@@ -158,7 +158,7 @@ def test_s1_a_save_in_flight_at_the_claim_is_waited_for_and_refused(world, monke
     leaver.join(30)
     assert results == {"save": "ok", "exit": "409 exit_disclosure_required 2"}
     assert member_memory_count(world, world.shared, world.alice) == 2
-    assert world.repo.is_member(world.shared, world.alice.id)
+    assert world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
 
 
 def test_s2_a_candidate_confirmed_during_the_purge_is_deleted_with_its_source(
@@ -180,7 +180,7 @@ def test_s2_a_candidate_confirmed_during_the_purge_is_deleted_with_its_source(
 
     monkeypatch.setattr(svc.store, "bulk_delete_memories", confirm_then_delete)
     assert _outcome(lambda: self_exit(world, world.alice, world.shared, 2)) == "200 2"
-    assert not world.repo.is_member(world.shared, world.alice.id)
+    assert not world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
     assert member_memory_count(world, world.shared, world.alice) == 0
     assert _orphans(world) == 0
 
@@ -226,7 +226,7 @@ def test_s3_a_candidate_rejected_during_the_purge(world, monkeypatch):
     assert _outcome(lambda: self_exit(world, world.alice, world.shared, 2)) == "200 2"
     assert rejected == ["gone"]  # one page: the candidate was already deleted
     assert member_memory_count(world, world.shared, world.alice) == 0
-    assert not world.repo.is_member(world.shared, world.alice.id)
+    assert not world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
 
 
 @pytest.mark.parametrize(
@@ -245,16 +245,16 @@ def test_s4_other_actions_during_the_purge(world, monkeypatch, action):
 
     def hook() -> None:
         if action == "remove_member":
-            repo.remove_member(world.shared, world.alice.id)
+            repo._runtime.sharing.remove_member(world.shared, world.alice.id)
         elif action == "unshare":
-            repo.unshare_notebook(world.shared)
+            repo._runtime.sharing.unshare_notebook(world.shared)
         elif action == "kick_all":
-            repo.kick_all_members(world.shared)
+            repo._runtime.sharing.kick_all_members(world.shared)
         elif action == "delete_notebook":
             repo.delete_notebook(world.shared)
         else:
-            repo.remove_member(world.shared, world.alice.id)
-            repo.add_member(world.shared, world.alice.id)
+            repo._runtime.sharing.remove_member(world.shared, world.alice.id)
+            repo._runtime.sharing.add_member(world.shared, world.alice.id)
 
     _after_page(monkeypatch, world, hook)
     result = _outcome(lambda: self_exit(world, world.alice, world.shared, count))
@@ -267,7 +267,7 @@ def test_s4_other_actions_during_the_purge(world, monkeypatch, action):
     assert result == f"200 {count}"
     assert member_memory_count(world, world.shared, world.alice) == 0
     assert member_memory_count(world, world.shared, world.bob) == bob_before
-    assert repo.is_member(world.shared, world.alice.id) is (action == "remove_and_readd")
+    assert repo._runtime.sharing.is_member(world.shared, world.alice.id) is (action == "remove_and_readd")
 
 
 def test_s8_a_process_dying_between_pages_then_the_retry(world, monkeypatch):
@@ -288,7 +288,7 @@ def test_s8_a_process_dying_between_pages_then_the_retry(world, monkeypatch):
     with pytest.raises(Killed):
         self_exit(world, world.alice, world.shared, count)
     monkeypatch.undo()
-    assert world.repo.is_member(world.shared, world.alice.id)
+    assert world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
     remaining = disclosure(world, world.alice, world.shared)
     assert remaining == count - 200
     assert _outcome(lambda: self_exit(world, world.alice, world.shared, count)) == (
@@ -297,7 +297,7 @@ def test_s8_a_process_dying_between_pages_then_the_retry(world, monkeypatch):
     assert _outcome(lambda: self_exit(world, world.alice, world.shared, remaining)) == (
         f"200 {remaining}"
     )
-    assert not world.repo.is_member(world.shared, world.alice.id)
+    assert not world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
     assert _orphans(world) == 0
 
 
@@ -338,7 +338,7 @@ def test_two_leavers_merged_into_the_same_shared_objects_do_not_deadlock(
         "dave": world.repo._runtime.identity.create_user("d00100006", "pw123456"),
     }
     for user in users.values():
-        world.repo.add_member(world.shared, user.id)
+        world.repo._runtime.sharing.add_member(world.shared, user.id)
     projections = {
         name: sorted(
             (make_memory(world, f"dl-{name}-{n}", world.shared, user) for n in range(2)),

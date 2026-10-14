@@ -79,7 +79,7 @@ def build_world(repo: Any, *, postgres: bool) -> World:
     notebook_id = _as_user(
         owner, lambda: repo.create_notebook(NotebookCreate(name="K3 live"))
     ).id
-    repo.add_member(notebook_id, member.id)
+    repo._runtime.sharing.add_member(notebook_id, member.id)
     world = World(repo, postgres, owner, member, notebook_id, {}, {}, {})
     for user in (owner, member):
         tag = user.id[-12:]

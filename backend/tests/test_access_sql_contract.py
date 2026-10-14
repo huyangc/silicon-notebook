@@ -133,7 +133,7 @@ def world(repo):
     _add_group_member(repo, admins, group_plain, "member")
 
     notebook = _mk_nb(repo, owner=owner)
-    repo.add_member(notebook, member)
+    repo._runtime.sharing.add_member(notebook, member)
     _mk_grant(repo, notebook, "user", grantee)
     _mk_grant(repo, notebook, "group", viewers)
     _mk_grant(repo, notebook, "group_admins", admins, role="admin")
@@ -272,7 +272,7 @@ def test_predicate_layers_match_the_matrix_and_remain_nested(world):
         store_admin = store.user_can_admin_notebook(notebook_id, user_id)
         store_write = store.user_can_access_notebook(notebook_id, user_id)
         service_read = repo.user_can_read_notebook(notebook_id, user_id)
-        service_admin = repo.user_can_admin_notebook(notebook_id, user_id)
+        service_admin = repo._runtime.sharing.user_can_admin_notebook(notebook_id, user_id)
         service_write = repo.user_can_access_notebook(notebook_id, user_id)
 
         assert (store_read, store_admin, store_write) == (
@@ -305,7 +305,7 @@ def test_write_predicate_stays_owner_only_for_every_member(world):
     assert repo.user_can_access_notebook(notebook, world["owner"]) is True
     for key in ("member", "stranger", "grantee", "group_member", "group_admin"):
         non_owner = world[key]
-        assert repo.is_member(notebook, non_owner) == (key == "member")
+        assert repo._runtime.sharing.is_member(notebook, non_owner) == (key == "member")
         assert repo.user_can_access_notebook(notebook, non_owner) is False
     # everyone 授权同样一个字的写权都不给。
     assert repo.user_can_access_notebook(world["everyone"], world["stranger"]) is False
@@ -322,23 +322,23 @@ def test_admin_predicate_tracks_the_grant_role_not_the_principal_type(world):
     在 `notebook` 那本库上它给出的答案与正确实现**逐格相同**。
     """
     repo, managed = world["repo"], world["managed"]
-    assert repo.user_can_admin_notebook(managed, world["group_admin"]) is False
+    assert repo._runtime.sharing.user_can_admin_notebook(managed, world["group_admin"]) is False
     assert repo.user_can_read_notebook(managed, world["group_admin"]) is True
-    assert repo.user_can_admin_notebook(managed, world["group_member"]) is True
+    assert repo._runtime.sharing.user_can_admin_notebook(managed, world["group_member"]) is True
 
 
 def test_downgrading_the_grant_role_revokes_admin_but_keeps_read(world):
     """把管理边改成 viewer:管理权当场消失,读权原样保留(实时判定,不是一次性授予)。"""
     repo, notebook = world["repo"], world["notebook"]
     group_admin = world["group_admin"]
-    assert repo.user_can_admin_notebook(notebook, group_admin) is True
+    assert repo._runtime.sharing.user_can_admin_notebook(notebook, group_admin) is True
     with repo._write() as db:
         db.execute(
             "UPDATE notebook_grants SET role='viewer' "
             "WHERE notebook_id=? AND principal_type='group_admins'",
             (notebook,),
         )
-    assert repo.user_can_admin_notebook(notebook, group_admin) is False
+    assert repo._runtime.sharing.user_can_admin_notebook(notebook, group_admin) is False
     assert repo.user_can_read_notebook(notebook, group_admin) is True
 
 
@@ -346,13 +346,13 @@ def test_deleting_the_admin_grant_edge_revokes_admin(world):
     """删掉管理边即刻失管理权(读权也一并没了——那条边是他唯一的读权来源)。"""
     repo, notebook = world["repo"], world["notebook"]
     group_admin = world["group_admin"]
-    assert repo.user_can_admin_notebook(notebook, group_admin) is True
+    assert repo._runtime.sharing.user_can_admin_notebook(notebook, group_admin) is True
     _delete_rows(
         repo,
         "DELETE FROM notebook_grants WHERE notebook_id=? AND principal_type='group_admins'",
         (notebook,),
     )
-    assert repo.user_can_admin_notebook(notebook, group_admin) is False
+    assert repo._runtime.sharing.user_can_admin_notebook(notebook, group_admin) is False
     assert repo.user_can_read_notebook(notebook, group_admin) is False
 
 
@@ -360,13 +360,13 @@ def test_demoting_a_group_admin_revokes_admin_capability(world):
     """组内降级(role='member')同样即刻失管理权——两根轴任一为假即为假。"""
     repo, notebook = world["repo"], world["notebook"]
     group_admin, admins = world["group_admin"], world["admins"]
-    assert repo.user_can_admin_notebook(notebook, group_admin) is True
+    assert repo._runtime.sharing.user_can_admin_notebook(notebook, group_admin) is True
     with repo._write() as db:
         db.execute(
             "UPDATE group_members SET role='member' WHERE group_id=? AND user_id=?",
             (admins, group_admin),
         )
-    assert repo.user_can_admin_notebook(notebook, group_admin) is False
+    assert repo._runtime.sharing.user_can_admin_notebook(notebook, group_admin) is False
 
 
 def test_admin_grant_pointing_at_a_deleted_group_fails_closed(world):
@@ -377,7 +377,7 @@ def test_admin_grant_pointing_at_a_deleted_group_fails_closed(world):
     """
     repo, notebook = world["repo"], world["notebook"]
     group_admin = world["group_admin"]
-    assert repo.user_can_admin_notebook(notebook, group_admin) is True
+    assert repo._runtime.sharing.user_can_admin_notebook(notebook, group_admin) is True
     with repo._write() as db:
         db.execute("PRAGMA foreign_keys = ON")
         db.execute("DELETE FROM groups WHERE id=?", (world["admins"],))
@@ -387,7 +387,7 @@ def test_admin_grant_pointing_at_a_deleted_group_fails_closed(world):
             (notebook,),
         ).fetchone()["c"]
     assert remaining == 1, "授权边行刻意保留:这条测的是谓词侧的 fail-safe"
-    assert repo.user_can_admin_notebook(notebook, group_admin) is False
+    assert repo._runtime.sharing.user_can_admin_notebook(notebook, group_admin) is False
 
 
 def test_parked_sentinel_admin_grant_matches_nobody(world):
@@ -400,8 +400,8 @@ def test_parked_sentinel_admin_grant_matches_nobody(world):
     """
     repo, sentinel = world["repo"], world["sentinel"]
     for key in ("stranger", "grantee", "group_member", "group_admin", "group_plain", "member"):
-        assert repo.user_can_admin_notebook(sentinel, world[key]) is False, key
-    assert repo.user_can_admin_notebook(sentinel, world["owner"]) is True
+        assert repo._runtime.sharing.user_can_admin_notebook(sentinel, world[key]) is False, key
+    assert repo._runtime.sharing.user_can_admin_notebook(sentinel, world["owner"]) is True
 
 
 def test_everyone_grant_never_confers_admin(world):
@@ -414,9 +414,9 @@ def test_everyone_grant_never_confers_admin(world):
     """
     repo, nb = world["repo"], world["everyone_admin"]
     for key in ("stranger", "grantee", "group_member", "group_admin", "group_plain", "member"):
-        assert repo.user_can_admin_notebook(nb, world[key]) is False, key
+        assert repo._runtime.sharing.user_can_admin_notebook(nb, world[key]) is False, key
         assert repo.user_can_read_notebook(nb, world[key]) is True, key  # everyone=viewer
-    assert repo.user_can_admin_notebook(nb, world["owner"]) is True  # owner 分支
+    assert repo._runtime.sharing.user_can_admin_notebook(nb, world["owner"]) is True  # owner 分支
 
 
 def test_admin_predicate_reuses_the_restricted_arms_and_excludes_everyone():
@@ -475,10 +475,10 @@ def test_predicate_follows_membership_changes(world):
     """读权是实时判定而非一次性授予:踢掉成员即刻失读权,写权全程为假。"""
     repo, notebook, member = world["repo"], world["notebook"], world["member"]
     assert repo.user_can_read_notebook(notebook, member) is True
-    repo.remove_member(notebook, member)
+    repo._runtime.sharing.remove_member(notebook, member)
     assert repo.user_can_read_notebook(notebook, member) is False
     assert repo.user_can_access_notebook(notebook, member) is False
-    repo.add_member(notebook, member)
+    repo._runtime.sharing.add_member(notebook, member)
     assert repo.user_can_read_notebook(notebook, member) is True
 
 
@@ -604,7 +604,7 @@ def test_admin_clause_embeds_into_a_larger_query_with_identical_results(world):
                 row = db.execute(
                     embedded, (notebook_id, *access_sql.admin_access_params(user_id))
                 ).fetchone()
-            assert (row is not None) is repo.user_can_admin_notebook(
+            assert (row is not None) is repo._runtime.sharing.user_can_admin_notebook(
                 notebook_id, user_id
             ), (target, subject)
 
@@ -642,7 +642,7 @@ def test_member_probe_matches_is_member(world):
             row = db.execute(
                 access_sql.MEMBER_PROBE_SQL, (notebook, user_id)
             ).fetchone()
-        assert (row is not None) is repo.is_member(notebook, user_id)
+        assert (row is not None) is repo._runtime.sharing.is_member(notebook, user_id)
 
 
 def test_grant_probe_matches_the_grant_half_of_the_read_predicate(world):

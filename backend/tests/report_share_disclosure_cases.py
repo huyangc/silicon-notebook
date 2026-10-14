@@ -82,7 +82,7 @@ def build_world(client: TestClient, monkeypatch: Any) -> World:
     notebook = client.post(
         "/api/notebooks", json={"name": "共享库"}, headers=owner.headers
     ).json()["id"]
-    repo.add_member(notebook, alice.id)
+    repo._runtime.sharing.add_member(notebook, alice.id)
     doc_source = f"src-doc-{next(_KEYS)}"
     repo._runtime.source_ingestion.sources.insert_source(
         source_id=doc_source, notebook_id=notebook, title="设计说明",

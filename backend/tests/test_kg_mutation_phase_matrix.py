@@ -874,7 +874,7 @@ def test_deep_copy_never_calls_the_mutation_coordinator(repo, monkeypatch):
     _spy_coordinator(repo, monkeypatch, events)
     _spy_cluster_seq(repo, monkeypatch, events)
 
-    copied = repo.copy_notebook(notebook_id, new_owner_id="user-local")
+    copied = repo._runtime.sharing.copy_notebook(notebook_id, new_owner_id="user-local")
 
     assert copied.id != notebook_id
     assert events == []

@@ -609,27 +609,15 @@ class IdentityStorePort(IdentityRepository, Protocol):
     def notebook_owner(self, notebook_id: str) -> "tuple[str | None, str | None]": ...
 
 
-class NotebookAccessRepository(Protocol):
+class NotebookAccessReadRepository(Protocol):
+    """The access reads the facade itself carries (``NotebookRepository`` and
+    ``McpMemoryRepository`` inherit only these). Membership, admin, ownership
+    and sync-origin checks live on ``NotebookAccessRepository``, which
+    ``deps.notebook_access_repository()`` hands out as the runtime sharing
+    service, not the facade."""
+
     def user_can_access_notebook(self, notebook_id: str, user_id: str) -> bool: ...
-    # `DELETE /api/notebooks/{id}` 依赖专属（codex #659 R6 P2）:owner 判定
-    # 不带生命周期过滤,好让 owner 对自己正在删除/拷贝中的库仍然"看得见"这一行,
-    # 使路由体内的 request() 走到它自己的 409 分支而不是被依赖层挡成假 404。
-    # 唯一消费点是 `deps.require_notebook_delete`;其它任何写端点都必须继续用
-    # `user_can_access_notebook`(连同它的生命周期过滤)。
-    def user_owns_notebook_regardless_of_lifecycle(
-        self, notebook_id: str, user_id: str
-    ) -> bool: ...
-    def is_member(self, notebook_id: str, user_id: str) -> bool: ...
-    # 管理权(P2 能力翻转):owner ∪ role='admin' 的有效授权边。与写权**并列**而不是
-    # 取代它——notebook:delete 与 Agent/MCP 面仍恒 owner,两条谓词各有引用者。
-    def user_can_admin_notebook(self, notebook_id: str, user_id: str) -> bool: ...
     def user_can_read_notebook(self, notebook_id: str, user_id: str) -> bool: ...
-    # 目标端写入围栏的读侧(docs/incremental-sync-design.md §5):非空 ⇒ 这本笔记本
-    # 是从别的环境同步来的镜像,值是源环境标识;本地库与不存在的行都返回 ''。
-    # 它**不是**授权判定——`_CAPABILITY_MIRROR_FENCE` 在能力守卫放行之后才查它,
-    # 所以它既不带生命周期过滤,也不回答「存不存在」。
-    def notebook_sync_origin(self, notebook_id: str) -> str: ...
-    def user_can_read_source(self, source_id: str, user_id: str) -> bool: ...
     # source_owner: P0-T2 之后已无生产/测试调用者(体内自查改走
     # source_notebook_id + 能力判定),仅为冻结兼容面保留——它被
     # facade_surface.json 与 ownership_manifest 登记,删除需要 rebaseline,
@@ -655,8 +643,29 @@ class NotebookAccessRepository(Protocol):
         viewer_id: str | None = None,
         visible_only: bool = False,
     ) -> str | None: ...
-    def conversation_owner(self, conversation_id: str) -> str | None: ...
     def answer_owner(self, answer_id: str) -> str | None: ...
+
+
+class NotebookAccessRepository(NotebookAccessReadRepository, Protocol):
+    # `DELETE /api/notebooks/{id}` 依赖专属（codex #659 R6 P2）:owner 判定
+    # 不带生命周期过滤,好让 owner 对自己正在删除/拷贝中的库仍然"看得见"这一行,
+    # 使路由体内的 request() 走到它自己的 409 分支而不是被依赖层挡成假 404。
+    # 唯一消费点是 `deps.require_notebook_delete`;其它任何写端点都必须继续用
+    # `user_can_access_notebook`(连同它的生命周期过滤)。
+    def user_owns_notebook_regardless_of_lifecycle(
+        self, notebook_id: str, user_id: str
+    ) -> bool: ...
+    def is_member(self, notebook_id: str, user_id: str) -> bool: ...
+    # 管理权(P2 能力翻转):owner ∪ role='admin' 的有效授权边。与写权**并列**而不是
+    # 取代它——notebook:delete 与 Agent/MCP 面仍恒 owner,两条谓词各有引用者。
+    def user_can_admin_notebook(self, notebook_id: str, user_id: str) -> bool: ...
+    # 目标端写入围栏的读侧(docs/incremental-sync-design.md §5):非空 ⇒ 这本笔记本
+    # 是从别的环境同步来的镜像,值是源环境标识;本地库与不存在的行都返回 ''。
+    # 它**不是**授权判定——`_CAPABILITY_MIRROR_FENCE` 在能力守卫放行之后才查它,
+    # 所以它既不带生命周期过滤,也不回答「存不存在」。
+    def notebook_sync_origin(self, notebook_id: str) -> str: ...
+    def user_can_read_source(self, source_id: str, user_id: str) -> bool: ...
+    def conversation_owner(self, conversation_id: str) -> str | None: ...
     # Authorisation for anything that acts on an answer: notebook read access AND
     # being the creator of the answer's conversation (E7-4). Replaces the former
     # ``user_can_read_answer`` here, one for one.
@@ -764,14 +773,22 @@ class NotebookCatalogRepository(Protocol):
     def search_notebook(self, notebook_id: str, query: str) -> NotebookSearchResponse: ...
 
 
-class NotebookSharingRepository(Protocol):
-    def share_notebook(self, notebook_id: str) -> dict: ...
+class NotebookShareReadRepository(Protocol):
+    """The sharing reads the facade itself carries (``NotebookRepository``
+    inherits only these). Share, copy and membership writes live on
+    ``NotebookSharingRepository``, which ``deps.notebook_sharing_repository()``
+    hands out as the runtime sharing service, not the facade."""
+
     def share_state(self, notebook_id: str) -> dict: ...
-    def unshare_notebook(self, notebook_id: str) -> None: ...
-    def find_notebook_by_share_token(self, token: str) -> str | None: ...
     def notebook_copy_stats(self, notebook_id: str) -> dict: ...
     def shared_preview(self, notebook_id: str) -> dict: ...
     def shared_by_me(self, user_id: str) -> list: ...
+
+
+class NotebookSharingRepository(NotebookShareReadRepository, Protocol):
+    def share_notebook(self, notebook_id: str) -> dict: ...
+    def unshare_notebook(self, notebook_id: str) -> None: ...
+    def find_notebook_by_share_token(self, token: str) -> str | None: ...
     def copy_notebook(self, source_notebook_id: str, *, new_owner_id: str, actor_label: str | None = None, new_name: str | None = None) -> NotebookSummary: ...
     def add_member(self, notebook_id: str, user_id: str) -> None: ...
     def remove_member(self, notebook_id: str, user_id: str) -> None: ...
@@ -921,14 +938,6 @@ class KnowledgeLifecycleRepository(Protocol):
         allow_without_model: bool = False,
     ) -> dict: ...
     def fail_notebook_kg_job_submission(self, job_id: str) -> bool: ...
-    def finish_indexing_pipeline_job(
-        self,
-        notebook_id: str,
-        job_id: str,
-        *,
-        succeeded: bool,
-        pipeline_identity: tuple[str, str, str] | None = None,
-    ) -> None: ...
     def execute_notebook_kg_job(
         self,
         notebook_id: str,
@@ -1034,7 +1043,6 @@ class ReportRepository(Protocol):
         report_id: str,
         understanding: dict | None = None,
     ) -> bool: ...
-    def complete_report_generation(self, notebook_id: str, report_id: str, *, sections: list, content_md: str, gaps: list, references: list) -> bool: ...
     def get_report(self, notebook_id: str, report_id: str) -> dict: ...
     # Admin read-only detail (GET /admin/users/{user_id}/reports/{report_id}).
     # Same fence contract as `guarded_ask_detail`: `actor_id` pins the report's
@@ -1144,7 +1152,7 @@ class AskExecutionPort(Protocol):
 
 class McpMemoryRepository(
     MemoryRepository,
-    NotebookAccessRepository,
+    NotebookAccessReadRepository,
     NotebookCatalogRepository,
     KnowledgeLifecycleRepository,
     AskExecutionPort,
@@ -3368,7 +3376,7 @@ class AskStreamPort(Protocol):
     ) -> "queue.Queue[dict[str, object] | None] | None": ...
 
 
-class NotebookRepository(IdentityReadRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, SourceRepository, KnowledgeReadRepository, SchemaRegistryRepository, KnowledgeGovernanceRepository, KnowledgeLifecycleRepository, IndexLifecycleRepository, AskStateRepository, ReportRepository, AskExecutionPort, FacadePropertyContract, Protocol):
+class NotebookRepository(IdentityReadRepository, NotebookAccessReadRepository, NotebookCatalogRepository, NotebookShareReadRepository, SourceRepository, KnowledgeReadRepository, SchemaRegistryRepository, KnowledgeGovernanceRepository, KnowledgeLifecycleRepository, IndexLifecycleRepository, AskStateRepository, ReportRepository, AskExecutionPort, FacadePropertyContract, Protocol):
     def close(self) -> None: ...
 
 

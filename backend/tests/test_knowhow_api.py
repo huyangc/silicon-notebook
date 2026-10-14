@@ -1128,7 +1128,7 @@ def test_readonly_member_can_get_cannot_write(tmp_path, monkeypatch, repo):
 
     bob_h = _login(client, "b00000513")
     bob_id = client.get("/api/me", headers=bob_h).json()["id"]
-    repo.add_member(nb, bob_id)
+    repo._runtime.sharing.add_member(nb, bob_id)
 
     assert client.get(f"/api/notebooks/{nb}/knowhow", headers=bob_h).status_code == 200
     assert client.get(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=bob_h).status_code == 200

@@ -55,7 +55,7 @@ def mounted_library(
         summary="", doc_type="",
     )
     if readable_by_alice:
-        world.repo.add_member(library, world.alice.id)
+        world.repo._runtime.sharing.add_member(library, world.alice.id)
     mount(world, [library])
     return library, source
 
@@ -149,13 +149,13 @@ def case_a_mount_its_creator_cannot_read_is_not_served(world: World) -> None:
     assert world.repo.participant_notebook_ids(
         world.notebook, viewer_id=world.owner.id
     ) == [world.notebook, library], "the mounter still has the mount"
-    world.repo.add_member(library, world.alice.id)
+    world.repo._runtime.sharing.add_member(library, world.alice.id)
     token = publish(world, world.alice, cid, first).json()["share_token"]
     page = f"/api/public/conversations/{token}"
     assert world.client.get(page).status_code == 200
-    world.repo.remove_member(library, world.alice.id)
+    world.repo._runtime.sharing.remove_member(library, world.alice.id)
     assert world.client.get(page).status_code == 404
-    world.repo.add_member(library, world.alice.id)
+    world.repo._runtime.sharing.add_member(library, world.alice.id)
     assert world.client.get(page).status_code == 200
 
 
@@ -175,15 +175,15 @@ def case_a_report_quoting_a_mount_its_author_cannot_read_is_not_served(
     assert refused.status_code == 404
     assert refused.json() == {"detail": "部分笔记本已无法访问，请重新选择范围。"}
     assert world.repo.report_share_token(world.notebook, rid) == ""
-    world.repo.add_member(library, world.alice.id)
+    world.repo._runtime.sharing.add_member(library, world.alice.id)
     token = share(world, world.alice, rid).json()["share_token"]
     page = f"/api/public/reports/{token}"
     assert world.client.get(page).status_code == 200
-    world.repo.remove_member(library, world.alice.id)
+    world.repo._runtime.sharing.remove_member(library, world.alice.id)
     gone = world.client.get(page)
     assert gone.status_code == 404
     assert gone.json() == {"detail": "shared report not found"}
-    world.repo.add_member(library, world.alice.id)
+    world.repo._runtime.sharing.add_member(library, world.alice.id)
     assert world.client.get(page).status_code == 200
 
 
@@ -315,7 +315,7 @@ def case_report_quoting_the_authors_memory_in_a_mounted_library_follows_its_moun
     from tests.report_share_disclosure_cases import recorded
 
     library, _source = mounted_library(world)
-    world.repo.add_member(library, world.alice.id)
+    world.repo._runtime.sharing.add_member(library, world.alice.id)
     memory_id, memory_source = _memory_in(world, world.alice, library, "am")
     rid = make_report(world, world.alice, [
         recorded(_mounted_ref(memory_source, "k1"), memory_id, world.alice),
@@ -477,7 +477,7 @@ def case_global_round_is_re_checked_against_every_searched_library(world: World)
     searched = world.client.post(
         "/api/notebooks", json={"name": "被转述库"}, headers=world.owner.headers
     ).json()["id"]
-    world.repo.add_member(searched, world.alice.id)
+    world.repo._runtime.sharing.add_member(searched, world.alice.id)
     paraphrase = answer([source_anchor(world.doc_source, "k1", notebook_id=world.notebook)])
     paraphrase["answer"] += " 另一库的设计说明也给出同一结论。"
     cid, (first,) = seed_global(world, world.alice, [paraphrase],
@@ -485,9 +485,9 @@ def case_global_round_is_re_checked_against_every_searched_library(world: World)
     token = global_publish(world, world.alice, cid, first).json()["share_token"]
     page = f"/api/public/conversations/{token}"
     assert world.client.get(page).status_code == 200
-    world.repo.remove_member(searched, world.alice.id)
+    world.repo._runtime.sharing.remove_member(searched, world.alice.id)
     assert world.client.get(page).status_code == 404
-    world.repo.add_member(searched, world.alice.id)
+    world.repo._runtime.sharing.add_member(searched, world.alice.id)
     assert world.client.get(page).status_code == 200
 
 

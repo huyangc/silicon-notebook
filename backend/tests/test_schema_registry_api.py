@@ -45,7 +45,7 @@ def test_notebook_schema_api_role_matrix_and_validation(tmp_path, monkeypatch):
     notebook = client.post(
         "/api/notebooks", json={"name": "schema api"}, headers=owner_headers
     ).json()["id"]
-    deps.repository().add_member(notebook, reader_id)
+    deps.repository()._runtime.sharing.add_member(notebook, reader_id)
     collection = f"/api/notebooks/{notebook}/object-schemas"
 
     owner_view = client.get(collection, headers=owner_headers)

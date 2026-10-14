@@ -37,17 +37,17 @@ def _mk_nb(repo, owner="user-local", name="NB"):
 def test_membership_crud_and_read_access(repo):
     nb = _mk_nb(repo, owner="user-local")
     _mk_user(repo, "user-bob", "b00000001")
-    assert repo.is_member(nb, "user-bob") is False
+    assert repo._runtime.sharing.is_member(nb, "user-bob") is False
     assert repo.user_can_read_notebook(nb, "user-bob") is False   # 非成员非 owner
     assert repo.user_can_read_notebook(nb, "user-local") is True  # owner 恒可读
-    repo.add_member(nb, "user-bob")
-    assert repo.is_member(nb, "user-bob") is True
+    repo._runtime.sharing.add_member(nb, "user-bob")
+    assert repo._runtime.sharing.is_member(nb, "user-bob") is True
     assert repo.user_can_read_notebook(nb, "user-bob") is True    # 成员可读
-    assert [m["username"] for m in repo.list_members(nb)] == ["b00000001"]
-    repo.add_member(nb, "user-bob")  # 幂等
-    assert len(repo.list_members(nb)) == 1
-    repo.kick_all_members(nb)
-    assert repo.list_members(nb) == []
+    assert [m["username"] for m in repo._runtime.sharing.list_members(nb)] == ["b00000001"]
+    repo._runtime.sharing.add_member(nb, "user-bob")  # 幂等
+    assert len(repo._runtime.sharing.list_members(nb)) == 1
+    repo._runtime.sharing.kick_all_members(nb)
+    assert repo._runtime.sharing.list_members(nb) == []
     assert repo.user_can_read_notebook(nb, "user-bob") is False
 
 
@@ -57,20 +57,20 @@ def test_user_can_read_source_follows_membership(repo):
     with repo._write() as db:
         db.execute("INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,file_size,created_at,updated_at) "
                    "VALUES (?,?,?,?,?,?,?,?,?)", ("src-1", nb, "S", "document", "s.md", "", 0, _now(), _now()))
-    assert repo.user_can_read_source("src-1", "user-bob") is False
-    repo.add_member(nb, "user-bob")
-    assert repo.user_can_read_source("src-1", "user-bob") is True
-    assert repo.user_can_read_source("src-1", "user-local") is True  # owner
+    assert repo._runtime.sharing.user_can_read_source("src-1", "user-bob") is False
+    repo._runtime.sharing.add_member(nb, "user-bob")
+    assert repo._runtime.sharing.user_can_read_source("src-1", "user-bob") is True
+    assert repo._runtime.sharing.user_can_read_source("src-1", "user-local") is True  # owner
 
 
 # ---------------------------------------------------------------- Task 2
 def test_unshare_kicks_members(repo):
     nb = _mk_nb(repo, owner="user-local")
     _mk_user(repo, "user-bob")
-    repo.share_notebook(nb)
-    repo.add_member(nb, "user-bob")
-    repo.unshare_notebook(nb)
-    assert repo.list_members(nb) == []
+    repo._runtime.sharing.share_notebook(nb)
+    repo._runtime.sharing.add_member(nb, "user-bob")
+    repo._runtime.sharing.unshare_notebook(nb)
+    assert repo._runtime.sharing.list_members(nb) == []
 
 
 def test_preview_mode_readonly_for_large(repo, monkeypatch):
@@ -113,7 +113,7 @@ def test_member_can_read_cannot_write(tmp_path, monkeypatch, repo):
     nb = client.post("/api/notebooks", json={"name": "L"}, headers=owner_h).json()["id"]
     bob_h = _login(client, "b00000002")
     bob_id = client.get("/api/me", headers=bob_h).json()["id"]
-    repo.add_member(nb, bob_id)   # bob 成为只读成员
+    repo._runtime.sharing.add_member(nb, bob_id)   # bob 成为只读成员
     for suffix in READ_ROUTES:
         r = client.get(f"/api/notebooks/{nb}{suffix}", headers=bob_h)
         assert r.status_code == 200, (suffix, r.status_code)
@@ -133,7 +133,7 @@ def test_member_reads_source_but_cannot_delete(tmp_path, monkeypatch, repo):
                    "VALUES (?,?,?,?,?,?,?,?,?)", ("src-x", nb, "S", "document", "s.md", "", 0, _now(), _now()))
     bob_h = _login(client, "b00000004")
     bob_id = client.get("/api/me", headers=bob_h).json()["id"]
-    repo.add_member(nb, bob_id)
+    repo._runtime.sharing.add_member(nb, bob_id)
     assert client.get("/api/sources/src-x", headers=bob_h).status_code == 200      # 成员可读
     assert client.delete("/api/sources/src-x", headers=bob_h).status_code == 404   # 成员不能删
 
@@ -145,7 +145,7 @@ def test_conversation_owner_is_creator_not_notebook_owner(repo):
     with repo._write() as db:
         db.execute("INSERT INTO conversations (id,notebook_id,title,created_by,created_at,updated_at) "
                    "VALUES (?,?,?,?,?,?)", ("cv-1", nb, "chat", "user-mbr", _now(), _now()))
-    assert repo.conversation_owner("cv-1") == "user-mbr"   # 创建者,不是 notebook owner
+    assert repo._runtime.sharing.conversation_owner("cv-1") == "user-mbr"   # 创建者,不是 notebook owner
 
 
 # ---------------------------------------------------------------- Task 5
@@ -154,7 +154,7 @@ def test_list_notebooks_includes_joined_marked_reader(repo):
     _mk_user(repo, "user-alice", "a00000009")
     owner_nb = _mk_nb(repo, owner="user-local", name="Mine")
     other_nb = _mk_nb(repo, owner="user-alice", name="Alice's")
-    repo.add_member(other_nb, "user-local")   # 当前用户(seeded admin=user-local)加入了 alice 的库
+    repo._runtime.sharing.add_member(other_nb, "user-local")   # 当前用户(seeded admin=user-local)加入了 alice 的库
     got = {n.id: n for n in repo.list_notebooks()}
     assert got[owner_nb].access == "owner" and got[owner_nb].shared_from == ""
     assert got[other_nb].access == "reader" and got[other_nb].shared_from == "a00000009"
@@ -186,13 +186,13 @@ def test_shared_by_me_lists_with_members(repo):
     small = _mk_nb(repo, owner="user-local", name="Small")
     big = _mk_nb(repo, owner="user-local", name="Big")
     other = _mk_nb(repo, owner="user-alice", name="Other")
-    repo.share_notebook(small); repo.share_notebook(big); repo.share_notebook(other)
+    repo._runtime.sharing.share_notebook(small); repo._runtime.sharing.share_notebook(big); repo._runtime.sharing.share_notebook(other)
     with repo._write() as db:
         for i in range(3):
             db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,created_at,updated_at) "
                        "VALUES (?,?,?,?,?)", (f"ko-{i}", big, "concept", _now(), _now()))
     repo.settings.notebook_copy_max_rows = 1  # big→readonly
-    repo.add_member(big, "user-bob")
+    repo._runtime.sharing.add_member(big, "user-bob")
     items = {it["id"]: it for it in repo.shared_by_me("user-local")}
     assert set(items) == {small, big}              # 只我 owner 的、且 is_shared;不含 alice 的
     assert items[big]["mode"] == "readonly"
@@ -235,10 +235,10 @@ def test_user_can_read_answer_follows_membership_and_is_not_authorisation(repo):
         db.execute("INSERT INTO answers (id,notebook_id,question,payload,created_at) VALUES (?,?,?,?,?)",
                    ("ans-1", nb, "q", "{}", _now()))
     sharing = repo._runtime.sharing
-    assert repo.user_can_read_answer("ans-1", "user-mbr") is False   # 非成员
-    assert repo.user_can_read_answer("ans-1", "user-local") is True  # owner
-    repo.add_member(nb, "user-mbr")
-    assert repo.user_can_read_answer("ans-1", "user-mbr") is True    # 成员可
+    assert repo._runtime.sharing.user_can_read_answer("ans-1", "user-mbr") is False   # 非成员
+    assert repo._runtime.sharing.user_can_read_answer("ans-1", "user-local") is True  # owner
+    repo._runtime.sharing.add_member(nb, "user-mbr")
+    assert repo._runtime.sharing.user_can_read_answer("ans-1", "user-mbr") is True    # 成员可
     # reading the notebook never makes anyone the answer's owner
     for user in ("user-mbr", "user-local"):
         assert sharing.user_owns_answer("ans-1", user) is False

@@ -193,7 +193,7 @@ def test_readonly_member_can_copy_but_never_move(client, repo):
 
     bob_h = _login(client, "b00000011")
     bob_nb = client.post("/api/notebooks", json={"name": "bob"}, headers=bob_h).json()["id"]
-    repo.add_member(src, _uid(client, bob_h))  # 只读成员：能读源，但不是 owner
+    repo._runtime.sharing.add_member(src, _uid(client, bob_h))  # 只读成员：能读源，但不是 owner
 
     # copy：源侧只需读权限 → 放行
     resp = client.post(

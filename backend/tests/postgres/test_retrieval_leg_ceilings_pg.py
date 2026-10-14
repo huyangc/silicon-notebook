@@ -393,7 +393,7 @@ def _pg_seam(postgres_settings, tmp_path, *, own_memory: bool):
         token = set_request_user(a)
         try:
             nb = repository.create_notebook(NotebookCreate(name="seam")).id
-            repository.add_member(nb, b.id)
+            repository._runtime.sharing.add_member(nb, b.id)
         finally:
             reset_request_user(token)
         with repository._write() as db:

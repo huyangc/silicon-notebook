@@ -397,9 +397,9 @@ def seed_world(repo: Any, *, postgres: bool) -> dict:
     elsewhere = _as_user(
         bob, lambda: repo.create_notebook(NotebookCreate(name="Bob elsewhere"))
     ).id
-    repo.add_member(shared, alice.id)
-    repo.add_member(shared, bob.id)
-    repo.add_member(elsewhere, alice.id)
+    repo._runtime.sharing.add_member(shared, alice.id)
+    repo._runtime.sharing.add_member(shared, bob.id)
+    repo._runtime.sharing.add_member(elsewhere, alice.id)
     doc_source, doc_object = _doc_object(repo, sql, owner, shared)
     _doc_object(repo, sql, alice, alice_home)
     _doc_object(repo, sql, bob, elsewhere)
@@ -868,7 +868,7 @@ def case_self_exit_requires_the_exact_acknowledgement(world: World) -> None:
         assert expect_disclosure_required(
             lambda ack=ack: self_exit(world, world.alice, world.shared, ack)
         ) == 1
-    assert world.repo.is_member(world.shared, world.alice.id)
+    assert world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
     assert_intact(world, "alice")
 
 
@@ -876,24 +876,24 @@ def case_self_exit_purges_and_rejoin_starts_empty(world: World) -> None:
     repo = world.repo
     seq = mark_clean(world, world.shared)
     self_exit(world, world.alice, world.shared, 1)
-    assert not repo.is_member(world.shared, world.alice.id)
+    assert not repo._runtime.sharing.is_member(world.shared, world.alice.id)
     assert_purged(world, "alice")
     assert_shared_object_stripped(world)
     assert_marked_dirty(world, world.shared, seq)
     assert_intact(world, "bob")
     assert_intact(world, "alice_home")
     assert_intact(world, "alice_elsewhere")
-    repo.add_member(world.shared, world.alice.id)
+    repo._runtime.sharing.add_member(world.shared, world.alice.id)
     assert disclosure(world, world.alice, world.shared) == 0
     assert repo.list_memories(world.alice.id, notebook_id=world.shared).items == []
 
 
 def case_self_exit_with_nothing_to_delete_needs_no_acknowledgement(world: World) -> None:
     dave = world.repo._runtime.identity.create_user("d00100004", "pw123456")
-    world.repo.add_member(world.shared, dave.id)
+    world.repo._runtime.sharing.add_member(world.shared, dave.id)
     assert disclosure(world, dave, world.shared) == 0
     self_exit(world, dave, world.shared)
-    assert not world.repo.is_member(world.shared, dave.id)
+    assert not world.repo._runtime.sharing.is_member(world.shared, dave.id)
     self_exit(world, dave, world.shared)  # not a member: a no-op, like before
     assert_intact(world, "alice")
     assert_intact(world, "bob")
@@ -902,7 +902,7 @@ def case_self_exit_with_nothing_to_delete_needs_no_acknowledgement(world: World)
 def _assert_exit_keeps_memory(world: World) -> None:
     assert disclosure(world, world.alice, world.shared) == 0
     self_exit(world, world.alice, world.shared)
-    assert not world.repo.is_member(world.shared, world.alice.id)
+    assert not world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
     assert_intact(world, "alice")
     alice = world.projections["alice"]
     assert world.repo.get_memory(alice.memory_id, world.alice.id).id == alice.memory_id
@@ -928,14 +928,14 @@ def case_removal_by_others_never_deletes_memory(world: World) -> None:
     removal, a notebook-wide kick and the facade's membership-only leave end
     the membership and keep every Memory."""
     repo = world.repo
-    repo.remove_member(world.shared, world.alice.id)
-    assert not repo.is_member(world.shared, world.alice.id)
+    repo._runtime.sharing.remove_member(world.shared, world.alice.id)
+    assert not repo._runtime.sharing.is_member(world.shared, world.alice.id)
     assert_intact(world, "alice")
-    repo.kick_all_members(world.shared)
-    assert not repo.is_member(world.shared, world.bob.id)
+    repo._runtime.sharing.kick_all_members(world.shared)
+    assert not repo._runtime.sharing.is_member(world.shared, world.bob.id)
     assert_intact(world, "bob")
-    repo.leave_notebook(world.elsewhere, world.alice.id)
-    assert not repo.is_member(world.elsewhere, world.alice.id)
+    repo._runtime.sharing.leave_notebook(world.elsewhere, world.alice.id)
+    assert not repo._runtime.sharing.is_member(world.elsewhere, world.alice.id)
     assert_intact(world, "alice_elsewhere")
     assert world.sql.count(
         "SELECT COUNT(*) AS c FROM knowledge_objects WHERE id=?",
@@ -951,8 +951,8 @@ def case_revoking_authorisation_keeps_memory(world: World) -> None:
     self_exit(world, world.alice, world.shared)  # grant still reads: keeps
     assert repo._runtime.groups.delete_grant(world.shared, grant_id)
     assert_intact(world, "alice")
-    repo.unshare_notebook(world.shared)  # drops Bob's membership row
-    assert not repo.is_member(world.shared, world.bob.id)
+    repo._runtime.sharing.unshare_notebook(world.shared)  # drops Bob's membership row
+    assert not repo._runtime.sharing.is_member(world.shared, world.bob.id)
     assert_intact(world, "bob")
     # Invisible while access is gone, back as soon as it returns.
     try:
@@ -970,7 +970,7 @@ def case_contract_a_finished_exit_reports_what_it_deleted(world: World) -> None:
     plain_memory(world, world.shared, world.alice, "contract-200", "candidate")
     assert disclosure(world, world.alice, world.shared) == 2
     assert self_exit(world, world.alice, world.shared, 2) == 2
-    assert not world.repo.is_member(world.shared, world.alice.id)
+    assert not world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
     assert member_memory_count(world, world.shared, world.alice) == 0
 
 
@@ -983,10 +983,10 @@ def case_contract_zero_claim_refuses_a_positive_acknowledgement(world: World) ->
     assert expect_disclosure_required(
         lambda: self_exit(world, world.alice, world.shared, 1)
     ) == 0
-    assert world.repo.is_member(world.shared, world.alice.id)
+    assert world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
     assert_intact(world, "alice")
     assert self_exit(world, world.alice, world.shared, 0) == 0
-    assert not world.repo.is_member(world.shared, world.alice.id)
+    assert not world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
     assert_intact(world, "alice")
     # No longer a member at all: a stale acknowledgement is refused too.
     assert expect_disclosure_required(
@@ -1435,7 +1435,7 @@ def case_mixed_statuses_are_counted_exported_and_deleted_together(world: World) 
     self_exit(world, alice, shared, 3)
     assert member_memory_count(world, shared, alice) == 0
     assert member_memory_count(world, world.alice_home, alice) == home_before
-    assert not world.repo.is_member(shared, alice.id)
+    assert not world.repo._runtime.sharing.is_member(shared, alice.id)
 
 
 def case_export_needs_read_access_and_is_lazy(world: World) -> None:
@@ -1588,7 +1588,7 @@ def case_failed_purge_keeps_the_membership(world: World, monkeypatch) -> None:
         assert (exc.deleted_memory_count, exc.memory_count) == (0, 1)
     else:  # pragma: no cover - the assertion below explains the failure
         raise AssertionError("the exit swallowed a failed Memory purge")
-    assert world.repo.is_member(world.shared, world.alice.id)
+    assert world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
     assert_intact(world, "alice")
 
 
@@ -1619,11 +1619,11 @@ def case_a_purge_failing_part_way_reports_both_numbers(
         assert (exc.deleted_memory_count, exc.memory_count) == (1, 1)
     else:  # pragma: no cover - the assertion below explains the failure
         raise AssertionError("a failed purge was reported as finished")
-    assert world.repo.is_member(world.shared, world.alice.id)
+    assert world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
     monkeypatch.undo()
     assert disclosure(world, world.alice, world.shared) == 1
     assert self_exit(world, world.alice, world.shared, 1) == 1
-    assert not world.repo.is_member(world.shared, world.alice.id)
+    assert not world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
     assert member_memory_count(world, world.shared, world.alice) == 0
 
 
@@ -1689,11 +1689,11 @@ def case_a_cleanup_failure_after_the_delete_counts_the_deleted_rows(
         assert (exc.deleted_memory_count, exc.memory_count) == (1, 0)
     else:  # pragma: no cover - the assertion below explains the failure
         raise AssertionError("a failed cleanup was reported as finished")
-    assert world.repo.is_member(world.shared, world.alice.id)
+    assert world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
     assert member_memory_count(world, world.shared, world.alice) == 0
     assert disclosure(world, world.alice, world.shared) == 0
     assert self_exit(world, world.alice, world.shared, 0) == 0
-    assert not world.repo.is_member(world.shared, world.alice.id)
+    assert not world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
 
     home = world.projections["alice_home"].memory_id
     try:
@@ -1749,7 +1749,7 @@ def case_claimed_memories_gone_meanwhile_finish_with_zero_deleted(
 
     monkeypatch.setattr(svc, "_purge_page", moved_away_first)
     assert self_exit(world, world.alice, world.shared, 1) == 0
-    assert not world.repo.is_member(world.shared, world.alice.id)
+    assert not world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
 
 
 def case_memory_saved_during_exit_is_never_deleted_unacknowledged(
@@ -1774,13 +1774,13 @@ def case_memory_saved_during_exit_is_never_deleted_unacknowledged(
         assert (exc.deleted_memory_count, exc.memory_count) == (1, 1)
     else:  # pragma: no cover - the assertion below explains the failure
         raise AssertionError("an incomplete exit was reported as finished")
-    assert world.repo.is_member(world.shared, world.alice.id)
+    assert world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
     assert_purged(world, "alice")
     assert_intact(world, "late")
     monkeypatch.undo()
     assert disclosure(world, world.alice, world.shared) == 1
     assert self_exit(world, world.alice, world.shared, 1) == 1
-    assert not world.repo.is_member(world.shared, world.alice.id)
+    assert not world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
     assert_purged(world, "late")
 
 
@@ -1796,15 +1796,15 @@ def case_remove_and_readd_during_the_purge_keeps_the_new_membership(
 
     def delete_then_readd(user_id, memory_ids):
         deleted = original(user_id, memory_ids)
-        world.repo.remove_member(world.shared, world.alice.id)
-        world.repo.add_member(world.shared, world.alice.id)
+        world.repo._runtime.sharing.remove_member(world.shared, world.alice.id)
+        world.repo._runtime.sharing.add_member(world.shared, world.alice.id)
         plain_memory(world, world.shared, world.alice, "readded", "candidate")
         _member_job_row(world, world.shared, world.alice)  # the new membership's
         return deleted
 
     monkeypatch.setattr(store, "bulk_delete_memories", delete_then_readd)
     assert self_exit(world, world.alice, world.shared, 1) == 1
-    assert world.repo.is_member(world.shared, world.alice.id)
+    assert world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
     assert_purged(world, "alice")
     assert member_memory_count(world, world.shared, world.alice) == 1
     # BM3: the exit did not end the new membership, so it must not clear the
@@ -1821,13 +1821,13 @@ def case_rejoin_after_the_membership_ends_keeps_new_memory(
     original = sharing.forget_member_state
 
     def rejoin_then_forget(notebook_id, user_id):
-        world.repo.add_member(notebook_id, user_id)
+        world.repo._runtime.sharing.add_member(notebook_id, user_id)
         make_memory(world, "after_rejoin", notebook_id, world.alice)
         original(notebook_id, user_id)
 
     monkeypatch.setattr(sharing, "forget_member_state", rejoin_then_forget)
     self_exit(world, world.alice, world.shared, 1)
-    assert world.repo.is_member(world.shared, world.alice.id)
+    assert world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
     assert_purged(world, "alice")
     assert_intact(world, "after_rejoin")
 
@@ -1862,7 +1862,7 @@ def case_statements_per_page_do_not_grow_with_sourceless_memories(
     counts = []
     for index, size in enumerate((3, 40)):
         user = world.repo._runtime.identity.create_user(f"p0010010{index}", "pw123456")
-        world.repo.add_member(world.shared, user.id)
+        world.repo._runtime.sharing.add_member(world.shared, user.id)
         for number in range(size):
             plain_memory(world, world.shared, user, f"{index}-{number}", "confirmed")
         counts.append(count_statements(

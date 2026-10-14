@@ -110,7 +110,7 @@ def test_two_concurrent_exits_of_the_same_member_never_fail_on_gone_rows(
     assert all(
         outcome == "ok" or outcome.startswith("disclosure:") for outcome in outcomes
     ), outcomes
-    assert not world.repo.is_member(world.shared, world.alice.id)
+    assert not world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
     assert member_memory_count(world, world.shared, world.alice) == 0
     assert world.sql.count(
         "SELECT COUNT(*) AS c FROM sources s WHERE s.source_type='memory' "
@@ -156,7 +156,7 @@ def test_an_exit_racing_a_save_never_deletes_the_unacknowledged_memory(
     # acknowledged Memory is either deleted (exit ran) or the exit refused.
     assert set(saved) <= surviving
     if outcomes[0] == "ok":
-        assert not world.repo.is_member(world.shared, world.alice.id)
+        assert not world.repo._runtime.sharing.is_member(world.shared, world.alice.id)
         assert surviving == set(saved) == set()
     else:
-        assert world.repo.is_member(world.shared, world.alice.id)
+        assert world.repo._runtime.sharing.is_member(world.shared, world.alice.id)

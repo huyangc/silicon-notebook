@@ -110,7 +110,7 @@ def test_member_without_own_notebooks_still_sees_their_shared_notebook_report(re
     _mk_user(repo, "user-member")          # 成员自己一个 notebook 都没有
     # 建报告的前提本来就是对该库有读权(require_notebook_read);铃铛现在叠加了
     # 同一读谓词(codex #517 R1 P2),夹具如实给出成员行。
-    repo.add_member(owner_nb, "user-member")
+    repo._runtime.sharing.add_member(owner_nb, "user-member")
     with repo._connect() as db:
         db.execute(
             "INSERT INTO reports (id, notebook_id, question, status, created_by, created_at, updated_at) "
@@ -143,7 +143,7 @@ def test_pending_report_drops_out_when_the_creator_loses_read_access(repo):
     规范读谓词叠进铃铛查询,与「授权即时生效」同口径;条目从未被删,恢复即回。"""
     owner_nb = _seed_user_nb(repo, "user-owner")
     _mk_user(repo, "user-member")
-    repo.add_member(owner_nb, "user-member")
+    repo._runtime.sharing.add_member(owner_nb, "user-member")
     with repo._connect() as db:
         db.execute(
             "INSERT INTO reports (id, notebook_id, question, status, created_by, created_at, updated_at) "
@@ -159,9 +159,9 @@ def test_pending_report_drops_out_when_the_creator_loses_read_access(repo):
         ]
 
     assert _member_report_ids() == ["r-revoked"]
-    repo.remove_member(owner_nb, "user-member")
+    repo._runtime.sharing.remove_member(owner_nb, "user-member")
     assert _member_report_ids() == []
-    repo.add_member(owner_nb, "user-member")
+    repo._runtime.sharing.add_member(owner_nb, "user-member")
     assert _member_report_ids() == ["r-revoked"]
 
 
@@ -429,7 +429,7 @@ def test_pending_actions_running_ask_owner_isolation(repo):
     """属主隔离:别人在我库里跑的提问不进我的铃铛,我在别人库里跑的进我的铃铛。"""
     owner_nb = _seed_user_nb(repo, "user-owner")
     _mk_user(repo, "user-member")
-    repo.add_member(owner_nb, "user-member")
+    repo._runtime.sharing.add_member(owner_nb, "user-member")
     _insert_ask_job(repo, "askjob-owner", owner_nb, "user-owner")
     _insert_ask_job(repo, "askjob-member", owner_nb, "user-member")
 
@@ -464,7 +464,7 @@ def test_pending_actions_running_ask_drops_out_when_read_access_is_lost(repo):
     """对该库失权 → 条目出铃铛;恢复读权自动回来(与待确认报告同口径)。"""
     owner_nb = _seed_user_nb(repo, "user-owner")
     _mk_user(repo, "user-member")
-    repo.add_member(owner_nb, "user-member")
+    repo._runtime.sharing.add_member(owner_nb, "user-member")
     _insert_ask_job(repo, "askjob-shared", owner_nb, "user-member")
 
     def _member_ask_ids():
@@ -472,9 +472,9 @@ def test_pending_actions_running_ask_drops_out_when_read_access_is_lost(repo):
                 if it["type"] == "ask"]
 
     assert _member_ask_ids() == ["askjob-shared"]
-    repo.remove_member(owner_nb, "user-member")
+    repo._runtime.sharing.remove_member(owner_nb, "user-member")
     assert _member_ask_ids() == []
-    repo.add_member(owner_nb, "user-member")
+    repo._runtime.sharing.add_member(owner_nb, "user-member")
     assert _member_ask_ids() == ["askjob-shared"]
 
 
@@ -593,7 +593,7 @@ def test_pending_actions_running_global_ask_owner_and_terminal_states(repo):
     """属主隔离 + 只有精确的 running 进铃铛(全局作业的终态同样一律缺席)。"""
     nb = _seed_user_nb(repo, "user-a")
     _mk_user(repo, "user-b")
-    repo.add_member(nb, "user-b")
+    repo._runtime.sharing.add_member(nb, "user-b")
     for index, status in enumerate(("done", "failed", "cancelled", "interrupted", "running")):
         _insert_global_job(repo, f"gask-{status}", "user-a", [nb], status=status,
                            created_at=f"2026-07-07T0{index}:00:00+00:00")
@@ -608,16 +608,16 @@ def test_pending_actions_running_global_ask_needs_every_participant_readable(rep
     失权或进入删除中即出铃铛,恢复后自动回来。"""
     own = _seed_user_nb(repo, "user-member", "own")
     shared = _seed_user_nb(repo, "user-owner", "shared")
-    repo.add_member(shared, "user-member")
+    repo._runtime.sharing.add_member(shared, "user-member")
     _insert_global_job(repo, "gask-two", "user-member", [own, shared])
 
     def ids():
         return [it["job_id"] for it in _asks(repo, "user-member")]
 
     assert ids() == ["gask-two"]
-    repo.remove_member(shared, "user-member")
+    repo._runtime.sharing.remove_member(shared, "user-member")
     assert ids() == []
-    repo.add_member(shared, "user-member")
+    repo._runtime.sharing.add_member(shared, "user-member")
     assert ids() == ["gask-two"]
     with repo._connect() as db:
         db.execute("UPDATE notebooks SET status='deleting' WHERE id=?", (own,))
@@ -632,7 +632,7 @@ def test_pending_actions_running_global_ask_gates_on_the_whole_first_page(repo):
 
     own = _seed_user_nb(repo, "user-member", "own")
     shared = _seed_user_nb(repo, "user-owner", "shared")
-    repo.add_member(shared, "user-member")
+    repo._runtime.sharing.add_member(shared, "user-member")
     _insert_global_job(repo, "gask-early", "user-member", [shared], status="done",
                        conversation_id="gconv-1", created_at="2026-07-07T01:00:00+00:00")
     _insert_global_job(repo, "gask-now", "user-member", [own],
@@ -642,7 +642,7 @@ def test_pending_actions_running_global_ask_gates_on_the_whole_first_page(repo):
         return [it["job_id"] for it in _asks(repo, "user-member")]
 
     assert ids() == ["gask-now"]
-    repo.remove_member(shared, "user-member")
+    repo._runtime.sharing.remove_member(shared, "user-member")
     assert ids() == []
 
     # 把那条失权的早先轮次挤出第一页:会话读取不再看它,条目回来。

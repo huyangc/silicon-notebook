@@ -92,7 +92,7 @@ def _shared(repo, *, b_memory=True):
     token = set_request_user(a)
     try:
         nb = repo.create_notebook(NotebookCreate(name="shared")).id
-        repo.add_member(nb, b.id)
+        repo._runtime.sharing.add_member(nb, b.id)
     finally:
         reset_request_user(token)
     with repo._write() as db:

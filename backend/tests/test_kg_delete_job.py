@@ -223,7 +223,7 @@ def test_read_only_member_cannot_start_delete_but_can_poll_status(api):
     ).json()["id"]
     member = _login(client, "d00000002")
     member_id = client.get("/api/me", headers=member).json()["id"]
-    repo.add_member(nb, member_id)
+    repo._runtime.sharing.add_member(nb, member_id)
 
     refused = client.post(f"/api/notebooks/{nb}/kg/delete", headers=member)
     # The kg:write capability guard's established refusal (no existence leak).
@@ -588,8 +588,8 @@ def _own_the_memory_source(repo, notebook_id: str):
 
     owner = repo._runtime.identity.create_user("m00000001", "pw123456")
     other = repo._runtime.identity.create_user("m00000002", "pw123456")
-    repo.add_member(notebook_id, owner.id)
-    repo.add_member(notebook_id, other.id)
+    repo._runtime.sharing.add_member(notebook_id, owner.id)
+    repo._runtime.sharing.add_member(notebook_id, other.id)
     now = _now()
     with repo._write() as db:
         db.execute(

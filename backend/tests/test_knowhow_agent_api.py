@@ -335,7 +335,7 @@ def test_agent_tables_list_reader_can_read(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     owner_h, nb, table, row, col = _seed(client, "a00002002")
     bob_h = _login(client, "b00002002")
-    _app_repo().add_member(nb, _user_id(client, bob_h))
+    _app_repo()._runtime.sharing.add_member(nb, _user_id(client, bob_h))
 
     resp = client.get(f"/api/agent/knowhow/tables?notebook_id={nb}", headers=bob_h)
 
@@ -438,7 +438,7 @@ def test_row_detail_reader_can_read_but_stranger_cannot(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     owner_h, nb, table, row, col = _seed(client, "a00002022")
     bob_h = _login(client, "b00002022")
-    _app_repo().add_member(nb, _user_id(client, bob_h))
+    _app_repo()._runtime.sharing.add_member(nb, _user_id(client, bob_h))
     stranger_h = _login(client, "c00002022")
 
     assert client.get(f"/api/agent/knowhow/rows/{row['id']}", headers=bob_h).status_code == 200
@@ -494,7 +494,7 @@ def test_code_put_requires_write_reader_gets_404_but_can_still_read(tmp_path, mo
     client = _client(tmp_path, monkeypatch)
     owner_h, nb, table, row, col = _seed(client, "a00002031")
     bob_h = _login(client, "b00002031")
-    _app_repo().add_member(nb, _user_id(client, bob_h))
+    _app_repo()._runtime.sharing.add_member(nb, _user_id(client, bob_h))
     url = f"/api/agent/knowhow/rows/{row['id']}/cells/{col}/code"
 
     assert client.get(url, headers=bob_h).status_code == 200

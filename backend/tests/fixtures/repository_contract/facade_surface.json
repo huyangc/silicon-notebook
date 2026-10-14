@@ -2775,18 +2775,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.add_member",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.add_relations",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.add_url_sources",
         "target": "_runtime"
       },
@@ -3075,19 +3063,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.conversation_owner",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.conversation_share_state",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.copy_notebook",
         "target": "_runtime"
       },
       {
@@ -3345,12 +3321,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.find_notebook_by_share_token",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.finish_ask_job",
         "target": "_runtime"
       },
@@ -3471,19 +3441,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.is_member",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.issue_agent_token",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.join_shared",
         "target": "_runtime"
       },
       {
@@ -3508,12 +3466,6 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.kg_search",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.kick_all_members",
         "target": "_runtime"
       },
       {
@@ -3544,12 +3496,6 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.knowledge_types",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.leave_notebook",
         "target": "_runtime"
       },
       {
@@ -3586,12 +3532,6 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.list_knowledge",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.list_members",
         "target": "_runtime"
       },
       {
@@ -3879,12 +3819,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.remove_member",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.rename_conversation",
         "target": "_runtime"
       },
@@ -4107,12 +4041,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.share_notebook",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.share_report",
         "target": "_runtime"
       },
@@ -4269,12 +4197,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.unshare_notebook",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.unshare_report",
         "target": "_runtime"
       },
@@ -4377,25 +4299,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.user_can_admin_notebook",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.user_can_read_answer",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.user_can_read_notebook",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.user_can_read_source",
         "target": "_runtime"
       },
       {

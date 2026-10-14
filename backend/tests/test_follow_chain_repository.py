@@ -7,6 +7,7 @@ from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients
+from tests.kg_relation_testkit import add_relations
 
 
 @pytest.fixture
@@ -103,7 +104,7 @@ def test_follow_chain_requires_quote_on_every_hop(repo):
 
 def test_follow_chain_does_not_repackage_an_existing_direct_edge(repo):
     nb, ids, _ = _seed_chain(repo)
-    repo.add_relations(nb.id, None, [{
+    add_relations(repo, nb.id, None, [{
         "source_object_id": ids["Premise A"],
         "target_object_id": ids["Conclusion C"],
         "edge_type": "derived_from",
@@ -208,7 +209,7 @@ def test_direct_edge_beyond_frontier_limit_still_suppresses_inference(repo):
         with repo._write() as db:
             db.execute("UPDATE knowledge_objects SET id=? WHERE id=?", (new, old))
         decoy_ids.append(new)
-    repo.add_relations(nb.id, None, [{
+    add_relations(repo, nb.id, None, [{
         "source_object_id": "ko-A", "target_object_id": decoy,
         "edge_type": "derived_from", "evidence": [{"quote": f"A to {decoy}"}],
     } for decoy in decoy_ids])
@@ -220,7 +221,7 @@ def test_direct_edge_beyond_frontier_limit_still_suppresses_inference(repo):
 
     # Direct A-Z is the ninth outgoing edge and therefore absent from edge_rows,
     # but the separately indexed exact-direct guard must still see it.
-    repo.add_relations(nb.id, None, [{
+    add_relations(repo, nb.id, None, [{
         "source_object_id": "ko-A", "target_object_id": "ko-Z",
         "edge_type": "derived_from", "evidence": [{"quote": "direct A to Z"}],
     }])
@@ -241,7 +242,7 @@ def test_truncated_supernode_direct_guard_fails_closed(repo):
             "source_object_id": ids["Premise A"], "target_object_id": decoy,
             "edge_type": "derived_from", "evidence": [{"quote": "bounded decoy"}],
         })
-    repo.add_relations(nb.id, None, decoys)
+    add_relations(repo, nb.id, None, decoys)
 
     # fan_out=8 => raw endpoint budget=64; 65 outgoing rows means absence of a
     # direct A→C edge cannot be proven inside the budget, so no inference ships.

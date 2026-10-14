@@ -785,7 +785,7 @@ def test_a_deep_copy_today_carries_no_memory_source(repo):
     _memory_item(repo, "mem-c", "nb-src")
     _source(repo, "nb-src", "src-c", "memory", "mem-c")
     _derive(repo, "nb-src", "src-c")
-    copy = repo.copy_notebook("nb-src", new_owner_id=RECIPIENT)
+    copy = repo._runtime.sharing.copy_notebook("nb-src", new_owner_id=RECIPIENT)
     with repo._runtime.database.connect() as db:
         carried = db.execute(
             "SELECT COUNT(*) FROM sources WHERE notebook_id=? AND source_type='memory'",

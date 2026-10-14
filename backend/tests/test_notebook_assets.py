@@ -107,7 +107,7 @@ def test_readonly_member_can_get_cannot_post(tmp_path, monkeypatch, repo):
 
     bob_h = _login(client, "b00000305")
     bob_id = client.get("/api/me", headers=bob_h).json()["id"]
-    repo.add_member(nb, bob_id)
+    repo._runtime.sharing.add_member(nb, bob_id)
 
     assert client.get(asset["url"], headers=bob_h).status_code == 200
     # Non-owner write attempt: 404 (not 403) — this codebase's established

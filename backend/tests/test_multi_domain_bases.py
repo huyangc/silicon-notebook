@@ -619,21 +619,21 @@ class TestApiUnauthorizedWrite:
         shared = client.post(
             "/api/notebooks", headers=c["u2"], json={"name": "u2 分享给我的库"}
         ).json()
-        repo_api.add_member(shared["id"], c["u1_id"])
+        repo_api._runtime.sharing.add_member(shared["id"], c["u1_id"])
         client.put(
             f"/api/notebooks/{a['id']}/bases", headers=c["u1"],
             json={"base_notebook_ids": [shared["id"]]},
         )
         assert repo_api.participant_notebook_ids(a["id"], viewer_id=c["u1_id"]) == [a["id"], shared["id"]]
 
-        repo_api.remove_member(shared["id"], c["u1_id"])
+        repo_api._runtime.sharing.remove_member(shared["id"], c["u1_id"])
         assert repo_api.participant_notebook_ids(a["id"], viewer_id=c["u1_id"]) == [a["id"]]
         edges = repo_api.list_notebook_bases(a["id"])
         assert [(e["id"], e["active"]) for e in edges] == [(shared["id"], False)], (
             "边必须保留、只是失效——静默删掉用户配置无法撤销"
         )
 
-        repo_api.add_member(shared["id"], c["u1_id"])
+        repo_api._runtime.sharing.add_member(shared["id"], c["u1_id"])
         assert repo_api.participant_notebook_ids(a["id"], viewer_id=c["u1_id"]) == [a["id"], shared["id"]]
 
     def test_group_grant_grants_mountable_status(self, two_users_client):
@@ -899,7 +899,7 @@ class TestBorrowedMountReshare:
             "/api/notebooks", headers=c["alice"], json={"name": "Alice 的库 X"}
         ).json()
         source_id = _insert_source(repo, y["id"], "src-carol-secret")
-        repo.add_member(y["id"], c["alice_id"])
+        repo._runtime.sharing.add_member(y["id"], c["alice_id"])
         resp = client.put(
             f"/api/notebooks/{x['id']}/bases", headers=c["alice"],
             json={"base_notebook_ids": [y["id"]]},
@@ -932,7 +932,7 @@ class TestBorrowedMountReshare:
         repo, x, y, source_id = self._stage(c)
         client = c["client"]
 
-        repo.add_member(x["id"], c["bob_id"])
+        repo._runtime.sharing.add_member(x["id"], c["bob_id"])
         assert repo.user_can_read_notebook(x["id"], c["bob_id"]) is True
 
         assert repo.participant_notebook_ids(x["id"], viewer_id=c["alice_id"]) == [x["id"]], (
@@ -954,10 +954,10 @@ class TestBorrowedMountReshare:
         """③ Bob 被踢 ⇒ X 重新回到未共享状态,借入边自动恢复。"""
         c = three_users_client
         repo, x, y, source_id = self._stage(c)
-        repo.add_member(x["id"], c["bob_id"])
+        repo._runtime.sharing.add_member(x["id"], c["bob_id"])
         assert repo.participant_notebook_ids(x["id"], viewer_id=c["alice_id"]) == [x["id"]]
 
-        repo.remove_member(x["id"], c["bob_id"])
+        repo._runtime.sharing.remove_member(x["id"], c["bob_id"])
         assert repo.participant_notebook_ids(x["id"], viewer_id=c["alice_id"]) == [x["id"], y["id"]]
         detail = c["client"].get(
             f"/api/notebooks/{x['id']}/sources/{source_id}", headers=c["alice"]
@@ -1004,7 +1004,7 @@ class TestBorrowedMountReshare:
             f"/api/notebooks/{x['id']}/bases", headers=c["alice"],
             json={"base_notebook_ids": [y["id"]]},
         ).status_code == 200
-        repo.add_member(x["id"], c["bob_id"])
+        repo._runtime.sharing.add_member(x["id"], c["bob_id"])
         assert repo.participant_notebook_ids(x["id"], viewer_id=c["alice_id"]) == [x["id"], y["id"]]
         got = client.get(
             f"/api/notebooks/{x['id']}/sources/{source_id}", headers=c["bob"]
@@ -1042,9 +1042,9 @@ class TestBorrowedMountReshare:
         ).status_code == 200
         assert repo.participant_notebook_ids(x["id"], viewer_id=c["alice_id"]) == [x["id"], y["id"]]
 
-        repo.add_member(x["id"], c["bob_id"])
+        repo._runtime.sharing.add_member(x["id"], c["bob_id"])
         assert repo.participant_notebook_ids(x["id"], viewer_id=c["alice_id"]) == [x["id"]]
-        repo.remove_member(x["id"], c["bob_id"])
+        repo._runtime.sharing.remove_member(x["id"], c["bob_id"])
         assert repo.participant_notebook_ids(x["id"], viewer_id=c["alice_id"]) == [x["id"], y["id"]]
 
     def test_gate_closed_edge_keeps_the_name_and_explains_the_exit(
@@ -1060,7 +1060,7 @@ class TestBorrowedMountReshare:
         """
         c = three_users_client
         repo, x, y, _source_id = self._stage(c)
-        repo.add_member(x["id"], c["bob_id"])
+        repo._runtime.sharing.add_member(x["id"], c["bob_id"])
 
         edges = repo.list_notebook_bases(x["id"])
         assert len(edges) == 1
@@ -1071,7 +1071,7 @@ class TestBorrowedMountReshare:
         assert "不属于你" not in edge["inactive_reason"]
 
         # 对照:Carol 撤销对 Alice 的分享(真正失权)→ 旧文案 + 名字遮蔽。
-        repo.remove_member(y["id"], c["alice_id"])
+        repo._runtime.sharing.remove_member(y["id"], c["alice_id"])
         edge = repo.list_notebook_bases(x["id"])[0]
         assert edge["active"] is False
         assert edge["name"] == "已不可用的知识库"
@@ -1097,7 +1097,7 @@ class TestBorrowedMountReshare:
             "/api/notebooks", headers=c["carol"], json={"name": "公共库"}
         ).json()
         repo.mark_notebook_base(public["id"])
-        repo.add_member(x["id"], c["bob_id"])
+        repo._runtime.sharing.add_member(x["id"], c["bob_id"])
 
         assert client.put(
             f"/api/notebooks/{x['id']}/bases", headers=c["alice"],

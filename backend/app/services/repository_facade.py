@@ -1452,17 +1452,8 @@ class RepositoryFacade:
     # Frozen public signatures; the facade keeps notebook_copy_stats' own
     # scale-profile memo (cross-domain bridge) and the _insert_row seat.
     # ------------------------------------------------------------------
-    def share_notebook(self, notebook_id: str) -> dict:
-        return self._runtime.sharing.share_notebook(notebook_id)
-
     def share_state(self, notebook_id: str) -> dict:
         return self._runtime.sharing.share_state(notebook_id)
-
-    def unshare_notebook(self, notebook_id: str) -> None:
-        return self._runtime.sharing.unshare_notebook(notebook_id)
-
-    def find_notebook_by_share_token(self, token: str) -> "str | None":
-        return self._runtime.sharing.find_notebook_by_share_token(token)
 
     def notebook_copy_stats(self, notebook_id: str) -> dict:
         return self._runtime.scale_artifacts.notebook_copy_stats(notebook_id)
@@ -1479,51 +1470,11 @@ class RepositoryFacade:
     def _sweep_stuck_copies(self, created_by: "str | None" = None) -> int:
         return self._runtime.sharing.sweep_stuck_copies(created_by)
 
-    def copy_notebook(
-        self,
-        source_notebook_id: str,
-        *,
-        new_owner_id: str,
-        actor_label: "str | None" = None,
-        new_name: "str | None" = None,
-    ) -> NotebookSummary:
-        return self._runtime.sharing.copy_notebook(
-            source_notebook_id, new_owner_id=new_owner_id,
-            actor_label=actor_label, new_name=new_name,
-        )
-
     def user_can_access_notebook(self, notebook_id: str, user_id: str) -> bool:
         return self._runtime.sharing.user_can_access_notebook(notebook_id, user_id)
 
-    def is_member(self, notebook_id: str, user_id: str) -> bool:
-        return self._runtime.sharing.is_member(notebook_id, user_id)
-
-    def user_can_admin_notebook(self, notebook_id: str, user_id: str) -> bool:
-        return self._runtime.sharing.user_can_admin_notebook(notebook_id, user_id)
-
     def user_can_read_notebook(self, notebook_id: str, user_id: str) -> bool:
         return self._runtime.sharing.user_can_read_notebook(notebook_id, user_id)
-
-    def user_can_read_source(self, source_id: str, user_id: str) -> bool:
-        return self._runtime.sharing.user_can_read_source(source_id, user_id)
-
-    def add_member(self, notebook_id: str, user_id: str) -> None:
-        return self._runtime.sharing.add_member(notebook_id, user_id)
-
-    def remove_member(self, notebook_id: str, user_id: str) -> None:
-        return self._runtime.sharing.remove_member(notebook_id, user_id)
-
-    def kick_all_members(self, notebook_id: str) -> None:
-        return self._runtime.sharing.kick_all_members(notebook_id)
-
-    def list_members(self, notebook_id: str) -> list:
-        return self._runtime.sharing.list_members(notebook_id)
-
-    def join_shared(self, notebook_id: str, user_id: str) -> NotebookSummary:
-        return self._runtime.sharing.join_shared(notebook_id, user_id)
-
-    def leave_notebook(self, notebook_id: str, user_id: str) -> None:
-        return self._runtime.sharing.leave_notebook(notebook_id, user_id)
 
     def source_owner(self, source_id: str) -> "str | None":
         return self._runtime.sharing.source_owner(source_id)
@@ -1539,16 +1490,8 @@ class RepositoryFacade:
             source_id, viewer_id=viewer_id, visible_only=visible_only
         )
 
-    def conversation_owner(self, conversation_id: str) -> "str | None":
-        return self._runtime.sharing.conversation_owner(conversation_id)
-
     def answer_owner(self, answer_id: str) -> "str | None":
         return self._runtime.sharing.answer_owner(answer_id)
-
-    def user_can_read_answer(self, answer_id: str, user_id: str) -> bool:
-        """Notebook read access only; NOT authorisation to act on an answer
-        (that is ``user_owns_answer`` on the sharing service). Frozen delegate."""
-        return self._runtime.sharing.user_can_read_answer(answer_id, user_id)
 
     def delete_notebook_kg(self, notebook_id: str) -> dict:
         """Delete all KG artifacts for a notebook — KnowledgeLifecycleService
@@ -2305,29 +2248,6 @@ class RepositoryFacade:
 
     def _kg_headline(self, payload: dict) -> str:
         return self._runtime.knowledge_query.kg_headline(payload)
-
-    def add_relations(self, notebook_id: str, source_id: str,
-                      relations: List[dict]) -> int:
-        result = self._runtime.knowledge.add_relations_current(
-            notebook_id, source_id, relations
-        )
-        # F1 (R3 T-A3 review): this test/fixture-only raw insert bypasses
-        # store_kg's kg_mutation_seq bump, which is what the seq-gated
-        # review-queue RANKING memo (items + total, v4) relies on to
-        # self-invalidate. Mirrors knowledge_query.insert_test_object's same
-        # precedent — drop it explicitly so a fixture that warms the ranking,
-        # seeds relations via this path, then reads the queue again never
-        # sees a stale ranking/total.
-        #
-        # v4 (codex #638 R1): the ``knowledge_counts_cache.invalidate_knowledge_
-        # counts`` call that used to sit here was added SOLELY to protect the
-        # (now-removed) ``review_queue_total`` module-global memo — none of
-        # the four remaining counts_cache memos (type/status counts, chunk
-        # count, the two pending-source views) read ``knowledge_relations``,
-        # so a relations-only insert never staled any of them. Removed rather
-        # than left as a no-op call.
-        self._runtime.review_queue_memo.invalidate(notebook_id)
-        return result
 
     def store_kg(self, notebook_id: str, source_id: Optional[str],
                  objects: List[dict], relations: List[dict]) -> Tuple[int, int]:

@@ -500,12 +500,12 @@ def global_case_an_unopenable_link_is_refused_before_asking(world: World) -> Non
     searched = world.client.post(
         "/api/notebooks", json={"name": "被检索库"}, headers=world.owner.headers
     ).json()["id"]
-    world.repo.add_member(searched, world.alice.id)
+    world.repo._runtime.sharing.add_member(searched, world.alice.id)
     cid, (first,) = seed_global(world, world.alice, [
         answer(citations=[memory_citation(world, "a1")]),
     ], resolved=[world.notebook, searched])
     assert global_disclose(world, world.alice, cid, first).json() == counts(1, 1)
-    world.repo.remove_member(searched, world.alice.id)
+    world.repo._runtime.sharing.remove_member(searched, world.alice.id)
     lost = {"detail": "部分笔记本已无法访问，请重新选择范围。"}
     for attempt in (global_disclose(world, world.alice, cid, first),
                     global_publish(world, world.alice, cid, first)):

@@ -35,7 +35,7 @@ def memory_data(tmp_path, monkeypatch):
         other = repo.create_notebook(NotebookCreate(name="Other notebook"))
     finally:
         reset_request_user(token)
-    repo.add_member(notebook.id, bob.id)
+    repo._runtime.sharing.add_member(notebook.id, bob.id)
 
     with repo._write() as db:
         db.executemany(

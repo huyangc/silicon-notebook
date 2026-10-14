@@ -388,7 +388,7 @@ def test_reformat_endpoint_reader_gets_404(tmp_path, monkeypatch):
 
     bob_h = _login(client, "b00002094")
     bob_id = client.get("/api/me", headers=bob_h).json()["id"]
-    _app_repo().add_member(nb, bob_id)
+    _app_repo()._runtime.sharing.add_member(nb, bob_id)
 
     resp = _reformat(client, bob_h, nb, table["id"], row["id"], column_id)
 

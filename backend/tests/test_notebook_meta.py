@@ -323,7 +323,7 @@ def test_offline_multi_source_fallback_does_not_claim_first_source_topic(repo):
 
 def test_explicit_copy_name_becomes_manual(repo):
     nb = repo.create_notebook(NotebookCreate())
-    copied = repo.copy_notebook(nb.id, new_owner_id=repo.current_user().id, new_name="手动副本")
+    copied = repo._runtime.sharing.copy_notebook(nb.id, new_owner_id=repo.current_user().id, new_name="手动副本")
     _insert_source(repo, copied.id)
     repo._augment_notebook_meta(copied.id)
     assert repo.get_notebook(copied.id).name == "手动副本"

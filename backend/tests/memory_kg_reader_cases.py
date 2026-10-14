@@ -107,7 +107,7 @@ def build_world(repo, *, postgres: bool) -> SimpleNamespace:
     token = set_request_user(a)
     try:
         nb = repo.create_notebook(NotebookCreate(name="shared")).id
-        repo.add_member(nb, b.id)
+        repo._runtime.sharing.add_member(nb, b.id)
     finally:
         reset_request_user(token)
     token = set_request_user(b)

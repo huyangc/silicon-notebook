@@ -60,7 +60,7 @@ def test_user_owns_answer_is_conversation_author_and_notebook_reader(world):
 def test_removing_the_member_removes_the_answer_from_them(world):
     sharing = world.repo._runtime.sharing
     assert sharing.user_owns_answer(world.bob_answer, world.bob.id) is True
-    world.repo.remove_member(world.notebook_id, world.bob.id)
+    world.repo._runtime.sharing.remove_member(world.notebook_id, world.bob.id)
     assert sharing.user_owns_answer(world.bob_answer, world.bob.id) is False
 
 
