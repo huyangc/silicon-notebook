@@ -23,7 +23,8 @@
 //     提交之间落地的旧笔记本响应,act() 下的组件用例观察不到那个窗口,只能在这里钉。
 //     另外每处 setSelectedTableId 所在的函数都必须先把同一个值写进
 //     selectedTableIdRef(openTable 判断「重开同一张表」与异步命令判断「用户还在不在
-//     这张表」都读它)。
+//     这张表」都读它);反过来,镜像的每次写入也必须与写同一值的 setSelectedTableId
+//     同函数成对出现;setter 只许直接调用,不许当作值传出(prop、参数、别名)。
 //  5. 回调身份:搬家没有改变任何回调的 useCallback 状态。loadTables 仍是
 //     useCallback([notebookId])、loadRowCode 仍是 useCallback([]);
 //     handleCodeSaved/handleCodeDeleted/deleteConcept/deleteBranch 仍是每次渲染
@@ -354,18 +355,40 @@ function enclosingFunction(node) {
   return current ?? null;
 }
 
+function statementTexts(fn, sourceFile) {
+  return bodyStatements(fn)
+    .filter((statement) => ts.isExpressionStatement(statement))
+    .map((statement) => flatText(statement.expression, sourceFile));
+}
+
 function selectionMirrorViolations(sourceFile, ownerName) {
   const owner = findFunction(sourceFile, ownerName);
   const violations = [];
   function visit(node) {
+    // setter 只许直接调用:当作值传出去(prop、参数、赋给别的名字)就绕过了镜像。
+    if (
+      ts.isIdentifier(node) && node.text === "setSelectedTableId"
+      && !(ts.isCallExpression(node.parent) && node.parent.expression === node)
+      && !ts.isBindingElement(node.parent)
+    ) {
+      violations.push(`setSelectedTableId 只能直接调用,不能当作值传出:${flatText(node.parent, sourceFile)}`);
+    }
+    // 镜像只许跟着选中表一起写:同一函数里必须有写同一个值的 setSelectedTableId。
+    if (
+      ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      && flatText(node.left, sourceFile) === "selectedTableIdRef.current"
+    ) {
+      const value = flatText(node.right, sourceFile);
+      if (!statementTexts(enclosingFunction(node), sourceFile).includes(`setSelectedTableId(${value})`)) {
+        violations.push(`selectedTableIdRef.current = ${value} 所在函数没有 setSelectedTableId(${value})`);
+      }
+    }
     if (
       ts.isCallExpression(node) && ts.isIdentifier(node.expression)
       && node.expression.text === "setSelectedTableId" && node.arguments.length === 1
     ) {
       const value = flatText(node.arguments[0], sourceFile);
-      const mirrored = bodyStatements(enclosingFunction(node)).some((statement) =>
-        ts.isExpressionStatement(statement)
-        && flatText(statement.expression, sourceFile) === `selectedTableIdRef.current = ${value}`);
+      const mirrored = statementTexts(enclosingFunction(node), sourceFile).includes(`selectedTableIdRef.current = ${value}`);
       if (!mirrored) violations.push(`setSelectedTableId(${value}) 所在函数没有同步写 selectedTableIdRef.current = ${value}`);
     }
     ts.forEachChild(node, visit);
@@ -648,6 +671,18 @@ const PANEL_MUTANTS = [
     from: "selectedTableIdRef.current = null; setSelectedTableId(null); }, [notebookId]);",
     to: "selectedTableIdRef.current = undefined; setSelectedTableId(null); }, [notebookId]);",
     expect: /setSelectedTableId\(null\) 所在函数没有同步写/,
+  },
+  {
+    label: "把 setSelectedTableId 当作 prop 传出",
+    from: "      <KnowhowTableList onHealthFilterChange",
+    to: "      <KnowhowTableList onOpen={setSelectedTableId} onHealthFilterChange",
+    expect: /setSelectedTableId 只能直接调用,不能当作值传出/,
+  },
+  {
+    label: "只写镜像、不写选中表",
+    from: "  const openRow = rows.find",
+    to: "  function peek(tableId) { selectedTableIdRef.current = tableId; }\n  const openRow = rows.find",
+    expect: /selectedTableIdRef\.current = tableId 所在函数没有 setSelectedTableId\(tableId\)/,
   },
   {
     label: "setter 包一层箭头再传",
