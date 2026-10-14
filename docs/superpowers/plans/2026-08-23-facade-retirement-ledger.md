@@ -151,14 +151,14 @@ PYTHONPATH=backend python3 scripts/audit_facade_callers.py \
 | `build_notebook_kg` | 1811 | `_runtime.knowledge_lifecycle.build_notebook_kg` | adapter | 2 | 0 | 0 | 22 | 2 | - | **keep** |
 | `build_scale_index` | 3172 | `_runtime.scale_artifacts.build` | adapter | 4 | 0 | 2 | 156 | 3 | - | **keep** |
 | `bulk_delete_conversations` | 3859 | `_runtime.ask_component.bulk_delete_conversations_current` | delegate | 1 | 0 | 0 | 3 | 5 | - | **keep** |
-| `bulk_delete_memories` | 1415 | `_runtime.memory_service.bulk_delete` | delegate | 1 | 0 | 0 | 3 | 4 | - | **keep** |
+| `bulk_delete_memories` | 1415 | `_runtime.memory_service.bulk_delete` | delegate | 1 | 0 | 0 | 3 | 5 | - | **keep** |
 | `bump_knowhow_mutation_seq` | 4220 | `_runtime.knowhow_store.bump_knowhow_mutation_seq` | delegate | 0 | 0 | 0 | 0 | 1 | - | **ambiguous** |
 | `cancel_ask_job` | 3777 | `_runtime.ask_component.cancel_job` | delegate | 1 | 0 | 0 | 3 | 0 | - | **keep** |
 | `cancel_scale_index` | 3259 | `_runtime.scale_artifacts.cancel` | delegate | 1 | 0 | 0 | 4 | 0 | - | **keep** |
-| `chat` | 842 | `_runtime.models.chat` | delegate | 1 | 0 | 2 | 0 | 130 | - | **keep** |
+| `chat` | 842 | `_runtime.models.chat` | delegate | 1 | 0 | 2 | 0 | 131 | - | **keep** |
 | `claim_report_generation` | 3959 | `_runtime.report_store.claim_report_generation` | adapter | 1 | 0 | 0 | 16 | 9 | - | **keep** |
 | `claim_report_intent` | 3952 | `_runtime.report_store.claim_report_intent` | delegate | 1 | 0 | 1 | 7 | 1 | - | **keep** |
-| `close` | 998 | `_runtime.close` | delegate | 6 | 0 | 9 | 222 | 474 | postgres:override | **keep** |
+| `close` | 998 | `_runtime.close` | delegate | 6 | 0 | 9 | 247 | 500 | postgres:override | **keep** |
 | `cluster_map` | 2427 | `retrieval.candidates.cluster_map` | delegate | 1 | 1 | 0 | 81 | 8 | - | **keep** |
 | `collection_catalog` (property) | 3365 | `_runtime.collection_catalog` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
 | `collection_enumeration` (property) | 3375 | `_runtime.collection_enumeration` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
@@ -181,7 +181,7 @@ PYTHONPATH=backend python3 scripts/audit_facade_callers.py \
 | `create_knowhow_table_with_rows` | 4134 | `_runtime.knowhow_store.create_knowhow_table_with_rows` | delegate | 1 | 0 | 0 | 0 | 5 | - | **keep** |
 | `create_memory_candidate` | 1364 | `_runtime.memory_service.create_candidate` | delegate | 1 | 0 | 0 | 33 | 5 | - | **keep** |
 | `create_memory_from_answer` | 1382 | `_runtime.memory_service.create_from_answer` | delegate | 1 | 0 | 0 | 3 | 0 | - | **keep** |
-| `create_notebook` | 1218 | `_runtime.catalog.create_notebook` | delegate | 2 | 0 | 9 | 1920 | 78 | - | **keep** |
+| `create_notebook` | 1218 | `_runtime.catalog.create_notebook` | delegate | 2 | 0 | 9 | 1926 | 78 | - | **keep** |
 | `create_notebook_object_schema` | 2186 | `_runtime.schema_registry.create_notebook_object_schema` | delegate | 1 | 0 | 0 | 3 | 0 | - | **keep** |
 | `create_object_schema` | 2212 | `_runtime.schema_registry.create_object_schema` | delegate | 1 | 0 | 1 | 5 | 0 | - | **keep** |
 | `create_report` | 3930 | `_runtime.report_application.create_report` | delegate | 1 | 0 | 2 | 70 | 29 | - | **keep** |
@@ -291,7 +291,7 @@ PYTHONPATH=backend python3 scripts/audit_facade_callers.py \
 | `public_conversation_by_token` | 3917 | `_runtime.ask_state.public_conversation_by_token` | delegate | 2 | 0 | 0 | 0 | 35 | - | **keep** |
 | `public_report_by_token` | 4014 | `_runtime.report_store.public_report_by_token` | delegate | 1 | 0 | 0 | 0 | 15 | - | **keep** |
 | `rebuild_notebook_kg` | 1838 | `_runtime.knowledge_lifecycle.rebuild_notebook_kg` | adapter | 0 | 0 | 0 | 5 | 1 | - | **test-only** |
-| `rebuild_unified_kg` | 2758 | `_runtime.knowledge_lifecycle.rebuild_unified_kg` | adapter | 4 | 0 | 2 | 276 | 4 | - | **keep** |
+| `rebuild_unified_kg` | 2758 | `_runtime.knowledge_lifecycle.rebuild_unified_kg` | adapter | 4 | 0 | 2 | 277 | 4 | - | **keep** |
 | `refresh_agent_principal` | 1339 | `_runtime.memory_service.refresh_agent_principal` | delegate | 3 | 0 | 0 | 0 | 5 | - | **keep** |
 | `reject_conflict` | 2564 | `_runtime.knowledge_governance.reject_conflict` | delegate | 1 | 0 | 0 | 1 | 0 | - | **keep** |
 | `reject_memory` | 1406 | `_runtime.memory_service.reject` | delegate | 1 | 0 | 0 | 3 | 0 | - | **keep** |
@@ -313,7 +313,7 @@ PYTHONPATH=backend python3 scripts/audit_facade_callers.py \
 | `resolve_agent_token_status` | 1334 | `_runtime.memory_service.resolve_agent_token_status` | delegate | 0 | 0 | 0 | 0 | 21 | - | **ambiguous** |
 | `resolve_notebook_conflicts` | 2572 | `_runtime.knowledge_governance.resolve_notebook_conflicts` | delegate | 0 | 0 | 0 | 24 | 4 | - | **test-only** |
 | `resolve_reasoning_followup` | 3565 | `_runtime.ask_component.resolve_reasoning_followup` | delegate | 1 | 0 | 0 | 0 | 1 | - | **keep** |
-| `resolve_session` | 824 | `_runtime.identity.resolve_session` | delegate | 2 | 0 | 0 | 8 | 54 | - | **keep** |
+| `resolve_session` | 824 | `_runtime.identity.resolve_session` | delegate | 2 | 0 | 0 | 8 | 57 | - | **keep** |
 | `retrieval` (property) | 3360 | `_runtime.retrieval_component` | delegate | 0 | 55 | 0 | 0 | 6 | - | **keep** |
 | `retrieval_experiences` (property) | 1088 | `_runtime.retrieval_experiences` | delegate | 0 | 0 | 0 | 0 | 0 | - | **keep** |
 | `revert_knowhow_table` | 4368 | `_runtime.knowhow_history_store.revert_to` | delegate | 1 | 0 | 0 | 0 | 0 | - | **keep** |
@@ -355,7 +355,7 @@ PYTHONPATH=backend python3 scripts/audit_facade_callers.py \
 | `start_notebook_relink` | 2267 | `_runtime.knowledge_lifecycle.start_notebook_relink` | adapter | 1 | 0 | 0 | 23 | 5 | - | **keep** |
 | `start_unified_kg_rebuild` | 2770 | `_runtime.knowledge_lifecycle.start_unified_kg_rebuild` | adapter | 2 | 0 | 0 | 22 | 1 | - | **keep** |
 | `storage_dir` (property+setter) | 4088 | `_runtime.storage_dir` | delegate | 0 | 2 | 0 | 0 | 0 | - | **keep** |
-| `store_kg` | 2252 | `_runtime.knowledge_lifecycle.store_kg` | delegate | 0 | 0 | 6 | 440 | 23 | - | **keep** |
+| `store_kg` | 2252 | `_runtime.knowledge_lifecycle.store_kg` | delegate | 0 | 0 | 6 | 441 | 23 | - | **keep** |
 | `submit_feedback` | 4041 | `_runtime.ask_state.submit_feedback` | delegate | 1 | 0 | 2 | 0 | 8 | - | **keep** |
 | `transfer_memories` | 4392 | `_runtime.memory_service.transfer` | delegate | 1 | 0 | 0 | 28 | 0 | - | **keep** |
 | `trigger_scale_index_rebuild` | 3240 | `_runtime.scale_artifacts.trigger` | adapter | 2 | 0 | 0 | 6 | 0 | - | **keep** |
@@ -377,7 +377,7 @@ PYTHONPATH=backend python3 scripts/audit_facade_callers.py \
 | `update_notebook_object_schema` | 2193 | `_runtime.schema_registry.update_notebook_object_schema` | delegate | 1 | 0 | 0 | 2 | 0 | - | **keep** |
 | `update_object_schema` | 2215 | `_runtime.schema_registry.update_object_schema` | delegate | 1 | 0 | 2 | 5 | 0 | - | **keep** |
 | `update_report` | 3942 | `_runtime.report_store.update_report` | delegate | 3 | 0 | 1 | 67 | 64 | - | **keep** |
-| `upload_sources` | 1772 | `_runtime.source_ingestion.upload_sources_compat` | adapter | 5 | 0 | 7 | 46 | 5 | - | **keep** |
+| `upload_sources` | 1772 | `_runtime.source_ingestion.upload_sources_compat` | adapter | 5 | 0 | 7 | 47 | 5 | - | **keep** |
 | `upsert_knowhow_cell_code` | 4316 | `_runtime.knowhow_store.upsert_knowhow_cell_code` | delegate | 1 | 0 | 0 | 5 | 5 | - | **keep** |
 | `user_can_access_notebook` | 1473 | `_runtime.sharing.user_can_access_notebook` | delegate | 1 | 0 | 0 | 15 | 9 | - | **keep** |
 | `user_can_read_notebook` | 1476 | `_runtime.sharing.user_can_read_notebook` | delegate | 5 | 0 | 0 | 39 | 21 | - | **keep** |
