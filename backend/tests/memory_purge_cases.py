@@ -1944,12 +1944,19 @@ def case_the_row_delete_itself_is_scoped_to_the_creator(
     governance = sys.modules[type(store).__module__].GovernanceStore
     original = governance.withdraw_memory_promotions_on
 
+    handed_over: list[str] = []
+
     def hand_the_row_to_bob_first(db, notebook_id, ids, *args, **kwargs):
         for memory_id in ids:
-            db.execute(
+            updated = db.execute(
                 world.sql._text("UPDATE memory_items SET created_by=? WHERE id=?"),
                 (world.bob.id, memory_id),
             )
+            assert updated.rowcount == 1, (
+                "hook point moved: the row is not there to hand over at the "
+                f"withdrawal step ({updated.rowcount} rows updated)"
+            )
+            handed_over.append(memory_id)
         return original(db, notebook_id, ids, *args, **kwargs)
 
     monkeypatch.setattr(
@@ -1957,6 +1964,10 @@ def case_the_row_delete_itself_is_scoped_to_the_creator(
         staticmethod(hand_the_row_to_bob_first),
     )
     store.bulk_delete_memories(world.alice.id, [alice.memory_id])
+    assert handed_over == [alice.memory_id], (
+        "hook point moved: the creator change did not happen between the "
+        "SELECT and the DELETE (it never fired, or fired after the row was gone)"
+    )
     assert world.sql.count(
         "SELECT COUNT(*) AS c FROM memory_items WHERE id=? AND created_by=?",
         (alice.memory_id, world.bob.id),
