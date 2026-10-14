@@ -19,10 +19,9 @@
 //    touches `deleting` (S5: only the DELETE's outcome releases it).
 //  * The row drawer re-registered its Escape listener on every panel render:
 //    fixed in S6 (pinned in knowhow-panel-golden).
-// Found while characterising (also recorded as-is, see the tests): a same-table
-// re-targeted jump leaving the grid blank. (Fixed in S6: a stray detail request
-// on a notebook switch, and a re-targeted jump routing against the previous
-// table's detail; see those tests.)
+// Found while characterising and fixed in S6 (see the tests): a stray detail
+// request on a notebook switch, a re-targeted jump routing against the previous
+// table's detail, and a same-table re-targeted jump leaving the grid blank.
 //  * The row-code effect (E5) reset its state from an effect whenever no row was
 //    open, costing one extra commit after the drawer closed: fixed in S6 (the
 //    reset now runs at render time; pinned in knowhow-panel-row-code-reset).
@@ -360,30 +359,68 @@ test("re-targeting a jump from an open record table to an anchor table opens the
 // Reset sets: openTable / backToList / E6 (asymmetries fixed in S6)
 // ---------------------------------------------------------------------------
 
-test("quirk: re-targeting a jump to another row of the same table blanks the grid without reloading it", async () => {
-  // Recorded as-is (found while characterising, not in the plan's list): a new
-  // initialRowId with the same initialTableId runs E7 → openTable(sameId), which
-  // sets detail to null; selectedTableId does not change, so the detail effect
-  // (E4) does not run again and the grid stays empty until the user goes back.
-  // The routing effect (E8) still sees the old detail and points openRowId at the
-  // cited row, so that row's code is fetched although no drawer can render.
+test("re-targeting a jump to another row of the same record table keeps the grid and opens that row", async () => {
+  // Until S6 a new initialRowId with the same initialTableId ran E7 →
+  // openTable(sameId), which nulled the detail; selectedTableId did not change,
+  // so the detail effect (E4) never refetched and the grid stayed blank until
+  // the user went back, while the routing effect (E8) still pointed openRowId at
+  // r2 and fetched its code for a drawer that could not render. openTable now
+  // keeps the detail of the table it reopens, so E8 routes against it. Same
+  // request sequence; the row-code request is now used by the drawer.
   const server = suite.server();
   routeTable(server, "nb-1", recordDetail());
   const panel = renderPanel({ initialTableId: "t-rec" });
   expect(await screen.findByRole("button", { name: "供电异常" })).toBeInTheDocument();
 
   panel.update({ ...BASE_PROPS, initialTableId: "t-rec", initialRowId: "r2" });
-  await waitFor(() => expect(screen.queryByRole("button", { name: "供电异常" })).not.toBeInTheDocument());
+  const drawer = await screen.findByRole("dialog", { name: "时钟漂移" });
+  expect(await within(drawer).findAllByRole("button", { name: /添加代码/ })).toHaveLength(3);
   await settle();
-  expect(screen.queryByRole("heading", { name: "排障记录" })).not.toBeInTheDocument();
-  expect(screen.queryByPlaceholderText("按行标题/全文过滤行…")).not.toBeInTheDocument();
-  expect(screen.queryByText("加载中…")).not.toBeInTheDocument();
-  expect(screen.queryByRole("dialog", { name: "时钟漂移" })).not.toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "返回" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "排障记录" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "供电异常" })).toBeInTheDocument();
   expect(server.log).toEqual([
     { method: "GET", path: "/notebooks/nb-1/knowhow" },
     { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
     { method: "GET", path: "/agent/knowhow/rows/r2" },
+  ]);
+});
+
+test("a jump to the table already open but failed to load falls back to the list with a notice", async () => {
+  // Keeping the reopened table's detail (S6) must not turn a failed load into a
+  // dead end: the stale-citation effect sees the failure in the same commit and
+  // goes back to the list, as for a cited table that fails to load. No refetch.
+  const server = suite.server();
+  routeTable(server, "nb-1", recordDetail());
+  server.once("GET", "/notebooks/nb-1/knowhow/t-rec", { status: 500, json: { detail: "boom" } });
+  const user = userEvent.setup();
+  const panel = renderPanel();
+  await user.click(await screen.findByRole("button", { name: "打开表格：排障记录" }));
+  expect(await screen.findByText("加载表格详情失败，请重试")).toBeInTheDocument();
+
+  panel.update({ ...BASE_PROPS, initialTableId: "t-rec", initialRowId: "r2" });
+  expect(await screen.findByText("未能定位到引用指向的表格，它可能已被删除。")).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "打开表格：排障记录" })).toBeInTheDocument();
+  await settle();
+  expect(server.log).toEqual([
+    { method: "GET", path: "/notebooks/nb-1/knowhow" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
+  ]);
+});
+
+test("re-targeting a jump to another concept of the same anchor table switches the matrix without a reload", async () => {
+  const server = suite.server();
+  routeTable(server, "nb-1", anchorDetail());
+  const panel = renderPanel({ initialTableId: "t-anc", initialRowId: "a2" });
+  expect(await screen.findByRole("dialog", { name: "概念 时钟" })).toBeInTheDocument();
+
+  panel.update({ ...BASE_PROPS, initialTableId: "t-anc", initialRowId: "a3" });
+  expect(await screen.findByRole("dialog", { name: "概念 电源" })).toBeInTheDocument();
+  await settle();
+  expect(screen.queryByRole("dialog", { name: "概念 时钟" })).not.toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "概念表" })).toBeInTheDocument();
+  expect(server.log).toEqual([
+    { method: "GET", path: "/notebooks/nb-1/knowhow" },
+    { method: "GET", path: "/notebooks/nb-1/knowhow/t-anc" },
   ]);
 });
 
