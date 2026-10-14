@@ -87,18 +87,34 @@ for pid in "${GROUP_PIDS[@]}"; do
   wait "$pid" || status=1
 done
 
+# A step without an exit file either never started (only the typecheck, and
+# only after a failed build) or was killed before run_step could record one.
+declare -a FAILED_STEPS=()
 for step in node-tests component-tests build typecheck; do
   if [[ ! -f "$STEP_LOG_DIR/$step.exit" ]]; then
-    printf '\n----- frontend %s: not run (build failed) -----\n' "$step"
+    if [[ "$step" == typecheck && -f "$STEP_LOG_DIR/build.exit" \
+          && "$(cat "$STEP_LOG_DIR/build.exit")" != 0 ]]; then
+      printf '\n----- frontend %s: not run (build failed) -----\n' "$step"
+      continue
+    fi
+    printf '\n----- frontend %s: no exit status recorded (interrupted) -----\n' "$step"
+    if [[ -f "$STEP_LOG_DIR/$step.log" ]]; then
+      cat "$STEP_LOG_DIR/$step.log"
+    fi
+    FAILED_STEPS+=("$step (interrupted)")
+    status=1
     continue
   fi
   printf '\n----- frontend %s: exit=%s %ss -----\n' "$step" \
     "$(cat "$STEP_LOG_DIR/$step.exit")" "$(cat "$STEP_LOG_DIR/$step.seconds")"
   cat "$STEP_LOG_DIR/$step.log"
+  if [[ "$(cat "$STEP_LOG_DIR/$step.exit")" != 0 ]]; then
+    FAILED_STEPS+=("$step (exit $(cat "$STEP_LOG_DIR/$step.exit"))")
+  fi
 done
-for step in node-tests component-tests build typecheck; do
-  if [[ -f "$STEP_LOG_DIR/$step.exit" && "$(cat "$STEP_LOG_DIR/$step.exit")" != 0 ]]; then
-    printf 'frontend step failed: %s (exit %s)\n' "$step" "$(cat "$STEP_LOG_DIR/$step.exit")" >&2
+for failed in "${FAILED_STEPS[@]:-}"; do
+  if [[ -n "$failed" ]]; then
+    printf 'frontend step failed: %s\n' "$failed" >&2
   fi
 done
 exit "$status"
