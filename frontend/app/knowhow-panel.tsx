@@ -891,6 +891,12 @@ export function KnowhowPanel({
     setCodeModal({ rowId, columnId });
   }
 
+  // 行抽屉的关闭回调身份稳定（S6）：抽屉的 window Esc 监听依赖 [onClose, cellModalOpen]，
+  // 此前这里传内联箭头，面板每渲染一次监听就拆了重挂一次。现在只在 cellModalOpen 翻转时
+  // 重挂——正是叠放弹窗开/关的那次提交，监听仍按「抽屉先、其上的弹窗后」排队，Esc 只关
+  // 最上层的语义不变（抽屉在有弹窗时短路，捕获的仍是那次渲染的 cellModalOpen）。
+  const closeRowDrawer = useCallback(() => setOpenRowId(null), []);
+
   const openRow = detail?.rows.find((row) => row.id === openRowId) ?? null;
   const cellModalRow = cellModal ? detail?.rows.find((row) => row.id === cellModal.rowId) ?? null : null;
   const cellModalColumn = cellModal ? detail?.columns.find((column) => column.id === cellModal.columnId) ?? null : null;
@@ -1064,7 +1070,7 @@ export function KnowhowPanel({
           apiBase={apiBase}
           canEdit={canEdit}
           onEditCell={openCellEdit}
-          onClose={() => setOpenRowId(null)}
+          onClose={closeRowDrawer}
           cellModalOpen={
             cellModal !== null || optimizeRowId !== null || completeRowId !== null || reformatRowId !== null || codeModal !== null
           }
