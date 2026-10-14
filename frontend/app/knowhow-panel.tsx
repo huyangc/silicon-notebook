@@ -327,6 +327,9 @@ export function KnowhowPanel({
   // 避免残留上一个 notebook 的表选中态。
   useEffect(() => {
     detailRequestRef.current += 1; // 作废上一个笔记本 in-flight 的表详情（拉详情 effect 不再因 notebookId 重跑）
+    // 同一次 flush 里路由 / 陈旧引用 effect 的闭包还是上一个笔记本的 detail：同 id 的表被
+    // 重新选回时（见 openTable）别按它判，等新笔记本的 detail 到了再判。
+    supersededDetailRef.current = detail;
     selectedTableIdRef.current = null;
     setSelectedTableId(null);
     setDetail(null);
