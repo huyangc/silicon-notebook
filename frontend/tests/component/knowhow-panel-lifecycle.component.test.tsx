@@ -19,10 +19,10 @@
 //    touches `deleting` (S5: only the DELETE's outcome releases it).
 //  * The row drawer re-registered its Escape listener on every panel render:
 //    fixed in S6 (pinned in knowhow-panel-golden).
-// Found while characterising (also recorded as-is, see the tests): a re-targeted
-// jump routing against the stale detail; a same-table re-targeted jump leaving
-// the grid blank. (A stray detail request on a notebook switch was fixed in S6;
-// see the notebook-switch test.)
+// Found while characterising (also recorded as-is, see the tests): a same-table
+// re-targeted jump leaving the grid blank. (Fixed in S6: a stray detail request
+// on a notebook switch, and a re-targeted jump routing against the previous
+// table's detail; see those tests.)
 //  * The row-code effect (E5) reset its state from an effect whenever no row was
 //    open, costing one extra commit after the drawer closed: fixed in S6 (the
 //    reset now runs at render time; pinned in knowhow-panel-row-code-reset).
@@ -322,14 +322,12 @@ test("closing the jumped-to drawer and then editing a cell does not reopen the d
   ]);
 });
 
-test("quirk: re-targeting a jump while a record table is loaded routes the new row against the stale detail", async () => {
-  // Recorded as-is (found while characterising, not in the plan's list): when
-  // initialTableId/initialRowId change while a record table's detail is loaded,
-  // the routing effect (E8) runs in the same commit as the jump effect (E7) and
-  // still sees the old detail (no anchor column), so it opens the row drawer for
-  // the cited row instead of the concept matrix, and marks the target as routed.
-  // A jump from the list (no detail loaded) opens the matrix as designed — see the
-  // anchor-jump test above. Do not change during the split.
+test("re-targeting a jump from an open record table to an anchor table opens the concept matrix", async () => {
+  // Until S6 the routing effect (E8) ran in the same commit as the jump effect
+  // (E7) and still saw the record table's detail (no anchor column): it opened
+  // the row drawer for a3 instead of the concept matrix, marked the target as
+  // routed, and fetched a3's row code. E8 now waits for the cited table's own
+  // detail, so the outcome matches a jump made from the list.
   const server = suite.server();
   const record = recordDetail();
   const anchor = anchorDetail();
@@ -337,22 +335,24 @@ test("quirk: re-targeting a jump while a record table is loaded routes the new r
   server.on("GET", "/notebooks/nb-1/knowhow/t-rec", { json: wireDetail(record) });
   server.on("GET", "/notebooks/nb-1/knowhow/t-anc", { json: wireDetail(anchor) });
   server.on("GET", "/agent/knowhow/rows/r1", { json: { code: [] } });
-  server.on("GET", "/agent/knowhow/rows/a3", { json: { code: [] } });
   const panel = renderPanel({ initialTableId: "t-rec", initialRowId: "r1" });
   await screen.findByRole("dialog", { name: /^供电异常/ });
 
   panel.update({ ...BASE_PROPS, initialTableId: "t-anc", initialRowId: "a3" });
-  expect(await screen.findByRole("dialog", { name: "电源" })).toBeInTheDocument();
+  const matrix = await screen.findByRole("dialog", { name: "概念 电源" });
   expect(screen.getByRole("heading", { name: "概念表" })).toBeInTheDocument();
+  const highlighted = within(matrix).getAllByRole("columnheader")
+    .filter((header) => header.classList.contains("kh-matrix-branch--hi"));
+  expect(highlighted).toHaveLength(1);
   await settle();
-  expect(screen.queryByRole("dialog", { name: "概念 电源" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("dialog", { name: "电源" })).not.toBeInTheDocument();
   expect(screen.queryByRole("dialog", { name: /^供电异常/ })).not.toBeInTheDocument();
+  // a3's row code is no longer fetched (no row drawer, as in a jump from the list).
   expect(server.log).toEqual([
     { method: "GET", path: "/notebooks/nb-1/knowhow" },
     { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
     { method: "GET", path: "/agent/knowhow/rows/r1" },
     { method: "GET", path: "/notebooks/nb-1/knowhow/t-anc" },
-    { method: "GET", path: "/agent/knowhow/rows/a3" },
   ]);
 });
 
