@@ -1,6 +1,7 @@
 # silicon-notebook 待办（fangan_todo.md）
 
-更新日期：2026-10-07
+更新日期：2026-10-15（技术债整改程序移交：新增「四、技术债整改程序：收官后剩余」，`read_document`
+延后项 (b) 与「历史全局回答 payload 归一」已移入 `fangan_done.md` §59；此前 2026-10-07）
 对照：`silicon_notebook_fangan.md`（产品方案）。已完成项见 `fangan_done.md`；本文件只列**尚未做完**的部分。
 
 > 规则：完成某项后，从本文件移除并补进 `fangan_done.md`（见 `AGENTS.md` 的「Documentation Ownership」）。
@@ -22,6 +23,8 @@
   剩余为用户侧生产动作与各设计稿登记的残余债。
 - 本文件按「近期可动手」→「产品功能」→「长期方向」排列。可直接实现的项已排进
   `docs/superpowers/plans/2026-09-07-todo-closeout.md`（PR-1～PR-5），需拍板的项留在本文件。
+- 2026-10-12 起的「技术债整改程序」已合入的各项见 `fangan_done.md` §59；其登记的残余债集中在
+  本文件第四节。
 
 ---
 
@@ -110,24 +113,10 @@
       上千），大量极短段的库理论上可能逼近 1000。
 - [ ] **问答纠偏规则 12（限定词保真）人工 A/B**：仓库无问答质量评测台，放量前用「点名子部件 /
       周期性 / 方向」三句式各问一次验证；ledger 喂摘要未做。
-- [ ] **`read_document`（PR-A）已登记的延后项**：(a) 清单里**同名**的第二篇
+- [ ] **`read_document`（PR-A）已登记的延后项 (a)**：清单里**同名**的第二篇
       文档无法按标题精确匹配（动作的参数就是标题），只能被跳过并提示模型改读别的文档，尚无第二个
       消歧维度（如序号）；无标题文档已可按花名册占位串「未命名来源」读取，不再属于这一条。
-      (b) **取样通道的 I/O 放大**：`prepare_source_overview` 对每个元素调一次
-      `source_elements_page(offset, limit=1)`，而每次调用含「来源存在性检查 + `COUNT(*)` +
-      单行窗口」三条语句——standard 档一篇取 5 个元素即 15 条语句、加两次 generation 读约 17 条
-      往返，一个 run 读 4 篇约 70 条；exhaustive 档一篇 16 个元素约 50 条，一 run 约 200 条。
-      优化方向二选一：给 `SourceStorePort` 加「按一组 offsets 批量取元素」的原语，
-      或让首页之后的每次取页跳过存在性检查与计数（总数在首页已经拿到，执行体的
-      `stable_count` 只需要最后再核一次）。零锚点路径与目录补摘要通道共享同一份收益。
-      **PR-4（`read_document.depth`）之后口径改为按 run 计**：brief 下每次读取的元素数由字符
-      份额反推、仍是个位数；`depth="thorough"` 把整份剩余预算集中到**单次**读取，单次元素数
-      按档位为 overview 8、standard 22、deep 约 38、thorough 档约 61、exhaustive 受元素池
-      封顶 64。每个元素一次 `source_elements_page(offset, limit=1)`（PG 每次含存在性检查与
-      `COUNT(*)`），单次 thorough 读取约 66–194 次**串行**往返（standard 到 exhaustive）。
-      按 run 计的总量上界没变（两个池本来就是 run 级），但它现在可以落在一次动作、一个
-      trace 步里。**优先级提前**：优先做批量按 offset 取元素的原语，或首页之后跳过存在性
-      检查与计数。
+      （原 (b)「取样通道的 I/O 放大」已由 PR #859 解决，见 `fangan_done.md` §59。）
 - [ ] **reasoning 原文段引用卡重复三次批量读**：`_draft_reasoning_response` 的原文段腿对同一批
       chunk 再做一次 `tier_map` / `citation_source_info` / `knowhow_refs_for`，而合成前的
       `chunk_context` 已经做过（按节路径本来就是 N 次，这里再 +1）。形状与 chunk 模式一致、
@@ -266,12 +255,6 @@
       连带要决定：重新合成后的引用是否再核对一轮、轮次上限、推理轨迹里怎么如实记这一步，以及
       重新合成的回答与第一份回答的引用标记和 `citation_check` 汇总是什么关系（沿用、替换，
       还是两份都保留给读者看）。
-- [ ] **历史全局回答 payload 归一**。归一之前的作业存的是旧形状 `GlobalAskJob.response`，
-      之后是标准 `GlobalAskJob.answer`。今天靠 `models/global_ask.py` 的三个投影函数
-      （`global_answer_text` / `global_answer_citations` / `global_answer_trace`）与历史 SQL 的
-      `COALESCE(answer.answer, response.answer)` 兼容，零迁移；代价是每个新读者都要记得走投影，
-      漏一个就只对一半作业生效。要么写一次性迁移把旧 payload 改写成新形状，要么给这条「只许经
-      投影读」加一道守卫，二选一，目前两者都没有。
 - [ ] **8 库 reasoning 的 `payload_json` 体积观测**。全局作业没有轨迹子表，推理轨迹整份存在
       作业行的单个 JSON 里，`_append_trace` 只靠时间/步数双阈值节流重写。8 个库的 reasoning
       run 轮数与每步 detail 都比单库大，这份 payload 的真实分布没有测过；要先量（p50/p95
@@ -344,6 +327,89 @@
       扩展点（#714）与 arXiv 样例插件的 `search_arxiv` 动作分两个 PR 合入，样例插件现在演示
       三个点。剩余：X7 等仍无真实消费者的点；X10 后端热更用户明确要求「完全热更或不做」；
       niuma 插件 e2e 后的问题回流。
+
+---
+
+## 四、技术债整改程序（2026-10）：收官后剩余
+
+已合入的各项见 `fangan_done.md` §59。以下是该程序执行中登记、刻意未做的残余；每条注明来源 PR。
+
+### 实验开关评估出口
+
+> `backend/app/core/config.py` 里 8 个默认关（或默认 shadow）的实验开关，注释都写「评估后转正或删除，
+> 出口登记在 fangan_todo.md「实验开关评估出口」」，指针指向本节（来源：PR #853）。默认值刻意不动；
+> 本期只补了注释，没有评估。
+
+- [ ] **8 个实验开关逐个评估后转正或删除**：`REPORT_HIGH_RISK_DOWNGRADE_ENABLED`、
+      `KG_RELATION_COMPLETION_MODE`（默认 `off`）、`RETRIEVAL_RRF_ENABLED`、`RELATION_RETRIEVAL_ENABLED`、
+      `SELECTED_SOURCE_GRAPH_ROLLOUT_MODE`（默认 `shadow`）、`PPR_FACT_RERANK_ENABLED`、
+      `KG_CANONICAL_FOLD_ENABLED`、`KG_ABOUT_DOWNWEIGHT_ENABLED`。出口只有两种：有放量证据则改默认值并
+      删开关与旧分支；没有则删开关与旁路代码。评估尚未排期。
+
+### 其它残余
+
+- [ ] **`IGNORABLE_RETIRED_WORKLOADS` 两个版本后移除**（来源：PR #853）：`kg_community_summary` 已退役，
+      `backend/app/services/model_registry.py` 的 `IGNORABLE_RETIRED_WORKLOADS` 让部署文件里残留的
+      绑定行不致拒启，并在每次加载成功时打一行脱敏提示。自 #853 所在版本起再过两个版本，部署文件
+      都已清掉这两行后，删除该名单、对应启动提示与部署文档（`docs/deployment-and-configuration*.md`）里
+      「已退役可忽略 id」一段。回滚到 #853 之前的版本前，运维要把那两行加回，否则旧版严格校验拒启。
+- [ ] **`communities.title` / `summary` / `findings` 三列已无写入方**（来源：PR #853）：社区摘要生成
+      已删除，这三列除 `copy_forward_communities`（翻转事务内把未重建层级的旧行复制进新代）原样带过之外
+      没有写入方。本轮不做迁移（SQLite 与 PostgreSQL 的 `communities` 表都还有这三列）；是否删列留到
+      下一次 `communities` 结构变更时一并决定。
+- [ ] **C6 生产信号：可见性图未设好时计划可能被劫持**（来源：PR #854 / #897 / #908）：测试里的计划钉
+      已改成不依赖可见性图，但生产同形问题没有测量：表的可见性图（visibility map）没设好时，
+      `version_facts` 与 skip-gate 的 count 可能被 `idx_clusters_nb_canonical_name_lower` 劫持
+      （Index Scan + heap Filter，而不是预期的索引）。需要在生产只读库读
+      `pg_class.relallvisible` 对 `relpages`，并对这两条语句抽查 `EXPLAIN`；成立与否未知，
+      不要在没有生产测量的情况下改索引或查询。
+- [ ] **K1（裁决 11/12/13）：删除知识图谱后 5 张派生表行保留到下次重建**（来源：PR #905）：删除作业
+      不再逐批清 `canonical_relations`、`mention_edges`、`concept_comentions`、`communities`、
+      `community_members`（生产规模下排水使删除从 0.87 s 变 33 s），而是写代际哨兵（社区 `-1`、
+      规范关系与提及桥各 `-2`）让读取侧视为没有派生数据，下次重建重写它们。所以删库后这五张表的存储
+      不会立刻回收。若将来需要即时回收，另立「离线/低峰批量清理」方案。**K1 上线之前**做过的删除没有哨兵，其保留行按原样可读到下次
+      重建；对该图再删一次即可闭合，**不做回填**。
+- [ ] **K2：历史深拷贝副本的图片修复先量后做**（来源：PR #847）：#847 只修了此后新做的深拷贝，此前
+      的副本里元素的图片资产 id 可能仍指向源库。先在生产只读库跑 #847 描述里的三条核对 SQL（①元素所在库
+      与资产所在库不同；②副本资产行的 `source_id` 指向别库来源；③能否按 filename/mime/size/created_at/
+      source_id 唯一找回对应副本资产）。①② 为零则无事；不为零且 ③ 基本唯一时，再另开离线修复命令
+      （仿 `backfill-images` 的 CAS 与续跑方式），不放进迁移。
+- [ ] **K3：`bulk_delete` 在非存活库仍可删本人 Memory**（来源：PR #848）：刻意保留——
+      `MemoryService.bulk_delete`（`backend/app/services/memory_service.py`）只看创建者、不看笔记本存活，
+      库卡在 importing 时作者仍能清理自己的 Memory（代码注释已写）。其余 Memory 与自助问答/报告读取
+      已加存活闸；这一条不是漏网，只在此登记，别当 bug 修。
+- [ ] **K5：公开页存量规整的残余形态**（来源：PR #849）：失败章节正文改为固定中性句之后，公开页
+      对仍带异常原文的存量报告，读取失败节原文并按生成器当时写下的字面串精确替换为中性句；
+      只有中性句的报告不读 `sections`。已知残余：存下的原文本身以「中性句 + 「）」+ 空行」开头时，
+      不读 `sections` 就无法与新格式区分。只有异常文本恰好以本产品自己的中文失败文案开头才会出现，
+      代码注释与用例已写明，登记为已知形态，不另行处理。
+- [ ] **S2-A：协议绑定缺口只剩 `NotebookRepository.rerank`**（来源：PR #857 / #862 / #872 / #906）：
+      `scripts/architecture_boundary_baseline.json::facade_protocol_binding_gaps` 起始 44 条
+      （AskStateStorePort 20、McpMemoryRepository 4、NotebookRepository 20），其余已清零；剩下的
+      `rerank` 经 `FacadePropertyContract` → `ModelClientProvider` 继承进 `NotebookRepository`，facade
+      本体不实现它；#906 刻意未动。清零需要另立一项处理这条继承链。
+- [ ] **S2-D：`facade_surface.json` 细节字段漂移无守卫，待拍板**（来源：PR #862）：
+      `test_facade_surface_fixture` 只断言名字集合，`owner` / `consumers` / `patch_targets` /
+      `signature` 的漂移没人看。全量等值前提是先去掉生成器对 `SURFACE_SOURCE_COMMIT` git 历史的依赖
+      （CI 浅克隆拿不到），并且属于全仓 PR 政策变化——每个改消费点或签名的 PR 都要重基线。
+      需要用户裁决要不要上这条政策。
+- [ ] **S2-D：组件层「仅测试调用」成员未清点**（来源：PR #862）：审计脚本只统计 facade，看不到组件层
+      （`AskService.ask_chunk_current` / `ask_reasoning_current`、两端 store 与 `AskStateStorePort` 的
+      `ask_job_status` 等）只被测试调用的成员；登记为一类待清点项。
+- [ ] **S2 批 B 待合入**：退役 10 个 KG 治理 facade 方法（PR #907，开放中）。合入后把它并入
+      `fangan_done.md` §59 的 S2 条目并删除本条；其后仍刻意保留的只测试调用成员是
+      `rebuild_notebook_kg` / `relink_notebook_kg`。
+- [ ] **S7 待合入：Knowhow 面板焦点陷阱**（PR #910，开放中）：面板 `aria-modal` 却没有 `inert`/焦点陷阱，
+      背后的引用按钮可 Tab+Enter（既有无障碍问题，S6 合入后才开工）。#910 合入后并入 `fangan_done.md`
+      §59 的 Knowhow 条目并删除本条。
+- [ ] **G1 本机热门禁 ≈77 s，目标 80 s，余量在被吃掉**（来源：ci60 收官 `ci60-closeout.md`，PR #898）：
+      后端测试每周约增 1000 条，本机门禁每 1000 条约 +4 s，余量只有约 3 s。下一个杠杆是
+      T3-b1——把「全仓 AST 正向扫描」类守卫的真实树扫描挪到每日 G2（约 −3.5 s，约 76 s）；代价是 PR 上
+      违反这些守卫的改动要到次日 G2 才报红，**需要用户裁决**，未获裁决前不动。
+- [ ] **`test_extension_service_launchers.py::test_launcher_forwards_cancellation_while_companions_start`
+      高负载下超时**（来源：K1 第 6 轮验证）：重型本机负载下 4/4 次撞 5 s 子进程超时，干净 master 上
+      26/26 通过，判为锁外压测负载所致而非回归。每天看一眼每日 G2，若在干净 runner 上复现就立项，
+      改成握手/受控时钟判据，别靠放宽超时搪塞。
 
 ---
 
