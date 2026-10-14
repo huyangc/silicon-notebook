@@ -2204,19 +2204,25 @@ def test_deployment_parity_script_reports_discovery_failure_as_exit_two(
     assert str(bad_toml) not in err
 
 
-def test_ui_vocabulary_extra_root_scans_plugin_sources_and_default_is_unchanged(
-    tmp_path, capsys, monkeypatch
-):
-    vocab = _load_script_module(
-        "sn_test_check_ui_vocabulary_extra_root", "check_ui_vocabulary.py"
-    )
+def _minimal_vocab_tree(vocab, tmp_path, monkeypatch):
+    """Point every scan channel of ``check_ui_vocabulary`` at one tiny clean tree.
 
+    ``--extra-root`` only *adds* a scan face on top of the default roots, so the
+    merge logic can be exercised against any default roots. Pointing them at the
+    real repository would re-scan all of ``backend/app`` (the contracts lane's
+    ``scripts/check_ui_vocabulary.py`` already does that once per gate against the
+    real source tree, and is the sole owner of "the shipped tree is clean").
+    Every channel gets one clean site and its non-vacuity floor is lowered to
+    match, so a default run on this tree is a real, passing run of all channels.
+    Returns the (redirected) backend root.
+    """
     frontend_root = tmp_path / "frontend"
     frontend_root.mkdir()
     (frontend_root / "page.tsx").write_text(
         'export default function Page() { return <p>公共知识库</p> }\n',
         encoding="utf-8",
     )
+
     backend_root = tmp_path / "backend"
     backend_root.mkdir()
     (backend_root / "routes.py").write_text(
@@ -2225,15 +2231,75 @@ def test_ui_vocabulary_extra_root_scans_plugin_sources_and_default_is_unchanged(
         '    raise user_error(403, "仅管理员可设置公共知识库")\n',
         encoding="utf-8",
     )
+    # Trace-summary channel: one named module with one clean summary.
+    trace_module = backend_root / "trace.py"
+    trace_module.write_text(
+        'def run(record):\n'
+        '    record(TraceStep(step_type="skip", summary="已跳过本轮复核"))\n',
+        encoding="utf-8",
+    )
+    # Display-field channel: one registered call shape with clean copy. The
+    # display root is the same tree as the backend root, so (as in the real
+    # repository) one AST pass serves both channels.
+    display_module = backend_root / "pipeline.py"
+    display_module.write_text(
+        'def options():\n'
+        '    return IndexingPipelineOption(label="标准方式", description="适合大多数资料")\n',
+        encoding="utf-8",
+    )
+    # Model workload-label channel + shipped service-label channel.
+    label_module = tmp_path / "model_registry.py"
+    label_module.write_text(
+        '_WORKLOAD_LABELS = {"ask": "回答问题"}\n', encoding="utf-8"
+    )
+    roles_module = tmp_path / "migrate_roles.py"
+    roles_module.write_text('ROLE_LABELS = {"general": "通用模型"}\n', encoding="utf-8")
+    template = tmp_path / "model-services.example.toml"
+    template.write_text(
+        '[services.general]\ndisplay_name = "通用模型"\n', encoding="utf-8"
+    )
+    # Release-note channel: an existing but empty directory scans nothing.
+    notes = tmp_path / "release-notes"
+    notes.mkdir()
+
     monkeypatch.setattr(vocab, "FRONTEND_PRODUCTION_DIRS", (frontend_root,))
     monkeypatch.setattr(vocab, "BACKEND_APP", backend_root)
-    monkeypatch.setattr(vocab, "MIN_USER_ERROR_SITES", 1)
+    monkeypatch.setattr(vocab, "DISPLAY_FIELD_ROOT", backend_root)
+    monkeypatch.setattr(vocab, "DISPLAY_FIELD_ANCHOR_MODULES", (display_module,))
+    monkeypatch.setattr(vocab, "KG_BUILD_JOB_STORE_MODULES", ())
+    monkeypatch.setattr(vocab, "TRACE_SUMMARY_MODULES", (trace_module,))
+    monkeypatch.setattr(vocab, "WORKLOAD_LABEL_MODULE", label_module)
+    monkeypatch.setattr(vocab, "SERVICE_LABEL_DICTS", ((roles_module, "ROLE_LABELS"),))
+    monkeypatch.setattr(vocab, "SERVICE_LABEL_TEMPLATE", template)
+    monkeypatch.setattr(vocab, "RELEASE_NOTES_DIR", notes)
+    # The settings module only feeds the env-var allowlist; keep it hermetic.
+    monkeypatch.setattr(vocab, "SETTINGS_MODULE", tmp_path / "no_settings.py")
+    monkeypatch.setattr(vocab, "_ENV_VAR_CACHE", None)
+    for floor in (
+        "MIN_USER_ERROR_SITES",
+        "MIN_TRACE_SUMMARY_SITES",
+        "MIN_DISPLAY_FIELD_SITES",
+        "MIN_WORKLOAD_LABELS",
+    ):
+        monkeypatch.setattr(vocab, floor, 1)
+    monkeypatch.setattr(vocab, "MIN_SERVICE_LABELS", 2)
+    return backend_root
+
+
+def test_ui_vocabulary_extra_root_scans_plugin_sources_and_default_is_unchanged(
+    tmp_path, capsys, monkeypatch
+):
+    vocab = _load_script_module(
+        "sn_test_check_ui_vocabulary_extra_root", "check_ui_vocabulary.py"
+    )
+    # The contracts lane owns the one real-repository scan of every default root;
+    # this test owns argv / ``--extra-root`` semantics, so the default roots are a
+    # minimal clean tree (every channel non-empty) rather than ``backend/app``.
+    _minimal_vocab_tree(vocab, tmp_path, monkeypatch)
 
     # Not passing --extra-root at all (bare main()) must behave identically to
     # explicitly passing an empty argv — both are "no extra roots" and neither
     # reads this process's real sys.argv (which, under pytest, is pytest's own).
-    # Redirect the default roots to a minimal valid project: the contracts lane
-    # owns the one real repository scan, while this test owns argv semantics.
     rc_bare = vocab.main()
     out_bare = capsys.readouterr()
     rc_empty = vocab.main([])
@@ -2241,6 +2307,16 @@ def test_ui_vocabulary_extra_root_scans_plugin_sources_and_default_is_unchanged(
     assert rc_bare == rc_empty == 0
     assert out_bare.out == out_empty.out
     assert out_bare.err == out_empty.err
+    # "Default unchanged": the default run is a clean, complete pass of every
+    # channel on the minimal tree and prints nothing about extra roots.
+    assert out_bare.err == ""
+    assert out_bare.out.startswith("UI vocabulary contract OK: scanned 1 frontend")
+    assert "1 backend user_error() messages" in out_bare.out
+    assert "1 trace summaries" in out_bare.out
+    assert "2 display fields" in out_bare.out  # label + description
+    assert "1 workload labels" in out_bare.out
+    assert "2 model service labels" in out_bare.out
+    assert "extra-root" not in out_bare.out
 
     plugin_root = tmp_path / "plugin_src"
     plugin_root.mkdir()
@@ -2252,10 +2328,37 @@ def test_ui_vocabulary_extra_root_scans_plugin_sources_and_default_is_unchanged(
     )
 
     rc = vocab.main(["--extra-root", str(plugin_root)])
-    err = capsys.readouterr().err
+    captured = capsys.readouterr()
+    err = captured.err
     assert rc == 1
     assert "基准库" in err
     assert "routes.py" in err
+    # The extra root is merged *into* the scan, not a replacement for it: it is
+    # reported as the extra-root channel, the default roots were still scanned,
+    # and it is the only violation.
+    assert "extra-root scan covered 1 user_error() call site(s) across 1 root(s)" in captured.out
+    assert "(extra root)" in err
+    assert err.count("in user_error message") == 1
+    assert "in rendered text" not in err
+    assert "in trace summary" not in err
+    assert "in display field" not in err
+
+    # A clean extra root passes, and its sites are counted separately from the
+    # default roots' (it can neither satisfy nor lower the default-root floor).
+    clean_root = tmp_path / "clean_plugin_src"
+    clean_root.mkdir()
+    (clean_root / "routes.py").write_text(
+        'from app.api.deps import user_error\n\n'
+        'def handler():\n'
+        '    raise user_error(403, "仅管理员可设置公共知识库")\n',
+        encoding="utf-8",
+    )
+    rc_clean = vocab.main(["--extra-root", str(clean_root)])
+    clean = capsys.readouterr()
+    assert rc_clean == 0
+    assert clean.err == ""
+    assert "+ 1 extra-root user_error() messages" in clean.out
+    assert "1 backend user_error() messages" in clean.out
 
 
 def test_ui_contract_generator_sorts_rows():
