@@ -396,12 +396,6 @@
 - [ ] **S2-D：组件层「仅测试调用」成员未清点**（来源：PR #862）：审计脚本只统计 facade，看不到组件层
       （`AskService.ask_chunk_current` / `ask_reasoning_current`、两端 store 与 `AskStateStorePort` 的
       `ask_job_status` 等）只被测试调用的成员；登记为一类待清点项。
-- [ ] **S2 批 B 待合入**：退役 10 个 KG 治理 facade 方法（PR #907，开放中）。合入后把它并入
-      `fangan_done.md` §59 的 S2 条目并删除本条；其后仍刻意保留的只测试调用成员是
-      `rebuild_notebook_kg` / `relink_notebook_kg`。
-- [ ] **S7 待合入：Knowhow 面板焦点陷阱**（PR #910，开放中）：面板 `aria-modal` 却没有 `inert`/焦点陷阱，
-      背后的引用按钮可 Tab+Enter（既有无障碍问题，S6 合入后才开工）。#910 合入后并入 `fangan_done.md`
-      §59 的 Knowhow 条目并删除本条。
 - [ ] **G1 本机热门禁 ≈77 s，目标 80 s，余量在被吃掉**（来源：ci60 收官 `ci60-closeout.md`，PR #898）：
       后端测试每周约增 1000 条，本机门禁每 1000 条约 +4 s，余量只有约 3 s。下一个杠杆是
       T3-b1——把「全仓 AST 正向扫描」类守卫的真实树扫描挪到每日 G2（约 −3.5 s，约 76 s）；代价是 PR 上
