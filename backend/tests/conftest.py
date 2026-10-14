@@ -55,6 +55,11 @@ _PROCESS_LOG_DIR = Path(tempfile.mkdtemp(prefix="silicon-notebook-test-logs-"))
 atexit.register(shutil.rmtree, _PROCESS_LOG_DIR, ignore_errors=True)
 os.environ["EVENT_LOG_DIR"] = str(_PROCESS_LOG_DIR)
 os.environ["LLM_LOG_PATH"] = str(_PROCESS_LOG_DIR / "llm.jsonl")
+# 诊断目录同理：进入 app lifespan 的用例（`with TestClient(app)` 等）会启动诊断运行态，
+# 按 DIAGNOSTICS_DIR 写 runtime.json / thread-dumps.log；不覆盖就落进 checkout 的
+# `.local/diagnostics`，且所有 xdist worker 抢同一份心跳文件。子目录不预建，留给运行态
+# 按 0700 自建。tests/test_diagnostics_dir_isolation.py 守住这条。
+os.environ["DIAGNOSTICS_DIR"] = str(_PROCESS_LOG_DIR / "diagnostics")
 
 # python-igraph imports its drawing adapters lazily on the first graph rebuild,
 # which imports Matplotlib. On macOS, a missing Matplotlib cache invokes the
@@ -67,19 +72,6 @@ os.environ["MPLCONFIGDIR"] = str(_MPLCONFIGDIR)
 _MPLCONFIGDIR.mkdir(parents=True, exist_ok=True)
 if "PYTEST_XDIST_WORKER" not in os.environ:
     import matplotlib.font_manager as _matplotlib_font_manager  # noqa: F401
-
-# 进入 app lifespan 的用例（`with TestClient(app)` 等）会启动诊断运行态，按
-# DIAGNOSTICS_DIR 写 runtime.json / thread-dumps.log；不覆盖就落进 checkout 的
-# `.local/diagnostics`，且所有 xdist worker 抢同一份心跳文件。与日志目录同理在任何
-# 测试模块导入前强制指向本进程的临时目录（子目录留给运行态按 0700 自建）；开发者
-# shell 或 .env 里的值同样不该接收测试写入。
-# tests/test_diagnostics_dir_isolation.py 守住这条。
-import atexit as _atexit
-import tempfile as _tempfile
-
-_PROCESS_DIAGNOSTICS_ROOT = Path(_tempfile.mkdtemp(prefix="silicon-notebook-test-diagnostics-"))
-_atexit.register(shutil.rmtree, _PROCESS_DIAGNOSTICS_ROOT, ignore_errors=True)
-os.environ["DIAGNOSTICS_DIR"] = str(_PROCESS_DIAGNOSTICS_ROOT / "diagnostics")
 
 
 import pytest
