@@ -681,3 +681,144 @@ def test_memory_isolation_requeue_keeps_a_deleted_layer_closed_on_postgres(
         assert state["mention_seq"] == -1, "未删的层照旧置 -1"
         assert runtime.unified_kg.relation_support_rows(
             db, nb, [("K-a000", "supports", "K-at000")]) == []
+        # 复审 r5 P3-1:提及层(未删)照常可读——提及闸看错列时报红。
+        assert {"claim_object_id": "ko-ac000", "concept_canonical_id": "K-a000"} in [
+            dict(r) for r in runtime.unified_kg.mention_rows(db, nb)]
+
+
+def _layer_reads_by_layer_pg(runtime, notebook_id):
+    """Every reader of each kept layer (``tag="a"`` ids), one pooled
+    connection at a time."""
+    uk = runtime.unified_kg
+    with runtime.database.connect() as db:
+        sources = [r["id"] for r in db.execute(
+            "SELECT id FROM sources WHERE notebook_id=%s ORDER BY id", (notebook_id,))]
+        canonical = {
+            "relation_support": [dict(r) for r in uk.relation_support_rows(
+                db, notebook_id, [("K-a000", "supports", "K-at000")])],
+            "edge_support": [tuple(r.values()) for r in uk.edge_support_rows(
+                db, notebook_id).fetchall()],
+            "weak_support": [dict(r) for r in uk.weak_support_relation_rows(
+                db, notebook_id, ["K-a000"], 10, 10)],
+            "weak_support_ceiling": [dict(r) for r in uk.weak_support_relation_rows(
+                db, notebook_id, ["K-a000"], 10, 10, allowed_source_ids=sources)],
+            "weak_support_viewer": [dict(r) for r in uk.weak_support_relation_rows(
+                db, notebook_id, ["K-a000"], 10, 10, viewer_id="viewer-x")],
+        }
+        mention = {"mention": [dict(r) for r in uk.mention_rows(db, notebook_id)]}
+    mention["comention"] = uk.comention_peers(notebook_id, "K-a000", 1, 10)
+    return {"canonical": canonical, "mention": mention}
+
+
+_LAYER_TABLES = {
+    "canonical": ("canonical_relations",),
+    "mention": ("mention_edges", "concept_comentions"),
+}
+
+
+def _seed_derived_layer_pg(runtime, notebook_id, tables):
+    now = normalize_timestamp(runtime.seams.now())
+    statements = {
+        "canonical_relations": (
+            "INSERT INTO canonical_relations (notebook_id,canonical_src,edge_type,"
+            "canonical_tgt,updated_at) VALUES (%s,'K-a000','supports','K-at000',%s) "
+            "ON CONFLICT DO NOTHING", (notebook_id, now)),
+        "mention_edges": (
+            "INSERT INTO mention_edges (notebook_id,claim_object_id,"
+            "concept_canonical_id) VALUES (%s,'ko-ac000','K-a000') "
+            "ON CONFLICT DO NOTHING", (notebook_id,)),
+        "concept_comentions": (
+            "INSERT INTO concept_comentions (notebook_id,canonical_a,canonical_b,"
+            "bridge_claims) VALUES (%s,'K-a000','K-az000',3) ON CONFLICT DO NOTHING",
+            (notebook_id,)),
+    }
+    with runtime.database.write() as db:
+        for table in tables:
+            db.execute(*statements[table])
+
+
+@pytest.mark.postgres_integration
+@pytest.mark.parametrize("failing", ["canonical", "mention"])
+def test_one_layer_failing_leaves_only_that_layer_closed_on_postgres(
+    postgres_repository, monkeypatch, failing,
+):
+    """K1 第 6 轮 PG 孪生(复审 r5 P3-1):删除后第一次重建只有一层重算失败
+    ——失败层的每个读者读不到旧行,成功层的每个读者照常可读。"""
+    runtime = postgres_repository._runtime
+    service = runtime.knowledge_lifecycle
+    nb = postgres_repository.create_notebook(NotebookCreate(name=f"asym-{failing}")).id
+    _seed_graph(postgres_repository, nb, doc_objects=2)
+    _seed_derived(postgres_repository, nb, 3, tag="a")
+    postgres_repository.delete_notebook_kg(nb)
+    for canonical_id, member in (("K-a000", "ko-re-1"), ("K-az000", "ko-re-2"),
+                                 ("K-at000", "ko-re-3")):
+        _reextract_pg(runtime, nb, canonical_id, canonical_id, member, "src-doc")
+    with runtime.database.write() as db:  # a real rebuild re-clusters to the same ids
+        for member, name in (("ko-re-1", "a000"), ("ko-re-2", "az000"),
+                             ("ko-re-3", "at000")):
+            db.execute("UPDATE knowledge_objects SET payload=jsonb_build_object("
+                       "'name', %s::text) WHERE id=%s", (name, member))
+
+    def _boom(notebook_id, force=False):
+        raise RuntimeError(f"{failing} recompute failed")
+
+    monkeypatch.setattr(
+        service, {"canonical": "rebuild_canonical_relations",
+                  "mention": "rebuild_mention_bridge"}[failing], _boom)
+    service.rebuild_unified_kg(nb, force=True)
+
+    rebuilt = "mention" if failing == "canonical" else "canonical"
+    with runtime.database.connect() as db:
+        state = runtime.unified_kg.state_row(db, nb)
+    seq_col = {"canonical": "canonical_rel_seq", "mention": "mention_seq"}
+    assert state[seq_col[failing]] == -2
+    assert state[seq_col[rebuilt]] >= 0
+    _seed_derived_layer_pg(runtime, nb, _LAYER_TABLES[rebuilt])
+
+    reads = _layer_reads_by_layer_pg(runtime, nb)
+    for reader, rows in reads[failing].items():
+        assert not rows, f"{failing} 层重算失败后 {reader} 读回了旧图:{rows}"
+    for reader, rows in reads[rebuilt].items():
+        assert rows, f"{rebuilt} 层已重建,{reader} 却读不到"
+
+
+@pytest.mark.postgres_integration
+@pytest.mark.parametrize("layer", ["canonical", "mention"])
+def test_a_layer_recompute_overtaken_by_a_delete_does_not_reopen_the_layer_on_postgres(
+    postgres_repository, monkeypatch, layer,
+):
+    """K1 第 6 轮 PG 孪生(复审 r5 P3-2):层重算读完种子后删除提交,随后的
+    replace 整事务回滚——层仍 -2、保留行原样、读者读不到。"""
+    from app.repositories.ports import KgDerivedLayerResetRaced
+
+    runtime = postgres_repository._runtime
+    service = runtime.knowledge_lifecycle
+    uk = runtime.unified_kg
+    nb = postgres_repository.create_notebook(NotebookCreate(name=f"race-{layer}")).id
+    _seed_graph(postgres_repository, nb, doc_objects=2)
+    _seed_derived(postgres_repository, nb, 3, tag="a")
+    seed_reader = {"canonical": "canonical_relation_seed_rows",
+                   "mention": "mention_seed_rows"}[layer]
+    original = getattr(uk, seed_reader)
+
+    def _seed_then_delete(db, notebook_id):
+        out = original(db, notebook_id)
+        out = list(out) if layer == "canonical" else (list(out[0]), out[1])
+        postgres_repository.delete_notebook_kg(notebook_id)
+        return out
+
+    monkeypatch.setattr(uk, seed_reader, _seed_then_delete)
+    rebuild = {"canonical": service.rebuild_canonical_relations,
+               "mention": service.rebuild_mention_bridge}[layer]
+    with pytest.raises(KgDerivedLayerResetRaced):
+        rebuild(nb, force=True)
+    monkeypatch.undo()
+
+    with runtime.database.connect() as db:
+        state = uk.state_row(db, nb)
+    assert state["canonical_rel_seq"] == state["mention_seq"] == -2
+    assert int(state["kg_reset_epoch"]) == 1
+    counts = _derived_counts(runtime, nb)
+    for table in _LAYER_TABLES[layer]:
+        assert counts[table] == 3, f"回滚后 {table} 的保留行必须原样:{counts}"
+    assert _layer_reads_pg(runtime, nb) == _EMPTY_LAYERS

@@ -479,7 +479,9 @@ def test_merge_drops_derived_layers_of_a_deleted_graph(tmp_path):
     派生行。合库清掉导入库的状态行(哨兵随之消失),所以这三张派生表的行
     必须按副库的 seq 直接丢掉;-2 以外的笔记本照常拷入。变异钉:去掉这段
     处理 → 旧行在合并库里可读,报红。社区行由既有的指针筛选处理(-1 代
-    没有行,整层丢掉)。"""
+    没有行,整层丢掉)。两层各看各的 seq(K1 第 6 轮,复审 P3-1):只有一层
+    是 -2 的笔记本只丢那一层——列配错(提及两表按 canonical_rel_seq 判)
+    报红。"""
     now = "2026-01-01T00:00:00"
 
     def _mk(path, notebooks):
@@ -489,7 +491,7 @@ def test_merge_drops_derived_layers_of_a_deleted_graph(tmp_path):
             conn.execute(
                 "INSERT INTO users (id,email,display_name,role,created_at,"
                 "updated_at) VALUES ('u','u@x','u','member',?,?)", (now, now))
-            for nb, seq, community_generation in notebooks:
+            for nb, canonical_seq, mention_seq, community_generation in notebooks:
                 conn.execute(
                     "INSERT INTO notebooks (id,name,purpose,primary_domain,status,"
                     "created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
@@ -497,7 +499,8 @@ def test_merge_drops_derived_layers_of_a_deleted_graph(tmp_path):
                 conn.execute(
                     "INSERT INTO unified_kg_state (notebook_id, canonical_rel_seq, "
                     "mention_seq, community_generation, kg_reset_epoch, updated_at) "
-                    "VALUES (?,?,?,?,1,?)", (nb, seq, seq, community_generation, now))
+                    "VALUES (?,?,?,?,1,?)",
+                    (nb, canonical_seq, mention_seq, community_generation, now))
                 conn.execute(
                     "INSERT INTO canonical_relations (notebook_id,canonical_src,"
                     "edge_type,canonical_tgt,updated_at) VALUES (?,'K-a','supports','K-b',?)",
@@ -515,8 +518,11 @@ def test_merge_drops_derived_layers_of_a_deleted_graph(tmp_path):
         conn.close()
 
     primary, secondary, out = tmp_path / "a.db", tmp_path / "b.db", tmp_path / "out.db"
-    _mk(primary, [("nb-main", 3, 0)])
-    _mk(secondary, [("nb-deleted", -2, -1), ("nb-live", 4, 0)])
+    _mk(primary, [("nb-main", 3, 3, 0)])
+    _mk(secondary, [("nb-deleted", -2, -2, -1), ("nb-live", 4, 4, 0),
+                    # one layer rebuilt since the delete, the other not
+                    ("nb-canonical-only", 5, -2, 0),
+                    ("nb-mention-only", -2, 5, 0)])
     merge_dbs.merge_core(out, primary, secondary, shared_base="nb-none")
 
     conn = sqlite3.connect(str(out))
@@ -531,5 +537,11 @@ def test_merge_drops_derived_layers_of_a_deleted_graph(tmp_path):
             assert _count(table, "nb-deleted") == 0, table
             assert _count(table, "nb-live") == 1, table
             assert _count(table, "nb-main") == 1, table
+        assert _count("canonical_relations", "nb-canonical-only") == 1
+        assert _count("mention_edges", "nb-canonical-only") == 0
+        assert _count("concept_comentions", "nb-canonical-only") == 0
+        assert _count("canonical_relations", "nb-mention-only") == 0
+        assert _count("mention_edges", "nb-mention-only") == 1
+        assert _count("concept_comentions", "nb-mention-only") == 1
     finally:
         conn.close()

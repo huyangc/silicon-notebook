@@ -749,7 +749,8 @@ published 指针（`cluster_generation`/`community_generation`，无 state 行 �
    写哨兵 -2，清在飞/催收标记，但不动 counter。删除保留重建派生表到下次重建
    （K1，裁决 11/13）：社区读者按指针读，-1 代没有任何行；canonical 关系、
    提及边、共提读者见该层 seq 为 -2 即视为没有派生数据，只有该层自己的
-   `replace_*` 写入真实 seq 后才重新可读。
+   `replace_*` 写入真实 seq 后才重新可读；这次 seq 写入以层重算入口读到的
+   `kg_reset_epoch` 为条件，纪元已推进（删除在重算途中提交）就整事务回滚。
 2. **预回收**：残代行（∉ {published, 在飞}）按扫描键分页删（各表沿
    notebook 前导索引 keyset，LIMIT 界住扫描行数而非命中数），是唯一回收
    通道（加启动恢复）；退休代刻意保留一整轮给跨翻转在飞读者，稳态容量按

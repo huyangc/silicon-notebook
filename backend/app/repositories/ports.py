@@ -217,6 +217,18 @@ class KgDerivedGenerationPreempted(RuntimeError):
         self.generation = generation
 
 
+class KgDerivedLayerResetRaced(RuntimeError):
+    """K1:一次派生层重算(canonical 关系 / 提及桥接)在入口读完种子之后,
+    知识图谱被删除提交了(``kg_reset_epoch`` 已推进)。``replace_*`` 的
+    seq 写入以入口纪元为条件,不相等就以本异常回滚整个事务——旧图算出的
+    行不落库、该层保持删除哨兵 -2。调用方的 fail-open 照常吞掉。"""
+
+    def __init__(self, notebook_id: str, layer: str) -> None:
+        super().__init__(f"{notebook_id} {layer}: graph deleted during the rebuild")
+        self.notebook_id = notebook_id
+        self.layer = layer
+
+
 class KgMaintenanceAlreadyRunning(RuntimeError):
     """One notebook already has an in-flight KG maintenance pass.
 
@@ -2800,7 +2812,7 @@ class UnifiedKgStorePort(Protocol):
         """
         ...
     @staticmethod
-    def replace_canonical_relations(db: object, notebook_id: str, rows: object, seq: int) -> None: ...
+    def replace_canonical_relations(db: object, notebook_id: str, rows: object, seq: int, *, reset_epoch: int | None = None) -> bool: ...
     # 批 3·W2 §1.3:旧 replace_communities(整表删再插)拆成两半——写新代在
     # 发布事务**外**先行(write_communities_generation,无 DELETE),发布事务
     # 内 copy-forward 未重建的 level(板块 id 重铸+成员行重映射)再翻
@@ -2820,7 +2832,7 @@ class UnifiedKgStorePort(Protocol):
     @staticmethod
     def discard_board_dependent_kg_analysis_artifacts(db: object, notebook_id: str) -> None: ...
     @staticmethod
-    def replace_mention_bridge(db: object, notebook_id: str, edges: object, comention_rows: object, seq: int) -> None: ...
+    def replace_mention_bridge(db: object, notebook_id: str, edges: object, comention_rows: object, seq: int, *, reset_epoch: int | None = None) -> bool: ...
     @staticmethod
     def scratch_vector_rows(db: object, notebook_id: str, run_id: str) -> object: ...
     @staticmethod

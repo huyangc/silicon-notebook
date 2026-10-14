@@ -1644,6 +1644,9 @@ def test_memory_isolation_requeue_keeps_a_deleted_layer_closed(repo):
     with rt.database.connect() as db:
         assert rt.unified_kg.relation_support_rows(
             db, nb.id, [("K-000", "supports", "K-t000")]) == []
+        # 复审 r5 P3-1:提及层(未删)照常可读——提及闸看错列时报红。
+        assert ("ko-c000", "K-000") in [
+            tuple(r) for r in rt.unified_kg.mention_rows(db, nb.id)]
 
 
 def test_a_failing_residue_sweep_does_not_fail_the_delete(repo, monkeypatch):
@@ -1674,3 +1677,192 @@ def test_a_failing_residue_sweep_does_not_fail_the_delete(repo, monkeypatch):
     assert order == ["evict", "sweep"]
     assert {"kind": "kg_delete_residue_sweep_failed", "notebook_id": nb.id,
             "error_type": "ConnectionError"} in events
+
+
+def _name_reextracted(repo, names):
+    """Give re-extracted objects the payload name their canonical id came
+    from, so a real rebuild re-clusters them under the SAME ids (what makes
+    the deleted graph's kept rows a hazard in the first place)."""
+    with repo._runtime.database.write() as db:
+        for member, name in names:
+            db.execute(
+                "UPDATE knowledge_objects SET payload=json_object('name', ?) WHERE id=?",
+                (name, member))
+
+
+def _layer_reads_by_layer(repo, notebook_id):
+    """Every reader of each kept layer, by the old ids: the canonical-relation
+    readers (relation/edge support and all three weak-support statement
+    shapes) and the mention readers (mention edges, co-mention peers)."""
+    rt = repo._runtime
+    uk = rt.unified_kg
+    with rt.database.connect() as db:
+        sources = [r[0] for r in db.execute(
+            "SELECT id FROM sources WHERE notebook_id=? ORDER BY id", (notebook_id,))]
+        canonical = {
+            "relation_support": [tuple(r) for r in uk.relation_support_rows(
+                db, notebook_id, [("K-000", "supports", "K-t000")])],
+            "edge_support": [tuple(r) for r in uk.edge_support_rows(db, notebook_id)],
+            "weak_support": [tuple(r) for r in uk.weak_support_relation_rows(
+                db, notebook_id, ["K-000"], 10, 10)],
+            "weak_support_ceiling": [tuple(r) for r in uk.weak_support_relation_rows(
+                db, notebook_id, ["K-000"], 10, 10, allowed_source_ids=sources)],
+            "weak_support_viewer": [tuple(r) for r in uk.weak_support_relation_rows(
+                db, notebook_id, ["K-000"], 10, 10, viewer_id="viewer-x")],
+        }
+        mention = {"mention": [tuple(r) for r in uk.mention_rows(db, notebook_id)]}
+    mention["comention"] = uk.comention_peers(notebook_id, "K-000", 1, 10)
+    return {"canonical": canonical, "mention": mention}
+
+
+_LAYER_TABLES = {
+    "canonical": ("canonical_relations",),
+    "mention": ("mention_edges", "concept_comentions"),
+}
+
+
+@pytest.mark.parametrize("failing", ["canonical", "mention"])
+def test_one_layer_failing_leaves_only_that_layer_closed(repo, monkeypatch, failing):
+    """K1 第 6 轮(复审 r5 P3-1):删除后第一次重建里只有一层重算失败——
+    失败层的每个读者仍读不到旧行,成功层的每个读者照常可读(两层各看各的
+    seq)。变异钉:提及闸 / weak_support 闸看错列、canonical 重写顺带打开
+    提及层 → 失败层读回旧图,报红;重写不写本层 seq → 成功层读不到,报红。"""
+    rt = repo._runtime
+    service = rt.knowledge_lifecycle
+    nb = repo.create_notebook(NotebookCreate(name=f"asym-{failing}"))
+    _seed_graph(repo, nb.id, doc_objects=2, clusters=True)
+    _seed_derived(repo, nb.id, 3, generation=0, prefix="")
+    repo.delete_notebook_kg(nb.id)
+    for canonical_id, member in (("K-000", "ko-re-1"), ("K-z000", "ko-re-2"),
+                                 ("K-t000", "ko-re-3")):
+        _reextract(repo, nb.id, canonical_id, canonical_id, member, "src-doc")
+    _name_reextracted(repo, [("ko-re-1", "000"), ("ko-re-2", "z000"),
+                             ("ko-re-3", "t000")])
+
+    def _boom(notebook_id, force=False):
+        raise RuntimeError(f"{failing} recompute failed")
+
+    monkeypatch.setattr(
+        service, {"canonical": "rebuild_canonical_relations",
+                  "mention": "rebuild_mention_bridge"}[failing], _boom)
+    service.rebuild_unified_kg(nb.id, force=True)
+
+    rebuilt = "mention" if failing == "canonical" else "canonical"
+    with rt.database.connect() as db:
+        state = rt.unified_kg.state_row(db, nb.id)
+    seq_col = {"canonical": "canonical_rel_seq", "mention": "mention_seq"}
+    assert state[seq_col[failing]] == -2
+    assert state[seq_col[rebuilt]] >= 0
+    # The rebuilt layer was rewritten from the new graph (no relations or
+    # claims yet): put the old-shaped rows back into it only; the failed
+    # layer still holds the deleted graph's rows.
+    _seed_derived_layer(repo, nb.id, _LAYER_TABLES[rebuilt])
+
+    reads = _layer_reads_by_layer(repo, nb.id)
+    for reader, rows in reads[failing].items():
+        assert not rows, f"{failing} 层重算失败后 {reader} 读回了旧图:{rows}"
+    for reader, rows in reads[rebuilt].items():
+        assert rows, f"{rebuilt} 层已重建,{reader} 却读不到"
+
+
+def _seed_derived_layer(repo, notebook_id, tables):
+    now = _now()
+    statements = {
+        "canonical_relations": (
+            "INSERT OR IGNORE INTO canonical_relations (notebook_id,canonical_src,"
+            "edge_type,canonical_tgt,updated_at) VALUES (?,'K-000','supports','K-t000',?)",
+            (notebook_id, now)),
+        "mention_edges": (
+            "INSERT OR IGNORE INTO mention_edges (notebook_id,claim_object_id,"
+            "concept_canonical_id) VALUES (?,'ko-c000','K-000')", (notebook_id,)),
+        "concept_comentions": (
+            "INSERT OR IGNORE INTO concept_comentions (notebook_id,canonical_a,"
+            "canonical_b,bridge_claims) VALUES (?,'K-000','K-z000',3)", (notebook_id,)),
+    }
+    with repo._runtime.database.write() as db:
+        for table in tables:
+            db.execute(*statements[table])
+
+
+@pytest.mark.parametrize("layer", ["canonical", "mention"])
+def test_a_layer_recompute_overtaken_by_a_delete_does_not_reopen_the_layer(
+    repo, monkeypatch, layer,
+):
+    """K1 第 6 轮(复审 r5 P3-2):离线进程的层重算读完种子之后,删除提交了
+    (纪元推进、本层写 -2)。重算随后的 replace 必须整事务回滚——不写入旧图
+    算出的行、本层仍是 -2、保留的旧行一行不少。变异钉:replace 的 seq 写去掉
+    纪元条件 → 层以旧 seq 重开,报红。"""
+    from app.repositories.ports import KgDerivedLayerResetRaced
+
+    rt = repo._runtime
+    service = rt.knowledge_lifecycle
+    uk = rt.unified_kg
+    nb = repo.create_notebook(NotebookCreate(name=f"race-{layer}"))
+    _seed_graph(repo, nb.id, doc_objects=2, clusters=True)
+    _seed_derived(repo, nb.id, 3, generation=0, prefix="")
+    seed_reader = {"canonical": "canonical_relation_seed_rows",
+                   "mention": "mention_seed_rows"}[layer]
+    original = getattr(uk, seed_reader)
+
+    def _seed_then_delete(db, notebook_id):
+        out = original(db, notebook_id)
+        if layer == "canonical":
+            out = list(out)
+        else:
+            out = (list(out[0]), out[1])
+        repo.delete_notebook_kg(notebook_id)  # commits while we hold the seeds
+        return out
+
+    monkeypatch.setattr(uk, seed_reader, _seed_then_delete)
+    rebuild = {"canonical": service.rebuild_canonical_relations,
+               "mention": service.rebuild_mention_bridge}[layer]
+    with pytest.raises(KgDerivedLayerResetRaced):
+        rebuild(nb.id, force=True)
+    monkeypatch.undo()
+
+    with rt.database.connect() as db:
+        state = uk.state_row(db, nb.id)
+    assert state["canonical_rel_seq"] == state["mention_seq"] == -2
+    assert int(state["kg_reset_epoch"]) == 1
+    counts = _derived_counts(repo, nb.id)
+    for table in _LAYER_TABLES[layer]:
+        assert counts[table] == 3, f"回滚后 {table} 的保留行必须原样:{counts}"
+    assert _layer_reads(repo, nb.id) == _EMPTY_LAYERS
+
+
+def test_kg_analysis_reports_a_deleted_layer_as_never_built():
+    """K1:分析页把删除哨兵 -2 报成「从没建过」的 -1(前端显示 ``#seq``)。
+    变异钉:去掉钳制 → 报 -2,报红。"""
+    from app.services.kg_analysis import _state_view
+
+    row = {"kg_mutation_seq": 4, "community_seq": -1, "cluster_mutation_seq": 2,
+           "canonical_rel_seq": -2, "dirty": 1, "last_rebuild_at": "",
+           "object_count": 0, "relation_count": 0, "cluster_count": 0}
+    view = _state_view(row)
+    assert view.present is True
+    assert view.canonical_rel_seq == -1
+    assert _state_view({**row, "canonical_rel_seq": 7}).canonical_rel_seq == 7
+
+
+def test_edge_support_map_does_not_replay_a_deleted_graph_at_the_same_seq(repo):
+    """K1(复审 r5 存疑转修):canonical_rel_seq 在删除后从头再来,重抽 + 重建
+    可以落回删除前的同一个值;整表 edge-support 缓存的版本键因此带上删除
+    纪元。删除前缓存了 seq K 的旧图,删除后同为 K 的新图必须读到新值。
+    变异钉:键去掉纪元 → 返回旧缓存,报红。"""
+    rt = repo._runtime
+    uk = rt.unified_kg
+    graph = repo.retrieval.graph
+    nb = repo.create_notebook(NotebookCreate(name="edge-support-key"))
+    _seed_graph(repo, nb.id, doc_objects=2)
+    with rt.database.write() as db:
+        uk.replace_canonical_relations(
+            db, nb.id, [(nb.id, "K-old", "supports", "K-oldt", 4, 2, "[]", _now())], 0)
+    assert graph._edge_support_map(nb.id) == {("K-old", "supports", "K-oldt"): (4, 2)}
+
+    repo.delete_notebook_kg(nb.id)
+    with rt.database.write() as db:
+        assert uk.replace_canonical_relations(
+            db, nb.id, [(nb.id, "K-new", "supports", "K-newt", 1, 1, "[]", _now())], 0,
+            reset_epoch=1)
+    assert graph._edge_support_map(nb.id) == {("K-new", "supports", "K-newt"): (1, 1)}
+
