@@ -447,6 +447,11 @@ export function KnowhowPanel({
     setActionError(null);
     try {
       await deleteKnowhowTable(notebookId, selectedTableId);
+      // 删除落地才解禁：与 backToList() 写在同一个同步块里，React 自动批处理成一次
+      // 提交，网格离场与解禁同时发生，中间不会出现可点的「确认删除」。不放进
+      // backToList()/openTable：删除进行中「返回」再开表时，按钮必须仍禁用到请求
+      // 落地，否则可以对同一张表再发一次删除。
+      setDeleting(false);
       backToList();
       knowhowTableList.loadTables();
     } catch {
