@@ -26,6 +26,8 @@ from __future__ import annotations
 import json
 import time
 
+import pytest
+
 from app.services.knowhow import textops
 from app.services.knowhow.projection import _cell_ko_id
 from app.services.retrieval import _payload_text
@@ -43,6 +45,11 @@ from tests.test_knowhow_retrieval import (  # noqa: F401  (client/imported are f
     client,
     imported,
 )
+
+# One worker runs the whole file, so the imported world (a private copy of the
+# one test_knowhow_retrieval builds) is built once for it instead of once per
+# worker that happens to get one of these tests.
+pytestmark = pytest.mark.xdist_group(name="knowhow_kg_node_retrieval_world")
 
 # The column whose 过冲 row cell carries UNIQUE_TERM (DATA_ROWS[0][3]).
 FIX_COLUMN = "修复方法"

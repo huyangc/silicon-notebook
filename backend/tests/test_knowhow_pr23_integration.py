@@ -37,27 +37,40 @@ from app.models.schemas import AskRequest, Evidence
 from app.services.embedding import FakeEmbedder
 from app.services.retrieval import RetrievedKnowledge
 from tests.model_testkit import bind_all_embedding_clients
+from tests.test_knowhow_retrieval import quiesce_knowhow_world
+from tests.world_templates import world_env, world_template
 
 EMBED_DIM = 16
 
+# One worker runs the whole file, so the edited world is built once for it
+# instead of once per worker that happens to get one of these tests.
+pytestmark = pytest.mark.xdist_group(name="knowhow_pr23_integration_world")
 
-@pytest.fixture
-def client(tmp_path, monkeypatch):
+
+# The environment the app runs under here. A world template is built and
+# reopened under exactly this (``world_template(..., env=...)`` is part of the
+# template's identity), and the per-test fixture applies the same values.
+WORLD_ENV = {
+    "EVENT_LOG_ENABLED": "false",
+    "LLM_LOG_ENABLED": "false",
+    "EMBED_DIM": str(EMBED_DIM),
+    **{
+        key: ""
+        for key in (
+            "OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
+            "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL",
+        )
+    },
+}
+
+
+def _open_app_client() -> TestClient:
     """The app's own repository singleton with a fake embedder installed —
     needed so a background projection job (driven by the REAL
     ProjectionScheduler, which the editing HTTP endpoints call) produces
     real vectors, and so this file's own direct `_retrieve_chunks`/
     `ask_chunk` calls share that same fake embedder and in-process caches
     (mirrors test_knowhow_retrieval.py's own fixture rationale exactly)."""
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
-    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
-    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
-    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_DIM", str(EMBED_DIM))
-    for _k in ("OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
-               "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
-        monkeypatch.setenv(_k, "")
-
     from app.api.knowhow_routes import repository
     from app.main import app
 
@@ -65,6 +78,31 @@ def client(tmp_path, monkeypatch):
     c._repo = repository()  # type: ignore[attr-defined]
     bind_all_embedding_clients(c._repo, FakeEmbedder(dim=EMBED_DIM))
     assert c._repo.configured("knowhow_embedding")
+    return c
+
+
+@pytest.fixture
+def client(request, tmp_path, tmp_path_factory, monkeypatch):
+    """``_open_app_client()`` on a private copy of the edited world (built once
+    per process, see ``_build_edited_world``) for a test that requests
+    ``edited_env``; on a fresh database otherwise. The wizard-created table
+    and its projection happen BEFORE any test touches the data, so a copy is
+    the same world each test used to build itself."""
+    if "edited_env" not in request.fixturenames:
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+        monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+        for name, value in WORLD_ENV.items():
+            monkeypatch.setenv(name, value)
+        return _open_app_client()
+    template = world_template(
+        tmp_path_factory, "knowhow-pr23-edited",
+        _build_edited_world, _reopen_edited_world, env=WORLD_ENV,
+    )
+    root, payload = template.materialize(tmp_path)
+    for name, value in {**WORLD_ENV, **world_env(root)}.items():
+        monkeypatch.setenv(name, value)
+    c = _open_app_client()
+    c._world_payload = payload  # type: ignore[attr-defined]
     return c
 
 
@@ -134,13 +172,13 @@ def _chunk_count(repo, hidden_source_id) -> int:
         ).fetchone()["n"]
 
 
-@pytest.fixture
-def edited_env(client):
+def _build_edited_world(root) -> dict:
     """Wizard-created (NOT imported) table + one row with real content in
     every cell, fully projected via the REAL ProjectionScheduler. Shared
     setup for scenarios (a)/(b)/(d)/(e), each of which independently mutates
-    or reads from it without interfering with the others (fresh DB per
-    test function)."""
+    or reads from it without interfering with the others (each gets its own
+    copy of the world)."""
+    client = _open_app_client()
     headers = _login(client, "a00000801")
     nb = _mk_notebook(client, headers)
     table = _create_table(client, headers, nb)
@@ -153,11 +191,22 @@ def edited_env(client):
     detail = _poll_all_rows_settled(client, headers, nb, table["id"])
     assert detail is not None and detail["rows"], detail
     assert all(r["projection_status"] == "synced" for r in detail["rows"]), detail
+    quiesce_knowhow_world()
     return {
         "headers": headers, "nb": nb, "table": table, "row": row,
         "anchor_id": anchor_id, "procedure_id": procedure_id, "entity_id": entity_id,
         "hidden_source_id": detail["hidden_source_id"],
     }
+
+
+def _reopen_edited_world(root):
+    return _open_app_client()._repo
+
+
+@pytest.fixture
+def edited_env(client):
+    """The edited world of ``client`` (see ``client``)."""
+    return client._world_payload
 
 
 # ---------------------------------------------------------------------------
