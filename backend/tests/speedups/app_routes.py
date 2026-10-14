@@ -29,8 +29,9 @@ else takes the real ``include_router`` unchanged:
   is a ``FastAPI`` whose ``.router`` is the target) with no router-level
   prefix, tags, dependencies, responses or callbacks of its own;
 * the source router is one of the ``APIRouter`` objects bound as globals of
-  ``sys.modules["app.main"]`` right now (the per-call onboarding router and the
-  deployment-plugin routers never are);
+  ``sys.modules["app.main"]`` right now (the onboarding router and the
+  deployment-plugin routers are not globals there, so they always take the
+  real path, even when a plugin factory hands back the same router twice);
 * only ``prefix`` and ``dependencies`` differ from ``include_router``'s
   defaults;
 * the source router has no ``on_startup``/``on_shutdown`` handlers and every
@@ -39,6 +40,12 @@ else takes the real ``include_router`` unchanged:
   every attribute ``include_router`` reads from them still compares equal to
   the snapshot taken then (so a test that adds, removes or edits a route in
   place gets a fresh real build).
+
+One input is invisible to the template: a real build re-resolves string
+annotations (``from __future__ import annotations``) against the endpoint
+module's globals, a template keeps the first resolution. Tests therefore may not
+patch type-like names on the ``app.api`` modules that define endpoints; a
+source guard in the pin file enforces that.
 
 Pinned by ``tests/test_app_route_templates.py``. Off switches:
 ``SILICON_NOTEBOOK_TEST_ROUTE_TEMPLATES=0`` (never install) and the
