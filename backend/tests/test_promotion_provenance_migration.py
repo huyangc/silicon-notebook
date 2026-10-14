@@ -29,8 +29,6 @@ from app.repositories.sqlite.migrations import SCHEMA_VERSION, SqliteMigrator
 from app.services.sqlite_repository import SQLiteRepository
 from tests import promotion_provenance_migration_cases as cases
 
-pytestmark = [pytest.mark.legacy_upgrade_contract, pytest.mark.real_sqlite_migration]
-
 PG_MIGRATION = (
     Path(__file__).resolve().parents[1]
     / "app" / "repositories" / "postgres" / "migrations"
@@ -62,6 +60,8 @@ def _seed_at_v87(database) -> None:
         db.execute("PRAGMA user_version = 87")
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_upgrade_rewrites_foreign_entries_to_the_librarys_own_provenance(repo):
     database = repo._runtime.database
     _seed_at_v87(database)
@@ -128,6 +128,8 @@ def test_the_frozen_v88_rule_equals_the_live_planner(evidence, memory):
     )
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_rerun_changes_nothing(repo):
     database = repo._runtime.database
     _seed_at_v87(database)
@@ -138,6 +140,8 @@ def test_rerun_changes_nothing(repo):
     assert _snapshot(database) == after
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_migration_logs_counts_only(repo, caplog):
     database = repo._runtime.database
     _seed_at_v87(database)
@@ -151,6 +155,8 @@ def test_migration_logs_counts_only(repo, caplog):
     ]
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_fresh_database_is_at_v88_and_v86_migrates_both(repo):
     database = repo._runtime.database
     assert SCHEMA_VERSION >= 88

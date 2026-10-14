@@ -24,8 +24,6 @@ from app.repositories.sqlite import migrations as migrations_module
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.migrations import SCHEMA_VERSION, SqliteMigrator
 
-pytestmark = [pytest.mark.legacy_upgrade_contract, pytest.mark.real_sqlite_migration]
-
 
 def _fresh_migrated_database(tmp_path: Path) -> tuple[SqliteDatabase, Settings]:
     db_path = tmp_path / "migrations.db"
@@ -40,6 +38,7 @@ def _set_user_version(database: SqliteDatabase, version: int) -> None:
         db.execute(f"PRAGMA user_version = {int(version)}")
 
 
+@pytest.mark.real_sqlite_migration
 def test_migrate_returns_empty_list_when_database_is_exactly_current(tmp_path):
     """Equality must keep short-circuiting: no migrations re-run, no raise."""
     database, settings = _fresh_migrated_database(tmp_path)
@@ -51,6 +50,7 @@ def test_migrate_returns_empty_list_when_database_is_exactly_current(tmp_path):
         database.close_local()
 
 
+@pytest.mark.real_sqlite_migration
 def test_migrate_raises_when_database_is_stamped_newer_than_schema_version(
     tmp_path,
 ):
@@ -112,6 +112,8 @@ def _v77_database(tmp_path, monkeypatch):
     return settings, database
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_v78_recovers_committed_schema_with_v77_stamp_without_data_loss(
     tmp_path, monkeypatch
 ):
@@ -157,6 +159,8 @@ def test_v78_recovers_committed_schema_with_v77_stamp_without_data_loss(
     reopened.close_local()
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_v78_schema_and_version_stamp_roll_back_together_on_interruption(
     tmp_path, monkeypatch
 ):
@@ -226,6 +230,8 @@ def test_v78_schema_and_version_stamp_roll_back_together_on_interruption(
     database.close_local()
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_v92_drops_the_staged_auth_schema_and_keeps_credentials(tmp_path):
     """A v91 database (forged from the current schema with rollback_v92) loses
     the staged-auth tables, users.local_login_name and the audit grant
@@ -287,6 +293,8 @@ def test_v92_drops_the_staged_auth_schema_and_keeps_credentials(tmp_path):
     database.close_local()
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_v92_refuses_usernames_that_differ_only_by_case(tmp_path):
     """idx_users_username_lower keeps the case-insensitive login lookup to one
     row; a database already holding a case clash fails the upgrade with the
@@ -314,6 +322,7 @@ def test_v92_refuses_usernames_that_differ_only_by_case(tmp_path):
     database.close_local()
 
 
+@pytest.mark.real_sqlite_migration
 def test_v93_adds_the_nullable_profile_deleted_at_without_touching_rows(tmp_path):
     """Agent Profile soft delete is a new nullable column: an existing Profile
     comes through listed (``deleted_at`` NULL) and a second run is a no-op."""

@@ -16,8 +16,6 @@ from app.core.config import Settings
 from app.repositories.sqlite.migrations import SCHEMA_VERSION, SqliteMigrator
 from app.services.sqlite_repository import SQLiteRepository
 
-pytestmark = [pytest.mark.legacy_upgrade_contract, pytest.mark.real_sqlite_migration]
-
 PG_MIGRATION = (
     Path(__file__).resolve().parents[1]
     / "app" / "repositories" / "postgres" / "migrations"
@@ -52,6 +50,8 @@ def test_fresh_database_has_the_output_column_on_both_tables(repo):
             assert _output_column(db, table) == ("TEXT", 1, "'answer'")
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_v89_rows_stay_answers_and_rerun_changes_nothing(repo):
     database = repo._runtime.database
     with database.write() as db:

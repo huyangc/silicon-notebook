@@ -24,8 +24,6 @@ from app.repositories.sqlite.migrations import SCHEMA_VERSION, SqliteMigrator
 from app.services.sqlite_repository import SQLiteRepository
 from tests import agent_token_tiers_migration_cases as cases
 
-pytestmark = [pytest.mark.legacy_upgrade_contract, pytest.mark.real_sqlite_migration]
-
 PG_MIGRATION = (
     Path(__file__).resolve().parents[1]
     / "app" / "repositories" / "postgres" / "migrations"
@@ -58,6 +56,8 @@ def _snapshot(database) -> dict:
         return cases.snapshot(db)
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_upgrade_rewrites_every_token_to_tiers(repo):
     database = repo._runtime.database
     _seed_at_v88(database)
@@ -66,6 +66,8 @@ def test_upgrade_rewrites_every_token_to_tiers(repo):
     cases.assert_migrated(_snapshot(database))
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_rerun_changes_nothing(repo):
     database = repo._runtime.database
     _seed_at_v88(database)
@@ -76,6 +78,8 @@ def test_rerun_changes_nothing(repo):
     assert _snapshot(database) == after
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_migration_logs_counts_only(repo, caplog):
     database = repo._runtime.database
     _seed_at_v88(database)

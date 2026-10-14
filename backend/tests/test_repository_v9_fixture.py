@@ -9,8 +9,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.legacy_upgrade_contract
-
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "backend" / "tests" / "fixtures"
@@ -161,6 +159,7 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     assert snapshot["ask_metadata"]["jobs"]
 
 
+@pytest.mark.legacy_upgrade_contract
 def test_v9_fixture_replays_through_the_current_repository(tmp_path):
     spec = importlib.util.spec_from_file_location("repository_v9_fixture_generator", GENERATOR)
     assert spec is not None and spec.loader is not None
