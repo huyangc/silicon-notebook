@@ -264,8 +264,9 @@ def test_offline_archive_ships_executable_service_runtime_without_a_real_build(l
         "extension_services.sh", "extension_services.py", "extension_service_runtime.py",
         "extension_service_worker.py", "check_cli_extensions.py", "python_env.py",
     )
-    for name in (*helpers, "pack.sh", "migrate_legacy_model_env.py"):
+    for name in (*helpers, "pack.sh", "node_version.sh", "migrate_legacy_model_env.py"):
         shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+    shutil.copy2(ROOT / ".nvmrc", root / ".nvmrc")
     shutil.copytree(ROOT / "packaging", root / "packaging")
     for name in (".env.example", "model-services.example.toml"):
         shutil.copy2(ROOT / name, root / name)
@@ -276,13 +277,13 @@ def test_offline_archive_ships_executable_service_runtime_without_a_real_build(l
         (root / "frontend/.next" / directory).mkdir(parents=True)
     (root / "frontend/.next/standalone/server.js").write_text("// prebuilt fixture\n")
     executable(root / "fake-bin/npm", "#!/bin/sh\nexit 0\n")
-    executable(root / "fake-bin/node", "#!/bin/sh\necho v22.0.0\n")
+    executable(root / "fake-bin/node", "#!/bin/sh\necho v26.0.0\n")
     node_tar = root / "node-fixture.tar"
     with tarfile.open(node_tar, "w") as archive:
         archive.add(root / "fake-bin/node", arcname="node-fixture/bin/node")
     result = run(root, {
         **env, "PACK_PYTHON": sys.executable, "VERSION": "fixture",
-        "NODE_TARBALL": str(node_tar), "NODE_VERSION": "v22.0.0", "SKIP_WHEELHOUSE": "1",
+        "NODE_TARBALL": str(node_tar), "NODE_VERSION": "v26.0.0", "SKIP_WHEELHOUSE": "1",
     }, "scripts/pack.sh")
     assert result.returncode == 0, result.stdout + result.stderr
     [release] = (root / "dist").glob("silicon_notebook_*.tar.gz")

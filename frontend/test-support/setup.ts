@@ -8,7 +8,7 @@ import { afterEach } from "vitest";
 // Node 那份内建 getter 胜出、jsdom 自己那份**根本没被装上**:`"localStorage" in window`
 // 为真、描述符是 get/set,取值却是 undefined,`delete` 掉也不会从原型链上露出来
 // (原型是普通 Object)。结果是任何读 `localStorage` 的组件在 Node 26 上当场抛
-// 「Cannot read properties of undefined」,而同一份代码在 CI 钉的 Node 22 上全绿——
+// 「Cannot read properties of undefined」,而同一份代码在当时 CI 钉的 Node 22 上全绿——
 // 一个只在开发者本机现形、CI 永远看不到的静默分歧。
 //
 // 修法是补一份**真的** jsdom Storage,而不是手搓 polyfill:配额、`key()`/`length`
@@ -19,8 +19,8 @@ import { afterEach } from "vitest";
 // 取到对象后立刻把 iframe 摘掉——Storage 挂在那个 realm 的存储区上,摘掉后读写与
 // `instanceof` 都照常(实测过),所以文档树里不留任何残留节点。
 //
-// 判据是「取值为 undefined」而不是 Node 版本号,所以 Node 22 上这段整个不执行、行为
-// 逐字不变;将来 Node 把内建 Storage 修成默认可用,它也会自动让路。属性写成
+// 判据是「取值为 undefined」而不是 Node 版本号(仓库现只支持 .nvmrc 钉的一个大版本),
+// 内建 Storage 可用时这段整个不执行、行为逐字不变;将来 Node 把内建 Storage 修成默认可用,它也会自动让路。属性写成
 // configurable + writable,`vi.stubGlobal` 与 `vi.spyOn(...)` 照常能改。
 function ensureWebStorage(): void {
   const target = globalThis as unknown as Record<string, unknown>;

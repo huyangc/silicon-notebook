@@ -20,11 +20,40 @@ export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
 # every module it imports before its first test.
 unset PYTHONDONTWRITEBYTECODE
 
+declare -a LANES=(contracts backend frontend)
+
+# With no arguments check.sh is all of G1. `--lane <name>` (repeatable) runs
+# only the named lanes, still concurrently, in LANES order: CI gives the
+# backend lane a job of its own and runs the other two together with
+# `--lane contracts --lane frontend`.
+declare -a SELECTED_LANES=()
+while (( $# )); do
+  case "$1" in
+    --lane)
+      if (( $# < 2 )) || [[ " ${LANES[*]} " != *" $2 "* ]]; then
+        printf 'Expected one of [%s] after --lane\n' "${LANES[*]}" >&2
+        exit 2
+      fi
+      SELECTED_LANES+=("$2")
+      shift 2
+      ;;
+    *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+if (( ${#SELECTED_LANES[@]} )); then
+  declare -a RUN_LANES=()
+  for lane in "${LANES[@]}"; do
+    if [[ " ${SELECTED_LANES[*]} " == *" $lane "* ]]; then
+      RUN_LANES+=("$lane")
+    fi
+  done
+  LANES=("${RUN_LANES[@]}")
+fi
+
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/silicon-check.XXXXXX")"
 GATE_START_SECONDS=$SECONDS
 GATE_STARTED_AT="$(date +%s)"
 declare -a PIDS=()
-declare -a LANES=(contracts backend frontend)
 
 cleanup() {
   local status=$?

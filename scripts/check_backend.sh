@@ -16,40 +16,9 @@ record_timing() {
 }
 trap record_timing EXIT
 
-# Explicit arguments stay on this pytest invocation. Exported shard settings
-# would incorrectly narrow collect-only/sub-pytest contracts launched by tests.
-SHARD_INDEX=""
-SHARD_COUNT=""
-while (( $# )); do
-  case "$1" in
-    --shard-index|--shard-count)
-      option="$1"
-      if (( $# < 2 )) || [[ ! "$2" =~ ^(0|[1-9][0-9]*)$ ]]; then
-        printf 'Expected an integer after %s\n' "$option" >&2
-        exit 2
-      fi
-      if [[ "$option" == --shard-index && -z "$SHARD_INDEX" ]]; then
-        SHARD_INDEX="$2"
-      elif [[ "$option" == --shard-count && -z "$SHARD_COUNT" ]]; then
-        SHARD_COUNT="$2"
-      else
-        printf 'Duplicate option: %s\n' "$option" >&2
-        exit 2
-      fi
-      shift 2
-      ;;
-    *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
-  esac
-done
-if [[ -n "$SHARD_INDEX" && -z "$SHARD_COUNT" || -z "$SHARD_INDEX" && -n "$SHARD_COUNT" ]]; then
-  printf '%s\n' '--shard-index and --shard-count must be supplied together' >&2
+if (( $# )); then
+  printf 'check_backend.sh takes no arguments (got: %s)\n' "$*" >&2
   exit 2
-fi
-set --
-JUNIT_NAME=backend-junit.xml
-if [[ -n "$SHARD_INDEX" ]]; then
-  set -- -p tests.architecture.g1_sharding --g1-shard-index "$SHARD_INDEX" --g1-shard-count "$SHARD_COUNT"
-  JUNIT_NAME="backend-junit-shard-$SHARD_INDEX.xml"
 fi
 
 # Match check.sh when CI runs this lane on its own runner.
@@ -71,6 +40,5 @@ PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   -m pytest -p no:cacheprovider -n "$BACKEND_PYTEST_WORKERS" \
   -m "not slow and not architecture_contract_heavy and not graph_index_contract" \
   --ignore="$ROOT_DIR/backend/tests/postgres" \
-  --durations=30 --junitxml="$ROOT_DIR/backend/.local/$JUNIT_NAME" \
-  "$@" \
+  --durations=30 --junitxml="$ROOT_DIR/backend/.local/backend-junit.xml" \
   "$ROOT_DIR/backend/tests"

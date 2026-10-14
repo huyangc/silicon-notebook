@@ -13,7 +13,8 @@
 # 可配置(环境变量):
 #   VERSION                  包版本串(默认 <date>-<git短sha>)
 #   OUT_DIR                  产出目录(默认 <repo>/dist)
-#   NODE_VERSION             便携 node 版本(默认跟随打包机 `node -v`,如 v22.22.0)
+#   NODE_VERSION             便携 node 版本(默认跟随打包机 `node -v`,如 v26.7.0);
+#                            必须是 .nvmrc 钉的大版本(26),否则拒绝打包
 #   NODE_DIST_URL            node 下载源(默认 https://nodejs.org/dist;可指内网镜像)
 #   NODE_TARBALL             直接用本地 node tarball(设了就不下载;离线打包机场景)
 #   NEXT_PUBLIC_API_BASE_URL 前端 API 基址(默认 /api,走同源反代;远程访问务必保持 /api)
@@ -31,6 +32,10 @@ die() { printf '\033[1;31m[pack:错误]\033[0m %s\n' "$*" >&2; exit 1; }
 
 command -v node >/dev/null 2>&1 || die "打包机需要 node(用于 next build)。"
 command -v npm  >/dev/null 2>&1 || die "打包机需要 npm。"
+# 仓库只支持一个 Node.js 大版本(.nvmrc);打包机构建前端与便携 node 都必须是它。
+source "$ROOT_DIR/scripts/node_version.sh"
+require_node_major "$(node -v)" "scripts/pack.sh (build host node)" \
+  || die "打包机 node 大版本不对;换成 .nvmrc 钉的版本再打包。"
 command -v "$PACK_PYTHON" >/dev/null 2>&1 || die "找不到 $PACK_PYTHON(建 wheelhouse 用)。"
 command -v curl >/dev/null 2>&1 || [[ -n "${NODE_TARBALL:-}" ]] || die "需要 curl 下载便携 node(或设 NODE_TARBALL 指向本地包)。"
 
@@ -89,8 +94,10 @@ cp -R "$ROOT_DIR/frontend/.next/static" "$STAGE/frontend/.next/static"
 [[ -d "$ROOT_DIR/frontend/public" ]] && cp -R "$ROOT_DIR/frontend/public" "$STAGE/frontend/public"
 
 # --- 2) 便携 node ---
-NODE_VERSION="${NODE_VERSION:-$(node -v)}"   # 形如 v22.22.0
+NODE_VERSION="${NODE_VERSION:-$(node -v)}"   # 形如 v26.7.0
 [[ "$NODE_VERSION" == v* ]] || NODE_VERSION="v$NODE_VERSION"
+require_node_major "$NODE_VERSION" "scripts/pack.sh (NODE_VERSION, the bundled portable node)" \
+  || die "便携 node 版本不对;NODE_VERSION 必须是 .nvmrc 钉的大版本。"
 NODE_PKG="node-${NODE_VERSION}-${nos}-${narch}"
 log "准备便携 node: $NODE_PKG"
 if [[ -n "${NODE_TARBALL:-}" ]]; then
