@@ -983,11 +983,14 @@ def _is_repeat_tail(tail: str, obj: str) -> bool:
     rest = tail.strip()
     if not rest.startswith("{"):
         return False
-    while rest.startswith(obj):
-        rest = rest[len(obj):].lstrip()
-    if not rest or _TRAILING_NOISE_RE.fullmatch(rest):
+    index = 0
+    while rest.startswith(obj, index):
+        index += len(obj)
+        while index < len(rest) and rest[index].isspace():
+            index += 1
+    if index == len(rest) or _TRAILING_NOISE_RE.fullmatch(rest, index):
         return True
-    return _repeats_prefix(rest, 0, len(rest), obj, 0)
+    return _repeats_prefix(rest, index, len(rest), obj, 0)
 
 
 def _leading_object(
@@ -1028,25 +1031,30 @@ def _restart_points(text: str) -> list[int]:
     ``{`` right after ``:``, ``[`` or ``,`` is where a nested value may
     start (``{"answer":{"answer":…}}``), which is a second reading.
 
-    The scan is bounded: a reply stuck repeating ``{`` or one short fragment
-    would otherwise cost quadratic or cubic time on every non-strict reply.
-    At most ``_RESTART_POINTS_MAX`` points are found, and the character
-    comparisons are capped at a few passes over the reply.
+    Returns ``(fragments dropped, offset)`` pairs, earliest first. The scan
+    stays linear on a reply stuck repeating ``{`` or one short fragment: each
+    fragment is compared only from the latest restart point, so its cost is
+    bounded by its own length, and only the ``_RESTART_POINTS_MAX`` latest
+    points are kept for decoding (only a late one can decode when the model
+    restarted many times). The comparison budget is a backstop for inputs
+    no test has found a way to make expensive; it is not what keeps the
+    degenerate replies above fast.
     """
-    reachable = [0]
-    points: list[int] = []
+    start = found = 0
+    points: list[tuple[int, int]] = []
     budget = [4 * len(text) + 4096]
     index = text.find("{", 1)
-    while index != -1 and len(points) < _RESTART_POINTS_MAX and budget[0] > 0:
+    while index != -1 and budget[0] > 0:
         before = index - 1
         while before > 0 and text[before].isspace():
             before -= 1
-        if text[before] not in ":[," and any(
-            _repeats_prefix(text, start, index, text, index, budget)
-            for start in {0, reachable[-1]}
+        if text[before] not in ":[," and _repeats_prefix(
+            text, start, index, text, index, budget,
         ):
-            reachable.append(index)
-            points.append(index)
+            start = index
+            found += 1
+            points.append((found, index))
+            del points[:-_RESTART_POINTS_MAX]
         index = text.find("{", index + 1)
     return points
 
@@ -1066,7 +1074,7 @@ def _restarted_object(
     would mean the lost fragment opened an array -- ``{"sections":[{...}]}``
     missing ``"sections":[`` -- and the object is a nested item.
     """
-    for dropped, point in enumerate(_restart_points(text), start=1):
+    for dropped, point in _restart_points(text):
         for reading in _readings(text[point:], inner_quotes=True):
             try:
                 value, end = _DECODER.raw_decode(reading.text)
