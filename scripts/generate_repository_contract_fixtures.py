@@ -1265,6 +1265,9 @@ max_concurrency = 2
     return Settings(
         database_url=f"sqlite:///{database}",
         storage_dir=str(storage),
+        # The API fixture enters the app lifespan, which starts the diagnostics
+        # runtime; keep it beside the disposable database, not in the checkout.
+        diagnostics_dir=str(database.parent / "diagnostics"),
         model_services_config=model_services_config,
         # The fixture registry deliberately defines ONE chat service and binds
         # only the chat workloads (and, for the missing_ask_answer oracle, one
