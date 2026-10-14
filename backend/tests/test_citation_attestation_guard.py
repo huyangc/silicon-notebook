@@ -322,23 +322,13 @@ def _keys(node: ast.Dict) -> list:
     return [key.value if isinstance(key, ast.Constant) else key for key in node.keys]
 
 
-@functools.lru_cache(maxsize=None)
-def parse(source: str):
-    """``ast.parse`` memoised by source text (the trees are never mutated)."""
-    return ast.parse(source)
-
-
 def parse_file(path) -> ast.Module:
     return read_source_tree(Path(path))
 
 
-def scan_source(relative: str, source: str) -> list:
-    """Every site in one module as ``(file, qualname, callee)`` (with repeats)."""
-    return scan_tree(relative, parse(source))
-
-
 def scan_tree(relative: str, tree: ast.Module) -> list:
-    """Same as ``scan_source`` for an already parsed (shared, read-only) tree."""
+    """Every site in one module as ``(file, qualname, callee)`` (with repeats);
+    ``tree`` is a shared, read-only syntax tree."""
     aliases = _aliases(tree)
     sites: list = []
 
@@ -801,7 +791,7 @@ def test_every_proof_and_gate_still_holds(site):
 
 # --- the guard's own teeth ------------------------------------------------
 # Every tooth goes through ``scan()`` over a fake ``APP`` directory -- the same
-# path the real check takes -- never through ``scan_source`` alone.
+# path the real check takes -- never through ``scan_tree`` alone.
 
 def _fake_app(tmp_path, monkeypatch, relative: str, source: str) -> None:
     """Point the guard at a directory holding ``relative`` (and nothing else

@@ -111,14 +111,10 @@ ORIGIN_REGISTRY = {
 }
 
 
-def scan_source(relative: str, source: str) -> list:
-    """``(file, qualname, class, passes_library)`` for every hit construction,
-    under any import alias or ``X = RetrievedChunk`` rebinding."""
-    return scan_tree(relative, d9.parse(source))
-
-
 def scan_tree(relative: str, tree: ast.Module) -> list:
-    """Same as ``scan_source`` for an already parsed (shared, read-only) tree."""
+    """``(file, qualname, class, passes_library)`` for every hit construction,
+    under any import alias or ``X = RetrievedChunk`` rebinding; ``tree`` is a
+    shared, read-only syntax tree."""
     aliases = d9._aliases(tree, tuple(sorted(HIT_CLASSES)))
     sites: list = []
 

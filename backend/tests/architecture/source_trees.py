@@ -5,11 +5,12 @@ the exact content is part of the cache key, so edits are visible even if a
 mutation test restores the file's size and timestamp. Directory discovery and
 synthetic string parsing stay with each guard and are never cached here.
 
-``app_source_trees()`` is the one shared way to read every module under
-``backend/app``: each guard that scans the whole production tree goes through it,
-so a pytest worker parses every file once no matter how many guards run in it.
-The file list and the file text are re-read on every call; only the parse is
-cached (by content), so a guard never sees a stale tree.
+``app_source_trees()`` is the shared way to read every module under
+``backend/app``; guards that go through it (and ``read_source_tree()`` for a
+single file) let a pytest worker parse each file once no matter how many of them
+run there. New whole-tree guards should use it too. The file list and the file
+text are re-read on every call; only the parse is cached, keyed by content alone
+(an AST carries no file name), so a guard never sees a stale tree.
 """
 from __future__ import annotations
 
@@ -22,8 +23,19 @@ _APP_ROOT = Path(__file__).resolve().parents[2] / "app"
 
 
 @lru_cache(maxsize=4096)
+def _parse_content(source: str) -> ast.Module:
+    return ast.parse(source)
+
+
 def _parse_source(source: str, filename: str) -> ast.Module:
-    return ast.parse(source, filename=filename)
+    """Parse by content alone: an AST node carries no file name, so two files with
+    identical text share one tree (and a copy of the app tree costs no re-parse).
+    The file name only labels a ``SyntaxError``; failures are never cached."""
+    try:
+        return _parse_content(source)
+    except SyntaxError as exc:
+        exc.filename = filename
+        raise
 
 
 def read_source_tree(path: Path, *, errors: str = "strict") -> ast.Module:
