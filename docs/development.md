@@ -434,7 +434,7 @@ The verification gates are tiered:
 | G2 extended | `scripts/check_extended.sh`: G1 plus real-index/performance, cold graph/index contracts, and repository-wide semantic scans (heavy subset) | Once daily at `17 18 * * *` UTC (02:17 Asia/Shanghai), plus manual dispatch |
 | G3 PostgreSQL | `scripts/check_postgres.sh`: direct PostgreSQL adapter integration | Independent PR/push/manual CI job |
 
-G1 runs three bounded lanes concurrently: `check_backend.sh` executes the stable backend pytest suite with default 16 backend pytest workers (override with `BACKEND_PYTEST_WORKERS`; the CI backend shards pin 4); `check_contracts.sh` executes syntax/dependency preflight, hermetic smoke paths, contract checks, and the deterministic extraction-scoring harness; `check_frontend.sh` executes every recursively discovered `*.test.mjs`, every `*.component.test.tsx`, the production frontend build, and the package typecheck. On a host with at least eight CPUs, after the one plugin sync, three groups run concurrently — node tests, component tests, and the build followed by the typecheck — each into its own log, printed in a fixed order with every step's exit status once all finish; smaller hosts (CI runners) keep the sequential order and stop at the first failure, and `FRONTEND_LANE_PARALLEL=1`/`0` overrides the CPU check. Node's test runner and Vitest are each capped at four workers, leaving CPU headroom for the backend critical path. The Next build must keep `ignoreBuildErrors` unset and stays the fail-closed typecheck for production code, but Next's build-time type checker silently filters out every diagnostic reported in `*.test.*`/`*.spec.*` files and `__tests__`/`__mocks__` directories (the `ignoreRegex` in `next/dist/lib/typescript/runTypeCheck.js`, verified on Next 15.5), so a type error that only exists under `frontend/tests/**` never fails the build. The frontend lane therefore runs `npm run lint` (`tsc --noEmit`) after the build — after, so it type-checks the freshly regenerated `.next/types` rather than a stale tree — as the one pass that sees those files; with `incremental` the warm re-check costs under a second (~5s cold), so the duplicate parse the lane once avoided is no longer a budget concern. Its backend lane excludes `slow` real-index/performance tests, `graph_index_contract` cold graph/index contracts, `architecture_contract_heavy` (the eight repository-wide semantic scans in `_ARCHITECTURE_CONTRACT_HEAVY_TESTS`; the remaining lightweight `architecture_contract` tests run in G1), and the PostgreSQL tree. G2 first runs G1 and then the exact complementary backend marker set — `backend/tests/test_test_architecture_policy.py::test_verification_lane_markers_partition_every_architecture_contract_test` proves that split empirically via `--collect-only`, not just by pinning the two `-m` strings. Each lane has its own process group, so interrupting or terminating the controller also terminates and reaps pytest, npm, and Next.js descendants. The official-client MCP smoke pins exactly the 17 published tools: two discovery/overview, two search/point-read, two ask, two contribute, four source, one build, and four knowhow tools. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
+G1 runs three bounded lanes concurrently: `check_backend.sh` executes the stable backend pytest suite with default 16 backend pytest workers (override with `BACKEND_PYTEST_WORKERS`; CI pins 4); `check_contracts.sh` executes syntax/dependency preflight, hermetic smoke paths, contract checks, and the deterministic extraction-scoring harness; `check_frontend.sh` executes every recursively discovered `*.test.mjs`, every `*.component.test.tsx`, the production frontend build, and the package typecheck. On a host with at least eight CPUs, after the one plugin sync, three groups run concurrently — node tests, component tests, and the build followed by the typecheck — each into its own log, printed in a fixed order with every step's exit status once all finish; smaller hosts (CI runners) keep the sequential order and stop at the first failure, and `FRONTEND_LANE_PARALLEL=1`/`0` overrides the CPU check. Node's test runner and Vitest are each capped at four workers, leaving CPU headroom for the backend critical path. The Next build must keep `ignoreBuildErrors` unset and stays the fail-closed typecheck for production code, but Next's build-time type checker silently filters out every diagnostic reported in `*.test.*`/`*.spec.*` files and `__tests__`/`__mocks__` directories (the `ignoreRegex` in `next/dist/lib/typescript/runTypeCheck.js`, verified on Next 15.5), so a type error that only exists under `frontend/tests/**` never fails the build. The frontend lane therefore runs `npm run lint` (`tsc --noEmit`) after the build — after, so it type-checks the freshly regenerated `.next/types` rather than a stale tree — as the one pass that sees those files; with `incremental` the warm re-check costs under a second (~5s cold), so the duplicate parse the lane once avoided is no longer a budget concern. Its backend lane excludes `slow` real-index/performance tests, `graph_index_contract` cold graph/index contracts, `architecture_contract_heavy` (the eight repository-wide semantic scans in `_ARCHITECTURE_CONTRACT_HEAVY_TESTS`; the remaining lightweight `architecture_contract` tests run in G1), and the PostgreSQL tree. G2 first runs G1 and then the exact complementary backend marker set — `backend/tests/test_test_architecture_policy.py::test_verification_lane_markers_partition_every_architecture_contract_test` proves that split empirically via `--collect-only`, not just by pinning the two `-m` strings. Each lane has its own process group, so interrupting or terminating the controller also terminates and reaps pytest, npm, and Next.js descendants. The official-client MCP smoke pins exactly the 17 published tools: two discovery/overview, two search/point-read, two ask, two contribute, four source, one build, and four knowhow tools. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
 
 Use the project’s Homebrew/Miniconda interpreter for acceptance:
 
@@ -485,47 +485,63 @@ while lock/writable handles still require one link and unsafe files remain rejec
 
 ### GitHub Actions CI
 
-`.github/workflows/ci.yml` exposes G1 as `CI / level-1-standard` for pull
-requests targeting `master`, pushes to `master`, and manual dispatches.
-`.github/workflows/daily-extended.yml` exposes G2 as
-`Daily Extended Gate / level-2-extended`, with one daily cron and a manual
-dispatch only. The same workflow's `level-2-frontend-parallel` job runs
-`scripts/check_frontend.sh` with `FRONTEND_LANE_PARALLEL=1`: CI runners have
-fewer than eight CPUs, so this is the only CI run of the frontend lane's
-parallel path; PR CI is unchanged. Both use `ubuntu-24.04`, Python 3.13, Node.js 22, install from
-the declared lock/requirements files, and delegate selection to their matching
-wrapper script. G3 remains `CI / level-3-postgres-integration`.
+Each workflow has at most three jobs, because every job shows up as a check on
+a pull request. No job only summarizes the others: each job's name says what it
+gates, every job must pass, and a workflow passes only when all of its jobs do.
 
-`CI / level-1-frontend-node26` re-runs the frontend lane and the production build
-on the current Node.js major, on the same triggers as G1. The documented floor is
-"Node.js ≥ 20" while G1 pins 22, so without this lane the upper half of that promise
-is unverified: Node ≥ 24 ships built-in Web Storage globals whose getters return
-`undefined` unless `--localstorage-file` is passed, and vitest's jsdom environment
-lets them shadow jsdom's own — every component test that touches `localStorage`
-fails on a developer's machine while CI stays green.
+`.github/workflows/ci.yml` runs on pull requests targeting `master`, pushes to
+`master`, and manual dispatches. G1 is two of its jobs: `CI / level-1-backend`
+runs `scripts/check_backend.sh` (the whole backend lane, unsharded, four pytest
+workers) on one runner, and `CI / level-1-contracts-frontend` runs
+`bash scripts/check.sh --lane contracts --lane frontend`, the other two lanes run
+concurrently exactly as `check.sh` runs them locally. G3 is the third job,
+`CI / level-3-postgres-integration`. `check.sh` with no arguments remains the
+complete local G1; `--lane <name>` (repeatable) runs only the named lanes and
+exists so CI can give the backend lane a runner of its own.
+
+`.github/workflows/daily-extended.yml` (`Daily Extended Gate`, one daily cron plus
+manual dispatch) is G2 in three jobs. `level-2-backend` and
+`level-2-contracts-frontend` run G1 command for command as `ci.yml` does; only the
+dependency install differs, keeping pip's wheel cache off as described below.
+`level-2-contracts-frontend` then also runs `scripts/check_frontend.sh` with
+`FRONTEND_LANE_PARALLEL=1`, even when the G1 step failed: CI runners have fewer
+than eight CPUs, so this is the only CI run of the frontend lane's parallel path,
+and PR CI never forces it. `level-2-complement` runs
+`check_extended.sh --complement-only`: the extended backend marker set, the sample
+plugin's UI lane and the facade-retirement ratchet, without re-running G1.
+`--complement-only` exists for this workflow alone; a local run with it is not a
+G2 run, and `check_extended.sh` with no arguments remains the complete local G2
+(G1, then the complement, in order). Until 2026-10-07 the daily workflow was one
+job running `check_extended.sh` on one 4-vCPU runner within 25 minutes; the last
+green runs took 23–25 minutes, G1's backend alone grew past 20 minutes there, and
+every run from 2026-10-07 was cancelled at the timeout without any G2 result.
+
+Both workflows use `ubuntu-24.04`, Python 3.13 and one Node.js major, install from
+the declared lock/requirements files, and delegate selection to the wrapper
+scripts. `test_ci_workflow_contract.py` pins the job sets and names, the at-most-
+three rule, that the G1 jobs together run every lane in `check.sh`'s `LANES`
+exactly once, that the daily G1 half mirrors `ci.yml`, and it executes
+`check.sh` and `check_extended.sh` with and without their arguments.
+
+The repository supports exactly one Node.js major, 26, pinned in `.nvmrc`. Every
+`actions/setup-node` step reads `node-version-file: .nvmrc`;
+`frontend/package.json` declares `"engines": {"node": ">=26 <27"}` and
+`frontend/.npmrc` sets `engine-strict=true`, so `npm ci`/`npm install` refuse any
+other major; and `scripts/check_frontend.sh`, `scripts/check_sample_plugin.sh` and
+`scripts/pack.sh` stop before doing any work when the Node they would use is not
+that major (`scripts/node_version.sh`). Node 26 ships built-in Web Storage globals
+whose getters return `undefined` unless `--localstorage-file` is passed, and
+vitest's jsdom environment lets them shadow jsdom's own;
 `frontend/test-support/setup.ts` restores real jsdom storage, and the matching
-`Storage` class so `vi.spyOn(Storage.prototype, …)` still intercepts, only when the
-built-ins read as `undefined`; Node 22 behavior is byte-identical. The lane also runs
-the build, which is what caught that fix's first attempt importing untyped `jsdom`.
+`Storage` class so `vi.spyOn(Storage.prototype, …)` still intercepts, whenever the
+built-ins read as `undefined`.
 
-The PR/push G1 workflow runs the backend, contracts, and Node 22 frontend lanes
-on separate runners. Backend uses two shards of the same G1 collection, with four
-pytest workers each. `check_backend.sh --shard-index 0 --shard-count 2` (or index 1)
-enables sharding explicitly; no sharding environment leaks into nested pytest.
-The plugin partitions after normal marker selection, keeps each `xdist_group`
-together and ordinary modules intact, and balances deterministic units using
-`backend/tests/fixtures/g1_module_timings.json` with a collected-count fallback.
-Timing hints affect placement only: new modules are included automatically.
-`check.sh` remains the complete local gate, and G2 selection is unchanged.
-The existing `level-1-standard` check aggregates all three lane jobs and fails
-unless every result is success, including both backend matrix entries; skipped,
-cancelled, failed, or missing dependencies cannot pass. Measure G1 wall time from
-the first lane start through aggregate completion, including installation and
-runner scheduling, rather than reporting the aggregate's short runtime alone.
-This isolation and sharding spend more runner minutes to reduce elapsed time.
-Backend and contracts wrappers preserve offline environment isolation when run
-directly, print slow pytest durations, and write JUnit reports under `backend/.local`;
-CI uploads them for seven days, including on failure.
+The backend and contracts wrappers preserve offline environment isolation when run
+directly, print slow pytest durations, and write JUnit reports under
+`backend/.local`; CI uploads them, and the extended backend lane's
+`backend/.local/backend-extended-junit.xml`, for seven days, including on failure.
+The extended backend lane uses the same offline isolation and bytecode prefix as
+the other lanes.
 
 Six production-source guard scans share one worker and content-validated AST cache;
 every lookup rereads the file, so edits cannot reuse a stale tree. Agent Profile
@@ -546,11 +562,16 @@ and no fallback to another cache. G2 continues to disable pip's wheel cache:
 wheel can crash with `SIGILL` when restored on a hosted runner with different
 CPU features. The portable build trades a small ANN speedup for deterministic
 CI; production wheelhouses may still target their declared deployment CPU.
-Each G1 execution lane's 20-minute timeout includes dependency installation and is intentionally
-separate from the under-60-second local Apple Silicon warm-gate target.
-`CI / level-1-standard` is initially observational; make it a required `master` check
-only after stable green pull-request and post-merge runs have been observed
-and the user explicitly approves the branch-protection change.
+Job timeouts include dependency installation and are intentionally separate from
+the under-60-second local Apple Silicon warm-gate target. The two backend jobs
+(`level-1-backend`, `level-2-backend`) get 30 minutes: on 2026-10-14 the unsharded
+backend lane took 8:05 in PR CI and 11:59 in the daily run on four workers (jobs
+8:41 and 13:03), and a single job has no other runner to spread over, so the limit
+leaves more than twice the measured time for growth and slow runners. Every other
+offline job keeps 20 minutes (measured: contracts and frontend 5:00 in PR CI and
+7:30 daily including the parallel path; the complement 3:50); G3 keeps 35. None of
+these checks is a required `master` status check; making one required needs the
+user's explicit approval of the branch-protection change.
 
 PostgreSQL coverage is deliberately separate from the offline gates. The
 `level-3-postgres-integration` job starts PostgreSQL 16 and runs

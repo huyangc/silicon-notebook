@@ -18,7 +18,8 @@ silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端—�
 - **Python ≥ 3.13**——SQLite 写锁的公平性依赖 CPython 3.13 中 `threading.Lock`（由
   `PyMutex` 支撑）的交接语义；更低版本会静默退化为抢占式（barging），写者饿死无声
   重现（见 `backend/app/repositories/sqlite/database.py`）。
-- **Node.js ≥ 20** 与 npm
+- **Node.js 26** 与 npm——唯一支持的大版本，钉在 `.nvmrc`；`frontend/.npmrc` 的
+  `engine-strict` 让 `npm ci`/`npm install` 拒绝其他大版本
 - **git**
 - 默认部署需要可访问的 **PostgreSQL 16** 数据库；扩展前置条件见 3.1 节。
 - C/C++ 工具链*仅作兜底*——`numpy`、`rustworkx`、`hnswlib` 在常见平台都有预编译 wheel;
@@ -444,7 +445,9 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 ./stop.sh       # 停止两者
 ```
 
-打包机可配置项:`NODE_VERSION` / `NODE_DIST_URL` / `NODE_TARBALL`(便携 Node 来源)、
+打包机可配置项:`NODE_VERSION` / `NODE_DIST_URL` / `NODE_TARBALL`(便携 Node 来源;`NODE_VERSION`
+默认取打包机 `node -v`,打包机的 Node 与 `NODE_VERSION` 都必须是 `.nvmrc` 钉的大版本(当前 26),
+否则 `pack.sh` 拒绝打包,没有绕过开关)、
 `SKIP_WHEELHOUSE=1`(改为目标机在线装依赖)、`PIP_INDEX_URL`、`PACK_PYTHON`。目标机可配置项:
 `PYTHON_BIN`、`PIP_INDEX_URL`、`FRONTEND_HOST` / `FRONTEND_PORT` / `BACKEND_HOST` / `PORT`。
 打包机的 Python **小版本**应与目标机一致,否则预编译 wheel 装不上(install.sh 会自动回退在线

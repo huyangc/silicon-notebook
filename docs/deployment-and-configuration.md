@@ -21,7 +21,8 @@ when no model service or MinerU parser is configured.
 - **Python ≥ 3.13** — the SQLite write lock's fairness depends on CPython 3.13's
   `PyMutex`-backed `threading.Lock` handoff; older interpreters silently regress to
   writer starvation (see `backend/app/repositories/sqlite/database.py`).
-- **Node.js ≥ 20** and npm
+- **Node.js 26** and npm — the one supported major, pinned in `.nvmrc`; `frontend/.npmrc`'s
+  `engine-strict` makes `npm ci`/`npm install` refuse any other major
 - **git**
 - An accessible **PostgreSQL 16** database for the default deployment; extension prerequisites are listed in section 3.1.
 - A C/C++ toolchain is needed *only as a fallback* — `numpy`, `rustworkx`, and `hnswlib`
@@ -535,7 +536,9 @@ vi .env         # MODEL_SERVICES_CONFIG + secrets referenced by api_key_env
 ./stop.sh       # stop both
 ```
 
-Build-host knobs: `NODE_VERSION` / `NODE_DIST_URL` / `NODE_TARBALL` (portable-Node source),
+Build-host knobs: `NODE_VERSION` / `NODE_DIST_URL` / `NODE_TARBALL` (portable-Node source;
+`NODE_VERSION` defaults to the build host's `node -v`, and `pack.sh` refuses to pack unless both the
+build host's Node and `NODE_VERSION` are the major pinned in `.nvmrc`, currently 26 — there is no override),
 `SKIP_WHEELHOUSE=1` (target installs deps online instead), `PIP_INDEX_URL`, `PACK_PYTHON`.
 Target knobs: `PYTHON_BIN`, `PIP_INDEX_URL`, `FRONTEND_HOST` / `FRONTEND_PORT` / `BACKEND_HOST`
 / `PORT`. The build host's Python **minor** version should match the target's, or the prebuilt
