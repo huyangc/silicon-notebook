@@ -38,7 +38,9 @@ def test_default_diagnostics_dir_is_the_historical_repo_local_path():
 
 
 def test_app_lifespan_writes_diagnostics_outside_the_checkout():
-    with TestClient(main_module.app):
+    # A fresh app: the module-level one's MCP session manager runs only once
+    # per process, and other tests in this worker enter its lifespan.
+    with TestClient(main_module.create_app()):
         runtime = diagnostics_runtime.current_runtime()
         assert runtime is not None
         target = Path(runtime.diagnostics_dir).resolve()
