@@ -381,6 +381,38 @@ def test_world_rewritten_by_reopening_is_rejected(
         )
 
 
+def _reopen_stamping(pragma: str):
+    def reopen(root: Path):
+        connection = sqlite3.connect(str(root / wt.WORLD_DB_NAME))
+        connection.execute(pragma)
+        connection.close()
+        return None
+
+    return reopen
+
+
+@pytest.mark.parametrize(
+    "pragma",
+    [
+        pytest.param("PRAGMA user_version = 93", id="user-version"),
+        pytest.param("PRAGMA application_id = 7", id="application-id"),
+        pytest.param("PRAGMA journal_mode = DELETE", id="journal-mode"),
+    ],
+)
+def test_reopen_that_only_restamps_the_database_header_is_rejected(
+    tmp_path_factory, pragma, request
+):
+    """A migrator that only bumps ``user_version`` on an already-current
+    schema changes no row and no DDL; the header must still count."""
+    with pytest.raises(WorldTemplateError, match=r"not reopen-stable.*<header>"):
+        world_template(
+            tmp_path_factory,
+            f"header-{request.node.callspec.id}",
+            _build_raw,
+            _reopen_stamping(pragma),
+        )
+
+
 def test_seeded_admin_credential_rederivation_is_the_only_masked_rewrite(
     tmp_path_factory,
 ):

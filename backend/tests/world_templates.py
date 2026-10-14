@@ -41,7 +41,9 @@ Build (once per process per key)
 Build-time hard checks
 ----------------------
 1. Reopen stability: a full-world digest (every real table's rows, sorted;
-   the schema; every non-SQLite file's bytes) is taken, ``reopen(root)`` runs
+   the schema; the persistent header fields ``user_version``,
+   ``application_id`` and ``journal_mode``; every non-SQLite file's bytes)
+   is taken, ``reopen(root)`` runs
    and is closed, and the digest must not change. Open-time normalisation
    (interrupted-job recovery, auth-transaction purge, seed inserts) is caught
    at build time instead of silently differing from the world the test meant.
@@ -100,6 +102,7 @@ WORLD_DB_NAME = "world.db"
 WORLD_STORAGE_NAME = "storage"
 
 _SQLITE_HEADER = b"SQLite format 3\x00"
+_HEADER_PRAGMAS = ("user_version", "application_id", "journal_mode")
 _SIDE_FILE_SUFFIXES = ("-wal", "-shm", "-journal")
 
 # Captured when the first test module imports this helper (collection time,
@@ -311,6 +314,18 @@ def _scan_sqlite(
             "ORDER BY type, name"
         ).fetchall()
         digests["<schema>"] = hashlib.sha256(repr(schema).encode()).hexdigest()
+        # The persistent header fields: the migrator stamps ``user_version``
+        # (a reopen that only bumps it changes no row) and the database keeps
+        # WAL mode in its header; ``application_id`` is unused by the app but
+        # equally persistent. Per-connection pragmas are not world state.
+        digests["<header>"] = hashlib.sha256(
+            repr(
+                tuple(
+                    connection.execute(f"PRAGMA {name}").fetchone()[0]
+                    for name in _HEADER_PRAGMAS
+                )
+            ).encode()
+        ).hexdigest()
         tables = [
             name
             for kind, name, _table, sql in schema
