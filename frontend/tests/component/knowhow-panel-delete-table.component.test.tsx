@@ -227,6 +227,10 @@ test("a DELETE that fails while the user is on another table reports it at the t
   expect(document.querySelector(".knowhow-action-error")).toBeNull();
   expect(screen.getByRole("heading", { name: "第二张表" })).toBeInTheDocument();
   expectToolbarUnlocked();
+  // The notice tells the user to go back and reopen the table, so 返回 keeps it.
+  await user.click(screen.getByRole("button", { name: "返回" }));
+  await screen.findByRole("button", { name: "打开表格：排障记录" });
+  expect(screen.getByRole("alert")).toBe(notice);
   await user.click(within(notice).getByRole("button", { name: "关闭" }));
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(server.log).toEqual([LIST, DETAIL, DELETE, TWIN_DETAIL]);

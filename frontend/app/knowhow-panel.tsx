@@ -173,7 +173,8 @@ export function KnowhowPanel({
   const [transferNotice, setTransferNotice] = useState<string | null>(null);
   // 删表失败、而用户此时已经不在那张表上（删除进行中返回或换了表，S6）：失败不能写进
   // 当前这张表的 actionError 横幅（会被当成这张表的失败），改在面板顶部的提示条里点名
-  // 被删的表。与 transferNotice 同一套复位：换表、回列表、换笔记本都清掉。
+  // 被删的表。只在打开表、手动关闭、换笔记本时清掉——提示让用户回列表重新打开那张表，
+  // 所以回列表时要留着（用户裁决保留面板顶部这一位置）。
   const [deleteNotice, setDeleteNotice] = useState<string | null>(null);
   // Task 9：追加导入向导显隐 + 模板下载进行中标记（工具栏「下载模板」按钮
   // 自身的 loading 态，不走 actionError/detailError 那一套整表级错误）。
@@ -489,7 +490,7 @@ export function KnowhowPanel({
     setDetailError(null);
     setActionError(null);
     setTransferNotice(null);
-    setDeleteNotice(null);
+    // 刻意不清 deleteNotice：它让用户回列表重新打开那张表，回列表时还得看得见。
     setQuery("");
     setOpenRowId(null);
     setCellModal(null);
