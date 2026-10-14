@@ -459,11 +459,28 @@ def _dotted(node) -> str | None:
     return ".".join(reversed(parts))
 
 
+def _scoped_calls(tree: ast.Module):
+    """``(enclosing qualname, call)`` for every call, in source order; the
+    qualname (not a line number) is what identifies a site."""
+
+    def visit(node, scope):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                yield from visit(child, (*scope, child.name))
+                continue
+            if isinstance(child, ast.Call):
+                yield ".".join(scope) or "<module>", child
+            yield from visit(child, scope)
+
+    yield from visit(tree, ())
+
+
 def annotation_patch_sites(
     source: str, modules: frozenset[str]
-) -> list[tuple[int, str]]:
-    """``(line, patched name)`` for every setattr of a type-like name on one of
-    ``modules``, by module alias, dotted path or string target."""
+) -> list[tuple[str, str]]:
+    """``(site, patched name)`` for every setattr of a type-like name on one of
+    ``modules``, by module alias, dotted path or string target. A site is the
+    enclosing qualname plus the call's source text."""
     if "app.api" not in source or not _CANDIDATE.search(source):
         return []
     tree = ast.parse(source)
@@ -479,9 +496,10 @@ def annotation_patch_sites(
                 if node.module == "app.api" or node.module.startswith("app.api."):
                     aliases[alias.asname or alias.name] = full
     sites = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not node.args:
+    for scope, node in _scoped_calls(tree):
+        if not node.args:
             continue
+        site = f"{scope}: {ast.unparse(node)}"
         func = node.func
         if not (
             (isinstance(func, ast.Attribute) and func.attr == "setattr")
@@ -492,7 +510,7 @@ def annotation_patch_sites(
         if isinstance(first, ast.Constant) and isinstance(first.value, str):
             match = _API_STRING_TARGET.match(first.value)
             if match and match.group(1) in modules and _is_type_like(match.group(2)):
-                sites.append((node.lineno, match.group(2)))
+                sites.append((site, match.group(2)))
             continue
         if len(node.args) < 2:
             continue
@@ -505,7 +523,7 @@ def annotation_patch_sites(
         head, _, rest = dotted.partition(".")
         module = aliases.get(head, head) + (f".{rest}" if rest else "")
         if module in modules and _is_type_like(name.value):
-            sites.append((node.lineno, name.value))
+            sites.append((site, name.value))
     return sites
 
 
@@ -537,6 +555,20 @@ def test_annotation_patch_guard_flags_every_spelling():
     assert [name for _, name in flagged] == [
         "ReportRequest", "UserProfile", "AskRequest", "KgQuery", "NotebookCreate"
     ]
+    assert flagged[0][0] == (
+        "t: monkeypatch.setattr(report_routes, 'ReportRequest', object)"
+    )
+    assert annotation_patch_sites(
+        "import app.api.ask_routes as ar\n"
+        "class TestX:\n"
+        "    def test_y(self, monkeypatch):\n"
+        "        monkeypatch.setattr(ar, 'AskRequest', object)\n"
+        "monkeypatch.setattr(ar, 'AskResponse', object)\n",
+        _GUARD_FIXTURE_MODULES,
+    ) == [
+        ("TestX.test_y: monkeypatch.setattr(ar, 'AskRequest', object)", "AskRequest"),
+        ("<module>: monkeypatch.setattr(ar, 'AskResponse', object)", "AskResponse"),
+    ]
     assert annotation_patch_sites(
         "from app.api import report_routes\n"
         "from app.services import thing\n"
@@ -563,8 +595,8 @@ def test_no_test_patches_an_annotation_name_on_an_endpoint_module():
     offenders = []
     for path in sorted(_TESTS_ROOT.rglob("*.py")):
         source = path.read_text(encoding="utf-8")
-        for line, name in annotation_patch_sites(source, modules):
-            offenders.append(f"{path.relative_to(_TESTS_ROOT)}:{line} {name}")
+        for site, name in annotation_patch_sites(source, modules):
+            offenders.append(f"{path.relative_to(_TESTS_ROOT)} {site} ({name})")
     assert offenders == [], (
         "patching a type-like name on an app.api module diverges between a "
         "templated and a real create_app() (see tests/speedups/app_routes.py); "
