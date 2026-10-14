@@ -21,6 +21,8 @@ export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
 unset PYTHONDONTWRITEBYTECODE
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/silicon-check.XXXXXX")"
+GATE_START_SECONDS=$SECONDS
+GATE_STARTED_AT="$(date +%s)"
 declare -a PIDS=()
 declare -a LANES=(contracts backend frontend)
 
@@ -77,5 +79,15 @@ for lane in "${LANES[@]}"; do
     printf "%s=missing\n" "$lane"
   fi
 done
+
+# Wall time, lane seconds and the slowest backend files/tests from this run's
+# junit; a prominent warning over the 60 s local target. Observational only:
+# it never changes the gate's exit status.
+"$PYTHON_BIN" "$ROOT_DIR/scripts/check_timing_summary.py" \
+  --wall "$((SECONDS - GATE_START_SECONDS))" \
+  --timing-dir "$TMP_DIR" \
+  --junit "$ROOT_DIR/backend/.local/backend-junit.xml" \
+  --started-at "$GATE_STARTED_AT" \
+  --target 60 || true
 
 exit "$status"
