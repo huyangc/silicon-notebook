@@ -373,15 +373,19 @@ def _raw_connection(postgres_repository):
 
 
 @pytest.mark.postgres_integration
+@pytest.mark.parametrize("late", [1, 8])
 def test_conflicts_committed_during_the_final_reset_are_swept_on_postgres(
-    postgres_repository, monkeypatch,
+    postgres_repository, monkeypatch, late,
 ):
     """K1(质量评审 P3-1,race 场景 A/B):终局事务的 REPEATABLE READ 快照之后、
     纪元 UPSERT 之前提交的失效候选,终局 DELETE 看不见、也没有行锁可等;
     它由提交后的一次清扫带走,不多烧重置轮。变异钉:拿掉清扫 → 删除返回
-    后仍留一条指向已删对象的候选,报红。"""
+    后仍留一条指向已删对象的候选,报红。``late=8`` 超过一页(页长压到 3,
+    codex #905 R1 P2):清扫须把同一步扫到空再前进——扫一页就前进会剩 5 条,
+    报红。"""
     runtime = postgres_repository._runtime
     store = runtime.knowledge
+    monkeypatch.setattr(runtime.knowledge_lifecycle, "_graph_drain_budget_rows", 3)
     nb = postgres_repository.create_notebook(NotebookCreate(name="race-ab")).id
     _seed_graph(postgres_repository, nb, doc_objects=2)
     original_final = store.delete_notebook_graph_rows
@@ -394,9 +398,10 @@ def test_conflicts_committed_during_the_final_reset_are_swept_on_postgres(
         with _raw_connection(postgres_repository) as other:
             other.execute(
                 "INSERT INTO kg_conflict_candidates (id,notebook_id,kind,left_ref,"
-                "right_ref,status,created_at,updated_at) VALUES "
-                "('kcc-race',%s,'node','ko-doc-0','ko-doc-1','pending',now(),now())",
-                (notebook_id,),
+                "right_ref,status,created_at,updated_at) SELECT 'kcc-race-'||g,%s,"
+                "'node','ko-doc-0','ko-doc-1','pending',now(),now() "
+                "FROM generate_series(1,%s) g",
+                (notebook_id, late),
             )
             other.commit()
         finals.append(notebook_id)
@@ -407,7 +412,7 @@ def test_conflicts_committed_during_the_final_reset_are_swept_on_postgres(
     counts = postgres_repository.delete_notebook_kg(nb)
 
     assert len(finals) == 1, f"清扫不得消耗重置轮:{finals}"
-    assert counts.get("kg_conflict_candidates", 0) == 1
+    assert counts.get("kg_conflict_candidates", 0) == late
     with runtime.database.connect() as db:
         assert db.execute(
             "SELECT COUNT(*) AS c FROM kg_conflict_candidates WHERE notebook_id=%s",

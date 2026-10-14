@@ -1130,6 +1130,80 @@ def test_running_merge_review_job_row_survives_kg_delete(repo):
     }
 
 
+def test_post_commit_sweep_empties_a_step_larger_than_one_page(repo, monkeypatch):
+    """codex #905 R1 P2:提交后清扫要把同一步扫到空再前进。复查之后落地的
+    失效候选多于一页(页长压到 3,落 8 条)时,扫一页就前进会永久剩下 5 条
+    ——它们不参与存活复查,删除却报成功。变异钉:每步只扫一页 → 报红。"""
+    service = repo._runtime.knowledge_lifecycle
+    monkeypatch.setattr(service, "_graph_drain_budget_rows", 3)
+    from app.repositories.sqlite.database import SqliteDatabase
+
+    primary = repo._runtime.database
+    independent = SqliteDatabase(primary.settings, primary.root_dir)
+    store = repo._runtime.knowledge
+    original_backlog = store.graph_drain_backlog
+    notebook = repo.create_notebook(NotebookCreate(name="sweep-pages"))
+    _seed_graph(repo, notebook.id, doc_objects=2)
+    injected = {"done": False}
+
+    def _backlog(db, nb, threshold, start=0, **kw):
+        if threshold == 0 and not injected["done"]:
+            injected["done"] = True  # the post-commit survivor probe
+            now = _now()
+            with independent.write() as w:
+                for i in range(8):
+                    w.execute(
+                        "INSERT INTO kg_conflict_candidates (id,notebook_id,kind,"
+                        "left_ref,right_ref,status,created_at,updated_at) "
+                        "VALUES (?,?,'node','ko-gone-a','ko-gone-b','pending',?,?)",
+                        (f"kcc-late-{i}", nb, now, now),
+                    )
+                w.execute(
+                    "INSERT INTO merge_review_jobs (notebook_id,status,total,done,"
+                    "started_at,updated_at,error) VALUES (?,'done',3,3,?,?,'')",
+                    (nb, now, now),
+                )
+        return original_backlog(db, nb, threshold, start, **kw)
+
+    monkeypatch.setattr(store, "graph_drain_backlog", _backlog)
+    counts = repo.delete_notebook_kg(notebook.id)
+
+    assert injected["done"], "前置不成立:没有触发注入"
+    assert _count(
+        repo, "SELECT COUNT(*) FROM kg_conflict_candidates WHERE notebook_id=?",
+        (notebook.id,)) == 0, "超过一页的失效候选必须扫空"
+    assert _count(
+        repo, "SELECT COUNT(*) FROM merge_review_jobs WHERE notebook_id=?",
+        (notebook.id,)) == 0, "后面的步骤照样被扫到"
+    assert counts["kg_conflict_candidates"] == 8
+
+
+def test_residue_sweep_failure_logs_only_the_exception_class(repo, monkeypatch, caplog):
+    """codex #905 R1 P2:清扫失败的日志只带异常类名——异常文本与 traceback
+    可能带数据库诊断值或私有路径(AGENTS.md 日志规则)。变异钉:改回
+    ``exc_info=True`` 或把异常文本写进消息 → 报红。"""
+    import logging
+
+    service = repo._runtime.knowledge_lifecycle
+    nb = repo.create_notebook(NotebookCreate(name="sweep-log"))
+    _seed_graph(repo, nb.id, doc_objects=2)
+    secret = "/private/secret/path.db: password=hunter2"
+
+    def _sweep(notebook_id, totals):
+        raise ConnectionError(secret)
+
+    monkeypatch.setattr(service, "_sweep_drain_only_residue", _sweep)
+    with caplog.at_level(logging.WARNING):
+        repo.delete_notebook_kg(nb.id)
+    records = [r for r in caplog.records if "residue sweep failed" in r.getMessage()]
+    assert records, "前置不成立:没有记到清扫失败"
+    for record in records:
+        assert "ConnectionError" in record.getMessage()
+        assert secret not in record.getMessage()
+        assert record.exc_info is None and not record.exc_text
+        assert "hunter2" not in caplog.text
+
+
 def test_drain_only_steps_stay_out_of_the_post_commit_survivor_check(
     repo, monkeypatch,
 ):
