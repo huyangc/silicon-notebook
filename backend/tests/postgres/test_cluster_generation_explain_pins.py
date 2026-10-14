@@ -365,7 +365,7 @@ def _a_non_key_index(connection, table: str) -> str:
 
 
 def test_every_visibility_sensitive_pin_runs_in_both_bystander_states():
-    """The five pins that flip with the visibility map take ``bystander_snapshot``,
+    """The pins that flip with the visibility map take ``bystander_snapshot``,
     and the fixture is parametrized over exactly the two states."""
     import ast
     import inspect
@@ -373,6 +373,9 @@ def test_every_visibility_sensitive_pin_runs_in_both_bystander_states():
     from tests.postgres import conftest
     from tests.postgres import test_index_projection_explain_pins as projection
     from tests.postgres import test_memory_sql_explain_pins as memory
+    from tests.postgres import test_mount_sql_viewer_pg as mounts
+    from tests.postgres import test_notebook_list_prefetch_pg as list_prefetch
+    from tests.postgres import test_source_elements_positions_pg as positions
 
     pins = (
         test_cluster_member_rows_keeps_index_only_scan_with_the_predicate,
@@ -380,6 +383,9 @@ def test_every_visibility_sensitive_pin_runs_in_both_bystander_states():
         test_concept_clusters_count_skip_gate_leg_stays_index_only,
         projection.test_memory_exclusion_statements_keep_their_index_paths,
         memory.test_memory_sql_fragments_keep_their_index_paths,
+        mounts.test_the_notebook_list_mounts_keep_the_index_path_at_realistic_scale,
+        list_prefetch.test_the_list_facts_statement_probes_each_notebook_by_index,
+        positions.test_both_shapes_walk_the_order_index_and_never_scan_or_sort_elements,
     )
     for pin in pins:
         assert "bystander_snapshot" in inspect.signature(pin).parameters, pin.__name__

@@ -11,11 +11,12 @@ The twin of ``tests/test_source_elements_positions.py``:
 * ``prepare_source_overview`` cites the promised positions of the stored
   order in batched reads, and shows the visible branch when the document
   shrinks, grows, is deleted or re-parsed after the first page;
-* both statement shapes, custom and generic plan: the per-offset shape is the
-  windowed read's ``Limit`` over ``idx_source_elements_source_created`` for
-  every position; the head walk is one index scan of that index (only or not
-  -- the visibility map is not this pin's business) with hits back by
-  ``pk_source_elements``; nothing scans or sorts ``source_elements``.
+* both statement shapes, custom and generic plan, in both visibility-map
+  states (``bystander_snapshot``): the per-offset shape is the windowed read's
+  ``Limit`` over ``idx_source_elements_source_created`` for every position
+  whatever the visibility map says; with a verified-full map the head walk is
+  one index scan of that index with hits back by ``pk_source_elements`` and
+  nothing scans or sorts ``source_elements``.
 """
 from __future__ import annotations
 
@@ -36,6 +37,10 @@ from app.core.config import Settings
 from app.repositories.read_budget import read_budget
 from app.services.collection_enumeration import SourceItem
 from app.services.document_source_overview import prepare_source_overview
+from tests.postgres.conftest import (
+    scans_with_own_conditions,
+    vacuum_until_all_visible,
+)
 from tests.test_source_elements_positions import assert_promised_positions
 
 pytestmark = [
@@ -93,7 +98,7 @@ def database():
             database.close()
 
 
-def _seed(database) -> None:
+def _seed(database, *, held: bool = False) -> None:
     with database.write() as db:
         db.execute(
             "INSERT INTO notebooks(id,name,created_at,updated_at) VALUES ('nb','nb',%s,%s)",
@@ -133,6 +138,15 @@ def _seed(database) -> None:
         )
     with psycopg.connect(database.settings.database_url, autocommit=True) as raw:
         raw.execute("VACUUM (ANALYZE) sources, source_elements")
+    if not held:
+        _settle(database)
+
+
+def _settle(database) -> None:
+    """VACUUM ``sources`` and ``source_elements`` until their visibility maps
+    are full -- verified, not assumed (see the EXPLAIN pin)."""
+    for table in ("sources", "source_elements"):
+        vacuum_until_all_visible(database.settings.database_url, table)
 
 
 @pytest.fixture
@@ -211,6 +225,18 @@ def _explain(connection, options: str, sql: str, params) -> str:
     return "\n".join(next(iter(row.values())) for row in rows)
 
 
+def _index_keyed(plan: str) -> bool:
+    """Every scan node of ``source_elements`` carries an Index/Recheck Cond on
+    the source or on the element id: no scan reads the table unkeyed."""
+    scans = scans_with_own_conditions(plan, "source_elements")
+    return bool(scans) and all(
+        any(line.split(":", 1)[0] in ("Index Cond", "Recheck Cond")
+            and ("source_id = " in line or "(id = " in line)
+            for line in own)
+        for _node, own in scans
+    )
+
+
 @pytest.mark.parametrize("shape,positions", [
     ("per_offset", [3, 120, DOC - 1]),
     ("per_offset", [DOC - 1]),
@@ -218,8 +244,33 @@ def _explain(connection, options: str, sql: str, params) -> str:
     ("head_walk", list(range(1, 100))),
 ])
 def test_both_shapes_walk_the_order_index_and_never_scan_or_sort_elements(
-    store, database, shape, positions,
+    bystander_snapshot, request, shape, positions,
 ):
+    """Two states (``bystander_snapshot``), because the plan around the walk
+    moves with the visibility map. With no page all-visible (a transaction on
+    the same database older than the seed -- a parallel lane's session, an
+    autoanalyze snapshot) the ``counted`` leg's Index Only Scan is costed as
+    heap visits and becomes a Bitmap Heap Scan, and a head walk over the whole
+    document becomes a Bitmap Heap Scan + Sort: this pin used to go red on
+    those (per_offset included, by the count leg) whenever the module's one
+    VACUUM ran under such a snapshot. Now:
+
+    * both states: the per-offset walk is the ``Limit`` over the order index
+      for every position, the head walk numbers rows with a ``WindowAgg`` and
+      fetches hits by ``pk_source_elements``, every scan of ``source_elements``
+      is keyed (no Seq Scan), and per-offset sorts nothing but ``w.ord``;
+    * no bystander, the module's world VACUUMed until its visibility map is
+      full (checked again right here: a change test may have run first): the
+      exact plan -- no Bitmap Heap Scan, the only sort the final ``w.ord``.
+    """
+    if bystander_snapshot.held:
+        database = request.getfixturevalue("postgres_database")
+        PostgresMigrator(database).migrate()
+        _seed(database, held=True)
+    else:
+        database = request.getfixturevalue("database")
+        _settle(database)
+    store = SourceStore(database, now=lambda: NOW)
     expected_sql = {
         "per_offset": SourceStore._POSITIONS_PER_OFFSET_SQL,
         "head_walk": SourceStore._POSITIONS_HEAD_WALK_SQL,
@@ -233,13 +284,13 @@ def test_both_shapes_walk_the_order_index_and_never_scan_or_sort_elements(
                    .replace("%(span)s", "$3"))
     assert "%(" not in generic_sql
     with database.connect() as connection:
+        bystander_snapshot.assert_visibility_map_blocked(
+            connection, "sources", "source_elements")
         custom = _explain(connection, "COSTS OFF", sql, params)
         generic = _explain(connection, "GENERIC_PLAN, COSTS OFF", generic_sql, ())
     for name, plan in (("custom", custom), ("generic", generic)):
         assert "Seq Scan on source_elements" not in plan, (name, plan)
-        assert "Bitmap Heap Scan on source_elements" not in plan, (name, plan)
-        # the only sort is the final one, by the caller's ordinal
-        assert re.findall(r"Sort Key: (.*)", plan) == ["w.ord"], (name, plan)
+        assert _index_keyed(plan), (name, plan)
         if shape == "per_offset":
             # each position: the windowed read's own Limit over the order index
             assert re.search(
@@ -247,14 +298,21 @@ def test_both_shapes_walk_the_order_index_and_never_scan_or_sort_elements(
                 r"on source_elements", plan,
             ), (name, plan)
             assert "WindowAgg" not in plan, (name, plan)
+            assert re.findall(r"Sort Key: (.*)", plan) == ["w.ord"], (name, plan)
         else:
+            assert "WindowAgg" in plan, (name, plan)
+            assert "Index Scan using pk_source_elements on source_elements" in plan, (
+                name, plan)
+        if bystander_snapshot.held:
+            continue
+        assert "Bitmap Heap Scan on source_elements" not in plan, (name, plan)
+        # the only sort is the final one, by the caller's ordinal
+        assert re.findall(r"Sort Key: (.*)", plan) == ["w.ord"], (name, plan)
+        if shape == "head_walk":
             assert re.search(
                 r"Index (Only )?Scan using idx_source_elements_source_created "
                 r"on source_elements", plan,
             ), (name, plan)
-            assert "WindowAgg" in plan, (name, plan)
-            assert "Index Scan using pk_source_elements on source_elements" in plan, (
-                name, plan)
 
 
 class _Reads:

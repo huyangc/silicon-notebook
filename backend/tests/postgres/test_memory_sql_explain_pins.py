@@ -38,6 +38,7 @@ import pytest
 
 from app.repositories.postgres import memory_sql
 from app.repositories.postgres.migrator import PostgresMigrator
+from tests.postgres.conftest import scans_with_own_conditions
 
 pytestmark = [
     pytest.mark.postgres_integration,
@@ -199,25 +200,6 @@ _SOURCE_LED_OBJECT_SCAN = re.compile(
 )
 
 
-def _scans_with_own_conditions(plan: str, table: str) -> list:
-    """Each scan node of ``table`` with the condition lines directly under it
-    (indented deeper, before the next node) -- never a neighbouring node's."""
-    lines = plan.splitlines()
-    scans = []
-    for at, line in enumerate(lines):
-        if not re.search(rf"\bScan\b.* on {table}\b", line):
-            continue
-        depth = len(line) - len(line.lstrip())
-        own = []
-        for below in lines[at + 1:]:
-            stripped = below.lstrip()
-            if len(below) - len(stripped) <= depth or stripped.startswith("->"):
-                break
-            own.append(stripped)
-        scans.append((line.strip(), own))
-    return scans
-
-
 def test_memory_sql_fragments_keep_their_index_paths(postgres_database, bystander_snapshot):
     plans = _plans(postgres_database, bystander_snapshot)
 
@@ -247,7 +229,7 @@ def test_memory_sql_fragments_keep_their_index_paths(postgres_database, bystande
     assert "Anti Join" in cluster and "SubPlan" not in cluster, cluster
     assert "idx_sources_nb_hidden_type" in cluster, cluster
     assert _SOURCE_LED_OBJECT_SCAN.search(cluster), cluster
-    object_scans = _scans_with_own_conditions(cluster, "knowledge_objects")
+    object_scans = scans_with_own_conditions(cluster, "knowledge_objects")
     assert object_scans, cluster
     for node, own in object_scans:
         assert _SOURCE_LED_OBJECT_SCAN.search(node), (node, cluster)

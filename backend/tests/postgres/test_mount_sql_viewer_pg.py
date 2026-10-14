@@ -23,6 +23,10 @@ from psycopg.types.json import Jsonb
 from app.repositories.postgres import mount_sql as pg_mount_sql
 from app.repositories.postgres._store_utils import normalize_timestamp
 from app.repositories.postgres.migrator import PostgresMigrator
+from tests.postgres.conftest import (
+    scans_with_own_conditions,
+    vacuum_until_all_visible,
+)
 from tests.test_mount_sql_contract import (
     mount_viewer_contract_failures,
     seed_mount_world,
@@ -237,21 +241,45 @@ _PROBE = "nbP0"
 _PIN_VIEWERS = (("member", "u500"), ("mounter", "u7"), ("reader", "u501"), ("empty", None))
 
 
+def held_bystander(request) -> bool:
+    """用例请求了 ``bystander_snapshot`` 时先把它建起来(旁路事务必须早于迁移与灌数),
+    返回它是否持有;没请求就是 False。"""
+    if "bystander_snapshot" not in request.fixturenames:
+        return False
+    return request.getfixturevalue("bystander_snapshot").held
+
+
+def analyze_and_settle(database_url: str, tables, *, held: bool) -> None:
+    """``VACUUM (ANALYZE)`` 给出真实选择度;没有旁路事务时再把每张表 VACUUM 到可见性图
+    全满(``vacuum_until_all_visible``:有界重试,满不了就红并列出挡住水位线的会话)。
+
+    可见性图是这些计划钉的前提:同库有一个早于灌数的事务(并行泳道里的旁路会话、
+    autoanalyze 的快照)时 VACUUM 一页都设不上 all-visible,Index Only Scan 按回表计价,
+    列表语句的驱动就翻成 ``Seq Scan on notebooks n`` + Hash Join(CI run 38563404029 那一红)。
+    以前只 VACUUM 一次、不核对结果,前提悄悄缺席时钉子就随机红。"""
+    with psycopg.connect(database_url, autocommit=True) as raw:
+        for table in tables:
+            raw.execute(f"VACUUM (ANALYZE) {table}")
+    if not held:
+        for table in tables:
+            vacuum_until_all_visible(database_url, table)
+
+
 @pytest.fixture
 def pg_realistic_mounts(request, postgres_database):
-    """`request.param` 本笔记本规模的真实形状夹具,返回 `(database, 规模)`。"""
+    """`request.param` 本笔记本规模的真实形状夹具,返回 `(database, 规模)`。用例同时
+    请求 ``bystander_snapshot`` 时,旁路事务在迁移之前开始(``held_bystander``)。"""
     notebooks = request.param
+    held = held_bystander(request)
     PostgresMigrator(postgres_database).migrate()
     now = normalize_timestamp("2026-01-01T00:00:00+00:00")
     with postgres_database.write() as db:
         db.execute("SET LOCAL statement_timeout = '0'")
         seed_realistic_mount_fixture(db.execute, notebooks, now)
-    # VACUUM 设置可见性图、ANALYZE 给出真实选择度;不能进事务,走独立 autocommit 连接。
-    with psycopg.connect(
-        postgres_database.settings.database_url, autocommit=True
-    ) as raw:
-        for table in _ACCESS_TABLES + ("users", "groups"):
-            raw.execute(f"VACUUM (ANALYZE) {table}")
+    analyze_and_settle(
+        postgres_database.settings.database_url, _ACCESS_TABLES + ("users", "groups"),
+        held=held,
+    )
     return postgres_database, notebooks
 
 
@@ -528,26 +556,69 @@ def facts_plan(connection, ids, viewer, *, generic: bool, seqscan: bool = True) 
 _PER_NOTEBOOK_MOUNT_PROBE = re.compile(
     r"Index Only Scan using pk_notebook_bases on notebook_bases e\s+"
     r"Index Cond: \(notebook_id = n\.id\)")
+# 与可见性图无关的那一半:挂载侧不顺序扫描任何访问控制表(notebooks 只许列表驱动 n
+# 自己顺序扫描),notebook_bases 的每个扫描节点都以被列出的那本库为键走
+# pk_notebook_bases——Index Only Scan、Index Scan 或 Bitmap Index Scan 都算逐本探针。
+_MOUNT_SIDE_SEQ_SCAN = re.compile(
+    r"Seq Scan on (?:notebook_bases|notebook_members|notebook_grants|group_members"
+    r"|notebooks (?!n\b))")
+_MOUNT_PROBE_ANY_ACCESS = re.compile(
+    r"Index (?:Only )?Scan using pk_notebook_bases on notebook_bases e\s+"
+    r"Index Cond: \(notebook_id = n\.id\)"
+    r"|Bitmap Heap Scan on notebook_bases e\s+Recheck Cond: \(notebook_id = n\.id\)\s+"
+    r"->  Bitmap Index Scan on pk_notebook_bases\s+Index Cond: \(notebook_id = n\.id\)")
+
+
+def assert_the_mounts_are_probed_per_notebook(plan: str, where: str) -> None:
+    """列表语句挂载半的不变量,可见性图设没设上都成立(见 ``_MOUNT_SIDE_SEQ_SCAN``)。"""
+    assert not _MOUNT_SIDE_SEQ_SCAN.search(plan), where
+    assert _MOUNT_PROBE_ANY_ACCESS.search(plan), where
+    mount_scans = scans_with_own_conditions(plan, "notebook_bases")
+    assert mount_scans, where
+    for node, own in mount_scans:
+        assert any(
+            line.split(":", 1)[0] in ("Index Cond", "Recheck Cond")
+            and "notebook_id = n.id" in line
+            for line in own
+        ), (node, own, where)
 
 
 @pytest.mark.parametrize("pg_realistic_mounts", sorted(PIN_SCALES), indirect=True)
 def test_the_notebook_list_mounts_keep_the_index_path_at_realistic_scale(
-    pg_realistic_mounts,
+    bystander_snapshot, pg_realistic_mounts,
 ):
     """列表那条语句的挂载半:每档规模、每类查看者(含空查看者)、custom 与 generic、
-    只列探针库与探针库加 499 本两种长度,计划里都没有 `Seq Scan on <访问控制表>`,
-    挂载是逐本 `pk_notebook_bases` 探针;`enable_seqscan=off` 能力判据同上。"""
+    只列探针库与探针库加 499 本两种长度,挂载是逐本 `pk_notebook_bases` 探针,挂载侧
+    不顺序扫描任何访问控制表;`enable_seqscan=off` 能力判据同上(列表驱动 n 也必须有
+    `pk_notebooks` 这条索引路径)。
+
+    两态(``bystander_snapshot``)。列表驱动「逐本 `pk_notebooks` 探针还是顺序扫描
+    notebooks 再 Hash Join」是随可见性图翻转的成本选择:jsonb 列表恒估 100 行,可见性图
+    全满时 100 次 Index Only Scan 便宜,一页都没设上时(旁路事务持有)按回表计价,顺序扫描
+    + Hash Join 更便宜(8000 本:300 对 503)。实测两种驱动在一本、500 本的列表上都是
+    亚毫秒到同量级(PR 描述有数),不是生产回退,所以:
+
+    * 无旁路事务、可见性图核对全满(``analyze_and_settle``)时,钉住完整计划——没有任何
+      `Seq Scan on <访问控制表>`,挂载是 `Index Only Scan using pk_notebook_bases`;
+    * 两态都钉挂载半的不变量(``assert_the_mounts_are_probed_per_notebook``)与能力判据。
+    """
     database, notebooks = pg_realistic_mounts
     with database.connect() as connection:
+        bystander_snapshot.assert_visibility_map_blocked(connection, *_ACCESS_TABLES)
         for ids in ([_PROBE], [_PROBE] + [f"nb{g}" for g in range(1, 500)]):
             for label, viewer in _PIN_VIEWERS:
                 for generic in (False, True):
                     plan = facts_plan(connection, ids, viewer, generic=generic)
                     where = f"{notebooks} 本 / {len(ids)} / {label} / {generic}:\n{plan}"
-                    assert not _SEQ_SCAN.search(plan), where
-                    assert _PER_NOTEBOOK_MOUNT_PROBE.search(plan), where
+                    assert_the_mounts_are_probed_per_notebook(plan, where)
+                    if not bystander_snapshot.held:
+                        assert not _SEQ_SCAN.search(plan), where
+                        assert _PER_NOTEBOOK_MOUNT_PROBE.search(plan), where
                 capability = facts_plan(connection, ids, viewer, generic=False,
                                         seqscan=False)
                 assert not _SEQ_SCAN.search(capability), (
+                    f"{notebooks} 本 / {len(ids)} / {label}(enable_seqscan=off):\n"
+                    f"{capability}")
+                assert re.search(r"Scan using pk_notebooks on notebooks n\b", capability), (
                     f"{notebooks} 本 / {len(ids)} / {label}(enable_seqscan=off):\n"
                     f"{capability}")
