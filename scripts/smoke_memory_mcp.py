@@ -78,6 +78,9 @@ async def run() -> None:
             {
                 "DATABASE_URL": f"sqlite:///{root / 'smoke.db'}",
                 "SILICON_NOTEBOOK_STORAGE_DIR": str(root / "storage"),
+                # The lifespan below starts the diagnostics runtime; keep its
+                # heartbeat out of the checkout's .local/diagnostics.
+                "DIAGNOSTICS_DIR": str(root / "diagnostics"),
                 "SILICON_NOTEBOOK_AUTH_OPTIONAL": "false",
                 "EVENT_LOG_ENABLED": "false",
                 "LLM_LOG_ENABLED": "false",
