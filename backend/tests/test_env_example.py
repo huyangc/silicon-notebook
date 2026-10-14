@@ -11,6 +11,7 @@ from unittest.mock import patch
 from dotenv import dotenv_values
 
 from app.core.config import Settings
+from tests.child_env_testkit import BYTECODE_ENV
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,7 +31,7 @@ def test_env_example_has_the_same_values_in_shell_and_dotenv():
             '"${@:3}"',
             "env-example", str(EXAMPLE), sys.executable, *expected,
         ],
-        env={"PATH": os.defpath},
+        env={"PATH": os.defpath, **BYTECODE_ENV},
         capture_output=True,
         text=True,
         check=False,

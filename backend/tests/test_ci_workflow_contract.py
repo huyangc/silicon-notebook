@@ -9,6 +9,8 @@ import subprocess
 import pytest
 import yaml
 
+from tests.child_env_testkit import BYTECODE_ENV
+
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
@@ -163,7 +165,7 @@ def test_standard_aggregate_executes_fail_closed_for_every_lane(lane, result, tm
         needs[lane]["result"] = result
     completed = subprocess.run(
         ["bash", "-e", "-c", gate["run"]], cwd=tmp_path,
-        env={"PATH": os.defpath, "NEEDS_JSON": json.dumps(needs)},
+        env={"PATH": os.defpath, "NEEDS_JSON": json.dumps(needs), **BYTECODE_ENV},
         capture_output=True, text=True, timeout=10,
     )
     assert completed.returncode == (0 if result == "success" else 1), completed.stderr

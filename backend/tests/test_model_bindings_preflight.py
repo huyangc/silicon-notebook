@@ -25,6 +25,7 @@ from app import main as main_module
 from app.core.config import Settings
 from app.main import _model_bindings_preflight
 from app.services.model_registry import WORKLOADS
+from tests.child_env_testkit import BYTECODE_ENV
 
 
 _SERVICE = """[services.chat]
@@ -354,14 +355,7 @@ def _boot(config: str, **overrides: str) -> subprocess.CompletedProcess:
         "MINERU_API_TOKEN": "",
         "MODEL_SERVICES_CONFIG": config,
         "PREFLIGHT_KEY": "secret",
-        # Bytecode only: the scrubbed environment would otherwise drop the
-        # gate's PYTHONPYCACHEPREFIX and write .pyc files next to the backend
-        # sources. Neither variable changes what the process prints.
-        **(
-            {"PYTHONPYCACHEPREFIX": os.environ["PYTHONPYCACHEPREFIX"]}
-            if os.environ.get("PYTHONPYCACHEPREFIX")
-            else {"PYTHONDONTWRITEBYTECODE": "1"}
-        ),
+        **BYTECODE_ENV,
         **overrides,
     }
     return subprocess.run(
