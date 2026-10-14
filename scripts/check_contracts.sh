@@ -22,6 +22,9 @@ export EXTENSIONS_CONFIG=""
 export MINERU_MODE="off" MINERU_API_TOKEN=""
 mkdir -p "$ROOT_DIR/.local/pycache" "$ROOT_DIR/backend/.local"
 export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
+# Bytecode goes to the gitignored prefix above, so write and reuse it even
+# when the calling shell exports PYTHONDONTWRITEBYTECODE=1 (see check.sh).
+unset PYTHONDONTWRITEBYTECODE
 
 "$PYTHON_BIN" -m py_compile \
   "$ROOT_DIR/backend/app/main.py" \

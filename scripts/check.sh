@@ -13,6 +13,12 @@ export MINERU_MODE="off" MINERU_API_TOKEN=""
 
 mkdir -p "$ROOT_DIR/.local/pycache"
 export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
+# Bytecode, including pytest's rewritten test modules, goes to the gitignored
+# prefix above, never into the source tree. So the gate writes and reuses it
+# even when the calling shell exports PYTHONDONTWRITEBYTECODE=1 (agent
+# sessions do): without a cache every pytest worker recompiles and rewrites
+# every module it imports before its first test.
+unset PYTHONDONTWRITEBYTECODE
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/silicon-check.XXXXXX")"
 declare -a PIDS=()
