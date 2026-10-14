@@ -833,6 +833,7 @@ RESTARTED_ANSWER = (
         '{"answer":"一、先澄',  # restarted mid-sentence
         '{"{"answer',  # two fragments, each repeated by what follows
         '{\n  "answer": "',  # the fragment indented differently
+        '{"answer":"一、' * 12,  # restarted more times than are kept
     ],
 )
 def test_a_restarted_reply_is_read_as_the_object_written(prefix, allow_repair):
@@ -1016,6 +1017,7 @@ def test_an_inner_quote_without_one_reading_stays_malformed(raw, allow_repair):
         "{ " * 20000,
         '{"answer":"x"}' * 2000 + "junk",
         '{"answer":"一、' * 4000,
+        "{} " * 200000 + "x",
         '{"nodes":[' + ",".join(
             '{"local_id":"n%d","name":"x"}' % index for index in range(5000)
         ) + ',{"local_id":"cut',
