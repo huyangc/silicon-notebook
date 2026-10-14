@@ -4239,7 +4239,10 @@ def _group_world_tests() -> None:
     would put ~30 s of import calls on one worker. So the world tests are
     dealt round-robin into ``_WORLD_GROUPS`` groups, and every
     ``first_import`` test joins the first group so the after-import world is
-    built once. Tests that touch no world stay free."""
+    built once. Tests that touch no world stay free. Measured on the full
+    16-worker gate (three interleaved runs per arm, 2026-10-14): dropping the
+    groups cut this file's own busy time by ~4 s but added ~20 s of per-worker
+    world builds and ~1.8 s of gate wall time, so the groups stay."""
     namespace = globals()
     world_tests = [
         name
