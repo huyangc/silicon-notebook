@@ -606,6 +606,90 @@ def test_materialize_empties_every_identity_keyed_process_cache(
     knowhow_api.reset_asset_sweep_throttle()
 
 
+class _SweepMaintenance:
+    def sweep_orphan_assets(self, notebook_id, **_options):
+        return {"removed": 0}
+
+
+class _SweepRepo:
+    maintenance = _SweepMaintenance()
+
+
+_FOREIGN = "nb-not-in-this-world"
+
+
+def test_materialize_restores_what_the_build_warmed_for_its_own_ids(
+    tmp_path_factory, tmp_path, monkeypatch
+):
+    """A self-built world started its test with the caches its build warmed:
+    a count memo keyed by the import-time version, an occupied 300 s sweep
+    throttle, the once-per-notebook orphan sweep marked done. Every copy must
+    start the same way -- and with nothing for ids outside the world."""
+    from app.repositories.sqlite import knowledge_counts_cache as counts
+    from app.services import knowledge_lifecycle
+    from app.services.knowhow import api as knowhow_api
+
+    clock = [1000.0]
+    monkeypatch.setattr(wt, "_monotonic", lambda: clock[0])
+
+    def build(root: Path):
+        repo = SQLiteRepository(Settings())
+        try:
+            fresh = repo.create_notebook(NotebookCreate(name="Fresh")).id
+            stale = repo.create_notebook(NotebookCreate(name="Moved on")).id
+            with repo._connect() as db:
+                counts.type_status_counts(db, fresh)
+                counts.visible_pending_source_count(db, fresh)
+                counts.type_status_counts(db, stale)  # keyed (0, 0) ...
+            with repo._write() as db:  # ... then the world moves to (0, 1)
+                db.execute(
+                    "UPDATE unified_kg_state SET kg_mutation_seq = 1 "
+                    "WHERE notebook_id = ?",
+                    (stale,),
+                )
+        finally:
+            repo.close()
+        with counts._LOCK:
+            counts._CHUNKS[fresh] = ((9, 9), 42)  # beyond the world's version
+            counts._MEMO[_FOREIGN] = ((0, 0), ({}, {}, {}))
+        knowhow_api.maybe_sweep_orphan_assets(_SweepRepo(), fresh, now=clock[0])
+        knowhow_api.maybe_sweep_orphan_assets(_SweepRepo(), _FOREIGN, now=clock[0])
+        with knowledge_lifecycle._ORPHAN_SWEEP_DONE_LOCK:
+            knowledge_lifecycle._ORPHAN_SWEEP_DONE.update({fresh, _FOREIGN})
+        clock[0] = 1100.0  # the build ends 100 s after the sweep
+        return {"fresh": fresh, "stale": stale}
+
+    template = world_template(tmp_path_factory, "warm-caches", build, _reopen_repository)
+    fresh, stale = template.payload["fresh"], template.payload["stale"]
+
+    for attempt in ("first", "second"):
+        clock[0] = 5000.0
+        root, _payload = template.materialize(tmp_path, attempt)
+        # (a) the build's memos are back, the import-time one included.
+        assert set(counts._MEMO) == {fresh, stale}
+        assert counts._MEMO[stale][0] == (0, 0)
+        assert set(counts._VISIBLE_PENDING) == {fresh, stale}  # create_notebook reads it
+        # (b) the throttle is as occupied as right after the build.
+        assert knowhow_api._LAST_ASSET_SWEEP == {fresh: 4900.0}
+        assert knowhow_api.maybe_sweep_orphan_assets(_SweepRepo(), fresh, now=5001.0) is False
+        assert knowledge_lifecycle._ORPHAN_SWEEP_DONE == {fresh}
+        # (c) foreign ids and versions the world never had are gone.
+        assert _FOREIGN not in counts._MEMO and fresh not in counts._CHUNKS
+        # The restored memo is the copy's: a version-checked hit, not a miss.
+        restored = counts._MEMO[fresh][1][2]
+        repo = _repo(root)
+        try:
+            with repo._connect() as db:
+                assert counts.type_status_counts(db, fresh) is restored
+        finally:
+            repo.close()
+        # Whatever this test does to the caches, the next copy starts over.
+        with counts._LOCK:
+            counts._MEMO.pop(fresh)
+            counts._MEMO[_FOREIGN] = ((0, 0), ({}, {}, {}))
+    wt.reset_identity_keyed_process_caches()
+
+
 def test_process_cache_inventory_classifies_every_cache_in_backend_app():
     scanned = wt.scan_process_caches(APP_ROOT)
     unclassified = sorted(scanned - set(PROCESS_CACHE_INVENTORY))
@@ -621,6 +705,15 @@ def test_process_cache_inventory_classifies_every_cache_in_backend_app():
         if kind == IDENTITY_RESET
     }
     assert reset_modules == set(wt._IDENTITY_RESETS)
+    identity_keyed = {
+        entry for entry, kind in PROCESS_CACHE_INVENTORY.items() if kind == IDENTITY_RESET
+    }
+    assert set(wt._RESTORE_POLICY) == identity_keyed
+    assert {
+        entry.split(":")[0]
+        for entry, policy in wt._RESTORE_POLICY.items()
+        if policy != wt.RESET_ONLY
+    } == set(wt._CONTAINER_LOCKS)
     assert set(PROCESS_CACHE_INVENTORY.values()) <= {
         wt.IDENTITY_RESET,
         wt.CONTENT_KEYED,
