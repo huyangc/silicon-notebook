@@ -23,7 +23,9 @@ Build (once per process per key)
   the log variables point at a sibling log directory outside the world, and
   the caller's ``env`` is applied. ``env`` is part of the template identity:
   the same ``key`` with a different ``env``, layout, builder or reopener is a
-  loud error, never a silently shared world.
+  loud error, never a silently shared world. Callbacks are compared by code
+  object, defaults, closure-cell contents and bound ``__self__``, not by
+  name: two closures from one factory share a qualified name.
 * The conftest autouse patches (schema-template copy, fast default password
   hashing) are active exactly as when every test built its own world.
 * The payload must be pure data and survive a JSON round trip. Live objects
@@ -73,6 +75,7 @@ two copies of the same world (``reset_identity_keyed_process_caches``).
 from __future__ import annotations
 
 import copy
+import functools
 import gc
 import hashlib
 import json
@@ -386,9 +389,32 @@ def _embedded_root_paths(root: Path, payload: Any) -> list[str]:
             found.extend(f"{relative}::{hit}" for hit in hits)
         elif any(needle in path.read_bytes() for needle in needles):
             found.append(relative)
-    if _contains(json.dumps(payload), needles):
-        found.append("<payload>")
+    # Walk the strings themselves: ``json.dumps`` escapes non-ASCII, so a
+    # root such as ``.../世界/...`` would never match its UTF-8 needle there.
+    found.extend(
+        f"<payload>{where}"
+        for where, text in _payload_strings(payload)
+        if _contains(text, needles)
+    )
     return found
+
+
+def _payload_strings(value: Any, where: str = "") -> list[tuple[str, str]]:
+    if isinstance(value, str):
+        return [(where, value)]
+    if isinstance(value, (list, tuple)):
+        return [
+            item
+            for index, element in enumerate(value)
+            for item in _payload_strings(element, f"{where}[{index}]")
+        ]
+    if isinstance(value, dict):
+        return [
+            item
+            for key, element in value.items()
+            for item in [(f"{where}<key>", key), *_payload_strings(element, f"{where}[{key!r}]")]
+        ]
+    return []
 
 
 def _open_paths_under(root: Path) -> list[str]:
@@ -629,12 +655,104 @@ class WorldTemplate:
         return root, copy.deepcopy(self.payload)
 
 
+_MATCH_DEPTH = 8
+
+
+def _values_match(left: Any, right: Any, depth: int = 0) -> bool:
+    """Equal values, or functions that are the same callback (see below).
+
+    Anything whose ``==`` raises or is not a plain bool (arrays) only
+    matches itself -- the conservative answer is "a different world".
+    """
+    if left is right:
+        return True
+    if callable(left) and callable(right):
+        return _callables_match(left, right, depth + 1)
+    if isinstance(left, (list, tuple)) and type(left) is type(right):
+        return len(left) == len(right) and all(
+            _values_match(a, b, depth + 1) for a, b in zip(left, right)
+        )
+    if isinstance(left, dict) and type(left) is type(right):
+        return left.keys() == right.keys() and all(
+            _values_match(left[name], right[name], depth + 1) for name in left
+        )
+    try:
+        equal = left == right
+    except Exception:  # noqa: BLE001 - incomparable means "not the same"
+        return False
+    return equal if type(equal) is bool else False
+
+
+def _cell_contents(function: Any) -> tuple[Any, ...]:
+    contents = []
+    for cell in function.__closure__ or ():
+        try:
+            contents.append(cell.cell_contents)
+        except ValueError:  # an empty cell
+            contents.append(_EMPTY_CELL)
+    return tuple(contents)
+
+
+_EMPTY_CELL = object()
+
+
+def _callables_match(left: Any, right: Any, depth: int = 0) -> bool:
+    """Whether two callbacks build the same world.
+
+    A qualified name is not enough: every closure from one factory, every
+    lambda on one line and every bound method of one class share it. The
+    same code object with equal defaults, equal closure-cell contents and an
+    equal bound ``__self__`` is the same callback, so a fixture that recreates
+    an identical closure per test still reuses its world; anything else that
+    is not the very same object is a different world.
+    """
+    if left is right:
+        return True
+    if depth > _MATCH_DEPTH:
+        return False
+    if isinstance(left, functools.partial) or isinstance(right, functools.partial):
+        return (
+            isinstance(left, functools.partial)
+            and isinstance(right, functools.partial)
+            and _callables_match(left.func, right.func, depth + 1)
+            and _values_match(left.args, right.args, depth + 1)
+            and _values_match(left.keywords, right.keywords, depth + 1)
+        )
+    left_function = getattr(left, "__func__", None)
+    right_function = getattr(right, "__func__", None)
+    if left_function is not None or right_function is not None:  # bound methods
+        return (
+            left_function is not None
+            and right_function is not None
+            and _values_match(left.__self__, right.__self__, depth + 1)
+            and _callables_match(left_function, right_function, depth + 1)
+        )
+    left_code = getattr(left, "__code__", None)
+    right_code = getattr(right, "__code__", None)
+    if left_code is None or right_code is None or left_code != right_code:
+        return False
+    return (
+        _values_match(left.__defaults__, right.__defaults__, depth + 1)
+        and _values_match(left.__kwdefaults__, right.__kwdefaults__, depth + 1)
+        and _values_match(_cell_contents(left), _cell_contents(right), depth + 1)
+    )
+
+
 @dataclass(frozen=True)
 class _Spec:
     layout: str
     env: tuple[tuple[str, str], ...]
     build: str
     reopen: str
+    build_callable: Callable[[Path], Any] = field(compare=False, repr=False)
+    reopen_callable: Callable[[Path], Any] = field(compare=False, repr=False)
+
+    def matches(self, other: "_Spec") -> bool:
+        return (
+            self == other
+            and _callables_match(self.build_callable, other.build_callable)
+            and _callables_match(self.reopen_callable, other.reopen_callable)
+        )
 
 
 _TEMPLATES: dict[tuple[str, str], tuple[_Spec, WorldTemplate]] = {}
@@ -671,16 +789,19 @@ def world_template(
         env=tuple(sorted(env.items())),
         build=_callable_name(build),
         reopen=_callable_name(reopen),
+        build_callable=build,
+        reopen_callable=reopen,
     )
     base = tmp_path_factory.getbasetemp()
     registry_key = (str(base), key)
     cached = _TEMPLATES.get(registry_key)
     if cached is not None:
         cached_spec, template = cached
-        if cached_spec != spec:
+        if not cached_spec.matches(spec):
             raise WorldTemplateError(
-                f"world key {key!r} was already built as {cached_spec}; "
-                f"refusing to reuse it for {spec} (fold the difference into the key)"
+                f"world key {key!r} was already built as {cached_spec} by "
+                f"different callbacks or settings; refusing to reuse it for "
+                f"{spec} (fold the difference into the key)"
             )
         return template
 

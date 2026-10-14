@@ -196,6 +196,59 @@ def test_key_reused_with_different_settings_is_rejected(tmp_path_factory):
     assert builds == ["8", "16"]
 
 
+def _closure_builder(rows: tuple[str, ...]):
+    def build(root: Path):
+        _raw_world(root, rows=rows).close()
+        return {}
+
+    return build
+
+
+class _BoundBuilder:
+    def __init__(self, rows: tuple[str, ...]) -> None:
+        self.rows = rows
+
+    def build(self, root: Path):
+        _raw_world(root, rows=self.rows).close()
+        return {}
+
+
+@pytest.mark.parametrize(
+    ("same_callable", "equal_callable", "other_callable"),
+    [
+        pytest.param(
+            _closure_builder(("alpha",)),
+            _closure_builder(("alpha",)),
+            _closure_builder(("beta",)),
+            id="factory-closures",
+        ),
+        pytest.param(
+            _BoundBuilder(("alpha",)).build,
+            None,
+            _BoundBuilder(("alpha",)).build,
+            id="bound-methods",
+        ),
+    ],
+)
+def test_key_reuse_compares_callbacks_not_just_their_names(
+    tmp_path_factory, same_callable, equal_callable, other_callable, request
+):
+    """Every closure of one factory (and every bound method of one class)
+    has the same qualified name; a name-only check would hand the second
+    caller the first caller's world."""
+    key = f"callback-identity-{request.node.callspec.id}"
+    template = world_template(tmp_path_factory, key, same_callable, _reopen_nothing)
+    assert world_template(tmp_path_factory, key, same_callable, _reopen_nothing) is template
+    if equal_callable is not None:
+        # A fixture that recreates an identical closure per test reuses it.
+        assert (
+            world_template(tmp_path_factory, key, equal_callable, _reopen_nothing)
+            is template
+        )
+    with pytest.raises(WorldTemplateError, match="different callbacks"):
+        world_template(tmp_path_factory, key, other_callable, _reopen_nothing)
+
+
 def test_build_refuses_a_test_that_already_opened_the_app_repository(
     tmp_path_factory,
 ):
@@ -357,6 +410,30 @@ def test_relocatable_world_embedding_its_build_root_is_rejected(
 
     with pytest.raises(WorldTemplateError, match="embeds its build root"):
         world_template(tmp_path_factory, f"embedded-{where}", build, _reopen_nothing)
+
+
+class _NonAsciiBaseTemp:
+    """Only ``getbasetemp()`` is read from the factory."""
+
+    def __init__(self, base: Path) -> None:
+        self._base = base
+
+    def getbasetemp(self) -> Path:
+        return self._base
+
+
+@pytest.mark.parametrize("where", ["payload", "row"])
+def test_non_ascii_build_root_is_still_found(tmp_path, where):
+    base = tmp_path / "世界"
+    base.mkdir()
+
+    def build(root: Path):
+        assert "世界" in str(root)
+        _raw_world(root, rows=(str(root) if where == "row" else "plain",)).close()
+        return {"dir": str(root)} if where == "payload" else {}
+
+    with pytest.raises(WorldTemplateError, match="embeds its build root"):
+        world_template(_NonAsciiBaseTemp(base), f"non-ascii-{where}", build, _reopen_nothing)
 
 
 def _build_uploaded_source(root: Path):
