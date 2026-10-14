@@ -267,3 +267,49 @@ test("the failed-delete notice shown on the list goes away when a table is opene
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(server.log).toEqual([LIST, DETAIL, DELETE, TWIN_DETAIL]);
 });
+
+test("a failed delete of a table whose detail never loaded names it from the table list", async () => {
+  // The delete button stays usable when the table's detail failed to load, so the
+  // notice cannot rely on the detail's title.
+  const server = routeTwoTables();
+  server.once("GET", "/notebooks/nb-1/knowhow/t-rec", { status: 500, json: { detail: "boom" } });
+  const release = server.hold("DELETE", "/notebooks/nb-1/knowhow/t-rec");
+  const user = userEvent.setup();
+  renderPanel();
+  await user.click(await screen.findByRole("button", { name: "打开表格：排障记录" }));
+  expect(await screen.findByText("加载表格详情失败，请重试")).toBeInTheDocument();
+  await user.click(screen.getByTitle("删除表"));
+  await user.click(screen.getByRole("button", { name: "确认删除" }));
+  expect(await screen.findByRole("button", { name: "删除中…" })).toBeDisabled();
+  await user.click(screen.getByRole("button", { name: "返回" }));
+  await user.click(await screen.findByRole("button", { name: "打开表格：第二张表" }));
+  await screen.findByRole("heading", { name: "第二张表" });
+
+  release({ status: 500, json: { detail: "boom" } });
+  expect(await screen.findByRole("alert")).toHaveTextContent("「排障记录」没有删除成功，请重新打开这张表再删一次。");
+  await settle();
+  expect(server.log).toEqual([LIST, DETAIL, DELETE, TWIN_DETAIL]);
+});
+
+test("a failed delete of a table known neither by detail nor by the list uses a sentence without a name", async () => {
+  // The list failed to load and the cited table's detail is still loading when the
+  // user deletes it, so no title is known: the notice must not read 「」.
+  const server = suite.server();
+  server.on("GET", "/notebooks/nb-1/knowhow", { status: 500, json: { detail: "boom" } });
+  server.hold("GET", "/notebooks/nb-1/knowhow/t-rec");
+  const release = server.hold("DELETE", "/notebooks/nb-1/knowhow/t-rec");
+  const user = userEvent.setup();
+  renderPanel({ initialTableId: "t-rec" });
+  await user.click(await screen.findByTitle("删除表"));
+  await user.click(screen.getByRole("button", { name: "确认删除" }));
+  expect(await screen.findByRole("button", { name: "删除中…" })).toBeDisabled();
+  await user.click(screen.getByRole("button", { name: "返回" }));
+  expect(await screen.findByText("加载 knowhow 表失败，请重试")).toBeInTheDocument();
+
+  release({ status: 500, json: { detail: "boom" } });
+  const notice = await screen.findByRole("alert");
+  expect(notice).toHaveTextContent("有一张表没有删除成功，请重新打开它再删一次。");
+  expect(notice.textContent).not.toContain("「」");
+  await settle();
+  expect(server.log).toEqual([LIST, DETAIL, DELETE]);
+});

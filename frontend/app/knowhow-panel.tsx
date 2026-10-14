@@ -510,7 +510,10 @@ export function KnowhowPanel({
   async function confirmDeleteTable() {
     if (!selectedTableId) return;
     const deletedTableId = selectedTableId;
-    const deletedTitle = detail?.title ?? "";
+    // 表详情加载失败或还在加载时也能删表：标题先取 detail，取不到再按 id 去清单里找。
+    const deletedTitle = detail?.title
+      || knowhowTableList.view.tables?.find((table) => table.id === deletedTableId)?.title
+      || "";
     setDeleting(true);
     setActionError(null);
     try {
@@ -530,7 +533,9 @@ export function KnowhowPanel({
         setActionError("删除失败，请重试");
         setConfirmDelete(false);
       } else {
-        setDeleteNotice(`「${deletedTitle}」没有删除成功，请重新打开这张表再删一次。`);
+        setDeleteNotice(deletedTitle
+          ? `「${deletedTitle}」没有删除成功，请重新打开这张表再删一次。`
+          : "有一张表没有删除成功，请重新打开它再删一次。");
       }
     }
   }
