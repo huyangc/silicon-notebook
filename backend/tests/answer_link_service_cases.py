@@ -229,6 +229,12 @@ def issue_ttl_is_validated_never_clamped(env):
     for bad in (0, -1, 169):
         with pytest.raises(ValueError):
             _issue(env, job_id, principal, ttl_hours=bad)
+    # Not a whole number of hours: refused, never truncated or coerced.
+    for bad in (1.5, 2.0, True, "2"):
+        with pytest.raises(ValueError):
+            _issue(env, job_id, principal, ttl_hours=bad)
+    # Nothing was issued by the refusals.
+    assert _issue(env, job_id, principal, ttl_hours=1).reused is False
     with pytest.raises(ValueError):
         _issue(env, "conv-not-a-job", principal)
     assert answer_link_job_kind("gask-1") == "global"
@@ -411,6 +417,49 @@ def browser_job_running_job_evidence_job_deleted_job_are_none(env):
     assert _resolve(env, _link_token(_issue(env, foreign_job, principal))) is None
 
 
+class _CountingRepo:
+    """Counts the reads an open makes, delegating everything to the real one."""
+
+    def __init__(self, repo):
+        self._repo = repo
+        self.calls: list[str] = []
+
+    def __getattr__(self, name):
+        attr = getattr(self._repo, name)
+        if callable(attr):
+            def counted(*args, **kwargs):
+                self.calls.append(name)
+                return attr(*args, **kwargs)
+            return counted
+        return attr
+
+
+def notebook_open_reads_the_token_once_and_no_trace(env):
+    """One read of the issuing token's row per open (the refreshed principal
+    carries every later token check), and the job's state comes with its
+    origin: the trace-loading detail read is never made."""
+    case = _ready(env, scopes=("ask", "read"), memory=True)
+    store = env.repo._runtime.memory_service.store
+    rows: list[str] = []
+    original = store.agent_token_auth_row
+
+    def counting_auth_row(token_id):
+        rows.append(token_id)
+        return original(token_id)
+
+    store.agent_token_auth_row = counting_auth_row
+    counting = _CountingRepo(env.repo)
+    try:
+        row = resolve_answer_link(case.token, store=env.store, repo=counting,
+                                  global_service=env.global_service)
+    finally:
+        del store.agent_token_auth_row
+    assert row is not None
+    assert rows == [case.principal.token_id]
+    assert "ask_job_detail" not in counting.calls
+    assert "require_agent_access" not in counting.calls
+
+
 def ambient_request_user_does_not_change_the_answer(env):
     """The anonymous resolve takes every identity from the link row: an
     administrator bound as the request user neither rescues a dead link nor
@@ -562,6 +611,7 @@ CASES = {
     "unmounted_quoted_library_is_none": unmounted_quoted_library_is_none,
     "memory_job_without_memory_read_now_is_none": memory_job_without_memory_read_now_is_none,
     "browser_job_running_job_evidence_job_deleted_job_are_none": browser_job_running_job_evidence_job_deleted_job_are_none,
+    "notebook_open_reads_the_token_once_and_no_trace": notebook_open_reads_the_token_once_and_no_trace,
     "ambient_request_user_does_not_change_the_answer": ambient_request_user_does_not_change_the_answer,
     "global_link_delegates_to_public_answer_job_with_allowlist": global_link_delegates_to_public_answer_job_with_allowlist,
     "global_link_rechecks_the_issuer_before_delegating": global_link_rechecks_the_issuer_before_delegating,

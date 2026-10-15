@@ -73,14 +73,19 @@ def issue_answer_link(
     ``ttl_hours`` (``None`` = the deployment default) only shapes a NEW link
     and must lie in ``1..MCP_ANSWER_LINK_TTL_HOURS`` -- out of range is a
     ``ValueError``, never clamped (the MCP layer reports ``invalid_argument``
-    before calling). Authorization to issue (the token's ``allow_answer_links``
+    before calling); so is anything but a plain ``int`` (a ``bool``, or a
+    ``1.5`` that ``int()`` would quietly truncate). Authorization to issue (the token's ``allow_answer_links``
     and its right to read the job) is the caller's gate."""
     base = str(getattr(settings, "public_web_base_url", "") or "").rstrip("/")
     if not base:
         raise AnswerLinkUnavailable()
     job_kind = answer_link_job_kind(job_id)
     ceiling = int(settings.mcp_answer_link_ttl_hours)
-    hours = ceiling if ttl_hours is None else int(ttl_hours)
+    if ttl_hours is not None and (
+        isinstance(ttl_hours, bool) or not isinstance(ttl_hours, int)
+    ):
+        raise ValueError("link_ttl_hours must be a whole number of hours")
+    hours = ceiling if ttl_hours is None else ttl_hours
     if hours < 1 or hours > ceiling:
         raise ValueError(f"link_ttl_hours must be within 1..{ceiling}")
     issued = store.issue_answer_link(
@@ -174,23 +179,32 @@ def _notebook_row(repo: Any, principal: Any, job_id: str, owner: str) -> dict | 
     ):
         return None
     notebook_id = str(origin.get("notebook_id") or "")
-    try:
-        repo.require_agent_access(principal, "ask:execute", notebook_id)
-        # A run that had the private-Memory channel open (a row without the
-        # fact counts as open) is replayed only to a token that may read
-        # Memory now -- the token holder's standing consent replaces the
-        # share's per-publish disclosure handshake.
-        if origin.get("memory_access", True):
-            repo.require_agent_access(principal, "memory:read", notebook_id)
-    except PermissionError:
+    # ``require_agent_access``'s checks, run on the principal ``_live_issuer``
+    # refreshed a moment ago rather than re-reading the token row for each
+    # capability: that refresh already found the token alive (not revoked or
+    # expired, profile active, owner eligible) under the link's owner, so
+    # what is left is the tier and the allowlist -- judged against ONE
+    # snapshot of the token instead of three. The owner's read access to the
+    # notebook is the first check of the snapshot predicate below (same
+    # ``user_can_read_notebook(notebook_id, owner)``), so it is not read twice.
+    if (
+        not principal_has_capability(principal, "ask:execute")
+        or notebook_id not in set(principal.notebook_ids or ())
+    ):
         return None
-    try:
-        detail = repo.ask_job_detail(job_id)
-    except KeyError:
+    # A run that had the private-Memory channel open (a row without the fact
+    # counts as open) is replayed only to a token that may read Memory now --
+    # the token holder's standing consent replaces the share's per-publish
+    # disclosure handshake. Same notebook, so only the tier is left to check.
+    if origin.get("memory_access", True) and not principal_has_capability(
+        principal, "memory:read"
+    ):
         return None
-    if detail.get("status") != "done" or detail.get("output") == "evidence":
+    # Where the job stands comes with its origin: no trace is loaded on an
+    # anonymous open.
+    if origin.get("status") != "done" or origin.get("output") == "evidence":
         return None
-    answer = repo.ask_answer_detail(str(detail.get("answer_id") or ""))
+    answer = repo.ask_answer_detail(str(origin.get("answer_id") or ""))
     if answer is None:
         return None
     row = {
