@@ -142,6 +142,30 @@ def test_edges_index_the_original_reply_array_and_drop_with_a_dropped_node(beta_
     )
 
 
+def test_a_null_node_survives_shared_normalisation_as_a_hole():
+    """JSON mode: the scheduler's shape walk runs before extract_window, and a
+    null node it removed would shift every later position, re-pointing the
+    edge 1 -> 2 (Alpha -> Beta) at Beta -> Gamma."""
+    from app.core.model_json import validate_model_json_shape
+    from app.services.kg.extract import _KG_SCHEMA_HINT
+
+    raw = json.dumps({"nodes": [
+        None,
+        {"type": "Claim", "name": "Alpha", "ev": 0},
+        {"type": "Claim", "name": "Beta", "ev": 0},
+        {"type": "Claim", "name": "Gamma", "ev": 0},
+    ], "edges": [{"type": "supports", "source": 1, "target": 2}]})
+    delivered = validate_model_json_shape(raw, _KG_SCHEMA_HINT).content
+
+    class Normalised:
+        def chat_json(self, messages, response_schema_hint):
+            return delivered
+
+    nodes, edges = extract_window(Normalised(), ELEMENTS, "1", "textbook")
+    names = {node.id: node.name for node in nodes}
+    assert [(names[e.source_id], names[e.target_id]) for e in edges] == [("Alpha", "Beta")]
+
+
 def test_refine_dropping_a_node_drops_its_edges_without_shifting_the_rest():
     class Refining:
         configured = True

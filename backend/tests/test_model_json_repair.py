@@ -1399,6 +1399,16 @@ def test_nested_and_optional_root_nulls_are_not_drift():
     assert json.loads(paper.content) == {"is_paper": False}
 
 
+def test_a_null_in_a_positional_list_stays_in_place_and_is_reported():
+    shape = validate_model_json_shape(
+        '{"nodes":[null,{"name":"a"}],"edges":[]}',
+        '{"nodes":[{"name":""}],"edges":[{"source":0}]}',
+    )
+
+    assert json.loads(shape.content)["nodes"] == [None, {"name": "a"}]
+    assert [(item.path, item.fix) for item in shape.deviations] == [("nodes[0]", "")]
+
+
 def test_list_items_still_report_drift_from_the_first_example_item():
     # The strict schema admits every advertised item kind; the shape walk
     # judges items by the first example only, and that mismatch still counts.
