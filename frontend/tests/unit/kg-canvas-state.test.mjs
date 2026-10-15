@@ -55,3 +55,10 @@ test("普通空图仍然是 empty，没被大库状态借走", () => {
 test("有可见节点时正常出图", () => {
   assert.equal(kgCanvasState(GRAPH({ total_nodes: 3 }), false, 3), "graph");
 });
+
+test("过期旧图在后台刷新时照样出图，不被构建卡片盖住", () => {
+  // 建好图谱后又新增来源：后端先交出旧的折叠图，后台刷新，并回 viz_building:true
+  // 让前端轮询换新图。把「有可见节点就出图」挪回「在建」之后，这条会红——画布会
+  // 盖成「图谱索引构建中」卡片，把一张能用的图藏起来。
+  assert.equal(kgCanvasState(GRAPH({ viz_building: true, total_nodes: 3 }), true, 3), "graph");
+});

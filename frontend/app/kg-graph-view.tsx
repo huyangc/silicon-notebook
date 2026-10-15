@@ -232,6 +232,7 @@ export function KgGraphView({
     | "selectedNodeId"
     | "selectedTypes"
     | "status"
+    | "vizBuilding"
   >;
   fgData: { nodes: FgNode[]; links: FgLink[]; searchHitCount: number };
   kgCanvas: "loading" | "building" | "unavailable" | "empty" | "graph";
@@ -422,6 +423,8 @@ export function KgGraphView({
             <p className="tool-hint" style={{ margin: "4px 2px 0" }}>
               {kgGraph.rangeBusy
                 ? "加载中…"
+                : kgGraph.vizBuilding && kgGraph.graph.nodes.length > 0
+                  ? "图谱有更新，正在后台刷新，完成后自动换上新图…"
                 : kgGraph.graph.truncated
                   ? `已载 ${kgGraph.graph.nodes.length} / 共 ${kgGraph.graph.total_nodes ?? kgGraph.graph.nodes.length} 节点 · 按连接度，可扩大范围`
                   : `共 ${kgGraph.graph.total_nodes ?? kgGraph.graph.nodes.length} 节点（已全部显示）`}
