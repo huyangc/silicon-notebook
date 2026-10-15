@@ -6074,9 +6074,11 @@ class KnowledgeLifecycleService:
                         # LLM 阶段的分块回调兼认领心跳(R13):merge review
                         # 可以单阶段跑数小时,只靠 stage 边界续租不够。
                         self._refresh_generation_lease(notebook_id, generation)
+                        # Rows checkpointed before canonical_name was retired
+                        # still carry it; the reader below takes only
+                        # decision/confidence, so they resume unchanged.
                         rows = [(id_to_key[d["candidate_id"]],
-                                 {"decision": d["decision"], "confidence": d["confidence"],
-                                  "canonical_name": d.get("canonical_name", "")})
+                                 {"decision": d["decision"], "confidence": d["confidence"]})
                                 for d in chunk_decisions if d.get("candidate_id") in id_to_key]
                         if rows:
                             self.unified_kg.checkpoint_put(
