@@ -56,6 +56,51 @@ def test_citation_cleanup_strips_chinese_bracket_markers():
     assert _clean_answer("结论【k1】、证据【k2，k3】与编号【1，2】。") == "结论、证据与编号。"
 
 
+@pytest.mark.parametrize("field", ["title", "content_md"])
+@pytest.mark.parametrize("invalid", [["不是正文"], {"text": "不是正文"}, True, 7])
+def test_preview_wrong_typed_prose_uses_original_answer(field, invalid):
+    from app.api.memory_routes import _answer_memory_preview_result
+    from app.core.model_json import validate_model_json_shape
+
+    class Client:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            reply = {"title": "模型标题", "content_md": "模型正文", "tags": []}
+            reply[field] = invalid
+            return validate_model_json_shape(json.dumps(reply), schema_hint).content
+
+    result = _answer_memory_preview_result("answer-1", {
+        "question": "原始问题", "answer": "原答案 [k1]。", "notebook_id": "nb-1",
+        "evidence_level": "grounded", "citations": [],
+    }, False, Client())
+    assert result.title == "原始问题"
+    assert result.content_md == "原答案。"
+    assert result.tags == []
+
+
+def test_preview_drops_wrong_typed_tags_while_preserving_valid_prose():
+    from app.api.memory_routes import _answer_memory_preview_result
+    from app.core.model_json import validate_model_json_shape
+
+    class Client:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return validate_model_json_shape(json.dumps({
+                "title": "模型标题", "content_md": "模型正文",
+                "tags": [" 有效标签 ", ["无效"], {"name": "无效"}, True, 7],
+            }), schema_hint).content
+
+    result = _answer_memory_preview_result("answer-1", {
+        "question": "原始问题", "answer": "原答案", "notebook_id": "nb-1",
+        "evidence_level": "grounded", "citations": [],
+    }, False, Client())
+    assert result.title == "模型标题"
+    assert result.content_md == "模型正文"
+    assert result.tags == ["有效标签"]
+
+
 def test_preview_falls_back_deterministically_without_persisting(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'preview.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))

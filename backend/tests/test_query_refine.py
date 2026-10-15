@@ -113,6 +113,29 @@ def test_refine_context_prepends_focused_evidence(repo):
     assert out.startswith("Focused relevant evidence")
     assert "k1: [concept][personal] Engram" in out
 
+
+@pytest.mark.parametrize("relevant", [
+    [["bad"] , {"text": "bad"}, True, 7],
+    [" retained fact ", ["bad"], {"text": "bad"}, True, 7],
+])
+def test_refine_context_drops_wrong_typed_items(repo, relevant):
+    from app.core.model_json import validate_model_json_shape
+
+    class Client:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return validate_model_json_shape(
+                json.dumps({"relevant": relevant}), schema_hint,
+            ).content
+
+    original = "k1: original evidence"
+    result = repo._refine_context("q", original, Client())
+    if isinstance(relevant[0], str):
+        assert result == "Focused relevant evidence (for this question):\n- retained fact\n\n" + original
+    else:
+        assert result == original
+
 def test_refine_context_noop_when_disabled(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "kg_query_refine_enabled", False)
     cb = "k1: [concept][personal] Engram"

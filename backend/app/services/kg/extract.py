@@ -492,6 +492,16 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
     data = safe_json(raw)
     nodes: List[Node] = []
     by_local = {}
+    # IDs identify model-declared nodes, independently of whether those nodes
+    # ground successfully. A repeated ID is ambiguous even when only one of
+    # its declarations survives grounding; do not guess which one an edge meant.
+    local_id_counts = Counter(
+        item["local_id"]
+        for item in _list_items(data.get("nodes"))
+        if isinstance(item, dict)
+        and isinstance(item.get("local_id"), str)
+        and item["local_id"].strip()
+    )
     type_by_node_id: Dict[str, str] = {}
     for it in _list_items(data.get("nodes")):
         name = _name_str(it.get("name")) if isinstance(it, dict) else ""
@@ -509,8 +519,9 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
             node.validity_scope = _parse_validity_scope(it.get("validity_scope"))
         nodes.append(node)
         type_by_node_id[nid] = node.type
-        if it.get("local_id"):
-            by_local[str(it["local_id"])] = nid
+        local_id = it.get("local_id")
+        if isinstance(local_id, str) and local_id_counts[local_id] == 1:
+            by_local[local_id] = nid
     if gleaning_rounds and nodes:
         # Gleaning only ever ADDS to a window the first pass already
         # extracted; a fault inside it must not discard those nodes. The
@@ -558,7 +569,10 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
             )
             rejected_edges[(category, "unknown_edge_type")] += 1
             continue
-        s = by_local.get(str(it.get("source"))); t = by_local.get(str(it.get("target")))
+        source = it.get("source")
+        target = it.get("target")
+        s = by_local.get(source) if isinstance(source, str) else None
+        t = by_local.get(target) if isinstance(target, str) else None
         if not s or not t or s == t:
             rejected_edges[(it["type"], "missing_or_self_endpoint")] += 1
             continue

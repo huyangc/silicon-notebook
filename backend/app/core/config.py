@@ -224,6 +224,10 @@ class Settings(BaseSettings):
         60,
         validation_alias="OPENAI_COMPAT_TIMEOUT_SECONDS",
     )
+    model_json_schema_probe_timeout_seconds: float = Field(
+        30, ge=1, le=300,
+        validation_alias="MODEL_JSON_SCHEMA_PROBE_TIMEOUT_SECONDS",
+    )
     # Extra attempts on transient connection/timeout errors (total = 1 + this).
     # We drive retries ourselves with the SDK's max_retries pinned to 0.
     openai_compat_max_retries: int = Field(

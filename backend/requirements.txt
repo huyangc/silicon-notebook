@@ -30,3 +30,4 @@ hnswlib>=0.8.0
 scipy>=1.11
 orjson>=3
 json-repair==0.63.3  # bounded fallback for malformed JSON model responses
+jsonschema>=4.23,<5  # validate provider-constrained JSON against the actual wire schema

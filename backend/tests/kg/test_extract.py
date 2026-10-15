@@ -80,6 +80,53 @@ def test_extract_window_empty_elements():
     assert nodes == [] and edges == []
 
 
+def test_non_string_node_ids_cannot_overwrite_string_identity():
+    class MalformedIds:
+        def chat_json(self, messages, response_schema_hint):
+            return json.dumps({"nodes": [
+                {"local_id": "1", "type": "Claim", "name": "Alpha", "ev": 0},
+                {"local_id": 1, "type": "Claim", "name": "Beta", "ev": 0},
+                {"local_id": "target", "type": "Claim", "name": "Gamma", "ev": 0},
+            ], "edges": [
+                {"type": "supports", "source": "1", "target": "target"},
+                {"type": "supports", "source": 1, "target": "target"},
+                {"type": "supports", "source": "target", "target": 1},
+            ]})
+
+    nodes, edges = extract_window(MalformedIds(), ELEMENTS, "1", "textbook")
+    assert {node.name for node in nodes} == {"Alpha", "Beta", "Gamma"}
+    names = {node.id: node.name for node in nodes}
+    assert [(names[edge.source_id], names[edge.target_id]) for edge in edges] == [
+        ("Alpha", "Gamma"),
+    ]
+
+
+@pytest.mark.parametrize("duplicate_ev", [0, 99])
+def test_duplicate_local_ids_preserve_nodes_but_never_bind_ambiguous_edges(duplicate_ev):
+    class DuplicateIds:
+        def chat_json(self, messages, response_schema_hint):
+            return json.dumps({"nodes": [
+                {"local_id": "a", "type": "Claim", "name": "Alpha", "ev": 0},
+                {"local_id": "a", "type": "Claim", "name": "Beta", "ev": duplicate_ev},
+                {"local_id": "b", "type": "Claim", "name": "Gamma", "ev": 0},
+                {"local_id": "c", "type": "Claim", "name": "Delta", "ev": 0},
+            ], "edges": [
+                {"type": "supports", "source": "a", "target": "b"},
+                {"type": "supports", "source": "b", "target": "a"},
+                {"type": "supports", "source": "b", "target": "c"},
+            ]})
+
+    nodes, edges = extract_window(DuplicateIds(), ELEMENTS, "1", "textbook")
+    assert {node.name for node in nodes} == (
+        {"Alpha", "Beta", "Gamma", "Delta"} if duplicate_ev == 0
+        else {"Alpha", "Gamma", "Delta"}
+    )
+    names = {node.id: node.name for node in nodes}
+    assert [(names[edge.source_id], names[edge.target_id]) for edge in edges] == [
+        ("Gamma", "Delta"),
+    ]
+
+
 def test_extract_window_propagates_task_abort():
     class AbortedClient:
         def chat_json(self, messages, response_schema_hint):

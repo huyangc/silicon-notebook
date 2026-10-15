@@ -2897,6 +2897,67 @@ def test_final_editor_reports_uncovered_intent_without_rewriting_sections(repo, 
     assert "notebook_id" not in editor_timings[0]
 
 
+@pytest.mark.parametrize("contradictions", [
+    [" 真实冲突 ", ["假冲突"], {"text": "假冲突"}, True, 7],
+    {"text": "假冲突"},
+])
+def test_final_editor_discards_wrong_typed_notes_and_contradictions(repo, contradictions):
+    from app.core.model_json import validate_model_json_shape
+
+    class Client:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return validate_model_json_shape(json.dumps({
+                "summary": "执行摘要",
+                "coverage": [{"intent_id": "intent-1", "covered": False,
+                              "note": {"text": "假说明"}}],
+                "contradictions": contradictions,
+            }), schema_hint).content
+
+    nb = _mk_nb(repo)
+    engine = _mk_engine(repo, Client())
+    catalog = [{"id": "intent-1", "title": "机理", "question": "解释机理",
+                "retrieval_queries": ["mechanism"]}]
+    outline = [{"title": "机理", "scope": "解释", "sub_queries": ["q"],
+                "intent_ids": ["intent-1"], "intent_catalog": catalog}]
+    sections = [{"title": "机理", "markdown": "## 机理\n原有正文", "grounded": True,
+                 "intent_ids": ["intent-1"], "id_map": {}}]
+    report_id = repo.create_report(nb.id, "q")
+    markdown, gaps, _ = engine._assemble(nb.id, report_id, "q", outline, sections)
+    assert "执行摘要" in markdown and "原有正文" in markdown
+    assert "必答主题「机理」回答不完整" in gaps
+    assert "假说明" not in markdown and "假冲突" not in markdown
+    if isinstance(contradictions, list):
+        assert "跨章节可能存在冲突:真实冲突" in gaps
+    else:
+        assert not any(gap.startswith("跨章节可能存在冲突:") for gap in gaps)
+
+
+@pytest.mark.parametrize(("action", "expected"), [
+    ("invented_action", "external"), (["keep"], "external"),
+    ({"value": "keep"}, "external"), ("keep", "keep"),
+    ("supplement", "supplement"), ("external", "external"),
+])
+def test_sufficiency_only_accepts_documented_actions(repo, action, expected):
+    from app.core.model_json import validate_model_json_shape
+
+    class Client:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return validate_model_json_shape(json.dumps({"verdicts": [{
+                "title": "A", "sufficiency": "缺失", "gap_note": "",
+                "action": action,
+            }]}), schema_hint).content
+
+    engine = _mk_engine(repo, Client())
+    result = engine._judge_sufficiency(
+        "q", [{"title": "A"}], [{"title": "A", "hits": 0, "base_hits": 0}],
+    )
+    assert result[0]["action"] == expected
+
+
 def test_report_section_queue_failure_stays_a_failed_section(repo):
     from app.services.model_work import ModelQueueFull
     from app.services.reasoning_retrieval import ReasoningResult

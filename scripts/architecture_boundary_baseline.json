@@ -310,7 +310,7 @@
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever._run_enumeration": 259,
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever._run_reflect_loop": 134,
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever.run": 23,
-    "backend/app/services/report_engine.py::ReportEngine._assemble": 457,
+    "backend/app/services/report_engine.py::ReportEngine._assemble": 454,
     "backend/app/services/report_engine.py::ReportEngine._draft_section": 266,
     "backend/app/services/repository_facade.py::RepositoryFacade.__init__": 470,
     "backend/app/services/repository_runtime.py::RepositoryRuntime.__init__": 146,

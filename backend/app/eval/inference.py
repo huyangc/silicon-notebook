@@ -5,6 +5,7 @@ import pathlib
 from typing import Any, Dict, List
 
 import yaml
+from app.core.model_values import as_text
 
 _QUESTIONS_PATH = pathlib.Path(__file__).resolve().parent / "questions.yaml"
 
@@ -42,19 +43,27 @@ def judge_prompt(question: str, expected_points: List[str], answer: str,
 def parse_judge(raw: str) -> Dict[str, Any]:
     try:
         d = json.loads(raw)
+        if not isinstance(d, dict):
+            raise ValueError("judge reply must be an object")
     except (ValueError, TypeError):
         return {"correctness": 0, "inference_quality": 0,
                 "grounding_consistency": False, "fabricated_citation": False,
                 "reason": "parse_error"}
     def _int(k):
         v = d.get(k, 0)
-        return v if isinstance(v, int) and 0 <= v <= 2 else 0
+        return v if type(v) is int and 0 <= v <= 2 else 0
+
+    def _bool(k):
+        v = d.get(k)
+        if isinstance(v, bool):
+            return v
+        return isinstance(v, str) and v.strip().lower() == "true"
     return {
         "correctness": _int("correctness"),
         "inference_quality": _int("inference_quality"),
-        "grounding_consistency": bool(d.get("grounding_consistency", False)),
-        "fabricated_citation": bool(d.get("fabricated_citation", False)),
-        "reason": str(d.get("reason", ""))[:200],
+        "grounding_consistency": _bool("grounding_consistency"),
+        "fabricated_citation": _bool("fabricated_citation"),
+        "reason": as_text(d.get("reason"))[:200],
     }
 
 

@@ -1,5 +1,6 @@
 """接地校验(anti-hallucination)单测:不在头部文本中的字段不落库。"""
 import json
+import pytest
 
 from app.services.paper_meta import paper_meta_prompt, verify_paper_meta
 
@@ -212,12 +213,17 @@ def test_doi_wrapped_in_unicode_quotes_accepted():
     assert meta["doi"] == "10.9999/abc"
 
 
-def test_only_a_real_json_true_marks_a_paper():
+@pytest.mark.parametrize("classification", ["no", "unsure", ["yes"], {}, 1, 0, None])
+def test_malformed_classification_is_not_a_non_paper_marker(classification):
     # The shape boundary coerces the spellings "true"/"false" before the
-    # reply reaches this parser; any other truthy value is a negative.
-    for negative in ("no", "unsure", ["yes"], 1):
-        meta = verify_paper_meta(_base(is_paper=negative), HEAD, model="m1")
-        assert meta["is_paper"] is False, negative
+    # reply reaches this parser. Other values must leave the attempt retryable.
+    with pytest.raises(ValueError, match="is_paper must be a boolean"):
+        verify_paper_meta(_base(is_paper=classification), HEAD, model="m1")
+
+
+def test_missing_classification_is_not_a_non_paper_marker():
+    with pytest.raises(ValueError, match="is_paper must be a boolean"):
+        verify_paper_meta({"title": "Attention Is All You Need"}, HEAD, model="m1")
 
 
 def test_container_valued_bibliographic_fields_are_never_persisted_as_text():

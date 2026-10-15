@@ -12,11 +12,12 @@ from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from typing import Any, Callable, Literal
 
 from app.core.config import Settings
 from app.core.ask_context import _ASK_MODEL_ERRORS
-from app.core.llm import CALL_STATS_KWARG, OpenAICompatibleClient
+from app.core.llm import CALL_STATS_KWARG, JsonSchemaCapability, OpenAICompatibleClient
 from app.core.llm_logging import (
     current_interaction_support_id,
     interaction_support_scope,
@@ -27,6 +28,7 @@ from app.core.model_json import (
     parse_model_json_object,
     validate_model_json_shape,
 )
+from app.core.model_schema import StructuredModelResponseError
 from app.domain.model_artifacts import MalformedModelInteraction
 from app.core.model_safety import (
     MODEL_ERROR_MISSING_CONFIG,
@@ -591,9 +593,21 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
         )
         forward_stats = stats_sink is not None and raw_supports_stats
 
+        def raw_chat_json(*args, **kwargs) -> str:
+            nonlocal raw_response, rejection_reason
+            try:
+                return runtime.raw.chat_json(*args, **kwargs)
+            except StructuredModelResponseError as exc:
+                raw_response = exc.content
+                rejection_reason = exc.reason
+                raise MalformedModelResponse(
+                    reason=exc.reason,
+                    finish_reason=str((stats_sink or {}).get("finish_reason") or ""),
+                ) from exc
+
         def invoke() -> str:
             nonlocal raw_response, rejection_reason
-            content = runtime.raw.chat_json(
+            content = raw_chat_json(
                 messages,
                 response_schema_hint,
                 timeout=timeout,
@@ -909,6 +923,7 @@ class RuntimeModelProvider:
         # can finish on its original generation while new work routes to the
         # replacement generation.
         self._runtimes: dict[tuple[str, str], _ServiceRuntime] = {}
+        self._json_schema_capabilities: dict[tuple[str, str, str, str], JsonSchemaCapability] = {}
         self._adapters: dict[tuple[str, str], Any] = {}
         self._closing = False
         self._closed = False
@@ -1326,6 +1341,38 @@ class RuntimeModelProvider:
             persist()
 
     def _raw_chat(self, service: ModelServiceDefinition) -> OpenAICompatibleClient:
+        # Capacity/display/policy edits replace a runtime without changing the
+        # endpoint/model capability. Credentials may select a different gateway
+        # route, so a rotation deliberately gets a new probe (no raw key in the
+        # identity or diagnostics).
+        identity = (
+            service.protocol, service.base_url, service.model,
+            sha256(service.api_key.encode()).hexdigest(),
+        )
+        with self._lock:
+            capability = self._json_schema_capabilities.setdefault(
+                identity, JsonSchemaCapability(),
+            )
+        def observe_json_schema(status: str, reason: str) -> None:
+            # Capability diagnostics carry only a closed vocabulary and safe
+            # service metadata, never the probe or an upstream exception.
+            if status not in {"supported", "unsupported", "unverified"}:
+                return
+            if reason not in {
+                "schema_enforced", "schema_ignored", "schema_rejected", "probe_error",
+            }:
+                return
+            try:
+                self.event_log.emit({
+                    "kind": "model_json_schema_capability",
+                    "status": status,
+                    "reason": reason,
+                    "service_id": safe_model_metadata_id(service.id),
+                    "model": safe_model_label(service.model),
+                })
+            except Exception:
+                pass
+
         return OpenAICompatibleClient(
             self.settings,
             base_url=service.base_url,
@@ -1333,6 +1380,9 @@ class RuntimeModelProvider:
             model=service.model,
             max_connections=service.max_concurrency,
             top_p_override=service.top_p,
+            enable_json_schema_probe=True,
+            json_schema_observer=observe_json_schema,
+            json_schema_capability=capability,
         )
 
     def _raw_embedding(self, service: ModelServiceDefinition):
@@ -1519,13 +1569,16 @@ class RuntimeModelProvider:
 
         def invoke() -> Any:
             if service.kind == "chat":
-                return _validate_json_object(runtime.raw.chat_json(
-                    [{"role": "user", "content": "health check"}],
-                    '{"ok":true}',
-                    max_retries=0,
-                    bypass_cache=True,
-                    thinking_mode="disabled",
-                ))
+                try:
+                    return _validate_json_object(runtime.raw.chat_json(
+                        [{"role": "user", "content": "health check"}],
+                        '{"ok":true}',
+                        max_retries=0,
+                        bypass_cache=True,
+                        thinking_mode="disabled",
+                    ))
+                except StructuredModelResponseError as exc:
+                    raise MalformedModelResponse(reason=exc.reason) from exc
             if service.kind == "embedding":
                 return runtime.raw.embed_query("health check")
             return runtime.raw._rerank_batch("health check", ["health check"])

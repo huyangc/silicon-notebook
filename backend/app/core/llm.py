@@ -1,8 +1,12 @@
 import httpx
+import json
 import random
 import re
+import secrets
+import threading
 import time
 from datetime import datetime
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
@@ -10,7 +14,23 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 from app.core.config import Settings
 from app.core.cache import CacheBackend, is_cacheable_llm_response, llm_key
 from app.core.llm_logging import LLMInteractionLogger, new_interaction_id
+from app.core.model_schema import (
+    StructuredModelResponseError,
+    response_format_for_hint,
+    validate_structured_response,
+)
 from app.domain.cancellation import AskCancelled, CancelEvent, raise_if_cancelled, sleep_or_cancel
+
+_SCHEMA_PROBE_LOCK_POLL_SECONDS = 0.1
+
+
+@dataclass
+class JsonSchemaCapability:
+    """Process-local evidence shared by unchanged physical model identities."""
+
+    status: Optional[str] = None
+    lock: Any = field(default_factory=threading.Lock, repr=False)
+    rejected_formats: set[str] = field(default_factory=set)
 
 
 def llm_status_code(exc: Exception) -> int | None:
@@ -30,6 +50,7 @@ def is_response_format_rejection(exc: Exception) -> bool:
     text = str(exc).lower()
     return status in (400, 422) and (
         "response_format" in text
+        or "json_schema" in text
         or "json_object" in text
         or "json mode" in text
     )
@@ -41,6 +62,7 @@ def _is_non_http_response_format_rejection(exc: Exception) -> bool:
     text = str(exc).lower()
     return (
         "response_format" in text
+        or "json_schema" in text
         or "json_object" in text
         or "json mode" in text
     )
@@ -363,6 +385,9 @@ class OpenAICompatibleClient:
                  max_retries: Optional[int] = None,
                  max_connections: Optional[int] = None,
                  top_p_override: Optional[float] = None,
+                 enable_json_schema_probe: bool = False,
+                 json_schema_observer: Optional[Callable[[str, str], None]] = None,
+                 json_schema_capability: Optional[JsonSchemaCapability] = None,
                  cache: Optional[CacheBackend] = None):
         self.settings = settings
         # Transport identity is always supplied by the system service registry.
@@ -378,6 +403,11 @@ class OpenAICompatibleClient:
             else 1,
         )
         self.top_p_override = top_p_override
+        self._enable_json_schema_probe = enable_json_schema_probe
+        self._json_schema_observer = json_schema_observer
+        self._json_schema_state = json_schema_capability or JsonSchemaCapability()
+        self._json_schema_probe_lock = self._json_schema_state.lock
+        self._json_schema_rejected_formats = self._json_schema_state.rejected_formats
         self._client: Optional[OpenAI] = None
         # None = not probed yet; False is learned only from an explicit
         # parameter rejection. Keeping the result on the physical client avoids
@@ -398,6 +428,14 @@ class OpenAICompatibleClient:
     @property
     def configured(self) -> bool:
         return bool(self.base_url and self.api_key and self.model)
+
+    @property
+    def _json_schema_capability(self) -> Optional[str]:
+        return self._json_schema_state.status
+
+    @_json_schema_capability.setter
+    def _json_schema_capability(self, value: Optional[str]) -> None:
+        self._json_schema_state.status = value
 
     def client(self) -> OpenAI:
         if not (self.base_url and self.api_key):
@@ -462,6 +500,7 @@ class OpenAICompatibleClient:
         json_mode: bool,
         cancel_event: CancelEvent,
         requests: _RequestCount,
+        deadline_at: Optional[float] = None,
     ) -> tuple[str, Optional[str], Optional[Dict[str, int]]]:
         """Return ``(content, finish_reason, usage)``.
 
@@ -499,6 +538,8 @@ class OpenAICompatibleClient:
         usage: Optional[Dict[str, int]] = None
         try:
             for chunk in stream:
+                if deadline_at is not None and time.monotonic() >= deadline_at:
+                    raise TimeoutError("JSON Schema capability probe timed out")
                 chunk_usage = _usage_dict(chunk)
                 if chunk_usage:
                     usage = chunk_usage
@@ -522,6 +563,143 @@ class OpenAICompatibleClient:
                 close()
         _raise_if_cancelled_with_usage(cancel_event, usage)
         return "".join(parts), finish_reason, usage
+
+    def _structured_format(
+        self, hint: str, *, requests: _RequestCount,
+        cancel_event: CancelEvent, timeout: Optional[float],
+    ) -> Optional[Dict[str, Any]]:
+        """Learn capability once inside the physical service's scheduler slot.
+
+        The proof value exists only in the wire schema, never in the prompt.
+        A server that accepts but ignores response_format cannot pass merely by
+        following a cooperative health-check prompt. Unknown/error outcomes use
+        ordinary JSON for this runtime generation; cancellation leaves it untried.
+        """
+        if not self._enable_json_schema_probe:
+            return None
+        while not self._json_schema_probe_lock.acquire(
+            timeout=_SCHEMA_PROBE_LOCK_POLL_SECONDS,
+        ):
+            raise_if_cancelled(cancel_event)
+        try:
+            raise_if_cancelled(cancel_event)
+            if self._json_schema_capability is None:
+                self._probe_json_schema(requests, cancel_event, timeout)
+            if self._json_schema_capability != "supported":
+                return None
+            response_format = response_format_for_hint(hint)
+            if response_format is not None and (
+                response_format["json_schema"]["name"]
+                in self._json_schema_rejected_formats
+            ):
+                return None
+            return response_format
+        finally:
+            self._json_schema_probe_lock.release()
+
+    def _probe_json_schema(
+        self, requests: _RequestCount, cancel_event: CancelEvent,
+        timeout: Optional[float],
+    ) -> None:
+        marker = secrets.token_hex(16)
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "capability_probe", "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "proof": {"type": "string", "enum": [marker]},
+                        "count": {"type": "integer", "enum": [7]},
+                    },
+                    "required": ["proof", "count"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+        probe_timeout = self.settings.model_json_schema_probe_timeout_seconds
+        if timeout is not None:
+            probe_timeout = min(probe_timeout, timeout)
+        kwargs = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": (
+                'Return only this JSON object: {"ignored":true}. '
+                "Do not add any other fields."
+            )}],
+            "response_format": response_format,
+        }
+        if self.settings.openai_compat_max_tokens > 0:
+            kwargs["max_tokens"] = self.settings.openai_compat_max_tokens
+        status, reason = "unverified", "probe_error"
+        usage = None
+        try:
+            content, finish_reason, usage = self._stream_chat_content(
+                kwargs, {"timeout": probe_timeout}, json_mode=False,
+                cancel_event=cancel_event, requests=requests,
+                deadline_at=time.monotonic() + probe_timeout,
+            )
+            if finish_reason == "length":
+                status, reason = "unverified", "probe_error"
+            elif validate_structured_response(content, response_format):
+                status, reason = "supported", "schema_enforced"
+            else:
+                status, reason = "unsupported", "schema_ignored"
+        except AskCancelled:
+            raise
+        except Exception as exc:
+            if is_response_format_rejection(exc) or _is_non_http_response_format_rejection(exc):
+                status, reason = "unsupported", "schema_rejected"
+        self._json_schema_capability = status
+        # Probe accounting is separate from the business completion's usage;
+        # neither the random proof nor raw provider exception enters this record.
+        self.interaction_logger.log({
+            "kind": "json_schema_probe", "status": status, "reason": reason,
+            **({"usage": usage} if usage is not None else {}),
+        })
+        if self._json_schema_observer is not None:
+            try:
+                self._json_schema_observer(status, reason)
+            except Exception:
+                pass
+
+    def _request_json_completion(
+        self, kwargs: Dict[str, Any], req_kwargs: Dict[str, Any], *,
+        response_format: Optional[Dict[str, Any]], cancel_event: CancelEvent,
+        requests: _RequestCount,
+    ) -> tuple[Any, Any, Optional[Dict[str, Any]]]:
+        formats = [response_format] if response_format is not None else []
+        formats.extend([{"type": "json_object"}, None])
+        for wire_format in formats:
+            raise_if_cancelled(cancel_event)
+            call_kwargs = dict(kwargs)
+            if wire_format is not None:
+                call_kwargs["response_format"] = wire_format
+            try:
+                if cancel_event is not None:
+                    streamed = self._stream_chat_content(
+                        call_kwargs, req_kwargs, json_mode=False,
+                        cancel_event=cancel_event, requests=requests,
+                    )
+                    return None, streamed, wire_format
+                response = self._create(requests, **call_kwargs, **req_kwargs)
+                return response, None, wire_format
+            except AskCancelled:
+                raise
+            except Exception as exc:
+                if wire_format is None or not (
+                    is_response_format_rejection(exc)
+                    or _is_non_http_response_format_rejection(exc)
+                ):
+                    raise
+                if wire_format.get("type") == "json_schema":
+                    # Supporting the small probe does not imply accepting every
+                    # schema subset. Remember this one rejection, not a global
+                    # loss of service capability or provider availability.
+                    with self._json_schema_probe_lock:
+                        self._json_schema_rejected_formats.add(
+                            wire_format["json_schema"]["name"],
+                        )
+        raise RuntimeError("JSON completion did not produce a response")
 
     def chat_json(
         self,
@@ -574,6 +752,19 @@ class OpenAICompatibleClient:
         # same `start`, so the cache probe is inside all of their durations as
         # well — which is correct: the caller waited for it either way.
         start = time.perf_counter()
+        requests = _RequestCount()
+        try:
+            response_format = self._structured_format(
+                response_schema_hint, requests=requests,
+                cancel_event=cancel_event, timeout=timeout,
+            )
+        except AskCancelled:
+            _record_call_stats(
+                call_stats, status="cancelled",
+                wall_ms=round((time.perf_counter() - start) * 1000),
+                attempts=requests.value,
+            )
+            raise
         # Best-effort cache lookup: a cache fault must never break the call.
         # The response cache is OPT-IN (Codex round 6 / user decision): a caller
         # participates ONLY by supplying a response_validator. cache/ckey are
@@ -606,6 +797,7 @@ class OpenAICompatibleClient:
                     temperature=temperature, top_p=effective_top_p,
                     max_tokens=effective_max_tokens,
                     thinking_mode=thinking_mode,
+                    response_format=response_format,
                 )
                 # Opt-in HIT gate: only a validator-bearing caller may be served a
                 # cached reply, and only if the cached value still satisfies THAT
@@ -618,8 +810,12 @@ class OpenAICompatibleClient:
                 # never breaks the call (still inside the bypass_cache try).
                 if response_validator is not None:
                     cached = cache.get(ckey)
-                    if cached is not None and _response_validator_allows(
-                        response_validator, cached
+                    if (
+                        cached is not None
+                        and _response_validator_allows(response_validator, cached)
+                        and (response_format is None or validate_structured_response(
+                            cached, response_format,
+                        ))
                     ):
                         # The fourth exit, and the only one that reaches no
                         # provider at all. It writes no llm.jsonl row (it never
@@ -640,7 +836,7 @@ class OpenAICompatibleClient:
                             call_stats,
                             status="cache_hit",
                             wall_ms=round((time.perf_counter() - start) * 1000),
-                            attempts=0,
+                            attempts=requests.value,
                         )
                         return cached
             except Exception:
@@ -678,6 +874,9 @@ class OpenAICompatibleClient:
                     for m in full_messages
                 ],
                 "schema_hint": logger.clip(response_schema_hint),
+                "response_format_type": (
+                    "json_schema" if response_format is not None else "json_object"
+                ),
                 **(
                     {
                         "thinking_mode": thinking_mode
@@ -688,7 +887,6 @@ class OpenAICompatibleClient:
         }
         # Owned here, incremented at the transport (see _create): every exit
         # below reports how many requests this ONE logical call really issued.
-        requests = _RequestCount()
         # Per-call overrides (interactive reasoning uses a shorter timeout / fewer
         # retries than the batch-extraction global defaults). When not supplied,
         # behavior is byte-for-byte identical to before: the retry budget uses the
@@ -716,35 +914,17 @@ class OpenAICompatibleClient:
             for attempt in range(attempt_budget):
                 raise_if_cancelled(cancel_event)
                 try:
-                    # Prefer native JSON mode; fall back if the server rejects
-                    # the param.
-                    try:
-                        if cancel_event is not None:
-                            streamed = self._stream_chat_content(
-                                kwargs, req_kwargs, json_mode=True,
-                                cancel_event=cancel_event, requests=requests)
-                        else:
-                            response = self._create(
-                                requests,
-                                **kwargs, **req_kwargs, response_format={"type": "json_object"}
-                            )
-                    except AskCancelled:
-                        raise
-                    except Exception as exc:
-                        # Server rejected response_format (param unsupported):
-                        # retry once in plain mode. NOT a connection error, so it
-                        # never enters the bounded connection-retry loop.
-                        if not (
-                            is_response_format_rejection(exc)
-                            or _is_non_http_response_format_rejection(exc)
-                        ):
-                            raise
-                        if cancel_event is not None:
-                            streamed = self._stream_chat_content(
-                                kwargs, req_kwargs, json_mode=False,
-                                cancel_event=cancel_event, requests=requests)
-                        else:
-                            response = self._create(requests, **kwargs, **req_kwargs)
+                    response, streamed, wire_format = self._request_json_completion(
+                        kwargs, req_kwargs, response_format=response_format,
+                        cancel_event=cancel_event, requests=requests,
+                    )
+                    record["request"]["response_format_type"] = (
+                        wire_format["type"] if wire_format is not None else "text"
+                    )
+                    if response_format is not None and wire_format != response_format:
+                        # A legacy fallback must never populate the schema key.
+                        ckey = ""
+                        response_format = None
                     break
                 except AskCancelled:
                     raise
@@ -777,14 +957,21 @@ class OpenAICompatibleClient:
                     sleep_or_cancel(backoff + random.uniform(0, backoff), cancel_event)
             if streamed is not None:
                 streamed_content, finish_reason, usage = streamed
-                content = strip_json_fences(streamed_content)
+                content = (
+                    streamed_content if response_format is not None
+                    else strip_json_fences(streamed_content)
+                )
             else:
                 choice = response.choices[0]
                 # getattr: hand-rolled test doubles and thin OpenAI-compatible
                 # servers may omit finish_reason entirely; absent == unknown,
                 # and is_cacheable_llm_response then falls back to parseability.
                 finish_reason = getattr(choice, "finish_reason", None)
-                content = strip_json_fences(choice.message.content or "")
+                raw_content = choice.message.content or ""
+                content = (
+                    raw_content if response_format is not None
+                    else strip_json_fences(raw_content)
+                )
                 usage = _usage_dict(response)
             # Recorded either way, and handed back to a caller that asked for it
             # at the exit below (see CALL_STATS_KWARG). Without it an empty
@@ -792,6 +979,18 @@ class OpenAICompatibleClient:
             # empty string everywhere downstream, and llm.jsonl cannot tell a
             # token-budget truncation from a model that returned nothing.
             record["finish_reason"] = finish_reason or ""
+            if response_format is not None and not validate_structured_response(
+                content, response_format,
+            ):
+                if usage:
+                    record["usage"] = usage
+                _record_call_stats(
+                    call_stats, status="error",
+                    wall_ms=round((time.perf_counter() - start) * 1000),
+                    attempts=requests.value, usage=usage,
+                    finish_reason=finish_reason or "", response_chars=len(content),
+                )
+                raise StructuredModelResponseError(content)
             # Best-effort write, and only of a reply that is actually usable —
             # the empty "{}" fallback, unparseable JSON and budget-truncated
             # completions are all excluded (see is_cacheable_llm_response for
