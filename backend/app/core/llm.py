@@ -1,3 +1,6 @@
+import asyncio
+from contextlib import suppress
+
 import httpx
 import json
 import random
@@ -9,7 +12,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Literal, Optional
 
-from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI, OpenAI
 
 from app.core.config import Settings
 from app.core.cache import CacheBackend, is_cacheable_llm_response, llm_key
@@ -298,8 +301,8 @@ class _RequestCount:
     """Real provider requests issued for ONE ``chat_json`` call.
 
     A counter object rather than a local int because the request sites live in
-    two functions: the retry loop in ``chat_json`` and the two ``create()`` calls
-    inside ``_stream_chat_content`` (the second one being the ``stream_options``
+    the sync transport and the async capability probe, including ``create()``
+    calls inside ``_stream_chat_content`` (the second being the ``stream_options``
     rebuild, which today leaves no trace anywhere). ``chat_json`` owns the
     instance and hands it down, so ``attempts`` counts requests ISSUED instead of
     the number of loop iterations — those differ by exactly the silent fallbacks,
@@ -466,8 +469,9 @@ class OpenAICompatibleClient:
     ) -> Any:
         """Issue ONE provider request and count it as ATTEMPTED.
 
-        The single choke point for every ``chat.completions.create`` in this
-        class, so a request cannot be added without being counted. The client is
+        The single choke point for synchronous ``chat.completions.create``;
+        the async capability probe records the same tally before its await.
+        The client is
         resolved BEFORE the tally: a configuration error raised by ``client()``
         means nothing was sent, and counting it would inflate the request count
         with a call that never left the process.
@@ -500,7 +504,6 @@ class OpenAICompatibleClient:
         json_mode: bool,
         cancel_event: CancelEvent,
         requests: _RequestCount,
-        deadline_at: Optional[float] = None,
     ) -> tuple[str, Optional[str], Optional[Dict[str, int]]]:
         """Return ``(content, finish_reason, usage)``.
 
@@ -536,30 +539,8 @@ class OpenAICompatibleClient:
         parts: List[str] = []
         finish_reason: Optional[str] = None
         usage: Optional[Dict[str, int]] = None
-        expired = threading.Event()
-        deadline_timer: Optional[threading.Timer] = None
-        if deadline_at is not None:
-            def expire_stream() -> None:
-                # A read timeout resets on each operation. Closing the stream
-                # from the deadline watchdog also interrupts a stalled next
-                # read, which a check inside the iterator body cannot reach.
-                expired.set()
-                close = getattr(stream, "close", None)
-                if callable(close):
-                    try:
-                        close()
-                    except Exception:
-                        pass
-
-            deadline_timer = threading.Timer(
-                max(0.0, deadline_at - time.monotonic()), expire_stream,
-            )
-            deadline_timer.daemon = True
-            deadline_timer.start()
         try:
             for chunk in stream:
-                if deadline_at is not None and time.monotonic() >= deadline_at:
-                    raise TimeoutError("JSON Schema capability probe timed out")
                 chunk_usage = _usage_dict(chunk)
                 if chunk_usage:
                     usage = chunk_usage
@@ -578,16 +559,105 @@ class OpenAICompatibleClient:
                 if content:
                     parts.append(content)
         finally:
-            if deadline_timer is not None:
-                deadline_timer.cancel()
-                deadline_timer.join()
             close = getattr(stream, "close", None)
             if callable(close):
                 close()
         _raise_if_cancelled_with_usage(cancel_event, usage)
-        if expired.is_set():
-            raise TimeoutError("JSON Schema capability probe timed out")
         return "".join(parts), finish_reason, usage
+
+    def _probe_client(self, timeout: float) -> AsyncOpenAI:
+        """A short-lived async transport whose opening and reads are cancellable."""
+        return AsyncOpenAI(
+            api_key=self.api_key, base_url=self.base_url,
+            timeout=timeout, max_retries=0,
+        )
+
+    async def _probe_stream_content(
+        self, kwargs: Dict[str, Any], timeout: float,
+        requests: _RequestCount, cancel_event: CancelEvent,
+    ) -> tuple[str, Optional[str], Optional[Dict[str, int]]]:
+        """One deadline covers headers, usage-option fallback and the full body.
+
+        This runs on the scheduler worker's own temporary event loop. Cancelling
+        async HTTP I/O reaps the request on that same worker; no background
+        request thread can outlive a timed-out or cancelled capability probe.
+        """
+        owner = asyncio.current_task()
+
+        async def watch_cancellation() -> None:
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    owner.cancel()
+                    return
+                await asyncio.sleep(_SCHEMA_PROBE_LOCK_POLL_SECONDS)
+
+        monitor = asyncio.create_task(watch_cancellation())
+        usage = None
+        try:
+            async with asyncio.timeout(timeout) as budget:
+                client = self._probe_client(timeout)
+                stream = None
+
+                async def close_resource(resource) -> None:
+                    # Reuse the absolute deadline: a close reached from a
+                    # timed-out body must not gain a fresh cleanup budget.
+                    with suppress(Exception):
+                        async with asyncio.timeout_at(budget.when()):
+                            await resource.close()
+
+                try:
+                    call_kwargs = {**kwargs, "timeout": timeout, "stream": True}
+                    request_usage = self._stream_usage_options_supported is not False
+                    if request_usage:
+                        call_kwargs["stream_options"] = {"include_usage": True}
+
+                    async def create_stream():
+                        raise_if_cancelled(cancel_event)
+                        requests.record()
+                        return await client.chat.completions.create(**call_kwargs)
+
+                    try:
+                        stream = await create_stream()
+                    except Exception as exc:
+                        if not request_usage or not _is_stream_usage_rejection(exc):
+                            raise
+                        self._stream_usage_options_supported = False
+                        call_kwargs.pop("stream_options", None)
+                        stream = await create_stream()
+                    parts = []
+                    finish_reason = None
+                    async for chunk in stream:
+                        chunk_usage = _usage_dict(chunk)
+                        if chunk_usage:
+                            usage = chunk_usage
+                        _raise_if_cancelled_with_usage(cancel_event, usage)
+                        if not getattr(chunk, "choices", None):
+                            continue
+                        choice = chunk.choices[0]
+                        reason = getattr(choice, "finish_reason", None)
+                        if reason:
+                            finish_reason = reason
+                        delta = getattr(choice, "delta", None)
+                        content = getattr(delta, "content", None) if delta is not None else None
+                        if content:
+                            parts.append(content)
+                    _raise_if_cancelled_with_usage(cancel_event, usage)
+                    return "".join(parts), finish_reason, usage
+                finally:
+                    # Await both local SDK closes, including when cancellation
+                    # interrupts the stream close. Preserve the original error.
+                    try:
+                        if stream is not None:
+                            await close_resource(stream)
+                    finally:
+                        await close_resource(client)
+        except asyncio.CancelledError:
+            _raise_if_cancelled_with_usage(cancel_event, usage)
+            raise
+        finally:
+            monitor.cancel()
+            with suppress(asyncio.CancelledError):
+                await monitor
 
     def _structured_format(
         self, hint: str, *, requests: _RequestCount,
@@ -658,11 +728,10 @@ class OpenAICompatibleClient:
         status, reason = "unverified", "probe_error"
         usage = None
         try:
-            content, finish_reason, usage = self._stream_chat_content(
-                kwargs, {"timeout": probe_timeout}, json_mode=False,
-                cancel_event=cancel_event, requests=requests,
-                deadline_at=time.monotonic() + probe_timeout,
-            )
+            content, finish_reason, usage = asyncio.run(self._probe_stream_content(
+                kwargs, probe_timeout, requests, cancel_event,
+            ))
+            _raise_if_cancelled_with_usage(cancel_event, usage)
             if finish_reason == "length":
                 status, reason = "unverified", "probe_error"
             elif validate_structured_response(content, response_format):
@@ -672,8 +741,10 @@ class OpenAICompatibleClient:
         except AskCancelled:
             raise
         except Exception as exc:
+            _raise_if_cancelled_with_usage(cancel_event, usage)
             if is_response_format_rejection(exc) or _is_non_http_response_format_rejection(exc):
                 status, reason = "unsupported", "schema_rejected"
+        _raise_if_cancelled_with_usage(cancel_event, usage)
         self._json_schema_capability = status
         # Probe accounting is separate from the business completion's usage;
         # neither the random proof nor raw provider exception enters this record.

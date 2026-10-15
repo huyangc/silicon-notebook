@@ -66,6 +66,28 @@ class FakeSDK:
         pass
 
 
+class AsyncProbeSDK:
+    def __init__(self, sdk):
+        self.sdk = sdk
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+    async def create(self, **kwargs):
+        chunks = self.sdk.create(**kwargs)
+
+        class ProbeStream:
+            async def __aiter__(self):
+                for chunk in chunks:
+                    yield chunk
+
+            async def close(self):
+                pass
+
+        return ProbeStream()
+
+    async def close(self):
+        pass
+
+
 def service():
     return ModelServiceDefinition(
         id="shared", display_name="Shared chat", kind="chat", protocol="openai",
@@ -84,6 +106,7 @@ def registry(model_service):
 
 def make_provider(tmp_path, monkeypatch, sdk):
     monkeypatch.setattr(llm.OpenAICompatibleClient, "client", lambda self: sdk)
+    monkeypatch.setattr(llm.OpenAICompatibleClient, "_probe_client", lambda self, timeout: AsyncProbeSDK(sdk))
     event_log = EventLog()
     provider = RuntimeModelProvider(Settings(
         _env_file=None, model_services_config="", llm_cache_enabled=False,

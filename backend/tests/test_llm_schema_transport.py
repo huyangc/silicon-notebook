@@ -1,4 +1,5 @@
 """Negotiation, cancellation, cache identity and fallback at the real transport."""
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
 import threading
@@ -77,6 +78,32 @@ class SDK:
         return Stream(data) if kwargs.get("stream") else response(data)
 
 
+class AsyncStreamAdapter:
+    """Only the probe uses async I/O; the business SDK fake remains synchronous."""
+
+    def __init__(self, stream):
+        self.stream = stream
+
+    async def __aiter__(self):
+        for chunk in self.stream:
+            yield chunk
+
+    async def close(self):
+        self.stream.close()
+
+
+class AsyncSDKAdapter:
+    def __init__(self, sdk):
+        self.sdk, self.closed = sdk, False
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+    async def create(self, **kwargs):
+        return AsyncStreamAdapter(self.sdk.create(**kwargs))
+
+    async def close(self):
+        self.closed = True
+
+
 def client(tmp_path, sdk, *, enabled=True, cache=None):
     result = OpenAICompatibleClient(Settings(
         _env_file=None, llm_cache_enabled=False, llm_log_enabled=False,
@@ -86,6 +113,7 @@ def client(tmp_path, sdk, *, enabled=True, cache=None):
     result._client = SimpleNamespace(chat=SimpleNamespace(
         completions=SimpleNamespace(create=sdk.create),
     ))
+    result._probe_client = lambda timeout: AsyncSDKAdapter(sdk)
     return result
 
 
@@ -136,61 +164,165 @@ def test_cancelled_probe_does_not_remember_a_negative_capability(tmp_path):
     assert sdk.calls[-1]["response_format"]["type"] == "json_schema"
 
 
-def test_probe_deadline_closes_a_read_stalled_after_a_chunk(tmp_path, monkeypatch):
-    blocked, closed = threading.Event(), threading.Event()
-    timers = []
-
-    class DeadlineTimer:
-        def __init__(self, interval, callback):
-            self.interval, self.callback = interval, callback
-            self.cancelled = self.joined = False
-            timers.append(self)
-
-        def start(self):
-            pass
-
-        def cancel(self):
-            self.cancelled = True
-
-        def join(self):
-            self.joined = True
-
+def test_probe_deadline_closes_a_read_stalled_after_a_chunk(tmp_path):
     class StalledStream:
-        def __iter__(self):
+        closed = False
+        read_cancelled = False
+
+        async def __aiter__(self):
             yield SimpleNamespace(choices=[SimpleNamespace(
                 delta=SimpleNamespace(content="{"), finish_reason=None,
             )], usage=None)
-            blocked.set()
-            assert closed.wait(30)
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.read_cancelled = True
 
-        def close(self):
-            closed.set()
+        async def close(self):
+            self.closed = True
 
-    sdk = SDK()
-    create = sdk.create
-
-    def transport(**kwargs):
-        if kwargs.get("response_format", {}).get("json_schema", {}).get("name") == "capability_probe":
+    class StalledReader(AsyncSDKAdapter):
+        async def create(self, **kwargs):
             sdk.calls.append(kwargs)
-            return StalledStream()
-        return create(**kwargs)
+            return stalled
 
-    monkeypatch.setattr(sdk, "create", transport)
-    monkeypatch.setattr(llm.threading, "Timer", DeadlineTimer)
+    sdk, stalled = SDK(), StalledStream()
+    probe = StalledReader(sdk)
     result = client(tmp_path, sdk)
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        pending = pool.submit(call, result, bypass_cache=True)
-        assert blocked.wait(30)
-        assert len(timers) == 1
-        assert 0 < timers[0].interval <= result.settings.model_json_schema_probe_timeout_seconds
-        timers[0].callback()
-        assert json.loads(pending.result(timeout=30))["answer"] == "answer"
-    assert closed.is_set()
-    assert timers[0].cancelled and timers[0].joined
+    result._probe_client = lambda timeout: probe
+    stats = {}
+    assert json.loads(call(result, timeout=0.01, call_stats=stats, bypass_cache=True))["answer"] == "answer"
+    assert stalled.closed and stalled.read_cancelled and probe.closed
+    assert stats["attempts"] == 2
     assert result._json_schema_capability == "unverified"
     assert sdk.calls[-1]["response_format"]["type"] == "json_object"
     call(result, bypass_cache=True)
     assert probe_count(sdk) == 1
+
+
+def test_probe_deadline_cancels_stalled_opening_and_closes_async_client(tmp_path):
+    class StalledOpening(AsyncSDKAdapter):
+        opening_cancelled = False
+
+        async def create(self, **kwargs):
+            self.sdk.calls.append(kwargs)
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.opening_cancelled = True
+
+    sdk = SDK()
+    probe = StalledOpening(sdk)
+    result = client(tmp_path, sdk)
+    result._probe_client = lambda timeout: probe
+    stats = {}
+    assert json.loads(call(result, timeout=0.01, call_stats=stats, bypass_cache=True))["answer"] == "answer"
+    assert probe.closed and probe.opening_cancelled
+    assert stats["attempts"] == 2
+    assert probe_count(sdk) == 1
+    assert result._json_schema_capability == "unverified"
+    assert sdk.calls[-1]["response_format"]["type"] == "json_object"
+
+
+def test_timed_out_probe_does_not_give_stalled_cleanup_another_budget(tmp_path):
+    class StalledClose:
+        close_attempted = False
+        close_cancelled = False
+
+        async def __aiter__(self):
+            yield SimpleNamespace(choices=[], usage=None)
+            await asyncio.Event().wait()
+
+        async def close(self):
+            self.close_attempted = True
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.close_cancelled = True
+
+    class StreamWithStalledClose(AsyncSDKAdapter):
+        async def create(self, **kwargs):
+            self.sdk.calls.append(kwargs)
+            return stream
+
+    sdk, stream = SDK(), StalledClose()
+    probe = StreamWithStalledClose(sdk)
+    result = client(tmp_path, sdk)
+    result._probe_client = lambda timeout: probe
+    assert json.loads(call(result, timeout=0.01, bypass_cache=True))["answer"] == "answer"
+    assert stream.close_attempted and stream.close_cancelled and probe.closed
+    assert result._json_schema_capability == "unverified"
+
+
+def test_usage_option_fallback_keeps_the_original_probe_deadline(tmp_path, monkeypatch):
+    deadlines = []
+    original_timeout = asyncio.timeout
+
+    def timeout_scope(delay):
+        scope = original_timeout(delay)
+        deadlines.append(scope)
+        return scope
+
+    class RejectUsageThenStall(AsyncSDKAdapter):
+        opening_cancelled = False
+
+        async def create(self, **kwargs):
+            self.sdk.calls.append(kwargs)
+            if "stream_options" in kwargs:
+                raise ValueError("stream_options.include_usage unsupported")
+            # The second request is already inside the first request's total
+            # timeout scope, rather than acquiring another whole timeout.
+            assert len(deadlines) == 1 and not deadlines[0].expired()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.opening_cancelled = True
+
+    monkeypatch.setattr(llm.asyncio, "timeout", timeout_scope)
+    sdk = SDK()
+    probe = RejectUsageThenStall(sdk)
+    result = client(tmp_path, sdk)
+    result._probe_client = lambda timeout: probe
+    stats = {}
+    assert json.loads(call(result, timeout=0.01, call_stats=stats, bypass_cache=True))["answer"] == "answer"
+    assert len(deadlines) == 1 and deadlines[0].expired()
+    assert probe.closed and probe.opening_cancelled
+    assert stats["attempts"] == 3
+    assert probe_count(sdk) == 2
+    assert result._stream_usage_options_supported is False
+    assert "stream_options" not in sdk.calls[1]
+    assert result._json_schema_capability == "unverified"
+
+
+def test_cancellation_interrupts_probe_while_opening_without_remembering_status(tmp_path):
+    entered, cancelled = threading.Event(), threading.Event()
+
+    class CancellableOpening(AsyncSDKAdapter):
+        opening_cancelled = False
+
+        async def create(self, **kwargs):
+            self.sdk.calls.append(kwargs)
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.opening_cancelled = True
+
+    sdk = SDK()
+    probe = CancellableOpening(sdk)
+    result = client(tmp_path, sdk)
+    result._probe_client = lambda timeout: probe
+    stats = {}
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(call, result, cancel_event=cancelled, call_stats=stats, bypass_cache=True)
+        assert entered.wait(30)
+        cancelled.set()
+        with pytest.raises(AskCancelled):
+            pending.result(timeout=30)
+    assert probe.closed and probe.opening_cancelled
+    assert stats["status"] == "cancelled" and stats["attempts"] == 1
+    assert result._json_schema_capability is None
+    assert len(sdk.calls) == 1
 
 
 def test_rejected_schema_is_remembered_without_disabling_other_schemas(tmp_path):
