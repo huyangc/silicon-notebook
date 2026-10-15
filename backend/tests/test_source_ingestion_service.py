@@ -772,7 +772,7 @@ def test_background_embedding_overlaps_extraction_and_extracted_gates_on_extract
     sid = _seed_queued_source(repo, nb.id, file_path=str(md))
     repo.settings.kg_auto_extract = True
     bind_chat_client(repo, "kg_extract", _FakeLLM(json.dumps({
-        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
+        "nodes": [{"type": "Concept", "name": "Engram",
                    "evidence": "Engram is a memory architecture"}],
         "edges": []})))
     emb = _ElementBlockingEmbedder()
@@ -833,9 +833,9 @@ def test_extraction_relink_ordering_and_stale_source_cleanup_match_master(repo):
     the source's prior objects."""
     bind_chat_client(repo, "kg_extract", _FakeLLM(json.dumps({
         "nodes": [
-            {"local_id": "a", "type": "Concept", "name": "Engram",
+            {"type": "Concept", "name": "Engram",
              "evidence": "Engram is a memory architecture"},
-            {"local_id": "b", "type": "Claim", "name": "Engram improves perplexity",
+            {"type": "Claim", "name": "Engram improves perplexity",
              "evidence": "Engram improves perplexity"},
         ],
         "edges": []})))
@@ -898,9 +898,9 @@ def _seed_source_for_reset(repo, nb_id: str) -> str:
 
 _ONE_RELATION_GRAPH = json.dumps({
     "nodes": [
-        {"local_id": "a", "type": "Concept", "name": "Engram",
+        {"type": "Concept", "name": "Engram",
          "evidence": "Engram is a memory architecture"},
-        {"local_id": "b", "type": "Claim", "name": "Engram improves perplexity",
+        {"type": "Claim", "name": "Engram improves perplexity",
          "evidence": "Engram improves perplexity"},
     ],
     "edges": []})

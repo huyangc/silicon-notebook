@@ -78,7 +78,6 @@ class _ControlledKgClient:
             {
                 "nodes": [
                     {
-                        "local_id": "engram",
                         "type": "Concept",
                         "name": "Engram",
                         "ev": 0,
@@ -114,7 +113,6 @@ class _DrainVisibilityClient:
                 {
                     "nodes": [
                         {
-                            "local_id": "engram",
                             "type": "Concept",
                             "name": "Engram",
                             "ev": 0,
@@ -1096,7 +1094,6 @@ class _PerSourceFailingKgClient:
             {
                 "nodes": [
                     {
-                        "local_id": "engram",
                         "type": "Concept",
                         "name": "Engram",
                         "ev": 0,

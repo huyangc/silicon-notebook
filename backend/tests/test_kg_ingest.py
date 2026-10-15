@@ -519,12 +519,12 @@ def test_extract_graph_grounds_nodes():
     # ABS is a single prose element (one window) -> ev:0 anchors to it.
     payload = json.dumps({
         "nodes": [
-            {"local_id": "a", "type": "Concept", "name": "Engram", "ev": 0},
-            {"local_id": "b", "type": "Claim", "name": "Engram improves perplexity",
+            {"type": "Concept", "name": "Engram", "ev": 0},
+            {"type": "Claim", "name": "Engram improves perplexity",
              "ev": 0},
-            {"local_id": "z", "type": "Concept", "name": "Ghost", "ev": 99},
+            {"type": "Concept", "name": "Ghost", "ev": 99},
         ],
-        "edges": [{"type": "about", "source": "b", "target": "a", "ev": 0}],
+        "edges": [{"type": "about", "source": 1, "target": 0, "ev": 0}],
     })
     g = kg_ingest.extract_graph(FakeClient(payload), ABS, "doc.md", "academic")
     names = {n.name for n in g.nodes}
@@ -565,11 +565,11 @@ def test_extract_graph_drops_and_reports_invalid_endpoint_pair(caplog):
 
     payload = json.dumps({
         "nodes": [
-            {"local_id": "a", "type": "Formula", "name": "gain equation", "ev": 0},
-            {"local_id": "b", "type": "Claim", "name": "gain increases", "ev": 0},
+            {"type": "Formula", "name": "gain equation", "ev": 0},
+            {"type": "Claim", "name": "gain increases", "ev": 0},
         ],
         # precedes is same-type only; Formula -> Claim is contract-invalid.
-        "edges": [{"type": "precedes", "source": "a", "target": "b", "ev": 0}],
+        "edges": [{"type": "precedes", "source": 0, "target": 1, "ev": 0}],
     })
     with caplog.at_level("WARNING", logger="app.services.kg.extract"):
         graph = kg_ingest.extract_graph(
@@ -620,7 +620,7 @@ def test_extract_graph_counts_failed_windows():
 
     # ev:0 anchors to each window's first prose element (contains the quote).
     payload = json.dumps({
-        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram", "ev": 0}],
+        "nodes": [{"type": "Concept", "name": "Engram", "ev": 0}],
         "edges": [],
     })
     # Fail the first window only.
@@ -656,7 +656,7 @@ def test_extract_graph_counts_programming_errors_as_failed_windows():
 def test_extract_graph_no_failures_zero_count():
     import json
     payload = json.dumps({
-        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram", "ev": 0}],
+        "nodes": [{"type": "Concept", "name": "Engram", "ev": 0}],
         "edges": [],
     })
     g = kg_ingest.extract_graph(FakeClient(payload), ABS, "doc.md", "academic")
@@ -814,7 +814,7 @@ def test_canonicalize_merges_across_windows():
 
     payload = json.dumps({
         "nodes": [
-            {"local_id": "a", "type": "Concept", "name": "Engram", "ev": 0},
+            {"type": "Concept", "name": "Engram", "ev": 0},
         ],
         "edges": [],
     })
@@ -830,7 +830,7 @@ def test_canonicalize_merges_across_windows():
 
 def test_extract_graph_uses_global_pool():
     import json
-    payload = json.dumps({"nodes": [{"local_id": "a", "type": "Concept",
+    payload = json.dumps({"nodes": [{"type": "Concept",
                                       "name": "Engram", "ev": 0}], "edges": []})
     g = kg_ingest.extract_graph(FakeClient(payload), ABS, "doc.md", "academic")
     assert g.total_windows >= 1

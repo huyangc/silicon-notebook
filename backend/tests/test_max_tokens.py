@@ -162,7 +162,7 @@ class _RecordingKG:
         self.kwargs = None
     def chat_json(self, messages, response_schema_hint, **kw):
         self.kwargs = kw
-        return _j.dumps({"nodes": [{"local_id": "a", "type": "Concept",
+        return _j.dumps({"nodes": [{"type": "Concept",
                                     "name": "analog signal", "ev": 0}], "edges": []})
 
 

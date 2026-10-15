@@ -22,7 +22,7 @@ class _GleanLLM:
         self.calls += 1
         if len(messages) == 1:
             return json.dumps({"nodes": [
-                {"local_id": "a", "type": "Concept", "name": "analog signal", "ev": 0}],
+                {"type": "Concept", "name": "analog signal", "ev": 0}],
                 "edges": []})
         return json.dumps({"nodes": self.extra, "edges": []})
 
@@ -30,14 +30,14 @@ class _GleanLLM:
 def test_gleaning_adds_missed_node():
     els = [_se(0, "Analog signal is continuous.", 0),
            _se(1, "Engram is a memory module.", 40)]
-    llm = _GleanLLM([{"local_id": "b", "type": "Concept", "name": "Engram", "ev": 1}])
+    llm = _GleanLLM([{"type": "Concept", "name": "Engram", "ev": 1}])
     nodes, _e = extract_window(llm, els, "1", "textbook", win_idx=0, gleaning_rounds=1)
     assert {n.name for n in nodes} == {"analog signal", "Engram"}
 
 
 def test_gleaning_dedups_existing():
     els = [_se(0, "Analog signal is continuous.", 0)]
-    llm = _GleanLLM([{"local_id": "a2", "type": "Concept", "name": "analog  signal", "ev": 0}])
+    llm = _GleanLLM([{"type": "Concept", "name": "analog  signal", "ev": 0}])
     nodes, _e = extract_window(llm, els, "1", "textbook", win_idx=0, gleaning_rounds=1)
     assert [n.name for n in nodes] == ["analog signal"]   # not duplicated (norm-equal)
 
@@ -52,7 +52,7 @@ def test_gleaning_early_stop_on_empty():
 
 def test_gleaning_off_by_default():
     els = [_se(0, "x", 0)]
-    llm = _GleanLLM([{"local_id": "b", "type": "Concept", "name": "Engram", "ev": 0}])
+    llm = _GleanLLM([{"type": "Concept", "name": "Engram", "ev": 0}])
     nodes, _e = extract_window(llm, els, "1", "textbook", win_idx=0)   # gleaning_rounds defaults 0
     assert len(nodes) == 1
     assert llm.calls == 1   # no gleaning call

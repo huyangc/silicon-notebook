@@ -1,5 +1,6 @@
-"""Window -> LLM KG fragment -> grounded nodes/edges. Local ids are kept so the
-caller can wire edges. Evidence is anchored by element-id markers: the LLM emits
+"""Window -> LLM KG fragment -> grounded nodes/edges. Edges name their endpoints
+by integer position in the reply's own nodes array. Evidence is anchored by
+element-id markers: the LLM emits
 only an integer "ev" label per node/edge, and the backend maps it back to that
 source element's exact text/offsets (drop ungroundable nodes). Node types
 constrained to the 4; edges to the vocab."""
@@ -67,12 +68,28 @@ _EDGE_PROMPT_RULES = render_edge_prompt_rules()
 _log = logging.getLogger(__name__)
 
 _KG_SCHEMA_HINT = (
-    '{"nodes":[{"local_id":"","type":"Concept|Claim|Formula|Procedure","name":"",'
+    '{"nodes":[{"type":"Concept|Claim|Formula|Procedure","name":"",'
     '"ev":0,"validity_scope":{"region":[],"assumptions":[],"approximation":"","range":""},'
     '"steps":[{"name":"","ev":0}]}],'
     f'"edges":[{{"type":"{edge_schema_hint()}",'
-    '"source":"<local_id>","target":"<local_id>","ev":0}]}'
+    '"source":0,"target":1,"ev":0}]}'
 )
+
+
+def _grounded_node_positions(nodes: list, elements: List[SourceElementQ]) -> set:
+    """Positions in the reply's ``nodes`` array whose entry survives the node
+    gate. Edge endpoints index the ORIGINAL array, so a position whose node
+    was dropped (bad type, no name, ungroundable) is a dangling endpoint."""
+    return {i for i, it in enumerate(nodes) if _grounds_a_node(it, elements)}
+
+
+def _edge_endpoints(it: Any) -> Tuple[int, int]:
+    """An edge's (source, target) node positions, -1 where the value is not
+    one. Read with the same rule as ``ev`` (an integer or a digit string;
+    never a boolean or float), so both integer labels in the hint agree."""
+    if not isinstance(it, dict):
+        return -1, -1
+    return _evidence_index(it.get("source")), _evidence_index(it.get("target"))
 
 
 def _grounds_a_node(it: Any, elements: List[SourceElementQ]) -> bool:
@@ -99,7 +116,8 @@ def _grounds_a_node(it: Any, elements: List[SourceElementQ]) -> bool:
     return isinstance(it.get("ev"), int)
 
 
-def _fragment_grounds_something(content: str, elements: List[SourceElementQ]) -> bool:
+def _fragment_grounds_something(content: str, elements: List[SourceElementQ],
+                                edges_consumed: bool = True) -> bool:
     """Cache-admission gate for the KG-fragment schema (_KG_SCHEMA_HINT), judged by
     running the DOWNSTREAM grounding logic itself instead of a shape approximation.
 
@@ -122,6 +140,11 @@ def _fragment_grounds_something(content: str, elements: List[SourceElementQ]) ->
     - otherwise cache iff AT LEAST ONE present node grounds via ``_grounds_a_node``
       (the real ``_resolve`` gate). A list whose nodes ALL fail to ground drops to 0
       objects downstream — freezing that 0 for the TTL is the poison → reject.
+    - a non-empty ``edges`` list where NO edge names two distinct grounded node
+      positions (every endpoint out of range, self-referencing, or on a dropped
+      node) wires nothing downstream — the same poison for the edge half →
+      reject. ``edges_consumed=False`` (gleaning, which reads nodes only)
+      skips this rule: edges there are never read, so they cannot poison.
 
     The window's ``elements`` are closed in by the caller (extract_window /
     _glean_nodes build ``lambda content: _fragment_grounds_something(content,
@@ -139,9 +162,17 @@ def _fragment_grounds_something(content: str, elements: List[SourceElementQ]) ->
     edges = data.get("edges")
     if edges is not None and not isinstance(edges, list):
         return False
-    if not nodes:
-        return True  # legit empty window — a real "found nothing" extraction
-    return any(_grounds_a_node(it, elements) for it in nodes)
+    grounded = _grounded_node_positions(nodes, elements)
+    if nodes and not grounded:
+        return False
+    if edges and edges_consumed:
+        # Endpoints must index this reply's grounded nodes, as extract_window
+        # wires them; a legit empty window has no edges to check.
+        return any(
+            s != t and s in grounded and t in grounded
+            for s, t in map(_edge_endpoints, edges)
+        )
+    return True  # an empty "found nothing" window, or at least one node grounds
 
 
 def _kg_fragment_cacheable(content: str) -> bool:
@@ -154,18 +185,17 @@ def _kg_fragment_cacheable(content: str) -> bool:
 
 def _refine_response_grounds(content: str, nodes: List[Node]) -> bool:
     """Cache-admission gate for the refine schema (REFINE_SCHEMA_HINT,
-    ``{"items":[{"index":0,"keep":true}]}``), closed over the CURRENT node list the
-    same way ``_fragment_grounds_something`` closes over the window elements. Same
+    ``{"drop":[0]}``), closed over the CURRENT node list the same way
+    ``_fragment_grounds_something`` closes over the window elements. Same
     tightening rationale as ``_kg_fragment_cacheable``: cache only a reply we are sure
     is a real refine result, since skipping a doubtful one costs just a re-fetch.
 
-    ``refine_nodes`` consumes ``data["items"]`` and, per entry, indexes
-    ``nodes[index]`` and drops that node when ``keep is False``. So a usable reply
-    requires, for EVERY item:
+    ``refine_nodes`` consumes ``data["drop"]`` and drops ``nodes[index]`` for each
+    entry. So a usable reply requires, for EVERY entry:
 
     - ``type(index) is int`` — ``type() is``, NOT ``isinstance``: ``bool`` is a
-      subclass of ``int`` in Python, so ``isinstance(True, int)`` is True and an
-      ``index: true`` would sail through and be consumed as index 1. ``type() is int``
+      subclass of ``int`` in Python, so ``isinstance(True, int)`` is True and a
+      ``true`` entry would sail through and be consumed as index 1. ``type() is int``
       excludes ``True``/``False``.
     - ``0 <= index < len(nodes)`` WHEN the node list is known (the real refine call
       closes it in): an out-of-range index is silently ignored downstream, so a reply
@@ -173,27 +203,21 @@ def _refine_response_grounds(content: str, nodes: List[Node]) -> bool:
       poison. With NO nodes (the window-less degraded entry / test doubles) the bound
       is unknowable, so it degrades to the type check only (conservative: it can only
       ever mean "re-fetch", never "cache junk").
-    - ``keep`` is a real ``bool``.
 
-    A genuine "keep everything" is ``{"items":[]}`` (empty list, no drops), NOT an
-    absent key — so absence / a wrong-typed ``items`` / an ``error`` envelope is
-    rejected, not treated as empty. Passed to chat_json as response_validator; a fault
-    there conservatively skips the write (OpenAICompatibleClient.
+    A genuine "keep everything" is ``{"drop":[]}`` (empty list), NOT an absent key —
+    so absence / a wrong-typed ``drop`` / an ``error`` envelope is rejected, not
+    treated as empty. Passed to chat_json as response_validator; a fault there
+    conservatively skips the write (OpenAICompatibleClient.
     _response_validator_allows). On a cache HIT this same gate re-judges the stored
     value against the current nodes, so any laxer-era poison is treated as a miss."""
     data = safe_json(content)
     if not isinstance(data, dict) or "error" in data:
         return False
-    items = data.get("items")
-    if not isinstance(items, list):
+    drop = data.get("drop")
+    if not isinstance(drop, list):
         return False
-    for it in items:
-        if not isinstance(it, dict):
-            return False
-        index = it.get("index")
+    for index in drop:
         if type(index) is not int:  # bool is an int subclass — exclude True/False
-            return False
-        if not isinstance(it.get("keep"), bool):
             return False
         if nodes and not (0 <= index < len(nodes)):
             return False
@@ -202,9 +226,9 @@ def _refine_response_grounds(content: str, nodes: List[Node]) -> bool:
 
 def _refine_response_cacheable(content: str) -> bool:
     """Degraded (node-less) entry to ``_refine_response_grounds`` for callers/tests
-    with no ``nodes`` to bound-check against — keeps the structural + ``type(index)
-    is int`` + ``keep`` bool checks and drops only the range check (see there). Real
-    refine callers pass a nodes-closed validator, so the bound is enforced there."""
+    with no ``nodes`` to bound-check against — keeps the structural and ``type(index)
+    is int`` checks and drops only the range check (see there). Real refine callers
+    pass a nodes-closed validator, so the bound is enforced there."""
     return _refine_response_grounds(content, [])
 
 
@@ -250,7 +274,7 @@ EVERY Procedure present.
 CLAIMS — ATOMIC (one proposition per node). SPLIT compound statements:
 - "A and B" / "A; B"  ->  two separate Claims.
 - "B because/therefore A", "A, which causes B"  ->  TWO atomic Claims (A, B) PLUS
-  a reasoning edge between them (supports / derived_from / depends_on) by local_id.
+  a reasoning edge between them (supports / derived_from / depends_on).
   Connecting the atoms with an edge is HOW reasoning edges get built — do it.
 GUARDRAIL: split ONLY when each part stands alone as truth-evaluable; never
 fragment a single proposition just because it is long. Do NOT emit Claims for
@@ -260,14 +284,16 @@ covers…"), or navigation.
 VALIDITY SCOPE: when a Claim or Formula holds only under a stated condition, put
 that condition in a structured `validity_scope` object ON that node — NOT as prose,
 NOT as a separate dangling Claim (never emit "This holds for DC…" as its own Claim).
-Fields (ALL optional; include only what the text explicitly states):
+Fields (fill only what the text explicitly states; write null for any field it
+does not state):
   region: [..]        e.g. ["saturation"] | ["weak-inversion"]
   assumptions: [..]   e.g. ["perfect matching", "R_in << R_C"]
   approximation: ".." e.g. "small-signal" | "neglecting body effect"
   range: ".."         e.g. "low-frequency" | "f << f_T"
-NEVER invent a scope the text does not state; OMIT validity_scope when none.
+NEVER invent a scope the text does not state; write "validity_scope": null when
+there is none, and always on Concept and Procedure nodes.
 
-EDGES (source->target by local_id). Use ONLY the endpoint pairs below. Reasoning-
+EDGES (source -> target, by node index). Use ONLY the endpoint pairs below. Reasoning-
 bearing edges are the priority and may connect Claims/Formulas/Concepts, not only
 Concept->Concept:
 {_EDGE_PROMPT_RULES}
@@ -281,12 +307,16 @@ one edge. Prefer reasoning edges (supports/derived_from/depends_on); fall back t
 {base_rule}
 The passage is numbered elements, one per line, prefixed like [3]. Every node and
 edge MUST include "ev": the bare INTEGER label of the element that best contains
-it (write 3, never "3", 3.0 or true). Give each node a "local_id": a short STRING
-(e.g. "n1") reused verbatim as an edge's "source"/"target". "type" is exactly one
+it (write 3, never "3", 3.0 or true). An edge's "source" and "target" are node
+INDEXES: the bare INTEGER position of the endpoint node in THIS reply's "nodes"
+array, counting from 0 (the first node is 0, the second 1), with the same integer
+rules as "ev". Source and target must be two different nodes, and each index must
+be less than the number of nodes you return. "type" is exactly one
 of the four node-type words above, as a string. "name" carries the node's text as
 a single string (Concept/Procedure name, Claim proposition, Formula expression).
 For an ordered multi-step Procedure emit ONE Procedure node with an ordered
-`steps` array, each {{"name":..,"ev":..}} with the same string/integer rules.
+`steps` array, each {{"name":..,"ev":..}} with the same string/integer rules;
+every other node writes "steps": null.
 Skip narrative/filler.
 
 Preserve entity/concept names, formula expressions and canonical labels EXACTLY
@@ -384,16 +414,12 @@ def refine_nodes(client: Any, elements: List[SourceElementQ], nodes: List[Node],
         raise
     except Exception:
         return nodes
-    items = data.get("items") if isinstance(data, dict) else None
-    if not isinstance(items, list):
+    listed = data.get("drop") if isinstance(data, dict) else None
+    if not isinstance(listed, list):
         return nodes
-    drop = set()
-    for it in items:
-        # ``type(...) is int``: a delivered boolean index (``bool`` is an
-        # ``int`` subclass) would otherwise delete node 1 (codex #720 R6).
-        if isinstance(it, dict) and type(it.get("index")) is int \
-                and it.get("keep") is False:
-            drop.add(it["index"])
+    # ``type(...) is int``: a delivered boolean index (``bool`` is an ``int``
+    # subclass) would otherwise delete node 1 (codex #720 R6).
+    drop = {index for index in listed if type(index) is int}
     if not drop:
         return nodes
     return [n for i, n in enumerate(nodes) if i not in drop]
@@ -425,7 +451,9 @@ def _glean_nodes(client: Any, elements: List[SourceElementQ], section_path: str,
                 messages, _KG_SCHEMA_HINT,
                 **_extract_call_kwargs(
                     client,
-                    lambda content: _fragment_grounds_something(content, elements),
+                    lambda content: _fragment_grounds_something(
+                        content, elements, edges_consumed=False
+                    ),
                 ),
             )
             data = safe_json(raw)
@@ -491,19 +519,12 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
     )
     data = safe_json(raw)
     nodes: List[Node] = []
-    by_local = {}
-    # IDs identify model-declared nodes, independently of whether those nodes
-    # ground successfully. A repeated ID is ambiguous even when only one of
-    # its declarations survives grounding; do not guess which one an edge meant.
-    local_id_counts = Counter(
-        item["local_id"]
-        for item in _list_items(data.get("nodes"))
-        if isinstance(item, dict)
-        and isinstance(item.get("local_id"), str)
-        and item["local_id"].strip()
-    )
+    # Edge endpoints are positions in the reply's ORIGINAL nodes array, so the
+    # map is keyed by that position; a node the gate drops leaves a hole and
+    # every edge on it is rejected rather than shifted onto a neighbour.
+    by_position: Dict[int, str] = {}
     type_by_node_id: Dict[str, str] = {}
-    for it in _list_items(data.get("nodes")):
+    for position, it in enumerate(_list_items(data.get("nodes"))):
         name = _name_str(it.get("name")) if isinstance(it, dict) else ""
         if not name or not _typed_str(it.get("type"), NODE_TYPES):
             continue
@@ -519,9 +540,7 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
             node.validity_scope = _parse_validity_scope(it.get("validity_scope"))
         nodes.append(node)
         type_by_node_id[nid] = node.type
-        local_id = it.get("local_id")
-        if isinstance(local_id, str) and local_id_counts[local_id] == 1:
-            by_local[local_id] = nid
+        by_position[position] = nid
     if gleaning_rounds and nodes:
         # Gleaning only ever ADDS to a window the first pass already
         # extracted; a fault inside it must not discard those nodes. The
@@ -547,7 +566,9 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
             kept = nodes
         kept_ids = {n.id for n in kept}
         nodes = kept
-        by_local = {lid: nid for lid, nid in by_local.items() if nid in kept_ids}
+        by_position = {
+            position: nid for position, nid in by_position.items() if nid in kept_ids
+        }
         type_by_node_id = {
             node_id: node_type for node_id, node_type in type_by_node_id.items()
             if node_id in kept_ids
@@ -569,10 +590,9 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
             )
             rejected_edges[(category, "unknown_edge_type")] += 1
             continue
-        source = it.get("source")
-        target = it.get("target")
-        s = by_local.get(source) if isinstance(source, str) else None
-        t = by_local.get(target) if isinstance(target, str) else None
+        source, target = _edge_endpoints(it)
+        s = by_position.get(source)
+        t = by_position.get(target)
         if not s or not t or s == t:
             rejected_edges[(it["type"], "missing_or_self_endpoint")] += 1
             continue

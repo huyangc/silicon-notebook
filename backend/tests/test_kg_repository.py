@@ -143,7 +143,7 @@ class _FakeLLM:
 
 def test_run_extraction_kg_path(repo):
     bind_chat_client(repo, "kg_extract", _FakeLLM(json.dumps({
-        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
+        "nodes": [{"type": "Concept", "name": "Engram",
                    "evidence": "Engram is a memory architecture"}],
         "edges": []})))
     nb = repo.create_notebook(NotebookCreate(name="nb"))
@@ -171,12 +171,12 @@ def test_run_extraction_with_surviving_edge(repo):
     """
     bind_chat_client(repo, "kg_extract", _FakeLLM(json.dumps({
         "nodes": [
-            {"local_id": "a", "type": "Concept", "name": "Engram",
+            {"type": "Concept", "name": "Engram",
              "evidence": "Engram is a memory architecture"},
-            {"local_id": "b", "type": "Claim", "name": "Engram improves perplexity",
+            {"type": "Claim", "name": "Engram improves perplexity",
              "evidence": "Engram improves perplexity"},
         ],
-        "edges": [{"type": "about", "source": "b", "target": "a",
+        "edges": [{"type": "about", "source": 1, "target": 0,
                    "evidence": "Engram improves perplexity"}],
     })))
     nb = repo.create_notebook(NotebookCreate(name="nb"))
@@ -204,7 +204,7 @@ def test_run_extraction_with_surviving_edge(repo):
 
 def test_reextraction_is_idempotent(repo):
     bind_chat_client(repo, "kg_extract", _FakeLLM(json.dumps({
-        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
+        "nodes": [{"type": "Concept", "name": "Engram",
                    "evidence": "Engram is a memory architecture"}],
         "edges": []})))
     nb = repo.create_notebook(NotebookCreate(name="nb"))
@@ -247,7 +247,7 @@ def test_extraction_warning_surfaced_on_failed_windows(repo, monkeypatch):
     """A window that fails with a network error yields a non-empty
     extraction_warning on the source summary; a clean run yields None."""
     payload = json.dumps({
-        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
+        "nodes": [{"type": "Concept", "name": "Engram",
                    "evidence": "Engram is a memory architecture"}],
         "edges": []})
     nb = repo.create_notebook(NotebookCreate(name="nb"))
@@ -286,7 +286,7 @@ def test_extraction_warning_surfaced_on_failed_windows(repo, monkeypatch):
 
 def test_extraction_warning_empty_on_clean_run(repo):
     payload = json.dumps({
-        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
+        "nodes": [{"type": "Concept", "name": "Engram",
                    "evidence": "Engram is a memory architecture"}],
         "edges": []})
     nb = repo.create_notebook(NotebookCreate(name="nb"))
@@ -303,12 +303,12 @@ def test_partial_retry_preserves_old_graph_until_clean_replacement(repo):
     repo.settings.kg_gleaning_enabled = False
     repo.settings.kg_refine_enabled = False
     old_payload = json.dumps({
-        "nodes": [{"local_id": "old", "type": "Concept", "name": "Engram",
+        "nodes": [{"type": "Concept", "name": "Engram",
                    "evidence": "Engram is a memory architecture"}],
         "edges": [],
     })
     new_payload = json.dumps({
-        "nodes": [{"local_id": "new", "type": "Concept", "name": "Memory architecture",
+        "nodes": [{"type": "Concept", "name": "Memory architecture",
                    "evidence": "memory architecture"}],
         "edges": [],
     })
@@ -406,7 +406,7 @@ def test_partial_retry_store_failure_rolls_back_to_old_graph(repo, monkeypatch):
     repo.settings.kg_gleaning_enabled = False
     repo.settings.kg_refine_enabled = False
     payload = json.dumps({
-        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
+        "nodes": [{"type": "Concept", "name": "Engram",
                    "evidence": "Engram is a memory architecture"}],
         "edges": [],
     })

@@ -164,18 +164,19 @@ def notebook_meta_prompt(sources_block: str) -> str:
     )
 
 
-REFINE_SCHEMA_HINT = '{"items":[{"index":0,"keep":true}]}'
+REFINE_SCHEMA_HINT = '{"drop":[0]}'
 
 
 def refine_prompt(section_path: str, records_block: str, elements_block: str) -> str:
     return (
         "You verify extracted knowledge items against their source document "
-        "(self-refinement pass). For EACH numbered item decide keep=true or "
-        "keep=false:\n"
-        "- keep=false if the item is NOT supported by the source text "
+        "(self-refinement pass). Decide for EACH numbered item whether to drop it:\n"
+        "- drop the item if it is NOT supported by the source text "
         "(hallucinated), is too vague to be useful, or merely restates a "
-        "heading; otherwise keep=true.\n"
-        "Return JSON only, one entry per input index.\n\n"
+        "heading; keep it otherwise.\n"
+        'Return JSON only: "drop" lists the bracketed numbers of the items to '
+        "drop, as bare integers (write 3, never \"3\"); return \"drop\": [] to "
+        "keep every item.\n\n"
         f"Source section: {section_path}\n\n"
         f"Extracted items:\n{records_block}\n\n"
         f"Source elements (ground truth):\n{elements_block}"
@@ -190,7 +191,8 @@ def gleaning_prompt(section_path: str, doc_type: str) -> str:
         "ONLY the NODES that were missed — use the SAME node types (Concept, "
         "Claim, Formula, Procedure) and the SAME JSON schema, each with its "
         'integer "ev" element label. Do NOT repeat nodes you already extracted. '
-        "If nothing was missed, return an empty nodes list. "
+        "If nothing was missed, return an empty nodes list. This pass reads "
+        "nodes only: return an empty edges list. "
         "Preserve entity/concept names, formula expressions and canonical labels "
         "EXACTLY as they appear in the source text, in their original language — "
         "do NOT translate or transliterate them. Return JSON only."

@@ -25,7 +25,6 @@ class _KgChat:
         return json.dumps({
             "nodes": [
                 {
-                    "local_id": "concept-1",
                     "type": "Concept",
                     "name": "PostgreSQL batch ingestion",
                     "ev": 0,
