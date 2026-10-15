@@ -239,6 +239,18 @@ bearer token。由于该值会进入 Agent 指令正文，启动会拒绝 userin
 `MCP_PUBLIC_URL=http://notebook.example.com/mcp`、`MCP_REQUIRE_HTTPS=0`；这会放宽
 Host/Origin 校验，并明文传输 token。
 
+Agent 的 `ask` / `get_ask` 可以用 `delivery="link"` 把回答发成限时匿名链接（见[产品与 API](./product-and-api_zh.md)
+的 MCP `ask` 一节）。要启用它，必须设置 `PUBLIC_WEB_BASE_URL`，即读者浏览器能打开的**前端**公开地址，链接为
+`${PUBLIC_WEB_BASE_URL}/c/<token>`。服务端**不会**从请求头（`Host`、`X-Forwarded-*`）推导它：这些头来自客户端或
+中间代理，可被伪造，据此拼出的链接可能指向别的站点；也无法保证 MCP 请求走的入口与读者能访问的入口是同一个。
+它允许 `http`（生产前端常是 `http://<IP>:3000`）和 `https`，可以带子路径（如
+`https://example.com/notebook`），末尾斜杠会被去掉；带 userinfo、query、fragment、空白或控制符时启动失败。
+**未配置时** `delivery="link"` 返回 `unavailable`，其余功能不受影响。另有三个可选配置：
+`MCP_ANSWER_LINK_TTL_HOURS`（默认 168，范围 1–720，是 `link_ttl_hours` 的缺省值与上限，超过上限的请求被拒绝而
+不是被钳制）、`MCP_ANSWER_LINK_GRACE_HOURS`（默认 168，范围 0–720，过期后保留多久：期间读者看到 410「已过期」，
+之后才会被签发时顺带的清扫删除，之后变回 404）与 `MCP_ANSWER_PREVIEW_MAX_CHARS`（默认 300，范围 40–2000，
+纯文本摘要的字数上限）。每个 token 还需在「Agent 接入」页单独打开「允许签发限时回答链接」。
+
 生产诊断支持的目标形态是 Ubuntu 24.04 上按上述 `npm run start` 启动、只含一个
 Uvicorn worker 的普通部署。若部署疑似卡住，请保持服务运行，并在**卡顿正在发生时**
 采集事故；见[生产事故即时采集](./operations_zh.md#生产事故即时采集)。先重启会丢掉命令需要关联的

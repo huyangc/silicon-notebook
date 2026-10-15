@@ -50,7 +50,10 @@ def _inline(text: str) -> str:
         saved.append(m.group(m.lastindex))
         return f"\ue000{len(saved) - 1}\ue001"
 
-    text = MARKER_RE.sub("", text)
+    # A marker takes the blanks before it along ("exists [k1]." -> "exists."),
+    # by splitting rather than a `[ \t]*` prefix that would backtrack on runs of blanks.
+    pieces = MARKER_RE.sub("", text).split("")
+    text = "".join(p.rstrip(" \t") for p in pieces[:-1]) + pieces[-1]
     text = _IMAGE_RE.sub("", text)
     text = _CODE_SPAN_RE.sub(stash, text)
     text = _INLINE_MATH_RE.sub(stash, text)

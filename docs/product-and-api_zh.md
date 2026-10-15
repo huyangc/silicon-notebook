@@ -401,6 +401,10 @@ token）。已认证的三个端点在 `/api/global-ask/conversations/{conversat
 是幂等的，这个 404 来自服务层的所有权判定）。全局会话不属于任何笔记本，所以这里**没有**
 `require_notebook_read` 这层库级守卫：所有权就是全部的闸。
 
+同一个公开页还有第三个命名空间 `alnk-`：MCP `ask` / `get_ask` 的 `delivery="link"` 为**单条已回答任务**签发的限时链接
+（单库或全局任务都可），见[问答会话公开分享护栏](#问答会话公开分享护栏)的「MCP 回答链接」。它不属于会话分享，不经
+`.../share` 端点。
+
 与单库相比，只有两处真正不同：
 
 - **边界是作业**，不是答案行。`expected_through_id` 送的是 `job_id`；解析不到（已删除、仍在
@@ -1190,14 +1194,16 @@ Token 签发后可以再次复制：服务端在签发时保存明文（`agent_a
 撤销会同时清空明文。
 
 已签发 token 的访问配置可以原地修改：`PUT /api/agent-tokens/{token_id}/access`
-整体替换权限档位、默认 notebook、allowlist 与过期时间（四个字段都必填，`expires_at: null` 表示无到期
-时间），校验规则与签发完全相同；token 哈希、所属 Profile 与创建时间不变。Agent
+整体替换权限档位、默认 notebook、allowlist、过期时间与回答链接开关（五个字段都必填，`expires_at: null` 表示无到期
+时间；`allow_answer_links` 必须显式给出，不给默认值，以免漏写就悄悄关掉或打开），校验规则与签发完全相同；token 哈希、所属 Profile 与创建时间不变。Agent
 每次工具调用都会重读实时 token 状态，所以修改从下一次调用起生效，无需重签或重新配置客户端；把已过期
 token 的过期时间改到将来会让它重新可用；签发与修改时 `expires_at` 传空串与 `null` 同义，都表示无到期
-时间。可选的 `expected` 对象携带编辑器上次读到的四个访问字段：给出且存储中的配置此后已变时，写入返回
+时间。可选的 `expected` 对象携带编辑器上次读到的五个访问字段：给出且存储中的配置此后已变时，写入返回
 409 而不是覆盖（浏览器总会带上它，旧标签页因此不能悄悄恢复另一个标签页刚收回的权限；不带则后写覆盖）。
 已撤销的 token、或所属 Profile 已停用的 token 返回 409；allowlist 中含 owner 已无权读取的 notebook
-返回 422。浏览器在每个 token 行内编辑，忙碌、失败与「已保存」状态都落在该行；已撤销或所属 Profile
+返回 422。`allow_answer_links: true` 而权限档位里没有「问答」（`ask`）时返回 422
+「允许签发回答链接需要同时勾选「问答」权限」；签发（`POST /agent-profiles/{id}/tokens`）时该字段可省略，缺省为关，规则相同。
+它只决定该 token 的 `ask` / `get_ask` 能否使用 `delivery="link"`（见下文 MCP `ask` 的「限时回答链接」），读时复核与撤销语义见[问答会话公开分享护栏](#问答会话公开分享护栏)的「MCP 回答链接」一节。浏览器在每个 token 行内编辑，忙碌、失败与「已保存」状态都落在该行；已撤销或所属 Profile
 已停用的 token 不提供修改入口，撤销需要在行内再确认一次。后端 requirements 已包含官方 `mcp>=1.26.0` client/server
 SDK。启动后，Streamable HTTP 服务位于 `/mcp/`（写 `/mcp` 会经 307 到达）。
 签发回执还会给出匿名 `GET /api/agent-mcp/onboarding`：这是一份机器可读的 Markdown 交接说明，
@@ -1475,6 +1481,33 @@ Memory 条目是 `mem` ref），所以 `read_reference` 解析它的方式与解
 例外）：20 行上限与 2,000 字符文本上限都不适用，整份证据一次返回、不分页。MCP 客户端通常自带工具输出上限，需要
 调高（见 [Agent MCP 记忆 SOP](./agent-mcp-memory-sop_zh.md)）。已登记差异：`reasoning` 下证据一律按单次装配成
 一份上下文，即便回答会对该问题分节合成；证据精炼的模型调用也被跳过。
+
+**限时回答链接：`delivery="link"`。** `ask` 与 `get_ask` 都接受 `delivery`（`"inline"` 默认，即上文行为；或
+`"link"`）和 `link_ttl_hours`（整数，小时）。`link` 面向「把答案发进聊天工具」：已回答的任务不返回
+`answer` / `citations` / `coverage` / `trace`，只返回一段纯文本 `preview` 和一条限时匿名链接，读者点开
+`/c/{token}` 看完整回答、引用与图片。成功时响应形如 `{"job_id", "conversation_id", "status": "answered",
+"mode", "preview", "preview_truncated", "link": {"url", "expires_at"}, "grounded", "total_citations",
+"completeness_notice", "scope", "error", "content_is_untrusted_evidence": true}`；`preview` 由确定性规则从回答
+Markdown 化简而来（不调模型）：去掉引用标记、图片、HTML 与强调符号，表格与块级公式各换成一行占位，字数以
+`MCP_ANSWER_PREVIEW_MAX_CHARS`（默认 300，按 Unicode 码点）为上限，被截断时 `preview_truncated` 为 true。
+`preview`、`link.url` 与 `link.expires_at` 必须完整装进响应预算，否则报 `internal`，绝不返回被截断的链接或摘要。
+非 `answered` 状态（`running`、`needs_clarification`、`failed` 等）仍返回通常的形状，不签发链接。
+
+组合规则（动手之前检查）：`delivery` 只能是 `inline` 或 `link`；`link_ttl_hours` 只能与 `link` 同用，取值须是
+`1` 到 `MCP_ANSWER_LINK_TTL_HOURS` 之间的整数（布尔与小数一律拒绝，**不会被钳到上限**），否则
+`invalid_argument`；`delivery="link"` 不能与 `output="evidence"` 同用（仅检索不存回答），`get_ask` 的 `link`
+也不能同时传分页位置（`invalid_argument`）。部署未配置 `PUBLIC_WEB_BASE_URL` 时报 `unavailable`（文案让
+用户联系部署管理员）；token 没开「允许签发限时回答链接」时报 `forbidden`（文案指向「Agent 接入」页的开关）——
+开关在交付时按 token 当前状态重读，运行期间被关掉也会拒绝：回答已保存，这条 `forbidden` 的文案会带上它的
+`job_id`，可用 `get_ask` 以 `inline` 读取（运行前就被拒时不带 job）。
+
+唯一性与重试：每个（作业, 签发 token）至多一条有效链接。同一 `client_request_id` 的重试与 `get_ask`
+`delivery="link"` 的补签复用这条链接，并返回它**原来的** `expires_at`（`link_ttl_hours` 只对新链接生效；
+复用从不延期）。同一主人的另一个 token 对同一作业再签，是它自己的另一条链接，不会顶掉前者。签发先过与
+`get_ask` 完全相同的归属、读权、白名单与 Memory 回放检查——链接从不授权 token 本来读不到的任务；单库任务
+引用的挂载参考库按会话分享的规则复核，但不要求 token 白名单覆盖这些挂载库（与 `get_ask` 的口径一致）。
+链接形如 `{PUBLIC_WEB_BASE_URL}/c/alnk-…`，持有链接的人**无需登录**即可看完整回答，所以 `ask` 说明里明写了
+这一点。
 
 **`ref` 与 `read_reference`。** `search` 的命中与 `ask`/`get_ask` 的每条引用都带不透明的 `ref`
 （无填充的 `base64url(json)`；不签名——`read_reference` 每次调用都重跑原读取的全部鉴权）。
@@ -2960,6 +2993,26 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 **个人记忆披露（分享弹窗）。** 公开或更新会话分享链接前，分享弹窗先向服务端取「公开页将包含你多少条不同的个人记忆」（`GET …/share/disclosure?through_id=`，浏览器不自己数 Memory），并显示「公开页会包含 N 条你引用到的个人记忆摘录。」（更新后：「更新后公开页共 N 条你引用到的个人记忆摘录（新增 M 条）。」）。N>0 时公开请求在 `expected_through_id` 之外带 `acknowledged_memory_count: N`；N 为 0 或取数失败时不带（请求体仍是 `{"expected_through_id": …}`）。服务端按即将公开的确切范围重算，不相等就返回 409 `share_disclosure_required` 并带回确数（其中 `new_memory_count` 相对当前已公开水位），弹窗把披露行就地换成该数字，按钮改为「确认公开」，作者重新确认后才公开；确认公开成功后披露行显示作者刚确认的数字；403 时在按钮旁就地显示服务端那句中文原因。结果落在公开按钮自己身上（在飞时「生成链接中…」，成功后 1.6 秒内「已公开」），复制链接仍是手动操作。公开页（`/c/{token}`、`/r/{token}`）中个人记忆引用保留标题与摘录，当引用带结构化标记 `is_memory: true` 时位置标签显示「作者的个人记忆」。
 
 **每次打开都复核挂载参考库。** 除创建者的读权外，单库会话公开页（及其图片）每次打开时，还会以创建者的身份复核公开轮次引用到的每个挂载参考库——由锚点与引用上的 `notebook_id` 写明：任一不再是该会话所在笔记本的有效参与库——被取消挂载，或挂载失效——页面返回与未知 token 相同的 404，与全局分支失去某个库时一致；挂载恢复后同一条链接复活。没有引用其它库的页面不读取挂载关系。
+
+**MCP 回答链接（`alnk-`）。** 第三个能力命名空间：Agent 用 `ask` / `get_ask` 的 `delivery="link"` 为**一条已回答的
+MCP 任务**签发限时链接（`answer_links` 表，SQLite v94 / PostgreSQL `0074_answer_links.sql`，行里是
+链接 token、任务种类与 id、主人、签发 token、创建与到期时间，同（任务, 签发 token）唯一，无外键），仍走同一个公开页 `/c/{token}` 与同一对匿名端点，按 `alnk-`
+前缀分流，不会命中 `cshr-` / `gshr-`。页面只含**那一轮回答**（单轮，不含会话其余轮次），投影沿用同一份白名单
+（无 id、无推理轨迹、无意图），并带 `Cache-Control: no-store`；响应多一个只在这条分支出现的 `expires_at`，页面据此
+显示有效期。每次打开都在服务端重新复核，顺序固定：未知 token 为 404；**已过期但行仍在**为 410（页面端点返回
+中文 detail「链接已过期，请重新提问」，走 `user_error()`；图片端点对过期仍是 404），不管其余复核结果如何；之后任何
+一项复核失败都是与未知 token 无法区分的 404。复核项是 `get_ask` 此刻对签发 token 的全部检查——token 未撤销未过期、
+所属 Profile 启用、主人仍有资格、**回答链接开关仍开**、仍持 `ask` 档、任务属于主人且由 MCP 发起、单库任务的笔记本
+仍在 token 白名单内、运行时开着私人记忆通道的任务须 token 此刻仍持 `memory:read`、主人仍可读该笔记本——加上与会话
+分享同一份的快照谓词（挂载参考库仍有效等）；全局任务则按白名单作天花板复核。仅检索（`output="evidence"`）任务、未完成
+任务与没有回答行的任务一律 404。关掉开关再打开，未过期的旧链接恢复可用；撤销 token 让它的所有链接立即失效。
+图片别名按链接 token 派生，只有这条回答引用的图片可读，其余一律 404。
+
+链接的有效期由签发时的 `link_ttl_hours`（缺省 `MCP_ANSWER_LINK_TTL_HOURS`）决定。删除任务／会话／token **不级联删除**
+链接行，读时因复核失败而 404；占用空间由签发时顺带的清扫回收（每进程每小时至多一次，在写事务提交之后才记为已清扫）：
+过期超过 `MCP_ANSWER_LINK_GRACE_HOURS` 宽限期的行、签发 token 已撤销或不存在的行、任务已不存在的行被删除；宽限期内
+读者看到 410，清扫之后同一链接变回 404。shadow 切换不复制该表，切换后旧链接 404，可用 `get_ask(delivery="link")` 重签；
+跨环境增量同步里它是本地表，不随同步搬运。
 
 下表每一条对**全局（跨库）会话的分享**同样适用：两条链路共用同一份投影模块、同一对匿名端点，
 因此也共用这一组常量。真正不同的只有两处（水位边界是作业、实时复核的是一组库），见
