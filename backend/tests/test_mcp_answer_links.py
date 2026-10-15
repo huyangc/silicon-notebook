@@ -93,8 +93,13 @@ async def test_global_ask_link_for_two_notebooks_and_star(linked, notebooks):
 
 
 @pytest.mark.anyio
-async def test_global_link_is_refused_when_the_switch_is_off_at_delivery(linked):
+async def test_global_link_is_refused_when_the_switch_is_off_at_delivery(
+    linked, monkeypatch,
+):
     handlers, principal, service, store = linked
+    booked: list = []
+    monkeypatch.setattr(ask_module, "_record_agent_call",
+                        lambda *args: booked.append(args[2:]))
 
     def start(payload, **kwargs):
         principal.allow_answer_links = False  # turned off while it ran
@@ -105,7 +110,84 @@ async def test_global_link_is_refused_when_the_switch_is_off_at_delivery(linked)
         await handlers["ask"]("问题", None, notebooks=BOTH, mode="chunk",
                               delivery="link")
     assert refused.value.code == "forbidden"
-    assert store.calls == []
+    # The refusal names the saved job so it can still be read with get_ask.
+    assert "job_id: gask-a" in refused.value.message
+    assert "get_ask" in refused.value.message
+    assert store.calls == [] and booked == []
+    # The switch back on: delivered, and booked per resolved notebook.
+    principal.allow_answer_links = True
+    service.start = lambda payload, **kwargs: job(answer="答案")
+    await handlers["ask"]("问题", None, notebooks=BOTH, mode="chunk", delivery="link")
+    assert booked == [("nb-a", "ask:execute")]
+
+
+@pytest.mark.anyio
+async def test_an_unexpected_issue_failure_is_not_reported_as_a_ttl_error(linked):
+    """``link_ttl_hours`` is validated before any work; a ``ValueError`` from
+    issuing itself is a fault, never relabelled as the caller's argument."""
+    handlers, _, service, store = linked
+
+    def broken(**kwargs):
+        raise ValueError("store fault")
+
+    store.issue_answer_link = broken
+    service.start = lambda payload, **kwargs: job(answer="答案")
+    with pytest.raises(ValueError, match="store fault"):
+        await handlers["ask"]("问题", None, notebooks=BOTH, mode="chunk",
+                              delivery="link", link_ttl_hours=3)
+
+
+@pytest.mark.anyio
+async def test_a_real_keyed_retry_attaches_to_its_job_and_reuses_the_link(env):
+    """The real ``ask_with_job`` (attach_only probe, durable job store); only
+    the model call is a stand-in. The retry runs no engine, attaches to the
+    first job and gets the first link back."""
+    from app.services.sqlite_repository import _now
+    from tests.answer_link_service_cases import _notebook, _user
+    from tests.mcp_answer_link_cases import _agent, _clients, _link_rows, _payload
+    from tests.model_testkit import bind_chat_client
+
+    owner, owner_id = _user(env)
+    nb = _notebook(env, owner)
+    raw, _ = _agent(env, owner_id, [nb])
+    now = _now()
+    with env.repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+            "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("src-t7", nb, "Evidence", "markdown", "extracted", "parsed", "e.md",
+             "", 0, "", "", "textbook", now, now),
+        )
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,"
+            "element_ids,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("chunk-t7", nb, "src-t7", "evidence exists in this notebook", "1",
+             "[]", now),
+        )
+    calls: list = []
+
+    class _AnswerClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            calls.append(1)
+            return '{"answer":"Evidence exists [k1].","grounded":true}'
+
+    bind_chat_client(env.repo, "ask_answer", _AnswerClient())
+    arguments = {"question": "What evidence exists?", "mode": "chunk",
+                 "delivery": "link", "client_request_id": "t7-real-key"}
+    async with env.app.router.lifespan_context(env.app):
+        async with _clients(env, raw) as (client,):
+            first = _payload(await client.call("ask", {**arguments, "link_ttl_hours": 2}))
+            engine_calls = len(calls)
+            again = _payload(await client.call("ask", arguments))
+        assert _link_rows(env) == 1
+    assert engine_calls >= 1 and len(calls) == engine_calls, "the retry attached"
+    assert first["job_id"].startswith("askjob-") and again["job_id"] == first["job_id"]
+    assert again["link"] == first["link"]
+    assert first["preview"].startswith("Evidence exists") and "[k1]" not in first["preview"]
+    assert env.repo.ask_job_origin(first["job_id"])["submitted_via"] == "mcp"
 
 
 @pytest.mark.anyio

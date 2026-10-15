@@ -17,6 +17,7 @@ refused call writes no ``answer_links`` row.
 from __future__ import annotations
 
 import json
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 from itertools import count
@@ -197,10 +198,16 @@ async def ask_link_returns_preview_url_and_expiry(env):
     nb = _notebook(env, owner)
     raw, _ = _agent(env, owner_id, [nb])
     seeded = _fake_engine(env, owner_id, answer="**结论**：带宽足够。后续说明。")
+    booked: list = []
+    env.monkeypatch.setattr(
+        ask_module, "_record_agent_call", lambda *args: booked.append(args[2:])
+    )
     async with _clients(env, raw) as (client,):
         page = _payload(await client.call("ask", {
             "question": "带宽够吗", "mode": "chunk", "delivery": "link",
         }))
+        # A delivered link page is booked once, like an inline answer.
+        assert booked == [(nb, "ask:execute")]
         inline = _payload(await client.call("ask", {"question": "带宽够吗", "mode": "chunk"}))
     _assert_link_page(page, seeded[0])
     assert page["preview"] == "结论：带宽足够。后续说明。"
@@ -210,6 +217,48 @@ async def ask_link_returns_preview_url_and_expiry(env):
     # inline is the unchanged answer page and issues nothing.
     assert inline["answer"] == "**结论**：带宽足够。后续说明。" and "link" not in inline
     assert _link_rows(env) == 1
+
+
+async def inline_default_matches_the_pre_link_shape(env):
+    """``delivery`` omitted is byte-for-byte the page ``ask`` / ``get_ask``
+    returned before answer links existed (pinned as literals taken from the
+    implementation at 083e1fb00, not compared against the new code)."""
+    owner, owner_id = _user(env)
+    nb = _notebook(env, owner)
+    raw, _ = _agent(env, owner_id, [nb])
+    job_id, conversation_id = _seed_job(env, nb, owner_id)
+    seeded = _fake_engine(env, owner_id)
+    async with _clients(env, raw) as (client,):
+        read = _payload(await client.call("get_ask", {"job_id": job_id}))
+        asked = _payload(await client.call("ask", {"question": "带宽够吗", "mode": "chunk"}))
+    assert read == _pre_link_page(job_id, conversation_id, nb, "reasoning", False)
+    assert asked == _pre_link_page(seeded[0], asked["conversation_id"], nb, "chunk", True)
+    assert asked["conversation_id"].startswith("conv-")
+
+
+def _pre_link_page(job_id, conversation_id, nb, mode, grounded) -> dict:
+    """The first answer page of a one-sentence, uncited notebook answer, as
+    the pre-link implementation (083e1fb00) returned it."""
+    return {
+        "job_id": job_id, "conversation_id": conversation_id,
+        "status": "answered", "mode": mode, "answer_id": "",
+        "answer": "答案正文。", "next_answer_offset": None,
+        "citations": [], "next_citation_offset": None, "total_citations": 0,
+        "grounded": grounded,
+        "coverage": {
+            "resolved": 1, "searched": 1, "skipped": 0, "degraded": 0,
+            "offset": 0, "skipped_notebooks": [], "degraded_notebook_ids": [],
+        },
+        "next_coverage_offset": None,
+        "trace": {"steps": [], "offset": 0, "next_offset": None, "total": 0},
+        "error": "", "completeness_notice": "",
+        "scope": {"kind": "notebook", "notebook_ids": [nb]},
+        "content_is_untrusted_evidence": True,
+        "truncation": {
+            "budget_chars": 12000, "truncated": False, "omitted_items": 0,
+            "omitted_map_entries": 0, "omitted_characters": 0, "omitted_fields": 0,
+        },
+    }
 
 
 async def inline_default_is_identical_to_explicit_inline(env):
@@ -247,19 +296,30 @@ async def switch_turned_off_mid_run_is_forbidden_and_answer_is_saved(env):
     owner, owner_id = _user(env)
     nb = _notebook(env, owner)
     raw, principal = _agent(env, owner_id, [nb])
-    seeded = _fake_engine(
+    _fake_engine(
         env, owner_id,
         during=lambda: _set_access(env, principal, allow_links=False),
+    )
+    booked: list = []
+    env.monkeypatch.setattr(
+        ask_module, "_record_agent_call", lambda *args: booked.append(args)
     )
     async with _clients(env, raw) as (client,):
         refused = await client.call("ask", {
             "question": "带宽够吗", "mode": "chunk", "delivery": "link",
         })
-        saved = _payload(await client.call("get_ask", {"job_id": seeded[0]}))
-    code, text = _error(refused)
-    assert code == "forbidden" and "Agent 接入" in text
+        code, text = _error(refused)
+        # The refusal itself names the saved job (no client_request_id was
+        # sent, so this is the caller's only handle on it).
+        match = re.search(r"job_id: (askjob-[A-Za-z0-9_-]+)", text)
+        assert match, text
+        saved = _payload(await client.call("get_ask", {"job_id": match.group(1)}))
+    assert code == "forbidden" and "Agent 接入" in text and "get_ask" in text
     assert saved["status"] == "answered" and saved["answer"] == "答案正文。"
     assert _link_rows(env) == 0
+    # A refused delivery hands nothing back, so the ask is not booked
+    # (get_ask books nothing either).
+    assert booked == []
 
 
 async def token_without_answer_links_is_forbidden_before_any_work(env):
@@ -518,6 +578,7 @@ async def plugin_engine_answer_gets_a_link(env):
 
 CASES = {case.__name__: case for case in (
     ask_link_returns_preview_url_and_expiry,
+    inline_default_matches_the_pre_link_shape,
     inline_default_is_identical_to_explicit_inline,
     keyed_retry_reuses_the_same_link,
     switch_turned_off_mid_run_is_forbidden_and_answer_is_saved,
