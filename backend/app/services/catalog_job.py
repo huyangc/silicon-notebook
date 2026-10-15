@@ -219,9 +219,9 @@ CATALOG_TABLE_COLUMNS = (
 # failure. See `_call` for where the shape is enforced and `_prompt` for how it
 # is asked for.
 _SCHEMA_HINT = (
-    '{"entries": [{"command_name": "string", "syntax": "string", '
-    '"description": "string", "args": [{"name": "string", "required": true, '
-    '"desc": "string", "default": "string"}], "examples": ["string"]}]}'
+    '{"entries": [{"command_name": "", "syntax": "", '
+    '"description": "", "args": [{"name": "", "required": false, '
+    '"desc": "", "default": ""}], "examples": [""]}]}'
 )
 
 # User-readable copy. Everything a route hands to `user_error()` comes from
@@ -3917,7 +3917,7 @@ Rules:
 - `required` is true only when the source text says the parameter is required;
   write it as a JSON boolean (true/false), never as a quoted string.
 - `syntax`, `description`, `desc` and `default` are plain strings; when a value
-  is absent write "" (never null). `examples` is always an array of strings —
+  is absent write "" (an empty string). `examples` is always an array of strings —
   `[]` when there are none, `["one example"]` even for a single one.
 
 Return JSON only, matching: {_SCHEMA_HINT}
