@@ -757,6 +757,33 @@ class GlobalAskStore:
             ],
         }
 
+    def public_job(self, job_id, user_id):
+        """One finished MCP job of this owner, in the shape of a
+        ``public_conversation_by_token`` ``jobs[]`` element, or ``None``.
+
+        Only ``status='done'`` and ``submitted_via='mcp'`` rows qualify: a
+        browser-asked, running, failed or cancelled job is not something an
+        answer link may publish, and a foreign owner's id resolves to nothing
+        (``user_id`` is part of the predicate, never a post-filter). The payload
+        crosses exactly as stored, like the share read.
+        """
+        clean = str(job_id or "").strip()
+        owner = str(user_id or "").strip()
+        if not clean or not owner:
+            return None
+        with self.database.connect() as db:
+            row = db.execute(self._sql(
+                "SELECT id, payload_json, created_at FROM global_ask_jobs "
+                "WHERE id=? AND user_id=? AND status='done' AND submitted_via='mcp'"
+            ), (clean, owner)).fetchone()
+        if row is None:
+            return None
+        return {
+            "job_id": row["id"],
+            "payload": self._payload(row["payload_json"]),
+            "created_at": row["created_at"],
+        }
+
     def share_window(self, conversation_id, user_id, *, expected_through_id=None):
         """The done jobs a share pinned at ``expected_through_id`` would
         publish, read only: ``{"through_id": <boundary job id>, "jobs": [...]}``

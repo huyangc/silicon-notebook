@@ -2361,20 +2361,65 @@ class GlobalAskService:
             # and a link that can never be re-checked must not be served.
             return None
         jobs = [job for job in (row.get("jobs") or []) if isinstance(job, dict)]
-        scope = _snapshot_notebook_ids([job.get("payload") for job in jobs])
-        try:
-            self._check(scope, creator)
-        except GlobalAskError:
+        snapshot = self._public_snapshot(jobs, creator)
+        if snapshot is None:
             return None
+        turns, scope = snapshot
         return {
             "title": row.get("title") or "",
             "created_at": row.get("created_at") or "",
             "shared_through_at": row.get("shared_through_at") or "",
-            "turns": [_public_turn_row(job) for job in jobs],
-            "notebook_ids": frozenset(scope),
+            "turns": turns,
+            "notebook_ids": scope,
             # Gate field like ``notebook_ids``: the sharer, whose own Memory the
             # page route marks (M4); popped before projection, never shown.
             "created_by": creator,
+        }
+
+    def _public_snapshot(self, jobs, creator, allowed_notebook_ids=None):
+        """The one live re-authorization behind every anonymous global read.
+
+        ``(turns, scope)`` for these snapshot jobs when ``creator`` (and, when
+        given, the ``allowed_notebook_ids`` ceiling) can still read every
+        library the snapshot searched or cited; ``None`` otherwise. Shared by
+        the session share and the answer link so the two cannot drift. Takes
+        identity explicitly -- no request user exists on these paths.
+        """
+        scope = _snapshot_notebook_ids([job.get("payload") for job in jobs])
+        try:
+            self._check(scope, creator, allowed_notebook_ids)
+        except GlobalAskError:
+            return None
+        return [_public_turn_row(job) for job in jobs], frozenset(scope)
+
+    def public_answer_job(self, job_id, *, owner_id, allowed_notebook_ids):
+        """The anonymous snapshot of one finished MCP global job, or ``None``.
+
+        ⚠ NO REQUEST USER EXISTS ON THIS PATH (same discipline as
+        ``public_conversation``): the owner and the token's notebook allowlist
+        come in as arguments, and nothing here may read the ambient user.
+        Every failure -- no such done MCP job, foreign owner, a library read
+        lost, a cited library outside the allowlist -- is the same ``None``.
+        Returns the row shape ``conversation_public_view`` projects plus the
+        ``notebook_ids`` / ``created_by`` gate fields, with a single turn.
+        """
+        owner = str(owner_id or "")
+        if not owner:
+            return None
+        job = self.store.public_job(job_id, owner)
+        if job is None:
+            return None
+        snapshot = self._public_snapshot([job], owner, allowed_notebook_ids)
+        if snapshot is None:
+            return None
+        turns, scope = snapshot
+        return {
+            "title": "",
+            "created_at": job.get("created_at") or "",
+            "shared_through_at": "",
+            "turns": turns,
+            "notebook_ids": scope,
+            "created_by": owner,
         }
 
     def cited_element(self, job_id, element_id, *, user_id, allowed_notebook_ids=None):

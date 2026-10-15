@@ -376,7 +376,29 @@ def case_a_job_stamped_after_the_newest_one_keeps_its_own_stamp(store):
     assert later.created_at == "2026-01-01T00:00:09.500000+00:00"
 
 
+def case_public_job_serves_only_the_owners_done_mcp_job(store):
+    """answer-link door: one done MCP job of this owner, nothing else."""
+    conversation_id, user_id = insert_conversation(store, "conv-pj", "user-pj")
+    for job_id, status, via in (("pj-ok", "done", "mcp"), ("pj-web", "done", "web"),
+                                ("pj-run", "running", "mcp")):
+        insert_job(store, conversation_id, user_id, job_id,
+                   "2026-01-01T00:00:01", status=status)
+        with store.database.write() as db:
+            db.execute(store._sql(
+                "UPDATE global_ask_jobs SET submitted_via=? WHERE id=?"), (via, job_id))
+    got = store.public_job("pj-ok", user_id)
+    assert got["job_id"] == "pj-ok"
+    assert got["created_at"] == "2026-01-01T00:00:01"
+    assert got["payload"]["response"] == {"answer": "answer-pj-ok"}
+    assert store.public_job("pj-web", user_id) is None
+    assert store.public_job("pj-run", user_id) is None
+    assert store.public_job("pj-ok", "someone-else") is None
+    assert store.public_job("pj-missing", user_id) is None
+    assert store.public_job("", user_id) is None
+
+
 CASES = [
+    case_public_job_serves_only_the_owners_done_mcp_job,
     case_share_is_token_idempotent_but_advances_the_watermark,
     case_a_turn_written_after_the_share_stays_private_until_reshared,
     case_public_snapshot_tie_breaks_the_watermark_instant_by_id,
