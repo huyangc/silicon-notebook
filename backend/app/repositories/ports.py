@@ -562,6 +562,7 @@ class AnswerLinkStorePort(Protocol):
 
     def answer_link(self, token: str) -> "dict | None": ...
 
+    # Runs inside issue_answer_link (throttled); callable on its own for tests and operators.
     def sweep_answer_links(self, *, grace_seconds: int) -> int: ...
 
 
