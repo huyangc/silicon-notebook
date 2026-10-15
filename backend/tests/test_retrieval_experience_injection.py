@@ -377,43 +377,33 @@ def test_the_two_switches_are_independent(repo):
 
 
 def test_prompt_functions_are_frozen_without_a_block():
-    """空打法块 ⇒ 两份规划拼写的输出与不传这个参数逐字节相同。
+    """空打法块 ⇒ 规划 prompt 的输出与不传这个参数逐字节相同。
 
     「关闭态回到接入前」在 prompts 层的判据:注入靠一个条件 section 拼进去,只要
-    空串不产出 section,新参数就在字节层面不可见。两份拼写都要测——``plan_prompt``
-    是备份拼写,production 走 ``expand_query_prompt``,而合同是「要到达规划模型的
-    东西必须两份都加」。
+    空串不产出 section,新参数就在字节层面不可见。
     """
-    from app.services.prompts import expand_query_prompt, plan_prompt
+    from app.services.prompts import expand_query_prompt
 
     collection_map = "[Collections in scope] elements: formula 3 | sources: 2"
     profile = "[What the agent knows about this library]\nx\n- corpus shape (shared): y"
     for history in ("", "user: 前一句"):
         for cmap in ("", collection_map):
             for prof in ("", profile):
-                assert plan_prompt(
-                    "q", history, cmap, prof
-                ) == plan_prompt("q", history, cmap, prof, experience_block="")
                 assert expand_query_prompt(
                     "q", history, True, 4, None, cmap, prof
                 ) == expand_query_prompt(
                     "q", history, True, 4, None, cmap, prof, experience_block="")
 
 
-def test_both_planning_spellings_render_the_block():
-    """「要到达规划模型的东西必须两份拼写都加」——正向那一半。
-
-    只测整轮 run 的话,``plan_prompt``(备份拼写,production 不走它)把注入删掉
-    不会有任何测试变红,而它的存在理由恰恰是「两份绝不各说各的」。
-    """
-    from app.services.prompts import expand_query_prompt, plan_prompt
+def test_the_planning_prompt_renders_the_block():
+    """正向那一半:冻结用例只证明空串时不变,证明不了非空时带上。"""
+    from app.services.prompts import expand_query_prompt
 
     block = render_experience_block([
         {"id": "rx_1", "situation": _situation(), "action": "enumerate",
          "polarity": "good", "rationale": RATIONALE, "support": 3},
     ])
     assert block
-    assert block in plan_prompt("q", experience_block=block)
     assert block in expand_query_prompt("q", experience_block=block)
 
 

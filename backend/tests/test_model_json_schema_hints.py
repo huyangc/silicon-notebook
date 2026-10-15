@@ -116,7 +116,6 @@ _SWEPT_MODULES: tuple[tuple[str, str], ...] = (
 _KNOWN_SWEPT_NAMES = frozenset({
     "app.services.prompts.REFLECT_SCHEMA_HINT",
     "app.services.prompts.ANSWER_SCHEMA_HINT",
-    "app.services.prompts.PLAN_SCHEMA_HINT",
     "app.services.prompts.REPORT_OUTLINE_SCHEMA_HINT",
     "app.services.prompts.QUERY_INTENT_SCHEMA_HINT",
     "app.services.kg.extract._KG_SCHEMA_HINT",

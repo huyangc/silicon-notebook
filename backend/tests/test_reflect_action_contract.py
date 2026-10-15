@@ -29,6 +29,8 @@ from app.domain.reflect_action import (
     REFLECT_ACTION_PARAM_DESCRIPTION_MAX_CHARS,
     REFLECT_ACTION_PARAMETERS_MAX,
     RESERVED_REFLECT_KEYS,
+    RESERVED_REFLECT_PARAMETER_NAMES,
+    STRICT_SCHEMA_FALLBACK_KEYS,
     ReflectActionSpec,
 )
 from app.extension_sdk import (
@@ -505,7 +507,7 @@ _KNOWN_REFLECT_SCHEMA_GATES = frozenset({
     # PR-A:按篇读取有界原文取样。它是**默认关**的那种形状,正是这份反射式
     # 开闸最该覆盖的——手写调用会永远漏掉它。
     "read_document",
-    # PR-3:`search_chunks` 的子闸,打开后多出 `chunks_keywords` 顶层字段。同样
+    # PR-3:`search_chunks` 的子闸,打开后多出 `keywords` 顶层字段。同样
     # 默认关,全门打开时它必须把这个字段带进保留集。
     "keyword_search",
     # PR-B:来源清单的 `scope` 字段。它是**做减法**的闸(关 = 对等模式,字段整个
@@ -593,7 +595,40 @@ def test_reserved_keys_are_exactly_what_an_all_gates_open_reflect_schema_offers(
 
     offered = set(schema) | set(schema["next_action"].split("|"))
 
-    assert offered == set(RESERVED_REFLECT_KEYS)
+    assert offered == set(RESERVED_REFLECT_KEYS) - STRICT_SCHEMA_FALLBACK_KEYS
+
+
+def test_strict_schema_fallback_keys_track_the_projection_s_dynamic_fields():
+    """An action or parameter named after a key the strict projection refuses
+    would silently drop the whole reflect hint back to JSON mode, so those names
+    are reserved too. ``resolved_payload`` is excluded because its producer is
+    being retired; every other dynamic field must stay reserved."""
+    from app.core.model_schema import _DYNAMIC_FIELDS, response_format_for_hint
+
+    assert set(_DYNAMIC_FIELDS) - {"resolved_payload"} <= STRICT_SCHEMA_FALLBACK_KEYS
+    assert STRICT_SCHEMA_FALLBACK_KEYS <= RESERVED_REFLECT_KEYS
+    assert STRICT_SCHEMA_FALLBACK_KEYS <= RESERVED_REFLECT_PARAMETER_NAMES
+    for key in STRICT_SCHEMA_FALLBACK_KEYS:
+        hint = reflect_schema_hint()[:-1] + f',"{key}":{{"a":""}}}}'
+        assert response_format_for_hint(hint) is None, key
+    assert response_format_for_hint(
+        reflect_schema_hint(**_all_gates_open_kwargs())) is not None
+
+
+@pytest.mark.parametrize("name", sorted(STRICT_SCHEMA_FALLBACK_KEYS))
+def test_an_action_named_after_a_strict_schema_fallback_key_is_refused(name):
+    message = _rejects(_bundle("p", replace(_DESCRIPTOR, name=name)))
+
+    assert "reserved reflect key" in message
+
+
+@pytest.mark.parametrize("name", sorted(STRICT_SCHEMA_FALLBACK_KEYS))
+def test_a_parameter_named_after_a_strict_schema_fallback_key_is_refused(name):
+    parameters = (ReflectActionParameter(name, "d", "text"),)
+
+    assert "reserved parameter name" in _rejects(
+        _bundle("p", replace(_DESCRIPTOR, parameters=parameters))
+    )
 
 
 # --- The retrieval result carrier ------------------------------------------

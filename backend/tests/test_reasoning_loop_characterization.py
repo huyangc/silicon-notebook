@@ -92,7 +92,7 @@ def chain(start: str, edge_type: str = "derived_from", direction: str = "out"):
 
 
 def outline(*sections, sufficient: bool = False, action: str = "update_outline"):
-    payload = act(action, outline={"sections": list(sections)})
+    payload = act(action, outline_sections=list(sections))
     if sufficient:
         payload["sufficient"] = True
     return payload
@@ -690,10 +690,10 @@ def _expect_report_depth(obs):
         act("enumerate_elements", enumerate={"collection": "sources"}),
         act("read_document", read_document={"source": "版图手册"}),
         act("read_document", read_document={"source": "工艺说明"}),
-        act("search_chunks", chunks_query="版图 寄生电容"),
+        act("search_chunks", query="版图 寄生电容"),
         act("search_papers", search_papers={"query": "版图寄生提取"}),
-        act("ppr_retrieve", ppr_query="版图设计"),
-        act("expand_community", community_focal="@id:版图设计"),
+        act("ppr_retrieve", query="版图设计"),
+        act("expand_community", query="@id:版图设计"),
         ANSWER,
     ],
 )
@@ -727,8 +727,8 @@ def _expect_ask_stage(obs):
         chain("@id:前提甲"),
         sub("规则"),
         RawDecision("enumerate_elements"),
-        act("exact_lookup", exact_term="set_db"),
-        act("expand_community", community_focal="@id:版图设计"),
+        act("exact_lookup", query="set_db"),
+        act("expand_community", query="@id:版图设计"),
         ANSWER,
     ],
 )
@@ -815,8 +815,8 @@ def _expect_expand_graph(obs):
     reflects=[
         act("expand_graph", expand={"object_id": "@id:版图设计"}),
         chain("@id:前提甲"),
-        act("expand_community", community_focal="@id:版图设计"),
-        dict(act("search_elements", elements_query="版图"), sufficient=True),
+        act("expand_community", query="@id:版图设计"),
+        dict(act("search_elements", query="版图"), sufficient=True),
         ANSWER,
     ],
 )
@@ -904,9 +904,9 @@ def _expect_subquery_skips(obs):
     notebook="empty",
     settings={"reasoning_max_element_searches": 2, "reasoning_stale_limit": 4},
     reflects=[
-        act("search_elements", elements_query="版图"),
-        act("search_elements", elements_query="版图"),
-        act("exact_lookup", exact_term="set_db"),
+        act("search_elements", query="版图"),
+        act("search_elements", query="版图"),
+        act("exact_lookup", query="set_db"),
         ANSWER,
     ],
 )
@@ -926,9 +926,9 @@ def _expect_empty(obs):
     name="search_elements_until_cap",
     settings={"reasoning_max_element_searches": 2},
     reflects=[
-        act("search_elements", elements_query="寄生电容"),
-        act("search_elements", elements_query="工艺角"),
-        act("search_elements", elements_query="版图"),
+        act("search_elements", query="寄生电容"),
+        act("search_elements", query="工艺角"),
+        act("search_elements", query="版图"),
         "[1]",
         ANSWER,
     ],
@@ -949,14 +949,14 @@ def _expect_elements(obs):
     settings={"graph_ppr_enabled": False, "reasoning_stale_limit": 50},
     question="set_db 在版图设计里怎么用",
     reflects=[
-        act("exact_lookup", exact_term="set_db"),
-        act("exact_lookup", exact_term="第 2.1 节"),
-        act("exact_lookup", exact_term=""),
-        act("exact_lookup", exact_term="report_timing"),
-        act("exact_lookup", exact_term="get_db"),
-        act("exact_lookup", exact_term="read_lef"),
-        act("exact_lookup", exact_term="foo_bar"),
-        act("exact_lookup", exact_term="第 2.1 节"),
+        act("exact_lookup", query="set_db"),
+        act("exact_lookup", query="第 2.1 节"),
+        act("exact_lookup", query=""),
+        act("exact_lookup", query="report_timing"),
+        act("exact_lookup", query="get_db"),
+        act("exact_lookup", query="read_lef"),
+        act("exact_lookup", query="foo_bar"),
+        act("exact_lookup", query="第 2.1 节"),
         act("answer"),
         ANSWER,
     ],
@@ -1026,12 +1026,12 @@ def _fail_chain_for(ctx, name):
     plan_queries=("版图设计", "版图规则"),
     settings={"reasoning_max_outline_updates": 3, "reasoning_stale_limit": 50},
     reflects=[
-        act("search_elements", elements_query="版图"),
-        act("search_elements", elements_query="签核"),
-        act("search_elements", elements_query="命令"),
+        act("search_elements", query="版图"),
+        act("search_elements", query="签核"),
+        act("search_elements", query="命令"),
         lambda ctx, prompt: outline({"id": "s1", "title": "规则清单",
                                      "evidence": [ctx["ids"]["版图规则"]]}),
-        act("search_elements", elements_query="工艺"),
+        act("search_elements", query="工艺"),
         lambda ctx, prompt: outline(
             {"id": "s1", "title": "规则清单", "evidence": []},
             {"id": "s2", "title": "版图要点",
@@ -1097,7 +1097,7 @@ def _expect_repair_accepted(obs):
         act("expand_graph", expand={"object_id": ""}),
         act("expand_graph", expand={"object_id": ""}),
         act("expand_graph", expand={"object_id": ""}),
-        act("search_elements", elements_query="版图"),
+        act("search_elements", query="版图"),
         ANSWER,
     ],
 )
@@ -1221,13 +1221,13 @@ def _long_rationale(channel: str) -> str:
     profile=(("", "corpus_shape", "这个库主要是版图与签核的中文手册。"),),
     reflects=[
         act("consult_memory"),
-        act("exact_lookup", exact_term="foo_bar"),
-        act("exact_lookup", exact_term="baz_qux"),
+        act("exact_lookup", query="foo_bar"),
+        act("exact_lookup", query="baz_qux"),
         act("consult_memory"),
         chain("@id:版图设计", edge_type="kind_of"),
         chain("@id:版图设计", edge_type="part_of"),
-        act("search_chunks", chunks_query="不存在的词甲"),
-        act("search_chunks", chunks_query="不存在的词乙"),
+        act("search_chunks", query="不存在的词甲"),
+        act("search_chunks", query="不存在的词乙"),
         act("consult_memory"),
         act("consult_memory"),
         act("expand_graph", expand={"object_id": "@id:版图设计"}),
@@ -1274,7 +1274,7 @@ def _expect_consult(obs):
         act("consult_memory"),
         Effect(lambda ctx: ctx.update(fault=True), act("consult_memory")),
         Effect(lambda ctx: ctx.update(fault=False),
-               act("search_elements", elements_query="版图")),
+               act("search_elements", query="版图")),
         act("consult_memory"),
     ],
 )
@@ -1352,8 +1352,8 @@ def _expect_consult_disabled(obs):
         act("enumerate_elements", enumerate={"collection": "sources"}),
         act("consult_memory"),
         outline({"id": "s1", "title": "版图要点", "evidence": []}),
-        act("exact_lookup", exact_term="foo_bar"),
-        act("exact_lookup", exact_term="baz_qux"),
+        act("exact_lookup", query="foo_bar"),
+        act("exact_lookup", query="baz_qux"),
         act("search_papers", search_papers={"query": "版图寄生提取"}),
         ANSWER,
     ],
@@ -1405,9 +1405,9 @@ def _ascending_elements(count):
     ),
     retrieval_overrides=lambda ctx: {"retrieve_elements": _ascending_elements(8)},
     reflects=[
-        act("exact_lookup", exact_term="foo_bar"),
-        act("exact_lookup", exact_term="baz_qux"),
-        act("search_elements", elements_query="版图"),
+        act("exact_lookup", query="foo_bar"),
+        act("exact_lookup", query="baz_qux"),
+        act("search_elements", query="版图"),
         ANSWER,
     ],
 )

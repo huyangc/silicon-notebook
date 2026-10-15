@@ -81,9 +81,9 @@ REFLECT_TURNS = (
     {"next_action": "expand_graph", "sufficient": False,
      "expand": {"object_id": "ko-visible", "direction": "both"}},
     {"next_action": "search_elements", "sufficient": False,
-     "elements_query": f"{TERM} latency element"},
+     "query": f"{TERM} latency element"},
     {"next_action": "expand_community", "sufficient": False,
-     "community_focal": f"{TERM} latency visible concept VISKGMARK"},
+     "query": f"{TERM} latency visible concept VISKGMARK"},
     {"next_action": "follow_chain", "sufficient": False,
      "follow_chain": {"start_object_id": "ko-visible", "direction": "both"}},
 )

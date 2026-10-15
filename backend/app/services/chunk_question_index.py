@@ -12,7 +12,9 @@ from app.services.model_work import model_artifact_scope
 
 
 _QUESTION_BUILD_PAGE_ROWS = 100
-_QUESTION_SCHEMA_HINT = '{"questions":["question answerable from the passage"]}'
+# The example value is empty: the prompt prose says what a question is, and a
+# sentence in the template invites the model to copy it back verbatim.
+_QUESTION_SCHEMA_HINT = '{"questions":[""]}'
 
 
 def question_generation_prompt(text: str, maximum: int) -> str:

@@ -65,14 +65,14 @@ def _reflects(repo, anchor_id):
         {"sufficient": False, "next_action": "expand_graph",
          "expand": {"object_id": start, "direction": "both"}, "reason": "深挖"},
         {"sufficient": False, "next_action": "expand_community",
-         "community_focal": f"{TERM}论断", "reason": "横向对比"},
+         "query": f"{TERM}论断", "reason": "横向对比"},
         {"sufficient": False, "next_action": "follow_chain",
          "follow_chain": {"start_object_id": start, "edge_type": "derived_from",
                           "direction": "out"}, "reason": "推导"},
         {"sufficient": False, "next_action": "search_elements",
          "search_query": TERM, "reason": "原文"},
-        {"sufficient": False, "next_action": "search_chunks", "chunks_query": TERM,
-         "chunks_keywords": f"{TERM} 实验", "reason": "段落"},
+        {"sufficient": False, "next_action": "search_chunks", "query": TERM,
+         "keywords": f"{TERM} 实验", "reason": "段落"},
     ]
 
 

@@ -289,13 +289,13 @@ REFLECT_TURNS = (
     {"next_action": "expand_graph", "sufficient": False,
      "expand": {"object_id": LIB["object"], "direction": "both"}},
     {"next_action": "search_elements", "sufficient": False,
-     "elements_query": f"{TERM} latency {EXACT}"},
+     "query": f"{TERM} latency {EXACT}"},
     {"next_action": "expand_community", "sufficient": False,
-     "community_focal": f"{TERM} latency library concept {MARK}KG"},
+     "query": f"{TERM} latency library concept {MARK}KG"},
     {"next_action": "follow_chain", "sufficient": False,
      "follow_chain": {"start_object_id": LIB["object"], "direction": "both"}},
     {"next_action": "search_chunks", "sufficient": False,
-     "chunks_query": f"{TERM} latency", "chunks_keywords": f"{TERM} {EXACT}"},
+     "query": f"{TERM} latency", "keywords": f"{TERM} {EXACT}"},
 )
 
 
@@ -420,7 +420,7 @@ async def _asks(http, headers, env, model, *, reads_b: bool) -> tuple[str, str]:
     # A ``reflect`` step echoes the scripted model's own decision, and the
     # community step its chosen focal name -- the stub talking, not retrieval
     # (the peers it FOUND stay in the dump).
-    focal = REFLECT_TURNS[2]["community_focal"]
+    focal = REFLECT_TURNS[2]["query"]
     for answer in answers:
         trace = []
         for step in answer.get("reasoning_trace") or ():

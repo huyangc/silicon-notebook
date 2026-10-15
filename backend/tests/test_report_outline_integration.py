@@ -594,11 +594,11 @@ def test_a_real_outline_action_reaches_the_section_writer(repo):
     object_id = hits[0].object_id
     llm = _SectionLLM(reflects=[{
         "next_action": "update_outline", "sufficient": False,
-        "outline": {"sections": [
+        "outline_sections": [
             {"id": "o1", "title": "工艺角对比", "evidence": [object_id]},
             {"id": "o2", "title": "还没找到证据的一节",
              "evidence": ["ko-从来不是候选"]},
-        ]},
+        ],
     }])
     engine = _engine(repo, llm)
     section = {"title": "A", "scope": "sa", "sub_queries": ["版图设计要点"]}

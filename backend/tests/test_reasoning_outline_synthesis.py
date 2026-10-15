@@ -420,10 +420,10 @@ def _run_with_one_outline_round(
                 seen_ids.extend(ids)
                 return json.dumps({
                     "next_action": OUTLINE_ACTION, "reason": "整理",
-                    "outline": {"sections": [
+                    "outline_sections": [
                         {"id": "s1", "title": "全部要点",
                          "evidence": seen_ids[:2]},
-                    ]},
+                    ],
                 })
             return json.dumps({"next_action": "answer", "sufficient": True})
 
@@ -1225,12 +1225,12 @@ def test_a_real_run_builds_the_outline_and_writes_it_section_by_section(repo):
                     self.bound = True
                     return json.dumps({
                         "next_action": OUTLINE_ACTION, "reason": "整理",
-                        "outline": {"sections": [
+                        "outline_sections": [
                             {"id": "s1", "title": "甲部分",
                              "evidence": [ids[0]]},
                             {"id": "s2", "title": "乙部分",
                              "evidence": [ids[1]]},
-                        ]},
+                        ],
                     })
             return super().chat_json(messages, schema_hint, **kwargs)
 
@@ -1278,12 +1278,12 @@ def test_a_final_outline_submitted_with_sufficient_reaches_the_synthesis(repo):
                     return json.dumps({
                         "next_action": OUTLINE_ACTION, "reason": "补齐后收尾",
                         "sufficient": True,
-                        "outline": {"sections": [
+                        "outline_sections": [
                             {"id": "s1", "title": "甲部分",
                              "evidence": [ids[0]]},
                             {"id": "s2", "title": "乙部分",
                              "evidence": [ids[1]]},
-                        ]},
+                        ],
                     })
             return super().chat_json(messages, schema_hint, **kwargs)
 

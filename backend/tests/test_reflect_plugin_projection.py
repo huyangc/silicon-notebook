@@ -217,7 +217,7 @@ def test_the_closed_state_leaves_no_character_before_the_scope_paragraph(
     assert before_scope.endswith(
         "when genuinely unsure what to try next.\n" if consult_memory
         # consult_memory 关着时,动作列表的最后一行是 exact_lookup。
-        else "paraphrase returns nothing.\n"
+        else "or a scope word, returns nothing.\n"
     )
 
 

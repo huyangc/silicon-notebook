@@ -204,15 +204,6 @@ def test_reasoning_timeout_retry_knobs_env(monkeypatch):
     assert s.reasoning_max_retries == 4
 
 
-def test_plan_prompt_contains_question_and_schema():
-    from app.services.prompts import plan_prompt, PLAN_SCHEMA_HINT
-    p = plan_prompt("innovus 的 PR 流程", "User: ...\nAssistant: ...")
-    assert "innovus 的 PR 流程" in p
-    assert "User: ..." in p  # history_block 被插值进 prompt
-    assert "sub_queries" in PLAN_SCHEMA_HINT
-    assert "prefer" in PLAN_SCHEMA_HINT
-
-
 def test_reflect_prompt_contains_summary_and_schema():
     from app.services.prompts import reflect_prompt, REFLECT_SCHEMA_HINT
     p = reflect_prompt("问题X", "- [claim] A (id=k1)")
@@ -769,7 +760,7 @@ def test_reflect_parses_add_subquery(rrepo):
 
 def test_reflect_parses_search_elements(rrepo):
     rr = _rr_with_llm(rrepo, reflect={
-        "next_action": "search_elements", "elements_query": "原文检索词"})
+        "next_action": "search_elements", "query": "原文检索词"})
     d = rr.reflect("q", "s")
     assert d.next_action == "search_elements"
     assert d.elements_query == "原文检索词"
@@ -1052,7 +1043,7 @@ def test_run_feeds_no_progress_signal_to_reflect_after_fruitless_retrieval(rrepo
         def __init__(self):
             # 第1轮 search_elements(必 0 新增,因无原文段),第2轮 answer
             self._reflects = [
-                {"next_action": "search_elements", "elements_query": "q"},
+                {"next_action": "search_elements", "query": "q"},
                 {"next_action": "answer", "sufficient": True},
             ]
 
@@ -1236,7 +1227,7 @@ def test_run_caps_repeated_element_search(rrepo, monkeypatch):
     monkeypatch.setattr(ReasoningRetriever, "search_elements", fake_elements)
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "q"}]},
-        reflects=[{"next_action": "search_elements", "elements_query": "q"}] * 40))
+        reflects=[{"next_action": "search_elements", "query": "q"}] * 40))
     res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "q", "")
     assert counter["n"] <= 4                   # 实际执行的 element 检索不超过上限
     reflect_steps = [t for t in res.trace if t.step_type == "reflect"]
@@ -1265,7 +1256,7 @@ def test_empty_fallback_element_search_count_reaches_reflect_loop(
         _SeqLLM(
             plan={"sub_queries": [{"query": "库内容"}]},
             reflects=[
-                {"next_action": "search_elements", "elements_query": "库内容"},
+                {"next_action": "search_elements", "query": "库内容"},
                 {"next_action": "answer", "sufficient": True},
             ],
         ),
@@ -1771,7 +1762,7 @@ def test_run_max_steps_override_caps_reflect_loop(rrepo):
             if "sub_queries" in schema_hint:
                 return json.dumps({"sub_queries": [{"query": "RTL到GDSII流程"}]})
             calls["reflect"] += 1
-            return json.dumps({"next_action": "search_elements", "elements_query": "q"})  # 永不 answer
+            return json.dumps({"next_action": "search_elements", "query": "q"})  # 永不 answer
 
     bind_chat_client(rrepo, "reasoning_agent", _LoopLLM())
     ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", max_steps=2)
@@ -2508,7 +2499,7 @@ def test_run_expand_community_fans_out_peers(rrepo, monkeypatch):
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "DeepSeek-V4"}]},
         reflects=[
-            {"next_action": "expand_community", "community_focal": "DeepSeek-V4",
+            {"next_action": "expand_community", "query": "DeepSeek-V4",
              "reason": "需要同类"},
             {"next_action": "answer", "sufficient": True}]))
     retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
@@ -2532,7 +2523,7 @@ def test_run_expand_community_fans_out_across_multiple_mounted_bases(rrepo, monk
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "DeepSeek-V4"}]},
         reflects=[
-            {"next_action": "expand_community", "community_focal": "DeepSeek-V4",
+            {"next_action": "expand_community", "query": "DeepSeek-V4",
              "reason": "需要同类"},
             {"next_action": "answer", "sufficient": True}]))
     retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
@@ -2567,7 +2558,7 @@ def test_run_expand_community_source_sticky_prefers_comention(rrepo, monkeypatch
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "DeepSeek-V4"}]},
         reflects=[
-            {"next_action": "expand_community", "community_focal": "DeepSeek-V4",
+            {"next_action": "expand_community", "query": "DeepSeek-V4",
              "reason": "需要同类"},
             {"next_action": "answer", "sufficient": True}]))
     retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
@@ -2601,7 +2592,7 @@ def test_run_expand_community_community_fallback_summary_uses_ui_vocabulary(
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "DeepSeek-V4"}]},
         reflects=[
-            {"next_action": "expand_community", "community_focal": "DeepSeek-V4",
+            {"next_action": "expand_community", "query": "DeepSeek-V4",
              "reason": "需要同类"},
             {"next_action": "answer", "sufficient": True}]))
     retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
@@ -2632,7 +2623,7 @@ def test_run_expand_community_caps_merged_peers_across_bases(rrepo, monkeypatch)
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "DeepSeek-V4"}]},
         reflects=[
-            {"next_action": "expand_community", "community_focal": "DeepSeek-V4",
+            {"next_action": "expand_community", "query": "DeepSeek-V4",
              "reason": "需要同类"},
             {"next_action": "answer", "sufficient": True}]))
     retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
@@ -2712,7 +2703,7 @@ def test_run_expand_community_no_base_noop(rrepo, monkeypatch):
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "X"}]},
         reflects=[
-            {"next_action": "expand_community", "community_focal": "X"},
+            {"next_action": "expand_community", "query": "X"},
             {"next_action": "answer", "sufficient": True}]))
     res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "X 相比其他", "")
     assert called["peers"] == 0                     # base 为 None → 根本不调 community_peers
@@ -2731,7 +2722,7 @@ def test_run_expand_community_disabled_by_policy_skips_without_ending_loop(rrepo
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
         reflects=[
-            {"next_action": "expand_community", "community_focal": "DeepSeek-V4"},
+            {"next_action": "expand_community", "query": "DeepSeek-V4"},
             {"next_action": "add_subquery",
              "new_sub_query": {"query": "布局布线步骤", "prefer": "balanced"}},
             {"next_action": "answer", "sufficient": True}]))
@@ -2763,7 +2754,7 @@ def test_run_expand_community_disabled_repeatedly_still_trips_stale_breaker(rrep
     rrepo.settings.reasoning_stale_limit = 3
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
-        reflects=[{"next_action": "expand_community", "community_focal": "X"}] * 6))
+        reflects=[{"next_action": "expand_community", "query": "X"}] * 6))
     retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     retriever.allow_community_expansion = False
 
@@ -2985,10 +2976,10 @@ def _retriever_counting_exact_lookup(repo, calls):
 def test_reflect_prompt_and_schema_expose_exact_lookup():
     from app.services.prompts import reflect_prompt, REFLECT_SCHEMA_HINT
     assert "exact_lookup" in REFLECT_SCHEMA_HINT
-    assert "exact_term" in REFLECT_SCHEMA_HINT
+    assert '"query":""' in REFLECT_SCHEMA_HINT
     p = reflect_prompt("set_db 命令是怎样的", "- [chunk] Tool Manual · set_db: ...")
     assert "- exact_lookup:" in p
-    assert "exact_term" in p
+    assert "Set query to that name EXACTLY" in p
     # 既有 7 个动作的说明不能被挤掉。
     for action in ("answer", "expand_graph", "add_subquery", "search_elements",
                    "ppr_retrieve", "expand_community", "follow_chain"):
@@ -3027,7 +3018,7 @@ def test_reflect_accepts_exact_lookup_and_keeps_invalid_actions_rejected(rrepo):
 
     bind_chat_client(rrepo, "reasoning_agent",
                      _OneShot({"next_action": "exact_lookup",
-                               "exact_term": " 「set_db」 "}))
+                               "query": " 「set_db」 "}))
     decision = ReasoningRetriever.from_repository(rrepo, rrepo.settings).reflect("q", "s")
     assert decision.next_action == "exact_lookup"
     assert decision.exact_term == "set_db"      # 解析时就清洗好
@@ -3040,7 +3031,7 @@ def test_reflect_accepts_exact_lookup_and_keeps_invalid_actions_rejected(rrepo):
     with pytest.raises(ValueError):
         strict.reflect("q", "s")
     bind_chat_client(rrepo, "reasoning_agent",
-                     _OneShot({"next_action": "exact_lookup", "exact_term": "  "}))
+                     _OneShot({"next_action": "exact_lookup", "query": "  "}))
     with pytest.raises(ValueError):
         ReasoningRetriever.from_repository(
             rrepo, rrepo.settings, fail_closed=True).reflect("q", "s")
@@ -3062,7 +3053,7 @@ def test_reflect_fail_closed_rejects_overlong_exact_term(rrepo):
 
     bind_chat_client(rrepo, "reasoning_agent",
                      _OneShot({"next_action": "exact_lookup",
-                               "exact_term": "a_" * 5000}))
+                               "query": "a_" * 5000}))
     strict = ReasoningRetriever.from_repository(
         rrepo, rrepo.settings, fail_closed=True)
     with pytest.raises(ValueError, match="too long"):
@@ -3157,7 +3148,7 @@ def test_run_exact_lookup_action_rejects_a_digitless_hyphen_word_with_a_teaching
 
     bind_chat_client(rrepo, "reasoning_agent", _CapturingLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
-        reflects=[{"next_action": "exact_lookup", "exact_term": "real-time"},
+        reflects=[{"next_action": "exact_lookup", "query": "real-time"},
                   {"next_action": "answer", "sufficient": True}]))
     calls = []
     res = _retriever_counting_exact_lookup(rrepo, calls).run(
@@ -3176,7 +3167,7 @@ def test_run_exact_lookup_action_pulls_the_section_the_model_named(rrepo):
     rrepo.settings.graph_ppr_enabled = False
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
-        reflects=[{"next_action": "exact_lookup", "exact_term": "set_db"},
+        reflects=[{"next_action": "exact_lookup", "query": "set_db"},
                   {"next_action": "answer", "sufficient": True}]))
     calls = []
     res = _retriever_counting_exact_lookup(rrepo, calls).run(
@@ -3199,7 +3190,7 @@ def test_run_exact_lookup_action_skips_a_term_the_seed_already_probed(rrepo):
     rrepo.settings.graph_ppr_enabled = False
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "set_db"}]},
-        reflects=[{"next_action": "exact_lookup", "exact_term": "set_db 的参数"},
+        reflects=[{"next_action": "exact_lookup", "query": "set_db 的参数"},
                   {"next_action": "answer", "sufficient": True}]))
     calls = []
     res = _retriever_counting_exact_lookup(rrepo, calls).run(
@@ -3228,8 +3219,8 @@ def test_run_exact_lookup_action_repeats_are_fed_back_to_reflect(rrepo):
 
     bind_chat_client(rrepo, "reasoning_agent", _CapturingLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
-        reflects=[{"next_action": "exact_lookup", "exact_term": "set_db"},
-                  {"next_action": "exact_lookup", "exact_term": "set_db"},
+        reflects=[{"next_action": "exact_lookup", "query": "set_db"},
+                  {"next_action": "exact_lookup", "query": "set_db"},
                   {"next_action": "answer", "sufficient": True}]))
     _retriever_counting_exact_lookup(rrepo, []).run(nb.id, "这个命令怎么用", "")
 
@@ -3245,7 +3236,7 @@ def test_run_exact_lookup_action_rejects_a_low_selectivity_term(rrepo):
     rrepo.settings.graph_ppr_enabled = False
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
-        reflects=[{"next_action": "exact_lookup", "exact_term": "2.1"},
+        reflects=[{"next_action": "exact_lookup", "query": "2.1"},
                   {"next_action": "answer", "sufficient": True}]))
     calls = []
     res = _retriever_counting_exact_lookup(rrepo, calls).run(
@@ -3264,7 +3255,7 @@ def test_run_exact_lookup_action_caps_at_three_and_seed_does_not_count(rrepo):
     rrepo.settings.graph_ppr_enabled = False
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "set_db"}]},
-        reflects=[{"next_action": "exact_lookup", "exact_term": t} for t in (
+        reflects=[{"next_action": "exact_lookup", "query": t} for t in (
             "report_timing", "place_opt_design", "get_db", "write_db")]
         + [{"next_action": "answer", "sufficient": True}]))
     calls = []
@@ -3289,7 +3280,7 @@ def test_exact_lookup_disabled_turns_off_both_the_seed_and_the_action(rrepo):
     rrepo.settings.exact_lookup_enabled = False
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "set_db"}]},
-        reflects=[{"next_action": "exact_lookup", "exact_term": "set_db"},
+        reflects=[{"next_action": "exact_lookup", "query": "set_db"},
                   {"next_action": "answer", "sufficient": True}]))
     calls = []
     res = _retriever_counting_exact_lookup(rrepo, calls).run(
@@ -3327,7 +3318,7 @@ def test_exact_lookup_goes_through_the_candidate_policy_boundary(rrepo):
     rrepo.settings.graph_ppr_enabled = False
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "set_db"}]},
-        reflects=[{"next_action": "exact_lookup", "exact_term": "report_timing"},
+        reflects=[{"next_action": "exact_lookup", "query": "report_timing"},
                   {"next_action": "answer", "sufficient": True}]))
     from app.services.reasoning_retrieval import ReasoningRetriever
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
@@ -3367,7 +3358,7 @@ def test_allow_exact_lookup_policy_flag_disables_seed_and_action(rrepo):
 
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "参数"}]},
-        reflects=[{"next_action": "exact_lookup", "exact_term": "table_title"},
+        reflects=[{"next_action": "exact_lookup", "query": "table_title"},
                   {"next_action": "answer", "sufficient": True}]))
     calls = []
     rr = _retriever_counting_exact_lookup(rrepo, calls)
@@ -3415,8 +3406,8 @@ def test_run_exact_lookup_skip_feeds_teaching_note_to_reflect(rrepo):
 
     bind_chat_client(rrepo, "reasoning_agent", _CapturingLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
-        reflects=[{"next_action": "exact_lookup", "exact_term": "2.1"},
-                  {"next_action": "exact_lookup", "exact_term": "2.1"},
+        reflects=[{"next_action": "exact_lookup", "query": "2.1"},
+                  {"next_action": "exact_lookup", "query": "2.1"},
                   {"next_action": "answer", "sufficient": True}]))
     _retriever_counting_exact_lookup(rrepo, []).run(nb.id, "这个命令怎么用", "")
 
@@ -3532,38 +3523,37 @@ def test_attempted_marks_search_failures_sparsely(rrepo, monkeypatch):
 #: 所以它同时是插入点的锚。措辞变了这条锚会失配,对账用例会明确报出来。
 _ADD_SUBQUERY_TAIL = "rephrase it substantially or choose a different action.\n"
 
-#: 开启态在「范围词规则」那句里多出来的第五项。红线是「除动作说明**与规则句第
-#: 五项**外逐字节不变」,所以对账时先把这一处归一掉,再要求其余部分只差那一段
-#: 动作说明——两处插入因此各自被单独钉住,谁多改一个字节都红。
-_SCOPE_RULE_WITH_CHUNKS_QUERY = ", chunks_query and exact_term"
-_SCOPE_RULE_WITHOUT_CHUNKS_QUERY = " and exact_term"
-#: 真实 `reflect()` 在单库 run 里还开着 PR-3 的 `chunks_keywords` 子闸
-#: (`keyword_search_active`),规则句于是再多一项;归一时一并还原。
-_SCOPE_RULE_WITH_CHUNKS_KEYWORDS = ", chunks_query, chunks_keywords and exact_term"
-#: 同一子闸开着时 schema 尾组的形态(`chunks_keywords` 紧跟 `chunks_query`)。
-_CHUNK_SCHEMA_FIELDS_WITH_KEYWORDS = (
-    '"exact_term":"","chunks_query":"","chunks_keywords":"","reason":""')
+#: 范围词规则那句的关闭态形状。`search_chunks` 自己不加字段(它读共用的根级
+#: `query`),所以只开 search_chunks 时规则句一个字节都不变。
+_SCOPE_RULE_WITHOUT_KEYWORDS = "you fill: new_sub_query.query and query.\n"
+#: 真实 `reflect()` 在单库 run 里还开着 PR-3 的 `keywords` 子闸
+#: (`keyword_search_active`),规则句于是多一项;归一时还原。红线是「除动作说明
+#: **与规则句那一项**外逐字节不变」,两处插入因此各自被单独钉住。
+_SCOPE_RULE_WITH_KEYWORDS = "you fill: new_sub_query.query, query and keywords.\n"
+#: 同一子闸开着时 schema 尾组的形态(`keywords` 紧跟 `query`)。
+_CHUNK_SCHEMA_FIELDS_WITH_KEYWORDS = '"query":"","keywords":"","reason":""'
 
 
 def _scope_rule_normalised(prompt: str) -> str:
     """把开启态的规则句还原成关闭态的形状(其余字节一个不动)。"""
     return prompt.replace(
-        _SCOPE_RULE_WITH_CHUNKS_KEYWORDS, _SCOPE_RULE_WITHOUT_CHUNKS_QUERY, 1,
-    ).replace(_SCOPE_RULE_WITH_CHUNKS_QUERY, _SCOPE_RULE_WITHOUT_CHUNKS_QUERY, 1)
+        _SCOPE_RULE_WITH_KEYWORDS, _SCOPE_RULE_WITHOUT_KEYWORDS, 1)
 
 
 def _free_text_retrieval_fields(schema_hint: str) -> set:
     """schema 模板里**实际渲染出来**的自由文本检索字段。
 
-    判据是命名约定而不是一张手写清单:凡是 `*_query` / `*_term` 的键都算(对象
-    包装 `new_sub_query` 折成它的叶子 `new_sub_query.query`,那是 prompt 里点名
-    的写法)。手写清单没有守卫价值——下一个字段照样会被漏掉,而这条按约定推导
-    的判据只要新字段沿用同一后缀就自动进集合。
+    判据是形状而不是一张手写清单:根级每个**字符串**字段都算(除了动作枚举
+    `next_action` 与说明 `reason`),再加上子查询对象的叶子 `new_sub_query.query`
+    (那是 prompt 里点名的写法)。手写清单没有守卫价值——下一个字段照样会被漏掉,
+    而这条按形状推导的判据让任何新的根级检索串自动进集合。
     """
-    keys = set(re.findall(r'"([a-z_]+)"\s*:', schema_hint))
-    fields = {key for key in keys if key.endswith(("_query", "_term"))}
-    if "new_sub_query" in fields:
-        fields.discard("new_sub_query")
+    schema = json.loads(schema_hint)
+    fields = {
+        key for key, value in schema.items()
+        if isinstance(value, str) and key not in ("next_action", "reason")
+    }
+    if isinstance(schema.get("new_sub_query"), dict):
         fields.add("new_sub_query.query")
     return fields
 
@@ -3670,22 +3660,17 @@ def test_search_chunks_settings_and_policy_defaults_and_env(monkeypatch):
 
 
 def test_reflect_schema_offers_search_chunks_and_chunks_query_only_when_on():
-    """验收 1/10 的 schema 半:关=接入前的形状(连这两个词都没有),开=只多两处
-    插入。"""
+    """验收 1/10 的 schema 半:关=接入前的形状(连这个词都没有),开=只多枚举里
+    的一个词(检索串读共用的根级 `query`,不加字段)。"""
     from app.services.prompts import reflect_schema_hint
 
     off = reflect_schema_hint()
-    assert "search_chunks" not in off and "chunks_query" not in off
+    assert "search_chunks" not in off
 
     on = reflect_schema_hint(search_chunks=True)
     assert "|exact_lookup|search_chunks" in on
-    assert '"exact_term":"","chunks_query":"","reason":""' in on
-    # 逐字节:两处插入之外一个字节都没动(其余三把闸关着时的形状同样成立)。
-    assert on == (
-        off.replace("|exact_lookup", "|exact_lookup|search_chunks", 1)
-           .replace('"exact_term":"","reason":""',
-                    '"exact_term":"","chunks_query":"","reason":""', 1)
-    )
+    # 逐字节:那一处插入之外一个字节都没动(其余三把闸关着时的形状同样成立)。
+    assert on == off.replace("|exact_lookup", "|exact_lookup|search_chunks", 1)
     # 另外三把闸开着时也只多这两处——闸与闸之间不互相污染。
     from app.services.collection_catalog import (
         ENUMERABLE_ELEMENT_KINDS,
@@ -3695,39 +3680,32 @@ def test_reflect_schema_offers_search_chunks_and_chunks_query_only_when_on():
         ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES, True, True)
     full_on = reflect_schema_hint(
         ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES, True, True, True)
-    assert full_on == (
-        full_off.replace("|exact_lookup", "|exact_lookup|search_chunks", 1)
-                .replace('"exact_term":"","reason":""',
-                         '"exact_term":"","chunks_query":"","reason":""', 1)
-    )
+    assert full_on == full_off.replace(
+        "|exact_lookup", "|exact_lookup|search_chunks", 1)
 
 
 def test_reflect_prompt_inserts_exactly_one_action_paragraph_when_on():
     """验收 1/10 的 prompt 半。
 
-    对账不看快照,看**结构**:把规则句的第五项归一掉之后,关闭态的渲染被开启态
-    原样包住,唯一差异是紧跟 add_subquery 之后插入的一整条动作说明(且只有一
-    条)。有图 run 的动作空间因此除这一段与那一项外逐字节不变(D-3 的全部代价就
-    是这几十字节)。
+    对账不看快照,看**结构**:关闭态的渲染被开启态原样包住,唯一差异是紧跟
+    add_subquery 之后插入的一整条动作说明(且只有一条)。范围词规则句不变:
+    这个动作读共用的 `query`,规则句本来就点名了它。
     """
     from app.services.prompts import reflect_prompt
 
     question, summary = "布局布线怎么做", "- [chunk] Doc · 布局: ..."
     off = reflect_prompt(question, summary)
-    assert "search_chunks" not in off and "chunks_query" not in off
+    assert "search_chunks" not in off
 
-    raw_on = reflect_prompt(question, summary, search_chunks=True)
-    # 第五项确实插进了范围词规则那句(P1-1),且只插了一处。
-    assert _SCOPE_RULE_WITH_CHUNKS_QUERY in raw_on
-    assert raw_on.count(_SCOPE_RULE_WITH_CHUNKS_QUERY) == 1
-    on = _scope_rule_normalised(raw_on)
+    on = reflect_prompt(question, summary, search_chunks=True)
+    assert on.count(_SCOPE_RULE_WITHOUT_KEYWORDS) == 1
     head, sep, tail = off.partition(_ADD_SUBQUERY_TAIL)
     assert sep, "add_subquery 说明的措辞变了,_ADD_SUBQUERY_TAIL 要跟着改"
     assert on.startswith(head + sep) and on.endswith(tail)
     inserted = on[len(head + sep):len(on) - len(tail)]
     assert inserted.startswith("- search_chunks: ") and inserted.endswith("\n")
     assert "\n- " not in inserted[:-1]          # 只插了**一条**动作说明
-    assert "chunks_query" in inserted
+    assert "(set query)" in inserted
     # 它必须把自己与另外两条原文通道讲清楚,否则模型无从选择。
     assert "search_elements" in inserted and "ppr_retrieve" in inserted
     # 既有 8 条动作说明一条不少。
@@ -3752,7 +3730,7 @@ def test_reflect_kill_switch_puts_the_whole_action_back_to_baseline(rrepo):
         def chat_json(self, messages, schema_hint, **kwargs):
             self.seen.append((messages[-1]["content"], schema_hint))
             return json.dumps({"next_action": "search_chunks",
-                               "chunks_query": "布局"})
+                               "query": "布局"})
 
     def _reflect_once():
         capture = _Capture()
@@ -3764,10 +3742,10 @@ def test_reflect_kill_switch_puts_the_whole_action_back_to_baseline(rrepo):
     rrepo.settings.reasoning_chunk_search_enabled = False
     off_decision, (off_prompt, off_schema) = _reflect_once()
     # 关闭态:模型看到的两份文本里连这个词都不存在。
-    assert "search_chunks" not in off_prompt and "chunks_query" not in off_prompt
-    assert "search_chunks" not in off_schema and "chunks_query" not in off_schema
+    assert "search_chunks" not in off_prompt
+    assert "search_chunks" not in off_schema
     # 白名单里也没有它 → 硬吐一个就是畸形输出,fail-open 成 answer;
-    # `chunks_query` 连读都不读。
+    # 共用的 `query` 也不会落进 `chunks_query`。
     assert off_decision.next_action == "answer"
     assert off_decision.chunks_query == ""
 
@@ -3779,12 +3757,12 @@ def test_reflect_kill_switch_puts_the_whole_action_back_to_baseline(rrepo):
     # 插入——其余(包括本 run 实际开着的枚举/大纲/consult 三把闸的产物)逐字节
     # 相同。
     on_prompt = _scope_rule_normalised(raw_on_prompt)
-    assert _SCOPE_RULE_WITH_CHUNKS_KEYWORDS in raw_on_prompt
+    assert _SCOPE_RULE_WITH_KEYWORDS in raw_on_prompt
     head, sep, tail = off_prompt.partition(_ADD_SUBQUERY_TAIL)
     assert sep and on_prompt.startswith(head + sep) and on_prompt.endswith(tail)
     assert on_schema == (
         off_schema.replace("|exact_lookup", "|exact_lookup|search_chunks", 1)
-                  .replace('"exact_term":"","reason":""',
+                  .replace('"query":"","reason":""',
                            _CHUNK_SCHEMA_FIELDS_WITH_KEYWORDS, 1)
     )
 
@@ -3826,8 +3804,8 @@ def test_search_chunks_action_merges_hits_and_upgrades_duplicates(rrepo):
     rrepo.settings.graph_ppr_enabled = False
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
-        reflects=[{"next_action": "search_chunks", "chunks_query": "布局"},
-                  {"next_action": "search_chunks", "chunks_query": "布线"},
+        reflects=[{"next_action": "search_chunks", "query": "布局"},
+                  {"next_action": "search_chunks", "query": "布线"},
                   {"next_action": "answer", "sufficient": True}]))
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     calls = []
@@ -3852,7 +3830,7 @@ def test_search_chunks_action_merges_hits_and_upgrades_duplicates(rrepo):
 
 
 def test_search_chunks_action_falls_back_to_the_question(rrepo):
-    """验收 2:`chunks_query` 为空回退到原问题(与 elements_query/ppr_query 同)。"""
+    """验收 2:`query` 为空回退到原问题(与 search_elements/ppr_retrieve 同)。"""
     from app.services.reasoning_retrieval import ReasoningRetriever
 
     nb = _seed_two_nodes(rrepo)
@@ -3882,8 +3860,8 @@ def test_search_chunks_action_stops_at_the_per_run_cap(rrepo):
     rrepo.settings.reasoning_max_chunk_searches = 1
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
-        reflects=[{"next_action": "search_chunks", "chunks_query": "布局"},
-                  {"next_action": "search_chunks", "chunks_query": "布线"},
+        reflects=[{"next_action": "search_chunks", "query": "布局"},
+                  {"next_action": "search_chunks", "query": "布线"},
                   {"next_action": "answer", "sufficient": True}]))
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     calls = []
@@ -4864,25 +4842,28 @@ def test_scope_rule_lists_every_free_text_retrieval_field_it_renders():
     「范围词规则」那句的列举里。
 
     这条规则句是 prompt 里唯一一处**枚举**这类字段的地方,模型把它读成穷尽
-    列表:漏一个,那个字段就成了「不受范围词约束」的例外。`chunks_query` 就
-    是这样差点被漏掉的。对账两个方向各跑一次(门开/门关),这样下一个新字段
-    只要沿用 `*_query` / `*_term` 命名就自动被这条守卫接住。
+    列表:漏一个,那个字段就成了「不受范围词约束」的例外。对账在每种闸组合下
+    各跑一次,这样下一个新的根级检索串字段自动被这条守卫接住;反方向(规则句
+    点名了 schema 没有的字段)同样要红。
     """
     from app.services.prompts import reflect_prompt, reflect_schema_hint
 
-    for search_chunks in (False, True):
-        schema = reflect_schema_hint(search_chunks=search_chunks)
-        prompt = reflect_prompt("q", "c", search_chunks=search_chunks)
+    for search_chunks, keyword_search in (
+            (False, False), (True, False), (True, True), (False, True)):
+        gates = dict(search_chunks=search_chunks,
+                     keyword_search=keyword_search)
+        schema = reflect_schema_hint(**gates)
+        prompt = reflect_prompt("q", "c", **gates)
         rendered = _free_text_retrieval_fields(schema)
-        # 门关时是那四个,门开时多一个 —— 提取器本身也被钉住,免得它悄悄退化
-        # 成空集合让整条守卫变成恒真。
-        assert rendered == ({"new_sub_query.query", "elements_query",
-                             "ppr_query", "exact_term"}
-                            | ({"chunks_query"} if search_chunks else set()))
+        # 提取器本身也被钉住,免得它悄悄退化成空集合让整条守卫变成恒真。
+        assert rendered == ({"new_sub_query.query", "query"}
+                            | ({"keywords"} if search_chunks and keyword_search
+                               else set()))
         start = prompt.index("This applies to every retrieval field you fill: ")
-        listed = prompt[start:prompt.index("exact_term especially", start)]
-        missing = sorted(f for f in rendered if f not in listed)
-        assert not missing, f"规则句漏列了检索字段: {missing}"
+        listed = prompt[start + len("This applies to every retrieval field you fill: "):
+                        prompt.index("\n", start)].rstrip(".")
+        named = set(listed.replace(" and ", ", ").split(", "))
+        assert named == rendered, f"规则句与 schema 的检索字段不一致: {named}"
 
 
 def test_allow_search_chunks_policy_flag_disables_seed_and_action(rrepo):
@@ -4908,7 +4889,7 @@ def test_allow_search_chunks_policy_flag_disables_seed_and_action(rrepo):
             if "sub_queries" in schema_hint:
                 return json.dumps({"sub_queries": [{"query": "布局布线"}]})
             return json.dumps({"next_action": "search_chunks",
-                               "chunks_query": "布局", "sufficient": True})
+                               "query": "布局", "sufficient": True})
 
     capture = _Capture()
     bind_chat_client(rrepo, "reasoning_agent", capture)
@@ -4924,9 +4905,7 @@ def test_allow_search_chunks_policy_flag_disables_seed_and_action(rrepo):
     assert not any(t.step_type == "search_chunks" for t in res.trace)
     reflect_prompt, reflect_schema = capture.seen[-1]
     assert "search_chunks" not in reflect_prompt
-    assert "chunks_query" not in reflect_prompt
     assert "search_chunks" not in reflect_schema
-    assert "chunks_query" not in reflect_schema
 
 
 def test_kg_in_scope_counts_a_checked_reference_library(rrepo, owner_asks):
@@ -5080,8 +5059,8 @@ _KG_ONLY_ACTIONS = ("expand_graph", "ppr_retrieve", "expand_community",
                     "follow_chain", "enumerate_kg_objects")
 
 #: 它们在 schema 里对应的参数分支/字段,一并不出现。
-_KG_ONLY_SCHEMA_FIELDS = ('"expand"', '"follow_chain"', '"community_focal"',
-                          '"ppr_query"', '"object_type"')
+_KG_ONLY_SCHEMA_FIELDS = ('"expand"', '"follow_chain"', '"types"',
+                          '"object_type"')
 
 #: 无图 run 里必须**保留**的动作(枚举的那两条各自独立受闸)。
 _KG_FREE_ACTIONS = ("answer", "add_subquery", "search_elements",
@@ -5145,15 +5124,12 @@ def test_reflect_schema_drops_every_graph_branch_when_the_scope_has_no_kg():
         assert field not in off, field
     for action in _KG_FREE_ACTIONS:
         assert action in off, action
-    # 保留的那一半:enumerate 分支还在(只是没了 object_type),自由文本字段里
-    # 只少了 ppr_query。
+    # 保留的那一半:enumerate 分支还在(只是没了 object_type),共用的根级
+    # `query` 也在——search_elements/exact_lookup 无图时照样读它。
     assert '"enumerate":{"kind":"' in off and '"collection":""' in off
-    assert _free_text_retrieval_fields(off) == {
-        "new_sub_query.query", "elements_query", "chunks_query", "exact_term"}
+    assert _free_text_retrieval_fields(off) == {"new_sub_query.query", "query"}
     on = reflect_schema_hint(**_all_gates())
-    assert _free_text_retrieval_fields(on) == {
-        "new_sub_query.query", "elements_query", "ppr_query", "chunks_query",
-        "exact_term"}
+    assert _free_text_retrieval_fields(on) == {"new_sub_query.query", "query"}
 
 
 def test_reflect_prompt_drops_every_graph_sentence_when_the_scope_has_no_kg():
@@ -5161,7 +5137,7 @@ def test_reflect_prompt_drops_every_graph_sentence_when_the_scope_has_no_kg():
 
     判据刻意是「这五个词一次都不出现」而不是「这五条 `- 动作:` 说明不出现」:
     指导句里指向一个不存在动作的**引用**(consult_memory 的重试清单、
-    search_chunks 的对比句、范围词规则里的 ppr_query)与动作说明本身一样有害
+    search_chunks 的对比句)与动作说明本身一样有害
     ——模型照着它去选一个白名单会拒绝的动作,白烧一轮反思。
     """
     from app.services.prompts import reflect_prompt
@@ -5169,8 +5145,7 @@ def test_reflect_prompt_drops_every_graph_sentence_when_the_scope_has_no_kg():
     off = reflect_prompt("布局布线怎么做", "候选", **_all_gates(kg_actions=False))
     for action in _KG_ONLY_ACTIONS:
         assert action not in off, action
-    assert "ppr_query" not in off
-    # `object_type` 与 `ppr_query` 对称:schema 无图时已不提供这个字段,prompt 就
+    # `object_type`:schema 无图时已不提供这个字段,prompt 就
     # 不能再两次点名它(enumerate.collection 那段的「OVERRIDES ... kind/object_type」
     # 与「(kind, object_type, source_id ...)」)。
     assert "object_type" not in off
@@ -5180,9 +5155,8 @@ def test_reflect_prompt_drops_every_graph_sentence_when_the_scope_has_no_kg():
     # 首句:图 → 文库。
     assert off.startswith("You decide the NEXT retrieval step for answering a "
                           "question from a document library.")
-    # 范围词规则那句只少了 ppr_query 一项(其余四项一个不少)。
-    assert ("new_sub_query.query, elements_query, chunks_query and exact_term"
-            in off)
+    # 范围词规则那句与有图时相同:检索串都在共用的 `query` 里。
+    assert "you fill: new_sub_query.query and query.\n" in off
 
 
 #: 无图渲染里**被改写**过的措辞 → 它在有图渲染里的拼写。整份 reflect_prompt 的
@@ -5208,10 +5182,6 @@ _CONDITIONED_PHRASES = (
     ("before repeating an action (exact_lookup, search_elements) that has",
      "before repeating an action (ppr_retrieve, exact_lookup, expand_graph, "
      "follow_chain) that has"),
-    ("you fill: new_sub_query.query, elements_query, chunks_query and "
-     "exact_term",
-     "you fill: new_sub_query.query, elements_query, ppr_query, chunks_query "
-     "and exact_term"),
 )
 
 
@@ -5303,8 +5273,8 @@ def test_no_kg_run_shrinks_the_action_space_in_prompt_schema_and_whitelist(rrepo
 #: 少了它们有图那半会撞上「missing ...」而不是本组要看的 `invalid action`)。
 _KG_ACTION_PAYLOADS = {
     "expand_graph": {"expand": {"object_id": "obj-1"}},
-    "ppr_retrieve": {"ppr_query": "布局"},
-    "expand_community": {"community_focal": "DeepSeek-V4"},
+    "ppr_retrieve": {"query": "布局"},
+    "expand_community": {"query": "DeepSeek-V4"},
     "follow_chain": {"follow_chain": {"start_object_id": "obj-1"}},
     "enumerate_kg_objects": {"enumerate": {"object_type": "claim"}},
 }
@@ -5777,8 +5747,8 @@ def test_first_round_empty_gets_the_switch_channel_note_then_the_old_one(
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "布局布线步骤"}]},
         reflects=[
-            {"next_action": "search_elements", "elements_query": "q"},
-            {"next_action": "search_elements", "elements_query": "q2"},
+            {"next_action": "search_elements", "query": "q"},
+            {"next_action": "search_elements", "query": "q2"},
         ]))
     retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     expected = first_round_empty_note(
@@ -5873,7 +5843,7 @@ def test_legacy_exact_lookup_shape_gate_stays_in_the_executor(rrepo):
     rrepo.settings.graph_ppr_enabled = False
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
-        reflects=[{"next_action": "exact_lookup", "exact_term": "real-time"},
+        reflects=[{"next_action": "exact_lookup", "query": "real-time"},
                   {"next_action": "answer", "sufficient": True}]))
     calls: list = []
     result = _retriever_counting_exact_lookup(rrepo, calls).run(
@@ -6205,7 +6175,7 @@ def test_reflect_drops_off_type_query_fields_instead_of_searching_their_repr(rre
             return json.dumps({
                 "next_action": "add_subquery",
                 "new_sub_query": {"query": []},
-                "ppr_query": ["a", "b"],
+                "query": ["a", "b"],
                 "reason": {"zh": "x"},
             }, ensure_ascii=False)
 
@@ -6220,7 +6190,7 @@ def test_reflect_drops_off_type_query_fields_instead_of_searching_their_repr(rre
 #
 # chunk 模式总有一条按语料语言双语化的关键词全文检索臂;reasoning 的确定性
 # 关键词只在首轮播种、且 `plan()` 真的跑过时才有。PR-3 把这条臂作为
-# `search_chunks` 的可选参数 `chunks_keywords` 交给模型,并把本 run 的语料语言
+# `search_chunks` 的可选参数 `keywords` 交给模型,并把本 run 的语料语言
 # 告诉模型与规划器。
 
 
@@ -6257,12 +6227,12 @@ def _keyword_action_run(rrepo, reflect, *, fail_closed=False, channel=None):
 
 
 def test_search_chunks_action_merges_the_models_keyword_half(rrepo):
-    """模型给了 `chunks_keywords` ⇒ 关键词通道被调一次、字面命中并入证据池,
+    """模型给了 `keywords` ⇒ 关键词通道被调一次、字面命中并入证据池,
     轨迹 detail 多出 `keywords`/`keyword_found`,`found` 是两半合计。"""
     kw = f"{_KEYWORD_ONLY_TERM} 沟槽隔离"
     nb, rr, vector_calls, keyword_calls = _keyword_action_run(rrepo, {
-        "next_action": "search_chunks", "chunks_query": "布局",
-        "chunks_keywords": kw})
+        "next_action": "search_chunks", "query": "布局",
+        "keywords": kw})
     res = rr.run(nb.id, "布局布线怎么做", "")
 
     assert keyword_calls == [kw]
@@ -6279,9 +6249,9 @@ def test_search_chunks_action_merges_the_models_keyword_half(rrepo):
 
 
 def test_search_chunks_action_without_keywords_keeps_its_old_shape(rrepo):
-    """不给 `chunks_keywords` ⇒ 关键词通道零调用、detail 键集合与接入前相同。"""
+    """不给 `keywords` ⇒ 关键词通道零调用、detail 键集合与接入前相同。"""
     nb, rr, _vector_calls, keyword_calls = _keyword_action_run(rrepo, {
-        "next_action": "search_chunks", "chunks_query": "布局"})
+        "next_action": "search_chunks", "query": "布局"})
     res = rr.run(nb.id, "布局布线怎么做", "")
 
     assert keyword_calls == []
@@ -6301,7 +6271,7 @@ def test_search_chunks_action_keyword_half_is_bounded_like_the_vector_half(rrepo
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
         reflects=[{"next_action": "search_chunks",
-                   "chunks_keywords": _KEYWORD_ONLY_TERM},
+                   "keywords": _KEYWORD_ONLY_TERM},
                   {"next_action": "answer", "sufficient": True}]))
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     _stub_search_chunks(rr, [], {None: []})
@@ -6326,7 +6296,7 @@ def test_reflect_truncates_chunks_keywords_to_the_documented_cap(rrepo):
 
         def chat_json(self, *_args, **_kwargs):
             return json.dumps({"next_action": "search_chunks",
-                               "chunks_keywords": self.keywords})
+                               "keywords": self.keywords})
 
     long_kw = "k" * 400
     decision = _reflect_once(rrepo, _LongKeywords(long_kw))
@@ -6340,7 +6310,7 @@ def test_reflect_truncates_chunks_keywords_to_the_documented_cap(rrepo):
 def test_truncated_keywords_are_what_reaches_the_channel_and_the_trace(rrepo):
     kw = f"{_KEYWORD_ONLY_TERM} " + "y" * 400
     nb, rr, _vector_calls, keyword_calls = _keyword_action_run(rrepo, {
-        "next_action": "search_chunks", "chunks_keywords": kw})
+        "next_action": "search_chunks", "keywords": kw})
     res = rr.run(nb.id, "布局布线怎么做", "")
 
     assert keyword_calls == [kw[:300]]
@@ -6354,8 +6324,8 @@ def test_search_chunks_keyword_half_fails_soft_and_discloses_it(rrepo):
         raise RuntimeError("fts down")
 
     nb, rr, _vector_calls, _keyword_calls = _keyword_action_run(
-        rrepo, {"next_action": "search_chunks", "chunks_query": "布线",
-                "chunks_keywords": _KEYWORD_ONLY_TERM}, channel=_boom)
+        rrepo, {"next_action": "search_chunks", "query": "布线",
+                "keywords": _KEYWORD_ONLY_TERM}, channel=_boom)
     rr.search_chunks = lambda notebook_id, query, *, k=None: (
         [_chunk_hit("ck-act")] if query == "布线" else [])
     res = rr.run(nb.id, "布局布线怎么做", "")
@@ -6373,7 +6343,7 @@ def test_search_chunks_keyword_half_raises_under_fail_closed(rrepo):
 
     nb, rr, _vector_calls, _keyword_calls = _keyword_action_run(
         rrepo, {"next_action": "search_chunks",
-                "chunks_keywords": _KEYWORD_ONLY_TERM},
+                "keywords": _KEYWORD_ONLY_TERM},
         fail_closed=True, channel=_boom)
     with pytest.raises(RuntimeError, match="fts down"):
         rr.run(nb.id, "布局布线怎么做", "")
@@ -6387,30 +6357,32 @@ def test_search_chunks_keyword_half_propagates_cancellation(rrepo):
 
     nb, rr, _vector_calls, _keyword_calls = _keyword_action_run(
         rrepo, {"next_action": "search_chunks",
-                "chunks_keywords": _KEYWORD_ONLY_TERM}, channel=_cancelled)
+                "keywords": _KEYWORD_ONLY_TERM}, channel=_cancelled)
     with pytest.raises(AskCancelled):
         rr.run(nb.id, "布局布线怎么做", "")
 
 
 def test_chunks_keywords_is_not_even_read_with_the_channel_closed(rrepo):
-    """闸关时即便模型硬吐 `chunks_keywords` 也不解析(与 `chunks_query` 同形)。"""
+    """闸关时即便模型硬吐 `keywords` 也不解析;共用的 `query` 只落进所选动作
+    自己的那一格,不会被 search_chunks 读到。"""
     class _Stray:
         configured = True
 
         def chat_json(self, *_args, **_kwargs):
             return json.dumps({"next_action": "search_elements",
-                               "elements_query": "布局",
-                               "chunks_query": "布线",
-                               "chunks_keywords": _KEYWORD_ONLY_TERM})
+                               "query": "布局",
+                               "keywords": _KEYWORD_ONLY_TERM})
 
     rrepo.settings.reasoning_chunk_search_enabled = False
     closed = _reflect_once(rrepo, _Stray())
     assert closed.next_action == "search_elements"
+    assert closed.elements_query == "布局"
     assert closed.chunks_query == "" and closed.chunks_keywords == ""
 
     rrepo.settings.reasoning_chunk_search_enabled = True
     opened = _reflect_once(rrepo, _Stray())
-    assert opened.chunks_query == "布线"
+    assert opened.elements_query == "布局"
+    assert opened.chunks_query == ""
     assert opened.chunks_keywords == _KEYWORD_ONLY_TERM
 
 
@@ -6422,11 +6394,11 @@ def test_search_chunks_with_keywords_still_counts_once_against_the_cap(rrepo):
         rrepo, [("ck-kw", _KEYWORD_ONLY_TEXT)])
     rrepo.settings.graph_ppr_enabled = False
     rrepo.settings.reasoning_max_chunk_searches = 2
-    action = {"next_action": "search_chunks", "chunks_query": "布局",
-              "chunks_keywords": _KEYWORD_ONLY_TERM}
+    action = {"next_action": "search_chunks", "query": "布局",
+              "keywords": _KEYWORD_ONLY_TERM}
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
-        reflects=[action, dict(action, chunks_query="布线"), dict(action),
+        reflects=[action, dict(action, query="布线"), dict(action),
                   {"next_action": "answer", "sufficient": True}]))
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     _stub_search_chunks(rr, [], {None: []})
@@ -6477,7 +6449,7 @@ def test_reflect_prompt_names_the_corpus_language_of_the_notebook(rrepo):
 
 
 def test_confirmed_intent_run_still_tells_reflect_the_corpus_language(rrepo):
-    """已确认意图路径不调 `plan()`,但 reflect 的 `chunks_keywords` 说明仍要
+    """已确认意图路径不调 `plan()`,但 reflect 的 `keywords` 说明仍要
     拿到语料语言——那条路径上的关键词检索正是靠它交给模型的。"""
     from app.services.reasoning_retrieval import ReasoningRetriever
 
@@ -6615,7 +6587,7 @@ def test_corpus_languages_are_not_probed_with_the_keyword_gate_closed(
 
 
 def test_chunks_keywords_list_form_is_joined_and_leading_blanks_are_free(rrepo):
-    """模型把 `chunks_keywords` 写成列表:取字符串元素、空格拼接;开头空白不占
+    """模型把 `keywords` 写成列表:取字符串元素、空格拼接;开头空白不占
     300 字符的预算——这一格钉的是 `as_text` / `as_text_list` 先去首尾空白的
     性质(`chunks_keywords_text` 在其后截断再 strip)。"""
     class _Keywords:
@@ -6626,7 +6598,7 @@ def test_chunks_keywords_list_form_is_joined_and_leading_blanks_are_free(rrepo):
 
         def chat_json(self, *_args, **_kwargs):
             return json.dumps({"next_action": "search_chunks",
-                               "chunks_keywords": self.keywords})
+                               "keywords": self.keywords})
 
     listed = _reflect_once(rrepo, _Keywords(["ZKX7734", " 沟槽隔离 ", 7, ""]))
     assert listed.chunks_keywords == "ZKX7734 沟槽隔离"
@@ -6645,8 +6617,8 @@ def test_corpus_languages_are_probed_once_per_run(rrepo):
     nb = _seed_notebook_without_kg(rrepo)
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
-        reflects=[{"next_action": "search_chunks", "chunks_query": "布局"},
-                  {"next_action": "search_chunks", "chunks_query": "布线"},
+        reflects=[{"next_action": "search_chunks", "query": "布局"},
+                  {"next_action": "search_chunks", "query": "布线"},
                   {"next_action": "answer", "sufficient": True}]))
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     probes = []
@@ -6706,11 +6678,11 @@ def test_keyword_corpus_languages_follow_the_keyword_arms_scope(monkeypatch):
     assert service.keyword_corpus_languages("nb-a") == ["en"]
 
 
-# ------------------------------------ `chunks_keywords` 子闸(关键词臂恒空时消失)
+# ------------------------------------ `keywords` 子闸(关键词臂恒空时消失)
 
 
 class _CaptureReflect:
-    """记下 reflect 的 prompt 与 schema,并硬吐一个带 `chunks_keywords` 的动作。"""
+    """记下 reflect 的 prompt 与 schema,并硬吐一个带 `keywords` 的动作。"""
     configured = True
 
     def __init__(self):
@@ -6719,8 +6691,8 @@ class _CaptureReflect:
     def chat_json(self, messages, schema_hint, **kwargs):
         self.seen.append((messages[-1]["content"], schema_hint))
         return json.dumps({"next_action": "search_chunks",
-                           "chunks_query": "布局",
-                           "chunks_keywords": _KEYWORD_ONLY_TERM})
+                           "query": "布局",
+                           "keywords": _KEYWORD_ONLY_TERM})
 
 
 @contextmanager
@@ -6741,7 +6713,7 @@ def test_peer_run_with_the_keyword_arm_switched_off_hides_chunks_keywords(
     rrepo, enabled,
 ):
     """对等 run + `GLOBAL_ASK_KEYWORD_ARM_ENABLED=false`:关键词臂恒空,所以
-    schema、prompt、解析三处都没有 `chunks_keywords`(模型硬吐也不读);开关开着
+    schema、prompt、解析三处都没有 `keywords`(模型硬吐也不读);开关开着
     时三处都在。判据走真实链路:`keyword_search_active` →
     `RetrievalService.keyword_arm_available` → 通道自己的 `keyword_arm_available`。
     """
@@ -6759,8 +6731,8 @@ def test_peer_run_with_the_keyword_arm_switched_off_hides_chunks_keywords(
 
     assert decision.next_action == "search_chunks"
     assert decision.chunks_query == "布局"
-    assert ("chunks_keywords" in prompt) is enabled
-    assert ("chunks_keywords" in schema) is enabled
+    assert ("Optionally also set keywords" in prompt) is enabled
+    assert ('"keywords"' in schema) is enabled
     assert decision.chunks_keywords == (_KEYWORD_ONLY_TERM if enabled else "")
     if not enabled:
         # 子闸关 == search_chunks 开但没有这个参数的形态,逐字节。
@@ -6778,11 +6750,11 @@ def test_peer_run_with_the_keyword_arm_switched_off_hides_chunks_keywords(
 
 
 def test_keyword_gate_closed_run_never_calls_the_keyword_channel(rrepo):
-    """子闸关时的执行面:模型硬吐 `chunks_keywords`、甚至决定里带着它直达
+    """子闸关时的执行面:模型硬吐 `keywords`、甚至决定里带着它直达
     执行体,关键词通道也零调用,detail 键集合与接入前相同。"""
     nb, rr, _vector_calls, keyword_calls = _keyword_action_run(rrepo, {
-        "next_action": "search_chunks", "chunks_query": "布局",
-        "chunks_keywords": _KEYWORD_ONLY_TERM})
+        "next_action": "search_chunks", "query": "布局",
+        "keywords": _KEYWORD_ONLY_TERM})
     rr.retrieval.keyword_arm_available = lambda: False
     res = rr.run(nb.id, "布局布线怎么做", "")
 
@@ -6814,8 +6786,8 @@ def test_keyword_channel_failure_is_an_event_not_a_banner(rrepo, monkeypatch):
     from app.core.ask_context import _ASK_MODEL_ERRORS
 
     nb, rr, _vector_calls, keyword_calls = _keyword_action_run(rrepo, {
-        "next_action": "search_chunks", "chunks_query": "布局",
-        "chunks_keywords": _KEYWORD_ONLY_TERM})
+        "next_action": "search_chunks", "query": "布局",
+        "keywords": _KEYWORD_ONLY_TERM})
     candidates = rrepo.retrieval.candidates
     events = []
     real_emit = candidates.event_log.emit
@@ -6849,7 +6821,7 @@ def test_keyword_channel_failure_is_an_event_not_a_banner(rrepo, monkeypatch):
 
 @pytest.mark.parametrize("enabled", [True, False])
 def test_seed_keyword_arm_rides_the_same_sub_gate(rrepo, monkeypatch, enabled):
-    """首轮播种的词法臂与 `chunks_keywords` 共读子闸 `keyword_search_active()`。
+    """首轮播种的词法臂与 `keywords` 共读子闸 `keyword_search_active()`。
 
     对等 run + `GLOBAL_ASK_KEYWORD_ARM_ENABLED=false`:关键词臂恒空,播种不调
     通道、seed 步 detail 没有 `keyword_found`(与「`plan_keywords` 为空」同形,
@@ -6910,3 +6882,130 @@ def test_keyword_search_active_follows_the_passage_switch_and_the_probe():
     # 原文检索整体关着时子闸必关。
     assert _rr(SimpleNamespace(keyword_arm_available=lambda: True),
                enabled=False).keyword_search_active() is False
+
+
+# ------------------------------- reflect 的严格 schema:投影 + 合规回复往返解析
+
+
+@pytest.mark.parametrize("enumeration", [False, True])
+@pytest.mark.parametrize("kg_actions", [False, True])
+def test_every_reflect_gate_combination_projects_to_a_strict_schema(
+    enumeration, kg_actions,
+):
+    """任何闸组合下 reflect 的 hint 都能投影成严格 json_schema——一个回退成
+    JSON 模式的组合就会让那一类 run 静默失去结构化输出。"""
+    import itertools
+
+    from app.core.model_schema import response_format_for_hint
+    from app.services.collection_catalog import (
+        ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES,
+    )
+    from app.services.prompts import reflect_schema_hint
+
+    for outline, consult, chunks, read_doc, keywords, scope in itertools.product(
+            [False, True], repeat=6):
+        hint = reflect_schema_hint(
+            ENUMERABLE_ELEMENT_KINDS if enumeration else (),
+            ENUMERABLE_KG_OBJECT_TYPES if enumeration else (),
+            outline, consult, chunks, kg_actions,
+            read_document=read_doc, keyword_search=keywords,
+            enumerate_scope=scope)
+        assert response_format_for_hint(hint) is not None, hint
+
+
+def _strict_instance(schema: dict, overrides: dict):
+    """按严格 schema 造一份**合规**回复:给定的根级字段取 ``overrides`` 的值,
+    其余可为 null 的字段写 null(prompt 说的「没用到就写 null」),不可为 null
+    的取该类型的空值。"""
+    def empty(node):
+        types = node.get("type")
+        types = [types] if isinstance(types, str) else (types or [])
+        if "null" in types or {"type": "null"} in node.get("anyOf", []):
+            return None
+        if "object" in types:
+            return {key: empty(sub) for key, sub in node["properties"].items()}
+        return {"string": "", "boolean": False, "integer": 0,
+                "number": 0.0, "array": []}[types[0]]
+
+    return {
+        key: overrides[key] if key in overrides else empty(sub)
+        for key, sub in schema["properties"].items()
+    }
+
+
+class _StrictReply:
+    """把收到的 hint 投影成严格 schema,回一份按它写的合规回复。"""
+
+    configured = True
+
+    def __init__(self, overrides):
+        self.overrides = overrides
+        self.schema = None
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        from app.core.model_schema import (
+            response_format_for_hint, validate_structured_response,
+        )
+        response_format = response_format_for_hint(schema_hint)
+        assert response_format is not None, schema_hint
+        self.schema = response_format["json_schema"]["schema"]
+        reply = json.dumps(_strict_instance(self.schema, self.overrides),
+                           ensure_ascii=False)
+        assert validate_structured_response(reply, response_format), reply
+        return reply
+
+
+@pytest.mark.parametrize("kg_actions", [False, True])
+@pytest.mark.parametrize("action, overrides, expected", [
+    ("search_elements", {"query": "版图"}, {"elements_query": "版图"}),
+    ("exact_lookup", {"query": "set_db"}, {"exact_term": "set_db"}),
+    ("search_chunks", {"query": "布局", "keywords": "布局 placement"},
+     {"chunks_query": "布局", "chunks_keywords": "布局 placement"}),
+    ("ppr_retrieve", {"query": "跨文档"}, {"ppr_query": "跨文档"}),
+    ("expand_community", {"query": "DeepSeek-V4"},
+     {"community_focal": "DeepSeek-V4"}),
+    ("add_subquery", {"new_sub_query": {
+        "query": "时序收敛", "types": ["formula", "bogus"],
+        "prefer": "keyword", "reason": None}}, {}),
+    ("update_outline", {"outline_sections": [
+        {"id": "s1", "title": "概述", "parent": None,
+         "evidence": [], "remove_evidence": None}]}, {}),
+])
+def test_a_strict_schema_compliant_reflect_reply_parses_into_the_decision(
+    rrepo, kg_actions, action, overrides, expected,
+):
+    """严格 schema 下的合规回复(未用字段全是 null)被 ``reflect()`` 正确解析:
+    共用的 ``query`` 只落进所选动作自己的那一格,``keywords``/
+    ``outline_sections``/``prefer`` 三值枚举各归其位;无图时 ``types`` 字段整个
+    不存在,子查询的类型过滤照样成立。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    graph_only = action in ("ppr_retrieve", "expand_community")
+    if graph_only and not kg_actions:
+        pytest.skip("graph action is not offered without a knowledge graph")
+    rrepo.settings.reasoning_chunk_search_enabled = True
+    reply = _StrictReply(dict(overrides, next_action=action, reason="r"))
+    if action == "add_subquery" and not kg_actions:
+        reply.overrides["new_sub_query"] = {
+            key: value for key, value in overrides["new_sub_query"].items()
+            if key != "types"}
+    bind_chat_client(rrepo, "reasoning_agent", reply)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings, fail_closed=True)
+    decision = rr.reflect("布局布线怎么做", "候选", outline=True,
+                          kg_actions=kg_actions)
+
+    assert decision.next_action == action
+    assert ("types" in reply.schema["properties"]["new_sub_query"]["properties"]
+            ) is kg_actions
+    single = ("elements_query", "exact_term", "chunks_query", "ppr_query",
+              "community_focal", "chunks_keywords")
+    for field in single:
+        assert getattr(decision, field) == expected.get(field, ""), field
+    if action == "add_subquery":
+        sub = decision.new_sub_query
+        assert sub.query == "时序收敛" and sub.prefer == "keyword"
+        assert sub.types == (["formula"] if kg_actions else [])
+        assert sub.reason == ""
+    if action == "update_outline":
+        assert [(s.id, s.title, s.parent) for s in decision.outline_sections] == [
+            ("s1", "概述", "")]

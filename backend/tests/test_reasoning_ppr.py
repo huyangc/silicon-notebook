@@ -56,9 +56,10 @@ def _seed_two_doc_moe(repo):
 def test_reflect_prompt_and_schema_expose_ppr():
     from app.services.prompts import reflect_prompt, REFLECT_SCHEMA_HINT
     assert "ppr_retrieve" in REFLECT_SCHEMA_HINT
-    assert "ppr_query" in REFLECT_SCHEMA_HINT
+    assert '"query":""' in REFLECT_SCHEMA_HINT
     p = reflect_prompt("对比 DeepSeek 与 GLM", "- [concept] MoE (id=k1)")
     assert "ppr_retrieve" in p
+    assert "PPR (set query)" in p
     # 既有 4 动作不丢
     for a in ("answer", "expand_graph", "add_subquery", "search_elements"):
         assert a in REFLECT_SCHEMA_HINT
@@ -72,7 +73,7 @@ def test_reflect_parses_ppr_retrieve_decision():
         configured = True
         def chat_json(self, messages, schema_hint, **kw):
             return json.dumps({"next_action": "ppr_retrieve",
-                               "ppr_query": "DeepSeek vs GLM MoE", "reason": "需跨文档对比"})
+                               "query": "DeepSeek vs GLM MoE", "reason": "需跨文档对比"})
 
     class _Retrieval:
         pass
@@ -160,7 +161,7 @@ def test_ppr_retrieve_action_caps_at_max(repo, monkeypatch):
     nb = _seed_two_doc_moe(repo)
     monkeypatch.setattr(repo.settings, "reasoning_stale_limit", 99)
     bind_chat_client(repo, "reasoning_agent", _ScriptedReflectLLM(
-        reflects=[{"next_action": "ppr_retrieve", "ppr_query": f"q{i}"} for i in range(4)]
+        reflects=[{"next_action": "ppr_retrieve", "query": f"q{i}"} for i in range(4)]
         + [{"next_action": "answer", "sufficient": True}]))
     result = ReasoningRetriever.from_repository(repo, repo.settings).run(nb.id, "对比题")
     ppr_actions = [s for s in result.trace
@@ -180,8 +181,8 @@ def test_ppr_retrieve_action_uses_deployment_policy(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "reasoning_max_ppr_retrieves", 1)
     bind_chat_client(repo, "reasoning_agent", _ScriptedReflectLLM(
         reflects=[
-            {"next_action": "ppr_retrieve", "ppr_query": "q1"},
-            {"next_action": "ppr_retrieve", "ppr_query": "q2"},
+            {"next_action": "ppr_retrieve", "query": "q1"},
+            {"next_action": "ppr_retrieve", "query": "q2"},
             {"next_action": "answer", "sufficient": True},
         ]
     ))
@@ -210,7 +211,7 @@ def test_ppr_retrieve_action_skipped_when_flag_off(repo, monkeypatch):
     nb = _seed_two_doc_moe(repo)
     monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)
     bind_chat_client(repo, "reasoning_agent", _ScriptedReflectLLM(
-        reflects=[{"next_action": "ppr_retrieve", "ppr_query": "q"},
+        reflects=[{"next_action": "ppr_retrieve", "query": "q"},
                   {"next_action": "answer", "sufficient": True}]))
     result = ReasoningRetriever.from_repository(repo, repo.settings).run(nb.id, "对比题")
     assert any(s.step_type == "skip" and s.detail.get("reason") == "ppr_disabled"

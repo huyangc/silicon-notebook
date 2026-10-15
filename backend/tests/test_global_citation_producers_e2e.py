@@ -434,7 +434,7 @@ def test_expand_community_is_clean(tmp_path, monkeypatch):
         nb, _ids = _two_claims_and_an_edge(repo)
         events = kit.capture_events(repo, monkeypatch)
         kit.bind_models(repo, kit.ScriptedAgent([{
-            "next_action": "expand_community", "community_focal": "前提甲",
+            "next_action": "expand_community", "query": "前提甲",
             "reason": "横向对比",
         }], plan_query="前提甲"))
         result = kit.global_answer(repo, [nb.id], "前提甲的同类")
@@ -465,7 +465,7 @@ def test_exact_lookup_is_clean(tmp_path, monkeypatch):
     try:
         events = kit.capture_events(repo, monkeypatch)
         kit.bind_models(repo, kit.ScriptedAgent([{
-            "next_action": "exact_lookup", "exact_term": "set_gain_mode", "reason": "精查",
+            "next_action": "exact_lookup", "query": "set_gain_mode", "reason": "精查",
         }], plan_query="低温性能"))
         result = kit.global_answer(repo, [nb.id for nb in notebooks], "set_gain_mode 的低温性能")
         kit.assert_clean(result, events, None)
@@ -481,8 +481,8 @@ def test_keyword_arm_is_clean(tmp_path, monkeypatch):
     try:
         events = kit.capture_events(repo, monkeypatch)
         kit.bind_models(repo, kit.ScriptedAgent([{
-            "next_action": "search_chunks", "chunks_query": "低温增益",
-            "chunks_keywords": "cryogenic gain 低温 增益", "reason": "关键词检索",
+            "next_action": "search_chunks", "query": "低温增益",
+            "keywords": "cryogenic gain 低温 增益", "reason": "关键词检索",
         }], plan_query="低温性能"))
         result = kit.global_answer(repo, [nb.id for nb in notebooks], "低温下的增益表现")
         kit.assert_clean(result, events, None)

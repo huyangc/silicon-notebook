@@ -172,8 +172,10 @@ def test_query_intent_prompt_single_topic_rules_unchanged():
     for literal in (
         "Freeze what the user actually asks; evidence availability must never change "
         "the requested topic. Split only genuinely distinct required questions. ",
-        "Each topic needs a stable short "
-        "id, a title in the user's language, the exact question it must answer, and "
+        # Topic/ambiguity ids are minted by the server (``plan_query_intent``),
+        # so the prompt no longer asks the model for one.
+        "Each topic needs a title in "
+        "the user's language, the exact question it must answer, and "
         "1-4 retrieval queries. Preserve requested comparisons, constraints, scope, "
         "time range and output form. excluded_topics lists plausible but out-of-scope "
         "directions. Do not answer the question and do not mention corpus coverage.\n",
@@ -215,14 +217,13 @@ def test_extract_prompt_excludes_enumerated_values_and_meta_claims():
 # Agentic Memory P3 (T8) — style_block 新增形参:默认值空转 + 落点/双拼写覆盖。
 # --------------------------------------------------------------------------- #
 def test_style_block_default_is_byte_identical_to_omitting_it():
-    """新形参默认空串 ⇒ 不传它与显式传 ``style_block=""`` 逐字节相同——三个
-    消费点(合成 + 两份规划拼写)都要测,这是「关闭态回到接入前」在 prompts
+    """新形参默认空串 ⇒ 不传它与显式传 ``style_block=""`` 逐字节相同——两个
+    消费点(合成 + 规划)都要测,这是「关闭态回到接入前」在 prompts
     层的判据(镜像 profile_block/experience_block 的冻结基线先例)。"""
-    from app.services.prompts import answer_prompt, expand_query_prompt, plan_prompt
+    from app.services.prompts import answer_prompt, expand_query_prompt
 
     assert answer_prompt("q?", "k1: [concept] X") == answer_prompt(
         "q?", "k1: [concept] X", style_block="")
-    assert plan_prompt("q") == plan_prompt("q", style_block="")
     assert expand_query_prompt("q") == expand_query_prompt("q", style_block="")
 
 
@@ -237,13 +238,11 @@ def test_style_block_lands_between_the_rules_and_the_question_in_answer_prompt()
     assert rules_end < p.index("STYLE_MARKER_XYZ") < question_line
 
 
-def test_style_block_reaches_both_planning_prompt_spellings():
-    """规划侧:``plan_prompt``(backup 拼写)与 ``expand_query_prompt``
-    (production 实际发送的那份)必须都加上这个参数——「要到达规划模型的东西
-    必须两份都加」,镜像 profile_block/experience_block 的既有钉法。"""
-    from app.services.prompts import expand_query_prompt, plan_prompt
+def test_style_block_reaches_the_planning_prompt():
+    """规划侧:``expand_query_prompt``(规划实际发送的那份)带上这个参数,
+    镜像 profile_block/experience_block 的既有钉法。"""
+    from app.services.prompts import expand_query_prompt
 
-    assert "STYLE_MARKER_XYZ" in plan_prompt("q", style_block="STYLE_MARKER_XYZ")
     assert "STYLE_MARKER_XYZ" in expand_query_prompt(
         "q", style_block="STYLE_MARKER_XYZ")
 
@@ -269,55 +268,6 @@ def test_retrieval_experience_prompt_rule_3_explains_the_anchored_figure():
 # --------------------------------------------------------------------------- #
 # KG 可选化 T2 — 规划措辞的 kg_available 门(验收 7)。
 # --------------------------------------------------------------------------- #
-def test_plan_prompt_kg_available_true_is_byte_identical_to_omitting_it():
-    """新门参数默认 True ⇒ 不传它与显式传 True 逐字节相同(有图侧零变化)。
-
-    基线是同一个函数的默认渲染,不是快照:plan 的措辞今后怎么调这条都成立,
-    它红只可能是因为有人让这把闸漏进了默认路径。
-    """
-    import itertools
-
-    from app.services.prompts import plan_prompt
-
-    for h, c, p, e, s in itertools.product(
-            ["", "H"], ["", "C"], ["", "P"], ["", "E"], ["", "S"]):
-        assert plan_prompt("q", h, c, p, e, style_block=s) == plan_prompt(
-            "q", h, c, p, e, style_block=s, kg_available=True)
-
-
-def test_plan_prompt_kg_available_false_changes_only_the_kg_bound_lines():
-    """无图侧:只有首句与 `types` 字段说明换掉,JSON 合同与其余每一行原样。
-
-    `types` 那行必须一起换:它原本写「subset of the 4」,指的是首句介绍的那 4 个
-    KG 节点类型。首句一走,「the 4」就成了悬空指代——prompt 里再没有任何一处列出
-    过这个 4。
-    """
-    from app.services.prompts import plan_prompt
-
-    on = plan_prompt("布局布线怎么做", "H", "C", "P", "E", style_block="S")
-    off = plan_prompt("布局布线怎么做", "H", "C", "P", "E", style_block="S",
-                      kg_available=False)
-    on_lines, off_lines = on.splitlines(), off.splitlines()
-    assert len(on_lines) == len(off_lines)
-    differing = [i for i, (a, b) in enumerate(zip(on_lines, off_lines)) if a != b]
-    # 首句(0)与 `- types:` 那行(3);其余每一行逐字节不动。
-    assert differing == [0, 3], [off_lines[i] for i in differing]
-    assert off_lines[0] == (
-        "You plan how to retrieve evidence from a document library to answer "
-        "an engineer's question. Sub-queries are run against source passages; "
-        "the `types` field is ignored when the library has no knowledge graph.")
-    assert off_lines[3] == (
-        "- types: ignored when the library has no knowledge graph; leave it "
-        "empty.")
-    assert on_lines[3].startswith("- types: which node types to search")
-    assert "the 4" not in off
-    assert "knowledge graph (KG)" not in off
-    # JSON 合同不变(`types` 仍是合法字段,解析器零改动)。
-    assert off.endswith(
-        'Return JSON only: {"sub_queries":[{"query":"","types":[],'
-        '"prefer":"balanced","reason":""}]}')
-
-
 def test_reflect_prompt_kg_actions_true_is_byte_identical_to_omitting_it():
     """验收 7 的 reflect 半:同款「True == 不传」对账(动作段的对账在
     ``test_reasoning_retrieval`` 那一组)。"""
@@ -395,9 +345,9 @@ def test_read_document_open_shows_up_in_all_three_projections(gates):
 
 
 # ---------------------------------------------------------------------------
-# PR-3:`search_chunks` 的可选关键词 `chunks_keywords` + 语料语言。
+# PR-3:`search_chunks` 的可选关键词 `keywords` + 语料语言。
 #
-# `chunks_keywords` 骑一把**子闸** `keyword_search`(单点判据
+# `keywords` 骑一把**子闸** `keyword_search`(单点判据
 # `ReasoningRetriever.keyword_search_active`):只有 `search_chunks` 与它同时开时
 # schema 与 prompt 里才出现这个字段;任一关着时一个字节都不出现,`corpus_langs`
 # 也不改变任何一个字节(它唯一的读者就是那句说明)。子闸关、`search_chunks` 开时
@@ -429,8 +379,8 @@ def test_chunks_keywords_is_absent_and_languages_inert_with_either_gate_closed(
     closed = reflect_prompt("q", "c", keyword_search=keyword_search, **kwargs)
     schema = reflect_schema_hint(keyword_search=keyword_search,
                                  **_schema_only(kwargs))
-    assert "chunks_keywords" not in closed
-    assert "chunks_keywords" not in schema
+    assert "Optionally also set keywords" not in closed
+    assert '"keywords"' not in schema
     # 子闸关 == 不传(接入前的调用形状);子闸在 search_chunks 关时开着也不起作用。
     assert closed == reflect_prompt("q", "c", **kwargs)
     assert schema == reflect_schema_hint(**_schema_only(kwargs))
@@ -441,19 +391,19 @@ def test_chunks_keywords_is_absent_and_languages_inert_with_either_gate_closed(
 
 @pytest.mark.parametrize("gates", _CHUNKS_KEYWORDS_OTHER_GATES)
 def test_keyword_gate_closed_is_the_pre_parameter_search_chunks_shape(gates):
-    """子闸关、search_chunks 开:schema 尾组只有 `chunks_query`,动作说明以
-    「works even with no graph at all.」收尾,范围词规则只列到 chunks_query。"""
+    """子闸关、search_chunks 开:schema 尾组只有共用的 `query`,动作说明以
+    「works even with no graph at all.」收尾,范围词规则只列到 query。"""
     from app.services.prompts import reflect_prompt, reflect_schema_hint
 
     kwargs = dict(gates, search_chunks=True)
     schema = reflect_schema_hint(**_schema_only(kwargs))
-    assert '"exact_term":"","chunks_query":"","reason":""' in schema
+    assert schema.endswith('"query":"","reason":""}')
     prompt = reflect_prompt("q", "c", **kwargs)
     assert "works even with no graph at all.\n" in prompt
-    assert ", chunks_query and exact_term" in prompt
+    assert "you fill: new_sub_query.query and query.\n" in prompt
     opened = reflect_schema_hint(keyword_search=True, **_schema_only(kwargs))
     assert opened == schema.replace(
-        '"chunks_query":"",', '"chunks_query":"","chunks_keywords":"",', 1)
+        '"query":"","reason":""}', '"query":"","keywords":"","reason":""}', 1)
 
 
 @pytest.mark.parametrize("gates", _CHUNKS_KEYWORDS_OTHER_GATES)
@@ -462,15 +412,15 @@ def test_chunks_keywords_shows_up_in_schema_and_prompt_together(gates):
 
     schema = json.loads(reflect_schema_hint(
         search_chunks=True, keyword_search=True, **_schema_only(gates)))
-    assert schema["chunks_keywords"] == ""
-    # 紧跟 chunks_query,与它同在尾组。
+    assert schema["keywords"] == ""
+    # 紧跟共用的 query,与它同在尾组。
     keys = list(schema)
-    assert keys.index("chunks_keywords") == keys.index("chunks_query") + 1
+    assert keys.index("keywords") == keys.index("query") + 1
     prompt = reflect_prompt("q", "c", search_chunks=True, keyword_search=True,
                             **gates)
-    assert "Optionally also set chunks_keywords" in prompt
+    assert "Optionally also set keywords" in prompt
     # 范围词规则同样点名它(字面匹配的字段,范围词放进去必零命中)。
-    assert "chunks_query, chunks_keywords and exact_term" in prompt
+    assert "you fill: new_sub_query.query, query and keywords.\n" in prompt
 
 
 def test_chunks_keywords_sentence_names_the_corpus_languages():
@@ -489,10 +439,11 @@ def test_chunks_keywords_sentence_names_the_corpus_languages():
     assert "keywords in the corpus language (en)" in en
     both = _line(corpus_langs=["zh", "en"])
     assert "keywords in each corpus language (zh, en), giving both forms" in both
-    # 字面命中的用途与「不填就只按 chunks_query」都要说。
+    # 字面命中的用途与「不填就只按 query」都要说。
     for line in (zh, en, both):
         assert "model numbers, terms, command names, code identifiers" in line
-        assert "Leave it empty to search by chunks_query alone" in line
+        assert "Leave it empty to search by query alone" in line
+        assert "It is matched literally, so a scope word in it finds nothing" in line
         # 真模型抽问(PR #799):模型会把候选里见过的兄弟型号与猜测的答案值塞进
         # 关键词串,整串覆盖率被稀释到把金段挤出 RELEVANCE_FLOOR。只许问题点名
         # 的词及其对应写法,这句约束必须随关键词说明一起出现。
@@ -605,27 +556,17 @@ def test_read_document_source_is_not_listed_among_the_scope_fields():
     assert "new_sub_query.query" in rule
 
 
-def test_plan_prompt_neutral_opening_matches_expand_query_prompts_framing():
-    """两份规划拼写不得说出互相矛盾的计划(``plan_prompt`` 函数体前 NOTE 的
-    「must be added to BOTH」纪律)。
-
-    这次改的是**首句框架**而不是分解指导:production 实际发送的
-    ``expand_query_prompt`` 首句本来就是 KG 中性的("retrieval over a document
-    corpus"),所以无图态的 backup 拼写是在向它靠拢,而不是背离——这条用例把
-    「两份拼写的框架句都不宣称必有一张图」钉住。
+def test_expand_query_prompt_opening_is_kg_neutral():
+    """规划 prompt 的首句框架是 KG 中性的("retrieval over a document
+    corpus"):无图 run 也发同一份,它不得宣称必有一张图。
     """
-    from app.services.prompts import expand_query_prompt, plan_prompt
+    from app.services.prompts import expand_query_prompt
 
     production = expand_query_prompt("q")
     assert production.startswith(
         "You prepare an engineer's question for retrieval over a document "
         "corpus.")
-    # 判据是「不宣称去检索一张图」,不是「不出现 knowledge graph 这个词」——
-    # 中性版首句正是靠"the library has no knowledge graph"这半句解释 `types`。
     assert "retrieve a knowledge graph" not in production
-    assert "retrieve a knowledge graph" not in plan_prompt(
-        "q", kg_available=False)
-    assert "retrieve a knowledge graph" in plan_prompt("q")
 
 
 # ---------------------------------------------------------------------------

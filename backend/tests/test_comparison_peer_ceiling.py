@@ -291,7 +291,7 @@ def _reasoning_run(repo, library, monkeypatch, ceilings):
 
         def __init__(self):
             self._reflects = [
-                {"next_action": "expand_community", "community_focal": FOCAL,
+                {"next_action": "expand_community", "query": FOCAL,
                  "reason": "需要同类"},
                 {"next_action": "answer", "sufficient": True},
             ]
