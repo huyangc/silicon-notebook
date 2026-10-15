@@ -601,11 +601,10 @@ def test_reserved_keys_are_exactly_what_an_all_gates_open_reflect_schema_offers(
 def test_strict_schema_fallback_keys_track_the_projection_s_dynamic_fields():
     """An action or parameter named after a key the strict projection refuses
     would silently drop the whole reflect hint back to JSON mode, so those names
-    are reserved too. ``resolved_payload`` is excluded because its producer is
-    being retired; every other dynamic field must stay reserved."""
+    are reserved too: every dynamic field must stay reserved."""
     from app.core.model_schema import _DYNAMIC_FIELDS, response_format_for_hint
 
-    assert set(_DYNAMIC_FIELDS) - {"resolved_payload"} <= STRICT_SCHEMA_FALLBACK_KEYS
+    assert set(_DYNAMIC_FIELDS) <= STRICT_SCHEMA_FALLBACK_KEYS
     assert STRICT_SCHEMA_FALLBACK_KEYS <= RESERVED_REFLECT_KEYS
     assert STRICT_SCHEMA_FALLBACK_KEYS <= RESERVED_REFLECT_PARAMETER_NAMES
     for key in STRICT_SCHEMA_FALLBACK_KEYS:

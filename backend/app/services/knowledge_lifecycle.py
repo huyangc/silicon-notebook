@@ -6074,7 +6074,7 @@ class KnowledgeLifecycleService:
                         # LLM 阶段的分块回调兼认领心跳(R13):merge review
                         # 可以单阶段跑数小时,只靠 stage 边界续租不够。
                         self._refresh_generation_lease(notebook_id, generation)
-                        rows =[(id_to_key[d["candidate_id"]],
+                        rows = [(id_to_key[d["candidate_id"]],
                                  {"decision": d["decision"], "confidence": d["confidence"]})
                                 for d in chunk_decisions if d.get("candidate_id") in id_to_key]
                         if rows:

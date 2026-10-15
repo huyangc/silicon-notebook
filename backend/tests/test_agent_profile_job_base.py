@@ -636,7 +636,6 @@ def test_an_unconfigured_model_fails_the_chain_and_keeps_the_blocks(harness):
             "value_not_a_string",
         ),
         ('{"blocks": [{"label": "corpus_shape", "value": 42}]}', "value_not_a_string"),
-        ('{"blocks": [{"label": "corpus_shape"}]}', "value_not_a_string"),
         (
             '{"blocks": [{"label": "corpus_shape", "value": "x", "evidence": "src-a"}]}',
             "evidence_not_a_list",
@@ -756,6 +755,26 @@ def test_a_non_withdrawal_retire_value_is_an_ordinary_update(retire_field):
     assert parse_overlay_reply(json.loads(overlay_content)) == [
         {"label": "retrieval_notes", "value": "x"},
     ]
+
+
+@pytest.mark.parametrize("value_field", [{"value": None}, {}], ids=["null", "absent"])
+def test_a_block_without_a_value_changes_nothing_and_spares_the_rest(value_field):
+    """Null or absent ``value`` on a non-retired block says nothing, like "";
+    it must not reject the reply and drop the other blocks' updates."""
+    silent = {"label": "corpus_gaps", "evidence": None, "retire": False, **value_field}
+    content = json.dumps({"blocks": [{**_STRICT_UPDATE_BLOCK, "retire": False}, silent]})
+    if value_field:
+        base_format = response_format_for_hint(AGENT_PROFILE_SCHEMA_HINT)
+        assert validate_structured_response(content, base_format)
+    assert parse_base_reply(json.loads(content), frozenset({"s1"})) == [
+        {"label": "corpus_shape", "value": "x", "evidence": ["s1"],
+         "evidence_dropped": 0},
+    ]
+    overlay = {"blocks": [
+        {"label": "retrieval_notes", "value": "x"},
+        {"label": "usage_gaps", "retire": False, **value_field},
+    ]}
+    assert parse_overlay_reply(overlay) == [{"label": "retrieval_notes", "value": "x"}]
 
 
 def test_a_strict_retirement_with_a_null_value_is_a_withdrawal():

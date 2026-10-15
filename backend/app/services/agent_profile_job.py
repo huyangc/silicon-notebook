@@ -597,6 +597,10 @@ def parse_base_reply(payload: object, served_ids: frozenset[str]) -> list[dict]:
             parsed.append({"label": label, "retire": True})
             continue
         raw_value = entry.get("value")
+        if raw_value is None:
+            # Null or absent is the strict schema's spelling of an empty
+            # value; it says nothing and changes nothing, like "" below.
+            continue
         if not isinstance(raw_value, str):
             raise AgentProfileOutputRejected("value_not_a_string")
         value = clip_block_value(raw_value)
@@ -1208,6 +1212,8 @@ def parse_overlay_reply(payload: object) -> list[dict]:
             parsed.append({"label": label, "retire": True})
             continue
         raw_value = entry.get("value")
+        if raw_value is None:
+            continue
         if not isinstance(raw_value, str):
             raise AgentProfileOutputRejected("value_not_a_string")
         value = clip_block_value(raw_value)
