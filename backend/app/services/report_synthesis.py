@@ -325,7 +325,6 @@ def normalize_synthesis_blueprint(
 
         claims: list[dict] = []
         claim_ids: set[str] = set()
-        owners: dict[str, str] = {}
         for raw in raw_claims:
             if not isinstance(raw, dict):
                 return None
@@ -384,7 +383,6 @@ def normalize_synthesis_blueprint(
             if claim_type in {"fact", "comparison", "trend"} and not evidence_keys:
                 return None
             claim_ids.add(claim_id)
-            owners[claim_id] = owner
             claims.append({
                 "id": claim_id,
                 "statement": statement,
@@ -396,37 +394,35 @@ def normalize_synthesis_blueprint(
                 "owner_section_id": owner,
             })
 
+        # A section's claim list is DERIVED from each claim's owner rather than
+        # asked for twice: the reply used to carry ``sections[].claim_ids`` as
+        # well, and any disagreement between the two copies discarded the whole
+        # blueprint. ``claim_ids`` stays in the normalized output (claim order)
+        # because ``blueprint_for_section`` and the section writer read it.
+        claims_by_section: dict[str, list[str]] = {}
+        for claim in claims:
+            claims_by_section.setdefault(claim["owner_section_id"], []).append(claim["id"])
+        if any(len(ids) > BLUEPRINT_SECTION_MAX_CLAIMS for ids in claims_by_section.values()):
+            return None
+
         sections: list[dict] = []
         seen_sections: set[str] = set()
         for raw in raw_sections:
             if not isinstance(raw, dict):
                 return None
             section_id = _text(raw.get("section_id"), 80)
-            raw_claim_ids = raw.get("claim_ids")
-            if (
-                not isinstance(raw_claim_ids, list)
-                or len(raw_claim_ids) > BLUEPRINT_SECTION_MAX_CLAIMS
-            ):
-                return None
-            ids = _strings(raw_claim_ids, BLUEPRINT_SECTION_MAX_CLAIMS, 80)
-            if (
-                section_id not in section_ids or section_id in seen_sections
-                or any(cid not in claim_ids or owners[cid] != section_id for cid in ids)
-            ):
+            if section_id not in section_ids or section_id in seen_sections:
                 return None
             seen_sections.add(section_id)
             sections.append({
                 "section_id": section_id,
                 "thesis": _text(raw.get("thesis"), 1000),
-                "claim_ids": ids,
+                "claim_ids": claims_by_section.get(section_id, []),
                 "must_contrast": _strings(raw.get("must_contrast"), 8, 400),
                 "handoff": _text(raw.get("handoff"), 500),
                 "do_not_repeat": _strings(raw.get("do_not_repeat"), 24, 80),
             })
         if seen_sections != section_ids:
-            return None
-        assigned = {cid for row in sections for cid in row["claim_ids"]}
-        if assigned != claim_ids:
             return None
 
         definitions: list[dict] = []

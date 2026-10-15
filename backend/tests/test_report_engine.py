@@ -1292,7 +1292,7 @@ def test_report_stages_use_their_independent_output_budgets(repo):
                     "claims": [],
                     "sections": [{
                         "section_id": "section-1", "thesis": "t",
-                        "claim_ids": [], "must_contrast": [], "handoff": "",
+                        "must_contrast": [], "handoff": "",
                         "do_not_repeat": [],
                     }],
                 })
@@ -1348,7 +1348,7 @@ def test_synthesize_blueprint_passes_frame_facet_ids_to_synthesis_prompt(repo):
                     "claims": [],
                     "sections": [{
                         "section_id": "section-1", "thesis": "t",
-                        "claim_ids": [], "must_contrast": [], "handoff": "",
+                        "must_contrast": [], "handoff": "",
                         "do_not_repeat": [],
                     }],
                 })
