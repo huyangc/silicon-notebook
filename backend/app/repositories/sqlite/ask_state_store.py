@@ -423,11 +423,15 @@ class AskStateStore:
         question -- the facts the MCP ``ask``/``get_ask`` tools check before
         attaching to or reading a job (no trace, no answer) -- including
         ``memory_access``, whether the run had the private-Memory channel
-        open. ``None`` when the job does not exist."""
+        open -- plus where the job stands (``status``, ``output``,
+        ``answer_id``), so a reader that only needs those (the anonymous
+        answer link) never loads the trace. ``None`` when the job does not
+        exist."""
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT notebook_id, created_by, submitted_via, question, mode, "
-                "conversation_id, memory_access FROM ask_jobs WHERE id=?",
+                "conversation_id, memory_access, status, output, answer_id "
+                "FROM ask_jobs WHERE id=?",
                 (job_id,),
             ).fetchone()
         if row is None:
@@ -440,6 +444,9 @@ class AskStateStore:
             "mode": row["mode"],
             "conversation_id": row["conversation_id"],
             "memory_access": bool(row["memory_access"]),
+            "status": row["status"],
+            "output": row["output"],
+            "answer_id": row["answer_id"] or "",
         }
 
     def ask_job_progress(self, job_id: str) -> "dict | None":

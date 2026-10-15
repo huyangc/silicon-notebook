@@ -623,7 +623,12 @@ def test_ask_job_origin_reads_the_stored_request_facts(repo):
         "question": "Q?", "mode": "chunk", "conversation_id": conv_id,
         # Not passed: a run records the channel as open unless told otherwise.
         "memory_access": True,
+        "status": "running", "output": "answer", "answer_id": "",
     }
+    store.finish_job(job_id, "done", answer_id="ans-origin-1")
+    origin = store.ask_job_origin(job_id)
+    assert (origin["status"], origin["output"], origin["answer_id"]) == (
+        "done", "answer", "ans-origin-1")
     assert store.ask_job_origin("askjob-missing") is None
     closed_keyed, _conv, _ = store.begin_or_attach_durable_job(
         nb,
@@ -636,6 +641,11 @@ def test_ask_job_origin_reads_the_stored_request_facts(repo):
     )
     assert store.ask_job_origin(closed_keyed)["memory_access"] is False
     assert store.ask_job_origin(closed_plain)["memory_access"] is False
+    evidence, _conv = store.begin_durable_job(
+        nb, AskRequest(question="Q?", mode="chunk"), "chunk", uid,
+        submitted_via="mcp", output="evidence",
+    )
+    assert store.ask_job_origin(evidence)["output"] == "evidence"
 
 
 def test_ask_job_progress_counts_trace_steps_without_reading_them(repo):
