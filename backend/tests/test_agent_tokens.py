@@ -449,7 +449,8 @@ def test_auth_row_reads_one_access_snapshot_across_a_concurrent_edit(
     reader = _EditAfterFirstRead(
         store.database.connect(),
         lambda: store.update_agent_token_access(
-            issued.id, alice.id, new[0], notebook.id, new[1], None
+            issued.id, alice.id, new[0], notebook.id, new[1], None,
+            allow_answer_links=False,
         ),
     )
     monkeypatch.setattr(store.database, "connect", lambda: reader)
