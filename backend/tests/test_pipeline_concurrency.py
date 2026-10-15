@@ -63,7 +63,7 @@ def test_extracted_set_before_element_embedding_finishes(repo, tmp_path):
             (sid, nb.id, "Doc", str(md), now, now))
 
     bind_chat_client(repo, "kg_extract", _FakeLLM(json.dumps({
-        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram", "ev": 0}],
+        "nodes": [{"type": "Concept", "name": "Engram", "ev": 0}],
         "edges": []})))
     emb = _ElementBlockingEmbedder()
     bind_all_embedding_clients(repo, emb)

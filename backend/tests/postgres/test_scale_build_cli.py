@@ -43,7 +43,6 @@ class _KgChat:
         return json.dumps({
             "nodes": [
                 {
-                    "local_id": "concept-1",
                     "type": "Concept",
                     "name": "offline scale build",
                     "ev": 0,

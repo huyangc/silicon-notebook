@@ -77,7 +77,7 @@ def _expected_key(client, schema_hint="{}", user_content="extract a kg fragment"
 def test_schema_valid_reply_with_validator_is_cached(tmp_path, monkeypatch):
     """opt-in happy path: a well-shaped KG fragment WITH a validator caches, so
     the second identical call is a hit (one endpoint call total)."""
-    good = ('{"nodes": [{"local_id": "a", "type": "Concept", "name": "x", "ev": 0}],'
+    good = ('{"nodes": [{"type": "Concept", "name": "x", "ev": 0}],'
             ' "edges": []}')
     client, fake = _client(tmp_path, monkeypatch, good)
     client.chat_json(_MSGS, "{}", response_validator=_kg_fragment_cacheable)
@@ -208,7 +208,7 @@ def test_kg_fragment_validator_rejects_error_envelopes_and_junk_entries():
 def test_kg_fragment_validator_accepts_usable_shapes():
     assert _kg_fragment_cacheable('{"nodes": [], "edges": []}') is True  # legit empty window
     assert _kg_fragment_cacheable(
-        '{"nodes": [{"local_id": "a", "type": "Concept", "name": "x", "ev": 0}],'
+        '{"nodes": [{"type": "Concept", "name": "x", "ev": 0}],'
         ' "edges": []}'
     ) is True  # a normal, fully-formed extraction (name + integer ev -> grounds)
     # No `nodes` key is error/malformed, NOT a legit empty window (that is
@@ -218,19 +218,20 @@ def test_kg_fragment_validator_accepts_usable_shapes():
 
 def test_refine_validator_shape():
     # The window-less DEGRADED entry (no nodes to bound-check against): keeps the
-    # structural + type(index) is int + keep bool checks; only the range check is
-    # dropped (it is unknowable without the node list — see the nodes-closed tests
-    # in tests/kg/test_extract.py).
-    assert _refine_response_cacheable('{"items": [{"index": 0, "keep": true}]}') is True
-    assert _refine_response_cacheable('{"items": []}') is True  # keep-all = empty decisions
-    assert _refine_response_cacheable('{"items": "nope"}') is False
-    assert _refine_response_cacheable('{"items": 7}') is False
-    assert _refine_response_cacheable('{}') is False  # absent items != keep-all
+    # structural + type(index) is int checks; only the range check is dropped (it
+    # is unknowable without the node list — see the nodes-closed tests in
+    # tests/kg/test_extract.py).
+    assert _refine_response_cacheable('{"drop": [0]}') is True
+    assert _refine_response_cacheable('{"drop": [7]}') is True  # range unknowable here
+    assert _refine_response_cacheable('{"drop": []}') is True  # keep-all = empty drop list
+    assert _refine_response_cacheable('{"drop": "nope"}') is False
+    assert _refine_response_cacheable('{"drop": 7}') is False
+    assert _refine_response_cacheable('{}') is False  # absent drop != keep-all
     assert _refine_response_cacheable('{"error": "quota"}') is False
-    assert _refine_response_cacheable('{"items": [{"garbage": 1}]}') is False  # no index/keep
-    # bool is an int subclass — `index: true` must NOT be treated as an integer
-    # index (downstream would consume it as index 1). type(index) is int excludes it,
+    assert _refine_response_cacheable('{"drop": [{"index": 0}]}') is False
+    assert _refine_response_cacheable('{"items": []}') is False  # retired contract
+    # bool is an int subclass — `true` must NOT be treated as an integer index
+    # (downstream would consume it as index 1). type(index) is int excludes it,
     # so even the degraded entry (no range check) rejects it.
-    assert _refine_response_cacheable('{"items": [{"index": true, "keep": false}]}') is False
-    # keep must be a real bool, not just present.
-    assert _refine_response_cacheable('{"items": [{"index": 0, "keep": 1}]}') is False
+    assert _refine_response_cacheable('{"drop": [true]}') is False
+    assert _refine_response_cacheable('{"drop": [0.0]}') is False

@@ -32,16 +32,16 @@ class Fake:
     def chat_json(self, messages, response_schema_hint):
         return json.dumps({"nodes": [
             # valid ev -> binds to element 0
-            {"local_id": "a", "type": "Concept", "name": "analog signal", "ev": 0},
+            {"type": "Concept", "name": "analog signal", "ev": 0},
             # out-of-range ev, but name is substring of element 2 -> fallback
-            {"local_id": "b", "type": "Claim", "name": "Engram", "ev": 99},
+            {"type": "Claim", "name": "Engram", "ev": 99},
             # out-of-range ev and non-matching name -> dropped
-            {"local_id": "c", "type": "Claim", "name": "no such thing here", "ev": 99}],
+            {"type": "Claim", "name": "no such thing here", "ev": 99}],
             "edges": [
             # valid ev -> evidence attached
-            {"type": "about", "source": "b", "target": "a", "ev": 1},
+            {"type": "about", "source": 1, "target": 0, "ev": 1},
             # missing ev -> edge kept, empty evidence
-            {"type": "supports", "source": "a", "target": "b"}]})
+            {"type": "supports", "source": 0, "target": 1}]})
 
 
 def test_marker_anchoring_binds_resolves_and_drops():
@@ -80,50 +80,89 @@ def test_extract_window_empty_elements():
     assert nodes == [] and edges == []
 
 
-def test_non_string_node_ids_cannot_overwrite_string_identity():
-    class MalformedIds:
+def test_edge_endpoints_read_like_ev_and_reject_bad_indexes(caplog):
+    """Endpoints are integer positions in the reply's nodes array, read with
+    the ``ev`` rule: an integer or a digit string binds; a boolean, float,
+    negative, out-of-range or self-referencing endpoint loses the edge and
+    is counted under missing_or_self_endpoint."""
+    class Indexed:
         def chat_json(self, messages, response_schema_hint):
             return json.dumps({"nodes": [
-                {"local_id": "1", "type": "Claim", "name": "Alpha", "ev": 0},
-                {"local_id": 1, "type": "Claim", "name": "Beta", "ev": 0},
-                {"local_id": "target", "type": "Claim", "name": "Gamma", "ev": 0},
+                {"type": "Claim", "name": "Alpha", "ev": 0},
+                {"type": "Claim", "name": "Beta", "ev": 0},
+                {"type": "Claim", "name": "Gamma", "ev": 0},
             ], "edges": [
-                {"type": "supports", "source": "1", "target": "target"},
-                {"type": "supports", "source": 1, "target": "target"},
-                {"type": "supports", "source": "target", "target": 1},
+                {"type": "supports", "source": 0, "target": 2},
+                {"type": "supports", "source": "1", "target": "2"},
+                {"type": "supports", "source": True, "target": 2},
+                {"type": "supports", "source": 0.0, "target": 2},
+                {"type": "supports", "source": -1, "target": 2},
+                {"type": "supports", "source": 0, "target": 3},
+                {"type": "supports", "source": 2, "target": 2},
+                {"type": "supports", "source": "x", "target": 0},
+                {"type": "supports", "target": 0},
             ]})
 
-    nodes, edges = extract_window(MalformedIds(), ELEMENTS, "1", "textbook")
-    assert {node.name for node in nodes} == {"Alpha", "Beta", "Gamma"}
+    with caplog.at_level("WARNING", logger="app.services.kg.extract"):
+        nodes, edges = extract_window(Indexed(), ELEMENTS, "1", "textbook")
+    assert [node.name for node in nodes] == ["Alpha", "Beta", "Gamma"]
+    names = {node.id: node.name for node in nodes}
+    assert [(names[edge.source_id], names[edge.target_id]) for edge in edges] == [
+        ("Alpha", "Gamma"), ("Beta", "Gamma"),
+    ]
+    assert "('supports', 'missing_or_self_endpoint', 7)" in caplog.text
+
+
+@pytest.mark.parametrize("beta_ev", [0, 99])
+def test_edges_index_the_original_reply_array_and_drop_with_a_dropped_node(beta_ev):
+    """A node the gate drops (ev=99 and no name hit) leaves a hole: an edge on
+    it is rejected, and later positions are NOT shifted onto its neighbour."""
+    class DroppedNode:
+        def chat_json(self, messages, response_schema_hint):
+            return json.dumps({"nodes": [
+                {"type": "Claim", "name": "Alpha", "ev": 0},
+                {"type": "Claim", "name": "Beta", "ev": beta_ev},
+                {"type": "Claim", "name": "Gamma", "ev": 0},
+                {"type": "Claim", "name": "Delta", "ev": 0},
+            ], "edges": [
+                {"type": "supports", "source": 0, "target": 1},
+                {"type": "supports", "source": 2, "target": 3},
+            ]})
+
+    nodes, edges = extract_window(DroppedNode(), ELEMENTS, "1", "textbook")
+    assert [node.name for node in nodes] == (
+        ["Alpha", "Beta", "Gamma", "Delta"] if beta_ev == 0
+        else ["Alpha", "Gamma", "Delta"]
+    )
+    names = {node.id: node.name for node in nodes}
+    pairs = [(names[edge.source_id], names[edge.target_id]) for edge in edges]
+    assert pairs == (
+        [("Alpha", "Beta"), ("Gamma", "Delta")] if beta_ev == 0
+        else [("Gamma", "Delta")]
+    )
+
+
+def test_refine_dropping_a_node_drops_its_edges_without_shifting_the_rest():
+    class Refining:
+        configured = True
+
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            if "self-refinement" in messages[0]["content"]:
+                return json.dumps({"drop": [1]})
+            return json.dumps({"nodes": [
+                {"type": "Claim", "name": "Alpha", "ev": 0},
+                {"type": "Claim", "name": "Beta", "ev": 0},
+                {"type": "Claim", "name": "Gamma", "ev": 0},
+            ], "edges": [
+                {"type": "supports", "source": 0, "target": 1},
+                {"type": "supports", "source": 0, "target": 2},
+            ]})
+
+    nodes, edges = extract_window(Refining(), ELEMENTS, "1", "textbook", refine=True)
+    assert [node.name for node in nodes] == ["Alpha", "Gamma"]
     names = {node.id: node.name for node in nodes}
     assert [(names[edge.source_id], names[edge.target_id]) for edge in edges] == [
         ("Alpha", "Gamma"),
-    ]
-
-
-@pytest.mark.parametrize("duplicate_ev", [0, 99])
-def test_duplicate_local_ids_preserve_nodes_but_never_bind_ambiguous_edges(duplicate_ev):
-    class DuplicateIds:
-        def chat_json(self, messages, response_schema_hint):
-            return json.dumps({"nodes": [
-                {"local_id": "a", "type": "Claim", "name": "Alpha", "ev": 0},
-                {"local_id": "a", "type": "Claim", "name": "Beta", "ev": duplicate_ev},
-                {"local_id": "b", "type": "Claim", "name": "Gamma", "ev": 0},
-                {"local_id": "c", "type": "Claim", "name": "Delta", "ev": 0},
-            ], "edges": [
-                {"type": "supports", "source": "a", "target": "b"},
-                {"type": "supports", "source": "b", "target": "a"},
-                {"type": "supports", "source": "b", "target": "c"},
-            ]})
-
-    nodes, edges = extract_window(DuplicateIds(), ELEMENTS, "1", "textbook")
-    assert {node.name for node in nodes} == (
-        {"Alpha", "Beta", "Gamma", "Delta"} if duplicate_ev == 0
-        else {"Alpha", "Gamma", "Delta"}
-    )
-    names = {node.id: node.name for node in nodes}
-    assert [(names[edge.source_id], names[edge.target_id]) for edge in edges] == [
-        ("Gamma", "Delta"),
     ]
 
 
@@ -160,7 +199,7 @@ def test_extract_window_parses_procedure_steps():
     class FakeProc:
         def chat_json(self, messages, hint):
             return json.dumps({"nodes": [
-                {"local_id": "p", "type": "Procedure", "name": "Foundation Flow", "ev": 0,
+                {"type": "Procedure", "name": "Foundation Flow", "ev": 0,
                  "steps": [{"name": "import design", "ev": 0},
                            {"name": "floorplan", "ev": 1},
                            {"name": "unbindable step", "ev": 99}]}],
@@ -236,6 +275,36 @@ def test_cache_gate_rejects_error_envelopes_even_with_elements():
     ) is True
 
 
+def test_cache_gate_rejects_edges_that_all_fail_to_resolve():
+    """Edges are present but none names two distinct grounded node positions
+    (out of range, self-referencing, or on a dropped node): the window wires
+    nothing, so freezing it is the edge-half poison -> a miss, not a hit."""
+    grounded = [
+        {"type": "Claim", "name": "Alpha", "ev": 0},
+        {"type": "Claim", "name": "nonexistent-token-zzz", "ev": 999},  # dropped
+        {"type": "Claim", "name": "Gamma", "ev": 0},
+    ]
+
+    def gate(edges, nodes=grounded, **kwargs):
+        content = json.dumps({"nodes": nodes, "edges": edges})
+        return _fragment_grounds_something(content, ELEMENTS, **kwargs)
+
+    bad = [
+        {"type": "supports", "source": 0, "target": 7},     # out of range
+        {"type": "supports", "source": 2, "target": 2},     # self
+        {"type": "supports", "source": 0, "target": 1},     # dropped node
+        {"type": "supports", "source": True, "target": 2},  # not an index
+    ]
+    assert gate(bad) is False
+    assert gate(bad + [{"type": "supports", "source": 0, "target": 2}]) is True
+    assert gate(bad + [{"type": "supports", "source": "0", "target": "2"}]) is True
+    assert gate([]) is True
+    # No nodes at all, yet edges: nothing to wire them to.
+    assert gate(bad[:1], nodes=[]) is False
+    # Gleaning reads nodes only; its (ignored) edges never decide caching.
+    assert gate(bad, edges_consumed=False) is True
+
+
 # ------------------------------- refine cache gate: index type + range vs nodes
 
 # refine 决策针对**当前 node 列表**:refine_nodes 用 index 索引 nodes[index]。缓存门
@@ -247,14 +316,10 @@ _REFINE_NODES = [
 
 
 def test_refine_gate_caches_a_legal_in_range_decision():
-    assert _refine_response_grounds(
-        json.dumps({"items": [{"index": 0, "keep": False}]}), _REFINE_NODES
-    ) is True
-    assert _refine_response_grounds(
-        json.dumps({"items": [{"index": 1, "keep": True}]}), _REFINE_NODES
-    ) is True
-    # 「全保留」= 空决策列表,不是缺 items 键。
-    assert _refine_response_grounds('{"items": []}', _REFINE_NODES) is True
+    assert _refine_response_grounds(json.dumps({"drop": [0]}), _REFINE_NODES) is True
+    assert _refine_response_grounds(json.dumps({"drop": [0, 1]}), _REFINE_NODES) is True
+    # 「全保留」= 空 drop 列表,不是缺 drop 键。
+    assert _refine_response_grounds('{"drop": []}', _REFINE_NODES) is True
 
 
 def test_refine_gate_rejects_out_of_range_index():
@@ -262,40 +327,37 @@ def test_refine_gate_rejects_out_of_range_index():
     没精修——把这个 no-op 固化整个 TTL 就是毒。闭包在 nodes 上才挡得住。
     变异验证:去掉 `0 <= index < len(nodes)` 范围门后本测试转红(degraded 入口无 nodes、
     挡不住这个变异)。"""
+    assert _refine_response_grounds(json.dumps({"drop": [999]}), _REFINE_NODES) is False
+    assert _refine_response_grounds(json.dumps({"drop": [-1]}), _REFINE_NODES) is False
     assert _refine_response_grounds(
-        json.dumps({"items": [{"index": 999, "keep": False}]}), _REFINE_NODES
-    ) is False
-    assert _refine_response_grounds(
-        json.dumps({"items": [{"index": -1, "keep": False}]}), _REFINE_NODES
-    ) is False
-    assert _refine_response_grounds(
-        json.dumps({"items": [{"index": 2, "keep": False}]}), _REFINE_NODES  # == len,越界
+        json.dumps({"drop": [2]}), _REFINE_NODES  # == len,越界
     ) is False
     # 一条合法 + 一条越界:整份回复仍不可信(有坏决策)→ 不缓存。
-    assert _refine_response_grounds(
-        json.dumps({"items": [{"index": 0, "keep": True}, {"index": 999, "keep": False}]}),
-        _REFINE_NODES,
-    ) is False
+    assert _refine_response_grounds(json.dumps({"drop": [0, 999]}), _REFINE_NODES) is False
 
 
 def test_refine_gate_rejects_bool_index_even_when_in_range():
-    """bool 是 int 子类:`index: true` 会被下游当成 index 1(恰好在界内!)消费。
+    """bool 是 int 子类:`true` 会被下游当成 index 1(恰好在界内!)消费。
     `type(index) is int` 排除 True/False,与范围无关。
     变异验证:把 `type(index) is not int` 换成 `not isinstance(index, int)` 后本测试转红。"""
     assert _refine_response_grounds(
-        json.dumps({"items": [{"index": True, "keep": False}]}), _REFINE_NODES  # True==1,界内
+        json.dumps({"drop": [True]}), _REFINE_NODES  # True==1,界内
     ) is False
     assert _refine_response_grounds(
-        json.dumps({"items": [{"index": False, "keep": False}]}), _REFINE_NODES  # False==0,界内
+        json.dumps({"drop": [False]}), _REFINE_NODES  # False==0,界内
     ) is False
 
 
 def test_refine_gate_structural_rejections_hold_with_nodes():
     assert _refine_response_grounds('{"error": "quota"}', _REFINE_NODES) is False
-    assert _refine_response_grounds('{"items": "nope"}', _REFINE_NODES) is False
-    assert _refine_response_grounds('{}', _REFINE_NODES) is False  # 缺 items ≠ 全保留
+    assert _refine_response_grounds('{"drop": "nope"}', _REFINE_NODES) is False
+    assert _refine_response_grounds('{}', _REFINE_NODES) is False  # 缺 drop ≠ 全保留
+    # 旧契约的 items 回复不再被读取,也不能当成「全保留」缓存。
     assert _refine_response_grounds(
-        json.dumps({"items": [{"index": 0, "keep": 1}]}), _REFINE_NODES  # keep 非 bool
+        json.dumps({"items": [{"index": 0, "keep": False}]}), _REFINE_NODES
+    ) is False
+    assert _refine_response_grounds(
+        json.dumps({"drop": [{"index": 0}]}), _REFINE_NODES  # 元素非整数
     ) is False
 
 
@@ -305,12 +367,12 @@ class _OffTypeFake:
 
     def chat_json(self, messages, response_schema_hint):
         return json.dumps({"nodes": [
-            {"local_id": "a", "type": ["Concept"], "name": "analog signal", "ev": 0},
-            {"local_id": "b", "type": "Claim", "name": "Engram", "ev": 2},
-            {"local_id": "d", "type": {"kind": "Claim"}, "name": "C_j", "ev": 1}],
+            {"type": ["Concept"], "name": "analog signal", "ev": 0},
+            {"type": "Claim", "name": "Engram", "ev": 2},
+            {"type": {"kind": "Claim"}, "name": "C_j", "ev": 1}],
             "edges": [
-            {"type": ["about"], "source": "b", "target": "a", "ev": 1},
-            {"type": "about", "source": "b", "target": "b", "ev": 1}]})
+            {"type": ["about"], "source": 1, "target": 0, "ev": 1},
+            {"type": "about", "source": 1, "target": 1, "ev": 1}]})
 
 
 def test_off_type_type_fields_are_dropped_per_item_not_per_window():
@@ -340,9 +402,9 @@ def test_gleaning_faults_never_discard_the_first_pass(monkeypatch):
 class _ListNameFake:
     def chat_json(self, messages, response_schema_hint):
         return json.dumps({"nodes": [
-            {"local_id": "a", "type": "Concept", "name": [], "ev": 0},
-            {"local_id": "b", "type": "Claim", "name": {"zh": "Engram"}, "ev": 2},
-            {"local_id": "c", "type": "Procedure", "name": "Engram", "ev": 2,
+            {"type": "Concept", "name": [], "ev": 0},
+            {"type": "Claim", "name": {"zh": "Engram"}, "ev": 2},
+            {"type": "Procedure", "name": "Engram", "ev": 2,
              "steps": [{"name": ["step"], "ev": 1}, {"name": "C_j", "ev": 1}]}],
             "edges": []})
 
@@ -380,10 +442,7 @@ def test_refine_ignores_a_boolean_index_instead_of_deleting_node_one():
         configured = True
 
         def chat_json(self, messages, response_schema_hint, **kwargs):
-            return json.dumps({"items": [
-                {"index": True, "keep": False},
-                {"index": 0, "keep": True},
-            ]})
+            return json.dumps({"drop": [True]})
 
     nodes = [
         Node(id="W0-0", type="Concept", name="analog signal", section_path="1", evidence=[]),
@@ -397,7 +456,7 @@ class _ScalarEdgesFake:
     def chat_json(self, messages, response_schema_hint):
         # Bypasses the boundary (raw client), so the consumer must guard too.
         return json.dumps({"nodes": [
-            {"local_id": "a", "type": "Concept", "name": "analog signal", "ev": 0}],
+            {"type": "Concept", "name": "analog signal", "ev": 0}],
             "edges": True})
 
 
@@ -409,12 +468,23 @@ def test_scalar_collections_never_discard_the_extracted_nodes():
 
 
 def test_prompt_states_scalar_types_for_ids_labels_and_names():
-    """Prompt/parser alignment (audit A2): the parser keys nodes by a string
-    local_id and reads ev as an integer label; the prompt must say so instead
-    of leaving the shape to the model."""
+    """Prompt/parser alignment (audit A2): the parser binds edge endpoints by
+    integer position in the reply's nodes array and reads ev as an integer
+    label; the prompt must say so instead of leaving the shape to the model."""
+    from app.services.kg.extract import _KG_SCHEMA_HINT
+
     prompt = _prompt("[0] text", "1 > 1.1", "textbook")
     assert 'bare INTEGER label' in prompt
     assert 'write 3, never "3", 3.0 or true' in prompt
-    assert '"local_id": a short STRING' in prompt
+    assert "local_id" not in prompt and "local_id" not in _KG_SCHEMA_HINT
+    assert 'bare INTEGER position of the endpoint node in THIS reply\'s "nodes"' in prompt
+    assert "Source and target must be two different nodes" in prompt
+    assert "less than the number of nodes you return" in prompt
+    edge = json.loads(_KG_SCHEMA_HINT)["edges"][0]
+    assert (edge["source"], edge["target"]) == (0, 1)
+    # Optional parts are spelled null, matching the strict projection.
+    assert "OMIT" not in prompt
+    assert '"validity_scope": null' in prompt
+    assert 'every other node writes "steps": null' in prompt
     assert '"type" is exactly one\nof the four node-type words above, as a string' in prompt
     assert "carries the node's text as\na single string" in prompt

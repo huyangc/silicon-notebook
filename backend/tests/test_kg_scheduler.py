@@ -176,7 +176,7 @@ def test_task_exception_clears_active_and_waiting(submit_name, active_key, waiti
 
 def _kg_json():
     import json
-    return json.dumps({"nodes": [{"local_id": "a", "type": "Concept",
+    return json.dumps({"nodes": [{"type": "Concept",
                                   "name": "current mirror", "ev": 0}], "edges": []})
 
 

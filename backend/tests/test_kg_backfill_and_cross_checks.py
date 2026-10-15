@@ -30,7 +30,7 @@ class _AlwaysExtractClient:
         if prompt.startswith('Return {"ok":true}'):
             return '{"ok":true}'
         return json.dumps({
-            "nodes": [{"local_id": "engram", "type": "Concept",
+            "nodes": [{"type": "Concept",
                        "name": "Engram", "ev": 0}],
             "edges": [],
         })

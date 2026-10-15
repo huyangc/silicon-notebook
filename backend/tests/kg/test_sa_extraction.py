@@ -54,11 +54,11 @@ _ELS = [_el(0, "In saturation, I_D depends on V_GS.", 0),
 class _VSFake:
     def chat_json(self, messages, hint):
         return json.dumps({"nodes": [
-            {"local_id": "c1", "type": "Claim",
+            {"type": "Claim",
              "name": "I_D depends on V_GS", "ev": 0,
              "validity_scope": {"region": ["saturation"], "assumptions": [],
                                 "approximation": "", "range": ""}},
-            {"local_id": "k1", "type": "Concept", "name": "threshold voltage",
+            {"type": "Concept", "name": "threshold voltage",
              "ev": 1, "validity_scope": {"region": ["bogus"]}}],
             "edges": []})
 
@@ -77,7 +77,7 @@ def test_extract_window_backward_compat_no_scope():
     class _Old:
         def chat_json(self, m, h):
             return json.dumps({"nodes": [
-                {"local_id": "c", "type": "Claim", "name": "I_D depends on V_GS",
+                {"type": "Claim", "name": "I_D depends on V_GS",
                  "ev": 0}], "edges": []})
     nodes, _ = extract_window(_Old(), _ELS, "1", "textbook", win_idx=0)
     assert nodes[0].validity_scope == {}
@@ -173,12 +173,12 @@ def test_gleaning_threads_base_filter_and_parses_scope():
             self.n += 1
             if self.n == 1:
                 return json.dumps({"nodes": [
-                    {"local_id": "m", "type": "Claim", "name": "main claim", "ev": 0}],
+                    {"type": "Claim", "name": "main claim", "ev": 0}],
                     "edges": []})
             # gleaning round: base_filter must have reached this prompt
             assert "QUALITY FILTER" in messages[0]["content"]
             return json.dumps({"nodes": [
-                {"local_id": "g", "type": "Claim",
+                {"type": "Claim",
                  "name": "In saturation gleaned claim", "ev": 0,
                  "validity_scope": {"region": ["saturation"]}}],
                 "edges": []})

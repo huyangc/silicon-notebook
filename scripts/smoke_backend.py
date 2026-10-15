@@ -420,32 +420,32 @@ def check_kg_extract_window_grounding() -> None:
             return json.dumps(
                 {
                     "nodes": [
-                        {"local_id": "c", "type": "Concept", "name": "Engram", "ev": 0},
+                        {"type": "Concept", "name": "Engram", "ev": 0},
                         {
-                            "local_id": "claim",
                             "type": "Claim",
                             "name": "Engram separates storage from computation",
                             "ev": 1,
                         },
-                        {"local_id": "bad", "type": "Rule", "name": "invalid", "ev": 0},
+                        {"type": "Rule", "name": "invalid", "ev": 0},
                         {
-                            "local_id": "lost",
                             "type": "Claim",
                             "name": "not in source",
                             "ev": 99,
                         },
                     ],
+                    # Endpoints are positions in "nodes": 1 = the claim,
+                    # 0 = the concept, 3 = the dropped ungroundable claim.
                     "edges": [
                         {
                             "type": "about",
-                            "source": "claim",
-                            "target": "c",
+                            "source": 1,
+                            "target": 0,
                             "ev": 1,
                         },
                         {
                             "type": "supports",
-                            "source": "lost",
-                            "target": "claim",
+                            "source": 3,
+                            "target": 1,
                             "ev": 1,
                         },
                     ],

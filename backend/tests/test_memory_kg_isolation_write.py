@@ -47,9 +47,9 @@ class _KgExtractLLM:
     def chat_json(self, messages, response_schema_hint=None, **_kwargs) -> str:
         return json.dumps({
             "nodes": [
-                {"local_id": "c", "type": "Concept", "name": "Engram",
+                {"type": "Concept", "name": "Engram",
                  "evidence": "Engram is a memory architecture"},
-                {"local_id": "k", "type": "Claim", "name": "Engram is a memory architecture",
+                {"type": "Claim", "name": "Engram is a memory architecture",
                  "evidence": "Engram is a memory architecture"},
             ],
             "edges": [],

@@ -161,16 +161,17 @@ narrative/meta sentences about the document itself (e.g. "This chapter covers…
 
 The passage is given as numbered elements, one per line, each prefixed with its
 integer label like [3]. Every node and edge MUST include "ev": the INTEGER label
-of the element that best contains it (NOT a quote, NOT text). Give each node a
-"local_id" you reuse in edges. "name" carries the node's text (Concept/Procedure
+of the element that best contains it (NOT a quote, NOT text). An edge's "source"
+and "target" are the INTEGER positions (from 0) of its two different endpoint
+nodes in THIS reply's "nodes" array. "name" carries the node's text (Concept/Procedure
 name, Claim statement, Formula expression). For a Procedure that is an ordered multi-step process/flow, emit it as ONE Procedure node (named after the flow — use the section heading if it names the flow) and list its ordered steps in a `steps` array, each {{"name":..,"ev":..}} where ev is the element label containing that step; prefer this over many separate Procedure nodes. `steps` is the source of truth for order (you may still add `precedes` edges). Skip narrative/filler.
 
 Passage:
 \"\"\"{labeled_text}\"\"\"
 
 Return JSON ONLY:
-{{"nodes":[{{"local_id":"..","type":"..","name":"..","ev":0,"steps":[{{"name":"..","ev":0}}]}}],
- "edges":[{{"type":"..","source":"<local_id>","target":"<local_id>","ev":0}}]}}
+{{"nodes":[{{"type":"..","name":"..","ev":0,"steps":[{{"name":"..","ev":0}}]}}],
+ "edges":[{{"type":"..","source":0,"target":1,"ev":0}}]}}
 """
 
 
