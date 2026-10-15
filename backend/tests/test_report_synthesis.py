@@ -91,7 +91,7 @@ def _blueprint():
         }],
         "sections": [{
             "section_id": "section-1", "thesis": "Separate the dimensions.",
-            "claim_ids": ["c1"], "must_contrast": ["mixer vs capacity"],
+            "must_contrast": ["mixer vs capacity"],
             "handoff": "Next compare conditions.", "do_not_repeat": [],
         }],
     }
@@ -102,10 +102,8 @@ def _blueprint_with_claim_counts(counts):
     sections = []
     for section_index, count in enumerate(counts, 1):
         section_id = f"section-{section_index}"
-        claim_ids = []
         for claim_index in range(1, count + 1):
             claim_id = f"c{section_index}-{claim_index}"
-            claim_ids.append(claim_id)
             claims.append({
                 "id": claim_id,
                 "statement": f"Claim {section_index}-{claim_index}",
@@ -119,7 +117,6 @@ def _blueprint_with_claim_counts(counts):
         sections.append({
             "section_id": section_id,
             "thesis": f"Thesis {section_index}",
-            "claim_ids": claim_ids,
             "must_contrast": [],
             "handoff": "",
             "do_not_repeat": [],
@@ -167,6 +164,35 @@ def test_blueprint_requires_every_confirmed_section_once():
         _blueprint(), outline=[{"title": "A"}, {"title": "B"}],
         legal_evidence_ids={"o1"}, frame=_frame(),
     ) is None
+
+
+def test_section_claim_lists_are_derived_from_claim_owners():
+    payload = _blueprint_with_claim_counts([2, 0, 1])
+    normalized = normalize_synthesis_blueprint(
+        payload, outline=[{"title": "A"}, {"title": "B"}, {"title": "C"}],
+        legal_evidence_ids={"o1"}, frame=None,
+    )
+    assert normalized is not None
+    assert [row["claim_ids"] for row in normalized["sections"]] == [
+        ["c1-1", "c1-2"], [], ["c3-1"],
+    ]
+    assert [claim["id"] for claim in blueprint_for_section(normalized, 0)["claims"]] == [
+        "c1-1", "c1-2",
+    ]
+    assert blueprint_for_section(normalized, 1)["claims"] == []
+
+
+def test_a_legacy_section_claim_id_list_is_ignored_not_cross_checked():
+    # The reply no longer carries sections[].claim_ids; an old-shaped reply
+    # whose copy disagrees with the owners must not discard the blueprint.
+    payload = _blueprint()
+    payload["sections"][0]["claim_ids"] = ["c-missing"]
+    normalized = normalize_synthesis_blueprint(
+        payload, outline=[{"title": "A"}],
+        legal_evidence_ids={"o1"}, frame=_frame(),
+    )
+    assert normalized is not None
+    assert normalized["sections"][0]["claim_ids"] == ["c1"]
 
 
 def test_report_wide_evidence_ids_are_translated_to_local_writer_anchors():
@@ -630,11 +656,8 @@ def _blueprint_with_facet_tags(tags):
     payload = _blueprint()
     template = payload["claims"][0]
     payload["claims"] = []
-    payload["sections"][0]["claim_ids"] = []
     for index, tag in enumerate(tags, 1):
-        claim = dict(template, id=f"c{index}", facet_id=tag)
-        payload["claims"].append(claim)
-        payload["sections"][0]["claim_ids"].append(claim["id"])
+        payload["claims"].append(dict(template, id=f"c{index}", facet_id=tag))
     return payload
 
 

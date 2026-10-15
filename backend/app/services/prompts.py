@@ -1912,7 +1912,7 @@ REPORT_SYNTHESIS_SCHEMA_HINT = (
     '"statement":"","type":"fact|comparison|trend|inference|general",'
     '"facet_id":"","evidence_keys":[""],"counterevidence_keys":[""],'
     '"conditions":[""],"owner_section_id":"section-1"}],"sections":'
-    '[{"section_id":"section-1","thesis":"","claim_ids":["c1"],'
+    '[{"section_id":"section-1","thesis":"",'
     '"must_contrast":[""],"handoff":"","do_not_repeat":[""]}]}'
 )
 
@@ -1943,11 +1943,15 @@ def report_synthesis_prompt(question: str, intent_block: str, frame_block: str,
         "add, remove, rename, or reassign a mandatory section. Use only evidence_ids "
         "present in the supplied evidence. Every fact/comparison/trend claim needs "
         "direct evidence; retain counterevidence and conditions. Assign every claim "
-        "to exactly one owner section. Use must_contrast for genuine disagreements, "
+        "to exactly one owner section through its owner_section_id; a section's "
+        "claims are exactly the claims that name it as owner. Return one sections "
+        "entry for every confirmed section id, even one that owns no claim. Use "
+        "must_contrast for genuine disagreements, "
         "handoff for the next logical step, and do_not_repeat to prevent duplicated "
         "background. Single-source findings must remain conditional and attributed. "
         "Keep the JSON compact: select only load-bearing claims, at most 12 claims "
-        "per section and 60 claims for the whole report; do not copy evidence prose "
+        "per section, 60 claims for the whole report and 24 shared_definitions; "
+        "exceeding any of these limits discards the whole synthesis. Do not copy evidence prose "
         "outside the required statement fields. Do not infer a high-confidence trend "
         "merely from source count. Intent "
         "assumptions delimit scope only and are never evidence.\n\n"
@@ -2030,7 +2034,7 @@ def report_storm_outline_prompt(question: str, corpus_map: str,
         "condition fields needed for fair comparison; and an instance_policy. "
         f"{fragment_text('report.frame_example')}"
         "For "
-        "other questions omit frame or return an empty object.\n"
+        "other questions set frame to null.\n"
         f"Produce 3-{max_sections} sections. Do NOT include executive-summary / "
         "references / knowledge-gap sections (auto-appended). Each section: title "
         f"(question's language), scope (one line), sub_queries (2-{max_subqueries} focused ENGLISH "
