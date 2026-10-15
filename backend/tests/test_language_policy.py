@@ -361,12 +361,13 @@ def test_notebook_meta_prompt_uses_dominant_source_language():
 
 
 def test_concept_merge_review_prompt_merges_translations():
-    from app.services.concept_merge_review import _prompt
+    from app.services.concept_merge_review import _SCHEMA, _prompt
     p = _prompt([{"id": "1", "canonical_a": "LNA", "canonical_b": "低噪声放大器"}])
     low = p.lower()
     assert "translation" in low  # translations of each other should merge
-    assert "verbatim" in low or "never translate" in low
-    assert "original language" in low
+    # The reply carries no name at all: a merge keeps the stored names, so the
+    # model has no field in which it could translate or invent one.
+    assert not any("name" in key for key in _json.loads(_SCHEMA)["decisions"][0])
 
 
 # ── ③ final answer language ───────────────────────────────────────────
