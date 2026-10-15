@@ -670,7 +670,7 @@ class SourceIngestionService:
                         "Summarize this semiconductor notebook source in one concise sentence.\n"
                         f"Title: {title}\n\n{text[:6000]}"
                     )}],
-                    '{"summary": "one concise sentence"}',
+                    '{"summary": ""}',
                 )
                 raw_summary = json.loads(raw).get("summary")
                 summary = raw_summary.strip() if isinstance(raw_summary, str) else ""

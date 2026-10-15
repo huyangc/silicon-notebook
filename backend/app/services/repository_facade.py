@@ -3209,7 +3209,7 @@ class RepositoryFacade:
                           key_to_idx: Dict[str, int]) -> Dict[int, float]:
         return self.retrieval.graph._ppr_reset_vector(notebook_id, question, key_to_idx)
 
-    _PPR_RERANK_SCHEMA = '{"relevant_ids": ["..."]}'
+    _PPR_RERANK_SCHEMA = '{"relevant_ids": [""]}'
 
     def _ppr_fact_rerank(self, question: str, kg_hits: list) -> list:
         return self.retrieval.graph._ppr_fact_rerank(question, kg_hits)

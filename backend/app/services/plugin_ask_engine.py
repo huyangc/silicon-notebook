@@ -963,7 +963,7 @@ class PluginEngineModelAccess:
                 # 在部署给 plugin_engine 绑了小 cap 客户端时越过它(codex #602 R2 P2)。
                 raw = state.client.chat_json(
                     [{"role": "user", "content": prompt}],
-                    '{"text":"string"}',
+                    '{"text":""}',
                     cancel_event=state.cancellation,
                 )
                 parsed = json.loads(raw)

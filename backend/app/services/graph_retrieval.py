@@ -387,7 +387,7 @@ class GraphRetrievalService(_RetrievalState):
     # planner 的递归栈深度上限。300 远在两条悬崖之前,且仍比逐条查询(旧实现)
     # 快至少两个数量级。
     _RELATION_SUPPORT_IN_CHUNK = 300
-    _PPR_RERANK_SCHEMA = '{"relevant_ids": ["..."]}'
+    _PPR_RERANK_SCHEMA = '{"relevant_ids": [""]}'
 
     def federated_retrieve(self, *args, **kwargs):
         return self._peer.federated_retrieve(*args, **kwargs)

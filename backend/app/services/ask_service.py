@@ -5410,7 +5410,7 @@ class AskService:
         )
         raw = _bounded_gap_model_json(
             client, prompt,
-            '{"text": "...", "conflicts": [{"kb_says": "...", "external_says": "...", "note": "..."}]}',
+            '{"text": "", "conflicts": [{"kb_says": "", "external_says": "", "note": ""}]}',
             cancel_event=cancel_event, deadline=deadline,
         )
         if raw is None:
