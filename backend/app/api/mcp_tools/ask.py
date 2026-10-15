@@ -25,7 +25,10 @@ from typing import Any, Callable, Iterator, Mapping
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import BaseModel, Field, ValidationError
 
-from app.api.deps import ask_intent_handle_repository, notebook_access_repository
+from app.api.deps import (
+    answer_link_repository, ask_intent_handle_repository, notebook_access_repository,
+)
+from app.core.config import get_settings
 from app.domain.agent_tools import (
     AgentAccessDenied, capability_tier, scope_missing_message,
 )
@@ -47,6 +50,8 @@ from app.models.ask import (
 )
 from app.models.global_ask import GlobalAskIntentPreviewRequest, GlobalAskRequest
 from app.repositories.ports import AskRequestKeyConflict, AskRequestKeyReused
+from app.services.answer_links import AnswerLinkUnavailable, issue_answer_link
+from app.services.answer_preview import answer_preview
 from app.services.ask_modes import UnknownAskMode
 from app.services.query_intent import (
     conversation_intent_history,
@@ -67,6 +72,7 @@ from ._shared import (
     _selected_notebook,
 )
 from ._messages import chinese_value_error
+from .answer_link_page import link_page
 from .ask_pages import answer_page
 from .evidence_page import evidence_page
 from .memory_context import _memory_read_allowed
@@ -259,6 +265,87 @@ def _validate_output(
         raise AgentToolError("invalid_argument", _EVIDENCE_SINGLE_NOTEBOOK)
     if client_request_id:
         raise AgentToolError("invalid_argument", _EVIDENCE_NO_KEY)
+
+
+# ------------------------------------------------------- answer links
+
+_DELIVERIES = ("inline", "link")
+_LINK_UNAVAILABLE = (
+    "部署未配置 PUBLIC_WEB_BASE_URL，暂不能签发回答链接，请联系部署管理员"
+)
+_ANSWER_LINKS_OFF = (
+    "此凭证未开启「允许签发限时回答链接」，请在「Agent 接入」页为它打开后重试"
+)
+
+
+def _ttl_refusal(ceiling: int) -> AgentToolError:
+    return AgentToolError(
+        "invalid_argument", f"link_ttl_hours 必须是 1 到 {ceiling} 之间的整数（小时）"
+    )
+
+
+def _validate_delivery(delivery: str, output: str, link_ttl_hours: Any) -> None:
+    """``delivery``'s rails, before any repository work (plan D9/D10): a
+    known value; ``link_ttl_hours`` only with a link and within
+    ``1..MCP_ANSWER_LINK_TTL_HOURS`` (never clamped); no link for a
+    retrieval-only call (it stores no answer); and a deployment that can
+    build a link at all. The token's own switch is checked once the token
+    is read (``_require_answer_links``)."""
+    if delivery not in _DELIVERIES:
+        raise AgentToolError("invalid_argument", "delivery 只能是 inline 或 link")
+    if delivery == "inline":
+        if link_ttl_hours is not None:
+            raise AgentToolError(
+                "invalid_argument", "link_ttl_hours 只能与 delivery=\"link\" 一起使用"
+            )
+        return
+    if output == "evidence":
+        raise AgentToolError("invalid_argument", "仅检索不产生回答，不能签发回答链接")
+    settings = get_settings()
+    ceiling = int(settings.mcp_answer_link_ttl_hours)
+    if link_ttl_hours is not None and (
+        isinstance(link_ttl_hours, bool) or not isinstance(link_ttl_hours, int)
+        or not 1 <= link_ttl_hours <= ceiling
+    ):
+        raise _ttl_refusal(ceiling)
+    if not settings.public_web_base_url:
+        raise AgentToolError("unavailable", _LINK_UNAVAILABLE)
+
+
+def _require_answer_links(principal: Any) -> None:
+    if not getattr(principal, "allow_answer_links", False):
+        raise AgentToolError("forbidden", _ANSWER_LINKS_OFF)
+
+
+def _deliver(
+    live: Any, view: Mapping[str, Any], delivery: str,
+    link_ttl_hours: int | None, offsets: tuple[int, ...] = (),
+) -> dict[str, Any]:
+    """The page a delivered job view becomes. ``inline`` -- and every status
+    but ``answered`` under ``link`` -- is ``answer_page`` unchanged. An
+    answered ``link`` delivery re-checks the token's switch AS IT IS NOW
+    (``live``: the run may have taken minutes; the answer stays saved and
+    readable inline), then issues or reuses the token's link to this job and
+    returns the preview page. Every caller has already passed get_ask's
+    ownership/read/delivery checks for ``view``'s job: issuing never
+    authorizes on its own."""
+    if delivery != "link" or view.get("status") != "answered":
+        return answer_page(view, *offsets)
+    _require_answer_links(live)
+    settings = get_settings()
+    try:
+        link = issue_answer_link(
+            answer_link_repository(), settings, job_id=str(view["job_id"]),
+            principal=live, ttl_hours=link_ttl_hours,
+        )
+    except AnswerLinkUnavailable:
+        raise AgentToolError("unavailable", _LINK_UNAVAILABLE) from None
+    except ValueError:
+        raise _ttl_refusal(int(settings.mcp_answer_link_ttl_hours)) from None
+    preview, truncated = answer_preview(
+        str(view.get("answer") or ""), int(settings.mcp_answer_preview_max_chars)
+    )
+    return link_page(view, preview, truncated, link)
 
 
 # --------------------------------------------------------------- routing
@@ -780,7 +867,8 @@ def _plugin_failure(exc: AskPluginEngineError) -> AgentToolError:
 def _run_notebook(
     repo: Any, principal: Any, notebook_id: str, question: str, mode: str,
     conversation: Any, reply: _IntentReply | None, client_request_id: str,
-    stop: threading.Event, output: str = "answer",
+    stop: threading.Event, output: str = "answer", *,
+    delivery: str = "inline", link_ttl_hours: int | None = None,
 ) -> dict[str, Any]:
     """The single-notebook path's blocking body (``ask_current`` semantics:
     the memory channel, mounted libraries, plugin engines, the
@@ -878,7 +966,10 @@ def _run_notebook(
         except KeyError:
             detail = None
     _record_agent_call(repo, live, notebook_id, "ask:execute")
-    return answer_page(notebook_view(job_id, notebook_id, response, detail, allow_now))
+    return _deliver(
+        live, notebook_view(job_id, notebook_id, response, detail, allow_now),
+        delivery, link_ttl_hours,
+    )
 
 
 def _refreshed_principal(repo: Any, principal: Any) -> Any:
@@ -933,7 +1024,8 @@ def _recheck_notebook_delivery(
 def _run_global(
     repo: Any, principal: Any, notebooks: list[str] | None, question: str,
     mode: str, conversation_id: str, reply: _IntentReply | None,
-    client_request_id: str, stop: threading.Event,
+    client_request_id: str, stop: threading.Event, *,
+    delivery: str = "inline", link_ttl_hours: int | None = None,
 ) -> dict[str, Any]:
     """The 2-8 notebook (or ``["*"]``) path: ``GlobalAskService.start`` then ``wait``, the
     first page of the terminal job. A clear reasoning question is understood
@@ -1052,7 +1144,7 @@ def _run_global(
                 logger.warning("global ask via MCP failed (%s)", type(exc).__name__)
                 mapped = AgentToolError("internal", _global._GLOBAL_FALLBACK)
             raise mapped from None
-    return answer_page(_global.global_view(job))
+    return _deliver(live, _global.global_view(job), delivery, link_ttl_hours)
 
 
 def _read_notebook_job(
@@ -1145,7 +1237,15 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
             "follows the synthesis budget, not the 12,000-byte one, so raise the "
             "client's tool-output limit; conversation_id is read for history, "
             "never appended to, and nothing is saved but a retrieval-only job "
-            "record (get_ask has nothing to read for it). Requires the ask "
+            "record (get_ask has nothing to read for it). delivery=\"link\" "
+            "(default \"inline\"; not with output=\"evidence\"): an answered "
+            "result returns only a plain-text `preview` and `link` {url, "
+            "expires_at} instead of answer/citations/coverage/trace -- anyone "
+            "holding the URL can read the whole answer without signing in until "
+            "it expires (or the token is revoked); other statuses return the "
+            "usual shape. link_ttl_hours (link only) shortens the lifetime, never "
+            "beyond the deployment cap; a retry of the same job reuses the same "
+            "link. Needs the token's answer-links switch. Requires the ask "
             "permission; private Memory takes part only with the read permission "
             "too."
         ),
@@ -1154,7 +1254,8 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
         question: str, ctx: Context, notebooks: list[str] | None = None,
         conversation_id: str = "", mode: str = "reasoning",
         intent: dict[str, Any] | None = None, client_request_id: str = "",
-        output: str = "answer",
+        output: str = "answer", delivery: str = "inline",
+        link_ttl_hours: int | None = None,
     ) -> dict[str, Any]:
         reply, clean = _validate_inputs(question, conversation_id, mode, intent, notebooks)
         plugin = _plugin_mode(mode)
@@ -1162,6 +1263,8 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
         # one job, so they must also share one waiter slot.
         client_request_id = _normalized_key(client_request_id)
         _validate_output(output, plugin, clean, conversation_id, client_request_id)
+        _validate_delivery(delivery, output, link_ttl_hours)
+        deliver = {"delivery": delivery, "link_ttl_hours": link_ttl_hours}
         if client_request_id and len(client_request_id) > 128:
             raise AgentToolError("invalid_argument", "client_request_id 最多 128 个字符")
         repo = repository_provider()
@@ -1171,6 +1274,8 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
 
         def run() -> dict[str, Any]:
             principal = _live_principal(repo)
+            if delivery == "link":
+                _require_answer_links(principal)
             kind, target, conversation = _route(repo, principal, clean, conversation_id)
             if kind == "global" and output == "evidence":
                 raise AgentToolError("invalid_argument", _EVIDENCE_SINGLE_NOTEBOOK)
@@ -1182,7 +1287,7 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
                 _global._authorize(repo, token_id=principal.token_id)
                 return _run_global(
                     repo, principal, target, question, mode, conversation_id,
-                    reply, client_request_id, stop,
+                    reply, client_request_id, stop, **deliver,
                 )
             try:
                 # Booked only when the answer is delivered (after the
@@ -1197,12 +1302,12 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
             if not client_request_id:
                 return _run_notebook(
                     repo, principal, notebook_id, question, mode, conversation,
-                    reply, client_request_id, stop, output,
+                    reply, client_request_id, stop, output=output, **deliver,
                 )
             with _waiter_slot(principal.owner_id, "key:" + client_request_id):
                 return _run_notebook(
                     repo, principal, notebook_id, question, mode, conversation,
-                    reply, client_request_id, stop,
+                    reply, client_request_id, stop, output=output, **deliver,
                 )
 
         try:
@@ -1220,20 +1325,33 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
             "next_coverage_offset and trace.next_offset independently until null. "
             "Use it to continue a long answer or to read a result after a dropped "
             "connection. Each call rechecks the token, the allowlist and read "
-            "access. Requires the ask permission."
+            "access. delivery=\"link\" (no offsets; needs the token's "
+            "answer-links switch) returns, for an answered job, the preview and "
+            "expiring anonymous link ask returns (the token's existing live link "
+            "is reused; link_ttl_hours applies to a new one only). Requires the "
+            "ask permission."
         ),
     )
     async def get_ask(
         job_id: str, ctx: Context, answer_offset: int = 0, citation_offset: int = 0,
         coverage_offset: int = 0, trace_offset: int = 0,
+        delivery: str = "inline", link_ttl_hours: int | None = None,
     ) -> dict[str, Any]:
         _offsets(answer_offset, citation_offset, coverage_offset, trace_offset)
         offsets = (answer_offset, citation_offset, coverage_offset, trace_offset)
+        _validate_delivery(delivery, "answer", link_ttl_hours)
+        if delivery == "link" and any(offsets):
+            raise AgentToolError(
+                "invalid_argument",
+                "delivery=\"link\" 只返回摘要和链接，不能同时传分页位置",
+            )
         repo = repository_provider()
 
         def load() -> dict[str, Any]:
             if job_id.startswith("gask-"):
                 principal = _global._authorize(repo)
+                if delivery == "link":
+                    _require_answer_links(principal)
                 with _owner_request_context(principal):
                     try:
                         job = _global.global_ask_service().get_job(
@@ -1247,16 +1365,25 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
                 if job.submitted_via != "mcp":
                     # A browser-started global job is not readable via MCP.
                     raise AgentToolError("not_found", _JOB_NOT_FOUND)
-                return answer_page(_global.global_view(job), *offsets)
+                return _deliver(
+                    principal, _global.global_view(job), delivery, link_ttl_hours,
+                    offsets,
+                )
             if not job_id.startswith("askjob-"):
                 raise AgentToolError("not_found", _JOB_NOT_FOUND)
             principal = _live_principal(repo)
+            if delivery == "link":
+                _require_answer_links(principal)
             with _owner_request_context(principal):
                 notebook_id, response, detail, allow = _read_notebook_job(
                     repo, principal, job_id
                 )
-            return answer_page(
-                notebook_view(job_id, notebook_id, response, detail, allow), *offsets
+            # Only after _read_notebook_job's owner / mcp / allowlist / read /
+            # Memory checks: a link is never issued for a job this token
+            # could not read inline.
+            return _deliver(
+                principal, notebook_view(job_id, notebook_id, response, detail, allow),
+                delivery, link_ttl_hours, offsets,
             )
 
         return await _run_with_progress(ctx, load, label="get_ask")
