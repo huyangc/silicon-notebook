@@ -23,6 +23,7 @@ import {
   agentTokenEditDraft,
   agentTokenRequest,
   canIssueAgentToken,
+  withScopes,
   canSaveAgentTokenAccess,
   mergeAgentPage,
   localDateTimeToUtcIso,
@@ -42,6 +43,25 @@ test("new token drafts stay least-privileged and default to one notebook", () =>
   assert.deepEqual(draft.notebook_ids, ["notebook-1"]);
   assert.deepEqual(draft.scopes, ["read"]);
   assert.equal(draft.scopes.includes("contribute"), false);
+  assert.equal(draft.allow_answer_links, false);
+});
+
+test("dropping ask also drops the answer-link flag; the flag without ask is incomplete", () => {
+  const on = { ...agentTokenDraft("notebook-1"), scopes: ["read", "ask"], allow_answer_links: true, expires_at: "2030-01-02T03:04" };
+  assert.equal(withScopes(on, ["read", "ask"]).allow_answer_links, true);
+  assert.equal(withScopes(on, ["read"]).allow_answer_links, false);
+  assert.equal(canIssueAgentToken("profile-1", on), true);
+  assert.equal(canIssueAgentToken("profile-1", { ...on, scopes: ["read"] }), false);
+});
+
+test("the answer-link flag rides on issue and save requests and counts as a change", () => {
+  const draft = { ...agentTokenDraft("notebook-1"), scopes: ["ask"], allow_answer_links: true, expires_at: "2030-01-02T03:04:05" };
+  assert.equal(agentTokenRequest("profile-1", draft).allow_answer_links, true);
+  const token = { default_notebook_id: "notebook-1", notebook_ids: ["notebook-1"], scopes: ["ask"], expires_at: null };
+  assert.equal(agentTokenAccessRequest(draft, token).allow_answer_links, true);
+  assert.equal(agentTokenAccessRequest(draft, token).expected.allow_answer_links, false);
+  assert.equal(agentTokenAccessChanged(token, { ...draft, expires_at: "" }), true);
+  assert.equal(agentTokenAccessChanged(token, { ...draft, expires_at: "", allow_answer_links: false }), false);
 });
 
 test("token request always includes its default notebook exactly once", () => {
@@ -231,16 +251,18 @@ test("access updates are full replacements that carry the opened snapshot, never
     default_notebook_id: "notebook-1",
     notebook_ids: ["notebook-2"],
     scopes: ["read", "read"],
+    allow_answer_links: false,
     expires_at: "",
   }, original);
 
-  assert.deepEqual(Object.keys(payload).sort(), ["default_notebook_id", "expected", "expires_at", "notebook_ids", "scopes"]);
+  assert.deepEqual(Object.keys(payload).sort(), ["allow_answer_links", "default_notebook_id", "expected", "expires_at", "notebook_ids", "scopes"]);
   assert.deepEqual(payload.notebook_ids, ["notebook-1", "notebook-2"]);
   assert.deepEqual(payload.scopes, ["read"]);
   assert.equal(payload.expires_at, null);
   // 前置条件是打开时服务端给的原样配置(含已下线 scope、缺省的到期时间归一为 null)。
   assert.deepEqual(payload.expected, {
     scopes: ["read", "retired:scope"],
+    allow_answer_links: false,
     default_notebook_id: "notebook-1",
     notebook_ids: ["notebook-1"],
     expires_at: null,
