@@ -25,7 +25,11 @@ from datetime import datetime, timedelta, timezone
 from itertools import count
 from types import SimpleNamespace
 
+from fastapi.testclient import TestClient
+
 from app.api.deps import USER_MESSAGE_HEADER
+from app.core.request_context import reset_request_user, set_request_user
+from app.models.identity import UserProfile
 from app.services.knowhow.assets import AssetService
 from tests.answer_link_service_cases import (
     _issue,
@@ -33,6 +37,7 @@ from tests.answer_link_service_cases import (
     _notebook,
     _payload,
     _seed_job,
+    _set_access,
     _token,
     _user,
     _write,
@@ -90,8 +95,19 @@ def _with_image(payload: dict, asset_id: str) -> dict:
     return payload
 
 
-def _assert_served(env, token: str, *, expires_at: str) -> dict:
-    page = _page(env, token)
+def _seeded_ids(job_id: str) -> tuple[str, ...]:
+    """Every row id seeding put behind a job: the job itself and, for a
+    notebook job, its answer and conversation (``_seed_job`` numbers all
+    three alike)."""
+    if job_id.startswith("askjob-"):
+        n = job_id.rsplit("-", 1)[1]
+        return (job_id, f"ans-t5-{n}", f"conv-t5-{n}")
+    return (job_id,)
+
+
+def _assert_served(env, token: str, *, expires_at: str, job_id: str,
+                   page=None) -> dict:
+    page = page if page is not None else _page(env, token)
     assert page.status_code == 200, page.text
     assert page.headers["cache-control"] == "no-store"
     body = page.json()
@@ -102,6 +118,11 @@ def _assert_served(env, token: str, *, expires_at: str) -> dict:
         assert f'"{field}"' not in page.text
     for secret in ("IMGELE-secret", "SRC-secret", "ELE-secret"):
         assert secret not in page.text
+    # No row id behind the link reaches the reader, under any namespace.
+    for row_id in _seeded_ids(job_id):
+        assert row_id not in page.text, row_id
+    for namespace in ("askjob-", "gask-", "ans-t5-", "conv-t5-", "gconv-t6-"):
+        assert namespace not in page.text, namespace
     return body
 
 
@@ -148,7 +169,7 @@ def _lifecycle(env, *, kind: str) -> None:
     second = _issue(env, job_id, other)
     token, kept = _link_token(first), _link_token(second)
 
-    body = _assert_served(env, token, expires_at=first.expires_at)
+    body = _assert_served(env, token, expires_at=first.expires_at, job_id=job_id)
     assert body["title"] == ""
     assert body["turns"][0]["question"] in ("链接问题?", "跨库问题")
     alias = body["turns"][0]["images"][0]["alias"]
@@ -162,7 +183,7 @@ def _lifecycle(env, *, kind: str) -> None:
     clock.advance(hours=2)
     _assert_expired_page(env, token)
     assert _image(env, token, alias).status_code == 404
-    _assert_served(env, kept, expires_at=second.expires_at)
+    _assert_served(env, kept, expires_at=second.expires_at, job_id=job_id)
 
     # Revoking the issuing token kills its link at once.
     env.repo.revoke_agent_token(owner_id, other.token_id)
@@ -229,7 +250,7 @@ def global_link_rechecks_every_cited_library(env):
             "UPDATE global_ask_jobs SET submitted_via='mcp' WHERE id=?"), (job_id,))
     link = _issue(env, job_id, principal)
     token = _link_token(link)
-    _assert_served(env, token, expires_at=link.expires_at)
+    _assert_served(env, token, expires_at=link.expires_at, job_id=job_id)
 
     assert env.client.delete(f"/api/groups/{group_id}/members/{owner_id}",
                              headers=reader).status_code in (200, 204)
@@ -301,7 +322,75 @@ def expired_page_is_410_even_when_other_gates_also_fail(env):
     assert _page(env, token).status_code == 404
 
 
+def _client_bound_to(env, user: UserProfile) -> TestClient:
+    """A client whose every request runs with the request-user ContextVar set
+    to ``user`` -- what a leaked ambient identity would look like on the
+    anonymous router (set inside the request's own context, so the sync
+    endpoint's worker thread inherits it)."""
+    inner = env.client.app
+
+    async def bound(scope, receive, send):
+        marker = set_request_user(user)
+        try:
+            await inner(scope, receive, send)
+        finally:
+            reset_request_user(marker)
+
+    return TestClient(bound)
+
+
+def ambient_request_user_does_not_change_page_or_image(env):
+    """An administrator or an unrelated user bound as the request user neither
+    changes what a live link serves nor revives a dead one -- page and image,
+    notebook and global link alike."""
+    owner, owner_id = _user(env)
+    nb = _notebook(env, owner)
+    asset_id = _save_asset(env, nb, owner_id)
+    notebook_job, _ = _seed_job(env, nb, owner_id,
+                                payload=_with_image(_payload(), asset_id))
+    global_job = _seed_global_job(env, owner_id, nb, _with_image(_payload(nb), asset_id))
+    principal = _token(env, owner_id, [nb])
+    live = [_link_token(_issue(env, job, principal)) for job in (notebook_job, global_job)]
+    other_nb = _notebook(env, owner, "另一个库")
+    narrowed = _token(env, owner_id, [nb])
+    dead = [_link_token(_issue(env, job, narrowed)) for job in (notebook_job, global_job)]
+    _set_access(env, narrowed, notebooks=[other_nb])
+
+    baseline = {}
+    for token in live:
+        page = _page(env, token)
+        assert page.status_code == 200, page.text
+        alias = page.json()["turns"][0]["images"][0]["alias"]
+        image = _image(env, token, alias)
+        assert image.status_code == 200
+        baseline[token] = (page.json(), alias, image.content)
+    for token in dead:
+        assert _page(env, token).status_code == 404
+
+    admin = env.repo.current_user()
+    assert admin.role == "admin"
+    _, stranger_id = _user(env)
+    for user in (
+        UserProfile(id=admin.id, email=admin.email,
+                    display_name=admin.display_name, role="admin"),
+        UserProfile(id=stranger_id, email="", display_name="", role="user"),
+        UserProfile(id=owner_id, email="", display_name="", role="user"),
+    ):
+        client = _client_bound_to(env, user)
+        for token in live:
+            body, alias, content = baseline[token]
+            page = client.get(f"/api/public/conversations/{token}")
+            assert page.status_code == 200, (user.id, page.text)
+            assert page.json() == body
+            image = client.get(f"/api/public/conversations/{token}/assets/{alias}")
+            assert image.status_code == 200 and image.content == content
+        for token in dead:
+            assert client.get(f"/api/public/conversations/{token}").status_code == 404
+        assert client.get("/api/public/conversations/alnk-doesnotexist").status_code == 404
+
+
 CASES = {
+    "ambient_request_user_does_not_change_page_or_image": ambient_request_user_does_not_change_page_or_image,
     "notebook_link_lifecycle_end_to_end": notebook_link_lifecycle_end_to_end,
     "global_link_lifecycle_end_to_end": global_link_lifecycle_end_to_end,
     "unknown_alnk_token_is_404_on_page_and_image": unknown_alnk_token_is_404_on_page_and_image,
