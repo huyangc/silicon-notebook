@@ -233,11 +233,10 @@ def test_shape_deviation_report_is_bounded_but_normalisation_is_not():
     [
         (
             '{"conflict_type":"temporal","resolution":"modify",'
-            '"winner_ref":null,"resolved_payload":{"valid_from":"2020"}}',
+            '"winner_ref":"a","resolved_name":"a [2000-2005]"}',
             '{"conflict_type":"none|mutual|temporal|granularity",'
             '"resolution":"keep|discard|modify",'
-            '"winner_ref":"<left_ref or right_ref or null>",'
-            '"resolved_payload":null}',
+            '"winner_ref":"","resolved_name":""}',
         ),
         (
             '{"sections":[],"frame":{}}',

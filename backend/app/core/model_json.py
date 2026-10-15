@@ -442,21 +442,6 @@ def _normalise_shape(
         if len(out) < SHAPE_DEVIATIONS_MAX:
             out.append(ShapeDeviation(path=path or "$", reason=reason, fix=fix))
 
-    # A schema hint is prompt prose encoded as a JSON example, not JSON Schema.
-    # Two current workload contracts deliberately use values the example cannot
-    # express: conflict review's payload is null or an object, and its winner
-    # placeholder explicitly permits JSON null.
-    if field_name == "resolved_payload" and (
-        value is None or isinstance(value, dict)
-    ):
-        return value
-    if (
-        value is None
-        and isinstance(example, str)
-        and example.startswith("<")
-        and "null" in example.lower()
-    ):
-        return value
     if example is None:
         # Hints use null for optional scalar fields whose concrete value may be
         # null or a string (for example an optional edge type).
