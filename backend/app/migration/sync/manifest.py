@@ -597,6 +597,9 @@ _LOCAL: tuple[TableSyncSpec, ...] = (
     # MCP ask 的澄清句柄（SQLite v90 / PostgreSQL 0070）：一小时有效，是本环境
     # 发给 Agent 的一次暂停，不随笔记本同步。
     TableSyncSpec("ask_intent_handles", SyncClass.LOCAL, notes="MCP ask 澄清句柄"),
+    # MCP 限时回答链接（SQLite v94 / PostgreSQL 0074）：绑定本环境的 Agent token
+    # （agent_access_tokens 本身是 LOCAL），不能跨环境，也不随笔记本同步。
+    TableSyncSpec("answer_links", SyncClass.LOCAL, notes="MCP 限时回答链接，绑定本环境 Agent token"),
 )
 
 SYNC_MANIFEST: tuple[TableSyncSpec, ...] = _SYNCED + _SYNCED_WITH_MAPPING + _LOCAL

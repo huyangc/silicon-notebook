@@ -5586,5 +5586,78 @@ MIGRATION_MANIFEST[(92, 93)] = {
     "views": {},
 }
 
+# v94 (parity with PostgreSQL 0074_answer_links.sql): the adapter-local
+# answer_links table (MCP expiring answer links), its unique per-(job, issuing
+# token) index and expiry index, plus ``agent_access_tokens.allow_answer_links``
+# INTEGER NOT NULL DEFAULT 0 (whether the token may issue such links; the
+# default is the whole backfill). SQLite's ALTER TABLE ADD COLUMN splices the
+# definition in before the closing parenthesis of the stored CREATE TABLE text
+# (after v89's ``token_plain``). No trigger or view.
+AGENT_TOKEN_ANSWER_LINKS_COLUMNS = {
+    "agent_access_tokens": {
+        "allow_answer_links": ("allow_answer_links", "INTEGER", 1, "0", 0),
+    },
+}
+AGENT_ACCESS_TOKENS_V94_FROM = ", token_plain TEXT)"
+AGENT_ACCESS_TOKENS_V94_TO = (
+    ", token_plain TEXT, allow_answer_links INTEGER NOT NULL DEFAULT 0)"
+)
+ANSWER_LINK_TABLES = {
+    "answer_links": """CREATE TABLE answer_links (
+                    token TEXT NOT NULL PRIMARY KEY,
+                    job_kind TEXT NOT NULL CHECK (job_kind IN ('notebook', 'global')),
+                    job_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    agent_token_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                )""",
+}
+ANSWER_LINK_INDEXES = {
+    "uq_answer_links_job_token": (
+        "CREATE UNIQUE INDEX uq_answer_links_job_token\n"
+        "                    ON answer_links(job_kind, job_id, agent_token_id)"
+    ),
+    "idx_answer_links_expires": (
+        "CREATE INDEX idx_answer_links_expires\n"
+        "                    ON answer_links(expires_at)"
+    ),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 94, *key[2:]): {
+        **manifest,
+        "tables": {
+            **{
+                name: (
+                    sql.replace(AGENT_ACCESS_TOKENS_V94_FROM, AGENT_ACCESS_TOKENS_V94_TO)
+                    if name == "agent_access_tokens"
+                    else sql
+                )
+                for name, sql in manifest["tables"].items()
+            },
+            **ANSWER_LINK_TABLES,
+        },
+        "columns": {
+            **manifest["columns"],
+            **{
+                table: {
+                    **manifest["columns"].get(table, {}),
+                    **columns,
+                }
+                for table, columns in AGENT_TOKEN_ANSWER_LINKS_COLUMNS.items()
+            },
+        },
+        "indexes": {**manifest["indexes"], **ANSWER_LINK_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(93, 94)] = {
+    "tables": ANSWER_LINK_TABLES,
+    "columns": AGENT_TOKEN_ANSWER_LINKS_COLUMNS,
+    "indexes": ANSWER_LINK_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

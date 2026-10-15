@@ -568,6 +568,10 @@ class AuthStoreContract:
             ("handle-1", mistaken.id, "scope", "0" * 64, "{}", now, now),
         )
         execute(
+            identity, "INSERT INTO answer_links(token,job_kind,job_id,owner_id,agent_token_id,created_at,expires_at) VALUES (?,?,?,?,?,?,?)",
+            ("alnk-1", "notebook", "askjob-1", mistaken.id, "agt-1", now, now),
+        )
+        execute(
             identity, "INSERT INTO model_service_status(user_id,service,config_fingerprint,status,trigger,checked_at) VALUES (?,?,?,?,?,?)",
             (mistaken.id, "general", "fp", "ok", "manual_test", now),
         )

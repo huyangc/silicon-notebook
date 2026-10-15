@@ -296,7 +296,12 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # v93 (paired with PostgreSQL 0073_agent_profile_deleted_at.sql) adds
 # agent_profiles.deleted_at (nullable TEXT, no backfill): the soft-delete
 # marker of an Agent Profile. See ``_migration_93``.
-SCHEMA_VERSION = 93
+# v94 (paired with PostgreSQL 0074_answer_links.sql) adds the answer_links
+# table (expiring anonymous links to one answered MCP ask job; unique per
+# (job_kind, job_id, agent_token_id), no FK) and agent_access_tokens.
+# allow_answer_links (INTEGER NOT NULL DEFAULT 0: whether the token may issue
+# such links). No backfill. See ``_migration_94``.
+SCHEMA_VERSION = 94
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
 # when v87 was written (a migration must not change meaning when the live
@@ -5783,6 +5788,43 @@ class SqliteMigrator:
         """
         with self._connect() as db:
             self.add_column_if_missing(db, "agent_profiles", "deleted_at", "TEXT")
+
+    def _migration_94(self) -> None:
+        """MCP answer links, parity with PostgreSQL ``0074_answer_links.sql``.
+
+        One row per expiring anonymous link to one answered MCP ask job:
+        ``token`` is the capability, ``job_kind`` / ``job_id`` the job it opens,
+        ``owner_id`` whose answer it is, ``agent_token_id`` the Agent token that
+        issued it. Expiry and rights are judged when the link is opened, so no
+        job / conversation / token deletion path needs a cascade (hence no
+        foreign keys); the issuing write path purges stale rows. The unique
+        index keeps one live link per (job, issuing token). ``token`` carries an
+        explicit ``NOT NULL`` beside its ``PRIMARY KEY`` (SQLite rowid tables
+        accept a NULL there, PostgreSQL does not).
+
+        ``agent_access_tokens.allow_answer_links`` is the owner's opt-in for a
+        token to issue such links; ``DEFAULT 0`` keeps every existing token as
+        it was, so it needs no backfill.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "agent_access_tokens", "allow_answer_links", "INTEGER NOT NULL DEFAULT 0"
+            )
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS answer_links (
+                    token TEXT NOT NULL PRIMARY KEY,
+                    job_kind TEXT NOT NULL CHECK (job_kind IN ('notebook', 'global')),
+                    job_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    agent_token_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_answer_links_job_token
+                    ON answer_links(job_kind, job_id, agent_token_id);
+                CREATE INDEX IF NOT EXISTS idx_answer_links_expires
+                    ON answer_links(expires_at);
+            """)
 
     def migrate(self) -> list[int]:
         with self._connect() as db:

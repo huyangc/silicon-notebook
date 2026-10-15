@@ -41,6 +41,7 @@ POSTGRES_BUSINESS_TABLES = (
     "ask_intent_handles",
     "agent_profiles",
     "agent_token_notebooks",
+    "answer_links",
     "answers",
     "app_settings",
     "ask_jobs",
@@ -451,7 +452,12 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # no backfill) plus the unique idx_users_username_lower over lower(username).
 # SQLite v93 / PostgreSQL 0073 add agent_profiles.deleted_at (nullable, no
 # backfill, no index): the soft-delete marker of an Agent Profile.
+# SQLite v94 / PostgreSQL 0074 add the adapter-local answer_links table (MCP
+# expiring answer links; token primary key, unique uq_answer_links_job_token
+# over (job_kind, job_id, agent_token_id), idx_answer_links_expires; no FK) and
+# agent_access_tokens.allow_answer_links (integer NOT NULL DEFAULT 0; no
+# backfill, no index).
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=93,
-    postgres_version=73,
+    sqlite_version=94,
+    postgres_version=74,
 )

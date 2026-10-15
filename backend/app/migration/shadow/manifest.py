@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=93, postgres_version=73, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=94, postgres_version=74, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -856,6 +856,11 @@ _TABLES = (
     # hand the target a pause it never issued. LOCAL_EPHEMERAL, no
     # replication key.
     TableSpec("ask_intent_handles", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 109),
+    # SQLite v94 / PostgreSQL 0074: MCP expiring answer links. Each row is bound
+    # to an Agent token of THIS environment (agent_access_tokens is local), so
+    # it cannot mean anything on the shadow target. LOCAL_EPHEMERAL, no
+    # replication key.
+    TableSpec("answer_links", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 110),
 )
 
 MANIFEST = Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)

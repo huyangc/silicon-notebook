@@ -60,6 +60,7 @@ USER_REFERENCE_COLUMNS: tuple[UserReference, ...] = (
     UserReference("user_profiles", "user_id", "scaffolding"),
     UserReference("model_service_status", "user_id", "scaffolding"),
     UserReference("ask_intent_handles", "owner_id", "scaffolding"),
+    UserReference("answer_links", "owner_id", "scaffolding"),
     UserReference("auth_identity_audit", "actor_id", "audit_kept"),
     UserReference("auth_identity_audit", "target_user_id", "audit_kept"),
     _blocking("notebooks", "created_by", "笔记本"),

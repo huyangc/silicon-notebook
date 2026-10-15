@@ -42,6 +42,10 @@ def _roll_back_to_66(database) -> None:
         db.execute("ALTER TABLE unified_kg_state DROP COLUMN memory_isolation_version")
         # 71 (ask_intent_handles) creates a table: undo it so the replay can.
         db.execute("DROP TABLE ask_intent_handles")
+        # 74 (answer_links) creates a table and a column: undo them so the
+        # replay can.
+        db.execute("DROP TABLE answer_links")
+        db.execute("ALTER TABLE agent_access_tokens DROP COLUMN allow_answer_links")
         # 73 (agent_profile_deleted_at) adds a column: undo it so the replay can.
         db.execute("ALTER TABLE agent_profiles DROP COLUMN deleted_at")
         # 72 (auth simplification) drops what 0058 made: restore the objects
@@ -91,7 +95,7 @@ def _marker(database, notebook_id):
 
 @pytest.fixture
 def upgraded(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 73
+    assert PostgresMigrator(postgres_database).migrate() == 74
     with postgres_database.write() as db:
         cases.seed(db, postgres=True)
     before = _snapshot(postgres_database)
@@ -112,7 +116,7 @@ def test_summary_counts_match_the_shared_world(postgres_database):
     log, out of a test's reach) are read from its working tables inside the
     migration's own transaction, then rolled back -- the same numbers the
     SQLite twin logs (test_migration_logs_counts_only)."""
-    assert PostgresMigrator(postgres_database).migrate() == 73
+    assert PostgresMigrator(postgres_database).migrate() == 74
     with postgres_database.write() as db:
         cases.seed(db, postgres=True)
     _roll_back_to_66(postgres_database)
@@ -180,7 +184,7 @@ def test_reexecuting_the_frozen_sql_changes_nothing(upgraded):
 
 
 def test_fresh_database_defaults_the_marker_to_isolated(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 73
+    assert PostgresMigrator(postgres_database).migrate() == 74
     with postgres_database.connect() as db:
         column = db.execute(
             "SELECT is_nullable, column_default FROM information_schema.columns "
@@ -358,7 +362,7 @@ def test_the_census_is_read_only_and_matches_the_check(postgres_database):
     is read-only: a write attempt fails)."""
     import importlib.util
 
-    assert PostgresMigrator(postgres_database).migrate() == 73
+    assert PostgresMigrator(postgres_database).migrate() == 74
     with postgres_database.write() as db:
         cases.seed(db, postgres=True)
     _roll_back_to_66(postgres_database)
@@ -393,7 +397,7 @@ def test_approved_memory_promotion_count_is_index_driven(postgres_database):
     by primary key -- never a scan of either table."""
     from app.repositories.postgres import memory_isolation_store as store
 
-    assert PostgresMigrator(postgres_database).migrate() == 73
+    assert PostgresMigrator(postgres_database).migrate() == 74
     with postgres_database.write() as db:
         cases.seed(db, postgres=True)
         db.execute(
@@ -447,7 +451,7 @@ def _seed_state_rows(database, count: int) -> None:
 
 
 def test_marker_reads_and_write_use_the_state_primary_key(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 73
+    assert PostgresMigrator(postgres_database).migrate() == 74
     _seed_state_rows(postgres_database, 30000)
     from app.repositories.postgres import memory_isolation_store as store
 
@@ -712,7 +716,7 @@ def test_statements_are_driven_from_the_working_tables(
     through the notebook index). Then the real migrator runs under
     production's 30 s statement budget."""
     base_objects = int(os.environ.get("MKI_PIN_BASE_OBJECTS", "200000"))
-    assert PostgresMigrator(postgres_database).migrate() == 73
+    assert PostgresMigrator(postgres_database).migrate() == 74
     _seed_large(postgres_database, f_notebooks=5, objects_per_f=400,
                 base_objects=base_objects)
     if base_in_f:
@@ -772,7 +776,7 @@ def test_the_post_readiness_check_statements_are_index_driven(postgres_database)
     (the cost of one check stays in proportion to its notebook, paged)."""
     from app.repositories.postgres import memory_isolation_store as store
 
-    assert PostgresMigrator(postgres_database).migrate() == 73
+    assert PostgresMigrator(postgres_database).migrate() == 74
     _seed_large(postgres_database, f_notebooks=5, objects_per_f=400,
                 base_objects=100000)
     with postgres_database.write() as db:

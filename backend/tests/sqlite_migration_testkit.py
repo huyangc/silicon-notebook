@@ -44,9 +44,21 @@ V78_AUTH_TABLES = {
 }
 
 
+def rollback_v94(db: sqlite3.Connection) -> None:
+    """Remove what SQLite migration 94 added: the ``answer_links`` table with
+    its two indexes and ``agent_access_tokens.allow_answer_links``. Callers
+    lower ``user_version`` themselves."""
+    db.execute("DROP INDEX idx_answer_links_expires")
+    db.execute("DROP INDEX uq_answer_links_job_token")
+    db.execute("DROP TABLE answer_links")
+    db.execute("ALTER TABLE agent_access_tokens DROP COLUMN allow_answer_links")
+
+
 def rollback_v93(db: sqlite3.Connection) -> None:
     """Remove ``agent_profiles.deleted_at``, the column SQLite migration 93
-    added. Callers lower ``user_version`` themselves."""
+    added. v94 is undone first (newest-first). Callers lower ``user_version``
+    themselves."""
+    rollback_v94(db)
     db.execute("ALTER TABLE agent_profiles DROP COLUMN deleted_at")
 
 

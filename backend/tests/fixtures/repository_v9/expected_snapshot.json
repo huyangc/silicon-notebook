@@ -1202,6 +1202,11 @@
         "type": "index"
       },
       {
+        "name": "idx_answer_links_expires",
+        "sql_sha256": "0cd83c7848ae3078ddfd22d996c71a170fc4e6e50efc6cc6372ea2845e629e6e",
+        "type": "index"
+      },
+      {
         "name": "idx_answers_conversation",
         "sql_sha256": "dcff1ed1dace548cb5ffab73a3b16e92e196a48396f0f29d0a62fe497b87e554",
         "type": "index"
@@ -1937,6 +1942,11 @@
         "type": "index"
       },
       {
+        "name": "uq_answer_links_job_token",
+        "sql_sha256": "ab4cf07e1de9e7a729e6fa577de9eaab3fc54ef337a12a2d16a2f023f2d0065f",
+        "type": "index"
+      },
+      {
         "name": "uq_clusters_nb_type_member_generation",
         "sql_sha256": "990451e7100ff78519e17a56b285a7b961fb3860cc2423cdf957877e0bccc0ee",
         "type": "index"
@@ -1963,7 +1973,7 @@
       },
       {
         "name": "agent_access_tokens",
-        "sql_sha256": "f2087eaeb80478010d50289ff64ee655d94b31e50ff329ca7e7f986976e17e63",
+        "sql_sha256": "fe333c340ee5af22f70e26233dd453941c27e571e0c5deeb3015259df7dedfb4",
         "type": "table"
       },
       {
@@ -1989,6 +1999,11 @@
       {
         "name": "agent_token_notebooks",
         "sql_sha256": "584eb57840d2903793b0ce78096bdd45f647e656538bea9950c448210a20a9fc",
+        "type": "table"
+      },
+      {
+        "name": "answer_links",
+        "sql_sha256": "2ba4a64d3be2561453e142bfc957d18ad81cc5e67d10ebb3aefa5472b1f739e2",
         "type": "table"
       },
       {
@@ -3267,6 +3282,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 93
+    "user_version": 94
   }
 }
