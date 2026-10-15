@@ -231,27 +231,18 @@ def test_node_modify_updates_target_name_only(seeded):
     assert stored_b["name"] == "Claim B"
 
 
-def test_node_modify_winner_ref_none_falls_back_to_left(seeded):
-    """When winner_ref is None (or not in refs), target falls back to left_ref."""
+@pytest.mark.parametrize("winner_ref", [None, "not-a-real-id"])
+def test_node_modify_without_valid_winner_is_skipped(seeded, winner_ref):
+    """resolved_name describes one specific side, so a modify that does not
+    name which side is skipped rather than rewriting left_ref by guess."""
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
-    new_name = "Fallback modified"
     result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
-        resolution="modify", winner_ref=None, resolved_name=new_name,
+        resolution="modify", winner_ref=winner_ref, resolved_name="Guessed side",
     )
-    assert result == {"action": "modify", "target": oid_a}
-    stored = _get_object_payload(repo, nb_id, oid_a)
-    assert stored["name"] == "Fallback modified"
-
-
-def test_node_modify_winner_ref_unknown_falls_back_to_left(seeded):
-    repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
-    new_name = "Unknown winner fallback"
-    result = repo._runtime.knowledge_governance.apply_conflict_resolution(
-        nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
-        resolution="modify", winner_ref="not-a-real-id", resolved_name=new_name,
-    )
-    assert result["target"] == oid_a
+    assert result == {"action": "skipped", "reason": "no valid winner_ref for modify"}
+    assert _get_object_payload(repo, nb_id, oid_a)["name"] == "Claim A"
+    assert _get_object_payload(repo, nb_id, oid_b)["name"] == "Claim B"
 
 
 @pytest.mark.parametrize("resolved_name", [None, "", "   "])

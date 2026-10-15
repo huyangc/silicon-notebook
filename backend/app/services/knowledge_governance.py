@@ -758,8 +758,8 @@ class KnowledgeGovernanceService:
             ``"keep"`` | ``"discard"`` | ``"modify"``.
         winner_ref:
             For ``"discard"``: the ref that survives; the other is the loser.
-            For ``"modify"``/``"node"``: the target object to update (falls back
-            to ``left_ref`` when None or not in {left_ref, right_ref}).
+            For ``"modify"``/``"node"``: the target object to update; a modify
+            whose winner_ref is None or not in {left_ref, right_ref} is skipped.
             Ignored for ``"keep"``.
         resolved_name:
             For ``"modify"``/``"node"``: the new ``name`` of the target object.
@@ -817,7 +817,16 @@ class KnowledgeGovernanceService:
             )
             return {"action": "skipped", "reason": "modify without payload"}
 
-        target = winner_ref if winner_ref in (left_ref, right_ref) else left_ref
+        # resolved_name was written for one specific side; guessing a side
+        # would stamp that text onto the entry it does not describe.
+        if winner_ref not in (left_ref, right_ref):
+            self.event_log.logger.warning(
+                "apply_conflict_resolution: modify skipped — winner_ref %r is not one of "
+                "(%r, %r) in notebook %s",
+                winner_ref, left_ref, right_ref, notebook_id,
+            )
+            return {"action": "skipped", "reason": "no valid winner_ref for modify"}
+        target = winner_ref
         # update_knowledge replaces the entire payload column, so rewrite only
         # ``name`` on the current payload and keep every other field
         # (section_path, validity_scope, steps, …) as stored.
