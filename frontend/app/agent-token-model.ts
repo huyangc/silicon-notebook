@@ -257,13 +257,14 @@ export function utcIsoToLocalDateTime(value: string | null | undefined, timezone
 /** 已签发 token 的编辑草稿。已下线的 scope 不进草稿:后端对未知 scope 一律拒收,
  *  留着它只会让「保存」必然失败,而表单上又没有对应的勾选框能把它去掉。 */
 export function agentTokenEditDraft(token: AgentTokenAccess): AgentTokenDraft {
-  return {
+  // 经 withScopes 归一：无 ask 却带 flag=true 的历史行，编辑器里按「关」呈现，才能正常保存。
+  return withScopes({
     default_notebook_id: token.default_notebook_id,
     notebook_ids: Array.from(new Set([token.default_notebook_id, ...token.notebook_ids].filter(Boolean))),
-    scopes: token.scopes.filter((scope) => Object.hasOwn(AGENT_SCOPE_LABELS, scope)),
+    scopes: [],
     allow_answer_links: Boolean(token.allow_answer_links),
     expires_at: utcIsoToLocalDateTime(token.expires_at),
-  };
+  }, token.scopes.filter((scope) => Object.hasOwn(AGENT_SCOPE_LABELS, scope)));
 }
 
 export function agentTokenAccessPath(tokenId: string): string {
