@@ -469,6 +469,12 @@ def _normalise_shape(
             return value
         # Every remaining example advertises a value: null and absent mean the
         # same thing to the consumer, so make it absent.
+        if state.get("schema_enforced"):
+            # The strict schema had to make every optional field required and
+            # nullable, so this null is the conforming way to say "unused",
+            # not drift: absorb it without a diagnostic.
+            state["fixes"] += 1
+            return _DROP
         note("invalid_type" if not isinstance(example, bool) else "invalid_boolean", "dropped")
         return _DROP
     if isinstance(example, bool):
@@ -596,7 +602,9 @@ def _normalise_shape(
     return value
 
 
-def validate_model_json_shape(content: str, schema_hint: str) -> ModelJsonShape:
+def validate_model_json_shape(
+    content: str, schema_hint: str, *, schema_enforced: bool = False,
+) -> ModelJsonShape:
     """Gate a parseable object on usability; absorb or report field drift.
 
     Raises ``ModelJsonRepairError("missing_expected_key")`` only when the
@@ -609,6 +617,11 @@ def validate_model_json_shape(content: str, schema_hint: str) -> ModelJsonShape:
     reply to deliver: byte-for-byte the input when nothing was absorbed, a
     canonical re-serialisation when something was. Provider-added or
     model-added extra fields are never deviations.
+
+    ``schema_enforced`` says the reply already passed the strict JSON Schema
+    projected from this hint. Its nulls are then still removed for the
+    consumer but not reported: that schema forces every optional field to be
+    written, so counting them would bury real drift under conforming nulls.
     """
     value = _strict_object(content)
     # ``json.loads`` accepts NaN / Infinity / overflowing exponents that JSON
@@ -622,7 +635,7 @@ def validate_model_json_shape(content: str, schema_hint: str) -> ModelJsonShape:
     if not set(value).intersection(example):
         raise ModelJsonRepairError("missing_expected_key")
     deviations: list[ShapeDeviation] = []
-    state = {"fixes": 0}
+    state = {"fixes": 0, "schema_enforced": int(schema_enforced)}
     fixed = _normalise_shape(
         value, example, path="", out=deviations, state=state,
     )
