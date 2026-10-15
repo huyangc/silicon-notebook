@@ -116,3 +116,25 @@ def test_off_type_sub_query_text_never_becomes_a_retrieval_plan():
     # No usable sub-query at all ⇒ the existing whole-plan fallback.
     assert ex.query == "原问题"
     assert [s.query for s in ex.sub_queries] == ["原问题"]
+
+
+def test_expand_reads_a_strict_schema_reply_with_null_optional_fields():
+    """Under the strict schema every optional nested field may arrive as null and
+    ``prefer`` is the three-value enum (plus ""): null reason reads as "", an
+    empty or unknown prefer falls back to balanced, and a null comparison means
+    no comparison."""
+    llm = _FakeLLM({
+        "query": "x", "high_level_keywords": None, "low_level_keywords": ["MLA"],
+        "sub_queries": [
+            {"query": "a", "types": None, "prefer": "keyword", "reason": None},
+            {"query": "b", "types": ["claim"], "prefer": "", "reason": "why"},
+            {"query": "c", "types": [], "prefer": None, "reason": None},
+        ],
+        "comparison": None,
+    })
+    ex = expand_query(llm, "q", want_types=True)
+    assert [(s.query, s.types, s.prefer, s.reason) for s in ex.sub_queries] == [
+        ("a", [], "keyword", ""), ("b", ["claim"], "balanced", "why"),
+        ("c", [], "balanced", ""),
+    ]
+    assert ex.high_level_keywords == [] and ex.comparison is None

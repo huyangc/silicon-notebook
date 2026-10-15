@@ -668,8 +668,8 @@ def test_a_delivering_consult_turn_does_not_advance_the_stale_breaker(repo):
     _write_experience(repo, "exact_lookup", "bad", f"exact {filler}b.")
     _write_experience(repo, "follow_chain", "bad", f"chain {filler}c.")
     llm = _SeqLLM([
-        {"next_action": "exact_lookup", "exact_term": "set_db"},   # 空手 stale 1
-        {"next_action": "exact_lookup", "exact_term": "set_db2"},  # 空手 stale 2
+        {"next_action": "exact_lookup", "query": "set_db"},   # 空手 stale 1
+        {"next_action": "exact_lookup", "query": "set_db2"},  # 空手 stale 2
         {"next_action": "consult_memory"},                          # 送达,持平
         {"next_action": "answer", "sufficient": True},
     ])

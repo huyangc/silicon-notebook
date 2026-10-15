@@ -35,7 +35,7 @@ def _make_rr(payload, configured=True):
 def test_reflect_parses_expand_community():
     rr = _make_rr(json.dumps({
         "next_action": "expand_community",
-        "community_focal": "DeepSeek-V4",
+        "query": "DeepSeek-V4",
         "reason": "need peers",
     }))
     d = rr.reflect("q", "candidates")
@@ -52,7 +52,7 @@ def test_reflect_community_focal_defaults_empty():
 
 def test_reflect_unknown_action_still_falls_back_to_answer():
     """白名单守卫:非枚举动作退回 answer(确保新增 expand_community 未放开兜底)。"""
-    rr = _make_rr(json.dumps({"next_action": "teleport", "community_focal": "X"}))
+    rr = _make_rr(json.dumps({"next_action": "teleport", "query": "X"}))
     d = rr.reflect("q", "candidates")
     assert d.next_action == "answer"
 
@@ -60,7 +60,7 @@ def test_reflect_unknown_action_still_falls_back_to_answer():
 def test_reflect_community_focal_stripped():
     rr = _make_rr(json.dumps({
         "next_action": "expand_community",
-        "community_focal": "  Qwen-X  ",
+        "query": "  Qwen-X  ",
     }))
     d = rr.reflect("q", "candidates")
     assert d.next_action == "expand_community"

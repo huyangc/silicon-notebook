@@ -228,7 +228,7 @@ def test_reasoning_search_elements_fallback_path(arepo):
     _bind_reasoning(arepo, _SeqLLM(
         plan={"sub_queries": [{"query": "完全不相关的冷门问题zzz"}]},
         reflects=[
-            {"next_action": "search_elements", "elements_query": "zzz"},
+            {"next_action": "search_elements", "query": "zzz"},
             {"next_action": "answer", "sufficient": True}],
         answer={"answer": "知识库未覆盖,以下为推断。", "grounded": False}))
     resp = arepo.ask(nb.id, AskRequest(question="冷门zzz", mode="reasoning"))

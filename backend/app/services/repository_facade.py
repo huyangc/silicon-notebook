@@ -138,13 +138,11 @@ from app.services.knowhow.assets import AssetService
 from app.services.source_image_persist import make_persist_image_factory
 from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
-    DESCRIPTION_SCHEMA_HINT,
     FOLLOWUP_REWRITE_SCHEMA_HINT,
     NOTEBOOK_META_SCHEMA_HINT,
     SCHEMA_INDUCTION_HINT,
     answer_prompt,
     followup_rewrite_prompt,
-    notebook_description_prompt,
     notebook_meta_prompt,
     schema_induction_prompt,
 )

@@ -132,7 +132,7 @@ the wrong advice) and `unavailable` (everything else). Rows carrying `arm="keywo
 bilingual keyword recall supplement, which has NO coverage receipt: exclude them when counting skip events
 against receipts. That arm reports once per call (a `reasoning` run may call it more than once) as `ask_stage` with `stage="global_keyword_arm"` (participant,
 notebooks-with-hits, merged and failed-notebook counts plus latency, no text). The single-notebook keyword supplement
-(shared by `chunk` mode, `reasoning`'s first-round seed lexical arm and `search_chunks.chunks_keywords`) likewise
+(shared by `chunk` mode, `reasoning`'s first-round seed lexical arm and `search_chunks`'s `keywords`) likewise
 records no model error and shows no banner when it fails; it emits one `ask_stage` event with
 `stage="chunk_keyword_union"`, `status="failed_open"`, carrying only `notebook_id` and the exception class name
 `error_type`. A failed `reasoning` corpus-language probe likewise emits only one `ask_stage` event

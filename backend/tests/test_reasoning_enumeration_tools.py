@@ -45,11 +45,13 @@ FROZEN_REFLECT_SCHEMA_HINT = (
     'search_elements|ppr_retrieve|expand_community|follow_chain|exact_lookup",'
     '"expand":{"object_id":"","edge_type":null,'
     '"direction":"out|in|both"},"new_sub_query":{"query":"","types":[],'
-    '"prefer":"balanced","reason":""},"follow_chain":{"start_object_id":"",'
+    '"prefer":"keyword|semantic|balanced","reason":""},"follow_chain":{"start_object_id":"",'
     '"target_object_id":"","edge_type":null,"direction":"out|in|both"},'
-    '"community_focal":"","elements_query":"","ppr_query":"","exact_term":"",'
+    '"query":"",'
     '"reason":""}'
 )
+# 基线再前进一次(reflect 形状简化):单参数动作共用根级 ``query``,
+# ``prefer`` 写成三值枚举。关闭态的对照物随之换成这一份新形状。
 
 
 @pytest.fixture
@@ -382,18 +384,17 @@ def test_reflect_prompt_offers_the_sources_collection(repo):
 
 def test_scope_deixis_grounding_reaches_every_query_writing_prompt():
     """指示语接地(design doc §6.1):四份把用户问题变成检索文本的 prompt
-    ——意图契约、两份规划拼写、反思——必须都带这一段。
+    ——意图契约、规划、反思——必须都带这一段。
 
     少任何一份,那一层就会继续把「当前notebook」「知识图谱」当关键词发出去:
     没有文档含有装着它的那个库的名字,所以那是一次注定零命中的探测。
     """
     from app.services.prompts import (
-        SCOPE_DEIXIS_GROUNDING, expand_query_prompt, plan_prompt,
+        SCOPE_DEIXIS_GROUNDING, expand_query_prompt,
         query_intent_prompt, reflect_prompt,
     )
 
     assert SCOPE_DEIXIS_GROUNDING in query_intent_prompt("q")
-    assert SCOPE_DEIXIS_GROUNDING in plan_prompt("q")
     assert SCOPE_DEIXIS_GROUNDING in expand_query_prompt("q")
     assert SCOPE_DEIXIS_GROUNDING in reflect_prompt("q", "s")
     # 关掉枚举工具也不影响这一段:它讲的是子查询卫生,与工具无关。
@@ -437,11 +438,11 @@ def test_kg_is_a_scope_word_only_in_the_possessive_form():
     assert "ordinary TOPIC and stays a search term" in text
     assert "这些论文里知识图谱是怎么构建的" in text
     assert "must keep 知识图谱" in text
-    # 两半都必须真的到得了四份 prompt(豁免只写在常量里、没被拼进去等于没写)。
+    # 两半都必须真的到得了三份 prompt(豁免只写在常量里、没被拼进去等于没写)。
     from app.services.prompts import (
-        expand_query_prompt, plan_prompt, query_intent_prompt, reflect_prompt,
+        expand_query_prompt, query_intent_prompt, reflect_prompt,
     )
-    for rendered in (query_intent_prompt("q"), plan_prompt("q"),
+    for rendered in (query_intent_prompt("q"),
                      expand_query_prompt("q"), reflect_prompt("q", "s")):
         assert "ordinary TOPIC and stays a search term" in rendered
 
@@ -454,12 +455,11 @@ def test_scope_deixis_grounding_precedes_the_question_it_governs():
     ——规则出现在被它约束的输入后面,模型已经读完问题才被告知怎么处理范围词。
     """
     from app.services.prompts import (
-        expand_query_prompt, plan_prompt, query_intent_prompt,
+        expand_query_prompt, query_intent_prompt,
     )
 
     for rendered, marker in (
         (query_intent_prompt("q"), "User request:"),
-        (plan_prompt("q"), "Question:"),
         (expand_query_prompt("q"), "Question:"),
     ):
         grounding_at = rendered.index("Scope words are not search terms")
@@ -468,16 +468,20 @@ def test_scope_deixis_grounding_precedes_the_question_it_governs():
 
 
 def test_reflect_names_the_fields_a_scope_word_could_leak_into():
-    """reflect 是唯一有四个自由文本检索字段的 prompt,必须逐个点名。
+    """reflect 的自由文本检索字段必须逐个点名(子查询串与共用的 ``query``)。
 
-    exact_term 尤其:它是字面匹配,一个范围词进去就是保证零命中的探测。
+    exact_lookup 尤其:它按字面匹配 ``query``,一个范围词进去就是保证零命中的
+    探测——这句话写在 exact_lookup 自己的动作说明里。
     """
     from app.services.prompts import reflect_prompt
 
     on = reflect_prompt("q", "s", element_kinds=("formula",))
-    for field in ("new_sub_query.query", "elements_query", "ppr_query",
-                  "exact_term"):
-        assert field in on, field
+    rule = on[on.index("This applies to every retrieval field you fill"):]
+    rule = rule[:rule.index("\n")]
+    assert rule.endswith("new_sub_query.query and query.")
+    exact = on[on.index("- exact_lookup:"):]
+    exact = exact[:exact.index("\n")]
+    assert "matches query literally" in exact and "a scope word" in exact
     # 有工具时才教「问库本身的规模看计数行」——没有工具时那行计数根本不存在。
     assert "[Collections in scope] counts and the enumerate actions" in on
     assert "[Collections in scope] counts and the enumerate actions" not in (
@@ -494,11 +498,9 @@ def test_query_intent_prompt_keeps_a_library_wide_request_as_the_topic():
 
 
 def test_plan_side_prompts_take_the_collection_map():
-    from app.services.prompts import expand_query_prompt, plan_prompt
+    from app.services.prompts import expand_query_prompt
 
     line = "[Collections in scope] elements: formula 12 | KG objects: concept 3"
-    assert line not in plan_prompt("q")
-    assert line in plan_prompt("q", "", line)
     # plan() 实际发出的是 expand_query_prompt;地图必须落在**这一份**上,
     # 否则「注入规划上下文」只是注释里的说法。
     assert line not in expand_query_prompt("q")
@@ -2175,13 +2177,13 @@ def test_the_roster_scope_is_a_tool_parameter_the_model_fills(repo):
     ["ZKX7734", "沟槽隔离"],             # 模型常见的列表形态(宽松边界兼容)
 ])
 def test_chunks_keywords_survives_the_production_shape_boundary(repo, keywords):
-    """PR-3:`chunks_keywords` 走真实的两道校验(`parse_model_json_object` +
+    """PR-3:`keywords` 走真实的两道校验(`parse_model_json_object` +
     `validate_model_json_shape`)再进 `reflect()` 解析——字符串与列表两种形态都
     落地成同一个空格分隔串、这一轮不是兜底,关键词通道被调用一次。"""
     notebook = _seed(repo)
     llm = _ValidatingLLM([
-        {"next_action": "search_chunks", "chunks_query": "版图",
-         "chunks_keywords": keywords, "reason": "查型号"},
+        {"next_action": "search_chunks", "query": "版图",
+         "keywords": keywords, "reason": "查型号"},
         {"next_action": "answer", "sufficient": True},
     ])
     retriever, limits = _retriever(repo, llm)
@@ -2198,7 +2200,7 @@ def test_chunks_keywords_survives_the_production_shape_boundary(repo, keywords):
 
     assert _fallback_reasons(result) == []
     # schema 真的给了这个字段(否则这条用例测的是一个模型看不到的参数)。
-    assert any('"chunks_keywords":""' in hint for hint in llm.schema_hints)
+    assert any('"keywords":""' in hint for hint in llm.schema_hints)
     assert keyword_calls == ["ZKX7734 沟槽隔离"]
     [step] = [s for s in _steps(result, "search_chunks")
               if s.detail.get("phase") != "seed"]

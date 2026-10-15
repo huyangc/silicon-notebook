@@ -207,12 +207,7 @@ L1_FRAGMENTS: Dict[str, PromptFragment] = {
         _fragment(
             "expand_query.decomposition_guidance",
             "expand_query_prompt",
-            "子查询分解启发式与领域示例；不改变输出 schema 与数量上限。"
-            "plan_prompt 是同一条规划指令的 backup 拼写，在 prompts.py:438-445 "
-            "自带一段未被抽取、措辞不同但语义对等的分解指导；两份拼写受同一条 "
-            "「must be added to BOTH」纪律约束（见 plan_prompt 函数体前的 NOTE），"
-            "任何覆盖此片段的改动都必须同时处理 plan_prompt 那一份，否则规划模型"
-            "在两条拼写路径上会看到互相矛盾的分解规则。",
+            "子查询分解启发式与领域示例；不改变输出 schema 与数量上限。",
             "For a COMPARISON, "
             "emit ONE sub-query per entity (e.g. 'DeepSeek-V2 architecture and features', "
             "'DeepSeek-V3 improvements'). For a BROAD/overview question, emit one per "
@@ -337,7 +332,6 @@ L2_BLOCKS: Tuple[L2Block, ...] = (
         "history_block",
         (
             "answer_prompt",
-            "plan_prompt",
             "expand_query_prompt",
             "query_intent_prompt",
             "report_outline_prompt",
@@ -351,32 +345,32 @@ L2_BLOCKS: Tuple[L2Block, ...] = (
     ),
     L2Block(
         "profile_block",
-        ("plan_prompt", "expand_query_prompt"),
+        ("expand_query_prompt",),
         "Agentic Memory P1：该 notebook 的共享理解摘要（corpus_shape/key_entities/corpus_gaps）；关闭或未生成时为空串。",
         "app.services.agent_profile_block",
     ),
     L2Block(
         "experience_block",
-        ("plan_prompt", "expand_query_prompt"),
+        ("expand_query_prompt",),
         "Agentic Memory P2：部署级检索经验库摘要（哪个检索通道对哪类问题有效）；开关关闭时为空串。",
         "app.services.retrieval_experience_block",
     ),
     L2Block(
         "style_block",
-        ("answer_prompt", "plan_prompt", "expand_query_prompt"),
+        ("answer_prompt", "expand_query_prompt"),
         "Agentic Memory P3（T8）：按用户的检索风格提示（仅组织/措辞偏好，不涉及范围或检索通道）；无提示时为空串。",
         "app.services.search_profile.render_style_block",
     ),
     L2Block(
         "collection_map",
-        ("plan_prompt", "expand_query_prompt"),
+        ("expand_query_prompt",),
         "按类型分类的可枚举集合计数（仅计数，不含标题/正文），供规划把「列出所有 X」类问题当成盘点而非关键词搜索来处理。",
         "app.services.collection_catalog.render_collection_map",
     ),
     L2Block(
         "corpus_langs",
         ("expand_query_prompt", "reflect_prompt"),
-        "语料库涉及的语言代码列表，决定 high/low level keywords 与 reflect 里 search_chunks 的 chunks_keywords 要覆盖哪些语言拼写。",
+        "语料库涉及的语言代码列表，决定 high/low level keywords 与 reflect 里 search_chunks 的 keywords 要覆盖哪些语言拼写。",
         "调用方直接传入的参数（非渲染出的文本块）",
     ),
     L2Block(

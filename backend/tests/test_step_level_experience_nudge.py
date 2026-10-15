@@ -249,8 +249,8 @@ def test_nudge_appears_after_two_zero_hit_exact_lookups(repo):
     _write_experience(repo, "exact_lookup",
                       "bad", "exact_lookup rarely finds this shape.")
     llm = _SeqLLM([
-        {"next_action": "exact_lookup", "exact_term": "set_db"},
-        {"next_action": "exact_lookup", "exact_term": "get_db"},
+        {"next_action": "exact_lookup", "query": "set_db"},
+        {"next_action": "exact_lookup", "query": "get_db"},
         {"next_action": "answer", "sufficient": True},
     ])
     retriever = _retriever(repo, llm)
@@ -293,9 +293,9 @@ def test_zero_hit_streak_resets_on_a_genuine_hit_between_two_misses(repo):
     _write_experience(repo, "exact_lookup",
                       "bad", "exact_lookup rarely finds this shape.")
     llm = _SeqLLM([
-        {"next_action": "exact_lookup", "exact_term": "missing_cmd"},
-        {"next_action": "exact_lookup", "exact_term": "set_db"},
-        {"next_action": "exact_lookup", "exact_term": "unknown_flag"},
+        {"next_action": "exact_lookup", "query": "missing_cmd"},
+        {"next_action": "exact_lookup", "query": "set_db"},
+        {"next_action": "exact_lookup", "query": "unknown_flag"},
         {"next_action": "answer", "sufficient": True},
     ])
     retriever = _retriever(repo, llm)
@@ -318,8 +318,8 @@ def test_zero_hit_streak_still_fires_on_two_true_consecutive_misses(repo):
     _write_experience(repo, "exact_lookup",
                       "bad", "exact_lookup rarely finds this shape.")
     llm = _SeqLLM([
-        {"next_action": "exact_lookup", "exact_term": "missing_cmd"},
-        {"next_action": "exact_lookup", "exact_term": "unknown_flag"},
+        {"next_action": "exact_lookup", "query": "missing_cmd"},
+        {"next_action": "exact_lookup", "query": "unknown_flag"},
         {"next_action": "answer", "sufficient": True},
     ])
     retriever = _retriever(repo, llm)
@@ -337,8 +337,8 @@ def test_nudge_is_not_gated_by_effort_tier(repo):
     _write_experience(repo, "exact_lookup",
                       "bad", "exact_lookup rarely finds this shape.")
     llm = _SeqLLM([
-        {"next_action": "exact_lookup", "exact_term": "set_db"},
-        {"next_action": "exact_lookup", "exact_term": "get_db"},
+        {"next_action": "exact_lookup", "query": "set_db"},
+        {"next_action": "exact_lookup", "query": "get_db"},
         {"next_action": "answer", "sufficient": True},
     ])
     retriever = _retriever(repo, llm)
@@ -353,9 +353,9 @@ def test_injection_switch_off_disables_the_nudge(repo):
                       "bad", "exact_lookup rarely finds this shape.")
     repo.settings.retrieval_experience_inject_enabled = False
     llm = _SeqLLM([
-        {"next_action": "exact_lookup", "exact_term": "set_db"},
-        {"next_action": "exact_lookup", "exact_term": "get_db"},
-        {"next_action": "exact_lookup", "exact_term": "run_db"},
+        {"next_action": "exact_lookup", "query": "set_db"},
+        {"next_action": "exact_lookup", "query": "get_db"},
+        {"next_action": "exact_lookup", "query": "run_db"},
         {"next_action": "answer", "sufficient": True},
     ])
     retriever = _retriever(repo, llm)
@@ -377,8 +377,8 @@ def test_max_two_nudges_per_run_across_different_actions(repo):
                       "bad", "exact_lookup rarely finds this shape.")
     llm = _SeqLLM([
         # ppr zero-hit twice (no edges in this notebook).
-        {"next_action": "ppr_retrieve", "ppr_query": "毫不相关的检索词一"},
-        {"next_action": "ppr_retrieve", "ppr_query": "毫不相关的检索词二"},
+        {"next_action": "ppr_retrieve", "query": "毫不相关的检索词一"},
+        {"next_action": "ppr_retrieve", "query": "毫不相关的检索词二"},
         # follow_chain zero-hit twice, varying direction so neither call is
         # treated as a duplicate of the other.
         {"next_action": "follow_chain",
@@ -387,8 +387,8 @@ def test_max_two_nudges_per_run_across_different_actions(repo):
          "follow_chain": {"start_object_id": object_id, "direction": "in"}},
         # exact_lookup zero-hit twice — a third tracked action that would
         # ALSO qualify, proving the run-level cap (not a per-action cap).
-        {"next_action": "exact_lookup", "exact_term": "set_db"},
-        {"next_action": "exact_lookup", "exact_term": "get_db"},
+        {"next_action": "exact_lookup", "query": "set_db"},
+        {"next_action": "exact_lookup", "query": "get_db"},
         {"next_action": "answer", "sufficient": True},
     ])
     retriever = _retriever(repo, llm)
@@ -447,7 +447,7 @@ def test_nudge_precheck_skips_the_cache_read_when_no_action_qualifies(repo):
                       "bad", "exact_lookup rarely finds this shape.")
     counting_store = _CountingExperienceStore(repo.retrieval_experiences)
     llm = _SeqLLM([
-        {"next_action": "exact_lookup", "exact_term": "set_db"},
+        {"next_action": "exact_lookup", "query": "set_db"},
         {"next_action": "answer", "sufficient": True},
     ])
     retriever = _retriever(repo, llm)
@@ -469,8 +469,8 @@ def test_nudge_precheck_does_read_again_once_the_threshold_is_crossed(repo):
                       "bad", "exact_lookup rarely finds this shape.")
     counting_store = _CountingExperienceStore(repo.retrieval_experiences)
     llm = _SeqLLM([
-        {"next_action": "exact_lookup", "exact_term": "set_db"},
-        {"next_action": "exact_lookup", "exact_term": "get_db"},
+        {"next_action": "exact_lookup", "query": "set_db"},
+        {"next_action": "exact_lookup", "query": "get_db"},
         {"next_action": "answer", "sufficient": True},
     ])
     retriever = _retriever(repo, llm)
@@ -492,8 +492,8 @@ def test_fail_open_on_a_broken_experience_store(repo):
             raise RuntimeError("boom")
 
     llm = _SeqLLM([
-        {"next_action": "exact_lookup", "exact_term": "set_db"},
-        {"next_action": "exact_lookup", "exact_term": "get_db"},
+        {"next_action": "exact_lookup", "query": "set_db"},
+        {"next_action": "exact_lookup", "query": "get_db"},
         {"next_action": "answer", "sufficient": True},
     ])
     retriever = _retriever(repo, llm)
@@ -518,8 +518,8 @@ def test_cancellation_during_the_nudge_lookup_still_propagates(repo):
             raise AskCancelled("user pressed stop")
 
     llm = _SeqLLM([
-        {"next_action": "exact_lookup", "exact_term": "set_db"},
-        {"next_action": "exact_lookup", "exact_term": "get_db"},
+        {"next_action": "exact_lookup", "query": "set_db"},
+        {"next_action": "exact_lookup", "query": "get_db"},
         {"next_action": "answer", "sufficient": True},
     ])
     retriever = _retriever(repo, llm)
@@ -541,8 +541,8 @@ def test_the_nudge_reads_this_notebooks_own_partition(repo):
                       "exact_lookup rarely finds this shape.",
                       partition=notebook.id)
     llm = _SeqLLM([
-        {"next_action": "exact_lookup", "exact_term": "set_db"},
-        {"next_action": "exact_lookup", "exact_term": "get_db"},
+        {"next_action": "exact_lookup", "query": "set_db"},
+        {"next_action": "exact_lookup", "query": "get_db"},
         {"next_action": "answer", "sufficient": True},
     ])
     retriever = _retriever(repo, llm)
@@ -559,8 +559,8 @@ def test_the_nudge_never_quotes_another_notebooks_partition(repo):
     _write_experience(repo, "exact_lookup", "bad",
                       "Another library's own tactic.", partition=other.id)
     llm = _SeqLLM([
-        {"next_action": "exact_lookup", "exact_term": "set_db"},
-        {"next_action": "exact_lookup", "exact_term": "get_db"},
+        {"next_action": "exact_lookup", "query": "set_db"},
+        {"next_action": "exact_lookup", "query": "get_db"},
         {"next_action": "answer", "sufficient": True},
     ])
     retriever = _retriever(repo, llm)
@@ -606,8 +606,8 @@ def test_the_nudge_quotes_this_notebooks_reason_over_the_shared_one(repo):
     _write_experience(repo, "exact_lookup", "bad",
                       "Shared fallback tactic for exact_lookup.")
     llm = _SeqLLM([
-        {"next_action": "exact_lookup", "exact_term": "set_db"},
-        {"next_action": "exact_lookup", "exact_term": "get_db"},
+        {"next_action": "exact_lookup", "query": "set_db"},
+        {"next_action": "exact_lookup", "query": "get_db"},
         {"next_action": "answer", "sufficient": True},
     ])
     retriever = _retriever(repo, llm)

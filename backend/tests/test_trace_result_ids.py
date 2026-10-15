@@ -334,7 +334,7 @@ def test_ppr_action_step_carries_result_ids(rrepo):
     nb = _seed_two_nodes(rrepo)
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
-        reflects=[{"next_action": "ppr_retrieve", "ppr_query": "跨文档"},
+        reflects=[{"next_action": "ppr_retrieve", "query": "跨文档"},
                   {"next_action": "answer", "sufficient": True}]))
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     seed_chunk = RetrievedChunk(chunk_id="ck-seed", source_id="s1",
@@ -361,7 +361,7 @@ def test_ppr_action_step_writes_empty_result_ids_on_zero_hits(rrepo):
     nb = _seed_two_nodes(rrepo)
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
-        reflects=[{"next_action": "ppr_retrieve", "ppr_query": "跨文档"},
+        reflects=[{"next_action": "ppr_retrieve", "query": "跨文档"},
                   {"next_action": "answer", "sufficient": True}]))
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     rr.ppr_retrieve = lambda notebook_id, query: []
@@ -378,7 +378,7 @@ def test_exact_lookup_action_step_carries_result_ids(rrepo):
     rrepo.settings.graph_ppr_enabled = False
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
-        reflects=[{"next_action": "exact_lookup", "exact_term": "set_db"},
+        reflects=[{"next_action": "exact_lookup", "query": "set_db"},
                   {"next_action": "answer", "sufficient": True}]))
     calls: list = []
     res = _retriever_counting_exact_lookup(rrepo, calls).run(
@@ -393,7 +393,7 @@ def test_exact_lookup_action_step_writes_empty_result_ids_on_zero_hits(rrepo):
     rrepo.settings.graph_ppr_enabled = False
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
-        reflects=[{"next_action": "exact_lookup", "exact_term": "no_such_cmd"},
+        reflects=[{"next_action": "exact_lookup", "query": "no_such_cmd"},
                   {"next_action": "answer", "sufficient": True}]))
     res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
         nb.id, "这个命令怎么用", "")
@@ -437,7 +437,7 @@ def test_search_chunks_action_step_carries_result_ids(rrepo):
     rrepo.settings.graph_ppr_enabled = False
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
-        reflects=[{"next_action": "search_chunks", "chunks_query": "布局"},
+        reflects=[{"next_action": "search_chunks", "query": "布局"},
                   {"next_action": "answer", "sufficient": True}]))
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     _stub_search_chunks(rr, [], {"布局": [_chunk_hit("ck-action")]})
@@ -456,7 +456,7 @@ def test_search_chunks_action_step_writes_empty_result_ids_on_zero_hits(rrepo):
     rrepo.settings.graph_ppr_enabled = False
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
-        reflects=[{"next_action": "search_chunks", "chunks_query": "布局"},
+        reflects=[{"next_action": "search_chunks", "query": "布局"},
                   {"next_action": "answer", "sufficient": True}]))
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     _stub_search_chunks(rr, [], {})
@@ -475,7 +475,7 @@ def test_search_chunks_cap_skip_never_writes_result_ids(rrepo):
     rrepo.settings.reasoning_max_chunk_searches = 0
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
-        reflects=[{"next_action": "search_chunks", "chunks_query": "布局"},
+        reflects=[{"next_action": "search_chunks", "query": "布局"},
                   {"next_action": "answer", "sufficient": True}]))
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     calls = []
@@ -565,7 +565,7 @@ def test_skip_branches_never_write_result_ids(rrepo):
     rrepo.settings.graph_ppr_enabled = False
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
-        reflects=[{"next_action": "exact_lookup", "exact_term": "第 2.1 节"},
+        reflects=[{"next_action": "exact_lookup", "query": "第 2.1 节"},
                   {"next_action": "answer", "sufficient": True}]))
     res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
         nb.id, "这个流程是怎样的", "")

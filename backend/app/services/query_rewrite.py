@@ -124,7 +124,7 @@ def expand_query(client, question: str, history: str = "", *,
                 types = [t for t in (tr if isinstance(tr, list) else []) if t in _KG_TYPES]
                 prefer = s.get("prefer") if s.get("prefer") in _PREFER else "balanced"
             out.append(SubQuerySpec(query=q, types=types, prefer=prefer,
-                                    reason=str(s.get("reason", ""))))
+                                    reason=as_text(s.get("reason"))))
             if len(out) >= max_subqueries:
                 break
         if not out:

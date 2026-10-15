@@ -353,13 +353,6 @@ def test_schema_induction_prompt_preserves_source_language_keeps_ascii_keys():
     assert "snake_case" in p
 
 
-def test_notebook_description_prompt_uses_dominant_source_language():
-    from app.services.prompts import notebook_description_prompt
-    p = notebook_description_prompt("srcs")
-    assert "(Chinese ok)" not in p
-    assert "dominant language of the sources" in p.lower()
-
-
 def test_notebook_meta_prompt_uses_dominant_source_language():
     from app.services.prompts import notebook_meta_prompt
     p = notebook_meta_prompt("srcs")

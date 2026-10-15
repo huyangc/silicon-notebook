@@ -33,10 +33,10 @@ def test_section_prompt_says_one_string_value_per_facet():
 
 def test_reflect_outline_hint_spells_optional_parent_as_null():
     hint = prompts.reflect_schema_hint((), (), True, False, False, False)
-    section = json.loads(hint)["outline"]["sections"][0]
+    section = json.loads(hint)["outline_sections"][0]
     assert section["parent"] is None
     prose = prompts.reflect_prompt("q", "candidates", outline=True)
-    assert "null or omitted for a top-level section" in prose
+    assert "a parent (null for a top-level section" in prose
 
 
 def test_expand_prompt_closes_with_the_advertised_schema_hint():
@@ -57,7 +57,10 @@ def test_document_guide_hint_has_empty_slots_and_the_instruction_embeds_it():
     source = inspect.getsource(document_guide.guide_style_instruction)
     assert "GUIDE_SCHEMA_HINT" in source
     assert "empty list [] (never null)" in source
-    assert "never null, never" in source and "a placeholder sentence" in source
+    # Slots may be null under the strict schema (the renderer falls back), so
+    # the prose only rules out placeholder sentences; root lists stay non-null.
+    assert "never null, never" not in source and "a placeholder sentence" in source
+    assert "placeholders, not documents" in source
 
 
 def test_paper_meta_prompt_says_null_and_integer_year():

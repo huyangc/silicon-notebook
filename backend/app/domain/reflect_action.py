@@ -97,7 +97,13 @@ REFLECT_ACTION_ENUM_VALUE_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 # ``name`` and ``reason`` are the two words a model most readily writes at the
 # top level of a reflect object; a parameter spelled either way inside the
 # action's nested object invites it to fill the outer field instead.
-RESERVED_REFLECT_PARAMETER_NAMES = frozenset({"name", "reason"})
+#
+# The strict-schema fallback keys (``STRICT_SCHEMA_FALLBACK_KEYS`` below) are
+# reserved here too: a parameter nests inside the action's object, and the
+# strict projection gives up on such a key wherever it appears.
+RESERVED_REFLECT_PARAMETER_NAMES = frozenset({
+    "name", "reason", "source_queries", "frame_assignments",
+})
 
 # Anything in this class inside a descriptor string is a registration failure,
 # never a strip.  The set is wider than "control characters" in the ASCII sense
@@ -152,18 +158,32 @@ REFLECT_SCHEMA_TOP_LEVEL_FIELDS = frozenset({
     "new_sub_query",
     "follow_chain",
     "enumerate",
-    "outline",
-    "community_focal",
-    "elements_query",
-    "ppr_query",
-    "exact_term",
-    "chunks_query",
+    # The outline scratchpad's section list (``update_outline``).
+    "outline_sections",
+    # The one search string every single-string action reads as its own
+    # parameter (search_elements, exact_lookup, ppr_retrieve,
+    # expand_community, search_chunks).
+    "query",
     # The ``search_chunks`` action's optional literal-keyword (full-text) half;
-    # rides the same gate as ``chunks_query``.
-    "chunks_keywords",
+    # rides the ``keyword_search`` sub-gate.
+    "keywords",
     # PR-A: the ``read_document`` action's own arguments (``source`` /
     # ``coverage``) nest under this same-named top-level field.
     "read_document",
+})
+
+# Keys that make ``app.core.model_schema.response_format_for_hint`` give up on
+# the strict structured-output projection (its ``_DYNAMIC_FIELDS``: objects
+# whose keys are data, not a fixed contract). A plugin action of one of these
+# names -- or a parameter of one, since parameters nest under the action name
+# -- would silently drop the WHOLE reflect hint back to JSON mode for every
+# run that offers it. Spelled out here rather than imported: ``app.domain``
+# does not reach into a core module's private constant, and the reflective
+# test in ``backend/tests/test_reflect_action_contract.py`` pins this set
+# against that constant so the two cannot drift.
+STRICT_SCHEMA_FALLBACK_KEYS = frozenset({
+    "source_queries",
+    "frame_assignments",
 })
 
 # The union is what registration rejects.  It lives in ``app.domain`` rather
@@ -176,7 +196,9 @@ REFLECT_SCHEMA_TOP_LEVEL_FIELDS = frozenset({
 # ``reflect_schema_hint`` with every gate open
 # (``backend/tests/test_reflect_action_contract.py``).
 RESERVED_REFLECT_KEYS: frozenset[str] = (
-    CORE_REFLECT_ACTION_IDS | REFLECT_SCHEMA_TOP_LEVEL_FIELDS
+    CORE_REFLECT_ACTION_IDS
+    | REFLECT_SCHEMA_TOP_LEVEL_FIELDS
+    | STRICT_SCHEMA_FALLBACK_KEYS
 )
 
 
@@ -424,6 +446,7 @@ __all__ = [
     "ReflectActionOutcome",
     "ReflectActionParameter",
     "ReflectActionSpec",
+    "STRICT_SCHEMA_FALLBACK_KEYS",
     "contains_control_characters",
     "fold_control_characters",
 ]

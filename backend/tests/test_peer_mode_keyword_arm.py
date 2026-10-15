@@ -506,7 +506,7 @@ def test_switch_off_restores_the_empty_peer_arm_and_queries_nothing():
 
 @pytest.mark.parametrize("enabled", [True, False])
 def test_keyword_arm_availability_is_the_switch_in_peer_mode_only(enabled):
-    """``keyword_arm_available`` 是通道短路与 reasoning ``chunks_keywords`` 子闸
+    """``keyword_arm_available`` 是通道短路与 reasoning ``keywords`` 子闸
     共读的那一句:对等模式下等于开关;单库路径恒 True 且**不读**开关。"""
     from app.services.retrieval_candidates import keyword_arm_available
 

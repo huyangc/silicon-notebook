@@ -130,7 +130,7 @@ ANSWER = {"next_action": "answer", "sufficient": True}
 
 def _outline_action(sections, reason="整理大纲"):
     return {"next_action": OUTLINE_ACTION, "reason": reason,
-            "outline": {"sections": sections}}
+            "outline_sections": sections}
 
 
 def _retriever(repo, llm, *, effort="exhaustive", fail_closed=False):
@@ -218,8 +218,8 @@ def test_prompt_and_schema_offer_the_action_only_when_gated_on():
 
     schema_on = reflect_schema_hint(outline=True)
     # ``parent`` is spelled null: the prose calls it optional (audit A4).
-    assert ('"outline":{"sections":[{"id":"","title":"","parent":null,'
-            '"evidence":[""],"remove_evidence":[""]}]}' in schema_on)
+    assert ('"outline_sections":[{"id":"","title":"","parent":null,'
+            '"evidence":[""],"remove_evidence":[""]}]' in schema_on)
     assert f"|{OUTLINE_ACTION}" in schema_on
     # 关闭态逐字回到接入前:模块级常量(枚举工具的冻结基线钉的就是它)不受影响。
     assert "outline" not in reflect_schema_hint()
@@ -251,7 +251,7 @@ def test_outline_and_enumeration_gates_are_independent():
 
     schema = reflect_schema_hint(ENUMERABLE_ELEMENT_KINDS,
                                  ENUMERABLE_KG_OBJECT_TYPES, outline=True)
-    assert '"enumerate":{' in schema and '"outline":{' in schema
+    assert '"enumerate":{' in schema and '"outline_sections":[' in schema
 
 
 @pytest.mark.parametrize("effort,enabled", [
@@ -288,11 +288,11 @@ def test_the_documented_bounds_are_the_ones_in_the_code():
 
 
 def test_parse_clamps_every_documented_bound():
-    raw = {"sections": [
+    raw = [
         {"id": f"s{i}", "title": f"节{i}" * 40,
          "evidence": [f"k{i}-{j}" for j in range(12)]}
         for i in range(20)
-    ]}
+    ]
 
     sections = parse_outline_sections(raw)
 
@@ -306,18 +306,18 @@ def test_parse_clamps_every_documented_bound():
 
 
 def test_parse_clamps_and_deduplicates_explicit_evidence_removals():
-    section = parse_outline_sections({"sections": [{
+    section = parse_outline_sections([{
         "id": "s1", "title": "一节",
         "remove_evidence": ["k1", None, "k1", *[f"k{n}" for n in range(2, 12)]],
-    }]})[0]
+    }])[0]
 
     assert section.remove_evidence_keys == [f"k{n}" for n in range(1, 9)]
 
 
 def test_parse_clamps_long_ids_and_evidence_keys():
-    raw = {"sections": [{
+    raw = [{
         "id": "x" * 200, "title": "引言", "evidence": ["k" * 200],
-    }]}
+    }]
 
     section = parse_outline_sections(raw)[0]
 
@@ -330,12 +330,12 @@ def test_parse_clamps_long_ids_and_evidence_keys():
 
 def test_parse_drops_malformed_entries_but_keeps_the_rest():
     """fail-open 逐项丢弃(与 enumerate 非白名单值同形),不是整份拒绝。"""
-    sections = parse_outline_sections({"sections": [
+    sections = parse_outline_sections([
         "不是对象",
         {"title": ""},                       # 无标题 = 不是一节
         {"title": "  引言  ", "evidence": "不是列表"},
         {"id": "b", "title": "方法", "evidence": ["k1", None, "k1", 7, "k2"]},
-    ]})
+    ])
 
     assert [s.title for s in sections] == ["引言", "方法"]
     assert sections[0].evidence_keys == []          # 非列表 evidence → 空
@@ -343,22 +343,24 @@ def test_parse_drops_malformed_entries_but_keeps_the_rest():
 
 
 def test_parse_rejects_non_list_payloads():
-    for raw in (None, "outline", 7, {"sections": "x"}, {}):
+    # The pre-flattening wrapper object is no longer a shape the parser reads.
+    for raw in (None, "outline", 7, {"sections": "x"}, {},
+                {"sections": [{"id": "a", "title": "x"}]}):
         assert parse_outline_sections(raw) == []
 
 
 def test_parse_assigns_deterministic_ids_when_missing_or_duplicated():
-    sections = parse_outline_sections({"sections": [
+    sections = parse_outline_sections([
         {"title": "一"}, {"title": "二"}, {"id": "s2", "title": "三"},
-    ]})
+    ])
 
     ids = [s.id for s in sections]
     assert ids == ["s1", "s2", "s2-2"]
     assert len(set(ids)) == 3
     # 同一份输入必须给出同一份 id:模型下一轮要按这些 id 原样重提。
-    assert ids == [s.id for s in parse_outline_sections({"sections": [
+    assert ids == [s.id for s in parse_outline_sections([
         {"title": "一"}, {"title": "二"}, {"id": "s2", "title": "三"},
-    ]})]
+    ])]
 
 
 def test_long_colliding_ids_terminate_and_stay_unique():
@@ -375,10 +377,10 @@ def test_long_colliding_ids_terminate_and_stay_unique():
     """
     prefix32 = "outline-section-approach-alpha-a"          # 32 字符
     assert len(prefix32) == 32
-    slugs = parse_outline_sections({"sections": [
+    slugs = parse_outline_sections([
         {"id": prefix32 + "a", "title": "方案甲"},
         {"id": prefix32 + "b", "title": "方案乙"},
-    ]})
+    ])
 
     ids = [s.id for s in slugs]
     assert len(set(ids)) == 2, ids
@@ -386,11 +388,11 @@ def test_long_colliding_ids_terminate_and_stay_unique():
 
     prefix31 = "outline-section-approach-alph-a"           # 31 字符
     assert len(prefix31) == 31
-    same = parse_outline_sections({"sections": [
+    same = parse_outline_sections([
         {"id": prefix31, "title": "甲"},
         {"id": prefix31, "title": "乙"},
         {"id": prefix31, "title": "丙"},
-    ]})
+    ])
 
     ids = [s.id for s in same]
     assert len(set(ids)) == 3, ids
@@ -401,11 +403,11 @@ def test_long_colliding_ids_terminate_and_stay_unique():
     assert ids[1].endswith("-2") and ids[2].endswith("-3"), ids
     assert all(i.startswith(prefix31[:28]) for i in ids), ids
     # 确定性:同一份输入必须给出同一份 id(模型下一轮要按它们原样重提)。
-    assert ids == [s.id for s in parse_outline_sections({"sections": [
+    assert ids == [s.id for s in parse_outline_sections([
         {"id": prefix31, "title": "甲"},
         {"id": prefix31, "title": "乙"},
         {"id": prefix31, "title": "丙"},
-    ]})]
+    ])]
 
 
 def test_id_dedup_falls_back_to_position_ids():
@@ -421,13 +423,13 @@ def test_id_dedup_falls_back_to_position_ids():
 
 
 def test_parse_keeps_two_layers_and_drops_impossible_parents():
-    sections = parse_outline_sections({"sections": [
+    sections = parse_outline_sections([
         {"id": "a", "title": "顶层"},
         {"id": "b", "title": "子节", "parent": "a"},
         {"id": "c", "title": "孙节", "parent": "b"},     # 第三层 → 提为顶层
         {"id": "d", "title": "野指针", "parent": "zzz"},  # 不存在 → 顶层
         {"id": "e", "title": "自环", "parent": "e"},      # 指向自己 → 顶层
-    ]})
+    ])
 
     parents = {s.id: s.parent for s in sections}
     assert parents == {"a": "", "b": "a", "c": "", "d": "", "e": ""}
@@ -435,19 +437,19 @@ def test_parse_keeps_two_layers_and_drops_impossible_parents():
 
 def test_parse_resolves_a_forward_parent_reference():
     """子节先于父节出现也算合法:两层判定必须在收齐所有节之后做。"""
-    sections = parse_outline_sections({"sections": [
+    sections = parse_outline_sections([
         {"id": "b", "title": "子节", "parent": "a"},
         {"id": "a", "title": "父节"},
-    ]})
+    ])
 
     assert {s.id: s.parent for s in sections} == {"b": "a", "a": ""}
 
 
 def test_parse_breaks_a_parent_cycle():
-    sections = parse_outline_sections({"sections": [
+    sections = parse_outline_sections([
         {"id": "a", "title": "甲", "parent": "b"},
         {"id": "b", "title": "乙", "parent": "a"},
-    ]})
+    ])
 
     assert [s.parent for s in sections] == ["", ""]
 
@@ -493,9 +495,9 @@ def test_evidence_key_width_fits_the_real_surrogate_ids():
         generated = _new_id(prefix)
         assert len(generated) < _OUTLINE_EVIDENCE_KEY_CHARS, generated
         # 也要真的活过解析层(那里才是截断发生的地方)。
-        section = parse_outline_sections({"sections": [
+        section = parse_outline_sections([
             {"id": "a", "title": "引言", "evidence": [generated]},
-        ]})[0]
+        ])[0]
         assert section.evidence_keys == [generated]
 
 
@@ -773,7 +775,7 @@ def test_sufficient_overflow_repair_round_cannot_execute_retrieval(repo, monkeyp
         dict(_outline_action([
             {"id": "a", "title": "一节", "evidence": [new_key]},
         ]), sufficient=True),
-        {"next_action": "search_elements", "elements_query": "不应执行"},
+        {"next_action": "search_elements", "query": "不应执行"},
     ])
     retriever, limits = _retriever(repo, llm)
 
@@ -876,7 +878,7 @@ def test_max_steps_never_adds_an_overflow_repair_round(
     llm = _SeqLLM([
         _outline_action([{"id": "a", "title": "一节", "evidence": old_keys}]),
         _outline_action([{"id": "a", "title": "一节", "evidence": [new_key]}]),
-        {"next_action": "search_elements", "elements_query": "不应执行"},
+        {"next_action": "search_elements", "query": "不应执行"},
     ])
     retriever, limits = _retriever(repo, llm)
 
@@ -1146,7 +1148,7 @@ def test_a_retrieval_step_between_outline_updates_keeps_the_run_alive(repo):
     notebook = _seed(repo, elements=2)
     llm = _SeqLLM([
         _outline_action([{"id": "a", "title": "一"}]),
-        {"next_action": "search_elements", "elements_query": "版图设计要点"},
+        {"next_action": "search_elements", "query": "版图设计要点"},
         _outline_action([{"id": "a", "title": "一"}, {"id": "b", "title": "二"}]),
         ANSWER,
     ])
@@ -1250,7 +1252,7 @@ def test_run_wires_the_id_display_to_the_gate(repo, effort, ids_expected):
     """
     notebook = _seed(repo, elements=2)
     llm = _SeqLLM([
-        {"next_action": "search_elements", "elements_query": "版图设计要点"},
+        {"next_action": "search_elements", "query": "版图设计要点"},
         ANSWER,
     ])
     retriever, limits = _retriever(repo, llm, effort=effort)
@@ -1313,7 +1315,7 @@ def test_bindings_survive_the_candidate_window(repo):
 
 def test_fail_closed_rejects_an_outline_action_without_sections(repo):
     notebook = _seed(repo)
-    llm = _SeqLLM([{"next_action": OUTLINE_ACTION, "outline": {"sections": []}}])
+    llm = _SeqLLM([{"next_action": OUTLINE_ACTION, "outline_sections": []}])
     retriever, limits = _retriever(repo, llm, fail_closed=True)
 
     with pytest.raises(ValueError, match="outline sections"):
@@ -1402,7 +1404,7 @@ def test_the_final_update_outline_lands_even_with_sufficient(repo):
             {"id": "b", "title": "待补的一节"},
         ]),
         # ② 为空节做一次定向检索(它也把 stale 清零,与真实用法同形)。
-        {"next_action": "search_elements", "elements_query": "版图设计要点"},
+        {"next_action": "search_elements", "query": "版图设计要点"},
         # ③ 最终版大纲 + sufficient=true:同一轮里既补上绑定又宣布收尾。
         lambda prompt: dict(
             _outline_action([
@@ -1443,7 +1445,7 @@ def test_answer_with_sufficient_applies_no_outline_payload(repo):
     llm = _SeqLLM([
         _outline_action([{"id": "a", "title": "保留的一节"}]),
         {"next_action": "answer", "sufficient": True,
-         "outline": {"sections": [{"id": "z", "title": "不该生效的一节"}]}},
+         "outline_sections": [{"id": "z", "title": "不该生效的一节"}]},
     ])
     retriever, limits = _retriever(repo, llm)
 
@@ -1481,15 +1483,15 @@ def test_parse_strips_citation_markers_from_titles():
     留着的话 `## 标题` 进最终 Markdown 后,前端对合并全文扫标记建引用表——
     标题里的号要么显示成绑不上的裸引用,要么恰好撞上别节号段、绑到毫不相干
     的证据。解析入口单点剥掉,trace 步/账目回喂/最终标题共用同一份产物。"""
-    sections = parse_outline_sections({"sections": [
+    sections = parse_outline_sections([
         {"id": "s1", "title": "结论 [k12] 汇总 [ k3, k4 ]", "evidence": []},
-    ]})
+    ])
     assert len(sections) == 1
     assert sections[0].title == "结论 汇总"
     # 整个标题都是标记时,剥完为空 → 与无标题条目同判,整条丢弃。
-    assert parse_outline_sections({"sections": [
+    assert parse_outline_sections([
         {"id": "s2", "title": "[k5001]", "evidence": []},
-    ]}) == []
+    ]) == []
 
 
 # --------------------------------------------- 大纲采用引导(设计文档 §3.1.1)
@@ -1619,9 +1621,9 @@ def test_a_finished_roster_nudges_the_model_at_most_twice(repo):
     llm = _SeqLLM([
         {"next_action": "enumerate_elements", "reason": "先看有哪几篇",
          "enumerate": {"collection": "sources"}},
-        {"next_action": "search_elements", "elements_query": "版图设计要点 一"},
-        {"next_action": "search_elements", "elements_query": "版图设计要点 二"},
-        {"next_action": "search_elements", "elements_query": "版图设计要点 三"},
+        {"next_action": "search_elements", "query": "版图设计要点 一"},
+        {"next_action": "search_elements", "query": "版图设计要点 二"},
+        {"next_action": "search_elements", "query": "版图设计要点 三"},
         ANSWER,
     ])
     retriever, limits = _retriever(repo, llm)
@@ -1687,7 +1689,7 @@ def test_confirmed_directions_nudge_without_any_roster(repo):
     """
     notebook = _seed(repo, elements=2)
     llm = _SeqLLM([
-        {"next_action": "search_elements", "elements_query": "版图设计要点"},
+        {"next_action": "search_elements", "query": "版图设计要点"},
         ANSWER,
     ])
     retriever, limits = _retriever(repo, llm)
@@ -1702,7 +1704,7 @@ def test_a_single_confirmed_direction_is_not_a_reason(repo):
     """只有整体问题一条种子(零必答方向)→ 不引导。"""
     notebook = _seed(repo, elements=2)
     llm = _SeqLLM([
-        {"next_action": "search_elements", "elements_query": "版图设计要点"},
+        {"next_action": "search_elements", "query": "版图设计要点"},
         ANSWER,
     ])
     retriever, limits = _retriever(repo, llm)
@@ -1723,7 +1725,7 @@ def test_exactly_one_direction_is_still_not_a_reason(repo):
     """
     notebook = _seed(repo, elements=2)
     llm = _SeqLLM([
-        {"next_action": "search_elements", "elements_query": "版图设计要点"},
+        {"next_action": "search_elements", "query": "版图设计要点"},
         ANSWER,
     ])
     retriever, limits = _retriever(repo, llm)

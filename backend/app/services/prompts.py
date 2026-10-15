@@ -99,8 +99,6 @@ def quoted_phrase_grounding(question: str) -> str:
     )
 
 
-DESCRIPTION_SCHEMA_HINT = '{"description":""}'
-
 CONCEPT_DESC_SCHEMA_HINT = '{"description":""}'
 
 MEMORY_PREVIEW_SCHEMA_HINT = '{"title":"","content_md":"","tags":[""]}'
@@ -130,17 +128,6 @@ def concept_description_prompt(name: str, evidence_block: str) -> str:
         "the source snippets. "
         "Return JSON only with a 'description' field.\n\n"
         f"Concept: {name}\n\nSource snippets:\n{evidence_block}"
-    )
-
-
-def notebook_description_prompt(sources_block: str) -> str:
-    return (
-        "Write a concise 1-2 sentence description, in the dominant language of the "
-        "sources, of what this knowhow notebook covers, based on the sources its "
-        "curator has added. Describe the subject matter and document types; do not "
-        "invent scope beyond the sources. Return valid JSON only with a "
-        "'description' field.\n\n"
-        f"Sources:\n{sources_block}"
     )
 
 
@@ -246,7 +233,7 @@ def followup_rewrite_prompt(history_block: str, question: str) -> str:
         "- If the question is already standalone, return it essentially unchanged.\n\n"
         f"Prior conversation:\n{history_block}\n\n"
         f"Follow-up question: {question}\n\n"
-        'Return JSON only: {"query":"<standalone search query>"}'
+        f"Return JSON only: {FOLLOWUP_REWRITE_SCHEMA_HINT}"
     )
 
 
@@ -471,113 +458,6 @@ def answer_prompt(
     )
 
 
-PLAN_SCHEMA_HINT = (
-    '{"sub_queries":[{"query":"","types":["concept","claim","formula","procedure"],'
-    '"prefer":"keyword|semantic|balanced","reason":""}]}'
-)
-
-
-def plan_prompt(
-    question: str, history_block: str = "", collection_map: str = "",
-    profile_block: str = "", experience_block: str = "",
-    *, style_block: str = "", kg_available: bool = True,
-) -> str:
-    history_section = (
-        "Prior conversation (resolve pronouns/ellipsis against it):\n"
-        f"{history_block}\n\n" if history_block else ""
-    )
-    # NOTE: this function is a BACKUP spelling of the planning instruction and
-    # is not what production sends — ``ReasoningRetriever.plan`` goes through
-    # ``expand_query`` / ``expand_query_prompt``.  It is kept in sync (including
-    # this parameter) so the two never state different plans; anything that has
-    # to reach a planning model must be added to BOTH.
-    #
-    # The typed-collection map is counts only (no titles, no text): it tells the
-    # planner what kinds of listable material exist and how much, so a "which
-    # formulas are there" question can be planned as an inventory instead of as
-    # a keyword hunt.  Empty when the enumeration tools are off or the map could
-    # not be built — the prompt then reads exactly as it did before.
-    collection_section = f"{collection_map}\n\n" if collection_map else ""
-    # The agent's accumulated understanding of THIS library (Agentic Memory P1,
-    # design §5.2).  Same "add it to BOTH spellings" rule as the map above —
-    # this backup spelling exists so the two never state different plans.
-    # Empty when the feature is off, when nothing has been consolidated yet, or
-    # when the read failed; the prompt then reads exactly as it did before.
-    profile_section = f"{profile_block}\n\n" if profile_block else ""
-    # The deployment-global retrieval experience library (Agentic Memory P2,
-    # design §6.1).  Same "add it to BOTH spellings" rule again.  It says which
-    # SEARCH CHANNEL tends to pay off on this shape of question — never which
-    # sources may be read — and it is empty whenever the injection switch is
-    # off (its default), so the prompt then reads exactly as it did before.
-    experience_section = f"{experience_block}\n\n" if experience_block else ""
-    # The per-user search-profile style hint (Agentic Memory P3, T8) — see
-    # ``expand_query_prompt``'s identical comment. This function is a BACKUP
-    # spelling (see the NOTE above); the parameter is added here too so the
-    # two spellings never state different plans.
-    style_section = f"{style_block}\n\n" if style_block else ""
-    # ``kg_available`` is a run-level GATE (not an L2 data block, so it is
-    # deliberately NOT registered in ``prompt_layers.L2_BLOCKS``: the two-way
-    # reconciliation there only covers parameters named after a registered
-    # block id).  False = this run's retrieval scope holds no knowledge graph
-    # (``reasoning_retrieval.kg_in_scope_for``), so the KG framing of the
-    # opening paragraph would describe a store that does not exist; the JSON
-    # contract is untouched (``types`` stays a legal, ignorable list).  True is
-    # byte-for-byte the text this function produced before the gate existed.
-    #
-    # The "must be added to BOTH spellings" discipline of the NOTE above does
-    # NOT require a matching gate in ``expand_query_prompt``: that discipline
-    # exists so the two spellings never state DIFFERENT plans, and
-    # ``expand_query_prompt``'s own opening sentence is already KG-neutral
-    # ("retrieval over a document corpus") — the only KG wording it carries is
-    # the ``want_types`` line, which is a separate caller-supplied gate and is
-    # untouched here.  Adding this gate therefore moves the backup spelling
-    # TOWARD the production one rather than away from it, and the L1 fragment
-    # ``expand_query.decomposition_guidance`` (the decomposition heuristics the
-    # BOTH-rule was written for) is not touched at all.
-    kg_opening = (
-        "You plan how to retrieve a knowledge graph (KG) to answer an "
-        "engineer's question. The KG has 4 node types: concept (definitions), "
-        "claim (conclusions), formula (math/models), procedure (step flows).\n"
-        if kg_available else
-        "You plan how to retrieve evidence from a document library to answer "
-        "an engineer's question. Sub-queries are run against source passages; "
-        "the `types` field is ignored when the library has no knowledge "
-        "graph.\n"
-    )
-    # The ``types`` field description names "the 4" node types the KG opening
-    # paragraph introduces; with that paragraph gone the reference dangles, so
-    # the False branch says what the field actually does in a graph-less run
-    # instead of pointing at a list the prompt no longer contains.
-    types_field = (
-        "- types: which node types to search (subset of the 4; omit/empty = all).\n"
-        if kg_available else
-        "- types: ignored when the library has no knowledge graph; leave it "
-        "empty.\n"
-    )
-    return (
-        f"{kg_opening}"
-        "Decompose the question into 1-N standalone sub-queries. For EACH:\n"
-        "- query: a self-contained search string (resolve any references using "
-        "the prior conversation).\n"
-        f"{types_field}"
-        "- prefer: keyword (exact terms/codes), semantic (paraphrase/concept), "
-        "or balanced.\n"
-        "- reason: one line on why this sub-query.\n"
-        "Keep sub-queries focused and non-redundant.\n"
-        f"{SCOPE_DEIXIS_GROUNDING}"
-        f"{quoted_phrase_grounding(question)}"
-        "\n"
-        f"{history_section}"
-        f"{profile_section}"
-        f"{experience_section}"
-        f"{style_section}"
-        f"{collection_section}"
-        f"Question: {question}\n\n"
-        'Return JSON only: {"sub_queries":[{"query":"","types":[],'
-        '"prefer":"balanced","reason":""}]}'
-    )
-
-
 # --- Plugin-contributed reflect actions (design doc §3.2 / §3.3) ------------
 #
 # The four sentences a plugin CANNOT edit.  A descriptor contributes the action
@@ -748,13 +628,13 @@ def reflect_schema_hint(
     of the four that is a pure deployment kill switch
     (``REASONING_CHUNK_SEARCH_ENABLED``, resolved once per run by
     ``reasoning_retrieval.ReasoningRetriever.chunk_search_active``). It adds one
-    word to the ``next_action`` enum and one field (``chunks_query``) to the
-    tail group, so False is again byte-for-byte the schema from before the
-    action existed.
+    word to the ``next_action`` enum and no field: the action reads its search
+    string from the shared root ``query``, so False is again byte-for-byte the
+    schema without the action.
 
     ``keyword_search`` is a SUB-gate of ``search_chunks`` (keyword-only,
     default False): True adds the action's optional literal-keyword field
-    ``chunks_keywords`` right after ``chunks_query``. It is True only when the
+    ``keywords`` right after ``query``. It is True only when the
     keyword (full-text) arm can return anything this run
     (``ReasoningRetriever.keyword_search_active``); a peer run with
     ``GLOBAL_ASK_KEYWORD_ARM_ENABLED=false`` closes it, because offering a
@@ -767,9 +647,12 @@ def reflect_schema_hint(
     scope holds no knowledge graph (``reasoning_retrieval.kg_in_scope_for``), so
     the five graph-shaped actions (``expand_graph``, ``ppr_retrieve``,
     ``expand_community``, ``follow_chain``, ``enumerate_kg_objects``) and their
-    parameter branches (``expand``, ``follow_chain``, ``community_focal``,
-    ``ppr_query``, ``enumerate.object_type``) are removed — they could only ever
-    return empty. It is a run-level FACT, not a deployment switch, so it rides
+    parameter branches (``expand``, ``follow_chain``, ``enumerate.object_type``)
+    are removed — they could only ever return empty — and so is
+    ``new_sub_query.types``: the parser keeps only knowledge-graph node types
+    from it, so with no graph it can only ever be ignored. The shared root
+    ``query`` stays, because ``search_elements`` and ``exact_lookup`` read it
+    in every gate combination. It is a run-level FACT, not a deployment switch, so it rides
     the same precedent as the enumeration/outline/consult_memory gates. True
     (the default, and every pre-existing caller) is byte-for-byte the schema
     from before the gate existed.
@@ -824,17 +707,13 @@ def reflect_schema_hint(
         actions += "|search_chunks"
     if read_document and enumeration_tools:
         actions += "|read_document"
-    # Shown beside the other free-text retrieval fields in the tail group, and
-    # only when the action exists — an unusable field in the template is a
-    # field some model will fill in anyway. ``chunks_keywords`` is the same
-    # action's optional literal (full-text) half: it needs the action AND a
-    # keyword arm that can actually return something this run
-    # (``keyword_search``), so a closed keyword gate leaves exactly the
-    # pre-parameter ``chunks_query``-only shape.
-    chunks_query_field = (
-        '"chunks_query":"",'
-        + ('"chunks_keywords":"",' if keyword_search else "")
-        if search_chunks else "")
+    # ``keywords`` is ``search_chunks``'s optional literal (full-text) half,
+    # shown right after the shared ``query`` and only when it can take effect:
+    # it needs the action AND a keyword arm that can actually return something
+    # this run (``keyword_search``) — an unusable field in the template is a
+    # field some model will fill in anyway.
+    keywords_field = (
+        '"keywords":"",' if search_chunks and keyword_search else "")
     enumerate_branch = ""
     if element_kinds or object_types:
         # Two INDEPENDENT branches now: listing document elements needs no
@@ -918,22 +797,22 @@ def reflect_schema_hint(
         # copies from the candidates, and an empty list is a legal (and
         # meaningful) value — a section with no evidence yet is the whole point
         # of the scratchpad.
-        # ``parent`` is spelled null, not "": the prose calls it optional and a
-        # model's natural spelling of "no parent" is null (audit A4).
+        # ``parent`` is spelled null, not "": the prose says a top-level
+        # section writes null there (audit A4). The list sits at the root, with
+        # no one-key wrapper object around it.
         outline_branch = (
-            '"outline":{"sections":[{"id":"","title":"","parent":null,'
-            '"evidence":[""],"remove_evidence":[""]}]},'
+            '"outline_sections":[{"id":"","title":"","parent":null,'
+            '"evidence":[""],"remove_evidence":[""]}],'
         )
     # Appended LAST to the enum so every core word keeps the position (and the
     # bytes) it had before the extension point existed; empty projection = no
     # word, no branch, no change.
     plugin_projection = project_reflect_actions(plugin_actions)
     actions += plugin_projection.next_action_words
-    # The four graph-shaped parameter branches. Each is spelled in the exact
-    # position (and with the exact bytes) it occupied before the gate existed,
-    # so ``kg_actions=True`` reassembles the previous string character for
-    # character; ``False`` removes the fields whose actions are gone rather
-    # than leaving the model a template slot it can fill in anyway.
+    # The graph-shaped parameter branches. ``False`` removes the fields whose
+    # actions are gone rather than leaving the model a template slot it can
+    # fill in anyway — ``new_sub_query.types`` included, since the parser keeps
+    # only knowledge-graph node types from it.
     expand_branch = (
         '"expand":{"object_id":"","edge_type":null,'
         '"direction":"out|in|both"},' if kg_actions else ""
@@ -943,23 +822,25 @@ def reflect_schema_hint(
         '"target_object_id":"","edge_type":null,"direction":"out|in|both"},'
         if kg_actions else ""
     )
-    community_focal_field = '"community_focal":"",' if kg_actions else ""
-    ppr_query_field = '"ppr_query":"",' if kg_actions else ""
+    sub_query_types = '"types":[],' if kg_actions else ""
+    # ``query`` is the ONE search argument of every single-string action
+    # (search_elements, exact_lookup, ppr_retrieve, expand_community,
+    # search_chunks): each action reads it as its own parameter, so the model
+    # fills one slot for the action it chose instead of picking among
+    # look-alike fields. It is unconditional because search_elements and
+    # exact_lookup exist in every gate combination.
     return (
         '{"sufficient":false,"next_action":"' + actions + '",'
         + expand_branch +
-        '"new_sub_query":{"query":"","types":[],'
-        '"prefer":"balanced","reason":""},'
+        '"new_sub_query":{"query":"",' + sub_query_types +
+        '"prefer":"keyword|semantic|balanced","reason":""},'
         + chain_branch
         + enumerate_branch
         + read_document_branch
         + plugin_projection.schema_branches
         + outline_branch
-        + community_focal_field
-        + '"elements_query":"",'
-        + ppr_query_field
-        + '"exact_term":"",'
-        + chunks_query_field +
+        + '"query":"",'
+        + keywords_field +
         '"reason":""}'
     )
 
@@ -973,7 +854,7 @@ def corpus_language_list(corpus_langs: Optional[Sequence[str]]) -> List[str]:
     ``None``/empty means "not probed" and falls back to the zh/en pair — the
     same default ``expand_query_prompt`` has always used, so a caller that
     passes nothing gets the wording it got before the hint existed. Shared by
-    that prompt and ``reflect_prompt``'s ``chunks_keywords`` sentence so the
+    that prompt and ``reflect_prompt``'s ``keywords`` sentence so the
     two keyword instructions can never name different fallback languages.
     """
     return [l for l in (corpus_langs or ["zh", "en"]) if l] or ["zh", "en"]
@@ -1023,7 +904,7 @@ def reflect_prompt(
     ``enumerate_kg_objects``) are not offered, and — just as importantly —
     every OTHER sentence that names one of them is rewritten or dropped: a
     prompt that keeps telling the model to compare ``search_chunks`` against
-    ``ppr_retrieve``, or to fill ``ppr_query`` carefully, is a prompt that
+    ``ppr_retrieve`` is a prompt that
     advertises actions the schema and the whitelist will both reject. True (the
     default) is byte-for-byte the prompt from before this gate existed.
 
@@ -1062,16 +943,16 @@ def reflect_prompt(
     ``corpus_langs`` is not a gate either: it is the run's corpus languages
     (``ReasoningRetriever._corpus_langs``), and its ONLY reader is the
     ``search_chunks`` description, which tells the model which languages its
-    ``chunks_keywords`` should be written in. With ``search_chunks`` closed it
+    ``keywords`` should be written in. With ``search_chunks`` closed it
     renders nothing, so every closed-gate prompt is byte for byte what it was.
     ``None`` = not probed, and the sentence names the zh/en fallback that
     ``expand_query_prompt`` uses (``corpus_language_list``). Keyword-only, for
     the same reason as ``plugin_actions``.
 
-    ``keyword_search`` is the ``chunks_keywords`` sub-gate, the same one
+    ``keyword_search`` is the ``keywords`` sub-gate, the same one
     ``reflect_schema_hint`` takes (single predicate:
     ``ReasoningRetriever.keyword_search_active``). True adds the
-    ``chunks_keywords`` sentence to the ``search_chunks`` description and the
+    ``keywords`` sentence to the ``search_chunks`` description and the
     field to the scope-word rule; False (the default) renders both exactly as
     they were before the parameter existed.
 
@@ -1103,7 +984,7 @@ def reflect_prompt(
     # model to keep probing for it). Both are spelled as suffix/infix clauses so
     # the gate-open text is byte-for-byte the sentence from before T2.
     #
-    # The closing ``chunks_keywords`` sentence is the action's optional literal
+    # The closing ``keywords`` sentence is the action's optional literal
     # (full-text) half — the same keyword arm chunk mode always runs, handed to
     # the model as a parameter instead of being derived by the server. It names
     # the corpus languages because the arm is a lexical match: a keyword in a
@@ -1118,8 +999,8 @@ def reflect_prompt(
     # It is appended only under ``keyword_search``, so
     # with that sub-gate closed the paragraph is byte-for-byte the pre-PR-3 one.
     kw_langs = corpus_language_list(corpus_langs)
-    chunks_keywords_rule = (
-        "Optionally also set chunks_keywords: space-separated keywords in "
+    keywords_rule = (
+        "Optionally also set keywords: space-separated keywords in "
         + (
             f"each corpus language ({', '.join(kw_langs)}), giving both forms "
             "of a term that has a well-known form in another listed language"
@@ -1134,11 +1015,12 @@ def reflect_prompt(
         "and do not add guessed answer values, since every extra term dilutes "
         "the match; each term the question does name should still carry its "
         "forms in the other listed languages and its abbreviation or full "
-        "name. Leave it empty to search by chunks_query alone."
+        "name. It is matched literally, so a scope word in it finds nothing. "
+        "Leave it empty to search by query alone."
     )
     search_chunks_action = (
         "- search_chunks: retrieve raw SOURCE PASSAGES from the documents "
-        "themselves, by semantics and keywords (set chunks_query). Reach for it "
+        "themselves, by semantics and keywords (set query). Reach for it "
         "when the candidates carry no passage-level evidence for what the "
         "question asks"
         + (", or when the knowledge graph is thin or absent"
@@ -1150,50 +1032,26 @@ def reflect_prompt(
            "through the graph)" if kg_actions else "")
         + ": this one searches the passage text directly, so it "
         "works even with no graph at all."
-        + (" " + chunks_keywords_rule if keyword_search else "")
+        + (" " + keywords_rule if keyword_search else "")
         + "\n"
         if search_chunks else ""
     )
-    # The reflect-local half of the scope-grounding rule: this is the prompt with
-    # four separate free-text retrieval fields (FIVE once ``search_chunks``
-    # offers ``chunks_query``), and each of them is a place a scope word can leak
-    # back in after the paragraph above told the model to
-    # drop it. ``exact_term`` is named explicitly because it is the one field
-    # that is matched LITERALLY — "当前notebook" as an exact_term is a guaranteed
-    # zero-hit probe. The library-composition sentence only appears with the
-    # tools, since the counts line it points at only exists then.
-    #
-    # ``chunks_query`` is listed here for the same reason as the other four and
-    # ONLY when its action exists: an enumeration that silently omits a live
-    # retrieval field is worse than no enumeration, because the model reads the
-    # list as exhaustive and treats the unlisted field as exempt. With the gate
-    # closed the sentence is byte-for-byte what it was before the field existed.
-    # ``exact_term`` stays LAST so the "exact_term especially" clause that
-    # follows still lands on the field it names.
-    #
-    # ``ppr_query`` drops out of the list with its action (``kg_actions``): the
-    # list is read as EXHAUSTIVE, so naming a field the schema does not offer is
-    # the mirror image of the omission problem described above. ``exact_term``
-    # stays out of the joined list so the "exact_term especially" clause that
-    # follows still lands on the field it names.
-    #
-    # ``chunks_keywords`` is listed for the same reason and only when its
-    # sub-gate is open, and it is the field where a scope word costs the most
-    # after ``exact_term``: it is matched literally too, so "当前notebook" as a
-    # keyword is a zero-hit probe.
-    scope_fields = ["new_sub_query.query", "elements_query"]
-    if kg_actions:
-        scope_fields.append("ppr_query")
-    if search_chunks:
-        scope_fields.append("chunks_query")
-        if keyword_search:
-            scope_fields.append("chunks_keywords")
+    # The reflect-local half of the scope-grounding rule: every free-text
+    # retrieval field is a place a scope word can leak back in after the
+    # paragraph above told the model to drop it. Since every single-string
+    # action reads the one root ``query``, the list is short: the sub-query
+    # text, ``query`` itself and — only while its sub-gate is open —
+    # ``keywords``. The list is read as EXHAUSTIVE, so it names exactly the
+    # fields this run's schema offers: omitting a live one reads as an
+    # exemption, naming an absent one advertises a slot that does not exist.
+    # That ``exact_lookup`` and ``keywords`` match LITERALLY (a scope word there
+    # is a guaranteed zero-hit probe) is said in their own descriptions.
+    scope_fields = ["new_sub_query.query", "query"]
+    if search_chunks and keyword_search:
+        scope_fields.append("keywords")
     scope_fields_rule = (
         "This applies to every retrieval field you fill: "
-        + ", ".join(scope_fields)
-        + " and exact_term. exact_term especially — it "
-        "is matched literally against document text, so a scope word there "
-        "returns nothing.\n"
+        + ", ".join(scope_fields[:-1]) + " and " + scope_fields[-1] + ".\n"
         + (
             "A question about the library ITSELF (how much it holds, what kinds "
             "of material, how many documents) is answered from the "
@@ -1394,9 +1252,9 @@ def reflect_prompt(
         "several turns — a survey or overview, an inventory, a per-document "
         "treatment of a library, a comparison of several subjects, or any long "
         "answer the question asks you to fill in progressively. Keep that "
-        "structure in outline.sections: each section has a short stable id, a "
-        "title in the question's language, an optional parent (null or omitted "
-        "for a top-level section; ONE nesting level — a section whose parent is "
+        "structure in outline_sections: each section has a short stable id, a "
+        "title in the question's language, a parent (null for a top-level "
+        "section; ONE nesting level — a section whose parent is "
         "itself a child is flattened), and evidence = "
         "the ids of candidates above that support it, copied exactly as they "
         "appear in (id=...). This call REPLACES the section structure: send every "
@@ -1471,12 +1329,12 @@ def reflect_prompt(
     graph_retrieval_actions = (
         "- ppr_retrieve: the question compares across models/sources or needs "
         "breadth across documents; pull cross-document source passages via PPR "
-        "(set ppr_query). Prefer this for comparison / cross-paper questions where "
+        "(set query). Prefer this for comparison / cross-paper questions where "
         "single-document evidence isn't enough, or when a multi-layer derivation "
         "needs supporting passages scattered across documents.\n"
         "- expand_community: the question compares an entity with its peers / other "
         "of-its-kind, and those peers are missing from candidates; pull the entity's "
-        "SEMANTIC COMMUNITY members across documents (set community_focal to the entity "
+        "SEMANTIC COMMUNITY members across documents (set query to the entity "
         "name, e.g. 'DeepSeek-V4'). Use for 'X vs other Y' questions.\n"
         "- follow_chain: the question requires an explicit A→B→C derivation. Set "
         "follow_chain.start_object_id to a candidate id, optional target_object_id, "
@@ -1497,7 +1355,7 @@ def reflect_prompt(
         "- search_elements: "
         + ("the KG is too thin; fall back" if kg_actions else "fall back")
         + " to raw document "
-        "passages (set elements_query).\n"
+        "passages (set query).\n"
     )
     return (
         "You decide the NEXT retrieval step for answering a question from a "
@@ -1515,10 +1373,11 @@ def reflect_prompt(
         f"{graph_retrieval_actions}"
         "- exact_lookup: the question names a specific command / API / option / "
         "parameter (e.g. 'set_db') and the candidates do not yet cover its full "
-        "definition (arguments, defaults, examples). Set exact_term to that name "
-        "EXACTLY as written in the documentation; this matches the name literally "
-        "and returns the whole manual section it heads, so a name you invent or "
-        "paraphrase returns nothing.\n"
+        "definition (arguments, defaults, examples). Set query to that name "
+        "EXACTLY as written in the documentation; this action matches query "
+        "literally against document text and returns the whole manual section "
+        "it heads, so a name you invent or paraphrase, or a scope word, returns "
+        "nothing.\n"
         f"{enumerate_actions}"
         f"{read_document_action}"
         f"{outline_action}"
@@ -1536,7 +1395,9 @@ def reflect_prompt(
         # Keep every question-independent rule ahead of question-dependent
         # grounding and candidates, in the same user message. This changes
         # only text order, not the Legacy decision or evidence projection.
-        'Return JSON only matching the schema (omit unused branch fields).\n\n'
+        "Return JSON only matching the schema: query is the search string of "
+        "the action you chose; write null for every branch or field that "
+        "action does not use.\n\n"
         f"{quoted_phrase_grounding(question)}"
         f"Question: {question}\n\n"
         f"Candidates so far:\n{candidates_summary}"
@@ -1559,7 +1420,8 @@ def evidence_refine_prompt(question: str, evidence_block: str) -> str:
 
 
 EXPAND_SCHEMA_HINT = ('{"query":"","high_level_keywords":[],"low_level_keywords":[],'
-                      '"sub_queries":[{"query":"","types":[],"prefer":"balanced","reason":""}],'
+                      '"sub_queries":[{"query":"","types":[],"prefer":"keyword|semantic|balanced",'
+                      '"reason":""}],'
                       '"comparison":{"focal":""}}')
 
 
@@ -1573,19 +1435,23 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
     history_section = (
         "Prior conversation (resolve pronouns/ellipsis against it):\n"
         f"{history_block}\n\n" if history_block else "")
-    # Counts-only typed-collection map (see ``plan_prompt``).  This function is
-    # the prompt the reasoning planner actually sends, so this — not
-    # ``plan_prompt`` — is where the map has to land to reach a planning model.
+    # The typed-collection map is counts only (no titles, no text): it tells
+    # the planner what kinds of listable material exist and how much, so a
+    # "which formulas are there" question can be planned as an inventory
+    # instead of as a keyword hunt.  Empty when the enumeration tools are off
+    # or the map could not be built — the prompt then reads exactly as it did
+    # before.
     collection_section = f"{collection_map}\n\n" if collection_map else ""
-    # The agent's understanding block (see ``plan_prompt``).  This function is
-    # what production sends, so this — not ``plan_prompt`` — is where it has to
-    # land to reach a planning model.  Empty string = byte-for-byte the prompt
-    # this function produced before the feature existed.
+    # The agent's accumulated understanding of THIS library (Agentic Memory
+    # P1, design §5.2).  Empty when the feature is off, when nothing has been
+    # consolidated yet, or when the read failed; empty string = byte-for-byte
+    # the prompt this function produced before the feature existed.
     profile_section = f"{profile_block}\n\n" if profile_block else ""
-    # The retrieval experience library (see ``plan_prompt``).  This function is
-    # what production sends, so this — not ``plan_prompt`` — is where it has to
-    # land to reach a planning model.  Empty string = byte-for-byte the prompt
-    # this function produced before the feature existed.
+    # The deployment-global retrieval experience library (Agentic Memory P2,
+    # design §6.1).  It says which SEARCH CHANNEL tends to pay off on this
+    # shape of question — never which sources may be read — and it is empty
+    # whenever the injection switch is off (its default), so the prompt then
+    # reads exactly as it did before.
     experience_section = f"{experience_block}\n\n" if experience_block else ""
     # The per-user search-profile style hint (Agentic Memory P3, T8):
     # ``search_profile.render_style_block``'s output, empty when the feature
@@ -1601,7 +1467,7 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
     # prose says what to do with them either way. ``reason`` is optional.
     types_line = (
         "- types: which KG node types to search (subset of concept/claim/formula/"
-        "procedure; omit/empty = all). prefer: keyword|semantic|balanced. "
+        "procedure; empty = all). prefer: keyword|semantic|balanced. "
         "reason: an optional one-line note.\n"
         if want_types else
         "- types and prefer are not used in this run: leave them as [] and "
@@ -1633,8 +1499,8 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
         f"{types_line}"
         "Keep sub-queries non-redundant.\n"
         "If the question compares an entity with others of its kind (e.g. 'X vs "
-        "other LLMs'), set comparison.focal to that entity's canonical name; omit "
-        "comparison otherwise.\n"
+        "other LLMs'), set comparison.focal to that entity's canonical name; set "
+        "comparison to null otherwise.\n"
         f"{SCOPE_DEIXIS_GROUNDING}"
         f"{quoted_phrase_grounding(question)}"
         "\n"
@@ -1659,10 +1525,10 @@ QUERY_INTENT_SCHEMA_HINT = (
     '{"normalized_question":"","intent_type":"explain|compare|diagnose|design|review|other",'
     '"result_scope":"ranked|complete|aggregate|hybrid",'
     '"completeness_required":false,'
-    '"entities":[""],"mandatory_topics":[{"id":"","title":"",'
+    '"entities":[""],"mandatory_topics":[{"title":"",'
     '"question":"","retrieval_queries":[""]}],"comparison_axes":[""],'
     '"constraints":[""],"excluded_topics":[""],"expected_output":"",'
-    '"assumptions":[""],"ambiguities":[{"id":"","question":"",'
+    '"assumptions":[""],"ambiguities":[{"question":"",'
     '"reason":"","required":true,"options":[""]}],'
     '"confidence":0.0,"needs_clarification":false}')
 
@@ -1695,8 +1561,8 @@ def query_intent_prompt(question: str, max_topics: int = 6,
         f"Create an INTENT CONTRACT for a {purpose} before seeing any corpus. "
         "Freeze what the user actually asks; evidence availability must never change "
         "the requested topic. Split only genuinely distinct required questions. "
-        f"Return at most {max_topics} mandatory topics. Each topic needs a stable short "
-        "id, a title in the user's language, the exact question it must answer, and "
+        f"Return at most {max_topics} mandatory topics. Each topic needs a title in "
+        "the user's language, the exact question it must answer, and "
         "1-4 retrieval queries. Preserve requested comparisons, constraints, scope, "
         "time range and output form. excluded_topics lists plausible but out-of-scope "
         "directions. Do not answer the question and do not mention corpus coverage.\n"

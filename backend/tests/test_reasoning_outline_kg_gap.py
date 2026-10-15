@@ -149,7 +149,7 @@ ANSWER = {"next_action": "answer", "sufficient": True}
 
 def _outline_action(sections, **extra):
     return {"next_action": OUTLINE_ACTION, "reason": "整理大纲",
-            "outline": {"sections": sections}, **extra}
+            "outline_sections": sections, **extra}
 
 
 def _retriever(repo, llm, *, effort="exhaustive"):
@@ -870,7 +870,7 @@ def test_only_kg_object_ids_seed_the_probe(repo, monkeypatch):
     monkeypatch.setattr(
         repo.retrieval.candidates, "weak_support_relations", spy)
     llm = _SeqLLM([
-        {"next_action": "search_elements", "elements_query": "版图设计"},
+        {"next_action": "search_elements", "query": "版图设计"},
         lambda prompt: _outline_action([
             {"id": "a", "title": "混合绑定的一节",
              "evidence": [_shown_kg_ids(prompt)[0], "el-000"]},

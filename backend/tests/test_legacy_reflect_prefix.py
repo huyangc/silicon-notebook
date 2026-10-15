@@ -27,7 +27,7 @@ def test_legacy_shares_all_fixed_rules_across_quoted_and_unquoted_questions(
     # These control instructions must remain cacheable when quoted terms change.
     assert "Before choosing answer, check aspect by aspect" in shared
     assert "Return JSON only matching the schema" in shared
-    assert "exact_term especially" in shared
+    assert "matches query literally" in shared
     assert "Question:" not in shared
     assert "source candidates" not in shared
     for question, prompt in zip(questions, prompts):
