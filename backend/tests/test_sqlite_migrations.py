@@ -384,10 +384,38 @@ def test_v94_adds_answer_links_and_the_token_flag(tmp_path):
     with database.write() as db:
         rollback_v94(db)
         db.execute("PRAGMA user_version = 93")
+        # A token issued before v94 must read back as unable to issue links.
+        now = "2026-10-15T00:00:00+00:00"
+        db.execute(
+            "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
+            "username,password_hash,password_salt,password_iterations) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("u-v94", "v94@example.test", "u-v94", "user", "active", now, now,
+             "t00000094", "", "", 0),
+        )
+        db.execute(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("nb-v94", "nb-v94", "", "", "ready", "u-v94", now, now),
+        )
+        db.execute(
+            "INSERT INTO agent_profiles(id,owner_id,name,description,status,created_at,"
+            "updated_at) VALUES (?,?,?,?,?,?,?)",
+            ("agent-v94", "u-v94", "Agent", "", "active", now, now),
+        )
+        db.execute(
+            "INSERT INTO agent_access_tokens(id,agent_profile_id,token_hash,scopes_json,"
+            "default_notebook_id,revoked_at,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("tk-v94", "agent-v94", "hash-v94", '["read", "ask"]', "nb-v94", None, now),
+        )
 
     assert SqliteMigrator(database, settings).migrate() == [94]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db)[1:] == fresh[1:]
         assert set(shape(db)[0]) == set(columns)
+        legacy = db.execute(
+            "SELECT allow_answer_links FROM agent_access_tokens WHERE id = 'tk-v94'"
+        ).fetchone()
+        assert legacy[0] == 0
     database.close_local()

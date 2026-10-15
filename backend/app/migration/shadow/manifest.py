@@ -856,9 +856,10 @@ _TABLES = (
     # hand the target a pause it never issued. LOCAL_EPHEMERAL, no
     # replication key.
     TableSpec("ask_intent_handles", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 109),
-    # SQLite v94 / PostgreSQL 0074: MCP expiring answer links. Each row is bound
-    # to an Agent token of THIS environment (agent_access_tokens is local), so
-    # it cannot mean anything on the shadow target. LOCAL_EPHEMERAL, no
+    # SQLite v94 / PostgreSQL 0074: MCP expiring answer links. Deliberately not
+    # copied, although the tokens and jobs they point at are: a link is a
+    # short-lived capability, so after a cutover the old links 404 and the bot
+    # re-issues one with get_ask(delivery="link"). LOCAL_EPHEMERAL, no
     # replication key.
     TableSpec("answer_links", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 110),
 )
