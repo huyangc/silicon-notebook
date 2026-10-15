@@ -276,6 +276,11 @@ _LINK_UNAVAILABLE = (
 _ANSWER_LINKS_OFF = (
     "此凭证未开启「允许签发限时回答链接」，请在「Agent 接入」页为它打开后重试"
 )
+_ANSWER_LINKS_OFF_SAVED = (
+    "此凭证未开启「允许签发限时回答链接」，没有签发链接；回答已保存，"
+    "job_id: {job_id}，可用 get_ask 按这个 job_id 读取全文，"
+    "或在「Agent 接入」页为凭证打开后用 get_ask 重新签发链接"
+)
 
 
 def _ttl_refusal(ceiling: int) -> AgentToolError:
@@ -312,9 +317,16 @@ def _validate_delivery(delivery: str, output: str, link_ttl_hours: Any) -> None:
         raise AgentToolError("unavailable", _LINK_UNAVAILABLE)
 
 
-def _require_answer_links(principal: Any) -> None:
-    if not getattr(principal, "allow_answer_links", False):
+def _require_answer_links(principal: Any, saved_job_id: str = "") -> None:
+    """``forbidden`` unless the token may issue answer links. At delivery
+    (``saved_job_id`` set) the answer already exists: the refusal names its
+    job id, so a caller that sent no ``client_request_id`` can still read it
+    with ``get_ask`` (the error model carries code and message only)."""
+    if getattr(principal, "allow_answer_links", False):
+        return
+    if not saved_job_id:
         raise AgentToolError("forbidden", _ANSWER_LINKS_OFF)
+    raise AgentToolError("forbidden", _ANSWER_LINKS_OFF_SAVED.format(job_id=saved_job_id))
 
 
 def _deliver(
@@ -331,17 +343,18 @@ def _deliver(
     authorizes on its own."""
     if delivery != "link" or view.get("status") != "answered":
         return answer_page(view, *offsets)
-    _require_answer_links(live)
+    job_id = str(view["job_id"])
+    _require_answer_links(live, saved_job_id=job_id)
     settings = get_settings()
     try:
+        # ``link_ttl_hours`` was validated before any work
+        # (``_validate_delivery``): any other error here is not the caller's.
         link = issue_answer_link(
-            answer_link_repository(), settings, job_id=str(view["job_id"]),
+            answer_link_repository(), settings, job_id=job_id,
             principal=live, ttl_hours=link_ttl_hours,
         )
     except AnswerLinkUnavailable:
         raise AgentToolError("unavailable", _LINK_UNAVAILABLE) from None
-    except ValueError:
-        raise _ttl_refusal(int(settings.mcp_answer_link_ttl_hours)) from None
     preview, truncated = answer_preview(
         str(view.get("answer") or ""), int(settings.mcp_answer_preview_max_chars)
     )
@@ -965,11 +978,14 @@ def _run_notebook(
             detail = repo.ask_job_detail(job_id)
         except KeyError:
             detail = None
-    _record_agent_call(repo, live, notebook_id, "ask:execute")
-    return _deliver(
+    page = _deliver(
         live, notebook_view(job_id, notebook_id, response, detail, allow_now),
         delivery, link_ttl_hours,
     )
+    # Booked only once the answer is actually delivered (a refused link
+    # delivery hands nothing back).
+    _record_agent_call(repo, live, notebook_id, "ask:execute")
+    return page
 
 
 def _refreshed_principal(repo: Any, principal: Any) -> Any:
@@ -1125,9 +1141,6 @@ def _run_global(
             )
             if job.submitted_via != "mcp":
                 raise AgentToolError("not_found", _JOB_NOT_FOUND)
-            # Booked only for a delivered answer, after every gate.
-            for notebook_id in job.resolved_notebook_ids:
-                _record_agent_call(repo, live, notebook_id, "ask:execute")
         except (AgentToolError, AskWaitAbandoned):
             # The Agent's own error, or a wait the cancelled call let go of:
             # neither is a failure of the run (no warning, no internal).
@@ -1144,7 +1157,11 @@ def _run_global(
                 logger.warning("global ask via MCP failed (%s)", type(exc).__name__)
                 mapped = AgentToolError("internal", _global._GLOBAL_FALLBACK)
             raise mapped from None
-    return _deliver(live, _global.global_view(job), delivery, link_ttl_hours)
+    page = _deliver(live, _global.global_view(job), delivery, link_ttl_hours)
+    # Booked only for a delivered answer, after every gate.
+    for notebook_id in job.resolved_notebook_ids:
+        _record_agent_call(repo, live, notebook_id, "ask:execute")
+    return page
 
 
 def _read_notebook_job(
