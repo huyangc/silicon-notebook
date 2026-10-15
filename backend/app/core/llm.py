@@ -536,6 +536,26 @@ class OpenAICompatibleClient:
         parts: List[str] = []
         finish_reason: Optional[str] = None
         usage: Optional[Dict[str, int]] = None
+        expired = threading.Event()
+        deadline_timer: Optional[threading.Timer] = None
+        if deadline_at is not None:
+            def expire_stream() -> None:
+                # A read timeout resets on each operation. Closing the stream
+                # from the deadline watchdog also interrupts a stalled next
+                # read, which a check inside the iterator body cannot reach.
+                expired.set()
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
+
+            deadline_timer = threading.Timer(
+                max(0.0, deadline_at - time.monotonic()), expire_stream,
+            )
+            deadline_timer.daemon = True
+            deadline_timer.start()
         try:
             for chunk in stream:
                 if deadline_at is not None and time.monotonic() >= deadline_at:
@@ -558,10 +578,15 @@ class OpenAICompatibleClient:
                 if content:
                     parts.append(content)
         finally:
+            if deadline_timer is not None:
+                deadline_timer.cancel()
+                deadline_timer.join()
             close = getattr(stream, "close", None)
             if callable(close):
                 close()
         _raise_if_cancelled_with_usage(cancel_event, usage)
+        if expired.is_set():
+            raise TimeoutError("JSON Schema capability probe timed out")
         return "".join(parts), finish_reason, usage
 
     def _structured_format(
