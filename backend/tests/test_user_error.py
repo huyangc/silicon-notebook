@@ -180,10 +180,10 @@ def test_no_bare_chinese_4xx_http_exception():
 # 键用「文件::函数名」而不是行号——行号会被无关改动推移。
 ALLOWED_DYNAMIC_USER_ERROR = {
     "app/api/memory_routes.py::issue_agent_token": (
-        "唯一的动态实参是 app/domain/agent_tools.py 的中文模块常量 OWNER_ONLY_TIERS_MESSAGE(签发/修改 token 勾了「管理」「删除」而白名单里没有自己拥有的笔记本),AgentOwnerOnlyTierError 也只用它构造;不拼异常原文。tests/test_agent_tools_vocabulary.py 对它跑词汇守卫;tests/test_agent_tokens.py 覆盖签发与修改两条 422。"
+        "唯一的动态实参是 app/domain/agent_tools.py 的中文模块常量 OWNER_ONLY_TIERS_MESSAGE(签发/修改 token 勾了「管理」「删除」而白名单里没有自己拥有的笔记本),AgentOwnerOnlyTierError 也只用它构造;另一个动态实参是同文件的中文模块常量 ANSWER_LINKS_REQUIRE_ASK_MESSAGE(开了「允许签发回答链接」却没有问答档),AgentAnswerLinksNeedAskError 只用它构造;都不拼异常原文。tests/test_agent_tools_vocabulary.py 对它们跑词汇守卫;tests/test_agent_tokens.py 覆盖签发与修改两条 422。"
     ),
     "app/api/memory_routes.py::update_agent_token_access": (
-        "唯一的动态实参是 app/domain/agent_tools.py 的中文模块常量 OWNER_ONLY_TIERS_MESSAGE(签发/修改 token 勾了「管理」「删除」而白名单里没有自己拥有的笔记本),AgentOwnerOnlyTierError 也只用它构造;不拼异常原文。tests/test_agent_tools_vocabulary.py 对它跑词汇守卫;tests/test_agent_tokens.py 覆盖签发与修改两条 422。"
+        "唯一的动态实参是 app/domain/agent_tools.py 的中文模块常量 OWNER_ONLY_TIERS_MESSAGE(签发/修改 token 勾了「管理」「删除」而白名单里没有自己拥有的笔记本),AgentOwnerOnlyTierError 也只用它构造;另一个动态实参是同文件的中文模块常量 ANSWER_LINKS_REQUIRE_ASK_MESSAGE(开了「允许签发回答链接」却没有问答档),AgentAnswerLinksNeedAskError 只用它构造;都不拼异常原文。tests/test_agent_tools_vocabulary.py 对它们跑词汇守卫;tests/test_agent_tokens.py 覆盖签发与修改两条 422。"
     ),
     "app/api/knowledge_routes.py::merge_knowledge": (
         "唯一的动态实参是 MemoryKnowledgeMergeRefused.user_message:它只可能是 "

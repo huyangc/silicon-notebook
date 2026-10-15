@@ -32,6 +32,7 @@ from app.models.memory import (
     PaginatedMemories,
 )
 from app.repositories.identity_errors import (
+    AgentAnswerLinksNeedAskError,
     AgentOwnerOnlyTierError,
     AgentTokenInactiveError,
     AgentTokenSecretUnavailableError,
@@ -550,6 +551,7 @@ class MemoryService:
         default_notebook_id: str,
         notebook_ids: Sequence[str],
         expires_at: str | None,
+        allow_answer_links: bool = False,
     ) -> tuple[list[str], list[str], str | None]:
         """Shared scopes/notebook-allowlist/expiry validation for both
         ``issue_agent_token`` (a fresh token) and ``update_agent_token_access``
@@ -569,6 +571,10 @@ class MemoryService:
             clean_notebooks = [default_notebook_id]
         if not default_notebook_id or default_notebook_id not in clean_notebooks:
             raise ValueError("default notebook must be in notebook allowlist")
+        # "May issue answer links" is an add-on to asking and opens no tool of
+        # its own, so it is meaningless (and refused) without the ask tier.
+        if allow_answer_links and "ask" not in clean_scopes:
+            raise AgentAnswerLinksNeedAskError()
         # An empty string means "no expiry" exactly like null; normalizing it
         # here keeps SQLite (which would store '') and PostgreSQL (NULL) alike.
         expires_at = _normalize_expiry(expires_at) if expires_at else None
@@ -593,9 +599,15 @@ class MemoryService:
         default_notebook_id: str,
         notebook_ids: Sequence[str],
         expires_at: str | None,
+        allow_answer_links: bool = False,
     ) -> AgentTokenIssued:
         clean_scopes, clean_notebooks, expires_at = self._validate_agent_access(
-            owner_id, scopes, default_notebook_id, notebook_ids, expires_at
+            owner_id,
+            scopes,
+            default_notebook_id,
+            notebook_ids,
+            expires_at,
+            allow_answer_links,
         )
         token_id = self.new_id("token")
         raw_token = f"snm_{token_id}.{secrets.token_urlsafe(32)}"
@@ -610,6 +622,7 @@ class MemoryService:
             clean_notebooks,
             expires_at,
             token_plain=raw_token,
+            allow_answer_links=allow_answer_links,
         )
         return AgentTokenIssued(
             id=summary.id,
@@ -620,6 +633,7 @@ class MemoryService:
             notebook_ids=summary.notebook_ids,
             expires_at=summary.expires_at,
             created_at=summary.created_at,
+            allow_answer_links=summary.allow_answer_links,
         )
 
     def list_agent_tokens(
@@ -658,9 +672,15 @@ class MemoryService:
         notebook_ids: Sequence[str],
         expires_at: str | None,
         expected: AgentTokenAccess | None = None,
+        allow_answer_links: bool = False,
     ) -> AgentTokenSummary:
         clean_scopes, clean_notebooks, expires_at = self._validate_agent_access(
-            owner_id, scopes, default_notebook_id, notebook_ids, expires_at
+            owner_id,
+            scopes,
+            default_notebook_id,
+            notebook_ids,
+            expires_at,
+            allow_answer_links,
         )
         return self.store.update_agent_token_access(
             token_id,
@@ -670,6 +690,7 @@ class MemoryService:
             clean_notebooks,
             expires_at,
             expected,
+            allow_answer_links=allow_answer_links,
         )
 
     def resolve_agent_token(self, raw_token: str) -> AgentPrincipal | None:
@@ -750,6 +771,7 @@ class MemoryService:
             default_notebook_id=row["default_notebook_id"],
             notebook_ids=list(row["notebook_ids"]),
             token_id=token_id,
+            allow_answer_links=bool(row.get("allow_answer_links")),
         )
 
     def require_agent_access(

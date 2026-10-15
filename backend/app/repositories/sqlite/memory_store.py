@@ -112,6 +112,7 @@ class MemoryStore:
             last_used_at=row["last_used_at"],
             created_at=row["created_at"],
             copyable=bool(row["token_plain"]) and row["revoked_at"] is None,
+            allow_answer_links=bool(row["allow_answer_links"]),
         )
 
     def create_agent_profile(
@@ -208,6 +209,7 @@ class MemoryStore:
         notebook_ids: Sequence[str],
         expires_at: str | None,
         token_plain: str | None = None,
+        allow_answer_links: bool = False,
     ) -> AgentTokenSummary:
         now = self.now()
         with self.database.write() as db:
@@ -221,7 +223,8 @@ class MemoryStore:
             db.execute(
                 "INSERT INTO agent_access_tokens "
                 "(id,agent_profile_id,token_hash,scopes_json,default_notebook_id,"
-                "expires_at,created_at,token_plain) VALUES (?,?,?,?,?,?,?,?)",
+                "expires_at,created_at,token_plain,allow_answer_links) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
                 (
                     token_id,
                     agent_profile_id,
@@ -231,6 +234,7 @@ class MemoryStore:
                     expires_at,
                     now,
                     token_plain,
+                    1 if allow_answer_links else 0,
                 ),
             )
             db.executemany(
@@ -312,6 +316,7 @@ class MemoryStore:
         notebook_ids: Sequence[str],
         expires_at: str | None,
         expected: AgentTokenAccess | None = None,
+        allow_answer_links: bool = False,
     ) -> AgentTokenSummary:
         # 一个写事务:sqlite ``write()`` 的进程内写锁串行化了读-判-写,所以下面
         # 的「读撤销/停用状态与 expected 前置条件」与「写新配置」之间不会被另一次
@@ -336,11 +341,12 @@ class MemoryStore:
                 raise AgentTokenAccessConflictError(token_id)
             cursor = db.execute(
                 "UPDATE agent_access_tokens SET scopes_json=?,default_notebook_id=?,"
-                "expires_at=? WHERE id=? AND revoked_at IS NULL",
+                "expires_at=?,allow_answer_links=? WHERE id=? AND revoked_at IS NULL",
                 (
                     json.dumps(list(scopes), ensure_ascii=False),
                     default_notebook_id,
                     expires_at,
+                    1 if allow_answer_links else 0,
                     token_id,
                 ),
             )
@@ -371,7 +377,7 @@ class MemoryStore:
                 # on the authentication path, which compares the hash only.
                 "SELECT t.id,t.agent_profile_id,t.token_hash,t.scopes_json,"
                 "t.default_notebook_id,t.expires_at,t.revoked_at,t.last_used_at,"
-                "t.created_at,"
+                "t.created_at,t.allow_answer_links,"
                 "p.owner_id,p.name AS profile_name,p.status AS profile_status,"
                 "(SELECT json_group_array(n.notebook_id) FROM agent_token_notebooks n "
                 "WHERE n.token_id=t.id) AS notebook_ids_json "

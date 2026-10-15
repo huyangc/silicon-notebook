@@ -1285,6 +1285,7 @@ class RepositoryFacade:
         default_notebook_id: str,
         notebook_ids: List[str],
         expires_at: "str | None",
+        allow_answer_links: bool = False,
     ) -> AgentTokenIssued:
         return self._runtime.memory_service.issue_agent_token(
             owner_id,
@@ -1293,6 +1294,7 @@ class RepositoryFacade:
             default_notebook_id,
             notebook_ids,
             expires_at,
+            allow_answer_links,
         )
 
     def list_agent_tokens(
@@ -1314,6 +1316,7 @@ class RepositoryFacade:
         notebook_ids: List[str],
         expires_at: "str | None",
         expected: AgentTokenAccess | None = None,
+        allow_answer_links: bool = False,
     ) -> AgentTokenSummary:
         return self._runtime.memory_service.update_agent_token_access(
             owner_id,
@@ -1323,6 +1326,7 @@ class RepositoryFacade:
             notebook_ids,
             expires_at,
             expected,
+            allow_answer_links,
         )
 
     def agent_token_secret(self, owner_id: str, token_id: str) -> str:

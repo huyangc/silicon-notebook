@@ -1406,6 +1406,11 @@
           "additionalProperties": false,
           "description": "A token's access configuration exactly as a client last read it.",
           "properties": {
+            "allow_answer_links": {
+              "default": false,
+              "title": "Allow Answer Links",
+              "type": "boolean"
+            },
             "default_notebook_id": {
               "minLength": 1,
               "title": "Default Notebook Id",
@@ -1450,6 +1455,10 @@
           "additionalProperties": false,
           "description": "``PUT /agent-tokens/{token_id}/access`` request body.\n\nA whole-object replace of the token's access configuration, so every\naccess field is required — none has a default a caller could omit and\nsilently narrow (or widen) scopes/notebooks by accident. ``expires_at``\nstill carries its ``Optional`` type (``null`` clears the expiry) but no\ndefault value, so the field itself must be present in the payload;\nleaving it out entirely is a 422, not \"leave unchanged\" (there is no\npartial-update semantics here, unlike ``AgentProfileUpdate``).\n\n``expected`` is an optional compare-and-swap precondition: the access\nconfiguration the editor started from. When present and the stored\nconfiguration has changed since, the write is refused (409) instead of\nsilently restoring a permission another session just removed.",
           "properties": {
+            "allow_answer_links": {
+              "title": "Allow Answer Links",
+              "type": "boolean"
+            },
             "default_notebook_id": {
               "minLength": 1,
               "title": "Default Notebook Id",
@@ -1495,7 +1504,8 @@
             "scopes",
             "default_notebook_id",
             "notebook_ids",
-            "expires_at"
+            "expires_at",
+            "allow_answer_links"
           ],
           "title": "AgentTokenAccessUpdate",
           "type": "object"
@@ -1506,6 +1516,11 @@
             "agent_profile_id": {
               "title": "Agent Profile Id",
               "type": "string"
+            },
+            "allow_answer_links": {
+              "default": false,
+              "title": "Allow Answer Links",
+              "type": "boolean"
             },
             "default_notebook_id": {
               "minLength": 1,
@@ -1550,6 +1565,11 @@
             "agent_profile_id": {
               "title": "Agent Profile Id",
               "type": "string"
+            },
+            "allow_answer_links": {
+              "default": false,
+              "title": "Allow Answer Links",
+              "type": "boolean"
             },
             "created_at": {
               "title": "Created At",
@@ -1622,6 +1642,11 @@
             "agent_profile_id": {
               "title": "Agent Profile Id",
               "type": "string"
+            },
+            "allow_answer_links": {
+              "default": false,
+              "title": "Allow Answer Links",
+              "type": "boolean"
             },
             "copyable": {
               "default": false,

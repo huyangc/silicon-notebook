@@ -1,6 +1,9 @@
 from typing import Literal
 
-from app.domain.agent_tools import OWNER_ONLY_TIERS_MESSAGE
+from app.domain.agent_tools import (
+    ANSWER_LINKS_REQUIRE_ASK_MESSAGE,
+    OWNER_ONLY_TIERS_MESSAGE,
+)
 
 
 class AuthStoreError(ValueError):
@@ -64,3 +67,11 @@ class AgentOwnerOnlyTierError(ValueError):
 
     def __init__(self) -> None:
         super().__init__(OWNER_ONLY_TIERS_MESSAGE)
+
+
+class AgentAnswerLinksNeedAskError(ValueError):
+    """开了「允许签发回答链接」却没有「问答」档:这个开关只是问答的附加授权,
+    自己不打开任何工具。文案可直接展示,路由用 ``user_error`` 映射成 422。"""
+
+    def __init__(self) -> None:
+        super().__init__(ANSWER_LINKS_REQUIRE_ASK_MESSAGE)

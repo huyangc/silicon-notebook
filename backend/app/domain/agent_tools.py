@@ -57,6 +57,11 @@ AGENT_OWNER_ONLY_TIERS = frozenset({"manage", "delete"})
 #: in tests/test_agent_tools_vocabulary.py).
 OWNER_ONLY_TIERS_MESSAGE = "管理和删除权限只对你拥有的笔记本生效，所选笔记本里没有你拥有的"
 
+#: The refusal for turning on "may issue answer links" without the ``ask`` tier
+#: (the switch is an add-on to asking, it opens no tool of its own). Raised as
+#: ``AgentAnswerLinksNeedAskError``, shown verbatim by the token routes.
+ANSWER_LINKS_REQUIRE_ASK_MESSAGE = "允许签发回答链接需要同时勾选「问答」权限"
+
 
 def capability_tier(capability: str) -> str:
     """The tier that grants ``capability``. An unknown capability is a

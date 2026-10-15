@@ -42,3 +42,14 @@ def test_the_sentence_is_written_once_in_app_code():
         if agent_tools.OWNER_ONLY_TIERS_MESSAGE in path.read_text(encoding="utf-8")
     )
     assert holders == ["domain/agent_tools.py"]
+
+
+def test_the_answer_links_refusal_passes_the_vocabulary_guard():
+    from app.repositories.identity_errors import AgentAnswerLinksNeedAskError
+
+    assert agent_tools.ANSWER_LINKS_REQUIRE_ASK_MESSAGE.strip()
+    assert guard.terms_in(agent_tools.ANSWER_LINKS_REQUIRE_ASK_MESSAGE) == []
+    assert (
+        str(AgentAnswerLinksNeedAskError())
+        == agent_tools.ANSWER_LINKS_REQUIRE_ASK_MESSAGE
+    )
