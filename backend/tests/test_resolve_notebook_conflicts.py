@@ -45,8 +45,8 @@ class FakeLLM:
             return json.dumps({
                 "conflict_type": "none",
                 "resolution": "keep",
-                "winner_ref": None,
-                "resolved_payload": None,
+                "winner_ref": "",
+                "resolved_name": "",
                 "confidence": 0.0,
                 "rationale": "no conflict",
             })
@@ -216,7 +216,7 @@ def test_high_confidence_discard_applies_and_marks_applied(repo):
         "conflict_type": "mutual",
         "resolution": "discard",
         "winner_ref": winner_ref,
-        "resolved_payload": None,
+        "resolved_name": "",
         "confidence": 0.98,
         "rationale": "These edges genuinely contradict each other.",
     }
@@ -267,7 +267,7 @@ def test_low_confidence_leaves_db_unchanged_and_pending(repo):
         "conflict_type": "mutual",
         "resolution": "discard",
         "winner_ref": winner_ref,
-        "resolved_payload": None,
+        "resolved_name": "",
         "confidence": 0.60,  # below the 0.95 threshold
         "rationale": "Possibly conflicting but uncertain.",
     }
@@ -380,8 +380,8 @@ def test_conflict_type_none_stays_pending(repo):
     none_verdict = {
         "conflict_type": "none",
         "resolution": "keep",
-        "winner_ref": None,
-        "resolved_payload": None,
+        "winner_ref": "",
+        "resolved_name": "",
         "confidence": 0.99,  # high confidence but conflict_type=none → not auto-applied
         "rationale": "These are corroborating, not conflicting.",
     }
@@ -473,12 +473,12 @@ class RefAwareFakeLLM:
 
     def __init__(self, conflict_type: str, resolution: str,
                  pick: str = "left",
-                 resolved_payload: dict | None = None,
+                 resolved_name: str = "",
                  confidence: float = 0.98):
         self._conflict_type = conflict_type
         self._resolution = resolution
         self._pick = pick  # "left" or "right"
-        self._resolved_payload = resolved_payload
+        self._resolved_name = resolved_name
         self._confidence = confidence
         self.calls: list[list[dict]] = []
 
@@ -500,7 +500,7 @@ class RefAwareFakeLLM:
             "conflict_type": self._conflict_type,
             "resolution": self._resolution,
             "winner_ref": winner_ref,
-            "resolved_payload": self._resolved_payload,
+            "resolved_name": self._resolved_name,
             "confidence": self._confidence,
             "rationale": "test verdict",
         })
@@ -589,13 +589,13 @@ def test_node_discriminative_modify_applies(repo):
     """Node conflict with resolution=modify → payload updated, candidate 'applied'."""
     nb_id, oid_pos, oid_neg = _seed_notebook_with_node_claims(repo)
 
-    new_payload = {"name": "positive feedback dominates", "statement": "Reconciled claim [modified]"}
+    new_name = "feedback dominates [1990–2000]"
 
     bind_chat_client(repo, "kg_conflict_review", RefAwareFakeLLM(
-        conflict_type="granularity",
+        conflict_type="temporal",
         resolution="modify",
         pick="left",
-        resolved_payload=new_payload,
+        resolved_name=new_name,
         confidence=0.97,
     ))
     repo.settings.kg_conflict_auto_apply_threshold = 0.95
@@ -618,9 +618,17 @@ def test_node_discriminative_modify_applies(repo):
     assert row is not None
     import json
     payload = json.loads(row["payload"])
-    assert payload.get("statement") == "Reconciled claim [modified]", (
-        f"Expected payload to contain updated statement, got {payload!r}"
+    assert payload.get("name") == new_name, (
+        f"Expected the winner side's name to be rewritten, got {payload!r}"
     )
+    # The queue row keeps its object column shape, carrying only the name.
+    with repo._connect() as db:
+        stored = db.execute(
+            "SELECT resolved_payload FROM kg_conflict_candidates "
+            "WHERE notebook_id=? AND left_ref=? AND right_ref=?",
+            (nb_id, left_ref, right_ref),
+        ).fetchone()
+    assert json.loads(stored["resolved_payload"]) == {"name": new_name}
 
     # Candidate row should be 'applied'
     with repo._connect() as db:
@@ -653,8 +661,8 @@ class PromptRecordingLLM:
         return _json.dumps({
             "conflict_type": "none",
             "resolution": "keep",
-            "winner_ref": None,
-            "resolved_payload": None,
+            "winner_ref": "",
+            "resolved_name": "",
             "confidence": 0.0,
             "rationale": "no conflict",
         })
@@ -1183,7 +1191,7 @@ def test_candidates_are_not_written_back_after_the_graph_was_deleted(
     left_ref, right_ref = (rel_a, rel_b) if rel_a < rel_b else (rel_b, rel_a)
     llm = _DeletingLLM(repo, nb_id, [{
         "conflict_type": "temporal", "resolution": "discard",
-        "winner_ref": left_ref, "resolved_payload": None,
+        "winner_ref": left_ref, "resolved_name": "",
         "confidence": 0.99, "rationale": "r",
     }])
     bind_chat_client(repo, "kg_conflict_review", llm)
@@ -1242,7 +1250,7 @@ def test_epoch_is_read_before_the_graph_so_a_delete_during_the_read_writes_nothi
     left_ref = rel_a if rel_a < rel_b else rel_b
     bind_chat_client(repo, "kg_conflict_review", FakeLLM([{
         "conflict_type": "temporal", "resolution": "discard",
-        "winner_ref": left_ref, "resolved_payload": None,
+        "winner_ref": left_ref, "resolved_name": "",
         "confidence": 0.99, "rationale": "r",
     }]))
     governance = repo._runtime.knowledge_governance

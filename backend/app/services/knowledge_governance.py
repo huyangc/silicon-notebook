@@ -148,6 +148,22 @@ def payload_join(payload: dict) -> str:
     return " ".join(parts)
 
 
+def _stored_resolved_name(stored: Any) -> Optional[str]:
+    """The ``name`` a stored conflict ``resolved_payload`` rewrites, or None.
+
+    New rows store ``{"name": ...}``; rows adjudicated under the older
+    arbitrary-object contract may carry other keys, which are ignored now
+    that a modify rewrites only the name. Accepts the JSON text or an
+    already-decoded object; anything unreadable reads as no rewrite."""
+    if isinstance(stored, str):
+        try:
+            stored = json.loads(stored)
+        except ValueError:
+            return None
+    name = stored.get("name") if isinstance(stored, dict) else None
+    return name.strip() or None if isinstance(name, str) else None
+
+
 class KnowledgeGovernanceService:
     # --- Track E: edge trust review statuses (frozen vocabulary) -----------
     _REVIEW_STATUSES = frozenset({"pending", "verified", "rejected"})
@@ -721,7 +737,7 @@ class KnowledgeGovernanceService:
         right_ref: str,
         resolution: str,
         winner_ref: Optional[str] = None,
-        resolved_payload: Optional[dict] = None,
+        resolved_name: Optional[str] = None,
     ) -> dict:
         """Execute ONE adjudicated conflict resolution against the KG.
 
@@ -745,8 +761,9 @@ class KnowledgeGovernanceService:
             For ``"modify"``/``"node"``: the target object to update (falls back
             to ``left_ref`` when None or not in {left_ref, right_ref}).
             Ignored for ``"keep"``.
-        resolved_payload:
-            For ``"modify"``/``"node"``: the new payload dict to write.
+        resolved_name:
+            For ``"modify"``/``"node"``: the new ``name`` of the target object.
+            Only the name is rewritten; every other payload field is kept.
         """
         if kind not in ("edge", "node"):
             raise ValueError(f"kind must be 'edge' or 'node', got {kind!r}")
@@ -792,22 +809,21 @@ class KnowledgeGovernanceService:
             return {"action": "skipped", "reason": "edge modify unsupported in v1"}
 
         # kind == "node"
-        if not isinstance(resolved_payload, dict):
+        if not isinstance(resolved_name, str) or not resolved_name.strip():
             self.event_log.logger.warning(
-                "apply_conflict_resolution: modify skipped — resolved_payload is not a dict "
+                "apply_conflict_resolution: modify skipped — no resolved_name "
                 "(got %r) in notebook %s",
-                type(resolved_payload).__name__, notebook_id,
+                type(resolved_name).__name__, notebook_id,
             )
             return {"action": "skipped", "reason": "modify without payload"}
 
         target = winner_ref if winner_ref in (left_ref, right_ref) else left_ref
-        # Fetch the current payload so we can merge rather than replace.
-        # update_knowledge replaces the entire payload column, so we must
-        # preserve fields (section_path, validity_scope, steps, …) not
-        # included in the adjudicator's resolved_payload.
+        # update_knowledge replaces the entire payload column, so rewrite only
+        # ``name`` on the current payload and keep every other field
+        # (section_path, validity_scope, steps, …) as stored.
         _row = self.knowledge.get_object_row(notebook_id, target)
         existing_payload: dict = json.loads(_row["payload"] or "{}") if _row else {}
-        merged_payload = {**existing_payload, **resolved_payload}
+        merged_payload = {**existing_payload, "name": resolved_name.strip()}
         self.update_knowledge(
             notebook_id, target, KnowledgeUpdate(payload=merged_payload)
         )
@@ -837,13 +853,6 @@ class KnowledgeGovernanceService:
                 f"conflict candidate {candidate_id!r} has no resolution "
                 f"(not yet adjudicated)"
             )
-        resolved_payload: Optional[dict] = None
-        if row.get("resolved_payload") is not None:
-            try:
-                resolved_payload = json.loads(row["resolved_payload"])
-            except (TypeError, ValueError):
-                resolved_payload = None
-
         apply_result = self.apply_conflict_resolution(
             notebook_id,
             kind=row["kind"],
@@ -851,7 +860,7 @@ class KnowledgeGovernanceService:
             right_ref=row["right_ref"],
             resolution=row["resolution"],
             winner_ref=row["winner_ref"],
-            resolved_payload=resolved_payload,
+            resolved_name=_stored_resolved_name(row.get("resolved_payload")),
         )
         # The candidate-status transaction rides the facade wrapper (port) —
         # the frozen phase contract patches that facade method and must keep
@@ -1207,7 +1216,7 @@ class KnowledgeGovernanceService:
             conflict_type = verdict["conflict_type"]
             resolution = verdict["resolution"]
             winner_ref = verdict["winner_ref"]
-            resolved_payload = verdict["resolved_payload"]
+            resolved_name = verdict["resolved_name"]
             confidence = verdict["confidence"]
             rationale = verdict["rationale"]
 
@@ -1220,8 +1229,10 @@ class KnowledgeGovernanceService:
                 conflict_type=conflict_type,
                 resolution=resolution,
                 winner_ref=winner_ref,
+                # The stored column keeps its object shape ({"name": ...}) so
+                # rows written before the name-only contract still read back.
                 resolved_payload=(
-                    json.dumps(resolved_payload) if resolved_payload is not None else None
+                    json.dumps({"name": resolved_name}) if resolved_name else None
                 ),
                 confidence=confidence,
                 rationale=rationale,
@@ -1253,7 +1264,7 @@ class KnowledgeGovernanceService:
                         right_ref=cand["right_ref"],
                         resolution=resolution,
                         winner_ref=winner_ref,
-                        resolved_payload=resolved_payload,
+                        resolved_name=resolved_name,
                     )
                     self._set_conflict_status(notebook_id, candidate_id, "applied")
                     auto_applied += 1

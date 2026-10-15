@@ -83,7 +83,7 @@ class RefAwareFakeLLM:
             "conflict_type": "mutual",
             "resolution": "discard",
             "winner_ref": left_ref,
-            "resolved_payload": None,
+            "resolved_name": "",
             "confidence": self._confidence,
             "rationale": "e2e test verdict — keep left, discard right",
         })

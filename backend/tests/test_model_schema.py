@@ -48,7 +48,6 @@ def test_current_declared_hints_have_valid_strict_formats_or_explicit_safe_fallb
     )
     unsupported = {
         ("app.services.prompts", "REPORT_SECTION_SCHEMA_HINT"),
-        ("app.services.kg.conflict_review", "_SCHEMA"),
     }
     seen = set()
     for module_name in modules:

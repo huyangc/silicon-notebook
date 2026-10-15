@@ -777,7 +777,7 @@ def test_node_conflict_discard_and_modify_add_a_second_dirty_bump(
         right_ref=object_ids[1],
         resolution="modify",
         winner_ref=object_ids[0],
-        resolved_payload={"name": "modified"},
+        resolved_name="modified",
     )
     # payload update_knowledge (embed, carrying its own R6 P1 replace bump)
     # + apply_conflict_resolution's belt-and-suspenders second bump
