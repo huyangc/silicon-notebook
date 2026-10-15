@@ -368,7 +368,8 @@ def test_node_modify_preserves_pre_existing_payload_fields(seeded):
 def test_confirm_legacy_stored_payload_applies_only_its_name(seeded):
     """A pending row adjudicated before the name-only contract may carry any
     keys in resolved_payload; confirming it rewrites the name and ignores
-    the rest. A legacy row without a usable name is a skipped modify."""
+    the rest. A legacy row without a usable name cannot be applied and stays
+    pending for review."""
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
     governance = repo._runtime.knowledge_governance
     legacy = governance.write_conflict_candidate(
@@ -386,8 +387,25 @@ def test_confirm_legacy_stored_payload_applies_only_its_name(seeded):
         resolution="modify", winner_ref=oid_a,
         resolved_payload=json.dumps({"annotation": "granularity: A ⊂ B"}),
     )
-    result = governance.confirm_conflict(nb_id, nameless)
-    assert result["action"] == "skipped" and result["status"] == "applied"
+    with pytest.raises(ValueError, match="modify without payload"):
+        governance.confirm_conflict(nb_id, nameless)
+    assert governance.get_conflict_candidate(nb_id, nameless)["status"] == "pending"
+    assert _get_object_payload(repo, nb_id, oid_a)["name"] == "Claim A"
+
+
+def test_confirm_a_modify_without_a_valid_side_keeps_it_pending(seeded):
+    """A row the old prompt adjudicated without winner_ref: applying it would
+    change nothing, so it must not leave the review queue as applied."""
+    repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
+    governance = repo._runtime.knowledge_governance
+    candidate = governance.write_conflict_candidate(
+        nb_id, "node", oid_a, oid_b, conflict_type="temporal",
+        resolution="modify", winner_ref=None,
+        resolved_payload=json.dumps({"name": "Claim A [2000]"}),
+    )
+    with pytest.raises(ValueError, match="no valid winner_ref for modify"):
+        governance.confirm_conflict(nb_id, candidate)
+    assert governance.get_conflict_candidate(nb_id, candidate)["status"] == "pending"
     assert _get_object_payload(repo, nb_id, oid_a)["name"] == "Claim A"
 
 

@@ -871,6 +871,13 @@ class KnowledgeGovernanceService:
             winner_ref=row["winner_ref"],
             resolved_name=_stored_resolved_name(row.get("resolved_payload")),
         )
+        if apply_result.get("action") == "skipped":
+            # Nothing changed in the graph: closing the candidate as applied
+            # would drop it from review with the conflict still in place.
+            raise ValueError(
+                f"conflict candidate {candidate_id!r} cannot be applied: "
+                f"{apply_result.get('reason')}"
+            )
         # The candidate-status transaction rides the facade wrapper (port) —
         # the frozen phase contract patches that facade method and must keep
         # observing the mutation-commits-before-status boundary.
@@ -1266,7 +1273,7 @@ class KnowledgeGovernanceService:
             )
             if should_apply:
                 try:
-                    self.apply_conflict_resolution(
+                    outcome = self.apply_conflict_resolution(
                         notebook_id,
                         kind=kind,
                         left_ref=cand["left_ref"],
@@ -1275,6 +1282,10 @@ class KnowledgeGovernanceService:
                         winner_ref=winner_ref,
                         resolved_name=resolved_name,
                     )
+                    if outcome.get("action") == "skipped":
+                        # Nothing changed: leave it pending for a person.
+                        queued += 1
+                        continue
                     self._set_conflict_status(notebook_id, candidate_id, "applied")
                     auto_applied += 1
                 except Exception:  # noqa: BLE001

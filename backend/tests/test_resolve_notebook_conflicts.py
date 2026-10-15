@@ -495,7 +495,7 @@ class RefAwareFakeLLM:
             m = re.match(r"Right ref:\s+(\S+)", line)
             if m:
                 right_ref = m.group(1)
-        winner_ref = left_ref if self._pick == "left" else right_ref
+        winner_ref = {"left": left_ref, "right": right_ref}.get(self._pick, "")
         return _json.dumps({
             "conflict_type": self._conflict_type,
             "resolution": self._resolution,
@@ -666,6 +666,26 @@ class PromptRecordingLLM:
             "confidence": 0.0,
             "rationale": "no conflict",
         })
+
+
+def test_auto_apply_leaves_a_modify_that_names_no_side_pending(repo):
+    """A confident modify whose winner_ref is "" changes nothing, so it is
+    queued for a person instead of being closed as applied."""
+    nb_id, oid_pos, oid_neg = _seed_notebook_with_node_claims(repo)
+    bind_chat_client(repo, "kg_conflict_review", RefAwareFakeLLM(
+        conflict_type="temporal", resolution="modify", pick="none",
+        resolved_name="feedback dominates [1990–2000]", confidence=0.97,
+    ))
+    repo.settings.kg_conflict_auto_apply_threshold = 0.95
+
+    result = repo._runtime.knowledge_governance.resolve_notebook_conflicts(nb_id)
+
+    assert result["auto_applied"] == 0 and result["queued"] >= 1
+    with repo._connect() as db:
+        statuses = {r["status"] for r in db.execute(
+            "SELECT status FROM kg_conflict_candidates WHERE notebook_id=?", (nb_id,),
+        ).fetchall()}
+    assert statuses == {"pending"}
 
 
 def test_edge_evidence_quote_reaches_llm_prompt(repo):
