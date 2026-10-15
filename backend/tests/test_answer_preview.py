@@ -159,3 +159,21 @@ def test_tiny_max_chars():
     text, trunc = answer_preview("甲。" * 100, 40)
     assert trunc is True and len(text) <= 40 and text.endswith("…")
     assert answer_preview("abc", 0) == ("", True)
+
+
+def test_early_stop_with_unread_input_reports_truncated():
+    text, trunc = answer_preview("a" * 20 + "\n" + "b" * 19 + "\n" + "c" * 10, 40)
+    assert trunc is True and text.endswith("…") and len(text) <= 40
+
+
+def test_early_stop_inside_code_block_reports_truncated():
+    md = "```\n" + "x   \n" * 12 + "```\n尾巴"
+    text, trunc = answer_preview(md, 40)
+    # trailing spaces no longer inflate the read budget: everything fits, nothing lost
+    assert (text, trunc) == ("x\n" * 12 + "尾巴", False)
+    text, trunc = answer_preview("```\n" + "x   \n" * 30 + "```\n尾巴", 40)
+    assert trunc is True and len(text) <= 40
+
+
+def test_trailing_fence_only_is_not_unread_content():
+    assert answer_preview("a" * 20 + "\n" + "b" * 19 + "\n```\n", 40) == ("a" * 20 + "\n" + "b" * 19, False)

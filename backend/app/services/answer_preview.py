@@ -78,7 +78,7 @@ def _next_index(indices: list[int], after: int) -> int | None:
 
 
 def _to_blocks(markdown: str, stop_after: int) -> tuple[list[str], bool]:
-    """Plain-text lines (empty string = paragraph break) and whether a line was clipped.
+    """Plain-text lines (empty string = paragraph break) and whether input was clipped or left unread.
 
     Stops once more than ``stop_after`` characters of text exist: the caller
     truncates anyway, so reading further input only costs time.
@@ -108,7 +108,7 @@ def _to_blocks(markdown: str, stop_after: int) -> tuple[list[str], bool]:
                 fence = None
             else:
                 out.append(line.rstrip())
-                size += len(line) + 1
+                size += len(line.rstrip()) + 1
             i += 1
             continue
         m = _FENCE_RE.match(line)
@@ -121,6 +121,10 @@ def _to_blocks(markdown: str, stop_after: int) -> tuple[list[str], bool]:
         for open_, close, closers in (("$$", "$$", dollar_close), ("\\[", "\\]", bracket_close)):
             if not stripped.startswith(open_):
                 continue
+            # Closers are indexed over all lines, code fences included. A "$$" line
+            # inside a fenced block can only be matched by an opener outside it, which
+            # would be an unclosed-in-prose case already; accepted: it just swallows to
+            # that fence line, never past input end.
             if close in stripped[len(open_):]:
                 consumed = 1
             else:
@@ -159,6 +163,13 @@ def _to_blocks(markdown: str, stop_after: int) -> tuple[list[str], bool]:
             out.append(text)
             size += len(text) + 1
         i += 1
+    # Input left unread (we stopped early) counts as clipped so the caller reports
+    # truncation; bare fence markers and blank lines are not content.
+    if not clipped:
+        clipped = any(
+            ln.strip() and not (_FENCE_RE.match(ln) and not ln.strip().strip("`~"))
+            for ln in lines[i:]
+        )
     return out, clipped
 
 
