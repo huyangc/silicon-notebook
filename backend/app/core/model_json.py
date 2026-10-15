@@ -382,6 +382,11 @@ SHAPE_DEVIATIONS_MAX = 32
 # Sentinel: "remove this key / item" — a JSON null the hint did not advertise.
 _DROP = object()
 
+# Lists whose items other fields reference by 0-based position (KG extraction
+# edges name their endpoints by index into ``nodes``): removing an item there
+# would silently re-point every later reference.
+_POSITIONAL_LISTS = frozenset({"nodes"})
+
 _INT_STRING_RE = re.compile(r"-?(?:0|[1-9]\d*)\Z")
 _NUMBER_STRING_RE = re.compile(
     r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?\Z"
@@ -527,6 +532,16 @@ def _normalise_shape(
             return value
         items: list[Any] = []
         for index, item in enumerate(value):
+            if item is None and field_name in _POSITIONAL_LISTS:
+                # Other fields address this list by position, so a dropped
+                # item would shift every later one onto the wrong reference;
+                # the null stays as a hole the consumer skips.
+                if len(out) < SHAPE_DEVIATIONS_MAX:
+                    out.append(ShapeDeviation(
+                        path=f"{path}[{index}]", reason="invalid_type", fix="",
+                    ))
+                items.append(item)
+                continue
             fixed = _normalise_shape(
                 item, item_example,
                 path=f"{path}[{index}]", out=out, state=state,
