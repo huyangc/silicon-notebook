@@ -177,3 +177,10 @@ def test_early_stop_inside_code_block_reports_truncated():
 
 def test_trailing_fence_only_is_not_unread_content():
     assert answer_preview("a" * 20 + "\n" + "b" * 19 + "\n```\n", 40) == ("a" * 20 + "\n" + "b" * 19, False)
+
+
+def test_fenced_dollar_does_not_close_prose_math():
+    md = "$$ 开头未闭合的正文段落\n重要结论一\n```latex\n$$\n```\n尾段"
+    out = pv(md)
+    assert "重要结论一" in out and "尾段" in out
+    assert pv("\\[ 未闭合\n重要\n```\n\\]\n```\n尾") .count("重要") == 1

@@ -89,8 +89,28 @@ def _to_blocks(markdown: str, stop_after: int) -> tuple[list[str], bool]:
         if len(ln) > _LINE_CAP:
             lines[k] = ln[:_LINE_CAP]
             clipped = True
-    dollar_close = [k for k, ln in enumerate(lines) if "$$" in ln]
-    bracket_close = [k for k, ln in enumerate(lines) if "\\]" in ln]
+    # Closer indices cover only lines outside fenced code (same open/close rule as
+    # the main loop), so a "$$" inside a code block never closes prose math.
+    dollar_close: list[int] = []
+    bracket_close: list[int] = []
+    scan_fence: str | None = None
+    for k, ln in enumerate(lines):
+        fm = _FENCE_RE.match(ln)
+        if scan_fence is not None:
+            if (
+                fm
+                and fm.group(1)[0] == scan_fence[0]
+                and len(fm.group(1)) >= len(scan_fence)
+                and not ln.strip().strip(scan_fence[0])
+            ):
+                scan_fence = None
+        elif fm:
+            scan_fence = fm.group(1)
+        else:
+            if "$$" in ln:
+                dollar_close.append(k)
+            if "\\]" in ln:
+                bracket_close.append(k)
     out: list[str] = []
     size = 0
     i, n = 0, len(lines)
@@ -121,10 +141,6 @@ def _to_blocks(markdown: str, stop_after: int) -> tuple[list[str], bool]:
         for open_, close, closers in (("$$", "$$", dollar_close), ("\\[", "\\]", bracket_close)):
             if not stripped.startswith(open_):
                 continue
-            # Closers are indexed over all lines, code fences included. A "$$" line
-            # inside a fenced block can only be matched by an opener outside it, which
-            # would be an unclosed-in-prose case already; accepted: it just swallows to
-            # that fence line, never past input end.
             if close in stripped[len(open_):]:
                 consumed = 1
             else:
