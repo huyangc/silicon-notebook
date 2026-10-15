@@ -78,6 +78,7 @@ from app.services.conversation_public_view import (
 from app.services.public_share_recheck import (
     conversation_library_ids,
     mounts_still_effective,
+    notebook_snapshot_still_readable,
 )
 from app.services.share_disclosure import (
     ConversationShareDisclosure as ConversationShareCount,
@@ -1360,15 +1361,12 @@ def _public_conversation_or_404(repo, token: str) -> dict:
     row = repo.public_conversation_by_token(token)
     if row is None:
         raise HTTPException(status_code=404, detail="shared conversation not found")
-    creator = str(row.get("created_by") or "")
-    if not creator:
-        raise HTTPException(status_code=404, detail="shared conversation not found")
-    notebook_id = str(row.get("notebook_id") or "")
-    if not repo.user_can_read_notebook(notebook_id, creator):
-        raise HTTPException(status_code=404, detail="shared conversation not found")
-    if not mounts_still_effective(
-        notebook_id, creator, conversation_library_ids(row.get("turns") or []),
-        repo.participant_notebook_ids,
+    # Empty creator, lost read access, or a quoted mount no longer effective:
+    # one shared predicate (``notebook_snapshot_still_readable``), the same
+    # one the answer-link branch runs, all the same 404.
+    if not notebook_snapshot_still_readable(
+        row, can_read=repo.user_can_read_notebook,
+        participant_notebook_ids=repo.participant_notebook_ids,
     ):
         raise HTTPException(status_code=404, detail="shared conversation not found")
     return row

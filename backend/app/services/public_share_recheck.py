@@ -127,6 +127,34 @@ def report_library_ids(
     return found
 
 
+def notebook_snapshot_still_readable(
+    row: Mapping[str, Any],
+    *,
+    can_read: Callable[[str, str], bool],
+    participant_notebook_ids: Callable[..., Iterable[str]],
+) -> bool:
+    """The live re-check of an anonymous notebook-scoped snapshot -- the one
+    predicate both the conversation share (``cshr-``) and the MCP answer link
+    (``alnk-``) run on every open, so the two cannot drift.
+
+    ``row`` carries the gate fields ``notebook_id`` / ``created_by`` and the
+    projected ``turns``. True only when the creator is named (an empty creator
+    fails closed: an ``everyone`` grant's read arm ignores the user id), can
+    still read the notebook, and every mounted library the turns quote is
+    still an effective participant of it for them (D-3). Identity comes from
+    the row, never from a request user."""
+    creator = str(row.get("created_by") or "")
+    if not creator:
+        return False
+    notebook_id = str(row.get("notebook_id") or "")
+    if not can_read(notebook_id, creator):
+        return False
+    return mounts_still_effective(
+        notebook_id, creator, conversation_library_ids(row.get("turns") or []),
+        participant_notebook_ids,
+    )
+
+
 def mounts_still_effective(
     notebook_id: str,
     creator_id: str,
