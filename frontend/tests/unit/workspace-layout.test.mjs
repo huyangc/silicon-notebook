@@ -45,6 +45,7 @@ test("workspace composes executable Ask and account components", () => {
     sessionPanelOpen: "sessionPanelOpen",
     onToggleSessionPanel: "askSession.toggleSessionPanel",
     onStartNewSession: "startNewAskSession",
+    showSessionEntries: "!sessionSidebar",
   });
   const pageFunctions = new Set(
     declarations(page)

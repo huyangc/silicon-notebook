@@ -250,6 +250,8 @@ import {
 } from "./report-outline-model";
 import { SourceDetailWindow } from "./source-detail-window";
 import { useWorkspaceExtensions } from "./use-workspace-extensions";
+import { useMediaQuery } from "./use-media-query.ts";
+import { useSessionSidebarMorph } from "./use-session-sidebar-morph.ts";
 import { createOwnedWorkspaceExtensionActions } from "../features/extension-sdk/actions";
 import { WorkspaceExtensionOutlet } from "../features/extension-sdk/host";
 import { WORKSPACE_UI_CONTRIBUTIONS } from "../features/extension-sdk/workspace-registry";
@@ -2153,6 +2155,16 @@ export default function Home() {
     feedbackSent,
     inFlight: askInFlight,
   } = askSession;
+  // 收起来源栏后,问答页把空出来的左栏让给平铺的历史会话(「历史」弹窗随之退场)。
+  // 窄屏(≤760px)本来就不支持收起来源栏,那里仍用弹窗。
+  const wideWorkspace = useMediaQuery("(min-width: 761px)");
+  const sessionSidebar = chatMode === "ask" && sourcesCollapsed && wideWorkspace;
+  const sessionSidebarMorph = useSessionSidebarMorph(sessionSidebar);
+  // 来源栏的两个开关都先记下动画起点再切换,会话栏才能从「历史」按钮长出来、再缩回去。
+  function setSourcesCollapsedWithMorph(collapsed: boolean) {
+    sessionSidebarMorph.capture();
+    sourceLibrary.setSourcesCollapsed(collapsed);
+  }
   // 「英文双引号 = 整体检索」的即时回执。识别规则有边界(太短、引号太密都不算),
   // 不当场回执的话,没被识别就是一次静默失败:用户以为下了约束,检索侧当普通词处理。
   const askQuotedPhraseHint = useMemo(() => quotedPhraseHint(question), [question]);
@@ -2233,6 +2245,10 @@ export default function Home() {
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [sessionPanelOpen]);
+  // 弹窗开着时收起来源栏:会话清单搬进左栏,弹窗不再有内容可显示,顺手关掉。
+  useEffect(() => {
+    if (sessionSidebar && sessionPanelOpen) askSession.closeSessionPanel();
+  }, [sessionSidebar, sessionPanelOpen]);
   // 「将借用参考库「…」推理」该点名谁:同一条判据的名称版。过去这里 join 的是**全部
   // 挂载库名**,会当着用户的面点名一个这次不参与、或压根没建图的库。
   const borrowedBaseNames = useMemo(
@@ -5025,6 +5041,46 @@ export default function Home() {
   const accountName = currentUser.username;
   const accountBadge = accountInitials(accountName);
 
+  // 会话清单与批量清理各只写一份:同一时刻要么在「历史」弹窗里,要么在收起来源栏后的左栏里。
+  const askSessionHistoryList = (
+    <AskSessionHistoryList
+      variant={sessionSidebar ? "sidebar" : "grid"}
+      sessions={sessions}
+      conversationId={conversationId}
+      renamingSessionId={renamingSessionId}
+      sessionTitleDraft={sessionTitleDraft}
+      sessionTitleOverLimit={sessionTitleOverLimit}
+      strictLabel={strictLabel}
+      onUpdateTitleDraft={askSession.updateSessionTitleDraft}
+      onCommitRename={(id) => askSession.commitRenameSession(id).catch(reportError)}
+      onCancelRename={askSession.cancelRenameSession}
+      onOpenSession={(id) => openAskSession(id).catch(reportError)}
+      onBeginRename={askSession.beginRenameSession}
+      onShare={(session) => openConversationShare({ id: session.id, title: session.title || "", throughAnswerId: "" })}
+      onDelete={requestDeleteSession}
+    />
+  );
+  const askSessionCleanup = sessions.length > 0 ? (
+    <div className="chat-session-cleanup">
+      <span>批量清理</span>
+      {CLEANUP_PRESETS.map((days) => {
+        const n = conversationsOlderThan(sessions, days).length;
+        return (
+          <button
+            key={days}
+            type="button"
+            className="chat-session-cleanup-btn"
+            disabled={n === 0}
+            title={`删除最近 ${days} 天内无活动的会话`}
+            onClick={() => requestBulkCleanup(days)}
+          >
+            {days} 天前{n > 0 ? ` (${n})` : ""}
+          </button>
+        );
+      })}
+    </div>
+  ) : null;
+
   return (
     <>
     {loginOpening && <LoginEntrance onComplete={finishLoginOpening} />}
@@ -5378,7 +5434,7 @@ export default function Home() {
             </div>
           </section>
 
-          <section className={`workspace-grid${sourcesCollapsed ? " sources-collapsed" : ""}`}>
+          <section className={`workspace-grid${sourcesCollapsed ? " sources-collapsed" : ""}${sessionSidebar ? " has-session-sidebar" : ""}`}>
             <aside className="workspace-panel sources-panel">
               <div className="workspace-panel-header">
                 <h2>Source Stack</h2>
@@ -5389,7 +5445,7 @@ export default function Home() {
                     className="sources-collapse-handle"
                     aria-label="收起来源栏"
                     title="收起来源栏"
-                    onClick={() => sourceLibrary.setSourcesCollapsed(true)}
+                    onClick={() => setSourcesCollapsedWithMorph(true)}
                   >
                     <PanelLeftClose size={18} />
                   </button>
@@ -5716,7 +5772,50 @@ export default function Home() {
               </div>
             </aside>
 
-            {sourcesCollapsed && (
+            {sessionSidebar && (
+              <aside className="workspace-panel ask-session-sidebar" aria-label="历史会话" ref={sessionSidebarMorph.sidebarRef}>
+                <div className="ask-session-sidebar-head">
+                  <button
+                    type="button"
+                    className="sources-collapse-handle"
+                    aria-label="展开来源栏"
+                    title="展开来源栏"
+                    onClick={() => setSourcesCollapsedWithMorph(false)}
+                  >
+                    <PanelLeftOpen size={18} />
+                  </button>
+                  <strong>历史会话</strong>
+                  <span className="panel-count">{sessions.length}</span>
+                </div>
+                <button
+                  className={`ask-session-sidebar-new ${conversationId == null ? "active" : ""}`}
+                  type="button"
+                  onClick={startNewAskSession}
+                >
+                  <Plus size={16} />
+                  <span>新会话</span>
+                </button>
+                <div className="ask-session-sidebar-label">最近使用</div>
+                <div className="chat-session-list sidebar">{askSessionHistoryList}</div>
+                {askSessionCleanup}
+              </aside>
+            )}
+            {/* 会话栏缩回「历史」按钮时的影子:会话栏本身已经卸载,影子只负责这一段动画。 */}
+            {sessionSidebarMorph.ghost && (
+              <div
+                ref={sessionSidebarMorph.ghostRef}
+                className="ask-session-sidebar-ghost"
+                aria-hidden="true"
+                style={sessionSidebarMorph.ghost}
+              >
+                <strong>历史会话</strong>
+                {sessions.slice(0, 16).map((session) => (
+                  <span key={session.id}>{session.title || "未命名会话"}</span>
+                ))}
+              </div>
+            )}
+
+            {sourcesCollapsed && !sessionSidebar && (
               <button
                 type="button"
                 className="sources-reveal-rail"
@@ -5750,11 +5849,12 @@ export default function Home() {
                       sessionPanelOpen={sessionPanelOpen}
                       onToggleSessionPanel={askSession.toggleSessionPanel}
                       onStartNewSession={startNewAskSession}
+                      showSessionEntries={!sessionSidebar}
                     />
                   )}
                 </div>
               </div>
-              {chatMode === "ask" && sessionPanelOpen && (
+              {chatMode === "ask" && sessionPanelOpen && !sessionSidebar && (
                 <div
                   id="ask-session-manager"
                   className="chat-session-popover"
@@ -5772,26 +5872,7 @@ export default function Home() {
                         <X size={15} />
                       </button>
                     </div>
-                    {sessions.length > 0 && (
-                      <div className="chat-session-cleanup">
-                        <span>批量清理</span>
-                        {CLEANUP_PRESETS.map((days) => {
-                          const n = conversationsOlderThan(sessions, days).length;
-                          return (
-                            <button
-                              key={days}
-                              type="button"
-                              className="chat-session-cleanup-btn"
-                              disabled={n === 0}
-                              title={`删除最近 ${days} 天内无活动的会话`}
-                              onClick={() => requestBulkCleanup(days)}
-                            >
-                              {days} 天前{n > 0 ? ` (${n})` : ""}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
+                    {askSessionCleanup}
                   </div>
                   <div className="chat-session-list">
                     <button className={`chat-session-card new ${conversationId == null ? "active" : ""}`} type="button" onClick={startNewAskSession}>
@@ -5799,21 +5880,7 @@ export default function Home() {
                       <span>新会话</span>
                       <small>从一个新的问题开始</small>
                     </button>
-                    <AskSessionHistoryList
-                      sessions={sessions}
-                      conversationId={conversationId}
-                      renamingSessionId={renamingSessionId}
-                      sessionTitleDraft={sessionTitleDraft}
-                      sessionTitleOverLimit={sessionTitleOverLimit}
-                      strictLabel={strictLabel}
-                      onUpdateTitleDraft={askSession.updateSessionTitleDraft}
-                      onCommitRename={(id) => askSession.commitRenameSession(id).catch(reportError)}
-                      onCancelRename={askSession.cancelRenameSession}
-                      onOpenSession={(id) => openAskSession(id).catch(reportError)}
-                      onBeginRename={askSession.beginRenameSession}
-                      onShare={(session) => openConversationShare({ id: session.id, title: session.title || "", throughAnswerId: "" })}
-                      onDelete={requestDeleteSession}
-                    />
+                    {askSessionHistoryList}
                   </div>
                 </div>
               )}

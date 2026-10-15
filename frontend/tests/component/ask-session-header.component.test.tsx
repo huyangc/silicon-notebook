@@ -33,3 +33,21 @@ test("shows one history entry and starts a new session directly", async () => {
   await user.click(newSession);
   expect(onStartNewSession).toHaveBeenCalledTimes(1);
 });
+
+
+
+test("shows no session entry while the sessions sit in the left column", () => {
+  const { container } = render(
+    <AskSessionHeaderActions
+      sessionCount={3}
+      sessionPanelOpen={false}
+      onToggleSessionPanel={vi.fn()}
+      onStartNewSession={vi.fn()}
+      showSessionEntries={false}
+    />,
+  );
+
+  expect(screen.queryByRole("button", { name: /历史/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "新会话" })).not.toBeInTheDocument();
+  expect(container).toBeEmptyDOMElement();
+});
