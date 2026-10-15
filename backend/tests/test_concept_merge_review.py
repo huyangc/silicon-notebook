@@ -14,14 +14,12 @@ class _ReviewLLM:
             {
               "candidate_id": "mc-1",
               "decision": "merge",
-              "canonical_name": "voltage-controlled oscillator",
               "confidence": 0.96,
               "rationale": "VCO is the common acronym for voltage-controlled oscillator."
             },
             {
               "candidate_id": "mc-2",
               "decision": "keep_separate",
-              "canonical_name": "",
               "confidence": 0.91,
               "rationale": "current mirror and current source are related but not identical."
             }
@@ -49,6 +47,32 @@ def test_review_merge_candidates_parses_decisions():
     assert decisions[0]["decision"] == "merge"
     assert decisions[0]["confidence"] == 0.96
     assert decisions[1]["decision"] == "keep_separate"
+
+
+def test_retired_canonical_name_is_neither_asked_for_nor_read():
+    """canonical_name had no consumer; the hint and prompt no longer ask for
+    it, and a model that still sends one has it ignored."""
+    from app.services.concept_merge_review import _SCHEMA, _prompt
+
+    assert "canonical_name" not in _SCHEMA
+    prompt = _prompt(_cands(1))
+    assert "canonical_name" not in prompt
+    assert "candidate_id is the value of that candidate's leading id field" in prompt
+    assert "id=mc-0" in prompt
+
+    class _Legacy:
+        configured = True
+
+        def chat_json(self, messages, response_schema_hint):
+            return json.dumps({"decisions": [
+                {"candidate_id": "mc-0", "decision": "merge", "canonical_name": "x",
+                 "confidence": 0.9, "rationale": "r"},
+            ]})
+
+    [decision] = review_merge_candidates(_Legacy(), _cands(1))
+    assert decision == {
+        "candidate_id": "mc-0", "decision": "merge", "confidence": 0.9, "rationale": "r",
+    }
 
 
 # --- new: chunk + fail-open behavior (truncated LLM JSON must not crash rebuild) ---
@@ -86,7 +110,7 @@ class _CountingLLM:
                for tok in line.split() if tok.startswith("id=")]
         decisions = [
             {"candidate_id": cid, "decision": "merge",
-             "canonical_name": f"c-{cid}", "confidence": 0.9, "rationale": "x"}
+             "confidence": 0.9, "rationale": "x"}
             for cid in ids
         ]
         import json as _json
@@ -112,7 +136,7 @@ class _FlakyLLM:
         import json as _json
         decisions = [
             {"candidate_id": cid, "decision": "merge",
-             "canonical_name": f"c-{cid}", "confidence": 0.9, "rationale": "x"}
+             "confidence": 0.9, "rationale": "x"}
             for cid in ids
         ]
         return _json.dumps({"decisions": decisions})
@@ -295,7 +319,7 @@ def test_parallel_bad_confidence_isolated_does_not_raise():
             for cid in ids:
                 conf = "high" if cid == "mc-2" else 0.9
                 decisions.append({"candidate_id": cid, "decision": "merge",
-                                  "canonical_name": f"c-{cid}", "confidence": conf,
+                                  "confidence": conf,
                                   "rationale": "x"})
             return json.dumps({"decisions": decisions})
 

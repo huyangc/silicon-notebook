@@ -96,7 +96,7 @@ class _CountingReviewLLM:
         import re
         ids = re.findall(r"id=(ac\d+)", messages[0]["content"])
         decisions = [{"candidate_id": i, "decision": "merge",
-                      "canonical_name": "x", "confidence": 0.99, "rationale": "r"}
+                      "confidence": 0.99, "rationale": "r"}
                      for i in ids]
         return __import__("json").dumps({"decisions": decisions})
 
@@ -146,6 +146,43 @@ def test_merge_review_checkpoint_skips_relled_llm_on_second_run(repo, monkeypatc
     assert fake.calls == first             # 二跑零新增(input_version 未变 → 全命中)
 
 
+def test_merge_review_checkpoint_rows_with_retired_canonical_name_still_resume(
+    repo, monkeypatch,
+):
+    """canonical_name 已退役:新写入的断点行不再带它;升级前写下、仍带
+    canonical_name 的旧断点行照样命中续跑(读侧只取 decision/confidence)。"""
+    import json as _json
+
+    fake = _CountingReviewLLM()
+    bind_chat_client(repo, "kg_merge_review", fake)
+    monkeypatch.setattr(repo.settings, "kg_concept_desc_enabled", False, raising=False)
+
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    _seed_mergeable(repo, nb.id)
+    repo.rebuild_unified_kg(nb.id, force=True)
+    first = fake.calls
+    assert first > 0
+
+    with repo._write() as db:
+        rows = db.execute(
+            "SELECT item_key, payload FROM kg_rebuild_checkpoint "
+            "WHERE notebook_id=? AND stage='merge_review'", (nb.id,),
+        ).fetchall()
+        assert rows
+        for row in rows:
+            payload = _json.loads(row["payload"])
+            assert "canonical_name" not in payload
+            payload["canonical_name"] = "legacy name"
+            db.execute(
+                "UPDATE kg_rebuild_checkpoint SET payload=? "
+                "WHERE notebook_id=? AND stage='merge_review' AND item_key=?",
+                (_json.dumps(payload), nb.id, row["item_key"]),
+            )
+
+    repo.rebuild_unified_kg(nb.id, force=True)
+    assert fake.calls == first
+
+
 def test_fresh_clears_checkpoint_and_readjudicates(repo, monkeypatch):
     """--fresh(fresh=True)清 checkpoint → 再跑重新裁决(LLM 又被调用)。"""
     fake = _CountingReviewLLM()
@@ -175,7 +212,7 @@ class _CountingDescLLM:
             ids = re.findall(r"id=(ac\d+)", content)
             return _j.dumps({"decisions": [
                 {"candidate_id": i, "decision": "keep_separate",
-                 "canonical_name": "", "confidence": 0.9, "rationale": "r"} for i in ids]})
+                 "confidence": 0.9, "rationale": "r"} for i in ids]})
         self.calls += 1                                # 概念描述 prompt
         import json as _j
         return _j.dumps({"description": "一句定值描述。"})

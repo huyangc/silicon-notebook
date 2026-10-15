@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 _SCHEMA = (
     '{"decisions":[{"candidate_id":"","decision":"merge|keep_separate|unsure",'
-    '"canonical_name":"","confidence":0.0,"rationale":""}]}'
+    '"confidence":0.0,"rationale":""}]}'
 )
 
 
@@ -32,15 +32,16 @@ def _prompt(candidates: List[dict]) -> str:
         "spelling/plural variants.\n"
         "Two names that are TRANSLATIONS of each other for the SAME concept (e.g. a "
         "Chinese name and its English equivalent or acronym — '低噪声放大器' / 'LNA' / "
-        "'Low Noise Amplifier') SHOULD merge. canonical_name MUST be one of the input "
-        "candidate strings, kept VERBATIM in its original language — never translate "
-        "or invent a new form. Write the rationale in the candidates' language. "
+        "'Low Noise Amplifier') SHOULD merge. Write the rationale in the "
+        "candidates' language. "
         "confidence is a number between 0 and 1 (e.g. 0.85) — never a word such "
         "as high/medium/low.\n"
         "Keep separate when one is a subtype, a different version/size/variant "
         "(e.g. 'V2' vs 'V3', '7B' vs '72B'), a related-but-distinct method, a "
         "parameter, a cause/effect, or a broader/narrower term.\n"
-        "Return JSON only.\n\n"
+        "Return JSON only, one decision per candidate. candidate_id is the value "
+        "of that candidate's leading id field — the text right after its equals "
+        "sign, up to the space — copied exactly as a string.\n\n"
         "Candidates:\n" + "\n".join(lines)
     )
 
@@ -104,7 +105,6 @@ def _review_chunk(llm_client: Any, chunk: List[dict]) -> List[dict]:
             out.append({
                 "candidate_id": as_text(item.get("candidate_id")),
                 "decision": decision,
-                "canonical_name": as_text(item.get("canonical_name")),
                 "confidence": _to_float(item.get("confidence", 0)),
                 "rationale": as_text(item.get("rationale"))[:500],
             })
