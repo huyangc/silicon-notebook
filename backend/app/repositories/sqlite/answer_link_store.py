@@ -51,12 +51,22 @@ class AnswerLinkStore:
 
     def _sweep_due(self) -> bool:
         with self._sweep_lock:
-            current = self._monotonic()
             last = self._last_sweep_monotonic
-            if last is not None and current - last < _SWEEP_INTERVAL_SECONDS:
-                return False
-            self._last_sweep_monotonic = current
-            return True
+            return last is None or self._monotonic() - last >= _SWEEP_INTERVAL_SECONDS
+
+    def _mark_swept(self) -> None:
+        # Only after the write committed: a failed transaction rolls its sweep
+        # back, and must not cost the next hour of sweeping.
+        with self._sweep_lock:
+            self._last_sweep_monotonic = self._monotonic()
+
+    @staticmethod
+    def _read_key(db: Any, job_kind: str, job_id: str, agent_token_id: str) -> Any:
+        return db.execute(
+            "SELECT token, expires_at FROM answer_links WHERE job_kind = ? "
+            "AND job_id = ? AND agent_token_id = ?",
+            (job_kind, job_id, agent_token_id),
+        ).fetchone()
 
     def issue_answer_link(
         self,
@@ -79,19 +89,23 @@ class AnswerLinkStore:
                 "AND agent_token_id = ? AND expires_at <= ?",
                 (job_kind, job_id, agent_token_id, _iso(now)),
             )
-            db.execute(
-                "INSERT INTO answer_links (" + _COLUMNS + ") VALUES (?,?,?,?,?,?,?) "
-                "ON CONFLICT (job_kind, job_id, agent_token_id) DO NOTHING",
-                (
-                    candidate, job_kind, job_id, owner_id, agent_token_id,
-                    _iso(now), _iso(now + timedelta(seconds=ttl_seconds)),
-                ),
-            )
-            row = db.execute(
-                "SELECT token, expires_at FROM answer_links WHERE job_kind = ? "
-                "AND job_id = ? AND agent_token_id = ?",
-                (job_kind, job_id, agent_token_id),
-            ).fetchone()
+            row = None
+            for _attempt in range(2):
+                db.execute(
+                    "INSERT INTO answer_links (" + _COLUMNS + ") VALUES (?,?,?,?,?,?,?) "
+                    "ON CONFLICT (job_kind, job_id, agent_token_id) DO NOTHING",
+                    (
+                        candidate, job_kind, job_id, owner_id, agent_token_id,
+                        _iso(now), _iso(now + timedelta(seconds=ttl_seconds)),
+                    ),
+                )
+                row = self._read_key(db, job_kind, job_id, agent_token_id)
+                if row is not None:
+                    break
+            if row is None:
+                raise RuntimeError("answer link vanished between insert and read-back")
+        if sweep:
+            self._mark_swept()
         return {
             "token": row["token"],
             "expires_at": row["expires_at"],
