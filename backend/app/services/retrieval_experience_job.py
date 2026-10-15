@@ -164,8 +164,10 @@ _MIN_SUPPORTING_RUNS = 2
 #: drawn from evidence this batch never saw.
 _SIMILARITY_FLOOR = 0.5
 
-#: The three operations the model may return.
-_OPS = frozenset({"ADD", "UPDATE", "NOOP"})
+#: The operations the model may return. "Nothing to record" is an absent
+#: entry, not an operation; a legacy ``NOOP`` falls outside this set and is
+#: skipped like any other unknown op, which is all it ever did.
+_OPS = frozenset({"ADD", "UPDATE"})
 
 #: An id-shaped run of hex. Every id this repository mints is a prefix plus a
 #: full uuid hex, so anything with a long hex run in it is an id — and an id in
@@ -1369,8 +1371,9 @@ def parse_distillation_reply(
 
     What each entry has to survive:
 
-    * ``op`` is one of ADD / UPDATE / NOOP. NOOP writes nothing and is the
-      expected answer most of the time.
+    * ``op`` is ADD or UPDATE. Anything else (a legacy ``NOOP`` included)
+      writes nothing; an empty ``entries`` list is the expected answer most of
+      the time.
     * ``situation`` names one of the offered indices. It is never CONSTRUCTED
       by the model — the server hands out ``s0``/``s1`` keys and resolves them
       back here, so an entry's situation is by construction one the deployment
@@ -1412,7 +1415,7 @@ def parse_distillation_reply(
         if not isinstance(item, Mapping):
             continue
         op = str(item.get("op") or "").strip().upper()
-        if op not in _OPS or op == "NOOP":
+        if op not in _OPS:
             continue
         resolved = by_key.get(str(item.get("situation") or "").strip().lower())
         if resolved is None:

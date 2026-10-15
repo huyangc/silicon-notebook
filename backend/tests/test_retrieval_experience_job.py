@@ -957,6 +957,32 @@ def test_an_update_naming_an_unoffered_entry_downgrades_to_a_plain_add():
     assert parsed[0]["replace"] is False              # 不许改写从未展示过的行
 
 
+def test_the_hint_enumerates_ops_and_polarity_and_allows_an_empty_list():
+    from app.core.model_schema import (
+        response_format_for_hint,
+        validate_structured_response,
+    )
+    from app.services.prompts import (
+        RETRIEVAL_EXPERIENCE_SCHEMA_HINT,
+        retrieval_experience_prompt,
+    )
+
+    fmt = response_format_for_hint(RETRIEVAL_EXPERIENCE_SCHEMA_HINT)
+    assert fmt is not None
+    item = fmt["json_schema"]["schema"]["properties"]["entries"]["items"]
+    assert item["properties"]["op"]["enum"] == ["", "ADD", "UPDATE", None]
+    assert item["properties"]["polarity"]["enum"] == ["", "good", "bad", None]
+    assert validate_structured_response('{"entries":[]}', fmt)
+    assert not validate_structured_response(
+        '{"entries":[{"op":"NOOP","situation":"s0","action":"ppr",'
+        '"polarity":"good","rationale":"x"}]}', fmt,
+    )
+    prompt = retrieval_experience_prompt(
+        "OBS", "EXISTING", actions=("ppr",), rationale_max_chars=80,
+    )
+    assert '{"entries": []}' in prompt and "NOOP" not in prompt
+
+
 def test_a_noop_writes_nothing():
     groups = _groups()
     assert parse_distillation_reply(

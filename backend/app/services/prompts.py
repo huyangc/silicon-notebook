@@ -2359,8 +2359,8 @@ def agent_profile_overlay_prompt(
 #: never occurs. Naming an index makes "the situation is one the server
 #: observed" true by construction.
 RETRIEVAL_EXPERIENCE_SCHEMA_HINT = (
-    '{"entries":[{"op":"ADD","situation":"s0","action":"exact_lookup",'
-    '"polarity":"bad","rationale":""},{"op":"NOOP","situation":"s1"}]}'
+    '{"entries":[{"op":"ADD|UPDATE","situation":"s0","action":"exact_lookup",'
+    '"polarity":"good|bad","rationale":""}]}'
 )
 
 
@@ -2390,8 +2390,8 @@ def retrieval_experience_prompt(
 
     Three rules carry the design:
 
-    * **NOOP is the expected answer most of the time.** Forty runs of ordinary
-      searching usually establish nothing new. A model told to produce entries
+    * **An empty ``entries`` list is the expected answer most of the time.**
+      Forty runs of ordinary searching usually establish nothing new. A model told to produce entries
       will manufacture them, and a manufactured entry then steers real
       retrieval — worse than an empty library, because it looks like evidence.
     * **One entry says one thing about one action.** An entry that hedges
@@ -2415,7 +2415,8 @@ def retrieval_experience_prompt(
         "for similar shapes. Decide what — if anything — the library should "
         "learn.\n"
         "Rules:\n"
-        "1. NOOP is the normal answer. Only record something when the numbers "
+        "1. Recording nothing is the normal answer: when nothing qualifies, "
+        'return {"entries": []}. Only record something when the numbers '
         "show a CLEAR and REPEATED pattern across several runs. One run is "
         "never a pattern, and an invented tactic misdirects every later "
         "search.\n"
@@ -2430,10 +2431,11 @@ def retrieval_experience_prompt(
         "line has no 'anchored=' figure, that batch predates this check for "
         "that action — total_citations is a WHOLE-RUN number in every case "
         "and must never be attributed to one particular action.\n"
-        "4. op is ADD for a conclusion the library does not hold yet, UPDATE to "
-        "revise the polarity or wording of an entry listed below, NOOP to leave "
-        "a situation alone. UPDATE only when the new numbers actually "
-        "contradict or sharpen the existing entry.\n"
+        "4. op is ADD for a conclusion the library does not hold yet, or UPDATE "
+        "to revise the polarity or wording of an entry listed below. A "
+        "situation with nothing to record gets no entry at all. UPDATE only "
+        "when the new numbers actually contradict or sharpen the existing "
+        "entry.\n"
         f"5. situation must be one of the ids given below (s0, s1, ...). action "
         f"must be exactly one of: {action_list}. polarity is 'good' or 'bad'.\n"
         f"6. rationale is ONE short line, at most {rationale_max_chars} "

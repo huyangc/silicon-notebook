@@ -128,7 +128,10 @@ def test_agent_block_variants_preserve_both_updates_and_retirements():
 
 
 def test_heterogeneous_array_examples_merge_fields_without_freezing_sample_values():
-    hint = prompts.RETRIEVAL_EXPERIENCE_SCHEMA_HINT
+    hint = (
+        '{"entries":[{"op":"ADD","situation":"s0","action":"exact_lookup",'
+        '"polarity":"bad","rationale":""},{"op":"NOOP","situation":"s1"}]}'
+    )
     assert _valid(hint, {"entries": [
         {"op": "NOOP", "situation": "s9", "action": None, "polarity": None, "rationale": None},
         {"op": "ADD", "situation": "s42", "action": "search_chunks", "polarity": "good", "rationale": "有效"},
