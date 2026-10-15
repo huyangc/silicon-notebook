@@ -1341,6 +1341,12 @@ class PublicConversation(BaseModel):
     shared_at: str = ""
     turns: List[PublicTurn] = Field(default_factory=list)
     truncated_turns: bool = False
+    # MCP answer links (``alnk-``) only: when this link stops opening. Left out
+    # of the body entirely when unset, so a session/global share serializes
+    # byte for byte as before.
+    expires_at: Optional[str] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class SearchHit(BaseModel):

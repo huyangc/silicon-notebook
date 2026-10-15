@@ -12,8 +12,12 @@ from app.bootstrap import application_extension_runtime
 from app.domain.ask_engine import AskPluginEngineError
 from app.domain.conversation_public_view import MAX_TURNS
 
-from app.core.capability_tokens import is_global_conversation_share_token
+from app.core.capability_tokens import (
+    is_answer_link_token,
+    is_global_conversation_share_token,
+)
 from app.api.deps import (
+    answer_link_repository,
     get_current_user,
     global_ask_service,
     notebook_access_repository,
@@ -75,6 +79,7 @@ from app.services.conversation_public_view import (
     public_conversation_payload,
     resolve_conversation_asset_alias,
 )
+from app.services.answer_links import AnswerLinkExpired, resolve_answer_link
 from app.services.public_share_recheck import (
     conversation_library_ids,
     mounts_still_effective,
@@ -1309,17 +1314,51 @@ def _public_global_conversation_or_404(token: str) -> dict:
     return row
 
 
-def _public_conversation_or_404(repo, token: str) -> dict:
+def _public_answer_link_or_404(repo, token: str, *, expired_status: int) -> dict:
+    """The MCP answer-link (``alnk-``) branch of the shared anonymous read.
+
+    ``resolve_answer_link`` runs EVERY gate itself — the issuing token as it
+    stands now, the owner's read access, and for a notebook job the very
+    snapshot predicate the ``cshr`` branch below runs — taking each identity
+    from the link row, never from the request-user ContextVar. This branch only
+    maps its outcome: ``None`` is the one indistinguishable 404; an expired row
+    still present is a 410 on the PAGE (plan D11: the reader is told to ask
+    again rather than shown a dead-link page) and a 404 everywhere else
+    (``expired_status`` defaults to 404, so the image endpoint never tells an
+    expired link from an unknown one). The row carries the same gate fields as
+    the other two branches (``notebook_id``/``notebook_ids``/``created_by``)
+    plus ``expires_at``.
+    """
+    try:
+        row = resolve_answer_link(
+            token,
+            store=answer_link_repository(),
+            repo=repo,
+            global_service=global_ask_service(),
+        )
+    except AnswerLinkExpired:
+        if expired_status == 410:
+            raise user_error(410, "链接已过期，请重新提问") from None
+        raise HTTPException(
+            status_code=404, detail="shared conversation not found"
+        ) from None
+    if row is None:
+        raise HTTPException(status_code=404, detail="shared conversation not found")
+    return row
+
+
+def _public_conversation_or_404(repo, token: str, *, expired_status: int = 404) -> dict:
     """Resolve a shared conversation by token and run the live creator re-check.
 
-    TWO features share this one anonymous surface, told apart by the token's
+    THREE features share this one anonymous surface, told apart by the token's
     capability-namespace prefix: ``gshr-`` is a global (cross-library)
-    conversation and takes the branch above, anything else is the
+    conversation, ``alnk-`` is an MCP answer link (one answer, time-limited;
+    ``expired_status`` only matters there), and anything else is the
     notebook-scoped conversation this function has always served. One endpoint
-    pair rather than two is what keeps ``/c/{token}`` a single public page — a
-    reader is handed a link, not a feature name. The two namespaces partition
-    the token space (``capability_tokens``), so neither branch can ever resolve
-    the other's token.
+    pair rather than three is what keeps ``/c/{token}`` a single public page — a
+    reader is handed a link, not a feature name. The namespaces partition the
+    token space (``capability_tokens``), so no branch can ever resolve another's
+    token.
 
     Shared by the page endpoint and the image endpoint so the two gates can
     NEVER diverge — the design (§七 item 3) requires the image channel to run
@@ -1358,6 +1397,8 @@ def _public_conversation_or_404(repo, token: str) -> dict:
     """
     if is_global_conversation_share_token(token):
         return _public_global_conversation_or_404(token)
+    if is_answer_link_token(token):
+        return _public_answer_link_or_404(repo, token, expired_status=expired_status)
     row = repo.public_conversation_by_token(token)
     if row is None:
         raise HTTPException(status_code=404, detail="shared conversation not found")
@@ -1392,7 +1433,13 @@ def public_conversation_route(token: str, response: Response) -> PublicConversat
     read in ONE batch per page, with the creator's id passed explicitly.
     """
     repo = repository()
-    row = _public_conversation_or_404(repo, token)
+    # Only the page tells an expired answer link apart (410, "ask again"); the
+    # image endpoint keeps the default 404.
+    row = _public_conversation_or_404(repo, token, expired_status=410)
+    # The answer-link branch's validity line: not a snapshot field, so it is
+    # taken off the row before projection and set on the model directly; the
+    # other two branches have none and serialize exactly as before.
+    expires_at = row.pop("expires_at", None) or None
     # Pop the GATE fields before projection: ``notebook_id``/``created_by`` are
     # for the live re-check ONLY and must never cross to an anonymous reader
     # (store docstring). Defense-in-depth — the allowlist ignores them anyway.
@@ -1416,7 +1463,8 @@ def public_conversation_route(token: str, response: Response) -> PublicConversat
             share_token=token,
             images_enabled=get_settings().mineru_return_images,
             memory_sources=memory_sources,
-        )
+        ),
+        expires_at=expires_at,
     )
 
 
@@ -1432,7 +1480,10 @@ def public_conversation_asset_route(token: str, alias: str) -> FileResponse:
     Same anonymous-router discipline and the SAME live creator re-check as the
     page endpoint (shared ``_public_conversation_or_404``): the link's lifetime
     is exactly the creator's read access, so an image must die the instant the
-    page does.
+    page does. For an MCP answer link (``alnk-``) that includes expiry: the
+    page says 410, this endpoint keeps the plain 404 (the default
+    ``expired_status``), and the alias is keyed by the link token, so only the
+    images that link's one answer quotes resolve under it.
 
     ⚠ Cross-notebook boundary (design §六): a referenced image may live in a
     MOUNTED reference library, so ``asset["notebook_id"]`` can differ from the

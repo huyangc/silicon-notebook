@@ -58,6 +58,13 @@ What never crosses, and why:
   (never any content), so T5's page can say "此回答还包含未公开的清单内容"
   rather than let the reader think the answer was always this short.
 
+Three token namespaces feed this one projection: the session share (``cshr-``),
+the global conversation share (``gshr-``), and the MCP answer link (``alnk-``,
+``services/answer_links``) -- ONE answer, time-limited, through the SAME
+allowlist. A link's row is one turn with an empty title and watermark; its
+``expires_at`` is set on the response model by the route, never projected from
+the row, and image aliases are keyed by the link token like any share's.
+
 Numeric caps below are named constants only; the authoritative registration of
 their values is T6's job in ``docs/product-and-api*.md``.
 """
