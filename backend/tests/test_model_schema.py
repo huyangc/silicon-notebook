@@ -140,12 +140,61 @@ def test_heterogeneous_array_examples_merge_fields_without_freezing_sample_value
 
 
 def test_pipe_enums_allow_the_unused_empty_value_but_reject_other_values():
-    hint = '{"action":"keep|supplement|external"}'
+    hint = '{"verdicts":[{"action":"keep|supplement|external"}]}'
     for action in ("", "keep", "supplement", "external"):
-        assert _valid(hint, {"action": action})
-    assert not _valid(hint, {"action": "invented_action"})
-    assert not _valid(hint, {"action": 1})
+        assert _valid(hint, {"verdicts": [{"action": action}]})
+    assert not _valid(hint, {"verdicts": [{"action": "invented_action"}]})
+    assert not _valid(hint, {"verdicts": [{"action": 1}]})
     assert _valid('{"endpoint":"<source|target>"}', {"endpoint": "node-7"})
+
+
+def test_required_root_enums_admit_only_the_listed_values():
+    hint = '{"action":"keep|supplement|external"}'
+    for action in ("keep", "supplement", "external"):
+        assert _valid(hint, {"action": action})
+    for action in ("", None, "invented_action"):
+        assert not _valid(hint, {"action": action})
+    # Root enum arrays are item vocabularies, not the root decision itself.
+    assert _valid('{"kinds":["text|table"]}', {"kinds": [""]})
+
+
+def test_reflect_decision_is_required_while_unused_branch_enums_stay_open():
+    hint = prompts.reflect_schema_hint(("text", "table"), outline=True)
+    schema = _format(hint)["json_schema"]["schema"]
+    properties = schema["properties"]
+    assert "" not in properties["next_action"]["enum"]
+    # Optional root branches and nested enums keep "" and null for "unused".
+    assert "" in properties["enumerate"]["properties"]["kind"]["enum"]
+    payload = dict.fromkeys(properties)
+    payload.update(sufficient=False, next_action="", reason="r")
+    assert not _valid(hint, payload)
+    payload["next_action"] = "answer"
+    assert _valid(hint, payload)
+
+
+@pytest.mark.parametrize("hint", [
+    prompts.QUERY_INTENT_SCHEMA_HINT, prompts.REPORT_INTENT_SCHEMA_HINT,
+])
+def test_intent_classification_enums_admit_only_the_listed_values(hint):
+    properties = _format(hint)["json_schema"]["schema"]["properties"]
+    for field in ("intent_type", "result_scope"):
+        assert "" not in properties[field]["enum"], field
+        assert None not in properties[field]["enum"], field
+
+
+def test_optional_root_enums_keep_the_unused_empty_value():
+    # A paper-meta style root: every field but the classifier is optional.
+    hint = '{"is_paper":true,"venue_kind":"journal|conference"}'
+    assert _valid(hint, {"is_paper": False, "venue_kind": ""})
+    assert _valid(hint, {"is_paper": False, "venue_kind": None})
+    assert not _valid(hint, {"is_paper": None, "venue_kind": "journal"})
+
+
+def test_resolved_payload_is_no_longer_a_placeholder_key():
+    # A string-valued resolved_* field is ordinary text; only a null example
+    # with an unknown type still falls back to JSON mode.
+    assert _valid('{"resolved_payload":"name"}', {"resolved_payload": "其他名称"})
+    assert response_format_for_hint('{"resolved_payload":null}') is None
 
 
 @pytest.mark.parametrize("field", ["parent", "edge_type", "suggestion_md"])
