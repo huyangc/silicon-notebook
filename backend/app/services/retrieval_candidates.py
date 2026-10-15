@@ -235,7 +235,7 @@ def keyword_arm_available(settings) -> bool:
     THE one statement of that fact: the channel short-circuits on it, and
     reasoning reads the very same answer (through
     ``RetrievalService.keyword_arm_available``) to decide whether its
-    ``search_chunks`` action may offer the model a ``chunks_keywords``
+    ``search_chunks`` action may offer the model a ``keywords``
     parameter at all -- a parameter that is guaranteed to do nothing must not
     be shown. Today the only such configuration is peer mode with
     ``GLOBAL_ASK_KEYWORD_ARM_ENABLED=false``. The switch is read only in peer
@@ -4787,7 +4787,7 @@ class CandidateRetrievalService(_RetrievalState):
         vector embed — purely lexical. Called once per question text, never per
         sub-query: chunk mode calls it once per ask; reasoning calls it once in
         the first-round seed (when ``plan()`` produced keywords) plus once per
-        ``search_chunks`` action that carries ``chunks_keywords`` (so at most
+        ``search_chunks`` action that carries ``keywords`` (so at most
         ``1 + REASONING_MAX_CHUNK_SEARCHES`` per run). The caller merges these
         into whatever candidate set its branch built
         (dedup by chunk_id), so a chunk that matches only a 2nd-language keyword —
@@ -4967,7 +4967,7 @@ class CandidateRetrievalService(_RetrievalState):
             # 的候选,也不改答案的可信度,所以不记 model_error、不上「模型服务调用
             # 失败」横幅——此前记成 `chunk_keyword_union` model_error,会以一条
             # 没有服务身份的横幅出现(chunk 模式的关键词补召回与 reasoning 的播种
-            # 词法臂、`search_chunks.chunks_keywords` 都走这里)。原因码走事件:
+            # 词法臂、`search_chunks` 的 `keywords` 都走这里)。原因码走事件:
             # 内容无关,只带异常类名,与对等腿的 skip 事件同口径。
             self.event_log.emit({
                 "kind": "ask_stage",

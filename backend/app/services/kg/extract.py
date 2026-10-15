@@ -167,7 +167,9 @@ def _fragment_grounds_something(content: str, elements: List[SourceElementQ],
         return False
     if edges and edges_consumed:
         # Endpoints must index this reply's grounded nodes, as extract_window
-        # wires them; a legit empty window has no edges to check.
+        # wires them; a legit empty window has no edges to check. The cost is
+        # deliberate: a window whose every edge is broken is re-asked on the
+        # next build instead of freezing a relation-less fragment for the TTL.
         return any(
             s != t and s in grounded and t in grounded
             for s, t in map(_edge_endpoints, edges)
