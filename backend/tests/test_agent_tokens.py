@@ -10,9 +10,14 @@ from fastapi.testclient import TestClient
 from app.api.deps import USER_MESSAGE_HEADER
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
-from app.domain.agent_tools import OWNER_ONLY_TIERS_MESSAGE, AgentAccessDenied
+from app.domain.agent_tools import (
+    ANSWER_LINKS_REQUIRE_ASK_MESSAGE,
+    OWNER_ONLY_TIERS_MESSAGE,
+    AgentAccessDenied,
+)
 from app.models.identity import AgentTokenAccess
 from app.repositories.identity_errors import (
+    AgentAnswerLinksNeedAskError,
     AgentOwnerOnlyTierError,
     AgentTokenAccessConflictError,
     AgentTokenInactiveError,
@@ -774,6 +779,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
             "default_notebook_id": other_notebook_id,
             "notebook_ids": [other_notebook_id],
             "expires_at": None,
+            "allow_answer_links": False,
         },
     )
     assert updated.status_code == 200, updated.text
@@ -797,6 +803,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
             "default_notebook_id": bob_notebook_id,
             "notebook_ids": [bob_notebook_id],
             "expires_at": None,
+            "allow_answer_links": False,
         },
     )
     assert foreign.status_code == 404
@@ -809,6 +816,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
             "default_notebook_id": bob_notebook_id,
             "notebook_ids": [bob_notebook_id],
             "expires_at": None,
+            "allow_answer_links": False,
         },
     )
     assert missing.status_code == 404
@@ -825,6 +833,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
             "default_notebook_id": other_notebook_id,
             "notebook_ids": [other_notebook_id],
             "expires_at": None,
+            "allow_answer_links": False,
         },
     )
     assert revoked_update.status_code == 409
@@ -852,6 +861,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
             "default_notebook_id": notebook_id,
             "notebook_ids": [notebook_id],
             "expires_at": None,
+            "allow_answer_links": False,
             "expected": {
                 "scopes": ["read", "contribute"],
                 "default_notebook_id": notebook_id,
@@ -871,6 +881,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
             "default_notebook_id": notebook_id,
             "notebook_ids": [notebook_id],
             "expires_at": None,
+            "allow_answer_links": False,
             "expected": {
                 "scopes": ["read"],
                 "default_notebook_id": notebook_id,
@@ -890,6 +901,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
             "default_notebook_id": notebook_id,
             "notebook_ids": [notebook_id, bob_notebook_id],
             "expires_at": None,
+            "allow_answer_links": False,
         },
     )
     assert unreadable.status_code == 422
@@ -923,6 +935,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
             "default_notebook_id": notebook_id,
             "notebook_ids": [notebook_id],
             "expires_at": None,
+            "allow_answer_links": False,
         },
     )
     assert disabled_update.status_code == 409
@@ -950,6 +963,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
             "default_notebook_id": notebook_id,
             "notebook_ids": [notebook_id],
             "expires_at": None,
+            "allow_answer_links": False,
             "unexpected": "field",
         },
     )
@@ -1283,6 +1297,7 @@ def test_secret_endpoint_and_owner_only_tier_errors_are_user_messages(
             "default_notebook_id": notebook_id,
             "notebook_ids": [notebook_id],
             "expires_at": None,
+            "allow_answer_links": False,
         },
     )
     assert edit.status_code == 422
@@ -1320,3 +1335,163 @@ def test_a_wrong_secret_never_learns_why_a_real_token_id_is_dead(token_context):
         assert service.resolve_agent_token_status(
             issued.token[:-1] + ("A" if issued.token[-1] != "A" else "B")
         ) == (None, "token_invalid"), issued.id
+
+
+# ---------------------------------------------------------------------------
+# "May issue answer links": an add-on bit beside the five tiers.
+# ---------------------------------------------------------------------------
+
+
+def _issue_links(service, owner, profile, notebook, *, scopes, allow):
+    return service.issue_agent_token(
+        owner.id, profile.id, scopes, notebook.id, [notebook.id], None, allow
+    )
+
+
+def test_issue_defaults_answer_links_off_and_lists_it(token_context):
+    service, alice, _bob, notebook, _other = token_context
+    profile = service.create_agent_profile(alice.id, "Links", "")
+    plain = _issue(service, alice, profile, notebook, scopes=["read", "ask"])
+    assert plain.allow_answer_links is False
+    on = _issue_links(
+        service, alice, profile, notebook, scopes=["read", "ask"], allow=True
+    )
+    assert on.allow_answer_links is True
+    listed = {t.id: t.allow_answer_links for t in service.list_agent_tokens(alice.id)}
+    assert listed == {plain.id: False, on.id: True}
+    assert service.resolve_agent_token(on.token).allow_answer_links is True
+    assert service.resolve_agent_token(plain.token).allow_answer_links is False
+
+
+def test_answer_links_need_the_ask_tier_on_issue_and_edit(token_context):
+    service, alice, _bob, notebook, _other = token_context
+    profile = service.create_agent_profile(alice.id, "Links", "")
+    with pytest.raises(AgentAnswerLinksNeedAskError) as refused:
+        _issue_links(service, alice, profile, notebook, scopes=["read"], allow=True)
+    assert str(refused.value) == ANSWER_LINKS_REQUIRE_ASK_MESSAGE
+    token = _issue(service, alice, profile, notebook, scopes=["read"])
+    with pytest.raises(AgentAnswerLinksNeedAskError):
+        service.update_agent_token_access(
+            alice.id, token.id, ["read"], notebook.id, [notebook.id], None,
+            None, True,
+        )
+    # Dropping ask while the bit is on is refused the same way.
+    on = _issue_links(
+        service, alice, profile, notebook, scopes=["read", "ask"], allow=True
+    )
+    with pytest.raises(AgentAnswerLinksNeedAskError):
+        service.update_agent_token_access(
+            alice.id, on.id, ["read"], notebook.id, [notebook.id], None, None, True,
+        )
+
+
+def test_put_access_requires_allow_answer_links_field(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'alnk-api.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.main import create_app
+
+    client = TestClient(create_app())
+    headers, _ = _register(client, "j00119010")
+    notebook_id = client.post(
+        "/api/notebooks", headers=headers, json={"name": "Links API"}
+    ).json()["id"]
+    profile_id = client.post(
+        "/api/agent-profiles", headers=headers, json={"name": "Agent"}
+    ).json()["id"]
+    base = {
+        "agent_profile_id": profile_id,
+        "default_notebook_id": notebook_id,
+        "notebook_ids": [notebook_id],
+    }
+    refused = client.post(
+        f"/api/agent-profiles/{profile_id}/tokens",
+        headers=headers,
+        json={**base, "scopes": ["read"], "allow_answer_links": True},
+    )
+    assert refused.status_code == 422
+    assert refused.headers.get(USER_MESSAGE_HEADER) == "1"
+    assert refused.json()["detail"] == ANSWER_LINKS_REQUIRE_ASK_MESSAGE
+    issued = client.post(
+        f"/api/agent-profiles/{profile_id}/tokens",
+        headers=headers,
+        json={**base, "scopes": ["read", "ask"]},
+    ).json()
+    assert issued["allow_answer_links"] is False
+    url = f"/api/agent-tokens/{issued['id']}/access"
+    body = {
+        "scopes": ["read", "ask"],
+        "default_notebook_id": notebook_id,
+        "notebook_ids": [notebook_id],
+        "expires_at": None,
+    }
+    assert client.put(url, headers=headers, json=body).status_code == 422
+    bad = client.put(
+        url, headers=headers,
+        json={**body, "scopes": ["read"], "allow_answer_links": True},
+    )
+    assert bad.status_code == 422
+    assert bad.headers.get(USER_MESSAGE_HEADER) == "1"
+    assert bad.json()["detail"] == ANSWER_LINKS_REQUIRE_ASK_MESSAGE
+    ok = client.put(
+        url, headers=headers, json={**body, "allow_answer_links": True}
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["allow_answer_links"] is True
+
+
+def test_put_access_toggles_answer_links_and_principal_reflects_it(token_context):
+    service, alice, _bob, notebook, _other = token_context
+    profile = service.create_agent_profile(alice.id, "Links", "")
+    issued = _issue(service, alice, profile, notebook, scopes=["read", "ask"])
+    principal = service.resolve_agent_token(issued.token)
+    assert principal.allow_answer_links is False
+    summary = service.update_agent_token_access(
+        alice.id, issued.id, ["read", "ask"], notebook.id, [notebook.id], None,
+        None, True,
+    )
+    assert summary.allow_answer_links is True
+    assert service.refresh_agent_principal(principal.token_id).allow_answer_links is True
+    summary = service.update_agent_token_access(
+        alice.id, issued.id, ["read", "ask"], notebook.id, [notebook.id], None,
+        None, False,
+    )
+    assert summary.allow_answer_links is False
+    assert service.refresh_agent_principal(principal.token_id).allow_answer_links is False
+
+
+def test_expected_mismatch_on_answer_links_is_409(token_context):
+    service, alice, _bob, notebook, _other = token_context
+    profile = service.create_agent_profile(alice.id, "Links", "")
+    issued = _issue(service, alice, profile, notebook, scopes=["read", "ask"])
+    stale = AgentTokenAccess(
+        scopes=["read", "ask"], default_notebook_id=notebook.id,
+        notebook_ids=[notebook.id], expires_at=None, allow_answer_links=True,
+    )
+    with pytest.raises(AgentTokenAccessConflictError):
+        service.update_agent_token_access(
+            alice.id, issued.id, ["read", "ask"], notebook.id, [notebook.id], None,
+            stale, False,
+        )
+    fresh = stale.model_copy(update={"allow_answer_links": False})
+    service.update_agent_token_access(
+        alice.id, issued.id, ["read", "ask"], notebook.id, [notebook.id], None,
+        fresh, True,
+    )
+
+
+def test_unrelated_edit_keeps_answer_links(token_context):
+    service, alice, _bob, notebook, other = token_context
+    profile = service.create_agent_profile(alice.id, "Links", "")
+    issued = service.issue_agent_token(
+        alice.id, profile.id, ["read", "ask"], notebook.id,
+        [notebook.id], None, True,
+    )
+    summary = service.update_agent_token_access(
+        alice.id, issued.id, ["read", "ask"], notebook.id,
+        [notebook.id, other.id], None, None, True,
+    )
+    assert summary.allow_answer_links is True
+    assert sorted(summary.notebook_ids) == sorted([notebook.id, other.id])

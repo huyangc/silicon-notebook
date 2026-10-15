@@ -145,6 +145,7 @@ class MemoryStore:
             last_used_at=iso_timestamp(row["last_used_at"], empty="") or None,
             created_at=iso_timestamp(row["created_at"]),
             copyable=bool(row["token_plain"]) and row["revoked_at"] is None,
+            allow_answer_links=bool(row["allow_answer_links"]),
         )
 
     def create_agent_profile(
@@ -250,6 +251,7 @@ class MemoryStore:
         notebook_ids: Sequence[str],
         expires_at: str | None,
         token_plain: str | None = None,
+        allow_answer_links: bool = False,
     ) -> AgentTokenSummary:
         now = self.now()
         with self.database.write() as db:
@@ -266,7 +268,8 @@ class MemoryStore:
             db.execute(
                 "INSERT INTO agent_access_tokens "
                 "(id,agent_profile_id,token_hash,scopes_json,default_notebook_id,"
-                "expires_at,created_at,token_plain) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                "expires_at,created_at,token_plain,allow_answer_links) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     token_id,
                     agent_profile_id,
@@ -276,6 +279,7 @@ class MemoryStore:
                     normalize_timestamp(expires_at) if expires_at else None,
                     normalize_timestamp(now),
                     token_plain,
+                    1 if allow_answer_links else 0,
                 ),
             )
             execute_many(
@@ -359,6 +363,7 @@ class MemoryStore:
         notebook_ids: Sequence[str],
         expires_at: str | None,
         expected: AgentTokenAccess | None = None,
+        allow_answer_links: bool = False,
     ) -> AgentTokenSummary:
         # 一个写事务:``FOR UPDATE OF t`` 锁住 token 行,使下面的「读撤销/停用
         # 状态与 expected 前置条件」与「写新配置」之间不会被另一次并发撤销或
@@ -383,11 +388,12 @@ class MemoryStore:
                 raise AgentTokenAccessConflictError(token_id)
             cursor = db.execute(
                 "UPDATE agent_access_tokens SET scopes_json=%s,default_notebook_id=%s,"
-                "expires_at=%s WHERE id=%s AND revoked_at IS NULL",
+                "expires_at=%s,allow_answer_links=%s WHERE id=%s AND revoked_at IS NULL",
                 (
                     jsonb(list(scopes)),
                     default_notebook_id,
                     normalize_timestamp(expires_at) if expires_at else None,
+                    1 if allow_answer_links else 0,
                     token_id,
                 ),
             )
@@ -419,7 +425,7 @@ class MemoryStore:
                 # on the authentication path, which compares the hash only.
                 "SELECT t.id,t.agent_profile_id,t.token_hash,t.scopes_json,"
                 "t.default_notebook_id,t.expires_at,t.revoked_at,t.last_used_at,"
-                "t.created_at,"
+                "t.created_at,t.allow_answer_links,"
                 "p.owner_id,p.name AS profile_name,p.status AS profile_status,"
                 "COALESCE((SELECT array_agg(n.notebook_id ORDER BY n.notebook_id COLLATE \"C\") "
                 "FROM agent_token_notebooks n WHERE n.token_id=t.id),ARRAY[]::text[]) "

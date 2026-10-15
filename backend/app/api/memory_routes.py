@@ -24,7 +24,10 @@ from app.api.deps import (
     require_notebook_read,
     user_error,
 )
-from app.domain.agent_tools import OWNER_ONLY_TIERS_MESSAGE
+from app.domain.agent_tools import (
+    ANSWER_LINKS_REQUIRE_ASK_MESSAGE,
+    OWNER_ONLY_TIERS_MESSAGE,
+)
 from app.models.identity import (
     AgentProfile,
     AgentProfileCreate,
@@ -37,6 +40,7 @@ from app.models.identity import (
     UserProfile,
 )
 from app.repositories.identity_errors import (
+    AgentAnswerLinksNeedAskError,
     AgentOwnerOnlyTierError,
     AgentTokenAccessConflictError,
     AgentTokenInactiveError,
@@ -183,11 +187,14 @@ async def issue_agent_token(
             payload.default_notebook_id,
             payload.notebook_ids,
             payload.expires_at,
+            payload.allow_answer_links,
         )
     except KeyError:
         raise _not_found("Agent profile not found")
     except AgentOwnerOnlyTierError:
         raise user_error(422, OWNER_ONLY_TIERS_MESSAGE)
+    except AgentAnswerLinksNeedAskError:
+        raise user_error(422, ANSWER_LINKS_REQUIRE_ASK_MESSAGE)
     except (PermissionError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -253,6 +260,7 @@ async def update_agent_token_access(
             payload.notebook_ids,
             payload.expires_at,
             payload.expected,
+            payload.allow_answer_links,
         )
     except KeyError:
         raise user_error(404, "没有找到这个 Token，可能已被删除")
@@ -266,6 +274,8 @@ async def update_agent_token_access(
         raise user_error(422, "白名单里有你已无权访问的笔记本，请取消勾选后再保存")
     except AgentOwnerOnlyTierError:
         raise user_error(422, OWNER_ONLY_TIERS_MESSAGE)
+    except AgentAnswerLinksNeedAskError:
+        raise user_error(422, ANSWER_LINKS_REQUIRE_ASK_MESSAGE)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 

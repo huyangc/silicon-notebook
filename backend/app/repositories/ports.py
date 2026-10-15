@@ -720,7 +720,7 @@ class MemoryRepository(Protocol):
     def issue_agent_token(
         self, owner_id: str, agent_profile_id: str, scopes: Sequence[str],
         default_notebook_id: str, notebook_ids: Sequence[str],
-        expires_at: str | None,
+        expires_at: str | None, allow_answer_links: bool = False,
     ) -> AgentTokenIssued: ...
     def list_agent_tokens(
         self, owner_id: str, offset: int = 0, limit: int = 100
@@ -732,6 +732,7 @@ class MemoryRepository(Protocol):
         self, owner_id: str, token_id: str, scopes: Sequence[str],
         default_notebook_id: str, notebook_ids: Sequence[str],
         expires_at: str | None, expected: AgentTokenAccess | None = None,
+        allow_answer_links: bool = False,
     ) -> AgentTokenSummary: ...
     def agent_token_secret(self, owner_id: str, token_id: str) -> str: ...
     def resolve_agent_token(self, raw_token: str) -> AgentPrincipal | None: ...
@@ -4096,7 +4097,7 @@ class MemoryStorePort(Protocol):
         self, token_id: str, owner_id: str, agent_profile_id: str,
         token_hash: str, scopes: Sequence[str], default_notebook_id: str,
         notebook_ids: Sequence[str], expires_at: str | None,
-        token_plain: str | None = None,
+        token_plain: str | None = None, allow_answer_links: bool = False,
     ) -> AgentTokenSummary: ...
     def list_agent_tokens(
         self, owner_id: str, offset: int = 0, limit: int = 100
@@ -4112,6 +4113,7 @@ class MemoryStorePort(Protocol):
         self, token_id: str, owner_id: str, scopes: Sequence[str],
         default_notebook_id: str, notebook_ids: Sequence[str],
         expires_at: str | None, expected: AgentTokenAccess | None = None,
+        allow_answer_links: bool = False,
     ) -> AgentTokenSummary: ...
     def agent_token_auth_row(self, token_id: str) -> dict[str, Any] | None: ...
     def touch_agent_token(

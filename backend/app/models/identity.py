@@ -143,6 +143,7 @@ class AgentTokenCreate(BaseModel):
     default_notebook_id: str = Field(min_length=1)
     notebook_ids: List[str] = Field(default_factory=list)
     expires_at: Optional[str] = None
+    allow_answer_links: bool = False
 
 
 def _same_expiry(left: Optional[str], right: Optional[str]) -> bool:
@@ -167,6 +168,7 @@ class AgentTokenAccess(BaseModel):
     default_notebook_id: str = Field(min_length=1)
     notebook_ids: List[str]
     expires_at: Optional[str]
+    allow_answer_links: bool = False
 
     def matches(self, token: "AgentTokenSummary") -> bool:
         return (
@@ -174,6 +176,7 @@ class AgentTokenAccess(BaseModel):
             and self.default_notebook_id == token.default_notebook_id
             and set(self.notebook_ids) == set(token.notebook_ids)
             and _same_expiry(self.expires_at, token.expires_at)
+            and self.allow_answer_links == token.allow_answer_links
         )
 
 
@@ -200,6 +203,7 @@ class AgentTokenAccessUpdate(BaseModel):
     default_notebook_id: str = Field(min_length=1)
     notebook_ids: List[str]
     expires_at: Optional[str]
+    allow_answer_links: bool
     expected: Optional[AgentTokenAccess] = None
 
 
@@ -218,6 +222,7 @@ class AgentTokenSummary(BaseModel):
     # token is not revoked: ``GET /agent-tokens/{id}/secret`` can return it.
     # The list never carries the plaintext itself.
     copyable: bool = False
+    allow_answer_links: bool = False
 
 
 class AgentTokenSecret(BaseModel):
@@ -233,6 +238,7 @@ class AgentTokenIssued(BaseModel):
     notebook_ids: List[str] = Field(default_factory=list)
     expires_at: Optional[str] = None
     created_at: str
+    allow_answer_links: bool = False
 
 
 class AgentPrincipal(BaseModel):
@@ -243,6 +249,7 @@ class AgentPrincipal(BaseModel):
     default_notebook_id: str = Field(min_length=1)
     notebook_ids: List[str] = Field(default_factory=list)
     token_id: str
+    allow_answer_links: bool = False
 
 
 class AuthRequest(BaseModel):

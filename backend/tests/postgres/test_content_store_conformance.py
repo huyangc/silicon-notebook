@@ -2201,6 +2201,36 @@ def test_memory_agent_token_round_trip_uses_connection_cursor_batch(content_harn
     assert store.list_agent_tokens("user-content") == [issued]
 
 
+def test_memory_agent_token_answer_links_bit_round_trips(content_harness):
+    """``allow_answer_links``: issue, list, auth row, CAS ``expected``, update."""
+    store = content_harness.memory
+    profile = store.create_agent_profile("user-content", "Links bit", "")
+    issued = store.create_agent_token(
+        "agent-token-links", "user-content", profile.id, "sha256-links",
+        ["read", "ask"], "nb-content", ["nb-content"], None,
+        allow_answer_links=True,
+    )
+    assert issued.allow_answer_links is True
+    assert store.agent_token_auth_row(issued.id)["allow_answer_links"] == 1
+    stale = AgentTokenAccess(
+        scopes=["read", "ask"], default_notebook_id="nb-content",
+        notebook_ids=["nb-content"], expires_at=None, allow_answer_links=False,
+    )
+    with pytest.raises(AgentTokenAccessConflictError):
+        store.update_agent_token_access(
+            issued.id, "user-content", ["read", "ask"], "nb-content",
+            ["nb-content"], None, stale, allow_answer_links=True,
+        )
+    off = store.update_agent_token_access(
+        issued.id, "user-content", ["read", "ask"], "nb-content",
+        ["nb-content"], None, None, allow_answer_links=False,
+    )
+    assert off.allow_answer_links is False
+    assert store.agent_token_auth_row(issued.id)["allow_answer_links"] == 0
+    assert [t.allow_answer_links for t in store.list_agent_tokens("user-content")
+            if t.id == issued.id] == [False]
+
+
 def test_memory_agent_token_plaintext_is_owner_scoped_and_cleared_on_revoke(
     content_harness,
 ):
