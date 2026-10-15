@@ -252,11 +252,68 @@ def test_viz_stale_served_while_rebuilding(repo, monkeypatch):
     ], [])
     repo._viz_idx_cache.pop(nb.id, None)
     result = repo.unified_graph(nb.id, level="object", limit=10)
-    # Stale data is benign to serve immediately.
+    # Stale data is benign to serve immediately...
+    assert len(result["nodes"]) > 0
+    # ...but the answer says a refresh is running, so the frontend polls and
+    # swaps in the refreshed graph. This used to assert the opposite, which
+    # is how a notebook that gained sources after its KG was built kept
+    # showing the old node count until the canvas was reopened.
+    assert result["viz_building"] is True
+    _wait_until_not_building(repo, nb.id)
+    # The poll's next read: fresh, the new node is in, and polling stops.
+    after = repo.unified_graph(nb.id, level="object", limit=10)
+    assert not after.get("viz_building")
+    assert after["total_nodes"] == result["total_nodes"] + 1
+
+
+def test_stale_viz_reports_building_even_if_the_refresh_already_finished(
+    repo, monkeypatch,
+):
+    """The flag comes from the serving call itself, not from a later look at
+    ``viz_building``: a small notebook's refresh can finish before the reply
+    is assembled, and a membership read would then say "not building" about
+    a graph that is stale -- the frontend would never poll for the new one.
+    Mutation pin: answering from ``notebook_id in viz_building`` instead
+    turns this red (the stub below finishes the build synchronously)."""
+    nb = _star(repo)
+    repo.store_kg(nb.id, None, [
+        {"local_id": "d", "object_type": "concept", "payload": {"name": "leakage", "section_path": ""}, "evidence": []},
+    ], [])
+    repo._viz_idx_cache.pop(nb.id, None)
+    scale = repo._runtime.scale_artifacts
+    monkeypatch.setattr(scale, "_spawn_viz_build", scale.build_viz)
+
+    result = repo.unified_graph(nb.id, level="object", limit=10)
+
+    assert nb.id not in repo._viz_building
+    assert result["viz_building"] is True
+    assert not result.get("viz_unavailable")
+
+
+def test_fresh_viz_does_not_report_building(repo):
+    """Control: an up-to-date folding is served without the flag, so the
+    frontend does not poll a graph that will not change."""
+    nb = _star(repo)
+    result = repo.unified_graph(nb.id, level="object", limit=10)
     assert len(result["nodes"]) > 0
     assert not result.get("viz_building")
-    # A background refresh was kicked off (may have already finished).
-    _wait_until_not_building(repo, nb.id)
+
+
+def test_refused_stale_refresh_does_not_call_on_refresh(repo, monkeypatch):
+    """A stale folding whose refresh the size gate refused will not be
+    replaced here, so the caller must not be told to poll for it."""
+    nb = _star(repo)
+    repo.store_kg(nb.id, None, [
+        {"local_id": "d", "object_type": "concept", "payload": {"name": "leakage", "section_path": ""}, "evidence": []},
+    ], [])
+    repo._viz_idx_cache.pop(nb.id, None)
+    scale = repo._runtime.scale_artifacts
+    monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
+    monkeypatch.setattr(scale, "_spawn_viz_build", lambda _nb: None)
+    calls: list[bool] = []
+
+    assert scale.viz_index(nb.id, on_refresh=lambda: calls.append(True)) is not None
+    assert calls == []
 
 
 def _record_events(monkeypatch, scale):
@@ -316,8 +373,10 @@ def test_stale_viz_refresh_still_spawns_for_a_small_notebook(repo, monkeypatch):
     monkeypatch.setattr(scale, "_spawn_viz_build", lambda nbid: spawned.append(nbid))
     events = _record_events(monkeypatch, scale)
 
-    assert scale.viz_index(nb.id) is not None
+    calls: list[bool] = []
+    assert scale.viz_index(nb.id, on_refresh=lambda: calls.append(True)) is not None
     assert spawned == [nb.id]
+    assert calls == [True]
     assert [e for e in events if e.get("kind") == "viz_lazy_build_refused"] == []
 
 

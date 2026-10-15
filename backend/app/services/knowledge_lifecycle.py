@@ -4576,10 +4576,19 @@ class KnowledgeLifecycleService:
         # below (same node-id set / totals / shape). Small notebooks with no
         # index fall through unchanged.
         if limit is not None and level != "concept" and artifacts:
-            idx = self.scale_artifacts.viz_index(notebook_id)
+            # A stale folding (sources added since it was built) is served at
+            # once while it is refreshed in the background; ``viz_building``
+            # then makes the frontend poll and swap in the refreshed graph.
+            # Without it the canvas kept the old node count until reopened.
+            refreshing: list[bool] = []
+            idx = self.scale_artifacts.viz_index(
+                notebook_id, on_refresh=lambda: refreshing.append(True))
             if idx is not None and getattr(idx, "viz_ids", None) is not None:
-                return self._with_viewer_overlay(
+                graph = self._with_viewer_overlay(
                     scope, self._unified_graph_bounded(notebook_id, idx, limit), limit)
+                if refreshing:
+                    graph["viz_building"] = True
+                return graph
             if idx is None and notebook_id in self.scale_artifacts.viz_building:
                 # A background build was spawned inside _viz_index instead of
                 # blocking this request on a minutes-long full-graph fold.

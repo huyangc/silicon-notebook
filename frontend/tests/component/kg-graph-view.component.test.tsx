@@ -56,6 +56,7 @@ function graphView(overrides: Partial<Props["kgGraph"]> = {}): Props["kgGraph"] 
     selectedNodeId: null,
     selectedTypes: [],
     status: null,
+    vizBuilding: false,
   } satisfies Props["kgGraph"];
   return { ...base, ...overrides };
 }
@@ -184,6 +185,20 @@ test("画布四态各渲染自己的曲面，只有 graph 态才挂 ForceGraph2D
   expect(screen.getByTestId("force-graph")).toBeTruthy();
 });
 
+
+test("旧图后台刷新时照样出图，侧栏说正在刷新；刷新完那句话消失", () => {
+  // 建好图谱后又新增来源：后端先交出旧的折叠图并回 viz_building:true，前端轮询换新图。
+  // 画布出图（kgCanvasState 判 graph），「正在更新」由侧栏提示行说。
+  const graph = { nodes: [{ id: "K-1", name: "阈值", type: "concept" }], edges: [], total_nodes: 1 } as never;
+  const refreshing = renderView({ kgCanvas: "graph", kgGraph: graphView({ graph, vizBuilding: true }) });
+  expect(screen.getByTestId("force-graph")).toBeTruthy();
+  expect(screen.getByText("图谱有更新，正在后台刷新，完成后自动换上新图…")).toBeTruthy();
+  refreshing.unmount();
+
+  renderView({ kgCanvas: "graph", kgGraph: graphView({ graph, vizBuilding: false }) });
+  expect(screen.queryByText("图谱有更新，正在后台刷新，完成后自动换上新图…")).toBeNull();
+  expect(screen.getByText("共 1 节点（已全部显示）")).toBeTruthy();
+});
 
 test("graph 态把注入的图数据与画布尺寸原样交给 ForceGraph2D，且它是 ssr:false 动态加载的", () => {
   const fgData = {

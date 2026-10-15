@@ -856,7 +856,10 @@ class ScaleArtifactRuntime:
         self._emit_viz_lazy_build_refused(notebook_id, count, trigger)
         return True
 
-    def _serve_stale_viz(self, notebook_id: str, index: Any):
+    def _serve_stale_viz(
+        self, notebook_id: str, index: Any,
+        on_refresh: Optional[Callable[[], None]] = None,
+    ):
         """Return a STALE standalone viz, refreshing it only within budget.
 
         The refresh is a FULL rebuild — ``build_viz`` re-derives the whole
@@ -885,9 +888,24 @@ class ScaleArtifactRuntime:
         """
         if not self._viz_lazy_build_refused(notebook_id, "stale_refresh"):
             self._spawn_viz_build(notebook_id)
+            if on_refresh is not None:
+                on_refresh()
         return index
 
-    def viz_index(self, notebook_id: str, *, emit_refusal: bool = True):
+    def viz_index(
+        self, notebook_id: str, *, emit_refusal: bool = True,
+        on_refresh: Optional[Callable[[], None]] = None,
+    ):
+        # ``on_refresh`` is called when the returned artifact is STALE and a
+        # refresh of it is running (just spawned, or already in flight). The
+        # caller learns it from this call itself, not from a later
+        # ``viz_building`` read: a small notebook's build can finish before
+        # that read, and the caller would then report a stale graph as
+        # current with nothing left to tell the frontend to poll for the new
+        # one (new sources' nodes never appeared until the canvas was
+        # reopened). Not called for a stale artifact whose refresh the size
+        # gate refused -- nothing will replace it, so there is nothing to
+        # poll for.
         # ``emit_refusal=False`` is the side-effect-free re-probe variant
         # (codex #676 R11 P2): unified_graph re-probes once after observing
         # no builder (the R5 publication-race close), and that second walk
@@ -974,7 +992,7 @@ class ScaleArtifactRuntime:
                     # not None`` keeps the R5 corner conservative: an entry
                     # with no recorded identity has no invalidation basis, so
                     # it reloads rather than being served indefinitely.
-                    return self._serve_stale_viz(notebook_id, cached)
+                    return self._serve_stale_viz(notebook_id, cached, on_refresh)
         # M1: same refusal as the warm-entry branch above. The artifact is
         # treated as absent, so a within-budget notebook builds a fresh one
         # right here and a large one reports "no preview yet" until the scale
@@ -1012,7 +1030,7 @@ class ScaleArtifactRuntime:
             stale_signature = self._recordable_viz_signature(disk_signature)
             if stale_signature is not None:
                 self.viz_cache[notebook_id] = (index, stale_signature)
-            return self._serve_stale_viz(notebook_id, index)
+            return self._serve_stale_viz(notebook_id, index, on_refresh)
         count = int(self.projections.effective_object_count(notebook_id))
         if count <= self.settings.viz_sync_build_max_objects:
             self.build_viz(notebook_id)
