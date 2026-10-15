@@ -281,11 +281,9 @@ def test_manual_health_check_schema_failure_is_malformed_without_breaker_failure
         provider.close()
 
 
-@pytest.mark.parametrize(("behavior", "drift_reported"), [
-    ("supported", False), ("ignored", True),
-])
-def test_conforming_strict_nulls_are_not_reported_as_shape_drift(
-    tmp_path, monkeypatch, behavior, drift_reported,
+@pytest.mark.parametrize("behavior", ["supported", "ignored"])
+def test_conforming_nulls_are_not_reported_as_shape_drift(
+    tmp_path, monkeypatch, behavior,
 ):
     from app.core.model_schema import response_format_for_hint
     from app.services import prompts
@@ -299,22 +297,18 @@ def test_conforming_strict_nulls_are_not_reported_as_shape_drift(
     sdk.business_data.update(sufficient=True, next_action="answer", reason="ok")
     provider, log = make_provider(tmp_path, monkeypatch, sdk)
     try:
-        # A reused sink's stale marker must not vouch for this call.
-        stats = {"schema_enforced": True}
         reply = provider.chat("ask_answer").chat_json(
             [{"role": "user", "content": "question"}], hint, bypass_cache=True,
-            call_stats=stats,
         )
-        assert stats.get("schema_enforced", False) is not drift_reported
-        # Either way the consumer sees the unused branches as absent.
+        # Strict or JSON mode, the consumer sees the unused branches as absent
+        # and the nulls the prompt asks for are not drift.
         assert json.loads(reply) == {
             "sufficient": True, "next_action": "answer", "reason": "ok",
         }
         business = [call for call in sdk.calls if not is_probe(call)]
         assert ("response_format" in business[-1] and business[-1][
-            "response_format"]["type"] == "json_schema") is not drift_reported
-        shape_events = [event for event in log.events
-                        if event.get("kind") == "model_json_shape"]
-        assert bool(shape_events) is drift_reported
+            "response_format"]["type"] == "json_schema") is (behavior == "supported")
+        assert not [event for event in log.events
+                    if event.get("kind") == "model_json_shape"]
     finally:
         provider.close()

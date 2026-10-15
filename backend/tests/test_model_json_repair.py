@@ -221,11 +221,11 @@ def test_shape_deviation_report_is_bounded_but_normalisation_is_not():
     assert len(shape.deviations) == SHAPE_DEVIATIONS_MAX
     assert shape.deviations[0].path == "sub_queries[0].query"
 
-    # Every null is dropped even past the report cap.
-    raw = json.dumps({"sub_queries": [{"query": None, "types": []}] * 200})
+    # Every reported null is dropped even past the report cap.
+    raw = json.dumps({"sub_queries": [None] * 200})
     shape = validate_model_json_shape(raw, PLAN_SCHEMA)
     assert len(shape.deviations) == SHAPE_DEVIATIONS_MAX
-    assert json.loads(shape.content) == {"sub_queries": [{"types": []}] * 200}
+    assert json.loads(shape.content) == {"sub_queries": []}
 
 
 @pytest.mark.parametrize(
@@ -1356,10 +1356,10 @@ def _conforming_reflect_reply() -> tuple[str, str]:
     return raw, hint
 
 
-def test_schema_enforced_nulls_are_removed_without_being_reported():
+def test_conforming_nulls_are_removed_without_being_reported():
     raw, hint = _conforming_reflect_reply()
 
-    shape = validate_model_json_shape(raw, hint, schema_enforced=True)
+    shape = validate_model_json_shape(raw, hint)
 
     assert shape.deviations == ()
     assert json.loads(shape.content) == {
@@ -1367,24 +1367,42 @@ def test_schema_enforced_nulls_are_removed_without_being_reported():
     }
 
 
-def test_json_mode_still_reports_nulls_where_the_hint_advertised_values():
-    raw, hint = _conforming_reflect_reply()
-
+@pytest.mark.parametrize(
+    ("raw", "hint", "path"),
+    [
+        # A required root field: the strict projection rejects this null.
+        ('{"answer":null,"grounded":true}', '{"answer":"","grounded":true}', "answer"),
+        # A list item: strict list items are never nullable.
+        ('{"tags":["a",null]}', '{"tags":[""]}', "tags[1]"),
+    ],
+)
+def test_nulls_the_strict_projection_would_reject_are_still_reported(raw, hint, path):
     shape = validate_model_json_shape(raw, hint)
 
-    assert shape.deviations
-    assert {item.fix for item in shape.deviations} == {"dropped"}
-    assert json.loads(shape.content) == {
-        "sufficient": True, "next_action": "answer", "reason": "证据充分",
-    }
+    assert [(item.path, item.fix) for item in shape.deviations] == [(path, "dropped")]
 
 
-def test_schema_enforced_replies_still_report_drift_from_the_first_list_item():
+def test_nested_and_optional_root_nulls_are_not_drift():
+    # KG nodes spell an unused validity_scope/steps as null; paper metadata
+    # spells every bibliography field of a non-paper as null.
+    kg = validate_model_json_shape(
+        '{"nodes":[{"name":"a","validity_scope":null,"steps":null}],"edges":[]}',
+        '{"nodes":[{"name":"","validity_scope":{"range":""},'
+        '"steps":[{"name":""}]}],"edges":[{"source":0}]}',
+    )
+    paper = validate_model_json_shape(
+        '{"is_paper":false,"title":null,"year":null}',
+        '{"is_paper":true,"title":"","year":0}',
+    )
+
+    assert kg.deviations == () and paper.deviations == ()
+    assert json.loads(paper.content) == {"is_paper": False}
+
+
+def test_list_items_still_report_drift_from_the_first_example_item():
     # The strict schema admits every advertised item kind; the shape walk
     # judges items by the first example only, and that mismatch still counts.
-    shape = validate_model_json_shape(
-        '{"values":[2]}', '{"values":["example",1]}', schema_enforced=True,
-    )
+    shape = validate_model_json_shape('{"values":[2]}', '{"values":["example",1]}')
 
     assert [(item.path, item.reason) for item in shape.deviations] == [
         ("values[0]", "invalid_type"),

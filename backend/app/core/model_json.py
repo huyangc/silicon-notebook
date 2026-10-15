@@ -24,6 +24,8 @@ from typing import Any
 
 import json_repair
 
+from app.core.model_schema import nullable_root_fields
+
 
 @dataclass(frozen=True)
 class ModelJsonObject:
@@ -396,7 +398,7 @@ def _normalise_shape(
     *,
     path: str,
     out: list[ShapeDeviation],
-    state: dict[str, int],
+    state: dict[str, Any],
     field_name: str = "",
 ) -> Any:
     """Walk a reply against its example-shaped hint: absorb the deviations
@@ -454,10 +456,11 @@ def _normalise_shape(
             return value
         # Every remaining example advertises a value: null and absent mean the
         # same thing to the consumer, so make it absent.
-        if state.get("schema_enforced"):
-            # The strict schema had to make every optional field required and
-            # nullable, so this null is the conforming way to say "unused",
-            # not drift: absorb it without a diagnostic.
+        if not path.endswith("]") and (
+            "." in path or "[" in path or path in state["nullable_root"]
+        ):
+            # A property the strict projection makes nullable: prompts spell
+            # "unused" as null there, in either mode, so this is not drift.
             state["fixes"] += 1
             return _DROP
         note("invalid_type" if not isinstance(example, bool) else "invalid_boolean", "dropped")
@@ -587,9 +590,7 @@ def _normalise_shape(
     return value
 
 
-def validate_model_json_shape(
-    content: str, schema_hint: str, *, schema_enforced: bool = False,
-) -> ModelJsonShape:
+def validate_model_json_shape(content: str, schema_hint: str) -> ModelJsonShape:
     """Gate a parseable object on usability; absorb or report field drift.
 
     Raises ``ModelJsonRepairError("missing_expected_key")`` only when the
@@ -603,10 +604,10 @@ def validate_model_json_shape(
     canonical re-serialisation when something was. Provider-added or
     model-added extra fields are never deviations.
 
-    ``schema_enforced`` says the reply already passed the strict JSON Schema
-    projected from this hint. Its nulls are then still removed for the
-    consumer but not reported: that schema forces every optional field to be
-    written, so counting them would bury real drift under conforming nulls.
+    A null is removed for the consumer wherever the hint advertised a value;
+    it is reported only where the strict projection of the same hint would
+    reject it (a required root field, a list item), so the conforming nulls
+    prompts ask for never bury real drift.
     """
     value = _strict_object(content)
     # ``json.loads`` accepts NaN / Infinity / overflowing exponents that JSON
@@ -620,7 +621,7 @@ def validate_model_json_shape(
     if not set(value).intersection(example):
         raise ModelJsonRepairError("missing_expected_key")
     deviations: list[ShapeDeviation] = []
-    state = {"fixes": 0, "schema_enforced": int(schema_enforced)}
+    state: dict[str, Any] = {"fixes": 0, "nullable_root": nullable_root_fields(example)}
     fixed = _normalise_shape(
         value, example, path="", out=deviations, state=state,
     )
