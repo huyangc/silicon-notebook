@@ -2051,8 +2051,8 @@ def report_storm_outline_prompt(question: str, corpus_map: str,
 
 
 REPORT_SUFFICIENCY_SCHEMA_HINT = (
-    '{"verdicts":[{"title":"","sufficiency":"充足|薄弱|缺失",'
-    '"gap_note":"","action":"keep|supplement|external"}]}')
+    '{"verdicts":[{"index":1,"sufficiency":"充足|薄弱|缺失",'
+    '"gap_note":""}]}')
 
 
 def report_sufficiency_prompt(question: str, probe_block: str, *,
@@ -2060,7 +2060,8 @@ def report_sufficiency_prompt(question: str, probe_block: str, *,
                               completeness_required: bool = False) -> str:
     return (
         "You judge whether the notebook library has ENOUGH evidence for each planned "
-        "report section. You are given each section's title and its OBJECTIVE retrieval "
+        "report section. You are given each section's number in brackets, its title "
+        "and its OBJECTIVE retrieval "
         "signals. relevant_items are distinct relevant evidence objects/elements; "
         "relevant_supports counts distinct (evidence item, resolved source family) "
         "pairs plus one conservative unknown-support unit when an item has an "
@@ -2071,12 +2072,12 @@ def report_sufficiency_prompt(question: str, probe_block: str, *,
         "identity_uncertain must not be treated as additional independent support. "
         "base_hits is only a governance-tier count, NOT a separate proof of authority "
         "or sufficiency. Trust these signals as the ground truth of coverage; your job "
-        "is to interpret them into a verdict + a one-line gap note + a suggested "
-        "action. Diverse relevant families may be sufficient → 充足(keep); "
-        "few/only-tangential → 薄弱(supplement, note what's missing); ~0 hits → "
-        "缺失(external, the library cannot support it). sufficiency must be exactly "
-        "one of 充足 / 薄弱 / 缺失 and action exactly one of keep / supplement / "
-        "external, as strings. Do not invent coverage the signals don't show. "
+        "is to interpret them into a verdict + a one-line gap note. Diverse relevant "
+        "families may be sufficient → 充足; few/only-tangential → 薄弱 (note "
+        "what's missing); ~0 hits → 缺失 (the library cannot support it). Return "
+        "one verdict per section: index is the section's bracketed number below "
+        "(an integer, never its title), and sufficiency must be exactly one of "
+        "充足 / 薄弱 / 缺失, as a string. Do not invent coverage the signals don't show. "
         f"The confirmed result scope is {result_scope}; completeness_required="
         f"{str(bool(completeness_required)).lower()}. For a completeness request, "
         "ranked retrieval is not enumeration and must be judged by the stricter "
@@ -2099,7 +2100,7 @@ def report_sufficiency_prompt(question: str, probe_block: str, *,
 
 AGENT_PROFILE_SCHEMA_HINT = (
     '{"blocks":[{"label":"corpus_shape","value":"","evidence":["source_id"],'
-    '"retire":false},{"label":"corpus_gaps","value":null,"retire":true}]}'
+    '"retire":false},{"label":"corpus_gaps","value":"","retire":true}]}'
 )
 
 
@@ -2182,7 +2183,7 @@ def agent_profile_base_prompt(
         "list when no single document is the reason.\n"
         "5. If an existing block's claim is CONTRADICTED by the statistics below "
         "— the material it described is no longer here at all — withdraw it with "
-        '{"label": "<that label>", "value": null, "retire": true}. Every other '
+        '{"label": "<that label>", "value": "", "retire": true}. Every other '
         'block you return carries "retire": false. Retire only '
         "what the statistics contradict: having nothing to add is rule 1's "
         "omission, not a retirement. A block marked (user-authored) can never be "
@@ -2211,7 +2212,7 @@ def agent_profile_base_prompt(
 #: it was just handed, and then trusting the restatement.
 AGENT_PROFILE_OVERLAY_SCHEMA_HINT = (
     '{"blocks":[{"label":"retrieval_notes","value":"","retire":false},'
-    '{"label":"usage_gaps","value":null,"retire":true}]}'
+    '{"label":"usage_gaps","value":"","retire":true}]}'
 )
 
 
@@ -2337,7 +2338,7 @@ def agent_profile_overlay_prompt(
         "never quote a question back verbatim as if it were a finding.\n"
         "5. If an existing note is CONTRADICTED by the sample below — it "
         "describes searching that no longer resembles this person's at all — "
-        'withdraw it with {"label": "<that label>", "value": null, "retire": '
+        'withdraw it with {"label": "<that label>", "value": "", "retire": '
         'true}. Every other note you return carries "retire": false. Retire '
         "only what the sample contradicts: having nothing to add "
         "is rule 1's omission, not a retirement. A note marked (user-authored) "

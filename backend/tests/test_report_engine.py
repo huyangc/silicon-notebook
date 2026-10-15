@@ -1617,7 +1617,8 @@ def test_sufficiency_prompt_contract():
     from app.services.prompts import report_sufficiency_prompt, REPORT_SUFFICIENCY_SCHEMA_HINT
     p = report_sufficiency_prompt("Q", "PROBEBLOCK")
     assert "sufficiency" in p and "PROBEBLOCK" in p and "Q" in p
-    assert "gap_note" in REPORT_SUFFICIENCY_SCHEMA_HINT and "action" in REPORT_SUFFICIENCY_SCHEMA_HINT
+    assert "gap_note" in REPORT_SUFFICIENCY_SCHEMA_HINT and '"index":1' in REPORT_SUFFICIENCY_SCHEMA_HINT
+    assert "action" not in REPORT_SUFFICIENCY_SCHEMA_HINT and "title" not in REPORT_SUFFICIENCY_SCHEMA_HINT
 
 
 # ---------------------------------------------------------------------------
@@ -1830,8 +1831,8 @@ def test_plan_outline_produces_enriched_outline_ready(repo, monkeypatch):
                 return json.dumps({"sections":[{"title":"机理","scope":"s","sub_queries":["bandgap"],
                                                 "perspectives":["领域专家"],"tensions":[]}]})
             if "ENOUGH evidence" in c:
-                return json.dumps({"verdicts":[{"title":"机理","sufficiency":"薄弱",
-                                                "gap_note":"缺实测","action":"supplement"}]})
+                return json.dumps({"verdicts":[{"index":1,"sufficiency":"薄弱",
+                                                "gap_note":"缺实测"}]})
             return "{}"
     _bind_report_llm(repo, _LLM())
     monkeypatch.setattr(ReportEngine, "_build_corpus_map", lambda self,n,q: "MAP")
@@ -1846,7 +1847,8 @@ def test_plan_outline_produces_enriched_outline_ready(repo, monkeypatch):
     assert d["status"] == "outline_ready"
     sec = d["outline"][0]
     assert sec["title"]=="机理" and sec["perspectives"]==["领域专家"]
-    assert sec["sufficiency"]=="薄弱" and sec["action"]=="supplement"
+    assert sec["sufficiency"]=="薄弱" and sec["gap_note"]=="缺实测"
+    assert "action" not in sec
 
 
 def test_storm_comparison_frame_is_bounded_and_attached_to_the_outline(repo):
@@ -2934,28 +2936,52 @@ def test_final_editor_discards_wrong_typed_notes_and_contradictions(repo, contra
         assert not any(gap.startswith("跨章节可能存在冲突:") for gap in gaps)
 
 
-@pytest.mark.parametrize(("action", "expected"), [
-    ("invented_action", "external"), (["keep"], "external"),
-    ({"value": "keep"}, "external"), ("keep", "keep"),
-    ("supplement", "supplement"), ("external", "external"),
-])
-def test_sufficiency_only_accepts_documented_actions(repo, action, expected):
+def test_sufficiency_verdicts_bind_by_section_number_not_title(repo):
+    """Two sections may share a title; the verdict names the bracketed
+    number the prompt gave each one, so neither receives the other's."""
     from app.core.model_json import validate_model_json_shape
+
+    prompts_seen: list[str] = []
 
     class Client:
         configured = True
 
         def chat_json(self, messages, schema_hint, **kwargs):
-            return validate_model_json_shape(json.dumps({"verdicts": [{
-                "title": "A", "sufficiency": "缺失", "gap_note": "",
-                "action": action,
-            }]}), schema_hint).content
+            prompts_seen.append(messages[-1]["content"])
+            return validate_model_json_shape(json.dumps({"verdicts": [
+                {"index": 2, "sufficiency": "薄弱", "gap_note": "第二节缺口"},
+                {"index": 1, "sufficiency": "缺失", "gap_note": "第一节缺口"},
+                {"index": 3, "sufficiency": "薄弱", "gap_note": "越界"},
+                {"index": True, "sufficiency": "薄弱", "gap_note": "布尔"},
+            ]}), schema_hint).content
+
+    engine = _mk_engine(repo, Client())
+    result = engine._judge_sufficiency(
+        "q", [{"title": "A"}, {"title": "A"}],
+        [{"title": "A", "hits": 0, "base_hits": 0},
+         {"title": "A", "hits": 0, "base_hits": 0}],
+    )
+    assert "[1] A:" in prompts_seen[0] and "[2] A:" in prompts_seen[0]
+    assert [row["sufficiency"] for row in result] == ["缺失", "薄弱"]
+    assert [row["gap_note"] for row in result] == ["第一节缺口", "第二节缺口"]
+    assert all("action" not in row for row in result)
+
+
+def test_sufficiency_ceiling_demotion_leaves_no_contradicting_action(repo):
+    class Client:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return json.dumps({"verdicts": [
+                {"index": 1, "sufficiency": "充足", "gap_note": ""},
+            ]})
 
     engine = _mk_engine(repo, Client())
     result = engine._judge_sufficiency(
         "q", [{"title": "A"}], [{"title": "A", "hits": 0, "base_hits": 0}],
     )
-    assert result[0]["action"] == expected
+    assert result[0]["sufficiency"] == "缺失"
+    assert "action" not in result[0]
 
 
 def test_report_section_queue_failure_stays_a_failed_section(repo):
@@ -3486,7 +3512,7 @@ def test_sufficiency_llm_skipped_at_low_tiers(repo, monkeypatch):
     # 确定性半照常:coverage 与充足/薄弱/缺失结论都在(界面消费的就是它们)。
     assert out[0]["sufficiency"] == "充足"
     assert out[0]["coverage"]["hits"] == 5
-    assert out[0]["action"] == "keep"
+    assert "action" not in out[0]
 
 
 def test_sufficiency_runtime_uses_centralized_policy(repo, monkeypatch):
@@ -3507,7 +3533,6 @@ def test_sufficiency_runtime_uses_centralized_policy(repo, monkeypatch):
     out = eng._judge_sufficiency("Q", sections, probe, use_llm=False)
 
     assert out[0]["sufficiency"] == "薄弱"
-    assert out[0]["action"] == "supplement"
 
 
 def test_plan_outline_wires_probe_width_from_report_depth(repo, monkeypatch):
