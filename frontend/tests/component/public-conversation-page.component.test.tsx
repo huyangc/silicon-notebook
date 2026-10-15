@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -426,7 +426,8 @@ test("带 expires_at 的回答链接头部写明失效时间，会话分享页�
   const d = new Date(expiresAt);
   const pad = (n: number) => String(n).padStart(2, "0");
   const local = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  expect(screen.getByText(/此链接将于/)).toHaveTextContent(`此链接将于 ${local} 失效`);
+  // 时间由挂载后的 effect 填入，等它落地再断言。
+  await waitFor(() => expect(screen.getByText(/此链接将于/)).toHaveTextContent(`此链接将于 ${local} 失效`));
   expect(screen.getByText("问答回答 · 只读分享")).toBeInTheDocument();
   unmount();
 

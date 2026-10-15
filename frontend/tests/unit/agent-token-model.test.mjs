@@ -345,3 +345,11 @@ test("a full bounded page exposes a next page while a short page terminates", ()
   assert.equal(agentPageHasMore(Array(AGENT_ACCESS_PAGE_SIZE).fill({})), true);
   assert.equal(agentPageHasMore(Array(AGENT_ACCESS_PAGE_SIZE - 1).fill({})), false);
 });
+
+test("a stored flag without ask opens as off, so the row can still be edited and saved", () => {
+  const stale = { default_notebook_id: "notebook-1", notebook_ids: ["notebook-1"], scopes: ["read"], allow_answer_links: true, expires_at: null };
+  const draft = agentTokenEditDraft(stale);
+  assert.equal(draft.allow_answer_links, false);
+  assert.equal(agentTokenEditDraft({ ...stale, scopes: ["read", "ask"] }).allow_answer_links, true);
+  assert.equal(agentTokenAccessRequest({ ...draft, scopes: ["read", "ask"] }, stale).allow_answer_links, false);
+});
