@@ -142,6 +142,17 @@ class Settings(BaseSettings):
     auth_session_touch_interval_seconds: int = Field(
         300, validation_alias="AUTH_SESSION_TOUCH_INTERVAL_SECONDS"
     )
+    # MCP 回答链接：前端公开访问地址（可含子路径；生产前端是 http://<IP>:3000，故允许 http）。
+    public_web_base_url: str = Field("", validation_alias="PUBLIC_WEB_BASE_URL")
+    mcp_answer_link_ttl_hours: int = Field(
+        168, ge=1, le=720, validation_alias="MCP_ANSWER_LINK_TTL_HOURS"
+    )
+    mcp_answer_link_grace_hours: int = Field(
+        168, ge=0, le=720, validation_alias="MCP_ANSWER_LINK_GRACE_HOURS"
+    )
+    mcp_answer_preview_max_chars: int = Field(
+        300, ge=40, le=2000, validation_alias="MCP_ANSWER_PREVIEW_MAX_CHARS"
+    )
     # 每个笔记本「用户可见文档」数量的全局默认上限。管理员可在 app_settings 里覆盖
     # 全局默认、或给某用户单独设覆盖值(user_profiles.upload_document_limit);两者都
     # 缺省时回退到此值。pydantic-settings v2 下 Field(env=) 失效,必须用 validation_alias。
@@ -1953,6 +1964,29 @@ class Settings(BaseSettings):
         if self.environment.strip().lower() in {"prod", "production"}:
             if not self.admin_password.strip() or self.admin_password == "admin":
                 raise ValueError("production requires a non-default SILICON_NOTEBOOK_ADMIN_PASSWORD")
+
+    @field_validator("public_web_base_url")
+    @classmethod
+    def _validate_public_web_base_url(cls, value: str) -> str:
+        from urllib.parse import urlsplit
+
+        value = value.strip()
+        if not value:
+            return ""
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or "?" in value
+            or "#" in value
+            or any(ord(char) <= 32 or ord(char) == 127 for char in value)
+        ):
+            raise ValueError("PUBLIC_WEB_BASE_URL must be an http(s) URL without credentials, query or fragment")
+        return value.rstrip("/")
 
     @field_validator("auth_public_base_url", "auth_frontend_base_url")
     @classmethod
