@@ -20,10 +20,10 @@ import secrets
 import threading
 import time
 from contextlib import contextmanager
-from typing import Any, Callable, Iterator, Mapping
+from typing import Annotated, Any, Callable, Iterator, Mapping
 
 from mcp.server.fastmcp import Context, FastMCP
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, WithJsonSchema
 
 from app.api.deps import (
     answer_link_repository, ask_intent_handle_repository, notebook_access_repository,
@@ -281,6 +281,11 @@ _ANSWER_LINKS_OFF_SAVED = (
     "job_id: {job_id}，可用 get_ask 按这个 job_id 读取全文，"
     "或在「Agent 接入」页为凭证打开后用 get_ask 重新签发链接"
 )
+
+
+# The tool parameter is taken raw: FastMCP would coerce ``true`` or ``"2"`` to an
+# int before ``_validate_delivery`` saw it. The schema still says integer.
+_RawTtl = Annotated[Any, WithJsonSchema({"anyOf": [{"type": "integer"}, {"type": "null"}]})]
 
 
 def _ttl_refusal(ceiling: int) -> AgentToolError:
@@ -1272,7 +1277,7 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
         conversation_id: str = "", mode: str = "reasoning",
         intent: dict[str, Any] | None = None, client_request_id: str = "",
         output: str = "answer", delivery: str = "inline",
-        link_ttl_hours: int | None = None,
+        link_ttl_hours: _RawTtl = None,
     ) -> dict[str, Any]:
         reply, clean = _validate_inputs(question, conversation_id, mode, intent, notebooks)
         plugin = _plugin_mode(mode)
@@ -1352,7 +1357,7 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
     async def get_ask(
         job_id: str, ctx: Context, answer_offset: int = 0, citation_offset: int = 0,
         coverage_offset: int = 0, trace_offset: int = 0,
-        delivery: str = "inline", link_ttl_hours: int | None = None,
+        delivery: str = "inline", link_ttl_hours: _RawTtl = None,
     ) -> dict[str, Any]:
         _offsets(answer_offset, citation_offset, coverage_offset, trace_offset)
         offsets = (answer_offset, citation_offset, coverage_offset, trace_offset)

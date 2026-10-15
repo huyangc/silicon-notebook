@@ -364,6 +364,22 @@ async def argument_refusals_come_before_any_work(env):
             "ttl_zero": await client.call("ask", {
                 **ask, "delivery": "link", "link_ttl_hours": 0,
             }),
+            # Through the real transport: FastMCP must not coerce these to an int.
+            "ttl_bool": await client.call("ask", {
+                **ask, "delivery": "link", "link_ttl_hours": True,
+            }),
+            "ttl_string": await client.call("ask", {
+                **ask, "delivery": "link", "link_ttl_hours": "2",
+            }),
+            "ttl_float": await client.call("ask", {
+                **ask, "delivery": "link", "link_ttl_hours": 2.0,
+            }),
+            "get_ttl_bool": await client.call(
+                "get_ask", {"job_id": job_id, "delivery": "link", "link_ttl_hours": True}
+            ),
+            "get_ttl_string": await client.call(
+                "get_ask", {"job_id": job_id, "delivery": "link", "link_ttl_hours": "2"}
+            ),
             "get_bad_delivery": await client.call(
                 "get_ask", {"job_id": job_id, "delivery": "page"}
             ),
