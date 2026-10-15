@@ -74,3 +74,88 @@ def test_empty():
     assert answer_preview("", 300) == ("", False)
     assert answer_preview("  \n\n ", 300) == ("", False)
     assert answer_preview("![x](y)[k1]", 300) == ("", False)
+
+
+def test_angle_brackets_in_code_and_math_survive_html_strip():
+    assert pv("用 `Vec<T>` 与 `a<b>c`") == "用 Vec<T> 与 a<b>c"
+    assert pv("$a<b$ 且 $c>d$ 还有<b>粗</b>") == "a<b 且 c>d 还有粗"
+
+
+def test_unclosed_display_math_is_plain_text():
+    text, trunc = answer_preview("前文\n\n$$\nE=mc^2\n\n后文保留", 300)
+    assert "后文保留" in text and "（公式，见链接）" not in text and trunc is False
+    assert "后文保留" in pv("\\[ x\n\n后文保留")
+
+
+def test_decimal_and_url_dots_are_not_sentence_ends():
+    text, trunc = answer_preview("圆周率约为3.14159265358979323846264338327950288", 20)
+    assert trunc is True and text != "圆周率约为3.…" and text.endswith("…")
+    text, _ = answer_preview("see http://a.b.c/dd/ee/ff/gg/hh/ii/jj/kk", 25)
+    assert text == "see http://a.b.c/dd/ee/f…"
+    text, _ = answer_preview("All work is done. Next sentence goes on", 25)
+    assert text == "All work is done.…"  # sentence end followed by whitespace still counts
+
+
+def test_boundary_shorter_than_half_budget_hard_cuts():
+    text, trunc = answer_preview("好。" + "字" * 100, 40)
+    assert trunc is True and text == "好。" + "字" * 37 + "…"
+
+
+def test_pathological_inputs_are_fast_and_bounded():
+    import time
+
+    cases = [
+        "[" * 200_000,
+        "![" * 100_000,
+        "# " + "#" * 200_000 + " x",
+        "**a" * 70_000,
+        "`a" * 100_000,
+        "<!--" * 50_000,
+        ("a|b\n" + "-" * 50) * 5_000,
+        "$$\n" * 70_000,
+        "\\[\n" * 70_000,
+        "x\n" * 100_000,
+    ]
+    for md in cases:
+        t0 = time.perf_counter()
+        text, _ = answer_preview(md, 300)
+        assert time.perf_counter() - t0 < 0.2, md[:10]
+        assert len(text) <= 300
+
+
+def test_clipped_long_line_is_marked_truncated():
+    text, trunc = answer_preview("a" * 5000, 3000)
+    assert trunc is True and text.endswith("…") and len(text) <= 3000
+
+
+def test_fence_close_needs_same_char_and_length():
+    md = "````\nin\n```\nstill\n````\n后"
+    assert pv(md) == "in\n```\nstill\n后"
+    assert pv("~~~\na\n```\nb\n~~~\nc") == "a\n```\nb\nc"
+
+
+def test_unclosed_code_block_keeps_rest():
+    assert pv("```\na\nb") == "a\nb"
+
+
+def test_pipe_line_without_separator_row_is_not_table():
+    assert pv("a | b\n-\nc") == "a | b\n-\nc"
+    assert "（表格" not in pv("a | b\nc | d")
+    assert pv("x | y\n--|--\n1 | 2") == "（表格，见链接）"
+
+
+def test_crlf_and_cr_line_endings():
+    assert pv("# 标题\r\n\r\n- 甲\r\n- 乙\r\n") == "标题\n• 甲\n• 乙"
+    assert pv("甲\r乙") == "甲\n乙"
+
+
+def test_nested_lists():
+    assert pv("- a\n  - b\n    1. c") == "• a\n• b\n• c"
+
+
+def test_tiny_max_chars():
+    assert answer_preview("你好世界", 1) == ("…", True)
+    assert answer_preview("你", 1) == ("你", False)
+    text, trunc = answer_preview("甲。" * 100, 40)
+    assert trunc is True and len(text) <= 40 and text.endswith("…")
+    assert answer_preview("abc", 0) == ("", True)
