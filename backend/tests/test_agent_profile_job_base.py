@@ -60,7 +60,17 @@ from app.services.agent_profile_job import (
     BASE_CHAIN_OWNER,
     AgentProfileConsolidationService,
     CorpusStats,
+    parse_base_reply,
+    parse_overlay_reply,
     render_current_blocks,
+)
+from app.core.model_schema import (
+    response_format_for_hint,
+    validate_structured_response,
+)
+from app.services.prompts import (
+    AGENT_PROFILE_OVERLAY_SCHEMA_HINT,
+    AGENT_PROFILE_SCHEMA_HINT,
 )
 
 NOW = "2026-08-18T00:00:00+00:00"
@@ -642,7 +652,11 @@ def test_an_unconfigured_model_fails_the_chain_and_keeps_the_blocks(harness):
             "retire_not_true",
         ),
         (
-            '{"blocks": [{"label": "corpus_shape", "retire": false}]}',
+            '{"blocks": [{"label": "corpus_shape", "retire": 0}]}',
+            "retire_not_true",
+        ),
+        (
+            '{"blocks": [{"label": "corpus_shape", "retire": "false"}]}',
             "retire_not_true",
         ),
         # 「既要退役又给正文」两个意思互相矛盾,猜哪一半都是错的。
@@ -709,6 +723,68 @@ def test_an_empty_value_omits_the_block_instead_of_clearing_it(harness):
     assert _blocks(harness)["corpus_shape"]["value"] == "保留我"
     assert _job(harness)["status"] == "done"
     assert _job(harness)["blocks_written"] == 0
+
+
+_STRICT_UPDATE_BLOCK = {"label": "corpus_shape", "value": "x", "evidence": ["s1"]}
+
+
+@pytest.mark.parametrize(
+    "retire_field",
+    [{"retire": False}, {"retire": None}, {}],
+    ids=["false", "null", "absent"],
+)
+def test_a_non_withdrawal_retire_value_is_an_ordinary_update(retire_field):
+    """Strict structured output makes every item key required, so a strict
+    reply that updates a block carries ``"retire": false`` (or null). Both
+    chains must read false, null and an absent key as "not a withdrawal"."""
+    entry = {**_STRICT_UPDATE_BLOCK, **retire_field}
+    content = json.dumps({"blocks": [entry]})
+    if retire_field:
+        # The strict projection requires the key, so absent is JSON-mode only.
+        base_format = response_format_for_hint(AGENT_PROFILE_SCHEMA_HINT)
+        assert validate_structured_response(content, base_format)
+    assert parse_base_reply(json.loads(content), frozenset({"s1"})) == [
+        {"label": "corpus_shape", "value": "x", "evidence": ["s1"],
+         "evidence_dropped": 0},
+    ]
+
+    overlay_entry = {"label": "retrieval_notes", "value": "x", **retire_field}
+    overlay_content = json.dumps({"blocks": [overlay_entry]})
+    if retire_field:
+        overlay_format = response_format_for_hint(AGENT_PROFILE_OVERLAY_SCHEMA_HINT)
+        assert validate_structured_response(overlay_content, overlay_format)
+    assert parse_overlay_reply(json.loads(overlay_content)) == [
+        {"label": "retrieval_notes", "value": "x"},
+    ]
+
+
+def test_a_strict_retirement_with_a_null_value_is_a_withdrawal():
+    content = json.dumps({"blocks": [
+        {"label": "corpus_gaps", "value": None, "evidence": None, "retire": True},
+    ]})
+    base_format = response_format_for_hint(AGENT_PROFILE_SCHEMA_HINT)
+    assert validate_structured_response(content, base_format)
+    assert parse_base_reply(json.loads(content), frozenset()) == [
+        {"label": "corpus_gaps", "retire": True},
+    ]
+
+
+def test_a_strict_false_retire_reply_writes_the_block(harness):
+    service = _service(
+        harness,
+        client=_Client(_reply([
+            {"label": "corpus_shape", "value": "新的理解", "evidence": [],
+             "retire": False},
+            {"label": "key_entities", "value": "电路", "evidence": None,
+             "retire": None},
+        ])),
+    )
+    claimed = harness["profiles"].claim(NOTEBOOK_ID, "")
+
+    _run_base(service, claimed)
+
+    assert _job(harness)["status"] == "done"
+    assert _blocks(harness)["corpus_shape"]["value"] == "新的理解"
 
 
 def test_a_block_edited_mid_run_is_skipped_and_not_retried(harness):
