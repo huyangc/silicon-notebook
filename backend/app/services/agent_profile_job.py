@@ -452,12 +452,19 @@ def _retire_requested(entry: Mapping[str, Any]) -> bool:
     guessing which half was meant. ``is True`` rather than truthiness on
     purpose — ``1``/``"yes"`` are a model improvising a protocol.
 
+    ``false``, ``null`` and an absent key all mean "not a withdrawal". The
+    strict structured-output projection of the hint makes every item key
+    required, so a strict-mode reply that updates a block MUST carry
+    ``"retire": false`` (or null); refusing that would reject every update a
+    strict provider can produce. The JSON boolean ``false`` is not improvising:
+    it is the hint's own advertised value. ``"false"``/``0`` still are.
+
     Shared by both chains and therefore module level: the two parsers already
     differ only in their label sets, and a second copy of this would be the
     one that keeps accepting ``{"retire": "true"}`` after this one stops.
     """
     raw = entry.get("retire")
-    if raw is None:
+    if raw is None or raw is False:
         return False
     if raw is not True:
         raise AgentProfileOutputRejected("retire_not_true")

@@ -2094,8 +2094,8 @@ def report_sufficiency_prompt(question: str, probe_block: str, *,
 # ---------------------------------------------------------------------------
 
 AGENT_PROFILE_SCHEMA_HINT = (
-    '{"blocks":[{"label":"corpus_shape","value":"","evidence":["source_id"]},'
-    '{"label":"corpus_gaps","retire":true}]}'
+    '{"blocks":[{"label":"corpus_shape","value":"","evidence":["source_id"],'
+    '"retire":false},{"label":"corpus_gaps","value":null,"retire":true}]}'
 )
 
 
@@ -2178,7 +2178,8 @@ def agent_profile_base_prompt(
         "list when no single document is the reason.\n"
         "5. If an existing block's claim is CONTRADICTED by the statistics below "
         "— the material it described is no longer here at all — withdraw it with "
-        '{"label": "<that label>", "retire": true} and no value. Retire only '
+        '{"label": "<that label>", "value": null, "retire": true}. Every other '
+        'block you return carries "retire": false. Retire only '
         "what the statistics contradict: having nothing to add is rule 1's "
         "omission, not a retirement. A block marked (user-authored) can never be "
         "retired; a person's own statement is not yours to withdraw. A block "
@@ -2205,8 +2206,8 @@ def agent_profile_base_prompt(
 #: renders, so asking the model for it would be asking it to restate a number
 #: it was just handed, and then trusting the restatement.
 AGENT_PROFILE_OVERLAY_SCHEMA_HINT = (
-    '{"blocks":[{"label":"retrieval_notes","value":""},'
-    '{"label":"usage_gaps","retire":true}]}'
+    '{"blocks":[{"label":"retrieval_notes","value":"","retire":false},'
+    '{"label":"usage_gaps","value":null,"retire":true}]}'
 )
 
 
@@ -2332,8 +2333,9 @@ def agent_profile_overlay_prompt(
         "never quote a question back verbatim as if it were a finding.\n"
         "5. If an existing note is CONTRADICTED by the sample below — it "
         "describes searching that no longer resembles this person's at all — "
-        'withdraw it with {"label": "<that label>", "retire": true} and no '
-        "value. Retire only what the sample contradicts: having nothing to add "
+        'withdraw it with {"label": "<that label>", "value": null, "retire": '
+        'true}. Every other note you return carries "retire": false. Retire '
+        "only what the sample contradicts: having nothing to add "
         "is rule 1's omission, not a retirement. A note marked (user-authored) "
         "can never be retired; the person wrote it themselves.\n"
         f"{rule_6}"
