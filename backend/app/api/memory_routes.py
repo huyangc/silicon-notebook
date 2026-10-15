@@ -63,6 +63,7 @@ from app.services.knowledge_governance import PromotionTargetError
 from app.services.memory_service import NothingToExport
 from app.services.citation_markers import LOOSE_MARKER_RE
 from app.core.memory_inputs import MemoryExportTooLarge, MemoryInputError
+from app.core.model_values import as_text, as_text_list
 from app.api.task_stream import task_stream_response
 from app.services.cancellation import AskCancelled
 from app.services.model_work import model_artifact_scope
@@ -556,10 +557,9 @@ def _answer_memory_preview_result(
                 **control,
             )
         data = json.loads(raw)
-        title = str(data.get("title") or "").strip()[:80]
-        content_md = str(data.get("content_md") or "").strip()
-        raw_tags = data.get("tags")
-        tags = [str(tag).strip() for tag in raw_tags if str(tag).strip()] if isinstance(raw_tags, list) else []
+        title = as_text(data.get("title"))[:80]
+        content_md = as_text(data.get("content_md"))
+        tags = as_text_list(data.get("tags"))
         if not title or not content_md:
             return fallback
         return MemoryPreview(

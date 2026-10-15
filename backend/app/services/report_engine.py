@@ -2042,8 +2042,9 @@ class ReportEngine:
                             s["sufficiency"] = verdict
                         if _prose(v.get("gap_note")):
                             s["gap_note"] = _prose(v.get("gap_note"))
-                        if _prose(v.get("action")):
-                            s["action"] = _prose(v.get("action"))
+                        action = _prose(v.get("action"))
+                        if action in {"keep", "supplement", "external"}:
+                            s["action"] = action
         except AskCancelled:
             raise
         except Exception:
@@ -3723,18 +3724,15 @@ class ReportEngine:
             data = json.loads(raw)
             summary = _prose(data.get("summary"))
             known_intents = {str(item.get("id") or "") for item in intent_catalog}
-            for row in (data.get("coverage") or []):
-                if not isinstance(row, dict):
-                    continue
-                intent_id = str(row.get("intent_id") or "")
+            for row in _dict_items(data.get("coverage")):
+                intent_id = _prose(row.get("intent_id"))
                 if intent_id in known_intents and isinstance(row.get("covered"), bool):
                     editor_coverage[intent_id] = {
                         "covered": row.get("covered") is not False,
-                        "note": str(row.get("note") or "").strip()[:300],
+                        "note": _prose(row.get("note"))[:300],
                     }
             contradictions = [
-                str(item).strip()[:300] for item in (data.get("contradictions") or [])
-                if str(item).strip()
+                item[:300] for item in _string_items(data.get("contradictions"))
             ][:8]
         except AskCancelled:
             final_editor_cancelled = True

@@ -3090,19 +3090,13 @@ class SourceIngestionService:
                     temperature=0.0,
                     **cap_kwargs(client, "openai_compat_max_tokens"),
                 )
-            # safe_json() always coerces to a dict (its contract), silently
-            # swallowing whatever the true top-level JSON shape was — an
-            # empty-dict result is then indistinguishable from a genuine
-            # LLM {} response. That matters here specifically: verify_
-            # paper_meta({}, ...) yields a *valid* is_paper=False marker,
-            # which upsert_paper_meta persists as "already tried, not a
-            # paper" and permanently suppresses retries. A model that
-            # emits array-wrapped/scalar garbage (e.g. "[]") must NOT get
-            # that treatment — it should fail this attempt and stay
-            # retryable. So probe the raw JSON's real top-level shape
-            # first (json.loads, no cleanup) and only fall back to
-            # safe_json's think-tag/code-fence stripping when the direct
-            # parse fails outright.
+            # Preserve the real top-level shape: safe_json always returns a
+            # dict, hiding array/scalar garbage behind {}. Only a single
+            # object wrapper can be unwrapped without guessing. The verifier
+            # below also requires an explicit boolean classification, so a
+            # missing/malformed is_paper stays retryable instead of becoming
+            # a persisted "not a paper" marker. Fall back to safe_json's
+            # think-tag/code-fence stripping only when direct parsing fails.
             try:
                 parsed = json.loads(raw)
             except (ValueError, TypeError):

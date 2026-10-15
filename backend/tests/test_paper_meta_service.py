@@ -15,6 +15,8 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.repositories.sqlite.source_store import SourceElementWrite
 from app.services.embedding import FakeEmbedder
+from app.services.model_provider import RuntimeModelProvider
+from app.services.model_registry import ModelServiceDefinition, SystemModelServiceRegistry
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import RecordingModelProvider, bind_chat_client
 from tests.model_testkit import bind_all_embedding_clients
@@ -91,6 +93,27 @@ def repo(tmp_path, monkeypatch):
 @pytest.fixture
 def service(repo):
     return repo._runtime.source_ingestion
+
+
+@pytest.fixture
+def scheduled_paper_client(repo, service):
+    """Real scheduler/normalisation boundary with an in-process transport."""
+    raw = _FakeKgLLM(PAYLOAD)
+    definition = ModelServiceDefinition(
+        id="paper", display_name="论文测试服务", kind="chat", protocol="openai",
+        base_url="https://paper.example/v1", model="paper-test",
+        api_key_env="PAPER_TEST_KEY", api_key="test", max_concurrency=1,
+        fingerprint="paper-test",
+    )
+    provider = RuntimeModelProvider(
+        repo.settings, service.event_log,
+        registry=SystemModelServiceRegistry({"paper": definition}, {"paper_metadata": "paper"}),
+        chat_factory=lambda _service: raw,
+    )
+    try:
+        yield raw, provider.chat("paper_metadata")
+    finally:
+        provider.close()
 
 
 @pytest.fixture
@@ -316,6 +339,55 @@ def test_ensure_non_object_json_fails_without_row(repo, notebook_id, service):
     assert status == "failed"
     assert repo._runtime.source_store.get_paper_meta("src-1") is None
     assert fake.calls == 1
+
+
+@pytest.mark.parametrize("classification", [None, "", "unsure", 0, 1, [], {}])
+def test_ensure_malformed_classification_can_retry_through_scheduler(
+    repo, notebook_id, service, scheduled_paper_client, classification,
+):
+    raw, client = scheduled_paper_client
+    raw.payload = {**PAYLOAD, "is_paper": classification}
+    source = _insert_source(repo, notebook_id, "src-1")
+
+    assert service.ensure_paper_metadata(source, client=client) == "failed"
+    assert service.sources.get_paper_meta(source.id) is None
+
+    raw.payload = PAYLOAD
+    assert service.ensure_paper_metadata(source, client=client) == "stored"
+    assert service.sources.get_paper_meta(source.id)["is_paper"] is True
+    assert raw.calls == 2
+
+
+def test_ensure_missing_classification_can_retry_through_scheduler(
+    repo, notebook_id, service, scheduled_paper_client,
+):
+    raw, client = scheduled_paper_client
+    raw.payload = {"title": PAYLOAD["title"]}
+    source = _insert_source(repo, notebook_id, "src-1")
+
+    assert service.ensure_paper_metadata(source, client=client) == "failed"
+    assert service.sources.get_paper_meta(source.id) is None
+    raw.payload = PAYLOAD
+    assert service.ensure_paper_metadata(source, client=client) == "stored"
+    assert raw.calls == 2
+
+
+@pytest.mark.parametrize("classification, expected", [
+    (True, True), (False, False), ("true", True), ("false", False),
+])
+def test_ensure_boolean_classification_and_normalised_spellings_are_idempotent(
+    repo, notebook_id, service, scheduled_paper_client, classification, expected,
+):
+    raw, client = scheduled_paper_client
+    raw.payload = {**PAYLOAD, "is_paper": classification}
+    source = _insert_source(repo, notebook_id, "src-1")
+
+    assert service.ensure_paper_metadata(source, client=client) == (
+        "stored" if expected else "not_paper"
+    )
+    assert service.sources.get_paper_meta(source.id)["is_paper"] is expected
+    assert service.ensure_paper_metadata(source, client=client) == "skipped"
+    assert raw.calls == 1
 
 
 def test_ensure_single_element_array_json_is_unwrapped(repo, notebook_id, service):

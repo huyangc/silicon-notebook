@@ -1606,6 +1606,16 @@ and reads a backslash that starts no JSON escape, such as LaTeX `50\%`, as the
 characters written (`status: "escaped"`); neither is a repair. Repair
 events are content-free and correlate through the model call's safe `support_id`.
 
+Runtime chat services automatically negotiate strict JSON Schema on first scheduled
+use. `MODEL_JSON_SCHEMA_PROBE_TIMEOUT_SECONDS` controls the optional probe budget;
+its defaults, rails, identity/lifetime and fallback contract live in
+[Model JSON recovery](./product-and-api.md#model-json-recovery-and-stream-liveness).
+No model-name allowlist or additional workload binding is needed. Unsupported,
+ignored or unverified endpoints keep ordinary JSON; supported services use formal
+schemas where the hint can be represented without losing valid fields. Capacity
+or label changes reuse the observation; changed endpoint/model/credential identity
+or process restart observes again. This advanced budget is not in `.env.example`.
+
 The same-origin `/api/*` rewrite has a finite proxy idle timeout. Ask therefore sends a
 content-free blank NDJSON heartbeat every 5 seconds and returns anti-buffering headers;
 do not configure an ingress to buffer `application/x-ndjson`. This addresses idle

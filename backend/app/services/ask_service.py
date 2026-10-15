@@ -126,6 +126,7 @@ from app.services.ask_evidence import _EvidenceAssemblyClient, build_ask_evidenc
 from app.services.context_spans import Glue, clip, concat, recording_spans
 from app.services.evidence_context import anchor_image_targets
 from app.services.model_work import MalformedModelResponse, ModelNotConfiguredError
+from app.core.model_values import as_text_list
 
 
 def _answer_text(data: dict) -> str:
@@ -3412,10 +3413,7 @@ class AskService:
                 timeout=self.settings.reasoning_timeout_seconds,
                 max_retries=self.settings.reasoning_max_retries,
                 cancel_event=cancel_event)
-            rel = json.loads(raw).get("relevant")
-            if not isinstance(rel, list):
-                rel = []
-            rel = [str(x).strip() for x in rel if str(x).strip()]
+            rel = as_text_list(json.loads(raw).get("relevant"))
         except AskCancelled:
             raise
         except Exception:

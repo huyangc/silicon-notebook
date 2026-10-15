@@ -117,16 +117,18 @@ def verify_paper_meta(data: Dict[str, Any], head_text: str, model: str) -> Dict[
     """接地校验:返回可直接交给 SourceStore.upsert_paper_meta 的 meta dict。
     不在头部文本中的字段不落库;丢弃明细记入 raw_json 审计信封
     {"llm": 原始返回, "dropped": {...}} 并以 "dropped" 键回传给调用方记事件。
-    畸形形状的值(非预期类型的 authors/keywords/affiliations 等)静默降级、绝不
-    raise:原始值完整保留在 raw_json["llm"],dropped 只记录接地拒绝(非形状降级)。"""
+    is_paper 必须为布尔值,否则抛出 ValueError,让调用方保持可重试。
+    其它畸形形状的值(非预期类型的 authors/keywords/affiliations 等)静默降级:
+    原始值完整保留在 raw_json["llm"],dropped 只记录接地拒绝(非形状降级)。"""
+    # The scheduler normalises the unambiguous spellings "true"/"false".
+    # Missing or otherwise malformed classification is a failed attempt, not
+    # evidence that this source is not a paper: persisting false suppresses retry.
+    is_paper = data.get("is_paper")
+    if not isinstance(is_paper, bool):
+        raise ValueError("paper-meta is_paper must be a boolean")
     head_text = head_text or ""
     head_norm = _norm(head_text)
     dropped: Dict[str, Any] = {}
-    # Only a real JSON true counts: the shape boundary already coerces the
-    # spellings "true"/"false", so any other truthy value ("no", "unsure", a
-    # list) is a negative, never a paper (codex #720 R2).
-    is_paper = data.get("is_paper") is True
-
     title = as_text(data.get("title")) or None
     if title and not grounded(title, head_norm):
         dropped["title"] = title

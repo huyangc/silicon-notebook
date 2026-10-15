@@ -107,6 +107,7 @@ def llm_key(
     top_p: float = 1.0,
     max_tokens: Optional[int] = None,
     thinking_mode: Optional[str] = None,
+    response_format: Optional[dict] = None,
 ) -> str:
     """LLM 响应的缓存键 = sha256(base_url + model + messages 全文 + schema_hint +
     有效生成参数 temperature/top_p/max_tokens/显式 thinking mode)。
@@ -157,6 +158,8 @@ def llm_key(
     # cache cold-start for workloads whose request shape did not change.
     if thinking_mode is not None:
         material["thinking_mode"] = thinking_mode
+    if response_format is not None:
+        material["response_format"] = response_format
     payload = json.dumps(material, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 

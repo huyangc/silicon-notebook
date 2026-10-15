@@ -5,6 +5,7 @@ PYTHONPATH=backend python -m app.scripts.gen_recall_gold --notebook nb-xxx --n-o
 leakage_ratio > 0.6 的题剔除(泄漏)。生成后人工抽检并入 recall_gold.yaml。"""
 import argparse, json, yaml, random
 from app.core.config import get_settings
+from app.core.model_values import as_text
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.kg.client import make_client
 from app.services.retrieval import _payload_text
@@ -20,7 +21,7 @@ def _gen_question(client, source_text: str) -> str:
             "要求:改写表述、不要逐字照抄原文、不要直接点名片段里的专有名词原样串联。\n"
             f"知识片段:{source_text}\n只返回 JSON: {{\"question\":\"...\"}}"}]
     try:
-        return str(json.loads(client.chat_json(msg, _GEN_SCHEMA)).get("question", "")).strip()
+        return as_text(json.loads(client.chat_json(msg, _GEN_SCHEMA)).get("question"))
     except Exception:
         return ""
 
