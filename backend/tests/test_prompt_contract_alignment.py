@@ -17,10 +17,13 @@ from app.services import catalog_job, concept_merge_review, document_guide, pape
 def test_sufficiency_prompt_closes_with_the_schema_hint_and_names_every_verdict():
     prompt = prompts.report_sufficiency_prompt("Q", "sections block")
     assert prompt.endswith(f"Return JSON only: {prompts.REPORT_SUFFICIENCY_SCHEMA_HINT}")
-    # Every value of the enum hint is taught in the prose, "充足(keep)" included.
-    assert "充足(keep)" in prompt and "薄弱(supplement" in prompt and "缺失(external" in prompt
+    # Every value of the enum hint is taught in the prose; the verdict binds
+    # to the section's bracketed number and no suggested action is asked for.
+    assert "→ 充足;" in prompt and "→ 薄弱 (" in prompt and "→ 缺失 (" in prompt
     assert "exactly one of 充足 / 薄弱 / 缺失" in prompt
-    assert "exactly one of keep / supplement / external" in prompt
+    assert "index is the section's bracketed number" in prompt
+    assert "action" not in prompts.REPORT_SUFFICIENCY_SCHEMA_HINT
+    assert "keep / supplement / external" not in prompt
 
 
 def test_section_prompt_says_one_string_value_per_facet():

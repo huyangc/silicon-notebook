@@ -689,8 +689,8 @@ class _ReportModel:
                 for i in range(2)]})
         if "verdicts" in hint:
             return json.dumps({"verdicts": [
-                {"title": f"Section {i}", "sufficiency": "充足", "gap_note": "",
-                 "action": "keep"} for i in range(2)]})
+                {"index": i + 1, "sufficiency": "充足", "gap_note": ""}
+                for i in range(2)]})
         if '"markdown"' in hint:
             return json.dumps({"markdown": f"{TERM} text [k1]", "grounded": True,
                                "claims": []})

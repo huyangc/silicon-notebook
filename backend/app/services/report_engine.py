@@ -1963,22 +1963,27 @@ class ReportEngine:
                            completeness_required: bool = False,
                            use_llm: bool = True) -> List[dict]:
         from app.services.prompts import report_sufficiency_prompt, REPORT_SUFFICIENCY_SCHEMA_HINT
-        by_title = {p["title"]: p for p in probe}
         result_scope = str(
             getattr(self, "_planning_result_scope", result_scope) or result_scope
         )
         completeness_required = bool(
             getattr(self, "_planning_completeness_required", completeness_required)
         )
-        deterministic_by_title: Dict[str, str] = {}
+        # ``probe`` is positional (``_probe_sufficiency`` zips it with
+        # ``sections``), and so is the judge's reply: verdicts name the
+        # section's 1-based number in the block below, never its title, so two
+        # sections sharing a title can no longer receive each other's verdict.
+        deterministic: List[str] = []
+        probe_lines: List[str] = []
         sufficiency_policy = report_sufficiency_policy(self.settings)
         # Fail-open judge fallback, but fail-closed evidence semantics: volume of
         # graph objects alone is never sufficient.  Require relevant items from
         # multiple independently identifiable document families and reject a
         # heavily single-family distribution.
-        for s in sections:
-            h = by_title.get(s["title"], {"hits": 0, "base_hits": 0,
-                                         "element_hits": 0, "source_hits": 0})
+        for index, s in enumerate(sections):
+            h = probe[index] if index < len(probe) else {
+                "hits": 0, "base_hits": 0, "element_hits": 0, "source_hits": 0,
+            }
             relevant = int(h.get("relevant_items", 0))
             families = int(h.get("relevant_family_count", 0))
             top_share = float(h.get("top_family_share", 1.0) or 1.0)
@@ -1989,7 +1994,18 @@ class ReportEngine:
                 completeness_required=completeness_required,
             )
             fallback = "充足" if enough else "薄弱" if thin else "缺失"
-            deterministic_by_title[s["title"]] = fallback
+            deterministic.append(fallback)
+            probe_lines.append(
+                f"[{index + 1}] {s.get('title', '')}: hits={h.get('hits', 0)} "
+                f"base_hits={h.get('base_hits', 0)} "
+                f"element_hits={h.get('element_hits', 0)} "
+                f"relevant_items={relevant} "
+                f"relevant_supports={h.get('relevant_supports', 0)} "
+                f"independent_families={families} "
+                f"unknown_supports={h.get('unknown_supports', 0)} "
+                f"identity_uncertain={h.get('source_identity_uncertain', 0)} "
+                f"top_family_share={float(h.get('top_family_share', 1.0)):.3f}"
+            )
             s["coverage"] = {
                 key: (float(h.get(key, 0)) if key == "top_family_share"
                       else int(h.get(key, 0)))
@@ -2001,23 +2017,12 @@ class ReportEngine:
             }
             s.setdefault("sufficiency", fallback)
             s.setdefault("gap_note", "")
-            s.setdefault("action", "keep" if enough else "supplement" if thin else "external")
         # 低档只跑确定性半:LLM 精修本就是 fail-open 的锦上添花(只降不升),
         # 跳过它 = 走既有的失败路径语义,而人工大纲确认门紧随其后。
         if not use_llm:
             return sections
         try:
-            block = "\n".join(
-                f"- {p['title']}: hits={p['hits']} base_hits={p['base_hits']} "
-                f"element_hits={p.get('element_hits', 0)} "
-                f"relevant_items={p.get('relevant_items', 0)} "
-                f"relevant_supports={p.get('relevant_supports', 0)} "
-                f"independent_families={p.get('relevant_family_count', 0)} "
-                f"unknown_supports={p.get('unknown_supports', 0)} "
-                f"identity_uncertain={p.get('source_identity_uncertain', 0)} "
-                f"top_family_share={float(p.get('top_family_share', 1.0)):.3f}"
-                for p in probe
-            )
+            block = "\n".join(probe_lines)
             raw = self.dependencies.model_clients.chat("report_sufficiency").chat_json(
                 [{"role": "user", "content": report_sufficiency_prompt(
                     question,
@@ -2027,24 +2032,24 @@ class ReportEngine:
                 )}],
                 REPORT_SUFFICIENCY_SCHEMA_HINT, cancel_event=self.cancel_event)
             for v in _dict_items(json.loads(raw).get("verdicts")):
-                for s in sections:
-                    if s["title"] == str(v.get("title", "")).strip():
-                        verdict = str(v.get("sufficiency") or "")
-                        # The judge may call a zero-hit probe "薄弱" (for example
-                        # when the planned scope is still partially answerable),
-                        # but it cannot manufacture the family diversity required
-                        # for "充足".
-                        order = {"缺失": 0, "薄弱": 1, "充足": 2}
-                        ceiling = deterministic_by_title.get(s["title"], "缺失")
-                        if verdict in order and (
-                            verdict != "充足" or ceiling == "充足"
-                        ):
-                            s["sufficiency"] = verdict
-                        if _prose(v.get("gap_note")):
-                            s["gap_note"] = _prose(v.get("gap_note"))
-                        action = _prose(v.get("action"))
-                        if action in {"keep", "supplement", "external"}:
-                            s["action"] = action
+                number = v.get("index")
+                if (
+                    isinstance(number, bool) or not isinstance(number, int)
+                    or not 1 <= number <= len(sections)
+                ):
+                    continue
+                s = sections[number - 1]
+                verdict = str(v.get("sufficiency") or "")
+                # The judge may call a zero-hit probe "薄弱" (for example
+                # when the planned scope is still partially answerable),
+                # but it cannot manufacture the family diversity required
+                # for "充足".
+                if verdict in {"缺失", "薄弱", "充足"} and (
+                    verdict != "充足" or deterministic[number - 1] == "充足"
+                ):
+                    s["sufficiency"] = verdict
+                if _prose(v.get("gap_note")):
+                    s["gap_note"] = _prose(v.get("gap_note"))
         except AskCancelled:
             raise
         except Exception:

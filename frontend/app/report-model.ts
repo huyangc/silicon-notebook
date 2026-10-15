@@ -50,7 +50,6 @@ export type ReportOutlineSectionT = {
   tensions?: string[];
   sufficiency?: ReportSufficiency;
   gap_note?: string;
-  action?: string;
   intent_ids?: string[];
   intent_questions?: string[];
   intent_catalog?: { id: string; title: string; question: string; retrieval_queries: string[] }[];

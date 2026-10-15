@@ -541,7 +541,7 @@ def test_sufficiency_judge_cannot_promote_one_family_even_with_many_hits():
 
         def chat_json(self, *args, **kwargs):
             return json.dumps({
-                "verdicts": [{"title": "A", "sufficiency": "充足"}]
+                "verdicts": [{"index": 1, "sufficiency": "充足"}]
             })
 
     deps = _deps()
