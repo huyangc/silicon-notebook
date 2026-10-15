@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.config import Settings
+from app.core import llm
 from app.core.llm import OpenAICompatibleClient
 from app.core.model_schema import StructuredModelResponseError
 from app.domain.cancellation import AskCancelled
@@ -133,6 +134,63 @@ def test_cancelled_probe_does_not_remember_a_negative_capability(tmp_path):
     assert json.loads(call(result, bypass_cache=True))["answer"] == "answer"
     assert probe_count(sdk) == 2
     assert sdk.calls[-1]["response_format"]["type"] == "json_schema"
+
+
+def test_probe_deadline_closes_a_read_stalled_after_a_chunk(tmp_path, monkeypatch):
+    blocked, closed = threading.Event(), threading.Event()
+    timers = []
+
+    class DeadlineTimer:
+        def __init__(self, interval, callback):
+            self.interval, self.callback = interval, callback
+            self.cancelled = self.joined = False
+            timers.append(self)
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            self.cancelled = True
+
+        def join(self):
+            self.joined = True
+
+    class StalledStream:
+        def __iter__(self):
+            yield SimpleNamespace(choices=[SimpleNamespace(
+                delta=SimpleNamespace(content="{"), finish_reason=None,
+            )], usage=None)
+            blocked.set()
+            assert closed.wait(30)
+
+        def close(self):
+            closed.set()
+
+    sdk = SDK()
+    create = sdk.create
+
+    def transport(**kwargs):
+        if kwargs.get("response_format", {}).get("json_schema", {}).get("name") == "capability_probe":
+            sdk.calls.append(kwargs)
+            return StalledStream()
+        return create(**kwargs)
+
+    monkeypatch.setattr(sdk, "create", transport)
+    monkeypatch.setattr(llm.threading, "Timer", DeadlineTimer)
+    result = client(tmp_path, sdk)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(call, result, bypass_cache=True)
+        assert blocked.wait(30)
+        assert len(timers) == 1
+        assert 0 < timers[0].interval <= result.settings.model_json_schema_probe_timeout_seconds
+        timers[0].callback()
+        assert json.loads(pending.result(timeout=30))["answer"] == "answer"
+    assert closed.is_set()
+    assert timers[0].cancelled and timers[0].joined
+    assert result._json_schema_capability == "unverified"
+    assert sdk.calls[-1]["response_format"]["type"] == "json_object"
+    call(result, bypass_cache=True)
+    assert probe_count(sdk) == 1
 
 
 def test_rejected_schema_is_remembered_without_disabling_other_schemas(tmp_path):
