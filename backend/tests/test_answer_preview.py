@@ -9,6 +9,10 @@ def test_citation_markers_removed():
     assert pv("结论成立[k1]，并且[k2, k3]也是【k4】（k5）") == "结论成立，并且也是"
 
 
+def test_citation_marker_takes_the_blank_before_it():
+    assert pv("It exists [k1]. Next [k2][k3], then [k4] more") == "It exists. Next, then more"
+
+
 def test_heading_emphasis_code_unwrapped():
     out = pv("# 标题\n\n**粗** 和 *斜* 与 ~~删~~ 以及 `code` 和 __b__ _i_")
     assert out == "标题\n粗 和 斜 与 删 以及 code 和 b i"

@@ -447,6 +447,8 @@ UPDATE is idempotent, so that 404 comes from the service's ownership gate). A gl
 belongs to no notebook, so there is no `require_notebook_read` above these routes: ownership is the
 whole gate.
 
+The same public page has a third namespace, `alnk-`: the expiring link that MCP `ask` / `get_ask` with `delivery="link"` issue for **one answered task** (notebook or global). It is not a conversation share and never goes through the `.../share` endpoints; see "MCP answer links" under [Public conversation share guardrails](#public-conversation-share-guardrails).
+
 Only two things genuinely differ from the notebook-scoped trio:
 
 - **The boundary is a job**, not an answer row. `expected_through_id` carries a `job_id`; a boundary
@@ -1575,17 +1577,17 @@ version (hash only) is 409 「这个 token 签发于旧版本，无法再次复�
 the plaintext.
 
 An issued token's access can be edited in place: `PUT /api/agent-tokens/{token_id}/access`
-replaces tiers, default notebook, allowlist, and expiry together (all four fields are required;
-`expires_at: null` means no expiry) under the same validation as issuing, while the token hash,
+replaces tiers, default notebook, allowlist, expiry, and the answer-links switch together (all five fields are required;
+`expires_at: null` means no expiry; `allow_answer_links` has no default so an omission cannot silently flip it) under the same validation as issuing, while the token hash,
 Profile, and creation time stay unchanged. Because every
 Agent tool call rereads live token state, the change applies from the next call without
 reissuing or reconfiguring the client; moving an expired token's expiry into the future makes it
 usable again; an empty-string `expires_at` means no expiry, like `null`, on both issue and edit.
-An optional `expected` object carries the four access fields as the editor last read them; when
+An optional `expected` object carries the five access fields as the editor last read them; when
 present and the stored configuration has changed since, the write returns 409 instead of
 overwriting (the browser always sends it, so a stale tab cannot silently restore a permission
 another tab just removed; omitting it is last-writer-wins). A revoked token, or one whose Profile
-is disabled, returns 409; an allowlisted notebook the owner can no longer read returns 422. The
+is disabled, returns 409; an allowlisted notebook the owner can no longer read returns 422. `allow_answer_links: true` without the Ask tier returns 422 ("allowing answer links also requires the Ask permission", Chinese user copy); issuing (`POST /agent-profiles/{id}/tokens`) may omit the field, which defaults to off, under the same rule. The switch only decides whether that token's `ask` / `get_ask` may use `delivery="link"` (see "Expiring answer links" under MCP `ask`); read-time re-checks and revocation are under [Public conversation share guardrails](#public-conversation-share-guardrails). The
 browser edits each token inline, with busy, failure, and saved states on that token's row, hides
 editing for revoked tokens and for tokens of a disabled Profile, and asks for an inline second
 confirmation before revoking. Install the backend
@@ -1975,6 +1977,39 @@ returned in one call, never paged. MCP clients usually cap tool output on their 
 cap raised (see the [Agent MCP memory SOP](./agent-mcp-memory-sop.md)). Registered difference: in
 `reasoning`, evidence is always assembled as one single-pass context, even for a question the answer
 would synthesize section by section, and the evidence-refinement model call is skipped.
+
+**Expiring answer links: `delivery="link"`.** `ask` and `get_ask` both take `delivery` (`"inline"`, the default and the
+behaviour above, or `"link"`) and `link_ttl_hours` (integer hours). `link` is for posting an answer into a chat
+tool: an answered job returns no `answer` / `citations` / `coverage` / `trace`, only a plain-text `preview` and an
+expiring anonymous link; the reader opens `/c/{token}` for the full answer, citations and images. On success the
+response is `{"job_id", "conversation_id", "status": "answered", "mode", "preview", "preview_truncated",
+"link": {"url", "expires_at"}, "grounded", "total_citations", "completeness_notice", "scope", "error",
+"content_is_untrusted_evidence": true}`. The `preview` is derived deterministically from the answer Markdown (no
+model call): citation markers, images, HTML and emphasis marks are dropped, tables and display-math blocks become
+a one-line placeholder, and the length is capped at `MCP_ANSWER_PREVIEW_MAX_CHARS` (default 300 code points);
+`preview_truncated` is true when it was cut. `preview`, `link.url` and `link.expires_at` must fit the response
+budget whole or the call fails with `internal` -- a clipped link or preview is never returned. Non-`answered`
+statuses (`running`, `needs_clarification`, `failed`, ...) keep the usual shape and issue no link.
+
+Combination rules (checked before any work): `delivery` must be `inline` or `link`; `link_ttl_hours` is allowed
+only with `link` and must be an integer from `1` to `MCP_ANSWER_LINK_TTL_HOURS` (booleans and fractions are
+refused, and a too-large value is **never clamped**), otherwise `invalid_argument`; `delivery="link"` cannot be
+combined with `output="evidence"` (retrieval-only stores no answer), and `get_ask` with `link` cannot also pass
+paging offsets (`invalid_argument`). A deployment without `PUBLIC_WEB_BASE_URL` answers `unavailable` (the message
+tells the user to contact the deployment admin); a token whose "allow expiring answer links" switch is off answers
+`forbidden` (the message points at the switch on the Agent access page). The switch is re-read at delivery time, so
+turning it off while a run is in flight refuses too: the answer is saved, and that `forbidden` message names its
+`job_id` so `get_ask` can read it inline (a refusal before the run names no job).
+
+Uniqueness and retries: there is at most one live link per (job, issuing token). A retry with the same
+`client_request_id` and a later `get_ask` with `delivery="link"` reuse that link and return its **original**
+`expires_at` (`link_ttl_hours` shapes a new link only; reuse never extends). Another token of the same owner
+issuing for the same job gets its own link and does not displace the first. Issuing first passes exactly the
+ownership, read, allowlist and Memory-replay checks `get_ask` applies -- a link never authorizes a job the token
+could not read -- and the mounted reference libraries a single-notebook job quoted are re-checked by the session
+share's rule, without requiring the token's allowlist to cover them (the same as `get_ask`). The link looks like
+`{PUBLIC_WEB_BASE_URL}/c/alnk-...`; anyone holding it can read the whole answer **without signing in**, which the
+`ask` tool description says outright.
 
 **Refs and `read_reference`.** `search` hits and every `ask`/`get_ask` citation carry an opaque
 `ref` (`base64url(json)` without padding; not signed -- `read_reference` re-runs the original
@@ -3904,6 +3939,10 @@ Over-limit reference title/original filename/excerpt sets `title_truncated`/`fil
 ### Public conversation share guardrails
 
 A conversation's creator can publish completed turns at `/c/{token}`. Under `/notebooks/{nb}/conversations/{cid}/share`, `POST` issues/updates, `GET` reads the creator's token/watermark, and `DELETE` revokes. `GET /public/conversations/{token}` and `GET /public/conversations/{token}/assets/{alias}` are anonymous. Non-owner and nonexistent conversations both return 404; blank creators and conversations without answers return 409 (no token remains issued).
+
+**MCP answer links (`alnk-`).** The third capability namespace: an Agent issues an expiring link for **one answered MCP job** with `delivery="link"` on `ask` / `get_ask` (table `answer_links`, SQLite v94 / PostgreSQL `0074_answer_links.sql`: link token, job kind and id, owner, issuing token, created/expiry times, unique per (job, issuing token), no foreign keys). It is served by the same public page `/c/{token}` and the same anonymous endpoints, routed by the `alnk-` prefix, so it can never resolve a `cshr-` / `gshr-` token. The page holds **that one turn only**, goes through the same allowlist projection (no ids, no reasoning trace, no intent) and carries `Cache-Control: no-store`; the response gains an `expires_at` that only this branch emits, which the page shows as the validity line. Every open re-checks on the server in a fixed order: an unknown token is 404; an **expired row that is still present** is 410 (the page endpoint returns the Chinese detail 「链接已过期，请重新提问」 via `user_error()`; the image endpoint keeps 404 for expiry) whatever the other checks would say; after that any failing check is a 404 indistinguishable from an unknown token. The checks are everything `get_ask` applies to the issuing token NOW -- token not revoked or expired, Profile enabled, owner still eligible, **the answer-links switch still on**, the Ask tier still held, the job owned by the link's owner and started via MCP, the single-notebook job's notebook still on the token's allowlist, a run that had the private-Memory channel open requiring the token to still hold `memory:read`, the owner still able to read the notebook -- plus the session share's snapshot predicate (shared code: mounted reference libraries still effective); a global job is checked against the allowlist as a ceiling. Retrieval-only (`output="evidence"`), unfinished and answer-less jobs are always 404. Turning the switch off and on again revives still-unexpired old links; revoking the token kills all its links at once. Image aliases are derived per link token and only the images that one answer quotes are readable; anything else is 404.
+
+A link lives for `link_ttl_hours` given at issue time (default `MCP_ANSWER_LINK_TTL_HOURS`). Deleting a job, conversation or token does **not** cascade to link rows; they 404 on read because a check fails, and the space is reclaimed by a sweep run opportunistically on the issuing write (at most once per process per hour, marked only after the write commits): rows expired beyond the `MCP_ANSWER_LINK_GRACE_HOURS` grace period, rows whose issuing token is revoked or gone, and rows whose job is gone are deleted. Inside the grace period a reader sees 410; after the sweep the same link is 404 again. A shadow switch does not copy the table, so old links 404 afterwards and `get_ask(delivery="link")` re-issues; in incremental cross-environment sync it is a local table and is not carried over.
 
 Issuing retains the token and advances `shared_through_at`/`shared_through_id`. Body `expected_through_id` pins publication to the exact answer the user reviewed, excluding later arrivals; a deleted boundary returns 409. Empty/absent body selects the latest answer. The snapshot uses the boundary answer's `(created_at, rowid/ordinal)` keyset, so same-instant later answers stay excluded; if the answer no longer resolves, it falls back to the time interval. In-flight jobs without answer rows are excluded.
 

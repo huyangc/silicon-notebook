@@ -286,6 +286,21 @@ the backend-only trailing slash without a client redirect. A trusted-intranet HT
 deployment can instead use `MCP_PUBLIC_URL=http://notebook.example.com/mcp` and
 `MCP_REQUIRE_HTTPS=0`; this relaxes Host/Origin checks and transmits tokens in cleartext.
 
+An Agent's `ask` / `get_ask` can hand an answer out as an expiring anonymous link with `delivery="link"` (see
+MCP `ask` in [Product and API](./product-and-api.md)). Enabling it requires `PUBLIC_WEB_BASE_URL`: the public
+address of the **frontend** as readers' browsers reach it, so a link is `${PUBLIC_WEB_BASE_URL}/c/<token>`. The
+server does **not** derive it from request headers (`Host`, `X-Forwarded-*`): those come from the client or an
+intermediary and can be forged, so a derived link could point at another site, and the entry an MCP request
+used need not be the one readers can open. It accepts `http` (the production frontend is often
+`http://<IP>:3000`) and `https`, may carry a sub-path (such as `https://example.com/notebook`), has trailing
+slashes trimmed, and fails startup if it carries userinfo, a query, a fragment, whitespace or control characters.
+**When unset**, `delivery="link"` returns `unavailable` and nothing else changes. Three optional settings:
+`MCP_ANSWER_LINK_TTL_HOURS` (default 168, range 1-720; the default and the cap for `link_ttl_hours`, where a larger
+request is refused rather than clamped), `MCP_ANSWER_LINK_GRACE_HOURS` (default 168, range 0-720; how long an
+expired link is kept: readers see 410 "expired" meanwhile, then the sweep that runs on issuing deletes it and the
+link becomes 404), and `MCP_ANSWER_PREVIEW_MAX_CHARS` (default 300, range 40-2000; the plain-text preview cap).
+Each token also needs "allow expiring answer links" switched on separately on the Agent access page.
+
 The supported production diagnostics target is Ubuntu 24.04 running this normal
 `npm run start` flow with its single Uvicorn worker. If that deployment appears hung,
 leave it running and capture the incident **while the hang is still present**; see

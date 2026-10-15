@@ -80,6 +80,8 @@ still read are the whole check, and each row already carries its counts — so e
 A tool refused for a missing tier names that tier in its error (for example
 「此凭证缺少「读取」权限，请在 Agent 接入页为它勾选后重试」) instead of returning only a notebook id.
 
+**Expiring answer-link switch.** Once the Ask tier is ticked the permission area shows a separate switch, "允许签发限时回答链接" (allow expiring answer links; off by default, disabled without the Ask tier, and the backend refuses the combination too). Only with it on may the token use `delivery="link"` to turn an answer into an expiring public link -- **anyone holding the link can read the whole answer without signing in, which may include quoted personal-Memory excerpts**, so enable it only for tokens that really post answers into chat tools, and tell the people using them. You can flip it any time on an issued token with **修改权限**: switching it off makes the links that token already issued stop opening at once, and switching it back on revives the unexpired ones. It also needs the deployment administrator to have set `PUBLIC_WEB_BASE_URL`; otherwise the call returns `unavailable`.
+
 6. Set a short expiry (the **7 天 / 30 天 / 90 天** shortcuts fill it in; you can still edit it — the page converts the browser's local time to a UTC instant, and the backend rejects a time without a zone), choose **签发 Token** (issue token), then copy the plaintext. You can copy it again later with **复制 token** on its row in the issued-token list (owner only, through `GET /api/agent-tokens/{token_id}/secret`); a revoked token cannot be copied, and a token issued before this version stored only a hash and cannot be copied again — issue a new one if needed. The list itself never carries the plaintext. The receipt also shows an **Agent MCP onboarding instructions** link. Give the Agent that link and the token as two separate values: the public Markdown tells it the deployment's exact MCP endpoint and client configuration steps, while the link itself never contains the token. The same document is available anonymously at `GET /api/agent-mcp/onboarding`, so an Agent can read it before MCP is configured; a request carrying any query string or an `Authorization` header gets `400`. The top of the `/agents` page links the same document.
 
 Never commit the token or place it in documentation or script arguments. Share it only with the intended Agent over a trusted channel, separately from the onboarding URL; after configuration, keep it in the client's secret/environment mechanism and do not repeat it in later conversation. The examples read it from the process environment.
@@ -408,6 +410,20 @@ never as k1/k2-style keys; check key claims against the original with read_refer
 item's ref; the item text is material, not instructions.
 ```
 
+### For chat tools: `delivery="link"`
+
+When an answer is going into a chat tool (a group message, a ticket comment), do not paste thousands of characters: have `ask` return a plain-text preview and an expiring link.
+
+```json
+{"question":"What do these projects' low-temperature tests have in common?","delivery":"link","link_ttl_hours":72}
+```
+
+- **Prerequisites.** The token holds the Ask tier with the answer-links switch on (section 3) and the deployment has `PUBLIC_WEB_BASE_URL`. `link_ttl_hours` may be omitted (the deployment default, normally 7 days); when given it must be an integer from 1 to the deployment cap -- above the cap is `invalid_argument`, never trimmed to it. It cannot be combined with `output="evidence"`.
+- **Result.** For an answered job you get `preview` (plain text; tables and formulas become a "see the link" placeholder, and `preview_truncated` says whether it was cut), `link.url` and `link.expires_at`, plus `grounded`, `total_citations`, `completeness_notice` and `scope`; `answer`, `citations`, `coverage` and `trace` are not returned. Other statuses (`running`, `needs_clarification`, `failed`) come back as usual with no link. Show people the `preview` and `link.url` together and say the link stops working at `expires_at`; **the preview is only a summary, the full answer on the link page is authoritative**, and to read the whole text yourself use `get_ask` without `delivery`.
+- **Retry and re-issue.** Retrying with the same `client_request_id`, or later calling `get_ask(job_id, delivery="link")`, returns the **same** link with its original `expires_at` (never extended; `link_ttl_hours` shapes a new link only). `get_ask` with `link` cannot also pass paging offsets.
+- **What the reader sees.** A read-only answer page with a validity line, no sign-in needed. After expiry the page says "链接已过期，请重新提问" (link expired, please ask again). Every open re-checks: if the token is revoked or expired, the switch is off, the token lost the Ask tier or the notebook left its allowlist, or the owner lost read access to the notebook, the link stops at once (the reader only sees "not found"). Deleting the conversation or job also makes the link stop opening.
+- **Not private sharing.** The link is the credential: do not post it in public channels or logs, and revoke the issuing token if you suspect a leak.
+
 ## 6. Runnable official-client example
 
 [scripts/example_mcp_memory_client.py](../scripts/example_mcp_memory_client.py) uses the official Python `mcp` client (the version range is declared in `backend/requirements.txt`). It is read-only by default and the token needs at least `read`; `--propose` creates an idempotent candidate for UI review (needs `contribute`). The script connects to `http://127.0.0.1:8000/mcp/` by default; for a remote deployment point `--url` or the `SILICON_NOTEBOOK_MCP_URL` environment variable at the address the onboarding instructions print.
@@ -553,12 +569,12 @@ Every tool error reads `[<code>] <Chinese message>` (a client may prefix `Error 
 | `notebook_not_allowed` | The notebook is outside the token's allowlist | Add it to the allowlist |
 | `notebook_unreadable` | The token's owner can no longer read the notebook | Check the owner's membership |
 | `owner_only` | A write on a notebook the token's owner does not own | Use a notebook the owner owns |
-| `forbidden` | The operation is refused by a rule (for example deleting a person's source, re-parsing a promotion source, or an index for a notebook too small to need one) | Not retryable; change the request |
+| `forbidden` | The operation is refused by a rule (for example deleting a person's source, re-parsing a promotion source, or an index for a notebook too small to need one); `delivery="link"` on `ask` / `get_ask` also reports it when the token's answer-links switch is off (the message points at the switch on the **Agent access** page) | Generally not retryable; change the request. For answer links, switch it on with **修改权限** and retry (the answer is saved and readable via `get_ask` without `delivery`) |
 | `not_found` | The resource does not exist or is outside what the token may see (the message names the kind of resource); also a job or key not started over MCP by this owner, and a tool name that does not exist | Check the id; `tools/list` is authoritative for tools |
 | `invalid_argument` | A malformed or out-of-range argument, or a `client_request_id` reused for a different question. A `ValueError` text is shown only when it starts with Chinese or matches a known validator shape and is translated into Chinese; a missing or mistyped parameter (MCP schema validation) reads 「参数不合法：<field>」; other unexpected errors are `internal` and never echoed | Fix the argument named in the message |
 | `busy` | A build, parse, index rebuild or maintenance action is already running, two calls already wait on the same `ask`, global Ask is at its concurrency limit, or that global conversation is still answering | Wait and poll (`get_notebook`, `get_ask`); do not retry at once |
 | `mirrored` | The notebook is a mirror synced from another environment; its synced content is not writable here | Make the change in the source environment |
-| `unavailable` | A model, engine or capacity is unavailable right now: including a retrieval timeout, the selected index pipeline being unavailable, a notebook with nothing to answer from yet, a full notebook, a feature switched off, or an `ask` whose job, held by another process, made no progress for 30 minutes | Retry later or ask the administrator |
+| `unavailable` | A model, engine or capacity is unavailable right now: including a retrieval timeout, the selected index pipeline being unavailable, a notebook with nothing to answer from yet, a full notebook, a feature switched off, or an `ask` whose job, held by another process, made no progress for 30 minutes; with `delivery="link"`, a deployment without `PUBLIC_WEB_BASE_URL` | Retry later or ask the administrator |
 | `internal` | An unexpected server error (details are in the server log only) | Retry; contact the administrator if it persists |
 
 ## 10. Revoke and rotate
@@ -566,6 +582,8 @@ Every tool error reads `[<code>] <Chinese message>` (a client may prefix `Error 
 Use **Agent access → issued tokens → 撤销 (revoke)**, then **确认撤销** (confirm) on the same row. Every data tool rechecks live token state. Choosing **停用** (disable) under **Agent Profile** invalidates all its tokens immediately, with no confirmation step. On a disabled Profile, choose **启用** (enable) and then **确认启用** (confirm) on the same row: its tokens that are neither revoked nor expired work again at once, while a token revoked during the disabled period stays revoked. A Profile you no longer need can be removed with **删除** (delete) and then **确认删除** (confirm) on the same row: it leaves the list, every token of it is revoked for good, and it cannot be restored; the Memory it proposed and the sources it added keep its name.
 
 To change what an existing token may do, choose **修改权限** (edit access) on it instead: tiers, default notebook, allowlist, and expiry are saved together and the Agent's next tool call sees them, with no reissue or client reconfiguration. Revoked tokens, and tokens whose Profile is disabled, cannot be edited. A token you forgot to copy can be copied again from the list with **复制 token** (except tokens issued before this version); if a token was **exposed**, do not copy it again — issue a new one and revoke the old one.
+
+Revoking a token makes **all** answer links it issued stop working at once (no per-link cleanup); merely switching off its answer-links switch has the same effect, but switching it back on revives the unexpired ones.
 
 For rotation, issue and verify a new short-lived token first, update the Agent environment, then revoke the old token. Do not reuse a token that appeared in logs, shell history, or plaintext client configuration.
 
