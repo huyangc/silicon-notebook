@@ -544,6 +544,27 @@ class AskIntentHandleStorePort(Protocol):
     def get_intent_handle(self, token: str, *, owner_id: str) -> "dict | None": ...
 
 
+class AnswerLinkStorePort(Protocol):
+    """MCP answer links (v94/0074): expiring anonymous links to one answered
+    ask job, one per (job, issuing Agent token). Expiry is judged at read time;
+    ``issue`` purges stale rows at most once per interval."""
+
+    def issue_answer_link(
+        self,
+        *,
+        job_kind: str,
+        job_id: str,
+        owner_id: str,
+        agent_token_id: str,
+        ttl_seconds: int,
+        sweep_grace_seconds: int,
+    ) -> dict: ...
+
+    def answer_link(self, token: str) -> "dict | None": ...
+
+    def sweep_answer_links(self, *, grace_seconds: int) -> int: ...
+
+
 @runtime_checkable
 class WishStorePort(Protocol):
     def create_wish(

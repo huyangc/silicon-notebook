@@ -13,6 +13,7 @@ from app.repositories.ports import (
     CatalogStorePort,
     ChunkStorePort,
     EmbeddingStorePort,
+    AnswerLinkStorePort,
     AskIntentHandleStorePort,
     ExtensionToggleStorePort,
     GovernanceStorePort,
@@ -72,6 +73,7 @@ class PersistenceBundle(Protocol):
     extension_toggles: ExtensionToggleStorePort
     wishes: WishStorePort
     ask_intent_handles: AskIntentHandleStorePort
+    answer_links: AnswerLinkStorePort
 
 
 class PersistenceBundleFactory(Protocol):

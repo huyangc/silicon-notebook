@@ -51,6 +51,7 @@ BUNDLE_STORE_PORTS = {
     "extension_toggles": "ExtensionToggleStorePort",
     "wishes": "WishStorePort",
     "ask_intent_handles": "AskIntentHandleStorePort",
+    "answer_links": "AnswerLinkStorePort",
 }
 
 
