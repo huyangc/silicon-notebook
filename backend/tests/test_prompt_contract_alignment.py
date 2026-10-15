@@ -79,7 +79,13 @@ def test_catalog_prompt_spells_scalar_and_container_types():
     source = inspect.getsource(catalog_job._prompt)
     assert "write it as a JSON boolean (true/false), never as a quoted string" in source
     assert '`examples` is always an array of strings' in source
-    assert 'is absent write "" (never null)' in source
+    assert 'is absent write "" (an empty string)' in source
+    assert "never null" not in source
+    hint = json.loads(catalog_job._SCHEMA_HINT)
+    entry = hint["entries"][0]
+    assert entry["args"][0]["required"] is False
+    assert entry["examples"] == [""]
+    assert "string" not in catalog_job._SCHEMA_HINT
 
 
 def test_intent_prompt_tells_the_model_its_scope_decides_and_how_confidence_is_read():
