@@ -406,9 +406,6 @@ class JsonChatClientPort(Protocol):
         #   ``usage``             — dict of plain token counters; a counter the
         #                           provider did not report is an absent key,
         #                           never a fabricated 0.
-        #   ``schema_enforced``   — True when the delivered reply was requested
-        #                           under and validated against the hint's
-        #                           strict JSON Schema; absent otherwise.
         call_stats: Optional[Dict[str, Any]] = None,
     ) -> str: ...
 

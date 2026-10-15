@@ -2,9 +2,10 @@
 
 Hints describe shapes, not complete domain contracts. Scalar examples are never
 constants; pipe-delimited strings advertise enums (including the legacy empty
-value, except on a required root field). All object properties must be required for strict structured output, so
-optional fields are represented with null. Existing domain validation remains
-authoritative after the scheduler removes unused null fields.
+value, except on a required root field). All object properties must be required
+for strict structured output, so optional fields are represented with null.
+Existing domain validation remains authoritative after the scheduler removes
+unused null fields.
 
 An empty list does not describe its item type. Only the semantic string-list
 fields below and the spreadsheet plan's explicit filter contract supply that
@@ -90,6 +91,15 @@ def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
     if {"type": "null"} in variants:
         return schema
     return {"anyOf": [*variants, {"type": "null"}]}
+
+
+def nullable_root_fields(example: dict[str, Any]) -> set[str]:
+    """Root fields the strict projection lets a reply set to null.
+
+    Nested object fields are always nullable. The JSON-mode shape walk uses
+    this same set, so a null is "unused" or drift identically in both modes.
+    """
+    return _optional_root_fields(example)
 
 
 def _optional_root_fields(example: dict[str, Any]) -> set[str]:
