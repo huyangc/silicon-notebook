@@ -228,6 +228,8 @@ export type AgentTokenSummary = {
   scopes: string[];
   default_notebook_id: string;
   notebook_ids: string[];
+  /** 是否允许此 Agent 为回答签发限时公开链接(需要同时有「问答」权限)。 */
+  allow_answer_links?: boolean;
   expires_at?: string | null;
   revoked_at?: string | null;
   last_used_at?: string | null;

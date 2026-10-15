@@ -9,7 +9,12 @@ vi.mock("next/navigation", () => ({ useParams: () => ({ token: "ctok-test" }) })
 // 清单编号」「附图走别名 URL」这两条契约，把它们 mock 掉就只剩渲染壳子了。
 vi.mock("../../app/public-conversation.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../app/public-conversation.ts")>()),
-  fetchPublicConversation: mocks.fetchPublicConversation,
+  // 旧用例直接给会话对象/null；这里统一包成页面现在消费的结果形状。
+  fetchPublicConversation: async (...args: unknown[]) => {
+    const value = await (mocks.fetchPublicConversation as (...a: unknown[]) => Promise<unknown>)(...args);
+    if (value && typeof value === "object" && "kind" in value) return value;
+    return value ? { kind: "ready", conversation: value } : { kind: "missing" };
+  },
 }));
 // 行为不变的透传 spy：normalizeMathMarkdown 只在 markdown 解析真正重跑时被调用，
 // 调用次数就是「remark+KaTeX+rehype 管线跑了几次」的账本。
@@ -402,4 +407,32 @@ test("只认结构化布尔：位置标签恰好叫 Memory 的普通文档引用
   await screen.findByText("引用出处");
   expect(container.querySelector("#ref-t0-k1 .public-report-locus")!.textContent).toBe("Memory");
   expect(screen.queryByText("作者的个人记忆")).toBeNull();
+});
+
+test("限时回答链接过期（410）读作「链接已过期，请重新提问」", async () => {
+  mocks.fetchPublicConversation.mockResolvedValue({ kind: "expired" });
+  render(<PublicConversationPage />);
+
+  expect(await screen.findByText("链接已过期")).toBeInTheDocument();
+  expect(screen.getByText("链接已过期，请重新提问。")).toBeInTheDocument();
+});
+
+test("带 expires_at 的回答链接头部写明失效时间，会话分享页不写", async () => {
+  const expiresAt = "2030-01-02T03:04:05Z";
+  mocks.fetchPublicConversation.mockResolvedValue({ ...CONVERSATION, expires_at: expiresAt });
+  const { unmount } = render(<PublicConversationPage />);
+
+  await screen.findByText("LLM 有哪些架构？");
+  const d = new Date(expiresAt);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const local = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  expect(screen.getByText(/此链接将于/)).toHaveTextContent(`此链接将于 ${local} 失效`);
+  expect(screen.getByText("问答回答 · 只读分享")).toBeInTheDocument();
+  unmount();
+
+  mocks.fetchPublicConversation.mockResolvedValue(CONVERSATION);
+  render(<PublicConversationPage />);
+  await screen.findByText("LLM 有哪些架构？");
+  expect(screen.queryByText(/此链接将于/)).toBeNull();
+  expect(screen.getByText("问答会话 · 只读分享")).toBeInTheDocument();
 });

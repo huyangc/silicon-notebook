@@ -87,7 +87,14 @@ export type PublicConversationT = {
   shared_at: string;
   turns: PublicTurnT[];
   truncated_turns: boolean;
+  /** 仅限时回答链接带：链接失效时刻(ISO)。会话分享没有这一项。 */
+  expires_at?: string;
 };
+
+export type PublicConversationResult =
+  | { kind: "ready"; conversation: PublicConversationT }
+  | { kind: "missing" }
+  | { kind: "expired" };
 
 /** 分享链接。链接口令是全部授权，所以 URL 里不带 notebook/conversation id。 */
 export function buildPublicConversationLink(token: string, origin: string): string {
@@ -110,32 +117,38 @@ export function publicConversationImageUrl(token: string, alias: string): string
 }
 
 /**
- * 取一份公开会话；未知/已撤销链接口令与不存在无法区分，都返回 null。
+ * 取一份公开会话；未知/已撤销链接口令与不存在无法区分，都是 `missing`；
+ * 限时回答链接过期（410）是 `expired`，其余错误照常抛出。
  *
  * 走共享 transport 而不是裸 fetch，但用 `auth: "none"`：这是全站唯一不需要 session
  * 的读取，带上凭据反而会让未登录访客在 401 处理上走进已认证应用的分支。
  */
 export async function fetchPublicConversation(
   token: string,
-): Promise<PublicConversationT | null> {
+): Promise<PublicConversationResult> {
   const clean = String(token || "").trim();
-  if (!clean) return null;
+  if (!clean) return { kind: "missing" };
   try {
     const body = await requestJson<PublicConversationT>(
       `/public/conversations/${encodeURIComponent(clean)}`,
       { tag: "public-conversation", auth: "none", cache: "no-store" },
     );
     return {
-      ...body,
-      turns: (Array.isArray(body.turns) ? body.turns : []).map((turn) => ({
-        ...turn,
-        references: Array.isArray(turn.references) ? turn.references : [],
-        images: Array.isArray(turn.images) ? turn.images : [],
-        omitted_result_sets: Number(turn.omitted_result_sets) || 0,
-      })),
+      kind: "ready",
+      conversation: {
+        ...body,
+        turns: (Array.isArray(body.turns) ? body.turns : []).map((turn) => ({
+          ...turn,
+          references: Array.isArray(turn.references) ? turn.references : [],
+          images: Array.isArray(turn.images) ? turn.images : [],
+          omitted_result_sets: Number(turn.omitted_result_sets) || 0,
+        })),
+      },
     };
   } catch (error) {
-    if (httpErrorStatus(error) === 404) return null;
+    const status = httpErrorStatus(error);
+    if (status === 404) return { kind: "missing" };
+    if (status === 410) return { kind: "expired" };
     throw error;
   }
 }

@@ -57,6 +57,7 @@ import {
 type LoadState =
   | { kind: "loading" }
   | { kind: "missing" }
+  | { kind: "expired" }
   | { kind: "error" }
   | { kind: "ready"; conversation: PublicConversationT };
 
@@ -213,9 +214,9 @@ export default function PublicConversationPage() {
     let cancelled = false;
     setState({ kind: "loading" });
     fetchPublicConversation(token)
-      .then((conversation) => {
+      .then((result) => {
         if (cancelled) return;
-        setState(conversation ? { kind: "ready", conversation } : { kind: "missing" });
+        setState(result);
       })
       .catch(() => {
         if (!cancelled) setState({ kind: "error" });
@@ -238,6 +239,14 @@ export default function PublicConversationPage() {
       </main>
     );
   }
+  if (state.kind === "expired") {
+    return (
+      <main className="public-report">
+        <h1>链接已过期</h1>
+        <p className="public-report-note">链接已过期，请重新提问。</p>
+      </main>
+    );
+  }
   if (state.kind === "error") {
     return (
       <main className="public-report">
@@ -252,10 +261,17 @@ export default function PublicConversationPage() {
   return (
     <main className="public-report public-conversation">
       <header className="public-report-head">
-        <p className="public-report-eyebrow">问答会话 · 只读分享</p>
-        <h1>{conversation.title || "问答会话"}</h1>
+        <p className="public-report-eyebrow">
+          {conversation.expires_at ? "问答回答 · 只读分享" : "问答会话 · 只读分享"}
+        </p>
+        <h1>{conversation.title || (conversation.expires_at ? "问答" : "问答会话")}</h1>
         <p className="public-report-meta">
           <span>这是只读快照</span>
+          {conversation.expires_at && (
+            <span>
+              此链接将于 <PublicTime value={conversation.expires_at} minute /> 失效
+            </span>
+          )}
           {conversation.shared_at && (
             <span>
               内容截至 <PublicTime value={conversation.shared_at} />
@@ -577,11 +593,19 @@ function PublicTurnView({
 }
 
 /** 浏览器本地时区渲染；服务端渲染时先留空，避免 hydration 前后不一致。 */
-function PublicTime({ value }: { value: string }) {
+function PublicTime({ value, minute = false }: { value: string; minute?: boolean }) {
   const [text, setText] = useState("");
   useEffect(() => {
     const parsed = new Date(value);
-    setText(Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString());
-  }, [value]);
+    if (Number.isNaN(parsed.getTime())) {
+      setText(value);
+    } else if (minute) {
+      // 失效时刻按本地时间 YYYY-MM-DD HH:mm 显示，不带秒。
+      const pad = (n: number) => String(n).padStart(2, "0");
+      setText(`${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`);
+    } else {
+      setText(parsed.toLocaleString());
+    }
+  }, [value, minute]);
   return <>{text}</>;
 }

@@ -123,6 +123,7 @@ test("已签发 token 可以回来修改权限,保存后行内确认并按整体
   const body = JSON.parse(String(saves[0].body)) as Record<string, unknown>;
   expect(body).toEqual({
     scopes: ["read", "ask"],
+    allow_answer_links: false,
     default_notebook_id: "nb-1",
     notebook_ids: ["nb-1", "nb-2"],
     // 过期时间没动:原样回传存储值,而不是从只到分钟的本地时间重算。
@@ -130,6 +131,7 @@ test("已签发 token 可以回来修改权限,保存后行内确认并按整体
     // 编辑器打开时读到的配置,供服务端拒绝旧标签页的覆盖写。
     expected: {
       scopes: ["read"],
+      allow_answer_links: false,
       default_notebook_id: "nb-1",
       notebook_ids: ["nb-1"],
       expires_at: "2030-01-01T00:00:00Z",
@@ -1026,4 +1028,81 @@ test("启用确认与删除确认互斥,同一行一次只开一个", async () =
   await user.click(within(profileListRow("Claude Code")).getByRole("button", { name: "启用" }));
   expect(within(profileListRow("Claude Code")).getByRole("button", { name: "确认启用" })).toBeInTheDocument();
   expect(within(profileListRow("Claude Code")).queryByRole("button", { name: "确认删除" })).toBeNull();
+});
+
+test("回答链接开关依附「问答」：未勾选时禁用并提示，取消「问答」同步关掉，告知文案在开关旁", async () => {
+  routeRequests(baseRoutes({ "GET /agent-profiles": () => [profileOne] }));
+  const user = userEvent.setup();
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  const form = await waitFor(() => {
+    const node = issueForm();
+    expect(within(node).getByRole("combobox", { name: "Profile" })).toHaveValue("agent-1");
+    return node;
+  });
+  const toggle = within(form).getByRole("checkbox", { name: "允许签发限时回答链接" });
+  expect(toggle).toBeDisabled();
+  expect(toggle).toHaveAccessibleDescription(/需要先勾选问答/);
+
+  await user.click(within(form).getByRole("checkbox", { name: "问答" }));
+  expect(toggle).toBeEnabled();
+  await user.click(toggle);
+  expect(toggle).toBeChecked();
+  const notice = toggle.getAttribute("aria-describedby");
+  const text = document.getElementById(String(notice))?.textContent ?? "";
+  expect(text).toContain("无需登录");
+  expect(text).toContain("个人记忆摘录");
+  expect(text).toContain("默认 7 天");
+
+  await user.click(within(form).getByRole("checkbox", { name: "问答" }));
+  expect(toggle).toBeDisabled();
+  expect(toggle).not.toBeChecked();
+});
+
+test("签发表单勾选回答链接后 POST 体带 allow_answer_links: true，列表行标出可签发", async () => {
+  routeRequests(baseRoutes({
+    "GET /agent-profiles": () => [profileOne],
+    "POST /agent-profiles/agent-1/tokens": () => ({ ...activeToken, scopes: ["read", "ask"], allow_answer_links: true, token: "sk-new" }),
+  }));
+  const user = userEvent.setup();
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  const form = await waitFor(() => {
+    const node = issueForm();
+    expect(within(node).getByRole("combobox", { name: "Profile" })).toHaveValue("agent-1");
+    return node;
+  });
+  await user.click(within(form).getByRole("checkbox", { name: "问答" }));
+  await user.click(within(form).getByRole("checkbox", { name: "允许签发限时回答链接" }));
+  const issue = within(form).getByRole("button", { name: /签发 Token/ });
+  await waitFor(() => expect(issue).toBeEnabled());
+  await user.click(issue);
+  await screen.findByLabelText("新签发的明文 token");
+  const posts = requestsTo("POST /agent-profiles/agent-1/tokens");
+  expect(posts).toHaveLength(1);
+  const body = JSON.parse(String(posts[0].body)) as Record<string, unknown>;
+  expect(body.allow_answer_links).toBe(true);
+  expect(body.scopes).toEqual(["read", "ask"]);
+});
+
+test("编辑已签发 token 打开回答链接：PUT 体与 expected 都带该字段", async () => {
+  const askToken = { ...activeToken, scopes: ["read", "ask"], allow_answer_links: false };
+  routeRequests(baseRoutes({
+    "GET /agent-tokens": () => [askToken],
+    "PUT /agent-tokens/token-1/access": () => ({ ...askToken, allow_answer_links: true }),
+  }));
+  const user = userEvent.setup();
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+  await screen.findByText("Claude Code");
+  expect(tokenRow("Claude Code")).not.toHaveTextContent("可签发回答链接");
+  await user.click(within(tokenRow("Claude Code")).getByRole("button", { name: /修改权限/ }));
+  const editor = screen.getByRole("form", { name: "修改 Claude Code 的 token 权限" });
+  const save = within(editor).getByRole("button", { name: "保存" });
+  expect(save).toBeDisabled();
+  await user.click(within(editor).getByRole("checkbox", { name: "允许签发限时回答链接" }));
+  expect(save).toBeEnabled();
+  await user.click(save);
+  await waitFor(() => expect(requestsTo("PUT /agent-tokens/token-1/access")).toHaveLength(1));
+  const body = JSON.parse(String(requestsTo("PUT /agent-tokens/token-1/access")[0].body)) as Record<string, unknown>;
+  expect(body.allow_answer_links).toBe(true);
+  expect((body.expected as Record<string, unknown>).allow_answer_links).toBe(false);
+  await waitFor(() => expect(tokenRow("Claude Code")).toHaveTextContent("可签发回答链接"));
 });

@@ -36,6 +36,7 @@ import {
   setAllNotebooks,
   setAllScopes,
   whitelistHasOwnedNotebook,
+  withScopes,
   type AgentTokenDraft,
 } from "./agent-token-model";
 import { requestJson, requestVoid } from "./api-client.ts";
@@ -121,6 +122,7 @@ function AgentAccessFields({
   const [filter, setFilter] = useState("");
   // 签发表单与行内编辑器可能同时挂载,说明节点的 id 必须按实例区分。
   const idPrefix = useId();
+  const linkHintId = `${idPrefix}-answer-links-hint`;
   const known = new Set(notebooks.map((notebook) => notebook.id));
   const owned = useMemo(() => ownedNotebookIdSet(notebooks), [notebooks]);
   const options = [
@@ -143,6 +145,7 @@ function AgentAccessFields({
   const allNotebooksOn = visibleIds.length > 0 && visibleIds.every((id) => draft.notebook_ids.includes(id));
   const anyNotebookRemovable = visibleIds.some((id) => id !== draft.default_notebook_id && draft.notebook_ids.includes(id));
   const preset = matchedExpiryPreset(draft.expires_at);
+  const askOn = draft.scopes.includes("ask");
 
   function setDefaultNotebook(notebookId: string) {
     setDraft((current) => ({
@@ -177,15 +180,15 @@ function AgentAccessFields({
         <legend>权限</legend>
         <div className="agent-access-group-head">
           <span className="agent-access-count" aria-live="polite">已选 {draft.scopes.filter((scope) => AGENT_SCOPE_LABELS[scope]).length} / {AGENT_SCOPE_OPTIONS.length}</span>
-          <button type="button" disabled={disabled || allScopesOn} onClick={() => setDraft((current) => ({ ...current, scopes: setAllScopes(current.scopes, selectableScopes, true) }))}>全选</button>
-          <button type="button" disabled={disabled || !anyScopeOn} onClick={() => setDraft((current) => ({ ...current, scopes: setAllScopes(current.scopes, selectableScopes, false) }))}>取消全选</button>
+          <button type="button" disabled={disabled || allScopesOn} onClick={() => setDraft((current) => withScopes(current, setAllScopes(current.scopes, selectableScopes, true)))}>全选</button>
+          <button type="button" disabled={disabled || !anyScopeOn} onClick={() => setDraft((current) => withScopes(current, setAllScopes(current.scopes, selectableScopes, false)))}>取消全选</button>
         </div>
         {AGENT_SCOPE_OPTIONS.map((scope) => {
           const hintId = `${idPrefix}-scope-hint-${scope.value}`;
           const blocked = scope.ownerOnly && ownerBlocked;
           return (
             <div className="agent-scope-row" key={scope.value}>
-              <label className="agent-access-check"><input type="checkbox" aria-describedby={hintId} checked={draft.scopes.includes(scope.value)} disabled={scopeLocked(scope)} onChange={(event) => setDraft((current) => ({ ...current, scopes: event.target.checked ? [...current.scopes, scope.value] : current.scopes.filter((item) => item !== scope.value) }))} />{scope.label}</label>
+              <label className="agent-access-check"><input type="checkbox" aria-describedby={hintId} checked={draft.scopes.includes(scope.value)} disabled={scopeLocked(scope)} onChange={(event) => setDraft((current) => withScopes(current, event.target.checked ? [...current.scopes, scope.value] : current.scopes.filter((item) => item !== scope.value)))} />{scope.label}</label>
               <small id={hintId} className="agent-access-hint">
                 {scope.description}
                 {scope.ownerOnly && "；仅对你拥有的笔记本生效"}
@@ -195,6 +198,15 @@ function AgentAccessFields({
           );
         })}
       </fieldset>
+      <div className="agent-scope-row">
+        <label className="agent-access-check"><input type="checkbox" aria-describedby={linkHintId} checked={draft.allow_answer_links} disabled={disabled || !askOn} onChange={(event) => setDraft((current) => ({ ...current, allow_answer_links: event.target.checked }))} />允许签发限时回答链接</label>
+        <small id={linkHintId} className="agent-access-hint">
+          {!askOn && <strong className="agent-access-warn">需要先勾选问答。{" "}</strong>}
+          {draft.allow_answer_links && askOn
+            ? "开启后，此 Agent 可以为它的回答生成限时公开链接：任何拿到链接的人无需登录即可查看完整回答，可能包含引用到的个人记忆摘录。链接按部署设置的有效期自动失效（默认 7 天）。"
+            : "开启后，此 Agent 可以为回答生成限时公开链接，任何拿到链接的人无需登录即可查看。"}
+        </small>
+      </div>
       <label>过期时间<input type="datetime-local" value={draft.expires_at} disabled={disabled} onChange={(event) => setDraft((current) => ({ ...current, expires_at: event.target.value }))} /></label>
       <div className="agent-expiry-presets" role="group" aria-label="过期时间快捷选择">
         {AGENT_EXPIRY_PRESET_DAYS.map((days) => (
@@ -949,6 +961,7 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
                     <strong>{token.profile_name} <span className={`agent-token-status ${status}`}>{AGENT_TOKEN_STATUS_LABELS[status]}</span></strong>
                     <small>
                       {token.scopes.length ? token.scopes.map((scope) => label(AGENT_SCOPE_LABELS, scope, "已下线的权限")).join(" · ") : "未授予任何权限"}
+                      {token.allow_answer_links && token.scopes.includes("ask") && " · 可签发回答链接"}
                       <br />
                       默认：{notebookNames.get(token.default_notebook_id) || "无法访问的笔记本"} · 允许 {token.notebook_ids.length} 个笔记本
                       {names.length > 0 && (

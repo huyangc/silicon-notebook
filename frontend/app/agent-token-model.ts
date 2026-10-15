@@ -43,6 +43,7 @@ export type AgentTokenDraft = {
   default_notebook_id: string;
   notebook_ids: string[];
   scopes: string[];
+  allow_answer_links: boolean;
   expires_at: string;
 };
 
@@ -51,6 +52,7 @@ export function agentTokenDraft(defaultNotebookId = ""): AgentTokenDraft {
     default_notebook_id: defaultNotebookId,
     notebook_ids: defaultNotebookId ? [defaultNotebookId] : [],
     scopes: ["read"],
+    allow_answer_links: false,
     expires_at: "",
   };
 }
@@ -81,6 +83,15 @@ export function localDateTimeToUtcIso(
   return new Date(utcMillis).toISOString();
 }
 
+/** 「允许签发回答链接」依附于「问答」权限：改权限集合一律走这里，去掉 ask 时同步关掉该项。 */
+export function withScopes(draft: AgentTokenDraft, scopes: string[]): AgentTokenDraft {
+  return {
+    ...draft,
+    scopes,
+    allow_answer_links: scopes.includes("ask") ? draft.allow_answer_links : false,
+  };
+}
+
 function agentTokenAccessFields(draft: AgentTokenDraft) {
   const notebookIds = Array.from(new Set([
     draft.default_notebook_id,
@@ -88,6 +99,7 @@ function agentTokenAccessFields(draft: AgentTokenDraft) {
   ].filter(Boolean)));
   return {
     scopes: Array.from(new Set(draft.scopes)),
+    allow_answer_links: draft.allow_answer_links,
     default_notebook_id: draft.default_notebook_id,
     notebook_ids: notebookIds,
     expires_at: draft.expires_at ? localDateTimeToUtcIso(draft.expires_at) : null,
@@ -114,6 +126,7 @@ function isCompleteAgentTokenDraft(
     draft.default_notebook_id
     && draft.notebook_ids.includes(draft.default_notebook_id)
     && draft.scopes.length
+    && !(draft.allow_answer_links && !draft.scopes.includes("ask"))
     && draft.expires_at
     && !(ownedNotebookIds && ownerTiersUnusable(draft, ownedNotebookIds)),
   );
@@ -227,6 +240,7 @@ export type AgentTokenAccess = {
   default_notebook_id: string;
   notebook_ids: readonly string[];
   scopes: readonly string[];
+  allow_answer_links?: boolean;
   expires_at?: string | null;
 };
 
@@ -247,6 +261,7 @@ export function agentTokenEditDraft(token: AgentTokenAccess): AgentTokenDraft {
     default_notebook_id: token.default_notebook_id,
     notebook_ids: Array.from(new Set([token.default_notebook_id, ...token.notebook_ids].filter(Boolean))),
     scopes: token.scopes.filter((scope) => Object.hasOwn(AGENT_SCOPE_LABELS, scope)),
+    allow_answer_links: Boolean(token.allow_answer_links),
     expires_at: utcIsoToLocalDateTime(token.expires_at),
   };
 }
@@ -259,6 +274,7 @@ export function agentTokenAccessPath(tokenId: string): string {
 export function agentTokenAccessSnapshot(token: AgentTokenAccess) {
   return {
     scopes: [...token.scopes],
+    allow_answer_links: Boolean(token.allow_answer_links),
     default_notebook_id: token.default_notebook_id,
     notebook_ids: [...token.notebook_ids],
     expires_at: token.expires_at ?? null,
@@ -298,6 +314,7 @@ export function agentTokenAccessChanged(token: AgentTokenAccess, draft: AgentTok
   return draft.default_notebook_id !== original.default_notebook_id
     || !sameMembers(draft.notebook_ids, original.notebook_ids)
     || !sameMembers(draft.scopes, token.scopes)
+    || draft.allow_answer_links !== original.allow_answer_links
     || draft.expires_at !== original.expires_at;
 }
 

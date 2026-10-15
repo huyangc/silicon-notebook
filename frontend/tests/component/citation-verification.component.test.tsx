@@ -16,7 +16,12 @@ const mocks = vi.hoisted(() => ({ fetchPublicConversation: vi.fn(), assetBlob: v
 vi.mock("next/navigation", () => ({ useParams: () => ({ token: "ctok-test" }) }));
 vi.mock("../../app/public-conversation.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../app/public-conversation.ts")>()),
-  fetchPublicConversation: mocks.fetchPublicConversation,
+  // 旧用例直接给会话对象/null；这里统一包成页面现在消费的结果形状。
+  fetchPublicConversation: async (...args: unknown[]) => {
+    const value = await (mocks.fetchPublicConversation as (...a: unknown[]) => Promise<unknown>)(...args);
+    if (value && typeof value === "object" && "kind" in value) return value;
+    return value ? { kind: "ready", conversation: value } : { kind: "missing" };
+  },
 }));
 vi.mock("../../app/source-api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../app/source-api")>()),
