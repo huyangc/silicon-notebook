@@ -607,6 +607,10 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
 
         def invoke() -> str:
             nonlocal raw_response, rejection_reason
+            if forward_stats and stats_sink is not None:
+                # A caller may reuse its sink; only this call's exit may say
+                # the reply was schema-enforced.
+                stats_sink.pop("schema_enforced", None)
             content = raw_chat_json(
                 messages,
                 response_schema_hint,
@@ -645,7 +649,11 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                     allow_repair=repair_mode in {"shadow", "on"},
                 )
                 shape = validate_model_json_shape(
-                    parsed.content, response_schema_hint
+                    parsed.content, response_schema_hint,
+                    # Set by the physical client only after it validated
+                    # this reply against the hint's strict schema.
+                    schema_enforced=forward_stats and bool(
+                        (stats_sink or {}).get("schema_enforced")),
                 )
             except ModelJsonRepairError as exc:
                 rejection_reason = exc.reason

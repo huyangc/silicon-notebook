@@ -385,6 +385,23 @@ def test_strict_validation_does_not_extract_an_object_from_invalid_raw_reply(tmp
     assert cache.writes == []
 
 
+def test_call_stats_say_whether_the_reply_was_schema_enforced(tmp_path):
+    sdk, cache = SDK(), Cache()
+    strict_stats, cached_stats, legacy_stats, fallback_stats = {}, {}, {}, {}
+    strict = client(tmp_path, sdk, cache=cache)
+    call(strict, response_validator=lambda _: True, call_stats=strict_stats)
+    assert strict_stats["status"] == "ok" and strict_stats["schema_enforced"] is True
+    call(strict, response_validator=lambda _: True, call_stats=cached_stats)
+    assert cached_stats["status"] == "cache_hit"
+    assert cached_stats["schema_enforced"] is True
+    call(client(tmp_path, sdk, enabled=False), call_stats=legacy_stats, bypass_cache=True)
+    assert legacy_stats["status"] == "ok" and "schema_enforced" not in legacy_stats
+    # A rejected schema falls back to JSON mode: that reply was never enforced.
+    sdk.reject_answer_schema = True
+    call(client(tmp_path, sdk), call_stats=fallback_stats, bypass_cache=True)
+    assert fallback_stats["status"] == "ok" and "schema_enforced" not in fallback_stats
+
+
 @pytest.mark.parametrize("timeout", [0, 301, "bad"])
 def test_probe_timeout_has_validated_deployment_rails(timeout):
     from pydantic import ValidationError

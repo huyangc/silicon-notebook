@@ -1335,3 +1335,58 @@ def test_single_quoted_escapes_keep_a_faithful_repair(raw, answer):
     repaired = parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=True)
 
     assert json.loads(repaired.content) == {"answer": answer, "grounded": True}
+
+
+def _conforming_reflect_reply() -> tuple[str, str]:
+    """A reply the strict reflect schema accepts: every unused branch null."""
+    from app.core.model_schema import (
+        response_format_for_hint, validate_structured_response,
+    )
+    from app.services import prompts
+
+    hint = prompts.reflect_schema_hint(
+        ("text",), ("Concept",), True, True, True, True,
+    )
+    response_format = response_format_for_hint(hint)
+    assert response_format is not None
+    schema = response_format["json_schema"]["schema"]
+    payload = dict.fromkeys(schema["properties"])
+    payload.update(sufficient=True, next_action="answer", reason="证据充分")
+    raw = json.dumps(payload, ensure_ascii=False)
+    assert validate_structured_response(raw, response_format)
+    return raw, hint
+
+
+def test_schema_enforced_nulls_are_removed_without_being_reported():
+    raw, hint = _conforming_reflect_reply()
+
+    shape = validate_model_json_shape(raw, hint, schema_enforced=True)
+
+    assert shape.deviations == ()
+    assert json.loads(shape.content) == {
+        "sufficient": True, "next_action": "answer", "reason": "证据充分",
+    }
+
+
+def test_json_mode_still_reports_nulls_where_the_hint_advertised_values():
+    raw, hint = _conforming_reflect_reply()
+
+    shape = validate_model_json_shape(raw, hint)
+
+    assert shape.deviations
+    assert {item.fix for item in shape.deviations} == {"dropped"}
+    assert json.loads(shape.content) == {
+        "sufficient": True, "next_action": "answer", "reason": "证据充分",
+    }
+
+
+def test_schema_enforced_replies_still_report_drift_from_the_first_list_item():
+    # The strict schema admits every advertised item kind; the shape walk
+    # judges items by the first example only, and that mismatch still counts.
+    shape = validate_model_json_shape(
+        '{"values":[2]}', '{"values":["example",1]}', schema_enforced=True,
+    )
+
+    assert [(item.path, item.reason) for item in shape.deviations] == [
+        ("values[0]", "invalid_type"),
+    ]

@@ -26,6 +26,7 @@ class FakeSDK:
     def __init__(self, behavior="supported"):
         self.behavior = behavior
         self.calls = []
+        self.business_data = None
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
 
     def create(self, **kwargs):
@@ -44,6 +45,8 @@ class FakeSDK:
                 data = {"ignored": True}
             else:
                 data = {"proof": properties["proof"]["enum"][0], "count": 7}
+        elif self.business_data is not None:
+            data = self.business_data
         elif "query" in properties:
             data = {"query": "valid query"}
         elif "ok" in properties or kwargs["messages"][-1]["content"] == "health check":
@@ -274,5 +277,44 @@ def test_manual_health_check_schema_failure_is_malformed_without_breaker_failure
         assert observation.status == "error"
         assert observation.code == "malformed_response"
         assert provider.scheduler_snapshot("shared").breaker_state == "closed"
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize(("behavior", "drift_reported"), [
+    ("supported", False), ("ignored", True),
+])
+def test_conforming_strict_nulls_are_not_reported_as_shape_drift(
+    tmp_path, monkeypatch, behavior, drift_reported,
+):
+    from app.core.model_schema import response_format_for_hint
+    from app.services import prompts
+
+    hint = prompts.reflect_schema_hint(
+        ("text",), ("Concept",), True, True, True, True,
+    )
+    schema = response_format_for_hint(hint)["json_schema"]["schema"]
+    sdk = FakeSDK(behavior)
+    sdk.business_data = dict.fromkeys(schema["properties"])
+    sdk.business_data.update(sufficient=True, next_action="answer", reason="ok")
+    provider, log = make_provider(tmp_path, monkeypatch, sdk)
+    try:
+        # A reused sink's stale marker must not vouch for this call.
+        stats = {"schema_enforced": True}
+        reply = provider.chat("ask_answer").chat_json(
+            [{"role": "user", "content": "question"}], hint, bypass_cache=True,
+            call_stats=stats,
+        )
+        assert stats.get("schema_enforced", False) is not drift_reported
+        # Either way the consumer sees the unused branches as absent.
+        assert json.loads(reply) == {
+            "sufficient": True, "next_action": "answer", "reason": "ok",
+        }
+        business = [call for call in sdk.calls if not is_probe(call)]
+        assert ("response_format" in business[-1] and business[-1][
+            "response_format"]["type"] == "json_schema") is not drift_reported
+        shape_events = [event for event in log.events
+                        if event.get("kind") == "model_json_shape"]
+        assert bool(shape_events) is drift_reported
     finally:
         provider.close()

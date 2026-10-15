@@ -329,6 +329,7 @@ def _record_call_stats(
     usage: Optional[Dict[str, int]] = None,
     finish_reason: Optional[str] = None,
     response_chars: Optional[int] = None,
+    schema_enforced: bool = False,
 ) -> None:
     """Fill a caller's ``call_stats`` out-parameter (see ``CALL_STATS_KWARG``).
 
@@ -354,6 +355,12 @@ def _record_call_stats(
     and empty therefore differ for that one key: absent means the call never
     produced a completion at all (it was cancelled or it failed).
 
+    ``schema_enforced`` is written (always True) only on an ok or cache-hit
+    exit whose reply was requested under, and validated against, the strict
+    JSON Schema projected from the hint; absent means JSON mode or unknown.
+    The scheduler uses it to stop counting that schema's mandatory nulls as
+    shape drift.
+
     ``attempts_observed`` is True because this client counts requests at the
     transport itself. It is not decoration: a duck-typed client that does not
     declare ``supports_call_stats`` leaves the sink empty, and a consumer must
@@ -372,6 +379,8 @@ def _record_call_stats(
         sink["response_chars"] = response_chars
     if usage:
         sink["usage"] = usage
+    if schema_enforced:
+        sink["schema_enforced"] = True
 
 
 class OpenAICompatibleClient:
@@ -933,6 +942,7 @@ class OpenAICompatibleClient:
                             status="cache_hit",
                             wall_ms=round((time.perf_counter() - start) * 1000),
                             attempts=requests.value,
+                            schema_enforced=response_format is not None,
                         )
                         return cached
             except Exception:
@@ -1154,6 +1164,7 @@ class OpenAICompatibleClient:
                 usage=usage,
                 finish_reason=finish_reason or "",
                 response_chars=len(content),
+                schema_enforced=response_format is not None,
             )
             logger.log(record)
             return content
