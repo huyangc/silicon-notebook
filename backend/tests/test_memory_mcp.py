@@ -848,7 +848,7 @@ async def test_whitespace_spellings_of_one_key_share_the_waiter_cap(
     keys: list = []
 
     def holding(repo, principal, notebook_id, question, mode, conversation,
-                reply, client_request_id, stop, *rest):
+                reply, client_request_id, stop, *rest, **_named):
         keys.append(client_request_id)
         entered.release()
         assert release.wait(10)
