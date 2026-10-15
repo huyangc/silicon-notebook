@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 from app.migration.sync.capture import expected_sqlite_trigger_names
-from tests.sqlite_migration_testkit import rollback_v92
+from tests.sqlite_migration_testkit import rollback_v92, rollback_v94
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -85,7 +85,7 @@ def test_v92_drop_outside_the_allowlist_still_fails(tmp_path, _upgraded_v9):
     with sqlite3.connect(database) as rollback:
         rollback_v92(rollback)
         rollback.execute("PRAGMA user_version = 91")
-    manifest = module.MIGRATION_MANIFEST[(91, 93)]
+    manifest = module.MIGRATION_MANIFEST[(91, 94)]
     assert manifest["dropped_tables"] == frozenset(
         {"auth_policy", "auth_policy_audit", "external_identities"}
     )
@@ -95,12 +95,12 @@ def test_v92_drop_outside_the_allowlist_still_fails(tmp_path, _upgraded_v9):
     }
     original = dict(manifest)
     try:
-        module.MIGRATION_MANIFEST[(91, 93)] = {
+        module.MIGRATION_MANIFEST[(91, 94)] = {
             **manifest, "dropped_tables": frozenset({"auth_policy"}),
         }
         result = module.verify_snapshot(database, storage)
     finally:
-        module.MIGRATION_MANIFEST[(91, 93)] = original
+        module.MIGRATION_MANIFEST[(91, 94)] = original
     assert not result.ok
     assert "external_identities" in result.changed_tables
 
@@ -232,6 +232,27 @@ def test_v92_changed_surviving_column_of_a_trimmed_table_fails(
     assert not result.ok
     assert result.changed_tables == ["auth_identity_audit"]
     assert any("row-digest-changed" in item for item in result.discrepancies)
+
+
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
+def test_deployed_v93_database_verifies_answer_links(tmp_path, _upgraded_v9):
+    """A deployed v93 database is missing exactly _migration_94's schema:
+    the ``answer_links`` table with its two indexes and
+    ``agent_access_tokens.allow_answer_links`` (DEFAULT 0 is the whole
+    backfill). The fixture holds no link and no token."""
+    module = _load_verifier()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
+    with sqlite3.connect(database) as rollback:
+        rollback_v94(rollback)
+        rollback.execute("PRAGMA user_version = 93")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 93
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
 
 
 def _rollback_v91(db: sqlite3.Connection) -> None:

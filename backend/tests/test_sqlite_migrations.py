@@ -266,7 +266,7 @@ def test_v92_drops_the_staged_auth_schema_and_keeps_credentials(tmp_path):
         )
         db.execute("PRAGMA user_version = 91")
 
-    assert SqliteMigrator(database, settings).migrate() == [92, 93]
+    assert SqliteMigrator(database, settings).migrate() == [92, 93, 94]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -341,11 +341,53 @@ def test_v93_adds_the_nullable_profile_deleted_at_without_touching_rows(tmp_path
         rollback_v93(db)
         db.execute("PRAGMA user_version = 92")
 
-    assert SqliteMigrator(database, settings).migrate() == [93]
+    assert SqliteMigrator(database, settings).migrate() == [93, 94]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         columns = {row[1]: row for row in db.execute("PRAGMA table_info(agent_profiles)")}
         row = db.execute("SELECT name,status,deleted_at FROM agent_profiles").fetchone()
     assert columns["deleted_at"][2] == "TEXT" and columns["deleted_at"][3] == 0
     assert (row["name"], row["status"], row["deleted_at"]) == ("Kept", "active", None)
+    database.close_local()
+
+
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
+def test_v94_adds_answer_links_and_the_token_flag(tmp_path):
+    """MCP answer links: a new table with its unique per-(job, issuing token)
+    index and expiry index, and agent_access_tokens.allow_answer_links
+    defaulting to 0 so an existing token reads as unable to issue links. A
+    fresh database and a v93 upgrade end up the same; a second run is a no-op."""
+    from tests.sqlite_migration_testkit import rollback_v94
+
+    database, settings = _fresh_migrated_database(tmp_path)
+
+    def shape(db):
+        columns = {row[1]: row for row in db.execute("PRAGMA table_info(answer_links)")}
+        indexes = {
+            row[1]: row[2]
+            for row in db.execute("PRAGMA index_list(answer_links)")
+            if not row[1].startswith("sqlite_autoindex")
+        }
+        flag = {row[1]: row for row in db.execute("PRAGMA table_info(agent_access_tokens)")}
+        return columns, indexes, flag["allow_answer_links"]
+
+    with database.connect() as db:
+        fresh = shape(db)
+    columns, indexes, flag = fresh
+    assert set(columns) == {
+        "token", "job_kind", "job_id", "owner_id", "agent_token_id", "created_at", "expires_at",
+    }
+    assert indexes == {"uq_answer_links_job_token": 1, "idx_answer_links_expires": 0}
+    assert (flag[2], flag[3], flag[4]) == ("INTEGER", 1, "0")
+
+    with database.write() as db:
+        rollback_v94(db)
+        db.execute("PRAGMA user_version = 93")
+
+    assert SqliteMigrator(database, settings).migrate() == [94]
+    assert SqliteMigrator(database, settings).migrate() == []
+    with database.connect() as db:
+        assert shape(db)[1:] == fresh[1:]
+        assert set(shape(db)[0]) == set(columns)
     database.close_local()

@@ -265,6 +265,9 @@ SKIP_SECONDARY_TABLES = [
     # v90 MCP ask 澄清句柄:一小时有效、是副库自己发给 Agent 的一次暂停,合进
     # primary 毫无意义(原句柄指向的是副库那边理解出的合同)。只保 primary。
     "ask_intent_handles",
+    # v94 MCP 限时回答链接:绑定副库自己的 Agent token(agent_access_tokens 只保
+    # primary),合进 primary 只会留下指向不存在 token 的死链。只保 primary。
+    "answer_links",
 ]
 
 # 导入后清空(引用可再生的 kg_index 产物, 逼部署侧干净重建)
