@@ -60,11 +60,14 @@ def test_document_guide_hint_has_empty_slots_and_the_instruction_embeds_it():
     assert "never null, never" in source and "a placeholder sentence" in source
 
 
-def test_paper_meta_prompt_says_omit_and_integer_year():
+def test_paper_meta_prompt_says_null_and_integer_year():
+    # The strict projection requires every root key and lets all but
+    # is_paper be null, so "absent" is spelled null, never "omit the key".
     prompt = paper_meta.paper_meta_prompt("head text")
-    assert 'return exactly {"is_paper": false} and OMIT every other key' in prompt
+    assert '"is_paper": false and write null for EVERY other field' in prompt
     assert "year: the publication year as a bare integer" in prompt
-    assert "omit the key otherwise" in prompt
+    assert "write null if there is none" in prompt
+    assert "omit" not in prompt.lower()
     assert "Every string field is a plain string, never a list or object" in prompt
 
 

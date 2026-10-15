@@ -95,6 +95,34 @@ def test_not_paper_blanks_everything():
     assert meta["keywords"] == [] and meta["doi"] is None
 
 
+def test_strict_non_paper_reply_with_every_other_field_null_reads_as_non_paper():
+    """The prompt tells a non-paper to write null for every other field. That
+    exact reply must pass the strict projection of the hint and be read as a
+    non-paper with nothing to drop, the same as the old omitted-key reply."""
+    from app.core.model_schema import response_format_for_hint, validate_structured_response
+    from app.services.paper_meta import PAPER_META_SCHEMA_HINT
+
+    response_format = response_format_for_hint(PAPER_META_SCHEMA_HINT)
+    assert response_format is not None
+    reply = {
+        "is_paper": False, "title": None, "authors": None, "venue": None,
+        "year": None, "doi": None, "keywords": None,
+    }
+    assert set(reply) == set(json.loads(PAPER_META_SCHEMA_HINT))
+    content = json.dumps(reply)
+    assert validate_structured_response(content, response_format)
+    meta = verify_paper_meta(json.loads(content), HEAD, model="m")
+    assert meta["is_paper"] is False
+    assert meta["paper_title"] is None and meta["venue"] is None
+    assert meta["pub_year"] is None and meta["doi"] is None
+    assert meta["authors"] == [] and meta["keywords"] == []
+    assert meta["dropped"] == {}
+    # The same nulls on a paper are "not shown in the text", not drops.
+    meta = verify_paper_meta({**reply, "is_paper": True}, HEAD, model="m")
+    assert meta["is_paper"] is True and meta["dropped"] == {}
+    assert meta["pub_year"] is None and meta["authors"] == []
+
+
 def test_prompt_forbids_memory_fill():
     p = paper_meta_prompt("some text")
     assert "do NOT" in p and "memory" in p and "some text" in p
