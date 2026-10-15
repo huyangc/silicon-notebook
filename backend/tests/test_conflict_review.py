@@ -75,7 +75,7 @@ def _verdict(
     conflict_type: str = "mutual",
     resolution: str = "discard",
     winner_ref: str | None = "r1",
-    resolved_payload: dict | None = None,
+    resolved_name: str = "",
     confidence: float = 0.88,
     rationale: str = "Left is better supported.",
 ) -> str:
@@ -83,7 +83,7 @@ def _verdict(
         "conflict_type": conflict_type,
         "resolution": resolution,
         "winner_ref": winner_ref,
-        "resolved_payload": resolved_payload,
+        "resolved_name": resolved_name,
         "confidence": confidence,
         "rationale": rationale,
     })
@@ -148,7 +148,7 @@ class TestPromptContents:
 # ---------------------------------------------------------------------------
 
 class TestMutualConflict:
-    """mutual → discard, winner_ref set, resolved_payload None."""
+    """mutual → discard, winner_ref set, resolved_name None."""
 
     def test_mutual_parsed(self):
         response = _verdict(conflict_type="mutual", resolution="discard", winner_ref="r1")
@@ -158,60 +158,72 @@ class TestMutualConflict:
         assert v["conflict_type"] == "mutual"
         assert v["resolution"] == "discard"
         assert v["winner_ref"] == "r1"
-        assert v["resolved_payload"] is None
+        assert v["resolved_name"] is None
         assert v["confidence"] == pytest.approx(0.88)
         assert isinstance(v["rationale"], str) and v["rationale"]
 
 
 class TestTemporalConflict:
-    """temporal → modify, resolved_payload carries scoped statement."""
+    """temporal → modify one side: winner_ref names it, resolved_name is its
+    statement with the time range appended."""
 
     def test_temporal_parsed(self):
-        payload = {"name": "A —supports→ B [2000–2005]"}
         response = _verdict(
             conflict_type="temporal",
             resolution="modify",
-            winner_ref=None,
-            resolved_payload=payload,
+            winner_ref="r2",
+            resolved_name="  A —supports→ B [2000–2005] ",
             confidence=0.75,
         )
-        verdicts = review_conflict_candidates(_FakeLLM(response), [_item()])
+        verdicts = review_conflict_candidates(_FakeLLM(response), [_item(kind="node")])
         v = verdicts[0]
         assert v["conflict_type"] == "temporal"
         assert v["resolution"] == "modify"
-        assert v["winner_ref"] is None
-        assert v["resolved_payload"] == payload
+        assert v["winner_ref"] == "r2"
+        assert v["resolved_name"] == "A —supports→ B [2000–2005]"
         assert v["confidence"] == pytest.approx(0.75)
+
+    def test_empty_strings_mean_no_winner_and_no_rewrite(self):
+        response = _verdict(
+            conflict_type="temporal", resolution="modify",
+            winner_ref="", resolved_name="",
+        )
+        [v] = review_conflict_candidates(_FakeLLM(response), [_item(kind="node")])
+        assert v["winner_ref"] is None
+        assert v["resolved_name"] is None
+
+    def test_name_outside_modify_is_ignored(self):
+        response = _verdict(resolution="discard", resolved_name="stray text")
+        [v] = review_conflict_candidates(_FakeLLM(response), [_item()])
+        assert v["resolved_name"] is None
 
 
 class TestGranularityConflict:
-    """granularity → modify, resolved_payload annotates both."""
+    """granularity → keep: both entries coexist unchanged."""
 
     def test_granularity_parsed(self):
-        payload = {"annotation": "granularity: Shanghai ⊂ China"}
         response = _verdict(
             conflict_type="granularity",
-            resolution="modify",
-            winner_ref=None,
-            resolved_payload=payload,
+            resolution="keep",
+            winner_ref="",
             confidence=0.82,
         )
         verdicts = review_conflict_candidates(_FakeLLM(response), [_item()])
         v = verdicts[0]
         assert v["conflict_type"] == "granularity"
-        assert v["resolution"] == "modify"
-        assert v["resolved_payload"] == payload
+        assert v["resolution"] == "keep"
+        assert v["winner_ref"] is None
+        assert v["resolved_name"] is None
 
 
 class TestNoneConflict:
-    """none → keep, winner_ref None, resolved_payload None."""
+    """none → keep, winner_ref None, resolved_name None."""
 
     def test_none_parsed(self):
         response = _verdict(
             conflict_type="none",
             resolution="keep",
-            winner_ref=None,
-            resolved_payload=None,
+            winner_ref="",
             confidence=0.95,
         )
         verdicts = review_conflict_candidates(_FakeLLM(response), [_item()])
@@ -219,7 +231,7 @@ class TestNoneConflict:
         assert v["conflict_type"] == "none"
         assert v["resolution"] == "keep"
         assert v["winner_ref"] is None
-        assert v["resolved_payload"] is None
+        assert v["resolved_name"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +336,7 @@ def test_transient_llm_error_does_not_abort_batch():
         "conflict_type": "mutual",
         "resolution": "discard",
         "winner_ref": "r3",     # item 1 has refs r3/r4
-        "resolved_payload": None,
+        "resolved_name": "",
         "confidence": 0.9,
         "rationale": "ok",
     })
@@ -374,7 +386,7 @@ class TestEdgeCases:
         verdicts = review_conflict_candidates(_FakeLLM(_verdict()), [_item()])
         required = {
             "conflict_type", "resolution", "winner_ref",
-            "resolved_payload", "confidence", "rationale",
+            "resolved_name", "confidence", "rationale",
             "left_ref", "right_ref",
         }
         assert set(verdicts[0].keys()) == required
@@ -406,7 +418,7 @@ def test_container_valued_rationale_is_never_persisted_as_text():
         def chat_json(self, messages, schema_hint, **kwargs):
             return json.dumps({
                 "conflict_type": "temporal", "resolution": "keep",
-                "winner_ref": None, "resolved_payload": None,
+                "winner_ref": None, "resolved_name": "",
                 "confidence": 0.5, "rationale": ["新旧版本"],
             })
 
@@ -415,13 +427,43 @@ def test_container_valued_rationale_is_never_persisted_as_text():
     assert decision["conflict_type"] == "temporal"
 
 
-def test_prompt_states_that_resolved_payload_is_an_object():
-    """Prompt/parser alignment (audit B4): the parser only applies a dict
-    payload, so the prompt must not invite a bare string ("append …")."""
+def test_prompt_matches_what_the_executor_applies():
+    """Prompt/executor alignment: a modify rewrites only the winner side's
+    name; granularity keeps both; an edge cannot be modified; "none" is
+    spelled "" because the strict schema keeps root fields non-null."""
+    from app.services.kg.conflict_review import _SCHEMA
+
     llm = _FakeLLM(_verdict())
-    review_conflict_candidates(llm, [_item()])
+    review_conflict_candidates(llm, [_item(kind="edge")])
     prompt = llm.last_messages[0]["content"]
-    assert "resolved_payload is a JSON OBJECT" in prompt
-    assert 'e.g. {"name":' in prompt
-    assert "never a bare string" in prompt
+    assert "resolved_payload" not in prompt and "null" not in prompt
+    assert "set winner_ref to the ref of the side you rewrite" in prompt
+    assert "Only that side changes" in prompt
+    assert "Resolution: keep — both entries stay as they are." in prompt
+    assert "annotate granularity" not in prompt
+    assert "Kind edge: modify is not supported" in prompt
+    assert "Kind: edge" in prompt
+    assert 'or "" when the resolution is keep' in prompt
+    assert 'write "" for every other resolution' in prompt
     assert "rationale: one short sentence, as a string" in prompt
+    hint = json.loads(_SCHEMA)
+    assert hint["winner_ref"] == "" and hint["resolved_name"] == ""
+    assert "resolved_payload" not in hint
+
+
+def test_conflict_hint_projects_to_a_strict_schema():
+    from app.core.model_schema import response_format_for_hint, validate_structured_response
+    from app.services.kg.conflict_review import _SCHEMA
+
+    response_format = response_format_for_hint(_SCHEMA)
+    assert response_format is not None
+    reply = {
+        "conflict_type": "temporal", "resolution": "modify", "winner_ref": "r2",
+        "resolved_name": "A [2000–2005]", "confidence": 0.9, "rationale": "x",
+    }
+    assert validate_structured_response(json.dumps(reply), response_format)
+    keep = {**reply, "resolution": "keep", "winner_ref": "", "resolved_name": ""}
+    assert validate_structured_response(json.dumps(keep), response_format)
+    assert not validate_structured_response(
+        json.dumps({**keep, "winner_ref": None}), response_format
+    )

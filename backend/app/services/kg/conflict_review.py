@@ -21,11 +21,15 @@ from app.core.model_values import as_text
 # ---------------------------------------------------------------------------
 # Schema hint shown to the LLM (mirrors concept_merge_review's _SCHEMA)
 # ---------------------------------------------------------------------------
+# ``winner_ref`` and ``resolved_name`` use "" for "none": a strict schema keeps
+# root fields non-null, and the refs vary per candidate so they cannot be an
+# enum. The parser reads "" (and anything that is not one of the two refs) as
+# no winner, and an empty name as no rewrite.
 _SCHEMA = (
     '{"conflict_type":"none|mutual|temporal|granularity",'
     '"resolution":"keep|discard|modify",'
-    '"winner_ref":"<left_ref or right_ref or null>",'
-    '"resolved_payload":null,'
+    '"winner_ref":"",'
+    '"resolved_name":"",'
     '"confidence":0.0,'
     '"rationale":""}'
 )
@@ -54,22 +58,26 @@ def _prompt(item: dict) -> str:
         "Resolution: discard the wrong side; set winner_ref to the ref of the KEPT side.\n"
         "  - temporal (时序): predicate is time-dependent, each claim holds in a different "
         "time window.  "
-        "Resolution: modify — resolved_payload is a JSON OBJECT holding only the entry "
-        "fields to overwrite, e.g. {\"name\": \"<the statement with its time range "
-        "appended, like … [2000–2005]>\"}; never a bare string.\n"
+        "Resolution: modify ONE side — set winner_ref to the ref of the side you "
+        "rewrite and resolved_name to that side's statement with its time range "
+        "appended (like \"… [2000–2005]\").  Only that side changes; the other side "
+        "stays as it is.\n"
         "  - granularity (粒度): different specificity but compatible "
         "(e.g. Shanghai vs China).  "
-        "Resolution: modify — annotate granularity; both can coexist.\n"
+        "Resolution: keep — both entries stay as they are.\n"
         "  - none (无冲突): not actually a conflict (corroborating/paraphrase/unrelated).  "
-        "Resolution: keep, winner_ref null.\n\n"
+        "Resolution: keep.\n\n"
         "Rules:\n"
-        "  - resolved_payload is only relevant for resolution=modify and must then be a "
-        "JSON object of entry fields (e.g. {\"name\": ...}); set to null otherwise — a "
-        "string here is discarded and the modify is not applied.\n"
+        "  - winner_ref is exactly one of the two refs shown below, or \"\" when "
+        "the resolution is keep.\n"
+        "  - resolved_name is the new statement text for resolution=modify, as a "
+        "plain string; write \"\" for every other resolution.  A modify with an "
+        "empty resolved_name is not applied.\n"
+        "  - Kind edge: modify is not supported — choose keep or discard only.\n"
         "  - rationale: one short sentence, as a string.\n"
-        "  - winner_ref must be exactly one of the two refs shown below, or null.\n"
         "  - confidence is 0.0–1.0; use lower values when evidence is ambiguous.\n"
         "  - Return a single JSON object matching the schema.  No extra text.\n\n"
+        f"Kind: {cand.get('kind') or 'node'}\n"
         f"Signal: {cand['signal']}\n"
         f"Left ref:  {cand['left_ref']}\n"
         f"Right ref: {cand['right_ref']}\n\n"
@@ -118,7 +126,7 @@ def _fallback(item: dict) -> dict:
         "conflict_type": "none",
         "resolution": "keep",
         "winner_ref": None,
-        "resolved_payload": None,
+        "resolved_name": None,
         "confidence": 0.0,
         "rationale": "LLM output could not be parsed; defaulting to no-conflict.",
     }
@@ -182,19 +190,19 @@ def review_conflict_candidates(llm_client: Any, items: List[dict]) -> List[dict]
         if resolution not in _VALID_RESOLUTIONS:
             resolution = "keep"
 
-        # winner_ref must be one of the two known refs or None
+        # winner_ref must be one of the two known refs; "" (the hint's "none")
+        # and anything else read as no winner.
         raw_winner = data.get("winner_ref")
         if raw_winner in (cand["left_ref"], cand["right_ref"]):
             winner_ref: str | None = raw_winner
         else:
             winner_ref = None
 
-        # resolved_payload only makes sense for modify
-        raw_payload = data.get("resolved_payload")
-        if resolution == "modify" and isinstance(raw_payload, dict):
-            resolved_payload: dict | None = raw_payload
-        else:
-            resolved_payload = None
+        # resolved_name only makes sense for modify; "" means no rewrite.
+        resolved_name = (
+            as_text(data.get("resolved_name")) or None
+            if resolution == "modify" else None
+        )
 
         confidence = _confidence(data.get("confidence"))
 
@@ -206,7 +214,7 @@ def review_conflict_candidates(llm_client: Any, items: List[dict]) -> List[dict]
             "conflict_type": conflict_type,
             "resolution": resolution,
             "winner_ref": winner_ref,
-            "resolved_payload": resolved_payload,
+            "resolved_name": resolved_name,
             "confidence": confidence,
             "rationale": rationale,
         })

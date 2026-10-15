@@ -216,17 +216,16 @@ def test_edge_discard_none_winner_ref_skipped(seeded):
 # node modify → target object payload updated
 # ---------------------------------------------------------------------------
 
-def test_node_modify_updates_target_payload(seeded):
+def test_node_modify_updates_target_name_only(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
-    new_payload = {"name": "Claim A (merged)", "statement": "A is definitively true"}
     result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
-        resolution="modify", winner_ref=oid_a, resolved_payload=new_payload,
+        resolution="modify", winner_ref=oid_a, resolved_name=" Claim A (merged) ",
     )
     assert result == {"action": "modify", "target": oid_a}
     stored = _get_object_payload(repo, nb_id, oid_a)
     assert stored["name"] == "Claim A (merged)"
-    assert stored["statement"] == "A is definitively true"
+    assert stored["statement"] == "A is true"
     # other object untouched
     stored_b = _get_object_payload(repo, nb_id, oid_b)
     assert stored_b["name"] == "Claim B"
@@ -235,10 +234,10 @@ def test_node_modify_updates_target_payload(seeded):
 def test_node_modify_winner_ref_none_falls_back_to_left(seeded):
     """When winner_ref is None (or not in refs), target falls back to left_ref."""
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
-    new_payload = {"name": "Fallback modified"}
+    new_name = "Fallback modified"
     result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
-        resolution="modify", winner_ref=None, resolved_payload=new_payload,
+        resolution="modify", winner_ref=None, resolved_name=new_name,
     )
     assert result == {"action": "modify", "target": oid_a}
     stored = _get_object_payload(repo, nb_id, oid_a)
@@ -247,19 +246,20 @@ def test_node_modify_winner_ref_none_falls_back_to_left(seeded):
 
 def test_node_modify_winner_ref_unknown_falls_back_to_left(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
-    new_payload = {"name": "Unknown winner fallback"}
+    new_name = "Unknown winner fallback"
     result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
-        resolution="modify", winner_ref="not-a-real-id", resolved_payload=new_payload,
+        resolution="modify", winner_ref="not-a-real-id", resolved_name=new_name,
     )
     assert result["target"] == oid_a
 
 
-def test_node_modify_without_payload_skipped(seeded):
+@pytest.mark.parametrize("resolved_name", [None, "", "   "])
+def test_node_modify_without_name_skipped(seeded, resolved_name):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
     result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
-        resolution="modify", winner_ref=oid_a, resolved_payload=None,
+        resolution="modify", winner_ref=oid_a, resolved_name=resolved_name,
     )
     assert result["action"] == "skipped"
     assert "modify without payload" in result["reason"]
@@ -267,13 +267,14 @@ def test_node_modify_without_payload_skipped(seeded):
     assert _get_object_payload(repo, nb_id, oid_a)["name"] == "Claim A"
 
 
-def test_node_modify_non_dict_payload_skipped(seeded):
+def test_node_modify_non_string_name_skipped(seeded):
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
     result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
-        resolution="modify", winner_ref=oid_a, resolved_payload="not a dict",
+        resolution="modify", winner_ref=oid_a, resolved_name={"name": "x"},
     )
     assert result["action"] == "skipped"
+    assert _get_object_payload(repo, nb_id, oid_a)["name"] == "Claim A"
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +286,7 @@ def test_edge_modify_returns_skipped(seeded):
     result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="edge", left_ref=rel_a, right_ref=rel_b,
         resolution="modify", winner_ref=rel_a,
-        resolved_payload={"edge_type": "supports"},
+        resolved_name="A supports B",
     )
     assert result["action"] == "skipped"
     assert "edge modify unsupported" in result["reason"]
@@ -317,27 +318,25 @@ def test_unknown_kind_raises_value_error(seeded):
 
 
 # ---------------------------------------------------------------------------
-# node modify → pre-existing payload fields NOT in resolved_payload survive
+# node modify → only the name changes; every other payload field survives
 # ---------------------------------------------------------------------------
 
 def test_node_modify_preserves_pre_existing_payload_fields(seeded):
-    """Fix 2 regression: apply_conflict_resolution modify must MERGE resolved_payload
-    onto the existing payload, not replace it wholesale.
+    """Fix 2 regression: a modify rewrites only ``name`` on the existing
+    payload, never replaces it wholesale.
 
     update_knowledge replaces the entire payload column.  Without the merge step a
-    resolved_payload like {"name": "..."} would silently drop pre-existing fields
+    rewritten name would silently drop pre-existing fields
     (section_path, validity_scope, steps, …).
 
     This test:
     - Seeds an object whose payload already contains section_path="§2.3".
-    - Calls apply_conflict_resolution with resolved_payload={"name": "Updated name"}
-      which intentionally omits section_path.
+    - Calls apply_conflict_resolution with resolved_name="Claim A (reconciled)".
     - Asserts section_path="§2.3" still survives AND name was updated.
     """
     repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
 
-    # First, enrich Claim A's payload with an extra field (section_path)
-    # that will NOT appear in the adjudicator's resolved_payload.
+    # First, enrich Claim A's payload with an extra field (section_path).
     import json as _json
     with repo._write() as db:
         db.execute(
@@ -349,12 +348,9 @@ def test_node_modify_preserves_pre_existing_payload_fields(seeded):
             ),
         )
 
-    # Adjudicator only returns a modified name — section_path is absent
-    resolved_payload = {"name": "Claim A (reconciled)"}
-
     result = repo._runtime.knowledge_governance.apply_conflict_resolution(
         nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
-        resolution="modify", winner_ref=oid_a, resolved_payload=resolved_payload,
+        resolution="modify", winner_ref=oid_a, resolved_name="Claim A (reconciled)",
     )
     assert result == {"action": "modify", "target": oid_a}
 
@@ -368,7 +364,46 @@ def test_node_modify_preserves_pre_existing_payload_fields(seeded):
         f"section_path was dropped — modify replaced rather than merged the payload. "
         f"Got {stored!r}"
     )
-    # Other original field not in resolved_payload must also survive
+    # Other original field must also survive
     assert stored.get("statement") == "A is true", (
         f"statement was dropped unexpectedly. Got {stored!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# stored candidates written under the older arbitrary-object contract
+# ---------------------------------------------------------------------------
+
+def test_confirm_legacy_stored_payload_applies_only_its_name(seeded):
+    """A pending row adjudicated before the name-only contract may carry any
+    keys in resolved_payload; confirming it rewrites the name and ignores
+    the rest. A legacy row without a usable name is a skipped modify."""
+    repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
+    governance = repo._runtime.knowledge_governance
+    legacy = governance.write_conflict_candidate(
+        nb_id, "node", oid_a, oid_b, conflict_type="temporal",
+        resolution="modify", winner_ref=oid_b,
+        resolved_payload=json.dumps({"name": "Claim B [2000]", "statement": "rewritten"}),
+    )
+    result = governance.confirm_conflict(nb_id, legacy)
+    assert result["action"] == "modify" and result["target"] == oid_b
+    stored = _get_object_payload(repo, nb_id, oid_b)
+    assert stored == {"name": "Claim B [2000]", "statement": "B is true"}
+
+    nameless = governance.write_conflict_candidate(
+        nb_id, "node", oid_a, oid_b, conflict_type="granularity",
+        resolution="modify", winner_ref=oid_a,
+        resolved_payload=json.dumps({"annotation": "granularity: A ⊂ B"}),
+    )
+    result = governance.confirm_conflict(nb_id, nameless)
+    assert result["action"] == "skipped" and result["status"] == "applied"
+    assert _get_object_payload(repo, nb_id, oid_a)["name"] == "Claim A"
+
+
+def test_stored_resolved_name_reads_text_objects_and_junk():
+    from app.services.knowledge_governance import _stored_resolved_name
+
+    assert _stored_resolved_name('{"name": " X "}') == "X"
+    assert _stored_resolved_name({"name": "Y", "other": 1}) == "Y"
+    for junk in (None, "", "not json", "[]", '{"name": ""}', '{"name": 3}', {"x": "y"}):
+        assert _stored_resolved_name(junk) is None, junk

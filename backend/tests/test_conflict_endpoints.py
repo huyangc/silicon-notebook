@@ -30,8 +30,8 @@ class _ConfiguredLLM:
         return json.dumps({
             "conflict_type": "none",
             "resolution": "keep",
-            "winner_ref": None,
-            "resolved_payload": None,
+            "winner_ref": "",
+            "resolved_name": "",
             "confidence": 0.0,
             "rationale": "no conflict",
         })

@@ -256,7 +256,7 @@ class EchoReviewer:
         seen = " | ".join(str(m.get("content", "")) for m in messages)[-1500:]
         return json.dumps({
             "conflict_type": "mutual", "resolution": "modify", "winner_ref": None,
-            "resolved_payload": {"seen": seen}, "confidence": 0.4,
+            "resolved_name": seen, "confidence": 0.4,
             "rationale": "saw: " + seen[-400:],
         })
 
