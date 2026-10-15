@@ -230,6 +230,11 @@ _PY_REGISTRY: dict[str, dict[str, tuple[str, str, tuple[str, ...]]]] = {
             NOT_GLOBAL, "a notebook ask's ``AskResponse`` text; global jobs go through "
                         "``mcp_tools/global_ask.global_view``",
             ("new: getattr(response, 'answer', '')",)),
+        "_deliver": (
+            PROJECTED, "previews the normalised view ``global_view``/``notebook_view`` built "
+                       "(the same view ``answer_page`` pages), whose ``answer`` is already "
+                       "the projected text",
+            ("new: view.get('answer')",)),
     },
     "repositories/postgres/ask_state_store.py": {
         "AskStateStore.answer_memory_source": (
