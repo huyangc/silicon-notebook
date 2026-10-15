@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from app.core.capability_tokens import ANSWER_LINK_PREFIX, new_capability_token
 from app.repositories.postgres._store_utils import (
     TimestampInput,
-    iso_timestamp,
     normalized_clock,
 )
 from app.repositories.postgres.database import PostgresDatabase
 
 _SWEEP_INTERVAL_SECONDS = 3600
+
+
+def _iso(value: datetime) -> str:
+    # The same fixed-width UTC spelling the SQLite store keeps.
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
 _COLUMNS = "token, job_kind, job_id, owner_id, agent_token_id, created_at, expires_at"
 
 
@@ -42,12 +46,22 @@ class AnswerLinkStore:
 
     def _sweep_due(self) -> bool:
         with self._sweep_lock:
-            current = self._monotonic()
             last = self._last_sweep_monotonic
-            if last is not None and current - last < _SWEEP_INTERVAL_SECONDS:
-                return False
-            self._last_sweep_monotonic = current
-            return True
+            return last is None or self._monotonic() - last >= _SWEEP_INTERVAL_SECONDS
+
+    def _mark_swept(self) -> None:
+        # Only after the write committed: a failed transaction rolls its sweep
+        # back, and must not cost the next hour of sweeping.
+        with self._sweep_lock:
+            self._last_sweep_monotonic = self._monotonic()
+
+    @staticmethod
+    def _read_key(db: Any, job_kind: str, job_id: str, agent_token_id: str) -> Any:
+        return db.execute(
+            "SELECT token, expires_at FROM answer_links WHERE job_kind = %s "
+            "AND job_id = %s AND agent_token_id = %s",
+            (job_kind, job_id, agent_token_id),
+        ).fetchone()
 
     def issue_answer_link(
         self,
@@ -70,25 +84,30 @@ class AnswerLinkStore:
                 "AND agent_token_id = %s AND expires_at <= %s",
                 (job_kind, job_id, agent_token_id, now),
             )
-            db.execute(
-                "INSERT INTO answer_links (" + _COLUMNS + ") "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s) "
-                "ON CONFLICT (job_kind, job_id, agent_token_id) DO NOTHING",
-                (
-                    candidate, job_kind, job_id, owner_id, agent_token_id,
-                    now, now + timedelta(seconds=ttl_seconds),
-                ),
-            )
+            row = None
             # A fresh statement under READ COMMITTED: a concurrent winner whose
             # insert made ours a no-op has committed by now, so it is visible.
-            row = db.execute(
-                "SELECT token, expires_at FROM answer_links WHERE job_kind = %s "
-                "AND job_id = %s AND agent_token_id = %s",
-                (job_kind, job_id, agent_token_id),
-            ).fetchone()
+            # If that winner was swept away meanwhile, insert once more.
+            for _attempt in range(2):
+                db.execute(
+                    "INSERT INTO answer_links (" + _COLUMNS + ") "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s) "
+                    "ON CONFLICT (job_kind, job_id, agent_token_id) DO NOTHING",
+                    (
+                        candidate, job_kind, job_id, owner_id, agent_token_id,
+                        now, now + timedelta(seconds=ttl_seconds),
+                    ),
+                )
+                row = self._read_key(db, job_kind, job_id, agent_token_id)
+                if row is not None:
+                    break
+            if row is None:
+                raise RuntimeError("answer link vanished between insert and read-back")
+        if sweep:
+            self._mark_swept()
         return {
             "token": str(row["token"]),
-            "expires_at": iso_timestamp(row["expires_at"]),
+            "expires_at": _iso(row["expires_at"]),
             "reused": str(row["token"]) != candidate,
         }
 
@@ -105,8 +124,8 @@ class AnswerLinkStore:
             "job_id": str(row["job_id"]),
             "owner_id": str(row["owner_id"]),
             "agent_token_id": str(row["agent_token_id"]),
-            "created_at": iso_timestamp(row["created_at"]),
-            "expires_at": iso_timestamp(row["expires_at"]),
+            "created_at": _iso(row["created_at"]),
+            "expires_at": _iso(row["expires_at"]),
             "expired": row["expires_at"] <= self.now(),
         }
 

@@ -92,3 +92,13 @@ def test_issue_sweeps_at_most_once_per_interval(env):
 def test_concurrent_same_key_issues_one_link(env):
     store, clock, _, seed, count_rows = env
     cases.assert_concurrent_same_key_issues_one_link(store, clock, seed, count_rows)
+
+
+def test_failed_issue_does_not_burn_the_sweep_interval(env):
+    store, clock, mono, seed, _ = env
+    cases.assert_failed_issue_does_not_burn_the_sweep_interval(store, clock, mono, seed)
+
+
+def test_vanished_winner_is_retried_then_reported(env):
+    store, _, _, seed, _ = env
+    cases.assert_vanished_winner_is_retried_then_reported(store, seed)

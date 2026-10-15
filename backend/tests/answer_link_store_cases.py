@@ -3,6 +3,7 @@
 store whose wall clock and sweep (monotonic) clock the case controls."""
 from __future__ import annotations
 
+import re
 import threading
 from datetime import datetime, timedelta
 from typing import Callable
@@ -90,6 +91,9 @@ def _issue(store, *, kind="notebook", job="job-1", token="tok-1", ttl=TTL):
     )
 
 
+_ISO = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}\+00:00$")
+
+
 def _at(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
@@ -115,6 +119,8 @@ def assert_issue_then_read_back(store, clock: Clock, seed: Seed) -> None:
     assert _at(row["created_at"]) == _at(clock.value)
     assert _at(row["expires_at"]) == _at(clock.value) + timedelta(seconds=TTL)
     assert _at(issued["expires_at"]) == _at(row["expires_at"])
+    for value in (issued["expires_at"], row["created_at"], row["expires_at"]):
+        assert _ISO.match(value), value  # one spelling on both engines
     assert store.answer_link("alnk-unknown") is None
 
 
@@ -252,3 +258,44 @@ def assert_concurrent_same_key_issues_one_link(
     assert results[0]["token"] == results[1]["token"]
     assert sorted(r["reused"] for r in results) == [False, True]
     assert count_rows() == 1
+
+
+def assert_failed_issue_does_not_burn_the_sweep_interval(
+    store, clock: Clock, mono: Monotonic, seed: Seed
+) -> None:
+    seed.token("tok-1")
+    seed.notebook_job("job-1")
+    garbage = _issue(store, job="job-gone")  # first issue sweeps, then marks
+    mono.value += 3600
+    try:
+        _issue(store, kind="bogus")  # CHECK violation rolls the write back
+    except Exception:  # noqa: BLE001 - any engine's integrity error
+        pass
+    else:
+        raise AssertionError("an invalid job_kind must be rejected")
+    assert store.answer_link(garbage["token"]) is not None  # sweep rolled back
+    _issue(store, job="job-1")  # still due: the failed write did not mark it
+    assert store.answer_link(garbage["token"]) is None
+
+
+def assert_vanished_winner_is_retried_then_reported(store, seed: Seed) -> None:
+    _live(seed)
+    real = store._read_key
+    calls: list[int] = []
+
+    def flaky(db, *key):
+        calls.append(1)
+        return None if len(calls) == 1 else real(db, *key)
+
+    store._read_key = flaky
+    issued = _issue(store)
+    assert len(calls) == 2 and issued["reused"] is False
+    assert store.answer_link(issued["token"]) is not None
+
+    store._read_key = lambda db, *key: None
+    try:
+        _issue(store, job="job-2")
+    except RuntimeError as exc:
+        assert "vanished" in str(exc)
+    else:
+        raise AssertionError("a row that never reads back must raise")
