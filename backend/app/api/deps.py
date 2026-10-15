@@ -82,6 +82,11 @@ def ask_intent_handle_repository():
     return repository()._runtime.ask_intent_handles  # type: ignore[attr-defined]
 
 
+def answer_link_repository():
+    """The MCP answer-link store (v94/0074)."""
+    return repository()._runtime.answer_links  # type: ignore[attr-defined]
+
+
 def ask_stream_repository() -> AskStreamPort:
     return repository()
 

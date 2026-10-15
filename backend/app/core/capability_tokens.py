@@ -16,6 +16,8 @@ import secrets
 # `[A-Za-z0-9_-]` and survives path segments and diagnostics redaction patterns.
 CAPABILITY_TOKEN_BYTES = 32
 
+# The three capability namespaces: the two conversation-share ones below, and
+# ``alnk`` (MCP answer links, minted by ``AnswerLinkStore``).
 # The two conversation-share namespaces. They matter beyond documentation
 # because ONE anonymous endpoint pair (`/public/conversations/{token}` and its
 # image sibling) serves BOTH features: a notebook-scoped conversation and a
@@ -25,6 +27,7 @@ CAPABILITY_TOKEN_BYTES = 32
 # renamed prefix cannot silently stop resolving.
 NOTEBOOK_CONVERSATION_SHARE_PREFIX = "cshr"
 GLOBAL_CONVERSATION_SHARE_PREFIX = "gshr"
+ANSWER_LINK_PREFIX = "alnk"
 
 
 def new_capability_token(prefix: str) -> str:
@@ -45,3 +48,11 @@ def is_global_conversation_share_token(token: str) -> bool:
     through to the notebook-scoped branch unchanged.
     """
     return str(token or "").startswith(f"{GLOBAL_CONVERSATION_SHARE_PREFIX}-")
+
+
+def is_answer_link_token(token: str) -> bool:
+    """Whether this token is an MCP answer link (``alnk-...``).
+
+    Like ``is_global_conversation_share_token`` the separator is part of the
+    test, so the three namespaces partition the token space."""
+    return str(token or "").startswith(f"{ANSWER_LINK_PREFIX}-")

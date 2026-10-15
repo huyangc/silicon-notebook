@@ -149,6 +149,7 @@ RUNTIME_ATTRIBUTES = [
     "unified_kg",
     "wishes",
     "ask_intent_handles",
+    "answer_links",
 ]
 
 

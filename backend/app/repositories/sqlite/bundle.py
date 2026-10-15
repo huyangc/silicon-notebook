@@ -39,6 +39,7 @@ from app.repositories.sqlite.retrieval_experience_store import (
 from app.repositories.sqlite.sharing_store import SharingStore
 from app.repositories.sqlite.source_store import SourceStore
 from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
+from app.repositories.sqlite.answer_link_store import AnswerLinkStore
 from app.repositories.sqlite.ask_intent_handle_store import AskIntentHandleStore
 from app.repositories.sqlite.wish_store import WishStore
 
@@ -86,6 +87,7 @@ class SqlitePersistenceBundle(PersistenceBundle):
     extension_toggles: ExtensionToggleStore
     wishes: WishStore
     ask_intent_handles: AskIntentHandleStore
+    answer_links: AnswerLinkStore
 
 
 class SqlitePersistenceBundleFactory:
@@ -164,6 +166,7 @@ class SqlitePersistenceBundleFactory:
         extension_toggles = ExtensionToggleStore(database, identity.auth)
         wishes = WishStore(database, new_id=seams.new_id, now=seams.now)
         ask_intent_handles = AskIntentHandleStore(database, now=seams.now)
+        answer_links = AnswerLinkStore(database, now=seams.now)
         return SqlitePersistenceBundle(
             database=database,
             identity=identity,
@@ -195,4 +198,5 @@ class SqlitePersistenceBundleFactory:
             extension_toggles=extension_toggles,
             wishes=wishes,
             ask_intent_handles=ask_intent_handles,
+            answer_links=answer_links,
         )

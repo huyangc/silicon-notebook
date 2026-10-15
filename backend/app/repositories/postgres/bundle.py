@@ -42,6 +42,7 @@ from app.repositories.postgres.retrieval_experience_store import (
 from app.repositories.postgres.sharing_store import SharingStore
 from app.repositories.postgres.source_store import SourceStore
 from app.repositories.postgres.unified_kg_store import UnifiedKgStore
+from app.repositories.postgres.answer_link_store import AnswerLinkStore
 from app.repositories.postgres.ask_intent_handle_store import AskIntentHandleStore
 from app.repositories.postgres.wish_store import WishStore
 from app.domain.extraction_profiles import (
@@ -188,6 +189,7 @@ class PostgresPersistenceBundle(PersistenceBundle):
     extension_toggles: ExtensionToggleStore
     wishes: WishStore
     ask_intent_handles: AskIntentHandleStore
+    answer_links: AnswerLinkStore
 
 
 class PostgresPersistenceBundleFactory:
@@ -296,6 +298,7 @@ class PostgresPersistenceBundleFactory:
             extension_toggles = ExtensionToggleStore(database, identity.auth)
             wishes = WishStore(database, new_id=seams.new_id, now=seams.now)
             ask_intent_handles = AskIntentHandleStore(database, now=seams.now)
+            answer_links = AnswerLinkStore(database, now=seams.now)
             return PostgresPersistenceBundle(
                 database=database,
                 identity=identity,
@@ -327,6 +330,7 @@ class PostgresPersistenceBundleFactory:
                 extension_toggles=extension_toggles,
                 wishes=wishes,
                 ask_intent_handles=ask_intent_handles,
+                answer_links=answer_links,
             )
         except BaseException:
             database.close()

@@ -304,6 +304,9 @@ class _PersistenceSeats:
     # understood contract, one hour, purged on write. Read only by
     # ``mcp_tools.ask`` through ``deps.ask_intent_handle_repository``.
     ask_intent_handles: Any
+    # MCP answer links (v94/0074), read/written through
+    # ``deps.answer_link_repository``.
+    answer_links: Any
     source_store: Any
     chunk_store: Any
     # Task 25: reports-table row persistence is seam-free (the shared
@@ -407,6 +410,7 @@ def _build_persistence_seats(
         extension_toggles=bundle.extension_toggles,
         wishes=bundle.wishes,
         ask_intent_handles=bundle.ask_intent_handles,
+        answer_links=bundle.answer_links,
         source_store=bundle.sources,
         chunk_store=bundle.chunks,
         report_store=bundle.reports,
@@ -1098,6 +1102,7 @@ class RepositoryRuntime:
         self.extension_toggles = seats.extension_toggles
         self.wishes = seats.wishes
         self.ask_intent_handles = seats.ask_intent_handles
+        self.answer_links = seats.answer_links
         self.source_store = seats.source_store
         self.chunk_store = seats.chunk_store
         self.report_store = seats.report_store
