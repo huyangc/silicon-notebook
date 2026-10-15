@@ -2,7 +2,7 @@
 
 Hints describe shapes, not complete domain contracts. Scalar examples are never
 constants; pipe-delimited strings advertise enums (including the legacy empty
-value). All object properties must be required for strict structured output, so
+value, except on a required root field). All object properties must be required for strict structured output, so
 optional fields are represented with null. Existing domain validation remains
 authoritative after the scheduler removes unused null fields.
 
@@ -28,7 +28,7 @@ _STRING_LIST_FIELDS = frozenset({
     "assumptions", "based_on_row_ids", "evidence_keys", "columns",
 })
 _NULL_STRING_FIELDS = frozenset({"parent", "edge_type", "suggestion_md"})
-_DYNAMIC_FIELDS = frozenset({"source_queries", "frame_assignments", "resolved_payload"})
+_DYNAMIC_FIELDS = frozenset({"source_queries", "frame_assignments"})
 _ENUM_EXAMPLE = re.compile(r"[^\s|<>]+(?:\|[^\s|<>]+)+\Z")
 
 
@@ -193,7 +193,12 @@ def _project_kind(
         # A placeholder or one scalar value describes its type, never a const.
         if all(_ENUM_EXAMPLE.fullmatch(example) for example in examples):
             values = [value for example in examples for value in example.split("|")]
-            return {"type": "string", "enum": list(dict.fromkeys(["", *values]))}
+            # A required root field is the decision itself (reflect's
+            # next_action, an intent's result_scope): "" there is not "unused"
+            # but an invalid choice. Elsewhere "" keeps meaning "not used".
+            required = len(path) == 1 and path[0] not in _optional_root_fields(root)
+            empty = [] if required else [""]
+            return {"type": "string", "enum": list(dict.fromkeys([*empty, *values]))}
         return {"type": "string"}
     return {"type": kind}
 
