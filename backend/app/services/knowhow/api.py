@@ -1128,10 +1128,14 @@ _COMPLETION_PROMPT_KIND_CHAR_LIMIT = 32
 _COMPLETION_SUGGESTION_CHAR_LIMIT = 40_000
 _COMPLETION_EXPLANATION_CHAR_LIMIT = 1_000
 _COMPLETION_EVIDENCE_EXCERPT_CHAR_LIMIT = 900
+# One suggestion-shaped item: the empty strings are type samples, and the
+# abstain shape (suggestion_md null) stays legal because every nested field
+# of the strict projection is nullable. ``confidence`` advertises the closed
+# vocabulary ``_COMPLETION_CONFIDENCE`` reads.
 _COMPLETION_SCHEMA_HINT = (
-    '{"suggestions":[{"column_id":"","suggestion_md":null,'
-    '"confidence":"low","based_on_row_ids":[],"evidence_keys":[],"basis":"",'
-    '"abstain_reason":""}]}'
+    '{"suggestions":[{"column_id":"","suggestion_md":"",'
+    '"confidence":"high|medium|low","based_on_row_ids":[],"evidence_keys":[],'
+    '"basis":"","abstain_reason":""}]}'
 )
 _COMPLETION_CONFIDENCE = frozenset({"high", "medium", "low"})
 
@@ -1762,7 +1766,8 @@ _COMPLETION_PROMPT_PREFIX = (
     "- evidence_keys 只能引用 library_evidence 中给出的 key，不得自造。\n"
     "- 若 personal 与 base 证据冲突，以 base 为准，并在 basis 中披露冲突；推断必须明确写成推断，不得冒充事实。\n"
     "- high 置信度只能用于同表参考行与全库证据相互印证的情形；只有单一证据通道时最高 medium。\n"
-    "- 每个目标列恰好返回一项。建议项 suggestion_md 非空且 abstain_reason 为空；"
+    "- confidence 只能是 high、medium 或 low（小写）。\n"
+    "- 每个目标列恰好返回一项。建议项 suggestion_md 非空且 abstain_reason 为空字符串；"
     "放弃项 suggestion_md 为 null、confidence 为 low、abstain_reason 非空。\n"
     "- 只输出严格 JSON，不要代码围栏或额外说明。\n\n"
     "输入 JSON：\n"

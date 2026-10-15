@@ -148,6 +148,35 @@ def _table(reference_count: int = 2) -> dict:
     }
 
 
+def test_completion_hint_projects_both_suggestion_and_abstain_items():
+    from app.core.model_schema import (
+        response_format_for_hint,
+        validate_structured_response,
+    )
+
+    fmt = response_format_for_hint(knowhow_api._COMPLETION_SCHEMA_HINT)
+    assert fmt is not None
+    item = fmt["json_schema"]["schema"]["properties"]["suggestions"]["items"]
+    assert set(item["properties"]["confidence"]["enum"]) - {"", None} == set(
+        knowhow_api._COMPLETION_CONFIDENCE
+    )
+    suggestion = {
+        "column_id": "c1", "suggestion_md": "值", "confidence": "high",
+        "based_on_row_ids": ["r1"], "evidence_keys": ["k1"], "basis": "印证",
+        "abstain_reason": "",
+    }
+    abstain = dict(
+        suggestion, suggestion_md=None, confidence="low",
+        based_on_row_ids=[], evidence_keys=[], basis="",
+        abstain_reason="证据不足",
+    )
+    for row in (suggestion, abstain):
+        assert validate_structured_response(json.dumps({"suggestions": [row]}), fmt)
+    assert not validate_structured_response(
+        json.dumps({"suggestions": [dict(suggestion, confidence="HIGH")]}), fmt
+    )
+
+
 def test_resolve_targets_defaults_deduplicates_and_rejects_invalid_targets():
     table = _table()
 
