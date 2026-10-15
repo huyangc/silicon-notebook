@@ -9,8 +9,10 @@ import type { ConversationSummary } from "./workspace-model";
 const ASK_SESSION_HISTORY_PAGE_SIZE = 20;
 
 /**
- * 历史会话弹窗里的会话清单 + 分页。弹窗只在 `chatMode === "ask" && sessionPanelOpen`
- * 时渲染它,关闭即卸载,所以每次重新打开都从第一页开始,不需要 resetKey。
+ * 历史会话清单 + 分页。两处落点,page.tsx 同一时刻只挂其中一处:
+ * - `grid`(默认):「历史」弹窗里的卡片网格,只在 `sessionPanelOpen` 时渲染;
+ * - `sidebar`:收起来源栏后左侧平铺的会话栏,一行一个标题,操作键悬停/聚焦时出现。
+ * 两处都是关闭(收起)即卸载,所以每次重新打开都从第一页开始,不需要 resetKey。
  */
 export function AskSessionHistoryList({
   sessions,
@@ -26,6 +28,7 @@ export function AskSessionHistoryList({
   onBeginRename,
   onShare,
   onDelete,
+  variant = "grid",
 }: {
   sessions: ConversationSummary[];
   conversationId: string | null;
@@ -40,13 +43,18 @@ export function AskSessionHistoryList({
   onBeginRename: (session: ConversationSummary) => void;
   onShare: (session: ConversationSummary) => void;
   onDelete: (session: ConversationSummary) => void;
+  variant?: "grid" | "sidebar";
 }) {
+  const sidebar = variant === "sidebar";
   const page = useClientPagination(sessions, ASK_SESSION_HISTORY_PAGE_SIZE);
   if (sessions.length === 0) return <div className="chat-session-empty">还没有历史会话。</div>;
   return (
     <>
       {page.pageItems.map((session) => (
-        <article className={`chat-session-card ${session.id === conversationId ? "active" : ""}`} key={session.id}>
+        <article
+          className={`${sidebar ? "chat-session-row" : "chat-session-card"} ${session.id === conversationId ? "active" : ""}`}
+          key={session.id}
+        >
           {renamingSessionId === session.id ? (
             <div className="chat-session-rename">
               {/* 刻意没有 maxLength:那把尺数的是 UTF-16 code unit,与后端
@@ -72,12 +80,18 @@ export function AskSessionHistoryList({
             </div>
           ) : (
             <>
-              <button className="chat-session-card-main" type="button" onClick={() => onOpenSession(session.id)}>
+              <button
+                className="chat-session-card-main"
+                type="button"
+                aria-current={session.id === conversationId ? "true" : undefined}
+                title={sidebar ? `${session.title || "未命名会话"} · ${formatRelativeTime(session.updated_at)} · ${session.turn_count} 轮` : undefined}
+                onClick={() => onOpenSession(session.id)}
+              >
                 <span>{session.title || "未命名会话"}</span>
-                <small>
+                {!sidebar && <small>
                   {formatRelativeTime(session.updated_at)} · {session.turn_count} 轮
                   {session.used_reasoning && <span className="chat-session-reasoning-badge">{`✦ ${strictLabel}`}</span>}
-                </small>
+                </small>}
               </button>
               <div className="chat-session-card-actions">
                 <button type="button" title="分享" onClick={() => onShare(session)}><Share2 size={14} /></button>
@@ -88,7 +102,7 @@ export function AskSessionHistoryList({
           )}
         </article>
       ))}
-      <Pagination page={page.page} pageSize={ASK_SESSION_HISTORY_PAGE_SIZE} total={page.total} onPage={page.setPage} label="历史会话分页" />
+      <Pagination page={page.page} pageSize={ASK_SESSION_HISTORY_PAGE_SIZE} total={page.total} onPage={page.setPage} label="历史会话分页" compact={sidebar} />
     </>
   );
 }

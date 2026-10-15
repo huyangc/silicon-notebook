@@ -708,7 +708,7 @@ of an empty one. Page sizes:
 | --- | --- | --- |
 | Home collection — 我的笔记本 and 群组 sections (grid and list, each section independent) | 24 | filter tab, search query, sort, or view mode changes |
 | 已分享 modal — shared notebooks; each notebook's read-only link members | 20 | the modal reopens |
-| Ask conversation history | 20 | the panel reopens |
+| Ask conversation history (the 历史 popover; the left column once the source panel is collapsed) | 20 | the panel reopens or the source panel is collapsed again |
 | Knowledge browser — duplicate groups | 20 | the object type tab changes |
 | Knowledge object occurrences (Knowledge browser item context and Knowledge Graph detail; numbering continues across pages) | 10 | another node is selected |
 | Knowledge Graph — pending merges; a selected node's adjacent relations | 20 | another node is selected (relations) |

@@ -76,3 +76,34 @@ test("点击某条会话调用 onOpenSession，携带对应的会话 id", async 
   await user.click(screen.getByText("会话02"));
   expect(onOpenSession).toHaveBeenCalledWith("s2");
 });
+
+// 收起来源栏后的左栏:一行一个标题(时间/轮数收进 title 提示),翻页用窄栏的 compact 控件。
+test("侧栏形态一行一个标题，当前会话标出 aria-current，分页用紧凑控件", async () => {
+  const user = userEvent.setup();
+  const onDelete = vi.fn();
+  render(
+    <AskSessionHistoryList
+      sessions={makeSessions(25)}
+      {...baseProps()}
+      conversationId="s2"
+      onDelete={onDelete}
+      variant="sidebar"
+    />,
+  );
+
+  const rows = document.querySelectorAll(".chat-session-row");
+  expect(rows).toHaveLength(20);
+  expect(document.querySelector(".chat-session-card")).toBeNull();
+  expect(rows[0].querySelector("small")).toBeNull();
+  expect(rows[1]).toHaveClass("active");
+  const current = screen.getByRole("button", { name: "会话02" });
+  expect(current).toHaveAttribute("aria-current", "true");
+  expect(current.getAttribute("title")).toContain("1 轮");
+  expect(screen.getByRole("button", { name: "会话01" })).not.toHaveAttribute("aria-current");
+
+  const pager = screen.getByRole("navigation", { name: "历史会话分页" });
+  expect(pager).toHaveClass("compact");
+
+  await user.click(within(rows[2] as HTMLElement).getByTitle("删除"));
+  expect(onDelete).toHaveBeenCalledWith(expect.objectContaining({ id: "s3" }));
+});

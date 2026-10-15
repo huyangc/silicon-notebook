@@ -1542,6 +1542,155 @@ button.copy-result-failed:hover:not(:disabled) {
   box-shadow: 0 8px 22px rgba(31, 42, 58, 0.18);
 }
 
+/* 收起来源栏后的问答页:左栏换成平铺的历史会话(一行一个标题,侧栏导航式),
+   取代「历史」弹窗。来源栏那一列仍是 0 宽,会话栏插在它和问答面板之间。 */
+.workspace-grid.sources-collapsed.has-session-sidebar {
+  grid-template-columns: 0 248px minmax(0, 1fr);
+}
+.ask-session-sidebar {
+  /* 从「历史」按钮长出来的那 280ms 里要盖在问答面板上面。 */
+  position: relative;
+  z-index: 5;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  align-content: start;
+  gap: 4px;
+  padding: 12px 10px;
+}
+.ask-session-sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px 8px;
+}
+.ask-session-sidebar-head strong {
+  font-size: 14px;
+  color: var(--ink);
+}
+.ask-session-sidebar-head .panel-count {
+  margin-left: auto;
+  font-size: 12px;
+}
+.ask-session-sidebar-new,
+.chat-session-row {
+  min-width: 0;
+  border-radius: 8px;
+  color: #263241;
+  transition: background 120ms ease;
+}
+.ask-session-sidebar-new {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  border: 0;
+  padding: 0 10px;
+  background: transparent;
+  font-size: 14px;
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+}
+.ask-session-sidebar-new:hover,
+.chat-session-row:hover,
+.chat-session-row:focus-within {
+  background: #f3f5f9;
+}
+.ask-session-sidebar-new:active,
+.chat-session-row:active {
+  background: #e9edf3;
+}
+.ask-session-sidebar-new.active,
+.chat-session-row.active {
+  background: #eaeef4;
+}
+.ask-session-sidebar-label {
+  padding: 12px 10px 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.chat-session-list.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.chat-session-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+  min-height: 36px;
+  padding: 0 4px 0 10px;
+}
+.chat-session-row .chat-session-card-main {
+  align-self: stretch;
+  align-content: center;
+}
+.chat-session-row .chat-session-card-main span {
+  font-size: 13.5px;
+  font-weight: 500;
+}
+.chat-session-row.active .chat-session-card-main span {
+  font-weight: 700;
+}
+/* 操作键只在悬停/聚焦这一行时出现,平时不挤占标题的宽度。 */
+.chat-session-row .chat-session-card-actions {
+  display: none;
+  gap: 2px;
+}
+.chat-session-row:hover .chat-session-card-actions,
+.chat-session-row:focus-within .chat-session-card-actions {
+  display: flex;
+}
+.chat-session-row .chat-session-card-actions button {
+  width: 26px;
+  height: 26px;
+  border-color: transparent;
+  background: transparent;
+}
+.chat-session-row .chat-session-card-actions button:hover {
+  border-color: #d8dee8;
+  background: #fff;
+}
+.chat-session-row .chat-session-card-actions button:active {
+  background: #e9edf3;
+}
+.chat-session-row .chat-session-rename {
+  padding: 4px 0;
+}
+/* 会话栏缩回「历史」按钮时的影子(位置/大小由 use-session-sidebar-morph 写在行内)。 */
+.ask-session-sidebar-ghost {
+  position: fixed;
+  overflow: hidden;
+  z-index: 30;
+  box-sizing: border-box;
+  padding: 14px 16px;
+  border: 1px solid rgba(34, 48, 68, 0.12);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 16px 40px rgba(31, 42, 58, 0.12);
+  transform-origin: top left;
+  pointer-events: none;
+}
+.ask-session-sidebar-ghost strong {
+  display: block;
+  margin-bottom: 12px;
+  font-size: 14px;
+  color: var(--ink);
+}
+.ask-session-sidebar-ghost span {
+  display: block;
+  overflow: hidden;
+  padding: 8px 0;
+  color: #263241;
+  font-size: 13.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ask-session-sidebar .chat-session-cleanup {
+  padding: 8px 6px 0;
+  border-top: 1px solid #e1e6ee;
+}
+
 .add-source-button {
   min-height: 44px;
   display: flex;

@@ -85,6 +85,11 @@ const NOT_A_VIEW_OWNER = new Map([
     "KG 三个领域 owner 共用的 actor/notebook/generation 门。它只返回判定函数与生命周期"
     + "命令，一个领域状态字段都不持有，因此结构上不存在 owner-hidden 回退值可判",
   ],
+  ["use-media-query.ts", "订阅一条 CSS 媒体查询，只返回一个布尔值：没有 notebook/actor 视图"],
+  [
+    "use-session-sidebar-morph.ts",
+    "会话栏展开/收回的形变动画：只返回 DOM ref、动画影子的几何与起点记录函数，没有 notebook/actor 视图",
+  ],
 ]);
 
 // Hooks that DO own a view, but whose own `return {...}` object literal is
