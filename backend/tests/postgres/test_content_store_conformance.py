@@ -2290,7 +2290,7 @@ def test_memory_agent_profile_soft_delete_revokes_live_tokens_in_one_write(
     with pytest.raises(KeyError):
         store.create_agent_token(
             "agent-token-del-after", "user-content", profile.id, "sha256-del-after",
-            ["read"], "nb-content", ["nb-content"], None,
+            ["read"], "nb-content", ["nb-content"], None, allow_answer_links=False,
         )
 
 
@@ -2324,6 +2324,7 @@ def test_memory_agent_token_access_update_round_trip_and_rejects_when_inactive(
         "nb-content",
         ["nb-content"],
         "2027-01-01T00:00:00+00:00",
+        allow_answer_links=False,
     )
     assert updated.id == issued.id
     assert updated.agent_profile_id == profile.id
@@ -2344,13 +2345,14 @@ def test_memory_agent_token_access_update_round_trip_and_rejects_when_inactive(
     matched = store.update_agent_token_access(
         issued.id, "user-content", ["contribute", "read"],
         "nb-content", ["nb-content"], "2027-01-01T00:00:00+00:00", snapshot,
+        allow_answer_links=False,
     )
     assert sorted(matched.scopes) == ["contribute", "read"]
     # ... while a snapshot that is now stale is refused without writing.
     with pytest.raises(AgentTokenAccessConflictError):
         store.update_agent_token_access(
             issued.id, "user-content", ["contribute"], "nb-content",
-            ["nb-content"], None, snapshot,
+            ["nb-content"], None, snapshot, allow_answer_links=False,
         )
     assert store.list_agent_tokens("user-content") == [matched]
     updated = matched
@@ -2359,7 +2361,7 @@ def test_memory_agent_token_access_update_round_trip_and_rejects_when_inactive(
     with pytest.raises(KeyError):
         store.update_agent_token_access(
             issued.id, "user-other", ["contribute"], "nb-content",
-            ["nb-content"], None,
+            ["nb-content"], None, allow_answer_links=False,
         )
 
     # Revoked: rejected, and the previously-saved config is left untouched.
@@ -2367,7 +2369,7 @@ def test_memory_agent_token_access_update_round_trip_and_rejects_when_inactive(
     with pytest.raises(AgentTokenInactiveError) as exc_info:
         store.update_agent_token_access(
             issued.id, "user-content", ["read"], "nb-content",
-            ["nb-content"], None,
+            ["nb-content"], None, allow_answer_links=False,
         )
     assert exc_info.value.reason == "revoked"
     still = store.list_agent_tokens("user-content")[0]
@@ -2388,7 +2390,7 @@ def test_memory_agent_token_access_update_round_trip_and_rejects_when_inactive(
     with pytest.raises(AgentTokenInactiveError) as exc_info:
         store.update_agent_token_access(
             live_token.id, "user-content", ["read"], "nb-content",
-            ["nb-content"], None,
+            ["nb-content"], None, allow_answer_links=False,
         )
     assert exc_info.value.reason == "profile_disabled"
 
@@ -2439,7 +2441,8 @@ def test_memory_agent_token_auth_row_reads_one_snapshot_across_a_concurrent_edit
             if not fired:
                 fired.append(True)
                 store.update_agent_token_access(
-                    issued.id, "user-content", new[0], "nb-content", new[1], None
+                    issued.id, "user-content", new[0], "nb-content", new[1], None,
+                    allow_answer_links=False,
                 )
             return cursor
 

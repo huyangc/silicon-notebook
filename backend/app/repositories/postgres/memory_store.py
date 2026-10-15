@@ -363,7 +363,7 @@ class MemoryStore:
         notebook_ids: Sequence[str],
         expires_at: str | None,
         expected: AgentTokenAccess | None = None,
-        allow_answer_links: bool = False,
+        *, allow_answer_links: bool,
     ) -> AgentTokenSummary:
         # 一个写事务:``FOR UPDATE OF t`` 锁住 token 行,使下面的「读撤销/停用
         # 状态与 expected 前置条件」与「写新配置」之间不会被另一次并发撤销或

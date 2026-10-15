@@ -316,7 +316,7 @@ class MemoryStore:
         notebook_ids: Sequence[str],
         expires_at: str | None,
         expected: AgentTokenAccess | None = None,
-        allow_answer_links: bool = False,
+        *, allow_answer_links: bool,
     ) -> AgentTokenSummary:
         # 一个写事务:sqlite ``write()`` 的进程内写锁串行化了读-判-写,所以下面
         # 的「读撤销/停用状态与 expected 前置条件」与「写新配置」之间不会被另一次

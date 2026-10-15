@@ -4113,7 +4113,7 @@ class MemoryStorePort(Protocol):
         self, token_id: str, owner_id: str, scopes: Sequence[str],
         default_notebook_id: str, notebook_ids: Sequence[str],
         expires_at: str | None, expected: AgentTokenAccess | None = None,
-        allow_answer_links: bool = False,
+        *, allow_answer_links: bool,
     ) -> AgentTokenSummary: ...
     def agent_token_auth_row(self, token_id: str) -> dict[str, Any] | None: ...
     def touch_agent_token(
