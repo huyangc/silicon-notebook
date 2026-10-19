@@ -1607,9 +1607,12 @@ def spreadsheet_prompt_block(
     for index, result in enumerate(results, start=1):
         key = f"k{6000 + index}"
         headers = [column.name for column in result.columns]
+        # Peer runs only (the model field defaults to ""); read with a default
+        # so a duck-typed receipt without the field renders as it always did.
+        library = getattr(result, "notebook_name", "")
         if not append_line(
             f"{key}: [spreadsheet] {result.source_title} · {result.sheet}!{result.range} "
-            + (f"library={result.notebook_name}; " if result.notebook_name else "")
+            + (f"library={library}; " if library else "")
             + f"operation={result.operation}; scanned={result.coverage.scanned_rows}; "
             f"result_rows={result.coverage.total_rows}"
         ):
