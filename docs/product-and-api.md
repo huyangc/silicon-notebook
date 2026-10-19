@@ -2318,7 +2318,10 @@ are stored as 「晋升自：…」 / 「晋升自个人记忆：…」 and are 
 list and detail, the notebook search box, the activity feed, the share preview, MCP source output) maps that leading
 prefix when it reads, through the one mapping `presented_source_title` in `app/domain/promotion_source.py`, and only
 for a source of type `promotion` (or with a promotion source id) — an uploaded document that happens to be titled that
-way keeps its title, and a body that mentions 「晋升」 is never touched. Each evidence entry becomes one element of it. For a
+way keeps its title, and a body that mentions 「晋升」 is never touched. A title search (the sources list filter
+and both legs of the notebook search box) also matches such a source under the current wording: when the query
+contains 「收」 or 「录」 — the only characters that tell the two spellings apart — one more branch matches the mapped
+title, for promotion sources only; every other query keeps its SQL and plan unchanged. Each evidence entry becomes one element of it. For a
 generic promotion its text is the original element's current text read in the approving transaction, otherwise the
 entry's stored excerpt; a Memory promotion's cards keep only the excerpt the member approved, never the element's live
 text. An entry whose original is a member's Memory source is dropped (M1, fail closed), an entry with no text is
