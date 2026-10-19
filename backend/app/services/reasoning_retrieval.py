@@ -1282,6 +1282,32 @@ def local_only_scope_offered() -> bool:
     return not subjectless_run_active()
 
 
+def element_search_offered() -> bool:
+    """本 run 是否向模型提供 ``search_elements`` 动作(prompt 行、schema 枚举、
+    ``allowed_actions`` 三处)。
+
+    对等(全局)模式下元素检索没有联邦通道,生产者整条关着
+    (``retrieval_candidates.retrieve_elements``,D1-4),那种 run 里它只会空手而归,
+    所以不提供。**每条通道一个判据**,不与 PPR 绑成一个「对等模式」布尔:元素臂
+    联邦化之后翻这一个,PPR 不受牵连。执行侧那两道纵深防御(``_element_search_skip``
+    的 peer_mode 跳过、``_first_round_empty_fallback`` 不自动补腿)仍按
+    ``subjectless_run_active`` 直写——它们被引用核验守卫的 ``_ELEMENT_ARM_CLOSED``
+    按字面钉着,联邦化时与生产者那道闸一起改。
+    """
+    return not subjectless_run_active()
+
+
+def ppr_retrieve_offered() -> bool:
+    """本 run 是否提供概念漫游(PPR):reflect 的 ``ppr_retrieve`` 动作(三处同上)
+    与首轮 PPR 播种(含预取)。
+
+    对等(全局)模式下 PPR 走的是按名义 active 缓存的联邦图,生产者整条关着
+    (``graph_retrieval._ppr_retrieve``,D0-5),恒返回空,所以不提供。与
+    ``element_search_offered`` 各自独立,理由见那里。
+    """
+    return not subjectless_run_active()
+
+
 def unsafe_scope_restricted(retrieval) -> bool:
     """Whether non-source-partitioned channels must be disabled.
 
@@ -4530,6 +4556,12 @@ class ReasoningRetriever:
         # 模型必须知道清单里的数不是整库的数(`_run_ceiling_binds`,与传给执行器的
         # 是同一个按 run 记住的判词;只在枚举工具在场时才读,关闭态零 I/O)。
         enumerate_scope = local_only_scope_offered()
+        # 两把逐动作的减法闸:通道本 run 拿不到任何东西时(今天 = 对等 run),
+        # 动作从 prompt/schema/白名单三处消失(`element_search_offered` /
+        # `ppr_retrieve_offered`)。与 `enumerate_scope` 同款在这里现算——判据
+        # 是 run 级模式位,run() 的调用形状一个字都不用改。
+        element_search = element_search_offered()
+        ppr_action = ppr_retrieve_offered()
         source_scoped = bool(enumeration) and self._run_ceiling_binds()
         try:
             messages = [{
@@ -4546,6 +4578,8 @@ class ReasoningRetriever:
                     keyword_search=keyword_search,
                     enumerate_scope=enumerate_scope,
                     source_scoped=source_scoped,
+                    search_elements=element_search,
+                    ppr_retrieve=ppr_action,
                 ),
             }]
             if self.untrusted_evidence:
@@ -4562,6 +4596,8 @@ class ReasoningRetriever:
                     plugin_actions=plugin_actions,
                     keyword_search=keyword_search,
                     enumerate_scope=enumerate_scope,
+                    search_elements=element_search,
+                    ppr_retrieve=ppr_action,
                 ),
                 timeout=self.settings.reasoning_timeout_seconds,
                 max_retries=self.settings.reasoning_max_retries,
@@ -4608,6 +4644,15 @@ class ReasoningRetriever:
             # 都不加,模型硬吐一个插件动作名就按既有的未知动作合同处理
             # (fail_closed 抛错,否则 `invalid_action:<name>` 兜底)。
             ) + project_reflect_actions(plugin_actions).action_names
+            # 逐动作减法闸关着的那个动作与 prompt 行、schema 枚举一起消失;模型
+            # 硬吐一个就走下面既有的未知动作合同,轨迹记 `invalid_action:<name>`。
+            withheld = (
+                (() if element_search else ("search_elements",))
+                + (() if ppr_action else ("ppr_retrieve",))
+            )
+            if withheld:
+                allowed_actions = tuple(
+                    name for name in allowed_actions if name not in withheld)
             action_rejected = action not in allowed_actions
             rejected_action = ""
             if action_rejected:
@@ -5748,6 +5793,16 @@ class ReasoningRetriever:
                          summary=f"初检索得到 {len(collected)} 个候选节点",
                          detail=_initial_detail))
 
+    def _ppr_seed_offered(self) -> bool:
+        """首轮 PPR 播种跑不跑。预取(`_run_first_round`)与播种本身共读这一个判据,
+        两者因此必然成对:不会出现「预取了却无人 join」或「播种时才现查」。
+
+        对等 run 不播种(`ppr_retrieve_offered`):PPR 在那里恒返回空,播一次
+        只会在轨迹上多一步「概念漫游:跨文档检索,得到 0 段原文」。"""
+        return (not self._unsafe_scope_restricted()
+                and self.allow_ppr and self.settings.graph_ppr_enabled
+                and ppr_retrieve_offered())
+
     def _first_round_ppr_seed(
         self, state: "_ReasoningRunState", ppr_future,
     ) -> None:
@@ -5759,8 +5814,7 @@ class ReasoningRetriever:
         chunks = state.chunks
         # PPR seed pass(确定性兜底):flag 开时无条件先跑一次跨文档 PPR,保证对比/跨文档题
         # 至少有一组跨文档 chunk,不赌 agent 是否选 ppr_retrieve。纯图传播、无 LLM、图已缓存。
-        if (not self._unsafe_scope_restricted()
-                and self.allow_ppr and self.settings.graph_ppr_enabled):
+        if self._ppr_seed_offered():
             raise_if_cancelled(self.cancel_event)
             ppr_all = (ppr_future.result() if ppr_future is not None
                        else self.ppr_retrieve(notebook_id, question))
@@ -7153,7 +7207,7 @@ class ReasoningRetriever:
         # 重叠(copy_context 保住 per-user 模型解析的 ContextVar)。在原 seed pass
         # 位置 join,故 seen_chunks 合并时序/trace 顺序与串行版逐位一致;
         # future.result() 重抛异常=与串行抛出同语义。
-        # submit 与下方 seed pass 共用同一 graph_ppr_enabled 条件:只要没有异常
+        # submit 与下方 seed pass 共用同一判据 `_ppr_seed_offered`:只要没有异常
         # 提前跳出,两者必然成对执行。下面单一 try/finally 包住从 submit 之后到
         # seed pass join 为止的整段(plan、初检索、seed pass 三处都在内)——无论
         # 正常返回、plan/初检索抛异常(含 AskCancelled)、还是 ppr_future.result()
@@ -7162,9 +7216,8 @@ class ReasoningRetriever:
         # 无人 join 且池未关闭"的线程泄漏,也不会出现两处 shutdown 各触发一次。
         ppr_future = None
         ppr_pool = None
-        if (not self._unsafe_scope_restricted()
-                and self.allow_ppr and self.settings.graph_ppr_enabled and getattr(
-                self.settings, "reasoning_ppr_prefetch", True)):
+        if self._ppr_seed_offered() and getattr(
+                self.settings, "reasoning_ppr_prefetch", True):
             ppr_pool = ThreadPoolExecutor(max_workers=1)
             ppr_future = ppr_pool.submit(
                 contextvars.copy_context().run,
