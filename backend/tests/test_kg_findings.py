@@ -486,6 +486,18 @@ def test_candidate_generation_memory_per_pair():
     assert peak / generated <= 32, peak / generated
 
 
+def test_generation_count_includes_repeats_and_is_what_the_cap_bounds():
+    """Two sources sharing three prefix concepts: ONE distinct candidate, THREE
+    generations. The cap and the ledger's limit are about generations."""
+    p_src = np.asarray([0, 1, 0, 1, 0, 1], dtype=np.int32)
+    p_can = np.asarray([0, 0, 1, 1, 2, 2], dtype=np.int32)
+    df = np.asarray([2, 2, 2], dtype=np.int32)
+    a, b, generated, truncated = kg_findings._candidate_pairs(p_src, p_can, df, 2, 10)
+    assert (a.tolist(), b.tolist(), generated, truncated) == ([0], [1], 3, False)
+    a, b, generated, truncated = kg_findings._candidate_pairs(p_src, p_can, df, 2, 2)
+    assert (a.size, generated, truncated) == (1, 2, True)
+
+
 def test_the_random_join_fixtures_are_not_trivial(monkeypatch):
     monkeypatch.setattr(contracts, "UBIQUITOUS_SOURCE_COUNT", 6)
     found = [len(_brute_force_pairs(_random_library(seed))) for seed in range(40)]
