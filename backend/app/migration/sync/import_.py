@@ -2531,14 +2531,16 @@ def _preflight(backend: _Backend, conn: Any, context: _Context) -> bool:
     # rows were attributed through the target at import time cannot be
     # re-verified that way once a LATER window has deleted the parent, so
     # re-running a finished package raised instead of short-circuiting.
-    already_applied = any(
-        str(row["status"]) == _STATUS_DONE
+    recorded = [
+        row
         for row in backend.fetch(
             conn,
-            "SELECT status FROM sync_imports WHERE package_id = ?",
+            "SELECT status, report_json FROM sync_imports WHERE package_id = ?",
             (manifest.package_id,),
         )
-    )
+        if str(row["status"]) == _STATUS_DONE
+    ]
+    already_applied = bool(recorded)
     # Row-range validity is still checked in full: it is the package's own
     # internal consistency (``manifest.notebooks`` vs ``rows/notebooks.jsonl``
     # vs every other table's scope column), and a package that lies about its
@@ -2564,6 +2566,15 @@ def _preflight(backend: _Backend, conn: Any, context: _Context) -> bool:
     )
 
     if already_applied:
+        # The short-circuit returns before _knowhow_history_complete, so the
+        # report of this no-op re-run repeats what the run that applied the
+        # package recorded, instead of the ledger's default.
+        stored = _report_document(recorded[0]["report_json"]).get(
+            _KNOWHOW_HISTORY_COMPLETE_KEY
+        )
+        context.ledger.knowhow_history_complete = (
+            stored if isinstance(stored, bool) else manifest.knowhow_history
+        )
         return True
     prior = _prior_imports(backend, conn, manifest.source_env)
     _assert_chain(context, prior)
@@ -2682,6 +2693,9 @@ def _build_group_mapping(
         (str(row.get("id") or ""), str(row.get("name") or ""))
         for row in _iter_lines(context.package_dir / rows_path("groups"))
     ]
+    needed = _groups_this_import_seeds(backend, conn, context)
+    if not package_rows and not needed:
+        return {}
     source_ids_by_name: dict[str, list[str]] = {}
     for group_id, name in package_rows:
         if group_id:
@@ -2693,9 +2707,16 @@ def _build_group_mapping(
         if name in wanted:
             target_ids_by_name.setdefault(name, []).append(str(row["id"]))
 
-    needed = _groups_this_import_seeds(backend, conn, context)
     mapping: dict[str, str] = {}
-    problems: list[str] = []
+    # A grant this import will write may name a group the package does
+    # not carry at all (principal_id has no foreign key, so a source grant can
+    # outlive its group). Its row would otherwise be skipped silently; "not
+    # found" refuses like every other unanswerable group.
+    carried_ids = {group_id for group_id, _name in package_rows if group_id}
+    problems: list[str] = [
+        f"授权引用的群组 {group_id} 不在包内"
+        for group_id in sorted(needed - carried_ids)
+    ]
     for group_id, name in package_rows:
         if not group_id:
             continue

@@ -107,7 +107,7 @@
 | notebook_members | user_id | 跳过该行并记日志 |
 | notebook_grants | principal_id（PRINCIPAL）、created_by | principal 映射不到跳过该行并记日志，everyone 不需要映射；created_by 映射不到置为导入执行者 |
 | groups | created_by、owner_id、invite_created_by | 组按 name 匹配目标端已有组，导入从不建组也不更新组（§4）；三列的规则只为策略表的完备性保留，不可达 |
-| group_members | group_id（GROUP）、user_id、added_by | 成员行只随本次导入创建的组播种，而导入从不建组，所以一律跳过：目标端组的成员名单归目标端 |
+| group_members | group_id（GROUP）、user_id、added_by | 成员行只随本次导入创建的组播种，而导入从不建组，所以导出端干脆不带成员行（`export._EMPTY_ROW_TABLES`：行文件恒为空、表条目照留，源端成员名单与其用户投影都不出源环境）；目标端组的成员名单归目标端 |
 | notebook_bases、notebook_object_schemas、notebook_assets、knowhow_tables、knowhow_milestones | created_by | 映射不到置为导入执行者 |
 | knowhow_cell_code | updated_by | 映射不到置为导入执行者 |
 | sources | uploaded_by | 映射不到置空并记日志（0045 之前的行本来就为空） |
@@ -156,7 +156,8 @@ users 不同步但导入时可能**创建**：见 §4。
   一个、或包内同名组不止一个，导入在认领前（dry run 同样）拒绝并列出组名（「目标端没有名为
   「X」的群组」等），由运维先在目标端建组/改名再重跑；不猜。只被已有镜像的授权引用的组不在
   此列——那些授权边不会再被写入，拒绝它们只会让管理员在目标端删过的组把这本的后续导入永久
-  卡住；这类组名字唯一时照常映射，否则不映射，引用它的行一律跳过并记原因。
+  卡住；这类组名字唯一时照常映射，否则不映射，引用它的行一律跳过并记原因。新建镜像的授权引用了
+  包里根本没有的组（`principal_id` 无外键，源端授权可能比组活得久），同样拒绝并报出组 id。
 - 按 `--create-missing-users` 建的用户一律 `role='user'`（不沿用源端角色，导入不能在目标端
   授出管理员），不建 `user_profiles` 行，走外部认证首次登录同款字段。
 - 导入执行者 `importer_user_id` 默认取目标端最早创建的管理员；没有则硬失败。
@@ -1413,7 +1414,10 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
   报出组名，不猜（§4）。实现：`app/migration/sync/import_.py::_build_group_mapping` /
   `_groups_this_import_seeds`（拒绝只针对会被写入的授权边要用的组），`_map_row`（映射不到目标组
   的 groups 行一律跳过，绝不以源 id 插入）；原先「本包建过的组」的进度标记
-  （`__created__:groups:*`）与它在取代时的转移随之删除。导入报告不再有 `groups_created`。用例：
+  （`__created__:groups:*`）与它在取代时的转移随之删除，导出端也不再带 `group_members` 的行
+  （`export._EMPTY_ROW_TABLES`）。导入报告不再有 `groups_created`。升级注意：旧构建的一次导入若恰好
+  中断在 groups 与 group_members 之间，组已按源 id 建出、成员还没播种；升级后续跑或被取代时这个组
+  照常按名字映射，但成员不会再补——升级前先让在途导入跑完，否则由管理员给该组补成员或删除它。用例：
   `tests/test_sync_import.py`（缺组/目标重名/包内重名拒绝、不需要的缺组不卡后续导入）、
   `tests/postgres/test_sync_import_pg.py::test_users_fold_ascii_case_and_groups_match_by_name_only_pg`。
 - **Knowhow 编辑历史默认不同步，开关可打开。** 开关是导出端的
@@ -1426,7 +1430,8 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
     （`_prunable_tables`）、删除重放（`_delete_replay_tables`）都不碰这两张表，**目标端已有的历史
     原样保留、不删不改**。唯一会让它们消失的是父行消失：源端删了 Knowhow 表或整本笔记本，目标端
     删父行时由外键 `ON DELETE CASCADE`／笔记本删除作业一并带走——这是父行没了，不是覆盖。一个声明
-    不带历史却在 `tables` 里列了它们、或带着它们的删除条目的包，被当成自相矛盾拒绝。
+    不带历史却在 `tables` 里列了它们、或带着它们的删除条目的包，被当成自相矛盾拒绝。冻结的历史在
+    镜像上只能看：镜像本就挡 `knowhow:write`（§5），不会有人在镜像上按旧历史回退当前态。
   - 开：两张表随包走，全量包照常按快照对账（目标端历史与源端一致），增量窗口照常带变化与删除，
     用户列照 §3.2 映射。
   - **增量模式下开关切换的影响。** 历史完整与否按链传递，记在 `sync_imports.report_json` 的

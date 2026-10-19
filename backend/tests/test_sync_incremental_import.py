@@ -2865,3 +2865,18 @@ def test_a_package_that_contradicts_its_knowhow_history_flag_is_refused(baseline
     with pytest.raises(SyncImportError, match="not a table this package carries"):
         _import(baseline["target"], plain, dry_run=True)
 
+
+def test_re_running_an_applied_package_reports_its_recorded_history_state(baseline):
+    """A package already applied short-circuits before the history check;
+    its report must still say what the applying run recorded, not a
+    default."""
+    _add_milestone(baseline["source"]["repo"], _alpha_table(baseline), "mstone-r", "v1", 1)
+    window = _window(baseline)
+    first = _import(baseline["target"], window.package_dir)
+    assert first.knowhow_history_complete is False
+
+    again = _import(baseline["target"], window.package_dir)
+
+    assert again.already_applied is True
+    assert again.knowhow_history_complete is False
+

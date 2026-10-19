@@ -1648,18 +1648,13 @@ def test_the_lease_has_no_transaction_floor_on_sqlite(baseline, monkeypatch):
 # ------------------------------------------------- GLOBAL parents seed with
 
 
-def test_a_membership_change_carries_its_group_row(baseline):
-    """``group_members.group_id`` references ``groups.id`` on both backends.
-    The GLOBAL seed set is resolved from the notebooks this package touches,
-    so a window that only edited a MEMBERSHIP touches none and the seed comes
-    out empty -- and the package would carry a member row whose group is
-    nowhere in the chain.
+def test_a_membership_change_travels_nowhere(baseline):
+    """The importer never creates a group and so never seeds a membership
+    (design doc §4/§11), so a window that only edited a group's roster
+    carries neither the member row nor, on its account, the group: the
+    rows file stays empty and no notebook is touched.
 
-    The group's id is in ``group_members``' own sync key, which is why it can
-    be collected before ``groups`` is written (copy_rank puts the parent
-    first).
-
-    变异验证: 去掉 ``_GLOBAL_KEY_PARENTS`` 那一趟(不把父键并进种子集合),
+    变异验证: 让 ``_EMPTY_ROW_TABLES`` 为空(group_members 照常压缩导出),
     本条必须报红。
     """
     repo = baseline["repo"]
@@ -1683,10 +1678,9 @@ def test_a_membership_change_carries_its_group_row(baseline):
     report = _export(baseline["settings"], baseline["out"])
 
     assert report.notebooks == (), "the window must touch no notebook at all"
-    members = {(row["group_id"], row["user_id"])
-               for row in _rows(report.package_dir, "group_members")}
-    assert ("grp-orphan", "member-1") in members
-    assert "grp-orphan" in _ids(report.package_dir, "groups")
+    assert _rows(report.package_dir, "group_members") == []
+    assert report.table_counts["group_members"] == 0
+    assert "grp-orphan" not in _ids(report.package_dir, "groups")
 
 
 def test_a_new_group_grant_carries_its_group_row(baseline):
