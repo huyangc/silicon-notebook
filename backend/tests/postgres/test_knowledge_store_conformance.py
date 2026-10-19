@@ -35,6 +35,8 @@ from app.services.kg_analysis_precompute import (
     artifact_cluster_seq_is_unknown,
     stamp_cluster_seq,
 )
+from app.domain.kg_analysis_contracts import ARTIFACT_FINDINGS, stamp_ledger_contract
+from app.domain.kg_findings_contracts import ALL_RULES, RULES_VERSION
 from app.services.knowledge_contracts import (
     KG_COMMUNITY_EDGES_MAX,
     KG_SOURCE_PAGE_MAX,
@@ -4065,10 +4067,21 @@ def _analysis_payloads(
     """
     payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
     payloads[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 2}
+    payloads[ARTIFACT_FINDINGS] = _empty_findings_payload()
     payloads.update(overrides)
-    return stamp_cluster_seq(
+    # 账本契约戳(问题清单设计 2026-10-19 §7.4)同样照生产路径盖,不手抄。
+    return stamp_ledger_contract(stamp_cluster_seq(
         payloads, cluster_seq, partition_rebuilt=partition_rebuilt
-    )
+    ))
+
+
+def _empty_findings_payload() -> dict:
+    """与空明细对得上账的问题清单 payload(每条规则 persisted = 0)。"""
+    return {
+        "rules_version": RULES_VERSION,
+        "rules": {rule: {"status": "ran", "total": 0, "persisted": 0, "truncated": False}
+                  for rule in ALL_RULES},
+    }
 
 
 def _analysis_object(object_id: str, *, notebook: str = ANALYSIS_NB,
@@ -4954,7 +4967,7 @@ def test_precomputed_artifacts_round_trip_identically_on_postgres(
     unified = _analysis_unified_store(knowledge_harness)
     edges = [("cm-big", "cm-small", 7)]
     profiles = [("source-golden", 12, 9, "cm-big", 0.75, 2, 0.5)]
-    payloads = stamp_cluster_seq({
+    payloads = stamp_ledger_contract(stamp_cluster_seq({
         ARTIFACT_COMMUNITY_EDGES: {"level": 0, "edges": 1, "edges_total": 1,
                                    "truncated": False, "edge_limit": 200000,
                                    "cross_weight": 7, "intra_weight": 3,
@@ -4966,7 +4979,8 @@ def test_precomputed_artifacts_round_trip_identically_on_postgres(
         ARTIFACT_CLUSTER_HISTOGRAM: unified.cluster_size_histogram(ANALYSIS_NB),
         ARTIFACT_LARGEST_CLUSTERS: unified.largest_clusters(ANALYSIS_NB, 20),
         ARTIFACT_RELATION_PROVENANCE: unified.relation_provenance_counts(ANALYSIS_NB),
-    }, 19, partition_rebuilt=True)
+        ARTIFACT_FINDINGS: _empty_findings_payload(),
+    }, 19, partition_rebuilt=True))
     with knowledge_harness.database.write() as connection:
         unified.replace_kg_analysis_artifacts(
             connection, ANALYSIS_NB, 41, edges, profiles, payloads, NOW,

@@ -245,7 +245,6 @@ def check_artifact_payloads(payloads: Mapping[str, dict]) -> None:
     那一份的「账本 persisted == 明细行数」要看明细行,所以由 store 写入口另调
     `kg_findings_contracts.check_findings_ledger`。
     """
-    check_ledger_contract(payloads)
     unknown = sorted(set(payloads) - _ARTIFACT_KINDS)
     if unknown:
         raise ValueError(
@@ -258,6 +257,8 @@ def check_artifact_payloads(payloads: Mapping[str, dict]) -> None:
             f"KG 分析产物账本:缺少必需的 kind {missing}。账本是整批重写的,"
             "少写一行 = 下游把它读成「从来没算过」,而且不会有任何报错"
         )
+    # kind 集合先对,再查每一份的契约戳:错在「写了不认识的 kind」时报那一条。
+    check_ledger_contract(payloads)
     if ARTIFACT_SOURCE_PROFILES not in payloads:
         boards = int(payloads[ARTIFACT_COMMUNITY_EDGES].get("communities", 0) or 0)
         if boards:
