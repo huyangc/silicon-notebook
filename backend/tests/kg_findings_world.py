@@ -20,6 +20,12 @@ The world, by rule:
   → F4. The "Llama 3.1" canonical's NAME comes from a knowhow member
   (its spelling "Llama-3.1" is never allowed into a row or the payload: names
   shown are the visible members' own);
+  A second knowhow member ("Llama three-one") gives that canonical a v1 seed
+  no visible name has: decisions keyed by it must still apply;
+* "Mistral base" (core-2) sits in a canonical NAMED by a knowhow object
+  ("Mistral 7.1"), which squash-collides with "Mistral 71" (core-3) on canonical
+  names only: the visible names do not reproduce it, so no F4 row may appear
+  for it (``groups_unreproducible``) — never under the hidden spelling;
 * "Q-Former" (core-2) / "Qformer" (core-3): one v2 seed, two v1 seeds → S1;
 * claims of core-0 with no relation → F5 (isolated objects).
 
@@ -40,6 +46,17 @@ T0 = "2026-10-19T08:00:00.123456+00:00"
 # engine judges F4 on canonical names), so it is a plausible name — the test is
 # that THIS spelling never reaches a row or the payload.
 KNOWHOW_SECRET = "Llama-3.1"
+# A second hidden member of the same canonical whose v1 seed is unlike any
+# visible name's: a stored decision keyed by IT must still count (seeds of
+# hidden members decide, design §4.4).
+KNOWHOW_HIDDEN_SEED_NAME = "Llama three-one"
+# A canonical named ONLY by a knowhow object: its visible member ("Mistral
+# base") does not share the squash key, so the F4 group it would form with
+# "Mistral 71" is not reproducible from visible names and must be dropped —
+# never shown under the hidden spelling.
+KNOWHOW_ONLY_NAME = "Mistral 7.1"
+_CANONICAL_OVERRIDE = {"Mistral base": KNOWHOW_ONLY_NAME}
+SECRETS = (KNOWHOW_SECRET, KNOWHOW_HIDDEN_SEED_NAME, KNOWHOW_ONLY_NAME)
 
 
 def canonical_of(name: str) -> str:
@@ -71,8 +88,8 @@ def _concept_names() -> Dict[str, List[str]]:
     names = {f"src-core-{i}": pool[8 * i: 8 * i + 12] for i in range(4)}
     names["src-core-0"] = names["src-core-0"] + ["Llama 3.1"]
     names["src-core-1"] = names["src-core-1"] + ["Llama 31"]
-    names["src-core-2"] = names["src-core-2"] + ["Q-Former"]
-    names["src-core-3"] = names["src-core-3"] + ["Qformer"]
+    names["src-core-2"] = names["src-core-2"] + ["Q-Former", "Mistral base"]
+    names["src-core-3"] = names["src-core-3"] + ["Qformer", "Mistral 71"]
     names["src-off"] = [f"Unrelated topic {i:02d}" for i in range(12)]
     shared_dup = pool[0:6] + [f"Duplicate concept {i:02d}" for i in range(6)]
     names["src-dup-a"] = list(shared_dup)
@@ -126,13 +143,20 @@ def seed_world(repo, *, postgres: bool, community_min_size: int = 2) -> World:
             for name in concept_names:
                 object_id = obj(source_id, name)
                 objects[(source_id, name)] = object_id
-                canonical_id = canonical_of(name)
-                canonical_name = KNOWHOW_SECRET if name == "Llama 3.1" else name
+                canonical_name = _CANONICAL_OVERRIDE.get(name, name)
+                canonical_id = canonical_of(canonical_name)
+                if name == "Llama 3.1":
+                    canonical_name = KNOWHOW_SECRET
                 world.canonical_names[canonical_id] = canonical_name
                 cluster(object_id, canonical_id, canonical_name)
-        # the knowhow member that names the "Llama 3.1" canonical
-        secret = obj("src-kh", KNOWHOW_SECRET)
-        cluster(secret, canonical_of("Llama 3.1"), KNOWHOW_SECRET)
+        # the knowhow members: the one that names the "Llama 3.1" canonical, one
+        # more of it with its own v1 seed, and the one naming "Mistral base"'s
+        for name, canonical_id, canonical_name in (
+            (KNOWHOW_SECRET, canonical_of("Llama 3.1"), KNOWHOW_SECRET),
+            (KNOWHOW_HIDDEN_SEED_NAME, canonical_of("Llama 3.1"), KNOWHOW_SECRET),
+            (KNOWHOW_ONLY_NAME, canonical_of(KNOWHOW_ONLY_NAME), KNOWHOW_ONLY_NAME),
+        ):
+            cluster(obj("src-kh", name), canonical_id, canonical_name)
         # isolated claims (F5): no relation, no cluster row
         for k in range(3):
             obj("src-core-0", f"Lonely claim {k}", object_type="claim")
