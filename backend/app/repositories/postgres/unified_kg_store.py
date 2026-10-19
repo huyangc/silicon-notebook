@@ -555,6 +555,68 @@ class UnifiedKgStore:
 
     @staticmethod
     def community_graph_rows(db: Any, notebook_id: str):
+        """``(names, relations)``:``names`` 是 canonical → 名称的**已物化**小字典,
+        ``relations`` 是 canonical 边图 ``(s, t)`` 的**服务端流式游标**(惰性生成器)。
+
+        ⚠ **关系这一条必须走 `cursor().stream()`,不能用 `db.execute()`**(与
+        `source_canonical_rows` 同一条理由、同一种修法)。psycopg3 的普通游标在
+        `execute()` 返回时就把**整个结果集**收进了 libpq 的 `PGresult` —— 那是 C 层缓冲,
+        `tracemalloc` 看不见,只有 RSS 能。这条查询的行数 = 本 notebook 的关系数(生产约
+        836 万),缓冲在 `rebuild_communities` 建图**开始前**就整份落在客户端,迭代结束后
+        调用方才把它收进列式 int32 边表 —— 所以那份客户端缓冲是纯额外的一份,叠在建图的
+        内存峰值底下。
+
+        本机真实 PG 库(`silicon_notebook_local_pg16_live`,notebook `nb-b37185f4ae`,
+        51,617 条关系)独立子进程实测:只读连接;探针把 `names` 那条小查询换成空集,量的
+        只是关系结果集;数字是消费完整个结果集后的 RSS 增量,每个形态各 5 个独立进程:
+
+            execute(客户端缓冲)   RSS +4.3 / +2.5 / +5.6 / +5.3 / +6.8 MB
+            cursor().stream()     RSS +0.0 / +0.0 / +0.0 / +0.0 / +0.0 MB
+
+        ⚠ 这是**形态**证据,**不能**线性外推成生产结论:这里只有 5 万行、生产是它的
+        ~160 倍,本机也没有生产规模的 PG 库。它证明的是 `execute` 的客户端缓冲随行数
+        增长、`stream` 不增长。耗时方面同一台机器上 `stream` 每行多约 0.2 µs(调用方真实
+        循环体 ~1.9–2.0 → ~2.1–2.3 µs/行),按 836 万行是秒级,不是回退。
+
+        行序与口径**一字不动**:SQL 文本、参数、`ORDER BY kr.id COLLATE "C"` 都与
+        `execute` 形态逐字相同 —— Louvain 对边序敏感,行序漂了就是已部署库的板块划分全
+        漂(见 `rebuild_communities` 里「首次出现序」那段说明)。`stream()` 只改
+        「结果怎么到客户端」,不改「服务端算出什么」。
+
+        两侧形态**刻意分岔**:SQLite 侧不用改 —— `sqlite3` 的游标本来就是惰性取行,没有
+        「整个结果集先收进客户端缓冲」这一步;parity 要求的是语义等价(同一批 `(s, t)`、
+        同一个行序),不要求 SQL 文本或游标形态相同。对等守卫:
+        `tests/postgres/test_community_graph_rows_twin_pg.py` 在同一夹具上逐行比对两侧
+        (含顺序),本侧的 `test_community_graph_rows_do_not_buffer_the_whole_result_on_postgres`
+        钉住「返回的是 `stream()` 的生成器」。
+
+        `stream()` 用 libpq 的单行模式,不需要 named cursor、不需要显式事务(named cursor
+        还会改变规划:`DECLARE CURSOR` 按 `cursor_tuple_fraction` 偏向快速出首行,这条
+        `ORDER BY` 查询的计划可能因此变);游标从连接继承 `dict_row`,所以调用方按键
+        取值的写法两侧一致。它是**惰性**的:SQL 要到**第一次**取行才发出去,不是本方法
+        返回时。代价:
+          · 整个迭代期间占住这条连接(psycopg 的连接锁与 libpq 的 ACTIVE 状态都在迭代
+            期间保持,别的语句发不进来),也不能在 pipeline 模式下用(本仓库不用 pipeline);
+          · 服务端语句要等客户端读完最后一行才算结束,所以连接上的 `statement_timeout`
+            计时覆盖**整个消费期**(`execute` 形态下它只覆盖服务端算完并发完缓冲的那段)。
+            实测(同一个 notebook,探针用去掉 Memory 谓词的同形查询):`statement_timeout=
+            1.5s`、消费方中途停 3 s —— `execute` 形态照常读完,`stream` 形态继续取行
+            时 `QueryCanceled`(已读 5,218 行)。这条查询带 `ORDER BY`,服务端
+            先排完才开始发行,消费期只是它之后的那一段尾巴;`source_canonical_rows` 的消费期
+            是同一量级(878 万行),部署的超时必须同时盖住两者。
+
+        调用方契约(唯一调用点是 `KnowledgeLifecycleService.rebuild_communities`):
+          · 迭代必须在拿到 `db` 的那个 `with self._connect() as db:` 块**之内**跑完。
+            `rebuild_communities` 正是这么写的:`names, graph_rows = …` 与消费它的
+            `for` 循环在同一个 `with` 里,循环体只做 dict 查找和 `edge_builder.add`,
+            不再向这条连接发任何语句。`names` 在流开始之前就已物化完(它是第一条语句、
+            先于流占线),所以不受这条限制。
+          · ⚠ 流被**中途丢下**时,离开 `with` 会永久阻塞:流挂起期间连接是 ACTIVE 状态,
+            连接释放时的 `rollback()` 在 psycopg 3.3 里不返回(裸 psycopg、6 行结果集
+            实测同样复现)。丢下的方式有两种 —— 循环里抛异常、`break`;而生成器只要还被
+            栈帧里的局部变量引用着就不会被回收。生成器被 `close()` 或最后一个引用释放后
+            一切正常(同样实测)。所以消费方要么跑完、要么在离开 `with` 之前 `close()` 它。
+        """
         names = {
             row["canonical_id"]: row["canonical_name"]
             for row in db.execute(
@@ -563,7 +625,7 @@ class UnifiedKgStore:
                 (notebook_id, notebook_id),
             )
         }
-        relations = db.execute(
+        relations = db.cursor().stream(
             f"SELECT COALESCE(cs.canonical_id, kr.source_object_id) AS s, "
             f"       COALESCE(ct.canonical_id, kr.target_object_id) AS t "
             f"FROM knowledge_relations kr "
