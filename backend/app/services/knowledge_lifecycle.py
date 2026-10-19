@@ -5972,9 +5972,12 @@ class KnowledgeLifecycleService:
                     self.unified_kg.stamp_cluster_code_version(
                         db, notebook_id, input_version, code_version)
             except Exception as exc:  # noqa: BLE001
+                # Class name only: EventLogger.emit persists events unredacted,
+                # and exception text can carry internal paths or database
+                # diagnostics (AGENTS.md: keep exception text out of logs).
                 self.event_log.emit({"kind": "cluster_code_version_stamp_failed",
                                      "notebook_id": notebook_id,
-                                     "error": str(exc)[:200]})
+                                     "error_class": type(exc).__name__})
 
     @notebook_model_artifact_scope
     def rebuild_unified_kg(self, notebook_id: str,
