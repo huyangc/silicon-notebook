@@ -27,7 +27,12 @@ from app.migration.sync.export import (
     SyncExportError,
     export_notebooks,
 )
-from app.migration.sync.manifest import MappingKind, spec_for, synced_tables
+from app.migration.sync.manifest import (
+    MappingKind,
+    carried_tables,
+    spec_for,
+    synced_tables,
+)
 from app.migration.sync.package import (
     BYTES_KEY,
     CHECKSUMS_NAME,
@@ -358,7 +363,7 @@ def test_package_has_every_declared_file(seeded, tmp_path):
     assert not package.with_name(package.name + ".tmp").exists()
     for name in (MANIFEST_NAME, CHECKSUMS_NAME, USERS_NAME, DELETES_NAME, KG_EPOCHS_NAME):
         assert (package / name).is_file(), name
-    for table in synced_tables():
+    for table in carried_tables(knowhow_history=False):
         assert (package / rows_path(table)).is_file(), table
     assert (package / DELETES_NAME).read_text() == ""
     assert (package / KG_EPOCHS_NAME).read_text() == ""
@@ -377,7 +382,10 @@ def test_manifest_records_the_full_export_contract(seeded, tmp_path):
     assert manifest["notebooks"] == [seeded["exported"]]
     assert set(manifest["schema_pair"]) == {"sqlite_version", "postgres_version"}
     assert manifest["embed_runtime_dim"] == seeded["settings"].embed_runtime_dim
-    assert set(manifest["tables"]) == set(synced_tables())
+    assert set(manifest["tables"]) == set(carried_tables(knowhow_history=False))
+    # Off by default: the package says so, and carries no history table.
+    assert manifest["knowhow_history"] is False
+    assert report.knowhow_history is False
     assert manifest["checksums_sha256"] == hashlib.sha256(
         (package / CHECKSUMS_NAME).read_bytes()
     ).hexdigest()
@@ -507,7 +515,7 @@ def test_the_unexported_notebook_contributes_no_row_anywhere(seeded, tmp_path):
     other = seeded["other"]
 
     leaked: list[str] = []
-    for table in synced_tables():
+    for table in carried_tables(knowhow_history=False):
         for row in _rows(report.package_dir, table):
             if other in {value for value in row.values() if isinstance(value, str)}:
                 leaked.append(f"{table}: {row}")
@@ -815,7 +823,7 @@ def test_ordinal_is_never_exported(seeded, tmp_path):
 
     for table, entry in manifest["tables"].items():
         assert "ordinal" not in entry["columns"], table
-    for table in synced_tables():
+    for table in carried_tables(knowhow_history=False):
         for row in _rows(report.package_dir, table):
             assert "ordinal" not in row, table
 
@@ -947,7 +955,7 @@ def test_users_is_closed_over_every_identity_column_in_the_package(seeded, tmp_p
     }
 
     referenced: set[str] = set()
-    for table in synced_tables():
+    for table in carried_tables(knowhow_history=False):
         spec = spec_for(table)
         user_columns = [
             c.name for c in spec.mapped_columns if c.kind is MappingKind.USER

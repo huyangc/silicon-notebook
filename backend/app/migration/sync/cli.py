@@ -193,6 +193,7 @@ def _export_report_as_json(report: ExportReport) -> dict[str, Any]:
         "empty": report.empty,
         "warnings": list(report.warnings),
         "missing_files": list(report.missing_files),
+        "knowhow_history": report.knowhow_history,
     }
 
 
@@ -239,6 +240,14 @@ def _cmd_export(args: argparse.Namespace, settings: Settings) -> int:
         print("水位未推进")
     if report.empty:
         print("窗口为空，仍产出空增量包；水位已记录。")
+    print(
+        "Knowhow 编辑历史: "
+        + (
+            "随包导出"
+            if report.knowhow_history
+            else "未导出（SILICON_NOTEBOOK_SYNC_KNOWHOW_HISTORY 关闭，只带当前态）"
+        )
+    )
     print(f"笔记本: {len(report.notebooks)} 个")
     if report.deleted_notebooks:
         print(f"已删除的笔记本: {len(report.deleted_notebooks)} 个")
@@ -312,6 +321,10 @@ def _print_import_summary(report: ImportReport) -> None:
     print(f"包 id: {report.package_id}（来自 {report.source_env}）")
     base_note = f"，base={report.base_package_id}" if report.base_package_id else ""
     print(f"模式: {report.mode}{base_note}")
+    print(
+        "Knowhow 编辑历史: "
+        + ("随包引入" if report.knowhow_history else "包内未带，本环境已有的历史保持不变")
+    )
     print(f"笔记本: {len(report.notebooks)} 个")
     if not report.dry_run:
         # dry-run 从不触达行/文件应用阶段，tables/files_copied 恒为空——打印它们
@@ -335,9 +348,6 @@ def _print_import_summary(report: ImportReport) -> None:
         f"用户映射: 匹配 {len(mapping.matched)}、新建 {len(mapping.created)}、"
         f"未匹配 {len(mapping.unmatched)}"
     )
-    if report.groups_created:
-        label = "将新建组" if report.dry_run else "新建组"
-        print(f"{label}: {', '.join(sorted(report.groups_created))}")
     if not report.dry_run:
         print(f"文件数: {report.files_copied}")
     if not report.dry_run and report.mode == MODE_INCREMENTAL:

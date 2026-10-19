@@ -72,7 +72,6 @@ def _empty_import_report(**overrides) -> ImportReport:
         skipped_rows=(),
         skipped_row_total=0,
         user_mapping=UserMappingResult(matched={}, created={}, unmatched=()),
-        groups_created=(),
         files_copied=0,
         warnings=(),
     )
@@ -613,7 +612,9 @@ def test_import_json_uses_report_as_json(tmp_path, monkeypatch, capsys):
         "scale_rebuild_mode": "auto",
         "scale_rebuild_note": None,
     }
-    assert payload["user_mapping"] == {"matched": 1, "created": [], "unmatched": ["carol"]}
+    assert payload["user_mapping"] == {
+        "matched": 1, "created": [], "unmatched": ["carol"], "case_folded": [],
+    }
 
 
 def test_import_resume_and_verify_files_are_forwarded(tmp_path, monkeypatch):
@@ -656,7 +657,6 @@ def test_import_real_run_human_output_includes_tables_and_files(
         notebooks=("nb-1",),
         tables={"sources": TableOutcome(inserted=2, updated=1)},
         files_copied=5,
-        groups_created=("acme",),
     )
     monkeypatch.setattr(cli, "import_package", lambda *a, **k: report)
     exit_code = cli.main(["import", str(tmp_path / "pkg")])
@@ -665,8 +665,9 @@ def test_import_real_run_human_output_includes_tables_and_files(
     assert "== 预检模式" not in out
     assert "逐表结果" in out
     assert "文件数: 5" in out
-    assert "新建组: acme" in out
-    assert "将新建组" not in out
+    # The import never creates a group (design doc §4), so there is no
+    # "groups created" line to print in either mode.
+    assert "新建组" not in out
 
 
 def test_import_dry_run_human_output_banner_first_and_skips_table_and_file_lines(
@@ -676,7 +677,6 @@ def test_import_dry_run_human_output_banner_first_and_skips_table_and_file_lines
     report = _empty_import_report(
         dry_run=True,
         notebooks=("nb-1",),
-        groups_created=("acme",),
     )
     monkeypatch.setattr(cli, "import_package", lambda *a, **k: report)
     exit_code = cli.main(["import", str(tmp_path / "pkg"), "--dry-run"])
@@ -686,8 +686,7 @@ def test_import_dry_run_human_output_banner_first_and_skips_table_and_file_lines
     assert lines[0] == "== 预检模式（--dry-run）：以下是预览，未写入任何数据 =="
     assert "逐表结果" not in out
     assert "文件数" not in out
-    assert "将新建组: acme" in lines
-    assert "新建组: acme" not in lines
+    assert "新建组" not in out
 
 
 def test_import_prints_every_warning_including_sqlite_stop_service_hint(

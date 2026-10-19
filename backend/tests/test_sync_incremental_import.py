@@ -309,6 +309,15 @@ def baseline(tmp_path_factory, tmp_path):
         source_repo.close()
 
 
+def _carry_knowhow_history(baseline) -> None:
+    """Turn the SOURCE's SILICON_NOTEBOOK_SYNC_KNOWHOW_HISTORY on for the
+    windows this test exports. The Knowhow history tables are the only synced
+    tables besides memory with a secondary unique key, which is what the
+    tests calling this exercise; with the switch at its default (off) they
+    would not travel at all."""
+    baseline["source"]["settings"].sync_knowhow_history = True
+
+
 def _window(baseline) -> ExportReport:
     report = _export(baseline["source"], baseline["out"])
     assert report.mode == MODE_INCREMENTAL, "the fixture's capture gate is open"
@@ -1909,6 +1918,7 @@ def test_a_row_deleted_and_recreated_under_the_same_business_key_imports(
 
     变异验证: 把 ``_import`` 的增量相位序改回 3b 先于 3c, 本条报红
     (``_assert_no_unique_key_collision`` 中止导入)。"""
+    _carry_knowhow_history(baseline)
     repo = baseline["source"]["repo"]
     mirror = baseline["target"]["repo"]
     table_id = _one(
@@ -2620,6 +2630,7 @@ def test_a_collision_outside_the_source_authoritative_tables_still_refuses(
     environments with no rule saying which wins, and the import still refuses.
 
     变异验证: 把 ``resolve_collisions`` 的表集合放宽成所有表, 本条报红。"""
+    _carry_knowhow_history(baseline)
     repo = baseline["source"]["repo"]
     mirror = baseline["target"]["repo"]
     table_id = _one(
@@ -2650,3 +2661,207 @@ def test_a_collision_outside_the_source_authoritative_tables_still_refuses(
         mirror, "SELECT COUNT(*) FROM knowhow_milestones WHERE id=?",
         ("mstone-target",),
     ) == 1
+
+
+# --------------------------------------- Knowhow edit history switch (§11)
+
+
+_HISTORY = ("knowhow_milestones", "knowhow_changes")
+
+
+def _alpha_table(baseline) -> str:
+    return _one(
+        baseline["source"]["repo"],
+        "SELECT id FROM knowhow_tables WHERE notebook_id=?",
+        (baseline["alpha"],),
+    )["id"]
+
+
+def _history_counts(repo, table_id: str) -> dict[str, int]:
+    return {
+        table: _count(repo, f"SELECT COUNT(*) FROM {table} WHERE table_id=?", (table_id,))
+        for table in _HISTORY
+    }
+
+
+def _add_milestone(repo, table_id: str, milestone_id: str, name: str, seq: int) -> None:
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowhow_milestones(id,table_id,seq,name,note,"
+            "created_by,created_at) VALUES(?,?,?,?,'','user-local',?)",
+            (milestone_id, table_id, seq, name, MOMENT),
+        )
+
+
+def _add_row(repo, table_id: str, value: str) -> None:
+    columns = repo.get_knowhow_table(table_id)["columns"]
+    repo.add_knowhow_row(
+        table_id, {column["id"]: value for column in columns}, actor="user-local"
+    )
+
+
+def test_the_knowhow_history_stays_home_by_default(baseline):
+    """User ruling 2026-10-19 (§11): the history is off unless the exporting
+    environment turns SILICON_NOTEBOOK_SYNC_KNOWHOW_HISTORY on. The full
+    baseline and every window then carry the tables' current state only --
+    no history row, no history delete, not even an empty rows file -- and
+    the package says so."""
+    table_id = _alpha_table(baseline)
+    source = baseline["source"]["repo"]
+    mirror = baseline["target"]["repo"]
+    assert _history_counts(source, table_id)["knowhow_changes"] >= 1
+    full = baseline["full"].package_dir
+    assert _manifest(full)["knowhow_history"] is False
+    for table in _HISTORY:
+        assert table not in _manifest(full)["tables"]
+        assert not (full / rows_path(table)).exists()
+    assert _history_counts(mirror, table_id) == {table: 0 for table in _HISTORY}
+
+    _add_milestone(source, table_id, "mstone-home", "v1", 1)
+    _add_row(source, table_id, "second value")
+    window = _window(baseline)
+
+    manifest = _manifest(window.package_dir)
+    assert manifest["knowhow_history"] is False and window.knowhow_history is False
+    assert not set(_HISTORY) & set(manifest["tables"])
+    assert not [e for e in _deletes(window.package_dir) if e["table"] in _HISTORY]
+    report = _import(baseline["target"], window.package_dir)
+    assert report.error == ""
+    assert report.knowhow_history is False
+    assert report.knowhow_history_complete is False
+    # The current state still travels: the new row is there, its history not.
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM knowhow_rows WHERE table_id=?", (table_id,)
+    ) == 2
+    assert _history_counts(mirror, table_id) == {table: 0 for table in _HISTORY}
+
+
+def test_history_already_at_the_target_survives_packages_that_leave_it_out(baseline):
+    """Turning the switch OFF after it was on: what the mirror already holds
+    is neither deleted nor overwritten -- not by a window (the source's
+    history deletes never travel), and not by a full snapshot's
+    reconciliation (it only prunes the tables the package carries). Only the
+    parent going away takes it: a deleted Knowhow table cascades."""
+    table_id = _alpha_table(baseline)
+    source = baseline["source"]["repo"]
+    mirror = baseline["target"]["repo"]
+
+    _carry_knowhow_history(baseline)
+    _add_milestone(source, table_id, "mstone-kept", "v1", 1)
+    carried = _window(baseline)
+    assert carried.knowhow_history is True
+    assert _import(baseline["target"], carried.package_dir).error == ""
+    held = _history_counts(mirror, table_id)
+    assert held["knowhow_milestones"] == 1
+
+    baseline["source"]["settings"].sync_knowhow_history = False
+    with source._write() as db:
+        db.execute("DELETE FROM knowhow_milestones WHERE id='mstone-kept'")
+    _add_milestone(source, table_id, "mstone-later", "v2", 2)
+    _add_row(source, table_id, "after the switch")
+    window = _window(baseline)
+    assert _import(baseline["target"], window.package_dir).error == ""
+    assert _history_counts(mirror, table_id) == held
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM knowhow_milestones WHERE id='mstone-kept'"
+    ) == 1
+
+    full = _export(baseline["source"], baseline["out"], full=True)
+    assert full.mode == MODE_FULL and full.knowhow_history is False
+    report = _import(baseline["target"], full.package_dir)
+    assert report.error == ""
+    assert _history_counts(mirror, table_id) == held
+
+    repo_table = source.get_knowhow_table(table_id)
+    assert repo_table is not None
+    with source._write() as db:
+        db.execute("DELETE FROM knowhow_tables WHERE id=?", (table_id,))
+    gone = _window(baseline)
+    assert _import(baseline["target"], gone.package_dir).error == ""
+    assert _count(mirror, "SELECT COUNT(*) FROM knowhow_tables WHERE id=?", (table_id,)) == 0
+    assert _history_counts(mirror, table_id) == {table: 0 for table in _HISTORY}
+
+
+def test_turning_the_history_on_mid_chain_is_partial_until_a_full_package(baseline):
+    """Turning the switch ON after a stretch with it off: a window brings
+    only what changed since its base, so what changed while it was off never
+    arrives. Every window continuing such a base says so (the incompleteness
+    is carried down the chain, not only reported once), and one full package
+    with the switch on makes the mirror's history equal the source's."""
+    table_id = _alpha_table(baseline)
+    source = baseline["source"]["repo"]
+    mirror = baseline["target"]["repo"]
+    _add_milestone(source, table_id, "mstone-while-off", "v1", 1)
+    off = _window(baseline)
+    assert _import(baseline["target"], off.package_dir).error == ""
+
+    _carry_knowhow_history(baseline)
+    _add_milestone(source, table_id, "mstone-first-on", "v2", 2)
+    first = _import(baseline["target"], _window(baseline).package_dir)
+    assert first.error == "" and first.knowhow_history is True
+    assert first.knowhow_history_complete is False
+    assert any("sync export --full" in warning for warning in first.warnings)
+    _add_milestone(source, table_id, "mstone-second-on", "v3", 3)
+    second = _import(baseline["target"], _window(baseline).package_dir)
+    assert second.knowhow_history_complete is False
+    assert any("sync export --full" in warning for warning in second.warnings)
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM knowhow_milestones WHERE id='mstone-while-off'"
+    ) == 0
+
+    full = _export(baseline["source"], baseline["out"], full=True)
+    healed = _import(baseline["target"], full.package_dir)
+    assert healed.error == "" and healed.knowhow_history_complete is True
+    assert not any("sync export --full" in warning for warning in healed.warnings)
+    assert _history_counts(mirror, table_id) == _history_counts(source, table_id)
+    row = _one(
+        mirror,
+        "SELECT report_json FROM sync_imports WHERE package_id=?",
+        (healed.package_id,),
+    )
+    recorded = json.loads(row["report_json"])
+    assert recorded["knowhow_history"] is True
+    assert recorded["knowhow_history_complete"] is True
+
+    _add_milestone(source, table_id, "mstone-after-heal", "v4", 4)
+    after = _import(baseline["target"], _window(baseline).package_dir)
+    assert after.knowhow_history_complete is True
+    assert not any("sync export --full" in warning for warning in after.warnings)
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM knowhow_milestones WHERE id='mstone-after-heal'"
+    ) == 1
+
+
+def test_a_package_that_contradicts_its_knowhow_history_flag_is_refused(baseline):
+    """``knowhow_history=false`` is what lets the target's history alone, so a
+    package claiming it while still listing a history table -- or carrying a
+    delete for one -- is refused rather than half believed."""
+    table_id = _alpha_table(baseline)
+    source = baseline["source"]["repo"]
+    _carry_knowhow_history(baseline)
+    _add_milestone(source, table_id, "mstone-x", "v1", 1)
+    carried = _window(baseline).package_dir
+    document = _manifest(carried)
+    document["knowhow_history"] = False
+    _write_manifest(carried, document)
+    _reseal(carried)
+    with pytest.raises(SyncImportError, match="contradicts itself"):
+        _import(baseline["target"], carried, dry_run=True)
+
+    baseline["source"]["settings"].sync_knowhow_history = False
+    with source._write() as db:
+        db.execute("DELETE FROM knowhow_milestones WHERE id='mstone-x'")
+    _add_row(source, table_id, "so the window is not empty")
+    plain = _window(baseline).package_dir
+    _write_deletes(plain, [
+        *_deletes(plain),
+        {"table": "knowhow_milestones", "key": {"id": "mstone-x"},
+         "notebook_id": baseline["alpha"], "parent_key": None},
+    ])
+    document = _manifest(plain)
+    document["deletes"] = len(_deletes(plain))
+    _write_manifest(plain, document)
+    _reseal(plain)
+    with pytest.raises(SyncImportError, match="not a table this package carries"):
+        _import(baseline["target"], plain, dry_run=True)
+

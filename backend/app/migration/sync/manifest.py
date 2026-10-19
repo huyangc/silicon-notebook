@@ -25,10 +25,11 @@ More axes cut across those three classes:
   failing. ``(column, referenced_table)`` pairs. Empty for LOCAL tables.
 - ``seed_only``: for a target-side row that already exists (matched by
   primary key), import never overwrites or deletes it; a row that does not
-  exist yet is inserted. For the notebook/group membership tables this
-  means "only written the first time the parent notebook/group is created
-  at the target, never touched again by a re-sync" (the target owns
-  membership/sharing decisions made after that first import); for a
+  exist yet is inserted. For the notebook membership/grant tables this
+  means "only written the first time the parent notebook is created at the
+  target, never touched again by a re-sync" (the target owns
+  membership/sharing decisions made after that first import); the import
+  never creates a group, so ``group_members`` rows are never written; for a
   table like ``object_schemas`` that is not owned by any one notebook, it
   is ordinary idempotent-by-primary-key insert. Always False for LOCAL
   tables.
@@ -86,7 +87,8 @@ class MappingKind(StrEnum):
     # username-based UserMapping.
     USER = "user"
     # Column holds a groups.id; rewritten through a name-based group mapping
-    # (group matched by name, created if absent).
+    # (group matched by name; the import never creates one, and a group it
+    # needs that is missing or ambiguous at the target refuses the import).
     GROUP = "group"
     # Column is polymorphic (its meaning depends on a sibling column in the
     # same row). Currently only notebook_grants.principal_id, whose target
@@ -473,11 +475,11 @@ _SYNCED_WITH_MAPPING: tuple[TableSyncSpec, ...] = (
         ),
         seed_only=True,
         notes=(
-            "组按 name 匹配已有组，匹配不到则创建。invite_created_by 可为空"
-            "（无活跃邀请链接时为 NULL），映射不到置空并记日志。owner_id 是组"
-            "的现行所有权（0034 迁移，刻意无 FK），映射不到取该组目标端 admin"
-            "成员，仍无则置为导入执行者。种子写入：首次创建组后不再由导入"
-            "更新/删除。GLOBAL：groups 没有 notebook_id 列，也不经任何单一父"
+            "组按 name 匹配目标端已有组，导入从不建组（用户裁决 2026-10-19）："
+            "本次导入新建笔记本的群组授权要用到的组，若目标端没有同名组、同名"
+            "组不唯一、或包内同名组重复，导入拒绝并列出组名。只为映射而带这张"
+            "表的行，目标端已有的组不更新/删除；invite_created_by/owner_id 的"
+            "映射规则只为策略表的完备性保留。GLOBAL：groups 没有 notebook_id 列，也不经任何单一父"
             "表归属到一个笔记本——一个组可以被多个笔记本的 notebook_grants"
             "引用。导出器按「被导出笔记本集合的 notebook_grants.principal_id"
             "（principal_type=group）引用到的组」这条授权边圈定要带走哪些组，"
@@ -496,7 +498,8 @@ _SYNCED_WITH_MAPPING: tuple[TableSyncSpec, ...] = (
         seed_only=True,
         notes=(
             "user_id 映射不到跳过该行并记日志；group_id 按组映射（按 name 匹配"
-            "/创建）解析所属组。种子写入：首次创建组后不再由导入更新/删除。"
+            "目标端已有组）解析所属组。种子写入只随本次导入创建的组发生，而导入"
+            "从不建组，所以成员行一律跳过：目标端组的成员名单归目标端。"
             "GLOBAL：同 groups——按授权边圈定到的组集合决定带走哪些成员行，"
             "不是靠本表自身的列。"
         ),
@@ -744,6 +747,26 @@ def synced_tables() -> tuple[str, ...]:
             "order is defined."
         )
     return tuple(sorted(names, key=lambda name: _SHADOW_COPY_RANKS[name]))
+
+
+# The Knowhow edit history (design doc §3.2/§11). Synced only when the
+# exporting environment turns SILICON_NOTEBOOK_SYNC_KNOWHOW_HISTORY on (off by
+# default, user ruling 2026-10-19); a package says which it did in
+# ``manifest.knowhow_history`` and the importer touches these tables only
+# when it says yes. Both are PARENT-scoped children of knowhow_tables with
+# ON DELETE CASCADE, so leaving them out never strands a parent delete.
+KNOWHOW_HISTORY_TABLES: frozenset[str] = frozenset(
+    {"knowhow_milestones", "knowhow_changes"}
+)
+
+
+def carried_tables(*, knowhow_history: bool) -> tuple[str, ...]:
+    """``synced_tables()`` minus the Knowhow history tables unless
+    ``knowhow_history``: the tables one package carries, in the same order."""
+    tables = synced_tables()
+    if knowhow_history:
+        return tables
+    return tuple(name for name in tables if name not in KNOWHOW_HISTORY_TABLES)
 
 
 def local_tables() -> tuple[str, ...]:
