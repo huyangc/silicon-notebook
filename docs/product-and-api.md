@@ -335,7 +335,8 @@ names the action anyway gets a skip step saying the action is not offered this r
 (strict mode raises). `reasoning`'s raw-element search arm (the `search_elements` action and the automatic top-up
 when every deterministic channel came back empty) is not closed but federated per library, see below. The
 spreadsheet analysis arm is federated: every participant's workbooks are merged into ONE planner
-catalog, planned ONCE, and one sheet is executed (as in a single notebook); the participants are the
+catalog, planned ONCE, and up to `SPREADSHEET_ANALYSIS_MAX_TARGETS` sheets are executed, possibly from different
+libraries, each its own result card (as in a single notebook); the participants are the
 original-text channel's own (the same participant set, the same `CHUNK_FEDERATION_MAX_PARTICIPANTS` bound and
 `CHUNK_FEDERATION_ENABLED` rollback switch), and each library contributes only visible workbooks inside the run's
 frozen source ceiling. The catalog is filled library by library in rotation within the single-notebook byte
@@ -4517,14 +4518,17 @@ asker sees it), the planner prompt explains it, and the synthesis model's table 
 `library=` too, so same-titled workbooks in two libraries can be told apart; the names count
 against the catalog byte budget. The catalog shares the single-notebook
 `SPREADSHEET_ANALYSIS_PLANNER_CATALOG_BYTES` budget and workbooks are read one at a time, stopping
-the moment that budget is spent, so planner calls (at most one), executed sheets (one), catalog
-length and workbooks read are all capped by the single-notebook bound and do not grow with the
+the moment that budget is spent, so planner calls (at most one), executed sheets (at most
+`SPREADSHEET_ANALYSIS_MAX_TARGETS`, the single-notebook cap, possibly from different libraries),
+catalog length and workbooks read are all capped by the single-notebook bound and do not grow with the
 number of libraries; when only one library contributes workbooks the catalog is byte-identical to
 the single-notebook one (no `library`). What does not fit is disclosed by count: the planner prompt
 states "X readable workbooks across the participants, N listed in library rotation, M not listed"
 (a workbook found corrupt while reading is not counted in X), the result card carries the same
 sentence, and the `spreadsheet` trace step adds `notebook_id`, `libraries`,
-`contributing_libraries`, `workbooks`, `listed` and `skipped`, with the summary naming the library.
+`contributing_libraries`, `workbooks`, `listed` and `skipped`, with the summary naming the library
+(when several tables are analysed, `notebook_id` moves into each `tables[]` entry and the summary
+names each table's library).
 Results and receipts carry their owning notebook and that notebook's tier (in peer mode the first
 library keeps its id too), and a global result also carries `notebook_name`; when the table comes
 from another library (any library in Global Ask, a mounted reference library in a notebook ask)
@@ -4544,14 +4548,41 @@ plan may name at most 8 filters and 20 result columns; exceeding either invarian
 the whole plan and falls back to a local profile, so no prefix of a user-requested operation
 is executed as though it were complete. A planner timeout or malformed plan likewise falls
 back to a local profile, and any lane failure fails open to
-the ordinary reasoning answer. Successful output adds a `spreadsheet` trace step, citable
-bounded evidence, and a `result_sets[]` item with `kind="spreadsheet"`; the card discloses
+the ordinary reasoning answer.
+One plan may name several tables (user ruling 2026-10-19): the planner returns a `targets` list,
+one entry per sheet, at most `SPREADSHEET_ANALYSIS_MAX_TARGETS` entries (default 3, range 1..3),
+and is told to write more than one only when the question explicitly compares, contrasts or
+separately analyses several tables; it is still that one planner call (its output allowance
+scales to 500 tokens per entry). Each entry is validated on its own: an invalid entry drops only
+itself and is never replaced by another table; a second entry on an already planned sheet is
+dropped; the distinct valid entries run in plan order up to the cap, the rest are cut in plan
+order and the last result card says so ("本次规划选了 X 张表，超过单次最多 N 张的上限，按规划顺序只分析了前
+N 张；未分析：…"). A reply with no usable entry (an empty list, not a list, all invalid) falls back
+exactly as an invalid single plan did, to the local profile of the first sheet. Every executed
+table is its own result card, in plan order, naming its workbook and sheet and, when it comes
+from another library, that library; there is no merged comparison card -- the comparison is the
+synthesized answer's job. When one table runs, the card, the trace step, the synthesis table
+block and its citable map are byte-identical to before; with several, the trace summary reads
+"已分析 N 张表：…" and `detail.tables[]` lists the per-table fields, and whenever the reply named
+more than one entry `detail.targets` adds `planned`, `executed`, `invalid`, `duplicate`,
+`over_limit` and `limit`.
+Successful output adds a `spreadsheet` trace step, citable bounded evidence, and one
+`result_sets[]` item with `kind="spreadsheet"` per table; the card discloses
 scanned/result/displayed rows, formula-cache gaps, and partial preview coverage. The planner
 receives a whole-field prefix projection of the selected workbook/sheet/header catalog under
 one aggregate byte rail; omitted fields are never cut mid-value, and a result warning discloses
 when that projection was partial. The persisted/browser result is independently bounded by
-rows, cells (headers included), and serialized table bytes, while synthesis receives a further
-row-and-byte-bounded preview.
+rows, cells (headers included), and serialized table bytes (per result card), while synthesis
+receives a further row-and-byte-bounded preview. Several tables share that preview's one budget
+(`SPREADSHEET_ANALYSIS_PROMPT_BYTES` and the characters the source partition leaves it); it does
+not grow with the number of tables. Every table's title and header lines go in first, in plan
+order, then preview rows round robin, one per table per round (each table shows a prefix of its
+own rows; the first row that does not fit ends that table), so the first table cannot starve the
+others. Table evidence keys run from `k6001` in plan order; plugin-returned external evidence
+shares the 6000 band and now numbers after the table keys instead of restarting at `k6001` (when
+both appeared they used to collide and the merged map overwrote the table receipt); without
+table results external evidence still starts at `k6001`. Two sheets of one workbook keep one
+source-level citation each.
 Every spreadsheet evidence line admitted under that preview byte rail is retained whole in
 the citable evidence map; it is never subjected to a second hidden character slice.
 
@@ -4588,6 +4619,7 @@ classification, identify the executor as `system`, and do not invent a user or n
 | `SPREADSHEET_ANALYSIS_PROMPT_ROWS` | 20 | 1..100 |
 | `SPREADSHEET_ANALYSIS_PROMPT_BYTES` | 65,536 | 1,024..524,288 |
 | `SPREADSHEET_ANALYSIS_PLANNER_CATALOG_BYTES` | 32,768 | 1,024..262,144 |
+| `SPREADSHEET_ANALYSIS_MAX_TARGETS` | 3 | 1..3 |
 | `SPREADSHEET_ANALYSIS_PLANNER_TIMEOUT_SECONDS` | 8.0 seconds | 1.0..60.0 |
 | `ANALYSIS_FAILURE_RETENTION_DAYS` | 30 days | 1..3,650 |
 
