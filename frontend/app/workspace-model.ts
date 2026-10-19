@@ -960,7 +960,17 @@ export type NodeContext = {
   definition_element_id?: string | null;
   steps: KgProcedureStep[] | null;
 };
-export type PendingMerge = { id: string; canonical_a: string; canonical_b: string; score: number; status: string };
+export type PendingMerge = {
+  id: string;
+  canonical_a: string;
+  canonical_b: string;
+  score: number;
+  status: string;
+  // Display names of the two sides; "" (or absent) when the backend has none
+  // to show this viewer -- the row then falls back to the id without `K-`.
+  name_a?: string;
+  name_b?: string;
+};
 export type UnifiedKgStatus = {
   dirty: boolean;
   last_rebuild_at: string;

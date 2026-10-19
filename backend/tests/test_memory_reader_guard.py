@@ -272,6 +272,9 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "GovernanceStore.conflict_relation_count": STATE_PROBE,
         "GovernanceStore.incremental_cluster_rows": DERIVED_LAYER,
         "GovernanceStore._existing_cluster_members": DERIVED_LAYER,
+        # P4-T6: the pending list's own cluster ids; the service relabels them
+        # by the viewer rule (KgViewerScope.cluster_labels)
+        "GovernanceStore.pending_merge_names": KEY_BOUNDED,
         "GovernanceStore.promotion_object_type_row": KEY_BOUNDED,
         "GovernanceStore.locate_approved_base_object": KEY_BOUNDED,
         "GovernanceStore.locate_approved_memory_base_objects": KEY_BOUNDED,

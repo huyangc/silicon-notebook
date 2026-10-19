@@ -271,6 +271,31 @@ test("待确认合并把候选与 confirm 位交回注入命令，且在飞/重�
 });
 
 
+test("待确认合并两侧显示概念名；某侧没有名字时回退到去掉 K- 的 id", () => {
+  const named: PendingMerge = {
+    id: "m-1", canonical_a: "K-rms norm", canonical_b: "K-layer norm", score: 0.91,
+    status: "pending", name_a: "RMSNorm", name_b: "LayerNorm",
+  };
+  // 一侧名字为空（后端对这位查看者没有可显示的名字），一侧缺字段（旧响应）
+  const partial: PendingMerge = {
+    id: "m-2", canonical_a: "K-q former", canonical_b: "K-qformer", score: 0.85,
+    status: "pending", name_a: "",
+  };
+  const withName: PendingMerge = { ...partial, id: "m-3", name_b: "Q-Former" };
+  renderView({ kgGraph: graphView({ pendingMerges: [named, partial, withName] }) });
+
+  const rows = Array.from(document.querySelectorAll(".kg-merge-row"));
+  const labels = rows.map((row) => row.querySelector("span")!.textContent);
+  expect(labels).toEqual([
+    "RMSNorm ↔ LayerNorm (0.91)",
+    "q former ↔ qformer (0.85)",
+    "q former ↔ Q-Former (0.85)",
+  ]);
+  // 有名字时种子串不上屏
+  expect(screen.queryByText(/rms norm/)).toBeNull();
+});
+
+
 test("只读工作区看不到图谱处理、自动判重与逐行合并决定", () => {
   const candidate: PendingMerge = { id: "m-1", canonical_a: "K-A", canonical_b: "K-B", score: 0.91, status: "pending" };
   renderView({

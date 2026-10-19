@@ -25,7 +25,9 @@ counts, KG search, the legacy ``/graph`` and the unified graph (the shared
 graph plus the viewer's own Memory).  What it does NOT decide: pending
 merges/conflicts, duplicate groups, the edge review queue and the analysis
 artifacts -- shared tools from which the structural isolation (E4-2/E4-3,
-the 0067/v87 migration) removes Memory-derived rows for everyone.
+the 0067/v87 migration) removes Memory-derived rows for everyone.  The one
+exception is a label: the side names a pending merge shows (P4-T6) are
+cluster labels, so they take ``cluster_labels``; the rows stay unfiltered.
 
 Single definition.  "Which sources are Memory" is
 ``SourceStore.memory_source_ids``; "which hidden sources belong to this

@@ -4840,6 +4840,15 @@ class GovernanceStorePort(Protocol):
         candidate slice (``idx_candidates_nb_status`` is the only index); the
         id list only filters it, bound through ``id_binding``."""
     @staticmethod
+    def pending_merge_names(
+        connection: object, notebook_id: str, canonical_ids: Sequence[str]
+    ) -> dict[str, str]:
+        """``{canonical_id: canonical_name}`` of the published concept
+        clusters among ``canonical_ids`` (one statement per call, one bounded
+        point lookup per id, the first member row in member order); an id no
+        published cluster row carries is absent. The caller batches."""
+        ...
+    @staticmethod
     def valid_object_ids(db: object, object_ids: object, *, exclude_memory_derived: bool = False) -> set[str]: ...
     @staticmethod
     def seed_for(object_type: str): ...

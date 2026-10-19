@@ -716,6 +716,41 @@ class GovernanceStore:
         return [{"id": r["id"], "canonical_a": r["canonical_a"], "canonical_b": r["canonical_b"], "score": r["score"], "status": r["status"]} for r in rows]
 
     @staticmethod
+    def pending_merge_names(
+        connection: sqlite3.Connection, notebook_id: str, canonical_ids
+    ) -> Dict[str, str]:
+        """``{canonical_id: canonical_name}`` of the published concept
+        clusters among ``canonical_ids`` -- the names the pending-merge list
+        shows for its two sides. An id no published cluster row carries is
+        absent (the caller falls back to the id).
+
+        One statement for the whole batch (the caller cuts the response's
+        ids into batches), one bounded point lookup per id: a correlated
+        ``LIMIT 1`` on ``idx_clusters_nb_canonical_member_gen`` (notebook,
+        canonical, member, generation) in member order -- the first member
+        row of the published generation, so a hub cluster costs one seek,
+        not its member count. The published-generation scalar is
+        uncorrelated (evaluated once). Same row as the PostgreSQL twin
+        (member ids compare bytewise on both)."""
+        values = [str(value) for value in canonical_ids]
+        if not values:
+            return {}
+        rows = connection.execute(
+            "SELECT CAST(c.value AS TEXT) AS canonical_id, ("
+            "SELECT cc.canonical_name FROM concept_clusters cc "
+            "WHERE cc.notebook_id=? AND cc.canonical_id=CAST(c.value AS TEXT) "
+            "AND cc.generation = COALESCE((SELECT cluster_generation "
+            "FROM unified_kg_state WHERE notebook_id = ?), 0) "
+            "ORDER BY cc.member_object_id LIMIT 1) AS canonical_name "
+            "FROM json_each(?) c",
+            (notebook_id, notebook_id, json.dumps(values, ensure_ascii=False)),
+        ).fetchall()
+        return {
+            str(r["canonical_id"]): str(r["canonical_name"] or "")
+            for r in rows if r["canonical_name"] is not None
+        }
+
+    @staticmethod
     def pending_merges_batch(
         connection: sqlite3.Connection, notebook_id: str, limit: int
     ) -> List[dict]:
