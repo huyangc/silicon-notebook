@@ -12363,6 +12363,13 @@ button.tag:hover {
   border-radius: 10px;
   padding: 10px 12px;
   background: #fff;
+  /* 证据与附注里常有很长的文件名(没有空格):在窄屏上断开,不撑出卡片。 */
+  overflow-wrap: anywhere;
+}
+
+/* 诊断数据里「没建立关联的内容」那一块同样列着来源文件名。 */
+.kg-findings-relink-spent {
+  overflow-wrap: anywhere;
 }
 
 .kg-finding--high { border-left-color: #c2413b; }
@@ -12600,7 +12607,9 @@ button.tag:hover {
   color: var(--green);
 }
 
+/* 文字占满剩下的宽度、在自己的格子里折行:窄屏上不把「✓」单独留在上一行。 */
 .kg-findings-passed-text {
+  flex: 1 1 12em;
   min-width: 0;
 }
 
@@ -12633,6 +12642,11 @@ button.tag:hover {
 
   .kg-findings-update-reason {
     text-align: left;
+  }
+
+  /* 窄屏下来源分组里的按钮会折成两行,胶囊圆角会把它画成椭圆;改成圆角矩形。 */
+  .kg-finding-source-group {
+    border-radius: 12px;
   }
 
   .kg-analysis-insight-grid,

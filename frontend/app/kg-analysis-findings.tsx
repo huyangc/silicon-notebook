@@ -835,7 +835,7 @@ export function FindingsPassedZone({
               <span className="kg-findings-passed-mark" aria-hidden="true">
                 {line.state === "clean" ? "✓" : line.state === "decided" ? "≠" : "–"}
               </span>
-              <span>{line.text}</span>
+              <span className="kg-findings-passed-text">{line.text}</span>
             </li>
           ))}
         </ul>
