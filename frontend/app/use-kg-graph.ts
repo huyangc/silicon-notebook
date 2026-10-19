@@ -50,7 +50,10 @@ import {
 import {
   RELINK_POLL_MAX_ATTEMPTS,
   RELINK_POLL_TIMED_OUT,
+  RELINK_RESULT_HOLD_MS,
   relinkPollOutcome,
+  relinkTerminalResult,
+  type RelinkResult,
 } from "../features/kg-maintenance/kg-relink-status";
 import {
   KG_DELETE_BUSY_MESSAGE,
@@ -236,6 +239,10 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
   // 结果,A→B→A 在保留期内回来仍能看到。每格自带计时器,到点只清自己那一格。
   const [deleteResults, setDeleteResults] = useState<Map<string, KgDeleteResult>>(new Map());
   const deleteResultTimersRef = useRef(new Map<string, number>());
+  // 「补上关联」最近一次跑完的两个计数,同样按 actor+notebook 分格、各自计时消失。图谱分析
+  // 的「没建立关联的内容」把它写在按钮旁(新增 N 条关联,还剩 M 个没有关联的知识条目)。
+  const [relinkResults, setRelinkResults] = useState<Map<string, RelinkResult>>(new Map());
+  const relinkResultTimersRef = useRef(new Map<string, number>());
   const [buildingKg, setBuildingKg] = useState(false);
   const [trackedKgJobId, setTrackedKgJobId] = useState<string | null>(null);
   const trackedKgJobIdRef = useRef<string | null>(null);
@@ -1002,6 +1009,42 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     };
   }, []);
 
+  const clearRelinkResult = (key: string) => {
+    const timer = relinkResultTimersRef.current.get(key);
+    if (timer !== undefined) window.clearTimeout(timer);
+    relinkResultTimersRef.current.delete(key);
+    setRelinkResults((current) => {
+      if (!current.has(key)) return current;
+      const next = new Map(current);
+      next.delete(key);
+      return next;
+    });
+  };
+
+  // 与 showDeleteResult 同一形态:计时器按格保存,新结果先撤掉旧计时器。
+  const showRelinkResult = (key: string, result: RelinkResult) => {
+    const previous = relinkResultTimersRef.current.get(key);
+    if (previous !== undefined) window.clearTimeout(previous);
+    setRelinkResults((current) => new Map(current).set(key, result));
+    relinkResultTimersRef.current.set(key, window.setTimeout(() => {
+      relinkResultTimersRef.current.delete(key);
+      setRelinkResults((current) => {
+        if (current.get(key) !== result) return current;
+        const next = new Map(current);
+        next.delete(key);
+        return next;
+      });
+    }, RELINK_RESULT_HOLD_MS));
+  };
+
+  useEffect(() => {
+    const timers = relinkResultTimersRef.current;
+    return () => {
+      for (const timer of timers.values()) window.clearTimeout(timer);
+      timers.clear();
+    };
+  }, []);
+
   const maintenanceOwnerKey = (owner: Pick<KgWorkspaceOwner, "actorId" | "notebookId">) =>
     ownerKey(owner);
   const maintenanceJobKey = (
@@ -1067,6 +1110,8 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       || deletingNotebookIds.has(key)
       || submittingMaintenanceRef.current.has(jobKey)) return;
     setRelinkingNotebookIds((current) => claimNotebookSlot(current, key));
+    // 上一次的结果属于上一次;这一次在跑时按钮旁不该还挂着旧数字。
+    clearRelinkResult(key);
     expectedMaintenanceJobRef.current.delete(jobKey);
     for (const attempt of [0, 1]) {
       if (!owns(owner) || !policyRef.current.canWriteKg) {
@@ -1261,9 +1306,12 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     let inFlight = false;
     let attempts = 0;
     let mismatchStreak = 0;
+    // 终态回执里能以「这一次」名义报的两个计数;超时收工与别人的那一次都没有。
+    let terminalResult: RelinkResult | null = null;
     const settle = async (outcome: ReturnType<typeof relinkPollOutcome>) => {
       if (outcome.toast && owns(owner)) effectsRef.current.notify(outcome.toast);
       if (outcome.refresh && owns(owner)) await refreshAfterRelink();
+      if (terminalResult && ownsIdentity(owner)) showRelinkResult(key, terminalResult);
       expectedMaintenanceJobRef.current.delete(maintenanceJobKey(owner, "relink"));
       setRelinkingNotebookIds((current) => releaseNotebookClaim(current, key));
     };
@@ -1289,6 +1337,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
           mismatchStreak += 1;
           if (mismatchStreak < MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK) return;
         }
+        terminalResult = relinkTerminalResult(status, expected);
         settled = true;
         window.clearInterval(timer);
         await settle(outcome);
@@ -1557,6 +1606,9 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
         && busyForNotebook(deletingNotebookIds, maintenanceOwnerKey(currentOwner()!))),
       deleteResult: visible
         ? deleteResults.get(maintenanceOwnerKey(currentOwner()!)) ?? null
+        : null,
+      relinkResult: visible
+        ? relinkResults.get(maintenanceOwnerKey(currentOwner()!)) ?? null
         : null,
       buildingKg: visible && buildingKg,
       trackedKgJobId: visible ? trackedKgJobId : null,

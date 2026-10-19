@@ -51,6 +51,7 @@ import { KgGraphView } from "./kg-graph-view";
 import { fieldLabel, KgOccurrenceList, KgProcedureStepCard, kgNodeName } from "./kg-object-cards";
 import { formatRelativeTime } from "./relative-time.ts";
 import { KgAnalysisView } from "./kg-analysis-view";
+import type { KgDeleteOutcome, KgReparsePhase, KgSourceActionTarget } from "./kg-analysis-findings";
 import { AgentProfilePanel } from "./agent-profile-panel";
 import { kgBandTarget, kgBandVelocity, kgTypeBandTargets } from "./kg-layout";
 import {
@@ -1134,6 +1135,9 @@ export default function Home() {
     effects: { notify: setToast },
   });
   const [knowhowNavigation, setKnowhowNavigation] = useState(CLOSED_KNOWHOW_NAVIGATION);
+  // 图谱分析「疑似没合并的同名概念」→ 知识图谱视图「待确认合并」里的那一对。seq 让同一对
+  // 被连点两次也能再定位一次(只比 id 的话第二次不会触发)。
+  const [kgMergeFocus, setKgMergeFocus] = useState<{ id: string; seq: number } | null>(null);
   // Task 12（引用跳转）：ask 引用命中 knowhow 格子时的跳转目标——非 null 时
   // KnowhowPanel 挂载即定位到该表该行的抽屉（见 openKnowhowAt）。
   const [backfillingMeta, setBackfillingMeta] = useState(false);
@@ -1597,8 +1601,11 @@ export default function Home() {
   //
   // 返回值 = 「后台真的在跑了吗」,给按钮的忙碌态用:只有 true 才把这一组标成修复中并
   // 禁用按钮。未受理/报错必须回 false,否则按钮会锁在「解析中…」而后台其实什么都没干。
-  const runReparse = async (nb: string, sourceIds: string[]): Promise<boolean> => {
-    if (sourceIds.length === 0) return false;
+  //
+  // `reparseOutcome` 是同一条路径、但把「没排上」与「请求失败」分开回报——图谱分析的问题
+  // 清单要把这两种结果分别写在「重新解析…」按钮旁;体检只要布尔值,走 runReparse。
+  const reparseOutcome = async (nb: string, sourceIds: string[]): Promise<"started" | "none" | "failed"> => {
+    if (sourceIds.length === 0) return "none";
     try {
       const r = await reparseSources(nb, sourceIds);
       // 一篇都没排上是**合法**结果:样本是体检那一刻的快照,期间来源可能已被删除,或
@@ -1609,16 +1616,19 @@ export default function Home() {
         setToast("这些来源已不在或无需重新解析；已刷新状态");
         reloadCheckup(nb);
         loadSourcesPage(nb, sourceLibrary.currentPageRequest()).catch(() => {});
-        return false;
+        return "none";
       }
       setToast(`已开始重新解析 ${r.scheduled.length} 篇来源；完成后会自动更新`);
       bumpCheckupRepairPoll();
       reloadCheckup(nb);
       // 让来源列表的状态标签也及时反映(分析中/已就绪)。
       loadSourcesPage(nb, sourceLibrary.currentPageRequest()).catch(() => {});
-      return true;
-    } catch (e) { reportError(e); return false; }
+      return "started";
+    } catch (e) { reportError(e); return "failed"; }
   };
+  const runReparse = async (nb: string, sourceIds: string[]): Promise<boolean> => (
+    (await reparseOutcome(nb, sourceIds)) === "started"
+  );
   // H4/H5 修复:后台补齐该 notebook 缺失的检索向量(只补缺失、幂等)。
   const runBackfillVectors = async (nb: string): Promise<boolean> => {
     try {
@@ -3917,7 +3927,12 @@ export default function Home() {
     await sourceLibrary.reparseSource();
   }
 
-  function confirmDeleteSource(source: SourceSummary) {
+  // `onSettled` 只在用户确认之后、删除请求落定时调用(取消不调用):图谱分析的问题清单
+  // 用它把结果写在「删除来源…」按钮旁。确认框与文案与其它入口逐字相同。
+  function confirmDeleteSource(
+    source: Pick<SourceSummary, "id" | "notebook_id" | "type" | "title">,
+    onSettled?: (deleted: boolean) => void,
+  ) {
     if (crossLibrarySourceNotebookId(source.notebook_id, currentNotebookId)) return;
     if (deletingSourceIds.has(source.id)) return;
     // The list-card action has no source detail open, so it must remain a
@@ -3934,7 +3949,9 @@ export default function Home() {
         {
           label: "删除来源",
           danger: true,
-          action: () => sourceLibrary.deleteSource(source).catch(reportError),
+          action: () => sourceLibrary.deleteSource(source)
+            .then((deleted) => onSettled?.(deleted))
+            .catch(reportError),
         },
       ],
     }, modalOwner);
@@ -4280,6 +4297,63 @@ export default function Home() {
       "生成或更新图谱分析？\n\n将重算跨文档概念合并、主题板块和质量统计（不重新分析来源）。后台进行，完成后分析页会自动刷新。",
       () => refreshUnifiedKg(),
     );
+  }
+
+  // —— 图谱分析「问题清单」的处置入口(设计 §四)。面板不执行任何处置，只把用户带到既有
+  // 入口：删除走既有删除确认框；重新解析先弹一个说明确认框再走体检同款批量重新解析；补上
+  // 关联走知识图谱视图同一个后台任务；没合并的同名概念跳到「待确认合并」。后端是权限的
+  // 唯一判据，按钮是否出现由面板按 `!readOnlyWorkspace` 与来源类型决定。
+
+  // 打开来源核对：来源详情叠在面板上层打开，面板不关(根弹窗协调器里这一对允许共存)；
+  // 关掉来源详情后焦点回到原按钮。失败交还给面板，写在按钮旁。
+  async function openSourceFromAnalysis(sourceId: string) {
+    await openSourceDetailById(sourceId);
+  }
+
+  function deleteSourceFromAnalysis(
+    target: KgSourceActionTarget,
+    report: (outcome: KgDeleteOutcome) => void,
+  ) {
+    const nb = currentNotebookId;
+    if (!nb || readOnlyWorkspace) return;
+    confirmDeleteSource(
+      { id: target.sourceId, notebook_id: nb, type: target.sourceType, title: target.title },
+      (deleted) => report(deleted ? "deleted" : "failed"),
+    );
+  }
+
+  // 既有的重新解析入口都没有确认框；从面板触发时加一个，说清会重新调用模型、替换这篇来源
+  // 现有的知识条目(设计 §十四「默认取舍」)。确认之后才回报 running，取消什么都不回报。
+  function confirmReparseFromAnalysis(
+    target: KgSourceActionTarget,
+    report: (phase: KgReparsePhase) => void,
+  ) {
+    const nb = currentNotebookId;
+    if (!nb || readOnlyWorkspace) return;
+    openInfoModal({
+      title: "重新解析来源",
+      message: `确定重新解析“${target.title}”吗？会重新调用模型解析这篇来源，并替换它现有的知识条目。后台进行，解析完成后在图谱分析里点「更新分析」核验。`,
+      actions: [
+        { label: "取消", action: () => {} },
+        {
+          label: "重新解析",
+          primary: true,
+          action: () => {
+            if (activeNotebookIdRef.current !== nb) return;
+            report("running");
+            void reparseOutcome(nb, [target.sourceId]).then((outcome) => {
+              report(outcome === "started" ? "started" : outcome === "none" ? "skipped" : "failed");
+            });
+          },
+        },
+      ],
+    });
+  }
+
+  // 疑似没合并的同名概念 → 关掉分析面板，在知识图谱视图左栏「待确认合并」里定位那一对。
+  function reviewMergeFromAnalysis(mergeId: string) {
+    closeKgAnalysis();
+    setKgMergeFocus((previous) => ({ id: mergeId, seq: (previous?.seq ?? 0) + 1 }));
   }
 
   // 「删除知识图谱」(知识图谱视图「图谱处理」):破坏性后台任务，先经统一确认。与重新合并/
@@ -7998,6 +8072,7 @@ export default function Home() {
           onLoadMoreConceptMembers={() => kgWorkspace.loadMoreConceptMembers().catch(reportError)}
           onSelectCanvasNode={(nodeId) => selectKgNode(nodeId)}
           onSelectOverviewNode={(nodeId) => selectKgNode(nodeId).catch(reportError)}
+          focusMergeRequest={kgMergeFocus}
         >
           {rootModals.view("kg-analysis").open && kgGraph.analysisOpen && currentNotebookId && (
             <KgAnalysisView
@@ -8010,6 +8085,20 @@ export default function Home() {
               zIndex={rootModals.view("kg-analysis").zIndex}
               onAnalyze={confirmGenerateKgAnalysis}
               onClose={closeKgAnalysis}
+              // 失效令牌:来源内容变了(删除、重新解析的状态推进)、补上关联起止、合并决定
+              // 起止时问题清单重取——「已处理，更新后核验」是读侧派生的。
+              findingsRevision={`${sourceLibrary.contentRevision}|${kgGraph.relinking ? 1 : 0}|${kgGraph.decidingMerge ? 1 : 0}`}
+              findingHandlers={{
+                onOpenSource: openSourceFromAnalysis,
+                onDeleteSource: deleteSourceFromAnalysis,
+                onReparseSource: confirmReparseFromAnalysis,
+                onReviewMerge: reviewMergeFromAnalysis,
+                onRelink: relinkFromKgView,
+              }}
+              deletingSourceIds={deletingSourceIds}
+              relinking={kgGraph.relinking}
+              relinkResult={kgGraph.relinkResult}
+              pendingMerges={kgGraph.pendingMerges}
             />
           )}
         </KgGraphView>

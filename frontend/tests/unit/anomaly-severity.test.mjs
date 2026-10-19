@@ -246,6 +246,14 @@ test("同一轮里少了一份产物 → integrity(账本非空却缺一份,同�
   assert.equal(anomalies[0].label, "本该有却缺失");
 });
 
+test("升级后还没生成(新版本才有的那份产物)→ info 灰色,绝不落进「本该有却缺失」的红色", () => {
+  const anomalies = analysisArtifactAnomalies({ present: false, absence: "upgrade_pending" });
+  assert.equal(anomalies.length, 1);
+  assert.equal(anomalies[0].severity, "info");
+  assert.equal(anomalies[0].label, "升级后还没生成");
+  assert.match(anomalies[0].tooltip, /更新分析/);
+});
+
 test("从没算过 → info(「没算过」不是「算出来是 0」,但也不是异常)", () => {
   for (const absence of ["never_computed", null, undefined]) {
     const anomalies = analysisArtifactAnomalies({ present: false, absence });

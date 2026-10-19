@@ -69,6 +69,7 @@ import {
   REBUILD_POLL_MAX_ATTEMPTS,
   REBUILD_POLL_TIMED_OUT,
 } from "../../features/kg-maintenance/kg-rebuild-status";
+import { RELINK_RESULT_HOLD_MS } from "../../features/kg-maintenance/kg-relink-status";
 
 type HookValue = ReturnType<typeof useKgWorkspace>;
 type HookOptions = Parameters<typeof useKgWorkspace>[0];
@@ -456,6 +457,52 @@ test("maintenance submission suppresses stale terminal polls and rechecks permis
   await act(async () => rebuildPending.reject(httpConflict()));
   await rebuilding;
   expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(1);
+});
+
+// 图谱分析「没建立关联的内容」把补上关联的结果写在按钮旁:数字来自这一次任务自己的终态
+// 回执,按自己的计时器消失;别人的那一次(job 对不上)不以「这一次」的名义报数字。
+test("a finished relink keeps its two counts for this notebook beside the button, then clears them on its own timer", async () => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchRelinkStatus).toHaveBeenCalledOnce());
+  vi.useFakeTimers();
+  kgApi.fetchRelinkStatus.mockResolvedValue({
+    job_id: "relink-a",
+    notebook_id: "notebook-a",
+    status: "succeeded",
+    running: false,
+    isolated_before: 1830,
+    edges_added: 12,
+    isolated_after: 1818,
+  });
+  await act(async () => { await value!.startRelink(); });
+  expect(value!.graph.relinking).toBe(true);
+  expect(value!.graph.relinkResult).toBeNull();
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(value!.graph.relinking).toBe(false);
+  expect(value!.graph.relinkResult).toEqual({ edgesAdded: 12, isolatedAfter: 1818 });
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(RELINK_RESULT_HOLD_MS); });
+  expect(value!.graph.relinkResult).toBeNull();
+});
+
+test("a relink terminal that belongs to another job settles without claiming its counts", async () => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchRelinkStatus).toHaveBeenCalledOnce());
+  vi.useFakeTimers();
+  kgApi.fetchRelinkStatus.mockResolvedValue({
+    job_id: "someone-else",
+    notebook_id: "notebook-a",
+    status: "succeeded",
+    running: false,
+    isolated_before: 10,
+    edges_added: 99,
+    isolated_after: 1,
+  });
+  await act(async () => { await value!.startRelink(); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(6_000); });
+  expect(value!.graph.relinking).toBe(false);
+  expect(value!.graph.relinkResult).toBeNull();
 });
 
 test("synchronous relink commands stay single-flight and release authority after failure", async () => {

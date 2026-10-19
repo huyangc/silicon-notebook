@@ -6,19 +6,24 @@
 //   · 单位从响应的 units 读——换一张单位表,上屏文案必须跟着变;
 //   · 缺失 / 合法缺席 / 本该有却缺失 / 算过但为 0,四种情形四种呈现;
 //   · 俯瞰图的 top-N 截断、长尾汇总、以及「根本没取回」的那一截,分开声明。
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 
 vi.mock("../../app/kg-analysis-api", () => ({
   fetchKgAnalysis: vi.fn(),
   fetchKgAnalysisSources: vi.fn(),
+  fetchKgFindings: vi.fn(),
+  dismissKgFinding: vi.fn(),
+  undismissKgFinding: vi.fn(),
 }));
 
 import {
   fetchKgAnalysis,
   fetchKgAnalysisSources,
+  fetchKgFindings,
   type KgAnalysisReport,
   type KgArtifactView,
+  type KgFindingsPage,
   type KgSourceProfilePage,
 } from "../../app/kg-analysis-api";
 import { KgAnalysisView } from "../../app/kg-analysis-view";
@@ -279,9 +284,31 @@ function sourcePage(overrides: Partial<KgSourceProfilePage> = {}): KgSourceProfi
   };
 }
 
+// 问题清单那三页(待处理 / 已通过 / 已标为正常)在这份文件里都是空的——这里钉的是诊断数据
+// 区块;问题清单本身的呈现在 kg-analysis-findings.component.test.tsx。
+function emptyFindingsPage(zone: string): KgFindingsPage {
+  return {
+    notebook_id: "nb-1",
+    generated_at: "2026-07-25T10:00:00Z",
+    present: true,
+    absence: null,
+    freshness: { basis: "usable_live", built_at_seq: 128, seq_behind: 0, stale: false, built_at_cluster_seq: 7, cluster_seq_behind: 0 },
+    rules_version: 1,
+    zone,
+    limit: 20,
+    offset: 0,
+    total: 0,
+    returned: 0,
+    has_more: false,
+    units: { impact_objects: "objects" },
+    rows: [],
+  };
+}
+
 beforeEach(() => {
   vi.mocked(fetchKgAnalysis).mockResolvedValue(report());
   vi.mocked(fetchKgAnalysisSources).mockResolvedValue(sourcePage());
+  vi.mocked(fetchKgFindings).mockImplementation(async (_nb, options) => emptyFindingsPage(options?.zone ?? "open"));
 });
 
 function renderView() {
@@ -353,17 +380,78 @@ test("五份数据恒定列出，缺席的那份也在清单里而不是少一�
 });
 
 test("先把技术状态翻译成结论，并解释状态颜色和更新方式", async () => {
+  // 主题结构信号改报主体内容 / 孤岛(设计 §五 S3):连通分量的数来自问题清单的账本摘要,
+  // 「主体内容里有几个主题」来自依赖板块的那份产物。
+  const base = report();
+  vi.mocked(fetchKgAnalysis).mockResolvedValue(report({
+    artifacts: base.artifacts.map((item) => (
+      item.kind === "community_edges"
+        ? { ...item, payload: { ...item.payload, boards_in_giant: 80 } }
+        : item
+    )),
+    findings_summary: {
+      present: true,
+      absence: null,
+      freshness: { basis: "usable_live", built_at_seq: 128, seq_behind: 0, stale: false, built_at_cluster_seq: 7, cluster_seq_behind: 0 },
+      rules_version: 1,
+      counts: { by_rule: {}, dismissed: 0 },
+      rules: [],
+      dev_items: [],
+      structure: { giant_objects: 30366, objects_total: 41713, giant_object_share: 0.728, island_components: 1137, island_sources: 14 },
+      comparison: null,
+      relink: null,
+      units: {},
+    },
+  }));
   renderView();
   await screen.findByRole("heading", { name: "先看结论", level: 3 });
 
   const readout = blockByTitle("先看结论");
   expect(within(readout).getByText("先更新，再判断")).toBeInTheDocument();
   expect(within(readout).getByText(/概念条目从 9,400 条收敛为 6,487 个/)).toBeInTheDocument();
-  expect(within(readout).getByText(/当前分为 1,217 个主题板块/)).toBeInTheDocument();
-  expect(within(readout).getByText(/当前最先值得复核的是“光遗传学质粒手册”/)).toBeInTheDocument();
+  expect(within(readout).getByText("主体内容占 72.8%")).toBeInTheDocument();
+  expect(within(readout).getByText(/主体内容含 72.8% 的知识对象，内部有 80 个主题；另有 1,137 个孤岛，来自 14 个来源/)).toBeInTheDocument();
+  // 不再报「当前分为 1,217 个主题板块」——那个数里九成是孤岛碎片。
+  expect(within(readout).queryByText(/当前分为 1,217 个主题板块/)).not.toBeInTheDocument();
   expect(within(readout).getByText(/红色：数字不可信/)).toBeInTheDocument();
   expect(within(readout).getByText(/黄色：旧版本/)).toBeInTheDocument();
-  expect(within(readout).getByText(/不会重新分析来源/)).toBeInTheDocument();
+  // 「更新分析」与它的说明搬到了面板头部。
+  const head = blockByTitle("报告状态");
+  expect(within(head).getByText(/不会重新分析来源/)).toBeInTheDocument();
+});
+
+test("「来源复核入口」卡被问题清单取代：卡片不在，它额外的那次稀疏首页请求也不再发", async () => {
+  renderView();
+  await screen.findByRole("heading", { name: "先看结论", level: 3 });
+  const readout = blockByTitle("先看结论");
+  expect(within(readout).queryByText("来源复核入口")).not.toBeInTheDocument();
+  expect(within(readout).queryByText(/当前最先值得复核的是/)).not.toBeInTheDocument();
+
+  // 切到「最紧密」只发这一页本身的请求;原来那张卡会再补一份 sparse 首页。
+  const sourcesBlock = blockByTitle("关联稀疏的来源");
+  const before = vi.mocked(fetchKgAnalysisSources).mock.calls.length;
+  fireEvent.click(within(sourcesBlock).getByRole("button", { name: "关联最紧密的在前" }));
+  await waitFor(() => expect(vi.mocked(fetchKgAnalysisSources).mock.calls.length).toBe(before + 1));
+  expect(vi.mocked(fetchKgAnalysisSources).mock.calls.slice(before)).toEqual([
+    ["nb-1", { limit: 20, offset: 0, order: "connected" }],
+  ]);
+});
+
+test("诊断数据默认收起，原有区块都在里面", async () => {
+  const { container } = renderView();
+  await screen.findByRole("heading", { name: "先看结论", level: 3 });
+  const details = container.querySelector("details.kg-findings-diagnostics") as HTMLDetailsElement | null;
+  expect(details).not.toBeNull();
+  expect(details!.open).toBe(false);
+  for (const title of [
+    "先看结论", "报告口径与新鲜度", "本报告用到的数据", "对象构成", "合并收敛率",
+    "需要复核的大型合并组", "关联是怎样形成的", "主题板块", "板块俯瞰图", "关联稀疏的来源",
+  ]) {
+    expect(details!.contains(blockByTitle(title)), title).toBe(true);
+  }
+  // 问题清单的各区不在折叠里。
+  expect(details!.contains(screen.getByRole("heading", { name: /^待处理/, level: 3 }))).toBe(false);
+  expect(details!.contains(screen.getByRole("heading", { name: "已通过", level: 3 }))).toBe(false);
 });
 
 test("合并代次无法验证不谎报成旧版本，也不诱导用户反复更新", async () => {
@@ -745,18 +833,6 @@ test("切换排序回到第一页，并按新顺序取数", async () => {
     offset: 0,
     order: "connected",
   });
-});
-
-test("切换来源表排序后，结论区仍保留固定的稀疏来源复核候选", async () => {
-  renderView();
-  await screen.findByText(/当前最先值得复核的是“光遗传学质粒手册”/);
-
-  const sourcesBlock = blockByTitle("关联稀疏的来源");
-  fireEvent.click(within(sourcesBlock).getByRole("button", { name: "关联最紧密的在前" }));
-
-  const readout = blockByTitle("先看结论");
-  expect(within(readout).getByText(/当前最先值得复核的是“光遗传学质粒手册”/)).toBeInTheDocument();
-  expect(within(readout).queryByText("等待来源画像")).not.toBeInTheDocument();
 });
 
 // 切排序 / 翻页时请求在飞、屏上还是**上一次**的行。此时任何「跟着控件走」的标注都会把

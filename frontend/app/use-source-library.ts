@@ -648,7 +648,9 @@ export function useSourceLibrary({
     }
   }
 
-  async function deleteSource(source: SourceSummary) {
+  // 返回值 = 这次点击有没有真的把来源删掉(DELETE 成功)。调用方用它把结果写在按钮旁
+  // (图谱分析的问题清单);失败的原因仍由 reportError 报出,这里不重复。
+  async function deleteSource(source: Pick<SourceSummary, "id" | "notebook_id" | "type">): Promise<boolean> {
     const ownerAtStart = currentOwner();
     if (
       !ownerAtStart
@@ -656,7 +658,7 @@ export function useSourceLibrary({
       || source.notebook_id !== ownerAtStart.notebookId
       || deletingIdsRef.current.has(source.id)
       || !canWriteRef.current
-    ) return;
+    ) return false;
     const actorAtStart = ownerAtStart.actorId;
     const pendingKey = ownerKey(ownerAtStart.actorId, ownerAtStart.notebookId);
     deletingIdsRef.current.add(source.id);
@@ -682,7 +684,7 @@ export function useSourceLibrary({
           generation,
         )
         : null;
-      if (!refreshOwner || !activeOwner) return;
+      if (!refreshOwner || !activeOwner) return true;
       const owner = activeOwner;
       const isCurrent = () => {
         const current = ownerRef.current;
@@ -716,11 +718,13 @@ export function useSourceLibrary({
         effectsRef.current.refreshNotebook(source.notebook_id, isCurrent),
         effectsRef.current.refreshCheckup(source.notebook_id, isCurrent),
       ]);
+      return true;
     } catch (error) {
       const current = ownerRef.current;
       if (current?.actorId === actorAtStart && current.notebookId === source.notebook_id) {
         effectsRef.current.reportError(error);
       }
+      return false;
     } finally {
       deletingIdsRef.current.delete(source.id);
       const pending = deletingIdsByOwnerRef.current.get(pendingKey);

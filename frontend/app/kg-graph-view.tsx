@@ -1,6 +1,6 @@
 "use client";
 
-import { ReactNode } from "react";
+import { ReactNode, useEffect, useRef, useState } from "react";
 import { BarChart3, Database } from "lucide-react";
 import dynamic from "next/dynamic";
 
@@ -38,6 +38,13 @@ const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false 
 // 界面每页显示的条数。
 const KG_PENDING_MERGE_PAGE_SIZE = 20;
 const KG_RELATION_PAGE_SIZE = 20;
+/** 从图谱分析跳过来时,那一对的高亮停留多久。 */
+const KG_MERGE_FOCUS_HOLD_MS = 6000;
+/** 「待确认合并」一节与其中每一对的锚点(图谱分析「疑似没合并的同名概念」跳到这里)。 */
+const PENDING_MERGES_ANCHOR = "kg-pending-merges";
+function pendingMergeAnchor(mergeId: string): string {
+  return `kg-pending-merge-${mergeId}`;
+}
 
 function truncateKgLabel(label: string, max = 34): string {
   return label.length > max ? `${label.slice(0, max - 1)}…` : label;
@@ -152,7 +159,9 @@ function drawKgLinkLabel(link: FgLink, ctx: CanvasRenderingContext2D, globalScal
  *
  * 边界：
  * - state / ref / useMemo 派生 / effects / 命令编排全部留在 page.tsx 与
- *   use-kg-graph.ts；这里只呈现，写动作一律经显式回调交回去。
+ *   use-kg-graph.ts；这里只呈现，写动作一律经显式回调交回去。仅有的本地状态都是呈现
+ *   用的：两份清单的当前页(useClientPagination)，以及从图谱分析跳到「待确认合并」时
+ *   那一对的高亮与滚动定位(`focusMergeRequest`)。
  * - props 刻意与 page.tsx 里原局部变量**同名**，这样搬过来的 JSX 逐字不变——
  *   `disabled={kgGraph.relinking || kgGraph.rebuilding || kgGraph.buildingKg || kgGraph.deleting}`
  *   这类正是 kg-relink / kg-rebuild / kg-delete 三个守卫的判据文本，改名等于悄悄让守卫失去目标。
@@ -203,6 +212,7 @@ export function KgGraphView({
   onLoadMoreConceptMembers,
   onSelectCanvasNode,
   onSelectOverviewNode,
+  focusMergeRequest = null,
   children,
 }: {
   kgGraph: Pick<
@@ -291,9 +301,49 @@ export function KgGraphView({
    */
   onSelectCanvasNode: (nodeId: string) => void;
   onSelectOverviewNode: (nodeId: string) => void;
+  /**
+   * 从图谱分析「疑似没合并的同名概念」跳过来:翻到「待确认合并」里那一对所在的页、滚到它、
+   * 高亮一会儿并把焦点放上去。`seq` 每次请求加一,同一对连点两次也会再定位一次。
+   */
+  focusMergeRequest?: { id: string; seq: number } | null;
   children?: ReactNode;
 }) {
   const mergesPage = useClientPagination(kgGraph.pendingMerges, KG_PENDING_MERGE_PAGE_SIZE);
+  const [mergeFocus, setMergeFocus] = useState<{ id: string; seq: number } | null>(null);
+  const pendingMergesRef = useRef(kgGraph.pendingMerges);
+  pendingMergesRef.current = kgGraph.pendingMerges;
+  const setMergesPage = mergesPage.setPage;
+  // 挂载时已经存在的请求是上一次打开视图时留下的,不再消费(关掉再打开知识图谱不该自己跳)。
+  const consumedFocusSeqRef = useRef(focusMergeRequest?.seq ?? 0);
+  // 只跟着请求走(seq),不跟着列表走:列表之后再刷新不该把用户拽回那一行。
+  useEffect(() => {
+    if (!focusMergeRequest || focusMergeRequest.seq === consumedFocusSeqRef.current) return;
+    consumedFocusSeqRef.current = focusMergeRequest.seq;
+    const index = pendingMergesRef.current.findIndex((merge) => merge.id === focusMergeRequest.id);
+    if (index < 0) {
+      // 列表在跳转途中刷新过、那一对已经不在了:至少把「待确认合并」这一节带到眼前。
+      document.getElementById(PENDING_MERGES_ANCHOR)?.scrollIntoView?.({ block: "start" });
+      return;
+    }
+    setMergesPage(Math.floor(index / KG_PENDING_MERGE_PAGE_SIZE));
+    setMergeFocus(focusMergeRequest);
+  }, [focusMergeRequest, setMergesPage]);
+  // 高亮的那一行在翻页那次提交之后才在 DOM 里:等它出现再滚过去、给焦点。
+  useEffect(() => {
+    if (!mergeFocus) return;
+    const row = document.getElementById(pendingMergeAnchor(mergeFocus.id));
+    if (!row) return;
+    row.scrollIntoView?.({ block: "center" });
+    row.focus({ preventScroll: true });
+  }, [mergeFocus, mergesPage.page]);
+  // 高亮按自己的计时器褪掉;同一对再跳一次(新的 seq)会重新计时。
+  useEffect(() => {
+    if (!mergeFocus) return;
+    const timer = window.setTimeout(() => {
+      setMergeFocus((current) => (current === mergeFocus ? null : current));
+    }, KG_MERGE_FOCUS_HOLD_MS);
+    return () => window.clearTimeout(timer);
+  }, [mergeFocus]);
   // 相邻关系是「选中节点」的详情,resetKey 用选中节点 id:换一个节点必须回到第一页,
   // 不然新节点的详情会从上一个节点翻到的那一页开始显示。出处清单同理(KgOccurrenceList)。
   const relationsPage = useClientPagination(selectedKgEdges, KG_RELATION_PAGE_SIZE, selectedKgNode?.id);
@@ -504,7 +554,7 @@ export function KgGraphView({
             ))}
           </div>
         </div>
-        <div className="kg-rail-section">
+        <div className="kg-rail-section" id={PENDING_MERGES_ANCHOR}>
           <h3>待确认合并 ({kgGraph.pendingMerges.length})</h3>
           {!readOnlyWorkspace && (
             <>
@@ -527,7 +577,12 @@ export function KgGraphView({
           {kgGraph.pendingMerges.length === 0 ? <p className="tool-hint">无</p> : <>{mergesPage.pageItems.map((m) => {
             const [sideA, sideB] = pendingMergeSides(m);
             return (
-              <div className="kg-merge-row" key={m.id}>
+              <div
+                className={`kg-merge-row${mergeFocus?.id === m.id ? " is-focused" : ""}`}
+                key={m.id}
+                id={pendingMergeAnchor(m.id)}
+                tabIndex={-1}
+              >
                 <span>{sideA} ↔ {sideB} <em>({m.score.toFixed(2)})</em></span>
                 {!readOnlyWorkspace && <span className="kg-merge-actions">
                   {/* 确认会连带跑一次全量概念合并重建；重建完成前锁住整列，避免新决定

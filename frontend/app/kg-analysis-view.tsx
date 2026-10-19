@@ -24,8 +24,11 @@
  * 规模(按生产库设计,不按本机小库):板块数是万级、来源近 5 万。所以俯瞰图只单独画
  * top-N 个板块 + 一个长尾汇总节点并声明覆盖率,来源表走后端分页。
  *
- * 页面先把技术统计翻译成可采取行动的诊断信号，再保留逐指标口径供复核；可编辑成员还能
- * 从这里触发生成/更新，复用知识图谱已有的后台重新合并与轮询链路。
+ * 面板主体是**问题清单**(2026-10-19 设计 §3.4 的四个区):待处理 / 需要开发处理 /
+ * 诊断数据(原有的全部统计区块,默认折叠)/ 已通过。头部说清报告建于哪一代、与上一次比
+ * 消失了几条,以及「更新分析」此刻有没有用(没用时置灰并写原因)。问题清单的呈现在
+ * kg-analysis-findings.tsx,这里负责取数、失效重取与布局。处置动作经 page.tsx 传进来的
+ * 回调走既有入口,面板自己不执行删除或重新解析。
  */
 "use client";
 
@@ -42,15 +45,28 @@ import {
 import { toUserMessage } from "./errors";
 import { FloatingModalCard } from "./floating-modal-card";
 import {
+  dismissKgFinding,
   fetchKgAnalysis,
   fetchKgAnalysisSources,
+  undismissKgFinding,
   type KgAnalysisReport,
   type KgArtifactView,
+  type KgFindingRow,
   type KgSourceOrder,
   type KgSourceProfilePage,
-  type KgSourceProfileRow,
 } from "./kg-analysis-api";
 import {
+  FindingsDevZone,
+  FindingsHeader,
+  FindingsPassedZone,
+  FindingsPendingZone,
+  useFindingsPage,
+  type KgFindingHandlers,
+  type KgFindingsActionState,
+  type KgRelinkResult,
+} from "./kg-analysis-findings";
+import {
+  analysisReadiness,
   artifactLabel,
   artifactPurpose,
   basisLabel,
@@ -60,6 +76,8 @@ import {
   BOARD_MAP_VIEW,
   convergenceTable,
   countText,
+  findingRuleLabel,
+  findingSubjectText,
   formatCount,
   formatPercent,
   freshnessNote,
@@ -67,6 +85,7 @@ import {
   relationProvenance,
   reportHeadline,
   SOURCE_ORDER_LABEL,
+  structureSignal,
   unitFor,
   type ConvergenceTable,
   type FreshnessNote,
@@ -74,11 +93,20 @@ import {
   type RelationProvenance,
 } from "./kg-analysis-model";
 import { label } from "./vocabulary";
+import type { PendingMerge } from "./workspace-model";
 
 const SOURCE_PAGE_SIZE = 20;
 const BOARD_LIST_LIMIT = 50;
 const BOARD_EDGE_LIMIT = 200;
 const BOARD_TOP_MEMBERS = 5;
+/** 待处理每页条数;已通过区的两份清单(已判定不是同一个 / 已标为正常)每页条数。 */
+const FINDINGS_PAGE_SIZE = 20;
+const PASSED_PAGE_SIZE = 20;
+/** 「已标为正常」「已撤销」这类区级提示停留多久。 */
+const FINDINGS_NOTICE_HOLD_MS = 8000;
+const NO_DELETING_SOURCES: ReadonlySet<string> = new Set<string>();
+const NO_PENDING_MERGES: readonly PendingMerge[] = Object.freeze([]) as readonly PendingMerge[];
+const NO_FINDING_HANDLERS: KgFindingHandlers = Object.freeze({});
 
 const ARTIFACT_HISTOGRAM = "cluster_size_histogram";
 const ARTIFACT_LARGEST_CLUSTERS = "largest_clusters";
@@ -149,7 +177,9 @@ function ArtifactAbsence({ absence }: { absence: string | null }) {
     ? "这个知识库一个主题板块都没有，这份数据没有可说的内容，因此没有生成。"
     : absence === "unexpected"
       ? "同一轮里其它数据都在，唯独这一份没有写下来。"
-      : "这个知识库还没算过这份数据。";
+      : absence === "upgrade_pending"
+        ? "这是升级后新增的数据，这个知识库还没生成过；点「更新分析」即可生成。"
+        : "这个知识库还没算过这份数据。";
   return (
     <p className="kg-analysis-absent">
       {reason}
@@ -173,9 +203,20 @@ export function KgAnalysisView({
   interactive = true,
   zIndex,
   onAnalyze,
+  findingsRevision = "",
+  findingHandlers = NO_FINDING_HANDLERS,
+  deletingSourceIds = NO_DELETING_SOURCES,
+  relinking = false,
+  relinkResult = null,
+  pendingMerges = NO_PENDING_MERGES,
 }: {
   notebookId: string;
   onClose: () => void;
+  /**
+   * 可编辑成员(= 页面的 `!readOnlyWorkspace`,镜像库也是 false)。它同时决定「生成/更新
+   * 分析」、问题的处置按钮与「标为正常」出不出现——只读成员看得到同样的问题与证据,但一个
+   * 按钮都没有(设计 §3.4)。
+   */
   canAnalyze?: boolean;
   analysisRunning?: boolean;
   analysisBlocked?: boolean;
@@ -188,6 +229,16 @@ export function KgAnalysisView({
   interactive?: boolean;
   zIndex?: number;
   onAnalyze?: () => void;
+  /**
+   * 问题清单的失效令牌:来源内容变了(删除、重新解析的状态推进)、补上关联或合并决定落定时
+   * 它会变,问题清单的三页就按当前偏移重取——「已处理，更新后核验」是读侧派生的。
+   */
+  findingsRevision?: string | number;
+  findingHandlers?: KgFindingHandlers;
+  deletingSourceIds?: ReadonlySet<string>;
+  relinking?: boolean;
+  relinkResult?: KgRelinkResult | null;
+  pendingMerges?: readonly PendingMerge[];
 }) {
   const [report, setReport] = useState<KgAnalysisReport | null>(null);
   const [reportError, setReportError] = useState("");
@@ -195,11 +246,18 @@ export function KgAnalysisView({
   const [reloadToken, setReloadToken] = useState(0);
 
   const [sources, setSources] = useState<KgSourceProfilePage | null>(null);
-  const [reviewCandidate, setReviewCandidate] = useState<KgSourceProfileRow | null>(null);
   const [sourcesError, setSourcesError] = useState("");
   const [sourcesLoading, setSourcesLoading] = useState(true);
   const [order, setOrder] = useState<KgSourceOrder>("sparse");
   const [offset, setOffset] = useState(0);
+
+  // 问题清单三页的偏移,与「标为正常 / 撤销」之后自己触发的那次重取。
+  const [openOffset, setOpenOffset] = useState(0);
+  const [passedOffset, setPassedOffset] = useState(0);
+  const [dismissedOffset, setDismissedOffset] = useState(0);
+  const [findingsBump, setFindingsBump] = useState(0);
+  const [pendingNotice, setPendingNotice] = useState("");
+  const [passedNotice, setPassedNotice] = useState("");
 
   // 换库时清掉**笔记本作用域**的那几份 state。
   //
@@ -220,6 +278,8 @@ export function KgAnalysisView({
   // effect 根本不碰的,会一直陈旧到新请求返回)。这里一并清是顺手把那一帧也去掉 ——
   // 一帧的差别在 React Testing Library 里观察不到(`act` 会把 effect 一起冲掉),所以
   // 这四个字段**没有**独立守卫,别照着它们再写一条恒绿的测试。
+  //
+  // 问题清单三页的偏移与区级提示同理(那三页本身由 useFindingsPage 在渲染期清空)。
   const [shownNotebook, setShownNotebook] = useState(notebookId);
   if (shownNotebook !== notebookId) {
     setShownNotebook(notebookId);
@@ -227,36 +287,64 @@ export function KgAnalysisView({
     setReportError("");
     setLoading(true);
     setSources(null);
-    setReviewCandidate(null);
     setSourcesError("");
     setSourcesLoading(true);
     setOffset(0);
+    setOpenOffset(0);
+    setPassedOffset(0);
+    setDismissedOffset(0);
+    setPendingNotice("");
+    setPassedNotice("");
   }
 
-  // 结论区的复核候选固定来自“最稀疏”第一页，不能跟着下方表格的浏览排序消失。
-  // 初始 sparse 首页直接复用分页请求；只有用户切到 connected 时才补一份独立的
-  // 有界 sparse 首页，并在分析刷新后重取。
+  const findingsToken = `${reloadToken}|${findingsRevision}|${findingsBump}`;
+  const openFindings = useFindingsPage(notebookId, "open", FINDINGS_PAGE_SIZE, openOffset, findingsToken);
+  const passedFindings = useFindingsPage(notebookId, "passed", PASSED_PAGE_SIZE, passedOffset, findingsToken);
+  const dismissedFindings = useFindingsPage(
+    notebookId, "dismissed", PASSED_PAGE_SIZE, dismissedOffset, findingsToken,
+  );
+
+  // 处置之后这一页可能变短:停在已经不存在的那一页上时退回最后一页,而不是显示一页空白。
   useEffect(() => {
-    if (order !== "connected") return;
-    let cancelled = false;
-    fetchKgAnalysisSources(notebookId, {
-      limit: SOURCE_PAGE_SIZE,
-      offset: 0,
-      order: "sparse",
-    })
-      .then((data) => {
-        if (cancelled) return;
-        setReviewCandidate(data.present
-          ? data.rows.find((row) => !row.source_missing) ?? null
-          : null);
-      })
-      .catch(() => {
-        if (!cancelled) setReviewCandidate(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [notebookId, order, reloadToken]);
+    const page = openFindings.page;
+    if (!page || !page.present || page.returned > 0 || page.offset <= 0) return;
+    setOpenOffset(Math.max(0, Math.floor(Math.max(0, page.total - 1) / FINDINGS_PAGE_SIZE) * FINDINGS_PAGE_SIZE));
+  }, [openFindings.page]);
+
+  // 区级提示(「已标为正常…」)按自己的计时器消失。
+  const noticeTimers = useRef<{ pending: number | null; passed: number | null }>({ pending: null, passed: null });
+  useEffect(() => () => {
+    const timers = noticeTimers.current;
+    if (timers.pending !== null) window.clearTimeout(timers.pending);
+    if (timers.passed !== null) window.clearTimeout(timers.passed);
+  }, []);
+  const showNotice = useCallback((zone: "pending" | "passed", text: string) => {
+    const timers = noticeTimers.current;
+    const previous = timers[zone];
+    if (previous !== null) window.clearTimeout(previous);
+    const setter = zone === "pending" ? setPendingNotice : setPassedNotice;
+    setter(text);
+    timers[zone] = window.setTimeout(() => {
+      timers[zone] = null;
+      setter((current) => (current === text ? "" : current));
+    }, FINDINGS_NOTICE_HOLD_MS);
+  }, []);
+
+  const refetchFindings = useCallback(() => setFindingsBump((value) => value + 1), []);
+
+  // 「标为正常」与「撤销」:写完重取三页。这一条从待处理里移走、出现在已通过里(或反过来),
+  // 区级提示说清它去了哪里——按钮所在的那一行已经不在原处了。
+  const dismissFinding = useCallback(async (row: KgFindingRow) => {
+    await dismissKgFinding(notebookId, row.rule_id, row.subject.key);
+    refetchFindings();
+    showNotice("pending", `已标为正常：${findingRuleLabel(row.rule_id)} · ${findingSubjectText(row)}。可以在下方「已通过」里撤销。`);
+  }, [notebookId, refetchFindings, showNotice]);
+
+  const undismissFinding = useCallback(async (row: KgFindingRow) => {
+    await undismissKgFinding(notebookId, row.rule_id, row.subject.key);
+    refetchFindings();
+    showNotice("passed", `已撤销：${findingRuleLabel(row.rule_id)} · ${findingSubjectText(row)} 回到了待处理。`);
+  }, [notebookId, refetchFindings, showNotice]);
 
   useEffect(() => {
     let cancelled = false;
@@ -292,11 +380,6 @@ export function KgAnalysisView({
       .then((data) => {
         if (cancelled) return;
         setSources(data);
-        if (data.order === "sparse" && data.offset === 0) {
-          setReviewCandidate(data.present
-            ? data.rows.find((row) => !row.source_missing) ?? null
-            : null);
-        }
       })
       .catch((error: unknown) => {
         if (cancelled) return;
@@ -354,6 +437,17 @@ export function KgAnalysisView({
     [provenanceArtifact],
   );
 
+  const actionState: KgFindingsActionState = {
+    canWrite: canAnalyze,
+    deletingSourceIds,
+    relinking,
+    // 补上关联与重新合并 / 整理 / 删除知识图谱共用一个维护槽(`analysisBlocked` 里含 relinking,
+    // 那一档由 `relinking` 自己说「补连中…」)。
+    maintenanceBusy: analysisRunning || analysisBlocked,
+    relinkResult,
+    pendingMerges,
+  };
+
   return (
     <section
       className="utility-modal"
@@ -374,7 +468,7 @@ export function KgAnalysisView({
               <div>
                 <h2>图谱分析</h2>
                 <p>
-                  判断图谱数据是否可用、合并是否值得复核、主题之间如何连接，以及哪些来源可能偏离主体内容。
+                  列出这个知识库里需要处理的问题：哪几个来源、哪几组概念有问题，证据是什么，该怎么处理。
                 </p>
               </div>
               <div className="kg-analysis-header-actions">
@@ -392,38 +486,72 @@ export function KgAnalysisView({
                 <p className="kg-analysis-error" role="alert">{reportError}</p>
               ) : report ? (
                 <>
-                  <AnalysisReadout
+                  <FindingsHeader
                     report={report}
-                    table={convergence}
-                    boards={boards}
-                    largest={largest}
-                    provenance={provenance}
-                    reviewCandidate={reviewCandidate}
                     canAnalyze={canAnalyze}
                     analysisRunning={analysisRunning}
                     analysisBlocked={analysisBlocked}
                     onAnalyze={onAnalyze}
                   />
-                  <ReportState report={report} />
-                  <ArtifactLedger report={report} />
-                  <CompositionBlock artifact={histogram} table={convergence} />
-                  <ConvergenceBlock artifact={histogram} table={convergence} />
-                  <LargestClustersBlock artifact={largestArtifact} data={largest} />
-                  <RelationProvenanceBlock artifact={provenanceArtifact} data={provenance} />
-                  <BoardsBlock report={report} boards={boards} />
-                  <BoardMapBlock
+                  <FindingsPendingZone
                     report={report}
-                    map={map}
-                    artifact={artifactOf(ARTIFACT_COMMUNITY_EDGES)}
+                    pageState={openFindings}
+                    state={actionState}
+                    handlers={findingHandlers}
+                    notice={pendingNotice}
+                    onOffset={setOpenOffset}
+                    onDismiss={dismissFinding}
+                    onChanged={refetchFindings}
                   />
-                  <SourcesBlock
-                    artifact={artifactOf(ARTIFACT_SOURCE_PROFILES)}
-                    page={sources}
-                    loading={sourcesLoading}
-                    error={sourcesError}
-                    order={order}
-                    onOrder={changeOrder}
-                    onOffset={setOffset}
+                  <FindingsDevZone report={report} />
+                  {/* 诊断数据:原有的全部统计区块原样保留、逐指标的新鲜度标注不变,只是默认收起
+                      ——它们是复核用的原始数字,不是要读者先读的结论(设计 §3.4)。 */}
+                  <details className="kg-findings-diagnostics">
+                    <summary>
+                      <span className="kg-findings-diagnostics-title">诊断数据</span>
+                      <span className="kg-findings-diagnostics-hint">
+                        报告口径与新鲜度、本报告用到的数据、构成、收敛率、最大合并组、关联形成方式、主题结构、俯瞰图、来源画像
+                      </span>
+                    </summary>
+                    <div className="kg-findings-diagnostics-body">
+                      <AnalysisReadout
+                        report={report}
+                        table={convergence}
+                        largest={largest}
+                        provenance={provenance}
+                      />
+                      <ReportState report={report} />
+                      <ArtifactLedger report={report} />
+                      <CompositionBlock artifact={histogram} table={convergence} />
+                      <ConvergenceBlock artifact={histogram} table={convergence} />
+                      <LargestClustersBlock artifact={largestArtifact} data={largest} />
+                      <RelationProvenanceBlock artifact={provenanceArtifact} data={provenance} />
+                      <BoardsBlock report={report} boards={boards} />
+                      <BoardMapBlock
+                        report={report}
+                        map={map}
+                        artifact={artifactOf(ARTIFACT_COMMUNITY_EDGES)}
+                      />
+                      <SourcesBlock
+                        artifact={artifactOf(ARTIFACT_SOURCE_PROFILES)}
+                        page={sources}
+                        loading={sourcesLoading}
+                        error={sourcesError}
+                        order={order}
+                        onOrder={changeOrder}
+                        onOffset={setOffset}
+                      />
+                    </div>
+                  </details>
+                  <FindingsPassedZone
+                    report={report}
+                    passed={passedFindings}
+                    dismissed={dismissedFindings}
+                    canWrite={canAnalyze}
+                    notice={passedNotice}
+                    onPassedOffset={setPassedOffset}
+                    onDismissedOffset={setDismissedOffset}
+                    onUndismiss={undismissFinding}
                   />
                 </>
               ) : null}
@@ -435,77 +563,28 @@ export function KgAnalysisView({
   );
 }
 
-// ------------------------------------------------------------ 先给结论与动作
+// ------------------------------------------------------------ 先看结论(诊断数据区的摘要)
 
-function payloadNumber(payload: Record<string, unknown> | null | undefined, key: string): number {
-  const value = payload?.[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
+/**
+ * 诊断数据区的第一块:三张信号卡。原来的第四张「来源复核入口」已被问题清单的「疑似内容
+ * 错配」取代、连同它额外的一次来源画像请求一起删掉——它挑出的「最先值得复核的来源」用的是
+ * 「主体板块」口径,会把真正混进来的来源与正常文档并列在 0%(设计 §一)。「主题结构信号」改报
+ * 主体内容 / 孤岛(§五 S3),不再报「当前分为 N 个主题板块」。
+ *
+ * 「更新分析」按钮挪到了面板头部(按 §五 S4 的状态表置灰或可点),这里不再重复一颗。
+ */
 function AnalysisReadout({
   report,
   table,
-  boards,
   largest,
   provenance,
-  reviewCandidate,
-  canAnalyze,
-  analysisRunning,
-  analysisBlocked,
-  onAnalyze,
 }: {
   report: KgAnalysisReport;
   table: ConvergenceTable;
-  boards: ReturnType<typeof boardList>;
   largest: LargestClusters;
   provenance: RelationProvenance;
-  reviewCandidate: KgSourceProfileRow | null;
-  canAnalyze: boolean;
-  analysisRunning: boolean;
-  analysisBlocked: boolean;
-  onAnalyze?: () => void;
 }) {
-  const hasIntegrityProblem = !report.ledger_consistent || report.artifacts.some((item) => (
-    item.absence === "unexpected"
-    || (item.freshness.seq_behind ?? 0) < 0
-    || (item.freshness.cluster_seq_behind ?? 0) < 0
-  ));
-  const hasNoAnalysis = report.ledger_state === "empty";
-  const needsUpdate = report.state.dirty || report.artifacts.some((item) => (
-    item.present && item.freshness.stale === true
-  ));
-  const hasUnknownMergeGeneration = report.artifacts.some((item) => (
-    item.present && item.freshness.stale === null
-  ));
-  const readiness = hasIntegrityProblem
-    ? {
-        tone: "danger",
-        title: "暂不可据此下结论",
-        text: "报告数据有缺失或版本互相对不上。先更新分析；更新后仍出现红色状态时再排查数据完整性。",
-      }
-    : hasNoAnalysis
-      ? {
-          tone: "neutral",
-          title: "尚未生成分析",
-          text: "当前只有图谱内容，没有质量统计。生成后才会出现合并、主题和来源诊断。",
-        }
-      : needsUpdate
-        ? {
-            tone: "warn",
-            title: "先更新，再判断",
-            text: "图谱内容或合并结果在这份报告之后发生过变化；黄色状态描述的是旧版本。",
-          }
-        : hasUnknownMergeGeneration
-          ? {
-              tone: "neutral",
-              title: "可用，但有一项无法验证",
-              text: "报告与当前图谱内容一致，但旧主题划分没有保存其合并代次，部分合并新鲜度无法核对。这不代表数据已经陈旧，重复更新也不一定消除该提示。",
-            }
-        : {
-            tone: "ok",
-            title: "可用于当前判断",
-            text: "报告数据齐全，且与当前图谱版本一致。下面的指标可以作为排查线索。",
-          };
+  const readiness = analysisReadiness(report);
 
   const concept = table.rows.find((row) => row.key === "concept");
   const largestRow = largest.rows[0];
@@ -514,17 +593,7 @@ function AnalysisReadout({
     : "尚无可判断的概念合并数据。";
 
   const communityArtifact = report.artifacts.find((item) => item.kind === ARTIFACT_COMMUNITY_EDGES);
-  const crossWeight = payloadNumber(communityArtifact?.payload, "cross_weight");
-  const intraWeight = payloadNumber(communityArtifact?.payload, "intra_weight");
-  const connectedWeight = crossWeight + intraWeight;
-  const crossShare = connectedWeight > 0 ? crossWeight / connectedWeight : null;
-  const topologyText = boards.total > 0
-    ? `当前分为 ${formatCount(boards.total)} 个主题板块${crossShare === null ? "，尚无可统计的板块间关联。" : `；跨板块关联占全部板块关联的 ${formatPercent(crossShare)}。`}`
-    : "尚未形成主题板块，无法判断主题边界与来源归属。";
-
-  const sourceText = reviewCandidate
-    ? `当前最先值得复核的是“${reviewCandidate.title || "没有标题的来源"}”：与主体板块的关联度为 ${formatPercent(reviewCandidate.mainstream_share)}。确认它是否偏题、解析不完整或缺少关系。`
-    : "生成来源画像后，会按与主体板块的关联度列出优先复核候选；低关联不等于错误。";
+  const structure = structureSignal(report.findings_summary, communityArtifact?.payload ?? null);
 
   return (
     <div className="kg-analysis-block kg-analysis-readout">
@@ -533,18 +602,6 @@ function AnalysisReadout({
           <h3>先看结论</h3>
           <p className="kg-analysis-hint">这些是诊断信号，不是把图谱压成一个“质量总分”。</p>
         </div>
-        {canAnalyze && onAnalyze ? (
-          <button
-            type="button"
-            className="sort-button kg-analysis-run-button"
-            disabled={analysisRunning || analysisBlocked}
-            onClick={onAnalyze}
-            title="重算跨文档合并、主题板块和质量统计；不会重新分析来源"
-          >
-            <RefreshCw size={15} className={analysisRunning ? "busy-spin" : undefined} />
-            {analysisRunning ? "正在生成…" : hasNoAnalysis ? "生成分析" : "更新分析"}
-          </button>
-        ) : null}
       </div>
       <div className="kg-analysis-insight-grid">
         <article className={`kg-analysis-insight kg-analysis-insight--${readiness.tone}`}>
@@ -559,13 +616,12 @@ function AnalysisReadout({
         </article>
         <article className="kg-analysis-insight">
           <span>主题结构信号</span>
-          <strong>{boards.total > 0 ? `${formatCount(boards.total)} 个主题板块` : "尚未形成板块"}</strong>
-          <p>{topologyText} 比例高可能是主题交织或边界过松，比例低可能是边界清晰或板块彼此孤立。</p>
-        </article>
-        <article className="kg-analysis-insight">
-          <span>来源复核入口</span>
-          <strong>{reviewCandidate ? "已有优先候选" : "等待来源画像"}</strong>
-          <p>{sourceText}</p>
+          <strong>{structure ? structure.headline : "尚无结构数据"}</strong>
+          <p>
+            {structure
+              ? `${structure.text} 主体内容是彼此有关联连在一起的最大那一片；孤岛与它没有任何关联，多半来自内容错配或解析残缺的来源。`
+              : "生成问题清单后，这里会说明主体内容占多少、另有多少孤岛。"}
+          </p>
         </article>
       </div>
       <div className="kg-analysis-status-guide" aria-label="状态说明">
@@ -574,11 +630,6 @@ function AnalysisReadout({
         <span><i className="kg-analysis-guide-dot is-neutral" />灰色：尚未生成、无需生成或代次无法验证</span>
         <span><i className="kg-analysis-guide-dot is-ok" />无异常徽标：已生成且版本一致</span>
       </div>
-      <p className="kg-analysis-action-note">
-        生成或更新分析会在后台重算跨文档合并、主题板块和五份质量数据，不会重新分析来源。
-        {analysisBlocked ? " 当前有其它图谱任务进行中，完成后即可操作。" : " 完成后本页会自动刷新。"}
-        {!canAnalyze ? " 只读成员可以查看，拥有编辑权限的成员可以生成或更新。" : ""}
-      </p>
       {provenance.counted > 0 ? (
         <p className="kg-analysis-action-note">
           当前可用关联中有 {formatPercent(provenance.relinkShare)} 来自自动补连；这说明关联覆盖方式，
@@ -658,7 +709,7 @@ function ReportState({ report }: { report: KgAnalysisReport }) {
 // ------------------------------------------------------------------ 数据清单
 
 /**
- * 五份数据的在场情况。**恒五行**——缺席的那几份也在列表里,否则「少了一份数据」会
+ * 每份数据的在场情况。**条数恒定**(问题清单上线后是六份)——缺席的那几份也在列表里,否则「少了一份数据」会
  * 表现成「少了一张卡片、没有任何提示」。
  */
 function ArtifactLedger({ report }: { report: KgAnalysisReport }) {
@@ -669,7 +720,7 @@ function ArtifactLedger({ report }: { report: KgAnalysisReport }) {
           <h3>本报告用到的数据</h3>
         </div>
         <p className="kg-analysis-hint">
-          这五份数据由“生成/更新分析”统一产出。每一行说明它回答的问题以及当前是否可用。
+          这几份数据由“生成/更新分析”统一产出。每一行说明它回答的问题以及当前是否可用。
         </p>
       </div>
       <ul className="kg-analysis-ledger">

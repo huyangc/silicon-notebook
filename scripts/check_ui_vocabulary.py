@@ -310,6 +310,21 @@ ASCII_TERMS = {
     # 检索结束事实(设计稿 2026-09-07 §7.2):一个必答方面的支撑全被最终装配的
     # 预算/过滤挡在合成之外,界面说「未送达」。内部名不上屏。
     "undelivered": re.compile(r"(?<![A-Za-z])undelivered(?![A-Za-z])", re.IGNORECASE),
+    # —— 图谱分析「问题清单」(设计 2026-10-19 §十)。规则、状态与结构口径的内部名
+    # 夹在中文文案里上屏就是黑话;界面词见 docs/ui-vocabulary.md 对应各行。
+    "finding": re.compile(r"(?<![A-Za-z])findings?(?![A-Za-z])", re.IGNORECASE),
+    "dismiss": re.compile(r"(?<![A-Za-z])dismiss(?:ed|al)?(?![A-Za-z])", re.IGNORECASE),
+    "exemption": re.compile(r"(?<![A-Za-z])exemptions?(?![A-Za-z])", re.IGNORECASE),
+    "off-topic": re.compile(r"(?<![A-Za-z])off-?topic(?![A-Za-z])", re.IGNORECASE),
+    "duplicate import": re.compile(r"(?<![A-Za-z])duplicate imports?(?![A-Za-z])", re.IGNORECASE),
+    "parse damage": re.compile(r"(?<![A-Za-z])parse damage(?![A-Za-z])", re.IGNORECASE),
+    "under-merge": re.compile(r"(?<![A-Za-z])under-?merg(?:e|ed|ing)(?![A-Za-z])", re.IGNORECASE),
+    "giant component": re.compile(r"(?<![A-Za-z])giant components?(?![A-Za-z])", re.IGNORECASE),
+    "island component": re.compile(r"(?<![A-Za-z])island components?(?![A-Za-z])", re.IGNORECASE),
+    "handled": re.compile(r"(?<![A-Za-z])handled(?![A-Za-z])", re.IGNORECASE),
+    "dev-side defect": re.compile(r"(?<![A-Za-z])dev-side defects?(?![A-Za-z])", re.IGNORECASE),
+    # 两个来源的概念集合重合度在界面上叫「概念重合度」,算法名不上屏。
+    "Jaccard": re.compile(r"(?<![A-Za-z])jaccard(?![A-Za-z])", re.IGNORECASE),
 }
 
 # CJK jargon. Regex (not plain substring) so the ambiguous rows can carry their
@@ -378,6 +393,11 @@ CJK_TERMS = {
     # —— Agentic Memory P3「我的回答偏好」。「回答风格偏好」是 config.py 注释里
     # 「检索/回答风格偏好」文档的内部措辞，界面词是「我的回答偏好」。
     "回答风格偏好": re.compile(r"回答风格偏好"),
+    # —— 图谱分析「问题清单」(设计 2026-10-19 §五 S3 / §十)。图论里的「连通分量」与
+    # 设计稿里的「主连通块」在界面上分别说「主体内容」「孤岛」。两个都是无歧义的复合
+    # 形态,不会误伤正常措辞(裸「分量」「连通」不收)。
+    "连通分量": re.compile(r"连通分量"),
+    "主连通块": re.compile(r"主连通块"),
 }
 
 CJK = re.compile(r"[一-鿿]")

@@ -8,6 +8,7 @@ import {
   relinkBusyFor,
   releaseRelinkClaim,
   relinkPollOutcome,
+  relinkTerminalResult,
 } from "../../features/kg-maintenance/kg-relink-status.ts";
 
 const base = {
@@ -138,4 +139,17 @@ test("轮询尝试上限是有界的，且超限回执中性（不说任务失�
       `超限只是「不等了」，任务可能仍在跑，文案不得出现「${word}」：${RELINK_POLL_TIMED_OUT.toast}`,
     );
   }
+});
+
+test("终态回执 → 写在按钮旁的两个计数：只认 succeeded，只认本标签页期望的那一次", () => {
+  const done = { ...base, status: "succeeded", running: false, edges_added: 12, isolated_after: 1818 };
+  assert.deepEqual(relinkTerminalResult(done, "rlj-1"), { edgesAdded: 12, isolatedAfter: 1818 });
+  // 领养来的任务(没有期望 job)照报:用户等的正是刚跑完的这一次。
+  assert.deepEqual(relinkTerminalResult(done, undefined), { edgesAdded: 12, isolatedAfter: 1818 });
+  // 别人的那一次、还在跑、失败、idle(进程重启后不知道有过任务)都没有可报的数。
+  assert.equal(relinkTerminalResult(done, "rlj-2"), null);
+  assert.equal(relinkTerminalResult({ ...done, running: true }, "rlj-1"), null);
+  assert.equal(relinkTerminalResult({ ...done, status: "failed" }, "rlj-1"), null);
+  assert.equal(relinkTerminalResult({ ...done, status: "idle" }, null), null);
+  assert.equal(relinkTerminalResult(null, null), null);
 });

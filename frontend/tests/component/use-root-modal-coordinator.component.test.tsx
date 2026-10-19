@@ -232,6 +232,70 @@ test("source detail invalidates older primary opens while its catalog review rem
   expect(value!.view("catalog-review").topmost).toBe(true);
 });
 
+// 图谱分析的问题清单「打开来源核对」:来源详情叠在分析面板上层打开,面板不关;来源详情里
+// 再开命令目录审阅,面板仍在;逐层关掉之后焦点回到面板里那颗按钮。面板全程不卸载,所以
+// 滚动位置原样保留。其它 primary 照旧把分析面板冲突关掉——共存只给这几对。
+function KgAnalysisHarness({ sourceId = null }: { sourceId?: string | null }) {
+  value = useRootModalCoordinator({ actorId: "user-a", sourceId, onClosed: closed });
+  const analysis = value.view("kg-analysis");
+  const detail = value.view("source-detail");
+  return <div>
+    {analysis.open ? (
+      <section data-testid="kg-analysis-surface" inert={analysis.topmost ? undefined : true} aria-hidden={!analysis.topmost}>
+        <button data-testid="open-source-for-checking">打开来源核对</button>
+      </section>
+    ) : null}
+    {detail.open ? <section data-testid="source-detail-surface">来源</section> : null}
+  </div>;
+}
+
+test("source detail and its catalog review coexist with the KG analysis panel; closing them returns focus to the opener", () => {
+  const screen = render(<KgAnalysisHarness />);
+  enterWorkspace();
+  const workspace = value!.captureWorkspaceOwner();
+  act(() => { value!.open("kg-analysis", workspace); });
+  const opener = screen.getByTestId("open-source-for-checking");
+  opener.focus();
+
+  // openSourceDetailById 的形状:先 issue(此刻记下焦点),异步取到详情后再 publish。
+  const lease = value!.issue("source-detail", value!.captureWorkspaceOwner());
+  act(() => { expect(value!.publish(lease)).toBe(true); });
+  screen.rerender(<KgAnalysisHarness sourceId="source-a" />);
+  expect(value!.view("kg-analysis").open).toBe(true);
+  expect(value!.view("kg-analysis").topmost).toBe(false);
+  expect(value!.view("source-detail").topmost).toBe(true);
+  expect(value!.view("source-detail").zIndex).toBeGreaterThan(value!.view("kg-analysis").zIndex);
+  expect(screen.getByTestId("kg-analysis-surface")).toHaveAttribute("inert");
+
+  act(() => { expect(value!.open("catalog-review", value!.captureSourceOwner())).not.toBeNull(); });
+  expect(value!.view("kg-analysis").open).toBe(true);
+  expect(value!.view("source-detail").open).toBe(true);
+  expect(value!.view("catalog-review").topmost).toBe(true);
+  expect(closed).not.toHaveBeenCalledWith("kg-analysis", "conflict");
+
+  act(() => { expect(value!.requestClose("catalog-review", "button")).toBe(true); });
+  act(() => { expect(value!.requestClose("source-detail", "button")).toBe(true); });
+  expect(value!.view("kg-analysis").topmost).toBe(true);
+  expect(screen.getByTestId("kg-analysis-surface")).not.toHaveAttribute("inert");
+  expect(document.activeElement).toBe(screen.getByTestId("open-source-for-checking"));
+});
+
+test("the coexistence pairs are narrow: any other primary still evicts the KG analysis panel", () => {
+  render(<KgAnalysisHarness />);
+  enterWorkspace();
+  const workspace = value!.captureWorkspaceOwner();
+  act(() => { value!.open("kg-analysis", workspace); });
+  act(() => { value!.open("analytics", workspace); });
+  expect(value!.view("kg-analysis").open).toBe(false);
+  expect(closed).toHaveBeenCalledWith("kg-analysis", "conflict");
+
+  // 反过来:先开来源详情,再开分析面板,两者同样共存(配对是对称的)。
+  act(() => { value!.open("source-detail", workspace); });
+  act(() => { value!.open("kg-analysis", workspace); });
+  expect(value!.view("source-detail").open).toBe(true);
+  expect(value!.view("kg-analysis").open).toBe(true);
+});
+
 test("workspace navigation closes collection dialogs but keeps actor-global settings", () => {
   render(<Harness />);
   enterWorkspace();

@@ -199,6 +199,25 @@ test("collection and KG payload owners are coordinated only through typed presen
   ]) assert.ok(closeCalls.includes(target), target);
 });
 
+// primary 之间的共存例外只给「往下钻」的那几对:来源详情 ↔ 命令目录审阅(原有),以及
+// 图谱分析的问题清单「打开来源核对」带出来的两对——来源详情叠在分析面板上层、来源详情
+// 再开命令目录审阅时面板仍在。多一对就会有别的弹窗不再互斥,少一对面板就会被自己带出来的
+// 下一层关掉(关掉来源详情后也就回不到原来那一条问题)。行为在协调器组件测试里钉。
+test("primary coexistence is limited to the drill-down pairs", () => {
+  const block = hookText.match(/const COEXISTING_PRIMARY_PAIRS[^=]*= \[([\s\S]*?)\];/);
+  assert.ok(block, "COEXISTING_PRIMARY_PAIRS 不见了");
+  const pairs = [...block[1].matchAll(/\["([\w-]+)", "([\w-]+)"\]/g)].map((match) => [match[1], match[2]]);
+  assert.deepEqual(pairs, [
+    ["source-detail", "catalog-review"],
+    ["source-detail", "kg-analysis"],
+    ["catalog-review", "kg-analysis"],
+  ]);
+  assert.match(hookText, /function primarySlotsMayCoexist\(left: RootModalSlot, right: RootModalSlot\): boolean \{\s*return COEXISTING_PRIMARY_PAIRS\.some\(/);
+  // 面板里的「打开来源核对」走既有的冻结票据开窗,且不关面板。
+  const calls = callSitesIn(findFunctionIn(page, "Home", "openSourceFromAnalysis")).map(({ target }) => target);
+  assert.deepEqual(calls, ["openSourceDetailById"]);
+});
+
 test("only the coordinator top layer drives the model focus trap", () => {
   assert.match(pageText, /interactive=\{rootModals\.view\("model-service"\)\.topmost\}/);
   assert.match(modelPanel.getText(modelPanel), /if \(!interactive\) return;/);
