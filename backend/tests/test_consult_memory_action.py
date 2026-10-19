@@ -844,3 +844,27 @@ def test_consult_memory_returns_this_notebooks_row_over_the_shared_twin(repo):
     assert len(steps) == 1 and steps[0].detail["entries"] == 1
     assert RATIONALE_PPR in llm.reflect_prompts[1]
     assert "Shared fallback tactic for ppr." not in llm.reflect_prompts[1]
+
+
+def test_consult_never_returns_a_row_for_an_action_the_run_does_not_offer(repo):
+    """deep 档不提供 `update_outline`:推荐它的那条经验在两次 consult 里都不出现
+    (选择前就被滤掉,不占名额),推荐提供了的动作的行照常返回。"""
+    notebook = _seed(repo)
+    outline_text = "outline pays off on survey-shaped questions."
+    _write_many_experiences(repo, [
+        ("outline", "good", outline_text),
+        ("exact_lookup", "good", "exact_lookup nails the section fast."),
+    ])
+    llm = _SeqLLM([
+        {"next_action": "consult_memory"},
+        {"next_action": "consult_memory"},
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever = _retriever(repo, llm)
+    result, _ = _run(retriever, notebook, "deep")
+
+    assert _steps(result, "consult_memory"), "前提:consult 真的送达过东西"
+    assert any("exact_lookup nails" in p for p in llm.reflect_prompts)
+    for prompt in [*llm.plan_prompts, *llm.reflect_prompts]:
+        assert outline_text not in prompt
+        assert "update_outline —" not in prompt

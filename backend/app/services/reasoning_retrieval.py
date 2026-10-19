@@ -245,9 +245,14 @@ def first_round_empty_note(chunk_search: bool, enumeration: bool) -> str:
 
 def legacy_action_ledger_note(
     visited, collected, neighbor_truncated, neighbor_expand_limit,
-    attempted, exact_lookup_log, document_reads=(),
+    attempted, exact_lookup_log, document_reads=(), *,
+    element_search: bool = True,
 ) -> str:
     """把已执行动作的五段账目拼到候选摘要之后。
+
+    ``element_search`` = 本 run 是否提供 ``search_elements``(``element_search_offered``)。
+    邻居截断那段的「下一步该做什么」只点名提供了的动作:闸关(今天 = 对等 run,
+    expand_graph 照常提供、截断照常可能发生)时只建议 add_subquery,闸开逐字节不变。
 
     ``document_reads`` 是 PR-A 的按篇取样账目(`DocumentReadOutcome` 列表)。它
     带默认值是因为这份账目对**没有这个通道**的 run(关闭态、没接 `sources` 的
@@ -279,8 +284,9 @@ def legacy_action_ledger_note(
             + (f" 等 {len(neighbor_truncated)} 个"
                if len(neighbor_truncated) > _NEIGHBOR_TRUNCATION_DISCLOSE
                else "")
-            + "。它们周边未展开的证据请改用针对性的 add_subquery 或"
-              "search_elements 定向检索;重复 expand_graph 请求同一节点"
+            + "。它们周边未展开的证据请改用针对性的 add_subquery"
+            + (" 或search_elements" if element_search else "")
+            + " 定向检索;重复 expand_graph 请求同一节点"
               "不会给出更多邻居。）")
     # 已执行过的子查询账目回喂 reflect(镜像 visited 回喂,治"反复补充同
     # 一条子查询"):模型据此区分"没查过"与"查过但没捞到";账目含尝试次数,
@@ -673,6 +679,7 @@ def _reflect_step_summary(decision: "ReflectDecision") -> str:
         f"反思结果无法采用（校验拒绝：{reason}），按直接作答处理"
         if rejected else "反思结果无法采用（模型调用失败），按直接作答处理"
     )
+
 
 def core_reflect_actions(
     *, kg_actions: bool, chunk_search: bool, enumeration: bool,
@@ -2444,6 +2451,13 @@ def outline_wiring_active(settings, limits) -> bool:
 # for what makes this a different SELECTION rather than a second copy of
 # ``select_experiences``.
 CONSULT_MEMORY_ACTION = "consult_memory"
+#: 全部核心动作 id(每把闸都开时 ``core_reflect_actions`` 给出的集合;放在最后一个
+#: 动作常量之后求值)。模型选到其中一个而本 run 不提供时按「不提供」处理(记 skip
+#: 继续,见 ``ReflectDecision.withheld``),选到集合外的名字才是真正的未知动作。
+CORE_REFLECT_ACTION_IDS: "frozenset[str]" = frozenset(core_reflect_actions(
+    kg_actions=True, chunk_search=True, enumeration=True, read_document=True,
+    outline=True, consult_memory=True, search_elements=True, ppr_retrieve=True,
+))
 
 #: deep 及以上档才提供这个动作。与大纲便签的档位闸同一条道理(低档不该为一次
 #: 额外的模型驱动反思轮付成本)但阈值不同:大纲只在 exhaustive,因为它触发按节
@@ -2593,9 +2607,8 @@ def _zero_hit_nudge_for(
 
 
 def _consultable_rows(
-    store, notebook_id, situation: Mapping[str, object],
-    offered: "Optional[frozenset]" = None, *,
-    exclude_ids, zero_hit_actions, top_k: int,
+    store, notebook_id, situation: Mapping[str, object], *,
+    offered: "Optional[frozenset]", exclude_ids, zero_hit_actions, top_k: int,
 ) -> List[Mapping[str, object]]:
     """读两层快照 + 选出这一轮 consult_memory 该还回去的新行。
 
@@ -3130,6 +3143,11 @@ class ReflectDecision:
     # run() 据它在 reflect 步 detail 上写稀疏键、并把上屏那行换成中文整句。
     fallback: bool = False
     fallback_reason: str = ""
+    # 模型选了一个**已知的核心动作**(``CORE_REFLECT_ACTION_IDS``),但本 run 不提供
+    # 它(无图、对等、档位或部署开关把它摘掉了)。这不是畸形输出:执行处记一条 skip
+    # 如实说明,循环照常进展结算(受 stale 熔断与步数上限约束),而不是像未知动作
+    # 那样兜底成 answer 提前收尾。
+    withheld: bool = False
 
 
 @dataclass
@@ -4716,6 +4734,14 @@ class ReasoningRetriever:
             # (fail_closed 抛错,否则 `invalid_action:<name>` 兜底)。
             ) + project_reflect_actions(plugin_actions).action_names
             action_rejected = action not in allowed_actions
+            if (action_rejected and not self.fail_closed
+                    and action in CORE_REFLECT_ACTION_IDS):
+                # 已知核心动作、只是本 run 不提供:记 skip 继续,不当成畸形输出
+                # 收尾(`ReflectDecision.withheld`)。严格调用方的合同不变:任何
+                # 不在白名单里的动作都抛错(下面那条 fail_closed 分支)。
+                return ReflectDecision(
+                    next_action=action, withheld=True,
+                    reason=as_text(data.get("reason")))
             rejected_action = ""
             if action_rejected:
                 if self.fail_closed:
@@ -7765,7 +7791,7 @@ class ReasoningRetriever:
         summary += legacy_action_ledger_note(
             state.visited, state.collected, state.neighbor_truncated,
             state.neighbor_expand_limit, state.attempted, state.exact_lookup_log,
-            state.document_reads)
+            state.document_reads, element_search=element_search_offered())
         # 未执行的已确认方向回喂 reflect(镜像上面几份账目):模型据此知道哪些
         # 用户确认过的方向还没跑过,可以优先用 add_subquery 把它们补上,而不是
         # 另起炉灶猜一个新角度。每轮按 attempted 现算 —— 模型真把某条补上了,
@@ -7936,7 +7962,16 @@ class ReasoningRetriever:
         """执行本轮 reflect 选中的动作。返回 False 表示动作未知,循环据此直接收尾
         (不走进展结算);两条被闸住的动作(枚举、跨库同类实体扩展)在这里零 I/O
         记 skip,照常落到循环的进展结算。"""
-        if (
+        if decision.withheld:
+            # 本 run 不提供的已知核心动作(见 `ReflectDecision.withheld`):零 I/O
+            # 记 skip,落到循环的进展结算,不提前收尾。
+            state.record(TraceStep(
+                step_type="skip",
+                summary="跳过模型所选的检索动作(本次检索不提供它)",
+                detail={"reason": "action_not_offered",
+                        "action": decision.next_action},
+            ))
+        elif (
             decision.next_action in (
                 ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION
             )
@@ -8240,7 +8275,7 @@ class ReasoningRetriever:
                 } if state.experience_block else set()
                 new_consult_rows = _consultable_rows(
                     self.retrieval_experiences, state.notebook_id,
-                    consult_situation, state.offered_reflect_actions,
+                    consult_situation, offered=state.offered_reflect_actions,
                     exclude_ids=(
                         state.consult_delivered_ids | delivered_passive_ids
                     ),
