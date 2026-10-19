@@ -65,7 +65,7 @@ const ARTIFACT_EXPECTED_TOOLTIP = "一个主题板块都没有时，这份数据
 // 这是**预期态**,下一次「更新分析」就会补上——不是数据坏了,所以是灰色(info),绝不能
 // 落进 unexpected 那一档亮红色「本该有却缺失」(那会在每一个已部署库上误报)。
 const ARTIFACT_UPGRADE_PENDING_LABEL = "升级后还没生成";
-const ARTIFACT_UPGRADE_PENDING_TOOLTIP = "这是升级后新增的数据，这个知识库还没生成过。点「更新分析」即可生成。";
+const ARTIFACT_UPGRADE_PENDING_TOOLTIP = "这是升级后新增的数据，这个知识库还没生成过；更新一次分析后即可生成。";
 
 const ARTIFACT_STALE_LABEL = "落后于当前内容";
 const ARTIFACT_STALE_TOOLTIP = "这份数字描述的是更早的库内容，之后又有过改动。重新合并一次即可对齐。";

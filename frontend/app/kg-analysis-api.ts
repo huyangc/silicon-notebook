@@ -196,7 +196,13 @@ export type KgFindingRow = {
   live_sources?: KgFindingLiveSource[] | null;
 };
 
-/** 三个区各一页:待处理(open)/ 已通过(passed)/ 已标为正常(dismissed)。 */
+/**
+ * 三个区各一页:
+ *   · `open` —— 待处理:status 为 open 或 handled(已处理，更新后核验)的行;
+ *   · `passed` —— F4 用户已判定不是同一个(status = decided_not_same)的行;
+ *   · `dismissed` —— 已标为正常(status = dismissed)的行。
+ * 前端按每行自己的 status 归区,所以读侧即使把已标为正常也放进 passed,也不会被列两遍。
+ */
 export type KgFindingZone = "open" | "passed" | "dismissed";
 
 export type KgFindingsPage = {

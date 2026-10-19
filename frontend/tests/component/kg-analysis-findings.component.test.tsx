@@ -555,6 +555,8 @@ test("已通过：✓ 检查过没发现、– 没法检查、– 部分没判�
     "–疑似重复导入：没法检查，能互相比较的来源不足两个",
     "✓没发现解析残缺的来源（检查了 84 个来源）",
     "✓没发现没合并的同名概念（检查了 9,400 个合并后的知识对象）",
+    // 重建之后用户驳回过的组不再成行,只剩计数;不写出来,用户的判断就看不见了。
+    "≠疑似没合并的同名概念：已判定不是同一个的有 1 组，不再列为问题",
   ]);
   expect(within(passed).getByText(/已判定不是同一个：疑似没合并的同名概念 · Llama 3\.1/)).toBeInTheDocument();
   expect(within(passed).getByRole("button", { name: "撤销" })).toBeEnabled();
@@ -626,6 +628,83 @@ test("来源详情叠在上面时面板只退出交互树、不卸载：滚动�
   expect(after).toBe(body);
   expect(after.scrollTop).toBe(340);
   expect(findingItems()).toHaveLength(5);
+});
+
+test("面板里删掉一篇来源之后总览也重取：「更新分析」按新报告从「无需更新」变成可点", async () => {
+  const handlers: KgFindingHandlers = { onDeleteSource: vi.fn((_target, report) => report("deleted")) };
+  renderPanel({ findingHandlers: handlers });
+  await ready();
+  expect(within(zone("报告状态")).getByRole("button", { name: "更新分析" })).toBeDisabled();
+  const overviewCalls = vi.mocked(fetchKgAnalysis).mock.calls.length;
+  vi.mocked(fetchKgAnalysis).mockResolvedValue(report({ state: { ...report().state, kg_mutation_seq: 129, dirty: true } }));
+
+  fireEvent.click(within(findingByRule("疑似内容错配")).getByRole("button", { name: "删除来源…" }));
+  await waitFor(() => expect(within(zone("报告状态")).getByRole("button", { name: "更新分析" })).toBeEnabled());
+  expect(vi.mocked(fetchKgAnalysis).mock.calls.length).toBe(overviewCalls + 1);
+  expect(within(zone("报告状态")).queryByText(/无需更新/)).toBeNull();
+  // 报告落后了:每条问题标出它基于哪一次变更。
+  await waitFor(() => expect(within(findingByRule("疑似重复导入")).getByText("基于变更 #128")).toBeInTheDocument());
+});
+
+test("失效令牌变化（例如补上关联跑完）时总览静默重取；一次失败不把面板换成一句错误", async () => {
+  const view = renderPanel({ findingsRevision: "1|0|0" });
+  await ready();
+  const overviewCalls = vi.mocked(fetchKgAnalysis).mock.calls.length;
+  vi.mocked(fetchKgAnalysis).mockRejectedValueOnce(new Error("flaky"));
+  view.rerender(
+    <KgAnalysisView notebookId="nb-1" onClose={() => undefined} canAnalyze onAnalyze={() => undefined} findingsRevision="1|1|0" />,
+  );
+  await waitFor(() => expect(vi.mocked(fetchKgAnalysis).mock.calls.length).toBe(overviewCalls + 1));
+  await waitFor(() => expect(findingItems()).toHaveLength(5));
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(within(zone("报告状态")).getByRole("button", { name: "更新分析" })).toBeDisabled();
+
+  vi.mocked(fetchKgAnalysis).mockResolvedValue(report({ state: { ...report().state, dirty: true } }));
+  view.rerender(
+    <KgAnalysisView notebookId="nb-1" onClose={() => undefined} canAnalyze onAnalyze={() => undefined} findingsRevision="1|0|0" />,
+  );
+  await waitFor(() => expect(within(zone("报告状态")).getByRole("button", { name: "更新分析" })).toBeEnabled());
+});
+
+test("问题行是规则引擎的扁平形状时照样呈现，「标为正常」带对主键", async () => {
+  openRows = [{
+    rule_id: "F1",
+    severity: "high",
+    subject_kind: "source",
+    subject_key: "src-flat",
+    subject_label: "扁平形状.pdf",
+    impact_objects: 77,
+    evidence: { shared_share: 0.02, concepts: 40 },
+    actions: [{ kind: "delete_source", source_id: "src-flat" }],
+  } as unknown as KgFindingRow];
+  renderPanel();
+  await waitFor(() => expect(findingItems()).toHaveLength(1));
+  const item = findingItems()[0];
+  expect(within(item).getByText("扁平形状.pdf")).toBeInTheDocument();
+  expect(within(item).getByText("影响 77 知识对象")).toBeInTheDocument();
+  fireEvent.click(within(item).getByRole("button", { name: "标为正常" }));
+  expect(dismissKgFinding).toHaveBeenCalledWith("nb-1", "F1", "src-flat");
+});
+
+test("来源已经不在了：打开来源核对失败时如实说，而不是叫人稍后重试", async () => {
+  const gone = Object.assign(new Error("not found"), {});
+  Object.defineProperty(gone, Symbol.for("silicon-notebook.errors.httpStatus"), { value: 404 });
+  renderPanel({ findingHandlers: { onOpenSource: vi.fn(async () => { throw gone; }) } });
+  await ready();
+  fireEvent.click(within(findingByRule("疑似内容错配")).getByRole("button", { name: "打开来源核对" }));
+  await waitFor(() => expect(within(findingByRule("疑似内容错配")).getByText("这篇来源已经不在了")).toBeInTheDocument());
+  expect(within(findingByRule("疑似内容错配")).getByRole("button", { name: "打开来源核对" })).toBeEnabled();
+});
+
+test("只读成员看到的「还没生成」不叫他去点他没有的按钮", async () => {
+  vi.mocked(fetchKgFindings).mockImplementation(async (_nb, options) => page(options?.zone ?? "open", [], {
+    present: false, absence: "upgrade_pending", total: 0,
+  }));
+  renderPanel({ canAnalyze: false });
+  await waitFor(() => expect(within(zone(/^待处理/)).getByText(/这是升级后新增的问题清单/)).toBeInTheDocument());
+  const pending = zone(/^待处理/);
+  expect(pending.textContent).toContain("拥有编辑权限的成员更新一次分析后就会生成");
+  expect(pending.textContent).not.toContain("点上方");
 });
 
 test("删除没成功：失败写在按钮旁", async () => {
@@ -722,15 +801,28 @@ test("别的图谱任务占着维护槽：补上关联禁用并就地说明", as
   expect(within(f5).getByText("其它图谱任务进行中")).toBeInTheDocument();
 });
 
-test("补上关联已经跑过、之后没有新内容：不出按钮，说明再跑也补不上（只读成员也看得到）", async () => {
+test("补上关联已经跑过、之后没有新内容：移出待处理、放进诊断数据，不出按钮（只读成员也看得到）", async () => {
   vi.mocked(fetchKgAnalysis).mockResolvedValue(report({
     findings_summary: summary({ relink: { attempted: true, at_kg_seq: 120, at: "2026-10-18T00:00:00Z", may_change: false } }),
   }));
-  renderPanel({ findingHandlers: { onRelink: vi.fn() }, canAnalyze: false });
+  const { container } = renderPanel({ findingHandlers: { onRelink: vi.fn() }, canAnalyze: false });
+  await waitFor(() => expect(findingItems().length).toBe(4));
+  // 不占待处理的位置,也不计入它的条数。
+  expect(screen.getByRole("heading", { name: "待处理（4）", level: 3 })).toBeInTheDocument();
+  expect(findingItems().some((item) => item.querySelector(".kg-finding-rule")?.textContent === "没建立关联的内容")).toBe(false);
+  const details = container.querySelector("details.kg-findings-diagnostics") as HTMLElement;
+  const spent = zone("没建立关联的内容");
+  expect(details.contains(spent)).toBe(true);
+  expect(within(spent).getByText("1,830 个知识对象没有任何关联，占全部 41,713 个的 4.4%")).toBeInTheDocument();
+  expect(within(spent).getByText(/补上关联已经跑过，剩下 1,830 个没有可自动补上的关联；集中在某几个来源的，见疑似解析残缺/)).toBeInTheDocument();
+  expect(within(spent).queryAllByRole("button")).toHaveLength(0);
+});
+
+test("补上关联还可能改变结果时，诊断数据里没有那块「已经跑过」的说明", async () => {
+  const { container } = renderPanel();
   await ready();
-  const f5 = findingByRule("没建立关联的内容");
-  expect(within(f5).queryByRole("button", { name: "补上关联" })).toBeNull();
-  expect(within(f5).getByText(/补上关联已经跑过，剩下 1,830 个没有可自动补上的关联；集中在某几个来源的，见疑似解析残缺/)).toBeInTheDocument();
+  const details = container.querySelector("details.kg-findings-diagnostics") as HTMLElement;
+  expect(within(details).queryByRole("heading", { name: "没建立关联的内容", level: 3 })).toBeNull();
 });
 
 test("疑似没合并的同名概念：待确认合并里有这一组就跳过去，没有就如实说", async () => {

@@ -60,6 +60,7 @@ import {
   FindingsHeader,
   FindingsPassedZone,
   FindingsPendingZone,
+  FindingsRelinkSpentBlock,
   useFindingsPage,
   type KgFindingHandlers,
   type KgFindingsActionState,
@@ -178,7 +179,7 @@ function ArtifactAbsence({ absence }: { absence: string | null }) {
     : absence === "unexpected"
       ? "同一轮里其它数据都在，唯独这一份没有写下来。"
       : absence === "upgrade_pending"
-        ? "这是升级后新增的数据，这个知识库还没生成过；点「更新分析」即可生成。"
+        ? "这是升级后新增的数据，这个知识库还没生成过；更新一次分析后即可生成。"
         : "这个知识库还没算过这份数据。";
   return (
     <p className="kg-analysis-absent">
@@ -230,8 +231,9 @@ export function KgAnalysisView({
   zIndex?: number;
   onAnalyze?: () => void;
   /**
-   * 问题清单的失效令牌:来源内容变了(删除、重新解析的状态推进)、补上关联或合并决定落定时
-   * 它会变,问题清单的三页就按当前偏移重取——「已处理，更新后核验」是读侧派生的。
+   * 失效令牌:来源内容变了(删除、重新解析的状态推进)、补上关联起止时它会变,问题清单的
+   * 三页按当前偏移重取、总览静默重取——「已处理，更新后核验」是读侧派生的,「更新分析」
+   * 该不该可点取决于总览里的 dirty 与新鲜度。
    */
   findingsRevision?: string | number;
   findingHandlers?: KgFindingHandlers;
@@ -256,6 +258,7 @@ export function KgAnalysisView({
   const [passedOffset, setPassedOffset] = useState(0);
   const [dismissedOffset, setDismissedOffset] = useState(0);
   const [findingsBump, setFindingsBump] = useState(0);
+  const [actionBump, setActionBump] = useState(0);
   const [pendingNotice, setPendingNotice] = useState("");
   const [passedNotice, setPassedNotice] = useState("");
 
@@ -331,6 +334,12 @@ export function KgAnalysisView({
   }, []);
 
   const refetchFindings = useCallback(() => setFindingsBump((value) => value + 1), []);
+  // 面板里的处置(删除 / 重新解析)回报完成:问题页与总览都重取——总览里的 dirty 与新鲜度
+  // 决定「更新分析」此刻该不该可点。
+  const afterAction = useCallback(() => {
+    setFindingsBump((value) => value + 1);
+    setActionBump((value) => value + 1);
+  }, []);
 
   // 「标为正常」与「撤销」:写完重取三页。这一条从待处理里移走、出现在已通过里(或反过来),
   // 区级提示说清它去了哪里——按钮所在的那一行已经不在原处了。
@@ -346,8 +355,12 @@ export function KgAnalysisView({
     showNotice("passed", `已撤销：${findingRuleLabel(row.rule_id)} · ${findingSubjectText(row)} 回到了待处理。`);
   }, [notebookId, refetchFindings, showNotice]);
 
+  // 总览的每一次请求都领一个序号,只有最新的那一次能落地:下面「静默重取」与这里的
+  // 显式读取可能同时在飞,晚到的旧回执不能盖掉新的。
+  const overviewSeqRef = useRef(0);
   useEffect(() => {
     let cancelled = false;
+    const seq = ++overviewSeqRef.current;
     setLoading(true);
     setReportError("");
     fetchKgAnalysis(notebookId, {
@@ -356,11 +369,11 @@ export function KgAnalysisView({
       edges: BOARD_EDGE_LIMIT,
     })
       .then((data) => {
-        if (cancelled) return;
+        if (cancelled || seq !== overviewSeqRef.current) return;
         setReport(data);
       })
       .catch((error: unknown) => {
-        if (cancelled) return;
+        if (cancelled || seq !== overviewSeqRef.current) return;
         setReport(null);
         setReportError(toUserMessage(error, "图谱分析暂时打不开，请稍后重试"));
       })
@@ -371,6 +384,42 @@ export function KgAnalysisView({
       cancelled = true;
     };
   }, [notebookId, reloadToken]);
+
+  // 处置之后总览也要跟上:删掉一篇来源、重新解析排上、补上关联跑完、合并有了决定,都会让
+  // 图谱变「有改动待整理」——不重取的话,头部「更新分析」会继续按旧报告置灰写「无需更新」,
+  // 问题也不标「基于变更 #N」,闭环(处置 → 更新分析 → 核验)就断在最常见的那一步。
+  //
+  // 这是**静默**重取:不清来源表的偏移(那是 `refresh` 的事),不闪加载态,失败也不把屏上
+  // 那份报告换成一句错误——这里的触发源会随来源解析状态推进而频繁变化,一次瞬时失败不该
+  // 让整个面板消失;下一次触发或「刷新」会再取。换库那一次不在这里取(上面那条已经在取)。
+  const overviewToken = `${findingsRevision}|${actionBump}`;
+  const quietOverviewRef = useRef({ notebookId, token: overviewToken });
+  const reportShownRef = useRef(report !== null);
+  reportShownRef.current = report !== null;
+  useEffect(() => {
+    const previous = quietOverviewRef.current;
+    quietOverviewRef.current = { notebookId, token: overviewToken };
+    if (previous.notebookId !== notebookId || previous.token === overviewToken) return;
+    // 屏上还没有报告(首次读取还在路上)时不插队:那一次会带回结果,静默重取失败反而会
+    // 把它作废、留下一块空白。
+    if (!reportShownRef.current) return;
+    let cancelled = false;
+    const seq = ++overviewSeqRef.current;
+    fetchKgAnalysis(notebookId, {
+      boards: BOARD_LIST_LIMIT,
+      topMembers: BOARD_TOP_MEMBERS,
+      edges: BOARD_EDGE_LIMIT,
+    })
+      .then((data) => {
+        if (cancelled || seq !== overviewSeqRef.current) return;
+        setReport(data);
+        setReportError("");
+      })
+      .catch(() => { /* 静默:屏上保留上一份报告 */ });
+    return () => {
+      cancelled = true;
+    };
+  }, [notebookId, overviewToken]);
 
   useEffect(() => {
     let cancelled = false;
@@ -501,7 +550,7 @@ export function KgAnalysisView({
                     notice={pendingNotice}
                     onOffset={setOpenOffset}
                     onDismiss={dismissFinding}
-                    onChanged={refetchFindings}
+                    onChanged={afterAction}
                   />
                   <FindingsDevZone report={report} />
                   {/* 诊断数据:原有的全部统计区块原样保留、逐指标的新鲜度标注不变,只是默认收起
@@ -514,6 +563,12 @@ export function KgAnalysisView({
                       </span>
                     </summary>
                     <div className="kg-findings-diagnostics-body">
+                      <FindingsRelinkSpentBlock
+                        report={report}
+                        row={openFindings.page?.present
+                          ? openFindings.page.rows.find((row) => row.rule_id === "F5") ?? null
+                          : null}
+                      />
                       <AnalysisReadout
                         report={report}
                         table={convergence}

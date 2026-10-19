@@ -8085,9 +8085,10 @@ export default function Home() {
               zIndex={rootModals.view("kg-analysis").zIndex}
               onAnalyze={confirmGenerateKgAnalysis}
               onClose={closeKgAnalysis}
-              // 失效令牌:来源内容变了(删除、重新解析的状态推进)、补上关联起止、合并决定
-              // 起止时问题清单重取——「已处理，更新后核验」是读侧派生的。
-              findingsRevision={`${sourceLibrary.contentRevision}|${kgGraph.relinking ? 1 : 0}|${kgGraph.decidingMerge ? 1 : 0}`}
+              // 失效令牌:来源内容变了(删除、重新解析的状态推进)或补上关联起止时,问题清单
+              // 与总览重取——「已处理，更新后核验」是读侧派生的。合并决定不在这里:面板开着时
+              // 它盖住了「待确认合并」,关掉再开会重新挂载、本来就重取。
+              findingsRevision={`${sourceLibrary.contentRevision}|${kgGraph.relinking ? 1 : 0}`}
               findingHandlers={{
                 onOpenSource: openSourceFromAnalysis,
                 onDeleteSource: deleteSourceFromAnalysis,

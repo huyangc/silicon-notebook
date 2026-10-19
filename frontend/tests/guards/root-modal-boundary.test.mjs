@@ -4,6 +4,7 @@ import ts from "typescript";
 
 import {
   callSitesIn,
+  findFunction,
   findFunctionIn,
   ifConditionsIn,
   importsIn,
@@ -203,16 +204,24 @@ test("collection and KG payload owners are coordinated only through typed presen
 // 图谱分析的问题清单「打开来源核对」带出来的两对——来源详情叠在分析面板上层、来源详情
 // 再开命令目录审阅时面板仍在。多一对就会有别的弹窗不再互斥,少一对面板就会被自己带出来的
 // 下一层关掉(关掉来源详情后也就回不到原来那一条问题)。行为在协调器组件测试里钉。
-test("primary coexistence is limited to the drill-down pairs", () => {
+test("primary coexistence is limited to the directed drill-down pairs", () => {
   const block = hookText.match(/const COEXISTING_PRIMARY_PAIRS[^=]*= \[([\s\S]*?)\];/);
   assert.ok(block, "COEXISTING_PRIMARY_PAIRS 不见了");
   const pairs = [...block[1].matchAll(/\["([\w-]+)", "([\w-]+)"\]/g)].map((match) => [match[1], match[2]]);
+  // [已开着的, 正要开的]。分析面板只作为「已开着的」一方出现:它画在知识图谱视图的层叠
+  // 上下文里,来源详情已开时再开它必须照旧把来源详情冲突关掉。
   assert.deepEqual(pairs, [
     ["source-detail", "catalog-review"],
-    ["source-detail", "kg-analysis"],
-    ["catalog-review", "kg-analysis"],
+    ["catalog-review", "source-detail"],
+    ["kg-analysis", "source-detail"],
+    ["kg-analysis", "catalog-review"],
   ]);
-  assert.match(hookText, /function primarySlotsMayCoexist\(left: RootModalSlot, right: RootModalSlot\): boolean \{\s*return COEXISTING_PRIMARY_PAIRS\.some\(/);
+  // 函数体就是这一条有向查表,不许在后面再或上别的例外。
+  const coexist = findFunction(hook, "primarySlotsMayCoexist").getText(hook).replace(/\s+/g, " ");
+  assert.equal(
+    coexist,
+    "function primarySlotsMayCoexist(open: RootModalSlot, opening: RootModalSlot): boolean { return COEXISTING_PRIMARY_PAIRS.some(([kept, incoming]) => open === kept && opening === incoming); }",
+  );
   // 面板里的「打开来源核对」走既有的冻结票据开窗,且不关面板。
   const calls = callSitesIn(findFunctionIn(page, "Home", "openSourceFromAnalysis")).map(({ target }) => target);
   assert.deepEqual(calls, ["openSourceDetailById"]);

@@ -22,7 +22,9 @@ import type {
   KgBoardOverview,
   KgFindingAction,
   KgFindingRow,
+  KgFindingRuleStatus,
   KgFindingsComparison,
+  KgFindingsDevItem,
   KgFindingsSummary,
   KgFreshness,
   KgMergeCodeState,
@@ -770,6 +772,130 @@ function finiteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function plainObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function plainText(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+// ------------------------------------------------ 线上形状 → 统一形状(两种拼写都收)
+//
+// 契约草案给的是嵌套的 `subject{kind,key,label}`、`impact{objects}`、规则状态数组、
+// `dev_items`;规则引擎落库的是扁平列(`subject_key` / `subject_kind` / `subject_label` /
+// `impact_objects`)、按规则编号为键的状态表(`sources_checked` / `canonicals_checked` /
+// `objects_checked` / `sources_too_few_concepts` / `groups_decided_apart`)、S1 的计数挂在
+// `rules.S1` 下。读侧投影最后选哪一种,前端都要能读——认不出就少一句话,不能整区消失、
+// 也不能让「标为正常」拿着空主键去写。
+
+/** 一行问题统一成嵌套形状;连规则编号都没有的行丢掉(无从呈现,也无从标为正常)。 */
+export function normalizeFindingRow(raw: unknown): KgFindingRow | null {
+  const row = plainObject(raw);
+  if (!row) return null;
+  const ruleId = plainText(row.rule_id);
+  if (!ruleId) return null;
+  const subject = plainObject(row.subject);
+  const impact = plainObject(row.impact);
+  const objects = finiteNumber(impact?.objects) ?? finiteNumber(row.impact_objects);
+  return {
+    ...(row as unknown as KgFindingRow),
+    rule_id: ruleId,
+    severity: plainText(row.severity),
+    subject: {
+      kind: plainText(subject?.kind) || plainText(row.subject_kind),
+      key: plainText(subject?.key) || plainText(row.subject_key),
+      label: plainText(subject?.label) || plainText(row.subject_label),
+    },
+    evidence: plainObject(row.evidence),
+    impact: objects === null ? null : { objects },
+    status: plainText(row.status) || "open",
+  };
+}
+
+export function normalizeFindingRows(rows: unknown): KgFindingRow[] {
+  if (!Array.isArray(rows)) return [];
+  return rows.map(normalizeFindingRow).filter((row): row is KgFindingRow => row !== null);
+}
+
+const FINDING_RULE_ORDER = ["F1", "F2", "F3", "F4", "F5", "S1"];
+
+/** 引擎状态表里「检查了多少」的三种拼写 → 数量与单位代号。 */
+const CHECKED_FIELDS: ReadonlyArray<readonly [string, string]> = [
+  ["sources_checked", "sources"],
+  ["canonicals_checked", "canonical"],
+  ["objects_checked", "objects"],
+];
+
+function ruleStatusFrom(ruleId: string, raw: Record<string, unknown>): KgFindingRuleStatus {
+  let checked = finiteNumber(raw.checked);
+  let unit = plainText(raw.checked_unit);
+  if (checked === null) {
+    for (const [field, code] of CHECKED_FIELDS) {
+      const value = finiteNumber(raw[field]);
+      if (value !== null) {
+        checked = value;
+        unit = code;
+        break;
+      }
+    }
+  }
+  return {
+    ...(raw as unknown as KgFindingRuleStatus),
+    rule_id: ruleId,
+    status: plainText(raw.status),
+    reason: plainText(raw.reason) || null,
+    checked,
+    checked_unit: unit || null,
+    total: finiteNumber(raw.total),
+    persisted: finiteNumber(raw.persisted),
+    truncated: raw.truncated === true,
+    not_judged: finiteNumber(raw.not_judged) ?? finiteNumber(raw.sources_too_few_concepts),
+    decided_not_same: finiteNumber(raw.decided_not_same) ?? finiteNumber(raw.groups_decided_apart),
+  };
+}
+
+/** 每条规则的状态,数组或按编号为键的表都收,按 F1…F5、S1 的顺序给出。 */
+export function findingRuleStatuses(summary: KgFindingsSummary | null | undefined): KgFindingRuleStatus[] {
+  const rules: unknown = summary?.rules;
+  const list: KgFindingRuleStatus[] = [];
+  if (Array.isArray(rules)) {
+    for (const item of rules) {
+      const raw = plainObject(item);
+      const ruleId = plainText(raw?.rule_id);
+      if (raw && ruleId) list.push(ruleStatusFrom(ruleId, raw));
+    }
+  } else {
+    for (const [ruleId, value] of Object.entries(plainObject(rules) ?? {})) {
+      const raw = plainObject(value);
+      if (raw) list.push(ruleStatusFrom(ruleId, raw));
+    }
+  }
+  const rank = (ruleId: string) => {
+    const index = FINDING_RULE_ORDER.indexOf(ruleId);
+    return index < 0 ? FINDING_RULE_ORDER.length : index;
+  };
+  return list.sort((a, b) => rank(a.rule_id) - rank(b.rule_id));
+}
+
+/** 「需要开发处理」的条目:`dev_items`;没有时从 S1 的状态(引擎的拼写)里取。 */
+function findingDevItems(summary: KgFindingsSummary | null | undefined): KgFindingsDevItem[] {
+  if (Array.isArray(summary?.dev_items) && summary.dev_items.length > 0) return summary.dev_items;
+  const rules: unknown = summary?.rules;
+  const s1 = Array.isArray(rules)
+    ? plainObject(rules.find((item) => plainText(plainObject(item)?.rule_id) === "S1"))
+    : plainObject(plainObject(rules)?.S1);
+  if (!s1 || plainText(s1.status) !== "ran") return [];
+  const groups = finiteNumber(s1.narrow_groups) ?? finiteNumber(s1.groups);
+  if (groups === null) return [];
+  return [{
+    item_id: "S1",
+    groups,
+    objects: finiteNumber(s1.narrow_group_objects) ?? finiteNumber(s1.objects) ?? 0,
+    samples: Array.isArray(s1.examples) ? s1.examples : Array.isArray(s1.samples) ? s1.samples : [],
+  }];
+}
+
 /** 影响面(单位:知识对象)。契约里叫 `impact.objects`;规则引擎的扁平拼写一并接受。 */
 export function findingImpact(row: KgFindingRow): number {
   const nested = finiteNumber(row.impact?.objects);
@@ -879,7 +1005,7 @@ export function analysisReadiness(report: KgAnalysisReport): AnalysisReadiness {
     return {
       tone: "neutral",
       title: "升级后还没生成问题清单",
-      text: "这是升级后新增的数据，这个知识库还没生成过。点「更新分析」生成后，会列出需要处理的问题。",
+      text: "这是升级后新增的数据，这个知识库还没生成过；更新一次分析后，会列出需要处理的问题。",
     };
   }
   const needsUpdate = report.state.dirty || report.artifacts.some((item) => (
@@ -1260,6 +1386,7 @@ export type FindingButtonSpec =
   | { kind: "open_source"; sourceId: string; title: string }
   | { kind: "delete_source"; sourceId: string; title: string; sourceType: string }
   | { kind: "reparse_source"; sourceId: string; title: string; sourceType: string }
+  /** `mergeId` 为空串 = 只带到「待确认合并」那一节(没能定位到具体那一对)。 */
   | { kind: "review_merge"; mergeId: string }
   | { kind: "relink" };
 
@@ -1295,7 +1422,14 @@ function actionTarget(action: KgFindingAction, row: KgFindingRow): string {
   return row.subject?.kind === "source" ? row.subject.key : "";
 }
 
-type SourceFacts = { title: string; sourceType: string; exists: boolean; processing: boolean };
+type SourceFacts = {
+  title: string;
+  sourceType: string;
+  exists: boolean;
+  processing: boolean;
+  /** 读侧给了这一篇此刻的样子(类型、在不在、是否在解析)。 */
+  known: boolean;
+};
 
 function sourceFacts(row: KgFindingRow, sourceId: string): SourceFacts {
   const live = (row.live_sources ?? []).find((item) => item?.source_id === sourceId);
@@ -1313,10 +1447,32 @@ function sourceFacts(row: KgFindingRow, sourceId: string): SourceFacts {
       || subjectTitle
       || "（没有标题）",
     sourceType: typeof live?.source_type === "string" ? live.source_type : "",
-    // 读侧没给这篇的实时状态时按「在」处理:按钮最终由后端裁决,宁可多给一个入口。
+    // 读侧没给这篇的实时状态时,「打开来源核对」照出(只读、后端裁决);删除与重新解析
+    // 不出——不知道类型就既拦不住收录来源的重新解析,也会让删除确认框用错文案。
     exists: live ? live.exists !== false : true,
     processing: Boolean(live?.processing),
+    known: Boolean(live),
   };
+}
+
+/** F2 证据里标了「建议保留」的那一侧:删除按钮绝不放在它旁边。 */
+function keptSide(row: KgFindingRow, sourceId: string): boolean {
+  return evidenceList(row.evidence ?? null, "sources").some((item) => (
+    textField(item, "source_id") === sourceId
+    && Boolean(item && typeof item === "object" && (item as Record<string, unknown>).keep === true)
+  ));
+}
+
+/**
+ * 这一组的成员 id 是不是全的:契约给了完整的 `canonical_ids` 就是;只有截到 5 个的
+ * `members` 时,比一比组里一共几个合并后的知识对象(`canonicals`)。
+ */
+function mergeGroupIdsComplete(row: KgFindingRow): boolean {
+  const evidence = row.evidence ?? null;
+  if (Array.isArray(evidence?.canonical_ids)) return true;
+  const known = evidenceList(evidence, "members").filter((member) => textField(member, "canonical_id")).length;
+  const total = evidenceNumber(evidence, "canonicals");
+  return total === null || total <= known;
 }
 
 /**
@@ -1343,6 +1499,7 @@ export function pendingMergeForFinding(
 const DELETE_NOTE = "不可撤销，先打开来源核对";
 const KEEP_NOTE = "两份内容几乎相同，保留对象更多的一份";
 const PROCESSING_NOTE = "这篇来源正在解析，完成后再处理";
+const MERGE_SECTION_NOTE = "这一组写法较多，没能直接定位到对应的一对，按钮会带你到「待确认合并」那一节查找";
 
 /**
  * 一条问题该出哪些按钮、旁边写什么(§四各条的「建议动作」)。
@@ -1388,8 +1545,11 @@ export function findingActionPlan(row: KgFindingRow, context: FindingActionConte
       if (!sourceId) continue;
       const facts = sourceFacts(row, sourceId);
       if (!facts.exists) continue;
-      if (action.kind === "reparse_source" && facts.sourceType === "promotion") continue;
       addOpen(sourceId, facts);
+      if (!facts.known) continue;
+      if (action.kind === "reparse_source" && facts.sourceType === "promotion") continue;
+      // 疑似重复导入:建议保留的那份旁边不出删除,哪怕读侧两边都给了删除动作。
+      if (action.kind === "delete_source" && row.rule_id === "F2" && keptSide(row, sourceId)) continue;
       if (facts.processing && !plan.processingSourceIds.includes(sourceId)) {
         plan.processingSourceIds.push(sourceId);
       }
@@ -1400,8 +1560,14 @@ export function findingActionPlan(row: KgFindingRow, context: FindingActionConte
       }
     } else if (action.kind === "review_merge") {
       const merge = pendingMergeForFinding(row, context.pendingMerges);
-      if (merge) plan.buttons.push({ kind: "review_merge", mergeId: merge.id });
-      else if (!plan.blocked.includes(FINDING_UNAVAILABLE_LABEL.not_in_queue)) {
+      if (merge) {
+        plan.buttons.push({ kind: "review_merge", mergeId: merge.id });
+      } else if (!mergeGroupIdsComplete(row)) {
+        // 只拿到这一组的前几种写法,没找到不等于没有:带到「待确认合并」那一节让人自己找,
+        // 不断言「还没有这一组」。
+        plan.buttons.push({ kind: "review_merge", mergeId: "" });
+        plan.notes.push(MERGE_SECTION_NOTE);
+      } else if (!plan.blocked.includes(FINDING_UNAVAILABLE_LABEL.not_in_queue)) {
         plan.blocked.push(FINDING_UNAVAILABLE_LABEL.not_in_queue);
       }
     } else if (action.kind === "relink") {
@@ -1410,6 +1576,14 @@ export function findingActionPlan(row: KgFindingRow, context: FindingActionConte
   }
   if (plan.processingSourceIds.length > 0) plan.notes.push(PROCESSING_NOTE);
   return plan;
+}
+
+/**
+ * 「补上关联」已经跑过、之后没有新内容:再跑一次也补不上(它是确定性、幂等的)。这时
+ * 「没建立关联的内容」不再是一条能处理的问题——移出待处理、放进诊断数据(§4.5)。
+ */
+export function relinkIsSpent(summary: KgFindingsSummary | null | undefined): boolean {
+  return summary?.present === true && summary.relink?.may_change === false;
 }
 
 /** 补上关联跑完之后写在按钮旁的那一句(数字是它自己返回的,口径与问题清单不同、不互相核对)。 */
@@ -1477,9 +1651,9 @@ function devSampleText(sample: unknown): string {
  * 按下去不会有任何变化的按钮一律不许出现(§3.4)。认不出的条目不上屏。
  */
 export function devItemViews(summary: KgFindingsSummary | null | undefined): Array<{ key: string; text: string }> {
-  if (!summary?.present || !Array.isArray(summary.dev_items)) return [];
+  if (!summary?.present) return [];
   const views: Array<{ key: string; text: string }> = [];
-  for (const item of summary.dev_items) {
+  for (const item of findingDevItems(summary)) {
     if (item?.item_id !== "S1") continue;
     const groups = finiteNumber(item.groups);
     if (groups === null || groups <= 0) continue;
@@ -1500,8 +1674,12 @@ export function devItemViews(summary: KgFindingsSummary | null | undefined): Arr
 
 export type PassedRuleLine = {
   ruleId: string;
-  /** clean = 检查过、没发现(✓);skipped = 没法检查(–,不算通过);partial = 有一部分没判断(–)。 */
-  state: "clean" | "skipped" | "partial";
+  /**
+   * clean = 检查过、没发现(✓);skipped = 没法检查(–,不算通过);partial = 有一部分没判断(–);
+   * decided = F4 用户已判定不是同一个的组数(≠)——重建之后这些组不再成行,只剩这一个计数,
+   * 不写出来用户的判断就看不见了。
+   */
+  state: "clean" | "skipped" | "partial" | "decided";
   text: string;
 };
 
@@ -1519,10 +1697,10 @@ function checkedText(checked: number | null, unitCode: string | null | undefined
  * 有问题的规则不在这里出「✓」:它的问题在待处理区。
  */
 export function passedRuleLines(summary: KgFindingsSummary | null | undefined): PassedRuleLine[] {
-  if (!summary?.present || !Array.isArray(summary.rules)) return [];
+  if (!summary?.present) return [];
   const lines: PassedRuleLine[] = [];
-  for (const rule of summary.rules) {
-    if (!rule || !Object.hasOwn(FINDING_RULE_LABEL, rule.rule_id)) continue;
+  for (const rule of findingRuleStatuses(summary)) {
+    if (!Object.hasOwn(FINDING_RULE_LABEL, rule.rule_id)) continue;
     const name = FINDING_RULE_LABEL[rule.rule_id];
     if (rule.status === "skipped") {
       lines.push({
@@ -1550,16 +1728,24 @@ export function passedRuleLines(summary: KgFindingsSummary | null | undefined): 
           : `${name}：有 ${formatCount(notJudged)} 项没有判断`,
       });
     }
+    const decided = finiteNumber(rule.decided_not_same);
+    if (rule.rule_id === "F4" && decided !== null && decided > 0) {
+      lines.push({
+        ruleId: rule.rule_id,
+        state: "decided",
+        text: `${name}：已判定不是同一个的有 ${formatCount(decided)} 组，不再列为问题`,
+      });
+    }
   }
   return lines;
 }
 
 /** 某条规则的问题太多、只保存了前若干条:写在待处理区,截断绝不静默。 */
 export function truncatedRuleNotes(summary: KgFindingsSummary | null | undefined): string[] {
-  if (!summary?.present || !Array.isArray(summary.rules)) return [];
+  if (!summary?.present) return [];
   const notes: string[] = [];
-  for (const rule of summary.rules) {
-    if (!rule || !Object.hasOwn(FINDING_RULE_LABEL, rule.rule_id) || rule.truncated !== true) continue;
+  for (const rule of findingRuleStatuses(summary)) {
+    if (!Object.hasOwn(FINDING_RULE_LABEL, rule.rule_id) || rule.truncated !== true) continue;
     const total = finiteNumber(rule.total);
     const persisted = finiteNumber(rule.persisted);
     notes.push(total !== null && persisted !== null && persisted < total
