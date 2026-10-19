@@ -595,6 +595,30 @@ test("待确认合并超过一页时分页展示，翻页后显示下一批候�
   expect(within(pager).getByRole("button", { name: "下一页" })).toBeDisabled();
 });
 
+// 图谱分析「疑似没合并的同名概念」→「去待确认合并」:翻到那一对所在的页、高亮并给焦点。
+// 挂载时就已存在的请求是上一次打开视图时留下的,不再消费;同一对再跳一次(新 seq)照样定位。
+test("从图谱分析跳过来：翻到那一对所在的页、高亮并把焦点放上去；旧请求不重放", () => {
+  const merges = manyPendingMerges(25);
+  const { rerender, props } = renderView({ kgGraph: graphView({ pendingMerges: merges }) });
+  expect(document.getElementById("kg-pending-merges")).not.toBeNull();
+
+  rerender(<KgGraphView {...props} focusMergeRequest={{ id: "m-23", seq: 1 }} />);
+  const pager = screen.getByRole("navigation", { name: "待确认合并分页" });
+  expect(within(pager).getByText("21–25 / 25")).toBeInTheDocument();
+  const row = document.getElementById("kg-pending-merge-m-23");
+  expect(row).not.toBeNull();
+  expect(row).toHaveClass("is-focused");
+  expect(document.activeElement).toBe(row);
+});
+
+test("挂载时就带着的旧定位请求不重放（关掉再打开知识图谱不该自己跳）", () => {
+  const merges = manyPendingMerges(25);
+  renderView({ kgGraph: graphView({ pendingMerges: merges }), focusMergeRequest: { id: "m-23", seq: 4 } });
+  const pager = screen.getByRole("navigation", { name: "待确认合并分页" });
+  expect(within(pager).getByText("1–20 / 25")).toBeInTheDocument();
+  expect(document.querySelector(".kg-merge-row.is-focused")).toBeNull();
+});
+
 test("相邻关系超过一页时分页展示，切换选中节点时回到第一页", async () => {
   const user = userEvent.setup();
   const { rerender, props } = renderView({

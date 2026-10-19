@@ -134,9 +134,27 @@ export const ROOT_MODAL_POLICIES: Readonly<Record<RootModalSlot, ModalPolicy>> =
   extension: { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
 };
 
+// The only primary pairs that may stay open together. Each one is a drill-down:
+//   · source-detail ↔ catalog-review — the command-catalog review opens from a
+//     source's own detail window;
+//   · source-detail ↔ kg-analysis — the KG analysis findings open a source for
+//     checking ("打开来源核对") on top of the panel, which stays open underneath
+//     (inert while covered) so closing the source returns the reader to the same
+//     finding, scroll position and focused button;
+//   · catalog-review ↔ kg-analysis — the same source detail can open its catalog
+//     review while the analysis panel is still underneath; without this pair that
+//     second step would close the panel the first step deliberately kept.
+// Every pair is symmetric; any other primary still evicts the one already open.
+const COEXISTING_PRIMARY_PAIRS: ReadonlyArray<readonly [RootModalSlot, RootModalSlot]> = [
+  ["source-detail", "catalog-review"],
+  ["source-detail", "kg-analysis"],
+  ["catalog-review", "kg-analysis"],
+];
+
 function primarySlotsMayCoexist(left: RootModalSlot, right: RootModalSlot): boolean {
-  return (left === "source-detail" && right === "catalog-review")
-    || (left === "catalog-review" && right === "source-detail");
+  return COEXISTING_PRIMARY_PAIRS.some(([a, b]) => (
+    (left === a && right === b) || (left === b && right === a)
+  ));
 }
 
 type ActiveLease = RootModalLease & Readonly<{ order: number }>;

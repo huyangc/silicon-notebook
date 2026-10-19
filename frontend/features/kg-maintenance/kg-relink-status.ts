@@ -58,6 +58,33 @@ export {
   releaseNotebookClaim as releaseRelinkClaim,
 } from "./notebook-busy-set.ts";
 
+/** 补上关联跑完之后的两个计数(图谱分析把它写在「补上关联」按钮旁)。 */
+export type RelinkResult = {
+  edgesAdded: number;
+  isolatedAfter: number;
+};
+
+/** 结果在按钮旁停留多久(按钮旁的结果按自己的计时器消失)。 */
+export const RELINK_RESULT_HOLD_MS = 15000;
+
+/**
+ * 终态回执 → 可以以「这一次补上关联」的名义报的两个数;报不出时 null。
+ *
+ * 只认 `succeeded`:失败与 idle(进程重启后不知道有过任务)都没有可报的数字,不编一个。
+ * 本标签页期望过某个 job 而回执是另一个时也不报——那两个数属于别人的那一次。没有期望
+ * (领养了一个已经在跑的任务)时照报:用户等的正是刚跑完的这一次。
+ */
+export function relinkTerminalResult(
+  status: RelinkStatus | null | undefined,
+  expectedJobId: string | null | undefined,
+): RelinkResult | null {
+  if (!status || status.running || status.status !== "succeeded") return null;
+  if (expectedJobId && status.job_id !== expectedJobId) return null;
+  const edgesAdded = Number.isFinite(status.edges_added) ? status.edges_added : 0;
+  const isolatedAfter = Number.isFinite(status.isolated_after) ? status.isolated_after : 0;
+  return { edgesAdded, isolatedAfter };
+}
+
 /**
  * 一次轮询回执 → 该做什么。
  *

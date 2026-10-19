@@ -207,7 +207,11 @@ test("authenticated bootstrap can activate the actor before the React user state
 test("delete requires the current owner and an exact source notebook", async () => {
   api.deleteSource.mockResolvedValue(undefined);
   render(<Harness />);
-  await act(async () => value!.deleteSource(source("no-owner", "notebook-a")));
+  // 返回值说的是「这次真的删掉了没有」:被拒(没有 owner / 别的库)、请求失败都是 false,
+  // 图谱分析的问题清单据此把结果写在「删除来源…」按钮旁。
+  let refused: boolean | undefined;
+  await act(async () => { refused = await value!.deleteSource(source("no-owner", "notebook-a")); });
+  expect(refused).toBe(false);
   expect(api.deleteSource).not.toHaveBeenCalled();
 
   act(() => {
@@ -223,11 +227,38 @@ test("delete requires the current owner and an exact source notebook", async () 
       },
     });
   });
-  await act(async () => value!.deleteSource(source("foreign", "notebook-b")));
+  let foreign: boolean | undefined;
+  await act(async () => { foreign = await value!.deleteSource(source("foreign", "notebook-b")); });
+  expect(foreign).toBe(false);
   expect(api.deleteSource).not.toHaveBeenCalled();
-  await act(async () => value!.deleteSource(source("owned", "notebook-a")));
+  let deleted: boolean | undefined;
+  await act(async () => { deleted = await value!.deleteSource(source("owned", "notebook-a")); });
+  expect(deleted).toBe(true);
   expect(api.deleteSource).toHaveBeenCalledTimes(1);
   expect(api.deleteSource).toHaveBeenCalledWith("owned");
+});
+
+test("a delete request that fails reports false and still releases the busy bit", async () => {
+  api.deleteSource.mockRejectedValueOnce(new Error("boom"));
+  render(<Harness />);
+  act(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+      page: {
+        items: [source("broken", "notebook-a")],
+        total_count: 1,
+        offset: 0,
+        limit: 50,
+      },
+    });
+  });
+  let deleted: boolean | undefined;
+  await act(async () => { deleted = await value!.deleteSource(source("broken", "notebook-a")); });
+  expect(deleted).toBe(false);
+  expect(effects.reportError).toHaveBeenCalled();
+  expect(value!.deletingSourceIds.has("broken")).toBe(false);
 });
 
 test("an in-flight delete remains visibly busy across A to B to A", async () => {
@@ -248,7 +279,7 @@ test("an in-flight delete remains visibly busy across A to B to A", async () => 
   act(() => {
     value!.commitNotebookSnapshot(pageA);
   });
-  let deleting!: Promise<void>;
+  let deleting!: Promise<boolean>;
   act(() => {
     deleting = value!.deleteSource(source("deleting", "notebook-a"));
   });

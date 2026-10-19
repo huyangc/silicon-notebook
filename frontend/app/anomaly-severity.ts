@@ -47,7 +47,8 @@ const PAPER_META_NOT_PAPER_TOOLTIP = "该来源非学术论文，无需补全";
 //     —— 报告里的数字互相不可比,读者据此下的结论会是错的 → integrity。
 //   · 产物落后当前若干次变更 —— 数字本身没算错,只是描述的是更早的库状态,
 //     重新整理一次即可对齐 → retrieval。
-//   · 从没算过 / 合法缺席(零板块的库不出来源画像)—— 预期态,不是异常 → info。
+//   · 从没算过 / 合法缺席(零板块的库不出来源画像)/ 升级后还没生成(问题清单)
+//     —— 预期态,不是异常 → info。
 // 这一档的存在理由见设计 §3.3 的真实教训:有人拿一份陈旧产物推出了关于图结构的
 // 重大结论,随后才得知该库尚未整理,整个推断作废。所以陈旧必须**逐份**标注出来,
 // 而不是在报告顶部挂一条横幅。
@@ -59,6 +60,12 @@ const ARTIFACT_NEVER_TOOLTIP = "这个知识库还没算过这份数据。它不
 
 const ARTIFACT_EXPECTED_LABEL = "本次无需生成";
 const ARTIFACT_EXPECTED_TOOLTIP = "一个主题板块都没有时，这份数据没有可说的内容，因此刻意不生成——而不是写一张全 0 的表。";
+
+// 升级之后新增的一份产物(问题清单)在这个库上还没生成过:账本里其余几份都建于它出现之前。
+// 这是**预期态**,下一次「更新分析」就会补上——不是数据坏了,所以是灰色(info),绝不能
+// 落进 unexpected 那一档亮红色「本该有却缺失」(那会在每一个已部署库上误报)。
+const ARTIFACT_UPGRADE_PENDING_LABEL = "升级后还没生成";
+const ARTIFACT_UPGRADE_PENDING_TOOLTIP = "这是升级后新增的数据，这个知识库还没生成过。点「更新分析」即可生成。";
 
 const ARTIFACT_STALE_LABEL = "落后于当前内容";
 const ARTIFACT_STALE_TOOLTIP = "这份数字描述的是更早的库内容，之后又有过改动。重新合并一次即可对齐。";
@@ -107,6 +114,13 @@ export function analysisArtifactAnomalies(artifact: {
     }
     if (artifact.absence === "unexpected") {
       return [{ severity: "integrity", label: ARTIFACT_MISSING_LABEL, tooltip: ARTIFACT_MISSING_TOOLTIP }];
+    }
+    if (artifact.absence === "upgrade_pending") {
+      return [{
+        severity: "info",
+        label: ARTIFACT_UPGRADE_PENDING_LABEL,
+        tooltip: ARTIFACT_UPGRADE_PENDING_TOOLTIP,
+      }];
     }
     return [{ severity: "info", label: ARTIFACT_NEVER_LABEL, tooltip: ARTIFACT_NEVER_TOOLTIP }];
   }

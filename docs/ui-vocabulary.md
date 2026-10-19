@@ -35,6 +35,17 @@
 | canonical 簇 / cluster | 合并后的知识对象 |
 | outlier source | 关联稀疏的来源 |
 | centrality | 核心度 |
+| finding（图谱分析问题清单里的一条） | 问题 |
+| dismiss / exemption | 标为正常 / 撤销 |
+| off-topic source（F1） | 疑似内容错配 |
+| duplicate import（F2） | 疑似重复导入 |
+| parse damage（F3） | 疑似解析残缺 |
+| under-merge（F4） | 疑似没合并的同名概念 |
+| giant component / 主连通块 | 主体内容 |
+| island component | 孤岛 |
+| handled（已处置、等下一次更新分析核验） | 已处理，更新后核验 |
+| dev-side defect | 需要开发处理 |
+| Jaccard / 连通分量 | 不上屏（重合度说「概念重合度」，结构说「主体内容」「孤岛」） |
 | 画像 / 底座画像（agent_notebook_profile 共享层） / 巡固（consolidation job） | AI 对这个库的理解 |
 | 画像 / 覆盖层画像（agent_notebook_profile 个人层） | 我的检索心得 |
 | 观察队列（observation, agent_observations） | Agent 记录 |
@@ -70,6 +81,12 @@
   `communities.centrality` 使用「核心度」；`basis` 映射为：`usable_live` →
   「整理当时的实时口径」、`community_snapshot` → 「上次主题板块划分」、
   `unified_rebuild_snapshot` → 「上次整理时的规模」。
+- 图谱分析的问题清单（`frontend/app/kg-analysis-model.ts`）：规则编号 F1–F5 不上屏，界面只说
+  「疑似内容错配」「疑似重复导入」「疑似解析残缺」「疑似没合并的同名概念」「没建立关联的内容」（F5 沿用
+  既有词）；严重度说「高 / 中 / 低」；读侧状态 `handled` 说「已处理，更新后核验」、`dismissed` 说「已标为
+  正常」、F4 的 `decided_not_same` 说「已判定不是同一个」；四个区叫「待处理」「需要开发处理」「诊断数据」
+  「已通过」。「主体内容」指彼此有关联连成的最大那一片知识对象，「孤岛」指与它没有任何关联的小块。
+  「补上关联」「待确认合并」「重新解析」「删除来源」「主题板块」「合并后的知识对象」沿用既有词。
 ## 答案正文内的标记
 
 问答与深度报告正文里句首/段首出现的「（推断）」「(推断)」「Likely,」与「【通识】」是模型输出

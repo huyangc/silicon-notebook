@@ -64,6 +64,18 @@ const LONG_TASK_BUTTONS = [
   // 天然不匹配,也确实不该禁用。这五颗按钮住在 notebook-collection-section.tsx;
   // page.tsx 有没有把真正的在飞状态传进去,由下一条测试钉。
   { match: "openNotebook(notebook.id)", module: "notebook-collection-section.tsx", why: "打开笔记本:load 相位数秒,连点会叠出多组并行请求(网格卡片 + 列表行四格)", requires: "openingNotebookId" },
+  // 图谱分析面板(问题清单)。「更新分析」与重新合并共用维护槽;处置按钮的在飞判据集中在
+  // disabledFor(删除在跑 / 重新解析已确认 / 来源正在解析 / 补上关联与维护槽),逐项由
+  // kg-findings-wiring-guard 点名;「标为正常」「撤销」是一次 PUT/DELETE,等回执期间不能再点。
+  {
+    match: "onAnalyze",
+    module: "kg-analysis-findings.tsx",
+    why: "生成/更新分析:与重新合并、补上关联、删除知识图谱共用维护槽,在跑时不能再点",
+    requires: ["analysisRunning", "analysisBlocked"],
+  },
+  { match: "run(spec, event)", module: "kg-analysis-findings.tsx", why: "问题的处置按钮:删除/重新解析/补上关联都是后台或确认后的长动作", requires: "disabledFor" },
+  { match: "void dismiss()", module: "kg-analysis-findings.tsx", why: "标为正常:等回执期间不能重复提交", requires: 'busy === "dismiss"' },
+  { match: "void undo()", module: "kg-analysis-findings.tsx", why: "撤销标为正常:等回执期间不能重复提交", requires: "busy" },
 ];
 
 // 长任务入口的另一种形态：**file input**。外层 label 无法 :disabled,所以禁用位落在

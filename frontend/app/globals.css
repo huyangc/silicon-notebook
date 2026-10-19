@@ -12268,6 +12268,308 @@ button.tag:hover {
   white-space: nowrap;
 }
 
+/* --- 图谱分析 · 问题清单(kg-analysis-findings.tsx)--------------------------
+   四个区沿用 .kg-analysis-block 的骨架;一条问题 = 一行头(严重度点 · 严重度 · 规则名 ·
+   定位标签 · 名字 · 影响面)+ 证据 + 动作行。动作的结果写在动作行里,紧挨着按钮。 */
+.kg-findings-head {
+  border-left: 4px solid #94a3b8;
+}
+
+.kg-findings-head--ok { border-left-color: #2f855a; }
+.kg-findings-head--warn { border-left-color: #c58a11; }
+.kg-findings-head--danger { border-left-color: #c2413b; }
+.kg-findings-head--neutral { border-left-color: #94a3b8; }
+
+.kg-findings-head-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.kg-findings-head-text {
+  min-width: 0;
+}
+
+.kg-findings-head-text h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+.kg-findings-report-line,
+.kg-findings-compare,
+.kg-findings-resolved {
+  margin: 2px 0 0;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.kg-findings-compare.is-muted,
+.kg-findings-resolved {
+  color: var(--muted);
+}
+
+.kg-findings-readiness {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.kg-findings-readiness strong {
+  color: var(--ink);
+}
+
+.kg-findings-update {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  flex: 0 0 auto;
+  max-width: 260px;
+}
+
+.kg-findings-update-reason {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: right;
+}
+
+.kg-findings-notice {
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--soft);
+  font-size: 13px;
+}
+
+.kg-findings-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.kg-finding {
+  border: 1px solid var(--line);
+  border-left: 4px solid #94a3b8;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff;
+}
+
+.kg-finding--high { border-left-color: #c2413b; }
+.kg-finding--medium { border-left-color: #c58a11; }
+.kg-finding--low { border-left-color: #64748b; }
+
+.kg-finding.is-handled {
+  background: #fbfcff;
+}
+
+.kg-finding-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.kg-finding-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #94a3b8;
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+.kg-finding-dot.is-high { background: #c2413b; }
+.kg-finding-dot.is-medium { background: #c58a11; }
+.kg-finding-dot.is-low { background: #64748b; }
+
+.kg-finding-severity {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.kg-finding-rule {
+  font-size: 14px;
+}
+
+.kg-finding-kind {
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+.kg-finding-subject {
+  flex: 1 1 160px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.kg-finding-impact {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.kg-finding-based {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--warning);
+}
+
+.kg-finding-evidence {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.kg-finding-samples,
+.kg-finding-note,
+.kg-finding-blocked,
+.kg-finding-handled {
+  margin: 4px 0 0;
+  font-size: 13px;
+}
+
+.kg-finding-samples-label,
+.kg-finding-note,
+.kg-finding-blocked {
+  color: var(--muted);
+}
+
+.kg-finding-handled {
+  font-weight: 600;
+  color: var(--green);
+}
+
+.kg-finding-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-top: 8px;
+}
+
+.kg-finding-action.is-danger {
+  color: var(--danger);
+  border-color: var(--danger-border);
+}
+
+.kg-finding-action-note {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.kg-finding-result {
+  font-size: 12px;
+}
+
+.kg-finding-result.is-ok { color: var(--green); }
+.kg-finding-result.is-failed { color: var(--danger); }
+.kg-finding-result.is-neutral { color: var(--muted); }
+
+.kg-finding-dismiss {
+  margin-left: auto;
+}
+
+.kg-findings-dev-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+.kg-findings-diagnostics {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.kg-findings-diagnostics > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 12px 16px;
+  cursor: pointer;
+}
+
+.kg-findings-diagnostics-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.kg-findings-diagnostics-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.kg-findings-diagnostics-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 0 12px 12px;
+}
+
+.kg-findings-rule-lines,
+.kg-findings-passed-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.kg-findings-passed-list {
+  margin-top: 10px;
+}
+
+.kg-findings-rule-line,
+.kg-findings-passed-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+
+.kg-findings-passed-mark {
+  width: 14px;
+  flex: 0 0 auto;
+  text-align: center;
+  color: var(--muted);
+}
+
+.kg-findings-rule-line.is-clean .kg-findings-passed-mark {
+  color: var(--green);
+}
+
+.kg-findings-passed-text {
+  min-width: 0;
+}
+
+.kg-merge-row.is-focused {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 2px rgba(31, 94, 255, 0.18);
+}
+
 @media (max-width: 720px) {
   .kg-analysis-body {
     padding: 12px 14px 18px;
@@ -12279,9 +12581,19 @@ button.tag:hover {
     gap: 2px;
   }
 
-  .kg-analysis-readout-head {
+  .kg-analysis-readout-head,
+  .kg-findings-head-row {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .kg-findings-update {
+    align-items: flex-start;
+    max-width: none;
+  }
+
+  .kg-findings-update-reason {
+    text-align: left;
   }
 
   .kg-analysis-insight-grid,
