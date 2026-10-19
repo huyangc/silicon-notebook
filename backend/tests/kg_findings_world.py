@@ -87,9 +87,11 @@ def world_snapshot(repo, notebook_id: str) -> dict:
         page.pop("notebook_id")
         pages[zone] = page
     edges = ledger["community_edges"]["payload"]
+    payload = dict(ledger["findings"]["payload"])
+    assert payload.pop("scanned_at")          # a clock reading: present, not compared
     return json.loads(json.dumps({
         "rows": rows,
-        "payload": ledger["findings"]["payload"],
+        "payload": payload,
         "board_structure": {key: edges[key]
                             for key in ("boards_in_giant", "boards_equal_component")},
         "summary": summary,

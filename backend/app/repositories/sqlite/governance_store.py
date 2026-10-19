@@ -222,8 +222,18 @@ def require_live_promotion_target(connection: sqlite3.Connection, base_nb_id: st
         )
 
 
+# 一个合并候选某一侧的**有效种子**(`decided_seed_pairs_from` 的同一条推导):seed 列
+# 非空就是它,否则 canonical 去掉 ``K-`` 前缀(``substr`` 起止两侧语法相同,PG 孪生
+# 逐字同一段文本)。``{side}`` 是 ``a`` / ``b``。
+_EFFECTIVE_SEED_SQL = (
+    "(CASE WHEN COALESCE(seed_{side}, '') <> '' THEN seed_{side} "
+    "WHEN substr(canonical_{side}, 1, 2) = 'K-' THEN substr(canonical_{side}, 3) "
+    "ELSE canonical_{side} END)"
+)
+
+
 def _lifecycle_merge_status_sql(statuses) -> str:
-    """``merge_candidate_states_for_canonicals`` 的状态谓词:与
+    """``merge_candidate_states_for_seeds`` 的状态谓词:与
     `merge_candidate_pairs_for_canonicals` 同一套 deny-by-default 取值(固定字面量,
     不绑定参数)。"""
     values = tuple(statuses)
@@ -388,37 +398,41 @@ class GovernanceStore:
         ).fetchall()
 
     @staticmethod
-    def merge_candidate_states_for_canonicals(
-        db: sqlite3.Connection, notebook_id: str, statuses, canonical_ids
+    def merge_candidate_states_for_seeds(
+        db: sqlite3.Connection, notebook_id: str, statuses, seeds
     ) -> List[Dict[str, str]]:
         """图谱分析 F4 读侧派生「已处理 / 已判定不是同一个」用的候选状态(设计
-        2026-10-19 §3.5):至少一端落在 ``canonical_ids`` 里的那些候选,每行
-        ``{id, canonical_a, canonical_b, status, seed_a, seed_b, updated_at}``,按
+        2026-10-19 §3.5 / §4.4):至少一端的**有效种子**落在 ``seeds`` 里的那些候选,
+        每行 ``{id, canonical_a, canonical_b, status, seed_a, seed_b, updated_at}``,按
         ``id`` 序。
+
+        有效种子 = ``seed_x`` 非空时就是它,否则回退到 canonical 去掉 ``K-`` 前缀 ——
+        与 `decided_seed_pairs_from` 逐字同一条推导(`_EFFECTIVE_SEED_SQL`)。按种子而不是
+        按 canonical id 过滤:canonical id 随簇的最小成员漂,两侧 id 都已漂移的决定按 id
+        永远匹配不上,驳回过的组会一直停在「待处理」。
 
         排序在 Python 里做,SQL 里**刻意不写** ``ORDER BY id``:有了它,SQLite 3.45
         (CI 的版本)在生产形态的统计下会改走主键自动索引按 id 序扫**全库**候选,把
-        「本库这几种状态的切片」整个丢掉(3.53 不会);结果集被 ``canonical_ids`` 与
-        切片双重限定,在内存里排一次是有界的。PG 孪生同样不在 SQL 里排,两侧形态一致。
+        「本库这几种状态的切片」整个丢掉(3.53 不会);结果集被 ``seeds`` 与切片双重
+        限定,在内存里排一次是有界的。PG 孪生同样不在 SQL 里排,两侧形态一致。
 
-        ``concept_merge_candidates`` 只有 ``idx_candidates_nb_status``(canonical_a/b
-        无索引),所以这不是主键点查:语句由本库、这几种状态的候选切片驱动,
-        ``canonical_ids`` 只在切片里过滤 —— ``id_binding.member_of``(``+col IN``,
-        一个 JSON 参数,不随列表长度长出变量;两端共用同一个绑定,只扫一遍切片)。
-        与 `merge_candidate_pairs_for_canonicals` 同一个切片与过滤形态,区别是带回
-        状态与 seed,并且不要求调用方分批。
+        ``concept_merge_candidates`` 只有 ``idx_candidates_nb_status``(seed / canonical
+        列无索引),所以这不是主键点查:语句由本库、这几种状态的候选切片驱动,种子列表只在
+        切片里过滤 —— ``id_binding.member_of``(``+expr IN``,一个 JSON 参数,不随列表
+        长度长出变量;两端共用同一个绑定,只扫一遍切片)。
 
-        ``statuses`` 与那边同一套 deny-by-default 取值;校验在空列表早退之前。"""
+        ``statuses`` 与 `merge_candidate_pairs_for_canonicals` 同一套 deny-by-default
+        取值;校验在空列表早退之前。"""
         status_sql = _lifecycle_merge_status_sql(statuses)
-        ids = list(dict.fromkeys(canonical_ids))
-        if not ids:
+        values = list(dict.fromkeys(str(seed) for seed in seeds if seed))
+        if not values:
             return []
-        bound = id_bind_ids(ids, sort=True)
+        bound = id_bind_ids(values, sort=True)
         rows = db.execute(
             "SELECT id, canonical_a, canonical_b, status, seed_a, seed_b, updated_at "
             f"FROM concept_merge_candidates WHERE notebook_id=? AND {status_sql} "
-            f"AND ({id_member_of('canonical_a', bound)} "
-            f"OR {id_member_of('canonical_b', bound)})",
+            f"AND ({id_member_of(_EFFECTIVE_SEED_SQL.format(side='a'), bound)} "
+            f"OR {id_member_of(_EFFECTIVE_SEED_SQL.format(side='b'), bound)})",
             (notebook_id, bound.param, bound.param),
         ).fetchall()
         return sorted((

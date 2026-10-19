@@ -299,8 +299,17 @@ def require_live_promotion_target(connection: Any, base_nb_id: str) -> None:
         )
 
 
+# SQLite 孪生的 `_EFFECTIVE_SEED_SQL`,逐字同一段文本(`seed_{side}` 非空就是它,否则
+# canonical 去掉 ``K-`` 前缀;`decided_seed_pairs_from` 的同一条推导)。
+_EFFECTIVE_SEED_SQL = (
+    "(CASE WHEN COALESCE(seed_{side}, '') <> '' THEN seed_{side} "
+    "WHEN substr(canonical_{side}, 1, 2) = 'K-' THEN substr(canonical_{side}, 3) "
+    "ELSE canonical_{side} END)"
+)
+
+
 def _lifecycle_merge_status_sql(statuses) -> str:
-    """``merge_candidate_states_for_canonicals`` 的状态谓词:与
+    """``merge_candidate_states_for_seeds`` 的状态谓词:与
     `merge_candidate_pairs_for_canonicals` 同一套 deny-by-default 取值(固定字面量,
     不绑定参数)。"""
     values = tuple(statuses)
@@ -513,27 +522,27 @@ class GovernanceStore:
         ).fetchall()
 
     @staticmethod
-    def merge_candidate_states_for_canonicals(
-        db: Any, notebook_id: str, statuses, canonical_ids
+    def merge_candidate_states_for_seeds(
+        db: Any, notebook_id: str, statuses, seeds
     ) -> List[Dict[str, str]]:
-        """SQLite 孪生同名方法(用途、切片驱动与过滤形态见那边)。
+        """SQLite 孪生同名方法(用途、有效种子的推导、切片驱动与过滤形态见那边;
+        `_EFFECTIVE_SEED_SQL` 两侧逐字相同)。
 
-        canonical 列表经 ``id_binding``(``member_of`` + ``execute_ids``),两端共用同一个
-        绑定参数,custom plan 按真实列表出计划。按 ``id`` 排序在 Python 里做(理由见
-        SQLite 孪生:SQL 里的 ``ORDER BY id`` 会让 SQLite 3.45 丢掉切片驱动;这里跟着
-        不写,两侧形态一致),Python 的码点序与 ``COLLATE "C"`` / SQLite 二进制序逐字
-        一致。``updated_at`` 经 `iso_timestamp`。"""
+        种子列表经 ``id_binding``(``member_of`` + ``execute_ids``),两端共用同一个绑定
+        参数,custom plan 按真实列表出计划。按 ``id`` 排序在 Python 里做(理由见 SQLite
+        孪生),Python 的码点序与 ``COLLATE "C"`` / SQLite 二进制序逐字一致。
+        ``updated_at`` 经 `iso_timestamp`。"""
         status_sql = _lifecycle_merge_status_sql(statuses)
-        ids = list(dict.fromkeys(canonical_ids))
-        if not ids:
+        values = list(dict.fromkeys(str(seed) for seed in seeds if seed))
+        if not values:
             return []
-        bound = id_bind_ids(ids)
+        bound = id_bind_ids(values)
         rows = id_execute_ids(
             db,
             "SELECT id, canonical_a, canonical_b, status, seed_a, seed_b, updated_at "
             f"FROM concept_merge_candidates WHERE notebook_id=%s AND {status_sql} "
-            f"AND ({id_member_of('canonical_a', bound)} "
-            f"OR {id_member_of('canonical_b', bound)})",
+            f"AND ({id_member_of(_EFFECTIVE_SEED_SQL.format(side='a'), bound)} "
+            f"OR {id_member_of(_EFFECTIVE_SEED_SQL.format(side='b'), bound)})",
             [notebook_id, bound.param, bound.param],
         ).fetchall()
         return sorted((

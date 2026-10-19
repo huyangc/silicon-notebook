@@ -72,6 +72,7 @@ from app.domain.kg_findings_contracts import (
     MAX_PERSISTED_FINDINGS,
     MAX_RESOLVED_SAMPLES,
     MAX_SAMPLES,
+    MAX_MEMBER_SEEDS_PER_CANONICAL,
     MAX_SUBJECT_REFS,
     NOTEBOOK_SUBJECT_KEY,
     RULE_DUPLICATE_IMPORT,
@@ -92,6 +93,7 @@ from app.domain.kg_findings_contracts import (
     SKIP_NO_OBJECTS,
     UBIQUITOUS_SOURCE_COUNT,
     finding_sort_key,
+    source_pair_ids,
     source_pair_key,
 )
 from app.domain.kg_merge_seed import (
@@ -135,6 +137,10 @@ _MEMBER_SEED_BATCH = 500
 # S1 examples: candidates whose visible names are asked per lookup round, so
 # that unreproducible examples cost a round per this many, not per 3.
 _S1_LOOKAHEAD = 30
+# F4 the same way: near the 500-row cap a round would otherwise ask only the
+# few free slots, and a high drop rate (visible names not reproducing the
+# group) would turn into one lookup round per handful of groups.
+_F4_LOOKAHEAD = 64
 
 
 # ============================================================ step ③ structure
@@ -742,11 +748,14 @@ class LookupRequest:
 
 
 class _Lookups:
-    __slots__ = ("names", "sources")
+    __slots__ = ("names", "sources", "seeds")
 
     def __init__(self) -> None:
         self.names: Dict[NameKey, List[str]] = {}
         self.sources: Dict[str, SourceFacts] = {}
+        # canonical id → v1 seeds of ALL its members (hidden ones included),
+        # answered with the (None, canonical) name keys; stored in F4 evidence.
+        self.seeds: Dict[str, Set[str]] = {}
 
     def candidates(self, key: NameKey) -> List[str]:
         return self.names.get(key) or []
@@ -1475,9 +1484,18 @@ def _under_merge_pending(
         }
         # The whole group, not just the shown sample: the read side re-judges
         # "the user rejected / deferred / confirmed it" on these classes with
-        # the decisions stored at read time (`under_merge_decision`).
+        # the decisions stored at read time (`under_merge_decision`), matched
+        # by the members' v1 seeds stored here — so it never reads members.
         evidence["canonical_ids"] = kept
         evidence["classes"] = sorted(sorted(classes[seed]) for seed in open_classes)
+        member_seeds: Dict[str, List[str]] = {}
+        truncated = False
+        for canonical_id in kept:
+            seeds = sorted(lookups.seeds.get(canonical_id, ()))
+            truncated = truncated or len(seeds) > MAX_MEMBER_SEEDS_PER_CANONICAL
+            member_seeds[canonical_id] = seeds[:MAX_MEMBER_SEEDS_PER_CANONICAL]
+        evidence["member_seeds"] = member_seeds
+        evidence["seeds_truncated"] = truncated
         impact = sum(objects[c] for c in kept)
         return _row(RULE_UNDER_MERGE, squash, visible[shown[0]], refs[:MAX_SUBJECT_REFS],
                     impact, evidence)
@@ -1600,7 +1618,7 @@ class FindingsDraft:
     ) -> None:
         self._fixed = fixed
         self._windows = {
-            RULE_UNDER_MERGE: _Window(f4_candidates, MAX_PERSISTED_FINDINGS),
+            RULE_UNDER_MERGE: _Window(f4_candidates, MAX_PERSISTED_FINDINGS, _F4_LOOKAHEAD),
             RULE_SEED_DEFECT: _Window(s1_candidates, S1_EXAMPLES, _S1_LOOKAHEAD),
         }
         self._statuses = statuses
@@ -1647,8 +1665,12 @@ class FindingsDraft:
         *,
         names: Iterable[Tuple[Optional[str], str, str]] = (),
         sources: Optional[Mapping[str, SourceFacts]] = None,
+        member_seeds: Optional[Mapping[str, Iterable[str]]] = None,
     ) -> None:
-        """Add answers to the current round: name rows, facts per source id.
+        """Add answers to the current round: name rows, facts per source id, and
+        for the ``(None, canonical)`` keys the v1 seeds of ALL that canonical's
+        members (hidden ones included — they decide, never display; F4 stores
+        them so the read side matches decisions without reading members).
 
         Accumulates — a paged lookup may call it any number of times; nothing is
         judged until the next ``pending()`` / ``result()``."""
@@ -1656,6 +1678,10 @@ class FindingsDraft:
             key = (source_id, canonical_id)
             if key in self._asked_names and name:
                 self._lookups.names.setdefault(key, []).append(str(name))
+        for canonical_id, seeds in (member_seeds or {}).items():
+            if (None, canonical_id) in self._asked_names:
+                self._lookups.seeds.setdefault(canonical_id, set()).update(
+                    str(seed) for seed in seeds if seed)
         for source_id, facts in (sources or {}).items():
             if source_id in self._asked_sources:
                 self._lookups.sources[source_id] = facts
@@ -1811,7 +1837,10 @@ def compute_findings(
         groups.setdefault(concept_squash_key(names[ids[index]]), []).append(index)
     groups = {squash: members for squash, members in groups.items() if len(members) >= 2}
     adjacency: Dict[str, Set[str]] = {}
-    if groups:
+    # Member seeds only feed the "decided apart" adjacency: with no rejected or
+    # deferred decision in the library there is nothing to match, and the gate
+    # is exact — every member-seed read is skipped.
+    if groups and any(status in DECISION_APART_STATUSES for status in decisions.values()):
         group_ids = sorted(ids[index] for members in groups.values() for index in members)
         adjacency = _apart_adjacency(_member_seed_sets(group_ids, member_seeds), decisions)
     f4_pending, s1_pending, merge_counts = _merge_specs(corpus, groups, ids, names, adjacency)
@@ -1913,29 +1942,64 @@ def finding_row_values(row: Mapping[str, object]) -> tuple:
     return tuple(row[name] for name in FINDING_ROW_FIELDS)
 
 
-def stale_dismissals(
-    marks: Iterable[Mapping[str, object]], rows: Iterable[Mapping[str, object]],
-) -> List[Tuple[str, str, str]]:
-    """The ``dismissed`` marks whose subject is not in the new detail — the
-    store's ``prune_marks`` for this publication (§8.3).
+def _dismissed_subject_sources(rule_id: str, subject_key: str) -> Tuple[str, ...]:
+    """The sources whose deletion ends a dismissed subject: F1 / F3 their source,
+    F2 its two sources; ``()`` for F4 / F5 (never pruned at publication)."""
+    if rule_id in (RULE_OFF_TOPIC_SOURCE, RULE_PARSE_DAMAGE):
+        return (subject_key,) if subject_key else ()
+    if rule_id == RULE_DUPLICATE_IMPORT:
+        return source_pair_ids(subject_key)
+    return ()
 
-    A dismissal is the user's judgement on one finding, so it survives every
-    rebuild that still reports that subject (same ``(rule_id, subject_key)``).
-    Once the subject is gone from the detail (the source was deleted, the pair
-    or group no longer exists), the mark goes with it: that is what keeps the
-    mark table within ``KG_ANALYSIS_MARKS_MAX`` (dismissals are only written for
-    subjects of the current detail). ``relink_attempted`` is a system mark about
-    the notebook, never pruned here. ⚠ A dismissed subject that drops out
-    because its rule hit the per-rule cap loses its mark too — it comes back as
-    open if it is ever persisted again (registered trade-off: no subject outside
-    the detail can be told apart from a gone one without reading the KG)."""
-    present = {(str(row["rule_id"]), str(row["subject_key"])) for row in rows}
-    return [
-        (str(mark["rule_id"]), str(mark["subject_key"]), str(mark["kind"]))
-        for mark in marks
-        if mark["kind"] == MARK_DISMISSED
-        and (str(mark["rule_id"]), str(mark["subject_key"])) not in present
-    ]
+
+def dismissal_source_ids(marks: Iterable[Mapping[str, object]]) -> List[str]:
+    """Source ids to point-look-up before computing `stale_dismissals`."""
+    ids: Set[str] = set()
+    for mark in marks:
+        if mark["kind"] == MARK_DISMISSED:
+            ids.update(_dismissed_subject_sources(str(mark["rule_id"]),
+                                                  str(mark["subject_key"])))
+    return sorted(ids)
+
+
+def stale_dismissals(
+    marks: Iterable[Mapping[str, object]],
+    rule_statuses: Mapping[str, Mapping[str, object]],
+    source_states: Mapping[str, Mapping[str, object]],
+) -> List[Tuple[str, str, str]]:
+    """The ``dismissed`` marks whose subject no longer EXISTS — the store's
+    ``prune_marks`` for this publication (design §8.3: "只在发布时清掉主体已不存在
+    的标记(来源被删)"; §8.5⑤: a dismissal survives a re-organisation and the
+    same finding is dismissed again).
+
+    "Not in the new detail" is NOT "gone": a library re-extracted after a KG
+    delete, a dismissed source caught mid-reparse, a rule cut at its 500-row cap
+    or temporarily skipped (fewer than two comparable sources) all leave the
+    subject out of the detail while it still exists — pruning there would drop
+    the user's judgement silently. So:
+
+      · F1 / F3: pruned only when the subject source is no longer in ``sources``;
+        F2: when either of its two sources is gone (``source_states`` from
+        `kg_finding_source_states`, read outside the write transaction);
+      · F4 / F5: never pruned here — only an undo, a graph / notebook delete
+        removes them;
+      · a rule that did not run, or was truncated, in the new ledger prunes
+        nothing (its view of the library is incomplete).
+    ``relink_attempted`` is a system mark, never touched. Dismissals therefore
+    outlive the detail; ``KG_ANALYSIS_MARKS_MAX`` is the table's own bound."""
+    stale: List[Tuple[str, str, str]] = []
+    for mark in marks:
+        if mark["kind"] != MARK_DISMISSED:
+            continue
+        rule_id, subject_key = str(mark["rule_id"]), str(mark["subject_key"])
+        status = rule_statuses.get(rule_id) or {}
+        if status.get("status") != RULE_STATUS_RAN or status.get("truncated"):
+            continue
+        sources = _dismissed_subject_sources(rule_id, subject_key)
+        if sources and any(not (source_states.get(source_id) or {}).get("exists")
+                           for source_id in sources):
+            stale.append((rule_id, subject_key, MARK_DISMISSED))
+    return stale
 
 
 # ============================================================== finalize

@@ -31,10 +31,11 @@
   · `kg_source_profile_page`     COUNT + 一页 ≤200 行 + ≤200 次主键点查(仅 /sources)
   · `kg_analysis_mark_rows`      ≤ `KG_ANALYSIS_MARKS_MAX` 行主键前缀读(总览的问题清单
                                  摘要 + /findings)
+  · `kg_analysis_finding_keys`   总览:豁免标记里哪些主体还在当前明细里(主键点查)
   · 仅 /findings(设计 2026-10-19 §8.4):`kg_analysis_finding_rows`(≤ `KG_FINDINGS_ROWS_MAX`
-    行主键前缀)、F4 组的已存决定(`merge_candidate_states_for_canonicals`,本库决定切片
-    按组的 canonical 过滤)与成员名(`kg_finding_member_name_rows`,按 canonical 驱动,500
-    一批)、这一页涉及来源的状态(`kg_finding_source_states`,≤ 一页的主键点查)
+    行主键前缀)、F4 组的已存决定(`merge_candidate_states_for_seeds`,本库决定切片按
+    证据里存的成员种子过滤;不读成员对象)、这一页涉及来源的状态
+    (`kg_finding_source_states`,≤ 一页的主键点查)
 
 后两条里读**明细表**的那两条(`kg_community_edges_top` / `kg_source_profile_page`)还带
 一道账本闸:账本行不在就整条跳过(见 `_detail_rows_are_readable`)。这不是性能优化而是
@@ -545,7 +546,7 @@ class KgAnalysisService:
       另起一份库。
     - ``now``:时钟 seam。
     - ``governance``:后端相关的 governance store,只用它的
-      `merge_candidate_states_for_canonicals`(connection-taking,骑同一个快照)——
+      `merge_candidate_states_for_seeds`(connection-taking,骑同一个快照)——
       问题清单 F4 读侧按已存决定派生「已判定不是同一个 / 已处理」。
     - ``current_merge_code``:当前代码的合并代码分量(`kg_merge.cluster_code_version`,
       不读库),与 state 行里存的那一份比,给「合并规则已更新」(§五 S4)。
@@ -657,6 +658,12 @@ class KgAnalysisService:
             # (≤ KG_ANALYSIS_MARKS_MAX 行),与账本同一个快照。明细一行都不读。
             marks = (self._unified_kg.kg_analysis_mark_rows(db, notebook_id)
                      if ARTIFACT_FINDINGS in ledger else [])
+            # 豁免可以活过明细(来源还在就不清,§8.3),计数只数主体还在**当前**明细里的
+            # 那些 —— 主键点查,不读整份明细。
+            dismissed_keys = [(m["rule_id"], m["subject_key"]) for m in marks
+                              if m["kind"] == MARK_DISMISSED]
+            dismissed_present = (self._unified_kg.kg_analysis_finding_keys(
+                db, notebook_id, dismissed_keys) if dismissed_keys else set())
             state = _state_view(state_row)
             level = _ledger_level(ledger)
             signature = _signature(state, ledger)
@@ -706,7 +713,7 @@ class KgAnalysisService:
                 ledger, state.kg_mutation_seq, state.cluster_mutation_seq,
                 edge_rows, edge_limit,
             ),
-            findings_summary=_findings_summary(ledger, marks, state),
+            findings_summary=_findings_summary(ledger, marks, state, len(dismissed_present)),
             merge_code=_merge_code(state_row, self._current_merge_code()),
         )
 
@@ -746,17 +753,15 @@ class KgAnalysisService:
             if _detail_rows_are_readable(ARTIFACT_FINDINGS, ledger):
                 detail = self._unified_kg.kg_analysis_finding_rows(db, notebook_id)
                 marks = self._unified_kg.kg_analysis_mark_rows(db, notebook_id)
+                # F4 的已存决定按**种子**匹配(组成员的 v1 种子存在证据里,不读成员对象);
+                # 没有 F4 行、或一条相关决定都没有,整步跳过。
                 decisions: Dict[frozenset, str] = {}
-                seeds: Dict[str, Any] = {}
-                f4_ids = findings_view.f4_canonical_ids(detail)
-                if f4_ids:
+                seeds = findings_view.f4_member_seeds(detail)
+                if seeds:
                     decisions = findings_view.decisions_from_candidates(
-                        self._governance.merge_candidate_states_for_canonicals(
+                        self._governance.merge_candidate_states_for_seeds(
                             db, notebook_id, findings_view.DECIDED_CANDIDATE_STATUSES,
-                            f4_ids))
-                    seeds = findings_view.member_seeds_from_rows(
-                        self._unified_kg.kg_finding_member_name_rows(
-                            db, notebook_id, f4_ids))
+                            sorted(set().union(*seeds.values()))))
                 in_zone = findings_view.zone_rows(
                     detail, zone, marks=marks, decisions=decisions, member_seeds=seeds,
                     relink=findings_view.relink_view(marks, state.kg_mutation_seq),
@@ -768,7 +773,10 @@ class KgAnalysisService:
                           if ids else {})
                 rows = [
                     findings_view.page_row(
-                        row, status, reason, dismissed_at, states, entry["created_at"])
+                        row, status, reason, dismissed_at, states,
+                        # 「报告之后重新解析过」以扫描开始的时刻为准(§3.5),旧 payload
+                        # 没有这个键时退回账本行的发布时刻。
+                        entry["payload"].get("scanned_at") or entry["created_at"])
                     for row, status, reason, dismissed_at in window
                 ]
         payload = entry["payload"] if entry is not None else {}
@@ -798,20 +806,25 @@ class KgAnalysisService:
         self, notebook_id: str, rule_id: str, subject_key: str, *, actor_user_id: str,
     ) -> bool:
         """把一条问题标为正常(设计 §8.3)。主键不在**当前**明细里 → ``False``(端点
-        报 404):只能为此刻报着的问题做判断,这也是标记表行数有界的前提
-        (`KG_ANALYSIS_MARKS_MAX`)。``at_kg_seq`` 记写下时的 KG 世代。
+        报 404):只能为此刻报着的问题做判断。``at_kg_seq`` 记写下时的 KG 世代。
 
-        检查与写入同一个写事务:读明细(≤ 上限行,主键前缀)与 upsert 之间不会有一次
-        发布插进来把这条问题删掉。"""
+        判主键在不在是一次**主键点查**(`kg_analysis_finding_keys`),不读整份明细 ——
+        这在写事务里,SQLite 上还持着进程写锁。
+
+        ⚠ 实际保证如实写:检查与写入在同一个写事务里,但 PostgreSQL 是 READ COMMITTED,
+        点查之后、upsert 之前提交的一次发布仍可能把这条问题从明细里换掉。最坏结果是留下
+        一条主体已不在明细里的豁免 —— 它不会被显示(总览只数还在明细里的豁免,`/findings`
+        的区按明细派生),下一次发布按 `stale_dismissals` 的口径处理(来源已删就清,
+        否则保留)。SQLite 的写锁让这个窗口不存在。
+
+        标记表写满(`KG_ANALYSIS_MARKS_MAX`)时抛 `KgAnalysisMarksFull`,端点回 409 与
+        可展示的提示;已有标记一条都不动。"""
         self._reject_inside_write_transaction("KG 分析标为正常")
         if rule_id not in FINDING_RULES:
             return False
         with self._database.write() as db:
-            current = {
-                (row["rule_id"], row["subject_key"])
-                for row in self._unified_kg.kg_analysis_finding_rows(db, notebook_id)
-            }
-            if (rule_id, subject_key) not in current:
+            if not self._unified_kg.kg_analysis_finding_keys(
+                    db, notebook_id, [(rule_id, subject_key)]):
                 return False
             state = self._unified_kg.state_row(db, notebook_id)
             self._unified_kg.write_kg_analysis_mark(
@@ -1308,8 +1321,10 @@ def _findings_built_at(
 
 def _findings_summary(
     ledger: Dict[str, Dict[str, Any]], marks: List[Dict[str, Any]], state: KgState,
+    dismissed: int,
 ) -> FindingsSummary:
-    """总览里问题清单那一格:只读账本行 + 标记(设计 §8.4),不读明细。"""
+    """总览里问题清单那一格:只读账本行 + 标记(设计 §8.4),不读明细。``dismissed``
+    是主体还在当前明细里的豁免数(调用方主键点查得出)。"""
     entry = ledger.get(ARTIFACT_FINDINGS)
     freshness = _artifact_freshness(
         ARTIFACT_FINDINGS, entry, state.kg_mutation_seq, state.cluster_mutation_seq)
@@ -1333,7 +1348,7 @@ def _findings_summary(
         rules_version=payload.get("rules_version"),
         built_at=_findings_built_at(entry),
         created_at=str(entry["created_at"]),
-        counts=findings_view.summary_counts(rules, marks),
+        counts=findings_view.summary_counts(rules, dismissed),
         rules=rules,
         dev_items=findings_view.dev_items(payload.get("rules") or {}),
         structure=payload.get("structure"),

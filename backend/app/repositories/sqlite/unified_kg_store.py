@@ -70,6 +70,7 @@ from app.repositories.sqlite.source_ceiling import (
 from app.domain.kg_analysis_contracts import (
     BOARD_DEPENDENT_ARTIFACT_KINDS,
     KG_ANALYSIS_MARKS_MAX,
+    KgAnalysisMarksFull,
     KG_FINDINGS_ROWS_MAX,
     batched,
     check_artifact_payloads,
@@ -2699,6 +2700,36 @@ class UnifiedKgStore:
         )
 
     @staticmethod
+    def kg_analysis_finding_keys(
+        db: sqlite3.Connection, notebook_id: str, keys: Sequence[Tuple[str, str]]
+    ) -> set:
+        """``keys`` 里哪些 ``(rule_id, subject_key)`` 在本库**当前**的问题明细里 —— 主键
+        点查,不读整份明细。两个消费方:「标为正常」写之前判主键在不在(写事务里,
+        SQLite 上还持着进程写锁,读整份明细就是把锁按住一次 ≤5000 行的读);总览的
+        ``counts.dismissed`` 只数主体还在明细里的豁免。
+
+        每条规则一条语句,主体键列表驱动(``drive_by`` → 主键
+        ``(notebook_id, rule_id, subject_key)`` 每键一次 seek),500 一批。"""
+        wanted: Dict[str, List[str]] = {}
+        for rule_id, subject_key in dict.fromkeys((str(r), str(k)) for r, k in keys):
+            wanted.setdefault(rule_id, []).append(subject_key)
+        found: set = set()
+        for rule_id in sorted(wanted):
+            subject_keys = sorted(wanted[rule_id])
+            for start in range(0, len(subject_keys), 500):
+                bound = bind_ids(subject_keys[start:start + 500])
+                found.update(
+                    (row["rule_id"], row["subject_key"])
+                    for row in db.execute(
+                        "SELECT rule_id, subject_key FROM kg_analysis_findings "
+                        "WHERE notebook_id=? AND rule_id=? "
+                        f"AND {drive_by('subject_key', bound)}",
+                        (notebook_id, rule_id, bound.param),
+                    )
+                )
+        return found
+
+    @staticmethod
     def kg_analysis_mark_rows(
         db: sqlite3.Connection, notebook_id: str
     ) -> List[Dict[str, object]]:
@@ -2753,7 +2784,7 @@ class UnifiedKgStore:
                 (notebook_id, KG_ANALYSIS_MARKS_MAX),
             ).fetchone()["c"]
             if int(count) >= KG_ANALYSIS_MARKS_MAX:
-                raise ValueError(
+                raise KgAnalysisMarksFull(
                     f"KG 分析标记:一个 notebook 最多 {KG_ANALYSIS_MARKS_MAX} 条,"
                     "读入口按这个上限取数"
                 )

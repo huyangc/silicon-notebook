@@ -23,6 +23,7 @@ from app.models.kg import (
     ScaleIndexStatus,
     UnifiedKgStatus,
 )
+from app.domain.kg_analysis_contracts import KgAnalysisMarksFull
 from app.domain.kg_findings_contracts import KG_FINDINGS_PAGE_MAX
 from app.models.kg_analysis import (
     FindingsPageResponse,
@@ -760,10 +761,17 @@ def dismiss_kg_finding(
     user: UserProfile = Depends(get_current_user),
 ) -> None:
     """标为正常。主键两段由路由解码一次(F2 的主键含 ``|``,F4 的主键可能含 ``/``,所以
-    ``subject_key`` 用 ``:path``);主键不在**当前**问题清单里 → 404。"""
-    if not kg_analysis_service().dismiss_finding(
-        notebook_id, rule_id, subject_key, actor_user_id=user.id
-    ):
+    ``subject_key`` 用 ``:path``);主键不在**当前**问题清单里 → 404;本库的标记已到
+    上限 → 409 + 可展示的提示(已有的豁免一条都不动,撤销一些即可再标)。"""
+    try:
+        dismissed = kg_analysis_service().dismiss_finding(
+            notebook_id, rule_id, subject_key, actor_user_id=user.id
+        )
+    except KgAnalysisMarksFull:
+        raise user_error(
+            409, "这个知识库标为正常的问题已经太多，请先撤销一些不再需要的，再标记这一条。"
+        )
+    if not dismissed:
         raise HTTPException(status_code=404, detail="Finding not found")
 
 

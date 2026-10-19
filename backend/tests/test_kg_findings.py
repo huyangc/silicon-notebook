@@ -145,11 +145,17 @@ def _run(lib: _Library, *, cap: int = 1_000_000, object_order: Optional[int] = N
                 names.append((source_id, cid, lib.own.get((source_id, cid), f"{cid}@{source_id}")))
         sources = {sid: SourceFacts(f"title-{sid}", lib.created.get(sid))
                    for sid in request.sources}
+        # Like the product's member-name read: the seeds of EVERY member (hidden
+        # ones too) of each (None, canonical) key, for F4's evidence.
+        seeds = {cid: {concept_seed_v1(n) for n in lib.member_names.get(cid, [lib.names[cid]])}
+                 for source_id, cid in request.names
+                 if source_id is None and (cid in lib.names or cid in lib.member_names)}
         # A paged caller: the answers of one round arrive over several calls.
         for page in range(supply_pages):
             draft.supply(names=names[page::supply_pages],
                          sources={k: v for i, (k, v) in enumerate(sorted(sources.items()))
-                                  if i % supply_pages == page})
+                                  if i % supply_pages == page},
+                         member_seeds=seeds if page == 0 else None)
     return _Run(draft.result(), rounds, calls)
 
 
@@ -896,10 +902,42 @@ def test_s1_examples_look_ahead_instead_of_three_per_round():
 
 def test_member_seeds_are_asked_in_bounded_batches(monkeypatch):
     monkeypatch.setattr(kg_findings, "_MEMBER_SEED_BATCH", 2)
-    run = _run(_merge_library())
+    lib = _merge_library()
+    lib.decisions = {frozenset(("unrelated", "other")): "rejected"}   # opens the gate
+    run = _run(lib)
     assert [len(batch) for batch in run.seed_calls] == [2, 2, 1]
     assert sorted(cid for batch in run.seed_calls for cid in batch) == sorted(
         ["K-llama 3 1", "K-llama 31", "K-llama31", "K-q former", "K-qformer"])
+
+
+def test_member_seed_reads_are_skipped_without_an_apart_decision():
+    """Member seeds only build the "decided apart" adjacency, so a library with
+    no rejected or deferred decision needs none of them — the gate is exact (a
+    confirmed decision never keeps a group out of F4 / S1)."""
+    lib = _merge_library()
+    assert _run(lib).seed_calls == []
+    lib.decisions = {frozenset(("llama 3 1", "llama 31")): "confirmed"}
+    run = _run(lib)
+    assert run.seed_calls == []
+    assert run.keys("F4") == ["llama31"]
+    lib.decisions = {frozenset(("llama 3 1", "llama 31")): "deferred"}
+    assert _run(lib).seed_calls != []
+
+
+def test_f4_evidence_carries_the_member_seeds_capped_per_canonical(monkeypatch):
+    """The read side matches stored decisions by these seeds without reading
+    member objects; a canonical with more seeds than the cap keeps the first N
+    (sorted) and says so — a missed seed only leaves the group open."""
+    monkeypatch.setattr(kg_findings, "MAX_MEMBER_SEEDS_PER_CANONICAL", 2)
+    lib = _merge_library()
+    lib.member_names = {"K-llama 3 1": ["Llama 3.1", "Llama 3.1 instruct", "llama three one"]}
+    row = _run(lib).rows("F4")[0]
+    seeds = row["evidence"]["member_seeds"]
+    assert set(seeds) == {"K-llama 3 1", "K-llama 31", "K-llama31"}
+    assert seeds["K-llama 3 1"] == sorted(
+        {concept_seed_v1(n) for n in ["Llama 3.1", "Llama 3.1 instruct", "llama three one"]})[:2]
+    assert seeds["K-llama 31"] == [concept_seed_v1("Llama 31")]
+    assert row["evidence"]["seeds_truncated"] is True
 
 
 def test_f4_rejudges_on_visible_names_and_promotes_the_next_group(monkeypatch):
@@ -922,7 +960,9 @@ def test_f4_rejudges_on_visible_names_and_promotes_the_next_group(monkeypatch):
     assert run.keys("F4") == ["llama31"]
     status = run.status("F4")
     assert (status["total"], status["persisted"], status["groups_unreproducible"]) == (1, 1, 1)
-    assert len(run.rounds) == 2                       # the promotion asked a second time
+    # F4's lookahead asks past the one free slot in the first round, so the
+    # promoted group was already answered: no second round.
+    assert len(run.rounds) == 1
     dumped = json.dumps(run.result.payload, ensure_ascii=False) + json.dumps(
         run.result.rows, ensure_ascii=False)
     assert "GPT_4_0" not in dumped
@@ -1213,6 +1253,65 @@ def test_ledger_contract_stamp():
         check_ledger_contract({"a": {LEDGER_CONTRACT_KEY: True}})
     assert ledger_row_predates_findings({"x": 1}) is True
     assert ledger_row_predates_findings(stamped["a"]) is False
+
+
+# ------------------------------------------------------- dismissal lifecycle
+def _dismissed(rule_id, key):
+    return {"rule_id": rule_id, "subject_key": key, "kind": "dismissed"}
+
+
+_RAN = {"status": "ran", "total": 1, "persisted": 1, "truncated": False}
+_ALL_RAN = {rule: dict(_RAN) for rule in ("F1", "F2", "F3", "F4", "F5")}
+_EXISTS = {"exists": True}
+
+
+def test_a_dismissal_goes_only_when_its_subject_source_is_gone():
+    """§8.3: pruned only when the subject no longer EXISTS — F1/F3 their source,
+    F2 either source — never just because the subject left the detail."""
+    marks = [_dismissed("F1", "s-del"), _dismissed("F1", "s-kept"),
+             _dismissed("F3", "s-del"), _dismissed("F2", "s-kept|s-del"),
+             _dismissed("F2", "s-kept|s-kept2"),
+             {"rule_id": "F5", "subject_key": "notebook", "kind": "relink_attempted"}]
+    states = {"s-kept": _EXISTS, "s-kept2": _EXISTS, "s-del": {"exists": False}}
+    assert kg_findings.dismissal_source_ids(marks) == ["s-del", "s-kept", "s-kept2"]
+    assert kg_findings.stale_dismissals(marks, _ALL_RAN, states) == [
+        ("F1", "s-del", "dismissed"), ("F3", "s-del", "dismissed"),
+        ("F2", "s-kept|s-del", "dismissed")]
+
+
+def test_a_dismissal_survives_a_subject_that_merely_left_the_detail():
+    """Failure modes of "not in the new detail ⇒ prune" (each was silently
+    dropping the user's judgement): the KG deleted and not re-extracted yet,
+    the source caught mid-reparse — the source row is still there, so the mark
+    stays even though no row reports the subject."""
+    marks = [_dismissed("F1", "s-a"), _dismissed("F3", "s-b")]
+    states = {"s-a": _EXISTS, "s-b": {"exists": True, "status": "parsing"}}
+    assert kg_findings.stale_dismissals(marks, _ALL_RAN, states) == []
+
+
+def test_a_truncated_or_skipped_rule_prunes_nothing():
+    """A rule cut at its cap or skipped (fewer than two comparable sources) sees
+    only part of the library: even a deleted source keeps its dismissal."""
+    marks = [_dismissed("F1", "s-del"), _dismissed("F2", "s-del|s-x")]
+    states = {"s-del": {"exists": False}, "s-x": _EXISTS}
+    truncated = dict(_ALL_RAN, F1={**_RAN, "truncated": True},
+                     F2={"status": "skipped", "reason": "fewer_than_two_sources", "total": 0})
+    assert kg_findings.stale_dismissals(marks, truncated, states) == []
+    assert kg_findings.stale_dismissals(marks, {}, states) == []
+
+
+def test_f4_and_f5_dismissals_are_never_pruned_at_publication():
+    marks = [_dismissed("F4", "llama31"), _dismissed("F5", "notebook")]
+    assert kg_findings.dismissal_source_ids(marks) == []
+    assert kg_findings.stale_dismissals(marks, _ALL_RAN, {}) == []
+
+
+def test_a_malformed_pair_key_is_unknown_not_gone():
+    from app.domain.kg_findings_contracts import source_pair_ids
+
+    assert source_pair_ids("a|b") == ("a", "b")
+    assert source_pair_ids("a") == () and source_pair_ids("a|") == ()
+    assert kg_findings.stale_dismissals([_dismissed("F2", "broken")], _ALL_RAN, {}) == []
 
 
 def test_findings_kind_is_registered_with_its_producer():

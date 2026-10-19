@@ -1117,6 +1117,7 @@ def test_a_board_member_that_left_the_graph_still_places_its_objects(repo):
     batch = repo._runtime.knowledge_lifecycle._compute_kg_analysis(
         notebook_id, 0, 0, kept_rows, edge_table, can2idx,
         reusable=None, partition_rebuilt=False, names={}, relations_by_source={},
+        scanned_at="2026-10-19T00:00:00+00:00",
     )
     profiles, payloads = batch.profiles, batch.payloads
 

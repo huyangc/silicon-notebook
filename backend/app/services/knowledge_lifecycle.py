@@ -89,6 +89,7 @@ from app.services.kg_findings import (
     SourceFacts,
     board_structure_counts,
     compute_findings,
+    dismissal_source_ids,
     finalize_findings,
     finding_row_values,
     stale_dismissals,
@@ -2239,15 +2240,26 @@ class KnowledgeLifecycleService:
         零条也写 —— 零条正是「确定性、幂等,再跑还是补不上」的那一档。``at_kg_seq`` 在
         这个写事务里读:逐来源的写事务已各自推进了 `kg_mutation_seq`,记的是跑完那一刻
         的世代;读侧拿它与当前世代比(之后有新内容进来,才可能补上新的)。一个很小的
-        写事务:一行 state 点读 + 一行标记 upsert。"""
-        with self._write() as db:
-            state = self.unified_kg.state_row(db, notebook_id)
-            self.unified_kg.write_kg_analysis_mark(
-                db, notebook_id, RULE_ISOLATED_OBJECTS, NOTEBOOK_SUBJECT_KEY,
-                MARK_RELINK_ATTEMPTED,
-                at_kg_seq=int(state["kg_mutation_seq"]) if state else 0,
-                actor_user_id="", note="", now=self._now(),
-            )
+        写事务:一行 state 点读 + 一行标记 upsert。
+
+        ⚠ 补边已经提交:标记写失败**不得**把一次成功的「补上关联」报成失败(那会让
+        运维和用户以为边没补上)。吞掉异常、发一条事件 —— 事件**只记异常类名**,不记
+        异常文本(文本里可能带库内标识与 SQL 片段)。代价只是 F5 少一次「已经跑过」的
+        判据,下一次补上关联会再写。"""
+        try:
+            with self._write() as db:
+                state = self.unified_kg.state_row(db, notebook_id)
+                self.unified_kg.write_kg_analysis_mark(
+                    db, notebook_id, RULE_ISOLATED_OBJECTS, NOTEBOOK_SUBJECT_KEY,
+                    MARK_RELINK_ATTEMPTED,
+                    at_kg_seq=int(state["kg_mutation_seq"]) if state else 0,
+                    actor_user_id="", note="", now=self._now(),
+                )
+        except Exception as exc:  # noqa: BLE001 -- reported as an event, by class only
+            self.event_log.emit({
+                "kind": "kg_relink_mark_failed", "notebook_id": notebook_id,
+                "error_class": type(exc).__name__,
+            })
 
     def _relink_source_partitions(self, notebook_id: str) -> Iterator[str]:
         """Every partition key of the notebook's objects, each yielded exactly once.
@@ -7278,10 +7290,14 @@ class KnowledgeLifecycleService:
 
     def _scan_canonical_graph(
         self, notebook_id: str,
-    ) -> "Tuple[Dict[str, str], Dict[str, int], List[str], CanonicalEdgeTable, Dict[str, int]]":
+    ) -> "Tuple[Dict[str, str], Dict[str, int], List[str], CanonicalEdgeTable, Dict[str, int], str]":
         """`rebuild_communities` 的第 ① 步:一趟流式读 `community_graph_rows`,建
         canonical 整数边图。返回 ``(names, can2idx, idx2can, edge_table,
-        relations_by_source)``。
+        relations_by_source, scanned_at)``。
+
+        ``scanned_at`` 是这一趟读**开始**的时刻(问题清单 §3.5):读侧判「来源在报告
+        之后重新解析 / 抽取过」以它为准,而不是发布时刻 —— 分钟级预计算窗口里完成的
+        重新解析,产物未必看得到它,按发布时刻判会让它一直显示「待处理」。
 
         SQL-join 把关系两端映射到 canonical(未聚类→自身 object_id),整数索引累加边权。
         避开 networkx dict-of-dicts 与全量 cluster_map dict → 10^7 边内存有界
@@ -7305,6 +7321,7 @@ class KnowledgeLifecycleService:
         can2idx: "Dict[str, int]" = {}
         relations_by_source: "Dict[str, int]" = {}
         edge_builder = CanonicalEdgeTableBuilder()
+        scanned_at = self._now()
         with self._connect() as db:
             names, graph_rows = self.unified_kg.community_graph_rows(db, notebook_id)
             _fold_canonical_edges(graph_rows, can2idx, edge_builder, relations_by_source)
@@ -7313,7 +7330,7 @@ class KnowledgeLifecycleService:
             idx2can[_i] = _c
         edge_table = edge_builder.build(len(can2idx))
         del edge_builder
-        return names, can2idx, idx2can, edge_table, relations_by_source
+        return names, can2idx, idx2can, edge_table, relations_by_source, scanned_at
 
     def rebuild_communities(self, notebook_id: str, level: int = 0, force: bool = False) -> int:
         """在 canonical 实体图(关系两端经 cluster_map 映射)上跑 Louvain 社区检测,
@@ -7489,7 +7506,7 @@ class KnowledgeLifecycleService:
                 self._reap_stale_community_generations(
                     notebook_id, keep=(_published_from, _generation))
             # canonical 整数边图(列式 int32 边表 + 每来源关联数,见 `_scan_canonical_graph`)。
-            names, can2idx, idx2can, edge_table, relations_by_source = (
+            names, can2idx, idx2can, edge_table, relations_by_source, scanned_at = (
                 self._scan_canonical_graph(notebook_id))
             n_nodes = len(can2idx)
             _partition_generation = 0
@@ -7641,7 +7658,7 @@ class KnowledgeLifecycleService:
                         # 拿的是现成的划分,它建在哪一代合并结果上没有地方记,盖上当前世代就是
                         # 把一份混合世代的东西说成「与当前一致」(codex 第 7 轮 P2)。
                         partition_rebuilt=not graph_fresh,
-                        names=names, relations_by_source=relations_by_source,
+                        names=names, relations_by_source=relations_by_source, scanned_at=scanned_at,
                     )
                 except KgBuildAborted:
                     raise
@@ -7718,6 +7735,7 @@ class KnowledgeLifecycleService:
         partition_rebuilt: bool,
         names: "Mapping[str, str]",
         relations_by_source: "Mapping[str, int]",
+        scanned_at: str,
     ) -> "KgAnalysisBatch":
         """把 KG 质量分析的产物在**这一次**图构建里算出来(设计 §3.2)。**不落库。**
 
@@ -7733,8 +7751,9 @@ class KnowledgeLifecycleService:
              要清掉的过期豁免;
           ⑦ 三条统计快照照旧跑在更低的水位上(⑥ 新增的结构到这里已全部释放)。
         ``names``:`community_graph_rows` 的 canonical → canonical 名(只用于判定 F3a /
-        F4,从不展示);``relations_by_source``:第 ① 步按 ``kr.source_id`` 数的关联行数。
-        两个都没有默认值:漏传会让规则在空输入上「全部通过」。
+        F4,从不展示);``relations_by_source``:第 ① 步按 ``kr.source_id`` 数的关联行数;
+        ``scanned_at``:第 ① 步开始读的时刻,写进问题清单 payload,读侧拿它判「报告之后
+        重新解析过」。都没有默认值:漏传会让规则在空输入上「全部通过」。
 
         为什么挂在这里而不是端点上:五份里有三份是**全表级重活**(簇大小直方图 / 最大簇
         榜单 / 边出处构成,见 ports.py 只读聚合段头的双后端实测),生产库 200 万簇行 /
@@ -7914,13 +7933,18 @@ class KnowledgeLifecycleService:
         can2idx.clear()
         findings = self._findings_lookups(notebook_id, draft)
         del draft
-        payloads[ARTIFACT_FINDINGS] = findings.payload
-        # 发布时要清掉的过期豁免(主体已不在新明细里的 dismissed 标记):写事务之外读
-        # 一次标记表(≤ KG_ANALYSIS_MARKS_MAX 行,主键前缀)。读到之后、发布之前新写的
-        # 标记留到下一次发布再判,不会误删。
+        payloads[ARTIFACT_FINDINGS] = {**findings.payload, "scanned_at": str(scanned_at)}
+        # 发布时要清掉的豁免:只有**主体已不存在**的(F1/F3 来源被删、F2 任一来源被删;
+        # F4/F5 与 skipped / 截断的规则一律不清,判据见 `stale_dismissals`)。写事务之外
+        # 读一次标记表(≤ KG_ANALYSIS_MARKS_MAX 行,主键前缀)与这些来源的状态(主键点查)。
+        # 读到之后、发布之前新写的标记留到下一次发布再判,不会误删。
         with self.unified_kg.read_snapshot() as db:
-            prune_marks = stale_dismissals(
-                self.unified_kg.kg_analysis_mark_rows(db, notebook_id), findings.rows)
+            marks = self.unified_kg.kg_analysis_mark_rows(db, notebook_id)
+            marked_sources = dismissal_source_ids(marks)
+            source_states = (self.unified_kg.kg_finding_source_states(
+                db, notebook_id, marked_sources) if marked_sources else {})
+        prune_marks = stale_dismissals(marks, findings.payload["rules"], source_states)
+        del marks, source_states
         payloads[ARTIFACT_CLUSTER_HISTOGRAM] = self.unified_kg.cluster_size_histogram(
             notebook_id
         )
@@ -7999,12 +8023,18 @@ class KnowledgeLifecycleService:
                 continue
             with self.unified_kg.read_snapshot() as db:
                 if members:
-                    draft.supply(names=[
-                        (None, cid, name) for cid, name, visible, _count
-                        in self.unified_kg.kg_finding_member_name_rows(
-                            db, notebook_id, members)
-                        if visible
-                    ])
+                    rows = self.unified_kg.kg_finding_member_name_rows(
+                        db, notebook_id, members)
+                    seeds: "Dict[str, Set[str]]" = {}
+                    for cid, name, _visible, _count in rows:
+                        seeds.setdefault(cid, set()).add(concept_seed_v1(name))
+                    # 展示名只取可见成员;种子取全部成员(含隐藏),F4 把它存进证据,读侧
+                    # 按种子匹配已存决定、不再读成员。
+                    draft.supply(
+                        names=[(None, cid, name) for cid, name, visible, _count in rows
+                               if visible],
+                        member_seeds=seeds,
+                    )
                 if request.sources:
                     states = self.unified_kg.kg_finding_source_states(
                         db, notebook_id, list(request.sources))

@@ -3196,6 +3196,13 @@ class UnifiedKgStorePort(Protocol):
         db: object, notebook_id: str
     ) -> list[dict[str, object]]: ...
     @staticmethod
+    def kg_analysis_finding_keys(
+        db: object, notebook_id: str, keys: Sequence[tuple[str, str]]
+    ) -> set:
+        """Which ``(rule_id, subject_key)`` of ``keys`` are in the notebook's
+        current findings detail — primary-key probes, never the whole detail
+        (the dismissal write's existence check; the overview's dismissed count)."""
+    @staticmethod
     def kg_analysis_mark_rows(
         db: object, notebook_id: str
     ) -> list[dict[str, object]]: ...
@@ -4852,14 +4859,16 @@ class GovernanceStorePort(Protocol):
         db: object, notebook_id: str, statuses: object, canonical_ids: object
     ) -> list[Any]: ...
     @staticmethod
-    def merge_candidate_states_for_canonicals(
-        db: object, notebook_id: str, statuses: object, canonical_ids: object
+    def merge_candidate_states_for_seeds(
+        db: object, notebook_id: str, statuses: object, seeds: object
     ) -> list[dict[str, str]]:
-        """Candidates with either side in ``canonical_ids`` (KG analysis F4's
-        read-side status), ``{id, canonical_a, canonical_b, status, seed_a,
-        seed_b, updated_at}`` in ``id`` order. Driven by this notebook's
-        candidate slice (``idx_candidates_nb_status`` is the only index); the
-        id list only filters it, bound through ``id_binding``."""
+        """Candidates with either side's EFFECTIVE seed in ``seeds`` (KG analysis
+        F4's read-side status; effective seed = ``seed_x``, or the canonical id
+        minus ``K-`` when empty — `decided_seed_pairs_from`'s derivation),
+        ``{id, canonical_a, canonical_b, status, seed_a, seed_b, updated_at}`` in
+        ``id`` order. Driven by this notebook's candidate slice
+        (``idx_candidates_nb_status`` is the only index); the seed list only
+        filters it, bound through ``id_binding``."""
     @staticmethod
     def pending_merge_names(
         connection: object, notebook_id: str, canonical_ids: Sequence[str]

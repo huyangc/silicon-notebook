@@ -134,9 +134,9 @@
 | F4 | 待确认合并里这一组已被确认。若是**驳回或暂缓**，当场移进「已通过」写「已判定不是同一个」，下次重建也不再报（§4.4）。驳回不置 `dirty`（只有撤销一次确认才置），所以不能靠「更新后消失」来收尾，否则这条会永远「仍在」 | `concept_merge_candidates` 只有 `(notebook_id, status)` 索引，不是主键点查：在本库候选切片里按这一页的组分批过滤 |
 | F5 | 「补上关联」在问题建成之后**改变过图谱**（标记记下的 `kg_mutation_seq` 晚于账本行的 seq）。只跑过、什么都没补上（标记世代 = 当前世代）不是「已处理」，而是 §4.5 的「已经跑过、之后没有新内容」：移出待处理（读侧状态 `relink_spent`，进「已通过」区），不放按钮 | 一行点读 |
 
-「问题建成之后」以 `findings` 账本行的 `created_at` 为准。
+「问题建成之后」以这一次预计算**开始扫描**的时刻为准（payload 的 `scanned_at`；旧 payload 没有时退回账本行的 `created_at`）：分钟级预计算窗口里完成的重新解析，产物未必看得到它，按发布时刻判会让它一直显示「待处理」。
 
-**实施对齐（PR-2）**：读侧状态的代号与分区——`open`（待处理）/ `handled`（已处理，更新后核验，仍在待处理区；`handled_reason` = `source_deleted` / `source_processing` / `source_reprocessed` / `merge_confirmed` / `relinked`）/ `dismissed`（标为正常）/ `decided_not_same`（F4，驳回或暂缓）/ `relink_spent`（F5，见上）。`GET .../findings` 的 `zone`：`open` = open + handled，`passed` = decided_not_same + relink_spent，`dismissed` = dismissed。分区只依赖标记、F4 的已存决定与 F5 标记；来源点查只做当前这一页（handled 与 open 同区，来源状态不改变分区）。F1/F3 的「重跑过」看来源的 `chunked_at` 与最近一次抽取的 `created_at`（不看 `updated_at`）；「正在跑」= 来源状态 `queued` / `parsing` / `extracting`，或最近一次抽取 `running`。F4 的已存决定在本库决定切片里按这一组的 canonical 过滤读出（`merge_candidate_states_for_canonicals`），再按全部成员（含隐藏来源成员）的 v1 种子与证据里存的写法分组（`classes`）判定，与发布时引擎的判定同一个函数。
+**实施对齐（PR-2）**：读侧状态的代号与分区——`open`（待处理）/ `handled`（已处理，更新后核验，仍在待处理区；`handled_reason` = `source_deleted` / `source_processing` / `source_reprocessed` / `merge_confirmed` / `relinked`）/ `dismissed`（标为正常）/ `decided_not_same`（F4，驳回或暂缓）/ `relink_spent`（F5，见上）。`GET .../findings` 的 `zone`：`open` = open + handled，`passed` = decided_not_same + relink_spent，`dismissed` = dismissed。分区只依赖标记、F4 的已存决定与 F5 标记；来源点查只做当前这一页（handled 与 open 同区，来源状态不改变分区）。F1/F3 的「重跑过」看来源的 `chunked_at` 与最近一次抽取的 `created_at`（不看 `updated_at`）；「正在跑」= 来源状态 `queued` / `parsing` / `extracting`，或最近一次抽取 `running`。F4 的已存决定**按种子**匹配：发布时把组内每个 canonical 全部成员（含隐藏来源成员）的去重 v1 种子写进证据（`member_seeds`，每个 canonical 至多 `MAX_MEMBER_SEEDS_PER_CANONICAL=32` 个，超出记 `seeds_truncated`——漏掉的种子只会让组留在「待处理」，是安全方向）；读侧只用这些种子（加上 canonical id 去 `K-` 的那一个）在本库决定切片里按候选两侧的**有效种子**过滤（`merge_candidate_states_for_seeds`，空种子的旧行回退到去 `K-` 的 canonical），不读成员对象，两侧 canonical id 都已漂移的决定也匹配得上；再按证据里存的写法分组（`classes`）判定，与发布时引擎的判定同一个函数。一条相关决定都没有时整步跳过。
 
 报告整体落后于数据时（`dirty`，黄色），问题照常列出，但每条都标「基于变更 #N」，免得读者以为那是此刻的状态。
 
@@ -177,7 +177,7 @@
 
 **判据**：两个来源的 concept canonical 集合 Jaccard ≥ 0.45。
 
-- 集合取两篇各自的 concept canonical，去掉**通用概念**，即出现在 30 个以上来源里的那些。它们对判断「是不是同一篇」不提供信息。
+- 集合取两篇各自的 concept canonical，去掉**通用概念**，即出现在超过 30 个来源里的那些。它们对判断「是不是同一篇」不提供信息。
 - 只在其中一篇出现的概念**计入分母**：它们是两篇真实存在的差异。
 
 **算法**：精确的前缀过滤相似连接（all-pairs prefix filtering）。步骤如下：
@@ -282,7 +282,7 @@ F3 与 F1 的界线是本规格最要紧的判别：
 - **可能改变结果** → 待处理，显示「补上关联」按钮。
   - 走既有的 `POST /notebooks/{id}/kg/relink`：需图谱写权限，后台任务，与重新合并、删除知识图谱共用维护槽。槽被占时如实显示「其它图谱任务进行中」。
   - 结果写在按钮旁：「新增 N 条关联，还剩 M 个」。N、M 用补上关联自己返回的计数（`edges_added` / `isolated_after`），并照它的口径说「还剩 M 个没有关联的知识条目」。它数的是**对象**的原始度数（非 deprecated 的对象），F5 数的是 **canonical** 层面的孤立（可用对象），两个数对不上是口径不同，不能拿来互相核对或相减。
-- **已经跑过、之后没有新内容** → 移进诊断数据，不放按钮，写：「补上关联已经跑过，剩下 M 个没有可自动补上的关联；集中在某几个来源的，见疑似解析残缺」。
+- **已经跑过、之后没有新内容** → API 在 `passed` 区返回，读侧状态 `relink_spent`；界面放进「诊断数据」那块，不放按钮，写：「补上关联已经跑过，剩下 M 个没有可自动补上的关联；集中在某几个来源的，见疑似解析残缺」。
 
 ## 五、B 档：需要开发处理
 
@@ -434,7 +434,7 @@ F3 与 F1 的界线是本规格最要紧的判别：
 | ⑤ 来源画像那一趟：`source_canonical_rows` + `SourceBoardCounter` | 878 万行，每行存两个 int32。**零板块的库整趟跳过**（`if total_members:`） | SQL 多返回一列「是不是 concept」。concept 行另记（来源序号，canonical 下标）两个 int32；不在图里的 concept canonical 用一张旁路 dict 另编下标，只为 F1/F2 计数，**不扩 `can2idx`**（会与 `SourceBoardCounter` 的下标表越界冲突）。「在不在图里」以 `edge_table.n_nodes` 为界，不以 `can2idx` 为界：补账本路径会把不在图里的板块成员也补进 `can2idx`。另按来源累加孤立对象数（F5、F3b）。⚠ 问题清单是必需产物，所以零板块的库也要跑这一趟扫描，只是不写来源画像。原设计刻意为零板块库省掉了这趟扫描，这里把它加回来了，代价要算进去 |
 | ⑥ drain 之后、`can2idx.clear()` **之前** | 立即释放 membership | 在这里算完 F1–F5，顺序见本表下方。全部算完、为不超过上限的问题取到样例名之后，才 `can2idx.clear()` |
 | ⑦ 三条统计快照 | 不变 | 不变。「它们跑在更低的内存水位上」这条约束照旧成立：新增的结构在 ⑥ 末尾全部释放 |
-| ⑧ 发布事务 | 板块 + 五份产物 | 另写 `findings` 账本行与问题明细；读旧账本行与旧明细（≤ 上限行，主键范围读）算出对比摘要、继承 `first_seen_*`；清掉主体已不在新明细里的 `dismissed` 标记（要清哪些在写事务之外读一次标记表算好；`relink_attempted` 从不在这里清） |
+| ⑧ 发布事务 | 板块 + 五份产物 | 另写 `findings` 账本行与问题明细；读旧账本行与旧明细（≤ 上限行，主键范围读）算出对比摘要、继承 `first_seen_*`；清掉主体已不存在的豁免（§8.3：F1/F3 来源已被删、F2 任一来源已被删；F4/F5 发布时一律不清；该规则在新账本里 skipped 或截断时一律不清）。要清哪些在写事务之外算好：读一次标记表，对涉及的来源主键点查（`kg_finding_source_states`）；`relink_attempted` 从不在这里清 |
 
 第 ⑥ 步的计算顺序：
 
@@ -465,7 +465,7 @@ F3 与 F1 的界线是本规格最要紧的判别：
 | 新增项 | 内存（推算） | 时间量级 | 说明 |
 |---|---|---|---|
 | ① 每行多一列 `source_id`，按来源计数 | 计数器 O(来源数)，几 MB——**前提是这条查询已改成流式**（§7.1 顺带发现）；否则 libpq 缓冲每行多二十来个字节以上 | 836 万次字典自增，秒级 | 多一列，网络与解析的开销多一点 |
-| ③ 连通分量 + 度数 | 分量号与度数共 13.7 MB，常驻到 ⑥ 结束；CSR 临时约 50 MB | O(V+E) 的 C 实现；本机 3.6 万节点 2 ms | 与边表同时在场，但发生在 igraph 图已经释放之后 |
+| ③ 连通分量 + 度数 | 分量号、度数与主连通块位图共约 14.7 MB，常驻到 ⑥ 结束；`from_edges` 瞬时约 +107 MB RSS（实测：合成 171 万节点 / 836 万边，tracemalloc 峰值 117 MB，含首次 import scipy 约 11 MB） | O(V+E) 的 C 实现；本机 3.6 万节点 2 ms | 与边表同时在场。全量路径上发生在 igraph 图已经释放之后，不抬全局峰值；**补账本路径没有 Louvain 那个更高的峰，这一步因此把它的峰值抬高约 110 MB** |
 | ⑤ concept 关联对 | 211 万 × 8 B，约 17 MB；去重排序时另有临时的 17 MB | 每行开销与 `SourceBoardCounter.add` 同量级，但只落在 24% 的行上 | 参照原设计第 13 轮：同类的每行开销，在 200 万行上让来源画像从 4.2 s 变成 10.4 s |
 | ⑥ 每个 canonical 的来源数 | 约 7 MB（int32） | 向量化 | |
 | ⑥ F2 前缀过滤连接 | 取决于候选对数，**未知** | 本机 450 对候选，7 ms | 4.9 万个来源上的候选对数推算不出，必须实测。设成本上限 `kg_findings_max_candidate_pairs`（Settings）；触顶时如实记 `truncated`，绝不静默 |
@@ -530,6 +530,8 @@ kind ∈ { dismissed（标为正常）, relink_attempted（补上关联完成时
 
 - `relink_attempted` 不论 §14④ 怎么定都需要：F5 要靠它判断「再跑一次有没有用」。`dismissed` 是否存在这张表里，取决于 §14④。
 - 标记是**用户的决定**，不是派生产物。重建不清它；只在发布时清掉主体已不存在的标记（比如来源已被删）。
+  - **实施口径（PR-2 评审裁决）**：「不在新明细里」不等于「不存在」——删除知识图谱后重抽未完成、已豁免的来源正在重新解析、规则被 500 行上限截断或临时 skipped（可比来源不到两个），主体都会离开明细而本身还在。所以：F1/F3 只在主体来源已不在 `sources` 表时清，F2 任一来源已不在时清；F4/F5 发布时一律不清，只随撤销或删库/删笔记本消失；该规则在新账本里 skipped 或截断时一律不清。
+  - 因此豁免可以活过明细、跨多次发布累积，`KG_ANALYSIS_MARKS_MAX`（明细上限的两倍 + 1）是标记表自己的硬上限：写满时「标为正常」端点返回 409 与可展示的提示（先撤销一些），已有标记一条都不动。总览的 `counts.dismissed` 只数主体还在当前明细里的豁免（主键点查）。
 - 归属与随行要与 `concept_merge_candidates` 对齐，因为那张表同样存的是用户对图谱的决定。笔记本删除时级联删除。分享拷贝、`merge_dbs`、快照校验、跨环境增量同步要不要带上它，按那张表的现行处理方式核对后决定，不另立口径。
 
 ### 8.4 端点

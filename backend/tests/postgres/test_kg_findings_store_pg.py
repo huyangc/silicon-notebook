@@ -90,6 +90,10 @@ def test_display_names_are_batch_invariant(postgres_repository):
     cases.check_display_names_across_batches(postgres_repository, postgres=True)
 
 
+def test_finding_keys_are_read_by_primary_key(postgres_repository):
+    cases.check_finding_keys(postgres_repository, postgres=True)
+
+
 def test_member_names_cover_every_member_and_flag_the_hidden_ones(postgres_repository):
     cases.check_member_names(postgres_repository, postgres=True)
 

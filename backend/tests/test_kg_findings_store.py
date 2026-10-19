@@ -66,6 +66,10 @@ def test_display_names_are_batch_invariant(repo):
     cases.check_display_names_across_batches(repo, postgres=False)
 
 
+def test_finding_keys_are_read_by_primary_key(repo):
+    cases.check_finding_keys(repo, postgres=False)
+
+
 def test_member_names_cover_every_member_and_flag_the_hidden_ones(repo):
     cases.check_member_names(repo, postgres=False)
 
@@ -118,13 +122,15 @@ _PRODUCTION_STATS = [
     ("extraction_runs", "sqlite_autoindex_extraction_runs_1", "98000 1"),
     ("concept_merge_candidates", "idx_candidates_nb_status", "20000 10000 2500"),
     ("concept_merge_candidates", "sqlite_autoindex_concept_merge_candidates_1", "20000 1"),
+    ("kg_analysis_findings", "sqlite_autoindex_kg_analysis_findings_1", "200000 500 100 1"),
 ]
 
 
 @pytest.mark.parametrize("statistics", ["none", "production"])
 def test_id_list_statements_keep_their_key_plans(repo, monkeypatch, statistics):
-    """The four statements that bind an id list (``id_binding``) drive by the
-    keys they exist to read, with and without planner statistics:
+    """The statements that bind an id list (``id_binding``) drive by the keys
+    they exist to read, with and without planner statistics (finding keys, PR-2
+    review: one primary-key seek per listed subject key, per rule):
 
     * source states: one primary-key seek per listed source (``drive_by``), the
       latest extraction run by ``idx_extraction_runs_source_created``;
@@ -163,16 +169,24 @@ def test_id_list_statements_keep_their_key_plans(repo, monkeypatch, statistics):
     cases.source_states(rt, world.nb)
     cases.display_names(rt, world.nb)
     cases.candidate_states(rt, world.nb, ("confirmed", "rejected", "deferred"),
-                           ["K-rmsnorm"])
+                           ["rmsnorm"])
     cases.member_names(rt, world.nb)
+    cases.finding_keys(rt, world.nb, [("F1", "src-a"), ("F2", "src-a|src-b")])
     monkeypatch.setattr(sqlite_database._Conn, "execute", original)
-    assert len(captured) == 4
+    assert len(captured) == 6          # finding keys: one statement per rule
     db = rt.database.connect()
     plans = [
         [row[3] for row in sqlite3.Connection.execute(db, "EXPLAIN QUERY PLAN " + sql, params)]
         for sql, params in captured
     ]
-    states, names, candidates, members = plans
+    states, names, candidates, members, *keys = plans
+    # finding keys (PR-2 review): a primary-key seek per listed key, per rule
+    for plan in keys:
+        assert plan == [
+            "SEARCH kg_analysis_findings USING INDEX sqlite_autoindex_kg_analysis_findings_1 "
+            "(notebook_id=? AND rule_id=? AND subject_key=?)"
+        ] or any("sqlite_autoindex_kg_analysis_findings_1 (notebook_id=? AND rule_id=? "
+                 "AND subject_key=?)" in step for step in plan), plan
     # member names (PR-2): the same two legs as the display names, plus the
     # hidden-source probe of ``visible`` by the sources' primary key.
     assert any("idx_clusters_nb_canonical_member_gen (notebook_id=? AND canonical_id=?)"
