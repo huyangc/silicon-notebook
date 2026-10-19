@@ -1087,6 +1087,85 @@ def test_the_knowhow_history_travels_only_when_the_source_switches_it_on(
     assert actors == {ALICE[1]}
 
 
+# ------------------------------------- a memory's source answer (§11)
+
+
+def _as_answer_memory(repo, notebook_id: str, answer_id: str) -> None:
+    """Turn the seeded memory into one saved from an Ask answer, the shape
+    whose ``source_answer_id`` points into the SOURCE's answers."""
+    with repo._write() as db:
+        db.execute(
+            "UPDATE memory_items SET origin='ask_answer', source_answer_id=? "
+            "WHERE notebook_id=?",
+            (answer_id, notebook_id),
+        )
+        db.execute(
+            "UPDATE memory_provenance SET origin='ask_answer', payload_json=? "
+            "WHERE memory_id IN (SELECT id FROM memory_items WHERE notebook_id=?)",
+            (json.dumps({"question": "源端的问题", "citations": []},
+                        ensure_ascii=False), notebook_id),
+        )
+
+
+def _target_memories(target, notebook_id: str):
+    return target["repo"]._runtime.memory_store.list_memories(
+        ALICE[1], notebook_id=notebook_id, status=None, origin=None,
+        query="", offset=0, limit=20,
+    ).items
+
+
+def test_an_imported_memory_names_the_environment_its_source_answer_is_in(
+    source, target, tmp_path
+):
+    """User ruling 2026-10-19 (design doc §11): answers never travel, so the
+    importer stamps every memory it brings with the package's source_env
+    (``provenance.sync_origin``), and the browser says "the source answer is
+    in <env>" instead of looking it up here. The pointer itself is kept, the
+    source's package does not carry the stamp, and a re-import that UPDATES
+    the row keeps it."""
+    _as_answer_memory(source["repo"], source["exported"], "ans-in-dev")
+    package = _export(source, tmp_path / "out-answer")
+    for row in _rows(package, "memory_provenance"):
+        assert "sync_origin" not in json.loads(row["payload_json"])
+
+    assert _import(target, package).error == ""
+
+    (memory,) = _target_memories(target, source["exported"])
+    assert memory.origin == "ask_answer"
+    assert memory.source_answer_id == "ans-in-dev"
+    assert memory.provenance["sync_origin"] == SOURCE_ENV
+    assert memory.provenance["question"] == "源端的问题"
+    assert _count(target["repo"], "SELECT COUNT(*) FROM answers") == 0
+
+    with source["repo"]._write() as db:
+        db.execute(
+            "UPDATE memory_items SET title='改过的标题' WHERE notebook_id=?",
+            (source["exported"],),
+        )
+    report = _import(target, _export(source, tmp_path / "out-answer-2"))
+    assert report.tables["memory_provenance"].updated == 1
+    (memory,) = _target_memories(target, source["exported"])
+    assert memory.title == "改过的标题"
+    assert memory.provenance["sync_origin"] == SOURCE_ENV
+
+
+def test_a_memory_made_at_the_target_carries_no_source_environment(
+    source, target, package, first_import
+):
+    """Only the importer writes the key, so a memory this environment's own
+    user saves on the mirror is never mistaken for one whose answer lives
+    elsewhere."""
+    local = target["repo"]._runtime.memory_service.create_candidate(
+        source["exported"], ALICE[1], None, "本地请求", "本地记忆", "正文",
+        ["t"], "test",
+    )
+
+    mine = [m for m in _target_memories(target, source["exported"]) if m.id == local.id]
+    assert mine and "sync_origin" not in mine[0].provenance
+    imported = [m for m in _target_memories(target, source["exported"]) if m.id != local.id]
+    assert imported and imported[0].provenance["sync_origin"] == SOURCE_ENV
+
+
 # ------------------------------------------------------------ optional refs
 
 

@@ -524,3 +524,93 @@ def test_both_sides_editing_one_memory_resolves_instead_of_deadlocking(
     assert surviving.get("rev-3-source") == 3
     assert "rev-3-target" not in surviving
     assert report.source_authoritative_collisions_resolved >= 1
+
+
+# ------------------------------------------ Knowhow edit history switch (§11)
+
+
+def _alpha_history(mirrored, repo) -> int:
+    table_id = _one(
+        mirrored["source"], "SELECT id FROM knowhow_tables WHERE notebook_id=%s",
+        (mirrored["alpha"],),
+    )["id"]
+    return _count(
+        repo,
+        "SELECT (SELECT COUNT(*) FROM knowhow_changes WHERE table_id=%s)"
+        " + (SELECT COUNT(*) FROM knowhow_milestones WHERE table_id=%s) AS n",
+        (table_id, table_id),
+    )
+
+
+def _add_alpha_milestone(mirrored, milestone_id: str, name: str, seq: int) -> None:
+    source = mirrored["source"]
+    table_id = _one(
+        source, "SELECT id FROM knowhow_tables WHERE notebook_id=%s",
+        (mirrored["alpha"],),
+    )["id"]
+    with source._write() as db:
+        db.execute(
+            "INSERT INTO knowhow_milestones(id,table_id,seq,name,note,created_by,"
+            "created_at) VALUES (%s,%s,%s,%s,'','user-local',%s)",
+            (milestone_id, table_id, seq, name, MOMENT),
+        )
+
+
+def test_the_knowhow_history_switch_across_a_postgres_chain(mirrored):
+    """Off by default through the baseline and a window; turned on mid-chain
+    the windows say the history is incomplete; one full package heals it;
+    turned off again, the mirror keeps what it holds even when the source
+    deletes the rows, until the parent table itself goes (FK cascade)."""
+    target = mirrored["target"]
+    assert json.loads(
+        (mirrored["full"].package_dir / MANIFEST_NAME).read_text(encoding="utf-8")
+    )["knowhow_history"] is False
+    assert _alpha_history(mirrored, target) == 0
+
+    _add_alpha_milestone(mirrored, "mstone-off", "v1", 1)
+    off = _window(mirrored)
+    assert off.knowhow_history is False
+    assert _import(mirrored, off.package_dir).error == ""
+    assert _alpha_history(mirrored, target) == 0
+
+    mirrored["source_settings"].sync_knowhow_history = True
+    _add_alpha_milestone(mirrored, "mstone-on", "v2", 2)
+    partial = _import(mirrored, _window(mirrored).package_dir)
+    assert partial.error == "" and partial.knowhow_history_complete is False
+    assert any("sync export --full" in warning for warning in partial.warnings)
+
+    full = export_notebooks(
+        mirrored["source_settings"], target_env=TARGET_ENV, out_dir=mirrored["out"],
+        notebook_ids=None, source_env=SOURCE_ENV, full=True,
+    )
+    healed = _import(mirrored, full.package_dir)
+    assert healed.error == "" and healed.knowhow_history_complete is True
+    held = _alpha_history(mirrored, target)
+    assert held == _alpha_history(mirrored, mirrored["source"])
+    recorded = _one(
+        target, "SELECT report_json FROM sync_imports WHERE package_id=%s",
+        (healed.package_id,),
+    )["report_json"]
+    assert recorded["knowhow_history_complete"] is True
+
+    mirrored["source_settings"].sync_knowhow_history = False
+    with mirrored["source"]._write() as db:
+        db.execute("DELETE FROM knowhow_milestones WHERE id IN ('mstone-off','mstone-on')")
+    assert _import(mirrored, _window(mirrored).package_dir).error == ""
+    assert _alpha_history(mirrored, target) == held
+
+    with mirrored["source"]._write() as db:
+        db.execute(
+            "DELETE FROM knowhow_tables WHERE notebook_id=%s", (mirrored["alpha"],)
+        )
+    assert _import(mirrored, _window(mirrored).package_dir).error == ""
+    assert _count(
+        target, "SELECT COUNT(*) AS n FROM knowhow_tables WHERE notebook_id=%s",
+        (mirrored["alpha"],),
+    ) == 0
+    assert _count(
+        target,
+        "SELECT COUNT(*) AS n FROM knowhow_milestones WHERE id IN "
+        "('mstone-off','mstone-on')",
+    ) == 0
+

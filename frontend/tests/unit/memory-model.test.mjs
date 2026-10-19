@@ -189,6 +189,44 @@ test("candidate review exposes every normalized evidence ref and validation resu
 // 这种嵌套形状视而不见：复制来的 ask-answer memory 显示零引用，agent 来的
 // 显示零证据。
 
+// 跨环境同步导入的记忆（docs/incremental-sync-design.md §11，用户裁决 2026-10-19）：
+// 来源回答留在源环境，provenance 顶层的 sync_origin 是导入器写的源环境名。
+test("同步导入的 ask-answer memory：来源回答显示「在 <源环境> 中」，纯文本不可点", () => {
+  const memory = {
+    origin: "ask_answer",
+    source_answer_id: "ans-from-source",
+    provenance: {
+      question: "电源轨怎么排？",
+      mode: "auto",
+      evidence_level: "grounded",
+      citations: [],
+      sync_origin: "prod-shanghai",
+    },
+  };
+  assert.equal(memoryModel.memorySourceAnswerElsewhere(memory), "prod-shanghai");
+  const rows = memoryProvenanceRows(memory);
+  assert.deepEqual(rows[0], ["原问题", "电源轨怎么排？"]);
+  assert.deepEqual(rows[1], ["来源回答", "在 prod-shanghai 中"]);
+});
+
+test("本环境自己的 ask-answer memory 不出现来源回答行", () => {
+  const local = {
+    origin: "ask_answer",
+    source_answer_id: "ans-local",
+    provenance: { question: "q", citations: [] },
+  };
+  assert.equal(memoryModel.memorySourceAnswerElsewhere(local), "");
+  assert.equal(memoryProvenanceRows(local).some(([name]) => name === "来源回答"), false);
+  // 没有来源回答 id 的（例如复制而来、或 Agent 提议的）也不出现，哪怕带着标记。
+  for (const other of [
+    { ...local, source_answer_id: null, provenance: { ...local.provenance, sync_origin: "prod" } },
+    { origin: "external_agent", source_answer_id: "x", provenance: { sync_origin: "prod" } },
+  ]) {
+    assert.equal(memoryModel.memorySourceAnswerElsewhere(other), "");
+    assert.equal(memoryProvenanceRows(other).some(([name]) => name === "来源回答"), false);
+  }
+});
+
 test("跨库复制而来的 ask-answer memory：来源+问题+引用计数渲染为仅存档", () => {
   const rows = memoryProvenanceRows({
     origin: "ask_answer",

@@ -517,8 +517,10 @@ _SYNCED_WITH_MAPPING: tuple[TableSyncSpec, ...] = (
             "created_by 映射不到硬失败；confirmed_by 映射不到置空并记日志。"
             "agent_profile_id 指向 LOCAL 的 agent_profiles，导入时置空。"
             "source_answer_id 指向不同步的 answers，刻意不登记为 severed——"
-            "保留这个文本指针供人工排查，是否需要标注「来源在源环境」是设计"
-            "文档 §11 的未决问题，不在这里预先决定。"
+            "保留这个文本指针供人工排查；「来源在源环境」由导入器在 "
+            "memory_provenance.payload_json 顶层写 sync_origin=<源环境> 标出"
+            "（§11 已决，import_.MEMORY_SYNC_ORIGIN_KEY），前端据此显示"
+            "「来源回答在 <源环境> 中」。"
         ),
         scope=_NOTEBOOK_SCOPE,
     ),
@@ -533,7 +535,10 @@ _SYNCED_WITH_MAPPING: tuple[TableSyncSpec, ...] = (
         "knowhow_milestones",
         SyncClass.SYNCED_WITH_MAPPING,
         mapped_columns=(MappedColumn("created_by", MappingKind.USER),),
-        notes="编辑历史表，可随开关关闭只同步当前态；映射不到置为导入执行者。",
+        notes=(
+            "编辑历史表，默认不同步（SILICON_NOTEBOOK_SYNC_KNOWHOW_HISTORY，"
+            "KNOWHOW_HISTORY_TABLES）；映射不到置为导入执行者。"
+        ),
         scope=TableScope(ScopeKind.PARENT, column="table_id", parent_table="knowhow_tables"),
     ),
     TableSyncSpec(
@@ -541,7 +546,8 @@ _SYNCED_WITH_MAPPING: tuple[TableSyncSpec, ...] = (
         SyncClass.SYNCED_WITH_MAPPING,
         mapped_columns=(MappedColumn("actor", MappingKind.USER),),
         notes=(
-            "编辑历史表，可随开关关闭只同步当前态；用户引用列是 actor（不是"
+            "编辑历史表，默认不同步（SILICON_NOTEBOOK_SYNC_KNOWHOW_HISTORY，"
+            "KNOWHOW_HISTORY_TABLES）；用户引用列是 actor（不是"
             "created_by，knowhow_store.py 全程用这个字段名），映射不到置为"
             "导入执行者。"
         ),

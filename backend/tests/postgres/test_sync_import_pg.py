@@ -241,6 +241,18 @@ def test_a_sqlite_package_lands_native_postgres_values(
     )
     assert reviewed["last_reviewed"] is None
 
+    # §11: the provenance JSON text the importer stamped with the source
+    # environment lands as real jsonb, the stamp inside it.
+    provenance = _one(
+        repo,
+        "SELECT jsonb_typeof(p.payload_json) AS kind, "
+        "p.payload_json->>'sync_origin' AS env FROM memory_provenance p "
+        "JOIN memory_items m ON m.id = p.memory_id WHERE m.notebook_id=%s",
+        (notebook,),
+    )
+    assert provenance["kind"] == "object"
+    assert provenance["env"] == SOURCE_ENV
+
 
 def test_a_sqlite_package_gets_target_assigned_ordinals(target, sqlite_package):
     """``ordinal`` is a PostgreSQL identity column SQLite does not have at
@@ -502,6 +514,152 @@ def test_sync_key_tables_are_pruned_when_the_source_no_longer_has_the_row_pg(
     assert _sync_key_counts(target["repo"], notebook) == {
         "knowledge_object_sources": 0, "community_members": 0,
     }
+
+
+# ------------------------------------- design doc §11 rulings (2026-10-19)
+
+
+def _add_pg_user(repo, user_id: str, username: str) -> None:
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO users(id,email,display_name,role,status,created_at,"
+            "updated_at,username,password_hash,password_salt,password_iterations) "
+            "VALUES (%s,%s,%s,'user','active',%s,%s,%s,'','',0)",
+            (user_id, f"{user_id}@example.test", username, MOMENT, MOMENT, username),
+        )
+
+
+def _add_pg_group(repo, group_id: str, name: str) -> None:
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO groups(id,name,kind,description,created_by,created_at,"
+            "updated_at) VALUES (%s,%s,'project','','user-local',%s,%s)",
+            (group_id, name, MOMENT, MOMENT),
+        )
+
+
+def _seed_knowhow(repo, notebook_id: str, name: str) -> str:
+    table_id = repo.create_knowhow_table(
+        notebook_id, f"{name}-table", "",
+        [{"name": "Topic", "role": "anchor"}], created_by="user-local",
+    )
+    columns = repo.get_knowhow_table(table_id)["columns"]
+    repo.add_knowhow_row(
+        table_id, {column["id"]: f"{name} value" for column in columns},
+        actor="user-local",
+    )
+    return table_id
+
+
+def test_users_fold_ascii_case_and_groups_match_by_name_only_pg(
+    target, sync_key_source, tmp_path
+):
+    """§4/§11 on a PostgreSQL target, PG package: the package's ``A1`` lands
+    on the target's ``a1``, and a group the new mirror's grant needs must
+    already exist here by name -- refused (dry run too) naming it until it
+    does, then mapped onto it, never created."""
+    repo = sync_key_source["repo"]
+    notebook = _seed(repo, "rulings", placeholder="%s", no_time=None)
+    _add_pg_user(repo, "user-src-a1", "A1")
+    _add_pg_group(repo, "grp-src", "pg-team")
+    with repo._write() as db:
+        db.execute(
+            "UPDATE memory_items SET created_by='user-src-a1' WHERE notebook_id=%s",
+            (notebook,),
+        )
+        db.execute(
+            "INSERT INTO notebook_grants(id,notebook_id,principal_type,"
+            "principal_id,role,created_by,created_at) "
+            "VALUES ('grant-pg',%s,'group','grp-src','reader','user-local',%s)",
+            (notebook, MOMENT),
+        )
+    package = _export_sync_key_source(sync_key_source, tmp_path, "out-rulings", notebook)
+    _add_pg_user(target["repo"], "user-tgt-a1", "a1")
+
+    for dry_run in (True, False):
+        with pytest.raises(SyncImportError) as failure:
+            import_package(target["settings"], package, dry_run=dry_run)
+        assert "目标端没有名为「pg-team」的群组" in str(failure.value)
+    assert _one(target["repo"], "SELECT COUNT(*) AS n FROM sync_imports")["n"] == 0
+
+    _add_pg_group(target["repo"], "grp-tgt", "pg-team")
+    report = import_package(target["settings"], package)
+
+    assert report.error == ""
+    assert report.user_mapping.case_folded == (("A1", "a1"),)
+    assert _one(
+        target["repo"], "SELECT created_by FROM memory_items WHERE notebook_id=%s",
+        (notebook,),
+    )["created_by"] == "user-tgt-a1"
+    assert _one(
+        target["repo"], "SELECT principal_id FROM notebook_grants WHERE id='grant-pg'"
+    )["principal_id"] == "grp-tgt"
+    assert _one(
+        target["repo"], "SELECT COUNT(*) AS n FROM groups WHERE id='grp-src'"
+    )["n"] == 0
+
+
+def test_knowhow_history_switch_and_memory_source_env_pg(
+    target, sync_key_source, tmp_path
+):
+    """§11 on a PostgreSQL target, PG package: the history stays home by
+    default, travels once the source turns the switch on (actor mapped),
+    and a later package without it leaves what the mirror holds alone --
+    the full snapshot's reconciliation included. Every imported memory's
+    jsonb provenance names the source environment."""
+    repo = sync_key_source["repo"]
+    notebook = _seed(repo, "history", placeholder="%s", no_time=None)
+    table_id = _seed_knowhow(repo, notebook, "history")
+
+    def history_count(store) -> int:
+        return int(
+            _one(
+                store,
+                "SELECT (SELECT COUNT(*) FROM knowhow_changes WHERE table_id=%s)"
+                " + (SELECT COUNT(*) FROM knowhow_milestones WHERE table_id=%s) AS n",
+                (table_id, table_id),
+            )["n"]
+        )
+
+    default = _export_sync_key_source(sync_key_source, tmp_path, "out-off", notebook)
+    manifest = json.loads((default / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["knowhow_history"] is False
+    assert import_package(target["settings"], default).error == ""
+    assert history_count(target["repo"]) == 0
+    assert _one(
+        target["repo"],
+        "SELECT p.payload_json->>'sync_origin' AS env FROM memory_provenance p "
+        "JOIN memory_items m ON m.id = p.memory_id WHERE m.notebook_id=%s",
+        (notebook,),
+    )["env"] == SOURCE_ENV
+
+    sync_key_source["settings"].sync_knowhow_history = True
+    carried = _export_sync_key_source(sync_key_source, tmp_path, "out-on", notebook)
+    report = import_package(target["settings"], carried)
+    assert report.error == "" and report.knowhow_history is True
+    held = history_count(target["repo"])
+    assert held == history_count(repo) and held >= 1
+    def actors(store) -> list[str]:
+        return sorted(
+            str(row["actor"])
+            for row in _fetch(
+                store, "SELECT actor FROM knowhow_changes WHERE table_id=%s",
+                (table_id,),
+            )
+        )
+
+    # user-local exists under the same username at both ends, so the mapped
+    # actors equal the source's ('' is "nobody" and travels as it is).
+    assert actors(target["repo"]) == actors(repo)
+    assert "user-local" in actors(target["repo"])
+
+    sync_key_source["settings"].sync_knowhow_history = False
+    with repo._write() as db:
+        db.execute("DELETE FROM knowhow_changes WHERE table_id=%s", (table_id,))
+    leaves = _export_sync_key_source(sync_key_source, tmp_path, "out-off-2", notebook)
+    report = import_package(target["settings"], leaves)
+    assert report.error == "" and report.knowhow_history is False
+    assert history_count(target["repo"]) == held
 
 
 # ----------------------------------------------------- PG package -> SQLite target
