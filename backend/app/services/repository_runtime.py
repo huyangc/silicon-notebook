@@ -2220,6 +2220,11 @@ class RepositoryRuntime:
             kg_version=read_kg_mutation_seq,
             mark_unified_kg_dirty_in_tx=mark_unified_kg_dirty_in_tx,
             review_queue_memo=self.review_queue_memo,
+            # P4-T6: the pending-merge names take the same reader instance the
+            # knowledge-query service holds (built in wire_query_services).
+            viewer_scope=lambda notebook_id, active_notebook_id=None: (
+                self.knowledge_query.viewer_scope(notebook_id, active_notebook_id)
+            ),
         )
         if self.memory_service is not None:
             self.memory_service.set_promotion_service(self.knowledge_governance)

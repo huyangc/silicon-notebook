@@ -782,6 +782,42 @@ class GovernanceStore:
         return [{"id": r["id"], "canonical_a": r["canonical_a"], "canonical_b": r["canonical_b"], "score": r["score"], "status": r["status"]} for r in rows]
 
     @staticmethod
+    def pending_merge_names(
+        connection: Any, notebook_id: str, canonical_ids
+    ) -> Dict[str, str]:
+        """``{canonical_id: canonical_name}`` of the published concept
+        clusters among ``canonical_ids`` -- the names the pending-merge list
+        shows for its two sides; an id no published cluster row carries is
+        absent (the caller falls back to the id). Mirrors the SQLite twin.
+
+        One statement for the whole batch (the caller cuts the response's
+        ids into batches), one bounded point lookup per id: a LATERAL
+        ``LIMIT 1`` seek on ``idx_clusters_nb_canonical_member_gen``
+        (notebook, canonical, member) INCLUDE (generation) in member order --
+        the first member row of the published generation, so a hub cluster
+        costs one seek, not its member count. The published-generation scalar
+        is a bound-parameter InitPlan (evaluated once). The id array is one
+        parameter run unprepared (same reason as
+        ``concept_cluster_detail_rows(canonical_ids=...)``)."""
+        values = [str(value) for value in canonical_ids]
+        if not values:
+            return {}
+        rows = connection.execute(
+            "SELECT c.cid AS canonical_id, n.canonical_name AS canonical_name "
+            "FROM unnest(%s::text[]) AS c(cid) CROSS JOIN LATERAL ("
+            "SELECT cc.canonical_name FROM concept_clusters cc "
+            "WHERE cc.notebook_id=%s AND cc.canonical_id=c.cid "
+            "AND cc.generation = COALESCE((SELECT cluster_generation "
+            "FROM unified_kg_state WHERE notebook_id = %s), 0) "
+            'ORDER BY cc.member_object_id COLLATE "C" LIMIT 1) n',
+            (values, notebook_id, notebook_id),
+            prepare=False,
+        ).fetchall()
+        return {
+            str(r["canonical_id"]): str(r["canonical_name"] or "") for r in rows
+        }
+
+    @staticmethod
     def pending_merges_batch(
         connection: Any, notebook_id: str, limit: int
     ) -> List[dict]:

@@ -8,6 +8,7 @@ import { LatexText } from "./answer-panel";
 import { KgEvidenceList } from "./kg-evidence-list";
 import { fieldLabel, KgOccurrenceList, KgProcedureStepCard, kgNodeName } from "./kg-object-cards";
 import { KG_TYPE_STYLE, KgTypeMark, kgTypeLabel } from "./kg-type-mark";
+import { pendingMergeSides } from "./kg-merge-model.ts";
 import { KG_RANGE_STEPS } from "./kg-workspace-model.ts";
 import { Pagination } from "./Pagination";
 import { formatRelativeTime } from "./relative-time.ts";
@@ -523,21 +524,24 @@ export function KgGraphView({
               </button>
             </>
           )}
-          {kgGraph.pendingMerges.length === 0 ? <p className="tool-hint">无</p> : <>{mergesPage.pageItems.map((m) => (
-            <div className="kg-merge-row" key={m.id}>
-              <span>{m.canonical_a.replace(/^K-/, "")} ↔ {m.canonical_b.replace(/^K-/, "")} <em>({m.score.toFixed(2)})</em></span>
-              {!readOnlyWorkspace && <span className="kg-merge-actions">
-                {/* 确认会连带跑一次全量概念合并重建；重建完成前锁住整列，避免新决定
-                    与正在发布的旧候选代次竞态。拒绝不重建，但提交期间同样防重复点。 */}
-                <button disabled={kgGraph.decidingMerge !== null || kgGraph.rebuilding || kgGraph.deleting} onClick={() => decideMerge(m, true)}>
-                  {kgGraph.decidingMerge?.id === m.id && kgGraph.decidingMerge.confirm ? "合并中…" : "合并"}
-                </button>
-                <button disabled={kgGraph.decidingMerge !== null || kgGraph.rebuilding || kgGraph.deleting} onClick={() => decideMerge(m, false)}>
-                  {kgGraph.decidingMerge?.id === m.id && !kgGraph.decidingMerge.confirm ? "分开中…" : "拒绝"}
-                </button>
-              </span>}
-            </div>
-          ))}
+          {kgGraph.pendingMerges.length === 0 ? <p className="tool-hint">无</p> : <>{mergesPage.pageItems.map((m) => {
+            const [sideA, sideB] = pendingMergeSides(m);
+            return (
+              <div className="kg-merge-row" key={m.id}>
+                <span>{sideA} ↔ {sideB} <em>({m.score.toFixed(2)})</em></span>
+                {!readOnlyWorkspace && <span className="kg-merge-actions">
+                  {/* 确认会连带跑一次全量概念合并重建；重建完成前锁住整列，避免新决定
+                      与正在发布的旧候选代次竞态。拒绝不重建，但提交期间同样防重复点。 */}
+                  <button disabled={kgGraph.decidingMerge !== null || kgGraph.rebuilding || kgGraph.deleting} onClick={() => decideMerge(m, true)}>
+                    {kgGraph.decidingMerge?.id === m.id && kgGraph.decidingMerge.confirm ? "合并中…" : "合并"}
+                  </button>
+                  <button disabled={kgGraph.decidingMerge !== null || kgGraph.rebuilding || kgGraph.deleting} onClick={() => decideMerge(m, false)}>
+                    {kgGraph.decidingMerge?.id === m.id && !kgGraph.decidingMerge.confirm ? "分开中…" : "拒绝"}
+                  </button>
+                </span>}
+              </div>
+            );
+          })}
           <Pagination
             page={mergesPage.page}
             pageSize={KG_PENDING_MERGE_PAGE_SIZE}

@@ -56,6 +56,7 @@ from app.repositories.ports import (
     MemoryStorePort,
     RepositoryRow,
 )
+from app.services.kg_viewer_scope import filtering
 from app.services.retrieval import cosine, keyword_score
 from app.services.model_work import notebook_model_artifact_scope
 from app.services.review_queue_memo import (
@@ -200,6 +201,12 @@ class KnowledgeGovernanceService:
         kg_version: Callable[[str], "tuple[int, int]"],
         mark_unified_kg_dirty_in_tx: Callable[[Any, str], int],
         review_queue_memo: ReviewQueueMemo,
+        # P4-T6: (notebook_id, active_notebook_id) -> KgViewerScope | None
+        # (kg_viewer_scope) -- the label rule the pending-merge names follow.
+        # Default: nothing is filtered (every direct construction unchanged).
+        viewer_scope: Callable[..., Any] = (
+            lambda _notebook_id, _active_notebook_id=None: None
+        ),
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -241,6 +248,7 @@ class KnowledgeGovernanceService:
         # R3 T-A2: runtime-owned ranking memo (one per RepositoryRuntime), NOT
         # a module global — see review_queue_memo's module docstring.
         self._review_queue_memo = review_queue_memo
+        self._viewer_scope = viewer_scope
 
     @staticmethod
     def promotion_dict(row, *, payload=None, evidence=None) -> dict:
@@ -604,9 +612,49 @@ class KnowledgeGovernanceService:
             )
 
     def pending_merges(self, notebook_id: str) -> List[dict]:
+        """Every pending candidate, each row also carrying ``name_a`` /
+        ``name_b``: the display names of its two sides (P4-T6). The list's
+        rows are not filtered by viewer (a shared tool, as before); the names
+        are, by the cluster label rule of the KG detail reads.
+
+        * A name is the published cluster's stored ``canonical_name``, read
+          by one bounded point lookup per distinct id of this response
+          (``pending_merge_names``, ``_IN_CHUNK`` ids per statement) -- never
+          a scan of the notebook's clusters, and no statement at all for an
+          empty list.
+        * When the notebook holds a hidden source the viewer may not read
+          (``filtering(viewer_scope)``; ``None`` -- nothing hidden -- costs the
+          scope's one or two bounded reads and changes nothing), a cluster
+          that may hold a hidden member is named by its first visible member
+          (``KgViewerScope.cluster_labels``, one batched member read), and one
+          with no visible live member gets ``""``: its stored name can only
+          have come from a hidden member.
+        * ``""`` also when no published cluster row carries the id (a bridge
+          candidate whose cluster was never formed, a candidate written in
+          the moment before its rebuild publishes); the browser then shows
+          the id as before."""
         self.get_notebook(notebook_id)
         with self._connect() as db:
-            return self.governance_store.pending_merges(db, notebook_id)
+            rows = self.governance_store.pending_merges(db, notebook_id)
+            ids = sorted({
+                str(row[side]) for row in rows
+                for side in ("canonical_a", "canonical_b") if row[side]
+            })
+            names: Dict[str, str] = {}
+            for start in range(0, len(ids), _IN_CHUNK):
+                names.update(self.governance_store.pending_merge_names(
+                    db, notebook_id, ids[start:start + _IN_CHUNK]))
+        if ids:
+            scope = filtering(self._viewer_scope(notebook_id))
+            if scope is not None:
+                for cid, label in scope.cluster_labels(ids).items():
+                    names[cid] = label or ""
+        return [
+            {**row,
+             "name_a": names.get(str(row["canonical_a"]), ""),
+             "name_b": names.get(str(row["canonical_b"]), "")}
+            for row in rows
+        ]
 
     def _pending_merges_batch(self, notebook_id: str, limit: int) -> List[dict]:
         """Bounded fetch of pending merge candidates, LIMITed in SQL instead of

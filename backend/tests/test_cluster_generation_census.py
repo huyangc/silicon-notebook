@@ -62,14 +62,15 @@ def _predicate_counts(text: str) -> tuple[int, int]:
 _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
     "backend/app/domain/kg_analysis_contracts.py": (3, 0, 0, 0, 0,
         "非站点:注释描述别处 SQL 的 JOIN 形状"),
-    "backend/app/repositories/postgres/governance_store.py": (10, 0, 0, 2, 0,
+    "backend/app/repositories/postgres/governance_store.py": (11, 0, 0, 3, 0,
         "B 已参数化:insert_clusters 锁后读指针写 published 代(谓词计数来自"
         "_published_cluster_generation 的指针读),_existing_cluster_members 探针"
-        "按代收窄;A:incremental_cluster_rows 已配谓词;C(孤儿清扫"
+        "按代收窄;A:incremental_cluster_rows 已配谓词;A:pending_merge_names"
+        "(P4-T6,待确认合并两侧的名字,按 id 有界点查)已配谓词;C(孤儿清扫"
         "分页删,跨代豁免:死成员行在每一代都要清);C:purge_memory_review_rows_on"
         "(Memory 清理删整簇 + 按簇 id 删合并候选,跨代豁免:计划 §3 第 3 步按"
         "canonical_id 在任一代删整簇,名字与描述在每一代都要清)"),
-    "backend/app/repositories/sqlite/governance_store.py": (10, 0, 0, 2, 0,
+    "backend/app/repositories/sqlite/governance_store.py": (11, 0, 0, 3, 0,
         "PG 孪生同注记"),
     "backend/app/repositories/postgres/index_projection_store.py": (4, 0, 0, 4, 0,
         "A×4:version_facts 簇分量(版本身份红线)+scale-graph 读,均已配谓词;"

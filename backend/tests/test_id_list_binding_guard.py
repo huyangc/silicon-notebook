@@ -159,6 +159,9 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(ANY, BOUNDED, "cluster ids of the page just read under LIMIT"),),
     ("postgres/governance_store.py", "GovernanceStore.merge_candidate_pairs_for_canonicals"): (
         s(PG_EXP, BATCHED, "canonical ids, the caller batches with _in_fuse_batches"),),
+    ("postgres/governance_store.py", "GovernanceStore.pending_merge_names"): (
+        s("unnest(%s)", BATCHED,
+          "the pending list's canonical ids, the caller batches _IN_CHUNK (900)"),),
     ("postgres/governance_store.py", "GovernanceStore.review_queue_rows"): (
         s(ANY, BATCHED, "endpoint ids, _REVIEW_ENDPOINT_LOOKUP_BATCH per statement"),),
     ("postgres/governance_store.py", "GovernanceStore._existing_cluster_members"): (
@@ -503,6 +506,9 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(SQ_EXP, BATCHED, "cluster ids of one page, _SWEEP_DELETE_ID_CHUNK per statement"),),
     ("sqlite/governance_store.py", "GovernanceStore.merge_candidate_pairs_for_canonicals"): (
         s(SQ_EXP, BATCHED, "canonical ids, the caller batches with _in_fuse_batches"),),
+    ("sqlite/governance_store.py", "GovernanceStore.pending_merge_names"): (
+        s(JSON, BATCHED,
+          "the pending list's canonical ids, the caller batches _IN_CHUNK (900)"),),
     ("sqlite/governance_store.py", "GovernanceStore.review_queue_rows"): (
         s(SQ_EXP, BATCHED, "endpoint ids, one batch per statement"),),
     ("sqlite/governance_store.py", "GovernanceStore._existing_cluster_members"): (
