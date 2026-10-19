@@ -345,7 +345,7 @@ G1 并行运行三个有界 lane：`check_backend.sh` 以默认 16 个 worker �
 PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
 ```
 
-G1 标准门并发运行 backend、contracts、frontend 三个 lane。`check_backend.sh` 默认使用 16 个 backend pytest worker，可用 `BACKEND_PYTEST_WORKERS` 覆盖。Apple Silicon warm gate 硬目标是不超过 80 秒（60 秒仍是长期目标）；G2 每日扩展门不受该本机时限约束，各 CI lane 时长仅作观察，因此这不是对每一台 CI 机器的可移植超时断言。`check.sh` 结束时打印整门墙钟、各 lane 秒数，以及本次 JUnit 报告里最慢的 10 个 backend 测试文件与 10 条测试（`scripts/check_timing_summary.py`），墙钟超过 80 秒时打印醒目警告；这份汇总只是本地警告，从不改变门禁的退出码。门禁脚本把 Python 字节码（含 pytest 改写后的测试模块）写到 gitignored 的 `.local/pycache`（`PYTHONPYCACHEPREFIX`），并 unset 调用方 shell 导出的 `PYTHONDONTWRITEBYTECODE`：新 worktree 或 agent 会话也复用字节码缓存，不再在每个 worker 里重新编译全部模块。backend 测试里用手工构造的环境启动子进程时，一律展开 `BYTECODE_ENV`（`backend/tests/child_env_testkit.py`，由策略测试强制），所以 G1 运行不会往源码树写任何字节码。由于前缀按绝对路径镜像，测试写在临时目录下的模块也会被缓存进去；backend conftest 在每次 pytest 会话开始时删掉镜像临时目录的那一棵子树，缓存因此有界，仓库自身与解释器的模块缓存保持热。
+G1 标准门并发运行 backend、contracts、frontend 三个 lane。`check_backend.sh` 默认使用 16 个 backend pytest worker，可用 `BACKEND_PYTEST_WORKERS` 覆盖。Apple Silicon warm gate 硬目标是不超过 100 秒（2026-10-19 裁决由 80 秒放宽，2026-10-14 挪到 G2 的合同测试仍留在 G2；60 秒仍是长期目标）；G2 每日扩展门不受该本机时限约束，各 CI lane 时长仅作观察，因此这不是对每一台 CI 机器的可移植超时断言。`check.sh` 结束时打印整门墙钟、各 lane 秒数，以及本次 JUnit 报告里最慢的 10 个 backend 测试文件与 10 条测试（`scripts/check_timing_summary.py`），墙钟超过 100 秒时打印醒目警告；这份汇总只是本地警告，从不改变门禁的退出码。门禁脚本把 Python 字节码（含 pytest 改写后的测试模块）写到 gitignored 的 `.local/pycache`（`PYTHONPYCACHEPREFIX`），并 unset 调用方 shell 导出的 `PYTHONDONTWRITEBYTECODE`：新 worktree 或 agent 会话也复用字节码缓存，不再在每个 worker 里重新编译全部模块。backend 测试里用手工构造的环境启动子进程时，一律展开 `BYTECODE_ENV`（`backend/tests/child_env_testkit.py`，由策略测试强制），所以 G1 运行不会往源码树写任何字节码。由于前缀按绝对路径镜像，测试写在临时目录下的模块也会被缓存进去；backend conftest 在每次 pytest 会话开始时删掉镜像临时目录的那一棵子树，缓存因此有界，仓库自身与解释器的模块缓存保持热。
 
 测试加速必须保持结果语义：G1 标准门与 G2 扩展门的 marker 表达式精确互补，PostgreSQL 独立负责，任何已提交用例都不能变成不可达；全仓 AST/协议扫描在同一测试进程（pytest worker 或隔离的 Node guard 进程）内只解析每个生产文件一次，冻结 fixture 用例若只关心成员集合，就应使用只投影名称的入口，不生成详细站点、签名与 ownership；可执行的全仓守卫只在其归属的 contracts lane 对真实源码树运行一次，参数解析、失败模式与 extra-root 的单元测试把默认根重定向到最小 fixture，不再重复扫描全仓；同一份不可变行为矩阵上的断言只遍历一次，并给每一格保留明确失败标签，不能为每一格或不同断言族重复搭建完全相同的数据库世界；frontend lane 只同步一次不可变的本地插件投影，随后仅抑制 npm 重复的 `pretest`/`prebuild`/`prelint` 钩子，开发者单独执行每条命令时这些钩子仍是必跑项；缓存容器策略直接验证容器，不搭建无关数据库与 ANN 索引；autouse 隔离路径从 worker 已有的 pytest base temp 派生，不为每条纯测试额外创建 `tmp_path`；普通 SQLite 仓储测试按 worker 只构建一次当前空 schema（这次构建本身就是每个 worker 里一次真实的从零完整迁移梯），再复制成每条测试各自独立的可变数据库文件。是否从零跑真实迁移梯按测试决定，不按模块：迁移梯本身是检查对象的测试标 `@pytest.mark.real_sqlite_migration`（或由所在模块的 `pytestmark` 统一标）。`test_test_architecture_policy.py` 要求：在拥有迁移器的模块里，凡是测试函数自身（直接或经模块内 helper）驱动 `SqliteMigrator` 的，以及启动迁移接线用例，都必须带这个标记；迁移与仓储快照模块里的升级用例逐条标注，新加进这些模块的用例默认用模板、留在 G1。只建当前 schema 空库的 fixture 使用模板副本；测试改了迁移梯（`SCHEMA_VERSION` 或某个 `_migration_N` 步骤，沿迁移器的类继承链查找）却没有标记时，autouse fixture 让这次复制直接失败；步骤调用的 helper 被打补丁时检测不到，这类用例要自己带标记。已经存在的库文件（老版本 fixture、回滚出来的副本）始终按真实迁移梯升级；仓储密集测试只可在 pytest autouse fixture 中降低默认密码派生成本，认证 helper 保留生产默认，比较凭据字段的快照模块必须登记 `_REAL_PASSWORD_HASH_MODULES`；普通 UT 与 G1 测试必须环境自足，不绑定宿主端口、不依赖环境服务；只有合同本身属于进程级行为时才保留自包含的子进程/信号覆盖，启动真实子进程的用例标 `process_contract`，在 G2 运行。`test_test_architecture_policy.py` 扫描测试模块：G1 用例自身代码（或它用到的模块内 helper、fixture）经 `subprocess`、`multiprocessing`、`ProcessPoolExecutor`、`os.fork`/`os.spawn*` 或 `asyncio.create_subprocess_*` 启动进程就判失败；lane 划分守卫是唯一经审查的例外，进程在应用代码内部启动时这项扫描看不到。并发顺序与公平性使用 event/barrier，而非固定 sleep 或线程唤醒顺序；分波次排队时由控制线程运行被测同步编排，在观测到目标容量后用 event 放行，不能让后一波单独落进 cyclic barrier；进程级延迟任务须在共享 teardown 中取消待执行项并等待活跃项收敛，不能只清理由某个局部 repository 对象可见的任务。测试若把 `app.*` 模块从 `sys.modules` 摘掉，必须经 `monkeypatch`（`delitem`，并钉住父包属性）还原，不能裸 `pop`：父包属性仍绑着旧模块对象，下一次 import 会让属性查找与 `sys.modules` 查找分叉，对着一条路径打的补丁另一条路径看不见；backend conftest 在每条测试结束后核对这一不变量，让污染者报错而不是后跑的受害者。收集结束时 backend conftest 先做一次完整回收，再对存活对象（已导入的 app、测试模块与已收集的用例）执行 `gc.freeze()`，循环回收器不再在每次完整回收时重新遍历这块常驻堆；测试之后分配的对象照常回收。
 
@@ -456,7 +456,7 @@ OS/架构/Python/requirements/策略 key，不回退到其他缓存；G2 继续�
 `-march=native` 编译，把这种本机 wheel 缓存后恢复到 CPU 特性不同的托管
 runner，可能以 `SIGILL` 崩溃。CI 使用可移植构建，以少量 ANN 性能换取确定性；
 生产 wheelhouse 仍可按已声明的部署 CPU 定向构建。job 的 timeout 都包含依赖安装，
-与 Apple Silicon 本地 warm gate 的 80 秒内目标刻意分开。两个后端 job（`level-1-backend`、
+与 Apple Silicon 本地 warm gate 的 100 秒内目标刻意分开。两个后端 job（`level-1-backend`、
 `level-2-backend`）给 30 分钟：2026-10-14 实测不分片的后端泳道在 PR CI 用 8:05、每日
 run 用 11:59（4 个 worker；job 总时长 8:41 与 13:03），单个 job 没有别的 runner 可以分摊，
 这个上限为增长和慢 runner 留出两倍以上余量。其余离线 job 保持 20 分钟（实测 contracts
@@ -498,7 +498,7 @@ CI 可移植性属于门禁契约：所有由 CI 执行的测试使用的文件�
 定位，禁止依赖开发机 checkout 绝对路径或 `HOME`，测试也不得读取仓库外源文档。
 测试启动时直接导入的第三方包必须声明在 `backend/requirements.txt`；干净 hosted
 runner 必须从该文件和 `frontend/package-lock.json` 安装，并且只凭这些声明即可
-全绿。各 lane 时长继续输出供观察，80 秒内目标只约束已验证的 Apple Silicon
+全绿。各 lane 时长继续输出供观察，100 秒内目标只约束已验证的 Apple Silicon
 Homebrew warm gate。
 
 依赖仓库外 PDF 解析产物的 gold 生成、构建与校验脚本仍属于 developer-only

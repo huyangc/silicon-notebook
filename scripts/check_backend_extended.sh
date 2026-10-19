@@ -14,7 +14,7 @@ BACKEND_EXTENDED_PYTEST_WORKERS="${BACKEND_EXTENDED_PYTEST_WORKERS:-${BACKEND_PY
 # — see conftest._ARCHITECTURE_CONTRACT_HEAVY_TESTS for exactly which 8.
 # It also runs every process_contract test (a real child process) and every
 # legacy_upgrade_contract test (old-version upgrade matrix), which G1 leaves
-# out to keep the local warm gate within its 80 s target.
+# out to keep the local warm gate within its 100 s target.
 # PostgreSQL has its own authoritative check_postgres.sh lane.
 
 # Same offline isolation as check.sh and check_backend.sh. check_extended.sh
