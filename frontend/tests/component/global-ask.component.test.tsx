@@ -1191,7 +1191,7 @@ test("renders legacy markdown for historical jobs", async () => {
   expect(await screen.findByRole("button", { name: "[1]" })).toBeTruthy();
 });
 
-test("mode picker submits the selected engine", async () => {
+test("the engine picker starts on deep analysis and submits it after the understanding step", async () => {
   render(<GlobalAskPage />);
   const input = await screen.findByRole("textbox", { name: "输入问题" });
   await waitFor(() => expect(input).toBeEnabled());
@@ -1221,6 +1221,66 @@ test("choosing the general engine submits chunk without the understanding step",
   await waitFor(() => expect(api.ask).toHaveBeenCalledTimes(1));
   expect(api.intent).not.toHaveBeenCalled();
   expect(api.ask.mock.calls[0][0].mode).toBe("chunk");
+});
+
+test("switching to the general engine and back to deep analysis submits reasoning again", async () => {
+  render(<GlobalAskPage />);
+  const input = await screen.findByRole("textbox", { name: "输入问题" });
+  await waitFor(() => expect(input).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "通用问答" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "通用问答" })).toHaveClass("active"));
+  fireEvent.click(screen.getByRole("button", { name: "深入分析" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "深入分析" })).toHaveClass("active"));
+  fireEvent.change(input, { target: { value: "请逐步比较两个体系" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+  await waitFor(() => expect(api.ask).toHaveBeenCalledTimes(1));
+  expect(api.intent).toHaveBeenCalledTimes(1);
+  expect(api.ask.mock.calls[0][0].mode).toBe("reasoning");
+});
+
+// Global Ask remembers the engine this browser last chose explicitly (per-viewer
+// storage); only with nothing remembered does it start on the default engine.
+test("a remembered general engine is restored on mount and submits chunk without understanding", async () => {
+  window.localStorage.setItem("sn.globalAskMode", "chunk");
+  render(<GlobalAskPage />);
+  const input = await screen.findByRole("textbox", { name: "输入问题" });
+  await waitFor(() => expect(input).toBeEnabled());
+  await waitFor(() => expect(screen.getByRole("button", { name: "通用问答" })).toHaveClass("active"));
+  expect(screen.getByRole("button", { name: "深入分析" })).not.toHaveClass("active");
+  fireEvent.change(input, { target: { value: "请比较两个体系" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+  await waitFor(() => expect(api.ask).toHaveBeenCalledTimes(1));
+  expect(api.intent).not.toHaveBeenCalled();
+  expect(api.ask.mock.calls[0][0].mode).toBe("chunk");
+});
+
+test("an explicit engine choice is remembered for the next visit", async () => {
+  const first = render(<GlobalAskPage />);
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入问题" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "通用问答" }));
+  expect(window.localStorage.getItem("sn.globalAskMode")).toBe("chunk");
+  first.unmount();
+  render(<GlobalAskPage />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "通用问答" })).toHaveClass("active"));
+});
+
+test("an unreadable engine memory falls back to deep analysis and the page still works", async () => {
+  const read = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+    throw new Error("storage blocked");
+  });
+  try {
+    render(<GlobalAskPage />);
+    const input = await screen.findByRole("textbox", { name: "输入问题" });
+    await waitFor(() => expect(input).toBeEnabled());
+    expect(screen.getByRole("button", { name: "深入分析" })).toHaveClass("active");
+    fireEvent.change(input, { target: { value: "请逐步比较两个体系" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+    await waitFor(() => expect(api.ask).toHaveBeenCalledTimes(1));
+    expect(api.intent).toHaveBeenCalledTimes(1);
+    expect(api.ask.mock.calls[0][0].mode).toBe("reasoning");
+  } finally {
+    read.mockRestore();
+  }
 });
 
 test("the simplified interface offers no engine picker and submits the fixed engine after understanding", async () => {

@@ -757,9 +757,18 @@ test("a rolled-back notebook transition performs no Ask-mode projection I/O", as
   expect(api.fetchAskModes).not.toHaveBeenCalled();
 });
 
-test("a fresh view and a new session start on reasoning, the default engine", () => {
+// The projection (GET /ask-modes) lands AFTER the view mounts and re-derives the
+// mode (an empty session falls back to the default engine), so a default asserted
+// before it resolves says nothing about that fallback.
+async function projectionLanded() {
+  expect(api.fetchAskModes).toHaveBeenCalled();
+  await act(async () => { await api.fetchAskModes.mock.results[0]?.value; });
+}
+
+test("a fresh view and a new session start on reasoning, the default engine", async () => {
   render(<Harness />);
   beginOwnedNotebook(1, null);
+  await projectionLanded();
   expect(value!.mode).toBe("reasoning");
 
   // "chunk" stays a first-class choice; a new session goes back to the default.
@@ -767,6 +776,27 @@ test("a fresh view and a new session start on reasoning, the default engine", ()
   expect(value!.mode).toBe("chunk");
   act(() => value!.startNewSession(2));
   expect(value!.mode).toBe("reasoning");
+});
+
+test("a question submitted in the default state goes through the understanding step as reasoning", async () => {
+  api.previewAskIntent.mockResolvedValue(contractFor("default engine question", false));
+  api.runAskStream.mockResolvedValue({ ...answer("conversation-default"), mode: "reasoning" });
+  render(<Harness />);
+  // Picker untouched: no selectMode, so the default (as re-derived by the
+  // projection) alone decides the engine.
+  beginOwnedNotebook(1, null);
+  await projectionLanded();
+
+  await act(async () => {
+    await value!.submit("default engine question");
+  });
+
+  expect(api.previewAskIntent).toHaveBeenCalledTimes(1);
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  expect(api.runAskStream.mock.calls[0]?.[1]).toMatchObject({
+    question: "default engine question",
+    mode: "reasoning",
+  });
 });
 
 test("a historical plugin mode falls back when that engine is not projected", async () => {
@@ -2391,6 +2421,41 @@ test("leaving during a reasoning intent preview keeps it running and re-attaches
   expect(value!.asking).toBe(false);
   expect(value!.conversationId).toBe("conversation-intent");
   expect(value!.turns.map((turn) => turn.question)).toEqual(["clear question"]);
+});
+
+// The default engine is reasoning, so the projection's "keep the preview's
+// engine" branch is only distinguishable from the plain last-turn fallback when
+// the view already holds a chunk turn: without that branch the returning view
+// would flip to chunk and cancel the preview.
+test("a preview left running over an existing chunk turn keeps reasoning on return", async () => {
+  const preview = deferred<QueryIntentContract>();
+  api.previewAskIntent.mockReturnValue(preview.promise);
+  api.runAskStream.mockResolvedValue({ ...answer("conversation-older"), mode: "reasoning" });
+  api.listConversations.mockResolvedValue([summary("conversation-older")]);
+  api.getConversation.mockResolvedValue(detail("conversation-older"));
+  render(<Harness />);
+  beginOwnedNotebook(1, null);
+  await projectionLanded();
+  await act(async () => { await value!.openSession("conversation-older", 2); });
+  expect(value!.turns).toHaveLength(1);
+  expect(value!.mode).toBe("chunk");
+  act(() => value!.selectMode("reasoning"));
+
+  act(() => { void value!.submit("follow-up question"); });
+  expect(value!.intentChecking).toBe(true);
+  await settleSubmit();
+  act(() => value!.leaveWorkspace());
+
+  const owner = beginOwnedNotebook(3, null);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.intentChecking).toBe(true);
+  expect(value!.pendingQuestion).toBe("follow-up question");
+  expect(value!.mode).toBe("reasoning");
+  preview.resolve(contractFor("follow-up question", false));
+  await settleSubmit();
 });
 
 test("an intent preview that completes while away starts the durable Ask and re-attaches it on return", async () => {
