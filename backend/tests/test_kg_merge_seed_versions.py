@@ -86,6 +86,44 @@ def test_v1_unaliased_form_is_norm_before_aliases():
         assert _ALIASES.get(unaliased, unaliased) == _norm(name), name
 
 
+def _reference_v2(name: str) -> str:
+    """v2 written the obvious way: alias lookup on the v1 form FIRST, always."""
+    import re
+
+    unaliased = _concept_seed_v1_unaliased(name)
+    if unaliased in _ALIASES:
+        return _ALIASES[unaliased].replace(" ", "")
+    text = _strip_paren_acronym_for_test(unicodedata.normalize("NFKC", name)).strip().lower()
+    text = re.sub(r"[\s\-_]+", "", text)
+    text = re.sub(r"[^\w+/ ]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _strip_paren_acronym_for_test(name: str) -> str:
+    from app.domain.kg_merge_seed import _strip_paren_acronym
+
+    return _strip_paren_acronym(name)
+
+
+def test_v2_lazy_alias_check_equals_the_eager_reference():
+    """v2 only builds the v1 form when the space-free v2 text could be an alias
+    key (a speed-up for the millions of names the findings pass sees). It must
+    give exactly what the eager definition gives."""
+    import random
+
+    alias_spellings = []
+    for key in _ALIASES:
+        for joiner in (" ", "-", "_", ".", "·", "", " . ", "（", "\t"):
+            alias_spellings.append(key.replace(" ", joiner).upper())
+            alias_spellings.append(joiner.join(key))
+    rng = random.Random(7)
+    alphabet = "opamvcolnbjtsf ._-·()/+（）ＯＰ\t"
+    noise = ["".join(rng.choice(alphabet) for _ in range(rng.randint(0, 12)))
+             for _ in range(3000)]
+    for name in _CORPUS + alias_spellings + noise:
+        assert concept_seed_v2(name) == _reference_v2(name), repr(name)
+
+
 def test_q_former_and_qformer_share_one_v2_seed():
     assert concept_seed_v1("Q-Former") != concept_seed_v1("Qformer")
     assert concept_seed_v2("Q-Former") == concept_seed_v2("Qformer") == "qformer"
