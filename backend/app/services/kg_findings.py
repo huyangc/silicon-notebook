@@ -1007,14 +1007,16 @@ def _names_pass(
         if squash:
             hashes.append(hash(squash))
             hashed_idx.append(index)
+    # ``np.array`` reads the ``array('q')`` buffers directly (buffer protocol, one
+    # copy); these are index / hash columns, never similarity vectors.
     named = np.zeros(stride, dtype=bool)
-    named[np.frombuffer(named_idx, dtype=np.int64)] = True
+    named[np.array(named_idx, dtype=np.int64)] = True
     fragmented = np.zeros(stride, dtype=bool)
-    fragmented[np.frombuffer(fragmented_idx, dtype=np.int64)] = True
+    fragmented[np.array(fragmented_idx, dtype=np.int64)] = True
     return (
         named, fragmented,
-        np.frombuffer(hashes, dtype=np.int64).copy(),
-        np.frombuffer(hashed_idx, dtype=np.int64).copy(),
+        np.array(hashes, dtype=np.int64),
+        np.array(hashed_idx, dtype=np.int64),
     )
 
 
