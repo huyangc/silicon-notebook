@@ -5542,7 +5542,7 @@ class ReasoningRetriever:
         limits = state.limits
         enumeration_active = state.enumeration_active
         collection_map_text = state.collection_map_text
-        state.offered_reflect_actions = self._offered_reflect_actions(state)
+        state.offered_reflect_actions = self._first_round_offered_actions(state)
         # Agent 对这个库的已有理解(共享底座 + 本次提问者的覆盖层)。每 run 只
         # 读一次,同一个字符串既进规划上下文、又进每一轮 reflect 的候选摘要
         # 尾部。
@@ -5862,7 +5862,7 @@ class ReasoningRetriever:
                          summary=f"初检索得到 {len(collected)} 个候选节点",
                          detail=_initial_detail))
 
-    def _offered_reflect_actions(self, state: "_ReasoningRunState") -> frozenset:
+    def _first_round_offered_actions(self, state: "_ReasoningRunState") -> frozenset:
         """本 run reflect 提供的核心动作。闸值取 `reflect()` 现算的同一组判据,
         run 级三把(`kg_in_scope`/`outline_active`/`consult_memory_flag`)取
         `_reflect_round_kwargs` 传给它的同一份 state 值;全部零 I/O。"""
