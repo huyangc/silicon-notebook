@@ -961,7 +961,7 @@ test("a public library's promotion sources are never polled and never take a doc
   const promoted = (id: string, parseStatus: string): SourceSummary => ({
     ...source(id, "notebook-a", parseStatus),
     type: "promotion",
-    title: `晋升自：${id}`,
+    title: `收录自：${id}`,
   });
   const uploads = Array.from({ length: 15 }, (_, index) => source(`doc-${index}`, "notebook-a"));
   const promotions = [

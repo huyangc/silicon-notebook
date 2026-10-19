@@ -22,6 +22,14 @@ from app.domain.promotion_provenance import (
     promotion_origin_title,
     promotion_source_id,
 )
+from app.domain.promotion_source import (
+    MEMORY_PROMOTION_TITLE_PREFIX,
+    PROMOTION_TITLE_PREFIX,
+    current_promotion_title,
+    memory_promotion_source_title,
+    presented_source_title,
+    promotion_source_title,
+)
 from tests import global_citation_e2e_kit as kit
 from tests import promotion_provenance_cases as cases
 
@@ -53,6 +61,10 @@ def test_a_merge_rewrites_only_the_incoming_entries(world):
 
 def test_a_memory_promotion_is_titled_after_the_memory(world):
     cases.a_memory_promotion_is_titled_after_the_memory(world)
+
+
+def test_a_stored_legacy_title_is_shown_with_the_current_prefix(world):
+    cases.a_stored_legacy_title_is_shown_with_the_current_prefix(world)
 
 
 def test_deleting_the_promotion_source_deletes_the_objects_it_supports(world):
@@ -198,7 +210,7 @@ def test_promotion_sources_never_take_an_uploaded_document_slot(tmp_path, monkey
                     "INSERT INTO sources (id,notebook_id,title,source_type,status,"
                     "parse_status,created_at,updated_at) VALUES (?,?,?,'promotion',"
                     "'active','extracted','t','t')",
-                    (f"src-promo-cap-{index}", nb_id, f"晋升自：原件{index}"),
+                    (f"src-promo-cap-{index}", nb_id, f"收录自：原件{index}"),
                 )
         assert repo.visible_document_count(nb_id) == 15
         response = import_files(1, start=15)
@@ -234,7 +246,7 @@ def test_an_entry_with_neither_live_text_nor_a_quote_is_dropped():
     ])
     assert [entry["quoted_span"] for entry in plan.evidence] == ["kept"]
     (source,) = plan.sources
-    assert source.title == "晋升自：T"
+    assert source.title == "收录自：T"
     assert plan.evidence[0]["origin_notebook_id"] == ""
 
 
@@ -290,10 +302,43 @@ def test_a_memory_original_is_dropped_and_a_memory_card_keeps_its_quote():
     memory = _plan(entries, origin_elements=live, memory_source_ids={"s-mem"},
                    memory=("mem-1", "记忆"))
     assert [row.text for row in memory.elements] == ["card"]
-    assert memory.sources[0].title == "晋升自个人记忆：记忆"
+    assert memory.sources[0].title == "收录自个人记忆：记忆"
 
 
 def test_the_card_title_is_the_original():
+    # the current spelling, and the legacy one stored titles still carry
+    assert promotion_origin_title("收录自：原件") == "原件"
+    assert promotion_origin_title("收录自个人记忆：记忆") == "记忆"
     assert promotion_origin_title("晋升自：原件") == "原件"
     assert promotion_origin_title("晋升自个人记忆：记忆") == "记忆"
     assert promotion_origin_title("改过名") == "改过名"
+
+
+def test_new_promotion_titles_say_shoulu_never_jinsheng():
+    assert promotion_source_title("原件") == "收录自：原件"
+    assert memory_promotion_source_title("记忆") == "收录自个人记忆：记忆"
+    assert "晋升" not in PROMOTION_TITLE_PREFIX + MEMORY_PROMOTION_TITLE_PREFIX
+
+
+def test_a_legacy_title_is_mapped_by_its_leading_prefix_only():
+    assert current_promotion_title("晋升自：原件") == "收录自：原件"
+    assert current_promotion_title("晋升自个人记忆：记忆") == "收录自个人记忆：记忆"
+    # the body is never touched: a title that mentions 晋升 later, or twice
+    assert current_promotion_title("晋升自：晋升自：套娃") == "收录自：晋升自：套娃"
+    assert current_promotion_title("晋升自：关于晋升的说明") == "收录自：关于晋升的说明"
+    assert current_promotion_title("关于晋升自：的说明") == "关于晋升自：的说明"
+    assert current_promotion_title("收录自：已是新词") == "收录自：已是新词"
+    assert current_promotion_title("") == ""
+    assert current_promotion_title(None) == ""
+
+
+def test_the_reader_mapping_is_gated_on_the_source_being_a_promotion():
+    legacy = "晋升自：原件"
+    # by type, or by the content-addressed id
+    assert presented_source_title(legacy, source_type="promotion") == "收录自：原件"
+    assert presented_source_title(legacy, source_id="src-promo-abc") == "收录自：原件"
+    # an uploaded document that happens to carry the words is the user's own title
+    assert presented_source_title(legacy, source_type="document") == legacy
+    assert presented_source_title(legacy, source_id="src-1") == legacy
+    assert presented_source_title(legacy) == legacy
+    assert presented_source_title("普通标题", source_type="promotion") == "普通标题"

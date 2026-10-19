@@ -570,6 +570,11 @@ _CHANNEL_MARKERS = {
         "shipped model-service labels",
         "service-label source missing",
     ),
+    "promotion": (
+        "in promotion source title prefix",
+        "promotion title prefixes found",
+        "promotion-title module missing",
+    ),
     "release": ("in release note",),
 }
 
@@ -669,6 +674,13 @@ def _minimal_guard_tree(tmp_path: pathlib.Path, monkeypatch) -> SimpleNamespace:
             '[services.general]\ndisplay_name = "通用模型"\n\n'
             '[services.kg]\ndisplay_name = "知识分析模型"\n',
         ),
+        promotion=_write(
+            app / "domain" / "promotion_source.py",
+            'PROMOTION_TITLE_PREFIX = "收录自："\n'
+            'MEMORY_PROMOTION_TITLE_PREFIX = "收录自个人记忆："\n'
+            # 存量标题的存储拼写:读时映射,从不上屏,守卫不扫。
+            'LEGACY_PROMOTION_TITLE_PREFIX = "晋升自："\n',
+        ),
         notes=tmp_path / "release-notes",
     )
     # README 允许写黑话(写法约定),它在基线里就是「README 被排除」的证据。
@@ -690,6 +702,7 @@ def _minimal_guard_tree(tmp_path: pathlib.Path, monkeypatch) -> SimpleNamespace:
         "WORKLOAD_LABEL_MODULE": tree.registry,
         "SERVICE_LABEL_DICTS": ((tree.migrate, "ROLE_LABELS"),),
         "SERVICE_LABEL_TEMPLATE": tree.template,
+        "PROMOTION_TITLE_MODULE": tree.promotion,
         "RELEASE_NOTES_DIR": tree.notes,
         # 下限降到这棵树的实际站点数:2 个 user_error、1 条轨迹摘要、4 个展示字段
         # (索引管线 label+description,两个作业存储各 1 个 error_message)、2 个工作负载
@@ -713,7 +726,7 @@ def test_最小树上守卫全绿(tmp_path, monkeypatch, capsys):
     assert (
         "scanned 1 frontend production files + 2 backend user_error() messages + "
         "1 trace summaries + 4 display fields + 2 workload labels + "
-        "4 model service labels"
+        "4 model service labels + 2 promotion title prefixes"
     ) in captured.out
 
 
@@ -1308,3 +1321,69 @@ def test_更新说明文件头的纯英文键值行不触发而中文标题会�
     monkeypatch.setattr(guard, "RELEASE_NOTES_DIR", notes)
     # 只有含中文的 title 行(第 4 行)被扫;level/audience 这类 ASCII 行不会。
     assert [(line, term) for line, term, _ in guard.scan_release_note(notes / "h.md")] == [(4, "chunk")]
+
+
+# --------------------------------------------------------------------------
+# 第七条通道:公共库「收录自」合成来源的标题前缀
+# --------------------------------------------------------------------------
+
+
+def test_收录自标题前缀里的黑话会被抓到(tmp_path):
+    module = tmp_path / "promotion_source.py"
+    module.write_text(
+        'PROMOTION_TITLE_PREFIX = "晋升自："\n'
+        'MEMORY_PROMOTION_TITLE_PREFIX = "收录自个人记忆："\n',
+        encoding="utf-8",
+    )
+    sites, hits = guard.scan_promotion_title_prefixes(module)
+    assert sites == 2
+    assert [(line, term) for line, term, _ in hits] == [(1, "晋升")]
+
+
+def test_存量标题的存储拼写不上屏所以不扫(tmp_path):
+    module = tmp_path / "promotion_source.py"
+    module.write_text(
+        'PROMOTION_TITLE_PREFIX = "收录自："\n'
+        'MEMORY_PROMOTION_TITLE_PREFIX = "收录自个人记忆："\n'
+        'LEGACY_PROMOTION_TITLE_PREFIX = "晋升自："\n'
+        'LEGACY_MEMORY_PROMOTION_TITLE_PREFIX = "晋升自个人记忆："\n',
+        encoding="utf-8",
+    )
+    assert guard.scan_promotion_title_prefixes(module) == (2, [])
+
+
+def test_真实收录自前缀确实曾经违规过(tmp_path):
+    """变异验证:把新写入的前缀改回「晋升自」,守卫必须各报一条「晋升」。"""
+    src = guard.PROMOTION_TITLE_MODULE.read_text(encoding="utf-8")
+    assert 'PROMOTION_TITLE_PREFIX = "收录自："' in src, "前缀又漂了,本变异样本需同步"
+    sites, hits = guard.scan_promotion_title_prefixes(guard.PROMOTION_TITLE_MODULE)
+    assert hits == [] and sites == len(guard.PROMOTION_TITLE_NAMES)
+    mutated = tmp_path / "promotion_source_mutated.py"
+    mutated.write_text(
+        src.replace('PROMOTION_TITLE_PREFIX = "收录自："', 'PROMOTION_TITLE_PREFIX = "晋升自："')
+        .replace(
+            'MEMORY_PROMOTION_TITLE_PREFIX = "收录自个人记忆："',
+            'MEMORY_PROMOTION_TITLE_PREFIX = "晋升自个人记忆："',
+        ),
+        encoding="utf-8",
+    )
+    assert [t for _l, t, _x in guard.scan_promotion_title_prefixes(mutated)[1]] == [
+        "晋升",
+        "晋升",
+    ]
+
+
+def test_收录自标题前缀违规让守卫红(tmp_path, monkeypatch, capsys):
+    tree = _minimal_guard_tree(tmp_path, monkeypatch)
+    _rewrite(tree.promotion, 'PROMOTION_TITLE_PREFIX = "收录自："', 'PROMOTION_TITLE_PREFIX = "晋升自："')
+    assert guard.main() == 1
+    _assert_only_channel(
+        capsys, "promotion", "promotion_source.py:1: 「晋升」in promotion source title prefix"
+    )
+
+
+def test_收录自标题前缀扫描面塌了要红(tmp_path, monkeypatch, capsys):
+    _minimal_guard_tree(tmp_path, monkeypatch)
+    monkeypatch.setattr(guard, "PROMOTION_TITLE_NAMES", ("RENAMED_PREFIX", "RENAMED_MEMORY_PREFIX"))
+    assert guard.main() == 1
+    _assert_only_channel(capsys, "promotion", "promotion title prefixes found")

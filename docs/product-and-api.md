@@ -2312,8 +2312,13 @@ evidence that names another library's element even under this library's source.
 Since PR-E8 an approval no longer leaves the promoted evidence pointing into the promoter's notebook: the public
 library gets its own provenance (`app/domain/promotion_provenance.py`). For every original — the promoter's source, or
 for a Memory promotion the Memory itself — the library holds one synthetic source of type `promotion`, titled
-「晋升自：<original title>」 (a Memory promotion 「晋升自个人记忆：<Memory title>」; approving publishes that title, by
-design), reused by every later promotion from the same original. Each evidence entry becomes one element of it. For a
+「收录自：<original title>」 (a Memory promotion 「收录自个人记忆：<Memory title>」; approving publishes that title, by
+design), reused by every later promotion from the same original. Sources written before the 2026-10-19 wording ruling
+are stored as 「晋升自：…」 / 「晋升自个人记忆：…」 and are never rewritten: every surface that names a source (source
+list and detail, the notebook search box, the activity feed, the share preview, MCP source output) maps that leading
+prefix when it reads, through the one mapping `presented_source_title` in `app/domain/promotion_source.py`, and only
+for a source of type `promotion` (or with a promotion source id) — an uploaded document that happens to be titled that
+way keeps its title, and a body that mentions 「晋升」 is never touched. Each evidence entry becomes one element of it. For a
 generic promotion its text is the original element's current text read in the approving transaction, otherwise the
 entry's stored excerpt; a Memory promotion's cards keep only the excerpt the member approved, never the element's live
 text. An entry whose original is a member's Memory source is dropped (M1, fail closed), an entry with no text is
@@ -2322,7 +2327,7 @@ library's source and element; the original source id and notebook stay on it onl
 `origin_notebook_id` display keys. Merging into an existing public object rewrites only the incoming entries, and the
 reverse index follows the new sources. Because a promotion source is an ordinary visible source of the library, a
 notebook that mounts the library (whose ceiling opens only the library's visible sources) and a global ask both recall
-and cite the promoted object, its citation card names the original title and opens the library's 「晋升自」 source, and
+and cite the promoted object, its citation card names the original title and opens the library's 「收录自」 source, and
 deleting the promoter's private notebook changes nothing. In the source detail its type reads 「收录」; in the source
 list its badge reads 「已收录」 while some object's evidence still cites it, and 「不在图谱中」 once none does (for
 example after the knowledge graph was deleted or fully re-analysed: a promotion source is never re-analysed, so a

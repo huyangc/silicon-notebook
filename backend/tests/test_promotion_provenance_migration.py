@@ -24,6 +24,7 @@ import pytest
 
 from app.core.config import Settings
 from app.domain import promotion_provenance
+from app.domain.promotion_source import current_promotion_title
 from app.repositories.sqlite import migrations as sqlite_migrations
 from app.repositories.sqlite.migrations import SCHEMA_VERSION, SqliteMigrator
 from app.services.sqlite_repository import SQLiteRepository
@@ -118,6 +119,14 @@ def test_the_frozen_v88_rule_equals_the_live_planner(evidence, memory):
         fallback_origin_notebook_id="nb-fallback", memory=memory,
         memory_source_ids={"s-mem"},
     )
+    # v88 is sealed and still writes the pre-2026-10-19 wording; readers map it
+    # (``current_promotion_title``), so the frozen rule equals the live one up to
+    # that one prefix.
+    frozen = (
+        frozen[0],
+        [(source_id, current_promotion_title(title)) for source_id, title in frozen[1]],
+        *frozen[2:],
+    )
     assert frozen == (
         plan.evidence,
         [(row.id, row.title) for row in plan.sources],
@@ -180,13 +189,18 @@ def test_the_postgresql_file_spells_the_same_rule():
     assert ("'src-promo-' || md5(f.base_id || '|' || 'memory:' || f.memory_id)"
             in sql)
     assert promotion_provenance.memory_origin_key("x") == "memory:x"
-    assert f"'{promotion_provenance.PROMOTION_TITLE_PREFIX}' || f.origin_title" in sql
-    assert (f"'{promotion_provenance.MEMORY_PROMOTION_TITLE_PREFIX}' || f.memory_title"
+    # the sealed migrations keep writing the pre-2026-10-19 spelling (stored
+    # titles are never rewritten; readers map them), so they pin the LEGACY
+    # constants -- not the prefixes new promotions are written with
+    assert (f"'{promotion_provenance.LEGACY_PROMOTION_TITLE_PREFIX}' || f.origin_title"
             in sql)
+    assert (f"'{promotion_provenance.LEGACY_MEMORY_PROMOTION_TITLE_PREFIX}' || "
+            "f.memory_title" in sql)
     # the frozen SQLite copy names the same constants
-    assert sqlite_migrations._V88_TITLE == promotion_provenance.PROMOTION_TITLE_PREFIX
+    assert (sqlite_migrations._V88_TITLE
+            == promotion_provenance.LEGACY_PROMOTION_TITLE_PREFIX)
     assert (sqlite_migrations._V88_MEMORY_TITLE
-            == promotion_provenance.MEMORY_PROMOTION_TITLE_PREFIX)
+            == promotion_provenance.LEGACY_MEMORY_PROMOTION_TITLE_PREFIX)
     assert f"left(r.body, {promotion_provenance.EXCERPT_CHARS})" in sql
     assert f"ELSE '{promotion_provenance.DEFAULT_ELEMENT_TYPE}' END" in sql
     assert f"'{promotion_provenance.PROMOTION_SOURCE_TYPE}'," in sql

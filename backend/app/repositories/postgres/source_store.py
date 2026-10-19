@@ -24,7 +24,7 @@ from app.domain.source_display import summary_display_title
 from app.domain.source_positions import normalize_positions, positions_page
 from app.models.question_suggestions import QUESTION_SUGGESTION_REVISION_PAGE_SIZE
 from app.repositories.postgres.memory_sql import memory_source_type_predicate
-from app.domain.promotion_source import PROMOTION_SOURCE_TYPE
+from app.domain.promotion_source import PROMOTION_SOURCE_TYPE, presented_source_title
 from app.repositories.ports import (
     SOURCE_PAPER_META_UNSET,
     DocumentCapacityExceeded,
@@ -1443,7 +1443,10 @@ class SourceStore:
                 f"SELECT id,title FROM sources WHERE id IN ({placeholders(ids)})",
                 ids,
             ).fetchall()
-        return {row["id"]: row["title"] for row in rows}
+        return {
+            row["id"]: presented_source_title(row["title"], source_id=row["id"])
+            for row in rows
+        }
 
     def notebook_element_sample(
         self, notebook_id: str, *, max_chars: int = 8000

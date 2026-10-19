@@ -911,6 +911,36 @@ def test_source_hides_memory_and_knowhow_and_carries_paper_meta(postgres_databas
     assert by_id["src-plain"]["paper_title"] == ""
 
 
+def test_promotion_source_titles_in_the_retained_feed_use_the_current_wording(
+    postgres_database, store
+):
+    """Twin of ``test_admin_user_activity``'s wording-ruling case: a row retained
+    BEFORE the 2026-10-19 ruling snapshotted 「晋升自：…」; it is listed as
+    「收录自：…」, while a document with the same words keeps its own title."""
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u1")
+        _insert_notebook(connection, "n1", "u1")
+        _insert_source(connection, "src-promo-1", "n1",
+                       datetime(2026, 8, 1, 10, tzinfo=timezone.utc),
+                       title="晋升自：原件甲", source_type="promotion", file_name="")
+        _insert_source(connection, "src-own", "n1",
+                       datetime(2026, 8, 1, 9, tzinfo=timezone.utc),
+                       title="晋升自：我自己的文档", source_type="md")
+    _delete_notebook_now(postgres_database, "n1")
+    with postgres_database.write() as connection:
+        connection.execute(
+            "UPDATE retained_user_activity SET display_title=%s WHERE record_id=%s",
+            ("晋升自：原件甲", "src-promo-1"),
+        )
+    retained = store.list_user_activity(
+        "u1", include_inaccessible_questions=True, limit=50,
+    )
+    assert {item["id"]: item["display_title"] for item in retained["items"]} == {
+        "src-promo-1": "收录自：原件甲",
+        "src-own": "晋升自：我自己的文档",
+    }
+
+
 def test_sources_scoped_to_owned_notebooks_only(postgres_database, store):
     with postgres_database.write() as connection:
         _insert_user(connection, "u1")

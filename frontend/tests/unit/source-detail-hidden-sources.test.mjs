@@ -47,7 +47,7 @@ test("a promotion source can be deleted but not re-parsed, and is labelled in Ch
 });
 
 test("deleting a promotion source says what happens to the objects it supports", () => {
-  const promotion = sourceDeleteMessage("promotion", "晋升自：原件");
+  const promotion = sourceDeleteMessage("promotion", "收录自：原件");
   assert.match(promotion, /失去这份证据/);
   assert.match(promotion, /还有其他证据的条目会保留/);
   const document = sourceDeleteMessage("markdown", "论文");

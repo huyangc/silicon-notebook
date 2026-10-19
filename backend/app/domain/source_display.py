@@ -14,7 +14,9 @@ out again; the failure that costs is not the duplication but its drift, which
 is visible to the user in one screen: the same paper listed as "1706.03762.pdf"
 on a list card and as its parsed title on the citation card next to it.
 
-A leaf on purpose.  It imports nothing from the application, so the citation
+A leaf on purpose.  It imports nothing from the application but the equally
+dependency-free ``promotion_source`` leaf (the one stored-title-to-shown-title
+mapping for promotion sources), so the citation
 path, the retrieval path and the enumeration path each depend on it without
 depending on one another.
 
@@ -28,6 +30,8 @@ collection_enumeration — are untouched, and app.repositories can import
 from __future__ import annotations
 
 from typing import Any
+
+from app.domain.promotion_source import presented_source_title
 
 
 def _columns(row: Any, *keys: str) -> dict[str, Any]:
@@ -65,11 +69,18 @@ def source_display_title(row: Any) -> str:
     is a user-visible behaviour change and belongs to its own change, not to
     the consolidation.
     """
-    values = _columns(row, "is_paper", "paper_title", "title", "file_name")
+    values = _columns(
+        row, "is_paper", "paper_title", "title", "file_name", "source_type", "id"
+    )
     paper_title = str(values["paper_title"] or "").strip()
     if values["is_paper"] and paper_title:
         return paper_title
-    return str(values["title"] or values["file_name"] or "").strip()
+    # A promotion source stored under the pre-2026-10-19 wording is shown in
+    # today's (``presented_source_title``; other sources pass through).
+    return presented_source_title(
+        str(values["title"] or values["file_name"] or "").strip(),
+        source_type=values["source_type"], source_id=values["id"],
+    )
 
 
 def summary_display_title(row: Any, meta: "dict | None") -> str:

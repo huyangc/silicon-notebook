@@ -627,8 +627,9 @@ class EvidenceContextService:
             row = rows.get(source_id) or {}
             title = source_display_title(row)
             if is_promotion_source_type(row.get("source_type")):
-                # PR-E8: the card names the original ("晋升自：X" -> "X"); the
-                # card still opens the public library's promotion source.
+                # PR-E8: the card names the original ("收录自：X" -> "X"; a
+                # stored legacy "晋升自：X" too); the card still opens the
+                # public library's promotion source.
                 title = promotion_origin_title(title)
             file_name = str(row.get("file_name") or "").strip()
             if title or file_name:

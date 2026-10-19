@@ -11,6 +11,7 @@ from psycopg.errors import ForeignKeyViolation
 from psycopg.types.json import Jsonb
 
 from app.core.config import Settings
+from app.domain.promotion_source import presented_source_title
 from app.repositories.group_rows import (
     GROUP_GRANT_COUNT_SQL,
     GROUP_GRANT_EXISTS_SQL,
@@ -838,12 +839,18 @@ class SharingStore:
                 (notebook_id,),
             ).fetchone()
             rows = connection.execute(
-                "SELECT title FROM sources WHERE notebook_id=%s "
+                "SELECT id,title,source_type FROM sources WHERE notebook_id=%s "
                 "AND source_type NOT IN ('memory','knowhow') "
                 "ORDER BY created_at,id COLLATE \"C\" LIMIT 50",
                 (notebook_id,),
             ).fetchall()
-        return (owner["username"] if owner and owner["username"] else "", [r["title"] for r in rows])
+        titles = [
+            presented_source_title(
+                r["title"], source_type=r["source_type"], source_id=r["id"]
+            )
+            for r in rows
+        ]
+        return (owner["username"] if owner and owner["username"] else "", titles)
 
     def notebook_sync_origin(self, notebook_id: str) -> str:
         """`sqlite/sharing_store.py::notebook_sync_origin` 的镜像——为什么不带

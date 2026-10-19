@@ -442,7 +442,7 @@ neighbour focus the stored preview does not hold is answered the same way.
 ## Promotion provenance in public libraries
 
 A knowledge object promoted into a public library now carries the library's own provenance: one
-visible source of type `promotion` (「晋升自：<original title>」) per original and one element per
+visible source of type `promotion` (「收录自：<original title>」) per original and one element per
 evidence entry (product contract: the promotion paragraphs of
 [Memory and Agent MCP](./product-and-api.md#memory-and-agent-mcp)). Approvals
 write it from this version on; upgrading to **PostgreSQL 0068 / SQLite v88** rewrites what was
@@ -458,7 +458,8 @@ attested has every object's evidence read — and rewrites each such entry:
 - an entry whose original is a member's **Memory source is dropped** (fail closed, ruling M1: only data approved before
   the Memory guards can carry one);
 - an object created by an approved **Memory promotion** is rewritten as the approval does now: one
-  「晋升自个人记忆：<Memory title>」 source per Memory, and its cards keep only their stored excerpt. A Memory promotion
+  「晋升自个人记忆：<Memory title>」 source per Memory (the sealed migration keeps writing this earlier wording; readers
+  show it as 「收录自个人记忆：…」 and nothing is rewritten), and its cards keep only their stored excerpt. A Memory promotion
   that was merged into an existing object cannot be told apart from a generic one there, and takes the generic rule;
 - any other entry: the original element's current text if it still exists, else the stored excerpt; an entry with
   neither is dropped.

@@ -96,6 +96,36 @@ def test_citation_titles_prefer_grounded_paper_title_and_keep_other_sources():
     }
 
 
+def test_a_promotion_citation_card_names_the_original_under_either_spelling():
+    """The card shows the original's title; a stored legacy 「晋升自：」 title
+    (written before the 2026-10-19 wording ruling) resolves like the new one."""
+    service = _service(source_metadata={
+        "src-promo-new": {
+            "title": "收录自：原件甲", "source_type": "promotion", "notebook_id": "active",
+        },
+        "src-promo-old": {
+            "title": "晋升自：原件乙", "source_type": "promotion", "notebook_id": "active",
+        },
+        "src-promo-mem": {
+            "title": "晋升自个人记忆：记忆丙", "source_type": "promotion",
+            "notebook_id": "active",
+        },
+        "plain": {
+            "title": "晋升自：我自己的文档", "source_type": "markdown",
+            "notebook_id": "active",
+        },
+    })
+
+    assert service.citation_titles(
+        ["src-promo-new", "src-promo-old", "src-promo-mem", "plain"]
+    ) == {
+        "src-promo-new": "原件甲",
+        "src-promo-old": "原件乙",
+        "src-promo-mem": "记忆丙",
+        "plain": "晋升自：我自己的文档",
+    }
+
+
 def test_element_context_and_anchor_expose_parsed_paper_title():
     service = _service(source_metadata={
         "s-paper": {

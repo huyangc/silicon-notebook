@@ -25,6 +25,7 @@ from app.core.config import (
 )
 from app.models.common import Evidence
 from app.domain.extensions import GENERATED_QUESTION_ACCESS_CAPABILITY
+from app.domain.promotion_source import presented_source_title
 from app.domain.retrieval import ChunkRetrievalPlan
 from app.domain.retrieval_control import RetrievalControlError
 from app.repositories.ports import ChunkLexicalSearchTimeout
@@ -1455,7 +1456,9 @@ class CandidateRetrievalService(_RetrievalState):
                 {
                     "element_id": row["id"],
                     "source_id": row["source_id"],
-                    "source_title": row["source_title"],
+                    "source_title": presented_source_title(
+                        row["source_title"], source_id=row["source_id"]
+                    ),
                     "location_label": row["location_label"],
                     "element_type": row["element_type"],
                     "text": row["text"],

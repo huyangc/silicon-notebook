@@ -13,6 +13,7 @@ import threading
 import pytest
 from app.core.activity_time import parse_activity_instant
 from app.core.config import Settings
+from app.services.source_display import source_display_title
 from app.services.sqlite_repository import SQLiteRepository
 
 from tests.activity_parity_cases import (
@@ -526,6 +527,41 @@ def test_source_hides_memory_and_knowhow_and_carries_paper_meta(repo):
     # LEFT JOIN miss must not error and must default sanely.
     assert plain["is_paper"] is False
     assert plain["paper_title"] == ""
+
+
+def test_promotion_source_titles_in_the_feed_use_the_current_wording(repo):
+    """2026-10-19 wording ruling: a promotion source stored (live or retained
+    after the notebook was deleted) under 「晋升自：」 is listed as 「收录自：」;
+    a document that merely carries the same words is the user's own title."""
+    with repo._write() as db:
+        _insert_user(db, "u1", "a00000001")
+        _insert_notebook(db, "n1", "u1")
+        _insert_source(db, "src-promo-1", "n1", "2026-08-01T10:00:00",
+                       title="晋升自：原件甲", source_type="promotion",
+                       file_name="")
+        _insert_source(db, "src-own", "n1", "2026-08-01T09:00:00",
+                       title="晋升自：我自己的文档", source_type="md")
+
+    live = repo._runtime.queries.list_user_activity("u1", limit=50)
+    assert {item["id"]: source_display_title(item) for item in live["items"]} == {
+        "src-promo-1": "收录自：原件甲",
+        "src-own": "晋升自：我自己的文档",
+    }
+
+    repo._runtime.notebook_store.delete_row_and_orphan_embeddings("n1")
+    with repo._write() as db:
+        # a row retained BEFORE the ruling snapshotted the old wording
+        db.execute(
+            "UPDATE retained_user_activity SET display_title=? WHERE record_id=?",
+            ("晋升自：原件甲", "src-promo-1"),
+        )
+    retained = repo._runtime.queries.list_user_activity(
+        "u1", include_inaccessible_questions=True, limit=50,
+    )
+    assert {item["id"]: item["display_title"] for item in retained["items"]} == {
+        "src-promo-1": "收录自：原件甲",
+        "src-own": "晋升自：我自己的文档",
+    }
 
 
 def test_sources_scoped_to_owned_notebooks_only(repo):
