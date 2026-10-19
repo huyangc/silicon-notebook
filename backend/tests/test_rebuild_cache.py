@@ -504,7 +504,10 @@ def test_a_failing_skip_path_stamp_is_fail_open(repo, monkeypatch):
     assert _code_version(repo, nb.id)[1] == ""
     failures = [e for e in events if e.get("kind") == "cluster_code_version_stamp_failed"]
     assert failures == [{"kind": "cluster_code_version_stamp_failed",
-                         "notebook_id": nb.id, "error": "database is locked"}]
+                         "notebook_id": nb.id, "error_class": "OperationalError"}]
+    # The exception text stays out of the persisted event (it can carry
+    # internal paths or database diagnostics); only the class name is kept.
+    assert "database is locked" not in repr(failures)
 
     monkeypatch.setattr(repo._runtime.unified_kg, "stamp_cluster_code_version",
                         stamp)                                  # lock released
