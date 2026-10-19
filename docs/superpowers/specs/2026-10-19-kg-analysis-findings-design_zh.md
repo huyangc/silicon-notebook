@@ -132,9 +132,11 @@
 | F1 / F3 | 来源已不存在；或来源的解析/抽取在问题建成之后重跑过、或正在跑 | `sources` 主键点查，加该来源最近一次抽取的时间，≤ 一页。不能用 `sources.updated_at`：改标题之类的动作也会推进它。实现时核对哪个字段只随重新解析变化 |
 | F2 | 两个来源中任一已不存在 | `sources` 主键点查。重新解析不解决重复，不算处置 |
 | F4 | 待确认合并里这一组已被确认。若是**驳回或暂缓**，当场移进「已通过」写「已判定不是同一个」，下次重建也不再报（§4.4）。驳回不置 `dirty`（只有撤销一次确认才置），所以不能靠「更新后消失」来收尾，否则这条会永远「仍在」 | `concept_merge_candidates` 只有 `(notebook_id, status)` 索引，不是主键点查：在本库候选切片里按这一页的组分批过滤 |
-| F5 | 「补上关联」在问题建成之后完成过（§4.5 的持久标记） | 一行点读 |
+| F5 | 「补上关联」在问题建成之后**改变过图谱**（标记记下的 `kg_mutation_seq` 晚于账本行的 seq）。只跑过、什么都没补上（标记世代 = 当前世代）不是「已处理」，而是 §4.5 的「已经跑过、之后没有新内容」：移出待处理（读侧状态 `relink_spent`，进「已通过」区），不放按钮 | 一行点读 |
 
 「问题建成之后」以 `findings` 账本行的 `created_at` 为准。
+
+**实施对齐（PR-2）**：读侧状态的代号与分区——`open`（待处理）/ `handled`（已处理，更新后核验，仍在待处理区；`handled_reason` = `source_deleted` / `source_processing` / `source_reprocessed` / `merge_confirmed` / `relinked`）/ `dismissed`（标为正常）/ `decided_not_same`（F4，驳回或暂缓）/ `relink_spent`（F5，见上）。`GET .../findings` 的 `zone`：`open` = open + handled，`passed` = decided_not_same + relink_spent，`dismissed` = dismissed。分区只依赖标记、F4 的已存决定与 F5 标记；来源点查只做当前这一页（handled 与 open 同区，来源状态不改变分区）。F1/F3 的「重跑过」看来源的 `chunked_at` 与最近一次抽取的 `created_at`（不看 `updated_at`）；「正在跑」= 来源状态 `queued` / `parsing` / `extracting`，或最近一次抽取 `running`。F4 的已存决定在本库决定切片里按这一组的 canonical 过滤读出（`merge_candidate_states_for_canonicals`），再按全部成员（含隐藏来源成员）的 v1 种子与证据里存的写法分组（`classes`）判定，与发布时引擎的判定同一个函数。
 
 报告整体落后于数据时（`dirty`，黄色），问题照常列出，但每条都标「基于变更 #N」，免得读者以为那是此刻的状态。
 
@@ -432,7 +434,7 @@ F3 与 F1 的界线是本规格最要紧的判别：
 | ⑤ 来源画像那一趟：`source_canonical_rows` + `SourceBoardCounter` | 878 万行，每行存两个 int32。**零板块的库整趟跳过**（`if total_members:`） | SQL 多返回一列「是不是 concept」。concept 行另记（来源序号，canonical 下标）两个 int32；不在图里的 concept canonical 用一张旁路 dict 另编下标，只为 F1/F2 计数，**不扩 `can2idx`**（会与 `SourceBoardCounter` 的下标表越界冲突）。「在不在图里」以 `edge_table.n_nodes` 为界，不以 `can2idx` 为界：补账本路径会把不在图里的板块成员也补进 `can2idx`。另按来源累加孤立对象数（F5、F3b）。⚠ 问题清单是必需产物，所以零板块的库也要跑这一趟扫描，只是不写来源画像。原设计刻意为零板块库省掉了这趟扫描，这里把它加回来了，代价要算进去 |
 | ⑥ drain 之后、`can2idx.clear()` **之前** | 立即释放 membership | 在这里算完 F1–F5，顺序见本表下方。全部算完、为不超过上限的问题取到样例名之后，才 `can2idx.clear()` |
 | ⑦ 三条统计快照 | 不变 | 不变。「它们跑在更低的内存水位上」这条约束照旧成立：新增的结构在 ⑥ 末尾全部释放 |
-| ⑧ 发布事务 | 板块 + 五份产物 | 另写 `findings` 账本行与问题明细；读旧明细（≤ 上限行，主键范围读）算出对比摘要；清掉主体已不存在的豁免 |
+| ⑧ 发布事务 | 板块 + 五份产物 | 另写 `findings` 账本行与问题明细；读旧账本行与旧明细（≤ 上限行，主键范围读）算出对比摘要、继承 `first_seen_*`；清掉主体已不在新明细里的 `dismissed` 标记（要清哪些在写事务之外读一次标记表算好；`relink_attempted` 从不在这里清） |
 
 第 ⑥ 步的计算顺序：
 
@@ -536,7 +538,7 @@ kind ∈ { dismissed（标为正常）, relink_attempted（补上关联完成时
 |---|---|---|---|
 | GET | `/notebooks/{id}/kg-analysis` | 笔记本读 | 新增 `findings_summary`。只读账本，沿用既有的记忆化 |
 | GET | `/notebooks/{id}/kg-analysis/findings?zone=open\|passed\|dismissed&limit&offset` | 笔记本读 | 返回一页问题，加读侧派生的 `status`（§3.5，最多一页的主键点查）。与 `/sources` 一样不做记忆化 |
-| PUT / DELETE | `/notebooks/{id}/kg-analysis/findings/{rule_id}/{subject_key}/dismissal` | 图谱写，与合并确认同级 | 标为正常 / 撤销。镜像库返回 409（既有围栏）。仅当 §14④ 选持久化时才有 |
+| PUT / DELETE | `/notebooks/{id}/kg-analysis/findings/{rule_id}/{subject_key}/dismissal` | 图谱写，与合并确认同级 | 标为正常 / 撤销（§14④ 已选后端持久化）。成功 204；镜像库返回 409（既有围栏）；无权限仍是 404；PUT 的主键不在当前明细里返回 404；DELETE 幂等。`subject_key` 按 `:path` 取（F4 的主键可能含 `/`），两段都由路由解码一次 |
 
 - 响应里只用内部代号，界面词由前端映射，这是原设计 T3 的红线。
 - 样例名与标题只来自**可见来源**。`source_canonical_rows` 已经排除 memory/knowhow 来源，但这还不够：canonical 名可能来自 knowhow 写入的对象（knowhow 的 concept 参与合并，只有 Memory 被排除），所以「这个 canonical 有本来源的成员」不能推出「它的名字来自本来源」。显示名一律取可见来源成员对象自己的名字（§7.1 第 ⑥ 步第 7 条）。守卫要检查名字的出处，而不只是来源是否可见：构造一个 canonical 名来自 knowhow 对象的夹具，断言那个名字不出现在 payload 里。

@@ -14,7 +14,7 @@
 | PR-3 | 前端：四区、弹窗共存、动作接线、S4、界面词、release note | PR-2（契约先行，可并行开发） | PR-2 合入后 rebase |
 | PR-4 | P3+P4 一个 PR：S1 切换种子 + 决定重算 + 描述缓存按签名复用 + 待确认合并显示名 + F4 squash 候选档 + S2 热启动划分与 board_key + 一次 `CLUSTER_ALGO_VERSION` bump + 运维文档 | PR-1（合并代码分量列，否则 S4 会挡住修复）、PR-2（squash key 同源） | PR-2 合入后 rebase |
 
-迁移号：开工时 origin/master 是 SQLite v94 / PG 0074。PR-1 用 v95/0075；PR-4 先用占位，rebase 时取 PR-1 之后的下一号。PG 同号文件并存不报冲突，所以 MANIFEST 与全仓 `migrate() == N` 断言随改号一起改。
+迁移号：开工时 origin/master 是 SQLite v94 / PG 0074；开工后 master 先合入了 v95/0075 与 v96/0076，所以 PR-1（#937）实际落 **v97/0077**。PR-4 先用占位，rebase 时取合入当时 origin/master 的下一号（PR-1 之后即 v98/0078 起）。PG 同号文件并存不报冲突，所以 MANIFEST 与全仓 `migrate() == N` 断言随改号一起改。
 
 ## 二、任务
 
@@ -23,7 +23,7 @@
 ### PR-1 存储与契约
 
 - **T1 同步捕获集按版本冻结**：`_migration_84` 按**当前**清单渲染触发器，v84 之后新增的 SYNCED 表会让从零迁移梯报 `no such table`。`TableSyncSpec` 加 `since_schema`（默认 84），各渲染函数收 `at_schema`；`_migration_84` 显式传 84，输出逐字不变。验收：从零迁移梯跑通；v84–v94 快照校验逐字不变；变异「去掉 at_schema」报红。
-- **T2 迁移**：`kg_analysis_findings`、`kg_analysis_marks`、`unified_kg_state.cluster_code_version`；SQLite `_migration_95` + SCHEMA_VERSION；PG `0075`；`POSTGRES_BUSINESS_TABLES`、`POSTGRES_JSON_COLUMNS`、MANIFEST 配对；testkit 回滚；全仓 `migrate()==N`；v9 fixtures 重生；verifier DDL 表。
+- **T2 迁移**：`kg_analysis_findings`、`kg_analysis_marks`、`unified_kg_state.cluster_code_version`；SQLite `_migration_97` + SCHEMA_VERSION；PG `0077`（原计划 v95/0075，见上「迁移号」）；`POSTGRES_BUSINESS_TABLES`、`POSTGRES_JSON_COLUMNS`、MANIFEST 配对；testkit 回滚；全仓 `migrate()==N`；v9 fixtures 重生；verifier DDL 表。
 - **T3 生命周期登记**：shadow manifest 复制序；sync manifest（findings = SYNCED，marks = LOCAL）与 findings 捕获触发器；`user_references` 登记 `kg_analysis_marks.actor_user_id`；`notebook_delete_tables`；两侧删除知识图谱清单（含 state 重置新列）；两侧 `_clear_notebook_derived_kg`；索引管线发布；`merge_dbs`（findings 不导入，marks 随库、清 relink 标记）；`copy_memory_cases` 缺席集。`relink_attempted` 在每一个让 `kg_mutation_seq` 归零的地方清掉；`dismissed` 保留。
 - **T4 两侧 store 原语 + ports**：`replace_kg_analysis_artifacts` 加 `findings_rows` / `prune_marks`；`finish_rebuild_state` 加必填 `cluster_code_version`；新方法 `kg_analysis_finding_rows`、`kg_analysis_mark_rows`、`write_kg_analysis_mark`、`clear_kg_analysis_mark`、`kg_finding_source_states`、`kg_finding_display_name_rows`、`stamp_cluster_code_version`、governance `merge_candidate_states_for_canonicals`（ports 计数 +8，先例 AnswerLinkStore +3）。展示名读取排除 memory/knowhow 来源的对象。各守卫清单登记。
 - **T5 合并代码分量**：`kg_merge.cluster_code_version(settings)`（算法版本 + embed_dim + runtime_dim），`_cluster_input_version` 哈希逐字不变；全量收尾与跳过路径（带守卫的 UPDATE）各写一次；跳过分支的催收块抽成 helper，下调 `rebuild_unified_kg` 基线。
