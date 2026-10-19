@@ -641,7 +641,13 @@ def test_runtime_wiring_supports_notebooks_without_knowledge_graph(tmp_path):
     settings = Settings(_env_file=None, database_url=f"sqlite:///{tmp_path / 'runtime.db'}", storage_dir=str(tmp_path / "storage"))
     repo = SQLiteRepository(settings)
     try:
+        from tests.test_global_ask_empty_scope import _source
+
         notebook = repo.create_notebook(NotebookCreate(name="Original sources"))
+        # A visible source and no knowledge graph: something to search (an
+        # all-empty scope is refused at submission, see
+        # ``test_global_ask_empty_scope``), and still no graph to lean on.
+        _source(repo, notebook.id)
         user_id = repo.current_user().id
         service = repo._runtime.global_ask_service()
         job = service.start(GlobalAskRequest(question="有哪些内容"), user_id=user_id)

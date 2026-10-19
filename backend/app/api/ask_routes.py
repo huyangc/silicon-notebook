@@ -94,6 +94,7 @@ from app.services.share_disclosure import (
     require_conversation_acknowledged,
 )
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS, AssetService
+from app.services.notebook_catalog import local_universe_non_empty
 from app.services.search_concurrency import run_under_search_gate
 from app.services.source_scope import retrieval_scope_receipt_context
 from app.api.task_stream import (
@@ -325,12 +326,14 @@ def _require_non_empty_scope(
     # 判据算出,零新增查询),并与 counts["sources"] 取**或**:该信号只增不减,尚在解析
     # (有来源、还没有 chunk)的库仍按旧判据放行,列表投影未回填时(默认 False)也逐字
     # 回落到旧行为。
-    local_universe_non_empty = (
-        bool(notebook.local_evidence_available)
-        or int(notebook.counts.get("sources", 0) or 0) > 0
+    # 组合口径与全局问答的准入(GlobalAskService._require_searchable)共用同一个
+    # local_universe_non_empty,本地证据判据是同一个 NotebookSummaryQuery.local_evidence。
+    has_local_universe = local_universe_non_empty(
+        int(notebook.counts.get("sources", 0) or 0) > 0,
+        lambda: bool(notebook.local_evidence_available),
     )
     if resolved_source_scope is None:
-        has_local = local_universe_non_empty
+        has_local = has_local_universe
     elif resolved_source_scope.source_ids:
         has_local = True
     else:
@@ -341,7 +344,7 @@ def _require_non_empty_scope(
         #     发的 exclude:[] 在这类库上就冻结成这个形状,它没有表达任何收窄意图,
         #     必须按真实本地证据宇宙作答,否则 Knowhow-only 的库一进来就被判空。
         has_local = (
-            not resolved_source_scope.narrowed and local_universe_non_empty
+            not resolved_source_scope.narrowed and has_local_universe
         )
     # 库维度**不需要**同样的 narrowed 分支:`_validate_base_scope` 的
     # narrowed = len(selected) < len(mounted),空选择只有在零挂载时才 narrowed=False,

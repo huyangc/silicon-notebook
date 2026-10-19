@@ -57,6 +57,24 @@ def memory_channel_allowed() -> bool:
     return _kg_viewer_scope.memory_channel_allowed()
 
 
+def local_universe_non_empty(
+    has_visible_sources: bool, local_evidence: Callable[[], bool],
+) -> bool:
+    """Is one library's LOCAL evidence universe non-empty for an Ask?
+
+    THE composition both Ask entry points refuse an empty scope by: the
+    single-library check (``ask_routes._require_non_empty_scope``, visible
+    source count + ``NotebookSummary.local_evidence_available``) and the
+    global admission check, per participant (``GlobalAskService.
+    _require_searchable``, the frozen ceiling + ``any_local_evidence``).
+    Visible sources count on their own -- a library still parsing has
+    sources and no chunk yet -- and otherwise the local-evidence predicate
+    (``NotebookSummaryQuery.local_evidence``) decides; it is asked lazily, so
+    a library with sources pays no probe.
+    """
+    return bool(has_visible_sources) or bool(local_evidence())
+
+
 # Search has one canonical total-hit contract in app.models.ask. Memory is an
 # additive search family and gets a smaller reserved candidate pool so it
 # cannot evict every source/element/KG match from that total.
@@ -307,6 +325,71 @@ class NotebookSummaryQuery:
         stays unfiltered (it is a table-agnostic primitive shared with the
         facade's ``_count`` re-export / its equivalence-oracle test)."""
         return self.queries.visible_source_count(db, notebook_id)
+
+    def local_evidence(
+        self, db: object, notebook_id: str, *, user_id: "str | None",
+        kg_ready: Callable[[], bool], memories: "int | None",
+    ) -> bool:
+        """THE local-evidence predicate: can ``notebook_id`` ITSELF (mounted
+        libraries excluded) produce retrievable evidence for ``user_id``?
+
+        ``NotebookSummary.local_evidence_available`` is this value (``get``),
+        and through it the single-library Ask gate and its empty-scope check
+        (``ask_routes._require_ask_available`` / ``_require_non_empty_scope``);
+        the global Ask admission check asks the same question per participant
+        (``any_local_evidence``). One predicate, so the two entry points cannot
+        drift on what counts as "something to search".
+
+        Any chunk (document chunks and Knowhow cells share the table), a
+        usable-status KG, or this user's confirmed Memory -- short-circuited
+        in that order, every probe an ``EXISTS``.  The two prefilters are the
+        caller's: ``kg_ready`` (called only when the chunk probe missed) is the
+        viewer's ``kg_ready``; ``memories`` is a count that is a strict
+        superset of confirmed Memory (0 skips the probe), or ``None`` when the
+        caller has no such count -- then the probe runs whenever the Memory
+        channel is open (``memory_channel_allowed``, the gate ``from_row``
+        applies to the count it hands ``get``).
+        """
+        memory_possible = (
+            memory_channel_allowed() if memories is None else memories > 0
+        )
+        return bool(
+            self.queries.notebook_has_chunk(db, notebook_id)
+            or (
+                kg_ready()
+                and self.queries.notebook_has_usable_kg(db, notebook_id)
+            )
+            or (
+                memory_possible
+                and user_id is not None
+                and self.queries.notebook_has_confirmed_memory(
+                    db, notebook_id, user_id
+                )
+            )
+        )
+
+    def any_local_evidence(self, notebook_ids: Sequence[str], user_id: str) -> bool:
+        """Does ANY of ``notebook_ids`` have local evidence (``local_evidence``)?
+
+        The global Ask admission check's probe (``GlobalAskService.
+        _require_searchable``), run only when every participant's frozen
+        source ceiling is empty.  One connection, libraries in the order
+        given, stopping at the first hit: at most a handful of ``EXISTS``
+        probes per library, never a scan.  ``kg_ready`` is computed exactly as
+        the summary computes it (``has_kg`` under ``viewer_count_kwargs``), and
+        lazily -- only for a library whose chunk probe missed.
+        """
+        with self.database.connect() as db:
+            for notebook_id in dict.fromkeys(notebook_ids):
+                if self.local_evidence(
+                    db, notebook_id, user_id=user_id,
+                    kg_ready=lambda nb=notebook_id: self.has_kg(
+                        db, nb, **self.viewer_count_kwargs(db, nb, user_id)
+                    ),
+                    memories=None,
+                ):
+                    return True
+        return False
 
     def count_pending_kg_sources(
         self, db: object, notebook_id: str
@@ -693,19 +776,10 @@ class NotebookSummaryQuery:
             #     —— 那是为了如实回答 local_evidence_available 必须付的那一次(local 的取值
             #     由 D 决定,c 再真也代替不了它),且已被预过滤收窄到「本库对该用户有
             #     memory 行但一条都没确认」这一形态。
-            local_evidence = bool(
-                self.queries.notebook_has_chunk(db, notebook_id)
-                or (
-                    summary.kg_ready
-                    and self.queries.notebook_has_usable_kg(db, notebook_id)
-                )
-                or (
-                    int(summary.counts.get("memories", 0)) > 0
-                    and user_id is not None
-                    and self.queries.notebook_has_confirmed_memory(
-                        db, notebook_id, user_id
-                    )
-                )
+            local_evidence = self.local_evidence(
+                db, notebook_id, user_id=user_id,
+                kg_ready=lambda: summary.kg_ready,
+                memories=int(summary.counts.get("memories", 0)),
             )
             summary.local_evidence_available = local_evidence
             summary.ask_available = local_evidence or self._base_evidence_available(

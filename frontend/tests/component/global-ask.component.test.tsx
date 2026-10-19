@@ -977,6 +977,40 @@ test("page hides raw transport failures and preserves explicitly safe job guidan
   expect(screen.queryByText(diagnostic)).toBeNull();
 });
 
+// 范围里没有可检索内容时，后端在建任务之前 409 拒绝（与单库「检索范围为空」同一判据）。
+// 这句拒绝必须**就地**出现在输入框紧上方的提示条里，问题回到输入框，不上屏任何一轮；
+// 「逐步推理」在问题理解预检就被拒，不会再去建任务。大窗（页面）与小窗（嵌入式紧凑
+// 布局）是同一个组件，两处都钉住。
+const EMPTY_SCOPE_REFUSAL = "当前检索范围为空：范围内的笔记本还没有可检索的内容，请换选有资料的笔记本，或先添加来源。";
+test.each([
+  ["page", "chunk"], ["page", "reasoning"], ["compact window", "chunk"], ["compact window", "reasoning"],
+] as const)("an empty-scope refusal shows beside the composer (%s, %s)", async (surface, engine) => {
+  installDialogMethods();
+  const refusal = () => Promise.reject(humanizedError(EMPTY_SCOPE_REFUSAL, 409));
+  if (engine === "reasoning") api.intent.mockImplementation(refusal);
+  else api.ask.mockImplementation(refusal);
+  if (surface === "page") render(<GlobalAskPage />);
+  else render(<GlobalAskWorkspace embedded compact uiMode="advanced" />);
+  const input = await screen.findByRole("textbox", { name: "输入问题" });
+  await waitFor(() => expect(input).toBeEnabled());
+  if (engine === "reasoning") fireEvent.click(screen.getByRole("button", { name: "深入分析" }));
+  fireEvent.change(input, { target: { value: "这些资料讲了什么" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+  const alert = await screen.findByText(EMPTY_SCOPE_REFUSAL);
+  expect(alert).toHaveAttribute("role", "alert");
+  // 紧邻输入框：与输入框同在提交区里，而不是页面顶部的横幅。
+  const composerArea = alert.closest(".global-composer-area");
+  expect(composerArea).not.toBeNull();
+  expect(composerArea!.contains(screen.getByRole("textbox", { name: "输入问题" }))).toBe(true);
+  expect(composerArea!.contains(screen.getByRole("button", { name: "发送问题" }))).toBe(true);
+  // 问题回到输入框，没有任何一轮上屏，「逐步推理」不会越过被拒的预检去建任务。
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入问题" })).toHaveValue("这些资料讲了什么"));
+  expect(screen.queryByText("正在提交问题…")).toBeNull();
+  expect(screen.queryByText("正在理解问题…")).toBeNull();
+  if (engine === "reasoning") expect(api.ask).not.toHaveBeenCalled();
+  else expect(api.ask).toHaveBeenCalledTimes(1);
+});
+
 test.each([false, true, undefined])("answer grounding notice follows the reliability value even with citations: %s", async (grounded) => {
   window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
   api.detail.mockResolvedValue({
