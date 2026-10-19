@@ -101,6 +101,7 @@ from app.services.cancellation import AskCancelled, raise_if_cancelled
 from app.domain.retrieval_control import RetrievalControlError
 # The one element/passage text digest, shared with both stores' snapshots.
 from app.domain.evidence_fingerprint import element_text_sha
+from app.domain.chunk_lane import chunk_lane_bound, chunk_lane_reads_mounts
 # The budget vocabulary itself is repository knowledge -- which driver failure
 # means "the statement was cancelled" and which means "no connection could be
 # leased" -- so it is imported rather than re-derived here; see
@@ -347,11 +348,11 @@ def _bounded_participants(
     if federated_ask_active():
         assert_override_matches_run()
     settings = candidates.settings
-    if not settings.chunk_federation_enabled:
+    if not chunk_lane_reads_mounts(settings):
         # The rollback path: one library, so every caller takes the
         # short-circuit below and behaviour returns to pre-federation exactly.
         # No participant query is issued at all.
-        return ((active_notebook_id, _ACTIVE_TIER),), 0
+        return chunk_lane_bound(settings, ((active_notebook_id, _ACTIVE_TIER),))
     participants = tuple(candidates._retrieval_participants(active_notebook_id))
     if not participants or participants[0][0] != active_notebook_id:
         # The seat's library-dimension cost guard dropped the active notebook
@@ -372,10 +373,11 @@ def _bounded_participants(
         # test_library_scope_can_still_narrow_an_override``, which unchecks
         # every peer and asserts the active survives.
         return ((active_notebook_id, _ACTIVE_TIER),), 0
-    maximum = settings.chunk_federation_max_participants
-    if len(participants) <= maximum:
-        return participants, 0
-    return participants[:maximum], len(participants)
+    # The switch and the cap are ONE pure rule shared with the catalog's
+    # availability check (``app.domain.chunk_lane``), so "the lane searches
+    # this library" and "this library may make an empty notebook askable"
+    # cannot drift apart.
+    return chunk_lane_bound(settings, participants)
 
 
 def federation_participants(

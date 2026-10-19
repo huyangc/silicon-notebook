@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Sequence
 
+from app.domain.chunk_lane import chunk_lane_bound, chunk_lane_reads_mounts
 from app.domain.indexing_pipeline import (
     BUILTIN_INDEXING_PIPELINE_VERSION,
     IndexingPipelineHostPort,
@@ -188,7 +189,8 @@ class NotebookSummaryQuery:
         kg_build_jobs: "KgBuildJobStorePort | None" = None,
         indexing_pipelines: "IndexingPipelineHostPort | None" = None,
         memory_source_ids: "Callable[[object, str], Sequence[str]] | None" = None,
-        settings: Any = None,
+        *,
+        settings: Any,
     ) -> None:
         self.database = database
         self.queries = queries
@@ -199,9 +201,9 @@ class NotebookSummaryQuery:
         self.memory_source_ids = memory_source_ids
         # The process ``Settings`` -- the SAME object the retrieval services
         # read ``chunk_federation_*`` from, so ``_chunk_lane_base_ids`` and the
-        # federated chunk lane answer from one switch and one bound.  ``None``
-        # (a bare test construction) = no reference-library passage lane: the
-        # summary keeps the pre-federation availability rule exactly.
+        # federated chunk lane answer from one switch and one bound.  Required:
+        # a construction that forgot it must fail loudly, not quietly drop the
+        # reference-library passage half of ``ask_available``.
         self.settings = settings
 
     def _indexing_option_map(self) -> dict[str, IndexingPipelineOption]:
@@ -767,16 +769,18 @@ class NotebookSummaryQuery:
     def _chunk_lane_base_ids(self, summary: NotebookSummary) -> list[str]:
         """联邦 chunk 通道这次**真会搜**的参考库 id,按挂载顺序。
 
-        与 ``chunk_federation._bounded_participants`` 同一把开关、同一个上界:
-        ``CHUNK_FEDERATION_ENABLED`` 关掉时参与集收成当前库一本,参考库原文根本不进
-        召回,返回空;否则参与集是「当前库 + 挂载库」按 ``MOUNT_ORDER`` 截到
-        ``CHUNK_FEDERATION_MAX_PARTICIPANTS``,当前库恒占第一席,所以参考库至多
-        ``上界 - 1`` 本——排在上界之外的库检索不到,也就不能替这个库撑起可用性。"""
-        settings = self.settings
-        if settings is None or not settings.chunk_federation_enabled:
+        开关与上界不在这里另写一份:``app.domain.chunk_lane.chunk_lane_bound`` 是
+        ``chunk_federation._bounded_participants`` 用的同一个纯函数,喂给它的也是同形
+        的名单(当前库打头,其后是 ``MOUNT_ORDER`` 的有效挂载)。``CHUNK_FEDERATION_
+        ENABLED`` 关掉时只剩当前库一本,参考库原文根本不进召回;否则截到
+        ``CHUNK_FEDERATION_MAX_PARTICIPANTS``——排在上界之外的库检索不到,也就不能替
+        这个库撑起可用性。零查询:名单就是已在手的 ``summary.base_notebooks``。"""
+        if not chunk_lane_reads_mounts(self.settings):
             return []
-        seats = max(int(settings.chunk_federation_max_participants) - 1, 0)
-        return [ref.id for ref in summary.base_notebooks][:seats]
+        kept, _mounted_total = chunk_lane_bound(
+            self.settings, [summary.id, *(ref.id for ref in summary.base_notebooks)]
+        )
+        return list(kept[1:])
 
     def list_for_user(self, user_id: str) -> list[NotebookSummary]:
         """自有库(access=owner)∪ 经只读共享加入的库 ∪ 经**群组授权边**可读的库。

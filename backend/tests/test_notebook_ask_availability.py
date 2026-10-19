@@ -7,6 +7,8 @@ confirmed memory、base+overlay 配置前端都看不到,故由后端权威计�
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from app.core.config import Settings
@@ -655,3 +657,35 @@ def test_library_text_probe_plan_seeks_chunks_by_source(repo, analyzed):
         )
     assert "idx_chunks_source" in plan, plan
     assert "idx_chunks_nb" not in plan, plan
+    if not analyzed:
+        # The library list drives the outer read (``drive_by``): one seek per
+        # listed library on a ``sources(notebook_id, ...)`` index.  A
+        # ``member_of`` (``+s.notebook_id``) would turn it into a scan of every
+        # source in the database.  Plan wording differs across SQLite builds
+        # (3.45 in CI, 3.53 locally), hence the tolerant pattern.
+        assert re.search(
+            r"SEARCH s USING (?:COVERING )?INDEX \w+ \(notebook_id=\?", plan
+        ), plan
+
+
+@pytest.mark.parametrize(
+    ("enabled", "cap"),
+    [(True, 8), (True, 3), (True, 1), (False, 8)],
+    ids=["default", "cap-3", "cap-1", "switch-off"],
+)
+def test_availability_counts_exactly_the_libraries_the_chunk_lane_searches(
+    repo, enabled, cap,
+):
+    """同源钉:``_chunk_lane_base_ids`` 与联邦通道 ``federation_participant_ids`` 读的是
+    同一个纯函数(``app.domain.chunk_lane``),对同一份挂载给出同一批参考库。"""
+    from app.services.chunk_federation import federation_participant_ids
+
+    libraries = [_graphless_library(repo, f"lib-{i}") for i in range(5)]
+    nb = _empty_notebook_mounting(repo, libraries)
+    repo.settings.chunk_federation_enabled = enabled
+    repo.settings.chunk_federation_max_participants = cap
+    summary = repo.get_notebook(nb.id)
+    counted = repo._runtime.notebook_summaries._chunk_lane_base_ids(summary)
+    searched = federation_participant_ids(repo.retrieval.candidates, nb.id) - {nb.id}
+    assert set(counted) == searched
+    assert counted == [ref.id for ref in summary.base_notebooks][: len(counted)]

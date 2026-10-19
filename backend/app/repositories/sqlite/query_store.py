@@ -437,18 +437,21 @@ class QueryStore:
         语句文本与名单长度无关;``drive_by``:逐库按 ``sources(notebook_id, ...)``
         索引取可见来源,再按 ``idx_chunks_source`` 探第一条 chunk,EXISTS 首中即停。
 
-        ⚠ ``+c.notebook_id``:生产库不跑 ``ANALYZE``,无统计时计划器会拿
+        内层只按 ``c.source_id = s.id`` 关联,**刻意不写** ``c.notebook_id =
+        s.notebook_id``:那一列一旦出现,无统计时(生产库不跑 ``ANALYZE``)计划器会拿
         ``idx_chunks_nb`` 去探内层 EXISTS——每篇来源都把整库 chunk 扫一遍再按
-        ``source_id`` 过滤(实测 2 万来源 / 40 万 chunk 的库 127 ms);一元 ``+``
-        把这一列移出索引候选,内层回到按 ``source_id`` 探(同一形状 0.007 ms)。
-        计划钉在 ``test_notebook_ask_availability``,两种统计状态都钉。"""
+        ``source_id`` 过滤(实测 2 万来源 / 40 万 chunk 的库 127 ms,按 source 探
+        0.007 ms;PostgreSQL 侧同理,见孪生的 docstring)。省掉它不改语义:一条 chunk
+        的 ``notebook_id`` 恒等于它所属来源的 ``notebook_id``(写者清单与「即便历史
+        脏行违反也只会 fail-open、不越权」的论证见 PostgreSQL 孪生)。计划钉在
+        ``test_notebook_ask_availability``,两种统计状态都钉。"""
         bound = bind_ids(notebook_ids)
         row = db.execute(
             "SELECT EXISTS(SELECT 1 FROM sources s "
             f"WHERE {drive_by('s.notebook_id', bound)} "
             f"AND s.{VISIBLE_SOURCE_TYPES_PREDICATE} "
             "AND EXISTS(SELECT 1 FROM chunks c "
-            "WHERE c.source_id = s.id AND +c.notebook_id = s.notebook_id))",
+            "WHERE c.source_id = s.id))",
             (bound.param,),
         ).fetchone()
         return bool(row[0])

@@ -6,8 +6,9 @@
 // 判据权威源在**后端**:NotebookSummary.ask_available 由后端计算(有可见来源、或任意
 // chunk[含 knowhow 格子——无可见来源却可检索]、或已建 KG、或该用户有 confirmed memory、
 // 或挂载参考库有 KG、或挂载参考库有可见原文——无图参考库的原文会被跨库召回——任一即真)。
-// 路由层的 409 预检(_require_ask_available)读的也是这同一个字段,前后端同源。前端不自行用代理信号推断——隐藏的 knowhow chunk、
-// confirmed memory 与 base+overlay 配置前端都看不到,曾据此误禁/误放(codex PR#334)。
+// 路由层的 409 预检(_require_ask_available)读的也是这同一个字段,前后端同源。
+// 前端不自行用代理信号推断——隐藏的 knowhow chunk、confirmed memory 与
+// base+overlay 配置前端都看不到,曾据此误禁/误放(codex PR#334)。
 //
 // 刻意**不**用「本地来源计数>0」做乐观快路:上传的来源要排队解析,尚未解析(或解析失败)
 // 时并没有任何 chunk,拿它解禁会绕过硬约束(codex PR#334 第3轮 P1)。改为纯听后端——
