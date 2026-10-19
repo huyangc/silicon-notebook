@@ -990,6 +990,20 @@ def _roster_display_title(row) -> str:
     return str(getattr(row, "source_title", "") or UNNAMED_SOURCE_LABEL)
 
 
+def _copied_title_forms(text: str):
+    """模型抄回来的标题依次要试的形态(与 `_resolve_roster_rows` 的还原顺序一致)。"""
+    yield text
+    if text.endswith(_ENUM_NOTE_NO_SUMMARY_MARK):
+        text = text[: -len(_ENUM_NOTE_NO_SUMMARY_MARK)].strip()
+        yield text
+    unwrapped = _strip_title_wrapping(text)
+    if unwrapped != text:
+        text = unwrapped
+        yield text
+    if SOURCE_ROW_FIELD_SEPARATOR in text:
+        yield text.split(SOURCE_ROW_FIELD_SEPARATOR, 1)[0]
+
+
 def _roster_row_key(row):
     """花名册行的身份键:`source_id`(生产的 `SourceItem` 一定有;测试替身要补)。"""
     return row.source_id
@@ -1015,7 +1029,11 @@ def _ambiguous_read_summary(matches, placeholders) -> str:
     """
     issued = [placeholders[row.source_id] for row in matches
               if row.source_id in placeholders]
-    if issued:
+    real = {_normalized_title(" ".join(_roster_display_title(row).split()))
+            for row in matches}
+    # 已发占位串本身又是某一行的真实标题(后到的真标题撞号)时,带序号的写法同样
+    # 命中两篇——再教模型「连序号一起抄」只会让它原样重试出同一个歧义。
+    if issued and not any(_normalized_title(p) in real for p in issued):
         suffix = "（" + issued[0].rsplit("（", 1)[-1]
         return (f"跳过按篇读取原文:清单里有 {len(matches)} 篇同名文档,"
                 f"请连同标题后面的序号(如「{suffix}」)一起从清单里逐字复制,"
@@ -1107,24 +1125,26 @@ class _RosterNumbering:
                 self._synced[chain_key] = len(outcome.items)
         return self
 
-    def source_id_for(self, requested: str) -> str:
-        """模型抄回来的占位串 → 它指向的 `source_id`;不是已发占位串时返回空串。
+    def lookup(self, requested: str) -> "Tuple[str, bool]":
+        """模型抄回来的串 → `(source_id, ambiguous)`;不是已发占位串时 `("", False)`。
 
-        读者是 `_run_enumeration` 的名字→id 解析:模型可能把花名册里的占位串
-        (「系列（第 2 篇）」)抄进 `enumerate_elements` 的来源名参数。命中就定向
-        到花名册里那一篇,绝不落到按名解析去撞一篇不在花名册里的同名文档(例如
-        参考库里真标题恰为「系列（第 2 篇）」的另一篇)。
+        读者是 `_run_enumeration` 的来源名解析(`_resolve_enumeration_source`):模型
+        可能把花名册里的占位串抄进 `enumerate_elements` 的来源名参数。命中就定向到
+        花名册里那一篇,绝不落到按名解析去撞一篇不在花名册里的同名文档。
 
-        真实标题优先:花名册里已有一行的真实标题恰好等于这个串时不翻译(交回
-        原来的按名解析),与 `_resolve_roster_rows` 里「两者都命中就报歧义」同向。
+        还原口径与 `_resolve_roster_rows` 相同(原样 → 剥 `(无摘要)` → 剥一对书名号
+        /引号 → 取整行的标题段),先命中的那一形态为准。命中的串**同时**是花名册里某
+        一行的真实标题(后到的同字面真标题)时返回 `ambiguous=True`:与
+        `_resolve_roster_rows` 里「占位串命中与真实标题命中取并集」同向,两个读者对
+        同一个串给同一个结论(都是歧义),不让其中一个静默选一篇。
         """
-        wanted = _normalized_title(" ".join(str(requested or "").split()))
-        if not wanted or wanted in self._real:
-            return ""
-        for key, placeholder in self.issued.items():
-            if _normalized_title(placeholder) == wanted:
-                return key
-        return ""
+        wanted = {_normalized_title(placeholder): key
+                  for key, placeholder in self.issued.items()}
+        for form in _copied_title_forms(" ".join(str(requested or "").split())):
+            norm = _normalized_title(form)
+            if norm in wanted:
+                return ("", True) if norm in self._real else (wanted[norm], False)
+        return "", False
 
 
 def _roster_placeholders(rows) -> Dict[str, str]:
@@ -7677,6 +7697,43 @@ class ReasoningRetriever:
         # 反复请求同一已访问节点 / 反复 search_elements, 这里强制收尾, 不空转到上限。
         state.stale = 1 if state.no_progress else 0
 
+    def _resolve_enumeration_source(
+        self, state: "_ReasoningRunState", kind: str, source_title: str,
+        source_scoped: bool,
+    ) -> "Tuple[str, int | None, bool, str]":
+        """`enumerate_elements` 的来源名 → `(source_id, matches, truncated, error)`。
+
+        先问本 run 的同名序号发号簿:模型可能把花名册里的占位串(「系列（第 2 篇）」)
+        抄进来源名参数。命中就定向到花名册里那一篇(`matches=None` = 没做按名解析),
+        绝不落到按名解析去撞一篇不在花名册里的同名文档;串同时又是后到的真实
+        标题时是歧义(`matches=2`,走既有的 `enumeration_source_unresolved`),同样
+        不交回按名解析——否则会静默列出那篇真实标题的文档,而 `read_document` 对同一
+        个串报的是歧义。没命中占位串才做原来的确定性按名解析。
+        """
+        hit, ambiguous = state.roster_numbering.sync(state.enum_chains).lookup(
+            source_title)
+        if ambiguous:
+            return "", 2, False, ""
+        if hit:
+            return hit, None, False, ""
+        try:
+            source_id, matches, truncated = (
+                self.collection_enumeration.resolve_source_title(
+                    state.notebook_id, kind, source_title,
+                    cancel_event=self.cancel_event, ceiling_binds=source_scoped,
+                )
+            )
+            return source_id, matches, truncated, ""
+        except (AskCancelled, RetrievalControlError):
+            raise
+        except Exception as exc:  # noqa: BLE001 — 见 `_run_enumeration` 的 skip
+            # 解析不出来与「名字对不上」对用户是同一件事:这一个动作做不成。绝不
+            # 退成「那就枚举整个库吧」——那会把一个被限定到单一来源的请求悄悄换成
+            # 另一个问题的答案。
+            if self.fail_closed:
+                raise
+            return "", 0, False, str(exc)[:120]
+
     def _run_enumeration(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
     ) -> None:
@@ -7725,10 +7782,8 @@ class ReasoningRetriever:
         # 天花板收窄/漂移 → `source_scoped`(三类集合)。换算见 `_enumeration_scope`。
         local_only, source_scoped = self._enumeration_scope(
             is_sources, decision.enumerate_scope)
+        source_id = decision.enumerate_source_id if is_elements else ""
         source_title = decision.enumerate_source_title if is_elements else ""
-        source_id = ((decision.enumerate_source_id if is_elements else "")
-                     or state.roster_numbering.sync(enum_chains)
-                     .source_id_for(source_title))
         label = _collection_label(collection, kind)
         # 「列出《某某》里的公式」按名字表达；内部 source id 不作为可检索身份上屏。
         # 所以先做一次确定性的名字→id 解析,再进下面所有以 source_id 为键的逻辑
@@ -7738,24 +7793,9 @@ class ReasoningRetriever:
         source_truncated = False
         resolve_error = ""
         if kind and is_elements and not source_id and source_title:
-            try:
-                source_id, source_matches, source_truncated = (
-                    self.collection_enumeration.resolve_source_title(
-                        notebook_id, kind, source_title,
-                        cancel_event=self.cancel_event, ceiling_binds=source_scoped,
-                    )
-                )
-            except (AskCancelled, RetrievalControlError):
-                raise
-            except Exception as exc:  # noqa: BLE001 — 见下的 skip
-                # 解析不出来与「名字对不上」对用户是同一件事:这一个动作
-                # 做不成。绝不退成「那就枚举整个库吧」——那会把一个被限定
-                # 到单一来源的请求悄悄换成另一个问题的答案。
-                if self.fail_closed:
-                    raise
-                source_id, source_matches = "", 0
-                source_truncated = False
-                resolve_error = str(exc)[:120]
+            (source_id, source_matches, source_truncated,
+             resolve_error) = self._resolve_enumeration_source(
+                state, kind, source_title, source_scoped)
         # 续跑键含**范围**:换了范围就不是同一份目录了(见 `_EnumChain`)。
         key = (collection, kind, source_id, local_only)
         chain_state = enum_chains.get(key)

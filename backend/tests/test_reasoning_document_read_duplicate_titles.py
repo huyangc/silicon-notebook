@@ -408,8 +408,25 @@ def test_a_late_real_title_equal_to_an_issued_placeholder_is_ambiguous_not_a_ren
     assert sorted(r.source_id for r in matches) == ["s2", "s9"]
     assert [r.source_id for r in rr._resolve_roster_rows(
         rows, "系列（第 1 篇）", numbering.issued)] == ["s1"]
-    # 翻译器也不替模型选:真实标题已在花名册里,交回原来的按名解析。
-    assert numbering.source_id_for("系列（第 2 篇）") == ""
+    # 枚举名翻译与解析侧同一个结论:歧义(而不是交回按名解析、静默列出真标题那篇)。
+    assert numbering.lookup("系列（第 2 篇）") == ("", True)
+    assert numbering.lookup("系列（第 1 篇）") == ("s1", False)
+    # 歧义文案:带序号的写法本身也歧义,不能再教模型「连序号一起抄」。
+    summary = rr._ambiguous_read_summary(matches, numbering.issued)
+    assert "无法区分" in summary and "序号" not in summary
+
+
+def test_lookup_restores_a_copied_placeholder_like_the_resolver_does():
+    """翻译前与 `read_document` 同口径还原:书名号/引号、`(无摘要)` 标记、整行的
+    标题段都先剥掉再认占位串。"""
+    numbering = rr._RosterNumbering().add([_Row("周报", "a"), _Row("周报", "b")])
+    mark = rr._ENUM_NOTE_NO_SUMMARY_MARK
+    for copied in ("周报（第 2 篇）", "《周报（第 2 篇）》", f"周报（第 2 篇）{mark}",
+                   f"《周报（第 2 篇）》{mark}", "「周报（第 2 篇）」",
+                   "周报（第 2 篇） · 类型: 摘要"):
+        assert numbering.lookup(copied) == ("b", False), copied
+    assert numbering.lookup("周报") == ("", False)         # 裸标题不是占位串
+    assert numbering.lookup("") == ("", False)
 
 
 def test_a_group_reaching_two_issues_both_numbers_once_and_later_members_append():
@@ -501,7 +518,36 @@ def test_a_real_title_arriving_in_a_later_listing_does_not_renumber_the_ledger(r
     assert "同名第" not in llm.reflect_prompts[2]
     skip = _skips(result)["document_read_unresolved"]
     assert skip.detail["matches"] == 2
+    assert "无法区分" in skip.summary          # 带序号的写法也歧义,不教模型再抄一次
     assert result.document_reads == []
+
+
+def test_enumerating_a_colliding_placeholder_is_the_same_ambiguity_not_a_silent_pick(repo):  # noqa: F811
+    """先发号、后到真标题撞号、再 `enumerate_elements` 该串:与 `read_document` 对同一个
+    串的结论一致——走既有的 `enumeration_source_unresolved`(matches=2),既不定向到
+    花名册那一篇、也不交回按名解析去静默列出真标题那一篇。"""
+    from tests.test_reasoning_enumeration_tools import _add_titled_source, _enumerate_action
+
+    active = repo.create_notebook(NotebookCreate(name="活动库"))
+    reference = repo.create_notebook(NotebookCreate(name="参考库"))
+    repo.mark_notebook_base(reference.id)
+    _add_titled_source(repo, active.id, "s-1", "系列", formulas=1)
+    _add_titled_source(repo, active.id, "s-2", "系列", formulas=2)
+    _add_titled_source(repo, reference.id, "s-ref", "系列（第 2 篇）", formulas=3)
+    repo.replace_notebook_bases(active.id, [reference.id], "user-local")
+    repo.collection_catalog.invalidate()
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(scope="current_notebook"),
+        _enumerate_sources_action(),
+        _enumerate_action(source_title="系列（第 2 篇）"),
+        ANSWER,
+    ], plan=PLAN)
+    result = _reader(repo, llm).run(active.id, "列出公式", "")
+
+    assert [o for o in result.enumerations if o.collection == "elements"] == []
+    skip = _skips(result)["enumeration_source_unresolved"]
+    assert skip.detail["matches"] == 2
+    assert skip.detail["requested_title"] == "系列（第 2 篇）"
 
 
 def test_the_read_ledger_and_trace_use_the_roster_placeholder(repo):  # noqa: F811
