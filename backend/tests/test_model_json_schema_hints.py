@@ -118,6 +118,7 @@ _KNOWN_SWEPT_NAMES = frozenset({
     "app.services.prompts.ANSWER_SCHEMA_HINT",
     "app.services.prompts.REPORT_OUTLINE_SCHEMA_HINT",
     "app.services.prompts.QUERY_INTENT_SCHEMA_HINT",
+    "app.services.prompts.QUERY_INTENT_KEYWORDS_SCHEMA_HINT",
     "app.services.kg.extract._KG_SCHEMA_HINT",
     "app.services.concept_merge_review._SCHEMA",
     "app.services.kg.conflict_review._SCHEMA",

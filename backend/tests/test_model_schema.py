@@ -176,6 +176,7 @@ def test_reflect_decision_is_required_while_unused_branch_enums_stay_open():
 
 @pytest.mark.parametrize("hint", [
     prompts.QUERY_INTENT_SCHEMA_HINT, prompts.REPORT_INTENT_SCHEMA_HINT,
+    prompts.QUERY_INTENT_KEYWORDS_SCHEMA_HINT,
 ])
 def test_intent_classification_enums_admit_only_the_listed_values(hint):
     properties = _format(hint)["json_schema"]["schema"]["properties"]

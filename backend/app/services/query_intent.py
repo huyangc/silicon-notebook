@@ -6,6 +6,7 @@ candidates are allowed to influence the requested topic.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import Any, Iterable
@@ -332,6 +333,77 @@ def _bounded_strings(value: object, limit: int = 8, item_chars: int = 500) -> li
     ][:limit]
 
 
+#: Bounds of each whole-request keyword list (``high_level_keywords`` /
+#: ``low_level_keywords``). The contract round-trips through the client, so
+#: ``QueryIntentContract`` enforces the same two numbers; the parser trims a
+#: model reply to them first, so an honest round trip never trips the model.
+INTENT_KEYWORDS_MAX_ITEMS = 16
+INTENT_KEYWORD_MAX_CHARS = 200
+_KEYWORD_SPLIT = re.compile(r"[,;\n]")
+
+
+def _intent_keyword_list(value: object) -> list[str]:
+    """One keyword list from the model, read like ``expand_query`` reads it.
+
+    Same accepted shapes as ``query_rewrite.expand_query``'s keyword reader
+    (a list, or one comma/semicolon/newline-separated string -- the
+    single-value-as-list deviation the harness absorbs), but string items
+    only (``as_text`` discipline: an off-type item is dropped, never
+    stringified into container syntax) and bounded to the contract's caps.
+    """
+    if isinstance(value, str):
+        items = _KEYWORD_SPLIT.split(value)
+    elif isinstance(value, list):
+        items = [item for item in value if isinstance(item, str)]
+    else:
+        return []
+    return [
+        item.strip()[:INTENT_KEYWORD_MAX_CHARS] for item in items if item.strip()
+    ][:INTENT_KEYWORDS_MAX_ITEMS]
+
+
+def intent_keyword_basis(contract: dict) -> str:
+    """Digest of the understanding the contract's keywords were produced for.
+
+    The keywords describe ONE understanding: this objective, this resolved
+    wording and these topic questions/directions. ``finalize_query_intent``
+    recomputes it over the submitted contract, so a contract whose wording or
+    topics changed after the model wrote the keywords (any client, not only the
+    review card) no longer matches and its keywords are dropped.
+    """
+    payload = json.dumps([
+        as_text(contract.get("objective")),
+        as_text(contract.get("resolved_question")),
+        [
+            [as_text(row.get("question")),
+             [query for query in (row.get("retrieval_queries") or [])
+              if isinstance(query, str)]]
+            for row in (contract.get("mandatory_topics") or [])
+            if isinstance(row, dict)
+        ],
+    ], ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def confirmed_intent_keywords(intent_contract: dict) -> str:
+    """The confirmed contract's whole-request keyword string, or "".
+
+    Joined exactly like ``plan()`` joins ``expand_query``'s pair (high-level
+    then low-level, one space): the first-round lexical seed arm reads either
+    string the same way. Empty -- the arm stays off, as it always was on this
+    path -- when the understanding produced none or confirmation dropped them.
+    """
+    high = _bounded_strings(
+        intent_contract.get("high_level_keywords"),
+        INTENT_KEYWORDS_MAX_ITEMS, INTENT_KEYWORD_MAX_CHARS,
+    )
+    low = _bounded_strings(
+        intent_contract.get("low_level_keywords"),
+        INTENT_KEYWORDS_MAX_ITEMS, INTENT_KEYWORD_MAX_CHARS,
+    )
+    return " ".join(high + low)
+
+
 def plan_query_intent(
     client: Any,
     question: str,
@@ -341,9 +413,20 @@ def plan_query_intent(
     purpose: str = "evidence-grounded answer",
     cancel_event: CancelEvent = None,
     status: dict[str, bool] | None = None,
+    keywords: bool = False,
+    corpus_langs: list[str] | None = None,
 ) -> dict:
-    """Build one bounded intent contract without reading corpus content."""
+    """Build one bounded intent contract without reading corpus content.
+
+    ``keywords`` (reasoning Ask, when its lexical seed arm is live) asks the
+    same single model call for the whole-request keyword pair in
+    ``corpus_langs`` (see ``prompts.query_intent_prompt``); the contract then
+    carries ``high_level_keywords`` / ``low_level_keywords`` and their
+    ``keyword_basis``. Off by default, and the returned dict then has none of
+    the three keys -- byte for byte the contract reports and older callers get.
+    """
     from app.services.prompts import (
+        QUERY_INTENT_KEYWORDS_SCHEMA_HINT,
         QUERY_INTENT_SCHEMA_HINT,
         query_intent_prompt,
     )
@@ -353,6 +436,11 @@ def plan_query_intent(
     max_topics = max(1, min(int(max_topics), 16))
     data: dict = {}
     understanding_succeeded = False
+    # "Has the arm" kwargs only when asked: the default call is byte for byte
+    # the prompt every existing caller sends.
+    keyword_kwargs = (
+        {"keywords": True, "corpus_langs": corpus_langs} if keywords else {}
+    )
     try:
         if getattr(client, "configured", False):
             raw = client.chat_json(
@@ -361,8 +449,10 @@ def plan_query_intent(
                     max_topics=max_topics,
                     history_block=history,
                     purpose=purpose,
+                    **keyword_kwargs,
                 )}],
-                QUERY_INTENT_SCHEMA_HINT,
+                QUERY_INTENT_KEYWORDS_SCHEMA_HINT
+                if keywords else QUERY_INTENT_SCHEMA_HINT,
                 cancel_event=cancel_event,
             )
             parsed = json.loads(raw)
@@ -527,6 +617,21 @@ def plan_query_intent(
         ),
         "confirmed": False,
     }
+    if keywords:
+        # Only a valid understanding's keywords are kept: a malformed reply's
+        # topics were already replaced by the fallback above, and keywords
+        # written for an understanding the server discarded describe nothing
+        # the run will search for. Empty lists mean "no lexical arm" -- the
+        # behaviour of this path before the pair existed.
+        contract["high_level_keywords"] = (
+            _intent_keyword_list(data.get("high_level_keywords"))
+            if understanding_succeeded else []
+        )
+        contract["low_level_keywords"] = (
+            _intent_keyword_list(data.get("low_level_keywords"))
+            if understanding_succeeded else []
+        )
+        contract["keyword_basis"] = intent_keyword_basis(contract)
     return contract
 
 
@@ -765,7 +870,34 @@ def finalize_query_intent(
         clarification_answers=answer_rows,
     )
     final.pop("confirmed_input", None)
+    _drop_stale_keywords(final, seed, edited=bool(answer_rows) or wording_changed)
     return final
+
+
+def _drop_stale_keywords(final: dict, seed: dict, *, edited: bool) -> None:
+    """Keep the understanding's keywords only for the understanding they describe.
+
+    The rule (conservative by construction -- the fallback is the lexical arm
+    staying off, which is what this path did before the keywords existed; no
+    deterministic tokenisation stands in for them): the keywords survive
+    confirmation only when
+
+    * the user neither edited the confirmed wording nor answered a
+      clarification (``edited``): either one can move the request away from
+      what the model wrote the keywords for, and nothing re-asks the model;
+    * the submitted contract's objective, resolved wording and every topic's
+      question and directions are still the ones the keywords were produced
+      for (``keyword_basis`` recomputes to the same digest) -- the review card
+      cannot edit topics, but any other client can.
+
+    Otherwise both lists are emptied (and the basis cleared), never repaired.
+    """
+    if not (final.get("high_level_keywords") or final.get("low_level_keywords")):
+        return
+    basis = as_text(seed.get("keyword_basis"))
+    if not edited and basis and basis == intent_keyword_basis(seed):
+        return
+    final.update(high_level_keywords=[], low_level_keywords=[], keyword_basis="")
 
 
 def confirmed_research_question(

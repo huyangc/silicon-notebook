@@ -991,8 +991,14 @@ def subjectless_run_active() -> bool:
     become another way to learn which libraries a run may search, and the one
     manager that installs a global run installs both facts together under a
     loud all-or-nothing assertion, so the two cannot disagree.
+
+    Reads only an INSTALLED scope, never a pending lazy one: the bit has a
+    single writer (``global_run``, which always installs eagerly), so a lazily
+    installed default ceiling is subjectless=False by construction, built or
+    not. Asking the question therefore never builds that ceiling -- the intent
+    precheck's keyword-language probe asks it and must stay read-free.
     """
-    scope = current_source_scope()
+    scope = _CURRENT_SOURCE_SCOPE.get()
     return bool(scope and scope.subjectless)
 
 

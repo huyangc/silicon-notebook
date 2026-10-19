@@ -125,6 +125,15 @@ test("review entries need a well-formed contract; malformed entries are dropped 
   assert.equal(isQueryIntentContractShape(contract({
     clarification_answers: [{ id: "a", question: "q", answer: "x" }],
   })), true);
+  // The understanding's keyword pair is optional (an older backend omits it) but,
+  // when present, must be what the backend accepts back — a malformed entry would
+  // otherwise be re-submitted and 422.
+  assert.equal(isQueryIntentContractShape(contract({
+    high_level_keywords: ["锁定时间", "lock time"], low_level_keywords: [], keyword_basis: "ab",
+  })), true);
+  assert.equal(isQueryIntentContractShape(contract({ high_level_keywords: "lock time" })), false);
+  assert.equal(isQueryIntentContractShape(contract({ low_level_keywords: [1] })), false);
+  assert.equal(isQueryIntentContractShape(contract({ keyword_basis: 1 })), false);
 
   assert.equal(isPersistedIntentRun(run({ phase: "review", contract: contract() })), true);
   // hand-off entries carry the confirmed intent; anything less cannot be re-submitted.

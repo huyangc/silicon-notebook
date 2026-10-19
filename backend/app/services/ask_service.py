@@ -2291,15 +2291,22 @@ class AskService:
         Runs under the same ceiling the ask will (``_retrieval_ceiling``, with
         the scopes the route froze), so the precheck can never see more than
         the run it prepares -- installed lazily: the understanding step reads
-        no corpus today, so it pays no ceiling read, and anything that ever
-        does read the scope in here gets the full default ceiling.
-        ``user_id`` defaults to the request's user."""
+        no source-scoped corpus today, so it pays no ceiling read, and anything
+        that ever does read the scope in here gets the full default ceiling.
+        ``user_id`` defaults to the request's user.
+
+        The same single model call also writes the whole-request keyword pair
+        the confirmed run's first-round lexical seed arm reads (that path never
+        runs ``plan()``), when that arm can run at all -- see
+        ``_intent_keyword_kwargs``. Still corpus-blind: the only corpus fact
+        it reads is which languages (zh/en codes) the keywords must be in."""
         from app.services.query_intent import plan_query_intent
 
         status: dict[str, bool] = {}
+        actor_id = self.current_user_id() if user_id is None else user_id
         with self._retrieval_ceiling(
             notebook_id,
-            self.current_user_id() if user_id is None else user_id,
+            actor_id,
             local_scope=source_scope,
             base_scope=base_scope,
             cancel_event=cancel_event,
@@ -2316,12 +2323,55 @@ class AskService:
                 purpose="step-by-step evidence-grounded answer",
                 cancel_event=cancel_event,
                 status=status,
+                **self._intent_keyword_kwargs(notebook_id, actor_id, cancel_event),
             )
         result = QueryIntentContract(**contract)
         result._understanding_succeeded = status.get(
             "understanding_succeeded", False
         )
         return result
+
+    def _intent_keyword_kwargs(
+        self, notebook_id: str, actor_id: str, cancel_event: CancelEvent,
+    ) -> dict:
+        """``plan_query_intent``'s keyword kwargs: ``{}`` or keywords + languages.
+
+        ``{}`` -- the understanding prompt and schema stay byte for byte what
+        they were -- whenever the confirmed run's lexical seed arm cannot run
+        (``keyword_arm_wiring_active``: passage search switched off, or a peer
+        run with its keyword arm off): a field with no reader costs output
+        tokens for nothing.
+
+        Otherwise the keywords are asked for in the run's corpus languages,
+        probed exactly as ``plan()``'s are (``probe_corpus_langs``: single
+        library = this notebook's own; global = the union over the resolved
+        participants), fail-open to the zh/en default with the same event. The
+        probe runs inside a retrieval run attested for ``actor_id`` because a
+        global preview's participant override only answers inside one; no event
+        log is passed, so the run itself emits nothing. The per-notebook
+        language cache it warms is the one the reasoning run reads next.
+        """
+        from app.services.reasoning_retrieval import (
+            keyword_arm_wiring_active,
+            note_corpus_langs_fallback,
+            probe_corpus_langs,
+        )
+        from app.services.retrieval_run import retrieval_run
+
+        retrieval = getattr(self, "retrieval", None)
+        if retrieval is None or not keyword_arm_wiring_active(self.settings, retrieval):
+            return {}
+        event_log = getattr(self, "event_log", None)
+        with retrieval_run(
+            run_kind="ask_reasoning", actor_id=str(actor_id or ""),
+            cancel_event=cancel_event,
+        ):
+            langs = probe_corpus_langs(
+                retrieval, notebook_id,
+                on_failed_open=lambda error: note_corpus_langs_fallback(
+                    event_log, error),
+            )
+        return {"keywords": True, "corpus_langs": langs}
 
     def validate_reasoning_submission(
         self, notebook_id: str, payload: AskRequest,
@@ -5102,6 +5152,7 @@ class AskService:
         reasoning_history = history
         limits = ask_retrieval_limits(payload.retrieval_effort)
         from app.services.query_intent import (
+            confirmed_intent_keywords,
             confirmed_intent_queries,
             confirmed_research_question,
         )
@@ -5180,6 +5231,13 @@ class AskService:
             intent_json=intent_contract.model_dump_json(),
             research_question=research_question,
             intent_queries=tuple(intent_queries),
+            # Only a client-confirmed intent carries understanding keywords; the
+            # direct-compatibility path (``payload.intent is None``) runs
+            # ``plan()``, whose own keywords feed the same lexical seed arm.
+            intent_keywords=(
+                confirmed_intent_keywords(intent_contract.model_dump())
+                if payload.intent is not None else ""
+            ),
             limits=limits,
             intent_projection=intent_projection,
             intent_trace_duration_ms=intent_step.duration_ms,
@@ -6284,7 +6342,7 @@ class AskService:
                         notebook_id=notebook_id, question=research_question,
                         history=reasoning_history,
                         top_n=None, max_steps=None,
-                        intent_queries=tuple(intent_queries), limits=limits,
+                        intent_queries=tuple(intent_queries), limits=limits, intent_keywords=prepared.intent_keywords,
                         # 关闭字段投影与 intent trace 同源；检索器只能通过
                         # ``as_mapping`` 进入既有 project_run_step 收窄点。
                         intent=prepared.intent_projection,

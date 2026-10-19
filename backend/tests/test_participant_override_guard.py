@@ -900,8 +900,10 @@ _SEAT_FAILSOFT_SITES = (
      "ReasoningRetriever._chunk_seed_workers", "count"),
     # PR-3 语料语言探测:对等模式取参与库语言并集,
     # ``keyword_corpus_languages`` -> ``federation_participant_ids`` -> 座位。
+    # 规划/reflect(``ReasoningRetriever._corpus_langs``)与问题理解步
+    # (``AskService._intent_keyword_kwargs``)共用这一个实现与这一个 handler。
     ("app/services/reasoning_retrieval.py",
-     "ReasoningRetriever._corpus_langs", "memoized_retrieval_value"),
+     "probe_corpus_langs", "memoized_retrieval_value"),
     ("app/services/reasoning_retrieval.py",
      "ReasoningRetriever._first_round_search", "search"),
     ("app/services/reasoning_retrieval.py",

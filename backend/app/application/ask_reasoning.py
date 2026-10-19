@@ -147,6 +147,9 @@ class PreparedReasoningAsk:
     # "evidence" stops after retrieval: the draft stage returns the context
     # the synthesis would have received and the commit stage saves nothing.
     output: str = "answer"
+    # See ``ReasoningRunInput.intent_keywords``; frozen once, here, from the
+    # confirmed contract.
+    intent_keywords: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +162,12 @@ class ReasoningRunInput:
     intent_queries: tuple[str, ...]
     limits: AskRetrievalLimits | None
     intent: ReasoningIntentProjection | None
+    # The confirmed contract's whole-request keyword string
+    # (``query_intent.confirmed_intent_keywords``): the first-round lexical
+    # seed arm's input on the path that never runs ``plan()``. Defaulted and
+    # appended last so every existing construction site stays valid; "" keeps
+    # that arm off, as it was before the understanding produced keywords.
+    intent_keywords: str = ""
 
 
 @dataclass(frozen=True, slots=True)

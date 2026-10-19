@@ -984,17 +984,16 @@ class GlobalAskService:
         source ceilings, the detached turn, and a ``FederatedRunPlan`` whose
         callbacks are never invoked (see ``_preview_federated_plan``).
 
-        That last part is defensive rather than load-bearing today:
-        ``AskService.preview_reasoning_intent`` is documented CORPUS-BLIND
-        (``AskExecutionPort.preview_reasoning_intent``'s docstring says so
-        verbatim) -- it hands the question and history straight to
-        ``plan_query_intent``, which never reads a notebook, a mount table or
-        the participant override, so the peer-mode context this installs is
-        never actually read on this path. Installing it anyway is what keeps
-        that true by CONSTRUCTION rather than by one function's current
-        implementation: if the understanding step ever grows a corpus-aware
-        step, it inherits the resolved participant set for free instead of
-        silently reading the nominal active's own mount table.
+        ``AskService.preview_reasoning_intent`` is CORPUS-BLIND about content:
+        ``plan_query_intent`` never sees a passage, a title or a mount table.
+        The one corpus fact it does read is load-bearing on this context:
+        when the run's keyword arm is live, the understanding call also writes
+        the whole-request keywords, in the union of the PARTICIPANTS' corpus
+        languages (``probe_corpus_langs`` -> ``keyword_corpus_languages`` ->
+        the participant override installed here). Without this context it
+        would read the nominal active's own languages only, and a peer written
+        in the other language would get no keyword it could match. The
+        callbacks of the installed plan are still never invoked.
         """
         plan = self._preview_federated_plan(cancel_event or threading.Event())
         with global_ask_run(
@@ -1004,6 +1003,12 @@ class GlobalAskService:
             return self.ask.preview_reasoning_intent(
                 prepared.nominal_active, prepared.question,
                 prepared.turn.user_history, cancel_event=cancel_event,
+                # The keyword-language probe resolves the participant set
+                # through this override, which answers only a retrieval run
+                # attested for the actor it was built for -- name that actor
+                # rather than trusting whatever request user the worker
+                # thread happens to carry.
+                user_id=prepared.override.attested_actor_id,
             )
 
     def preview_intent(self, payload: GlobalAskIntentPreviewRequest, *, user_id,

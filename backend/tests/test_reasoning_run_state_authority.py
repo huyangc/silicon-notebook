@@ -74,7 +74,7 @@ GUARDED = (
 #: exempt in ``run`` only
 FROZEN_PARAMETERS = frozenset({
     "notebook_id", "question", "history", "intent_queries", "limits",
-    "intent_detail",
+    "intent_detail", "intent_keywords",
 })
 #: pre-existing methods that take the run state but are not loop bodies:
 #: action executors and their helpers (they alias containers by convention)

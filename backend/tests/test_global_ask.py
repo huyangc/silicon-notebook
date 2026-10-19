@@ -62,7 +62,8 @@ class _EngineDouble:
         )
 
     @staticmethod
-    def _default_preview_reasoning_intent(notebook_id, question, history="", *, cancel_event=None):
+    def _default_preview_reasoning_intent(notebook_id, question, history="", *,
+                                          cancel_event=None, user_id=None):
         """语料盲的理解替身:字面回声问题,从不读参与集或来源。"""
         stripped = question.strip()
         return QueryIntentContract(objective=stripped, resolved_question=stripped)

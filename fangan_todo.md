@@ -165,13 +165,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
         查询向量拉向「契约模板」而不是「这道题」，跨语言时尤其伤。待办：先量化契约前缀
         对查询向量的偏移（同一道题的裸问句 vs 带契约版本，比命中集与 top-k 相似度），
         再决定要不要在 embedding 一侧也只取分隔符之前的方向。
-      - **高级界面确认合同后 `plan()` 整个不执行 → 关键词臂不跑**：正式 UI 路径永远带着
-        已确认意图（`reviewed_queries` 非空），`ReasoningRetriever` 因此刻意跳过
-        `self.plan()`（`backend/app/services/reasoning_retrieval.py` 约 3637 行的注释写明
-        了这条纪律），而首轮原文播种的词法臂用的正是 `plan()` 里 `expand_query` 产出的高/低层
-        关键词。结果：走高级界面的 run 只剩语义臂，词法臂在最需要它的跨语言场景缺席。
-        与下方「词法臂关键词双语化」是同一处的两个问题（一个是不跑、一个是跑了但语言对
-        不上），做的时候一起定。
 - [ ] **全局（对等）模式的元素检索臂联邦化**。`retrieval_candidates.retrieve_elements`
       是第三条 **active-only** 补召回腿（前两条见上一条）：它只对传进来的那一个 notebook
       发一次元素检索，没有联邦通道。对等模式下留着它，等于凭空给**名义 active** 多一条
