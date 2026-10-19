@@ -115,6 +115,9 @@ def seed(repo, *, postgres: bool) -> World:
             ("mc-3", nb, "K-other", "K-rmsnorm", "pending", "", ""),
             ("mc-4", nb, "K-x", "K-y", "deferred", "x", "y"),
             ("mc-5", other, "K-rmsnorm", "K-z", "confirmed", "", ""),
+            # both canonical ids drifted away (no such canonical any more): only
+            # the seeds still say which concepts the user judged
+            ("mc-6", nb, "K-gone-a", "K-gone-b", "rejected", "llama 3 1", "llama 31"),
         ):
             ins("concept_merge_candidates", "id,notebook_id,canonical_a,canonical_b,"
                 "score,status,seed_a,seed_b,created_at,updated_at",
@@ -294,10 +297,10 @@ EXPECTED_ALL_STATES = [
 ]
 
 
-def candidate_states(rt, notebook_id: str, statuses, ids):
+def candidate_states(rt, notebook_id: str, statuses, seeds):
     with rt.unified_kg.read_snapshot() as db:
-        return rt.governance.merge_candidate_states_for_canonicals(
-            db, notebook_id, statuses, ids)
+        return rt.governance.merge_candidate_states_for_seeds(
+            db, notebook_id, statuses, seeds)
 
 
 # ---------------------------------------------------------- code version
@@ -342,6 +345,29 @@ BAD_ROWS = (
 # ``monkeypatch`` and the backend's ``unified_kg_store`` module (for the
 # store-level caps), and asserts against the literals above.
 # ======================================================================
+
+def finding_keys(rt, notebook_id: str, keys):
+    with rt.unified_kg.read_snapshot() as db:
+        return rt.unified_kg.kg_analysis_finding_keys(db, notebook_id, keys)
+
+
+def check_finding_keys(repo, *, postgres: bool) -> None:
+    """Which (rule_id, subject_key) are in the CURRENT detail — by primary key,
+    per notebook, batch-invariant; keys with "|" and "/" round-trip exactly."""
+    rt = repo._runtime
+    world = seed(repo, postgres=postgres)
+    replace(rt, world.nb, FINDINGS_V1)
+    replace(rt, world.other, FINDINGS_V2)
+    asked = [("F2", "src-a|src-b"), ("F1", "src-a"), ("F1", "src-b"), ("F5", "notebook"),
+             ("F4", "tcp/ip"), ("F2", "src-a|src-b")]
+    assert finding_keys(rt, world.nb, asked) == {
+        ("F2", "src-a|src-b"), ("F1", "src-a"), ("F5", "notebook")}
+    assert finding_keys(rt, world.other, asked) == {("F1", "src-b")}
+    assert finding_keys(rt, world.nb, []) == set()
+    padding = [("F1", f"src-none-{i:04d}") for i in range(1200)]
+    assert finding_keys(rt, world.nb, padding + asked) == {
+        ("F2", "src-a|src-b"), ("F1", "src-a"), ("F5", "notebook")}
+
 
 def check_findings_replace_wholesale(repo, *, postgres: bool) -> None:
     """The detail is replaced wholesale with the ledger (整删整插), read back in
@@ -641,14 +667,22 @@ def check_candidate_states(repo, *, postgres: bool) -> None:
     rt = repo._runtime
     world = seed(repo, postgres=postgres)
     decided = ("confirmed", "rejected", "deferred")
-    assert candidate_states(rt, world.nb, decided, ["K-rmsnorm"]) == (
+    # "rmsnorm" is mc-1's seed_a and mc-2's EFFECTIVE seed_b (an empty seed falls
+    # back to the canonical id minus "K-", like decided_seed_pairs_from)
+    assert candidate_states(rt, world.nb, decided, ["rmsnorm"]) == (
         EXPECTED_DECIDED_STATES)
     assert candidate_states(
-        rt, world.nb, (*decided, "pending"), ["K-rmsnorm", "K-rmsnorm"]
+        rt, world.nb, (*decided, "pending"), ["rmsnorm", "rmsnorm"]
     ) == EXPECTED_ALL_STATES
-    assert candidate_states(rt, world.nb, decided, ["K-y"]) == [
+    assert candidate_states(rt, world.nb, decided, ["y"]) == [
         {"id": "mc-4", "canonical_a": "K-x", "canonical_b": "K-y", "status": "deferred",
          "seed_a": "x", "seed_b": "y", "updated_at": T1}]
+    # both canonical ids drifted: found by seed, never by canonical id
+    assert candidate_states(rt, world.nb, decided, ["llama 31"]) == [
+        {"id": "mc-6", "canonical_a": "K-gone-a", "canonical_b": "K-gone-b",
+         "status": "rejected", "seed_a": "llama 3 1", "seed_b": "llama 31",
+         "updated_at": T1}]
+    assert candidate_states(rt, world.nb, decided, ["K-rmsnorm"]) == []
     assert candidate_states(rt, world.nb, decided, []) == []
     with pytest.raises(ValueError):
         candidate_states(rt, world.nb, ("confirmed",), [])

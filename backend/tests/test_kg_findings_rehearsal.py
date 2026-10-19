@@ -247,6 +247,14 @@ def test_default_candidate_cap_is_the_product_default():
     )
 
 
+def test_default_statement_timeout_does_not_hold_a_snapshot_for_an_hour():
+    """PR-2 review: a streamed full read keeps its snapshot open (vacuum waits);
+    twenty minutes covers the read and stops short of an hour-long hold."""
+    assert rehearsal.DEFAULT_STATEMENT_TIMEOUT_SECONDS == 1200
+    assert "statement_timeout=1200000" in rehearsal.connection_options(
+        rehearsal.DEFAULT_STATEMENT_TIMEOUT_SECONDS)
+
+
 def test_phase_timer_records_a_phase_even_when_its_body_fails():
     ticks = iter(float(i) for i in range(100))
     lines: List[str] = []

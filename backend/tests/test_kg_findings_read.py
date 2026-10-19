@@ -167,6 +167,35 @@ def test_reject_merge_moves_f4_to_passed(repo, built):
     assert _status(passed) == {("F4", "llama31"): (STATUS_DECIDED_NOT_SAME, None)}
 
 
+def test_a_decision_with_drifted_canonical_ids_still_moves_f4_to_passed(repo, built):
+    """PR-2 review: decisions are matched by SEED on the read side too — a
+    rejection whose two canonical ids both drifted (the clusters' minimum
+    members changed) still says "not the same thing"; so does one keyed by a
+    hidden member's seed (stored in the evidence at publication)."""
+    _sql(repo,
+         "INSERT INTO concept_merge_candidates(id,notebook_id,canonical_a,canonical_b,"
+         "score,status,seed_a,seed_b,created_at,updated_at) "
+         "VALUES ('mc-drift',?,'K-gone-a','K-gone-b',0.9,'rejected',?,?,?,?)",
+         (built, concept_seed_v1("Llama three-one"), concept_seed_v1("Llama 31"),
+          "2026-10-19", "2026-10-19"))
+    assert _status(_page(repo, built, "passed")) == {
+        ("F4", "llama31"): (STATUS_DECIDED_NOT_SAME, None)}
+
+
+def test_a_reparse_finished_during_the_precompute_counts_as_handled(repo, built):
+    """"Reparsed after the report" is judged against the moment the scan started
+    (``scanned_at``), not the publication: a reparse that finished inside the
+    precompute window may not be in the report at all."""
+    payload_scanned = _service(repo).findings_page(built).built_at   # sanity: present
+    assert payload_scanned is not None
+    _sql(repo, "UPDATE kg_analysis_artifacts SET created_at='2099-01-02T00:00:00+00:00' "
+               "WHERE notebook_id=? AND kind='findings'", (built,))
+    _sql(repo, "UPDATE sources SET chunked_at='2099-01-01T00:00:00+00:00' "
+               "WHERE id='src-broken'")
+    assert _status(_page(repo, built))[("F3", "src-broken")] == (
+        STATUS_HANDLED, HANDLED_SOURCE_REPROCESSED)
+
+
 def test_confirm_merge_marks_f4_handled(repo, built):
     _decide(repo, built, "confirmed")
     assert _status(_page(repo, built))[("F4", "llama31")] == (
@@ -243,13 +272,27 @@ def test_the_page_reads_one_snapshot(repo, built, monkeypatch):
                  "kg_analysis_mark_rows", "kg_finding_member_name_rows",
                  "kg_finding_source_states"):
         spy(store, name)
-    spy(governance, "merge_candidate_states_for_canonicals")
+    spy(governance, "merge_candidate_states_for_seeds")
     _page(repo, built)
     assert len(snapshots) == 1
     assert set(seen) == {"state_row", "kg_analysis_artifact_rows", "kg_analysis_finding_rows",
-                         "kg_analysis_mark_rows", "kg_finding_member_name_rows",
-                         "kg_finding_source_states", "merge_candidate_states_for_canonicals"}
+                         "kg_analysis_mark_rows", "kg_finding_source_states",
+                         "merge_candidate_states_for_seeds"}
     assert {id(snapshots[0])} == set().union(*seen.values())
+
+
+def test_the_page_never_reads_member_objects(repo, built, monkeypatch):
+    """PR-2 review: F4's decisions are matched by the member seeds stored in the
+    evidence at publication — the page does not read member objects at all (that
+    read grew with group sizes, independent of zone and page), and with no stored
+    decision at all the decision read is still bounded by the seed list."""
+    store = repo._runtime.unified_kg
+    called: list = []
+    monkeypatch.setattr(store, "kg_finding_member_name_rows",
+                        lambda *args, **kwargs: called.append(args) or [])
+    for zone in ("open", "passed", "dismissed"):
+        _page(repo, built, zone)
+    assert called == []
 
 
 # ---------------------------------------------------------------- summary
@@ -393,6 +436,25 @@ def test_the_dismissal_routes_are_guarded_like_merge_confirmation():
     for dependencies in methods.values():
         assert require_notebook_capability("kg:write") in dependencies
     assert KG_FINDINGS_PAGE_MAX == 200
+
+
+def test_a_full_mark_table_refuses_a_new_dismissal_with_409(tmp_path, monkeypatch):
+    """Dismissals outlive the detail, so the mark table can fill; a NEW
+    dismissal is then refused with 409 and a message the panel can show — not a
+    500 — and no existing mark is touched."""
+    from app.repositories.sqlite import unified_kg_store as store_module
+
+    client, nb, owner, _member, repository = _route_world(tmp_path, monkeypatch, "j")
+    monkeypatch.setattr(store_module, "KG_ANALYSIS_MARKS_MAX", 1)
+    assert client.put(_dismissal(nb, "F1", "src-off"), headers=owner).status_code == 204
+    response = client.put(_dismissal(nb, "F3", "src-broken"), headers=owner)
+    assert response.status_code == 409, response.text
+    assert "撤销" in response.json()["detail"]
+    with repository._runtime.unified_kg.read_snapshot() as db:
+        marks = repository._runtime.unified_kg.kg_analysis_mark_rows(db, nb)
+    assert [(m["rule_id"], m["subject_key"]) for m in marks] == [("F1", "src-off")]
+    # overwriting an existing dismissal is not a new row: still fine
+    assert client.put(_dismissal(nb, "F1", "src-off"), headers=owner).status_code == 204
 
 
 def test_dismissal_on_a_mirror_is_409(tmp_path, monkeypatch):

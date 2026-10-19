@@ -22756,7 +22756,7 @@
           "summary": "Undismiss Kg Finding"
         },
         "put": {
-          "description": "标为正常。主键两段由路由解码一次(F2 的主键含 ``|``,F4 的主键可能含 ``/``,所以\n``subject_key`` 用 ``:path``);主键不在**当前**问题清单里 → 404。",
+          "description": "标为正常。主键两段由路由解码一次(F2 的主键含 ``|``,F4 的主键可能含 ``/``,所以\n``subject_key`` 用 ``:path``);主键不在**当前**问题清单里 → 404;本库的标记已到\n上限 → 409 + 可展示的提示(已有的豁免一条都不动,撤销一些即可再标)。",
           "operationId": "dismiss_kg_finding_api_notebooks__notebook_id__kg_analysis_findings__rule_id___subject_key__dismissal_put",
           "parameters": [
             {

@@ -327,10 +327,20 @@ MARK_RELINK_ATTEMPTED = "relink_attempted"
 MARK_KINDS = (MARK_DISMISSED, MARK_RELINK_ATTEMPTED)
 
 # 每个 notebook 的标记行数硬上限,同一个「写入口保证、读入口恒覆盖」的结构:写一条
-# **新**标记时,已有行数到了上限就硬失败。上限取明细上限的两倍:dismissed 只为当前明细
-# 里的主体写(≤ KG_FINDINGS_ROWS_MAX),发布时把主体已不存在的清掉;两次发布之间旧的
-# 还没清、新的已经写,最多叠成两份;relink_attempted 每个 notebook 一条。
+# **新**标记时,已有行数到了上限就拒(`KgAnalysisMarksFull`,端点 409 + 可展示的提示),
+# 读入口取 ``LIMIT 上限 + 1`` 恒是全集。
+#
+# ⚠ 标记**可以比明细多**,上限是真上限而不是推出来的界:dismissed 只能为当前明细里的主体
+# 写,但写下之后一直保留,直到用户撤销、主体来源被删(F1/F2/F3)、或删除笔记本 —— F4/F5
+# 的豁免发布时从不清,规则 skipped / 截断时也一律不清(问题清单设计 §8.3)。所以它们可以
+# 活过明细、跨多次发布累积。取明细上限的两倍(+ 每库一条 relink_attempted)是「正常使用
+# 远到不了」的量级;真写满时拒的是**新**豁免,用户先撤销一些即可,已有的一条都不丢。
 KG_ANALYSIS_MARKS_MAX = 2 * KG_FINDINGS_ROWS_MAX + 1
+
+
+class KgAnalysisMarksFull(ValueError):
+    """写一条**新**标记时本库已有 `KG_ANALYSIS_MARKS_MAX` 条。端点据此回 409 与可展示的
+    提示,不是 500;已有标记一条都不动。"""
 
 
 def check_finding_row(row: object) -> tuple:

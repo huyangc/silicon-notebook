@@ -432,6 +432,147 @@ def test_publish_prunes_dismissals_whose_subject_is_gone(repo):
         ("F1", "src-off", MARK_DISMISSED), ("F5", "notebook", MARK_RELINK_ATTEMPTED)]
 
 
+def _dismiss(repo, notebook_id, rule_id, key):
+    assert repo._runtime.kg_analysis.dismiss_finding(
+        notebook_id, rule_id, key, actor_user_id="u-1") is True
+
+
+def _dismissed_keys(repo, notebook_id):
+    return sorted((m["rule_id"], m["subject_key"]) for m in _marks(repo, notebook_id)
+                  if m["kind"] == MARK_DISMISSED)
+
+
+def _drop_objects(repo, notebook_id, where: str, params=()):
+    """Remove objects (and what hangs off them) the way a KG delete or a reparse in
+    flight leaves a source: the source row stays, its knowledge is gone."""
+    with repo._runtime.database.write() as db:
+        ids = [row["id"] for row in db.execute(
+            f"SELECT id FROM knowledge_objects WHERE notebook_id=? AND {where}",
+            (notebook_id, *params)).fetchall()]
+        for object_id in ids:
+            db.execute("DELETE FROM knowledge_relations WHERE source_object_id=? "
+                       "OR target_object_id=?", (object_id, object_id))
+            db.execute("DELETE FROM concept_clusters WHERE member_object_id=?", (object_id,))
+            db.execute("DELETE FROM knowledge_objects WHERE id=?", (object_id,))
+        db.execute("UPDATE unified_kg_state SET kg_mutation_seq = kg_mutation_seq + 1 "
+                   "WHERE notebook_id=?", (notebook_id,))
+
+
+def test_a_dismissal_survives_a_kg_delete_awaiting_re_extraction(repo):
+    """Failure mode 1 of "not in the detail ⇒ prune": the knowledge graph was
+    deleted (or a source's knowledge dropped) and not re-extracted yet when the
+    analysis is updated. The source still exists, so its dismissal stays; it
+    goes once the source itself is deleted."""
+    world = seed_world(repo, postgres=False)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    lifecycle.rebuild_communities(world.notebook_id)
+    _dismiss(repo, world.notebook_id, "F1", "src-off")
+    _drop_objects(repo, world.notebook_id, "source_id='src-off'")
+    lifecycle.rebuild_communities(world.notebook_id, force=True)
+    assert ("F1", "src-off") not in _keys(_rows(repo, world.notebook_id))
+    assert _dismissed_keys(repo, world.notebook_id) == [("F1", "src-off")]
+    # counted only while the subject is in the current detail
+    assert repo._runtime.kg_analysis.overview(
+        world.notebook_id).findings_summary.counts["dismissed"] == 0
+    with repo._runtime.database.write() as db:
+        db.execute("DELETE FROM sources WHERE id='src-off'")
+    lifecycle.rebuild_communities(world.notebook_id, force=True)
+    assert _dismissed_keys(repo, world.notebook_id) == []
+
+
+def test_a_dismissal_survives_a_reparse_in_flight(repo):
+    """Failure mode 2: the dismissed source is being reparsed (its old knowledge
+    cleared, the new not extracted yet) when a build publishes."""
+    world = seed_world(repo, postgres=False)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    lifecycle.rebuild_communities(world.notebook_id)
+    _dismiss(repo, world.notebook_id, "F3", "src-broken")
+    with repo._runtime.database.write() as db:
+        db.execute("UPDATE sources SET status='parsing' WHERE id='src-broken'")
+    _drop_objects(repo, world.notebook_id, "source_id='src-broken'")
+    lifecycle.rebuild_communities(world.notebook_id, force=True)
+    assert ("F3", "src-broken") not in _keys(_rows(repo, world.notebook_id))
+    assert _dismissed_keys(repo, world.notebook_id) == [("F3", "src-broken")]
+
+
+def test_a_dismissal_survives_its_rule_being_truncated(repo, monkeypatch):
+    """Failure mode 3: the rule hit its row cap — a subject can drop out of the
+    persisted window by ranking alone. Nothing of a truncated rule is pruned,
+    even when a source of the subject is gone (the rule saw only part)."""
+    from app.services import kg_findings
+
+    world = seed_world(repo, postgres=False)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    lifecycle.rebuild_communities(world.notebook_id)
+    _dismiss(repo, world.notebook_id, "F2", "src-dup-a|src-dup-b")
+    with repo._runtime.database.write() as db:
+        db.execute("DELETE FROM sources WHERE id='src-dup-b'")
+    monkeypatch.setattr(kg_findings, "MAX_PERSISTED_FINDINGS", 0)
+    lifecycle.rebuild_communities(world.notebook_id, force=True)
+    payload = _ledger(repo, world.notebook_id)[ARTIFACT_FINDINGS]["payload"]
+    assert payload["rules"]["F2"]["truncated"] is True
+    assert _dismissed_keys(repo, world.notebook_id) == [("F2", "src-dup-a|src-dup-b")]
+
+
+def test_a_dismissal_survives_its_rule_being_skipped(repo):
+    """Failure mode 4: fewer than two comparable sources left — F1/F2 are
+    skipped for this build; a skipped rule prunes nothing."""
+    world = seed_world(repo, postgres=False)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    lifecycle.rebuild_communities(world.notebook_id)
+    _dismiss(repo, world.notebook_id, "F2", "src-dup-a|src-dup-b")
+    _drop_objects(repo, world.notebook_id, "source_id <> 'src-dup-a'")
+    with repo._runtime.database.write() as db:
+        db.execute("DELETE FROM sources WHERE id='src-dup-b'")
+    lifecycle.rebuild_communities(world.notebook_id, force=True)
+    payload = _ledger(repo, world.notebook_id)[ARTIFACT_FINDINGS]["payload"]
+    assert payload["rules"]["F2"]["status"] == "skipped"
+    assert _dismissed_keys(repo, world.notebook_id) == [("F2", "src-dup-a|src-dup-b")]
+
+
+def test_f4_and_f5_dismissals_survive_publication(repo):
+    """F4 / F5 dismissals are never pruned at publication (an F4 group the user
+    then rejected leaves the detail; the dismissal stays until undone)."""
+    world = seed_world(repo, postgres=False)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    lifecycle.rebuild_communities(world.notebook_id)
+    _dismiss(repo, world.notebook_id, "F4", "llama31")
+    _dismiss(repo, world.notebook_id, "F5", "notebook")
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO concept_merge_candidates(id,notebook_id,canonical_a,canonical_b,"
+            "score,status,seed_a,seed_b,created_at,updated_at) "
+            "VALUES ('mc-r',?,'K-llama 3 1','K-llama 31',0.9,'rejected','llama 3 1',"
+            "'llama 31','2026-10-19','2026-10-19')", (world.notebook_id,))
+    lifecycle.rebuild_communities(world.notebook_id, force=True)
+    assert ("F4", "llama31") not in _keys(_rows(repo, world.notebook_id))
+    assert _dismissed_keys(repo, world.notebook_id) == [("F4", "llama31"), ("F5", "notebook")]
+
+
+def test_a_failed_relink_mark_does_not_fail_the_relink(repo, monkeypatch):
+    """The edges are committed before the mark is written: a failing mark write
+    must not turn a successful relink into a failure. It is reported as an
+    event carrying the exception CLASS only, never its text."""
+    world = seed_world(repo, postgres=False)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    events: list = []
+    original_emit = lifecycle.event_log.emit
+    monkeypatch.setattr(lifecycle.event_log, "emit",
+                        lambda event: (events.append(event), original_emit(event))[1])
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("secret-path /var/db relation kg_analysis_marks")
+
+    monkeypatch.setattr(repo._runtime.unified_kg, "write_kg_analysis_mark", boom)
+    result = lifecycle.relink_notebook_kg(world.notebook_id)
+    assert result["edges_added"] == 0
+    failed = [{k: e[k] for k in ("kind", "notebook_id", "error_class")}
+              for e in events if e.get("kind") == "kg_relink_mark_failed"]
+    assert failed == [{"kind": "kg_relink_mark_failed", "notebook_id": world.notebook_id,
+                       "error_class": "RuntimeError"}]
+    assert "secret" not in json.dumps(events, default=str)
+
+
 def test_the_graph_scan_counts_relation_rows_per_source(repo):
     """Step ① feeds F3b: every `community_graph_rows` row counted under its own
     ``kr.source_id`` — self-loops included (a relation both of whose ends merged
@@ -448,7 +589,7 @@ def test_the_graph_scan_counts_relation_rows_per_source(repo):
             "target_object_id,edge_type,evidence,created_at) "
             "VALUES ('kr-loop',?,'src-off',?,?,'supports','[]','2026-10-19')",
             (world.notebook_id, loop, loop))
-    _names, _can2idx, _idx2can, _edges, relations = (
+    _names, _can2idx, _idx2can, _edges, relations, _scanned_at = (
         repo._runtime.knowledge_lifecycle._scan_canonical_graph(world.notebook_id))
     assert relations == {
         "src-core-0": 12, "src-core-1": 12, "src-core-2": 13, "src-core-3": 13,

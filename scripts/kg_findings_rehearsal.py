@@ -30,9 +30,10 @@
 **只读保证**:每条连接都用 `psycopg.connect(dsn, options="-c default_transaction_read_only=on
 ...")` 打开并置 `conn.read_only = True`,服务端拒绝任何写;脚本只发 SELECT(测试逐条
 断言);大结果集一律 `cursor().stream()`,不整体缓冲;每个阶段后 `commit()` 释放快照。
-只支持 PostgreSQL(SQLite 值直接拒绝)。连接附带 `statement_timeout`(默认 3600 秒,
+只支持 PostgreSQL(SQLite 值直接拒绝)。连接附带 `statement_timeout`(默认 1200 秒,
 `--statement-timeout-seconds 0` 不限):流式整表读的计时覆盖整个消费期,服务端默认的
-30 秒会把它掐掉(产品侧用 `raise_statement_timeout_floor` 抬到 600 秒,理由同)。
+30 秒会把它掐掉(产品侧用 `raise_statement_timeout_floor` 抬到 600 秒,理由同);上限也
+不取更大,流式读期间一直持着快照、挡着 vacuum。
 
 **成本**(错峰运行):一次 `knowledge_relations` 全库流(带 `ORDER BY`,服务端先排序)、
 一次 `knowledge_objects` 流、一次 `concept_clusters` 名字流,各是该笔记本的整表扫描,
@@ -138,7 +139,7 @@ APPLICATION_NAME = "kg_findings_rehearsal"
 DEFAULT_MAX_CANDIDATE_PAIRS = 5_000_000
 # F2's J distribution below the product threshold: one extra join at this J.
 DEFAULT_J_FLOOR = 0.30
-DEFAULT_STATEMENT_TIMEOUT_SECONDS = 3600
+DEFAULT_STATEMENT_TIMEOUT_SECONDS = 1200
 
 PERCENTILES = (1, 5, 10, 25, 50, 75, 90, 95, 99)
 DF_BOUNDS = (1, 10, 30, 100, 300, 1000)
@@ -598,7 +599,7 @@ class DbLookups:
 
     def __call__(
         self, request: LookupRequest
-    ) -> Tuple[List[Tuple[Optional[str], str, str]], Dict[str, SourceFacts]]:
+    ) -> Tuple[List[Tuple[Optional[str], str, str]], Dict[str, SourceFacts], Dict[str, Set[str]]]:
         names: List[Tuple[Optional[str], str, str]] = []
         for source_id, canonical_id in request.names:
             query = (
@@ -619,14 +620,19 @@ class DbLookups:
                 sources[source_id] = SourceFacts(
                     title or "", created.isoformat() if created else None
                 )
-        return names, sources
+        # Like the product: the (None, canonical) keys also get the v1 seeds of ALL
+        # members (hidden ones included), which F4 stores in its evidence.
+        members = sorted({cid for sid, cid in request.names if sid is None})
+        seeds = (member_seeds_from_rows(fetch_all(
+            self._conn, member_names_query(self._notebook_id, members))) if members else {})
+        return names, sources, seeds
 
 
 def drive_draft(
     draft: kg_findings.FindingsDraft,
     answer: Callable[
         [LookupRequest],
-        Tuple[Iterable[Tuple[Optional[str], str, str]], Mapping[str, SourceFacts]],
+        tuple,  # (names, sources[, member seeds])
     ],
 ) -> Tuple[kg_findings.FindingsResult, Dict[str, int]]:
     """The lookup protocol (``FindingsDraft`` docstring): ask, answer, until done."""
@@ -635,8 +641,10 @@ def drive_draft(
         rounds += 1
         name_keys += len(request.names)
         source_keys += len(request.sources)
-        names, sources = answer(request)
-        draft.supply(names=names, sources=sources)
+        answered = answer(request)
+        names, sources = answered[0], answered[1]
+        draft.supply(names=names, sources=sources,
+                     member_seeds=answered[2] if len(answered) > 2 else None)
     return draft.result(), {
         "lookup_rounds": rounds, "lookup_name_keys": name_keys,
         "lookup_source_keys": source_keys,

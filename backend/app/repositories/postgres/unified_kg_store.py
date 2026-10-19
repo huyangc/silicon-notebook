@@ -95,6 +95,7 @@ from app.repositories.postgres.search import (
 from app.domain.kg_analysis_contracts import (
     BOARD_DEPENDENT_ARTIFACT_KINDS,
     KG_ANALYSIS_MARKS_MAX,
+    KgAnalysisMarksFull,
     KG_FINDINGS_ROWS_MAX,
     batched,
     check_artifact_payloads,
@@ -2883,6 +2884,33 @@ class UnifiedKgStore:
         )
 
     @staticmethod
+    def kg_analysis_finding_keys(
+        db: Any, notebook_id: str, keys: Sequence[Tuple[str, str]]
+    ) -> set:
+        """SQLite 孪生同名方法(两个消费方与主键点查形态见那边)。主体键列表经
+        ``member_of`` + ``execute_ids``(``= ANY``,custom plan),每条规则一条语句,500
+        一批。"""
+        wanted: Dict[str, List[str]] = {}
+        for rule_id, subject_key in dict.fromkeys((str(r), str(k)) for r, k in keys):
+            wanted.setdefault(rule_id, []).append(subject_key)
+        found: set = set()
+        for rule_id in sorted(wanted):
+            subject_keys = sorted(wanted[rule_id])
+            for start in range(0, len(subject_keys), 500):
+                bound = bind_ids(subject_keys[start:start + 500])
+                found.update(
+                    (row["rule_id"], row["subject_key"])
+                    for row in execute_ids(
+                        db,
+                        "SELECT rule_id, subject_key FROM kg_analysis_findings "
+                        "WHERE notebook_id=%s AND rule_id=%s "
+                        f"AND {member_of('subject_key', bound)}",
+                        [notebook_id, rule_id, bound.param],
+                    ).fetchall()
+                )
+        return found
+
+    @staticmethod
     def kg_analysis_mark_rows(
         db: Any, notebook_id: str
     ) -> List[Dict[str, object]]:
@@ -2945,7 +2973,7 @@ class UnifiedKgStore:
                 (notebook_id, KG_ANALYSIS_MARKS_MAX),
             ).fetchone()["c"]
             if int(count) >= KG_ANALYSIS_MARKS_MAX:
-                raise ValueError(
+                raise KgAnalysisMarksFull(
                     f"KG 分析标记:一个 notebook 最多 {KG_ANALYSIS_MARKS_MAX} 条,"
                     "读入口按这个上限取数"
                 )

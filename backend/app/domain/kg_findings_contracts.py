@@ -117,6 +117,13 @@ def source_pair_key(source_a: str, source_b: str) -> str:
     return f"{low}{SOURCE_PAIR_KEY_SEPARATOR}{high}"
 
 
+def source_pair_ids(subject_key: str) -> Tuple[str, ...]:
+    """F2's subject key back to its two source ids; ``()`` when it is not one
+    (the caller then treats it as unknown, never as "the sources are gone")."""
+    parts = str(subject_key).split(SOURCE_PAIR_KEY_SEPARATOR)
+    return tuple(parts) if len(parts) == 2 and all(parts) else ()
+
+
 # --------------------------------------------------------------- action kinds
 ACTION_DELETE_SOURCE = "delete_source"
 ACTION_REPARSE_SOURCE = "reparse_source"
@@ -194,6 +201,12 @@ MAX_SUBJECT_REFS = 50
 S1_EXAMPLES = 3
 # Comparison summary: names of findings that disappeared since the last build.
 MAX_RESOLVED_SAMPLES = 20
+# F4 evidence: the v1 seeds of each canonical's members (hidden members
+# included) are stored with the group, so the read side matches stored decisions
+# by seed without reading member objects. Capped per canonical (sorted, the
+# first N kept, ``seeds_truncated`` recorded): a missed seed can only fail to
+# match a decision, i.e. the group stays "open" — the safe direction.
+MAX_MEMBER_SEEDS_PER_CANONICAL = 32
 # `GET /notebooks/{id}/kg-analysis/findings`: rows per page (the endpoint's
 # ``le=``, and the service clamps again — same layering as /kg-analysis/sources).
 KG_FINDINGS_PAGE_MAX = 200

@@ -2,11 +2,12 @@
 (PostgreSQL 0077), on a production-shaped corpus and with the planner left
 alone (no ``enable_seqscan`` games):
 
-* the four statements that bind an id list (``id_binding``): the per-source
+* the statements that bind an id list (``id_binding``): the per-source
   state read (``kg_finding_source_states``), the sample display-name read
   (``kg_finding_display_name_rows``), the member-name read
   (``kg_finding_member_name_rows``, PR-2) and the candidate-state read
-  (``merge_candidate_states_for_canonicals``) -- each must reach its rows
+  (``merge_candidate_states_for_seeds``) and the finding-key probe
+  (``kg_analysis_finding_keys``) -- each must reach its rows
   through the keys it exists to read and never scan the table;
 * the publish transaction's old-detail read (``kg_analysis_finding_rows``):
   this notebook's primary-key prefix among many notebooks' findings, never a
@@ -249,8 +250,10 @@ def test_candidate_state_read_is_driven_by_the_notebook_status_slice(pin_databas
     store = GovernanceStore(pin_database, _seams())
 
     def call():
+        # The corpus' candidates carry empty seeds and canonicals without "K-",
+        # so their effective seed IS the canonical id: the list doubles as seeds.
         with UnifiedKgStore(pin_database).read_snapshot() as db:
-            assert store.merge_candidate_states_for_canonicals(
+            assert store.merge_candidate_states_for_seeds(
                 db, NB, ("confirmed", "rejected", "deferred"), CANDIDATE_CANONICALS)
 
     [(sql, params)] = _captured(call, "FROM concept_merge_candidates WHERE")
@@ -258,6 +261,24 @@ def test_candidate_state_read_is_driven_by_the_notebook_status_slice(pin_databas
     _no_scan(plan, "concept_merge_candidates")
     assert "idx_candidates_nb_status" in plan, plan
     assert "Sort" not in plan, plan
+
+
+def test_finding_key_read_probes_the_primary_key(pin_database):
+    """PR-2 review: the dismissal write's existence check and the overview's
+    dismissed count probe ``pk_kg_analysis_findings`` per key — never the
+    notebook's whole detail, never a scan of every notebook's findings."""
+    store = UnifiedKgStore(pin_database)
+    keys = [("F1", f"s-{index:05d}") for index in range(0, 125, 5)]
+
+    def call():
+        with store.read_snapshot() as db:
+            assert store.kg_analysis_finding_keys(db, NB, keys)
+
+    [(sql, params)] = _captured(call, "SELECT rule_id, subject_key FROM kg_analysis_findings")
+    plan = _plan(pin_database, sql, params)
+    _no_scan(plan, "kg_analysis_findings")
+    assert "pk_kg_analysis_findings" in plan, plan
+    assert "subject_key = ANY" in plan, plan
 
 
 def test_old_detail_read_walks_the_primary_key(pin_database):

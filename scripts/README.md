@@ -649,7 +649,7 @@ PYTHONPATH=backend python3 scripts/kg_findings_rehearsal.py \
 | `--show-samples` | 输出来源标题、概念名和问题明细原文。**那是用户数据**,输出文件按 0600 创建,别外发;默认一概不输出 |
 | `--j-floor` | F2 的 J 分布默认再多跑一遍把阈值降到 0.30 的连接(量产品阈值以下的一段);`0.45` 跳过 |
 | `--max-candidate-pairs` | F2 候选对生成数上限,默认与产品设置 `KG_FINDINGS_MAX_CANDIDATE_PAIRS` 相同 |
-| `--statement-timeout-seconds` | 会话 `statement_timeout`,默认 3600(`0` 不限):流式整表读的计时覆盖整个消费期,服务端默认的 30 秒会掐断它 |
+| `--statement-timeout-seconds` | 会话 `statement_timeout`,默认 1200(`0` 不限):流式整表读的计时覆盖整个消费期,服务端默认的 30 秒会掐断它;也不取更大,流式读期间一直持着快照、挡着 vacuum |
 | `--out` | 把 JSON 写到文件(0600);缺省打印到标准输出 |
 
 要点:

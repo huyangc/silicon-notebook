@@ -1,6 +1,6 @@
 """KG 分析「问题清单」的**读侧派生**(设计 2026-10-19 §3.5 / §4.5 / §8.4)。纯函数。
 
-`KgAnalysisService` 在一个 `read_snapshot()` 里把账本、明细、标记、F4 的候选状态与成员名、
+`KgAnalysisService` 在一个 `read_snapshot()` 里把账本、明细、标记、F4 组按种子过滤的已存决定、
 这一页涉及的来源状态读出来,交给这里装配;这里不碰连接、不判后端 —— 两个后端因此结构性地
 拿到逐字相同的一页。
 
@@ -42,7 +42,6 @@ from app.domain.kg_findings_contracts import (
     finding_actions,
     finding_sort_key,
 )
-from app.domain.kg_merge_seed import concept_seed_v1
 from app.services.kg_findings import (
     UNDER_MERGE_CONFIRMED,
     UNDER_MERGE_DECIDED_APART,
@@ -105,15 +104,27 @@ def source_is_processing(state: Mapping[str, object]) -> bool:
             or str(state.get("last_extraction_status") or "") == "running")
 
 
-def f4_canonical_ids(rows: Iterable[Mapping[str, object]]) -> List[str]:
-    """Every canonical id of every F4 group in the detail (evidence ``classes``)."""
-    ids: Set[str] = set()
+def f4_member_seeds(rows: Iterable[Mapping[str, object]]) -> Dict[str, Set[str]]:
+    """canonical id → v1 seeds, for every canonical of every F4 group in the detail,
+    straight from the evidence (``member_seeds``, written at publication from ALL
+    members, hidden ones included) plus the canonical id's own seed (``K-`` + min
+    seed, the key legacy decision rows fell back to). No member object is read:
+    the page's cost does not grow with group sizes. A canonical whose seeds were
+    capped (``seeds_truncated``) can only miss a decision — it stays open, the
+    safe direction."""
+    seeds: Dict[str, Set[str]] = {}
     for row in rows:
         if row["rule_id"] != RULE_UNDER_MERGE:
             continue
-        for cls in (row["evidence"] or {}).get("classes") or []:   # type: ignore[union-attr]
-            ids.update(str(cid) for cid in cls)
-    return sorted(ids)
+        evidence = row["evidence"] or {}
+        stored = evidence.get("member_seeds") or {}            # type: ignore[union-attr]
+        for cls in evidence.get("classes") or []:              # type: ignore[union-attr]
+            for cid in cls:
+                cid = str(cid)
+                own = {cid[2:]} if cid.startswith("K-") else set()
+                seeds.setdefault(cid, set()).update(
+                    own, (str(seed) for seed in stored.get(cid) or []))
+    return seeds
 
 
 def decisions_from_candidates(rows: Iterable[Mapping[str, object]]) -> Dict[frozenset, str]:
@@ -129,17 +140,6 @@ def decisions_from_candidates(rows: Iterable[Mapping[str, object]]) -> Dict[froz
         b = str(row["seed_b"] or "") or strip(str(row["canonical_b"]))
         out[frozenset((a, b))] = str(row["status"])
     return out
-
-
-def member_seeds_from_rows(
-    rows: Iterable[Sequence[object]],
-) -> Dict[str, Set[str]]:
-    """`kg_finding_member_name_rows` → canonical id → v1 seeds of ALL its members
-    (hidden ones included: seeds only decide, never display)."""
-    seeds: Dict[str, Set[str]] = {}
-    for canonical_id, name, _visible, _count in rows:
-        seeds.setdefault(str(canonical_id), set()).add(concept_seed_v1(str(name or "")))
-    return seeds
 
 
 def relink_view(
@@ -177,7 +177,7 @@ def zone_status(
     if key in dismissed:
         return STATUS_DISMISSED, None
     rule = key[0]
-    if rule == RULE_UNDER_MERGE:
+    if rule == RULE_UNDER_MERGE and decisions:
         verdict = under_merge_decision(
             (row["evidence"] or {}).get("classes") or [],   # type: ignore[union-attr]
             member_seeds, decisions)
@@ -329,10 +329,12 @@ def dev_items(rules: Mapping[str, Mapping[str, object]]) -> List[Dict[str, objec
 
 
 def summary_counts(
-    rules: Mapping[str, Mapping[str, object]], marks: Iterable[Mapping[str, object]],
+    rules: Mapping[str, Mapping[str, object]], dismissed: int,
 ) -> Dict[str, object]:
+    """Rows per rule, and the dismissals whose subject is in the CURRENT detail
+    (dismissals outlive the detail — §8.3 — so the raw mark count is not it)."""
     return {
         "by_rule": {rule: int(status.get("persisted") or 0)   # type: ignore[arg-type]
                     for rule, status in rules.items() if "persisted" in status},
-        "dismissed": sum(1 for mark in marks if mark["kind"] == MARK_DISMISSED),
+        "dismissed": int(dismissed),
     }

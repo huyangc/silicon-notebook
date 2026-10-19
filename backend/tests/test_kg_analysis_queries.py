@@ -947,6 +947,7 @@ def test_both_backend_stores_declare_the_same_analysis_surface():
         # 标记的写与删、来源点查、展示名、合并代码分量的两处写入。
         "replace_kg_analysis_artifacts",
         "kg_analysis_finding_rows",
+        "kg_analysis_finding_keys",
         "kg_analysis_mark_rows",
         "write_kg_analysis_mark",
         "clear_kg_analysis_mark",
@@ -999,6 +1000,7 @@ _ANALYSIS_METHODS = (
     # 不在运行时判后端。
     "replace_kg_analysis_artifacts",
     "kg_analysis_finding_rows",
+    "kg_analysis_finding_keys",
     "kg_analysis_mark_rows",
     "write_kg_analysis_mark",
     "clear_kg_analysis_mark",
