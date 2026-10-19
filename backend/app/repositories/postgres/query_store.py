@@ -2277,10 +2277,11 @@ class QueryStore:
                 if len(hits) < cap else ()
             )
             for row in source_rows:
-                label = presented_source_title(
+                shown = presented_source_title(
                     row["title"], source_type=row["source_type"], source_id=row["id"]
-                ) or row["file_name"]
-                body = row["summary"] or row["file_name"] or row["title"]
+                )
+                label = shown or row["file_name"]
+                body = row["summary"] or row["file_name"] or shown
                 hits.append(
                     SearchHit(
                         scope="Source",

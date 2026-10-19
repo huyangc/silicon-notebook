@@ -654,6 +654,10 @@ class NotebookStore:
                     "source", row["id"], row["uploaded_by"] or "",
                     row["notebook_id"], row["notebook_owner_id"],
                     row["notebook_name"], row["created_at"], row["updated_at"],
+                    # The title is snapshotted as shown NOW: a promotion source
+                    # retained from this version on already carries the current
+                    # wording; snapshots written earlier keep the legacy one and
+                    # are mapped when read (query_store, ``presented_source_title``).
                     "", "", "", "", row["status"], source_display_title(row),
                     row["file_name"], row["source_type"], row["parse_status"],
                     row["parse_status"] == "failed", 0, "", deleted_at,

@@ -27,6 +27,11 @@ from app.domain.source_positions import normalize_positions, positions_page
 from app.models.question_suggestions import QUESTION_SUGGESTION_REVISION_PAGE_SIZE
 from app.repositories.sqlite.memory_sql import memory_source_type_predicate
 from app.domain.promotion_source import PROMOTION_SOURCE_TYPE, presented_source_title
+from app.repositories.promotion_title_sql import (
+    mapped_title_sql,
+    needle_names_current_wording,
+    promotion_gate_sql,
+)
 from app.repositories.ports import (
     SOURCE_PAPER_META_UNSET,
     DocumentCapacityExceeded,
@@ -444,18 +449,28 @@ class SourceStore:
             # ——IN 集合先物化再排序,丢了旧形态沿 `(notebook_id, created_at)`
             # 提前终止的窗口。其余场景持平或明显更快(同一 2 万库上 0 命中长词
             # 94.9ms→47.9ms),净收益为正;SQLITE_SCHEMA_VERSION 不动。
+            # A needle naming the current wording (「收录自」) adds one more leg that
+            # matches a legacy-titled promotion source by its MAPPED title; every
+            # other needle keeps this statement byte for byte.
+            mapped = needle_names_current_wording(needle)
             where += (
                 " AND sources.id IN ("
                 "SELECT id FROM sources WHERE notebook_id = ?"
                 f" AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
                 " AND (LOWER(title) LIKE ? OR LOWER(file_name) LIKE ?)"
-                " UNION SELECT a.source_id FROM source_authors a"
+                + (f" UNION SELECT id FROM sources WHERE notebook_id = ?"
+                   f" AND {promotion_gate_sql('source_type', 'id')}"
+                   f" AND LOWER({mapped_title_sql('title')}) LIKE ?" if mapped else "")
+                + " UNION SELECT a.source_id FROM source_authors a"
                 " WHERE a.notebook_id = ? AND LOWER(a.name) LIKE ?"
                 " UNION SELECT m.source_id FROM source_paper_meta m"
                 " WHERE m.notebook_id = ? AND LOWER(m.paper_title) LIKE ?)"
             )
             like = f"%{needle}%"
-            params += [notebook_id, like, like, notebook_id, like, notebook_id, like]
+            params += [notebook_id, like, like]
+            if mapped:
+                params += [notebook_id, like]
+            params += [notebook_id, like, notebook_id, like]
         with self.database.connect() as db:
             counted = db.execute(
                 "SELECT COUNT(*) c, "

@@ -580,3 +580,52 @@ def a_stored_legacy_title_is_shown_with_the_current_prefix(world: World) -> None
     # and a source with the current spelling is returned as it is
     world.write("UPDATE sources SET title=? WHERE id=?", (shown, source_id))
     assert repo.get_source(source_id).title == shown
+
+
+def a_search_for_the_current_wording_finds_a_legacy_titled_promotion(world: World) -> None:
+    """Stored titles keep the legacy wording, so a query for 「收录自」 must match
+    the MAPPED title -- in the sources list filter and in the notebook search box
+    (source and element legs) -- for promotion sources only."""
+    repo = world.repo
+    source_id = world.promotion_source
+    legacy = f"{LEGACY_PREFIX}{ORIGIN_TITLE}"
+    shown = f"{CURRENT_PREFIX}{ORIGIN_TITLE}"
+    world.write("UPDATE sources SET title=? WHERE id=?", (legacy, source_id))
+    # an uploaded document carrying the legacy words as its own title
+    seed_document(repo, world.sql, world.base, "s-own", f"{LEGACY_PREFIX}我自己的文档",
+                  [f"{TERM} 自有"])
+
+    def listed(q: str) -> set[str]:
+        return {item.id for item in repo.list_sources_page(world.base, 0, 50, q).items}
+
+    def hits_for(q: str, scope: str | None = None):
+        return [hit for hit in repo.search_notebook(world.base, q).hits
+                if hit.source_id == source_id and (scope is None or hit.scope == scope)]
+
+    # 搜「收录自」命中存量 (list filter + both search legs)
+    assert listed("收录自") == {source_id}
+    assert listed("收录自：私有") == {source_id}
+    assert hits_for("收录自", "Source"), "source leg"
+    assert hits_for("收录自", "Element"), "element leg (matches the source title)"
+    # 搜原件标题照旧
+    assert listed(ORIGIN_TITLE) == {source_id}
+    assert hits_for(ORIGIN_TITLE, "Source")
+    # 普通来源不受影响:the user's own document is neither found by the current
+    # wording nor hidden from the words it really carries
+    assert "s-own" not in listed("收录自")
+    assert "s-own" in listed("晋升自")
+    assert not [h for h in repo.search_notebook(world.base, "收录自").hits
+                if h.source_id == "s-own"]
+    # a search hit never shows the legacy wording for the promotion source
+    for query in ("收录自", ORIGIN_TITLE, TERM):
+        for hit in hits_for(query):
+            assert not hit.label.startswith(LEGACY_PREFIX), (query, hit)
+            assert not hit.text.startswith(LEGACY_PREFIX), (query, hit)
+            assert LEGACY_PREFIX not in hit.text.replace("...", ""), (query, hit)
+    # the Memory spelling is found by its current wording too
+    world.write("UPDATE sources SET title=? WHERE id=?",
+                ("晋升自个人记忆：增益记忆", source_id))
+    assert listed("收录自个人记忆") == {source_id}
+    assert hits_for("收录自个人记忆", "Source")
+    # a needle that cannot tell the two spellings apart is unchanged
+    assert listed("增益记忆") == {source_id}
