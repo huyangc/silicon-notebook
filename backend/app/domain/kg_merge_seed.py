@@ -107,6 +107,108 @@ def seed_concept(obj) -> str:
     return _norm(obj.get("name", ""))
 
 
+# ---------------------------------------------------------------------------
+# Concept seed spaces v1 / v2 and the squash key (KG-analysis findings design
+# 2026-10-19, §4.4 + §五 S1 「实施细化」).
+#
+# These are PURE functions added ahead of the seed switch. Nothing calls v2 to
+# build clusters yet: the switch (alias table, ``_seed_with_alias``,
+# ``bridge_canonical_id``, the unified-rebuild seed stream, catch-up and
+# incremental fusion, all parameterised by seed version) lands with PR-4 of
+# that plan. Today they feed only the findings rules (F4 narrow / wide split,
+# S1 "needs development" count).
+#
+# ⚠ ``_norm`` is deliberately NOT changed. ``kg_merge._discriminative_conflict``
+# tokenises ``_norm`` output on spaces to detect "only one contrast word
+# differs" (low/high, first/second …); squashing spaces inside ``_norm`` would
+# turn every multi-word name into a single token and that guard would go silently
+# blind. v2 lives beside it instead.
+# ---------------------------------------------------------------------------
+
+# Original-text separators that v2 removes (whitespace, hyphen, underscore) —
+# BEFORE punctuation is turned into spaces, so they never become a token
+# boundary. Spaces that punctuation (``.``, ``(``, ``·`` …) turns into survive.
+_ORIGINAL_SEPARATORS_RE = re.compile(r"[\s\-_]+")
+_NON_SEED_CHARS_RE = re.compile(r"[^\w+/ ]+")
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+def _concept_seed_v1_unaliased(name: str) -> str:
+    """The v1 seed BEFORE the alias table: NFKC → paren-acronym strip → strip/lower
+    → every non-``[\\w+/ ]`` char to a space → ``[\\s\\-_]+`` runs to one space.
+
+    It is the exact intermediate of ``_norm`` (``_norm`` is this followed by the
+    ``_ALIASES`` lookup); ``test_v1_unaliased_form_is_norm_before_aliases`` pins
+    the two equal, because ``_norm`` itself is deliberately left untouched. v2
+    looks its aliases up on THIS form, so an alias key keeps matching the words
+    it was written for ("op amp", "mos transistor")."""
+    folded = unicodedata.normalize("NFKC", name or "")
+    stripped = _strip_paren_acronym(folded)
+    cleaned = _NON_SEED_CHARS_RE.sub(" ", stripped.strip().lower())
+    return _ORIGINAL_SEPARATORS_RE.sub(" ", cleaned).strip()
+
+
+def concept_seed_v1(name: str) -> str:
+    """FROZEN v1 concept seed — byte-for-byte today's ``seed_concept`` / ``_norm``.
+
+    "Frozen" is a contract, pinned by golden values in
+    ``tests/test_kg_merge_seed_versions.py``: when PR-4 parameterises the seed
+    machinery by version, v1 must keep producing exactly these strings, because
+    every stored merge decision (``concept_merge_candidates.seed_a/seed_b``)
+    and every published ``K-`` canonical id was minted in this space."""
+    return _norm(name)
+
+
+def concept_seed_v2(name: str) -> str:
+    """v2 concept seed (S1): drop ORIGINAL whitespace / ``-`` / ``_`` first, then
+    punctuation → space, then collapse.
+
+    Steps, in this order (the order is the whole point):
+
+      1. NFKC, paren-acronym strip ("Mixture-of-Experts (MoE)" → head), strip,
+         lower — identical to v1.
+      2. Alias lookup on the **v1 form** (``_concept_seed_v1_unaliased``); a hit
+         returns the alias VALUE with its spaces removed ("op-amp" → "opamp").
+      3. Delete every original ``[\\s\\-_]`` run — "Q-Former", "Qformer" and
+         "Q Former" all become "qformer".
+      4. Every remaining non-``[\\w+/ ]`` char becomes a space, runs collapse:
+         "llama3.1" → "llama3 1". The space a dot or bracket leaves behind is a
+         token boundary v2 keeps on purpose.
+
+    Consequence (design §4.4): "Llama 3.1" → ``llama3 1`` and "Llama 31" →
+    ``llama31`` stay TWO seeds — that difference is left to a human (F4) —
+    while "Llama-3-1" → ``llama31`` joins "Llama 31". Doing step 3 after step 4
+    would erase the dot-made space too and merge "Llama 3.1" with "Llama 31";
+    ``test_v2_drops_original_separators_before_punctuation`` pins the order.
+    """
+    unaliased = _concept_seed_v1_unaliased(name)
+    alias = _ALIASES.get(unaliased)
+    if alias is not None:
+        return alias.replace(" ", "")
+    folded = unicodedata.normalize("NFKC", name or "")
+    text = _strip_paren_acronym(folded).strip().lower()
+    text = _ORIGINAL_SEPARATORS_RE.sub("", text)
+    text = _NON_SEED_CHARS_RE.sub(" ", text)
+    return _WHITESPACE_RUN_RE.sub(" ", text).strip()
+
+
+def concept_squash_key(name: str) -> str:
+    """The squash key of a concept name: the v2 seed with its spaces removed.
+
+    Coarser than the v2 seed (it also erases the punctuation-made spaces, so
+    "Llama 3.1" and "Llama 31" share ``llama31``) but it still keeps ``+`` and
+    ``/`` ("C++" ≠ "C", "I/O" ≠ "IO"). It is the F4 subject key and the one
+    function F4 (and later PR-4's squash candidate tier) groups by:
+
+      · v1 seeds differ, v2 seeds equal  → the **narrow** half: a seed defect S1
+        fixes automatically ("Q-Former" / "Qformer", "RMS Norm" / "RMSNorm");
+      · v2 seeds differ, squash keys equal → the **wide** half: F4 proper, left
+        to a human because a dot or bracket may carry meaning
+        ("Llama 3.1" / "Llama 31").
+    """
+    return concept_seed_v2(name).replace(" ", "")
+
+
 def seed_claim(obj) -> str:
     """Seed function for claims. obj may be a dict (production) or str (test shorthand)."""
     if isinstance(obj, str):

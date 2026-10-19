@@ -626,6 +626,14 @@ class Settings(BaseSettings):
     community_min_size: int = Field(3, validation_alias="COMMUNITY_MIN_SIZE")
     community_peers_topk: int = Field(8, validation_alias="COMMUNITY_PEERS_TOPK")
     community_rerank_candidates: int = Field(200, validation_alias="COMMUNITY_RERANK_CANDIDATES")
+    # 图谱分析「问题清单」F2(疑似重复导入)的前缀过滤连接**候选对上限**——成本预算,
+    # 不是口径(口径阈值是 app.domain.kg_findings_contracts 的具名常量)。候选对数随来源数
+    # 增长,生产 4.9 万来源上推算不出(设计 2026-10-19 §7.2,待只读演练实测);触顶时只
+    # 验证上限以内的候选,账本如实记 candidates_truncated,绝不静默。瞬时内存约 16 字节/对。
+    kg_findings_max_candidate_pairs: int = Field(
+        5_000_000, ge=1, le=100_000_000,
+        validation_alias="KG_FINDINGS_MAX_CANDIDATE_PAIRS",
+    )
 
     # 共提桥接层(P2):claim 文本确定性提取 mention 边/共提对,治对比题坍缩。默认开(零 LLM,有界)。
     mention_bridge_enabled: bool = Field(True, validation_alias="MENTION_BRIDGE_ENABLED")
