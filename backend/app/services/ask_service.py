@@ -124,7 +124,7 @@ from app.services.federated_run import (
 # builder, and the boundary recorder every context assembler writes through.
 from app.services.ask_evidence import _EvidenceAssemblyClient, build_ask_evidence
 from app.services.context_spans import Glue, clip, concat, recording_spans
-from app.services.evidence_context import anchor_image_targets
+from app.services.evidence_context import CitationLookups, anchor_image_targets
 from app.services.model_work import MalformedModelResponse, ModelNotConfiguredError
 from app.core.model_values import as_text_list
 
@@ -263,6 +263,39 @@ class _OverviewPrep:
     catalog: Any
     prepared: Any
     notice: str
+
+
+def _merged_section_baseline(rows: Sequence[Mapping[str, Any]]) -> dict:
+    """One baseline capture for a sectioned synthesis: the per-section
+    captures (``_ReasoningContext.baseline``) concatenated in section order --
+    blocks joined by a newline, id maps and handles chained, budgets and
+    capture errors summed -- plus their ``CitationLookups`` folded into one,
+    so the passage-card leg reuses every section's reads."""
+    lookups = CitationLookups()
+    for row in rows:
+        section_lookups = row.get("citation_lookups")
+        if isinstance(section_lookups, CitationLookups):
+            lookups.merge(section_lookups)
+    return {
+        "context_block": "\n".join(
+            str(row.get("context_block") or "") for row in rows
+        ),
+        "id_map": {
+            key: value
+            for row in rows
+            for key, value in dict(row.get("id_map") or {}).items()
+        },
+        "ordered_handles": tuple(
+            handle
+            for row in rows
+            for handle in tuple(row.get("ordered_handles") or ())
+        ),
+        "budget_chars": sum(int(row.get("budget_chars") or 0) for row in rows),
+        "capture_error_count": sum(
+            int(row.get("capture_error_count") or 0) for row in rows
+        ),
+        "citation_lookups": lookups,
+    }
 
 
 def _evidence_relevance(id_map: Mapping[str, Mapping[str, Any]], hits) -> dict:
@@ -2121,10 +2154,11 @@ class AskService:
         return self.evidence_context.tier_map(list(notebook_ids))
 
     def _chunk_answer_context(self, chunks, budget_chars: "int | None" = None,
-                              notebook_id: str = "", id_offset: int = 0) -> tuple:
+                              notebook_id: str = "", id_offset: int = 0,
+                              lookup_sink: "CitationLookups | None" = None) -> tuple:
         return self.evidence_context.chunk_context(
             chunks, notebook_id=notebook_id, id_offset=id_offset,
-            budget_chars=budget_chars)
+            budget_chars=budget_chars, lookup_sink=lookup_sink)
 
     def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge],
                         id_offset: int = 0, budget_chars: int | None = None) -> tuple:
@@ -3535,6 +3569,7 @@ class AskService:
         external_evidence=(),
         trailing_chunks=(),
         refine: bool = True,
+        citation_lookups: bool = False,
     ) -> "_ReasoningContext":
         """The reasoning synthesis context, assembled exactly as
         ``_answer_reasoning`` sends it (its parameters, same meaning; see that
@@ -3546,6 +3581,14 @@ class AskService:
         sectioned mode; the retrieval-only output (``refine=False``) does not,
         because that summary is not evidence -- it carries no ``[k]`` -- and it
         would be one more model call on a path that promises none.
+
+        ``citation_lookups`` asks the chunk blocks to record their three batch
+        reads (``CitationLookups``, handed out as ``baseline
+        ["citation_lookups"]``, else ``None``) for the passage citation cards
+        minted from this same assembly.  Only ``_answer_reasoning`` -- whose
+        caller mints those cards -- asks: recording widens the assembly's
+        knowhow read to every admitted passage's first element, which is pure
+        cost on a path with no card leg (the retrieval-only output).
         """
         raise_if_cancelled(cancel_event)
         chunks = chunks or []
@@ -3561,6 +3604,9 @@ class AskService:
         source_context = ""
         source_map: dict = {}
         baseline_admission: dict = {}
+        # The chunk blocks' three batch reads, kept for the passage citation
+        # cards minted from this same assembly (see the docstring).
+        lookup_sink = CitationLookups() if citation_lookups else None
         # The collection MAP goes in FIRST, ahead of every other block. It is
         # the smallest thing in the prompt (a fixed header plus one hard-capped
         # counts line) and the only one that cannot be recovered from anywhere
@@ -3610,7 +3656,8 @@ class AskService:
             ordered = reasoning_order_for(self.settings, chunks, notebook_id).passages
             chunk_block, chunk_id_map = self._chunk_answer_context(
                 ordered, notebook_id=notebook_id, id_offset=key_offset,
-                budget_chars=max(0, chunk_budget - len(source_context)))
+                budget_chars=max(0, chunk_budget - len(source_context)),
+                lookup_sink=lookup_sink)
             source_context, source_map = self._bounded_context_append(
                 source_context, source_map, chunk_block, chunk_id_map,
                 budget_chars=chunk_budget, heading=_REASONING_CHUNK_HEADING,
@@ -3648,6 +3695,7 @@ class AskService:
                 list(trailing_chunks), notebook_id=notebook_id,
                 id_offset=key_offset + len(chunks or ()),
                 budget_chars=max(0, chunk_budget - len(source_context)),
+                lookup_sink=lookup_sink,
             )
             source_context, source_map = self._bounded_context_append(
                 source_context, source_map, trailing_block, trailing_id_map,
@@ -3785,6 +3833,10 @@ class AskService:
             "capture_error_count": int(
                 baseline_admission.get("ambiguous_truncations") or 0
             ),
+            # Not part of the manifest (``build_retrieval_baseline_manifest``
+            # reads the keys above by name): the reads the passage-card leg of
+            # ``_draft_reasoning_response`` reuses (``_reasoning_chunk_cards``).
+            "citation_lookups": lookup_sink,
         }
         return _ReasoningContext(
             context_block=context_block,
@@ -3889,6 +3941,9 @@ class AskService:
             # ②精炼是给「上下文太大、要先挑重点」准备的,而一节的切片至多 8 条绑定
             # 证据,本来就没有中段可丢。
             refine=not sectioned,
+            # 调用方(``_draft_reasoning_response``)随后给同一批原文段发引用卡,
+            # 复用这次装配的三份批量读取(``_reasoning_chunk_cards``)。
+            citation_lookups=True,
         )
         context_block, id_map, has_external = (
             context.context_block, context.id_map, context.has_external)
@@ -6748,6 +6803,40 @@ class AskService:
                 enumeration_block_dropped, collection_item_citations,
                 document_read_block_dropped)
 
+    def _reasoning_chunk_cards(self, chunks, baseline: Mapping[str, Any],
+                               notebook_id: str) -> list[Citation]:
+        """The passage (chunk) citation cards of ``_draft_reasoning_response``.
+
+        The candidates are the passages that really entered the synthesis
+        prompt: ``baseline["id_map"]`` (filled before the model call, so a
+        round whose model raised still has it) filters this run's
+        ``stage.chunks``, keeping stage order.  ``chunks`` in full is
+        deliberately not used -- a passage the ``chunk_context`` character
+        budget squeezed out never reached the model, and carding it would list
+        as "the answer's basis" something the answer's author never read.  A
+        sectioned synthesis has already merged every section's id map into one
+        baseline (``_merged_section_baseline``), so no key-range split is
+        needed here.
+
+        The three batch reads behind each card were made once already, when
+        the same passages were assembled into the prompt; ``baseline
+        ["citation_lookups"]`` carries them, and ``chunk_citations`` reads only
+        what that memo lacks (see ``CitationLookups``).  No passage in the
+        prompt (a KG-only run, or no synthesis at all) -> no call and no read.
+        """
+        prompt_chunk_ids = {
+            str(entry.get("object_id") or "")
+            for entry in dict(baseline.get("id_map") or {}).values()
+            if entry.get("object_type") == "chunk"
+        }
+        prompt_chunks = [item for item in chunks if item.chunk_id in prompt_chunk_ids]
+        if not prompt_chunks:
+            return []
+        lookups = baseline.get("citation_lookups")
+        return [c for c, _ids in self.evidence_context.chunk_citations(
+            prompt_chunks, notebook_id=notebook_id,
+            lookups=lookups if isinstance(lookups, CitationLookups) else None)]
+
     def _draft_reasoning_response(self, stage, runtime):
         """The shipped ``ResponseDraftStage`` body: evidence -> response draft.
 
@@ -6973,30 +7062,8 @@ class AskService:
             reasoning_counts.clear()
             reasoning_counts.update(sectioned.counts)
             reasoning_baseline.clear()
-            reasoning_baseline.update({
-                "context_block": "\n".join(
-                    str(row.get("context_block") or "")
-                    for row in sectioned.baseline_assemblies
-                ),
-                "id_map": {
-                    key: value
-                    for row in sectioned.baseline_assemblies
-                    for key, value in dict(row.get("id_map") or {}).items()
-                },
-                "ordered_handles": tuple(
-                    handle
-                    for row in sectioned.baseline_assemblies
-                    for handle in tuple(row.get("ordered_handles") or ())
-                ),
-                "budget_chars": sum(
-                    int(row.get("budget_chars") or 0)
-                    for row in sectioned.baseline_assemblies
-                ),
-                "capture_error_count": sum(
-                    int(row.get("capture_error_count") or 0)
-                    for row in sectioned.baseline_assemblies
-                ),
-            })
+            reasoning_baseline.update(
+                _merged_section_baseline(sectioned.baseline_assemblies))
             synthesis_ran = True
         # 地图也是合成的触发条件之一:大集合场景里模型 reflect 直接 answer、
         # 一条证据都没检索到,而正确答案就是那个计数——没有这一项,合成压根
@@ -7081,22 +7148,12 @@ class AskService:
         citations.extend(self._memory_citations(anchors, memory_hits))
         citations.extend(self.evidence_context.element_citations(
             elements, anchors, notebook_id=notebook_id))
-        # 原文段(chunk)腿。候选集是**真正进了合成 prompt** 的那几段:由
-        # `reasoning_baseline["id_map"]`(合成前就填好,所以模型抛错的那一轮也
-        # 有)回过滤本次 `stage.chunks`,保留 stage 序。刻意不用 `chunks` 全量
-        # ——`chunk_context` 的字符预算挤掉的段没进过模型的视野,给它发卡就是
-        # 在「答案的依据」里列一条答案作者没看过的东西。按节合成路径各节的
-        # id_map 已合并进同一个 baseline(见上面的 sectioned 分支),所以这里
-        # 不需要按号段分区。清空闸(枚举答案零锚点)在下面自动适用;这些卡整体
-        # 不参与附图(见下面 attach_citation_images 处按身份排除的理由)。
-        prompt_chunk_ids = {
-            str(entry.get("object_id") or "")
-            for entry in dict(reasoning_baseline.get("id_map") or {}).values()
-            if entry.get("object_type") == "chunk"
-        }
-        chunk_cards = [c for c, _ids in self.evidence_context.chunk_citations(
-            [item for item in chunks if item.chunk_id in prompt_chunk_ids],
-            notebook_id=notebook_id)]
+        # 原文段(chunk)腿:只给**真正进了合成 prompt** 的那几段发卡(候选集
+        # 口径与读取复用见 `_reasoning_chunk_cards`)。清空闸(枚举答案零锚点)
+        # 在下面自动适用;这些卡整体不参与附图(见下面 attach_citation_images
+        # 处按身份排除的理由)。
+        chunk_cards = self._reasoning_chunk_cards(
+            chunks, reasoning_baseline, notebook_id)
         citations.extend(chunk_cards)
         # Typed collection rows have their own deterministic k5001+
         # bindings.  Mirror the cited rows into the fallback Citation

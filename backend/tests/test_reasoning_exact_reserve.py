@@ -82,10 +82,11 @@ def _spy_assembly(monkeypatch):
     """
     captured: dict = {}
 
-    def _spy(self, chunks, budget_chars=None, notebook_id="", id_offset=0):
+    def _spy(self, chunks, budget_chars=None, notebook_id="", id_offset=0,
+             **kwargs):
         block, id_map = _REAL_CHUNK_ANSWER_CONTEXT(
             self, chunks, budget_chars=budget_chars,
-            notebook_id=notebook_id, id_offset=id_offset,
+            notebook_id=notebook_id, id_offset=id_offset, **kwargs,
         )
         call = {
             "chunks": [chunk.chunk_id for chunk in chunks],

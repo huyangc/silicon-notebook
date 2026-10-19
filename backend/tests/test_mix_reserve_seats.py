@@ -548,7 +548,8 @@ def _ask_with_pool(monkeypatch, pool, *, peer=False, reserve=0.25):
             return list(pool), "", {}, [], 0
 
     class _Evidence(_MinimalEvidence):
-        def chunk_citations(self, chunks, *, notebook_id, anchors=None):
+        def chunk_citations(self, chunks, *, notebook_id, anchors=None,
+                            lookups=None):
             captured["selected"] = [chunk.chunk_id for chunk in chunks]
             return []
 

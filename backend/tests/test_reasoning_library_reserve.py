@@ -277,10 +277,11 @@ def test_a_section_promotes_its_own_bound_active_passages(repo, monkeypatch):  #
     captured: list = []
     real = AskService._chunk_answer_context
 
-    def _spy(self, chunks, budget_chars=None, notebook_id="", id_offset=0):
+    def _spy(self, chunks, budget_chars=None, notebook_id="", id_offset=0,
+             **kwargs):
         captured.append([chunk.chunk_id for chunk in chunks])
         return real(self, chunks, budget_chars=budget_chars,
-                    notebook_id=notebook_id, id_offset=id_offset)
+                    notebook_id=notebook_id, id_offset=id_offset, **kwargs)
 
     monkeypatch.setattr(AskService, "_chunk_answer_context", _spy)
     repo._runtime.ask_service()._answer_reasoning(
@@ -315,10 +316,11 @@ def test_reasoning_synthesis_passes_the_real_id(repo):  # noqa: F811
     captured: list = []
     real = AskService._chunk_answer_context
 
-    def _spy(self, chunks, budget_chars=None, notebook_id="", id_offset=0):
+    def _spy(self, chunks, budget_chars=None, notebook_id="", id_offset=0,
+             **kwargs):
         captured.append([chunk.chunk_id for chunk in chunks])
         return real(self, chunks, budget_chars=budget_chars,
-                    notebook_id=notebook_id, id_offset=id_offset)
+                    notebook_id=notebook_id, id_offset=id_offset, **kwargs)
 
     AskService._chunk_answer_context = _spy
     try:

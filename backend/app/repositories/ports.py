@@ -3234,6 +3234,9 @@ class EvidenceContextPort(Protocol):
         notebook_id: str,
         id_offset: int = 0,
         budget_chars: int | None = None,
+        # ``evidence_context.CitationLookups`` (a service-layer type, so it is
+        # not named here): records the three batch reads for card reuse.
+        lookup_sink: Any = None,
     ) -> tuple[str, dict[str, dict[str, Any]]]: ...
     def element_context(
         self,

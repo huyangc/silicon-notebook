@@ -123,10 +123,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       文档无法按标题精确匹配（动作的参数就是标题），只能被跳过并提示模型改读别的文档，尚无第二个
       消歧维度（如序号）；无标题文档已可按花名册占位串「未命名来源」读取，不再属于这一条。
       （原 (b)「取样通道的 I/O 放大」已由 PR #859 解决，见 `fangan_done.md` §59。）
-- [ ] **reasoning 原文段引用卡重复三次批量读**：`_draft_reasoning_response` 的原文段腿对同一批
-      chunk 再做一次 `tier_map` / `citation_source_info` / `knowhow_refs_for`，而合成前的
-      `chunk_context` 已经做过（按节路径本来就是 N 次，这里再 +1）。形状与 chunk 模式一致、
-      KG-only run 零开销，所以只登记：把装配期结果沿 `baseline_sink` 带出来复用即可省两次。
 - [ ] **Prompt 三层化后的 per-notebook 定制与 self-evo**：接缝只有 `fragment_text()`；L1 片段分
       两类（A 类离线 GEPA + 人审，B 类只改示例槽位），尚未拍板开放。
 - [ ] **Agentic Memory 注入的真实 A/B 观测**：按笔记本分区一系列已收官（PR-1 #769 分区、
