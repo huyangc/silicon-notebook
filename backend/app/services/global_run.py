@@ -58,6 +58,7 @@ from __future__ import annotations
 from contextlib import ExitStack, contextmanager
 from typing import Any, Iterator, Mapping
 
+from app.core.event_logging import GLOBAL_EVENT_SCOPE, event_scope
 from app.domain.retrieval_control import ParticipantOverrideError
 from app.services.federated_run import (
     DetachedAskTurn,
@@ -179,4 +180,10 @@ def global_ask_run(
         ))
         stack.enter_context(detached_ask_turn(turn))
         stack.enter_context(federated_run_plan(plan))
+        # Telemetry, not a fifth fact of the run: every event emitted inside
+        # it carries ``scope="global"`` beside whatever ``notebook_id`` it
+        # names (the anchor, or the library one federated leg searched), so a
+        # consumer can tell a global run's stages and run totals from a
+        # notebook ask's (``EventLogger.emit``).
+        stack.enter_context(event_scope(GLOBAL_EVENT_SCOPE))
         yield

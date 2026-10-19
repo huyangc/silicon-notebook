@@ -1597,9 +1597,13 @@ optional debug log viewer.
 
 `USER_ACTIVITY_RETENTION_DAYS` controls how long the content-minimal user-analysis
 projection survives after its notebook is deleted (default 180, accepted range 1–3650).
-It never extends the lifetime of answer/source/report bodies, citations, or reasoning
-traces. The setting is read at backend startup and applies to notebooks deleted after
-that process starts; existing retained rows keep their stamped `expires_at`.
+It never extends the lifetime of the notebook's own answer/source/report bodies,
+citations, or reasoning traces. The same window is also how long the global Ask turns
+that used the deleted notebook are kept: they stay readable to their owner during it and
+are cleaned up afterwards (see "After a participant notebook is deleted" in
+product-and-api). The setting is read at backend startup and applies to notebooks deleted
+after that process starts; existing retained rows and already-stamped global Ask turns
+keep their stamped expiry.
 
 Professional workbook analysis is deployment-controlled by
 `SPREADSHEET_ANALYSIS_ENABLED`. Its ingestion rails are

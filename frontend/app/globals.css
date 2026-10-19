@@ -7583,6 +7583,27 @@ button.tag:hover {
   color: var(--warning);
 }
 
+/* 来自已删笔记本的行内引用标记（全局问答留存期内的轮次）：不是按钮、点不开，所以
+   没有 hover/active 态，cursor 也不是手形；编号后面直接写「来源已删除」。 */
+.cite-chip.cite-chip-deleted {
+  border-style: dashed;
+  border-color: var(--line);
+  color: var(--muted);
+  background: transparent;
+  font-weight: 600;
+  cursor: default;
+}
+
+.cite-chip.cite-chip-deleted:hover {
+  border-color: var(--line);
+  background: transparent;
+}
+
+.cite-chip-deleted-label {
+  margin-left: 4px;
+  font-weight: 500;
+}
+
 /* 推断/通识行内标记（T2-a）：与 .cite-chip 同一视觉家族（细边框圆角小标签）,但这两个
    标记不可点——不带 hover/active 态、cursor 是 default，避免用户误以为能点开详情。
    两个 class 各用一种弱化色相区分：推断偏琥珀色,通识偏青色。不动 evidence_level 顶栏

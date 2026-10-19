@@ -8,6 +8,7 @@
 //   · 来源异常小字 → AnomalyBadge + sourceAnomalies()（经 source-view.tsx）
 //   · 提问时间 → chat-question-time.ts；报告耗时 → report-time.ts
 
+import { useMemo } from "react";
 import { AnswerView, ReasoningTracePanel } from "../../../answer-panel.tsx";
 import type { ReasoningTraceStep } from "../../../ask-stream.ts";
 import { formatQuestionTime } from "../../../chat-question-time.ts";
@@ -16,6 +17,7 @@ import { formatReportTiming } from "../../../report-time.ts";
 import { ASK_MODES, modeLabel, type AskModeId } from "../../../ask-modes.ts";
 import { REPORT_DEPTH, label } from "../../../vocabulary.ts";
 import type { AskResponse } from "../../../workspace-model.ts";
+import { withDeletedSources } from "../../../global-deleted-sources.ts";
 import { ActivityDetailBoundary } from "./DetailBoundary.tsx";
 import { activityStatusLabel, activityTitle, activityTone } from "./format.ts";
 import { SourceAnomalies } from "./source-view.tsx";
@@ -43,6 +45,14 @@ function userFacingModeLabel(mode: string): string {
 // 不在活动视图这里重新声明）。这两个收口函数负责在渲染前做最小的形状确认。
 function asAnswer(value: unknown): AskResponse | null {
   return value && typeof value === "object" ? (value as AskResponse) : null;
+}
+
+/** 全局问答留存期内的轮次：已删笔记本的引用降级成「来源已删除」、名下附图不取——
+ *  与全局问答窗口同一份口径（`global-deleted-sources.ts`），不对已删的库发任何读请求。 */
+function degradedAnswer(detail: AskDetail | null): AskResponse | null {
+  const answer = asAnswer(detail?.answer);
+  if (!answer) return answer;
+  return withDeletedSources({ deleted_notebook_ids: detail?.deleted_notebook_ids, answer }).answer ?? null;
 }
 
 function asTrace(value: unknown[]): ReasoningTraceStep[] {
@@ -90,7 +100,7 @@ function AskDetailPane({
   notebookNames: Record<string, string>;
   now?: Date;
 }) {
-  const answer = asAnswer(detail?.answer);
+  const answer = useMemo(() => degradedAnswer(detail), [detail]);
   const persistedTrace = asTrace(detail?.trace ?? []);
   // AnswerView 自己会渲染答案负载里带的轨迹。两份轨迹说的是同一次运行，同屏挂两个
   // 面板只会让人以为跑了两轮，所以负载里有轨迹时这里不再重复渲染持久化的那份。

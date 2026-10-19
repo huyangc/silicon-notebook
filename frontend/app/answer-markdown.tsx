@@ -20,6 +20,7 @@ import {
 } from "./answer-formatting";
 import { remarkCitations } from "./answer-citations";
 import { referenceVerification, verificationMarkerName } from "./citation-verification";
+import { DELETED_SOURCE_LABEL, referenceSourceDeleted } from "./global-deleted-sources";
 import { remarkAnswerInference } from "./answer-inference";
 import { normalizeInferenceListMarkers } from "./inference-list-markers";
 import { remarkGfmPlugin } from "./markdown-gfm";
@@ -76,6 +77,19 @@ function AnswerMarkdownLink({ href, children }: { href?: string; children?: Reac
   const state = useContext(AnswerMarkdownRenderContext);
   if (href?.startsWith("cite:")) {
     const reference = state?.refsByCitationKey[href.slice(5)];
+    if (reference && state && referenceSourceDeleted(reference)) {
+      // 来自已删笔记本的引用(全局问答留存期内的轮次)：不是按钮，点不开——引用卡里
+      // 每一个入口都要读那个笔记本，而它已经不存在了。标记原地保留(删掉会在正文
+      // 留下一个裸 `[k]`)，并直接写明「来源已删除」。
+      const markerName = `${reference.displayLabel} ${DELETED_SOURCE_LABEL}`;
+      return (
+        <span className="cite-chip-wrap">
+          <span className="cite-chip cite-chip-deleted" title={markerName}>
+            {children}<span className="cite-chip-deleted-label">{DELETED_SOURCE_LABEL}</span>
+          </span>
+        </span>
+      );
+    }
     if (reference && state) {
       const isSelected = state.selectedReferenceId === reference.id;
       // 没通过终态核对的引用(PR-D)：弱化样式 + 原因进可访问名称/悬浮提示。点击照旧
@@ -168,8 +182,8 @@ export function AnswerMarkdown({
     Object.entries(refsByCitationKey).map(([key, reference]) => [
       key,
       // 没通过核对的引用名下的附图不插进正文(PR-D)：图片与原文同属那份已改动/已删除
-      // 的资料，取图端点对它同样不再担保。
-      referenceVerification(reference)
+      // 的资料，取图端点对它同样不再担保。来自已删笔记本的引用同理(那个库已经不在了)。
+      referenceVerification(reference) || referenceSourceDeleted(reference)
         ? []
         : (reference.anchor?.images ?? reference.citation?.images ?? []).map((image) => image.asset_id),
     ]),

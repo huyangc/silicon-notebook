@@ -301,7 +301,11 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # (job_kind, job_id, agent_token_id), no FK) and agent_access_tokens.
 # allow_answer_links (INTEGER NOT NULL DEFAULT 0: whether the token may issue
 # such links). No backfill. See ``_migration_94``.
-SCHEMA_VERSION = 94
+# v95 (paired with PostgreSQL 0075_global_ask_retained_until.sql) adds
+# global_ask_jobs.retained_until (nullable TEXT, no backfill) and the partial
+# idx_global_ask_jobs_retained over it: the expiry stamp a notebook deletion
+# puts on the global Ask turns that ran over it. See ``_migration_95``.
+SCHEMA_VERSION = 95
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
 # when v87 was written (a migration must not change meaning when the live
@@ -4375,6 +4379,17 @@ class SqliteMigrator:
             "WHERE julianday(expires_at) <= julianday(?)",
             (now,),
         ))
+
+        def _purge_retained_global_turns() -> None:
+            # The global Ask turns retained after a participant library's
+            # deletion expire on the same window and are purged at the same
+            # point (``app/domain/global_ask_retention.py``).
+            from app.repositories.global_ask_store import GlobalAskStore
+
+            with self._connect() as db:
+                GlobalAskStore.purge_expired_turns(db, now, marker="?")
+
+        _settle("global_ask_jobs(retained)", _purge_retained_global_turns)
         _settle("merge_review_jobs", lambda: _write(
             "UPDATE merge_review_jobs SET status='failed', "
             "error='中断:服务重启' WHERE status='running'"))
@@ -5825,6 +5840,30 @@ class SqliteMigrator:
                 CREATE INDEX IF NOT EXISTS idx_answer_links_expires
                     ON answer_links(expires_at);
             """)
+
+    def _migration_95(self) -> None:
+        """Global Ask turn retention, parity with PostgreSQL
+        ``0075_global_ask_retained_until.sql``.
+
+        ``global_ask_jobs.retained_until`` is NULL for a turn none of whose
+        participant libraries was ever deleted. Deleting a library stamps every
+        turn that ran over it with the deletion's ``retained_user_activity``
+        expiry (``app/domain/global_ask_retention.py``); the owner can still
+        open such a turn until then, and startup recovery or the next deletion
+        purges it afterwards. No backfill: a turn whose library was deleted
+        before this column existed has no deletion instant to start a window
+        from, and keeps the strict "every participant readable" rule (404) it
+        had. The partial index over the few stamped rows, keyed by
+        conversation, serves the purge and the conversation read gate's
+        "holds an expired turn" probe (``conversation_live_sql``).
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(db, "global_ask_jobs", "retained_until", "TEXT")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_global_ask_jobs_retained\n"
+                "                 ON global_ask_jobs(conversation_id, retained_until) "
+                "WHERE retained_until IS NOT NULL"
+            )
 
     def migrate(self) -> list[int]:
         with self._connect() as db:

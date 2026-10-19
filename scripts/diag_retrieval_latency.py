@@ -204,7 +204,12 @@ def build_report(
         kind = event.get("kind")
         if kind == "retrieval_run_stats":
             relevant += 1
+            # A global run (``scope="global"``) reuses the notebook ask's run
+            # kinds; its totals are kept apart so they never blend into the
+            # single-library ones.
             run_kind = _safe_run_kind(event.get("run_kind"))
+            if event.get("scope") == "global":
+                run_kind = f"{run_kind}(global)"
             stats = run_stats[run_kind]
             stats["runs"] += 1
             for field_name in (
@@ -314,6 +319,7 @@ def build_report(
         "  - unknown means the event's notebook had no readable local scale manifest.",
         "  - manifest n_chunks excludes sources added after its watermark.",
         "  - leaf size buckets combine Ask/report traffic; run totals remain separated by run kind.",
+        "  - (global) marks a global Ask run's totals; its leaf events are bucketed by the library each leg searched.",
     ])
     return "\n".join(lines) + "\n"
 

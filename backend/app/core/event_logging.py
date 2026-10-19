@@ -20,9 +20,10 @@ import re
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Iterator, Tuple
 from uuid import uuid4
 
 from app.core.config import Settings
@@ -53,6 +54,34 @@ def reset_log_owner(token) -> None:
 
 def get_log_owner() -> "str | None":
     return _log_owner.get()
+
+
+# 运行级「事件范围」槽：全局问答的一次 run 在进入时装上 ``"global"``
+# (``app/services/global_run.py::global_ask_run``)，``EventLogger.emit`` 据此给
+# 这次 run 里写出的每一条事件补一个 ``scope`` 字段——``ask_stage``、
+# ``retrieval_run_stats`` 以及 run 内任何别的内容无关事件，不论它由哪一层发出。
+# 只补不改：事件自带的 ``notebook_id``（全局 run 里那是锚点库，或某条联邦腿实际
+# 检索的那个库）原样保留，既有按 notebook_id 读事件的消费方不受影响；笔记本内
+# 问答不装这个槽，事件逐字节不变。与 ``_log_owner`` 同样定义在 core 层，worker
+# 线程经 ``contextvars.copy_context()`` 自然带上。
+_event_scope: "contextvars.ContextVar[str | None]" = contextvars.ContextVar(
+    "event_scope", default=None)
+
+GLOBAL_EVENT_SCOPE = "global"
+
+
+@contextmanager
+def event_scope(scope: str) -> Iterator[None]:
+    """Mark every event emitted inside this block with ``scope``."""
+    token = _event_scope.set(scope)
+    try:
+        yield
+    finally:
+        _event_scope.reset(token)
+
+
+def current_event_scope() -> "str | None":
+    return _event_scope.get()
 
 
 def is_safe_owner(owner: str) -> bool:
@@ -182,6 +211,9 @@ class EventLogger:
         now = datetime.now()
         event.setdefault("ts", now.isoformat())
         event.setdefault("channel", self.channel)
+        scope = _event_scope.get()
+        if scope:
+            event.setdefault("scope", scope)
         day = now.strftime("%Y-%m-%d")
         target = self._target_path_for_day(day)
         try:

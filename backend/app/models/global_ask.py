@@ -186,6 +186,24 @@ class GlobalAskJob(BaseModel):
     asked_at: str = ""
     updated_at: str = ""
     feedback_at: str = ""
+    # Retention after a participant library was deleted (SQLite v95 /
+    # PostgreSQL 0075, ``app/domain/global_ask_retention.py``). Both are
+    # read-time facts and never part of the stored payload
+    # (``GlobalAskStore`` excludes them from every payload write):
+    #
+    # * ``retained_until`` -- the instant this turn is cleaned up, filled from
+    #   the row's own column; "" for a turn none of whose libraries was deleted.
+    # * ``deleted_notebook_ids`` -- the libraries this turn names (ran over or
+    #   cites) that no longer exist, computed by the owner read
+    #   (``GlobalAskService._check_turns``) so the interface can render their
+    #   citations as "来源已删除" without ever requesting anything from them.
+    retained_until: str = ""
+    deleted_notebook_ids: list[str] = Field(default_factory=list)
+
+
+# Fields a job carries only on the way out of a read; the stored payload never
+# holds them (the column, or the live notebook table, is their authority).
+GLOBAL_JOB_READ_TIME_FIELDS = frozenset({"retained_until", "deleted_notebook_ids"})
 
 
 # Read-side projections over the two persisted answer shapes. ``answer`` (the
@@ -219,6 +237,30 @@ def global_answer_citations(job: "GlobalAskJob") -> list[Citation]:
     if job.response is not None:
         return job.response.citations
     return []
+
+
+def global_answer_anchors(job: "GlobalAskJob") -> list[AnswerAnchor]:
+    if job.answer is not None:
+        return job.answer.anchors
+    if job.response is not None:
+        return job.response.anchors
+    return []
+
+
+def global_job_notebook_ids(job: "GlobalAskJob") -> list[str]:
+    """Every library one turn names, in first-seen order: the ones it ran over
+    (``resolved_notebook_ids``), the ones it cites, and the one on each anchor
+    and citation of its answer -- the same two axes the public read
+    re-authorizes (``global_ask._snapshot_notebook_ids``), read off the model
+    through the projections above instead of a stored dict. The set a retained
+    turn's ``deleted_notebook_ids`` is drawn from."""
+    named = [*job.resolved_notebook_ids, *job.cited_notebook_ids]
+    named.extend(
+        item.notebook_id
+        for item in (*global_answer_anchors(job), *global_answer_citations(job))
+        if getattr(item, "notebook_id", "")
+    )
+    return [value for value in dict.fromkeys(str(item) for item in named) if value]
 
 
 # The one sentence both drill-down surfaces answer a flagged citation with.

@@ -2236,6 +2236,13 @@
               "title": "Conversation Id",
               "type": "string"
             },
+            "deleted_notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Deleted Notebook Ids",
+              "type": "array"
+            },
             "error": {
               "default": "",
               "title": "Error",
@@ -4912,6 +4919,13 @@
               "title": "Degraded Notebook Ids",
               "type": "array"
             },
+            "deleted_notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Deleted Notebook Ids",
+              "type": "array"
+            },
             "error": {
               "anyOf": [
                 {
@@ -4965,6 +4979,11 @@
                   "type": "null"
                 }
               ]
+            },
+            "retained_until": {
+              "default": "",
+              "title": "Retained Until",
+              "type": "string"
             },
             "retrieval_effort": {
               "default": "standard",

@@ -23,11 +23,16 @@ from app.models.ask import (
     StoredSubmittedVia,
 )
 from app.domain.global_ask_attribution import attribution_sql
+from app.domain.global_ask_retention import live_turn_sql
 
 # One shared newest-first step budget over a ``candidates`` CTE carrying a jsonb
 # ``trace`` column (SQLite twin in sqlite/ask_state_store.py): ``budget`` is
 # what remains for each row after the newer rows took theirs (``%s`` binds
 # ``step_limit``). Non-array traces count as 0 and read back as ``[]``.
+# The global Ask retention read gate (``app/domain/global_ask_retention.py``):
+# a turn past its ``retained_until`` no longer feeds any learning chain.
+_GLOBAL_TURN_LIVE = live_turn_sql(dialect="postgres")
+
 _TRACE_BUDGET_POSTGRES = (
     "SELECT id, status, created_at, question, resolved_json, searched_json, "
     "cited_json, skipped_json, "
@@ -673,7 +678,7 @@ class AskStateStore:
                     "payload_json::jsonb->'searched_notebook_ids' AS searched_json, "
                     "payload_json::jsonb->'cited_notebook_ids' AS cited_json, "
                     "payload_json::jsonb->'skipped_notebooks' AS skipped_json "
-                    "FROM global_ask_jobs WHERE user_id = %s "
+                    "FROM global_ask_jobs WHERE user_id = %s AND {live} "
                     "AND {attributed} "
                     "ORDER BY created_at DESC, id DESC LIMIT %s), "
                     "budgeted AS ({budget}) "
@@ -683,7 +688,9 @@ class AskStateStore:
                     "jsonb_array_elements(budgeted.trace) WITH ORDINALITY AS t(e, n) "
                     "WHERE t.n <= budgeted.budget) AS trace_json "
                     "FROM budgeted ORDER BY created_at DESC, id DESC"
-                ).format(attributed=attributed, budget=_TRACE_BUDGET_POSTGRES),
+                ).format(
+                    attributed=attributed, budget=_TRACE_BUDGET_POSTGRES, live=_GLOBAL_TURN_LIVE,
+                ),
                 (user_id, *([notebook_id] * binds), job_limit, step_limit),
             ).fetchall()
         for row in step_rows:
@@ -757,7 +764,7 @@ class AskStateStore:
                         "SELECT id, mode, created_at, "
                         "COALESCE(payload_json::jsonb->'answer'->'reasoning_trace', "
                         "payload_json::jsonb->'trace', '[]'::jsonb) AS trace "
-                        "FROM global_ask_jobs WHERE status = 'done' AND mode = 'reasoning' "
+                        "FROM global_ask_jobs WHERE status = 'done' AND mode = 'reasoning' AND {live} "
                         "ORDER BY created_at DESC, id DESC LIMIT %s), "
                         "budgeted AS ({budget}) "
                         "SELECT id, mode, created_at, "
@@ -765,7 +772,7 @@ class AskStateStore:
                         "jsonb_array_elements(budgeted.trace) WITH ORDINALITY AS t(e, n) "
                         "WHERE t.n <= budgeted.budget) AS trace_json "
                         "FROM budgeted ORDER BY created_at DESC, id DESC"
-                    ).format(budget=_RUN_BUDGET_POSTGRES),
+                    ).format(budget=_RUN_BUDGET_POSTGRES, live=_GLOBAL_TURN_LIVE),
                     (job_limit, step_limit),
                 ).fetchall()
         by_run = {run["run_id"]: run for run in runs}
@@ -885,7 +892,7 @@ class AskStateStore:
             # in the SQL text, question text discarded in this method.
             global_rows = db.execute(
                 "SELECT payload_json::jsonb->>'question' AS question, created_at "
-                "FROM global_ask_jobs WHERE user_id = %s AND status = 'done' "
+                f"FROM global_ask_jobs WHERE user_id = %s AND status = 'done' AND {_GLOBAL_TURN_LIVE} "
                 "ORDER BY created_at DESC, id DESC LIMIT %s",
                 (user_id, limit),
             ).fetchall()

@@ -1,6 +1,7 @@
 import { performApiRequest, requestJson, requestVoid } from "./api-client.ts";
 import { throwHumanizedHttpError } from "./errors.ts";
 import { readNdjsonStream } from "./ndjson-stream.ts";
+import { withDeletedSources } from "./global-deleted-sources.ts";
 import { requestTaskStream } from "./request-task-stream.ts";
 import type { AnswerAnchorLike, CitationLike } from "./answer-formatting.ts";
 import type { ReasoningTraceStep } from "./ask-stream.ts";
@@ -87,6 +88,12 @@ export type GlobalJob = {
   updated_at?: string;
   /** 这条反馈写入的时刻,与 `feedback` 同落一行。旧作业没有这一列时为空串。 */
   feedback_at?: string;
+  /** 这一轮用到的某个笔记本被删除后，它保留到的时刻(ISO-8601)；到期后这一轮自动清除。
+   *  没有参与笔记本被删除的轮次为空串或缺席。 */
+  retained_until?: string;
+  /** 这一轮提到的、已经被删除的笔记本(后端在所有者读到这一轮时算出)。读入口据此把它们
+   *  的引用标成「来源已删除」(`global-deleted-sources.ts`)。 */
+  deleted_notebook_ids?: string[];
 };
 export type GlobalConversation = {
   id: string;
@@ -122,9 +129,18 @@ export function withAnswerIdentity(job: GlobalJob): GlobalJob {
   return { ...job, answer: { ...job.answer, answer_id: job.job_id } };
 }
 
+/**
+ * 每个作业读入口的统一归一：回答身份（`withAnswerIdentity`）＋已删笔记本的引用降级
+ * （`withDeletedSources`，见 `global-deleted-sources.ts`）。两者都在读入口做一次，
+ * 下游渲染拿到的就是稳定的同一个对象，不用各自判断。
+ */
+export function normalizeGlobalJob(job: GlobalJob): GlobalJob {
+  return withDeletedSources(withAnswerIdentity(job));
+}
+
 export const getGlobalConversation = (id: string, offset = 0) =>
   requestJson<GlobalConversationDetail>(`${root}/conversations/${encodeURIComponent(id)}?limit=${GLOBAL_ASK_PAGE_SIZE}&offset=${offset}`, options)
-    .then((detail) => ({ ...detail, turns: detail.turns.map(withAnswerIdentity) }));
+    .then((detail) => ({ ...detail, turns: detail.turns.map(normalizeGlobalJob) }));
 export const renameGlobalConversation = (id: string, title: string) =>
   requestJson<GlobalConversation>(`${root}/conversations/${encodeURIComponent(id)}`, {
     ...options, method: "PATCH", body: JSON.stringify({ title }),
@@ -148,7 +164,7 @@ export const askGlobal = (input: {
    *  后端在建新作业的同一个事务里删掉它。 */
   replaces_job_id?: string;
 }) => requestJson<GlobalJob>(`${root}/ask`, { ...options, method: "POST", body: JSON.stringify(input) })
-  .then(withAnswerIdentity);
+  .then(normalizeGlobalJob);
 
 /**
  * 全局问答的问题理解预检。与单库的 `/notebooks/{id}/ask/intent/stream` 完全同形
@@ -179,7 +195,7 @@ export const previewGlobalAskIntent = (
   },
 );
 export const getGlobalJob = (id: string) =>
-  requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}`, options).then(withAnswerIdentity);
+  requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}`, options).then(normalizeGlobalJob);
 
 // --- 运行中作业的推送流 -------------------------------------------------------
 //
@@ -259,8 +275,9 @@ export async function streamGlobalJob(
     if (frame.event === "progress") {
       await handlers.onProgress(frame);
     } else if (frame.event === "final") {
-      // 与其它作业读入口同一处归一：全局回答的身份就是它的作业（`withAnswerIdentity`）。
-      outcome = { kind: "final", job: withAnswerIdentity(frame.job) };
+      // 与其它作业读入口同一处归一（`normalizeGlobalJob`）：全局回答的身份就是它的作业，
+      // 已删笔记本的引用降级。
+      outcome = { kind: "final", job: normalizeGlobalJob(frame.job) };
     } else if (frame.event === "gone") {
       outcome = { kind: "gone" };
     } else if (frame.event === "error") {
@@ -276,11 +293,11 @@ export async function streamGlobalJob(
  *  **被这次调用停下来**的作业，响应也可能丢：调用方一律重读会话对账
  *  （`use-global-ask.ts` 的 `discardJob`），不凭这里的返回值断言「已经删了」。 */
 export const cancelGlobalJob = (id: string, discard = false) =>
-  requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}/cancel${discard ? "?discard=true" : ""}`, { ...options, method: "POST" }).then(withAnswerIdentity);
+  requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}/cancel${discard ? "?discard=true" : ""}`, { ...options, method: "POST" }).then(normalizeGlobalJob);
 export const submitGlobalFeedback = (jobId: string, rating: "useful" | "not_useful") =>
   requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(jobId)}/feedback`, {
     ...options, method: "POST", body: JSON.stringify({ rating }),
-  }).then(withAnswerIdentity);
+  }).then(normalizeGlobalJob);
 
 // --- 回答投影：新形状 `job.answer` 优先，旧形状 `job.response` 兜底 ------------
 //

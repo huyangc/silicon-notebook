@@ -5659,5 +5659,61 @@ MIGRATION_MANIFEST[(93, 94)] = {
     "views": {},
 }
 
+# v95 (parity with PostgreSQL 0075_global_ask_retained_until.sql): the nullable
+# global_ask_jobs.retained_until (no backfill) -- the expiry a notebook deletion
+# stamps on the global Ask turns that ran over it -- and the partial
+# idx_global_ask_jobs_retained over it. SQLite's ALTER TABLE ADD COLUMN splices
+# the definition in before the closing parenthesis of the stored CREATE TABLE
+# text (after v82's ``mode``). Conditional like v82: only a lineage that holds
+# (or creates) global_ask_jobs carries the ALTERed text. The fixture holds no
+# global rows. No table, trigger or view.
+GLOBAL_ASK_RETAINED_UNTIL_COLUMNS = {
+    "global_ask_jobs": {
+        "retained_until": ("retained_until", "TEXT", 0, None, 0),
+    },
+}
+GLOBAL_ASK_JOBS_V95_FROM = " mode TEXT NOT NULL DEFAULT '')"
+GLOBAL_ASK_JOBS_V95_TO = " mode TEXT NOT NULL DEFAULT '', retained_until TEXT)"
+GLOBAL_ASK_RETAINED_UNTIL_INDEXES = {
+    "idx_global_ask_jobs_retained": (
+        "CREATE INDEX idx_global_ask_jobs_retained\n"
+        "                 ON global_ask_jobs(conversation_id, retained_until) "
+        "WHERE retained_until IS NOT NULL"
+    ),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 95, *key[2:]): {
+        **manifest,
+        "tables": {
+            **manifest["tables"],
+            **(
+                {
+                    "global_ask_jobs": manifest["tables"]["global_ask_jobs"].replace(
+                        GLOBAL_ASK_JOBS_V95_FROM, GLOBAL_ASK_JOBS_V95_TO,
+                    )
+                }
+                if "global_ask_jobs" in manifest["tables"]
+                else {}
+            ),
+        },
+        "columns": {
+            **manifest["columns"],
+            "global_ask_jobs": {
+                **manifest["columns"].get("global_ask_jobs", {}),
+                **GLOBAL_ASK_RETAINED_UNTIL_COLUMNS["global_ask_jobs"],
+            },
+        },
+        "indexes": {**manifest["indexes"], **GLOBAL_ASK_RETAINED_UNTIL_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(94, 95)] = {
+    "tables": {},
+    "columns": GLOBAL_ASK_RETAINED_UNTIL_COLUMNS,
+    "indexes": GLOBAL_ASK_RETAINED_UNTIL_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

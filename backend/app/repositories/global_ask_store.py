@@ -12,8 +12,19 @@ from app.core.capability_tokens import (
 # Safety ceiling on how many turns one public page renders; the same name the
 # notebook-scoped public read caps its fetch by. Pure leaf module, no cycle.
 from app.domain.conversation_public_view import MAX_TURNS
+from app.domain.global_ask_retention import (
+    conversation_live_sql,
+    live_turn_sql,
+    participant_bind_count,
+    participant_sql,
+)
 from app.models.ask import CONVERSATION_TITLE_MAX_CHARS
-from app.models.global_ask import GlobalAskJob, GlobalConversationSummary
+from app.models.global_ask import (
+    GLOBAL_JOB_READ_TIME_FIELDS,
+    GlobalAskJob,
+    GlobalConversationSummary,
+    global_job_notebook_ids,
+)
 from app.repositories.global_ask_ports import ReplacedJobUnavailable
 from app.repositories.ports import (
     ConversationHasNoShareableAnswer,
@@ -38,6 +49,28 @@ def _transition_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _payload_json(job) -> str:
+    """The stored payload of ``job``: everything but the read-time facts."""
+    return job.model_dump_json(exclude=set(GLOBAL_JOB_READ_TIME_FIELDS))
+
+
+def _aware_iso(value) -> str:
+    """An aware UTC ISO-8601 instant, the spelling every stamp here is written in."""
+    if isinstance(value, datetime):
+        instant = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return instant.astimezone(timezone.utc).isoformat()
+    return str(value)
+
+
+def _dialect(marker) -> str:
+    return "postgres" if marker == "%s" else "sqlite"
+
+
+# How many ids one purge statement names: far below SQLite's bound-parameter
+# ceiling and PostgreSQL's comfortable IN-list size.
+_PURGE_BATCH = 500
+
+
 class GlobalAskStore:
     def __init__(self, database, *, marker="?", access_sql=None, read_authority_lock=None):
         self.database = database
@@ -49,6 +82,11 @@ class GlobalAskStore:
         # Only ``guarded_admin_job_record`` consumes them.
         self._access_sql = access_sql
         self._read_authority_lock = read_authority_lock
+        # The retention read gate (``app/domain/global_ask_retention.py``):
+        # every read of a job's content skips a turn past its stamp.
+        self._live = live_turn_sql(dialect=_dialect(marker))
+        # ...and a conversation whose every turn did (``conversation_live_sql``).
+        self._conversation_live = conversation_live_sql(dialect=_dialect(marker), alias="c")
         self._history_projection = (
             "payload_json::jsonb->>'question' AS question, "
             "COALESCE(payload_json::jsonb->'answer'->>'answer', "
@@ -77,15 +115,17 @@ class GlobalAskStore:
     def conversation(self, conversation_id, user_id):
         with self.database.connect() as db:
             row = db.execute(self._sql(
-                "SELECT * FROM global_ask_conversations WHERE id=? AND user_id=?"
+                "SELECT c.* FROM global_ask_conversations c WHERE c.id=? AND c.user_id=? "
+                f"AND {self._conversation_live}"
             ), (conversation_id, user_id)).fetchone()
         return self._conversation(row)
 
     def list_conversations(self, user_id, limit, offset):
         with self.database.connect() as db:
             rows = db.execute(self._sql(
-                "SELECT * FROM global_ask_conversations WHERE user_id=? "
-                "ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?"
+                "SELECT c.* FROM global_ask_conversations c WHERE c.user_id=? "
+                f"AND {self._conversation_live} "
+                "ORDER BY c.updated_at DESC,c.id DESC LIMIT ? OFFSET ?"
             ), (user_id, limit, offset)).fetchall()
         return [self._conversation(row) for row in rows]
 
@@ -98,7 +138,9 @@ class GlobalAskStore:
         # The submission's idempotency id and the two record-parity instants
         # live in their own columns, not in the payload; a narrower SELECT
         # simply does not carry them.
-        for field in ("client_request_id", "asked_at", "updated_at", "submitted_via"):
+        for field in (
+            "client_request_id", "asked_at", "updated_at", "submitted_via", "retained_until",
+        ):
             try:
                 setattr(result, field, row[field] or "")
             except (KeyError, IndexError):
@@ -110,7 +152,7 @@ class GlobalAskStore:
     def job(self, job_id, user_id):
         with self.database.connect() as db:
             row = db.execute(self._sql(
-                "SELECT * FROM global_ask_jobs WHERE id=? AND user_id=?"
+                f"SELECT * FROM global_ask_jobs WHERE id=? AND user_id=? AND {self._live}"
             ), (job_id, user_id)).fetchone()
         return self._job(row)
 
@@ -199,7 +241,7 @@ class GlobalAskStore:
                 "payload_json,created_at,submitted_via,asked_at,updated_at,mode) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
             ), (job.job_id, job.conversation_id, user_id, request_id or None,
-                request_json, job.status, job.model_dump_json(), job.created_at,
+                request_json, job.status, _payload_json(job), job.created_at,
                 submitted_via, job.asked_at, job.updated_at, job.mode))
             db.execute(self._sql(
                 "UPDATE global_ask_conversations SET scope_json=?,updated_at=? WHERE id=? AND user_id=?"
@@ -310,7 +352,7 @@ class GlobalAskStore:
         # Stamped onto the object only when THIS write won: the loser of a
         # cancel/finish race must not carry an instant the row never had.
         stamp = _transition_now()
-        payload = job.model_copy(update={"updated_at": stamp}).model_dump_json()
+        payload = _payload_json(job.model_copy(update={"updated_at": stamp}))
         with self.database.write() as db:
             cursor = db.execute(self._sql(
                 "UPDATE global_ask_jobs SET status=?,payload_json=?,updated_at=?,"
@@ -379,11 +421,13 @@ class GlobalAskStore:
         with self.database.write() as db:
             cursor = db.execute(self._sql(
                 f"UPDATE global_ask_jobs SET payload_json={expression} "
-                f"WHERE id=? AND user_id=? AND status='done' AND {empty_feedback}"
+                f"WHERE id=? AND user_id=? AND status='done' AND {empty_feedback} "
+                f"AND {self._live}"
             ), (patch, job_id, user_id))
             if cursor.rowcount != 1:
                 eligible = db.execute(self._sql(
-                    "SELECT 1 FROM global_ask_jobs WHERE id=? AND user_id=? AND status='done'"
+                    "SELECT 1 FROM global_ask_jobs WHERE id=? AND user_id=? AND status='done' "
+                    f"AND {self._live}"
                 ), (job_id, user_id)).fetchone()
                 if eligible is None:
                     return None
@@ -393,7 +437,7 @@ class GlobalAskStore:
         with self.database.connect() as db:
             rows = db.execute(self._sql(
                 "SELECT * FROM global_ask_jobs WHERE conversation_id=? AND user_id=? "
-                "ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?"
+                f"AND {self._live} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?"
             ), (conversation_id, user_id, limit, offset)).fetchall()
         return [self._job(row) for row in rows]
 
@@ -402,7 +446,7 @@ class GlobalAskStore:
         with self.database.connect() as db:
             rows = db.execute(self._sql(
                 f"SELECT {self._history_projection} FROM global_ask_jobs WHERE conversation_id=? AND user_id=? "
-                "AND status='done' ORDER BY created_at DESC,id DESC LIMIT ?"
+                f"AND status='done' AND {self._live} ORDER BY created_at DESC,id DESC LIMIT ?"
             ), (conversation_id, user_id, limit)).fetchall()
         turns = []
         for row in rows:
@@ -467,7 +511,7 @@ class GlobalAskStore:
         access = self._access_sql
         with self.database.write() as db:
             row = db.execute(self._sql(
-                "SELECT * FROM global_ask_jobs WHERE id=? AND user_id=?" + share
+                f"SELECT * FROM global_ask_jobs WHERE id=? AND user_id=? AND {self._live}" + share
             ), (job_id, owner_id)).fetchone()
             if row is None:
                 yield None
@@ -500,9 +544,20 @@ class GlobalAskStore:
                             notebook_owner_id=live[nb_id]["created_by"],
                         ):
                             readable.discard(nb_id)
-            if reader_id is not None and not set(ids) <= readable:
+            # The owner's retained turn (``app/domain/global_ask_retention.py``):
+            # a participant that no longer exists at all no longer takes part
+            # in the rule -- the same tolerance ``GlobalAskService._check_turns``
+            # applies to the conversation read. A participant that still exists
+            # but is unreadable keeps refusing the whole record.
+            named = global_job_notebook_ids(job) if job.retained_until else []
+            gone = self._missing_on(db, named) if named else set()
+            if reader_id is not None and not set(ids) - gone <= readable:
                 yield None
                 return
+            # Read-time, like the conversation read's: which of the libraries
+            # this turn names are gone, so the detail pane degrades their
+            # citations instead of requesting anything from them.
+            job.deleted_notebook_ids = [nb_id for nb_id in named if nb_id in gone]
             yield {
                 "job": job,
                 "error_detail": row["error_detail"] or "",
@@ -523,7 +578,7 @@ class GlobalAskStore:
         """
         with self.database.connect() as db:
             row = db.execute(self._sql(
-                "SELECT * FROM global_ask_jobs WHERE id=? AND user_id=?"
+                f"SELECT * FROM global_ask_jobs WHERE id=? AND user_id=? AND {self._live}"
             ), (job_id, user_id)).fetchone()
         if row is None:
             return None
@@ -532,6 +587,149 @@ class GlobalAskStore:
             "error_detail": row["error_detail"] or "",
             "submitted_via": row["submitted_via"] or "",
         }
+
+    # ------------------------------------------------------------------
+    # retention after a participant library is deleted
+    # (``app/domain/global_ask_retention.py``)
+    # ------------------------------------------------------------------
+
+    def _missing_on(self, db, notebook_ids):
+        """The ids among ``notebook_ids`` with no ``notebooks`` row at all.
+
+        "No row" rather than "not live": a library still being deleted has its
+        row until the deletion's final transaction, and until then it is an
+        existing library this reader cannot read, not a deleted one.
+        """
+        ids = sorted({str(value) for value in notebook_ids if value})
+        if not ids:
+            return set()
+        placeholders = ",".join("?" for _ in ids)
+        present = {
+            row["id"] for row in db.execute(self._sql(
+                f"SELECT id FROM notebooks WHERE id IN ({placeholders})"
+            ), tuple(ids)).fetchall()
+        }
+        return set(ids) - present
+
+    def missing_notebook_ids(self, notebook_ids):
+        """``_missing_on`` in its own read."""
+        with self.database.connect() as db:
+            return self._missing_on(db, notebook_ids)
+
+    @staticmethod
+    def stamp_retained_turns(db, notebook_id, expires_at, *, marker):
+        """Stamp every job that ran over ``notebook_id`` with ``expires_at``.
+
+        Runs inside the notebook delete transaction, beside the
+        ``retained_user_activity`` projection whose window ``expires_at`` is,
+        before the notebook row goes. A turn that already carries an EARLIER
+        stamp (an earlier participant deletion) keeps it: a later deletion can
+        never extend what an earlier one started. Returns the stamped count.
+        """
+        dialect = _dialect(marker)
+        stamp = _aware_iso(expires_at)
+        participant = participant_sql(dialect=dialect, marker=marker)
+        binds = (notebook_id,) * participant_bind_count(dialect=dialect)
+        earlier = (
+            "retained_until::timestamptz <= %s::timestamptz" if dialect == "postgres"
+            else "julianday(retained_until) <= julianday(?)"
+        )
+        cursor = db.execute(
+            f"UPDATE global_ask_jobs SET retained_until={marker} WHERE {participant} "
+            f"AND NOT (retained_until IS NOT NULL AND {earlier})",
+            (stamp, *binds, stamp),
+        )
+        return cursor.rowcount
+
+    @classmethod
+    def purge_expired_turns(cls, db, now, *, marker):
+        """Physically delete every turn whose stamp is at or before ``now``.
+
+        The retention twin of ``DELETE FROM retained_user_activity WHERE
+        expires_at<=now``, called at the same two points: startup recovery and
+        the next notebook deletion (inside its transaction). The read gate
+        already hides these rows; this only reclaims them.
+
+        A conversation left with no turn is deleted with them (its share token
+        dies with it). A conversation that keeps other turns keeps its user
+        title, but an AUTOMATIC title -- still the first question, as
+        ``create`` set it -- that names a purged first turn moves on to the
+        first remaining question, so the history list does not keep showing a
+        question that no longer exists anywhere (the rule ``_discard_replaced``
+        applies when it removes a turn). Returns the purged turn count.
+        """
+        dialect = _dialect(marker)
+        expired_sql = (
+            "retained_until IS NOT NULL AND retained_until::timestamptz <= %s::timestamptz"
+            if dialect == "postgres" else
+            "retained_until IS NOT NULL AND julianday(retained_until) <= julianday(?)"
+        )
+        when = _aware_iso(now)
+        rows = db.execute(
+            f"SELECT id, conversation_id FROM global_ask_jobs WHERE {expired_sql}", (when,),
+        ).fetchall()
+        if not rows:
+            return 0
+        conversations = sorted({row["conversation_id"] for row in rows})
+        if dialect == "postgres":
+            # The same row lock ``create`` takes before inserting a turn: a
+            # submission into one of these conversations either commits first
+            # (and the empty-conversation delete below then sees its job) or
+            # waits and finds the conversation gone. SQLite's ``write()`` is a
+            # process-level write lock already.
+            for start in range(0, len(conversations), _PURGE_BATCH):
+                page = conversations[start:start + _PURGE_BATCH]
+                db.execute(
+                    "SELECT id FROM global_ask_conversations WHERE id IN ("
+                    + ",".join(marker for _ in page) + ") ORDER BY id FOR UPDATE",
+                    tuple(page),
+                ).fetchall()
+        question = (
+            "payload_json::jsonb->>'question'" if dialect == "postgres"
+            else "json_extract(payload_json,'$.question')"
+        )
+        for conversation_id in conversations:
+            cls._retitle_before_purge(db, conversation_id, expired_sql, when, question, marker)
+        ids = [row["id"] for row in rows]
+        for start in range(0, len(ids), _PURGE_BATCH):
+            page = ids[start:start + _PURGE_BATCH]
+            db.execute(
+                "DELETE FROM global_ask_jobs WHERE id IN ("
+                + ",".join(marker for _ in page) + ")", tuple(page),
+            )
+        for start in range(0, len(conversations), _PURGE_BATCH):
+            page = conversations[start:start + _PURGE_BATCH]
+            db.execute(
+                "DELETE FROM global_ask_conversations WHERE id IN ("
+                + ",".join(marker for _ in page) + ") AND NOT EXISTS("
+                "SELECT 1 FROM global_ask_jobs j WHERE j.conversation_id="
+                "global_ask_conversations.id)", tuple(page),
+            )
+        return len(ids)
+
+    @staticmethod
+    def _retitle_before_purge(db, conversation_id, expired_sql, when, question, marker):
+        """Move an automatic title off a first turn that is about to be purged."""
+        first = db.execute(
+            f"SELECT id, {question} AS question, ({expired_sql}) AS expired "
+            f"FROM global_ask_jobs WHERE conversation_id={marker} "
+            f"{GLOBAL_JOBS_ORDER_ASC} LIMIT 1", (when, conversation_id),
+        ).fetchone()
+        if first is None or not first["expired"]:
+            return
+        remaining = db.execute(
+            f"SELECT {question} AS question FROM global_ask_jobs "
+            f"WHERE conversation_id={marker} AND NOT ({expired_sql}) "
+            f"{GLOBAL_JOBS_ORDER_ASC} LIMIT 1", (conversation_id, when),
+        ).fetchone()
+        if remaining is None:
+            return
+        db.execute(
+            f"UPDATE global_ask_conversations SET title={marker} "
+            f"WHERE id={marker} AND title={marker}",
+            (str(remaining["question"] or "")[:CONVERSATION_TITLE_MAX_CHARS],
+             conversation_id, str(first["question"] or "")[:CONVERSATION_TITLE_MAX_CHARS]),
+        )
 
     # ------------------------------------------------------------------
     # public conversation sharing -- the global twin of
@@ -653,14 +851,14 @@ class GlobalAskStore:
         if expected:
             boundary = db.execute(self._sql(
                 "SELECT id, created_at FROM global_ask_jobs "
-                "WHERE id=? AND conversation_id=? AND user_id=? AND status='done'"
+                f"WHERE id=? AND conversation_id=? AND user_id=? AND status='done' AND {self._live}"
             ), (expected, conversation_id, user_id)).fetchone()
             if boundary is None:
                 raise ConversationShareWatermarkStale(expected)
             return boundary["created_at"], boundary["id"]
         latest = db.execute(self._sql(
             "SELECT id, created_at FROM global_ask_jobs WHERE conversation_id=? "
-            "AND user_id=? AND status='done' " + GLOBAL_JOBS_ORDER_DESC + " LIMIT 1"
+            f"AND user_id=? AND status='done' AND {self._live} " + GLOBAL_JOBS_ORDER_DESC + " LIMIT 1"
         ), (conversation_id, user_id)).fetchone()
         if latest is None:
             return None, None
@@ -734,8 +932,9 @@ class GlobalAskStore:
             return None
         with self.database.connect() as db:
             conv = db.execute(self._sql(
-                "SELECT id, user_id, title, created_at, shared_through_at, "
-                "shared_through_id FROM global_ask_conversations WHERE share_token=?"
+                "SELECT c.id, c.user_id, c.title, c.created_at, c.shared_through_at, "
+                "c.shared_through_id FROM global_ask_conversations c WHERE c.share_token=? "
+                f"AND {self._conversation_live}"
             ), (clean,)).fetchone()
             if conv is None or not conv["shared_through_at"]:
                 return None
@@ -774,7 +973,7 @@ class GlobalAskStore:
         with self.database.connect() as db:
             row = db.execute(self._sql(
                 "SELECT id, payload_json, created_at FROM global_ask_jobs "
-                "WHERE id=? AND user_id=? AND status='done' AND submitted_via='mcp'"
+                f"WHERE id=? AND user_id=? AND status='done' AND submitted_via='mcp' AND {self._live}"
             ), (clean, owner)).fetchone()
         if row is None:
             return None
@@ -850,7 +1049,7 @@ class GlobalAskStore:
             return self._jobs_through(db, conv["id"], watermark)
         return db.execute(self._sql(
             "SELECT id, payload_json, created_at FROM global_ask_jobs "
-            "WHERE conversation_id=? AND status='done' AND created_at <= ? "
+            f"WHERE conversation_id=? AND status='done' AND created_at <= ? AND {self._live} "
             + GLOBAL_JOBS_ORDER_ASC + " LIMIT ?"
         ), (conv["id"], conv["shared_through_at"], MAX_TURNS + 1)).fetchall()
 
@@ -861,7 +1060,7 @@ class GlobalAskStore:
         published snapshot and the share window."""
         return db.execute(self._sql(
             "SELECT id, payload_json, created_at FROM global_ask_jobs "
-            "WHERE conversation_id=? AND status='done' AND ("
+            f"WHERE conversation_id=? AND status='done' AND {self._live} AND ("
             "created_at < ? OR (created_at = ? AND id <= ?)) "
             + GLOBAL_JOBS_ORDER_ASC + " LIMIT ?"
         ), (conversation_id, boundary["created_at"], boundary["created_at"],

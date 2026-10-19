@@ -447,6 +447,11 @@ class AskDetail(BaseModel):
     retained_until: str = ""
     notebook_ids: List[str] = Field(default_factory=list)
     notebook_names: Dict[str, str] = Field(default_factory=dict)
+    # ``global`` 且这一轮用到的某个库已被删除时(留存期内的轮次,
+    # ``app/domain/global_ask_retention.py``):这一轮提到的、已不存在的库。前端据此把
+    # 它们的引用降级成「来源已删除」,不对它们发任何读请求;``retained_until`` 是这一轮
+    # 被清除的时刻。其余情况为空。
+    deleted_notebook_ids: List[str] = Field(default_factory=list)
 
     @field_validator("trace", mode="before")
     @classmethod
