@@ -5433,7 +5433,7 @@ def test_no_kg_run_opens_with_the_disclosure_step(rrepo):
     first = res.trace[0]
     assert first.step_type == "skip"
     assert first.detail == {"reason": "kg_unavailable"}
-    assert first.summary == "本笔记本尚未构建知识图谱,本轮只用原文检索与集合清单"
+    assert first.summary == "本笔记本尚未整理知识图谱,本轮只用原文检索与集合清单"
     # skip 步不写 `result_ids`(Agentic Memory P4 硬规则)。
     assert "result_ids" not in first.detail
     # 顺序契约:披露步排在 `_first_round_prompt_blocks` 产出的那一步**之前**。

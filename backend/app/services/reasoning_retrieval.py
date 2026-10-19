@@ -5420,7 +5420,7 @@ class ReasoningRetriever:
             return
         state.record(TraceStep(
             step_type="skip",
-            summary="本笔记本尚未构建知识图谱,本轮只用原文检索与集合清单",
+            summary="本笔记本尚未整理知识图谱,本轮只用原文检索与集合清单",
             detail={"reason": "kg_unavailable"}))
 
     def _first_round_prompt_blocks(self, state: "_ReasoningRunState") -> None:

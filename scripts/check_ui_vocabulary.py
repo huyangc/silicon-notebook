@@ -145,17 +145,6 @@ TRACE_STEP = "TraceStep"
 # Non-vacuity floor: keep the existing guard while removing retired modules.
 MIN_TRACE_SUMMARY_SITES = 50
 
-# 这条通道开通**之前**就已存在的一条违规,登记为例外而不是静默放行:
-# 「本笔记本尚未构建知识图谱…」里的「构建知识图谱」按词表该写成「整理知识图谱」,
-# 但这句是被 `docs/product-and-api*.md` 逐字冻结的协议串(文档明写「含其中的半角
-# 逗号」),还被 `backend/tests/fixtures/repository_contract/ask_responses.json` 这份
-# 仓库黄金 fixture 钉住。改它要同改文档、既有用例与 fixture,属于独立的一次改动;
-# 登记在这里是为了让它可见且**有界**——例外按逐字全串匹配,改一个字就重新违规。
-# 后续项登记在 `fangan_todo.md` 的「问答」一节。
-GRANDFATHERED_TRACE_SUMMARIES = frozenset({
-    "本笔记本尚未构建知识图谱,本轮只用原文检索与集合清单",
-})
-
 # —— 第五条通道:服务端写、前端逐字渲染的**展示字段** ——————————————————————
 # 与轨迹摘要同构:这些字段由后端写进接口,前端原样上屏,不经 frontend/app。按**显式
 # 登记的调用形状**匹配,不按 kwarg 名泛扫——`error_message=` 在删除作业、来源表等处
@@ -900,8 +889,6 @@ def scan_trace_summaries(
             if units:
                 sites += 1
             for text in units:
-                if text in GRANDFATHERED_TRACE_SUMMARIES:
-                    continue
                 for term in _backend_terms_in(text):
                     hits.add((node.lineno, term, text))
     return sites, sorted(hits)

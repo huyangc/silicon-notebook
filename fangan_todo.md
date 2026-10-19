@@ -166,12 +166,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       问答有 `retained_user_activity` 留存投影，全局问答没有对应机制；(d) `ask_stage` /
       `retrieval_run_stats` 事件给全局 run 打的仍是某个锚点笔记本 id，没有专门的全局标记。全局反馈
       的聚合面缺口见上一条，不在此重复登记。
-- [ ] **无图披露步文案「构建知识图谱」→「整理知识图谱」**：`reasoning_retrieval.py` 那条
-      `kg_unavailable` 披露步的 `summary` 违反界面词汇表，但它被 `docs/product-and-api*.md`
-      逐字冻结（文档明写「含其中的半角逗号」）、并被 `tests/fixtures/repository_contract/
-      ask_responses.json` 与 `test_reasoning_retrieval.py` 钉住。眼下登记在
-      `scripts/check_ui_vocabulary.py::GRANDFATHERED_TRACE_SUMMARIES`（逐字全串例外，改一个字
-      就重新违规）；改它要同改文案、两份文档、既有用例与黄金 fixture，是独立的一次改动。
 
 ### 知识图谱
 
