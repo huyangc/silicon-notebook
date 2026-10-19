@@ -52,7 +52,7 @@
 - **P4-T3 迁移**：候选表 `seed_version`（存量 1）；state 三列 `concept_seed_version`、`community_partition_version`、`community_partition_mode`；`communities.board_key`（回填为 id）；连带登记；删除知识图谱复位。
 - **P4-T4 已存决定重算**（算法见规格 §五 S1「实施细化」）：放在每个库第一次 v2 全量重建里；覆盖 `~v1:` 例外；悬置发事件；决定计数折进输入版本。
 - **P4-T5 描述缓存按签名复用**。
-- **P4-T6 待确认合并返回两侧 canonical 名与「同名不同写法」标记**（后端 + 前端 + 产品文档）。
+- **P4-T6 待确认合并「同名不同写法」标记**：两侧 canonical 名（后端 `name_a` / `name_b` + 前端 + 产品文档）已由单独的 PR（`claude/kg-pending-merge-names`）先行交付；「同名不同写法」标记仍在 PR-4 随 S1 的 squash key 一起加。
 - **P4-T7 F4 squash 候选档**：星形对、与 ANN 行按 canonical 对去重、过既有决定过滤、上限 Settings、触顶发事件。
 - **P4-T8 `CLUSTER_ALGO_VERSION=4`**。
 - **P4-T9 纯分区模块 `services/kg_partition.py`**：按分量逐个跑 igraph Leiden（分量内按 canonical id 排名编号、边排序、每分量重置 seed、resolution = m_c/m、`n_iterations=-1`、可选 `initial_membership`）；board_key 续用（互为最佳且 J ≥ 0.5）与新铸（成员内容哈希、代内撞键确定性再散列）。
