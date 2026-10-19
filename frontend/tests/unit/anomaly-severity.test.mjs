@@ -251,7 +251,7 @@ test("升级后还没生成(新版本才有的那份产物)→ info 灰色,绝�
   assert.equal(anomalies.length, 1);
   assert.equal(anomalies[0].severity, "info");
   assert.equal(anomalies[0].label, "升级后还没生成");
-  assert.match(anomalies[0].tooltip, /更新分析/);
+  assert.match(anomalies[0].tooltip, /更新一次分析/);
 });
 
 test("从没算过 → info(「没算过」不是「算出来是 0」,但也不是异常)", () => {

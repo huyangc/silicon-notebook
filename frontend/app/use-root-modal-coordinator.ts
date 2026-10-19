@@ -134,27 +134,30 @@ export const ROOT_MODAL_POLICIES: Readonly<Record<RootModalSlot, ModalPolicy>> =
   extension: { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
 };
 
-// The only primary pairs that may stay open together. Each one is a drill-down:
-//   · source-detail ↔ catalog-review — the command-catalog review opens from a
-//     source's own detail window;
-//   · source-detail ↔ kg-analysis — the KG analysis findings open a source for
+// The only primary pairs that may stay open together, as [already open, being
+// opened]. Each one is a drill-down from the slot already open:
+//   · source-detail ⇄ catalog-review — the command-catalog review opens from a
+//     source's own detail window (both directions, as before);
+//   · kg-analysis → source-detail — the KG analysis findings open a source for
 //     checking ("打开来源核对") on top of the panel, which stays open underneath
 //     (inert while covered) so closing the source returns the reader to the same
 //     finding, scroll position and focused button;
-//   · catalog-review ↔ kg-analysis — the same source detail can open its catalog
-//     review while the analysis panel is still underneath; without this pair that
-//     second step would close the panel the first step deliberately kept.
-// Every pair is symmetric; any other primary still evicts the one already open.
+//   · kg-analysis → catalog-review — that source detail can open its catalog
+//     review while the panel is still underneath; without this pair the second
+//     step would close the panel the first step deliberately kept.
+// Directed on purpose: the analysis panel renders inside the KG view's stacking
+// context (below every root-level dialog), so opening it while a source detail is
+// already up must still evict the detail — kept, the detail would sit on top
+// visually while the coordinator made the panel topmost and the detail inert.
 const COEXISTING_PRIMARY_PAIRS: ReadonlyArray<readonly [RootModalSlot, RootModalSlot]> = [
   ["source-detail", "catalog-review"],
-  ["source-detail", "kg-analysis"],
-  ["catalog-review", "kg-analysis"],
+  ["catalog-review", "source-detail"],
+  ["kg-analysis", "source-detail"],
+  ["kg-analysis", "catalog-review"],
 ];
 
-function primarySlotsMayCoexist(left: RootModalSlot, right: RootModalSlot): boolean {
-  return COEXISTING_PRIMARY_PAIRS.some(([a, b]) => (
-    (left === a && right === b) || (left === b && right === a)
-  ));
+function primarySlotsMayCoexist(open: RootModalSlot, opening: RootModalSlot): boolean {
+  return COEXISTING_PRIMARY_PAIRS.some(([kept, incoming]) => open === kept && opening === incoming);
 }
 
 type ActiveLease = RootModalLease & Readonly<{ order: number }>;

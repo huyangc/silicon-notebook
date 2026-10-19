@@ -6,7 +6,7 @@
 //   · 重新解析先弹说明确认框,确认之后才走体检同款批量重新解析,且「在飞」只在确认之后开始;
 //   · 打开来源走 `openSourceDetailById` 且不关面板(根弹窗协调器里那一对允许共存);
 //   · 补上关联走知识图谱视图同一个后台任务;「去待确认合并」关面板并请求定位;
-//   · 失效令牌含来源内容版本、补上关联与合并决定的忙碌位;
+//   · 失效令牌含来源内容版本与补上关联的忙碌位;
 //   · 只读成员与镜像库:面板的写入口与「生成分析」同一位(`!readOnlyWorkspace`)。
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -44,8 +44,8 @@ test("面板的处置回调全部接到既有入口", () => {
   assert.equal(analysis.bindings.relinking, "kgGraph.relinking");
   assert.equal(analysis.bindings.relinkResult, "kgGraph.relinkResult");
   assert.equal(analysis.bindings.pendingMerges, "kgGraph.pendingMerges");
-  // 失效令牌:来源内容(删除、重新解析状态推进)、补上关联与合并决定的起止。
-  for (const part of ["sourceLibrary.contentRevision", "kgGraph.relinking", "kgGraph.decidingMerge"]) {
+  // 失效令牌:来源内容(删除、重新解析状态推进)与补上关联的起止。
+  for (const part of ["sourceLibrary.contentRevision", "kgGraph.relinking"]) {
     assert.ok(analysis.bindings.findingsRevision.includes(part), `findingsRevision 缺 ${part}`);
   }
 });
@@ -107,5 +107,6 @@ test("面板里的写按钮:在飞期间禁用;「标为正常」只给可编辑
     assert.ok(disabledFor.includes(flag), `disabledFor 缺 ${flag}`);
   }
   const text = findings.getFullText();
-  assert.match(text, /\{state\.canWrite && row\.status === "open" \? \(\s*<button[\s\S]{0,120}className="sort-button kg-finding-dismiss"/);
+  assert.match(text, /const canDismiss = state\.canWrite && row\.status === "open" && Boolean\(row\.subject\?\.key\);/);
+  assert.match(text, /\{canDismiss \? \(\s*<button[\s\S]{0,120}className="sort-button kg-finding-dismiss"/);
 });

@@ -18,7 +18,7 @@
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 
-import { toUserMessage } from "./errors";
+import { httpErrorStatus, toUserMessage } from "./errors";
 import {
   fetchKgFindings,
   type KgAnalysisReport,
@@ -43,7 +43,9 @@ import {
   findingSubjectKindLabel,
   findingSubjectText,
   formatCount,
+  normalizeFindingRows,
   passedRuleLines,
+  relinkIsSpent,
   relinkResultText,
   sortFindings,
   truncatedRuleNotes,
@@ -162,7 +164,8 @@ export function useFindingsPage(
     setFailure("");
     fetchKgFindings(notebookId, { zone, limit, offset })
       .then((data) => {
-        if (!cancelled) setPage(data);
+        // 行统一成嵌套形状(规则引擎的扁平列也认),组件只读一种。
+        if (!cancelled) setPage({ ...data, rows: normalizeFindingRows(data.rows) });
       })
       .catch((caught: unknown) => {
         if (cancelled) return;
@@ -218,12 +221,16 @@ function FindingsPager({
 }
 
 /** 问题清单这一页本身不在场(还没生成 / 升级后还没生成)时的说明。 */
-function FindingsAbsence({ absence }: { absence: string | null }) {
+function FindingsAbsence({ absence, canWrite }: { absence: string | null; canWrite: boolean }) {
+  // 只读成员没有「生成 / 更新分析」按钮:不叫他去点一颗他看不见的按钮。
+  const next = canWrite
+    ? "点上方「更新分析」生成。"
+    : "拥有编辑权限的成员更新一次分析后就会生成。";
   return (
     <p className="kg-analysis-absent">
       {absence === "upgrade_pending"
-        ? "这是升级后新增的问题清单，这个知识库还没生成过。点上方「更新分析」生成。"
-        : "这个知识库还没生成过问题清单。点上方「生成分析」或「更新分析」生成。"}
+        ? `这是升级后新增的问题清单，这个知识库还没生成过。${next}`
+        : `这个知识库还没生成过问题清单。${next}`}
       <span className="kg-analysis-absent-note">这里没有列出问题，不代表没有问题。</span>
     </p>
   );
@@ -394,8 +401,13 @@ function FindingRowView({
       const key = `open:${spec.sourceId}`;
       setBusy(key);
       Promise.resolve(handlers.onOpenSource?.(spec.sourceId))
-        .catch(() => {
-          if (mounted.current) showResult({ tone: "failed", text: "没能打开这篇来源，请稍后重试" });
+        .catch((caught: unknown) => {
+          if (mounted.current) {
+            showResult({
+              tone: "failed",
+              text: httpErrorStatus(caught) === 404 ? "这篇来源已经不在了" : "没能打开这篇来源，请稍后重试",
+            });
+          }
         })
         .finally(() => {
           if (mounted.current) setBusy((current) => (current === key ? null : current));
@@ -448,16 +460,21 @@ function FindingRowView({
     handlers.onRelink?.();
   };
 
+  // 成功之后不急着放开按钮:这一行要等问题页重取回来才移走,其间再点只会再发一次请求。
+  // 重取回来的新一页会换掉 `row`(哪怕这一行还在),那时再放开。
   const dismiss = async () => {
     setBusy("dismiss");
     try {
       await onDismiss(row);
     } catch (caught) {
-      if (mounted.current) showResult({ tone: "failed", text: toUserMessage(caught, "没能标为正常，请稍后重试") });
-    } finally {
-      if (mounted.current) setBusy((current) => (current === "dismiss" ? null : current));
+      if (!mounted.current) return;
+      showResult({ tone: "failed", text: toUserMessage(caught, "没能标为正常，请稍后重试") });
+      setBusy((current) => (current === "dismiss" ? null : current));
     }
   };
+  useEffect(() => {
+    setBusy((current) => (current === "dismiss" ? null : current));
+  }, [row]);
 
   // 在飞期间禁用(长任务按钮红线):删除在跑、重新解析已确认还没排上、来源正在解析时,
   // 对准这篇来源的写按钮都不能再点;补上关联与重新合并 / 整理 / 删除知识图谱共用一个维护槽。
@@ -478,6 +495,8 @@ function FindingRowView({
   };
 
   const relinkLine = row.rule_id === "F5" && state.relinkResult ? relinkResultText(state.relinkResult) : "";
+  // 「标为正常」只给可编辑成员的待处理问题;没有主键的行(契约外的形状)写不进豁免,不出。
+  const canDismiss = state.canWrite && row.status === "open" && Boolean(row.subject?.key);
   const relinkBlocked = row.rule_id === "F5" && state.maintenanceBusy && !state.relinking
     && visible.some((spec) => spec.kind === "relink");
 
@@ -509,7 +528,7 @@ function FindingRowView({
       {evidence.notes.map((note) => <p key={note} className="kg-finding-note">{note}</p>)}
       {handled ? <p className="kg-finding-handled">已处理，更新后核验</p> : null}
       {plan.blocked.map((text) => <p key={text} className="kg-finding-blocked">{text}</p>)}
-      {visible.length > 0 || (state.canWrite && row.status === "open") || result || relinkLine ? (
+      {visible.length > 0 || canDismiss || result || relinkLine ? (
         <div className="kg-finding-actions">
           {groups.map((group) => {
             const buttons = group.specs.map((spec) => {
@@ -541,7 +560,7 @@ function FindingRowView({
           {relinkBlocked ? <span className="kg-finding-action-note" role="status">其它图谱任务进行中</span> : null}
           {relinkLine ? <span className="kg-finding-result is-ok" role="status">{relinkLine}</span> : null}
           {result ? <span className={`kg-finding-result is-${result.tone}`} role="status">{result.text}</span> : null}
-          {state.canWrite && row.status === "open" ? (
+          {canDismiss ? (
             <button
               type="button"
               className="sort-button kg-finding-dismiss"
@@ -581,15 +600,21 @@ export function FindingsPendingZone({
 }) {
   const { page, loading, failure } = pageState;
   const summary = report.findings_summary ?? null;
-  const rows = page?.present
-    ? sortFindings(page.rows).filter((row) => row.status !== "dismissed" && row.status !== "decided_not_same")
-    : [];
+  // 「补上关联」再跑也补不上时,「没建立关联的内容」挪到诊断数据(那里另有一块说明),不占
+  // 待处理的位置、也不计入它的条数。
+  const spent = relinkIsSpent(summary);
+  const pageRows = page?.present ? sortFindings(page.rows) : [];
+  const moved = spent ? pageRows.filter((row) => row.rule_id === "F5").length : 0;
+  const rows = pageRows.filter((row) => (
+    row.status !== "dismissed" && row.status !== "decided_not_same" && !(spent && row.rule_id === "F5")
+  ));
+  const shownTotal = page?.present ? Math.max(0, page.total - moved) : 0;
   const truncated = truncatedRuleNotes(summary);
   return (
     <section className="kg-analysis-block kg-findings-zone kg-findings-pending" aria-label="待处理">
       <div className="kg-analysis-block-head">
         <div className="kg-analysis-block-title">
-          <h3>待处理{page?.present ? `（${formatCount(page.total)}）` : ""}</h3>
+          <h3>待处理{page?.present ? `（${formatCount(shownTotal)}）` : ""}</h3>
         </div>
         <p className="kg-analysis-hint">
           按严重度、影响面排列。处理之后点「更新分析」，按每条问题自己的来源或概念核验是否已经解决。
@@ -602,10 +627,10 @@ export function FindingsPendingZone({
       ) : loading && !page ? (
         <p className="tool-hint">正在读取问题清单…</p>
       ) : !page ? null : !page.present ? (
-        <FindingsAbsence absence={page.absence} />
+        <FindingsAbsence absence={page.absence} canWrite={state.canWrite} />
       ) : rows.length === 0 ? (
         <p className="kg-analysis-empty">
-          {page.total === 0 ? "没有待处理的问题。每条规则的检查结果见下方「已通过」。" : "这一页没有问题。"}
+          {shownTotal === 0 ? "没有待处理的问题。每条规则的检查结果见下方「已通过」。" : "这一页没有问题。"}
         </p>
       ) : (
         <ol className="kg-findings-list">
@@ -628,6 +653,47 @@ export function FindingsPendingZone({
         <FindingsPager page={page} loading={loading} onOffset={onOffset} label="待处理分页" />
       ) : null}
     </section>
+  );
+}
+
+/**
+ * 诊断数据里的「没建立关联的内容」:补上关联已经跑过、之后没有新内容,再跑也补不上
+ * (§4.5)。只说现状,不放按钮。`row` 是待处理那一页里的 F5(不在这一页时为 null,只少那个数)。
+ */
+export function FindingsRelinkSpentBlock({
+  report,
+  row,
+}: {
+  report: KgAnalysisReport;
+  row: KgFindingRow | null;
+}) {
+  const summary = report.findings_summary ?? null;
+  if (!relinkIsSpent(summary)) return null;
+  const evidence = row ? findingEvidenceView(row) : null;
+  const plan = findingActionPlan(
+    row ?? { rule_id: "F5", severity: "low", subject: { kind: "notebook", key: "notebook", label: "" }, evidence: null, impact: null, status: "open" },
+    { canWrite: false, pendingMerges: [], relinkMayChange: false },
+  );
+  return (
+    <div className="kg-analysis-block kg-findings-relink-spent">
+      <div className="kg-analysis-block-head">
+        <div className="kg-analysis-block-title">
+          <h3>没建立关联的内容</h3>
+        </div>
+      </div>
+      {evidence && evidence.lines.length > 0 ? (
+        <ul className="kg-finding-evidence">
+          {evidence.lines.map((line) => <li key={line}>{line}</li>)}
+        </ul>
+      ) : null}
+      {evidence && evidence.samples.length > 0 ? (
+        <p className="kg-finding-samples">
+          <span className="kg-finding-samples-label">{evidence.sampleLabel}：</span>
+          {evidence.samples.join("、")}
+        </p>
+      ) : null}
+      {plan.blocked.map((text) => <p key={text} className="kg-analysis-note">{text}</p>)}
+    </div>
   );
 }
 
@@ -669,16 +735,20 @@ function PassedRowView({
   const [busy, setBusy] = useState(false);
   const [result, showResult] = useTimedResult();
   const dismissed = row.status === "dismissed";
+  // 与「标为正常」同理:成功后保持「撤销中…」,直到重取回来的新一页换掉这一行。
   const undo = async () => {
     setBusy(true);
     try {
       await onUndismiss(row);
     } catch (caught) {
-      if (mounted.current) showResult({ tone: "failed", text: toUserMessage(caught, "没能撤销，请稍后重试") });
-    } finally {
-      if (mounted.current) setBusy(false);
+      if (!mounted.current) return;
+      showResult({ tone: "failed", text: toUserMessage(caught, "没能撤销，请稍后重试") });
+      setBusy(false);
     }
   };
+  useEffect(() => {
+    setBusy(false);
+  }, [row]);
   return (
     <li className="kg-findings-passed-row">
       <span className="kg-findings-passed-mark" aria-hidden="true">{dismissed ? "↺" : "≠"}</span>
@@ -720,8 +790,13 @@ export function FindingsPassedZone({
 }) {
   const summary = report.findings_summary ?? null;
   const lines = passedRuleLines(summary);
-  const decided = passed.page?.present ? sortFindings(passed.page.rows) : [];
-  const marked = dismissed.page?.present ? sortFindings(dismissed.page.rows) : [];
+  // 按行自己的状态分:读侧若把「已标为正常」也放进 passed 那一页,这里不会把它列两遍。
+  const decided = passed.page?.present
+    ? sortFindings(passed.page.rows).filter((row) => row.status === "decided_not_same")
+    : [];
+  const marked = dismissed.page?.present
+    ? sortFindings(dismissed.page.rows).filter((row) => row.status === "dismissed")
+    : [];
   const failure = passed.failure || dismissed.failure;
   const nothing = lines.length === 0 && decided.length === 0 && marked.length === 0;
   return (
@@ -737,7 +812,9 @@ export function FindingsPassedZone({
         <ul className="kg-findings-rule-lines">
           {lines.map((line) => (
             <li key={`${line.ruleId}:${line.state}`} className={`kg-findings-rule-line is-${line.state}`}>
-              <span className="kg-findings-passed-mark" aria-hidden="true">{line.state === "clean" ? "✓" : "–"}</span>
+              <span className="kg-findings-passed-mark" aria-hidden="true">
+                {line.state === "clean" ? "✓" : line.state === "decided" ? "≠" : "–"}
+              </span>
               <span>{line.text}</span>
             </li>
           ))}

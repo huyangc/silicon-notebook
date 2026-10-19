@@ -22,13 +22,17 @@ import {
   findingEvidenceView,
   findingImpactText,
   findingRuleLabel,
+  findingRuleStatuses,
   findingSeverityTone,
   findingsComparisonView,
   findingsReportLine,
   mergeRulesChanged,
+  normalizeFindingRow,
+  normalizeFindingRows,
   partitionFindings,
   passedRuleLines,
   pendingMergeForFinding,
+  relinkIsSpent,
   relinkResultText,
   sortFindings,
   structureSignal,
@@ -397,6 +401,13 @@ test("动作:F2 两份都能打开,删除只给建议删除的那份;契约的�
   ]);
   assert.deepEqual(plan.notes, ["不可撤销，先打开来源核对", "两份内容几乎相同，保留对象更多的一份"]);
   assert.deepEqual(findingActions(f2).map((action) => action.kind), ["delete_source"]);
+  // 读侧两边都给了删除动作:建议保留的那份旁边照样不出删除(前端自己的防线)。
+  const both = findingActionPlan({
+    ...f2,
+    action: null,
+    actions: [{ kind: "delete_source", source_id: "a" }, { kind: "delete_source", source_id: "b" }],
+  }, CONTEXT);
+  assert.deepEqual(both.buttons.filter((spec) => spec.kind === "delete_source").map((spec) => spec.sourceId), ["b"]);
 });
 
 test("动作:收录来源不出重新解析;已不在的来源不出按钮;正在解析的标出来", () => {
@@ -404,9 +415,16 @@ test("动作:收录来源不出重新解析;已不在的来源不出按钮;正�
     rule_id: "F3", severity: "medium", subject: { kind: "source", key: "d", label: "D" }, evidence: {}, status: "open",
     actions: [{ kind: "reparse_source", source_id: "d" }],
   };
+  // 收录来源只留「打开来源核对」,不出「重新解析」(后端对它的重新解析回 409)。
   assert.deepEqual(
-    findingActionPlan({ ...f3, live_sources: [live("d", "D", { source_type: "promotion" })] }, CONTEXT).buttons,
-    [],
+    findingActionPlan({ ...f3, live_sources: [live("d", "D", { source_type: "promotion" })] }, CONTEXT).buttons
+      .map((spec) => spec.kind),
+    ["open_source"],
+  );
+  // 读侧没给这一篇此刻的样子:不知道类型就不出删除 / 重新解析,只留打开。
+  assert.deepEqual(
+    findingActionPlan({ ...f3, live_sources: [] }, CONTEXT).buttons.map((spec) => spec.kind),
+    ["open_source"],
   );
   assert.deepEqual(
     findingActionPlan({ ...f3, live_sources: [live("d", "D")] }, CONTEXT).buttons.map((spec) => spec.kind),
@@ -447,6 +465,15 @@ test("动作:F4 只认两侧都在组内的那一对;没有就写「待确认合
   assert.deepEqual(none.blocked, ["待确认合并里还没有这一组"]);
   // 契约若改给完整的 canonical_ids 列表,同样认。
   assert.equal(pendingMergeForFinding({ ...f4, evidence: { canonical_ids: ["K-rmsnorm", "K-rms norm"] } }, merges)?.id, "match");
+  // 组里不止证据列出的那几个(只截了前 5 个):没找到不等于没有——带到那一节,不断言没有。
+  const big = { ...f4, evidence: { ...f4.evidence, canonicals: 7 } };
+  const hedged = findingActionPlan(big, { ...CONTEXT, pendingMerges: [merges[0]] });
+  assert.deepEqual(hedged.buttons, [{ kind: "review_merge", mergeId: "" }]);
+  assert.deepEqual(hedged.blocked, []);
+  assert.deepEqual(hedged.notes, ["这一组写法较多，没能直接定位到对应的一对，按钮会带你到「待确认合并」那一节查找"]);
+  // 完整的 id 表在手、确实没有:如实说。
+  const complete = findingActionPlan({ ...f4, evidence: { ...f4.evidence, canonicals: 2 } }, { ...CONTEXT, pendingMerges: [merges[0]] });
+  assert.deepEqual(complete.blocked, ["待确认合并里还没有这一组"]);
 });
 
 test("动作:F5 跑过且之后没有新内容 → 不出按钮,说明再跑也补不上(只读成员也看得到这句)", () => {
@@ -485,6 +512,71 @@ test("已通过:✓ 检查过没发现、– 没法检查、– 部分没判断�
     { ruleId: "F5", state: "clean", text: "没发现没建立关联的内容" },
   ]);
   assert.deepEqual(passedRuleLines(summary({ present: false })), []);
+});
+
+test("已通过:F4 用户判定过不是同一个的组数单独一行(重建后那些组不再成行)", () => {
+  const lines = passedRuleLines(summary({
+    rules: [{ rule_id: "F4", status: "ran", checked: 9400, checked_unit: "canonical", total: 2, decided_not_same: 3 }],
+  }));
+  assert.deepEqual(lines, [
+    { ruleId: "F4", state: "decided", text: "疑似没合并的同名概念：已判定不是同一个的有 3 组，不再列为问题" },
+  ]);
+});
+
+test("规则状态两种形状都认:按编号为键的表(引擎拼写)与数组,按 F1…F5 排", () => {
+  const engine = summary({
+    rules: {
+      F5: { status: "ran", objects_checked: 41713, total: 0 },
+      F1: { status: "ran", sources_checked: 81, sources_too_few_concepts: 3, total: 600, persisted: 500, truncated: true },
+      S1: { status: "ran", narrow_groups: 14, narrow_group_objects: 220, examples: [{ names: ["RMS Norm", "RMSNorm"] }] },
+      F4: { status: "ran", canonicals_checked: 9400, groups_decided_apart: 2, total: 0 },
+      F2: { status: "skipped", reason: "fewer_than_two_sources", total: 0 },
+      F3: { status: "ran", sources_checked: 84, total: 0 },
+    },
+  });
+  assert.deepEqual(passedRuleLines(engine).map((line) => line.text), [
+    "疑似内容错配：有 3 个来源概念太少，没有判断",
+    "疑似重复导入：没法检查，能互相比较的来源不足两个",
+    "没发现解析残缺的来源（检查了 84 个来源）",
+    "没发现没合并的同名概念（检查了 9,400 个合并后的知识对象）",
+    "疑似没合并的同名概念：已判定不是同一个的有 2 组，不再列为问题",
+    "没发现没建立关联的内容（检查了 41,713 个知识对象）",
+  ]);
+  assert.deepEqual(truncatedRuleNotes(engine), ["疑似内容错配共 600 条，只保存了前 500 条"]);
+  // 没有 dev_items 时,「需要开发处理」从 S1 的状态里取。
+  assert.deepEqual(devItemViews(engine), [{
+    key: "S1",
+    text: "14 组只差空格/连字符的概念没有合并（例：RMS Norm / RMSNorm），这是合并规则的缺陷，修好后会自动合并，不需要逐条处理。",
+  }]);
+  assert.deepEqual(findingRuleStatuses(engine).map((rule) => rule.rule_id), ["F1", "F2", "F3", "F4", "F5", "S1"]);
+  assert.deepEqual(findingRuleStatuses(summary({ rules: "nonsense" })), []);
+});
+
+test("问题行两种形状都认:引擎的扁平列统一成嵌套形状;没有规则编号的行丢掉", () => {
+  const flat = normalizeFindingRow({
+    rule_id: "F2", severity: "medium", subject_kind: "source_pair", subject_key: "a|b", subject_label: "A ⇄ B",
+    impact_objects: 12, evidence: { jaccard: 0.5 },
+  });
+  assert.deepEqual(flat.subject, { kind: "source_pair", key: "a|b", label: "A ⇄ B" });
+  assert.deepEqual(flat.impact, { objects: 12 });
+  assert.equal(flat.status, "open");
+  const nested = normalizeFindingRow({
+    rule_id: "F1", severity: "high", subject: { kind: "source", key: "s", label: "S" }, impact: { objects: 3 }, status: "handled",
+  });
+  assert.deepEqual(nested.subject, { kind: "source", key: "s", label: "S" });
+  assert.equal(nested.status, "handled");
+  assert.equal(normalizeFindingRow({ severity: "high" }), null);
+  assert.equal(normalizeFindingRow("x"), null);
+  assert.deepEqual(normalizeFindingRows(null), []);
+  assert.equal(normalizeFindingRows([{ rule_id: "F5" }, null, { rule_id: "" }]).length, 1);
+});
+
+test("补上关联跑过且无新内容 = 「已经跑过」;判断不了或还可能改变结果都不算", () => {
+  assert.equal(relinkIsSpent(summary({ relink: { attempted: true, at_kg_seq: 1, at: "", may_change: false } })), true);
+  assert.equal(relinkIsSpent(summary({ relink: { attempted: true, at_kg_seq: 1, at: "", may_change: true } })), false);
+  assert.equal(relinkIsSpent(summary({ relink: { attempted: false, at_kg_seq: null, at: null, may_change: null } })), false);
+  assert.equal(relinkIsSpent(summary({ present: false, relink: { attempted: true, at_kg_seq: 1, at: "", may_change: false } })), false);
+  assert.equal(relinkIsSpent(null), false);
 });
 
 test("截断不静默:只保存了前若干条时写在待处理区", () => {

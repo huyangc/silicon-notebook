@@ -2,6 +2,7 @@ import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import {
+  ROOT_MODAL_POLICIES,
   useRootModalCoordinator,
   type RootModalCloseReason,
   type RootModalSlot,
@@ -280,20 +281,39 @@ test("source detail and its catalog review coexist with the KG analysis panel; c
   expect(document.activeElement).toBe(screen.getByTestId("open-source-for-checking"));
 });
 
-test("the coexistence pairs are narrow: any other primary still evicts the KG analysis panel", () => {
-  render(<KgAnalysisHarness />);
+test("the coexistence pairs are narrow and directed: other primaries still evict the panel, and opening the panel over a source detail evicts the detail", () => {
+  const screen = render(<KgAnalysisHarness />);
   enterWorkspace();
   const workspace = value!.captureWorkspaceOwner();
-  act(() => { value!.open("kg-analysis", workspace); });
-  act(() => { value!.open("analytics", workspace); });
-  expect(value!.view("kg-analysis").open).toBe(false);
-  expect(closed).toHaveBeenCalledWith("kg-analysis", "conflict");
+  // 共存只给「面板已开、再往下钻」这一个方向;其余每个 primary 照旧把面板关掉。
+  const others = (Object.keys(ROOT_MODAL_POLICIES) as RootModalSlot[]).filter((slot) => (
+    ROOT_MODAL_POLICIES[slot].conflictGroup === "primary"
+    && !["kg-analysis", "source-detail", "catalog-review"].includes(slot)
+  ));
+  expect(others.length).toBeGreaterThan(5);
+  for (const slot of others) {
+    act(() => { value!.open("kg-analysis", workspace); });
+    const owner = ROOT_MODAL_POLICIES[slot].ownerKinds.includes("workspace")
+      ? workspace
+      : value!.captureActorOwner();
+    act(() => { value!.open(slot, owner); });
+    expect(value!.view("kg-analysis").open, slot).toBe(false);
+    act(() => { value!.requestClose(slot, "button"); });
+  }
 
-  // 反过来:先开来源详情,再开分析面板,两者同样共存(配对是对称的)。
+  // 反方向:来源详情已开(例如从知识图谱的出处列表打开),再开分析面板——面板画在知识图谱
+  // 视图的层叠上下文里,低于任何根层弹窗;两者若共存,视觉上来源详情压着面板,协调器却
+  // 让面板成为最上层、把来源详情设成 inert。所以这个方向照旧冲突关闭。
   act(() => { value!.open("source-detail", workspace); });
+  screen.rerender(<KgAnalysisHarness sourceId="source-a" />);
   act(() => { value!.open("kg-analysis", workspace); });
-  expect(value!.view("source-detail").open).toBe(true);
   expect(value!.view("kg-analysis").open).toBe(true);
+  expect(value!.view("source-detail").open).toBe(false);
+  expect(closed).toHaveBeenCalledWith("source-detail", "conflict");
+  act(() => { value!.open("catalog-review", value!.captureSourceOwner()); });
+  act(() => { value!.requestClose("kg-analysis", "button"); });
+  act(() => { value!.open("kg-analysis", workspace); });
+  expect(value!.view("catalog-review").open).toBe(false);
 });
 
 test("workspace navigation closes collection dialogs but keeps actor-global settings", () => {
