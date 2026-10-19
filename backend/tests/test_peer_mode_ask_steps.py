@@ -623,8 +623,11 @@ def test_workbook_lane_drops_libraries_outside_the_run():
     对等模式下那份清单答的是名义 active 自己的挂载表——与用户逐个选的那几个库
     毫无关系。挂在命名锚点下、却不在本次选择里的参考库,会成为唯一一个仍然向
     答案供证据的库外来源。这里按**逐库天花板**把它收窄掉(只减不增,是消费边界
-    的过滤,不是第二条学参与集的路);把 peer 的工作簿也分析进来是联邦化那一半,
-    登记在 ``fangan_todo.md``。
+    的过滤,不是第二条学参与集的路)。
+
+    联邦化之后生产上的对等 run 走 ``_peer_workbook_results``(参与集取 chunk 联邦
+    的同一入口,见 ``test_spreadsheet_federation.py``),这里钉的是同一条收窄在
+    回退形态(检索层不提供联邦座位)下依旧成立,对照臂(单库)逐值不变。
     """
     analyzed: list = []
     service = SimpleNamespace(
@@ -640,6 +643,7 @@ def test_workbook_lane_drops_libraries_outside_the_run():
         model_clients=SimpleNamespace(chat=lambda name: None),
         event_log=SimpleNamespace(logger=SimpleNamespace(warning=lambda *a: None)),
     )
+    service._peer_workbook_seat = lambda: AskService._peer_workbook_seat(service)
     prepared = SimpleNamespace(notebook_id="nb-a", user_id="u",
                                research_question="q")
     runtime = SimpleNamespace(scope=None, cancellation=None, trace_sink=None)

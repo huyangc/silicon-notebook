@@ -283,6 +283,28 @@ class AnalysisArtifactStore:
             return None
         return value if isinstance(value, dict) else None
 
+    def spreadsheet_manifest_ids(self, notebook_id: str) -> frozenset[str]:
+        """The source ids that have a compiled manifest in this notebook.
+
+        ONE directory listing, no file is opened.  The peer (global) workbook
+        lane uses it to fill its federated catalog: without it every visible
+        source of every participant library would cost a failed open just to
+        learn it is not a workbook, which grows with the number of libraries.
+        A missing or unreadable directory is an empty set -- the same answer
+        ``load_spreadsheet_manifest`` gives for each of its sources.  Names
+        that are not ``<source id>.json`` (an in-flight atomic write's temp
+        file) are not ids; callers intersect with the visible sources anyway.
+        """
+        directory = self.root / "spreadsheets" / notebook_id
+        try:
+            names = [entry.name for entry in directory.iterdir()]
+        except OSError:
+            return frozenset()
+        return frozenset(
+            name[: -len(".json")] for name in names
+            if name.endswith(".json") and not name.startswith(".")
+        )
+
     def delete_spreadsheet_manifest(self, notebook_id: str, source_id: str) -> None:
         path = self._manifest_path(notebook_id, source_id)
         try:

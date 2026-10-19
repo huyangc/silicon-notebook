@@ -892,6 +892,12 @@ _SEAT_FAILSOFT_SITES = (
     # ``evidence_context.knowledge_context`` -> canonical 折叠范围读座位),
     # 吞掉就是重试一次再返回空答案。
     ("app/services/ask_service.py", "AskService._answer_with_retry", "synth"),
+    # 对等模式的表格分析臂(联邦化):``_peer_workbook_results`` ->
+    # ``RetrievalService.workbook_libraries`` -> ``federated_library_sources``
+    # -> ``_bounded_participants`` -> 参与集座位。宽 handler 吞掉身份复核失败
+    # 就是一次「这轮没有表格结果」的正常回答。
+    ("app/services/ask_service.py",
+     "AskService._spreadsheet_reasoning_results", "_peer_workbook_results"),
     ("app/services/reasoning_retrieval.py",
      "ReasoningRetriever._chunk_seed_search", "search_chunks"),
     # 首轮播种外层并发度按参与库数收紧:``chunk_participant_count`` ->
@@ -960,7 +966,8 @@ _SEAT_FAILSOFT_SITES = (
 #   —— 前者包 ``_unsafe_source_scope_restricted``,后者包 ``all_visible_source_ids`` +
 #   ``scoped_allowed_source_ids``,两者都只读 ``source_scope``。
 # * D0-5 没有新增任何宽 ``except``;它加在 ``_spreadsheet_reasoning_results``(已有宽
-#   handler)里的两行只读 ``source_scope`` 的 ContextVar,同样不触达座位。
+#   handler)里的两行只读 ``source_scope`` 的 ContextVar,同样不触达座位。表格臂联邦化
+#   之后那个 handler 的 try 体经 ``_peer_workbook_results`` 触达座位,已登记在上面。
 # * D1-4 在 ``global_ask.py`` 新增的三个宽 ``except`` —— ``_emit``(事件投递)、
 #   ``_append_trace``(``job.trace.append`` + 一次作业行写)、``_same_request``
 #   (旧请求串过模型归一)——都不登记:三个 try 体都不读参与集,而且该文件根本不在

@@ -445,6 +445,42 @@ def federation_participant_ids(
     return frozenset(notebook_id for notebook_id, _tier in participants)
 
 
+def federated_library_sources(
+    candidates, active_notebook_id: str,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """``((notebook_id, visible source ids), ...)`` over the chunk lane's libraries.
+
+    The peer (global) workbook lane's participant entry.  That lane may not
+    walk ``AskService.ask_engine_participant_notebooks``: that seat is the REAL
+    mount predicate on purpose (an authorization-grade reader, pinned by
+    ``test_participant_override_guard``), and in a peer run it answers for the
+    nominal active's own mount table rather than for the libraries the user
+    selected.  So the lane asks the chunk lane instead, through the same
+    ``_bounded_participants`` (seat, library filter,
+    ``CHUNK_FEDERATION_MAX_PARTICIPANTS`` bound, rollback switch) and the same
+    per-library visible read ``_peer_visible_sources`` (frozen per run under
+    the same memo key, so a run whose passage search already enumerated a
+    library pays nothing to enumerate it again).  "The table lane analyses
+    this library" and "the passage lane searches this library" therefore
+    cannot drift apart.
+
+    Silent like ``federation_participant_ids`` -- the truncation event belongs
+    to the fan-out.  A failing visible read propagates: the caller's lane is
+    fail-open as a whole, exactly as it is when its single-library read fails.
+
+    ⛔ Not an authorization predicate, the same layer as
+    ``federation_participants``: callers still narrow every list to the run's
+    frozen per-library ceiling.
+    """
+    participants, _mounted_total = _bounded_participants(
+        candidates, active_notebook_id,
+    )
+    return tuple(
+        (notebook_id, tuple(_peer_visible_sources(candidates, notebook_id)))
+        for notebook_id, _tier in participants
+    )
+
+
 def federated_chunk_candidates(
     candidates, active_notebook_id: str, sub_queries: Sequence[str], *,
     drifted: bool | None = None,
