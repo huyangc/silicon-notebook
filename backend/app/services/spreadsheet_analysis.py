@@ -680,9 +680,12 @@ class SpreadsheetAnalysisService:
         when two or more libraries contribute workbooks, each catalog entry's
         owning library -- so two workbooks with the same title can be told
         apart.  Planning, validation, execution and the receipt are the
-        single-library code unchanged.  So the cost stays the single-library
-        cost whatever the number of libraries: one planner call, one executed
-        sheet, a catalog (library names included) under the same
+        single-library code unchanged -- a plan may name up to
+        ``spreadsheet_analysis_max_targets`` tables there, from any of the
+        libraries, and every result card names its own library.  So the cost
+        stays the single-library cost whatever the number of libraries: one
+        planner call, at most that many executed sheets, a catalog (library
+        names included) under the same
         ``SPREADSHEET_ANALYSIS_PLANNER_CATALOG_BYTES`` budget, and no more
         manifest reads than that budget can list (plus one directory listing
         per library).  Workbooks the budget leaves out are disclosed with
@@ -713,20 +716,34 @@ class SpreadsheetAnalysisService:
             ),
         )
         if results and trace is not None:
-            result = results[0]
             if omitted:
-                result.warnings.append(disclosure)
-            name = names.get().get(result.notebook_id, "")
-            result.notebook_name = name
+                # About the ONE catalog every planned table was chosen from,
+                # so it is said once, on the first card.
+                results[0].warnings.append(disclosure)
+            for result in results:
+                result.notebook_name = names.get().get(result.notebook_id, "")
+            if len(results) == 1:
+                result = results[0]
+                summary = (
+                    f"已分析「{result.notebook_name}」中的 {result.source_title} · "
+                    f"{result.sheet}" if result.notebook_name else trace.summary
+                )
+                owner = {"notebook_id": result.notebook_id}
+            else:
+                summary = f"已分析 {len(results)} 张表：" + "；".join(
+                    (f"「{result.notebook_name}」中的 " if result.notebook_name else "")
+                    + f"{result.source_title} · {result.sheet}"
+                    for result in results
+                )
+                for table, result in zip(trace.detail["tables"], results):
+                    table["notebook_id"] = result.notebook_id
+                owner = {}
             trace = TraceStep(
                 step_type="spreadsheet",
-                summary=(
-                    f"已分析「{name}」中的 {result.source_title} · {result.sheet}"
-                    if name else trace.summary
-                ),
+                summary=summary,
                 detail={
                     **trace.detail,
-                    "notebook_id": result.notebook_id,
+                    **owner,
                     "libraries": len(libraries),
                     "contributing_libraries": contributing,
                     "workbooks": total,
@@ -836,42 +853,58 @@ class SpreadsheetAnalysisService:
         cancel_event: Any,
         catalog_note: str = "",
     ) -> tuple[list[SpreadsheetAnalysisResult], TraceStep | None]:
-        """Plan, execute and receipt one already-loaded manifest list."""
+        """Plan once, then execute and receipt every planned table in order.
+
+        One planner call names up to ``spreadsheet_analysis_max_targets``
+        tables (``_plan``); each is executed by the same deterministic
+        ``_execute`` and becomes its own result card, in plan order.  A run
+        that executes one table returns exactly the single-table result and
+        trace step; the planning tally (``_PlanningTally``) is written only
+        when the planner named more than one target.
+        """
         if not manifests:
             return [], None
         raise_if_cancelled(cancel_event)
         started = perf_counter()
-        plan = self._plan(
+        planned = self._plan(
             question, manifests, planner_client, cancel_event,
             catalog_note=catalog_note,
         )
-        if plan is None:
+        if planned is None:
             return [], None
+        plans, tally = planned
         raise_if_cancelled(cancel_event)
-        result = self._execute(
-            plan,
-            manifests,
-            active_notebook_id=notebook_id,
-            notebook_tiers=notebook_tiers or {},
-        )
-        if result is None:
+        results = [
+            result for plan in plans
+            if (result := self._execute(
+                plan,
+                manifests,
+                active_notebook_id=notebook_id,
+                notebook_tiers=notebook_tiers or {},
+            )) is not None
+        ]
+        if not results:
             return [], None
+        if tally.over_limit:
+            results[-1].warnings.append(tally.over_limit_disclosure(manifests))
         duration_ms = round((perf_counter() - started) * 1000)
+        if len(results) == 1:
+            summary = f"已分析 {results[0].source_title} · {results[0].sheet}"
+            detail = _table_detail(results[0])
+        else:
+            summary = f"已分析 {len(results)} 张表：" + "；".join(
+                f"{result.source_title} · {result.sheet}" for result in results
+            )
+            detail = {"tables": [_table_detail(result) for result in results]}
+        if tally.planned > 1:
+            detail["targets"] = tally.detail(executed=len(results))
         trace = TraceStep(
             step_type="spreadsheet",
-            summary=f"已分析 {result.source_title} · {result.sheet}",
-            detail={
-                "source_id": result.source_id,
-                "sheet": result.sheet,
-                "range": result.range,
-                "operation": result.operation,
-                "scanned_rows": result.coverage.scanned_rows,
-                "returned_rows": result.coverage.returned_rows,
-                "complete": result.coverage.complete,
-            },
+            summary=summary,
+            detail=detail,
             duration_ms=duration_ms,
         )
-        return [result], trace
+        return results, trace
 
     def _load_manifests(
         self, manifest_refs: Sequence[tuple[str, str]]
@@ -903,40 +936,57 @@ class SpreadsheetAnalysisService:
         cancel_event: Any,
         *,
         catalog_note: str = "",
-    ) -> dict[str, Any] | None:
+    ) -> tuple[list[dict[str, Any]], "_PlanningTally"] | None:
+        """``(plans, tally)`` from at most ONE planner call, or ``None``.
+
+        ``plans`` is never empty: every way the planner can fail -- offline,
+        a timeout, a malformed reply, or a reply naming no usable target --
+        lands on the single local profile it always landed on.
+        """
+        tally = _PlanningTally(limit=self.settings.spreadsheet_analysis_max_targets)
         if getattr(client, "configured", False):
             catalog, planning_manifests, catalog_complete = (
                 self._bounded_planner_catalog(manifests)
             )
             if not catalog or self._default_plan(planning_manifests) is None:
                 fallback = self._default_plan(manifests)
-                if fallback is not None:
-                    fallback["__planner_catalog_complete"] = False
-                return fallback
+                if fallback is None:
+                    return None
+                fallback["__planner_catalog_complete"] = False
+                return [fallback], tally
             prompt = (
-                "为电子表格问题选择一个受限的确定性执行计划。只能使用给定 source_id、"
+                "为电子表格问题选择受限的确定性执行计划，写进 targets 列表，每项针对"
+                "一张工作表（source_id + sheet）。问题只涉及一张表时只写一项；问题明确"
+                "要求比较、对照或分别分析多张表时，每张表各写一项，按问题提到的顺序，"
+                f"最多 {tally.limit} 项，同一张工作表只写一次。只能使用给定 source_id、"
                 "sheet 和列名；不得生成公式、代码或 SQL。operation 只能是 profile、"
                 "aggregate、top、filter。aggregate 使用 aggregation=sum|avg|min|max|count，"
                 "可选 measure/group_by；top 使用 sort_by/order=asc|desc；filter 可选 filters，"
-                "每项 operator=eq|ne|gt|gte|lt|lte|contains。无法可靠匹配时返回 operation=profile。\n"
+                "每项 operator=eq|ne|gt|gte|lt|lte|contains。某张表无法可靠匹配时，"
+                "该项写 operation=profile。\n"
                 f"问题：{question}\n{catalog_note}"
                 f"可用工作簿：{json.dumps(catalog, ensure_ascii=False)}"
             )
             try:
                 raw = client.chat_json(
                     [{"role": "user", "content": prompt}],
-                    '{"source_id":"id","sheet":"name","operation":"profile",'
+                    '{"targets":[{"source_id":"id","sheet":"name","operation":"profile",'
                     '"aggregation":"count","measure":"","group_by":"",'
-                    '"sort_by":"","order":"desc","filters":[],"columns":[]}',
+                    '"sort_by":"","order":"desc","filters":[],"columns":[]}]}',
                     timeout=self.settings.spreadsheet_analysis_planner_timeout_seconds,
-                    max_tokens=500,
+                    # The single-target reply's allowance, once per target.
+                    max_tokens=500 * tally.limit,
                     cancel_event=cancel_event,
                 )
                 candidate = json.loads(raw)
                 if isinstance(candidate, dict):
-                    normalized = self._validate_plan(candidate, planning_manifests)
-                    normalized["__planner_catalog_complete"] = catalog_complete
-                    return normalized
+                    plans = self._validate_targets(
+                        _planned_targets(candidate), planning_manifests, tally,
+                    )
+                    if plans:
+                        for plan in plans:
+                            plan["__planner_catalog_complete"] = catalog_complete
+                        return plans, tally
             except AskCancelled:
                 raise
             except Exception as exc:  # noqa: BLE001 - optional planner is fail-open
@@ -944,10 +994,49 @@ class SpreadsheetAnalysisService:
                     "spreadsheet planner failed (%s)", type(exc).__name__
                 )
             fallback = self._default_plan(planning_manifests)
-            if fallback is not None:
-                fallback["__planner_catalog_complete"] = catalog_complete
-            return fallback
-        return self._default_plan(manifests)
+            if fallback is None:
+                return None
+            fallback["__planner_catalog_complete"] = catalog_complete
+            return [fallback], tally
+        fallback = self._default_plan(manifests)
+        return None if fallback is None else ([fallback], tally)
+
+    def _validate_targets(
+        self,
+        targets: Sequence[Any],
+        manifests: Sequence[dict[str, Any]],
+        tally: "_PlanningTally",
+    ) -> list[dict[str, Any]]:
+        """The planner's targets, validated one by one, in the planner's order.
+
+        A target that fails validation is dropped on its own (it never stands
+        in for another table); a second target on a sheet already planned is
+        dropped too -- the ruling is about several TABLES, and the card, the
+        receipt and the citation identity are all per sheet.  The first
+        ``tally.limit`` distinct valid targets are executed; the valid ones
+        past the cap are kept on the tally for the result card's disclosure.
+        """
+        tally.planned = len(targets)
+        plans: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for target in targets:
+            plan = (
+                self._validate_plan(target, manifests)
+                if isinstance(target, dict) else None
+            )
+            if plan is None:
+                tally.invalid += 1
+                continue
+            identity = (plan["source_id"], plan["sheet"])
+            if identity in seen:
+                tally.duplicate += 1
+                continue
+            seen.add(identity)
+            if len(plans) < tally.limit:
+                plans.append(plan)
+            else:
+                tally.over_limit.append(identity)
+        return plans
 
     def _bounded_planner_catalog(
         self, manifests: Sequence[dict[str, Any]]
@@ -988,40 +1077,43 @@ class SpreadsheetAnalysisService:
 
     def _validate_plan(
         self, plan: dict[str, Any], manifests: Sequence[dict[str, Any]]
-    ) -> dict[str, Any]:
-        fallback = self._default_plan(manifests)
-        if fallback is None:
-            return {}
+    ) -> dict[str, Any] | None:
+        """One planner target normalized, or ``None`` when any part is invalid.
+
+        All or nothing: an unknown table, column or operator invalidates the
+        whole target, so no prefix of a requested operation is executed as
+        though it were complete.
+        """
         source_id = str(plan.get("source_id") or "")
         manifest = next((row for row in manifests if row["source_id"] == source_id), None)
         if manifest is None:
-            return fallback
+            return None
         sheet_name = str(plan.get("sheet") or "")
         sheet = next(
             (row for row in manifest.get("sheets", []) if row["name"] == sheet_name),
             None,
         )
         if sheet is None:
-            return fallback
+            return None
         operation = str(plan.get("operation") or "profile").lower()
         if operation not in PLAN_OPERATIONS:
-            return fallback
+            return None
         aggregation = str(plan.get("aggregation") or "count").lower()
         if aggregation not in AGGREGATIONS:
-            return fallback
+            return None
         raw_order = str(plan.get("order") or "").lower()
         if operation == "top" and raw_order not in {"", "asc", "desc"}:
-            return fallback
+            return None
         headers = sheet["headers"]
         raw_columns = plan.get("columns", [])
         raw_filters = plan.get("filters", [])
         if not isinstance(raw_columns, list) or not isinstance(raw_filters, list):
-            return fallback
+            return None
         if (
             len(raw_columns) > SPREADSHEET_PLAN_MAX_COLUMNS
             or len(raw_filters) > SPREADSHEET_PLAN_MAX_FILTERS
         ):
-            return fallback
+            return None
         measure_input = str(plan.get("measure") or "")
         group_by_input = str(plan.get("group_by") or "")
         sort_by_input = str(plan.get("sort_by") or "")
@@ -1033,23 +1125,23 @@ class SpreadsheetAnalysisService:
             or (group_by_input.strip() and not group_by)
             or (sort_by_input.strip() and not sort_by)
         ):
-            return fallback
+            return None
         columns: list[str] = []
         for value in raw_columns:
             if not isinstance(value, str):
-                return fallback
+                return None
             resolved = self._resolve_header(value, headers)
             if not resolved:
-                return fallback
+                return None
             columns.append(resolved)
         filters: list[dict[str, Any]] = []
         for item in raw_filters:
             if not isinstance(item, dict):
-                return fallback
+                return None
             column = self._resolve_header(str(item.get("column") or ""), headers)
             operator = str(item.get("operator") or "eq").lower()
             if not column or operator not in FILTER_OPERATORS:
-                return fallback
+                return None
             filters.append({
                 "column": column,
                 "operator": operator,
@@ -1068,9 +1160,9 @@ class SpreadsheetAnalysisService:
             "filters": filters,
         }
         if operation == "aggregate" and aggregation != "count" and not normalized["measure"]:
-            return fallback
+            return None
         if operation == "top" and not normalized["sort_by"]:
-            return fallback
+            return None
         return normalized
 
     @staticmethod
@@ -1480,6 +1572,80 @@ class SpreadsheetAnalysisService:
 _LIBRARY_KEY = "__library_name"
 
 
+def _table_detail(result: SpreadsheetAnalysisResult) -> dict[str, Any]:
+    """One executed table as the ``spreadsheet`` trace step describes it."""
+    return {
+        "source_id": result.source_id,
+        "sheet": result.sheet,
+        "range": result.range,
+        "operation": result.operation,
+        "scanned_rows": result.coverage.scanned_rows,
+        "returned_rows": result.coverage.returned_rows,
+        "complete": result.coverage.complete,
+    }
+
+
+def _planned_targets(reply: dict[str, Any]) -> list[Any]:
+    """The target list of one planner reply.
+
+    ``{"targets": [...]}`` is the contract; anything else under ``targets``
+    names no target (and so falls back to the local profile).  A reply that
+    carries no ``targets`` key at all is the pre-list single-object plan and
+    is read as one target -- the scheduler's shape gate refuses that shape
+    from a real model client, so this keeps the older contract readable for
+    a client that answers without that gate.
+    """
+    if "targets" not in reply:
+        return [reply]
+    targets = reply["targets"]
+    return list(targets) if isinstance(targets, list) else []
+
+
+class _PlanningTally:
+    """What one planner reply asked for, beyond the plans that run.
+
+    ``planned`` counts the targets the reply named, ``invalid`` /
+    ``duplicate`` the ones dropped by validation or as a second target on an
+    already planned sheet, and ``over_limit`` lists the distinct valid
+    targets past ``limit`` (``(source_id, sheet)``, in plan order) -- the
+    one loss the user is told about, on the last executed card.
+    """
+
+    def __init__(self, *, limit: int) -> None:
+        self.limit = max(1, int(limit))
+        self.planned = 0
+        self.invalid = 0
+        self.duplicate = 0
+        self.over_limit: list[tuple[str, str]] = []
+
+    def detail(self, *, executed: int) -> dict[str, int]:
+        return {
+            "planned": self.planned,
+            "executed": executed,
+            "invalid": self.invalid,
+            "duplicate": self.duplicate,
+            "over_limit": len(self.over_limit),
+            "limit": self.limit,
+        }
+
+    def over_limit_disclosure(self, manifests: Sequence[dict[str, Any]]) -> str:
+        by_id = {manifest["source_id"]: manifest for manifest in manifests}
+        names = []
+        for source_id, sheet in self.over_limit:
+            manifest = by_id.get(source_id, {})
+            library = manifest.get(_LIBRARY_KEY, "")
+            names.append(
+                f"{manifest.get('source_title', '') or source_id}"
+                + (f"（{library}）" if library else "")
+                + f" · {sheet}"
+            )
+        return (
+            f"本次规划选了 {self.limit + len(self.over_limit)} 张表，超过单次最多 "
+            f"{self.limit} 张的上限，按规划顺序只分析了前 {self.limit} 张；"
+            f"未分析：{'、'.join(names)}。"
+        )
+
+
 class _LazyNames:
     """The run's library display names, read at most once and fail-soft.
 
@@ -1576,6 +1742,32 @@ class _CatalogProjection:
         return True
 
 
+class _LineBudget:
+    """Whole lines joined by ``"\n"`` under a UTF-8 byte cap and an optional
+    character cap.  The joined length is the sum of the lines plus one
+    separator per line after the first, whatever order they are taken in."""
+
+    def __init__(self, *, max_bytes: int, max_chars: int | None) -> None:
+        self.max_bytes = max_bytes
+        self.max_chars = max_chars
+        self.used_bytes = 0
+        self.used_chars = 0
+        self.count = 0
+
+    def take(self, line: str) -> bool:
+        separator = 1 if self.count else 0
+        line_bytes = len(line.encode("utf-8")) + separator
+        line_chars = len(line) + separator
+        if self.used_bytes + line_bytes > self.max_bytes:
+            return False
+        if self.max_chars is not None and self.used_chars + line_chars > self.max_chars:
+            return False
+        self.used_bytes += line_bytes
+        self.used_chars += line_chars
+        self.count += 1
+        return True
+
+
 def spreadsheet_prompt_block(
     results: Sequence[SpreadsheetAnalysisResult], *, preview_rows: int, max_bytes: int,
     max_chars: int | None = None,
@@ -1587,43 +1779,58 @@ def spreadsheet_prompt_block(
     reasoning source partition has left for this block once the passage
     floor is held back.  A line that would cross either is not written, so the
     ``result_rows`` header and the rows shown never disagree with a cut.
+
+    Several results (a multi-table plan) SHARE those caps -- the block's
+    budget does not grow with the number of tables -- and are admitted in two
+    passes so the first table cannot starve the others: first every result's
+    key line and column-header line, in plan order; then preview rows round
+    robin (every table's first row, then every table's second row, ...), each
+    table keeping a prefix of its rows (its first row that does not fit ends
+    that table).  Admission depends only on which lines are taken, never on
+    the order they are counted in, so a single result is admitted -- and
+    rendered -- exactly as before.  Rendering keeps each table's lines
+    together under its own key, ``k6001`` + plan position.
     """
-    lines: list[str] = []
-    starts: list[int] = []
     evidence: dict[str, dict[str, Any]] = {}
-
-    def append_line(line: str) -> bool:
-        separator = "\n" if lines else ""
-        current_bytes = len("\n".join(lines).encode("utf-8"))
-        if current_bytes + len((separator + line).encode("utf-8")) > max_bytes:
-            return False
-        if max_chars is not None and (
-            len("\n".join(lines)) + len(separator + line) > max_chars
-        ):
-            return False
-        lines.append(line)
-        return True
-
+    budget = _LineBudget(max_bytes=max_bytes, max_chars=max_chars)
+    admitted: list[tuple[str, SpreadsheetAnalysisResult, list[str]]] = []
+    pending_rows: list[list[str]] = []
     for index, result in enumerate(results, start=1):
         key = f"k{6000 + index}"
         headers = [column.name for column in result.columns]
         # Peer runs only (the model field defaults to ""); read with a default
         # so a duck-typed receipt without the field renders as it always did.
         library = getattr(result, "notebook_name", "")
-        if not append_line(
+        key_line = (
             f"{key}: [spreadsheet] {result.source_title} · {result.sheet}!{result.range} "
             + (f"library={library}; " if library else "")
             + f"operation={result.operation}; scanned={result.coverage.scanned_rows}; "
             f"result_rows={result.coverage.total_rows}"
-        ):
+        )
+        if not budget.take(key_line):
             break
-        starts.append(len(lines) - 1)  # the rows below belong to this key
-        can_append_rows = not headers or append_line(" | ".join(headers))
-        for row in result.rows[: max(1, preview_rows)]:
-            if not can_append_rows or not append_line(
-                " | ".join(row.cells.get(header, "") for header in headers)
-            ):
-                break
+        taken = [key_line]
+        can_append_rows = not headers or budget.take(" | ".join(headers))
+        if headers and can_append_rows:
+            taken.append(" | ".join(headers))
+        admitted.append((key, result, taken))
+        pending_rows.append([
+            " | ".join(row.cells.get(header, "") for header in headers)
+            for row in result.rows[: max(1, preview_rows)]
+        ] if can_append_rows else [])
+    for position in range(max(1, preview_rows)):
+        for slot, rows in enumerate(pending_rows):
+            if position >= len(rows):
+                continue
+            if budget.take(rows[position]):
+                admitted[slot][2].append(rows[position])
+            else:
+                del rows[position:]  # a table shows a prefix of its rows
+    lines: list[str] = []
+    starts: list[int] = []
+    for key, result, taken in admitted:
+        starts.append(len(lines))  # the rows below belong to this key
+        lines.extend(taken)
         citation = next((row.citation for row in result.rows if row.citation), None)
         element_id = citation.element_id if citation else ""
         evidence[key] = {

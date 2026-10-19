@@ -219,21 +219,38 @@ def test_known_empty_lists_allow_string_items_instead_of_only_empty_arrays(field
     assert not _valid(hint, {field: [42]})
 
 
+_SPREADSHEET_TARGET = (
+    '{"source_id":"id","sheet":"name","operation":"profile",'
+    '"aggregation":"count","measure":"","group_by":"",'
+    '"sort_by":"","order":"desc","filters":[],"columns":[]}'
+)
+
+
 def test_spreadsheet_filters_use_the_explicit_scalar_cell_contract():
-    hint = (
-        '{"source_id":"id","sheet":"name","operation":"profile",'
-        '"aggregation":"count","measure":"","group_by":"",'
-        '"sort_by":"","order":"desc","filters":[],"columns":[]}'
-    )
-    payload = json.loads(hint)
-    payload.update(operation="filter", columns=["Voltage"])
+    hint = '{"targets":[' + _SPREADSHEET_TARGET + ']}'
+    target = json.loads(_SPREADSHEET_TARGET)
+    target.update(operation="filter", columns=["Voltage"])
     for value in ("high", 1, 2.5, False, None):
-        payload["filters"] = [{"column": "Voltage", "operator": "eq", "value": value}]
-        assert _valid(hint, payload)
-    payload["filters"][0]["operator"] = "execute"
-    assert not _valid(hint, payload)
-    payload["filters"][0].update(operator="eq", value={"unexpected": "container"})
-    assert not _valid(hint, payload)
+        target["filters"] = [{"column": "Voltage", "operator": "eq", "value": value}]
+        assert _valid(hint, {"targets": [target]})
+    # Several targets, each with its own filters: the list is the contract.
+    assert _valid(hint, {"targets": [target, {**target, "sheet": "Other"}]})
+    target["filters"][0]["operator"] = "execute"
+    assert not _valid(hint, {"targets": [target]})
+    target["filters"][0].update(operator="eq", value={"unexpected": "container"})
+    assert not _valid(hint, {"targets": [target]})
+
+
+def test_spreadsheet_filter_contract_is_only_the_planner_target_list():
+    # The filter contract is keyed on the planner's target shape; an empty
+    # ``filters`` example anywhere else still has no item type.
+    assert response_format_for_hint(_SPREADSHEET_TARGET) is None
+    assert response_format_for_hint(
+        '{"targets":[{"source_id":"id","sheet":"name","filters":[]}]}'
+    ) is None
+    assert response_format_for_hint(
+        '{"plans":[' + _SPREADSHEET_TARGET + ']}'
+    ) is None
 
 
 @pytest.mark.parametrize("hint", [

@@ -217,6 +217,62 @@ test("a mounted library's workbook card names it; the current library's does not
 });
 
 
+function renderWorkbooks(
+  receipts: SpreadsheetAnalysisResult[],
+  notebookId: string | null,
+  notebookNames: Record<string, string>,
+) {
+  const answer = answerWithRows(1);
+  answer.result_sets = receipts;
+  answer.result_coverage = undefined;
+  render(
+    <AnswerView
+      answer={answer}
+      feedbackSent=""
+      onFeedback={() => undefined}
+      notebookId={notebookId}
+      notebookNames={notebookNames}
+      buildingScaleIndex={false}
+      memorySaved={false}
+    />,
+  );
+}
+
+
+test("a multi-table plan renders one card per table, in plan order, each naming its own library", () => {
+  // Global Ask comparing a quote table in library A with one in library B:
+  // the same workbook title in both, told apart only by each card's badge.
+  renderWorkbooks(
+    [workbookFrom("nb-b", "base"), workbookFrom("nb-a")],
+    null,
+    { "nb-a": "A 库", "nb-b": "B 库" },
+  );
+  const cards = screen.getAllByRole("region", { name: "Excel 分析：报价单" });
+  expect(cards).toHaveLength(2);
+  expect(cards[0]).toHaveTextContent("来自「B 库」（公共知识库）");
+  expect(cards[0]).not.toHaveTextContent("A 库");
+  expect(cards[1]).toHaveTextContent("来自「A 库」（个人知识库）");
+  expect(cards[1]).not.toHaveTextContent("B 库");
+});
+
+
+test("two tables of the current library render as two badge-free cards, the cap disclosure on the last", () => {
+  const disclosure = "本次规划选了 4 张表，超过单次最多 3 张的上限，按规划顺序只分析了前 3 张；未分析：丁 · Quotes。";
+  const first = { ...workbookFrom("nb-1"), source_id: "src-1", source_title: "甲报价表" };
+  const second = {
+    ...workbookFrom("nb-1"), source_id: "src-2", source_title: "乙报价表", warnings: [disclosure],
+  };
+  renderWorkbooks([first, second], "nb-1", { "nb-1": "本库" });
+  const cards = screen.getAllByRole("region", { name: /^Excel 分析：/ });
+  expect(cards.map((card) => card.getAttribute("aria-label"))).toEqual([
+    "Excel 分析：甲报价表", "Excel 分析：乙报价表",
+  ]);
+  expect(screen.queryByText(/来自「/)).not.toBeInTheDocument();
+  expect(cards[0]).not.toHaveTextContent(disclosure);
+  expect(cards[1]).toHaveTextContent(disclosure);
+});
+
+
 test("a workbook card from the current library carries no library badge", () => {
   renderWorkbook(workbookFrom("nb-1"), "nb-1", { "nb-1": "本库" });
   expect(screen.getByText(/Excel 分析 · 报价单/)).toBeInTheDocument();

@@ -159,6 +159,19 @@ def _run_lane(ask, question, notebook_id="nb-1", scope=None):
 # i.e. before the peer workbook lane existed.
 _SINGLE_PROMPT_SHA = "99fd3f5daa8783179c4cf79590170b80af52171a6fbef3720683f401658198a0"
 _SINGLE_RESULT_SHA = "d00bde19954f65d34e5647c7b095921b38087be96417bd1ebc1ac1651a56af22"
+_PRE_LIST_INSTRUCTION = (
+    "为电子表格问题选择一个受限的确定性执行计划。只能使用给定 source_id、"
+    "sheet 和列名；不得生成公式、代码或 SQL。operation 只能是 profile、"
+    "aggregate、top、filter。aggregate 使用 aggregation=sum|avg|min|max|count，"
+    "可选 measure/group_by；top 使用 sort_by/order=asc|desc；filter 可选 filters，"
+    "每项 operator=eq|ne|gt|gte|lt|lte|contains。无法可靠匹配时返回 operation=profile。"
+)
+_MULTI_TABLE_INSTRUCTION = (
+    "为电子表格问题选择受限的确定性执行计划，写进 targets 列表，每项针对"
+    "一张工作表（source_id + sheet）。问题只涉及一张表时只写一项；问题明确"
+    "要求比较、对照或分别分析多张表时，每张表各写一项，按问题提到的顺序，"
+    "最多 3 项，同一张工作表只写一次。"
+)
 
 
 def test_single_library_lane_is_byte_identical(tmp_path):
@@ -176,7 +189,16 @@ def test_single_library_lane_is_byte_identical(tmp_path):
     results, trace = _run_lane(ask, "分析这个 Excel 报价表里价格最高的项目")
 
     assert len(planner.prompts) == 1
-    assert _digest(planner.prompts[0]) == _SINGLE_PROMPT_SHA, planner.prompts[0]
+    # Multi-table planning (user ruling 2026-10-19) rewrote the instruction
+    # sentence -- a target LIST, at most N tables -- and only that: put the
+    # pre-list instruction back in front of everything from the question on
+    # and the prompt is the captured one, so the question line, the catalog
+    # notes and the catalog itself are byte for byte.
+    prompt = planner.prompts[0]
+    assert prompt.startswith(_MULTI_TABLE_INSTRUCTION), prompt
+    assert _digest(
+        _PRE_LIST_INSTRUCTION + prompt[prompt.index("\n问题："):]
+    ) == _SINGLE_PROMPT_SHA, prompt
     assert artifacts.loads == [
         ("nb-1", "doc-1"), ("nb-1", "src-own"),
         ("base-1", "src-base"), ("base-1", "doc-2"),
