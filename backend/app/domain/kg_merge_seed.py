@@ -133,6 +133,16 @@ _NON_SEED_CHARS_RE = re.compile(r"[^\w+/ ]+")
 _WHITESPACE_RUN_RE = re.compile(r"\s+")
 
 
+def _seed_base(name: str) -> str:
+    """NFKC → paren-acronym strip → strip → lower: the start shared by v1 and v2."""
+    return _strip_paren_acronym(unicodedata.normalize("NFKC", name or "")).strip().lower()
+
+
+def _v1_unaliased_from_base(base: str) -> str:
+    cleaned = _NON_SEED_CHARS_RE.sub(" ", base)
+    return _ORIGINAL_SEPARATORS_RE.sub(" ", cleaned).strip()
+
+
 def _concept_seed_v1_unaliased(name: str) -> str:
     """The v1 seed BEFORE the alias table: NFKC → paren-acronym strip → strip/lower
     → every non-``[\\w+/ ]`` char to a space → ``[\\s\\-_]+`` runs to one space.
@@ -142,10 +152,16 @@ def _concept_seed_v1_unaliased(name: str) -> str:
     the two equal, because ``_norm`` itself is deliberately left untouched. v2
     looks its aliases up on THIS form, so an alias key keeps matching the words
     it was written for ("op amp", "mos transistor")."""
-    folded = unicodedata.normalize("NFKC", name or "")
-    stripped = _strip_paren_acronym(folded)
-    cleaned = _NON_SEED_CHARS_RE.sub(" ", stripped.strip().lower())
-    return _ORIGINAL_SEPARATORS_RE.sub(" ", cleaned).strip()
+    return _v1_unaliased_from_base(_seed_base(name))
+
+
+# The alias keys with their spaces removed. Deleting every space from the v1
+# form leaves the base minus ``[\s\-_]`` minus every non-``[\w+/ ]`` char — and
+# so does deleting every space from v2's own un-aliased text. A v1 form can
+# therefore only BE an alias key when the space-free v2 text is one of these, so
+# v2 builds the v1 form (two more regex passes) only for those few names. It runs
+# once per concept canonical name in the findings pass (millions in production).
+_ALIAS_KEYS_SQUASHED = frozenset(key.replace(" ", "") for key in _ALIASES)
 
 
 def concept_seed_v1(name: str) -> str:
@@ -181,15 +197,15 @@ def concept_seed_v2(name: str) -> str:
     would erase the dot-made space too and merge "Llama 3.1" with "Llama 31";
     ``test_v2_drops_original_separators_before_punctuation`` pins the order.
     """
-    unaliased = _concept_seed_v1_unaliased(name)
-    alias = _ALIASES.get(unaliased)
-    if alias is not None:
-        return alias.replace(" ", "")
-    folded = unicodedata.normalize("NFKC", name or "")
-    text = _strip_paren_acronym(folded).strip().lower()
-    text = _ORIGINAL_SEPARATORS_RE.sub("", text)
+    base = _seed_base(name)
+    text = _ORIGINAL_SEPARATORS_RE.sub("", base)
     text = _NON_SEED_CHARS_RE.sub(" ", text)
-    return _WHITESPACE_RUN_RE.sub(" ", text).strip()
+    text = _WHITESPACE_RUN_RE.sub(" ", text).strip()
+    if text.replace(" ", "") in _ALIAS_KEYS_SQUASHED:
+        alias = _ALIASES.get(_v1_unaliased_from_base(base))
+        if alias is not None:
+            return alias.replace(" ", "")
+    return text
 
 
 def concept_squash_key(name: str) -> str:
