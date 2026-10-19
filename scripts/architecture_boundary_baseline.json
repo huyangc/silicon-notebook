@@ -307,7 +307,7 @@
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever._action_consult_memory": 134,
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever._apply_outline_update": 133,
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever._new_run_state": 208,
-    "backend/app/services/reasoning_retrieval.py::ReasoningRetriever._run_enumeration": 242,
+    "backend/app/services/reasoning_retrieval.py::ReasoningRetriever._run_enumeration": 243,
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever._run_reflect_loop": 134,
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever.run": 23,
     "backend/app/services/report_engine.py::ReportEngine._assemble": 454,
