@@ -135,6 +135,9 @@ export function isQueryIntentContractShape(value: unknown): value is QueryIntent
   for (const key of ["entities", "comparison_axes", "constraints", "excluded_topics", "assumptions"]) {
     if (!isStringArray(value[key])) return false;
   }
+  if (!isOptional(value.high_level_keywords, isStringArray)) return false;
+  if (!isOptional(value.low_level_keywords, isStringArray)) return false;
+  if (!isOptional(value.keyword_basis, (v) => typeof v === "string")) return false;
   if (!isOptional(value.clarification_answers, (answers) => (
     Array.isArray(answers) && answers.every((item) => (
       isRecord(item)

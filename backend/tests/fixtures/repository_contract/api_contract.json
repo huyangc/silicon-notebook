@@ -10289,10 +10289,34 @@
               "title": "Expected Output",
               "type": "string"
             },
+            "high_level_keywords": {
+              "items": {
+                "maxLength": 200,
+                "type": "string"
+              },
+              "maxItems": 16,
+              "title": "High Level Keywords",
+              "type": "array"
+            },
             "intent_type": {
               "default": "other",
               "title": "Intent Type",
               "type": "string"
+            },
+            "keyword_basis": {
+              "default": "",
+              "maxLength": 64,
+              "title": "Keyword Basis",
+              "type": "string"
+            },
+            "low_level_keywords": {
+              "items": {
+                "maxLength": 200,
+                "type": "string"
+              },
+              "maxItems": 16,
+              "title": "Low Level Keywords",
+              "type": "array"
             },
             "mandatory_topics": {
               "items": {

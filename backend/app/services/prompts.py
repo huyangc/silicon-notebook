@@ -883,6 +883,29 @@ def corpus_language_list(corpus_langs: Optional[Sequence[str]]) -> List[str]:
     return [l for l in (corpus_langs or ["zh", "en"]) if l] or ["zh", "en"]
 
 
+def keyword_language_rule(corpus_langs: Optional[Sequence[str]]) -> str:
+    """Which languages the whole-question high/low-level keywords are written in.
+
+    THE one statement of the bilingual keyword rule. Two prompts ask for the
+    same ``high_level_keywords`` / ``low_level_keywords`` pair --
+    ``expand_query_prompt`` (chunk mode and reasoning's ``plan()``) and, when
+    the run's lexical seed arm can use them, ``query_intent_prompt`` (the
+    confirmed-intent path, which never runs ``plan()``) -- and both feed the
+    same lexical arm, so the two must never ask for different languages.
+    """
+    langs = corpus_language_list(corpus_langs)
+    if len(langs) > 1:
+        return (
+            "provide terms in EACH of these corpus languages: "
+            f"{', '.join(langs)} — for a term with a well-known form in another "
+            "listed language (e.g. an English acronym for a Chinese concept, or "
+            "vice-versa), include BOTH forms — so lexical search matches documents "
+            "in any of them.")
+    return (
+        f"provide terms in the corpus language ({langs[0]}); a single-language "
+        "corpus needs only single-language keywords.")
+
+
 def reflect_prompt(
     question: str,
     candidates_summary: str,
@@ -1528,18 +1551,7 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
         if want_types else
         "- types and prefer are not used in this run: leave them as [] and "
         "\"balanced\". reason: an optional one-line note.\n")
-    langs = corpus_language_list(corpus_langs)
-    if len(langs) > 1:
-        kw_langs_rule = (
-            "provide terms in EACH of these corpus languages: "
-            f"{', '.join(langs)} — for a term with a well-known form in another "
-            "listed language (e.g. an English acronym for a Chinese concept, or "
-            "vice-versa), include BOTH forms — so lexical search matches documents "
-            "in any of them.")
-    else:
-        kw_langs_rule = (
-            f"provide terms in the corpus language ({langs[0]}); a single-language "
-            "corpus needs only single-language keywords.")
+    kw_langs_rule = keyword_language_rule(corpus_langs)
     return (
         "You prepare an engineer's question for retrieval over a document "
         "corpus. Produce:\n"
@@ -1591,11 +1603,42 @@ QUERY_INTENT_SCHEMA_HINT = (
 # Compatibility alias: reports and reasoning Ask now share this contract.
 REPORT_INTENT_SCHEMA_HINT = QUERY_INTENT_SCHEMA_HINT
 
+# The same contract plus the whole-request keyword pair, for an Ask whose
+# first-round lexical seed arm can use it (``query_intent_prompt(keywords=
+# True)``). The two keys are spelled exactly like ``EXPAND_SCHEMA_HINT``'s and
+# carry the same ``[]`` example, so the strict projection reads them as string
+# lists there and here alike. The base hint above stays what reports (and an
+# Ask with no usable keyword arm) send, byte for byte.
+QUERY_INTENT_KEYWORDS_SCHEMA_HINT = (
+    '{"normalized_question":"","intent_type":"explain|compare|diagnose|design|review|other",'
+    '"result_scope":"ranked|complete|aggregate|hybrid",'
+    '"completeness_required":false,'
+    '"entities":[""],"mandatory_topics":[{"title":"",'
+    '"question":"","retrieval_queries":[""]}],'
+    '"high_level_keywords":[],"low_level_keywords":[],"comparison_axes":[""],'
+    '"constraints":[""],"excluded_topics":[""],"expected_output":"",'
+    '"assumptions":[""],"ambiguities":[{"question":"",'
+    '"reason":"","required":true,"options":[""]}],'
+    '"confidence":0.0,"needs_clarification":false}')
+
 
 def query_intent_prompt(question: str, max_topics: int = 6,
                         history_block: str = "", *,
                         purpose: str = "deep report",
-                        confirmation_mode: bool = False) -> str:
+                        confirmation_mode: bool = False,
+                        keywords: bool = False,
+                        corpus_langs: Optional[List[str]] = None) -> str:
+    """The corpus-blind intent contract prompt.
+
+    ``keywords`` = also ask for the whole-request ``high_level_keywords`` /
+    ``low_level_keywords`` pair (the shape ``expand_query`` produces), in the
+    languages ``keyword_language_rule(corpus_langs)`` names. Only a reasoning
+    Ask whose first-round lexical seed arm can use them turns it on; with the
+    default ``False`` the prompt and its schema hint are byte for byte what
+    they were before the pair existed (reports never turn it on).
+    ``corpus_langs`` is read only when ``keywords`` is on: language codes are
+    corpus metadata, not corpus text, so the step stays corpus-blind.
+    """
     history_section = (
         f"Prior conversation (context only; the latest request wins):\n{history_block}\n\n"
         if history_block else ""
@@ -1612,6 +1655,22 @@ def query_intent_prompt(question: str, max_topics: int = 6,
         "in ambiguities with required=true and ask one concise user-facing question. "
         "Do not block for optional stylistic preferences; record safe, reversible "
         "defaults in assumptions instead.\n"
+    )
+    # The keyword pair is described with expand_query_prompt's own wording and
+    # language rule (``keyword_language_rule``): it feeds the same lexical arm.
+    # Absent (empty) unless the caller asked for it, so the default prompt is
+    # unchanged.
+    keyword_rule = (
+        "high_level_keywords: themes / relationship types / abstract topics (used "
+        "to retrieve RELATIONS); low_level_keywords: concrete entities / names / "
+        "specifics (used to retrieve ENTITIES). Both are lexical search terms for "
+        "the WHOLE request, never additional questions or topics; for both, "
+        f"{keyword_language_rule(corpus_langs)} Do not add terms the request does "
+        "not name; return [] for a list with no such term.\n"
+        if keywords else ""
+    )
+    schema_hint = (
+        QUERY_INTENT_KEYWORDS_SCHEMA_HINT if keywords else QUERY_INTENT_SCHEMA_HINT
     )
     return (
         f"Create an INTENT CONTRACT for a {purpose} before seeing any corpus. "
@@ -1665,9 +1724,10 @@ def query_intent_prompt(question: str, max_topics: int = 6,
         "Keep normalized_question, mandatory_topics, constraints and expected_output "
         "consistent with that scope; do not smuggle full-library coverage into those "
         "fields when the request is only an overview.\n"
+        f"{keyword_rule}"
         f"{confirmation_rule}\n"
         f"{history_section}User request: {question}\n\n"
-        f"Return JSON only: {QUERY_INTENT_SCHEMA_HINT}"
+        f"Return JSON only: {schema_hint}"
     )
 
 

@@ -4526,10 +4526,10 @@ def test_graph_run_runs_the_keyword_arm_too(rrepo):
     assert "ck-1" in [c.chunk_id for c in res.chunks]
 
 
-def test_confirmed_intent_run_has_no_plan_keywords_and_no_keyword_arm(rrepo):
-    """已确认意图路径不调 `plan()` ⇒ 没有关键词 ⇒ 词法臂不跑、detail 不加键。
-
-    (chunk 模式在同一条路径上同样没有 expand 关键词,两侧同义。)
+def test_confirmed_intent_run_without_intent_keywords_has_no_keyword_arm(rrepo):
+    """已确认意图路径不调 `plan()`;没有理解步关键词(`intent_keywords` 缺省)
+    ⇒ 词法臂不跑、detail 不加键——与理解步产出关键词之前逐字一致。planner 返回
+    里的关键词绝不会被借来:这条路径从不调 `plan()`。
     """
     from app.services.reasoning_retrieval import ReasoningRetriever
 
@@ -4556,6 +4556,107 @@ def test_confirmed_intent_run_has_no_plan_keywords_and_no_keyword_arm(rrepo):
     seed = next(t for t in res.trace if t.step_type == "search_chunks")
     assert "keyword_found" not in seed.detail
     assert _KEYWORD_ONLY_TERM not in "".join(c.text for c in res.chunks)
+
+
+class _PlanCountingLLM(_SeqLLM):
+    """`_SeqLLM` 外加规划调用计数:已确认意图路径一次都不许调 `plan()`。"""
+
+    def __init__(self, plan, reflects):
+        super().__init__(plan, reflects)
+        self.plan_calls = 0
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        if "sub_queries" in schema_hint:
+            self.plan_calls += 1
+        return super().chat_json(messages, schema_hint, **kwargs)
+
+
+def test_confirmed_intent_run_seeds_the_keyword_arm_with_the_intent_keywords(rrepo):
+    """已确认意图 run 带着理解步关键词(`intent_keywords`)时,首轮词法臂**真的跑**,
+    而且用的就是这一串——不是 planner 的(`plan()` 零调用),也不是问题原文。
+    并入口径与规划路径同一套:seed 步写 `keyword_found`、词法独有段进证据池。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo, ["布局布线阶段先全局布局再详细布线。",
+                                           _KEYWORD_ONLY_TEXT])
+    rrepo.settings.graph_ppr_enabled = False
+    llm = _PlanCountingLLM(
+        plan=_plan_with_keywords_json(high=["规划侧"], low=["绝不该出现"]),
+        reflects=[{"next_action": "answer", "sufficient": True}])
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr, [], {None: [_chunk_hit("ck-1")]})
+    keyword_calls = _count_keyword_chunk_candidates(rr)
+    intent_keywords = f"沟槽隔离 trench isolation {_KEYWORD_ONLY_TERM}"
+
+    state = rr._new_run_state(
+        nb.id, "完整问题", "", None, max_steps=None,
+        intent_queries=["完整问题", "方向一"], limits=None, intent_detail=None,
+        intent_keywords=intent_keywords)
+    rr._first_round_plan(state)
+    assert state.plan_keywords == intent_keywords
+
+    res = rr.run(nb.id, "完整问题", "", intent_queries=["完整问题", "方向一"],
+                 intent_keywords=intent_keywords)
+    assert llm.plan_calls == 0
+    assert keyword_calls == [intent_keywords]
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert seed.detail["keyword_found"] >= 1
+    assert _KEYWORD_ONLY_TERM in "".join(c.text for c in res.chunks)
+    plan_step = next(t for t in res.trace if t.step_type == "plan")
+    assert plan_step.detail["source"] == "confirmed_intent"
+
+
+def test_intent_keywords_obey_the_keyword_arm_gate(rrepo):
+    """理解步关键词不开新闸:关键词臂本 run 不可达(对等 run 关了关键词臂)时,
+    带着 `intent_keywords` 也零 I/O、detail 不加键——与规划路径同一把子闸。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo, ["布局布线阶段先全局布局再详细布线。",
+                                           _KEYWORD_ONLY_TEXT])
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "x"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    rr.retrieval.keyword_arm_available = lambda: False
+    _stub_search_chunks(rr, [], {None: [_chunk_hit("ck-1")]})
+    keyword_calls = _count_keyword_chunk_candidates(rr)
+
+    res = rr.run(nb.id, "完整问题", "", intent_queries=["完整问题"],
+                 intent_keywords=f"沟槽隔离 {_KEYWORD_ONLY_TERM}")
+    assert keyword_calls == []
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert "keyword_found" not in seed.detail
+
+
+def test_run_stage_forwards_intent_keywords_only_when_present(rrepo):
+    """`run_stage` 把 `ReasoningRunInput.intent_keywords` 交给 `run`;为空时按
+    「有才传」不传,调用形状与接入前逐字一致(覆写 `run` 的替身无需认识它)。"""
+    from app.application.ask_reasoning import (
+        ReasoningRetrievalRuntime, ReasoningRunInput,
+    )
+    from app.services.reasoning_retrieval import ReasoningResult, ReasoningRetriever
+
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    seen = []
+
+    def _run(*args, **kwargs):
+        seen.append(kwargs)
+        return ReasoningResult()
+
+    rr.run = _run
+    event = threading.Event()
+    rr.cancel_event = event
+    runtime = ReasoningRetrievalRuntime(
+        scope=None, retrieval_run=None, cancellation=event,
+        trace_sink=None, connection_probe=None)
+    base = dict(notebook_id="nb", question="q", history="", top_n=None,
+                max_steps=None, intent_queries=("q",), limits=None, intent=None)
+    rr.run_stage(ReasoningRunInput(**base), runtime)
+    rr.run_stage(ReasoningRunInput(**base, intent_keywords="kw one"), runtime)
+    assert "intent_keywords" not in seen[0]
+    assert seen[1]["intent_keywords"] == "kw one"
 
 
 @pytest.mark.parametrize("gate", ["kill_switch", "allow_search_chunks"])

@@ -990,6 +990,85 @@ def chunk_search_wiring_active(settings) -> bool:
     return bool(getattr(settings, "reasoning_chunk_search_enabled", True))
 
 
+def keyword_arm_reachable(retrieval) -> bool:
+    """关键词(FTS)臂本 run 能不能返回任何东西(`ReasoningRetriever.
+    keyword_search_active` 的第二个条件)。
+
+    判据在检索层(`RetrievalService.keyword_arm_available`)。按属性探测、不入
+    `RetrievalPort`:没有这个方法的检索替身按「可用」处理,即接入前的形态。
+    """
+    probe = getattr(retrieval, "keyword_arm_available", None)
+    return bool(probe()) if callable(probe) else True
+
+
+def keyword_arm_wiring_active(settings, retrieval) -> bool:
+    """接线层面上,已确认意图 run 的首轮播种词法臂能不能跑。
+
+    读者是问题理解步(``AskService.preview_reasoning_intent``):只有这条臂能用上
+    整题关键词时,理解那一次模型调用才顺带产出它们(``plan_query_intent(
+    keywords=True)``);否则理解 prompt 与 schema 逐字节回到没有关键词的形态,
+    不为一个没有读者的字段付输出 token。与 ``keyword_search_active`` 同两句话
+    (``chunk_search_wiring_active`` + ``keyword_arm_reachable``);Ask 的检索器
+    策略位 ``allow_search_chunks`` 恒为 True(只有 knowhow 补全关它,而补全不走
+    问题理解),所以这里不再叠它。
+    """
+    return chunk_search_wiring_active(settings) and keyword_arm_reachable(retrieval)
+
+
+def probe_corpus_langs(
+    retrieval, notebook_id, *, fail_closed: bool = False, on_failed_open=None,
+) -> Optional[List[str]]:
+    """本 run 关键词该用的语料语言(``["zh","en"]`` 的子集);探测不到时 None。
+
+    ``ReasoningRetriever._corpus_langs``(规划与 reflect)与问题理解步
+    (``AskService.preview_reasoning_intent``)共用的唯一实现,口径与失败语义见
+    前者的 docstring。``on_failed_open(error)`` 在 fail-open 退回 None 时调用
+    (事件回执);``fail_closed`` 下照抛。
+    """
+    probe = getattr(retrieval, "keyword_corpus_languages", None)
+    if not callable(probe):
+        return None
+    try:
+        langs = memoized_retrieval_value(
+            ("reasoning_corpus_langs", notebook_id),
+            lambda: tuple(probe(notebook_id) or ()),
+        )
+    except AskCancelled:
+        raise
+    except RetrievalControlError:
+        # 登记的 fail-soft handler(`_SEAT_FAILSOFT_SITES`):对等模式下并集
+        # 口径读参与集座位,身份错配是 raise,不许吞。
+        raise
+    except Exception as error:
+        if fail_closed:
+            raise
+        if on_failed_open is not None:
+            on_failed_open(error)
+        return None
+    return list(langs) or None
+
+
+def note_corpus_langs_fallback(event_log, error) -> None:
+    """语料语言探测 fail-open 的事件回执(只带异常类名;不上横幅、不带内容)。
+
+    规划/reflect(``ReasoningRetriever._note_corpus_langs_fallback``)与问题理解步
+    发的是同一条 ``ask_stage``/``reasoning_corpus_langs``/``failed_open``。
+    ``event_log`` 没有 ``emit`` 就不记;记录本身失败也吞掉。
+    """
+    emit = getattr(event_log, "emit", None)
+    if not callable(emit):
+        return
+    try:
+        emit({
+            "kind": "ask_stage",
+            "stage": "reasoning_corpus_langs",
+            "status": "failed_open",
+            "error_type": type(error).__name__,
+        })
+    except Exception:  # noqa: BLE001 — 诊断绝不打断检索
+        pass
+
+
 def kg_in_scope_for(retrieval: "RetrievalPort", notebook_id) -> bool:
     """本次请求的检索范围内有没有知识图谱(本库有图 或 勾选的参考库里有图)。
 
@@ -3474,11 +3553,17 @@ class _ReasoningRunState:
     reviewed_queries: List[str] = field(default_factory=list)
     pending_intent_queries: List[str] = field(default_factory=list)
     subqueries: List["SubQuery"] = field(default_factory=list)
-    # 整题关键词串(`expand_query` 的 high+low level,空格分隔),首轮原文播种的
-    # 词法臂唯一输入。`_first_round_plan` 写、`_first_round_chunk_seed` 读。
-    # 已确认意图路径不调 `plan()`,因此恒为空串 —— 词法臂在那条路径上不跑
-    # (chunk 模式在同样的路径上也没有 expand 关键词)。
+    # 整题关键词串(high+low level,空格分隔),首轮原文播种的词法臂唯一输入。
+    # `_first_round_plan` 写、`_first_round_chunk_seed` 读。两个来源、同一形状:
+    # 规划路径取 `plan()` 里 `expand_query` 的产出;已确认意图路径不调 `plan()`,
+    # 取下面的 `intent_keywords`(问题理解那一次调用的产出)。两者都为空时
+    # 词法臂不跑。
     plan_keywords: str = ""
+    # 冻结输入(放在这里只因 dataclass 的缺省值排序):`run(intent_keywords=...)`
+    # 原样带入,已确认问题契约里的整题关键词串(`confirmed_intent_keywords`,
+    # 拼法与 `plan()` 同形)。只有 `_first_round_plan` 在已确认意图分支读它;
+    # 空串 = 理解步没给、或确认时因编辑被作废(`_drop_stale_keywords`)。
+    intent_keywords: str = ""
     # 本 run 的语料语言(`ReasoningRetriever._corpus_langs`)。`_first_round_plan`
     # 写;读者是 `plan()` 的 `expand_query` 与每轮 reflect 的 `search_chunks`
     # 说明(`keywords` 该用哪几种语言)。None = 没探测到(检索替身没有
@@ -3809,12 +3894,13 @@ class ReasoningRetriever:
         先例):没有这个方法的检索替身按「可用」处理,即接入前的形态。
 
         每次调用现算、不缓存:两个输入(部署开关 + 请求级 ContextVar)在一个 run
-        内恒定,与 `chunk_search_active` 同款。
+        内恒定,与 `chunk_search_active` 同款。第二个条件的判据在模块函数
+        `keyword_arm_reachable`;问题理解步决定要不要顺带产出整题关键词时读的
+        `keyword_arm_wiring_active` 是同两句话(部署开关 + 这个探测)。
         """
         if not self.chunk_search_active():
             return False
-        probe = getattr(self.retrieval, "keyword_arm_available", None)
-        return bool(probe()) if callable(probe) else True
+        return keyword_arm_reachable(self.retrieval)
 
     # --- 按篇原文取样通道的总闸(PR-A) ---
     def document_read_active(
@@ -3931,46 +4017,24 @@ class ReasoningRetriever:
         ``fail_closed`` 下照抛。其余异常发一条只带异常类名的
         ``ask_stage``/``stage="reasoning_corpus_langs"``/``status="failed_open"``
         事件,不上横幅(与原文精排回退事件同一个事件日志接缝)。
+
+        实现在模块函数 ``probe_corpus_langs``(问题理解步共用同一份,两边的口径与
+        失败语义因此不会分叉);这里只交出本实例的 ``fail_closed`` 与事件回执。
         """
-        probe = getattr(self.retrieval, "keyword_corpus_languages", None)
-        if not callable(probe):
-            return None
-        try:
-            langs = memoized_retrieval_value(
-                ("reasoning_corpus_langs", notebook_id),
-                lambda: tuple(probe(notebook_id) or ()),
-            )
-        except AskCancelled:
-            raise
-        except RetrievalControlError:
-            # 登记的 fail-soft handler(`_SEAT_FAILSOFT_SITES`):对等模式下并集
-            # 口径读参与集座位,身份错配是 raise,不许吞。
-            raise
-        except Exception as error:
-            if self.fail_closed:
-                raise
-            self._note_corpus_langs_fallback(error)
-            return None
-        return list(langs) or None
+        return probe_corpus_langs(
+            self.retrieval, notebook_id, fail_closed=self.fail_closed,
+            on_failed_open=self._note_corpus_langs_fallback,
+        )
 
     def _note_corpus_langs_fallback(self, error) -> None:
         """语料语言探测失败、已退回 zh/en 默认的事件回执。不上横幅,不带内容。
 
         与 `_note_chunk_rerank_fallback` 同一个接缝:`model_clients` 上的
-        `event_log` 按属性探测,没有就不记;记录本身失败也吞掉。
+        `event_log` 按属性探测,没有就不记;记录本身失败也吞掉。事件形状在模块
+        函数 `note_corpus_langs_fallback`(问题理解步发同一条)。
         """
-        emit = getattr(getattr(self.model_clients, "event_log", None), "emit", None)
-        if not callable(emit):
-            return
-        try:
-            emit({
-                "kind": "ask_stage",
-                "stage": "reasoning_corpus_langs",
-                "status": "failed_open",
-                "error_type": type(error).__name__,
-            })
-        except Exception:  # noqa: BLE001 — 诊断绝不打断检索
-            pass
+        note_corpus_langs_fallback(
+            getattr(self.model_clients, "event_log", None), error)
 
     def enumeration_active(self) -> bool:
         """本 run 是否提供类型化集合枚举工具。
@@ -5262,6 +5326,10 @@ class ReasoningRetriever:
             intent_queries=list(stage.intent_queries),
             limits=stage.limits,
             intent_detail=(stage.intent.as_json_mapping() if stage.intent else None),
+            # 「有才传」:没有已确认关键词时调用形状与接入前逐字一致(覆写 `run`
+            # 的替身不必认识这个形参)。
+            **({"intent_keywords": stage.intent_keywords}
+               if stage.intent_keywords else {}),
         )
         if type(result) is not ReasoningResult:
             raise StageBoundaryError("invalid reasoning retrieval result")
@@ -5289,7 +5357,7 @@ class ReasoningRetriever:
 
     def _new_run_state(
         self, notebook_id, question, history, on_step, *,
-        max_steps, intent_queries, limits, intent_detail,
+        max_steps, intent_queries, limits, intent_detail, intent_keywords="",
     ) -> "_ReasoningRunState":
         """解析本 run 的预算/开关并铺开 run 级账目(除 `_kg_in_scope` 那对 EXISTS 外零 I/O)。
 
@@ -5437,7 +5505,7 @@ class ReasoningRetriever:
             notebook_id=notebook_id,
             question=question,
             history=history,
-            intent_queries=intent_queries,
+            intent_queries=intent_queries, intent_keywords=intent_keywords,
             intent_detail=intent_detail,
             limits=limits,
             # 记账器**最后**构造:它的起点戳等价于原先紧跟在上面这段初始化之后
@@ -5794,14 +5862,15 @@ class ReasoningRetriever:
         if self.keyword_search_active():
             state.corpus_langs = self._corpus_langs(state.notebook_id)
         plan_kwargs.update(state.corpus_langs_kwarg)
-        # 已确认意图路径不调 `plan()`,因此也没有关键词:`plan_keywords` 留空串,
-        # 原文播种的词法臂在那条路径上不跑(chunk 模式同样只在 expand 过的路径上
-        # 才有关键词)。那条路径上的关键词检索交给模型:reflect 的 `search_chunks`
-        # 动作带可选的 `keywords` 参数(见 `_action_search_chunks`),服务端
-        # 不另造一个确定性的关键词来源。
+        # 已确认意图路径不调 `plan()`:整题关键词取自问题理解那**同一次**调用
+        # (`state.intent_keywords`,形状、拼法、双语化规则与 `plan()` 同源),
+        # 不为它多付一次模型调用。没有(理解步没给、确认时被作废)就是空串,原文
+        # 播种的词法臂与这条路径此前一样不跑;服务端不另造确定性的关键词来源。
+        # 之后的字面检索仍可由模型经 reflect 的 `search_chunks` `keywords` 按需发起。
         plan_keywords = ""
         if reviewed_queries:
             subqueries = [SubQuery(query=query) for query in reviewed_queries]
+            plan_keywords = state.intent_keywords
         else:
             outcome = self.plan_with_keywords(question, history, **plan_kwargs)
             subqueries = outcome.subqueries
@@ -8916,21 +8985,21 @@ class ReasoningRetriever:
     def run(self, notebook_id, question, history="", on_step=None, top_n=None,
             max_steps=None, intent_queries=None,
             limits: Optional[AskRetrievalLimits] = None,
-            intent_detail=None):
+            intent_detail=None, intent_keywords=""):
         """一次逐步推理检索:首轮 → reflect 循环 → 收尾。
 
         四段各是一个方法:`_run_first_round`(阶段为 `_first_round_*`)、
         `_run_reflect_loop`(每轮的摘要拼装、kwargs、分派与各 `_action_*` 另成方法)、
         `_disclose_unresolved_after_loop`、`_finish_run`。run 级状态全程以 `state`
         (`_ReasoningRunState`)为唯一权威,各方法直接读写 `state.`。`run` 的名字与
-        签名是 Report、Ask(`run_stage`)、knowhow 共用的兼容接缝,保持不变。
+        签名是 Report、Ask(`run_stage`)、knowhow 共用的兼容接缝:既有形参不变,只追加缺省形参。
         """
         raise_if_cancelled(self.cancel_event)
         self._per_query_scored.clear()
         state = self._new_run_state(
             notebook_id, question, history, on_step,
             max_steps=max_steps, intent_queries=intent_queries,
-            limits=limits, intent_detail=intent_detail,
+            limits=limits, intent_detail=intent_detail, intent_keywords=intent_keywords,
         )
         self._run_first_round(state)
         self._run_reflect_loop(state)

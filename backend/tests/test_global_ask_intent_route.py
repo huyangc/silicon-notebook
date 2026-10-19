@@ -273,11 +273,12 @@ def test_intent_preview_runs_under_the_same_participant_set(setup):
     readable.add("c")
     seen: dict = {}
 
-    def probe(notebook_id, question, history="", *, cancel_event=None):
+    def probe(notebook_id, question, history="", *, cancel_event=None, user_id=None):
         seen["active"] = federated_ask_active()
         override = current_participant_override()
         seen["ids"] = set(override.notebook_ids) if override else set()
         seen["nominal_active"] = notebook_id
+        seen["user_id"] = user_id
         return QueryIntentContract(objective=question, resolved_question=question)
 
     service.ask.preview_reasoning_intent = probe
@@ -287,5 +288,8 @@ def test_intent_preview_runs_under_the_same_participant_set(setup):
     assert seen["active"] is True
     assert seen["ids"] == readable
     assert seen["nominal_active"] in readable
+    # The understanding is attested for the actor the override was built for:
+    # its keyword-language probe resolves participants through that override.
+    assert seen["user_id"] == "u"
     # The context must not leak past the call.
     assert federated_ask_active() is False

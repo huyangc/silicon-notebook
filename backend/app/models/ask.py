@@ -270,6 +270,19 @@ class QueryIntentContract(BaseModel):
     completeness_required: bool = False
     entities: List[str] = Field(default_factory=list, max_length=8)
     mandatory_topics: List[QueryIntentTopic] = Field(default_factory=list, max_length=16)
+    # Whole-request lexical keywords from the same understanding call
+    # (``plan_query_intent(keywords=True)``; same shape and bilingual rule as
+    # ``expand_query``'s pair). They feed only the confirmed run's first-round
+    # lexical seed arm; empty = no arm, the behaviour before they existed.
+    # ``keyword_basis`` is the digest of the understanding they were written
+    # for -- confirmation drops them when that understanding was edited
+    # (``query_intent._drop_stale_keywords``). Caps mirror
+    # ``query_intent.INTENT_KEYWORDS_MAX_ITEMS`` / ``INTENT_KEYWORD_MAX_CHARS``.
+    high_level_keywords: List[Annotated[str, Field(max_length=200)]] = Field(
+        default_factory=list, max_length=16)
+    low_level_keywords: List[Annotated[str, Field(max_length=200)]] = Field(
+        default_factory=list, max_length=16)
+    keyword_basis: str = Field(default="", max_length=64)
     comparison_axes: List[str] = Field(default_factory=list, max_length=8)
     constraints: List[str] = Field(default_factory=list, max_length=8)
     excluded_topics: List[str] = Field(default_factory=list, max_length=8)

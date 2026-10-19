@@ -21,6 +21,12 @@ export type QueryIntentContract = {
   completeness_required: boolean;
   entities: string[];
   mandatory_topics: QueryIntentTopic[];
+  // 问题理解同一次调用顺带产出的整题检索关键词(只喂已确认 run 的首轮词法臂)。
+  // 界面不展示、不编辑,原样随合同回传;后端在确认时按 keyword_basis 判它们是否
+  // 仍对应这份理解,改过措辞或回答过澄清就作废。旧后端不发这三个字段。
+  high_level_keywords?: string[];
+  low_level_keywords?: string[];
+  keyword_basis?: string;
   comparison_axes: string[];
   constraints: string[];
   excluded_topics: string[];
