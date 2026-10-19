@@ -186,13 +186,17 @@ _ELEMENT_QUERY = "低温 增益 指标"
 
 
 def element_search_citations(repository, notebook_id: str, *,
-                             element_ids=(CITED, SIBLING)) -> list:
+                             element_ids=(CITED, SIBLING), between=None,
+                             texts=None) -> list:
     """The global element arm: the REAL merge and registration
     (``federated_element_candidates``) over the REAL hydration read
     (``_retrieve_elements_from_chunks`` -> ``evidence_elements``) of one
     passage declaring ``element_ids``, then the production minting
     (``element_citations``) of a card per merged element. The leg stands in
-    only for the chunk recall above the hydration (no embeddings here)."""
+    only for the chunk recall above the hydration (no embeddings here).
+    ``between`` runs inside the leg after that recall and before the
+    hydration read -- the window between "the passage was found" and "its
+    elements were read"; ``texts`` is what the hydration must then return."""
     from app.domain.retrieval import RetrievedChunk
     from app.models.ask import AnswerAnchor
     from app.services.chunk_federation import federated_element_candidates
@@ -203,15 +207,18 @@ def element_search_citations(repository, notebook_id: str, *,
         section_path="", text="", element_ids=list(element_ids),
         score=0.9, relevance=0.9,
     )
-    hits = federated_element_candidates(
-        candidates, notebook_id, _ELEMENT_QUERY,
-        lambda _notebook_id, _visible: candidates._retrieve_elements_from_chunks(
+    def _leg(_notebook_id, _visible):
+        if between is not None:
+            between()
+        return candidates._retrieve_elements_from_chunks(
             _ELEMENT_QUERY, [passage], limit=8,
-        ),
-        limit=8,
+        )
+
+    hits = federated_element_candidates(
+        candidates, notebook_id, _ELEMENT_QUERY, _leg, limit=8,
     )
     for hit in hits:
-        assert hit.text == TEXTS[hit.element_id]
+        assert hit.text == (texts or TEXTS)[hit.element_id]
     anchors = [
         AnswerAnchor(key=f"k{index}", object_id=hit.element_id,
                      object_type="element", label=hit.element_id)
@@ -353,6 +360,34 @@ def one_row_page_case(world) -> None:
     response = terminal_check(world.sources, run, world.notebook_id, citations)
     assert response.citations[0].verification == "changed"
     assert run.state.evidence == {CITED: (SOURCE, element_text_sha(TEXTS[CITED]))}
+
+
+def element_recall_to_hydration_race_case(world) -> None:
+    """The element arm's own window: the passage was recalled, then the cited
+    element changed (or vanished) before its text was read. The arm hands the
+    model -- and registers -- the text it READ, so an edit in that window is
+    simply the text the answer rests on (the card passes and the snapshot is
+    the edited body), and a deletion leaves nothing to cite. Only an edit
+    after the read is ``changed`` (the race cases above)."""
+    from app.domain.evidence_fingerprint import element_text_sha
+
+    edited = TEXTS[CITED] + "（修订）"
+    with global_run(world.sources, world.notebook_id) as run:
+        card = cited(element_search_citations(
+            world.repository, world.notebook_id,
+            between=lambda: mutate(world.database, world.marker, "update"),
+            texts={**TEXTS, CITED: edited},
+        ))
+    response = terminal_check(world.sources, run, world.notebook_id, [card])
+    assert response.citations[0].verification is None
+    assert response.citation_check is None
+    assert run.state.evidence[CITED] == (SOURCE, element_text_sha(edited))
+
+    mutate(world.database, world.marker, "delete")
+    with global_run(world.sources, world.notebook_id) as run:
+        citations = element_search_citations(world.repository, world.notebook_id)
+    assert [citation.element_id for citation in citations] == [SIBLING]
+    assert CITED not in run.state.evidence
 
 
 EMPTY_SOURCE = "src-attest-empty"

@@ -29,7 +29,7 @@ from app.models.notebooks import NotebookCreate
 from app.services.evidence_attestation import evidence_attestation_seat
 from tests.producer_attestation_testkit import (
     CITED, RACE_EXPECTATIONS, SIBLING, SOURCE, TEXTS, cited, element_search_citations,
-    enumeration_citations,
+    element_recall_to_hydration_race_case, enumeration_citations,
     global_run, mutate, nothing_to_register_case, one_row_page_case,
     overview_citations, refused_row_case, seed, table_citations, terminal_check,
 )
@@ -206,3 +206,7 @@ def test_enumeration_registers_a_one_row_page(world):
 @pytest.mark.parametrize("producer", PRODUCERS)
 def test_a_producer_with_nothing_to_cite_registers_nothing(world, producer):
     nothing_to_register_case(world, producer)
+
+
+def test_element_arm_registers_the_text_it_read_not_the_recalled_one(world):
+    element_recall_to_hydration_race_case(world)

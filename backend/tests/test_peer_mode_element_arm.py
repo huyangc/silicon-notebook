@@ -583,3 +583,104 @@ def test_first_round_empty_fallback_follows_the_switch_in_peer_mode(enabled):
         assert [step.detail["reason"] for step in trace] == ["initial_evidence_empty"]
     else:
         assert searched == [] and trace == [] and state.elements_searches == 0
+
+
+# ---------------------------------------------------------------------------
+# 7. 真实通道:元素腿内部的 fail-open 记错不进回答横幅
+# ---------------------------------------------------------------------------
+
+class _BrokenQueryEmbedder:
+    """只换掉查询向量适配器:每次都抛,其余(ANN/FTS/回表)全是真实通道。"""
+
+    configured = True
+    model = "fake"
+
+    def embed_query(self, text):
+        raise RuntimeError("embedding endpoint down")
+
+    def embed_documents(self, texts):
+        raise RuntimeError("embedding endpoint down")
+
+
+def _real_provider_libraries(tmp_path, monkeypatch, count=2):
+    """真实 ``SQLiteRepository`` + **真实** ``ModelProvider``(它的 ``note_model_error``
+    才写 ``_ASK_MODEL_ERRORS``;测试用的 RecordingModelProvider 只记账),几个处理过
+    的库,每库一篇带「低温增益」原文的文档。"""
+    from app.core.config import Settings
+    from app.models.notebooks import NotebookCreate
+    from app.repositories.ports import UploadedSourceFile
+    from app.services.embedding import FakeEmbedder
+    from app.services.sqlite_repository import SQLiteRepository
+    from tests.model_testkit import bind_all_embedding_clients
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'leg.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("EMBED_DIM", "16")
+    repo = SQLiteRepository(Settings())
+    bind_all_embedding_clients(repo, FakeEmbedder(dim=16))
+    notebooks = []
+    for index in range(count):
+        notebook = repo.create_notebook(NotebookCreate(name=f"库{index}"))
+        source = repo.upload_sources(notebook.id, [UploadedSourceFile(
+            file_name=f"手册{index}.md", content_type="text/markdown",
+            content=(f"# 手册{index}\n\n## 低温性能\n\n低温下的增益随温度下降而上升，"
+                     f"零下四十度仍然满足指标{index}。").encode("utf-8"),
+        )], scheduler=lambda _source_id: None)[0]
+        repo.process_source(source.id)
+        notebooks.append(notebook)
+    return repo, notebooks
+
+
+def test_an_element_leg_model_error_is_an_event_not_a_banner(tmp_path, monkeypatch):
+    """真实 ``_retrieve_elements`` → ``_retrieve_chunks`` → ``_embed_query`` →
+    真实 ``ModelProvider.note_model_error``:查询向量失败时,元素腿照旧经全文检索
+    交回元素;``model_error`` 事件照写,但本次回答的横幅 sink(``_ASK_MODEL_ERRORS``)
+    一条都不进。对照臂:同一个 run 里语义侧直接走同一条通道,同一次失败照旧进
+    sink——屏蔽只在元素腿上。"""
+    from app.core.ask_context import _ASK_MODEL_ERRORS
+    from app.services.retrieval_participants import (
+        ParticipantOverride, participant_override,
+    )
+    from tests import global_citation_e2e_kit as kit
+    from tests.model_testkit import bind_embedding_client
+
+    repo, notebooks = _real_provider_libraries(tmp_path, monkeypatch)
+    try:
+        bind_embedding_client(repo, _BrokenQueryEmbedder(),
+                              workload_ids=("retrieval_query_embedding",))
+        events = kit.capture_events(repo, monkeypatch)
+        candidates = repo._runtime.retrieval_component.candidates
+        actor = repo.current_user().id
+        ids = tuple(nb.id for nb in notebooks)
+        ceilings = {
+            nid: set(repo._runtime.source_store.all_visible_source_ids(nid))
+            for nid in ids
+        }
+        sink: list = []
+        token = _ASK_MODEL_ERRORS.set(sink)
+        try:
+            with retrieval_run(run_kind="ask_reasoning", actor_id=actor):
+                with source_scope_context(
+                    ids[0], None, None, notebook_source_ceilings=ceilings,
+                    subjectless=True,
+                ):
+                    with participant_override(ParticipantOverride(
+                        notebook_ids=ids, tiers={}, attested_actor_id=actor,
+                    )):
+                        hits = candidates.retrieve_elements(ids[0], "低温 增益 指标")
+                        leg_sink = list(sink)
+                        # 对照臂:语义侧同一条通道、同一次失败,照旧进 sink。
+                        candidates._retrieve_chunks(ids[0], "低温 增益 指标")
+        finally:
+            _ASK_MODEL_ERRORS.reset(token)
+    finally:
+        repo.close()
+
+    assert leg_sink == []
+    assert hits and {hit.notebook_id for hit in hits} == set(ids)
+    embed_errors = [e for e in events
+                    if e.get("kind") == "model_error" and e.get("stage") == "embed"]
+    # 每条元素腿一条 + 对照臂一条:事件一条不少。
+    assert len(embed_errors) >= len(ids) + 1
+    assert sink and {entry["stage"] for entry in sink} == {"embed"}

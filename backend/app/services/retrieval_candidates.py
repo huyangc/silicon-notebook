@@ -5996,9 +5996,24 @@ class CandidateRetrievalService(_RetrievalState):
         contextual ceiling (``producer_explicit=False``, as the plugin seam's
         live enumeration is), so it always takes the bounded chunk-hydration
         route and never the whole-library element scan.  The leg is a
-        fail-open supplement: ``_CHUNK_SUPPLEMENT_LEG`` keeps its full-text
-        timeouts from opening the library's shared FTS circuit.
+        fail-open supplement, and two run-shared seats are shielded from it for
+        the length of the search:
+
+        * ``_CHUNK_SUPPLEMENT_LEG`` keeps its full-text timeouts from opening
+          the library's shared FTS circuit;
+        * the answer's model-error sink (``_ASK_MODEL_ERRORS``, copied into
+          every task ``Context`` by reference) is swapped for a throwaway list,
+          so the fail-open notes the ordinary chunk lane makes on the way
+          (query embedding, ANN query/delta, a sole-FTS failure) never become
+          a banner on the answer -- one library's supplementary element leg
+          being absent does not change the answer's credibility (the product
+          rule "only failures that affect the result are shown").  The
+          content-free ``model_error`` event is still written: the provider
+          emits it before it looks at the sink.  Shielding HERE rather than in
+          ``_note_model_error`` keeps the rule on this one leg: the semantic
+          legs run the very same lane and must keep reporting.
         """
+        from app.core.ask_context import _ASK_MODEL_ERRORS
         from app.services.source_scope import scoped_allowed_source_ids
 
         wanted = None if narrowed is None else frozenset(map(str, narrowed))
@@ -6010,12 +6025,16 @@ class CandidateRetrievalService(_RetrievalState):
             if allowed is not None and not allowed:
                 return []
             token = _CHUNK_SUPPLEMENT_LEG.set(True)
+            # A list, not ``None``: "an answer is being assembled, this leg's
+            # notes are discarded" -- never "no answer in progress".
+            sink_token = _ASK_MODEL_ERRORS.set([])
             try:
                 return self._retrieve_elements(
                     notebook_id, query, limit=limit,
                     allowed_source_ids=allowed, producer_explicit=False,
                 )
             finally:
+                _ASK_MODEL_ERRORS.reset(sink_token)
                 _CHUNK_SUPPLEMENT_LEG.reset(token)
 
         return _leg
