@@ -148,9 +148,16 @@ F3A_MIN_NAMES = 5
 # F3b — relations-per-object below this fraction of the library median → hit.
 # Local p10–p90 of the ratio: 1.08–1.41.
 F3B_RELATIONS_PER_OBJECT_FRACTION = 0.5
-# F3b — isolated-object share above this multiple of the library median AND at
-# least F3B_MIN_ISOLATED isolated objects → hit. Local p50 4%, p90 8%, max 11%.
+# F3b — that sub-signal only judges sources with at least this many objects,
+# and its median is taken over those sources only: a three-object note with no
+# relation says nothing about parsing (main-session ruling, 2026-10-19).
+F3B_MIN_OBJECTS = 20
+# F3b — isolated-object share strictly above max(F3B_ISOLATED_SHARE_FACTOR ×
+# library median, F3B_ISOLATED_SHARE_FLOOR) AND at least F3B_MIN_ISOLATED
+# isolated objects → hit. The floor stops a 0 median from flagging 20 isolated
+# objects that are 1% of a source (same ruling). Local p50 4%, p90 8%, max 11%.
 F3B_ISOLATED_SHARE_FACTOR = 3.0
+F3B_ISOLATED_SHARE_FLOOR = 0.10
 F3B_MIN_ISOLATED = 20
 # F3b's third signal in the design ("objects per chunk below 1/3 of the
 # median") is NOT part of rules v1: it needs a new full GROUP BY over chunks
@@ -184,11 +191,19 @@ RULE_THRESHOLDS: Dict[str, float] = {
     "f3a_share_min": F3A_SHARE_MIN,
     "f3a_min_names": F3A_MIN_NAMES,
     "f3b_relations_per_object_fraction": F3B_RELATIONS_PER_OBJECT_FRACTION,
+    "f3b_min_objects": F3B_MIN_OBJECTS,
     "f3b_isolated_share_factor": F3B_ISOLATED_SHARE_FACTOR,
+    "f3b_isolated_share_floor": F3B_ISOLATED_SHARE_FLOOR,
     "f3b_min_isolated": F3B_MIN_ISOLATED,
     "max_persisted_findings": MAX_PERSISTED_FINDINGS,
 }
 """Written verbatim into every findings ledger payload under ``thresholds``."""
+
+# Stored merge decisions (``concept_merge_candidates.status``) that mean "these
+# are NOT the same thing": F4 / S1 never report a pair the user judged so (§4.4).
+# Decisions are keyed by v1 SEEDS, never by canonical id — a canonical id moves
+# whenever its cluster's minimum member changes (`decided_seed_pairs_from`).
+DECISION_APART_STATUSES: Tuple[str, ...] = ("rejected", "deferred")
 
 # Rule status values in the ledger (§3.4 「已通过」: checked-and-clean and
 # could-not-check are different states and must never both render as a tick).
@@ -257,7 +272,8 @@ UNIT_RATIO = "ratio"
 UNIT_SEQ = "seq"
 UNIT_FINDINGS = "findings"                     # finding rows
 UNIT_SOURCE_PAIRS = "source_pairs"             # unordered source pairs
-UNIT_CANDIDATE_PAIRS = "candidate_pairs"       # F2 candidate pairs (prefix join)
+UNIT_CANDIDATE_PAIRS = "candidate_pairs"       # F2 distinct candidate pairs (prefix join)
+UNIT_PAIR_GENERATIONS = "pair_generations"     # F2 pairs generated, repeats included (the capped count)
 UNIT_COMPONENTS = "components"                 # connected components of the canonical graph
 UNIT_CONCEPT_GROUPS = "concept_groups"         # squash-key groups / v2-seed classes
 UNIT_SPELLINGS = "spellings"                   # distinct v2 seeds inside one group
@@ -285,7 +301,9 @@ FINDINGS_PAYLOAD_UNITS: Dict[str, str] = {
     "f3a_share_min": UNIT_RATIO,
     "f3a_min_names": UNIT_CANONICAL,
     "f3b_relations_per_object_fraction": UNIT_FACTOR,
+    "f3b_min_objects": UNIT_OBJECTS,
     "f3b_isolated_share_factor": UNIT_FACTOR,
+    "f3b_isolated_share_floor": UNIT_RATIO,
     "f3b_min_isolated": UNIT_OBJECTS,
     "max_persisted_findings": UNIT_FINDINGS,
     # per-rule status, common
@@ -296,9 +314,11 @@ FINDINGS_PAYLOAD_UNITS: Dict[str, str] = {
     "sources_too_few_concepts": UNIT_SOURCES,
     "sources_hit": UNIT_SOURCES,
     "sources_deferred_to_f3": UNIT_SOURCES,
-    # F2
+    # F2 — distinct pairs verified vs pairs generated: the cap bounds the latter
+    # (one generation per shared prefix concept), so the two never share a unit.
     "candidate_pairs": UNIT_CANDIDATE_PAIRS,
-    "candidate_pair_limit": UNIT_CANDIDATE_PAIRS,
+    "candidate_pair_generations": UNIT_PAIR_GENERATIONS,
+    "candidate_pair_generation_limit": UNIT_PAIR_GENERATIONS,
     "pairs_hit": UNIT_SOURCE_PAIRS,
     "pairs_absorbed_into_f1": UNIT_SOURCE_PAIRS,
     # F3
@@ -342,7 +362,6 @@ FINDING_EVIDENCE_UNITS: Dict[str, Dict[str, str]] = {
         "shared_share": UNIT_RATIO,
         "giant_share": UNIT_RATIO,
         "concepts": UNIT_CANONICAL,
-        "objects": UNIT_OBJECTS,
     },
     RULE_DUPLICATE_IMPORT: {
         "jaccard": UNIT_RATIO,
@@ -358,7 +377,7 @@ FINDING_EVIDENCE_UNITS: Dict[str, Dict[str, str]] = {
         "isolated_objects": UNIT_OBJECTS,
         "isolated_share": UNIT_RATIO,
         "median_isolated_share": UNIT_RATIO,
-        "objects": UNIT_OBJECTS,
+        "isolated_share_threshold": UNIT_RATIO,
     },
     RULE_UNDER_MERGE: {
         "canonicals": UNIT_CANONICAL,

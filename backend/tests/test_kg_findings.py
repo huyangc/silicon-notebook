@@ -31,6 +31,7 @@ from app.domain.kg_findings_contracts import (
     finding_actions, ledger_row_predates_findings, source_pair_key,
     stamp_ledger_contract,
 )
+from app.domain.kg_merge_seed import concept_seed_v1
 from app.services import kg_findings
 from app.services.kg_analysis_precompute import CanonicalEdgeTableBuilder
 from app.services.kg_findings import (
@@ -53,7 +54,10 @@ class _Library:
     visible: Dict[str, List[str]] = field(default_factory=dict)
     own: Dict[Tuple[str, str], str] = field(default_factory=dict)
     created: Dict[str, str] = field(default_factory=dict)
-    decided: Set[FrozenSet[str]] = field(default_factory=set)
+    # ``decided_seed_pairs_from``'s shape: {frozenset({seed_a, seed_b}): status}.
+    decisions: Dict[FrozenSet[str], str] = field(default_factory=dict)
+    # Every member name per canonical (hidden ones too); default: its canonical name.
+    member_names: Dict[str, List[str]] = field(default_factory=dict)
 
     def add_source(self, source_id: str, concepts: Sequence[str], *,
                    chain: bool = True, extra_relations: Sequence[Tuple[str, str]] = (),
@@ -76,7 +80,7 @@ class _Library:
             [o for o in self.objects if o[0] != source_id],
             [r for r in self.relations if r[0] != source_id],
             dict(self.names), dict(self.visible), dict(self.own), dict(self.created),
-            set(self.decided),
+            dict(self.decisions), dict(self.member_names),
         )
 
 
@@ -84,7 +88,7 @@ class _Library:
 class _Run:
     result: kg_findings.FindingsResult
     rounds: List[kg_findings.LookupRequest]
-    decided_calls: List[List[str]]
+    seed_calls: List[List[str]]
 
     def rows(self, rule: str) -> List[dict]:
         return [row for row in self.result.rows if row["rule_id"] == rule]
@@ -97,7 +101,7 @@ class _Run:
 
 
 def _run(lib: _Library, *, cap: int = 1_000_000, object_order: Optional[int] = None,
-         backfill_extension: Sequence[str] = ()) -> _Run:
+         backfill_extension: Sequence[str] = (), supply_pages: int = 1) -> _Run:
     can2idx: Dict[str, int] = {}
     builder = CanonicalEdgeTableBuilder()
     relations: Counter = Counter()
@@ -118,15 +122,15 @@ def _run(lib: _Library, *, cap: int = 1_000_000, object_order: Optional[int] = N
         tally.add(source_id, cid, is_concept)
     calls: List[List[str]] = []
 
-    def decided_apart(ids):
+    def member_seeds(ids):
         calls.append(list(ids))
-        wanted = set(ids)
-        return [tuple(sorted(pair)) for pair in lib.decided if set(pair) <= wanted]
+        return {cid: {concept_seed_v1(n) for n in lib.member_names.get(cid, [lib.names[cid]])}
+                for cid in ids if cid in lib.names or cid in lib.member_names}
 
     draft = compute_findings(
         tally=tally, structure=structure, can2idx=can2idx, names=lib.names,
-        relations_by_source=relations, decided_apart=decided_apart,
-        max_candidate_pairs=cap,
+        relations_by_source=relations, decisions=lib.decisions,
+        member_seeds=member_seeds, max_candidate_pairs=cap,
     )
     can2idx.clear()                        # the protocol: nothing needs it any more
     rounds = []
@@ -139,9 +143,13 @@ def _run(lib: _Library, *, cap: int = 1_000_000, object_order: Optional[int] = N
                     names.append((None, cid, name))
             else:
                 names.append((source_id, cid, lib.own.get((source_id, cid), f"{cid}@{source_id}")))
-        draft.supply(names=names, sources={
-            sid: SourceFacts(f"title-{sid}", lib.created.get(sid)) for sid in request.sources
-        })
+        sources = {sid: SourceFacts(f"title-{sid}", lib.created.get(sid))
+                   for sid in request.sources}
+        # A paged caller: the answers of one round arrive over several calls.
+        for page in range(supply_pages):
+            draft.supply(names=names[page::supply_pages],
+                         sources={k: v for i, (k, v) in enumerate(sorted(sources.items()))
+                                  if i % supply_pages == page})
     return _Run(draft.result(), rounds, calls)
 
 
@@ -210,6 +218,9 @@ def test_duplicate_offtopic_pair_yields_one_f1():
     assert [p["source_id"] for p in row["evidence"]["partners"]] == ["w-b"]
     assert row["evidence"]["partners"][0]["label"] == "title-w-b"
     assert row["evidence"]["shared_share"] == 0.0
+    # Evidence carries only what the criterion used (§3.1): objects are the impact.
+    assert "objects" not in row["evidence"]
+    assert "objects" not in row["evidence"]["partners"][0]
     assert row["impact_objects"] == 44                       # both copies' objects
     assert source_pair_key("w-a", "w-b") not in run.keys("F2")
     actions = finding_actions("F1", row["subject_key"], row["subject_refs"], row["evidence"])
@@ -327,7 +338,8 @@ def test_graph_without_edges_still_judges_f1_without_giant_share():
     lib.add_source("b", [f"K-b{k}" for k in range(12)], chain=False)
     run = _run(lib)
     assert run.keys("F1") == ["a", "b"]
-    assert all(row["evidence"]["giant_share"] is None for row in run.rows("F1"))
+    # No relation at all: no giant component, so no giant_share key (not null).
+    assert all("giant_share" not in row["evidence"] for row in run.rows("F1"))
 
 
 # ===================================================================== F2
@@ -387,9 +399,91 @@ def test_prefix_join_equals_brute_force(seed, monkeypatch):
     pair for pair, with the same overlap and union sizes."""
     monkeypatch.setattr(kg_findings, "UBIQUITOUS_SOURCE_COUNT", 6)
     monkeypatch.setattr(contracts, "UBIQUITOUS_SOURCE_COUNT", 6)
-    monkeypatch.setattr(kg_findings, "_VERIFY_BATCH", 3)
+    monkeypatch.setattr(kg_findings, "_VERIFY_ELEMENT_BUDGET", 7)
+    monkeypatch.setattr(kg_findings, "_VERIFY_PAIR_CHUNK", 5)
     lib = _random_library(seed)
     assert _join(lib) == _brute_force_pairs(lib)
+
+
+def _star_universe(big: int, partners: int) -> Tuple[np.ndarray, ...]:
+    """Universe CSR: source 0 holds ``big`` concepts; sources 1..partners hold 5
+    each, the first shared with source 0. Candidates: (0, i) for every partner —
+    one big LEFT source repeated, the shape that blew up per-pair row copies."""
+    rows = [np.arange(big, dtype=np.int32)]
+    for i in range(partners):
+        rows.append(np.asarray([0] + [big + 4 * i + k for k in range(4)], dtype=np.int32))
+    sizes = np.asarray([r.size for r in rows], dtype=np.int64)
+    indptr = np.zeros(sizes.size + 1, dtype=np.int64)
+    np.cumsum(sizes, out=indptr[1:])
+    universe = np.concatenate(rows)
+    cand_a = np.zeros(partners, dtype=np.int32)
+    cand_b = np.arange(1, partners + 1, dtype=np.int32)
+    width = big + 4 * partners + 1
+    return cand_a, cand_b, universe, indptr, sizes, width
+
+
+def _verification_peak(big: int, partners: int) -> int:
+    import tracemalloc
+
+    args = _star_universe(big, partners)
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        before = tracemalloc.get_traced_memory()[0]
+        pairs = kg_findings._verify_pairs(*args)
+        peak = tracemalloc.get_traced_memory()[1] - before
+    finally:
+        tracemalloc.stop()
+    assert pairs == []                               # 1 shared of 5 vs `big`: no duplicate
+    return peak
+
+
+def test_verification_memory_is_bounded_by_the_element_budget():
+    """One big source with many partners costs its partners' sizes, never its own
+    size per partner: the peak does not grow with the big source. (Per-pair row
+    copies measured 2.68 GB on 20 × 5000-concept sources / 340 k candidates.)"""
+    small = _verification_peak(2_000, 20_000)
+    large = _verification_peak(32_000, 20_000)
+    assert small < 16_000_000 and large < 16_000_000, (small, large)
+    assert large - small < 1_000_000, (small, large)   # only the 8 B/concept key column
+
+
+def test_verification_steps_respect_the_element_budget(monkeypatch):
+    seen = []
+    real = np.searchsorted
+
+    def spy(a, v, *args, **kwargs):
+        if np.ndim(v) and np.asarray(v).dtype == np.int64 and np.asarray(a).size > 1000:
+            seen.append(int(np.size(v)))
+        return real(a, v, *args, **kwargs)
+
+    monkeypatch.setattr(kg_findings, "_VERIFY_ELEMENT_BUDGET", 1_000)
+    monkeypatch.setattr(np, "searchsorted", spy)
+    kg_findings._verify_pairs(*_star_universe(3_000, 2_000))
+    assert seen and max(seen) <= 1_000                 # 2,000 × 5 elements, in steps of ≤ 1,000
+    assert sum(seen) == 2_000 * 5
+
+
+def test_candidate_generation_memory_per_pair():
+    """Generation is the capped stage; its peak per generated pair is what the
+    deployment reference quotes (measured ≈ 25 B)."""
+    import tracemalloc
+
+    members = 1_500                                    # one inverted list: C(1500, 2) pairs
+    p_src = np.arange(members, dtype=np.int32)
+    p_can = np.zeros(members, dtype=np.int32)
+    df = np.asarray([members], dtype=np.int32)
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        before = tracemalloc.get_traced_memory()[0]
+        a, b, generated, truncated = kg_findings._candidate_pairs(
+            p_src, p_can, df, members, 10_000_000)
+        peak = tracemalloc.get_traced_memory()[1] - before
+    finally:
+        tracemalloc.stop()
+    assert generated == members * (members - 1) // 2 == a.size and not truncated
+    assert peak / generated <= 32, peak / generated
 
 
 def test_the_random_join_fixtures_are_not_trivial(monkeypatch):
@@ -459,7 +553,8 @@ def test_candidate_cap_is_disclosed_never_silent():
     run = _run(lib, cap=1)
     f2, f1 = run.status("F2"), run.status("F1")
     assert f2["candidates_truncated"] is True and f2["truncated"] is True
-    assert f2["candidate_pair_limit"] == 1
+    assert f2["candidate_pair_generation_limit"] == 1
+    assert f2["candidate_pair_generations"] <= 1
     assert f1["partner_exclusion_incomplete"] is True and f1["truncated"] is True
     check_findings_ledger(run.result.payload, run.result.rows)
     full = _run(lib)
@@ -544,16 +639,18 @@ def test_f3_low_relations_is_relative_to_the_median():
 
 
 def _yield_library(isolated_target: int, *, isolated_others: int = 10,
-                   relations_target: int = 200, relations_others: int = 200) -> _Library:
-    """Four sources of 200 objects, overlapping enough to share their concepts.
-    Every relation row counts toward F3b (self loops pad the counts without
-    touching the graph). The target differs only in isolated objects and relation
-    rows."""
+                   relations_target: int = 200, relations_others: int = 200,
+                   objects_target: int = 200) -> _Library:
+    """Three sources of 200 objects plus a target, overlapping enough to share
+    their concepts. Every relation row counts toward F3b (self loops pad the
+    counts without touching the graph). The target differs only in its size,
+    isolated objects and relation rows."""
     lib = _Library()
-    shape = [(isolated_others, relations_others)] * 3 + [(isolated_target, relations_target)]
-    for i, (isolated, relations) in enumerate(shape):
+    shape = [(isolated_others, relations_others, 200)] * 3 + [
+        (isolated_target, relations_target, objects_target)]
+    for i, (isolated, relations, size) in enumerate(shape):
         sid = f"s{i}"
-        linked = [f"K-core{k:03d}" for k in range(i * 40, i * 40 + 200 - isolated)]
+        linked = [f"K-core{k:03d}" for k in range(i * 40, i * 40 + size - isolated)]
         lib.add_source(sid, linked, chain=False)
         lib.relations.extend((sid, a, b) for a, b in zip(linked, linked[1:]))
         padding = relations - (len(linked) - 1)
@@ -574,9 +671,43 @@ def test_f3_isolated_share_is_strictly_above_three_medians_and_floored():
     assert run.keys("F3") == ["s3"]
     assert run.rows("F3")[0]["evidence"]["signals"] == ["high_isolated"]
     assert run.rows("F3")[0]["impact_objects"] == 200        # F3b: the whole source
-    # Far above 3× the median, but only 19 isolated objects: below the floor.
-    assert _run(_yield_library(19, isolated_others=1)).keys("F3") == []
-    assert _run(_yield_library(20, isolated_others=1)).keys("F3") == ["s3"]
+    # 19% of 100 objects is far above both cuts, but only 19 isolated objects.
+    small = dict(isolated_others=1, objects_target=100, relations_target=100)
+    assert _run(_yield_library(19, **small)).keys("F3") == []
+    assert _run(_yield_library(20, **small)).keys("F3") == ["s3"]
+
+
+def test_f3_isolated_share_floor_holds_when_the_median_is_zero():
+    """A median of 0 used to make "20 isolated objects" a hit at any share. The
+    cut is max(3 × median, 10%), strictly."""
+    big = dict(isolated_others=0, objects_target=1000, relations_target=1000)
+    assert _run(_yield_library(30, **big)).keys("F3") == []          # 3%: not a hit any more
+    assert _run(_yield_library(100, **big)).keys("F3") == []         # exactly 10%
+    run = _run(_yield_library(101, **big))
+    assert run.keys("F3") == ["s3"]
+    evidence = run.rows("F3")[0]["evidence"]
+    assert evidence["median_isolated_share"] == 0.0
+    assert evidence["isolated_share_threshold"] == 0.1
+
+
+def test_f3_low_relations_needs_twenty_objects_and_ignores_tiny_sources_in_the_median():
+    lib = _Library()
+    _mainstream(lib, 3)                                   # 22 objects, 21 relations each
+    for k in range(10):                                   # tiny, relation-less notes
+        lib.add_source(f"tiny{k}", [f"K-tiny{k}-{j}" for j in range(5)], chain=False)
+    lib.add_source("t-thin", [f"K-core{k:03d}" for k in range(19)], chain=False)
+    run = _run(lib)
+    # 19 objects, no relation: below the object floor, not judged.
+    assert run.keys("F3") == []
+    # The median is over the judged sources only (the tiny ones would drag it to 0).
+    assert run.status("F3")["median_relations_per_object"] == pytest.approx(21 / 22)
+    lib.objects.append(("t-thin", "K-core019", True))     # 20 objects now
+    assert _run(lib).keys("F3") == ["t-thin"]
+    nothing_judged = _Library()
+    nothing_judged.add_source("a", ["K-a0", "K-a1"])
+    nothing_judged.add_source("b", ["K-b0", "K-b1"])
+    status = _run(nothing_judged).status("F3")
+    assert status["median_relations_per_object"] is None and status["total"] == 0
 
 
 def test_f3_low_relations_is_strictly_below_half_the_median():
@@ -625,16 +756,136 @@ def test_narrow_wide_split():
 
 
 def test_f4_and_s1_skip_what_the_user_rejected_or_deferred():
+    """Decisions arrive keyed by v1 SEED pair (``decided_seed_pairs_from``)."""
     lib = _merge_library()
-    lib.decided = {frozenset(("K-llama 3 1", "K-llama 31")),     # one pair across the classes
-                   frozenset(("K-q former", "K-qformer"))}
+    lib.decisions = {frozenset(("llama 3 1", "llama 31")): "rejected",  # across the classes
+                     frozenset(("q former", "qformer")): "deferred",
+                     frozenset(("llama 31", "llama31")): "confirmed"}   # not "apart"
     run = _run(lib)
     assert run.keys("F4") == []
     assert run.status("F4")["groups_decided_apart"] == 1
     assert run.status("S1")["narrow_groups"] == 1               # Llama 31 / Llama31 still open
     assert run.status("S1")["groups_decided_apart"] == 1
-    assert run.decided_calls == [sorted(["K-llama 3 1", "K-llama 31", "K-llama31",
-                                         "K-q former", "K-qformer"])]
+    assert run.seed_calls == [sorted(["K-llama 3 1", "K-llama 31", "K-llama31",
+                                      "K-q former", "K-qformer"])]
+
+
+def test_decisions_survive_a_canonical_id_drift():
+    """A canonical id moves when its cluster's minimum member changes; the stored
+    decision does not. Same members, new canonical ids: the rejection still
+    holds because it is matched through the members' seeds — including a member
+    that only a hidden source carries."""
+    lib = _Library()
+    _mainstream(lib)
+    lib.add_source("n-a", ["K-aaa", "K-core000", "K-core001"] + [f"K-core{k:03d}" for k in range(2, 12)])
+    lib.add_source("n-b", ["K-bbb"] + [f"K-core{k:03d}" for k in range(20, 32)])
+    lib.names.update({"K-aaa": "Llama 3.1", "K-bbb": "Llama31"})
+    # The cluster ids drifted ("K-aaa", "K-bbb"); the members' seeds did not.
+    lib.member_names = {"K-aaa": ["Llama 3.1", "LLAMA 3.1"],
+                        "K-bbb": ["Llama31", "llama31 (hidden knowhow copy)"]}
+    lib.decisions = {frozenset(("llama 3 1", "llama31")): "rejected"}
+    run = _run(lib)
+    assert run.keys("F4") == []
+    assert run.status("F4")["groups_decided_apart"] == 1
+    lib.decisions = {}
+    assert _run(lib).keys("F4") == ["llama31"]
+
+
+def test_sources_of_is_one_vectorised_lookup(monkeypatch):
+    """Two ``searchsorted`` calls for any number of indices — one scalar call per
+    index converted the whole sorted array each time (quadratic in a wide group)."""
+    lib = _Library()
+    for s in range(40):
+        lib.add_source(f"s{s:02d}", [f"K-c{(s * 7 + k) % 300:03d}" for k in range(60)],
+                       chain=False)
+    structure = GraphStructure.from_edges(np.empty(0, np.int32), np.empty(0, np.int32), 0)
+    tally = FindingsObjectTally({}, structure)
+    for source_id, cid, is_concept in lib.objects:
+        tally.add(source_id, cid, is_concept)
+    corpus = kg_findings._drain_tally(tally, structure)
+    wanted = set(range(corpus.stride))
+    calls = []
+    real = np.searchsorted
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(np, "searchsorted", spy)
+    found = kg_findings._sources_of(corpus, wanted)
+    assert len(calls) == 2
+    monkeypatch.undo()
+    expected: Dict[int, List[int]] = {}
+    for src, can in zip(corpus.inc_src.tolist(), corpus.inc_can.tolist()):
+        expected.setdefault(can, []).append(src)
+    assert found == {k: sorted(v) for k, v in expected.items()}
+
+
+def test_paged_supply_equals_one_supply():
+    """``supply`` accumulates within a round; judging happens at the next
+    ``pending()``. Feeding a round in three pages must give the same result as
+    feeding it at once — F4 groups and S1 examples included."""
+    for library in (_merge_library(), _truth_library()):
+        once = _run(library)
+        paged = _run(library, supply_pages=3)
+        assert json.dumps(paged.result.__dict__, sort_keys=True) == json.dumps(
+            once.result.__dict__, sort_keys=True)
+    assert _run(_merge_library(), supply_pages=3).status("S1")["examples"]
+
+
+def test_corpus_is_freed_once_compute_returns(monkeypatch):
+    """The draft lives through the lookup rounds; the drained corpus (the big
+    arrays) must not: no closure may hold it."""
+    import gc
+    import weakref
+
+    refs = []
+    real = kg_findings._drain_tally
+
+    def recording(tally, structure):
+        corpus = real(tally, structure)
+        refs.append(weakref.ref(corpus))
+        return corpus
+
+    monkeypatch.setattr(kg_findings, "_drain_tally", recording)
+    lib = _merge_library()
+    lib.names["K-llama 3 1"] = "Llama 3.1"
+    structure = GraphStructure.from_edges(np.empty(0, np.int32), np.empty(0, np.int32), 0)
+    tally = FindingsObjectTally({}, structure)
+    for source_id, cid, is_concept in lib.objects:
+        tally.add(source_id, cid, is_concept)
+    draft = compute_findings(
+        tally=tally, structure=structure, can2idx={}, names=lib.names,
+        relations_by_source={}, decisions={}, member_seeds=lambda ids: {},
+        max_candidate_pairs=1_000)
+    gc.collect()
+    assert draft.pending() is not None                  # F4 / S1 candidates are alive
+    assert refs and refs[0]() is None
+
+
+def test_s1_examples_look_ahead_instead_of_three_per_round():
+    lib = _Library()
+    _mainstream(lib)
+    concepts = []
+    for k in range(15):
+        a, b = f"K-x{k} a", f"K-x{k}a"
+        lib.names.update({a: f"Xq{k} A", b: f"Xq{k}A"})
+        concepts += [a, b]
+        if k < 12:                                   # visible names show ONE spelling
+            lib.visible.update({a: [f"Xq{k}A"], b: [f"Xq{k}A"]})
+    lib.add_source("n", concepts, chain=False)
+    run = _run(lib)
+    assert run.status("S1")["narrow_groups"] == 15
+    assert len(run.status("S1")["examples"]) == 3
+    assert len(run.rounds) == 1                       # 15 ≤ the lookahead: one round
+
+
+def test_member_seeds_are_asked_in_bounded_batches(monkeypatch):
+    monkeypatch.setattr(kg_findings, "_MEMBER_SEED_BATCH", 2)
+    run = _run(_merge_library())
+    assert [len(batch) for batch in run.seed_calls] == [2, 2, 1]
+    assert sorted(cid for batch in run.seed_calls for cid in batch) == sorted(
+        ["K-llama 3 1", "K-llama 31", "K-llama31", "K-q former", "K-qformer"])
 
 
 def test_f4_rejudges_on_visible_names_and_promotes_the_next_group(monkeypatch):
@@ -708,7 +959,7 @@ def test_tally_is_one_shot():
     tally = FindingsObjectTally({}, structure)
     tally.add("s", "K-a", True)
     kwargs = dict(structure=structure, can2idx={}, names={}, relations_by_source={},
-                  decided_apart=lambda ids: [], max_candidate_pairs=10)
+                  decisions={}, member_seeds=lambda ids: {}, max_candidate_pairs=10)
     compute_findings(tally=tally, **kwargs)
     with pytest.raises(RuntimeError):
         compute_findings(tally=tally, **kwargs)
@@ -723,7 +974,7 @@ def test_result_refuses_while_lookups_are_outstanding():
         tally.add(source_id, cid, c)
     draft = compute_findings(tally=tally, structure=structure, can2idx=can2idx,
                              names=lib.names, relations_by_source={},
-                             decided_apart=lambda ids: [], max_candidate_pairs=10)
+                             decisions={}, member_seeds=lambda ids: {}, max_candidate_pairs=10)
     with pytest.raises(RuntimeError):
         draft.result()
 
@@ -731,8 +982,8 @@ def test_result_refuses_while_lookups_are_outstanding():
 # ===================================================================== order
 def test_rows_are_ordered_by_severity_impact_then_key():
     lib = _truth_library()
-    # Three relation-less objects: below half the median relations/object → F3b.
-    lib.add_source("z-iso", [f"K-alone{k}" for k in range(3)], chain=False)
+    # Twenty relation-less objects: below half the median relations/object → F3b.
+    lib.add_source("z-iso", [f"K-alone{k}" for k in range(20)], chain=False)
     rows = _run(lib).result.rows
     assert [row["rule_id"] for row in rows] == ["F1", "F1", "F1", "F2", "F3", "F5"]
     f1 = [row for row in rows if row["rule_id"] == "F1"]
@@ -810,6 +1061,29 @@ def test_finalize_refuses_to_compare_a_truncated_rule(monkeypatch):
                                       kg_seq=10, cluster_seq=4)
     assert payload["comparison"]["by_rule"]["F1"] == {"comparable": False}
     check_findings_comparison(payload["comparison"])
+
+
+def test_rules_skipped_on_both_sides_compare_as_zero():
+    """A single-source library skips F1/F2 on every build; that must not make the
+    headline comparison null forever. Ran on one side only stays incomparable."""
+    single = _Library()
+    single.add_source("only", [f"K-c{k}" for k in range(20)])
+    first = _run(single)
+    old_rows, old_payload = finalize_findings(first.result, [], None, kg_seq=1, cluster_seq=1)
+    _rows, payload = finalize_findings(_run(single).result, old_rows,
+                                       _old_ledger(old_payload), kg_seq=2, cluster_seq=1)
+    comparison = payload["comparison"]
+    assert comparison["by_rule"]["F1"] == {"comparable": True, "resolved": 0,
+                                           "persisting": 0, "new": 0}
+    assert comparison["comparable"] is True
+    assert (comparison["resolved"], comparison["persisting"], comparison["new"]) == (0, 0, 0)
+    check_findings_comparison(comparison)
+    grown = single.drop_source("none")
+    grown.add_source("second", [f"K-d{k}" for k in range(20)])
+    _rows, payload = finalize_findings(_run(grown).result, old_rows,
+                                       _old_ledger(old_payload), kg_seq=3, cluster_seq=1)
+    assert payload["comparison"]["by_rule"]["F1"] == {"comparable": False}
+    assert payload["comparison"]["comparable"] is False
 
 
 def test_resolved_samples_are_capped(monkeypatch):
