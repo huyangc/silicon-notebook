@@ -615,7 +615,9 @@ class UnifiedKgStore:
             连接释放时的 `rollback()` 在 psycopg 3.3 里不返回(裸 psycopg、6 行结果集
             实测同样复现)。丢下的方式有两种 —— 循环里抛异常、`break`;而生成器只要还被
             栈帧里的局部变量引用着就不会被回收。生成器被 `close()` 或最后一个引用释放后
-            一切正常(同样实测)。所以消费方要么跑完、要么在离开 `with` 之前 `close()` 它。
+            一切正常(同样实测)。所以消费方要么跑完、要么在离开 `with` 之前 `close()` 它:
+            `rebuild_communities` 经 `_fold_canonical_edges` 用 `closing(...)` 兜住了这条
+            (`tests/test_fold_canonical_edges.py` 钉住「循环抛异常时流被 close」)。
         """
         names = {
             row["canonical_id"]: row["canonical_name"]

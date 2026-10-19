@@ -42,6 +42,7 @@ import json
 import re
 import threading
 import time
+from contextlib import closing
 from types import SimpleNamespace
 from typing import (
     Any, Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple,
@@ -372,6 +373,32 @@ def _canonical_scratch_row(
         desc_by_cid.get(canonical_id, ""),
         desc_sig_by_cid.get(canonical_id, ""),
     )
+
+
+def _fold_canonical_edges(
+    graph_rows: Any, can2idx: Dict[str, int], edge_builder: Any,
+) -> None:
+    """Fold ``community_graph_rows``' ``(s, t)`` rows into the int32 edge table.
+
+    ``can2idx`` hands out canonical indices in first-appearance order (Louvain
+    is edge-order sensitive), self-loops and empty endpoints are dropped.
+
+    ``closing`` is load-bearing on PostgreSQL, where ``graph_rows`` is a
+    ``cursor().stream()`` generator: a stream abandoned mid-iteration (the loop
+    raises, e.g. ``MemoryError`` while the edge table grows, or ``KeyboardInterrupt``)
+    leaves its connection ACTIVE, and the caller's ``with self._connect()``
+    then blocks forever in ``rollback()`` instead of letting the exception
+    through. ``close()`` cancels the query and drains it first. Both backends'
+    cursors have ``close()``; on normal exhaustion it is a no-op.
+    """
+    with closing(graph_rows):
+        for r in graph_rows:
+            s, t = r["s"], r["t"]
+            if not s or not t or s == t:
+                continue
+            si = can2idx.setdefault(s, len(can2idx))
+            ti = can2idx.setdefault(t, len(can2idx))
+            edge_builder.add(si, ti)
 
 
 class KnowledgeLifecycleService:
@@ -7014,13 +7041,7 @@ class KnowledgeLifecycleService:
             edge_builder = CanonicalEdgeTableBuilder()
             with self._connect() as db:
                 names, graph_rows = self.unified_kg.community_graph_rows(db, notebook_id)
-                for r in graph_rows:
-                    s, t = r["s"], r["t"]
-                    if not s or not t or s == t:
-                        continue
-                    si = can2idx.setdefault(s, len(can2idx))
-                    ti = can2idx.setdefault(t, len(can2idx))
-                    edge_builder.add(si, ti)
+                _fold_canonical_edges(graph_rows, can2idx, edge_builder)
             idx2can = [""] * len(can2idx)
             for _c, _i in can2idx.items():
                 idx2can[_i] = _c
