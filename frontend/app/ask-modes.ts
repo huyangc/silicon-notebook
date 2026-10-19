@@ -30,14 +30,16 @@ export type AskModeProjection = Readonly<{
 // 污染全局真源,冻结让那种写法当场 TypeError 而不是静默漂移。
 export const ASK_MODES: readonly AskModeDef[] = Object.freeze([
   Object.freeze({ id: "chunk", group: "general", label: "通用问答",
-    desc: "默认。大范围检索原文，适合综述、对比、找事实。",
+    desc: "大范围检索原文，适合综述、对比、找事实。",
     requiresKg: false, streamsTrace: false, groupDefault: true } as AskModeDef),
   Object.freeze({ id: "reasoning", group: "strict", label: "逐步推理",
     desc: "像人查资料一样逐层追问，展示推理过程；适合需要一步步查证的复杂问题。",
     requiresKg: false, streamsTrace: true, groupDefault: true } as AskModeDef),
 ]);
 
-export const DEFAULT_ASK_MODE: AskModeId = "chunk";
+// 高级界面(以及未知/已下线模式回退)的默认引擎。两种内置模式长期并存(产品决定,
+// 见 docs/product-and-api.md);默认走 reasoning,与简化界面固定提交的引擎一致。
+export const DEFAULT_ASK_MODE: AskModeId = "reasoning";
 // 简化界面（ui_mode="auto"，即「自动模式」这个界面选项，本身保留）没有引擎
 // 控件；提交汇聚点固定发这个内置 id，档位固定 DEFAULT_ASK_RETRIEVAL_EFFORT。
 // 下线的是 Ask 请求级 mode="auto" 选择器，不是界面上的「自动模式」。

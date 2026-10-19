@@ -168,7 +168,12 @@ function contractFor(question: string, needsClarification: boolean): QueryIntent
   };
 }
 
-function beginOwnedNotebook(workspaceEpoch = 1) {
+// `startMode` is the engine the view starts on. Most of this file exercises
+// stream / cancel / restore mechanics that are the same for every engine and
+// were written against the direct "chunk" path (no intent preview), so they
+// start there explicitly; the built-in default ("reasoning") is covered by
+// `startMode: null`, which leaves the hook's own initial state untouched.
+function beginOwnedNotebook(workspaceEpoch = 1, startMode: string | null = "chunk") {
   let owner: ReturnType<HookValue["beginNotebookTransition"]> = null;
   act(() => {
     owner = value!.beginNotebookTransition({
@@ -179,6 +184,7 @@ function beginOwnedNotebook(workspaceEpoch = 1) {
   });
   expect(owner).not.toBeNull();
   act(() => value!.finishNotebookTransition(owner!));
+  if (startMode !== null) act(() => value!.selectMode(startMode));
   return owner!;
 }
 
@@ -751,6 +757,18 @@ test("a rolled-back notebook transition performs no Ask-mode projection I/O", as
   expect(api.fetchAskModes).not.toHaveBeenCalled();
 });
 
+test("a fresh view and a new session start on reasoning, the default engine", () => {
+  render(<Harness />);
+  beginOwnedNotebook(1, null);
+  expect(value!.mode).toBe("reasoning");
+
+  // "chunk" stays a first-class choice; a new session goes back to the default.
+  act(() => value!.selectMode("chunk"));
+  expect(value!.mode).toBe("chunk");
+  act(() => value!.startNewSession(2));
+  expect(value!.mode).toBe("reasoning");
+});
+
 test("a historical plugin mode falls back when that engine is not projected", async () => {
   api.listConversations.mockResolvedValue([summary("conversation-disabled-plugin")]);
   const disabled = detail("conversation-disabled-plugin");
@@ -762,7 +780,7 @@ test("a historical plugin mode falls back when that engine is not projected", as
   await act(async () => {
     await value!.restoreNotebook(owner);
   });
-  expect(value!.mode).toBe("chunk");
+  expect(value!.mode).toBe("reasoning");
 });
 
 test("empty restore skips detail and a foreign-notebook detail never commits", async () => {
@@ -2029,6 +2047,7 @@ test("durable A/G1 stream re-attaches to the returning A/G3 view after notebook 
     });
     value!.finishNotebookTransition(ownerA1!);
   });
+  act(() => value!.selectMode("chunk"));
   let submitting!: Promise<void>;
   act(() => {
     submitting = value!.submit("durable G1 question");
@@ -2552,6 +2571,7 @@ test("two detached runs of one notebook both survive and restore newest-first", 
     submittingA = value!.submit("question A");
   });
   act(() => value!.startNewSession(2));
+  act(() => value!.selectMode("chunk")); // a new session starts on the default engine
   let submittingB!: Promise<void>;
   act(() => {
     submittingB = value!.submit("question B");
@@ -2612,6 +2632,7 @@ test("a detached clarification outlives a newer run in the same notebook and re-
     submittingA = value!.submit("ambiguous A");
   });
   act(() => value!.startNewSession(2));
+  act(() => value!.selectMode("chunk")); // a new session starts on the default engine
   let submittingB!: Promise<void>;
   act(() => {
     submittingB = value!.submit("question B");
@@ -2884,6 +2905,7 @@ test("an older preview finishing late hands its serial to the durable run and st
     submittingA = value!.submit("clear A");
   });
   act(() => value!.startNewSession(2));
+  act(() => value!.selectMode("chunk")); // a new session starts on the default engine
   let submittingB!: Promise<void>;
   act(() => {
     submittingB = value!.submit("question B");
@@ -5405,6 +5427,7 @@ test("a run left behind in another conversation cannot clear this view's stopped
   act(() => { leftBehind = value!.submit("question left behind"); });
   await act(async () => { await Promise.resolve(); });
   act(() => value!.startNewSession(2));
+  act(() => value!.selectMode("chunk")); // a new session starts on the default engine
   expect(value!.asking).toBe(false);
 
   // Question B is stopped after process output in the new session.
@@ -5425,6 +5448,7 @@ test("a stopped turn never survives a new session or another conversation", asyn
   await stopAfter("stopped in this session", [RETRIEVAL_STEP]);
   expect(value!.stoppedTurn).not.toBeNull();
   act(() => value!.startNewSession(2));
+  act(() => value!.selectMode("chunk")); // a new session starts on the default engine
   expect(value!.stoppedTurn).toBeNull();
 
   await stopAfter("stopped again", [RETRIEVAL_STEP]);
