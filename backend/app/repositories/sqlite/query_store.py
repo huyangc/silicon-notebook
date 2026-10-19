@@ -36,6 +36,11 @@ from app.repositories.global_ask_feedback_sql import (
     rated_predicate,
     rating_expression,
 )
+from app.repositories.promotion_title_sql import (
+    mapped_title_sql,
+    needle_names_current_wording,
+    promotion_gate_sql,
+)
 from app.repositories.pending_action_rows import (
     RUNNING_ASK_ROWS,
     RUNNING_ASK_STATUSES,
@@ -2406,18 +2411,26 @@ class QueryStore:
             # would otherwise surface as a dead-end "Source" hit with no
             # coherent source view to jump to (citation-jump to the row detail
             # drawer is PR-2 scope, per the design spec).
+            # A needle that names the current wording (「收录自」) also matches a
+            # promotion source whose STORED title still says the legacy wording:
+            # the extra branch matches the mapped title and exists only for such
+            # needles, so every other query keeps its exact SQL and plan.
+            mapped = needle_names_current_wording(needle)
             source_rows = db.execute(
                 "SELECT * FROM sources WHERE notebook_id = ? "
                 "AND source_type NOT IN ('memory', 'knowhow') AND "
-                "(LOWER(title) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(file_name) LIKE ?) "
-                "ORDER BY created_at ASC LIMIT ?",
-                (notebook_id, like, like, like, cap),
+                "(LOWER(title) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(file_name) LIKE ?"
+                + (f" OR ({promotion_gate_sql('source_type', 'id')} "
+                   f"AND LOWER({mapped_title_sql('title')}) LIKE ?)" if mapped else "")
+                + ") ORDER BY created_at ASC LIMIT ?",
+                (notebook_id, like, like, like, *((like,) if mapped else ()), cap),
             ).fetchall() if len(hits) < cap else ()
             for row in source_rows:
-                label = presented_source_title(
+                shown = presented_source_title(
                     row["title"], source_type=row["source_type"], source_id=row["id"]
-                ) or row["file_name"]
-                body = row["summary"] or row["file_name"] or row["title"]
+                )
+                label = shown or row["file_name"]
+                body = row["summary"] or row["file_name"] or shown
                 hits.append(
                     SearchHit(
                         scope="Source",
@@ -2437,9 +2450,11 @@ class QueryStore:
                 "SELECT se.*, s.title AS source_title FROM source_elements se "
                 "JOIN sources s ON s.id = se.source_id "
                 "WHERE s.notebook_id = ? AND s.source_type NOT IN ('memory', 'knowhow') AND "
-                "(LOWER(se.text) LIKE ? OR LOWER(se.location_label) LIKE ? OR LOWER(s.title) LIKE ?) "
-                "LIMIT ?",
-                (notebook_id, like, like, like, cap),
+                "(LOWER(se.text) LIKE ? OR LOWER(se.location_label) LIKE ? OR LOWER(s.title) LIKE ?"
+                + (f" OR ({promotion_gate_sql('s.source_type', 's.id')} "
+                   f"AND LOWER({mapped_title_sql('s.title')}) LIKE ?)" if mapped else "")
+                + ") LIMIT ?",
+                (notebook_id, like, like, like, *((like,) if mapped else ()), cap),
             ).fetchall() if len(hits) < cap else ()
             for row in element_rows:
                 label = (

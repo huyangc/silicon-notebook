@@ -9,6 +9,11 @@ from psycopg import sql
 
 from app.repositories.lexical_query import has_cjk
 from app.repositories.like_pattern import LIKE_ESCAPE_CHAR, escape_like_pattern
+from app.repositories.promotion_title_sql import (
+    mapped_title_sql,
+    needle_names_current_wording,
+    promotion_gate_sql,
+)
 from app.repositories.postgres.access_sql import (
     live_read_access_exists_clause,
     read_access_params,
@@ -1050,24 +1055,32 @@ def _memory_match_predicates(
 
 def notebook_source_rows(connection, notebook_id: str, needle: str, limit: int):
     pattern = f"%{needle}%"
+    # Only a needle naming the current wording gets the mapped-title branch (a
+    # promotion source stored under the legacy wording); see promotion_title_sql.
+    mapped = needle_names_current_wording(needle)
     return connection.execute(
         "SELECT * FROM sources WHERE notebook_id=%s "
         "AND source_type NOT IN ('memory','knowhow') AND "
-        "(title ILIKE %s OR summary ILIKE %s OR file_name ILIKE %s) "
-        "ORDER BY created_at,id COLLATE \"C\" LIMIT %s",
-        (notebook_id, pattern, pattern, pattern, limit),
+        "(title ILIKE %s OR summary ILIKE %s OR file_name ILIKE %s"
+        + (f" OR ({promotion_gate_sql('source_type', 'id')} "
+           f"AND {mapped_title_sql('title')} ILIKE %s)" if mapped else "")
+        + ") ORDER BY created_at,id COLLATE \"C\" LIMIT %s",
+        (notebook_id, pattern, pattern, pattern, *((pattern,) if mapped else ()), limit),
     ).fetchall()
 
 
 def notebook_element_rows(connection, notebook_id: str, needle: str, limit: int):
     pattern = f"%{needle}%"
+    mapped = needle_names_current_wording(needle)
     return connection.execute(
         "SELECT se.*,s.title AS source_title FROM source_elements se "
         "JOIN sources s ON s.id=se.source_id "
         "WHERE s.notebook_id=%s AND s.source_type NOT IN ('memory','knowhow') "
-        "AND (se.text ILIKE %s OR se.location_label ILIKE %s OR s.title ILIKE %s) "
-        "ORDER BY se.ordinal LIMIT %s",
-        (notebook_id, pattern, pattern, pattern, limit),
+        "AND (se.text ILIKE %s OR se.location_label ILIKE %s OR s.title ILIKE %s"
+        + (f" OR ({promotion_gate_sql('s.source_type', 's.id')} "
+           f"AND {mapped_title_sql('s.title')} ILIKE %s)" if mapped else "")
+        + ") ORDER BY se.ordinal LIMIT %s",
+        (notebook_id, pattern, pattern, pattern, *((pattern,) if mapped else ()), limit),
     ).fetchall()
 
 

@@ -25,6 +25,11 @@ from app.domain.source_positions import normalize_positions, positions_page
 from app.models.question_suggestions import QUESTION_SUGGESTION_REVISION_PAGE_SIZE
 from app.repositories.postgres.memory_sql import memory_source_type_predicate
 from app.domain.promotion_source import PROMOTION_SOURCE_TYPE, presented_source_title
+from app.repositories.promotion_title_sql import (
+    mapped_title_sql,
+    needle_names_current_wording,
+    promotion_gate_sql,
+)
 from app.repositories.ports import (
     SOURCE_PAPER_META_UNSET,
     DocumentCapacityExceeded,
@@ -460,20 +465,28 @@ class SourceStore:
             # 子查询里的 `FROM sources` 遮蔽了外层同名关系,这是有意的:IN 左边的
             # `sources.id` 在外层作用域求值,腿内的裸列名全部解析到腿自己的
             # `sources`,两侧都不需要别名。
+            # A needle naming the current wording (「收录自」) adds one more leg that
+            # matches a legacy-titled promotion source by its MAPPED title; every
+            # other needle keeps this statement byte for byte.
+            mapped = needle_names_current_wording(needle)
             where += (
                 " AND sources.id IN ("
                 "SELECT id FROM sources WHERE notebook_id=%s "
                 f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
                 "AND (LOWER(title) LIKE %s OR LOWER(file_name) LIKE %s) "
-                "UNION SELECT a.source_id FROM source_authors a "
+                + (f"UNION SELECT id FROM sources WHERE notebook_id=%s "
+                   f"AND {promotion_gate_sql('source_type', 'id')} "
+                   f"AND LOWER({mapped_title_sql('title')}) LIKE %s " if mapped else "")
+                + "UNION SELECT a.source_id FROM source_authors a "
                 "WHERE a.notebook_id=%s AND LOWER(a.name) LIKE %s "
                 "UNION SELECT m.source_id FROM source_paper_meta m "
                 "WHERE m.notebook_id=%s AND LOWER(m.paper_title) LIKE %s)"
             )
             like = f"%{needle}%"
-            params.extend(
-                (notebook_id, like, like, notebook_id, like, notebook_id, like)
-            )
+            params.extend((notebook_id, like, like))
+            if mapped:
+                params.extend((notebook_id, like))
+            params.extend((notebook_id, like, notebook_id, like))
         with self.database.connect() as connection:
             counted = connection.execute(
                 "SELECT COUNT(*) AS c, "

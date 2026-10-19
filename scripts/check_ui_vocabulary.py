@@ -1046,14 +1046,24 @@ def scan_workload_labels(path: Path, name: str | None = None) -> tuple[int, Hits
 def scan_promotion_title_prefixes(path: Path) -> tuple[int, Hits]:
     """Blacklisted jargon in the promotion source title prefixes (seventh channel).
 
-    Returns (constants found, hits): every name in ``PROMOTION_TITLE_NAMES`` must
-    be a module-level assignment resolvable to string text; one that is missing
-    is simply not counted (the caller's floor turns that into a hard failure),
-    one that cannot be resolved is reported as ``UNRESOLVED_LABEL``.
+    Returns (constants found, hits); see ``_scan_promotion_title_names`` for the
+    names themselves."""
+    found, hits = _scan_promotion_title_names(path)
+    return len(found), hits
+
+
+def _scan_promotion_title_names(path: Path) -> tuple[set[str], Hits]:
+    """The ``PROMOTION_TITLE_NAMES`` constants found in ``path`` and their hits.
+
+    Every name must be a module-level assignment resolvable to string text; one
+    that is missing is simply not in the returned set (the caller compares the SET
+    with ``PROMOTION_TITLE_NAMES``, so a renamed constant cannot hide behind a
+    count that another name happens to fill), one that cannot be resolved is
+    reported as ``UNRESOLVED_LABEL``.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     resolver = _IndirectCopy(tree)
-    sites = 0
+    found: set[str] = set()
     hits: Hits = []
     for node in tree.body:
         if isinstance(node, ast.Assign):
@@ -1062,15 +1072,16 @@ def scan_promotion_title_prefixes(path: Path) -> tuple[int, Hits]:
             names = [node.target.id]
         else:
             continue
-        if node.value is None or not set(names) & set(PROMOTION_TITLE_NAMES):
+        wanted = set(names) & set(PROMOTION_TITLE_NAMES)
+        if node.value is None or not wanted:
             continue
-        sites += 1
+        found |= wanted
         hits += _label_hits(
             node.value.lineno,
             _strict_label_units(node.value, resolver),
             ast.unparse(node.value),
         )
-    return sites, hits
+    return found, hits
 
 
 def scan_service_label_template(path: Path) -> tuple[int, Hits]:
@@ -1327,7 +1338,8 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    promotion_sites, promotion_hits = scan_promotion_title_prefixes(PROMOTION_TITLE_MODULE)
+    promotion_found, promotion_hits = _scan_promotion_title_names(PROMOTION_TITLE_MODULE)
+    promotion_sites = len(promotion_found)
     for line, term, snippet in promotion_hits:
         violations.append(
             f"  {_rel(PROMOTION_TITLE_MODULE)}:{line}: 「{term}」in promotion source "
@@ -1372,10 +1384,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    if promotion_sites < len(PROMOTION_TITLE_NAMES):
+    if promotion_found != set(PROMOTION_TITLE_NAMES):
+        missing = sorted(set(PROMOTION_TITLE_NAMES) - promotion_found)
         print(
             f"check_ui_vocabulary: only {promotion_sites} promotion title prefixes found "
-            f"in {_rel(PROMOTION_TITLE_MODULE)} (expected {len(PROMOTION_TITLE_NAMES)}). "
+            f"in {_rel(PROMOTION_TITLE_MODULE)} (expected {len(PROMOTION_TITLE_NAMES)}; "
+            f"missing {', '.join(missing)}). "
             f"{' / '.join(PROMOTION_TITLE_NAMES)} 是不是改名 / 换了写法?同步 "
             f"PROMOTION_TITLE_NAMES,别删这条通道来「修」它。",
             file=sys.stderr,

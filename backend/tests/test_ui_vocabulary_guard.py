@@ -1387,3 +1387,17 @@ def test_收录自标题前缀扫描面塌了要红(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(guard, "PROMOTION_TITLE_NAMES", ("RENAMED_PREFIX", "RENAMED_MEMORY_PREFIX"))
     assert guard.main() == 1
     _assert_only_channel(capsys, "promotion", "promotion title prefixes found")
+
+
+def test_收录自标题前缀按名字集合判扫描面_重复赋值顶不了另一个名字(tmp_path, monkeypatch, capsys):
+    """同一个常量赋值两次不能把『找到的个数』凑够:缺哪个名字就点哪个名字。"""
+    tree = _minimal_guard_tree(tmp_path, monkeypatch)
+    tree.promotion.write_text(
+        'PROMOTION_TITLE_PREFIX = "收录自："\n'
+        'PROMOTION_TITLE_PREFIX = "收录自："\n',
+        encoding="utf-8",
+    )
+    assert guard.scan_promotion_title_prefixes(tree.promotion)[0] == 1
+    assert guard.main() == 1
+    err = _assert_only_channel(capsys, "promotion", "promotion title prefixes found")
+    assert "missing MEMORY_PROMOTION_TITLE_PREFIX" in err

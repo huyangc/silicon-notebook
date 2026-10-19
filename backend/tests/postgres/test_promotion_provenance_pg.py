@@ -70,6 +70,10 @@ def test_pg_a_stored_legacy_title_is_shown_with_the_current_prefix(world):
     cases.a_stored_legacy_title_is_shown_with_the_current_prefix(world)
 
 
+def test_pg_a_search_for_the_current_wording_finds_a_legacy_titled_promotion(world):
+    cases.a_search_for_the_current_wording_finds_a_legacy_titled_promotion(world)
+
+
 def test_pg_deleting_the_promotion_source_deletes_the_objects_it_supports(world):
     cases.deleting_the_promotion_source_deletes_the_objects_it_supports(world)
 
