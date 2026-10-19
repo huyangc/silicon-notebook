@@ -46,6 +46,26 @@ def test_fold_skips_blank_endpoints_and_self_loops_and_numbers_by_first_appearan
     assert builder.edges == [(0, 1), (2, 0), (0, 1)]
 
 
+def test_fold_counts_every_row_per_relation_source_before_the_skips():
+    """KG findings F3b: rows are counted under ``src`` BEFORE the self-loop and
+    blank-endpoint skips; the edge table and the indices are unchanged."""
+    rows = [
+        {"s": "b", "t": "a", "src": "s1"},
+        {"s": "a", "t": "a", "src": "s1"},      # self-loop: counted, not an edge
+        {"s": "", "t": "c", "src": "s2"},       # blank endpoint: counted
+        {"s": "c", "t": "b", "src": None},      # no source: under ""
+    ]
+    can2idx: dict[str, int] = {}
+    builder = _Builder()
+    relations: dict[str, int] = {}
+
+    _fold_canonical_edges((row for row in rows), can2idx, builder, relations)
+
+    assert relations == {"s1": 2, "s2": 1, "": 1}
+    assert can2idx == {"b": 0, "a": 1, "c": 2}
+    assert builder.edges == [(0, 1), (2, 0)]
+
+
 def test_fold_closes_the_row_stream_when_the_loop_raises():
     closed: list[bool] = []
 
