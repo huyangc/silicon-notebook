@@ -103,7 +103,8 @@ def test_a_bare_title_shared_by_two_documents_teaches_the_ordinal(repo):  # noqa
     assert skip.detail == {"reason": "document_read_unresolved",
                            "requested_title": "周报", "matches": 2}
     assert "清单里有 2 篇同名文档" in skip.summary
-    assert "（第 N 篇）" in skip.summary
+    assert "「（第 1 篇）」" in skip.summary      # 示例按实际写法给,且只给后缀、不带标题
+    assert "周报" not in skip.summary
     assert "无法区分" not in skip.summary
     assert result.document_reads == []
 
@@ -299,9 +300,9 @@ def test_unnamed_documents_keep_their_one_slot_next_to_numbered_same_titled_ones
         "，标题: 《未命名来源》《周报（第 1 篇）》《周报（第 2 篇）》")
     assert sorted(_resolved_ids(rows, UNNAMED_SOURCE_LABEL)) == ["u1", "u2"]
     unnamed = rr._resolve_roster_rows(rows, UNNAMED_SOURCE_LABEL)
-    assert "无法区分" in rr._ambiguous_read_summary(unnamed, rows)
+    assert "无法区分" in rr._ambiguous_read_summary(unnamed, placeholders)
     shared = rr._resolve_roster_rows(rows, "周报")
-    assert "（第 N 篇）" in rr._ambiguous_read_summary(shared, rows)
+    assert "「（第 1 篇）」" in rr._ambiguous_read_summary(shared, placeholders)
     # 20 篇无名 + 一对同名:真标题不被挤出账目。
     many = _roster_of(*[(f"u{i}", "") for i in range(20)],
                       ("a", "周报"), ("b", "周报"))
@@ -344,3 +345,171 @@ def test_a_copied_ledger_line_with_marker_still_resolves_an_ordinal_title():
     mark = rr._ENUM_NOTE_NO_SUMMARY_MARK
     assert _resolved_ids(rows, f"《周报（第 2 篇）》{mark}") == ["b"]
     assert _resolved_ids(rows, f"周报（第 1 篇）{mark}") == ["a"]
+
+
+# ------------------------------------------- 发号后不变(跨轮稳定,评审 P1)
+
+
+class _FakeChain:
+    """`_EnumChain` 的鸭子替身:只带 `outcome.collection/items`。"""
+
+    def __init__(self, items, collection="sources"):
+        class _Outcome:
+            pass
+
+        self.outcome = _Outcome()
+        self.outcome.collection = collection
+        self.outcome.items = items
+
+
+def _fold(chains):
+    folded = {}
+    for chain in chains.values():
+        for row in chain.outcome.items:
+            folded.setdefault(row.source_id, row)
+    return list(folded.values())
+
+
+def test_a_continued_earlier_chain_never_renumbers_an_issued_placeholder():
+    """P1 漂移①:较早的清单链续跑插队(花名册顺序里新行排到了旧行前面)。模型手里
+    的旧串「X（第 2 篇）」必须仍指向当初发号的那一篇,新来的 X 拿下一个序号。"""
+    a1, r1 = _Row("X", "a1"), _Row("X", "r1")
+    chain_a = _FakeChain([a1])                  # 本库清单,尚未列完
+    chain_b = _FakeChain([a1, r1])              # scope=all 的新链
+    chains = {("a",): chain_a, ("b",): chain_b}
+    numbering = rr._RosterNumbering().sync(chains)
+    assert numbering.issued == {"a1": "X（第 1 篇）", "r1": "X（第 2 篇）"}
+
+    chain_a.outcome.items.append(_Row("X", "a2"))   # 链 A 续跑,新行入簿
+    numbering.sync(chains)
+    assert numbering.issued["a1"] == "X（第 1 篇）"
+    assert numbering.issued["r1"] == "X（第 2 篇）"   # 没被插队的 a2 顶成第 3
+    assert numbering.issued["a2"] == "X（第 3 篇）"
+    # 此时花名册折叠顺序已是 a1, a2, r1:旧串仍只解析到 r1。
+    rows = _fold(chains)
+    assert [r.source_id for r in rows] == ["a1", "a2", "r1"]
+    # 对照:每次按当前花名册现算(旧做法)会把「第 2 篇」解析到插队的 a2 上。
+    assert _resolved_ids(rows, "X（第 2 篇）") == ["a2"]
+    resolved = [r.source_id for r in rr._resolve_roster_rows(
+        rows, "X（第 2 篇）", numbering.issued)]
+    assert resolved == ["r1"]
+
+
+def test_a_late_real_title_equal_to_an_issued_placeholder_is_ambiguous_not_a_renumber():
+    """P1 漂移②:后到的真实标题恰好等于已发占位串。已发的号不改;旧串与新真标题
+    两者都命中 → 歧义(而不是静默指到新来的真标题上)。"""
+    numbering = rr._RosterNumbering().add([_Row("系列", "s1"), _Row("系列", "s2")])
+    assert numbering.issued == {"s1": "系列（第 1 篇）", "s2": "系列（第 2 篇）"}
+    late = _Row("系列（第 2 篇）", "s9")
+    numbering.add([late])
+    assert numbering.issued == {"s1": "系列（第 1 篇）", "s2": "系列（第 2 篇）"}
+    rows = [_Row("系列", "s1"), _Row("系列", "s2"), late]
+    matches = rr._resolve_roster_rows(rows, "系列（第 2 篇）", numbering.issued)
+    assert sorted(r.source_id for r in matches) == ["s2", "s9"]
+    assert [r.source_id for r in rr._resolve_roster_rows(
+        rows, "系列（第 1 篇）", numbering.issued)] == ["s1"]
+    # 翻译器也不替模型选:真实标题已在花名册里,交回原来的按名解析。
+    assert numbering.source_id_for("系列（第 2 篇）") == ""
+
+
+def test_a_group_reaching_two_issues_both_numbers_once_and_later_members_append():
+    """第一次凑够两篇时前两篇一并拿号(第一篇此前以裸标题出现过,没有旧串可漂);
+    之后的新成员依次拿下一个序号,已发的不动。"""
+    numbering = rr._RosterNumbering()
+    numbering.add([_Row("周报", "a")])
+    assert numbering.issued == {}
+    numbering.add([_Row("周报", "b")])
+    assert numbering.issued == {"a": "周报（第 1 篇）", "b": "周报（第 2 篇）"}
+    numbering.add([_Row("周报", "c"), _Row("周报", "a")])   # a 重复出现不重复发号
+    assert numbering.issued["c"] == "周报（第 3 篇）"
+    assert numbering.issued["a"] == "周报（第 1 篇）"
+
+
+def test_the_enumeration_note_shows_the_same_string_for_a_document_every_round():
+    """账目读 run 级发号簿:同一篇在前后两轮、不同链里是同一个串,即使链续跑。"""
+    a1, r1 = _Row("X", "a1"), _Row("X", "r1")
+    chain_a = _FakeChain([a1])
+    chains = {("a",): chain_a, ("b",): _FakeChain([a1, r1])}
+    numbering = rr._RosterNumbering()
+    first = rr._source_titles_note([r1], numbering.sync(chains).issued)
+    chain_a.outcome.items.append(_Row("X", "a2"))
+    second = rr._source_titles_note([r1], numbering.sync(chains).issued)
+    assert first == second == "，标题: 《X（第 2 篇）》"
+
+
+# ------------------------------------------- 已读账目 / 轨迹 / 枚举名解析(评审 P2)
+
+
+def test_a_real_title_arriving_in_a_later_listing_does_not_renumber_the_ledger(repo):  # noqa: F811
+    """P1 端到端:先列本库(两篇「系列」得到第 1/2 篇),再列全部,参考库里恰有一篇
+    真标题「系列（第 2 篇）」。已发的号不改——第二轮账目里本库第二篇仍叫
+    「系列（第 2 篇）」;模型此时抄这个串 → 两篇都命中 → 歧义 skip,绝不静默读到
+    新来的那篇。"""
+    active = repo.create_notebook(NotebookCreate(name="活动库"))
+    reference = repo.create_notebook(NotebookCreate(name="参考库"))
+    repo.mark_notebook_base(reference.id)
+    _seed_document(repo, active.id, "s-1", "系列", "有摘要", ("一。",))
+    _seed_document(repo, active.id, "s-2", "系列", "有摘要", ("二。",))
+    _seed_document(repo, reference.id, "s-ref", "系列（第 2 篇）", "有摘要", ("参考。",))
+    repo.replace_notebook_bases(active.id, [reference.id], "user-local")
+    repo.collection_catalog.invalidate()
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(scope="current_notebook"),
+        _enumerate_sources_action(),
+        _read_action("系列（第 2 篇）"),
+        ANSWER,
+    ], plan=PLAN)
+    result = _reader(repo, llm).run(active.id, "这个库讲了什么", "")
+
+    assert "《系列（第 1 篇）》《系列（第 2 篇）》" in llm.reflect_prompts[1]
+    assert "同名第" not in llm.reflect_prompts[2]
+    skip = _skips(result)["document_read_unresolved"]
+    assert skip.detail["matches"] == 2
+    assert result.document_reads == []
+
+
+def test_the_read_ledger_and_trace_use_the_roster_placeholder(repo):  # noqa: F811
+    """读完「第 1 篇」后,下一轮已读账目写的是「《周报（第 1 篇）》」(与花名册同口径),
+    轨迹摘要同样带序号;detail.source 仍是真实标题。"""
+    notebook = repo.create_notebook(NotebookCreate(name="资料"))
+    _seed_document(repo, notebook.id, "s-a", "周报", "", ("甲篇开头。", "甲篇结论。"))
+    _seed_document(repo, notebook.id, "s-b", "周报", "", ("乙篇开头。", "乙篇结论。"))
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(),
+        _read_action("周报（第 1 篇）"),
+        ANSWER,
+    ], plan=PLAN)
+    result = _reader(repo, llm).run(notebook.id, "这个库讲了什么", "")
+
+    assert "已按篇读取过原文的文档,勿重复请求: 《周报（第 1 篇）》" in llm.reflect_prompts[2]
+    step = next(s for s in result.trace if s.step_type == "read_document")
+    assert "《周报（第 1 篇）》" in step.summary
+    assert step.detail["source"] == "周报"
+
+
+def test_a_placeholder_copied_into_enumerate_source_title_targets_the_roster_document(repo):  # noqa: F811
+    """P2:模型把花名册占位串抄进 `enumerate_elements` 的来源名。参考库里另有一篇
+    真标题恰为「系列（第 2 篇）」且不在花名册里:必须定向到花名册那一篇,而不是
+    落到按名解析撞上参考库那篇。"""
+    from tests.test_reasoning_enumeration_tools import _add_titled_source, _enumerate_action
+
+    active = repo.create_notebook(NotebookCreate(name="活动库"))
+    reference = repo.create_notebook(NotebookCreate(name="参考库"))
+    repo.mark_notebook_base(reference.id)
+    _add_titled_source(repo, active.id, "s-1", "系列", formulas=1)
+    _add_titled_source(repo, active.id, "s-2", "系列", formulas=2)
+    _add_titled_source(repo, reference.id, "s-ref", "系列（第 2 篇）", formulas=3)
+    repo.replace_notebook_bases(active.id, [reference.id], "user-local")
+    repo.collection_catalog.invalidate()
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(scope="current_notebook"),
+        _enumerate_action(source_title="系列（第 2 篇）"),
+        ANSWER,
+    ], plan=PLAN)
+    result = _reader(repo, llm).run(active.id, "列出公式", "")
+
+    roster = [r.source_id for r in _sources_roster(result)]
+    assert roster == ["s-1", "s-2"]
+    elements = [o for o in result.enumerations if o.collection == "elements"]
+    assert [o.source_id for o in elements] == ["s-2"]
+    assert len(elements[0].items) == 2

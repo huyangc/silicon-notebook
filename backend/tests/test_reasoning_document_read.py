@@ -440,6 +440,7 @@ def test_a_ledger_visible_collision_is_reported_as_ambiguity_not_silently_resolv
     class _Row:
         def __init__(self, title):
             self.source_title = title
+            self.source_id = f"id-{title}"
             self.summary = ""
 
     short = "甲" * rr._ENUM_NOTE_TITLE_CHARS
@@ -456,6 +457,7 @@ def test_a_literal_title_ending_in_the_marker_matches_as_typed_before_stripping(
     class _Row:
         def __init__(self, title):
             self.source_title = title
+            self.source_id = f"id-{title}"
             self.summary = ""
 
     mark = rr._ENUM_NOTE_NO_SUMMARY_MARK

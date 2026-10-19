@@ -245,7 +245,7 @@ def first_round_empty_note(chunk_search: bool, enumeration: bool) -> str:
 
 def legacy_action_ledger_note(
     visited, collected, neighbor_truncated, neighbor_expand_limit,
-    attempted, exact_lookup_log, document_reads=(), *,
+    attempted, exact_lookup_log, document_reads=(), read_labels=None, *,
     element_search: bool = True,
 ) -> str:
     """把已执行动作的五段账目拼到候选摘要之后。
@@ -257,6 +257,10 @@ def legacy_action_ledger_note(
     ``document_reads`` 是 PR-A 的按篇取样账目(`DocumentReadOutcome` 列表)。它
     带默认值是因为这份账目对**没有这个通道**的 run(关闭态、没接 `sources` 的
     调用方)恒为空,而空序列渲染不出任何字节——关闭态因此逐字节等于接入前。
+    ``read_labels`` 是同名来源的序号占位串(``source_id`` → 「标题（第 N 篇）」,
+    run 级发号簿的 ``issued``):已读账目里那一篇按花名册同一口径显示,否则模型
+    读完「第 1 篇」后看到的是一个花名册里已经不存在的裸标题。缺省/无同名时空,
+    账目逐字节不变。
     """
     note = ""
     # 已展开过的节点回喂 reflect, 提示模型勿重复请求(治"反复 expand 同节点"根源)。
@@ -337,10 +341,14 @@ def legacy_action_ledger_note(
     # 标题走与上面那几份账目同一条截长范式(`intent_direction_label`):文档标题
     # 可能是一整句话,原样重放会每轮顶掉半屏回喂预算。
     if document_reads:
-        done = "".join(f"《{intent_direction_label(o.source_title)}》"
+        def _shown(o) -> str:
+            return ((read_labels and read_labels.get(o.source_id))
+                    or intent_direction_label(o.source_title))
+
+        done = "".join(f"《{_shown(o)}》"
                        for o in document_reads if o.context_block)
         failed = "".join(
-            f"《{intent_direction_label(o.source_title)}》——{o.coverage_note}"
+            f"《{_shown(o)}》——{o.coverage_note}"
             for o in document_reads if not o.context_block)
         # depth 填了非法值的那几次(PR-4)单列一句:模型按「以为自己花了多少
         # 预算」规划后续读取,不告诉它那几次其实按 brief 读了,它会以为整份预算
@@ -886,7 +894,7 @@ def _roster_note_form(row) -> str:
     return " ".join(_roster_display_title(row).split())[:_ENUM_NOTE_TITLE_CHARS]
 
 
-def _resolve_roster_rows(rows, requested: str) -> list:
+def _resolve_roster_rows(rows, requested: str, placeholders=None) -> list:
     """Deterministic title -> roster rows resolution for ``read_document``.
 
     Every step is an EXACT comparison after one bounded, lossless-in-spirit
@@ -905,17 +913,25 @@ def _resolve_roster_rows(rows, requested: str) -> list:
     the ambiguity; a title that equals none of these forms stays unresolved.
 
     Rows that share a title are listed to the model as ``标题（第 N 篇）``
-    (``_roster_placeholders``); such a placeholder, copied back, resolves to
-    exactly that one row (it never equals a real title, so it cannot shadow
-    one).  A roster with no shared titles resolves exactly as before.
+    (``_RosterNumbering``); such a placeholder, copied back, resolves to
+    exactly that one row.  ``placeholders`` is the run's issued-number map
+    (``key -> placeholder``, never renumbered once issued); without it the
+    map is computed once from ``rows`` (unit-test / single-shot form).  A real
+    title that arrives AFTER the same string was issued as a placeholder
+    matches too, so both rows match and the caller reports the ambiguity --
+    an issued number is never changed to dodge it.  A roster with no shared
+    titles resolves exactly as before.
     """
     text = " ".join(str(requested or "").split())
-    # 同名篇的序号占位串(见 `_roster_placeholders`)。占位串永不等于任何真实标题,
-    # 所以先查它不会抢走真实标题的命中;命中它就是**确定的一篇**,不再走下面的
-    # 「账目形态撞车」扩展(那一步会把同名的兄弟行拉回来,把序号白加了)。
+    # 同名篇的序号占位串(见 `_RosterNumbering`)。命中它就是**确定的一篇**,不再走
+    # 下面的「账目形态撞车」扩展(那一步会把同名的兄弟行拉回来,把序号白加了)。
+    # 发号时避开了当时已知的真实标题;之后才出现的真实标题若恰好等于已发占位串,
+    # 两者都命中 → 调用方按歧义 skip,而不是改号(改号会让模型手里的旧串指向别篇)。
+    if placeholders is None:
+        placeholders = _roster_placeholders(rows)
     by_placeholder = {
         _normalized_title(placeholder): key
-        for key, placeholder in _roster_placeholders(rows).items()}
+        for key, placeholder in placeholders.items()}
     placed = False
 
     def _exact(candidate: str) -> list:
@@ -923,12 +939,14 @@ def _resolve_roster_rows(rows, requested: str) -> list:
         wanted = _normalized_title(candidate)
         if not wanted:
             return []
+        found = [row for row in rows
+                 if _normalized_title(" ".join(_roster_display_title(row).split())) == wanted]
         key = by_placeholder.get(wanted)
         if key is not None:
             placed = True
-            return [row for row in rows if _roster_row_key(row) == key][:1]
-        return [row for row in rows
-                if _normalized_title(" ".join(_roster_display_title(row).split())) == wanted]
+            found += [row for row in rows if row.source_id == key
+                      and row not in found][:1]
+        return found
 
     # 先按模型给的**原样**精确匹配,剥 `(无摘要)` 标记只是兜底(codex #724 R7):
     # 真标题就以「(无摘要)」结尾的文档,先剥再比会把它匹配成没有这个尾巴的另一篇。
@@ -973,8 +991,8 @@ def _roster_display_title(row) -> str:
 
 
 def _roster_row_key(row):
-    """花名册行的身份键:真实行是 `source_id`;只带标题的测试替身退到对象身份。"""
-    return getattr(row, "source_id", None) or id(row)
+    """花名册行的身份键:`source_id`(生产的 `SourceItem` 一定有;测试替身要补)。"""
+    return row.source_id
 
 
 def _placeholder_candidates(form: str, ordinal: int):
@@ -987,63 +1005,131 @@ def _placeholder_candidates(form: str, ordinal: int):
         attempt += 1
 
 
-def _ambiguous_read_summary(matches, roster_rows) -> str:
+def _ambiguous_read_summary(matches, placeholders) -> str:
     """`read_document` 命中多篇时的 skip 文案。
 
     命中的行带着序号占位串(花名册里标了「（第 N 篇）」)时,下一步是**抄带序号
     的那个形态**——这时候说「无法区分」是错的,它能区分,只是模型给的形态没带序号。
     不带占位串的多命中(多篇无名文档、或旧口径下的账目撞车)才是真的区分不开。
+    示例按**实际写法**给(可能是「（同名第 N 篇）」),且只给后缀、不带标题。
     """
-    placeholders = _roster_placeholders(roster_rows)
-    if any(_roster_row_key(row) in placeholders for row in matches):
+    issued = [placeholders[row.source_id] for row in matches
+              if row.source_id in placeholders]
+    if issued:
+        suffix = "（" + issued[0].rsplit("（", 1)[-1]
         return (f"跳过按篇读取原文:清单里有 {len(matches)} 篇同名文档,"
-                "请连同标题后面的「（第 N 篇）」序号一起从清单里逐字复制,指明读哪一篇")
+                f"请连同标题后面的序号(如「{suffix}」)一起从清单里逐字复制,"
+                "指明读哪一篇")
     return (f"跳过按篇读取原文:清单里有 {len(matches)} 篇同名文档,"
             "这个动作按标题无法区分它们,请如实说明这一点或改读别的文档")
 
 
-def _roster_placeholders(rows) -> Dict[object, str]:
-    """花名册里**同名**篇的唯一占位串:`_roster_row_key(row)` → 「标题（第 N 篇）」。
+class _RosterNumbering:
+    """本 run **一份**的同名序号发号簿:`source_id` → 「标题（第 N 篇）」。
 
-    `read_document` 的参数就是标题,同名两篇本来区分不开。这里只在花名册(本 run
-    列出的全部来源清单按 `source_id` 折叠后的整体,与 `_action_read_document` 的
-    解析域同一份)里**真的出现同名**时给那几篇加序号,序号按花名册既有顺序从 1
-    编;没有同名的行不出现在返回值里,所以无同名的花名册渲染逐字节不变。
+    `read_document` 的参数就是标题,同名两篇本来区分不开。本类只在本 run 的花名册
+    (所有来源清单按 `source_id` 折叠后的整体,与 `_action_read_document` 的解析域
+    同一份)里**真的出现同名**时给那几篇发号;没有同名的行不在 `issued` 里,所以
+    无同名的花名册渲染逐字节不变。
 
-    * 同名判定用模型**看得见**的形态(`_roster_note_form`:折叠空白、截到账目的
-      60 字)再做 `_normalized_title`(trim + casefold)——与解析器报歧义用的是
-      同一把尺子:账目里显示得一模一样的几行,就是需要序号的几行。
-    * 无标题占位串(`UNNAMED_SOURCE_LABEL`)**不编号**:账目对它有「最多占一个
-      标题位」的硬规矩(codex #724 R2:20 篇无名文档不得挤掉真标题),编号会让
-      每一篇各占一位。多篇无名文档维持原状(按占位串读会报同名歧义)。
-    * 占位串**永不等于**花名册里任何一行的真实标题(含其账目形态):撞上就换下一
-      个候选写法(`_placeholder_candidates`)。所以解析时「占位串命中」与「真实标题
-      命中」在花名册上互不相交,真实标题恰好叫「X（第 2 篇）」时既不会被占位串
-      抢走,也不会抢走占位串——优先级问题在构造上不存在。
+    **发号后不变。** 号是模型会抄回来的东西——账目每轮重放,模型自写的大纲便签
+    还会把它带到更后面的轮次。如果每轮按当前花名册重新编号,某条较早的清单链
+    续跑插队、或后到的真实标题恰好等于已发的占位串,旧串就会静默指向另一篇。所以:
+    * 增量:`sync` 只吃每条 sources 链上**新增**的行,按首次列出的顺序入簿;
+    * 一个成员第一次被发号时(它所在的组第一次凑够两篇)才拿到号,之后永不改;
+      新成员拿下一个序号,序号 = 它在同名组里的首次列出名次;
+    * 发号时避开**当时已知**的全部真实标题与已发占位串(撞了换下一个候选写法);
+      之后才出现的真实标题若等于已发占位串,不改号——两者在解析时都命中,
+      调用方按歧义 skip(`_resolve_roster_rows`)。
+
+    同名判定用模型**看得见**的形态(`_roster_note_form`:折叠空白、截到账目的
+    60 字)再做 `_normalized_title`(trim + casefold),与解析器报歧义用的是同一把
+    尺子。无标题占位串(`UNNAMED_SOURCE_LABEL`)**不编号**:账目对它有「最多占
+    一个标题位」的硬规矩(codex #724 R2:20 篇无名文档不得挤掉真标题),编号会让
+    每一篇各占一位;多篇无名文档维持原状(按占位串读会报同名歧义)。
     """
-    unique = {}
-    for row in rows:
-        unique.setdefault(_roster_row_key(row), row)
-    groups: Dict[str, list] = {}
-    taken = set()
-    for key, row in unique.items():
-        form = _roster_note_form(row)
-        norm = _normalized_title(form)
-        groups.setdefault(norm, []).append((key, form))
-        taken.add(norm)
-        taken.add(_normalized_title(" ".join(_roster_display_title(row).split())))
-    unnamed = _normalized_title(UNNAMED_SOURCE_LABEL)
-    placeholders: Dict[object, str] = {}
-    for norm, members in groups.items():
-        if len(members) < 2 or norm == unnamed:
-            continue
-        for ordinal, (key, form) in enumerate(members, 1):
-            for candidate in _placeholder_candidates(form, ordinal):
-                if _normalized_title(candidate) not in taken:
-                    break
-            taken.add(_normalized_title(candidate))
-            placeholders[key] = candidate
-    return placeholders
+
+    __slots__ = ("issued", "_groups", "_taken", "_real", "_seen", "_synced")
+
+    def __init__(self):
+        self.issued: Dict[str, str] = {}
+        self._groups: Dict[str, list] = {}
+        self._taken: set = set()
+        self._real: set = set()
+        self._seen: set = set()
+        self._synced: Dict[object, int] = {}
+
+    def add(self, rows) -> "_RosterNumbering":
+        """把新到的花名册行按顺序入簿,给凑够同名的成员发号。"""
+        touched: List[str] = []
+        for row in rows:
+            key = _roster_row_key(row)
+            if key in self._seen:
+                continue
+            self._seen.add(key)
+            form = _roster_note_form(row)
+            norm = _normalized_title(form)
+            self._groups.setdefault(norm, []).append((key, form))
+            touched.append(norm)
+            real = {norm, _normalized_title(
+                " ".join(_roster_display_title(row).split()))}
+            self._real |= real
+            self._taken |= real
+        unnamed = _normalized_title(UNNAMED_SOURCE_LABEL)
+        for norm in dict.fromkeys(touched):
+            members = self._groups[norm]
+            if len(members) < 2 or norm == unnamed:
+                continue
+            for ordinal, (key, form) in enumerate(members, 1):
+                if key in self.issued:
+                    continue
+                for candidate in _placeholder_candidates(form, ordinal):
+                    if _normalized_title(candidate) not in self._taken:
+                        break
+                self._taken.add(_normalized_title(candidate))
+                self.issued[key] = candidate
+        return self
+
+    def sync(self, chains) -> "_RosterNumbering":
+        """吃进各条 sources 清单链上自上次以来新增的行(链内顺序、链间按落账顺序)。
+
+        惰性同步而不是在枚举执行体里挂钩:`_run_enumeration` 是零松弛的热函数,
+        而发号只要在**任何读者**(账目、解析、已读账目、枚举名解析)之前完成就够了——
+        模型见到的每个串都来自某次读者调用,读者调用之前都先 `sync`。
+        """
+        for chain_key, chain in chains.items():
+            outcome = chain.outcome
+            if outcome.collection != ENUMERATE_SOURCES_COLLECTION:
+                continue
+            done = self._synced.get(chain_key, 0)
+            if len(outcome.items) > done:
+                self.add(outcome.items[done:])
+                self._synced[chain_key] = len(outcome.items)
+        return self
+
+    def source_id_for(self, requested: str) -> str:
+        """模型抄回来的占位串 → 它指向的 `source_id`;不是已发占位串时返回空串。
+
+        读者是 `_run_enumeration` 的名字→id 解析:模型可能把花名册里的占位串
+        (「系列（第 2 篇）」)抄进 `enumerate_elements` 的来源名参数。命中就定向
+        到花名册里那一篇,绝不落到按名解析去撞一篇不在花名册里的同名文档(例如
+        参考库里真标题恰为「系列（第 2 篇）」的另一篇)。
+
+        真实标题优先:花名册里已有一行的真实标题恰好等于这个串时不翻译(交回
+        原来的按名解析),与 `_resolve_roster_rows` 里「两者都命中就报歧义」同向。
+        """
+        wanted = _normalized_title(" ".join(str(requested or "").split()))
+        if not wanted or wanted in self._real:
+            return ""
+        for key, placeholder in self.issued.items():
+            if _normalized_title(placeholder) == wanted:
+                return key
+        return ""
+
+
+def _roster_placeholders(rows) -> Dict[str, str]:
+    """一次性发号(单测与无 run 上下文的调用方):`_RosterNumbering().add(rows).issued`。"""
+    return _RosterNumbering().add(rows).issued
 
 
 # 枚举范围常量从动作契约导入并原样 re-export，供历史调用方使用。
@@ -1846,7 +1932,7 @@ def _source_titles_note(items, placeholders=None) -> str:
         # N 遍既挤掉真标题、又不给模型任何新的可操作信息(两篇同名时这个动作按
         # 标题本来就区分不开,只会 unresolved skip)。出现一次是「库里有这么一类
         # 文档」,出现 N 次只是把有界预算烧在同一句话上。
-        listed = (placeholders or {}).get(_roster_row_key(item))
+        listed = placeholders.get(item.source_id) if placeholders else None
         raw = listed or " ".join(_roster_display_title(item).split())
         # `titles` 存的是 (text, mark) 元组——占位串是否已占位要比 text 分量,直接
         # `raw in titles` 永远为假(codex #724 R2:20 篇无名文档会把占位串重复
@@ -1881,7 +1967,7 @@ def _source_titles_note(items, placeholders=None) -> str:
     return "，标题: " + "".join(f"《{text}》{mark}" for text, mark in titles) + tail
 
 
-def _enumeration_note(chains) -> str:
+def _enumeration_note(chains, numbering=None) -> str:
     """把本 run 的枚举账目回喂给 reflect(镜像 visited / attempted 回喂)。
 
     没有它,模型看不到自己刚枚举出的东西:清单结果刻意不进 collected/elements
@@ -1895,13 +1981,13 @@ def _enumeration_note(chains) -> str:
     if not chains:
         return ""
     parts = []
-    # 同名序号按**整个花名册**(本 run 全部来源清单折叠后)编,而不是按单条链:
-    # 同一篇在不同链的账目里必须是同一个占位串,与 `_action_read_document` 的
-    # 解析域同口径。没有同名时是空字典,账目逐字节不变。
-    placeholders = _roster_placeholders([
-        row for chain in chains.values()
-        if chain.outcome.collection == ENUMERATE_SOURCES_COLLECTION
-        for row in chain.outcome.items])
+    # 同名序号读 run 级发号簿(`numbering`,生产由 `state.roster_numbering` 传入;
+    # 不传则对这批链一次性发号,供单测):簿子按整个花名册、首次列出顺序发号且
+    # 发后不变,同一篇在不同链、不同轮的账目里永远是同一个占位串。没有同名时是
+    # 空字典,账目逐字节不变。
+    if numbering is None:
+        numbering = _RosterNumbering()
+    placeholders = numbering.sync(chains).issued
     for chain in list(chains.values())[:_ENUM_NOTE_MAX_ITEMS]:
         coverage = chain.outcome.coverage
         label = _collection_label(chain.outcome.collection, chain.outcome.kind)
@@ -3726,6 +3812,9 @@ class _ReasoningRunState:
     document_read_chars_used: int = 0
     document_reads: List["DocumentReadOutcome"] = field(default_factory=list)
     document_reads_by_id: set = field(default_factory=set)
+    # 同名来源的序号发号簿(见 `_RosterNumbering`):本 run 一份、发号后不变,账目、
+    # 标题解析、已读账目、枚举名解析四个读者共用;读者调用前各自 `sync(enum_chains)`。
+    roster_numbering: "_RosterNumbering" = field(default_factory=_RosterNumbering)
     # 这两个由 `_action_follow_chain`/`_action_exact_lookup` 读写(`state.` 直读直写)。
     follow_chain_searches: int = 0
     exact_lookups: int = 0
@@ -6755,7 +6844,8 @@ class ReasoningRetriever:
         requested = str(decision.read_document_source or "")
         # 解析走 `_resolve_roster_rows`:每一步都是确定性的精确匹配,只是先把模型
         # 抄来的形态(标记/书名号/整行/账目里的截断形)还原成花名册的显示串。
-        matches = _resolve_roster_rows(list(roster.values()), requested)
+        issued = state.roster_numbering.sync(state.enum_chains).issued
+        matches = _resolve_roster_rows(list(roster.values()), requested, issued)
         # 来源级兜底(检索/读取层的纵深防御,见 `document_source_admitted`):花名册
         # 已按天花板过滤,但读原文是 I/O,能不能读由这一层自己再判一次。天花板或参与
         # 集之外的行在判唯一**之前**就从候选里剔掉,于是「命中的全在范围外」与「清单
@@ -6778,7 +6868,7 @@ class ReasoningRetriever:
             record(TraceStep(
                 step_type="skip",
                 summary=(
-                    _ambiguous_read_summary(matches, list(roster.values()))
+                    _ambiguous_read_summary(matches, issued)
                     if len(matches) > 1 else
                     "跳过按篇读取原文:来源清单里没有匹配这个标题的文档,"
                     "请从清单里逐字复制标题后重试"),
@@ -6895,7 +6985,8 @@ class ReasoningRetriever:
                 _failed_detail["depth"] = outcome.depth
             record(TraceStep(
                 step_type="read_document",
-                summary=(f"按篇读取原文取样:《{item.source_title}》,"
+                summary=("按篇读取原文取样:"
+                         f"《{issued.get(item.source_id, item.source_title)}》,"
                          "本次没有取到原文"),
                 detail=_failed_detail))
             return
@@ -6914,7 +7005,8 @@ class ReasoningRetriever:
             _read_detail["depth"] = outcome.depth
         record(TraceStep(
             step_type="read_document",
-            summary=(f"按篇读取原文取样:《{item.source_title}》,"
+            summary=("按篇读取原文取样:"
+                     f"《{issued.get(item.source_id, item.source_title)}》,"
                      f"新增 {len(overview.id_map)} 段"),
             detail=_read_detail))
 
@@ -7633,10 +7725,10 @@ class ReasoningRetriever:
         # 天花板收窄/漂移 → `source_scoped`(三类集合)。换算见 `_enumeration_scope`。
         local_only, source_scoped = self._enumeration_scope(
             is_sources, decision.enumerate_scope)
-        source_id = decision.enumerate_source_id if is_elements else ""
-        source_title = (
-            decision.enumerate_source_title if is_elements else ""
-        )
+        source_title = decision.enumerate_source_title if is_elements else ""
+        source_id = ((decision.enumerate_source_id if is_elements else "")
+                     or state.roster_numbering.sync(enum_chains)
+                     .source_id_for(source_title))
         label = _collection_label(collection, kind)
         # 「列出《某某》里的公式」按名字表达；内部 source id 不作为可检索身份上屏。
         # 所以先做一次确定性的名字→id 解析,再进下面所有以 source_id 为键的逻辑
@@ -8003,7 +8095,9 @@ class ReasoningRetriever:
         summary += legacy_action_ledger_note(
             state.visited, state.collected, state.neighbor_truncated,
             state.neighbor_expand_limit, state.attempted, state.exact_lookup_log,
-            state.document_reads, element_search=element_search_offered())
+            state.document_reads,
+            state.roster_numbering.sync(state.enum_chains).issued,
+            element_search=element_search_offered())
         # 未执行的已确认方向回喂 reflect(镜像上面几份账目):模型据此知道哪些
         # 用户确认过的方向还没跑过,可以优先用 add_subquery 把它们补上,而不是
         # 另起炉灶猜一个新角度。每轮按 attempted 现算 —— 模型真把某条补上了,
@@ -8076,7 +8170,7 @@ class ReasoningRetriever:
         大纲引导文本(非空即这一轮发出了引导,reflect 步据它加 `outline_nudged`)。
         `terminal_overflow_repair` 是终态纠错轮标记:这一轮弱支撑边既不展示也不消费。"""
         # 已枚举清单的账目回喂(镜像上面几处),再接本 run 唯一那份集合地图。
-        enum_note = _enumeration_note(state.enum_chains)
+        enum_note = _enumeration_note(state.enum_chains, state.roster_numbering)
         if enum_note:
             summary = f"{summary}\n\n{enum_note}"
         # 大纲便签接在几份账目之后、地图之前:它同样是「本轮已经做了什么」,
