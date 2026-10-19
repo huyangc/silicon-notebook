@@ -423,3 +423,159 @@ def test_desc_evidence_batches_require_complete_lookup_tables():
         list(kl._desc_evidence_batches(["c0"], {}, {"c0": 1}))
     with pytest.raises(KeyError):
         list(kl._desc_evidence_batches(["c0"], {"c0": ["s"]}, {}))
+
+
+# --- 8. 按签名复用(P4-T5) ---------------------------------------------------
+#
+# 合并种子一变(合并组的最小种子变了、S1 一次性切换种子),canonical id 跟着变,而名字与
+# 引文没变。旧做法按 canonical id 查旧描述,id 一变就全部重写一遍(生产上是一大笔模型
+# 调用)。现在按描述签名查:签名只由名字与引文构成,不含 canonical id。这一组用例两后端
+# 共用(PostgreSQL 孪生在 tests/postgres/test_rebuild_desc_cache_pg.py)。
+
+
+def _is_postgres(repo) -> bool:
+    return type(repo).__name__ == "PostgresRepository"
+
+
+def _add_source(repo, notebook_id, source_id):
+    statement = (
+        "INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,"
+        "updated_at) VALUES (?,?,?,?,?,?,?)"
+    )
+    if _is_postgres(repo):
+        statement = statement.replace("?", "%s")
+    with repo._runtime.database.write() as db:
+        db.execute(statement, (source_id, notebook_id, source_id, "md", "ready",
+                               "2026-10-19T00:00:00", "2026-10-19T00:00:00"))
+
+
+def published_descriptions(repo, notebook_id):
+    """已发布代的 canonical_id -> (描述, 签名),经存储层的同一个读法(复用读的就是它)。"""
+    lifecycle = repo._runtime.knowledge_lifecycle
+    with repo._runtime.database.connect() as db:
+        rows = lifecycle.unified_kg.cluster_description_rows(db, notebook_id)
+    return {
+        str(r["canonical_id"]): (r["canonical_description"], r["canonical_desc_sig"])
+        for r in rows
+    }
+
+
+def switch_seed_function(monkeypatch):
+    """S1 的形状:合并种子函数变了,并照规矩 bump ``CLUSTER_ALGO_VERSION``(否则重建的
+    版本闸会把它跳过)。每个概念的 canonical id 因此都变,名字与引文一个字没变。"""
+    from app.services import kg_merge
+
+    # rebuild_unified_kg 在函数体内 ``from app.services.kg_merge import _norm``,
+    # 换的是 kg_merge 这一处名字。
+    real_norm = kg_merge._norm
+    monkeypatch.setattr(kg_merge, "_norm", lambda s: "v2 " + real_norm(s))
+    monkeypatch.setattr(
+        kg_merge, "CLUSTER_ALGO_VERSION", kg_merge.CLUSTER_ALGO_VERSION + 1)
+
+
+def moved_id_scenario(repo, monkeypatch, *, add_mosfet_quote: bool):
+    """两个跨来源合并的概念(MOSFET、cascode)先建一次图(2 次描述调用),再切换种子函数
+    重建。``add_mosfet_quote`` 时同时给 MOSFET 多一条新引文(只有它的签名变)。
+
+    返回 (假模型, 首建的已发布描述, 重建后的已发布描述)。"""
+    llm = _DescLLM()
+    bind_chat_client(repo, "kg_concept_description", llm)
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    for source_id in ("s1", "s2", "s3"):
+        _add_source(repo, nb, source_id)
+    repo.store_kg(nb, "s1", [
+        _concept_with_evidence("a1", "MOSFET", "mosfet A"),
+        _concept_with_evidence("b1", "cascode", "cascode A"),
+    ], [])
+    repo.store_kg(nb, "s2", [
+        _concept_with_evidence("a2", "mosfet", "mosfet B"),
+        _concept_with_evidence("b2", "Cascode", "cascode B"),
+    ], [])
+    lifecycle = repo._runtime.knowledge_lifecycle
+    lifecycle.rebuild_unified_kg(nb)
+    assert llm.calls == 2
+    before = published_descriptions(repo, nb)
+
+    switch_seed_function(monkeypatch)
+    if add_mosfet_quote:
+        repo.store_kg(nb, "s3", [_concept_with_evidence("a3", "Mosfet", "mosfet C")], [])
+    lifecycle.rebuild_unified_kg(nb)
+    return llm, before, published_descriptions(repo, nb)
+
+
+def _by_description(descs):
+    return {d: (cid, sig) for cid, (d, sig) in descs.items() if d}
+
+
+def assert_moved_ids_reuse_every_description(repo, monkeypatch):
+    llm, before, after = moved_id_scenario(repo, monkeypatch, add_mosfet_quote=False)
+    # 前提:id 真的全变了(否则这条测的还是旧的按 id 命中)。
+    assert before and after and not (set(before) & set(after)), (before, after)
+    assert llm.calls == 2, f"id 变了、名字与引文没变却重写了描述: {llm.names_seen}"
+    # 描述逐字不变,签名不变,只是挂到了新 id 上。
+    was, now = _by_description(before), _by_description(after)
+    assert set(now) == set(was) == {"desc-for::MOSFET", "desc-for::cascode"}
+    for desc, (cid, sig) in now.items():
+        assert sig == was[desc][1] and cid != was[desc][0]
+
+
+def assert_changed_signature_still_regenerates(repo, monkeypatch):
+    llm, before, after = moved_id_scenario(repo, monkeypatch, add_mosfet_quote=True)
+    assert not (set(before) & set(after))
+    # 只有签名变了的 MOSFET 重新生成,cascode 按签名复用。
+    assert llm.calls == 3, llm.names_seen
+    assert llm.names_seen[-1] == "MOSFET"
+    was, now = _by_description(before), _by_description(after)
+    assert now["desc-for::cascode"][1] == was["desc-for::cascode"][1]
+    assert now["desc-for::MOSFET"][1] != was["desc-for::MOSFET"][1]
+
+
+def test_moved_canonical_ids_reuse_descriptions_by_signature(repo, monkeypatch):
+    """变异锚点:把 ``_DescriptionReuse.get`` 改回只认本 cid 自己那一行(按 id 查)→
+    新 id 查不到旧行 → 多出 2 次调用,本条红。"""
+    assert_moved_ids_reuse_every_description(repo, monkeypatch)
+
+
+def test_moved_canonical_id_with_a_changed_signature_regenerates(repo, monkeypatch):
+    """签名不同照旧重写(复用不是按名字或按 id 放宽)。变异锚点:把复用改成只比名字
+    → MOSFET 也被复用,calls 停在 2,本条红。"""
+    assert_changed_signature_still_regenerates(repo, monkeypatch)
+
+
+def _row(cid, desc, sig):
+    return {"canonical_id": cid, "canonical_description": desc, "canonical_desc_sig": sig}
+
+
+def test_description_reuse_keeps_each_canonicals_own_text_first():
+    """回退防线:今天会命中的(本 cid 自己的行、签名相等)仍命中且**逐字是自己那份**
+    ——即使另一个 cid 恰好带着同一个签名、文字不同(同名同引文的两个簇)。别的 id 按
+    签名查到的是 cid 最小的那份,与行序无关。"""
+    from app.services.knowledge_lifecycle import _DescriptionReuse
+
+    rows = [_row("K-b", "text of b", "S"), _row("K-a", "text of a", "S"),
+            _row("K-c", "text of c", "T")]
+    for ordered in (rows, list(reversed(rows))):
+        reuse = _DescriptionReuse(ordered)
+        assert reuse.get("K-a", "S") == "text of a"
+        assert reuse.get("K-b", "S") == "text of b"       # 自己那份,不是 K-a 的
+        assert reuse.get("K-new", "S") == "text of a"     # 新 id:cid 最小的那份
+        assert reuse.get("K-c", "T") == "text of c"
+        assert reuse.get("K-b", "T") == "text of c"       # 自己的签名变了:按新签名找
+        assert reuse.get("K-a", "U") == ""                # 签名没人有:交给模型
+    # 只有输掉平局的才留一份「自己那份」;其余都只在按签名的表里。
+    assert _DescriptionReuse(rows).own == {("K-b", "S"): "text of b"}
+
+
+def test_description_reuse_ignores_rows_that_could_never_hit():
+    """空描述或空签名的行今天就命中不了(命中要求两者都非空),现在也不进表——
+    尤其不能让一个空描述的小 cid 把同签名的真描述挤掉。"""
+    from app.services.knowledge_lifecycle import _DescriptionReuse
+
+    reuse = _DescriptionReuse([
+        _row("K-a", "", "S"), _row("K-b", "real", "S"), _row("K-c", "no sig", ""),
+        _row("K-d", None, None),
+    ])
+    assert reuse.get("K-a", "S") == "real"
+    assert reuse.get("K-z", "S") == "real"
+    assert reuse.get("K-c", "") == ""
+    assert set(reuse.by_sig) == {"S"} and reuse.own == {}
