@@ -337,7 +337,12 @@ it alone starts no synchronization; it is consumed only by the explicit forward-
 unrelated cross-environment notebook sync CLI (`scripts/cli.sh sync export/import/status`,
 see [Operations](./operations.md#cross-environment-notebook-sync) and
 [the sync design doc](./incremental-sync-design.md)); it only supplies `export`'s default
-`source_env` and is otherwise inert.
+`source_env` and is otherwise inert. `SILICON_NOTEBOOK_SYNC_KNOWHOW_HISTORY` (default `false`)
+is read by the same CLI's `export` only: when true, packages also carry the Knowhow edit
+history (`knowhow_milestones`/`knowhow_changes`); when false they carry the tables' current state
+only and the target keeps whatever history it already has. Turning it on for a target that has
+been receiving packages without it needs one `sync export --full` to that target to bring the
+history across in full (see the design doc §11).
 
 ```dotenv
 # Default deployment for development and production; replace connection settings
@@ -943,6 +948,7 @@ SQLITE_CACHE_SIZE_KB    # Per-connection SQLite page cache in KB (negative = KB)
 DATABASE_URL            # Active database URL; PostgreSQL for development/production; unset fallback: sqlite:///.local/silicon_notebook.db
 SILICON_NOTEBOOK_STORAGE_DIR   # uploaded file storage directory (default .local/storage)
 SILICON_NOTEBOOK_SYNC_ENV      # this deployment's name in cross-environment notebook sync (default empty; see Operations)
+SILICON_NOTEBOOK_SYNC_KNOWHOW_HISTORY # sync export also carries the Knowhow edit history (default false; export side only)
 ```
 
 The synchronous Ask-cancellation endpoint may cross more than one database

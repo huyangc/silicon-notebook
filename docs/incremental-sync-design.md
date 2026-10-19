@@ -57,14 +57,15 @@
 `TableSyncSpec`，字段含义：
 
 - `mapped_columns`：引用用户或组 id 的列，每列标注映射种类 USER（按 username 映射）、
-  GROUP（组按 name 匹配，匹配不到则创建）或 PRINCIPAL（只用于 notebook_grants.principal_id，
+  GROUP（组按 name 匹配目标端已有组，导入从不建组，§4）或 PRINCIPAL（只用于 notebook_grants.principal_id，
   按行内 principal_type 选表，everyone 不映射）。
 - `severed_columns`：引用不同步层表的列，导入时置空。当前是 memory_items.agent_profile_id、
   sources.agent_profile_id、knowledge_objects.source_candidate_id。memory_items.source_answer_id
-  刻意保留为文本指针（§11）。
+  刻意保留为文本指针；「来源回答在源环境」由导入器写进 provenance 的标记表达（§11）。
 - `target_owned_columns`：对已存在行不覆盖的列（§5）。
-- `seed_only`：目标端不存在该行才插入，已存在的行不更新也不删除（授权边与组是「首次创建
-  笔记本时播种」，object_schemas 是「目标端管理员接管后不再覆盖」）。当前是 notebook_members、
+- `seed_only`：目标端不存在该行才插入，已存在的行不更新也不删除（授权边是「首次创建
+  笔记本时播种」；组与组成员在此之上还受「导入从不建组」约束，实际从不写入，§4；
+  object_schemas 是「目标端管理员接管后不再覆盖」）。当前是 notebook_members、
   notebook_grants、groups、group_members、object_schemas。
 - `optional_refs`：(列, 被引用表) 列表，导入时被引用行在目标端不存在则跳过该行并记日志，不算
   失败。当前只有 notebook_bases 的 base_notebook_id → notebooks：只导出挂载方而不导出被挂载库
@@ -105,8 +106,8 @@
 | notebooks | created_by | 硬失败，整个包不导入（粒度是包不是笔记本：行相位按表提交，无法只剔一本） |
 | notebook_members | user_id | 跳过该行并记日志 |
 | notebook_grants | principal_id（PRINCIPAL）、created_by | principal 映射不到跳过该行并记日志，everyone 不需要映射；created_by 映射不到置为导入执行者 |
-| groups | created_by、owner_id、invite_created_by | 组按 name 匹配已有组，匹配不到则创建；owner_id 映射不到置为导入执行者（「取该组目标端 admin 成员」那条腿不可达：组是 seed_only，新建组在 group_members 之前落地、还没有成员）；invite_created_by 置空 |
-| group_members | group_id（GROUP）、user_id、added_by | 成员映射不到跳过；added_by 置为导入执行者 |
+| groups | created_by、owner_id、invite_created_by | 组按 name 匹配目标端已有组，导入从不建组也不更新组（§4）；三列的规则只为策略表的完备性保留，不可达 |
+| group_members | group_id（GROUP）、user_id、added_by | 成员行只随本次导入创建的组播种，而导入从不建组，所以一律跳过：目标端组的成员名单归目标端 |
 | notebook_bases、notebook_object_schemas、notebook_assets、knowhow_tables、knowhow_milestones | created_by | 映射不到置为导入执行者 |
 | knowhow_cell_code | updated_by | 映射不到置为导入执行者 |
 | sources | uploaded_by | 映射不到置空并记日志（0045 之前的行本来就为空） |
@@ -114,7 +115,9 @@
 | memory_items | created_by、confirmed_by | created_by 映射不到硬失败；confirmed_by 映射不到置空并记日志 |
 | memory_revisions | changed_by | 映射不到置为导入执行者 |
 
-knowhow_changes 与 knowhow_milestones 是编辑历史，归本层，可随开关关闭只同步当前态。
+knowhow_changes 与 knowhow_milestones 是编辑历史，归本层，但**默认不同步**：只有导出端打开
+`SILICON_NOTEBOOK_SYNC_KNOWHOW_HISTORY` 时才随包走（`manifest.KNOWHOW_HISTORY_TABLES`，语义见
+§11）。
 `knowledge_objects.owner` 是治理面板里可编辑的自由文本标签，不是用户 id，不映射。
 `object_schemas` 归 SYNCED 但 scope 是 global（见 §3 的 scope 说明）：只带被导出笔记本引用到的
 自定义类型行，目标端已有同名类型不覆盖。
@@ -134,16 +137,26 @@ users 不同步但导入时可能**创建**：见 §4。
 
 - 映射键是 `users.username`。导出包携带源端用户表的投影 `(id, username, display_name, role)`
   仅供映射，不写入目标端 users。
-- 导入时先构造 `source_user_id → target_user_id`：目标端按 username 精确匹配；匹配不到时，
-  若 `--create-missing-users` 打开则按源端投影建一个无凭据的本地用户，否则按 §3.2 表内规则
-  处理。建出来的无凭据账号 username 与源端相同；若该 username 就是统一认证返回的工号，
-  该用户下次统一登录会按精确 username 直接进入这个账号，否则需管理员核对（停用/改用户名）。
-  导入报告要把这批用户单独列出；导入器不做任何认证侧绑定。匹配仍是精确的，但要建的用户若与目标端
-  某个用户名仅 ASCII 大小写不同（会撞目标端 `lower(username)` 唯一索引），导入在认领前（dry run
-  同样）硬失败，逐对列出「源 X ↔ 目标 Y」，由操作员在一侧改名。
-- 组按 `groups.name` 匹配，匹配不到则创建；匹配上的组把源端 `groups.id` 重映射为目标端 id
-  （`groups.name` 没有唯一索引，不重映射会以源 id 再插一份，下次导入撞歧义）。目标端同名组
-  重复、或源组 id 与目标端另一个名字的组撞 id，都硬失败。
+- 导入时先构造 `source_user_id → target_user_id`（`app/migration/sync/identity.py::build_user_mapping`），
+  两遍：先按 username **精确**匹配；精确没匹配上的，再按 **ASCII 忽略大小写**匹配（`ascii_lower`，
+  与两端 `lower(username)` 唯一索引同一种折叠，`Ä` 与 `ä` 仍是两个名字；不去首尾空白）。忽略
+  大小写后对应多个目标用户、或会和另一个源用户落到同一个目标用户，导入在认领前（dry run 同样）
+  硬失败，逐条列出「源 X 忽略大小写对应多个目标用户 …」/「源 X 与源 Y 忽略大小写会落到同一个
+  目标用户 Z」。按大小写折叠匹配上的每一对写进报告 `user_mapping.case_folded` 并发一条警告
+  「源 X → 目标 Y」（用户裁决 2026-10-19，§11）。两遍都匹配不到时，若 `--create-missing-users`
+  打开则按源端投影建一个无凭据的本地用户，否则按 §3.2 表内规则处理——走到这一步的用户在目标端
+  没有任何大小写变体，所以新建不会撞 `lower(username)` 唯一索引。建出来的无凭据账号 username 与
+  源端相同；若该 username 就是统一认证返回的工号，该用户下次统一登录会按精确 username 直接进入
+  这个账号，否则需管理员核对（停用/改用户名）。导入报告要把这批用户单独列出；导入器不做任何
+  认证侧绑定。
+- 组按 `groups.name` 匹配目标端**已有**的组，导入**从不建组**、也不更新组和组成员
+  （`import_.py::_build_group_mapping`，用户裁决 2026-10-19，§11）：组和它的成员名单归目标端。
+  匹配上的组把源端 `groups.id` 重映射为目标端 id。本次导入**新建**的镜像笔记本的群组授权
+  （`_SEED_PARENT` 只随新建笔记本播种授权边）要用到的组，若目标端没有同名组、目标端同名组不止
+  一个、或包内同名组不止一个，导入在认领前（dry run 同样）拒绝并列出组名（「目标端没有名为
+  「X」的群组」等），由运维先在目标端建组/改名再重跑；不猜。只被已有镜像的授权引用的组不在
+  此列——那些授权边不会再被写入，拒绝它们只会让管理员在目标端删过的组把这本的后续导入永久
+  卡住；这类组名字唯一时照常映射，否则不映射，引用它的行一律跳过并记原因。
 - 按 `--create-missing-users` 建的用户一律 `role='user'`（不沿用源端角色，导入不能在目标端
   授出管理员），不建 `user_profiles` 行，走外部认证首次登录同款字段。
 - 导入执行者 `importer_user_id` 默认取目标端最早创建的管理员；没有则硬失败。
@@ -201,7 +214,7 @@ users 不同步但导入时可能**创建**：见 §4。
   自有决定，与 copy_notebook 先例同款）；`status` 在导入期间为 `importing`（`NOTEBOOK_LIVE_SQL`
   隐藏它，避免用户看到空壳笔记本；不复用 `copying`，因为 `sweep_stale_copies` 会按源端的
   created_at 把它当陈旧半拷贝物理删掉），收尾翻成 `draft`。授权表（members/grants/group_members）
-  只在父行（笔记本/组）由本次导入创建时播种，目标端撤销过的授权不会被下一个包插回。授权边表只在首次创建笔记本时写入源端授权，之后
+  只在父行（笔记本/组）由本次导入创建时播种（导入从不建组，所以 group_members 实际一律跳过，§4），目标端撤销过的授权不会被下一个包插回。授权边表只在首次创建笔记本时写入源端授权，之后
   不覆盖。
 - 前端对镜像笔记本隐藏或禁用上述入口，并在来源面板顶部标注「镜像自 <sync_origin>」；
   按钮反馈规则遵循 `AGENTS.md` Interactive feedback。浏览器端「哪些入口画出来」的唯一
@@ -785,6 +798,10 @@ sync-<source_env>-<from_seq>-<to_seq>-<package_id 前 8 位>/
                      # scoped（true|false：`--notebook` 限定导出为 true，否则 false——增量式
                      # 字段，加它不改 format_version；早于这个字段的旧包读不到它，链校验按
                      # 「未知」处理，不当 false 用，见下方「下游」判据）、
+                     # knowhow_history（true|false：本包是否带 knowhow_milestones/
+                     # knowhow_changes，取导出端 SILICON_NOTEBOOK_SYNC_KNOWHOW_HISTORY，默认 false；
+                     # false 时 tables 与 deletes.jsonl 都不提这两张表。增量式字段，缺省的旧包
+                     # 按 true 读——旧构建总是带历史，§11）、
                      # notebooks、deleted_notebooks、tables{columns,rows,sha256}、deletes（条数）、
                      # kg_epochs（条数，本 PR 恒 0）、users、files；最后写入，是「包完整」的
                      # 标记，自身不进 checksums.json
@@ -1389,12 +1406,62 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
 
 ## 11. 未决问题
 
-- 组的同步粒度：按名字匹配是否足够，还是需要显式组映射表。
-- knowhow 编辑历史默认是否同步。
-- 记忆的 `source_answer_id` 指向不同步的 answers：目标端「查看来源回答」会失效，是否需要
-  在导入时把 origin 为 ask_answer 的记忆标成「来源在源环境」。
-- username 映射是否需要大小写不敏感：取决于两套认证服务给同一个人的 username 是否完全
-  一致；不一致会命中「created_by 映射不到，整个包不导入」。
+### 已决（用户裁决 2026-10-19）
+
+- **组的同步粒度：按名字匹配足够，不建显式组映射表。** 导入从不建组；本次导入新建镜像的群组
+  授权要用到的组，在目标端找不到同名组、目标端同名组不唯一、或包内同名组重复时，导入拒绝并
+  报出组名，不猜（§4）。实现：`app/migration/sync/import_.py::_build_group_mapping` /
+  `_groups_this_import_seeds`（拒绝只针对会被写入的授权边要用的组），`_map_row`（映射不到目标组
+  的 groups 行一律跳过，绝不以源 id 插入）；原先「本包建过的组」的进度标记
+  （`__created__:groups:*`）与它在取代时的转移随之删除。导入报告不再有 `groups_created`。用例：
+  `tests/test_sync_import.py`（缺组/目标重名/包内重名拒绝、不需要的缺组不卡后续导入）、
+  `tests/postgres/test_sync_import_pg.py::test_users_fold_ascii_case_and_groups_match_by_name_only_pg`。
+- **Knowhow 编辑历史默认不同步，开关可打开。** 开关是导出端的
+  `SILICON_NOTEBOOK_SYNC_KNOWHOW_HISTORY`（`Settings.sync_knowhow_history`，默认关，与
+  `SILICON_NOTEBOOK_SYNC_ENV` 同族）；包在 `manifest.knowhow_history` 声明本包带没带，导入端只按包的
+  声明行事（目标端这个变量不起作用）。没有这个字段的包是只会带历史的旧构建写的，按「带了」读。
+  - 关：导出（全量与增量）完全不碰 `knowhow_milestones`/`knowhow_changes`——不写行文件、不进
+    `manifest.tables`、增量窗口不压缩这两张表的日志、`deletes.jsonl` 不出现它们（日志行留给
+    `sync prune-log`）。导入只走包带的表（`import_.py::_carried`）：行相位、全量包的对账删除相位
+    （`_prunable_tables`）、删除重放（`_delete_replay_tables`）都不碰这两张表，**目标端已有的历史
+    原样保留、不删不改**。唯一会让它们消失的是父行消失：源端删了 Knowhow 表或整本笔记本，目标端
+    删父行时由外键 `ON DELETE CASCADE`／笔记本删除作业一并带走——这是父行没了，不是覆盖。一个声明
+    不带历史却在 `tables` 里列了它们、或带着它们的删除条目的包，被当成自相矛盾拒绝。
+  - 开：两张表随包走，全量包照常按快照对账（目标端历史与源端一致），增量窗口照常带变化与删除，
+    用户列照 §3.2 映射。
+  - **增量模式下开关切换的影响。** 历史完整与否按链传递，记在 `sync_imports.report_json` 的
+    `knowhow_history`/`knowhow_history_complete`（`import_.py::_knowhow_history_complete`）：不带
+    历史的包导入后为「不完整」（目标端历史冻结在最后一个带历史的包那一刻）；带历史的全量包导入后
+    为「完整」；带历史的窗口只有在它续接的链头完整时才完整。先开后关：之后的包不带历史，目标端
+    保留关之前已同步到的历史，源端此后对历史的改动/删除都不会到达；全量包也不会删它。先关后开
+    （或关了又开）：窗口只带开之后的变化，关着那段时间的改动永远不会经窗口补上，这类窗口导入时
+    报告标「不完整」并发警告，要求在源端跑一次 `sync export --full`；该全量包导入后历史与源端一致，
+    此后的窗口恢复「完整」。在补全量之前，目标端残留的旧历史若与源端新建的同名里程碑撞
+    `(table_id, name)` 唯一键，导入按 §5 的通则硬失败——同样由那次全量包解决。
+  - 用例：`tests/test_sync_incremental_import.py` 的四条 knowhow 历史用例（默认关、关时保留、
+    开关切换的链传递与全量补齐、自相矛盾的包被拒）、`tests/test_sync_import.py::test_the_knowhow_history_travels_only_when_the_source_switches_it_on`、
+    `tests/postgres/test_sync_import_pg.py::test_knowhow_history_switch_and_memory_source_env_pg`、
+    `tests/postgres/test_sync_incremental_import_pg.py::test_the_knowhow_history_switch_across_a_postgres_chain`。
+- **origin 为 ask_answer 的记忆导入时标成「来源在源环境」。** 不加迁移：导入器给它带过来的每条
+  `memory_provenance` 在 `payload_json` 顶层写 `sync_origin = <包的 source_env>`
+  （`import_.py::MEMORY_SYNC_ORIGIN_KEY` / `_stamp_memory_sync_origin`，插入与更新都写，所以本裁决
+  之前导入的记忆在下一次被携带时补上标记，任何全量包都会带全）。选标记而不选「`source_answer_id`
+  指向的回答在本环境不存在」这条判据，是因为后者不可靠：目标端用户在镜像上自己保存的记忆，删掉
+  对话后指针同样悬空，会被误判成「在源环境」；而这个键只有导入器会写。`source_answer_id` 照旧
+  保留。浏览器端 `frontend/app/memory-model.ts::memorySourceAnswerElsewhere` 据此在记忆的「来源与依据」
+  里多一行纯文本「来源回答：在 <源环境> 中」，不可点、不去本环境找那条回答；本环境自己的记忆、
+  没有来源回答 id 的记忆不出现这一行。用例：`tests/test_sync_import.py` 的两条记忆用例、
+  `tests/postgres/test_sync_import_pg.py`（SQLite 包与 PG 包落成 jsonb 后标记仍在）、
+  `frontend/tests/unit/memory-model.test.mjs`。
+- **username 映射忽略大小写：先精确，未命中再按 ASCII 忽略大小写；忽略大小写后仍有多个候选则
+  拒绝并报出**（§4）。实现：`app/migration/sync/identity.py::build_user_mapping`（复用 `ascii_lower`，
+  原 `case_variant_collisions` 只报冲突不匹配，现并入匹配本身；原「要建的用户与目标端仅大小写
+  不同则拒绝」的 `_refuse_case_variant_users` 随之删除——走到新建这一步的用户在目标端已没有
+  大小写变体）。用例：`tests/test_sync_manifest.py` 的 `build_user_mapping` 纯函数用例、
+  `tests/test_sync_import.py`（大小写变体映射到目标账号、精确优先、折叠到已匹配用户被拒）、
+  `tests/postgres/test_sync_import_pg.py::test_users_fold_ascii_case_and_groups_match_by_name_only_pg`。
+
+### 其余
 - `kg_epoch` 折叠延后：§7「压缩」阶段直接忽略 `operation='kg_epoch'` 的日志行，本 PR 的
   `kg_epochs.jsonl` 恒为空文件。这不是正确性缺口——逐行的 upsert/delete 日志已经完整覆盖了
   同一批 KG 重建产生的变化，折叠只是把它们合并成一条「整体替换」指令，省掉重放大量单行

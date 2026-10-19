@@ -1301,12 +1301,34 @@ at preflight, before anything is written, naming the offending field. An otherwi
 `mode=incremental` package whose `base_package_id` does not match the target's current chain
 head for that `source_env` is likewise rejected at preflight (see "Operating a daily export
 cadence" above for the chain-head rule and the two ways out this error offers).
+Users are matched by `username`: exactly first, then, for whatever that left, ignoring ASCII
+letter case (`A1` in the package lands on the target's `a1`; `Ä`/`ä` stay different, and
+whitespace is never trimmed). Every case-folded pair is listed in the report's
+`user_mapping.case_folded` and in a warning (`源 X → 目标 Y`). A fold that names more than one
+target user, or a target user another package user already matched, refuses the import before
+it is claimed (a dry run too), naming the pairs: rename one side first.
 `--create-missing-users` creates a credential-less local user for
-every source `username` the target has no match for (§4 of the design doc); without it,
-references to an unmatched user fall back to each table's own rule (skip the row, null the
-column, or fail the whole notebook, depending on the column). A user it would create whose
-username differs from an existing target username only by ASCII letter case is refused before
-the import is claimed (a dry run too), pair by pair (`源 X ↔ 目标 Y`): rename one side first.
+every source `username` the target has no match for even ignoring case (§4 of the design doc);
+without it, references to an unmatched user fall back to each table's own rule (skip the row,
+null the column, or fail the whole notebook, depending on the column).
+Groups are matched by name only, and **the import never creates a group** (nor touches a target
+group's members): every group a newly mirrored notebook's group grant needs must already exist
+at the target under exactly one name, and the package must carry only one group by that name.
+Otherwise the import is refused before it is claimed (a dry run too), naming the group
+(`目标端没有名为「X」的群组` / `目标端有多个名为「X」的群组` / `包内有多个名为「X」的群组`):
+create or rename the group at the target and re-run. A group named only by grants of notebooks
+the target already mirrors is not needed (those grants are never written again) and never
+blocks an import.
+The Knowhow edit history (`knowhow_milestones`/`knowhow_changes`) travels only when the
+**exporting** environment sets `SILICON_NOTEBOOK_SYNC_KNOWHOW_HISTORY=true` (default off; the
+package records the choice as `manifest.knowhow_history` and the importer follows it). A package
+without it leaves whatever history the target already holds exactly as it is, full snapshots
+included. If you turn it on for a target that has been receiving packages without it, run one
+`sync export --full` to that target afterwards: until then each incremental import warns that
+the history is incomplete (`knowhow_history_complete=false` in the report), because what changed
+while it was off never travels in a window.
+Memories imported from another environment carry `sync_origin=<source env>` in their provenance,
+so the memory panel says the source answer is in that environment instead of looking for it here.
 `--verify-files` re-checks every
 copied file's sha256 during the import instead of trusting the package's `checksums.json` alone
 — slower, use it when the package traveled over an untrusted or lossy transport.

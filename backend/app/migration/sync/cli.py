@@ -2384,7 +2384,8 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument(
         "--create-missing-users",
         action="store_true",
-        help="源端用户按 username 在目标端找不到时，创建无凭据本地用户",
+        help="源端用户按 username（先精确、再忽略 ASCII 大小写）在目标端找不到时，"
+        "创建无凭据本地用户",
     )
     import_parser.add_argument(
         "--dry-run",
