@@ -978,6 +978,12 @@ scale_index 各与其母格同为 admin，mount 与 configure 同为 owner）；
 内容的工具（来源、构建、维护、knowhow 格子代码）带同一道围栏；`add_observation` 与
 `propose_memory` 豁免，因为那些行是目标端用户自己的交互数据。
 
+导入器从别的环境带来的记忆，在每条记忆读取（`MemoryRecord.provenance`）里带
+`provenance.sync_origin`（源环境名）；这个键只有导入器会写，本环境自己产生的记忆永远没有它。
+回答不同步，所以对这种从 Ask 回答保存的记忆（`origin=ask_answer` 且有 `source_answer_id`），
+记忆面板「来源与依据」里显示一行纯文本「来源回答：在 <源环境> 中」，不可点，也不在本环境里
+找那条回答（见[同步设计文档](./incremental-sync-design.md) §11）。
+
 ### 读权 ⇒ 可挂载，以及借入挂载的「未共享门」
 
 挂载有效性历来是「公共库 ∨ 同 owner」，刻意**排除**只读分享进来的库，理由是「撤销分享

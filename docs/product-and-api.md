@@ -1291,6 +1291,14 @@ The Agent/MCP surface carries the same fence on every tool that writes synced co
 `propose_memory` are exempt, because those rows are the target user's own interaction
 data.
 
+A memory the importer brought from another environment carries `provenance.sync_origin`
+(the source environment's name) on every memory read (`MemoryRecord.provenance`); only the
+importer writes that key, so a memory created in this environment never has it. Answers
+never travel, so for such a memory saved from an Ask answer (`origin=ask_answer` with a
+`source_answer_id`) the memory panel's 「来源与依据」 shows a plain, non-clickable
+「来源回答：在 <源环境> 中」 row instead of looking the answer up here
+(see the [sync design doc](./incremental-sync-design.md) §11).
+
 ### Read access implies mountability, and the borrowed-mount gate
 
 Mount validity was historically "public library ∨ same owner", specifically
