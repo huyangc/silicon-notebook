@@ -329,8 +329,14 @@ too. In `reasoning` the two closed channels are also absent from the agent's act
 and `ppr_retrieve` leave the reflect action enum, prompt and allow-list together, and the first-round PPR seed
 does not run, so the trace never shows a concept-roaming step that could only report zero passages. A model that
 names either action anyway gets a skip step saying the action is not offered this run, and the loop carries on
-(strict mode raises). The spreadsheet analysis arm covers the first library only and is narrowed — never widened — by the
-per-notebook source ceiling. Community/comparison sibling entities stay available and cover every participant;
+(strict mode raises). The spreadsheet analysis arm is federated: every participant's workbooks are merged into ONE planner
+catalog, planned ONCE, and one sheet is executed (as in a single notebook); the participants are the
+original-text channel's own (the same participant set, the same `CHUNK_FEDERATION_MAX_PARTICIPANTS` bound and
+`CHUNK_FEDERATION_ENABLED` rollback switch), and each library contributes only visible workbooks inside the run's
+frozen source ceiling. The catalog is filled library by library in rotation within the single-notebook byte
+budget, so the number of workbooks read does not grow with the number of libraries, and whatever does not fit is
+disclosed by count (details under "Professional Excel analysis and automatic parsing-issue archive").
+Community/comparison sibling entities stay available and cover every participant;
 `chunk` mode's comparison sub-queries rotate across libraries under a total cap, and single-notebook behaviour
 is unchanged. Federating these channels is registered in `fangan_todo.md` pending a product decision.
 
@@ -4433,7 +4439,26 @@ Only `reasoning` Ask can consume the snapshot. The lane remains dormant unless t
 user-selected source scope contains a compiled workbook and the question has an analytical
 spreadsheet intent. Include/exclude scopes are resolved through the same frozen `allows`
 semantics as retrieval across the active notebook and every allowed mounted participant;
-excluded workbooks and excluded reference libraries never reach the planner. Intent requires either
+excluded workbooks and excluded reference libraries never reach the planner.
+Global Ask has no current notebook, so there the lane takes its federated form: the participants
+are the original-text channel's own set (the selected libraries that passed the read re-check,
+bounded by `CHUNK_FEDERATION_MAX_PARTICIPANTS`; with `CHUNK_FEDERATION_ENABLED=false` only the
+first library remains), and each library contributes only visible sources inside its frozen
+source ceiling, so an unselected or unreadable library and a deselected workbook are neither
+listed nor read. All participants' workbooks form one catalog: libraries are sorted by notebook
+id, the rotation's starting library is derived from a digest of the question (deterministic per
+question, even across questions, and the nominal first library gets no head start), then one
+workbook per library per round, each library's own in source order; a source id is listed once.
+The catalog shares the single-notebook `SPREADSHEET_ANALYSIS_PLANNER_CATALOG_BYTES` budget and
+workbooks are read one at a time, stopping the moment that budget is spent, so planner calls
+(at most one), executed sheets (one), catalog length and workbooks read are all capped by the
+single-notebook bound and do not grow with the number of libraries; with one library selected
+the catalog is byte-identical to the single-notebook one. What does not fit is disclosed by
+count: the planner prompt states "X readable workbooks across the participants, N listed in
+library rotation, M not listed", the result card carries the same sentence, and the
+`spreadsheet` trace step adds `notebook_id`, `libraries`, `workbooks` and `listed`. Results and
+receipts carry their owning notebook and that notebook's tier (in peer mode the first library
+keeps its id too). Intent requires either
 explicit workbook/table context plus an analysis phrase, or an unambiguous table operation;
 an isolated `行`/`列` character inside an unrelated word does not qualify, and bare English
 verbs such as `count`, `top`, or `group` require table context unless they form a clear

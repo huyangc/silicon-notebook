@@ -336,6 +336,21 @@ class RetrievalService:
 
         return max(1, len(federation_participant_ids(self.candidates, notebook_id)))
 
+    def workbook_libraries(self, notebook_id):
+        """``((notebook_id, visible source ids), ...)`` for a peer run's workbook lane.
+
+        The chunk lane's own participants and per-library visible reads
+        (``chunk_federation.federated_library_sources``), so the table lane of a
+        global ask covers exactly the libraries its passage search covers.
+        Deliberately NOT on ``RetrievalPort`` (the ``chunk_participant_count``
+        precedent): ``AskService`` is its only consumer and probes it with
+        ``getattr``; a retrieval double without it keeps the pre-federation
+        lane.
+        """
+        from app.services.chunk_federation import federated_library_sources
+
+        return federated_library_sources(self.candidates, notebook_id)
+
     def keyword_chunk_candidates(self, notebook_id, keywords):
         return filter_retrieval_items(
             notebook_id, "chunk",

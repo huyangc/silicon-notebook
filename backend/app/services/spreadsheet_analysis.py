@@ -1,6 +1,7 @@
 """Deterministic spreadsheet compilation and bounded reasoning-time analysis."""
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -609,6 +610,16 @@ class SpreadsheetAnalysisService:
             "warnings": warnings,
         }
 
+    def wants_analysis(self, question: str) -> bool:
+        """Would ``analyze`` plan for this question at all?
+
+        The two gates ``analyze`` opens with, as one answer a caller may ask
+        BEFORE it pays for enumerating sources -- the peer lane does, so a
+        global question without table intent reads no participant library."""
+        return bool(self.settings.spreadsheet_analysis_enabled) and (
+            _has_spreadsheet_intent(question)
+        )
+
     def analyze(
         self,
         *,
@@ -620,19 +631,160 @@ class SpreadsheetAnalysisService:
         planner_client: Any,
         cancel_event: Any = None,
     ) -> tuple[list[SpreadsheetAnalysisResult], TraceStep | None]:
-        if not self.settings.spreadsheet_analysis_enabled:
-            return [], None
-        if not _has_spreadsheet_intent(question):
+        if not self.wants_analysis(question):
             return [], None
         manifest_refs = source_refs or tuple(
             (notebook_id, source_id) for source_id in source_ids
         )
         manifests = self._load_manifests(manifest_refs)
+        return self._analyze_loaded(
+            manifests,
+            notebook_id=notebook_id,
+            notebook_tiers=notebook_tiers,
+            question=question,
+            planner_client=planner_client,
+            cancel_event=cancel_event,
+        )
+
+    def analyze_peer(
+        self,
+        *,
+        notebook_id: str,
+        libraries: Sequence[tuple[str, Sequence[str]]],
+        notebook_tiers: Mapping[str, str] | None = None,
+        question: str,
+        planner_client: Any,
+        cancel_event: Any = None,
+    ) -> tuple[list[SpreadsheetAnalysisResult], TraceStep | None]:
+        """The peer (global) lane: every participant's workbooks, ONE plan.
+
+        ``libraries`` is ``((notebook_id, readable source ids), ...)`` -- the
+        caller has already bounded the participants and narrowed each list to
+        the run's frozen ceiling.  What this adds over ``analyze`` is only how
+        the manifest list is FILLED (``_federated_manifests``: library by
+        library in rotation, stopping the moment the planner catalog's byte
+        budget is spent); planning, validation, execution and the receipt are
+        the single-library code unchanged.  So the cost stays the
+        single-library cost whatever the number of libraries: one planner
+        call, one executed sheet, a catalog under the same
+        ``SPREADSHEET_ANALYSIS_PLANNER_CATALOG_BYTES`` budget, and no more
+        manifest reads than that budget can list (plus one directory listing
+        per library).  Workbooks the budget leaves out are disclosed with
+        their count -- to the planner, on the result card and in the trace.
+        """
+        if not self.wants_analysis(question):
+            return [], None
+        manifests, total, listed = self._federated_manifests(libraries, question)
+        omitted = max(0, total - listed)
+        disclosure = (
+            f"本次全局问答的参与库共有 {total} 份可读工作簿，规划目录按库轮转"
+            f"列出其中 {listed} 份，另有 {omitted} 份未列出。"
+        )
+        results, trace = self._analyze_loaded(
+            manifests,
+            notebook_id=notebook_id,
+            notebook_tiers=notebook_tiers,
+            question=question,
+            planner_client=planner_client,
+            cancel_event=cancel_event,
+            catalog_note=f"目录说明：{disclosure}\n" if omitted else "",
+        )
+        if results and trace is not None:
+            if omitted:
+                results[0].warnings.append(disclosure)
+            trace.detail.update({
+                "notebook_id": results[0].notebook_id,
+                "libraries": len(libraries),
+                "workbooks": total,
+                "listed": listed,
+            })
+        return results, trace
+
+    def _federated_manifests(
+        self, libraries: Sequence[tuple[str, Sequence[str]]], rotation_key: str,
+    ) -> tuple[list[dict[str, Any]], int, int]:
+        """``(manifests, workbooks, listed)`` for the peer lane's ONE catalog.
+
+        Order: libraries by notebook id, rotated to start at a position derived
+        from ``rotation_key`` (the question), then library-minor round robin
+        -- every library's first workbook, then every library's second -- with
+        each library's own workbooks in its visible-source order.  Neither the
+        caller's participant order nor which library is the NOMINAL active
+        enters it: a peer run has no subject library, and the head of the
+        rotation is the one seat that is never cut (the catalog is a prefix
+        projection, and ``_default_plan`` falls back to its first entry), so a
+        fixed head would hand that advantage to the same library on every
+        question.  A digest of the question is deterministic per question and
+        spreads the head evenly across questions.
+
+        Only sources with a compiled manifest are candidates (one directory
+        listing per library, no file opened); a source id already taken by an
+        earlier library is skipped, because the planner names a workbook by
+        ``source_id`` alone.  Manifests are read one at a time into the same
+        projection ``_plan`` builds, and reading stops as soon as that
+        projection is incomplete -- nothing after that point could be listed,
+        so the prompt is byte-identical to projecting every candidate, without
+        reading them.  ``workbooks`` is the candidate count, ``listed`` how
+        many of them the projection names.
+        """
+        compiled: dict[str, list[str]] = {}
+        for notebook_id, source_ids in libraries:
+            present = self.artifacts.spreadsheet_manifest_ids(notebook_id)
+            compiled[notebook_id] = [
+                source_id for source_id in dict.fromkeys(source_ids)
+                if source_id in present
+            ]
+        order = sorted(compiled)
+        if order:
+            head = int.from_bytes(
+                hashlib.blake2s(
+                    rotation_key.encode("utf-8"), digest_size=8,
+                ).digest(),
+                "big",
+            ) % len(order)
+            order = order[head:] + order[:head]
+        queue: list[tuple[str, str]] = []
+        taken: set[str] = set()
+        depth = max((len(column) for column in compiled.values()), default=0)
+        for position in range(depth):
+            for notebook_id in order:
+                column = compiled[notebook_id]
+                if position < len(column) and column[position] not in taken:
+                    taken.add(column[position])
+                    queue.append((notebook_id, column[position]))
+        projection = _CatalogProjection(
+            self.settings.spreadsheet_analysis_planner_catalog_bytes
+        )
+        manifests: list[dict[str, Any]] = []
+        for ref in queue:
+            loaded = self._load_manifests((ref,))
+            if not loaded:
+                continue
+            manifests.extend(loaded)
+            if not projection.add(loaded[0]):
+                break
+        return manifests, len(queue), len(projection.projected)
+
+    def _analyze_loaded(
+        self,
+        manifests: Sequence[dict[str, Any]],
+        *,
+        notebook_id: str,
+        notebook_tiers: Mapping[str, str] | None,
+        question: str,
+        planner_client: Any,
+        cancel_event: Any,
+        catalog_note: str = "",
+    ) -> tuple[list[SpreadsheetAnalysisResult], TraceStep | None]:
+        """Plan, execute and receipt one already-loaded manifest list."""
         if not manifests:
             return [], None
         raise_if_cancelled(cancel_event)
         started = perf_counter()
-        plan = self._plan(question, manifests, planner_client, cancel_event)
+        plan = self._plan(
+            question, manifests, planner_client, cancel_event,
+            catalog_note=catalog_note,
+        )
         if plan is None:
             return [], None
         raise_if_cancelled(cancel_event)
@@ -689,6 +841,8 @@ class SpreadsheetAnalysisService:
         manifests: Sequence[dict[str, Any]],
         client: Any,
         cancel_event: Any,
+        *,
+        catalog_note: str = "",
     ) -> dict[str, Any] | None:
         if getattr(client, "configured", False):
             catalog, planning_manifests, catalog_complete = (
@@ -705,7 +859,8 @@ class SpreadsheetAnalysisService:
                 "aggregate、top、filter。aggregate 使用 aggregation=sum|avg|min|max|count，"
                 "可选 measure/group_by；top 使用 sort_by/order=asc|desc；filter 可选 filters，"
                 "每项 operator=eq|ne|gt|gte|lt|lte|contains。无法可靠匹配时返回 operation=profile。\n"
-                f"问题：{question}\n可用工作簿：{json.dumps(catalog, ensure_ascii=False)}"
+                f"问题：{question}\n{catalog_note}"
+                f"可用工作簿：{json.dumps(catalog, ensure_ascii=False)}"
             )
             try:
                 raw = client.chat_json(
@@ -738,59 +893,13 @@ class SpreadsheetAnalysisService:
         self, manifests: Sequence[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
         """Project whole catalog fields without ever slicing user-authored text."""
-        limit = self.settings.spreadsheet_analysis_planner_catalog_bytes
-        catalog: list[dict[str, Any]] = []
-        projected: list[dict[str, Any]] = []
-        complete = True
-        stop = False
-        used_bytes = _json_bytes(catalog)
+        projection = _CatalogProjection(
+            self.settings.spreadsheet_analysis_planner_catalog_bytes
+        )
         for manifest in manifests:
-            catalog_manifest = {
-                "source_id": manifest["source_id"],
-                "title": manifest.get("source_title", ""),
-                "sheets": [],
-            }
-            projected_manifest = {
-                "source_id": manifest["source_id"],
-                "sheets": [],
-            }
-            if _json_bytes([*catalog, catalog_manifest]) > limit:
-                complete = False
+            if not projection.add(manifest):
                 break
-            catalog.append(catalog_manifest)
-            projected.append(projected_manifest)
-            used_bytes = _json_bytes(catalog)
-            for sheet in manifest.get("sheets", []):
-                catalog_sheet = {
-                    "name": sheet["name"],
-                    "headers": [],
-                    "rows": len(sheet["rows"]),
-                }
-                projected_sheet = {"name": sheet["name"], "headers": []}
-                catalog_manifest["sheets"].append(catalog_sheet)
-                projected_manifest["sheets"].append(projected_sheet)
-                if _json_bytes(catalog) > limit:
-                    catalog_manifest["sheets"].pop()
-                    projected_manifest["sheets"].pop()
-                    complete = False
-                    stop = True
-                    break
-                used_bytes = _json_bytes(catalog)
-                for header in sheet.get("headers", []):
-                    header_bytes = _json_bytes(header)
-                    added_bytes = header_bytes + (1 if catalog_sheet["headers"] else 0)
-                    if used_bytes + added_bytes > limit:
-                        complete = False
-                        stop = True
-                        break
-                    catalog_sheet["headers"].append(header)
-                    projected_sheet["headers"].append(header)
-                    used_bytes += added_bytes
-                if stop:
-                    break
-            if stop:
-                break
-        return catalog, projected, complete
+        return projection.catalog, projection.projected, projection.complete
 
     def _default_plan(self, manifests: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
         first = next(
@@ -1303,6 +1412,67 @@ class SpreadsheetAnalysisService:
                 origin_notebook_id, citation_active_id(active_notebook_id),
             ),
         )
+
+
+class _CatalogProjection:
+    """The planner catalog's whole-field prefix projection, one manifest at a time.
+
+    ``_bounded_planner_catalog`` feeds it a whole manifest list; the peer lane
+    feeds it manifest by manifest as it reads them and stops reading the
+    moment ``add`` answers False.  It is a stateful object rather than a loop
+    body so both callers cut at exactly the same field: the accounting below
+    is the single-library projection's, moved here unchanged.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.catalog: list[dict[str, Any]] = []
+        self.projected: list[dict[str, Any]] = []
+        self.complete = True
+
+    def add(self, manifest: dict[str, Any]) -> bool:
+        """Project one more manifest; False once the byte budget is spent."""
+        limit = self.limit
+        catalog = self.catalog
+        catalog_manifest = {
+            "source_id": manifest["source_id"],
+            "title": manifest.get("source_title", ""),
+            "sheets": [],
+        }
+        projected_manifest = {
+            "source_id": manifest["source_id"],
+            "sheets": [],
+        }
+        if _json_bytes([*catalog, catalog_manifest]) > limit:
+            self.complete = False
+            return False
+        catalog.append(catalog_manifest)
+        self.projected.append(projected_manifest)
+        for sheet in manifest.get("sheets", []):
+            catalog_sheet = {
+                "name": sheet["name"],
+                "headers": [],
+                "rows": len(sheet["rows"]),
+            }
+            projected_sheet = {"name": sheet["name"], "headers": []}
+            catalog_manifest["sheets"].append(catalog_sheet)
+            projected_manifest["sheets"].append(projected_sheet)
+            if _json_bytes(catalog) > limit:
+                catalog_manifest["sheets"].pop()
+                projected_manifest["sheets"].pop()
+                self.complete = False
+                return False
+            used_bytes = _json_bytes(catalog)
+            for header in sheet.get("headers", []):
+                header_bytes = _json_bytes(header)
+                added_bytes = header_bytes + (1 if catalog_sheet["headers"] else 0)
+                if used_bytes + added_bytes > limit:
+                    self.complete = False
+                    return False
+                catalog_sheet["headers"].append(header)
+                projected_sheet["headers"].append(header)
+                used_bytes += added_bytes
+        return True
 
 
 def spreadsheet_prompt_block(

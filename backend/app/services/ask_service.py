@@ -5781,6 +5781,16 @@ class AskService:
         if self.spreadsheet_analysis is None:
             return []
         try:
+            peer_seat = self._peer_workbook_seat()
+            if peer_seat is not None:
+                results, step = self._peer_workbook_results(
+                    prepared, runtime, peer_seat
+                )
+                if step is not None:
+                    trace.append(step)
+                    if runtime.trace_sink:
+                        runtime.trace_sink(step)
+                return results
             notebook_id = prepared.notebook_id
             hidden_source_ids = set(
                 self.ask_engine_hidden_sources(notebook_id, prepared.user_id)
@@ -5798,8 +5808,9 @@ class AskService:
             # library outside the selection that still contributes evidence.
             # NARROWING ONLY: this can drop libraries, never add one, so it
             # stays a consumption-boundary filter rather than a second way to
-            # learn a participant set.  (The other half -- analysing the PEERS'
-            # workbooks -- is a federation gap registered in `fangan_todo.md`.)
+            # learn a participant set.  Production peer runs never get here --
+            # they take ``_peer_workbook_results`` above; this branch is what a
+            # retrieval without the federated seat keeps.
             if subjectless_run_active():
                 participant_notebook_ids = _peer_ceiling_participants(
                     participant_notebook_ids
@@ -5846,6 +5857,64 @@ class AskService:
                 "spreadsheet reasoning lane failed (%s)", type(exc).__name__
             )
             return []
+
+    def _peer_workbook_seat(self):
+        """The federated workbook participant entry, in a peer run only.
+
+        ``None`` outside a subjectless run -- so a single-notebook run, mounts
+        included, keeps its lane byte for byte -- and for a retrieval that
+        does not offer the seat (``RetrievalService.workbook_libraries``, a
+        ``getattr`` probe like ``chunk_participant_count``).  The seat is the
+        chunk lane's own bounded participant set and visible reads, NOT the
+        authorization-grade ``ask_engine_participant_notebooks``: that one
+        must stay the real mount predicate, and in a peer run it describes
+        the nominal active's mount table instead of the user's selection.
+        """
+        if not subjectless_run_active():
+            return None
+        return getattr(getattr(self, "retrieval", None), "workbook_libraries", None)
+
+    def _peer_workbook_results(self, prepared, runtime, seat) -> tuple:
+        """The peer lane: every selected library's workbooks, one plan.
+
+        Asks the cheap question first (``wants_analysis``: switch + table
+        intent), so a global question without table intent enumerates no
+        library at all.  Each participant is then kept only if the run froze
+        a ceiling for it (``_peer_ceiling_participants``, the D0-5 narrowing,
+        still narrowing-only) and each list only holds sources the frozen
+        scope admits -- so a library outside the selection, or one the asker
+        cannot read, contributes nothing, and a deselected source stays out.
+        No private Memory/Knowhow projection can enter: the seat's lists are
+        visible sources only.  The rest -- one catalog filled library by
+        library under the single-library byte budget, one plan, one sheet --
+        is ``SpreadsheetAnalysisService.analyze_peer``.
+        """
+        question = prepared.research_question
+        if not self.spreadsheet_analysis.wants_analysis(question):
+            return [], None
+        libraries = tuple(seat(prepared.notebook_id))
+        kept = set(_peer_ceiling_participants(
+            notebook_id for notebook_id, _sources in libraries
+        ))
+        scope = runtime.scope
+        libraries = tuple(
+            (notebook_id, tuple(
+                source_id for source_id in sources
+                if scope is None or scope.allows(notebook_id, source_id)
+            ))
+            for notebook_id, sources in libraries
+            if notebook_id in kept
+        )
+        return self.spreadsheet_analysis.analyze_peer(
+            notebook_id=prepared.notebook_id,
+            libraries=libraries,
+            notebook_tiers=self._tier_map_for(
+                notebook_id for notebook_id, _sources in libraries
+            ),
+            question=question,
+            planner_client=self.model_clients.chat("reasoning_agent"),
+            cancel_event=runtime.cancellation,
+        )
 
     def _build_reasoning_retriever(
         self, *, cancel_event, user_id: str, egress_question: str = "",

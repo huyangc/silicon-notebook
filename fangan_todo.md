@@ -187,17 +187,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       执行侧的 `_element_search_skip` peer_mode 跳过与 `_first_round_empty_fallback` 的
       补腿闸仍直读 `subjectless_run_active`（引用核验守卫 `_ELEMENT_ARM_CLOSED` 按字面钉着），
       与生产者那道闸一起改。PPR 那把 `ppr_retrieve_offered` 独立，不受牵连。）
-- [ ] **全局（对等）模式的表格分析臂只覆盖名义 active**。`AskService
-      ._spreadsheet_reasoning_results` 走的是**真实挂载谓词**
-      （`ask_engine_participant_notebooks`，鉴权级座位，绝不许变成覆盖感知——守卫
-      `test_participant_override_guard::test_injected_participant_predicate_is_the_real_mount_predicate`
-      钉住了这一点），所以对等模式下它答的是名义 active 自己的挂载表，而不是用户选中的
-      那几个库。D0-5 已经把**泄漏**那一半关掉：按逐库冻结天花板收窄，挂在命名锚点下却不
-      在本次选择里的参考库不再供证据（只减不增）。剩下的是**联邦化**那一半：其余参与库
-      的工作簿今天完全不参与分析，于是「比较 A 库和 B 库那两张报价表」在全局模式下只能
-      看到 A 库的。修法要新开一条不经鉴权座位的参与集入口（与 `chunk_federation
-      ._bounded_participants` 同源），并决定跨库工作簿的成本上界（分析臂是模型规划 +
-      逐表读取，× 库数不是免费的）。
 - [ ] **8 库 reasoning 的 `payload_json` 体积观测**。全局作业没有轨迹子表，推理轨迹整份存在
       作业行的单个 JSON 里，`_append_trace` 只靠时间/步数双阈值节流重写。8 个库的 reasoning
       run 轮数与每步 detail 都比单库大，这份 payload 的真实分布没有测过；要先量（p50/p95
