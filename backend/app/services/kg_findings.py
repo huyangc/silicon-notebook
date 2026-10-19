@@ -56,8 +56,11 @@ from app.domain.kg_findings_contracts import (
     F3A_MIN_NAMES,
     F3A_MIN_SINGLE_CHAR_RUN,
     F3A_SHARE_MIN,
+    DECISION_APART_STATUSES,
     F3B_ISOLATED_SHARE_FACTOR,
+    F3B_ISOLATED_SHARE_FLOOR,
     F3B_MIN_ISOLATED,
+    F3B_MIN_OBJECTS,
     F3B_RELATIONS_PER_OBJECT_FRACTION,
     F5_TOP_SOURCES,
     FINDING_RULES,
@@ -114,8 +117,19 @@ _DUP_J = Fraction(repr(DUP_J_MIN))
 # ranks stay far below 2^31.
 _INDEX_DTYPE = np.int32
 _EMPTY_INDEX = np.empty(0, dtype=_INDEX_DTYPE)
-# Candidate pairs verified per sparse batch (bounded transient memory).
-_VERIFY_BATCH = 1 << 15
+# F2 verification batching — engineering bounds on transient memory, not
+# result-changing limits (every candidate is verified):
+#   · concepts expanded per step (≈ 25 B each across the step's temporaries,
+#     so ≈ 26 MB at 1 << 20); a single pair larger than this is its own step;
+#   · candidate pairs per chunk (the per-pair helper arrays are chunk-sized).
+_VERIFY_ELEMENT_BUDGET = 1 << 20
+_VERIFY_PAIR_CHUNK = 1 << 16
+# Canonical ids per ``member_seeds`` call (the caller binds them into one IN
+# list per call; same order as the store's other bounded batches).
+_MEMBER_SEED_BATCH = 500
+# S1 examples: candidates whose visible names are asked per lookup round, so
+# that unreproducible examples cost a round per this many, not per 3.
+_S1_LOOKAHEAD = 30
 
 
 # ============================================================ step ③ structure
@@ -302,6 +316,7 @@ class _Corpus:
     giant: "np.ndarray"            # int64 [S]
     n_nodes: int
     extra_ids: List[str]           # side index n_nodes + k  ->  canonical id
+    extra_rank: Dict[str, int]     # canonical id -> side index (the tally's own dict, renumbered)
     stride: int                    # n_nodes + len(extra_ids)
     inc_src: "np.ndarray"          # int32 unique (source, concept) incidences,
     inc_can: "np.ndarray"          #   sorted by (source rank, concept index)
@@ -345,12 +360,15 @@ def _drain_tally(tally: FindingsObjectTally, structure: GraphStructure) -> _Corp
     in_graph = per_source(tally._in_graph)
     giant = per_source(tally._giant)
     n_nodes = tally._n_nodes
-    extra_ids = sorted(tally._extra)
+    extra_rank = tally._extra
+    tally._extra = {}
+    extra_ids = sorted(extra_rank)
     stride = n_nodes + len(extra_ids)
     remap = np.empty(len(extra_ids), dtype=_INDEX_DTYPE)
     for position, canonical_id in enumerate(extra_ids):
-        remap[tally._extra[canonical_id] - n_nodes] = n_nodes + position
-    tally._extra = {}
+        remap[extra_rank[canonical_id] - n_nodes] = n_nodes + position
+        # Renumber in place: the names pass reuses this dict (no second map).
+        extra_rank[canonical_id] = n_nodes + position
     rows = int(tally._rows)
     src = tally._drain_column(0)
     can = tally._drain_column(1)
@@ -383,8 +401,8 @@ def _drain_tally(tally: FindingsObjectTally, structure: GraphStructure) -> _Corp
     if n_nodes:
         degree[:n_nodes] = structure.degree
     return _Corpus(
-        source_ids, objects, isolated, in_graph, giant, n_nodes, extra_ids, stride,
-        inc_src, inc_can, inc_objects, indptr, df, concepts, can_objects, degree,
+        source_ids, objects, isolated, in_graph, giant, n_nodes, extra_ids, extra_rank,
+        stride, inc_src, inc_can, inc_objects, indptr, df, concepts, can_objects, degree,
     )
 
 
@@ -405,7 +423,8 @@ def _top_by_degree(corpus: _Corpus, indices: "np.ndarray", limit: int) -> List[i
 @dataclass
 class _DuplicatePairs:
     pairs: List[Tuple[int, int, int, int]]   # (rank a, rank b, |A∩B|, |A∪B|), a < b
-    candidate_pairs: int
+    candidate_pairs: int                     # distinct pairs verified
+    candidate_generations: int               # pairs generated, repeats included (the capped count)
     candidates_truncated: bool
     universe_can: "np.ndarray"               # universe incidences, sorted (source, concept)
     universe_indptr: "np.ndarray"
@@ -421,17 +440,23 @@ def _prefix_lengths(sizes: "np.ndarray") -> "np.ndarray":
 def _candidate_pairs(
     p_src: "np.ndarray", p_can: "np.ndarray", df: "np.ndarray",
     n_sources: int, cap: int,
-) -> Tuple["np.ndarray", "np.ndarray", bool]:
+) -> Tuple["np.ndarray", "np.ndarray", int, bool]:
     """All pairs of sources sharing a prefix concept, generation capped at ``cap``.
+
+    Returns ``(a, b, generated, truncated)``: the distinct pairs (``a < b``), and
+    how many pairs were GENERATED — repeats included, one per shared prefix
+    concept. ``cap`` bounds the generated count (that is what costs memory), so
+    the ledger reports it against the limit, never the distinct count.
 
     Inverted lists are visited in the global order (document frequency asc,
     concept index asc), so the cap cuts the same lists on every run and backend.
-    Like the calibrated probe, the list that would push the running pair count
-    over the cap stops generation (``truncated``); every list before it is
-    complete. Pair generation is vectorised; transient memory ≈ 16 B × pairs.
+    Like the calibrated probe, the list that would push the running count over
+    the cap stops generation (``truncated``); every list before it is complete.
+    Generation is vectorised; transient memory measured at ≈ 25 B per generated
+    pair (``test_candidate_generation_memory_per_pair`` bounds it at 32 B).
     """
     if p_src.size == 0:
-        return _EMPTY_INDEX, _EMPTY_INDEX, False
+        return _EMPTY_INDEX, _EMPTY_INDEX, 0, False
     order = np.lexsort((p_src, p_can, df[p_can]))
     p_src = p_src[order]
     p_can = p_can[order]
@@ -443,7 +468,9 @@ def _candidate_pairs(
     truncated = not bool(within.all())
     kept_lists = int(np.argmin(within)) if truncated else int(within.size)
     if kept_lists == 0:
-        return _EMPTY_INDEX, _EMPTY_INDEX, truncated
+        return _EMPTY_INDEX, _EMPTY_INDEX, 0, truncated
+    generated = int(running[kept_lists - 1])
+    del running, within
     end = int(starts[kept_lists]) if kept_lists < starts.size else int(p_src.size)
     members = p_src[:end].astype(np.int64)
     list_end = np.repeat(starts[:kept_lists] + sizes[:kept_lists], sizes[:kept_lists])
@@ -452,7 +479,7 @@ def _candidate_pairs(
     del list_end
     total = int(after.sum())
     if total == 0:
-        return _EMPTY_INDEX, _EMPTY_INDEX, truncated
+        return _EMPTY_INDEX, _EMPTY_INDEX, 0, truncated
     left = np.repeat(members, after)
     first = np.cumsum(after) - after
     right_position = np.repeat(position + 1 - first, after)
@@ -465,13 +492,87 @@ def _candidate_pairs(
     key += right
     del left, right
     key.sort()
-    unique = key[_group_starts(key)]
-    del key
+    # A boolean mask, not `_group_starts`' index array: 1 byte per generated pair
+    # instead of 8 at the peak.
+    first_of_run = np.empty(key.size, dtype=bool)
+    first_of_run[0] = True
+    np.not_equal(key[1:], key[:-1], out=first_of_run[1:])
+    unique = key[first_of_run]
+    del key, first_of_run
     return (
         (unique // width).astype(_INDEX_DTYPE),
         (unique % width).astype(_INDEX_DTYPE),
+        generated,
         truncated,
     )
+
+
+def _verify_pairs(
+    cand_a: "np.ndarray", cand_b: "np.ndarray", universe_can: "np.ndarray",
+    indptr: "np.ndarray", sizes: "np.ndarray", width: int,
+) -> List[Tuple[int, int, int, int]]:
+    """Exact ``|A∩B|`` for every candidate, in batches bounded by ELEMENTS.
+
+    For each pair only the SMALLER set is expanded and each of its concepts is
+    looked up (one vectorised ``searchsorted``) in the sorted universe keys
+    ``source * width + concept`` of the other source — the larger source's row is
+    never copied, so one big source with many partners costs its partners'
+    sizes, not its own size per partner. A batch takes pairs until the expanded
+    elements reach ``_VERIFY_ELEMENT_BUDGET`` (a single pair larger than the budget
+    is its own batch); ``test_verification_memory_is_bounded_by_the_element_budget``
+    pins the peak.
+    """
+    if cand_a.size == 0:
+        return []
+    src = np.repeat(np.arange(sizes.size, dtype=np.int64), sizes)
+    keys = src * int(width)          # sorted: universe incidences are (source, concept) sorted
+    del src
+    keys += universe_can
+    pairs: List[Tuple[int, int, int, int]] = []
+    for chunk in range(0, int(cand_a.size), _VERIFY_PAIR_CHUNK):
+        a = cand_a[chunk:chunk + _VERIFY_PAIR_CHUNK].astype(np.int64)
+        b = cand_b[chunk:chunk + _VERIFY_PAIR_CHUNK].astype(np.int64)
+        inter = _intersections(a, b, keys, universe_can, indptr, sizes, int(width))
+        union = sizes[a] + sizes[b] - inter
+        hit = inter * _DUP_J.denominator >= _DUP_J.numerator * union
+        pairs.extend(zip(a[hit].tolist(), b[hit].tolist(),
+                         inter[hit].tolist(), union[hit].tolist()))
+    return pairs
+
+
+def _intersections(
+    a: "np.ndarray", b: "np.ndarray", keys: "np.ndarray", universe_can: "np.ndarray",
+    indptr: "np.ndarray", sizes: "np.ndarray", width: int,
+) -> "np.ndarray":
+    """``|A∩B|`` per pair of one chunk; expanded elements per step ≤ the budget."""
+    small_is_a = sizes[a] <= sizes[b]
+    small = np.where(small_is_a, a, b)
+    large = np.where(small_is_a, b, a)
+    del small_is_a
+    cost = sizes[small]                # ≥ 1: every candidate shares a universe concept
+    running = np.cumsum(cost)
+    out = np.empty(a.size, dtype=np.int64)
+    at = 0
+    while at < a.size:
+        base = int(running[at - 1]) if at else 0
+        end = max(int(np.searchsorted(running, base + _VERIFY_ELEMENT_BUDGET, side="right")),
+                  at + 1)
+        lengths = cost[at:end]
+        expanded = int(lengths.sum())
+        first = np.cumsum(lengths) - lengths
+        position = np.repeat(indptr[small[at:end]] - first, lengths)
+        position += np.arange(expanded, dtype=np.int64)
+        query = np.repeat(large[at:end] * width, lengths)
+        query += universe_can[position]
+        del position
+        found = np.searchsorted(keys, query)
+        np.minimum(found, keys.size - 1, out=found)
+        matched = (keys[found] == query).astype(np.int64)
+        del found, query
+        out[at:end] = np.add.reduceat(matched, first)
+        del matched, first
+        at = end
+    return out
 
 
 def _duplicate_pairs(corpus: _Corpus, cap: int) -> _DuplicatePairs:
@@ -501,32 +602,13 @@ def _duplicate_pairs(corpus: _Corpus, cap: int) -> _DuplicatePairs:
     # A concept in one source only can never be shared: it keeps its place in
     # the prefix (positions are global), it is just not indexed.
     in_prefix &= corpus.df[o_can] >= 2
-    cand_a, cand_b, truncated = _candidate_pairs(
+    cand_a, cand_b, generated, truncated = _candidate_pairs(
         o_src[in_prefix], o_can[in_prefix], corpus.df, n_sources, cap
     )
     del o_src, o_can, position, in_prefix, u_src
-    pairs: List[Tuple[int, int, int, int]] = []
-    if cand_a.size:
-        from scipy.sparse import csr_matrix
-
-        matrix = csr_matrix(
-            (np.ones(u_can.size, dtype=np.int32), u_can, indptr),
-            shape=(n_sources, max(corpus.stride, 1)),
-        )
-        num, den = _DUP_J.numerator, _DUP_J.denominator
-        for at in range(0, int(cand_a.size), _VERIFY_BATCH):
-            a = cand_a[at:at + _VERIFY_BATCH]
-            b = cand_b[at:at + _VERIFY_BATCH]
-            inter = np.asarray(
-                matrix[a].multiply(matrix[b]).sum(axis=1)
-            ).ravel().astype(np.int64)
-            union = sizes[a] + sizes[b] - inter
-            hit = inter * den >= num * union
-            pairs.extend(zip(a[hit].tolist(), b[hit].tolist(),
-                             inter[hit].tolist(), union[hit].tolist()))
-        del matrix
+    pairs = _verify_pairs(cand_a, cand_b, u_can, indptr, sizes, max(corpus.stride, 1))
     pairs.sort()
-    return _DuplicatePairs(pairs, int(cand_a.size), truncated, u_can, indptr)
+    return _DuplicatePairs(pairs, int(cand_a.size), generated, truncated, u_can, indptr)
 
 
 # ================================================================== F1 inputs
@@ -714,15 +796,17 @@ def _off_topic_specs(
         samples = _top_by_degree(corpus, unique, MAX_SAMPLES)
         refs = [corpus.source_ids[rank] for rank in members]
         impact = int(corpus.objects[members].sum())
-        evidence = {
+        # Only the numbers the criterion used (§3.1): the object count is the
+        # impact, not evidence. Without any relation there is no giant component,
+        # so the key is absent rather than null (F1 still judges sharing, §4.1).
+        evidence: dict = {
             "shared_share": float(shared_share[primary]),
-            "giant_share": (None if giant_share is None else float(giant_share[primary])),
             "concepts": int(corpus.concepts[primary]),
-            "objects": int(corpus.objects[primary]),
         }
+        if giant_share is not None:
+            evidence["giant_share"] = float(giant_share[primary])
         partners = [
             {"source_id": corpus.source_ids[rank],
-             "objects": int(corpus.objects[rank]),
              "concepts": int(corpus.concepts[rank]),
              "shared_share": float(shared_share[rank])}
             for rank in members[1:]
@@ -822,8 +906,9 @@ class _ParseDamage:
     fragmented_share: "np.ndarray"
     relations_per_object: "np.ndarray"
     isolated_share: "np.ndarray"
-    median_relations: float
+    median_relations: Optional[float]     # None: no source reaches F3B_MIN_OBJECTS
     median_isolated: float
+    isolated_threshold: float             # max(factor × median, floor)
 
 
 def _exact_median(numerators: Sequence[int], denominators: Sequence[int]) -> Fraction:
@@ -852,21 +937,36 @@ def _parse_damage(
 
     F3a's share is over ALL the source's concept canonicals (named or not), the
     calibrated probe's denominator; canonicals without a name are never broken.
-    Both F3b comparisons are exact rationals: "below half the median" and "above
-    three medians" are strict, and an exact tie must stay a non-hit.
+
+    F3b, both sub-signals floored (a tiny source's ratios say nothing about
+    parsing):
+      · relations / objects strictly below ``F3B_RELATIONS_PER_OBJECT_FRACTION`` of
+        the median — judged, and the median taken, only over sources with at least
+        ``F3B_MIN_OBJECTS`` objects;
+      · isolated share strictly above max(``F3B_ISOLATED_SHARE_FACTOR`` × median,
+        ``F3B_ISOLATED_SHARE_FLOOR``) with at least ``F3B_MIN_ISOLATED`` isolated
+        objects — the floor keeps a 0 median from turning "20 isolated objects at
+        1%" into a hit.
+    Both comparisons are exact rationals: strict, and an exact tie stays a non-hit.
     """
     n_sources = len(corpus.source_ids)
     objects = [max(1, int(n)) for n in corpus.objects.tolist()]
     relations = [int(relations_by_source.get(source_id, 0) or 0)
                  for source_id in corpus.source_ids]
     isolated = [int(n) for n in corpus.isolated.tolist()]
-    median_relations = _exact_median(relations, objects)
+    judged = [i for i, o in enumerate(objects) if o >= F3B_MIN_OBJECTS]
+    median_relations: Optional[Fraction] = (
+        _exact_median([relations[i] for i in judged], [objects[i] for i in judged])
+        if judged else None
+    )
     median_isolated = _exact_median(isolated, objects)
-    low_cut = median_relations * Fraction(repr(F3B_RELATIONS_PER_OBJECT_FRACTION))
-    high_cut = median_isolated * Fraction(repr(F3B_ISOLATED_SHARE_FACTOR))
-    low_relations = np.asarray([
-        r * low_cut.denominator < low_cut.numerator * o for r, o in zip(relations, objects)
-    ], dtype=bool)
+    high_cut = max(median_isolated * Fraction(repr(F3B_ISOLATED_SHARE_FACTOR)),
+                   Fraction(repr(F3B_ISOLATED_SHARE_FLOOR)))
+    low_relations = np.zeros(n_sources, dtype=bool)
+    if median_relations is not None:
+        low_cut = median_relations * Fraction(repr(F3B_RELATIONS_PER_OBJECT_FRACTION))
+        for i in judged:
+            low_relations[i] = relations[i] * low_cut.denominator < low_cut.numerator * objects[i]
     high_isolated = np.asarray([
         i >= F3B_MIN_ISOLATED and i * high_cut.denominator > high_cut.numerator * o
         for i, o in zip(isolated, objects)
@@ -886,8 +986,9 @@ def _parse_damage(
     return _ParseDamage(
         fragmented_hit | low_relations | high_isolated, fragmented, fragmented_hit,
         low_relations, high_isolated, fragmented_names, fragmented_objects,
-        fragmented_share, relations_per_object, isolated_share, float(median_relations),
-        float(median_isolated),
+        fragmented_share, relations_per_object, isolated_share,
+        None if median_relations is None else float(median_relations),
+        float(median_isolated), float(high_cut),
     )
 
 
@@ -898,7 +999,7 @@ def _parse_damage_specs(
     for rank in np.flatnonzero(f3.hit).tolist():
         source_id = corpus.source_ids[rank]
         signals: List[str] = []
-        evidence: dict = {"objects": int(corpus.objects[rank])}
+        evidence: dict = {}
         samples: List[int] = []
         if f3.fragmented_hit[rank]:
             signals.append(F3_SIGNAL_FRAGMENTED_NAMES)
@@ -916,6 +1017,7 @@ def _parse_damage_specs(
             evidence["isolated_objects"] = int(corpus.isolated[rank])
             evidence["isolated_share"] = float(f3.isolated_share[rank])
             evidence["median_isolated_share"] = f3.median_isolated
+            evidence["isolated_share_threshold"] = f3.isolated_threshold
         evidence["signals"] = signals
         # It would also have been F1: if it is still unrelated to the library
         # after reparsing, it turns into an off-topic finding (§4.3).
@@ -985,7 +1087,7 @@ def _names_pass(
     boolean arrays over the concept index space."""
     stride = corpus.stride
     present = (corpus.df > 0).astype(np.uint8).tobytes()
-    extra_rank = {cid: corpus.n_nodes + k for k, cid in enumerate(corpus.extra_ids)}
+    extra_rank = corpus.extra_rank
     n_nodes = corpus.n_nodes
     named_idx = array("q")
     fragmented_idx = array("q")
@@ -1056,44 +1158,105 @@ def _resolve_canonical_ids(
 
 # ================================================================== F4 / S1
 def _sources_of(corpus: _Corpus, indices: Set[int]) -> Dict[int, List[int]]:
-    """Source ranks holding a visible member, per concept index (one argsort)."""
+    """Source ranks holding a visible member, per concept index.
+
+    One argsort, then ONE vectorised ``searchsorted`` per side for all the
+    indices, with the keys already in the array's dtype — a scalar Python-int
+    key per call would make numpy convert the whole sorted array every time
+    (≈ 230 µs per call at 2.1 M incidences: quadratic in a wide group's size).
+    ``test_sources_of_is_one_vectorised_lookup`` pins the call shape."""
     if not indices:
         return {}
     order = np.argsort(corpus.inc_can, kind="stable")
     ordered = corpus.inc_can[order]
-    out: Dict[int, List[int]] = {}
-    for index in indices:
-        lo = int(np.searchsorted(ordered, index, side="left"))
-        hi = int(np.searchsorted(ordered, index, side="right"))
-        out[index] = sorted(corpus.inc_src[order[lo:hi]].tolist())
-    return out
+    wanted = np.fromiter(sorted(indices), dtype=ordered.dtype, count=len(indices))
+    low = np.searchsorted(ordered, wanted, side="left")
+    high = np.searchsorted(ordered, wanted, side="right")
+    del ordered
+    sources = corpus.inc_src[order]       # source rank per incidence, grouped by concept
+    del order
+    return {
+        index: sorted(sources[lo:hi].tolist())
+        for index, lo, hi in zip(wanted.tolist(), low.tolist(), high.tolist())
+    }
 
 
-def _open_class_pairs(
-    classes: Mapping[str, List[str]], decided: Set[frozenset],
+def _member_seed_sets(
+    canonical_ids: Sequence[str],
+    member_seeds: Callable[[Sequence[str]], Mapping[str, Iterable[str]]],
+) -> Dict[str, Set[str]]:
+    """v1 seeds of every member of each canonical, asked in bounded batches.
+
+    The canonical id itself (``"K-" + min seed``) is a member seed too, and it
+    is the key legacy decision rows fell back to when ``seed_a/seed_b`` were
+    empty — so it is always included."""
+    seeds: Dict[str, Set[str]] = {
+        cid: ({cid[2:]} if cid.startswith("K-") else set()) for cid in canonical_ids
+    }
+    for at in range(0, len(canonical_ids), _MEMBER_SEED_BATCH):
+        batch = list(canonical_ids[at:at + _MEMBER_SEED_BATCH])
+        for cid, found in member_seeds(batch).items():
+            if cid in seeds:
+                seeds[cid].update(str(seed) for seed in found if seed)
+    return seeds
+
+
+def _apart_adjacency(
+    seeds_of: Mapping[str, Set[str]], decisions: Mapping[frozenset, str],
+) -> Dict[str, Set[str]]:
+    """canonical id → the canonicals the user judged NOT the same thing.
+
+    Decisions are stored per v1 SEED pair (`decided_seed_pairs_from`), because
+    a canonical id moves whenever its cluster's minimum member changes (locally
+    183 of 1,344 rejected/deferred rows name a canonical id that no longer
+    exists). X and Y are apart when some rejected or deferred decision {a, b}
+    has a ∈ seeds(X) and b ∈ seeds(Y). Cost: one pass over the decisions plus
+    the owners of their two seeds."""
+    owners: Dict[str, Set[str]] = {}
+    for cid, seeds in seeds_of.items():
+        for seed in seeds:
+            owners.setdefault(seed, set()).add(cid)
+    adjacency: Dict[str, Set[str]] = {}
+    for key, status in decisions.items():
+        if status not in DECISION_APART_STATUSES:
+            continue
+        pair = tuple(key)
+        if len(pair) != 2:
+            continue
+        left, right = owners.get(pair[0], ()), owners.get(pair[1], ())
+        for x in left:
+            for y in right:
+                if x != y:
+                    adjacency.setdefault(x, set()).add(y)
+                    adjacency.setdefault(y, set()).add(x)
+    return adjacency
+
+
+def _open_classes(
+    classes: Mapping[str, Sequence[str]], adjacency: Mapping[str, Set[str]],
 ) -> Set[str]:
-    """The v2-seed classes that take part in at least one class pair the user
-    has NOT decided apart. A class pair is decided apart as soon as ANY member
-    pair across it was rejected or deferred (after S1 the class is one canonical,
-    and the decision carries over to it)."""
-    seeds = sorted(classes)
-    open_classes: Set[str] = set()
-    for i, left in enumerate(seeds):
-        for right in seeds[i + 1:]:
-            apart = any(
-                frozenset((x, y)) in decided
-                for x in classes[left] for y in classes[right]
-            )
-            if not apart:
-                open_classes.update((left, right))
-    return open_classes
+    """The v2-seed classes in at least one class pair nobody decided apart.
+
+    A class pair is apart as soon as ANY member pair across it is apart (after
+    S1 each class is one canonical, and the decision carries over to it). Linear
+    in the members' apart edges: a class is open iff it is apart from fewer than
+    all the other classes."""
+    class_of = {cid: seed for seed, members in classes.items() for cid in members}
+    apart_from: Dict[str, Set[str]] = {seed: set() for seed in classes}
+    for cid, seed in class_of.items():
+        for other in adjacency.get(cid, ()):
+            other_seed = class_of.get(other)
+            if other_seed is not None and other_seed != seed:
+                apart_from[seed].add(other_seed)
+    others = len(classes) - 1
+    return {seed for seed, apart in apart_from.items() if others and len(apart) < others}
 
 
-def _undecided_inside(members: Sequence[str], decided: Set[frozenset]) -> bool:
-    return any(
-        frozenset((members[i], members[j])) not in decided
-        for i in range(len(members)) for j in range(i + 1, len(members))
-    )
+def _undecided_inside(members: Sequence[str], adjacency: Mapping[str, Set[str]]) -> bool:
+    """Whether some pair inside a narrow class is NOT decided apart."""
+    inside = set(members)
+    apart_pairs = sum(len(adjacency.get(cid, set()) & inside) for cid in members) // 2
+    return apart_pairs < len(inside) * (len(inside) - 1) // 2
 
 
 def _merge_specs(
@@ -1101,7 +1264,7 @@ def _merge_specs(
     groups: Mapping[str, List[int]],
     ids: Mapping[int, str],
     names: Mapping[str, str],
-    decided: Set[frozenset],
+    adjacency: Mapping[str, Set[str]],
 ) -> Tuple[List[_Pending], List[_Pending], Dict[str, int]]:
     """F4 groups (the wide half) and S1 classes (the narrow half), design §4.4.
 
@@ -1132,7 +1295,7 @@ def _merge_specs(
             cls = classes[seed]
             if len(cls) < 2 or len({concept_seed_v1(names[ids[i]]) for i in cls}) < 2:
                 continue
-            if not _undecided_inside([ids[i] for i in cls], decided):
+            if not _undecided_inside([ids[i] for i in cls], adjacency):
                 counts["narrow_decided_apart"] += 1
                 continue
             objects = int(corpus.can_objects[cls].sum())
@@ -1141,8 +1304,8 @@ def _merge_specs(
             narrow.append((objects, seed, sorted(cls)))
         if len(classes) < 2:
             continue
-        open_classes = _open_class_pairs(
-            {seed: [ids[i] for i in cls] for seed, cls in classes.items()}, decided
+        open_classes = _open_classes(
+            {seed: [ids[i] for i in cls] for seed, cls in classes.items()}, adjacency
         )
         if not open_classes:
             counts["wide_decided_apart"] += 1
@@ -1153,7 +1316,12 @@ def _merge_specs(
     narrow.sort(key=lambda item: (-item[0], item[1]))
     sources = _sources_of(corpus, {i for _o, _k, kept in wide for i in kept})
     f4 = [
-        _under_merge_pending(corpus, squash, kept, ids, sources, decided)
+        _under_merge_pending(
+            squash,
+            {ids[i]: int(corpus.can_objects[i]) for i in kept},
+            {ids[i]: [corpus.source_ids[r] for r in sources.get(i, [])] for i in kept},
+            {ids[i]: set(adjacency.get(ids[i], ())) for i in kept},
+        )
         for _objects, squash, kept in wide
     ]
     s1 = [_seed_defect_pending(seed, cls, ids) for _objects, seed, cls in narrow]
@@ -1170,16 +1338,15 @@ def _visible_name(lookups: _Lookups, canonical_id: str, squash: str) -> Optional
 
 
 def _under_merge_pending(
-    corpus: _Corpus,
     squash: str,
-    members: List[int],
-    ids: Mapping[int, str],
-    sources: Mapping[int, List[int]],
-    decided: Set[frozenset],
+    objects: Dict[str, int],
+    member_sources: Dict[str, List[str]],
+    adjacency: Dict[str, Set[str]],
 ) -> _Pending:
-    canonical_ids = [ids[index] for index in members]
-    objects = {ids[index]: int(corpus.can_objects[index]) for index in members}
-    source_ranks = {ids[index]: sources.get(index, []) for index in members}
+    """One F4 candidate. Its closure keeps only these small per-group maps —
+    never the corpus: the draft lives through the lookup rounds, and the
+    corpus' arrays must be free by then (``test_corpus_is_freed_once_compute_returns``)."""
+    canonical_ids = sorted(objects)
     keys: List[NameKey] = [(None, canonical_id) for canonical_id in canonical_ids]
 
     def build(lookups: _Lookups) -> Optional[dict]:
@@ -1193,24 +1360,24 @@ def _under_merge_pending(
             classes.setdefault(concept_seed_v2(name), []).append(canonical_id)
         if len(classes) < 2:
             return None            # the visible names do not reproduce the group
-        open_classes = _open_class_pairs(classes, decided)
+        open_classes = _open_classes(classes, adjacency)
         if not open_classes:
             return None
         kept = sorted(c for seed in open_classes for c in classes[seed])
         shown = sorted(kept, key=lambda c: (-objects[c], c))
-        ranks = sorted({rank for c in kept for rank in source_ranks[c]})
+        refs = sorted({source_id for c in kept for source_id in member_sources[c]})
         evidence = {
             "canonicals": len(kept),
             "spellings": len(open_classes),
-            "member_sources": len(ranks),
+            "member_sources": len(refs),
             "members": [
                 {"canonical_id": c, "name": visible[c], "objects": objects[c]}
                 for c in shown[:MAX_SAMPLES]
             ],
         }
-        refs = [corpus.source_ids[rank] for rank in ranks[:MAX_SUBJECT_REFS]]
         impact = sum(objects[c] for c in kept)
-        return _row(RULE_UNDER_MERGE, squash, visible[shown[0]], refs, impact, evidence)
+        return _row(RULE_UNDER_MERGE, squash, visible[shown[0]], refs[:MAX_SUBJECT_REFS],
+                    impact, evidence)
 
     return _Pending(RULE_UNDER_MERGE, squash, keys, [], build)
 
@@ -1248,21 +1415,29 @@ class FindingsResult:
 
 
 class _Window:
-    """Fill-to-cap window over ordered candidates the lookups may still reject."""
+    """Fill-to-cap window over ordered candidates the lookups may still reject.
 
-    __slots__ = ("_candidates", "_cap", "_next", "_awaiting", "kept", "dropped")
+    ``lookahead`` asks for more candidates than the free slots per round (S1
+    needs 3 examples; asking 3 at a time would cost one round per 3 failures).
+    Candidates verified past the cap are simply not used."""
 
-    def __init__(self, candidates: List[_Pending], cap: int) -> None:
+    __slots__ = ("_candidates", "_cap", "_lookahead", "_next", "_awaiting", "kept", "dropped")
+
+    def __init__(self, candidates: List[_Pending], cap: int, lookahead: int = 0) -> None:
         self._candidates = candidates
         self._cap = int(cap)
+        self._lookahead = int(lookahead)
         self._next = 0
         self._awaiting: List[_Pending] = []
         self.kept: List[dict] = []
         self.dropped = 0
 
     def refill(self) -> None:
-        while (len(self.kept) + len(self._awaiting) < self._cap
-               and self._next < len(self._candidates)):
+        free = self._cap - len(self.kept)
+        if free <= 0:
+            return
+        wanted = max(free, self._lookahead)
+        while len(self._awaiting) < wanted and self._next < len(self._candidates):
             self._awaiting.append(self._candidates[self._next])
             self._next += 1
 
@@ -1274,6 +1449,8 @@ class _Window:
         if not self._awaiting:
             return False
         for item in self._awaiting:
+            if len(self.kept) >= self._cap:
+                break
             row = item.build(lookups)
             if row is None:
                 self.dropped += 1
@@ -1294,9 +1471,13 @@ class FindingsDraft:
         draft = compute_findings(...)
         can2idx.clear()                       # no index is needed past here
         while (request := draft.pending()) is not None:
-            draft.supply(names=…rows for request.names…,
-                         sources=…SourceFacts for request.sources…)
+            for page in pages(request):        # any number of supply calls per round
+                draft.supply(names=…rows…, sources=…SourceFacts…)
         result = draft.result()
+
+    ``supply`` only accumulates; the round is judged when ``pending()`` (or
+    ``result()``) is called next — calling it declares the previous request
+    fully answered, and keys still without rows count as answered with nothing.
 
     Every round is bounded by the per-rule cap. F1/F2/F3/F5 need one round. F4
     groups (and S1 examples) are re-verified on the **visible** members' own names
@@ -1317,7 +1498,7 @@ class FindingsDraft:
         self._fixed = fixed
         self._windows = {
             RULE_UNDER_MERGE: _Window(f4_candidates, MAX_PERSISTED_FINDINGS),
-            RULE_SEED_DEFECT: _Window(s1_candidates, S1_EXAMPLES),
+            RULE_SEED_DEFECT: _Window(s1_candidates, S1_EXAMPLES, _S1_LOOKAHEAD),
         }
         self._statuses = statuses
         self._payload_base = payload_base
@@ -1331,9 +1512,14 @@ class FindingsDraft:
             yield from window.awaiting()
 
     def pending(self) -> Optional[LookupRequest]:
-        """The next round of lookups, or ``None`` when everything is answered."""
+        """The next round of lookups, or ``None`` when everything is answered.
+
+        Calling it closes the previous round: every candidate still awaiting
+        was part of the last request, so it is judged now on what was supplied.
+        """
         while True:
             for window in self._windows.values():
+                window.settle(self._lookups)
                 window.refill()
             names: List[NameKey] = []
             sources: List[str] = []
@@ -1348,11 +1534,10 @@ class FindingsDraft:
                         sources.append(source_id)
             if names or sources:
                 return LookupRequest(tuple(names), tuple(sources))
-            progressed = False
-            for window in self._windows.values():
-                progressed = window.settle(self._lookups) or progressed
-            if not progressed:
+            if not any(window.awaiting() for window in self._windows.values()):
                 return None
+            # Awaiting candidates whose keys were all asked already (shared keys):
+            # loop once more to judge them and promote the next ones.
 
     def supply(
         self,
@@ -1360,7 +1545,10 @@ class FindingsDraft:
         names: Iterable[Tuple[Optional[str], str, str]] = (),
         sources: Optional[Mapping[str, SourceFacts]] = None,
     ) -> None:
-        """Answer the last request: name rows, and facts per source id."""
+        """Add answers to the current round: name rows, facts per source id.
+
+        Accumulates — a paged lookup may call it any number of times; nothing is
+        judged until the next ``pending()`` / ``result()``."""
         for source_id, canonical_id, name in names:
             key = (source_id, canonical_id)
             if key in self._asked_names and name:
@@ -1368,8 +1556,6 @@ class FindingsDraft:
         for source_id, facts in (sources or {}).items():
             if source_id in self._asked_sources:
                 self._lookups.sources[source_id] = facts
-        for window in self._windows.values():
-            window.settle(self._lookups)
 
     def result(self) -> FindingsResult:
         if self.pending() is not None:
@@ -1413,7 +1599,8 @@ def compute_findings(
     can2idx: Mapping[str, int],
     names: Mapping[str, str],
     relations_by_source: Mapping[str, int],
-    decided_apart: Callable[[Sequence[str]], Iterable[Tuple[str, str]]],
+    decisions: Mapping[frozenset, str],
+    member_seeds: Callable[[Sequence[str]], Mapping[str, Iterable[str]]],
     max_candidate_pairs: int,
 ) -> FindingsDraft:
     """Run F2 → F3 → F1 → F4 → F5 on the drained step-⑤ tally (step ⑥).
@@ -1436,12 +1623,25 @@ def compute_findings(
       ``relations_by_source`` relation rows per ``kr.source_id``, counted over every
                            ``community_graph_rows`` row (step ①, before the
                            self-loop skip) — F3b's relations / objects;
-      ``decided_apart``    called at most once, with the sorted canonical ids of
-                           every squash-key group; returns the canonical-id pairs
-                           the user **rejected or deferred** (F4 / S1 must not
-                           report what the user already judged). Required: a
-                           silent default would ignore the user's decisions;
-      ``max_candidate_pairs`` ``settings.kg_findings_max_candidate_pairs``.
+      ``decisions``        the stored merge decisions keyed by v1 SEED pair —
+                           exactly ``governance_store.decided_seed_pairs_from``'s
+                           return (``{frozenset({seed_a, seed_b}): status}``, the
+                           empty-seed legacy rows already keyed by the canonical
+                           id minus ``K-``). Rejected / deferred pairs are never
+                           reported by F4 / S1 (§4.4);
+      ``member_seeds``     ``(canonical_ids) -> {canonical_id: v1 seeds}``: the
+                           ``concept_seed_v1`` of the name of EVERY member object
+                           of each canonical — hidden (memory / knowhow) members
+                           included: the seeds only decide, they are never shown.
+                           The engine calls it only for canonicals in a squash-key
+                           group, in batches of at most ``_MEMBER_SEED_BATCH`` ids
+                           (one bounded ``IN`` read per call). Decisions are
+                           matched by seed, not canonical id: a canonical id moves
+                           whenever its cluster's minimum member does;
+      ``max_candidate_pairs`` ``settings.kg_findings_max_candidate_pairs`` — the
+                           cap on F2 pair GENERATIONS (repeats included).
+    Both decision inputs are required: a silent default would ignore what the
+    user already judged.
     """
     corpus = _drain_tally(tally, structure)
     n_sources = len(corpus.source_ids)
@@ -1468,7 +1668,7 @@ def compute_findings(
     if comparable:
         duplicates = _duplicate_pairs(corpus, max_candidate_pairs)
     else:
-        duplicates = _DuplicatePairs([], 0, False, _EMPTY_INDEX,
+        duplicates = _DuplicatePairs([], 0, 0, False, _EMPTY_INDEX,
                                      np.zeros(n_sources + 1, dtype=np.int64))
     # F3 before F1: a parse-damaged source also "shares nothing".
     f3 = _parse_damage(corpus, relations_by_source, fragmented)
@@ -1507,11 +1707,12 @@ def compute_findings(
     for index in sorted(collisions):
         groups.setdefault(concept_squash_key(names[ids[index]]), []).append(index)
     groups = {squash: members for squash, members in groups.items() if len(members) >= 2}
-    decided: Set[frozenset] = set()
+    adjacency: Dict[str, Set[str]] = {}
     if groups:
         group_ids = sorted(ids[index] for members in groups.values() for index in members)
-        decided = {frozenset((str(a), str(b))) for a, b in decided_apart(group_ids) if a != b}
-    f4_pending, s1_pending, merge_counts = _merge_specs(corpus, groups, ids, names, decided)
+        adjacency = _apart_adjacency(_member_seed_sets(group_ids, member_seeds), decisions)
+    f4_pending, s1_pending, merge_counts = _merge_specs(corpus, groups, ids, names, adjacency)
+    del adjacency
     fixed = [spec.make(ids) for rule in (RULE_OFF_TOPIC_SOURCE, RULE_DUPLICATE_IMPORT,
                                          RULE_PARSE_DAMAGE, RULE_ISOLATED_OBJECTS)
              for spec in windows[rule]]
@@ -1536,7 +1737,8 @@ def compute_findings(
             "status": RULE_STATUS_RAN,
             "sources_checked": int((corpus.concepts > 0).sum()),
             "candidate_pairs": duplicates.candidate_pairs,
-            "candidate_pair_limit": int(max_candidate_pairs),
+            "candidate_pair_generations": duplicates.candidate_generations,
+            "candidate_pair_generation_limit": int(max_candidate_pairs),
             "candidates_truncated": duplicates.candidates_truncated,
             "pairs_hit": len(duplicates.pairs),
             "pairs_absorbed_into_f1": len(absorbed),
@@ -1603,9 +1805,18 @@ def _structure_payload(structure: GraphStructure, corpus: _Corpus, usable: int) 
 
 # ============================================================== finalize
 def _rule_comparable(old: Optional[Mapping[str, object]], new: Mapping[str, object]) -> bool:
+    """Both sides ran and neither truncated — or both sides skipped.
+
+    "Skipped on both sides" is comparable (0 / 0 / 0): a single-source or
+    concept-less library skips F1/F2 on every build, and treating that as
+    incomparable would leave the headline comparison null forever. Ran on one
+    side and skipped on the other is not: the skipped side says nothing."""
+    if old is None:
+        return False
+    if old.get("status") == RULE_STATUS_SKIPPED and new.get("status") == RULE_STATUS_SKIPPED:
+        return True
     return bool(
-        old is not None
-        and old.get("status") == RULE_STATUS_RAN and new.get("status") == RULE_STATUS_RAN
+        old.get("status") == RULE_STATUS_RAN and new.get("status") == RULE_STATUS_RAN
         and not old.get("truncated") and not new.get("truncated")
     )
 
