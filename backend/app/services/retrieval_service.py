@@ -272,6 +272,20 @@ class RetrievalService:
 
         return keyword_arm_available(self.candidates.settings)
 
+    def element_arm_available(self):
+        """Whether the raw-element arm can return anything this run.
+
+        Delegates to the producer's own predicate
+        (``retrieval_candidates.element_arm_available``), so whether reasoning
+        offers ``search_elements`` (and runs the empty-evidence top-up) and
+        whether the producer searches cannot drift. Not on ``RetrievalPort``,
+        like ``keyword_arm_available``: reasoning is its only consumer and
+        probes it with ``getattr``.
+        """
+        from app.services.retrieval_candidates import element_arm_available
+
+        return element_arm_available(self.candidates.settings)
+
     def keyword_corpus_languages(self, notebook_id):
         """The corpus languages the keyword (FTS) arm's keywords should be in.
 

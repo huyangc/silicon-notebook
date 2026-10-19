@@ -162,28 +162,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
         查询向量拉向「契约模板」而不是「这道题」，跨语言时尤其伤。待办：先量化契约前缀
         对查询向量的偏移（同一道题的裸问句 vs 带契约版本，比命中集与 top-k 相似度），
         再决定要不要在 embedding 一侧也只取分隔符之前的方向。
-- [ ] **全局（对等）模式的元素检索臂联邦化**。`retrieval_candidates.retrieve_elements`
-      是第三条 **active-only** 补召回腿（前两条见上一条）：它只对传进来的那一个 notebook
-      发一次元素检索，没有联邦通道。对等模式下留着它，等于凭空给**名义 active** 多一条
-      别的参与库没有的腿；更糟的是它的命中会经 `evidence_context.element_citations` 出
-      引用卡，而那条装配一直是单库口径。D1-4 因此把它整条关掉（生产者一处闸 +
-      `ReasoningRetriever._element_search_skip` 让轨迹如实说明 + `_first_round_empty_
-      fallback` 不再自动补腿），代价如实：全局问答暂时没有「按原文元素定向检索」这条腿，
-      reasoning 的确定性通道全空时也不再自动补它。联邦化要连带决定逐库元素配额、以及
-      `element_citations` 的 tier 查表在跨库时按哪一本算。
-      **附带**：`search_elements` 这个动作仍然留在 reflect 的动作目录里（与
-      `reasoning_max_element_searches=0` 这个既有的「关着但仍提供」态同形），模型偶尔
-      选到它会浪费一轮反思。要把它从 prompt/schema/白名单三处一起摘掉，得给 `reflect()`
-      加第五把 run 级闸，属于动作契约的独立改动。**概念漫游（PPR）同形**：对等模式下
-      `_ppr_retrieve` 恒返回空，但动作仍在目录里——2026-09-20 真引擎端到端实测的一次
-      全局 reasoning run 里，轨迹出现过一步「概念漫游:跨文档检索,得到 0 段原文」。两个
-      动作应当由同一把「对等模式下不提供」的闸一起摘掉。
-      （附带的「对等模式下 `search_elements` / `ppr_retrieve` 仍在 reflect 动作目录里」
-      已完成，见 `fangan_done.md` §61。联邦化时把 `reasoning_retrieval.element_search_offered`
-      改成按元素通道是否可用判定，动作就在对等模式下重新出现在 prompt/schema/白名单里；
-      执行侧的 `_element_search_skip` peer_mode 跳过与 `_first_round_empty_fallback` 的
-      补腿闸仍直读 `subjectless_run_active`（引用核验守卫 `_ELEMENT_ARM_CLOSED` 按字面钉着），
-      与生产者那道闸一起改。PPR 那把 `ppr_retrieve_offered` 独立，不受牵连。）
 - [ ] **8 库 reasoning 的 `payload_json` 体积观测**。全局作业没有轨迹子表，推理轨迹整份存在
       作业行的单个 JSON 里，`_append_trace` 只靠时间/步数双阈值节流重写。8 个库的 reasoning
       run 轮数与每步 detail 都比单库大，这份 payload 的真实分布没有测过；要先量（p50/p95

@@ -64,7 +64,13 @@ _KNOWLEDGE_STAMPED = (
     ("calls", RR, "ReasoningRetriever._closing_rerank", "_rescored_keeping_origin"),
     ("calls", RR, "outline_truncated_kg_evidence", "_rescored_keeping_origin"),
 )
-_ELEMENT_ARM_CLOSED = d9._ELEMENT_ARM_CLOSED
+_ELEMENTS_STAMPED = (
+    ("passes-kw", CF, "_stamped", "notebook_id"),
+    ("calls", CF, "federated_element_candidates", "_stamped"),
+    ("calls", RC, "CandidateRetrievalService._peer_retrieve_elements",
+     "federated_element_candidates"),
+    ("calls", RC, "CandidateRetrievalService.retrieve_elements", "_peer_retrieve_elements"),
+)
 
 #: (file, enclosing function, class) -> (classification, proofs, reason)
 ORIGIN_REGISTRY = {
@@ -91,11 +97,13 @@ ORIGIN_REGISTRY = {
           "notebook_id"),),
         "relation scoring for one library; federated_retrieve_relations assigns the library"),
     ("services/retrieval.py", "score_elements", "RetrievedElement"): (
-        "global-unreachable", _ELEMENT_ARM_CLOSED, "single-library element search is closed in peer mode"),
+        "stamped-downstream", _ELEMENTS_STAMPED,
+        "element scoring for one library; in peer mode retrieve_elements federates the "
+        "search per library and every leg returns through _stamped"),
     ("services/retrieval_candidates.py",
      "CandidateRetrievalService._retrieve_elements_from_chunks._hydrate_and_rank",
      "RetrievedElement"): (
-        "global-unreachable", _ELEMENT_ARM_CLOSED, "same element arm"),
+        "stamped-downstream", _ELEMENTS_STAMPED, "same element arm"),
     ("services/source_graph_activation.py",
      "SelectedSourceGraphActivationService._chunk_from_snapshot", "RetrievedChunk"): (
         "global-unreachable",

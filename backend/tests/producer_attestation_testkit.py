@@ -1,11 +1,13 @@
 """Shared drivers for the PR-D producer race tests (D3, D4, D7).
 
-Three non-federated citation producers register the evidence they cite through
-``services.evidence_attestation``:
+Four citation producers outside the federated passage channel register the
+evidence they cite through ``services.evidence_attestation``:
 
-* document overview (``document_source_overview.prepare_source_overview``) and
+* document overview (``document_source_overview.prepare_source_overview``),
   collection enumeration (``CollectionEnumerationService.enumerate_elements``)
-  READ the element text themselves and register it with ``attest_read``;
+  and the global element arm (``chunk_federation.federated_element_candidates``
+  over the real element hydration read) READ the element text themselves and
+  register it with ``attest_read``;
 * table analysis (``SpreadsheetAnalysisService``) cites a row element it never
   read and registers it with ``attest_pointers``.
 
@@ -85,7 +87,10 @@ def mutate(database, marker: str, mutation: str) -> None:
 def global_run(sources, notebook_id: str):
     """What ``GlobalAskService`` installs around a run: a subjectless (peer)
     source scope, the run plan whose ``on_evidence`` folds into ``_RunState``,
-    and the attestation seat reading through the real store."""
+    and the attestation seat reading through the real store. The plan lends a
+    small executor of its own, which only the element arm's fan-out uses."""
+    from concurrent.futures import ThreadPoolExecutor
+
     from app.services.evidence_attestation import evidence_attestation_seat
     from app.services.federated_run import FederatedRunPlan, federated_run_plan
     from app.services.global_ask import _RunState
@@ -93,18 +98,22 @@ def global_run(sources, notebook_id: str):
 
     state = _RunState((notebook_id,))
     events: list = []
+    executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="attest-kit")
     plan = FederatedRunPlan(
         phase_timeout_seconds=30.0, notebook_timeout_seconds=10.0,
-        executor=None, window=lambda: 1, cancel=None,
+        executor=executor, window=lambda: 1, cancel=None,
         on_library=lambda *_: None, on_evidence=state.record_evidence,
         on_evidence_groups=state.record_evidence_groups,
         evidence_registered=state.is_registered,
     )
-    with source_scope_context(
-        notebook_id, None, None,
-        notebook_source_ceilings={notebook_id: [SOURCE]}, subjectless=True,
-    ), federated_run_plan(plan), evidence_attestation_seat(sources, emit=events.append):
-        yield SimpleNamespace(state=state, events=events)
+    try:
+        with source_scope_context(
+            notebook_id, None, None,
+            notebook_source_ceilings={notebook_id: [SOURCE]}, subjectless=True,
+        ), federated_run_plan(plan), evidence_attestation_seat(sources, emit=events.append):
+            yield SimpleNamespace(state=state, events=events)
+    finally:
+        executor.shutdown(wait=True)
 
 
 def terminal_check(sources, run, notebook_id: str, citations):
@@ -171,6 +180,46 @@ def enumeration_citations(repository, notebook_id: str, *, between=None) -> list
         list(listed.items), active_notebook_id=notebook_id,
     )
     return [minted[item.element_id] for item in listed.items if item.element_id in minted]
+
+
+_ELEMENT_QUERY = "低温 增益 指标"
+
+
+def element_search_citations(repository, notebook_id: str, *,
+                             element_ids=(CITED, SIBLING)) -> list:
+    """The global element arm: the REAL merge and registration
+    (``federated_element_candidates``) over the REAL hydration read
+    (``_retrieve_elements_from_chunks`` -> ``evidence_elements``) of one
+    passage declaring ``element_ids``, then the production minting
+    (``element_citations``) of a card per merged element. The leg stands in
+    only for the chunk recall above the hydration (no embeddings here)."""
+    from app.domain.retrieval import RetrievedChunk
+    from app.models.ask import AnswerAnchor
+    from app.services.chunk_federation import federated_element_candidates
+
+    candidates = repository._runtime.retrieval_component.candidates
+    passage = RetrievedChunk(
+        chunk_id="chunk-attest", source_id=SOURCE, source_title="Original",
+        section_path="", text="", element_ids=list(element_ids),
+        score=0.9, relevance=0.9,
+    )
+    hits = federated_element_candidates(
+        candidates, notebook_id, _ELEMENT_QUERY,
+        lambda _notebook_id, _visible: candidates._retrieve_elements_from_chunks(
+            _ELEMENT_QUERY, [passage], limit=8,
+        ),
+        limit=8,
+    )
+    for hit in hits:
+        assert hit.text == TEXTS[hit.element_id]
+    anchors = [
+        AnswerAnchor(key=f"k{index}", object_id=hit.element_id,
+                     object_type="element", label=hit.element_id)
+        for index, hit in enumerate(hits, 1)
+    ]
+    return repository._runtime.evidence_context_component.element_citations(
+        hits, anchors, notebook_id=notebook_id,
+    )
 
 
 class _OfflinePlanner:
@@ -339,6 +388,10 @@ def nothing_to_register_case(world, producer: str) -> None:
                 world.notebook_id, "table", budget=_element_budget(256_000),
             )
             assert listed.items == ()
+        elif producer == "element_search":
+            assert element_search_citations(
+                world.repository, world.notebook_id, element_ids=(),
+            ) == []
         else:
             [card] = table_citations(world.tmp_path, world.notebook_id, anchored=False)
             assert card.element_id == "" and card.source_id == SOURCE

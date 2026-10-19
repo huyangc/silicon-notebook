@@ -244,7 +244,8 @@ class _Task:
     # (``_run_supplement_arm``), which borrow this module's whole fan-out
     # rather than growing a second concurrency mechanism.
     producer: Callable[["_Task"], tuple] | None = None
-    # Which recall arm the leg belongs to (``"keyword"`` / ``"exact"``),
+    # Which recall arm the leg belongs to (``"keyword"`` / ``"exact"`` /
+    # ``"element"``),
     # stamped on its skip event so an operator can tell a supplementary leg's
     # skip from a semantic leg's (only the latter decides coverage). Empty --
     # and absent from the event -- for the
@@ -773,6 +774,102 @@ def federated_exact_chunk_candidates(
     return merged
 
 
+def federated_element_candidates(
+    candidates, active_notebook_id: str, query: str,
+    leg: Callable[[str, "tuple | None"], list], *, limit: int,
+) -> list:
+    """PEER mode's raw-element arm: one single-library element search per library.
+
+    The same shape and machinery as the keyword and exact-identifier arms
+    (``_run_supplement_arm``): one task per participant on the semantic legs'
+    fan-out, each under that library's frozen ceiling, the whole arm inside
+    ONE per-library budget (``_supplement_arm_deadline``).
+    ``leg(notebook_id, visible)`` is ``CandidateRetrievalService
+    ._retrieve_elements`` for that one library, already ranked by it.
+
+    ⛔ NO RECEIPTS, NO BANNER, BUT EVIDENCE -- the keyword arm's rules, for the
+    same reasons: coverage is the semantic legs' verdict alone, a failed or
+    timed-out leg only leaves that library without elements (a skip event with
+    ``arm="element"``, nothing else), and its full-text timeouts never open the
+    library's shared FTS circuit (the leg runs under ``_CHUNK_SUPPLEMENT_LEG``).
+    ``AskCancelled`` and the attestation error propagate.
+
+    EVIDENCE by READ: the leg hydrated each element's full stored text, which is
+    exactly what the model is shown, so the merged list -- what the caller
+    receives -- is registered through ``evidence_attestation.attest_read``
+    (producer ``element_search``): zero extra reads, and the terminal citation
+    re-check compares the stored text against the text this run saw.  A no-op
+    without a run plan.
+
+    Merge by ROUNDS (``_interleave_rounds_capped``): every library's 1st
+    element, then every library's 2nd, ...; inside one round the elements go
+    by their own score (ties: participant order), so when the cap falls in the
+    middle of a round it is the weakest of that round that is left out -- not
+    whichever libraries happen to sit after the nominal active in the
+    participant order.  An ``element_id`` already taken is dropped, and the
+    total stops at ``limit``, the single-library element cap, so a global run
+    hands its caller no more elements than a single-notebook one.  Every hit is
+    stamped with its owning library.
+
+    Emits one content-free ``ask_stage``/``global_element_arm`` summary.
+    """
+    started = time.perf_counter()
+    arm = _run_supplement_arm(
+        candidates, active_notebook_id, query, leg, "element",
+    )
+    columns = [
+        _stamped(task, value) for task, value in zip(arm.tasks, arm.values)
+    ]
+    merged = _interleave_rounds_capped(columns, max(0, int(limit)))
+    if merged:
+        from app.services.evidence_attestation import attest_read
+
+        attest_read(ELEMENT_SEARCH_PRODUCER, {
+            hit.element_id: (hit.source_id, hit.text) for hit in merged
+        })
+    _emit(candidates, {
+        "kind": "ask_stage",
+        "stage": "global_element_arm",
+        "site": "global_element_arm",
+        "participants": len(arm.participants),
+        "libraries_with_hits": sum(1 for column in columns if column),
+        "merged": len(merged),
+        "failed_libraries": arm.failed_libraries,
+        "latency_ms": round((time.perf_counter() - started) * 1000),
+    })
+    return merged
+
+
+#: The producer code the peer-mode element arm registers its evidence under.
+ELEMENT_SEARCH_PRODUCER = "element_search"
+
+
+def _interleave_rounds_capped(columns: list, limit: int) -> list:
+    """Per-library ranked element lists, merged one ROUND at a time.
+
+    Round ``n`` holds every library's ``n``-th element; inside a round the
+    elements are ordered by score (descending; ties keep participant order), so
+    a cap landing mid-round drops that round's weakest rather than the
+    libraries listed last.  First occurrence of an ``element_id`` wins; stops
+    at ``limit``.
+    """
+    merged: list = []
+    seen: set = set()
+    for position in range(max((len(column) for column in columns), default=0)):
+        round_hits = [
+            column[position] for column in columns if position < len(column)
+        ]
+        round_hits.sort(key=lambda hit: -float(hit.score or 0.0))
+        for hit in round_hits:
+            if len(merged) >= limit:
+                return merged
+            if hit.element_id in seen:
+                continue
+            seen.add(hit.element_id)
+            merged.append(hit)
+    return merged
+
+
 @dataclass(frozen=True)
 class _SupplementArm:
     """What one fail-open supplementary arm's fan-out produced.
@@ -795,7 +892,8 @@ def _run_supplement_arm(
     candidates, active_notebook_id: str, query: str, leg, arm: str, *,
     drifted: bool | None = None,
 ) -> _SupplementArm:
-    """The shared fan-out of the peer-mode keyword and exact-identifier arms.
+    """The shared fan-out of the peer-mode keyword, exact-identifier and
+    element arms.
 
     Participants and each library's ceiling come from the one place the
     semantic legs take them (``_bounded_participants`` and

@@ -489,3 +489,81 @@ def test_keyword_arm_is_clean(tmp_path, monkeypatch):
         assert any(step.step_type == "search_chunks" for step in result.answer.reasoning_trace)
     finally:
         repo.close()
+
+
+def test_search_elements_is_clean_and_attributed_per_library(tmp_path, monkeypatch):
+    """The federated raw-element arm through the real engine: one
+    ``search_elements`` action searches every participant, at least two
+    libraries contribute elements, every element card names the library its
+    source lives in, and the healthy run is clean -- each element the answer
+    cites was registered at retrieval time (``element_search``)."""
+    repo, notebooks = _chunked_libraries(
+        tmp_path, monkeypatch, "低温下的增益在零下四十度仍然满足指标，见附表。",
+    )
+    try:
+        events = kit.capture_events(repo, monkeypatch)
+        kit.bind_models(repo, kit.ScriptedAgent([{
+            "next_action": "search_elements", "query": "低温 增益 指标",
+            "reason": "查原文元素",
+        }], plan_query="低温性能"))
+        ids = [nb.id for nb in notebooks]
+        result = kit.global_answer(repo, ids, "低温下的增益表现")
+        kit.assert_clean(result, events, "element_search")
+
+        [arm] = [e for e in events if e.get("stage") == "global_element_arm"]
+        assert arm["participants"] == len(ids) and arm["failed_libraries"] == 0
+        assert arm["libraries_with_hits"] >= 2 and arm["merged"] > 0
+        steps = [s for s in result.answer.reasoning_trace
+                 if s.step_type == "fallback" and s.detail.get("query") == "低温 增益 指标"]
+        assert steps and steps[0].detail["found"] > 0
+
+        with repo._runtime.database.connect() as db:
+            owner = {
+                row["id"]: row["notebook_id"] for row in db.execute(
+                    "SELECT e.id, s.notebook_id FROM source_elements e "
+                    "JOIN sources s ON s.id = e.source_id").fetchall()
+            }
+        element_anchors = [
+            anchor for anchor in result.answer.anchors if anchor.object_type == "element"
+        ]
+        assert element_anchors
+        assert all(a.notebook_id == owner[a.object_id] for a in element_anchors)
+        assert len({a.notebook_id for a in element_anchors}) >= 2
+        # The drill-down checks the card's library against the source's own:
+        # an element card from a non-anchor library opens.
+        service = repo._runtime.global_ask_service()
+        peer_card = next(
+            card for card in result.answer.citations
+            if card.element_id in owner and card.notebook_id != ids[0]
+        )
+        opened = service.cited_element(
+            result.job_id, peer_card.element_id, user_id=repo.current_user().id)
+        assert opened.id == peer_card.element_id
+    finally:
+        repo.close()
+
+
+def test_search_elements_switch_off_restores_the_closed_peer_arm(tmp_path, monkeypatch):
+    """``GLOBAL_ASK_ELEMENT_ARM_ENABLED=false``: the action is not offered, a
+    model that names it anyway gets the not-offered skip, no element arm runs
+    and no element is cited -- the behaviour before federation."""
+    repo, notebooks = _chunked_libraries(
+        tmp_path, monkeypatch, "低温下的增益在零下四十度仍然满足指标，见附表。",
+    )
+    try:
+        repo.settings.global_ask_element_arm_enabled = False
+        events = kit.capture_events(repo, monkeypatch)
+        kit.bind_models(repo, kit.ScriptedAgent([{
+            "next_action": "search_elements", "query": "低温 增益 指标",
+            "reason": "查原文元素",
+        }], plan_query="低温性能"))
+        result = kit.global_answer(repo, [nb.id for nb in notebooks], "低温下的增益表现")
+        assert result.status == "done", result.error
+        assert not [e for e in events if e.get("stage") == "global_element_arm"]
+        assert [
+            s.detail.get("action") for s in result.answer.reasoning_trace
+            if s.step_type == "skip" and s.detail.get("reason") == "action_not_offered"
+        ] == ["search_elements"]
+        assert not [a for a in result.answer.anchors if a.object_type == "element"]
+    finally:
+        repo.close()

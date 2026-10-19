@@ -28,14 +28,16 @@ from app.domain.evidence_fingerprint import element_text_sha
 from app.models.notebooks import NotebookCreate
 from app.services.evidence_attestation import evidence_attestation_seat
 from tests.producer_attestation_testkit import (
-    CITED, RACE_EXPECTATIONS, SIBLING, SOURCE, TEXTS, cited, enumeration_citations,
+    CITED, RACE_EXPECTATIONS, SIBLING, SOURCE, TEXTS, cited, element_search_citations,
+    enumeration_citations,
     global_run, mutate, nothing_to_register_case, one_row_page_case,
     overview_citations, refused_row_case, seed, table_citations, terminal_check,
 )
 
 
-PRODUCERS = ("document_overview", "collection_enumeration", "table_analysis")
-_READERS = ("document_overview", "collection_enumeration")
+PRODUCERS = ("document_overview", "collection_enumeration", "table_analysis",
+             "element_search")
+_READERS = ("document_overview", "collection_enumeration", "element_search")
 
 
 @pytest.fixture
@@ -71,6 +73,8 @@ class _World:
             return overview_citations(self.sources, self.notebook_id)
         if producer == "collection_enumeration":
             return enumeration_citations(self.repository, self.notebook_id)
+        if producer == "element_search":
+            return element_search_citations(self.repository, self.notebook_id)
         return table_citations(self.tmp_path, self.notebook_id)
 
 

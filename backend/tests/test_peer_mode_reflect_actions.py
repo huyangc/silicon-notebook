@@ -1,12 +1,13 @@
-"""对等(全局)模式下 reflect 不提供两条只查名义 active 的检索动作。
+"""对等(全局)模式下 reflect 的两把逐动作减法闸。
 
-``search_elements``(元素检索没有联邦通道,生产者 D1-4 整条关)与 ``ppr_retrieve``
-(PPR 走按名义 active 缓存的联邦图,生产者 D0-5 整条关)在对等 run 里只会空手而归。
-它们与「无图时摘五个图动作」那把 ``kg_actions`` 闸同形:prompt 行、schema 枚举、
-``allowed_actions`` 白名单三处一起消失。闸是**逐动作**的——
-``reasoning_retrieval.element_search_offered`` 与 ``ppr_retrieve_offered`` 各管一个,
-渲染函数各收一个同名参数——元素臂联邦化后只翻元素那一把。首轮 PPR 播种(含预取)
-读 PPR 那一把。
+``ppr_retrieve``(PPR 走按名义 active 缓存的联邦图,生产者 D0-5 整条关)在对等 run
+里只会空手而归,所以不提供。``search_elements`` 的元素臂已逐库联邦化
+(``test_peer_mode_element_arm.py``),对等 run 默认照常提供;只有回退开关
+``GLOBAL_ASK_ELEMENT_ARM_ENABLED=false`` 把它关回去时才不提供。两者与「无图时摘五个
+图动作」那把 ``kg_actions`` 闸同形:prompt 行、schema 枚举、``allowed_actions`` 白名单
+三处一起消失。闸是**逐动作**的——``reasoning_retrieval.element_search_offered`` 与
+``ppr_retrieve_offered`` 各管一个,渲染函数各收一个同名参数。首轮 PPR 播种(含预取)
+读 PPR 那一把。本文件里「两个都不提供」的用例都显式关掉元素臂开关。
 
 单库 run 的 prompt/schema 逐字节不变由两份摘要钉住(有图、无图各一),白名单与接线
 由对照臂钉住。
@@ -56,6 +57,11 @@ class _Capture:
         return json.dumps({"next_action": self._action, "query": "布局"})
 
 
+def _close_element_arm(rrepo):
+    """回退开关 ``GLOBAL_ASK_ELEMENT_ARM_ENABLED=false``:对等 run 里元素臂不可用。"""
+    rrepo.settings.global_ask_element_arm_enabled = False
+
+
 def _reflect(rrepo, action, *, kg_actions, peer_ids=None, fail_closed=False):
     from app.services.reasoning_retrieval import ReasoningRetriever
 
@@ -74,11 +80,14 @@ def _reflect(rrepo, action, *, kg_actions, peer_ids=None, fail_closed=False):
 
 @pytest.mark.parametrize("has_kg", [True, False])
 def test_peer_reflect_offers_neither_action_in_prompt_schema_or_whitelist(rrepo, has_kg):
-    """对等 run:两个动作在模型实际收到的 prompt 与 schema 里都不出现;模型硬吐
-    其中一个时,决定标成「本次不提供」(`withheld`,执行处记 skip 继续),不兜底。
+    """对等 run + 元素臂回退开关关:两个动作在模型实际收到的 prompt 与 schema 里都
+    不出现;模型硬吐其中一个时,决定标成「本次不提供」(`withheld`,执行处记 skip
+    继续),不兜底。
 
-    同一个用例里跑单库对照臂:同一份响应在单库 run 里是合法动作,三处都在。
+    同一个用例里跑单库对照臂:同一份响应在单库 run 里是合法动作,三处都在(单库
+    不读这个开关)。
     """
+    _close_element_arm(rrepo)
     nb = _seed_two_nodes(rrepo) if has_kg else _seed_notebook_without_kg(rrepo)
     other = _seed_notebook_without_kg(rrepo)
     for action in _GATED_ACTIONS:
@@ -106,10 +115,27 @@ def test_peer_reflect_offers_neither_action_in_prompt_schema_or_whitelist(rrepo,
             assert decision.withheld is False
 
 
+@pytest.mark.parametrize("has_kg", [True, False])
+def test_peer_reflect_offers_search_elements_once_the_arm_is_federated(rrepo, has_kg):
+    """元素臂开关开着(默认):对等 run 的 prompt、schema 与白名单里都有
+    ``search_elements``,同一份响应是合法决定;``ppr_retrieve`` 照旧不提供。"""
+    nb = _seed_two_nodes(rrepo) if has_kg else _seed_notebook_without_kg(rrepo)
+    other = _seed_notebook_without_kg(rrepo)
+    decision, prompt, schema = _reflect(
+        rrepo, "search_elements", kg_actions=has_kg, peer_ids=(nb.id, other.id))
+    assert "- search_elements:" in prompt
+    assert "search_elements" in _actions_in(schema)
+    assert decision.fallback is False and decision.withheld is False
+    assert decision.next_action == "search_elements"
+    assert "ppr_retrieve" not in prompt
+    assert "ppr_retrieve" not in _actions_in(schema)
+
+
 def test_peer_reflect_rejects_both_actions_when_fail_closed(rrepo):
     """严格调用方的既有合同不变:任何不在白名单里的动作都抛 `invalid action`
     (`test_no_kg_run_rejects_every_graph_action_when_fail_closed` 对无图闸钉的
     是同一条),不走「本次不提供」那条宽松路径。"""
+    _close_element_arm(rrepo)
     nb = _seed_two_nodes(rrepo)
     for action in _GATED_ACTIONS:
         with pytest.raises(ValueError, match="invalid action"):
@@ -128,7 +154,7 @@ def test_each_gate_closes_only_its_own_action(rrepo, monkeypatch, closed):
 
     predicate = {"search_elements": "element_search_offered",
                  "ppr_retrieve": "ppr_retrieve_offered"}[closed]
-    monkeypatch.setattr(rr_mod, predicate, lambda: False)
+    monkeypatch.setattr(rr_mod, predicate, lambda *_args: False)
     _seed_two_nodes(rrepo)
     (still,) = [name for name in _GATED_ACTIONS if name != closed]
 
@@ -178,10 +204,14 @@ def _captured_gates(rrepo, peer_ids):
 
 
 def test_reflect_passes_the_gates_from_the_run_mode(rrepo):
-    """接线:单库 run 两个渲染函数都拿到 (True, True)(开着 = 接入前的渲染),对等
-    run 都拿到 (False, False)。闸在 `reflect()` 里现算,`run()` 的调用形状没变,
-    所以接线点就是这一处。"""
+    """接线:单库 run 两个渲染函数都拿到 (True, True)(开着 = 接入前的渲染);对等
+    run 元素臂开着(默认)时拿到 (True, False),回退开关关掉时拿到 (False, False)。
+    单库 run 不读这个开关。闸在 `reflect()` 里现算,`run()` 的调用形状没变,所以接线
+    点就是这一处。"""
     nb = _seed_two_nodes(rrepo)
+    assert _captured_gates(rrepo, None) == {(True, True)}
+    assert _captured_gates(rrepo, (nb.id,)) == {(True, False)}
+    _close_element_arm(rrepo)
     assert _captured_gates(rrepo, None) == {(True, True)}
     assert _captured_gates(rrepo, (nb.id,)) == {(False, False)}
 
@@ -345,8 +375,9 @@ def _not_offered_skips(result):
 
 
 def test_a_peer_run_skips_an_unoffered_action_and_keeps_going(rrepo):
-    """对等 run 硬吐两个不提供的动作:各记一条 skip,循环继续,直到模型自己作答——
-    不兜底成 answer 提前收尾,反思步上也没有 `fallback_reason`。"""
+    """对等 run(元素臂回退开关关)硬吐两个不提供的动作:各记一条 skip,循环继续,
+    直到模型自己作答——不兜底成 answer 提前收尾,反思步上也没有 `fallback_reason`。"""
+    _close_element_arm(rrepo)
     rrepo.settings.reasoning_stale_limit = 10
     result = _run_with(rrepo, [
         {"next_action": "search_elements", "query": "布局"},
@@ -386,8 +417,9 @@ def test_an_unknown_action_name_still_takes_the_fallback(rrepo):
 
 
 def test_a_peer_runs_truncation_ledger_names_no_unoffered_action(rrepo, monkeypatch):
-    """对等 run 里 expand_graph 照常提供、截断照常可能发生:回喂账目的「下一步」
-    只点名 add_subquery,不点名 search_elements;单库对照臂逐字照旧。"""
+    """对等 run 里 expand_graph 照常提供、截断照常可能发生:元素臂回退开关关掉时,
+    回喂账目的「下一步」只点名 add_subquery,不点名 search_elements;开关开着(默认)
+    时与单库逐字相同;单库对照臂逐字照旧。"""
     from app.services.reasoning_retrieval import (
         NeighborExpansion, ReasoningRetriever,
     )
@@ -428,6 +460,9 @@ def test_a_peer_runs_truncation_ledger_names_no_unoffered_action(rrepo, monkeypa
             rr.run(nb.id, "q", "")
         return llm.prompts
 
+    federated = _prompts(True)
+    assert "add_subquery 或search_elements 定向检索" in federated[1]
+    _close_element_arm(rrepo)
     peer_prompts = _prompts(True)
     assert "只展开了其中一部分邻居" in peer_prompts[1]
     assert "add_subquery 定向检索" in peer_prompts[1]

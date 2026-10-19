@@ -1028,6 +1028,9 @@ Global Ask uses `GLOBAL_ASK_CANDIDATE_LIMIT` for merged cross-notebook evidence 
 participant in global Ask; `false` is the rollback that closes it for global runs (see the product reference).
 `GLOBAL_ASK_EXACT_ARM_ENABLED` (default `true`) does the same for the exact-identifier lookup arm (still subject
 to `EXACT_LOOKUP_ENABLED`); `false` closes that arm for global runs.
+`GLOBAL_ASK_ELEMENT_ARM_ENABLED` (default `true`) does the same for `reasoning`'s raw-element search arm (the
+`search_elements` action and the empty-first-round top-up), capped in total at the single-notebook element limit;
+`false` closes it for global runs and drops `search_elements` from their action catalog again.
 `GLOBAL_ASK_MAX_NOTEBOOKS`, `GLOBAL_ASK_MAX_CONCURRENT`, `GLOBAL_ASK_RETRIEVAL_CONCURRENCY`,
 `GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS`,
 `GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS` and `GLOBAL_ASK_SHUTDOWN_TIMEOUT_SECONDS` control explicit

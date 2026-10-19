@@ -804,6 +804,9 @@ origin 写进此名单后 URL 导入才能触达。每项必须带 `http://` 或
 设为 `false` 是回退，全局问答重新关闭这条臂（见产品参考）。
 `GLOBAL_ASK_EXACT_ARM_ENABLED`（默认 `true`）对精确标识符查找臂做同样的事（仍受 `EXACT_LOOKUP_ENABLED`
 约束）；设为 `false` 时全局问答关闭这条臂。
+`GLOBAL_ASK_ELEMENT_ARM_ENABLED`（默认 `true`）对 `reasoning` 的原文元素检索臂（`search_elements` 动作与
+首轮全空时的自动补腿）做同样的事，合并总数以单库元素上限封顶；设为 `false` 时全局问答关闭这条臂，
+`search_elements` 也重新从动作目录里移除。
 `GLOBAL_ASK_MAX_NOTEBOOKS`、`GLOBAL_ASK_MAX_CONCURRENT`、`GLOBAL_ASK_RETRIEVAL_CONCURRENCY`、
 `GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS`、
 `GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS` 和 `GLOBAL_ASK_SHUTDOWN_TIMEOUT_SECONDS` 分别控制范围

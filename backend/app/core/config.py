@@ -1452,6 +1452,13 @@ class Settings(BaseSettings):
     global_ask_exact_arm_enabled: bool = Field(
         True, validation_alias="GLOBAL_ASK_EXACT_ARM_ENABLED",
     )
+    # 对等(全局)模式下原文元素检索臂(reasoning 的 search_elements 动作与首轮全空
+    # 时的自动补腿)逐库联邦化的回退开关。开着时每个参与库各跑一次同一套单库元素
+    # 检索、各带冻结天花板,按库轮转合并并以单库元素上限封顶;关掉即回到「对等模式
+    # 整条不跑、动作不提供」。单库问答不读它。
+    global_ask_element_arm_enabled: bool = Field(
+        True, validation_alias="GLOBAL_ASK_ELEMENT_ARM_ENABLED",
+    )
     document_overview_max_elements: int = Field(
         64, ge=2, validation_alias="DOCUMENT_OVERVIEW_MAX_ELEMENTS",
     )
