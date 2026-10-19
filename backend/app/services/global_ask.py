@@ -45,6 +45,7 @@ from app.services.global_citation_check import (
     DIAGNOSTIC_REASONS, GlobalCitationCheck, apply_outcome, check_trace_summary,
 )
 from app.services.global_run import global_ask_run
+from app.services.notebook_catalog import local_universe_non_empty
 # 待确认中心「进行中的提问」的推送入口——与笔记本内问答的 worker 同一个叶子模块。
 from app.services.pending_bus import publish_snapshot
 from app.services.retrieval_participants import ParticipantOverride
@@ -111,6 +112,15 @@ REQUEST_KEY_REUSED = "request_key_reused"
 # ``GlobalAskError.reason`` of an ``all`` scope that resolved past the
 # participant ceiling; the error then carries that ceiling as ``limit``.
 SCOPE_ALL_TOO_WIDE = "scope_all_too_wide"
+# ``GlobalAskError.reason`` of a scope with nothing to search in ANY of its
+# libraries (409 on HTTP, the single-library empty-scope refusal's status).
+# Retrying never helps, so MCP must not read it as "busy".
+SCOPE_EMPTY = "scope_empty"
+# Same opening clause as the single-library refusal (``ask_routes.
+# _require_non_empty_scope``): the two entry points name the same condition.
+_SCOPE_EMPTY_COPY = (
+    "当前检索范围为空：范围内的笔记本还没有可检索的内容，请换选有资料的笔记本，或先添加来源。"
+)
 
 
 class GlobalAskError(Exception):
@@ -541,8 +551,13 @@ def _public_turn_row(job: Any) -> dict[str, Any]:
 class GlobalAskService:
     def __init__(self, *, store, notebooks, can_read, sources, settings, ask=None,
                  can_read_many=None, event_log=None, note_ask_completed=None,
-                 evidence_reader=None, memory_sources=None):
+                 evidence_reader=None, memory_sources=None, local_evidence=None):
         self.store = store
+        # ``NotebookSummaryQuery.any_local_evidence``: the single-library
+        # local-evidence predicate asked over the participant set, consulted
+        # by ``_require_searchable`` only when every frozen ceiling is empty.
+        # ``None`` (library/test construction) leaves admission unchecked.
+        self.local_evidence = local_evidence
         # M4: the Memory store's ``memory_sources_for_source_ids`` (the author's
         # Memory sources among cited ones, ``memory_sql.memory_source_readable``)
         # for the share disclosure count. ``None`` (library/test construction)
@@ -816,10 +831,43 @@ class GlobalAskService:
         source_rows = self.sources.visible_source_ids_by_notebook(ids)
         source_ceiling = {notebook_id: frozenset(source_rows[notebook_id]) for notebook_id in ids}
         self._check(ids, user_id, allowed, authority_check)
+        self._require_searchable(ids, source_ceiling, user_id)
         history, user_history = self._history(
             conversation, ids, user_id, allowed, authority_check,
         )
         return conversation, scope, ids, allowed, source_ceiling, history, user_history
+
+    def _require_searchable(self, ids, source_ceiling, user_id) -> None:
+        """Refuse a scope with nothing to search in ANY of its libraries.
+
+        The single-library empty-scope refusal (``ask_routes.
+        _require_non_empty_scope``), applied per participant: a library's
+        local universe is non-empty when it has visible sources -- here its
+        just-frozen ceiling, the very set the run would be bounded by -- or
+        local evidence by the ONE predicate the notebook summary uses
+        (``NotebookSummaryQuery.local_evidence``: any chunk, a usable KG, the
+        viewer's confirmed Memory). Mounted libraries do not count: the
+        participant set never grows along mounts. Any library with content
+        admits the whole run.
+
+        Called inside ``_resolve_run_scope``, after both authority checks, so
+        ``ids`` is only what this viewer may read (never another member's
+        library) and the refusal lands before any job row, conversation row or
+        model call -- the reasoning preview and ``start()`` alike.
+
+        Cost: the ordinary question has a non-empty ceiling and pays NOTHING
+        beyond the freeze it already paid; only an all-empty freeze runs the
+        per-library ``EXISTS`` probes, stopping at the first hit.
+        """
+        # "Any library's universe is non-empty" is the per-library composition
+        # OR-ed over the set, so it is asked once over the whole set: every
+        # ceiling first (already in hand), the probes only if all are empty.
+        if local_universe_non_empty(
+            any(source_ceiling[notebook_id] for notebook_id in ids),
+            lambda: self.local_evidence is None or self.local_evidence(ids, user_id),
+        ):
+            return
+        raise GlobalAskError(409, _SCOPE_EMPTY_COPY, SCOPE_EMPTY)
 
     def prepare_intent_preview(self, payload: GlobalAskIntentPreviewRequest, *,
                                 user_id, allowed_notebook_ids=None,

@@ -2649,6 +2649,9 @@ class RepositoryRuntime:
                     evidence_reader=self.source_store,
                     # M4: the author's Memory sources behind the share count.
                     memory_sources=self.memory_store,
+                    # The single-library local-evidence predicate, asked over
+                    # the participant set by the empty-scope admission check.
+                    local_evidence=self.notebook_summaries.any_local_evidence,
                     ask=self.ask_service(),
                     settings=self.settings,
                     event_log=self.event_log,

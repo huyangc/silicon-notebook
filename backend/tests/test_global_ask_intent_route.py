@@ -44,11 +44,22 @@ def _client(tmp_path, monkeypatch):
     return TestClient(create_app())
 
 
+def _notebook_with_a_source(client) -> str:
+    """A notebook with one visible source: something to search, so the
+    empty-scope refusal (``GlobalAskService._require_searchable``) admits it."""
+    from app.api import ask_routes
+    from tests.test_global_ask_empty_scope import _source
+
+    notebook_id = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    _source(ask_routes.repository(), notebook_id)
+    return notebook_id
+
+
 # -- HTTP 层:路由接线 -------------------------------------------------------
 
 def test_intent_endpoint_returns_contract(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
-    client.post("/api/notebooks", json={"name": "nb"})
+    _notebook_with_a_source(client)
     response = client.post("/api/global-ask/intent", json={"question": "分析一下这批资料"})
     assert response.status_code == 200
     body = response.json()
@@ -66,7 +77,7 @@ def test_intent_endpoint_rejects_empty_question(tmp_path, monkeypatch):
 
 def test_intent_endpoint_stream_emits_final_contract(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
-    client.post("/api/notebooks", json={"name": "nb"})
+    _notebook_with_a_source(client)
     response = client.post(
         "/api/global-ask/intent/stream", json={"question": "分析一下这批资料"},
     )

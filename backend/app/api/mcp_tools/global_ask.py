@@ -32,7 +32,7 @@ def global_ask_tool_error(exc: BaseException) -> AgentToolError | None:
     """The Agent error for a ``GlobalAskError``, else ``None``."""
     try:
         from app.services.global_ask import (
-            REQUEST_KEY_REUSED, SCOPE_ALL_TOO_WIDE, GlobalAskError,
+            REQUEST_KEY_REUSED, SCOPE_ALL_TOO_WIDE, SCOPE_EMPTY, GlobalAskError,
         )
     except ImportError:  # pragma: no cover - discovery before runtime wiring
         return None
@@ -54,6 +54,11 @@ def global_ask_tool_error(exc: BaseException) -> AgentToolError | None:
             "invalid_argument",
             "这个 client_request_id 已用于另一个问题，请换一个新的 client_request_id",
         )
+    if getattr(exc, "reason", "") == SCOPE_EMPTY:
+        # Nothing to search in any selected notebook: 409 on HTTP like the
+        # single-library refusal, and the same Agent code the single-notebook
+        # path gives an empty notebook -- never "busy", retrying never helps.
+        return AgentToolError("unavailable", exc.message)
     code = _GLOBAL_STATUS_CODES.get(int(exc.status_code or 0), "internal")
     return AgentToolError(code, exc.message or _GLOBAL_FALLBACK)
 
