@@ -3569,7 +3569,7 @@ class AskService:
         external_evidence=(),
         trailing_chunks=(),
         refine: bool = True,
-        citation_lookups: bool = False,
+        citation_lookups: "CitationLookups | None" = None,
     ) -> "_ReasoningContext":
         """The reasoning synthesis context, assembled exactly as
         ``_answer_reasoning`` sends it (its parameters, same meaning; see that
@@ -3582,13 +3582,12 @@ class AskService:
         because that summary is not evidence -- it carries no ``[k]`` -- and it
         would be one more model call on a path that promises none.
 
-        ``citation_lookups`` asks the chunk blocks to record their three batch
-        reads (``CitationLookups``, handed out as ``baseline
-        ["citation_lookups"]``, else ``None``) for the passage citation cards
-        minted from this same assembly.  Only ``_answer_reasoning`` -- whose
-        caller mints those cards -- asks: recording widens the assembly's
-        knowhow read to every admitted passage's first element, which is pure
-        cost on a path with no card leg (the retrieval-only output).
+        ``citation_lookups`` is the run's shared read memo (``CitationLookups``):
+        the chunk blocks read through it -- only keys it lacks -- and it is
+        handed back as ``baseline["citation_lookups"]`` (``None`` when not
+        given) for the passage citation cards minted from this run.  Only
+        ``_answer_reasoning`` passes one; the retrieval-only output has no card
+        leg and keeps the memo-less reads.
         """
         raise_if_cancelled(cancel_event)
         chunks = chunks or []
@@ -3604,9 +3603,8 @@ class AskService:
         source_context = ""
         source_map: dict = {}
         baseline_admission: dict = {}
-        # The chunk blocks' three batch reads, kept for the passage citation
-        # cards minted from this same assembly (see the docstring).
-        lookup_sink = CitationLookups() if citation_lookups else None
+        # The run's shared read memo for the chunk blocks (see the docstring).
+        lookup_sink = citation_lookups
         # The collection MAP goes in FIRST, ahead of every other block. It is
         # the smallest thing in the prompt (a fixed header plus one hard-capped
         # counts line) and the only one that cannot be recovered from anywhere
@@ -3877,6 +3875,7 @@ class AskService:
         external_sink: set | None = None,
         *,
         trailing_chunks=(),
+        citation_lookups: "CitationLookups | None" = None,
     ):
         """Synthesise the reasoning-mode answer. When PPR chunks are present they
         become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
@@ -3927,6 +3926,10 @@ class AskService:
         绑定块可能更低——同一段里混装等于让模型没绑进本节的原文按构造吃掉整份
         预算,绑到 source element 的节也一样(chunk 段先于 element 段装配)。
 
+        ``citation_lookups``:本 run 共享的读取备忘(``CitationLookups``)。按节合成
+        的每一节、``_answer_with_retry`` 的重试与回退的单次合成都传同一份,所以
+        同一个键在一个 run 里至多读一次;缺省则本次装配新建一份。
+
         """
         context = self._assemble_reasoning_context(
             notebook_id, question, top_hits, elements,
@@ -3941,9 +3944,13 @@ class AskService:
             # ②精炼是给「上下文太大、要先挑重点」准备的,而一节的切片至多 8 条绑定
             # 证据,本来就没有中段可丢。
             refine=not sectioned,
-            # 调用方(``_draft_reasoning_response``)随后给同一批原文段发引用卡,
-            # 复用这次装配的三份批量读取(``_reasoning_chunk_cards``)。
-            citation_lookups=True,
+            # 本 run 共享的读取备忘:别的节 / 重试 / 回退的装配不重读已读过的键,
+            # 调用方(``_draft_reasoning_response``)随后给同一批原文段发引用卡时
+            # 也复用它(``_reasoning_chunk_cards``)。没传就是本次装配自己一份。
+            citation_lookups=(
+                citation_lookups if citation_lookups is not None
+                else CitationLookups()
+            ),
         )
         context_block, id_map, has_external = (
             context.context_block, context.id_map, context.has_external)
@@ -4017,6 +4024,7 @@ class AskService:
         style_block: str = "",
         external_evidence=(),
         external_sink: set | None = None,
+        citation_lookups: "CitationLookups | None" = None,
     ):
         """按节合成(设计文档 §3.1):每节一次合成调用,只喂该节绑定的证据。
 
@@ -4053,9 +4061,15 @@ class AskService:
         相关度与绑定块同段竞争的话,精确命中那条常为 1.0 的相关度会直接吃掉整份
         chunk 预算,把模型亲自绑上的证据挤出 prompt。
 
+        ``citation_lookups``:本 run 共享的读取备忘,原样交给每一节的装配(各节
+        顺序执行、重试同步),所以每节都装的精确块与几节共用的段落只读一次;调用方
+        把同一份交给回退的单次合成。缺省则本函数内新建一份,各节仍共享。
+
         """
         from app.services.outline_synthesis import outline_answer_text
 
+        if citation_lookups is None:
+            citation_lookups = CitationLookups()
         rendered: list = []
         merged_anchors: list = []
         seen_anchor_keys: set = set()
@@ -4099,6 +4113,7 @@ class AskService:
                     external_evidence=external_evidence,
                     external_sink=admitted_external,
                     trailing_chunks=item.exact_chunks,
+                    citation_lookups=citation_lookups,
                 )
                 return text_, grounded_, anchors_
 
@@ -6953,6 +6968,7 @@ class AskService:
         # captures counts as a side effect instead of widening that contract.
         reasoning_counts: dict = {}
         reasoning_baseline: dict = {}
+        run_lookups = CitationLookups()  # 本 run 各次装配与引用卡共用(见其 docstring)
         admitted_external: set = set()
         raise_if_cancelled(cancel_event)
         answer_client = self.model_clients.chat("ask_answer")
@@ -6989,7 +7005,7 @@ class AskService:
                 baseline_sink=reasoning_baseline,
                 external_evidence=stage.external_evidence,
                 external_sink=admitted_external,
-                style_block=style_block)
+                style_block=style_block, citation_lookups=run_lookups)
             return ans, llm_grounded_, anchors_
 
         # ---------------------------------------------- 按节合成(设计文档 §3.1)
@@ -7051,6 +7067,7 @@ class AskService:
                         style_block=style_block,
                         external_evidence=stage.external_evidence,
                         external_sink=admitted_external,
+                        citation_lookups=run_lookups,
                     )
         # 按节合成失败(某一节两次都吐不出内容)→ 整体回退单次合成,已经产出
         # 的分节文本全部丢弃。多付一次合成调用是 fail-open 的价钱。
@@ -7148,12 +7165,9 @@ class AskService:
         citations.extend(self._memory_citations(anchors, memory_hits))
         citations.extend(self.evidence_context.element_citations(
             elements, anchors, notebook_id=notebook_id))
-        # 原文段(chunk)腿:只给**真正进了合成 prompt** 的那几段发卡(候选集
-        # 口径与读取复用见 `_reasoning_chunk_cards`)。清空闸(枚举答案零锚点)
-        # 在下面自动适用;这些卡整体不参与附图(见下面 attach_citation_images
-        # 处按身份排除的理由)。
-        chunk_cards = self._reasoning_chunk_cards(
-            chunks, reasoning_baseline, notebook_id)
+        # 原文段腿:候选集口径与读取复用见 `_reasoning_chunk_cards`;清空闸照常适用,
+        # 这些卡不参与附图(见下面 attach_citation_images 处按身份排除的理由)。
+        chunk_cards = self._reasoning_chunk_cards(chunks, reasoning_baseline, notebook_id)
         citations.extend(chunk_cards)
         # Typed collection rows have their own deterministic k5001+
         # bindings.  Mirror the cited rows into the fallback Citation
