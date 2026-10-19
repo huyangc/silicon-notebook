@@ -34,6 +34,7 @@ from psycopg import IsolationLevel
 from app.core.json_safety import validate_finite_json
 from app.repositories.kg_analysis_payloads import (
     artifact_ledger_rows as _artifact_ledger_rows,
+    checked_finding_rows as _checked_findings,
     clamp as _clamp,
     cluster_histogram_payload as _cluster_histogram_payload,
     community_overview_payload as _community_overview_payload,
@@ -42,6 +43,7 @@ from app.repositories.kg_analysis_payloads import (
     finding_source_states as _finding_source_states,
     largest_clusters_payload as _largest_clusters_payload,
     mark_rows as _mark_rows,
+    member_name_rows as _member_name_rows,
     relation_provenance_payload as _relation_provenance_payload,
 )
 from app.repositories.postgres._store_utils import (
@@ -96,7 +98,6 @@ from app.domain.kg_analysis_contracts import (
     KG_FINDINGS_ROWS_MAX,
     batched,
     check_artifact_payloads,
-    check_finding_row,
     check_mark_kind,
 )
 from app.domain.knowledge_contracts import (
@@ -655,9 +656,12 @@ class UnifiedKgStore:
                 (notebook_id, notebook_id),
             )
         }
+        # ``src`` (KG findings F3b): see the SQLite twin — one more column of the
+        # row already read; the stream, the timeout floor and the row order stay.
         relations = db.cursor().stream(
             f"SELECT COALESCE(cs.canonical_id, kr.source_object_id) AS s, "
-            f"       COALESCE(ct.canonical_id, kr.target_object_id) AS t "
+            f"       COALESCE(ct.canonical_id, kr.target_object_id) AS t, "
+            f"       kr.source_id AS src "
             f"FROM knowledge_relations kr "
             f"LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id "
             f"AND cs.member_object_id=kr.source_object_id "
@@ -2718,7 +2722,8 @@ class UnifiedKgStore:
         return db.cursor().stream(
             f"""
             SELECT o.source_id AS source_id,
-                   COALESCE(c.canonical_id, o.id) AS canonical_id
+                   COALESCE(c.canonical_id, o.id) AS canonical_id,
+                   (o.object_type = 'concept') AS is_concept
             FROM knowledge_objects o
             LEFT JOIN concept_clusters c
                    ON c.notebook_id = o.notebook_id
@@ -2751,13 +2756,14 @@ class UnifiedKgStore:
 
         与 SQLite 侧逐条对应(见那边的 docstring):产物表统一按 notebook 整表删(没有
         level 维度),`edges` / `profiles` / `findings_rows` 只按可迭代分批消费、不多物化
-        一份;问题明细逐行过 `check_finding_row`,超过 `KG_FINDINGS_ROWS_MAX` 行硬失败;
-        `prune_marks` 按主键删。
+        一份;问题明细在任何删写之前整份过 `checked_finding_rows`(逐行形状、
+        `KG_FINDINGS_ROWS_MAX` 上限、与 `findings` 账本对账);`prune_marks` 按主键删。
         PostgreSQL 侧的额外收口:账本 payload 与明细的两个 JSON 列走 `jsonb()` 且先过
         `_json_document` 的有限性校验 —— NaN/Inf 进 jsonb 会在读回时变成不可解析的值,
         必须在写入口就拒(SQLite 侧的对等收口是 `json.dumps(..., allow_nan=False)`)。
         """
         check_artifact_payloads(payloads)
+        checked_findings = _checked_findings(payloads, findings_rows)
         db.execute(
             "DELETE FROM kg_community_edges WHERE notebook_id=%s", (notebook_id,)
         )
@@ -2802,14 +2808,7 @@ class UnifiedKgStore:
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
                 batch,
             )
-        written = 0
-        for batch in batched((check_finding_row(row) for row in findings_rows), 1000):
-            written += len(batch)
-            if written > KG_FINDINGS_ROWS_MAX:
-                raise ValueError(
-                    f"KG 分析问题明细:一个 notebook 最多 {KG_FINDINGS_ROWS_MAX} 行,"
-                    "读入口按这个上限取数,写超过就再也读不全"
-                )
+        for batch in batched(checked_findings, 1000):
             execute_many(
                 db,
                 "INSERT INTO kg_analysis_findings "
@@ -2997,7 +2996,7 @@ class UnifiedKgStore:
             "SELECT s.id AS id, s.title AS title, s.source_type AS source_type, "
             "s.status AS status, s.parse_status AS parse_status, "
             "s.chunked_at AS chunked_at, er.created_at AS last_extraction_at, "
-            "er.status AS last_extraction_status "
+            "er.status AS last_extraction_status, s.created_at AS created_at "
             "FROM sources s "
             "LEFT JOIN LATERAL ("
             "SELECT e.created_at, e.status FROM extraction_runs e "
@@ -3013,7 +3012,7 @@ class UnifiedKgStore:
                 (row["id"], row["title"], row["source_type"], row["status"],
                  row["parse_status"], iso_timestamp(row["chunked_at"]),
                  iso_timestamp(row["last_extraction_at"]),
-                 row["last_extraction_status"])
+                 row["last_extraction_status"], iso_timestamp(row["created_at"]))
                 for row in rows
             ),
         )
@@ -3077,6 +3076,64 @@ class UnifiedKgStore:
                     ).fetchall()
                 )
         return _display_name_rows(raw, wanted)
+
+    @staticmethod
+    def kg_finding_member_name_rows(
+        db: Any, notebook_id: str, canonical_ids: Sequence[str]
+    ) -> List[Tuple[str, str, bool, int]]:
+        """SQLite 孪生同名方法(两个消费方、口径与两条腿见那边)。
+
+        形态分岔,语义相同:名字取 ``payload->>'name'``;id 列表经 ``member_of`` +
+        ``execute_ids``(``= ANY``,custom plan 按真实列表长度出计划),500 一批。
+        ``visible`` 是 SQL 里的布尔表达式,中性层统一转 ``bool``。connection-taking:
+        骑调用方的快照。
+
+        ⚠ 有簇行那条腿的对象读写成 ``CROSS JOIN LATERAL (… LIMIT 1)``:``id`` 是主键,
+        至多一行,``LIMIT 1`` 不改语义,只是一道围栏 —— 不加的话 PG 会把它拉平成哈希
+        连接、**整表**顺扫所有库的 ``knowledge_objects``(12 万对象的库上 1000 个成员就
+        这样选,`tests/postgres/test_kg_findings_plan_pins.py` 实测抓到)。围栏下每个
+        成员一次主键探查,成本与成员数成正比、与表大小无关。"""
+        ids = sorted(dict.fromkeys(str(cid) for cid in canonical_ids))
+        if not ids:
+            return []
+        statuses = ",".join("%s" for _ in USABLE_STATUSES)
+        visible = (
+            f"(o.status IN ({statuses}) AND o.source_id <> '' "
+            "AND NOT EXISTS (SELECT 1 FROM sources hs WHERE hs.id = o.source_id "
+            "AND hs.notebook_id = o.notebook_id "
+            "AND hs.source_type IN ('memory','knowhow')))"
+        )
+        raw: List[tuple] = []
+        for start in range(0, len(ids), 500):
+            canon = bind_ids(ids[start:start + 500])
+            raw.extend(
+                (row["canonical_id"], row["name"], row["visible"])
+                for row in execute_ids(
+                    db,
+                    "SELECT c.canonical_id AS canonical_id, m.name AS name, "
+                    "m.visible AS visible "
+                    "FROM concept_clusters c "
+                    "CROSS JOIN LATERAL ("
+                    f"SELECT o.payload->>'name' AS name, {visible} AS visible "
+                    "FROM knowledge_objects o "
+                    "WHERE o.id = c.member_object_id "
+                    "AND o.notebook_id = c.notebook_id LIMIT 1) m "
+                    f"WHERE {member_of('c.canonical_id', canon)} "
+                    "AND c.notebook_id = %s "
+                    f"AND c.generation = {_PUBLISHED_CLUSTER_GEN} "
+                    "UNION ALL "
+                    f"SELECT o.id, o.payload->>'name', {visible} "
+                    "FROM knowledge_objects o "
+                    f"WHERE {member_of('o.id', canon)} AND o.notebook_id = %s "
+                    "AND NOT EXISTS (SELECT 1 FROM concept_clusters cc "
+                    "WHERE cc.notebook_id = o.notebook_id "
+                    "AND cc.member_object_id = o.id "
+                    f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN})",
+                    [*USABLE_STATUSES, canon.param, notebook_id, notebook_id,
+                     *USABLE_STATUSES, canon.param, notebook_id, notebook_id],
+                ).fetchall()
+            )
+        return _member_name_rows(raw)
 
     @staticmethod
     def stamp_cluster_code_version(

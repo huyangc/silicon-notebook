@@ -54,6 +54,7 @@ from app.services.kg_analysis_precompute import (
     CLUSTER_DEPENDENT_ARTIFACT_KINDS,
     stamp_cluster_seq,
 )
+from app.domain.kg_analysis_contracts import ARTIFACT_FINDINGS, stamp_ledger_contract
 from app.services.knowledge_contracts import (
     COMMUNITY_OVERVIEW_MAX,
     COMMUNITY_TOP_MEMBERS_MAX,
@@ -115,17 +116,19 @@ def _artifact(db, kind: str, payload: dict, *, seq: int = 10,
               created_at: str = "2026-01-02T00:00:00",
               cluster_seq: "int | None" = None, stamp: bool = True,
               partition_rebuilt: bool = True) -> None:
-    """写一行账本。默认照生产路径盖簇世代的戳(`stamp_cluster_seq` 知道该盖哪几份)。
+    """写一行账本。默认照生产路径盖簇世代的戳(`stamp_cluster_seq` 知道该盖哪几份)
+    与账本契约戳(`stamp_ledger_contract`,设计 2026-10-19 §7.4)。
 
     ``cluster_seq=None`` → 跟 ``seq`` 走(``_state`` 的两个计数器默认也是同一个数,
     所以不特意错开时一切对齐)。``stamp=False`` 模拟**本次修复之前**写下的行:依赖
-    合并结果却没盖戳,读侧必须报「无从判断」而不是默认新鲜。
+    合并结果却没盖戳,读侧必须报「无从判断」而不是默认新鲜;它同样建于账本契约戳
+    出现之前(升级前的旧行)。
     """
     stamped = (
-        stamp_cluster_seq(
+        stamp_ledger_contract(stamp_cluster_seq(
             {kind: payload}, seq if cluster_seq is None else cluster_seq,
             partition_rebuilt=partition_rebuilt,
-        )[kind]
+        ))[kind]
         if stamp else payload
     )
     db.execute(
@@ -214,6 +217,26 @@ def _profiles_payload(**overrides) -> dict:
     return payload
 
 
+def _findings_payload() -> dict:
+    """问题清单账本 payload 的真实形状:跑一次纯规则引擎(空库 → 每条规则 skipped),
+    再经 `finalize_findings` 补上对比摘要 —— 不手抄,形状漂移不会让夹具自洽地错。"""
+    from app.services.kg_findings import (
+        FindingsObjectTally, GraphStructure, compute_findings, finalize_findings,
+    )
+    import numpy as np
+
+    structure = GraphStructure.from_edges(np.empty(0), np.empty(0), 0)
+    draft = compute_findings(
+        tally=FindingsObjectTally({}, structure), structure=structure, can2idx={},
+        names={}, relations_by_source={}, decisions={},
+        member_seeds=lambda ids: {}, max_candidate_pairs=10,
+    )
+    while draft.pending() is not None:
+        pass
+    _rows, payload = finalize_findings(draft.result(), [], None, kg_seq=0, cluster_seq=0)
+    return payload
+
+
 def _seed_complete_ledger(db, *, seq: int = 10, created_at: str = "2026-01-02T00:00:00",
                           cluster_seq: "int | None" = None,
                           partition_rebuilt: bool = True, **edge_overrides) -> None:
@@ -224,6 +247,7 @@ def _seed_complete_ledger(db, *, seq: int = 10, created_at: str = "2026-01-02T00
     _artifact(db, ARTIFACT_RELATION_PROVENANCE, _relation_payload(), **common)
     _artifact(db, ARTIFACT_COMMUNITY_EDGES, _edges_payload(**edge_overrides), **common)
     _artifact(db, ARTIFACT_SOURCE_PROFILES, _profiles_payload(), **common)
+    _artifact(db, ARTIFACT_FINDINGS, _findings_payload(), **common)
 
 
 def _service(repo, store=None) -> KgAnalysisService:
@@ -891,6 +915,7 @@ def test_ledger_state_never_says_complete_while_absence_says_unexpected(
         _artifact(db, ARTIFACT_LARGEST_CLUSTERS, _largest_payload())
         _artifact(db, ARTIFACT_RELATION_PROVENANCE, _relation_payload())
         _artifact(db, ARTIFACT_COMMUNITY_EDGES, _edges_payload(communities=boards))
+        _artifact(db, ARTIFACT_FINDINGS, _findings_payload())
 
     overview = _service(repo).overview(NB)
 
@@ -1117,10 +1142,10 @@ def test_source_page_is_ordered_by_mainstream_share_ascending(repo):
     assert [r["source_id"] for r in page.rows] == ["s-lo", "s-mid", "s-hi"]
     assert page.order == ORDER_SPARSE
     assert page.total == 3 and page.returned == 3 and page.has_more is False
-    # summary 就是账本行的 payload 原样(含生产路径盖上的簇世代戳)。
-    assert page.summary == stamp_cluster_seq(
+    # summary 就是账本行的 payload 原样(含生产路径盖上的簇世代戳与账本契约戳)。
+    assert page.summary == stamp_ledger_contract(stamp_cluster_seq(
         {ARTIFACT_SOURCE_PROFILES: _profiles_payload()}, 10, partition_rebuilt=True
-    )[ARTIFACT_SOURCE_PROFILES]
+    ))[ARTIFACT_SOURCE_PROFILES]
 
 
 def test_source_page_order_connected_reverses(repo):

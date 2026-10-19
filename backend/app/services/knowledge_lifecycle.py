@@ -46,8 +46,8 @@ from contextlib import closing
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import (
-    Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set,
-    Tuple,
+    Any, Callable, Dict, Iterable, Iterator, List, Mapping, NamedTuple, Optional,
+    Sequence, Set, Tuple,
 )
 
 from app.core.config import Settings
@@ -69,6 +69,29 @@ from app.repositories.ports import (
     KnowledgeStorePort,
     NotebookDeletingAbortsMaintenanceError,
     UnifiedKgStorePort,
+)
+from app.domain.kg_analysis_contracts import (
+    ARTIFACT_FINDINGS,
+    CLUSTER_SEQ_PAYLOAD_KEY,
+    MARK_RELINK_ATTEMPTED,
+    stamp_ledger_contract,
+)
+from app.domain.kg_findings_contracts import (
+    NOTEBOOK_SUBJECT_KEY,
+    RULE_ISOLATED_OBJECTS,
+)
+from app.domain.kg_merge_seed import concept_seed_v1
+from app.services.kg_findings import (
+    FindingsDraft,
+    FindingsObjectTally,
+    FindingsResult,
+    GraphStructure,
+    SourceFacts,
+    board_structure_counts,
+    compute_findings,
+    finalize_findings,
+    finding_row_values,
+    stale_dismissals,
 )
 from app.services.kg_analysis_precompute import (
     ARTIFACT_CLUSTER_HISTOGRAM,
@@ -227,6 +250,20 @@ _ORPHAN_SWEEP_DONE_MAX = 512
 # Z6:每批 DELETE 的行数上限 —— 与 keyset 游标一起把清扫拆成多条独立提交的写事务,
 # 使单条语句在 9M 行级别的库上仍能稳稳落在 statement_timeout(30s)以内。
 _ORPHAN_SWEEP_BATCH_SIZE = 5000
+
+
+class KgAnalysisBatch(NamedTuple):
+    """`_compute_kg_analysis` 的产出,原样交给发布事务(一个字节都还没写库)。
+
+    ``payloads``:账本 payload(已盖簇世代戳与账本契约戳);``findings``:问题清单的
+    明细行(还没有 ``first_seen_*``)+ 那一份账本 payload —— 发布事务里由
+    `finalize_findings` 对着旧明细补齐;``prune_marks``:主体已不在新明细里的豁免。"""
+
+    edges: list
+    profiles: list
+    payloads: Dict[str, dict]
+    findings: FindingsResult
+    prune_marks: List[Tuple[str, str, str]]
 
 
 class ModelSkipPolicy:
@@ -451,11 +488,18 @@ def _canonical_scratch_row(
 
 def _fold_canonical_edges(
     graph_rows: Any, can2idx: Dict[str, int], edge_builder: Any,
+    relations_by_source: Optional[Dict[str, int]] = None,
 ) -> None:
     """Fold ``community_graph_rows``' ``(s, t)`` rows into the int32 edge table.
 
     ``can2idx`` hands out canonical indices in first-appearance order (Louvain
     is edge-order sensitive), self-loops and empty endpoints are dropped.
+
+    ``relations_by_source`` (KG findings F3b, design 2026-10-19 §7.1 ①): when
+    given, EVERY row is counted under its ``src`` (``kr.source_id``) before the
+    self-loop / blank-endpoint skip — "relation rows per source", one dict
+    increment per row on the same pass; the edge table and the indices do not
+    change.
 
     ``closing`` is load-bearing on PostgreSQL, where ``graph_rows`` is a
     ``cursor().stream()`` generator: a stream abandoned mid-iteration (the loop
@@ -467,6 +511,9 @@ def _fold_canonical_edges(
     """
     with closing(graph_rows):
         for r in graph_rows:
+            if relations_by_source is not None:
+                src = r["src"] or ""
+                relations_by_source[src] = relations_by_source.get(src, 0) + 1
             s, t = r["s"], r["t"]
             if not s or not t or s == t:
                 continue
@@ -475,9 +522,13 @@ def _fold_canonical_edges(
             edge_builder.add(si, ti)
 
 
-def _fold_source_rows(rows: Any, counter: Any) -> None:
+def _fold_source_rows(rows: Any, counter: Any, tally: Any = None) -> None:
     """Fold ``source_canonical_rows``' ``(source_id, canonical_id)`` rows into the
-    per-board source counter.
+    per-board source counter and, when given, the KG findings object tally
+    (``FindingsObjectTally``, design 2026-10-19 §7.1 ⑤ — same pass, one more
+    ``add`` per row with the row's ``is_concept``). ``counter`` is ``None`` on a
+    zero-board library: no source profiles, but the tally still runs (findings
+    is a required artifact).
 
     ``closing`` is load-bearing on PostgreSQL for the same reason as in
     ``_fold_canonical_edges``: ``rows`` is a ``cursor().stream()`` generator, and one
@@ -491,7 +542,10 @@ def _fold_source_rows(rows: Any, counter: Any) -> None:
     """
     with closing(rows):
         for row in rows:
-            counter.add(row["source_id"], row["canonical_id"])
+            if counter is not None:
+                counter.add(row["source_id"], row["canonical_id"])
+            if tally is not None:
+                tally.add(row["source_id"], row["canonical_id"], row["is_concept"])
 
 
 @dataclass
@@ -2169,11 +2223,31 @@ class KnowledgeLifecycleService:
                 # happened per-source (durably, in-transaction) — this is
                 # process-local cache eviction only.
                 self._invalidate_unified_cache(notebook_id)
+        self._mark_relink_attempted(notebook_id)
         return {
             "isolated_before": isolated_before,
             "edges_added": written["edges"],
             "isolated_after": isolated_after,
         }
+
+    def _mark_relink_attempted(self, notebook_id: str) -> None:
+        """「补上关联」跑完的持久标记(设计 2026-10-19 §4.5 / §8.3):F5 靠它判断再跑一次
+        还有没有用 —— `GET /kg/relink/status` 只在内存里,重启即 ``idle``,「跑过但一条都
+        没补上」也不留痕迹。
+
+        只在**成功跑完**时写(中途异常不写:没跑完的一次不能说「再跑也没用」),补了
+        零条也写 —— 零条正是「确定性、幂等,再跑还是补不上」的那一档。``at_kg_seq`` 在
+        这个写事务里读:逐来源的写事务已各自推进了 `kg_mutation_seq`,记的是跑完那一刻
+        的世代;读侧拿它与当前世代比(之后有新内容进来,才可能补上新的)。一个很小的
+        写事务:一行 state 点读 + 一行标记 upsert。"""
+        with self._write() as db:
+            state = self.unified_kg.state_row(db, notebook_id)
+            self.unified_kg.write_kg_analysis_mark(
+                db, notebook_id, RULE_ISOLATED_OBJECTS, NOTEBOOK_SUBJECT_KEY,
+                MARK_RELINK_ATTEMPTED,
+                at_kg_seq=int(state["kg_mutation_seq"]) if state else 0,
+                actor_user_id="", note="", now=self._now(),
+            )
 
     def _relink_source_partitions(self, notebook_id: str) -> Iterator[str]:
         """Every partition key of the notebook's objects, each yielded exactly once.
@@ -7173,15 +7247,73 @@ class KnowledgeLifecycleService:
                         # 补账本重来,那时它读到的是抢占者留下的那套划分。
                         partition_replaced_under_us = True
                     else:
-                        _edges, _profiles, _payloads = analysis
-                        # 问题清单的明细与过期标记清理由规则引擎接上(设计
-                        # 2026-10-19 §7.1 第 ⑧ 步);在那之前明细恒为空、不清标记。
-                        self.unified_kg.replace_kg_analysis_artifacts(
-                            db, notebook_id, seq, _edges, _profiles, _payloads, now,
-                            findings_rows=(), prune_marks=(),
-                        )
+                        self._replace_analysis_artifacts(db, notebook_id, seq, analysis, now)
                         analysis_published = True
         return analysis_published, partition_replaced_under_us
+
+    def _replace_analysis_artifacts(
+        self, db: Any, notebook_id: str, seq: int, analysis: "KgAnalysisBatch", now: str,
+    ) -> None:
+        """发布事务里那一步(设计 2026-10-19 §7.1 ⑧):产物 + 问题清单整批重写。
+
+        ⚠ **本事务里唯一的读**是旧的 `findings` 账本行与旧明细 —— 对比摘要与
+        ``first_seen_*`` 的继承要读的就是「这一刻已发布的那一份」,挪到事务外就可能与
+        并发的另一次发布交错(两次都对着同一份旧明细比)。它有界且走主键:账本是按
+        notebook 的 ≤ 6 行点读,旧明细是 ``(notebook_id, rule_id, subject_key)`` 主键前缀
+        的范围读,≤ `KG_FINDINGS_ROWS_MAX` 行(写入口保证)—— 与写锁里禁止的全表重活
+        不是一类(`tests/test_kg_findings_store.py` / PG 计划钉守着这次读的计划)。"""
+        old_ledger = self.unified_kg.kg_analysis_artifact_rows(db, notebook_id).get(
+            ARTIFACT_FINDINGS)
+        old_rows = self.unified_kg.kg_analysis_finding_rows(db, notebook_id)
+        payloads = dict(analysis.payloads)
+        # 问题清单不依赖板块划分,补账本路径上也盖得出整数合并世代(`stamp_cluster_seq`)。
+        rows, payloads[ARTIFACT_FINDINGS] = finalize_findings(
+            analysis.findings, old_rows, old_ledger, kg_seq=seq,
+            cluster_seq=int(analysis.findings.payload[CLUSTER_SEQ_PAYLOAD_KEY]))
+        self.unified_kg.replace_kg_analysis_artifacts(
+            db, notebook_id, seq, analysis.edges, analysis.profiles, payloads, now,
+            findings_rows=[finding_row_values(row) for row in rows],
+            prune_marks=analysis.prune_marks,
+        )
+
+    def _scan_canonical_graph(
+        self, notebook_id: str,
+    ) -> "Tuple[Dict[str, str], Dict[str, int], List[str], CanonicalEdgeTable, Dict[str, int]]":
+        """`rebuild_communities` 的第 ① 步:一趟流式读 `community_graph_rows`,建
+        canonical 整数边图。返回 ``(names, can2idx, idx2can, edge_table,
+        relations_by_source)``。
+
+        SQL-join 把关系两端映射到 canonical(未聚类→自身 object_id),整数索引累加边权。
+        避开 networkx dict-of-dicts 与全量 cluster_map dict → 10^7 边内存有界
+        (concept_clusters.member_object_id 有索引,join 走索引)。
+
+        ⚠ 边表是**列式 int32 数组**而不是 `dict[(int, int), int]`(设计 §3.32,codex
+        第 2/7/9 轮那三个 P1 的共同根源就是那个 dict 形态)。dict 每条边要一个新分配的
+        int 二元组 + 哈希槽,生产 836 万边约 1.4 GB;而且**折叠它**必然要么造第二份同量级
+        dict、要么依赖不缩哈希表的 `popitem`。三个数组把同一份数据压到约 100 MB,折叠是
+        纯向量化。
+
+        行序 = 每对 canonical 的**首次出现序**,与被它取代的那张 dict 的插入序逐字一致
+        —— Louvain 对边序敏感,漂了就是已部署库的板块划分全漂(设计 §3.32 不变量 1)。
+        `build` 里那段说明写了为什么必须是稳定排序。
+
+        ``relations_by_source``(问题清单 F3b,设计 2026-10-19 §7.1 ①):同一趟读里按
+        ``kr.source_id`` 数**每一行**关系(自环与空端点也算,在跳过之前数),O(来源数)
+        的一个 dict。只多读一列,行序与 Louvain 的输入逐字不变;PG 侧这条读是流式游标
+        + 600 s 下限(#930),``closing`` 兜住异常路径(见 `_fold_canonical_edges`)。
+        """
+        can2idx: "Dict[str, int]" = {}
+        relations_by_source: "Dict[str, int]" = {}
+        edge_builder = CanonicalEdgeTableBuilder()
+        with self._connect() as db:
+            names, graph_rows = self.unified_kg.community_graph_rows(db, notebook_id)
+            _fold_canonical_edges(graph_rows, can2idx, edge_builder, relations_by_source)
+        idx2can = [""] * len(can2idx)
+        for _c, _i in can2idx.items():
+            idx2can[_i] = _c
+        edge_table = edge_builder.build(len(can2idx))
+        del edge_builder
+        return names, can2idx, idx2can, edge_table, relations_by_source
 
     def rebuild_communities(self, notebook_id: str, level: int = 0, force: bool = False) -> int:
         """在 canonical 实体图(关系两端经 cluster_map 映射)上跑 Louvain 社区检测,
@@ -7356,29 +7488,10 @@ class KnowledgeLifecycleService:
                 # 短路同 cluster 侧:G==1 ⇒ 只可能有 0 代存量。
                 self._reap_stale_community_generations(
                     notebook_id, keep=(_published_from, _generation))
-            # canonical 整数边图:SQL-join 把关系两端映射到 canonical(未聚类→自身 object_id),
-            # 整数索引累加边权。避开 networkx dict-of-dicts 与全量 cluster_map dict → 10^7 边
-            # 内存有界(concept_clusters.member_object_id 有索引,join 走索引)。
-            #
-            # ⚠ 边表是**列式 int32 数组**而不是 `dict[(int, int), int]`(设计 §3.32,
-            # codex 第 2/7/9 轮那三个 P1 的共同根源就是那个 dict 形态)。dict 每条边要一个
-            # 新分配的 int 二元组 + 哈希槽,生产 836 万边约 1.4 GB;而且**折叠它**必然要么
-            # 造第二份同量级 dict、要么依赖不缩哈希表的 `popitem`。三个数组把同一份数据压到
-            # 约 100 MB,折叠是纯向量化。
-            can2idx: "Dict[str, int]" = {}
-            edge_builder = CanonicalEdgeTableBuilder()
-            with self._connect() as db:
-                names, graph_rows = self.unified_kg.community_graph_rows(db, notebook_id)
-                _fold_canonical_edges(graph_rows, can2idx, edge_builder)
-            idx2can = [""] * len(can2idx)
-            for _c, _i in can2idx.items():
-                idx2can[_i] = _c
+            # canonical 整数边图(列式 int32 边表 + 每来源关联数,见 `_scan_canonical_graph`)。
+            names, can2idx, idx2can, edge_table, relations_by_source = (
+                self._scan_canonical_graph(notebook_id))
             n_nodes = len(can2idx)
-            # 行序 = 每对 canonical 的**首次出现序**,与被它取代的那张 dict 的插入序逐字
-            # 一致 —— Louvain 对边序敏感,漂了就是已部署库的板块划分全漂(设计 §3.32
-            # 不变量 1)。`build` 里那段说明写了为什么必须是稳定排序。
-            edge_table = edge_builder.build(n_nodes)
-            del edge_builder
             _partition_generation = 0
             deg: "Dict[str, float]" = {}
             if graph_fresh:
@@ -7506,7 +7619,7 @@ class KnowledgeLifecycleService:
             # ⚠ 只有默认层跑它(方向五):账本与两张产物表都不分 level,让非默认层去写就是
             # 把指向**另一层**板块 id 的产物塞进默认层的读侧,而读侧照旧按 `community_seq`
             # 对齐判「与当前一致」。非默认层因此只发布它自己的板块行,一个字都不占共享账目。
-            analysis: "Optional[Tuple[list, list, Dict[str, dict]]]" = None
+            analysis: "Optional[KgAnalysisBatch]" = None
             if not _ledger_speaks_for_level:
                 # 边表在这里就到头了 —— 它平时是交给 `_compute_kg_analysis` 边消化边释放的
                 # (生产 836 万边约 100 MB),这条路径没有接手方,得自己放掉,不能让它一路
@@ -7528,6 +7641,7 @@ class KnowledgeLifecycleService:
                         # 拿的是现成的划分,它建在哪一代合并结果上没有地方记,盖上当前世代就是
                         # 把一份混合世代的东西说成「与当前一致」(codex 第 7 轮 P2)。
                         partition_rebuilt=not graph_fresh,
+                        names=names, relations_by_source=relations_by_source,
                     )
                 except KgBuildAborted:
                     raise
@@ -7602,8 +7716,25 @@ class KnowledgeLifecycleService:
         *,
         reusable: "Optional[Dict[str, dict]]" = None,
         partition_rebuilt: bool,
-    ) -> "Tuple[list, list, Dict[str, dict]]":
+        names: "Mapping[str, str]",
+        relations_by_source: "Mapping[str, int]",
+    ) -> "KgAnalysisBatch":
         """把 KG 质量分析的产物在**这一次**图构建里算出来(设计 §3.2)。**不落库。**
+
+        **问题清单**(设计 2026-10-19 §7.1,步骤号即那张表的号)挂在同一趟里:
+          ③ 折叠跨板块边**之前**用边表求连通分量 + 度数(`GraphStructure`),板块口径
+             的两个 S3 数(主连通块内的板块数、恰好等于一整个分量的板块数)趁
+             membership 还在手算出来,进 `community_edges` payload;
+          ⑤ 来源画像那一趟对象流**同时**喂 `FindingsObjectTally` —— 零板块的库也照跑
+             (问题清单是必需产物,只是不建 `SourceBoardCounter`、不写来源画像);
+          ⑥ drain 之后、``can2idx.clear()`` 之前 `compute_findings`(已存的合并决定按
+             v1 种子判,成员名按批有界读),随即清 ``can2idx``,再按 `draft.pending()`
+             的有界清单点查展示名、来源标题(全部在写事务之外),最后读一次标记表算出
+             要清掉的过期豁免;
+          ⑦ 三条统计快照照旧跑在更低的水位上(⑥ 新增的结构到这里已全部释放)。
+        ``names``:`community_graph_rows` 的 canonical → canonical 名(只用于判定 F3a /
+        F4,从不展示);``relations_by_source``:第 ① 步按 ``kr.source_id`` 数的关联行数。
+        两个都没有默认值:漏传会让规则在空输入上「全部通过」。
 
         为什么挂在这里而不是端点上:五份里有三份是**全表级重活**(簇大小直方图 / 最大簇
         榜单 / 边出处构成,见 ports.py 只读聚合段头的双后端实测),生产库 200 万簇行 /
@@ -7658,7 +7789,8 @@ class KnowledgeLifecycleService:
         可以并排放、哪些不能。
 
         ⚠ **本方法一个字节都不写库**(codex 第 13 轮 P1 的原子发布)。它返回
-        ``(edges, profiles, payloads)``,由 `rebuild_communities` 在**板块自己的那个**
+        `KgAnalysisBatch`(跨板块边 / 来源画像 / 账本 payload / 问题清单 / 要清的过期
+        豁免),由 `rebuild_communities` 在**板块自己的那个**
         写事务里一起发布 —— 板块与全部产物因此对读者是同一个瞬间出现的,不再有
         「新板块 + 旧账本」这个生产上分钟级的窗口。半份产物比没有产物更危险,而「新板块
         配旧产物」比半份还糟:报告同屏混着两代库,一个标注都没有。
@@ -7695,6 +7827,12 @@ class KnowledgeLifecycleService:
                     can2idx[member] = index
                     community_of_index.append(None)
                 community_of_index[index] = cid
+        # ③ 问题清单的图结构:连通分量 + 度数,必须在下面那次折叠**释放**边表之前求。
+        # 全量与补账本两条路径共用;`n_nodes` 取边表的,不取 `can2idx` 的(上面那段
+        # 补下标会让 `can2idx` 比图大)。S3 依赖板块划分的两个数趁 membership 在手一起算。
+        structure = GraphStructure.from_edges(
+            edge_table.src, edge_table.dst, edge_table.n_nodes)
+        board_numbers = board_structure_counts(structure, community_of_index)
         # ⚠ 这一步**释放** `edge_table`(= 调用方的 `edge_table`),不是遍历它:折叠
         # 出来的板块对数在最坏情况下与边表同量级(生产 836 万条),两份同时驻留就是在
         # 437 GB 库的峰值时刻再叠一个峰值。落库上限(`MAX_PERSISTED_COMMUNITY_EDGES`)
@@ -7718,6 +7856,8 @@ class KnowledgeLifecycleService:
             "cross_weight": folder.cross_weight,
             "intra_weight": folder.intra_weight,
             "communities": len(sizes),
+            # S3 口径里依赖板块划分的两个数(只依赖连通分量的进问题清单 payload)。
+            **board_numbers,
         }
         # ⚠ **折叠结果到此为止,必须当场整个放掉**(codex 第 9 轮 P1-2)。它已经把要
         # 落库的东西交出来了(上面那个 payload + 有界的 `edges`),而紧接着的四条查询
@@ -7739,10 +7879,15 @@ class KnowledgeLifecycleService:
         # `community_members` 是一个划分,而它就是那份 membership),而且每行只留两个
         # int32,库内反而少了一棵 GROUP BY 的临时 B 树。
         profiles: "List[tuple]" = []
-        if total_members:
-            counter = SourceBoardCounter(can2idx, community_of_index)
-            with self._connect() as db:
-                _fold_source_rows(self.unified_kg.source_canonical_rows(db, notebook_id), counter)
+        # ⑤ 这一趟对象流**无条件**跑:问题清单是必需产物,零板块的库也要它(只是不建
+        # `SourceBoardCounter`、不写来源画像 —— 那份产物的「零板块合法缺席」不变)。
+        counter = (SourceBoardCounter(can2idx, community_of_index)
+                   if total_members else None)
+        tally = FindingsObjectTally(can2idx, structure)
+        with self._connect() as db:
+            _fold_source_rows(
+                self.unified_kg.source_canonical_rows(db, notebook_id), counter, tally)
+        if counter is not None:
             source_folder = SourceProfileFolder(head)
             for source_id, community_id, count in counter.drain():
                 source_folder.add(source_id, community_id, count)
@@ -7757,12 +7902,25 @@ class KnowledgeLifecycleService:
                 "head_members": head_members,
                 "total_members": total_members,
             }
+        del community_of_index
+        # ⑥ 问题清单:`compute_findings` 返回时已把要用的下标全部还原成 canonical id。
+        draft = self._findings_draft(
+            notebook_id, tally, structure, can2idx, names, relations_by_source)
+        del tally, structure
         # ⚠ membership 到此为止。`can2idx` 是**调用方**(`rebuild_communities`)的局部
         # 变量,它那个栈帧的名字在本方法执行期间一直活着,`del` 自己的形参一个字节也放
         # 不掉 —— 与 `CanonicalEdgeTable.release()` 是同一条契约,所以由持有者的内容被
         # 就地清空来兑现。调用方在本方法返回之后不得再用它(今天也没有任何使用点)。
-        del community_of_index
         can2idx.clear()
+        findings = self._findings_lookups(notebook_id, draft)
+        del draft
+        payloads[ARTIFACT_FINDINGS] = findings.payload
+        # 发布时要清掉的过期豁免(主体已不在新明细里的 dismissed 标记):写事务之外读
+        # 一次标记表(≤ KG_ANALYSIS_MARKS_MAX 行,主键前缀)。读到之后、发布之前新写的
+        # 标记留到下一次发布再判,不会误删。
+        with self.unified_kg.read_snapshot() as db:
+            prune_marks = stale_dismissals(
+                self.unified_kg.kg_analysis_mark_rows(db, notebook_id), findings.rows)
         payloads[ARTIFACT_CLUSTER_HISTOGRAM] = self.unified_kg.cluster_size_histogram(
             notebook_id
         )
@@ -7776,13 +7934,86 @@ class KnowledgeLifecycleService:
             reused if reused is not None
             else self.unified_kg.relation_provenance_counts(notebook_id)
         )
-        return (
-            edges,
-            profiles,
-            stamp_cluster_seq(
-                payloads, cluster_seq, partition_rebuilt=partition_rebuilt
-            ),
+        # 两个戳都在 service 侧盖、store 写入口查(盖与查分在两个函数里):簇世代
+        # (`stamp_cluster_seq`)与账本契约版本(`stamp_ledger_contract`,设计 2026-10-19
+        # §7.4 —— 读侧靠它分辨「升级后还没生成」与「本该有却缺失」)。问题清单那份的
+        # 对比摘要与 first_seen 继承在发布事务里由 `finalize_findings` 补上,保留这两个戳。
+        stamped = stamp_ledger_contract(stamp_cluster_seq(
+            payloads, cluster_seq, partition_rebuilt=partition_rebuilt))
+        return KgAnalysisBatch(
+            edges=edges, profiles=profiles, payloads=stamped,
+            findings=FindingsResult(findings.rows, stamped[ARTIFACT_FINDINGS]),
+            prune_marks=prune_marks,
         )
+
+    def _findings_draft(
+        self, notebook_id: str, tally: "FindingsObjectTally",
+        structure: "GraphStructure", can2idx: "Dict[str, int]",
+        names: "Mapping[str, str]", relations_by_source: "Mapping[str, int]",
+    ) -> "FindingsDraft":
+        """第 ⑥ 步的规则计算(设计 2026-10-19 §7.1),写事务之外。
+
+        已存的合并决定(``decided_seed_pairs_from``,按 v1 种子)一次短快照读;成员种子
+        按引擎给的批(≤ 500 个 canonical)各开一次短快照点查 —— 不把一个 REPEATABLE READ
+        快照挂过整段规则计算(那会拖住 PG 的 xmin horizon)。两者分属不同快照只影响「这
+        一刻刚落下的决定」:读侧按当时的决定重判 F4(`under_merge_decision`),不会漏。"""
+        with self.unified_kg.read_snapshot() as db:
+            decisions = self.governance_store.decided_seed_pairs_from(db, notebook_id)
+
+        def member_seeds(canonical_ids: "Sequence[str]") -> "Dict[str, Set[str]]":
+            with self.unified_kg.read_snapshot() as db:
+                rows = self.unified_kg.kg_finding_member_name_rows(
+                    db, notebook_id, canonical_ids)
+            seeds: "Dict[str, Set[str]]" = {}
+            for canonical_id, name, _visible, _count in rows:
+                seeds.setdefault(canonical_id, set()).add(concept_seed_v1(name))
+            return seeds
+
+        return compute_findings(
+            tally=tally, structure=structure, can2idx=can2idx, names=names,
+            relations_by_source=relations_by_source, decisions=decisions,
+            member_seeds=member_seeds,
+            max_candidate_pairs=self.settings.kg_findings_max_candidate_pairs,
+        )
+
+    def _findings_lookups(
+        self, notebook_id: str, draft: "FindingsDraft",
+    ) -> "FindingsResult":
+        """按 ``draft.pending()`` 的有界清单点查,直到答完(写事务之外)。
+
+        · ``(source_id, canonical_id)`` → `kg_finding_display_name_rows`(该来源自己的
+          可见对象的名字;自开快照,挂写事务守卫);
+        · ``(None, canonical_id)``(F4 / S1)→ `kg_finding_member_name_rows` 里
+          ``visible`` 的那些:隐藏来源(Memory / knowhow)成员的名字只判定、绝不展示;
+        · 来源 → `kg_finding_source_states` 的标题与导入时间(F2 并列消歧)。
+        每一轮的量由引擎的每规则上限封顶;成员名与来源状态同一个短快照。"""
+        while (request := draft.pending()) is not None:
+            pairs = [key for key in request.names if key[0] is not None]
+            members = sorted({cid for sid, cid in request.names if sid is None})
+            if pairs:
+                draft.supply(names=[
+                    (sid, cid, name) for sid, cid, name, _count
+                    in self.unified_kg.kg_finding_display_name_rows(notebook_id, pairs)
+                ])
+            if not members and not request.sources:
+                continue
+            with self.unified_kg.read_snapshot() as db:
+                if members:
+                    draft.supply(names=[
+                        (None, cid, name) for cid, name, visible, _count
+                        in self.unified_kg.kg_finding_member_name_rows(
+                            db, notebook_id, members)
+                        if visible
+                    ])
+                if request.sources:
+                    states = self.unified_kg.kg_finding_source_states(
+                        db, notebook_id, list(request.sources))
+                    draft.supply(sources={
+                        sid: SourceFacts(str(state["title"] or ""),
+                                         str(state["created_at"] or "") or None)
+                        for sid, state in states.items() if state["exists"]
+                    })
+        return draft.result()
 
     def list_communities(self, notebook_id: str, level: int = 0) -> List[List[str]]:
         """Member-id lists of each published community at ``level``."""

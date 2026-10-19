@@ -54,9 +54,11 @@ import numpy as np
 # — stamp_cluster_seq / artifact_is_current / _cluster_generation_verdict /
 # _generation_verdict below — and for external importers such as
 # app.repositories.*.unified_kg_store).
+from app.domain.kg_findings_contracts import RULES_VERSION
 from app.domain.kg_analysis_contracts import (
     ARTIFACT_CLUSTER_HISTOGRAM,
     ARTIFACT_COMMUNITY_EDGES,
+    ARTIFACT_FINDINGS,
     ARTIFACT_KINDS,
     ARTIFACT_LARGEST_CLUSTERS,
     ARTIFACT_RELATION_PROVENANCE,
@@ -214,6 +216,12 @@ def _generation_verdict(
     return None if cluster is None else bool(cluster)
 
 
+def findings_rules_are_current(payload: Mapping[str, object]) -> bool:
+    """问题清单 payload 是不是按**当前**规则版本算的(``bool`` 不算整数)。"""
+    version = payload.get("rules_version")
+    return not isinstance(version, bool) and version == RULES_VERSION
+
+
 def artifact_is_current(
     kind: str,
     built_seq: int,
@@ -242,7 +250,14 @@ def artifact_is_current(
 
     与簇无关的 kind 只看 KG 世代;依赖簇的 kind 两个世代都要对齐,而**漏盖戳(键不在
     或值被改坏)仍然等于不新鲜**(见 `artifact_cluster_seq`)。
+
+    ⚠ **问题清单还多一条线:规则版本**(设计 2026-10-19 §3.2)。payload 里的
+    ``rules_version`` 不是当前代码的 `RULES_VERSION` → 明确不新鲜(``False``):规则或阈值
+    改过之后,同一份 KG 上重算会得到不同的问题,闸必须补跑、读侧必须报落后 —— 否则部署
+    新规则后「更新分析」会说「无需更新」(S4),而那恰恰是要它更新的时候。
     """
+    if kind == ARTIFACT_FINDINGS and not findings_rules_are_current(payload):
+        return False
     return _generation_verdict(
         built_seq, seq, _cluster_generation_verdict(kind, payload, cluster_seq)
     )

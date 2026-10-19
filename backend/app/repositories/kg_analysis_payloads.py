@@ -24,7 +24,13 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
-from app.domain.kg_analysis_contracts import FINDING_ROW_FIELDS
+from app.domain.kg_analysis_contracts import (
+    ARTIFACT_FINDINGS,
+    FINDING_ROW_FIELDS,
+    KG_FINDINGS_ROWS_MAX,
+    check_finding_row,
+)
+from app.domain.kg_findings_contracts import check_findings_ledger
 from app.domain.knowledge_contracts import (
     CLUSTER_OBJECT_TYPE_GROUPS,
     CLUSTER_OBJECT_TYPES,
@@ -79,6 +85,36 @@ def artifact_ledger_rows(
             "created_at": str(created_at or ""),
         }
     return out
+
+
+def checked_finding_rows(
+    payloads: Mapping[str, Mapping[str, object]], rows: Iterable[Sequence[Any]],
+) -> List[tuple]:
+    """The write entry's whole check of the findings detail, BEFORE anything is
+    deleted or written (both backends call this one function):
+
+      · every row through ``check_finding_row`` (shape, types);
+      · at most ``KG_FINDINGS_ROWS_MAX`` rows — the publish read and the read
+        side take ``LIMIT max + 1`` and rely on this bound;
+      · the ``findings`` ledger payload agrees with the rows
+        (``check_findings_ledger``: per rule ``persisted`` == rows written,
+        a cap is never silent, severities / subject kinds are the rule's).
+
+    Returns the normalised tuples, materialised (≤ the cap) so the ledger check
+    and the INSERT see the same rows."""
+    checked: List[tuple] = []
+    for row in rows:
+        checked.append(check_finding_row(row))
+        if len(checked) > KG_FINDINGS_ROWS_MAX:
+            raise ValueError(
+                f"KG 分析问题明细:一个 notebook 最多 {KG_FINDINGS_ROWS_MAX} 行,"
+                "读入口按这个上限取数,写超过就再也读不全"
+            )
+    check_findings_ledger(
+        payloads[ARTIFACT_FINDINGS],
+        [dict(zip(FINDING_ROW_FIELDS, row)) for row in checked],
+    )
+    return checked
 
 
 def _json_column(value: Any, expected: type, what: str) -> Any:
@@ -147,9 +183,11 @@ def mark_rows(
     return out
 
 
+# ``created_at`` (PR-2): the import time — F2's "equal object counts keep the
+# earlier import" tie-break, read in the same point lookup as the rest.
 SOURCE_STATE_FIELDS = (
     "title", "source_type", "status", "parse_status", "chunked_at",
-    "last_extraction_at", "last_extraction_status",
+    "last_extraction_at", "last_extraction_status", "created_at",
 )
 _HIDDEN_SOURCE_TYPES = frozenset({"memory", "knowhow"})
 
@@ -200,6 +238,28 @@ def display_name_rows(
     ordered = sorted(counts.items(), key=lambda item: (item[0][0], item[0][1], -item[1], item[0][2]))
     return [(source_id, canonical_id, name, count)
             for (source_id, canonical_id, name), count in ordered]
+
+
+def member_name_rows(
+    rows: Iterable[Sequence[Any]],
+) -> List[Tuple[str, str, bool, int]]:
+    """Member-name rows ``(canonical_id, name, visible)`` → ``(canonical_id, name,
+    visible, objects)`` counted, in one deterministic order: canonical, visible
+    names first, most objects first, then the name (code-point order, so both
+    backends agree — PostgreSQL would sort ``text`` by the database collation).
+
+    ``visible`` = the member is a usable object of a source that is neither
+    Memory nor knowhow (orphan references count as visible, like
+    `source_canonical_rows`). Hidden members are returned too: their names only
+    decide (v1 seeds of stored merge decisions), they are never displayed."""
+    counts: Dict[Tuple[str, str, bool], int] = {}
+    for canonical_id, name, visible in rows:
+        key = (str(canonical_id), "" if name is None else str(name), bool(visible))
+        counts[key] = counts.get(key, 0) + 1
+    ordered = sorted(counts.items(),
+                     key=lambda item: (item[0][0], not item[0][2], -item[1], item[0][1]))
+    return [(canonical_id, name, visible, count)
+            for (canonical_id, name, visible), count in ordered]
 
 
 def _reject_unknown_buckets(seen, allowed: frozenset, what: str) -> None:

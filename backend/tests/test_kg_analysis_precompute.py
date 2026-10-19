@@ -53,6 +53,13 @@ from app.services.kg_analysis_precompute import (
     reusable_artifact_payloads,
     stamp_cluster_seq,
 )
+from app.domain.kg_analysis_contracts import (
+    ARTIFACT_FINDINGS,
+    LEDGER_CONTRACT_KEY,
+    LEDGER_CONTRACT_VERSION,
+    stamp_ledger_contract,
+)
+from app.domain.kg_findings_contracts import ALL_RULES, RULES_VERSION
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients
 
@@ -474,17 +481,27 @@ def _full_payloads(
     """
     payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
     payloads[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 2}
+    # 问题清单那份要与(空的)明细对得上账:每条规则 persisted = 0。
+    payloads[ARTIFACT_FINDINGS] = {
+        "rules_version": RULES_VERSION,
+        "rules": {rule: {"status": "ran", "total": 0, "persisted": 0, "truncated": False}
+                  for rule in ALL_RULES},
+    }
     payloads.update(overrides)
-    return stamp_cluster_seq(
+    # 账本契约戳(设计 2026-10-19 §7.4)同样照生产路径盖,不手抄。
+    return stamp_ledger_contract(stamp_cluster_seq(
         payloads, cluster_seq, partition_rebuilt=partition_rebuilt
-    )
+    ))
 
 
 def _ledger(seqs: dict, *, cluster_seq: int = 0,
             partition_rebuilt: bool = True) -> dict:
-    """``{kind: kg_seq}`` → `kg_analysis_artifact_rows` 的形状(闸真正吃的那个)。"""
+    """``{kind: kg_seq}`` → `kg_analysis_artifact_rows` 的形状(闸真正吃的那个)。
+    问题清单那份带当前的 ``rules_version``(规则版本是它的第三条新鲜度线)。"""
     stamped = stamp_cluster_seq(
-        {kind: {"level": 0} for kind in seqs}, cluster_seq,
+        {kind: ({"level": 0, "rules_version": RULES_VERSION}
+                if kind == ARTIFACT_FINDINGS else {"level": 0})
+         for kind in seqs}, cluster_seq,
         partition_rebuilt=partition_rebuilt,
     )
     return {
@@ -503,11 +520,27 @@ def test_check_artifact_payloads_rejects_unknown_kinds():
 def test_check_artifact_payloads_rejects_a_missing_kind():
     """账本是整批重写的:少写一行,下游读到的是「从来没算过」,而且不会有任何报错。"""
     for kind in (ARTIFACT_CLUSTER_HISTOGRAM, ARTIFACT_LARGEST_CLUSTERS,
-                 ARTIFACT_RELATION_PROVENANCE, ARTIFACT_COMMUNITY_EDGES):
+                 ARTIFACT_RELATION_PROVENANCE, ARTIFACT_COMMUNITY_EDGES,
+                 ARTIFACT_FINDINGS):
         payloads = _full_payloads()
         payloads.pop(kind)
         with pytest.raises(ValueError, match="缺少必需的 kind"):
             check_artifact_payloads(payloads)
+
+
+def test_check_artifact_payloads_demands_the_ledger_contract_stamp():
+    """设计 2026-10-19 §7.4:每一份都必须带当前的 ``ledger_contract``;缺键、版本不对、
+    布尔值都硬失败(service 盖、store 查,盖与查分在两个函数里)。"""
+    for kind in ARTIFACT_KINDS:
+        for bad in (None, LEDGER_CONTRACT_VERSION + 1, True):
+            payloads = _full_payloads()
+            payloads[kind] = dict(payloads[kind])
+            if bad is None:
+                payloads[kind].pop(LEDGER_CONTRACT_KEY)
+            else:
+                payloads[kind][LEDGER_CONTRACT_KEY] = bad
+            with pytest.raises(ValueError, match=LEDGER_CONTRACT_KEY):
+                check_artifact_payloads(payloads)
 
 
 def test_check_artifact_payloads_allows_absent_profiles_only_without_boards():
@@ -1081,12 +1114,11 @@ def test_a_board_member_that_left_the_graph_still_places_its_objects(repo):
     edge_table = CanonicalEdgeTableBuilder().build(0)
     kept_rows = [("cm-ghost", sorted([ids["A"], ids["B"]]))]
 
-    _edges, profiles, payloads = (
-        repo._runtime.knowledge_lifecycle._compute_kg_analysis(
-            notebook_id, 0, 0, kept_rows, edge_table, can2idx,
-            reusable=None, partition_rebuilt=False,
-        )
+    batch = repo._runtime.knowledge_lifecycle._compute_kg_analysis(
+        notebook_id, 0, 0, kept_rows, edge_table, can2idx,
+        reusable=None, partition_rebuilt=False, names={}, relations_by_source={},
     )
+    profiles, payloads = batch.profiles, batch.payloads
 
     by_source = {row[0]: row for row in profiles}
     # src-a 有 4 个可用对象,其中 A / B 属于那个板块。
@@ -1104,11 +1136,12 @@ def test_statistic_snapshots_round_trip_the_query_layer_payloads(repo):
     artifacts = _artifacts(repo, notebook_id)
     store = repo._runtime.unified_kg
 
-    # 依赖合并结果的两份多带一个簇世代的戳(`stamp_cluster_seq` 盖的),其余逐字相同。
+    # 依赖合并结果的两份多带一个簇世代的戳(`stamp_cluster_seq` 盖的),每一份都多带
+    # 账本契约戳(`stamp_ledger_contract`),其余逐字相同。
     def _unstamped(kind: str) -> dict:
         return {
             key: value for key, value in artifacts[kind]["payload"].items()
-            if key != CLUSTER_SEQ_PAYLOAD_KEY
+            if key not in (CLUSTER_SEQ_PAYLOAD_KEY, LEDGER_CONTRACT_KEY)
         }
 
     assert _unstamped(ARTIFACT_CLUSTER_HISTOGRAM) == json.loads(
@@ -1117,10 +1150,11 @@ def test_statistic_snapshots_round_trip_the_query_layer_payloads(repo):
     assert _unstamped(ARTIFACT_LARGEST_CLUSTERS) == json.loads(
         json.dumps(store.largest_clusters(notebook_id, 20))
     )
-    # 与合并无关的那份**不盖**戳:它逐字就是查询层的载荷。
-    assert artifacts[ARTIFACT_RELATION_PROVENANCE]["payload"] == json.loads(
+    # 与合并无关的那份**不盖**簇世代戳:除账本契约戳外,它逐字就是查询层的载荷。
+    assert _unstamped(ARTIFACT_RELATION_PROVENANCE) == json.loads(
         json.dumps(store.relation_provenance_counts(notebook_id))
     )
+    assert CLUSTER_SEQ_PAYLOAD_KEY not in artifacts[ARTIFACT_RELATION_PROVENANCE]["payload"]
     # 载荷结构必须仍能按类型分组还原(T1 的分组直方图)。
     groups = artifacts[ARTIFACT_CLUSTER_HISTOGRAM]["payload"]["by_object_type"]
     assert [group["object_type"] for group in groups] == [
@@ -1588,10 +1622,11 @@ def test_reminting_boards_discards_the_board_dependent_products_in_the_same_tran
     # 落库失败了,所以库里剩下的必须是「作废已生效」的状态。
     assert _edges(repo, notebook_id) == []
     assert _profiles(repo, notebook_id) == {}
+    # 问题清单不依赖板块划分(设计 2026-10-19 §7.1),与三条统计快照同档留下。
     assert set(_artifacts(repo, notebook_id)) == {
         ARTIFACT_CLUSTER_HISTOGRAM, ARTIFACT_LARGEST_CLUSTERS,
-        ARTIFACT_RELATION_PROVENANCE,
-    }, "与板块无关的三条统计快照被连坐删掉了 —— 它们仍是可读的陈旧快照"
+        ARTIFACT_RELATION_PROVENANCE, ARTIFACT_FINDINGS,
+    }, "与板块无关的产物被连坐删掉了 —— 它们仍是可读的陈旧快照"
 
 
 def test_a_failed_publish_leaves_the_library_exactly_as_it_was(repo, monkeypatch):
@@ -2572,12 +2607,12 @@ def test_building_another_level_copy_forwards_boards_and_discards_dangling_produ
     assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id, level=1) == 2
 
     # 悬空产物已作废(而不是留着指向旧 id):跨板块边/来源画像清空,账本
-    # 只剩三条与板块无关的统计快照 → 读侧判「缺失」,下一次补账本自愈。
+    # 只剩与板块无关的四份(三条统计快照 + 问题清单)→ 读侧判「缺失」,下一次补账本自愈。
     assert _edges(repo, notebook_id) == []
     assert _profiles(repo, notebook_id) == {}
     assert set(_artifacts(repo, notebook_id)) == {
         ARTIFACT_CLUSTER_HISTOGRAM, ARTIFACT_LARGEST_CLUSTERS,
-        ARTIFACT_RELATION_PROVENANCE,
+        ARTIFACT_RELATION_PROVENANCE, ARTIFACT_FINDINGS,
     }
     # 共享 seq 不被非默认层推进(方向五那半不变)。
     with repo._connect() as db:

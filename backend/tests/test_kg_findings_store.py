@@ -66,6 +66,10 @@ def test_display_names_are_batch_invariant(repo):
     cases.check_display_names_across_batches(repo, postgres=False)
 
 
+def test_member_names_cover_every_member_and_flag_the_hidden_ones(repo):
+    cases.check_member_names(repo, postgres=False)
+
+
 def test_merge_candidate_states_filter_the_notebook_slice(repo):
     cases.check_candidate_states(repo, postgres=False)
 
@@ -119,7 +123,7 @@ _PRODUCTION_STATS = [
 
 @pytest.mark.parametrize("statistics", ["none", "production"])
 def test_id_list_statements_keep_their_key_plans(repo, monkeypatch, statistics):
-    """The three statements that bind an id list (``id_binding``) drive by the
+    """The four statements that bind an id list (``id_binding``) drive by the
     keys they exist to read, with and without planner statistics:
 
     * source states: one primary-key seek per listed source (``drive_by``), the
@@ -129,7 +133,9 @@ def test_id_list_statements_keep_their_key_plans(repo, monkeypatch, statistics):
       and its "no published cluster row" probe goes by the member -- never by
       the notebook's whole cluster partition;
     * candidate states: the notebook's candidate slice by
-      ``idx_candidates_nb_status``; the list only filters it.
+      ``idx_candidates_nb_status``; the list only filters it;
+    * member names (PR-2): the display names' two legs without the source
+      filter, plus the hidden-source probe by the sources' primary key.
     No step scans a table."""
     from app.repositories.sqlite import database as sqlite_database
 
@@ -158,14 +164,24 @@ def test_id_list_statements_keep_their_key_plans(repo, monkeypatch, statistics):
     cases.display_names(rt, world.nb)
     cases.candidate_states(rt, world.nb, ("confirmed", "rejected", "deferred"),
                            ["K-rmsnorm"])
+    cases.member_names(rt, world.nb)
     monkeypatch.setattr(sqlite_database._Conn, "execute", original)
-    assert len(captured) == 3
+    assert len(captured) == 4
     db = rt.database.connect()
     plans = [
         [row[3] for row in sqlite3.Connection.execute(db, "EXPLAIN QUERY PLAN " + sql, params)]
         for sql, params in captured
     ]
-    states, names, candidates = plans
+    states, names, candidates, members = plans
+    # member names (PR-2): the same two legs as the display names, plus the
+    # hidden-source probe of ``visible`` by the sources' primary key.
+    assert any("idx_clusters_nb_canonical_member_gen (notebook_id=? AND canonical_id=?)"
+               in step for step in members), members
+    assert "SEARCH o USING INDEX sqlite_autoindex_knowledge_objects_1 (id=?)" in members, (
+        members)
+    assert "SEARCH cc USING INDEX idx_clusters_member (member_object_id=?)" in members, (
+        members)
+    assert any("sqlite_autoindex_sources_1 (id=?)" in step for step in members), members
     assert "SEARCH s USING INDEX sqlite_autoindex_sources_1 (id=?)" in states, states
     assert any("idx_extraction_runs_source_created (source_id=?)" in step
                for step in states), states

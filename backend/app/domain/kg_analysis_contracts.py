@@ -42,24 +42,58 @@ ARTIFACT_LARGEST_CLUSTERS = "largest_clusters"
 ARTIFACT_RELATION_PROVENANCE = "relation_provenance"
 ARTIFACT_COMMUNITY_EDGES = "community_edges"
 ARTIFACT_SOURCE_PROFILES = "source_profiles"
+# 问题清单(设计 2026-10-19 §八 8.1)的账本 kind;明细表 `kg_analysis_findings`,规则见
+# `app.domain.kg_findings_contracts` / `app.services.kg_findings`。它与产出方
+# (`_compute_kg_analysis` 的问题清单挂点与发布接线)同一个提交登记:进 REQUIRED(必需
+# 产物)与 CLUSTER_DEPENDENT(读了 `concept_clusters`),**不进** BOARD_DEPENDENT —— 它只用
+# 连通分量与合并结果,不依赖板块划分,板块重铸时不作废它(补账本路径也盖得出整数合并世代)。
+ARTIFACT_FINDINGS = "findings"
 ARTIFACT_KINDS = (
     ARTIFACT_CLUSTER_HISTOGRAM,
     ARTIFACT_LARGEST_CLUSTERS,
     ARTIFACT_RELATION_PROVENANCE,
     ARTIFACT_COMMUNITY_EDGES,
     ARTIFACT_SOURCE_PROFILES,
+    ARTIFACT_FINDINGS,
 )
-# 问题清单(设计 2026-10-19 §八 8.1)的账本 kind;明细表 `kg_analysis_findings`,规则见
-# `app.domain.kg_findings_contracts` / `app.services.kg_findings`。
-#
-# ⚠ **刻意还不在 `ARTIFACT_KINDS` 里**(因而也不在 REQUIRED / CLUSTER_DEPENDENT):
-# 那一步必须与**产出方**(`_compute_kg_analysis` 的问题清单挂点与发布接线)同一个提交。
-# 先登记再产出,`check_artifact_payloads` 会在每一次重建上以「缺少必需的 kind」硬失败,
-# 新鲜度闸也会把每个库判成账本不齐、每次调用都重跑全部重活。归类届时是:进
-# REQUIRED(必需产物)与 CLUSTER_DEPENDENT(读了 `concept_clusters`),**不进**
-# BOARD_DEPENDENT —— 它只用连通分量与合并结果,不依赖板块划分,板块重铸时不作废它。
-ARTIFACT_FINDINGS = "findings"
 _ARTIFACT_KINDS = frozenset(ARTIFACT_KINDS)
+
+# ------------------------------------------------------------ 账本契约版本戳
+# 设计 2026-10-19 §7.4:升级之后已部署库的账本里还没有 `findings`,读侧若照旧判「本该有
+# 却缺失」,每个库都会亮红色。为了分清「建于这份产物出现之前」(升级后还没生成,灰色)与
+# 「真的少了一份」(红色),**每一行**账本 payload 都带这个戳:service 盖
+# (`stamp_ledger_contract`),store 写入口查(`check_artifact_payloads` → `check_ledger_contract`,
+# 缺键硬失败)。没有这个键的旧行 = 建于这份契约之前。
+#
+# 盖与查分在两个函数里:同一个函数里既盖又查的守卫恒真。
+LEDGER_CONTRACT_KEY = "ledger_contract"
+LEDGER_CONTRACT_VERSION = 1
+
+
+def stamp_ledger_contract(payloads: Mapping[str, dict]) -> "dict[str, dict]":
+    """返回 ``payloads`` 的拷贝,每一份都盖上当前的契约戳。"""
+    return {
+        kind: {**payload, LEDGER_CONTRACT_KEY: LEDGER_CONTRACT_VERSION}
+        for kind, payload in payloads.items()
+    }
+
+
+def check_ledger_contract(payloads: Mapping[str, Mapping[str, object]]) -> None:
+    """写入口:每一份账本 payload 都必须带当前的契约戳。``True`` 会被
+    ``isinstance(value, int)`` 当成 1 放行,所以布尔值显式拒。"""
+    for kind in sorted(payloads):
+        value = payloads[kind].get(LEDGER_CONTRACT_KEY)
+        if isinstance(value, bool) or value != LEDGER_CONTRACT_VERSION:
+            raise ValueError(
+                f"KG 分析产物账本:{kind} 的 payload 缺少或带错了 {LEDGER_CONTRACT_KEY}"
+                f"(应为 {LEDGER_CONTRACT_VERSION},见 stamp_ledger_contract)。少了它,"
+                "读侧就分不清「升级后还没生成」与「本该有却缺失」"
+            )
+
+
+def ledger_row_predates_findings(payload: Mapping[str, object]) -> bool:
+    """这一行账本是不是建于契约戳出现之前 —— 读侧「升级后还没生成」(灰色)的证据。"""
+    return LEDGER_CONTRACT_KEY not in payload
 
 # **唯一**允许合法缺席的产物。一个板块都没有的库(对象有、关系没有,或者关系全被
 # min-size 过滤掉)算不出任何来源画像:每个来源的 `mainstream_share` 都会是 0.0,
@@ -127,11 +161,14 @@ _BOARD_DEPENDENT_ARTIFACT_KINDS = frozenset(BOARD_DEPENDENT_ARTIFACT_KINDS)
 # **最贵**的一份(生产 836 万边、每行两次随机 PK 探查,与仓库那次「835 万边冷扫
 # 39 分钟」同量级)。把它一刀切进作废集合,等于每一次纯合并写入都白付一趟全表扫,
 # 而它的输入一个字节都没变。
+#   · findings                问题清单的 F1/F2/F3a/F4 都按 `concept_clusters` 的 canonical
+#                              计 —— 簇一变,概念共享、重复对、同名组都跟着变。
 CLUSTER_DEPENDENT_ARTIFACT_KINDS = frozenset({
     ARTIFACT_CLUSTER_HISTOGRAM,
     ARTIFACT_LARGEST_CLUSTERS,
     ARTIFACT_COMMUNITY_EDGES,
     ARTIFACT_SOURCE_PROFILES,
+    ARTIFACT_FINDINGS,
 })
 
 # 簇世代盖在账本 payload 里的字段名。
@@ -202,7 +239,13 @@ def check_artifact_payloads(payloads: Mapping[str, dict]) -> None:
     世代永远是知道的,**必须是 int**;依赖板块的两份可以是 ``None``(= 板块划分是库里
     现成的、建在哪一代无从判断),但**键必须在** —— 允许「键干脆不写」就等于把「漏盖」
     和「盖不出来」揉成一档,上面那道守卫当场作废。
+
+    **账本契约戳也是硬要求**(`check_ledger_contract`):每一份都必须带当前的
+    ``ledger_contract``,读侧靠它分辨「升级后还没生成」与「本该有却缺失」。问题清单
+    那一份的「账本 persisted == 明细行数」要看明细行,所以由 store 写入口另调
+    `kg_findings_contracts.check_findings_ledger`。
     """
+    check_ledger_contract(payloads)
     unknown = sorted(set(payloads) - _ARTIFACT_KINDS)
     if unknown:
         raise ValueError(

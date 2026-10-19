@@ -32,6 +32,7 @@ from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from app.repositories.kg_analysis_payloads import (
     artifact_ledger_rows as _artifact_ledger_rows,
+    checked_finding_rows as _checked_findings,
     clamp as _clamp,
     cluster_histogram_payload as _cluster_histogram_payload,
     community_overview_payload as _community_overview_payload,
@@ -40,6 +41,7 @@ from app.repositories.kg_analysis_payloads import (
     finding_source_states as _finding_source_states,
     largest_clusters_payload as _largest_clusters_payload,
     mark_rows as _mark_rows,
+    member_name_rows as _member_name_rows,
     relation_provenance_payload as _relation_provenance_payload,
 )
 from app.repositories.sqlite.database import SqliteDatabase
@@ -71,7 +73,6 @@ from app.domain.kg_analysis_contracts import (
     KG_FINDINGS_ROWS_MAX,
     batched,
     check_artifact_payloads,
-    check_finding_row,
     check_mark_kind,
 )
 from app.domain.knowledge_contracts import (
@@ -539,9 +540,13 @@ class UnifiedKgStore:
                 (notebook_id, notebook_id),
             )
         }
+        # ``src`` (KG findings F3b): the relation's own source, counted per row by
+        # the caller. A column of the row already read — the plan and the row
+        # order (``ORDER BY kr.id``, Louvain's input) are unchanged.
         relations = db.execute(
             "SELECT COALESCE(cs.canonical_id, kr.source_object_id) AS s, "
-            "       COALESCE(ct.canonical_id, kr.target_object_id) AS t "
+            "       COALESCE(ct.canonical_id, kr.target_object_id) AS t, "
+            "       kr.source_id AS src "
             "FROM knowledge_relations kr "
             "LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id "
             f"AND cs.member_object_id=kr.source_object_id AND cs.generation = {_PUBLISHED_CLUSTER_GEN} "
@@ -2514,7 +2519,8 @@ class UnifiedKgStore:
         return db.execute(
             f"""
             SELECT o.source_id AS source_id,
-                   COALESCE(c.canonical_id, o.id) AS canonical_id
+                   COALESCE(c.canonical_id, o.id) AS canonical_id,
+                   (o.object_type = 'concept') AS is_concept
             FROM knowledge_objects o
             LEFT JOIN concept_clusters c
                    ON c.notebook_id = o.notebook_id
@@ -2573,8 +2579,13 @@ class UnifiedKgStore:
         `KG_FINDINGS_ROWS_MAX` 行硬失败:读入口按这个上限取数,行数有界是这里保证的。
         `prune_marks` 是要删掉的标记主键 `(rule_id, subject_key, kind)`(主体已不存在
         的豁免),按主键逐行删;标记是用户的决定,除此之外本方法不碰标记表。
+
+        明细在**任何删写之前**先整份过一遍:逐行 `check_finding_row`、行数上限,再与
+        `findings` 账本行对账(`check_findings_ledger`:每条规则的 ``persisted`` 等于
+        真正写下的明细行数、截断不静默)—— 对不上就整批拒,账本与明细不会各说各话。
         """
         check_artifact_payloads(payloads)
+        checked_findings = _checked_findings(payloads, findings_rows)
         db.execute(
             "DELETE FROM kg_community_edges WHERE notebook_id=?", (notebook_id,)
         )
@@ -2617,14 +2628,7 @@ class UnifiedKgStore:
                 "VALUES (?,?,?,?,?,?,?,?)",
                 batch,
             )
-        written = 0
-        for batch in batched((check_finding_row(row) for row in findings_rows), 1000):
-            written += len(batch)
-            if written > KG_FINDINGS_ROWS_MAX:
-                raise ValueError(
-                    f"KG 分析问题明细:一个 notebook 最多 {KG_FINDINGS_ROWS_MAX} 行,"
-                    "读入口按这个上限取数,写超过就再也读不全"
-                )
+        for batch in batched(checked_findings, 1000):
             db.executemany(
                 "INSERT INTO kg_analysis_findings "
                 "(notebook_id, rule_id, subject_key, subject_kind, subject_label, "
@@ -2809,7 +2813,7 @@ class UnifiedKgStore:
             "SELECT s.id AS id, s.title AS title, s.source_type AS source_type, "
             "s.status AS status, s.parse_status AS parse_status, "
             "s.chunked_at AS chunked_at, er.created_at AS last_extraction_at, "
-            "er.status AS last_extraction_status "
+            "er.status AS last_extraction_status, s.created_at AS created_at "
             "FROM sources s "
             "LEFT JOIN extraction_runs er ON er.id = ("
             "SELECT e.id FROM extraction_runs e "
@@ -2891,6 +2895,63 @@ class UnifiedKgStore:
                      notebook_id),
                 ))
         return _display_name_rows(raw, wanted)
+
+    @staticmethod
+    def kg_finding_member_name_rows(
+        db: sqlite3.Connection, notebook_id: str, canonical_ids: Sequence[str]
+    ) -> List[Tuple[str, str, bool, int]]:
+        """**全部**成员对象的名字,按 canonical 分组:``(canonical_id, name, visible,
+        对象数)``,顺序见中性层 `member_name_rows`。
+
+        两个消费方,都只读不展示以外的东西:
+          · 问题清单 F4 / S1 判「用户已驳回 / 暂缓」:已存的合并决定按 v1 **种子**存
+            (`decided_seed_pairs_from`),canonical id 会随簇的最小成员漂,所以要拿
+            成员名现算 `concept_seed_v1`。隐藏来源(Memory / knowhow)的成员也算 ——
+            种子只用于判定、从不展示;
+          · F4 / S1 的展示名:只取 ``visible`` 的(可用状态、来源不是隐藏合成来源;
+            孤儿引用照常算,与 `source_canonical_rows` 同一条 ``NOT EXISTS``)。
+
+        canonical 口径同 `source_canonical_rows`:``COALESCE(已发布代簇 canonical,
+        对象自己的 id)``,两条腿 —— 有簇行的按 canonical 驱动
+        (``idx_clusters_canonical``),没有簇行的对象按主键驱动(它的 canonical 就是
+        自己的 id)。id 列表经 ``id_binding`` 的 ``drive_by``,500 一批(调用方本来就
+        按批来)。connection-taking:预计算里骑一个 `read_snapshot()`(写事务之外),
+        读侧骑 `findings_page` 的同一个快照。"""
+        ids = sorted(dict.fromkeys(str(cid) for cid in canonical_ids))
+        if not ids:
+            return []
+        statuses = ",".join("?" for _ in USABLE_STATUSES)
+        visible = (
+            f"CASE WHEN o.status IN ({statuses}) AND o.source_id != '' "
+            "AND NOT EXISTS (SELECT 1 FROM sources hs WHERE hs.id = o.source_id "
+            "AND hs.notebook_id = o.notebook_id "
+            "AND hs.source_type IN ('memory','knowhow')) THEN 1 ELSE 0 END"
+        )
+        raw: List[tuple] = []
+        for start in range(0, len(ids), 500):
+            canon = bind_ids(ids[start:start + 500])
+            raw.extend(tuple(row) for row in db.execute(
+                "SELECT c.canonical_id AS canonical_id, "
+                f"json_extract(o.payload, '$.name') AS name, {visible} AS visible "
+                "FROM concept_clusters c "
+                "JOIN knowledge_objects o ON o.id = c.member_object_id "
+                f"WHERE {drive_by('c.canonical_id', canon)} AND c.notebook_id = ? "
+                f"AND c.generation = {_PUBLISHED_CLUSTER_GEN} "
+                "AND o.notebook_id = c.notebook_id "
+                "UNION ALL "
+                f"SELECT o.id, json_extract(o.payload, '$.name'), {visible} "
+                "FROM knowledge_objects o "
+                f"WHERE {drive_by('o.id', canon)} AND +o.notebook_id = ? "
+                # ``+cc.notebook_id``: probe by the member (idx_clusters_member),
+                # as in kg_finding_display_name_rows.
+                "AND NOT EXISTS (SELECT 1 FROM concept_clusters cc "
+                "WHERE +cc.notebook_id = o.notebook_id "
+                "AND cc.member_object_id = o.id "
+                f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN})",
+                (*USABLE_STATUSES, canon.param, notebook_id, notebook_id,
+                 *USABLE_STATUSES, canon.param, notebook_id, notebook_id),
+            ))
+        return _member_name_rows(raw)
 
     @staticmethod
     def stamp_cluster_code_version(

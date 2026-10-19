@@ -3220,6 +3220,15 @@ class UnifiedKgStorePort(Protocol):
     def kg_finding_source_states(
         db: object, notebook_id: str, source_ids: Sequence[str]
     ) -> dict[str, dict[str, object]]: ...
+    @staticmethod
+    def kg_finding_member_name_rows(
+        db: object, notebook_id: str, canonical_ids: Sequence[str]
+    ) -> list[tuple[str, str, bool, int]]:
+        """``(canonical_id, name, visible, objects)`` for EVERY member object of
+        the given canonicals (PR-2, KG findings): the F4 / S1 rules match stored
+        merge decisions by the members' v1 seeds (hidden members included —
+        the names only decide), and take display names from the visible ones.
+        Connection-taking, bounded by the id list (batched by 500)."""
     def kg_finding_display_name_rows(
         self, notebook_id: str, pairs: Sequence[tuple[str, str]]
     ) -> list[tuple[str, str, str, int]]: ...

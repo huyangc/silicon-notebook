@@ -48,7 +48,11 @@ from typing import (
 
 import numpy as np
 
-from app.domain.kg_analysis_contracts import CLUSTER_SEQ_PAYLOAD_KEY
+from app.domain.kg_analysis_contracts import (
+    CLUSTER_SEQ_PAYLOAD_KEY,
+    FINDING_ROW_FIELDS,
+    MARK_DISMISSED,
+)
 from app.domain.kg_findings_contracts import (
     DUP_J_MIN,
     F1_MIN_CONCEPTS,
@@ -57,6 +61,7 @@ from app.domain.kg_findings_contracts import (
     F3A_MIN_SINGLE_CHAR_RUN,
     F3A_SHARE_MIN,
     DECISION_APART_STATUSES,
+    DECISION_CONFIRMED,
     F3B_ISOLATED_SHARE_FACTOR,
     F3B_ISOLATED_SHARE_FLOOR,
     F3B_MIN_ISOLATED,
@@ -201,6 +206,52 @@ class GraphStructure:
         giant = int(np.argmax(sizes))
         in_giant = (component == giant).astype(np.uint8).tobytes()
         return cls(n, component, degree, giant, int(sizes[giant]), int(count), in_giant)
+
+
+def board_structure_counts(
+    structure: GraphStructure, community_of_index: Sequence[Optional[str]],
+) -> Dict[str, int]:
+    """S3's two partition-dependent numbers (design §五 S3), for the
+    ``community_edges`` payload — the findings payload never depends on boards:
+
+      · ``boards_in_giant``: boards with at least one node in the giant component
+        (the topics inside the main body);
+      · ``boards_equal_component``: boards whose graph nodes are exactly one
+        whole connected component (an island that is its own board — locally
+        1,137 of 1,217).
+
+    ``community_of_index``: board id per node index, as `_compute_kg_analysis`
+    holds it (``None`` = not in a kept board). Entries past ``structure.n_nodes``
+    are board members that are no longer graph nodes (backfill path): they are
+    in no component and count for neither number. One pass over the nodes, then
+    vectorised; nothing survives the call."""
+    n = structure.n_nodes
+    if n == 0:
+        return {"boards_in_giant": 0, "boards_equal_component": 0}
+    rank: Dict[str, int] = {}
+    board = np.full(n, -1, dtype=np.int64)
+    for index in range(n):
+        cid = community_of_index[index]
+        if cid is not None:
+            board[index] = rank.setdefault(cid, len(rank))
+    member = board >= 0
+    boards = board[member]
+    components = structure.component[member].astype(np.int64)
+    del board, member
+    if boards.size == 0:
+        return {"boards_in_giant": 0, "boards_equal_component": 0}
+    in_giant = int(np.unique(boards[components == structure.giant_label]).size)
+    pairs = np.unique(boards * int(structure.components) + components)
+    pair_board = pairs // int(structure.components)
+    pair_component = pairs % int(structure.components)
+    one_component = np.bincount(pair_board, minlength=len(rank)) == 1
+    board_nodes = np.bincount(boards, minlength=len(rank))
+    component_nodes = np.bincount(structure.component, minlength=int(structure.components))
+    only = one_component[pair_board]
+    equal = int(np.count_nonzero(
+        board_nodes[pair_board[only]] == component_nodes[pair_component[only]]
+    ))
+    return {"boards_in_giant": in_giant, "boards_equal_component": equal}
 
 
 # ================================================================ step ⑤ tally
@@ -1252,6 +1303,53 @@ def _open_classes(
     return {seed for seed, apart in apart_from.items() if others and len(apart) < others}
 
 
+UNDER_MERGE_OPEN = "open"
+UNDER_MERGE_CONFIRMED = "confirmed"
+UNDER_MERGE_DECIDED_APART = "decided_apart"
+
+
+def under_merge_decision(
+    classes: Sequence[Sequence[str]],
+    member_seeds: Mapping[str, Iterable[str]],
+    decisions: Mapping[frozenset, str],
+) -> str:
+    """The read side's verdict on one stored F4 group (§3.5), with the decisions
+    as they are NOW — the same matching the engine used when it built the row:
+
+      · ``decided_apart``: no class pair is left that nobody decided apart
+        (`_open_classes` is empty) — the user rejected or deferred it; it moves
+        to "passed" at once (rejecting does not set ``dirty``, so waiting for a
+        rebuild to make it disappear would leave it open forever);
+      · ``confirmed``: some confirmed decision joins two of its classes — the
+        user sent it to be merged; "handled, verified on the next update";
+      · ``open`` otherwise.
+
+    ``classes``: the evidence's ``classes`` (canonical ids per v2 spelling).
+    ``member_seeds``: canonical id → the v1 seeds of its member names, as
+    `kg_finding_member_name_rows` reads them (hidden members included); the
+    canonical id's own seed is added here, as in the engine."""
+    canonical_ids = sorted({cid for cls in classes for cid in cls})
+    seeds_of = _member_seed_sets(
+        canonical_ids, lambda batch: {cid: member_seeds.get(cid, ()) for cid in batch}
+    )
+    by_class = {str(index): list(cls) for index, cls in enumerate(classes)}
+    if not _open_classes(by_class, _apart_adjacency(seeds_of, decisions)):
+        return UNDER_MERGE_DECIDED_APART
+    class_of = {cid: index for index, cls in enumerate(classes) for cid in cls}
+    owners: Dict[str, Set[int]] = {}
+    for cid, seeds in seeds_of.items():
+        for seed in seeds:
+            owners.setdefault(seed, set()).add(class_of[cid])
+    for key, status in decisions.items():
+        pair = tuple(key)
+        if status != DECISION_CONFIRMED or len(pair) != 2:
+            continue
+        left, right = owners.get(pair[0], set()), owners.get(pair[1], set())
+        if any(a != b for a in left for b in right):
+            return UNDER_MERGE_CONFIRMED
+    return UNDER_MERGE_OPEN
+
+
 def _undecided_inside(members: Sequence[str], adjacency: Mapping[str, Set[str]]) -> bool:
     """Whether some pair inside a narrow class is NOT decided apart."""
     inside = set(members)
@@ -1375,6 +1473,11 @@ def _under_merge_pending(
                 for c in shown[:MAX_SAMPLES]
             ],
         }
+        # The whole group, not just the shown sample: the read side re-judges
+        # "the user rejected / deferred / confirmed it" on these classes with
+        # the decisions stored at read time (`under_merge_decision`).
+        evidence["canonical_ids"] = kept
+        evidence["classes"] = sorted(sorted(classes[seed]) for seed in open_classes)
         impact = sum(objects[c] for c in kept)
         return _row(RULE_UNDER_MERGE, squash, visible[shown[0]], refs[:MAX_SUBJECT_REFS],
                     impact, evidence)
@@ -1801,6 +1904,38 @@ def _structure_payload(structure: GraphStructure, corpus: _Corpus, usable: int) 
         "island_components": max(0, structure.components - 1),
         "island_sources": int(((corpus.in_graph - corpus.giant) > 0).sum()),
     }
+
+
+# ============================================================== publish
+def finding_row_values(row: Mapping[str, object]) -> tuple:
+    """One finalized row as the store's ``findings_rows`` tuple
+    (``FINDING_ROW_FIELDS`` order)."""
+    return tuple(row[name] for name in FINDING_ROW_FIELDS)
+
+
+def stale_dismissals(
+    marks: Iterable[Mapping[str, object]], rows: Iterable[Mapping[str, object]],
+) -> List[Tuple[str, str, str]]:
+    """The ``dismissed`` marks whose subject is not in the new detail — the
+    store's ``prune_marks`` for this publication (§8.3).
+
+    A dismissal is the user's judgement on one finding, so it survives every
+    rebuild that still reports that subject (same ``(rule_id, subject_key)``).
+    Once the subject is gone from the detail (the source was deleted, the pair
+    or group no longer exists), the mark goes with it: that is what keeps the
+    mark table within ``KG_ANALYSIS_MARKS_MAX`` (dismissals are only written for
+    subjects of the current detail). ``relink_attempted`` is a system mark about
+    the notebook, never pruned here. ⚠ A dismissed subject that drops out
+    because its rule hit the per-rule cap loses its mark too — it comes back as
+    open if it is ever persisted again (registered trade-off: no subject outside
+    the detail can be told apart from a gone one without reading the KG)."""
+    present = {(str(row["rule_id"]), str(row["subject_key"])) for row in rows}
+    return [
+        (str(mark["rule_id"]), str(mark["subject_key"]), str(mark["kind"]))
+        for mark in marks
+        if mark["kind"] == MARK_DISMISSED
+        and (str(mark["rule_id"]), str(mark["subject_key"])) not in present
+    ]
 
 
 # ============================================================== finalize

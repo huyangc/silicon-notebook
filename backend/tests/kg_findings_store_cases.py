@@ -13,7 +13,13 @@ from __future__ import annotations
 import json
 import math
 
-from app.domain.kg_analysis_contracts import ARTIFACT_COMMUNITY_EDGES, ARTIFACT_KINDS
+from app.domain.kg_analysis_contracts import (
+    ARTIFACT_COMMUNITY_EDGES,
+    ARTIFACT_FINDINGS,
+    ARTIFACT_KINDS,
+    stamp_ledger_contract,
+)
+from app.domain.kg_findings_contracts import ALL_RULES, RULES_VERSION
 from app.models.schemas import NotebookCreate
 from app.services.kg_analysis_precompute import stamp_cluster_seq
 
@@ -66,7 +72,10 @@ def seed(repo, *, postgres: bool) -> World:
         ):
             ins("sources", "id,notebook_id,title,source_type,status,parse_status,"
                 "chunked_at,created_at,updated_at",
-                (sid, notebook, title, stype, status, parse, chunked, T0, T0))
+                # src-b imported later: ``created_at`` is F2's tie-break and must
+                # come back from its own column, not from another timestamp.
+                (sid, notebook, title, stype, status, parse, chunked,
+                 T1 if sid == "src-b" else T0, T0))
         for rid, sid, status, created in (
             ("er-a1", "src-a", "completed", T1),
             ("er-a2", "src-a", "completed", T2),
@@ -113,12 +122,27 @@ def seed(repo, *, postgres: bool) -> World:
     return world
 
 
-def payloads() -> dict:
-    """One valid ledger batch (every required kind, cluster stamps the way the
-    production path puts them on)."""
+def findings_payload(findings=()) -> dict:
+    """The ``findings`` ledger payload that agrees with ``findings`` (the write
+    entry checks ``persisted`` per rule against the rows written)."""
+    counts: dict = {}
+    for row in findings:
+        counts[row[0]] = counts.get(row[0], 0) + 1
+    return {
+        "rules_version": RULES_VERSION,
+        "rules": {rule: {"status": "ran", "total": counts.get(rule, 0),
+                         "persisted": counts.get(rule, 0), "truncated": False}
+                  for rule in ALL_RULES},
+    }
+
+
+def payloads(findings=()) -> dict:
+    """One valid ledger batch (every required kind, cluster stamps and the
+    ledger contract stamp the way the production path puts them on)."""
     batch = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
     batch[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 2}
-    return stamp_cluster_seq(batch, 0, partition_rebuilt=True)
+    batch[ARTIFACT_FINDINGS] = findings_payload(findings)
+    return stamp_ledger_contract(stamp_cluster_seq(batch, 0, partition_rebuilt=True))
 
 
 FINDINGS_V1 = (
@@ -161,7 +185,7 @@ EXPECTED_FINDINGS_V2 = [
 def replace(rt, notebook_id: str, findings, prune=(), *, seq: int = 12) -> None:
     with rt.database.write() as db:
         rt.unified_kg.replace_kg_analysis_artifacts(
-            db, notebook_id, seq, [], [], payloads(), T0,
+            db, notebook_id, seq, [], [], payloads(findings), T0,
             findings_rows=findings, prune_marks=prune,
         )
 
@@ -197,23 +221,27 @@ SOURCE_STATE_REQUEST = ["src-a", "src-b", "src-k", "src-m", "src-o", "src-gone",
 _ABSENT = {
     "exists": False, "title": "", "source_type": "", "status": "",
     "parse_status": "", "chunked_at": "", "last_extraction_at": "",
-    "last_extraction_status": "",
+    "last_extraction_status": "", "created_at": "",
 }
 EXPECTED_SOURCE_STATES = {
     # er-a2 and er-a3 tie on created_at; the id breaks the tie, descending.
     "src-a": {"exists": True, "title": "Paper A", "source_type": "markdown",
               "status": "extracted", "parse_status": "parsed", "chunked_at": T0,
-              "last_extraction_at": T2, "last_extraction_status": "failed"},
+              "last_extraction_at": T2, "last_extraction_status": "failed",
+              "created_at": T0},
     "src-b": {"exists": True, "title": "Paper B", "source_type": "markdown",
               "status": "parsing", "parse_status": "parsing", "chunked_at": "",
-              "last_extraction_at": T1, "last_extraction_status": "running"},
+              "last_extraction_at": T1, "last_extraction_status": "running",
+              "created_at": T1},
     # hidden synthetic sources: reported, titles blanked
     "src-k": {"exists": True, "title": "", "source_type": "knowhow",
               "status": "extracted", "parse_status": "parsed", "chunked_at": T0,
-              "last_extraction_at": "", "last_extraction_status": ""},
+              "last_extraction_at": "", "last_extraction_status": "",
+              "created_at": T0},
     "src-m": {"exists": True, "title": "", "source_type": "memory",
               "status": "extracted", "parse_status": "parsed", "chunked_at": T0,
-              "last_extraction_at": "", "last_extraction_status": ""},
+              "last_extraction_at": "", "last_extraction_status": "",
+              "created_at": T0},
     # another notebook's source and a deleted one both read as absent
     "src-o": dict(_ABSENT),
     "src-gone": dict(_ABSENT),
@@ -349,6 +377,11 @@ def check_findings_write_guards(repo, *, postgres: bool, monkeypatch, store_modu
         with pytest.raises(ValueError):
             replace(rt, world.nb, FINDINGS_V1 + (bad,))
         assert finding_rows(rt, world.nb) == EXPECTED_FINDINGS_V2, bad
+    # The write cap lives in the neutral write check both backends call
+    # (``checked_finding_rows``); the read cap in each store's read.
+    from app.repositories import kg_analysis_payloads
+
+    monkeypatch.setattr(kg_analysis_payloads, "KG_FINDINGS_ROWS_MAX", 2)
     monkeypatch.setattr(store_module, "KG_FINDINGS_ROWS_MAX", 2)
     with pytest.raises(ValueError):
         replace(rt, world.nb, FINDINGS_V1)
@@ -564,6 +597,42 @@ def check_display_names_across_batches(repo, *, postgres: bool) -> None:
     padding = [("src-a", f"K-none-{i:04d}") for i in range(1200)]
     assert display_names(rt, world.nb, padding + DISPLAY_NAME_PAIRS) == (
         EXPECTED_DISPLAY_NAMES)
+
+
+MEMBER_NAME_REQUEST = ["ko-b1", "K-rmsnorm", "ko-a4", "ko-a1", "K-none", "K-rmsnorm"]
+EXPECTED_MEMBER_NAMES = [
+    # visible first, most objects first, then the name (code-point order)
+    ("K-rmsnorm", "RMSNorm", True, 2),
+    ("K-rmsnorm", "Orphan", True, 1),       # orphan reference: visible
+    ("K-rmsnorm", "RMS Norm", True, 1),
+    # hidden members are READ (their seeds decide), never displayed
+    ("K-rmsnorm", "Dead", False, 1),                 # deprecated
+    ("K-rmsnorm", "RMSNorm (knowhow)", False, 1),    # knowhow source
+    ("K-rmsnorm", "RMSNorm (memory)", False, 1),     # Memory source
+    # cluster row only in an unpublished generation: its own canonical
+    ("ko-a4", "Stale gen", True, 1),
+    ("ko-b1", "Layer Norm", True, 1),                # unclustered
+    # "ko-a1" is a clustered MEMBER, not a canonical: nothing under its own id
+]
+
+
+def member_names(rt, notebook_id: str, ids=MEMBER_NAME_REQUEST):
+    with rt.unified_kg.read_snapshot() as db:
+        return rt.unified_kg.kg_finding_member_name_rows(db, notebook_id, ids)
+
+
+def check_member_names(repo, *, postgres: bool) -> None:
+    """Every member of each canonical (published generation only), hidden
+    members included and flagged; unclustered objects under their own id;
+    another notebook sees nothing; batching does not change the answer."""
+    rt = repo._runtime
+    world = seed(repo, postgres=postgres)
+    assert member_names(rt, world.nb) == EXPECTED_MEMBER_NAMES
+    assert member_names(rt, world.nb, []) == []
+    assert member_names(rt, world.other) == []
+    padding = [f"K-none-{i:04d}" for i in range(1200)]
+    assert member_names(rt, world.nb, padding + MEMBER_NAME_REQUEST) == (
+        EXPECTED_MEMBER_NAMES)
 
 
 def check_candidate_states(repo, *, postgres: bool) -> None:

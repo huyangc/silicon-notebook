@@ -2,9 +2,10 @@
 (PostgreSQL 0077), on a production-shaped corpus and with the planner left
 alone (no ``enable_seqscan`` games):
 
-* the three statements that bind an id list (``id_binding``): the per-source
+* the four statements that bind an id list (``id_binding``): the per-source
   state read (``kg_finding_source_states``), the sample display-name read
-  (``kg_finding_display_name_rows``) and the candidate-state read
+  (``kg_finding_display_name_rows``), the member-name read
+  (``kg_finding_member_name_rows``, PR-2) and the candidate-state read
   (``merge_candidate_states_for_canonicals``) -- each must reach its rows
   through the keys it exists to read and never scan the table;
 * the publish transaction's old-detail read (``kg_analysis_finding_rows``):
@@ -221,6 +222,26 @@ def test_display_name_read_is_driven_by_the_listed_canonicals(pin_database):
     plan = _plan(pin_database, sql, params)
     _no_scan(plan, "concept_clusters", "knowledge_objects", "sources")
     assert "pk_knowledge_objects" in plan, plan
+    assert "idx_clusters_member" in plan, plan
+
+
+def test_member_name_read_is_driven_by_the_listed_canonicals(pin_database):
+    """PR-2: every member of the listed canonicals (both legs, as the display
+    names) plus the hidden-source probe by the sources' primary key."""
+    store = UnifiedKgStore(pin_database)
+    canonicals = sorted({canonical for _source, canonical in PAGE_PAIRS})
+
+    def call():
+        with store.read_snapshot() as db:
+            assert store.kg_finding_member_name_rows(db, NB, canonicals)
+
+    [(sql, params)] = _captured(call, "AS visible")
+    plan = _plan(pin_database, sql, params)
+    _no_scan(plan, "concept_clusters", "knowledge_objects", "sources")
+    # both legs reach objects by primary key (the clustered leg once per
+    # member, fenced by LATERAL … LIMIT 1), never by a hash of the whole table
+    assert plan.count("pk_knowledge_objects") == 2, plan
+    assert "Hash Join" not in plan, plan
     assert "idx_clusters_member" in plan, plan
 
 

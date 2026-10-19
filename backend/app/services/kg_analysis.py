@@ -74,6 +74,12 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from app.domain.kg_analysis_contracts import (
+    ARTIFACT_FINDINGS,
+    LEDGER_CONTRACT_KEY,
+    ledger_row_predates_findings,
+)
+from app.domain.kg_findings_contracts import FINDINGS_PAYLOAD_UNITS
 from app.services.kg_analysis_precompute import (
     ARTIFACT_CLUSTER_HISTOGRAM,
     ARTIFACT_COMMUNITY_EDGES,
@@ -117,6 +123,8 @@ ARTIFACT_BASIS: Dict[str, str] = {
     ARTIFACT_RELATION_PROVENANCE: BASIS_USABLE_LIVE,
     ARTIFACT_COMMUNITY_EDGES: BASIS_COMMUNITY_SNAPSHOT,
     ARTIFACT_SOURCE_PROFILES: BASIS_COMMUNITY_SNAPSHOT,
+    # 问题清单:预计算那一刻的实时口径(连通分量 + 合并结果),不依赖板块划分。
+    ARTIFACT_FINDINGS: BASIS_USABLE_LIVE,
 }
 
 # ----------------------------------------------------------------- 缺席的三种含义
@@ -125,6 +133,9 @@ ARTIFACT_BASIS: Dict[str, str] = {
 ABSENCE_NEVER_COMPUTED = "never_computed"   # 整个账本是空的:这个库从没跑过预计算
 ABSENCE_EXPECTED = "expected"               # 合法缺席(唯一一档:零板块库不写来源画像)
 ABSENCE_UNEXPECTED = "unexpected"           # 账本非空却少了这一份 —— 异常
+# 升级后还没生成(设计 2026-10-19 §7.4):账本里在场的每一行都建于账本契约戳出现之前,
+# 缺的那份是新版本才有的(今天只有问题清单),不是数据坏了。灰色,提示「更新分析」。
+ABSENCE_UPGRADE_PENDING = "upgrade_pending"
 
 LEDGER_EMPTY = "empty"
 LEDGER_PARTIAL = "partial"
@@ -153,6 +164,7 @@ UNIT_OBJECT_TYPES = "object_types"           # 不同的 object_type 个数
 UNIT_RATIO = "ratio"                         # [0,1] 的比例
 UNIT_SEQ = "seq"                             # 单调变更计数器(kg_mutation_seq 系)
 UNIT_LEVEL = "level"                         # 社区层级(不是数量)
+UNIT_VERSION = "version"                     # 契约 / 规则集的版本号(不是数量)
 
 # 单位表按 **payload 内的叶子字段名** 索引:同一份载荷里一个字段名只有一种含义
 # (跨载荷可以不同 —— `clusters` 在直方图里是整数、在最大簇榜单里是一个列表,所以
@@ -191,6 +203,9 @@ _COMMUNITY_EDGES_UNITS: Dict[str, str] = {
     "cross_weight": UNIT_RELATION_ROWS,
     "intra_weight": UNIT_RELATION_ROWS,
     "communities": UNIT_COMMUNITIES,
+    # S3 口径里依赖板块划分的两个数(设计 2026-10-19 §五 S3)。
+    "boards_in_giant": UNIT_COMMUNITIES,
+    "boards_equal_component": UNIT_COMMUNITIES,
 }
 _SOURCE_PROFILES_UNITS: Dict[str, str] = {
     "level": UNIT_LEVEL,
@@ -200,11 +215,13 @@ _SOURCE_PROFILES_UNITS: Dict[str, str] = {
     "head_members": UNIT_CANONICAL,
     "total_members": UNIT_CANONICAL,
 }
+# 账本契约戳(设计 2026-10-19 §7.4)在**每一份** payload 里,同理按 kind 展开。
+_LEDGER_CONTRACT_UNIT: Dict[str, str] = {LEDGER_CONTRACT_KEY: UNIT_VERSION}
 ARTIFACT_UNITS: Dict[str, Dict[str, str]] = {
     kind: (
-        {**units, **_CLUSTER_SEQ_UNIT}
+        {**units, **_CLUSTER_SEQ_UNIT, **_LEDGER_CONTRACT_UNIT}
         if kind in CLUSTER_DEPENDENT_ARTIFACT_KINDS
-        else units
+        else {**units, **_LEDGER_CONTRACT_UNIT}
     )
     for kind, units in {
         ARTIFACT_CLUSTER_HISTOGRAM: _HISTOGRAM_UNITS,
@@ -212,6 +229,9 @@ ARTIFACT_UNITS: Dict[str, Dict[str, str]] = {
         ARTIFACT_RELATION_PROVENANCE: _RELATION_PROVENANCE_UNITS,
         ARTIFACT_COMMUNITY_EDGES: _COMMUNITY_EDGES_UNITS,
         ARTIFACT_SOURCE_PROFILES: _SOURCE_PROFILES_UNITS,
+        # 问题清单的账本 payload(规则状态 / 阈值 / S3 结构 / 对比摘要),单位表住在
+        # 领域契约里,与引擎同源(`test_every_numeric_leaf_has_a_unit` 走真实输出)。
+        ARTIFACT_FINDINGS: FINDINGS_PAYLOAD_UNITS,
     }.items()
 }
 
@@ -863,6 +883,14 @@ def _absence(kind: str, ledger: Dict[str, Dict[str, Any]]) -> Optional[str]:
         return None
     if not ledger:
         return ABSENCE_NEVER_COMPUTED
+    if kind == ARTIFACT_FINDINGS and all(
+        ledger_row_predates_findings(entry["payload"]) for entry in ledger.values()
+    ):
+        # 升级后还没生成(设计 2026-10-19 §7.4):在场的每一行都没有账本契约戳 = 都建于
+        # 问题清单出现之前。缺的是新版本才有的那一份,不是数据坏了 —— 报红会让每一个已
+        # 部署库都亮「暂不可据此下结论」,直到有人跑一次整理。只要有一行带戳,账本就是
+        # 新版本写的,那时缺它就是真的少了一份(下面的 unexpected)。
+        return ABSENCE_UPGRADE_PENDING
     if kind not in OPTIONAL_ARTIFACT_KINDS:
         return ABSENCE_UNEXPECTED
     boards = _ledger_boards(ledger)
