@@ -202,12 +202,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       执行侧的 `_element_search_skip` peer_mode 跳过与 `_first_round_empty_fallback` 的
       补腿闸仍直读 `subjectless_run_active`（引用核验守卫 `_ELEMENT_ARM_CLOSED` 按字面钉着），
       与生产者那道闸一起改。PPR 那把 `ppr_retrieve_offered` 独立，不受牵连。）
-- [ ] **全局（对等）模式没有单库那道「检索范围为空」的 409 预检**。单库入口的
-      `_require_ask_available` 在勾选后范围为空时直接 409，全局入口没有对应物：八个库
-      全空时这次 run 照样跑完，交回一份没有证据的答案（`grounded=False`），用户读到的是
-      「没查到」而不是「你这次的范围里什么都没有」。修法要先决定「全局范围为空」的判据
-      （逐库冻结天花板全空？还是还要看 chunk/KG 有没有行），以及它该在 `start()` 里拒绝
-      还是作为一种终态原因码。
 - [ ] **全局（对等）模式的表格分析臂只覆盖名义 active**。`AskService
       ._spreadsheet_reasoning_results` 走的是**真实挂载谓词**
       （`ask_engine_participant_notebooks`，鉴权级座位，绝不许变成覆盖感知——守卫
