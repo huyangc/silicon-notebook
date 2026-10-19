@@ -1585,7 +1585,39 @@ def _map_row(
         if column in row:
             row[column] = None
     _rebase_storage_paths(table, row, context)
+    _stamp_memory_sync_origin(table, row, context)
     return row, ""
+
+
+# The provenance key every memory this import brings across is stamped with:
+# the package's source_env (design doc §11, user ruling 2026-10-19). A memory
+# saved from an Ask answer keeps ``source_answer_id`` as a pointer into the
+# SOURCE's answers, which never travel; the browser reads this key to say "the
+# source answer is in <env>" instead of looking for it here. A key and not a
+# column: only this importer writes it, so its presence is exact (a dangling
+# ``source_answer_id`` is not -- a local memory whose conversation was deleted
+# dangles too), and it needs no migration. Stamped on every carried row,
+# insert and update alike, so a memory imported before the key existed gets
+# it the next time its provenance travels (any full package carries all).
+MEMORY_SYNC_ORIGIN_KEY = "sync_origin"
+
+
+def _stamp_memory_sync_origin(
+    table: str, row: dict[str, Any], context: _Context
+) -> None:
+    if table != "memory_provenance":
+        return
+    raw = row.get("payload_json")
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return
+    if not isinstance(payload, dict):
+        # Not an object: there is no key to set without inventing a shape
+        # the memory store never wrote. Left exactly as the source had it.
+        return
+    payload[MEMORY_SYNC_ORIGIN_KEY] = context.manifest.source_env
+    row["payload_json"] = json.dumps(payload, ensure_ascii=False)
 
 
 def _rebase_storage_paths(table: str, row: dict[str, Any], context: _Context) -> None:

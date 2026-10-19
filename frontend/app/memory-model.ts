@@ -375,18 +375,37 @@ function archivalProvenanceRows(
   return rows;
 }
 
+/**
+ * 跨环境同步导入的记忆，其来源回答留在源环境（answers 不同步）。导入器在
+ * memory_provenance 顶层写 `sync_origin = <源环境>`（只有导入器写这个键，
+ * 见 docs/incremental-sync-design.md §11），这里据此给出一句不可点的说明，
+ * 不去本环境找那条回答。
+ */
+export function memorySourceAnswerElsewhere(memory: {
+  origin: MemoryOrigin;
+  provenance: Record<string, unknown>;
+  source_answer_id?: string | null;
+}): string {
+  if (memory.origin !== "ask_answer" || !memory.source_answer_id) return "";
+  const origin = (memory.provenance ?? {}).sync_origin;
+  return typeof origin === "string" ? origin.trim() : "";
+}
+
 export function memoryProvenanceRows(memory: {
   origin: MemoryOrigin;
   provenance: Record<string, unknown>;
   agent_profile_id?: string | null;
+  source_answer_id?: string | null;
 }): Array<[string, string]> {
   const provenance = memory.provenance ?? {};
   const imported = importedFromOf(provenance);
   if (imported) return archivalProvenanceRows(memory.origin, provenance);
   if (memory.origin === "ask_answer") {
     const citations = Array.isArray(provenance.citations) ? provenance.citations.length : 0;
+    const elsewhere = memorySourceAnswerElsewhere(memory);
     const rows: Array<[string, string]> = [
       ["原问题", String(provenance.question ?? "")],
+      ["来源回答", elsewhere ? `在 ${elsewhere} 中` : ""],
       ["提问方式", label(ASK_MODE_LABELS, String(provenance.mode ?? ""), "—")],
       ["依据", label(EVIDENCE_LEVEL, String(provenance.evidence_level ?? ""), "—")],
       ["引用", `${citations} 条`],

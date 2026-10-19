@@ -18,7 +18,7 @@ import pytest
 from app.core.config import Settings
 from app.migration.sync.export import export_notebooks
 from app.migration.shadow.postgres_catalog import EXPECTED_COLUMNS
-from app.migration.sync.manifest import synced_tables
+from app.migration.sync.manifest import carried_tables, synced_tables
 from app.migration.sync.package import BYTES_KEY, MANIFEST_NAME, decode_value, rows_path
 from app.models.schemas import NotebookCreate
 from app.repositories.ports import UploadedSourceFile
@@ -213,7 +213,8 @@ def test_the_unexported_notebook_contributes_no_row(seeded):
 
     leaked = [
         f"{table}: {row}"
-        for table in synced_tables()
+        # The default package leaves the Knowhow history out (§11).
+        for table in carried_tables(knowhow_history=False)
         for row in _rows(seeded["package"], table)
         if other in {value for value in row.values() if isinstance(value, str)}
     ]
