@@ -513,6 +513,10 @@ _KNOWN_REFLECT_SCHEMA_GATES = frozenset({
     # PR-B:来源清单的 `scope` 字段。它是**做减法**的闸(关 = 对等模式,字段整个
     # 消失),开着即默认值;嵌在 enumerate 分支里,不产生新的顶层键或动作词。
     "enumerate_scope",
+    # 逐动作的减法闸(今天对等模式下两把都关)。开着即默认值;全门打开时两个
+    # 动作词都在,保留集不变。
+    "search_elements",
+    "ppr_retrieve",
 })
 # The full whitelist each sequence-shaped gate is opened with.
 _REFLECT_SCHEMA_SEQUENCE_GATES = {

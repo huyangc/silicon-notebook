@@ -1,0 +1,322 @@
+"""对等(全局)模式下 reflect 不提供两条只查名义 active 的检索动作。
+
+``search_elements``(元素检索没有联邦通道,生产者 D1-4 整条关)与 ``ppr_retrieve``
+(PPR 走按名义 active 缓存的联邦图,生产者 D0-5 整条关)在对等 run 里只会空手而归。
+它们与「无图时摘五个图动作」那把 ``kg_actions`` 闸同形:prompt 行、schema 枚举、
+``allowed_actions`` 白名单三处一起消失。闸是**逐动作**的——
+``reasoning_retrieval.element_search_offered`` 与 ``ppr_retrieve_offered`` 各管一个,
+渲染函数各收一个同名参数——元素臂联邦化后只翻元素那一把。首轮 PPR 播种(含预取)
+读 PPR 那一把。
+
+单库 run 的 prompt/schema 逐字节不变由两份摘要钉住(有图、无图各一),白名单与接线
+由对照臂钉住。
+"""
+from __future__ import annotations
+
+import hashlib
+import inspect
+import json
+
+import pytest
+
+from app.services.collection_catalog import (
+    ENUMERABLE_ELEMENT_KINDS,
+    ENUMERABLE_KG_OBJECT_TYPES,
+)
+from app.services.prompts import reflect_prompt, reflect_schema_hint
+from tests.model_testkit import bind_chat_client
+from tests.test_peer_mode_ask_steps import _peer_scope
+from tests.test_reasoning_retrieval import (  # noqa: F401 — rrepo 是夹具
+    _SeqLLM, _seed_notebook_without_kg, _seed_two_nodes, rrepo,
+)
+
+
+#: 两把逐动作闸,动作名即渲染函数的参数名。
+_GATED_ACTIONS = ("search_elements", "ppr_retrieve")
+
+#: 对等 run 里**保留**的图动作:闸只摘那两条,不能顺手把别的图动作也带走。
+_PEER_KEPT_GRAPH_ACTIONS = ("expand_graph", "expand_community", "follow_chain")
+
+
+def _actions_in(schema: str) -> set:
+    return set(json.loads(schema)["next_action"].split("|"))
+
+
+class _Capture:
+    """反射替身:记下模型**实际收到**的 prompt/schema,并硬吐一个指定动作。"""
+
+    configured = True
+
+    def __init__(self, action):
+        self._action = action
+        self.seen = []
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        self.seen.append((messages[-1]["content"], schema_hint))
+        return json.dumps({"next_action": self._action, "query": "布局"})
+
+
+def _reflect(rrepo, action, *, kg_actions, peer_ids=None, fail_closed=False):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    capture = _Capture(action)
+    bind_chat_client(rrepo, "reasoning_agent", capture)
+    rr = ReasoningRetriever.from_repository(
+        rrepo, rrepo.settings, fail_closed=fail_closed)
+    if peer_ids is None:
+        decision = rr.reflect("布局布线怎么做", "候选", kg_actions=kg_actions)
+    else:
+        with _peer_scope(peer_ids):
+            decision = rr.reflect("布局布线怎么做", "候选", kg_actions=kg_actions)
+    prompt, schema = capture.seen[-1]
+    return decision, prompt, schema
+
+
+@pytest.mark.parametrize("has_kg", [True, False])
+def test_peer_reflect_offers_neither_action_in_prompt_schema_or_whitelist(rrepo, has_kg):
+    """对等 run:两个动作在模型实际收到的 prompt 与 schema 里都不出现;模型硬吐
+    其中一个就走既有未知动作合同(兜底 answer,轨迹原因 `invalid_action:<name>`)。
+
+    同一个用例里跑单库对照臂:同一份响应在单库 run 里是合法动作,三处都在。
+    """
+    nb = _seed_two_nodes(rrepo) if has_kg else _seed_notebook_without_kg(rrepo)
+    other = _seed_notebook_without_kg(rrepo)
+    for action in _GATED_ACTIONS:
+        decision, prompt, schema = _reflect(
+            rrepo, action, kg_actions=has_kg, peer_ids=(nb.id, other.id))
+        for name in _GATED_ACTIONS:
+            assert name not in prompt, name
+            assert name not in _actions_in(schema), name
+        assert decision.fallback is True
+        assert decision.fallback_reason == f"invalid_action:{action}"
+        assert decision.next_action == "answer"
+        # 闸只摘这两条:其余动作(有图时含三个图动作)原样留着。
+        kept = {"answer", "add_subquery", "exact_lookup", "search_chunks"}
+        if has_kg:
+            kept |= set(_PEER_KEPT_GRAPH_ACTIONS)
+        assert kept <= _actions_in(schema)
+        for name in kept:
+            assert f"- {name}:" in prompt, name
+
+        # 对照臂:单库 run 三处都在,同一份响应是合法决定。
+        decision, prompt, schema = _reflect(rrepo, action, kg_actions=has_kg)
+        if has_kg or action == "search_elements":
+            assert f"- {action}:" in prompt
+            assert action in _actions_in(schema)
+            assert decision.fallback is False and decision.next_action == action
+
+
+def test_peer_reflect_rejects_both_actions_when_fail_closed(rrepo):
+    """严格调用方拿到既有的 `invalid action` 硬失败,不是悄悄退成 answer。"""
+    nb = _seed_two_nodes(rrepo)
+    for action in _GATED_ACTIONS:
+        with pytest.raises(ValueError, match="invalid action"):
+            _reflect(rrepo, action, kg_actions=True, peer_ids=(nb.id,),
+                     fail_closed=True)
+        decision, _prompt, _schema = _reflect(
+            rrepo, action, kg_actions=True, fail_closed=True)
+        assert decision.next_action == action
+
+
+@pytest.mark.parametrize("closed", _GATED_ACTIONS)
+def test_each_gate_closes_only_its_own_action(rrepo, monkeypatch, closed):
+    """两把闸互相独立:只关一把时,另一个动作在 prompt、schema 与白名单里都还在。
+    元素臂联邦化之后只翻 `element_search_offered`,PPR 不受牵连(反之亦然)。"""
+    import app.services.reasoning_retrieval as rr_mod
+
+    predicate = {"search_elements": "element_search_offered",
+                 "ppr_retrieve": "ppr_retrieve_offered"}[closed]
+    monkeypatch.setattr(rr_mod, predicate, lambda: False)
+    _seed_two_nodes(rrepo)
+    (still,) = [name for name in _GATED_ACTIONS if name != closed]
+
+    decision, prompt, schema = _reflect(rrepo, closed, kg_actions=True)
+    assert closed not in _actions_in(schema)
+    assert f"- {closed}:" not in prompt
+    assert decision.fallback_reason == f"invalid_action:{closed}"
+
+    decision, prompt, schema = _reflect(rrepo, still, kg_actions=True)
+    assert still in _actions_in(schema)
+    assert f"- {still}:" in prompt
+    assert decision.fallback is False and decision.next_action == still
+
+
+_NOT_PASSED = "<未传>"
+
+
+def _captured_gates(rrepo, peer_ids):
+    """`reflect()` 传给两个渲染函数的两把闸实参(按签名绑定取值)。"""
+    import app.services.reasoning_retrieval as rr_mod
+
+    seen = []
+    originals = {"prompt": rr_mod.reflect_prompt,
+                 "schema": rr_mod.reflect_schema_hint}
+
+    def _spy(kind):
+        original = originals[kind]
+
+        def _wrapped(*args, **kwargs):
+            bound = inspect.signature(original).bind(*args, **kwargs)
+            seen.append((kind, tuple(
+                bound.arguments.get(name, _NOT_PASSED)
+                for name in _GATED_ACTIONS)))
+            return original(*args, **kwargs)
+
+        return _wrapped
+
+    rr_mod.reflect_prompt = _spy("prompt")
+    rr_mod.reflect_schema_hint = _spy("schema")
+    try:
+        _reflect(rrepo, "answer", kg_actions=True, peer_ids=peer_ids)
+    finally:
+        rr_mod.reflect_prompt = originals["prompt"]
+        rr_mod.reflect_schema_hint = originals["schema"]
+    assert {kind for kind, _value in seen} == {"prompt", "schema"}
+    return {value for _kind, value in seen}
+
+
+def test_reflect_passes_the_gates_from_the_run_mode(rrepo):
+    """接线:单库 run 两个渲染函数都拿到 (True, True)(开着 = 接入前的渲染),对等
+    run 都拿到 (False, False)。闸在 `reflect()` 里现算,`run()` 的调用形状没变,
+    所以接线点就是这一处。"""
+    nb = _seed_two_nodes(rrepo)
+    assert _captured_gates(rrepo, None) == {(True, True)}
+    assert _captured_gates(rrepo, (nb.id,)) == {(False, False)}
+
+
+def _all_gates_open(kg_actions):
+    return dict(
+        element_kinds=ENUMERABLE_ELEMENT_KINDS,
+        object_types=ENUMERABLE_KG_OBJECT_TYPES,
+        outline=True, consult_memory=True, search_chunks=True,
+        kg_actions=kg_actions, read_document=True, keyword_search=True,
+    )
+
+
+def _digest(kg_actions, **extra):
+    gates = _all_gates_open(kg_actions)
+    prompt = reflect_prompt(
+        "布局布线怎么做", "候选", **gates, read_document_cap=2,
+        corpus_langs=["zh", "en"], source_scoped=True, **extra)
+    schema = reflect_schema_hint(**gates, **extra)
+    return hashlib.sha256(
+        prompt.encode("utf-8") + b"\0" + schema.encode("utf-8")).hexdigest()
+
+
+#: 单库 run 的 reflect prompt + schema 摘要,取自加这两把闸**之前**的代码(各把闸
+#: 全开,含这两把闸改写过的每一句:search_chunks 的对比句、enumerate 的偏好句、
+#: consult_memory 的示例清单、两条动作说明)。改动 reflect prompt 本身时按新渲染
+#: 重算;只为这两把闸改了单库渲染的一个字节,这里就会红。
+_SINGLE_LIBRARY_DIGESTS = {
+    True: "2a2bcefbcffbec9691597e7be33dc392644a6acc0165bd3b781799dbe8d416db",
+    False: "3c92676db409c1ae04ec2b451c4eb2be18f26482fea973e1e6ac99a4e48a5800",
+}
+
+
+@pytest.mark.parametrize("has_kg", [True, False])
+def test_single_library_reflect_rendering_is_byte_identical(has_kg):
+    """单库 run(两把闸开着,即默认)逐字节等于加闸之前的渲染,有图、无图各一。"""
+    assert _digest(has_kg) == _SINGLE_LIBRARY_DIGESTS[has_kg]
+    assert _digest(
+        has_kg, search_elements=True, ppr_retrieve=True,
+    ) == _SINGLE_LIBRARY_DIGESTS[has_kg]
+
+
+_ELEMENTS_CONTRAST = ("search_elements (which returns TYPED document elements "
+                      "— formulas, tables, figures)")
+_PPR_CONTRAST = "ppr_retrieve (which propagates through the graph)"
+
+
+def _conditioned(has_kg, elements, ppr):
+    """被这两把闸条件化的措辞:(关闸拼写, 开闸拼写)。"""
+    contrasts = ([_ELEMENTS_CONTRAST] if elements else []) + (
+        [_PPR_CONTRAST] if has_kg and ppr else [])
+    full = [_ELEMENTS_CONTRAST] + ([_PPR_CONTRAST] if has_kg else [])
+    off_contrast = ("It differs from " + " and from ".join(contrasts)
+                    + ": this one searches" if contrasts else "It searches")
+    examples_on = (["ppr_retrieve", "exact_lookup", "expand_graph", "follow_chain"]
+                   if has_kg else ["exact_lookup", "search_elements"])
+    closed = {name for name, offered in
+              (("search_elements", elements), ("ppr_retrieve", ppr)) if not offered}
+    examples_off = [name for name in examples_on if name not in closed]
+    pairs = [
+        (off_contrast + " the passage text",
+         "It differs from " + " and from ".join(full)
+         + ": this one searches the passage text"),
+        ("(" + ", ".join(examples_off) + ")", "(" + ", ".join(examples_on) + ")"),
+    ]
+    if not elements:
+        pairs.append(("PREFER this over a relevance search",
+                      "PREFER this over search_elements"))
+    return pairs
+
+
+@pytest.mark.parametrize("has_kg", [True, False])
+@pytest.mark.parametrize("elements,ppr", [(False, False), (False, True), (True, False)])
+def test_closed_rendering_only_drops_the_closed_actions(has_kg, elements, ppr):
+    """关闸渲染相对开闸渲染**只减不改**:把条件化过的措辞还原回开闸拼写后,每一行
+    都是开闸渲染里原样存在的行,少掉的恰好是被关动作自己那一行;schema 枚举只少
+    被关的那几个词、其余顺序不变,其它字节一个不动。"""
+    gates = _all_gates_open(has_kg)
+    closed = [name for name, offered in
+              (("search_elements", elements), ("ppr_retrieve", ppr)) if not offered]
+    on = reflect_prompt("Q", "C", **gates, read_document_cap=2)
+    off = reflect_prompt("Q", "C", **gates, read_document_cap=2,
+                         search_elements=elements, ppr_retrieve=ppr)
+    normalised = off
+    for off_text, on_text in _conditioned(has_kg, elements, ppr):
+        assert off_text in normalised, off_text
+        assert on_text in on, on_text
+        normalised = normalised.replace(off_text, on_text, 1)
+    on_lines = on.splitlines()
+    normalised_lines = normalised.splitlines()
+    for line in normalised_lines:
+        assert line in on_lines, line
+    dropped = [line for line in on_lines if line not in normalised_lines]
+    assert sorted(line.split(":")[0] for line in dropped) == sorted(
+        f"- {name}" for name in closed if has_kg or name == "search_elements")
+
+    on_schema = reflect_schema_hint(**gates)
+    off_schema = reflect_schema_hint(
+        **gates, search_elements=elements, ppr_retrieve=ppr)
+    on_enum = json.loads(on_schema)["next_action"]
+    off_enum = json.loads(off_schema)["next_action"]
+    assert off_schema.replace(off_enum, on_enum) == on_schema
+    assert off_enum.split("|") == [
+        word for word in on_enum.split("|") if word not in closed]
+
+
+def test_peer_run_skips_the_ppr_seed_and_its_prefetch(rrepo):
+    """首轮 PPR 播种与预取读 PPR 那把判据:对等 run 一次 `ppr_retrieve` 都不发、轨迹
+    没有那步「概念漫游:跨文档检索,得到 0 段原文」;单库对照臂照旧播种。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.graph_ppr_enabled = True
+
+    def _run(peer):
+        bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+            plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+            reflects=[{"next_action": "answer", "sufficient": True}]))
+        rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+        calls = []
+        original = rr.ppr_retrieve
+
+        def _ppr(notebook_id, query):
+            calls.append(query)
+            return original(notebook_id, query)
+
+        rr.ppr_retrieve = _ppr
+        if peer:
+            with _peer_scope((nb.id,)):
+                res = rr.run(nb.id, "RTL到GDSII流程", "")
+        else:
+            res = rr.run(nb.id, "RTL到GDSII流程", "")
+        seeds = [t for t in res.trace
+                 if t.step_type == "ppr" and t.detail.get("phase") == "seed"]
+        return calls, seeds
+
+    calls, seeds = _run(peer=False)
+    assert calls == ["RTL到GDSII流程"] and len(seeds) == 1
+    calls, seeds = _run(peer=True)
+    assert calls == [] and seeds == []

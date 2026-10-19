@@ -602,6 +602,8 @@ def reflect_schema_hint(
     plugin_actions: Sequence[ReflectActionSpec] = (),
     keyword_search: bool = False,
     enumerate_scope: bool = True,
+    search_elements: bool = True,
+    ppr_retrieve: bool = True,
 ) -> str:
     """The reflect response schema, with the enumeration branch iff offered.
 
@@ -690,6 +692,20 @@ def reflect_schema_hint(
     argument parsing and the enumeration executor read the same predicate
     (``reasoning_retrieval.local_only_scope_offered``). True (the default) is
     byte-for-byte the schema from before the knob became conditional.
+
+    ``search_elements`` / ``ppr_retrieve`` are two more SUBTRACTING gates, one
+    per action, each False when that action's channel cannot return anything
+    this run (today: a PEER run, where both producers are closed). False drops
+    that one word from the ``next_action`` enum, every other word keeping its
+    relative order (``ppr_retrieve`` only matters while ``kg_actions`` offers
+    it). Neither has a branch of its own — both read the shared root
+    ``query``, which ``exact_lookup`` still needs — so nothing else changes.
+    They are separate on purpose: the element arm can be federated (and the
+    action offered again in a peer run) without touching PPR. The prompt and
+    ``reflect``'s whitelist read the same predicates
+    (``reasoning_retrieval.element_search_offered`` /
+    ``ppr_retrieve_offered``). True (the default) is byte-for-byte the schema
+    from before the gates existed.
     """
     # The SAME double gate ``reflect_prompt`` applies to the action's own prompt
     # line: ``read_document and enumeration_tools``. The two projections must
@@ -703,6 +719,13 @@ def reflect_schema_hint(
         if kg_actions else
         "answer|add_subquery|search_elements|exact_lookup"
     )
+    withheld = (
+        (() if search_elements else ("search_elements",))
+        + (() if ppr_retrieve else ("ppr_retrieve",))
+    )
+    if withheld:
+        actions = "|".join(
+            word for word in actions.split("|") if word not in withheld)
     if search_chunks:
         actions += "|search_chunks"
     if read_document and enumeration_tools:
@@ -827,8 +850,8 @@ def reflect_schema_hint(
     # (search_elements, exact_lookup, ppr_retrieve, expand_community,
     # search_chunks): each action reads it as its own parameter, so the model
     # fills one slot for the action it chose instead of picking among
-    # look-alike fields. It is unconditional because search_elements and
-    # exact_lookup exist in every gate combination.
+    # look-alike fields. It is unconditional because exact_lookup exists in
+    # every gate combination (search_elements only where its gate is open).
     return (
         '{"sufficient":false,"next_action":"' + actions + '",'
         + expand_branch +
@@ -877,6 +900,8 @@ def reflect_prompt(
     keyword_search: bool = False,
     enumerate_scope: bool = True,
     source_scoped: bool = False,
+    search_elements: bool = True,
+    ppr_retrieve: bool = True,
 ) -> str:
     """Next-step decision prompt.
 
@@ -967,6 +992,15 @@ def reflect_prompt(
     carrying ``SELECTED_SOURCES_SCOPE_SUFFIX``, tells the model not to present
     those counts as the size of the library. Only rendered with the
     enumeration tools; False (the default) adds nothing.
+
+    ``search_elements`` / ``ppr_retrieve`` False = that action is not offered
+    this run (one gate per action, the same ones ``reflect_schema_hint``
+    takes; today both close in a PEER run). Its own line goes, and so does
+    every other sentence's mention of it -- the ``search_chunks`` contrast,
+    the enumerate preference (``search_elements``) and the ``consult_memory``
+    example list -- for the same reason ``kg_actions`` rewrites those
+    sentences. True (the default) is byte-for-byte the prompt from before the
+    gates existed.
     """
     if read_document and read_document_cap < 1:
         raise ValueError(
@@ -1018,6 +1052,13 @@ def reflect_prompt(
         "name. It is matched literally, so a scope word in it finds nothing. "
         "Leave it empty to search by query alone."
     )
+    passage_contrasts = (
+        ["search_elements (which returns TYPED document elements — "
+         "formulas, tables, figures)"] if search_elements else []
+    ) + (
+        ["ppr_retrieve (which propagates through the graph)"]
+        if kg_actions and ppr_retrieve else []
+    )
     search_chunks_action = (
         "- search_chunks: retrieve raw SOURCE PASSAGES from the documents "
         "themselves, by semantics and keywords (set query). Reach for it "
@@ -1026,11 +1067,12 @@ def reflect_prompt(
         + (", or when the knowledge graph is thin or absent"
            if kg_actions else "")
         + ". It "
-        "differs from search_elements (which returns TYPED document elements — "
-        "formulas, tables, figures)"
-        + (" and from ppr_retrieve (which propagates "
-           "through the graph)" if kg_actions else "")
-        + ": this one searches the passage text directly, so it "
+        # The contrast names only actions this run offers; with none left the
+        # sentence states what the action does without comparing it.
+        + ("differs from " + " and from ".join(passage_contrasts)
+           + ": this one searches"
+           if passage_contrasts else "searches")
+        + " the passage text directly, so it "
         "works even with no graph at all."
         + (" " + keywords_rule if keyword_search else "")
         + "\n"
@@ -1064,7 +1106,9 @@ def reflect_prompt(
         "- enumerate_elements: the question asks you to LIST or INVENTORY a "
         "kind of document element rather than to find the most relevant ones. "
         "Set enumerate.kind to one of: " + ", ".join(element_kinds) + ". "
-        "PREFER this over search_elements whenever the question is 'which / "
+        "PREFER this over "
+        + ("search_elements" if search_elements else "a relevance search")
+        + " whenever the question is 'which / "
         "list / what are all the <kind>': relevance search returns a sample "
         "and can never prove it returned everything, while this walks the "
         "collection in order and reports exactly how much of it was covered. "
@@ -1285,11 +1329,20 @@ def reflect_prompt(
     # The parenthetical enumerates EXAMPLE channels worth reconsidering, so it
     # has to name channels this run actually has: three of the four listed are
     # graph actions. With ``kg_actions`` closed it falls back to the two
-    # non-graph retrieval channels that always exist.
+    # non-graph retrieval channels that always exist. An action this run does
+    # not offer (``search_elements`` / ``ppr_retrieve`` gates) leaves either
+    # list, the rest keeping their order.
+    consult_memory_examples = [
+        name for name, offered in (
+            (("ppr_retrieve", ppr_retrieve), ("exact_lookup", True),
+             ("expand_graph", True), ("follow_chain", True))
+            if kg_actions else
+            (("exact_lookup", True), ("search_elements", search_elements))
+        ) if offered
+    ]
     consult_memory_action = (
         "- consult_memory: before repeating an action ("
-        + ("ppr_retrieve, exact_lookup, expand_graph, follow_chain"
-           if kg_actions else "exact_lookup, search_elements")
+        + ", ".join(consult_memory_examples)
         + ") that has already come back "
         "empty a few times in THIS run, recall tactical hints from earlier "
         "runs on this shape of question, plus your own earlier notes for this "
@@ -1327,12 +1380,13 @@ def reflect_prompt(
         if kg_actions else ""
     )
     graph_retrieval_actions = (
-        "- ppr_retrieve: the question compares across models/sources or needs "
-        "breadth across documents; pull cross-document source passages via PPR "
-        "(set query). Prefer this for comparison / cross-paper questions where "
-        "single-document evidence isn't enough, or when a multi-layer derivation "
-        "needs supporting passages scattered across documents.\n"
-        "- expand_community: the question compares an entity with its peers / other "
+        ("- ppr_retrieve: the question compares across models/sources or needs "
+         "breadth across documents; pull cross-document source passages via PPR "
+         "(set query). Prefer this for comparison / cross-paper questions where "
+         "single-document evidence isn't enough, or when a multi-layer derivation "
+         "needs supporting passages scattered across documents.\n"
+         if ppr_retrieve else "")
+        + "- expand_community: the question compares an entity with its peers / other "
         "of-its-kind, and those peers are missing from candidates; pull the entity's "
         "SEMANTIC COMMUNITY members across documents (set query to the entity "
         "name, e.g. 'DeepSeek-V4'). Use for 'X vs other Y' questions.\n"
@@ -1351,11 +1405,13 @@ def reflect_prompt(
     # graph that exists and disappoints, and in a graph-less run it invites the
     # model to keep probing for one that was never built. Only the leading
     # clause is conditioned, so gate-open is byte-for-byte the pre-T2 sentence.
+    # Absent altogether when this run does not offer it (``search_elements`` gate).
     search_elements_action = (
         "- search_elements: "
         + ("the KG is too thin; fall back" if kg_actions else "fall back")
         + " to raw document "
         "passages (set query).\n"
+        if search_elements else ""
     )
     return (
         "You decide the NEXT retrieval step for answering a question from a "
