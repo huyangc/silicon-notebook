@@ -903,13 +903,30 @@ def _resolve_roster_rows(rows, requested: str) -> list:
 
     Two rows sharing the same bounded form both match and the caller reports
     the ambiguity; a title that equals none of these forms stays unresolved.
+
+    Rows that share a title are listed to the model as ``标题（第 N 篇）``
+    (``_roster_placeholders``); such a placeholder, copied back, resolves to
+    exactly that one row (it never equals a real title, so it cannot shadow
+    one).  A roster with no shared titles resolves exactly as before.
     """
     text = " ".join(str(requested or "").split())
+    # 同名篇的序号占位串(见 `_roster_placeholders`)。占位串永不等于任何真实标题,
+    # 所以先查它不会抢走真实标题的命中;命中它就是**确定的一篇**,不再走下面的
+    # 「账目形态撞车」扩展(那一步会把同名的兄弟行拉回来,把序号白加了)。
+    by_placeholder = {
+        _normalized_title(placeholder): key
+        for key, placeholder in _roster_placeholders(rows).items()}
+    placed = False
 
     def _exact(candidate: str) -> list:
+        nonlocal placed
         wanted = _normalized_title(candidate)
         if not wanted:
             return []
+        key = by_placeholder.get(wanted)
+        if key is not None:
+            placed = True
+            return [row for row in rows if _roster_row_key(row) == key][:1]
         return [row for row in rows
                 if _normalized_title(" ".join(_roster_display_title(row).split())) == wanted]
 
@@ -931,7 +948,7 @@ def _resolve_roster_rows(rows, requested: str) -> list:
         if wanted:
             matches = [row for row in rows
                        if _normalized_title(_roster_note_form(row)) == wanted]
-    if matches:
+    if matches and not placed:
         # 歧义按**模型看得见的形态**判(codex #724 R2):一篇标题恰好 60 字、另一篇
         # 以同样 60 字开头时,账目里两行显示得一模一样;整串精确匹配只会命中短的
         # 那一篇,静默选错。凡与已命中行在账目形态上撞车的行一并纳入,让调用方
@@ -953,6 +970,80 @@ def _roster_display_title(row) -> str:
     出来、永远读不到」。
     """
     return str(getattr(row, "source_title", "") or UNNAMED_SOURCE_LABEL)
+
+
+def _roster_row_key(row):
+    """花名册行的身份键:真实行是 `source_id`;只带标题的测试替身退到对象身份。"""
+    return getattr(row, "source_id", None) or id(row)
+
+
+def _placeholder_candidates(form: str, ordinal: int):
+    """同名序号占位串的候选序列(确定性,越往后越不可能撞上真实标题)。"""
+    yield f"{form}（第 {ordinal} 篇）"
+    yield f"{form}（同名第 {ordinal} 篇）"
+    attempt = 2
+    while True:
+        yield f"{form}（同名第 {ordinal} 篇·{attempt}）"
+        attempt += 1
+
+
+def _ambiguous_read_summary(matches, roster_rows) -> str:
+    """`read_document` 命中多篇时的 skip 文案。
+
+    命中的行带着序号占位串(花名册里标了「（第 N 篇）」)时,下一步是**抄带序号
+    的那个形态**——这时候说「无法区分」是错的,它能区分,只是模型给的形态没带序号。
+    不带占位串的多命中(多篇无名文档、或旧口径下的账目撞车)才是真的区分不开。
+    """
+    placeholders = _roster_placeholders(roster_rows)
+    if any(_roster_row_key(row) in placeholders for row in matches):
+        return (f"跳过按篇读取原文:清单里有 {len(matches)} 篇同名文档,"
+                "请连同标题后面的「（第 N 篇）」序号一起从清单里逐字复制,指明读哪一篇")
+    return (f"跳过按篇读取原文:清单里有 {len(matches)} 篇同名文档,"
+            "这个动作按标题无法区分它们,请如实说明这一点或改读别的文档")
+
+
+def _roster_placeholders(rows) -> Dict[object, str]:
+    """花名册里**同名**篇的唯一占位串:`_roster_row_key(row)` → 「标题（第 N 篇）」。
+
+    `read_document` 的参数就是标题,同名两篇本来区分不开。这里只在花名册(本 run
+    列出的全部来源清单按 `source_id` 折叠后的整体,与 `_action_read_document` 的
+    解析域同一份)里**真的出现同名**时给那几篇加序号,序号按花名册既有顺序从 1
+    编;没有同名的行不出现在返回值里,所以无同名的花名册渲染逐字节不变。
+
+    * 同名判定用模型**看得见**的形态(`_roster_note_form`:折叠空白、截到账目的
+      60 字)再做 `_normalized_title`(trim + casefold)——与解析器报歧义用的是
+      同一把尺子:账目里显示得一模一样的几行,就是需要序号的几行。
+    * 无标题占位串(`UNNAMED_SOURCE_LABEL`)**不编号**:账目对它有「最多占一个
+      标题位」的硬规矩(codex #724 R2:20 篇无名文档不得挤掉真标题),编号会让
+      每一篇各占一位。多篇无名文档维持原状(按占位串读会报同名歧义)。
+    * 占位串**永不等于**花名册里任何一行的真实标题(含其账目形态):撞上就换下一
+      个候选写法(`_placeholder_candidates`)。所以解析时「占位串命中」与「真实标题
+      命中」在花名册上互不相交,真实标题恰好叫「X（第 2 篇）」时既不会被占位串
+      抢走,也不会抢走占位串——优先级问题在构造上不存在。
+    """
+    unique = {}
+    for row in rows:
+        unique.setdefault(_roster_row_key(row), row)
+    groups: Dict[str, list] = {}
+    taken = set()
+    for key, row in unique.items():
+        form = _roster_note_form(row)
+        norm = _normalized_title(form)
+        groups.setdefault(norm, []).append((key, form))
+        taken.add(norm)
+        taken.add(_normalized_title(" ".join(_roster_display_title(row).split())))
+    unnamed = _normalized_title(UNNAMED_SOURCE_LABEL)
+    placeholders: Dict[object, str] = {}
+    for norm, members in groups.items():
+        if len(members) < 2 or norm == unnamed:
+            continue
+        for ordinal, (key, form) in enumerate(members, 1):
+            for candidate in _placeholder_candidates(form, ordinal):
+                if _normalized_title(candidate) not in taken:
+                    break
+            taken.add(_normalized_title(candidate))
+            placeholders[key] = candidate
+    return placeholders
 
 
 # 枚举范围常量从动作契约导入并原样 re-export，供历史调用方使用。
@@ -1715,8 +1806,12 @@ _ENUM_NOTE_NO_SUMMARY_MARK = "(无摘要)"
 _ENUM_NOTE_TITLES_TOTAL_CHARS = 800
 
 
-def _source_titles_note(items) -> str:
+def _source_titles_note(items, placeholders=None) -> str:
     """来源清单账目后面附的**有界**标题清单。
+
+    `placeholders` 是本 run 花名册的同名序号占位串(`_roster_placeholders`):命中
+    的行按「标题（第 N 篇）」列出,其余行与此前逐字节相同;不传/为空时整份输出
+    与加入这个参数之前一致。
 
     **这是对「账目回喂只报账目、不带条目正文」那条规则的定向豁免**,只对 sources
     集合成立,理由是那条规则在这里恰好自相矛盾:reflect prompt 教模型「先枚举目录
@@ -1751,7 +1846,8 @@ def _source_titles_note(items) -> str:
         # N 遍既挤掉真标题、又不给模型任何新的可操作信息(两篇同名时这个动作按
         # 标题本来就区分不开,只会 unresolved skip)。出现一次是「库里有这么一类
         # 文档」,出现 N 次只是把有界预算烧在同一句话上。
-        raw = " ".join(_roster_display_title(item).split())
+        listed = (placeholders or {}).get(_roster_row_key(item))
+        raw = listed or " ".join(_roster_display_title(item).split())
         # `titles` 存的是 (text, mark) 元组——占位串是否已占位要比 text 分量,直接
         # `raw in titles` 永远为假(codex #724 R2:20 篇无名文档会把占位串重复
         # 20 遍、把后面的真标题挤出账目)。
@@ -1760,7 +1856,8 @@ def _source_titles_note(items) -> str:
             continue
         if len(titles) >= _ENUM_NOTE_SOURCE_TITLES:
             break
-        text = raw[:_ENUM_NOTE_TITLE_CHARS]
+        # 占位串的标题部分在构造时已按账目口径截好,序号尾巴不能再被这一刀砍掉。
+        text = raw if listed else raw[:_ENUM_NOTE_TITLE_CHARS]
         # 摘要可得性标记:`summary` 属性存在且为空串才标;属性缺席(测试替身、
         # 非 SourceItem)不标——账目只报它确知的事。标记字符计入合计上界。
         summary = getattr(item, "summary", None)
@@ -1798,12 +1895,19 @@ def _enumeration_note(chains) -> str:
     if not chains:
         return ""
     parts = []
+    # 同名序号按**整个花名册**(本 run 全部来源清单折叠后)编,而不是按单条链:
+    # 同一篇在不同链的账目里必须是同一个占位串,与 `_action_read_document` 的
+    # 解析域同口径。没有同名时是空字典,账目逐字节不变。
+    placeholders = _roster_placeholders([
+        row for chain in chains.values()
+        if chain.outcome.collection == ENUMERATE_SOURCES_COLLECTION
+        for row in chain.outcome.items])
     for chain in list(chains.values())[:_ENUM_NOTE_MAX_ITEMS]:
         coverage = chain.outcome.coverage
         label = _collection_label(chain.outcome.collection, chain.outcome.kind)
         returned_total = getattr(coverage, "returned_total", 0)
         titles = (
-            _source_titles_note(chain.outcome.items)
+            _source_titles_note(chain.outcome.items, placeholders)
             if chain.outcome.collection == "sources" else ""
         )
         # 范围后缀与上屏摘要同形同词。模型看的是这份账目:不写范围的话,「已完整
@@ -6674,8 +6778,7 @@ class ReasoningRetriever:
             record(TraceStep(
                 step_type="skip",
                 summary=(
-                    f"跳过按篇读取原文:清单里有 {len(matches)} 篇同名文档,"
-                    "这个动作按标题无法区分它们,请如实说明这一点或改读别的文档"
+                    _ambiguous_read_summary(matches, list(roster.values()))
                     if len(matches) > 1 else
                     "跳过按篇读取原文:来源清单里没有匹配这个标题的文档,"
                     "请从清单里逐字复制标题后重试"),
