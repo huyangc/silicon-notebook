@@ -4841,8 +4841,8 @@ def test_community_graph_rows_do_not_buffer_the_whole_result_on_postgres(
 
     另外钉两件会被「顺手改成流式」改坏的事:取回的**行内容与行序**(Louvain 对边序敏感,
     `ORDER BY kr.id COLLATE "C"` 一字不能动 —— 双后端逐行比对见
-    `test_community_graph_rows_twin_pg.py`),以及 `names` 仍是已物化的字典(它是流占线
-    之前的第一条语句,调用方拿到时不依赖连接状态)。
+    `test_community_graph_rows_twin_pg.py`),以及 `names` 仍是已物化的字典(它是放宽
+    超时之后、流占线之前的第一条读,调用方拿到时不依赖连接状态)。
     """
     import inspect
 

@@ -2767,6 +2767,16 @@ class UnifiedKgStorePort(Protocol):
     def cluster_map_rows(db: object, notebook_id: str) -> dict[str, str]: ...
     @staticmethod
     def communities_count(db: object, notebook_id: str, level: int) -> int: ...
+    # ⚠ 返回 `(names, relations)`:`names` 是已物化的字典,`relations` 是**流式整表读**
+    # (PG:`cursor().stream()` 生成器;SQLite:惰性 `sqlite3` 游标)。流的使用契约 ——
+    # `source_canonical_rows` 同款,调用方必须遵守:
+    #   · 流占住调用方的连接:必须读完,或在离开 `with` 之前 `close()` 它;读的期间不能
+    #     往这条连接发任何别的语句。流被丢下(循环抛异常 / `break`)而连接被释放,在 PG 上
+    #     会让池的 `rollback()` 永久阻塞(psycopg 3.3 实测)—— 调用方经 `closing(...)` 兜底。
+    #   · PG 实现会把调用方**事务剩余部分**的 `statement_timeout` 抬到 ≥600 s(事务本地、
+    #     只抬不压、0 保持):stream 下语句要等客户端读完才算结束,超时覆盖整个消费期。
+    #     所以不得在 `write()` 里调它,也不得在同一个 `with` 里接着发写语句 —— 写语句不该
+    #     顺带吃到放宽后的超时。
     @staticmethod
     def community_graph_rows(db: object, notebook_id: str) -> object: ...
     @staticmethod
@@ -3115,6 +3125,15 @@ class UnifiedKgStorePort(Protocol):
     # 列表:`edges` 是一份最多 20 万行的有界物化,落库这一刻它整个压在栈帧上。
     # (折叠结果本身已在取完 top-N 之后当场释放,见 `_compute_kg_analysis` 的
     # `del folder` —— 那是 codex 第 9 轮 P1-2 的修法;这里说的是 `edges` 那一份。)
+    #
+    # ⚠ `source_canonical_rows` 返回的是**流式整表读**(PG:`cursor().stream()` 生成器;
+    # SQLite:惰性游标),使用契约与 `community_graph_rows` 完全相同:
+    #   · 流占住调用方的连接:必须读完,或在离开 `with` 之前 `close()` 它;读的期间不能
+    #     往这条连接发任何别的语句。流被丢下而连接被释放,在 PG 上会让池的 `rollback()`
+    #     永久阻塞(psycopg 3.3 实测)—— 调用方经 `closing(...)` 兜底。
+    #   · PG 实现会把调用方**事务剩余部分**的 `statement_timeout` 抬到 ≥600 s(事务本地、
+    #     只抬不压、0 保持)。所以不得在 `write()` 里调它,也不得在同一个 `with` 里接着发
+    #     写语句。
     @staticmethod
     def source_canonical_rows(db: object, notebook_id: str) -> object: ...
     @staticmethod
