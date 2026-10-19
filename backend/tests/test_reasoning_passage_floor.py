@@ -122,9 +122,11 @@ def _render(svc, notebook_id, chunks, structured_block, structured_map):
     captured: dict = {}
     real = AskService._chunk_answer_context
 
-    def _spy(self, chunks, budget_chars=None, notebook_id="", id_offset=0):
+    def _spy(self, chunks, budget_chars=None, notebook_id="", id_offset=0,
+             **kwargs):
         block, id_map = real(self, chunks, budget_chars=budget_chars,
-                             notebook_id=notebook_id, id_offset=id_offset)
+                             notebook_id=notebook_id, id_offset=id_offset,
+                             **kwargs)
         captured["rendered"] = {entry["object_id"] for entry in id_map.values()}
         return block, id_map
 

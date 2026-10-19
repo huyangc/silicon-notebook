@@ -227,7 +227,7 @@ class _MinimalEvidence:
     def citations_from(self, hits, element_ids, label, notebook_id=""):
         return []
 
-    def chunk_citations(self, chunks, *, notebook_id, anchors=None):
+    def chunk_citations(self, chunks, *, notebook_id, anchors=None, lookups=None):
         # PR-B 甲: chunk 模式的两个内联 Citation(...) 分支收进了这一个
         # evidence-context 调用(卡片规则 + 三个批量读取 + 跨库归一)。同
         # knowhow_refs_for / attach_citation_images——新声明的端口调用,这个

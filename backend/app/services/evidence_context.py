@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
 
 from app.core.config import Settings
@@ -115,6 +116,67 @@ def _knowhow_ref_from_payload(payload: Mapping[str, Any]) -> CitationKnowhowRef 
     if not table_id or not row_id:
         return None
     return CitationKnowhowRef(table_id=str(table_id), row_id=str(row_id))
+
+
+@dataclass
+class CitationLookups:
+    """The three batch reads ``chunk_context`` made while assembling a
+    synthesis context, kept by key so the citation cards minted for the same
+    passages afterwards (``chunk_citations(lookups=...)``) need not read them
+    again.
+
+    Each map is keyed by what its read is keyed by -- notebook id for
+    ``tier_map``, source id for ``citation_source_info``, element id for
+    ``knowhow_refs_for`` -- and records EVERY key that was asked, with
+    ``None`` for one the read did not return.  A key's presence therefore
+    means "answered", which is the only thing that lets a consumer tell a
+    real miss ("no tier row", "no display name", "not a Knowhow cell") from
+    a key this memo never saw.  All three reads are per-key independent
+    store lookups (each value depends on its own key only, not on the rest
+    of the batch), so a value recorded by one assembly is the value a fresh
+    read of the same key returns within the same request.  Keys a consumer
+    needs that are absent -- a passage the assembly never rendered, or a
+    multi-element passage whose first element the assembly did not ask
+    about -- are read for that remainder only (``_through``).
+
+    One memo belongs to one assembly (``AskService._assemble_reasoning_
+    context`` creates it and hands it out through the baseline capture);
+    ``merge`` folds the per-section memos of a sectioned synthesis together.
+    """
+
+    tiers: dict[str, str | None] = field(default_factory=dict)
+    source_info: dict[str, dict[str, str] | None] = field(default_factory=dict)
+    knowhow: dict[str, CitationKnowhowRef | None] = field(default_factory=dict)
+
+    def merge(self, other: "CitationLookups") -> None:
+        for mine, theirs in ((self.tiers, other.tiers),
+                             (self.source_info, other.source_info),
+                             (self.knowhow, other.knowhow)):
+            for key, value in theirs.items():
+                mine.setdefault(key, value)
+
+
+def _remember(memo: dict, asked: Iterable[str], found: Mapping[str, Any]) -> None:
+    """Record one batch read: every asked key, ``None`` where it missed."""
+    for key in asked:
+        if key:
+            memo[key] = found.get(key)
+
+
+def _through(
+    memo: dict, keys: Iterable[str], read: Callable[[list[str]], Mapping[str, Any]],
+) -> dict[str, Any]:
+    """``read(keys)``'s answer, reading only the keys ``memo`` has not seen.
+
+    The result has the shape the read itself returns (hits only, misses
+    absent), so callers keep their ``.get(key, fallback)`` unchanged.  No
+    missing key -> no read at all.
+    """
+    wanted = list(dict.fromkeys(key for key in keys if key))
+    missing = [key for key in wanted if key not in memo]
+    if missing:
+        _remember(memo, missing, read(missing))
+    return {key: memo[key] for key in wanted if memo[key] is not None}
 
 
 # 本段附图的两道上限。**协议边界，不是部署预算**——它们约束的是一次回答的响应
@@ -772,22 +834,32 @@ class EvidenceContextService:
         notebook_id: str,
         id_offset: int = 0,
         budget_chars: int | None = None,
+        lookup_sink: CitationLookups | None = None,
     ) -> tuple[str, dict[str, dict[str, Any]]]:
         """``id_offset`` 镜像 ``element_context``/``knowledge_context``:默认 0 保持
         chunk 段恒为 ``k1..kN``(所有既有调用方),按节合成给每节整体加一段偏移,
-        让各节的 key 号段互不相交(见 ``outline_synthesis``)。"""
+        让各节的 key 号段互不相交(见 ``outline_synthesis``)。
+
+        ``lookup_sink``:传入时把本次三个批量读取的问与答记进去(见
+        ``CitationLookups``),供同一批原文段随后建引用卡时复用。读取**次数**与
+        不传时相同;唯一的差别是 knowhow 那一次(本来就要发生时)把每条入选
+        chunk 的首个元素都问上——引用卡按首个元素定位 knowhow,只问单元素 chunk
+        的话卡片那一侧还得为多元素 chunk 再读一次。写回 id_map 的 knowhow 仍只
+        给单元素 chunk,上下文与 id_map 与不传时逐字节相等。"""
         chunks = deduplicate_source_chunks_in_order(chunks)
         budget = (
             self.settings.chunk_answer_budget_chars
             if budget_chars is None
             else max(0, int(budget_chars))
         )
-        tiers = self.tier_map(
-            list({getattr(chunk, "notebook_id", "") or notebook_id for chunk in chunks})
-        )
-        citation_source_info = self.citation_source_info(
-            chunk.source_id for chunk in chunks
-        )
+        tier_ids = list(
+            {getattr(chunk, "notebook_id", "") or notebook_id for chunk in chunks})
+        tiers = self.tier_map(tier_ids)
+        source_ids = [chunk.source_id for chunk in chunks]
+        citation_source_info = self.citation_source_info(source_ids)
+        if lookup_sink is not None:
+            _remember(lookup_sink.tiers, tier_ids, tiers)
+            _remember(lookup_sink.source_info, source_ids, citation_source_info)
         lines: list[str] = []
         evidence_by_id: dict[str, dict[str, Any]] = {}
         # Task 12b 评审修复（grounded 主路径可达性）：chunk 锚点也要带 knowhow。
@@ -863,9 +935,13 @@ class EvidenceContextService:
             if len(element_ids) == 1:
                 single_element_keys[key] = element_ids[0]
         if single_element_keys:
-            refs = self.knowhow_refs_for(single_element_keys.values())
+            asked = list(single_element_keys.values()) if lookup_sink is None else [
+                value["element_id"] for value in evidence_by_id.values()]
+            refs = self.knowhow_refs_for(asked)
             for key, element_id in single_element_keys.items():
                 evidence_by_id[key]["knowhow"] = refs.get(element_id)
+            if lookup_sink is not None:
+                _remember(lookup_sink.knowhow, asked, refs)
         return entry_lines(lines), evidence_by_id
 
     def element_context(
@@ -1889,8 +1965,13 @@ class EvidenceContextService:
         *,
         notebook_id: str,
         anchors: Sequence[AnswerAnchor] | None = None,
+        lookups: CitationLookups | None = None,
     ) -> list[tuple[Citation, tuple[str, ...]]]:
         """原文段落(chunk)的引用卡批量装配——`citations_from` 的 chunk 对偶。
+
+        ``lookups``:同一批段落装配合成上下文时 ``chunk_context(lookup_sink=...)``
+        已经记下的三份批量读取。传入时三个读取点各自只对**备忘里没有的键**补读
+        (一个都不缺就不读),卡片与不传时逐字节相等;不传时照旧整池各读一次。
 
         两种调用形态,同一份卡片规则:
 
@@ -1920,13 +2001,19 @@ class EvidenceContextService:
         笔记本」」徽章。
         """
         pool = list(chunks)
-        chunk_tier_map = self.tier_map(
-            list({c.notebook_id or notebook_id for c in pool}))
-        knowhow_refs = self.knowhow_refs_for(
-            c.element_ids[0] for c in pool if c.element_ids)
-        citation_source_info = self.citation_source_info(
-            c.source_id for c in pool
-        )
+        tier_ids = list({c.notebook_id or notebook_id for c in pool})
+        first_element_ids = [c.element_ids[0] for c in pool if c.element_ids]
+        source_ids = [c.source_id for c in pool]
+        if lookups is None:
+            chunk_tier_map = self.tier_map(tier_ids)
+            knowhow_refs = self.knowhow_refs_for(first_element_ids)
+            citation_source_info = self.citation_source_info(source_ids)
+        else:
+            chunk_tier_map = _through(lookups.tiers, tier_ids, self.tier_map)
+            knowhow_refs = _through(
+                lookups.knowhow, first_element_ids, self.knowhow_refs_for)
+            citation_source_info = _through(
+                lookups.source_info, source_ids, self.citation_source_info)
         if anchors is None:
             ordered = pool
         else:
