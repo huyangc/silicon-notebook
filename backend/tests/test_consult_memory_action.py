@@ -352,7 +352,9 @@ def test_two_calls_do_not_resurface_the_same_entry_and_share_one_cap(repo):
         ("ppr", "bad", "ppr rarely finds anything on this shape."),
         ("exact_lookup", "good", "exact_lookup nails the section fast."),
         ("follow_chain", "bad", "follow_chain rarely composes cleanly here."),
-        ("outline", "good", "outline pays off on survey-shaped questions."),
+        # 第四条推荐的动作必须是本 run 提供的:deep 档不提供 `update_outline`,
+        # 推荐它的行会在选择前被滤掉(见 test_experience_offered_actions)。
+        ("enumerate", "good", "enumerate pays off on survey-shaped questions."),
     ])
     llm = _SeqLLM([
         {"next_action": "consult_memory"},
