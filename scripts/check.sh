@@ -110,13 +110,13 @@ for lane in "${LANES[@]}"; do
 done
 
 # Wall time, lane seconds and the slowest backend files/tests from this run's
-# junit; a prominent warning over the 80 s local target. Observational only:
+# junit; a prominent warning over the 100 s local target. Observational only:
 # it never changes the gate's exit status.
 "$PYTHON_BIN" "$ROOT_DIR/scripts/check_timing_summary.py" \
   --wall "$((SECONDS - GATE_START_SECONDS))" \
   --timing-dir "$TMP_DIR" \
   --junit "$ROOT_DIR/backend/.local/backend-junit.xml" \
   --started-at "$GATE_STARTED_AT" \
-  --target 80 || true
+  --target 100 || true
 
 exit "$status"

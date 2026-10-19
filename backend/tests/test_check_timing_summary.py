@@ -1,7 +1,7 @@
 """scripts/check_timing_summary.py: the G1 gate's closing timing report.
 
 It shows the gate's wall time, lane seconds and the slowest backend files and
-tests, warns over the 80 s local target, and never fails the gate.
+tests, warns over the 100 s local target, and never fails the gate.
 """
 
 from __future__ import annotations
@@ -49,10 +49,10 @@ def _gate_outputs(tmp_path: Path) -> tuple[Path, Path]:
 
 def test_the_summary_ranks_files_and_tests_and_warns_over_the_target(tmp_path):
     timing, junit = _gate_outputs(tmp_path)
-    text = _module().summarize(81, timing, junit, time.time() - 60, 80)
+    text = _module().summarize(101, timing, junit, time.time() - 60, 100)
     lines = text.splitlines()
 
-    assert "gate_wall=81 backend=58 contracts=20 frontend=31" in lines
+    assert "gate_wall=101 backend=58 contracts=20 frontend=31" in lines
     files = lines.index(
         "slowest backend test files (summed junit seconds, top 10):"
     )
@@ -63,12 +63,12 @@ def test_the_summary_ranks_files_and_tests_and_warns_over_the_target(tmp_path):
         "4.00s", "tests.eval.test_beta.TestGroup::test_three"
     ]
     assert len(lines[files + 1 : tests]) == 10
-    assert "WARNING: the G1 gate took 81 s, over the 80 s local target" in lines
+    assert "WARNING: the G1 gate took 101 s, over the 100 s local target" in lines
 
 
 def test_no_warning_at_or_under_the_target(tmp_path):
     timing, junit = _gate_outputs(tmp_path)
-    text = _module().summarize(80, timing, junit, time.time() - 60, 80)
+    text = _module().summarize(100, timing, junit, time.time() - 60, 100)
 
     assert "WARNING" not in text
 
@@ -77,7 +77,7 @@ def test_a_report_older_than_this_run_is_not_ranked(tmp_path):
     timing, junit = _gate_outputs(tmp_path)
     old = time.time() - 3600
     os.utime(junit, (old, old))
-    text = _module().summarize(10, timing, junit, time.time() - 60, 80)
+    text = _module().summarize(10, timing, junit, time.time() - 60, 100)
 
     assert "backend junit backend-junit.xml: not written by this run" in text
     assert "slowest" not in text
@@ -93,7 +93,7 @@ def test_it_never_fails_the_gate_even_without_its_inputs(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert status == 0
-    assert "over the 80 s local target" in out
+    assert "over the 100 s local target" in out
     assert "gate_wall=500 backend=missing contracts=missing frontend=missing" in out
     assert "WARNING: the G1 gate took 500 s" in out
 
@@ -103,5 +103,5 @@ def test_check_sh_reports_it_without_letting_it_change_the_exit_status():
     call = source.index('"$ROOT_DIR/scripts/check_timing_summary.py"')
     tail = source[call:]
 
-    assert '--target 80 || true\n\nexit "$status"\n' in tail
+    assert '--target 100 || true\n\nexit "$status"\n' in tail
     assert source.index('cat "$TMP_DIR/$lane.log"') < call
