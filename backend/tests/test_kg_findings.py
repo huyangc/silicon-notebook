@@ -487,15 +487,17 @@ def test_candidate_generation_memory_per_pair():
 
 
 def test_generation_count_includes_repeats_and_is_what_the_cap_bounds():
-    """Two sources sharing three prefix concepts: ONE distinct candidate, THREE
-    generations. The cap and the ledger's limit are about generations."""
-    p_src = np.asarray([0, 1, 0, 1, 0, 1], dtype=np.int32)
-    p_can = np.asarray([0, 0, 1, 1, 2, 2], dtype=np.int32)
-    df = np.asarray([2, 2, 2], dtype=np.int32)
-    a, b, generated, truncated = kg_findings._candidate_pairs(p_src, p_can, df, 2, 10)
-    assert (a.tolist(), b.tolist(), generated, truncated) == ([0], [1], 3, False)
-    a, b, generated, truncated = kg_findings._candidate_pairs(p_src, p_can, df, 2, 2)
-    assert (a.size, generated, truncated) == (1, 2, True)
+    """Three sources sharing two prefix concepts: THREE distinct candidates, SIX
+    generations (three per inverted list). The cap and the ledger's limit are
+    about generations."""
+    p_src = np.asarray([0, 1, 2, 0, 1, 2], dtype=np.int32)
+    p_can = np.asarray([0, 0, 0, 1, 1, 1], dtype=np.int32)
+    df = np.asarray([3, 3], dtype=np.int32)
+    a, b, generated, truncated = kg_findings._candidate_pairs(p_src, p_can, df, 3, 10)
+    assert (list(zip(a.tolist(), b.tolist())), generated, truncated) == (
+        [(0, 1), (0, 2), (1, 2)], 6, False)
+    a, b, generated, truncated = kg_findings._candidate_pairs(p_src, p_can, df, 3, 5)
+    assert (a.size, generated, truncated) == (3, 3, True)   # the second list is cut
 
 
 def test_the_random_join_fixtures_are_not_trivial(monkeypatch):
