@@ -147,10 +147,11 @@ def test_pg_name_lookup_is_one_bounded_seek_per_id(postgres_database):
     assert scan["Index Name"] == "idx_clusters_nb_canonical_member_gen", text
     # one seek per id, at most one row each, and the rows of other
     # generations it skips before the published one bounded by the two
-    # non-published generations -- a 50 000-member hub costs one seek
+    # non-published generations -- a 50 000-member hub costs one seek.
+    # EXPLAIN reports both figures as per-loop averages.
     assert scan["Actual Loops"] == 900, text
     assert scan["Actual Rows"] <= 1, text
-    assert scan.get("Rows Removed by Filter", 0) <= 2 * 900, text
+    assert scan.get("Rows Removed by Filter", 0) <= 2, text
     assert not any(n["Node Type"] == "Sort" for n in nodes), text
     assert not any(n["Node Type"] == "Seq Scan" and n.get("Relation Name") == "concept_clusters"
                    for n in nodes), text
