@@ -305,7 +305,12 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # global_ask_jobs.retained_until (nullable TEXT, no backfill) and the partial
 # idx_global_ask_jobs_retained over it: the expiry stamp a notebook deletion
 # puts on the global Ask turns that ran over it. See ``_migration_95``.
-SCHEMA_VERSION = 95
+# v96 (paired with PostgreSQL 0076_global_ask_feedback_index.sql) adds the
+# partial expression index idx_global_ask_jobs_feedback over
+# json_extract(payload_json,'$.feedback'), holding only rated rows, so the
+# analytics / admin feedback counts read the rated global jobs without
+# parsing every payload. Index only. See ``_migration_96``.
+SCHEMA_VERSION = 96
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
 # when v87 was written (a migration must not change meaning when the live
@@ -5863,6 +5868,28 @@ class SqliteMigrator:
                 "CREATE INDEX IF NOT EXISTS idx_global_ask_jobs_retained\n"
                 "                 ON global_ask_jobs(conversation_id, retained_until) "
                 "WHERE retained_until IS NOT NULL"
+            )
+
+    def _migration_96(self) -> None:
+        """Rated global Ask jobs, parity with PostgreSQL
+        ``0076_global_ask_feedback_index.sql``.
+
+        A global rating lives only in ``payload_json`` (``feedback``, first
+        write wins); the notebook analytics panel and the admin question
+        overview now count it beside the ``feedback`` table. Without an index
+        each count would parse every global payload. The PARTIAL expression
+        index holds only the rated rows; a query whose WHERE carries the very
+        same ``json_extract(payload_json,'$.feedback') IN ('useful',
+        'not_useful')`` term (SQLite matches a partial index's predicate
+        textually) reads just those rows. ``json_extract`` is deterministic,
+        so the expression is indexable. Index only: no table, column or write
+        path change.
+        """
+        with self._connect() as db:
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_global_ask_jobs_feedback\n"
+                "                 ON global_ask_jobs(json_extract(payload_json,'$.feedback'))\n"
+                "                 WHERE json_extract(payload_json,'$.feedback') IN ('useful','not_useful')"
             )
 
     def migrate(self) -> list[int]:

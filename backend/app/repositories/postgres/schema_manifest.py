@@ -464,7 +464,12 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # retained_until IS NOT NULL: the
 # expiry a notebook deletion stamps on the global Ask turns that ran over it.
 # No table, FK or unique-surface change.
+# SQLite v96 / PostgreSQL 0076 add the NON-UNIQUE partial expression index
+# idx_global_ask_jobs_feedback over payload_json::jsonb->>'feedback' (SQLite:
+# json_extract(payload_json,'$.feedback')), holding only rows whose rating is
+# 'useful' or 'not_useful', so the analytics / admin feedback counts read the
+# rated global jobs only. No table, column, FK or unique-surface change.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=95,
-    postgres_version=75,
+    sqlite_version=96,
+    postgres_version=76,
 )

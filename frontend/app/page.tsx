@@ -148,6 +148,7 @@ import { copyTextSafely } from "./copy-text";
 import { useCopyResult } from "./copy-result";
 import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors.ts";
 import { DEFAULT_SUPPORTED_SOURCE_EXTENSIONS, fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ParserEngineCapability, type ReadySnapshot } from "./system-api";
+import { AnalyticsAnswerQuality } from "./analytics-answer-quality";
 import { backfillPaperMetadata, fetchNotebookAnalytics, fetchNotebookContentOverview, fetchNotebookIndexingPipeline, getNotebook, listNotebooks } from "./notebook-api";
 import { detectSourceTypes, importUrlSources, listSources, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { SourceListPanel } from "./source-list-panel";
@@ -7243,19 +7244,7 @@ export default function Home() {
               <button className="icon-button" onClick={() => closeAnalytics("button")} title="关闭">×</button>
             </div>
             <div className="source-detail-body">
-              <p className="section-title">回答质量</p>
-              <div className="tag-row">
-                <span className="tag">提问 {analytics.answers_total}</span>
-                <span className="tag">👍 {analytics.feedback_useful}</span>
-                <span className="tag">👎 {analytics.feedback_not_useful}</span>
-                <span className="tag">有用率 {Math.round(analytics.usefulness_rate * 100)}%</span>
-              </div>
-              {analytics.low_rated_questions.length > 0 && (
-                <>
-                  <p className="section-title">低分提问（知识缺口）</p>
-                  <div className="stack">{analytics.low_rated_questions.map((q) => <div className="checklist-row" key={q}>{q}</div>)}</div>
-                </>
-              )}
+              <AnalyticsAnswerQuality analytics={analytics} />
               <p className="section-title">知识覆盖（已批准）</p>
               <div className="tag-row">
                 {Object.entries(analytics.knowledge_counts).map(([k, v]) => <span className="tag" key={k}>{k}: {v}</span>)}

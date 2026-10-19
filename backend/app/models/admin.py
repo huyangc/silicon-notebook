@@ -341,6 +341,13 @@ class AdminQuestionStats(BaseModel):
     active_users: int = 0
     # Global Ask jobs under the current filter; a subset of ``asks``.
     global_asks: int = 0
+    # 👍 / 👎 given to the listed questions under the current filter: notebook
+    # feedback rows plus global Ask ratings; ``global_feedback_*`` is the
+    # global subset. Reports and retained (deleted-notebook) rows carry none.
+    feedback_useful: int = 0
+    feedback_not_useful: int = 0
+    global_feedback_useful: int = 0
+    global_feedback_not_useful: int = 0
 
 
 class AdminQuestionsResponse(BaseModel):

@@ -1422,6 +1422,11 @@
         "type": "index"
       },
       {
+        "name": "idx_global_ask_jobs_feedback",
+        "sql_sha256": "129c14ee1bbf5c50040a4830cb911eefe89d21cdc0aeb96c56fc69eef161074d",
+        "type": "index"
+      },
+      {
         "name": "idx_global_ask_jobs_retained",
         "sql_sha256": "30e7e8e88f3d5a01c51aff9a27e15475d85aa0733b1232db19c37fc1c7b33b7f",
         "type": "index"
@@ -3287,6 +3292,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 95
+    "user_version": 96
   }
 }

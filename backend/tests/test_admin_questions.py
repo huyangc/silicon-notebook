@@ -3,6 +3,11 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from app.repositories.global_ask_feedback_sql import ADMIN_QUESTION_FEEDBACK_KEYS
+
+# No question on these pages received any rating.
+NO_FEEDBACK = dict.fromkeys(ADMIN_QUESTION_FEEDBACK_KEYS, 0)
+
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
@@ -66,7 +71,7 @@ def test_admin_questions_combines_ask_and_report_with_filters(client):
     assert response.status_code == 200
     body = response.json()
     assert body["stats"] == {
-        "total": 2, "asks": 1, "reports": 1, "active_users": 1, "global_asks": 0,
+        "total": 2, "asks": 1, "reports": 1, "active_users": 1, "global_asks": 0, **NO_FEEDBACK,
     }
     assert {item["type"] for item in body["items"]} == {"ask", "report"}
     assert all(item["username"] == "d00000004" for item in body["items"])
@@ -81,7 +86,7 @@ def test_admin_questions_combines_ask_and_report_with_filters(client):
     filtered = client.get("/api/admin/questions?kind=report&q=稳定", headers=admin).json()
     assert filtered["total"] == 1
     assert filtered["stats"] == {
-        "total": 1, "asks": 0, "reports": 1, "active_users": 1, "global_asks": 0,
+        "total": 1, "asks": 0, "reports": 1, "active_users": 1, "global_asks": 0, **NO_FEEDBACK,
     }
     assert filtered["items"][0]["question"] == "分析放大器稳定性"
 
@@ -92,7 +97,7 @@ def test_admin_questions_combines_ask_and_report_with_filters(client):
     background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
     retained = client.get("/api/admin/questions", headers=admin).json()
     assert retained["stats"] == {
-        "total": 2, "asks": 1, "reports": 1, "active_users": 1, "global_asks": 0,
+        "total": 2, "asks": 1, "reports": 1, "active_users": 1, "global_asks": 0, **NO_FEEDBACK,
     }
     assert {item["id"] for item in retained["items"]} == {"ask-global", "report-global"}
     assert all(item["notebook_name"] == "模拟电路" for item in retained["items"])
@@ -148,7 +153,7 @@ def test_admin_questions_filters_by_submitted_via(client):
         "/api/admin/questions?submitted_via=web", headers=admin
     ).json()
     assert web_only["stats"] == {
-        "total": 1, "asks": 1, "reports": 0, "active_users": 1, "global_asks": 0,
+        "total": 1, "asks": 1, "reports": 0, "active_users": 1, "global_asks": 0, **NO_FEEDBACK,
     }
     assert [item["id"] for item in web_only["items"]] == ["ask-web"]
     assert web_only["items"][0]["submitted_via"] == "web"
@@ -157,7 +162,7 @@ def test_admin_questions_filters_by_submitted_via(client):
         "/api/admin/questions?submitted_via=mcp", headers=admin
     ).json()
     assert mcp_only["stats"] == {
-        "total": 2, "asks": 1, "reports": 1, "active_users": 1, "global_asks": 0,
+        "total": 2, "asks": 1, "reports": 1, "active_users": 1, "global_asks": 0, **NO_FEEDBACK,
     }
     assert {item["id"] for item in mcp_only["items"]} == {"ask-mcp", "report-mcp"}
     assert all(item["submitted_via"] == "mcp" for item in mcp_only["items"])

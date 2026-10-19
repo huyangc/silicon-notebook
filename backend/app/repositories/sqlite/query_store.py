@@ -28,6 +28,13 @@ from app.models.sources import (
 )
 from app.repositories.group_rows import SHARED_TO_GROUPS_COLUMN
 from app.repositories.like_pattern import escape_like_pattern
+from app.repositories.global_ask_feedback_sql import (
+    ADMIN_QUESTION_FEEDBACK_SUMS,
+    admin_question_feedback_joins,
+    admin_question_feedback_totals,
+    rated_predicate,
+    rating_expression,
+)
 from app.repositories.pending_action_rows import (
     RUNNING_ASK_ROWS,
     RUNNING_ASK_STATUSES,
@@ -67,6 +74,7 @@ from app.domain.global_ask_retention import (
 )
 from app.domain.knowledge_contracts import USABLE_STATUSES
 from app.domain.notebook_scale import NotebookScaleFacts
+from app.domain.global_ask_attribution import attribution_sql
 
 
 # The global Ask retention read gate (``app/domain/global_ask_retention.py``):
@@ -147,6 +155,39 @@ _NOT_MEMORY_OWNED_SQL = "NOT " + memory_derived_object("o")
 #: 批 3·W2 §1.4 的同代相关对齐都写在那里)。
 _NO_MEMORY_MEMBER_CLUSTER_SQL = no_memory_member_cluster("c")
 
+
+def _global_feedback_counts(db: sqlite3.Connection, notebook_id: str) -> tuple[int, int]:
+    """The 👍 / 👎 of global Ask runs attributed to ``notebook_id``.
+
+    Same attribution as the learning chain (``global_ask_attribution``: the
+    libraries a run searched or cited, else its participants minus the skipped
+    ones), so one rating counts once in every library it is attributed to.
+    ``rated_predicate`` restricts the read to ``idx_global_ask_jobs_feedback``
+    (rated rows only): an unrated payload is never parsed. A rating exists
+    only on a ``done`` job and that status is final (a replaced job is a
+    cancelled one), so no status term is needed -- and one would invite the
+    planner onto the status index instead.
+    A turn past its retention stamp (``live_turn_sql``: a deleted
+    participant's window ran out) is listed nowhere, so its rating counts
+    nowhere either.
+    """
+    statement, binds = global_feedback_counts_sql()
+    row = db.execute(statement, (notebook_id,) * binds).fetchone()
+    return int(row["useful"]), int(row["not_useful"])
+
+
+def global_feedback_counts_sql() -> tuple[str, int]:
+    """``_global_feedback_counts``' statement and how many times it binds the
+    notebook id (exposed so the plan pin reads the very statement served)."""
+    attributed, binds = attribution_sql(dialect="sqlite", marker="?")
+    rating = rating_expression("sqlite")
+    return (
+        "SELECT "
+        f"COALESCE(SUM(CASE WHEN {rating}='useful' THEN 1 ELSE 0 END),0) AS useful,"
+        f"COALESCE(SUM(CASE WHEN {rating}='not_useful' THEN 1 ELSE 0 END),0) AS not_useful "
+        f"FROM global_ask_jobs WHERE {rated_predicate('sqlite')} AND {_GLOBAL_TURN_LIVE} AND {attributed}",
+        binds,
+    )
 
 class QueryStore:
     def __init__(
@@ -1208,45 +1249,12 @@ class QueryStore:
         a notebook one (same engine, different retrieval), so it counts in
         ``asks`` and is additionally counted in ``global_asks``. ``scope``
         narrows to one of the two families.
+
+        The stats row also sums the 👍 / 👎 the listed questions received
+        (``_admin_questions_cte(feedback=True)``); the page query keeps the
+        feedback-free CTE.
         """
-        cte = (
-            "WITH questions AS ("
-            "SELECT 'ask' AS type,'notebook' AS scope,a.id,a.created_by AS user_id,"
-            "COALESCE(NULLIF(u.username,''),a.created_by) AS username,"
-            "a.notebook_id,COALESCE(n.name,'') AS notebook_name,"
-            "COALESCE(NULLIF(ans.question,''),a.question) AS question,"
-            "a.status,a.created_at,a.submitted_via,a.output FROM ask_jobs a "
-            "JOIN users u ON u.id=a.created_by "
-            "LEFT JOIN answers ans ON ans.id=a.answer_id "
-            "LEFT JOIN notebooks n ON n.id=a.notebook_id "
-            "UNION ALL "
-            "SELECT 'ask' AS type,'global' AS scope,g.id,g.user_id,"
-            "COALESCE(NULLIF(u.username,''),g.user_id) AS username,"
-            "'' AS notebook_id,'' AS notebook_name,"
-            "COALESCE(json_extract(g.payload_json,'$.question'),'') AS question,"
-            "g.status,g.created_at,g.submitted_via,'answer' AS output FROM global_ask_jobs g "
-            "JOIN users u ON u.id=g.user_id "
-            f"WHERE {_GLOBAL_TURN_LIVE_G} "
-            "UNION ALL "
-            "SELECT 'report' AS type,'notebook' AS scope,r.id,r.created_by AS user_id,"
-            "COALESCE(NULLIF(u.username,''),r.created_by) AS username,"
-            "r.notebook_id,COALESCE(n.name,'') AS notebook_name,r.question,"
-            "r.status,r.created_at,r.submitted_via,'answer' AS output FROM reports r "
-            "JOIN users u ON u.id=r.created_by "
-            "LEFT JOIN notebooks n ON n.id=r.notebook_id "
-            "UNION ALL "
-            "SELECT h.activity_type AS type,'notebook' AS scope,h.record_id AS id,"
-            "h.actor_id AS user_id,"
-            "COALESCE(NULLIF(u.username,''),h.actor_id) AS username,"
-            "h.notebook_id,h.notebook_name,h.question,h.status,h.created_at,"
-            "h.submitted_via,h.output "
-            "FROM retained_user_activity h "
-            "LEFT JOIN users u ON u.id=h.actor_id "
-            "WHERE h.activity_type IN ('ask','report') "
-            "AND julianday(h.expires_at)>julianday('now') "
-            "AND NOT EXISTS(SELECT 1 FROM notebooks live "
-            "WHERE live.id=h.notebook_id)) "
-        )
+        cte = self._admin_questions_cte(feedback=False)
         where = "WHERE 1=1"
         params: list[Any] = []
         if kind is not None:
@@ -1267,12 +1275,15 @@ class QueryStore:
             params.append(f"%{escape_like_pattern(needle)}%")
         with self.database.connect() as db:
             stats = db.execute(
-                cte
+                self._admin_questions_cte(feedback=True)
                 + "SELECT COUNT(*) AS total,"
                 "SUM(CASE WHEN type='ask' THEN 1 ELSE 0 END) AS asks,"
                 "SUM(CASE WHEN type='report' THEN 1 ELSE 0 END) AS reports,"
                 "SUM(CASE WHEN scope='global' THEN 1 ELSE 0 END) AS global_asks,"
-                "COUNT(DISTINCT user_id) AS active_users FROM questions "
+                "COUNT(DISTINCT user_id) AS active_users,"
+                + ADMIN_QUESTION_FEEDBACK_SUMS
+                + " FROM questions "
+                + admin_question_feedback_joins("sqlite")
                 + where,
                 params,
             ).fetchone()
@@ -1290,8 +1301,62 @@ class QueryStore:
             "reports": int(stats["reports"] or 0),
             "global_asks": int(stats["global_asks"] or 0),
             "active_users": int(stats["active_users"] or 0),
+            **admin_question_feedback_totals(stats),
         }
         return {"items": [dict(row) for row in rows], "stats": totals, "total": totals["total"]}
+
+    @staticmethod
+    def _admin_questions_cte(*, feedback: bool) -> str:
+        """The four question families as one ``questions`` CTE.
+
+        ``feedback=True`` adds one plain column, ``answer_id`` (a notebook
+        question's answer; NULL elsewhere), for the stats row's feedback joins
+        (``global_ask_feedback_sql.admin_question_feedback_joins``), which hang
+        off the outer rows so no arm gains a join. ``False`` is the page
+        query's CTE, unchanged.
+        """
+        nb_fb = gl_fb = none_fb = ""
+        if feedback:
+            nb_fb = ",a.answer_id AS answer_id"
+            gl_fb = none_fb = ",NULL AS answer_id"
+        return (
+            "WITH questions AS ("
+            "SELECT 'ask' AS type,'notebook' AS scope,a.id,a.created_by AS user_id,"
+            "COALESCE(NULLIF(u.username,''),a.created_by) AS username,"
+            "a.notebook_id,COALESCE(n.name,'') AS notebook_name,"
+            "COALESCE(NULLIF(ans.question,''),a.question) AS question,"
+            f"a.status,a.created_at,a.submitted_via,a.output{nb_fb} FROM ask_jobs a "
+            "JOIN users u ON u.id=a.created_by "
+            "LEFT JOIN answers ans ON ans.id=a.answer_id "
+            "LEFT JOIN notebooks n ON n.id=a.notebook_id "
+            "UNION ALL "
+            "SELECT 'ask' AS type,'global' AS scope,g.id,g.user_id,"
+            "COALESCE(NULLIF(u.username,''),g.user_id) AS username,"
+            "'' AS notebook_id,'' AS notebook_name,"
+            "COALESCE(json_extract(g.payload_json,'$.question'),'') AS question,"
+            f"g.status,g.created_at,g.submitted_via,'answer' AS output{gl_fb} FROM global_ask_jobs g "
+            "JOIN users u ON u.id=g.user_id "
+            f"WHERE {_GLOBAL_TURN_LIVE_G} "
+            "UNION ALL "
+            "SELECT 'report' AS type,'notebook' AS scope,r.id,r.created_by AS user_id,"
+            "COALESCE(NULLIF(u.username,''),r.created_by) AS username,"
+            "r.notebook_id,COALESCE(n.name,'') AS notebook_name,r.question,"
+            f"r.status,r.created_at,r.submitted_via,'answer' AS output{none_fb} FROM reports r "
+            "JOIN users u ON u.id=r.created_by "
+            "LEFT JOIN notebooks n ON n.id=r.notebook_id "
+            "UNION ALL "
+            "SELECT h.activity_type AS type,'notebook' AS scope,h.record_id AS id,"
+            "h.actor_id AS user_id,"
+            "COALESCE(NULLIF(u.username,''),h.actor_id) AS username,"
+            "h.notebook_id,h.notebook_name,h.question,h.status,h.created_at,"
+            f"h.submitted_via,h.output{none_fb} "
+            "FROM retained_user_activity h "
+            "LEFT JOIN users u ON u.id=h.actor_id "
+            "WHERE h.activity_type IN ('ask','report') "
+            "AND julianday(h.expires_at)>julianday('now') "
+            "AND NOT EXISTS(SELECT 1 FROM notebooks live "
+            "WHERE live.id=h.notebook_id)) "
+        )
 
     def list_user_notebooks(self, user_id: str) -> list[dict[str, Any]]:
         with self.database.connect() as db:
@@ -1919,6 +1984,7 @@ class QueryStore:
                     (notebook_id,),
                 ).fetchone()["c"]
             )
+            global_useful, global_not_useful = _global_feedback_counts(db, notebook_id)
             low_rated = [
                 row["question"]
                 for row in db.execute(
@@ -1974,11 +2040,15 @@ class QueryStore:
                 "marker": by_is_paper.get(0, 0),
                 "missing": missing,
             }
+        useful += global_useful
+        not_useful += global_not_useful
         rated = useful + not_useful
         return NotebookAnalytics(
             answers_total=answers_total,
             feedback_useful=useful,
             feedback_not_useful=not_useful,
+            feedback_useful_global=global_useful,
+            feedback_not_useful_global=global_not_useful,
             usefulness_rate=round(useful / rated, 3) if rated else 0.0,
             low_rated_questions=low_rated,
             knowledge_counts=knowledge_counts,

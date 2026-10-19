@@ -266,7 +266,7 @@ def test_v92_drops_the_staged_auth_schema_and_keeps_credentials(tmp_path):
         )
         db.execute("PRAGMA user_version = 91")
 
-    assert SqliteMigrator(database, settings).migrate() == [92, 93, 94, 95]
+    assert SqliteMigrator(database, settings).migrate() == [92, 93, 94, 95, 96]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -341,7 +341,7 @@ def test_v93_adds_the_nullable_profile_deleted_at_without_touching_rows(tmp_path
         rollback_v93(db)
         db.execute("PRAGMA user_version = 92")
 
-    assert SqliteMigrator(database, settings).migrate() == [93, 94, 95]
+    assert SqliteMigrator(database, settings).migrate() == [93, 94, 95, 96]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         columns = {row[1]: row for row in db.execute("PRAGMA table_info(agent_profiles)")}
@@ -409,7 +409,7 @@ def test_v94_adds_answer_links_and_the_token_flag(tmp_path):
             ("tk-v94", "agent-v94", "hash-v94", '["read", "ask"]', "nb-v94", None, now),
         )
 
-    assert SqliteMigrator(database, settings).migrate() == [94, 95]
+    assert SqliteMigrator(database, settings).migrate() == [94, 95, 96]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db)[1:] == fresh[1:]
@@ -461,7 +461,7 @@ def test_v95_adds_global_ask_retained_until_without_backfill(tmp_path):
             ("gj-v95", "gc-v95", "u-v95", "{}", "done", "{}", "2026-10-19T00:00:00+00:00"),
         )
 
-    assert SqliteMigrator(database, settings).migrate() == [95]
+    assert SqliteMigrator(database, settings).migrate() == [95, 96]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db) == fresh
@@ -469,4 +469,52 @@ def test_v95_adds_global_ask_retained_until_without_backfill(tmp_path):
             "SELECT retained_until FROM global_ask_jobs WHERE id = 'gj-v95'"
         ).fetchone()
         assert legacy[0] is None
+    database.close_local()
+
+
+@pytest.mark.real_sqlite_migration
+def test_v96_adds_the_rated_global_jobs_partial_index(tmp_path):
+    """v96 is one partial expression index over the global rating; it indexes
+    the rated rows already present when it runs (a v95 database's existing
+    ratings are counted right after the upgrade), a fresh database and a v95
+    upgrade carry the same definition, and a second run is a no-op."""
+    from tests.sqlite_migration_testkit import rollback_v96
+
+    database, settings = _fresh_migrated_database(tmp_path)
+
+    def definition(db):
+        row = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_global_ask_jobs_feedback'"
+        ).fetchone()
+        return None if row is None else row[0]
+
+    with database.connect() as db:
+        fresh = definition(db)
+    assert fresh is not None
+    assert "WHERE json_extract(payload_json,'$.feedback') IN ('useful','not_useful')" in fresh
+
+    now = "2026-10-19T00:00:00+00:00"
+    with database.write() as db:
+        rollback_v96(db)
+        db.execute("PRAGMA user_version = 95")
+        assert definition(db) is None
+        db.execute(
+            "INSERT INTO global_ask_conversations(id,user_id,title,scope_json,submitted_via,"
+            "created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+            ("gconv-v96", "u-v96", "", "{}", "web", now, now))
+        for job_id, rating in (("g-rated", "useful"), ("g-unrated", "")):
+            db.execute(
+                "INSERT INTO global_ask_jobs(id,conversation_id,user_id,request_json,status,"
+                "payload_json,created_at) VALUES(?,?,?,?,?,?,?)",
+                (job_id, "gconv-v96", "u-v96", "{}", "done", f'{{"feedback":"{rating}"}}', now))
+
+    assert SqliteMigrator(database, settings).migrate() == [96]
+    assert SqliteMigrator(database, settings).migrate() == []
+    with database.connect() as db:
+        assert definition(db) == fresh
+        rated = db.execute(
+            "SELECT id FROM global_ask_jobs INDEXED BY idx_global_ask_jobs_feedback "
+            "WHERE json_extract(payload_json,'$.feedback') IN ('useful','not_useful')"
+        ).fetchall()
+        assert [row[0] for row in rated] == ["g-rated"]
     database.close_local()

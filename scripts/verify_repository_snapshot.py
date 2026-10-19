@@ -5715,5 +5715,31 @@ MIGRATION_MANIFEST[(94, 95)] = {
     "views": {},
 }
 
+
+# v96: rated global Ask jobs (parity with PostgreSQL
+# 0076_global_ask_feedback_index.sql). One partial expression index; no table
+# or column change.
+GLOBAL_ASK_FEEDBACK_INDEXES = {
+    "idx_global_ask_jobs_feedback": (
+        "CREATE INDEX idx_global_ask_jobs_feedback\n"
+        "                 ON global_ask_jobs(json_extract(payload_json,'$.feedback'))\n"
+        "                 WHERE json_extract(payload_json,'$.feedback') IN ('useful','not_useful')"
+    ),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 96, *key[2:]): {
+        **manifest,
+        "indexes": {**manifest["indexes"], **GLOBAL_ASK_FEEDBACK_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(95, 96)] = {
+    "tables": {},
+    "columns": {},
+    "indexes": GLOBAL_ASK_FEEDBACK_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

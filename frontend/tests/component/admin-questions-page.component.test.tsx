@@ -46,7 +46,7 @@ const page = {
       created_at: "2026-08-30T09:00:00+08:00",
     },
   ],
-  stats: { total: 2, asks: 1, reports: 1, active_users: 2, global_asks: 0 },
+  stats: { total: 2, asks: 1, reports: 1, active_users: 2, global_asks: 0, feedback_useful: 0, feedback_not_useful: 0, global_feedback_useful: 0, global_feedback_not_useful: 0 },
   total: 2,
   offset: 0,
   limit: 50,
@@ -365,4 +365,26 @@ test("停在末页而提问变少时退回新的最后一页，不显示空页",
   expect(mocks.fetchAdminQuestions).toHaveBeenLastCalledWith(expect.objectContaining({ offset: 50 }));
   expect(screen.queryByText("没有符合当前条件的提问。")).not.toBeInTheDocument();
   expect(within(screen.getByRole("navigation", { name: "提问分页" })).getByText("第 2 / 2 页")).toBeInTheDocument();
+});
+
+test("汇总卡片列出 👍 / 👎 总数，并注明其中全局问答的条数", async () => {
+  mocks.fetchAdminQuestions.mockResolvedValue({
+    ...page,
+    stats: {
+      ...page.stats,
+      feedback_useful: 7, feedback_not_useful: 4,
+      global_feedback_useful: 2, global_feedback_not_useful: 0,
+    },
+  });
+  render(<AdminQuestionsPage />);
+  await screen.findByText("这个市场的主要竞争者是谁？");
+
+  const statsSection = screen.getByRole("region", { name: "提问汇总" });
+  const usefulCard = within(statsSection).getByText("有用").closest("article");
+  expect(within(usefulCard!).getByText("7")).toBeInTheDocument();
+  expect(within(usefulCard!).getByText("其中全局问答 2 条")).toBeInTheDocument();
+  const notUsefulCard = within(statsSection).getByText("需改进").closest("article");
+  expect(within(notUsefulCard!).getByText("4")).toBeInTheDocument();
+  // 没有全局评分时不出现「其中全局问答 0 条」。
+  expect(within(notUsefulCard!).queryByText(/其中全局问答/)).toBeNull();
 });
