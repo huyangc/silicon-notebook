@@ -1,7 +1,12 @@
 # silicon-notebook 待办（fangan_todo.md）
 
-更新日期：2026-10-15（技术债整改程序移交：新增「四、技术债整改程序：收官后剩余」，`read_document`
-延后项 (b) 与「历史全局回答 payload 归一」已移入 `fangan_done.md` §59；此前 2026-10-07）
+更新日期：2026-10-19（第四节新增「整改计划刻意不做、只登记」：整改计划里标为只登记、此前只留在程序
+台账的性能 / 结构 / 工程卫生项逐条按代码复核后补登；移除过时的「BM25 / FTS5 / tsvector 全文索引：暂缓」
+（SQLite FTS5 trigram 索引 + `bm25()` 排序与 PostgreSQL `pg_trgm` 词法候选早已在用，见 `fangan_done.md` §9；
+PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交付的统一认证与跨库全局问答，
+`_federated_graph_is_large` 一条按现行代码重写机制，状态速览改正 closeout 计划已完成；10-15 之后合入的 #913 / #914 / #915 / #916 记入 `fangan_done.md` §60。此前 2026-10-15：技术债整改程序
+移交，新增「四、技术债整改程序：收官后剩余」，`read_document` 延后项 (b) 与「历史全局回答 payload 归一」
+已移入 `fangan_done.md` §59；再此前 2026-10-07）
 对照：`silicon_notebook_fangan.md`（产品方案）。已完成项见 `fangan_done.md`；本文件只列**尚未做完**的部分。
 
 > 规则：完成某项后，从本文件移除并补进 `fangan_done.md`（见 `AGENTS.md` 的「Documentation Ownership」）。
@@ -21,10 +26,11 @@
   + Deep Report + Memory / Knowhow + MCP + 群组分享 + 部署插件扩展点。
 - 2026-08-29 起的「生产热路径修复计划」（批 0 / 1 / 2 / 3·W1–W4）全部实施项已合入（至 PR #676）。
   剩余为用户侧生产动作与各设计稿登记的残余债。
-- 本文件按「近期可动手」→「产品功能」→「长期方向」排列。可直接实现的项已排进
-  `docs/superpowers/plans/2026-09-07-todo-closeout.md`（PR-1～PR-5），需拍板的项留在本文件。
-- 2026-10-12 起的「技术债整改程序」已合入的各项见 `fangan_done.md` §59；其登记的残余债集中在
-  本文件第四节。
+- 本文件按「近期可动手」→「产品功能」→「长期方向」→「技术债残余」排列。2026-09-07 收尾计划
+  `docs/superpowers/plans/2026-09-07-todo-closeout.md` 的 PR-1～PR-5 已全部交付（见 `fangan_done.md`
+  交付表 2026-09-07 各行），不再是待办来源；需拍板的项留在本文件。
+- 2026-10-12 起的「技术债整改程序」已合入的各项见 `fangan_done.md` §59；其登记的残余债与整改计划
+  裁定「不做、只登记」的项集中在本文件第四节，不必再翻程序台账。
 
 ---
 
@@ -276,16 +282,18 @@
       对最终候选池再跑一次全局口径的词法/精确匹配（成本与库数无关，但拿不到各库的 FTS 索引）。
       两种形态解决的问题不同（前者补逐库召回，后者补跨库排序与标识符定位）；后者只在逐库形态
       被证明不够时再评估。
-- [ ] BM25 / FTS5 / tsvector 全文索引：已评估为低 ROI、基础设施级，暂缓。
 - [ ] 结构化硬过滤：软加权已够用，硬过滤有清空结果风险，暂缓。
 - [ ] **`_federated_graph_is_large` 把取消勾选的参考库也算进「图是否过大」**：这个
       判据（`backend/app/services/retrieval_candidates.py`）在**无参与集覆盖**时读
-      挂载表的裸 id 清单，从不过 `notebook_in_scope`。于是一个刚被用户取消勾选的大
-      参考库仍然把它撑成「大图」，本次 run 范围内每个库都很小时，`_chunk_kg_overlay`
-      与 PPR 回退照样以 `reason=large_notebook` 拒绝，事件也因此误描述了这次 run 的
-      语料。**不要单独收窄这个守卫**：它守的两张图在无覆盖时仍然按全部挂载库建
-      （`graph_retrieval._federated_rx_graph` 读 `participant_rows`、`_ppr_graph` 读
-      `participant_ids`，库维度是在走查**结果**上由 `scoped_subgraph_nodes` 过滤的），
+      `_viewer_graph_participants` 的快照——当前查看者有效的挂载（经 `participant_rows`，
+      PR #828 起只算查看者能读的被挂库），每个检索 run 按查看者 memo 一次——只要其中任一库
+      `notebook_copy_stats(...)["copyable"]` 为假就判「大图」；这份快照从不过
+      `notebook_in_scope`。于是一个刚被用户取消勾选的大参考库仍然把它撑成「大图」，
+      本次 run 范围内每个库都很小时，`_chunk_kg_overlay` 与 PPR 回退照样以
+      `reason=large_notebook` 拒绝，事件也因此误描述了这次 run 的语料。
+      **不要单独收窄这个守卫**：它守的两张图在无覆盖时按同一份快照里的全部挂载库建
+      （`graph_retrieval._federated_rx_graph` 与 `_ppr_graph` 都读 `_viewer_graph_participants`，
+      库维度是在走查**结果**上由 `scoped_subgraph_nodes` 过滤的），守卫与建图同源，
       只放松守卫会放行它本来要拒绝的那次构建——小笔记本挂一本 9M 对象的参考库、
       用户取消勾选它，就会逐库跑 `graph_object_rows`/`graph_relation_rows`/
       `cluster_member_rows`（`retrieval_service.ppr_retrieve` 的 docstring 记着这条路
@@ -314,9 +322,11 @@
 - [ ] **Review Mode**：review session、场景 checklist sign-off、reviewer 评论 / action items、
       导出 review 报告、project-level workspace。均无代码。
 - [ ] **企业能力**：source 级 ACL（现只有 notebook 级 capability tier + 群组角色）、结构化审计
-      日志（现只有 Knowhow 的 actor 标签投影）、SSO / VPC、Connectors（Confluence / SharePoint /
-      Drive / Jira / Git / Slack）、多 notebook 全局搜索。多用户 / 登录 / 管理员角色 / 分享链接 /
-      群组已交付。
+      日志（现只有 Knowhow 的 actor 标签投影）、VPC 部署形态、Connectors（Confluence / SharePoint /
+      Drive / Jira / Git / Slack）。已交付、不再列为待办：多用户 / 登录 / 管理员角色 / 分享链接 /
+      群组；统一认证 SSO（PR #837 工号直登或关联/新建账号，见 `fangan_done.md` §3；#876 补了管理员
+      合并统一认证账号；插件代码已交付，真实 IDaaS 联调与生产切换属部署侧验收）；跨多个 notebook 的检索与问答
+      （全局问答 #751–#755，见 `fangan_done.md` §41–§44）。
 - [ ] **分享的 edit 权限层与近实时协作**：写权限仍 owner-only；无 presence / revision 轮询
       （管理员用户列表的「在线状态」是另一特性）。原 spec
       `docs/superpowers/specs/2026-06-04-users-sharing-cowork-design.md` 的 D2 / D3 决策已被
@@ -404,6 +414,105 @@
       高负载下超时**（来源：K1 第 6 轮验证）：重型本机负载下 4/4 次撞 5 s 子进程超时，干净 master 上
       26/26 通过，判为锁外压测负载所致而非回归。每天看一眼每日 G2，若在干净 runner 上复现就立项，
       改成握手/受控时钟判据，别靠放宽超时搪塞。
+
+### 整改计划刻意不做、只登记
+
+> 整改计划评审时逐条裁定「不做、只登记」的项，此前只记在程序台账（不入库）里。2026-10-19 逐条按当时
+> 代码复核后补登于此：行数用 `ast` 量（含嵌套函数），文件与行号为当日 master。复核时已不成立的不登。
+> 删除索引管线阶段级联未分批（计划 5d）已在第一节 W1 一条，不重复。
+
+**性能**（理由来自整改程序的性能设计稿与分片评审；重开前一律先差分测量）
+
+- [ ] **`kg_cluster_scratch` 的 `(notebook_id, run_id, seed)` 索引：已被测量证伪，不做**。现状只有
+      `idx_kg_cluster_scratch_nb_run (notebook_id, run_id)`（PostgreSQL `0004_knowledge_indexes.sql`）。
+      计划曾拟用带 `seed` 的复合索引替换它，1M 行夹具实测：claim 型 seed（平均 186 字节）百万行插入
+      2.7 s → 7.0 s、WAL 2.1×、索引 7 MB → 564 MB；只有 concept 描述阶段受益，claim / formula /
+      procedure 只付成本，生产端到端多半净负；而且迁移在启动时跑、受 30 s 语句超时约束，残留 9M 行
+      可让启动永久失败。**不要凭「按 seed 查当然该有索引」的推理重开**。若将来确有需要，只评估两条
+      替代：`USING hash (seed)`，或把 B 次批读改成按 seed 有序的流式读。
+- [ ] **scale build 的 `(notebook_id, ordinal)` 复合索引：不做**。对象与 chunk 两条 keyset 分页
+      （`backend/app/repositories/postgres/index_projection_store.py`）靠全局唯一的
+      `uq_knowledge_objects_ordinal` / `uq_chunks_ordinal`，`notebook_id` 只是残余过滤；生产上跑
+      scale build 的库占表的主导份额（`postgres/embedding_store.py` 记的是 99.1%），一次遍历全局
+      ordinal 索引几乎零额外代价，只有「中等份额且正在跑 scale build」的库吃亏。代价却落在最热的写表
+      `knowledge_objects`（已有约 10 个索引外加同步触发器）和 `chunks` 上。重开前提：生产测量显示多个
+      大库共存且有中等份额的库在跑 scale build。测量：
+      `scripts/bench_scale_build_paging.py seed --notebooks N` 造 99% / 50% / 10% / 1% 四档份额，
+      比两条腿每页 `EXPLAIN BUFFERS` 与 `build_scale_index` 取图耗时，写侧比批量入库吞吐、WAL 与索引体积；判据为实际份额档显著改善且
+      入库劣化 ≤ 2%。形态只走 builder 的 `CONCURRENTLY` + `IF NOT EXISTS` 账本迁移，届时改
+      `backend/tests/postgres/test_index_projection_explain_pins.py` 钉的索引名。
+- [ ] **审阅队列不下推到 SQL**：`backend/app/services/knowledge_governance.py` 的优先级是
+      「中心度 × (1 − 可信度)」，佐证计数与中心度都依赖全图，必须全量算完再取 top-k；已用
+      `heapq.nlargest` 并按 seq 键缓存。平局按输入顺序决定，任何下推到 SQL 的改写都会改变平局顺序。
+      唯一可选的微优化是只对前 M 个构造字典，收益不确定，未做。
+- [ ] **晋升按类型整表 `FOR UPDATE`：代价真实，暂不改**。
+      `backend/app/repositories/postgres/governance_store.py::_base_dedup_rows_for_update`
+      对 base 库同类型的全部可用行 `ORDER BY id FOR UPDATE`：每个元组写 xmax、产生 WAL，并阻塞同库其它写者；Memory 晋升的循环里
+      每个候选都重扫一遍，复杂度为候选数 × 语料规模。但去重的 seed 匹配是 Python 函数，SQL 里无法精确
+      预筛；改用 advisory 锁会破坏与其它行锁写者之间的互斥，拿不出不变性证明。登记一个生产测量项：
+      base 库规模分布与晋升耗时，量出来真疼再设计。
+- [ ] **relink 不合并正则**：原清单「relink 逐概念编译正则」的描述已过时——
+      `backend/app/services/kg/relink.py` 已是每概念惰性编译一次（`concept_patterns` 缓存）。剩下的成本是
+      「孤立 claim × 概念」次 `search`。合并成交替大正则会漏掉重叠匹配；先按小写子串预筛与
+      `re.IGNORECASE` 的 Unicode 折叠不完全一致（例如 `ſ` 与 `s`），会出假阴性。语义不能保证不变，不做。
+- [ ] **rebuild 逐源替换（T-5b）：不做**。`KnowledgeLifecycleService` 的 KG 重建默认先
+      `delete_notebook_kg` 整库清图，`preserve_existing_rebuild` 只给索引管线用。逐源替换会留下「来源已删
+      但对象还在」的残渣与库级派生表，并改变重建期间的可见性（新旧图混在一起），需要单独的等价性证明
+      与差集清扫；W1 设计稿已裁定不做（见
+      `docs/superpowers/specs/2026-09-01-batch3-w1-delete-jobization-design_zh.md` 的 T-5b 条）。
+      这是效果风险，没有新的理由就不重开。
+
+**结构**（零行为变化的拆分；有需要时立项，每项先补表征测试）
+
+- [ ] **第二梯队大函数拆分**：`AskService._draft_reasoning_response` 597 行
+      （`backend/app/services/ask_service.py:6751`）、`AskService._run_reasoning_stage` 515 行
+      （同文件 `:5834`）、`NotebookCopyService.copy_notebook` 621 行（`notebook_sharing.py:394`）、
+      `KnowledgeLifecycleService.rebuild_unified_kg` 481 行（`knowledge_lifecycle.py:5867`），四者都在
+      `scripts/architecture_boundary_baseline.json::function_length_ceiling` 里按现值零松弛钉住。前两个
+      牵涉合成与绑定、流式输出与提示词字节，且 `_run_reasoning_stage` 是参与者守卫登记的 fail-soft
+      站点，目前没有表征测试，要先复用 `ReasoningRetriever.run` 拆分（PR #899）的表征做法；
+      `copy_notebook` 的前置 K2（#847）与 `rebuild_unified_kg` 的前置 K1（#905）已合入、T-5b 已定为
+      不做，可以动手但没有排期。
+- [ ] **≥ 150 行的函数共 182 个**（`backend/app` 全量，含嵌套函数），`ask_service.py` 7468 行、
+      `knowledge_lifecycle.py` 7442 行两个大文件。函数天花板守卫只盯基线里登记的 24 个函数，新出现的长
+      函数不会被自动纳入。没有统一拆分计划，按触碰到的模块逐个处理。
+- [ ] **`frontend/app/globals.css` 约 1.4 万行（14178 行）未拆分**。前端测试、守卫与脚本里有 21 个文件
+      按文件名读 `globals.css`，拆分要同步改这些读取点，属于独立的一次搬家。
+- [ ] **仓储层反向 import services 仍有 7 条**（基线 `repository_service_import_ceiling`：other 5、
+      postgres 2；守卫只拦增长）。① `repositories/factory.py:18` 导入 `SQLiteRepository`；
+      ②③ `repositories/postgres/repository.py:19`、`:106` 导入 `RepositoryFacade` 与 `checkup`；
+      ④–⑦ `repositories/filesystem/scale_artifact_store.py:40`、`:41`、`:475`、`:536` 导入
+      `services.kg.{scale_index, viz_index, source_partition_index}`。①–③ 已有裁决（把 `create_repository`
+      上移为 `app/services/repository_factory.py`、`PostgresRepository` 上移为
+      `app/services/postgres_repository.py`，不留 shim——shim 本身仍算一条边），整改计划排作 S3
+      但**未执行**；当前约 67 个 `.py` 文件引用 `PostgresRepository`，要逐个改导入路径。④–⑦ 需要把
+      文件格式编解码层从合计约 2.2K 行的三个 KG 算法模块里拆出、下沉到 domain 或 filesystem
+      （`source_partition_index` 还依赖 `services.source_subgraph`），或改构造注入，会动大库 scale index
+      的加载热路径与测试里 6 处直接构造 `ScaleArtifactStore(settings)` 的用法，需另行设计。
+- [ ] **owner-view 守卫的两张豁免表**：`frontend/tests/guards/owner-view-no-reflatten-guard.test.mjs` 的
+      `GRANDFATHERED_DESTRUCTURE_HOOKS`（`askSession`、`sourceLibrary` 两段先于守卫存在的整体解构，
+      `frontend/app/page.tsx` 约 2157 / 856 行）与 `PRE_EXISTING_SINGLE_USE_ALLOWLIST`（约 801 / 857 行
+      两条单次属性提取）。清掉它们要改 `page.tsx`，并入第二节「前端 `page.tsx` 继续减负」一起做。
+- [ ] **宽 `except Exception` 吞掉 `RetrievalControlError` 待排查**：
+      `backend/app/services/reasoning_retrieval.py` 的 `_collect_kg_gap`（约 8446 行，探
+      `weak_support_relations`）与 `_action_consult_memory`（约 8182 行）只放行 `AskCancelled`，参与集
+      身份复核失败等 `RetrievalControlError` 会被记成一条 skip 步后继续，而同文件多数同类站点都先
+      `except RetrievalControlError` 照抛。`weak_support_relations` 会不会触达参与集座位尚未核实；
+      先排查，成立再改为照抛（这是可见行为变化，要配用例）。
+
+**工程卫生**
+
+- [ ] **Python 依赖未锁定**：`backend/requirements.txt` 33 行里只有 `fastapi`、`pydantic`、`json-repair`
+      三行用 `==` 钉死，其余 30 行是下界或区间；仓库没有任何锁文件（无 `requirements.lock` / `uv.lock` /
+      `poetry.lock`），安装结果随发布时间漂移；`pytest`、`pytest-xdist` 与运行依赖混在同一个文件里，
+      生产安装会带上测试依赖。
+- [ ] **前端无 ESLint 门禁**：`frontend/package.json` 的 devDependencies 有 `eslint` 与
+      `eslint-config-next`，但仓库没有 ESLint 配置文件，`npm run lint` 实际是 `tsc --noEmit`；
+      `scripts/check.sh` 与 CI 工作流都不跑 ESLint（后端同样没有 pyflakes / ruff 一类的 lint 门禁）。
+- [ ] **没有 SQLite / PostgreSQL 双后端能力对等矩阵**：两端对等靠各特性的 conformance 用例分别守，
+      没有一张按能力列出两端是否都实现的总表；`docs/superpowers/specs/2026-08-21-architecture-review.md`
+      提过「由测试从 manifest 生成缺口报告」，未做。PostgreSQL 是主环境、SQLite 是可选后端，做之前先
+      决定 SQLite 的支持范围。
 
 ---
 
