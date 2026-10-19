@@ -327,14 +327,14 @@ A global question has no "current notebook": the notebook handed to the engine i
 the resolved scope, a naming anchor with no retrieval privilege, and EVERY citation names its owning notebook
 (the first library included). Channels defined as "…for the current library" are therefore closed for the whole
 run, disclosed rather than silently degraded: the notebook's hidden private Memory projection, concept roaming
-(PPR), selected-source graph activation, the `index_required` call to action,
-and `reasoning`'s raw-element search arm (including the automatic top-up when
-every deterministic channel came back empty); the generated-question recall supplement is off on federated legs
-too. In `reasoning` the two closed channels are also absent from the agent's action catalog: `search_elements`
-and `ppr_retrieve` leave the reflect action enum, prompt and allow-list together, and the first-round PPR seed
+(PPR), selected-source graph activation and the `index_required` call to action; the generated-question recall
+supplement is off on federated legs too. In `reasoning` the closed concept roaming is also absent from the agent's
+action catalog: `ppr_retrieve` leaves the reflect action enum, prompt and allow-list, and the first-round PPR seed
 does not run, so the trace never shows a concept-roaming step that could only report zero passages. A model that
-names either action anyway gets a skip step saying the action is not offered this run, and the loop carries on
-(strict mode raises). The spreadsheet analysis arm is federated: every participant's workbooks are merged into ONE planner
+names the action anyway gets a skip step saying the action is not offered this run, and the loop carries on
+(strict mode raises). `reasoning`'s raw-element search arm (the `search_elements` action and the automatic top-up
+when every deterministic channel came back empty) is not closed but federated per library, see below. The
+spreadsheet analysis arm is federated: every participant's workbooks are merged into ONE planner
 catalog, planned ONCE, and one sheet is executed (as in a single notebook); the participants are the
 original-text channel's own (the same participant set, the same `CHUNK_FEDERATION_MAX_PARTICIPANTS` bound and
 `CHUNK_FEDERATION_ENABLED` rollback switch), and each library contributes only visible workbooks inside the run's
@@ -392,6 +392,30 @@ one federated lookup) against its per-run cap. Each call of the arm emits one co
 failed-notebook counts and latency. `GLOBAL_ASK_EXACT_ARM_ENABLED` (default `true`) is the rollback switch:
 `false` closes the arm for global runs again; `EXACT_LOOKUP_ENABLED=false` still closes it everywhere, and
 single-notebook asks never read the global switch.
+
+`reasoning`'s raw-element search arm is federated the same way: one `search_elements` action (and the one automatic
+top-up when every first-round deterministic channel came back empty) runs the single-notebook element search once
+per participant, on the same fan-out and the same single per-notebook budget as the keyword arm, each notebook under
+its own frozen source ceiling (intersected with its currently visible sources); a notebook with no visible source,
+or outside this run's scope, issues no query, so a read-only viewer only ever gets elements they can read and that
+lie inside the frozen ceiling. Every notebook keeps the single-notebook element window, and the merged **total**
+is still the single-notebook element cap (8 per call), so a global search hands the model no more elements than a
+single-notebook one. The merge goes in rounds: every notebook's first element, then every notebook's second, …;
+within a round the elements are ordered by their own score, so when the cap falls mid-round it keeps that round's
+strongest rather than the notebooks listed first (the first library is only a naming anchor and gets no positional
+precedence); an element is taken once. Every element carries its owning notebook: its citation card names that
+library, its `tier` is looked up for that library, and the result boundary's source check judges it against that
+library's ceiling. Failures, timeouts, receipts, banners and evidence follow the keyword arm's rules: a failed or
+timed-out leg only leaves that notebook without elements, never enters the searched/skipped receipts and never
+raises a banner, and its full-text timeouts never switch off that notebook's full-text search for the semantic legs;
+the elements handed to the model are fingerprinted at retrieval time from the full text that was read, so their
+citations get the same recheck as every other passage. `REASONING_MAX_ELEMENT_SEARCHES` still caps the calls per
+run (one federated search counts once). Each call of the arm emits one content-free `ask_stage` event,
+`stage: "global_element_arm"`, with participant, notebooks-with-hits, merged and failed-notebook counts and latency.
+`GLOBAL_ASK_ELEMENT_ARM_ENABLED` (default `true`) is the rollback switch: `false` returns global runs to the
+pre-federation behaviour — `search_elements` is not in the action catalog (a model that names it anyway gets the
+not-offered skip), the executor skips it too (`reason: "peer_mode"`), and the empty first round gets no automatic
+top-up; single-notebook asks never read it.
 
 **Global-run event marker**: every event written inside a global run (the `reasoning` understanding
 preflight included) -- each stage's `ask_stage`, the retrieval run's closing `retrieval_run_stats`, the

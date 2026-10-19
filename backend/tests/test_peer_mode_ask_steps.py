@@ -397,19 +397,26 @@ def test_keyword_arm_switch_off_closes_it_in_peer_mode():
     assert probe.calls == ["restricted_probe", "corpus_langs", "chunk_fts"]
 
 
-def test_element_arm_is_closed_in_peer_mode():
-    """第三条 active-only 补召回腿(D1-4):元素检索没有联邦通道,对等模式整条关。
-
-    它比另外两条还多一层代价:命中会经 ``evidence_context.element_citations``
-    出引用卡,而那条装配一直是单库口径——对等 run 里就是一条没法对任何一本库的
-    天花板复核的引用。
+def test_element_arm_switch_off_closes_it_in_peer_mode():
+    """第三条补召回腿,原文元素检索:对等模式下已逐库联邦化(合同见
+    ``test_peer_mode_element_arm.py``);这里只钉回退开关
+    ``GLOBAL_ASK_ELEMENT_ARM_ENABLED=false``——对等模式回到「整条不跑」:只查名义
+    active 等于凭空给命名锚点多一条别人没有的腿,命中还会出一张对不上任何一本库的
+    引用卡,所以回退形状是零查询而不是单库那一次。对照臂:同一个开关不影响单库路径,
+    命中逐值原样交回。
     """
     calls: list = []
 
     class _Elements:
+        settings = SimpleNamespace(global_ask_element_arm_enabled=False)
+
         def _retrieve_elements(self, *args, **kwargs):
             calls.append(args[0] if args else kwargs.get("notebook_id"))
             return ["hit"]
+
+        def _peer_retrieve_elements(self, *args, **kwargs):
+            calls.append("peer")
+            return ["peer-hit"]
 
     probe = _Elements()
 
@@ -417,24 +424,40 @@ def test_element_arm_is_closed_in_peer_mode():
         assert CandidateRetrievalService.retrieve_elements(probe, "nb-a", "q") == []
     assert calls == []
 
-    # 对照臂:不装覆盖时这条腿照常跑,命中逐值原样交回。
     assert CandidateRetrievalService.retrieve_elements(
         probe, "nb-a", "q",
     ) == ["hit"]
     assert calls == ["nb-a"]
 
+    # 开关开着:对等模式走联邦分支,不走单库那一次。
+    probe.settings = SimpleNamespace(global_ask_element_arm_enabled=True)
+    calls.clear()
+    with _peer_scope():
+        assert CandidateRetrievalService.retrieve_elements(
+            probe, "nb-a", "q") == ["peer-hit"]
+    assert calls == ["peer"]
 
-def test_the_reasoning_element_action_is_skipped_in_peer_mode():
-    """动作执行处同一把闸:轨迹如实说明,而不是报一次「查了但一段都没有」。"""
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_the_reasoning_element_action_follows_the_switch_in_peer_mode(enabled):
+    """动作执行处读同一把判据(``element_search_offered``):开关关时轨迹如实说明,
+    而不是报一次「查了但一段都没有」;开关开时对等 run 只受次数上限约束,与单库
+    同形。单库路径不读开关。"""
     from app.services.reasoning_retrieval import ReasoningRetriever
 
     retriever = object.__new__(ReasoningRetriever)
     retriever.settings = SimpleNamespace(reasoning_max_element_searches=3)
+    retriever.retrieval = SimpleNamespace(element_arm_available=lambda: enabled)
 
     with _peer_scope():
         skip = ReasoningRetriever._element_search_skip(retriever, 0)
-    assert skip is not None and skip[1] == "peer_mode"
+        capped = ReasoningRetriever._element_search_skip(retriever, 3)
+    if enabled:
+        assert skip is None and capped[1] == "element_search_cap"
+    else:
+        assert skip is not None and skip[1] == "peer_mode"
 
+    retriever.retrieval = SimpleNamespace()  # 单库路径一次都不探
     assert ReasoningRetriever._element_search_skip(retriever, 0) is None
     assert ReasoningRetriever._element_search_skip(retriever, 3)[1] == (
         "element_search_cap"

@@ -251,8 +251,9 @@ def legacy_action_ledger_note(
     """把已执行动作的五段账目拼到候选摘要之后。
 
     ``element_search`` = 本 run 是否提供 ``search_elements``(``element_search_offered``)。
-    邻居截断那段的「下一步该做什么」只点名提供了的动作:闸关(今天 = 对等 run,
-    expand_graph 照常提供、截断照常可能发生)时只建议 add_subquery,闸开逐字节不变。
+    邻居截断那段的「下一步该做什么」只点名提供了的动作:闸关(今天 = 对等 run +
+    ``GLOBAL_ASK_ELEMENT_ARM_ENABLED=false``,expand_graph 照常提供、截断照常可能
+    发生)时只建议 add_subquery,闸开逐字节不变。
 
     ``document_reads`` 是 PR-A 的按篇取样账目(`DocumentReadOutcome` 列表)。它
     带默认值是因为这份账目对**没有这个通道**的 run(关闭态、没接 `sources` 的
@@ -704,8 +705,9 @@ def core_reflect_actions(
 
     * ``kg_actions`` = 本 run 范围内有图;无图时四个图动作与 ``enumerate_kg_objects``
       一起消失(与 prompt 说明、schema 三处同步);
-    * ``search_elements`` / ``ppr_retrieve`` = 两把逐动作减法闸(今天对等 run 两把
-      都关,见 ``element_search_offered`` / ``ppr_retrieve_offered``);
+    * ``search_elements`` / ``ppr_retrieve`` = 两把逐动作减法闸(今天对等 run 里
+      PPR 那把恒关,元素那把随 ``GLOBAL_ASK_ELEMENT_ARM_ENABLED``,见
+      ``element_search_offered`` / ``ppr_retrieve_offered``);
     * 其余五把各自对应一个可选动作。
 
     ``exact_lookup`` 例外地**不随**部署开关变(沿用 ppr_retrieve 立下的先例):
@@ -1637,19 +1639,26 @@ def local_only_scope_offered() -> bool:
     return not subjectless_run_active()
 
 
-def element_search_offered() -> bool:
-    """本 run 是否向模型提供 ``search_elements`` 动作(prompt 行、schema 枚举、
-    ``allowed_actions`` 三处)。
+def element_search_offered(retrieval) -> bool:
+    """本 run 的元素检索臂能不能返回任何东西——``search_elements`` 动作提不提供
+    (prompt 行、schema 枚举、``allowed_actions`` 三处),执行侧两道纵深防御
+    (``_element_search_skip`` 的 peer_mode 跳过、``_first_round_empty_fallback``
+    的自动补腿)也读同一句。
 
-    对等(全局)模式下元素检索没有联邦通道,生产者整条关着
-    (``retrieval_candidates.retrieve_elements``,D1-4),那种 run 里它只会空手而归,
-    所以不提供。**每条通道一个判据**,不与 PPR 绑成一个「对等模式」布尔:元素臂
-    联邦化之后翻这一个,PPR 不受牵连。执行侧那两道纵深防御(``_element_search_skip``
-    的 peer_mode 跳过、``_first_round_empty_fallback`` 不自动补腿)仍按
-    ``subjectless_run_active`` 直写——它们被引用核验守卫的 ``_ELEMENT_ARM_CLOSED``
-    按字面钉着,联邦化时与生产者那道闸一起改。
+    单库 run 恒 True,不读任何开关。对等(全局)模式下元素臂逐库联邦检索
+    (``retrieval_candidates.retrieve_elements`` → ``chunk_federation
+    .federated_element_candidates``),判据在检索层:``RetrievalService
+    .element_arm_available`` → 生产者自己的 ``retrieval_candidates
+    .element_arm_available``,生产者据同一句话短路,两边不会分叉;今天唯一让它
+    恒空的配置是 ``GLOBAL_ASK_ELEMENT_ARM_ENABLED=false``。按属性探测、不入
+    ``RetrievalPort``(``keyword_arm_available`` 的先例);没有这个方法的检索替身在
+    对等 run 里按「不可用」处理,即联邦化之前的形态。**每条通道一个判据**,不与
+    PPR 绑成一个「对等模式」布尔:``ppr_retrieve_offered`` 不受牵连。
     """
-    return not subjectless_run_active()
+    if not subjectless_run_active():
+        return True
+    probe = getattr(retrieval, "element_arm_available", None)
+    return bool(probe()) if callable(probe) else False
 
 
 def ppr_retrieve_offered() -> bool:
@@ -1658,7 +1667,7 @@ def ppr_retrieve_offered() -> bool:
 
     对等(全局)模式下 PPR 走的是按名义 active 缓存的联邦图,生产者整条关着
     (``graph_retrieval._ppr_retrieve``,D0-5),恒返回空,所以不提供。与
-    ``element_search_offered`` 各自独立,理由见那里。
+    ``element_search_offered`` 各自独立(元素臂已逐库联邦化,PPR 没有)。
     """
     return not subjectless_run_active()
 
@@ -4387,19 +4396,19 @@ class ReasoningRetriever:
 
         Two closed states, and the trace has to tell them apart:
 
-        * PEER mode -- the element arm is ACTIVE-ONLY (one search against the
-          notebook it is handed; there is no federated element channel), so in
-          a run answering for a participant SET it would give the naming anchor
-          a recall leg none of its peers has, and produce the one citation kind
-          with no real library attached. It is closed at the producer
-          (``retrieval_candidates.retrieve_elements``); this is what keeps the
-          trace from reporting a search that could only come back empty.
+        * the arm can return nothing this run (``element_search_offered``:
+          PEER mode with ``GLOBAL_ASK_ELEMENT_ARM_ENABLED=false``, where the
+          producer short-circuits on the same predicate); this is what keeps
+          the trace from reporting a search that could only come back empty.
+          With the switch on, a peer run searches every participant
+          (``retrieval_candidates.retrieve_elements``) and only the cap below
+          applies, exactly as on a single-library run.
         * the per-run count cap.
 
         ``None`` = go ahead. Separate from the execution branch so the branch
         stays one line per state; the copy is user-visible trace text.
         """
-        if subjectless_run_active():
+        if not element_search_offered(self.retrieval):
             return ("跳过 search_elements(跨库提问不使用单库原文检索)", "peer_mode")
         if elements_searches >= self.settings.reasoning_max_element_searches:
             return (
@@ -4410,8 +4419,16 @@ class ReasoningRetriever:
         return None
 
     def search_elements(self, notebook_id, query):
-        with retrieval_fanout_slot():
+        """原文元素检索。包装形状同 `keyword_chunks`:单库 run 由
+        `retrieval_fanout_slot()` 圈住发 I/O 的那一步;跨库(对等)run 是逐库联邦
+        扇出(`chunk_federation.federated_element_candidates`),每条联邦腿在叶子
+        上自己取扇出槽,外层再持一个就是编排者持槽——`fanout_limit=1` 时自锁——
+        所以对等 run 外层不取槽。"""
+        if subjectless_run_active():
             retrieved = self.retrieval.retrieve_elements(notebook_id, query)
+        else:
+            with retrieval_fanout_slot():
+                retrieved = self.retrieval.retrieve_elements(notebook_id, query)
         return self._filter_candidates(
             "element", retrieved
         )
@@ -4935,11 +4952,12 @@ class ReasoningRetriever:
         # 模型必须知道清单里的数不是整库的数(`_run_ceiling_binds`,与传给执行器的
         # 是同一个按 run 记住的判词;只在枚举工具在场时才读,关闭态零 I/O)。
         enumerate_scope = local_only_scope_offered()
-        # 两把逐动作的减法闸:通道本 run 拿不到任何东西时(今天 = 对等 run),
-        # 动作从 prompt/schema/白名单三处消失(`element_search_offered` /
-        # `ppr_retrieve_offered`)。与 `enumerate_scope` 同款在这里现算——判据
-        # 是 run 级模式位,run() 的调用形状一个字都不用改。
-        element_search = element_search_offered()
+        # 两把逐动作的减法闸:通道本 run 拿不到任何东西时(PPR:对等 run;元素:
+        # 对等 run + `GLOBAL_ASK_ELEMENT_ARM_ENABLED=false`),动作从 prompt/
+        # schema/白名单三处消失(`element_search_offered` / `ppr_retrieve_offered`)。
+        # 与 `enumerate_scope` 同款在这里现算——判据是 run 级模式位与部署开关,
+        # run() 的调用形状一个字都不用改。
+        element_search = element_search_offered(self.retrieval)
         ppr_action = ppr_retrieve_offered()
         source_scoped = bool(enumeration) and self._run_ceiling_binds()
         try:
@@ -6183,7 +6201,7 @@ class ReasoningRetriever:
             read_document=self.document_read_active(state.enum_limits),
             outline=state.outline_active,
             consult_memory=state.consult_memory_flag,
-            search_elements=element_search_offered(),
+            search_elements=element_search_offered(self.retrieval),
             ppr_retrieve=ppr_retrieve_offered(),
         ))
 
@@ -7497,11 +7515,12 @@ class ReasoningRetriever:
         if (
             not (collected or elements or chunks)
             and self.settings.reasoning_max_element_searches > 0
-            # PEER mode has no element arm at all (see
-            # ``retrieval_candidates.retrieve_elements``): the automatic top-up
-            # would search one library on behalf of eight and come back empty,
-            # spending a trace step to say so.
-            and not subjectless_run_active()
+            # The arm must be able to return something this run: a PEER run
+            # with ``GLOBAL_ASK_ELEMENT_ARM_ENABLED=false`` has no element arm
+            # at all, and the top-up would spend a trace step to report an
+            # empty search. With the switch on it searches every participant
+            # (the federated element arm), like the reflect action does.
+            and element_search_offered(self.retrieval)
         ):
             elements_searches = 1
             found = self.search_elements(notebook_id, question)
@@ -8137,7 +8156,7 @@ class ReasoningRetriever:
             state.neighbor_expand_limit, state.attempted, state.exact_lookup_log,
             state.document_reads,
             state.roster_numbering.sync(state.enum_chains).issued,
-            element_search=element_search_offered())
+            element_search=element_search_offered(self.retrieval))
         # 未执行的已确认方向回喂 reflect(镜像上面几份账目):模型据此知道哪些
         # 用户确认过的方向还没跑过,可以优先用 add_subquery 把它们补上,而不是
         # 另起炉灶猜一个新角度。每轮按 attempted 现算 —— 模型真把某条补上了,

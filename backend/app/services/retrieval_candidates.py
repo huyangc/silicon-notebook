@@ -40,6 +40,7 @@ from app.services.chunk_lane import (  # noqa: F401 - re-exported, see above
     _CHUNK_ARM_DRIFTED,
     _CHUNK_PEEK_ONLY,
     _CHUNK_PEER_LEG,
+    _CHUNK_SUPPLEMENT_LEG,
     _lexical_gate_drift_probe,
 )
 from app.services.knowledge_contracts import USABLE_STATUSES
@@ -246,6 +247,22 @@ def keyword_arm_available(settings) -> bool:
     if not federated_ask_active():
         return True
     return bool(settings.global_ask_keyword_arm_enabled)
+
+
+def element_arm_available(settings) -> bool:
+    """Whether ``retrieve_elements`` can return anything this run.
+
+    The element arm's twin of ``keyword_arm_available`` and THE one statement
+    of that fact: the producer short-circuits on it, and reasoning reads the
+    very same answer (through ``RetrievalService.element_arm_available``) to
+    decide whether ``search_elements`` is offered at all and whether the
+    first-round empty-evidence top-up may run.  The only configuration in which
+    it is False is peer mode with ``GLOBAL_ASK_ELEMENT_ARM_ENABLED=false``; the
+    switch is read only in peer mode, so the single-library path never reads it.
+    """
+    if not federated_ask_active():
+        return True
+    return bool(settings.global_ask_element_arm_enabled)
 
 
 #: BLAKE2s personalisation of the viewer-set digest.  It must NOT be the
@@ -1297,7 +1314,9 @@ class CandidateRetrievalService(_RetrievalState):
 
         ``trip_circuit=False`` -- passed only by the peer-mode keyword leg --
         still OBEYS an already-open per-library circuit but never OPENS one on
-        its own timeout.  That circuit is shared with the semantic legs' FTS
+        its own timeout.  The peer-mode element leg gets the same rule through
+        ``_CHUNK_SUPPLEMENT_LEG`` (it reaches this call several frames down,
+        inside the ordinary chunk lane).  That circuit is shared with the semantic legs' FTS
         union, and a supplementary keyword leg timing out must not switch a
         library's semantic lexical recall off for the rest of the run (a
         library on the FTS-degraded lane would then produce nothing while its
@@ -1327,7 +1346,8 @@ class CandidateRetrievalService(_RetrievalState):
                 corpus_langs=corpus_langs,
             )
         except ChunkLexicalSearchTimeout:
-            if run is not None and trip_circuit:
+            if (run is not None and trip_circuit
+                    and not _CHUNK_SUPPLEMENT_LEG.get()):
                 run.note_chunk_fts_timeout(notebook_id)
             elapsed_ms = round((time.perf_counter() - started) * 1000)
             self.event_log.emit({
@@ -2974,9 +2994,9 @@ class CandidateRetrievalService(_RetrievalState):
         for notebook_id, _tier in self._retrieval_participants(active_notebook_id):
             # Library dimension is decided inside `_retrieval_participants`,
             # which remains the last point at which an element's origin
-            # library is still known: `RetrievedElement` has no notebook_id
-            # field, so `filter_retrieval_items(..., "element", ...)` can only
-            # ever judge one against the ACTIVE notebook. Correctness
+            # library is still known: this seam leaves `RetrievedElement
+            # .notebook_id` blank, so `filter_retrieval_items(..., "element",
+            # ...)` could only judge one against the ACTIVE notebook. Correctness
             # downstream still holds without this line (the inner
             # `_retrieve_elements` intersects the same ceiling and comes back
             # empty), but only after paying for the search -- this is what
@@ -5912,29 +5932,90 @@ class CandidateRetrievalService(_RetrievalState):
         )
 
     def retrieve_elements(self, *args, **kwargs):
-        """PEER mode returns ``[]``: this is the THIRD active-only recall arm.
+        """Raw-element search; PEER mode federates it per participant.
 
-        Like the keyword and exact-lookup arms above, it issues one search
-        against the single notebook it is handed -- there is no federated
-        element channel -- so in a run that answers for a participant SET it
-        would give the nominal active, a naming anchor the user never singled
-        out, a recall leg none of its peers has. Its hits also reach the answer
-        as citations, and those citations are assembled by a lane that has
-        always been single-library, so the leg additionally produced the one
-        kind of citation with no real library attached.
+        On a single-library run this is the historical call, unchanged: one
+        search against the notebook it is handed, filtered by the run's
+        ceiling and bound on drift.
 
-        Closed at the producer rather than at the reasoning action that calls
-        it, for the same reason the other two arms are: this is the single
-        place every caller goes through. The reasoning side separately stops
-        OFFERING the action, so the model does not spend a round choosing one
-        that can only come back empty. Federating this arm is registered in
-        ``fangan_todo.md``; until then the honest behavior is no leg at all.
+        In PEER mode the nominal active is a naming anchor the user never
+        singled out, so searching only it would hand it a recall leg none of
+        its peers has.  Each participant instead gets the SAME single-library
+        element search, under its own frozen ceiling, on the semantic legs'
+        fan-out (``_peer_retrieve_elements`` ->
+        ``chunk_federation.federated_element_candidates``, which also owns the
+        per-library rotation, the cap and the retrieval-time attestation).
+        Every hit carries the library it was read from, so its citation card
+        names that library and takes that library's tier.
+        ``GLOBAL_ASK_ELEMENT_ARM_ENABLED=false`` restores the old peer-mode
+        ``[]`` (``element_arm_available``); the non-peer path never reads it.
         """
         from app.services.source_scope import filter_retrieval_items
 
         if federated_ask_active():
-            return []
+            if not element_arm_available(self.settings):
+                return []
+            return self._peer_retrieve_elements(*args, **kwargs)
         notebook_id = str(args[0] if args else kwargs.get("notebook_id", ""))
         return _bound_on_drift(notebook_id, lambda: filter_retrieval_items(
             notebook_id, "element", self._retrieve_elements(*args, **kwargs)
         ))
+
+    def _peer_retrieve_elements(self, notebook_id: str, query: str,
+                                limit: int = 8, *, allowed_source_ids=None):
+        """PEER mode's element arm: one single-library search per participant.
+
+        ``limit`` is both each library's own window and the merged total --
+        the single-library element cap, so a global run hands the caller no
+        more elements than a single-notebook one does.  A caller-supplied
+        ``allowed_source_ids`` can only NARROW each library's frozen ceiling
+        (source ids are globally unique, so it simply leaves every other
+        library with nothing to search); no caller passes one today.  The
+        result is filtered by each element's OWN library's ceiling
+        (``filter_retrieval_items``), the fail-closed backstop behind the
+        ceilings already pushed into every leg.
+        """
+        from app.services.chunk_federation import federated_element_candidates
+        from app.services.source_scope import filter_retrieval_items
+
+        hits = federated_element_candidates(
+            self, notebook_id, query,
+            self._peer_element_leg(query, limit, allowed_source_ids),
+            limit=limit,
+        )
+        return filter_retrieval_items(notebook_id, "element", hits)
+
+    def _peer_element_leg(self, query: str, limit: int, narrowed):
+        """One library's element leg for the peer-mode fan-out.
+
+        Runs inside the federated task's own ``Context``.  The ceiling is that
+        library's frozen per-notebook ceiling intersected with the live visible
+        list ``_federated_tasks`` enumerated -- the derivation the keyword leg
+        makes -- and a library with nothing left issues no query at all.  The
+        search itself is ``_retrieve_elements`` with the list declared a
+        contextual ceiling (``producer_explicit=False``, as the plugin seam's
+        live enumeration is), so it always takes the bounded chunk-hydration
+        route and never the whole-library element scan.  The leg is a
+        fail-open supplement: ``_CHUNK_SUPPLEMENT_LEG`` keeps its full-text
+        timeouts from opening the library's shared FTS circuit.
+        """
+        from app.services.source_scope import scoped_allowed_source_ids
+
+        wanted = None if narrowed is None else frozenset(map(str, narrowed))
+
+        def _leg(notebook_id: str, visible) -> list:
+            allowed = scoped_allowed_source_ids(notebook_id, visible)
+            if wanted is not None:
+                allowed = [sid for sid in (allowed or ()) if sid in wanted]
+            if allowed is not None and not allowed:
+                return []
+            token = _CHUNK_SUPPLEMENT_LEG.set(True)
+            try:
+                return self._retrieve_elements(
+                    notebook_id, query, limit=limit,
+                    allowed_source_ids=allowed, producer_explicit=False,
+                )
+            finally:
+                _CHUNK_SUPPLEMENT_LEG.reset(token)
+
+        return _leg

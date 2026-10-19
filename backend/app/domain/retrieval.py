@@ -41,6 +41,11 @@ class RetrievedElement:
     element_type: str
     text: str
     score: float = 0.0
+    # The library the element was read from. Blank on every single-library
+    # path (blank == the notebook being asked, as for chunks); stamped only by
+    # the global (peer-mode) element arm, whose hits come from several
+    # libraries and whose citation cards must name each one.
+    notebook_id: str = ""
 
 
 @dataclass

@@ -120,11 +120,14 @@ _CHAIN_PROOF = (
     ("calls", RR, "ReasoningRetriever.follow_chain", "attest_chain_evidence"),
     ("calls", RS, "attest_chain_evidence", "attest_pointers"),
 )
-_ELEMENT_ARM_CLOSED = (
-    ("if-calls", RC, "CandidateRetrievalService.retrieve_elements", "federated_ask_active"),
-    ("if-calls", RR, "ReasoningRetriever._element_search_skip", "subjectless_run_active"),
-    ("if-calls", RR, "ReasoningRetriever._first_round_empty_fallback", "subjectless_run_active",
-     "search_elements"),
+#: The raw-element arm in a global run: the producer federates it per library
+#: and the federated arm hashes the full element text it read (``attest_read``)
+#: for exactly the merged list it hands out.
+_ELEMENT_ARM_PROOF = (
+    ("calls", RC, "CandidateRetrievalService.retrieve_elements", "_peer_retrieve_elements"),
+    ("calls", RC, "CandidateRetrievalService._peer_retrieve_elements",
+     "federated_element_candidates"),
+    ("calls", CF, "federated_element_candidates", "attest_read"),
 )
 _PLUGIN_ENGINE_REFUSED = (
     ("compares", GA, "GlobalAskService._resolve_mode", "ask_plugin_engine"),
@@ -184,11 +187,12 @@ REGISTRY = {
         (("reads-param", EC, "EvidenceContextService.parse_anchors", "evidence_by_id"),),
         "copies an id_map entry; every id_map writer is registered here", 1),
     (EC, "EvidenceContextService.element_citations", "Citation"): (
-        "global-unreachable", _ELEMENT_ARM_CLOSED, "single-library element search is closed in peer mode", 1),
+        "read-registered", _ELEMENT_ARM_PROOF,
+        "raw-element cards; in a global run the federated element arm hashes the text it read", 1),
     (EC, "EvidenceContextService.element_context", 'dict:"element_id"'): (
-        "global-unreachable", _ELEMENT_ARM_CLOSED, "same element arm", 1),
+        "read-registered", _ELEMENT_ARM_PROOF, "same element arm (id_map entry)", 1),
     (EC, "EvidenceContextService.element_context", "splat:element_id"): (
-        "global-unreachable", _ELEMENT_ARM_CLOSED, "same element arm", 1),
+        "read-registered", _ELEMENT_ARM_PROOF, "same element arm", 1),
     (EC, "EvidenceContextService.external_citations", "Citation"): (
         "no-element", (), "URL-backed material from outside every library", 1),
     (EC, "EvidenceContextService.external_context", 'dict:"element_id"'): (
@@ -871,12 +875,31 @@ def test_a_registered_site_that_disappears_fails():
     assert any("no longer exists" in problem for problem in registry_problems(found))
 
 
+#: An exit gate the guards rely on (the selected-source graph activation
+#: returns before any read in a global run), used to test the checker itself.
+_EXIT_GATE = ("if-calls", AS, "AskService._activate_selected_source_graph",
+              "subjectless_run_active")
+_EXIT_GATE_TEXT = "        if subjectless_run_active():\n            return list(chunks), None\n"
+
+
 def test_a_removed_gate_fails(tmp_path, monkeypatch):
-    source = (APP / RC).read_text(encoding="utf-8")
-    gated = source.replace("        if federated_ask_active():\n            return []\n", "", 1)
-    assert gated != source
-    _fake_app(tmp_path, monkeypatch, RC, gated)
-    assert proof_problems(_ELEMENT_ARM_CLOSED[0])
+    source = (APP / AS).read_text(encoding="utf-8")
+    assert source.count(_EXIT_GATE_TEXT) == 1
+    assert proof_problems(_EXIT_GATE) == []
+    _fake_app(tmp_path, monkeypatch, AS, source.replace(_EXIT_GATE_TEXT, "", 1))
+    assert proof_problems(_EXIT_GATE)
+
+
+def test_a_removed_element_registration_fails(tmp_path, monkeypatch):
+    """The global element arm's ``attest_read`` is what makes its cards
+    checkable; deleting it must turn the registry red."""
+    source = (APP / CF).read_text(encoding="utf-8")
+    line = "        attest_read(ELEMENT_SEARCH_PRODUCER, {\n"
+    assert source.count(line) == 1
+    assert proof_problems(_ELEMENT_ARM_PROOF[2]) == []
+    _fake_app(tmp_path, monkeypatch, CF, source.replace(
+        line, "        dict(ELEMENT_SEARCH_PRODUCER, {\n", 1))
+    assert proof_problems(_ELEMENT_ARM_PROOF[2])
 
 
 def test_a_removed_registration_call_fails(tmp_path, monkeypatch):
@@ -936,13 +959,13 @@ def test_a_single_notebook_gate_needs_an_if_with_the_right_polarity(
 
 
 def test_an_exit_gate_with_inverted_polarity_fails(tmp_path, monkeypatch):
-    source = (APP / RC).read_text(encoding="utf-8")
+    source = (APP / AS).read_text(encoding="utf-8")
     inverted = source.replace(
-        "        if federated_ask_active():\n            return []\n",
-        "        if not federated_ask_active():\n            return []\n", 1)
+        _EXIT_GATE_TEXT,
+        "        if not subjectless_run_active():\n            return list(chunks), None\n", 1)
     assert inverted != source
-    _fake_app(tmp_path, monkeypatch, RC, inverted)
-    assert proof_problems(_ELEMENT_ARM_CLOSED[0])
+    _fake_app(tmp_path, monkeypatch, AS, inverted)
+    assert proof_problems(_EXIT_GATE)
 
 
 def test_a_registration_call_under_if_false_does_not_count(tmp_path, monkeypatch):

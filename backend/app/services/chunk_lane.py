@@ -138,10 +138,27 @@ _CHUNK_PEER_LEG: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "_chunk_peer_leg", default=False
 )
 
+# "This task is a fail-open SUPPLEMENTARY leg that happens to run the full
+# chunk lane" -- today only the peer-mode element arm
+# (``chunk_federation.federated_element_candidates``), whose per-library leg is
+# the single-library element search and therefore goes through
+# ``_retrieve_chunks``.  Its one reader is ``_chunk_fts_hits``: such a leg
+# OBEYS an already-open per-library FTS circuit but never OPENS one, exactly as
+# the keyword leg's explicit ``trip_circuit=False``.  That circuit is shared
+# with the semantic legs' own lexical union, and a supplement timing out must
+# not switch a library's semantic full-text recall off for the rest of the run.
+# A contextvar for the reason the two above are: the element leg reaches the
+# FTS call several frames down, through methods test doubles replace wholesale.
+# Set and reset by the leg itself inside its task's copied ``Context``.
+_CHUNK_SUPPLEMENT_LEG: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_chunk_supplement_leg", default=False
+)
+
 
 __all__ = [
     "_CHUNK_ARM_DRIFTED",
     "_CHUNK_PEEK_ONLY",
     "_CHUNK_PEER_LEG",
+    "_CHUNK_SUPPLEMENT_LEG",
     "_lexical_gate_drift_probe",
 ]

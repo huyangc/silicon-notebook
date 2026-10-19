@@ -1091,10 +1091,11 @@ def notebook_in_scope(notebook_id: str) -> bool:
     stays as the fail-closed backstop, this is the cost half.
 
     In the federated candidate loops it is therefore a COST guard, not the
-    correctness gate, and the difference is worth stating because the element
-    arm looks like the exception: ``RetrievedElement`` carries no
-    ``notebook_id``, so ``filter_retrieval_items(..., "element", ...)`` can only
-    judge it against the active notebook.  Even there the skip is not
+    correctness gate, and the difference is worth stating because the plugin
+    seam's element arm looks like the exception: its ``RetrievedElement`` hits
+    come back unstamped (blank ``notebook_id``), so
+    ``filter_retrieval_items(..., "element", ...)`` could only judge them
+    against the active notebook.  Even there the skip is not
     load-bearing -- the inner ``_retrieve_elements`` intersects the same
     per-notebook allow-list and comes back empty -- it just makes an unchecked
     library free instead of merely harmless.  Two consumers ARE
@@ -1226,8 +1227,8 @@ def scoped_allowed_source_ids(
     enumerate LIVE (``plugin_ask_engine`` builds its ``source_keys`` from
     ``all_visible_source_ids`` at port-construction time).  Live ∩ frozen is
     the frozen universe; live passed through is the drifted one.  This is the
-    ONLY enforcement point on the plugin element path: ``RetrievedElement``
-    carries no ``notebook_id``, ``filter_retrieval_items`` is not applied to
+    ONLY enforcement point on the plugin element path: its ``RetrievedElement``
+    hits carry no ``notebook_id``, ``filter_retrieval_items`` is not applied to
     it, and the port's own post-check judges an element by the very
     ``source_origin`` map built from that list -- so a drifted source that got
     into the list would be retrieved AND issued as evidence.
@@ -1638,18 +1639,19 @@ def filter_retrieval_items(
             or active_notebook_id
         )
         if kind == "element":
-            # Deliberately ``active_notebook_id``, not ``origin``:
-            # RetrievedElement has no notebook_id field, so ``origin`` is
-            # always the fallback here anyway.  The one cross-library element
-            # path (_federated_retrieve_elements_impl) skips unchecked
-            # libraries in its own participant loop, where the origin is still
-            # known.
-            if scope.allows(active_notebook_id, str(getattr(item, "source_id", "") or "")):
+            # Judged against the element's OWN library, like a chunk.  Only
+            # the global (peer-mode) element arm stamps one; every
+            # single-library element is blank, so ``origin`` is the active
+            # notebook there, exactly as before.  The plugin seam's
+            # cross-library path (_federated_retrieve_elements_impl) returns
+            # unstamped elements and is not filtered here at all: it skips
+            # unchecked libraries in its own participant loop.
+            if scope.allows(origin, str(getattr(item, "source_id", "") or "")):
                 out.append(item)
-            elif unbound_ceiling(active_notebook_id) is not None:
+            elif unbound_ceiling(origin) is not None:
                 # Read without its list and outside the freeze: the verdict
                 # flips (verify-on-read, see ``verify_unbound_read``).
-                record_ceiling_drift(scope, active_notebook_id)
+                record_ceiling_drift(scope, origin)
             continue
         if kind == "chunk":
             if scope.allows(origin, str(getattr(item, "source_id", "") or "")):

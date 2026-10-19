@@ -405,6 +405,18 @@ def _attest_collection_citations(
             del citations[item_id]
 
 
+def _element_libraries(elements: Sequence[Any], notebook_id: str) -> list[str]:
+    """The libraries one element pool's cards need a tier for.
+
+    ``notebook_id`` first, then every library a global (peer-mode) element arm
+    stamped on a hit.  A single-library pool stamps none, so this is exactly
+    ``[notebook_id]`` -- the one ``tier_map`` argument the element cards have
+    always asked for.
+    """
+    stamped = (getattr(item, "notebook_id", "") for item in elements)
+    return list(dict.fromkeys([notebook_id, *(nid for nid in stamped if nid)]))
+
+
 class EvidenceContextService:
     def __init__(
         self,
@@ -971,12 +983,16 @@ class EvidenceContextService:
         Elements are already the parser's smallest citation unit.  Keeping their
         ids in the reverse map prevents the report/Ask layers from collapsing a
         precise passage back to a source-level reference.
+
+        Each element's library is its own ``notebook_id`` when the global
+        element arm stamped one, else ``notebook_id`` (every single-library
+        element is blank, so the single path reads one tier exactly as before).
         """
         budget = (
             self.settings.answer_context_budget_chars
             if budget_chars is None else max(0, int(budget_chars))
         )
-        tier = self.tier_map([notebook_id]).get(notebook_id, "personal")
+        tiers = self.tier_map(_element_libraries(elements, notebook_id))
         citation_source_info = self.citation_source_info(
             element.source_id for element in elements
         )
@@ -985,6 +1001,8 @@ class EvidenceContextService:
         used = 0
         for index, element in enumerate(elements, 1):
             key = f"k{id_offset + index}"
+            origin = getattr(element, "notebook_id", "") or notebook_id
+            tier = tiers.get(origin, "personal")
             location = element.location_label or element.element_type
             source_info = citation_source_info.get(element.source_id) or {}
             source_title = source_info.get("title", element.source_title)
@@ -1017,12 +1035,12 @@ class EvidenceContextService:
                 ),
                 "location_label": location,
                 "tier": tier,
-                # Same rule as every other citation producer: the element arm
-                # is single-library, so the origin IS the notebook it was
-                # handed, and ``citation_active_id`` is what blanks it in a run
-                # that has a subject library. Never a hardcoded "".
+                # Same rule as every other citation producer: the origin is
+                # the element's own library, and ``citation_active_id`` is what
+                # blanks it in a run that has a subject library. Never a
+                # hardcoded "".
                 "notebook_id": foreign_notebook_id(
-                    notebook_id, citation_active_id(notebook_id),
+                    origin, citation_active_id(notebook_id),
                 ),
                 "relevance": float(element.score or 0.0),
                 "knowhow": None,
@@ -1930,32 +1948,31 @@ class EvidenceContextService:
         一次、``citation_source_info`` 一次、``tier_map`` 一次,与最终建几条卡
         无关;三个批量都按整池算(锚点收窄不改读取次数)。
 
-        ``notebook_id`` 解 ``tier``,**也**是这批引用的真实归属:element 检索是
-        单库通道(跨库命中走 KG/chunk 两条),所以每条命中都来自传进来的这一本。
-        归属照例过 ``foreign_notebook_id(origin, citation_active_id(active))``——
-        单库模式下 origin == active,归一成空串,与今天逐值相同(空串就是「本库」,
-        前端不为它画跨库徽章);对等模式下 ``citation_active_id`` 返回空串,于是
-        真实库 id 原样保留。
+        每条命中的归属是它**自己**的库:全局(对等)模式的元素臂逐库联邦检索,
+        给每条命中打上所在库(``RetrievedElement.notebook_id``);单库路径的命中
+        恒为空串,回退传进来的 ``notebook_id``。``tier`` 按该库查表(一次
+        ``tier_map``,覆盖本池涉及的每一本;单库路径就是传进来的这一本,与今天
+        同一次调用)。归属照例过 ``foreign_notebook_id(origin,
+        citation_active_id(active))``——单库模式下 origin == active,归一成空串,
+        与今天逐值相同(空串就是「本库」,前端不为它画跨库徽章);对等模式下
+        ``citation_active_id`` 返回空串,于是真实库 id 原样保留,与 chunk 卡同一
+        条规则。
 
         为什么不写死空串:对等 run 没有「本库」,一条恒空归属的引用既不能被引用
-        冻结复核对上任何一本库的天花板,也不能在界面上说出自己来自哪一本。这条
-        通道本身在对等模式下是关着的(见
-        ``retrieval_candidates.retrieve_elements``),所以这行今天不可达——但
-        「关着」是另一处的决定,归属口径不该依赖它才正确。
+        冻结复核对上任何一本库的天花板,也不能在界面上说出自己来自哪一本。
         """
         element_by_id = {item.element_id: item for item in elements}
         element_refs = self.knowhow_refs_for(element_by_id)
         element_source_info = self.citation_source_info(
             item.source_id for item in elements
         )
-        element_tier = self.tier_map([notebook_id]).get(
-            notebook_id, "personal"
-        )
+        element_tiers = self.tier_map(_element_libraries(elements, notebook_id))
         citations: list[Citation] = []
         for anchor in anchors:
             if anchor.object_type != "element" or anchor.object_id not in element_by_id:
                 continue
             item = element_by_id[anchor.object_id]
+            origin = getattr(item, "notebook_id", "") or notebook_id
             source_info = element_source_info.get(item.source_id) or {}
             source_title = source_info.get("title", item.source_title)
             citations.append(Citation(
@@ -1965,9 +1982,9 @@ class EvidenceContextService:
                 location_label=item.location_label,
                 quoted_span=item.text[:200],
                 source_file_name=source_info.get("file_name", ""),
-                tier=element_tier,
+                tier=element_tiers.get(origin, "personal"),
                 notebook_id=foreign_notebook_id(
-                    notebook_id, citation_active_id(notebook_id),
+                    origin, citation_active_id(notebook_id),
                 ),
                 knowhow=element_refs.get(item.element_id),
             ))

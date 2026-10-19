@@ -695,13 +695,15 @@ def reflect_schema_hint(
 
     ``search_elements`` / ``ppr_retrieve`` are two more SUBTRACTING gates, one
     per action, each False when that action's channel cannot return anything
-    this run (today: a PEER run, where both producers are closed). False drops
+    this run (``ppr_retrieve``: a PEER run, whose producer is closed;
+    ``search_elements``: a PEER run with ``GLOBAL_ASK_ELEMENT_ARM_ENABLED=false``
+    -- otherwise the element arm is federated per library). False drops
     that one word from the ``next_action`` enum, every other word keeping its
     relative order (``ppr_retrieve`` only matters while ``kg_actions`` offers
     it). Neither has a branch of its own — both read the shared root
     ``query``, which ``exact_lookup`` still needs — so nothing else changes.
-    They are separate on purpose: the element arm can be federated (and the
-    action offered again in a peer run) without touching PPR. The prompt and
+    They are separate on purpose: the element arm is federated (and the
+    action offered in a peer run) without touching PPR. The prompt and
     ``reflect``'s whitelist read the same predicates
     (``reasoning_retrieval.element_search_offered`` /
     ``ppr_retrieve_offered``). True (the default) is byte-for-byte the schema
@@ -1018,7 +1020,8 @@ def reflect_prompt(
 
     ``search_elements`` / ``ppr_retrieve`` False = that action is not offered
     this run (one gate per action, the same ones ``reflect_schema_hint``
-    takes; today both close in a PEER run). Its own line goes, and so does
+    takes; ``ppr_retrieve`` closes in a PEER run, ``search_elements`` only when
+    ``GLOBAL_ASK_ELEMENT_ARM_ENABLED=false`` too). Its own line goes, and so does
     every other sentence's mention of it -- the ``search_chunks`` contrast,
     the enumerate preference (``search_elements``) and the ``consult_memory``
     example list -- for the same reason ``kg_actions`` rewrites those
