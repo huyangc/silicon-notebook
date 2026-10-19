@@ -552,6 +552,10 @@ def a_stored_legacy_title_is_shown_with_the_current_prefix(world: World) -> None
     assert not any(
         hit.label.startswith(LEGACY_PREFIX) for hit in hits if hit.source_id == source_id
     ), [h.label for h in hits]
+    # a query that matches the source's own title reaches the "Source" leg
+    by_title = repo.search_notebook(world.base, ORIGIN_TITLE).hits
+    assert {hit.label for hit in by_title if hit.scope == "Source"
+            and hit.source_id == source_id} == {shown}, [h.label for h in by_title]
     # the user's own document titled with the same words is not remapped
     assert any(hit.label.startswith(f"{LEGACY_PREFIX}我自己的文档") for hit in hits)
     # the share preview lists titles verbatim to prospective copiers
