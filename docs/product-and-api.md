@@ -238,20 +238,22 @@ turn. An invalid or inaccessible explicit notebook rejects the request instead o
 Mounts never expand the participant set. Execution freezes participants and source ceilings, so notebooks
 or sources added later cannot join a running request.
 **A scope with nothing to search is refused at submission**, by the single-library "retrieval scope is
-empty" rule applied per participant: a participant counts as having content when its frozen visible-source
-list is non-empty, or it has any chunk (Knowhow cells included), a usable-status knowledge graph, or the
-viewer's own confirmed Memory; **any** participant with content admits the request, and only an all-empty
-set is refused. Mounted libraries do not count (the participant set never grows along mounts). The check
-reads only the participants this viewer may read in this request (for MCP, also intersected with the token
-allowlist), after the read re-check, and their just-frozen ceilings, so content in a library the viewer
-cannot read never admits a request. The refusal lands before any conversation or job exists and the
-`reasoning` intent preview refuses too, so no model call is spent: HTTP 409 whose `detail` is the
-user-message-marked Chinese sentence 「当前检索范围为空：范围内的笔记本还没有可检索的内容，请换选有资料的笔记本，或先添加来源。」
-(the single-library 409's shape and opening); the streaming preview carries it as the `error` frame's
-`status` + `message`; MCP `ask` returns `unavailable` with the same sentence (the code the single-notebook
-path gives an empty notebook). In the UI the sentence appears in the notice strip directly above the input
-and the question returns to the input. An ordinary question's frozen lists are non-empty, so the check adds
-no query; only an all-empty freeze runs per-library `EXISTS` probes, stopping at the first hit.
+empty" composition applied per participant over what a global run can actually search: its retrieval
+universe is the participants' frozen visible-source lists, and hidden Knowhow/Memory projections or
+knowledge objects whose evidence lies outside them are never retrievable by a global run. So **any**
+participant with a non-empty frozen list admits the request, and only an all-empty set is refused; a
+library holding only Knowhow cells, confirmed Memory or knowledge objects does not count. Mounted
+libraries do not count either (the participant set never grows along mounts). The check reads only the
+participants this viewer may read in this request (for MCP, also intersected with the token allowlist),
+after the read re-check; naming an unreadable library is still a 404 whether or not it holds content. The
+refusal lands before any conversation or job exists and the `reasoning` intent preview refuses too, so no
+model call is spent: HTTP 409 whose `detail` is the user-message-marked Chinese sentence
+「当前检索范围为空：范围内的笔记本还没有可检索的内容，请换选有资料的笔记本，或先添加来源。」 (the single-library
+409's shape and opening); the streaming preview carries it as the `error` frame's `status` + `message`;
+MCP `ask` returns `unavailable` with the same sentence (the code the single-notebook path gives an empty
+notebook). In the UI the sentence appears in the notice strip directly above the input, without the
+「重新加载」 button, and the question returns to the input. The check reads only the already-frozen lists
+and adds no query.
 
 Browser scope follows the user's live read access; MCP additionally intersects the live token allowlist.
 History, task results and cited evidence recheck access. Narrowing scope cannot reintroduce excluded

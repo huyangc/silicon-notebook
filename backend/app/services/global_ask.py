@@ -551,13 +551,8 @@ def _public_turn_row(job: Any) -> dict[str, Any]:
 class GlobalAskService:
     def __init__(self, *, store, notebooks, can_read, sources, settings, ask=None,
                  can_read_many=None, event_log=None, note_ask_completed=None,
-                 evidence_reader=None, memory_sources=None, local_evidence=None):
+                 evidence_reader=None, memory_sources=None):
         self.store = store
-        # ``NotebookSummaryQuery.any_local_evidence``: the single-library
-        # local-evidence predicate asked over the participant set, consulted
-        # by ``_require_searchable`` only when every frozen ceiling is empty.
-        # ``None`` (library/test construction) leaves admission unchecked.
-        self.local_evidence = local_evidence
         # M4: the Memory store's ``memory_sources_for_source_ids`` (the author's
         # Memory sources among cited ones, ``memory_sql.memory_source_readable``)
         # for the share disclosure count. ``None`` (library/test construction)
@@ -794,10 +789,12 @@ class GlobalAskService:
     def _resolve_run_scope(self, payload, user_id, allowed_notebook_ids, authority_check):
         """The scope ``start()`` and ``preview_intent`` must resolve IDENTICALLY.
 
-        Byte-for-byte the block ``start()`` used to run inline: same
-        conversation lookup, same scope defaulting, same participant-count
-        ceiling, same two authority re-checks around the source-ceiling
-        freeze, same history projection. Pulled out so a preview and the
+        The block ``start()`` used to run inline: same conversation lookup,
+        same scope defaulting, same participant-count ceiling, same two
+        authority re-checks around the source-ceiling freeze, then the
+        empty-scope admission check (``_require_searchable``, 409) on the
+        just-frozen ceilings, then the same history projection. Pulled out so
+        a preview and the
         submission it precedes cannot drift onto two library sets from the
         same inputs -- a preview that resolved a different set than the run
         it previews would hand the user a confirmation that does not describe
@@ -831,40 +828,39 @@ class GlobalAskService:
         source_rows = self.sources.visible_source_ids_by_notebook(ids)
         source_ceiling = {notebook_id: frozenset(source_rows[notebook_id]) for notebook_id in ids}
         self._check(ids, user_id, allowed, authority_check)
-        self._require_searchable(ids, source_ceiling, user_id)
+        self._require_searchable(ids, source_ceiling)
         history, user_history = self._history(
             conversation, ids, user_id, allowed, authority_check,
         )
         return conversation, scope, ids, allowed, source_ceiling, history, user_history
 
-    def _require_searchable(self, ids, source_ceiling, user_id) -> None:
-        """Refuse a scope with nothing to search in ANY of its libraries.
+    def _require_searchable(self, ids, source_ceiling) -> None:
+        """Refuse a scope with nothing a global run could search.
 
         The single-library empty-scope refusal (``ask_routes.
-        _require_non_empty_scope``), applied per participant: a library's
-        local universe is non-empty when it has visible sources -- here its
-        just-frozen ceiling, the very set the run would be bounded by -- or
-        local evidence by the ONE predicate the notebook summary uses
-        (``NotebookSummaryQuery.local_evidence``: any chunk, a usable KG, the
-        viewer's confirmed Memory). Mounted libraries do not count: the
-        participant set never grows along mounts. Any library with content
-        admits the whole run.
+        _require_non_empty_scope``) through the same composition
+        (``local_universe_non_empty``), applied per participant and OR-ed over
+        the set: any library with content admits the whole run.
+
+        A global run's retrieval universe is exactly the frozen visible-source
+        ceilings: every gate checks a library's per-notebook ceiling first
+        (``ActiveSourceScope.allows`` / ``source_ceiling_binds``), and that
+        ceiling holds visible sources only, so Knowhow cells, Memory
+        projections and KG objects with no evidence inside it are never
+        retrievable here. The local-evidence half is therefore a constant
+        ``False`` -- counting those rows would admit a run that still answers
+        from nothing. Mounted libraries do not count either: the participant
+        set never grows along mounts.
 
         Called inside ``_resolve_run_scope``, after both authority checks, so
-        ``ids`` is only what this viewer may read (never another member's
-        library) and the refusal lands before any job row, conversation row or
-        model call -- the reasoning preview and ``start()`` alike.
-
-        Cost: the ordinary question has a non-empty ceiling and pays NOTHING
-        beyond the freeze it already paid; only an all-empty freeze runs the
-        per-library ``EXISTS`` probes, stopping at the first hit.
+        ``ids`` is only what this viewer may read (an unreadable library is
+        refused as such, never probed for content) and the refusal lands before
+        any job row, conversation row or model call -- the reasoning preview
+        and ``start()`` alike. Costs no query: the ceilings are already frozen.
         """
-        # "Any library's universe is non-empty" is the per-library composition
-        # OR-ed over the set, so it is asked once over the whole set: every
-        # ceiling first (already in hand), the probes only if all are empty.
         if local_universe_non_empty(
             any(source_ceiling[notebook_id] for notebook_id in ids),
-            lambda: self.local_evidence is None or self.local_evidence(ids, user_id),
+            lambda: False,
         ):
             return
         raise GlobalAskError(409, _SCOPE_EMPTY_COPY, SCOPE_EMPTY)
@@ -877,7 +873,8 @@ class GlobalAskService:
         Split out from the model call for one reason: everything in here can
         fail with a PRECISE, user-facing status (404 for a conversation that is
         not this member's, 422 for an empty or over-wide scope, 404 for access
-        revoked since the page loaded), and those statuses only survive if the
+        revoked since the page loaded, 409 for a scope with nothing to search),
+        and those statuses only survive if the
         step runs BEFORE a streaming response has begun. Once the first NDJSON
         frame is out the HTTP status is already 200 and every refusal degrades
         into a content-free ``error`` frame -- which is exactly what the

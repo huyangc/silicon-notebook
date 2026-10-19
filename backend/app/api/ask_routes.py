@@ -327,7 +327,7 @@ def _require_non_empty_scope(
     # (有来源、还没有 chunk)的库仍按旧判据放行,列表投影未回填时(默认 False)也逐字
     # 回落到旧行为。
     # 组合口径与全局问答的准入(GlobalAskService._require_searchable)共用同一个
-    # local_universe_non_empty,本地证据判据是同一个 NotebookSummaryQuery.local_evidence。
+    # local_universe_non_empty;全局那边本地证据半边恒为假,理由见该函数 docstring。
     has_local_universe = local_universe_non_empty(
         int(notebook.counts.get("sources", 0) or 0) > 0,
         lambda: bool(notebook.local_evidence_available),

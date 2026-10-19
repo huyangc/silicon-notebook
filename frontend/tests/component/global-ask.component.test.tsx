@@ -1009,6 +1009,16 @@ test.each([
   expect(screen.queryByText("正在理解问题…")).toBeNull();
   if (engine === "reasoning") expect(api.ask).not.toHaveBeenCalled();
   else expect(api.ask).toHaveBeenCalledTimes(1);
+  // 重新加载改变不了范围里有没有内容：这句拒绝旁边不给「重新加载」。
+  expect(within(alert).queryByRole("button", { name: "重新加载" })).toBeNull();
+  // 别的失败照旧带着它——判据只认这一种拒绝。
+  const other = () => Promise.reject(new Error("network"));
+  if (engine === "reasoning") api.intent.mockImplementation(other);
+  else api.ask.mockImplementation(other);
+  fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+  const failure = await screen.findByText(engine === "reasoning" ? /问题理解没能完成/ : /提交失败，请重试/);
+  expect(within(failure).getByRole("button", { name: "重新加载" })).toBeTruthy();
+  expect(screen.queryByText(EMPTY_SCOPE_REFUSAL)).toBeNull();
 });
 
 test.each([false, true, undefined])("answer grounding notice follows the reliability value even with citations: %s", async (grounded) => {

@@ -65,6 +65,16 @@ export type GlobalPendingTurn = {
 
 // 轨迹步数也进这把键：逐步推理的一轮可以连出好几步而覆盖回执一动不动，键里没有它，
 // 轮询会把「只长轨迹」判成没进展、一路退避到 15 秒，实时轨迹就成了 15 秒一跳。
+// 范围里没有可检索内容时，后端在建任务之前以 409 拒绝（`GlobalAskService._require_searchable`，
+// reason `scope_empty`）。那句话以「当前检索范围为空」开头——与单库「检索范围为空」的
+// 409 同一个开头，是后端刻意钉住的（`test_global_ask_empty_scope` 的 EMPTY_COPY_OPENING）；
+// 它只经 `user_error()` 的出处标记到这里，所以判的是一句**已被信任**的整句，不是任意文本。
+// 这种拒绝换范围才有用，重新加载不会改变结果，所以提示条不给「重新加载」。
+const SCOPE_EMPTY_REFUSAL_OPENING = "当前检索范围为空";
+function isScopeEmptyRefusal(cause: unknown, message: string): boolean {
+  return httpErrorStatus(cause) === 409 && message.startsWith(SCOPE_EMPTY_REFUSAL_OPENING);
+}
+
 function progressKey(job: GlobalJob): string {
   return JSON.stringify([job.status, job.searched_notebook_ids, job.skipped_notebooks ?? [], job.degraded_notebook_ids ?? [], job.trace?.length ?? 0]);
 }
@@ -140,6 +150,9 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
   const [submitting, setSubmitting] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState("");
+  // 最近一次「范围为空」拒绝的原句。`error` 恰好等于它时，提示条不给「重新加载」；其他任何
+  // 一处 setError 写进别的句子（或清空）都自动回到可重新加载，不必每处都记得复位。
+  const [scopeRefusal, setScopeRefusal] = useState("");
   // 停止 / 取消之后那句一闪而过的轻提示——与笔记本内问答同一组措辞（那边走页面的 toast，
   // 这里没有宿主页可借，自己带一条会自动消失的状态行）。结果本身已经落在界面上（问题
   // 回到了输入框），这句话只回答「刚才那一下到底生效了没有」。
@@ -585,6 +598,12 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     }
   }
 
+  function showSubmissionFailure(cause: unknown, fallback: string) {
+    const message = toUserMessage(cause, fallback);
+    setScopeRefusal(isScopeEmptyRefusal(cause, message) ? message : "");
+    setError(message);
+  }
+
   async function submit() {
     if (flight.current || running || opening || openFailed || loading || intentChecking || intentReview) return;
     const question = draft.trim();
@@ -655,7 +674,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
       returnQuestion();
       // 用户自己按下的「取消问题理解」不是失败，不上错误条，只给一句轻提示。
       if (controller.signal.aborted) flashNotice("已取消问题理解");
-      else setError(toUserMessage(cause, "问题理解没能完成，请重试"));
+      else showSubmissionFailure(cause, "问题理解没能完成，请重试");
     } finally {
       // 判据是「自己这次预检是否仍是当前那一次」，**不看 ticket**：owner 换过
       // （load / 切换对话 / 新建对话）时那条路径已经 retireIntent 收过状态了，而
@@ -781,7 +800,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
       if (mounted.current && ticket === owner.current) {
         const stopWanted = stopRequested.current;
         returnQuestion();
-        setError(toUserMessage(cause, "提交失败，请重试；重复提交不会创建重复任务"));
+        showSubmissionFailure(cause, "提交失败，请重试；重复提交不会创建重复任务");
         // 失败不等于没提交：响应可能只是丢了。凡是这次提交带着「替换」或一次还没
         // 兑现的「停止」，就以服务端为准重新同步一次会话（`readConversation`）：
         //   · 会话里有一条带着这次提交的幂等 id 的作业——那就是这次提交：认领它
@@ -1016,6 +1035,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
   return {
     notebooks, conversations, conversationId, conversationTitle, turns, scope, setScope, draft, setDraft,
     loading, opening, openFailed, submitting, stopping, error, notice, pollError, historyError, running,
+    errorReloadable: !error || error !== scopeRefusal,
     pending, traceSeeds,
     moreHistory, loadingHistory, turnOffset, loadingTurns, loadMoreHistory, loadMoreTurns,
     load, openConversation, focusConversation, newConversation, submit, stop, sendFeedback, updateConversation, removeConversation,
