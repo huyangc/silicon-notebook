@@ -39,7 +39,13 @@ from app.services.kg_analysis import (
 )
 from app.services.kg_analysis_precompute import analysis_ledger_is_current
 from app.services.sqlite_repository import SQLiteRepository
-from tests.kg_findings_world import KNOWHOW_SECRET, seed_world
+from app.domain.kg_merge_seed import concept_seed_v1
+from tests.kg_findings_world import (
+    KNOWHOW_HIDDEN_SEED_NAME,
+    KNOWHOW_SECRET,
+    SECRETS,
+    seed_world,
+)
 from tests.model_testkit import bind_all_embedding_clients
 
 
@@ -120,7 +126,11 @@ def test_the_world_publishes_one_finding_per_rule(repo):
     assert f4["subject_label"] == "Llama 3.1"
     assert f4["evidence"]["classes"] == [["K-llama 3 1"], ["K-llama 31"]]
     assert world.canonical_names["K-llama 3 1"] == KNOWHOW_SECRET
-    assert KNOWHOW_SECRET not in json.dumps([rows, payload], ensure_ascii=False)
+    # the Mistral group exists on canonical names only (one side is named by a
+    # knowhow object): dropped on the visible names, counted, never shown
+    assert payload["rules"]["F4"]["groups_unreproducible"] == 1
+    published = json.dumps([rows, payload], ensure_ascii=False)
+    assert [secret for secret in SECRETS if secret in published] == []
     # first publication: everything is new at this build's two generations
     kg_seq, cluster_seq = _seq(repo, world.notebook_id)
     assert {(r["first_seen_kg_seq"], r["first_seen_cluster_seq"]) for r in rows} == {
@@ -134,6 +144,25 @@ def test_the_world_publishes_one_finding_per_rule(repo):
     assert {"boards_in_giant", "boards_equal_component"} <= set(edges_payload)
     assert "boards_in_giant" not in payload["structure"]
     assert edges_payload["boards_equal_component"] >= 1      # the off-topic island
+
+
+def test_a_decision_keyed_by_a_hidden_member_seed_keeps_f4_quiet(repo):
+    """Stored decisions match by the v1 seeds of EVERY member, hidden ones
+    included (design §4.4): a rejection recorded against the knowhow member's
+    seed — a spelling no visible member has — still means "not the same thing".
+    Mutation anchor: let the member-seed read keep only visible members."""
+    world = seed_world(repo, postgres=False)
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO concept_merge_candidates(id,notebook_id,canonical_a,canonical_b,"
+            "score,status,seed_a,seed_b,created_at,updated_at) "
+            "VALUES ('mc-1',?,'K-gone-a','K-gone-b',0.9,'rejected',?,?,?,?)",
+            (world.notebook_id, concept_seed_v1(KNOWHOW_HIDDEN_SEED_NAME),
+             concept_seed_v1("Llama 31"), "2026-10-19", "2026-10-19"))
+    repo._runtime.knowledge_lifecycle.rebuild_communities(world.notebook_id)
+    payload = _ledger(repo, world.notebook_id)[ARTIFACT_FINDINGS]["payload"]
+    assert ("F4", "llama31") not in _keys(_rows(repo, world.notebook_id))
+    assert payload["rules"]["F4"]["groups_decided_apart"] == 1
 
 
 def test_a_second_build_inherits_first_seen_and_compares(repo):
