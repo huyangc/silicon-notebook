@@ -613,3 +613,45 @@ def test_http_ask_on_an_empty_notebook_follows_the_library_text(
         f"/api/notebooks/{nb}/ask", json={"question": "q", "mode": mode}
     )
     assert asked.status_code == expected_status, asked.text
+
+
+@pytest.mark.parametrize("analyzed", [False, True], ids=["no-stats", "analyzed"])
+def test_library_text_probe_plan_seeks_chunks_by_source(repo, analyzed):
+    """计划钉:内层 EXISTS 必须按 ``idx_chunks_source`` 探,不能拿 ``idx_chunks_nb``
+    把整库 chunk 逐篇来源扫一遍(无统计时计划器恰好会这么选,2 万来源 / 40 万 chunk
+    的库实测 127 ms)。生产库不跑 ANALYZE,两种统计状态都钉。"""
+    library = _graphless_library(repo, "ref-text")
+    # Statistics only mean something over more than a handful of rows: three
+    # libraries x 100 sources x 5 chunks (the no-stats state does not care).
+    bulk = [repo.create_notebook(NotebookCreate(name=f"bulk-{lib}")).id
+            for lib in range(3)]
+    with repo._write() as db:
+        for lib, other in enumerate(bulk):
+            for src in range(100):
+                _add_source(db, other, f"s-bulk-{lib}-{src}", "document")
+                for chunk in range(5):
+                    _add_chunk(db, other, f"s-bulk-{lib}-{src}",
+                               f"c-bulk-{lib}-{src}-{chunk}")
+    statements: list[tuple[str, tuple]] = []
+
+    class _Recorder:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, statement, params=()):
+            statements.append((statement, tuple(params)))
+            return self._inner.execute(statement, params)
+
+    with repo._runtime.database.connect() as db:
+        if analyzed:
+            db.execute("ANALYZE")
+        assert repo._runtime.queries.notebooks_have_visible_chunk(
+            _Recorder(db), [library.id]
+        ) is True
+        (statement, params), = statements
+        plan = "\n".join(
+            str(row[-1])
+            for row in db.execute("EXPLAIN QUERY PLAN " + statement, params).fetchall()
+        )
+    assert "idx_chunks_source" in plan, plan
+    assert "idx_chunks_nb" not in plan, plan

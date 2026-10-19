@@ -435,14 +435,20 @@ class QueryStore:
         的挂载库(``NotebookSummaryQuery._chunk_lane_base_ids``),本方法不做任何
         鉴权。名单 <= ``CHUNK_FEDERATION_MAX_PARTICIPANTS - 1``(<= 7),一个参数绑定,
         语句文本与名单长度无关;``drive_by``:逐库按 ``sources(notebook_id, ...)``
-        索引取可见来源,再按 ``idx_chunks_source`` 探第一条 chunk,EXISTS 首中即停。"""
+        索引取可见来源,再按 ``idx_chunks_source`` 探第一条 chunk,EXISTS 首中即停。
+
+        ⚠ ``+c.notebook_id``:生产库不跑 ``ANALYZE``,无统计时计划器会拿
+        ``idx_chunks_nb`` 去探内层 EXISTS——每篇来源都把整库 chunk 扫一遍再按
+        ``source_id`` 过滤(实测 2 万来源 / 40 万 chunk 的库 127 ms);一元 ``+``
+        把这一列移出索引候选,内层回到按 ``source_id`` 探(同一形状 0.007 ms)。
+        计划钉在 ``test_notebook_ask_availability``,两种统计状态都钉。"""
         bound = bind_ids(notebook_ids)
         row = db.execute(
             "SELECT EXISTS(SELECT 1 FROM sources s "
             f"WHERE {drive_by('s.notebook_id', bound)} "
             f"AND s.{VISIBLE_SOURCE_TYPES_PREDICATE} "
             "AND EXISTS(SELECT 1 FROM chunks c "
-            "WHERE c.source_id = s.id AND c.notebook_id = s.notebook_id))",
+            "WHERE c.source_id = s.id AND +c.notebook_id = s.notebook_id))",
             (bound.param,),
         ).fetchone()
         return bool(row[0])
