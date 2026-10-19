@@ -199,8 +199,9 @@ id 随机，32 万条 Memory，机器负载均值约 45）：启动探测（`EXI
 
 普查有三点局限：`merge_review_pairs` 读的是 `kg_rebuild_checkpoint`，迁移会删掉 F 的检查点，所以升级后再跑，
 F 会显示为 0；这个数不含概念描述的模型调用，应视为下限；SCALE 列的是最终会排的集合，不反映排入的时机（scale
-构建要等该库知识图谱已隔离才排，见下文）。概念描述只重算名字或引文有变化的部分（按这两者的签名复用旧描述，
-canonical id 变了也照样复用）；社区构建不调模型。dirty 库自上次
+构建要等该库知识图谱已隔离才排，见下文）。概念描述只给多成员概念写，且只重算名字或引文有变化的、以及上次生成
+失败而留空的（引文取去重排序后的前 8 条；按名字与这 8 条引文的签名复用旧描述，canonical id 变了也照样复用）；
+社区构建不调模型。dirty 库自上次
 重建以来 `kg_mutation_seq` 已经前进过，输入版本本来就变了：对迟早会被刷新的库，这笔复核花费是提前支付，不是
 新增；只有对永远不会被刷新的库才是新增。检查本身的实测成本：干净的 100 万对象库 3.3 秒、610 条语句（按缓存
 冷热为 3.2–11.1 秒）。
@@ -1778,7 +1779,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 - `--pool-report-interval` —— `all`/`kg`/`reparse` 阶段每 N 秒打印 producer/source 业务线程池占用（默认 15；`0` 关闭）。它不是模型容量权威来源；每个服务的运行数、排队数、健康状态和熔断状态应在只读「模型服务」状态中查看。
 
-选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`，显式值在 repository 构造前应用到本进程业务 scheduler；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--retry-partial`（仅 `kg`：安全重试最近一次有失败窗口且已有对象的来源）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index` / `backfill-chunk-elements`）、`--force`（`metadata` / `question-index` / `backfill-source-index` / `backfill-chunk-elements` / `backfill-source-facts`：有意重建已完成状态）、`--mineru-output` / `--source-id` / `--after-id` / `--report`（仅 `backfill-images`：可重复的 MinerU output 树根、单源试点限制、keyset 断点续跑起点，以及只含计数与稳定 reason code 的逐源 JSONL 明细）、`--dry-run`（只扫描预估；`backfill-images` 的 dry-run 是只读数据库演练而不是输入目录预览）。模型并发不提供 CLI 覆盖参数，只取所绑定物理服务的 `max_concurrency`。`embed` 子命令补缺失的 chunk + element + 节点向量；`question-index` 要求单个 notebook、显式 rollout mode 与两个生成问题模型绑定。
+选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`，显式值在 repository 构造前应用到本进程业务 scheduler；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--retry-partial`（仅 `kg`：安全重试最近一次有失败窗口且已有对象的来源）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild。它不会重写概念描述：描述阶段仍读已发布的描述，名字与引文的签名没变就直接复用、不调模型）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index` / `backfill-chunk-elements`）、`--force`（`metadata` / `question-index` / `backfill-source-index` / `backfill-chunk-elements` / `backfill-source-facts`：有意重建已完成状态）、`--mineru-output` / `--source-id` / `--after-id` / `--report`（仅 `backfill-images`：可重复的 MinerU output 树根、单源试点限制、keyset 断点续跑起点，以及只含计数与稳定 reason code 的逐源 JSONL 明细）、`--dry-run`（只扫描预估；`backfill-images` 的 dry-run 是只读数据库演练而不是输入目录预览）。模型并发不提供 CLI 覆盖参数，只取所绑定物理服务的 `max_concurrency`。`embed` 子命令补缺失的 chunk + element + 节点向量；`question-index` 要求单个 notebook、显式 rollout mode 与两个生成问题模型绑定。
 
 前置：用 `MODEL_SERVICES_CONFIG` 指向部署 TOML，按阶段绑定所需 workload（尤其是 `chunk_embedding`、`source_element_embedding`、`knowledge_object_embedding`、`kg_extract`、`paper_metadata` 和可选的 `chunk_question_generation`），`.env` 只保存 TOML 引用的密钥。`chunk_embedding` 未绑定时 CLI 默认拒绝运行；确需无向量导入须显式加 `--allow-no-embed`。续跑从**数据库状态**推导而非读取进度文件：`ingest` 看内容哈希，`kg` 看最近一次抽取是否完成，`embed` 看向量行是否存在。parse 中断但已写入哈希的来源用 `reparse` 修复；`<storage>/batch_ingest/<notebook>.jsonl` 只是只写运行日志。
 
