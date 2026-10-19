@@ -518,3 +518,36 @@ def test_v96_adds_the_rated_global_jobs_partial_index(tmp_path):
         ).fetchall()
         assert [row[0] for row in rated] == ["g-rated"]
     database.close_local()
+
+
+@pytest.mark.real_sqlite_migration
+def test_v96_stops_with_the_ids_when_a_payload_is_not_json(tmp_path):
+    """A malformed global payload would make the index build fail with an
+    opaque error; v96 names the rows and the remedy, leaves the database at
+    v95, and upgrades once the row is repaired."""
+    from tests.sqlite_migration_testkit import rollback_v96
+
+    database, settings = _fresh_migrated_database(tmp_path)
+    now = "2026-10-19T00:00:00+00:00"
+    with database.write() as db:
+        rollback_v96(db)
+        db.execute("PRAGMA user_version = 95")
+        db.execute(
+            "INSERT INTO global_ask_conversations(id,user_id,title,scope_json,submitted_via,"
+            "created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+            ("gconv-bad", "u-bad", "", "{}", "web", now, now))
+        db.execute(
+            "INSERT INTO global_ask_jobs(id,conversation_id,user_id,request_json,status,"
+            "payload_json,created_at) VALUES(?,?,?,?,?,?,?)",
+            ("g-bad", "gconv-bad", "u-bad", "{}", "done", "{not json", now))
+
+    with pytest.raises(RuntimeError) as failure:
+        SqliteMigrator(database, settings).migrate()
+    message = str(failure.value)
+    assert "SQLite v96" in message and "g-bad" in message and "json_valid" in message
+    with database.connect() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 95
+    with database.write() as db:
+        db.execute("UPDATE global_ask_jobs SET payload_json='{}' WHERE id='g-bad'")
+    assert SqliteMigrator(database, settings).migrate() == [96]
+    database.close_local()

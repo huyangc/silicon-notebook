@@ -112,11 +112,14 @@ def _global_feedback_counts(db, notebook_id: str) -> tuple[int, int]:
     Same attribution as the learning chain (``global_ask_attribution``: the
     libraries a run searched or cited, else its participants minus the skipped
     ones), so one rating counts once in every library it is attributed to.
-    The inner read carries ``rated_predicate``, so it is a scan of
-    ``idx_global_ask_jobs_feedback`` (rated rows only; an unrated payload is
-    never detoasted), and parses each rated payload ONCE (``OFFSET 0`` keeps
-    the subquery from being flattened back into one ``::jsonb`` per key read
-    of the fragment). A rating exists only on a ``done`` job and that status
+    The inner read carries ``rated_predicate`` AND the participation
+    containment spelled exactly as the GIN expression index
+    ``idx_global_ask_jobs_participants`` (0062), so the planner can BitmapAnd
+    the two indexes and only rated jobs this notebook took part in are
+    fetched -- the cost follows this library's rated global history, not the
+    whole site's. Each fetched payload is then parsed once more for the full
+    attribution (``OFFSET 0`` keeps the subquery from being flattened back
+    into one ``::jsonb`` per key read of the fragment). A rating exists only on a ``done`` job and that status
     is final, so no status term is needed.
     A turn past its retention stamp (``live_turn_sql``: a deleted
     participant's window ran out) is listed nowhere, so its rating counts
@@ -135,10 +138,16 @@ def global_feedback_counts_sql() -> tuple[str, int]:
         "SELECT COUNT(*) FILTER (WHERE p->>'feedback'='useful') AS useful,"
         "COUNT(*) FILTER (WHERE p->>'feedback'='not_useful') AS not_useful "
         "FROM (SELECT payload_json::jsonb AS p FROM global_ask_jobs "
-        f"WHERE {rated_predicate('postgres')} AND {_GLOBAL_TURN_LIVE} OFFSET 0) rated "
+        f"WHERE {rated_predicate('postgres')} AND {_GLOBAL_TURN_LIVE} "
+        f"AND {_PARTICIPATES} OFFSET 0) rated "
         f"WHERE {attributed}",
-        binds,
+        binds + 1,
     )
+
+
+# The participation containment, spelled exactly as the expression of the GIN
+# index ``idx_global_ask_jobs_participants`` (0062) so the planner matches it.
+_PARTICIPATES = "(payload_json::jsonb->'resolved_notebook_ids') @> jsonb_build_array(%s::text)"
 
 
 def _compat_notebook_rows(rows):

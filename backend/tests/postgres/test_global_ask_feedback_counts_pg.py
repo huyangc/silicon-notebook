@@ -157,3 +157,58 @@ def test_counts_can_only_be_answered_from_the_partial_index(repo):
                 and n.get("Relation Name") == "global_ask_jobs"], analytics
     rated_reads = [n for n in admin if n.get("Index Name") == "idx_global_ask_jobs_feedback"]
     assert sorted("'not_useful'" in n["Index Cond"] for n in rated_reads) == [False, True], admin
+
+
+class _Rollback(Exception):
+    """Raised to roll back the throwaway DROP INDEX transaction."""
+
+
+def test_analytics_count_is_answerable_from_each_of_its_two_indexes(repo):
+    """The analytics count must be able to intersect the rated partial index
+    with the participation GIN (``idx_global_ask_jobs_participants``), so its
+    cost follows this library's rated global history rather than the whole
+    site's. Proven deterministically: with sequential scans priced out, the
+    statement still finds an index path when EITHER index is dropped (inside a
+    rolled-back transaction) -- i.e. its inner predicates match both index
+    expressions verbatim. (On a 5050-job corpus with 5025 rated jobs elsewhere
+    the planner picks the BitmapAnd of the two; see the PR's measurement.)"""
+    statement, binds = global_feedback_counts_sql()
+    for dropped, remaining in (
+        ("idx_global_ask_jobs_feedback", "idx_global_ask_jobs_participants"),
+        ("idx_global_ask_jobs_participants", "idx_global_ask_jobs_feedback"),
+    ):
+        nodes = []
+        with pytest.raises(_Rollback):
+            with repo._runtime.database.write() as db:
+                db.execute(f"DROP INDEX {dropped}")
+                db.execute("SET LOCAL enable_seqscan = off")
+                nodes = list(_nodes(_plan(db, statement, ("nb-fa",) * binds)[0]["Plan"]))
+                raise _Rollback
+        assert any(n.get("Index Name") == remaining for n in nodes), (dropped, nodes)
+        assert not [n for n in nodes if n["Node Type"] == "Seq Scan"
+                    and n.get("Relation Name") == "global_ask_jobs"], (dropped, nodes)
+    with repo._runtime.database.connect() as db:
+        names = {row["indexname"] if isinstance(row, dict) else row[0] for row in db.execute(
+            "SELECT indexname FROM pg_indexes WHERE tablename='global_ask_jobs'")}
+    assert {"idx_global_ask_jobs_feedback", "idx_global_ask_jobs_participants"} <= names
+
+
+def test_shadow_catalog_reads_the_live_feedback_index_as_its_migration(repo):
+    """The shadow replicator compares the live catalog with what the migration
+    files declare; PostgreSQL deparses the predicate as ``(expr) = ANY
+    (ARRAY[...])``, which the catalog canonicalizer must read as the
+    migration's ``(expr) IN (...)``."""
+    from app.migration.shadow.postgres_catalog import (
+        EXPECTED_OPERATIONAL_INDEXES,
+        _canonical_expression,
+    )
+
+    with repo._runtime.database.connect() as db:
+        row = db.execute(
+            "SELECT pg_get_expr(i.indpred, i.indrelid) AS predicate "
+            "FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
+            "WHERE c.relname='idx_global_ask_jobs_feedback'"
+        ).fetchone()
+    live = row["predicate"] if isinstance(row, dict) else row[0]
+    expected = EXPECTED_OPERATIONAL_INDEXES["idx_global_ask_jobs_feedback"]
+    assert _canonical_expression(live, context="predicate") == expected.predicate_tokens
