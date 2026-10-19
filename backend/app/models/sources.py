@@ -1,9 +1,9 @@
 import re
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from app.domain.promotion_source import PROMOTION_SOURCE_TYPE
+from app.domain.promotion_source import PROMOTION_SOURCE_TYPE, presented_source_title
 
 
 PDF_PYTHON_FALLBACK_WARNING_PREFIX = "[pdf-python-fallback]"
@@ -169,7 +169,8 @@ class SourceSummary(BaseModel):
     notebook_id: str
     title: str
     # 面向用户的显示名(论文标题优先),由 source_display.source_display_title
-    # 合成——那是这条规则的唯一定义点。刻意与 ``title`` 并存而不是改写它:
+    # 合成——那是这条规则的唯一定义点。刻意与 ``title`` 并存而不是改写它
+    # (唯一的读时映射见下方 validator:存量晋升来源的旧前缀):
     # ``title`` 是 sources 表的原始列,既有的来源页签按它渲染,改写会是一次
     # 计划外的用户可见变更。新的展示路径一律读这个字段。空串表示该来源无名,
     # 由调用方决定占位文案(该函数刻意不造占位符)。
@@ -232,6 +233,15 @@ class SourceSummary(BaseModel):
     # 既有字段(同 display_title 先例),默认 False = 人添加的——那也正是全部存量行
     # 的取值。派生是零成本的:`SELECT *` 本来就把这一列取回来了,不加 join、不加查询。
     agent_created: bool = False
+
+    @model_validator(mode="after")
+    def _present_promotion_title(self) -> "SourceSummary":
+        """A promotion source stored under the pre-2026-10-19 wording
+        (「晋升自：…」) is shown with today's prefix (「收录自：…」).  The stored
+        title is untouched; this is the one place every summary, detail and
+        scoped detail -- both storage backends, every constructor -- passes."""
+        self.title = presented_source_title(self.title, source_type=self.type)
+        return self
 
 
 class PaginatedSources(BaseModel):

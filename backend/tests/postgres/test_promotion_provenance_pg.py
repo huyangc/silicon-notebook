@@ -66,6 +66,10 @@ def test_pg_a_memory_promotion_is_titled_after_the_memory(world):
     cases.a_memory_promotion_is_titled_after_the_memory(world)
 
 
+def test_pg_a_stored_legacy_title_is_shown_with_the_current_prefix(world):
+    cases.a_stored_legacy_title_is_shown_with_the_current_prefix(world)
+
+
 def test_pg_deleting_the_promotion_source_deletes_the_objects_it_supports(world):
     cases.deleting_the_promotion_source_deletes_the_objects_it_supports(world)
 

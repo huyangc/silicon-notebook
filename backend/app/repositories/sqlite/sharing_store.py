@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from typing import Callable, Sequence
 
 from app.core.config import Settings
+from app.domain.promotion_source import presented_source_title
 from app.repositories.copy_memory_evidence import strip_memory_evidence
 from app.repositories.group_rows import (
     GROUP_GRANT_COUNT_SQL,
@@ -921,9 +922,11 @@ class SharingStore:
                 (notebook_id,),
             ).fetchone()
             titles = [
-                row["title"]
+                presented_source_title(
+                    row["title"], source_type=row["source_type"], source_id=row["id"]
+                )
                 for row in db.execute(
-                    "SELECT title FROM sources WHERE notebook_id = ? "
+                    "SELECT id, title, source_type FROM sources WHERE notebook_id = ? "
                     "AND source_type NOT IN ('memory', 'knowhow') "
                     "ORDER BY created_at LIMIT 50",
                     (notebook_id,),

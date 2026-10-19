@@ -12,6 +12,7 @@ from app.core.activity_time import (
     parse_activity_instant,
 )
 from app.core.config import Settings
+from app.domain.promotion_source import presented_source_title
 from app.models.admin import ADMIN_QUESTIONS_DEFAULT_LIMIT
 from app.models.global_ask import GLOBAL_ASK_PAGE_SIZE
 from app.models.notebooks import NotebookAnalytics
@@ -1775,7 +1776,11 @@ class QueryStore:
             elif row["activity_type"] == "source":
                 item = {
                     **common,
-                    "display_title": row["display_title"],
+                    # Retained rows snapshot the title as it was shown then; a
+                    # promotion source retained under the old wording is mapped.
+                    "display_title": presented_source_title(
+                        row["display_title"], source_type=row["source_type"]
+                    ),
                     "file_name": row["file_name"],
                     "source_type": row["source_type"],
                     "parse_status": row["parse_status"],
@@ -2272,7 +2277,9 @@ class QueryStore:
                 if len(hits) < cap else ()
             )
             for row in source_rows:
-                label = row["title"] or row["file_name"]
+                label = presented_source_title(
+                    row["title"], source_type=row["source_type"], source_id=row["id"]
+                ) or row["file_name"]
                 body = row["summary"] or row["file_name"] or row["title"]
                 hits.append(
                     SearchHit(
@@ -2294,7 +2301,10 @@ class QueryStore:
                 if len(hits) < cap else ()
             )
             for row in element_rows:
-                label = f"{row['source_title']} · {row['location_label']}"
+                label = (
+                    f"{presented_source_title(row['source_title'], source_id=row['source_id'])}"
+                    f" · {row['location_label']}"
+                )
                 hits.append(
                     SearchHit(
                         scope="Element",

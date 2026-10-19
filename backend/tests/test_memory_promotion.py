@@ -785,7 +785,7 @@ def test_approval_binds_only_server_validated_source_element_evidence(
         ).fetchone()["text"]
     assert source == {
         "notebook_id": base.id,
-        "title": "晋升自个人记忆：Verified claim",
+        "title": "收录自个人记忆：Verified claim",
         "source_type": "promotion",
     }
     assert element_text == "Verified source statement."

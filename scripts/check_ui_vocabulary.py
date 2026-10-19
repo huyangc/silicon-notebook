@@ -33,6 +33,15 @@ a user's screen, and all of them are scanned:
      `display_name` the model-service status card prints verbatim. Names an
      operator types into their own TOML are deployment data and out of reach.
 
+  7. backend **promotion source titles** — a public library's synthetic
+     「收录自：<原标题>」 sources are named by `PROMOTION_TITLE_PREFIX` /
+     `MEMORY_PROMOTION_TITLE_PREFIX` in `backend/app/domain/promotion_source.py`; the
+     title is shown verbatim as the source's name (source list, detail, search,
+     activity). See `PROMOTION_TITLE_MODULE`. The `LEGACY_*` prefixes in the same
+     module are the storage spelling of titles written before the 2026-10-19
+     wording ruling (the sealed v88 / 0068 migrations still write them); readers map
+     them to the current spelling, so they never reach a screen and are not scanned.
+
   For the backend channels (2, 3, 5) the copy does not have to be a literal at the
   call site: `_IndirectCopy` follows variables, conditionals, concatenation,
   `%`/`.format`, `X.get(k, default)`, module constants and module-helper returns.
@@ -219,6 +228,12 @@ SERVICE_LABEL_DICTS = (
 SERVICE_LABEL_TEMPLATE = ROOT / "model-services.example.toml"
 # 2026-10:ROLE_LABELS 6 条 + 模板 4 条。
 MIN_SERVICE_LABELS = 8
+
+# —— 第七条通道:公共库「收录自」合成来源的标题前缀 ——————————————————————
+# 前缀常量的值就是来源标题的开头,标题原样上屏。只扫 PROMOTION_TITLE_NAMES 点名的两个
+# 模块顶层常量;`LEGACY_*` 是存量标题的存储拼写(读时映射成新前缀),不在此列。
+PROMOTION_TITLE_MODULE = ROOT / "backend" / "app" / "domain" / "promotion_source.py"
+PROMOTION_TITLE_NAMES = ("PROMOTION_TITLE_PREFIX", "MEMORY_PROMOTION_TITLE_PREFIX")
 
 # ASCII acronyms/words: matched only when not glued to another ASCII letter, so
 # identifiers (currentNotebook, MemoryPanel, schemaBusy, PKG) cannot trip them.
@@ -1028,6 +1043,36 @@ def scan_workload_labels(path: Path, name: str | None = None) -> tuple[int, Hits
     return sites, hits
 
 
+def scan_promotion_title_prefixes(path: Path) -> tuple[int, Hits]:
+    """Blacklisted jargon in the promotion source title prefixes (seventh channel).
+
+    Returns (constants found, hits): every name in ``PROMOTION_TITLE_NAMES`` must
+    be a module-level assignment resolvable to string text; one that is missing
+    is simply not counted (the caller's floor turns that into a hard failure),
+    one that cannot be resolved is reported as ``UNRESOLVED_LABEL``.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    resolver = _IndirectCopy(tree)
+    sites = 0
+    hits: Hits = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names = [node.target.id]
+        else:
+            continue
+        if node.value is None or not set(names) & set(PROMOTION_TITLE_NAMES):
+            continue
+        sites += 1
+        hits += _label_hits(
+            node.value.lineno,
+            _strict_label_units(node.value, resolver),
+            ast.unparse(node.value),
+        )
+    return sites, hits
+
+
 def scan_service_label_template(path: Path) -> tuple[int, Hits]:
     """Blacklisted jargon in the shipped template's ``services.*.display_name``.
 
@@ -1274,6 +1319,21 @@ def main(argv: list[str] | None = None) -> int:
                 f"  {_rel(path)}:{line}: 「{term}」in model service label: {snippet!r}"
             )
 
+    # 第七条通道:「收录自」合成来源的标题前缀。按 ROOT 写死,理由同第五条。
+    if not PROMOTION_TITLE_MODULE.exists():
+        print(
+            f"check_ui_vocabulary: promotion-title module missing: "
+            f"{_rel(PROMOTION_TITLE_MODULE)} (update PROMOTION_TITLE_MODULE)",
+            file=sys.stderr,
+        )
+        return 1
+    promotion_sites, promotion_hits = scan_promotion_title_prefixes(PROMOTION_TITLE_MODULE)
+    for line, term, snippet in promotion_hits:
+        violations.append(
+            f"  {_rel(PROMOTION_TITLE_MODULE)}:{line}: 「{term}」in promotion source "
+            f"title prefix: {snippet!r}"
+        )
+
     note_files = _release_note_files()
     for path in note_files:
         rel = _rel(path)
@@ -1312,6 +1372,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    if promotion_sites < len(PROMOTION_TITLE_NAMES):
+        print(
+            f"check_ui_vocabulary: only {promotion_sites} promotion title prefixes found "
+            f"in {_rel(PROMOTION_TITLE_MODULE)} (expected {len(PROMOTION_TITLE_NAMES)}). "
+            f"{' / '.join(PROMOTION_TITLE_NAMES)} 是不是改名 / 换了写法?同步 "
+            f"PROMOTION_TITLE_NAMES,别删这条通道来「修」它。",
+            file=sys.stderr,
+        )
+        return 1
+
     if service_sites < MIN_SERVICE_LABELS:
         print(
             f"check_ui_vocabulary: only {service_sites} shipped model-service labels "
@@ -1337,7 +1407,8 @@ def main(argv: list[str] | None = None) -> int:
         f"{trace_sites} trace summaries + "
         f"{display_sites} display fields + "
         f"{label_sites} workload labels + "
-        f"{service_sites} model service labels "
+        f"{service_sites} model service labels + "
+        f"{promotion_sites} promotion title prefixes "
         f"({len(CJK_TERMS) + len(ASCII_TERMS)} blacklisted terms)"
     )
     if extra_roots:

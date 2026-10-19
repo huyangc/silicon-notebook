@@ -1467,7 +1467,7 @@ class GovernanceStore:
             raise ValueError("晋升候选缺少目标公共知识库(target_base_id)")
         require_live_promotion_target(connection, base_nb_id)
         # B-12 (PR-E8): see the PostgreSQL twin -- the cards are rewritten to
-        # the public library's own "晋升自个人记忆：<title>" source.
+        # the public library's own "收录自个人记忆：<title>" source.
         memory_row = connection.execute(
             "SELECT title FROM memory_items WHERE id=?", (cand["object_id"],)
         ).fetchone()
@@ -1622,7 +1622,7 @@ class GovernanceStore:
             raise MemoryPromotionRefused(PROMOTION_APPROVE_MESSAGE)
         src_payload = json.loads(src["payload"] or "{}")
         # B-12 (PR-E8): see the PostgreSQL twin -- only these incoming entries
-        # are rewritten to the public library's own "晋升自：<title>" sources.
+        # are rewritten to the public library's own "收录自：<title>" sources.
         src_evidence = materialize_promotion_evidence(
             connection, base_nb_id, json.loads(src["evidence"] or "[]"), now,
             fallback_origin_notebook_id=str(cand["notebook_id"] or ""),

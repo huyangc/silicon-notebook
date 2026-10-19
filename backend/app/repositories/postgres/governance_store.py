@@ -1600,7 +1600,7 @@ class GovernanceStore:
             raise ValueError("晋升候选缺少目标公共知识库(target_base_id)")
         require_live_promotion_target(connection, base_nb_id)
         # B-12 (PR-E8): the evidence cards point at the member's notebook; the
-        # public library gets its own "晋升自个人记忆：<title>" source and one
+        # public library gets its own "收录自个人记忆：<title>" source and one
         # element per card, and the cards are rewritten to point at them
         # (app.domain.promotion_provenance).
         memory_row = connection.execute(
@@ -1772,7 +1772,7 @@ class GovernanceStore:
             raise MemoryPromotionRefused(PROMOTION_APPROVE_MESSAGE)
         src_payload = json_value(src["payload"], {})
         # B-12 (PR-E8): the promoted evidence points at the public library's
-        # own "晋升自：<title>" sources; on a merge only these incoming entries
+        # own "收录自：<title>" sources; on a merge only these incoming entries
         # are rewritten (app.domain.promotion_provenance).
         src_evidence = materialize_promotion_evidence(
             connection, base_nb_id, json_value(src["evidence"], []), now,

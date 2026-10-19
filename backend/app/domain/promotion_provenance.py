@@ -23,8 +23,10 @@ The rule, defined once here and applied by both backends' approval paths
   and every group gets ONE synthetic source in the public library,
   ``source_type = 'promotion'`` (visible: it is listed, enters the ceiling of a
   mounted run, can be deleted, cannot be re-parsed), titled
-  ``晋升自：<original title>`` (a Memory promotion: ``晋升自个人记忆：<Memory
-  title>``; approval publishes it, by design).
+  ``收录自：<original title>`` (a Memory promotion: ``收录自个人记忆：<Memory
+  title>``; approval publishes it, by design).  Titles written before the
+  2026-10-19 wording ruling say ``晋升自`` in storage and are mapped when read
+  (``promotion_source.presented_source_title``); they are never rewritten.
 * An entry whose original is a member's MEMORY source is dropped (fail
   closed, ruling M1: the approval paths refuse Memory-derived objects, so only
   pre-guard data can carry one; nothing of a Memory is published by this
@@ -55,6 +57,8 @@ from typing import AbstractSet, Any, Mapping, Optional, Sequence, Tuple
 
 # The type value and the titles live in the readers' leaf module; re-exported.
 from app.domain.promotion_source import (  # noqa: F401 - re-exported
+    LEGACY_MEMORY_PROMOTION_TITLE_PREFIX,
+    LEGACY_PROMOTION_TITLE_PREFIX,
     MEMORY_PROMOTION_TITLE_PREFIX,
     PROMOTION_SOURCE_ID_PREFIX,
     PROMOTION_SOURCE_TYPE,

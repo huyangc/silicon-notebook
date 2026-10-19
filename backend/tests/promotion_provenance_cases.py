@@ -140,7 +140,7 @@ def approval_writes_library_owned_provenance(world: World) -> None:
         "SELECT notebook_id,title,source_type,status,parse_status FROM sources "
         "WHERE id=?", (world.promotion_source,))
     assert source == {
-        "notebook_id": world.base, "title": f"晋升自：{ORIGIN_TITLE}",
+        "notebook_id": world.base, "title": f"收录自：{ORIGIN_TITLE}",
         "source_type": PROMOTION_SOURCE_TYPE, "status": "active",
         # terminal: the browser never polls it as "still processing"
         "parse_status": "extracted",
@@ -227,7 +227,7 @@ def a_merge_rewrites_only_the_incoming_entries(world: World) -> None:
 
 
 def a_memory_promotion_is_titled_after_the_memory(world: World) -> None:
-    """A Memory promotion publishes one "晋升自个人记忆：<title>" source; its
+    """A Memory promotion publishes one "收录自个人记忆：<title>" source; its
     cards (the Memory's verified citations) become its elements."""
     from app.models.schemas import AskResponse, Citation
     from tests.answer_owner_testkit import save_owned_answer
@@ -253,7 +253,7 @@ def a_memory_promotion_is_titled_after_the_memory(world: World) -> None:
     result = repo._runtime.knowledge_governance.approve_promotion(proposal["id"])
     expected = promotion_source_id(world.base, memory_origin_key(memory.id))
     (source,) = world.rows("SELECT title,source_type FROM sources WHERE id=?", (expected,))
-    assert source == {"title": "晋升自个人记忆：增益记忆",
+    assert source == {"title": "收录自个人记忆：增益记忆",
                       "source_type": PROMOTION_SOURCE_TYPE}
     for base_object in result["base_object_ids"]:
         entries = world.evidence(base_object)
@@ -475,7 +475,7 @@ def single_notebook_ask_through_a_mount_cites_the_promoted_object(world: World) 
     labels = [getattr(ref, "label", "") or getattr(ref, "source_title", "")
               for ref in cited]
     assert any(ORIGIN_TITLE in label for label in labels), labels
-    assert not any(label.startswith("晋升自") for label in labels), labels
+    assert not any(label.startswith(("晋升自", "收录自")) for label in labels), labels
     for ref in _references(response):
         assert ref.source_id != "s-priv"
         assert not str(ref.element_id or "").startswith("s-priv")
@@ -494,7 +494,7 @@ def global_ask_cites_the_promoted_object(world: World) -> None:
     labels = [getattr(ref, "label", "") or getattr(ref, "source_title", "")
               for ref in cited]
     assert any(ORIGIN_TITLE in label for label in labels), labels
-    assert not any(label.startswith("晋升自") for label in labels), labels
+    assert not any(label.startswith(("晋升自", "收录自")) for label in labels), labels
     assert "citation_check" not in result.answer.model_dump(mode="json")
 
 
@@ -507,3 +507,66 @@ def the_promoters_private_notebook_can_go(world: World) -> None:
     assert world.rows("SELECT id FROM notebooks WHERE id=?", (world.private,)) == []
     assert world.evidence(base_object) == before
     single_notebook_ask_through_a_mount_cites_the_promoted_object(world)
+
+
+LEGACY_PREFIX = "晋升自："
+CURRENT_PREFIX = "收录自："
+
+
+def a_stored_legacy_title_is_shown_with_the_current_prefix(world: World) -> None:
+    """2026-10-19 wording ruling: promotion sources written before it keep the
+    stored title 「晋升自：…」 (nothing is rewritten); every surface that names
+    a source shows 「收录自：…」, and only the leading prefix is mapped."""
+    from app.services.source_display import source_display_title
+
+    repo, runtime = world.repo, world.repo._runtime
+    source_id = world.promotion_source
+    legacy = f"{LEGACY_PREFIX}{ORIGIN_TITLE}"
+    shown = f"{CURRENT_PREFIX}{ORIGIN_TITLE}"
+    world.write("UPDATE sources SET title=? WHERE id=?", (legacy, source_id))
+    # a document of the library that merely carries the same words is the
+    # user's own title and is left alone
+    seed_document(repo, world.sql, world.base, "s-own", f"{LEGACY_PREFIX}我自己的文档",
+                  [f"{TERM} 自有"])
+
+    # storage is untouched ...
+    (stored,) = world.rows("SELECT title FROM sources WHERE id=?", (source_id,))
+    assert stored["title"] == legacy
+    # ... the source list / detail / metadata read through the one mapping
+    listed = {item.id: item for item in repo.list_sources(world.base)}
+    assert listed[source_id].title == shown
+    assert listed[source_id].display_title == shown
+    assert listed["s-own"].title == f"{LEGACY_PREFIX}我自己的文档"
+    assert listed["s-own"].display_title == f"{LEGACY_PREFIX}我自己的文档"
+    detail = repo.get_source(source_id)
+    assert (detail.title, detail.display_title) == (shown, shown)
+    metadata = runtime.source_store.source_metadata([source_id, "s-own"])
+    assert source_display_title(metadata[source_id]) == shown
+    assert source_display_title(metadata["s-own"]) == f"{LEGACY_PREFIX}我自己的文档"
+    assert runtime.source_store.source_titles([source_id, "s-own"]) == {
+        source_id: shown, "s-own": f"{LEGACY_PREFIX}我自己的文档"}
+    # the notebook search box labels its hits with the shown title
+    hits = repo.search_notebook(world.base, TERM).hits
+    labels = {hit.label for hit in hits if hit.source_id == source_id}
+    assert shown in labels or f"{shown} · 第1节" in labels, labels
+    assert not any(
+        hit.label.startswith(LEGACY_PREFIX) for hit in hits if hit.source_id == source_id
+    ), [h.label for h in hits]
+    # the user's own document titled with the same words is not remapped
+    assert any(hit.label.startswith(f"{LEGACY_PREFIX}我自己的文档") for hit in hits)
+    # the share preview lists titles verbatim to prospective copiers
+    _owner, titles = runtime.sharing_store.shared_preview_rows(world.base)
+    assert shown in titles and legacy not in titles
+    assert f"{LEGACY_PREFIX}我自己的文档" in titles
+
+    # only the LEADING prefix is mapped: a body that talks about 晋升 stays
+    body = f"{LEGACY_PREFIX}关于晋升自：的说明"
+    world.write("UPDATE sources SET title=? WHERE id=?", (body, source_id))
+    assert repo.get_source(source_id).title == f"{CURRENT_PREFIX}关于晋升自：的说明"
+    # the Memory spelling too
+    world.write("UPDATE sources SET title=? WHERE id=?",
+                ("晋升自个人记忆：增益记忆", source_id))
+    assert repo.get_source(source_id).title == "收录自个人记忆：增益记忆"
+    # and a source with the current spelling is returned as it is
+    world.write("UPDATE sources SET title=? WHERE id=?", (shown, source_id))
+    assert repo.get_source(source_id).title == shown
