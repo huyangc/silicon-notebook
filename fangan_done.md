@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-10-15（新增 §59 技术债整改程序：全局回答读法、取样通道批量读、Knowhow 面板怪癖、门面退役；此前 2026-10-08 新增 §55 知识图谱里的 Memory 只属于本人；§56 会话公开分享先告知个人记忆，公开页每次打开复核用到的库；§57 晋升对象由公共知识库自己承载出处；§58 挂载只对能读被挂库的人生效；此前 2026-10-07 新增 §54 检索各腿按本次运行的来源天花板取数；此前 2026-09-30 新增 §52 笔记本拷贝不带 Memory；§53 成员退出与 Memory 的彻底删除；此前 2026-09-29 新增 §47 当前库保底席位与原文段下限；§48 全局问答引用核对：部分失败照常交付；§49 KG 对象定义的来源归因与 KG 详情按查看者过滤；§50 全局问答集合枚举引用按冻结参与集；§51 集合枚举与按篇读取原文认本次勾选的来源）
+更新日期：2026-10-19（新增 §60 MCP 提问的全部笔记本写法与限时回答链接、模型 JSON 按严格 schema 对齐；此前 2026-10-15 新增 §59 技术债整改程序：全局回答读法、取样通道批量读、Knowhow 面板怪癖、门面退役；此前 2026-10-08 新增 §55 知识图谱里的 Memory 只属于本人；§56 会话公开分享先告知个人记忆，公开页每次打开复核用到的库；§57 晋升对象由公共知识库自己承载出处；§58 挂载只对能读被挂库的人生效；此前 2026-10-07 新增 §54 检索各腿按本次运行的来源天花板取数；此前 2026-09-30 新增 §52 笔记本拷贝不带 Memory；§53 成员退出与 Memory 的彻底删除；此前 2026-09-29 新增 §47 当前库保底席位与原文段下限；§48 全局问答引用核对：部分失败照常交付；§49 KG 对象定义的来源归因与 KG 详情按查看者过滤；§50 全局问答集合枚举引用按冻结参与集；§51 集合枚举与按篇读取原文认本次勾选的来源）
 
 对照依据：[产品方案](silicon_notebook_fangan.md)。章节号指向原方案；“扩展”表示交付时延伸能力，不冒称原方案已有独立条款。
 
@@ -491,6 +491,15 @@ Agent profile、opaque token、scope/allowlist/过期与撤销、公开 onboardi
 - **运行期诊断目录可配置（PR #902，C10 → C11）。** lifespan 原把 `.local/diagnostics` 写死为相对仓库根的路径，测试与脚本进入 lifespan 会把 `runtime.json`、`thread-dumps.log` 写进检出目录。新增 `DIAGNOSTICS_DIR`（默认值与旧路径逐字节相同，相对路径锚在仓库根，空值回退默认），`diag.py incident` 新增 `--diagnostics-dir`（显式参数 > 已配置的 `DIAGNOSTICS_DIR` > `<--local>/diagnostics`）；测试进程、冒烟脚本、契约夹具生成器与影子台各自指向一次性目录。回归入口：[目录隔离](backend/tests/test_diagnostics_dir_isolation.py)、[诊断公共件](backend/tests/test_diag_common.py)。
 - **门面（`RepositoryFacade`）退役与协议绑定（S2 批 A / C / D / E / F / B：PR #857 / #870 / #862 / #872 / #906 / #907）。** 只被测试调用的 facade 单跳委托逐批退役，生产经运行时组件（`_runtime.<组件>`）调用，测试改为直调组件，参数逐字不变，生产行为与性能不变：批 A 退 18 个，批 D 退 8 个，批 C 退 7 个（并把 scale builder 弱引用接缝 `incremental_fuse_source` 改接线到生命周期服务，避免被删后融合被静默跳过），批 E 退 6 个身份方法，批 F 退 15 个分享/成员方法并把测试专用的 `add_relations` 挪到测试夹具。随之新增的守卫：facade 公开面双向零松弛、动态引用检查（弱引用接缝、字面量 `getattr` / `hasattr`、经 `._runtime.<组件>.<成员>` 的接缝成员必须仍在组件类上）、协议绑定检查——被当作协议交出去的 facade 不得缺协议声明的方法。协议绑定的既有缺口从 44 条（AskStateStorePort 20、McpMemoryRepository 4、NotebookRepository 20）收到只剩 `NotebookRepository.rerank`（见待办）：靠把 `ask_state_repository()` 的返回类型收窄为只含 `answer_memory_source` 的协议、把 `IdentityRepository` / `NotebookAccessRepository` / `NotebookSharingRepository` 各拆出 facade 实际实现的只读基类、删掉 facade 从未实现的两处协议声明。批 B 最后退 10 个 KG 治理方法（审阅路由走 facade 保留的 `approve_promotion_as_reviewer` / `reject_promotion_as_reviewer`），审计里只测试调用的 facade 方法收到只剩按裁决保留的 `rebuild_notebook_kg` / `relink_notebook_kg`。`ports_protocol_method_count` 975 → 967，`allowed_names` 327 → 262。当前台账见[门面退役台账](docs/superpowers/plans/2026-08-23-facade-retirement-ledger.md)，守卫见[架构边界脚本](scripts/check_architecture_boundaries.py)与其[基线](scripts/architecture_boundary_baseline.json)。
 - **测试里的死代码。** `backend/tests/test_diag_unified.py` 的 `_command_matrix` 无任何引用，已删除。
+
+## 60. MCP 提问的全部笔记本写法与限时回答链接；模型 JSON 按严格 schema 对齐（2026-10-15）
+
+**已交付，2026-10-15；方案 §19.3 与模型调用扩展。** 技术债整改程序移交（§59）之后合入、此前未入账的四项。合同由所属权威文档承载，本节只登记完成状态与回归入口。
+
+- **MCP `ask` 接受 `notebooks=["*"]`（PR #913）。** #830/#831 把省略 `notebooks` 定为默认笔记本后，原「全部授权笔记本」的写法随之消失；用户裁决保留省略 = 默认笔记本，另加显式的 `"*"`：白名单内、token 主人当前仍可读的全部笔记本，一律走全局问答，范围由服务端既有的 `all` 模式解析，不由 MCP 展开 id。`"*"` 与其他 id 混传、解析超过上限等边界均返回可操作的拒绝。当前合同见[Memory 与 Agent MCP][memory]；回归入口：[全局问答 MCP](backend/tests/test_global_ask_mcp.py)、[全局问答准入](backend/tests/test_global_ask_admission.py)。
+- **MCP 回答的限时链接（PR #915）。** `ask` / `get_ask` 新增 `delivery="link"`：已回答时只返回确定性生成的纯文本摘要和一个限时匿名链接（`/c/alnk-…`，每次打开按签发 token 的当前权限复核，过期且行仍在时返回 410），供即时聊天工具这类不渲染 Markdown 的客户端使用；默认 `inline` 的行为与响应不变。存储为新表 `answer_links`（SQLite v94 / PostgreSQL 0074），Agent token 新增「允许签发限时回答链接」开关。当前合同见[Memory 与 Agent MCP][memory]与[问答会话公开分享护栏](docs/product-and-api_zh.md#问答会话公开分享护栏)，配置见[部署][deploy]，接入步骤见 [Agent MCP SOP](docs/agent-mcp-memory-sop_zh.md)；设计与实施计划：[设计](docs/superpowers/specs/2026-10-15-mcp-answer-link-design_zh.md)、[计划](docs/superpowers/plans/2026-10-15-mcp-answer-link-plan_zh.md)。
+- **模型 JSON 校验对齐与 JSON Schema 能力协商（PR #914）。** 模型回复通过共享 JSON 边界后仍可能被各消费方读歪（数字 id 覆盖字符串 id、容器被当成正文、动作越出词表等），改为在各自的消费方收窄并补用例；每个模型服务在首次调度使用时协商一次 JSON Schema 能力，支持的服务走严格 wire schema 加本地校验，不支持或无法确认的保持普通 JSON。当前合同见[模型 JSON 恢复与流保活](docs/product-and-api_zh.md#模型-json-恢复与流保活)与[部署][deploy]。
+- **JSON hint 与严格投影、消费方对齐（PR #916）。** 对 #914 的逐条复核：每个 hint 与其提示词、投影出的严格 schema 和消费方三方对齐——修掉一处真实拒收（Agent profile 的 `retire:false`）、提示词里「省略」与严格 schema 的矛盾（改为「写 null」）、根字段枚举误收空串；并按约定简化回复形状（KG 抽取的边改按节点数组下标引用、refine 改为 `{"drop":[…]}`、reflect 收成单一 `query` 等）。hint 文本是模型缓存键的一部分，升级后第一次建图会对每个窗口重新调用模型。回归入口：[hint 投影快照](backend/tests/test_model_schema_hint_snapshots.py)。
 
 [product]: docs/product-and-api_zh.md
 [flow]: docs/product-and-api_zh.md#产品流程
