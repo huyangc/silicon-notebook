@@ -479,6 +479,26 @@ test("诊断数据默认收起，原有区块都在里面", async () => {
   expect(details!.contains(screen.getByRole("heading", { name: "已通过", level: 3 }))).toBe(false);
 });
 
+test("诊断数据里每一张表都在自己的横向滚动容器里：窄屏上面板本身不跟着横向滚动", async () => {
+  // 375 宽下「合并收敛率」等表比面板宽;没有这层容器时整个面板能横向滚一百多像素
+  // (收起状态也一样)。jsdom 量不到宽度,这里钉结构,容器与诊断区的 CSS 由
+  // tests/guards/kg-analysis-narrow-overflow-guard.test.mjs 钉。
+  const { container } = renderView();
+  await waitFor(() => expect(blockByTitle("关联稀疏的来源").querySelector("table")).not.toBeNull());
+  const details = container.querySelector("details.kg-findings-diagnostics") as HTMLElement;
+  const tables = Array.from(details.querySelectorAll("table"));
+  // 合并收敛率、关联是怎样形成的、关联稀疏的来源。
+  expect(tables.length).toBeGreaterThanOrEqual(3);
+  for (const table of tables) {
+    const title = table.closest(".kg-analysis-block")?.querySelector("h3")?.textContent ?? "";
+    expect(table.parentElement?.classList.contains("kg-analysis-table-scroll"), title).toBe(true);
+  }
+  // 俯瞰图是按容器宽度缩放的 SVG,不是固定宽度。
+  const map = details.querySelector("svg.kg-analysis-map");
+  expect(map).not.toBeNull();
+  expect(map!.getAttribute("width")).toBeNull();
+});
+
 test("合并代次无法验证不谎报成旧版本，也不诱导用户反复更新", async () => {
   const current = report();
   vi.mocked(fetchKgAnalysis).mockResolvedValueOnce(report({

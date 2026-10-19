@@ -884,32 +884,34 @@ function ConvergenceBlock({
         <EmptyPayload text="这份数据已经生成，但当前没有任何可统计的条目。" />
       ) : (
         <>
-          <table className="kg-analysis-table">
-            <thead>
-              <tr>
-                <th scope="col">类型</th>
-                <th scope="col">{memberUnit}</th>
-                <th scope="col">{clusterUnit}</th>
-                <th scope="col">收敛率</th>
-              </tr>
-            </thead>
-            <tbody>
-              {table.rows.map((row) => (
-                <tr key={row.key}>
-                  <th scope="row">{row.label}</th>
-                  <td>{formatCount(row.memberRows)}</td>
-                  <td>{formatCount(row.clusters)}</td>
-                  <td>{formatPercent(row.rate)}</td>
+          <div className="kg-analysis-table-scroll">
+            <table className="kg-analysis-table">
+              <thead>
+                <tr>
+                  <th scope="col">类型</th>
+                  <th scope="col">{memberUnit}</th>
+                  <th scope="col">{clusterUnit}</th>
+                  <th scope="col">收敛率</th>
                 </tr>
-              ))}
-              <tr className="kg-analysis-table-total">
-                <th scope="row">{table.total.label}</th>
-                <td>{formatCount(table.total.memberRows)}</td>
-                <td>{formatCount(table.total.clusters)}</td>
-                <td>{formatPercent(table.total.rate)}</td>
-              </tr>
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {table.rows.map((row) => (
+                  <tr key={row.key}>
+                    <th scope="row">{row.label}</th>
+                    <td>{formatCount(row.memberRows)}</td>
+                    <td>{formatCount(row.clusters)}</td>
+                    <td>{formatPercent(row.rate)}</td>
+                  </tr>
+                ))}
+                <tr className="kg-analysis-table-total">
+                  <th scope="row">{table.total.label}</th>
+                  <td>{formatCount(table.total.memberRows)}</td>
+                  <td>{formatCount(table.total.clusters)}</td>
+                  <td>{formatPercent(table.total.rate)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
           <p className="kg-analysis-note">
             收敛率 =（{memberUnit} − {clusterUnit}）÷ {memberUnit}。
             其中 {countText(table.emptyClusters, artifact.units, "empty_clusters")}
@@ -990,29 +992,31 @@ function RelationProvenanceBlock({
         <EmptyPayload text="这份数据已经生成，但当前没有任何关联可统计。" />
       ) : (
         <>
-          <table className="kg-analysis-table">
-            <thead>
-              <tr>
-                <th scope="col">形成方式</th>
-                <th scope="col">{unitFor(artifact.units, "counted")}</th>
-                <th scope="col">占可用关联</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.rows.map((row) => (
-                <tr key={row.key}>
-                  <th scope="row">{row.label}</th>
-                  <td>{formatCount(row.count)}</td>
-                  <td>{formatPercent(row.share)}</td>
+          <div className="kg-analysis-table-scroll">
+            <table className="kg-analysis-table">
+              <thead>
+                <tr>
+                  <th scope="col">形成方式</th>
+                  <th scope="col">{unitFor(artifact.units, "counted")}</th>
+                  <th scope="col">占可用关联</th>
                 </tr>
-              ))}
-              <tr className="kg-analysis-table-total">
-                <th scope="row">可用关联合计</th>
-                <td>{formatCount(data.counted)}</td>
-                <td>{data.counted > 0 ? "100%" : "—"}</td>
-              </tr>
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {data.rows.map((row) => (
+                  <tr key={row.key}>
+                    <th scope="row">{row.label}</th>
+                    <td>{formatCount(row.count)}</td>
+                    <td>{formatPercent(row.share)}</td>
+                  </tr>
+                ))}
+                <tr className="kg-analysis-table-total">
+                  <th scope="row">可用关联合计</th>
+                  <td>{formatCount(data.counted)}</td>
+                  <td>{data.counted > 0 ? "100%" : "—"}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
           <p className="kg-analysis-note">
             自动补连占 {formatPercent(data.relinkShare)}。另有
             {" "}{countText(data.rejected, artifact.units, "rejected")}已被拒绝、

@@ -12122,8 +12122,10 @@ button.tag:hover {
 
 /* 来源表列多,窄屏要能横向滚动。⚠ 不能给 <table> 直接加 display:block ——那会让它
    退化成块盒、内部再生成一个收缩到内容宽度的匿名表格盒,width:100% 随之失效、表格
-   不再撑满卡片。所以滚动条挂在外层容器上。 */
+   不再撑满卡片。所以滚动条挂在外层容器上。诊断数据里的每一张表都包在这一层里:
+   窄屏上表格在自己的容器里横向滚动,面板本身不跟着横向滚动。 */
 .kg-analysis-table-scroll {
+  max-width: 100%;
   overflow-x: auto;
 }
 
@@ -12525,7 +12527,10 @@ button.tag:hover {
   font-size: 13px;
 }
 
+/* 诊断数据区不被子元素撑宽:超宽的表在自己的 .kg-analysis-table-scroll 里滚动。 */
 .kg-findings-diagnostics {
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: #fff;
@@ -12570,6 +12575,7 @@ button.tag:hover {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  min-width: 0;
   padding: 0 12px 12px;
 }
 

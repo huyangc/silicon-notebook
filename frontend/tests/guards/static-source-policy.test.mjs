@@ -104,6 +104,12 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // 1024/768/375 宽下横向溢出到 1102px。jsdom 不做 grid/flex 布局(rect 恒为 0),样式表
   // 是唯一诚实的输入。
   "tests/guards/app-shell-column-guard.test.mjs",
+  // 同上,只读 globals.css:断言图谱分析诊断数据里的表在自己的 `.kg-analysis-table-scroll`
+  // 里横向滚动、诊断区不被子元素撑宽。这条守卫存在的理由是一个真实缺陷——375 宽下「合并
+  // 收敛率」表比面板宽,整个面板能横向滚约 120px(收起状态也一样)。jsdom 不做布局,样式表
+  // 文本是唯一诚实的输入;结构那侧(每张表的父元素就是滚动容器)由
+  // tests/component/kg-analysis-view.component.test.tsx 真渲染断言。
+  "tests/guards/kg-analysis-narrow-overflow-guard.test.mjs",
   // 同上,只读 globals.css:断言引用附图预览的缩放内容盒以 !important 铺满舞台。这条守卫
   // 存在的理由就是一个真实缺陷——react-zoom-pan-pinch 把自己那份单类 CSS module 在运行时
   // 注入 <head> 末尾,同特指度下它赢,声明好的居中规则整条失效,图片钉死在舞台左上角。
