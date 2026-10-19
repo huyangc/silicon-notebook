@@ -174,6 +174,126 @@ def test_warm_start_from_its_own_output_is_a_fixed_point():
     assert _snapshot(graph.ids, again) == _snapshot(graph.ids, warm)
 
 
+def _assert_same_partition(first, second) -> None:
+    assert _boards(second) == _boards(first)
+    assert np.array_equal(second.board_of_node, first.board_of_node)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3])
+def test_a_discarded_round_that_differs_from_its_start_leaves_a_fixed_point(monkeypatch, seed):
+    """稀疏的植入图上,作废的那一轮与它的起点**不同**——这正是「作废时输出起点、而不是输出
+    这一轮的结果」要守的那条路。把增益下限调到够不着,让作废尽早发生:以冷启动输出热启动,
+    第一轮做出同一个作废判断,原样输出。"""
+    graph = _Graph()
+    _planted(graph, "s-", seed, groups=12, size=25, p_in=0.15, p_out=0.01, max_weight=2)
+    monkeypatch.setattr(kg_partition, "LEIDEN_MIN_ROUND_GAIN", 10.0)
+    cold = _partition(graph)
+    _assert_same_partition(cold, _partition(graph, previous=_published(cold), warm=True))
+
+
+def _cliques_with_dangling_pairs(graph: _Graph, seed: int) -> None:
+    """6 个近 K8 团连成链,每团挂 1–3 个悬挂对(对内权 2–8,以权 1 挂到团上):大分量里
+    混着成员数不足 min_size 的社区。"""
+    rng = np.random.default_rng(seed)
+    cliques = []
+    for c in range(6):
+        nodes = [f"c{c}-{i}" for i in range(8)]
+        for a, b in itertools.combinations(nodes, 2):
+            if rng.random() < 0.85:
+                graph.edge(a, b)
+        cliques.append(nodes)
+        for p in range(int(rng.integers(1, 4))):
+            x, y = f"c{c}-p{p}x", f"c{c}-p{p}y"
+            graph.edge(x, y, int(rng.integers(2, 9)))
+            graph.edge(x, nodes[int(rng.integers(0, 8))])
+            if rng.random() < 0.5:
+                graph.edge(y, nodes[int(rng.integers(0, 8))])
+    for c in range(5):
+        graph.edge(cliques[c][0], cliques[c + 1][7])
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3])
+def test_fixed_point_holds_with_sub_min_size_communities_inside_a_large_component(seed):
+    """大分量里有成员数不足 min_size 的社区时,它们不发布、下一代从单点起步——起点形式必须
+    把它们拆成单点,停下时的起点才与下一代的起点逐字相同。"""
+    graph = _Graph()
+    _cliques_with_dangling_pairs(graph, seed)
+    cold = _partition(graph)
+    warm = _partition(graph, previous=_published(cold), warm=True)
+    _assert_same_partition(cold, warm)
+    _assert_same_partition(warm, _partition(graph, previous=_published(warm), warm=True))
+
+
+def test_a_board_left_disconnected_is_split_in_the_start_not_after_the_fact(monkeypatch):
+    """上一代把只挂在 Y 上的 f1–f2 留在了 X 的板块里。拆不连通的社区发生在**起点**里:
+    f1–f2 这一代就从起点里的单点并进 Y,下一代原样不变。若改成输出前的后处理,这一代只会
+    把它们踢出板块(增益够不着下限,并进 Y 的那一轮被作废),下一代才并进 Y——不动点破。"""
+    graph = _Graph()
+    x_nodes = _clique(graph, "x-", 8)
+    y_nodes = _clique(graph, "y-", 8)
+    graph.edge(x_nodes[0], y_nodes[0])
+    graph.edge("f1", "f2")
+    for f in ("f1", "f2"):
+        graph.edge(f, y_nodes[1])
+        graph.edge(f, y_nodes[2])
+    previous = {m: "cm-x" for m in x_nodes + ["f1", "f2"]}
+    previous.update({m: "cm-y" for m in y_nodes})
+    monkeypatch.setattr(kg_partition, "LEIDEN_MIN_ROUND_GAIN", 10.0)
+    first = _partition(graph, previous=previous, warm=True)
+    by_key = {b.key: set(b.members) for b in first.boards}
+    assert by_key["cm-y"] == set(y_nodes) | {"f1", "f2"}
+    assert by_key["cm-x"] == set(x_nodes)
+    _assert_same_partition(first, _partition(graph, previous=_published(first), warm=True))
+
+
+def test_every_published_board_is_internally_connected():
+    graph = _Graph()
+    _planted(graph, "g-", 13, groups=8, size=20, p_in=0.2, p_out=0.02, max_weight=2)
+    _cliques_with_dangling_pairs(graph, 5)
+    result = _partition(graph)
+    adjacency: Dict[str, set] = {}
+    for a, b, _ in graph.edges:
+        adjacency.setdefault(a, set()).add(b)
+        adjacency.setdefault(b, set()).add(a)
+    for board in result.boards:
+        members = set(board.members)
+        seen = {board.members[0]}
+        frontier = [board.members[0]]
+        while frontier:
+            node = frontier.pop()
+            for nxt in adjacency[node] & members:
+                if nxt not in seen:
+                    seen.add(nxt)
+                    frontier.append(nxt)
+        assert seen == members, board.key
+
+
+def test_a_round_that_boards_more_nodes_but_lowers_modularity_is_discarded(monkeypatch):
+    """「让更多节点进入板块」那半条要求模块度不降。用一个假的 Leiden 把哑铃两团连同挂在 A 上
+    的 z 并成一个社区(连通,归一之后仍是一块):进板块的节点多了一个,模块度却明显下降——
+    这一轮必须作废。没有「不降」这个条件时它会被接受(也就能与「模块度回升、少进板块」的
+    轮次来回振荡)。"""
+    graph = _Graph()
+    a_nodes, b_nodes = _barbell(graph, "", 6)            # a-00..a-05 / b-00..b-05
+    graph.edge(a_nodes[1], "z")
+    previous = {m: "cm-a" for m in a_nodes}
+    previous.update({m: "cm-b" for m in b_nodes})
+    ids = sorted(graph.ids)
+
+    class _Round:
+        def __init__(self, membership):
+            self.membership = membership
+
+    def fake_leiden(self, **kwargs):
+        return _Round([0] * len(kwargs["initial_membership"]))
+
+    monkeypatch.setattr(igraph.Graph, "community_leiden", fake_leiden)
+    result = _run(ids, graph.edges, previous=previous, warm=True)
+    assert {b.key: set(b.members) for b in result.boards} == {
+        "cm-a": set(a_nodes), "cm-b": set(b_nodes)}
+    assert result.board_of_node[ids.index("z")] == -1
+
+
 # ------------------------------------------------------------------ ② 热启动保留给定的那一种
 
 
@@ -246,9 +366,12 @@ def test_edge_arrival_order_direction_and_node_order_do_not_change_the_result():
 def test_duplicate_edges_are_summed_like_one_weighted_edge():
     graph = _Graph()
     _planted(graph, "d-", 3, groups=3, size=12, p_in=0.4, p_out=0.05, max_weight=3)
-    split = []
-    for a, b, w in graph.edges:
-        split.extend([(a, b, 1), (b, a, w - 1)] if w > 1 else [(a, b, w)])
+    # 拆开的两份不相邻:先喂所有 (a, b, 1),再按另一种顺序喂所有反向的 (b, a, w-1)。
+    first_halves = [(a, b, 1) for a, b, w in graph.edges]
+    second_halves = [(b, a, w - 1) for a, b, w in graph.edges if w > 1]
+    random.Random(4).shuffle(second_halves)
+    split = first_halves + second_halves
+    assert len(second_halves) > 10
     assert _snapshot(graph.ids, _run(graph.ids, split)) == _snapshot(graph.ids, _partition(graph))
 
 
@@ -472,6 +595,12 @@ def test_previous_partition_builder_is_independent_of_row_order_and_counts_vanis
     builder.add(0, "k1")
     with pytest.raises(ValueError):
         builder.add(0, "k2")
+    # 负下标不能被 numpy 静默当成「从末尾数」(`can2idx.get(c, -1)` 就会给出 -1)。
+    for bad in (-1, 2):
+        with pytest.raises(ValueError):
+            builder.add(bad, "k3")
+    builder.add(None, "k4")
+    assert builder.build().label_of_node.tolist() == [0, -1]
 
 
 # ------------------------------------------------------------------ min_size / 度数 / 统计
@@ -534,6 +663,25 @@ def test_a_round_below_the_gain_floor_is_discarded_unless_it_boards_more_nodes(m
     assert "g-new" in _published(grown)
 
 
+def test_the_gain_floor_cuts_the_tail_of_rounds(monkeypatch):
+    """增益下限是性能护栏:去掉它,结果仍是不动点,只是每个分量多跑几轮(大分量上每轮秒级)。
+    在 20 张稀疏植入图上数 Leiden 调用次数:有下限 143 次,去掉下限 161 次(本机 igraph
+    1.0.0);上界取两者之间。"""
+    original = igraph.Graph.community_leiden
+    calls = [0]
+
+    def counting(self, *args, **kwargs):
+        calls[0] += 1
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(igraph.Graph, "community_leiden", counting)
+    for seed in range(20):
+        graph = _Graph()
+        _planted(graph, "t-", seed, groups=20, size=25, p_in=0.15, p_out=0.01, max_weight=2)
+        _run(sorted(graph.ids), graph.edges)
+    assert calls[0] <= 152
+
+
 def test_unstable_components_are_counted_when_the_iteration_cap_is_hit(monkeypatch):
     graph = _Graph()
     _planted(graph, "g-", 7, groups=6, size=20, p_in=0.3, p_out=0.02)
@@ -562,6 +710,44 @@ def test_partitioning_leaves_the_global_random_state_and_igraphs_generator_alone
     _partition(graph)
     assert random.getstate() == state
     assert igraph_draw() == expected
+
+
+def test_a_failing_round_still_restores_igraphs_generator_and_releases_the_lock(monkeypatch):
+    graph = _Graph()
+    _planted(graph, "g-", 7, groups=4, size=15, p_in=0.3, p_out=0.02)
+
+    def igraph_draw():
+        random.seed(1234)
+        return igraph.Graph.Erdos_Renyi(n=30, p=0.2).get_edgelist()
+
+    igraph.set_random_number_generator(random)
+    expected = igraph_draw()
+
+    def broken_leiden(self, **kwargs):
+        raise RuntimeError("leiden failed")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(igraph.Graph, "community_leiden", broken_leiden)
+        with pytest.raises(RuntimeError):
+            _partition(graph)
+    assert igraph_draw() == expected
+    assert kg_partition._IGRAPH_RNG_LOCK.acquire(blocking=False)
+    kg_partition._IGRAPH_RNG_LOCK.release()
+
+
+def test_partition_algo_version_is_pinned_to_the_constants_it_depends_on():
+    """改了任何一个影响划分或 board_key 的常量,都必须 bump `PARTITION_ALGO_VERSION`
+    (调用方据此判「已发布划分是另一套算法的产物、要冷启动」)。改常量时连同这里一起改。"""
+    assert (
+        kg_partition.PARTITION_ALGO_VERSION,
+        kg_partition.LEIDEN_SEED,
+        kg_partition.LOUVAIN_FALLBACK_SEED,
+        kg_partition.LEIDEN_MIN_ROUND_GAIN,
+        kg_partition.LEIDEN_MAX_ITERATIONS,
+        kg_partition.BOARD_KEY_CARRY_JACCARD,
+        kg_partition.BOARD_KEY_PREFIX,
+        kg_partition.BOARD_KEY_HEX_DIGITS,
+    ) == (1, 42, 42, 1e-4, 64, (1, 2), "bk-", 24)
 
 
 # ------------------------------------------------------------------ networkx 回退

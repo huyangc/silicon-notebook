@@ -55,7 +55,7 @@
 - **P4-T6 待确认合并「同名不同写法」标记**：两侧 canonical 名（后端 `name_a` / `name_b` + 前端 + 产品文档）已由单独的 PR（`claude/kg-pending-merge-names`）先行交付；「同名不同写法」标记仍在 PR-4 随 S1 的 squash key 一起加。
 - **P4-T7 F4 squash 候选档**：星形对、与 ANN 行按 canonical 对去重、过既有决定过滤、上限 Settings、触顶发事件。
 - **P4-T8 `CLUSTER_ALGO_VERSION=4`**。
-- **P4-T9 纯分区模块 `services/kg_partition.py`**：按分量逐个跑 igraph Leiden（分量内按 canonical id 排名编号、边排序、每分量重置 seed、resolution = m_c/m、`n_iterations=-1`、可选 `initial_membership`）；board_key 续用（互为最佳且 J ≥ 0.5）与新铸（成员内容哈希、代内撞键确定性再散列）。
+- **P4-T9 纯分区模块 `services/kg_partition.py`**：按分量逐个跑 igraph Leiden（分量内按 canonical id 排名编号、边排序、resolution = m_c/m、可选 `initial_membership`）。每个分量**逐轮**跑 `n_iterations=1`，每轮开跑前重置 seed=42。每个起点先归一：社区按内部边拆成连通段，不足 min_size 的段拆成单点，再按首次出现序编号。一轮的结果若原样回到起点，或者模块度抬高 ≤ `LEIDEN_MIN_ROUND_GAIN`（1e-4）且没有在模块度不降的前提下多进板块，就作废这一轮、输出它的起点。这样以发布结果热启动在构造上就是不动点，发布的板块也都内部连通。轮数上限 64，触顶如实计数。总边权 m_c² < 2m 的分量直接整块成板块（可证的唯一最优）。board_key 续用（互为最佳且 J ≥ 0.5）与新铸（成员内容哈希、代内撞键确定性再散列）。没装 igraph 时走冷启动 networkx Louvain，记 `cold_fallback`，不拆分。模块导出 `PARTITION_ALGO_VERSION`，由 T10 写进 `community_partition_version`。**不用 `n_iterations=-1`**，有两个原因：它在对称结构上可能永不返回（4 个 K4 成环、以两两成对为起点即复现；评审另测 66 种对称变体里 21 种 4 s 不返回）；它停在续下去的随机序列上，输出在重置 seed 后不是不动点。
 - **P4-T10 接入 `rebuild_communities`**：冷启动判据（无已发布划分 / 分区版本不同 / networkx 回退 / 显式 `--cold-partition`），**force 不等于冷启动**；热启动在事务外流式读 `_published_from` 那一代的成员；发布语句写分区版本与 mode；payload 记 `partition_mode` 与续用数；补账本路径的放弃复核不动。
 - **P4-T11 文档**：operations / product-and-api / ui-vocabulary 双语；release note「主题板块会整体重新划分一次」；原设计 §3.32 推翻指针；K1 注释改公式；`recluster_kg --cold-partition`。
 - **P4-T12 实测**：本机真库复现规格数字；分区与种子流的耗时/RSS 对比基线。

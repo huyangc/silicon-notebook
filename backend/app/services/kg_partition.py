@@ -27,12 +27,15 @@
      表里 B' 那一行:模块度掉 0.03)。
    · **每一轮开跑前把 RNG 重置为 seed=42**:分量之间、轮与轮之间都不共享随机序列,增删
      一个分量不会改动别的分量拿到的随机数。
-   · 冷启动第一轮单点起步;热启动第一轮用上一代的板块(按分量内首次出现序重新编号),
-     上一代不在任何板块里的节点单点起步。
-   · 之后每一轮从「上一轮的输出、只保留成员数 >= ``min_size`` 的社区」起步;某一轮原样
-     回到起点,或者模块度抬高不超过 `LEIDEN_MIN_ROUND_GAIN`、也没让更多节点进入板块,
-     就作废这一轮、输出它的起点(那段说明写了为什么不用 igraph 的 ``n_iterations=-1``)。
-     于是「以本次发布结果热启动」在构造上就是不动点,冷启动的输出也不例外。
+   · 冷启动第一轮单点起步;热启动第一轮用上一代的板块,上一代不在任何板块里的节点单点
+     起步。
+   · 每个起点都先归一成**起点形式**(`_restart_from`):每个社区按自己内部的边拆成连通的
+     几段,不足 ``min_size`` 的段拆成单点,再按首次出现序编号。所以发布出去的板块一定
+     内部连通。
+   · 之后每一轮从上一轮的结果(同样归一)起步;某一轮原样回到起点,或者模块度抬高不超过
+     `LEIDEN_MIN_ROUND_GAIN`、又没有在模块度不降的前提下让更多节点进入板块,就作废这一轮、
+     输出它的起点(那段说明写了为什么不用 igraph 的 ``n_iterations=-1``)。于是「以本次
+     发布结果热启动」在构造上就是不动点,冷启动的输出也不例外。
    · 总边权 m_c 满足 m_c² < 2m 的分量直接整块成一个社区,不调 igraph:那是可证的唯一
      最优(`_whole_component_is_optimal`),生产上绝大多数孤岛都在这一档。
 4. 尺寸 < ``min_size`` 的分量**不跑算法**,其节点不在任何板块里。与今天「先跑 Louvain
@@ -51,9 +54,13 @@ board_key 只取决于成员集合与上一代的 board_key。热启动从自己
 (用例钉住,真实库上实测见下)。
 
 代价是**依赖历史**:划分是「当前图 + 上一代划分」的函数。冷启动与增量演化出来的
-划分不同。何时冷启动由调用方按规格判据决定(没有已发布划分 / 分区版本不同 / 显式
-``--cold-partition``),⚠ **不能以 ``force`` 为判据**——每次真正的重新合并都以
-``force=True`` 调 `rebuild_communities`,照那个判据热启动永远不会发生。
+划分不同。何时冷启动由调用方按规格判据决定(没有已发布划分 / 已发布划分的
+`PARTITION_ALGO_VERSION` 与当前不同 / 显式 ``--cold-partition``),⚠ **不能以 ``force``
+为判据**——每次真正的重新合并都以 ``force=True`` 调 `rebuild_communities`,照那个判据热启动
+永远不会发生。
+
+调用方须知:``min_size`` 必须 >= 1(否则 ``ValueError``)。``COMMUNITY_MIN_SIZE`` 今天没有
+下界、设 0 也能跑,所以 P4-T10 接线时要先钳位到 >= 1。
 
 networkx 回退
 -------------
@@ -87,9 +94,9 @@ board_key 续用
 · 边按(分量, lo, hi)排序:int64 复合键 + int64 排序下标 + 排好的键,峰值约 200 MB;
   之后只留三列 int32(lo、hi 换成分量内局部下标;边权),约 100 MB。**不为每个分量复制
   整张边表**:每个分量只拿这三列上的一段切片。
-· igraph:每个分量单独建图(``Graph(n); add_edges(ndarray)``——``Graph(n, edges=ndarray)``
-  会逐行转成 Python 临时结构,本机 300 万条随机边实测构建时 RSS 增量 554 MB 对 196 MB),
-  跑完当场释放。峰值落在主连通块那一次 Leiden 上。
+· igraph:每个分量单独建图(``Graph(n); add_edges(ndarray)``),跑完当场释放。峰值落在
+  主连通块的 Leiden 上。每一轮归一起点时对「两端同社区的边」求一次连通段(scipy,临时
+  约「同社区边数 × 十几字节」)。
 · 上一代划分:每节点一个 int32 标签(约 6.8 MB)+ 每个旧板块一个 key 与大小;续用的
   交集计数是一次复合键排序(约 14 MB)。
 
@@ -136,11 +143,18 @@ LEIDEN_SEED = 42
 LOUVAIN_FALLBACK_SEED = 42
 
 # 每个分量逐轮跑 Leiden。一轮 = 一次 ``community_leiden(n_iterations=1)``,开跑前随机数重置为
-# seed=42;每一轮的起点都是「只保留成员数 >= min_size 的社区、其余节点单点」的形式——这**正是**
-# 下一代以本次发布结果热启动时的起点。一轮的结果若原样回到起点,或者「把分量的模块度抬高
-# 不超过 `LEIDEN_MIN_ROUND_GAIN`、也没有让更多节点进入板块」,这一轮作废、输出它的起点;
-# 否则以它为下一轮的起点。作废与否只取决于(图, 起点),所以下一代以本次输出热启动时,第一轮
-# 就做出同一个「作废」判断、原样输出:**构造上的不动点**(对任何确定性的作废规则都成立)。
+# seed=42。每一轮的起点(以及热启动的第一个起点)都先归一成**起点形式**(`_restart_from`):
+# 按「两端同一个社区的边」把每个社区拆成连通的几段 → 不足 min_size 的段拆成单点 → 按首次
+# 出现序编号。这**正是**下一代以本次发布结果热启动时的起点(发布的板块都连通、都不小于
+# min_size,再归一一次原样不变)。一轮的结果(同样归一之后)若原样回到起点,或者既没有把
+# 分量的模块度抬高超过 `LEIDEN_MIN_ROUND_GAIN`、又没有「在模块度不降的前提下让更多节点进入
+# 板块」,这一轮作废、输出它的起点;否则以它为下一轮的起点。作废与否只取决于(图, 起点),
+# 所以下一代以本次输出热启动时,第一轮就做出同一个「作废」判断、原样输出:**构造上的不动点**
+# (对任何确定性的作废规则都成立)。
+#
+# 拆不连通的社区必须在起点里做,不能放到输出前当后处理:上一代把只挂在 Y 上的 f1–f2 留在
+# X 的板块里时,起点里拆开,这一代就能把它们并进 Y、下一代原样不变;后处理拆开则这一代
+# 只把它们踢出板块,下一代才并进 Y——不动点就破了(用例钉住)。
 #
 # 为什么不用 igraph 自带的 ``n_iterations=-1``(「迭代到某一轮没有改动」):
 #   1. **它可能不返回。** 4 个 K4 连成环、相邻两团之间两条权 6 的边,以「两两成对」为
@@ -160,11 +174,16 @@ LOUVAIN_FALLBACK_SEED = 42
 #     2.3e-4 / 2.7e-5 …,第 7 轮作废;比跑到「原样回到起点」(第 12 轮)少拿的模块度合计
 #     约 4.6e-5。
 # 「让更多节点进入板块」那半条是给增量新增的:新导入的几个概念挂到大分量上,摆放它们的模块度
-# 增益可能远小于下限(一个节点 ~ 度数/分量边权),只看增益就会让它们一直停在板块之外。
+# 增益可能远小于下限(一个节点 ~ 度数/分量边权),只看增益就会让它们一直停在板块之外。这半条
+# 要求模块度**不降**:否则「多进板块、模块度下降」与「模块度回升、少进板块」两种轮次可以交替
+# 被接受,来回振荡到轮数上限。
 LEIDEN_MIN_ROUND_GAIN = 1e-4
 
-# 轮数上限只防意外(每一轮被接受都要严格抬高模块度,本来就有界)。触顶的分量数如实记进
-# `BoardPartition.unstable_components`,不静默。
+# 轮数上限。被接受的轮次里模块度从不下降,靠下限被接受的那种每次至少抬高 1e-4,靠「进板块」
+# 被接受的那种每次至少多进一个节点——所以不会振荡,但理论上界只是「模块度区间 / 下限 × 节点
+# 数」这种量级,实际上合成图 4 次、真实库 7 次调用就停。触顶的分量数如实记进
+# `BoardPartition.unstable_components`,不静默;主连通块触顶的代价约 64 × 一轮(合成图上一轮
+# ~3 s)。
 LEIDEN_MAX_ITERATIONS = 64
 
 # board_key 续用的 Jaccard 下限(含):分子 / 分母,按整数交叉相乘比较。
@@ -173,6 +192,12 @@ BOARD_KEY_CARRY_JACCARD = (1, 2)
 BOARD_KEY_PREFIX = "bk-"
 # sha256 十六进制的前 24 位(96 bit)。代内撞键另有确定性再散列兜底。
 BOARD_KEY_HEX_DIGITS = 24
+
+# 分区算法版本:写进 `unified_kg_state.community_partition_version`(P4-T10)。与已发布划分的
+# 版本不同就冷启动——上一代是另一套算法的产物,拿它热启动没有意义。上面任何一个影响划分或
+# board_key 的常量、或者算法本身改了,都必须 +1;`tests/test_kg_partition.py` 把版本号与这些
+# 常量的取值钉在一起,只改常量不改版本会红。
+PARTITION_ALGO_VERSION = 1
 
 _LABEL_DTYPE = np.int32
 _NO_LABEL = -1
@@ -254,6 +279,11 @@ class PreviousPartitionBuilder:
         self._sizes[ordinal] += 1
         if node_index is None:
             return
+        if not 0 <= node_index < self._labels.size:
+            # 负下标会被 numpy 静默当成「从末尾数」——`can2idx.get(c, -1)` 的 -1 就会把旧板块
+            # 标到最后一个节点上。不在当前图里请传 None。
+            raise ValueError(
+                f"PreviousPartitionBuilder: 节点下标 {node_index} 越界(共 {self._labels.size} 个)")
         if self._labels[node_index] != _NO_LABEL:
             # 同一代里一个 canonical 只能在一个板块里;出现两次说明读到的不是一代划分。
             raise ValueError(
@@ -343,6 +373,9 @@ def partition_boards(
     权重相加)。``warm=True`` 时以 ``previous`` 热启动;``previous`` 给了而 ``warm=False``
     时冷启动,只用它续用 board_key。没装 igraph 时一律走 networkx 回退
     (``mode="cold_fallback"``)。
+
+    ``min_size < 1`` 抛 ``ValueError``。⚠ ``COMMUNITY_MIN_SIZE``(`config.py`)今天没有下界、
+    设 0 也能跑:调用方(P4-T10 的 `rebuild_communities`)负责把它钳位到 >= 1 再传进来。
     """
     min_size = int(min_size)
     if min_size < 1:
@@ -636,19 +669,18 @@ def _leiden_communities(igraph, layout: _NodeLayout, edges: _ComponentEdges,
                     community_of_pos[n0:n1] = next_label
                     next_label += 1
                     continue
+                lo, hi = edges.lo[e0:e1], edges.hi[e0:e1]
                 graph = igraph.Graph(n=size)
-                graph.add_edges(np.column_stack((edges.lo[e0:e1], edges.hi[e0:e1])))
+                graph.add_edges(np.column_stack((lo, hi)))
                 component_weight = edges.weight[e0:e1]
                 resolution = comp_weight[c] / total_weight
 
-                if warm_labels is None:
-                    start = list(range(size))
-                else:
-                    # 起点也归一成「小社区单点」的形式:上一代的板块在当前图里可能只剩不到
-                    # min_size 个成员,而下一代热启动时它们本来就不会出现在起点里。
-                    start = _restart_from(
-                        np.asarray(_initial_membership(warm_labels[n0:n1]), dtype=np.int64),
-                        min_size)
+                # 冷启动从单点起步;热启动从上一代的板块起步。两者都先归一成起点形式——上一代
+                # 的板块在当前图里可能已经断成几段,或者只剩不到 min_size 个成员。
+                start = _restart_from(
+                    np.arange(size, dtype=np.int64) if warm_labels is None
+                    else warm_labels[n0:n1].astype(np.int64),
+                    lo, hi, min_size)
 
                 def quality(membership):
                     return graph.modularity(membership, weights=component_weight,
@@ -658,26 +690,27 @@ def _leiden_communities(igraph, layout: _NodeLayout, edges: _ComponentEdges,
                 start_boarded = _boarded(start, min_size)
                 for _ in range(LEIDEN_MAX_ITERATIONS):
                     rng.seed(LEIDEN_SEED)
-                    nxt = _restart_from(_first_appearance_labels(np.asarray(
-                        graph.community_leiden(
-                            objective_function="modularity",
-                            weights=component_weight,
-                            resolution=resolution,
-                            n_iterations=1,
-                            initial_membership=start,
-                        ).membership, dtype=np.int64)), min_size)
+                    nxt = _restart_from(np.asarray(graph.community_leiden(
+                        objective_function="modularity",
+                        weights=component_weight,
+                        resolution=resolution,
+                        n_iterations=1,
+                        initial_membership=start,
+                    ).membership, dtype=np.int64), lo, hi, min_size)
                     if nxt == start:
                         break
                     nxt_quality = quality(nxt)
                     nxt_boarded = _boarded(nxt, min_size)
-                    if (nxt_quality - start_quality <= LEIDEN_MIN_ROUND_GAIN
-                            and nxt_boarded <= start_boarded):
+                    gained = nxt_quality - start_quality > LEIDEN_MIN_ROUND_GAIN
+                    boarded_more = (nxt_boarded > start_boarded
+                                    and nxt_quality >= start_quality)
+                    if not (gained or boarded_more):
                         break                      # 这一轮作废,输出它的起点
                     start, start_quality, start_boarded = nxt, nxt_quality, nxt_boarded
                 else:
                     unstable += 1
                 local = np.asarray(start, dtype=np.int64)
-                del graph, quality
+                del graph, quality, lo, hi
                 community_of_pos[n0:n1] = local + next_label
                 next_label += int(local.max()) + 1
         finally:
@@ -708,15 +741,41 @@ def _boarded(membership: List[int], min_size: int) -> int:
     return int(np.count_nonzero(np.bincount(labels)[labels] >= min_size))
 
 
-def _restart_from(local: "np.ndarray", min_size: int) -> List[int]:
-    """一轮的起点形式:成员数 < min_size 的社区拆成单点(它们不会被发布,下一代热启动时
-    本来就是单点),再按首次出现序编号。冷启动的单点起点 ``0..n-1`` 本身就是这个形式。"""
+def _restart_from(labels: "np.ndarray", lo: "np.ndarray", hi: "np.ndarray",
+                  min_size: int) -> List[int]:
+    """把一个分量的划分归一成**起点形式**,顺序固定:
+
+    1. 按「两端同一个社区的边」求连通段——每个社区拆成它连通的几段(``-1`` 的节点不属于
+       任何社区,各自一段);
+    2. 不足 ``min_size`` 的段拆成单点(它们不会被发布,下一代热启动时本来就是单点);
+    3. 按首次出现序编号(`_initial_membership`)。
+
+    幂等:发布出去的板块都连通、都不小于 min_size,再归一一次原样不变——下一代热启动的
+    起点因此与本代停下时的起点逐字相同。``lo`` / ``hi`` 是本分量的局部边端点。
+    """
+    size = int(labels.size)
+    same = labels[lo] == labels[hi]
+    if size and int(labels.min()) < 0:
+        same &= labels[lo] >= 0
+    pieces = _connected_pieces(size, lo[same], hi[same])
+    del same
     if min_size > 1:
-        small = np.bincount(local)[local] < min_size
+        small = np.bincount(pieces)[pieces] < min_size
         if small.any():
-            local = local.copy()
-            local[small] = _NO_LABEL
-    return _initial_membership(local)
+            pieces[small] = _NO_LABEL
+    return _initial_membership(pieces)
+
+
+def _connected_pieces(size: int, lo: "np.ndarray", hi: "np.ndarray") -> "np.ndarray":
+    """``size`` 个节点在边 (lo, hi) 下的连通段编号(int64)。"""
+    if lo.size == 0:
+        return np.arange(size, dtype=np.int64)
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    adjacency = coo_matrix((np.ones(lo.size, dtype=np.int8), (lo, hi)), shape=(size, size))
+    _, pieces = connected_components(adjacency, directed=False)
+    return pieces.astype(np.int64)
 
 
 def _louvain_fallback_communities(n: int, edges: _ComponentEdges) -> "np.ndarray":
