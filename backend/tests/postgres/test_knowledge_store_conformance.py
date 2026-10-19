@@ -4813,6 +4813,72 @@ def test_source_canonical_rows_do_not_buffer_the_whole_result_on_postgres(
         assert sum(1 for _ in rows) == 14
 
 
+def test_community_graph_rows_do_not_buffer_the_whole_result_on_postgres(
+    knowledge_harness,
+):
+    """PG 侧 `community_graph_rows` 的关系结果集必须走服务端流式游标,不能退回
+    `db.execute()`(与上面 `source_canonical_rows` 那条同一种回归、同一种守法)。
+
+    背景:这条查询的行数 = 本 notebook 的关系数(生产约 836 万)。psycopg3 的普通游标在
+    `execute()` 返回时就把整个结果集收进了 libpq 的 `PGresult` —— 那是 C 层缓冲,
+    `tracemalloc` 看不见,只有 RSS 能 —— 而且它出现在 `rebuild_communities` 建图之前,
+    叠在建图的内存峰值底下。
+
+    本机真实 PG 库(`silicon_notebook_local_pg16_live`,notebook `nb-b37185f4ae`,
+    51,617 条关系)独立子进程实测,关系结果集消费完后的 RSS 增量:
+
+        execute(客户端缓冲)   +4.3 / +2.5 / +5.6 / +5.3 / +6.8 MB
+        cursor().stream()     +0.0 / +0.0 / +0.0 / +0.0 / +0.0 MB
+
+    ⚠ **这条守卫的强度边界,如实写明**:它断言的是「返回的是 `stream()` 的生成器」,
+    **不是**「内存有界」。它能挡住的回归形态有两种:退回 `db.execute()`(返回
+    `psycopg.Cursor`)、以及 `execute(...).fetchall()`(返回 list,比上面那条
+    `isinstance(..., Cursor)` 的写法多挡一种)。挡不住的是「自己写个生成器包一层
+    `execute()` 再逐行 yield」—— 那是个生成器、却照样全量缓冲。真正的内存证据在上面那组
+    实测里(以及 PG 侧 `community_graph_rows` 的 docstring),不在这条断言里。之所以不写成
+    内存断言:合成夹具只有十几行,任何 RSS 阈值都会被测试进程自身的噪声淹没,那样的守卫
+    看着更强、实际是空的。
+
+    另外钉两件会被「顺手改成流式」改坏的事:取回的**行内容与行序**(Louvain 对边序敏感,
+    `ORDER BY kr.id COLLATE "C"` 一字不能动 —— 双后端逐行比对见
+    `test_community_graph_rows_twin_pg.py`),以及 `names` 仍是已物化的字典(它是流占线
+    之前的第一条语句,调用方拿到时不依赖连接状态)。
+    """
+    import inspect
+
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+
+    with knowledge_harness.database.connect() as connection:
+        names, relations = unified.community_graph_rows(connection, ANALYSIS_NB)
+        assert isinstance(names, dict), "names 必须是已物化的字典,不是惰性游标"
+        assert inspect.isgenerator(relations), (
+            "community_graph_rows 的关系结果集不是 cursor().stream() 的生成器 —— "
+            "execute() / fetchall() 会在返回时就把整个结果集收进 libpq 缓冲"
+            "(生产 836 万行)。必须走 cursor().stream()。"
+        )
+        # 真的能取到数据、行序是逐字节序,不是拿一个空生成器换绿。夹具里 10 条关系
+        # 未被否决(rel-an-rejected / rel-an-rejected-ghost 两条被否决的不在其中);
+        # 端点是否存在不在这条查询的口径里 —— 幽灵 / 跨库端点照样返回,各自映射到
+        # 夹具里给它们建的 canonical。
+        rows = [(row["s"], row["t"]) for row in relations]
+
+    quad = "canonical-quad"
+    assert rows == [
+        (quad, "canonical-dead"),      # rel-an-dead
+        (quad, "canonical-foreign"),   # rel-an-foreign
+        ("canonical-foreign", quad),   # rel-an-foreign-src
+        (quad, "canonical-ghost"),     # rel-an-ghost
+        (quad, quad),                  # rel-an-name
+        (quad, quad),                  # rel-an-other
+        (quad, quad),                  # rel-an-scalar
+        (quad, quad),                  # rel-an-shared
+        (quad, quad),                  # rel-an-tagged
+        (quad, quad),                  # rel-an-untagged
+    ]
+    assert {"canonical-quad", "canonical-solo", "canonical-blank"} <= set(names)
+
+
 def test_source_counts_drop_hidden_sources_but_keep_orphans_on_postgres(
     knowledge_harness,
 ):

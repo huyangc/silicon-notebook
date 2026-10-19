@@ -278,9 +278,30 @@ def _seed_plan_data(postgres_database) -> None:
             raw.execute(f"VACUUM (ANALYZE) {table}")
 
 
+class _RecordingCursor:
+    """Cursor wrapper that logs ``(statement, params)`` of every ``stream`` call.
+
+    ``community_graph_rows`` reads its relation set through ``cursor().stream()``
+    (a server-side streaming read, not ``execute``), so a recorder that only
+    watched ``execute`` would lose that statement and the plan pins below would
+    silently stop covering it."""
+
+    def __init__(self, inner, log):
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "_log", log)
+
+    def stream(self, statement, params=None, **kwargs):
+        self._log.append((statement, tuple(params or ())))
+        return self._inner.stream(statement, params, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 class _Recording:
-    """Connection wrapper that logs ``(statement, params)`` of every execute;
-    attribute writes (``read_only`` / ``isolation_level``) go to the real one."""
+    """Connection wrapper that logs ``(statement, params)`` of every execute and
+    every cursor ``stream``; attribute writes (``read_only`` /
+    ``isolation_level``) go to the real one."""
 
     def __init__(self, inner, log):
         object.__setattr__(self, "_inner", inner)
@@ -289,6 +310,9 @@ class _Recording:
     def execute(self, statement, params=()):
         self._log.append((statement, tuple(params or ())))
         return self._inner.execute(statement, params)
+
+    def cursor(self, *args, **kwargs):
+        return _RecordingCursor(self._inner.cursor(*args, **kwargs), self._log)
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
