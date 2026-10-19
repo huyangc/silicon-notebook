@@ -1656,17 +1656,23 @@ def query_intent_prompt(question: str, max_topics: int = 6,
         "Do not block for optional stylistic preferences; record safe, reversible "
         "defaults in assumptions instead.\n"
     )
-    # The keyword pair is described with expand_query_prompt's own wording and
-    # language rule (``keyword_language_rule``): it feeds the same lexical arm.
-    # Absent (empty) unless the caller asked for it, so the default prompt is
-    # unchanged.
+    # The keyword pair is defined in expand_query_prompt's own words (the two
+    # field definitions are the same phrases) under the very same language rule
+    # (``keyword_language_rule``): it feeds the same lexical arm. The only
+    # addition is the scope sentence an intent contract needs -- the keywords
+    # must not widen the frozen topic -- worded so it can never be read as
+    # "drop the other-language forms": those are the cross-language matches
+    # this pair exists for. Absent (empty) unless the caller asked for it, so
+    # the default prompt is unchanged.
     keyword_rule = (
         "high_level_keywords: themes / relationship types / abstract topics (used "
         "to retrieve RELATIONS); low_level_keywords: concrete entities / names / "
         "specifics (used to retrieve ENTITIES). Both are lexical search terms for "
         "the WHOLE request, never additional questions or topics; for both, "
-        f"{keyword_language_rule(corpus_langs)} Do not add terms the request does "
-        "not name; return [] for a list with no such term.\n"
+        f"{keyword_language_rule(corpus_langs)} Do not add concepts the request "
+        "does not ask about; the other-language forms, abbreviations and full "
+        "names of what it does ask about are required, not extra. Write [] (never "
+        "null) for a list with nothing in it.\n"
         if keywords else ""
     )
     schema_hint = (

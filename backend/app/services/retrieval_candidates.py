@@ -4786,7 +4786,8 @@ class CandidateRetrievalService(_RetrievalState):
         exactly like the existing ANN∪FTS union). Empty/blank keywords → []. NO
         vector embed — purely lexical. Called once per question text, never per
         sub-query: chunk mode calls it once per ask; reasoning calls it once in
-        the first-round seed (when ``plan()`` produced keywords) plus once per
+        the first-round seed (when ``plan()`` -- or, on the confirmed-intent
+        path, the understanding step -- produced keywords) plus once per
         ``search_chunks`` action that carries ``keywords`` (so at most
         ``1 + REASONING_MAX_CHUNK_SEARCHES`` per run). The caller merges these
         into whatever candidate set its branch built

@@ -4659,6 +4659,95 @@ def test_run_stage_forwards_intent_keywords_only_when_present(rrepo):
     assert seen[1]["intent_keywords"] == "kw one"
 
 
+def _concurrency_probe(rr, *, hold_vector):
+    """把向量召回与词法通道都换成记录并发度的替身(仍走真实实现)。
+
+    `hold_vector` 为真时每条向量召回先等词法调用进场(至多 5 秒)再返回:串行
+    实现下词法臂要等全部向量召回返回之后才发,于是等待超时、`overlapped` 记假。
+    """
+    lock = threading.Lock()
+    active = {"now": 0, "max": 0}
+    keyword_started = threading.Event()
+    overlapped = []
+    retrieval = rr.retrieval
+    vector_original = retrieval.retrieve_chunk_candidates
+    keyword_original = retrieval.keyword_chunk_candidates
+
+    def _enter():
+        with lock:
+            active["now"] += 1
+            active["max"] = max(active["max"], active["now"])
+
+    def _leave():
+        with lock:
+            active["now"] -= 1
+
+    def vector(notebook_id, query):
+        _enter()
+        try:
+            if hold_vector:
+                overlapped.append(keyword_started.wait(5))
+            return vector_original(notebook_id, query)
+        finally:
+            _leave()
+
+    def keyword(notebook_id, keywords):
+        _enter()
+        keyword_started.set()
+        try:
+            return keyword_original(notebook_id, keywords)
+        finally:
+            _leave()
+
+    retrieval.retrieve_chunk_candidates = vector
+    retrieval.keyword_chunk_candidates = keyword
+    return active, overlapped
+
+
+def test_seed_keyword_arm_runs_concurrently_with_the_vector_arm(rrepo):
+    """词法臂与向量臂同池并发(此前它在向量臂收齐之后串行发起,首轮墙钟多付一次
+    FTS);只改并发、不改合并:证据与 seed 步 detail 与串行时同一份。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo, ["布局布线阶段先全局布局再详细布线。",
+                                           _KEYWORD_ONLY_TEXT])
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "x"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _active, overlapped = _concurrency_probe(rr, hold_vector=True)
+
+    res = rr.run(nb.id, "布局布线", "", intent_queries=["布局布线"],
+                 intent_keywords=f"沟槽隔离 {_KEYWORD_ONLY_TERM}")
+    assert overlapped == [True]
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert "keyword_found" in seed.detail      # 真向量臂也能捞到这段,故不断言 ≥1
+    assert _KEYWORD_ONLY_TERM in "".join(c.text for c in res.chunks)
+
+
+def test_seed_keyword_arm_takes_a_recall_gate_seat(rrepo):
+    """词法召回与向量召回共用召回闸:参与库数把闸宽压到 1 时两者绝不同时取连接
+    ——召回 × 联邦腿 ≤ 8 的上界对并发后的词法臂同样成立。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo, ["布局布线阶段先全局布局再详细布线。",
+                                           _KEYWORD_ONLY_TEXT])
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "x"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    rr.retrieval.chunk_participant_count = lambda _notebook_id: 8   # 8 // 8 = 1
+    active, _overlapped = _concurrency_probe(rr, hold_vector=False)
+
+    res = rr.run(nb.id, "布局布线", "", intent_queries=["布局布线", "沟槽隔离"],
+                 intent_keywords=f"沟槽隔离 {_KEYWORD_ONLY_TERM}")
+    assert active["max"] == 1
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert "keyword_found" in seed.detail
+
+
 @pytest.mark.parametrize("gate", ["kill_switch", "allow_search_chunks"])
 def test_keyword_arm_dies_with_the_rest_of_the_channel(rrepo, gate):
     """词法臂没有自己的闸:部署级 kill switch 与调用方策略位

@@ -106,7 +106,20 @@ def test_keywords_come_from_the_one_understanding_call_in_expand_querys_shape():
     rule = prompts.keyword_language_rule(["zh", "en"])
     assert "EACH of these corpus languages: zh, en" in rule
     assert prompt.count(rule) == 1
-    assert rule in prompts.expand_query_prompt("q", corpus_langs=["zh", "en"])
+    expand = prompts.expand_query_prompt("q", corpus_langs=["zh", "en"])
+    assert rule in expand
+    # The two field definitions are expand_query's own phrases.
+    for phrase in ("themes / relationship types / abstract topics (used to "
+                   "retrieve RELATIONS)",
+                   "concrete entities / names / specifics (used to retrieve ENTITIES)"):
+        assert phrase in prompt and phrase in expand
+    # The scope sentence bounds concepts but REQUIRES the other-language forms
+    # (they are the cross-language matches this pair exists for); nothing tells
+    # the model to drop a form the user did not literally type.
+    assert ("the other-language forms, abbreviations and full names of what it "
+            "does ask about are required") in prompt
+    assert "does not name" not in prompt
+    assert "Write [] (never null)" in prompt
     assert contract["high_level_keywords"] == HIGH
     assert contract["low_level_keywords"] == LOW
     assert contract["keyword_basis"] == intent_keyword_basis(contract)
@@ -424,8 +437,8 @@ async def test_mcp_ask_in_call_understanding_seeds_the_keyword_arm(tmp_path, mon
 # Entry 3: global Ask (preview over the participants -> confirmed run)
 # --------------------------------------------------------------------------- #
 
-def test_global_ask_preview_and_run_seed_the_keyword_arm(tmp_path, monkeypatch):
-    from app.models.global_ask import GlobalAskIntentPreviewRequest, GlobalAskRequest
+def _global_setup(tmp_path, monkeypatch):
+    """A real repository with one Chinese-only and one English-only library."""
     from app.models.notebooks import NotebookCreate
     from app.repositories.ports import UploadedSourceFile
     from app.services.embedding import FakeEmbedder
@@ -436,28 +449,58 @@ def test_global_ask_preview_and_run_seed_the_keyword_arm(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     repo = SQLiteRepository(Settings(), model_provider=RecordingModelProvider())
+    bind_all_embedding_clients(repo, FakeEmbedder(dim=16))
+    model = _IntentModel()
+    for workload in ("ask_answer", "query_rewrite", "reasoning_agent",
+                     "evidence_refine", "source_summary"):
+        bind_chat_client(repo, workload, model)
+    # One Chinese-only and one English-only library: the keyword languages
+    # must be the UNION over the participants, not the nominal active's.
+    texts = ("浅沟槽隔离的沟槽深度决定隔离效果。",
+             f"Shallow trench isolation depth follows the {RARE} rule.")
+    notebooks = []
+    for index, text in enumerate(texts):
+        notebook = repo.create_notebook(NotebookCreate(name=f"库{index}"))
+        source = repo.upload_sources(notebook.id, [UploadedSourceFile(
+            file_name=f"m{index}.md", content_type="text/markdown",
+            content=f"# 隔离\n\n{text}".encode("utf-8"),
+        )], scheduler=lambda _source_id: None)[0]
+        repo.process_source(source.id)
+        notebooks.append(notebook)
+    scope = {"mode": "include", "notebook_ids": [nb.id for nb in notebooks]}
+    return repo, model, scope, repo.current_user().id
+
+
+def test_global_ask_with_its_keyword_arm_off_pays_no_keyword_tokens(
+    tmp_path, monkeypatch,
+):
+    """``GLOBAL_ASK_KEYWORD_ARM_ENABLED=false``: the peer keyword arm can return
+    nothing, so the understanding call sends the plain hint and prompt -- no
+    output tokens are spent on a field the run would never read."""
+    from app.models.global_ask import GlobalAskIntentPreviewRequest
+
+    monkeypatch.setenv("GLOBAL_ASK_KEYWORD_ARM_ENABLED", "false")
+    repo, model, scope, user_id = _global_setup(tmp_path, monkeypatch)
     try:
-        bind_all_embedding_clients(repo, FakeEmbedder(dim=16))
-        model = _IntentModel()
-        for workload in ("ask_answer", "query_rewrite", "reasoning_agent",
-                         "evidence_refine", "source_summary"):
-            bind_chat_client(repo, workload, model)
-        # One Chinese-only and one English-only library: the keyword languages
-        # must be the UNION over the participants, not the nominal active's.
-        texts = ("浅沟槽隔离的沟槽深度决定隔离效果。",
-                 f"Shallow trench isolation depth follows the {RARE} rule.")
-        notebooks = []
-        for index, text in enumerate(texts):
-            notebook = repo.create_notebook(NotebookCreate(name=f"库{index}"))
-            source = repo.upload_sources(notebook.id, [UploadedSourceFile(
-                file_name=f"m{index}.md", content_type="text/markdown",
-                content=f"# 隔离\n\n{text}".encode("utf-8"),
-            )], scheduler=lambda _source_id: None)[0]
-            repo.process_source(source.id)
-            notebooks.append(notebook)
-        user_id = repo.current_user().id
+        contract = repo._runtime.global_ask_service().preview_intent(
+            GlobalAskIntentPreviewRequest(
+                question="浅沟槽隔离有哪些关键参数", notebook_scope=scope),
+            user_id=user_id,
+        )
+        prompt, hint = model.intent_calls[-1]
+        assert hint == prompts.QUERY_INTENT_SCHEMA_HINT
+        assert "high_level_keywords" not in prompt
+        assert contract.high_level_keywords == [] == contract.low_level_keywords
+    finally:
+        repo.close()
+
+
+def test_global_ask_preview_and_run_seed_the_keyword_arm(tmp_path, monkeypatch):
+    from app.models.global_ask import GlobalAskIntentPreviewRequest, GlobalAskRequest
+
+    repo, model, scope, user_id = _global_setup(tmp_path, monkeypatch)
+    try:
         service = repo._runtime.global_ask_service()
-        scope = {"mode": "include", "notebook_ids": [nb.id for nb in notebooks]}
         question = "浅沟槽隔离有哪些关键参数"
 
         contract = service.preview_intent(

@@ -3118,7 +3118,8 @@ class PlanOutcome:
 
     `keywords` 是空格分隔的一个串(与 `ask_chunk` 的 `kw_str` 同形),不是
     列表:通道 `keyword_chunk_candidates` 收的就是一个串,拆成列表只会让两侧
-    各写一次拼接。没有关键词(已确认意图路径、`expand_query` 回退)时是空串。
+    各写一次拼接。`expand_query` 回退时是空串。已确认意图路径根本不调 `plan()`,
+    那条路径的同形关键词串来自问题理解(`run(intent_keywords=...)`),不经这里。
     """
 
     subqueries: List["SubQuery"]
@@ -4471,7 +4472,8 @@ class ReasoningRetriever:
         只有向量一臂,所以同一个库、同一个问题,chunk 模式能捞到的词法独有段落在
         reasoning 里是拿不到的。
 
-        两个调用方:首轮播种(`keywords` = `PlanOutcome.keywords`,空格分隔,拼法
+        两个调用方:首轮播种(`keywords` = `state.plan_keywords`:规划路径取
+        `PlanOutcome.keywords`,已确认意图路径取问题理解的同形串;空格分隔,拼法
         与 `ask_chunk` 的 `kw_str` 逐字同形)与 `search_chunks` 动作(`keywords` =
         模型给的 `keywords`)。召回窗沿用通道自身的口径(`chunk_recall`),不新增
         配置——**所以这里交出来的是召回窗,不是选择结果**:`search_chunks` 的
@@ -6152,6 +6154,23 @@ class ReasoningRetriever:
                 raise
             return [], True
 
+    def _gated_keyword_seed_search(
+        self, notebook_id: str, keywords: str,
+    ) -> Tuple[List, bool]:
+        """首轮播种里词法臂那一次调用:`_keyword_seed_search` 在召回闸里跑。
+
+        与向量臂的召回(`_recall_chunk_candidates`)取同一把 `_chunk_recall_gate`
+        的一个席位:词法召回同样取数据库连接(对等 run 还按参与库扇出),并发跑时
+        若不进闸,召回 × 联邦腿就会越过 8 的上界。闸只在首轮播种期间设置;
+        闸不在时(理论上不会从这里进来)直接调用。失败语义原样是
+        `_keyword_seed_search` 的。
+        """
+        gate = self._chunk_recall_gate
+        if gate is None:
+            return self._keyword_seed_search(notebook_id, keywords)
+        with gate:
+            return self._keyword_seed_search(notebook_id, keywords)
+
     def _first_round_chunk_seed(self, state: "_ReasoningRunState") -> None:
         """首轮的原文播种 pass(确定性召回,镜像 PPR/精确查找 seed pass)。
 
@@ -6213,10 +6232,15 @@ class ReasoningRetriever:
         捞不到的,就是那些只能被术语字面命中的段落(它也是「FTS 携带第二语言」
         到达原文的路径;关键词按本 run 的语料语言双语化,见 `keyword_chunks`)。
 
-        **分工:这条臂只在 `plan_keywords` 非空时跑,不另造关键词来源。** 已确认
-        意图路径不调 `plan()`,首轮因此没有确定性的关键词;那条路径上的字面检索
-        以 function 的形式交给模型——reflect 的 `search_chunks` 动作带可选参数
-        `keywords`(`_action_search_chunks`),由模型按需要决定给不给。
+        **分工:这条臂只在 `plan_keywords` 非空时跑,不另造关键词来源。** 规划路径
+        取 `plan()` 的关键词;已确认意图路径不调 `plan()`,取问题理解那同一次调用
+        产出的同形关键词(确认时因编辑被作废、或理解步没给就是空串,不跑)。之后的
+        字面检索以 function 的形式交给模型——reflect 的 `search_chunks` 动作带可选
+        参数 `keywords`(`_action_search_chunks`),由模型按需要决定给不给。
+
+        **与向量臂并发。** 词法召回与各条子查询的向量召回提交到同一个池、各取
+        `_chunk_recall_gate` 的一个席位(闸宽按「N + 1 条召回」算,上界仍是
+        `8 // P`);只改并发不改合并——下面的并入顺序照旧。
 
         **词法臂并入前先过自己的选择步。** 向量臂那半的宽度由
         `search_chunks(k=take)` 的 MMR 定死;词法通道没有选择步,交回来的是
@@ -6242,7 +6266,8 @@ class ReasoningRetriever:
         记账当初要修的那个病。守卫用例:
         `test_vector_arm_is_accounted_before_the_keyword_arm_merges`。
 
-        `state.plan_keywords` 空白(已确认意图路径、`expand_query` 回退)时这条臂
+        `state.plan_keywords` 空白(`expand_query` 回退、已确认意图路径没有理解
+        关键词)时这条臂
         零 I/O,且 `detail` 一个键都不加——关键词为空的 run,detail 形状与本臂
         接入前逐字一致。判空用 `.strip()`,与 chunk 侧的 `kw_str.strip()` 同形。
         关键词臂本 run 恒空时(子闸 `keyword_search_active()` 为假:对等 run +
@@ -6260,7 +6285,18 @@ class ReasoningRetriever:
         seen_chunks = state.seen_chunks
         take = state.per_query_take
         raise_if_cancelled(self.cancel_event)
-        workers = self._chunk_seed_workers(notebook_id, len(subqueries))
+        # 与 `keywords` 同一把子闸:关键词臂本 run 恒空(对等 run +
+        # `GLOBAL_ASK_KEYWORD_ARM_ENABLED=false`)时不调通道、detail 不写
+        # `keyword_found`——形态与「子闸开但 `plan_keywords` 为空」相同,而不是
+        # 一句「跑了但零命中」的假账。
+        keyword_arm = bool(state.plan_keywords.strip()) and self.keyword_search_active()
+        # 词法臂的 I/O 与向量臂一起进同一个池并发跑(它此前在向量臂收齐之后串行
+        # 发起,首轮墙钟多付一整次 FTS)。它的召回同样取 `_chunk_recall_gate`
+        # 的一个席位,所以按「N 条向量召回 + 1 条词法召回」定闸宽:闸宽上界仍是
+        # `8 // P`,召回 × 联邦腿 ≤ 8 不变。只改并发、不改合并:并入仍是向量臂
+        # 全部并完、词法臂才并(见 docstring 的并入顺序一节)。
+        recalls = len(subqueries) + (1 if keyword_arm else 0)
+        workers = self._chunk_seed_workers(notebook_id, recalls)
         # 两段并发(codex/评审 P2-1):召回拿数据库连接,按 `workers` 限流——那把
         # 信号量在 `_recall_chunk_candidates` 里取;选择步(精排)不拿连接,外层池
         # 放宽到 `min(N, 8)`,不再被参与库数串行压住。没有精排时多出的线程只是
@@ -6268,7 +6304,7 @@ class ReasoningRetriever:
         self._chunk_recall_gate = threading.BoundedSemaphore(workers)
         try:
             with ThreadPoolExecutor(max_workers=min(
-                    len(subqueries), _CHUNK_SEED_POOL_MAX_WORKERS)) as ex:
+                    recalls, _CHUNK_SEED_POOL_MAX_WORKERS)) as ex:
                 # Context must be copied once PER task (见 `_first_round_initial_
                 # search` 的同款注释):一个 Context 不能被并发进入,而裸执行器会
                 # 丢掉 per-user 的模型/日志路由。
@@ -6277,6 +6313,11 @@ class ReasoningRetriever:
                               self._chunk_seed_search, notebook_id, sq.query, take)
                     for sq in subqueries
                 ]
+                keyword_future = (
+                    ex.submit(contextvars.copy_context().run,
+                              self._gated_keyword_seed_search, notebook_id,
+                              state.plan_keywords)
+                    if keyword_arm else None)
                 # 按提交顺序 result:第 i 个结果仍对应第 i 个子查询,故去重与串行
                 # 版完全等价(同一段先被哪条子查询领走是确定的)。取消检查与
                 # `_first_round_initial_search` 同形:**逐个** future 收完就查一
@@ -6285,6 +6326,9 @@ class ReasoningRetriever:
                 for future in futures:
                     found.append(future.result())
                     raise_if_cancelled(self.cancel_event)
+                keyword_result = (
+                    keyword_future.result() if keyword_future is not None else None)
+                raise_if_cancelled(self.cancel_event)
         finally:
             self._chunk_recall_gate = None
         seeded: List = []
@@ -6313,13 +6357,8 @@ class ReasoningRetriever:
         # 一节)。不记 `attempted.new`——它不属于任何一条子查询方向。
         keyword_new = None
         keyword_failed = False
-        # 与 `keywords` 同一把子闸:关键词臂本 run 恒空(对等 run +
-        # `GLOBAL_ASK_KEYWORD_ARM_ENABLED=false`)时不调通道、detail 不写
-        # `keyword_found`——形态与「子闸开但 `plan_keywords` 为空」相同,而不是
-        # 一句「跑了但零命中」的假账。
-        if state.plan_keywords.strip() and self.keyword_search_active():
-            keyword_hits, keyword_failed = self._keyword_seed_search(
-                notebook_id, state.plan_keywords)
+        if keyword_result is not None:
+            keyword_hits, keyword_failed = keyword_result
             # 通道交回的是召回窗,不是选择结果 —— 先过词法臂自己的选择步,宽度
             # 与向量臂每条子查询同为 `take`(见 docstring)。
             keyword_new = take_distinct_chunk_hits(
@@ -6460,8 +6499,9 @@ class ReasoningRetriever:
         `_ReasoningRunState`)。
 
         **可选的关键词半(`keywords`)。** chunk 模式总有一条按语料语言
-        双语化的关键词全文检索臂;reasoning 的确定性关键词只在首轮播种、且只在
-        `plan()` 真的跑过时才有(已确认意图路径没有)。这条臂因此以**参数**的形式
+        双语化的关键词全文检索臂;reasoning 的整题关键词只用于首轮播种(来自
+        `plan()`,已确认意图路径来自问题理解),之后各轮没有确定性的关键词。这条臂
+        因此以**参数**的形式
         交给模型:模型在 reflect 里给出关键词(语料语言 + 跨语言对应词,prompt 里
         列出本 run 的语料语言),这里走与播种词法臂同一个通道
         `keyword_chunks`——单库 run 只查本库、对等 run 逐库联邦,与 chunk 模式的
