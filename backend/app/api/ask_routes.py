@@ -315,7 +315,7 @@ def _require_non_empty_scope(
     """
     if resolved_source_scope is None and resolved_base_scope is None:
         return
-    # 本地维度的证据宇宙 ≠ 可见导入来源数。ask_available 的四个判据里有**三个**是本地的
+    # 本地维度的证据宇宙 ≠ 可见导入来源数。ask_available 的判据里有**三个**是本地的
     # (任意 chunk[含 Knowhow 格子]、本地可用 KG、该用户的已确认 Memory),而
     # counts["sources"] 只覆盖第一个的一部分:Knowhow 表与 Memory 根本没有可见来源行。
     # 拿来源数当本地宇宙,会把「只有 Knowhow / 只有已确认 Memory + 显式取消勾选全部
@@ -443,7 +443,8 @@ def _require_ask_available(
     base_scope: BaseNotebookScope | None = None,
 ) -> tuple[SourceScope | None, BaseNotebookScope | None]:
     """硬约束(PR#334):笔记本在任一模式下都取不到可检索证据(NotebookSummary
-    .ask_available=False——无可见来源/knowhow chunk/可用 KG/带图参考库/confirmed memory)
+    .ask_available=False——无可见来源/knowhow chunk/可用 KG/confirmed memory/带图参考库/
+    有可见原文的参考库)
     时,回答只会是凭空生成,拒绝提问。前端会据同一信号禁用对话框,但那只是 UX;这里是
     路由层**权威预检**——挡住前端快照陈旧(跨标签/并发)、直连 HTTP 等一切旁路。
 

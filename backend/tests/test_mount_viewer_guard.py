@@ -144,9 +144,10 @@ _SITES = {
      "notebook_list_summary_facts"):
         (_EXPLICIT, 1, "the list's user (N-6), the mounts of every listed "
                        "notebook in one read (F2)"),
-    ("app/services/notebook_catalog.py", "NotebookSummaryQuery.get",
+    ("app/services/notebook_catalog.py",
+     "NotebookSummaryQuery._base_evidence_available",
      "notebook_has_usable_base_kg"):
-        (_EXPLICIT, 1, "the summary's user (N-6)"),
+        (_EXPLICIT, 1, "the summary's user (N-6), handed down by get()"),
     ("app/services/repository_facade.py",
      "RepositoryFacade._any_base_notebook_has_kg", "any_mounted_has_kg_compat"):
         (_EXPLICIT, 1, "facade pass-through of its caller's viewer"),

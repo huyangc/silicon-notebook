@@ -169,12 +169,14 @@ class NotebookSummary(BaseModel):
     # 本 notebook 挂载的参考库列表(0..N)。基准库不再全局唯一,也不再隐式参与检索。
     base_notebooks: List[NotebookRef] = Field(default_factory=list)
     # 该 notebook 在**任一可用问答模式下能否产出有据回答**:有可见来源、或任意 chunk
-    # (含 knowhow 格子——它没有可见来源却可检索)、或已建 KG、或挂载参考库有 KG、或该用户
-    # 有 confirmed memory,任一即为真。前端据此禁用"空库"的问答输入框——判定所需的隐藏
+    # (含 knowhow 格子——它没有可见来源却可检索)、或已建 KG、或该用户有 confirmed
+    # memory、或对查看者生效的挂载参考库有可用 KG、或联邦 chunk 通道这次会搜的挂载
+    # 参考库里有可见来源的 chunk(无图参考库的原文也会被跨库召回),任一即为真。
+    # 前端 isAskBlocked 与路由 _require_ask_available 都只读这一个字段(同源)。前端据此禁用"空库"的问答输入框——判定所需的隐藏
     # knowhow chunk、confirmed memory 与 base+overlay 配置前端都看不到,故由后端权威计算。
     # 仅单库 get() 精确回填;列表投影恒为默认 True(列表不消费此字段,永不误禁)。
     ask_available: bool = True
-    # ask_available 的**本地那一半**:上面四个判据里去掉「挂载参考库有 KG」之后剩下的
+    # ask_available 的**本地那一半**:上面的判据里去掉两条参考库判据之后剩下的
     # 三个(任意 chunk[含 knowhow 格子]、本地可用 KG、该用户在本库的 confirmed memory)。
     # 存在的理由:ask_available 是合并后的单个布尔,分不出「有得可搜」是本地撑起来的还是
     # 参考库撑起来的;而「本次请求把参考库全部取消勾选后还剩不剩东西」恰恰只能问本地那半。

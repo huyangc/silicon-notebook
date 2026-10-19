@@ -2049,14 +2049,12 @@ class AskService:
         ``chunk_federation``,参与集里每个库各出一条召回腿。判据必须跟着说真话,
         否则就反过来变成「通道到得了、判据却装作到不了」。
 
-        ⚠ **口径对齐了,端到端可用性还没有。**「当前笔记本零源 + 只有一个无图
-        参考库有来源」这个形态在 HTTP 上仍然够不着这里:``NotebookSummary
-        .ask_available`` 的参考库判据是 ``base_kg_available``(挂载参考库**有可用
-        知识图谱**),无图参考库撑不起它,前端输入框保持禁用,直连 ``POST /ask``
-        被 ``_require_ask_available`` 拦成 409。所以本函数这一支今天只在默认配置
-        下的枚举理由之外多放行了内部路径,并**不等于**那个场景现在能答。修复需要
-        一个「任一参与库有 chunk」的可用性判据,已登记在 ``fangan_todo.md`` 的
-        检索一节,不在本 PR 的范围里。
+        **端到端可用性跟着同一条通道。**「当前笔记本零源 + 只有一个无图参考库有
+        来源」这个形态在 HTTP 上也够得着这里:``NotebookSummary.ask_available``
+        的参考库那一半除了「挂载参考库有可用知识图谱」,还数「联邦 chunk 通道这次
+        会搜的参考库里有可见原文」(``NotebookSummaryQuery._base_evidence_available``,
+        同一把 ``CHUNK_FEDERATION_ENABLED``、同一个参与上界),前端 ``isAskBlocked``
+        与路由的 ``_require_ask_available`` 都读这一个字段。
 
         ``CHUNK_FEDERATION_ENABLED`` 关掉时参与集收成当前库一本,这条判据也同步
         退回 ``active_sources`` —— 单一开关、单一回退路径,不留「通道关了判据还

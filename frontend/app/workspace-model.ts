@@ -60,8 +60,8 @@ export type NotebookSummary = {
   base_kg_notebook_ids?: string[];
   base_notebooks?: NotebookRef[];
   // 该 notebook 能否在任一模式下产出有据回答(后端权威计算:可见来源/任意 chunk[含
-  // knowhow 格子]/已建 KG/参考库有 KG/confirmed memory 任一即真)。仅单库 get() 精确
-  // 回填,列表恒 True。前端据此禁用空库对话框(见 ask-availability.isAskBlocked)。
+  // knowhow 格子]/已建 KG/confirmed memory/参考库有 KG/参考库有可见原文 任一即真)。
+  // 仅单库 get() 精确回填,列表恒 True。前端据此禁用空库对话框(见 ask-availability.isAskBlocked)。
   ask_available?: boolean;
   /**
    * 该 notebook **自己**(不含挂载参考库)有没有可检索证据 —— `ask_available` 那批
