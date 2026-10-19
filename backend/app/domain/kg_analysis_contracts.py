@@ -49,6 +49,16 @@ ARTIFACT_KINDS = (
     ARTIFACT_COMMUNITY_EDGES,
     ARTIFACT_SOURCE_PROFILES,
 )
+# 问题清单(设计 2026-10-19 §八 8.1)的账本 kind;明细表 `kg_analysis_findings`,规则见
+# `app.domain.kg_findings_contracts` / `app.services.kg_findings`。
+#
+# ⚠ **刻意还不在 `ARTIFACT_KINDS` 里**(因而也不在 REQUIRED / CLUSTER_DEPENDENT):
+# 那一步必须与**产出方**(`_compute_kg_analysis` 的问题清单挂点与发布接线)同一个提交。
+# 先登记再产出,`check_artifact_payloads` 会在每一次重建上以「缺少必需的 kind」硬失败,
+# 新鲜度闸也会把每个库判成账本不齐、每次调用都重跑全部重活。归类届时是:进
+# REQUIRED(必需产物)与 CLUSTER_DEPENDENT(读了 `concept_clusters`),**不进**
+# BOARD_DEPENDENT —— 它只用连通分量与合并结果,不依赖板块划分,板块重铸时不作废它。
+ARTIFACT_FINDINGS = "findings"
 _ARTIFACT_KINDS = frozenset(ARTIFACT_KINDS)
 
 # **唯一**允许合法缺席的产物。一个板块都没有的库(对象有、关系没有,或者关系全被
