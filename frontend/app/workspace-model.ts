@@ -521,6 +521,8 @@ export type SpreadsheetAnalysisResult = {
   /** 回执的归属库与层级（同 `Citation.notebook_id` / `tier`）：本库为空、层级为默认值时整体缺席。 */
   notebook_id?: string;
   tier?: string;
+  /** 归属库名，只在全局问答里由后端填（给合成模型区分同名工作簿）；界面显示库名仍查 `notebookNames`。 */
+  notebook_name?: string;
 };
 
 export type KnowhowBatchCoverage = {

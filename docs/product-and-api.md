@@ -4445,21 +4445,37 @@ are the original-text channel's own set (the selected libraries that passed the 
 bounded by `CHUNK_FEDERATION_MAX_PARTICIPANTS`; with `CHUNK_FEDERATION_ENABLED=false` only the
 first library remains), and each library contributes only visible sources inside its frozen
 source ceiling, so an unselected or unreadable library and a deselected workbook are neither
-listed nor read. All participants' workbooks form one catalog: libraries are sorted by notebook
-id, the rotation's starting library is derived from a digest of the question (deterministic per
-question, even across questions, and the nominal first library gets no head start), then one
-workbook per library per round, each library's own in source order; a source id is listed once.
-The catalog shares the single-notebook `SPREADSHEET_ANALYSIS_PLANNER_CATALOG_BYTES` budget and
-workbooks are read one at a time, stopping the moment that budget is spent, so planner calls
-(at most one), executed sheets (one), catalog length and workbooks read are all capped by the
-single-notebook bound and do not grow with the number of libraries; with one library selected
-the catalog is byte-identical to the single-notebook one. What does not fit is disclosed by
-count: the planner prompt states "X readable workbooks across the participants, N listed in
-library rotation, M not listed", the result card carries the same sentence, and the
-`spreadsheet` trace step adds `notebook_id`, `libraries`, `workbooks` and `listed`. Results and
-receipts carry their owning notebook and that notebook's tier (in peer mode the first library
-keeps its id too). Intent requires either
-explicit workbook/table context plus an analysis phrase, or an unambiguous table operation;
+listed nor read. Each library's source-list read gets the passage channel's preparation
+protections: a cancellation check, then a read inside the global run plan's per-library budget
+(`GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS`); a library whose read fails or times out is dropped alone
+(the trace step's `skipped` lists it with its reason code), a library the passage channel already
+failed to prepare in this run keeps that reason and is not read again, and a cancellation still
+ends the whole run. All participants' workbooks form one catalog: only libraries that actually hold
+a workbook take part in the ordering and rotation; they are sorted by notebook id, the rotation's
+starting library is derived from a digest of the question (deterministic per question, even across
+questions, and the nominal first library gets no head start), then one workbook per library per
+round, each library's own in source order; a source id is listed once. When two or more libraries
+contribute workbooks, every catalog entry also carries `library` (the owning notebook's name as the
+asker sees it), the planner prompt explains it, and the synthesis model's table block names
+`library=` too, so same-titled workbooks in two libraries can be told apart; the names count
+against the catalog byte budget. The catalog shares the single-notebook
+`SPREADSHEET_ANALYSIS_PLANNER_CATALOG_BYTES` budget and workbooks are read one at a time, stopping
+the moment that budget is spent, so planner calls (at most one), executed sheets (one), catalog
+length and workbooks read are all capped by the single-notebook bound and do not grow with the
+number of libraries; when only one library contributes workbooks the catalog is byte-identical to
+the single-notebook one (no `library`). What does not fit is disclosed by count: the planner prompt
+states "X readable workbooks across the participants, N listed in library rotation, M not listed"
+(a workbook found corrupt while reading is not counted in X), the result card carries the same
+sentence, and the `spreadsheet` trace step adds `notebook_id`, `libraries`,
+`contributing_libraries`, `workbooks`, `listed` and `skipped`, with the summary naming the library.
+Results and receipts carry their owning notebook and that notebook's tier (in peer mode the first
+library keeps its id too), and a global result also carries `notebook_name`; when the table comes
+from another library (any library in Global Ask, a mounted reference library in a notebook ask)
+and the UI knows its name, the result card's title line says which, in the citation card's
+wording. Intent requires either
+explicit workbook/table context (including a closed set of Chinese "...表" table nouns such as
+「报表」「报价表」「价格表」「明细表」「统计表」; a bare 「表」 does not count) plus an analysis phrase
+(including 「比较」/「对比」), or an unambiguous table operation;
 an isolated `行`/`列` character inside an unrelated word does not qualify, and bare English
 verbs such as `count`, `top`, or `group` require table context unless they form a clear
 construction such as `sum Amount by Region`. The lane then

@@ -43,11 +43,17 @@ SPREADSHEET_PLAN_MAX_COLUMNS = 20
 _SPREADSHEET_CONTEXT_TERMS = (
     "excel", "workbook", "spreadsheet", "worksheet", "sheet", "table", "data",
     "工作簿", "电子表格", "表格", "数据集", "数据",
+    # Closed list of "...表" table nouns (user ruling 2026-10-19: 「报价表」 is
+    # table context).  A bare 「表」 is not: 代表/表示/发表 would all match it.
+    "报表", "报价表", "价格表", "价目表", "明细表", "统计表", "汇总表", "对照表",
+    "一览表",
 )
 _GENERIC_ANALYSIS_TERMS = (
     "analyze", "analysis", "profile", "statistics", "summary", "trend", "outlier",
     "分析", "统计", "概况", "质量", "结构", "趋势", "异常", "多少", "行数", "列数",
     "列名", "字段", "表头", "列出", "缺失", "重复", "最大", "最小", "中位",
+    # User ruling 2026-10-19; still needs table context to open the lane.
+    "比较", "对比",
 )
 _STRONG_TABLE_OPERATION_TERMS = (
     "aggregate", "top", "filter", "group", "rank", "count", "sum", "average",
@@ -655,18 +661,28 @@ class SpreadsheetAnalysisService:
         question: str,
         planner_client: Any,
         cancel_event: Any = None,
+        skipped: Sequence[tuple[str, str]] = (),
+        notebook_names: Any = None,
     ) -> tuple[list[SpreadsheetAnalysisResult], TraceStep | None]:
         """The peer (global) lane: every participant's workbooks, ONE plan.
 
         ``libraries`` is ``((notebook_id, readable source ids), ...)`` -- the
         caller has already bounded the participants and narrowed each list to
-        the run's frozen ceiling.  What this adds over ``analyze`` is only how
-        the manifest list is FILLED (``_federated_manifests``: library by
-        library in rotation, stopping the moment the planner catalog's byte
-        budget is spent); planning, validation, execution and the receipt are
-        the single-library code unchanged.  So the cost stays the
-        single-library cost whatever the number of libraries: one planner
-        call, one executed sheet, a catalog under the same
+        the run's frozen ceiling.  ``skipped`` names the participants whose
+        source list could not be read this run (``(notebook_id, reason)``);
+        they are reported in the trace and contribute nothing.
+        ``notebook_names`` is the run's lazy name reader
+        (``DetachedAskTurn.notebook_names``) or ``None``.
+
+        What this adds over ``analyze`` is only how the manifest list is
+        FILLED (``_federated_manifests``: library by library in rotation,
+        stopping the moment the planner catalog's byte budget is spent) and,
+        when two or more libraries contribute workbooks, each catalog entry's
+        owning library -- so two workbooks with the same title can be told
+        apart.  Planning, validation, execution and the receipt are the
+        single-library code unchanged.  So the cost stays the single-library
+        cost whatever the number of libraries: one planner call, one executed
+        sheet, a catalog (library names included) under the same
         ``SPREADSHEET_ANALYSIS_PLANNER_CATALOG_BYTES`` budget, and no more
         manifest reads than that budget can list (plus one directory listing
         per library).  Workbooks the budget leaves out are disclosed with
@@ -674,12 +690,16 @@ class SpreadsheetAnalysisService:
         """
         if not self.wants_analysis(question):
             return [], None
-        manifests, total, listed = self._federated_manifests(libraries, question)
+        names = _LazyNames(notebook_names, self.event_log)
+        manifests, total, listed, contributing = self._federated_manifests(
+            libraries, question, names,
+        )
         omitted = max(0, total - listed)
         disclosure = (
             f"本次全局问答的参与库共有 {total} 份可读工作簿，规划目录按库轮转"
             f"列出其中 {listed} 份，另有 {omitted} 份未列出。"
         )
+        labelled = any(_LIBRARY_KEY in manifest for manifest in manifests)
         results, trace = self._analyze_loaded(
             manifests,
             notebook_id=notebook_id,
@@ -687,27 +707,51 @@ class SpreadsheetAnalysisService:
             question=question,
             planner_client=planner_client,
             cancel_event=cancel_event,
-            catalog_note=f"目录说明：{disclosure}\n" if omitted else "",
+            catalog_note=(
+                ("目录说明：每份工作簿的 library 是它所属的笔记本。\n" if labelled else "")
+                + (f"目录说明：{disclosure}\n" if omitted else "")
+            ),
         )
         if results and trace is not None:
+            result = results[0]
             if omitted:
-                results[0].warnings.append(disclosure)
-            trace.detail.update({
-                "notebook_id": results[0].notebook_id,
-                "libraries": len(libraries),
-                "workbooks": total,
-                "listed": listed,
-            })
+                result.warnings.append(disclosure)
+            name = names.get().get(result.notebook_id, "")
+            result.notebook_name = name
+            trace = TraceStep(
+                step_type="spreadsheet",
+                summary=(
+                    f"已分析「{name}」中的 {result.source_title} · {result.sheet}"
+                    if name else trace.summary
+                ),
+                detail={
+                    **trace.detail,
+                    "notebook_id": result.notebook_id,
+                    "libraries": len(libraries),
+                    "contributing_libraries": contributing,
+                    "workbooks": total,
+                    "listed": listed,
+                    "skipped": [
+                        {"notebook_id": skipped_id, "reason": reason}
+                        for skipped_id, reason in skipped
+                    ],
+                },
+                duration_ms=trace.duration_ms,
+            )
         return results, trace
 
     def _federated_manifests(
         self, libraries: Sequence[tuple[str, Sequence[str]]], rotation_key: str,
-    ) -> tuple[list[dict[str, Any]], int, int]:
-        """``(manifests, workbooks, listed)`` for the peer lane's ONE catalog.
+        names: "_LazyNames | None" = None,
+    ) -> tuple[list[dict[str, Any]], int, int, int]:
+        """``(manifests, workbooks, listed, contributing)`` for the ONE catalog.
 
-        Order: libraries by notebook id, rotated to start at a position derived
-        from ``rotation_key`` (the question), then library-minor round robin
-        -- every library's first workbook, then every library's second -- with
+        Only libraries that actually hold a compiled workbook take part in the
+        order (and in the rotation's modulo): a library without one would be
+        a seat at the head that lists nothing.  Order: those libraries by
+        notebook id, rotated to start at a position derived from
+        ``rotation_key`` (the question), then library-minor round robin --
+        every library's first workbook, then every library's second -- with
         each library's own workbooks in its visible-source order.  Neither the
         caller's participant order nor which library is the NOMINAL active
         enters it: a peer run has no subject library, and the head of the
@@ -720,20 +764,28 @@ class SpreadsheetAnalysisService:
         Only sources with a compiled manifest are candidates (one directory
         listing per library, no file opened); a source id already taken by an
         earlier library is skipped, because the planner names a workbook by
-        ``source_id`` alone.  Manifests are read one at a time into the same
-        projection ``_plan`` builds, and reading stops as soon as that
-        projection is incomplete -- nothing after that point could be listed,
-        so the prompt is byte-identical to projecting every candidate, without
-        reading them.  ``workbooks`` is the candidate count, ``listed`` how
-        many of them the projection names.
+        ``source_id`` alone.  With two or more contributing libraries every
+        loaded manifest carries its library's display name (``_LIBRARY_KEY``),
+        which the projection writes into the entry and charges to the same
+        byte budget; with one there is nothing to tell apart and the catalog
+        stays byte-identical to the single-library one.  Manifests are read
+        one at a time into the same projection ``_plan`` builds, and reading
+        stops as soon as that projection is incomplete -- nothing after that
+        point could be listed, so the prompt is byte-identical to projecting
+        every candidate, without reading them.  ``workbooks`` is the candidate
+        count less the candidates that turned out unreadable, ``listed`` how
+        many the projection names, ``contributing`` how many libraries hold a
+        candidate.
         """
         compiled: dict[str, list[str]] = {}
         for notebook_id, source_ids in libraries:
             present = self.artifacts.spreadsheet_manifest_ids(notebook_id)
-            compiled[notebook_id] = [
+            column = [
                 source_id for source_id in dict.fromkeys(source_ids)
                 if source_id in present
             ]
+            if column:
+                compiled[notebook_id] = column
         order = sorted(compiled)
         if order:
             head = int.from_bytes(
@@ -743,6 +795,7 @@ class SpreadsheetAnalysisService:
                 "big",
             ) % len(order)
             order = order[head:] + order[:head]
+        labels = names.get() if names is not None and len(order) >= 2 else {}
         queue: list[tuple[str, str]] = []
         taken: set[str] = set()
         depth = max((len(column) for column in compiled.values()), default=0)
@@ -756,14 +809,21 @@ class SpreadsheetAnalysisService:
             self.settings.spreadsheet_analysis_planner_catalog_bytes
         )
         manifests: list[dict[str, Any]] = []
+        unreadable = 0
         for ref in queue:
             loaded = self._load_manifests((ref,))
             if not loaded:
+                unreadable += 1
                 continue
+            if labels.get(ref[0]):
+                loaded[0][_LIBRARY_KEY] = labels[ref[0]]
             manifests.extend(loaded)
             if not projection.add(loaded[0]):
                 break
-        return manifests, len(queue), len(projection.projected)
+        return (
+            manifests, len(queue) - unreadable, len(projection.projected),
+            len(order),
+        )
 
     def _analyze_loaded(
         self,
@@ -1414,6 +1474,45 @@ class SpreadsheetAnalysisService:
         )
 
 
+# The in-memory key a peer catalog's manifest carries its owning library's
+# display name under.  Dunder-prefixed so it can never collide with a field a
+# compiled manifest stores on disk; set only by ``_federated_manifests``.
+_LIBRARY_KEY = "__library_name"
+
+
+class _LazyNames:
+    """The run's library display names, read at most once and fail-soft.
+
+    A name is a label for the planner and the reader, never a gate, so a
+    reader that fails leaves the catalog unlabelled rather than failing the
+    lane; a cancellation still propagates.
+    """
+
+    def __init__(self, reader: Any, event_log: Any) -> None:
+        self._reader = reader
+        self._event_log = event_log
+        self._names: dict[str, str] | None = None
+
+    def get(self) -> dict[str, str]:
+        if self._names is None:
+            self._names = {}
+            if callable(self._reader):
+                try:
+                    self._names = {
+                        str(key): str(value)
+                        for key, value in dict(self._reader() or {}).items()
+                        if value
+                    }
+                except AskCancelled:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - labels are optional
+                    self._event_log.logger.warning(
+                        "spreadsheet library names unavailable (%s)",
+                        type(exc).__name__,
+                    )
+        return self._names
+
+
 class _CatalogProjection:
     """The planner catalog's whole-field prefix projection, one manifest at a time.
 
@@ -1434,11 +1533,13 @@ class _CatalogProjection:
         """Project one more manifest; False once the byte budget is spent."""
         limit = self.limit
         catalog = self.catalog
-        catalog_manifest = {
-            "source_id": manifest["source_id"],
-            "title": manifest.get("source_title", ""),
-            "sheets": [],
-        }
+        catalog_manifest = {"source_id": manifest["source_id"]}
+        if _LIBRARY_KEY in manifest:
+            # Peer catalogs over two or more libraries only (the key is set by
+            # ``_federated_manifests`` alone), charged to the same budget.
+            catalog_manifest["library"] = manifest[_LIBRARY_KEY]
+        catalog_manifest["title"] = manifest.get("source_title", "")
+        catalog_manifest["sheets"] = []
         projected_manifest = {
             "source_id": manifest["source_id"],
             "sheets": [],
@@ -1508,7 +1609,8 @@ def spreadsheet_prompt_block(
         headers = [column.name for column in result.columns]
         if not append_line(
             f"{key}: [spreadsheet] {result.source_title} · {result.sheet}!{result.range} "
-            f"operation={result.operation}; scanned={result.coverage.scanned_rows}; "
+            + (f"library={result.notebook_name}; " if result.notebook_name else "")
+            + f"operation={result.operation}; scanned={result.coverage.scanned_rows}; "
             f"result_rows={result.coverage.total_rows}"
         ):
             break

@@ -62,6 +62,7 @@ class RetrievalRunState:
         self._value_cache: dict[Hashable, Any] = {}
         self._value_pending: dict[Hashable, _PendingEmbedding] = {}
         self._chunk_fts_open: set[str] = set()
+        self._peer_unprepared: dict[str, str] = {}
         self.embedding_requests = 0
         self.embedding_hits = 0
         self.embedding_errors = 0
@@ -188,6 +189,24 @@ class RetrievalRunState:
             if key not in self._chunk_fts_open:
                 self._chunk_fts_open.add(key)
                 self.chunk_fts_timeouts += 1
+
+    def note_peer_unprepared(self, notebook_id: str, reason: str) -> None:
+        """Remember that the passage lane could not prepare this library.
+
+        Written by ``chunk_federation._federated_tasks`` when a peer's
+        per-library preparation read fails; the FIRST reason wins.  Read only
+        by the peer workbook lane (``chunk_federation.federated_library_sources``)
+        so it does not spend a second budget on the same failed read.  The
+        passage lane itself does not consult it: each federated call keeps
+        retrying its own preparation, as it always has.
+        """
+        with self._lock:
+            self._peer_unprepared.setdefault(str(notebook_id), str(reason))
+
+    def peer_unprepared_reason(self, notebook_id: str) -> str:
+        """The recorded reason for this library, or ``""`` if none."""
+        with self._lock:
+            return self._peer_unprepared.get(str(notebook_id), "")
 
     @contextmanager
     def fanout_slot(self) -> Iterator[None]:

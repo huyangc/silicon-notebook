@@ -5885,17 +5885,23 @@ class AskService:
         scope admits -- so a library outside the selection, or one the asker
         cannot read, contributes nothing, and a deselected source stays out.
         No private Memory/Knowhow projection can enter: the seat's lists are
-        visible sources only.  The rest -- one catalog filled library by
-        library under the single-library byte budget, one plan, one sheet --
-        is ``SpreadsheetAnalysisService.analyze_peer``.
+        visible sources only.  A participant whose source list could not be
+        read this run comes back in the seat's ``skipped`` half: it drops out
+        alone and is reported in the trace.  Library display names come from
+        the global run's turn (``DetachedAskTurn.notebook_names``), read lazily
+        and only to label a catalog over two or more libraries and the result.
+        The rest -- one catalog filled library by library under the
+        single-library byte budget, one plan, one sheet -- is
+        ``SpreadsheetAnalysisService.analyze_peer``.
         """
         question = prepared.research_question
         if not self.spreadsheet_analysis.wants_analysis(question):
             return [], None
-        libraries = tuple(seat(prepared.notebook_id))
+        libraries, skipped = seat(prepared.notebook_id)
         kept = set(_peer_ceiling_participants(
-            notebook_id for notebook_id, _sources in libraries
+            notebook_id for notebook_id, _sources in (*libraries, *skipped)
         ))
+        turn = current_detached_ask_turn()
         scope = runtime.scope
         libraries = tuple(
             (notebook_id, tuple(
@@ -5914,6 +5920,11 @@ class AskService:
             question=question,
             planner_client=self.model_clients.chat("reasoning_agent"),
             cancel_event=runtime.cancellation,
+            skipped=tuple(
+                (notebook_id, reason) for notebook_id, reason in skipped
+                if notebook_id in kept
+            ),
+            notebook_names=turn.notebook_names if turn is not None else None,
         )
 
     def _build_reasoning_retriever(

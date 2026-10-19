@@ -722,6 +722,10 @@ class SpreadsheetAnalysisResult(BaseModel):
     # 时整体从 JSON 缺席，历史 payload 逐字节不变。
     notebook_id: str = Field(default="", exclude_if=lambda value: not value)
     tier: str = Field(default="personal", exclude_if=lambda value: value == "personal")
+    # 归属库在提问者眼里的名字，只在全局（对等）问答里填：合成模型的表格块据此区分
+    # 两个库里同名的工作簿。单库问答恒为空串、整体从 JSON 缺席，逐字节不变。界面上
+    # 显示库名仍以前端自己的库名表为准（与引用卡同口径）。
+    notebook_name: str = Field(default="", exclude_if=lambda value: not value)
 
 
 # Deliberately NOT a reuse of ``StructuredResultCoverage``: that model's

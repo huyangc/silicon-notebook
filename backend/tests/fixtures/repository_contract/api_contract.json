@@ -12596,6 +12596,11 @@
               "title": "Notebook Id",
               "type": "string"
             },
+            "notebook_name": {
+              "default": "",
+              "title": "Notebook Name",
+              "type": "string"
+            },
             "operation": {
               "title": "Operation",
               "type": "string"

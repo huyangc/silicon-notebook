@@ -137,6 +137,16 @@ class DetachedAskTurn:
     conversation_id: str
     history: str = ""
     user_history: str = ""
+    # ``Callable[[], Mapping[str, str]] | None`` -- the asker's display names of
+    # the libraries they may read, READ LAZILY: only a consumer that has to tell
+    # two participant libraries apart in a prompt calls it (the peer workbook
+    # lane, when two or more libraries contribute workbooks), so a run that
+    # never needs a name never pays the read.  Display data only -- it grants
+    # nothing, and no consumer may use it to decide which libraries a run
+    # searches.  ``None`` (the default, and every notebook-scoped turn) means
+    # nobody answers, and consumers render without names.  Typed loosely for
+    # the same leaf-module reason as ``FederatedRunPlan``'s callables.
+    notebook_names: Any = None
 
 
 class PointerSnapshot(tuple):

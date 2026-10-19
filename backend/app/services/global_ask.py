@@ -856,6 +856,21 @@ class GlobalAskService:
         return (stored.model_dump(exclude=_REQUEST_IDENTITY_EXCLUDES)
                 == current.model_dump(exclude=_REQUEST_IDENTITY_EXCLUDES))
 
+    def _participant_names(self, user_id, notebook_ids) -> dict:
+        """``{notebook_id: name}`` for this run's libraries, as the asker sees them.
+
+        The same reader ``_resolve_run_scope`` lists names through, narrowed to
+        the run's own participants: display data for a prompt, never a source of
+        which libraries the run may search (a library the asker can no longer
+        read simply has no name here).
+        """
+        rows = self.notebooks(user_id)
+        names = rows if isinstance(rows, dict) else {row.id: row.name for row in rows}
+        return {
+            notebook_id: names[notebook_id]
+            for notebook_id in notebook_ids if names.get(notebook_id)
+        }
+
     def _resolve_run_scope(self, payload, user_id, allowed_notebook_ids, authority_check):
         """The scope ``start()`` and ``preview_intent`` must resolve IDENTICALLY.
 
@@ -1986,6 +2001,11 @@ class GlobalAskService:
                     conversation_id=job.conversation_id,
                     history=history,
                     user_history=user_history,
+                    # Lazy: read only by a consumer that must tell two
+                    # participant libraries apart (the peer workbook lane).
+                    notebook_names=lambda: self._participant_names(
+                        user_id, job.resolved_notebook_ids,
+                    ),
                 ),
                 plan,
                 nominal_active=job.resolved_notebook_ids[0],

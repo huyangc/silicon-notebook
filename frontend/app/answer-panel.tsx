@@ -209,12 +209,23 @@ const SPREADSHEET_OPERATION_LABELS: Record<string, string> = {
 
 function SpreadsheetResultCard({
   resultSet,
+  notebookId,
+  notebookNames,
   onOpenSource,
 }: {
   resultSet: SpreadsheetAnalysisResult;
+  notebookId: string | null;
+  notebookNames: Record<string, string>;
   onOpenSource?: (sourceId: string, elementId?: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  // 表格来自别的库(全局问答里的任一库、笔记本内问答里的挂载参考库)时,在标题行标出
+  // 库名,与引用卡同口径「来自「名」（层级）」;库名查不到就不标,绝不吐裸 notebook id。
+  const sourceNotebookId = resultSet.notebook_id ?? "";
+  const sourceName = isCrossLibraryItem(sourceNotebookId, notebookId)
+    ? notebookNames[sourceNotebookId] ?? ""
+    : "";
+  const tier = resultSet.tier ?? "personal";
   const visibleLimit = STRUCTURED_ENUMERATION_LIMITS.initialVisibleRows;
   const rows = expanded ? resultSet.rows : resultSet.rows.slice(0, visibleLimit);
   const coverage = resultSet.coverage;
@@ -226,6 +237,11 @@ function SpreadsheetResultCard({
           {coverage.complete ? "结果完整" : "部分预览"} {coverage.returned_rows}/{coverage.total_rows}
         </span>
         <strong><Table2 size={14} aria-hidden="true" /> Excel 分析 · {resultSet.source_title || "未命名来源"}</strong>
+        {sourceName && (
+          <span className={`tier-badge tier-${tier}`}>
+            来自「<span className="tier-badge-source-name">{sourceName}</span>」（{label(TIER, tier, "未知来源")}）
+          </span>
+        )}
         <span>{resultSet.sheet}!{resultSet.range} · {label(SPREADSHEET_OPERATION_LABELS, resultSet.operation, "专业分析")}</span>
         {onOpenSource && resultSet.source_id && (
           <button
@@ -814,6 +830,8 @@ function KnowhowResultSets({
             <SpreadsheetResultCard
               key={`spreadsheet-${resultSet.source_id}-${resultSet.sheet}-${resultSet.operation}`}
               resultSet={resultSet}
+              notebookId={notebookId}
+              notebookNames={notebookNames}
               onOpenSource={onOpenSource}
             />
           );

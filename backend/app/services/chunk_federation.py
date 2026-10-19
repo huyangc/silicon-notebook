@@ -122,7 +122,7 @@ from app.services.retrieval_participants import (
     assert_override_matches_run, federated_ask_active,
 )
 from app.services.retrieval_run import (
-    memoized_retrieval_value, retrieval_fanout_slot,
+    current_retrieval_run, memoized_retrieval_value, retrieval_fanout_slot,
 )
 
 
@@ -447,8 +447,13 @@ def federation_participant_ids(
 
 def federated_library_sources(
     candidates, active_notebook_id: str,
-) -> tuple[tuple[str, tuple[str, ...]], ...]:
-    """``((notebook_id, visible source ids), ...)`` over the chunk lane's libraries.
+) -> tuple[tuple[tuple[str, tuple[str, ...]], ...], tuple[tuple[str, str], ...]]:
+    """``(libraries, skipped)`` over the chunk lane's libraries.
+
+    ``libraries`` is ``((notebook_id, visible source ids), ...)``; ``skipped``
+    is ``((notebook_id, reason code), ...)`` for each library this call could
+    not enumerate, in participant order, with codes from
+    ``federated_run.LIBRARY_SKIP_REASONS``.
 
     The peer (global) workbook lane's participant entry.  That lane may not
     walk ``AskService.ask_engine_participant_notebooks``: that seat is the REAL
@@ -464,9 +469,22 @@ def federated_library_sources(
     this library" and "the passage lane searches this library" therefore
     cannot drift apart.
 
+    The per-library reads get the chunk lane's own protections, because they
+    are the same kind of read in the same place -- serial, in the parent
+    thread, before anything else can bound them:
+
+    * a library the passage lane already failed to prepare in this run
+      (``RetrievalRunState.peer_unprepared_reason``) is skipped with that
+      lane's reason and NOT read again;
+    * with a run plan each read is ``raise_if_cancelled`` + ``read_budget``
+      bounded by the plan's per-library ``notebook_timeout_seconds`` and its
+      cancel token, the budget a passage preparation gets;
+    * one library failing drops that library alone.  ``AskCancelled`` and
+      ``RetrievalControlError`` still reach the caller.
+
     Silent like ``federation_participant_ids`` -- the truncation event belongs
-    to the fan-out.  A failing visible read propagates: the caller's lane is
-    fail-open as a whole, exactly as it is when its single-library read fails.
+    to the fan-out.  The participant seat is read BEFORE the loop and outside
+    its handler, so the handler below can never swallow an attestation failure.
 
     ⛔ Not an authorization predicate, the same layer as
     ``federation_participants``: callers still narrow every list to the run's
@@ -475,10 +493,48 @@ def federated_library_sources(
     participants, _mounted_total = _bounded_participants(
         candidates, active_notebook_id,
     )
-    return tuple(
-        (notebook_id, tuple(_peer_visible_sources(candidates, notebook_id)))
-        for notebook_id, _tier in participants
-    )
+    plan = current_federated_run_plan() if federated_ask_active() else None
+    run = current_retrieval_run()
+    libraries: list = []
+    skipped: list = []
+    for notebook_id, _tier in participants:
+        known = run.peer_unprepared_reason(notebook_id) if run is not None else ""
+        if known:
+            skipped.append((notebook_id, known))
+            continue
+        bound = 0.0 if plan is None else (
+            time.monotonic() + float(plan.notebook_timeout_seconds)
+        )
+        try:
+            libraries.append((
+                notebook_id, _budgeted_visible_sources(
+                    candidates, notebook_id, plan, bound,
+                ),
+            ))
+        except (AskCancelled, RetrievalControlError):
+            raise
+        except Exception as exc:  # noqa: BLE001 - one library must not fail the lane
+            skipped.append((notebook_id, classify_read_failure(exc) or (
+                "timeout" if plan is not None and time.monotonic() >= bound
+                else "unavailable"
+            )))
+    return tuple(libraries), tuple(skipped)
+
+
+def _budgeted_visible_sources(
+    candidates, notebook_id: str, plan, deadline: float,
+) -> tuple:
+    """One library's visible ceiling, under the plan's per-library budget.
+
+    The ``_prepared_peer`` discipline for the one read this lane needs: a
+    cancelled run opens no connection (``AskCancelled``, never a budget
+    timeout), and without a plan it is the plain read.
+    """
+    if plan is None:
+        return tuple(_peer_visible_sources(candidates, notebook_id))
+    raise_if_cancelled(plan.cancel)
+    with read_budget(deadline, plan.cancel):
+        return tuple(_peer_visible_sources(candidates, notebook_id))
 
 
 def federated_chunk_candidates(
@@ -1204,6 +1260,10 @@ def _federated_tasks(
                             else "unavailable"
                         )
                         event["reason"] = dropped[notebook_id]
+                        # Remembered for the run, so the workbook lane does not
+                        # spend a second budget on a library that has already
+                        # failed this exact read (``federated_library_sources``).
+                        _note_unprepared(notebook_id, dropped[notebook_id])
                     if arm:
                         event["arm"] = arm
                     _emit(candidates, event)
@@ -1224,6 +1284,13 @@ def _federated_tasks(
     finally:
         _CHUNK_ARM_DRIFTED.reset(drift_token)
     return tasks
+
+
+def _note_unprepared(notebook_id: str, reason: str) -> None:
+    """Record a failed peer preparation on the ambient run (no-op without one)."""
+    run = current_retrieval_run()
+    if run is not None:
+        run.note_peer_unprepared(notebook_id, reason)
 
 
 def _prepared_peer(candidates, notebook_id: str, plan, deadline: float) -> tuple:
