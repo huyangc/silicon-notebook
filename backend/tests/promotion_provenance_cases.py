@@ -558,6 +558,12 @@ def a_stored_legacy_title_is_shown_with_the_current_prefix(world: World) -> None
             and hit.source_id == source_id} == {shown}, [h.label for h in by_title]
     # the user's own document titled with the same words is not remapped
     assert any(hit.label.startswith(f"{LEGACY_PREFIX}我自己的文档") for hit in hits)
+    # the direct element fallback hands the answer model the same name
+    with runtime.database.connect() as db:
+        gathered = repo.retrieval.candidates._gather_elements(
+            db, world.base, with_vectors=False)
+    assert {row["source_title"] for row in gathered
+            if row["source_id"] == source_id} == {shown}
     # the share preview lists titles verbatim to prospective copiers
     _owner, titles = runtime.sharing_store.shared_preview_rows(world.base)
     assert shown in titles and legacy not in titles
