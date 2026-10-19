@@ -247,9 +247,18 @@ def case_an_expired_turn_vanishes_then_startup_recovery_purges_it(repo):
     world.turn("job-1", "conv-1", ["nb-a", "nb-b"], question="第一问", new_conversation=True)
     world.turn("job-2", "conv-1", ["nb-a"], question="第二问")
     world.turn("job-3", "conv-2", ["nb-b"], question="只问已删的库", new_conversation=True)
+    token = world.service.share_conversation("conv-1", user_id=OWNER)["share_token"]
     world.delete_notebook("nb-b")
     world.expire("job-1")
     world.expire("job-3")
+
+    # The automatic title named the expired first turn: every surface that shows
+    # a title reads the earliest live question from now on, before any purge.
+    assert world.service.conversation("conv-1", user_id=OWNER).title == "第二问"
+    assert world.service.list_conversations(user_id=OWNER)[0].title == "第二问"
+    public = world.service.public_conversation(token)
+    assert public is not None and public["title"] == "第二问"
+    assert [turn["question"] for turn in public["turns"]] == ["第二问"]
 
     # Logical gate: gone for the owner the moment the window passes.
     _expect_404(lambda: world.service.get_job("job-1", user_id=OWNER))

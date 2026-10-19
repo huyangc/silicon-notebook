@@ -184,7 +184,12 @@ physically by startup recovery or the next notebook deletion (with any conversat
 When "the global conversation will not open after a library was deleted" is reported, look at that column
 first: empty means the turn was never stamped (the library was deleted before this mechanism existed, or
 through the orphan clean-up path) and the 404 is the old rule; a value with a 404 usually means another,
-still-existing participant the owner can no longer read -- a deliberate conservative rule, not a fault.
+still-existing participant the owner can no longer read -- a deliberate conservative rule, not a fault;
+a read over MCP / an Agent token is always 404, also by design. On PostgreSQL the stamp reads only the
+matching jobs through `idx_global_ask_jobs_participants` (GIN); SQLite has no such index, so there the
+stamp is a full table scan (an `instr` byte prefilter on the raw payload, then `json_each` on the rows that
+pass) inside the deletion's final write transaction -- SQLite is a mirror deployment of bounded size, and
+this is a known trade-off.
 
 ## Ownerless Memory sources
 

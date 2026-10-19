@@ -13,7 +13,9 @@ from app.core.capability_tokens import (
 # notebook-scoped public read caps its fetch by. Pure leaf module, no cycle.
 from app.domain.conversation_public_view import MAX_TURNS
 from app.domain.global_ask_retention import (
+    auto_title_on_expired_first_turn_sql,
     conversation_live_sql,
+    shown_title_sql,
     live_turn_sql,
     participant_bind_count,
     participant_sql,
@@ -87,6 +89,12 @@ class GlobalAskStore:
         self._live = live_turn_sql(dialect=_dialect(marker))
         # ...and a conversation whose every turn did (``conversation_live_sql``).
         self._conversation_live = conversation_live_sql(dialect=_dialect(marker), alias="c")
+        # An automatic title naming an expired first turn reads as the
+        # earliest live question (``shown_title_sql``), on every surface that
+        # shows a title: the list, the conversation, the public page.
+        self._shown_title = shown_title_sql(
+            dialect=_dialect(marker), conversation="c", title_chars=CONVERSATION_TITLE_MAX_CHARS,
+        )
         self._history_projection = (
             "payload_json::jsonb->>'question' AS question, "
             "COALESCE(payload_json::jsonb->'answer'->>'answer', "
@@ -106,8 +114,12 @@ class GlobalAskStore:
     def _conversation(row):
         if row is None:
             return None
+        try:
+            title = row["shown_title"]
+        except (KeyError, IndexError):
+            title = row["title"]
         return GlobalConversationSummary(
-            id=row["id"], title=row["title"], created_at=row["created_at"],
+            id=row["id"], title=title, created_at=row["created_at"],
             updated_at=row["updated_at"], notebook_scope=json.loads(row["scope_json"]),
             submitted_via=row["submitted_via"],
         )
@@ -115,7 +127,8 @@ class GlobalAskStore:
     def conversation(self, conversation_id, user_id):
         with self.database.connect() as db:
             row = db.execute(self._sql(
-                "SELECT c.* FROM global_ask_conversations c WHERE c.id=? AND c.user_id=? "
+                f"SELECT c.*, {self._shown_title} AS shown_title "
+                "FROM global_ask_conversations c WHERE c.id=? AND c.user_id=? "
                 f"AND {self._conversation_live}"
             ), (conversation_id, user_id)).fetchone()
         return self._conversation(row)
@@ -123,7 +136,8 @@ class GlobalAskStore:
     def list_conversations(self, user_id, limit, offset):
         with self.database.connect() as db:
             rows = db.execute(self._sql(
-                "SELECT c.* FROM global_ask_conversations c WHERE c.user_id=? "
+                f"SELECT c.*, {self._shown_title} AS shown_title "
+                "FROM global_ask_conversations c WHERE c.user_id=? "
                 f"AND {self._conversation_live} "
                 "ORDER BY c.updated_at DESC,c.id DESC LIMIT ? OFFSET ?"
             ), (user_id, limit, offset)).fetchall()
@@ -494,14 +508,24 @@ class GlobalAskStore:
         keeps both until the API has assembled its response, so a revocation
         or deletion that lands mid-request cannot leave an answer in flight
         that the caller was no longer entitled to. This does the same for a
-        global job: one transaction reads the job row (``FOR SHARE``), leases
-        every live participant notebook (``FOR KEY SHARE``, which conflicts
-        with whole-notebook deletion's ``FOR UPDATE``), resolves the names the
+        global job: one transaction leases every live participant notebook
+        (``FOR KEY SHARE``, which conflicts with whole-notebook deletion's
+        ``FOR UPDATE``), then reads the job row (``FOR SHARE``), resolves the names the
         OWNER can still read, and -- for the owner's self-service read -- locks
         each participant's authority chain and refuses unless every
         participant is still readable. On SQLite ``database.write()`` is the
         process-level write lock, so the same statements serialize without
         row locks.
+
+        ⛔ LOCK ORDER: notebooks, THEN the job row -- the order the notebook
+        delete's finalize transaction takes them in (``notebooks FOR UPDATE``
+        first, the retention stamp's ``UPDATE global_ask_jobs`` later). Taking
+        the job row first let a finalize that already held the notebook wait on
+        this reader's job lock while this reader waited on the notebook: a
+        deadlock that failed the detail read or the deletion. The participant
+        set is read once without a lock to know which notebooks to lease; it is
+        frozen at the job's creation, and the locked re-read below is the one
+        the record is built from.
 
         ``reader_id`` is ``None`` for an administrator, who keeps the audit
         record after the owner lost a participant; otherwise it is the owner.
@@ -510,16 +534,14 @@ class GlobalAskStore:
         key_share = " FOR KEY SHARE" if self.marker == "%s" else ""
         access = self._access_sql
         with self.database.write() as db:
-            row = db.execute(self._sql(
-                f"SELECT * FROM global_ask_jobs WHERE id=? AND user_id=? AND {self._live}" + share
+            unlocked = db.execute(self._sql(
+                f"SELECT * FROM global_ask_jobs WHERE id=? AND user_id=? AND {self._live}"
             ), (job_id, owner_id)).fetchone()
-            if row is None:
+            if unlocked is None:
                 yield None
                 return
-            job = self._job(row)
-            ids = list(dict.fromkeys(job.resolved_notebook_ids))
-            names = {}
-            readable = set()
+            ids = list(dict.fromkeys(self._job(unlocked).resolved_notebook_ids))
+            live = {}
             if ids and access is not None:
                 placeholders = ",".join("?" for _ in ids)
                 live = {
@@ -529,6 +551,17 @@ class GlobalAskStore:
                         + key_share
                     ), tuple(ids)).fetchall()
                 }
+            row = db.execute(self._sql(
+                f"SELECT * FROM global_ask_jobs WHERE id=? AND user_id=? AND {self._live}" + share
+            ), (job_id, owner_id)).fetchone()
+            if row is None:
+                yield None
+                return
+            job = self._job(row)
+            names = {}
+            readable = set()
+            if ids and access is not None:
+                placeholders = ",".join("?" for _ in ids)
                 readable = {
                     r["id"] for r in db.execute(self._sql(
                         f"SELECT nb.id FROM notebooks nb WHERE nb.id IN ({placeholders}) AND "
@@ -684,12 +717,30 @@ class GlobalAskStore:
                     + ",".join(marker for _ in page) + ") ORDER BY id FOR UPDATE",
                     tuple(page),
                 ).fetchall()
-        question = (
-            "payload_json::jsonb->>'question'" if dialect == "postgres"
-            else "json_extract(payload_json,'$.question')"
+        # ONE set-based UPDATE per page of conversations, inside whichever
+        # transaction called the purge (a notebook delete's finalize): an
+        # automatic title naming the expiring first turn moves to the earliest
+        # remaining question -- the very title readers were already being shown
+        # (``shown_title_sql``) -- and a user-typed title is left alone.
+        at = "%s::timestamptz" if dialect == "postgres" else "julianday(?)"
+        column = (
+            (lambda alias: f"{alias}.retained_until::timestamptz") if dialect == "postgres"
+            else (lambda alias: f"julianday({alias}.retained_until)")
         )
-        for conversation_id in conversations:
-            cls._retitle_before_purge(db, conversation_id, expired_sql, when, question, marker)
+        condition, replacement = auto_title_on_expired_first_turn_sql(
+            dialect=dialect, conversation="global_ask_conversations",
+            title_chars=CONVERSATION_TITLE_MAX_CHARS,
+            expired=lambda alias: (
+                f"({alias}.retained_until IS NOT NULL AND {column(alias)} <= {at})"
+            ),
+        )
+        for start in range(0, len(conversations), _PURGE_BATCH):
+            page = conversations[start:start + _PURGE_BATCH]
+            db.execute(
+                f"UPDATE global_ask_conversations SET title=COALESCE({replacement}, title) "
+                "WHERE id IN (" + ",".join(marker for _ in page) + f") AND {condition}",
+                (when, *page, when),
+            )
         ids = [row["id"] for row in rows]
         for start in range(0, len(ids), _PURGE_BATCH):
             page = ids[start:start + _PURGE_BATCH]
@@ -706,30 +757,6 @@ class GlobalAskStore:
                 "global_ask_conversations.id)", tuple(page),
             )
         return len(ids)
-
-    @staticmethod
-    def _retitle_before_purge(db, conversation_id, expired_sql, when, question, marker):
-        """Move an automatic title off a first turn that is about to be purged."""
-        first = db.execute(
-            f"SELECT id, {question} AS question, ({expired_sql}) AS expired "
-            f"FROM global_ask_jobs WHERE conversation_id={marker} "
-            f"{GLOBAL_JOBS_ORDER_ASC} LIMIT 1", (when, conversation_id),
-        ).fetchone()
-        if first is None or not first["expired"]:
-            return
-        remaining = db.execute(
-            f"SELECT {question} AS question FROM global_ask_jobs "
-            f"WHERE conversation_id={marker} AND NOT ({expired_sql}) "
-            f"{GLOBAL_JOBS_ORDER_ASC} LIMIT 1", (conversation_id, when),
-        ).fetchone()
-        if remaining is None:
-            return
-        db.execute(
-            f"UPDATE global_ask_conversations SET title={marker} "
-            f"WHERE id={marker} AND title={marker}",
-            (str(remaining["question"] or "")[:CONVERSATION_TITLE_MAX_CHARS],
-             conversation_id, str(first["question"] or "")[:CONVERSATION_TITLE_MAX_CHARS]),
-        )
 
     # ------------------------------------------------------------------
     # public conversation sharing -- the global twin of
@@ -932,7 +959,7 @@ class GlobalAskStore:
             return None
         with self.database.connect() as db:
             conv = db.execute(self._sql(
-                "SELECT c.id, c.user_id, c.title, c.created_at, c.shared_through_at, "
+                f"SELECT c.id, c.user_id, {self._shown_title} AS title, c.created_at, c.shared_through_at, "
                 "c.shared_through_id FROM global_ask_conversations c WHERE c.share_token=? "
                 f"AND {self._conversation_live}"
             ), (clean,)).fetchone()
