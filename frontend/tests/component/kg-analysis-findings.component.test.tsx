@@ -6,8 +6,9 @@
 //     / 已通过(✓ 与 – 分开,已标为正常可撤销,F4 已判定不是同一个);
 //   · 只读成员看得到同样的问题与证据,但一个按钮都没有;
 //   · 「更新分析」按 S4 置灰并在旁边写原因(含「合并规则已更新」与空版本不误判);
-//   · 「已处理，更新后核验」「基于变更 #N」、对比行可比 / 不可比;
-//   · F5 补上关联两态与结果就地显示、F4 待确认合并有 / 无;
+//   · 「已处理，更新后核验（原因）」「基于变更 #N」(页级 built_at)、对比行可比 / 不可比;
+//   · F5 补上关联:open 出按钮、结果就地显示;relink_spent 随 passed 那一页回来,放进诊断数据、
+//     不在「已通过」列出也不计数;F4 待确认合并有 / 无(按全组 canonical_ids);
 //   · 按钮按下的在飞态与结果写在按钮旁(删除、重新解析、标为正常、撤销);
 //   · 打开来源核对时把焦点放在按钮上(来源详情关掉后焦点回到这里)。
 //
@@ -65,19 +66,31 @@ function summary(overrides: Partial<KgFindingsSummary> = {}): KgFindingsSummary 
     absence: null,
     freshness: CURRENT,
     rules_version: 1,
+    built_at: { kg_seq: 128, cluster_seq: 7 },
+    created_at: "2026-10-19T09:00:00Z",
     counts: { by_rule: { F1: 1, F2: 1, F3: 1, F4: 1, F5: 1 }, dismissed: 1 },
-    rules: [
-      { rule_id: "F1", status: "ran", checked: 84, checked_unit: "sources", total: 1, persisted: 1, truncated: false, not_judged: 3 },
-      { rule_id: "F2", status: "ran", checked: 84, checked_unit: "sources", total: 1, persisted: 1, truncated: false },
-      { rule_id: "F3", status: "ran", checked: 84, checked_unit: "sources", total: 1, persisted: 1, truncated: false },
-      { rule_id: "F4", status: "ran", checked: 9400, checked_unit: "canonical", total: 1, persisted: 1, truncated: false, decided_not_same: 1 },
-      { rule_id: "F5", status: "ran", checked: 41713, checked_unit: "objects", total: 1, persisted: 1, truncated: false },
-    ],
-    dev_items: [{ item_id: "S1", groups: 14, objects: 220, samples: [{ names: ["RMS Norm", "RMSNorm"] }, "Q-Former / Qformer"] }],
-    structure: { giant_objects: 30366, objects_total: 41713, giant_object_share: 0.728, island_components: 1137, island_sources: 14 },
+    // 引擎的原字段,按规则代号为键。
+    rules: {
+      F1: { status: "ran", sources_checked: 84, sources_too_few_concepts: 3, sources_hit: 1, total: 1, truncated: false },
+      F2: { status: "ran", sources_checked: 84, candidate_pairs: 40, pairs_hit: 1, total: 1, truncated: false },
+      F3: { status: "ran", sources_checked: 84, median_relations_per_object: 1.2, median_isolated_share: 0.02, total: 1 },
+      F4: { status: "ran", canonicals_checked: 9400, unnamed_concept_canonicals: 0, groups_decided_apart: 1, total: 1 },
+      S1: { status: "ran", narrow_groups: 14, narrow_group_objects: 220, groups_decided_apart: 0 },
+      F5: { status: "ran", objects_checked: 41713, total: 1 },
+    },
+    dev_items: [{
+      item_id: "S1", groups: 14, objects: 220,
+      samples: [{ names: ["RMS Norm", "RMSNorm"] }, { names: ["Q-Former", "Qformer"] }],
+    }],
+    structure: {
+      graph_nodes: 37340, components: 1138, giant_nodes: 27000, usable_objects: 41713,
+      giant_objects: 30366, giant_object_share: 0.728, island_components: 1137, island_sources: 14,
+    },
     comparison: {
-      comparable: true, reason: null, previous_built_at_seq: 120, resolved: 2, persisting: 4, new: 1,
-      resolved_samples: [{ rule_id: "F1", subject_key: "src-z", subject_label: "Titans.pdf" }],
+      previous_built_at_seq: 120, previous_built_at_cluster_seq: 6, comparable: true, reason: null,
+      resolved: 2, persisting: 4, new: 1,
+      resolved_samples: [{ rule_id: "F1", subject_kind: "source", subject_key: "src-z", subject_label: "Titans.pdf", impact_objects: 90 }],
+      by_rule: {},
     },
     relink: { attempted: false, at_kg_seq: null, at: null, may_change: true },
     units: {},
@@ -136,21 +149,35 @@ function live(sourceId: string, title: string, extra: Partial<{ exists: boolean;
   return { source_id: sourceId, exists: true, title, source_type: "pdf", processing: false, ...extra };
 }
 
-const F1: KgFindingRow = {
+/** 规范形状的一行:没写的字段取「新发现、还没处理」的默认值。 */
+function row(fields: Pick<KgFindingRow, "rule_id" | "severity" | "subject" | "evidence" | "impact" | "actions"> & Partial<KgFindingRow>): KgFindingRow {
+  return {
+    subject_refs: [],
+    first_seen: { kg_seq: 128, cluster_seq: 7 },
+    status: "open",
+    handled_reason: null,
+    dismissed_at: null,
+    live_sources: [],
+    ...fields,
+  };
+}
+
+const F1 = row({
   rule_id: "F1",
   severity: "high",
   subject: { kind: "source", key: "src-a", label: "06_LMCache_mineru.md" },
-  evidence: { shared_share: 0, giant_share: 0, concepts: 84, objects: 410, samples: ["量子光学", "SEIR 模型"] },
+  subject_refs: ["src-a"],
+  evidence: { shared_share: 0, giant_share: 0, concepts: 84, samples: ["量子光学", "SEIR 模型"] },
   impact: { objects: 410 },
   actions: [{ kind: "delete_source", capability: "sources:write", source_id: "src-a" }],
-  status: "open",
   live_sources: [live("src-a", "06_LMCache_mineru.md")],
-};
+});
 
-const F2: KgFindingRow = {
+const F2 = row({
   rule_id: "F2",
   severity: "medium",
   subject: { kind: "source_pair", key: "src-b|src-c", label: "Mamba2_mineru ⇄ Mamba2_full" },
+  subject_refs: ["src-b", "src-c"],
   evidence: {
     jaccard: 0.65,
     shared_concepts: 120,
@@ -161,29 +188,28 @@ const F2: KgFindingRow = {
     samples: ["状态空间模型"],
   },
   impact: { objects: 280 },
-  // 契约草案的单个 action 形状(target_source_id)。
-  action: { kind: "delete_source", capability: "sources:write", available: true, unavailable_reason: null, target_source_id: "src-c" },
-  status: "open",
+  // 后端只给建议删除的那一份的删除动作。
+  actions: [{ kind: "delete_source", capability: "sources:write", source_id: "src-c" }],
   live_sources: [live("src-b", "Mamba2_mineru"), live("src-c", "Mamba2_full")],
-};
+});
 
-const F3: KgFindingRow = {
+const F3 = row({
   rule_id: "F3",
   severity: "medium",
   subject: { kind: "source", key: "src-d", label: "Minitron.pdf" },
+  subject_refs: ["src-d"],
   evidence: {
     signals: ["fragmented_names", "low_relations"],
     fragmented_names: 8, fragmented_share: 0.12, fragmented_objects: 30,
     relations_per_object: 0.31, median_relations_per_object: 1.2,
-    objects: 200, also_off_topic: true, samples: ["L l a m a 3 . 1"],
+    also_off_topic: true, samples: ["L l a m a 3 . 1"],
   },
   impact: { objects: 200 },
   actions: [{ kind: "reparse_source", capability: "sources:write", source_id: "src-d" }],
-  status: "open",
   live_sources: [live("src-d", "Minitron.pdf")],
-};
+});
 
-const F4: KgFindingRow = {
+const F4 = row({
   rule_id: "F4",
   severity: "low",
   subject: { kind: "concept_group", key: "rmsnorm", label: "RMS Norm" },
@@ -193,13 +219,14 @@ const F4: KgFindingRow = {
       { canonical_id: "K-rms norm", name: "RMS Norm", objects: 12 },
       { canonical_id: "K-rmsnorm", name: "RMSNorm", objects: 3 },
     ],
+    canonical_ids: ["K-rms norm", "K-rmsnorm"],
+    classes: [["K-rms norm", "K-rmsnorm"]],
   },
   impact: { objects: 15 },
   actions: [{ kind: "review_merge", capability: "kg:write" }],
-  status: "open",
-};
+});
 
-const F5: KgFindingRow = {
+const F5 = row({
   rule_id: "F5",
   severity: "low",
   subject: { kind: "notebook", key: "notebook", label: "" },
@@ -209,8 +236,10 @@ const F5: KgFindingRow = {
   },
   impact: { objects: 1830 },
   actions: [{ kind: "relink", capability: "kg:write" }],
-  status: "open",
-};
+});
+
+/** F5 补上关联已经跑过、之后没有新内容:后端放在 passed 那一页里返回。 */
+const SPENT: KgFindingRow = { ...F5, status: "relink_spent" };
 
 const DECIDED: KgFindingRow = {
   ...F4,
@@ -221,6 +250,8 @@ const DECIDED: KgFindingRow = {
 const DISMISSED: KgFindingRow = {
   ...F1,
   subject: { kind: "source", key: "src-t", label: "Titans.pdf" },
+  subject_refs: ["src-t"],
+  actions: [{ kind: "delete_source", capability: "sources:write", source_id: "src-t" }],
   status: "dismissed",
   dismissed_at: "2026-10-19T09:30:00Z",
   live_sources: [live("src-t", "Titans.pdf")],
@@ -233,6 +264,7 @@ function page(zone: string, rows: KgFindingRow[], overrides: Partial<KgFindingsP
     present: true,
     absence: null,
     freshness: CURRENT,
+    built_at: { kg_seq: 128, cluster_seq: 7 },
     rules_version: 1,
     zone,
     limit: 20,
@@ -241,6 +273,7 @@ function page(zone: string, rows: KgFindingRow[], overrides: Partial<KgFindingsP
     returned: rows.length,
     has_more: false,
     units: { impact_objects: "objects" },
+    evidence_units: {},
     rows,
     ...overrides,
   };
@@ -370,10 +403,15 @@ test("认不出的规则与字段不报错、不上屏代号：只少几句话",
     rule_id: "F9",
     severity: "critical",
     subject: { kind: "galaxy", key: "x-1", label: "某个对象" },
+    subject_refs: [],
     evidence: { weird_field: 3, samples: "not-a-list" },
-    impact: null,
+    impact: { objects: 0 },
     actions: [{ kind: "teleport", capability: "x" }],
+    first_seen: { kg_seq: 128, cluster_seq: 7 },
     status: "mystery",
+    handled_reason: "teleported",
+    dismissed_at: null,
+    live_sources: [],
   }];
   renderPanel();
   await waitFor(() => expect(findingItems().length).toBe(1));
@@ -381,7 +419,7 @@ test("认不出的规则与字段不报错、不上屏代号：只少几句话",
   expect(within(item).getByText("其它问题")).toBeInTheDocument();
   expect(within(item).getByText("未分级")).toBeInTheDocument();
   expect(within(item).getByText("影响 0 知识对象")).toBeInTheDocument();
-  for (const code of ["F9", "critical", "galaxy", "weird_field", "teleport", "mystery"]) {
+  for (const code of ["F9", "critical", "galaxy", "weird_field", "teleport", "mystery", "teleported"]) {
     expect(item.textContent ?? "").not.toContain(code);
   }
 });
@@ -430,9 +468,9 @@ test("合并规则已更新：其余都一致时按钮仍可点，并写明为�
   expect(onAnalyze).toHaveBeenCalledTimes(1);
 });
 
-test("删除知识图谱之后合并版本是空串：不读成「合并规则已更新」", async () => {
+test("还没合并过（删除知识图谱之后 matches 为 null）：不读成「合并规则已更新」", async () => {
   vi.mocked(fetchKgAnalysis).mockResolvedValue(report({
-    merge_code: { stored: "", current: "v4|1024|1024", matches: false },
+    merge_code: { stored: "", current: "v4|1024|1024", matches: null },
   }));
   renderPanel();
   await ready();
@@ -457,18 +495,23 @@ test("只剩合并代次无从判断：置灰，写普通更新为什么改变�
   expect(within(head).getByText("这一项只有在重新划分主题板块时才能核对，普通更新不会改变它")).toBeInTheDocument();
 });
 
-test("有改动待整理：可点、不写原因；每条问题标「基于变更 #N」", async () => {
+test("有改动待整理：可点、不写原因；每条问题标「基于变更 #N」（N 取问题页的 built_at）", async () => {
   vi.mocked(fetchKgAnalysis).mockResolvedValue(report({
     state: { ...report().state, kg_mutation_seq: 140, dirty: true },
     findings_summary: summary({ freshness: { ...CURRENT, seq_behind: 12, stale: true } }),
   }));
+  vi.mocked(fetchKgFindings).mockImplementation(async (_nb, options) => {
+    const zoneName = options?.zone ?? "open";
+    if (zoneName !== "open") return page(zoneName, []);
+    return page("open", openRows, { built_at: { kg_seq: 126, cluster_seq: 7 } });
+  });
   renderPanel();
   await ready();
   const head = zone("报告状态");
   expect(within(head).getByRole("button", { name: "更新分析" })).toBeEnabled();
   expect(within(head).queryByText(/无需更新/)).toBeNull();
   for (const item of findingItems()) {
-    expect(within(item).getByText("基于变更 #128")).toBeInTheDocument();
+    expect(within(item).getByText("基于变更 #126")).toBeInTheDocument();
   }
 });
 
@@ -499,7 +542,7 @@ test("升级后还没生成问题清单：灰色，不是红色；待处理说�
     findings_summary: summary({ present: false, absence: "upgrade_pending" }),
   }));
   vi.mocked(fetchKgFindings).mockImplementation(async (_nb, options) => page(options?.zone ?? "open", [], {
-    present: false, absence: "upgrade_pending", total: 0,
+    present: false, absence: "upgrade_pending", total: 0, built_at: null,
   }));
   const { container } = renderPanel();
   await waitFor(() => expect(within(zone(/^待处理/)).getByText(/这是升级后新增的问题清单/)).toBeInTheDocument());
@@ -519,8 +562,8 @@ test("对比行不可比时写原因，不硬算", async () => {
   vi.mocked(fetchKgAnalysis).mockResolvedValue(report({
     findings_summary: summary({
       comparison: {
-        comparable: false, reason: "rules_version_changed", previous_built_at_seq: 120,
-        resolved: null, persisting: null, new: null, resolved_samples: [],
+        previous_built_at_seq: 120, previous_built_at_cluster_seq: 6, comparable: false, reason: "rules_version_changed",
+        resolved: null, persisting: null, new: null, resolved_samples: [], by_rule: {},
       },
     }),
   }));
@@ -536,13 +579,14 @@ test("对比行不可比时写原因，不硬算", async () => {
 test("已通过：✓ 检查过没发现、– 没法检查、– 部分没判断、已判定不是同一个、已标为正常分开写", async () => {
   vi.mocked(fetchKgAnalysis).mockResolvedValue(report({
     findings_summary: summary({
-      rules: [
-        { rule_id: "F1", status: "ran", checked: 84, checked_unit: "sources", total: 1, not_judged: 3 },
-        { rule_id: "F2", status: "skipped", reason: "fewer_than_two_sources", total: 0 },
-        { rule_id: "F3", status: "ran", checked: 84, checked_unit: "sources", total: 0 },
-        { rule_id: "F4", status: "ran", checked: 9400, checked_unit: "canonical", total: 0, decided_not_same: 1 },
-        { rule_id: "F5", status: "ran", checked: 41713, checked_unit: "objects", total: 1 },
-      ],
+      rules: {
+        F1: { status: "ran", sources_checked: 84, sources_too_few_concepts: 3, total: 1 },
+        F2: { status: "skipped", reason: "fewer_than_two_sources", total: 0 },
+        F3: { status: "ran", sources_checked: 84, total: 0 },
+        F4: { status: "ran", canonicals_checked: 9400, groups_decided_apart: 1, total: 0 },
+        S1: { status: "ran", narrow_groups: 14, narrow_group_objects: 220 },
+        F5: { status: "ran", objects_checked: 41713, total: 1 },
+      },
     }),
   }));
   renderPanel();
@@ -564,13 +608,20 @@ test("已通过：✓ 检查过没发现、– 没法检查、– 部分没判�
 
 // ------------------------------------------------------------------ 处置按钮
 
-test("已处理的问题写「已处理，更新后核验」，不再出处置按钮", async () => {
-  openRows = [{ ...F1, status: "handled", handled_reason: "source_deleted", live_sources: [live("src-a", "06_LMCache_mineru.md", { exists: false })] }];
-  renderPanel({ findingHandlers: { onOpenSource: vi.fn(), onDeleteSource: vi.fn() } });
-  await waitFor(() => expect(findingItems().length).toBe(1));
-  const item = findingItems()[0];
-  expect(within(item).getByText("已处理，更新后核验")).toBeInTheDocument();
-  expect(within(item).queryByRole("button", { name: /删除来源|打开来源核对|标为正常/ })).toBeNull();
+test("已处理的问题留在待处理、写「已处理，更新后核验」和读侧认出的原因，不再出处置按钮", async () => {
+  openRows = [
+    { ...F1, status: "handled", handled_reason: "source_deleted", live_sources: [live("src-a", "06_LMCache_mineru.md", { exists: false })] },
+    { ...F5, status: "handled", handled_reason: "relinked" },
+  ];
+  renderPanel({ findingHandlers: { onOpenSource: vi.fn(), onDeleteSource: vi.fn(), onRelink: vi.fn() } });
+  await waitFor(() => expect(findingItems().length).toBe(2));
+  const f1 = findingByRule("疑似内容错配");
+  expect(within(f1).getByText("已处理，更新后核验（来源已删除）")).toBeInTheDocument();
+  expect(within(f1).queryByRole("button", { name: /删除来源|打开来源核对|标为正常/ })).toBeNull();
+  const f5 = findingByRule("没建立关联的内容");
+  expect(within(f5).getByText("已处理，更新后核验（已补上关联）")).toBeInTheDocument();
+  expect(within(f5).queryAllByRole("button")).toHaveLength(0);
+  expect(screen.getByRole("heading", { name: "待处理（2）", level: 3 })).toBeInTheDocument();
 });
 
 test("疑似内容错配：打开来源核对（按钮成为焦点）与删除来源（不可撤销的说明、在飞禁用、结果写在旁边）", async () => {
@@ -666,24 +717,12 @@ test("失效令牌变化（例如补上关联跑完）时总览静默重取；�
   await waitFor(() => expect(within(zone("报告状态")).getByRole("button", { name: "更新分析" })).toBeEnabled());
 });
 
-test("问题行是规则引擎的扁平形状时照样呈现，「标为正常」带对主键", async () => {
-  openRows = [{
-    rule_id: "F1",
-    severity: "high",
-    subject_kind: "source",
-    subject_key: "src-flat",
-    subject_label: "扁平形状.pdf",
-    impact_objects: 77,
-    evidence: { shared_share: 0.02, concepts: 40 },
-    actions: [{ kind: "delete_source", source_id: "src-flat" }],
-  } as unknown as KgFindingRow];
+test("「标为正常」带对主键：两段原样交给接口（F2 的主键含「|」，编码在接口层做一次）", async () => {
+  openRows = [F2];
   renderPanel();
   await waitFor(() => expect(findingItems()).toHaveLength(1));
-  const item = findingItems()[0];
-  expect(within(item).getByText("扁平形状.pdf")).toBeInTheDocument();
-  expect(within(item).getByText("影响 77 知识对象")).toBeInTheDocument();
-  fireEvent.click(within(item).getByRole("button", { name: "标为正常" }));
-  expect(dismissKgFinding).toHaveBeenCalledWith("nb-1", "F1", "src-flat");
+  fireEvent.click(within(findingItems()[0]).getByRole("button", { name: "标为正常" }));
+  expect(dismissKgFinding).toHaveBeenCalledWith("nb-1", "F2", "src-b|src-c");
 });
 
 test("来源已经不在了：打开来源核对失败时如实说，而不是叫人稍后重试", async () => {
@@ -801,24 +840,75 @@ test("别的图谱任务占着维护槽：补上关联禁用并就地说明", as
   expect(within(f5).getByText("其它图谱任务进行中")).toBeInTheDocument();
 });
 
-test("补上关联已经跑过、之后没有新内容：移出待处理、放进诊断数据，不出按钮（只读成员也看得到）", async () => {
+test("补上关联已经跑过（relink_spent）：随 passed 那一页回来，放进诊断数据、不出按钮，不在「已通过」列出（只读成员也看得到）", async () => {
+  openRows = [F4, F3, F1, F2];
   vi.mocked(fetchKgAnalysis).mockResolvedValue(report({
-    findings_summary: summary({ relink: { attempted: true, at_kg_seq: 120, at: "2026-10-18T00:00:00Z", may_change: false } }),
+    findings_summary: summary({ relink: { attempted: true, at_kg_seq: 128, at: "2026-10-18T00:00:00Z", may_change: false } }),
   }));
+  vi.mocked(fetchKgFindings).mockImplementation(async (_nb, options) => {
+    const zoneName = options?.zone ?? "open";
+    if (zoneName === "passed") return page("passed", [DECIDED, SPENT]);
+    if (zoneName === "dismissed") return page("dismissed", [DISMISSED]);
+    return page("open", openRows);
+  });
   const { container } = renderPanel({ findingHandlers: { onRelink: vi.fn() }, canAnalyze: false });
   await waitFor(() => expect(findingItems().length).toBe(4));
-  // 不占待处理的位置,也不计入它的条数。
   expect(screen.getByRole("heading", { name: "待处理（4）", level: 3 })).toBeInTheDocument();
-  expect(findingItems().some((item) => item.querySelector(".kg-finding-rule")?.textContent === "没建立关联的内容")).toBe(false);
   const details = container.querySelector("details.kg-findings-diagnostics") as HTMLElement;
+  await waitFor(() => expect(within(details).getByRole("heading", { name: "没建立关联的内容", level: 3 })).toBeInTheDocument());
   const spent = zone("没建立关联的内容");
   expect(details.contains(spent)).toBe(true);
+  expect(within(spent).getByText("补上关联已经跑过，剩下 1,830 个没有可自动补上的关联；集中在某几个来源的，见疑似解析残缺")).toBeInTheDocument();
   expect(within(spent).getByText("1,830 个知识对象没有任何关联，占全部 41,713 个的 4.4%")).toBeInTheDocument();
-  expect(within(spent).getByText(/补上关联已经跑过，剩下 1,830 个没有可自动补上的关联；集中在某几个来源的，见疑似解析残缺/)).toBeInTheDocument();
   expect(within(spent).queryAllByRole("button")).toHaveLength(0);
+  // 已通过区只列 F4 已判定不是同一个与已标为正常,不列这一行。
+  const passed = zone("已通过");
+  expect(within(passed).getByText(/已判定不是同一个：疑似没合并的同名概念 · Llama 3\.1/)).toBeInTheDocument();
+  expect(Array.from(passed.querySelectorAll(".kg-findings-passed-row")).map((item) => item.textContent ?? ""))
+    .not.toContainEqual(expect.stringContaining("没建立关联的内容"));
 });
 
-test("补上关联还可能改变结果时，诊断数据里没有那块「已经跑过」的说明", async () => {
+test("relink_spent 不计入「已通过」的条数；翻到不含它的页时诊断数据那块仍在，令牌一变按新一页重新认", async () => {
+  const decidedRows = (count: number, from: number) => Array.from({ length: count }, (_, index) => ({
+    ...DECIDED,
+    subject: { kind: "concept_group", key: `group-${from + index}`, label: `组 ${from + index}` },
+  }));
+  let spentStill = true;
+  vi.mocked(fetchKgFindings).mockImplementation(async (_nb, options) => {
+    const zoneName = options?.zone ?? "open";
+    const offset = options?.offset ?? 0;
+    if (zoneName === "dismissed") return page("dismissed", []);
+    if (zoneName === "open") return page("open", openRows);
+    // passed 共 25 行:第一页 = relink_spent + 19 组,第二页 = 5 组。
+    const total = spentStill ? 25 : 24;
+    if (offset === 0) {
+      const rows = spentStill ? [SPENT, ...decidedRows(19, 1)] : decidedRows(20, 1);
+      return page("passed", rows, { total, has_more: true, returned: rows.length });
+    }
+    const rows = decidedRows(total - 20, 21);
+    return page("passed", rows, { total, offset, has_more: false, returned: rows.length });
+  });
+  const view = renderPanel({ findingsRevision: "1|0|0" });
+  await ready();
+  const pager = () => zone("已通过").querySelector('[aria-label="已判定不是同一个的分页"]') as HTMLElement;
+  await waitFor(() => expect(pager().textContent).toContain("第 1–19 条，共 24 条"));
+  expect(within(zone("已通过")).queryByText(/没建立关联的内容/)).toBeNull();
+
+  fireEvent.click(within(pager()).getByRole("button", { name: /下一页/ }));
+  await waitFor(() => expect(pager().textContent).toContain("第 20–24 条，共 24 条"));
+  // 第二页不含它:诊断数据那块沿用同一代里看到过的那一行。
+  expect(screen.getByRole("heading", { name: "没建立关联的内容", level: 3 })).toBeInTheDocument();
+
+  // 来了新内容(令牌变了),它回到了待处理:新一页不含它,诊断数据那块不再沿用。
+  spentStill = false;
+  view.rerender(
+    <KgAnalysisView notebookId="nb-1" onClose={() => undefined} canAnalyze onAnalyze={() => undefined} findingsRevision="2|0|0" />,
+  );
+  await waitFor(() => expect(screen.queryByRole("heading", { name: "没建立关联的内容", level: 3 })).toBeNull());
+  await waitFor(() => expect(pager().textContent).toContain("共 24 条"));
+});
+
+test("passed 那一页里没有 relink_spent 时，诊断数据里没有那块「已经跑过」的说明", async () => {
   const { container } = renderPanel();
   await ready();
   const details = container.querySelector("details.kg-findings-diagnostics") as HTMLElement;

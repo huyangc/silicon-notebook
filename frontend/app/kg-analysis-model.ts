@@ -20,11 +20,10 @@ import type {
   KgAnalysisReport,
   KgBoardEdgeView,
   KgBoardOverview,
-  KgFindingAction,
   KgFindingRow,
   KgFindingRuleStatus,
+  KgFindingSeq,
   KgFindingsComparison,
-  KgFindingsDevItem,
   KgFindingsSummary,
   KgFreshness,
   KgMergeCodeState,
@@ -687,7 +686,7 @@ export function artifactPurpose(kind: string): string {
 // 两条贯穿全段的红线:
 //   · 后端只给内部代号,这里映射成界面词;认不出的代号/字段**一律不渲染**,不报错,
 //     也不把代号或英文字段名原样上屏(raw-enum-fallback 那条)。证据 `evidence` 的字段
-//     随规则变,逐字段防御式读取:缺一个字段只少一句话,不会让整条问题消失。
+//     随规则变,逐字段读取:缺一个字段只少一句话,不会让整条问题消失。
 //   · 「检查过没发现」「没法检查」「已标为正常」三件事必须分开说(§3.4),「没法检查」
 //     不算通过。
 
@@ -733,15 +732,13 @@ export const FINDING_SKIP_REASON_LABEL: Record<string, string> = {
   no_named_concepts: "还没有带名字的概念",
 };
 
-/** 建议动作此刻做不了的原因。认不出的代号说一句中性的话,不上屏代号。 */
-const FINDING_UNAVAILABLE_LABEL: Record<string, string> = {
-  mirror: "这是同步来的镜像库，只能在源环境处理",
-  read_only: "只读成员不能处理",
-  source_missing: "这篇来源已经不在了",
-  source_processing: "这篇来源正在解析，完成后再处理",
-  promotion_source: "收录来源没有可重新解析的文件",
-  hidden_source: "这类来源不能在这里处理",
-  not_in_queue: "待确认合并里还没有这一组",
+/** 「已处理，更新后核验」后面那半句:读侧是凭什么认出来的。 */
+export const FINDING_HANDLED_REASON_LABEL: Record<string, string> = {
+  source_deleted: "来源已删除",
+  source_processing: "来源正在解析",
+  source_reprocessed: "来源已重新解析",
+  merge_confirmed: "已确认合并",
+  relinked: "已补上关联",
 };
 
 /** 与上一次问题清单不可比的原因。 */
@@ -750,6 +747,17 @@ const FINDING_COMPARISON_REASON_LABEL: Record<string, string> = {
   rules_version_changed: "规则已更新，本次不与上次比较",
   truncated_or_not_run: "上次或这次有规则没能完整检查，本次不与上次比较",
 };
+
+/** 引擎状态表里每条规则「检查了多少」的那个计数,以及它的单位代号。 */
+const FINDING_CHECKED_FIELD: Record<string, readonly [string, string]> = {
+  F1: ["sources_checked", "sources"],
+  F2: ["sources_checked", "sources"],
+  F3: ["sources_checked", "sources"],
+  F4: ["canonicals_checked", "canonical"],
+  F5: ["objects_checked", "objects"],
+};
+
+const FINDING_RULE_ORDER = ["F1", "F2", "F3", "F4", "F5"];
 
 export function findingRuleLabel(ruleId: string): string {
   return label(FINDING_RULE_LABEL, ruleId, "其它问题");
@@ -772,145 +780,16 @@ function finiteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function plainObject(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-}
-
-function plainText(value: unknown): string {
-  return typeof value === "string" ? value : "";
-}
-
-// ------------------------------------------------ 线上形状 → 统一形状(两种拼写都收)
-//
-// 契约草案给的是嵌套的 `subject{kind,key,label}`、`impact{objects}`、规则状态数组、
-// `dev_items`;规则引擎落库的是扁平列(`subject_key` / `subject_kind` / `subject_label` /
-// `impact_objects`)、按规则编号为键的状态表(`sources_checked` / `canonicals_checked` /
-// `objects_checked` / `sources_too_few_concepts` / `groups_decided_apart`)、S1 的计数挂在
-// `rules.S1` 下。读侧投影最后选哪一种,前端都要能读——认不出就少一句话,不能整区消失、
-// 也不能让「标为正常」拿着空主键去写。
-
-/** 一行问题统一成嵌套形状;连规则编号都没有的行丢掉(无从呈现,也无从标为正常)。 */
-export function normalizeFindingRow(raw: unknown): KgFindingRow | null {
-  const row = plainObject(raw);
-  if (!row) return null;
-  const ruleId = plainText(row.rule_id);
-  if (!ruleId) return null;
-  const subject = plainObject(row.subject);
-  const impact = plainObject(row.impact);
-  const objects = finiteNumber(impact?.objects) ?? finiteNumber(row.impact_objects);
-  return {
-    ...(row as unknown as KgFindingRow),
-    rule_id: ruleId,
-    severity: plainText(row.severity),
-    subject: {
-      kind: plainText(subject?.kind) || plainText(row.subject_kind),
-      key: plainText(subject?.key) || plainText(row.subject_key),
-      label: plainText(subject?.label) || plainText(row.subject_label),
-    },
-    evidence: plainObject(row.evidence),
-    impact: objects === null ? null : { objects },
-    status: plainText(row.status) || "open",
-  };
-}
-
-export function normalizeFindingRows(rows: unknown): KgFindingRow[] {
-  if (!Array.isArray(rows)) return [];
-  return rows.map(normalizeFindingRow).filter((row): row is KgFindingRow => row !== null);
-}
-
-const FINDING_RULE_ORDER = ["F1", "F2", "F3", "F4", "F5", "S1"];
-
-/** 引擎状态表里「检查了多少」的三种拼写 → 数量与单位代号。 */
-const CHECKED_FIELDS: ReadonlyArray<readonly [string, string]> = [
-  ["sources_checked", "sources"],
-  ["canonicals_checked", "canonical"],
-  ["objects_checked", "objects"],
-];
-
-function ruleStatusFrom(ruleId: string, raw: Record<string, unknown>): KgFindingRuleStatus {
-  let checked = finiteNumber(raw.checked);
-  let unit = plainText(raw.checked_unit);
-  if (checked === null) {
-    for (const [field, code] of CHECKED_FIELDS) {
-      const value = finiteNumber(raw[field]);
-      if (value !== null) {
-        checked = value;
-        unit = code;
-        break;
-      }
-    }
-  }
-  return {
-    ...(raw as unknown as KgFindingRuleStatus),
-    rule_id: ruleId,
-    status: plainText(raw.status),
-    reason: plainText(raw.reason) || null,
-    checked,
-    checked_unit: unit || null,
-    total: finiteNumber(raw.total),
-    persisted: finiteNumber(raw.persisted),
-    truncated: raw.truncated === true,
-    not_judged: finiteNumber(raw.not_judged) ?? finiteNumber(raw.sources_too_few_concepts),
-    decided_not_same: finiteNumber(raw.decided_not_same) ?? finiteNumber(raw.groups_decided_apart),
-  };
-}
-
-/** 每条规则的状态,数组或按编号为键的表都收,按 F1…F5、S1 的顺序给出。 */
-export function findingRuleStatuses(summary: KgFindingsSummary | null | undefined): KgFindingRuleStatus[] {
-  const rules: unknown = summary?.rules;
-  const list: KgFindingRuleStatus[] = [];
-  if (Array.isArray(rules)) {
-    for (const item of rules) {
-      const raw = plainObject(item);
-      const ruleId = plainText(raw?.rule_id);
-      if (raw && ruleId) list.push(ruleStatusFrom(ruleId, raw));
-    }
-  } else {
-    for (const [ruleId, value] of Object.entries(plainObject(rules) ?? {})) {
-      const raw = plainObject(value);
-      if (raw) list.push(ruleStatusFrom(ruleId, raw));
-    }
-  }
-  const rank = (ruleId: string) => {
-    const index = FINDING_RULE_ORDER.indexOf(ruleId);
-    return index < 0 ? FINDING_RULE_ORDER.length : index;
-  };
-  return list.sort((a, b) => rank(a.rule_id) - rank(b.rule_id));
-}
-
-/** 「需要开发处理」的条目:`dev_items`;没有时从 S1 的状态(引擎的拼写)里取。 */
-function findingDevItems(summary: KgFindingsSummary | null | undefined): KgFindingsDevItem[] {
-  if (Array.isArray(summary?.dev_items) && summary.dev_items.length > 0) return summary.dev_items;
-  const rules: unknown = summary?.rules;
-  const s1 = Array.isArray(rules)
-    ? plainObject(rules.find((item) => plainText(plainObject(item)?.rule_id) === "S1"))
-    : plainObject(plainObject(rules)?.S1);
-  if (!s1 || plainText(s1.status) !== "ran") return [];
-  const groups = finiteNumber(s1.narrow_groups) ?? finiteNumber(s1.groups);
-  if (groups === null) return [];
-  return [{
-    item_id: "S1",
-    groups,
-    objects: finiteNumber(s1.narrow_group_objects) ?? finiteNumber(s1.objects) ?? 0,
-    samples: Array.isArray(s1.examples) ? s1.examples : Array.isArray(s1.samples) ? s1.samples : [],
-  }];
-}
-
-/** 影响面(单位:知识对象)。契约里叫 `impact.objects`;规则引擎的扁平拼写一并接受。 */
+/** 影响面(单位:知识对象)。 */
 export function findingImpact(row: KgFindingRow): number {
-  const nested = finiteNumber(row.impact?.objects);
-  if (nested !== null) return nested;
-  const flat = finiteNumber((row as unknown as Record<string, unknown>).impact_objects);
-  return flat ?? 0;
+  return finiteNumber(row.impact.objects) ?? 0;
 }
 
 /** 「影响 1,234 知识对象」—— 单位从这一页的 units 读,没登记时说「知识对象」(契约写明的单位)。 */
 export function findingImpactText(row: KgFindingRow, units: Record<string, string> | null | undefined): string {
   const unit = units && Object.hasOwn(units, "impact_objects")
     ? unitLabel(units.impact_objects)
-    : units && Object.hasOwn(units, "objects")
-      ? unitLabel(units.objects)
-      : UNIT_LABEL.objects;
+    : UNIT_LABEL.objects;
   return `影响 ${formatCount(findingImpact(row))} ${unit}`;
 }
 
@@ -930,7 +809,7 @@ export function compareFindings(a: KgFindingRow, b: KgFindingRow): number {
   return rank(a) - rank(b)
     || findingImpact(b) - findingImpact(a)
     || compareText(a.rule_id, b.rule_id)
-    || compareText(a.subject?.key ?? "", b.subject?.key ?? "");
+    || compareText(a.subject.key, b.subject.key);
 }
 
 export function sortFindings(rows: readonly KgFindingRow[]): KgFindingRow[] {
@@ -942,27 +821,37 @@ export type FindingPartition = {
   pending: KgFindingRow[];
   /** 已标为正常(可撤销)。 */
   dismissed: KgFindingRow[];
-  /** F4:用户已判定不是同一个(驳回或暂缓)。 */
-  decidedApart: KgFindingRow[];
+  /** 已通过区列出的行:F4 已判定不是同一个。 */
+  passed: KgFindingRow[];
+  /**
+   * F5 补上关联已经跑过、之后没有新内容(§4.5)。后端把它放在 `passed` 那一页里返回,界面却
+   * 放进「诊断数据」的那一块:不在「已通过」列出,也不计入它的条数。
+   */
+  spent: KgFindingRow[];
 };
 
 /**
- * 按读侧派生的 `status` 分进各区。认不出的状态按「待处理」放——宁可多给用户看一条,
- * 也不把一条问题悄悄藏掉。
+ * 按读侧派生的 `status` 分进各区(与后端的区划分同一张表,只有 relink_spent 由界面另放)。
+ * 认不出的状态按「待处理」放——宁可多给用户看一条,也不把一条问题悄悄藏掉。
  */
 export function partitionFindings(rows: readonly KgFindingRow[]): FindingPartition {
-  const partition: FindingPartition = { pending: [], dismissed: [], decidedApart: [] };
+  const partition: FindingPartition = { pending: [], dismissed: [], passed: [], spent: [] };
   for (const row of sortFindings(rows)) {
     if (row.status === "dismissed") partition.dismissed.push(row);
-    else if (row.status === "decided_not_same") partition.decidedApart.push(row);
+    else if (row.status === "decided_not_same") partition.passed.push(row);
+    else if (row.status === "relink_spent") partition.spent.push(row);
     else partition.pending.push(row);
   }
   return partition;
 }
 
-/** 这条问题是不是「已处理，更新后核验」。 */
-export function findingIsHandled(row: KgFindingRow): boolean {
-  return row.status === "handled";
+/** 「已处理，更新后核验」,带上读侧认出来的原因(认不出的原因不说)。 */
+export function findingHandledText(row: KgFindingRow): string {
+  if (row.status !== "handled") return "";
+  const reason = row.handled_reason && Object.hasOwn(FINDING_HANDLED_REASON_LABEL, row.handled_reason)
+    ? FINDING_HANDLED_REASON_LABEL[row.handled_reason]
+    : "";
+  return reason ? `已处理，更新后核验（${reason}）` : "已处理，更新后核验";
 }
 
 // --------------------------------------------- 报告可信度(原「先看结论」第一张卡)
@@ -1000,8 +889,7 @@ export function analysisReadiness(report: KgAnalysisReport): AnalysisReadiness {
       text: "当前只有图谱内容，没有质量统计。生成后才会出现问题清单与合并、主题、来源诊断。",
     };
   }
-  if (report.artifacts.some((item) => item.absence === "upgrade_pending")
-    || report.findings_summary?.absence === "upgrade_pending") {
+  if (report.findings_summary.absence === "upgrade_pending") {
     return {
       tone: "neutral",
       title: "升级后还没生成问题清单",
@@ -1046,25 +934,20 @@ export type AnalysisUpdateState = {
 };
 
 /**
- * 合并结果是不是建于旧的合并规则。
- *
- * ⚠ `stored` 为空串说的是「这个库此刻没有合并结果」(删除知识图谱、索引管线发布之后,
- * 两个版本列都会被清空),**不是**「合并规则已更新」——按后者说会诱导用户去点一个
- * 理由编错了的按钮。空串时交给下面几档(账本不齐 / dirty)去判。
+ * 合并结果是不是建于旧的合并规则:只认 `matches === false`。`matches` 为 null 说的是
+ * 「这个库此刻没有合并结果」(删除知识图谱、索引管线发布之后存的版本是空串),**不是**
+ * 「合并规则已更新」——那一档交给下面的账本不齐 / dirty 去判。
  */
-export function mergeRulesChanged(mergeCode: KgMergeCodeState | null | undefined): boolean {
-  if (!mergeCode || mergeCode.matches !== false) return false;
-  const stored = typeof mergeCode.stored === "string" ? mergeCode.stored : "";
-  const current = typeof mergeCode.current === "string" ? mergeCode.current : "";
-  return stored !== "" && current !== "" && stored !== current;
+export function mergeRulesChanged(mergeCode: KgMergeCodeState): boolean {
+  return mergeCode.matches === false;
 }
 
 /**
  * 「更新分析」按钮该不该可点、旁边写什么(§五 S4 那张表,按优先级):
  *
  *   1. 合并结果建于旧的合并规则 → 可点,写「合并规则已更新，需要更新一次」;
- *   2. `dirty`;任一在场产物或板块 `stale === true`;账本不齐(含「升级后还没生成」);
- *      数字互相对不上 → 可点;
+ *   2. `dirty`;任一在场产物或板块 `stale === true`(问题清单的规则版本不同也算在它的
+ *      新鲜度里);账本不齐(含「升级后还没生成」);数字互相对不上 → 可点;
  *   3. 只剩 `stale === null`(合并代次无从判断)→ 置灰,写为什么普通更新改变不了它;
  *   4. 全部一致 → 置灰,写「已与当前图谱一致，无需更新」。
  *
@@ -1077,23 +960,22 @@ export function analysisUpdateState(report: KgAnalysisReport): AnalysisUpdateSta
   if (mergeRulesChanged(report.merge_code)) {
     return { kind: "rules_updated", enabled: true, label: buttonLabel, reason: "合并规则已更新，需要更新一次" };
   }
-  const boards = report.boards?.freshness ?? null;
-  const findingsMissing = !report.findings_summary || report.findings_summary.present !== true;
+  const boards = report.boards.freshness;
   const incomplete = empty
     || report.ledger_state !== "complete"
-    || findingsMissing
+    || !report.findings_summary.present
     || report.artifacts.some((item) => !item.present && item.absence !== "expected");
   const integrity = !report.ledger_consistent || report.artifacts.some((item) => (
     (item.freshness.seq_behind ?? 0) < 0 || (item.freshness.cluster_seq_behind ?? 0) < 0
   ));
   const stale = report.state.dirty
     || report.artifacts.some((item) => item.present && item.freshness.stale === true)
-    || boards?.stale === true;
+    || boards.stale === true;
   if (incomplete || integrity || stale) {
     return { kind: "needs_update", enabled: true, label: buttonLabel, reason: "" };
   }
   // 从没建过板块的库,板块那一格三个字段全是 null —— 那不是「代次无法验证」,是没有板块。
-  const boardsUnknown = boards !== null && boards.stale === null && boards.built_at_seq !== null;
+  const boardsUnknown = boards.stale === null && boards.built_at_seq !== null;
   if (boardsUnknown || report.artifacts.some((item) => item.present && item.freshness.stale === null)) {
     return {
       kind: "unverifiable",
@@ -1112,8 +994,8 @@ export function analysisUpdateState(report: KgAnalysisReport): AnalysisUpdateSta
  * ——那时头部的可信度一行与待处理区的缺席说明已经说清楚了,不拿空的新鲜度编一句
  * 「与当前一致」,也不重复同一句话。
  */
-export function findingsReportLine(summary: KgFindingsSummary | null | undefined): string {
-  if (!summary || !summary.present) return "";
+export function findingsReportLine(summary: KgFindingsSummary): string {
+  if (!summary.present) return "";
   const note = freshnessNote(summary.freshness);
   if (note.built === "尚未生成") return "";
   return note.behind ? `报告${note.built} · ${note.behind}` : `报告${note.built}`;
@@ -1126,17 +1008,16 @@ export type FindingsComparisonView = {
   resolvedNames: string[];
 };
 
-function comparisonCount(value: unknown): string {
-  const number = finiteNumber(value);
-  return number === null ? "—" : formatCount(number);
+function comparisonCount(value: number | null): string {
+  return value === null ? "—" : formatCount(value);
 }
 
 /** 「上次更新后：N 条已消失 · M 条仍在 · K 条新增」;不可比时写原因,不硬算(§3.2 / §六)。 */
 export function findingsComparisonView(
-  comparison: KgFindingsComparison | null | undefined,
+  comparison: KgFindingsComparison | null,
 ): FindingsComparisonView | null {
   if (!comparison) return null;
-  if (comparison.comparable !== true) {
+  if (!comparison.comparable) {
     return {
       comparable: false,
       text: label(FINDING_COMPARISON_REASON_LABEL, comparison.reason ?? "", "本次不与上次比较"),
@@ -1144,8 +1025,8 @@ export function findingsComparisonView(
     };
   }
   const names: string[] = [];
-  for (const sample of Array.isArray(comparison.resolved_samples) ? comparison.resolved_samples : []) {
-    const name = typeof sample?.subject_label === "string" ? sample.subject_label.trim() : "";
+  for (const sample of comparison.resolved_samples) {
+    const name = sample.subject_label.trim();
     if (name && !names.includes(name)) names.push(name);
   }
   return {
@@ -1157,17 +1038,17 @@ export function findingsComparisonView(
 
 /**
  * 报告落后于数据时,每条问题都标「基于变更 #N」,免得读者以为那是此刻的状态(§3.5 末尾)。
- * 报告与当前一致时返回空串。
+ * N 是整份清单建于哪一代(页级 `built_at`,不逐行记)。报告与当前一致时返回空串。
  */
 export function findingBasedOnChange(
-  row: KgFindingRow,
-  summary: KgFindingsSummary | null | undefined,
+  builtAt: KgFindingSeq | null,
+  summary: KgFindingsSummary,
   dirty: boolean,
 ): string {
-  const freshness = summary?.freshness ?? null;
-  const behind = dirty || freshness?.stale === true || (freshness?.seq_behind ?? 0) > 0;
+  const freshness = summary.freshness;
+  const behind = dirty || freshness.stale === true || (freshness.seq_behind ?? 0) > 0;
   if (!behind) return "";
-  const seq = finiteNumber(row.built_at?.kg_seq) ?? finiteNumber(freshness?.built_at_seq);
+  const seq = finiteNumber(builtAt?.kg_seq);
   return seq === null ? "基于旧的报告" : `基于变更 #${formatCount(seq)}`;
 }
 
@@ -1183,16 +1064,16 @@ export type FindingEvidenceView = {
   notes: string[];
 };
 
-function evidenceNumber(evidence: Record<string, unknown> | null, key: string): number | null {
-  return evidence ? finiteNumber(evidence[key]) : null;
+function evidenceNumber(evidence: Record<string, unknown>, key: string): number | null {
+  return finiteNumber(evidence[key]);
 }
 
-function evidenceList(evidence: Record<string, unknown> | null, key: string): unknown[] {
-  const value = evidence ? evidence[key] : null;
+function evidenceList(evidence: Record<string, unknown>, key: string): unknown[] {
+  const value = evidence[key];
   return Array.isArray(value) ? value : [];
 }
 
-function evidenceNames(evidence: Record<string, unknown> | null, key: string, max = 5): string[] {
+function evidenceNames(evidence: Record<string, unknown>, key: string, max = 5): string[] {
   const names: string[] = [];
   for (const item of evidenceList(evidence, key)) {
     const name = typeof item === "string" ? item.trim() : "";
@@ -1202,22 +1083,15 @@ function evidenceNames(evidence: Record<string, unknown> | null, key: string, ma
   return names;
 }
 
-function textField(source: unknown, ...keys: string[]): string {
+function textField(source: unknown, key: string): string {
   if (!source || typeof source !== "object") return "";
-  for (const key of keys) {
-    const value = (source as Record<string, unknown>)[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return "";
+  const value = (source as Record<string, unknown>)[key];
+  return typeof value === "string" ? value.trim() : "";
 }
 
-function numberField(source: unknown, ...keys: string[]): number | null {
+function numberField(source: unknown, key: string): number | null {
   if (!source || typeof source !== "object") return null;
-  for (const key of keys) {
-    const value = finiteNumber((source as Record<string, unknown>)[key]);
-    if (value !== null) return value;
-  }
-  return null;
+  return finiteNumber((source as Record<string, unknown>)[key]);
 }
 
 /** 关联/对象比这类小数:两位足够看出差距,不装精确。 */
@@ -1227,11 +1101,7 @@ function formatDecimal(value: number): string {
 
 const OFF_TOPIC_AFTER_REPARSE = "重新解析后若仍与本库无关，会转为疑似内容错配";
 
-function duplicatePartnerNote(name: string): string {
-  return name ? `另有一份重复导入：${name}，两份都建议删除` : "另有一份重复导入，两份都建议删除";
-}
-
-function offTopicEvidence(evidence: Record<string, unknown> | null, view: FindingEvidenceView) {
+function offTopicEvidence(evidence: Record<string, unknown>, view: FindingEvidenceView) {
   const concepts = evidenceNumber(evidence, "concepts");
   const shared = evidenceNumber(evidence, "shared_share");
   if (concepts !== null && shared !== null) {
@@ -1246,20 +1116,22 @@ function offTopicEvidence(evidence: Record<string, unknown> | null, view: Findin
   }
   view.samples = evidenceNames(evidence, "samples");
   view.sampleLabel = "代表概念";
+  // 两份重复的错文件合成一行(§4.1):另一份挂在这里,两份都建议删除。
   for (const partner of evidenceList(evidence, "partners")) {
-    view.notes.push(duplicatePartnerNote(textField(partner, "label", "title")));
+    const name = textField(partner, "label");
+    view.notes.push(name ? `另有一份重复导入：${name}，两份都建议删除` : "另有一份重复导入，两份都建议删除");
   }
 }
 
-function duplicateEvidence(evidence: Record<string, unknown> | null, view: FindingEvidenceView) {
+function duplicateEvidence(evidence: Record<string, unknown>, view: FindingEvidenceView) {
   const jaccard = evidenceNumber(evidence, "jaccard");
-  const shared = evidenceNumber(evidence, "shared_concepts") ?? evidenceNumber(evidence, "shared");
+  const shared = evidenceNumber(evidence, "shared_concepts");
   const clauses: string[] = [];
   if (shared !== null) clauses.push(`两份共有 ${formatCount(shared)} 个概念`);
   if (jaccard !== null) clauses.push(`概念重合度 ${formatPercent(jaccard)}`);
   if (clauses.length > 0) view.lines.push(clauses.join("，"));
   for (const side of evidenceList(evidence, "sources")) {
-    const name = textField(side, "label", "title") || "（没有标题）";
+    const name = textField(side, "label") || "（没有标题）";
     const objects = numberField(side, "objects");
     const keep = side && typeof side === "object" ? (side as Record<string, unknown>).keep : undefined;
     const verdict = keep === true ? "（建议保留）" : keep === false ? "（建议删除）" : "";
@@ -1271,9 +1143,8 @@ function duplicateEvidence(evidence: Record<string, unknown> | null, view: Findi
   view.sampleLabel = "共有的代表概念";
 }
 
-function parseDamageEvidence(evidence: Record<string, unknown> | null, view: FindingEvidenceView) {
-  // 证据里只放判据真正用到的数(§3.1),所以「字段在」就意味着那条子信号命中;`signals`
-  // 代号表缺席或多了认不出的代号都不影响下面三句。
+function parseDamageEvidence(evidence: Record<string, unknown>, view: FindingEvidenceView) {
+  // 证据里只放判据真正用到的数(§3.1),所以「字段在」就意味着那条子信号命中。
   const fragmented = evidenceNumber(evidence, "fragmented_names");
   if (fragmented !== null) {
     const share = evidenceNumber(evidence, "fragmented_share");
@@ -1291,10 +1162,12 @@ function parseDamageEvidence(evidence: Record<string, unknown> | null, view: Fin
   const isolated = evidenceNumber(evidence, "isolated_objects");
   if (isolated !== null) {
     const share = evidenceNumber(evidence, "isolated_share");
-    const median = evidenceNumber(evidence, "median_isolated_share");
+    // 判据是「高于门槛」(全库中位数的 3 倍与 10% 取大),门槛本身就在证据里:说门槛,
+    // 不只说中位数——中位数接近 0 时只给中位数会读成「中位数 0% 也算命中」。
+    const threshold = evidenceNumber(evidence, "isolated_share_threshold");
     const tail = [
       share === null ? "" : `占 ${formatPercent(share)}`,
-      median === null ? "" : `本库中位数是 ${formatPercent(median)}`,
+      threshold === null ? "" : `超过本库判为偏多的门槛 ${formatPercent(threshold)}`,
     ].filter(Boolean).join("，");
     view.lines.push(tail
       ? `${formatCount(isolated)} 个知识对象没有任何关联（${tail}）`
@@ -1302,20 +1175,15 @@ function parseDamageEvidence(evidence: Record<string, unknown> | null, view: Fin
   }
   view.samples = evidenceNames(evidence, "samples");
   view.sampleLabel = "破碎的名字";
-  if (evidence?.also_off_topic === true) view.notes.push(OFF_TOPIC_AFTER_REPARSE);
+  if (evidence.also_off_topic === true) view.notes.push(OFF_TOPIC_AFTER_REPARSE);
 }
 
-function underMergeEvidence(evidence: Record<string, unknown> | null, view: FindingEvidenceView) {
-  const members = evidenceList(evidence, "members").length > 0
-    ? evidenceList(evidence, "members")
-    : evidenceList(evidence, "names");
+function underMergeEvidence(evidence: Record<string, unknown>, view: FindingEvidenceView) {
   const shown: string[] = [];
-  let counted = false;
-  for (const member of members) {
-    const name = typeof member === "string" ? member.trim() : textField(member, "name", "label");
+  for (const member of evidenceList(evidence, "members")) {
+    const name = textField(member, "name");
     if (!name) continue;
-    const objects = typeof member === "string" ? null : numberField(member, "objects", "members");
-    if (objects !== null) counted = true;
+    const objects = numberField(member, "objects");
     shown.push(objects === null ? name : `${name}（${formatCount(objects)}）`);
     if (shown.length >= 5) break;
   }
@@ -1326,10 +1194,10 @@ function underMergeEvidence(evidence: Record<string, unknown> | null, view: Find
   if (sources !== null) clauses.push(`涉及 ${formatCount(sources)} 个来源`);
   if (clauses.length > 0) view.lines.push(clauses.join("，"));
   view.samples = shown;
-  view.sampleLabel = counted ? "组内的名字（知识对象数）" : "组内的名字";
+  view.sampleLabel = "组内的名字（知识对象数）";
 }
 
-function isolatedEvidence(evidence: Record<string, unknown> | null, view: FindingEvidenceView) {
+function isolatedEvidence(evidence: Record<string, unknown>, view: FindingEvidenceView) {
   const isolated = evidenceNumber(evidence, "isolated_objects");
   const usable = evidenceNumber(evidence, "usable_objects");
   const share = evidenceNumber(evidence, "isolated_share");
@@ -1339,9 +1207,9 @@ function isolatedEvidence(evidence: Record<string, unknown> | null, view: Findin
       : `${formatCount(isolated)} 个知识对象没有任何关联`);
   }
   const top: string[] = [];
-  for (const item of [...evidenceList(evidence, "top_sources"), ...evidenceList(evidence, "sources")]) {
-    const name = textField(item, "label", "title") || "（没有标题）";
-    const count = numberField(item, "isolated_objects", "objects", "count");
+  for (const item of evidenceList(evidence, "top_sources")) {
+    const name = textField(item, "label") || "（没有标题）";
+    const count = numberField(item, "isolated_objects");
     top.push(count === null ? name : `${name}（${formatCount(count)}）`);
     if (top.length >= 5) break;
   }
@@ -1353,30 +1221,22 @@ function isolatedEvidence(evidence: Record<string, unknown> | null, view: Findin
  * 一条问题的证据 → 几句人话。只渲染判据真正用到的数(§3.1);认不出的规则不编证据。
  */
 export function findingEvidenceView(row: KgFindingRow): FindingEvidenceView {
-  const evidence = row.evidence && typeof row.evidence === "object" ? row.evidence : null;
+  const evidence = row.evidence;
   const view: FindingEvidenceView = { lines: [], samples: [], sampleLabel: "", notes: [] };
   if (row.rule_id === "F1") offTopicEvidence(evidence, view);
   else if (row.rule_id === "F2") duplicateEvidence(evidence, view);
   else if (row.rule_id === "F3") parseDamageEvidence(evidence, view);
   else if (row.rule_id === "F4") underMergeEvidence(evidence, view);
   else if (row.rule_id === "F5") isolatedEvidence(evidence, view);
-  for (const attachment of Array.isArray(row.attachments) ? row.attachments : []) {
-    if (attachment?.relation === "duplicate_partner") {
-      view.notes.push(duplicatePartnerNote(attachment.subject?.label?.trim() ?? ""));
-    } else if (attachment?.relation === "may_become_offtopic") {
-      view.notes.push(OFF_TOPIC_AFTER_REPARSE);
-    }
-  }
-  view.notes = view.notes.filter((note, index) => view.notes.indexOf(note) === index);
   return view;
 }
 
 /** 定位标签后面那段名字。F5 是全库一条;没有名字时如实说没有,不拿主键充数。 */
 export function findingSubjectText(row: KgFindingRow): string {
-  if (row.subject?.kind === "notebook") return "全库";
-  const text = row.subject?.label?.trim() ?? "";
+  if (row.subject.kind === "notebook") return "全库";
+  const text = row.subject.label.trim();
   if (text) return text;
-  const source = (row.live_sources ?? []).find((item) => item?.exists && item.title?.trim());
+  const source = row.live_sources.find((item) => item.exists && item.title.trim());
   return source ? source.title.trim() : "（没有标题）";
 }
 
@@ -1386,7 +1246,6 @@ export type FindingButtonSpec =
   | { kind: "open_source"; sourceId: string; title: string }
   | { kind: "delete_source"; sourceId: string; title: string; sourceType: string }
   | { kind: "reparse_source"; sourceId: string; title: string; sourceType: string }
-  /** `mergeId` 为空串 = 只带到「待确认合并」那一节(没能定位到具体那一对)。 */
   | { kind: "review_merge"; mergeId: string }
   | { kind: "relink" };
 
@@ -1394,7 +1253,7 @@ export type FindingActionPlan = {
   buttons: FindingButtonSpec[];
   /** 写在按钮旁的说明(「不可撤销，先打开来源核对」……)。只在有对应按钮时出现。 */
   notes: string[];
-  /** 不出按钮的原因(待确认合并里没有这一组、补上关联已经跑过……)。 */
+  /** 不出按钮的原因(待确认合并里没有这一组……)。 */
   blocked: string[];
   /** 正在解析的来源:对准它们的写按钮置灰,旁边写原因。 */
   processingSourceIds: string[];
@@ -1404,23 +1263,7 @@ export type FindingActionContext = {
   /** 可编辑成员(只读成员、镜像库都是 false):false 时一个按钮都不出(§3.4)。 */
   canWrite: boolean;
   pendingMerges: readonly PendingMerge[];
-  /** 「补上关联」再跑一次有没有可能改变结果;false = 跑过且之后没有新内容。 */
-  relinkMayChange: boolean | null;
 };
-
-/** 契约给的是单个 `action`,规则引擎给的是 `actions` 数组;两种都收,去掉 `none`。 */
-export function findingActions(row: KgFindingRow): KgFindingAction[] {
-  const list = Array.isArray(row.actions) && row.actions.length > 0
-    ? row.actions
-    : row.action ? [row.action] : [];
-  return list.filter((action) => action && typeof action.kind === "string" && action.kind !== "none");
-}
-
-function actionTarget(action: KgFindingAction, row: KgFindingRow): string {
-  if (typeof action.target_source_id === "string" && action.target_source_id) return action.target_source_id;
-  if (typeof action.source_id === "string" && action.source_id) return action.source_id;
-  return row.subject?.kind === "source" ? row.subject.key : "";
-}
 
 type SourceFacts = {
   title: string;
@@ -1432,24 +1275,21 @@ type SourceFacts = {
 };
 
 function sourceFacts(row: KgFindingRow, sourceId: string): SourceFacts {
-  const live = (row.live_sources ?? []).find((item) => item?.source_id === sourceId);
-  const side = evidenceList(row.evidence ?? null, "sources")
-    .find((item) => textField(item, "source_id") === sourceId);
-  const partner = evidenceList(row.evidence ?? null, "partners")
-    .find((item) => textField(item, "source_id") === sourceId);
-  const subjectTitle = row.subject?.kind === "source" && row.subject.key === sourceId
-    ? row.subject.label?.trim() ?? ""
-    : "";
+  const live = row.live_sources.find((item) => item.source_id === sourceId);
+  const side = evidenceList(row.evidence, "sources").find((item) => textField(item, "source_id") === sourceId);
+  const partner = evidenceList(row.evidence, "partners").find((item) => textField(item, "source_id") === sourceId);
+  const subjectTitle = row.subject.kind === "source" && row.subject.key === sourceId ? row.subject.label.trim() : "";
   return {
-    title: live?.title?.trim()
-      || textField(side, "label", "title")
-      || textField(partner, "label", "title")
+    title: live?.title.trim()
+      || textField(side, "label")
+      || textField(partner, "label")
       || subjectTitle
       || "（没有标题）",
-    sourceType: typeof live?.source_type === "string" ? live.source_type : "",
-    // 读侧没给这篇的实时状态时,「打开来源核对」照出(只读、后端裁决);删除与重新解析
-    // 不出——不知道类型就既拦不住收录来源的重新解析,也会让删除确认框用错文案。
-    exists: live ? live.exists !== false : true,
+    sourceType: live?.source_type ?? "",
+    // 读侧每一页都会给涉及的来源此刻的样子;万一缺了这一篇,「打开来源核对」照出(只读、
+    // 后端裁决),删除与重新解析不出——不知道类型就既拦不住收录来源的重新解析,也会让
+    // 删除确认框用错文案。
+    exists: live ? live.exists : true,
     processing: Boolean(live?.processing),
     known: Boolean(live),
   };
@@ -1457,41 +1297,24 @@ function sourceFacts(row: KgFindingRow, sourceId: string): SourceFacts {
 
 /** F2 证据里标了「建议保留」的那一侧:删除按钮绝不放在它旁边。 */
 function keptSide(row: KgFindingRow, sourceId: string): boolean {
-  return evidenceList(row.evidence ?? null, "sources").some((item) => (
+  return evidenceList(row.evidence, "sources").some((item) => (
     textField(item, "source_id") === sourceId
     && Boolean(item && typeof item === "object" && (item as Record<string, unknown>).keep === true)
   ));
 }
 
 /**
- * 这一组的成员 id 是不是全的:契约给了完整的 `canonical_ids` 就是;只有截到 5 个的
- * `members` 时,比一比组里一共几个合并后的知识对象(`canonicals`)。
- */
-function mergeGroupIdsComplete(row: KgFindingRow): boolean {
-  const evidence = row.evidence ?? null;
-  if (Array.isArray(evidence?.canonical_ids)) return true;
-  const known = evidenceList(evidence, "members").filter((member) => textField(member, "canonical_id")).length;
-  const total = evidenceNumber(evidence, "canonicals");
-  return total === null || total <= known;
-}
-
-/**
- * F4 这一组在待确认合并里的那一对:两侧都必须是这一组的成员(合并后的知识对象 id 精确
- * 相等)。只认得两侧都在组内的那一对——一侧在组内、另一侧是别的概念的候选不是这一组。
+ * F4 这一组在待确认合并里的那一对:两侧都必须是这一组的成员(`canonical_ids` 是全组的
+ * 合并后的知识对象 id,不是只截了 5 个的样例)。一侧在组内、另一侧是别的概念的候选不是
+ * 这一组。
  */
 export function pendingMergeForFinding(
   row: KgFindingRow,
   pendingMerges: readonly PendingMerge[],
 ): PendingMerge | null {
-  const evidence = row.evidence ?? null;
-  const ids = new Set<string>();
-  for (const member of evidenceList(evidence, "members")) {
-    const id = textField(member, "canonical_id");
-    if (id) ids.add(id);
-  }
-  for (const id of evidenceList(evidence, "canonical_ids")) {
-    if (typeof id === "string" && id) ids.add(id);
-  }
+  const ids = new Set(
+    evidenceList(row.evidence, "canonical_ids").filter((id): id is string => typeof id === "string" && id !== ""),
+  );
   if (ids.size < 2) return null;
   return pendingMerges.find((merge) => ids.has(merge.canonical_a) && ids.has(merge.canonical_b)) ?? null;
 }
@@ -1499,26 +1322,18 @@ export function pendingMergeForFinding(
 const DELETE_NOTE = "不可撤销，先打开来源核对";
 const KEEP_NOTE = "两份内容几乎相同，保留对象更多的一份";
 const PROCESSING_NOTE = "这篇来源正在解析，完成后再处理";
-const MERGE_SECTION_NOTE = "这一组写法较多，没能直接定位到对应的一对，按钮会带你到「待确认合并」那一节查找";
+const NOT_IN_QUEUE_NOTE = "待确认合并里还没有这一组";
 
 /**
  * 一条问题该出哪些按钮、旁边写什么(§四各条的「建议动作」)。
  *
  * 判据与既有入口同一套:只读成员与镜像库没有任何按钮(「标为正常」由调用方按同一位判断);
- * 收录来源不出「重新解析」;来源已不在的不出;已处理 / 已标为正常的不出。后端仍是权限的
- * 唯一判据——这里只决定「出不出入口」。
+ * 收录来源不出「重新解析」;来源已不在的不出;只有 `open` 的行出按钮(已处理、已标为正常、
+ * 已判定不是同一个、补上关联已经跑过的都不出)。后端仍是权限的唯一判据——这里只决定
+ * 「出不出入口」。
  */
 export function findingActionPlan(row: KgFindingRow, context: FindingActionContext): FindingActionPlan {
   const plan: FindingActionPlan = { buttons: [], notes: [], blocked: [], processingSourceIds: [] };
-  const relinkSpent = row.rule_id === "F5" && context.relinkMayChange === false;
-  if (relinkSpent) {
-    // 「补上关联」是确定性、幂等的:上次没补上的,再跑一次还是补不上。这句是现状说明,
-    // 只读成员也看得到。
-    const isolated = evidenceNumber(row.evidence ?? null, "isolated_objects");
-    plan.blocked.push(isolated === null
-      ? "补上关联已经跑过，剩下的没有可自动补上的关联；集中在某几个来源的，见疑似解析残缺"
-      : `补上关联已经跑过，剩下 ${formatCount(isolated)} 个没有可自动补上的关联；集中在某几个来源的，见疑似解析残缺`);
-  }
   if (!context.canWrite || row.status !== "open") return plan;
   const opened = new Set<string>();
   const addOpen = (sourceId: string, facts: SourceFacts) => {
@@ -1528,27 +1343,18 @@ export function findingActionPlan(row: KgFindingRow, context: FindingActionConte
   };
   // F2:两份各有一个「打开来源」,删除只放在建议删除的那份旁边。
   if (row.rule_id === "F2") {
-    const ids = [
-      ...evidenceList(row.evidence ?? null, "sources").map((item) => textField(item, "source_id")),
-      ...(row.live_sources ?? []).map((item) => item?.source_id ?? ""),
-    ].filter(Boolean);
-    for (const sourceId of ids) addOpen(sourceId, sourceFacts(row, sourceId));
+    for (const sourceId of row.subject_refs) addOpen(sourceId, sourceFacts(row, sourceId));
   }
-  for (const action of findingActions(row)) {
-    if (action.available === false) {
-      const reason = label(FINDING_UNAVAILABLE_LABEL, action.unavailable_reason ?? "", "当前无法在这里处理");
-      if (!plan.blocked.includes(reason)) plan.blocked.push(reason);
-      continue;
-    }
+  for (const action of row.actions) {
     if (action.kind === "delete_source" || action.kind === "reparse_source") {
-      const sourceId = actionTarget(action, row);
+      const sourceId = action.source_id ?? "";
       if (!sourceId) continue;
       const facts = sourceFacts(row, sourceId);
       if (!facts.exists) continue;
       addOpen(sourceId, facts);
       if (!facts.known) continue;
       if (action.kind === "reparse_source" && facts.sourceType === "promotion") continue;
-      // 疑似重复导入:建议保留的那份旁边不出删除,哪怕读侧两边都给了删除动作。
+      // 疑似重复导入:建议保留的那份旁边不出删除(前端自己的防线)。
       if (action.kind === "delete_source" && row.rule_id === "F2" && keptSide(row, sourceId)) continue;
       if (facts.processing && !plan.processingSourceIds.includes(sourceId)) {
         plan.processingSourceIds.push(sourceId);
@@ -1560,30 +1366,14 @@ export function findingActionPlan(row: KgFindingRow, context: FindingActionConte
       }
     } else if (action.kind === "review_merge") {
       const merge = pendingMergeForFinding(row, context.pendingMerges);
-      if (merge) {
-        plan.buttons.push({ kind: "review_merge", mergeId: merge.id });
-      } else if (!mergeGroupIdsComplete(row)) {
-        // 只拿到这一组的前几种写法,没找到不等于没有:带到「待确认合并」那一节让人自己找,
-        // 不断言「还没有这一组」。
-        plan.buttons.push({ kind: "review_merge", mergeId: "" });
-        plan.notes.push(MERGE_SECTION_NOTE);
-      } else if (!plan.blocked.includes(FINDING_UNAVAILABLE_LABEL.not_in_queue)) {
-        plan.blocked.push(FINDING_UNAVAILABLE_LABEL.not_in_queue);
-      }
+      if (merge) plan.buttons.push({ kind: "review_merge", mergeId: merge.id });
+      else if (!plan.blocked.includes(NOT_IN_QUEUE_NOTE)) plan.blocked.push(NOT_IN_QUEUE_NOTE);
     } else if (action.kind === "relink") {
-      if (!relinkSpent) plan.buttons.push({ kind: "relink" });
+      plan.buttons.push({ kind: "relink" });
     }
   }
   if (plan.processingSourceIds.length > 0) plan.notes.push(PROCESSING_NOTE);
   return plan;
-}
-
-/**
- * 「补上关联」已经跑过、之后没有新内容:再跑一次也补不上(它是确定性、幂等的)。这时
- * 「没建立关联的内容」不再是一条能处理的问题——移出待处理、放进诊断数据(§4.5)。
- */
-export function relinkIsSpent(summary: KgFindingsSummary | null | undefined): boolean {
-  return summary?.present === true && summary.relink?.may_change === false;
 }
 
 /** 补上关联跑完之后写在按钮旁的那一句(数字是它自己返回的,口径与问题清单不同、不互相核对)。 */
@@ -1601,11 +1391,11 @@ export function relinkResultText(result: { edgesAdded: number; isolatedAfter: nu
  * 只有「主体内容里有几个主题」依赖板块划分,来自依赖板块的那份产物;它缺席时只少那半句。
  */
 export function structureSignal(
-  summary: KgFindingsSummary | null | undefined,
+  summary: KgFindingsSummary,
   communityEdgesPayload: Record<string, unknown> | null | undefined,
 ): { headline: string; text: string } | null {
-  const structure = summary?.present ? summary.structure : null;
-  if (!structure || typeof structure !== "object") return null;
+  const structure = summary.present ? summary.structure : null;
+  if (!structure) return null;
   const share = finiteNumber(structure.giant_object_share);
   const islands = finiteNumber(structure.island_components);
   const islandSources = finiteNumber(structure.island_sources);
@@ -1631,40 +1421,26 @@ export function structureSignal(
 
 // ------------------------------------------------------------ 需要开发处理(§五 B 档)
 
-/** S1 的一个例子:一个名字,或一组名字(`{names: [...]}`)。 */
-function devSampleText(sample: unknown): string {
-  if (typeof sample === "string") return sample.trim();
-  if (sample && typeof sample === "object") {
-    const names = (sample as Record<string, unknown>).names;
-    if (Array.isArray(names)) {
-      return names
-        .filter((name): name is string => typeof name === "string" && name.trim() !== "")
-        .slice(0, 5)
-        .join(" / ");
-    }
-  }
-  return "";
-}
-
 /**
  * 「需要开发处理」区的条目。只写现象、规模和「需要开发修复」,**不放按钮**:看起来能修、
  * 按下去不会有任何变化的按钮一律不许出现(§3.4)。认不出的条目不上屏。
  */
-export function devItemViews(summary: KgFindingsSummary | null | undefined): Array<{ key: string; text: string }> {
-  if (!summary?.present) return [];
+export function devItemViews(summary: KgFindingsSummary): Array<{ key: string; text: string }> {
+  if (!summary.present) return [];
   const views: Array<{ key: string; text: string }> = [];
-  for (const item of findingDevItems(summary)) {
-    if (item?.item_id !== "S1") continue;
-    const groups = finiteNumber(item.groups);
-    if (groups === null || groups <= 0) continue;
-    const examples = (Array.isArray(item.samples) ? item.samples : [])
-      .map(devSampleText)
+  for (const item of summary.dev_items) {
+    if (item.item_id !== "S1" || !(item.groups > 0)) continue;
+    const examples = item.samples
+      .map((sample) => sample.names
+        .filter((name) => name.trim() !== "")
+        .slice(0, 5)
+        .join(" / "))
       .filter(Boolean)
       .slice(0, 3);
     const example = examples.length > 0 ? `（例：${examples.join("；")}）` : "";
     views.push({
       key: "S1",
-      text: `${formatCount(groups)} 组只差空格/连字符的概念没有合并${example}，这是合并规则的缺陷，修好后会自动合并，不需要逐条处理。`,
+      text: `${formatCount(item.groups)} 组只差空格/连字符的概念没有合并${example}，这是合并规则的缺陷，修好后会自动合并，不需要逐条处理。`,
     });
   }
   return views;
@@ -1683,10 +1459,11 @@ export type PassedRuleLine = {
   text: string;
 };
 
-function checkedText(checked: number | null, unitCode: string | null | undefined): string {
-  if (checked === null) return "";
-  const unit = unitCode ? label(UNIT_LABEL, unitCode, "项") : "项";
-  return `（检查了 ${formatCount(checked)} 个${unit}）`;
+function checkedText(ruleId: string, status: KgFindingRuleStatus): string {
+  const field = FINDING_CHECKED_FIELD[ruleId];
+  const checked = field ? finiteNumber(status[field[0]]) : null;
+  if (!field || checked === null) return "";
+  return `（检查了 ${formatCount(checked)} 个${label(UNIT_LABEL, field[1], "项")}）`;
 }
 
 /**
@@ -1696,15 +1473,16 @@ function checkedText(checked: number | null, unitCode: string | null | undefined
  *   – 检查了但有一部分没判断(F1 概念太少的来源)—— 同样单列。
  * 有问题的规则不在这里出「✓」:它的问题在待处理区。
  */
-export function passedRuleLines(summary: KgFindingsSummary | null | undefined): PassedRuleLine[] {
-  if (!summary?.present) return [];
+export function passedRuleLines(summary: KgFindingsSummary): PassedRuleLine[] {
+  if (!summary.present) return [];
   const lines: PassedRuleLine[] = [];
-  for (const rule of findingRuleStatuses(summary)) {
-    if (!Object.hasOwn(FINDING_RULE_LABEL, rule.rule_id)) continue;
-    const name = FINDING_RULE_LABEL[rule.rule_id];
+  for (const ruleId of FINDING_RULE_ORDER) {
+    const rule = summary.rules[ruleId];
+    if (!rule) continue;
+    const name = FINDING_RULE_LABEL[ruleId];
     if (rule.status === "skipped") {
       lines.push({
-        ruleId: rule.rule_id,
+        ruleId,
         state: "skipped",
         text: `${name}：没法检查，${label(FINDING_SKIP_REASON_LABEL, rule.reason ?? "", "这一次没有可检查的内容")}`,
       });
@@ -1712,26 +1490,16 @@ export function passedRuleLines(summary: KgFindingsSummary | null | undefined): 
     }
     if (rule.status !== "ran") continue;
     if (finiteNumber(rule.total) === 0) {
-      lines.push({
-        ruleId: rule.rule_id,
-        state: "clean",
-        text: `没发现${FINDING_CLEAN_NOUN[rule.rule_id]}${checkedText(finiteNumber(rule.checked), rule.checked_unit)}`,
-      });
+      lines.push({ ruleId, state: "clean", text: `没发现${FINDING_CLEAN_NOUN[ruleId]}${checkedText(ruleId, rule)}` });
     }
-    const notJudged = finiteNumber(rule.not_judged);
+    const notJudged = ruleId === "F1" ? finiteNumber(rule.sources_too_few_concepts) : null;
     if (notJudged !== null && notJudged > 0) {
-      lines.push({
-        ruleId: rule.rule_id,
-        state: "partial",
-        text: rule.rule_id === "F1"
-          ? `${name}：有 ${formatCount(notJudged)} 个来源概念太少，没有判断`
-          : `${name}：有 ${formatCount(notJudged)} 项没有判断`,
-      });
+      lines.push({ ruleId, state: "partial", text: `${name}：有 ${formatCount(notJudged)} 个来源概念太少，没有判断` });
     }
-    const decided = finiteNumber(rule.decided_not_same);
-    if (rule.rule_id === "F4" && decided !== null && decided > 0) {
+    const decided = ruleId === "F4" ? finiteNumber(rule.groups_decided_apart) : null;
+    if (decided !== null && decided > 0) {
       lines.push({
-        ruleId: rule.rule_id,
+        ruleId,
         state: "decided",
         text: `${name}：已判定不是同一个的有 ${formatCount(decided)} 组，不再列为问题`,
       });
@@ -1740,17 +1508,37 @@ export function passedRuleLines(summary: KgFindingsSummary | null | undefined): 
   return lines;
 }
 
+/** 已通过区里一行的说明(F4 已判定不是同一个 / 已标为正常)。 */
+export function passedRowText(row: KgFindingRow): string {
+  const what = `${findingRuleLabel(row.rule_id)} · ${findingSubjectText(row)}`;
+  if (row.status === "decided_not_same") return `已判定不是同一个：${what}`;
+  if (row.status === "dismissed") return `已标为正常：${what}`;
+  return what;
+}
+
+/**
+ * 诊断数据里「没建立关联的内容」那一块的现状句(§4.5)。「补上关联」确定且幂等:跑过之后
+ * 没有新内容,再跑也补不上——不放按钮,只说现状。M 取这条问题自己的孤立对象数。
+ */
+export function relinkSpentText(row: KgFindingRow): string {
+  const isolated = evidenceNumber(row.evidence, "isolated_objects");
+  return isolated === null
+    ? "补上关联已经跑过，剩下的没有可自动补上的关联；集中在某几个来源的，见疑似解析残缺"
+    : `补上关联已经跑过，剩下 ${formatCount(isolated)} 个没有可自动补上的关联；集中在某几个来源的，见疑似解析残缺`;
+}
+
 /** 某条规则的问题太多、只保存了前若干条:写在待处理区,截断绝不静默。 */
-export function truncatedRuleNotes(summary: KgFindingsSummary | null | undefined): string[] {
-  if (!summary?.present) return [];
+export function truncatedRuleNotes(summary: KgFindingsSummary): string[] {
+  if (!summary.present) return [];
   const notes: string[] = [];
-  for (const rule of findingRuleStatuses(summary)) {
-    if (!Object.hasOwn(FINDING_RULE_LABEL, rule.rule_id) || rule.truncated !== true) continue;
+  for (const ruleId of FINDING_RULE_ORDER) {
+    const rule = summary.rules[ruleId];
+    if (!rule || rule.truncated !== true) continue;
     const total = finiteNumber(rule.total);
     const persisted = finiteNumber(rule.persisted);
     notes.push(total !== null && persisted !== null && persisted < total
-      ? `${FINDING_RULE_LABEL[rule.rule_id]}共 ${formatCount(total)} 条，只保存了前 ${formatCount(persisted)} 条`
-      : `${FINDING_RULE_LABEL[rule.rule_id]}没能检查完整，列出的不是全部`);
+      ? `${FINDING_RULE_LABEL[ruleId]}共 ${formatCount(total)} 条，只保存了前 ${formatCount(persisted)} 条`
+      : `${FINDING_RULE_LABEL[ruleId]}没能检查完整，列出的不是全部`);
   }
   return notes;
 }

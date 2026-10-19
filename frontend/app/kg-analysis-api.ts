@@ -118,20 +118,18 @@ export type KgAnalysisReport = {
   artifacts: KgArtifactView[];
   boards: KgBoardOverview;
   board_edges: KgBoardEdgeView;
-  /**
-   * 问题清单的账本摘要。**可选**:后端没带(还没升级到问题清单的后端)时按「还没生成」处理,
-   * 不报错、不把缺席渲染成「没有问题」。
-   */
-  findings_summary?: KgFindingsSummary | null;
+  /** 问题清单的账本摘要(只读账本 + 标记,不读明细)。 */
+  findings_summary: KgFindingsSummary;
   /** 合并结果建于哪一版合并规则,与当前代码比是否一致(「更新分析」按钮的第一档判据)。 */
-  merge_code?: KgMergeCodeState | null;
+  merge_code: KgMergeCodeState;
 };
 
 // ------------------------------------------------------------------ 问题清单
 //
-// 契约来自 2026-10-19 问题清单设计 §三/§八 与 PR-2 的端点。与上面一样,后端只给内部代号
-// (rule_id / severity / subject.kind / action.kind / status / reason),界面词全在
-// kg-analysis-model.ts。证据 `evidence` 的形状随规则变,是自由对象——前端逐字段防御式读取,
+// 契约与 backend/app/models/kg_analysis.py(FindingsSummary / MergeCodeState / FindingRow /
+// FindingsPageResponse)逐字对齐。与上面一样,后端只给内部代号(rule_id / severity /
+// subject.kind / actions[].kind / status / handled_reason / reason),界面词全在
+// kg-analysis-model.ts。证据 `evidence` 的形状随规则变,是自由对象——逐字段读取,
 // 认不出的字段一律不渲染,绝不把代号或英文字段名上屏。
 
 /** 一条问题指向什么:来源 / 来源对 / 概念组 / 全库。label 是发布时的标题或名字快照。 */
@@ -142,24 +140,14 @@ export type KgFindingSubject = {
 };
 
 /**
- * 建议动作。按钮只是建议的入口:是否显示由前端按既有入口的同一判据决定(只读成员、镜像库、
- * 收录来源),后端仍是权限的唯一判据。`target_source_id` 是删除/重新解析对准的那一篇;
- * 规则引擎的原始拼写 `source_id` 一并接受。
+ * 建议动作(从明细派生,不落库)。`source_id` 是删除 / 重新解析对准的那一篇。出不出按钮由
+ * 前端按既有入口的同一判据决定(只读成员、镜像库、收录来源、来源此刻在不在),后端仍是权限
+ * 的唯一判据。
  */
 export type KgFindingAction = {
   kind: string;
-  capability?: string;
-  available?: boolean;
-  unavailable_reason?: string | null;
-  target_source_id?: string | null;
+  capability: string;
   source_id?: string | null;
-};
-
-/** 挂在这条问题下面的附注(例如两份重复的错文件只出一条,另一份挂在这里)。 */
-export type KgFindingAttachment = {
-  rule_id: string;
-  relation: string;
-  subject: KgFindingSubject | null;
 };
 
 /** 两条世代线的一对戳(KG 写入 / 合并结果)。 */
@@ -174,7 +162,7 @@ export type KgFindingLiveSource = {
   exists: boolean;
   title: string;
   source_type: string;
-  /** 正在解析/分析。 */
+  /** 正在排队 / 解析 / 抽取。 */
   processing: boolean;
 };
 
@@ -182,26 +170,28 @@ export type KgFindingRow = {
   rule_id: string;
   severity: string;
   subject: KgFindingSubject;
-  evidence: Record<string, unknown> | null;
-  impact: { objects: number } | null;
-  action?: KgFindingAction | null;
-  actions?: KgFindingAction[] | null;
-  attachments?: KgFindingAttachment[] | null;
-  first_seen?: KgFindingSeq | null;
-  built_at?: KgFindingSeq | null;
-  /** open / handled(已处理,更新后核验)/ dismissed(标为正常)/ decided_not_same。读侧派生。 */
+  subject_refs: string[];
+  evidence: Record<string, unknown>;
+  impact: { objects: number };
+  actions: KgFindingAction[];
+  first_seen: KgFindingSeq;
+  /**
+   * 读侧派生:open / handled(已处理,更新后核验,仍在待处理)/ dismissed(标为正常)/
+   * decided_not_same(F4,已判定不是同一个)/ relink_spent(F5,补上关联已跑过、之后没有
+   * 新内容,再跑也补不上)。
+   */
   status: string;
-  handled_reason?: string | null;
-  dismissed_at?: string | null;
-  live_sources?: KgFindingLiveSource[] | null;
+  /** handled 的原因:source_deleted / source_processing / source_reprocessed / merge_confirmed / relinked。 */
+  handled_reason: string | null;
+  dismissed_at: string | null;
+  live_sources: KgFindingLiveSource[];
 };
 
 /**
  * 三个区各一页:
- *   · `open` —— 待处理:status 为 open 或 handled(已处理，更新后核验)的行;
- *   · `passed` —— F4 用户已判定不是同一个(status = decided_not_same)的行;
- *   · `dismissed` —— 已标为正常(status = dismissed)的行。
- * 前端按每行自己的 status 归区,所以读侧即使把已标为正常也放进 passed,也不会被列两遍。
+ *   · `open` —— 待处理:status 为 open 或 handled;
+ *   · `passed` —— decided_not_same 与 relink_spent;
+ *   · `dismissed` —— 已标为正常。
  */
 export type KgFindingZone = "open" | "passed" | "dismissed";
 
@@ -211,7 +201,8 @@ export type KgFindingsPage = {
   present: boolean;
   absence: string | null;
   freshness: KgFreshness;
-  built_at?: KgFindingSeq | null;
+  /** 整份清单建于哪一代(不逐行记)。「基于变更 #N」读这里。 */
+  built_at: KgFindingSeq | null;
   rules_version: number | null;
   zone: string;
   limit: number;
@@ -220,27 +211,24 @@ export type KgFindingsPage = {
   returned: number;
   has_more: boolean;
   units: Record<string, string>;
+  /** 每条规则证据里各个数的单位。 */
+  evidence_units: Record<string, Record<string, string>>;
   rows: KgFindingRow[];
 };
 
 /**
- * 一条规则这一次跑得怎么样。「检查过、没发现」「没法检查」「检查了但有一部分没判断」三件事
- * 必须分得开(已通过区不许把它们都画成绿勾)。
+ * 一条规则这一次跑得怎么样(引擎的原字段)。`status` 是 ran / skipped,skipped 时 `reason`
+ * 说为什么;各规则另带自己的计数:F1 `sources_checked` / `sources_too_few_concepts`、F2 / F3
+ * `sources_checked`、F4 `canonicals_checked` / `groups_decided_apart`、F5 `objects_checked`、
+ * S1 `narrow_groups` / `narrow_group_objects`。
  */
 export type KgFindingRuleStatus = {
-  rule_id: string;
-  /** ran / skipped */
   status: string;
   reason?: string | null;
-  checked?: number | null;
-  checked_unit?: string | null;
-  total?: number | null;
-  persisted?: number | null;
-  truncated?: boolean | null;
-  /** 参与了但没有判断的个数(F1:概念太少的来源)。 */
-  not_judged?: number | null;
-  /** F4:用户已判定不是同一个的组数。 */
-  decided_not_same?: number | null;
+  total?: number;
+  persisted?: number;
+  truncated?: boolean;
+  [field: string]: unknown;
 };
 
 /** 「需要开发处理」区的一项(目前只有 S1)。没有任何按钮。 */
@@ -248,37 +236,42 @@ export type KgFindingsDevItem = {
   item_id: string;
   groups: number;
   objects: number;
-  /** 例子:每一项可以是一个名字,也可以是一组名字(`{names: [...]}`)。 */
-  samples: unknown[];
+  /** 例子:每一项是一组只差空格 / 连字符的写法。 */
+  samples: Array<{ names: string[] }>;
 };
 
 /** S3:只依赖连通分量的结构数(主体内容 / 孤岛),与主题板块划分无关。 */
 export type KgFindingsStructure = {
+  graph_nodes: number;
+  components: number;
+  giant_nodes: number;
+  usable_objects: number;
   giant_objects: number;
-  objects_total: number;
-  giant_object_share: number | null;
+  giant_object_share: number;
   island_components: number;
   island_sources: number;
 };
 
 export type KgFindingsResolvedSample = {
   rule_id: string;
-  subject_kind?: string;
+  subject_kind: string;
   subject_key: string;
   subject_label: string;
-  impact_objects?: number;
+  impact_objects: number;
 };
 
 /** 与上一次问题清单的对比。规则版本不同、或任一侧截断/没跑时不可比,`reason` 说为什么。 */
 export type KgFindingsComparison = {
-  comparable: boolean;
-  reason: string | null;
   previous_built_at_seq: number | null;
+  previous_built_at_cluster_seq: number | null;
+  comparable: boolean;
+  /** no_previous / rules_version_changed / truncated_or_not_run */
+  reason: string | null;
   resolved: number | null;
   persisting: number | null;
   new: number | null;
   resolved_samples: KgFindingsResolvedSample[];
-  by_rule?: Record<string, unknown>;
+  by_rule: Record<string, unknown>;
 };
 
 /** 「补上关联」的持久标记:跑过没有、再跑一次能不能改变结果。 */
@@ -286,18 +279,20 @@ export type KgFindingsRelink = {
   attempted: boolean;
   at_kg_seq: number | null;
   at: string | null;
-  /** false = 跑过且之后没有新内容,再跑也补不上;null = 判断不了。 */
   may_change: boolean | null;
 };
 
 export type KgFindingsSummary = {
   present: boolean;
+  /** never_computed / unexpected / upgrade_pending(灰色:升级后还没生成)。 */
   absence: string | null;
   freshness: KgFreshness;
   rules_version: number | null;
-  built_at?: KgFindingSeq | null;
+  built_at: KgFindingSeq | null;
+  created_at: string;
   counts: { by_rule: Record<string, number>; dismissed: number } | null;
-  rules: KgFindingRuleStatus[];
+  /** 按规则代号为键(F1…F5、S1)。 */
+  rules: Record<string, KgFindingRuleStatus>;
   dev_items: KgFindingsDevItem[];
   structure: KgFindingsStructure | null;
   comparison: KgFindingsComparison | null;
@@ -307,13 +302,13 @@ export type KgFindingsSummary = {
 
 /**
  * 合并代码分量:上次合并结果建于哪一版合并规则(`stored`)与当前代码(`current`)。
- * ⚠ 删除知识图谱、索引管线发布之后 `stored` 是空串 —— 那是「还没合并过」,**不是**
+ * `matches` 为 **null** = 还没合并过(`stored` 为空串,如删除知识图谱之后)—— 那不是
  * 「合并规则已更新」。
  */
 export type KgMergeCodeState = {
   stored: string;
   current: string;
-  matches: boolean;
+  matches: boolean | null;
 };
 
 export type KgSourceProfileRow = {
@@ -381,8 +376,8 @@ export const fetchKgAnalysisSources = (
 
 /**
  * 问题清单的一页。端点硬上限 200/页(越界 422);分页判据用 has_more。每一页都带读侧派生的
- * `status`(已处理 / 标为正常 / 已判定不是同一个),所以处置之后要重取这一页,而不是在前端
- * 记住「我刚点过」。
+ * `status`(已处理 / 标为正常 / 已判定不是同一个 / 补上关联已经跑过),所以处置之后要重取这一页,
+ * 而不是在前端记住「我刚点过」。
  */
 export const fetchKgFindings = (
   nb: string,

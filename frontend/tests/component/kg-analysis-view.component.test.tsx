@@ -226,6 +226,24 @@ function report(overrides: Partial<KgAnalysisReport> = {}): KgAnalysisReport {
         { src: "c-000", dst: "c-029", weight: 10 },
       ],
     },
+    // 这份文件钉的是诊断数据区块:问题清单默认还没生成(它本身的呈现在
+    // kg-analysis-findings.component.test.tsx)。
+    findings_summary: {
+      present: false,
+      absence: "never_computed",
+      freshness: { basis: "usable_live", built_at_seq: null, seq_behind: null, stale: null, built_at_cluster_seq: null, cluster_seq_behind: null },
+      rules_version: null,
+      built_at: null,
+      created_at: "",
+      counts: null,
+      rules: {},
+      dev_items: [],
+      structure: null,
+      comparison: null,
+      relink: null,
+      units: {},
+    },
+    merge_code: { stored: "v4|1024|1024", current: "v4|1024|1024", matches: true },
     ...overrides,
   };
 }
@@ -293,6 +311,7 @@ function emptyFindingsPage(zone: string): KgFindingsPage {
     present: true,
     absence: null,
     freshness: { basis: "usable_live", built_at_seq: 128, seq_behind: 0, stale: false, built_at_cluster_seq: 7, cluster_seq_behind: 0 },
+    built_at: { kg_seq: 128, cluster_seq: 7 },
     rules_version: 1,
     zone,
     limit: 20,
@@ -301,6 +320,7 @@ function emptyFindingsPage(zone: string): KgFindingsPage {
     returned: 0,
     has_more: false,
     units: { impact_objects: "objects" },
+    evidence_units: {},
     rows: [],
   };
 }
@@ -394,10 +414,15 @@ test("先把技术状态翻译成结论，并解释状态颜色和更新方式",
       absence: null,
       freshness: { basis: "usable_live", built_at_seq: 128, seq_behind: 0, stale: false, built_at_cluster_seq: 7, cluster_seq_behind: 0 },
       rules_version: 1,
+      built_at: { kg_seq: 128, cluster_seq: 7 },
+      created_at: "2026-07-25T09:00:00Z",
       counts: { by_rule: {}, dismissed: 0 },
-      rules: [],
+      rules: {},
       dev_items: [],
-      structure: { giant_objects: 30366, objects_total: 41713, giant_object_share: 0.728, island_components: 1137, island_sources: 14 },
+      structure: {
+        graph_nodes: 37340, components: 1138, giant_nodes: 27000, usable_objects: 41713,
+        giant_objects: 30366, giant_object_share: 0.728, island_components: 1137, island_sources: 14,
+      },
       comparison: null,
       relink: null,
       units: {},

@@ -33,8 +33,8 @@ import {
   findingActionPlan,
   findingBasedOnChange,
   findingEvidenceView,
+  findingHandledText,
   findingImpactText,
-  findingIsHandled,
   findingRuleLabel,
   findingSeverityLabel,
   findingSeverityTone,
@@ -43,11 +43,11 @@ import {
   findingSubjectKindLabel,
   findingSubjectText,
   formatCount,
-  normalizeFindingRows,
+  partitionFindings,
+  passedRowText,
   passedRuleLines,
-  relinkIsSpent,
   relinkResultText,
-  sortFindings,
+  relinkSpentText,
   truncatedRuleNotes,
   type FindingButtonSpec,
 } from "./kg-analysis-model";
@@ -131,6 +131,11 @@ export type FindingsPageState = {
   loading: boolean;
   /** 取数失败时给用户看的那句话(已经过 toUserMessage);没有失败时为空串。 */
   failure: string;
+  /**
+   * `page` 是哪一代取回来的(库 + 失效令牌)。令牌变了、新一页还没回来时,屏上仍是上一代的
+   * 那一页,这里也仍是上一代——跨页记住的东西按它对齐,不会拿旧页的内容冒充新一代。
+   */
+  generation: string;
 };
 
 /**
@@ -151,10 +156,12 @@ export function useFindingsPage(
   const [page, setPage] = useState<KgFindingsPage | null>(null);
   const [loading, setLoading] = useState(true);
   const [failure, setFailure] = useState("");
+  const [generation, setGeneration] = useState("");
   const [shownNotebook, setShownNotebook] = useState(notebookId);
   if (shownNotebook !== notebookId) {
     setShownNotebook(notebookId);
     setPage(null);
+    setGeneration("");
     setLoading(true);
     setFailure("");
   }
@@ -164,12 +171,14 @@ export function useFindingsPage(
     setFailure("");
     fetchKgFindings(notebookId, { zone, limit, offset })
       .then((data) => {
-        // 行统一成嵌套形状(规则引擎的扁平列也认),组件只读一种。
-        if (!cancelled) setPage({ ...data, rows: normalizeFindingRows(data.rows) });
+        if (cancelled) return;
+        setPage(data);
+        setGeneration(`${notebookId}|${token}`);
       })
       .catch((caught: unknown) => {
         if (cancelled) return;
         setPage(null);
+        setGeneration("");
         setFailure(toUserMessage(caught, "问题清单暂时打不开，请稍后重试"));
       })
       .finally(() => {
@@ -179,7 +188,31 @@ export function useFindingsPage(
       cancelled = true;
     };
   }, [notebookId, zone, limit, offset, token]);
-  return { page, loading, failure };
+  return { page, loading, failure, generation };
+}
+
+/** 「补上关联已经跑过」那一行在 `passed` 列表里的位置(它只有一条)。 */
+export type RelinkSpentSighting = { row: KgFindingRow; offset: number };
+
+/**
+ * 从 `passed` 那一页里认出 relink_spent 那一行(§4.5),交给诊断数据那一块。它按严重度、影响面
+ * 排序,通常在第一页;翻到不含它的页时,沿用**同一代**里看到过的那一行——令牌一变(新内容、
+ * 更新了分析)就不再沿用,等新一页自己说它还在不在。
+ */
+export function useRelinkSpentRow(passed: FindingsPageState): RelinkSpentSighting | null {
+  const [seen, setSeen] = useState<{ generation: string; sighting: RelinkSpentSighting } | null>(null);
+  const page = passed.page?.present ? passed.page : null;
+  const onPage = page ? partitionFindings(page.rows).spent[0] ?? null : null;
+  if (page && onPage && (
+    seen === null
+    || seen.generation !== passed.generation
+    || seen.sighting.row !== onPage
+    || seen.sighting.offset !== page.offset
+  )) {
+    setSeen({ generation: passed.generation, sighting: { row: onPage, offset: page.offset } });
+  }
+  if (page && onPage) return { row: onPage, offset: page.offset };
+  return page && seen && seen.generation === passed.generation ? seen.sighting : null;
 }
 
 function FindingsPager({
@@ -187,18 +220,26 @@ function FindingsPager({
   loading,
   onOffset,
   label,
+  elsewhere = null,
 }: {
   page: KgFindingsPage;
   loading: boolean;
   onOffset: (next: number) => void;
   label: string;
+  /** 这一列表里另放别处、不在这里列出也不计数的那一行(已通过区的 relink_spent)。 */
+  elsewhere?: RelinkSpentSighting | null;
 }) {
   if (page.offset <= 0 && !page.has_more) return null;
+  const before = elsewhere && elsewhere.offset < page.offset ? 1 : 0;
+  const here = elsewhere && elsewhere.offset === page.offset ? 1 : 0;
+  const first = page.offset + 1 - before;
+  const last = page.offset + page.returned - before - here;
+  const total = page.total - (elsewhere ? 1 : 0);
   return (
     <div className="kg-analysis-pager" aria-label={label}>
       <span className="kg-analysis-pager-text">
-        第 {formatCount(page.offset + 1)}–{formatCount(page.offset + page.returned)} 条，
-        共 {formatCount(page.total)} 条
+        {last >= first ? `第 ${formatCount(first)}–${formatCount(last)} 条，` : ""}
+        共 {formatCount(total)} 条
       </span>
       <button
         type="button"
@@ -255,10 +296,10 @@ export function FindingsHeader({
   analysisBlocked: boolean;
   onAnalyze?: () => void;
 }) {
-  const summary = report.findings_summary ?? null;
+  const summary = report.findings_summary;
   const readiness = analysisReadiness(report);
   const update = analysisUpdateState(report);
-  const comparison = findingsComparisonView(summary?.present ? summary.comparison : null);
+  const comparison = findingsComparisonView(summary.present ? summary.comparison : null);
   const reportLine = findingsReportLine(summary);
   const reason = analysisRunning
     ? ""
@@ -343,8 +384,7 @@ function buttonAria(spec: FindingButtonSpec, text: string, multiSource: boolean)
 function FindingRowView({
   row,
   units,
-  summary,
-  dirty,
+  basedOn,
   state,
   handlers,
   onDismiss,
@@ -352,8 +392,8 @@ function FindingRowView({
 }: {
   row: KgFindingRow;
   units: Record<string, string> | null;
-  summary: KgAnalysisReport["findings_summary"];
-  dirty: boolean;
+  /** 「基于变更 #N」:整份清单建于哪一代,报告落后时每条都标;一致时为空串。 */
+  basedOn: string;
   state: KgFindingsActionState;
   handlers: KgFindingHandlers;
   onDismiss: (row: KgFindingRow) => Promise<void>;
@@ -363,14 +403,9 @@ function FindingRowView({
   const [busy, setBusy] = useState<string | null>(null);
   const [result, showResult] = useTimedResult();
   const evidence = findingEvidenceView(row);
-  const plan = findingActionPlan(row, {
-    canWrite: state.canWrite,
-    pendingMerges: state.pendingMerges,
-    relinkMayChange: summary?.present ? summary.relink?.may_change ?? null : null,
-  });
+  const plan = findingActionPlan(row, { canWrite: state.canWrite, pendingMerges: state.pendingMerges });
   const tone = findingSeverityTone(row.severity);
-  const basedOn = findingBasedOnChange(row, summary, dirty);
-  const handled = findingIsHandled(row);
+  const handledText = findingHandledText(row);
   const sourceIds = new Set(
     plan.buttons.flatMap((spec) => ("sourceId" in spec ? [spec.sourceId] : [])),
   );
@@ -494,21 +529,21 @@ function FindingRowView({
     }
   };
 
+  // 「标为正常」只给可编辑成员的待处理问题(已处理的等更新后核验,不再标)。
+  const canDismiss = state.canWrite && row.status === "open";
   const relinkLine = row.rule_id === "F5" && state.relinkResult ? relinkResultText(state.relinkResult) : "";
-  // 「标为正常」只给可编辑成员的待处理问题;没有主键的行(契约外的形状)写不进豁免,不出。
-  const canDismiss = state.canWrite && row.status === "open" && Boolean(row.subject?.key);
   const relinkBlocked = row.rule_id === "F5" && state.maintenanceBusy && !state.relinking
     && visible.some((spec) => spec.kind === "relink");
 
   return (
-    <li className={`kg-finding kg-finding--${tone}${handled ? " is-handled" : ""}`}>
+    <li className={`kg-finding kg-finding--${tone}${handledText ? " is-handled" : ""}`}>
       <div className="kg-finding-head">
         <span className={`kg-finding-dot is-${tone}`} aria-hidden="true" />
         <span className="kg-finding-severity">{findingSeverityLabel(row.severity)}</span>
         <strong className="kg-finding-rule">{findingRuleLabel(row.rule_id)}</strong>
-        <span className="kg-finding-kind">{findingSubjectKindLabel(row.subject?.kind ?? "")}</span>
+        <span className="kg-finding-kind">{findingSubjectKindLabel(row.subject.kind)}</span>
         {/* 全库一条的问题(没建立关联的内容)定位标签就是「全库」,不再重复一遍名字。 */}
-        {row.subject?.kind === "notebook" ? null : (
+        {row.subject.kind === "notebook" ? null : (
           <span className="kg-finding-subject" title={findingSubjectText(row)}>{findingSubjectText(row)}</span>
         )}
         <span className="kg-finding-impact">{findingImpactText(row, units)}</span>
@@ -526,7 +561,7 @@ function FindingRowView({
         </p>
       ) : null}
       {evidence.notes.map((note) => <p key={note} className="kg-finding-note">{note}</p>)}
-      {handled ? <p className="kg-finding-handled">已处理，更新后核验</p> : null}
+      {handledText ? <p className="kg-finding-handled">{handledText}</p> : null}
       {plan.blocked.map((text) => <p key={text} className="kg-finding-blocked">{text}</p>)}
       {visible.length > 0 || canDismiss || result || relinkLine ? (
         <div className="kg-finding-actions">
@@ -599,17 +634,15 @@ export function FindingsPendingZone({
   onChanged: () => void;
 }) {
   const { page, loading, failure } = pageState;
-  const summary = report.findings_summary ?? null;
-  // 「补上关联」再跑也补不上时,「没建立关联的内容」挪到诊断数据(那里另有一块说明),不占
-  // 待处理的位置、也不计入它的条数。
-  const spent = relinkIsSpent(summary);
-  const pageRows = page?.present ? sortFindings(page.rows) : [];
-  const moved = spent ? pageRows.filter((row) => row.rule_id === "F5").length : 0;
-  const rows = pageRows.filter((row) => (
-    row.status !== "dismissed" && row.status !== "decided_not_same" && !(spent && row.rule_id === "F5")
-  ));
-  const shownTotal = page?.present ? Math.max(0, page.total - moved) : 0;
+  const summary = report.findings_summary;
+  // 待处理区 = open + handled(读侧已经按区给了;这里只按行自己的状态再挡一次)。
+  const rows = page?.present
+    ? partitionFindings(page.rows).pending
+    : [];
+  const shownTotal = page?.present ? page.total : 0;
   const truncated = truncatedRuleNotes(summary);
+  // 整份清单建于哪一代:报告落后时每条问题都标「基于变更 #N」。
+  const basedOn = page?.present ? findingBasedOnChange(page.built_at, summary, report.state.dirty) : "";
   return (
     <section className="kg-analysis-block kg-findings-zone kg-findings-pending" aria-label="待处理">
       <div className="kg-analysis-block-head">
@@ -636,11 +669,10 @@ export function FindingsPendingZone({
         <ol className="kg-findings-list">
           {rows.map((row) => (
             <FindingRowView
-              key={`${row.rule_id}:${row.subject?.key ?? ""}`}
+              key={`${row.rule_id}:${row.subject.key}`}
               row={row}
-              units={page.units ?? null}
-              summary={summary}
-              dirty={report.state.dirty}
+              units={page.units}
+              basedOn={basedOn}
               state={state}
               handlers={handlers}
               onDismiss={onDismiss}
@@ -658,41 +690,30 @@ export function FindingsPendingZone({
 
 /**
  * 诊断数据里的「没建立关联的内容」:补上关联已经跑过、之后没有新内容,再跑也补不上
- * (§4.5)。只说现状,不放按钮。`row` 是待处理那一页里的 F5(不在这一页时为 null,只少那个数)。
+ * (§4.5)。只说现状,不放按钮。`row` 是 `passed` 那一页里 status 为 relink_spent 的那一行。
  */
-export function FindingsRelinkSpentBlock({
-  report,
-  row,
-}: {
-  report: KgAnalysisReport;
-  row: KgFindingRow | null;
-}) {
-  const summary = report.findings_summary ?? null;
-  if (!relinkIsSpent(summary)) return null;
-  const evidence = row ? findingEvidenceView(row) : null;
-  const plan = findingActionPlan(
-    row ?? { rule_id: "F5", severity: "low", subject: { kind: "notebook", key: "notebook", label: "" }, evidence: null, impact: null, status: "open" },
-    { canWrite: false, pendingMerges: [], relinkMayChange: false },
-  );
+export function FindingsRelinkSpentBlock({ row }: { row: KgFindingRow | null }) {
+  if (!row) return null;
+  const evidence = findingEvidenceView(row);
   return (
     <div className="kg-analysis-block kg-findings-relink-spent">
       <div className="kg-analysis-block-head">
         <div className="kg-analysis-block-title">
-          <h3>没建立关联的内容</h3>
+          <h3>{findingRuleLabel(row.rule_id)}</h3>
         </div>
       </div>
-      {evidence && evidence.lines.length > 0 ? (
+      <p className="kg-analysis-note">{relinkSpentText(row)}</p>
+      {evidence.lines.length > 0 ? (
         <ul className="kg-finding-evidence">
           {evidence.lines.map((line) => <li key={line}>{line}</li>)}
         </ul>
       ) : null}
-      {evidence && evidence.samples.length > 0 ? (
+      {evidence.samples.length > 0 ? (
         <p className="kg-finding-samples">
           <span className="kg-finding-samples-label">{evidence.sampleLabel}：</span>
           {evidence.samples.join("、")}
         </p>
       ) : null}
-      {plan.blocked.map((text) => <p key={text} className="kg-analysis-note">{text}</p>)}
     </div>
   );
 }
@@ -752,9 +773,7 @@ function PassedRowView({
   return (
     <li className="kg-findings-passed-row">
       <span className="kg-findings-passed-mark" aria-hidden="true">{dismissed ? "↺" : "≠"}</span>
-      <span className="kg-findings-passed-text">
-        {dismissed ? "已标为正常" : "已判定不是同一个"}：{findingRuleLabel(row.rule_id)} · {findingSubjectText(row)}
-      </span>
+      <span className="kg-findings-passed-text">{passedRowText(row)}</span>
       {dismissed && canWrite ? (
         <button type="button" className="sort-button kg-finding-undo" disabled={busy} onClick={() => { void undo(); }}>
           {busy ? "撤销中…" : "撤销"}
@@ -767,12 +786,14 @@ function PassedRowView({
 
 /**
  * 已通过:每条规则一行,三种状态分开——✓ 检查过没发现(写检查了多少)、– 没法检查(写原因,
- * 不算通过)、已标为正常(可撤销);F4 的「已判定不是同一个」也在这里。
+ * 不算通过)、已标为正常(可撤销);F4 的「已判定不是同一个」也在这里。`passed` 那一页里的
+ * relink_spent(F5 补上关联已经跑过)不在这里列、也不计数——它在诊断数据里(§4.5)。
  */
 export function FindingsPassedZone({
   report,
   passed,
   dismissed,
+  spent,
   canWrite,
   notice,
   onPassedOffset,
@@ -782,21 +803,20 @@ export function FindingsPassedZone({
   report: KgAnalysisReport;
   passed: FindingsPageState;
   dismissed: FindingsPageState;
+  /** useRelinkSpentRow 认出的那一行:分页计数里减掉它。 */
+  spent: RelinkSpentSighting | null;
   canWrite: boolean;
   notice: string;
   onPassedOffset: (next: number) => void;
   onDismissedOffset: (next: number) => void;
   onUndismiss: (row: KgFindingRow) => Promise<void>;
 }) {
-  const summary = report.findings_summary ?? null;
+  const summary = report.findings_summary;
   const lines = passedRuleLines(summary);
-  // 按行自己的状态分:读侧若把「已标为正常」也放进 passed 那一页,这里不会把它列两遍。
-  const decided = passed.page?.present
-    ? sortFindings(passed.page.rows).filter((row) => row.status === "decided_not_same")
-    : [];
-  const marked = dismissed.page?.present
-    ? sortFindings(dismissed.page.rows).filter((row) => row.status === "dismissed")
-    : [];
+  // passed 那一页 = F4 已判定不是同一个(+ F5 relink_spent,另放诊断数据);dismissed 那一页 =
+  // 已标为正常。按行自己的状态分,不会把一行列两遍。
+  const decided = passed.page?.present ? partitionFindings(passed.page.rows).passed : [];
+  const marked = dismissed.page?.present ? partitionFindings(dismissed.page.rows).dismissed : [];
   const failure = passed.failure || dismissed.failure;
   const nothing = lines.length === 0 && decided.length === 0 && marked.length === 0;
   return (
@@ -823,15 +843,21 @@ export function FindingsPassedZone({
       {decided.length > 0 || marked.length > 0 ? (
         <ul className="kg-findings-passed-list">
           {decided.map((row) => (
-            <PassedRowView key={`d:${row.rule_id}:${row.subject?.key ?? ""}`} row={row} canWrite={canWrite} onUndismiss={onUndismiss} />
+            <PassedRowView key={`d:${row.rule_id}:${row.subject.key}`} row={row} canWrite={canWrite} onUndismiss={onUndismiss} />
           ))}
           {marked.map((row) => (
-            <PassedRowView key={`m:${row.rule_id}:${row.subject?.key ?? ""}`} row={row} canWrite={canWrite} onUndismiss={onUndismiss} />
+            <PassedRowView key={`m:${row.rule_id}:${row.subject.key}`} row={row} canWrite={canWrite} onUndismiss={onUndismiss} />
           ))}
         </ul>
       ) : null}
       {passed.page?.present ? (
-        <FindingsPager page={passed.page} loading={passed.loading} onOffset={onPassedOffset} label="已判定不是同一个的分页" />
+        <FindingsPager
+          page={passed.page}
+          loading={passed.loading}
+          onOffset={onPassedOffset}
+          label="已判定不是同一个的分页"
+          elsewhere={spent}
+        />
       ) : null}
       {dismissed.page?.present ? (
         <FindingsPager page={dismissed.page} loading={dismissed.loading} onOffset={onDismissedOffset} label="已标为正常的分页" />
@@ -839,7 +865,7 @@ export function FindingsPassedZone({
       {failure ? <p className="kg-analysis-error" role="alert">{failure}</p> : null}
       {nothing && !failure ? (
         <p className="kg-analysis-empty">
-          {summary?.present
+          {summary.present
             ? "这一次没有可列出的检查结果。"
             : "生成问题清单后，这里会列出每条规则检查了多少、哪些没法检查。"}
         </p>
