@@ -549,7 +549,15 @@ test("embedded reload keeps the current conversation, failed draft, selected sco
   expect(result.current.turns).toHaveLength(1);
   api.ask.mockResolvedValueOnce(job("done"));
   await act(async () => { await result.current.submit(); });
-  expect(api.ask.mock.calls[2][0]).toEqual(request);
+  // The default engine runs the understanding step on every attempt, and the
+  // confirmation it hands over carries that step's measured wall time
+  // (`understanding_ms`), which legitimately differs between the first attempt
+  // and the retry. Everything else -- including the idempotency key -- must match.
+  const withoutMeasuredTime = (payload: { intent?: object }) => (
+    payload.intent ? { ...payload, intent: { ...payload.intent, understanding_ms: undefined } } : payload
+  );
+  expect(api.ask.mock.calls[2][0].client_request_id).toBe(request.client_request_id);
+  expect(withoutMeasuredTime(api.ask.mock.calls[2][0])).toEqual(withoutMeasuredTime(request));
 });
 
 test("error recovery restores a running conversation after stop fails", async () => {
