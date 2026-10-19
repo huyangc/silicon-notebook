@@ -642,6 +642,26 @@ def test_plugin_kg_success_atomically_publishes_graph_facts_and_identity(
             "VALUES (?,?,?,?,?)",
             (notebook.id, "source_profiles", 0, "{}", _now()),
         )
+        # v97:问题清单明细与它的账本一起作废;两种标记都留下(发布把
+        # kg_mutation_seq 推前而不是归零,relink 标记自然读成「之后有新内容」);
+        # 合并代码分量随 cluster_input_version 一起清空。
+        db.execute(
+            "INSERT INTO kg_analysis_findings (notebook_id,rule_id,subject_key,"
+            "subject_kind,severity,first_seen_kg_seq,first_seen_cluster_seq) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (notebook.id, "F1", source_id, "source", "high", 1, 1),
+        )
+        db.executemany(
+            "INSERT INTO kg_analysis_marks (notebook_id,rule_id,subject_key,kind,"
+            "at_kg_seq,created_at) VALUES (?,?,?,?,?,?)",
+            [(notebook.id, "F1", source_id, "dismissed", 1, _now()),
+             (notebook.id, "F5", "notebook", "relink_attempted", 1, _now())],
+        )
+        db.execute(
+            "UPDATE unified_kg_state SET cluster_input_version='v-in', "
+            "cluster_code_version='code-1' WHERE notebook_id=?",
+            (notebook.id,),
+        )
         # 批 3·W2(codex #671 R18):预置一份代际状态——published 指针、在飞
         # 认领与催收欠账都非零。staged 发布刚跨代清空三张派生表,必须同事务
         # 把这些归零(counter 除外),否则并发代际 rebuild 的翻转双 CAS 仍然
@@ -689,7 +709,8 @@ def test_plugin_kg_success_atomically_publishes_graph_facts_and_identity(
         ).fetchone()["c"])
         state = dict(db.execute(
             "SELECT dirty,kg_mutation_seq,cluster_mutation_seq,indexing_pipeline_id,"
-            "indexing_pipeline_version FROM unified_kg_state WHERE notebook_id=?",
+            "indexing_pipeline_version,cluster_input_version,cluster_code_version "
+            "FROM unified_kg_state WHERE notebook_id=?",
             (notebook.id,),
         ).fetchone())
         hidden_chunks = int(db.execute(
@@ -704,7 +725,8 @@ def test_plugin_kg_success_atomically_publishes_graph_facts_and_identity(
                 f"SELECT COUNT(*) AS c FROM {table} WHERE notebook_id=?",
                 (notebook.id,),
             ).fetchone()["c"])
-            for table in ("canonical_relations", "kg_analysis_artifacts")
+            for table in ("canonical_relations", "kg_analysis_artifacts",
+                          "kg_analysis_findings", "kg_analysis_marks")
         }
         generational = dict(db.execute(
             "SELECT cluster_generation, community_generation, "
@@ -747,7 +769,11 @@ def test_plugin_kg_success_atomically_publishes_graph_facts_and_identity(
     )
     assert hidden_chunks > 0
     assert hidden_objects == 1
-    assert derived_counts == {"canonical_relations": 0, "kg_analysis_artifacts": 0}
+    assert derived_counts == {
+        "canonical_relations": 0, "kg_analysis_artifacts": 0,
+        "kg_analysis_findings": 0, "kg_analysis_marks": 2,
+    }
+    assert (state["cluster_input_version"], state["cluster_code_version"]) == ("", "")
     assert repo._runtime.kg_build_jobs.get(response["job_id"])["status"] == "succeeded"
 
 

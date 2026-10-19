@@ -2691,7 +2691,11 @@ class UnifiedKgStore:
 
         写一条**新**主键之前先数本 notebook 已有的标记(``LIMIT`` 上限,走主键前缀):
         到了 ``KG_ANALYSIS_MARKS_MAX`` 就硬失败,读入口「按上限取数恒是全集」由这里
-        保证。覆盖已有的那一行不受上限约束(行数不变)。"""
+        保证。覆盖已有的那一行不受上限约束(行数不变)。
+
+        「先数后插」在这里天然原子:调用方的 ``write()`` 持有进程级写锁并以
+        ``BEGIN IMMEDIATE`` 开事务(跨进程的 RESERVED 锁),同一个库同一时刻只有一个
+        写事务。PG 孪生没有这层串行,数之前另取 notebook 级 advisory 锁。"""
         kind = check_mark_kind(kind)
         exists = db.execute(
             "SELECT 1 FROM kg_analysis_marks WHERE notebook_id=? AND rule_id=? "

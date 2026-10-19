@@ -5940,7 +5940,10 @@ class KnowledgeLifecycleService:
            would carry ``''`` until its next full merge and never read as up
            to date. Written only when the state row (already read by the
            caller) holds a different value: a settled skip path stays a
-           zero-write path."""
+           zero-write path. Fail-open, like the skip path's other derived
+           steps: a stamp that fails (e.g. SQLite's busy timeout behind a long
+           write) emits ``cluster_code_version_stamp_failed`` and the skip
+           returns as before; the next skip stamps."""
         if row["derived_catchup_from"] is not None:
             with self._write() as db:
                 claim = self.unified_kg.claim_derived_generation(
@@ -5961,9 +5964,17 @@ class KnowledgeLifecycleService:
 
         code_version = cluster_code_version(self.settings)
         if row["cluster_code_version"] != code_version:
-            with self._write() as db:
-                self.unified_kg.stamp_cluster_code_version(
-                    db, notebook_id, input_version, code_version)
+            # Fail-open like the skip path's other steps: a stamp that loses a
+            # long write lock (SQLite busy timeout) must not turn a rebuild
+            # that would have been skipped into an error; the next skip stamps.
+            try:
+                with self._write() as db:
+                    self.unified_kg.stamp_cluster_code_version(
+                        db, notebook_id, input_version, code_version)
+            except Exception as exc:  # noqa: BLE001
+                self.event_log.emit({"kind": "cluster_code_version_stamp_failed",
+                                     "notebook_id": notebook_id,
+                                     "error": str(exc)[:200]})
 
     @notebook_model_artifact_scope
     def rebuild_unified_kg(self, notebook_id: str,

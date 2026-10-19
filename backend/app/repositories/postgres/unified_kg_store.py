@@ -2854,8 +2854,24 @@ class UnifiedKgStore:
         note: str,
         now: str,
     ) -> None:
-        """SQLite 孪生同名方法:按主键 upsert 一条标记,写新主键前按上限数一次。"""
+        """SQLite 孪生同名方法:按主键 upsert 一条标记,写新主键前按上限数一次。
+
+        「先数后插」在 READ COMMITTED 下不是原子的:两个并发事务各写一个新主键,都会
+        数到 上限-1、都插进去,表里就有 上限+1 行 —— 之后 `kg_analysis_mark_rows` 读到
+        第 上限+1 行就永久硬失败。所以数之前先取本 notebook 的事务级 advisory 锁
+        (``kg-analysis-marks:<notebook>``,先例 agent_observation_store 的同款
+        ``hashtextextended``),把同一 notebook 的「数 + 插」串行化,提交或回滚时自动
+        释放。不会死锁:这把锁只有本方法拿,而且是本方法的**第一条**语句 —— 持锁者之后
+        只会等标记表的行锁(与发布事务的 ``prune_marks`` 删除撞同一主键时),而发布事务
+        从不拿这把锁,等待图里没有回边。不用 ``unified_kg_state`` 行的 ``FOR UPDATE``:
+        那一行是每次 KG 写入都要 upsert 的热行,标为正常会被排在任意长的入库事务后面。
+        SQLite 侧不需要:``write()`` 是进程级写锁加 ``BEGIN IMMEDIATE``(跨进程的
+        RESERVED 锁),写事务本来就串行。"""
         kind = check_mark_kind(kind)
+        db.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"kg-analysis-marks:{notebook_id}",),
+        )
         exists = db.execute(
             "SELECT 1 AS present FROM kg_analysis_marks WHERE notebook_id=%s "
             "AND rule_id=%s AND subject_key=%s AND kind=%s",
