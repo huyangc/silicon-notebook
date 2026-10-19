@@ -1620,7 +1620,8 @@ Professional workbook analysis is deployment-controlled by
 `SPREADSHEET_ANALYSIS_MAX_CELL_CHARS`; Ask output/prompt rails are
 `SPREADSHEET_ANALYSIS_RESULT_ROWS`, `SPREADSHEET_ANALYSIS_RESULT_CELLS`,
 `SPREADSHEET_ANALYSIS_RESULT_BYTES`, `SPREADSHEET_ANALYSIS_PROMPT_ROWS`,
-`SPREADSHEET_ANALYSIS_PROMPT_BYTES`, `SPREADSHEET_ANALYSIS_PLANNER_CATALOG_BYTES`, and
+`SPREADSHEET_ANALYSIS_PROMPT_BYTES`, `SPREADSHEET_ANALYSIS_PLANNER_CATALOG_BYTES`,
+`SPREADSHEET_ANALYSIS_MAX_TARGETS` (tables one plan may analyse, default 3, range 1..3), and
 `SPREADSHEET_ANALYSIS_PLANNER_TIMEOUT_SECONDS`. It reuses the existing
 `reasoning_agent` workload and adds no model binding. `ANALYSIS_FAILURE_RETENTION_DAYS`
 controls both the issue read boundary and quarantine-copy lifetime. Exact defaults and
