@@ -164,36 +164,44 @@ _FORBIDDEN_PLAN_SHAPES = ("idx_chunks_nb", "Merge Semi Join", "Seq Scan on chunk
 
 @pytest.mark.parametrize("analyzed", [False, True], ids=["no-stats", "analyzed"])
 def test_library_text_probe_plan_never_walks_chunks_by_notebook(repo, analyzed):
-    """计划钉(评审形状的缩小版):参考库 2000 篇可见来源、一条 chunk 都没有,别处
-    4 万条 chunk。内层若能按 notebook 走 chunk,无统计时会逐篇来源做
+    """计划钉(评审形状的缩小版):参考库 200 篇可见来源、一条 chunk 都没有,别处
+    4000 条 chunk。内层若能按 notebook 走 chunk,无统计时会逐篇来源做
     ``BitmapAnd(idx_chunks_nb_created, idx_chunks_source)``,有统计时可能整表
     ``Merge Semi Join``(评审实测 27–42 s / 97–115 ms)。
 
+    规模取「仍能让变异(恢复内层 notebook 相等)在无统计态现出禁用形状」的下限
+    的两倍:本机实测 100 篇 / 2000 条仍现形、50 篇 / 1000 条已不现形。只跑普通
+    ``EXPLAIN``(不带 ANALYZE,不执行语句),只断言计划形状。
+
     只钉**禁用的形状**,不钉某一个具体索引名或 Index Only Scan:后者会随可见性图
     翻转(见 memory_sql 计划钉的历史)。autovacuum 在插入前关掉,无统计态才名副
-    其实;有统计态显式 ANALYZE。"""
+    其实;有统计态显式 ANALYZE。播种与 ANALYZE 都 ``SET LOCAL statement_timeout =
+    '0'``,与其余计划钉的播种同款:那批插入每行都过 ``sources`` 外键检查,繁忙的
+    CI 机器上会越过池子的语句超时(CI 曾在 chunk 插入的外键检查里 QueryCanceled)。"""
     runtime = repo._runtime
     library = repo.create_notebook(NotebookCreate(name="ref-unchunked"))
     other = repo.create_notebook(NotebookCreate(name="elsewhere"))
     now = normalize_timestamp(runtime.seams.now())
     with runtime.database.write() as db:
+        db.execute("SET LOCAL statement_timeout = '0'")
         db.execute("ALTER TABLE sources SET (autovacuum_enabled = false)")
         db.execute("ALTER TABLE chunks SET (autovacuum_enabled = false)")
         for prefix, notebook_id in (("sl", library.id), ("so", other.id)):
             db.execute(
                 "INSERT INTO sources (id,notebook_id,title,source_type,status,"
                 "created_at,updated_at) SELECT %s || g, %s, 't', 'markdown', "
-                "'ready', %s, %s FROM generate_series(1, 2000) g",
+                "'ready', %s, %s FROM generate_series(1, 200) g",
                 (f"{prefix}-", notebook_id, now, now),
             )
         db.execute(
             "INSERT INTO chunks (id,notebook_id,source_id,text,created_at) "
-            "SELECT 'co-' || g, %s, 'so-' || (1 + g %% 2000), 't', %s "
-            "FROM generate_series(1, 40000) g",
+            "SELECT 'co-' || g, %s, 'so-' || (1 + g %% 200), 't', %s "
+            "FROM generate_series(1, 4000) g",
             (other.id, now),
         )
     if analyzed:
         with runtime.database.write() as db:
+            db.execute("SET LOCAL statement_timeout = '0'")
             db.execute("ANALYZE sources")
             db.execute("ANALYZE chunks")
 
