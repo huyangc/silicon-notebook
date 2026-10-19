@@ -65,7 +65,6 @@ def _report(**overrides) -> ImportReport:
         skipped_rows=(),
         skipped_row_total=0,
         user_mapping=UserMappingResult(matched={}, created={}, unmatched=()),
-        groups_created=(),
         files_copied=0,
         warnings=(),
     )

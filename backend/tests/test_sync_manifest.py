@@ -935,14 +935,56 @@ def test_build_user_mapping_target_duplicate_username_raises():
         build_user_mapping(source, target)
 
 
-def test_build_user_mapping_username_is_case_sensitive_and_not_stripped():
+def test_build_user_mapping_folds_ascii_case_after_exact_but_never_strips():
+    """User ruling 2026-10-19: exact first, then ASCII case-insensitive for
+    what is left. Whitespace is never stripped."""
     source = [_user("s1", "Alice"), _user("s2", " bob")]
     target = [_user("t1", "alice"), _user("t2", "bob")]
 
     result = build_user_mapping(source, target)
 
+    assert result.matched == {"s1": "t1"}
+    assert result.case_folded == (("Alice", "alice"),)
+    assert {u.username for u in result.unmatched} == {" bob"}
+
+
+def test_build_user_mapping_exact_match_needs_no_fold():
+    result = build_user_mapping([_user("s1", "alice")], [_user("t1", "alice")])
+
+    assert result.case_folded == ()
+
+
+def test_build_user_mapping_folds_only_ascii_letters():
+    # Same fold as the lower(username) index both backends keep: non-ASCII
+    # letters are left alone, so these are two different people.
+    result = build_user_mapping([_user("s1", "Ärger")], [_user("t1", "ärger")])
+
     assert result.matched == {}
-    assert {u.username for u in result.unmatched} == {"Alice", " bob"}
+    assert [u.username for u in result.unmatched] == ["Ärger"]
+
+
+def test_build_user_mapping_fold_with_several_target_candidates_raises():
+    source = [_user("s1", "Alice")]
+    target = [_user("t1", "alice"), _user("t2", "ALICE")]
+
+    with pytest.raises(ValueError, match="源 Alice 忽略大小写对应多个目标用户 ALICE、alice"):
+        build_user_mapping(source, target)
+
+
+def test_build_user_mapping_fold_onto_an_already_matched_target_raises():
+    source = [_user("s1", "alice"), _user("s2", "ALICE")]
+    target = [_user("t1", "alice")]
+
+    with pytest.raises(ValueError, match="源 ALICE 与源 alice"):
+        build_user_mapping(source, target)
+
+
+def test_build_user_mapping_two_folds_onto_one_target_raise():
+    source = [_user("s1", "Alice"), _user("s2", "ALICE")]
+    target = [_user("t1", "alice")]
+
+    with pytest.raises(ValueError, match="同一个目标用户 alice"):
+        build_user_mapping(source, target)
 
 
 def test_build_user_mapping_matched_is_not_a_plain_mutable_dict():

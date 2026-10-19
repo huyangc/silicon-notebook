@@ -30,7 +30,12 @@ from app.migration.sync.import_ import (
     _UNMAPPED_POLICY,
     import_package,
 )
-from app.migration.sync.manifest import SYNC_MANIFEST, SyncClass, synced_tables
+from app.migration.sync.manifest import (
+    SYNC_MANIFEST,
+    SyncClass,
+    carried_tables,
+    synced_tables,
+)
 from app.migration.sync.package import CHECKSUMS_NAME, MANIFEST_NAME, rows_path
 from app.models.schemas import NotebookCreate
 from app.repositories.ports import UploadedSourceFile
@@ -445,7 +450,7 @@ def test_every_table_is_accounted_for_row_by_row(
 
     assert report.error == ""
     assert not report.already_applied
-    for table in synced_tables():
+    for table in carried_tables(knowhow_history=False):
         outcome = report.tables[table]
         assert outcome.inserted + outcome.updated + outcome.skipped == len(
             _rows(package, table)
@@ -475,7 +480,7 @@ def test_user_columns_are_rewritten_to_the_target_ids(
     ) == 1
     # ... and not one row anywhere still carries a source-side user id.
     leaked: list[str] = []
-    for table in synced_tables():
+    for table in carried_tables(knowhow_history=False):
         for row in _rows(package, table):
             for column, value in row.items():
                 if isinstance(value, str) and value in {ALICE[0], BOB[0], CAROL[0]}:
@@ -618,7 +623,7 @@ def test_rowids_are_assigned_by_the_target(source, target, package, first_import
     paging cursor and never travels (§8). SQLite has no such column at all --
     its rowid is the equivalent -- so what this lane can pin is that the
     package carries no ordinal for the target to adopt."""
-    for table in synced_tables():
+    for table in carried_tables(knowhow_history=False):
         for row in _rows(package, table):
             assert "ordinal" not in row, table
 
@@ -846,28 +851,84 @@ def test_create_missing_users_makes_the_unmatched_ones_local(
     assert member["user_id"] == created["id"]
 
 
-def test_a_case_variant_of_a_target_user_is_refused_before_the_claim(
+def test_a_case_variant_of_a_target_user_is_matched_ignoring_case(
     source, target, tmp_path
 ):
-    """Matching stays exact, so the package's ``A1`` is not the target's
-    ``a1``; but creating ``A1`` would collide on the target's lower(username)
-    unique index after the run was claimed. The pair is named while only
-    reading -- in a dry run too -- and nothing is claimed or created."""
+    """User ruling 2026-10-19 (design doc §4/§11): matching is exact first,
+    then ASCII case-insensitive for what is left. The package's ``A1`` IS the
+    target's ``a1`` -- the two auth services spelled one person two ways -- so
+    the references land on the target account, nobody is created, and the
+    join is reported (dry run too) rather than done silently."""
     _add_user(target["repo"], "user-target-a1", "a1")
     with source["repo"]._write() as db:
         db.execute("UPDATE users SET username='A1' WHERE id=?", (BOB[0],))
     package = _export(source, tmp_path / "out-case")
 
+    dry = _import(target, package, dry_run=True)
+    assert dry.user_mapping.matched[BOB[0]] == "user-target-a1"
+    assert dry.user_mapping.case_folded == (("A1", "a1"),)
+    assert "A1" not in dry.user_mapping.unmatched
+
+    report = _import(target, package, create_missing_users=True)
+
+    assert report.error == ""
+    assert report.user_mapping.case_folded == (("A1", "a1"),)
+    assert report.user_mapping.created == {}
+    assert any("源 A1 → 目标 a1" in warning for warning in report.warnings)
+    assert report.as_json()["user_mapping"]["case_folded"] == [["A1", "a1"]]
+    # BOB's reader membership was seeded with the notebook onto the target
+    # account, and no second account was minted beside it.
+    member = _one(
+        target["repo"],
+        "SELECT user_id FROM notebook_members WHERE notebook_id=?",
+        (source["exported"],),
+    )
+    assert member["user_id"] == "user-target-a1"
+    assert _count(
+        target["repo"], "SELECT COUNT(*) FROM users WHERE lower(username)='a1'"
+    ) == 1
+
+
+def test_an_exact_username_match_wins_over_a_case_variant(source, target, tmp_path):
+    """Pass 1 is exact: ``alice`` at both ends maps exactly even though the
+    target also knows an unrelated spelling of nobody else -- folding only
+    ever runs for the users exact matching left over."""
+    package = _export(source, tmp_path / "out-exact")
+
+    report = _import(target, package, dry_run=True)
+
+    assert report.user_mapping.matched[ALICE[0]] == ALICE[1]
+    assert report.user_mapping.case_folded == ()
+
+
+def test_a_case_fold_onto_an_already_matched_user_refuses_the_import(
+    source, target, tmp_path
+):
+    """Folding must never join two source people onto one target account.
+    Neither environment can hold two case variants of one name (both keep a
+    unique lower(username) index), so the shape is built by editing the
+    package's ``users.jsonl`` and resealing it: ``ALICE`` folds onto the
+    target's ``alice``, whom the source's ``alice`` already matched exactly.
+    Refused while only reading -- in a dry run too -- naming both."""
+    package = _export(source, tmp_path / "out-fold-clash")
+    users = package / "users.jsonl"
+    lines = users.read_text(encoding="utf-8").splitlines()
+    lines.append(json.dumps({
+        "id": "user-a-shadow", "username": "ALICE",
+        "display_name": "Shadow", "role": "user",
+    }, ensure_ascii=False, sort_keys=True))
+    users.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _reseal(package)
+
     for dry_run in (True, False):
         with pytest.raises(SyncImportError) as failure:
-            _import(target, package, create_missing_users=True, dry_run=dry_run)
-        assert "源 A1 ↔ 目标 a1，请在一侧改名" in str(failure.value)
+            _import(target, package, dry_run=dry_run, create_missing_users=True)
+        message = str(failure.value)
+        assert "identity mapping is ambiguous" in message
+        assert "源 ALICE 与源 alice" in message and "目标用户 alice" in message
 
     assert _count(target["repo"], "SELECT COUNT(*) FROM sync_imports") == 0
-    assert _count(target["repo"], "SELECT COUNT(*) FROM users WHERE username='A1'") == 0
-    # Without user creation there is nothing to collide on: matching is exact.
-    report = _import(target, package, dry_run=True)
-    assert "A1" in report.user_mapping.unmatched
+    assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 0
 
 
 def test_ascii_lower_folds_only_ascii_letters():
@@ -895,7 +956,7 @@ def test_a_group_matched_by_name_is_reused_not_duplicated(
     repo = target["repo"]
 
     assert _count(repo, "SELECT COUNT(*) FROM groups") == 1
-    assert report.groups_created == ()
+    assert "groups_created" not in report.as_json()
     grant = _one(repo, "SELECT principal_id FROM notebook_grants WHERE id=?",
                  ("grant-1",))
     assert grant["principal_id"] == "grp-b", (
@@ -911,22 +972,119 @@ def test_a_group_matched_by_name_is_reused_not_duplicated(
     assert reasons and "already existed at the target" in reasons[0].reason
 
 
-def test_a_group_the_target_lacks_is_created(source, target, package):
+def test_a_group_the_target_lacks_refuses_the_import_by_name(
+    source, target, package
+):
+    """User ruling 2026-10-19 (design doc §4/§11): name matching is the whole
+    rule and the import never creates a group. A group a new mirror's grant
+    needs that the target does not have refuses the import, naming the group,
+    before anything is claimed -- a dry run included."""
     with target["repo"]._write() as db:
         db.execute("DELETE FROM group_members")
         db.execute("DELETE FROM groups")
 
+    for dry_run in (True, False):
+        with pytest.raises(SyncImportError) as failure:
+            _import(target, package, dry_run=dry_run)
+        assert "目标端没有名为「shared-team」的群组" in str(failure.value)
+
+    assert _count(target["repo"], "SELECT COUNT(*) FROM groups") == 0
+    assert _count(target["repo"], "SELECT COUNT(*) FROM sync_imports") == 0
+    assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 0
+
+
+def test_two_target_groups_by_one_name_refuse_the_import(source, target, package):
+    with target["repo"]._write() as db:
+        db.execute(
+            "INSERT INTO groups(id,name,kind,description,created_by,created_at,"
+            "updated_at,owner_id) VALUES(?,?,?,?,?,?,?,?)",
+            ("grp-b2", "shared-team", "team", "", "user-local", MOMENT, MOMENT,
+             "user-local"),
+        )
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, package)
+
+    assert "目标端有多个名为「shared-team」的群组" in str(failure.value)
+    assert _count(target["repo"], "SELECT COUNT(*) FROM sync_imports") == 0
+
+
+def test_two_package_groups_by_one_name_refuse_the_import(source, target, tmp_path):
+    """Folding two source groups onto one target group would be a guess about
+    which one a grant meant; the user ruling says do not guess."""
+    with source["repo"]._write() as db:
+        db.execute(
+            "INSERT INTO groups(id,name,kind,description,created_by,created_at,"
+            "updated_at,owner_id) VALUES(?,?,?,?,?,?,?,?)",
+            ("grp-a2", "shared-team", "team", "", ALICE[0], MOMENT, MOMENT, ALICE[0]),
+        )
+        db.execute(
+            "INSERT INTO notebook_grants(id,notebook_id,principal_type,"
+            "principal_id,role,created_by,created_at) VALUES(?,?,?,?,?,?,?)",
+            ("grant-2", source["exported"], "group", "grp-a2", "reader",
+             ALICE[0], MOMENT),
+        )
+    package = _export(source, tmp_path / "out-dup-groups")
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, package, dry_run=True)
+
+    assert "包内有多个名为「shared-team」的群组" in str(failure.value)
+
+
+def test_a_missing_group_no_new_grant_needs_does_not_wedge_later_imports(
+    source, target, package, tmp_path
+):
+    """Grants are seeded only with the notebook this import creates. Once the
+    mirror exists, a group its grants name is never written again, so an
+    administrator here removing that group must not wedge every later import
+    of the notebook: the group is simply not needed, nothing is created, and
+    the rows naming it are skipped."""
+    assert _import(target, package).error == ""
+    with target["repo"]._write() as db:
+        db.execute("DELETE FROM notebook_grants")
+        db.execute("DELETE FROM group_members")
+        db.execute("DELETE FROM groups")
+
+    report = _import(target, _export(source, tmp_path / "out-later"))
+
+    assert report.error == ""
+    assert _count(target["repo"], "SELECT COUNT(*) FROM groups") == 0
+    assert _count(target["repo"], "SELECT COUNT(*) FROM notebook_grants") == 0
+    assert report.tables["groups"].skipped == 1
+    reasons = [row.reason for row in report.skipped_rows if row.table == "groups"]
+    assert reasons and "does not create groups" in reasons[0]
+
+
+# ------------------------------------------------- Knowhow edit history (§11)
+
+
+def test_the_knowhow_history_travels_only_when_the_source_switches_it_on(
+    source, target, tmp_path
+):
+    """Off by default (user ruling 2026-10-19): a default package carries no
+    history table. With SILICON_NOTEBOOK_SYNC_KNOWHOW_HISTORY on at the
+    SOURCE, the history arrives and its user column is mapped like every
+    other one."""
+    default = _export(source, tmp_path / "out-default")
+    assert _manifest(default)["knowhow_history"] is False
+    assert not (default / rows_path("knowhow_changes")).exists()
+
+    source["settings"].sync_knowhow_history = True
+    package = _export(source, tmp_path / "out-history")
+    assert _manifest(package)["knowhow_history"] is True
+    assert _rows(package, "knowhow_changes"), "the seeded table has edit history"
+
     report = _import(target, package)
 
-    assert report.groups_created == ("shared-team",)
-    group = _one(target["repo"], "SELECT id, owner_id FROM groups", ())
-    assert group["id"] == "grp-a"
-    assert group["owner_id"] == ALICE[1]
-    # A group this import CREATED is seeded with its source-side roster: the
-    # target has no opinion about a group it has never seen.
-    member = _one(target["repo"], "SELECT group_id, user_id FROM group_members", ())
-    assert member["group_id"] == "grp-a"
-    assert member["user_id"] == ALICE[1]
+    assert report.error == ""
+    assert report.knowhow_history is True and report.knowhow_history_complete is True
+    assert report.tables["knowhow_changes"].inserted == len(_rows(package, "knowhow_changes"))
+    actors = {
+        row["actor"]
+        for row in _fetch(target["repo"], "SELECT actor FROM knowhow_changes")
+    }
+    assert actors == {ALICE[1]}
 
 
 # ------------------------------------------------------------ optional refs
@@ -2082,43 +2240,6 @@ def test_a_revoked_membership_is_not_resurrected_by_the_next_package(
     assert any("already existed at the target" in reason for reason in reasons)
 
 
-def test_the_parent_created_fact_survives_a_crash_between_groups_and_members(
-    source, target, package, monkeypatch
-):
-    """``groups`` and ``group_members`` are separate transactions, so the fact
-    "this import created group G" has to outlive the process. It is recorded
-    in sync_import_progress in the same transaction as the group row."""
-    from app.migration.sync import import_ as module
-
-    with target["repo"]._write() as db:
-        db.execute("DELETE FROM group_members")
-        db.execute("DELETE FROM groups")
-    real = module._apply_table
-
-    def fail_on_group_members(backend, conn, table, context):
-        if table == "group_members":
-            raise RuntimeError("simulated crash between groups and its members")
-        return real(backend, conn, table, context)
-
-    monkeypatch.setattr(module, "_apply_table", fail_on_group_members)
-    with pytest.raises(SyncImportError):
-        _import(target, package)
-    steps = {
-        str(row["table_name"])
-        for row in _fetch(target["repo"], "SELECT table_name FROM sync_import_progress")
-    }
-    assert "__created__:groups:grp-a" in steps
-
-    monkeypatch.setattr(module, "_apply_table", real)
-    report = _import(target, package)
-
-    # The resumed run skipped `groups` entirely, so the created-set can only
-    # have come from the progress row -- and the members still seed.
-    assert report.tables["groups"].resumed is True
-    assert report.tables["group_members"].inserted == 1
-    assert _count(target["repo"], "SELECT COUNT(*) FROM group_members") == 1
-
-
 # ------------------------------------------------ the import sentinel is its own
 
 
@@ -2412,7 +2533,7 @@ def test_a_memory_the_package_does_not_carry_keeps_its_own_history(
 # --------------------------------------------------- an imported group's invite
 
 
-def test_an_imported_group_arrives_with_no_invitation_link(
+def test_a_source_invitation_link_never_reaches_the_target(
     source, target, tmp_path
 ):
     """An invitation is a live capability to join. Carrying the source's token
@@ -2424,9 +2545,6 @@ def test_an_imported_group_arrives_with_no_invitation_link(
             "invite_created_by=? WHERE id=?",
             ("invite-from-source", MOMENT, ALICE[0], "grp-a"),
         )
-    with target["repo"]._write() as db:
-        db.execute("DELETE FROM group_members")
-        db.execute("DELETE FROM groups")
     # Exported AFTER the token exists, so the package really carries it and
     # the assertions below are about the importer, not about an empty column.
     package = _export(source, tmp_path / "out-invite")
@@ -2434,12 +2552,14 @@ def test_an_imported_group_arrives_with_no_invitation_link(
 
     report = _import(target, package)
 
-    assert report.groups_created == ("shared-team",)
+    assert report.error == ""
+    # Matched by name onto the target's own group, which is never updated.
+    assert _count(target["repo"], "SELECT COUNT(*) FROM groups WHERE id='grp-a'") == 0
     row = _one(
         target["repo"],
         "SELECT invite_token, invite_created_at, invite_created_by FROM groups "
         "WHERE id=?",
-        ("grp-a",),
+        ("grp-b",),
     )
     assert row["invite_token"] is None
     assert row["invite_created_at"] is None
@@ -3286,61 +3406,6 @@ def test_superseding_a_failed_package_requires_covering_its_notebooks(
     retired = _sync_import_row(target, both_id)
     assert retired["status"] == "superseded"
     assert json.loads(retired["report_json"])["superseded_by"] == report.package_id
-
-
-def test_superseding_transfers_the_created_group_marker_so_members_still_seed(
-    source, target, tmp_path, monkeypatch
-):
-    """codex #772 r8: ``groups`` has no in-row marker of its own for "this
-    import chain created this group" -- that fact lives only in
-    ``sync_import_progress`` as a ``__created__:groups:<id>`` step
-    (``_created_parents``). If a superseding package drops it with the rest
-    of the retired package's progress instead of moving it across, the group
-    row is still there (seed_only leaves an existing row alone) but nothing
-    says THIS chain made it, so ``group_members`` -- gated on exactly that
-    fact -- skips every row for it as "already existed at the target"."""
-    with target["repo"]._write() as db:
-        db.execute("DELETE FROM group_members")
-        db.execute("DELETE FROM groups")
-
-    first = _export(source, tmp_path / "out1")
-    _fail_partway(target, first, monkeypatch, table="group_members")
-    first_id = _manifest(first)["package_id"]
-    assert _sync_import_row(target, first_id)["status"] == "failed"
-    steps = {
-        str(row["table_name"])
-        for row in _fetch(
-            target["repo"],
-            "SELECT table_name FROM sync_import_progress WHERE package_id=?",
-            (first_id,),
-        )
-    }
-    assert "__created__:groups:grp-a" in steps
-    assert _count(target["repo"], "SELECT COUNT(*) FROM groups WHERE id='grp-a'") == 1
-    assert _count(target["repo"], "SELECT COUNT(*) FROM group_members") == 0
-
-    second = _export(source, tmp_path / "out2")
-    report = _import(target, second)
-
-    assert report.error == ""
-    second_id = _manifest(second)["package_id"]
-    assert _sync_import_row(target, first_id)["status"] == "superseded"
-    # The group row itself was already there from the failed run; this run's
-    # own pass over `groups` just finds it and skips it (seed_only) -- the
-    # created-fact this run relies on to seed group_members came from the
-    # TRANSFERRED marker, not from anything this run's own `groups` step did.
-    assert report.tables["groups"].inserted == 0
-    assert report.tables["group_members"].inserted == 1
-    assert _count(
-        target["repo"],
-        "SELECT COUNT(*) FROM group_members WHERE group_id='grp-a'",
-    ) == 1
-    marker = _one(
-        target["repo"],
-        "SELECT package_id FROM sync_import_progress WHERE table_name=?",
-        ("__created__:groups:grp-a",),
-    )
-    assert marker["package_id"] == second_id
 
 
 def test_a_superseded_package_is_refused_even_with_nothing_applied_yet(

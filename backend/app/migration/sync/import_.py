@@ -252,14 +252,15 @@ from app.migration.sync.identity import (
     UserMapping,
     UserProjection,
     build_user_mapping,
-    case_variant_collisions,
 )
 from app.migration.sync.manifest import (
+    KNOWHOW_HISTORY_TABLES,
     MappingKind,
     ScopeKind,
     SyncClass,
     SYNC_MANIFEST,
     TableScope,
+    carried_tables,
     scope_chain,
     spec_for,
     synced_tables,
@@ -327,6 +328,7 @@ _IMPORT_FINAL_STATUS = "draft"
 # it maps through the group mapping exactly like 'group' -- anything else
 # leaves every admin-only grant pointing at a source-side id.
 _GROUP_PRINCIPAL_TYPES = frozenset({"group", "group_admins"})
+_GRANTS_TABLE = "notebook_grants"
 
 # A user created by ``--create-missing-users``: no credentials, and the same
 # placeholder email shape a unified-auth account creation mints
@@ -493,6 +495,15 @@ _BASE_PACKAGE_ID_KEY = "base_package_id"
 # one: a scoped package must never displace the baseline a later window
 # continues from (codex #788 r2 P1).
 _SCOPED_KEY = "scoped"
+# ``manifest.knowhow_history`` as this row's package declared it, and whether
+# the Knowhow edit history at this target is COMPLETE once this row applied
+# (design doc §11): a package that does not carry the history leaves it
+# frozen (incomplete from then on); a full package that carries it restores
+# it; a window that carries it is only as complete as the base it continues.
+# A row written before these fields existed was written by a build that
+# always carried the history, and reads as carried and complete.
+_KNOWHOW_HISTORY_KEY = "knowhow_history"
+_KNOWHOW_HISTORY_COMPLETE_KEY = "knowhow_history_complete"
 
 # What an operator has to do next for every user ``--create-missing-users``
 # minted. A created account carries the package username and no password.
@@ -507,6 +518,16 @@ _CREATED_USERS_SIGN_IN = (
     "the account username; otherwise an administrator must reset the password "
     "(POST /admin/users/{{id}}/reset-password) or change the username "
     "(PATCH /admin/users/{{id}}/username). See user_mapping.created for the ids."
+)
+
+# Users joined only once ASCII letter case was ignored (identity.py pass 2,
+# design doc §4). A warning rather than silence: the join is the user ruling
+# (2026-10-19), but an operator should still be able to see which accounts
+# were joined on a spelling that was not identical.
+_CASE_FOLDED_USERS = (
+    "these package users matched a target user only when ASCII letter case "
+    "is ignored, and were mapped onto it (docs/incremental-sync-design.md "
+    "§4): {pairs}"
 )
 
 # Detailed skip entries kept in the report. Beyond this only the count grows,
@@ -607,18 +628,12 @@ _UNMAPPED_POLICY: dict[tuple[str, str], UnmappedPolicy] = {
     ("knowhow_milestones", "created_by"): UnmappedPolicy.IMPORTER,
     ("knowhow_changes", "actor"): UnmappedPolicy.IMPORTER,
     ("groups", "created_by"): UnmappedPolicy.IMPORTER,
-    # Required for totality, but unreachable in practice: groups is seed_only,
-    # so the only write is an INSERT, and _STATIC_INSERT_OVERRIDES clears the
-    # whole invitation capability on every insert. The rule is kept because a
-    # mapped column without one is a hard failure by design, and because the
-    # policy and the override happen to agree on the value.
+    # The three groups rules are required for totality only: the import never
+    # writes a groups row (it maps each one onto an existing target group by
+    # name or skips it, _build_group_mapping / _map_row), so none of them is
+    # reachable. Kept because a mapped column without a rule is a hard failure
+    # by design.
     ("groups", "invite_created_by"): UnmappedPolicy.NULL,
-    # Design doc §3.2 offers "an admin member of that group at the target"
-    # before falling back to the importer. That leg is unreachable for the
-    # only case that ever writes this column: groups is seed_only, so an
-    # existing target group is never updated, and a group this import
-    # CREATES has no members yet (group_members is applied after groups).
-    # The reachable rule is therefore the fallback, written as the rule.
     ("groups", "owner_id"): UnmappedPolicy.IMPORTER,
     # An unmappable group means the membership has no group to belong to.
     ("group_members", "group_id"): UnmappedPolicy.SKIP,
@@ -700,17 +715,21 @@ class SkippedRow:
 class UserMappingResult:
     """§4's mapping outcome. ``matched``/``created`` are source-user-id ->
     target-user-id; ``unmatched`` names the usernames that stayed unresolved
-    (only possible with ``create_missing_users=False``)."""
+    (only possible with ``create_missing_users=False``); ``case_folded`` is
+    ``identity.UserMapping.case_folded`` -- the ``matched`` entries whose
+    usernames only agree once ASCII letter case is ignored."""
 
     matched: Mapping[str, str]
     created: Mapping[str, str]
     unmatched: tuple[str, ...]
+    case_folded: tuple[tuple[str, str], ...] = ()
 
     def as_json(self) -> dict[str, Any]:
         return {
             "matched": len(self.matched),
             "created": sorted(self.created.values()),
             "unmatched": list(self.unmatched),
+            "case_folded": [list(pair) for pair in self.case_folded],
         }
 
 
@@ -731,7 +750,6 @@ class ImportReport:
     skipped_rows: tuple[SkippedRow, ...]
     skipped_row_total: int
     user_mapping: UserMappingResult
-    groups_created: tuple[str, ...]
     files_copied: int
     warnings: tuple[str, ...]
     # Empty on success; the failure's message when the run could not finish.
@@ -746,6 +764,10 @@ class ImportReport:
     base_package_id: str = ""
     # ``None`` when the package predates the field; see ``_PackageManifest``.
     scoped: bool | None = None
+    # ``manifest.knowhow_history``, and whether the target's Knowhow edit
+    # history is complete once this package applied (_KNOWHOW_HISTORY_*_KEY).
+    knowhow_history: bool = True
+    knowhow_history_complete: bool = True
     # Phase 3c (incremental only). ``applied`` counts rows actually deleted,
     # ``absent`` the entries whose row the target no longer had (idempotent
     # replay, or a resumed run), ``orphan_skipped`` the PARENT-scoped entries
@@ -779,6 +801,8 @@ class ImportReport:
             _MODE_KEY: self.mode,
             _BASE_PACKAGE_ID_KEY: self.base_package_id,
             _SCOPED_KEY: self.scoped,
+            _KNOWHOW_HISTORY_KEY: self.knowhow_history,
+            _KNOWHOW_HISTORY_COMPLETE_KEY: self.knowhow_history_complete,
             "already_applied": self.already_applied,
             "dry_run": self.dry_run,
             "notebooks": list(self.notebooks),
@@ -800,7 +824,6 @@ class ImportReport:
             "skipped_rows": [row.as_json() for row in self.skipped_rows],
             "skipped_row_total": self.skipped_row_total,
             "user_mapping": self.user_mapping.as_json(),
-            "groups_created": list(self.groups_created),
             "files_copied": self.files_copied,
             "warnings": list(self.warnings),
             "error": self.error,
@@ -815,7 +838,6 @@ class _Ledger:
         self.tables: dict[str, TableOutcome] = {}
         self.skipped_rows: list[SkippedRow] = []
         self.skipped_row_total = 0
-        self.groups_created: list[str] = []
         self.files_copied = 0
         self.warnings: list[str] = []
         self.missing_files: list[str] = []
@@ -828,6 +850,8 @@ class _Ledger:
         self.source_authoritative_collisions = 0
         self.notebooks_deleted: list[str] = []
         self.notebooks_delete_skipped: list[str] = []
+        # Settled by preflight (_knowhow_history_complete).
+        self.knowhow_history_complete = True
 
     def missing_file(self, label: str) -> None:
         """A row points at a ``storage/`` file this package did not carry.
@@ -873,13 +897,14 @@ def _report(
         skipped_rows=tuple(ledger.skipped_rows),
         skipped_row_total=ledger.skipped_row_total,
         user_mapping=mapping,
-        groups_created=tuple(sorted(ledger.groups_created)),
         files_copied=ledger.files_copied,
         warnings=tuple(warnings),
         error=error,
         mode=manifest.mode,
         base_package_id=manifest.base_package_id,
         scoped=manifest.scoped,
+        knowhow_history=manifest.knowhow_history,
+        knowhow_history_complete=ledger.knowhow_history_complete,
         deletes_applied=ledger.deletes_applied,
         deletes_absent=ledger.deletes_absent,
         deletes_orphan_skipped=ledger.deletes_orphan_skipped,
@@ -953,6 +978,19 @@ class _PackageManifest:
     # caller constructing this by hand (the path-safety tests do) does not
     # have to know about a field that only the chain rules read.
     scoped: bool | None = None
+    # ``manifest.knowhow_history``: whether the package carries
+    # ``KNOWHOW_HISTORY_TABLES``. A package without the field was written by a
+    # build that always carried them, so absence reads as True -- the rows
+    # are right there in the package. When False, every phase below works
+    # over ``_carried(manifest)`` and the target's own history is untouched.
+    knowhow_history: bool = True
+
+
+def _carried(manifest: "_PackageManifest") -> tuple[str, ...]:
+    """The tables this package carries, in ``synced_tables()`` order: every
+    synced table, minus the Knowhow edit history unless the package says it
+    brought it. Every phase that walks "the tables" walks this."""
+    return carried_tables(knowhow_history=manifest.knowhow_history)
 
 
 def _read_json(path: Path) -> Any:
@@ -979,6 +1017,12 @@ def _read_manifest(package_dir: Path) -> _PackageManifest:
         raise SyncImportError(
             f"{MANIFEST_NAME} declares the unknown mode {mode!r}; expected "
             f"{MODE_FULL!r} or {MODE_INCREMENTAL!r}"
+        )
+    history = document.get("knowhow_history", True)
+    if not isinstance(history, bool):
+        raise SyncImportError(
+            f"{MANIFEST_NAME} declares knowhow_history={history!r}; expected "
+            "true or false"
         )
     pair = document.get("schema_pair") or {}
     tables = {}
@@ -1012,6 +1056,7 @@ def _read_manifest(package_dir: Path) -> _PackageManifest:
         tables=MappingProxyType(tables),
         checksums_sha256=str(document.get("checksums_sha256") or ""),
         missing_files=tuple(str(item) for item in document.get("missing_files") or ()),
+        knowhow_history=history,
     )
 
 
@@ -1394,10 +1439,6 @@ class _Context:
     # Notebook directories swapped in by the file phase, as
     # (destination, retired) -- retired is kept until phase 5 succeeds.
     installed: list[tuple[Path, Path]] = field(default_factory=list)
-    # parent table -> primary keys THIS run inserted into it, for the
-    # seed_only parent gate (``_SEED_PARENT``). Only what this process did;
-    # ``_created_parents`` unions it with what an earlier attempt recorded.
-    created_parents: dict[str, set[str]] = field(default_factory=dict)
     # package ids recorded 'done' at the target, read once before the file
     # phase so _reconcile_staging can tell an abandoned retired directory
     # (its package finished) from one a live run still owns.
@@ -1487,7 +1528,17 @@ def _map_row(
         source_id = row.get(name)
         by_kind = context.groups if kind is MappingKind.GROUP else context.users
         if isinstance(source_id, str) and source_id:
-            row[name] = by_kind.get(source_id, source_id)
+            resolved_key = by_kind.get(source_id)
+            if resolved_key is None:
+                # The import never creates a group (_build_group_mapping), so
+                # a group row with no target counterpart has nowhere to go.
+                # Inserting it under its source id would be exactly the
+                # creation the user ruling forbids.
+                return None, (
+                    f"{name}={source_id!r} has no group by the same name at the "
+                    "target; the import does not create groups"
+                )
+            row[name] = resolved_key
     for column in spec.mapped_columns:
         value = row.get(column.name)
         if not isinstance(value, str) or not value:
@@ -2018,7 +2069,18 @@ def _verify_columns(backend: _Backend, conn: Any, manifest: _PackageManifest) ->
     package has and the target does not: its value would have nowhere to go.
     """
     problems: list[str] = []
-    for table in synced_tables():
+    if not manifest.knowhow_history:
+        # The package says it left the history out; a table entry for it
+        # anyway is a package that contradicts itself, and applying either
+        # reading could be the wrong one.
+        stray = sorted(KNOWHOW_HISTORY_TABLES & set(manifest.tables))
+        if stray:
+            raise SyncImportError(
+                f"{MANIFEST_NAME} declares knowhow_history=false but lists "
+                f"{stray} in its tables; refusing a package that contradicts "
+                "itself"
+            )
+    for table in _carried(manifest):
         entry = manifest.tables.get(table)
         if entry is None:
             problems.append(f"{table}: absent from the package manifest")
@@ -2131,7 +2193,7 @@ def _verify_row_scopes(
 
     parent_key_sets: dict[str, set[str]] = {"notebooks": notebook_ids}
     borrowed: dict[str, set[str]] = {}
-    for table in synced_tables():
+    for table in _carried(manifest):
         if table == "notebooks":
             continue
         spec = spec_for(table)
@@ -2300,7 +2362,10 @@ def _verify_delete_scopes(
     that HAVE entries, so an empty window writes no progress rows at all.
     """
     deleted_notebooks: set[str] = set()
-    synced = set(synced_tables())
+    # A delete for a table this package does not carry (the Knowhow history
+    # while the switch is off) is refused like one for an unknown table: the
+    # target's copy of it is not this package's to touch.
+    synced = set(_carried(manifest))
     key_columns: dict[str, tuple[str, ...]] = {}
     attributions: list[tuple[int, str, str]] = []
     grouped: dict[str, list[_DeleteEntry]] = {}
@@ -2309,8 +2374,8 @@ def _verify_delete_scopes(
         if table not in synced:
             raise SyncImportError(
                 f"{DELETES_NAME}:{number} names {table!r}, which is not a "
-                "synced table; this package's delete instructions do not "
-                "describe this schema"
+                "table this package carries; this package's delete "
+                "instructions do not describe what it carries"
             )
         spec = spec_for(table)
         if spec.seed_only:
@@ -2470,6 +2535,7 @@ def _preflight(backend: _Backend, conn: Any, context: _Context) -> bool:
         return True
     prior = _prior_imports(backend, conn, manifest.source_env)
     _assert_chain(context, prior)
+    _knowhow_history_complete(context)
     _reject_backwards_snapshot(prior, context)
     _assert_deleted_notebooks_are_ours(backend, conn, context)
 
@@ -2553,74 +2619,114 @@ def _resolve_importer(
 
 def _build_group_mapping(
     backend: _Backend, conn: Any, context: _Context
-) -> tuple[dict[str, str], list[str]]:
-    """``source group id -> target group id`` plus the names this import will
-    have to CREATE. Groups match by name (design doc §4).
+) -> dict[str, str]:
+    """``source group id -> target group id``. Groups match by NAME and the
+    import never creates one (user ruling 2026-10-19, design doc §4/§11).
 
-    Two ambiguities are handled rather than assumed away, and both are scoped
-    to the names the package actually carries -- an unrelated duplicate
-    elsewhere in the target's group list is none of this import's business:
+    A group is target-owned: who belongs to it, and whether it exists at all,
+    is decided here, not by the source. So the only thing name matching may
+    do is find the ONE target group a package group stands for; it never
+    guesses. Three shapes cannot be answered and refuse the import, naming
+    the group:
 
-    - two TARGET groups sharing a name the package uses: refused, because
-      "match by name" cannot choose between them;
-    - two SOURCE groups sharing one name: folded onto a single target group
-      and reported, because inserting both would create the first ambiguity
-      at the target and poison every later import.
+    - the target has no group by that name;
+    - the target has more than one group by that name;
+    - the package carries more than one group by that name (folding them onto
+      one target group would be a guess about which of two source groups a
+      grant meant).
 
-    Nothing is written here -- creation happens with the rest of the
-    ``groups`` table in the row phase, so a dry run creates no group."""
+    Only for the groups this import would actually USE: a group principal of
+    a grant on a notebook this import creates (``_groups_this_import_seeds``).
+    Grants are seeded only with the notebook they belong to (``_SEED_PARENT``),
+    so a group named only by grants on notebooks the target already mirrors
+    is never written anywhere; refusing over it would wedge every later
+    import of that notebook on a group an administrator here removed on
+    purpose. Such a group is still mapped when its name is unambiguous, and
+    left unmapped otherwise -- the rows naming it are skipped either way.
+
+    Nothing is written here, and it runs in the identity read snapshot before
+    the import is claimed, so a dry run refuses exactly like a real run."""
     package_rows = [
         (str(row.get("id") or ""), str(row.get("name") or ""))
         for row in _iter_lines(context.package_dir / rows_path("groups"))
     ]
+    source_ids_by_name: dict[str, list[str]] = {}
+    for group_id, name in package_rows:
+        if group_id:
+            source_ids_by_name.setdefault(name, []).append(group_id)
     wanted = {name for _id, name in package_rows if name}
-    by_name: dict[str, str] = {}
-    existing_ids: set[str] = set()
+    target_ids_by_name: dict[str, list[str]] = {}
     for row in backend.stream(conn, "SELECT id, name FROM groups"):
-        group_id, name = str(row["id"]), str(row["name"] or "")
-        existing_ids.add(group_id)
-        if name not in wanted:
-            continue
-        if name in by_name:
-            raise SyncImportError(
-                f"the target has more than one group named {name!r}, which "
-                "this package needs to map; group mapping is by name and "
-                "cannot choose between them"
-            )
-        by_name[name] = group_id
+        name = str(row["name"] or "")
+        if name in wanted:
+            target_ids_by_name.setdefault(name, []).append(str(row["id"]))
 
+    needed = _groups_this_import_seeds(backend, conn, context)
     mapping: dict[str, str] = {}
-    created: list[str] = []
-    minted: dict[str, str] = {}
+    problems: list[str] = []
     for group_id, name in package_rows:
         if not group_id:
             continue
-        target = by_name.get(name)
-        if target is not None:
-            mapping[group_id] = target
+        targets = target_ids_by_name.get(name, []) if name else []
+        if len(targets) == 1 and len(source_ids_by_name[name]) == 1:
+            mapping[group_id] = targets[0]
             continue
-        folded = minted.get(name)
-        if folded is not None:
-            mapping[group_id] = folded
-            context.ledger.warn(
-                f"the package carries more than one group named {name!r}; they "
-                "were folded onto one group at the target rather than "
-                "inserted twice under a name that cannot be mapped again"
-            )
+        if group_id not in needed:
             continue
-        if group_id in existing_ids:
-            raise SyncImportError(
-                f"group id {group_id!r} already exists at the target under a "
-                f"different name than the package's {name!r}; refusing to "
-                "merge two unrelated groups"
+        if not name:
+            problems.append(f"包内群组 {group_id} 没有名字，无法按名字匹配")
+        elif len(source_ids_by_name[name]) > 1:
+            problems.append(f"包内有多个名为「{name}」的群组")
+        elif not targets:
+            problems.append(f"目标端没有名为「{name}」的群组")
+        else:
+            problems.append(f"目标端有多个名为「{name}」的群组")
+    if problems:
+        raise SyncImportError(
+            "group mapping is by name and the import neither creates a group "
+            "nor guesses between several (docs/incremental-sync-design.md §4); "
+            "the grants of the notebooks this package creates need: "
+            + "；".join(sorted(set(problems)))
+            + "。Create or rename the group at the target, then re-run."
+        )
+    return mapping
+
+
+def _groups_this_import_seeds(
+    backend: _Backend, conn: Any, context: _Context
+) -> frozenset[str]:
+    """Source group ids named as a principal by a grant this import will
+    actually write: one on a notebook it creates. "Creates" is the same
+    predicate ``_created_parents`` applies in the row phase -- absent at the
+    target, or left in this source's in-flight marker by an earlier attempt
+    -- so the identity phase and the seed gate never disagree about which
+    grants land."""
+    manifest = context.manifest
+    existing: set[str] = set()
+    for batch in _batched(list(manifest.notebooks)):
+        placeholders = ",".join("?" for _ in batch)
+        for row in backend.fetch(
+            conn,
+            f"SELECT id, status, sync_origin FROM notebooks "
+            f"WHERE id IN ({placeholders})",
+            batch,
+        ):
+            in_flight = (
+                str(row["status"]) == _IMPORT_IN_FLIGHT_STATUS
+                and str(row["sync_origin"] or "") == manifest.source_env
             )
-        # Created in the row phase under its own source id: ids are
-        # uuid4-wide, so reusing it keeps group_members/notebook_grants
-        # resolvable without a second remap table.
-        mapping[group_id] = group_id
-        minted[name] = group_id
-        created.append(name)
-    return mapping, created
+            if not in_flight:
+                existing.add(str(row["id"]))
+    needed: set[str] = set()
+    for row in _iter_lines(context.package_dir / rows_path(_GRANTS_TABLE)):
+        if str(row.get("principal_type") or "") not in _GROUP_PRINCIPAL_TYPES:
+            continue
+        if str(row.get("notebook_id") or "") in existing:
+            continue
+        principal = row.get("principal_id")
+        if isinstance(principal, str) and principal:
+            needed.add(principal)
+    return frozenset(needed)
 
 
 def _assert_required_identities_resolve(
@@ -2671,32 +2777,6 @@ def _assert_required_identities_resolve(
         "(docs/incremental-sync-design.md §3.2), so the import would abort "
         f"partway through. {problems}. Re-run with --create-missing-users, or "
         "create those users at the target first."
-    )
-
-
-def _refuse_case_variant_users(
-    mapping: UserMapping, target_users: Sequence[UserProjection]
-) -> None:
-    """Refuse, in the identity read snapshot and so before the import is
-    claimed (a dry run included), a package whose user creation would collide
-    on the target's lower(username) unique index.
-
-    Matching stays exact: ``A1`` in the package is NOT the target's ``a1``,
-    and folding them into one account would hand one person's content to
-    another. But creating ``A1`` beside ``a1`` is refused by the index after
-    the import has been claimed and its earlier writes made, so the pair is
-    named here and an operator renames one side."""
-    pairs = case_variant_collisions(mapping.unmatched, target_users)
-    if not pairs:
-        return
-    listed = "；".join(
-        f"源 {source} ↔ 目标 {target}，请在一侧改名" for source, target in pairs
-    )
-    raise SyncImportError(
-        "--create-missing-users cannot create these package users: each "
-        "differs from an existing target user only by letter case, which the "
-        "target's case-insensitive username index refuses (matching stays "
-        f"exact, docs/incremental-sync-design.md §4). {listed}"
     )
 
 
@@ -2793,6 +2873,9 @@ class _PriorImport:
     # mode is treated as full: no incremental import existed before PR-3c, so
     # a row that does not say cannot be one (codex #788 r3 P2).
     mode: str = ""
+    # ``_KNOWHOW_HISTORY_COMPLETE_KEY`` as this row recorded it; True for a row
+    # that predates the field (its build always carried the history).
+    knowhow_history_complete: bool = True
 
     def downstream_of(self, base: "_PriorImport") -> bool:
         """Whether this row applied something the chain has moved PAST
@@ -2893,6 +2976,9 @@ def _prior_imports(
                     bool(document[_SCOPED_KEY])
                     if isinstance(document.get(_SCOPED_KEY), bool)
                     else None
+                ),
+                knowhow_history_complete=(
+                    document.get(_KNOWHOW_HISTORY_COMPLETE_KEY) is not False
                 ),
             )
         )
@@ -3056,6 +3142,42 @@ def _assert_chain(context: _Context, prior: Sequence[_PriorImport]) -> None:
             f"to_seq={base.to_seq}; the range is not contiguous. That is the "
             "ordinary shape after `sync prune-log` dropped an empty stretch "
             "of the change log, and the base matches, so it is applied"
+        )
+
+
+def _knowhow_history_complete(context: _Context) -> None:
+    """Settle whether the Knowhow edit history is complete once this package
+    applies, and warn when a package that carries it cannot make it so
+    (design doc §11, the switch being turned on after a stretch with it off).
+
+    - A package that does not carry the history leaves the target's copy
+      exactly as it is -- frozen at whatever the last carrying package left --
+      so from here on it is not complete.
+    - A FULL package that carries it is a snapshot of the history too (phase
+      3a reconciles it), so it is complete afterwards.
+    - A WINDOW that carries it brings only what changed since its base: it is
+      complete only if the base was. If not, the changes made while the
+      switch was off never reached this target and never will by window; the
+      fix is one ``sync export --full`` at the source, which the warning says.
+    """
+    manifest = context.manifest
+    if not manifest.knowhow_history:
+        context.ledger.knowhow_history_complete = False
+        return
+    if manifest.mode != MODE_INCREMENTAL:
+        context.ledger.knowhow_history_complete = True
+        return
+    base = context.chain_head
+    complete = base is None or base.knowhow_history_complete
+    context.ledger.knowhow_history_complete = complete
+    if not complete:
+        context.ledger.warn(
+            "this window carries the Knowhow edit history, but the package it "
+            "continues did not, so the history here stays incomplete: the "
+            "milestones and changes made while SILICON_NOTEBOOK_SYNC_KNOWHOW_"
+            "HISTORY was off never reached this environment. Run `sync export "
+            "--full` at the source once to bring the whole history across "
+            "(docs/incremental-sync-design.md §11)"
         )
 
 
@@ -3234,14 +3356,9 @@ def _claim_import(
             and row.has_progress
             and row.package_id != manifest.package_id
         ]
-        # Declared BEFORE the supersede, not after: a retired package's
-        # transferred `__created__:groups:*` progress rows are re-pointed at
-        # THIS package_id (``_transfer_created_group_markers``), and
-        # ``sync_import_progress.package_id`` is a foreign key into
-        # ``sync_imports.package_id`` -- the row that key points at has to
-        # exist before anything can be re-pointed at it. The whole thing is
-        # still one transaction, so a refusal inside ``_supersede_outstanding``
-        # rolls this INSERT back along with everything else.
+        # Declared, then the outstanding rows superseded, in ONE transaction,
+        # so a refusal inside ``_supersede_outstanding`` rolls this INSERT
+        # back along with everything else.
         conn.execute(
             backend.sql(
                 "INSERT INTO sync_imports "
@@ -3259,7 +3376,11 @@ def _claim_import(
                 manifest.from_seq,
                 manifest.to_seq,
                 _moment(backend, now),
-                _running_report_json(manifest, now),
+                _running_report_json(
+                    manifest,
+                    now,
+                    history_complete=context.ledger.knowhow_history_complete,
+                ),
             ),
         )
         _supersede_outstanding(
@@ -3399,7 +3520,6 @@ def _supersede_outstanding(
                 f"{row.package_id} first."
             )
     for row in outstanding:
-        _transfer_created_group_markers(backend, conn, context, row.package_id)
         conn.execute(
             backend.sql(
                 "DELETE FROM sync_import_progress WHERE package_id = ?"
@@ -3443,71 +3563,6 @@ def _supersede_outstanding(
         context.ledger.warn(
             f"package {row.package_id} was superseded by this newer one{taken}; "
             "its partial progress was dropped and it can no longer be resumed"
-        )
-
-
-def _transfer_created_group_markers(
-    backend: _Backend, conn: Any, context: _Context, old_package_id: str
-) -> None:
-    """Move a retired package's ``__created__:groups:<id>`` markers onto the
-    package that supersedes it, instead of dropping them with the rest of its
-    progress.
-
-    The rest of ``old_package_id``'s progress genuinely describes completed
-    STEPS the new package is about to redo from scratch (phase 3a/3b start
-    over for every table), so dropping it is correct. A created-group marker
-    is a different kind of fact: it is not a step the new run repeats, it is
-    the durable record that SOME earlier attempt of this import chain already
-    inserted group ``<id>`` and its members have not been seeded yet
-    (``_created_parents``, the ``_SEED_PARENT`` gate). ``groups`` is
-    ``seed_only``, so once the group row exists the superseding package's own
-    pass over ``groups`` finds it already there and never re-records the
-    fact -- if the marker were dropped instead of moved, ``group_members``
-    would find the group missing from ``_created_parents`` and skip every row
-    for it as "already existed at the target", exactly as if this import
-    chain had never created that group at all.
-
-    A notebook's equivalent fact needs no such transfer: it lives in the
-    notebook row's own ``status``/``sync_origin`` (``_IMPORT_IN_FLIGHT_STATUS``),
-    which is read straight from ``notebooks`` and is already keyed by
-    ``source_env``+id, not by ``package_id`` -- retiring the old package
-    row does not touch it.
-
-    Uses Python's ``str.startswith`` rather than SQL ``LIKE`` for the prefix
-    match, same reason as ``_created_parents``: the prefix contains ``_``
-    characters, which ``LIKE`` reads as single-character wildcards."""
-    prefix = _CREATED_STEP_PREFIX + "groups" + ":"
-    new_package_id = context.manifest.package_id
-    already_theirs = {
-        str(row["table_name"])
-        for row in backend.fetch(
-            conn,
-            "SELECT table_name FROM sync_import_progress WHERE package_id = ?",
-            (new_package_id,),
-        )
-        if str(row["table_name"]).startswith(prefix)
-    }
-    markers = [
-        str(row["table_name"])
-        for row in backend.fetch(
-            conn,
-            "SELECT table_name FROM sync_import_progress WHERE package_id = ?",
-            (old_package_id,),
-        )
-        if str(row["table_name"]).startswith(prefix)
-    ]
-    for step in markers:
-        if step in already_theirs:
-            # The new package's own earlier attempt already recorded the same
-            # group; nothing to move, and the caller's DELETE drops the old
-            # duplicate along with the rest of the retired progress.
-            continue
-        conn.execute(
-            backend.sql(
-                "UPDATE sync_import_progress SET package_id = ? "
-                "WHERE package_id = ? AND table_name = ?"
-            ),
-            (new_package_id, old_package_id, step),
         )
 
 
@@ -3872,13 +3927,19 @@ def _record_progress(
             "WHERE package_id = ?"
         ),
         (
-            _running_report_json(context.manifest, completed_at),
+            _running_report_json(
+                context.manifest,
+                completed_at,
+                history_complete=context.ledger.knowhow_history_complete,
+            ),
             context.manifest.package_id,
         ),
     )
 
 
-def _running_report_json(manifest: _PackageManifest, heartbeat: datetime) -> str:
+def _running_report_json(
+    manifest: _PackageManifest, heartbeat: datetime, *, history_complete: bool
+) -> str:
     """``report_json`` for a row that is still running: which snapshot it is
     applying, when it last committed anything, which notebooks it covers, and
     where it sits in this source environment's chain.
@@ -3902,6 +3963,8 @@ def _running_report_json(manifest: _PackageManifest, heartbeat: datetime) -> str
             _MODE_KEY: manifest.mode,
             _BASE_PACKAGE_ID_KEY: manifest.base_package_id,
             _SCOPED_KEY: manifest.scoped,
+            _KNOWHOW_HISTORY_KEY: manifest.knowhow_history,
+            _KNOWHOW_HISTORY_COMPLETE_KEY: history_complete,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -3922,9 +3985,9 @@ def _target_owned(table: str) -> frozenset[str]:
 # capability to join: carrying the source's token across would let anyone
 # holding a link minted in the OTHER environment walk into this one's group,
 # and the partial UNIQUE index on the column would additionally make two
-# environments' groups collide on it. An imported group therefore arrives with
-# no active link, exactly as a freshly created one does; a group admin here
-# mints their own.
+# environments' groups collide on it. The import no longer inserts a group at
+# all (_build_group_mapping), so this is defence in depth: if a groups row
+# ever did reach an INSERT, it would still arrive with no active link.
 _STATIC_INSERT_OVERRIDES: dict[str, dict[str, Any]] = {
     "groups": {
         "invite_token": None,
@@ -4024,6 +4087,11 @@ def _value_encoder(backend: _Backend, conn: Any, table: str):
 # row that exists"), which still INSERTS a row the target deleted -- exactly
 # the revoked-membership case. The parent gate is the missing half.
 #
+# ``group_members`` stays in the gate although the import never creates a
+# group any more (``_build_group_mapping``, user ruling 2026-10-19): every
+# group a package names already exists here, so every membership row is
+# skipped as one -- the roster of a target group is the target's own.
+#
 # ``object_schemas`` is deliberately absent: it is an environment-level
 # registry owned by no parent row, so plain row-level seed_only is the whole
 # rule for it (§3.1).
@@ -4033,89 +4101,38 @@ _SEED_PARENT: dict[str, tuple[str, str]] = {
     "group_members": ("group_id", "groups"),
 }
 
-# ``sync_import_progress.table_name`` prefix for "this package created parent
-# row X". Not a table name and can never collide with one. Used only for
-# parents that have no durable in-row marker of their own -- see
-# ``_created_parents``.
-_CREATED_STEP_PREFIX = "__created__:"
-
-# Parent tables whose created-set has to be written to sync_import_progress.
-# ``notebooks`` is NOT one: a notebook this run created wears
-# ``_IMPORT_IN_FLIGHT_STATUS`` until phase 5, which is already a durable,
-# per-row, crash-surviving marker -- and there can be thousands of notebooks
-# in one package, which would be thousands of progress rows. ``groups`` has no
-# such column, and a package carries only the handful of groups its notebooks'
-# grants reference, so recording those explicitly is cheap.
-_PERSISTED_CREATED_PARENTS = frozenset({"groups"})
-
-
-def _created_step(parent_table: str, parent_id: str) -> str:
-    return f"{_CREATED_STEP_PREFIX}{parent_table}:{parent_id}"
-
 
 def _created_parents(
     backend: _Backend, conn: Any, parent_table: str, context: _Context
 ) -> set[str]:
     """Which rows of ``parent_table`` THIS package created -- including in an
     earlier, crashed attempt of the same package, because the gate has to give
-    the same answer before and after a resume."""
-    if parent_table == "notebooks":
-        # Reads the same two columns _reserve_notebooks stamps
-        # (_IMPORT_IN_FLIGHT_STATUS/source_env, via _insert_overrides) and
-        # nothing from context.created_parents, so a notebook the claim-time
-        # reservation inserted (rather than _apply_table's own INSERT
-        # branch, which the reservation makes _apply_table skip -- see
-        # _Context.reserved_notebooks) reads exactly the same here either
-        # way: this branch has always gone straight to the row, never
-        # through the in-memory set.
-        found: set[str] = set()
-        for batch in _batched(list(context.manifest.notebooks)):
-            placeholders = ",".join("?" for _ in batch)
-            for row in backend.fetch(
-                conn,
-                f"SELECT id FROM notebooks WHERE id IN ({placeholders}) "
-                "AND status = ? AND sync_origin = ?",
-                (
-                    *batch,
-                    _IMPORT_IN_FLIGHT_STATUS,
-                    context.manifest.source_env,
-                ),
-            ):
-                found.add(str(row["id"]))
-        return found
-    # Read the package's whole progress list and filter in Python rather than
-    # with LIKE: the prefix contains '_' characters, which LIKE reads as
-    # single-character wildcards, and a bounded list (one row per synced table
-    # plus one per created group) is not worth a pattern this module would
-    # then have to escape correctly on two dialects.
-    prefix = _CREATED_STEP_PREFIX + parent_table + ":"
-    persisted = {
-        str(row["table_name"])[len(prefix) :]
+    the same answer before and after a resume.
+
+    Only ``notebooks`` can answer anything but "none": the import never
+    creates a group (``_build_group_mapping``)."""
+    if parent_table != "notebooks":
+        return set()
+    # Reads the same two columns _reserve_notebooks stamps
+    # (_IMPORT_IN_FLIGHT_STATUS/source_env, via _insert_overrides), so a
+    # notebook the claim-time reservation inserted (rather than _apply_table's
+    # own INSERT branch, which the reservation makes _apply_table skip -- see
+    # _Context.reserved_notebooks) reads exactly the same here either way.
+    found: set[str] = set()
+    for batch in _batched(list(context.manifest.notebooks)):
+        placeholders = ",".join("?" for _ in batch)
         for row in backend.fetch(
             conn,
-            "SELECT table_name FROM sync_import_progress WHERE package_id = ?",
-            (context.manifest.package_id,),
-        )
-        if str(row["table_name"]).startswith(prefix)
-    }
-    return persisted | context.created_parents.get(parent_table, set())
-
-
-def _record_created_parents(
-    backend: _Backend, conn: Any, context: _Context, table: str
-) -> None:
-    if table not in _PERSISTED_CREATED_PARENTS:
-        return
-    moment = datetime.now(timezone.utc)
-    for parent_id in sorted(context.created_parents.get(table, set())):
-        _record_progress(
-            backend,
-            conn,
-            context,
-            _created_step(table, parent_id),
-            0,
-            moment,
-        )
+            f"SELECT id FROM notebooks WHERE id IN ({placeholders}) "
+            "AND status = ? AND sync_origin = ?",
+            (
+                *batch,
+                _IMPORT_IN_FLIGHT_STATUS,
+                context.manifest.source_env,
+            ),
+        ):
+            found.add(str(row["id"]))
+    return found
 
 
 # A child table whose rows the SOURCE owns outright (§5: "源端产生的记忆行以
@@ -4985,7 +5002,6 @@ def _apply_table(
         if seed_parent is not None
         else None
     )
-    records_created = table in _PERSISTED_CREATED_PARENTS
 
     inserted = updated = skipped = 0
     for batch in _row_batches(context.package_dir / rows_path(table)):
@@ -5066,8 +5082,6 @@ def _apply_table(
             if not exists:
                 values.update(overrides)
                 fresh.append(key)
-                if records_created and len(primary_key) == 1:
-                    context.created_parents.setdefault(table, set()).add(str(key[0]))
             params.append(tuple(encode(column, values.get(column)) for column in columns))
             if exists:
                 updated += 1
@@ -5096,22 +5110,19 @@ def _row_batches(path: Path) -> Iterator[list[dict[str, Any]]]:
 
 
 def _apply_rows(backend: _Backend, context: _Context, done: set[str]) -> None:
-    resumed = done & set(synced_tables())  # bookkeeping steps are not tables
+    tables = _carried(context.manifest)
+    resumed = done & set(tables)  # bookkeeping steps are not tables
     if resumed:
         context.ledger.warn(
             f"{len(resumed)} table(s) were already complete from an earlier run "
             "of this package and were not re-applied"
         )
-    for table in synced_tables():
+    for table in tables:
         if table in done:
             context.ledger.tables[table] = TableOutcome(resumed=True)
             continue
         with backend.write() as conn:
             outcome = _apply_table(backend, conn, table, context)
-            # In the SAME transaction as the rows it describes: "this package
-            # created group G" and the G row itself must commit together, or a
-            # crash between them makes the gate lie on the way back.
-            _record_created_parents(backend, conn, context, table)
             _record_progress(
                 backend,
                 conn,
@@ -5161,8 +5172,12 @@ def _prune_step(table: str) -> str:
     return f"{_PRUNE_STEP_PREFIX}{table}"
 
 
-def _prunable_tables(backend: _Backend, conn: Any) -> tuple[str, ...]:
-    """Synced tables the snapshot prune covers, children before parents.
+def _prunable_tables(manifest: "_PackageManifest") -> tuple[str, ...]:
+    """Carried tables the snapshot prune covers, children before parents.
+
+    Only what the package carries (``_carried``): a snapshot that left the
+    Knowhow history out says nothing about which history rows exist, so it
+    must not delete any -- the target keeps the history it already has.
 
     Reverse ``synced_tables()`` order: that ordering puts a declared foreign
     key's parent before its child, so walking it backwards deletes a child
@@ -5170,7 +5185,7 @@ def _prunable_tables(backend: _Backend, conn: Any) -> tuple[str, ...]:
     CASCADE firing the way this module happens to expect.
     """
     chosen: list[str] = []
-    for table in reversed(synced_tables()):
+    for table in reversed(_carried(manifest)):
         spec = spec_for(table)
         if table in _SNAPSHOT_PRUNE_EXEMPT or spec.seed_only:
             continue
@@ -5361,7 +5376,7 @@ def _prune_snapshot(backend: _Backend, context: _Context, done: set[str]) -> Non
     """
     total = 0
     with backend.read() as conn:
-        tables = _prunable_tables(backend, conn)
+        tables = _prunable_tables(context.manifest)
         context.protected_sources = _protected_sources(backend, conn, context)
     if context.protected_sources:
         context.ledger.warn(
@@ -5516,8 +5531,8 @@ def _plan_deletes(backend: _Backend, context: _Context) -> _DeletePlan:
     )
 
 
-def _delete_replay_tables() -> tuple[str, ...]:
-    """Synced tables phase 3c replays deletes for, children before parents.
+def _delete_replay_tables(manifest: "_PackageManifest") -> tuple[str, ...]:
+    """Carried tables phase 3c replays deletes for, children before parents.
 
     Reverse ``synced_tables()`` order, for the same reason
     ``_prunable_tables`` walks it backwards: that ordering puts a declared
@@ -5537,7 +5552,7 @@ def _delete_replay_tables() -> tuple[str, ...]:
     one.
     """
     chosen: list[str] = []
-    for table in reversed(synced_tables()):
+    for table in reversed(_carried(manifest)):
         if table == "notebooks":
             continue
         spec = spec_for(table)
@@ -5943,7 +5958,7 @@ def _replay_deletes(backend: _Backend, context: _Context, done: set[str]) -> Non
         _record_phase_complete(backend, context, _DELETES_REPLAYED_STEP, done)
         return
     plan = _plan_deletes(backend, context)
-    for table in _delete_replay_tables():
+    for table in _delete_replay_tables(context.manifest):
         if table not in context.deletes:
             continue
         step = _delete_step(table)
@@ -7085,9 +7100,13 @@ def _import(
             mapping = build_user_mapping(package_users, target_users)
         except ValueError as exc:
             raise SyncImportError(f"identity mapping is ambiguous: {exc}") from None
-        if create_missing_users:
-            _refuse_case_variant_users(mapping, target_users)
-        groups, groups_to_create = _build_group_mapping(backend, conn, context)
+        if mapping.case_folded:
+            ledger.warn(_CASE_FOLDED_USERS.format(
+                pairs="；".join(
+                    f"源 {source} → 目标 {target}" for source, target in mapping.case_folded
+                )
+            ))
+        groups = _build_group_mapping(backend, conn, context)
         _assert_required_identities_resolve(
             context,
             mapping,
@@ -7097,7 +7116,6 @@ def _import(
 
     context.users = dict(mapping.matched)
     context.groups = groups
-    ledger.groups_created.extend(groups_to_create)
     created: dict[str, str] = {}
 
     if dry_run:
@@ -7114,6 +7132,7 @@ def _import(
                 matched=MappingProxyType(dict(mapping.matched)),
                 created=MappingProxyType({}),
                 unmatched=tuple(user.username for user in mapping.unmatched),
+                case_folded=mapping.case_folded,
             ),
             dry_run=True,
         )
@@ -7129,6 +7148,7 @@ def _import(
             unmatched=tuple(
                 user.username for user in mapping.unmatched if user.id not in created
             ),
+            case_folded=mapping.case_folded,
         )
 
     if _claim_import(backend, context, resume=resume, take_over=take_over):

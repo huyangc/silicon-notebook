@@ -45,7 +45,12 @@ from app.migration.sync.database import (
     _scope_of,
     _table_query,
 )
-from app.migration.sync.manifest import MappingKind, ScopeKind, spec_for, synced_tables
+from app.migration.sync.manifest import (
+    MappingKind,
+    ScopeKind,
+    carried_tables,
+    spec_for,
+)
 from app.migration.sync.package import (
     ASSET_FILES_DIR,
     CHECKSUMS_NAME,
@@ -117,8 +122,10 @@ class ExportReport:
     # have. A notebook's lifecycle ``status`` is NOT one of them -- see
     # _select_notebooks.
     skipped: Mapping[str, str]
-    # table name -> rows written, for every synced table (0 included, so the
-    # report and the package's file set describe the same thing).
+    # table name -> rows written, for every table the package carries (0
+    # included, so the report and the package's file set describe the same
+    # thing). The Knowhow history tables are absent when ``knowhow_history``
+    # is False.
     table_counts: Mapping[str, int]
     file_count: int
     bytes_written: int
@@ -184,6 +191,11 @@ class ExportReport:
     # copying. Reported rather than raised: a source file deleted by a
     # concurrent notebook edit must not throw away a whole export.
     missing_files: tuple[str, ...] = ()
+    # Whether this package carries the Knowhow edit history
+    # (``manifest.KNOWHOW_HISTORY_TABLES``): the exporting environment's
+    # ``SILICON_NOTEBOOK_SYNC_KNOWHOW_HISTORY``, off by default. Written to
+    # ``manifest.knowhow_history``; the importer follows it.
+    knowhow_history: bool = False
 
 
 # ----------------------------------------------------------- package writer
@@ -1299,16 +1311,17 @@ def _full_rows(
     writer: _PackageWriter,
     users: _UserIds,
     notebook_ids: Sequence[str] | None,
+    tables: Sequence[str],
 ) -> _Rows:
-    """The table-scan path: every row of every synced table that belongs to
-    the selected notebooks. ``deletes.jsonl`` is empty by construction -- a
+    """The table-scan path: every row of every carried table (``tables``)
+    that belongs to the selected notebooks. ``deletes.jsonl`` is empty by construction -- a
     full package states what EXISTS, and the importer reconciles by deleting
     whatever it holds that the package does not carry."""
     selection = _select_notebooks(source, conn, notebook_ids)
     global_keys = _global_keys(source, conn, selection.exported)
     table_counts: dict[str, int] = {}
     table_entries: dict[str, dict[str, Any]] = {}
-    for table in synced_tables():
+    for table in tables:
         columns, written = _write_table(
             source, conn, writer, table, selection.exported, global_keys, users
         )
@@ -1384,8 +1397,13 @@ def _incremental_rows(
     writer: _PackageWriter,
     users: _UserIds,
     watermark: Any,
+    tables: Sequence[str],
 ) -> _Rows:
-    """The change-log path (docs/incremental-sync-design.md §7).
+    """The change-log path (docs/incremental-sync-design.md §7), over the
+    carried ``tables``. A table left out (the Knowhow history while the
+    switch is off) is not compacted at all: its log rows -- upserts and
+    deletes alike -- stay behind for ``sync prune-log``, and nothing about it
+    reaches the package.
 
     Table order is copy_rank, with two deliberate deferrals, because two
     table groups cannot be written until the package's notebook set is known:
@@ -1499,7 +1517,7 @@ def _incremental_rows(
             if str(row.get("principal_type") or "") in _GROUP_PRINCIPAL_TYPES:
                 seed_group(row.get("principal_id"))
 
-        for table in synced_tables():
+        for table in tables:
             if table == "notebooks" or _scope_of(table).kind is ScopeKind.GLOBAL:
                 deferred.append(table)
                 continue
@@ -1644,6 +1662,8 @@ def _assemble(
 ) -> ExportReport:
     users = _UserIds()
     scoped = notebook_ids is not None
+    knowhow_history = bool(settings.sync_knowhow_history)
+    tables = carried_tables(knowhow_history=knowhow_history)
 
     with source.read() as conn:
         # FIRST statement of the transaction that needs a snapshot, so on
@@ -1666,9 +1686,13 @@ def _assemble(
             and watermark.captured
         )
         if resumable:
-            produced = _incremental_rows(source, conn, writer, users, watermark)
+            produced = _incremental_rows(
+                source, conn, writer, users, watermark, tables
+            )
         else:
-            produced = _full_rows(source, conn, writer, users, notebook_ids)
+            produced = _full_rows(
+                source, conn, writer, users, notebook_ids, tables
+            )
         user_count = _write_users(source, conn, writer, sorted(users.ids))
         with writer.lines(KG_EPOCHS_NAME):
             pass  # PR-3b does not fold KG resets; see incremental.OPERATION_KG_EPOCH.
@@ -1756,6 +1780,14 @@ def _assemble(
             # nothing new, and this build reads its absence as "unknown"
             # rather than as either answer (codex #788 r2 P1).
             "scoped": scoped,
+            # Whether the Knowhow edit history rides along
+            # (SILICON_NOTEBOOK_SYNC_KNOWHOW_HISTORY, off by default). When
+            # false, ``tables`` and ``deletes.jsonl`` say nothing about
+            # knowhow_milestones/knowhow_changes, and the importer leaves the
+            # target's own copy of them exactly as it is. Additive like
+            # ``scoped``: a package without it was written by a build that
+            # always carried the history, and is read that way.
+            "knowhow_history": knowhow_history,
             "notebooks": list(produced.notebooks),
             "deleted_notebooks": list(produced.deleted_notebooks),
             "tables": produced.table_entries,
@@ -1825,4 +1857,5 @@ def _assemble(
         run_id="" if scoped else package_id,
         warnings=tuple(run_warnings),
         missing_files=tuple(missing_files),
+        knowhow_history=knowhow_history,
     )

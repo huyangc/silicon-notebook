@@ -1787,6 +1787,15 @@ class Settings(BaseSettings):
     # `scripts/cli.sh sync export` defaults to it as source_env; empty means the
     # operator must pass --source-env explicitly on every export.
     sync_env: str = Field("", validation_alias="SILICON_NOTEBOOK_SYNC_ENV")
+    # Whether `sync export` carries the Knowhow edit history
+    # (knowhow_milestones / knowhow_changes). Off by default (user ruling
+    # 2026-10-19): a mirror gets the tables' current state only, and the
+    # history it already holds is left as it is. Read by the EXPORTING side
+    # only; the package declares the choice and the importer follows it.
+    # See docs/incremental-sync-design.md §3.2/§11.
+    sync_knowhow_history: bool = Field(
+        False, validation_alias="SILICON_NOTEBOOK_SYNC_KNOWHOW_HISTORY"
+    )
     postgres_pool_min_size: int = Field(1, validation_alias="POSTGRES_POOL_MIN_SIZE")
     postgres_pool_max_size: int = Field(10, validation_alias="POSTGRES_POOL_MAX_SIZE")
     postgres_pool_acquire_timeout_seconds: int = Field(
