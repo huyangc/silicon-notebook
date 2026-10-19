@@ -925,7 +925,12 @@ Set the launch-script variable `AUTOTUNE=0` to disable that automatic behavior.
 PostgreSQL pool sizing uses `POSTGRES_POOL_MIN_SIZE` / `POSTGRES_POOL_MAX_SIZE`,
 with `POSTGRES_POOL_ACQUIRE_TIMEOUT_SECONDS` bounding the wait for a connection.
 `POSTGRES_STATEMENT_TIMEOUT_SECONDS` and `POSTGRES_LOCK_TIMEOUT_SECONDS` bound one
-statement and database-lock waits respectively. Tune these advanced PostgreSQL-only
+statement and database-lock waits respectively. The whole-table operations of offline
+maintenance and the two whole-table streaming reads of the knowledge-graph rebuild (the
+relation graph and the per-source object scan) raise the statement timeout to at least
+600 seconds inside their own transaction (raise-only: a larger configured value is kept,
+`0` stays disabled, and it reverts when the transaction ends); every other statement stays
+bound by this value. Tune these advanced PostgreSQL-only
 settings together with database resources and concurrent workloads; the migration-only
 role of `SHADOW_DATABASE_URL` is described in backend selection above.
 

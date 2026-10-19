@@ -620,8 +620,11 @@ class UnifiedKgStore:
           · 迭代必须在拿到 `db` 的那个 `with self._connect() as db:` 块**之内**跑完。
             `rebuild_communities` 正是这么写的:`names, graph_rows = …` 与消费它的
             `for` 循环在同一个 `with` 里,循环体只做 dict 查找和 `edge_builder.add`,
-            不再向这条连接发任何语句。`names` 在流开始之前就已物化完(它是第一条语句、
-            先于流占线),所以不受这条限制。
+            不再向这条连接发任何语句。`names` 在流开始之前就已物化完(放宽超时之后的
+            第一条读,先于流占线),所以不受这条限制。
+          · 放宽超时作用于调用方**事务的剩余部分**,所以不要在 `write()` 里调本方法,
+            也不要在同一个 `with` 里接着发写语句 —— 写语句不该顺带吃到 600 s 的超时
+            (端口契约见 `ports.py` 的 `community_graph_rows`)。
           · ⚠ 流被**中途丢下**时,离开 `with` 会永久阻塞:流挂起期间连接是 ACTIVE 状态,
             连接释放时的 `rollback()` 在 psycopg 3.3 里不返回(裸 psycopg、6 行结果集
             实测同样复现)。丢下的方式有两种 —— 循环里抛异常、`break`;而生成器只要还被
@@ -2627,7 +2630,12 @@ class UnifiedKgStore:
             因此落在同一个事务里。
           · **流被中途丢下会让连接释放永久阻塞**(流挂起期间连接是 ACTIVE,`rollback()`
             不返回;裸 psycopg 3.3 实测复现)。调用方 `_compute_kg_analysis` 经
-            `_fold_source_rows` 用 `closing(...)` 兜住了循环抛异常的路径。
+            `_fold_source_rows` 用 `closing(...)` 兜住了循环抛异常的路径。(实测:直接
+            `for row in store.source_canonical_rows(...)`、迭代器只是栈上的临时值时,CPython
+            在异常展开时就把它回收了,不会挂;一旦把流绑到局部变量或传进 helper 的形参就会
+            挂 —— 所以由 helper 显式 `closing`,不赖展开细节。)
+          · **放宽作用于调用方事务的剩余部分**:不要在 `write()` 里调本方法,也不要在同一个
+            `with` 里接着发写语句,写语句不该顺带吃到 600 s 的超时(端口契约见 `ports.py`)。
         """
         raise_statement_timeout_floor(db)
         placeholders = ",".join("%s" for _ in USABLE_STATUSES)

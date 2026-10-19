@@ -409,7 +409,11 @@ def _fold_source_rows(rows: Any, counter: Any) -> None:
     ``_fold_canonical_edges``: ``rows`` is a ``cursor().stream()`` generator, and one
     abandoned mid-iteration (``counter.add`` raising, ``KeyboardInterrupt``) leaves
     its connection ACTIVE, so the caller's ``with self._connect()`` blocks forever
-    in ``rollback()`` instead of letting the exception through.
+    in ``rollback()`` instead of letting the exception through. Here ``rows`` is a
+    parameter, so the helper's frame (kept alive by the traceback) holds the
+    generator; a bare ``for row in store.source_canonical_rows(...)`` over a stack
+    temporary would be reclaimed during unwinding, but this form is not, hence the
+    explicit ``closing`` rather than a reliance on that detail.
     """
     with closing(rows):
         for row in rows:
