@@ -11740,9 +11740,10 @@ button.tag:hover {
   color: #fff;
 }
 
+/* 三张信号卡(「来源复核入口」那张已被问题清单取代)排成一行,不留一个空格。 */
 .kg-analysis-insight-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -12472,6 +12473,28 @@ button.tag:hover {
   border-color: var(--danger-border);
 }
 
+/* 两份来源各自一组:来源名 + 它的按钮,组与组之间有分隔,不会把两颗同名按钮读混。 */
+.kg-finding-source-group {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  padding: 3px 4px 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fbfcff;
+}
+
+.kg-finding-source-name {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .kg-finding-action-note {
   font-size: 12px;
   color: var(--muted);
@@ -12508,6 +12531,22 @@ button.tag:hover {
   gap: 4px 10px;
   padding: 12px 16px;
   cursor: pointer;
+  list-style: none;
+}
+
+/* summary 改成 flex 之后浏览器自带的展开三角就没了:补一个,收起 ▸ / 展开 ▾。 */
+.kg-findings-diagnostics > summary::-webkit-details-marker {
+  display: none;
+}
+
+.kg-findings-diagnostics > summary::before {
+  content: "▸";
+  width: 12px;
+  color: var(--muted);
+}
+
+.kg-findings-diagnostics[open] > summary::before {
+  content: "▾";
 }
 
 .kg-findings-diagnostics-title {
