@@ -349,6 +349,10 @@ def test_store_kg_chunks_thousand_rows_before_embeds_and_hooks(repo, monkeypatch
 
 
 def test_relink_zero_added_edges_has_no_side_effects(repo, monkeypatch):
+    """No KG mutation, no dirty bump, no cache eviction. The ONE write is the
+    durable "relink ran" mark (KG findings design 2026-10-19 §4.5): its own
+    small transaction, written also when nothing was linked — "ran and linked
+    nothing" is exactly the state F5 needs to know."""
     notebook = repo.create_notebook(NotebookCreate(name="relink empty"))
     events = []
     _trace_transactions(repo, monkeypatch, events)
@@ -357,7 +361,11 @@ def test_relink_zero_added_edges_has_no_side_effects(repo, monkeypatch):
     out = repo.relink_notebook_kg(notebook.id)
 
     assert out["edges_added"] == 0
-    assert events == []
+    assert events == ["write.begin", "write.commit"]
+    runtime = object.__getattribute__(repo, "_runtime")
+    with runtime.unified_kg.read_snapshot() as db:
+        marks = runtime.unified_kg.kg_analysis_mark_rows(db, notebook.id)
+    assert [(m["rule_id"], m["kind"]) for m in marks] == [("F5", "relink_attempted")]
 
 
 # -------------------------------------------------------------- edge review
@@ -1018,7 +1026,8 @@ def test_relink_store_spies_observe_read_projection_and_caller_write_connection(
     # write transaction as the edge insert (P1 fix: a `finally`-keyed bump
     # cannot survive a kill -9 landing right after this source's commit), so it
     # lands BEFORE write.commit; invalidate stays the run-level `finally` call,
-    # after the commit.
+    # after the commit. Last, on success only, the durable "relink ran" mark
+    # (KG findings §4.5) in its own small write transaction.
     assert [event[0] for event in events] == [
         "relink_orphan_source_ids",
         "relink_source_page",
@@ -1027,6 +1036,7 @@ def test_relink_store_spies_observe_read_projection_and_caller_write_connection(
         "relink_source_is_live",
         "write.begin", "insert_relation_chunk", "dirty", "write.commit",
         "invalidate",
+        "write.begin", "write.commit",
     ]
     assert events[5][1] == events[6][1] == events[7][1] == events[8][1]
     assert out["edges_added"] == 1

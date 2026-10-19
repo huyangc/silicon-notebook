@@ -151,6 +151,11 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     # 字面量,分页/上限走查询串),所以整条路径可以原样进诊断快照,不必打 {redacted}。
     ("kg-analysis",),
     ("kg-analysis", "sources"),
+    # 问题清单(设计 2026-10-19 §8.4):一页走查询串;「标为正常」的两段主键(规则代号、
+    # 主体键 —— 来源 id / 概念名归一串,可能是用户内容)都打 {id}。F4 主键含 "/" 时段数
+    # 对不上任何模板,落到兜底 {redacted},同样不泄露。
+    ("kg-analysis", "findings"),
+    ("kg-analysis", "findings", None, None, "dismissal"),
     ("reports",),
     ("reports", "export"),
     ("reports", None),
