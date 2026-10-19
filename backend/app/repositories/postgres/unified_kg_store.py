@@ -46,6 +46,7 @@ from app.repositories.postgres._store_utils import (
     json_value,
     jsonb,
     normalize_timestamp,
+    raise_statement_timeout_floor,
 )
 from app.repositories.postgres.cluster_lock import (
     lock_cluster_artifact_type,
@@ -602,8 +603,18 @@ class UnifiedKgStore:
             实测(同一个 notebook,探针用去掉 Memory 谓词的同形查询):`statement_timeout=
             1.5s`、消费方中途停 3 s —— `execute` 形态照常读完,`stream` 形态继续取行
             时 `QueryCanceled`(已读 5,218 行)。这条查询带 `ORDER BY`,服务端
-            先排完才开始发行,消费期只是它之后的那一段尾巴;`source_canonical_rows` 的消费期
-            是同一量级(878 万行),部署的超时必须同时盖住两者。
+            先排完才开始发行,消费期只是它之后的那一段尾巴;但按调用方循环体 ~2 µs/行
+            **推算**,836 万行的消费期要多出十几到二十几秒(推算,不是生产实测),
+            默认 `POSTGRES_STATEMENT_TIMEOUT_SECONDS=30` 下有被 `QueryCanceled` 的风险。
+
+        因此**函数一开头**就调 `raise_statement_timeout_floor(db)`(与离线维护的整表 DELETE
+        同一个函数、同一个 600 s 底线,见 `_store_utils`):只抬不压(部署配得更高就保持,
+        0=禁用保持)、事务本地(`set_config(.., true)`,随提交/回滚复原,不泄漏给池里下
+        一个借用者)。这依赖 `database.connect()` 借出的连接**不是 autocommit** —— 第一条
+        语句就隐式开启事务,`names` 查询、这个 `set_config`、随后的 `stream()` 因此落在
+        同一个事务里;autocommit 连接上 `true` 只管那一条语句,等于没放宽。放宽只覆盖
+        借用这条连接的这一个事务,调用方在同一个 `with` 块里做的别的读也在其内,而
+        `rebuild_communities` 那个块里只有这一条重活。
 
         调用方契约(唯一调用点是 `KnowledgeLifecycleService.rebuild_communities`):
           · 迭代必须在拿到 `db` 的那个 `with self._connect() as db:` 块**之内**跑完。
@@ -619,6 +630,7 @@ class UnifiedKgStore:
             `rebuild_communities` 经 `_fold_canonical_edges` 用 `closing(...)` 兜住了这条
             (`tests/test_fold_canonical_edges.py` 钉住「循环抛异常时流被 close」)。
         """
+        raise_statement_timeout_floor(db)
         names = {
             row["canonical_id"]: row["canonical_name"]
             for row in db.execute(
@@ -2603,7 +2615,21 @@ class UnifiedKgStore:
         游标从连接继承 `dict_row`,所以调用方按键取值的写法两侧一致。
         代价:整个迭代期间占住这条连接(调用方本就把循环包在一个 `_connect()` 里),
         且不能在 pipeline 模式下用(本仓库不用 pipeline)。
+
+        ⚠ 另外两条代价(与 `community_graph_rows` 同一类,理由与实测见它的 docstring):
+          · **`statement_timeout` 覆盖整个消费期。**服务端语句要等客户端读完最后一行才
+            算结束,所以计时包括调用方 `SourceBoardCounter.add` 的 Python 时间。按 ~2 µs/行
+            **推算**,878 万行的消费期要多出十几到二十几秒(推算,不是生产实测),默认
+            `POSTGRES_STATEMENT_TIMEOUT_SECONDS=30` 下有被 `QueryCanceled` 的风险。所以函数
+            一开头调 `raise_statement_timeout_floor(db)`,把本事务抬到与离线维护同一个
+            600 s 底线(只抬不压、0 保持、事务本地随提交/回滚复原)。依赖 `database.connect()`
+            的连接不是 autocommit —— 第一条语句隐式开事务,`set_config` 与随后的 `stream()`
+            因此落在同一个事务里。
+          · **流被中途丢下会让连接释放永久阻塞**(流挂起期间连接是 ACTIVE,`rollback()`
+            不返回;裸 psycopg 3.3 实测复现)。调用方 `_compute_kg_analysis` 经
+            `_fold_source_rows` 用 `closing(...)` 兜住了循环抛异常的路径。
         """
+        raise_statement_timeout_floor(db)
         placeholders = ",".join("%s" for _ in USABLE_STATUSES)
         return db.cursor().stream(
             f"""
