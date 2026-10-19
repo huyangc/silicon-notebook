@@ -422,6 +422,113 @@ def check_marks(repo, *, postgres: bool, monkeypatch, store_module) -> None:
         mark_rows(rt, world.nb)
 
 
+def check_mark_cap_under_concurrency(repo, *, postgres: bool, monkeypatch,
+                                    store_module) -> None:
+    """Two writers, each adding a NEW mark key to a notebook one below the cap,
+    on two connections. A barrier right after the count holds the first writer
+    there until the second has counted too, or until it times out: with the
+    count + insert serialized (PostgreSQL: the notebook advisory lock; SQLite:
+    the write lock every write transaction holds) the second never gets to
+    count while the first waits, the barrier times out, the first commits and
+    the second then counts the cap and is refused. Without the serialization
+    both count cap-1 and both insert: cap+1 rows, after which the mark read
+    fails for good. Mutation anchor (PostgreSQL): drop the advisory lock."""
+    import threading
+
+    import pytest
+
+    rt = repo._runtime
+    world = seed(repo, postgres=postgres)
+    monkeypatch.setattr(store_module, "KG_ANALYSIS_MARKS_MAX", 2)
+    write_mark(rt, world.nb, "F1", "src-a", "dismissed")
+    barrier = threading.Barrier(2, timeout=3)
+
+    class Counted:
+        """The writer's connection, pausing at the barrier after the count."""
+
+        def __init__(self, db):
+            self._db = db
+
+        def execute(self, statement, *args, **kwargs):
+            result = self._db.execute(statement, *args, **kwargs)
+            if "SELECT COUNT(*) AS c FROM (SELECT 1 FROM kg_analysis_marks" in statement:
+                try:
+                    barrier.wait()
+                except threading.BrokenBarrierError:
+                    pass
+            return result
+
+        def __getattr__(self, name):
+            return getattr(self._db, name)
+
+    outcomes: dict[str, object] = {}
+
+    def writer(key: str) -> None:
+        try:
+            with rt.database.write() as db:
+                rt.unified_kg.write_kg_analysis_mark(
+                    Counted(db), world.nb, "F2", key, "dismissed",
+                    at_kg_seq=1, actor_user_id="user-local", note="", now=T1)
+            outcomes[key] = "written"
+        except ValueError as exc:
+            outcomes[key] = exc
+        except Exception as exc:  # noqa: BLE001 -- reported below
+            outcomes[key] = repr(exc)
+
+    threads = [threading.Thread(target=writer, args=(key,))
+               for key in ("src-b|src-c", "src-c|src-d")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert sorted(outcomes) == ["src-b|src-c", "src-c|src-d"], outcomes
+    written = [key for key, outcome in outcomes.items() if outcome == "written"]
+    refused = [key for key, outcome in outcomes.items()
+               if isinstance(outcome, ValueError)]
+    assert len(written) == 1 and len(refused) == 1, outcomes
+    assert len(mark_rows(rt, world.nb)) == 2
+    with pytest.raises(ValueError):
+        write_mark(rt, world.nb, "F3", "src-e", "dismissed")
+
+
+def check_indexing_publish_clears_findings(repo, *, postgres: bool) -> None:
+    """The indexing-pipeline publication (a staged rebuild generation going
+    live) voids every notebook-derived KG product: the findings detail goes
+    with its ledger, and cluster_code_version is emptied together with
+    cluster_input_version. Both kinds of mark stay -- the publication moves
+    kg_mutation_seq forward, never to 0, so a relink-attempt mark already reads
+    as "content arrived since". Driven through the store itself with a
+    notebook that has no sources (the empty staged generation is still a full
+    publication). Mutation anchors: drop kg_analysis_findings from
+    ``_clear_notebook_derived_kg``, or the ``cluster_code_version=''`` reset."""
+    rt = repo._runtime
+    p = "%s" if postgres else "?"
+    notebook_id = repo.create_notebook(NotebookCreate(name="publish")).id
+    pipeline = ("test.pipeline", "v1", "g1")
+    job = rt.kg_build_jobs.create_job(notebook_id, "user-local", "rebuild", 0)
+    with rt.database.write() as db:
+        db.execute(
+            f"UPDATE notebooks SET indexing_pipeline={p}, indexing_pipeline_version={p}, "
+            f"indexing_pipeline_generation={p}, indexing_pipeline_job_id={p} "
+            f"WHERE id={p}",
+            (*pipeline, job["id"], notebook_id),
+        )
+    rt.kg_build_jobs.begin_indexing_pipeline_stage(
+        job["id"], notebook_id, *pipeline, [])
+    replace(rt, notebook_id, FINDINGS_V1)
+    write_mark(rt, notebook_id, "F1", "src-a", "dismissed")
+    write_mark(rt, notebook_id, "F5", "notebook", "relink_attempted")
+    set_versions(rt, notebook_id, "v-in", "code-1", postgres=postgres)
+
+    assert rt.kg_build_jobs.publish_indexing_pipeline_success(
+        job["id"], notebook_id, *pipeline) is True
+
+    assert finding_rows(rt, notebook_id) == []
+    assert [(m["rule_id"], m["kind"]) for m in mark_rows(rt, notebook_id)] == [
+        ("F1", "dismissed"), ("F5", "relink_attempted")]
+    assert state(rt, notebook_id) == ("", "")
+
+
 def check_source_states(repo, *, postgres: bool) -> None:
     rt = repo._runtime
     world = seed(repo, postgres=postgres)

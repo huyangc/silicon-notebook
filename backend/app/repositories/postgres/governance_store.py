@@ -467,8 +467,10 @@ class GovernanceStore:
         """SQLite 孪生同名方法(用途、切片驱动与过滤形态见那边)。
 
         canonical 列表经 ``id_binding``(``member_of`` + ``execute_ids``),两端共用同一个
-        绑定参数,custom plan 按真实列表出计划;``ORDER BY id`` 落在 ``COLLATE "C"`` 的
-        主键列上,与 SQLite 的二进制序逐字一致。``updated_at`` 经 `iso_timestamp`。"""
+        绑定参数,custom plan 按真实列表出计划。按 ``id`` 排序在 Python 里做(理由见
+        SQLite 孪生:SQL 里的 ``ORDER BY id`` 会让 SQLite 3.45 丢掉切片驱动;这里跟着
+        不写,两侧形态一致),Python 的码点序与 ``COLLATE "C"`` / SQLite 二进制序逐字
+        一致。``updated_at`` 经 `iso_timestamp`。"""
         status_sql = _lifecycle_merge_status_sql(statuses)
         ids = list(dict.fromkeys(canonical_ids))
         if not ids:
@@ -479,10 +481,10 @@ class GovernanceStore:
             "SELECT id, canonical_a, canonical_b, status, seed_a, seed_b, updated_at "
             f"FROM concept_merge_candidates WHERE notebook_id=%s AND {status_sql} "
             f"AND ({id_member_of('canonical_a', bound)} "
-            f"OR {id_member_of('canonical_b', bound)}) ORDER BY id",
+            f"OR {id_member_of('canonical_b', bound)})",
             [notebook_id, bound.param, bound.param],
         ).fetchall()
-        return [
+        return sorted((
             {
                 "id": row["id"],
                 "canonical_a": row["canonical_a"],
@@ -493,7 +495,7 @@ class GovernanceStore:
                 "updated_at": iso_timestamp(row["updated_at"]),
             }
             for row in rows
-        ]
+        ), key=lambda row: row["id"])
 
     @staticmethod
     def valid_object_ids(

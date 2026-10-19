@@ -469,6 +469,50 @@ def test_skip_path_stamps_code_version(repo, monkeypatch):
     assert calls["n"] == 0 and stamps == []              # settled skip: zero writes
 
 
+def test_a_failing_skip_path_stamp_is_fail_open(repo, monkeypatch):
+    """The stamp is a derived write on a path that used to be write-free and
+    always returned: if it fails (here: SQLite's busy timeout behind a long
+    write) the skip still returns the cached count, emits
+    ``cluster_code_version_stamp_failed`` and leaves the column for the next
+    skip to fill. Mutation anchor: drop the try/except in ``_settle_skip_path``
+    and ``rebuild_unified_kg`` raises."""
+    import sqlite3
+
+    import app.services.kg_merge as kg_merge
+
+    lifecycle = repo._runtime.knowledge_lifecycle
+    nb = _make_kg(repo)
+    count = lifecycle.rebuild_unified_kg(nb.id)
+    with repo._runtime.database.write() as db:
+        db.execute("UPDATE unified_kg_state SET cluster_code_version='' "
+                   "WHERE notebook_id=?", (nb.id,))
+
+    def locked(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    stamp = repo._runtime.unified_kg.stamp_cluster_code_version
+    monkeypatch.setattr(repo._runtime.unified_kg, "stamp_cluster_code_version", locked)
+    events = []
+    original_emit = lifecycle.event_log.emit
+    monkeypatch.setattr(lifecycle.event_log, "emit",
+                        lambda event, *a, **k: events.append(dict(event))
+                        or original_emit(event, *a, **k))
+    calls = _spy_stream(repo, monkeypatch)
+
+    assert lifecycle.rebuild_unified_kg(nb.id) == count       # still the skip
+    assert calls["n"] == 0
+    assert _code_version(repo, nb.id)[1] == ""
+    failures = [e for e in events if e.get("kind") == "cluster_code_version_stamp_failed"]
+    assert failures == [{"kind": "cluster_code_version_stamp_failed",
+                         "notebook_id": nb.id, "error": "database is locked"}]
+
+    monkeypatch.setattr(repo._runtime.unified_kg, "stamp_cluster_code_version",
+                        stamp)                                  # lock released
+    lifecycle.rebuild_unified_kg(nb.id)
+    assert _code_version(repo, nb.id)[1] == kg_merge.cluster_code_version(
+        lifecycle.settings)
+
+
 def test_algo_bump_reads_as_mismatch(repo, monkeypatch):
     """Bumping CLUSTER_ALGO_VERSION leaves kg_mutation_seq and dirty alone, so
     only the code component can tell a reader the last merge is stale: the

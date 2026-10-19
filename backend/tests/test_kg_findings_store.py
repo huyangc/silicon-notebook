@@ -45,6 +45,15 @@ def test_marks_upsert_delete_prune_and_cap(repo, monkeypatch):
         repo, postgres=False, monkeypatch=monkeypatch, store_module=store_module)
 
 
+def test_the_mark_cap_holds_under_concurrent_writers(repo, monkeypatch):
+    cases.check_mark_cap_under_concurrency(
+        repo, postgres=False, monkeypatch=monkeypatch, store_module=store_module)
+
+
+def test_indexing_publication_clears_findings_and_the_code_version(repo):
+    cases.check_indexing_publish_clears_findings(repo, postgres=False)
+
+
 def test_source_states_read_the_latest_extraction_and_hide_synthetic_titles(repo):
     cases.check_source_states(repo, postgres=False)
 
@@ -172,37 +181,49 @@ def test_id_list_statements_keep_their_key_plans(repo, monkeypatch, statistics):
                     if step.startswith("SCAN ") and "json_each" not in step], plan
 
 
-def test_old_detail_read_stays_on_the_primary_key(repo):
+@pytest.mark.parametrize("statistics", ["none", "production"])
+def test_old_detail_read_stays_on_the_primary_key(repo, monkeypatch, statistics):
     """The publish transaction's one in-transaction read (old detail, for
     first-seen inheritance and the comparison) is bounded by the row cap and
     walks the primary key: a prefix SEARCH on its automatic index, no sort, no
-    scan -- with and without planner statistics (production SQLite databases
-    are never ANALYZEd)."""
+    scan -- with no planner statistics (production SQLite databases are never
+    ANALYZEd) and with production-shaped ones. The statement pinned is the one
+    the store actually executes, captured on the way through, inside a write
+    transaction: it carries no write-transaction guard."""
+    from app.repositories.sqlite import database as sqlite_database
+
+    rt = repo._runtime
     world = cases.seed(repo, postgres=False)
-    cases.replace(repo._runtime, world.nb, cases.FINDINGS_V1)
+    cases.replace(rt, world.nb, cases.FINDINGS_V1)
+    if statistics == "production":
+        with rt.database.write() as db:
+            db.execute("ANALYZE")
+            db.execute("DELETE FROM sqlite_stat1 WHERE tbl='kg_analysis_findings'")
+            db.execute(
+                "INSERT INTO sqlite_stat1(tbl, idx, stat) VALUES "
+                "('kg_analysis_findings', 'sqlite_autoindex_kg_analysis_findings_1', "
+                "'200000 500 100 1')")
+        rt.database.close_local()
+    captured: list[tuple[str, tuple]] = []
+    original = sqlite_database._Conn.execute
 
-    def plan(db) -> list[str]:
-        return [
-            row[3]
-            for row in db.execute(
-                "EXPLAIN QUERY PLAN SELECT rule_id, subject_key, subject_kind, "
-                "subject_label, subject_refs, severity, impact_objects, evidence, "
-                "first_seen_kg_seq, first_seen_cluster_seq "
-                "FROM kg_analysis_findings WHERE notebook_id=? "
-                "ORDER BY rule_id, subject_key LIMIT ?",
-                (world.nb, 5001),
-            )
-        ]
+    def recording(self, sql, parameters=(), /):
+        if isinstance(sql, str) and "FROM kg_analysis_findings WHERE" in sql:
+            captured.append((sql, tuple(parameters)))
+        return original(self, sql, parameters)
 
-    with repo._runtime.database.write() as db:
-        cold = plan(db)
-        db.execute("ANALYZE")
-        warm = plan(db)
-    for steps in (cold, warm):
-        assert steps == [
-            "SEARCH kg_analysis_findings USING INDEX "
-            "sqlite_autoindex_kg_analysis_findings_1 (notebook_id=?)"
-        ], steps
-    # and it may run inside the publish transaction: no write-transaction guard
-    with repo._runtime.database.write() as db:
-        assert len(repo._runtime.unified_kg.kg_analysis_finding_rows(db, world.nb)) == 3
+    monkeypatch.setattr(sqlite_database._Conn, "execute", recording)
+    with rt.database.write() as db:
+        assert len(rt.unified_kg.kg_analysis_finding_rows(db, world.nb)) == 3
+    monkeypatch.setattr(sqlite_database._Conn, "execute", original)
+    assert len(captured) == 1
+    sql, params = captured[0]
+    assert params[-1] == store_module.KG_FINDINGS_ROWS_MAX + 1
+    steps = [
+        row[3] for row in sqlite3.Connection.execute(
+            rt.database.connect(), "EXPLAIN QUERY PLAN " + sql, params)
+    ]
+    assert steps == [
+        "SEARCH kg_analysis_findings USING INDEX "
+        "sqlite_autoindex_kg_analysis_findings_1 (notebook_id=?)"
+    ], steps

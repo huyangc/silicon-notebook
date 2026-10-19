@@ -13,6 +13,10 @@ from tests import kg_findings_store_cases as cases
 
 pytestmark = pytest.mark.postgres_integration
 
+# The plan pins (the id-list statements and the old-detail read, on a
+# production-shaped corpus with the planner left alone) live in
+# tests/postgres/test_kg_findings_plan_pins.py.
+
 
 @pytest.fixture
 def postgres_repository(postgres_settings):
@@ -41,6 +45,35 @@ def test_marks_upsert_delete_prune_and_cap(postgres_repository, monkeypatch):
     cases.check_marks(
         postgres_repository, postgres=True, monkeypatch=monkeypatch,
         store_module=store_module)
+
+
+@pytest.fixture
+def concurrent_repository(postgres_settings):
+    """Room for two writers plus the checks: three pooled connections, and lock
+    and statement timeouts above the case's 3 s barrier (the default test
+    settings give a lock wait 1 s)."""
+    from app.repositories.postgres.repository import PostgresRepository
+
+    repository = PostgresRepository(postgres_settings.model_copy(update={
+        "postgres_pool_max_size": 3,
+        "postgres_pool_acquire_timeout_seconds": 10,
+        "postgres_statement_timeout_seconds": 20,
+        "postgres_lock_timeout_seconds": 15,
+    }))
+    try:
+        yield repository
+    finally:
+        repository.close()
+
+
+def test_the_mark_cap_holds_under_concurrent_writers(concurrent_repository, monkeypatch):
+    cases.check_mark_cap_under_concurrency(
+        concurrent_repository, postgres=True, monkeypatch=monkeypatch,
+        store_module=store_module)
+
+
+def test_indexing_publication_clears_findings_and_the_code_version(postgres_repository):
+    cases.check_indexing_publish_clears_findings(postgres_repository, postgres=True)
 
 
 def test_source_states_read_the_latest_extraction_and_hide_synthetic_titles(
@@ -74,29 +107,3 @@ def test_the_check_constraint_backs_the_mark_kind_vocabulary(postgres_repository
                 "kind, at_kg_seq, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
                 (world.nb, "F1", "src-a", "bogus", 1, cases.T1),
             )
-
-
-def test_old_detail_read_stays_on_the_primary_key(postgres_repository):
-    """The publish transaction's in-transaction read of the old detail walks
-    ``pk_kg_analysis_findings`` (an index scan in key order: no sort node, no
-    sequential scan), and it may run inside the write transaction."""
-    rt = postgres_repository._runtime
-    world = cases.seed(postgres_repository, postgres=True)
-    cases.replace(rt, world.nb, cases.FINDINGS_V1)
-    with rt.database.write() as db:
-        db.execute("ANALYZE kg_analysis_findings")
-        db.execute("SET LOCAL enable_seqscan = off")
-        plan = "\n".join(
-            row["QUERY PLAN"]
-            for row in db.execute(
-                "EXPLAIN SELECT rule_id, subject_key, subject_kind, subject_label, "
-                "subject_refs, severity, impact_objects, evidence, "
-                "first_seen_kg_seq, first_seen_cluster_seq "
-                "FROM kg_analysis_findings WHERE notebook_id=%s "
-                "ORDER BY rule_id, subject_key LIMIT %s",
-                (world.nb, 5001),
-            ).fetchall()
-        )
-        assert "pk_kg_analysis_findings" in plan, plan
-        assert "Sort" not in plan, plan
-        assert len(rt.unified_kg.kg_analysis_finding_rows(db, world.nb)) == 3

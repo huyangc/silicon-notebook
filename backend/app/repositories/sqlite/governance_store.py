@@ -349,6 +349,11 @@ class GovernanceStore:
         ``{id, canonical_a, canonical_b, status, seed_a, seed_b, updated_at}``,按
         ``id`` 序。
 
+        排序在 Python 里做,SQL 里**刻意不写** ``ORDER BY id``:有了它,SQLite 3.45
+        (CI 的版本)在生产形态的统计下会改走主键自动索引按 id 序扫**全库**候选,把
+        「本库这几种状态的切片」整个丢掉(3.53 不会);结果集被 ``canonical_ids`` 与
+        切片双重限定,在内存里排一次是有界的。PG 孪生同样不在 SQL 里排,两侧形态一致。
+
         ``concept_merge_candidates`` 只有 ``idx_candidates_nb_status``(canonical_a/b
         无索引),所以这不是主键点查:语句由本库、这几种状态的候选切片驱动,
         ``canonical_ids`` 只在切片里过滤 —— ``id_binding.member_of``(``+col IN``,
@@ -366,10 +371,10 @@ class GovernanceStore:
             "SELECT id, canonical_a, canonical_b, status, seed_a, seed_b, updated_at "
             f"FROM concept_merge_candidates WHERE notebook_id=? AND {status_sql} "
             f"AND ({id_member_of('canonical_a', bound)} "
-            f"OR {id_member_of('canonical_b', bound)}) ORDER BY id",
+            f"OR {id_member_of('canonical_b', bound)})",
             (notebook_id, bound.param, bound.param),
         ).fetchall()
-        return [
+        return sorted((
             {
                 "id": row["id"],
                 "canonical_a": row["canonical_a"],
@@ -380,7 +385,7 @@ class GovernanceStore:
                 "updated_at": str(row["updated_at"] or ""),
             }
             for row in rows
-        ]
+        ), key=lambda row: row["id"])
 
     @staticmethod
     def valid_object_ids(
