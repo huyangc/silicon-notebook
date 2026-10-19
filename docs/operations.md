@@ -1316,9 +1316,12 @@ group's members): every group a newly mirrored notebook's group grant needs must
 at the target under exactly one name, and the package must carry only one group by that name.
 Otherwise the import is refused before it is claimed (a dry run too), naming the group
 (`目标端没有名为「X」的群组` / `目标端有多个名为「X」的群组` / `包内有多个名为「X」的群组`):
-create or rename the group at the target and re-run. A group named only by grants of notebooks
-the target already mirrors is not needed (those grants are never written again) and never
-blocks an import.
+create or rename the group at the target and re-run. A grant naming a group the package does
+not carry at all is refused the same way. A group named only by grants of notebooks the target
+already mirrors is not needed (those grants are never written again) and never blocks an import.
+Group rosters never travel (packages carry no `group_members` rows). Before upgrading, let any
+in-flight import finish: one interrupted by an older build between creating a group and seeding
+its members leaves that group without members, for an administrator to fill in or delete.
 The Knowhow edit history (`knowhow_milestones`/`knowhow_changes`) travels only when the
 **exporting** environment sets `SILICON_NOTEBOOK_SYNC_KNOWHOW_HISTORY=true` (default off; the
 package records the choice as `manifest.knowhow_history` and the importer follows it). A package

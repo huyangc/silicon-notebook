@@ -963,13 +963,11 @@ def test_a_group_matched_by_name_is_reused_not_duplicated(
         "the grant must point at the TARGET's group, not the source's id"
     )
     # ... and the group the target already had keeps ITS membership list.
-    # group_members is seeded only alongside a group this import created; a
-    # group that predates the import belongs to this environment, and pushing
-    # the source's roster into it would hand people access nobody here granted.
+    # The import never creates a group, so memberships are never seeded and
+    # the exporter does not even carry the source's roster (§4/§11).
+    assert _rows(package, "group_members") == []
     assert _count(repo, "SELECT COUNT(*) FROM group_members") == 0
-    assert report.tables["group_members"].skipped == 1
-    reasons = [row for row in report.skipped_rows if row.table == "group_members"]
-    assert reasons and "already existed at the target" in reasons[0].reason
+    assert report.tables["group_members"].inserted == 0
 
 
 def test_a_group_the_target_lacks_refuses_the_import_by_name(
@@ -1030,6 +1028,55 @@ def test_two_package_groups_by_one_name_refuse_the_import(source, target, tmp_pa
         _import(target, package, dry_run=True)
 
     assert "包内有多个名为「shared-team」的群组" in str(failure.value)
+
+
+def test_a_resumed_import_still_needs_the_group_of_the_notebook_it_is_creating(
+    source, target, package, monkeypatch
+):
+    """A notebook an earlier attempt of this package reserved is still being
+    CREATED by this import (it wears the in-flight marker), so its grants are
+    still seeded and the group they name is still needed: removing that group
+    at the target between the crash and the resume refuses the resume by name
+    instead of silently dropping the grant."""
+    _fail_partway(target, package, monkeypatch)
+    assert _one(
+        target["repo"], "SELECT status FROM notebooks WHERE id=?",
+        (source["exported"],),
+    )["status"] == "importing"
+    with target["repo"]._write() as db:
+        db.execute("DELETE FROM group_members")
+        db.execute("DELETE FROM groups")
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, package)
+
+    assert "目标端没有名为「shared-team」的群组" in str(failure.value)
+    assert _count(target["repo"], "SELECT COUNT(*) FROM notebook_grants") == 0
+
+
+def test_a_needed_group_without_a_name_or_absent_from_the_package_refuses(
+    source, target, tmp_path
+):
+    """Name matching cannot answer for a group with no name, nor for a grant
+    whose group the package does not carry at all (``principal_id`` has no
+    foreign key, so a source grant can outlive its group): both refuse,
+    naming the group id."""
+    with source["repo"]._write() as db:
+        db.execute("UPDATE groups SET name='' WHERE id='grp-a'")
+        db.execute(
+            "INSERT INTO notebook_grants(id,notebook_id,principal_type,"
+            "principal_id,role,created_by,created_at) VALUES(?,?,?,?,?,?,?)",
+            ("grant-dangling", source["exported"], "group", "grp-gone", "reader",
+             ALICE[0], MOMENT),
+        )
+    package = _export(source, tmp_path / "out-nameless")
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, package, dry_run=True)
+
+    message = str(failure.value)
+    assert "包内群组 grp-a 没有名字" in message
+    assert "授权引用的群组 grp-gone 不在包内" in message
 
 
 def test_a_missing_group_no_new_grant_needs_does_not_wedge_later_imports(

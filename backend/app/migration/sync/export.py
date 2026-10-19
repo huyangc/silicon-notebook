@@ -1252,27 +1252,20 @@ def _export(
         raise
 
 
-# Rows this package carries that REFERENCE a GLOBAL row which must travel
-# with them, even when that row itself did not change and no exported
-# notebook points at it. Without this an incremental package can carry a
-# ``group_members`` row whose ``groups`` parent is nowhere -- both backends
-# declare ``group_members.group_id -> groups.id`` -- because the seed set is
-# resolved from the touched NOTEBOOKS, and a window that only edited a
-# membership touches none.
-#
-# ``group_members``' parent id is in its own SYNC KEY ``(group_id, user_id)``,
-# which is what lets it be collected from the compacted window without
-# reading a row -- and therefore before ``groups`` is written, since
-# copy_rank puts the parent first.
-_GLOBAL_KEY_PARENTS: dict[str, tuple[str, str]] = {
-    "group_members": ("group_id", "granted_group_ids"),
-}
+# Synced tables whose rows file is always written EMPTY. ``group_members``:
+# the importer never creates a group, and memberships are seeded only with a
+# group the import created (design doc §4/§11, user ruling 2026-10-19), so
+# every member row would be skipped at the target -- carrying the source's
+# rosters (and their users into users.jsonl) would only move personal data
+# for nothing. The table keeps its manifest entry and file, with zero rows,
+# so the package's table set is unchanged.
+_EMPTY_ROW_TABLES = frozenset({"group_members"})
 
-# The same gap reached from a NOTEBOOK-scoped table: a grant whose principal
-# is a group names a ``groups`` row that the notebook-driven seed query would
-# only find if that grant were already committed when the seed ran. Collected
-# from the rows this package actually writes, which is why _RowSink takes an
-# observer.
+# A GLOBAL row that must travel even though the notebook-driven seed query
+# would not find it yet: a grant whose principal is a group names a
+# ``groups`` row that the seed query would only find if that grant were
+# already committed when the seed ran. Collected from the rows this package
+# actually writes, which is why _RowSink takes an observer.
 _PRINCIPAL_SEED_TABLE = "notebook_grants"
 _PRINCIPAL_SEED_KEY_SET = "granted_group_ids"
 
@@ -1305,6 +1298,16 @@ def _table_entry(writer: _PackageWriter, table: str, columns, written: int) -> d
     }
 
 
+def _write_empty_table(
+    source: _Source, conn: Any, writer: _PackageWriter, table: str
+) -> tuple[tuple[str, ...], int]:
+    """``rows/<table>.jsonl`` with no rows, for ``_EMPTY_ROW_TABLES``."""
+    columns = _exported_columns(source, source.columns(conn, table), table)
+    with writer.lines(rows_path(table)):
+        pass
+    return columns, 0
+
+
 def _full_rows(
     source: _Source,
     conn: Any,
@@ -1322,9 +1325,12 @@ def _full_rows(
     table_counts: dict[str, int] = {}
     table_entries: dict[str, dict[str, Any]] = {}
     for table in tables:
-        columns, written = _write_table(
-            source, conn, writer, table, selection.exported, global_keys, users
-        )
+        if table in _EMPTY_ROW_TABLES:
+            columns, written = _write_empty_table(source, conn, writer, table)
+        else:
+            columns, written = _write_table(
+                source, conn, writer, table, selection.exported, global_keys, users
+            )
         table_counts[table] = written
         table_entries[table] = _table_entry(writer, table, columns, written)
     with writer.lines(DELETES_NAME):
@@ -1441,11 +1447,8 @@ def _incremental_rows(
     counters = {"deletes": 0, "mirror": 0}
     deferred: list[str] = []
     # GLOBAL key sets this package needs seeded BEYOND what the touched
-    # notebooks resolve to -- see _GLOBAL_KEY_PARENTS.
+    # notebooks resolve to -- see _PRINCIPAL_SEED_TABLE.
     extra_global: dict[str, set[str]] = {}
-    # Compactions taken early (for the pass above) and reused when their
-    # table is actually written, so the change log is read once per table.
-    cached_changes: dict[str, Any] = {}
 
     def absorb(table: str, delta: Any, sink: _RowSink, columns) -> None:
         table_counts[table] = sink.rows
@@ -1471,6 +1474,12 @@ def _incremental_rows(
             extra: Any = None,
             observe: Any = None,
         ):
+            if table in _EMPTY_ROW_TABLES:
+                # Not even compacted: none of its log rows can travel.
+                columns, written = _write_empty_table(source, conn, writer, table)
+                table_counts[table] = written
+                table_entries[table] = _table_entry(writer, table, columns, written)
+                return
             columns = _exported_columns(source, source.columns(conn, table), table)
             key_columns = source.sync_key(conn, table)
             # A key column the package does not export still has to be READ,
@@ -1479,11 +1488,9 @@ def _incremental_rows(
             read_columns = columns + tuple(
                 name for name in key_columns if name not in columns
             )
-            changes = cached_changes.pop(table, None)
-            if changes is None:
-                changes = incremental.compact(
-                    source, conn, table, watermark, compensation
-                )
+            changes = incremental.compact(
+                source, conn, table, watermark, compensation
+            )
             with writer.lines(rows_path(table)) as write:
                 sink = _RowSink(
                     write, users, table, columns,
@@ -1525,25 +1532,6 @@ def _incremental_rows(
                 table,
                 observe=observe_grant if table == _PRINCIPAL_SEED_TABLE else None,
             )
-
-        # Before any GLOBAL table is written: pull the parent ids out of the
-        # deferred tables' own keys, so the parent (written first, by
-        # copy_rank) can carry them. The compaction is kept and reused rather
-        # than the log being read twice.
-        for table, (column, key_set) in _GLOBAL_KEY_PARENTS.items():
-            if table not in deferred:
-                continue
-            cached_changes[table] = incremental.compact(
-                source, conn, table, watermark, compensation
-            )
-            for change in cached_changes[table].values():
-                if change.operation == incremental.OPERATION_UPSERT:
-                    if key_set == _PRINCIPAL_SEED_KEY_SET:
-                        seed_group(change.key.get(column))
-                    else:
-                        extra_global.setdefault(key_set, set()).add(
-                            str(change.key[column])
-                        )
 
         process(
             "notebooks",

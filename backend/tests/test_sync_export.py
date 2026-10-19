@@ -888,16 +888,17 @@ def test_every_global_scope_names_a_key_set_that_exists():
 
 
 def test_groups_travel_by_the_authorization_edge_only(seeded, tmp_path):
-    """groups/group_members are GLOBAL: a group belongs to no single notebook,
-    so which ones travel is decided by the group grants of the notebooks being
-    exported -- and a group granted only elsewhere must stay behind."""
+    """groups are GLOBAL: a group belongs to no single notebook, so which ones
+    travel is decided by the group grants of the notebooks being exported --
+    and a group granted only elsewhere must stay behind. Their rosters never
+    travel: the importer never creates a group, so a member row could only
+    ever be skipped (design doc §4/§11)."""
     report = _export(seeded["settings"], tmp_path / "out", [seeded["exported"]])
     package = report.package_dir
 
     assert {row["id"] for row in _rows(package, "groups")} == {"grp-exported"}
-    assert {row["group_id"] for row in _rows(package, "group_members")} == {
-        "grp-exported"
-    }
+    assert _rows(package, "group_members") == []
+    assert _manifest(package)["tables"]["group_members"]["rows"] == 0
 
 
 def _reference_object_type(repo, notebook_id: str, object_type: str) -> None:
@@ -1553,9 +1554,7 @@ def test_a_group_reachable_only_through_a_group_admins_edge_still_travels(
     package = report.package_dir
 
     assert "grp-admins-only" in {row["id"] for row in _rows(package, "groups")}
-    assert "grp-admins-only" in {
-        row["group_id"] for row in _rows(package, "group_members")
-    }
+    assert _rows(package, "group_members") == []
 
 
 def test_a_running_export_keeps_its_heartbeat_and_ships_without_it(
