@@ -62,6 +62,7 @@ import {
   FindingsPendingZone,
   FindingsRelinkSpentBlock,
   useFindingsPage,
+  useRelinkSpentRow,
   type KgFindingHandlers,
   type KgFindingsActionState,
   type KgRelinkResult,
@@ -306,6 +307,8 @@ export function KgAnalysisView({
   const dismissedFindings = useFindingsPage(
     notebookId, "dismissed", PASSED_PAGE_SIZE, dismissedOffset, findingsToken,
   );
+  // F5「补上关联已经跑过」随 passed 那一页返回,界面放进诊断数据(§4.5),不在「已通过」列出。
+  const relinkSpent = useRelinkSpentRow(passedFindings);
 
   // 处置之后这一页可能变短:停在已经不存在的那一页上时退回最后一页,而不是显示一页空白。
   useEffect(() => {
@@ -563,12 +566,7 @@ export function KgAnalysisView({
                       </span>
                     </summary>
                     <div className="kg-findings-diagnostics-body">
-                      <FindingsRelinkSpentBlock
-                        report={report}
-                        row={openFindings.page?.present
-                          ? openFindings.page.rows.find((row) => row.rule_id === "F5") ?? null
-                          : null}
-                      />
+                      <FindingsRelinkSpentBlock row={relinkSpent?.row ?? null} />
                       <AnalysisReadout
                         report={report}
                         table={convergence}
@@ -602,6 +600,7 @@ export function KgAnalysisView({
                     report={report}
                     passed={passedFindings}
                     dismissed={dismissedFindings}
+                    spent={relinkSpent}
                     canWrite={canAnalyze}
                     notice={passedNotice}
                     onPassedOffset={setPassedOffset}

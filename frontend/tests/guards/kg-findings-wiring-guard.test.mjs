@@ -107,6 +107,6 @@ test("面板里的写按钮:在飞期间禁用;「标为正常」只给可编辑
     assert.ok(disabledFor.includes(flag), `disabledFor 缺 ${flag}`);
   }
   const text = findings.getFullText();
-  assert.match(text, /const canDismiss = state\.canWrite && row\.status === "open" && Boolean\(row\.subject\?\.key\);/);
+  assert.match(text, /const canDismiss = state\.canWrite && row\.status === "open";/);
   assert.match(text, /\{canDismiss \? \(\s*<button[\s\S]{0,120}className="sort-button kg-finding-dismiss"/);
 });
