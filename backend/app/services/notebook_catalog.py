@@ -188,6 +188,7 @@ class NotebookSummaryQuery:
         kg_build_jobs: "KgBuildJobStorePort | None" = None,
         indexing_pipelines: "IndexingPipelineHostPort | None" = None,
         memory_source_ids: "Callable[[object, str], Sequence[str]] | None" = None,
+        settings: Any = None,
     ) -> None:
         self.database = database
         self.queries = queries
@@ -196,6 +197,12 @@ class NotebookSummaryQuery:
         # ``SourceStorePort.memory_source_ids``: the no-Memory short-circuit
         # of ``viewer_count_kwargs`` (E4-7).
         self.memory_source_ids = memory_source_ids
+        # The process ``Settings`` -- the SAME object the retrieval services
+        # read ``chunk_federation_*`` from, so ``_chunk_lane_base_ids`` and the
+        # federated chunk lane answer from one switch and one bound.  ``None``
+        # (a bare test construction) = no reference-library passage lane: the
+        # summary keeps the pre-federation availability rule exactly.
+        self.settings = settings
 
     def _indexing_option_map(self) -> dict[str, IndexingPipelineOption]:
         """Resolve live availability once per summary/list projection."""
@@ -666,9 +673,9 @@ class NotebookSummaryQuery:
             # 放最前;usable-KG 查询用已算好的 kg_ready/base_kg_available 做便宜预过滤(为假
             # 则连查都免了);confirmed-memory 查询垫底。仅此单库路径回填;列表投影保持默认。
             #
-            # 四个判据里**前三个是本地证据、第四个是参考库证据**,所以拆成两步求值:先短路
-            # 求出本地那半(local_evidence_available),参考库那条只在本地为假时才查。
-            # ask_available 的取值与语义**逐字不变**((a or b or d) or c ≡ a or b or c or d)。
+            # 判据**前三个是本地证据、其余是参考库证据**,所以拆成两步求值:先短路求出本地
+            # 那半(local_evidence_available),参考库那半(带可用图谱的参考库、或有可见
+            # 原文的参考库,见 _base_evidence_available)只在本地为假时才查。
             #
             # 零新增往返(效率是本仓库一等约束,这条路径就是「打开笔记本卡 5-6 秒」的现场):
             #   * 前三个分支本来就要为 ask_available 求值,结果直接复用,不重查。
@@ -699,11 +706,8 @@ class NotebookSummaryQuery:
                 )
             )
             summary.local_evidence_available = local_evidence
-            summary.ask_available = local_evidence or bool(
-                summary.base_kg_available
-                and self.queries.notebook_has_usable_base_kg(
-                    db, notebook_id, viewer_id=user_id
-                )
+            summary.ask_available = local_evidence or self._base_evidence_available(
+                db, summary, user_id
             )
             # paper_meta_missing:「补全论文信息」按钮的显示门(见字段注释)。已在手的
             # 可见来源数是合规候选的严格超集(两者同排 memory/knowhow 合成源),为 0
@@ -725,6 +729,54 @@ class NotebookSummaryQuery:
         )
         summary.paper_meta_backfilling = paper_meta_backfilling
         return summary
+
+    def _base_evidence_available(
+        self, db: object, summary: NotebookSummary, user_id: "str | None"
+    ) -> bool:
+        """ask_available 的**参考库那一半**:对这位查看者生效的挂载库里,有没有本次
+        检索真能取到的证据。两条判据,任一即真:
+
+        * **带可用图谱的参考库**(``notebook_has_usable_base_kg``)—— 严格推理借图。
+          已在手的 ``base_kg_available``(同一次挂载读取的 has_kg,含 deprecated)是
+          它的严格超集,为假则连查都免了。逐字是改动前的那一条。
+        * **有可见原文的参考库**(``notebooks_have_visible_chunk``)—— 联邦 chunk 通道
+          给参与集里每个库各发一条召回腿,所以一个**无图**参考库的原文段落本来就会
+          被检索到;少了这一条,「空笔记本 + 只挂了无图参考库」会被前端锁死输入框、
+          直连 ``POST /ask`` 被 ``_require_ask_available`` 拦成 409,通道到得了、
+          判据却装作到不了。
+
+        前端 ``isAskBlocked`` 与路由的 ``_require_ask_available`` 读的都是这里算出的
+        ``ask_available`` 这一个字段,所以三处同源,不各写一份。
+
+        权限只在检索层审(用户裁决):参考库名单就是 ``summary.base_notebooks``——
+        ``mounted_bases_row`` 按**这位查看者**解析出的有效挂载(M3,与检索座位
+        ``resolve_participants`` 同一谓词、同一 ``MOUNT_ORDER``),查看者读不到的
+        私有库根本不在名单里;原文只数可见来源,与联邦同行腿的天花板同口径。
+
+        成本:只在本地证据为假(空库)时才走到这里;没有挂载库、或联邦通道关掉时
+        零新增查询;否则至多一条与挂载数无关的 EXISTS。列表投影不经过这里。"""
+        if summary.base_kg_available and self.queries.notebook_has_usable_base_kg(
+            db, summary.id, viewer_id=user_id
+        ):
+            return True
+        base_ids = self._chunk_lane_base_ids(summary)
+        return bool(base_ids) and self.queries.notebooks_have_visible_chunk(
+            db, base_ids
+        )
+
+    def _chunk_lane_base_ids(self, summary: NotebookSummary) -> list[str]:
+        """联邦 chunk 通道这次**真会搜**的参考库 id,按挂载顺序。
+
+        与 ``chunk_federation._bounded_participants`` 同一把开关、同一个上界:
+        ``CHUNK_FEDERATION_ENABLED`` 关掉时参与集收成当前库一本,参考库原文根本不进
+        召回,返回空;否则参与集是「当前库 + 挂载库」按 ``MOUNT_ORDER`` 截到
+        ``CHUNK_FEDERATION_MAX_PARTICIPANTS``,当前库恒占第一席,所以参考库至多
+        ``上界 - 1`` 本——排在上界之外的库检索不到,也就不能替这个库撑起可用性。"""
+        settings = self.settings
+        if settings is None or not settings.chunk_federation_enabled:
+            return []
+        seats = max(int(settings.chunk_federation_max_participants) - 1, 0)
+        return [ref.id for ref in summary.base_notebooks][:seats]
 
     def list_for_user(self, user_id: str) -> list[NotebookSummary]:
         """自有库(access=owner)∪ 经只读共享加入的库 ∪ 经**群组授权边**可读的库。

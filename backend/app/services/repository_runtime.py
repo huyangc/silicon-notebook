@@ -465,6 +465,9 @@ def _build_notebook_domain(
         foundation.indexing_pipelines,
         # E4-7: the counts' no-Memory short-circuit (``viewer_count_kwargs``).
         memory_source_ids=seats.source_store.memory_source_ids,
+        # The reference-library passage half of ``ask_available`` reads the
+        # chunk federation's own switch and bound (``_chunk_lane_base_ids``).
+        settings=foundation.settings,
     )
     # Source files resolve storage_dir through the database. Construct
     # BEFORE the catalog so its storage_dir callable can bind THIS store

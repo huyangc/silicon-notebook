@@ -47,6 +47,7 @@ from app.repositories.sqlite.memory_sql import (
     own_memory_source,
     no_memory_member_cluster,
 )
+from app.repositories.sqlite.id_binding import bind_ids, drive_by
 from app.repositories.sqlite.mount_sql import (
     MOUNT_EFFECTIVE_FOR_VIEWER,
     MOUNT_ORDER,
@@ -414,6 +415,35 @@ class QueryStore:
             + " AND EXISTS(SELECT 1 FROM knowledge_objects ko "
             f"WHERE ko.notebook_id = b.id AND ko.status IN ({placeholders})))",
             (viewer_id, notebook_id, *USABLE_STATUSES),
+        ).fetchone()
+        return bool(row[0])
+
+    @staticmethod
+    def notebooks_have_visible_chunk(
+        db: sqlite3.Connection, notebook_ids: list[str]
+    ) -> bool:
+        """这几本库里是否有任一**可见来源**的 chunk —— ask_available 参考库那一半的
+        原文判据(无图参考库)。
+
+        口径逐字对齐联邦 chunk 通道的同行腿:参考库那条腿只在
+        ``all_visible_source_ids`` 的天花板里取原文(``chunk_federation
+        ._peer_visible_sources``,``VISIBLE_SOURCE_TYPES_PREDICATE``),参考库的
+        Memory / Knowhow 投影根本到不了这条通道,所以这里同样只数可见来源的 chunk,
+        不能把一个只有 Knowhow 格子的参考库算成「有得可搜」。
+
+        ``notebook_ids`` 由调用方给出,已经是对查看者生效、且落在联邦参与上界之内
+        的挂载库(``NotebookSummaryQuery._chunk_lane_base_ids``),本方法不做任何
+        鉴权。名单 <= ``CHUNK_FEDERATION_MAX_PARTICIPANTS - 1``(<= 7),一个参数绑定,
+        语句文本与名单长度无关;``drive_by``:逐库按 ``sources(notebook_id, ...)``
+        索引取可见来源,再按 ``idx_chunks_source`` 探第一条 chunk,EXISTS 首中即停。"""
+        bound = bind_ids(notebook_ids)
+        row = db.execute(
+            "SELECT EXISTS(SELECT 1 FROM sources s "
+            f"WHERE {drive_by('s.notebook_id', bound)} "
+            f"AND s.{VISIBLE_SOURCE_TYPES_PREDICATE} "
+            "AND EXISTS(SELECT 1 FROM chunks c "
+            "WHERE c.source_id = s.id AND c.notebook_id = s.notebook_id))",
+            (bound.param,),
         ).fetchone()
         return bool(row[0])
 

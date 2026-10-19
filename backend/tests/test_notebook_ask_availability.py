@@ -378,3 +378,238 @@ def test_base_kg_notebook_ids_costs_no_extra_query(repo, monkeypatch):
     assert trace_one == trace_three, (
         "挂 1 个库与挂 3 个库的语句序列必须逐条相同 —— 不相同就说明有 per-base 的追问"
     )
+
+
+# ---------------------------------------------------------------------------
+# 参考库那一半的**原文**判据 —— 无图参考库的可见原文也撑得起 ask_available。
+#
+# 联邦 chunk 通道给参与集里每个库各发一条召回腿,所以「空笔记本 + 只挂了一个无图
+# 参考库」的原文本来就检索得到;旧判据只认「参考库有可用知识图谱」,于是前端锁死输入
+# 框、直连 POST /ask 被拦成 409。新判据与联邦同行腿同口径:对查看者生效的挂载库、
+# 落在 CHUNK_FEDERATION_MAX_PARTICIPANTS 上界之内、只数可见来源的 chunk。
+# ---------------------------------------------------------------------------
+
+
+def _graphless_library(repo, name, *, chunk_source_type="document", chunked=True):
+    """一个**无图**的私有参考库(与挂载方同 owner,不是公共库):一篇来源,
+    ``chunked`` 时带一条 chunk。"""
+    library = repo.create_notebook(NotebookCreate(name=name))
+    with repo._write() as db:
+        _add_source(db, library.id, f"s-{name}", chunk_source_type)
+        if chunked:
+            _add_chunk(db, library.id, f"s-{name}", f"c-{name}")
+    return library
+
+
+def _empty_notebook_mounting(repo, libraries, name="mounts-graphless"):
+    nb = repo.create_notebook(NotebookCreate(name=name))
+    repo.replace_notebook_bases(
+        nb.id, [library.id for library in libraries], repo.current_user().id
+    )
+    return nb
+
+
+def test_graphless_library_with_visible_chunks_is_ask_available(repo):
+    """缺口本体:本库零证据、参考库无图但有可见原文 —— 必须可提问。"""
+    library = _graphless_library(repo, "ref-text")
+    nb = _empty_notebook_mounting(repo, [library])
+    summary = repo.get_notebook(nb.id)
+    assert summary.base_kg_available is False        # 前提:参考库确实无图
+    assert summary.local_evidence_available is False  # 前提:本地确实什么都没有
+    assert summary.ask_available is True
+
+
+def test_graphless_library_without_chunks_is_not_ask_available(repo):
+    """参考库有来源、却一条 chunk 都没有(解析中 / 解析失败)—— 仍拦。"""
+    library = _graphless_library(repo, "ref-unparsed", chunked=False)
+    nb = _empty_notebook_mounting(repo, [library])
+    assert repo.get_notebook(nb.id).ask_available is False
+
+
+def test_library_with_only_hidden_projection_chunks_is_not_ask_available(repo):
+    """参考库只有 Knowhow 格子的 chunk:联邦同行腿只取可见来源的原文,隐藏投影到不了
+    跨库通道,所以它撑不起本库的可用性(本库自己的 Knowhow 格子才算本地证据)。"""
+    library = _graphless_library(repo, "ref-knowhow", chunk_source_type="knowhow")
+    nb = _empty_notebook_mounting(repo, [library])
+    assert repo.get_notebook(nb.id).ask_available is False
+
+
+def test_library_the_viewer_cannot_read_does_not_make_ask_available(repo):
+    """权限只在检索层审:A 的主人把自己的**私有**无图库挂到共享笔记本 A 上,这条挂载
+    只对他自己生效(M3)。读不到那个库的成员 Bob 不能因为它有 chunk 就被放行。"""
+    from app.api.ask_routes import _require_ask_available
+    from app.core.request_context import reset_request_user, set_request_user
+    from fastapi import HTTPException
+
+    library = _graphless_library(repo, "ref-private")
+    nb = _empty_notebook_mounting(repo, [library], name="shared-a")
+    bob = repo._runtime.identity.create_user("c00140001", "pw")
+    repo._runtime.sharing.add_member(nb.id, bob.id)
+
+    # 挂载人自己:生效,可提问(正对照,证明下面的「拦」不是别的原因)。
+    assert repo.get_notebook(nb.id).ask_available is True
+
+    marker = set_request_user(bob)
+    try:
+        summary = repo.get_notebook(nb.id)
+        assert summary.base_notebooks == []
+        assert summary.ask_available is False
+        with pytest.raises(HTTPException) as refused:
+            _require_ask_available(summary)
+        assert refused.value.status_code == 409
+    finally:
+        reset_request_user(marker)
+
+
+def test_library_passages_do_not_count_when_federation_is_off(repo):
+    """``CHUNK_FEDERATION_ENABLED=0``:参与集收成当前库一本,参考库原文根本不进召回,
+    判据跟着同一把开关回到改动前。"""
+    library = _graphless_library(repo, "ref-text")
+    nb = _empty_notebook_mounting(repo, [library])
+    assert repo._runtime.notebook_summaries.settings is repo.settings
+    repo.settings.chunk_federation_enabled = False
+    assert repo.get_notebook(nb.id).ask_available is False
+
+
+@pytest.mark.parametrize(
+    ("with_text", "expected"),
+    [
+        pytest.param("a-first", True, id="inside-the-bound"),
+        pytest.param("b-second", False, id="past-the-bound"),
+    ],
+)
+def test_only_libraries_inside_the_federation_bound_count(repo, with_text, expected):
+    """参与上界 2 = 当前库 + 一个参考库(按 MOUNT_ORDER,私有库按名字排)。排在上界
+    之外的库联邦通道检索不到,也就不能替这个库撑起可用性。"""
+    first = _graphless_library(repo, "a-first", chunked=with_text == "a-first")
+    second = _graphless_library(repo, "b-second", chunked=with_text == "b-second")
+    nb = _empty_notebook_mounting(repo, [second, first])
+    repo.settings.chunk_federation_max_participants = 2
+    assert [ref.id for ref in repo.get_notebook(nb.id).base_notebooks] == [
+        first.id, second.id
+    ]
+    assert repo.get_notebook(nb.id).ask_available is expected
+
+
+def _traced_statements(repo, monkeypatch):
+    sql: list[str] = []
+    database = repo._runtime.database
+    orig_connect = database.connect
+
+    class _SpyConn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, statement, *a, **kw):
+            sql.append(statement)
+            return self._inner.execute(statement, *a, **kw)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+    monkeypatch.setattr(database, "connect", lambda: _SpyConn(orig_connect()))
+    return sql
+
+
+def test_library_passage_probe_costs_one_statement_whatever_the_mount_count(
+    repo, monkeypatch,
+):
+    """新判据是**一条** EXISTS,名单绑成一个参数:挂 1 / 5 / 50 个无图空库时
+    ``get_notebook`` 的语句序列逐条相同(50 个被联邦上界截成 7 个,语句文本不变),
+    不存在逐库追问。"""
+    notebooks = {}
+    for count in (1, 5, 50):
+        libraries = [
+            _graphless_library(repo, f"r{count}-{i:02d}", chunked=False)
+            for i in range(count)
+        ]
+        notebooks[count] = _empty_notebook_mounting(
+            repo, libraries, name=f"mounts-{count}"
+        )
+        repo.get_notebook(notebooks[count].id)   # 预热进程内计数缓存
+    sql = _traced_statements(repo, monkeypatch)
+    traces = {}
+    for count, nb in notebooks.items():
+        sql.clear()
+        assert repo.get_notebook(nb.id).ask_available is False
+        traces[count] = list(sql)
+    probes = [s for s in traces[5] if "FROM chunks c" in s]
+    assert len(probes) == 1, probes
+    assert traces[1] == traces[5] == traces[50]
+
+
+def test_notebook_with_local_evidence_never_runs_the_library_probe(
+    repo, monkeypatch,
+):
+    """绝大多数库本地就有 chunk:短路在前,打开路径一条新语句都不多付。"""
+    library = _graphless_library(repo, "ref-text")
+    nb = repo.create_notebook(NotebookCreate(name="own-doc"))
+    with repo._write() as db:
+        _add_source(db, nb.id, "s-own", "document")
+        _add_chunk(db, nb.id, "s-own", "c-own")
+    repo.replace_notebook_bases(nb.id, [library.id], repo.current_user().id)
+    repo.get_notebook(nb.id)
+    sql = _traced_statements(repo, monkeypatch)
+    assert repo.get_notebook(nb.id).ask_available is True
+    assert not [s for s in sql if "FROM chunks c" in s]
+
+
+def test_list_projection_never_runs_the_library_probe(repo, monkeypatch):
+    """笔记本列表是热路径:列表投影不计算 ask_available(恒为默认 True),新判据不得
+    把它拉回逐库查询。"""
+    library = _graphless_library(repo, "ref-text")
+    nb = _empty_notebook_mounting(repo, [library])
+    repo.list_notebooks()
+    sql = _traced_statements(repo, monkeypatch)
+    listed = {row.id: row for row in repo.list_notebooks()}
+    assert listed[nb.id].ask_available is True
+    assert not [s for s in sql if "FROM chunks c" in s]
+
+
+@pytest.mark.parametrize(
+    ("chunked", "expected_status"),
+    [
+        pytest.param(True, 200, id="graphless-library-with-text"),
+        pytest.param(False, 409, id="graphless-library-without-text"),
+    ],
+)
+@pytest.mark.parametrize("mode", ["chunk", "reasoning"])
+@pytest.mark.parametrize("enum_tools", [False, True], ids=["enum-off", "enum-on"])
+def test_http_ask_on_an_empty_notebook_follows_the_library_text(
+    tmp_path, monkeypatch, chunked, expected_status, mode, enum_tools,
+):
+    """HTTP 端到端:详情里的 ``ask_available``(前端 ``isAskBlocked`` 读的那个字段)
+    与 ``POST /ask`` 的 409 预检给出同一个答案——参考库有可见原文就放行,没有就仍拦。
+
+    枚举工具开关两态都跑:它只决定 reasoning 内部的无图早退放行理由,与这道 HTTP 闸
+    无关;改动前两态在这里都是 409。"""
+    from tests.test_ask_modes_api import _client
+
+    monkeypatch.setenv("REASONING_ENUM_TOOLS_ENABLED", str(enum_tools).lower())
+    client = _client(tmp_path, monkeypatch)
+    from app.api.ask_routes import repository
+
+    repo = repository()
+    assert repo.settings.reasoning_enum_tools_enabled is enum_tools
+    library = client.post("/api/notebooks", json={"name": "ref"}).json()["id"]
+    nb = client.post("/api/notebooks", json={"name": "empty"}).json()["id"]
+    with repo._write() as db:
+        _add_source(db, library, "s-ref", "document")
+        if chunked:
+            _add_chunk(db, library, "s-ref", "c-ref")
+    repo.replace_notebook_bases(nb, [library], repo.current_user().id)
+
+    detail = client.get(f"/api/notebooks/{nb}").json()
+    assert detail["kg_ready"] is False and detail["base_kg_available"] is False
+    assert detail["ask_available"] is (expected_status == 200)
+    asked = client.post(
+        f"/api/notebooks/{nb}/ask", json={"question": "q", "mode": mode}
+    )
+    assert asked.status_code == expected_status, asked.text
