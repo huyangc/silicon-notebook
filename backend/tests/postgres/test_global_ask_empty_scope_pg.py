@@ -1,7 +1,7 @@
 """PostgreSQL twin of ``tests/test_global_ask_empty_scope.py``.
 
-Global Ask refuses, at submission, a scope with nothing to search in any of
-its libraries -- by the single-library predicate applied per participant. The
+Global Ask refuses, at submission, a scope with nothing a global run could
+search -- every participant's frozen visible-source ceiling empty. The
 scenarios are shared and backend-neutral; this file runs them on the canonical
 backend (see the SQLite file's module docstring for the contract).
 """
@@ -53,8 +53,3 @@ def test_global_empty_scope_on_postgres(postgres_world, monkeypatch, scenario):
     repository, world = postgres_world
     run(scenario, repository, world, monkeypatch)
 
-
-def test_runtime_wires_the_shared_predicate_on_postgres(postgres_world):
-    repository, _ = postgres_world
-    service = repository._runtime.global_ask_service()
-    assert service.local_evidence == repository._runtime.notebook_summaries.any_local_evidence

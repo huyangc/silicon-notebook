@@ -1377,3 +1377,30 @@ async def test_one_key_is_not_replayed_from_star_to_an_id_list(adapter):
     with pytest.raises(AgentToolError) as refused:
         await handlers["ask"]("Q?", None, notebooks=BOTH, mode="chunk", client_request_id="k1")
     assert refused.value.code == "invalid_argument" and "另一个问题" in refused.value.message
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["chunk", "reasoning"])
+async def test_an_all_empty_global_scope_is_unavailable_end_to_end(mcp_env, mode):
+    """The real global service behind the official client: two empty notebooks
+    (and ``"*"`` over them) are refused by the empty-scope admission check as
+    ``unavailable`` with its sentence -- never ``busy`` -- and nothing is
+    created. Reasoning is refused before its understanding pass."""
+    from app.api.deps import global_ask_service as provide
+    from tests.test_memory_mcp import _error_code
+
+    env = mcp_env
+    both = [env["notebook"].id, env["other"].id]
+    token = env["service"].issue_agent_token(
+        env["alice"].id, env["profile_a"].id, ["read", "ask"],
+        env["notebook"].id, both, None,
+    )
+    async with OfficialMcpClient(env["app"], token.token) as client:
+        for notebooks in (both, ["*"]):
+            refused = await client.call("ask", {
+                "question": "这些资料讲了什么？", "notebooks": notebooks, "mode": mode,
+            })
+            assert refused.isError
+            assert _error_code(refused) == "unavailable"
+            assert "当前检索范围为空" in refused.content[0].text
+    assert provide().list_conversations(user_id=env["alice"].id) == []

@@ -1,15 +1,15 @@
-"""Global Ask refuses a scope with nothing to search, by the single-library rule.
+"""Global Ask refuses a scope with nothing a global run could search.
 
 The single-library entry point refuses an empty retrieval scope with a 409
 (``ask_routes._require_ask_available`` / ``_require_non_empty_scope``); the
 global entry point now refuses the same condition at submission, before any
 job row, conversation row or model call (``GlobalAskService.
 _require_searchable``, inside ``_resolve_run_scope``, so the reasoning preview
-refuses too). The judgement is the single-library one applied per participant:
-a library counts when its frozen visible-source ceiling is non-empty or the ONE
-local-evidence predicate (``NotebookSummaryQuery.local_evidence``: any chunk, a
-usable KG, the viewer's confirmed Memory) holds; any library with content
-admits the run.
+refuses too). Same composition (``local_universe_non_empty``), per participant,
+over what a global run can actually search: its frozen visible-source
+ceilings. A library whose only rows are Knowhow cells, confirmed Memory or KG
+objects with no evidence in that ceiling is unreachable by a global run and
+does not admit it; any library with a visible source does.
 
 The scenarios are backend-neutral (store APIs; raw SQL takes the placeholder),
 so the PostgreSQL twin (``tests/postgres/test_global_ask_empty_scope_pg.py``)
@@ -89,9 +89,9 @@ def _confirmed_memory(repo, ph: str, notebook_id: str, user_id: str) -> None:
 
 
 def build_world(repo, ph: str) -> dict:
-    """Alice owns empty, chunk-only, KG-only, Memory-only, sourced (a visible
-    source not chunked yet) and full notebooks; Bob owns one full notebook
-    Alice cannot read."""
+    """Alice owns empty, chunk-only (Knowhow), KG-only, Memory-only, sourced (a
+    visible source not chunked yet) and full notebooks; Bob owns one full and
+    one empty notebook, neither of which Alice can read."""
     identity = repo._runtime.identity
     alice = identity.create_user("a00191019", "password-12")
     bob = identity.create_user("b00191019", "password-12")
@@ -109,6 +109,9 @@ def build_world(repo, ph: str) -> dict:
     try:
         world["bobs"] = repo._runtime.catalog.create_notebook(
             NotebookCreate(name="bobs")
+        ).id
+        world["bobs_empty"] = repo._runtime.catalog.create_notebook(
+            NotebookCreate(name="bobs_empty")
         ).id
     finally:
         reset_request_user(marker)
@@ -176,42 +179,49 @@ def scenario_all_empty_is_refused_before_anything(repo, world, monkeypatch):
     assert not service._workers and not service._pending
 
 
-def scenario_any_library_with_content_admits(repo, world):
+def scenario_hidden_rows_do_not_admit(repo, world, monkeypatch):
+    """Knowhow cells, confirmed Memory and an evidence-less KG object sit
+    outside every global ceiling (visible sources only): a global run could not
+    retrieve them, so they must not admit one."""
     service = repo._runtime.global_ask_service()
-    for library in ("chunk_only", "kg_only", "memory_only", "sourced", "full"):
+    _no_model(monkeypatch, service)
+    for library in ("chunk_only", "kg_only", "memory_only"):
+        _refused(lambda: _preview(service, world, _include(world["empty_a"], world[library])))
+    _refused(lambda: _preview(service, world, _include(
+        world["chunk_only"], world["kg_only"], world["memory_only"],
+    )))
+
+
+def scenario_any_visible_source_admits(repo, world):
+    service = repo._runtime.global_ask_service()
+    for library in ("sourced", "full"):
         prepared = _preview(service, world, _include(world["empty_a"], world[library]))
         assert prepared.override.notebook_ids == (world["empty_a"], world[library])
-
-
-def scenario_a_non_empty_ceiling_pays_no_probe(repo, world, monkeypatch):
-    service = repo._runtime.global_ask_service()
-    monkeypatch.setattr(
-        service, "local_evidence",
-        lambda *a: pytest.fail("a non-empty ceiling must not probe"),
-    )
-    _preview(service, world, _include(world["empty_a"], world["sourced"]))
 
 
 def scenario_unreadable_content_never_admits(repo, world):
     service = repo._runtime.global_ask_service()
     # ``all`` resolves only what Alice may read; Bob's full notebook is not in
-    # it, so it cannot lend the run its content.
-    allowed = [world["empty_a"], world["empty_b"]]
+    # it even when the allowlist names it, so it cannot lend the run content.
+    allowed = [world["empty_a"], world["empty_b"], world["bobs"]]
     _refused(lambda: _preview(service, world, {"mode": "all"}, allowed_notebook_ids=allowed))
-    # Naming it is refused as unreadable, never admitted.
-    with pytest.raises(GlobalAskError) as named:
-        _preview(service, world, _include(world["empty_a"], world["bobs"]))
-    assert named.value.status_code == 404
-    # The MCP allowlist narrows the set the same way: Alice's own chunk-only
+    # Naming one of Bob's is refused as unreadable -- 404 whether it holds
+    # content or not, so the admission check is never a probe of what an
+    # unreadable library contains.
+    for foreign in ("bobs", "bobs_empty"):
+        with pytest.raises(GlobalAskError) as named:
+            _preview(service, world, _include(world["empty_a"], world[foreign]))
+        assert named.value.status_code == 404
+    # The MCP allowlist narrows the set the same way: Alice's own full
     # notebook outside the allowlist does not admit it either.
     _refused(lambda: _preview(
         service, world, {"mode": "all"}, allowed_notebook_ids=[world["empty_a"]],
     ))
     admitted = _preview(
         service, world, {"mode": "all"},
-        allowed_notebook_ids=[world["empty_a"], world["chunk_only"]],
+        allowed_notebook_ids=[world["empty_a"], world["full"]],
     )
-    assert set(admitted.override.notebook_ids) == {world["empty_a"], world["chunk_only"]}
+    assert set(admitted.override.notebook_ids) == {world["empty_a"], world["full"]}
 
 
 def scenario_an_admitted_run_completes(repo, world):
@@ -256,8 +266,8 @@ def scenario_single_library_unchanged(repo, world):
 
 SCENARIOS = (
     scenario_all_empty_is_refused_before_anything,
-    scenario_any_library_with_content_admits,
-    scenario_a_non_empty_ceiling_pays_no_probe,
+    scenario_hidden_rows_do_not_admit,
+    scenario_any_visible_source_admits,
     scenario_unreadable_content_never_admits,
     scenario_an_admitted_run_completes,
     scenario_single_library_unchanged,
@@ -294,12 +304,6 @@ def test_global_empty_scope(sqlite_world, monkeypatch, scenario):
     run(scenario, repo, world, monkeypatch)
 
 
-def test_runtime_wires_the_shared_predicate(sqlite_world):
-    repo, _ = sqlite_world
-    service = repo._runtime.global_ask_service()
-    assert service.local_evidence == repo._runtime.notebook_summaries.any_local_evidence
-
-
 def test_the_mcp_error_is_readable_and_not_busy():
     from app.api.mcp_tools.global_ask import global_ask_tool_error
     from app.services.global_ask import _SCOPE_EMPTY_COPY
@@ -331,25 +335,3 @@ def test_the_http_refusal_has_the_single_library_shape(tmp_path, monkeypatch):
     _source(ask_routes.repository(), notebook)
     assert client.post("/api/global-ask/intent", json={"question": "有哪些内容"}).status_code == 200
 
-
-def test_library_construction_without_the_probe_leaves_admission_unchecked(tmp_path):
-    """``local_evidence=None`` (library/test construction, no store wired)
-    admits even all-empty ceilings: the check is the runtime's, never a guess."""
-    from types import SimpleNamespace
-
-    from app.services.global_ask import GlobalAskService
-
-    settings = Settings(_env_file=None, database_url=f"sqlite:///{tmp_path / 'g.db'}",
-                        storage_dir=str(tmp_path / "storage"))
-    service = GlobalAskService(
-        store=None, notebooks=lambda user: {"a": "A"}, can_read=lambda nb, user: True,
-        sources=SimpleNamespace(visible_source_ids_by_notebook=lambda ids: {nb: [] for nb in ids}),
-        settings=settings, ask=None,
-    )
-    try:
-        prepared = service.prepare_intent_preview(
-            GlobalAskIntentPreviewRequest(question="q"), user_id="u",
-        )
-        assert prepared.source_ceiling == {"a": frozenset()}
-    finally:
-        service.close()

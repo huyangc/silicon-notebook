@@ -305,7 +305,7 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
             </div>}
         </div>
         <div className="global-composer-area">
-          {ask.error && <div className="global-inline-error" role="alert">{ask.error}<button className="global-text-button" disabled={busy} onClick={() => void ask.load()}>重新加载</button></div>}
+          {ask.error && <div className="global-inline-error" role="alert">{ask.error}{ask.errorReloadable && <button className="global-text-button" disabled={busy} onClick={() => void ask.load()}>重新加载</button>}</div>}
           {/* 停止 / 取消之后的一句轻提示，自动消失；与笔记本内问答同一组措辞。 */}
           {ask.notice && <p className="global-notice" role="status">{ask.notice}</p>}
           {ask.pollError && <div className="global-inline-error" role="alert">{ask.pollError}<button className="global-text-button" onClick={ask.retryPoll}>重新连接</button></div>}
