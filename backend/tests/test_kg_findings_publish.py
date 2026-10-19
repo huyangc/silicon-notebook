@@ -35,7 +35,6 @@ from app.services.embedding import FakeEmbedder
 from app.services.kg_analysis import (
     ABSENCE_UNEXPECTED,
     ABSENCE_UPGRADE_PENDING,
-    KgAnalysisService,
 )
 from app.services.kg_analysis_precompute import analysis_ledger_is_current
 from app.services.sqlite_repository import SQLiteRepository
@@ -82,11 +81,7 @@ def _keys(rows) -> list:
 
 
 def _overview(repo, notebook_id: str):
-    runtime = repo._runtime
-    return KgAnalysisService(
-        database=runtime.database, unified_kg=runtime.unified_kg,
-        now=lambda: "2026-10-19T12:00:00",
-    ).overview(notebook_id)
+    return repo._runtime.kg_analysis.overview(notebook_id)
 
 
 def _view(overview, kind: str):

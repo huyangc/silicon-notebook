@@ -4771,6 +4771,515 @@
           "title": "FeedbackResponse",
           "type": "object"
         },
+        "FindingAction": {
+          "description": "建议动作(从明细派生,不落库):``kind`` = delete_source / reparse_source /\nreview_merge / relink;``capability`` 是对应既有入口的守卫名;``source_id`` 是删除 /\n重新解析对准的那一篇。出不出按钮由前端按既有入口的同一判据决定,后端仍是权限的\n唯一判据。",
+          "properties": {
+            "capability": {
+              "default": "",
+              "title": "Capability",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "source_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source Id"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "title": "FindingAction",
+          "type": "object"
+        },
+        "FindingImpact": {
+          "properties": {
+            "objects": {
+              "title": "Objects",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "objects"
+          ],
+          "title": "FindingImpact",
+          "type": "object"
+        },
+        "FindingLiveSource": {
+          "description": "读这一页时问题涉及的来源**此刻**的样子(主键点查)。隐藏来源(Memory / knowhow)\n的标题置空。``processing`` = 正在排队 / 解析 / 抽取。",
+          "properties": {
+            "exists": {
+              "title": "Exists",
+              "type": "boolean"
+            },
+            "processing": {
+              "default": false,
+              "title": "Processing",
+              "type": "boolean"
+            },
+            "source_id": {
+              "title": "Source Id",
+              "type": "string"
+            },
+            "source_type": {
+              "default": "",
+              "title": "Source Type",
+              "type": "string"
+            },
+            "title": {
+              "default": "",
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_id",
+            "exists"
+          ],
+          "title": "FindingLiveSource",
+          "type": "object"
+        },
+        "FindingRow": {
+          "description": "一条问题。``status``(读侧派生):open / handled(已处理,更新后核验,仍在待处理\n区)/ dismissed / decided_not_same(F4,用户已判定不是同一个)/ relink_spent(F5,\n补上关联已跑过、之后没有新内容)。``handled_reason``:source_deleted /\nsource_processing / source_reprocessed / merge_confirmed / relinked。证据只放判据真正\n用到的数与 ≤5 个样例名(来自可见来源),单位在页的 ``evidence_units``。",
+          "properties": {
+            "actions": {
+              "items": {
+                "$ref": "#/components/schemas/FindingAction"
+              },
+              "title": "Actions",
+              "type": "array"
+            },
+            "dismissed_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Dismissed At"
+            },
+            "evidence": {
+              "additionalProperties": true,
+              "title": "Evidence",
+              "type": "object"
+            },
+            "first_seen": {
+              "$ref": "#/components/schemas/FindingSeq"
+            },
+            "handled_reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Handled Reason"
+            },
+            "impact": {
+              "$ref": "#/components/schemas/FindingImpact"
+            },
+            "live_sources": {
+              "items": {
+                "$ref": "#/components/schemas/FindingLiveSource"
+              },
+              "title": "Live Sources",
+              "type": "array"
+            },
+            "rule_id": {
+              "title": "Rule Id",
+              "type": "string"
+            },
+            "severity": {
+              "title": "Severity",
+              "type": "string"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "subject": {
+              "$ref": "#/components/schemas/FindingSubject"
+            },
+            "subject_refs": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Subject Refs",
+              "type": "array"
+            }
+          },
+          "required": [
+            "rule_id",
+            "severity",
+            "subject",
+            "subject_refs",
+            "evidence",
+            "impact",
+            "actions",
+            "first_seen",
+            "status",
+            "live_sources"
+          ],
+          "title": "FindingRow",
+          "type": "object"
+        },
+        "FindingSeq": {
+          "description": "两条世代线的一对戳(KG 写入 / 合并结果)。",
+          "properties": {
+            "cluster_seq": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cluster Seq"
+            },
+            "kg_seq": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kg Seq"
+            }
+          },
+          "title": "FindingSeq",
+          "type": "object"
+        },
+        "FindingSubject": {
+          "description": "一条问题指向什么:``kind`` = source / source_pair / concept_group / notebook;\n``key`` 是稳定主键(F2 两个来源 id 用 ``|`` 拼;F4 是 squash key);``label`` 是发布时\n存下的标题或名字快照(来源删了也说得出是谁)。",
+          "properties": {
+            "key": {
+              "title": "Key",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "label": {
+              "default": "",
+              "title": "Label",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "key"
+          ],
+          "title": "FindingSubject",
+          "type": "object"
+        },
+        "FindingsPageResponse": {
+          "description": "问题清单的一页(一个区):``zone`` = open(待处理:open + handled)/ passed\n(decided_not_same + relink_spent)/ dismissed。``built_at`` 是整份清单建于哪一代(不\n逐行记);``total`` 是这个区的全部行数,``has_more`` 让分页不必靠 ``returned < limit``\n猜。账本行不在时 ``present=false``、``rows`` 为空。",
+          "properties": {
+            "absence": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Absence"
+            },
+            "built_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/FindingSeq"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "evidence_units": {
+              "additionalProperties": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "title": "Evidence Units",
+              "type": "object"
+            },
+            "freshness": {
+              "$ref": "#/components/schemas/Freshness"
+            },
+            "generated_at": {
+              "title": "Generated At",
+              "type": "string"
+            },
+            "has_more": {
+              "title": "Has More",
+              "type": "boolean"
+            },
+            "limit": {
+              "title": "Limit",
+              "type": "integer"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "offset": {
+              "title": "Offset",
+              "type": "integer"
+            },
+            "present": {
+              "title": "Present",
+              "type": "boolean"
+            },
+            "returned": {
+              "title": "Returned",
+              "type": "integer"
+            },
+            "rows": {
+              "items": {
+                "$ref": "#/components/schemas/FindingRow"
+              },
+              "title": "Rows",
+              "type": "array"
+            },
+            "rules_version": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Rules Version"
+            },
+            "total": {
+              "title": "Total",
+              "type": "integer"
+            },
+            "units": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "title": "Units",
+              "type": "object"
+            },
+            "zone": {
+              "title": "Zone",
+              "type": "string"
+            }
+          },
+          "required": [
+            "notebook_id",
+            "generated_at",
+            "present",
+            "freshness",
+            "zone",
+            "limit",
+            "offset",
+            "total",
+            "returned",
+            "has_more",
+            "units",
+            "evidence_units",
+            "rows"
+          ],
+          "title": "FindingsPageResponse",
+          "type": "object"
+        },
+        "FindingsRelink": {
+          "description": "「补上关联」的持久标记(设计 2026-10-19 §4.5)。``may_change=false`` = 跑过、之后\n没有新内容进来:它确定且幂等,再跑一次也补不上 —— F5 移出待处理、不放按钮。",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "At"
+            },
+            "at_kg_seq": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "At Kg Seq"
+            },
+            "attempted": {
+              "title": "Attempted",
+              "type": "boolean"
+            },
+            "may_change": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "May Change"
+            }
+          },
+          "required": [
+            "attempted"
+          ],
+          "title": "FindingsRelink",
+          "type": "object"
+        },
+        "FindingsSummary": {
+          "description": "问题清单的账本摘要(总览里那一格;只读账本 + 标记,不读明细)。\n\n``present=false`` 时 ``absence`` 说为什么(``never_computed`` / ``unexpected`` /\n``upgrade_pending`` —— 最后一档是灰色:升级后还没生成,不是数据坏了),其余为 null /\n空;「还没生成」绝不渲染成「没有问题」。``rules`` 按规则代号为键(F1…F5、S1),每条\n``{status: ran|skipped, reason?, total, persisted, truncated, …计数}``;S1 的样例名在\n``dev_items``。``structure`` 是只依赖连通分量的 S3 结构数;``comparison`` 是与上一次的\n对比摘要(不可比时 ``comparable=false`` + ``reason``)。单位见 ``units``。",
+          "properties": {
+            "absence": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Absence"
+            },
+            "built_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/FindingSeq"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "comparison": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Comparison"
+            },
+            "counts": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Counts"
+            },
+            "created_at": {
+              "default": "",
+              "title": "Created At",
+              "type": "string"
+            },
+            "dev_items": {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "title": "Dev Items",
+              "type": "array"
+            },
+            "freshness": {
+              "$ref": "#/components/schemas/Freshness"
+            },
+            "present": {
+              "title": "Present",
+              "type": "boolean"
+            },
+            "relink": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/FindingsRelink"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "rules": {
+              "additionalProperties": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "title": "Rules",
+              "type": "object"
+            },
+            "rules_version": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Rules Version"
+            },
+            "structure": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Structure"
+            },
+            "units": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "title": "Units",
+              "type": "object"
+            }
+          },
+          "required": [
+            "present",
+            "freshness",
+            "rules",
+            "dev_items",
+            "units"
+          ],
+          "title": "FindingsSummary",
+          "type": "object"
+        },
         "Freshness": {
           "description": "一份产物的新鲜度 + 口径来源。\n\n``built_at_seq`` 是它建于哪个 ``kg_mutation_seq``;``seq_behind`` = 当前 seq 减去它\n(**不 clamp 到 0**:负值意味着账本比当前还新,是库被手工改过的信号,压成 0 等于\n把异常藏起来)。产物缺席 / 社区从没建过时三个都是 null,不是 0 —— 0 会被读成\n「刚刚建好」。\n\n``built_at_cluster_seq`` / ``cluster_seq_behind`` 是**合并结果**那条世代线\n(``cluster_mutation_seq``),必须独立于 KG 世代:合并的写路径刻意不动\n``kg_mutation_seq``,所以只看前一条的话,一次纯合并之后簇大小直方图与最大簇榜单\n已经陈旧、报告却会说「与当前一致」。两个字段为 null 有三种情形:这份产物与合并\n结果无关(``relation_provenance`` —— 它的查询只读关系表);它缺席 / 没盖这个戳;\n或者它是**依赖主题板块**的那两份、而这一轮只补了账本 —— 那时板块划分是库里现成的,\n建在哪一代合并结果上没有地方记,产物因此是混合世代的,只能如实报「无从判断」。\n\n``stale`` 是两条线的**三值**合取:任一条明确落后即 true;两条都对齐即 false;\n没有明确落后但有一条无从判断即 **null**(上面第三种情形,以及产物缺席)。\nnull 不等于 false —— 把「无从判断」显示成「与当前一致」正是这个视图存在的理由的\n反面;消费方拿 ``present`` 分辨「缺席」与「在场但世代无从判断」。",
           "properties": {
@@ -5936,7 +6445,7 @@
           "type": "object"
         },
         "KgAnalysisResponse": {
-          "description": "总览。``artifacts`` **恒为五条、恒定顺序**,缺席的那几份也在里面(带 absence),\n这样「少了一份产物」不会表现成「少了一张卡片、没有任何提示」。\n\n``ledger_consistent=false`` = 在场的产物不是同一轮预计算的(正常写路径不可能产生,\n只可能是库被手工改过);此时报告里的数字互相不可比。",
+          "description": "总览。``artifacts`` **恒为六条、恒定顺序**,缺席的那几份也在里面(带 absence),\n这样「少了一份产物」不会表现成「少了一张卡片、没有任何提示」。\n\n``ledger_consistent=false`` = 在场的产物不是同一轮预计算的(正常写路径不可能产生,\n只可能是库被手工改过);此时报告里的数字互相不可比。",
           "properties": {
             "artifacts": {
               "items": {
@@ -5950,6 +6459,9 @@
             },
             "boards": {
               "$ref": "#/components/schemas/BoardOverview"
+            },
+            "findings_summary": {
+              "$ref": "#/components/schemas/FindingsSummary"
             },
             "generated_at": {
               "title": "Generated At",
@@ -5966,6 +6478,9 @@
             "level": {
               "title": "Level",
               "type": "integer"
+            },
+            "merge_code": {
+              "$ref": "#/components/schemas/MergeCodeState"
             },
             "notebook_id": {
               "title": "Notebook Id",
@@ -5984,7 +6499,9 @@
             "state",
             "artifacts",
             "boards",
-            "board_edges"
+            "board_edges",
+            "findings_summary",
+            "merge_code"
           ],
           "title": "KgAnalysisResponse",
           "type": "object"
@@ -8412,6 +8929,36 @@
             }
           },
           "title": "MemoryUpdate",
+          "type": "object"
+        },
+        "MergeCodeState": {
+          "description": "上次合并建于哪一版合并规则(``stored``)与当前代码(``current``)。``matches``:\ntrue / false;**null = 还没合并过**(``stored`` 为空串,如删除知识图谱之后)——\n那不是「合并规则已更新」。",
+          "properties": {
+            "current": {
+              "title": "Current",
+              "type": "string"
+            },
+            "matches": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Matches"
+            },
+            "stored": {
+              "title": "Stored",
+              "type": "string"
+            }
+          },
+          "required": [
+            "stored",
+            "current"
+          ],
+          "title": "MergeCodeState",
           "type": "object"
         },
         "MergeRequest": {
@@ -22078,6 +22625,184 @@
             }
           },
           "summary": "Kg Analysis Overview"
+        }
+      },
+      "/api/notebooks/{notebook_id}/kg-analysis/findings": {
+        "get": {
+          "description": "问题清单的一页:``open`` 待处理(含「已处理,更新后核验」)/ ``passed``(用户已判定\n不是同一个的 F4、补上关联已无可补的 F5)/ ``dismissed``(已标为正常)。每行带读侧\n派生的 ``status`` 与涉及来源此刻的样子(主键点查,≤ 一页)。与 /sources 一样不记忆化。",
+          "operationId": "kg_analysis_findings_api_notebooks__notebook_id__kg_analysis_findings_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "zone",
+              "required": false,
+              "schema": {
+                "default": "open",
+                "enum": [
+                  "open",
+                  "passed",
+                  "dismissed"
+                ],
+                "title": "Zone",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 50,
+                "maximum": 200,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "offset",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Offset",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/FindingsPageResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Kg Analysis Findings"
+        }
+      },
+      "/api/notebooks/{notebook_id}/kg-analysis/findings/{rule_id}/{subject_key}/dismissal": {
+        "delete": {
+          "description": "撤销「标为正常」。幂等(没有这条标记也是 204)。",
+          "operationId": "undismiss_kg_finding_api_notebooks__notebook_id__kg_analysis_findings__rule_id___subject_key__dismissal_delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "rule_id",
+              "required": true,
+              "schema": {
+                "title": "Rule Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "subject_key",
+              "required": true,
+              "schema": {
+                "title": "Subject Key",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Undismiss Kg Finding"
+        },
+        "put": {
+          "description": "标为正常。主键两段由路由解码一次(F2 的主键含 ``|``,F4 的主键可能含 ``/``,所以\n``subject_key`` 用 ``:path``);主键不在**当前**问题清单里 → 404。",
+          "operationId": "dismiss_kg_finding_api_notebooks__notebook_id__kg_analysis_findings__rule_id___subject_key__dismissal_put",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "rule_id",
+              "required": true,
+              "schema": {
+                "title": "Rule Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "subject_key",
+              "required": true,
+              "schema": {
+                "title": "Subject Key",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Dismiss Kg Finding"
         }
       },
       "/api/notebooks/{notebook_id}/kg-analysis/sources": {

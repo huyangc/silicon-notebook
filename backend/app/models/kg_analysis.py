@@ -21,7 +21,9 @@ pydantic 传输层。字段全是**内部契约**:``basis`` / ``absence`` / ``le
 
 3. **缺失 ≠ 为空。** ``present`` 说的是账本行在不在(唯一判据),``absence`` 说的是
    为什么不在:``never_computed``(整个库没跑过预计算)/ ``expected``(零板块库不写
-   来源画像,唯一合法的一档)/ ``unexpected``(账本非空却少了这一份 —— 异常)。
+   来源画像,唯一合法的一档)/ ``unexpected``(账本非空却少了这一份 —— 异常)/
+   ``upgrade_pending``(升级后还没生成:账本每一行都建于账本契约戳出现之前,缺的是
+   新版本才有的问题清单 —— 灰色,不是异常)。
    一张空的跨板块边表是 legitimate 的(单一板块的图),靠行数分不出来。
 """
 from __future__ import annotations
@@ -156,8 +158,60 @@ class BoardEdgeView(BaseModel):
     edges: list[BoardEdge]
 
 
+class FindingSeq(BaseModel):
+    """两条世代线的一对戳(KG 写入 / 合并结果)。"""
+
+    kg_seq: Optional[int] = None
+    cluster_seq: Optional[int] = None
+
+
+class FindingsRelink(BaseModel):
+    """「补上关联」的持久标记(设计 2026-10-19 §4.5)。``may_change=false`` = 跑过、之后
+    没有新内容进来:它确定且幂等,再跑一次也补不上 —— F5 移出待处理、不放按钮。"""
+
+    attempted: bool
+    at_kg_seq: Optional[int] = None
+    at: Optional[str] = None
+    may_change: Optional[bool] = None
+
+
+class FindingsSummary(BaseModel):
+    """问题清单的账本摘要(总览里那一格;只读账本 + 标记,不读明细)。
+
+    ``present=false`` 时 ``absence`` 说为什么(``never_computed`` / ``unexpected`` /
+    ``upgrade_pending`` —— 最后一档是灰色:升级后还没生成,不是数据坏了),其余为 null /
+    空;「还没生成」绝不渲染成「没有问题」。``rules`` 按规则代号为键(F1…F5、S1),每条
+    ``{status: ran|skipped, reason?, total, persisted, truncated, …计数}``;S1 的样例名在
+    ``dev_items``。``structure`` 是只依赖连通分量的 S3 结构数;``comparison`` 是与上一次的
+    对比摘要(不可比时 ``comparable=false`` + ``reason``)。单位见 ``units``。"""
+
+    present: bool
+    absence: Optional[str] = None
+    freshness: Freshness
+    rules_version: Optional[int] = None
+    built_at: Optional[FindingSeq] = None
+    created_at: str = ""
+    counts: Optional[dict[str, Any]] = None
+    rules: dict[str, dict[str, Any]]
+    dev_items: list[dict[str, Any]]
+    structure: Optional[dict[str, Any]] = None
+    comparison: Optional[dict[str, Any]] = None
+    relink: Optional[FindingsRelink] = None
+    units: dict[str, str]
+
+
+class MergeCodeState(BaseModel):
+    """上次合并建于哪一版合并规则(``stored``)与当前代码(``current``)。``matches``:
+    true / false;**null = 还没合并过**(``stored`` 为空串,如删除知识图谱之后)——
+    那不是「合并规则已更新」。"""
+
+    stored: str
+    current: str
+    matches: Optional[bool] = None
+
+
 class KgAnalysisResponse(BaseModel):
-    """总览。``artifacts`` **恒为五条、恒定顺序**,缺席的那几份也在里面(带 absence),
+    """总览。``artifacts`` **恒为六条、恒定顺序**,缺席的那几份也在里面(带 absence),
     这样「少了一份产物」不会表现成「少了一张卡片、没有任何提示」。
 
     ``ledger_consistent=false`` = 在场的产物不是同一轮预计算的(正常写路径不可能产生,
@@ -173,6 +227,89 @@ class KgAnalysisResponse(BaseModel):
     artifacts: list[ArtifactView]
     boards: BoardOverview
     board_edges: BoardEdgeView
+    findings_summary: FindingsSummary
+    merge_code: MergeCodeState
+
+
+class FindingSubject(BaseModel):
+    """一条问题指向什么:``kind`` = source / source_pair / concept_group / notebook;
+    ``key`` 是稳定主键(F2 两个来源 id 用 ``|`` 拼;F4 是 squash key);``label`` 是发布时
+    存下的标题或名字快照(来源删了也说得出是谁)。"""
+
+    kind: str
+    key: str
+    label: str = ""
+
+
+class FindingAction(BaseModel):
+    """建议动作(从明细派生,不落库):``kind`` = delete_source / reparse_source /
+    review_merge / relink;``capability`` 是对应既有入口的守卫名;``source_id`` 是删除 /
+    重新解析对准的那一篇。出不出按钮由前端按既有入口的同一判据决定,后端仍是权限的
+    唯一判据。"""
+
+    kind: str
+    capability: str = ""
+    source_id: Optional[str] = None
+
+
+class FindingImpact(BaseModel):
+    objects: int
+
+
+class FindingLiveSource(BaseModel):
+    """读这一页时问题涉及的来源**此刻**的样子(主键点查)。隐藏来源(Memory / knowhow)
+    的标题置空。``processing`` = 正在排队 / 解析 / 抽取。"""
+
+    source_id: str
+    exists: bool
+    title: str = ""
+    source_type: str = ""
+    processing: bool = False
+
+
+class FindingRow(BaseModel):
+    """一条问题。``status``(读侧派生):open / handled(已处理,更新后核验,仍在待处理
+    区)/ dismissed / decided_not_same(F4,用户已判定不是同一个)/ relink_spent(F5,
+    补上关联已跑过、之后没有新内容)。``handled_reason``:source_deleted /
+    source_processing / source_reprocessed / merge_confirmed / relinked。证据只放判据真正
+    用到的数与 ≤5 个样例名(来自可见来源),单位在页的 ``evidence_units``。"""
+
+    rule_id: str
+    severity: str
+    subject: FindingSubject
+    subject_refs: list[str]
+    evidence: dict[str, Any]
+    impact: FindingImpact
+    actions: list[FindingAction]
+    first_seen: FindingSeq
+    status: str
+    handled_reason: Optional[str] = None
+    dismissed_at: Optional[str] = None
+    live_sources: list[FindingLiveSource]
+
+
+class FindingsPageResponse(BaseModel):
+    """问题清单的一页(一个区):``zone`` = open(待处理:open + handled)/ passed
+    (decided_not_same + relink_spent)/ dismissed。``built_at`` 是整份清单建于哪一代(不
+    逐行记);``total`` 是这个区的全部行数,``has_more`` 让分页不必靠 ``returned < limit``
+    猜。账本行不在时 ``present=false``、``rows`` 为空。"""
+
+    notebook_id: str
+    generated_at: str
+    present: bool
+    absence: Optional[str] = None
+    freshness: Freshness
+    built_at: Optional[FindingSeq] = None
+    rules_version: Optional[int] = None
+    zone: str
+    limit: int
+    offset: int
+    total: int
+    returned: int
+    has_more: bool
+    units: dict[str, str]
+    evidence_units: dict[str, dict[str, str]]
+    rows: list[FindingRow]
 
 
 class SourceProfileRow(BaseModel):

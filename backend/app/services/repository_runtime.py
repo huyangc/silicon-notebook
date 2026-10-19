@@ -38,7 +38,7 @@ from app.repositories.ports import (
 from app.repositories.source_files import SourceFileStore
 from app.repositories.analysis_artifacts import AnalysisArtifactStore
 from app.services.agent_profile_job import AgentProfileConsolidationService
-from app.services.kg_merge import purge_bridge_canonical_ids
+from app.services.kg_merge import cluster_code_version, purge_bridge_canonical_ids
 from app.services.retrieval_experience_job import (
     RetrievalExperienceDistillationService,
 )
@@ -671,6 +671,9 @@ def _build_knowledge_domain(
             database=seats.database,
             unified_kg=seats.unified_kg,
             now=foundation.seams.now,
+            governance=seats.governance,
+            # 「合并规则已更新」的比较对象:当前代码的合并代码分量(不读库)。
+            current_merge_code=lambda: cluster_code_version(foundation.settings),
         ),
         schema_registry=SchemaRegistryService(
             seats.database,

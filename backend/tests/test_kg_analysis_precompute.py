@@ -1708,6 +1708,8 @@ def test_a_failed_precompute_after_a_force_rebuild_stops_serving_the_old_boards(
         database=repo._runtime.database,
         unified_kg=repo._runtime.unified_kg,
         now=lambda: "2026-01-03T00:00:00",
+        governance=repo._runtime.governance,
+        current_merge_code=lambda: "",
     )
     warmed = sorted(
         board["id"] for board in service.overview(notebook_id).boards.payload["communities"]

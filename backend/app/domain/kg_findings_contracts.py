@@ -194,6 +194,9 @@ MAX_SUBJECT_REFS = 50
 S1_EXAMPLES = 3
 # Comparison summary: names of findings that disappeared since the last build.
 MAX_RESOLVED_SAMPLES = 20
+# `GET /notebooks/{id}/kg-analysis/findings`: rows per page (the endpoint's
+# ``le=``, and the service clamps again — same layering as /kg-analysis/sources).
+KG_FINDINGS_PAGE_MAX = 200
 
 RULE_THRESHOLDS: Dict[str, float] = {
     "f1_shared_max": F1_SHARED_MAX,
