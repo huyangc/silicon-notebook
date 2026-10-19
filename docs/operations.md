@@ -261,8 +261,9 @@ Three limits of the census: `merge_review_pairs` is read from `kg_rebuild_checkp
 migration deletes for F, so a census run after the upgrade shows 0 for F; the pairs do not include
 the concept-description calls, so read them as a lower bound; and the SCALE list is the set that
 will eventually be queued, not when (a scale build is queued only once the notebook's knowledge
-graph is isolated, see below). Concept descriptions are regenerated only where their evidence
-changed; communities need no model. A dirty notebook has already moved its `kg_mutation_seq`
+graph is isolated, see below). Concept descriptions are regenerated only where a concept's name
+or quotes changed (an old description is reused by a signature of the two, even when the
+canonical id moved); communities need no model. A dirty notebook has already moved its `kg_mutation_seq`
 since its last rebuild, so its input version has changed anyway: for a notebook that will be
 refreshed sooner or later, this merge-review cost is paid earlier, not added; it is added only
 for a notebook nobody would ever refresh. Cost of the check itself, measured: 3.3 s and 610

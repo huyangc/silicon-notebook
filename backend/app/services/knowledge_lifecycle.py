@@ -45,7 +45,8 @@ import time
 from contextlib import closing
 from types import SimpleNamespace
 from typing import (
-    Any, Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple,
+    Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set,
+    Tuple,
 )
 
 from app.core.config import Settings
@@ -289,6 +290,77 @@ def _concept_desc_sig(name: str, quotes: List[str]) -> str:
     import hashlib
     payload = (name or "") + "\x00" + "\x00".join(sorted(quotes))
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+class _DescriptionReuse:
+    """Previous concept descriptions, looked up by their input SIGNATURE
+    (P4-T5), so a canonical whose id changed but whose name and quotes did
+    not reuses the stored description instead of calling the model again.
+
+    Why a signature lookup is safe and a strict superset of the old one:
+
+    * The sig is ``_concept_desc_sig(name, quotes)`` -- the canonical NAME
+      (a member's display name, ``cluster_seeds``' ``canonical_names``) and
+      the sorted quote set, nothing else. The canonical id is not part of
+      it, and the prompt (``concept_description_prompt(name, block)``) is
+      built from exactly those two inputs. Same sig therefore means the same
+      model input, and a stored description is only ever persisted next to
+      the sig of the input it was generated (or reused) for -- so any stored
+      description whose sig matches is a valid answer for this canonical.
+    * The old lookup was ``old_desc[cid]`` and fired only when that row's
+      sig equalled the new sig. Every such hit is still a hit here, and with
+      the SAME text: a canonical's own row wins over any other canonical's
+      row carrying the same sig (``by_sig`` keeps the smallest canonical id;
+      a canonical that lost that tie keeps its own text in ``own``). What is
+      new is only the case the old lookup missed: the id moved (merge-group
+      smallest seed changed, S1's seed switch) while name and quotes stayed.
+
+    Rows with an empty description or an empty sig are ignored -- neither
+    could ever hit before (a hit needed both). Deterministic: the winner per
+    sig is the smallest ``(canonical_id, description)``, whatever the row
+    order of the read. Memory stays bounded by #canonicals, as before: one
+    entry per distinct sig plus the rare tie losers, built in two passes
+    over the already-fetched row list (no per-canonical side table)."""
+
+    __slots__ = ("by_sig", "own")
+
+    def __init__(self, rows: Sequence[Any]) -> None:
+        by_sig: Dict[str, Tuple[str, str]] = {}
+        for r in rows:
+            desc = r["canonical_description"] or ""
+            sig = r["canonical_desc_sig"] or ""
+            if not desc or not sig:
+                continue
+            cid = str(r["canonical_id"])
+            held = by_sig.get(sig)
+            if held is None or (cid, desc) < held:
+                by_sig[sig] = (cid, desc)
+        # A canonical keeps its own text for its own sig when another
+        # canonical won that sig (rare: two canonicals with the same name and
+        # the same quotes). Only those few are kept here.
+        own: Dict[Tuple[str, str], str] = {}
+        for r in rows:
+            desc = r["canonical_description"] or ""
+            sig = r["canonical_desc_sig"] or ""
+            if not desc or not sig:
+                continue
+            cid = str(r["canonical_id"])
+            if by_sig[sig][0] == cid:
+                continue
+            prev = own.get((cid, sig))
+            if prev is None or desc < prev:
+                own[(cid, sig)] = desc
+        self.by_sig = by_sig
+        self.own = own
+
+    def get(self, cid: str, sig: str) -> str:
+        """The description to reuse for ``cid`` whose input sig is ``sig``,
+        or "" when nothing stored matches (the caller then asks the model)."""
+        mine = self.own.get((cid, sig))
+        if mine:
+            return mine
+        held = self.by_sig.get(sig)
+        return held[1] if held is not None else ""
 
 
 def _pair_key(a: str, b: str) -> str:
@@ -5749,14 +5821,16 @@ class KnowledgeLifecycleService:
         )
         if _desc_ran:
             from app.services.prompts import concept_description_prompt, CONCEPT_DESC_SCHEMA_HINT
-            # Previous descriptions + their input sigs, keyed by canonical id. DISTINCT
-            # so this is bounded by #canonicals (not #members). Reuse fires only on an
-            # exact sig match with a non-empty stored description → fail-safe: any
-            # miss/mismatch just regenerates (worst case = old behavior).
-            old_desc: Dict[str, tuple] = {}
+            # Previous descriptions, looked up by their input sig (P4-T5) rather
+            # than by canonical id, so an id that moved with name + quotes
+            # unchanged still reuses (see _DescriptionReuse for why this is a
+            # strict superset of the old by-id hit, own text first). DISTINCT
+            # so this is bounded by #canonicals (not #members). Reuse fires only
+            # on an exact sig match with a non-empty stored description →
+            # fail-safe: any miss just regenerates (worst case = old behavior).
             with self._connect() as db:
-                for r in self.unified_kg.cluster_description_rows(db, notebook_id):
-                    old_desc[r["canonical_id"]] = (r["canonical_description"] or "", r["canonical_desc_sig"] or "")
+                old_desc = _DescriptionReuse(
+                    self.unified_kg.cluster_description_rows(db, notebook_id))
             # 同 input_version 的 checkpoint(写簇前被杀留下的已完成描述)作第一优先复用源。
             try:
                 desc_ckpt = self.unified_kg.checkpoint_load(
@@ -5840,9 +5914,9 @@ class KnowledgeLifecycleService:
                         desc_by_cid[cid] = ck["description"]     # checkpoint 命中:复用,跳过 LLM
                         desc_sig_by_cid[cid] = sig
                         continue
-                    prev = old_desc.get(cid)
-                    if prev and prev[0] and prev[1] == sig:
-                        desc_by_cid[cid] = prev[0]               # 跨 rebuild 缓存命中:复用
+                    prev = old_desc.get(cid, sig)
+                    if prev:
+                        desc_by_cid[cid] = prev                  # 跨 rebuild 缓存命中(按签名):复用
                         desc_sig_by_cid[cid] = sig
                         continue
                     work.append((cid, name, quotes, sig))
