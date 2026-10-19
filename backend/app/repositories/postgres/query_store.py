@@ -411,7 +411,31 @@ class QueryStore:
         ``notebook_ids`` 由调用方给出,已经是对查看者生效、且落在联邦参与上界之内
         的挂载库,本方法不做任何鉴权;名单 <= 7,一个参数绑定(``id_binding``,
         custom plan),语句文本与名单长度无关。按 ``sources(notebook_id, ...)`` 取
-        可见来源、``idx_chunks_source`` 探第一条 chunk,EXISTS 首中即停。"""
+        可见来源、按 ``source_id`` 探第一条 chunk,EXISTS 首中即停。
+
+        ⚠ 内层**只**按 ``c.source_id = s.id`` 关联,刻意不写 ``c.notebook_id =
+        s.notebook_id``。那一列一旦出现,计划器就有了按 notebook 走 chunk 的路:
+        无统计时逐篇来源做 ``BitmapAnd(idx_chunks_nb_created, idx_chunks_source)``,
+        有统计时可能整表 ``Merge Semi Join``——评审在「2 万可见来源零 chunk + 别处
+        20 万 chunk」的形状上实测无统计 27–42 s(逼近 30 s 语句超时,详情页会 500)、
+        ANALYZE 后 97–115 ms 且随 chunk 总量增长;只按 ``source_id`` 关联两态都约
+        9 ms。计划钉:``tests/postgres/test_notebook_ask_availability_pg.py``,两种
+        统计状态都钉「不得出现 ``idx_chunks_nb*`` / ``Merge Semi Join`` / 整表扫
+        chunks」。
+
+        省掉 notebook 条件不改语义,依据是不变量「chunk 的 ``notebook_id`` 恒等于其
+        来源的 ``notebook_id``」。写 ``chunks`` 的全部路径都按来源所在库写入:
+        ``ChunkStore.replace_source_chunks`` / ``insert_rows``(分块服务从
+        ``get_source(source_id).notebook_id`` 取库,Knowhow 投影用表自己的隐藏来源与
+        库)、KG 发布(``kg_build_job_store``:同一库内 ``FOR UPDATE`` 锁住的来源快照)、
+        笔记本深拷贝(``sharing_store`` 把 ``notebook_id`` 与 ``source_id`` 一起改写到
+        新库)、Knowhow 表转移(载荷里每条 chunk 必须挂在载荷自己的来源下,否则整单
+        拒绝)、同步导入与库迁移脚本(按列原样搬运源环境的行);对 ``chunks`` 的
+        ``UPDATE`` 只改 ``element_ids`` / ``question_indexed_at``,全仓也没有任何
+        ``UPDATE sources SET notebook_id``(来源不会换库,见 ``source_store`` 对同一
+        不变量的核查)。即便某条早于这些写者的历史脏行违反它,后果也只是这个布尔
+        fail-open 为真、检索取不到——那条来源本身就在查看者可读的参考库里、且可见,
+        不越权,方向与路由预检那条已接受的 TOCTOU 残留相同。"""
         bound = bind_ids(list(notebook_ids))
         row = execute_ids(
             db,
@@ -419,7 +443,7 @@ class QueryStore:
             f"WHERE {member_of('s.notebook_id', bound)} "
             f"AND s.{VISIBLE_SOURCE_TYPES_PREDICATE} "
             "AND EXISTS(SELECT 1 FROM chunks c "
-            "WHERE c.source_id = s.id AND c.notebook_id = s.notebook_id)) AS exists",
+            "WHERE c.source_id = s.id)) AS exists",
             (bound.param,),
         ).fetchone()
         return bool(row["exists"])

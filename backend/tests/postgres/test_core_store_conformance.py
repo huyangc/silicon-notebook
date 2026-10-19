@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from app.core.config import Settings
 from app.models.notebooks import NotebookCreate, NotebookUpdate, SharedByMeItem
 from app.repositories.ports import (
     ChunkWrite,
@@ -807,7 +808,9 @@ def test_notebook_sync_origin_round_trips_and_reaches_the_summary(
     notebook_id = core_stores.notebooks.create_row(
         NotebookCreate(name="Mirrored"), owner.id
     )
-    summaries = NotebookSummaryQuery(core_stores.database, _EmptySummaryQueries())
+    summaries = NotebookSummaryQuery(
+        core_stores.database, _EmptySummaryQueries(), settings=Settings(_env_file=None)
+    )
 
     assert core_stores.sharing.notebook_sync_origin(notebook_id) == ""
     with core_stores.database.connect() as connection:
@@ -2601,7 +2604,10 @@ def test_notebook_and_source_created_labels_use_local_calendar_date(
             summary="",
             doc_type="",
         )
-        summaries = NotebookSummaryQuery(core_stores.database, _EmptySummaryQueries())
+        summaries = NotebookSummaryQuery(
+            core_stores.database, _EmptySummaryQueries(),
+            settings=Settings(_env_file=None),
+        )
         with core_stores.database.connect() as connection:
             notebook = summaries.from_row(connection, notebooks.get_row(notebook_id))
         source = sources.get_source("src-local-calendar")
@@ -2682,7 +2688,9 @@ def test_notebook_raw_rows_feed_neutral_summary_json_lists(
         ),
     )
     core_stores.sharing.set_share_token(notebook_id, "shr-raw-json")
-    summaries = NotebookSummaryQuery(core_stores.database, _EmptySummaryQueries())
+    summaries = NotebookSummaryQuery(
+        core_stores.database, _EmptySummaryQueries(), settings=Settings(_env_file=None)
+    )
 
     rows = [
         core_stores.notebooks.get_row(notebook_id),
