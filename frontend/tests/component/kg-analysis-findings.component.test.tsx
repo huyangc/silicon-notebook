@@ -649,6 +649,11 @@ test("疑似重复导入：两份各一个「打开来源」，删除只在建�
   expect(deletes).toHaveLength(1);
   expect(deletes[0]).toHaveAccessibleName("删除来源：Mamba2_full");
   expect(within(f2).getByText("两份内容几乎相同，保留对象更多的一份")).toBeInTheDocument();
+  // 按来源分组、写上是哪一份:两颗同名的「打开来源核对」不会读混。
+  const groups = Array.from(f2.querySelectorAll<HTMLElement>(".kg-finding-source-group"));
+  expect(groups.map((group) => group.querySelector(".kg-finding-source-name")?.textContent)).toEqual(["Mamba2_mineru", "Mamba2_full"]);
+  expect(within(groups[0]).queryByRole("button", { name: /删除来源/ })).toBeNull();
+  expect(within(groups[1]).getByRole("button", { name: "删除来源：Mamba2_full" })).toBeInTheDocument();
 });
 
 test("疑似解析残缺：重新解析先经确认；确认后在飞禁用，排上后结果写在按钮旁并重取问题页", async () => {

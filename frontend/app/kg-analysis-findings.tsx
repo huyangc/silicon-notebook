@@ -375,6 +375,17 @@ function FindingRowView({
     if (spec.kind === "review_merge") return Boolean(handlers.onReviewMerge);
     return Boolean(handlers.onRelink);
   });
+  // 多份来源时按来源分组(组名是来源标题);只有一份或不对准来源的按钮放在一个无名组里。
+  const groups: Array<{ key: string; title: string; specs: FindingButtonSpec[] }> = [];
+  for (const spec of visible) {
+    const sourceId = multiSource && "sourceId" in spec ? spec.sourceId : "";
+    let group = groups.find((item) => item.key === sourceId);
+    if (!group) {
+      group = { key: sourceId, title: sourceId && "title" in spec ? spec.title : "", specs: [] };
+      groups.push(group);
+    }
+    group.specs.push(spec);
+  }
 
   const run = (spec: FindingButtonSpec, event: MouseEvent<HTMLButtonElement>) => {
     if (spec.kind === "open_source") {
@@ -500,21 +511,31 @@ function FindingRowView({
       {plan.blocked.map((text) => <p key={text} className="kg-finding-blocked">{text}</p>)}
       {visible.length > 0 || (state.canWrite && row.status === "open") || result || relinkLine ? (
         <div className="kg-finding-actions">
-          {visible.map((spec) => {
-            const deleting = spec.kind === "delete_source" && state.deletingSourceIds.has(spec.sourceId);
-            const text = buttonLabel(spec, busy, deleting, state.relinking);
-            return (
-              <button
-                key={`${spec.kind}:${"sourceId" in spec ? spec.sourceId : ""}`}
-                type="button"
-                className={`sort-button kg-finding-action${spec.kind === "delete_source" ? " is-danger" : ""}`}
-                disabled={disabledFor(spec)}
-                aria-label={buttonAria(spec, text, multiSource)}
-                onClick={(event) => run(spec, event)}
-              >
-                {text}
-              </button>
-            );
+          {groups.map((group) => {
+            const buttons = group.specs.map((spec) => {
+              const deleting = spec.kind === "delete_source" && state.deletingSourceIds.has(spec.sourceId);
+              const text = buttonLabel(spec, busy, deleting, state.relinking);
+              return (
+                <button
+                  key={`${spec.kind}:${"sourceId" in spec ? spec.sourceId : ""}`}
+                  type="button"
+                  className={`sort-button kg-finding-action${spec.kind === "delete_source" ? " is-danger" : ""}`}
+                  disabled={disabledFor(spec)}
+                  aria-label={buttonAria(spec, text, multiSource)}
+                  onClick={(event) => run(spec, event)}
+                >
+                  {text}
+                </button>
+              );
+            });
+            // 一条问题涉及两份来源(两份重复的错文件 / 疑似重复导入)时,按钮按来源分组并写上
+            // 是哪一份——否则两颗一模一样的「打开来源核对」分不清各开哪一篇。
+            return group.title ? (
+              <span key={group.key} className="kg-finding-source-group">
+                <span className="kg-finding-source-name" title={group.title}>{group.title}</span>
+                {buttons}
+              </span>
+            ) : buttons;
           })}
           {plan.notes.map((note) => <span key={note} className="kg-finding-action-note">{note}</span>)}
           {relinkBlocked ? <span className="kg-finding-action-note" role="status">其它图谱任务进行中</span> : null}
