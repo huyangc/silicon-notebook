@@ -131,6 +131,26 @@ def _filter_item_schema() -> dict[str, Any]:
     }
 
 
+def _is_spreadsheet_filters(path: tuple[str, ...], root: dict[str, Any]) -> bool:
+    """The spreadsheet planner's ``targets[].filters`` (an empty example list).
+
+    Only there does an empty ``filters`` list have a known item type: every
+    target names a workbook plan (``source_id``/``sheet``/``operation``/
+    ``aggregation``) and its filters are the closed scalar-cell contract.
+    """
+    targets = root.get("targets")
+    return (
+        path == ("targets", "[]", "filters")
+        and isinstance(targets, list)
+        and bool(targets)
+        and all(
+            isinstance(target, dict)
+            and {"source_id", "sheet", "operation", "aggregation"}.issubset(target)
+            for target in targets
+        )
+    )
+
+
 def _kind(value: Any) -> str:
     if isinstance(value, bool):
         return "boolean"
@@ -192,9 +212,7 @@ def _project_kind(
             item_schema = _project(items, (*path, "[]"), root)
         elif path and path[-1] in _STRING_LIST_FIELDS:
             item_schema = {"type": "string"}
-        elif path == ("filters",) and {
-            "source_id", "sheet", "operation", "aggregation",
-        }.issubset(root):
+        elif _is_spreadsheet_filters(path, root):
             item_schema = _filter_item_schema()
         else:
             raise _UnsupportedHint()

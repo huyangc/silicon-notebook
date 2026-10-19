@@ -150,8 +150,11 @@ _PEER_PINS = {
     },
 }
 
+# The pre-list single-object reply (still read as one target) and the target
+# list the planner is now asked for: a one-item list must be byte for byte.
 _REPLY_SHAPES = {
     "single_object": lambda target: target,
+    "target_list": lambda target: {"targets": [target]},
 }
 
 
@@ -200,3 +203,429 @@ def test_single_target_peer_lane_is_byte_identical(tmp_path, scenario, shape):
     assert len(planner.prompts) == 1
     assert len(results) == 1
     assert _fingerprint(results, trace) == _PEER_PINS[scenario]
+
+
+# ---------------------------------------------------------------------------
+# Several tables from one plan
+# ---------------------------------------------------------------------------
+
+_TOP_A = {"source_id": "quote-a", "sheet": "Sheet", "operation": "top",
+          "sort_by": "Price", "order": "desc"}
+_TOP_B = {"source_id": "quote-b", "sheet": "Sheet", "operation": "top",
+          "sort_by": "Price", "order": "desc"}
+
+
+class _RecordingPlanner(_Planner):
+    """``_Planner`` that also keeps the schema hint and call options."""
+
+    def __init__(self, plan) -> None:
+        super().__init__(plan)
+        self.calls: list[tuple[str, dict]] = []
+
+    def chat_json(self, messages, schema_hint, **kwargs) -> str:
+        self.calls.append((schema_hint, kwargs))
+        return super().chat_json(messages, schema_hint, **kwargs)
+
+
+def test_one_plan_compares_two_tables_of_one_library(tmp_path):
+    """「比较 A、B 两张报价表」: one planner call names both tables; each is
+    executed and becomes its own card, in the planner's order, and the
+    synthesis block carries both under consecutive keys."""
+    for order in ((_TOP_A, _TOP_B), (_TOP_B, _TOP_A)):
+        run_dir = tmp_path / order[0]["source_id"]
+        run_dir.mkdir()
+        planner, results, trace = _single_library_run(
+            run_dir, {"targets": list(order)},
+        )
+        assert len(planner.prompts) == 1
+        assert [result.source_id for result in results] == [
+            target["source_id"] for target in order
+        ]
+        assert all(result.operation == "top" for result in results)
+        # A notebook ask over its own workbooks: no library on either card.
+        assert all(result.notebook_id == "" for result in results)
+        [step] = trace
+        titles = [f"{result.source_title} · Sheet" for result in results]
+        assert step.summary == f"已分析 2 张表：{titles[0]}；{titles[1]}"
+        assert [table["source_id"] for table in step.detail["tables"]] == [
+            target["source_id"] for target in order
+        ]
+        assert step.detail["targets"] == {
+            "planned": 2, "executed": 2, "invalid": 0, "duplicate": 0,
+            "over_limit": 0, "limit": 3,
+        }
+        block, evidence = spreadsheet_prompt_block(
+            results, preview_rows=20, max_bytes=65_536,
+        )
+        assert list(evidence) == ["k6001", "k6002"]
+        assert [evidence[key]["source_id"] for key in evidence] == [
+            target["source_id"] for target in order
+        ]
+        heads = [line for line in block.splitlines() if line.startswith("k600")]
+        assert [head.split(":", 1)[0] for head in heads] == ["k6001", "k6002"]
+
+
+def test_planner_is_asked_for_a_target_list_once(tmp_path):
+    analysis, _artifacts = _service(tmp_path)
+    _two_quote_tables(analysis, tmp_path)
+    planner = _RecordingPlanner({"targets": [_TOP_A, _TOP_B]})
+    ask = _ask(analysis, planner, participants=(), visible={
+        "nb-1": ("quote-a", "quote-b"),
+    })
+    _run_lane(ask, "比较这两张 Excel 报价表的价格")
+
+    [(hint, options)] = planner.calls
+    assert json.loads(hint)["targets"][0]["source_id"] == "id"
+    # The single-target allowance, once per target the plan may name.
+    assert options["max_tokens"] == 1_500
+    assert "最多 3 项" in planner.prompts[0]
+
+
+def test_global_ask_compares_one_quote_table_from_each_library(tmp_path):
+    """Global Ask, library A and library B, one quote table each: one plan
+    names both, and each card, receipt and block line names its own
+    library and tier."""
+    planner, results, trace = _peer_run(tmp_path, {"targets": [_TOP_A, _TOP_B]})
+
+    assert len(planner.prompts) == 1
+    assert [(r.source_id, r.notebook_id, r.tier, r.notebook_name) for r in results] == [
+        ("quote-a", "nb-a", "personal", "A 库"),
+        ("quote-b", "nb-b", "base", "B 库"),
+    ]
+    assert [
+        (r.rows[0].citation.notebook_id, r.rows[0].citation.tier) for r in results
+    ] == [("nb-a", "personal"), ("nb-b", "base")]
+    [step] = trace
+    assert step.summary == (
+        "已分析 2 张表：「A 库」中的 A 报价表 · Sheet；「B 库」中的 B 报价表 · Sheet"
+    )
+    assert [(t["source_id"], t["notebook_id"]) for t in step.detail["tables"]] == [
+        ("quote-a", "nb-a"), ("quote-b", "nb-b"),
+    ]
+    assert "notebook_id" not in step.detail
+    assert (step.detail["libraries"], step.detail["contributing_libraries"],
+            step.detail["workbooks"], step.detail["listed"]) == (2, 2, 2, 2)
+    block, evidence = spreadsheet_prompt_block(
+        results, preview_rows=20, max_bytes=65_536,
+    )
+    heads = [line for line in block.splitlines() if line.startswith("k600")]
+    assert "library=A 库; " in heads[0] and "library=B 库; " in heads[1]
+    assert [evidence[key]["notebook_id"] for key in ("k6001", "k6002")] == [
+        "nb-a", "nb-b",
+    ]
+
+
+def _four_tables(analysis, tmp_path):
+    for letter in "abcd":
+        _compile(analysis, tmp_path, "nb-1", f"quote-{letter}",
+                 title=f"{letter.upper()} 报价表", header=("Item", "Price"),
+                 rows=(("bolt", 3), ("nut", 1)))
+
+
+def _target(letter: str) -> dict:
+    return {"source_id": f"quote-{letter}", "sheet": "Sheet", "operation": "profile"}
+
+
+def test_targets_over_the_cap_are_cut_in_plan_order_and_disclosed(tmp_path):
+    analysis, _artifacts = _service(tmp_path)
+    _four_tables(analysis, tmp_path)
+    planner = _Planner({"targets": [_target(letter) for letter in "dbca"]})
+    ask = _ask(analysis, planner, participants=(), visible={
+        "nb-1": tuple(f"quote-{letter}" for letter in "abcd"),
+    })
+    results, trace = _run_lane(ask, "比较这四张 Excel 报价表")
+
+    assert len(planner.prompts) == 1
+    assert [result.source_id for result in results] == [
+        "quote-d", "quote-b", "quote-c",
+    ]
+    disclosure = (
+        "本次规划选了 4 张表，超过单次最多 3 张的上限，按规划顺序只分析了前 3 张；"
+        "未分析：A 报价表 · Sheet。"
+    )
+    # Said once, on the last card -- where the missing table would follow.
+    assert results[-1].warnings[-1] == disclosure
+    assert all(disclosure not in result.warnings for result in results[:-1])
+    [step] = trace
+    assert step.detail["targets"]["over_limit"] == 1
+    assert step.detail["targets"]["executed"] == 3
+
+
+def test_the_cap_is_a_setting(tmp_path):
+    analysis, _artifacts = _service(tmp_path, spreadsheet_analysis_max_targets=1)
+    _two_quote_tables(analysis, tmp_path)
+    planner = _RecordingPlanner({"targets": [_TOP_B, _TOP_A]})
+    ask = _ask(analysis, planner, participants=(), visible={
+        "nb-1": ("quote-a", "quote-b"),
+    })
+    results, trace = _run_lane(ask, "比较这两张 Excel 报价表的价格")
+
+    [result] = results
+    assert result.source_id == "quote-b"
+    assert result.warnings[-1] == (
+        "本次规划选了 2 张表，超过单次最多 1 张的上限，按规划顺序只分析了前 1 张；"
+        "未分析：A 报价表 · Sheet。"
+    )
+    [(_hint, options)] = planner.calls
+    assert options["max_tokens"] == 500
+    assert "最多 1 项" in planner.prompts[0]
+    [step] = trace
+    assert step.summary == "已分析 B 报价表 · Sheet"
+    assert step.detail["targets"]["over_limit"] == 1
+
+
+@pytest.mark.parametrize("value", [0, 4])
+def test_the_cap_setting_is_bounded_to_one_through_three(tmp_path, value):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        _service(tmp_path, spreadsheet_analysis_max_targets=value)
+
+
+def test_invalid_and_duplicate_targets_are_dropped_on_their_own(tmp_path):
+    analysis, _artifacts = _service(tmp_path)
+    _four_tables(analysis, tmp_path)
+    planner = _Planner({"targets": [
+        # An unknown column.
+        {"source_id": "quote-a", "sheet": "Sheet", "operation": "top",
+         "sort_by": "Missing"},
+        _target("b"),
+        # A second target on an already planned sheet.
+        {**_target("b"), "operation": "aggregate", "aggregation": "count"},
+        # Not an object.
+        "quote-c",
+        # An unknown source.
+        {"source_id": "nope", "sheet": "Sheet"},
+        _target("d"),
+    ]})
+    ask = _ask(analysis, planner, participants=(), visible={
+        "nb-1": tuple(f"quote-{letter}" for letter in "abcd"),
+    })
+    results, trace = _run_lane(ask, "比较这几张 Excel 报价表")
+
+    # A dropped target never stands in for another table: no fallback to
+    # the first sheet while a valid target survives.
+    assert [(r.source_id, r.operation) for r in results] == [
+        ("quote-b", "profile"), ("quote-d", "profile"),
+    ]
+    assert all(not result.warnings for result in results)
+    [step] = trace
+    assert step.detail["targets"] == {
+        "planned": 6, "executed": 2, "invalid": 3, "duplicate": 1,
+        "over_limit": 0, "limit": 3,
+    }
+
+
+@pytest.mark.parametrize("reply", [
+    {"targets": []},
+    {"targets": {"source_id": "quote-b", "sheet": "Sheet"}},
+    {"targets": "quote-b"},
+    {"targets": [{"source_id": "nope", "sheet": "Sheet"}, "quote-b"]},
+])
+def test_a_reply_naming_no_usable_target_falls_back_to_the_local_profile(
+    tmp_path, reply,
+):
+    """Exactly what an invalid single-object plan always did: the local
+    profile of the first listed sheet, one card, no planning tally unless
+    the reply named several targets."""
+    (tmp_path / "reply").mkdir()
+    (tmp_path / "invalid").mkdir()
+    _planner, results, trace = _single_library_run(tmp_path / "reply", reply)
+    _baseline, invalid_results, invalid_trace = _single_library_run(
+        tmp_path / "invalid", _SINGLE_TARGETS["invalid"],
+    )
+    assert [r.model_dump(mode="json") for r in results] == [
+        r.model_dump(mode="json") for r in invalid_results
+    ]
+    [step] = trace
+    targets = step.detail.pop("targets", None)
+    assert step.summary == invalid_trace[0].summary
+    assert step.detail == invalid_trace[0].detail
+    named = reply["targets"] if isinstance(reply["targets"], list) else []
+    assert (targets is None) == (len(named) <= 1)
+
+
+def test_two_sheets_of_one_workbook_keep_two_receipts(tmp_path):
+    from types import SimpleNamespace
+
+    from openpyxl import Workbook
+
+    from app.services.ask_service import AskService
+
+    analysis, _artifacts = _service(tmp_path)
+    path = tmp_path / "book.xlsx"
+    workbook = Workbook()
+    first = workbook.active
+    first.title = "2025"
+    first.append(["Item", "Price"])
+    first.append(["bolt", 3])
+    second = workbook.create_sheet("2026")
+    second.append(["Item", "Price"])
+    second.append(["bolt", 4])
+    workbook.save(path)
+    assert analysis.compile_source(SimpleNamespace(
+        id="book", notebook_id="nb-1", title="年度报价表", type="xlsx",
+        file_name="book.xlsx", file_path=str(path), file_hash="h", source_url="",
+    ), notebook_name="nb-1", owner_id="owner", row_element_ids={})
+    planner = _Planner({"targets": [
+        {"source_id": "book", "sheet": "2025", "operation": "profile"},
+        {"source_id": "book", "sheet": "2026", "operation": "profile"},
+    ]})
+    ask = _ask(analysis, planner, participants=(), visible={"nb-1": ("book",)})
+    results, _trace = _run_lane(ask, "比较 Excel 报价表 2025 和 2026 两个工作表")
+
+    assert [result.sheet for result in results] == ["2025", "2026"]
+    citations: list = []
+    AskService._append_spreadsheet_citations(citations, results)
+    # Both are source-level receipts of the same workbook (no row element):
+    # still two tables, so still two receipts.
+    assert [citation.element_id for citation in citations] == ["", ""]
+    assert [citation.location_label for citation in citations] == [
+        f"{result.sheet}!{result.range}" for result in results
+    ]
+
+
+# ---------------------------------------------------------------------------
+# The synthesis table block: one budget for every table
+# ---------------------------------------------------------------------------
+
+def _wide_results(tmp_path, count: int):
+    analysis, _artifacts = _service(tmp_path)
+    for index in range(count):
+        _compile(analysis, tmp_path, "nb-1", f"wide-{index}",
+                 title=f"报价表 {index}", header=("Item", "Price"),
+                 rows=tuple((f"item-{index}-{row:02d}", row) for row in range(30)))
+    planner = _Planner({"targets": [
+        {"source_id": f"wide-{index}", "sheet": "Sheet", "operation": "filter"}
+        for index in range(count)
+    ]})
+    ask = _ask(analysis, planner, participants=(), visible={
+        "nb-1": tuple(f"wide-{index}" for index in range(count)),
+    })
+    results, _trace = _run_lane(ask, "比较这些 Excel 报价表的明细")
+    assert len(results) == count
+    return results
+
+
+def _rows_shown(block: str) -> list[int]:
+    shown: list[int] = []
+    for line in block.splitlines():
+        if line.startswith("k600"):
+            shown.append(0)
+        elif line != "Item | Price":
+            shown[-1] += 1
+    return shown
+
+
+@pytest.mark.parametrize(("max_bytes", "max_chars"), [(1_024, None), (65_536, 400)])
+def test_tables_share_one_block_budget_and_none_is_starved(
+    tmp_path, max_bytes, max_chars,
+):
+    results = _wide_results(tmp_path, 3)
+    block, evidence = spreadsheet_prompt_block(
+        results, preview_rows=20, max_bytes=max_bytes, max_chars=max_chars,
+    )
+    # One budget: three tables do not get three blocks' worth.
+    assert len(block.encode("utf-8")) <= max_bytes
+    assert max_chars is None or len(block) <= max_chars
+    assert list(evidence) == ["k6001", "k6002", "k6003"]
+    # Key and header lines first, then rows round robin: every table shows
+    # rows, and no table shows more than one row more than another.
+    shown = _rows_shown(block)
+    assert min(shown) >= 1, shown
+    assert max(shown) - min(shown) <= 1, shown
+    assert sum(shown) < 3 * 20  # the cap actually bit
+    # Each table shows a prefix of its own rows under its own key.
+    for (key, entry), result, count in zip(evidence.items(), results, shown):
+        assert entry["source_id"] == result.source_id
+        last = result.rows[count - 1].cells
+        assert entry["snippet"] == f"{last['Item']} | {last['Price']}"
+
+
+def test_one_table_under_a_tight_budget_keeps_its_greedy_prefix(tmp_path):
+    """With one table the round robin is the old greedy walk."""
+    [result] = _wide_results(tmp_path, 1)
+    block, _evidence = spreadsheet_prompt_block(
+        [result], preview_rows=20, max_bytes=300,
+    )
+    lines = block.splitlines()
+    expected = [lines[0], "Item | Price"]
+    for row in result.rows[:20]:
+        line = f"{row.cells['Item']} | {row.cells['Price']}"
+        if len("\n".join([*expected, line]).encode("utf-8")) > 300:
+            break
+        expected.append(line)
+    assert lines == expected
+    assert 2 < len(lines) < 22
+
+
+# ---------------------------------------------------------------------------
+# Citation keys: workbook results and external evidence share the 6000 band
+# ---------------------------------------------------------------------------
+
+def _external(index: int):
+    from app.domain.reflect_action import ExternalEvidence
+
+    return ExternalEvidence(
+        key=f"ext:acme:{index}", plugin_id="acme", action="web_search",
+        source_label="IEEE Xplore", title=f"标题-{index}",
+        excerpt=f"摘录-{index}", url=f"https://example.org/{index}",
+        location_label=f"§{index}",
+    )
+
+
+def _external_ask():
+    from types import SimpleNamespace
+
+    from app.core.config import Settings
+    from app.services.ask_service import AskService
+    from app.services.evidence_context import EvidenceContextService
+
+    ask = object.__new__(AskService)
+    ask.evidence_context = EvidenceContextService(
+        notebooks=SimpleNamespace(), sources=SimpleNamespace(),
+        knowledge=SimpleNamespace(), settings=Settings(_env_file=None),
+    )
+    return ask
+
+
+def _shifted(block: str, sheet_map: dict, offset: int) -> tuple[str, dict]:
+    """The block and map as an outline section ``offset`` would number them."""
+    def key(name: str) -> str:
+        return f"k{offset + int(name[1:])}"
+
+    lines = [
+        key(line.split(":", 1)[0]) + ":" + line.split(":", 1)[1]
+        if line.startswith("k600") else line
+        for line in block.splitlines()
+    ]
+    return "\n".join(lines), {key(name): value for name, value in sheet_map.items()}
+
+
+@pytest.mark.parametrize("key_offset", [0, 10_000])
+def test_external_evidence_numbers_after_the_workbook_keys(tmp_path, key_offset):
+    results = _wide_results(tmp_path, 2)
+    block, sheet_map = _shifted(*spreadsheet_prompt_block(
+        results, preview_rows=2, max_bytes=65_536,
+    ), key_offset)
+    context, merged, admitted, _counts = _external_ask()._append_external_context(
+        block, dict(sheet_map), [_external(1), _external(2)], key_offset=key_offset,
+    )
+    keys = [f"k{key_offset + 6000 + n}" for n in (1, 2, 3, 4)]
+    assert [merged[key]["source_id"] for key in keys[:2]] == [
+        result.source_id for result in results
+    ]
+    assert [merged[key]["object_type"] for key in keys[2:]] == ["external", "external"]
+    heads = [line.split(":", 1)[0] for line in context.splitlines()
+             if line.startswith("k")]
+    assert len(heads) == len(set(heads)) == 4, heads
+    assert admitted == {"ext:acme:1", "ext:acme:2"}
+
+
+def test_external_evidence_without_workbook_keys_still_starts_at_k6001():
+    _context, merged, _admitted, _counts = _external_ask()._append_external_context(
+        "k1: [chunk] text", {"k1": {"object_type": "chunk"}}, [_external(1)],
+        key_offset=0,
+    )
+    assert sorted(merged) == ["k1", "k6001"]
+    assert merged["k6001"]["object_type"] == "external"

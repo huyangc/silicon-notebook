@@ -2607,7 +2607,7 @@ class AskService:
         """
         sink: dict = {}
         block, block_map = self.evidence_context.external_context(
-            items, id_offset=key_offset + self._EXTERNAL_KEY_BASE,
+            items, id_offset=self._external_key_offset(id_map, key_offset),
             truncation_sink=sink,
         )
         context_block, merged = self._bounded_context_append(
@@ -2639,6 +2639,28 @@ class AskService:
             ),
         }
         return context_block, merged, admitted, counts
+
+    @classmethod
+    def _external_key_offset(cls, id_map: dict, key_offset: int) -> int:
+        """Where this synthesis' external keys start numbering from.
+
+        External evidence shares the 6000 band with the workbook results
+        (``spreadsheet_prompt_block`` writes ``k6001`` + plan position;
+        ``ask_evidence.kind_for_key`` tells the two apart by ``definition``),
+        and the workbook block is already in ``id_map`` when this runs.  So
+        the external keys continue after the highest workbook key instead of
+        restarting at ``k6001``: two lines under one key would both reach the
+        prompt, and the id_map merge would silently replace the workbook
+        receipt with the external one.  Without workbook keys the offset is
+        the band base, exactly as before.
+        """
+        base = key_offset + cls._EXTERNAL_KEY_BASE
+        taken = [
+            int(match.group(1)) for key in id_map
+            if (match := re.fullmatch(r"k(\d+)", str(key))) is not None
+            and base < int(match.group(1)) < key_offset + cls._DOCUMENT_READ_KEY_BASE
+        ]
+        return max(taken, default=base)
 
     @staticmethod
     def _external_exact_keys(anchors) -> set:
@@ -5891,7 +5913,8 @@ class AskService:
         the global run's turn (``DetachedAskTurn.notebook_names``), read lazily
         and only to label a catalog over two or more libraries and the result.
         The rest -- one catalog filled library by library under the
-        single-library byte budget, one plan, one sheet -- is
+        single-library byte budget, one plan naming up to
+        ``SPREADSHEET_ANALYSIS_MAX_TARGETS`` sheets -- is
         ``SpreadsheetAnalysisService.analyze_peer``.
         """
         question = prepared.research_question
@@ -6712,15 +6735,22 @@ class AskService:
 
     @staticmethod
     def _append_spreadsheet_citations(citations: list, results: list) -> None:
-        """Attach at most one stable row locator per workbook result."""
-        seen: set[tuple[str, str]] = set()
+        """Attach at most one stable row locator per workbook result.
+
+        The identity includes the sheet range: a multi-table plan may analyse
+        two sheets of one workbook, and two source-level receipts (no row
+        element) of the same workbook are still two different tables.
+        """
+        seen: set[tuple[str, str, str]] = set()
         for result_set in results:
             citation = next(
                 (row.citation for row in result_set.rows if row.citation), None
             )
             if citation is None:
                 continue
-            identity = (citation.source_id, citation.element_id)
+            identity = (
+                citation.source_id, citation.element_id, citation.location_label,
+            )
             if identity in seen:
                 continue
             seen.add(identity)

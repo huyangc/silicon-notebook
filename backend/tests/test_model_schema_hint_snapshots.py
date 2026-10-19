@@ -123,8 +123,8 @@ _LITERAL_HINTS: tuple[tuple[str, str, str | None, tuple[str, ...]], ...] = (
      'model_response_801678e3ad61661b', ('relevant_ids',)),
     ('services/source_ingestion.py', '{"summary": ""}',
      'model_response_35de5b90eb8853f6', ('summary',)),
-    ('services/spreadsheet_analysis.py', '{"source_id":"id","sheet":"name","operation":"profile","aggregation":"count","measure":"","group_by":"","sort_by":"","order":"desc","filters":[],"columns":[]}',
-     'model_response_72ba483a6f3c5c7e', ('aggregation', 'columns', 'filters', 'group_by', 'measure', 'operation', 'order', 'sheet', 'sort_by', 'source_id')),
+    ('services/spreadsheet_analysis.py', '{"targets":[{"source_id":"id","sheet":"name","operation":"profile","aggregation":"count","measure":"","group_by":"","sort_by":"","order":"desc","filters":[],"columns":[]}]}',
+     'model_response_b7bfb7e6fff1ba84', ('targets',)),
 )
 
 _BUILT_HINTS: tuple[tuple[str, str, str | None, tuple[str, ...]], ...] = (

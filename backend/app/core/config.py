@@ -1722,6 +1722,15 @@ class Settings(BaseSettings):
         le=262_144,
         validation_alias="SPREADSHEET_ANALYSIS_PLANNER_CATALOG_BYTES",
     )
+    # How many tables ONE planner call may name (user ruling 2026-10-19:
+    # "at most 2-3", cap 3).  Still one planner call; execution and the
+    # result cards grow with it, the synthesis table-block budget does not.
+    spreadsheet_analysis_max_targets: int = Field(
+        3,
+        ge=1,
+        le=3,
+        validation_alias="SPREADSHEET_ANALYSIS_MAX_TARGETS",
+    )
     spreadsheet_analysis_planner_timeout_seconds: float = Field(
         8.0,
         ge=1.0,
