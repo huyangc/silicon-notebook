@@ -1,0 +1,970 @@
+{
+ "board_structure": {
+  "boards_equal_component": 1,
+  "boards_in_giant": 7
+ },
+ "pages": {
+  "dismissed": {
+   "absence": null,
+   "built_at": {
+    "cluster_seq": 2,
+    "kg_seq": 5
+   },
+   "evidence_units": {
+    "F1": {
+     "concepts": "canonical",
+     "giant_share": "ratio",
+     "shared_share": "ratio"
+    },
+    "F2": {
+     "jaccard": "ratio",
+     "objects": "objects",
+     "shared_concepts": "canonical"
+    },
+    "F3": {
+     "fragmented_names": "canonical",
+     "fragmented_objects": "objects",
+     "fragmented_share": "ratio",
+     "isolated_objects": "objects",
+     "isolated_share": "ratio",
+     "isolated_share_threshold": "ratio",
+     "median_isolated_share": "ratio",
+     "median_relations_per_object": "relations_per_object",
+     "relations_per_object": "relations_per_object"
+    },
+    "F4": {
+     "canonicals": "canonical",
+     "member_sources": "sources",
+     "objects": "objects",
+     "spellings": "spellings"
+    },
+    "F5": {
+     "isolated_objects": "objects",
+     "isolated_share": "ratio",
+     "usable_objects": "objects"
+    }
+   },
+   "freshness": {
+    "basis": "usable_live",
+    "built_at_cluster_seq": 2,
+    "built_at_seq": 5,
+    "cluster_seq_behind": 0,
+    "seq_behind": 0,
+    "stale": false
+   },
+   "has_more": false,
+   "limit": 50,
+   "offset": 0,
+   "present": true,
+   "returned": 0,
+   "rows": [],
+   "rules_version": 1,
+   "total": 0,
+   "units": {
+    "cluster_seq": "seq",
+    "impact_objects": "objects",
+    "kg_seq": "seq",
+    "limit": "findings",
+    "objects": "objects",
+    "offset": "findings",
+    "returned": "findings",
+    "total": "findings"
+   },
+   "zone": "dismissed"
+  },
+  "open": {
+   "absence": null,
+   "built_at": {
+    "cluster_seq": 2,
+    "kg_seq": 5
+   },
+   "evidence_units": {
+    "F1": {
+     "concepts": "canonical",
+     "giant_share": "ratio",
+     "shared_share": "ratio"
+    },
+    "F2": {
+     "jaccard": "ratio",
+     "objects": "objects",
+     "shared_concepts": "canonical"
+    },
+    "F3": {
+     "fragmented_names": "canonical",
+     "fragmented_objects": "objects",
+     "fragmented_share": "ratio",
+     "isolated_objects": "objects",
+     "isolated_share": "ratio",
+     "isolated_share_threshold": "ratio",
+     "median_isolated_share": "ratio",
+     "median_relations_per_object": "relations_per_object",
+     "relations_per_object": "relations_per_object"
+    },
+    "F4": {
+     "canonicals": "canonical",
+     "member_sources": "sources",
+     "objects": "objects",
+     "spellings": "spellings"
+    },
+    "F5": {
+     "isolated_objects": "objects",
+     "isolated_share": "ratio",
+     "usable_objects": "objects"
+    }
+   },
+   "freshness": {
+    "basis": "usable_live",
+    "built_at_cluster_seq": 2,
+    "built_at_seq": 5,
+    "cluster_seq_behind": 0,
+    "seq_behind": 0,
+    "stale": false
+   },
+   "has_more": false,
+   "limit": 50,
+   "offset": 0,
+   "present": true,
+   "returned": 5,
+   "rows": [
+    {
+     "actions": [
+      {
+       "capability": "sources:write",
+       "kind": "delete_source",
+       "source_id": "src-off"
+      }
+     ],
+     "dismissed_at": null,
+     "evidence": {
+      "concepts": 12,
+      "giant_share": 0.0,
+      "samples": [
+       "Unrelated topic 01",
+       "Unrelated topic 02",
+       "Unrelated topic 03",
+       "Unrelated topic 04",
+       "Unrelated topic 05"
+      ],
+      "shared_share": 0.0
+     },
+     "first_seen": {
+      "cluster_seq": 2,
+      "kg_seq": 5
+     },
+     "handled_reason": null,
+     "impact": {
+      "objects": 12
+     },
+     "live_sources": [
+      {
+       "exists": true,
+       "processing": false,
+       "source_id": "src-off",
+       "source_type": "markdown",
+       "title": "Title of src-off"
+      }
+     ],
+     "rule_id": "F1",
+     "severity": "high",
+     "status": "open",
+     "subject": {
+      "key": "src-off",
+      "kind": "source",
+      "label": "Title of src-off"
+     },
+     "subject_refs": [
+      "src-off"
+     ]
+    },
+    {
+     "actions": [
+      {
+       "capability": "sources:write",
+       "kind": "delete_source",
+       "source_id": "src-dup-b"
+      }
+     ],
+     "dismissed_at": null,
+     "evidence": {
+      "jaccard": 1.0,
+      "samples": [
+       "Core concept 05",
+       "Core concept 01",
+       "Core concept 02",
+       "Core concept 03",
+       "Core concept 04"
+      ],
+      "shared_concepts": 12,
+      "sources": [
+       {
+        "keep": true,
+        "label": "Title of src-dup-a",
+        "objects": 12,
+        "source_id": "src-dup-a"
+       },
+       {
+        "keep": false,
+        "label": "Title of src-dup-b",
+        "objects": 12,
+        "source_id": "src-dup-b"
+       }
+      ]
+     },
+     "first_seen": {
+      "cluster_seq": 2,
+      "kg_seq": 5
+     },
+     "handled_reason": null,
+     "impact": {
+      "objects": 12
+     },
+     "live_sources": [
+      {
+       "exists": true,
+       "processing": false,
+       "source_id": "src-dup-a",
+       "source_type": "markdown",
+       "title": "Title of src-dup-a"
+      },
+      {
+       "exists": true,
+       "processing": false,
+       "source_id": "src-dup-b",
+       "source_type": "markdown",
+       "title": "Title of src-dup-b"
+      }
+     ],
+     "rule_id": "F2",
+     "severity": "medium",
+     "status": "open",
+     "subject": {
+      "key": "src-dup-a|src-dup-b",
+      "kind": "source_pair",
+      "label": "Title of src-dup-a ⇄ Title of src-dup-b"
+     },
+     "subject_refs": [
+      "src-dup-a",
+      "src-dup-b"
+     ]
+    },
+    {
+     "actions": [
+      {
+       "capability": "sources:write",
+       "kind": "reparse_source",
+       "source_id": "src-broken"
+      }
+     ],
+     "dismissed_at": null,
+     "evidence": {
+      "also_off_topic": false,
+      "fragmented_names": 6,
+      "fragmented_objects": 6,
+      "fragmented_share": 0.5,
+      "samples": [
+       "l l a m a",
+       "m a m b a",
+       "q w e n x",
+       "g e m m a",
+       "p h i a b"
+      ],
+      "signals": [
+       "fragmented_names"
+      ]
+     },
+     "first_seen": {
+      "cluster_seq": 2,
+      "kg_seq": 5
+     },
+     "handled_reason": null,
+     "impact": {
+      "objects": 6
+     },
+     "live_sources": [
+      {
+       "exists": true,
+       "processing": false,
+       "source_id": "src-broken",
+       "source_type": "markdown",
+       "title": "Title of src-broken"
+      }
+     ],
+     "rule_id": "F3",
+     "severity": "medium",
+     "status": "open",
+     "subject": {
+      "key": "src-broken",
+      "kind": "source",
+      "label": "Title of src-broken"
+     },
+     "subject_refs": [
+      "src-broken"
+     ]
+    },
+    {
+     "actions": [
+      {
+       "capability": "kg:write",
+       "kind": "relink"
+      }
+     ],
+     "dismissed_at": null,
+     "evidence": {
+      "isolated_objects": 3,
+      "isolated_share": 0.02857142857142857,
+      "top_sources": [
+       {
+        "isolated_objects": 3,
+        "label": "Title of src-core-0",
+        "source_id": "src-core-0"
+       }
+      ],
+      "usable_objects": 105
+     },
+     "first_seen": {
+      "cluster_seq": 2,
+      "kg_seq": 5
+     },
+     "handled_reason": null,
+     "impact": {
+      "objects": 3
+     },
+     "live_sources": [
+      {
+       "exists": true,
+       "processing": false,
+       "source_id": "src-core-0",
+       "source_type": "markdown",
+       "title": "Title of src-core-0"
+      }
+     ],
+     "rule_id": "F5",
+     "severity": "low",
+     "status": "open",
+     "subject": {
+      "key": "notebook",
+      "kind": "notebook",
+      "label": ""
+     },
+     "subject_refs": [
+      "src-core-0"
+     ]
+    },
+    {
+     "actions": [
+      {
+       "capability": "kg:write",
+       "kind": "review_merge"
+      }
+     ],
+     "dismissed_at": null,
+     "evidence": {
+      "canonical_ids": [
+       "K-llama 3 1",
+       "K-llama 31"
+      ],
+      "canonicals": 2,
+      "classes": [
+       [
+        "K-llama 3 1"
+       ],
+       [
+        "K-llama 31"
+       ]
+      ],
+      "member_sources": 2,
+      "members": [
+       {
+        "canonical_id": "K-llama 3 1",
+        "name": "Llama 3.1",
+        "objects": 1
+       },
+       {
+        "canonical_id": "K-llama 31",
+        "name": "Llama 31",
+        "objects": 1
+       }
+      ],
+      "spellings": 2
+     },
+     "first_seen": {
+      "cluster_seq": 2,
+      "kg_seq": 5
+     },
+     "handled_reason": null,
+     "impact": {
+      "objects": 2
+     },
+     "live_sources": [
+      {
+       "exists": true,
+       "processing": false,
+       "source_id": "src-core-0",
+       "source_type": "markdown",
+       "title": "Title of src-core-0"
+      },
+      {
+       "exists": true,
+       "processing": false,
+       "source_id": "src-core-1",
+       "source_type": "markdown",
+       "title": "Title of src-core-1"
+      }
+     ],
+     "rule_id": "F4",
+     "severity": "low",
+     "status": "open",
+     "subject": {
+      "key": "llama31",
+      "kind": "concept_group",
+      "label": "Llama 3.1"
+     },
+     "subject_refs": [
+      "src-core-0",
+      "src-core-1"
+     ]
+    }
+   ],
+   "rules_version": 1,
+   "total": 5,
+   "units": {
+    "cluster_seq": "seq",
+    "impact_objects": "objects",
+    "kg_seq": "seq",
+    "limit": "findings",
+    "objects": "objects",
+    "offset": "findings",
+    "returned": "findings",
+    "total": "findings"
+   },
+   "zone": "open"
+  },
+  "passed": {
+   "absence": null,
+   "built_at": {
+    "cluster_seq": 2,
+    "kg_seq": 5
+   },
+   "evidence_units": {
+    "F1": {
+     "concepts": "canonical",
+     "giant_share": "ratio",
+     "shared_share": "ratio"
+    },
+    "F2": {
+     "jaccard": "ratio",
+     "objects": "objects",
+     "shared_concepts": "canonical"
+    },
+    "F3": {
+     "fragmented_names": "canonical",
+     "fragmented_objects": "objects",
+     "fragmented_share": "ratio",
+     "isolated_objects": "objects",
+     "isolated_share": "ratio",
+     "isolated_share_threshold": "ratio",
+     "median_isolated_share": "ratio",
+     "median_relations_per_object": "relations_per_object",
+     "relations_per_object": "relations_per_object"
+    },
+    "F4": {
+     "canonicals": "canonical",
+     "member_sources": "sources",
+     "objects": "objects",
+     "spellings": "spellings"
+    },
+    "F5": {
+     "isolated_objects": "objects",
+     "isolated_share": "ratio",
+     "usable_objects": "objects"
+    }
+   },
+   "freshness": {
+    "basis": "usable_live",
+    "built_at_cluster_seq": 2,
+    "built_at_seq": 5,
+    "cluster_seq_behind": 0,
+    "seq_behind": 0,
+    "stale": false
+   },
+   "has_more": false,
+   "limit": 50,
+   "offset": 0,
+   "present": true,
+   "returned": 0,
+   "rows": [],
+   "rules_version": 1,
+   "total": 0,
+   "units": {
+    "cluster_seq": "seq",
+    "impact_objects": "objects",
+    "kg_seq": "seq",
+    "limit": "findings",
+    "objects": "objects",
+    "offset": "findings",
+    "returned": "findings",
+    "total": "findings"
+   },
+   "zone": "passed"
+  }
+ },
+ "payload": {
+  "built_at_cluster_seq": 2,
+  "comparison": {
+   "by_rule": {},
+   "comparable": false,
+   "new": null,
+   "persisting": null,
+   "previous_built_at_cluster_seq": null,
+   "previous_built_at_seq": null,
+   "reason": "no_previous",
+   "resolved": null,
+   "resolved_samples": []
+  },
+  "ledger_contract": 1,
+  "rules": {
+   "F1": {
+    "partner_exclusion_incomplete": false,
+    "persisted": 1,
+    "sources_checked": 8,
+    "sources_deferred_to_f3": 0,
+    "sources_hit": 1,
+    "sources_too_few_concepts": 0,
+    "status": "ran",
+    "total": 1,
+    "truncated": false
+   },
+   "F2": {
+    "candidate_pair_generation_limit": 5000000,
+    "candidate_pair_generations": 14,
+    "candidate_pairs": 5,
+    "candidates_truncated": false,
+    "pairs_absorbed_into_f1": 0,
+    "pairs_hit": 1,
+    "persisted": 1,
+    "sources_checked": 8,
+    "status": "ran",
+    "total": 1,
+    "truncated": false
+   },
+   "F3": {
+    "median_isolated_share": 0.0,
+    "median_relations_per_object": null,
+    "persisted": 1,
+    "sources_checked": 8,
+    "sources_hit_fragmented_names": 1,
+    "sources_hit_isolated": 0,
+    "sources_hit_low_relations": 0,
+    "status": "ran",
+    "total": 1,
+    "truncated": false,
+    "unnamed_concept_canonicals": 0
+   },
+   "F4": {
+    "canonicals_checked": 66,
+    "groups_decided_apart": 0,
+    "groups_unreproducible": 1,
+    "persisted": 1,
+    "status": "ran",
+    "total": 1,
+    "truncated": false,
+    "unnamed_concept_canonicals": 0
+   },
+   "F5": {
+    "objects_checked": 105,
+    "persisted": 1,
+    "status": "ran",
+    "total": 1,
+    "truncated": false
+   },
+   "S1": {
+    "examples": [
+     {
+      "names": [
+       "Q-Former",
+       "Qformer"
+      ]
+     }
+    ],
+    "groups_decided_apart": 0,
+    "narrow_group_objects": 2,
+    "narrow_groups": 1,
+    "status": "ran"
+   }
+  },
+  "rules_version": 1,
+  "structure": {
+   "components": 2,
+   "giant_nodes": 54,
+   "giant_object_share": 0.8571428571428571,
+   "giant_objects": 90,
+   "graph_nodes": 66,
+   "island_components": 1,
+   "island_sources": 1,
+   "usable_objects": 105
+  },
+  "thresholds": {
+   "dup_j_min": 0.45,
+   "f1_min_concepts": 10,
+   "f1_shared_max": 0.05,
+   "f3a_min_names": 5,
+   "f3a_min_single_char_run": 4,
+   "f3a_share_min": 0.1,
+   "f3b_isolated_share_factor": 3.0,
+   "f3b_isolated_share_floor": 0.1,
+   "f3b_min_isolated": 20,
+   "f3b_min_objects": 20,
+   "f3b_relations_per_object_fraction": 0.5,
+   "max_persisted_findings": 500,
+   "ubiquitous_source_count": 30
+  }
+ },
+ "rows": [
+  {
+   "evidence": {
+    "concepts": 12,
+    "giant_share": 0.0,
+    "samples": [
+     "Unrelated topic 01",
+     "Unrelated topic 02",
+     "Unrelated topic 03",
+     "Unrelated topic 04",
+     "Unrelated topic 05"
+    ],
+    "shared_share": 0.0
+   },
+   "first_seen_cluster_seq": 2,
+   "first_seen_kg_seq": 5,
+   "impact_objects": 12,
+   "rule_id": "F1",
+   "severity": "high",
+   "subject_key": "src-off",
+   "subject_kind": "source",
+   "subject_label": "Title of src-off",
+   "subject_refs": [
+    "src-off"
+   ]
+  },
+  {
+   "evidence": {
+    "jaccard": 1.0,
+    "samples": [
+     "Core concept 05",
+     "Core concept 01",
+     "Core concept 02",
+     "Core concept 03",
+     "Core concept 04"
+    ],
+    "shared_concepts": 12,
+    "sources": [
+     {
+      "keep": true,
+      "label": "Title of src-dup-a",
+      "objects": 12,
+      "source_id": "src-dup-a"
+     },
+     {
+      "keep": false,
+      "label": "Title of src-dup-b",
+      "objects": 12,
+      "source_id": "src-dup-b"
+     }
+    ]
+   },
+   "first_seen_cluster_seq": 2,
+   "first_seen_kg_seq": 5,
+   "impact_objects": 12,
+   "rule_id": "F2",
+   "severity": "medium",
+   "subject_key": "src-dup-a|src-dup-b",
+   "subject_kind": "source_pair",
+   "subject_label": "Title of src-dup-a ⇄ Title of src-dup-b",
+   "subject_refs": [
+    "src-dup-a",
+    "src-dup-b"
+   ]
+  },
+  {
+   "evidence": {
+    "also_off_topic": false,
+    "fragmented_names": 6,
+    "fragmented_objects": 6,
+    "fragmented_share": 0.5,
+    "samples": [
+     "l l a m a",
+     "m a m b a",
+     "q w e n x",
+     "g e m m a",
+     "p h i a b"
+    ],
+    "signals": [
+     "fragmented_names"
+    ]
+   },
+   "first_seen_cluster_seq": 2,
+   "first_seen_kg_seq": 5,
+   "impact_objects": 6,
+   "rule_id": "F3",
+   "severity": "medium",
+   "subject_key": "src-broken",
+   "subject_kind": "source",
+   "subject_label": "Title of src-broken",
+   "subject_refs": [
+    "src-broken"
+   ]
+  },
+  {
+   "evidence": {
+    "canonical_ids": [
+     "K-llama 3 1",
+     "K-llama 31"
+    ],
+    "canonicals": 2,
+    "classes": [
+     [
+      "K-llama 3 1"
+     ],
+     [
+      "K-llama 31"
+     ]
+    ],
+    "member_sources": 2,
+    "members": [
+     {
+      "canonical_id": "K-llama 3 1",
+      "name": "Llama 3.1",
+      "objects": 1
+     },
+     {
+      "canonical_id": "K-llama 31",
+      "name": "Llama 31",
+      "objects": 1
+     }
+    ],
+    "spellings": 2
+   },
+   "first_seen_cluster_seq": 2,
+   "first_seen_kg_seq": 5,
+   "impact_objects": 2,
+   "rule_id": "F4",
+   "severity": "low",
+   "subject_key": "llama31",
+   "subject_kind": "concept_group",
+   "subject_label": "Llama 3.1",
+   "subject_refs": [
+    "src-core-0",
+    "src-core-1"
+   ]
+  },
+  {
+   "evidence": {
+    "isolated_objects": 3,
+    "isolated_share": 0.02857142857142857,
+    "top_sources": [
+     {
+      "isolated_objects": 3,
+      "label": "Title of src-core-0",
+      "source_id": "src-core-0"
+     }
+    ],
+    "usable_objects": 105
+   },
+   "first_seen_cluster_seq": 2,
+   "first_seen_kg_seq": 5,
+   "impact_objects": 3,
+   "rule_id": "F5",
+   "severity": "low",
+   "subject_key": "notebook",
+   "subject_kind": "notebook",
+   "subject_label": "",
+   "subject_refs": [
+    "src-core-0"
+   ]
+  }
+ ],
+ "summary": {
+  "absence": null,
+  "built_at": {
+   "cluster_seq": 2,
+   "kg_seq": 5
+  },
+  "comparison": {
+   "by_rule": {},
+   "comparable": false,
+   "new": null,
+   "persisting": null,
+   "previous_built_at_cluster_seq": null,
+   "previous_built_at_seq": null,
+   "reason": "no_previous",
+   "resolved": null,
+   "resolved_samples": []
+  },
+  "counts": {
+   "by_rule": {
+    "F1": 1,
+    "F2": 1,
+    "F3": 1,
+    "F4": 1,
+    "F5": 1
+   },
+   "dismissed": 0
+  },
+  "dev_items": [
+   {
+    "groups": 1,
+    "item_id": "S1",
+    "objects": 2,
+    "samples": [
+     {
+      "names": [
+       "Q-Former",
+       "Qformer"
+      ]
+     }
+    ]
+   }
+  ],
+  "freshness": {
+   "basis": "usable_live",
+   "built_at_cluster_seq": 2,
+   "built_at_seq": 5,
+   "cluster_seq_behind": 0,
+   "seq_behind": 0,
+   "stale": false
+  },
+  "present": true,
+  "relink": {
+   "at": null,
+   "at_kg_seq": null,
+   "attempted": false,
+   "may_change": true
+  },
+  "rules": {
+   "F1": {
+    "partner_exclusion_incomplete": false,
+    "persisted": 1,
+    "sources_checked": 8,
+    "sources_deferred_to_f3": 0,
+    "sources_hit": 1,
+    "sources_too_few_concepts": 0,
+    "status": "ran",
+    "total": 1,
+    "truncated": false
+   },
+   "F2": {
+    "candidate_pair_generation_limit": 5000000,
+    "candidate_pair_generations": 14,
+    "candidate_pairs": 5,
+    "candidates_truncated": false,
+    "pairs_absorbed_into_f1": 0,
+    "pairs_hit": 1,
+    "persisted": 1,
+    "sources_checked": 8,
+    "status": "ran",
+    "total": 1,
+    "truncated": false
+   },
+   "F3": {
+    "median_isolated_share": 0.0,
+    "median_relations_per_object": null,
+    "persisted": 1,
+    "sources_checked": 8,
+    "sources_hit_fragmented_names": 1,
+    "sources_hit_isolated": 0,
+    "sources_hit_low_relations": 0,
+    "status": "ran",
+    "total": 1,
+    "truncated": false,
+    "unnamed_concept_canonicals": 0
+   },
+   "F4": {
+    "canonicals_checked": 66,
+    "groups_decided_apart": 0,
+    "groups_unreproducible": 1,
+    "persisted": 1,
+    "status": "ran",
+    "total": 1,
+    "truncated": false,
+    "unnamed_concept_canonicals": 0
+   },
+   "F5": {
+    "objects_checked": 105,
+    "persisted": 1,
+    "status": "ran",
+    "total": 1,
+    "truncated": false
+   },
+   "S1": {
+    "groups_decided_apart": 0,
+    "narrow_group_objects": 2,
+    "narrow_groups": 1,
+    "status": "ran"
+   }
+  },
+  "rules_version": 1,
+  "structure": {
+   "components": 2,
+   "giant_nodes": 54,
+   "giant_object_share": 0.8571428571428571,
+   "giant_objects": 90,
+   "graph_nodes": 66,
+   "island_components": 1,
+   "island_sources": 1,
+   "usable_objects": 105
+  },
+  "units": {
+   "candidate_pair_generation_limit": "pair_generations",
+   "candidate_pair_generations": "pair_generations",
+   "candidate_pairs": "candidate_pairs",
+   "canonicals_checked": "canonical",
+   "components": "components",
+   "dup_j_min": "ratio",
+   "f1_min_concepts": "canonical",
+   "f1_shared_max": "ratio",
+   "f3a_min_names": "canonical",
+   "f3a_min_single_char_run": "tokens",
+   "f3a_share_min": "ratio",
+   "f3b_isolated_share_factor": "factor",
+   "f3b_isolated_share_floor": "ratio",
+   "f3b_min_isolated": "objects",
+   "f3b_min_objects": "objects",
+   "f3b_relations_per_object_fraction": "factor",
+   "giant_nodes": "canonical",
+   "giant_object_share": "ratio",
+   "giant_objects": "objects",
+   "graph_nodes": "canonical",
+   "groups_decided_apart": "concept_groups",
+   "groups_unreproducible": "concept_groups",
+   "impact_objects": "objects",
+   "island_components": "components",
+   "island_sources": "sources",
+   "ledger_contract": "version",
+   "max_persisted_findings": "findings",
+   "median_isolated_share": "ratio",
+   "median_relations_per_object": "relations_per_object",
+   "narrow_group_objects": "objects",
+   "narrow_groups": "concept_groups",
+   "new": "findings",
+   "objects_checked": "objects",
+   "pairs_absorbed_into_f1": "source_pairs",
+   "pairs_hit": "source_pairs",
+   "persisted": "findings",
+   "persisting": "findings",
+   "previous_built_at_cluster_seq": "seq",
+   "previous_built_at_seq": "seq",
+   "resolved": "findings",
+   "rules_version": "version",
+   "sources_checked": "sources",
+   "sources_deferred_to_f3": "sources",
+   "sources_hit": "sources",
+   "sources_hit_fragmented_names": "sources",
+   "sources_hit_isolated": "sources",
+   "sources_hit_low_relations": "sources",
+   "sources_too_few_concepts": "sources",
+   "total": "findings",
+   "ubiquitous_source_count": "sources",
+   "unnamed_concept_canonicals": "canonical",
+   "usable_objects": "objects"
+  }
+ }
+}
