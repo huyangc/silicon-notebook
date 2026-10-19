@@ -195,6 +195,10 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
     "scripts/diag_slow.py": (1, 1, 0, 0, 0, "C:只读诊断对照组"),
     "scripts/verify_repository_snapshot.py": (1, 0, 0, 0, 0,
         "C:离线迁移一致性校验(v24 去重投影),只读"),
+    "scripts/kg_findings_rehearsal.py": (7, 0, 0, 6, 0,
+        "A:问题清单的生产只读演练(只读连接 + 只发 SELECT),镜像产品的图读 / 对象读 /"
+        "名字读;7 处读全部带代次谓词,取自产品 PG store 的 `_PUBLISHED_CLUSTER_GEN`"
+        "(6 次取值:图读的两条 LEFT JOIN 共用一次)"),
 }
 
 

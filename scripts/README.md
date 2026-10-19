@@ -493,6 +493,7 @@ timeout 与熔断跳过次数。它只读日志和 manifest，不打开数据库
 | `kg_strip_attrs.py` | 一次性迁移:从 gold 草稿去掉 `attrs` |
 | `qiefen_cv.py` | LLM 原子选择器的交叉验证评测 |
 | `kg_quality_audit.py` | 审计现有库的 KG 抽取质量:类型构成 / 重名率 / 文档频次长尾 / 噪声探针 / 连通性(只读、零 LLM),见下 |
+| `kg_findings_rehearsal.py` | 图谱分析「问题清单」的**生产只读演练**(规格 §14③):在一个 PostgreSQL 笔记本上跑产品同一套规则引擎,量出定阈值要看的分布与各阶段耗时/RSS;只读、默认不输出标题和概念名,见下 |
 | `validate_concept_filter.py` | 离线试跑 concept 噪声过滤(无 LLM/不写库) |
 | `validate_overmerge_fix.py` | 验证 concept 去过度合并 |
 | `shadow_sqlite_to_postgres.py` | 显式 SQLite→PostgreSQL 正向 shadow CLI：`preflight` / `start-forward` / `status` / `verify` / 前台 `worker`；单独设置 `SHADOW_DATABASE_URL` 不会启动同步，且不得与停写 importer 共用目标库，完整 runbook 见 `docs/operations_zh.md` |
@@ -621,6 +622,52 @@ PYTHONPATH=backend python3 scripts/kg_quality_audit.py --db <path> --notebook nb
 - 两条已知的判据局限会被自动提示:`is_noise_concept` 的 `len(raw) <= 2` 有丢中文双字
   术语的风险(报告按**风险**措辞,不按已确认的丢失 —— 长度直方图证明不了这件事);
   `probes.claim_degraded` 的动词表只覆盖英文,中文库上该数字无效。
+
+### `kg_findings_rehearsal.py` —— 问题清单的生产只读演练
+
+图谱分析「问题清单」(F1 内容错配 / F2 重复导入 / F3 解析残缺 / F4 未合并同名 / F5 孤立内容)
+的阈值只在一个 84 个来源的本机库上标定过。规格 §14③ 的裁决是先按本机初值实现,再拿生产
+分布定阈值;这个脚本就是那次**生产只读演练**:在**一个**笔记本上跑产品同一套规则引擎,把
+定阈值要看的分布量出来。**只支持 PostgreSQL**,交给生产侧错峰运行。
+
+```bash
+# 默认(分布 + 引擎各规则的命中数,不含任何标题和概念名)
+PYTHONPATH=backend python3 scripts/kg_findings_rehearsal.py \
+  --dsn "$DATABASE_URL" --notebook nb-xxxx --out rehearsal.json
+
+# 带上 chunks 的每段对象数与 S1(种子归一)影响面
+PYTHONPATH=backend python3 scripts/kg_findings_rehearsal.py \
+  --dsn "$DATABASE_URL" --notebook nb-xxxx --with-chunks --s1-impact --out rehearsal.json
+```
+
+| 开关 | 作用 |
+|------|------|
+| `--dsn` / `--dsn-env` | `postgresql://` URL;缺省读环境变量 `DATABASE_URL`(DSN 不会被打印;SQLite 直接拒绝) |
+| `--with-chunks` | 多一次 `chunks` 的 GROUP BY,量 F3b 第三信号「每段对象数」 |
+| `--s1-impact` | 多一次概念对象名流:S1 拆开/合并多少旧种子组、「只合不拆」变体的风险合并数、已存的驳回/暂缓决定按 v2 撞种子的对数、找不到当前对象的决定数 |
+| `--partition-bench` | 在进程内跑 Louvain / Leiden 分区基准(CPU 分钟级,约 1-2 GB RSS,需要 python-igraph);默认不跑 |
+| `--show-samples` | 输出来源标题、概念名和问题明细原文。**那是用户数据**,输出文件按 0600 创建,别外发;默认一概不输出 |
+| `--j-floor` | F2 的 J 分布默认再多跑一遍把阈值降到 0.30 的连接(量产品阈值以下的一段);`0.45` 跳过 |
+| `--max-candidate-pairs` | F2 候选对生成数上限,默认与产品设置 `KG_FINDINGS_MAX_CANDIDATE_PAIRS` 相同 |
+| `--statement-timeout-seconds` | 会话 `statement_timeout`,默认 3600(`0` 不限):流式整表读的计时覆盖整个消费期,服务端默认的 30 秒会掐断它 |
+| `--out` | 把 JSON 写到文件(0600);缺省打印到标准输出 |
+
+要点:
+
+- **只读**:连接一律 `default_transaction_read_only=on` 且 `conn.read_only = True`,服务端拒绝
+  任何写;脚本只发 SELECT(测试逐条断言),大结果集一律 `cursor().stream()`,每个阶段后提交以
+  释放快照。
+- **同口径**:读流的 SQL 复用产品存储层的片段,行序也一样(`ORDER BY kr.id COLLATE "C"`,
+  节点下标因此与产品逐字一致);规则与分布调引擎的纯函数,种子归一调 `concept_seed_v1/v2`,
+  不重实现。`backend/tests/test_kg_findings_rehearsal.py` 钉住这条:产品 SQL 的 FROM 起的
+  文本漂移、引擎内部函数改名改签名都会让它红。
+- **成本**:一次关系流(服务端先排序)、一次对象流、一次 concept_clusters 名字流,各是该笔记本
+  的整表扫描;随后是引擎的 CPU 和有界的点查轮。`phases` 标出哪些阶段是产品也要付的成本
+  (`product_cost: true`)、哪些只是演练自己的测量;`4b_snapshot_for_distributions` 起的 RSS 含
+  一份 tally 快照(约每个概念对象 8 字节),读产品内存成本时请扣除。
+- **输出**:一份 JSON,含 `graph` / `objects` / `concepts`(通用概念界要看的 df 分布)/
+  `f1`..`f5`(分布与阈值敏感度)/ `engine`(产品那遍的各规则状态与逐条数字证据,无标题)/
+  `s1_impact` / `partition_bench` / `phases` / `notes`。
 
 ---
 
