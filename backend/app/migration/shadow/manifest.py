@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=96, postgres_version=76, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=97, postgres_version=77, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -862,6 +862,28 @@ _TABLES = (
     # re-issues one with get_ask(delivery="link"). LOCAL_EPHEMERAL, no
     # replication key.
     TableSpec("answer_links", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 110),
+    # SQLite v97 / PostgreSQL 0077: the KG analysis findings detail and the
+    # marks (dismissals, relink attempts) members and the system put on those
+    # findings. Both hang off notebooks (copy rank 15) and nothing references
+    # them, so the appended ranks are FK-consistent; both are copied, like the
+    # other analysis products and like concept_merge_candidates (the other
+    # table of user decisions about a graph). The replication key is each
+    # table's composite primary key, every column of which is declared
+    # NOT NULL on both backends.
+    _table(
+        "kg_analysis_findings",
+        ("notebook_id", "rule_id", "subject_key"),
+        ReplicationKeyKind.DECLARED_PK,
+        111,
+        "jsonb",
+    ),
+    _table(
+        "kg_analysis_marks",
+        ("notebook_id", "rule_id", "subject_key", "kind"),
+        ReplicationKeyKind.DECLARED_PK,
+        112,
+        "timestamptz",
+    ),
 )
 
 MANIFEST = Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)

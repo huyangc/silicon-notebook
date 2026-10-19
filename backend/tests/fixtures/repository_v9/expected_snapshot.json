@@ -1046,6 +1046,7 @@
       {
         "canonical_rel_seq": -1,
         "chunk_elements_indexed": 0,
+        "cluster_code_version": "",
         "cluster_count": 0,
         "cluster_generation": 0,
         "cluster_input_version": "fixture-cluster-v1",
@@ -2217,6 +2218,16 @@
         "type": "table"
       },
       {
+        "name": "kg_analysis_findings",
+        "sql_sha256": "0366d4305f997f4be1242f704484bc920bc354dbd8660b94a19a425d8d9bb6d1",
+        "type": "table"
+      },
+      {
+        "name": "kg_analysis_marks",
+        "sql_sha256": "c61899db0ee7b9e5be28e2be97c8a14f3eb0b61a39ce9fd77cc91bd1722e4666",
+        "type": "table"
+      },
+      {
         "name": "kg_build_jobs",
         "sql_sha256": "b3a53939a3bb75d8387891e998b125eccea586be4937a872efd4be021ed40788",
         "type": "table"
@@ -2563,7 +2574,7 @@
       },
       {
         "name": "unified_kg_state",
-        "sql_sha256": "3a4d49c8e64479af7aa176df4f5b99b0af698770e84510280a4661c40d0d08e9",
+        "sql_sha256": "a9911a2ad2ae77986219f57dfd30eff68636104a994adb487e4648f71fa945f3",
         "type": "table"
       },
       {
@@ -2794,6 +2805,21 @@
       {
         "name": "sync_capture_kg_analysis_artifacts_update",
         "sql_sha256": "89d9df8bcb549e8ba71d29c0d3d6b88b2da7593a5945d99bd4ee5e3b0caf4e76",
+        "type": "trigger"
+      },
+      {
+        "name": "sync_capture_kg_analysis_findings_delete",
+        "sql_sha256": "1aed5ee1b44af3c81fedb00d6347114c9233290191500bcdfcaba50d2c0b03f7",
+        "type": "trigger"
+      },
+      {
+        "name": "sync_capture_kg_analysis_findings_insert",
+        "sql_sha256": "325bf56de6b9d569a6274221d90e171ea2dd65eaa0c694ba2cdd08f262b88448",
+        "type": "trigger"
+      },
+      {
+        "name": "sync_capture_kg_analysis_findings_update",
+        "sql_sha256": "b42e2f047b9b8b84b10a7a856bc992a5de264be838b06e7aa78dc16f47ff51cc",
         "type": "trigger"
       },
       {
@@ -3292,6 +3318,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 96
+    "user_version": 97
   }
 }

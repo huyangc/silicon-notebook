@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
+from app.domain.kg_analysis_contracts import FINDING_ROW_FIELDS
 from app.domain.knowledge_contracts import (
     CLUSTER_OBJECT_TYPE_GROUPS,
     CLUSTER_OBJECT_TYPES,
@@ -78,6 +79,127 @@ def artifact_ledger_rows(
             "created_at": str(created_at or ""),
         }
     return out
+
+
+def _json_column(value: Any, expected: type, what: str) -> Any:
+    """SQLite 的 JSON 文本 / PostgreSQL 的 jsonb(psycopg 给的已是 Python 值)→ 同一形状。"""
+    if isinstance(value, (str, bytes, bytearray)):
+        try:
+            value = json.loads(value)
+        except ValueError as exc:
+            raise ValueError(f"{what} 不是合法 JSON({exc})") from exc
+    if not isinstance(value, expected):
+        raise ValueError(f"{what} 不是 {expected.__name__}(拿到 {type(value).__name__})")
+    return value
+
+
+def finding_rows(
+    rows: Iterable[Sequence[Any]], *, limit: int,
+) -> List[Dict[str, object]]:
+    """问题清单明细的原始行 → `FINDING_ROW_FIELDS` 键的 dict 列表(SQLite v97 /
+    PostgreSQL 0077)。两侧 store 只管按主键序把原始行喂进来,形状与校验在这里一处。
+
+    ``limit`` 是写入口保证的行数上限(`KG_FINDINGS_ROWS_MAX`):调用方的 SQL 取
+    ``LIMIT limit + 1``,读到第 ``limit + 1`` 行只可能是库被手工改过 —— 硬失败,不截断
+    (截断会让发布事务里继承的 first_seen 与对比摘要静默缺一块)。畸形 JSON 同理。
+    """
+    out: List[Dict[str, object]] = []
+    for row in rows:
+        values = dict(zip(FINDING_ROW_FIELDS, row))
+        key = f"{values['rule_id']}/{values['subject_key']}"
+        values["subject_refs"] = _json_column(
+            values["subject_refs"], list, f"KG 分析问题明细 {key} 的 subject_refs")
+        values["evidence"] = _json_column(
+            values["evidence"], dict, f"KG 分析问题明细 {key} 的 evidence")
+        for name in ("impact_objects", "first_seen_kg_seq", "first_seen_cluster_seq"):
+            values[name] = int(values[name])
+        out.append(values)
+    if len(out) > limit:
+        raise ValueError(
+            f"KG 分析问题明细超过了写入口保证的上限 {limit} 行:库被手工改过,拒绝截断"
+        )
+    return out
+
+
+MARK_ROW_FIELDS = (
+    "rule_id", "subject_key", "kind", "at_kg_seq", "actor_user_id", "created_at", "note",
+)
+
+
+def mark_rows(
+    rows: Iterable[Sequence[Any]], *, limit: int,
+) -> List[Dict[str, object]]:
+    """标记表的原始行 → dict 列表;``created_at`` 由调用方先规整成 ISO 文本(PostgreSQL
+    的 timestamptz 经 `iso_timestamp`)。``limit`` 与 `finding_rows` 同一结构:写入口
+    保证,读到第 ``limit + 1`` 行硬失败。"""
+    out: List[Dict[str, object]] = []
+    for row in rows:
+        values = dict(zip(MARK_ROW_FIELDS, row))
+        values["at_kg_seq"] = int(values["at_kg_seq"])
+        values["actor_user_id"] = str(values["actor_user_id"] or "")
+        values["created_at"] = str(values["created_at"] or "")
+        values["note"] = str(values["note"] or "")
+        out.append(values)
+    if len(out) > limit:
+        raise ValueError(
+            f"KG 分析标记超过了写入口保证的上限 {limit} 行:库被手工改过,拒绝截断"
+        )
+    return out
+
+
+SOURCE_STATE_FIELDS = (
+    "title", "source_type", "status", "parse_status", "chunked_at",
+    "last_extraction_at", "last_extraction_status",
+)
+_HIDDEN_SOURCE_TYPES = frozenset({"memory", "knowhow"})
+
+
+def finding_source_states(
+    requested: Sequence[str], rows: Iterable[Sequence[Any]],
+) -> Dict[str, Dict[str, object]]:
+    """来源点查的原始行 ``(id, *SOURCE_STATE_FIELDS)`` → 每个请求的 id 一项。
+
+    请求了却没读到(来源已删、或不在本 notebook)的 id 记 ``exists=False``,其余字段为
+    空串 —— 「不存在」本身就是读侧要的答案(F1/F2/F3 的「已处理」),不能让它在 dict 里
+    静默缺席。时间戳由各侧先规整成 ISO 文本(PostgreSQL 经 `iso_timestamp`),``NULL``
+    一律 ``''``。隐藏合成来源(``memory`` / ``knowhow``)的标题是用户内容:类型照报,
+    标题给空。"""
+    found: Dict[str, Dict[str, object]] = {}
+    for row in rows:
+        source_id, *rest = row
+        values = {
+            name: "" if value is None else str(value)
+            for name, value in zip(SOURCE_STATE_FIELDS, rest)
+        }
+        if values["source_type"] in _HIDDEN_SOURCE_TYPES:
+            values["title"] = ""
+        found[str(source_id)] = {"exists": True, **values}
+    empty = {"exists": False, **{name: "" for name in SOURCE_STATE_FIELDS}}
+    return {source_id: dict(found.get(source_id, empty)) for source_id in requested}
+
+
+def display_name_rows(
+    rows: Iterable[Sequence[Any]], pairs: Iterable[Tuple[str, str]],
+) -> List[Tuple[str, str, str, int]]:
+    """展示名候选的原始行 ``(source_id, canonical_id, name)`` → 只留调用方要的
+    ``(来源, canonical)`` 对,按名字计数,排成 ``(source_id, canonical_id, -count, name)``
+    的确定序。
+
+    SQL 按 canonical 驱动、按来源过滤,两份 id 各自绑定,所以取回的是两者笛卡尔积的
+    超集;精确到「对」这一步在这里做,两侧逐字一致。排序也在这里做:PostgreSQL 的
+    ``payload->>'name'`` 是库默认排序规则下的 text,在 SQL 里排序两侧就会分岔。
+    名字为空也照常回(``''``),取舍归调用方。"""
+    wanted = set(pairs)
+    counts: Dict[Tuple[str, str, str], int] = {}
+    for source_id, canonical_id, name in rows:
+        key = (str(source_id), str(canonical_id))
+        if key not in wanted:
+            continue
+        triple = (*key, "" if name is None else str(name))
+        counts[triple] = counts.get(triple, 0) + 1
+    ordered = sorted(counts.items(), key=lambda item: (item[0][0], item[0][1], -item[1], item[0][2]))
+    return [(source_id, canonical_id, name, count)
+            for (source_id, canonical_id, name), count in ordered]
 
 
 def _reject_unknown_buckets(seen, allowed: frozenset, what: str) -> None:

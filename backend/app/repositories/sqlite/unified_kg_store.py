@@ -35,7 +35,11 @@ from app.repositories.kg_analysis_payloads import (
     clamp as _clamp,
     cluster_histogram_payload as _cluster_histogram_payload,
     community_overview_payload as _community_overview_payload,
+    display_name_rows as _display_name_rows,
+    finding_rows as _finding_rows,
+    finding_source_states as _finding_source_states,
     largest_clusters_payload as _largest_clusters_payload,
+    mark_rows as _mark_rows,
     relation_provenance_payload as _relation_provenance_payload,
 )
 from app.repositories.sqlite.database import SqliteDatabase
@@ -63,8 +67,12 @@ from app.repositories.sqlite.source_ceiling import (
 )
 from app.domain.kg_analysis_contracts import (
     BOARD_DEPENDENT_ARTIFACT_KINDS,
+    KG_ANALYSIS_MARKS_MAX,
+    KG_FINDINGS_ROWS_MAX,
     batched,
     check_artifact_payloads,
+    check_finding_row,
+    check_mark_kind,
 )
 from app.domain.knowledge_contracts import (
     COMMUNITY_OVERVIEW_MAX,
@@ -1119,8 +1127,11 @@ class UnifiedKgStore:
         published_generation: int,
         *,
         input_seq: Optional[int] = None,
+        cluster_code_version: str,
     ) -> None:
         """The rebuild end-write: store the input version this rebuild consumed
+        (and, SQLite v97, ``cluster_code_version`` -- the code component of
+        that merge, ``kg_merge.cluster_code_version``, in the same statement)
         and clear dirty -- only when ``kg_mutation_seq`` still equals
         ``input_seq`` (the claim's), otherwise dirty stays 1. CRITICAL: MUST NOT
         touch kg_mutation_seq — omitted from both the column list and the SET so
@@ -1141,11 +1152,12 @@ class UnifiedKgStore:
         db.execute(
             f"""
             INSERT INTO unified_kg_state
-            (notebook_id, dirty, cluster_input_version, last_rebuild_at, object_count, relation_count, cluster_count, updated_at{marker_column})
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?{marker_value})
+            (notebook_id, dirty, cluster_input_version, cluster_code_version, last_rebuild_at, object_count, relation_count, cluster_count, updated_at{marker_column})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?{marker_value})
             ON CONFLICT(notebook_id) DO UPDATE SET
               dirty=CASE WHEN unified_kg_state.kg_mutation_seq = ? THEN 0 ELSE 1 END,
               {marker_set}cluster_input_version=excluded.cluster_input_version,
+              cluster_code_version=excluded.cluster_code_version,
               last_rebuild_at=excluded.last_rebuild_at,
               object_count=excluded.object_count,
               relation_count=excluded.relation_count,
@@ -1153,9 +1165,9 @@ class UnifiedKgStore:
               updated_at=excluded.updated_at
             WHERE unified_kg_state.cluster_generation = ?
             """,
-            (notebook_id, 0 if input_seq == 0 else 1, cluster_input_version, now,
-             object_count, relation_count, cluster_count, now, input_seq,
-             published_generation),
+            (notebook_id, 0 if input_seq == 0 else 1, cluster_input_version,
+             cluster_code_version, now, object_count, relation_count,
+             cluster_count, now, input_seq, published_generation),
         )
 
     # ---------------------------------------------------- canonical relations
@@ -2487,8 +2499,11 @@ class UnifiedKgStore:
         profiles: "Iterable[Tuple[str, int, int, str, float, int, float]]",
         payloads: Dict[str, dict],
         now: str,
+        *,
+        findings_rows: "Iterable[tuple]",
+        prune_marks: "Iterable[Tuple[str, str, str]]",
     ) -> None:
-        """整批重写一个 notebook 的三张产物表 —— **必须由调用方包在一个写事务里**。
+        """整批重写一个 notebook 的四张产物表 —— **必须由调用方包在一个写事务里**。
 
         设计 §3.3:「半份产物比没有产物更危险」。DELETE + INSERT 全部发生在调用方的
         `_write()` 事务内,所以一次预计算对读者是原子的:要么看到整批新产物,要么看到
@@ -2511,6 +2526,13 @@ class UnifiedKgStore:
         不可解析的 payload。今天的口径里除不出 NaN(分母为 0 时显式落 0.0),这是**入口
         对称性** —— PostgreSQL 侧 `_json_document` 本来就拒它,两侧都拒才不会出现
         「同一份 payload 一侧写得进、一侧写不进」。
+
+        问题清单(SQLite v97):`findings_rows` 是 `kg_analysis_findings` 的整份明细
+        (逐行 `FINDING_ROW_FIELDS` 序的元组),与账本、另两张明细**同一事务**整删整插 ——
+        处理方式与 `kg_source_profiles` 相同。逐行过 `check_finding_row`,超过
+        `KG_FINDINGS_ROWS_MAX` 行硬失败:读入口按这个上限取数,行数有界是这里保证的。
+        `prune_marks` 是要删掉的标记主键 `(rule_id, subject_key, kind)`(主体已不存在
+        的豁免),按主键逐行删;标记是用户的决定,除此之外本方法不碰标记表。
         """
         check_artifact_payloads(payloads)
         db.execute(
@@ -2521,6 +2543,9 @@ class UnifiedKgStore:
         )
         db.execute(
             "DELETE FROM kg_analysis_artifacts WHERE notebook_id=?", (notebook_id,)
+        )
+        db.execute(
+            "DELETE FROM kg_analysis_findings WHERE notebook_id=?", (notebook_id,)
         )
         for batch in batched(
             (
@@ -2552,6 +2577,36 @@ class UnifiedKgStore:
                 "VALUES (?,?,?,?,?,?,?,?)",
                 batch,
             )
+        written = 0
+        for batch in batched((check_finding_row(row) for row in findings_rows), 1000):
+            written += len(batch)
+            if written > KG_FINDINGS_ROWS_MAX:
+                raise ValueError(
+                    f"KG 分析问题明细:一个 notebook 最多 {KG_FINDINGS_ROWS_MAX} 行,"
+                    "读入口按这个上限取数,写超过就再也读不全"
+                )
+            db.executemany(
+                "INSERT INTO kg_analysis_findings "
+                "(notebook_id, rule_id, subject_key, subject_kind, subject_label, "
+                " subject_refs, severity, impact_objects, evidence, "
+                " first_seen_kg_seq, first_seen_cluster_seq) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    (notebook_id, rule_id, subject_key, subject_kind, subject_label,
+                     json.dumps(refs, ensure_ascii=False, allow_nan=False),
+                     severity, impact,
+                     json.dumps(evidence, ensure_ascii=False, allow_nan=False),
+                     first_kg, first_cluster)
+                    for (rule_id, subject_key, subject_kind, subject_label, refs,
+                         severity, impact, evidence, first_kg, first_cluster) in batch
+                ],
+            )
+        db.executemany(
+            "DELETE FROM kg_analysis_marks "
+            "WHERE notebook_id=? AND rule_id=? AND subject_key=? AND kind=?",
+            [(notebook_id, rule_id, subject_key, check_mark_kind(kind))
+             for rule_id, subject_key, kind in prune_marks],
+        )
         db.executemany(
             "INSERT INTO kg_analysis_artifacts "
             "(notebook_id, kind, kg_mutation_seq, payload, created_at) "
@@ -2562,3 +2617,257 @@ class UnifiedKgStore:
                 for kind in sorted(payloads)
             ],
         )
+
+    # ------------------------------------- 问题清单的明细与标记(SQLite v97)
+    # 设计 docs/superpowers/specs/2026-10-19-kg-analysis-findings-design_zh.md §8.2 /
+    # §8.3 / §3.5。连接契约分两种:
+    #   · connection-taking(明细/标记的读写、来源状态点查):骑调用方的事务 ——
+    #     发布写事务里那一次读旧明细、读侧 `read_snapshot()` 里的一趟多语句读、
+    #     标为正常的写事务。它们不自开连接,所以不挂 `_reject_inside_write_transaction`
+    #     (那道守卫防的是「自开的另一条连接读到提交前的库」)。读旧明细在写事务内是
+    #     刻意的,它的约束换成另一条:行数有界(写入口保证 ≤ KG_FINDINGS_ROWS_MAX)、
+    #     走主键前缀 —— 由计划钉与行数上限的用例钉住。
+    #   · 自开连接(展示名):只在预计算里、写事务之外调用,挂守卫。
+
+    @staticmethod
+    def kg_analysis_finding_rows(
+        db: sqlite3.Connection, notebook_id: str
+    ) -> List[Dict[str, object]]:
+        """一个 notebook 的全部问题明细,按主键 ``(rule_id, subject_key)`` 序。
+
+        行数由写入口保证 ≤ ``KG_FINDINGS_ROWS_MAX``,所以这里取 ``LIMIT 上限 + 1`` 恒是
+        全集;多出那一行只可能是库被手工改过,中性解析层当场硬失败而不是截断。走主键
+        ``(notebook_id, rule_id, subject_key)`` 的前缀范围,ORDER BY 就是主键序,不排序。
+        """
+        return _finding_rows(
+            (
+                tuple(row)
+                for row in db.execute(
+                    "SELECT rule_id, subject_key, subject_kind, subject_label, "
+                    "subject_refs, severity, impact_objects, evidence, "
+                    "first_seen_kg_seq, first_seen_cluster_seq "
+                    "FROM kg_analysis_findings WHERE notebook_id=? "
+                    "ORDER BY rule_id, subject_key LIMIT ?",
+                    (notebook_id, KG_FINDINGS_ROWS_MAX + 1),
+                )
+            ),
+            limit=KG_FINDINGS_ROWS_MAX,
+        )
+
+    @staticmethod
+    def kg_analysis_mark_rows(
+        db: sqlite3.Connection, notebook_id: str
+    ) -> List[Dict[str, object]]:
+        """一个 notebook 的全部标记,按主键 ``(rule_id, subject_key, kind)`` 序。行数
+        上限的结构同 `kg_analysis_finding_rows`(由 `write_kg_analysis_mark` 保证)。"""
+        return _mark_rows(
+            (
+                tuple(row)
+                for row in db.execute(
+                    "SELECT rule_id, subject_key, kind, at_kg_seq, actor_user_id, "
+                    "created_at, note FROM kg_analysis_marks WHERE notebook_id=? "
+                    "ORDER BY rule_id, subject_key, kind LIMIT ?",
+                    (notebook_id, KG_ANALYSIS_MARKS_MAX + 1),
+                )
+            ),
+            limit=KG_ANALYSIS_MARKS_MAX,
+        )
+
+    @staticmethod
+    def write_kg_analysis_mark(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        rule_id: str,
+        subject_key: str,
+        kind: str,
+        *,
+        at_kg_seq: int,
+        actor_user_id: str,
+        note: str,
+        now: str,
+    ) -> None:
+        """写一条标记(按主键 upsert:同一主体同一 kind 只有一行,再写就是覆盖)——
+        **由调用方包在写事务里**。
+
+        写一条**新**主键之前先数本 notebook 已有的标记(``LIMIT`` 上限,走主键前缀):
+        到了 ``KG_ANALYSIS_MARKS_MAX`` 就硬失败,读入口「按上限取数恒是全集」由这里
+        保证。覆盖已有的那一行不受上限约束(行数不变)。"""
+        kind = check_mark_kind(kind)
+        exists = db.execute(
+            "SELECT 1 FROM kg_analysis_marks WHERE notebook_id=? AND rule_id=? "
+            "AND subject_key=? AND kind=?",
+            (notebook_id, rule_id, subject_key, kind),
+        ).fetchone()
+        if exists is None:
+            count = db.execute(
+                "SELECT COUNT(*) AS c FROM (SELECT 1 FROM kg_analysis_marks "
+                "WHERE notebook_id=? LIMIT ?)",
+                (notebook_id, KG_ANALYSIS_MARKS_MAX),
+            ).fetchone()["c"]
+            if int(count) >= KG_ANALYSIS_MARKS_MAX:
+                raise ValueError(
+                    f"KG 分析标记:一个 notebook 最多 {KG_ANALYSIS_MARKS_MAX} 条,"
+                    "读入口按这个上限取数"
+                )
+        db.execute(
+            "INSERT INTO kg_analysis_marks "
+            "(notebook_id, rule_id, subject_key, kind, at_kg_seq, actor_user_id, "
+            " created_at, note) VALUES (?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(notebook_id, rule_id, subject_key, kind) DO UPDATE SET "
+            "at_kg_seq=excluded.at_kg_seq, actor_user_id=excluded.actor_user_id, "
+            "created_at=excluded.created_at, note=excluded.note",
+            (notebook_id, rule_id, subject_key, kind, int(at_kg_seq),
+             str(actor_user_id or ""), now, str(note or "")),
+        )
+
+    @staticmethod
+    def clear_kg_analysis_mark(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        rule_id: str,
+        subject_key: str,
+        kind: str,
+    ) -> bool:
+        """按主键删一条标记(撤销「标为正常」等);返回是否真删了一行。"""
+        cursor = db.execute(
+            "DELETE FROM kg_analysis_marks WHERE notebook_id=? AND rule_id=? "
+            "AND subject_key=? AND kind=?",
+            (notebook_id, rule_id, subject_key, check_mark_kind(kind)),
+        )
+        return cursor.rowcount == 1
+
+    @staticmethod
+    def kg_finding_source_states(
+        db: sqlite3.Connection, notebook_id: str, source_ids: Sequence[str]
+    ) -> Dict[str, Dict[str, object]]:
+        """读侧派生「已处理」用的来源点查:每个请求的 id 一项(去重后);来源不在本
+        notebook 时 ``exists=False``、其余字段为空。
+
+        ``last_extraction_at`` / ``last_extraction_status`` 是这个来源**最近一次抽取**
+        (``extraction_runs``:唯一的写者每开一轮写一行,``created_at`` 是开跑时刻)——
+        只随重新解析/重新抽取变化,改标题之类的动作不会推进它,所以不用
+        ``sources.updated_at``。``status`` / ``parse_status`` / ``chunked_at`` 原样给出
+        (重新解析开始时 ``chunked_at`` 清空、切块落库时重写):「是否在解析中」由调用方
+        按这几项判定,store 不内置状态词表。
+
+        隐藏合成来源(``memory`` / ``knowhow``)的标题是用户内容,不是元数据(见
+        `source_canonical_rows`):照报 ``exists`` 与类型,标题一律给空。
+
+        SQLite 侧「最近一次」用相关子查询取那一轮的 id 再按主键回表(一次
+        ``idx_extraction_runs_source_created`` 探查);PG 孪生用 ``LEFT JOIN LATERAL``,
+        语义相同。id 列表经 ``id_binding``:来源主键就是要读的行,``drive_by`` 让列表
+        驱动(逐 id 一次主键探查),``+notebook_id`` 只过滤。"""
+        ids = list(dict.fromkeys(source_ids))
+        if not ids:
+            return {}
+        bound = bind_ids(ids)
+        rows = db.execute(
+            "SELECT s.id AS id, s.title AS title, s.source_type AS source_type, "
+            "s.status AS status, s.parse_status AS parse_status, "
+            "s.chunked_at AS chunked_at, er.created_at AS last_extraction_at, "
+            "er.status AS last_extraction_status "
+            "FROM sources s "
+            "LEFT JOIN extraction_runs er ON er.id = ("
+            "SELECT e.id FROM extraction_runs e "
+            "WHERE e.source_id = s.id AND e.run_type = 'kg' "
+            "ORDER BY e.created_at DESC, e.id DESC LIMIT 1) "
+            f"WHERE {drive_by('s.id', bound)} AND +s.notebook_id = ?",
+            (bound.param, notebook_id),
+        ).fetchall()
+        return _finding_source_states(ids, (tuple(row) for row in rows))
+
+    def kg_finding_display_name_rows(
+        self, notebook_id: str, pairs: Sequence[Tuple[str, str]]
+    ) -> List[Tuple[str, str, str, int]]:
+        """问题样例的**展示名**:对每个 ``(source_id, canonical_id)``,取**这个来源自己
+        的**、归在这个 canonical 下的可用对象的名字,回 ``(source_id, canonical_id,
+        name, 对象数)``,按 ``(来源, canonical, 对象数降序, 名字)`` 排。
+
+        为什么不直接用 canonical 名:它是组里成员最多的那个种子第一次出现时的名字,可能
+        来自别的来源,甚至来自 knowhow 写入的对象(knowhow 的 concept 参与合并,只有
+        Memory 被排除)。所以这里只认「对象的 source_id 就是这个来源」,并且排除隐藏合成
+        来源(``memory`` / ``knowhow``)的对象 —— 与 `source_canonical_rows` 同一条
+        ``NOT EXISTS`` 判据(孤儿引用照常进)。canonical 口径同
+        `source_canonical_rows`:``COALESCE(已发布代的簇 canonical, 对象自己的 id)``。
+
+        两条腿:有簇行的对象按 canonical 驱动(``idx_clusters_canonical``);没有簇行的
+        对象 canonical 就是自己的 id,按主键驱动。两份 id(canonical、来源)各自经
+        ``id_binding`` 绑定(canonical ``drive_by``、来源 ``member_of`` 只过滤),取回
+        的是笛卡尔积的超集,精确到「对」、计数与排序在中性的 `display_name_rows` 里做。
+        名字取 ``json_extract(payload, '$.name')``(PG 孪生是 ``payload->>'name'``)。
+        canonical 按 500 一批,来源每批只绑这一批涉及的那几个。
+
+        只在预计算里、写事务之外调用(设计 §7.1 第 ⑥ 步第 7 条:点查在写事务之外),
+        所以挂 `_reject_inside_write_transaction`,所有批在一个读快照里读完。"""
+        self._reject_inside_write_transaction("问题样例展示名")
+        wanted = list(dict.fromkeys((str(s), str(c)) for s, c in pairs))
+        if not wanted:
+            return []
+        canonicals = sorted({c for _s, c in wanted})
+        statuses = ",".join("?" for _ in USABLE_STATUSES)
+        hidden = (
+            "NOT EXISTS (SELECT 1 FROM sources hs WHERE hs.id = o.source_id "
+            "AND hs.notebook_id = o.notebook_id "
+            "AND hs.source_type IN ('memory','knowhow'))"
+        )
+        raw: List[tuple] = []
+        with self._read_snapshot() as db:
+            for start in range(0, len(canonicals), 500):
+                batch = canonicals[start:start + 500]
+                batch_set = set(batch)
+                canon = bind_ids(batch)
+                sources = bind_ids(
+                    sorted({s for s, c in wanted if c in batch_set}), sort=True)
+                raw.extend(tuple(row) for row in db.execute(
+                    "SELECT o.source_id AS source_id, c.canonical_id AS canonical_id, "
+                    "json_extract(o.payload, '$.name') AS name "
+                    "FROM concept_clusters c "
+                    "JOIN knowledge_objects o ON o.id = c.member_object_id "
+                    f"WHERE {drive_by('c.canonical_id', canon)} AND c.notebook_id = ? "
+                    f"AND c.generation = {_PUBLISHED_CLUSTER_GEN} "
+                    f"AND o.notebook_id = c.notebook_id AND o.status IN ({statuses}) "
+                    f"AND {member_of('o.source_id', sources)} AND {hidden} "
+                    "UNION ALL "
+                    "SELECT o.source_id, o.id, json_extract(o.payload, '$.name') "
+                    "FROM knowledge_objects o "
+                    f"WHERE {drive_by('o.id', canon)} AND +o.notebook_id = ? "
+                    f"AND o.status IN ({statuses}) "
+                    f"AND {member_of('o.source_id', sources)} AND {hidden} "
+                    # ``+cc.notebook_id``: the probe must go by the member
+                    # (idx_clusters_member, one row), not by the notebook
+                    # prefix of the canonical index (every cluster row of the
+                    # notebook) -- measured on a statistics-free database.
+                    "AND NOT EXISTS (SELECT 1 FROM concept_clusters cc "
+                    "WHERE +cc.notebook_id = o.notebook_id "
+                    "AND cc.member_object_id = o.id "
+                    f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN})",
+                    (canon.param, notebook_id, notebook_id, *USABLE_STATUSES,
+                     sources.param,
+                     canon.param, notebook_id, *USABLE_STATUSES, sources.param,
+                     notebook_id),
+                ))
+        return _display_name_rows(raw, wanted)
+
+    @staticmethod
+    def stamp_cluster_code_version(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        cluster_input_version: str,
+        cluster_code_version: str,
+    ) -> bool:
+        """跳过路径(输入未变)补写合并代码分量 —— **由调用方包在写事务里**。
+
+        守卫 ``cluster_input_version = ?``:聚类输入版本本身就折进了代码分量(算法版本
+        与两个维度),所以「库里存的输入版本 == 这一次按当前代码算出来的」恰好证明库里
+        的合并结果就是按当前代码建的 —— 只有这时补写才如实。不等(并发重建已发布了别的
+        版本、或者删除知识图谱刚清空)就不写;空的输入版本(没有任何合并记录)恒不写。
+        值已经一致时也不写(``<>``):跳过路径不产生无谓的行写入与同步捕获日志。返回
+        是否真写了一行。"""
+        cursor = db.execute(
+            "UPDATE unified_kg_state SET cluster_code_version = ? "
+            "WHERE notebook_id = ? AND cluster_input_version = ? "
+            "AND cluster_input_version <> '' AND cluster_code_version <> ?",
+            (cluster_code_version, notebook_id, cluster_input_version,
+             cluster_code_version),
+        )
+        return cursor.rowcount == 1

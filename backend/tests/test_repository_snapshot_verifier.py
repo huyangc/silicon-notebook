@@ -27,6 +27,7 @@ from tests.sqlite_migration_testkit import (
     rollback_v94,
     rollback_v95,
     rollback_v96,
+    rollback_v97,
 )
 
 
@@ -90,7 +91,7 @@ def test_v92_drop_outside_the_allowlist_still_fails(tmp_path, _upgraded_v9):
     with sqlite3.connect(database) as rollback:
         rollback_v92(rollback)
         rollback.execute("PRAGMA user_version = 91")
-    manifest = module.MIGRATION_MANIFEST[(91, 96)]
+    manifest = module.MIGRATION_MANIFEST[(91, 97)]
     assert manifest["dropped_tables"] == frozenset(
         {"auth_policy", "auth_policy_audit", "external_identities"}
     )
@@ -100,12 +101,12 @@ def test_v92_drop_outside_the_allowlist_still_fails(tmp_path, _upgraded_v9):
     }
     original = dict(manifest)
     try:
-        module.MIGRATION_MANIFEST[(91, 96)] = {
+        module.MIGRATION_MANIFEST[(91, 97)] = {
             **manifest, "dropped_tables": frozenset({"auth_policy"}),
         }
         result = module.verify_snapshot(database, storage)
     finally:
-        module.MIGRATION_MANIFEST[(91, 96)] = original
+        module.MIGRATION_MANIFEST[(91, 97)] = original
     assert not result.ok
     assert "external_identities" in result.changed_tables
 
@@ -298,6 +299,61 @@ def test_deployed_v94_database_verifies_global_ask_retained_until(tmp_path, _upg
     assert result.source_user_version == 94
     assert result.final_user_version == module.SCHEMA_VERSION
     assert result.changed_tables == []
+
+
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
+def test_deployed_v96_database_verifies_kg_findings(tmp_path, _upgraded_v9):
+    """A deployed v96 database is missing exactly _migration_97's schema: the
+    two KG findings tables, the findings table's three capture triggers (the
+    first table made SYNCED after v84, rendered for v97's own set) and
+    ``unified_kg_state.cluster_code_version`` (DEFAULT '' is the whole
+    backfill). The fixture's one state row gains the column at its default and
+    nothing else moves."""
+    module = _load_verifier()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
+    with sqlite3.connect(database) as rollback:
+        rollback_v97(rollback)
+        rollback.execute("PRAGMA user_version = 96")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 96
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+
+
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
+def test_v97_hop_holds_the_findings_triggers_to_the_generator(tmp_path, _upgraded_v9):
+    """The v97 hop's trigger expectation comes from the same generator the
+    migration runs; a migration that installed a different trigger text (or
+    none) would be a discrepancy, not a silent pass."""
+    module = _load_verifier()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
+    with sqlite3.connect(database) as rollback:
+        rollback_v97(rollback)
+        rollback.execute("PRAGMA user_version = 96")
+    manifest = module.MIGRATION_MANIFEST[(96, 97)]
+    assert set(manifest["triggers"]) == {
+        "sync_capture_kg_analysis_findings_insert",
+        "sync_capture_kg_analysis_findings_update",
+        "sync_capture_kg_analysis_findings_delete",
+    }
+    original = dict(manifest)
+    try:
+        module.MIGRATION_MANIFEST[(96, 97)] = {
+            **manifest,
+            "triggers": {
+                **manifest["triggers"],
+                "sync_capture_kg_analysis_findings_insert": "CREATE TRIGGER x",
+            },
+        }
+        result = module.verify_snapshot(database, storage)
+    finally:
+        module.MIGRATION_MANIFEST[(96, 97)] = original
+    assert not result.ok
 
 
 def _rollback_v91(db: sqlite3.Connection) -> None:
@@ -699,10 +755,12 @@ def _rollback_v84(db: sqlite3.Connection) -> None:
     the 138 capture triggers, the change log's index and the two composite
     unique indexes that give knowledge_object_sources / community_members a
     row identity, then the two new tables. The trigger names come from the
-    same generator the migration runs, so a table added to the sync manifest
-    later cannot leave a trigger behind here."""
+    same generator the migration runs, pinned to v84's own table set exactly
+    as _migration_84 pins it: a table made SYNCED later (v97's
+    kg_analysis_findings) has its triggers undone by its own rollback, which
+    the chain through _rollback_v85 already ran."""
     _rollback_v85(db)
-    for name in sorted(expected_sqlite_trigger_names()):
+    for name in sorted(expected_sqlite_trigger_names(84)):
         db.execute(f'DROP TRIGGER "{name}"')
     db.execute("DROP INDEX uq_community_members_sync_key")
     db.execute("DROP INDEX uq_knowledge_object_sources_sync_key")
@@ -741,7 +799,8 @@ def test_deployed_v83_database_verifies_sync_capture(tmp_path, _upgraded_v9):
             )
         }
         assert installed == set(expected_sqlite_trigger_names())
-        assert len(installed) == 138
+        assert expected_sqlite_trigger_names(84) < installed
+        assert len(expected_sqlite_trigger_names(84)) == 138
 
     with sqlite3.connect(database) as rollback:
         _rollback_v84(rollback)

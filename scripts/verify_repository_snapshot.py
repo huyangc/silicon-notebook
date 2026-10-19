@@ -5094,9 +5094,11 @@ SYNC_CAPTURE_INDEXES = {
 # Rendered from the same generator the migration executes, so this manifest
 # cannot drift from what _migration_84 actually installs -- and the count is
 # asserted, because a generator that silently produced fewer triggers would
-# otherwise make this expectation shrink right along with it.
+# otherwise make this expectation shrink right along with it. Pinned to v84's
+# own table set, exactly as _migration_84 pins it: a table that became SYNCED
+# later gets its triggers in its own hop (v97's kg_analysis_findings below).
 SYNC_CAPTURE_TRIGGERS = {
-    name: sql for name, (_table, sql) in sqlite_trigger_sql().items()
+    name: sql for name, (_table, sql) in sqlite_trigger_sql(at_schema=84).items()
 }
 assert len(SYNC_CAPTURE_TRIGGERS) == 138, len(SYNC_CAPTURE_TRIGGERS)
 MIGRATION_MANIFEST = {
@@ -5738,6 +5740,76 @@ MIGRATION_MANIFEST[(95, 96)] = {
     "columns": {},
     "indexes": GLOBAL_ASK_FEEDBACK_INDEXES,
     "triggers": {},
+    "views": {},
+}
+
+# v97 (parity with PostgreSQL 0077_kg_analysis_findings.sql): the KG analysis
+# findings detail table kg_analysis_findings with its three change-capture
+# triggers (the first table made SYNCED after v84: rendered from the same
+# generator for v97's own table set, exactly as _migration_97 renders them),
+# the user-decision table kg_analysis_marks, and
+# ``unified_kg_state.cluster_code_version`` TEXT NOT NULL DEFAULT '' (the
+# default is the whole backfill: no merge has been recorded under this code
+# yet). unified_kg_state predates the v9 fixture, so like v87's marker the new
+# column is pinned per column, not through the table's text. Both new tables
+# are empty after the migration (nothing writes them yet). No index beyond
+# the two primary keys' automatic ones, no view.
+KG_FINDINGS_TABLES = {
+    "kg_analysis_findings": """CREATE TABLE kg_analysis_findings (
+                    notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                    rule_id TEXT NOT NULL,
+                    subject_key TEXT NOT NULL,
+                    subject_kind TEXT NOT NULL,
+                    subject_label TEXT NOT NULL DEFAULT '',
+                    subject_refs TEXT NOT NULL DEFAULT '[]',
+                    severity TEXT NOT NULL,
+                    impact_objects INTEGER NOT NULL DEFAULT 0,
+                    evidence TEXT NOT NULL DEFAULT '{}',
+                    first_seen_kg_seq INTEGER NOT NULL,
+                    first_seen_cluster_seq INTEGER NOT NULL,
+                    PRIMARY KEY (notebook_id, rule_id, subject_key)
+                )""",
+    "kg_analysis_marks": """CREATE TABLE kg_analysis_marks (
+                    notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                    rule_id TEXT NOT NULL,
+                    subject_key TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK (kind IN ('dismissed', 'relink_attempted')),
+                    at_kg_seq INTEGER NOT NULL,
+                    actor_user_id TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (notebook_id, rule_id, subject_key, kind)
+                )""",
+}
+KG_FINDINGS_STATE_COLUMNS = {
+    "unified_kg_state": {
+        "cluster_code_version": ("cluster_code_version", "TEXT", 1, "''", 0),
+    },
+}
+KG_FINDINGS_TRIGGERS = {
+    name: sql for name, (_table, sql) in sqlite_trigger_sql(added_at=97).items()
+}
+assert len(KG_FINDINGS_TRIGGERS) == 3, len(KG_FINDINGS_TRIGGERS)
+MIGRATION_MANIFEST = {
+    (key[0], 97, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **KG_FINDINGS_TABLES},
+        "columns": {
+            **manifest["columns"],
+            "unified_kg_state": {
+                **manifest["columns"].get("unified_kg_state", {}),
+                **KG_FINDINGS_STATE_COLUMNS["unified_kg_state"],
+            },
+        },
+        "triggers": {**manifest["triggers"], **KG_FINDINGS_TRIGGERS},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(96, 97)] = {
+    "tables": KG_FINDINGS_TABLES,
+    "columns": KG_FINDINGS_STATE_COLUMNS,
+    "indexes": {},
+    "triggers": KG_FINDINGS_TRIGGERS,
     "views": {},
 }
 

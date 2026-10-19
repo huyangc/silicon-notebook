@@ -266,7 +266,7 @@ def test_v92_drops_the_staged_auth_schema_and_keeps_credentials(tmp_path):
         )
         db.execute("PRAGMA user_version = 91")
 
-    assert SqliteMigrator(database, settings).migrate() == [92, 93, 94, 95, 96]
+    assert SqliteMigrator(database, settings).migrate() == [92, 93, 94, 95, 96, 97]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -341,7 +341,7 @@ def test_v93_adds_the_nullable_profile_deleted_at_without_touching_rows(tmp_path
         rollback_v93(db)
         db.execute("PRAGMA user_version = 92")
 
-    assert SqliteMigrator(database, settings).migrate() == [93, 94, 95, 96]
+    assert SqliteMigrator(database, settings).migrate() == [93, 94, 95, 96, 97]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         columns = {row[1]: row for row in db.execute("PRAGMA table_info(agent_profiles)")}
@@ -409,7 +409,7 @@ def test_v94_adds_answer_links_and_the_token_flag(tmp_path):
             ("tk-v94", "agent-v94", "hash-v94", '["read", "ask"]', "nb-v94", None, now),
         )
 
-    assert SqliteMigrator(database, settings).migrate() == [94, 95, 96]
+    assert SqliteMigrator(database, settings).migrate() == [94, 95, 96, 97]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db)[1:] == fresh[1:]
@@ -461,7 +461,7 @@ def test_v95_adds_global_ask_retained_until_without_backfill(tmp_path):
             ("gj-v95", "gc-v95", "u-v95", "{}", "done", "{}", "2026-10-19T00:00:00+00:00"),
         )
 
-    assert SqliteMigrator(database, settings).migrate() == [95, 96]
+    assert SqliteMigrator(database, settings).migrate() == [95, 96, 97]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db) == fresh
@@ -508,7 +508,7 @@ def test_v96_adds_the_rated_global_jobs_partial_index(tmp_path):
                 "payload_json,created_at) VALUES(?,?,?,?,?,?,?)",
                 (job_id, "gconv-v96", "u-v96", "{}", "done", f'{{"feedback":"{rating}"}}', now))
 
-    assert SqliteMigrator(database, settings).migrate() == [96]
+    assert SqliteMigrator(database, settings).migrate() == [96, 97]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert definition(db) == fresh
@@ -549,5 +549,133 @@ def test_v96_stops_with_the_ids_when_a_payload_is_not_json(tmp_path):
         assert db.execute("PRAGMA user_version").fetchone()[0] == 95
     with database.write() as db:
         db.execute("UPDATE global_ask_jobs SET payload_json='{}' WHERE id='g-bad'")
-    assert SqliteMigrator(database, settings).migrate() == [96]
+    assert SqliteMigrator(database, settings).migrate() == [96, 97]
     database.close_local()
+
+
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
+def test_v97_adds_the_findings_tables_and_the_code_version_column(tmp_path):
+    """KG analysis findings storage: the synced detail table with its three
+    capture triggers, the local marks table, and
+    unified_kg_state.cluster_code_version defaulting to '' so an existing
+    state row reads as "no merge recorded under this code yet". A fresh
+    database and a v96 upgrade end up the same; a second run is a no-op."""
+    from app.migration.sync.capture import sqlite_trigger_sql
+    from tests.sqlite_migration_testkit import rollback_v97
+
+    database, settings = _fresh_migrated_database(tmp_path)
+
+    def shape(db):
+        findings = [tuple(row) for row in db.execute("PRAGMA table_info(kg_analysis_findings)")]
+        marks = [tuple(row) for row in db.execute("PRAGMA table_info(kg_analysis_marks)")]
+        state = {row[1]: tuple(row) for row in db.execute("PRAGMA table_info(unified_kg_state)")}
+        triggers = {
+            row[0]: row[1]
+            for row in db.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='trigger' "
+                "AND tbl_name='kg_analysis_findings'"
+            )
+        }
+        foreign = {
+            table: [tuple(row)[2:] for row in db.execute(f"PRAGMA foreign_key_list({table})")]
+            for table in ("kg_analysis_findings", "kg_analysis_marks")
+        }
+        return findings, marks, state["cluster_code_version"][1:], triggers, foreign
+
+    with database.connect() as db:
+        fresh = shape(db)
+    findings, marks, code_version, triggers, foreign = fresh
+    # PRAGMA table_info: (cid, name, type, notnull, dflt_value, pk)
+    assert [(c[1], c[3], c[5]) for c in findings] == [
+        ("notebook_id", 1, 1), ("rule_id", 1, 2), ("subject_key", 1, 3),
+        ("subject_kind", 1, 0), ("subject_label", 1, 0), ("subject_refs", 1, 0),
+        ("severity", 1, 0), ("impact_objects", 1, 0), ("evidence", 1, 0),
+        ("first_seen_kg_seq", 1, 0), ("first_seen_cluster_seq", 1, 0),
+    ]
+    assert [(c[1], c[3], c[5]) for c in marks] == [
+        ("notebook_id", 1, 1), ("rule_id", 1, 2), ("subject_key", 1, 3),
+        ("kind", 1, 4), ("at_kg_seq", 1, 0), ("actor_user_id", 1, 0),
+        ("created_at", 1, 0), ("note", 1, 0),
+    ]
+    assert code_version == ("cluster_code_version", "TEXT", 1, "''", 0)
+    assert triggers == {
+        name: sql for name, (_table, sql) in sqlite_trigger_sql(added_at=97).items()
+    }
+    assert len(triggers) == 3
+    for table in foreign:
+        assert foreign[table] == [
+            ("notebooks", "notebook_id", "id", "NO ACTION", "CASCADE", "NONE")
+        ], table
+    with database.write() as db:
+        db.execute(
+            "INSERT INTO notebooks (id, name, created_at, updated_at) VALUES "
+            "('nb-v97', 'n', '2026-10-19T00:00:00+00:00', '2026-10-19T00:00:00+00:00')"
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        with database.write() as db:
+            db.execute(
+                "INSERT INTO kg_analysis_marks (notebook_id, rule_id, subject_key, "
+                "kind, at_kg_seq, created_at) VALUES ('nb-v97','F1','src-1','bogus',1,'t')"
+            )
+
+    with database.write() as db:
+        db.execute("DELETE FROM notebooks WHERE id='nb-v97'")
+        db.execute(
+            "INSERT INTO notebooks (id, name, created_at, updated_at) VALUES "
+            "('nb-v96', 'n', '2026-10-19T00:00:00+00:00', '2026-10-19T00:00:00+00:00')"
+        )
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, cluster_input_version, updated_at) "
+            "VALUES ('nb-v96', 'v-old', '2026-10-19T00:00:00+00:00')"
+        )
+        rollback_v97(db)
+        db.execute("PRAGMA user_version = 96")
+
+    assert SqliteMigrator(database, settings).migrate() == [97]
+    assert SqliteMigrator(database, settings).migrate() == []
+    with database.connect() as db:
+        upgraded = shape(db)
+        assert upgraded[:2] == fresh[:2]
+        assert upgraded[3:] == fresh[3:]
+        # ALTER TABLE appends the column last; its declaration is the same.
+        assert upgraded[2] == code_version
+        legacy = db.execute(
+            "SELECT cluster_code_version, cluster_input_version FROM unified_kg_state "
+            "WHERE notebook_id = 'nb-v96'"
+        ).fetchone()
+        assert tuple(legacy) == ("", "v-old")
+    database.close_local()
+
+
+@pytest.mark.real_sqlite_migration
+def test_v84_installs_only_its_own_capture_set(tmp_path, monkeypatch):
+    """The ladder stopped at v84 installs exactly v84's 138 capture triggers,
+    and no trigger on a table that only a later migration creates. Mutation
+    anchor: render _migration_84 from the current manifest (drop its
+    ``at_schema=84``) and this stops with "no such table:
+    kg_analysis_findings" -- as does every from-scratch ladder."""
+    from app.migration.sync.capture import expected_sqlite_trigger_names
+
+    monkeypatch.setattr(migrations_module, "SCHEMA_VERSION", 84)
+    db_path = tmp_path / "v84.db"
+    settings = Settings(database_url=f"sqlite:///{db_path}")
+    database = SqliteDatabase(settings, root_dir=tmp_path)
+    try:
+        assert SqliteMigrator(database, settings).migrate()[-1] == 84
+        with database.connect() as db:
+            installed = {
+                row[0]
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='trigger' "
+                    "AND name LIKE 'sync_capture_%'"
+                )
+            }
+            tables = {
+                row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+    finally:
+        database.close_local()
+    assert installed == expected_sqlite_trigger_names(84)
+    assert len(installed) == 138
+    assert "kg_analysis_findings" not in tables

@@ -364,3 +364,129 @@ def test_algo_version_bump_forces_recompute(repo, monkeypatch):
                         kg_merge.CLUSTER_ALGO_VERSION + 1)
     repo.rebuild_unified_kg(nb.id)                       # force=False, but algo bumped
     assert calls["n"] >= 1                               # real recompute ran (not skipped)
+
+
+# --- 10. the merge code component (SQLite v97 / PostgreSQL 0077) ---------------
+# unified_kg_state.cluster_code_version publishes the code part of the input
+# version (design 2026-10-19 §五 S4): the analysis panel must be able to tell
+# "the last merge ran under older merge rules" without recomputing the input
+# version's counts. It is written at the rebuild end-write and on the skip path.
+
+def _code_version(repo, notebook_id):
+    with repo._runtime.unified_kg.read_snapshot() as db:
+        row = repo._runtime.unified_kg.state_row(db, notebook_id)
+    return row["cluster_input_version"], row["cluster_code_version"]
+
+
+def test_cluster_input_version_hash_is_byte_identical(monkeypatch):
+    """Golden: moving the three code/config components behind
+    kg_merge.cluster_code_components left the hash exactly as it was. The digests
+    below were computed by the pre-change implementation over these fixed
+    facts; any change to the parts, their order or their spelling breaks them --
+    and with them every deployed library's skip gate (one full re-merge each)."""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    import app.services.kg_merge as kg_merge
+    from app.services.knowledge_lifecycle import KnowledgeLifecycleService
+
+    assert kg_merge.CLUSTER_ALGO_VERSION == 3
+
+    class Facts:
+        def cluster_input_facts(self, db, notebook_id, *, exclude_emb_count=False):
+            return (17, 230, 9, 412)
+
+    @contextmanager
+    def connect():
+        yield None
+
+    stub = SimpleNamespace(
+        _connect=connect, unified_kg=Facts(),
+        settings=SimpleNamespace(embed_dim=1024, embed_runtime_dim=512))
+    version = KnowledgeLifecycleService._cluster_input_version
+    assert version(stub, "nb-golden") == "c79f39c5d55aa529d1a60b8bd90dcfe38648b065"
+    assert version(stub, "nb-golden", exclude_emb_count=True) == (
+        "1f7d16b71218551b2031625ba5a2c33f2e3533fc")
+    stub.settings = SimpleNamespace(embed_dim=16, embed_runtime_dim=0)
+    assert version(stub, "nb-golden") == "8b872b5fcf47fb3ef83eb2bc6fcf1c0d99b4bbbf"
+
+
+def test_cluster_code_version_reads_the_same_three_components(repo, monkeypatch):
+    import app.services.kg_merge as kg_merge
+
+    settings = repo._runtime.knowledge_lifecycle.settings
+    assert kg_merge.cluster_code_version(settings) == (
+        f"algo={kg_merge.CLUSTER_ALGO_VERSION};embed_dim=16;runtime_dim="
+        f"{int(getattr(settings, 'embed_runtime_dim', 0) or 0)}")
+    monkeypatch.setattr(kg_merge, "CLUSTER_ALGO_VERSION",
+                        kg_merge.CLUSTER_ALGO_VERSION + 1)
+    assert kg_merge.cluster_code_version(settings).startswith(
+        f"algo={kg_merge.CLUSTER_ALGO_VERSION};")
+
+
+def test_rebuild_end_write_stores_the_code_version(repo):
+    import app.services.kg_merge as kg_merge
+
+    lifecycle = repo._runtime.knowledge_lifecycle
+    nb = _make_kg(repo)
+    assert _code_version(repo, nb.id) == ("", "")
+    lifecycle.rebuild_unified_kg(nb.id)
+    stored_input, stored_code = _code_version(repo, nb.id)
+    assert stored_input == lifecycle._cluster_input_version(nb.id)
+    assert stored_code == kg_merge.cluster_code_version(lifecycle.settings)
+
+
+def test_skip_path_stamps_code_version(repo, monkeypatch):
+    """A library upgraded to v97 carries '' until something writes the column.
+    The inputs-unchanged skip path proves the stored merge was built under the
+    running code (the stored input version folds the code component in) and
+    stamps it -- otherwise the panel could never reach "up to date" without a
+    forced re-merge. A skip that finds the value already right writes nothing.
+    Mutation anchors: drop the stamp from ``_settle_skip_path`` -> the first
+    assertion pair goes red; drop its equality pre-check -> the zero-write
+    assertion goes red."""
+    import app.services.kg_merge as kg_merge
+
+    lifecycle = repo._runtime.knowledge_lifecycle
+    nb = _make_kg(repo)
+    lifecycle.rebuild_unified_kg(nb.id)
+    with repo._runtime.database.write() as db:
+        db.execute("UPDATE unified_kg_state SET cluster_code_version='' "
+                   "WHERE notebook_id=?", (nb.id,))
+
+    calls = _spy_stream(repo, monkeypatch)
+    lifecycle.rebuild_unified_kg(nb.id)                  # force=False, inputs unchanged
+    assert calls["n"] == 0                               # it was the skip path
+    assert _code_version(repo, nb.id)[1] == kg_merge.cluster_code_version(
+        lifecycle.settings)
+
+    stamps = []
+    original = repo._runtime.unified_kg.stamp_cluster_code_version
+    monkeypatch.setattr(
+        repo._runtime.unified_kg, "stamp_cluster_code_version",
+        lambda *a, **k: stamps.append(a) or original(*a, **k))
+    lifecycle.rebuild_unified_kg(nb.id)
+    assert calls["n"] == 0 and stamps == []              # settled skip: zero writes
+
+
+def test_algo_bump_reads_as_mismatch(repo, monkeypatch):
+    """Bumping CLUSTER_ALGO_VERSION leaves kg_mutation_seq and dirty alone, so
+    only the code component can tell a reader the last merge is stale: the
+    stored value no longer equals the running code's. The next force=False
+    rebuild re-merges (the input version moved) and stores the new one."""
+    import app.services.kg_merge as kg_merge
+
+    lifecycle = repo._runtime.knowledge_lifecycle
+    nb = _make_kg(repo)
+    lifecycle.rebuild_unified_kg(nb.id)
+    before = _code_version(repo, nb.id)[1]
+    assert before == kg_merge.cluster_code_version(lifecycle.settings)
+
+    monkeypatch.setattr(kg_merge, "CLUSTER_ALGO_VERSION",
+                        kg_merge.CLUSTER_ALGO_VERSION + 1)
+    current = kg_merge.cluster_code_version(lifecycle.settings)
+    assert _code_version(repo, nb.id)[1] != current      # reads as a mismatch
+    calls = _spy_stream(repo, monkeypatch)
+    lifecycle.rebuild_unified_kg(nb.id)
+    assert calls["n"] >= 1                               # a real re-merge, not a skip
+    assert _code_version(repo, nb.id)[1] == current

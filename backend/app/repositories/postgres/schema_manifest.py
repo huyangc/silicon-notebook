@@ -75,6 +75,8 @@ POSTGRES_BUSINESS_TABLES = (
     "indexing_pipeline_stage_sources",
     "indexing_pipeline_stages",
     "kg_analysis_artifacts",
+    "kg_analysis_findings",
+    "kg_analysis_marks",
     "kg_build_jobs",
     "kg_canonical_scratch",
     "kg_cluster_scratch",
@@ -181,6 +183,10 @@ POSTGRES_JSON_COLUMNS = frozenset(
         "communities.findings",
         "communities.member_ids",
         "kg_analysis_artifacts.payload",
+        # SQLite v97 / PostgreSQL 0077: a finding's source-id list and the
+        # numbers its rule used.
+        "kg_analysis_findings.evidence",
+        "kg_analysis_findings.subject_refs",
         "kg_conflict_candidates.resolved_payload",
         "kg_rebuild_checkpoint.payload",
         "indexing_pipeline_stages.source_snapshot",
@@ -469,7 +475,14 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # json_extract(payload_json,'$.feedback')), holding only rows whose rating is
 # 'useful' or 'not_useful', so the analytics / admin feedback counts read the
 # rated global jobs only. No table, column, FK or unique-surface change.
+# SQLite v97 / PostgreSQL 0077 add the KG analysis findings detail table
+# kg_analysis_findings (primary key (notebook_id, rule_id, subject_key), FK to
+# notebooks ON DELETE CASCADE, its change-capture function and trigger), the
+# user-decision table kg_analysis_marks (primary key (notebook_id, rule_id,
+# subject_key, kind), CHECK on kind, FK to notebooks ON DELETE CASCADE) and
+# unified_kg_state.cluster_code_version (text NOT NULL DEFAULT ''); no
+# backfill, no secondary index.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=96,
-    postgres_version=76,
+    sqlite_version=97,
+    postgres_version=77,
 )

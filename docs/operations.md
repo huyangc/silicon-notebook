@@ -1595,9 +1595,10 @@ long time does not hold one long-running transaction or a single unbounded `DELE
 
 ### Change capture (`sync capture`)
 
-Every deployment ships with AFTER INSERT/UPDATE/DELETE triggers on all 46 synced tables
-(§7 of the design doc; 138 triggers on SQLite -- one per operation per table, since SQLite has no
-combined "AFTER INSERT OR UPDATE OR DELETE" -- and 46 on PostgreSQL, one per table), but they are
+Every deployment ships with AFTER INSERT/UPDATE/DELETE triggers on all 47 synced tables
+(§7 of the design doc; 141 triggers on SQLite -- one per operation per table, since SQLite has no
+combined "AFTER INSERT OR UPDATE OR DELETE" -- and 47 on PostgreSQL, one per table; 46 of the
+tables got theirs with v84/0064, `kg_analysis_findings` with v97/0077), but they are
 gated OFF by default: a fresh migration does not seed the `sync_capture_control` row, so nothing
 is logged until an operator runs `sync capture enable`. With the gate on, `sync export` reads
 that log to produce incremental packages automatically (see "Cross-environment notebook sync"
@@ -1703,7 +1704,7 @@ doc's §7 "升级窗口"](./incremental-sync-design.md#7-源端变更捕获) for
 `CREATE INDEX idx_sync_change_log_txid ON sync_change_log (txid, seq) WHERE txid IS NOT NULL`
 is a plain (non `CONCURRENTLY`) index build, which holds a SHARE lock on `sync_change_log`
 until it finishes;
-while the gate is open, every business write to any of the 46 synced tables also writes a row to
+while the gate is open, every business write to any of the 47 synced tables also writes a row to
 that same table via its trigger, so those writes queue behind the index build for its entire
 duration. Startup migrations run over the application's own connection pool, whose defaults
 (`POSTGRES_STATEMENT_TIMEOUT_SECONDS=30`, `POSTGRES_LOCK_TIMEOUT_SECONDS=5`) were sized for

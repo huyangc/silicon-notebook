@@ -92,7 +92,7 @@
 | 笔记本本体 | unified_kg_state、object_schemas |
 | 材料 | source_elements、source_authors、source_paper_meta、chunks、chunk_elements、chunk_questions、knowledge_source_facts、knowledge_source_fact_elements |
 | 向量 | chunk_embeddings、element_embeddings、knowledge_embeddings、relation_embeddings、memory_embeddings |
-| KG | knowledge_objects、knowledge_relations、knowledge_object_sources、concept_clusters、communities、community_members、canonical_relations、mention_edges、concept_comentions、kg_source_profiles、kg_community_edges、kg_analysis_artifacts |
+| KG | knowledge_objects、knowledge_relations、knowledge_object_sources、concept_clusters、communities、community_members、canonical_relations、mention_edges、concept_comentions、kg_source_profiles、kg_community_edges、kg_analysis_artifacts、kg_analysis_findings（v97/0077，账本 findings 行的明细） |
 | Knowhow | knowhow_columns、knowhow_rows、knowhow_cells |
 | 记忆 | memory_provenance |
 
@@ -124,7 +124,7 @@ knowhow_changes 与 knowhow_milestones 是编辑历史，归本层，可随开�
 | 分组 | 表 |
 | --- | --- |
 | 用户交互 | conversations、answers、ask_jobs、ask_trace_steps、feedback、reports、global_ask_conversations、global_ask_jobs、retrieval_experiences、agent_observations、agent_notebook_profile、retained_user_activity、wishes、wish_votes |
-| 运行态与作业 | kg_build_jobs、kg_rebuild_checkpoint、kg_cluster_scratch、kg_canonical_scratch、kg_relation_completion_state、merge_review_jobs、extraction_runs、catalog_jobs、catalog_candidates、promotion_candidates、concept_merge_candidates、kg_conflict_candidates、concept_whitelist、indexing_pipeline_stages、indexing_pipeline_stage_sources、source_index_backfills、knowledge_source_fact_backfills、chunk_element_backfills、notebook_delete_jobs、notebook_delete_files、agent_profile_jobs、notebook_share_requests |
+| 运行态与作业 | kg_build_jobs、kg_rebuild_checkpoint、kg_cluster_scratch、kg_canonical_scratch、kg_relation_completion_state、merge_review_jobs、extraction_runs、catalog_jobs、catalog_candidates、promotion_candidates、concept_merge_candidates、kg_analysis_marks（v97/0077，图谱分析的「标为正常」与「补上关联已尝试」，与合并决定同口径）、kg_conflict_candidates、concept_whitelist、indexing_pipeline_stages、indexing_pipeline_stage_sources、source_index_backfills、knowledge_source_fact_backfills、chunk_element_backfills、notebook_delete_jobs、notebook_delete_files、agent_profile_jobs、notebook_share_requests |
 | 身份与系统 | users、user_profiles、auth_*、agent_profiles、agent_access_tokens、agent_token_notebooks、model_service_status、system_model_service_status、app_settings、extension_runtime_toggles、command catalog |
 | 同步控制（PR-2 起，v83/0063） | sync_export_state（源端每个目标环境的导出水位）、sync_imports（目标端已引入的包与报告）、sync_import_progress（逐表断点） |
 
@@ -304,11 +304,19 @@ SQLite v84 / PostgreSQL 0064）；导出端（按日志读窗口、压缩、产�
   载荷，与 shadow capture 同理）、`operation`（`upsert` / `delete` / `kg_epoch`，见下）、
   `parent_key`、`notebook_id`、`txid`（仅 PostgreSQL，见下）、`changed_at`。索引
   `(table_name, seq)`，导出器按表、按 seq 顺序读。
-- 对同步层与边界层的每张表（`synced_tables()`，46 张）各挂一套 AFTER INSERT/UPDATE/DELETE
+- 对同步层与边界层的每张表（`synced_tables()`；v84/0064 时 46 张）各挂一套 AFTER INSERT/UPDATE/DELETE
   触发器，与业务写同一事务；触发器全部由
   `app.migration.sync.capture`（纯函数，输入 manifest，输出 SQL 文本）渲染，写进迁移文件，
   两端迁移与生成器输出逐字相等由 `tests/test_sync_capture.py` 钉住，避免迁移文件、生成器、
   `postgres_catalog` 的漂移守卫三处手改出现分歧。
+  - **表集按版本冻结。** `TableSyncSpec.since_schema` 记「哪个 SQLite 迁移第一次给这张表装捕获」
+    （v84 时已同步的 46 张取默认值 84）。渲染函数都收版本：`at_schema=N` 是 schema N 的全集，
+    `added_at=N` 只是迁移 N 自己装的那几张，`None` 是本构建的当前全集。迁移永远钉自己的版本——
+    `_migration_84` 与 0064 永远按 84 渲染，之后把表变成 SYNCED 的迁移按自己的 `added_at` 渲染
+    （v97/0077 装 `kg_analysis_findings`）。否则从零迁移的阶梯跑到 v84 时那张表还不存在，
+    `CREATE TRIGGER` 直接报 `no such table`；已部署库里 v84 那 138 条触发器的文本也会随 manifest
+    变化。`capture_contract.CAPTURE_MIGRATION_FILES` 列出每个装捕获对象的 PG 迁移文件，守卫要求
+    它与 manifest 里声明过的 `since_schema` 一一对应。
   - SQLite 每表三条触发器（`sync_capture_<table>_insert/update/delete`）：SQLite 没有
     `AFTER INSERT OR UPDATE OR DELETE`。PostgreSQL 每表一条触发器加一个同名的 plpgsql 函数
     （`sync_capture_<table>()`），`TG_OP` 里分支。
@@ -1432,8 +1440,8 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
   条，而线上 catalog 里有。守卫会因此报 drift（安全方向：宁可多报也不漏报），但报错会指向
   「manifest 与期望集不符」而不是「你缩进了」。真要写这种迁移，先让它顶格出现，或者扩展解析器
   并在这里更新记录。
-- `scripts/generate_sync_capture_migration.py --check` 比对的是**整个 0064 文件**，不只是生成
-  的那一半：渲染时手写前缀是原样保留的，所以「committed ≠ rendered」只可能来自生成的那一半漂
+- `scripts/generate_sync_capture_migration.py --check` 比对的是 `CAPTURE_MIGRATION_FILES` 里**每个
+  文件的全文**（0064、0077……各按自己的版本渲染），不只是生成的那一半：渲染时手写前缀是原样保留的，所以「committed ≠ rendered」只可能来自生成的那一半漂
   移；但 `--check` 打印的 diff 是全文 diff，读的人应该知道这一点。
 - `TableOutcome.updated`（`ImportReport`/CLI「更新」计数）在 `_apply_table` 里是按「这个键在
   目标端预取的键集合（`_TargetKeys.present`）里已经存在」来判定的，不是按 upsert 语句实际改动

@@ -10,6 +10,14 @@ their transitive dependency closure (``artifact_cluster_seq`` /
 directly. ``batched`` is an unrelated pure batching helper the same store
 modules import from the same historical module.
 
+The findings storage contract (SQLite v97 / PostgreSQL 0077) lives here too,
+for the same reason -- both backends' stores validate against it:
+``FINDING_ROW_FIELDS`` / ``check_finding_row`` for ``kg_analysis_findings``,
+``MARK_KINDS`` / ``check_mark_kind`` for ``kg_analysis_marks``, and the two
+per-notebook row caps the write entries enforce and the reads rely on
+(``KG_FINDINGS_ROWS_MAX`` / ``KG_ANALYSIS_MARKS_MAX``). Rule codes, thresholds
+and how many rows each rule persists are the rules engine's, not storage's.
+
 ``app.services.kg_analysis_precompute`` re-exports every name here unchanged
 (and keeps its own ``stamp_cluster_seq`` / ``artifact_is_current`` /
 ``_cluster_generation_verdict`` / ``_generation_verdict`` — NOT part of this
@@ -223,6 +231,95 @@ def check_artifact_payloads(payloads: Mapping[str, dict]) -> None:
                 f"{CLUSTER_SEQ_PAYLOAD_KEY} —— 盖了它,读侧就会替一份输入根本没变的"
                 "产物编造一个落后量"
             )
+
+
+# ------------------------------------------------- 问题清单的明细与标记的存储契约
+# SQLite v97 / PostgreSQL 0077(设计 docs/superpowers/specs/2026-10-19-kg-analysis-
+# findings-design_zh.md §8.2 / §8.3)。这里只有**存储层**的形状与上限:规则代号、阈值、
+# 规则版本、每条规则落库多少行,都是规则引擎的事。
+
+# `kg_analysis_findings` 一行的字段与顺序。写入口 `replace_kg_analysis_artifacts` 的
+# `findings_rows` 逐行按这个顺序给元组;读入口 `kg_analysis_finding_rows` 按这些键回
+# dict。主键是 `(notebook_id, rule_id, subject_key)`。`subject_refs` 是主体涉及的来源 id
+# 列表(读侧据此派生「已处理」),`evidence` 是判据用到的数字;两条 `first_seen_*` 是这条
+# 问题第一次出现时的两条世代线,由发布事务从旧行继承。「本次建于哪一代」不逐行记,统一
+# 取账本行的戳。
+FINDING_ROW_FIELDS = (
+    "rule_id",
+    "subject_key",
+    "subject_kind",
+    "subject_label",
+    "subject_refs",
+    "severity",
+    "impact_objects",
+    "evidence",
+    "first_seen_kg_seq",
+    "first_seen_cluster_seq",
+)
+
+# 每个 notebook 的明细行数硬上限。唯一的写入口写超过它就**硬失败**,所以读入口(发布
+# 事务里那一次读旧明细、读侧取一页之前的整份读)取 `LIMIT KG_FINDINGS_ROWS_MAX + 1`
+# 恒覆盖全集 —— 行数有界由写入口保证,不靠读侧截断;读到第 `+1` 行只可能是库被手工改过,
+# 硬失败而不是静默少报。规则引擎的「每条规则最多落 N 行 × 规则数」必须不超过它。
+KG_FINDINGS_ROWS_MAX = 5000
+
+# `kg_analysis_marks.kind` 的全部合法取值(两侧 CHECK 约束逐字相同):
+#   · dismissed         成员把一条问题标为正常 —— 用户的判断,重建不清;
+#   · relink_attempted  「补上关联」完成于哪一个 kg_mutation_seq —— 记的是本环境的世代,
+#                       所以凡是让 kg_mutation_seq 归零的地方(删除知识图谱、合库导入)
+#                       都清掉它。
+MARK_DISMISSED = "dismissed"
+MARK_RELINK_ATTEMPTED = "relink_attempted"
+MARK_KINDS = (MARK_DISMISSED, MARK_RELINK_ATTEMPTED)
+
+# 每个 notebook 的标记行数硬上限,同一个「写入口保证、读入口恒覆盖」的结构:写一条
+# **新**标记时,已有行数到了上限就硬失败。上限取明细上限的两倍:dismissed 只为当前明细
+# 里的主体写(≤ KG_FINDINGS_ROWS_MAX),发布时把主体已不存在的清掉;两次发布之间旧的
+# 还没清、新的已经写,最多叠成两份;relink_attempted 每个 notebook 一条。
+KG_ANALYSIS_MARKS_MAX = 2 * KG_FINDINGS_ROWS_MAX + 1
+
+
+def check_finding_row(row: object) -> tuple:
+    """`findings_rows` 一行的写入口守卫:形状不对一律硬失败,返回规整后的元组。
+
+    两侧 store 共用这一份,所以「一侧写得进、一侧写不进」的分岔不可能出现。JSON 列的
+    有限性(NaN/Inf)另由各侧的编码器拒(SQLite `allow_nan=False`、PostgreSQL
+    `_json_document`),与账本 payload 同一条入口对称性。"""
+    if not isinstance(row, (tuple, list)) or len(row) != len(FINDING_ROW_FIELDS):
+        raise ValueError(
+            f"KG 分析问题明细:一行必须是 {len(FINDING_ROW_FIELDS)} 个字段的元组 "
+            f"{FINDING_ROW_FIELDS},拿到 {row!r}"
+        )
+    values = dict(zip(FINDING_ROW_FIELDS, row))
+    for name in ("rule_id", "subject_key", "subject_kind", "severity"):
+        if not isinstance(values[name], str) or not values[name]:
+            raise ValueError(f"KG 分析问题明细:{name} 必须是非空字符串,拿到 {values[name]!r}")
+    if not isinstance(values["subject_label"], str):
+        raise ValueError("KG 分析问题明细:subject_label 必须是字符串")
+    refs = values["subject_refs"]
+    if not isinstance(refs, (list, tuple)) or not all(isinstance(r, str) for r in refs):
+        raise ValueError("KG 分析问题明细:subject_refs 必须是来源 id(字符串)列表")
+    if not isinstance(values["evidence"], dict):
+        raise ValueError("KG 分析问题明细:evidence 必须是对象")
+    for name in ("impact_objects", "first_seen_kg_seq", "first_seen_cluster_seq"):
+        value = values[name]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"KG 分析问题明细:{name} 必须是整数,拿到 {value!r}")
+    if values["impact_objects"] < 0:
+        raise ValueError("KG 分析问题明细:impact_objects 不能为负")
+    return (
+        values["rule_id"], values["subject_key"], values["subject_kind"],
+        values["subject_label"], list(refs), values["severity"],
+        values["impact_objects"], values["evidence"],
+        values["first_seen_kg_seq"], values["first_seen_cluster_seq"],
+    )
+
+
+def check_mark_kind(kind: object) -> str:
+    """标记 kind 的写入口守卫(库里的 CHECK 是第二道)。"""
+    if kind not in MARK_KINDS:
+        raise ValueError(f"KG 分析标记:契约外的 kind {kind!r};合法取值 {MARK_KINDS}")
+    return str(kind)
 
 
 def batched(rows: Iterable[tuple], size: int) -> Iterator[List[tuple]]:

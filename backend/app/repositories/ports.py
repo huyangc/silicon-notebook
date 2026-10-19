@@ -2793,11 +2793,25 @@ class UnifiedKgStorePort(Protocol):
     @staticmethod
     def distinct_cluster_count(db: object, notebook_id: str) -> int: ...
     @staticmethod
-    def finish_rebuild_state(db: object, notebook_id: str, cluster_input_version: str, cluster_count: int, now: str, published_generation: int, *, input_seq: int | None = None) -> None:
+    def finish_rebuild_state(db: object, notebook_id: str, cluster_input_version: str, cluster_count: int, now: str, published_generation: int, *, input_seq: int | None = None, cluster_code_version: str) -> None:
         """Rebuild end-write. ``input_seq`` is the ``kg_mutation_seq`` the rebuild
         claimed with (``claim_derived_generation``); dirty is cleared only while
         the current seq still equals it, so a change that arrived mid-rebuild
-        keeps the notebook dirty (E4-2). ``None`` (unknown start) never clears it."""
+        keeps the notebook dirty (E4-2). ``None`` (unknown start) never clears it.
+        ``cluster_code_version`` (required, SQLite v97 / PostgreSQL 0077) is the
+        code component of this merge (``kg_merge.cluster_code_version``),
+        stored beside ``cluster_input_version`` in the same statement."""
+    @staticmethod
+    def stamp_cluster_code_version(
+        db: object, notebook_id: str, cluster_input_version: str,
+        cluster_code_version: str,
+    ) -> bool:
+        """The inputs-unchanged skip path's write of the merge code component,
+        inside the caller's write transaction, guarded by
+        ``cluster_input_version = <the version just computed>`` (that version
+        folds in the code component, so equality proves the stored merge was
+        built under this code) and skipped when the value already matches.
+        True when a row was written."""
     @staticmethod
     def insert_scratch_rows(db: object, rows: object) -> None: ...
     @staticmethod
@@ -3145,7 +3159,64 @@ class UnifiedKgStorePort(Protocol):
         profiles: object,
         payloads: object,
         now: str,
+        *,
+        findings_rows: object,
+        prune_marks: object,
+    ) -> None:
+        """…and (SQLite v97 / PostgreSQL 0077) ``findings_rows``, the whole
+        ``kg_analysis_findings`` detail as tuples in ``FINDING_ROW_FIELDS``
+        order, replaced in the same transaction as the ledger (more than
+        ``KG_FINDINGS_ROWS_MAX`` rows is a hard failure: the read side relies on
+        that bound), plus ``prune_marks``, the ``(rule_id, subject_key, kind)``
+        keys of marks whose subject no longer exists, deleted by primary key."""
+    # ------------------------------------- 问题清单的明细与标记(SQLite v97 / PG 0077)
+    # 设计 docs/superpowers/specs/2026-10-19-kg-analysis-findings-design_zh.md §8。
+    #
+    #   · kg_analysis_finding_rows / kg_analysis_mark_rows  connection-taking 的整份读,
+    #       主键序,有界(写入口保证 ≤ KG_FINDINGS_ROWS_MAX / KG_ANALYSIS_MARKS_MAX,多一行
+    #       硬失败)。前者有一处**刻意**在写事务里调用:发布事务读旧明细(继承
+    #       first_seen、算对比摘要),所以不挂 `_reject_inside_write_transaction`,约束换成
+    #       「行数有界 + 走主键前缀」。
+    #   · write_kg_analysis_mark / clear_kg_analysis_mark  按主键 upsert / 删除,骑调用方
+    #       的写事务;kind 只取 MARK_KINDS(两侧另有 CHECK)。
+    #   · kg_finding_source_states  读侧派生「已处理」的来源点查(一页的来源 id,经
+    #       id_binding):是否存在、标题、类型、两个状态列、chunked_at、最近一次抽取的时间
+    #       与状态(只随重新解析/抽取变化,不用 sources.updated_at)。隐藏合成来源不给标题。
+    #   · kg_finding_display_name_rows  自开连接(预计算里、写事务之外;挂守卫):按
+    #       (来源, canonical) 取**该来源自己的**可用对象的名字,排除 memory/knowhow 来源的
+    #       对象 —— canonical 名可能来自别的来源或 knowhow 对象,不能拿来显示。
+    @staticmethod
+    def kg_analysis_finding_rows(
+        db: object, notebook_id: str
+    ) -> list[dict[str, object]]: ...
+    @staticmethod
+    def kg_analysis_mark_rows(
+        db: object, notebook_id: str
+    ) -> list[dict[str, object]]: ...
+    @staticmethod
+    def write_kg_analysis_mark(
+        db: object,
+        notebook_id: str,
+        rule_id: str,
+        subject_key: str,
+        kind: str,
+        *,
+        at_kg_seq: int,
+        actor_user_id: str,
+        note: str,
+        now: str,
     ) -> None: ...
+    @staticmethod
+    def clear_kg_analysis_mark(
+        db: object, notebook_id: str, rule_id: str, subject_key: str, kind: str,
+    ) -> bool: ...
+    @staticmethod
+    def kg_finding_source_states(
+        db: object, notebook_id: str, source_ids: Sequence[str]
+    ) -> dict[str, dict[str, object]]: ...
+    def kg_finding_display_name_rows(
+        self, notebook_id: str, pairs: Sequence[tuple[str, str]]
+    ) -> list[tuple[str, str, str, int]]: ...
     # -------------------------- KG 质量分析产物的**读**路径(T3,在线请求路径)
     # 这三个是唯一**可以**挂在在线请求上的 KG 分析读:它们只碰预计算产物表,代价按
     # 行数硬有界,与上面那三条 T1 全表重活(200 万簇行 / 836 万边)差一到两个数量级。
@@ -4759,6 +4830,15 @@ class GovernanceStorePort(Protocol):
     def merge_candidate_pairs_for_canonicals(
         db: object, notebook_id: str, statuses: object, canonical_ids: object
     ) -> list[Any]: ...
+    @staticmethod
+    def merge_candidate_states_for_canonicals(
+        db: object, notebook_id: str, statuses: object, canonical_ids: object
+    ) -> list[dict[str, str]]:
+        """Candidates with either side in ``canonical_ids`` (KG analysis F4's
+        read-side status), ``{id, canonical_a, canonical_b, status, seed_a,
+        seed_b, updated_at}`` in ``id`` order. Driven by this notebook's
+        candidate slice (``idx_candidates_nb_status`` is the only index); the
+        id list only filters it, bound through ``id_binding``."""
     @staticmethod
     def valid_object_ids(db: object, object_ids: object, *, exclude_memory_derived: bool = False) -> set[str]: ...
     @staticmethod

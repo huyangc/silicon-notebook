@@ -247,6 +247,20 @@ def require_live_promotion_target(connection: Any, base_nb_id: str) -> None:
         )
 
 
+def _lifecycle_merge_status_sql(statuses) -> str:
+    """``merge_candidate_states_for_canonicals`` 的状态谓词:与
+    `merge_candidate_pairs_for_canonicals` 同一套 deny-by-default 取值(固定字面量,
+    不绑定参数)。"""
+    values = tuple(statuses)
+    if values == ("pending",):
+        return "status='pending'"
+    if values == ("confirmed", "rejected", "deferred"):
+        return "status IN ('confirmed','rejected','deferred')"
+    if values == ("confirmed", "rejected", "deferred", "pending"):
+        return "status IN ('confirmed','rejected','deferred','pending')"
+    raise ValueError(f"unsupported lifecycle merge statuses: {values!r}")
+
+
 class GovernanceStore:
     def __init__(self, database: PostgresDatabase, seams) -> None:
         self.database = database
@@ -445,6 +459,41 @@ class GovernanceStore:
             f"AND (canonical_a IN ({placeholders}) OR canonical_b IN ({placeholders}))",
             [notebook_id, *ids, *ids],
         ).fetchall()
+
+    @staticmethod
+    def merge_candidate_states_for_canonicals(
+        db: Any, notebook_id: str, statuses, canonical_ids
+    ) -> List[Dict[str, str]]:
+        """SQLite 孪生同名方法(用途、切片驱动与过滤形态见那边)。
+
+        canonical 列表经 ``id_binding``(``member_of`` + ``execute_ids``),两端共用同一个
+        绑定参数,custom plan 按真实列表出计划;``ORDER BY id`` 落在 ``COLLATE "C"`` 的
+        主键列上,与 SQLite 的二进制序逐字一致。``updated_at`` 经 `iso_timestamp`。"""
+        status_sql = _lifecycle_merge_status_sql(statuses)
+        ids = list(dict.fromkeys(canonical_ids))
+        if not ids:
+            return []
+        bound = id_bind_ids(ids)
+        rows = id_execute_ids(
+            db,
+            "SELECT id, canonical_a, canonical_b, status, seed_a, seed_b, updated_at "
+            f"FROM concept_merge_candidates WHERE notebook_id=%s AND {status_sql} "
+            f"AND ({id_member_of('canonical_a', bound)} "
+            f"OR {id_member_of('canonical_b', bound)}) ORDER BY id",
+            [notebook_id, bound.param, bound.param],
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "canonical_a": row["canonical_a"],
+                "canonical_b": row["canonical_b"],
+                "status": row["status"],
+                "seed_a": row["seed_a"] or "",
+                "seed_b": row["seed_b"] or "",
+                "updated_at": iso_timestamp(row["updated_at"]),
+            }
+            for row in rows
+        ]
 
     @staticmethod
     def valid_object_ids(

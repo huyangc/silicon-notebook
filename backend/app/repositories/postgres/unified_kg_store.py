@@ -37,7 +37,11 @@ from app.repositories.kg_analysis_payloads import (
     clamp as _clamp,
     cluster_histogram_payload as _cluster_histogram_payload,
     community_overview_payload as _community_overview_payload,
+    display_name_rows as _display_name_rows,
+    finding_rows as _finding_rows,
+    finding_source_states as _finding_source_states,
     largest_clusters_payload as _largest_clusters_payload,
+    mark_rows as _mark_rows,
     relation_provenance_payload as _relation_provenance_payload,
 )
 from app.repositories.postgres._store_utils import (
@@ -88,8 +92,12 @@ from app.repositories.postgres.search import (
 )
 from app.domain.kg_analysis_contracts import (
     BOARD_DEPENDENT_ARTIFACT_KINDS,
+    KG_ANALYSIS_MARKS_MAX,
+    KG_FINDINGS_ROWS_MAX,
     batched,
     check_artifact_payloads,
+    check_finding_row,
+    check_mark_kind,
 )
 from app.domain.knowledge_contracts import (
     CLUSTER_OBJECT_TYPES,
@@ -1335,9 +1343,13 @@ class UnifiedKgStore:
         published_generation: int,
         *,
         input_seq: Optional[int] = None,
+        cluster_code_version: str,
     ) -> None:
         """The rebuild end-write: store the input version this rebuild consumed
-        and clear dirty -- but only when nothing changed while it ran.
+        (and, PostgreSQL 0077, ``cluster_code_version`` -- the code component of
+        that merge, ``kg_merge.cluster_code_version``, in the same statement and
+        under the same guard) and clear dirty -- but only when nothing changed
+        while it ran.
         CRITICAL: MUST NOT touch kg_mutation_seq — omitted from both the column
         list and the SET so an existing row's counter is PRESERVED.
 
@@ -1377,11 +1389,12 @@ class UnifiedKgStore:
         db.execute(
             f"""
             INSERT INTO unified_kg_state
-            (notebook_id, dirty, cluster_input_version, last_rebuild_at, object_count, relation_count, cluster_count, updated_at{marker_column})
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s{marker_value})
+            (notebook_id, dirty, cluster_input_version, cluster_code_version, last_rebuild_at, object_count, relation_count, cluster_count, updated_at{marker_column})
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s{marker_value})
             ON CONFLICT(notebook_id) DO UPDATE SET
               dirty=CASE WHEN unified_kg_state.kg_mutation_seq = %s THEN 0 ELSE 1 END,
               {marker_set}cluster_input_version=excluded.cluster_input_version,
+              cluster_code_version=excluded.cluster_code_version,
               last_rebuild_at=excluded.last_rebuild_at,
               object_count=excluded.object_count,
               relation_count=excluded.relation_count,
@@ -1393,6 +1406,7 @@ class UnifiedKgStore:
                 notebook_id,
                 0 if input_seq == 0 else 1,
                 cluster_input_version,
+                cluster_code_version,
                 normalize_timestamp(now),
                 object_count,
                 relation_count,
@@ -2667,14 +2681,19 @@ class UnifiedKgStore:
         profiles: "Iterable[Tuple[str, int, int, str, float, int, float]]",
         payloads: Dict[str, dict],
         now: str,
+        *,
+        findings_rows: "Iterable[tuple]",
+        prune_marks: "Iterable[Tuple[str, str, str]]",
     ) -> None:
-        """整批重写一个 notebook 的三张产物表 —— **必须由调用方包在一个写事务里**。
+        """整批重写一个 notebook 的四张产物表 —— **必须由调用方包在一个写事务里**。
 
-        与 SQLite 侧逐条对应(见那边的 docstring):三张表统一按 notebook 整表删(没有
-        level 维度),`edges` / `profiles` 只按可迭代分批消费、不多物化一份。
-        PostgreSQL 侧的额外收口:账本 payload 走 `jsonb()` 且先过 `_json_document` 的
-        有限性校验 —— NaN/Inf 进 jsonb 会在读回时变成不可解析的值,必须在写入口就拒
-        (SQLite 侧的对等收口是 `json.dumps(..., allow_nan=False)`)。
+        与 SQLite 侧逐条对应(见那边的 docstring):产物表统一按 notebook 整表删(没有
+        level 维度),`edges` / `profiles` / `findings_rows` 只按可迭代分批消费、不多物化
+        一份;问题明细逐行过 `check_finding_row`,超过 `KG_FINDINGS_ROWS_MAX` 行硬失败;
+        `prune_marks` 按主键删。
+        PostgreSQL 侧的额外收口:账本 payload 与明细的两个 JSON 列走 `jsonb()` 且先过
+        `_json_document` 的有限性校验 —— NaN/Inf 进 jsonb 会在读回时变成不可解析的值,
+        必须在写入口就拒(SQLite 侧的对等收口是 `json.dumps(..., allow_nan=False)`)。
         """
         check_artifact_payloads(payloads)
         db.execute(
@@ -2685,6 +2704,9 @@ class UnifiedKgStore:
         )
         db.execute(
             "DELETE FROM kg_analysis_artifacts WHERE notebook_id=%s", (notebook_id,)
+        )
+        db.execute(
+            "DELETE FROM kg_analysis_findings WHERE notebook_id=%s", (notebook_id,)
         )
         for batch in batched(
             (
@@ -2718,6 +2740,40 @@ class UnifiedKgStore:
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
                 batch,
             )
+        written = 0
+        for batch in batched((check_finding_row(row) for row in findings_rows), 1000):
+            written += len(batch)
+            if written > KG_FINDINGS_ROWS_MAX:
+                raise ValueError(
+                    f"KG 分析问题明细:一个 notebook 最多 {KG_FINDINGS_ROWS_MAX} 行,"
+                    "读入口按这个上限取数,写超过就再也读不全"
+                )
+            execute_many(
+                db,
+                "INSERT INTO kg_analysis_findings "
+                "(notebook_id, rule_id, subject_key, subject_kind, subject_label, "
+                " subject_refs, severity, impact_objects, evidence, "
+                " first_seen_kg_seq, first_seen_cluster_seq) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                [
+                    (notebook_id, rule_id, subject_key, subject_kind, subject_label,
+                     jsonb(_json_document(
+                         refs, expected=list, field="kg analysis finding subject_refs")),
+                     severity, impact,
+                     jsonb(_json_document(
+                         evidence, expected=dict, field="kg analysis finding evidence")),
+                     first_kg, first_cluster)
+                    for (rule_id, subject_key, subject_kind, subject_label, refs,
+                         severity, impact, evidence, first_kg, first_cluster) in batch
+                ],
+            )
+        execute_many(
+            db,
+            "DELETE FROM kg_analysis_marks "
+            "WHERE notebook_id=%s AND rule_id=%s AND subject_key=%s AND kind=%s",
+            [(notebook_id, rule_id, subject_key, check_mark_kind(kind))
+             for rule_id, subject_key, kind in prune_marks],
+        )
         execute_many(
             db,
             "INSERT INTO kg_analysis_artifacts "
@@ -2732,3 +2788,234 @@ class UnifiedKgStore:
                 for kind in sorted(payloads)
             ],
         )
+
+    # ------------------------------------- 问题清单的明细与标记(PostgreSQL 0077)
+    # SQLite 孪生同一段的段头写全了连接契约:connection-taking 的读写骑调用方事务
+    # (发布写事务里那一次读旧明细由「行数有界 + 走主键前缀」约束,不挂写事务守卫),
+    # 自开连接的只有展示名,挂守卫。返回值与 SQLite 侧逐字相同:
+    # tests/kg_findings_store_cases.py 的同一份字面量在两侧各跑一遍
+    # (tests/test_kg_findings_store.py / tests/postgres/test_kg_findings_store_pg.py)。
+
+    @staticmethod
+    def kg_analysis_finding_rows(
+        db: Any, notebook_id: str
+    ) -> List[Dict[str, object]]:
+        """SQLite 孪生同名方法:全部问题明细,主键序,``LIMIT 上限 + 1``(写入口保证
+        上限,多一行硬失败)。走 ``pk_kg_analysis_findings`` 的前缀范围,不排序。
+        两个 jsonb 列由 psycopg 直接给 Python 值,形状校验在中性解析层。"""
+        return _finding_rows(
+            (
+                (row["rule_id"], row["subject_key"], row["subject_kind"],
+                 row["subject_label"], row["subject_refs"], row["severity"],
+                 row["impact_objects"], row["evidence"], row["first_seen_kg_seq"],
+                 row["first_seen_cluster_seq"])
+                for row in db.execute(
+                    "SELECT rule_id, subject_key, subject_kind, subject_label, "
+                    "subject_refs, severity, impact_objects, evidence, "
+                    "first_seen_kg_seq, first_seen_cluster_seq "
+                    "FROM kg_analysis_findings WHERE notebook_id=%s "
+                    "ORDER BY rule_id, subject_key LIMIT %s",
+                    (notebook_id, KG_FINDINGS_ROWS_MAX + 1),
+                )
+            ),
+            limit=KG_FINDINGS_ROWS_MAX,
+        )
+
+    @staticmethod
+    def kg_analysis_mark_rows(
+        db: Any, notebook_id: str
+    ) -> List[Dict[str, object]]:
+        """SQLite 孪生同名方法:全部标记,主键序;``created_at`` 经 `iso_timestamp`
+        规整成与 SQLite 同形的 ISO 文本。"""
+        return _mark_rows(
+            (
+                (row["rule_id"], row["subject_key"], row["kind"], row["at_kg_seq"],
+                 row["actor_user_id"], iso_timestamp(row["created_at"]), row["note"])
+                for row in db.execute(
+                    "SELECT rule_id, subject_key, kind, at_kg_seq, actor_user_id, "
+                    "created_at, note FROM kg_analysis_marks WHERE notebook_id=%s "
+                    "ORDER BY rule_id, subject_key, kind LIMIT %s",
+                    (notebook_id, KG_ANALYSIS_MARKS_MAX + 1),
+                )
+            ),
+            limit=KG_ANALYSIS_MARKS_MAX,
+        )
+
+    @staticmethod
+    def write_kg_analysis_mark(
+        db: Any,
+        notebook_id: str,
+        rule_id: str,
+        subject_key: str,
+        kind: str,
+        *,
+        at_kg_seq: int,
+        actor_user_id: str,
+        note: str,
+        now: str,
+    ) -> None:
+        """SQLite 孪生同名方法:按主键 upsert 一条标记,写新主键前按上限数一次。"""
+        kind = check_mark_kind(kind)
+        exists = db.execute(
+            "SELECT 1 AS present FROM kg_analysis_marks WHERE notebook_id=%s "
+            "AND rule_id=%s AND subject_key=%s AND kind=%s",
+            (notebook_id, rule_id, subject_key, kind),
+        ).fetchone()
+        if exists is None:
+            count = db.execute(
+                "SELECT COUNT(*) AS c FROM (SELECT 1 FROM kg_analysis_marks "
+                "WHERE notebook_id=%s LIMIT %s) AS bounded",
+                (notebook_id, KG_ANALYSIS_MARKS_MAX),
+            ).fetchone()["c"]
+            if int(count) >= KG_ANALYSIS_MARKS_MAX:
+                raise ValueError(
+                    f"KG 分析标记:一个 notebook 最多 {KG_ANALYSIS_MARKS_MAX} 条,"
+                    "读入口按这个上限取数"
+                )
+        db.execute(
+            "INSERT INTO kg_analysis_marks "
+            "(notebook_id, rule_id, subject_key, kind, at_kg_seq, actor_user_id, "
+            " created_at, note) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT (notebook_id, rule_id, subject_key, kind) DO UPDATE SET "
+            "at_kg_seq=excluded.at_kg_seq, actor_user_id=excluded.actor_user_id, "
+            "created_at=excluded.created_at, note=excluded.note",
+            (notebook_id, rule_id, subject_key, kind, int(at_kg_seq),
+             str(actor_user_id or ""), normalize_timestamp(now), str(note or "")),
+        )
+
+    @staticmethod
+    def clear_kg_analysis_mark(
+        db: Any,
+        notebook_id: str,
+        rule_id: str,
+        subject_key: str,
+        kind: str,
+    ) -> bool:
+        """SQLite 孪生同名方法:按主键删一条标记,返回是否真删了一行。"""
+        cursor = db.execute(
+            "DELETE FROM kg_analysis_marks WHERE notebook_id=%s AND rule_id=%s "
+            "AND subject_key=%s AND kind=%s",
+            (notebook_id, rule_id, subject_key, check_mark_kind(kind)),
+        )
+        return cursor.rowcount == 1
+
+    @staticmethod
+    def kg_finding_source_states(
+        db: Any, notebook_id: str, source_ids: Sequence[str]
+    ) -> Dict[str, Dict[str, object]]:
+        """SQLite 孪生同名方法(口径与字段说明见那边)。
+
+        形态分岔,语义相同:「最近一次抽取」这里是 ``LEFT JOIN LATERAL``(每个来源一次
+        ``idx_extraction_runs_source_created`` 倒序探查,``LIMIT 1``);SQLite 没有
+        LATERAL,用相关子查询取那一轮的 id 再按主键回表。并列消歧 ``e.id COLLATE "C"
+        DESC`` 与 SQLite 的二进制序逐字一致。id 列表经 ``id_binding``(``member_of`` +
+        ``execute_ids``,每次都按真实列表出计划)。时间戳经 `iso_timestamp`。"""
+        ids = list(dict.fromkeys(source_ids))
+        if not ids:
+            return {}
+        bound = bind_ids(ids)
+        rows = execute_ids(
+            db,
+            "SELECT s.id AS id, s.title AS title, s.source_type AS source_type, "
+            "s.status AS status, s.parse_status AS parse_status, "
+            "s.chunked_at AS chunked_at, er.created_at AS last_extraction_at, "
+            "er.status AS last_extraction_status "
+            "FROM sources s "
+            "LEFT JOIN LATERAL ("
+            "SELECT e.created_at, e.status FROM extraction_runs e "
+            "WHERE e.source_id = s.id AND e.run_type = 'kg' "
+            "ORDER BY e.created_at DESC, e.id COLLATE \"C\" DESC LIMIT 1"
+            ") er ON true "
+            f"WHERE {member_of('s.id', bound)} AND s.notebook_id = %s",
+            [bound.param, notebook_id],
+        ).fetchall()
+        return _finding_source_states(
+            ids,
+            (
+                (row["id"], row["title"], row["source_type"], row["status"],
+                 row["parse_status"], iso_timestamp(row["chunked_at"]),
+                 iso_timestamp(row["last_extraction_at"]),
+                 row["last_extraction_status"])
+                for row in rows
+            ),
+        )
+
+    def kg_finding_display_name_rows(
+        self, notebook_id: str, pairs: Sequence[Tuple[str, str]]
+    ) -> List[Tuple[str, str, str, int]]:
+        """SQLite 孪生同名方法(取名口径、两条腿与批次见那边)。
+
+        形态分岔,语义相同:名字取 ``payload->>'name'``(SQLite 是
+        ``json_extract(payload, '$.name')``);两份 id 各经 ``id_binding`` 绑一个参数
+        (``member_of`` + ``execute_ids``),PG 没有 SQLite 那种「列表驱动 / 列表只过滤」
+        的写法区分 —— 两者都是 ``= ANY``,custom plan 按真实列表长度出计划。多批读在一个
+        REPEATABLE READ 快照里完成。挂写事务守卫。"""
+        self._reject_inside_write_transaction("问题样例展示名")
+        wanted = list(dict.fromkeys((str(s), str(c)) for s, c in pairs))
+        if not wanted:
+            return []
+        canonicals = sorted({c for _s, c in wanted})
+        statuses = ",".join("%s" for _ in USABLE_STATUSES)
+        hidden = (
+            "NOT EXISTS (SELECT 1 FROM sources hs WHERE hs.id = o.source_id "
+            "AND hs.notebook_id = o.notebook_id "
+            "AND hs.source_type IN ('memory','knowhow'))"
+        )
+        raw: List[tuple] = []
+        with self._read_snapshot(repeatable=True) as db:
+            for start in range(0, len(canonicals), 500):
+                batch = canonicals[start:start + 500]
+                batch_set = set(batch)
+                canon = bind_ids(batch)
+                sources = bind_ids(sorted({s for s, c in wanted if c in batch_set}))
+                raw.extend(
+                    (row["source_id"], row["canonical_id"], row["name"])
+                    for row in execute_ids(
+                        db,
+                        "SELECT o.source_id AS source_id, c.canonical_id AS canonical_id, "
+                        "o.payload->>'name' AS name "
+                        "FROM concept_clusters c "
+                        "JOIN knowledge_objects o ON o.id = c.member_object_id "
+                        f"WHERE {member_of('c.canonical_id', canon)} "
+                        "AND c.notebook_id = %s "
+                        f"AND c.generation = {_PUBLISHED_CLUSTER_GEN} "
+                        "AND o.notebook_id = c.notebook_id "
+                        f"AND o.status IN ({statuses}) "
+                        f"AND {member_of('o.source_id', sources)} AND {hidden} "
+                        "UNION ALL "
+                        "SELECT o.source_id, o.id, o.payload->>'name' "
+                        "FROM knowledge_objects o "
+                        f"WHERE {member_of('o.id', canon)} AND o.notebook_id = %s "
+                        f"AND o.status IN ({statuses}) "
+                        f"AND {member_of('o.source_id', sources)} AND {hidden} "
+                        "AND NOT EXISTS (SELECT 1 FROM concept_clusters cc "
+                        "WHERE cc.notebook_id = o.notebook_id "
+                        "AND cc.member_object_id = o.id "
+                        f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN})",
+                        [canon.param, notebook_id, notebook_id, *USABLE_STATUSES,
+                         sources.param,
+                         canon.param, notebook_id, *USABLE_STATUSES, sources.param,
+                         notebook_id],
+                    ).fetchall()
+                )
+        return _display_name_rows(raw, wanted)
+
+    @staticmethod
+    def stamp_cluster_code_version(
+        db: Any,
+        notebook_id: str,
+        cluster_input_version: str,
+        cluster_code_version: str,
+    ) -> bool:
+        """SQLite 孪生同名方法:跳过路径补写合并代码分量,守卫
+        ``cluster_input_version = %s``(理由见那边),值已一致不写。PG READ COMMITTED
+        下 UPDATE 对行重读最新已提交版本:并发的收尾写或删除知识图谱先提交,守卫就按
+        它们写下的值判。"""
+        cursor = db.execute(
+            "UPDATE unified_kg_state SET cluster_code_version = %s "
+            "WHERE notebook_id = %s AND cluster_input_version = %s "
+            "AND cluster_input_version <> '' AND cluster_code_version <> %s",
+            (cluster_code_version, notebook_id, cluster_input_version,
+             cluster_code_version),
+        )
+        return cursor.rowcount == 1
