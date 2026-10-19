@@ -283,9 +283,8 @@ def _scenario_federated(data, notebook):
 
 
 def _scenario_knowhow(data, notebook):
-    """带 Knowhow:单元素格子段落让装配期发生 knowhow 读取,而这次读取(传了备忘)
-    把每条入选段落的首个元素都问上——包括那个首元素也带标记的多元素段落,于是
-    卡片那一侧三个读取都全命中、一次都不读。"""
+    """带 Knowhow:单元素格子段落的 knowhow 由装配期读过,卡片侧复用;首元素也带
+    标记的那个多元素段落装配期不问(只问单元素 chunk),卡片侧只为它补读一次。"""
     for index in (1, 2, 3):
         data.source(index)
     data.knowhow("el-1-0", row="r-1")
@@ -295,9 +294,9 @@ def _scenario_knowhow(data, notebook):
 
 
 def _scenario_sectioned(data, notebook):
-    """按节合成:两节各绑不同的段落,各自一份装配备忘,合并后供原文段腿复用。
-    第一节有单元素格子段落(装配期 knowhow 读取覆盖了本节全部首元素),第二节
-    全是多元素段落(没有 knowhow 读取)——所以 knowhow 只补读第二节的首元素。"""
+    """按节合成:两节各绑不同的段落,共用本 run 的一份备忘,供原文段腿复用。
+    第一节的单元素格子段落由装配期读过 knowhow;其余三段都是多元素段落,装配期
+    不问——所以 knowhow 只补读这三段的首元素。"""
     for index in (1, 2, 3, 4):
         data.source(index, title=f"节手册-{index}")
     data.knowhow("el-1-0", row="r-1")
@@ -389,10 +388,10 @@ def test_the_whole_answer_payload_matches_a_run_without_reuse(
 @pytest.mark.parametrize("scenario, expected", [
     # 装配期没有 knowhow 读取 → 只补读进了 prompt 的首元素,tier / 来源零读取。
     ("plain", [("knowhow_refs_for", ["el-1-0", "el-2-0", "el-3-0"])]),
-    # 装配期 knowhow 读取(传了备忘)问上了全部首元素 → 一次都不读。
-    ("knowhow", []),
-    # 第一节的装配读过 el-1-0/el-2-0,第二节没有 knowhow 读取 → 只补第二节的。
-    ("sectioned", [("knowhow_refs_for", ["el-3-0", "el-4-0"])]),
+    # 两个单元素格子装配期读过 → 只补那个多元素段落的首元素。
+    ("knowhow", [("knowhow_refs_for", ["el-3-0"])]),
+    # 第一节的装配读过单元素的 el-1-0 → 只补三个多元素段落的首元素。
+    ("sectioned", [("knowhow_refs_for", ["el-2-0", "el-3-0", "el-4-0"])]),
 ])
 def test_a_partial_hit_reads_exactly_the_missing_keys(
     arepo, monkeypatch, scenario, expected
@@ -451,33 +450,184 @@ def test_a_second_run_never_sees_the_first_runs_values(arepo, monkeypatch):
     assert call["got"] == call["want"]
 
 
-def test_only_the_card_path_asks_the_assembly_to_record(arepo, monkeypatch):
-    """备忘是**选择加入**的:没有引用卡腿的装配(仅检索输出 ``_draft_reasoning_
-    evidence`` 用的默认形态)不记、也不把 knowhow 读取放宽到多元素段落的首元素,
-    读取与接这个特性之前逐字相同;两种形态的上下文 / id_map / 计数逐字节相等。"""
+def test_the_retrieval_only_entry_point_keeps_the_memo_less_reads(
+    arepo, monkeypatch
+):
+    """走真实的仅检索入口(``repo.ask(..., output="evidence")`` → ``_draft_reasoning_
+    evidence``):这条路径没有引用卡腿,装配不带备忘,knowhow 读取只问单元素段落,
+    与接这个特性之前逐字相同。往那个调用点加 ``citation_lookups=`` 这条就红。"""
     notebook = _seed(arepo)
+    _bind(arepo)
     data = _Data()
     for index in (1, 2):
         data.source(index)
     ec, reads = _install(monkeypatch, arepo, data)
-    service = arepo._runtime.ask_service()
-    chunks = [_chunk(1, elements=1), _chunk(2)]
+    _patch_retrieval(monkeypatch, chunks=[_chunk(1, elements=1), _chunk(2)])
+    seen: list = []
+    real = AskService._assemble_reasoning_context
 
-    plain = service._assemble_reasoning_context(
-        notebook.id, "增益", [], [], chunks=chunks, refine=False)
-    plain_reads = list(reads)
-    reads.clear()
-    recorded = service._assemble_reasoning_context(
-        notebook.id, "增益", [], [], chunks=chunks, refine=False,
-        citation_lookups=True)
+    def _spy(self, *args, **kwargs):
+        context = real(self, *args, **kwargs)
+        seen.append((kwargs.get("citation_lookups"), context.baseline))
+        return context
 
-    assert plain.baseline["citation_lookups"] is None
-    assert isinstance(recorded.baseline["citation_lookups"], CitationLookups)
-    assert (plain.context_block, plain.id_map, plain.counts) == (
-        recorded.context_block, recorded.id_map, recorded.counts)
-    assert ("knowhow_refs_for", ["el-1-0"]) in plain_reads
-    assert ("knowhow_refs_for", ["el-1-0", "el-2-0"]) in reads
-    assert [name for name, _ids in reads] == [name for name, _ids in plain_reads]
+    monkeypatch.setattr(AskService, "_assemble_reasoning_context", _spy)
+
+    evidence = arepo.ask(
+        notebook.id, AskRequest(question="增益", mode="reasoning"),
+        submitted_via="mcp", output="evidence")
+
+    assert evidence.items, evidence
+    assert len(seen) == 1, seen
+    lookups, baseline = seen[0]
+    assert lookups is None and baseline["citation_lookups"] is None
+    assert [ids for name, ids in reads if name == "knowhow_refs_for"] == [["el-1-0"]]
+
+
+def _old_path(monkeypatch):
+    """master 的读取:装配不带备忘(``chunk_context`` 不传 sink),原文段腿也拿不到
+    备忘(``chunk_citations(lookups=None)``,三个读取整池各一次)。"""
+    real = AskService._assemble_reasoning_context
+
+    def _assemble(self, *args, **kwargs):
+        kwargs["citation_lookups"] = None
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(AskService, "_assemble_reasoning_context", _assemble)
+
+
+def _read_totals(reads) -> dict[str, tuple[int, int]]:
+    """``{方法: (调用次数, 问到的键总数)}``。store 侧按键去重后取行,所以键数
+    就是 store 返回的行数上界(命中多少行由数据决定,两条路径同一份数据)。"""
+    totals: dict[str, tuple[int, int]] = {}
+    for name, ids in reads:
+        calls, rows = totals.get(name, (0, 0))
+        totals[name] = (calls + 1, rows + len(ids))
+    return totals
+
+
+def _exact_sections(data, notebook):
+    """评审抓到的形状:四节各绑一段单元素段落,外加两段多元素与一段单元素的
+    **精确命中**——未绑定任何节,按设计每一节都注入(``reasoning_exact_reserve``)。
+    共享段落在各节的装配里反复出现,任何一次重复读取都会让行数超过旧路径。"""
+    from dataclasses import replace
+
+    for index in range(1, 8):
+        data.source(index)
+    data.knowhow("el-5-0")
+    chunks = [_chunk(index, elements=1) for index in (1, 2, 3, 4)]
+    chunks += [replace(_chunk(index, elements=3), exact_lookup=True) for index in (5, 6)]
+    chunks += [replace(_chunk(7, elements=1), exact_lookup=True)]
+    outline = [_section(f"s{index}", f"第{index}节", f"chunk-{index}")
+               for index in (1, 2, 3, 4)]
+    return chunks, {"outline": outline, "effort": "exhaustive"}
+
+
+class _FailSectionLLM(_CiteFirstKeyLLM):
+    """第 2 节两次都吐空答案 → 按节合成整体回退到单次合成。"""
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        if "第2节" in messages[-1]["content"] and "sub_queries" not in schema_hint \
+                and "next_action" not in schema_hint:
+            return json.dumps({"answer": "", "grounded": False})
+        return super().chat_json(messages, schema_hint, **kwargs)
+
+
+def _track_chunk_path(monkeypatch, ec, reads) -> list:
+    """只收 ``chunk_context`` / ``chunk_citations`` 内部发生的读取(KG / element
+    腿不经备忘,两条路径一样多,不在这条合同里)。"""
+    inside: list = []
+    for name in ("chunk_context", "chunk_citations"):
+        real = getattr(ec, name)
+
+        def _wrapped(*args, _real=real, **kwargs):
+            mark = len(reads)
+            result = _real(*args, **kwargs)
+            inside.extend(reads[mark:])
+            return result
+
+        monkeypatch.setattr(ec, name, _wrapped)
+    return inside
+
+
+def _keys_read_twice(chunk_path_reads) -> dict:
+    seen: dict = {}
+    for name, ids in chunk_path_reads:
+        for key in ids:
+            seen[(name, key)] = seen.get((name, key), 0) + 1
+    return {key: count for key, count in seen.items() if count > 1}
+
+
+def _measure(arepo, monkeypatch, shape, *, old, fail_second=False, chunk_path=None):
+    notebook = _seed(arepo)
+    client = _FailSectionLLM() if fail_second else _CiteFirstKeyLLM()
+    for workload in ("reasoning_agent", "evidence_refine", "ask_answer"):
+        bind_chat_client(arepo, workload, client)
+    data = _Data()
+    chunks, extra = shape(data, notebook)
+    ec, reads = _install(monkeypatch, arepo, data)
+    tracked = _track_chunk_path(monkeypatch, ec, reads)
+    _patch_retrieval(monkeypatch, chunks=chunks, outline=extra.get("outline", ()))
+    with monkeypatch.context() as patch:
+        if old:
+            _old_path(patch)
+        response = _ask(arepo, notebook, effort=extra.get("effort"))
+    if chunk_path is not None:
+        chunk_path.extend(tracked)
+    return response, _read_totals(reads)
+
+
+SHAPES = {
+    **{name: (lambda data, nb, _f=fn: _f(data, nb)) for name, fn in SCENARIOS.items()},
+    "exact-sections": _exact_sections,
+}
+
+
+@pytest.mark.parametrize("shape", sorted(SHAPES))
+def test_no_read_asks_for_more_rows_than_the_old_path(arepo, monkeypatch, shape):
+    """逐个读取方法比**行数**(问到的键总数)与调用次数:新路径每一项都不多于
+    旧路径,且总行数严格更少;回答 payload 逐字节相等。"""
+    old_response, old = _measure(arepo, monkeypatch, SHAPES[shape], old=True)
+    chunk_path: list = []
+    new_response, new = _measure(
+        arepo, monkeypatch, SHAPES[shape], old=False, chunk_path=chunk_path)
+
+    assert _payload(new_response) == _payload(old_response)
+    # 原文段那条通路上,每个键一个 run 至多读一次(各节、重试、引用卡共用一份备忘)。
+    assert _keys_read_twice(chunk_path) == {}, chunk_path
+    for name in ("tier_map", "citation_source_info", "knowhow_refs_for"):
+        old_calls, old_rows = old.get(name, (0, 0))
+        new_calls, new_rows = new.get(name, (0, 0))
+        assert new_rows <= old_rows, (name, new, old)
+        assert new_calls <= old_calls, (name, new, old)
+    assert sum(rows for _c, rows in new.values()) < sum(
+        rows for _c, rows in old.values()), (new, old)
+    if shape == "exact-sections":
+        detail = [step.detail for step in new_response.reasoning_trace
+                  if step.step_type == "synthesis"][-1]
+        assert detail["outline_sections"] == 4 and not detail["outline_fallback"]
+        # 精确块确实注入了每一节(否则这个形状测不到共享段落的重复读取)。
+        assert {c.source_id for c in new_response.citations} >= {"src-5", "src-6"}
+
+
+def test_the_fallback_reuses_what_the_sections_already_read(arepo, monkeypatch):
+    """按节合成失败、回退单次合成:回退那次装配拿的是本 run 同一份备忘,各节已读
+    过的键不再读;payload 与旧路径逐字节相等,行数严格更少。"""
+    old_response, old = _measure(
+        arepo, monkeypatch, _exact_sections, old=True, fail_second=True)
+    chunk_path: list = []
+    new_response, new = _measure(
+        arepo, monkeypatch, _exact_sections, old=False, fail_second=True,
+        chunk_path=chunk_path)
+
+    detail = [step.detail for step in new_response.reasoning_trace
+              if step.step_type == "synthesis"][-1]
+    assert detail["outline_fallback"] is True, detail
+    assert _payload(new_response) == _payload(old_response)
+    assert _keys_read_twice(chunk_path) == {}, chunk_path
+    for name in ("tier_map", "citation_source_info", "knowhow_refs_for"):
+        assert new.get(name, (0, 0))[1] <= old.get(name, (0, 0))[1], (name, new, old)
+    assert sum(r for _c, r in new.values()) < sum(r for _c, r in old.values())
 
 
 # --------------------------------------------------------------------------
@@ -547,7 +697,9 @@ def _unit_chunks():
     ]
 
 
-def test_the_sink_leaves_the_context_and_the_read_count_unchanged():
+def test_the_sink_leaves_the_context_and_the_first_reads_unchanged():
+    """新备忘上的第一次装配:读取与不传时逐字相同(同样的键、同样的次数),上下文
+    逐字节相等;同一份备忘上的第二次装配(另一节 / 重试)一个键都不再读。"""
     service, reads = _unit_service()
     plain = service.chunk_context(_unit_chunks(), notebook_id="active")
     plain_reads = list(reads)
@@ -556,33 +708,38 @@ def test_the_sink_leaves_the_context_and_the_read_count_unchanged():
     sunk = service.chunk_context(_unit_chunks(), notebook_id="active", lookup_sink=memo)
 
     assert sunk == plain
-    assert [name for name, _ids in reads] == [name for name, _ids in plain_reads]
-    # 只差 knowhow 那一次问上了全部入选首元素(不传时只问单元素 chunk)。
+    assert reads == plain_reads
     assert plain_reads[-1] == ("evidence_elements", ["c1-el0"])
-    assert reads[-1] == ("evidence_elements", ["c1-el0", "c2-el0", "c3-el0"])
     # 每一个问过的键都记下,没命中的记 None(是「问过」而不是「没见过」)。
     assert set(memo.tiers) == {"active", "base"}
     assert memo.source_info["s3"] is None
-    assert set(memo.knowhow) == {"c1-el0", "c2-el0", "c3-el0"}
-    assert memo.knowhow["c2-el0"] is None
+    assert set(memo.knowhow) == {"c1-el0"}
+
+    reads.clear()
+    again = service.chunk_context(_unit_chunks(), notebook_id="active", lookup_sink=memo)
+    assert again == plain
+    assert reads == []
 
 
 def test_a_full_hit_reads_nothing_and_equals_the_fresh_read():
     service, reads = _unit_service()
+    chunks = [_unit_chunk("c1", "s1", elements=1),
+              _unit_chunk("c3", "s3", notebook_id="", elements=1)]
     memo = CitationLookups()
-    service.chunk_context(_unit_chunks(), notebook_id="active", lookup_sink=memo)
+    service.chunk_context(chunks, notebook_id="active", lookup_sink=memo)
     reads.clear()
 
-    reused = service.chunk_citations(_unit_chunks(), notebook_id="active", lookups=memo)
+    reused = service.chunk_citations(chunks, notebook_id="active", lookups=memo)
 
     assert reads == []
-    assert _dump(reused) == _dump(service.chunk_citations(
-        _unit_chunks(), notebook_id="active"))
+    assert _dump(reused) == _dump(service.chunk_citations(chunks, notebook_id="active"))
+    assert reused[1][0].knowhow is not None
 
 
 def test_a_partial_hit_reads_only_the_keys_the_assembly_never_asked():
     """装配只渲染了前两段(第三段被预算挤掉,没问过它的任何键),卡片却要三段:
-    只对第三段的来源与首元素补读;tier 的 "" 归属回退到本次 ask 的库,已命中。"""
+    只对没问过的键补读——第二段(多元素)与第三段的首元素、第三段的来源;tier 的
+    "" 归属回退到本次 ask 的库,已命中。"""
     service, reads = _unit_service()
     memo = CitationLookups()
     service.chunk_context(_unit_chunks()[:2], notebook_id="active", lookup_sink=memo)
@@ -590,7 +747,8 @@ def test_a_partial_hit_reads_only_the_keys_the_assembly_never_asked():
 
     reused = service.chunk_citations(_unit_chunks(), notebook_id="active", lookups=memo)
 
-    assert reads == [("evidence_elements", ["c3-el0"]), ("source_metadata", ["s3"])]
+    assert reads == [("evidence_elements", ["c2-el0", "c3-el0"]),
+                     ("source_metadata", ["s3"])]
     assert _dump(reused) == _dump(service.chunk_citations(
         _unit_chunks(), notebook_id="active"))
     assert reused[2][0].knowhow is not None, "补读的 knowhow 必须落到卡上"

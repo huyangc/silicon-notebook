@@ -4,7 +4,7 @@
 台账的性能 / 结构 / 工程卫生项逐条按代码复核后补登；移除过时的「BM25 / FTS5 / tsvector 全文索引：暂缓」
 （SQLite FTS5 trigram 索引 + `bm25()` 排序与 PostgreSQL `pg_trgm` 词法候选早已在用，见 `fangan_done.md` §9；
 PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交付的统一认证与跨库全局问答，
-`_federated_graph_is_large` 一条按现行代码重写机制，状态速览改正 closeout 计划已完成；10-15 之后合入的 #913 / #914 / #915 / #916 记入 `fangan_done.md` §60。此前 2026-10-15：技术债整改程序
+`_federated_graph_is_large` 一条按现行代码重写机制，状态速览改正 closeout 计划已完成；10-15 之后合入的 #913 / #914 / #915 / #916 记入 `fangan_done.md` §60；第二节「reasoning 原文段引用卡重复三次批量读」已完成，移入 `fangan_done.md` §61。此前 2026-10-15：技术债整改程序
 移交，新增「四、技术债整改程序：收官后剩余」，`read_document` 延后项 (b) 与「历史全局回答 payload 归一」
 已移入 `fangan_done.md` §59；再此前 2026-10-07）
 对照：`silicon_notebook_fangan.md`（产品方案）。已完成项见 `fangan_done.md`；本文件只列**尚未做完**的部分。

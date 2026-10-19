@@ -120,10 +120,11 @@ def _knowhow_ref_from_payload(payload: Mapping[str, Any]) -> CitationKnowhowRef 
 
 @dataclass
 class CitationLookups:
-    """The three batch reads ``chunk_context`` made while assembling a
-    synthesis context, kept by key so the citation cards minted for the same
-    passages afterwards (``chunk_citations(lookups=...)``) need not read them
-    again.
+    """The three batch reads ``chunk_context`` made while assembling the
+    synthesis contexts of one Ask run, kept by key so that no later read in the
+    same run -- another section's assembly, a retry, the single-synthesis
+    fallback, or the citation cards minted for the same passages afterwards
+    (``chunk_citations(lookups=...)``) -- asks for a key again.
 
     Each map is keyed by what its read is keyed by -- notebook id for
     ``tier_map``, source id for ``citation_source_info``, element id for
@@ -135,13 +136,25 @@ class CitationLookups:
     store lookups (each value depends on its own key only, not on the rest
     of the batch), so a value recorded by one assembly is the value a fresh
     read of the same key returns within the same request.  Keys a consumer
-    needs that are absent -- a passage the assembly never rendered, or a
-    multi-element passage whose first element the assembly did not ask
-    about -- are read for that remainder only (``_through``).
+    needs that are absent -- a passage no assembly rendered, or a
+    multi-element passage whose first element no assembly asked about -- are
+    read for that remainder only (``_through``).
 
-    One memo belongs to one assembly (``AskService._assemble_reasoning_
-    context`` creates it and hands it out through the baseline capture);
-    ``merge`` folds the per-section memos of a sectioned synthesis together.
+    Every read that goes through a memo asks only for keys the memo lacks, and
+    the keys it asks are a subset of what the same read asked without one, so
+    a run sharing one memo never reads a key more than once and never reads a
+    key the memo-less path would not have read: per read call, and in total,
+    it asks for at most as many keys as before.  That is also why
+    ``chunk_context`` does not widen its own knowhow read to the passages'
+    first elements: the passages it renders are not all the passages that
+    reach the prompt (the partition append can clip the last one), and a key
+    read for a passage that is then clipped is a row the old path never read.
+
+    One memo belongs to one Ask run: ``_draft_reasoning_response`` creates it
+    and hands it to every reasoning assembly of the run (each section, each
+    retry, the fallback); the assemblies hand it back through the baseline
+    capture.  ``merge`` folds memos together (a no-op duplicate when the
+    sections already share one).
     """
 
     tiers: dict[str, str | None] = field(default_factory=dict)
@@ -840,12 +853,10 @@ class EvidenceContextService:
         chunk 段恒为 ``k1..kN``(所有既有调用方),按节合成给每节整体加一段偏移,
         让各节的 key 号段互不相交(见 ``outline_synthesis``)。
 
-        ``lookup_sink``:传入时把本次三个批量读取的问与答记进去(见
-        ``CitationLookups``),供同一批原文段随后建引用卡时复用。读取**次数**与
-        不传时相同;唯一的差别是 knowhow 那一次(本来就要发生时)把每条入选
-        chunk 的首个元素都问上——引用卡按首个元素定位 knowhow,只问单元素 chunk
-        的话卡片那一侧还得为多元素 chunk 再读一次。写回 id_map 的 knowhow 仍只
-        给单元素 chunk,上下文与 id_map 与不传时逐字节相等。"""
+        ``lookup_sink``:本 run 共享的读取备忘(见 ``CitationLookups``)。传入时
+        三个批量读取都**只问备忘里还没有的键**、并把问到的记进去,供同一 run 里
+        后续的装配(别的节、重试、回退)与引用卡复用;问的键是不传时那次读取的
+        子集,一个都不缺就不读。上下文与 id_map 与不传时逐字节相等。"""
         chunks = deduplicate_source_chunks_in_order(chunks)
         budget = (
             self.settings.chunk_answer_budget_chars
@@ -854,12 +865,14 @@ class EvidenceContextService:
         )
         tier_ids = list(
             {getattr(chunk, "notebook_id", "") or notebook_id for chunk in chunks})
-        tiers = self.tier_map(tier_ids)
         source_ids = [chunk.source_id for chunk in chunks]
-        citation_source_info = self.citation_source_info(source_ids)
-        if lookup_sink is not None:
-            _remember(lookup_sink.tiers, tier_ids, tiers)
-            _remember(lookup_sink.source_info, source_ids, citation_source_info)
+        if lookup_sink is None:
+            tiers = self.tier_map(tier_ids)
+            citation_source_info = self.citation_source_info(source_ids)
+        else:
+            tiers = _through(lookup_sink.tiers, tier_ids, self.tier_map)
+            citation_source_info = _through(
+                lookup_sink.source_info, source_ids, self.citation_source_info)
         lines: list[str] = []
         evidence_by_id: dict[str, dict[str, Any]] = {}
         # Task 12b 评审修复（grounded 主路径可达性）：chunk 锚点也要带 knowhow。
@@ -935,13 +948,14 @@ class EvidenceContextService:
             if len(element_ids) == 1:
                 single_element_keys[key] = element_ids[0]
         if single_element_keys:
-            asked = list(single_element_keys.values()) if lookup_sink is None else [
-                value["element_id"] for value in evidence_by_id.values()]
-            refs = self.knowhow_refs_for(asked)
+            refs = (
+                self.knowhow_refs_for(single_element_keys.values())
+                if lookup_sink is None else _through(
+                    lookup_sink.knowhow, single_element_keys.values(),
+                    self.knowhow_refs_for)
+            )
             for key, element_id in single_element_keys.items():
                 evidence_by_id[key]["knowhow"] = refs.get(element_id)
-            if lookup_sink is not None:
-                _remember(lookup_sink.knowhow, asked, refs)
         return entry_lines(lines), evidence_by_id
 
     def element_context(
