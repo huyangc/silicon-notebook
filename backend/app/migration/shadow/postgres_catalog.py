@@ -101,8 +101,13 @@ _ARRAY_LITERAL_CAST = re.compile(
     rf"(?:\s*,\s*{_ARRAY_LITERAL_ITEM})*\s*\])\s*{_TYPE_CAST}",
     re.I,
 )
+# A parenthesized operand up to three levels deep -- PostgreSQL deparses an
+# expression on the left of ``= ANY`` wrapped in parens, e.g.
+# ``((payload_json)::jsonb ->> 'feedback'::text) = ANY (ARRAY[...])`` for the
+# migration's ``(payload_json::jsonb->>'feedback') IN (...)``.
+_PAREN_OPERAND = r"\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)"
 _MEMBERSHIP = re.compile(
-    r"(?P<left>\"?[a-z_][a-z0-9_]*\"?)\s*"
+    rf"(?P<left>\"?[a-z_][a-z0-9_]*\"?|{_PAREN_OPERAND})\s*"
     r"(?P<operator>=\s*ANY|<>\s*ALL|!=\s*ALL)\s*"
     r"\(\s*ARRAY\s*\[(?P<items>[^]]*)\]\s*\)",
     re.I | re.S,

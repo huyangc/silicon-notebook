@@ -5884,8 +5884,30 @@ class SqliteMigrator:
         textually) reads just those rows. ``json_extract`` is deterministic,
         so the expression is indexable. Index only: no table, column or write
         path change.
+
+        Precondition: every ``global_ask_jobs.payload_json`` is valid JSON
+        (every writer stores ``model_dump_json`` / ``json_patch`` output). The
+        index evaluates ``json_extract`` on each row, so a malformed payload
+        would abort the build with an opaque "malformed JSON"; the migration
+        counts such rows first and stops with the ids and what to do instead.
+        From here on the index also evaluates that expression on every write
+        of the column, which is why the writers' valid-JSON contract matters.
         """
         with self._connect() as db:
+            broken = [
+                row[0] for row in db.execute(
+                    "SELECT id FROM global_ask_jobs WHERE json_valid(payload_json)=0 "
+                    "ORDER BY id LIMIT 20"
+                )
+            ]
+            if broken:
+                raise RuntimeError(
+                    "SQLite v96: global_ask_jobs rows whose payload_json is not "
+                    "valid JSON must be repaired or deleted before upgrading "
+                    "(find them with SELECT id FROM global_ask_jobs WHERE "
+                    "json_valid(payload_json)=0, then start again); first ids: "
+                    + ", ".join(broken)
+                )
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_global_ask_jobs_feedback\n"
                 "                 ON global_ask_jobs(json_extract(payload_json,'$.feedback'))\n"
