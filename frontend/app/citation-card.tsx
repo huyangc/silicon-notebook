@@ -34,6 +34,7 @@ import {
   verificationExplanation,
   verificationLabel,
 } from "./citation-verification";
+import { DELETED_SOURCE_LABEL, referenceSourceDeleted } from "./global-deleted-sources";
 import { type AnswerImagePreviewItem } from "./image-preview";
 import { ImportRowButton, type ImportRowController } from "./import-row-state";
 import { referenceImages } from "./inline-citation-images";
@@ -218,7 +219,10 @@ export function SelectedReferenceDetail({
   // 打开笔记本、外链、导入、本段附图——一律**不渲染**(不是渲染成禁用):后端对带标记
   // 引用的下钻端点返回 404,留着就是一颗必然失败的按钮。取而代之的是原因行。
   const verification = referenceVerification(reference);
-  const flagged = Boolean(verification);
+  // 来自已删笔记本的引用(全局问答)：行内标记本身就不可点(answer-markdown.tsx)，这张卡
+  // 正常走不到；万一被别的路径打开，也与带标记的引用一样不留任何「去原处看」的入口、
+  // 不取任何附图——那个笔记本已经不存在了。
+  const flagged = Boolean(verification) || referenceSourceDeleted(reference);
   // When the evidence row itself is the image element, its snippet/quoted_span
   // is parser-generated caption + image description. The image already carries
   // that caption as alt text, so repeating the blob as visible prose defeats the
@@ -401,10 +405,14 @@ export function SelectedReferenceDetail({
           />
         )}
       </div>
-      {flagged && (
+      {verification ? (
         <div className="cite-detail-verification" role="note">
           <strong>未通过核对：{verificationLabel(verification)}</strong>
           <span>{verificationExplanation(verification)}</span>
+        </div>
+      ) : flagged && (
+        <div className="cite-detail-verification" role="note">
+          <strong>{DELETED_SOURCE_LABEL}</strong>
         </div>
       )}
       <h4><LatexText text={title} isFormula={objectType === "formula"} /></h4>

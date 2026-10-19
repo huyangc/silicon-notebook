@@ -810,8 +810,11 @@ def _global_ask_detail(record: dict, *, viewer: UserProfile) -> AskDetail:
     notebook branch likewise keeps a revoked shared-library question for the
     administrator). The owner reading their own activity gets exactly the
     owner-facing rule ``GlobalAskService.get_job`` applies -- every participant
-    must still be readable, otherwise 404 -- so an activity detail can never
-    show them a global answer the global page itself refuses to open. Both
+    must still be readable, otherwise 404, except a deleted participant of a
+    turn retained after that deletion -- so an activity detail can never show
+    them a global answer the global page itself refuses to open. A retained
+    turn carries ``retained_until`` and ``deleted_notebook_ids`` exactly as the
+    global page's read does, for the pane to degrade those citations. Both
     checks run inside ``guarded_admin_job_record``'s transaction, which holds
     the job row and the participants' authority chains until this projection
     is assembled (the notebook branch's ``guarded_ask_detail`` invariant).
@@ -848,6 +851,8 @@ def _global_ask_detail(record: dict, *, viewer: UserProfile) -> AskDetail:
             notebook_id: names[notebook_id]
             for notebook_id in notebook_ids if notebook_id in names
         },
+        retained_until=job.retained_until or "",
+        deleted_notebook_ids=list(job.deleted_notebook_ids),
     )
 
 

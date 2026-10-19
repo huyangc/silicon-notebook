@@ -126,6 +126,9 @@ export type AskDetail = {
   retained_until?: string;
   notebook_ids?: string[];
   notebook_names?: Record<string, string>;
+  /** global 且留存期内的轮次：这一轮提到的、已被删除的笔记本。它们的引用降级成
+   *  「来源已删除」（`global-deleted-sources.ts`）。 */
+  deleted_notebook_ids?: string[];
 };
 
 export type ReportSectionFailure = { index: number; title: string; error: string };

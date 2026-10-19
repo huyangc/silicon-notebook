@@ -176,6 +176,9 @@ OBJECT_SCHEMA_SEMANTIC_COLUMNS = (
 #   链接本身不是越权通道——公开读取每次都实时复核分享者对快照内被引各库的读权,
 #   合并后 ACL 变严即自动失效; token 冲突概率由 256 位随机凭据兜底, 真撞上会被
 #   share_token 的部分唯一索引硬失败, 不会静默合并成一条。
+# v95 全局问答轮次留存: global_ask_jobs.retained_until(参与库被删时盖的到期时刻)
+# 同样随行走——它记的是那次删除已经发生, 合并不让被删的库复活, 所以到期时刻
+# 原样保留, 到期后照常由启动恢复/下一次删库清理。
 GLOBAL_ASK_TABLES = ("global_ask_conversations", "global_ask_jobs")
 
 # 外部内容 FTS —— 导入后 rebuild

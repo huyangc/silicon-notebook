@@ -13,6 +13,7 @@ from app.repositories.postgres._store_utils import (
     placeholders,
     sqlite_compatible_notebook_row,
 )
+from app.repositories.global_ask_store import GlobalAskStore
 from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.notebook_delete_job_store import NotebookDeleteJobStore
@@ -671,6 +672,12 @@ class NotebookStore:
             + refresh_on_conflict,
             (deleted_at, expires_at, notebook_id),
         )
+        # The global Ask turns that ran over this library are retained for the
+        # SAME window, on the same two-step rule: expired turns are purged on
+        # every new deletion (as expired projections are just above), and this
+        # deletion stamps its own (``app/domain/global_ask_retention.py``).
+        GlobalAskStore.purge_expired_turns(connection, deleted_at, marker="%s")
+        GlobalAskStore.stamp_retained_turns(connection, notebook_id, expires_at, marker="%s")
 
     @staticmethod
     def meta_row(connection, notebook_id: str) -> dict | None:

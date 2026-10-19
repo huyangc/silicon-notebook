@@ -52,6 +52,10 @@ export type AnswerAnchorLike = {
   // 全局问答终态引用核对(PR-D)：只在这条锚点没通过核对时出现,缺席即通过。
   // 呈现口径见 citation-verification.ts。
   verification?: CitationVerification;
+  // 全局问答：这条锚点所属的笔记本已被删除（留存期内的轮次）。**前端读入口**按作业的
+  // `deleted_notebook_ids` 标上（`global-deleted-sources.ts`），不是后端线上字段。
+  // 标上的引用显示「来源已删除」、不可点开，名下的图片一张都不取。
+  source_deleted?: boolean;
 };
 
 export type CitationLike = {
@@ -80,6 +84,8 @@ export type CitationLike = {
   knowhow?: { table_id: string; row_id: string } | null;
   // 全局问答终态引用核对(PR-D)：同 AnswerAnchorLike.verification。
   verification?: CitationVerification;
+  // 全局问答所属笔记本已被删除：同 AnswerAnchorLike.source_deleted。
+  source_deleted?: boolean;
 };
 
 export type AnswerReference = {

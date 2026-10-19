@@ -1422,6 +1422,11 @@
         "type": "index"
       },
       {
+        "name": "idx_global_ask_jobs_retained",
+        "sql_sha256": "30e7e8e88f3d5a01c51aff9a27e15475d85aa0733b1232db19c37fc1c7b33b7f",
+        "type": "index"
+      },
+      {
         "name": "idx_global_ask_jobs_status_mode_created",
         "sql_sha256": "ef079771f91ef62bd560a13481f8969038079b5616638a6712dc26309d1315f3",
         "type": "index"
@@ -2178,7 +2183,7 @@
       },
       {
         "name": "global_ask_jobs",
-        "sql_sha256": "e3dea39721397293e47b155b4aa097ae9bd3ffb904ecfa043123c5baae90af94",
+        "sql_sha256": "2ff92cd1e41007b0828be49f09285b048b24910612bf9e36752d6e85c415ba60",
         "type": "table"
       },
       {
@@ -3282,6 +3287,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 94
+    "user_version": 95
   }
 }

@@ -170,7 +170,21 @@ Libraries are retrieved in parallel, bounded per process by
 `GLOBAL_ASK_RETRIEVAL_CONCURRENCY` and shared fairly between IN-FLIGHT FEDERATED CALLS (a `reasoning` job
 federates several times at once); a widened scope therefore costs connections, not only wall time.
 A global run uses the engine's own retrieval-run kinds (`ask_chunk` / `ask_reasoning`) rather than a
-category of its own, and a large participant's leg never cold-loads a shared whole-library index.
+category of its own, and a large participant's leg never cold-loads a shared whole-library index. What
+tells them apart is `scope: "global"` on the event: every event written inside a global run (each stage's
+`ask_stage`, `retrieval_run_stats`, skip receipts and so on) carries it, with `notebook_id` unchanged (the
+anchor for run-level stages, the searched library for a federated leg); `scripts/diag_retrieval_latency.py`
+lists a global run's run totals separately as `ask_chunk(global)` / `ask_reasoning(global)`.
+
+**Global conversations after a participant notebook is deleted**: the deletion's final transaction (the
+one that writes `retained_user_activity`, with the same `USER_ACTIVITY_RETENTION_DAYS` expiry) stamps
+`global_ask_jobs.retained_until` on the global Ask jobs that used the notebook. Those turns stay readable to
+their owner during the window, are hidden by the read gate the moment it passes, and are deleted
+physically by startup recovery or the next notebook deletion (with any conversation they leave empty).
+When "the global conversation will not open after a library was deleted" is reported, look at that column
+first: empty means the turn was never stamped (the library was deleted before this mechanism existed, or
+through the orphan clean-up path) and the 404 is the old rule; a value with a 404 usually means another,
+still-existing participant the owner can no longer read -- a deliberate conservative rule, not a fault.
 
 ## Ownerless Memory sources
 
@@ -996,7 +1010,9 @@ For a large source, throughput and reliability are dominated by a few levers:
   start. Two further writes are data-dependent: `recover_interrupted_jobs()` settles leftover
   running `ask_jobs`/`merge_review_jobs`/`extraction_runs`/`kg_build_jobs`, `knowhow_rows` in
   `syncing`/`pending`, and `sources` in `extracting`/`queued`/`parsing` before readiness,
-  removes expired `retained_user_activity` rows, and clears both KG scratch tables; and
+  removes expired `retained_user_activity` rows and expired retained global Ask turns
+  (`global_ask_jobs.retained_until`, with any conversation they leave empty), and clears both
+  KG scratch tables; and
   `_reproject_legacy_knowhow_tables()` runs *after*
   `mark_ready()`, scheduling background cell-level reprojection that replaces KG objects for any
   knowhow table still carrying the older fixed KOs. A provably write-free rollback therefore has
@@ -2972,7 +2988,9 @@ see below); the on-disk sweep: source files, the pasted-image asset
 directory, and the three scale-index artifact roots + their `.old`/`.tmp`/
 `.tmp-<token>` siblings (phase 4, "files"); and one final atomic
 transaction that fences, archives the deleted content into `retained_user_
-activity`, and drops the five archive-input tables' rows + the `notebooks`
+activity`, stamps the same expiry on the global Ask jobs that used the
+notebook (`global_ask_jobs.retained_until`, purging already-expired retained
+turns on the way), and drops the five archive-input tables' rows + the `notebooks`
 row itself (phase 5, "finalize" — by that point every other table is
 already empty, so the `notebooks` row's own cascade is a cheap zero-row
 probe per table rather than the multi-minute cascade a direct `DELETE FROM
@@ -3138,7 +3156,9 @@ archive projections' own source rows may already be gone via cascade, so
 reconstructing a partial or empty archive after the fact would be strictly
 worse than not archiving at all. Only this job's own two bookkeeping rows
 (`notebook_delete_jobs`/`notebook_delete_files`) are deleted at the end. No
-`retained_user_activity` row is ever written or rewritten by this path.
+`retained_user_activity` row is ever written or rewritten by this path, and no
+global Ask job is stamped (the global turns that used the library therefore
+keep the old 404 for their owner).
 
 **A notebook whose delete keeps failing.** Each failed attempt increments
 the job row's `attempts` column and applies an exponential backoff before

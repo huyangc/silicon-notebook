@@ -28,7 +28,7 @@ from app.models.global_ask import (
     GlobalAskIntentPreviewRequest, GlobalAskJob, GlobalAskRequest,
     GlobalConversationDetail, GlobalNotebookScope, GLOBAL_ASK_PAGE_MAX,
     GLOBAL_ASK_PAGE_SIZE, GlobalAskSkippedNotebook, global_answer_citations,
-    FLAGGED_CITATION_MESSAGE, global_citation_flagged,
+    FLAGGED_CITATION_MESSAGE, global_citation_flagged, global_job_notebook_ids,
 )
 from app.models.sources import SourceElement
 from app.repositories.global_ask_ports import ReplacedJobUnavailable
@@ -513,6 +513,18 @@ def _snapshot_notebook_ids(payloads: list) -> set[str]:
     return scope
 
 
+def _retention_passed(retained_until: str) -> bool:
+    """Whether a turn's retention stamp is behind us. An unparsable stamp is
+    treated as passed: fail closed rather than serve a turn of unknown age."""
+    try:
+        instant = datetime.fromisoformat(str(retained_until))
+    except ValueError:
+        return True
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    return instant <= datetime.now(timezone.utc)
+
+
 class _NoMemorySources:
     """The Memory-source seat of a service built without one (library and test
     construction): no source is anyone's Memory source."""
@@ -646,6 +658,54 @@ class GlobalAskService:
                     {notebook_id for notebook_id in ids if self.can_read(notebook_id, user_id)})
         if not ids.issubset(readable):
             raise GlobalAskError(404, "部分笔记本已无法访问，请重新选择范围。")
+
+    def _check_turns(self, jobs, user_id, allowed_notebook_ids=None, authority_check=None):
+        """The owner's read of these turns: ``_check`` over every library they
+        ran over, except the DELETED participants of a RETAINED turn.
+
+        Product decision 2026-10-19 (``app/domain/global_ask_retention.py``):
+        deleting a library leaves the global turns that ran over it readable to
+        their owner until ``retained_until``; a library with no ``notebooks`` row
+        at all then simply stops taking part in the rule. What does NOT relax:
+
+        * a participant that still EXISTS but this reader can no longer read
+          (left the group, grant revoked, a deletion still in progress) keeps
+          refusing the whole read, exactly as before -- the turn may restate
+          that library's material, and the rule never shows content of a
+          library the reader cannot read now;
+        * an UNSTAMPED turn with a missing library (deleted before the stamp
+          existed, or imported from elsewhere) has no retention window, so it
+          keeps the strict rule;
+        * a caller bounded by an allowlist (an Agent token) cannot prove it was
+          ever allowed the deleted library, so it keeps the strict rule too.
+
+        A turn without a stamp costs nothing extra: the existence read runs
+        only when the page holds a retained turn. Each retained turn comes back
+        with ``deleted_notebook_ids`` -- every library it names that is gone --
+        so the interface degrades those citations without requesting anything
+        from them.
+        """
+        retained = [job for job in jobs if job.retained_until]
+        if any(_retention_passed(job.retained_until) for job in retained):
+            # Every content read the store serves is gated already; this
+            # catches the one that is not -- the idempotent replay's
+            # ``request_job``, which must keep resolving an old request id.
+            raise GlobalAskError(404, "问答任务不存在，请刷新对话。")
+        gone = set()
+        if retained and allowed_notebook_ids is None:
+            gone = self.store.missing_notebook_ids(
+                {notebook_id for job in retained for notebook_id in global_job_notebook_ids(job)}
+            )
+        required = {
+            notebook_id for job in jobs for notebook_id in job.resolved_notebook_ids
+            if not (job.retained_until and notebook_id in gone)
+        }
+        self._check(required, user_id, allowed_notebook_ids, authority_check)
+        for job in retained:
+            job.deleted_notebook_ids = [
+                notebook_id for notebook_id in global_job_notebook_ids(job) if notebook_id in gone
+            ]
+        return gone
 
     def _conversation(self, conversation_id, user_id):
         row = self.store.conversation(conversation_id, user_id)
@@ -994,7 +1054,7 @@ class GlobalAskService:
             raise GlobalAskError(
                 409, "请求标识已用于其他问题，请重新提交。", REQUEST_KEY_REUSED
             )
-        self._check(job.resolved_notebook_ids, user_id, allowed_notebook_ids, authority_check)
+        self._check_turns([job], user_id, allowed_notebook_ids, authority_check)
         return job
 
     def _check_replaceable(self, payload: GlobalAskRequest, user_id) -> None:
@@ -1155,7 +1215,7 @@ class GlobalAskService:
                             409, "请求标识已用于其他问题，请重新提交。",
                             REQUEST_KEY_REUSED,
                         ) from exc
-                    self._check(previous[0].resolved_notebook_ids, user_id, allowed, authority_check)
+                    self._check_turns([previous[0]], user_id, allowed, authority_check)
                     return previous[0]
                 if isinstance(exc, ReplacedJobUnavailable):
                     # Checked AFTER the replay above: a concurrent twin of this
@@ -2083,7 +2143,7 @@ class GlobalAskService:
         job = self.store.job(job_id, user_id)
         if job is None:
             raise GlobalAskError(404, "问答任务不存在，请刷新对话。")
-        self._check(job.resolved_notebook_ids, user_id, allowed_notebook_ids)
+        self._check_turns([job], user_id, allowed_notebook_ids)
         return job
 
     def cancel(self, job_id, *, user_id, allowed_notebook_ids=None, discard=False):
@@ -2164,6 +2224,9 @@ class GlobalAskService:
         updated = self.store.set_feedback(job_id, user_id, rating)
         if updated is None:
             raise GlobalAskError(404, "问答任务不存在，请刷新对话。")
+        # The re-read job is what the client renders next: it carries the
+        # same read-time retention facts ``get_job`` attached.
+        self._check_turns([updated], user_id, allowed_notebook_ids)
         self._emit({
             "kind": "global_ask_feedback", "rating": rating,
             "mode": updated.mode, "libraries": len(updated.resolved_notebook_ids),
@@ -2186,8 +2249,19 @@ class GlobalAskService:
         jobs = self.store.jobs(conversation_id, user_id, limit + 1, offset)
         has_more = len(jobs) > limit
         turns = jobs[:limit]
-        self._check({notebook_id for job in turns for notebook_id in job.resolved_notebook_ids},
-                    user_id, allowed_notebook_ids)
+        gone = self._check_turns(turns, user_id, allowed_notebook_ids)
+        scope = conversation.notebook_scope
+        kept = [notebook_id for notebook_id in scope.notebook_ids if notebook_id not in gone]
+        if scope.mode == "include" and kept and len(kept) < len(scope.notebook_ids):
+            # The scope a continued turn starts from (the browser restores it):
+            # a deleted library can never be searched again, and leaving it in
+            # would refuse the very next follow-up with "部分笔记本已无法访问".
+            # Never narrowed to nothing -- an empty ``include`` reads as ``all``,
+            # which would silently widen what the user chose; the picker's
+            # "selected notebook unavailable" notice covers that case.
+            conversation = conversation.model_copy(update={
+                "notebook_scope": GlobalNotebookScope(mode="include", notebook_ids=kept),
+            })
         return GlobalConversationDetail(
             **conversation.model_dump(), turns=list(reversed(turns)), has_more=has_more,
             next_offset=offset + limit if has_more else None,

@@ -7,6 +7,7 @@ from typing import Callable, List, Literal, Sequence
 from app.core.activity_time import activity_retention_window
 from app.domain.source_display import source_display_title
 from app.models.notebooks import NotebookCreate, NotebookUpdate
+from app.repositories.global_ask_store import GlobalAskStore
 from app.repositories.sqlite.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.notebook_delete_job_store import NotebookDeleteJobStore
@@ -689,6 +690,12 @@ class NotebookStore:
             + refresh_on_conflict,
             (deleted_text, expires_text, notebook_id),
         )
+        # The global Ask turns that ran over this library are retained for the
+        # SAME window, on the same two-step rule: expired turns are purged on
+        # every new deletion (as expired projections are just above), and this
+        # deletion stamps its own (``app/domain/global_ask_retention.py``).
+        GlobalAskStore.purge_expired_turns(db, deleted_at, marker="?")
+        GlobalAskStore.stamp_retained_turns(db, notebook_id, expires_at, marker="?")
 
     # ------------------------------------------------- Task 26 primitives
     @staticmethod

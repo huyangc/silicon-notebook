@@ -60,8 +60,24 @@ from app.repositories.sqlite.source_store import (
     VISIBLE_SOURCE_TYPES_PREDICATE,
 )
 from app.domain.extraction_profiles import OBJECT_TYPE_LABELS
+from app.domain.global_ask_retention import (
+    conversation_live_sql,
+    live_turn_sql,
+    retained_gone_participant_sql,
+)
 from app.domain.knowledge_contracts import USABLE_STATUSES
 from app.domain.notebook_scale import NotebookScaleFacts
+
+
+# The global Ask retention read gate (``app/domain/global_ask_retention.py``):
+# a turn past its ``retained_until`` (a deleted participant library's window)
+# and a conversation every turn of which is, are gone for every reader here --
+# the administrator's totals and feeds included, exactly like an expired
+# ``retained_user_activity`` row -- before the purge reclaims them.
+_GLOBAL_TURN_LIVE = live_turn_sql(dialect="sqlite")
+_GLOBAL_TURN_LIVE_G = live_turn_sql(dialect="sqlite", alias="g")
+_GLOBAL_TURN_LIVE_T = live_turn_sql(dialect="sqlite", alias="t")
+_GLOBAL_CONVERSATION_LIVE = conversation_live_sql(dialect="sqlite", alias="gc")
 
 
 def _snippet(text: str, needle: str) -> str:
@@ -899,8 +915,9 @@ class QueryStore:
                     "SELECT k,SUM(c) AS c FROM ("
                     "SELECT created_by AS k,COUNT(*) AS c FROM conversations GROUP BY created_by "
                     "UNION ALL "
-                    "SELECT user_id AS k,COUNT(*) AS c FROM global_ask_conversations "
-                    "GROUP BY user_id) t GROUP BY k"
+                    "SELECT gc.user_id AS k,COUNT(*) AS c FROM global_ask_conversations gc "
+                    f"WHERE {_GLOBAL_CONVERSATION_LIVE} "
+                    "GROUP BY gc.user_id) t GROUP BY k"
                 ).fetchall()
             }
             questions = {
@@ -909,7 +926,8 @@ class QueryStore:
                     "SELECT k,SUM(c) AS c FROM ("
                     "SELECT created_by AS k,COUNT(*) AS c FROM ask_jobs GROUP BY created_by "
                     "UNION ALL "
-                    "SELECT user_id AS k,COUNT(*) AS c FROM global_ask_jobs GROUP BY user_id "
+                    f"SELECT user_id AS k,COUNT(*) AS c FROM global_ask_jobs WHERE {_GLOBAL_TURN_LIVE} "
+                    "GROUP BY user_id "
                     "UNION ALL "
                     "SELECT a.actor_id AS k,COUNT(*) AS c "
                     "FROM retained_user_activity a WHERE a.activity_type='ask' "
@@ -956,7 +974,7 @@ class QueryStore:
                     "UNION ALL "
                     "SELECT user_id AS k,COUNT(*) AS c FROM global_ask_jobs "
                     f"WHERE {_absolute_instant('created_at')}>={_questions_30d_floor_sql} "
-                    "GROUP BY user_id "
+                    f"AND {_GLOBAL_TURN_LIVE} GROUP BY user_id "
                     "UNION ALL "
                     "SELECT a.actor_id AS k,COUNT(*) AS c FROM retained_user_activity a "
                     "WHERE a.activity_type='ask' "
@@ -977,7 +995,7 @@ class QueryStore:
                     "WHERE status='failed' GROUP BY created_by "
                     "UNION ALL "
                     "SELECT user_id AS k,COUNT(*) AS c FROM global_ask_jobs "
-                    "WHERE status='failed' GROUP BY user_id "
+                    f"WHERE status='failed' AND {_GLOBAL_TURN_LIVE} GROUP BY user_id "
                     "UNION ALL "
                     "SELECT a.actor_id AS k,COUNT(*) AS c FROM retained_user_activity a "
                     "WHERE a.activity_type='ask' AND a.status='failed' "
@@ -1085,7 +1103,8 @@ class QueryStore:
                 "UNION ALL "
                 "SELECT g.user_id AS k,g.created_at AS m,"
                 f"MAX({_absolute_instant('g.created_at')}) AS sort_instant,"
-                "'global_ask:'||g.id AS activity_id FROM global_ask_jobs g GROUP BY g.user_id "
+                "'global_ask:'||g.id AS activity_id FROM global_ask_jobs g "
+                f"WHERE {_GLOBAL_TURN_LIVE_G} GROUP BY g.user_id "
                 "UNION ALL "
                 "SELECT r.created_by AS k,r.created_at AS m,"
                 f"MAX({_absolute_instant('r.created_at')}) AS sort_instant,"
@@ -1207,6 +1226,7 @@ class QueryStore:
             "COALESCE(json_extract(g.payload_json,'$.question'),'') AS question,"
             "g.status,g.created_at,g.submitted_via,'answer' AS output FROM global_ask_jobs g "
             "JOIN users u ON u.id=g.user_id "
+            f"WHERE {_GLOBAL_TURN_LIVE_G} "
             "UNION ALL "
             "SELECT 'report' AS type,'notebook' AS scope,r.id,r.created_by AS user_id,"
             "COALESCE(NULLIF(u.username,''),r.created_by) AS username,"
@@ -1533,15 +1553,23 @@ class QueryStore:
             # 该列上线前的失败行回落到 payload 里给用户看的那句,与详情端点同一条回退。
             global_rows = []
             if activity_type in (None, "ask") and notebook_id is None:
-                global_access_clause = ""
+                # A turn past its retention stamp is gone for every reader; a
+                # deleted participant of a still-retained turn no longer takes
+                # part in the self-service rule (``GlobalAskService.
+                # _check_turns`` is the same rule for the conversation read).
+                global_access_clause = f" AND {_GLOBAL_TURN_LIVE}"
                 global_params: list[Any] = [user_id]
                 if not include_inaccessible_questions:
-                    global_access_clause = (
+                    global_access_clause += (
                         " AND NOT EXISTS(SELECT 1 FROM json_each("
                         "json_extract(payload_json,'$.resolved_notebook_ids')) p "
                         "WHERE NOT EXISTS(SELECT 1 FROM notebooks nb WHERE nb.id=p.value AND "
                         + access_sql.read_access_clause()
-                        + f" AND nb.{access_sql.NOTEBOOK_LIVE_SQL}))"
+                        + f" AND nb.{access_sql.NOTEBOOK_LIVE_SQL}) AND NOT "
+                        + retained_gone_participant_sql(
+                            dialect="sqlite", job="global_ask_jobs", participant="p.value",
+                        )
+                        + ")"
                     )
                     global_params.extend(access_sql.read_access_params(user_id))
                 global_range_clause, global_range_params = _range_and_cursor_clause("")
@@ -2052,10 +2080,16 @@ class QueryStore:
             "json_extract(page.payload_json,'$.resolved_notebook_ids')) p "
             "WHERE page.id IN (SELECT t.id FROM global_ask_jobs t "
             "WHERE t.conversation_id = g.conversation_id AND t.user_id = g.user_id "
+            # The page the conversation read serves: its retention read gate
+            # and its deleted-participant tolerance, word for word
+            # (``GlobalAskStore.jobs`` / ``GlobalAskService._check_turns``).
+            f"AND {_GLOBAL_TURN_LIVE_T} "
             "ORDER BY t.created_at DESC, t.id DESC LIMIT ?) "
             "AND NOT EXISTS(SELECT 1 FROM notebooks nb WHERE nb.id=p.value AND "
             + access_sql.read_access_clause()
-            + f" AND nb.{access_sql.NOTEBOOK_LIVE_SQL})) "
+            + f" AND nb.{access_sql.NOTEBOOK_LIVE_SQL}) AND NOT "
+            + retained_gone_participant_sql(dialect="sqlite", job="page", participant="p.value")
+            + ") "
             "ORDER BY created_at DESC, id DESC LIMIT ?",
             (
                 user_id,

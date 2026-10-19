@@ -61,10 +61,15 @@ from app.models.ask import (
     StoredSubmittedVia,
 )
 from app.domain.global_ask_attribution import attribution_sql
+from app.domain.global_ask_retention import live_turn_sql
 
 # One shared newest-first step budget over a ``candidates`` CTE that carries a
 # JSON ``trace`` column: ``budget`` is what remains for each row after the newer
 # rows took theirs (``?`` binds ``step_limit``). Non-array traces count as 0.
+# The global Ask retention read gate (``app/domain/global_ask_retention.py``):
+# a turn past its ``retained_until`` no longer feeds any learning chain.
+_GLOBAL_TURN_LIVE = live_turn_sql(dialect="sqlite")
+
 _TRACE_BUDGET_SQLITE = (
     "SELECT id, status, created_at, question, resolved_json, searched_json, "
     "cited_json, skipped_json, "
@@ -773,7 +778,7 @@ class AskStateStore:
                     "json_extract(payload_json,'$.searched_notebook_ids') AS searched_json, "
                     "json_extract(payload_json,'$.cited_notebook_ids') AS cited_json, "
                     "json_extract(payload_json,'$.skipped_notebooks') AS skipped_json "
-                    "FROM global_ask_jobs WHERE user_id = ? "
+                    "FROM global_ask_jobs WHERE user_id = ? AND {live} "
                     "AND {attributed} "
                     "ORDER BY created_at DESC, id DESC LIMIT ?), "
                     "budgeted AS ({budget}) "
@@ -782,7 +787,9 @@ class AskStateStore:
                     "(SELECT json_group_array(json(value)) FROM json_each(budgeted.trace) "
                     "WHERE key < budgeted.budget) AS trace_json "
                     "FROM budgeted ORDER BY created_at DESC, id DESC"
-                ).format(attributed=attributed, budget=_TRACE_BUDGET_SQLITE),
+                ).format(
+                    attributed=attributed, budget=_TRACE_BUDGET_SQLITE, live=_GLOBAL_TURN_LIVE,
+                ),
                 (user_id, *([notebook_id] * binds), job_limit, step_limit),
             ).fetchall()
         for row in step_rows:
@@ -888,7 +895,7 @@ class AskStateStore:
                     "SELECT id, mode, created_at, "
                     "COALESCE(json_extract(payload_json,'$.answer.reasoning_trace'), "
                     "json_extract(payload_json,'$.trace'), '[]') AS trace "
-                    "FROM global_ask_jobs WHERE status = 'done' AND mode = 'reasoning' "
+                    f"FROM global_ask_jobs WHERE status = 'done' AND mode = 'reasoning' AND {_GLOBAL_TURN_LIVE} "
                     "ORDER BY created_at DESC, id DESC LIMIT ?), "
                     f"budgeted AS ({_RUN_BUDGET_SQLITE}) "
                     "SELECT id, mode, created_at, "
@@ -1040,7 +1047,7 @@ class AskStateStore:
             # in the SQL text, same closed bucket, question text discarded here.
             global_rows = db.execute(
                 "SELECT json_extract(payload_json,'$.question') AS question, created_at "
-                "FROM global_ask_jobs WHERE user_id = ? AND status = 'done' "
+                f"FROM global_ask_jobs WHERE user_id = ? AND status = 'done' AND {_GLOBAL_TURN_LIVE} "
                 "ORDER BY created_at DESC, id DESC LIMIT ?",
                 (user_id, limit),
             ).fetchall()

@@ -964,9 +964,12 @@ def test_global_ask_detail_failed_job_error_detail_admin_only(client):
     assert self_body["error"] == ""
 
 
-def test_global_ask_detail_self_404_after_participant_notebook_deleted(client):
-    """所有者自助读取应用 ``GlobalAskService.get_job`` 同一条规则:参与库集合
-    必须整体仍可读,否则 404——即便管理员仍保留完整审计历史。"""
+def test_global_ask_detail_self_readable_while_retained_after_participant_deleted(client):
+    """所有者自助读取应用 ``GlobalAskService.get_job`` 同一条规则。参与库被删除
+    （产品裁决 2026-10-19）后，这一轮在留存期内对所有者照常可读：活动详情、全局
+    问答页与本人活动流三处一致——被删的库不再参与「参与库整体可读」的判定。删除
+    之前从未存在过留存戳、或仍存在但本人已读不了的库，照旧整条 404
+    （``tests/global_ask_retention_cases.py``）。"""
     owner = _auth(client, 92)
     owner_id = _me(client, owner)
     nb_id = _create_notebook(client, owner, "NB-global-participant")
@@ -987,19 +990,22 @@ def test_global_ask_detail_self_404_after_participant_notebook_deleted(client):
     from app.services import background_jobs
     background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
 
-    gone = client.get(f"/api/admin/users/{owner_id}/asks/gask-3", headers=owner)
-    assert gone.status_code == 404
-    # The activity detail and the global page itself apply ONE owner rule
-    # (every participant still readable); the two must agree, or a turn the
-    # global page refuses would open from the activity page.
-    assert client.get("/api/global-ask/jobs/gask-3", headers=owner).status_code == 404
-    # And the owner's own activity feed no longer lists it: listing a row whose
-    # detail is guaranteed to fail would be the one error bar in the feed.
+    retained = client.get(f"/api/admin/users/{owner_id}/asks/gask-3", headers=owner)
+    assert retained.status_code == 200
+    assert retained.json()["deleted_notebook_ids"] == [nb_id]
+    assert retained.json()["retained_until"]
+    # The activity detail and the global page itself apply ONE owner rule; the
+    # two must agree, or a turn one of them refuses would open from the other.
+    job = client.get("/api/global-ask/jobs/gask-3", headers=owner)
+    assert job.status_code == 200
+    assert job.json()["deleted_notebook_ids"] == [nb_id]
+    assert job.json()["retained_until"]
+    # And the owner's own activity feed keeps listing it while it is readable.
     feed = client.get(
         f"/api/admin/users/{owner_id}/activity", params={"activity_type": "ask"},
         headers=owner,
     )
-    assert "gask-3" not in [item["id"] for item in feed.json()["items"]]
+    assert "gask-3" in [item["id"] for item in feed.json()["items"]]
 
     admin = _auth_admin(client)
     still_visible_to_admin = client.get(

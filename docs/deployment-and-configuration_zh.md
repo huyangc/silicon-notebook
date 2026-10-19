@@ -1284,9 +1284,10 @@ SILICON_NOTEBOOK_CORS_ORIGINS
 `REASONING_MAX_TOKENS`。`DEBUG_LOGS_ENABLED` 控制可选的调试日志查看器。
 
 `USER_ACTIVITY_RETENTION_DAYS` 控制笔记本删除后最小用户分析摘要的留存天数（默认
-180，可取 1–3650）。它不会延长答案/来源/报告正文、引用或推理轨迹的生命周期。该值在
-后端启动时读取，只影响本进程启动后删除的笔记本；已经生成的摘要继续使用行上已写定的
-`expires_at`。
+180，可取 1–3650）。它不会延长笔记本内答案/来源/报告正文、引用或推理轨迹的生命周期。
+同一个窗口也是全局问答里用到被删笔记本的那几轮的留存期：这些轮次在窗口内对所有者照常可读，
+到期后清理（见 product-and-api 的「参与笔记本被删除之后」）。该值在后端启动时读取，只影响本
+进程启动后删除的笔记本；已经生成的摘要与已盖戳的全局问答轮次继续使用行上已写定的到期时刻。
 
 Excel 专业分析由部署项 `SPREADSHEET_ANALYSIS_ENABLED` 总控；摄取护栏是
 `SPREADSHEET_ANALYSIS_MAX_CELLS`、`SPREADSHEET_ANALYSIS_MAX_SHEETS`、

@@ -30,6 +30,7 @@ from app.repositories.knowhow_asset_refs import (  # 后端中性,与 sqlite mai
     collect_change_payload_tokens,
     keepers_among,
 )
+from app.repositories.global_ask_store import GlobalAskStore
 from app.repositories.ports import OfflineMaintenanceBusyError
 from app.repositories.source_fact_backfill import project_historical_source_fact
 from app.repositories.postgres.source_store import NOT_PROMOTION_SOURCE_PREDICATE
@@ -708,6 +709,15 @@ class PostgresMaintenanceAdapter:
             "DELETE FROM retained_user_activity WHERE expires_at<=%s",
             (now,),
         ))
+
+        def _purge_retained_global_turns() -> None:
+            # The global Ask turns retained after a participant library's
+            # deletion expire on the same window and are purged at the same
+            # point (``app/domain/global_ask_retention.py``).
+            with self._runtime.database.write() as db:
+                GlobalAskStore.purge_expired_turns(db, now, marker="%s")
+
+        _settle("global_ask_jobs(retained)", _purge_retained_global_turns)
         _settle("merge_review_jobs", lambda: _write(
             "UPDATE merge_review_jobs SET status='failed', "
             "error='中断:服务重启' WHERE status='running'"

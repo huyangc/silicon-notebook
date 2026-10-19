@@ -457,7 +457,14 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # over (job_kind, job_id, agent_token_id), idx_answer_links_expires; no FK) and
 # agent_access_tokens.allow_answer_links (integer NOT NULL DEFAULT 0; no
 # backfill, no index).
+# SQLite v95 / PostgreSQL 0075 add global_ask_jobs.retained_until (nullable
+# text COLLATE "C" holding an aware ISO instant, like the table's other
+# instants; no backfill) and the partial
+# idx_global_ask_jobs_retained over (conversation_id, retained_until) WHERE
+# retained_until IS NOT NULL: the
+# expiry a notebook deletion stamps on the global Ask turns that ran over it.
+# No table, FK or unique-surface change.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=94,
-    postgres_version=74,
+    sqlite_version=95,
+    postgres_version=75,
 )

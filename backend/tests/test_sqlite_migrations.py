@@ -266,7 +266,7 @@ def test_v92_drops_the_staged_auth_schema_and_keeps_credentials(tmp_path):
         )
         db.execute("PRAGMA user_version = 91")
 
-    assert SqliteMigrator(database, settings).migrate() == [92, 93, 94]
+    assert SqliteMigrator(database, settings).migrate() == [92, 93, 94, 95]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -341,7 +341,7 @@ def test_v93_adds_the_nullable_profile_deleted_at_without_touching_rows(tmp_path
         rollback_v93(db)
         db.execute("PRAGMA user_version = 92")
 
-    assert SqliteMigrator(database, settings).migrate() == [93, 94]
+    assert SqliteMigrator(database, settings).migrate() == [93, 94, 95]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         columns = {row[1]: row for row in db.execute("PRAGMA table_info(agent_profiles)")}
@@ -409,7 +409,7 @@ def test_v94_adds_answer_links_and_the_token_flag(tmp_path):
             ("tk-v94", "agent-v94", "hash-v94", '["read", "ask"]', "nb-v94", None, now),
         )
 
-    assert SqliteMigrator(database, settings).migrate() == [94]
+    assert SqliteMigrator(database, settings).migrate() == [94, 95]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db)[1:] == fresh[1:]
@@ -418,4 +418,55 @@ def test_v94_adds_answer_links_and_the_token_flag(tmp_path):
             "SELECT allow_answer_links FROM agent_access_tokens WHERE id = 'tk-v94'"
         ).fetchone()
         assert legacy[0] == 0
+    database.close_local()
+
+
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
+def test_v95_adds_global_ask_retained_until_without_backfill(tmp_path):
+    """Global Ask turn retention: ``global_ask_jobs.retained_until`` is a
+    nullable TEXT with no backfill, plus a partial index over the stamped rows.
+    A turn that existed before v95 reads back unstamped (its libraries were
+    never deleted under the retention rule). A fresh database and a v94 upgrade
+    end up the same; a second run is a no-op."""
+    from tests.sqlite_migration_testkit import rollback_v95
+
+    database, settings = _fresh_migrated_database(tmp_path)
+
+    def shape(db):
+        columns = {row[1]: row for row in db.execute("PRAGMA table_info(global_ask_jobs)")}
+        index = db.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'idx_global_ask_jobs_retained'"
+        ).fetchone()
+        return columns["retained_until"], index[0] if index else None
+
+    with database.connect() as db:
+        fresh = shape(db)
+    column, index_sql = fresh
+    assert (column[2], column[3], column[4]) == ("TEXT", 0, None)
+    assert "WHERE retained_until IS NOT NULL" in index_sql
+
+    with database.write() as db:
+        rollback_v95(db)
+        db.execute("PRAGMA user_version = 94")
+        db.execute(
+            "INSERT INTO global_ask_conversations(id,user_id,title,scope_json,"
+            "submitted_via,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+            ("gc-v95", "u-v95", "t", '{"mode":"all","notebook_ids":[]}', "web",
+             "2026-10-19T00:00:00+00:00", "2026-10-19T00:00:00+00:00"),
+        )
+        db.execute(
+            "INSERT INTO global_ask_jobs(id,conversation_id,user_id,request_json,status,"
+            "payload_json,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("gj-v95", "gc-v95", "u-v95", "{}", "done", "{}", "2026-10-19T00:00:00+00:00"),
+        )
+
+    assert SqliteMigrator(database, settings).migrate() == [95]
+    assert SqliteMigrator(database, settings).migrate() == []
+    with database.connect() as db:
+        assert shape(db) == fresh
+        legacy = db.execute(
+            "SELECT retained_until FROM global_ask_jobs WHERE id = 'gj-v95'"
+        ).fetchone()
+        assert legacy[0] is None
     database.close_local()

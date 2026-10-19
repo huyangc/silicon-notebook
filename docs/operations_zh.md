@@ -126,7 +126,17 @@ run 直接抛出取消，两个事件都不发。改动之前被旧复核整份�
 逐库检索并行执行，进程级上界是 `GLOBAL_ASK_RETRIEVAL_CONCURRENCY`，并在**在途联邦调用**之间公平
 分配（一次 `reasoning` 作业会同时发起多次）；放宽选库范围因此同时消耗连接，而不只是墙钟时间。
 全局 run 使用引擎自己的 retrieval-run 类别（`ask_chunk` / `ask_reasoning`），不再有独立类别；
-大参与库那一腿不冷加载共享整库索引。
+大参与库那一腿不冷加载共享整库索引。区分靠事件上的 `scope: "global"`：全局 run 里写出的每一条事件
+（各阶段 `ask_stage`、`retrieval_run_stats`、跳过回执等）都带这个字段，`notebook_id` 照旧（run 级阶段
+是锚点库，联邦腿是该腿检索的库）；`scripts/diag_retrieval_latency.py` 把全局 run 的 run 总计单独列成
+`ask_chunk(global)` / `ask_reasoning(global)`。
+
+**参与笔记本被删除之后的全局会话**：删除笔记本的最终事务（与写 `retained_user_activity` 同一事务、同一
+个到期时刻 `USER_ACTIVITY_RETENTION_DAYS`）给用到它的全局问答作业盖 `global_ask_jobs.retained_until`；
+这些轮次在窗口内对所有者照常可读，到期即被读闸挡掉，启动恢复或下一次删除笔记本时物理删除（作业
+清空的会话一并删除）。排查「删了库之后全局会话打不开」时先看这一列：为空说明该轮没被盖戳（库在本
+特性上线前被删、或经孤儿收尾路径删除），照旧 404；有值但仍 404，多半是另一个仍存在的参与库本人已
+读不了——那是刻意的保守判定，不是故障。
 
 ## 无主 Memory 来源
 
@@ -791,7 +801,8 @@ python scripts/migrate_sqlite_to_postgres.py \
   `user-local` 行。另有两类取决于数据：`recover_interrupted_jobs()` 在 readiness 之前把遗留的
   `ask_jobs`/`merge_review_jobs`/`extraction_runs`/`kg_build_jobs` running 行、`knowhow_rows` 的
   syncing/pending、`sources` 的 extracting/queued/parsing 收敛到终态，清理已到期的
-  `retained_user_activity` 行，并清空两张 KG scratch 表；
+  `retained_user_activity` 行与已到期的全局问答留存轮次（`global_ask_jobs.retained_until`，连同
+  因此清空的会话），并清空两张 KG scratch 表；
   `_reproject_legacy_knowhow_tables()` 在 `mark_ready()` **之后**运行，对仍带旧版固定 KO 的
   knowhow 表调度后台 cell 级重投影，**会替换 KG 对象**。所以**「可证明零写入」的回滚必须在
   第一次启动 PostgreSQL 之前决定**——不存在「已启动但没动过」的状态。bootstrap 与恢复性写入
@@ -2405,7 +2416,8 @@ CONCURRENCY`，默认 1，独立于维护池与轻活池——见「部署与配
 「实现期勘误」一节）（相位 3，「rows」，见下）；磁盘产物清扫——来源文件、
 贴图资产目录、三根 scale 索引产物及各自的 `.old`/`.tmp`/`.tmp-<token>`
 兄弟目录（相位 4，「files」）；最后一个原子事务：围栏、把被删内容归档进
-`retained_user_activity`、删掉五张归档输入表的行以及 `notebooks` 行本身
+`retained_user_activity`、给用到它的全局问答作业盖同一个到期时刻（`global_ask_jobs.retained_until`，
+顺带物理清理已到期的留存轮次）、删掉五张归档输入表的行以及 `notebooks` 行本身
 （相位 5，「finalize」——到这一步时其余每张表都已清空，`notebooks` 行自身
 的级联对每张表只是一次零命中探查，不再是大库上曾经的多分钟级联）。
 
@@ -2532,7 +2544,8 @@ import，或另一次删除——见上文「排查独占锁持有者」）或�
 的源行也可能已经随级联消失,事后拼一份残缺或空的归档只会比完全不归档更
 糟。最后只删掉这个作业自己的两张台账行
 （`notebook_delete_jobs`/`notebook_delete_files`）。这条路径永远不会写
-或改写任何 `retained_user_activity` 行。
+或改写任何 `retained_user_activity` 行，也不给全局问答作业盖留存戳（用到这个库的全局轮次因此照旧
+对所有者 404）。
 
 **一直删不掉的笔记本。** 每一次失败都会让作业行的 `attempts` 列加一，
 并在扫尾重试前套一段指数退避（60 秒 × 2^(attempts−1)，封顶 3600 秒）。

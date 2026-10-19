@@ -23,6 +23,7 @@ import type { ReasoningTraceStep } from "../ask-stream";
 import { GlobalConversationList } from "./conversation-list";
 import { NotebookScopePicker } from "./notebook-scope-picker";
 import { GlobalCoverageReceipt } from "./global-coverage-receipt";
+import { GlobalRetentionNotice } from "./global-retention-notice";
 import { replaceableTurn, useGlobalAsk } from "./use-global-ask";
 import { useCopyResult } from "../copy-result";
 import { copyTextSafely } from "../copy-text";
@@ -290,6 +291,7 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                 {trace.length > 0 && <div className="chat-assistant chat-thinking"><ReasoningTracePanel steps={trace} live={job.status === "running"} /></div>}
                 </>}
                 <GlobalCoverageReceipt job={job} notebookNames={names} />
+                <GlobalRetentionNotice until={job.retained_until} />
               </section>; })}
               {/* 已提交、作业还没交回来的那一轮：问题在点击当下就上屏，问题理解的步骤
                   实时画在下面——与笔记本内问答的 pending 轮同一个时刻、同一块面板。 */}

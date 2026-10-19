@@ -79,6 +79,7 @@
 .global-coverage-receipt ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
 .global-coverage-receipt li { display: flex; flex-wrap: wrap; gap: 4px 10px; }
 .global-coverage-receipt strong { color: var(--ink); font-weight: 550; }
+.global-retention-notice { margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.8; }
 .global-scope { position: relative; min-width: 0; }
 .global-scope-trigger { display: flex; align-items: center; gap: 7px; border: 0; border-radius: 8px; background: var(--global-tint); color: var(--global-accent); padding: 8px 10px; font-size: 12px; }
 .global-scope-panel { position: absolute; z-index: 20; bottom: calc(100% + 16px); left: 0; width: 410px; max-width: calc(100vw - 56px); background: var(--panel); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); padding: 16px; text-align: left; }
