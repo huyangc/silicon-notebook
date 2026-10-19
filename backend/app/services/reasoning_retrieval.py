@@ -674,6 +674,78 @@ def _reflect_step_summary(decision: "ReflectDecision") -> str:
         if rejected else "反思结果无法采用（模型调用失败），按直接作答处理"
     )
 
+def core_reflect_actions(
+    *, kg_actions: bool, chunk_search: bool, enumeration: bool,
+    read_document: bool, outline: bool, consult_memory: bool,
+    search_elements: bool, ppr_retrieve: bool,
+) -> Tuple[str, ...]:
+    """本轮 reflect 提供的**核心**动作 id(插件动作另由 ``project_reflect_actions``
+    给出)。纯函数、零 I/O。
+
+    ``reflect()`` 的 ``allowed_actions`` 白名单就是它加插件动作;经验库注入块与
+    consult_memory 的候选行也按它过滤(``_ReasoningRunState.offered_reflect_actions``),
+    所以「白名单里有没有这个动作」与「会不会向模型推荐这个动作」是同一个答案。
+    每个参数都是 reflect 用来渲染 prompt/schema 的同一把闸:
+
+    * ``kg_actions`` = 本 run 范围内有图;无图时四个图动作与 ``enumerate_kg_objects``
+      一起消失(与 prompt 说明、schema 三处同步);
+    * ``search_elements`` / ``ppr_retrieve`` = 两把逐动作减法闸(今天对等 run 两把
+      都关,见 ``element_search_offered`` / ``ppr_retrieve_offered``);
+    * 其余五把各自对应一个可选动作。
+
+    ``exact_lookup`` 例外地**不随**部署开关变(沿用 ppr_retrieve 立下的先例):
+    ``exact_lookup_enabled=False`` 时它在执行处零 I/O skip,代价只是模型偶尔选到
+    它浪费一轮反思,换来动作契约不随部署配置漂移。
+    """
+    actions = (
+        ("answer", "add_subquery", "search_elements", "exact_lookup")
+    ) + (
+        ("expand_graph", "ppr_retrieve", "expand_community",
+         "follow_chain") if kg_actions else ()
+    ) + (
+        ("search_chunks",) if chunk_search else ()
+    ) + (
+        (ENUMERATE_ELEMENTS_ACTION,) if enumeration else ()
+    ) + (
+        (ENUMERATE_KG_OBJECTS_ACTION,) if enumeration and kg_actions else ()
+    ) + (
+        (READ_DOCUMENT_ACTION,) if read_document else ()
+    ) + ((OUTLINE_ACTION,) if outline else ()
+    ) + ((CONSULT_MEMORY_ACTION,) if consult_memory else ())
+    withheld = (
+        (() if search_elements else ("search_elements",))
+        + (() if ppr_retrieve else ("ppr_retrieve",))
+    )
+    return tuple(name for name in actions if name not in withheld)
+
+
+def experience_action_offered(word: object, offered: "frozenset[str]") -> bool:
+    """一条经验(存储词表的 ``action``)推荐的动作,本 run 是否提供。
+
+    经验行按 ``action_id_for`` 渲染成模型可选的动作 id;``enumerate`` 那条是唯一
+    的通配(``enumerate_*``),两个具体枚举动作里任一在场即算提供。没提供的动作
+    还推荐给模型,它照做就撞上白名单、按非法动作兜底提前收尾,所以这类行不渲染。
+    """
+    action = action_id_for(str(word))
+    if action == "enumerate_*":
+        return (ENUMERATE_ELEMENTS_ACTION in offered
+                or ENUMERATE_KG_OBJECTS_ACTION in offered)
+    return action in offered
+
+
+def offered_experience_rows(rows, offered: "Optional[frozenset[str]]"):
+    """只留推荐动作本 run 提供的经验行(``offered is None`` = 未知,原样返回)。
+
+    在**选择之前**过滤:被滤掉的行不占 top-k 名额,也就不会出现在注入块或
+    consult 块里,送达/采用账目(都按渲染出来的行计)因此天然不含它们。所有
+    动作都提供时返回逐元素相同的列表。
+    """
+    if offered is None:
+        return rows
+    return [row for row in rows
+            if experience_action_offered(row.get("action"), offered)]
+
+
 # 集合枚举动作的两个稳定 id。合起来是一件事(一个 run 级预算池、一份续跑账目、
 # 一个 trace 步类型),分开只在于取哪一类白名单与调哪个执行器方法。
 #
@@ -2521,16 +2593,22 @@ def _zero_hit_nudge_for(
 
 
 def _consultable_rows(
-    store, notebook_id, situation: Mapping[str, object], *,
+    store, notebook_id, situation: Mapping[str, object],
+    offered: "Optional[frozenset]" = None, *,
     exclude_ids, zero_hit_actions, top_k: int,
 ) -> List[Mapping[str, object]]:
     """读两层快照 + 选出这一轮 consult_memory 该还回去的新行。
 
     与 ``_zero_hit_nudge_for`` 同款外壳、同一条理由:合并列表与分界下标一起
     交给 ``select_consultable``,本库分区的条目在同分同支持度时赢。
+
+    ``offered`` = 本 run reflect 提供的核心动作:推荐别的动作的行在选择前滤掉,
+    与注入块同一把过滤(``offered_experience_rows``)。
     """
     primary, fallback = _cached_experience_layers(
         store, _experience_partition_for_run(notebook_id))
+    primary = offered_experience_rows(primary, offered)
+    fallback = offered_experience_rows(fallback, offered)
     return select_consultable(
         [*primary, *fallback], situation, exclude_ids=exclude_ids,
         zero_hit_actions=zero_hit_actions, primary_count=len(primary),
@@ -3361,6 +3439,10 @@ class _ReasoningRunState:
     profile_raw_blocks: List = field(default_factory=list)
     experience_block: str = ""
     experience_entries: List = field(default_factory=list)
+    # 本 run reflect 提供的核心动作(`core_reflect_actions`,闸值与 `reflect()`
+    # 每轮现算的同一组,run 内恒定)。注入块与 consult_memory 的经验行按它过滤:
+    # 不推荐模型调不动的动作。`None` = 首轮还没算(不过滤)。
+    offered_reflect_actions: "Optional[frozenset]" = None
     # 本 run 里 reflect **主动选中**的动作(经 ADOPTION_ACTIONS 折回存储词表)。
     # 只在真的注入过条目时才积累——没注入就没有「采用」可言。reflect 循环写、
     # 收尾的采用回写读。
@@ -4622,37 +4704,17 @@ class ReasoningRetriever:
             # 三把 run 级闸同类。无图时五个图动作在这里、在 schema、在 prompt 说
             # 明三处一起消失;模型硬吐一个 `expand_graph` 就按既有的未知动作合同
             # 处理(fail_closed 抛错,否则退成 answer)。
-            allowed_actions = (
-                ("answer", "add_subquery", "search_elements", "exact_lookup")
-            ) + (
-                ("expand_graph", "ppr_retrieve", "expand_community",
-                 "follow_chain") if kg_actions else ()
-            ) + (
-                ("search_chunks",) if chunk_search else ()
-            ) + (
-                (ENUMERATE_ELEMENTS_ACTION,) if enumeration else ()
-            ) + (
-                (ENUMERATE_KG_OBJECTS_ACTION,)
-                if enumeration and kg_actions else ()
-            ) + (
-                (READ_DOCUMENT_ACTION,) if read_document else ()
-            ) + ((OUTLINE_ACTION,) if outline else ()
-            ) + ((CONSULT_MEMORY_ACTION,) if consult_memory else ()
+            allowed_actions = core_reflect_actions(
+                kg_actions=kg_actions, chunk_search=chunk_search,
+                enumeration=enumeration, read_document=read_document,
+                outline=outline, consult_memory=consult_memory,
+                search_elements=element_search, ppr_retrieve=ppr_action,
             # 白名单条目与 prompt 行、schema 分支同源:三处都由
             # `project_reflect_actions` 这一个纯函数出,所以插件动作不可能出现
             # 「告诉了模型却调不动」或反过来的那种漂移。空元组 ⇒ 这里一个字节
             # 都不加,模型硬吐一个插件动作名就按既有的未知动作合同处理
             # (fail_closed 抛错,否则 `invalid_action:<name>` 兜底)。
             ) + project_reflect_actions(plugin_actions).action_names
-            # 逐动作减法闸关着的那个动作与 prompt 行、schema 枚举一起消失;模型
-            # 硬吐一个就走下面既有的未知动作合同,轨迹记 `invalid_action:<name>`。
-            withheld = (
-                (() if element_search else ("search_elements",))
-                + (() if ppr_action else ("ppr_retrieve",))
-            )
-            if withheld:
-                allowed_actions = tuple(
-                    name for name in allowed_actions if name not in withheld)
             action_rejected = action not in allowed_actions
             rejected_action = ""
             if action_rejected:
@@ -5480,6 +5542,7 @@ class ReasoningRetriever:
         limits = state.limits
         enumeration_active = state.enumeration_active
         collection_map_text = state.collection_map_text
+        state.offered_reflect_actions = self._offered_reflect_actions(state)
         # Agent 对这个库的已有理解(共享底座 + 本次提问者的覆盖层)。每 run 只
         # 读一次,同一个字符串既进规划上下文、又进每一轮 reflect 的候选摘要
         # 尾部。
@@ -5561,8 +5624,14 @@ class ReasoningRetriever:
                 primary, fallback = _cached_experience_layers(
                     self.retrieval_experiences,
                     _experience_partition_for_run(notebook_id))
+                # 推荐了本 run 不提供的动作的行先滤掉(`offered_experience_rows`),
+                # 不占名额;动作全在场时两层原样进选择,块逐字节不变。
                 selection = select_experiences_layered(
-                    primary, fallback, situation)
+                    offered_experience_rows(
+                        primary, state.offered_reflect_actions),
+                    offered_experience_rows(
+                        fallback, state.offered_reflect_actions),
+                    situation)
                 experience_entries = list(selection.entries)
                 experience_block = render_experience_block(experience_entries)
                 if experience_block:
@@ -5792,6 +5861,21 @@ class ReasoningRetriever:
         record(TraceStep(step_type="retrieve",
                          summary=f"初检索得到 {len(collected)} 个候选节点",
                          detail=_initial_detail))
+
+    def _offered_reflect_actions(self, state: "_ReasoningRunState") -> frozenset:
+        """本 run reflect 提供的核心动作。闸值取 `reflect()` 现算的同一组判据,
+        run 级三把(`kg_in_scope`/`outline_active`/`consult_memory_flag`)取
+        `_reflect_round_kwargs` 传给它的同一份 state 值;全部零 I/O。"""
+        return frozenset(core_reflect_actions(
+            kg_actions=state.kg_in_scope,
+            chunk_search=self.chunk_search_active(),
+            enumeration=self.enumeration_active(),
+            read_document=self.document_read_active(state.enum_limits),
+            outline=state.outline_active,
+            consult_memory=state.consult_memory_flag,
+            search_elements=element_search_offered(),
+            ppr_retrieve=ppr_retrieve_offered(),
+        ))
 
     def _ppr_seed_offered(self) -> bool:
         """首轮 PPR 播种跑不跑。预取(`_run_first_round`)与播种本身共读这一个判据,
@@ -8156,7 +8240,7 @@ class ReasoningRetriever:
                 } if state.experience_block else set()
                 new_consult_rows = _consultable_rows(
                     self.retrieval_experiences, state.notebook_id,
-                    consult_situation,
+                    consult_situation, state.offered_reflect_actions,
                     exclude_ids=(
                         state.consult_delivered_ids | delivered_passive_ids
                     ),
