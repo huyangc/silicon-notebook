@@ -7698,8 +7698,8 @@ class ReasoningRetriever:
         state.stale = 1 if state.no_progress else 0
 
     def _resolve_enumeration_source(
-        self, state: "_ReasoningRunState", kind: str, source_title: str,
-        source_scoped: bool,
+        self, numbering: "_RosterNumbering", notebook_id: str, kind: str,
+        source_title: str, source_scoped: bool,
     ) -> "Tuple[str, int | None, bool, str]":
         """`enumerate_elements` 的来源名 → `(source_id, matches, truncated, error)`。
 
@@ -7710,8 +7710,7 @@ class ReasoningRetriever:
         不交回按名解析——否则会静默列出那篇真实标题的文档,而 `read_document` 对同一
         个串报的是歧义。没命中占位串才做原来的确定性按名解析。
         """
-        hit, ambiguous = state.roster_numbering.sync(state.enum_chains).lookup(
-            source_title)
+        hit, ambiguous = numbering.lookup(source_title)
         if ambiguous:
             return "", 2, False, ""
         if hit:
@@ -7719,7 +7718,7 @@ class ReasoningRetriever:
         try:
             source_id, matches, truncated = (
                 self.collection_enumeration.resolve_source_title(
-                    state.notebook_id, kind, source_title,
+                    notebook_id, kind, source_title,
                     cancel_event=self.cancel_event, ceiling_binds=source_scoped,
                 )
             )
@@ -7795,7 +7794,8 @@ class ReasoningRetriever:
         if kind and is_elements and not source_id and source_title:
             (source_id, source_matches, source_truncated,
              resolve_error) = self._resolve_enumeration_source(
-                state, kind, source_title, source_scoped)
+                state.roster_numbering.sync(enum_chains), notebook_id, kind,
+                source_title, source_scoped)
         # 续跑键含**范围**:换了范围就不是同一份目录了(见 `_EnumChain`)。
         key = (collection, kind, source_id, local_only)
         chain_state = enum_chains.get(key)

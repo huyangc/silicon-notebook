@@ -913,7 +913,7 @@ _SEAT_FAILSOFT_SITES = (
     ("app/services/reasoning_retrieval.py",
      "ReasoningRetriever._action_expand_community", "mounted_base_ids"),
     ("app/services/reasoning_retrieval.py",
-     "ReasoningRetriever._run_enumeration", "resolve_source_title"),
+     "ReasoningRetriever._resolve_enumeration_source", "resolve_source_title"),
     ("app/services/reasoning_retrieval.py",
      "ReasoningRetriever._run_enumeration", "enumerate_sources"),
     ("app/services/reasoning_retrieval.py",
