@@ -3717,8 +3717,8 @@ def test_reflect_prompt_inserts_exactly_one_action_paragraph_when_on():
 
 def test_reflect_kill_switch_puts_the_whole_action_back_to_baseline(rrepo):
     """验收 10:`REASONING_CHUNK_SEARCH_ENABLED=false` ⇒ 模型看到的 prompt 与
-    schema 与接入前逐字节相同,白名单里也没有它(硬吐一个 → fail-open 成
-    answer,`chunks_query` 连读都不读)。"""
+    schema 与接入前逐字节相同,白名单里也没有它(硬吐一个 → 标成本 run 不提供,
+    `chunks_query` 连读都不读)。"""
     from app.services.reasoning_retrieval import ReasoningRetriever
 
     class _Capture:
@@ -3744,9 +3744,11 @@ def test_reflect_kill_switch_puts_the_whole_action_back_to_baseline(rrepo):
     # 关闭态:模型看到的两份文本里连这个词都不存在。
     assert "search_chunks" not in off_prompt
     assert "search_chunks" not in off_schema
-    # 白名单里也没有它 → 硬吐一个就是畸形输出,fail-open 成 answer;
-    # 共用的 `query` 也不会落进 `chunks_query`。
-    assert off_decision.next_action == "answer"
+    # 白名单里也没有它 → 硬吐一个是「本 run 不提供的已知核心动作」:决定标成
+    # withheld(执行处记 skip 继续),不进执行体;共用的 `query` 也不会落进
+    # `chunks_query`。
+    assert off_decision.withheld is True
+    assert off_decision.next_action == "search_chunks"
     assert off_decision.chunks_query == ""
 
     rrepo.settings.reasoning_chunk_search_enabled = True
@@ -5259,8 +5261,11 @@ def test_no_kg_run_shrinks_the_action_space_in_prompt_schema_and_whitelist(rrepo
             assert action not in prompt and action not in schema, action
         assert "search_chunks" in prompt and "search_chunks" in schema
         assert "enumerate_elements" in prompt and "enumerate_elements" in schema
-        # 白名单:模型硬吐一个图动作 ⇒ 按既有未知动作合同退成 answer。
-        assert decision.next_action == "answer", graph_action
+        # 白名单:模型硬吐一个图动作 ⇒ 它是已知核心动作、只是本 run 不提供,
+        # 决定标成 withheld(执行处记 skip 继续),不兜底成 answer。
+        assert decision.withheld is True, graph_action
+        assert decision.fallback is False, graph_action
+        assert decision.next_action == graph_action
 
     nb_kg = _seed_two_nodes(rrepo)
     _, (kg_prompt, kg_schema) = _reflect_with_scope_gate(

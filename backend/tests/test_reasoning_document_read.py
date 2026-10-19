@@ -632,7 +632,7 @@ def test_skip_when_the_sampling_budget_is_exhausted(repo):  # noqa: F811
 
 
 def test_skip_when_the_channel_is_switched_off_and_the_model_forces_it(repo):  # noqa: F811
-    """② 闸关时硬吐这个动作:三处投影逐字节回到接入前,动作走 `invalid_action` 兜底。
+    """② 闸关时硬吐这个动作:三处投影逐字节回到接入前,动作记「本次不提供」skip。
 
     关闭态下模型压根看不到这个动作,所以它只可能来自畸形响应或测试替身;那条路径
     必须零 I/O,而且 prompt / schema / allowed_actions 三处都不能留下痕迹。
@@ -653,14 +653,18 @@ def test_skip_when_the_channel_is_switched_off_and_the_model_forces_it(repo):  #
     assert all("read_document" not in hint for hint in llm.schema_hints)
     # 校验层只报告不拒收(harness 原则,2026-09-14):这个动作名不在 schema 的
     # next_action 枚举里只记一条 `invalid_enum` 注记、回复照常交付;真正把它挡下的
-    # 是白名单——`invalid_action:read_document` 兜底成 answer。白名单那一层的
-    # 合同由下面那条直调 reflect() 的纵深防御用例单独钉。
-    assert [s.detail["fallback_reason"] for s in _steps(result, "reflect")
-            if "fallback_reason" in s.detail] == ["invalid_action:read_document"]
+    # 是白名单——它是已知核心动作、只是本 run 不提供,所以零 I/O 记一条
+    # `action_not_offered` skip,循环继续(不再兜底成 answer 提前收尾)。白名单那一层
+    # 的合同由下面那条直调 reflect() 的纵深防御用例单独钉。
+    assert [s.detail for s in _steps(result, "skip")
+            if s.detail.get("reason") == "action_not_offered"] == [
+        {"reason": "action_not_offered", "action": "read_document"}]
+    assert not [s for s in _steps(result, "reflect")
+                if "fallback_reason" in s.detail]
 
 
 def test_the_action_whitelist_rejects_it_when_the_gate_is_shut(repo):  # noqa: F811
-    """② 绕过校验层直达 reflect():白名单退成兜底,原因带上被拒的动作名。"""
+    """② 绕过校验层直达 reflect():白名单拦下,决定标成「本次不提供」(不兜底)。"""
     from tests.test_reasoning_enumeration_tools import _SeqLLM
 
     repo.settings.reasoning_document_read_enabled = False
@@ -671,9 +675,9 @@ def test_the_action_whitelist_rejects_it_when_the_gate_is_shut(repo):  # noqa: F
 
     decision = retriever.reflect("q", "candidates")
 
-    assert decision.fallback is True
-    assert decision.fallback_reason == "invalid_action:read_document"
-    assert decision.next_action == "answer"
+    assert decision.fallback is False and decision.withheld is True
+    assert decision.next_action == "read_document"
+    assert decision.sufficient is False
 
 
 def test_the_field_parser_does_not_even_read_the_payload_when_shut(repo):  # noqa: F811

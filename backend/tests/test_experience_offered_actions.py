@@ -145,7 +145,8 @@ def test_consult_rows_drop_actions_the_run_does_not_offer(repo):
 
     def _actions(offered):
         rows = _consultable_rows(
-            repo.retrieval_experiences, notebook.id, _situation(), offered,
+            repo.retrieval_experiences, notebook.id, _situation(),
+            offered=offered,
             exclude_ids=set(), zero_hit_actions=set(), top_k=3)
         return {row["action"] for row in rows}
 

@@ -75,7 +75,7 @@ def _reflect(rrepo, action, *, kg_actions, peer_ids=None, fail_closed=False):
 @pytest.mark.parametrize("has_kg", [True, False])
 def test_peer_reflect_offers_neither_action_in_prompt_schema_or_whitelist(rrepo, has_kg):
     """对等 run:两个动作在模型实际收到的 prompt 与 schema 里都不出现;模型硬吐
-    其中一个就走既有未知动作合同(兜底 answer,轨迹原因 `invalid_action:<name>`)。
+    其中一个时,决定标成「本次不提供」(`withheld`,执行处记 skip 继续),不兜底。
 
     同一个用例里跑单库对照臂:同一份响应在单库 run 里是合法动作,三处都在。
     """
@@ -87,9 +87,8 @@ def test_peer_reflect_offers_neither_action_in_prompt_schema_or_whitelist(rrepo,
         for name in _GATED_ACTIONS:
             assert name not in prompt, name
             assert name not in _actions_in(schema), name
-        assert decision.fallback is True
-        assert decision.fallback_reason == f"invalid_action:{action}"
-        assert decision.next_action == "answer"
+        assert decision.fallback is False and decision.withheld is True
+        assert decision.next_action == action and decision.sufficient is False
         # 闸只摘这两条:其余动作(有图时含三个图动作)原样留着。
         kept = {"answer", "add_subquery", "exact_lookup", "search_chunks"}
         if has_kg:
@@ -104,10 +103,13 @@ def test_peer_reflect_offers_neither_action_in_prompt_schema_or_whitelist(rrepo,
             assert f"- {action}:" in prompt
             assert action in _actions_in(schema)
             assert decision.fallback is False and decision.next_action == action
+            assert decision.withheld is False
 
 
 def test_peer_reflect_rejects_both_actions_when_fail_closed(rrepo):
-    """严格调用方拿到既有的 `invalid action` 硬失败,不是悄悄退成 answer。"""
+    """严格调用方的既有合同不变:任何不在白名单里的动作都抛 `invalid action`
+    (`test_no_kg_run_rejects_every_graph_action_when_fail_closed` 对无图闸钉的
+    是同一条),不走「本次不提供」那条宽松路径。"""
     nb = _seed_two_nodes(rrepo)
     for action in _GATED_ACTIONS:
         with pytest.raises(ValueError, match="invalid action"):
@@ -133,7 +135,7 @@ def test_each_gate_closes_only_its_own_action(rrepo, monkeypatch, closed):
     decision, prompt, schema = _reflect(rrepo, closed, kg_actions=True)
     assert closed not in _actions_in(schema)
     assert f"- {closed}:" not in prompt
-    assert decision.fallback_reason == f"invalid_action:{closed}"
+    assert decision.withheld is True and decision.next_action == closed
 
     decision, prompt, schema = _reflect(rrepo, still, kg_actions=True)
     assert still in _actions_in(schema)
@@ -320,3 +322,133 @@ def test_peer_run_skips_the_ppr_seed_and_its_prefetch(rrepo):
     assert calls == ["RTL到GDSII流程"] and len(seeds) == 1
     calls, seeds = _run(peer=True)
     assert calls == [] and seeds == []
+
+
+def _run_with(rrepo, reflects, *, peer, notebook=None):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = notebook or _seed_two_nodes(rrepo)
+    llm = _SeqLLM(plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+                  reflects=reflects)
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    if peer:
+        with _peer_scope((nb.id,)):
+            return rr.run(nb.id, "RTL到GDSII流程", "")
+    return rr.run(nb.id, "RTL到GDSII流程", "")
+
+
+def _not_offered_skips(result):
+    return [t.detail["action"] for t in result.trace
+            if t.step_type == "skip"
+            and t.detail.get("reason") == "action_not_offered"]
+
+
+def test_a_peer_run_skips_an_unoffered_action_and_keeps_going(rrepo):
+    """对等 run 硬吐两个不提供的动作:各记一条 skip,循环继续,直到模型自己作答——
+    不兜底成 answer 提前收尾,反思步上也没有 `fallback_reason`。"""
+    rrepo.settings.reasoning_stale_limit = 10
+    result = _run_with(rrepo, [
+        {"next_action": "search_elements", "query": "布局"},
+        {"next_action": "ppr_retrieve", "query": "布局"},
+        {"next_action": "answer", "sufficient": True, "reason": "够了"},
+    ], peer=True)
+    assert _not_offered_skips(result) == ["search_elements", "ppr_retrieve"]
+    reflects = [t for t in result.trace if t.step_type == "reflect"]
+    assert [t.detail["next_action"] for t in reflects] == [
+        "search_elements", "ppr_retrieve", "answer"]
+    assert not any("fallback_reason" in t.detail for t in reflects)
+    assert result.trace[-1].step_type == "answer"
+
+
+def test_a_graphless_run_skips_a_graph_action_and_keeps_going(rrepo):
+    rrepo.settings.reasoning_stale_limit = 10
+    rrepo.settings.graph_ppr_enabled = False
+    nb = _seed_notebook_without_kg(rrepo)
+    result = _run_with(rrepo, [
+        {"next_action": "expand_graph", "expand": {"object_id": "x"}},
+        {"next_action": "answer", "sufficient": True},
+    ], peer=False, notebook=nb)
+    assert _not_offered_skips(result) == ["expand_graph"]
+    reflects = [t for t in result.trace if t.step_type == "reflect"]
+    assert len(reflects) == 2
+    assert not any("fallback_reason" in t.detail for t in reflects)
+
+
+def test_an_unknown_action_name_still_takes_the_fallback(rrepo):
+    """集合外的名字才是真正的未知动作:照旧兜底收尾,原因带上名字。"""
+    result = _run_with(rrepo, [{"next_action": "teleport", "query": "x"}],
+                       peer=True)
+    assert _not_offered_skips(result) == []
+    reflects = [t for t in result.trace if t.step_type == "reflect"]
+    assert [t.detail.get("fallback_reason") for t in reflects] == [
+        "invalid_action:teleport"]
+
+
+def test_a_peer_runs_truncation_ledger_names_no_unoffered_action(rrepo, monkeypatch):
+    """对等 run 里 expand_graph 照常提供、截断照常可能发生:回喂账目的「下一步」
+    只点名 add_subquery,不点名 search_elements;单库对照臂逐字照旧。"""
+    from app.services.reasoning_retrieval import (
+        NeighborExpansion, ReasoningRetriever,
+    )
+    from tests.test_reasoning_retrieval import _mk_rk
+
+    rrepo.settings.reasoning_stale_limit = 10
+    nb = _seed_two_nodes(rrepo)
+    monkeypatch.setattr(
+        ReasoningRetriever, "search",
+        lambda self, n, q, types=None, prefer="balanced": [_mk_rk("A", "nodeA")])
+    monkeypatch.setattr(
+        ReasoningRetriever, "neighbors",
+        lambda self, n, oid, edge_type=None, direction="both": NeighborExpansion(
+            [_mk_rk("B", "nodeB")], True))
+
+    def _prompts(peer):
+        class _Rec(_SeqLLM):
+            def __init__(self):
+                super().__init__(
+                    plan={"sub_queries": [{"query": "q"}]},
+                    reflects=[{"next_action": "expand_graph",
+                               "expand": {"object_id": "A"}},
+                              {"next_action": "answer", "sufficient": True}])
+                self.prompts = []
+
+            def chat_json(self, messages, schema_hint, **kwargs):
+                if "sub_queries" not in schema_hint:
+                    self.prompts.append(messages[-1]["content"])
+                return super().chat_json(messages, schema_hint, **kwargs)
+
+        llm = _Rec()
+        bind_chat_client(rrepo, "reasoning_agent", llm)
+        rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+        if peer:
+            with _peer_scope((nb.id,)):
+                rr.run(nb.id, "q", "")
+        else:
+            rr.run(nb.id, "q", "")
+        return llm.prompts
+
+    peer_prompts = _prompts(True)
+    assert "只展开了其中一部分邻居" in peer_prompts[1]
+    assert "add_subquery 定向检索" in peer_prompts[1]
+    assert all("search_elements" not in p for p in peer_prompts)
+    single = _prompts(False)
+    assert "add_subquery 或search_elements 定向检索" in single[1]
+
+
+def test_core_action_ids_are_every_gate_open():
+    """纯函数:闸全开的集合就是 CORE_REFLECT_ACTION_IDS;经验词表的每个词在全集下
+    都被判为「提供」(词表与动作 id 的映射没有漏项)。"""
+    from app.services.reasoning_retrieval import (
+        CORE_REFLECT_ACTION_IDS, core_reflect_actions, experience_action_offered,
+    )
+    from app.services.retrieval_experience_projection import RETRIEVAL_ACTIONS
+
+    every = core_reflect_actions(
+        kg_actions=True, chunk_search=True, enumeration=True, read_document=True,
+        outline=True, consult_memory=True, search_elements=True,
+        ppr_retrieve=True)
+    assert len(every) == len(set(every))
+    assert frozenset(every) == CORE_REFLECT_ACTION_IDS
+    for word in RETRIEVAL_ACTIONS:
+        assert experience_action_offered(word, CORE_REFLECT_ACTION_IDS), word
