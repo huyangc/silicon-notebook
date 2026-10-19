@@ -484,8 +484,10 @@ are untouched.
   progress) keeps refusing the whole turn with 404: the turn may restate that library's material, and
   another library's deletion must not expose it. A turn with a missing library but no stamp (a library
   deleted before this mechanism existed, or a turn imported from elsewhere) also keeps the 404. A
-  non-owner still gets 404, and so does a caller bounded by a notebook allowlist (an Agent token): it
-  cannot show it was ever allowed the deleted library.
+  non-owner still gets 404. **Reading a retained turn over MCP / an Agent token is always 404, as
+  before**: a token always carries a notebook allowlist and the deleted library left it with the
+  deletion, so such a read cannot show it was ever allowed that library; retained content is readable in
+  the browser only.
 - **Degraded citations**: the job response gains two read-time fields that are never part of the stored
   payload: `retained_until` (when the turn is cleaned up; empty for an unstamped turn) and
   `deleted_notebook_ids` (the libraries the turn searched or cites that no longer exist). The interface
@@ -508,8 +510,10 @@ are untouched.
   list (a conversation every turn of which expired disappears whole), public links, the administrator's
   usage overview / activity feed / question analysis and the post-answer learning chains' samples; startup
   recovery or the next notebook deletion deletes it physically, together with any conversation it leaves
-  empty. An automatic conversation title that still names the purged first turn moves to the earliest
-  remaining question; a title the user set is kept.
+  empty. An automatic conversation title that still names an expired first turn reads as the earliest
+  remaining question from the moment that turn expires -- on the conversation list, the conversation and
+  the public page alike (a read-time projection) -- and the purge later writes it down; a title the user
+  set is kept.
 
 #### Global conversation sharing
 

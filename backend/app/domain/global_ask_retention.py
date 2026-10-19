@@ -91,15 +91,80 @@ def retained_gone_participant_sql(*, dialect: str, job: str, participant: str) -
     )
 
 
+def question_sql(*, dialect: str, alias: str) -> str:
+    """The stored question of the ``global_ask_jobs`` row ``alias``."""
+    if dialect == "postgres":
+        return f"({alias}.payload_json::jsonb->>'question')"
+    if dialect == "sqlite":
+        return f"json_extract({alias}.payload_json,'$.question')"
+    raise ValueError(dialect)
+
+
+def expired_turn_sql(*, dialect: str, alias: str) -> str:
+    """``WHERE`` fragment: the row ``alias`` is past its stamp (database clock)."""
+    return f"({alias}.retained_until IS NOT NULL AND NOT {live_turn_sql(dialect=dialect, alias=alias)})"
+
+
+def auto_title_on_expired_first_turn_sql(
+    *, dialect: str, conversation: str, title_chars: int, expired,
+) -> tuple[str, str]:
+    """``(condition, replacement)`` for a conversation whose AUTOMATIC title
+    names a first turn that has expired.
+
+    ``create`` titles a conversation with its first question cut to
+    ``title_chars``; once that first turn has expired the title still spells a
+    question nobody may read any more. ``condition`` holds exactly then -- the
+    conversation's first turn (canonical ``(created_at, id)`` order) is
+    ``expired(alias)`` and the title equals its question's prefix, so a title
+    the user typed is never touched -- and ``replacement`` is the earliest
+    remaining question's prefix (NULL when none remains). ``expired`` builds
+    the per-row predicate: the database-clock gate for a read, the purge's own
+    instant when the title is rewritten. Each fragment calls it once.
+    """
+    q = lambda alias: question_sql(dialect=dialect, alias=alias)  # noqa: E731
+    condition = (
+        f"EXISTS(SELECT 1 FROM global_ask_jobs fx WHERE fx.conversation_id={conversation}.id "
+        f"AND {expired('fx')} AND substr({q('fx')},1,{int(title_chars)})={conversation}.title "
+        "AND NOT EXISTS(SELECT 1 FROM global_ask_jobs ex WHERE ex.conversation_id=fx.conversation_id "
+        "AND (ex.created_at < fx.created_at OR (ex.created_at = fx.created_at AND ex.id < fx.id))))"
+    )
+    replacement = (
+        f"(SELECT substr({q('rj')},1,{int(title_chars)}) FROM global_ask_jobs rj "
+        f"WHERE rj.conversation_id={conversation}.id AND NOT {expired('rj')} "
+        "ORDER BY rj.created_at, rj.id LIMIT 1)"
+    )
+    return condition, replacement
+
+
+def shown_title_sql(*, dialect: str, conversation: str, title_chars: int) -> str:
+    """The title a reader is shown: the stored one, except an automatic title
+    whose first turn has expired, which reads as the earliest live question --
+    the same rule the purge later writes down. The decisive probe is the
+    expired-turn one, answered from the partial ``idx_global_ask_jobs_retained``
+    (no entry at all for a conversation without a stamp)."""
+    condition, replacement = auto_title_on_expired_first_turn_sql(
+        dialect=dialect, conversation=conversation, title_chars=title_chars,
+        expired=lambda alias: expired_turn_sql(dialect=dialect, alias=alias),
+    )
+    return (
+        f"(CASE WHEN {condition} THEN COALESCE({replacement}, {conversation}.title) "
+        f"ELSE {conversation}.title END)"
+    )
+
+
 def participant_sql(*, dialect: str, marker: str) -> str:
     """``WHERE`` fragment: this job ran over the library bound at ``marker``.
 
     PostgreSQL spells it as the jsonb containment ``idx_global_ask_jobs_
     participants`` (0062) indexes, byte for byte the one the attribution rule
     uses (``global_ask_attribution.attribution_sql``), so the stamp at deletion
-    reads only the matching rows. SQLite has no such index; ``instr`` on the
-    raw payload is a cheap byte prefilter that lets the JSON walk run only on
-    the rows that mention the id at all. One bind of the notebook id on
+    reads only the matching rows. SQLite has no such index: there the stamp is
+    a FULL TABLE SCAN inside the deletion's final write transaction, with
+    ``instr`` on the raw payload as a cheap byte prefilter so the
+    ``json_each`` walk runs only on the rows that mention the id at all. A
+    known trade-off -- SQLite is a mirror deployment of bounded size
+    (``docs/operations.md``, "Global conversations after a participant
+    notebook is deleted"). One bind of the notebook id on
     PostgreSQL, two on SQLite (see ``participant_bind_count``).
     """
     if dialect == "postgres":

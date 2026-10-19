@@ -93,3 +93,26 @@ def test_retention_fragments_are_dialect_exact():
         dialect="postgres")
     with pytest.raises(ValueError):
         live_turn_sql(dialect="mysql")
+
+
+def test_an_idempotent_replay_of_an_expired_turn_is_refused(repo):
+    """``request_job`` is the one read outside the SQL retention gate (it must
+    keep resolving an old request id), so the replay judges the stamp itself;
+    a stamp still in the future replays as usual."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.models.global_ask import GlobalAskJob, GlobalNotebookScope
+    from app.services.global_ask import GlobalAskError
+
+    service = repo._runtime.global_ask_service()
+    job = GlobalAskJob(
+        job_id="job-r", conversation_id="conv-r", status="done", question="q",
+        created_at="2026-10-01T00:00:00+00:00",
+        notebook_scope=GlobalNotebookScope(mode="all"), resolved_notebook_ids=[],
+    )
+    job.retained_until = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    with pytest.raises(GlobalAskError) as refused:
+        service._check_replayed(job, "user-r", None, None)
+    assert refused.value.status_code == 404
+    job.retained_until = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    service._check_replayed(job, "user-r", None, None)

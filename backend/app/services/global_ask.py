@@ -686,11 +686,6 @@ class GlobalAskService:
         from them.
         """
         retained = [job for job in jobs if job.retained_until]
-        if any(_retention_passed(job.retained_until) for job in retained):
-            # Every content read the store serves is gated already; this
-            # catches the one that is not -- the idempotent replay's
-            # ``request_job``, which must keep resolving an old request id.
-            raise GlobalAskError(404, "问答任务不存在，请刷新对话。")
         gone = set()
         if retained and allowed_notebook_ids is None:
             gone = self.store.missing_notebook_ids(
@@ -706,6 +701,21 @@ class GlobalAskService:
                 notebook_id for notebook_id in global_job_notebook_ids(job) if notebook_id in gone
             ]
         return gone
+
+    def _check_replayed(self, job, user_id, allowed_notebook_ids, authority_check):
+        """``_check_turns`` for a job found by its idempotency id.
+
+        ``request_job`` is the one read that is NOT behind the store's
+        retention read gate -- it must keep resolving an old request id, or a
+        retry would collide with the stored row's unique key -- so the stamp is
+        judged here instead. Every other read is filtered in SQL against the
+        database clock; this one compares in the application, so it is kept
+        off those paths rather than becoming a second, differently-clocked
+        cutoff for them.
+        """
+        if job.retained_until and _retention_passed(job.retained_until):
+            raise GlobalAskError(404, "问答任务不存在，请刷新对话。")
+        self._check_turns([job], user_id, allowed_notebook_ids, authority_check)
 
     def _conversation(self, conversation_id, user_id):
         row = self.store.conversation(conversation_id, user_id)
@@ -1054,7 +1064,7 @@ class GlobalAskService:
             raise GlobalAskError(
                 409, "请求标识已用于其他问题，请重新提交。", REQUEST_KEY_REUSED
             )
-        self._check_turns([job], user_id, allowed_notebook_ids, authority_check)
+        self._check_replayed(job, user_id, allowed_notebook_ids, authority_check)
         return job
 
     def _check_replaceable(self, payload: GlobalAskRequest, user_id) -> None:
@@ -1215,7 +1225,7 @@ class GlobalAskService:
                             409, "请求标识已用于其他问题，请重新提交。",
                             REQUEST_KEY_REUSED,
                         ) from exc
-                    self._check_turns([previous[0]], user_id, allowed, authority_check)
+                    self._check_replayed(previous[0], user_id, allowed, authority_check)
                     return previous[0]
                 if isinstance(exc, ReplacedJobUnavailable):
                     # Checked AFTER the replay above: a concurrent twin of this
@@ -2225,8 +2235,11 @@ class GlobalAskService:
         if updated is None:
             raise GlobalAskError(404, "问答任务不存在，请刷新对话。")
         # The re-read job is what the client renders next: it carries the
-        # same read-time retention facts ``get_job`` attached.
-        self._check_turns([updated], user_id, allowed_notebook_ids)
+        # same read-time retention facts ``get_job`` just attached (the
+        # authority check already ran there; nothing about the libraries
+        # changed in between that a feedback write could have caused).
+        updated.retained_until = job.retained_until
+        updated.deleted_notebook_ids = list(job.deleted_notebook_ids)
         self._emit({
             "kind": "global_ask_feedback", "rating": rating,
             "mode": updated.mode, "libraries": len(updated.resolved_notebook_ids),
