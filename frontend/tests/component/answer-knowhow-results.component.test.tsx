@@ -150,6 +150,77 @@ test("a workbook receipt from a mounted library carries its library and renders 
   expect(screen.getByText(/Excel 分析 · 销售数据/)).toBeInTheDocument();
   expect(receipt.notebook_id).toBe("nb-mounted");
   expect(receipt.tier).toBe("base");
+  // No name known for that library: no badge, and never the bare id.
+  expect(screen.queryByText(/来自「/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/nb-mounted/)).not.toBeInTheDocument();
+});
+
+
+function workbookFrom(notebookId: string, tier = "personal"): SpreadsheetAnalysisResult {
+  return {
+    kind: "spreadsheet",
+    source_id: `src-${notebookId}`,
+    source_title: "报价单",
+    sheet: "Quotes",
+    range: "A1:B3",
+    operation: "top",
+    columns: [{ id: "Price", name: "Price" }],
+    rows: [{ position: 1, cells: { Price: "5" } }],
+    coverage: {
+      total_rows: 1, scanned_rows: 2, returned_rows: 1, complete: true,
+      truncated_reason: null, overflow_semantics: "",
+    },
+    formula_cells: 0,
+    unresolved_formula_cells: 0,
+    notebook_id: notebookId,
+    tier,
+  };
+}
+
+
+function renderWorkbook(
+  receipt: SpreadsheetAnalysisResult,
+  notebookId: string | null,
+  notebookNames: Record<string, string>,
+) {
+  const answer = answerWithRows(1);
+  answer.result_sets = [receipt];
+  answer.result_coverage = undefined;
+  render(
+    <AnswerView
+      answer={answer}
+      feedbackSent=""
+      onFeedback={() => undefined}
+      notebookId={notebookId}
+      notebookNames={notebookNames}
+      buildingScaleIndex={false}
+      memorySaved={false}
+    />,
+  );
+}
+
+
+test("a global answer's workbook card names the library the table came from", () => {
+  // Global Ask has no active notebook, so every workbook is from "another"
+  // library; the title line says which, in the citation card's own wording.
+  renderWorkbook(workbookFrom("nb-b", "base"), null, { "nb-a": "A 库", "nb-b": "B 库" });
+  const heading = screen.getByText(/Excel 分析 · 报价单/).closest("div");
+  expect(heading).toHaveTextContent("来自「B 库」（公共知识库）");
+  expect(heading).not.toHaveTextContent("A 库");
+});
+
+
+test("a mounted library's workbook card names it; the current library's does not", () => {
+  renderWorkbook(workbookFrom("nb-mounted"), "nb-1", { "nb-mounted": "参考库甲", "nb-1": "本库" });
+  expect(screen.getByText(/Excel 分析 · 报价单/).closest("div"))
+    .toHaveTextContent("来自「参考库甲」（个人知识库）");
+});
+
+
+test("a workbook card from the current library carries no library badge", () => {
+  renderWorkbook(workbookFrom("nb-1"), "nb-1", { "nb-1": "本库" });
+  expect(screen.getByText(/Excel 分析 · 报价单/)).toBeInTheDocument();
+  expect(screen.queryByText(/来自「/)).not.toBeInTheDocument();
 });
 
 

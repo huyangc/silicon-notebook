@@ -154,7 +154,9 @@ def _run_lane(ask, question, notebook_id="nb-1", scope=None):
 # Single-library lane: byte for byte
 # ---------------------------------------------------------------------------
 
-# Captured on the pre-federation base (ce7d6d81d) with this exact fixture.
+# Captured with this exact fixture on the parent of the commit that added this
+# test (``test(ask): pin the single-library workbook lane byte for byte``),
+# i.e. before the peer workbook lane existed.
 _SINGLE_PROMPT_SHA = "99fd3f5daa8783179c4cf79590170b80af52171a6fbef3720683f401658198a0"
 _SINGLE_RESULT_SHA = "d00bde19954f65d34e5647c7b095921b38087be96417bd1ebc1ac1651a56af22"
 
@@ -179,6 +181,8 @@ def test_single_library_lane_is_byte_identical(tmp_path):
         ("nb-1", "doc-1"), ("nb-1", "src-own"),
         ("base-1", "src-base"), ("base-1", "doc-2"),
     ]
+    # The single-library lane never lists a manifest directory.
+    assert artifacts.listings == []
     [result] = results
     dumped = json.dumps(result.model_dump(mode="json"), ensure_ascii=False,
                         sort_keys=True)
@@ -199,9 +203,14 @@ _ACTOR = "user-workbook-peer"
 
 
 @contextlib.contextmanager
-def _peer(ceilings: dict):
+def _peer(ceilings: dict, names=None, plan=None):
     """The installation shape ``global_run.global_ask_run`` freezes: nominal
-    active = first id, participant override, per-library ceilings, subjectless."""
+    active = first id, participant override, per-library ceilings, subjectless,
+    the detached turn (carrying the lazy library-name reader when ``names`` is
+    given) and, when given, the federated run plan."""
+    from app.services.federated_run import (
+        DetachedAskTurn, detached_ask_turn, federated_run_plan,
+    )
     from app.services.retrieval_participants import (
         ParticipantOverride, participant_override,
     )
@@ -209,31 +218,39 @@ def _peer(ceilings: dict):
     from app.services.source_scope import current_source_scope, source_scope_context
 
     ids = tuple(ceilings)
-    with retrieval_run(run_kind="ask_reasoning", actor_id=_ACTOR):
-        with source_scope_context(
+    reader = (lambda: dict(names)) if names is not None else None
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(retrieval_run(run_kind="ask_reasoning", actor_id=_ACTOR))
+        stack.enter_context(source_scope_context(
             ids[0], None, None,
             notebook_source_ceilings={
                 nb: set(sources) for nb, sources in ceilings.items()
             },
             subjectless=True,
-        ):
-            with participant_override(ParticipantOverride(
-                notebook_ids=ids, tiers={}, attested_actor_id=_ACTOR,
-            )):
-                yield current_source_scope()
+        ))
+        stack.enter_context(participant_override(ParticipantOverride(
+            notebook_ids=ids, tiers={}, attested_actor_id=_ACTOR,
+        )))
+        stack.enter_context(detached_ask_turn(DetachedAskTurn(
+            conversation_id="conv-workbook", notebook_names=reader,
+        )))
+        if plan is not None:
+            stack.enter_context(federated_run_plan(plan))
+        yield current_source_scope()
 
 
 class _Seat:
     """``RetrievalService.workbook_libraries`` as a double: what the chunk lane
     would hand over, recorded."""
 
-    def __init__(self, libraries) -> None:
+    def __init__(self, libraries, skipped=()) -> None:
         self.libraries = tuple(libraries)
+        self.skipped = tuple(skipped)
         self.calls: list[str] = []
 
     def workbook_libraries(self, notebook_id):
         self.calls.append(notebook_id)
-        return self.libraries
+        return self.libraries, self.skipped
 
 
 def _never(*_args, **_kwargs):
@@ -258,7 +275,9 @@ def _head(question: str, count: int) -> int:
     return int.from_bytes(digest, "big") % count
 
 
-_COMPARE = "汇总比较 A 库和 B 库两张报价表的价格"
+# The ruling's own wording (2026-10-19): 「比较」 is an analysis word, 「报价表」
+# is table context.
+_COMPARE = "比较 A 库和 B 库两张报价表的价格"
 
 
 # ---------------------------------------------------------------------------
@@ -271,29 +290,37 @@ def test_both_libraries_enter_one_catalog_and_either_workbook_is_read(tmp_path):
     executed, and its receipt carries the owning library and that library's
     tier -- including the nominal active, which has no "this library" status
     in a peer run and so keeps its id instead of the blank one."""
+    from app.services.spreadsheet_analysis import spreadsheet_prompt_block
+
     analysis, artifacts = _service(tmp_path)
-    _compile(analysis, tmp_path, "nb-a", "quote-a", title="A 报价",
+    # The SAME title in both libraries: only the library label tells them apart.
+    _compile(analysis, tmp_path, "nb-a", "quote-a", title="报价单",
              header=("Item", "Price"), rows=(("bolt", 3), ("nut", 1)))
-    _compile(analysis, tmp_path, "nb-b", "quote-b", title="B 报价",
+    _compile(analysis, tmp_path, "nb-b", "quote-b", title="报价单",
              header=("Item", "Price"), rows=(("bolt", 5),))
     tiers = {"nb-a": "personal", "nb-b": "base"}
+    names = {"nb-a": "A 库", "nb-b": "B 库"}
     for chosen, owner in (("quote-a", "nb-a"), ("quote-b", "nb-b")):
         planner = _Planner({"source_id": chosen, "sheet": "Sheet",
                             "operation": "top", "sort_by": "Price"})
         seat = _Seat((("nb-a", ("doc-a", "quote-a")), ("nb-b", ("quote-b",))))
         artifacts.loads.clear()
         artifacts.listings.clear()
-        with _peer({"nb-a": {"doc-a", "quote-a"}, "nb-b": {"quote-b"}}) as scope:
+        with _peer({"nb-a": {"doc-a", "quote-a"}, "nb-b": {"quote-b"}},
+                   names=names) as scope:
             results, trace = _run_lane(
                 _peer_ask(analysis, planner, seat, tiers), _COMPARE, "nb-a", scope,
             )
 
         assert seat.calls == ["nb-a"]
         [prompt] = planner.prompts
-        assert {entry["source_id"] for entry in _catalog(prompt)} == {
-            "quote-a", "quote-b",
-        }
-        assert "目录说明" not in prompt
+        # Same title, told apart by the owning library the planner now sees.
+        assert {
+            (entry["source_id"], entry["library"], entry["title"])
+            for entry in _catalog(prompt)
+        } == {("quote-a", "A 库", "报价单"), ("quote-b", "B 库", "报价单")}
+        assert "目录说明：每份工作簿的 library 是它所属的笔记本。" in prompt
+        assert "未列出" not in prompt
         # The non-workbook source is never opened: one listing per library.
         assert sorted(artifacts.loads) == [("nb-a", "quote-a"), ("nb-b", "quote-b")]
         assert sorted(artifacts.listings) == ["nb-a", "nb-b"]
@@ -303,10 +330,18 @@ def test_both_libraries_enter_one_catalog_and_either_workbook_is_read(tmp_path):
         assert (result.rows[0].citation.notebook_id,
                 result.rows[0].citation.tier) == (owner, tiers[owner])
         assert result.warnings == []
+        assert result.notebook_name == names[owner]
         [step] = trace
+        assert step.summary == f"已分析「{names[owner]}」中的 报价单 · Sheet"
         assert step.detail["notebook_id"] == owner
         assert (step.detail["libraries"], step.detail["workbooks"],
-                step.detail["listed"]) == (2, 2, 2)
+                step.detail["listed"], step.detail["skipped"]) == (2, 2, 2, [])
+        # The synthesis model's table block names the library too.
+        block, evidence = spreadsheet_prompt_block(
+            results, preview_rows=20, max_bytes=65_536,
+        )
+        assert f"library={names[owner]}; " in block.splitlines()[0]
+        assert evidence["k6001"]["notebook_id"] == owner
 
 
 def test_eight_libraries_cost_one_plan_and_no_more_reads_than_one_library(tmp_path):
@@ -365,6 +400,20 @@ def test_eight_libraries_cost_one_plan_and_no_more_reads_than_one_library(tmp_pa
     assert len(_catalog(single_planner.prompts[0])) == listed
     assert len(single_artifacts.loads) == 32
 
+    # With names, every entry carries its library and the labels are paid out
+    # of the SAME budget: the catalog still fits, and lists fewer workbooks.
+    labelled = _Planner({"operation": "profile"})
+    names = {nb: f"{nb} 的笔记本" for nb in ids}
+    with _peer({nb: set(sources) for nb, sources in libraries}, names=names) as scope:
+        _run_lane(_peer_ask(analysis, labelled, _Seat(libraries)), _COMPARE,
+                  ids[0], scope)
+    labelled_catalog = _catalog(labelled.prompts[0])
+    assert all(entry["library"] == names[entry["source_id"].rsplit("-wb", 1)[0]]
+               for entry in labelled_catalog)
+    assert len(json.dumps(labelled_catalog, ensure_ascii=False,
+                          separators=(",", ":")).encode("utf-8")) <= budget
+    assert len(labelled_catalog) < listed
+
 
 def test_rotation_head_follows_the_question_never_the_nominal_active(tmp_path):
     """No subject library: the order is libraries by id, rotated to a head
@@ -381,11 +430,18 @@ def test_rotation_head_follows_the_question_never_the_nominal_active(tmp_path):
         orders = []
         for participants in (ids, ("nb-c", "nb-a", "nb-b"), ("nb-b", "nb-c", "nb-a")):
             planner = _Planner({"operation": "profile"})
-            seat = _Seat(tuple((nb, (f"{nb}-quote",)) for nb in participants))
+            # A fourth participant with no workbook at all: it must not take a
+            # seat in the rotation (the modulo is over the three that list).
+            seat = _Seat((
+                *((nb, (f"{nb}-quote",)) for nb in participants),
+                ("nb-0-empty", ("doc-only",)),
+            ))
             ceilings = {nb: {f"{nb}-quote"} for nb in participants}
+            ceilings["nb-0-empty"] = {"doc-only"}
             with _peer(ceilings) as scope:
-                _run_lane(_peer_ask(analysis, planner, seat), question,
-                          participants[0], scope)
+                _results, trace = _run_lane(_peer_ask(analysis, planner, seat),
+                                            question, participants[0], scope)
+            assert trace[0].detail["contributing_libraries"] == 3
             orders.append([
                 entry["source_id"] for entry in _catalog(planner.prompts[0])
             ])
@@ -448,8 +504,10 @@ def test_a_source_id_seen_in_two_libraries_is_listed_once(tmp_path):
     planner = _Planner({"operation": "profile"})
     seat = _Seat((("nb-a", ("shared-id",)), ("nb-b", ("shared-id",))))
     with _peer({"nb-a": {"shared-id"}, "nb-b": {"shared-id"}}) as scope:
-        [result], _trace = _run_lane(_peer_ask(analysis, planner, seat), _COMPARE,
-                                     "nb-a", scope)
+        [result], trace = _run_lane(_peer_ask(analysis, planner, seat), _COMPARE,
+                                    "nb-a", scope)
+    assert (trace[0].detail["workbooks"], trace[0].detail["listed"]) == (1, 1)
+    assert result.warnings == []
     first = sorted(("nb-a", "nb-b"))[_head(_COMPARE, 2)]
     assert [entry["source_id"] for entry in _catalog(planner.prompts[0])] == [
         "shared-id",
@@ -472,12 +530,218 @@ def test_one_library_peer_run_lists_what_the_single_library_lane_lists(tmp_path)
     analysis.analyze(notebook_id="nb-a", source_ids=sources, question=_COMPARE,
                      planner_client=single)
     peer = _Planner({"operation": "profile"})
-    with _peer({"nb-a": set(sources)}) as scope:
+    # A name reader is present (as in every global run); one library has
+    # nothing to tell apart, so the catalog must not carry a label.
+    with _peer({"nb-a": set(sources)}, names={"nb-a": "A 库"}) as scope:
         _run_lane(_peer_ask(analysis, peer, _Seat((("nb-a", sources),))),
                   _COMPARE, "nb-a", scope)
     single_catalog = single.prompts[0].split("可用工作簿：", 1)[1]
     peer_catalog = peer.prompts[0].split("可用工作簿：", 1)[1]
     assert peer_catalog == single_catalog
+    assert "library" not in peer.prompts[0]
+
+
+def test_an_unreadable_manifest_is_not_counted_as_unlisted(tmp_path):
+    """A candidate whose manifest turns out unreadable is neither listed nor
+    disclosed as "not listed": the total counts what could have been listed."""
+    analysis, _artifacts = _service(tmp_path)
+    _compile(analysis, tmp_path, "nb-a", "quote-a", header=("Item", "Price"))
+    _compile(analysis, tmp_path, "nb-b", "quote-b", header=("Item", "Price"))
+    manifest = analysis.artifacts._manifest_path("nb-b", "quote-b")
+    assert manifest.is_file()
+    manifest.write_text("{not json", encoding="utf-8")
+    planner = _Planner({"operation": "profile"})
+    seat = _Seat((("nb-a", ("quote-a",)), ("nb-b", ("quote-b",))))
+    with _peer({"nb-a": {"quote-a"}, "nb-b": {"quote-b"}}) as scope:
+        [result], trace = _run_lane(_peer_ask(analysis, planner, seat), _COMPARE,
+                                    "nb-a", scope)
+    assert [entry["source_id"] for entry in _catalog(planner.prompts[0])] == ["quote-a"]
+    assert (trace[0].detail["workbooks"], trace[0].detail["listed"]) == (1, 1)
+    assert "未列出" not in planner.prompts[0]
+    assert result.warnings == []
+
+
+# ---------------------------------------------------------------------------
+# Peer lane: the federated seat isolates each library's read
+# ---------------------------------------------------------------------------
+
+class _Candidates:
+    """The slice of ``CandidateRetrievalService`` the federated seat reads:
+    settings, the participant seat, and the per-library visible read."""
+
+    def __init__(self, ids, visible, *, failing=()) -> None:
+        self.settings = SimpleNamespace(
+            chunk_federation_enabled=True, chunk_federation_max_participants=8,
+        )
+        self._ids = tuple(ids)
+        self._visible = dict(visible)
+        self._failing = set(failing)
+        self.reads: list[str] = []
+        self.budgets: list = []
+        self.sources = SimpleNamespace(all_visible_source_ids=self._read)
+
+    def _retrieval_participants(self, active_notebook_id):
+        return tuple((nb, "personal") for nb in self._ids)
+
+    def _read(self, notebook_id):
+        from app.repositories.read_budget import current_read_budget
+
+        self.reads.append(notebook_id)
+        self.budgets.append(current_read_budget())
+        if notebook_id in self._failing:
+            raise RuntimeError("visible-source read failed")
+        return list(self._visible[notebook_id])
+
+
+def _real_seat(candidates):
+    from app.services.retrieval_service import RetrievalService
+
+    return RetrievalService(candidates=candidates, graph=None, community_queries=None)
+
+
+def _plan(*, cancelled=False, notebook_timeout=5.0):
+    import threading
+
+    from app.services.federated_run import FederatedRunPlan
+
+    cancel = threading.Event()
+    if cancelled:
+        cancel.set()
+    return FederatedRunPlan(
+        phase_timeout_seconds=30.0, notebook_timeout_seconds=notebook_timeout,
+        executor=None, window=lambda: 1, cancel=cancel,
+        on_library=lambda *_a: None, on_evidence=lambda *_a: None,
+    )
+
+
+def test_one_librarys_failed_visible_read_drops_that_library_alone(tmp_path):
+    """B's visible-source read raises: A's workbook is still listed and still
+    executed, and B is reported in the trace -- the lane does not go empty."""
+    import time
+
+    analysis, _artifacts = _service(tmp_path)
+    _compile(analysis, tmp_path, "nb-a", "quote-a", header=("Item", "Price"))
+    _compile(analysis, tmp_path, "nb-b", "quote-b", header=("Item", "Price"))
+    candidates = _Candidates(
+        ("nb-a", "nb-b"), {"nb-a": ("quote-a",), "nb-b": ("quote-b",)},
+        failing=("nb-b",),
+    )
+    planner = _Planner({"source_id": "quote-a", "sheet": "Sheet",
+                        "operation": "profile"})
+    started = time.monotonic()
+    with _peer({"nb-a": {"quote-a"}, "nb-b": {"quote-b"}}, plan=_plan()) as scope:
+        [result], trace = _run_lane(
+            _peer_ask(analysis, planner, _real_seat(candidates)), _COMPARE,
+            "nb-a", scope,
+        )
+    assert result.source_id == "quote-a" and result.notebook_id == "nb-a"
+    assert [entry["source_id"] for entry in _catalog(planner.prompts[0])] == ["quote-a"]
+    assert trace[0].detail["skipped"] == [
+        {"notebook_id": "nb-b", "reason": "unavailable"},
+    ]
+    # Each read ran under the plan's per-library budget, as a passage
+    # preparation does.
+    assert all(budget is not None for budget in candidates.budgets)
+    assert all(
+        budget.deadline <= time.monotonic() + 5.0 and budget.deadline >= started
+        for budget in candidates.budgets
+    )
+
+
+def test_a_library_the_passage_lane_failed_to_prepare_is_not_read_again(tmp_path):
+    """The passage lane already failed to prepare B in this run: the workbook
+    lane skips B with that reason instead of spending a second budget on it."""
+    from app.services.retrieval_run import current_retrieval_run
+
+    analysis, _artifacts = _service(tmp_path)
+    _compile(analysis, tmp_path, "nb-a", "quote-a", header=("Item", "Price"))
+    _compile(analysis, tmp_path, "nb-b", "quote-b", header=("Item", "Price"))
+    candidates = _Candidates(
+        ("nb-a", "nb-b"), {"nb-a": ("quote-a",), "nb-b": ("quote-b",)},
+    )
+    planner = _Planner({"operation": "profile"})
+    with _peer({"nb-a": {"quote-a"}, "nb-b": {"quote-b"}}, plan=_plan()) as scope:
+        current_retrieval_run().note_peer_unprepared("nb-b", "timeout")
+        _results, trace = _run_lane(
+            _peer_ask(analysis, planner, _real_seat(candidates)), _COMPARE,
+            "nb-a", scope,
+        )
+    assert candidates.reads == ["nb-a"]
+    assert trace[0].detail["skipped"] == [{"notebook_id": "nb-b", "reason": "timeout"}]
+
+
+def test_the_passage_lanes_preparation_failure_is_what_the_workbook_lane_reads(
+    monkeypatch,
+):
+    """The other half of the reuse: ``_federated_tasks`` records a failed peer
+    preparation on the run, with the reason its own receipt carries."""
+    from app.services import chunk_federation
+    from app.services.retrieval_run import current_retrieval_run
+
+    candidates = _Candidates(("nb-a", "nb-b"), {"nb-a": ("s",), "nb-b": ("s",)})
+
+    def prepared(_candidates, notebook_id, _plan, _deadline):
+        if notebook_id == "nb-b":
+            raise RuntimeError("enumeration failed")
+        return ("s",), False
+
+    monkeypatch.setattr(chunk_federation, "_prepared_peer", prepared)
+    monkeypatch.setattr(
+        chunk_federation, "_emit", lambda *_args, **_kwargs: None,
+    )
+    import app.services.chunk_lane as chunk_lane
+
+    monkeypatch.setattr(
+        chunk_lane, "_lexical_gate_drift_probe", lambda *_args: False,
+    )
+    dropped: dict = {}
+    with _peer({"nb-a": {"s"}, "nb-b": {"s"}}, plan=_plan()):
+        chunk_federation._federated_tasks(
+            candidates, "nb-a", (("nb-a", "personal"), ("nb-b", "personal")),
+            ["q"], False, dropped=dropped, plan=_plan(), deadline=1e18,
+        )
+        recorded = current_retrieval_run().peer_unprepared_reason("nb-b")
+    assert dropped == {"nb-b": "unavailable"}
+    assert recorded == "unavailable"
+
+
+def test_a_cancelled_run_reads_no_library_and_says_so(tmp_path):
+    """Cancellation is never turned into "skipped": the seat raises
+    ``AskCancelled`` before opening a connection, and the lane lets it out."""
+    import pytest
+
+    from app.services.cancellation import AskCancelled
+
+    analysis, _artifacts = _service(tmp_path)
+    _compile(analysis, tmp_path, "nb-a", "quote-a", header=("Item", "Price"))
+    candidates = _Candidates(("nb-a",), {"nb-a": ("quote-a",)})
+    with _peer({"nb-a": {"quote-a"}}, plan=_plan(cancelled=True)) as scope:
+        with pytest.raises(AskCancelled):
+            _run_lane(_peer_ask(analysis, _Planner(), _real_seat(candidates)),
+                      _COMPARE, "nb-a", scope)
+    assert candidates.reads == []
+
+
+# ---------------------------------------------------------------------------
+# Intent: 「比较 / 对比」 (user ruling 2026-10-19), table context still required
+# ---------------------------------------------------------------------------
+
+def test_compare_opens_the_lane_only_with_table_context(tmp_path):
+    analysis, _artifacts = _service(tmp_path)
+    _compile(analysis, tmp_path, "nb-1", "quote", header=("Item", "Price"))
+    for question, opens in (
+        ("比较 A 库和 B 库两张报价表的价格", True),
+        ("对比这两个工作簿里的报价", True),
+        ("比较两种方法", False),
+        ("对比两位代表的观点", False),
+    ):
+        planner = _Planner({"operation": "profile"})
+        results, _trace = analysis.analyze(
+            notebook_id="nb-1", source_ids=("quote",), question=question,
+            planner_client=planner,
+        )
+        assert bool(results) is opens, question
+        assert bool(planner.prompts) is opens, question
 
 
 # ---------------------------------------------------------------------------
@@ -600,12 +864,15 @@ def assert_quote_federation(repo, tmp_path, owner, viewer) -> None:
             result = ask_globally(repo, user, [world["a"], world["b"]], _COMPARE)
             assert result.status == "done", result.error
             [prompt] = agent.sheet_prompts
-            listed = {entry["source_id"] for entry in _catalog(prompt)}
-            assert listed == {world["src_a"], world["src_b"]}, prompt
+            listed = {
+                (entry["source_id"], entry["library"]) for entry in _catalog(prompt)
+            }
+            # The libraries' own names, read through the run's turn.
+            assert listed == {(world["src_a"], "A 库"), (world["src_b"], "B 库")}, prompt
             assert world["src_c"] not in prompt
             [table] = [r for r in result.answer.result_sets if r.kind == "spreadsheet"]
-            assert (table.source_id, table.notebook_id) == (
-                world[f"src_{target}"], world[target],
+            assert (table.source_id, table.notebook_id, table.notebook_name) == (
+                world[f"src_{target}"], world[target], f"{target.upper()} 库",
             )
             [receipt] = [a for a in result.answer.anchors if a.key == "k6001"]
             assert (receipt.notebook_id, receipt.source_id) == (

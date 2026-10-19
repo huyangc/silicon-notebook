@@ -968,6 +968,10 @@ _SEAT_FAILSOFT_SITES = (
 # * D0-5 没有新增任何宽 ``except``;它加在 ``_spreadsheet_reasoning_results``(已有宽
 #   handler)里的两行只读 ``source_scope`` 的 ContextVar,同样不触达座位。表格臂联邦化
 #   之后那个 handler 的 try 体经 ``_peer_workbook_results`` 触达座位,已登记在上面。
+# * ``chunk_federation.federated_library_sources`` 的逐库宽 ``except`` —— 不登记:
+#   参与集在循环之前、任何 ``try`` 之外经 ``_bounded_participants`` 读完,try 体只有
+#   该库的可见来源读取(``_budgeted_visible_sources``),且 handler 先放行
+#   ``AskCancelled`` / ``RetrievalControlError``。
 # * D1-4 在 ``global_ask.py`` 新增的三个宽 ``except`` —— ``_emit``(事件投递)、
 #   ``_append_trace``(``job.trace.append`` + 一次作业行写)、``_same_request``
 #   (旧请求串过模型归一)——都不登记:三个 try 体都不读参与集,而且该文件根本不在
