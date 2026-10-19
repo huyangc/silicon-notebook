@@ -14,6 +14,7 @@ from app.repositories.postgres._store_utils import (
     json_value,
     jsonb,
     normalize_timestamp,
+    raise_statement_timeout_floor,
     sqlite_compatible_row,
 )
 from app.domain.auth_utils import ascii_lower
@@ -69,32 +70,13 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # ``--confirm-service-stopped``)、source-index 与 chunk-element 两族 backfill
 # 的起手清场(含 ``clear_source_index``/``clear_chunk_element_index``)。大库
 # 上这些 DELETE 可能超过默认 30s statement_timeout;离线维护不共享请求路径
-# 的时间预算,统一经 ``_raise_statement_timeout_floor`` 做事务内放宽。
+# 的时间预算,统一经 ``raise_statement_timeout_floor`` 做事务内放宽
+# (定义在 ``_store_utils``,取「底」不取「值」的理由见它的注释)。
 # 普查的负结果(查过、判断不补)登记在 PR 与 fangan_done:本文件其余
 # backfill_*/reap_*/recover_* 均已按 keyset/批量预算显式设计;CONCURRENTLY
 # 类与迁移工具各有 session 级放宽或独立超时配置;其余 store 的 DELETE 均为
 # 单行/小表量级。
-#
-# 取「底」不取「值」(T4 规格评 P2-1):运维把部署超时调得比 600s 更高时
-# (POSTGRES_STATEMENT_TIMEOUT_SECONDS,pool 在连接建立时按它设 session
-# 值),这里绝不能反向压低;0 = 已禁用超时,同样保持。
-_MAINTENANCE_STATEMENT_TIMEOUT_FLOOR_MS = 600_000
-
-
-def _raise_statement_timeout_floor(db) -> None:
-    """事务内把 statement_timeout 抬到维护底线(只抬不压,0/禁用保持)。
-
-    ``pg_settings.setting`` 对 statement_timeout 以毫秒计;第三参 ``true`` =
-    事务本地(SET LOCAL 等价),随提交/回滚自动复原,不泄漏给池化连接的
-    下一个借用者——notebook_store.py:437/migrator.py:191 同款先例。必须在
-    ``database.write()`` 打开的同一事务里、先于受保护语句调用。"""
-    db.execute(
-        "SELECT set_config('statement_timeout',"
-        " CASE WHEN cur = 0 THEN '0' ELSE GREATEST(cur, %s)::text END, true)"
-        " FROM (SELECT setting::bigint AS cur FROM pg_settings"
-        "       WHERE name='statement_timeout') AS s",
-        (_MAINTENANCE_STATEMENT_TIMEOUT_FLOOR_MS,),
-    )
+_raise_statement_timeout_floor = raise_statement_timeout_floor
 
 # 热路径修复批 2(R6)的「非空元素资格判定」谓词——单一定义点,供
 # count_missing_element_vectors 及其配套 discovery/page 站点(见各方法自己的调用)

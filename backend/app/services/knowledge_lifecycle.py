@@ -401,6 +401,21 @@ def _fold_canonical_edges(
             edge_builder.add(si, ti)
 
 
+def _fold_source_rows(rows: Any, counter: Any) -> None:
+    """Fold ``source_canonical_rows``' ``(source_id, canonical_id)`` rows into the
+    per-board source counter.
+
+    ``closing`` is load-bearing on PostgreSQL for the same reason as in
+    ``_fold_canonical_edges``: ``rows`` is a ``cursor().stream()`` generator, and one
+    abandoned mid-iteration (``counter.add`` raising, ``KeyboardInterrupt``) leaves
+    its connection ACTIVE, so the caller's ``with self._connect()`` blocks forever
+    in ``rollback()`` instead of letting the exception through.
+    """
+    with closing(rows):
+        for row in rows:
+            counter.add(row["source_id"], row["canonical_id"])
+
+
 class KnowledgeLifecycleService:
     def __init__(
         self,
@@ -7414,8 +7429,7 @@ class KnowledgeLifecycleService:
         if total_members:
             counter = SourceBoardCounter(can2idx, community_of_index)
             with self._connect() as db:
-                for row in self.unified_kg.source_canonical_rows(db, notebook_id):
-                    counter.add(row["source_id"], row["canonical_id"])
+                _fold_source_rows(self.unified_kg.source_canonical_rows(db, notebook_id), counter)
             source_folder = SourceProfileFolder(head)
             for source_id, community_id, count in counter.drain():
                 source_folder.add(source_id, community_id, count)

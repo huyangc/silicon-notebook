@@ -154,6 +154,37 @@ def execute_many(connection: Any, statement: str, rows: Sequence[Sequence[Any]])
         cursor.executemany(statement, rows)
 
 
+# 取「底」不取「值」(T4 规格评 P2-1):运维把部署超时调得比 600s 更高时
+# (POSTGRES_STATEMENT_TIMEOUT_SECONDS,pool 在连接建立时按它设 session
+# 值),`raise_statement_timeout_floor` 绝不能反向压低;0 = 已禁用超时,同样保持。
+MAINTENANCE_STATEMENT_TIMEOUT_FLOOR_MS = 600_000
+
+
+def raise_statement_timeout_floor(db: Any) -> None:
+    """事务内把 statement_timeout 抬到维护底线(只抬不压,0/禁用保持)。
+
+    ``pg_settings.setting`` 对 statement_timeout 以毫秒计;第三参 ``true`` =
+    事务本地(SET LOCAL 等价),随提交/回滚自动复原,不泄漏给池化连接的
+    下一个借用者——notebook_store.py:437/migrator.py:191 同款先例。必须在
+    受保护语句**所在的同一个事务**里、先于它调用:``database.write()`` /
+    ``database.connect()`` 借出的连接都是非 autocommit 的(``_restore_client_defaults``
+    把它置 False),第一条语句就隐式开启事务,所以 ``set_config(..., true)`` 对随后
+    同一个借用块内的语句(含 ``cursor().stream()``)都生效;autocommit 连接上它只管
+    这一条语句,等于没放宽。
+
+    最初为整表 DELETE 的离线维护站点而设(T-W4-4,``maintenance.py``);同一个底线现在
+    也被 KG 重建的两条流式整表读复用(``UnifiedKgStore.community_graph_rows`` /
+    ``source_canonical_rows``,理由见它们的 docstring),所以放在这个共享模块里,
+    不各复制一份。"""
+    db.execute(
+        "SELECT set_config('statement_timeout',"
+        " CASE WHEN cur = 0 THEN '0' ELSE GREATEST(cur, %s)::text END, true)"
+        " FROM (SELECT setting::bigint AS cur FROM pg_settings"
+        "       WHERE name='statement_timeout') AS s",
+        (MAINTENANCE_STATEMENT_TIMEOUT_FLOOR_MS,),
+    )
+
+
 # Page size for the offline build's whole-notebook keyset scans (batch-3 W4
 # T-W4-3.1). Same order of magnitude as the embedding scans'
 # ``MATRIX_FETCH_BATCH``: the bound that matters is "one page of rows in the
