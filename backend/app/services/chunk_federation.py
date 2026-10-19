@@ -814,8 +814,13 @@ def federated_element_candidates(
     Emits one content-free ``ask_stage``/``global_element_arm`` summary.
     """
     started = time.perf_counter()
+    # ``drifted=False``, as for the exact arm: in peer mode the lexical-lane
+    # drift verdict routes nothing (a global run submits no local narrowing,
+    # so ``_lexical_gate_source_scoped`` is constantly False for every
+    # library), and probing it would be two live source reads for an answer
+    # nobody reads.
     arm = _run_supplement_arm(
-        candidates, active_notebook_id, query, leg, "element",
+        candidates, active_notebook_id, query, leg, "element", drifted=False,
     )
     columns = [
         _stamped(task, value) for task, value in zip(arm.tasks, arm.values)
@@ -981,7 +986,7 @@ def _register_supplement_evidence(candidates, arm: _SupplementArm,
 def _supplement_arm_deadline(plan) -> float:
     """A supplementary arm's WHOLE-arm deadline: one per-library budget.
 
-    Shared by the peer-mode keyword and exact-identifier arms.  Derived once,
+    Shared by the peer-mode keyword, exact-identifier and element arms.  Derived once,
     before the first read (task preparation included), like the semantic
     arm's -- but shorter.  These arms are fail-open supplements, so on a
     saturated database each may cost at most about one

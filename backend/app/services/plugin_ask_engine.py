@@ -551,7 +551,8 @@ class PluginRetrievalAccess:
             # freezes it: a source that finished extracting after validation
             # is in the live half and not in the frozen ceiling, and the
             # element seam has no result-side fence to drop it later
-            # (RetrievedElement carries no notebook_id, and the port's own
+            # (this seam's hits are not stamped with a library -- their
+            # ``RetrievedElement.notebook_id`` stays blank -- and the port's own
             # post-check judges hits against the very ``source_origin`` map
             # built here).
             scoped_source_ids = scoped_allowed_source_ids(notebook_id, source_ids)
