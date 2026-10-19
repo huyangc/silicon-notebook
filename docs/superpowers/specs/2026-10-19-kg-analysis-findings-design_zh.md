@@ -131,7 +131,7 @@
 |---|---|---|
 | F1 / F3 | 来源已不存在；或来源的解析/抽取在问题建成之后重跑过、或正在跑 | `sources` 主键点查，加该来源最近一次抽取的时间，≤ 一页。不能用 `sources.updated_at`：改标题之类的动作也会推进它。实现时核对哪个字段只随重新解析变化 |
 | F2 | 两个来源中任一已不存在 | `sources` 主键点查。重新解析不解决重复，不算处置 |
-| F4 | 待确认合并里这一组已被确认。若是**驳回或暂缓**，当场移进「已通过」写「已判定不是同一个」，下次重建也不再报（§4.4）。驳回不置 `dirty`（只有撤销一次确认才置），所以不能靠「更新后消失」来收尾，否则这条会永远「仍在」 | `concept_merge_candidates` 按 seed 点查 |
+| F4 | 待确认合并里这一组已被确认。若是**驳回或暂缓**，当场移进「已通过」写「已判定不是同一个」，下次重建也不再报（§4.4）。驳回不置 `dirty`（只有撤销一次确认才置），所以不能靠「更新后消失」来收尾，否则这条会永远「仍在」 | `concept_merge_candidates` 只有 `(notebook_id, status)` 索引，不是主键点查：在本库候选切片里按这一页的组分批过滤 |
 | F5 | 「补上关联」在问题建成之后完成过（§4.5 的持久标记） | 一行点读 |
 
 「问题建成之后」以 `findings` 账本行的 `created_at` 为准。
@@ -391,7 +391,7 @@ F3 与 F1 的界线是本规格最要紧的判别：
 
 **刻意不在请求路径上重算聚类输入版本**：`cluster_input_facts` 要对对象表和向量表各做一次 `COUNT(*)`（生产 878 万行），不能每次打开面板都跑。
 
-**合并规则版本必须单独可见，否则 S4 会挡住 S1/P3 的修复。** `cluster_input_version` 是一个 sha1，把 `CLUSTER_ALGO_VERSION`、`embed_dim`、运行时维度和几项数据计数揉在一起；报告里没有任何字段能读出其中的代码分量，而 bump `CLUSTER_ALGO_VERSION` 也不会置 `dirty`。不处理的话，P3/P4 部署之后面板会置灰写「无需更新」，而真点下去恰恰会应用修复。做法：`unified_kg_state` 加一列，存上次合并时的代码分量（算法版本 + 两个维度），与 `cluster_input_version` 在同一次收尾写入；overview 同时返回这一列与当前代码的值，不一致就走上表最后一行。这一列随 P1 的迁移一起加。
+**合并规则版本必须单独可见，否则 S4 会挡住 S1/P3 的修复。** `cluster_input_version` 是一个 sha1，把 `CLUSTER_ALGO_VERSION`、`embed_dim`、运行时维度和几项数据计数揉在一起；报告里没有任何字段能读出其中的代码分量，而 bump `CLUSTER_ALGO_VERSION` 也不会置 `dirty`。不处理的话，P3/P4 部署之后面板会置灰写「无需更新」，而真点下去恰恰会应用修复。做法：`unified_kg_state` 加一列，存上次合并时的代码分量（算法版本 + 两个维度），与 `cluster_input_version` 在同一次收尾写入；overview 同时返回这一列与当前代码的值，不一致就走上表最后一行。这一列随 P1 的迁移一起加。只在合并收尾写不够：输入未变、走跳过路径的那一次也要补写（带「输入版本仍相等」守卫的 UPDATE），删除知识图谱时清空；否则升级后的库永远到不了「无需更新」。
 
 **已知残留**：只补齐了检索向量（向量数变了、`kg_mutation_seq` 没动）时，面板会说「无需更新」，真点下去却会重聚类。这是原设计新鲜度契约里本来就有的盲区，不是本特性引入的，如实记在这里。
 
@@ -423,7 +423,7 @@ F3 与 F1 的界线是本规格最要紧的判别：
 | ② 跑 Louvain，或在补账本路径读回已有划分 | | S2 若做：读上一代划分作热启动（见 7.3） |
 | ③ 进入 `_compute_kg_analysis`，在折叠跨板块边**之前** | 边表在手 | 用边表求连通分量（`scipy.sparse.csgraph.connected_components`，scipy 已是依赖），并按 `np.bincount` 求每个节点的度数。每节点存一个 int32 分量号、一个 int32 度数；CSR 临时结构用完即放。全量与补账本两条路径共用同一份实现 |
 | ④ `fold_cross_community_edges`（同时释放边表） | 不变 | 不变 |
-| ⑤ 来源画像那一趟：`source_canonical_rows` + `SourceBoardCounter` | 878 万行，每行存两个 int32。**零板块的库整趟跳过**（`if total_members:`） | SQL 多返回一列「是不是 concept」。concept 行另记（来源序号，canonical 下标）两个 int32；不在图里的 canonical 另编下标，只为 F1/F2 计数，不进 membership。另按来源累加孤立对象数（F5、F3b）。⚠ 问题清单是必需产物，所以零板块的库也要跑这一趟扫描，只是不写来源画像。原设计刻意为零板块库省掉了这趟扫描，这里把它加回来了，代价要算进去 |
+| ⑤ 来源画像那一趟：`source_canonical_rows` + `SourceBoardCounter` | 878 万行，每行存两个 int32。**零板块的库整趟跳过**（`if total_members:`） | SQL 多返回一列「是不是 concept」。concept 行另记（来源序号，canonical 下标）两个 int32；不在图里的 concept canonical 用一张旁路 dict 另编下标，只为 F1/F2 计数，**不扩 `can2idx`**（会与 `SourceBoardCounter` 的下标表越界冲突）。「在不在图里」以 `edge_table.n_nodes` 为界，不以 `can2idx` 为界：补账本路径会把不在图里的板块成员也补进 `can2idx`。另按来源累加孤立对象数（F5、F3b）。⚠ 问题清单是必需产物，所以零板块的库也要跑这一趟扫描，只是不写来源画像。原设计刻意为零板块库省掉了这趟扫描，这里把它加回来了，代价要算进去 |
 | ⑥ drain 之后、`can2idx.clear()` **之前** | 立即释放 membership | 在这里算完 F1–F5，顺序见本表下方。全部算完、为不超过上限的问题取到样例名之后，才 `can2idx.clear()` |
 | ⑦ 三条统计快照 | 不变 | 不变。「它们跑在更低的内存水位上」这条约束照旧成立：新增的结构在 ⑥ 末尾全部释放 |
 | ⑧ 发布事务 | 板块 + 五份产物 | 另写 `findings` 账本行与问题明细；读旧明细（≤ 上限行，主键范围读）算出对比摘要；清掉主体已不存在的豁免 |
@@ -484,7 +484,7 @@ F3 与 F1 的界线是本规格最要紧的判别：
 
 升级后，已部署库的账本里还没有 `findings`，于是判为账本不齐。下一次非 force 的整理会走补账本路径自动补上，这是原设计 B1 的自愈路径。在这一档，S4 的按钮是可点的。
 
-⚠ 但今天的读侧会把「账本非空、却缺一份必需产物」判成 `ABSENCE_UNEXPECTED`（`kg_analysis._absence`），前端随即在**每一个**已部署库上亮红色「暂不可据此下结论」，一直亮到有人跑一次整理。这是误报：缺的那份是新版本才有的，不是数据坏了。所以 `_absence` 要多分一档：账本里的其余行都建于这份产物出现之前（按行上记的契约版本判断），就报「升级后还没生成」，显示灰色并提示点「更新分析」，不报红。
+⚠ 但今天的读侧会把「账本非空、却缺一份必需产物」判成 `ABSENCE_UNEXPECTED`（`kg_analysis._absence`），前端随即在**每一个**已部署库上亮红色「暂不可据此下结论」，一直亮到有人跑一次整理。这是误报：缺的那份是新版本才有的，不是数据坏了。所以 `_absence` 要多分一档：账本里的其余行都建于这份产物出现之前，就报「升级后还没生成」，显示灰色并提示点「更新分析」，不报红。今天账本行上没有任何版本标记，所以要新增一个契约版本戳（payload 里的 `ledger_contract` 键）：service 盖，store 写入口查，缺键硬失败；没有这个键的旧行就是「建于 findings 出现之前」。
 
 **零板块的库**也要付第 ⑤ 步那趟对象扫描（§7.1），因为 `findings` 是必需产物。
 
@@ -504,11 +504,12 @@ F3 与 F1 的界线是本规格最要紧的判别：
 
 ```
 kg_analysis_findings(notebook_id, rule_id, subject_key, subject_kind, subject_label,
-                     severity, impact_objects, evidence, first_seen_seq, built_at_seq)
+                     subject_refs, severity, impact_objects, evidence,
+                     first_seen_kg_seq, first_seen_cluster_seq)
 PRIMARY KEY (notebook_id, rule_id, subject_key)
 ```
 
-处理方式与 `kg_source_profiles` 相同：与账本行在同一个事务里整表重写；账本行不在，就一行明细都不发（原设计第 3 轮）。`first_seen_seq` 在发布事务里从旧行继承。
+处理方式与 `kg_source_profiles` 相同：与账本行在同一个事务里整表重写；账本行不在，就一行明细都不发（原设计第 3 轮）。两个 `first_seen_*` 在发布事务里从旧行继承。「本次建于哪一代」不逐行记，统一取账本行的 seq，免得两处记同一件事。`subject_refs` 存主体涉及的来源 id 列表（F2 是两个，F4 是可见成员的来源），读侧派生「已处理」时用。
 
 ### 8.3 标记表 `kg_analysis_marks`（豁免 + 系统标记）
 
