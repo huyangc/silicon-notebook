@@ -516,11 +516,13 @@ def test_a_title_that_itself_contains_the_separator_matches_whole(repo):  # noqa
 
 
 def test_skip_when_two_documents_share_the_title(repo):  # noqa: F811
-    """② 同名两篇 → 同样 unresolved(服务端绝不替模型挑一篇)。
+    """② 同名两篇、模型给的是**不带序号**的标题 → 仍然 unresolved(服务端绝不替
+    模型挑一篇)。
 
-    ⑥ 文案与「一篇都没匹配上」分叉:0 篇是抄错了标题,重抄能成;≥2 篇是这个动作
-    的参数(标题)根本区分不开它们,再教它「逐字复制标题」只会让模型把剩下的轮数
-    花在同一个死循环上。
+    ⑥ 文案与「一篇都没匹配上」分叉:0 篇是抄错了标题,重抄能成;≥2 篇说的是另一件
+    事。花名册里这两篇已经标了「（第 N 篇）」(见
+    test_reasoning_document_read_duplicate_titles),能区分,下一步是连序号一起抄,
+    所以文案不再说「无法区分」。detail 的形状不变(只带模型给的标题与命中数)。
     """
     notebook = _notebook_with_documents(repo)
     _seed_document(repo, notebook.id, "s-dup", "无摘要文档", "", ("重名的一篇。",))
@@ -533,9 +535,11 @@ def test_skip_when_two_documents_share_the_title(repo):  # noqa: F811
 
     skip = _skips(result)["document_read_unresolved"]
     assert skip.detail["matches"] == 2
+    assert skip.detail == {"reason": "document_read_unresolved",
+                           "requested_title": "无摘要文档", "matches": 2}
     assert "清单里有 2 篇同名文档" in skip.summary
-    assert "无法区分" in skip.summary
-    assert "逐字复制标题" not in skip.summary
+    assert "序号" in skip.summary
+    assert "无法区分" not in skip.summary
     assert result.document_reads == []
 
 
