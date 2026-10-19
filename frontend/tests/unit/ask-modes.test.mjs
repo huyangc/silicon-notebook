@@ -85,7 +85,7 @@ test("deployment mode projection is data-driven, strict, and restorable", () => 
   assert.equal(canUseMode("corp.search", false, modes), false);
   assert.equal(streamsTrace("corp.search", modes), true);
   assert.equal(modeFromTurn({ response: { mode: "corp.search" } }, modes), "corp.search");
-  assert.equal(modeFromTurn({ response: { mode: "corp.disabled" } }, modes), "chunk");
+  assert.equal(modeFromTurn({ response: { mode: "corp.disabled" } }, modes), "reasoning");
 });
 
 test("grouping + default engine per group", () => {
