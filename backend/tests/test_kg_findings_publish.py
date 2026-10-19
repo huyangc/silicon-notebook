@@ -312,6 +312,18 @@ def test_a_stamped_ledger_without_findings_is_a_real_absence(repo):
                    (world.notebook_id, ARTIFACT_FINDINGS))
     view = _view(_overview(repo, world.notebook_id), ARTIFACT_FINDINGS)
     assert view.absence == ABSENCE_UNEXPECTED
+    # one unstamped row among stamped ones is not "every row predates the stamp"
+    with repo._runtime.database.write() as db:
+        row = db.execute(
+            "SELECT payload FROM kg_analysis_artifacts WHERE notebook_id=? AND kind=?",
+            (world.notebook_id, ARTIFACT_COMMUNITY_EDGES)).fetchone()
+        payload = json.loads(row["payload"])
+        payload.pop(LEDGER_CONTRACT_KEY)
+        db.execute(
+            "UPDATE kg_analysis_artifacts SET payload=? WHERE notebook_id=? AND kind=?",
+            (json.dumps(payload), world.notebook_id, ARTIFACT_COMMUNITY_EDGES))
+    view = _view(_overview(repo, world.notebook_id), ARTIFACT_FINDINGS)
+    assert view.absence == ABSENCE_UNEXPECTED
 
 
 def test_findings_built_on_older_rules_are_stale_and_rebuilt(repo):
@@ -423,6 +435,30 @@ def test_publish_prunes_dismissals_whose_subject_is_gone(repo):
     assert [(m["rule_id"], m["subject_key"], m["kind"])
             for m in _marks(repo, world.notebook_id)] == [
         ("F1", "src-off", MARK_DISMISSED), ("F5", "notebook", MARK_RELINK_ATTEMPTED)]
+
+
+def test_the_graph_scan_counts_relation_rows_per_source(repo):
+    """Step ① feeds F3b: every `community_graph_rows` row counted under its own
+    ``kr.source_id`` — self-loops included (a relation both of whose ends merged
+    into one canonical is still a relation the source produced). The world
+    chains each source's concepts, so every source has (concepts - 1) rows;
+    one extra self-loop row is added to src-off."""
+    world = seed_world(repo, postgres=False)
+    with repo._runtime.database.write() as db:
+        loop = db.execute(
+            "SELECT id FROM knowledge_objects WHERE notebook_id=? AND source_id='src-off' "
+            "ORDER BY id LIMIT 1", (world.notebook_id,)).fetchone()["id"]
+        db.execute(
+            "INSERT INTO knowledge_relations(id,notebook_id,source_id,source_object_id,"
+            "target_object_id,edge_type,evidence,created_at) "
+            "VALUES ('kr-loop',?,'src-off',?,?,'supports','[]','2026-10-19')",
+            (world.notebook_id, loop, loop))
+    _names, _can2idx, _idx2can, _edges, relations = (
+        repo._runtime.knowledge_lifecycle._scan_canonical_graph(world.notebook_id))
+    assert relations == {
+        "src-core-0": 12, "src-core-1": 12, "src-core-2": 13, "src-core-3": 13,
+        "src-off": 12, "src-dup-a": 11, "src-dup-b": 11, "src-broken": 11,
+    }
 
 
 def test_persisted_findings_fit_the_storage_cap():
