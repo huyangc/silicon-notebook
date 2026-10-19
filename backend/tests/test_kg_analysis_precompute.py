@@ -1210,14 +1210,21 @@ def test_precompute_takes_every_snapshot_outside_any_write_transaction(repo, mon
     都不碰,在 SQLite 上还跑在**另一条**连接上,所以把它们从 `_write()` 外面搬到里面
     时,那条断言完全看不见 —— 评审实测过这个移动变异,25 条测试全绿。这里改成直接记录
     调用时刻的 `write_depth`,移动变异会当场把它顶成 1。
+
+    问题清单(设计 2026-10-19 §7.1 ⑥)的读也在同一张清单上:已存合并决定、成员名
+    (按批)、展示名点查、来源状态点查、发布前的标记读 —— 全部必须在写事务之外。用的是
+    每条规则都会命中一次的合成库(`tests/kg_findings_world.py`),否则这几条读根本
+    不会被调到、守卫空转。
     """
-    notebook_id = _seed(repo)
+    from tests.kg_findings_world import seed_world
+
+    notebook_id = seed_world(repo, postgres=False).notebook_id
     database = repo._runtime.database
     store = repo._runtime.unified_kg
     depths: dict[str, list[int]] = {}
 
-    def instrument(name):
-        original = getattr(store, name)
+    def instrument(target, name):
+        original = getattr(target, name)
 
         def wrapper(*args, **kwargs):
             depths.setdefault(name, []).append(
@@ -1225,15 +1232,21 @@ def test_precompute_takes_every_snapshot_outside_any_write_transaction(repo, mon
             )
             return original(*args, **kwargs)
 
-        monkeypatch.setattr(store, name, wrapper)
+        monkeypatch.setattr(target, name, wrapper)
 
-    for name in (*ANALYSIS_SNAPSHOTS, "source_canonical_rows"):
-        instrument(name)
+    findings_reads = (
+        "kg_finding_member_name_rows", "kg_finding_display_name_rows",
+        "kg_finding_source_states", "kg_analysis_mark_rows",
+    )
+    for name in (*ANALYSIS_SNAPSHOTS, "source_canonical_rows", *findings_reads):
+        instrument(store, name)
+    instrument(repo._runtime.knowledge_lifecycle.governance_store, "decided_seed_pairs_from")
     repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
 
-    assert set(depths) == {*ANALYSIS_SNAPSHOTS, "source_canonical_rows"}, (
-        f"仪器没装上或有查询没被调用:{sorted(depths)}"
-    )
+    assert set(depths) == {
+        *ANALYSIS_SNAPSHOTS, "source_canonical_rows", *findings_reads,
+        "decided_seed_pairs_from",
+    }, f"仪器没装上或有查询没被调用:{sorted(depths)}"
     assert all(depth == 0 for calls in depths.values() for depth in calls), (
         f"全表级重活在写事务内被调用(write_depth != 0):{depths}"
     )
