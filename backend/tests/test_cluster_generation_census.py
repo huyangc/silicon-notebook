@@ -124,7 +124,10 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "副本侧沿用原口径,源侧按快照的决定计数"),
     "backend/app/repositories/sqlite/sharing_store.py": (2, 0, 0, 3, 0,
         "PG 孪生同注记"),
-    "backend/app/repositories/postgres/unified_kg_store.py": (30, 9, 7, 27, 13,
+    "backend/app/repositories/postgres/unified_kg_store.py": (32, 9, 7, 29, 13,
+        "图谱分析问题清单 PR-2:``kg_finding_member_name_rows`` 与展示名读同形的两条腿"
+        "(有簇行的成员按 canonical 读、没有簇行的对象用 NOT EXISTS 判「无已发布簇行」),"
+        "都配 cluster 谓词,concept_clusters 出现数与 cluster 谓词各 +2;"
         "图谱分析问题清单(v97/0077):``kg_finding_display_name_rows`` 两条腿各一处"
         "A 类读(有簇行的成员按 canonical 读、没有簇行的对象用 NOT EXISTS 判「无"
         "已发布簇行」),都配 cluster 谓词,concept_clusters 出现数与 cluster 谓词各 +2;"
@@ -147,7 +150,7 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "谓词各多一次;社区摘要退役删掉 set_community_summary(UPDATE "
         "communities,按 id 写、无谓词)与 community_reports(A 类读,配 "
         "community 谓词),communities 出现数 -2、community 谓词 -1"),
-    "backend/app/repositories/sqlite/unified_kg_store.py": (30, 9, 8, 27, 13,
+    "backend/app/repositories/sqlite/unified_kg_store.py": (32, 9, 8, 29, 13,
         "PG 孪生同注记(两侧 members 出现数差异来自 SQLite 无窗口函数的"
         "community_overview_on 分岔)"),
     "backend/app/repositories/source_subgraph_projection.py": (4, 0, 0, 2, 0,

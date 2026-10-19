@@ -334,6 +334,13 @@ _REGISTRY: dict[str, dict[str, str]] = {
         # leaves out every object of a memory/knowhow source (the canonical name
         # may come from one), the same NOT EXISTS as source_canonical_rows
         "UnifiedKgStore.kg_finding_display_name_rows": KEY_BOUNDED,
+        # KG analysis findings (PR-2): every member name of the given canonical
+        # ids. Hidden (memory/knowhow) members are READ on purpose — stored
+        # merge decisions are keyed by v1 seeds of all member names, and a seed
+        # only decides, it is never displayed; the statement computes
+        # ``visible`` with the same NOT EXISTS as source_canonical_rows and only
+        # visible names may become display labels
+        "UnifiedKgStore.kg_finding_member_name_rows": KEY_BOUNDED,
         # retrieval legs
         "UnifiedKgStore.comention_peers": CEILING_BOUNDED,
         "_canonical_support_exists": CEILING_BOUNDED,

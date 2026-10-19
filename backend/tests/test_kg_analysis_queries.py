@@ -952,6 +952,8 @@ def test_both_backend_stores_declare_the_same_analysis_surface():
         "clear_kg_analysis_mark",
         "kg_finding_source_states",
         "kg_finding_display_name_rows",
+        # PR-2:成员名(F4 / S1 按 v1 种子判已存决定,隐藏成员也算)。
+        "kg_finding_member_name_rows",
         "stamp_cluster_code_version",
         "finish_rebuild_state",
     ):
@@ -1002,6 +1004,7 @@ _ANALYSIS_METHODS = (
     "clear_kg_analysis_mark",
     "kg_finding_source_states",
     "kg_finding_display_name_rows",
+    "kg_finding_member_name_rows",
     "stamp_cluster_code_version",
 )
 

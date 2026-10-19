@@ -37,6 +37,19 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+# Storage-level contract (PR-1, SQLite v97 / PostgreSQL 0077): the detail-row
+# columns and the per-notebook row cap the write entry enforces, plus the
+# ledger-wide contract stamp. Re-exported so rule code has one import.
+from app.domain.kg_analysis_contracts import (  # noqa: F401  (re-exports)
+    FINDING_ROW_FIELDS,
+    KG_FINDINGS_ROWS_MAX,
+    LEDGER_CONTRACT_KEY,
+    LEDGER_CONTRACT_VERSION,
+    check_ledger_contract,
+    ledger_row_predates_findings,
+    stamp_ledger_contract,
+)
+
 
 # ------------------------------------------------------------------ rule codes
 # A tier (§四): the user can act on these from the panel.
@@ -204,6 +217,9 @@ RULE_THRESHOLDS: Dict[str, float] = {
 # Decisions are keyed by v1 SEEDS, never by canonical id — a canonical id moves
 # whenever its cluster's minimum member changes (`decided_seed_pairs_from`).
 DECISION_APART_STATUSES: Tuple[str, ...] = ("rejected", "deferred")
+# The stored decision that sends a pair to be merged: the read side calls an F4
+# group "handled" once one joins two of its spellings (§3.5).
+DECISION_CONFIRMED = "confirmed"
 
 # Rule status values in the ledger (§3.4 「已通过」: checked-and-clean and
 # could-not-check are different states and must never both render as a tick).
@@ -214,52 +230,11 @@ SKIP_FEWER_THAN_TWO_SOURCES = "fewer_than_two_sources"
 SKIP_NO_NAMED_CONCEPTS = "no_named_concepts"
 
 # --------------------------------------------------------- ledger contract stamp
-# §7.4: after an upgrade the deployed ledgers have no ``findings`` row, and the
-# read side would report "a required artifact is missing" (red) on every
-# library until someone rebuilds. To tell "built before findings existed"
-# (grey, "not generated since the upgrade") from a genuinely missing artifact,
-# every ledger payload carries this stamp: the service stamps it, the store
-# write entry checks it, a missing key fails hard. A ledger row WITHOUT the key
-# was written before this contract existed.
-#
-# ⚠ Not wired yet: ``check_artifact_payloads`` does not call
-# ``check_ledger_contract`` until the producer (the findings publish step) stamps
-# every payload in the same commit — wiring the check first would fail every
-# rebuild.
-LEDGER_CONTRACT_KEY = "ledger_contract"
-LEDGER_CONTRACT_VERSION = 1
-
-
-def stamp_ledger_contract(payloads: Mapping[str, dict]) -> Dict[str, dict]:
-    """Return a copy of ``payloads`` with the contract stamp on every kind."""
-    return {
-        kind: {**payload, LEDGER_CONTRACT_KEY: LEDGER_CONTRACT_VERSION}
-        for kind, payload in payloads.items()
-    }
-
-
-def check_ledger_contract(payloads: Mapping[str, Mapping[str, object]]) -> None:
-    """Store write entry: every ledger payload must carry the current stamp.
-
-    Stamping and checking live in different functions on purpose (a guard that
-    stamps and checks in one place is always true). ``bool`` is rejected
-    explicitly — ``True`` would pass ``isinstance(value, int)`` as 1."""
-    for kind in sorted(payloads):
-        value = payloads[kind].get(LEDGER_CONTRACT_KEY)
-        if isinstance(value, bool) or value != LEDGER_CONTRACT_VERSION:
-            raise ValueError(
-                f"KG 分析产物账本:{kind} 的 payload 缺少或带错了 {LEDGER_CONTRACT_KEY}"
-                f"(应为 {LEDGER_CONTRACT_VERSION},见 stamp_ledger_contract)。少了它,"
-                "读侧就分不清「升级后还没生成」与「本该有却缺失」"
-            )
-
-
-def ledger_row_predates_findings(payload: Mapping[str, object]) -> bool:
-    """True when this ledger row was written before the findings contract
-    existed — the read side's "upgrade pending" (grey) evidence for a ledger
-    that lacks ``findings``."""
-    return LEDGER_CONTRACT_KEY not in payload
-
+# §7.4: every ledger payload carries ``LEDGER_CONTRACT_KEY`` (the service stamps
+# it, the store write entry ``check_artifact_payloads`` checks it); a ledger row
+# WITHOUT the key was written before findings existed — the read side's
+# "upgrade pending" (grey). The stamp is a property of the whole artifact
+# ledger, so it lives in ``kg_analysis_contracts``; re-exported here unchanged.
 
 # ------------------------------------------------------------------- units
 # Unit codes. The first block reuses ``app.services.kg_analysis``'s vocabulary
@@ -393,14 +368,13 @@ FINDING_EVIDENCE_UNITS: Dict[str, Dict[str, str]] = {
 }
 
 # ------------------------------------------------------------------ rows
-# Column names of one detail row (``kg_analysis_findings``, §8.2). The
-# ``first_seen_*`` pair is filled by ``finalize_findings`` inside the publish
-# transaction; "built at" is the ledger row's seq, never per row.
-FINDING_ROW_FIELDS: Tuple[str, ...] = (
-    "rule_id", "subject_key", "subject_kind", "subject_label", "subject_refs",
-    "severity", "impact_objects", "evidence",
-    "first_seen_kg_seq", "first_seen_cluster_seq",
-)
+# The detail-row columns are ``FINDING_ROW_FIELDS`` (imported above from the
+# storage contract). The ``first_seen_*`` pair is filled by ``finalize_findings``
+# inside the publish transaction; "built at" is the ledger row's seq, never per row.
+# The engine's per-rule cap times the rules that persist rows must fit the
+# storage cap ``KG_FINDINGS_ROWS_MAX`` (pinned by
+# ``test_persisted_findings_fit_the_storage_cap``): the store write entry fails
+# hard above it, and the publish read relies on it to read the whole detail.
 
 
 def finding_sort_key(row: Mapping[str, object]) -> Tuple[int, int, str, str]:

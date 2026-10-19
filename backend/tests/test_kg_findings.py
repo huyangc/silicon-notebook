@@ -1215,11 +1215,25 @@ def test_ledger_contract_stamp():
     assert ledger_row_predates_findings(stamped["a"]) is False
 
 
-def test_findings_kind_is_named_but_not_yet_registered():
-    """Registration lands with the producer (otherwise every rebuild fails the
-    "required kind missing" guard); until then the name exists on its own."""
+def test_findings_kind_is_registered_with_its_producer():
+    """Registered in the same commit as the producer (`_compute_kg_analysis`
+    + the publish step): a required artifact that reads ``concept_clusters``
+    (cluster-dependent) but NOT the board partition — a board recast does not
+    void it, and the backfill path stamps it with an integer merge generation."""
+    from app.domain.kg_analysis_contracts import (
+        BOARD_DEPENDENT_ARTIFACT_KINDS, CLUSTER_DEPENDENT_ARTIFACT_KINDS,
+        OPTIONAL_ARTIFACT_KINDS, REQUIRED_ARTIFACT_KINDS,
+    )
+    from app.services.kg_analysis_precompute import stamp_cluster_seq
+
     assert ARTIFACT_FINDINGS == "findings"
-    assert ARTIFACT_FINDINGS not in ARTIFACT_KINDS
+    assert ARTIFACT_FINDINGS in ARTIFACT_KINDS
+    assert ARTIFACT_FINDINGS in REQUIRED_ARTIFACT_KINDS
+    assert ARTIFACT_FINDINGS not in OPTIONAL_ARTIFACT_KINDS
+    assert ARTIFACT_FINDINGS in CLUSTER_DEPENDENT_ARTIFACT_KINDS
+    assert ARTIFACT_FINDINGS not in BOARD_DEPENDENT_ARTIFACT_KINDS
+    stamped = stamp_cluster_seq({ARTIFACT_FINDINGS: {}}, 7, partition_rebuilt=False)
+    assert stamped[ARTIFACT_FINDINGS][CLUSTER_SEQ_PAYLOAD_KEY] == 7
 
 
 # ===================================================================== settings
