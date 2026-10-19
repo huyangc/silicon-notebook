@@ -35,7 +35,8 @@ stored merge decisions match by seed exactly as they do in production.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 from app.domain.kg_merge_seed import concept_seed_v1
@@ -61,6 +62,39 @@ SECRETS = (KNOWHOW_SECRET, KNOWHOW_HIDDEN_SEED_NAME, KNOWHOW_ONLY_NAME)
 
 def canonical_of(name: str) -> str:
     return "K-" + concept_seed_v1(name)
+
+
+EXPECTED_SNAPSHOT = Path(__file__).with_name("fixtures") / "kg_findings_world_expected.json"
+
+
+def world_snapshot(repo, notebook_id: str) -> dict:
+    """What a backend published and serves for the world, minus the two
+    timestamps (``created_at`` / ``generated_at``): the detail rows, the
+    findings ledger payload, the community_edges payload's S3 numbers, the
+    overview summary and every zone's page. Both backends must produce this
+    byte for byte (``EXPECTED_SNAPSHOT``)."""
+    store = repo._runtime.unified_kg
+    with store.read_snapshot() as db:
+        ledger = store.kg_analysis_artifact_rows(db, notebook_id)
+        rows = store.kg_analysis_finding_rows(db, notebook_id)
+    service = repo._runtime.kg_analysis
+    summary = dict(asdict(service.overview(notebook_id).findings_summary))
+    summary.pop("created_at")
+    pages = {}
+    for zone in ("open", "passed", "dismissed"):
+        page = asdict(service.findings_page(notebook_id, zone=zone))
+        page.pop("generated_at")
+        page.pop("notebook_id")
+        pages[zone] = page
+    edges = ledger["community_edges"]["payload"]
+    return json.loads(json.dumps({
+        "rows": rows,
+        "payload": ledger["findings"]["payload"],
+        "board_structure": {key: edges[key]
+                            for key in ("boards_in_giant", "boards_equal_component")},
+        "summary": summary,
+        "pages": pages,
+    }, sort_keys=True))
 
 
 @dataclass

@@ -456,6 +456,19 @@ def test_the_graph_scan_counts_relation_rows_per_source(repo):
     }
 
 
+def test_the_world_snapshot_matches_the_fixture_both_backends_share(repo):
+    """T10 parity: SQLite publishes and serves exactly ``EXPECTED_SNAPSHOT`` — the
+    same file ``tests/postgres/test_kg_findings_publish_pg.py`` compares the
+    PostgreSQL run against, so the two backends are held to byte-identical rows,
+    payload, summary and pages, not to "something plausible each"."""
+    from tests.kg_findings_world import EXPECTED_SNAPSHOT, world_snapshot
+
+    world = seed_world(repo, postgres=False)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(world.notebook_id)
+    expected = json.loads(EXPECTED_SNAPSHOT.read_text(encoding="utf-8"))
+    assert world_snapshot(repo, world.notebook_id) == expected
+
+
 def test_persisted_findings_fit_the_storage_cap():
     """The engine's per-rule cap times the rules that persist rows must fit the
     store's per-notebook row cap: the write entry fails hard above it, and the
