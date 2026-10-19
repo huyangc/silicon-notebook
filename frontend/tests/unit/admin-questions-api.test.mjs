@@ -26,7 +26,7 @@ test("调用方式筛选以 submitted_via 查询参数发出，未选时不带�
   globalThis.fetch = async (url) => {
     urls.push(new URL(String(url), "http://localhost"));
     return new Response(JSON.stringify({
-      items: [], stats: { total: 0, asks: 0, reports: 0, active_users: 0, global_asks: 0 },
+      items: [], stats: { total: 0, asks: 0, reports: 0, active_users: 0, global_asks: 0, feedback_useful: 0, feedback_not_useful: 0, global_feedback_useful: 0, global_feedback_not_useful: 0 },
       total: 0, offset: 0, limit: 50,
     }), { status: 200, headers: { "Content-Type": "application/json" } });
   };
@@ -50,7 +50,7 @@ test("提问项的 output 字段原样透传，缺省时保持缺省", async () 
       { type: "ask", id: "a1", output: "evidence" },
       { type: "ask", id: "a2" },
     ],
-    stats: { total: 2, asks: 2, reports: 0, active_users: 1, global_asks: 0 },
+    stats: { total: 2, asks: 2, reports: 0, active_users: 1, global_asks: 0, feedback_useful: 0, feedback_not_useful: 0, global_feedback_useful: 0, global_feedback_not_useful: 0 },
     total: 2, offset: 0, limit: 50,
   }), { status: 200, headers: { "Content-Type": "application/json" } });
   try {
@@ -68,7 +68,7 @@ test("范围筛选以 scope 查询参数发出，未选时不带该参数", asyn
   globalThis.fetch = async (url) => {
     urls.push(new URL(String(url), "http://localhost"));
     return new Response(JSON.stringify({
-      items: [], stats: { total: 0, asks: 0, reports: 0, active_users: 0, global_asks: 0 },
+      items: [], stats: { total: 0, asks: 0, reports: 0, active_users: 0, global_asks: 0, feedback_useful: 0, feedback_not_useful: 0, global_feedback_useful: 0, global_feedback_not_useful: 0 },
       total: 0, offset: 0, limit: 50,
     }), { status: 200, headers: { "Content-Type": "application/json" } });
   };

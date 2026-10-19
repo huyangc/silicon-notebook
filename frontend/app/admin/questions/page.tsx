@@ -1,7 +1,7 @@
 "use client";
 
-import { FileText, Globe, MessageCircleQuestion, Search, Users } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { FileText, Globe, MessageCircleQuestion, Search, ThumbsDown, ThumbsUp, Users } from "lucide-react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 import { fetchMe } from "../../auth.ts";
 import { PageHeader } from "../../components/PageHeader.tsx";
@@ -48,6 +48,21 @@ function statusLabel(status: string): string {
     intent_ready: "待确认问题", outline_ready: "待确认大纲",
   };
   return labels[status] ?? "状态未知";
+}
+
+/** 👍 / 👎 汇总卡片:按当前筛选统计,含笔记本内反馈与全局问答评分;
+ *  全局那一份在数字下方注明(只在有时出现)。 */
+function FeedbackStat({ icon, label, total, global }: { icon: ReactNode; label: string; total: number; global: number }) {
+  return (
+    <article>
+      {icon}
+      <div>
+        <strong>{total}</strong>
+        <span>{label}</span>
+        {global > 0 && <span className="questions-stats-note">其中全局问答 {global} 条</span>}
+      </div>
+    </article>
+  );
 }
 
 export default function AdminQuestionsPage() {
@@ -227,6 +242,8 @@ export default function AdminQuestionsPage() {
               <article><FileText size={19} /><div><strong>{state.page.stats.reports}</strong><span>深度报告</span></div></article>
               <article><Globe size={19} /><div><strong>{state.page.stats.global_asks}</strong><span>全局问答</span></div></article>
               <article><Users size={19} /><div><strong>{state.page.stats.active_users}</strong><span>活跃用户</span></div></article>
+              <FeedbackStat icon={<ThumbsUp size={19} />} label="有用" total={state.page.stats.feedback_useful} global={state.page.stats.global_feedback_useful} />
+              <FeedbackStat icon={<ThumbsDown size={19} />} label="需改进" total={state.page.stats.feedback_not_useful} global={state.page.stats.global_feedback_not_useful} />
             </section>
 
             <section className={busy ? "questions-results busy" : "questions-results"} aria-busy={busy}>

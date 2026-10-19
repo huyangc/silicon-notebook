@@ -863,8 +863,11 @@ export type KnowledgeRef = { id: string; object_type: string; headline: string; 
 export type DuplicateGroup = { object_type: string; similarity: number; members: KnowledgeRef[] };
 export type NotebookAnalytics = {
   answers_total: number;
+  /** 👍 / 👎 已含归入本库的全局问答评分;`*_global` 是其中全局问答那一份。 */
   feedback_useful: number;
   feedback_not_useful: number;
+  feedback_useful_global?: number;
+  feedback_not_useful_global?: number;
   usefulness_rate: number;
   low_rated_questions: string[];
   candidate_counts: Record<string, number>;

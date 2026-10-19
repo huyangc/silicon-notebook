@@ -28,7 +28,9 @@ def touched_notebook_ids(
     return [value for value in ordered if value in touched]
 
 
-def attribution_sql(*, dialect: str, marker: str) -> tuple[str, int]:
+def attribution_sql(
+    *, dialect: str, marker: str, document: str | None = None,
+) -> tuple[str, int]:
     """The SAME rule as ``touched_notebook_ids``, as a WHERE fragment over one
     ``global_ask_jobs`` row's ``payload_json`` so it applies BEFORE ``LIMIT``
     (a post-``LIMIT`` filter would starve a library whose newest runs merely
@@ -38,23 +40,31 @@ def attribution_sql(*, dialect: str, marker: str) -> tuple[str, int]:
     placeholder). ``dialect`` is ``"sqlite"`` or ``"postgres"``; the caller
     keeps applying ``touched_notebook_ids`` afterwards, and a parity test pins
     the two spellings against the Python rule.
+
+    ``document`` is the SQL expression the fragment reads the payload from:
+    by default the row's own ``payload_json`` (SQLite) / ``payload_json::jsonb``
+    (PostgreSQL). A PostgreSQL caller that already parsed the payload once
+    (a ``payload_json::jsonb AS p`` subquery) passes ``"p"`` so the fragment's
+    several key reads do not each re-parse the whole text.
     """
     if dialect == "sqlite":
+        doc = document or "payload_json"
+
         def has(key: str) -> str:
             return (
-                f"(json_type(json_extract(payload_json,'$.{key}')) = 'array' AND EXISTS("
-                f"SELECT 1 FROM json_each(json_extract(payload_json,'$.{key}')) p WHERE p.value = {marker}))"
+                f"(json_type(json_extract({doc},'$.{key}')) = 'array' AND EXISTS("
+                f"SELECT 1 FROM json_each(json_extract({doc},'$.{key}')) p WHERE p.value = {marker}))"
             )
         def empty(key: str) -> str:
             return (
-                f"(json_type(json_extract(payload_json,'$.{key}')) IS NOT 'array' OR "
-                f"json_array_length(json_extract(payload_json,'$.{key}')) = 0)"
+                f"(json_type(json_extract({doc},'$.{key}')) IS NOT 'array' OR "
+                f"json_array_length(json_extract({doc},'$.{key}')) = 0)"
             )
         skipped = (
-            "NOT EXISTS(SELECT 1 FROM json_each(json_extract(payload_json,'$.skipped_notebooks')) s "
+            f"NOT EXISTS(SELECT 1 FROM json_each(json_extract({doc},'$.skipped_notebooks')) s "
             f"WHERE json_extract(s.value,'$.notebook_id') = {marker})"
         )
-        not_an_array = "json_type(json_extract(payload_json,'$.skipped_notebooks')) IS NOT 'array'"
+        not_an_array = f"json_type(json_extract({doc},'$.skipped_notebooks')) IS NOT 'array'"
         # Participation is a MANDATORY outer conjunct (the Python rule always
         # intersects attribution with ``resolved``): it is the one branch a
         # planner can answer from an index, and inside an OR it could not
@@ -68,17 +78,19 @@ def attribution_sql(*, dialect: str, marker: str) -> tuple[str, int]:
         )
         return fragment, 4
     if dialect == "postgres":
+        doc = document or "payload_json::jsonb"
+
         def has(key: str) -> str:
-            return f"(payload_json::jsonb->'{key}') @> jsonb_build_array({marker}::text)"
+            return f"({doc}->'{key}') @> jsonb_build_array({marker}::text)"
         def empty(key: str) -> str:
             return (
-                f"(jsonb_typeof(payload_json::jsonb->'{key}') IS DISTINCT FROM 'array' OR "
-                f"jsonb_array_length(payload_json::jsonb->'{key}') = 0)"
+                f"(jsonb_typeof({doc}->'{key}') IS DISTINCT FROM 'array' OR "
+                f"jsonb_array_length({doc}->'{key}') = 0)"
             )
         skipped = (
             "NOT EXISTS(SELECT 1 FROM jsonb_array_elements("
-            "CASE WHEN jsonb_typeof(payload_json::jsonb->'skipped_notebooks') = 'array' "
-            "THEN payload_json::jsonb->'skipped_notebooks' ELSE '[]'::jsonb END) s "
+            f"CASE WHEN jsonb_typeof({doc}->'skipped_notebooks') = 'array' "
+            f"THEN {doc}->'skipped_notebooks' ELSE '[]'::jsonb END) s "
             f"WHERE s->>'notebook_id' = {marker})"
         )
         # Same shape as SQLite: the indexable participation containment

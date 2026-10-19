@@ -340,8 +340,15 @@ class MountedByCount(BaseModel):
 
 class NotebookAnalytics(BaseModel):
     answers_total: int = 0
+    # 👍 / 👎 include the global Ask ratings attributed to this notebook (the
+    # libraries a run searched or cited; ``global_ask_attribution``); the
+    # ``*_global`` fields are that subset. ``low_rated_questions`` lists
+    # notebook questions only -- a global question's text is never shown here,
+    # only counted in ``feedback_not_useful_global``.
     feedback_useful: int = 0
     feedback_not_useful: int = 0
+    feedback_useful_global: int = 0
+    feedback_not_useful_global: int = 0
     usefulness_rate: float = 0.0
     low_rated_questions: List[str] = Field(default_factory=list)
     knowledge_counts: Dict[str, int] = Field(default_factory=dict)

@@ -36,6 +36,12 @@ export type AdminQuestionStats = {
   active_users: number;
   /** 当前筛选下的全局问答数，是 `asks` 的子集。 */
   global_asks: number;
+  /** 当前筛选下这些提问收到的 👍 / 👎(笔记本内反馈 + 全局问答评分)。 */
+  feedback_useful: number;
+  feedback_not_useful: number;
+  /** 上面两个数里来自全局问答的那一份。 */
+  global_feedback_useful: number;
+  global_feedback_not_useful: number;
 };
 
 export type AdminQuestionsPage = {

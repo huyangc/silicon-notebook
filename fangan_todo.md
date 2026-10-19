@@ -125,17 +125,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       会显示 `模型未配置` 的失败原因。**状态页不显示未绑定工作负载这件事本身仍成立**，放行档下
       依然看不出来：后续可在 `/model-services/status` 的 payload 里带一份未绑定清单，并在该面板
       加一行显示；本期只登记，不做前端。
-- [ ] **全局回答的 👍/👎 反馈仍未进管理端提问分析 / 笔记本分析口径的聚合**：`POST
-      /global-ask/jobs/{job_id}/feedback` 把评分写进该任务 `global_ask_jobs.payload_json` 的
-      `feedback` 字段（首次写入为准），并发一个内容无关事件 `global_ask_feedback`；记录口径
-      对齐改动（本次改动，SQLite v81 / PostgreSQL 0061 给 `global_ask_jobs` 新增的是
-      `submitted_via`/`asked_at`/`updated_at`/`error_detail` 四个物理列，不含反馈）顺带给同一个
-      `payload_json` 补上了 `feedback_at`（写入反馈的瞬间，与 `feedback` 同一次首写、随 patch
-      一起落进 `payload_json`，不是新的 schema 列），但反馈本身仍只落在 `global_ask_jobs`，不进
-      笔记本内问答用的 `feedback` 表，因此管理端「提问分析」报告与笔记本分析面板现有的反馈统计
-      仍看不到这批数据、也没有聚合面。要并进同一份统计口径，需要决定是新增一条跨表聚合，还是
-      把全局反馈也镜像写一份进 `feedback` 表（后者要解决它没有 `answers` 行外键可挂的问题）；
-      这是产品决定，尚未拍板。
 
 ### 知识图谱
 

@@ -34,6 +34,11 @@ from tests.activity_parity_cases import (
 )
 from tests.clock_testkit import recent_datetime
 
+from app.repositories.global_ask_feedback_sql import ADMIN_QUESTION_FEEDBACK_KEYS
+
+# No question on these pages received any rating.
+NO_FEEDBACK = dict.fromkeys(ADMIN_QUESTION_FEEDBACK_KEYS, 0)
+
 
 pytestmark = pytest.mark.postgres_integration
 
@@ -167,7 +172,7 @@ def _insert_global_ask(connection, job_id, conv_id, user_id, created_at, *,
 
 @pytest.fixture
 def store(postgres_database, postgres_settings):
-    assert PostgresMigrator(postgres_database).migrate() == 75
+    assert PostgresMigrator(postgres_database).migrate() == 76
     return PostgresQueryStore(postgres_database, postgres_settings)
 
 
@@ -297,7 +302,7 @@ def test_admin_question_overview_combines_ask_and_report(postgres_database, stor
 
     result = store.list_admin_questions(query="稳定", limit=50)
     assert result["stats"] == {
-        "total": 1, "asks": 0, "reports": 1, "active_users": 1, "global_asks": 0,
+        "total": 1, "asks": 0, "reports": 1, "active_users": 1, "global_asks": 0, **NO_FEEDBACK,
     }
     assert result["items"][0]["id"] == "report-global"
     assert isinstance(result["items"][0]["created_at"], str)
@@ -321,7 +326,7 @@ def test_admin_question_overview_combines_ask_and_report(postgres_database, stor
 
     retained = store.list_admin_questions(limit=50)
     assert retained["stats"] == {
-        "total": 2, "asks": 1, "reports": 1, "active_users": 1, "global_asks": 0,
+        "total": 2, "asks": 1, "reports": 1, "active_users": 1, "global_asks": 0, **NO_FEEDBACK,
     }
     assert {item["id"] for item in retained["items"]} == {
         "ask-global", "report-global",
@@ -370,7 +375,7 @@ def test_admin_question_overview_submitted_via_filter_and_stats(
 
     everything = store.list_admin_questions(limit=50)
     assert everything["stats"] == {
-        "total": 5, "asks": 4, "reports": 1, "active_users": 1, "global_asks": 0,
+        "total": 5, "asks": 4, "reports": 1, "active_users": 1, "global_asks": 0, **NO_FEEDBACK,
     }
     by_id = {item["id"]: item for item in everything["items"]}
     assert by_id["ask-web"]["submitted_via"] == "web"
@@ -381,7 +386,7 @@ def test_admin_question_overview_submitted_via_filter_and_stats(
 
     mcp_only = store.list_admin_questions(submitted_via="mcp", limit=50)
     assert mcp_only["stats"] == {
-        "total": 2, "asks": 2, "reports": 0, "active_users": 1, "global_asks": 0,
+        "total": 2, "asks": 2, "reports": 0, "active_users": 1, "global_asks": 0, **NO_FEEDBACK,
     }
     assert {item["id"] for item in mcp_only["items"]} == {
         "ask-mcp", "ask-retained-mcp",
@@ -389,7 +394,7 @@ def test_admin_question_overview_submitted_via_filter_and_stats(
 
     web_only = store.list_admin_questions(submitted_via="web", limit=50)
     assert web_only["stats"] == {
-        "total": 2, "asks": 1, "reports": 1, "active_users": 1, "global_asks": 0,
+        "total": 2, "asks": 1, "reports": 1, "active_users": 1, "global_asks": 0, **NO_FEEDBACK,
     }
     assert {item["id"] for item in web_only["items"]} == {
         "ask-web", "report-web",

@@ -44,9 +44,17 @@ V78_AUTH_TABLES = {
 }
 
 
+def rollback_v96(db: sqlite3.Connection) -> None:
+    """Remove ``idx_global_ask_jobs_feedback``, the partial index SQLite
+    migration 96 added. Callers lower ``user_version`` themselves."""
+    db.execute("DROP INDEX idx_global_ask_jobs_feedback")
+
+
 def rollback_v95(db: sqlite3.Connection) -> None:
     """Remove what SQLite migration 95 added: ``global_ask_jobs.retained_until``
-    and its partial index. Callers lower ``user_version`` themselves."""
+    and its partial index. v96 is undone first (newest-first). Callers lower
+    ``user_version`` themselves."""
+    rollback_v96(db)
     db.execute("DROP INDEX idx_global_ask_jobs_retained")
     db.execute("ALTER TABLE global_ask_jobs DROP COLUMN retained_until")
 

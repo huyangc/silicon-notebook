@@ -746,9 +746,29 @@
               "title": "Asks",
               "type": "integer"
             },
+            "feedback_not_useful": {
+              "default": 0,
+              "title": "Feedback Not Useful",
+              "type": "integer"
+            },
+            "feedback_useful": {
+              "default": 0,
+              "title": "Feedback Useful",
+              "type": "integer"
+            },
             "global_asks": {
               "default": 0,
               "title": "Global Asks",
+              "type": "integer"
+            },
+            "global_feedback_not_useful": {
+              "default": 0,
+              "title": "Global Feedback Not Useful",
+              "type": "integer"
+            },
+            "global_feedback_useful": {
+              "default": 0,
+              "title": "Global Feedback Useful",
               "type": "integer"
             },
             "reports": {
@@ -8509,9 +8529,19 @@
               "title": "Feedback Not Useful",
               "type": "integer"
             },
+            "feedback_not_useful_global": {
+              "default": 0,
+              "title": "Feedback Not Useful Global",
+              "type": "integer"
+            },
             "feedback_useful": {
               "default": 0,
               "title": "Feedback Useful",
+              "type": "integer"
+            },
+            "feedback_useful_global": {
+              "default": 0,
+              "title": "Feedback Useful Global",
               "type": "integer"
             },
             "knowledge_counts": {
