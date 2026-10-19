@@ -437,6 +437,42 @@ def test_the_enumeration_note_shows_the_same_string_for_a_document_every_round()
     assert first == second == "，标题: 《X（第 2 篇）》"
 
 
+def test_the_whole_enumeration_note_reads_the_run_book_not_a_fresh_one():
+    """`_enumeration_note(chains, numbering)` 用传入的 run 级发号簿:链 A 在两轮之间
+    续跑插队后,账目里 r1 仍是「第 2 篇」(现算会把插队的 a2 排成第 2 篇)。"""
+    class _Coverage:
+        returned_total = 1
+        total = None
+        complete = False
+
+    def _chain(items):
+        class _Outcome:
+            collection = "sources"
+            kind = ""
+            local_only = False
+            source_scoped = False
+            coverage = _Coverage()
+
+        class _C:
+            outcome = _Outcome()
+            state = "open"
+
+        _C.outcome.items = items
+        return _C()
+
+    a1, r1 = _Row("X", "a1"), _Row("X", "r1")
+    chain_a = _chain([a1])
+    chains = {("a",): chain_a, ("b",): _chain([a1, r1])}
+    numbering = rr._RosterNumbering()
+    before = rr._enumeration_note(chains, numbering)
+    chain_a.outcome.items.append(_Row("X", "a2"))
+    after = rr._enumeration_note(chains, numbering)
+    assert "《X（第 1 篇）》《X（第 2 篇）》" in before
+    # 链 B 的账目:a1 第 1 篇、r1 第 2 篇,与续跑前一致;链 A 新增的 a2 是第 3 篇。
+    assert "《X（第 1 篇）》《X（第 2 篇）》" in after.split("、")[1]
+    assert "《X（第 1 篇）》《X（第 3 篇）》" in after.split("、")[0]
+
+
 # ------------------------------------------- 已读账目 / 轨迹 / 枚举名解析(评审 P2)
 
 
