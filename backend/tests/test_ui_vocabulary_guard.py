@@ -834,18 +834,23 @@ def test_不在轨迹摘要扫描面上的字符串不误报(tmp_path, code):
     assert scan_trace(tmp_path, code) == [], f"误报:{code}"
 
 
-def test_轨迹摘要的例外按逐字全串匹配(tmp_path):
-    """登记的例外只放行**那一整句**,改一个字就重新违规。
-
-    没有这条,`GRANDFATHERED_TRACE_SUMMARIES` 会退化成一条「凡是含这个词的都放行」
-    的隐形豁免——那正是这条通道要根治的东西。
-    """
-    frozen = next(iter(guard.GRANDFATHERED_TRACE_SUMMARIES))
-    assert scan_trace(
-        tmp_path, f'TraceStep(step_type="skip", summary="{frozen}")') == []
-    assert scan_trace(
-        tmp_path, f'TraceStep(step_type="skip", summary="{frozen}!")'), (
-        "例外不是全串匹配 —— 改一个字就该重新违规")
+def test_无图披露步文案改回构建会重新违规(tmp_path):
+    """变异验证:这条文案曾是唯一的登记例外(逐字全串豁免)。例外撤掉之后,把
+    `kg_unavailable` 披露步改回「尚未构建知识图谱」,守卫必须红——否则说明豁免
+    又以别的形式留了下来。"""
+    module = next(
+        p for p in guard.TRACE_SUMMARY_MODULES if p.name == "reasoning_retrieval.py"
+    )
+    src = module.read_text(encoding="utf-8")
+    assert "本笔记本尚未整理知识图谱,本轮只用原文检索与集合清单" in src, (
+        "文案又漂了,本变异样本需同步")
+    assert not hasattr(guard, "GRANDFATHERED_TRACE_SUMMARIES")
+    mutated = tmp_path / "reasoning_retrieval_mutated.py"
+    mutated.write_text(
+        src.replace("尚未整理知识图谱,本轮", "尚未构建知识图谱,本轮"), encoding="utf-8"
+    )
+    hits = [term for _line, term, _text in guard.scan_trace_summaries(mutated)[1]]
+    assert hits, "改回「构建知识图谱」后守卫应报红"
 
 
 def test_间接写法的轨迹摘要计入站点数(tmp_path):

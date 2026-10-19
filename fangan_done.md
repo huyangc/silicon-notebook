@@ -501,6 +501,12 @@ Agent profile、opaque token、scope/allowlist/过期与撤销、公开 onboardi
 - **模型 JSON 校验对齐与 JSON Schema 能力协商（PR #914）。** 模型回复通过共享 JSON 边界后仍可能被各消费方读歪（数字 id 覆盖字符串 id、容器被当成正文、动作越出词表等），改为在各自的消费方收窄并补用例；每个模型服务在首次调度使用时协商一次 JSON Schema 能力，支持的服务走严格 wire schema 加本地校验，不支持或无法确认的保持普通 JSON。当前合同见[模型 JSON 恢复与流保活](docs/product-and-api_zh.md#模型-json-恢复与流保活)与[部署][deploy]。
 - **JSON hint 与严格投影、消费方对齐（PR #916）。** 对 #914 的逐条复核：每个 hint 与其提示词、投影出的严格 schema 和消费方三方对齐——修掉一处真实拒收（Agent profile 的 `retire:false`）、提示词里「省略」与严格 schema 的矛盾（改为「写 null」）、根字段枚举误收空串；并按约定简化回复形状（KG 抽取的边改按节点数组下标引用、refine 改为 `{"drop":[…]}`、reflect 收成单一 `query` 等）。hint 文本是模型缓存键的一部分，升级后第一次建图会对每个窗口重新调用模型。回归入口：[hint 投影快照](backend/tests/test_model_schema_hint_snapshots.py)。
 
+## 61. 剩余待办收尾（2026-10-19 起）
+
+2026-10-19 起按「先做能直接做的、拍板项逐条过」推进的收尾项，每项一条。
+
+- **无图披露步文案对齐界面词汇表（PR #920）。** 笔记本没有可用知识图谱时，推理轨迹里的披露步由「本笔记本尚未构建知识图谱,本轮只用原文检索与集合清单」改为「本笔记本尚未整理知识图谱,本轮只用原文检索与集合清单」（半角逗号不变），与[界面词汇表](docs/ui-vocabulary.md)「建图 → 整理」一致。[产品/API][product]「尚未构建知识图谱的笔记本」一节里逐字冻结的那句、仓库黄金 fixture 与既有用例同批改写；界面词汇守卫中逐字全串的登记例外 `GRANDFATHERED_TRACE_SUMMARIES` 随之删除，守卫对该句改回「构建」重新报红。回归入口：[界面词汇守卫](backend/tests/test_ui_vocabulary_guard.py)、[推理检索](backend/tests/test_reasoning_retrieval.py)、[问答黄金契约](backend/tests/test_ask_repository_golden.py)。
+
 [product]: docs/product-and-api_zh.md
 [flow]: docs/product-and-api_zh.md#产品流程
 [retrieval]: docs/product-and-api_zh.md#检索模式问答
