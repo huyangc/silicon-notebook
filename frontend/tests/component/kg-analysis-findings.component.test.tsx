@@ -801,14 +801,16 @@ test("失效令牌变化（来源被删、补上关联跑完……）时三页�
     .toEqual(["dismissed", "open", "passed"]);
 });
 
-test("换库时问题清单当场清空，不先渲染一帧上一个库的问题", async () => {
+test("换库时问题清单当场清空：新库的报告先回来、问题清单还在路上时，也不摆上一个库的问题", async () => {
   const view = renderPanel();
   await ready();
-  vi.mocked(fetchKgAnalysis).mockReturnValue(new Promise(() => {}));
+  vi.mocked(fetchKgAnalysis).mockResolvedValue(report({ notebook_id: "nb-2" }));
   vi.mocked(fetchKgFindings).mockReturnValue(new Promise(() => {}));
   view.rerender(<KgAnalysisView notebookId="nb-2" onClose={() => undefined} canAnalyze onAnalyze={() => undefined} />);
   expect(screen.queryByText("06_LMCache_mineru.md")).toBeNull();
-  expect(screen.getByText("正在读取报告…")).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("heading", { name: "报告状态", level: 3 })).toBeInTheDocument());
+  expect(screen.queryByText("06_LMCache_mineru.md")).toBeNull();
+  expect(within(zone(/^待处理/)).getByText("正在读取问题清单…")).toBeInTheDocument();
 });
 
 test("待处理分页：按 offset 取下一页", async () => {
