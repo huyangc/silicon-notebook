@@ -938,6 +938,60 @@ def test_delete_notebook_kg_removes_this_notebooks_kg_analysis_artifacts_ledger(
     assert counts["kg_analysis_artifacts"] == 2
 
 
+def test_delete_notebook_kg_clears_findings_and_relink_marks_keeps_dismissals(repo):
+    """SQLite v97 (design 2026-10-19 §8.5 item 5): the findings detail goes
+    with its ledger; a ``relink_attempted`` mark records a kg_mutation_seq the
+    reset takes back to 0, so it goes too; a member's ``dismissed`` mark is a
+    judgment about a source and stays. The state reset empties
+    ``cluster_code_version`` together with ``cluster_input_version``. Another
+    notebook's rows are untouched.
+
+    变异锚点:从清空序列里去掉 kg_analysis_findings / 去掉 relink 标记那条
+    删除 / 把它改成不带 kind 的整表删除 / 状态重置漏掉 cluster_code_version,
+    本条都必须报红。"""
+    from app.services.sqlite_repository import _now
+
+    rt = repo._runtime
+    nb = repo.create_notebook(NotebookCreate(name="findings delete"))
+    other = repo.create_notebook(NotebookCreate(name="findings bystander"))
+    now = _now()
+    with rt.database.write() as db:
+        for notebook_id in (nb.id, other.id):
+            db.execute(
+                "INSERT INTO kg_analysis_findings (notebook_id, rule_id, subject_key, "
+                "subject_kind, severity, first_seen_kg_seq, first_seen_cluster_seq) "
+                "VALUES (?, 'F1', 'src-1', 'source', 'high', 4, 2)", (notebook_id,))
+            db.execute(
+                "INSERT INTO kg_analysis_marks (notebook_id, rule_id, subject_key, kind, "
+                "at_kg_seq, actor_user_id, created_at) VALUES "
+                "(?, 'F1', 'src-1', 'dismissed', 4, 'user-local', ?), "
+                "(?, 'F5', 'notebook', 'relink_attempted', 4, '', ?)",
+                (notebook_id, now, notebook_id, now))
+            db.execute(
+                "UPDATE unified_kg_state SET cluster_input_version='v-in', "
+                "cluster_code_version='code-1' WHERE notebook_id=?", (notebook_id,))
+
+    counts = rt.knowledge_lifecycle.delete_notebook_kg(nb.id)
+
+    with rt.database.connect() as db:
+        def rows(sql, notebook_id):
+            return [tuple(r) for r in db.execute(sql, (notebook_id,)).fetchall()]
+
+        findings = "SELECT rule_id, subject_key FROM kg_analysis_findings WHERE notebook_id=?"
+        marks = ("SELECT rule_id, kind FROM kg_analysis_marks WHERE notebook_id=? "
+                 "ORDER BY kind")
+        state = ("SELECT cluster_input_version, cluster_code_version FROM "
+                 "unified_kg_state WHERE notebook_id=?")
+        assert rows(findings, nb.id) == []
+        assert rows(marks, nb.id) == [("F1", "dismissed")]
+        assert rows(state, nb.id) == [("", "")]
+        assert rows(findings, other.id) == [("F1", "src-1")]
+        assert rows(marks, other.id) == [("F1", "dismissed"), ("F5", "relink_attempted")]
+        assert rows(state, other.id) == [("v-in", "code-1")]
+    assert counts["kg_analysis_findings"] == 1
+    assert counts["kg_analysis_marks"] == 1
+
+
 def test_delete_notebook_kg_upserts_when_the_state_row_was_already_missing(repo):
     """R1 (P0-2, post-review): scripts/merge_dbs.py's ``KG_STATE_TABLES``
     deliberately DELETEs a merged notebook's ``unified_kg_state`` row so the

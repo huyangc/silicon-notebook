@@ -96,6 +96,10 @@ _GRAPH_RESET_TABLES = frozenset({
     # rows here makes the post-clear read report ABSENCE_NEVER_COMPUTED
     # instead, which is the truthful answer.
     "kg_analysis_artifacts",
+    # kg_analysis_findings (SQLite v97 / PostgreSQL 0077): the detail of the
+    # ledger's findings kind, one unit with its ledger row -- same reasoning
+    # as the two detail tables below.
+    "kg_analysis_findings",
     # kg_community_edges / kg_source_profiles: the DETAIL tables the ledger's
     # two board-dependent kinds describe. R1 (P2-1, post-review): the ledger
     # row and its detail rows are a documented single unit —
@@ -861,9 +865,17 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int, bool], ...] = (
     ("concept_clusters", "notebook_id = %s", 1, True),
     ("concept_merge_candidates", "notebook_id = %s", 1, True),
     ("kg_analysis_artifacts", "notebook_id = %s", 1, True),
+    ("kg_analysis_findings", "notebook_id = %s", 1, True),
     ("kg_community_edges", "notebook_id = %s", 1, True),
     ("kg_relation_completion_state", "notebook_id = %s", 1, True),
     ("kg_source_profiles", "notebook_id = %s", 1, True),
+    # SQLite v97 / PostgreSQL 0077: a relink-attempt mark records the
+    # kg_mutation_seq "补上关联" last finished at; the delete takes that seq
+    # back to 0 and the relations it added away, so the mark goes with the
+    # graph. A member's 'dismissed' mark is a judgment about a source, not
+    # graph state, and stays: after the next rebuild the same finding is
+    # dismissed again.
+    ("kg_analysis_marks", "notebook_id=%s AND kind='relink_attempted'", 1, True),
     (
         "knowledge_embeddings",
         "notebook_id=%s AND NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
@@ -1157,6 +1169,13 @@ class KnowledgeStore:
                 (notebook_id,),
             )
             counts[table] = cur.rowcount
+        # kg_analysis_marks: only the relink-attempt marks (registry comment).
+        cur = db.execute(
+            "DELETE FROM kg_analysis_marks WHERE notebook_id=%s "
+            "AND kind='relink_attempted'",
+            (notebook_id,),
+        )
+        counts["kg_analysis_marks"] = cur.rowcount
         cur = db.execute(
             "DELETE FROM knowledge_embeddings WHERE notebook_id=%s "
             "AND NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
@@ -1240,6 +1259,9 @@ class KnowledgeStore:
         # ``derived_generation_counter`` 刻意 NOT 重置(UPDATE 分支不出现):
         # 它是版本键防混叠的单调源,与 kg_reset_epoch 同一条红线——回卷它,
         # 删除+重建就会重爬同一段代号,跨翻转在飞读者的宽限论证全部失效。
+        # cluster_code_version(v97/0077)随 cluster_input_version 一起清空:
+        # 两列合起来描述「上一次合并」,合并结果删掉了,两者都不再成立;
+        # INSERT 分支取列默认值 ''。
         cur = db.execute(
             "INSERT INTO unified_kg_state ("
             "notebook_id, dirty, kg_mutation_seq, cluster_mutation_seq, "
@@ -1249,7 +1271,7 @@ class KnowledgeStore:
             ") VALUES (%s, 0, 0, 0, '', NULL, 0, 0, 0, -1, -2, -2, 1, -1, %s) "
             "ON CONFLICT (notebook_id) DO UPDATE SET "
             "dirty=0, kg_mutation_seq=0, cluster_mutation_seq=0, "
-            "cluster_input_version='', last_rebuild_at=NULL, "
+            "cluster_input_version='', cluster_code_version='', last_rebuild_at=NULL, "
             "object_count=0, relation_count=0, cluster_count=0, "
             "community_seq=-1, canonical_rel_seq=-2, mention_seq=-2, "
             "kg_reset_epoch=unified_kg_state.kg_reset_epoch+1, "

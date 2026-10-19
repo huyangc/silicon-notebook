@@ -117,7 +117,8 @@ def test_pg_the_end_state_counts_exclude_memory_by_index_probes(pg_world):
     with database.write() as db:
         captured = _CapturingConnection(db)
         UnifiedKgStore.finish_rebuild_state(
-            captured, world.nb, "version", 3, "2026-09-30T00:00:00+00:00", 0, input_seq=0)
+            captured, world.nb, "version", 3, "2026-09-30T00:00:00+00:00", 0, input_seq=0,
+            cluster_code_version="code")
         db.rollback()
     counts = [s for s in captured.statements if s[0].startswith("SELECT COUNT(*)")]
     assert len(counts) == 2, captured.statements

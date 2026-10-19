@@ -311,6 +311,11 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "UnifiedKgStore.scratch_vector_rows": DERIVED_LAYER,
         "UnifiedKgStore.stream_scratch_rows": DERIVED_LAYER,
         "UnifiedKgStore.relation_endpoint_name_rows": KEY_BOUNDED,
+        # KG analysis findings (v97/0077): sample display names, by the
+        # (source, canonical) keys the precompute holds; the statement also
+        # leaves out every object of a memory/knowhow source (the canonical name
+        # may come from one), the same NOT EXISTS as source_canonical_rows
+        "UnifiedKgStore.kg_finding_display_name_rows": KEY_BOUNDED,
         # retrieval legs
         "UnifiedKgStore.comention_peers": CEILING_BOUNDED,
         "_canonical_support_exists": CEILING_BOUNDED,

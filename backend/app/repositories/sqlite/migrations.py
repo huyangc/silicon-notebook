@@ -310,7 +310,13 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # json_extract(payload_json,'$.feedback'), holding only rated rows, so the
 # analytics / admin feedback counts read the rated global jobs without
 # parsing every payload. Index only. See ``_migration_96``.
-SCHEMA_VERSION = 96
+# v97 (paired with PostgreSQL 0077_kg_analysis_findings.sql) adds the KG
+# analysis findings detail table kg_analysis_findings (synced; its three
+# change-capture triggers come with it), the user-decision table
+# kg_analysis_marks (local; dismissed / relink_attempted) and
+# unified_kg_state.cluster_code_version (TEXT NOT NULL DEFAULT ''). No
+# backfill. See ``_migration_97``.
+SCHEMA_VERSION = 97
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
 # when v87 was written (a migration must not change meaning when the live
@@ -4831,7 +4837,12 @@ class SqliteMigrator:
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_community_members_sync_key
                     ON community_members(community_id, canonical_id);
             """)
-            for name, (_table, sql) in sqlite_trigger_sql().items():
+            # Pinned to v84's own table set: the manifest describes the
+            # current schema, and a table that became SYNCED later (v97's
+            # kg_analysis_findings) does not exist yet on a ladder that is
+            # only now running v84. Unpinned, CREATE TRIGGER would stop a
+            # from-scratch migration with "no such table".
+            for name, (_table, sql) in sqlite_trigger_sql(at_schema=84).items():
                 db.execute(f'DROP TRIGGER IF EXISTS "{name}"')
                 db.execute(sql)
 
@@ -5913,6 +5924,81 @@ class SqliteMigrator:
                 "                 ON global_ask_jobs(json_extract(payload_json,'$.feedback'))\n"
                 "                 WHERE json_extract(payload_json,'$.feedback') IN ('useful','not_useful')"
             )
+
+    def _migration_97(self) -> None:
+        """KG analysis findings storage, parity with PostgreSQL
+        ``0077_kg_analysis_findings.sql`` (design
+        docs/superpowers/specs/2026-10-19-kg-analysis-findings-design_zh.md
+        §8.2, §8.3, §五 S4). Schema only: nothing writes these until the
+        findings rules ship, so there is no backfill.
+
+        ``kg_analysis_findings`` is the per-problem detail of the ledger's
+        ``findings`` kind, handled exactly like ``kg_source_profiles``: one
+        row per ``(notebook_id, rule_id, subject_key)``, rewritten wholesale in
+        the same transaction as its ledger row. ``subject_refs`` is a JSON
+        list of the source ids the subject involves and ``evidence`` the JSON
+        object of the numbers the rule used; ``first_seen_*`` carry the two
+        generation lines the problem first appeared at (inherited across
+        rebuilds). Derived data: synced like the other analysis products, so
+        it also gets its three change-capture triggers here
+        (``TableSyncSpec.since_schema = 97``, see ``_migration_84``).
+
+        ``kg_analysis_marks`` holds USER decisions and system marks about a
+        problem, not a derived product: ``dismissed`` (a member marked it
+        normal) and ``relink_attempted`` (the generation "补上关联" last
+        finished at). A rebuild never rewrites it. Environment-local, like
+        ``concept_merge_candidates`` -- the other table of user decisions about
+        a graph -- so it is not synced and gets no capture trigger.
+
+        Both cascade with their notebook, the way every analysis product
+        does. Every primary-key column also carries an explicit ``NOT NULL``
+        (a SQLite rowid table accepts a NULL there, PostgreSQL does not).
+
+        ``unified_kg_state.cluster_code_version`` records the code component
+        of the last merge (cluster algorithm version and the two embedding
+        dimensions; ``kg_merge.cluster_code_version``), written beside
+        ``cluster_input_version`` by the rebuild end-write and by the
+        inputs-unchanged skip path. ``DEFAULT ''`` reads as "no merge recorded
+        under this code yet", which is the truth for every existing row.
+        """
+        # Local import for the same reason as _migration_84's: the generator
+        # reaches the PostgreSQL migration DDL and therefore psycopg.
+        from app.migration.sync.capture import sqlite_trigger_sql
+
+        with self._connect() as db:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS kg_analysis_findings (
+                    notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                    rule_id TEXT NOT NULL,
+                    subject_key TEXT NOT NULL,
+                    subject_kind TEXT NOT NULL,
+                    subject_label TEXT NOT NULL DEFAULT '',
+                    subject_refs TEXT NOT NULL DEFAULT '[]',
+                    severity TEXT NOT NULL,
+                    impact_objects INTEGER NOT NULL DEFAULT 0,
+                    evidence TEXT NOT NULL DEFAULT '{}',
+                    first_seen_kg_seq INTEGER NOT NULL,
+                    first_seen_cluster_seq INTEGER NOT NULL,
+                    PRIMARY KEY (notebook_id, rule_id, subject_key)
+                );
+                CREATE TABLE IF NOT EXISTS kg_analysis_marks (
+                    notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                    rule_id TEXT NOT NULL,
+                    subject_key TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK (kind IN ('dismissed', 'relink_attempted')),
+                    at_kg_seq INTEGER NOT NULL,
+                    actor_user_id TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (notebook_id, rule_id, subject_key, kind)
+                );
+            """)
+            self.add_column_if_missing(
+                db, "unified_kg_state", "cluster_code_version", "TEXT NOT NULL DEFAULT ''"
+            )
+            for name, (_table, sql) in sqlite_trigger_sql(added_at=97).items():
+                db.execute(f'DROP TRIGGER IF EXISTS "{name}"')
+                db.execute(sql)
 
     def migrate(self) -> list[int]:
         with self._connect() as db:

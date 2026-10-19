@@ -3,12 +3,17 @@
 
 三段合同:
 
-1. **生成器是唯一出处**——PostgreSQL 0064 文件里的函数与 46 条触发器必须与
-   ``postgres_function_sql()`` / ``postgres_trigger_sql()`` 的输出逐字相同,
-   SQLite 138 条触发器必须与 ``sqlite_trigger_sql()`` 逐字相同(迁移里先
+1. **生成器是唯一出处**——每个装捕获对象的 PostgreSQL 迁移
+   (``CAPTURE_MIGRATION_FILES``: 0064 装 v84 时的 46 张表, 之后每个把表变成
+   SYNCED 的迁移装它自己那几张) 里的函数与触发器必须与
+   ``postgres_function_sql(added_at=<版本>)`` / ``postgres_trigger_sql(...)``
+   的输出逐字相同, SQLite v84 的 138 条触发器必须与
+   ``sqlite_trigger_sql(at_schema=84)`` 逐字相同(迁移里先
    ``DROP TRIGGER IF EXISTS`` 再不带 ``IF NOT EXISTS`` 地建, 就是为了让
    ``sqlite_master`` 存下的文本等于生成器输出)。两端一旦各写一份, 增量导出就会
-   在某个后端漏掉某张表的变更 —— 而且不报错。
+   在某个后端漏掉某张表的变更 —— 而且不报错。表集按版本冻结
+   (``TableSyncSpec.since_schema``): 迁移永远按自己的版本渲染, 后来才 SYNCED
+   的表不会被回填进 v84 —— 否则从零迁移的阶梯在 v84 就会因为表还不存在而失败。
 2. **行身份**——登记了 ``TableSyncSpec.key`` 的表必须在两端都有覆盖该列集的唯一
    面; 没登记的表必须有 catalog 主键。
 3. **触发器行为**——门关无日志; 门开时 insert/update/delete 各一条、键变化两条、
@@ -36,6 +41,9 @@ from app.migration.shadow.postgres_catalog import (
 )
 from app.migration.shadow.postgres_catalog import _MIGRATIONS as _PACKAGED_MIGRATIONS
 from app.migration.sync.capture import (
+    CAPTURE_BASE_SCHEMA,
+    capture_tables,
+    capture_tables_added_at,
     expected_postgres_function_names,
     expected_postgres_trigger_names,
     expected_sqlite_trigger_names,
@@ -45,7 +53,8 @@ from app.migration.sync.capture import (
     postgres_trigger_sql,
     sqlite_trigger_sql,
 )
-from app.migration.sync.manifest import SYNC_MANIFEST, synced_tables
+from app.migration.sync.capture_contract import CAPTURE_MIGRATION_FILES
+from app.migration.sync.manifest import SYNC_MANIFEST, spec_for, synced_tables
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.migrations import SCHEMA_VERSION
 from app.services.sqlite_repository import SQLiteRepository
@@ -56,11 +65,11 @@ NOW = "2026-09-23T00:00:00+00:00"
 # datetime.now(timezone.utc).isoformat() -> microseconds and an explicit offset.
 _TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\+00:00")
 
-_MIGRATION_0064 = (
+_MIGRATIONS_DIR = (
     pathlib.Path(__file__).resolve().parents[1]
     / "app" / "repositories" / "postgres" / "migrations"
-    / "0064_sync_change_capture.sql"
 )
+_MIGRATION_0064 = _MIGRATIONS_DIR / "0064_sync_change_capture.sql"
 
 
 @pytest.fixture
@@ -126,21 +135,55 @@ def _seed_source(repo, notebook_id: str, source_id: str = "src-1") -> str:
 # ------------------------------------------------- 1. 生成器是唯一出处
 
 
-def test_the_postgres_migration_carries_the_generated_text_verbatim():
-    """0064 里的每个函数与每条触发器都必须与生成器输出逐字相同。"""
-    text = _MIGRATION_0064.read_text(encoding="utf-8")
+@pytest.mark.parametrize("schema", sorted(CAPTURE_MIGRATION_FILES))
+def test_the_postgres_migration_carries_the_generated_text_verbatim(schema):
+    """每个捕获迁移里的每个函数与每条触发器都必须与按**它自己的版本**渲染的
+    生成器输出逐字相同。"""
+    file_name = CAPTURE_MIGRATION_FILES[schema]
+    text = (_MIGRATIONS_DIR / file_name).read_text(encoding="utf-8")
 
-    missing = [
-        name
-        for name, (_table, sql) in (
-            list(postgres_function_sql().items()) + list(postgres_trigger_sql().items())
-        )
-        if sql + ";" not in text
-    ]
-    assert missing == [], (
-        f"0064 与生成器不一致, 缺失: {missing}。重新渲染: "
+    rendered = list(postgres_function_sql(added_at=schema).items()) + list(
+        postgres_trigger_sql(added_at=schema).items()
+    )
+    missing = [name for name, (_table, sql) in rendered if sql + ";" not in text]
+    assert rendered and missing == [], (
+        f"{file_name} 与生成器不一致, 缺失: {missing}。重新渲染: "
         "python3 scripts/generate_sync_capture_migration.py"
     )
+
+
+def test_every_declared_since_schema_has_a_capture_migration():
+    """``since_schema`` 是「哪个迁移装这张表的捕获」: 声明了却没有对应的迁移,
+    PostgreSQL 上那张表就永远不被记录; 迁移登记了却没有表声明它, 生成器会渲染出
+    一份空的生成段。两个方向都钉住。"""
+    declared = {spec_for(table).since_schema for table in synced_tables()}
+
+    assert declared == set(CAPTURE_MIGRATION_FILES)
+    assert min(declared) == CAPTURE_BASE_SCHEMA
+    for spec in SYNC_MANIFEST:
+        assert spec.since_schema >= CAPTURE_BASE_SCHEMA, spec.name
+
+
+def test_the_v84_table_set_is_frozen_at_v84():
+    """v84 的表集只含 ``since_schema == 84`` 的表, 而且是 46 张 —— 与已部署库
+    里那 138 条触发器逐字对应。之后才 SYNCED 的表各自落在自己的迁移里, 当前表集
+    是各版本增量的并集, 不多不少。"""
+    at_84 = capture_tables(84)
+
+    assert len(at_84) == 46
+    assert at_84 == capture_tables_added_at(84)
+    assert len(expected_sqlite_trigger_names(84)) == 138
+    union = [
+        table
+        for schema in sorted(CAPTURE_MIGRATION_FILES)
+        for table in capture_tables_added_at(schema)
+    ]
+    assert sorted(union) == sorted(synced_tables())
+    assert capture_tables() == synced_tables()
+    with pytest.raises(ValueError):
+        capture_tables(83)
+    with pytest.raises(ValueError):
+        sqlite_trigger_sql(84, added_at=84)
 
 
 def test_the_migration_parse_takes_the_last_definition_of_each_object():
@@ -167,8 +210,9 @@ def test_the_migration_parse_takes_the_last_definition_of_each_object():
         "CREATE TRIGGER sync_capture_sources AFTER INSERT ON sources "
         "FOR EACH ROW EXECUTE FUNCTION sync_capture_sources()"
     )
-    # 其它 45 张表不受这条迁移影响。
-    assert len(bodies) == 46 and len(triggers) == 46
+    # 其它表不受这条迁移影响。
+    current = len(synced_tables())
+    assert len(bodies) == current and len(triggers) == current
 
 
 def test_the_migration_parse_retires_a_dropped_capture_object():
@@ -184,7 +228,8 @@ def test_the_migration_parse_retires_a_dropped_capture_object():
 
     assert "sync_capture_sources" not in triggers
     assert "sync_capture_sources" not in bodies
-    assert len(triggers) == 45 and len(bodies) == 45
+    current = len(synced_tables())
+    assert len(triggers) == current - 1 and len(bodies) == current - 1
 
 
 def test_the_migration_parse_ignores_commented_out_ddl():
@@ -216,9 +261,13 @@ def test_the_catalog_guards_parse_of_the_migration_equals_the_generator():
     }
 
 
-def test_the_postgres_migration_declares_nothing_beyond_the_generated_set():
-    """反向: 文件里不许有生成器之外的 CREATE TRIGGER / CREATE FUNCTION。"""
-    text = _MIGRATION_0064.read_text(encoding="utf-8")
+@pytest.mark.parametrize("schema", sorted(CAPTURE_MIGRATION_FILES))
+def test_the_postgres_migration_declares_nothing_beyond_the_generated_set(schema):
+    """反向: 文件里不许有生成器之外的 CREATE TRIGGER / CREATE FUNCTION —— 也不许
+    把别的版本的表渲染进来。"""
+    text = (_MIGRATIONS_DIR / CAPTURE_MIGRATION_FILES[schema]).read_text(
+        encoding="utf-8"
+    )
     triggers = {
         line.split()[2]
         for line in text.splitlines()
@@ -229,10 +278,26 @@ def test_the_postgres_migration_declares_nothing_beyond_the_generated_set():
         for line in text.splitlines()
         if line.startswith("CREATE FUNCTION ")
     }
+    expected = capture_tables_added_at(schema)
+
+    assert triggers == set(postgres_trigger_sql(added_at=schema))
+    assert functions == set(postgres_function_sql(added_at=schema))
+    assert text.count("CREATE FUNCTION ") == len(expected)
+
+
+def test_the_packaged_migrations_together_declare_the_current_set():
+    """所有捕获迁移的并集就是当前 schema 的捕获对象全集。"""
+    triggers: set[str] = set()
+    functions: set[str] = set()
+    for file_name in CAPTURE_MIGRATION_FILES.values():
+        for line in (_MIGRATIONS_DIR / file_name).read_text(encoding="utf-8").splitlines():
+            if line.startswith("CREATE TRIGGER "):
+                triggers.add(line.split()[2])
+            elif line.startswith("CREATE FUNCTION "):
+                functions.add(line.split()[2].split("(")[0])
 
     assert triggers == set(expected_postgres_trigger_names())
     assert functions == set(expected_postgres_function_names())
-    assert text.count("CREATE FUNCTION ") == 46
 
 
 def test_no_generated_statement_materializes_a_whole_row():
@@ -252,13 +317,16 @@ def test_no_generated_statement_materializes_a_whole_row():
 def test_the_generated_trigger_sets_cover_every_synced_table():
     tables = synced_tables()
 
-    assert len(tables) == 46
-    assert len(expected_postgres_trigger_names()) == 46
-    assert len(expected_postgres_function_names()) == 46
-    assert len(expected_sqlite_trigger_names()) == 138
+    assert len(expected_postgres_trigger_names()) == len(tables)
+    assert len(expected_postgres_function_names()) == len(tables)
+    assert len(expected_sqlite_trigger_names()) == 3 * len(tables)
     assert {table for _name, (table, _sql) in sqlite_trigger_sql().items()} == set(
         tables
     )
+    # v84 itself: the 46 tables synced when capture landed, 138 triggers.
+    assert len(expected_postgres_trigger_names(84)) == 46
+    assert len(expected_postgres_function_names(84)) == 46
+    assert len(sqlite_trigger_sql(at_schema=84)) == 138
 
 
 # 四条**手写**的触发器全文, 每条覆盖一种 scope/形态。它们是独立于生成器的锚:
@@ -436,7 +504,13 @@ def test_a_current_database_installs_the_capture_objects(repo):
 
 
 def _rollback_v84(db: sqlite3.Connection) -> None:
-    for name in sorted(expected_sqlite_trigger_names()):
+    """Undo v97 (newest-first: its findings table carries capture triggers of
+    its own) and then v84 -- v84's own trigger set, pinned exactly as
+    ``_migration_84`` pins it."""
+    from tests.sqlite_migration_testkit import rollback_v97
+
+    rollback_v97(db)
+    for name in sorted(expected_sqlite_trigger_names(84)):
         db.execute(f'DROP TRIGGER "{name}"')
     db.execute("DROP INDEX uq_community_members_sync_key")
     db.execute("DROP INDEX uq_knowledge_object_sources_sync_key")

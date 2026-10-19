@@ -604,8 +604,13 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int, bool], ...] = (
     ("concept_merge_candidates", "notebook_id = ?", 1, True),
     ("kg_relation_completion_state", "notebook_id = ?", 1, True),
     ("kg_analysis_artifacts", "notebook_id = ?", 1, True),
+    ("kg_analysis_findings", "notebook_id = ?", 1, True),
     ("kg_community_edges", "notebook_id = ?", 1, True),
     ("kg_source_profiles", "notebook_id = ?", 1, True),
+    # SQLite v97: the relink-attempt marks go with the graph (the generation
+    # they record no longer exists); a member's dismissal stays -- PostgreSQL
+    # twin's comment at the same step.
+    ("kg_analysis_marks", "notebook_id=? AND kind='relink_attempted'", 1, True),
     (
         "knowledge_embeddings",
         "notebook_id=? AND NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
@@ -972,6 +977,9 @@ class KnowledgeStore:
             # Sec 3.2 table #15) — a ledger row's meaning is "built at this
             # seq", so a cleared graph must drop it rather than reset it.
             "kg_analysis_artifacts",
+            # kg_analysis_findings (v97): the detail of the ledger's findings
+            # kind — one unit with its ledger row, like the two below.
+            "kg_analysis_findings",
             # kg_community_edges / kg_source_profiles: the DETAIL tables the
             # ledger's two board-dependent kinds describe. R1 (P2-1, post-
             # review): must be deleted in the SAME transaction as the ledger
@@ -983,6 +991,14 @@ class KnowledgeStore:
         ):
             cur = db.execute(f"DELETE FROM {table} WHERE notebook_id = ?", (notebook_id,))
             counts[table] = cur.rowcount
+        # kg_analysis_marks (v97): only the relink-attempt marks — PostgreSQL
+        # twin's comment has the rationale.
+        cur = db.execute(
+            "DELETE FROM kg_analysis_marks WHERE notebook_id=? "
+            "AND kind='relink_attempted'",
+            (notebook_id,),
+        )
+        counts["kg_analysis_marks"] = cur.rowcount
         cur = db.execute(
             "DELETE FROM knowledge_embeddings WHERE notebook_id=? "
             "AND NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
@@ -1032,7 +1048,7 @@ class KnowledgeStore:
             ") VALUES (?, 0, 0, 0, '', '', 0, 0, 0, -1, -2, -2, 1, -1, ?) "
             "ON CONFLICT(notebook_id) DO UPDATE SET "
             "dirty=0, kg_mutation_seq=0, cluster_mutation_seq=0, "
-            "cluster_input_version='', last_rebuild_at='', "
+            "cluster_input_version='', cluster_code_version='', last_rebuild_at='', "
             "object_count=0, relation_count=0, cluster_count=0, "
             "community_seq=-1, canonical_rel_seq=-2, mention_seq=-2, "
             "kg_reset_epoch=kg_reset_epoch+1, "

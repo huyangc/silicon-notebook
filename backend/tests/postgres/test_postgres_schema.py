@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 76
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 77
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -69,10 +69,85 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 76
-    assert migrator.migrate() == 76
-    assert migrator.current_version() == 76
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 76
+    assert migrator.migrate() == 77
+    assert migrator.migrate() == 77
+    assert migrator.current_version() == 77
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 77
+
+
+@pytest.mark.postgres_integration
+def test_kg_findings_storage_matches_the_sqlite_v97_contract(postgres_database):
+    """0077 mirrors SQLite v97 column for column: the same names in the same
+    order, the same nullability, the same primary keys, the CHECK on a mark's
+    kind, and both tables cascading with their notebook."""
+    import psycopg
+
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 77
+    with postgres_database.connect() as conn:
+        def columns(table):
+            return [
+                (row["column_name"], row["data_type"], row["is_nullable"])
+                for row in conn.execute(
+                    "SELECT column_name, data_type, is_nullable FROM "
+                    "information_schema.columns WHERE table_schema=current_schema() "
+                    "AND table_name=%s ORDER BY ordinal_position",
+                    (table,),
+                ).fetchall()
+            ]
+
+        findings = columns("kg_analysis_findings")
+        marks = columns("kg_analysis_marks")
+        code_version = conn.execute(
+            "SELECT data_type, is_nullable, column_default, collation_name FROM "
+            "information_schema.columns WHERE table_schema=current_schema() "
+            "AND table_name='unified_kg_state' AND column_name='cluster_code_version'"
+        ).fetchone()
+        foreign = {
+            row["table_name"]: (row["confdeltype"], row["referenced"])
+            for row in conn.execute(
+                "SELECT c.conrelid::regclass::text AS table_name, c.confdeltype, "
+                "c.confrelid::regclass::text AS referenced FROM pg_constraint c "
+                "JOIN pg_namespace n ON n.oid=c.connamespace "
+                "WHERE n.nspname=current_schema() AND c.contype='f' "
+                "AND c.conname IN ('fk_kg_analysis_findings_notebook_id__notebooks', "
+                "'fk_kg_analysis_marks_notebook_id__notebooks')"
+            ).fetchall()
+        }
+    assert findings == [
+        ("notebook_id", "text", "NO"), ("rule_id", "text", "NO"),
+        ("subject_key", "text", "NO"), ("subject_kind", "text", "NO"),
+        ("subject_label", "text", "NO"), ("subject_refs", "jsonb", "NO"),
+        ("severity", "text", "NO"), ("impact_objects", "bigint", "NO"),
+        ("evidence", "jsonb", "NO"), ("first_seen_kg_seq", "bigint", "NO"),
+        ("first_seen_cluster_seq", "bigint", "NO"),
+    ]
+    assert marks == [
+        ("notebook_id", "text", "NO"), ("rule_id", "text", "NO"),
+        ("subject_key", "text", "NO"), ("kind", "text", "NO"),
+        ("at_kg_seq", "bigint", "NO"), ("actor_user_id", "text", "NO"),
+        ("created_at", "timestamp with time zone", "NO"), ("note", "text", "NO"),
+    ]
+    assert dict(code_version) == {
+        "data_type": "text", "is_nullable": "NO", "column_default": "''::text",
+        "collation_name": "C",
+    }
+    assert foreign == {
+        "kg_analysis_findings": ("c", "notebooks"),
+        "kg_analysis_marks": ("c", "notebooks"),
+    }
+    with postgres_database.write() as db:
+        db.execute(
+            "INSERT INTO notebooks (id, name, created_at, updated_at) "
+            "VALUES ('nb-v77', 'n', now(), now())"
+        )
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with postgres_database.write() as db:
+            db.execute(
+                "INSERT INTO kg_analysis_marks (notebook_id, rule_id, subject_key, "
+                "kind, at_kg_seq, created_at) VALUES ('nb-v77','F1','src-1','bogus',1,now())"
+            )
 
 
 @pytest.mark.postgres_integration
@@ -80,7 +155,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 76
+    assert migrator.migrate() == 77
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -163,7 +238,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 76
+        assert PostgresMigrator(databases[1]).migrate() == 77
     finally:
         for database in databases:
             database.close()
@@ -264,6 +339,7 @@ def test_packaged_index_migration_phases_are_exact():
         (74, "answer_links"),
         (75, "global_ask_retained_until"),
         (76, "global_ask_feedback_index"),
+        (77, "kg_analysis_findings"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -773,6 +849,9 @@ def test_packaged_index_migration_phases_are_exact():
     assert index_declarations(75) == [(False, "idx_global_ask_jobs_retained")]
     # Migration 76 (rated global Ask jobs) adds one partial expression index.
     assert index_declarations(76) == [(False, "idx_global_ask_jobs_feedback")]
+    # Migration 77 (KG analysis findings) adds two tables whose every read is
+    # by notebook, the primary-key prefix, plus a column: no secondary index.
+    assert index_declarations(77) == []
     # Spelled without ``IF NOT EXISTS`` on purpose, and that is asserted
     # rather than merely commented: app/migration/shadow/postgres_catalog.py
     # parses CREATE INDEX straight out of these files to build the catalog

@@ -207,6 +207,19 @@ class TableSyncSpec:
     # KEY on PostgreSQL).
     key: tuple[str, ...] = ()
     notes: str = ""
+    # The SQLite schema version whose migration first installs this table's
+    # source-side change-capture triggers (the paired PostgreSQL migration is
+    # the one ``RUNNING_SCHEMA_PAIR`` pairs with it: v84 <-> 0064, v97 <->
+    # 0077). The 46 tables that were synced when capture landed carry the
+    # default, 84. A table that becomes SYNCED later sets the version of the
+    # migration that creates it, so ``_migration_84`` -- which renders its
+    # triggers from this manifest -- keeps rendering exactly the set it
+    # installed when it was written: a from-scratch ladder runs v84 long
+    # before a v97 table exists, and ``CREATE TRIGGER ... ON <missing>``
+    # would stop it with "no such table". See
+    # ``app.migration.sync.capture_contract.capture_tables``. Meaningless for
+    # LOCAL tables (never captured), which keep the default.
+    since_schema: int = 84
 
 
 # --- 3.1 同步层 (SYNCED) -----------------------------------------------
@@ -293,6 +306,16 @@ _SYNCED: tuple[TableSyncSpec, ...] = (
     TableSyncSpec("kg_source_profiles", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
     TableSyncSpec("kg_community_edges", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
     TableSyncSpec("kg_analysis_artifacts", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    # 图谱分析问题清单的明细（SQLite v97 / PostgreSQL 0077）：账本 findings 行的
+    # 明细，与 kg_source_profiles 同一种派生产物、同一事务整删整插。账本行随同步
+    # 走，明细不走就会出现「账本说有、明细没有」。v84 之后才进同步层，捕获触发器
+    # 由 v97/0077 自己装（since_schema=97，见 capture_contract.capture_tables）。
+    TableSyncSpec(
+        "kg_analysis_findings",
+        SyncClass.SYNCED,
+        scope=_NOTEBOOK_SCOPE,
+        since_schema=97,
+    ),
     # Knowhow
     TableSyncSpec(
         "knowhow_columns",
@@ -553,6 +576,13 @@ _LOCAL: tuple[TableSyncSpec, ...] = (
     TableSyncSpec("catalog_candidates", SyncClass.LOCAL),
     TableSyncSpec("promotion_candidates", SyncClass.LOCAL),
     TableSyncSpec("concept_merge_candidates", SyncClass.LOCAL),
+    # 图谱分析的标记（SQLite v97 / PostgreSQL 0077）：「标为正常」是成员对问题
+    # 的决定、「补上关联已尝试」记的是本环境的 kg_mutation_seq——与
+    # concept_merge_candidates（用户对图谱的合并决定）同口径，不随笔记本同步。
+    TableSyncSpec(
+        "kg_analysis_marks", SyncClass.LOCAL,
+        notes="图谱分析问题的豁免与补上关联标记，与合并决定同口径留在本环境",
+    ),
     TableSyncSpec("kg_conflict_candidates", SyncClass.LOCAL),
     TableSyncSpec("concept_whitelist", SyncClass.LOCAL),
     TableSyncSpec("indexing_pipeline_stages", SyncClass.LOCAL),

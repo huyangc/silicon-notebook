@@ -40,6 +40,13 @@ MIGRATION = (
 def _roll_back_to_66(database) -> None:
     with database.write() as db:
         db.execute("ALTER TABLE unified_kg_state DROP COLUMN memory_isolation_version")
+        # 77 (kg_analysis_findings) creates two tables, a capture function
+        # (dropping its table drops only the trigger) and a column: undo them
+        # so the replay can.
+        db.execute("DROP TABLE kg_analysis_findings")
+        db.execute("DROP FUNCTION sync_capture_kg_analysis_findings()")
+        db.execute("DROP TABLE kg_analysis_marks")
+        db.execute("ALTER TABLE unified_kg_state DROP COLUMN cluster_code_version")
         # 75 (global Ask turn retention) adds a column and its index: undo them
         # so the replay can.
         db.execute("DROP INDEX idx_global_ask_jobs_retained")
@@ -102,7 +109,7 @@ def _marker(database, notebook_id):
 
 @pytest.fixture
 def upgraded(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     with postgres_database.write() as db:
         cases.seed(db, postgres=True)
     before = _snapshot(postgres_database)
@@ -123,7 +130,7 @@ def test_summary_counts_match_the_shared_world(postgres_database):
     log, out of a test's reach) are read from its working tables inside the
     migration's own transaction, then rolled back -- the same numbers the
     SQLite twin logs (test_migration_logs_counts_only)."""
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     with postgres_database.write() as db:
         cases.seed(db, postgres=True)
     _roll_back_to_66(postgres_database)
@@ -191,7 +198,7 @@ def test_reexecuting_the_frozen_sql_changes_nothing(upgraded):
 
 
 def test_fresh_database_defaults_the_marker_to_isolated(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     with postgres_database.connect() as db:
         column = db.execute(
             "SELECT is_nullable, column_default FROM information_schema.columns "
@@ -208,6 +215,17 @@ def test_rebuild_pass_sets_the_marker_through_the_ordinary_slot(
     from app.services.memory_isolation_rebuild import MemoryIsolationRebuild
 
     database, _before, _after = upgraded
+    # 0077's schema, alone: this build's rebuild end-write stores
+    # unified_kg_state.cluster_code_version and its analysis publish rewrites
+    # the findings detail, so the code under test needs them; none of 0077's
+    # DDL touches what 0067 left. (The SQLite twin rolls back v87 alone, so its
+    # world keeps every later schema object the same way.)
+    with database.write() as db:
+        db.execute(
+            (MIGRATION.parent / "0077_kg_analysis_findings.sql").read_text(
+                encoding="utf-8"),
+            prepare=False,
+        )
     # migrate=False: the world stays at 0067 (0068, PR-E8, would rewrite and
     # mark dirty this world's public promotion copy ko-pub -- not this pass's
     # subject; the SQLite twin applies v87 alone the same way)
@@ -369,7 +387,7 @@ def test_the_census_is_read_only_and_matches_the_check(postgres_database):
     is read-only: a write attempt fails)."""
     import importlib.util
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     with postgres_database.write() as db:
         cases.seed(db, postgres=True)
     _roll_back_to_66(postgres_database)
@@ -404,7 +422,7 @@ def test_approved_memory_promotion_count_is_index_driven(postgres_database):
     by primary key -- never a scan of either table."""
     from app.repositories.postgres import memory_isolation_store as store
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     with postgres_database.write() as db:
         cases.seed(db, postgres=True)
         db.execute(
@@ -458,7 +476,7 @@ def _seed_state_rows(database, count: int) -> None:
 
 
 def test_marker_reads_and_write_use_the_state_primary_key(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_state_rows(postgres_database, 30000)
     from app.repositories.postgres import memory_isolation_store as store
 
@@ -723,7 +741,7 @@ def test_statements_are_driven_from_the_working_tables(
     through the notebook index). Then the real migrator runs under
     production's 30 s statement budget."""
     base_objects = int(os.environ.get("MKI_PIN_BASE_OBJECTS", "200000"))
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_large(postgres_database, f_notebooks=5, objects_per_f=400,
                 base_objects=base_objects)
     if base_in_f:
@@ -783,7 +801,7 @@ def test_the_post_readiness_check_statements_are_index_driven(postgres_database)
     (the cost of one check stays in proportion to its notebook, paged)."""
     from app.repositories.postgres import memory_isolation_store as store
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_large(postgres_database, f_notebooks=5, objects_per_f=400,
                 base_objects=100000)
     with postgres_database.write() as db:

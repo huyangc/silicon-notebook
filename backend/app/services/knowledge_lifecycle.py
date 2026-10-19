@@ -634,7 +634,14 @@ class KnowledgeLifecycleService:
         ``"kg_community_edges"`` / ``"kg_source_profiles"`` hold the ledger's
         DETAIL rows removed alongside it (the two are a documented single
         unit; see ``discard_board_dependent_kg_analysis_artifacts``'s
-        docstring in either backend's ``unified_kg_store.py``).
+        docstring in either backend's ``unified_kg_store.py``), as does
+        ``"kg_analysis_findings"`` (the findings kind's detail, SQLite v97 /
+        PostgreSQL 0077). ``"kg_analysis_marks"`` counts only the
+        ``relink_attempted`` marks removed: they record a ``kg_mutation_seq``
+        this reset takes back to 0, while a member's ``dismissed`` mark is a
+        judgment about a source and survives (the same finding is dismissed
+        again after the next rebuild). The reset also empties
+        ``cluster_code_version`` together with ``cluster_input_version``.
 
         batch-3-W1 PR-2 R1 (P0-1, post-review): only TWO of the three
         pre-PR-2 explicit post-commit invalidations were removable, not
@@ -5293,13 +5300,15 @@ class KnowledgeLifecycleService:
             )
         # runtime_dim 追加(非替换 embed_dim;T3/R4):聚类/融合空间统一到运行时
         # 空间,切 EMBED_RUNTIME_DIM 后版本闸不得跳过重聚(旧空间的簇不再有效)。
-        from app.services.vector_index import resolve_runtime_dim
         # 算法版本(纯代码分量):归一化/哨兵/护栏等 seed·聚类语义的代码改动不动任何
         # 数据派生分量(seq/COUNT/dim 全不变),但会改变聚类结果。折进版本串后,已部署
         # 库改代码 → 下次「刷新图谱」(force=False)因版本失配真重算一次,不再被闸静默
-        # 跳过。bump 约定见 kg_merge.CLUSTER_ALGO_VERSION。函数内 import:测试可 patch
-        # kg_merge 模块属性,调用时按 patch 后的值读取。
-        from app.services.kg_merge import CLUSTER_ALGO_VERSION
+        # 跳过。bump 约定见 kg_merge.CLUSTER_ALGO_VERSION。这三个代码/配置分量由
+        # kg_merge.cluster_code_components 一处读出(调用时读 kg_merge 模块属性,测试
+        # 可 patch),同一份也是 unified_kg_state.cluster_code_version 的来源;哈希的
+        # 位次与取值与抽出之前逐字相同(金标用例钉住)。
+        from app.services.kg_merge import cluster_code_components
+        embed_dim, runtime_dim, algo_version = cluster_code_components(self.settings)
         parts = [
             "v2", notebook_id,
             int(seq),
@@ -5307,12 +5316,7 @@ class KnowledgeLifecycleService:
         ]
         if not exclude_emb_count:
             parts.append(int(emb_c))     # 默认路径:与旧版位次/取值一字不差,skip-gate 哈希不变
-        parts += [
-            int(dec_c),
-            int(self.settings.embed_dim),
-            resolve_runtime_dim(self.settings),
-            int(CLUSTER_ALGO_VERSION),
-        ]
+        parts += [int(dec_c), embed_dim, runtime_dim, algo_version]
         return hashlib.sha1("|".join(map(str, parts)).encode()).hexdigest()
 
     def _stream_seed_reps(self, notebook_id: str, object_type: str, seed_fn,
@@ -5909,6 +5913,58 @@ class KnowledgeLifecycleService:
             _stage("concept: descriptions skipped")
         return desc_by_cid, desc_sig_by_cid
 
+    def _settle_skip_path(self, notebook_id: str, row, input_version: str) -> None:
+        """The two writes the inputs-unchanged skip path of ``rebuild_unified_kg``
+        may still owe; everything else on that path writes nothing.
+
+        1. A stranded catch-up (codex #671 R3 P1): when the previous force
+           rebuild crashed after its flip and the inputs happen to be
+           unchanged, the skip short-circuit would strand the debt for good --
+           startup recovery and pre-reaping both skip by the marker, so retired
+           generations only grow and the window members are never published.
+           Claim a generation and settle the debt first, then keep the skip
+           semantics; when the claim is refused (another rebuild in flight)
+           skip as before, and the in-flight round settles the debt itself once
+           it has claimed. The caller's cached cluster count is deliberately
+           not recomputed after the catch-up's appends: the skip path never
+           updates the persisted counts, the catch-up's ``added > 0`` bump has
+           already voided the keyed caches, and the next real rebuild fills
+           them in.
+        2. The merge code component (SQLite v97 / PostgreSQL 0077; design
+           2026-10-19 §五 S4): the stored ``cluster_input_version`` equals
+           ``input_version`` here, and that version folds in the code
+           component, so the stored merge was built under the running code --
+           stamp ``cluster_code_version`` with it (guarded by the same
+           equality in the store, so a concurrent publish or a KG delete that
+           moved the version wins). Without this, a library upgraded to v97
+           would carry ``''`` until its next full merge and never read as up
+           to date. Written only when the state row (already read by the
+           caller) holds a different value: a settled skip path stays a
+           zero-write path."""
+        if row["derived_catchup_from"] is not None:
+            with self._write() as db:
+                claim = self.unified_kg.claim_derived_generation(
+                    db, notebook_id,
+                    ttl_seconds=self.settings.kg_derived_build_ttl_seconds)
+            if claim is not None:
+                try:
+                    if claim["catchup_from"] is not None:
+                        self._settle_generation_catchup(
+                            notebook_id,
+                            published_generation=int(claim["cluster_generation"]),
+                            since_ts=claim["catchup_from"])
+                finally:
+                    with self._write() as db:
+                        self.unified_kg.release_derived_claim(
+                            db, notebook_id, int(claim["generation"]))
+        from app.services.kg_merge import cluster_code_version
+
+        code_version = cluster_code_version(self.settings)
+        if row["cluster_code_version"] != code_version:
+            with self._write() as db:
+                self.unified_kg.stamp_cluster_code_version(
+                    db, notebook_id, input_version, code_version)
+
     @notebook_model_artifact_scope
     def rebuild_unified_kg(self, notebook_id: str,
                            progress: Optional[Callable[[str, int, int], None]] = None,
@@ -5950,31 +6006,7 @@ class KnowledgeLifecycleService:
                 cc = self.unified_kg.concept_clusters_count(db, notebook_id)
             if row and row["cluster_input_version"] and row["cluster_input_version"] == _ver and cc > 0:
                 cached = int(row["cluster_count"] or 0)
-                if row["derived_catchup_from"] is not None:
-                    # codex #671 R3 P1:上一轮 force 重建翻转后崩溃、输入又
-                    # 恰好没变时,skip 短路会把欠账永远搁浅——启动恢复与
-                    # 预回收都按标记跳过,退休代只涨不缩、窗口成员永不发布。
-                    # 先取号补欠账再走跳过语义;被闸(别处在飞)则原样跳过,
-                    # 在飞的那一轮取号后自己会先补欠账。cached 刻意不随催收
-                    # 的 append 重算:skip 路径从来不更新持久化计数,催收的
-                    # added>0 bump 已作废键控缓存,下一次真重建会补齐。
-                    with self._write() as _db:
-                        _dclaim = self.unified_kg.claim_derived_generation(
-                            _db, notebook_id,
-                            ttl_seconds=self.settings.kg_derived_build_ttl_seconds)
-                    if _dclaim is not None:
-                        try:
-                            if _dclaim["catchup_from"] is not None:
-                                self._settle_generation_catchup(
-                                    notebook_id,
-                                    published_generation=int(
-                                        _dclaim["cluster_generation"]),
-                                    since_ts=_dclaim["catchup_from"])
-                        finally:
-                            with self._write() as _db:
-                                self.unified_kg.release_derived_claim(
-                                    _db, notebook_id,
-                                    int(_dclaim["generation"]))
+                self._settle_skip_path(notebook_id, row, _ver)
                 self.event_log.logger.info(
                     "kg-rebuild[%s] skipped — inputs unchanged since last rebuild (%s clusters)",
                     notebook_id, cached)
@@ -6032,7 +6064,7 @@ class KnowledgeLifecycleService:
         # 否则一次连接抖动就把认领留到 TTL(数小时)。
         from uuid import uuid4 as _uuid4
         from app.services.kg_merge import (cluster_seeds, filter_pending_seeds_by_decisions,
-                                           _norm, _discriminative_conflict,
+                                           _norm, _discriminative_conflict, cluster_code_version,
                                            seed_claim, seed_formula, seed_procedure)
         # Each rebuild gets a unique run_id so concurrent rebuilds of the SAME
         # notebook never wipe or read each other's scratch rows.
@@ -6314,7 +6346,8 @@ class KnowledgeLifecycleService:
                 self.unified_kg.finish_rebuild_state(
                     db, notebook_id, _ver, cluster_count, now,
                     published_generation=generation,
-                    input_seq=_claim["kg_mutation_seq"])
+                    input_seq=_claim["kg_mutation_seq"],
+                    cluster_code_version=cluster_code_version(self.settings))
         finally:
             # Final cleanup: drop only THIS run's scratch rows (run_id-scoped
             # so a concurrent rebuild with a different run_id is unaffected).
@@ -6868,8 +6901,11 @@ class KnowledgeLifecycleService:
                         partition_replaced_under_us = True
                     else:
                         _edges, _profiles, _payloads = analysis
+                        # 问题清单的明细与过期标记清理由规则引擎接上(设计
+                        # 2026-10-19 §7.1 第 ⑧ 步);在那之前明细恒为空、不清标记。
                         self.unified_kg.replace_kg_analysis_artifacts(
-                            db, notebook_id, seq, _edges, _profiles, _payloads, now
+                            db, notebook_id, seq, _edges, _profiles, _payloads, now,
+                            findings_rows=(), prune_marks=(),
                         )
                         analysis_published = True
         return analysis_published, partition_replaced_under_us

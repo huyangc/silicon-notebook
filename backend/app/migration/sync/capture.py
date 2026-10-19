@@ -48,6 +48,17 @@ An UPDATE that moves a row's key is logged as the old key's ``delete``
 followed by the new key's ``upsert`` -- the same rule the shadow capture
 triggers use (``app.migration.shadow.capture._capture_trigger_sql``).
 
+The table set is versioned. ``TableSyncSpec.since_schema`` names the SQLite
+migration that first installs a table's capture objects (84 for the tables
+synced when capture landed), and every renderer takes the version it renders
+for: ``at_schema=N`` is the whole set a schema-N database carries,
+``added_at=N`` only what migration N itself installs, ``None`` this build's
+current schema. Migrations always pin a version -- ``_migration_84`` and 0064
+render ``at_schema=84`` forever, a later migration that makes a table SYNCED
+renders its own ``added_at`` -- so a frozen migration's text never changes
+under a later manifest edit. The current set (``None``) is what the live-schema
+guards hold a database to.
+
 Two tables carry no primary key of their own and register an explicit
 ``TableSyncSpec.key`` instead; SQLite v84 / PostgreSQL 0064 give both a real
 unique surface (a UNIQUE INDEX on SQLite, which cannot add a primary key to
@@ -70,9 +81,12 @@ import re
 
 from app.migration.shadow.postgres_catalog import EXPECTED_CONSTRAINTS
 from app.migration.sync.capture_contract import (
+    CAPTURE_BASE_SCHEMA,
     CONTROL_TABLE,
     LOG_TABLE,
     SQLITE_TRIGGER_OPERATIONS,
+    capture_tables,
+    capture_tables_added_at,
     expected_postgres_function_names,
     expected_postgres_functions,
     expected_postgres_trigger_names,
@@ -82,15 +96,18 @@ from app.migration.sync.capture_contract import (
     postgres_trigger_name,
     sqlite_trigger_name,
 )
-from app.migration.sync.manifest import ScopeKind, spec_for, synced_tables
+from app.migration.sync.manifest import ScopeKind, spec_for
 
 
 # Re-exported so a caller that renders capture DDL does not need both modules;
 # the names themselves live in capture_contract, which the PostgreSQL catalog
 # validator also imports (see that module's docstring for why the split).
 __all__ = [
+    "CAPTURE_BASE_SCHEMA",
     "CONTROL_TABLE",
     "LOG_TABLE",
+    "capture_tables",
+    "capture_tables_added_at",
     "expected_postgres_function_names",
     "expected_postgres_functions",
     "expected_postgres_trigger_names",
@@ -257,8 +274,27 @@ def _sqlite_trigger_statements(table: str, operation: str) -> list[str]:
     return statements
 
 
-def sqlite_trigger_sql() -> dict[str, tuple[str, str]]:
-    """``{trigger_name: (table, CREATE TRIGGER sql)}`` for all synced tables.
+def _rendered_tables(at_schema: int | None, added_at: int | None) -> tuple[str, ...]:
+    """The table set one rendering covers: the tables captured at SQLite schema
+    ``at_schema`` (``None``: current), or -- with ``added_at`` -- only the
+    tables whose capture that one migration installs. The two are exclusive:
+    a migration installs a delta, a snapshot check wants a whole schema."""
+    if added_at is not None:
+        if at_schema is not None:
+            raise ValueError("pass at_schema or added_at, not both")
+        return capture_tables_added_at(added_at)
+    return capture_tables(at_schema)
+
+
+def sqlite_trigger_sql(
+    at_schema: int | None = None, *, added_at: int | None = None
+) -> dict[str, tuple[str, str]]:
+    """``{trigger_name: (table, CREATE TRIGGER sql)}`` for the synced tables
+    captured at SQLite schema ``at_schema`` (``None``: current build), or with
+    ``added_at`` for the tables that one migration adds (see
+    ``capture_contract.capture_tables``). A migration always pins its own
+    version: ``_migration_84`` passes ``at_schema=84``, a later migration that
+    makes a table SYNCED passes ``added_at=<its version>``.
 
     Three AFTER FOR EACH ROW triggers per table. The statements deliberately
     carry no ``IF NOT EXISTS``: the migration drops each name first and then
@@ -267,7 +303,7 @@ def sqlite_trigger_sql() -> dict[str, tuple[str, str]]:
     can compare them literally.
     """
     triggers: dict[str, tuple[str, str]] = {}
-    for table in synced_tables():
+    for table in _rendered_tables(at_schema, added_at):
         for operation in SQLITE_TRIGGER_OPERATIONS:
             name = sqlite_trigger_name(table, operation)
             body = " ".join(_sqlite_trigger_statements(table, operation))
@@ -353,9 +389,13 @@ def postgres_function_body(table: str) -> str:
     return "\n".join(lines)
 
 
-def postgres_function_sql() -> dict[str, tuple[str, str]]:
+def postgres_function_sql(
+    at_schema: int | None = None, *, added_at: int | None = None
+) -> dict[str, tuple[str, str]]:
     """``{function_name: (table, CREATE FUNCTION sql)}`` -- one trigger
-    function per synced table.
+    function per synced table, over the same table set ``sqlite_trigger_sql``
+    renders for the same arguments (``at_schema`` / ``added_at`` are SQLite
+    schema versions; 0064 is v84's pair, 0077 v97's).
 
     Per-table rather than one shared ``TG_ARGV``-driven function: see
     ``capture_contract.postgres_function_name`` for why (a generic function
@@ -374,7 +414,7 @@ def postgres_function_sql() -> dict[str, tuple[str, str]]:
     plane needs.
     """
     functions: dict[str, tuple[str, str]] = {}
-    for table in synced_tables():
+    for table in _rendered_tables(at_schema, added_at):
         name = postgres_function_name(table)
         tag = f"${name}$"
         functions[name] = (
@@ -385,8 +425,11 @@ def postgres_function_sql() -> dict[str, tuple[str, str]]:
     return functions
 
 
-def postgres_trigger_sql() -> dict[str, tuple[str, str]]:
-    """``{trigger_name: (table, CREATE TRIGGER sql)}`` for all synced tables.
+def postgres_trigger_sql(
+    at_schema: int | None = None, *, added_at: int | None = None
+) -> dict[str, tuple[str, str]]:
+    """``{trigger_name: (table, CREATE TRIGGER sql)}`` for the same table set
+    ``postgres_function_sql`` renders for the same arguments.
 
     The event list is spelled ``INSERT OR DELETE OR UPDATE`` -- PostgreSQL's
     own canonical order, the one ``pg_get_triggerdef()`` prints. Writing it
@@ -395,7 +438,7 @@ def postgres_trigger_sql() -> dict[str, tuple[str, str]]:
     qualifier and collapsing whitespace.
     """
     triggers: dict[str, tuple[str, str]] = {}
-    for table in synced_tables():
+    for table in _rendered_tables(at_schema, added_at):
         name = postgres_trigger_name(table)
         triggers[name] = (
             table,

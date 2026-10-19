@@ -650,6 +650,10 @@ MEMORY_CARRIERS_NOT_COPIED = frozenset({
     "concept_comentions", "concept_merge_candidates", "kg_conflict_candidates",
     "kg_source_profiles", "chunk_elements", "conversations", "answers", "reports",
     "retrieval_experiences", "unified_kg_state", "extraction_runs",
+    # v97: the findings detail goes where its ledger (kg_analysis_artifacts)
+    # goes -- not into a copy; the marks on findings go where the other user
+    # decisions about a graph (concept_merge_candidates) go.
+    "kg_analysis_findings", "kg_analysis_marks",
 })
 
 

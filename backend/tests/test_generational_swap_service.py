@@ -271,17 +271,22 @@ def test_finish_rebuild_state_is_a_noop_once_the_pointer_moved_on(repo):
     with repo._write() as db:
         store.finish_rebuild_state(
             db, nb.id, "stale-version", 999, "2026-02-02T00:00:00",
-            published_generation=int(before["cluster_generation"]) + 5)
+            published_generation=int(before["cluster_generation"]) + 5,
+            cluster_code_version="stale-code")
     unchanged = _state(repo, nb.id)
     assert unchanged["cluster_input_version"] == before["cluster_input_version"]
     assert unchanged["cluster_count"] == before["cluster_count"]
+    # v97: the merge code component rides the same guarded upsert.
+    assert unchanged["cluster_code_version"] == before["cluster_code_version"] != ""
     with repo._write() as db:
         store.finish_rebuild_state(
             db, nb.id, "fresh-version", 7, "2026-02-02T00:00:00",
-            published_generation=int(before["cluster_generation"]))
+            published_generation=int(before["cluster_generation"]),
+            cluster_code_version="fresh-code")
     applied = _state(repo, nb.id)
     assert applied["cluster_input_version"] == "fresh-version"
     assert applied["cluster_count"] == 7
+    assert applied["cluster_code_version"] == "fresh-code"
 
 
 def test_mention_seed_rows_read_only_the_published_generation(repo):

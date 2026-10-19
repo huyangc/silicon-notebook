@@ -424,7 +424,8 @@ def test_finish_rebuild_state_clears_dirty_only_at_the_claimed_seq(repo):
         with repo._write() as db:
             db.execute("UPDATE unified_kg_state SET dirty=1 WHERE notebook_id=?", (nb.id,))
             store.finish_rebuild_state(db, nb.id, "v", 1, "2026-09-30T00:00:00",
-                                       published_generation=kw.pop("gen", gen), **kw)
+                                       published_generation=kw.pop("gen", gen),
+                                       cluster_code_version="code", **kw)
         return _state(repo, nb.id)["dirty"]
 
     assert finish(input_seq=seq) == 0
@@ -445,7 +446,8 @@ def test_finish_rebuild_state_insert_branch_follows_the_same_rule(repo):
         with repo._write() as db:
             db.execute("DELETE FROM unified_kg_state WHERE notebook_id=?", (nb.id,))
             store.finish_rebuild_state(db, nb.id, "v", 1, "2026-09-30T00:00:00",
-                                       published_generation=0, input_seq=input_seq)
+                                       published_generation=0, input_seq=input_seq,
+                                       cluster_code_version="code")
         state = _state(repo, nb.id)
         assert state["kg_mutation_seq"] == 0 and state["cluster_input_version"] == "v"
         return state["dirty"]

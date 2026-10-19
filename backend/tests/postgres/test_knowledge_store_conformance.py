@@ -133,7 +133,7 @@ def knowledge_harness(postgres_database) -> KnowledgeHarness:
     seams = _seams()
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     yield KnowledgeHarness(
         database=postgres_database,
@@ -1105,7 +1105,7 @@ def test_postgres_embedding_bytea_roundtrip_and_fail_closed_validation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresEmbeddingStore(write=postgres_database.write)
     expected = np.asarray([0.125, -1.5, 3.25, 0.0], dtype=np.float32)
@@ -1157,7 +1157,7 @@ def test_postgres_replace_knowledge_vectors_mark_dirty_rides_same_transaction(
     (emb_c), which an unconditional bump here would double-count."""
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresEmbeddingStore(write=postgres_database.write)
 
@@ -1217,7 +1217,7 @@ def test_postgres_vector_pages_keyset_pagination_matches_inserted_set(
     (production default batch, single page for this row count) must agree."""
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresEmbeddingStore(write=postgres_database.write)
     rows = [
@@ -1272,7 +1272,7 @@ def test_postgres_jsonb_preserves_nested_null_and_rejects_top_level_null_or_nan(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     valid = (
@@ -1314,7 +1314,7 @@ def test_postgres_jsonb_preserves_nested_null_and_rejects_top_level_null_or_nan(
 def test_postgres_raw_graph_rows_keep_repository_json_text_contract(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     rows = [
@@ -1381,7 +1381,7 @@ def test_postgres_raw_graph_rows_keep_repository_json_text_contract(postgres_dat
 def test_postgres_retrieve_neighbors_consumes_repository_rows(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     objects = [
@@ -1718,7 +1718,7 @@ def test_postgres_knowledge_list_and_retrieval_normalize_review_timestamps(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     rows = [
@@ -1781,7 +1781,7 @@ def test_postgres_knowledge_object_keyset_page_conforms(postgres_database):
     """
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     rows = [
@@ -1844,7 +1844,7 @@ def test_postgres_fts_candidate_window_cannot_be_crowded_out_by_deprecated_rows(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     query = "crowdout exact thermal phrase"
@@ -1888,7 +1888,7 @@ def test_postgres_fts_candidate_window_cannot_be_crowded_out_by_deprecated_rows(
 def test_postgres_fts_recalls_independent_term_from_long_query(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     with postgres_database.write() as connection:
@@ -1918,7 +1918,7 @@ def test_postgres_fts_recalls_independent_term_from_long_query(postgres_database
 def test_postgres_merge_review_job_start_is_single_flight(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     with postgres_database.write() as connection:
@@ -2292,7 +2292,7 @@ def test_postgres_concurrent_cluster_appends_are_member_idempotent(
     """Two real transactions must not both pass the append membership check."""
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     first_reached = threading.Event()
@@ -2378,7 +2378,7 @@ def test_postgres_concurrent_cluster_replacements_publish_one_complete_final_set
     """A later replacement must erase, not mix with, the prior complete set."""
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
     with postgres_database.write() as connection:
@@ -2496,7 +2496,7 @@ def test_postgres_promotion_dedup_does_not_overwrite_concurrent_merge_evidence(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -2699,7 +2699,7 @@ def test_postgres_promotion_dedup_does_not_overwrite_concurrent_merge_evidence(
 def test_postgres_concurrent_merges_preserve_all_target_evidence(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -2792,7 +2792,7 @@ def test_postgres_concurrent_merges_preserve_all_target_evidence(postgres_databa
 def test_postgres_concurrent_partial_updates_do_not_lose_fields(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -2866,7 +2866,7 @@ def test_postgres_concurrent_partial_updates_do_not_lose_fields(postgres_databas
 def test_postgres_concurrent_promotion_proposals_are_idempotent(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -2946,7 +2946,7 @@ def test_postgres_concurrent_promotion_proposals_are_idempotent(postgres_databas
 def test_postgres_reject_waiting_behind_approve_cannot_overwrite(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -3073,7 +3073,7 @@ def test_postgres_graph_build_order_and_equal_confidence_fanout_are_physical_ord
     from app.repositories.postgres.migrator import PostgresMigrator
     from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     unified = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
@@ -3237,7 +3237,7 @@ def test_postgres_graph_rows_follow_persisted_ordinals_for_degree_ties(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     object_ids = ["ko-order-z", "ko-order-a", "ko-order-m"]
@@ -3609,7 +3609,7 @@ def test_postgres_follow_endpoint_limit_is_stable_and_prioritizes_live_edges(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     object_ids = ["ko-follow-start", "ko-follow-a", "ko-follow-m", "ko-follow-z"]
@@ -3677,7 +3677,7 @@ def test_postgres_follow_endpoint_limit_is_stable_and_prioritizes_live_edges(
 def test_postgres_query_store_multi_notebook_count_placeholders(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     with postgres_database.write() as connection:
         for job_id, status in (("job-question-1", "completed"), ("job-question-2", "failed")):
@@ -3723,7 +3723,7 @@ def test_postgres_user_usage_attributes_reports_to_their_creator(postgres_databa
     """
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     with postgres_database.write() as connection:
         connection.execute(
@@ -3755,7 +3755,7 @@ def test_postgres_notebook_analytics_dedupes_low_rated_questions_by_latest_feedb
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     with postgres_database.write() as connection:
         for answer_id, question, created_at in (
@@ -3790,7 +3790,7 @@ def test_postgres_notebook_analytics_dedupes_low_rated_questions_by_latest_feedb
 def test_postgres_unified_kg_temp_search_and_checkpoint_json(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
     claims = (
@@ -3830,7 +3830,7 @@ def test_postgres_cluster_evidence_rows_tag_each_row_with_its_seed(postgres_data
     在 PG 上会 KeyError / 全部串组。"""
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     with postgres_database.write() as connection:
         for oid, seed, span in (
@@ -3890,7 +3890,7 @@ def test_concurrent_equivalent_promotions_serialize_base_dedup(
     from app.repositories.postgres import governance_store as governance_module
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -4664,6 +4664,7 @@ def test_board_list_and_board_edges_share_the_caller_snapshot(postgres_database)
         store.replace_kg_analysis_artifacts(
             connection, ANALYSIS_NB, 12, [("cm-a", "cm-b", 30)], [],
             _analysis_payloads(), NOW,
+            findings_rows=(), prune_marks=(),
         )
 
     with store.read_snapshot() as connection:
@@ -4710,6 +4711,7 @@ def _recast_boards_and_edges(database) -> None:
         store.replace_kg_analysis_artifacts(
             connection, ANALYSIS_NB, 13, [("cm-x", "cm-y", 99)], [],
             _analysis_payloads(), NOW,
+            findings_rows=(), prune_marks=(),
         )
 
 
@@ -4967,7 +4969,8 @@ def test_precomputed_artifacts_round_trip_identically_on_postgres(
     }, 19, partition_rebuilt=True)
     with knowledge_harness.database.write() as connection:
         unified.replace_kg_analysis_artifacts(
-            connection, ANALYSIS_NB, 41, edges, profiles, payloads, NOW
+            connection, ANALYSIS_NB, 41, edges, profiles, payloads, NOW,
+            findings_rows=(), prune_marks=(),
         )
 
     placeholder = "%s"
@@ -5031,6 +5034,7 @@ def test_discarding_board_dependent_artifacts_on_postgres(
             [("cm-big", "cm-small", 7)],
             [("source-golden", 12, 9, "cm-big", 0.75, 2, 0.5)],
             payloads, NOW,
+            findings_rows=(), prune_marks=(),
         )
 
     placeholder = "%s"
@@ -5074,7 +5078,8 @@ def test_replace_kg_analysis_artifacts_rejects_unknown_kinds_on_postgres(
     with pytest.raises(ValueError, match="契约外的 kind"):
         with knowledge_harness.database.write() as connection:
             unified.replace_kg_analysis_artifacts(
-                connection, ANALYSIS_NB, 1, [], [], {"board_edges": {}}, NOW
+                connection, ANALYSIS_NB, 1, [], [], {"board_edges": {}}, NOW,
+                findings_rows=(), prune_marks=(),
             )
 
 
@@ -5089,7 +5094,8 @@ def test_replace_kg_analysis_artifacts_rejects_a_missing_kind_on_postgres(
     with pytest.raises(ValueError, match="缺少必需的 kind"):
         with knowledge_harness.database.write() as connection:
             unified.replace_kg_analysis_artifacts(
-                connection, ANALYSIS_NB, 1, [], [], payloads, NOW
+                connection, ANALYSIS_NB, 1, [], [], payloads, NOW,
+                findings_rows=(), prune_marks=(),
             )
 
 
@@ -5135,7 +5141,8 @@ def test_replace_kg_analysis_artifacts_polices_the_cluster_stamp_on_postgres(
         with pytest.raises(ValueError, match="payload 必须带"):
             with knowledge_harness.database.write() as connection:
                 unified.replace_kg_analysis_artifacts(
-                    connection, ANALYSIS_NB, 1, [], [], payloads, NOW
+                    connection, ANALYSIS_NB, 1, [], [], payloads, NOW,
+                    findings_rows=(), prune_marks=(),
                 )
 
     extra = _analysis_payloads()
@@ -5145,7 +5152,8 @@ def test_replace_kg_analysis_artifacts_polices_the_cluster_stamp_on_postgres(
     with pytest.raises(ValueError, match="不依赖合并结果"):
         with knowledge_harness.database.write() as connection:
             unified.replace_kg_analysis_artifacts(
-                connection, ANALYSIS_NB, 1, [], [], extra, NOW
+                connection, ANALYSIS_NB, 1, [], [], extra, NOW,
+                findings_rows=(), prune_marks=(),
             )
 
 
@@ -5162,6 +5170,7 @@ def test_the_cluster_stamp_round_trips_identically_on_postgres(knowledge_harness
         unified.replace_kg_analysis_artifacts(
             connection, ANALYSIS_NB, 77, [], [],
             _analysis_payloads(cluster_seq=19), NOW,
+            findings_rows=(), prune_marks=(),
         )
 
     with knowledge_harness.database.connect() as connection:
@@ -5184,6 +5193,7 @@ def test_the_cluster_stamp_round_trips_identically_on_postgres(knowledge_harness
         unified.replace_kg_analysis_artifacts(
             connection, ANALYSIS_NB, 78, [], [],
             _analysis_payloads(cluster_seq=19, partition_rebuilt=False), NOW,
+            findings_rows=(), prune_marks=(),
         )
     with knowledge_harness.database.connect() as connection:
         backfilled = unified.kg_analysis_artifact_rows(connection, ANALYSIS_NB)
@@ -5213,7 +5223,8 @@ def _seed_analysis_ledger(harness, *, seq: int = 55) -> dict:
     }})
     with harness.database.write() as connection:
         unified.replace_kg_analysis_artifacts(
-            connection, ANALYSIS_NB, seq, [], [], payloads, NOW
+            connection, ANALYSIS_NB, seq, [], [], payloads, NOW,
+            findings_rows=(), prune_marks=(),
         )
     return payloads
 
@@ -5281,7 +5292,8 @@ def test_kg_community_edges_top_matches_on_postgres(knowledge_harness):
         ARTIFACT_COMMUNITY_EDGES: {"level": 0, "communities": 4}})
     with knowledge_harness.database.write() as connection:
         unified.replace_kg_analysis_artifacts(
-            connection, ANALYSIS_NB, 12, edges, [], payloads, NOW
+            connection, ANALYSIS_NB, 12, edges, [], payloads, NOW,
+            findings_rows=(), prune_marks=(),
         )
 
     with knowledge_harness.database.connect() as connection:
@@ -5313,7 +5325,8 @@ def test_kg_source_profile_page_matches_on_postgres(knowledge_harness):
     placeholder = "%s"
     with knowledge_harness.database.write() as connection:
         unified.replace_kg_analysis_artifacts(
-            connection, ANALYSIS_NB, 13, [], profiles, payloads, NOW
+            connection, ANALYSIS_NB, 13, [], profiles, payloads, NOW,
+            findings_rows=(), prune_marks=(),
         )
         # 只给 src-b 建来源行:其余三条是孤儿引用(source_id 没有外键,历史清理会留下
         # 这种行)。标题为空到底是「没标题」还是「已删除」,必须分得开。
@@ -5367,7 +5380,8 @@ def test_kg_community_edges_top_is_clamped_on_postgres(knowledge_harness):
     payloads = _analysis_payloads()
     with knowledge_harness.database.write() as connection:
         unified.replace_kg_analysis_artifacts(
-            connection, ANALYSIS_NB, 14, edges, [], payloads, NOW
+            connection, ANALYSIS_NB, 14, edges, [], payloads, NOW,
+            findings_rows=(), prune_marks=(),
         )
 
     with knowledge_harness.database.connect() as connection:
@@ -5401,7 +5415,8 @@ def test_kg_source_profile_page_is_clamped_and_stable_on_ties_on_postgres(
     payloads = _analysis_payloads()
     with knowledge_harness.database.write() as connection:
         unified.replace_kg_analysis_artifacts(
-            connection, ANALYSIS_NB, 15, [], profiles, payloads, NOW
+            connection, ANALYSIS_NB, 15, [], profiles, payloads, NOW,
+            findings_rows=(), prune_marks=(),
         )
 
     with knowledge_harness.database.connect() as connection:
@@ -6480,7 +6495,7 @@ def test_postgres_follow_start_row_accepts_an_explicit_participant_set(
     """
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 76
+    assert PostgresMigrator(postgres_database).migrate() == 77
     _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     rows = [

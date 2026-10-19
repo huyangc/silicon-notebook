@@ -499,6 +499,12 @@ class KgBuildJobStore:
             "kg_community_edges",
             "kg_source_profiles",
             "kg_analysis_artifacts",
+            # v97/0077: the findings detail goes with its ledger row. The
+            # marks on findings stay: publication moves kg_mutation_seq
+            # forward (never to 0), so a relink-attempt mark already reads
+            # as "content arrived since", and a dismissal is a member's
+            # judgment, not derived state.
+            "kg_analysis_findings",
             "kg_rebuild_checkpoint",
             "kg_cluster_scratch",
             "kg_canonical_scratch",
@@ -1038,7 +1044,8 @@ class KgBuildJobStore:
                 "ON CONFLICT(notebook_id) DO UPDATE SET "
                 "dirty=1,kg_mutation_seq=unified_kg_state.kg_mutation_seq+1,"
                 "cluster_mutation_seq=unified_kg_state.cluster_mutation_seq+1,"
-                "cluster_input_version='',community_seq=-1,canonical_rel_seq=-1,"
+                "cluster_input_version='',cluster_code_version='',"
+                "community_seq=-1,canonical_rel_seq=-1,"
                 "mention_seq=-1,"
                 # 代际重置(codex #671 R18 P1):本次发布刚整表清空三张
                 # 派生表(跨代 blanket),不归零指针/在飞/催收的话,并发

@@ -175,6 +175,20 @@ def require_live_promotion_target(connection: sqlite3.Connection, base_nb_id: st
         )
 
 
+def _lifecycle_merge_status_sql(statuses) -> str:
+    """``merge_candidate_states_for_canonicals`` 的状态谓词:与
+    `merge_candidate_pairs_for_canonicals` 同一套 deny-by-default 取值(固定字面量,
+    不绑定参数)。"""
+    values = tuple(statuses)
+    if values == ("pending",):
+        return "status='pending'"
+    if values == ("confirmed", "rejected", "deferred"):
+        return "status IN ('confirmed','rejected','deferred')"
+    if values == ("confirmed", "rejected", "deferred", "pending"):
+        return "status IN ('confirmed','rejected','deferred','pending')"
+    raise ValueError(f"unsupported lifecycle merge statuses: {values!r}")
+
+
 class GovernanceStore:
     def __init__(self, database: SqliteDatabase, seams) -> None:
         self.database = database
@@ -325,6 +339,48 @@ class GovernanceStore:
             f"AND (canonical_a IN ({placeholders}) OR canonical_b IN ({placeholders}))",
             [notebook_id, *ids, *ids],
         ).fetchall()
+
+    @staticmethod
+    def merge_candidate_states_for_canonicals(
+        db: sqlite3.Connection, notebook_id: str, statuses, canonical_ids
+    ) -> List[Dict[str, str]]:
+        """图谱分析 F4 读侧派生「已处理 / 已判定不是同一个」用的候选状态(设计
+        2026-10-19 §3.5):至少一端落在 ``canonical_ids`` 里的那些候选,每行
+        ``{id, canonical_a, canonical_b, status, seed_a, seed_b, updated_at}``,按
+        ``id`` 序。
+
+        ``concept_merge_candidates`` 只有 ``idx_candidates_nb_status``(canonical_a/b
+        无索引),所以这不是主键点查:语句由本库、这几种状态的候选切片驱动,
+        ``canonical_ids`` 只在切片里过滤 —— ``id_binding.member_of``(``+col IN``,
+        一个 JSON 参数,不随列表长度长出变量;两端共用同一个绑定,只扫一遍切片)。
+        与 `merge_candidate_pairs_for_canonicals` 同一个切片与过滤形态,区别是带回
+        状态与 seed,并且不要求调用方分批。
+
+        ``statuses`` 与那边同一套 deny-by-default 取值;校验在空列表早退之前。"""
+        status_sql = _lifecycle_merge_status_sql(statuses)
+        ids = list(dict.fromkeys(canonical_ids))
+        if not ids:
+            return []
+        bound = id_bind_ids(ids, sort=True)
+        rows = db.execute(
+            "SELECT id, canonical_a, canonical_b, status, seed_a, seed_b, updated_at "
+            f"FROM concept_merge_candidates WHERE notebook_id=? AND {status_sql} "
+            f"AND ({id_member_of('canonical_a', bound)} "
+            f"OR {id_member_of('canonical_b', bound)}) ORDER BY id",
+            (notebook_id, bound.param, bound.param),
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "canonical_a": row["canonical_a"],
+                "canonical_b": row["canonical_b"],
+                "status": row["status"],
+                "seed_a": row["seed_a"] or "",
+                "seed_b": row["seed_b"] or "",
+                "updated_at": str(row["updated_at"] or ""),
+            }
+            for row in rows
+        ]
 
     @staticmethod
     def valid_object_ids(

@@ -1979,7 +1979,8 @@ def test_replace_artifacts_consumes_edges_and_profiles_as_one_shot_iterators(rep
     profiles = iter([("src-a", 5, 4, "cm-a", 1.0, 1, 1.0)])
     with repo._write() as db:
         store.replace_kg_analysis_artifacts(
-            db, notebook.id, 9, edges, profiles, payloads, "2026-01-01T00:00:00"
+            db, notebook.id, 9, edges, profiles, payloads, "2026-01-01T00:00:00",
+            findings_rows=(), prune_marks=(),
         )
     assert next(edges, None) is None and next(profiles, None) is None
     assert _edges(repo, notebook.id) == [("cm-a", "cm-b", 3)]

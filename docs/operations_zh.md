@@ -1250,9 +1250,10 @@ target 互斥」那条一样的归属校验）——看到这个报错，直接�
 
 ### 变更捕获（`sync capture`）
 
-每个部署都自带同步层全部 46 张表的 AFTER INSERT/UPDATE/DELETE 触发器（设计文档 §7；SQLite
-上是 138 条——每表每种操作各一条，因为 SQLite 没有合并写法的 "AFTER INSERT OR UPDATE OR
-DELETE"；PostgreSQL 上是 46 条，每表一条），但默认是**关**的：全新迁移不会播种
+每个部署都自带同步层全部 47 张表的 AFTER INSERT/UPDATE/DELETE 触发器（设计文档 §7；SQLite
+上是 141 条——每表每种操作各一条，因为 SQLite 没有合并写法的 "AFTER INSERT OR UPDATE OR
+DELETE"；PostgreSQL 上是 47 条，每表一条；其中 46 张随 v84/0064 装上，`kg_analysis_findings`
+随 v97/0077 装上），但默认是**关**的：全新迁移不会播种
 `sync_capture_control` 这一行，运维显式执行 `sync capture enable` 之前什么都不记。门开着，
 `sync export` 就会读这份日志自动产出增量包（见上「跨环境笔记本同步」）；门关着，每次导出
 都是全量快照，日志也不增长。
@@ -1336,7 +1337,7 @@ PYTHONPATH=backend python scripts/sync_notebooks.py capture disable --json
 `CREATE INDEX idx_sync_change_log_txid ON sync_change_log (txid, seq) WHERE txid IS NOT NULL`
 是一条普通（非 `CONCURRENTLY`）的建索引语句，建完之前会一直持有 `sync_change_log` 上的
 SHARE 锁；门开着
-期间，全部 46 张同步表的每一次业务写都会经触发器往这同一张表写一行，这些写就会排在建索引
+期间，全部 47 张同步表的每一次业务写都会经触发器往这同一张表写一行，这些写就会排在建索引
 后面等。启动期迁移走的是应用自己的连接池，池的默认值（`POSTGRES_STATEMENT_TIMEOUT_SECONDS=30`、
 `POSTGRES_LOCK_TIMEOUT_SECONDS=5`）是按请求路径上的查询定的，不是按建索引定的——日志表大到
 建索引跑得比这两个上限还久时，迁移会被掐断，服务启动失败，而且只要底层原因不解决，每次

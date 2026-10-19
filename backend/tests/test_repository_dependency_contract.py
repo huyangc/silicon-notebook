@@ -171,6 +171,9 @@ LIFECYCLE_STORE_CALLS = {
         "seed_payload_rows",
         "set_community_seq",
         "state_row",
+        # v97/0077: the inputs-unchanged skip path's guarded write of the
+        # merge code component (``_settle_skip_path``).
+        "stamp_cluster_code_version",
         "stream_seed_rows",
         # 批 3·W2 代际原语:取号/释放/在飞复读/写新代/翻转/催收/回收。
         # 旧 swap_cluster_map_from_scratch(DELETE+INSERT 同事务换表)已退役

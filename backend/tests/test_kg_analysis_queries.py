@@ -943,6 +943,17 @@ def test_both_backend_stores_declare_the_same_analysis_surface():
         # 一侧把 SQL 改成另一种语义、另一侧不动,这条守卫看不见(codex 第 12 轮 P2)。
         "community_overview_on",
         "relation_provenance_counts",
+        # 问题清单的存储原语(SQLite v97 / PostgreSQL 0077):写入口、两个整份读、
+        # 标记的写与删、来源点查、展示名、合并代码分量的两处写入。
+        "replace_kg_analysis_artifacts",
+        "kg_analysis_finding_rows",
+        "kg_analysis_mark_rows",
+        "write_kg_analysis_mark",
+        "clear_kg_analysis_mark",
+        "kg_finding_source_states",
+        "kg_finding_display_name_rows",
+        "stamp_cluster_code_version",
+        "finish_rebuild_state",
     ):
         assert name in SqliteUnifiedKgStore.__dict__, name
         assert name in PostgresUnifiedKgStore.__dict__, name
@@ -981,6 +992,17 @@ _ANALYSIS_METHODS = (
     "community_overview_on",
     "relation_provenance_counts",
     "_read_snapshot",
+    # 问题清单的存储原语(SQLite v97 / PostgreSQL 0077):两侧形态分岔(名字取值
+    # `->>` / `json_extract`、最近一次抽取 LATERAL / 相关子查询)都写在各自的 SQL 里,
+    # 不在运行时判后端。
+    "replace_kg_analysis_artifacts",
+    "kg_analysis_finding_rows",
+    "kg_analysis_mark_rows",
+    "write_kg_analysis_mark",
+    "clear_kg_analysis_mark",
+    "kg_finding_source_states",
+    "kg_finding_display_name_rows",
+    "stamp_cluster_code_version",
 )
 
 # 「这条连接/库是哪个后端」的运行时嗅探形态。后端选择只存在于 factory,store 里出现

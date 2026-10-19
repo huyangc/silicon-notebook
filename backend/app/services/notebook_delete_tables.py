@@ -267,6 +267,11 @@ _GROUP_D_STANDALONE: tuple[DirectTable, ...] = (
     DirectTable("conversations", "one", pk_column="id"),  # closure-external
     DirectTable("extraction_runs", "one", pk_column="id"),
     DirectTable("kg_analysis_artifacts", "two"),
+    # SQLite v97 / PostgreSQL 0077: the findings detail and the marks on
+    # findings. Both cascade with the notebook (A-class), composite primary
+    # keys (form two).
+    DirectTable("kg_analysis_findings", "two"),
+    DirectTable("kg_analysis_marks", "two"),
     DirectTable("kg_canonical_scratch", "two"),  # closure-external
     DirectTable("kg_cluster_scratch", "two"),  # closure-external
     DirectTable("kg_community_edges", "two"),
@@ -345,7 +350,11 @@ assert len(CURSOR_KEYS) == len(set(CURSOR_KEYS)), "PHASE_3_PLAN cursor keys must
 # `notebook_id` PARTITION column and therefore a partition to clear. It is a
 # closure-EXTERNAL table (no foreign key into `notebooks` at all), so it adds
 # to the count the same way the other closure-external tables already do.
-EXPECTED_PHASE_3_TABLE_COUNT = 67
+#
+# 69 since SQLite v97 / PostgreSQL 0077: `kg_analysis_findings` and
+# `kg_analysis_marks`, two A-class tables (ON DELETE CASCADE from
+# `notebooks`) cleared by form two like the other analysis products.
+EXPECTED_PHASE_3_TABLE_COUNT = 69
 
 
 def phase_3_table_names() -> frozenset[str]:

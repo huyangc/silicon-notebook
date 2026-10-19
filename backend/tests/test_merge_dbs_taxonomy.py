@@ -545,3 +545,61 @@ def test_merge_drops_derived_layers_of_a_deleted_graph(tmp_path):
         assert _count("concept_comentions", "nb-mention-only") == 1
     finally:
         conn.close()
+
+
+def test_merge_keeps_dismissals_and_drops_relink_marks_and_findings(tmp_path):
+    """v97:导入库的「标为正常」随库合并(与合并决定同类);「补上关联已尝试」
+    记的是副库的 kg_mutation_seq,导入库的状态行被清掉(seq 回到 0)之后它就
+    不成立,必须删掉;问题清单明细与它的账本一样不导入。变异钉:去掉 relink
+    标记的那条删除 → 报红;把 kg_analysis_findings 改回导入 → 报红。primary
+    自己的标记一条不动。"""
+    now = "2026-01-01T00:00:00"
+
+    def _mk(path, nb):
+        merge_dbs.migrate_to_current(path)
+        conn = sqlite3.connect(str(path))
+        with conn:
+            conn.execute(
+                "INSERT INTO users (id,email,display_name,role,created_at,"
+                "updated_at) VALUES ('u','u@x','u','member',?,?)", (now, now))
+            conn.execute(
+                "INSERT INTO notebooks (id,name,purpose,primary_domain,status,"
+                "created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (nb, nb, "", "Semiconductor", "active", "u", now, now))
+            conn.execute(
+                "INSERT INTO unified_kg_state (notebook_id, kg_mutation_seq, "
+                "updated_at) VALUES (?, 9, ?)", (nb, now))
+            for kind in ("dismissed", "relink_attempted"):
+                conn.execute(
+                    "INSERT INTO kg_analysis_marks (notebook_id, rule_id, subject_key, "
+                    "kind, at_kg_seq, actor_user_id, created_at) "
+                    "VALUES (?, ?, ?, ?, 9, 'u', ?)",
+                    (nb, "F1" if kind == "dismissed" else "F5",
+                     "src-1" if kind == "dismissed" else "notebook", kind, now))
+            conn.execute(
+                "INSERT INTO kg_analysis_findings (notebook_id, rule_id, subject_key, "
+                "subject_kind, severity, first_seen_kg_seq, first_seen_cluster_seq) "
+                "VALUES (?, 'F1', 'src-1', 'source', 'high', 9, 3)", (nb,))
+        conn.close()
+
+    primary, secondary, out = tmp_path / "a.db", tmp_path / "b.db", tmp_path / "out.db"
+    _mk(primary, "nb-main")
+    _mk(secondary, "nb-sec")
+    merge_dbs.merge_core(out, primary, secondary, shared_base="nb-none")
+
+    conn = sqlite3.connect(str(out))
+    try:
+        marks = {
+            (row[0], row[1])
+            for row in conn.execute("SELECT notebook_id, kind FROM kg_analysis_marks")
+        }
+        findings = {
+            row[0] for row in conn.execute("SELECT notebook_id FROM kg_analysis_findings")
+        }
+    finally:
+        conn.close()
+    assert marks == {
+        ("nb-main", "dismissed"), ("nb-main", "relink_attempted"),
+        ("nb-sec", "dismissed"),
+    }
+    assert findings == {"nb-main"}

@@ -44,9 +44,25 @@ V78_AUTH_TABLES = {
 }
 
 
+def rollback_v97(db: sqlite3.Connection) -> None:
+    """Remove what SQLite migration 97 added: ``kg_analysis_findings`` with its
+    three change-capture triggers, ``kg_analysis_marks`` and
+    ``unified_kg_state.cluster_code_version``. Callers lower ``user_version``
+    themselves."""
+    from app.migration.sync.capture import sqlite_trigger_sql
+
+    for name in sorted(sqlite_trigger_sql(added_at=97)):
+        db.execute(f'DROP TRIGGER "{name}"')
+    db.execute("DROP TABLE kg_analysis_marks")
+    db.execute("DROP TABLE kg_analysis_findings")
+    db.execute("ALTER TABLE unified_kg_state DROP COLUMN cluster_code_version")
+
+
 def rollback_v96(db: sqlite3.Connection) -> None:
     """Remove ``idx_global_ask_jobs_feedback``, the partial index SQLite
-    migration 96 added. Callers lower ``user_version`` themselves."""
+    migration 96 added. v97 is undone first (newest-first). Callers lower
+    ``user_version`` themselves."""
+    rollback_v97(db)
     db.execute("DROP INDEX idx_global_ask_jobs_feedback")
 
 

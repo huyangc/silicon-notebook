@@ -48,6 +48,11 @@ NOTEBOOK_SCOPED_TABLES = [
     "kg_relation_completion_state",
     "kg_cluster_scratch", "kg_canonical_scratch", "kg_conflict_candidates",
     "merge_review_jobs",
+    # v97 图谱分析问题的标记: 「标为正常」是成员对这本库的问题下的判断, 与
+    # concept_merge_candidates 里的合并决定同一类, 随库合并。「补上关联已尝试」
+    # 记的是副库的 kg_mutation_seq, 合并后导入库的状态行被 KG_STATE_TABLES 清掉
+    # (seq 回到 0), 这类标记在 merge_core 里随后删除。
+    "kg_analysis_marks",
     "promotion_candidates", "derived_rule_candidates", "extraction_runs",
     "extraction_candidates", "articles", "article_claims", "conversations",
     "answers", "feedback", "ask_jobs", "kg_build_jobs", "reports", "memory_items",
@@ -224,6 +229,9 @@ SKIP_SECONDARY_TABLES = [
     # ⚠ 反过来做(照拷进来再由 KG_STATE_TABLES 清)语义一样, 但要先把生产 base 库里
     #   数以百万计的跨板块边搬进合并事务再删掉 —— 白付一遍 IO。
     "kg_community_edges", "kg_source_profiles", "kg_analysis_artifacts",
+    # v97 问题清单明细是账本 findings 行的明细, 同一理由: 账本不导入, 明细导入只会
+    # 留下没有账本的孤行(读侧按账本判「在不在」), 等部署后重建一起重新算出来。
+    "kg_analysis_findings",
     # Agentic Memory P1(v51)的两张表:理解块与每条链的巡固状态。同一理由与措辞
     # 见 sharing_store.py 深拷贝快照里对这两张表的同款排除注释——块里存的是这本库
     # 被**用出来**的理解(共享底座 + 每位成员各自的覆盖层),不是知识本身;知识随
@@ -658,6 +666,13 @@ def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
                 if _table_exists(conn, t, "main"):
                     conn.execute(
                         f"DELETE FROM main.{t} WHERE notebook_id IN ({ph})", tuple(sec_nb))
+            # v97:状态行刚被清掉, 导入库的 kg_mutation_seq 回到 0, 副库那份「补上关联
+            # 完成于第 N 代」的标记从此指向一个本库不存在的世代 —— 与「删除知识图谱」
+            # 同一原则, 让 kg_mutation_seq 归零的地方都清掉它。「标为正常」保留。
+            if _table_exists(conn, "kg_analysis_marks", "main"):
+                conn.execute(
+                    f"DELETE FROM main.kg_analysis_marks WHERE notebook_id IN ({ph}) "
+                    "AND kind = 'relink_attempted'", tuple(sec_nb))
             # 批 3·W2 §1.6:上面刚清掉导入 notebook 的 unified_kg_state 行
             # (代次指针随之消失),而三张簇图派生表的行带着副库的 generation
             # 原样拷入——读者按 COALESCE(指针,0) 取代次,不归一到 0 代整份

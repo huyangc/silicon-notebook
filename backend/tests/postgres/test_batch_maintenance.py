@@ -759,6 +759,58 @@ def test_delete_notebook_kg_removes_this_notebooks_kg_analysis_artifacts_ledger(
 
 
 @pytest.mark.postgres_integration
+def test_delete_notebook_kg_clears_findings_and_relink_marks_keeps_dismissals(
+    postgres_repository,
+):
+    """PostgreSQL twin of test_kg_repository.py's test of the same name
+    (SQLite v97 / PostgreSQL 0077): findings go with the ledger,
+    relink-attempt marks go with the kg_mutation_seq they record, dismissals
+    stay, and cluster_code_version is emptied with cluster_input_version."""
+    rt = postgres_repository._runtime
+    nb = postgres_repository.create_notebook(NotebookCreate(name="findings delete")).id
+    other = postgres_repository.create_notebook(
+        NotebookCreate(name="findings bystander")
+    ).id
+    now = normalize_timestamp(rt.seams.now())
+    with rt.database.write() as db:
+        for notebook_id in (nb, other):
+            db.execute(
+                "INSERT INTO kg_analysis_findings (notebook_id, rule_id, subject_key, "
+                "subject_kind, severity, first_seen_kg_seq, first_seen_cluster_seq) "
+                "VALUES (%s, 'F1', 'src-1', 'source', 'high', 4, 2)", (notebook_id,))
+            db.execute(
+                "INSERT INTO kg_analysis_marks (notebook_id, rule_id, subject_key, kind, "
+                "at_kg_seq, actor_user_id, created_at) VALUES "
+                "(%s, 'F1', 'src-1', 'dismissed', 4, 'user-local', %s), "
+                "(%s, 'F5', 'notebook', 'relink_attempted', 4, '', %s)",
+                (notebook_id, now, notebook_id, now))
+            db.execute(
+                "UPDATE unified_kg_state SET cluster_input_version='v-in', "
+                "cluster_code_version='code-1' WHERE notebook_id=%s", (notebook_id,))
+
+    counts = rt.knowledge_lifecycle.delete_notebook_kg(nb)
+
+    with rt.database.connect() as db:
+        def rows(statement, notebook_id):
+            return [tuple(r.values()) for r in db.execute(statement, (notebook_id,)).fetchall()]
+
+        findings = ("SELECT rule_id, subject_key FROM kg_analysis_findings "
+                    "WHERE notebook_id=%s")
+        marks = ("SELECT rule_id, kind FROM kg_analysis_marks WHERE notebook_id=%s "
+                 "ORDER BY kind")
+        state = ("SELECT cluster_input_version, cluster_code_version FROM "
+                 "unified_kg_state WHERE notebook_id=%s")
+        assert rows(findings, nb) == []
+        assert rows(marks, nb) == [("F1", "dismissed")]
+        assert rows(state, nb) == [("", "")]
+        assert rows(findings, other) == [("F1", "src-1")]
+        assert rows(marks, other) == [("F1", "dismissed"), ("F5", "relink_attempted")]
+        assert rows(state, other) == [("v-in", "code-1")]
+    assert counts["kg_analysis_findings"] == 1
+    assert counts["kg_analysis_marks"] == 1
+
+
+@pytest.mark.postgres_integration
 def test_delete_notebook_kg_upserts_when_the_state_row_was_already_missing(
     postgres_repository,
 ):

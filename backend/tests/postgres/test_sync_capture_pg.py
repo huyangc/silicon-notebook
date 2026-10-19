@@ -116,9 +116,10 @@ def test_the_migration_installs_the_generated_functions_and_triggers(migrated):
 
     expected_functions = expected_postgres_functions()
     assert set(functions) == set(expected_functions)
-    assert len(functions) == 46
+    # 0064's 46 tables plus 0077's kg_analysis_findings (since_schema=97).
+    assert len(functions) == 47
     assert triggers == expected_postgres_triggers()
-    assert len(triggers) == 46
+    assert len(triggers) == 47
     for name, row in functions.items():
         assert row["prokind"] == "f"
         assert row["prosecdef"] is False
@@ -140,7 +141,7 @@ def test_no_installed_function_materializes_a_whole_row(migrated):
             ).fetchall()
         ]
 
-    assert len(sources) == 46
+    assert len(sources) == 47
     for source in sources:
         assert "to_jsonb(" not in source
         assert "row_to_json(" not in source
@@ -357,7 +358,7 @@ def test_the_migration_collapses_duplicate_rows_before_taking_the_key(
             "('c-2','nb-1',0,'com-1','b',0.0,1)"
         )
 
-    assert migrator.migrate() == 76
+    assert migrator.migrate() == 77
 
     with postgres_database.connect() as conn:
         kos = conn.execute(

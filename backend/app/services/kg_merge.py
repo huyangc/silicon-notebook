@@ -52,6 +52,39 @@ _log = logging.getLogger(__name__)
 CLUSTER_ALGO_VERSION = 3
 
 
+def cluster_code_components(settings) -> tuple[int, int, int]:
+    """``(embed_dim, runtime_dim, CLUSTER_ALGO_VERSION)``: the three components of
+    the clustering input version that come from code and configuration, not
+    from the data. ``KnowledgeLifecycleService._cluster_input_version`` folds
+    exactly these, read exactly this way, into its hash, and
+    ``cluster_code_version`` publishes them; one reader keeps the two from
+    drifting. ``CLUSTER_ALGO_VERSION`` is read at call time (a test may patch
+    the module attribute)."""
+    from app.domain.vector_index import resolve_runtime_dim
+
+    return (
+        int(settings.embed_dim),
+        resolve_runtime_dim(settings),
+        int(CLUSTER_ALGO_VERSION),
+    )
+
+
+def cluster_code_version(settings) -> str:
+    """The code component of a merge, as ``unified_kg_state.cluster_code_version``
+    stores it (SQLite v97 / PostgreSQL 0077; design 2026-10-19 §五 S4):
+    ``"algo=<CLUSTER_ALGO_VERSION>;embed_dim=<n>;runtime_dim=<n>"``.
+
+    ``cluster_input_version`` is a sha1 that folds these in together with data
+    counts, so nothing in a report can read the code part back out of it, and
+    bumping ``CLUSTER_ALGO_VERSION`` does not mark a library dirty. Stored beside
+    it at every merge (the rebuild end-write, and the inputs-unchanged skip path
+    under a ``cluster_input_version`` equality guard), the plain text lets a
+    reader compare the last merge's code with the running code without
+    recomputing the input version's object and vector counts."""
+    embed_dim, runtime_dim, algo = cluster_code_components(settings)
+    return f"algo={algo};embed_dim={embed_dim};runtime_dim={runtime_dim}"
+
+
 def seed_or_unique(seed: str, object_id: str) -> str:
     """空/退化 seed(符号-only 名)绝不共簇:回退为按对象唯一的哨兵 seed。
     "~" 会被 _norm 清洗掉,真实名字的 seed 不可能以 "~" 开头 → 无碰撞。

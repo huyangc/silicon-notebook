@@ -76,6 +76,9 @@ USER_REFERENCE_COLUMNS: tuple[UserReference, ...] = (
     _blocking("reports", "created_by", "报告"),
     _blocking("kg_build_jobs", "created_by", "知识图谱"),
     _blocking("concept_merge_candidates", "reviewed_by", "知识图谱"),
+    # Who marked a KG analysis finding normal (SQLite v97 / PostgreSQL 0077);
+    # '' for the system's own relink-attempt marks.
+    _blocking("kg_analysis_marks", "actor_user_id", "知识图谱"),
     _blocking("knowhow_tables", "created_by", "Knowhow 表"),
     _blocking("knowhow_changes", "actor", "Knowhow 表"),
     _blocking("knowhow_cell_code", "updated_by", "Knowhow 表"),
