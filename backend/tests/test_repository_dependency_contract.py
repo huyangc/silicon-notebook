@@ -155,6 +155,18 @@ LIFECYCLE_STORE_CALLS = {
         # 补账本发布复核的带锁读(PG FOR SHARE;质量评 P1)——只此一处消费。
         "community_generation_for_publish",
         "replace_kg_analysis_artifacts",
+        # KG analysis findings (design 2026-10-19 §7.1): the publish transaction's
+        # one bounded read of the old detail; the mark read for stale dismissals;
+        # the bounded lookups outside any write transaction (member names for the
+        # seed-keyed decisions and F4/S1 names, display names, source titles),
+        # riding `read_snapshot`; and the relink mark written on success.
+        "kg_analysis_finding_rows",
+        "kg_analysis_mark_rows",
+        "kg_finding_member_name_rows",
+        "kg_finding_display_name_rows",
+        "kg_finding_source_states",
+        "read_snapshot",
+        "write_kg_analysis_mark",
         "replace_mention_bridge",
         "source_canonical_rows",
         "scratch_vector_rows",

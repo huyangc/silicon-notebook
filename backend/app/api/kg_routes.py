@@ -23,7 +23,12 @@ from app.models.kg import (
     ScaleIndexStatus,
     UnifiedKgStatus,
 )
-from app.models.kg_analysis import KgAnalysisResponse, SourceProfilePageResponse
+from app.domain.kg_findings_contracts import KG_FINDINGS_PAGE_MAX
+from app.models.kg_analysis import (
+    FindingsPageResponse,
+    KgAnalysisResponse,
+    SourceProfilePageResponse,
+)
 from app.repositories.ports import KgBuildAlreadyRunning, KgMaintenanceAlreadyRunning
 from app.services import background_jobs
 from app.services.knowledge_contracts import (
@@ -715,3 +720,58 @@ def kg_analysis_sources(
             )
         )
     )
+
+
+# 问题清单(设计 2026-10-19 §8.4)。读端点与总览同级(只读成员也能看);「标为正常」与
+# 合并确认同级(图谱写,镜像库 409 —— 能力工厂自带的围栏;未授权仍是 404)。响应里只有
+# 内部代号,界面词由前端映射。
+
+
+@router.get(
+    "/notebooks/{notebook_id}/kg-analysis/findings",
+    response_model=FindingsPageResponse,
+    dependencies=[Depends(require_notebook_read)],
+)
+def kg_analysis_findings(
+    notebook_id: str,
+    zone: Literal["open", "passed", "dismissed"] = Query("open"),
+    limit: int = Query(50, ge=1, le=KG_FINDINGS_PAGE_MAX),
+    offset: int = Query(0, ge=0),
+) -> FindingsPageResponse:
+    """问题清单的一页:``open`` 待处理(含「已处理,更新后核验」)/ ``passed``(用户已判定
+    不是同一个的 F4、补上关联已无可补的 F5)/ ``dismissed``(已标为正常)。每行带读侧
+    派生的 ``status`` 与涉及来源此刻的样子(主键点查,≤ 一页)。与 /sources 一样不记忆化。"""
+    return FindingsPageResponse(
+        **asdict(
+            kg_analysis_service().findings_page(
+                notebook_id, zone=zone, limit=limit, offset=offset
+            )
+        )
+    )
+
+
+@router.put(
+    "/notebooks/{notebook_id}/kg-analysis/findings/{rule_id}/{subject_key:path}/dismissal",
+    status_code=204,
+    dependencies=[Depends(require_notebook_capability("kg:write"))],
+)
+def dismiss_kg_finding(
+    notebook_id: str, rule_id: str, subject_key: str,
+    user: UserProfile = Depends(get_current_user),
+) -> None:
+    """标为正常。主键两段由路由解码一次(F2 的主键含 ``|``,F4 的主键可能含 ``/``,所以
+    ``subject_key`` 用 ``:path``);主键不在**当前**问题清单里 → 404。"""
+    if not kg_analysis_service().dismiss_finding(
+        notebook_id, rule_id, subject_key, actor_user_id=user.id
+    ):
+        raise HTTPException(status_code=404, detail="Finding not found")
+
+
+@router.delete(
+    "/notebooks/{notebook_id}/kg-analysis/findings/{rule_id}/{subject_key:path}/dismissal",
+    status_code=204,
+    dependencies=[Depends(require_notebook_capability("kg:write"))],
+)
+def undismiss_kg_finding(notebook_id: str, rule_id: str, subject_key: str) -> None:
+    """撤销「标为正常」。幂等(没有这条标记也是 204)。"""
+    kg_analysis_service().undismiss_finding(notebook_id, rule_id, subject_key)

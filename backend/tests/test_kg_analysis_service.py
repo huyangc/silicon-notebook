@@ -256,6 +256,8 @@ def _service(repo, store=None) -> KgAnalysisService:
         database=runtime.database,
         unified_kg=store if store is not None else runtime.unified_kg,
         now=lambda: "2026-01-03T00:00:00",
+        governance=runtime.governance,
+        current_merge_code=lambda: "algo=4;embed_dim=16;runtime_dim=0",
     )
 
 
@@ -1801,6 +1803,7 @@ def test_endpoints_are_read_guarded():
     routes = {
         "/notebooks/{notebook_id}/kg-analysis",
         "/notebooks/{notebook_id}/kg-analysis/sources",
+        "/notebooks/{notebook_id}/kg-analysis/findings",
     }
     guarded = {
         route.path: {d.dependency for d in route.dependencies}

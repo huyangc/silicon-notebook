@@ -100,12 +100,14 @@ def _concept_names() -> Dict[str, List[str]]:
     return names
 
 
-def seed_world(repo, *, postgres: bool, community_min_size: int = 2) -> World:
-    """Seed the world into a fresh notebook; returns its ids. The KG state
-    carries kg_mutation_seq 5 / cluster_mutation_seq 2 (the published cluster
-    generation is the birth generation 0)."""
+def seed_world(repo, *, postgres: bool, community_min_size: int = 2,
+               notebook_id: str = "") -> World:
+    """Seed the world into a fresh notebook (or into ``notebook_id``, e.g. one an
+    API test created as its owner); returns its ids. The KG state carries
+    kg_mutation_seq 5 / cluster_mutation_seq 2 (the published cluster generation
+    is the birth generation 0)."""
     repo.settings.community_min_size = community_min_size
-    notebook_id = repo.create_notebook(NotebookCreate(name="findings-world")).id
+    notebook_id = notebook_id or repo.create_notebook(NotebookCreate(name="findings-world")).id
     world = World(notebook_id)
     names = _concept_names()
     p = "%s" if postgres else "?"

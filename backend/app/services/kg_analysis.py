@@ -6,7 +6,8 @@
 
 设计红线(与 `app/services/checkup.py` 同一套):
 
-- **只读**:不写库、不调 LLM / embedding / rerank。
+- **只读**:不写库、不调 LLM / embedding / rerank。唯一的写是用户「标为正常」(问题清单的
+  豁免标记,设计 2026-10-19 §8.3),不碰任何预计算产物。
 - **不 import facade**:collaborators 由构造方以窄 seam 注入(``database`` / ``unified_kg``
   / ``now``),本 service 只组装、不拼 SQL。
 - **后端中性**:不判 dialect、不 import 任一侧 adapter。注入的 store 实例是后端相关的,
@@ -22,12 +23,18 @@
 `unified_kg.cluster_size_histogram` / `largest_clusters` / `relation_provenance_counts` /
 `source_canonical_rows`(`tests/test_kg_analysis_service.py` 有一条 spy 守卫钉住这点)。
 
-请求路径上真正跑的 SQL 只有五条,全部按行数有界:
+请求路径上真正跑的 SQL,全部按行数有界:
   · `state_row`                  单行主键点读
-  · `kg_analysis_artifact_rows`  ≤5 行复合主键点读
+  · `kg_analysis_artifact_rows`  ≤6 行复合主键点读
   · `kg_community_edges_top`     ≤20 万行(T2 硬上限)的分片扫 + 有界 top-N
   · `community_overview_on`      COUNT + `ORDER BY size DESC LIMIT ≤200` + ≤200 次有界 top-K
   · `kg_source_profile_page`     COUNT + 一页 ≤200 行 + ≤200 次主键点查(仅 /sources)
+  · `kg_analysis_mark_rows`      ≤ `KG_ANALYSIS_MARKS_MAX` 行主键前缀读(总览的问题清单
+                                 摘要 + /findings)
+  · 仅 /findings(设计 2026-10-19 §8.4):`kg_analysis_finding_rows`(≤ `KG_FINDINGS_ROWS_MAX`
+    行主键前缀)、F4 组的已存决定(`merge_candidate_states_for_canonicals`,本库决定切片
+    按组的 canonical 过滤)与成员名(`kg_finding_member_name_rows`,按 canonical 驱动,500
+    一批)、这一页涉及来源的状态(`kg_finding_source_states`,≤ 一页的主键点查)
 
 后两条里读**明细表**的那两条(`kg_community_edges_top` / `kg_source_profile_page`)还带
 一道账本闸:账本行不在就整条跳过(见 `_detail_rows_are_readable`)。这不是性能优化而是
@@ -64,8 +71,12 @@ service 的硬要求是**逐指标标注**,而不是整份报告挂一条横幅:
   · 「缺失」与「为空」按**账本行的存在与否**区分,并且区分得出「从来没算过」、
     「合法缺席」与「本该有却没有」。
 
-**边界**:这是 DFX 诊断工具,不是产品引导。职责到「如实标注」为止 —— 不折叠、不置灰、
-不催促整理,也不替读者判断该不该信这些数字。
+**边界**(设计 2026-10-19 §14① 修订,取代原设计 §3.3 末尾「不折叠、不置灰、不催促
+整理」):本视图给出带证据的问题与建议 —— 判据确定、可解释、可复核,每条问题都附上判据
+用到的数字,并可标为正常;不出单一总分。处置不由视图执行:视图只把用户带到既有入口,
+删除、重新解析、合并确认、补上关联都走既有确认框与后端权限。原始统计默认收起但随时可
+展开;动作按钮只在按下去不会有任何变化时置灰,并在旁边写明原因。逐指标的口径与新鲜度
+标注要求不变。本 service 的唯一写是「标为正常」(`dismiss_finding` / `undismiss_finding`)。
 """
 from __future__ import annotations
 
@@ -77,9 +88,16 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from app.domain.kg_analysis_contracts import (
     ARTIFACT_FINDINGS,
     LEDGER_CONTRACT_KEY,
+    MARK_DISMISSED,
     ledger_row_predates_findings,
 )
-from app.domain.kg_findings_contracts import FINDINGS_PAYLOAD_UNITS
+from app.domain.kg_findings_contracts import (
+    FINDING_EVIDENCE_UNITS,
+    FINDING_RULES,
+    FINDINGS_PAYLOAD_UNITS,
+    KG_FINDINGS_PAGE_MAX,
+)
+from app.services import kg_findings_view as findings_view
 from app.services.kg_analysis_precompute import (
     ARTIFACT_CLUSTER_HISTOGRAM,
     ARTIFACT_COMMUNITY_EDGES,
@@ -263,6 +281,16 @@ STATE_UNITS: Dict[str, str] = {
     "relation_count": UNIT_RELATION_ROWS,
     "cluster_count": UNIT_CLUSTERS,
 }
+FINDINGS_PAGE_UNITS: Dict[str, str] = {
+    "total": "findings",
+    "returned": "findings",
+    "limit": "findings",
+    "offset": "findings",
+    "impact_objects": UNIT_OBJECTS,
+    "objects": UNIT_OBJECTS,
+    "kg_seq": UNIT_SEQ,
+    "cluster_seq": UNIT_SEQ,
+}
 SOURCE_PAGE_UNITS: Dict[str, str] = {
     "total": UNIT_SOURCES,
     "returned": UNIT_SOURCES,
@@ -409,6 +437,41 @@ class BoardEdgeView:
 
 
 @dataclass(frozen=True)
+class FindingsSummary:
+    """问题清单的账本摘要(设计 2026-10-19 §8.4:总览只读账本 + 标记,不读明细)。
+
+    缺席时 ``present=False``、``absence`` 说为什么(含 ``upgrade_pending``),其余为
+    None / 空 —— 「还没生成」绝不渲染成「没有问题」。``rules`` 是账本里逐条规则的状态
+    (按规则代号为键;S1 的样例名挪进 ``dev_items``),``relink`` 是「补上关联」的持久标记
+    (`kg_findings_view.relink_view`)。"""
+
+    present: bool
+    absence: Optional[str]
+    freshness: Freshness
+    rules_version: Optional[int]
+    built_at: Optional[Dict[str, Optional[int]]]
+    created_at: str
+    counts: Optional[Dict[str, Any]]
+    rules: Dict[str, Dict[str, Any]]
+    dev_items: List[Dict[str, Any]]
+    structure: Optional[Dict[str, Any]]
+    comparison: Optional[Dict[str, Any]]
+    relink: Optional[Dict[str, Any]]
+    units: Dict[str, str]
+
+
+@dataclass(frozen=True)
+class MergeCodeState:
+    """上次合并建于哪一版合并规则(``stored`` = `unified_kg_state.cluster_code_version`)
+    与当前代码(``current``)。``matches``:``None`` = 还没合并过 / 删除知识图谱之后
+    (``stored`` 是空串)—— 那**不是**「合并规则已更新」;否则两者是否逐字相等。"""
+
+    stored: str
+    current: str
+    matches: Optional[bool]
+
+
+@dataclass(frozen=True)
 class KgAnalysisOverview:
     notebook_id: str
     generated_at: str
@@ -419,6 +482,31 @@ class KgAnalysisOverview:
     artifacts: List[ArtifactView]
     boards: BoardOverview
     board_edges: BoardEdgeView
+    findings_summary: FindingsSummary
+    merge_code: MergeCodeState
+
+
+@dataclass(frozen=True)
+class FindingsPage:
+    """问题清单的一页(一个区)。``units`` 给页级计数与行里的数,``evidence_units``
+    逐规则给证据里每个数值叶子的单位。"""
+
+    notebook_id: str
+    generated_at: str
+    present: bool
+    absence: Optional[str]
+    freshness: Freshness
+    built_at: Optional[Dict[str, Optional[int]]]
+    rules_version: Optional[int]
+    zone: str
+    limit: int
+    offset: int
+    total: int
+    returned: int
+    has_more: bool
+    units: Dict[str, str]
+    evidence_units: Dict[str, Dict[str, str]]
+    rows: List[Dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -456,6 +544,16 @@ class KgAnalysisService:
       `community_overview_on` 而不是自开快照的 `community_overview`:后者会在这一趟里
       另起一份库。
     - ``now``:时钟 seam。
+    - ``governance``:后端相关的 governance store,只用它的
+      `merge_candidate_states_for_canonicals`(connection-taking,骑同一个快照)——
+      问题清单 F4 读侧按已存决定派生「已判定不是同一个 / 已处理」。
+    - ``current_merge_code``:当前代码的合并代码分量(`kg_merge.cluster_code_version`,
+      不读库),与 state 行里存的那一份比,给「合并规则已更新」(§五 S4)。
+
+    **报告只读,唯一的写是用户「标为正常」**(`dismiss_finding` / `undismiss_finding`,
+    设计 2026-10-19 §8.3/§8.4):标记是用户的决定,写进 `kg_analysis_marks`,不碰任何
+    预计算产物。它放在这里而不是 facade 上,是因为判据(主键在不在**当前**明细里)与读侧
+    同源。
     """
 
     def __init__(
@@ -464,10 +562,14 @@ class KgAnalysisService:
         database: Any,
         unified_kg: Any,
         now: Callable[[], str],
+        governance: Any,
+        current_merge_code: Callable[[], str],
     ) -> None:
         self._database = database
         self._unified_kg = unified_kg
         self._now = now
+        self._governance = governance
+        self._current_merge_code = current_merge_code
         # 进程内记忆化:(nb, 参数) -> (签名, (boards, edges))。只缓存**贵的那两块**;
         # 账本与 state 行每次都现读(它们是 ≤6 行的点读,而且正是签名本身)。
         self._overview_cache: "OrderedDict[tuple, tuple]" = OrderedDict()
@@ -551,6 +653,10 @@ class KgAnalysisService:
         with self._unified_kg.read_snapshot() as db:
             state_row = self._unified_kg.state_row(db, notebook_id)
             ledger = self._unified_kg.kg_analysis_artifact_rows(db, notebook_id)
+            # 问题清单摘要要的标记(豁免计数 + 「补上关联」的持久标记):有界的主键前缀读
+            # (≤ KG_ANALYSIS_MARKS_MAX 行),与账本同一个快照。明细一行都不读。
+            marks = (self._unified_kg.kg_analysis_mark_rows(db, notebook_id)
+                     if ARTIFACT_FINDINGS in ledger else [])
             state = _state_view(state_row)
             level = _ledger_level(ledger)
             signature = _signature(state, ledger)
@@ -600,7 +706,127 @@ class KgAnalysisService:
                 ledger, state.kg_mutation_seq, state.cluster_mutation_seq,
                 edge_rows, edge_limit,
             ),
+            findings_summary=_findings_summary(ledger, marks, state),
+            merge_code=_merge_code(state_row, self._current_merge_code()),
         )
+
+    # ---------------------------------------------------------- /findings
+    def findings_page(
+        self,
+        notebook_id: str,
+        *,
+        zone: str = findings_view.ZONE_OPEN,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> FindingsPage:
+        """问题清单的一页(一个区,设计 2026-10-19 §3.4 / §3.5 / §8.4)。
+
+        **一个快照**:state 行、账本、明细(≤ `KG_FINDINGS_ROWS_MAX` 行,主键前缀)、标记、
+        F4 的已存决定(本库候选切片里按这些组的 canonical 过滤)与成员种子、这一页涉及的
+        来源状态(主键点查,≤ 一页)—— 并发的预计算整批重写产物时,一页不会一半新一半旧。
+        分区与排序是 `kg_findings_view` 的纯函数。
+
+        **不记忆化**(与 /sources 同理):页是 zone × limit × offset 的笛卡尔积,而 status
+        要随用户在别处的处置即时变(删来源、驳回合并都不动账本)。
+
+        账本里没有 `findings` 这一行时**连明细都不读**(`_detail_rows_are_readable`):
+        ``present=False`` 却回一页行,就是同一份响应既说「不在」又把内容发出去。"""
+        self._reject_inside_write_transaction("KG 分析问题清单")
+        if zone not in findings_view.FINDING_ZONES:
+            raise ValueError(
+                f"KG 分析问题清单:zone 只能是 {findings_view.FINDING_ZONES} 之一,拿到 {zone!r}")
+        limit = max(1, min(int(limit), KG_FINDINGS_PAGE_MAX))
+        offset = max(0, int(offset))
+        total = 0
+        rows: List[Dict[str, Any]] = []
+        with self._unified_kg.read_snapshot() as db:
+            state = _state_view(self._unified_kg.state_row(db, notebook_id))
+            ledger = self._unified_kg.kg_analysis_artifact_rows(db, notebook_id)
+            entry = ledger.get(ARTIFACT_FINDINGS)
+            if _detail_rows_are_readable(ARTIFACT_FINDINGS, ledger):
+                detail = self._unified_kg.kg_analysis_finding_rows(db, notebook_id)
+                marks = self._unified_kg.kg_analysis_mark_rows(db, notebook_id)
+                decisions: Dict[frozenset, str] = {}
+                seeds: Dict[str, Any] = {}
+                f4_ids = findings_view.f4_canonical_ids(detail)
+                if f4_ids:
+                    decisions = findings_view.decisions_from_candidates(
+                        self._governance.merge_candidate_states_for_canonicals(
+                            db, notebook_id, findings_view.DECIDED_CANDIDATE_STATUSES,
+                            f4_ids))
+                    seeds = findings_view.member_seeds_from_rows(
+                        self._unified_kg.kg_finding_member_name_rows(
+                            db, notebook_id, f4_ids))
+                in_zone = findings_view.zone_rows(
+                    detail, zone, marks=marks, decisions=decisions, member_seeds=seeds,
+                    relink=findings_view.relink_view(marks, state.kg_mutation_seq),
+                    built_seq=int(entry["kg_mutation_seq"]))
+                total = len(in_zone)
+                window = in_zone[offset:offset + limit]
+                ids = findings_view.page_sources(row for row, *_ in window)
+                states = (self._unified_kg.kg_finding_source_states(db, notebook_id, ids)
+                          if ids else {})
+                rows = [
+                    findings_view.page_row(
+                        row, status, reason, dismissed_at, states, entry["created_at"])
+                    for row, status, reason, dismissed_at in window
+                ]
+        payload = entry["payload"] if entry is not None else {}
+        return FindingsPage(
+            notebook_id=notebook_id,
+            generated_at=self._now(),
+            present=entry is not None,
+            absence=_absence(ARTIFACT_FINDINGS, ledger),
+            freshness=_artifact_freshness(
+                ARTIFACT_FINDINGS, entry, state.kg_mutation_seq, state.cluster_mutation_seq),
+            built_at=_findings_built_at(entry),
+            rules_version=payload.get("rules_version") if entry is not None else None,
+            zone=zone,
+            limit=limit,
+            offset=offset,
+            total=total,
+            returned=len(rows),
+            has_more=(offset + len(rows)) < total,
+            units=dict(FINDINGS_PAGE_UNITS),
+            evidence_units={rule: dict(units)
+                            for rule, units in FINDING_EVIDENCE_UNITS.items()},
+            rows=rows,
+        )
+
+    # ------------------------------------------------- 唯一的写:标为正常
+    def dismiss_finding(
+        self, notebook_id: str, rule_id: str, subject_key: str, *, actor_user_id: str,
+    ) -> bool:
+        """把一条问题标为正常(设计 §8.3)。主键不在**当前**明细里 → ``False``(端点
+        报 404):只能为此刻报着的问题做判断,这也是标记表行数有界的前提
+        (`KG_ANALYSIS_MARKS_MAX`)。``at_kg_seq`` 记写下时的 KG 世代。
+
+        检查与写入同一个写事务:读明细(≤ 上限行,主键前缀)与 upsert 之间不会有一次
+        发布插进来把这条问题删掉。"""
+        self._reject_inside_write_transaction("KG 分析标为正常")
+        if rule_id not in FINDING_RULES:
+            return False
+        with self._database.write() as db:
+            current = {
+                (row["rule_id"], row["subject_key"])
+                for row in self._unified_kg.kg_analysis_finding_rows(db, notebook_id)
+            }
+            if (rule_id, subject_key) not in current:
+                return False
+            state = self._unified_kg.state_row(db, notebook_id)
+            self._unified_kg.write_kg_analysis_mark(
+                db, notebook_id, rule_id, subject_key, MARK_DISMISSED,
+                at_kg_seq=int(state["kg_mutation_seq"]) if state else 0,
+                actor_user_id=actor_user_id, note="", now=self._now(),
+            )
+        return True
+
+    def undismiss_finding(self, notebook_id: str, rule_id: str, subject_key: str) -> None:
+        """撤销「标为正常」。幂等:没有这条标记也照常返回(端点 204)。"""
+        self._reject_inside_write_transaction("KG 分析撤销标为正常")
+        with self._database.write() as db:
+            self._unified_kg.clear_kg_analysis_mark(
+                db, notebook_id, rule_id, subject_key, MARK_DISMISSED)
 
     # -------------------------------------------------------------- /sources
     def source_profiles(
@@ -1064,6 +1290,68 @@ def _board_edge_view(
             {"src": src, "dst": dst, "weight": int(weight)}
             for src, dst, weight in edge_rows
         ],
+    )
+
+
+def _findings_built_at(
+    entry: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Optional[int]]]:
+    """「报告建于变更 #N · 合并 #M」:账本行的 seq 与它盖的合并世代(不逐行记)。"""
+    if entry is None:
+        return None
+    cluster = entry["payload"].get(CLUSTER_SEQ_PAYLOAD_KEY)
+    return {
+        "kg_seq": int(entry["kg_mutation_seq"]),
+        "cluster_seq": None if isinstance(cluster, bool) or cluster is None else int(cluster),
+    }
+
+
+def _findings_summary(
+    ledger: Dict[str, Dict[str, Any]], marks: List[Dict[str, Any]], state: KgState,
+) -> FindingsSummary:
+    """总览里问题清单那一格:只读账本行 + 标记(设计 §8.4),不读明细。"""
+    entry = ledger.get(ARTIFACT_FINDINGS)
+    freshness = _artifact_freshness(
+        ARTIFACT_FINDINGS, entry, state.kg_mutation_seq, state.cluster_mutation_seq)
+    units = dict(FINDINGS_PAYLOAD_UNITS)
+    if entry is None:
+        return FindingsSummary(
+            present=False, absence=_absence(ARTIFACT_FINDINGS, ledger),
+            freshness=freshness, rules_version=None, built_at=None, created_at="",
+            counts=None, rules={}, dev_items=[], structure=None, comparison=None,
+            relink=None, units=units,
+        )
+    payload = entry["payload"]
+    rules = {
+        rule: {key: value for key, value in status.items() if key != "examples"}
+        for rule, status in (payload.get("rules") or {}).items()
+    }
+    return FindingsSummary(
+        present=True,
+        absence=None,
+        freshness=freshness,
+        rules_version=payload.get("rules_version"),
+        built_at=_findings_built_at(entry),
+        created_at=str(entry["created_at"]),
+        counts=findings_view.summary_counts(rules, marks),
+        rules=rules,
+        dev_items=findings_view.dev_items(payload.get("rules") or {}),
+        structure=payload.get("structure"),
+        comparison=payload.get("comparison"),
+        relink=findings_view.relink_view(marks, state.kg_mutation_seq),
+        units=units,
+    )
+
+
+def _merge_code(state_row: Any, current: str) -> MergeCodeState:
+    """存的合并代码分量与当前代码的比较(§五 S4)。空串 = 还没合并过 / 删除知识图谱
+    之后 / 索引管线发布之后 —— ``matches`` 给 None,绝不读成「合并规则已更新」。"""
+    stored = ""
+    if state_row is not None:
+        stored = str(state_row["cluster_code_version"] or "")
+    return MergeCodeState(
+        stored=stored, current=str(current or ""),
+        matches=None if not stored or not current else stored == current,
     )
 
 
