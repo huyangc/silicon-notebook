@@ -192,8 +192,8 @@ def test_a_discarded_round_that_differs_from_its_start_leaves_a_fixed_point(monk
 
 
 def _cliques_with_dangling_pairs(graph: _Graph, seed: int) -> None:
-    """6 个近 K8 团连成链,每团挂 1–3 个悬挂对(对内权 2–8,以权 1 挂到团上):大分量里
-    混着成员数不足 min_size 的社区。"""
+    """6 个近 K8 团连成链,每团挂 1–3 个悬挂对:对内权 2–8,一端以权 1 挂到本团,另一端以
+    权 1 挂到下一个团。大分量里因此混着成员数不足 min_size 的社区。"""
     rng = np.random.default_rng(seed)
     cliques = []
     for c in range(6):
@@ -202,17 +202,19 @@ def _cliques_with_dangling_pairs(graph: _Graph, seed: int) -> None:
             if rng.random() < 0.85:
                 graph.edge(a, b)
         cliques.append(nodes)
+    for c in range(6):
         for p in range(int(rng.integers(1, 4))):
             x, y = f"c{c}-p{p}x", f"c{c}-p{p}y"
             graph.edge(x, y, int(rng.integers(2, 9)))
-            graph.edge(x, nodes[int(rng.integers(0, 8))])
-            if rng.random() < 0.5:
-                graph.edge(y, nodes[int(rng.integers(0, 8))])
+            graph.edge(x, cliques[c][int(rng.integers(0, 8))])
+            graph.edge(y, cliques[(c + 1) % 6][int(rng.integers(0, 8))])
     for c in range(5):
         graph.edge(cliques[c][0], cliques[c + 1][7])
 
 
-@pytest.mark.parametrize("seed", [0, 1, 2, 3])
+# 这四个种子上,起点若不把不足 min_size 的段拆成单点,冷启动的输出就不是热启动的不动点
+# (在 400 个种子里搜出来的;多数种子上两种起点恰好给出同一个结果)。
+@pytest.mark.parametrize("seed", [51, 72, 96, 161])
 def test_fixed_point_holds_with_sub_min_size_communities_inside_a_large_component(seed):
     """大分量里有成员数不足 min_size 的社区时,它们不发布、下一代从单点起步——起点形式必须
     把它们拆成单点,停下时的起点才与下一代的起点逐字相同。"""
