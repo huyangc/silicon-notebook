@@ -587,6 +587,8 @@ test("default all submits once immediately and reuses request id after an ambigu
   api.ask.mockReturnValueOnce(pending.promise);
   const { result } = renderHook(() => useGlobalAsk());
   await waitFor(() => expect(result.current.loading).toBe(false));
+  // 这条用例锁的是提交与幂等 id，与引擎无关：走不经问题理解的通用问答。
+  act(() => result.current.selectMode("chunk"));
   act(() => result.current.setDraft("共同问题是什么？"));
   let submitted!: Promise<void>;
   act(() => { submitted = result.current.submit(); void result.current.submit(); });
@@ -720,6 +722,8 @@ test.each(["resolve", "reject"] as const)("deleting the active conversation reti
   render(<GlobalAskPage />);
   const input = await screen.findByRole("textbox", { name: "输入问题" });
   await waitFor(() => expect(input).toBeEnabled());
+  // 与引擎无关的提交/删除时序：走不经问题理解的通用问答。
+  fireEvent.click(screen.getByRole("button", { name: "通用问答" }));
   fireEvent.click(screen.getByRole("button", { name: "删除 对话 conv-a" }));
   fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
   expect(api.remove).toHaveBeenCalledWith("conv-a");
@@ -765,6 +769,8 @@ test.each(["other conversation", "failed deletion"] as const)("a pending submit 
   render(<GlobalAskPage />);
   const input = await screen.findByRole("textbox", { name: "输入问题" });
   await waitFor(() => expect(input).toBeEnabled());
+  // 与引擎无关的提交/删除时序：走不经问题理解的通用问答。
+  fireEvent.click(screen.getByRole("button", { name: "通用问答" }));
   fireEvent.click(screen.getByRole("button", { name: `删除 对话 ${deletedId}` }));
   fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
   fireEvent.change(input, { target: { value: "仍然有效的问题" } });
@@ -1191,9 +1197,9 @@ test("mode picker submits the selected engine", async () => {
   await waitFor(() => expect(input).toBeEnabled());
   // 扩展功能组整组不出现：后端对全局问答一律 422。
   expect(screen.queryByRole("button", { name: "扩展功能" })).toBeNull();
-  expect(screen.getByRole("button", { name: "通用问答" })).toHaveClass("active");
-  fireEvent.click(screen.getByRole("button", { name: "深入分析" }));
-  await waitFor(() => expect(screen.getByRole("button", { name: "深入分析" })).toHaveClass("active"));
+  // 默认停在「深入分析」；「通用问答」仍一键可选，两者长期并存。
+  expect(screen.getByRole("button", { name: "深入分析" })).toHaveClass("active");
+  expect(screen.getByRole("button", { name: "通用问答" })).not.toHaveClass("active");
   fireEvent.change(input, { target: { value: "请逐步比较两个体系" } });
   fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
   await waitFor(() => expect(api.ask).toHaveBeenCalledTimes(1));
@@ -1202,6 +1208,19 @@ test("mode picker submits the selected engine", async () => {
   expect(api.ask.mock.calls[0][0].mode).toBe("reasoning");
   expect(api.ask.mock.calls[0][0].intent.resolved_question).toBe("请逐步比较两个体系");
   expect(api.ask.mock.calls[0][0].retrieval_effort).toBe("standard");
+});
+
+test("choosing the general engine submits chunk without the understanding step", async () => {
+  render(<GlobalAskPage />);
+  const input = await screen.findByRole("textbox", { name: "输入问题" });
+  await waitFor(() => expect(input).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "通用问答" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "通用问答" })).toHaveClass("active"));
+  fireEvent.change(input, { target: { value: "请比较两个体系" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+  await waitFor(() => expect(api.ask).toHaveBeenCalledTimes(1));
+  expect(api.intent).not.toHaveBeenCalled();
+  expect(api.ask.mock.calls[0][0].mode).toBe("chunk");
 });
 
 test("the simplified interface offers no engine picker and submits the fixed engine after understanding", async () => {
@@ -1749,6 +1768,8 @@ test("a job stopped mid-process stays, can be edited, and the next question repl
   render(<GlobalAskPage />);
   fireEvent.click(await screen.findByRole("button", { name: "停止" }));
   await waitFor(() => expect(api.cancel).toHaveBeenCalledWith("job-conv-a", false));
+  // 与引擎无关：重发走不经问题理解的通用问答。
+  fireEvent.click(screen.getByRole("button", { name: "通用问答" }));
   // 情形一：记录留在对话里，问题不弹回输入框。
   expect(await screen.findByText(STOPPED_TURN_TEXT)).toBeTruthy();
   const input = screen.getByRole("textbox", { name: "输入问题" });
