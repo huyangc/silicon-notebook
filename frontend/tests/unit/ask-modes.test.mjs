@@ -24,7 +24,7 @@ async function appSourceCopy({ exclude = [] } = {}) {
 
 test("user-facing ids and default", () => {
   assert.deepEqual(askModeIds(), ["chunk", "reasoning"]);
-  assert.equal(DEFAULT_ASK_MODE, "chunk");
+  assert.equal(DEFAULT_ASK_MODE, "reasoning");
   assert.deepEqual(ASK_MODE_GROUPS.map((g) => g.id), ["general", "strict", "extension"]);
 });
 
@@ -119,10 +119,11 @@ test("实时轨迹面板按引擎是否流轨迹判断", () => {
 
 test("restore mode from a prior turn (exact engine, safe fallback)", () => {
   assert.equal(modeFromTurn({ response: { mode: "reasoning" } }), "reasoning");
-  assert.equal(modeFromTurn({ response: { mode: "fast" } }), "chunk");   // 非 user-facing → 兜底
-  assert.equal(modeFromTurn({ response: { mode: "graph" } }), "chunk");  // 退役模式 → 兜底
-  assert.equal(modeFromTurn({ response: {} }), "chunk");
-  assert.equal(modeFromTurn(undefined), "chunk");
+  assert.equal(modeFromTurn({ response: { mode: "chunk" } }), "chunk");  // 内置并存,原样保留
+  assert.equal(modeFromTurn({ response: { mode: "fast" } }), "reasoning");   // 非 user-facing → 兜底到默认
+  assert.equal(modeFromTurn({ response: { mode: "graph" } }), "reasoning");  // 退役模式 → 兜底到默认
+  assert.equal(modeFromTurn({ response: {} }), "reasoning");
+  assert.equal(modeFromTurn(undefined), "reasoning");
 });
 
 test("user-facing labels/descs are the current names (locks against silent drift)", () => {

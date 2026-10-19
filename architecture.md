@@ -563,7 +563,7 @@ transport disconnect / navigation / refresh
 
 base 的权威性另在答案合成 prompt 中表达：如果 personal 与 base 证据矛盾，答案服从 base，并明确披露差异。这是 synthesis policy，不是 retrieval score policy，也不参与 grounding 阈值。
 
-当前 Ask mode registry 的默认路径是 `chunk`；`reasoning` 迭代执行计划、检索、反思并流式产出 trace；有图时可沿图谱扩展，无图时按下文的原文/枚举可用性继续。简化界面直接提交 `mode="reasoning"`，走与高级界面相同的意图预检后进入同一条 reasoning 路径，没有分类路由模型调用。`auto` 为退役别名，映射到 `reasoning`（与 `fast`/`global`/`graph` 映射到 `chunk` 同一机制）。因此持久化 mode、retrieval-run kind 与引擎真源永远只是稳定 registry id，高级界面的具名选择不受影响。退役 mode id 只保留兼容映射，不能改回默认模式。
+当前 Ask mode registry 里省略 `mode` 的请求走 `chunk`（兼容客户端不进 `reasoning` 的意图闸），高级界面的选择器则默认选 `reasoning`；两种模式长期并存（2026-10-19 产品决定，不再计划退役 `chunk`）；`reasoning` 迭代执行计划、检索、反思并流式产出 trace；有图时可沿图谱扩展，无图时按下文的原文/枚举可用性继续。简化界面直接提交 `mode="reasoning"`，走与高级界面相同的意图预检后进入同一条 reasoning 路径，没有分类路由模型调用。`auto` 为退役别名，映射到 `reasoning`（与 `fast`/`global`/`graph` 映射到 `chunk` 同一机制）。因此持久化 mode、retrieval-run kind 与引擎真源永远只是稳定 registry id，高级界面的具名选择不受影响。退役 mode id 只保留兼容映射，不能改回默认模式。
 
 未携带 `intent` 的 `/ask`、`/ask/stream` 直接兼容调用在 `AskService.resolve_reasoning_followup` 里先用确定性澄清闸判问句本身；只有该闸命中（指代不清或纯泛化请求）才读取同一 owner、同一 notebook 的会话历史、跑既有 `query_rewrite` 工作负载把跟进句改写成独立问题，再对改写句重判同一把闸——命中闸就是入口层的唯一改写触发条件，不做无条件改写；改写后仍命中闸返回 422，其文案固定取自原句（改写产物绝不进入错误文案），放行时改写句只顶替 `retrieval_query`/`intent.resolved_question`，`objective`/`result_scope` 等仍按原句判定。解析结果经 `ask_followup.py` 的 `followup_resolution_context` contextvar 从路由层带入（与 `retrieval_scope_receipt_context` 同形、经 `copy_context()` 跨后台任务边界），`_prepare_reasoning_ask` 读取时先校验 `resolution.question` 与当次 payload 问句逐字节相同，不同即视为没有该 resolution、按原句走引擎兼容分支判闸。MCP `ask` 不经这条入口层改写：它在调用内已跑带会话历史的模型理解步并以澄清句柄回传，跟进句由那一步解析。
 

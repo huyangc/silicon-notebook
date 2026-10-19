@@ -1,6 +1,8 @@
 # silicon-notebook 待办（fangan_todo.md）
 
-更新日期：2026-10-19（第四节新增「整改计划刻意不做、只登记」：整改计划里标为只登记、此前只留在程序
+更新日期：2026-10-19（用户当日四条裁决已落地并记入 `fangan_done.md` §61：本机热门禁目标改 100 秒；
+`facade_surface.json` 细节字段守卫不上、全局回答 synthesis-only 重合成不做、退役 chunk 流水线不做，三者登记在第四节
+「产品与守卫裁决」组；第四节新增「整改计划刻意不做、只登记」：整改计划里标为只登记、此前只留在程序
 台账的性能 / 结构 / 工程卫生项逐条按代码复核后补登；移除过时的「BM25 / FTS5 / tsvector 全文索引：暂缓」
 （SQLite FTS5 trigram 索引 + `bm25()` 排序与 PostgreSQL `pg_trgm` 词法候选早已在用，见 `fangan_done.md` §9；
 PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交付的统一认证与跨库全局问答，
@@ -75,33 +77,13 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 
 ### Ask / Deep Report
 
-- [ ] **问答方法归一（路线，共四步，第一步已实施，第二步 ✅ 已合入 PR #693）**：① KG 可选的
-      reasoning——`docs/superpowers/specs/2026-09-07-reasoning-kg-optional-design_zh.md`
-      （T1–T5），原文段落检索一等动作 `search_chunks` + 无图首轮播种、按图存在收缩动作
-      空间、早退收窄为零源、注册表与前端闸放行，已落地；② 无图首轮并入关键词臂 + 首轮后
-      模型判定直接作答的成本契约（规格 `docs/superpowers/specs/2026-09-07-reasoning-chunk-parity-keyword-arm-design_zh.md`），
-      ✅ 已合入 PR #693；③ ✅ 2026-09-14 用户裁决直接下线请求级 `auto` 选择器，简化界面固定
-      `reasoning` 标准档（本 PR），原「自动模式灰度」不再做；④ 前置：chunk 独有能力补进
-      reasoning——PR-A `read_document` ✅ #724；PR-B 引用卡 + 精确席位 ✅ #728；PR-C 无 intent
-      跟进改写（本 PR；MCP `ask` 已由 #721 的调用内理解步覆盖，不在此改）；
-      ④ 退役 chunk 流水线，待立规格。
-- [ ] **无条件跟进改写作为后续开关（PR-C 延后项）**：PR-C 只在确定性澄清闸命中时才读会话
-      历史并改写；chunk 模式那种「有历史就改写」的无条件形态若要给 reasoning 直连路径，
-      是一个独立开关（多一次改写模型调用换更好的检索词），用户裁决时明确不做。
-      ④ 的硬前提：做 chunk/reasoning 对照前必须确认**界面路径的 chunk 向量检索基线已修复**
-      （`docs/superpowers/specs/2026-09-07-scoped-chunk-vector-lane-design_zh.md`，已由 PR #697
-      合入），否则两臂对比测的是一个坏掉的对照组；原「自动模式下 4 比 3 调用数」前提随
-      auto 下线作废——现在两种界面都是意图预检 + reflect + answer，直答比 chunk 只多一次 reflect。
-      v1（固定「直答」档位）与 v2（先合成、不足再查）均已撤回：用户裁决不设固定直答选项、
-      问题理解与子问题检索不能省、检索效果优先于省一次调用；v2 的先合成本可把首轮后的
-      reflect 并进合成再省一次调用，但代价是拆 `run()` 的重构与判定质量的不确定，按效果
-      优先撤回。放量前两条待办：
-      (a) 首轮原文播种现在对**所有** reasoning run 默认生效（2026-09-29 起不看知识图谱，
-      有图 run 也跑），逐子查询并发调用 `search_chunks`；外层并发已按参与库数收紧为
+- [ ] **首轮原文播种的大库耗时待实测**：首轮原文播种现在对**所有** reasoning run 默认生效
+      （2026-09-29 起不看知识图谱，有图 run 也跑），逐子查询并发调用 `search_chunks`；外层并发已按参与库数收紧为
       `max(1, min(N, 8, 8 // P))`（外层 × 联邦腿 ≤ 8，PG 池默认 10），但大库上的实际
       耗时仍待实测，改用多查询合并召回（`RetrievalService.retrieve_chunk_candidates_multi`）
-      之前先量；(b) 该规格「验收」一节给出的人工抽问（点名子部件 /
-      周期性 / 方向三句式 + 一句对比题，无图库与有图库各跑一遍）未做。
+      之前先量。
+- [ ] **首轮原文播种的人工抽问验收未做**：`docs/superpowers/specs/2026-09-07-reasoning-chunk-parity-keyword-arm-design_zh.md`
+      「验收」一节给出的人工抽问（点名子部件 / 周期性 / 方向三句式 + 一句对比题，无图库与有图库各跑一遍）未做。
 - [ ] **首轮原文播种与 KG 初检索并行提交**：`_run_first_round` 里播种排在 PPR / 精确 seed
       之后串行执行（为了 `seen_chunks` 去重与计数顺序），脱钩后有图 run 也要多等这一段。
       可以把播种的 I/O 与 KG 初检索一起提前提交、在原位置按序合并（与 PPR 预取同形），
@@ -237,15 +219,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       看到 A 库的。修法要新开一条不经鉴权座位的参与集入口（与 `chunk_federation
       ._bounded_participants` 同源），并决定跨库工作簿的成本上界（分析臂是模型规划 +
       逐表读取，× 库数不是免费的）。
-- [ ] **`AskService` 的 synthesis-only 入口（全局引用复核重合成的前置件）**。今天全局回答的
-      引用核对发现失败时，回答照常整份交付：未通过的引用逐条带标记，答案下方一句说明
-      （`fangan_done.md` 第 48 条）；不作废任何内容，也不要求用户重新提问。所以这个入口不再是
-      任何已交付行为的前置件。只有产品日后想要「剔除未通过的证据、用剩下的证据再合成一次」
-      时才需要它：重新调 `AskService.ask` 会重新检索、重新冻结，得到的是另一份答案顶着这一份的
-      身份，所以要一个只做合成、复用已有证据与已解析引用的入口。要不要做仍待产品拍板；若做，
-      连带要决定：重新合成后的引用是否再核对一轮、轮次上限、推理轨迹里怎么如实记这一步，以及
-      重新合成的回答与第一份回答的引用标记和 `citation_check` 汇总是什么关系（沿用、替换，
-      还是两份都保留给读者看）。
 - [ ] **8 库 reasoning 的 `payload_json` 体积观测**。全局作业没有轨迹子表，推理轨迹整份存在
       作业行的单个 JSON 里，`_append_trace` 只靠时间/步数双阈值节流重写。8 个库的 reasoning
       run 轮数与每步 detail 都比单库大，这份 payload 的真实分布没有测过；要先量（p50/p95
@@ -383,18 +356,9 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       （AskStateStorePort 20、McpMemoryRepository 4、NotebookRepository 20），其余已清零；剩下的
       `rerank` 经 `FacadePropertyContract` → `ModelClientProvider` 继承进 `NotebookRepository`，facade
       本体不实现它；#906 刻意未动。清零需要另立一项处理这条继承链。
-- [ ] **S2-D：`facade_surface.json` 细节字段漂移无守卫，待拍板**（来源：PR #862）：
-      `test_facade_surface_fixture` 只断言名字集合，`owner` / `consumers` / `patch_targets` /
-      `signature` 的漂移没人看。全量等值前提是先去掉生成器对 `SURFACE_SOURCE_COMMIT` git 历史的依赖
-      （CI 浅克隆拿不到），并且属于全仓 PR 政策变化——每个改消费点或签名的 PR 都要重基线。
-      需要用户裁决要不要上这条政策。
 - [ ] **S2-D：组件层「仅测试调用」成员未清点**（来源：PR #862）：审计脚本只统计 facade，看不到组件层
       （`AskService.ask_chunk_current` / `ask_reasoning_current`、两端 store 与 `AskStateStorePort` 的
       `ask_job_status` 等）只被测试调用的成员；登记为一类待清点项。
-- [ ] **G1 本机热门禁 ≈77 s，目标 80 s，余量在被吃掉**（来源：ci60 收官 `ci60-closeout.md`，PR #898）：
-      后端测试每周约增 1000 条，本机门禁每 1000 条约 +4 s，余量只有约 3 s。下一个杠杆是
-      T3-b1——把「全仓 AST 正向扫描」类守卫的真实树扫描挪到每日 G2（约 −3.5 s，约 76 s）；代价是 PR 上
-      违反这些守卫的改动要到次日 G2 才报红，**需要用户裁决**，未获裁决前不动。
 - [ ] **`test_extension_service_launchers.py::test_launcher_forwards_cancellation_while_companions_start`
       高负载下超时**（来源：K1 第 6 轮验证）：重型本机负载下 4/4 次撞 5 s 子进程超时，干净 master 上
       26/26 通过，判为锁外压测负载所致而非回归。每天看一眼每日 G2，若在干净 runner 上复现就立项，
@@ -405,6 +369,26 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 > 整改计划评审时逐条裁定「不做、只登记」的项，此前只记在程序台账（不入库）里。2026-10-19 逐条按当时
 > 代码复核后补登于此：行数用 `ast` 量（含嵌套函数），文件与行号为当日 master。复核时已不成立的不登。
 > 删除索引管线阶段级联未分批（计划 5d）已在第一节 W1 一条，不重复。
+
+**产品与守卫裁决**（用户裁决，不是技术上做不到；重开前先问用户）
+
+- [ ] **`facade_surface.json` 细节字段（`owner` / `consumers` / `patch_targets` / `signature`）漂移守卫：
+      不上**（用户 2026-10-19 裁决；来源：S2-D，PR #862）。`test_facade_surface_fixture` 维持只断言名字集合。
+      理由：全量等值前提是先去掉生成器对 `SURFACE_SOURCE_COMMIT` 版本历史的依赖（CI 浅克隆拿不到），
+      并且是全仓 PR 政策变化——每个改消费点或签名的 PR 都要重基线，成本高于它能抓到的漂移。
+- [ ] **全局回答的 synthesis-only 重合成入口（`AskService` 只做合成、复用已有证据与已解析引用）：
+      不做**（用户 2026-10-19 裁决）。理由：现行逐条标记交付已让读者看到哪条引用没通过（`fangan_done.md`
+      第 48 条），回答照常整份交付；再合成一次会让同一问题出现两份引用口径，还多一次模型调用。
+- [ ] **无条件跟进改写（chunk 模式那种「有历史就改写」）不给 reasoning 直连路径：不做**（PR-C 时用户裁决）。
+      reasoning 只在确定性澄清闸命中时才读会话历史并改写；无条件形态是多一次改写模型调用换更好的检索词，
+      用户明确不做。
+- [ ] **reasoning 的固定「直答」档位与「先合成、不足再查」流程：不做**。v1（固定「直答」档位）与 v2
+      （先合成、不足再查）均已撤回：用户裁决不设固定直答选项、问题理解与子问题检索不能省、检索效果优先于
+      省一次调用；v2 的先合成本可把首轮后的 reflect 并进合成再省一次调用，但代价是拆 `run()` 的重构与判定
+      质量的不确定，按效果优先撤回。
+- [ ] **退役 chunk 流水线：不做**（用户 2026-10-19 裁决）。通用问答（chunk）与深度分析（reasoning）两种模式
+      长期并存；高级界面默认模式改为 reasoning（「高级模式」名字不改）。原「问答方法归一」路线的第 ④ 步
+      及其放量前置（chunk / reasoning 对照、对照基线核实）随之作废。
 
 **性能**（理由来自整改程序的性能设计稿与分片评审；重开前一律先差分测量）
 
