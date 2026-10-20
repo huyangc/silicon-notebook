@@ -413,11 +413,16 @@ def test_deployed_v96_database_verifies_kg_findings(tmp_path, _upgraded_v9):
 
 @pytest.mark.legacy_upgrade_contract
 @pytest.mark.real_sqlite_migration
-def test_deployed_v99_database_verifies_the_concept_seed_space(tmp_path, _upgraded_v9):
-    """A deployed v99 database is missing exactly _migration_100's two columns:
-    ``concept_merge_candidates.seed_version`` (DEFAULT 1, the whole backfill)
-    and ``unified_kg_state.concept_seed_version`` (DEFAULT 2 for rows created
-    later, every existing row set to 1). Nothing else moves."""
+def test_deployed_v99_database_verifies_the_seed_space_and_board_partition(
+    tmp_path, _upgraded_v9,
+):
+    """A deployed v99 database is missing exactly _migration_100's five columns:
+    ``concept_merge_candidates.seed_version`` (DEFAULT 1, the whole backfill),
+    ``unified_kg_state.concept_seed_version`` (DEFAULT 2 for rows created
+    later, every existing row set to 1),
+    ``unified_kg_state.community_partition_version`` /
+    ``community_partition_mode`` (0 / '') and ``communities.board_key``
+    (backfilled to the row's id). Nothing else moves."""
     module = _load_verifier()
     database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
     with sqlite3.connect(database) as rollback:

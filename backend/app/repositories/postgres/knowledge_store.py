@@ -1263,6 +1263,10 @@ class KnowledgeStore:
         # cluster_code_version(v97/0077)随 cluster_input_version 一起清空:
         # 两列合起来描述「上一次合并」,合并结果删掉了,两者都不再成立;
         # INSERT 分支取列默认值 ''。
+        # community_partition_version / _mode(v100/0081)同理复位成
+        # 0 / '':它们描述「已发布的那套板块划分」,图删掉之后下一次重建没有
+        # 上一代可热启动,该从冷启动开始。communities.board_key 随行留到重建,
+        # 读者经已发布代谓词看不到它们。
         cur = db.execute(
             "INSERT INTO unified_kg_state ("
             "notebook_id, dirty, kg_mutation_seq, cluster_mutation_seq, "
@@ -1275,6 +1279,7 @@ class KnowledgeStore:
             "cluster_input_version='', cluster_code_version='', "
             # Nothing is published any more: the code's seed space (S1).
             f"concept_seed_version={int(CONCEPT_SEED_VERSION)}, last_rebuild_at=NULL, "
+            "community_partition_version=0, community_partition_mode='', "
             "object_count=0, relation_count=0, cluster_count=0, "
             "community_seq=-1, canonical_rel_seq=-2, mention_seq=-2, "
             "kg_reset_epoch=unified_kg_state.kg_reset_epoch+1, "

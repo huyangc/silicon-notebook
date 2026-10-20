@@ -6012,18 +6012,26 @@ MIGRATION_MANIFEST[(100, 101)] = {
     "views": {},
 }
 
-# v102 (parity with PostgreSQL 0083_kg_concept_seed_space.sql): the concept
-# seed space a merge decision's keys were minted in
-# (``concept_merge_candidates.seed_version``, INTEGER NOT NULL DEFAULT 1: the
-# default is the whole backfill, every existing decision was minted in space
-# 1) and the one a library's published merge was built in
-# (``unified_kg_state.concept_seed_version``, INTEGER NOT NULL DEFAULT 2 --
-# rows created from then on start in the code's space -- with every row that
-# existed set to 1). Both tables predate the v9 fixture, so the columns are
-# pinned per column, not through the tables' text; a table's digest spans its
-# pre-migration columns only, so the backfill moves no compared row (the v87
-# queue check reads it through ``_POST_V87_BACKFILLS``). No table, index,
-# trigger or view.
+# v102 (parity with PostgreSQL 0083_kg_seed_space_and_board_partition.sql),
+# PR-4 of the KG analysis findings design, two halves:
+#
+# - the concept seed space a merge decision's keys were minted in
+#   (``concept_merge_candidates.seed_version``, INTEGER NOT NULL DEFAULT 1: the
+#   default is the whole backfill, every existing decision was minted in space
+#   1) and the one a library's published merge was built in
+#   (``unified_kg_state.concept_seed_version``, INTEGER NOT NULL DEFAULT 2 --
+#   rows created from then on start in the code's space -- with every row that
+#   existed set to 1);
+# - the board partition: ``unified_kg_state.community_partition_version``
+#   INTEGER NOT NULL DEFAULT 0, ``unified_kg_state.community_partition_mode``
+#   TEXT NOT NULL DEFAULT '' and ``communities.board_key`` TEXT NOT NULL
+#   DEFAULT '' (backfilled to each row's own id).
+#
+# All three tables predate the v9 fixture, so the columns are pinned per
+# column, not through the tables' text; a table's digest spans its
+# pre-migration columns only, so neither backfill moves a compared row (the
+# v87 queue check reads the seed-space one through ``_POST_V87_BACKFILLS``).
+# No table, index, trigger or view.
 KG_SEED_SPACE_COLUMNS = {
     "concept_merge_candidates": {
         "seed_version": ("seed_version", "INTEGER", 1, "1", 0),
@@ -6032,6 +6040,22 @@ KG_SEED_SPACE_COLUMNS = {
         "concept_seed_version": ("concept_seed_version", "INTEGER", 1, "2", 0),
     },
 }
+BOARD_PARTITION_COLUMNS = {
+    "unified_kg_state": {
+        "community_partition_version": ("community_partition_version", "INTEGER", 1, "0", 0),
+        "community_partition_mode": ("community_partition_mode", "TEXT", 1, "''", 0),
+    },
+    "communities": {
+        "board_key": ("board_key", "TEXT", 1, "''", 0),
+    },
+}
+KG_FINDINGS_PR4_COLUMNS = {
+    table: {
+        **KG_SEED_SPACE_COLUMNS.get(table, {}),
+        **BOARD_PARTITION_COLUMNS.get(table, {}),
+    }
+    for table in (*KG_SEED_SPACE_COLUMNS, *BOARD_PARTITION_COLUMNS)
+}
 MIGRATION_MANIFEST = {
     (key[0], 102, *key[2:]): {
         **manifest,
@@ -6039,7 +6063,7 @@ MIGRATION_MANIFEST = {
             **manifest["columns"],
             **{
                 table: {**manifest["columns"].get(table, {}), **columns}
-                for table, columns in KG_SEED_SPACE_COLUMNS.items()
+                for table, columns in KG_FINDINGS_PR4_COLUMNS.items()
             },
         },
     }
@@ -6047,7 +6071,7 @@ MIGRATION_MANIFEST = {
 }
 MIGRATION_MANIFEST[(101, 102)] = {
     "tables": {},
-    "columns": KG_SEED_SPACE_COLUMNS,
+    "columns": KG_FINDINGS_PR4_COLUMNS,
     "indexes": {},
     "triggers": {},
     "views": {},
