@@ -19,6 +19,7 @@ when no model service or MinerU parser is configured.
 
 ### Prerequisites
 
+- **macOS or Linux.** Windows is not supported; run it inside WSL.
 - **Python ≥ 3.13** — the SQLite write lock's fairness depends on CPython 3.13's
   `PyMutex`-backed `threading.Lock` handoff; older interpreters silently regress to
   writer starvation (see `backend/app/repositories/sqlite/database.py`).
@@ -26,9 +27,9 @@ when no model service or MinerU parser is configured.
   `engine-strict` makes `npm ci`/`npm install` refuse any other major
 - **git**
 - An accessible **PostgreSQL 16** database for the default deployment; extension prerequisites are listed in section 3.1.
-- A C/C++ toolchain is needed *only as a fallback* — `numpy`, `rustworkx`, and `hnswlib`
-  ship prebuilt wheels for common platforms; install Xcode Command Line Tools (macOS) or
-  `build-essential` (Debian/Ubuntu) only if pip has to build one from source.
+- A **C/C++ toolchain** — `hnswlib` 0.8.0 publishes only a source distribution, so pip
+  always builds it: install Xcode Command Line Tools (macOS) or `build-essential`
+  (Debian/Ubuntu). The other locked packages install from prebuilt wheels.
 
 ### 1 · Install
 
@@ -38,7 +39,7 @@ cd silicon-notebook
 
 # Backend — into an isolated Python environment
 python3 -m venv .venv
-source .venv/bin/activate            # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 python -m pip install --upgrade pip
 # hash-locked runtime dependencies (docs/development.md, "Python dependencies")
 python -m pip install --require-hashes -r backend/requirements.txt

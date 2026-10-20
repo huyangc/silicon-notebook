@@ -566,7 +566,7 @@ Changing the admin access switch does not start or stop these processes.
 
 Ship four things, and only four:
 
-1. **A Python wheel** on the internal index (or a path the target can `pip install`). It must declare no dependency on this repository — the SDK is imported from the backend environment, not vendored.
+1. **A Python wheel** on the internal index (or a path the target can `pip install`). It must declare no dependency on this repository — the SDK is imported from the backend environment, not vendored. Its own dependencies must accept the core's locked versions (`backend/requirements.txt`): every start reinstalls the core from that lock with `--require-hashes`, which may move a package the plugin shares with the core back to the locked version.
 2. **The UI package directory**, either inside the wheel's data files, as a separate tarball, or as an internal npm package the target unpacks. It must arrive as a flat directory named exactly what the deployment will point at.
 3. **A TOML fragment** to paste into the deployment's `extensions.toml`, plus the names of the environment variables the settings reference (`CORP_SEARCH_API_KEY` above) — never their values.
 4. **A `CHANGELOG.md` entry** naming the supported `api_version`, the plugin `version` (it must match `ui-plugin.json`'s `version`, or the browser tuple check hides the contribution), and any settings-key change.

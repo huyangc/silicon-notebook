@@ -553,7 +553,7 @@ Python 包、前台 HTTP 健康服务、导入时不启动任何进程的 bundle
 
 交付四样东西，且只有四样：
 
-1. **一个 Python wheel**（内网 index，或目标机能 `pip install` 的路径）。它不得对本仓库声明依赖——SDK 从后端环境里 import，不是 vendored 进来的。
+1. **一个 Python wheel**（内网 index，或目标机能 `pip install` 的路径）。它不得对本仓库声明依赖——SDK 从后端环境里 import，不是 vendored 进来的。它自己的依赖必须接受核心锁定的版本（`backend/requirements.txt`）：每次启动都会按这份锁 `--require-hashes` 重装核心依赖，插件与核心共用的包可能被改回锁定版本。
 2. **UI 包目录**：放进 wheel 的 data files、单独一个 tarball，或一个目标机自己解开的内网 npm 包。到达时必须是一个扁平目录，名字就是部署将要指向的那个。
 3. **一段 TOML**，供粘进部署的 `extensions.toml`，外加 settings 引用到的环境变量**名**（上例是 `CORP_SEARCH_API_KEY`）——绝不给取值。
 4. **一条 `CHANGELOG.md`**，写明支持的 `api_version`、插件 `version`（必须与 `ui-plugin.json` 的 `version` 一致，否则浏览器那道三元组检查会把 contribution 藏掉），以及任何 settings 键的变化。

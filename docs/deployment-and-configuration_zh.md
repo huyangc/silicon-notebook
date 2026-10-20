@@ -16,6 +16,7 @@ silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端—�
 
 ### 前置条件
 
+- **macOS 或 Linux。** 不支持 Windows，请在 WSL 中运行。
 - **Python ≥ 3.13**——SQLite 写锁的公平性依赖 CPython 3.13 中 `threading.Lock`（由
   `PyMutex` 支撑）的交接语义；更低版本会静默退化为抢占式（barging），写者饿死无声
   重现（见 `backend/app/repositories/sqlite/database.py`）。
@@ -23,9 +24,9 @@ silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端—�
   `engine-strict` 让 `npm ci`/`npm install` 拒绝其他大版本
 - **git**
 - 默认部署需要可访问的 **PostgreSQL 16** 数据库；扩展前置条件见 3.1 节。
-- C/C++ 工具链*仅作兜底*——`numpy`、`rustworkx`、`hnswlib` 在常见平台都有预编译 wheel;
-  仅当 pip 不得不从源码编译时,才需装 Xcode Command Line Tools(macOS)或
-  `build-essential`(Debian/Ubuntu)。
+- **C/C++ 工具链**——`hnswlib` 0.8.0 只发布源码包,pip 每次都要本地编译它:请装 Xcode
+  Command Line Tools(macOS)或 `build-essential`(Debian/Ubuntu)。其余锁定的包都从
+  预编译 wheel 安装。
 
 ### 1 · 安装
 
@@ -35,7 +36,7 @@ cd silicon-notebook
 
 # 后端 —— 装进一个隔离的 Python 环境
 python3 -m venv .venv
-source .venv/bin/activate            # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 python -m pip install --upgrade pip
 # 带哈希锁定的运行依赖（见 docs/development_zh.md「Python 依赖」）
 python -m pip install --require-hashes -r backend/requirements.txt
