@@ -314,24 +314,166 @@ def test_pg_memory_removal_waits_for_an_uncommitted_own_merge(pg_repository):
         deadline = time.monotonic() + 10
         waiting = 0
         while time.monotonic() < deadline:
+            assert worker.is_alive(), f"the removal finished without waiting: {outcome!r}"
+            # Same probe as tests/postgres/test_concurrency.py: this database
+            # only, an active backend blocked on the teardown's source lock.
             waiting = probe.execute(
                 "SELECT count(*) AS n FROM pg_stat_activity "
-                "WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid()"
+                "WHERE pid <> pg_backend_pid() AND datname = current_database() "
+                "AND wait_event_type = 'Lock' AND state = 'active' "
+                "AND query ILIKE %s",
+                ("%FROM sources%FOR UPDATE%",),
             ).fetchone()["n"]
             if waiting:
                 break
-            time.sleep(0.02)
-        assert waiting, "the Memory removal never waited on the merge"
+            time.sleep(0.01)
+        assert waiting, "the Memory removal never waited on the merge's source lock"
+        assert worker.is_alive()
         merge_tx.commit()
     worker.join(timeout=10)
+    assert not worker.is_alive()
     assert outcome == {"removed": 1}
     assert _evidence_sources(database, "ko-ma1") is None
     assert _evidence_sources(database, "ko-ma2") == {"src-ma2"}
+    assert _pg_status(database, "ko-ma2") == "approved"
+
+
+def _pg_status(database, object_id: str) -> "str | None":
     with database.connect() as db:
-        status = db.execute(
-            "SELECT status FROM knowledge_objects WHERE id='ko-ma2'"
-        ).fetchone()["status"]
-    assert status == "approved"
+        row = db.execute(
+            "SELECT status FROM knowledge_objects WHERE id=%s", (object_id,)
+        ).fetchone()
+    return None if row is None else row["status"]
+
+
+def _pg_change_memory(repo, memory_id: str, change: str) -> None:
+    if change == "edit":
+        assert repo._runtime.source_ingestion.ingest_memory_source(
+            "nb", memory_id, "t", "edited text"
+        )
+    elif change == "transfer":
+        with repo._runtime.database.write() as db:
+            db.execute(
+                "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+                "created_at,updated_at,tier) VALUES ('nb-dst','D','','','ready','u-a',"
+                "%s,%s,'personal') ON CONFLICT DO NOTHING",
+                (NOW, NOW),
+            )
+        (result,) = repo._runtime.memory_service.transfer(
+            "u-a", [memory_id], "nb-dst", "move", False
+        )
+        assert result["ok"] is True, result
+    else:
+        repo._runtime.memory_service.delete(memory_id, "u-a")
+
+
+def _pg_own_merge(repo, source_id: str, into_id: str) -> None:
+    with repo._runtime.database.write() as db:
+        GovernanceStore.merge_objects_in_transaction(
+            db, "nb", source_id, into_id, NOW, actor_id="u-a"
+        )
+
+
+@pytest.mark.parametrize("change", ["edit", "transfer", "delete"])
+def test_pg_clearing_the_merge_result_restores_the_merged_away_object(
+    pg_repository, change
+):
+    """User ruling 2026-10-21: ko-ma1 merged into ko-ma2 (mem-a2's); editing,
+    transferring or deleting mem-a2 clears ko-ma2 and, just before, restores
+    ko-ma1 (its Memory still exists) to approved with its own evidence."""
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    _pg_own_merge(repo, "ko-ma1", "ko-ma2")
+    assert _pg_status(database, "ko-ma1") == "deprecated"
+    _pg_change_memory(repo, "mem-a2", change)
+    assert _pg_status(database, "ko-ma2") is None
+    assert _pg_status(database, "ko-ma1") == "approved"
+    assert _evidence_sources(database, "ko-ma1") == {"src-ma1"}
+
+
+def test_pg_clearing_the_merged_away_memory_restores_nothing(pg_repository):
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    _pg_own_merge(repo, "ko-ma1", "ko-ma2")
+    _pg_change_memory(repo, "mem-a1", "delete")
+    assert _pg_status(database, "ko-ma1") is None
+    assert _pg_status(database, "ko-ma2") == "approved"
+    assert _evidence_sources(database, "ko-ma2") == {"src-ma2"}
+
+
+def test_pg_a_merge_chain_restores_one_level_per_cleared_result(pg_repository):
+    """ko-ma1 → ko-ma2 → ko-ma3: deleting mem-a3 restores ko-ma2 (still
+    carrying ko-ma1's entries), ko-ma1 stays deprecated; deleting mem-a2
+    then restores ko-ma1."""
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    with database.write() as db:
+        db.execute(
+            "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
+            "content_md,created_at,updated_at) "
+            "VALUES ('mem-a3','nb','u-a','ask_answer','confirmed','t','x',%s,%s)",
+            (NOW, NOW),
+        )
+        db.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,memory_id,created_at,"
+            "updated_at) VALUES ('src-ma3','nb','src-ma3','memory','mem-a3',%s,%s)",
+            (NOW, NOW),
+        )
+        db.execute(
+            "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,payload,"
+            "evidence,source_id,created_at,updated_at) "
+            "VALUES ('ko-ma3','nb','claim','approved','{}',%s,'src-ma3',%s,%s)",
+            (json.dumps([{"source_id": "src-ma3", "element_id": "el-src-ma3",
+                          "quoted_span": "ko-ma3"}]), NOW, NOW),
+        )
+    _pg_own_merge(repo, "ko-ma1", "ko-ma2")
+    _pg_own_merge(repo, "ko-ma2", "ko-ma3")
+    _pg_change_memory(repo, "mem-a3", "delete")
+    assert _pg_status(database, "ko-ma2") == "approved"
+    assert _pg_status(database, "ko-ma1") == "deprecated"
+    assert _evidence_sources(database, "ko-ma2") == {"src-ma1", "src-ma2"}
+    _pg_change_memory(repo, "mem-a2", "delete")
+    assert _pg_status(database, "ko-ma1") == "approved"
+
+
+def test_pg_restore_skips_a_memory_being_removed_and_never_waits(pg_repository):
+    """Lock order for the restore: its Memory sources are taken FOR KEY
+    SHARE SKIP LOCKED. While mem-a1's source is held FOR UPDATE (a
+    concurrent removal or re-ingest, which clears ko-ma1 anyway), deleting
+    mem-a2 neither waits for it nor restores ko-ma1 — so two Memories merged
+    into each other's objects and removed at once cannot deadlock."""
+    import threading
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    _pg_own_merge(repo, "ko-ma1", "ko-ma2")
+    outcome: dict = {}
+
+    def remove():
+        try:
+            outcome["removed"] = repo._runtime.source_ingestion.remove_memory_sources(
+                ["src-ma2"]
+            )
+        except Exception as exc:  # pragma: no cover - surfaced below
+            outcome["removed"] = repr(exc)
+
+    with psycopg.connect(database.settings.database_url, row_factory=dict_row) as holder:
+        holder.execute("SELECT id FROM sources WHERE id='src-ma1' FOR UPDATE")
+        worker = threading.Thread(target=remove)
+        worker.start()
+        worker.join(timeout=10)
+        assert not worker.is_alive(), "the removal waited on the held Memory source"
+        holder.rollback()
+    assert outcome == {"removed": 1}
+    assert _pg_status(database, "ko-ma2") is None
+    assert _pg_status(database, "ko-ma1") == "deprecated"
 
 
 @pytest.mark.parametrize(
@@ -590,9 +732,9 @@ def test_pg_new_statements_keep_index_paths(seeded):
         for object_id, source in (("kox-0", "srcx-0"), ("kox-2", "srcx-2")):
             db.execute(
                 "UPDATE knowledge_objects SET evidence = jsonb_build_array("
-                "jsonb_build_object('source_id', %s::text, 'element_id', 'el', "
+                "jsonb_build_object('source_id', %s::text, 'element_id', %s::text, "
                 "'quoted_span', 'q')) WHERE id = %s",
-                (source, object_id),
+                (source, f"el-{source}", object_id),
             )
     with database.write() as db:
         own_capture = _CapturingConnection(db)
@@ -618,6 +760,31 @@ def test_pg_new_statements_keep_index_paths(seeded):
         assert "pk_knowledge_objects" in plan and "pk_sources" in plan, plan
     assert "Seq Scan" not in own_plan, own_plan
     assert "pk_sources" in own_plan and "pk_memory_items" in own_plan, own_plan
+
+    # The restore half of clearing kox-2's Memory (it absorbed kox-0): the
+    # tag read starts from the cleared source's objects (source index); the
+    # source lock and the restoring UPDATE reach the recorded ids by an index
+    # — the primary key, or (notebook, status='deprecated') when statistics
+    # say the notebook holds few deprecated rows — never a scan.
+    with database.write() as db:
+        restore_capture = _CapturingConnection(db)
+        restored = GovernanceStore.restore_merged_away_on(
+            restore_capture, "nbx", ["srcx-2"], NOW
+        )
+        db.execute("ROLLBACK")
+    assert restored == ["kox-0"]
+    assert len(restore_capture.statements) == 3
+    with database.connect() as db:
+        restore_plans = [_plan(db, *s) for s in restore_capture.statements]
+    for plan in restore_plans:
+        assert "Seq Scan" not in plan, plan
+    assert "idx_knowledge_objects_source" in restore_plans[0], restore_plans[0]
+    for plan in restore_plans[1:]:
+        assert (
+            "using pk_knowledge_objects" in plan
+            or "using idx_knowledge_objects_nb_status" in plan
+        ), plan
+        assert "pk_sources" in plan or "Update on knowledge_objects" in plan, plan
 
     for plan in plans:
         assert "Seq Scan" not in plan, plan

@@ -287,11 +287,14 @@ class SourceIngestionService:
         memory_detach: Optional[Callable[[Any, List[dict]], Any]] = None,
         memory_after_teardown: Optional[Callable[[Any, Any], None]] = None,
         # ``memory_evidence_detach(db, notebook_id, source_ids, now)``: the
-        # evidence strip of ``memory_detach`` alone (the governance store's
-        # ``strip_sources_evidence_on``), run by a Memory re-ingest before it
+        # merge half of ``memory_detach`` alone (the governance store's
+        # ``detach_memory_merges_on``), run by a Memory re-ingest before it
         # clears the source's old graph — a merge of two of the owner's
         # Memory objects can have put this source's evidence on an object
-        # another Memory source owns. ``None`` (narrow test doubles) skips it.
+        # another Memory source owns (stripped), or made one of this
+        # source's objects the merge result of another Memory's object
+        # (restored before the result is cleared). ``None`` (narrow test
+        # doubles) skips it.
         memory_evidence_detach: Optional[Callable[[Any, str, List[str], str], Any]] = None,
         # PR-E8: ``promotion_detach(db, rows, now)`` runs for the promotion
         # sources of a teardown after the source lock and before the clear:
@@ -2277,9 +2280,12 @@ class SourceIngestionService:
                     # ANOTHER Memory source owns that gained this source's
                     # evidence through a merge of two of the owner's Memory
                     # objects loses exactly those entries, instead of being
-                    # deleted with them (the removal's ``memory_detach`` takes
-                    # the same step; a merge takes FOR KEY SHARE on this row
-                    # first, so it cannot slip in between).
+                    # deleted with them; and an object of another Memory that
+                    # one of this source's objects absorbed by such a merge is
+                    # restored before that merge result is cleared (the
+                    # removal's ``memory_detach`` takes the same steps; a
+                    # merge takes FOR KEY SHARE on this row first, so it
+                    # cannot slip in between).
                     if self.memory_evidence_detach is not None:
                         self.memory_evidence_detach(db, notebook_id, [source_id], now)
                     # Reparse semantics: drop this source's prior extraction

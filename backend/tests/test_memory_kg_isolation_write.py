@@ -29,7 +29,7 @@ from app.domain.memory_kg_isolation import (
     CROSS_CLASS_MESSAGE,
     MemoryKnowledgeMergeRefused,
 )
-from app.models.knowledge import MergeRequest
+from app.models.knowledge import KnowledgeUpdate, MergeRequest
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
@@ -341,6 +341,133 @@ def test_editing_one_merged_memory_keeps_the_other_memorys_object(own_pair):
     assert {e["source_id"] for e in _evidence(repo, a2)} == {src_a2}
     assert _reverse_index(repo, a2) == {src_a2}
     assert _objects(repo, nb, src_a1)  # the edited Memory has fresh objects
+
+
+def _status(repo, object_id: str) -> "str | None":
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT status FROM knowledge_objects WHERE id=?", (object_id,)
+        ).fetchone()
+    return None if row is None else row["status"]
+
+
+def _listed_approved(repo, nb: str) -> set:
+    """The approved concepts u-a's knowledge list shows (her viewer scope)."""
+    from app.core.request_context import reset_request_user, set_request_user
+    from app.models.identity import UserProfile
+
+    token = set_request_user(UserProfile(
+        id="u-a", email="u-a@example.test", display_name="u-a", role="user",
+    ))
+    try:
+        page = repo.list_knowledge(nb, "concept", status="approved", offset=0, limit=200)
+    finally:
+        reset_request_user(token)
+    return {item.id for item in page.items}
+
+
+def _owned_by(repo, user: str, *notebooks: str) -> None:
+    with repo._write() as db:
+        for nb in notebooks:
+            db.execute("UPDATE notebooks SET created_by=? WHERE id=?", (user, nb))
+
+
+def _change_memory(repo, nb: str, memory_id: str, change: str) -> None:
+    """Edit, transfer (move) or delete one of u-a's Memories through the
+    real service paths."""
+    if change == "edit":
+        repo._runtime.source_ingestion.ingest_memory_source(
+            nb, memory_id, memory_id, TEXT + " Edited."
+        )
+    elif change == "transfer":
+        dst = repo.create_notebook(NotebookCreate(name="dst")).id
+        _owned_by(repo, "u-a", nb, dst)
+        (result,) = repo._runtime.memory_service.transfer(
+            "u-a", [memory_id], dst, "move", False
+        )
+        assert result["ok"] is True, result
+    else:
+        _owned_by(repo, "u-a", nb)
+        repo._runtime.memory_service.delete(memory_id, "u-a")
+
+
+@pytest.mark.parametrize("change", ["edit", "transfer", "delete"])
+def test_clearing_the_merge_result_restores_the_merged_away_object(own_pair, change):
+    """User ruling 2026-10-21: a1 was merged into a2 (a2 belongs to mem-a2).
+    Editing, transferring or deleting mem-a2 clears a2; just before, a1 —
+    whose Memory still exists — is restored to approved with its own
+    evidence, so mem-a1's knowledge is retrievable again instead of
+    silently vanishing."""
+    repo, nb, src_a1, _src_a2, a1, a2 = own_pair
+    assert a1 not in _listed_approved(repo, nb)
+    _change_memory(repo, nb, "mem-a2", change)
+    assert _status(repo, a2) is None
+    assert _status(repo, a1) == "approved"
+    assert {e["source_id"] for e in _evidence(repo, a1)} == {src_a1}
+    assert a1 in _listed_approved(repo, nb)
+
+
+def test_clearing_the_merged_away_memory_restores_nothing(own_pair):
+    """The merged-away side's own Memory is deleted: its object goes with it
+    (nothing to restore) and the merge result only loses its entries."""
+    repo, nb, _src_a1, src_a2, a1, a2 = own_pair
+    _change_memory(repo, nb, "mem-a1", "delete")
+    assert _status(repo, a1) is None
+    assert _status(repo, a2) == "approved"
+    assert {e["source_id"] for e in _evidence(repo, a2)} == {src_a2}
+
+
+def test_an_orphaned_merged_away_object_is_not_restored(own_pair):
+    """mem-a1's row is gone (its source is an orphan): clearing the merge
+    result does not bring a1 back."""
+    repo, nb, _src_a1, _src_a2, a1, a2 = own_pair
+    with repo._write() as db:
+        db.execute("UPDATE sources SET memory_id=NULL WHERE memory_id='mem-a1'")
+    _change_memory(repo, nb, "mem-a2", "delete")
+    assert _status(repo, a2) is None
+    assert _status(repo, a1) == "deprecated"
+
+
+def test_a_hand_deprecated_object_of_the_same_memory_stays_deprecated(own_pair):
+    """Only what the merge result absorbed is restored: mem-a1's claim that
+    its owner deprecated by hand stays deprecated."""
+    repo, nb, src_a1, _src_a2, a1, _a2 = own_pair
+    (claim,) = [o for o, r in _objects(repo, nb, src_a1).items() if r["object_type"] == "claim"]
+    repo.update_knowledge(nb, claim, KnowledgeUpdate(status="deprecated"), actor_id="u-a")
+    _change_memory(repo, nb, "mem-a2", "delete")
+    assert _status(repo, a1) == "approved"
+    assert _status(repo, claim) == "deprecated"
+
+
+def test_a_merge_chain_restores_one_level_per_cleared_result(world):
+    """a1 → a2 → a3. The copied entries record the DIRECT merged-away object
+    (a1's entries in a3 say a2), so deleting mem-a3 restores a2 — which
+    still carries a1's evidence — and leaves a1 deprecated (a2 represents
+    it); deleting mem-a2 afterwards restores a1."""
+    repo, nb, _upload = world
+    sources = [_confirmed_memory(repo, nb, f"mem-a{n}", "u-a") for n in (1, 2, 3)]
+    a1, a2, a3 = (_concept(_objects(repo, nb, s)) for s in sources)
+    governance = repo._runtime.knowledge_governance
+    governance.merge_knowledge(nb, a1, MergeRequest(into_id=a2), actor_id="u-a")
+    governance.merge_knowledge(nb, a2, MergeRequest(into_id=a3), actor_id="u-a")
+    assert {e.get("merged_from") for e in _evidence(repo, a3)} == {None, a2}
+    _change_memory(repo, nb, "mem-a3", "delete")
+    assert _status(repo, a2) == "approved" and _status(repo, a1) == "deprecated"
+    assert {e["source_id"] for e in _evidence(repo, a2)} == set(sources[:2])
+    _change_memory(repo, nb, "mem-a2", "delete")
+    assert _status(repo, a1) == "approved"
+    assert {e["source_id"] for e in _evidence(repo, a1)} == {sources[0]}
+
+
+def test_shared_merges_record_no_merge_provenance(world):
+    """Shared objects' merges keep their evidence byte for byte."""
+    repo, nb, upload = world
+    other = _upload_source(repo, nb, "src-upload-2")
+    a = _concept(_objects(repo, nb, upload))
+    b = _concept(_objects(repo, nb, other))
+    expected = _evidence(repo, b) + _evidence(repo, a)
+    repo.merge_knowledge(nb, a, MergeRequest(into_id=b))
+    assert _evidence(repo, b) == expected
 
 
 def _cite(repo, object_id: str, source_id: str) -> None:

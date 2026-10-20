@@ -29,7 +29,15 @@
 删除/转移/退出走 `remove_memory_sources`,先把该来源的证据从别的来源拥有的对象上
 摘掉(`strip_sources_evidence_on`)再拆;编辑后重抽(`ingest_memory_source`)在清旧
 产物之前做同一次摘除。被合并的另一条 Memory 的对象因此只失去这条 Memory 贡献的证据,
-不会随它一起被删。PostgreSQL 上合并先按 id 序对源对象的主来源与证据引用的 Memory
+不会随它一起被删。反过来,拥有合并结果的那条 Memory 被编辑、转移或删除时,合并结果随它
+清掉;清掉之前(同一事务、同一处 `detach_memory_merges_on`),它证据里
+`MERGED_FROM_EVIDENCE_KEY` 记下的、直接并进来的对象若仍是弃用状态、且它自己的 Memory
+仍在,就恢复为 approved(用户裁决 2026-10-21),于是那条 Memory 的知识重新进入检索;
+来源 Memory 已不在的不恢复。只看仍在用的合并结果:一个已被并走的对象被清掉时,它的
+条目早已随它进了下一层的合并结果,不需要恢复。PostgreSQL 上恢复先对被恢复对象的 Memory
+来源取 `FOR KEY SHARE SKIP LOCKED`(拿不到锁 = 那条 Memory 正被删除或重抽,它的对象
+反正要被清掉,不恢复),再锁对象行——不等待,所以两条 Memory 交叉合并后同时删除也不会
+互相死锁。PostgreSQL 上合并先按 id 序对源对象的主来源与证据引用的 Memory
 来源取 `FOR KEY SHARE`,再锁两个对象——与拆除、重抽「先来源、后派生行」同一锁序,
 所以并发的删除/退出/编辑要么排在合并之后(看得到合并写进的证据并摘掉),要么排在
 之前(合并读到的是已摘净的行)。
@@ -49,6 +57,13 @@ CROSS_CLASS_MESSAGE = "由个人记忆生成的知识对象不能与共享的知
 #: PostgreSQL 上合并读到的源对象证据在加锁前后不一致(另一个合并刚把新的 Memory 证据
 #: 并进了它):这次不合并、一行不写,重试即可。
 MEMORY_MERGE_RETRY_MESSAGE = "要合并的知识对象刚被修改，请稍后重试"
+
+#: 本人两条 Memory 对象合并时,从被并走对象拷进目标的每一条证据都带上这个键,值是被并走
+#: 对象的 id——「谁曾并进这里」的持久记录,随证据条目本身存放,不需要新列或迁移
+#: (`Evidence` 模型忽略多余的键,界面与接口不显示它)。链式合并时覆盖为最近一次的直接
+#: 来源(a1→a2→a3 后 a3 里 a1 的条目记的是 a2),所以清掉合并结果时只恢复直接并进来的
+#: 那一层。共享对象的合并不写这个键(证据逐字节不变)。
+MERGED_FROM_EVIDENCE_KEY = "merged_from"
 
 # 贡献到公共知识库(通用路径 `propose_promotion` → `approve_promotion_in_transaction`)。
 # Memory 进公共库只有一条路:创建者本人的 `propose_memory_promotion`,它只带经过
@@ -142,6 +157,14 @@ def memory_merge_refusal(
     if source_derived and into_derived and only_own_memory_evidence():
         return None
     return CROSS_CLASS_MESSAGE
+
+
+def merged_evidence_entry(item: Any, merged_away_id: str, own_memory_pair: bool) -> Any:
+    """一条从被并走对象拷进目标的证据:本人 Memory 对之间的合并带上
+    `MERGED_FROM_EVIDENCE_KEY`(覆盖旧值),其余合并原样。"""
+    if own_memory_pair and isinstance(item, dict):
+        return {**item, MERGED_FROM_EVIDENCE_KEY: merged_away_id}
+    return item
 
 
 def merge_evidence_source_ids(*evidence_lists: Iterable[Any]) -> frozenset[str] | None:

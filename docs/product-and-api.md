@@ -2701,9 +2701,17 @@ before the isolation left behind), another member's Memory, an entry without a s
 cross-class 409, because that object carries shared evidence. A site admin has no bypass: for her a
 member's Memory object is someone else's (404). Once merged, deleting, moving or editing one of the
 two Memories strips only that Memory's entries from the object the other Memory owns — it is never
-deleted with them; an edit re-extracts the edited Memory into fresh objects of its own. Deleting the
-Memory that owns the merged object deletes it with that Memory, and the other Memory's merged-away
-object stays deprecated until she restores it. On PostgreSQL a merge locks the Memory sources it
+deleted with them; an edit re-extracts the edited Memory into fresh objects of its own. Editing,
+moving or deleting the Memory that owns the merge result clears the result with that Memory; just
+before, every object merged directly into it is restored to approved, and so is retrievable again,
+when that object is still deprecated and its own Memory still exists (user ruling 2026-10-21). An
+object whose Memory is gone is not restored. Each copied evidence entry records the object it came
+from, so a chain restores one level per cleared result: after a1 → a2 → a3, clearing a3 restores
+a2 (which still carries a1's evidence) and leaves a1 deprecated, and clearing a2 later restores a1.
+An object the owner deprecated by hand is never restored this way. On PostgreSQL the restore takes
+the restored objects' Memory sources `FOR KEY SHARE SKIP LOCKED` before their rows: a Memory being
+deleted or re-extracted at that moment is skipped (its objects are cleared anyway), so two Memories
+merged into each other's objects and deleted at once never wait for each other. On PostgreSQL a merge locks the Memory sources it
 makes the target cite before the object rows (the order of every Memory removal and re-ingest), so
 a concurrent delete, member exit or edit of one of them waits for the merge and then strips what it
 wrote; in the rare case that another merge put a new Memory's evidence on the source object between

@@ -38,6 +38,7 @@ from app.repositories.postgres.id_binding import (
     bind_ids as id_bind_ids,
     execute_ids as id_execute_ids,
     member_of as id_member_of,
+    not_member_of as id_not_member_of,
 )
 from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER
 from app.repositories.postgres.promotion_provenance_store import (
@@ -54,7 +55,9 @@ from app.domain.memory_kg_isolation import (
     MemoryKnowledgeMergeRefused,
     MemoryPromotionRefused,
     PromotionObjectMissing,
+    MERGED_FROM_EVIDENCE_KEY,
     merge_evidence_source_ids,
+    merged_evidence_entry,
     memory_merge_refusal,
 )
 
@@ -2133,6 +2136,96 @@ class GovernanceStore:
         return stripped
 
     @staticmethod
+    def restore_merged_away_on(
+        connection: Any, notebook_id: str, source_ids: List[str], now: str
+    ) -> List[str]:
+        """Before the objects these Memory sources own are cleared (the
+        caller holds their ``FOR UPDATE`` source locks: a removal or a
+        re-ingest), restore to ``approved`` what their still-active objects
+        absorbed through an own-Memory merge — the object ids recorded on
+        their entries (``MERGED_FROM_EVIDENCE_KEY``) — when that object is
+        still deprecated, is owned by another source, and its Memory still
+        exists. User ruling 2026-10-21: clearing a merge result must not
+        silently drop the merged-away Memory's knowledge.
+
+        Lock order, source → object rows: the merged-away objects' Memory
+        sources take ``FOR KEY SHARE SKIP LOCKED`` in id order, then the
+        objects are locked in id order by the restoring UPDATE. A source
+        that cannot be locked is held ``FOR UPDATE`` by a concurrent removal
+        or re-ingest of that Memory, which clears its objects anyway, so it
+        is skipped rather than waited for — two Memories merged into each
+        other's objects and removed at once therefore never deadlock.
+        Returns the restored ids."""
+        ids = sorted(set(source_ids))
+        if not ids:
+            return []
+        owners = id_bind_ids(ids)
+        key = MERGED_FROM_EVIDENCE_KEY
+        merged_away = sorted({
+            str(row["merged_away"])
+            for row in id_execute_ids(
+                connection,
+                f"SELECT DISTINCT ev.value->>'{key}' AS merged_away "
+                "FROM knowledge_objects ko CROSS JOIN LATERAL jsonb_array_elements("
+                "CASE WHEN jsonb_typeof(ko.evidence) = 'array' THEN ko.evidence "
+                "ELSE '[]'::jsonb END) ev "
+                f"WHERE {id_member_of('ko.source_id', owners)} "
+                "AND ko.notebook_id = %s AND ko.status <> 'deprecated' "
+                f"AND jsonb_typeof(ev.value) = 'object' AND ev.value->>'{key}' IS NOT NULL",
+                (owners.param, notebook_id),
+            ).fetchall()
+            if row["merged_away"]
+        })
+        if not merged_away:
+            return []
+        found = id_bind_ids(merged_away)
+        pinned = [
+            str(row["id"])
+            for row in id_execute_ids(
+                connection,
+                "SELECT s.id FROM sources s WHERE s.id IN ("
+                "SELECT ko.source_id FROM knowledge_objects ko "
+                f"WHERE {id_member_of('ko.id', found)} AND ko.notebook_id = %s "
+                "AND ko.status = 'deprecated') "
+                f"AND {id_not_member_of('s.id', owners)} "
+                f"AND {memory_source_type_predicate('s.source_type')} "
+                "AND EXISTS (SELECT 1 FROM memory_items m WHERE m.id = s.memory_id) "
+                "ORDER BY s.id FOR KEY SHARE OF s SKIP LOCKED",
+                (found.param, notebook_id, owners.param),
+            ).fetchall()
+        ]
+        if not pinned:
+            return []
+        live = id_bind_ids(pinned)
+        return sorted(
+            str(row["id"])
+            for row in id_execute_ids(
+                connection,
+                "UPDATE knowledge_objects SET status = 'approved', updated_at = %s "
+                "WHERE id IN (SELECT ko.id FROM knowledge_objects ko "
+                f"WHERE {id_member_of('ko.id', found)} AND ko.notebook_id = %s "
+                f"AND ko.status = 'deprecated' AND {id_member_of('ko.source_id', live)} "
+                "ORDER BY ko.id COLLATE \"C\" FOR UPDATE) RETURNING id",
+                (normalize_timestamp(now), found.param, notebook_id, live.param),
+            ).fetchall()
+        )
+
+    @staticmethod
+    def detach_memory_merges_on(
+        connection: Any, notebook_id: str, source_ids: List[str], now: str
+    ) -> List[str]:
+        """The merge half of clearing Memory sources' graph, removal and
+        re-ingest alike, under the caller's source locks: restore what their
+        merge results absorbed (``restore_merged_away_on``), then strip their
+        own entries from the objects other sources own
+        (``strip_sources_evidence_on``). Returns the restored ids."""
+        restored = GovernanceStore.restore_merged_away_on(
+            connection, notebook_id, source_ids, now
+        )
+        GovernanceStore.strip_sources_evidence_on(connection, notebook_id, source_ids, now)
+        return restored
+
+    @staticmethod
     def detach_promotion_sources_on(
         connection: Any, rows: List[dict], now: str
     ) -> List[str]:
@@ -2372,12 +2465,15 @@ class GovernanceStore:
         )
         if refusal is not None:
             raise MemoryKnowledgeMergeRefused(refusal)
+        # Reached only past the refusal: Memory-derived on both sides is an
+        # own-Memory pair, whose copied entries record where they came from.
+        own_pair = bool(src["memory_derived"]) and bool(tgt["memory_derived"])
         merged: List[dict] = json_value(tgt["evidence"], [])
         seen = {(e.get("element_id"), e.get("quoted_span")) for e in merged}
         for item in json_value(src["evidence"], []):
             key = (item.get("element_id"), item.get("quoted_span"))
             if key not in seen:
-                merged.append(item)
+                merged.append(merged_evidence_entry(item, source_id, own_pair))
                 seen.add(key)
         merged_json = json.dumps(merged, ensure_ascii=False)
         connection.execute(
