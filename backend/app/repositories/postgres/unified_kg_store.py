@@ -397,13 +397,18 @@ class UnifiedKgStore:
     @staticmethod
     def scratch_vector_rows(db: Any, notebook_id: str, run_id: str):
         # Pass A inserts scratch rows from stream_seed_rows(), whose historical
-        # contract is knowledge_objects.ordinal order. PostgreSQL has no rowid
-        # on this scratch table, so recover that preserved order via the source
-        # object instead of inventing object-id lexical order. Float32 mean
-        # accumulation in Pass B is order-sensitive. (0078 gave the scratch
-        # table that insertion order as ``s.ordinal`` for the paged cluster-map
-        # write; this reader is deliberately left on ``k.ordinal`` -- the same
-        # order for every row, and its join and plan stay untouched.)
+        # contract is knowledge_objects.ordinal order. Float32 mean
+        # accumulation in Pass B is order-sensitive, so the rows come back in
+        # that insertion order: ``s.ordinal`` (0079), the scratch row's
+        # identity mirror of SQLite's rowid -- the SQLite twin orders by
+        # ``s.rowid``. Before 0079 this read recovered the order through
+        # ``k.ordinal``; the two are the same order row for row (s.ordinal was
+        # assigned in k.ordinal order) except for an object deleted and
+        # re-created under the same id between Pass A2 and here, where this now
+        # matches SQLite. Ordering by the scratch key lets a plan driven by
+        # the scratch index deliver the order without a Sort. The join to
+        # knowledge_objects stays: knowledge_embeddings has no foreign key to
+        # it, so it is what drops a vector whose object is gone.
         return db.execute(
             "SELECT s.seed AS seed, e.vector AS vector "
             "FROM knowledge_embeddings e "
@@ -411,7 +416,7 @@ class UnifiedKgStore:
             "  AND s.notebook_id=e.notebook_id AND s.run_id=%s "
             "JOIN knowledge_objects k ON k.id=s.object_id "
             "  AND k.notebook_id=s.notebook_id "
-            "WHERE e.notebook_id=%s ORDER BY k.ordinal", (run_id, notebook_id),
+            "WHERE e.notebook_id=%s ORDER BY s.ordinal", (run_id, notebook_id),
         )
 
     @staticmethod

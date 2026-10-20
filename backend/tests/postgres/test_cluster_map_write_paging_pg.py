@@ -32,6 +32,25 @@ def test_paged_write_matches_one_shot_row_for_row_pg(repo):
     cases.check_paged_write_matches_one_shot(repo, postgres=True)
 
 
+def test_pass_b_reads_vectors_in_scratch_insertion_order_pg(repo):
+    """Same order on PostgreSQL, and row for row the output of the statement
+    as it was before it ordered by ``s.ordinal`` (it recovered the order
+    through ``knowledge_objects.ordinal``): switching the sort key changes no
+    row and no position."""
+    nb, rows = cases.check_pass_b_reads_vectors_in_scratch_insertion_order(
+        repo, postgres=True)
+    with repo._connect() as db:
+        before = [(r["seed"], bytes(r["vector"])) for r in db.execute(
+            "SELECT s.seed AS seed, e.vector AS vector "
+            "FROM knowledge_embeddings e "
+            "JOIN kg_cluster_scratch s ON s.object_id=e.object_id "
+            "  AND s.notebook_id=e.notebook_id AND s.run_id=%s "
+            "JOIN knowledge_objects k ON k.id=s.object_id "
+            "  AND k.notebook_id=s.notebook_id "
+            "WHERE e.notebook_id=%s ORDER BY k.ordinal", (cases.RUN, nb)).fetchall()]
+    assert rows == before
+
+
 def test_rebuild_pages_and_a_lost_claim_stops_between_pages_pg(repo, monkeypatch):
     cases.check_rebuild_pages_and_a_lost_claim_stops_between_pages(
         repo, postgres=True, monkeypatch=monkeypatch)
