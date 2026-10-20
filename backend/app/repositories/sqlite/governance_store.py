@@ -24,12 +24,14 @@ from app.repositories.sqlite.memory_sql import (
     foreign_memory_relation_excluded,
     memory_derived_object,
     memory_derived_relation,
+    memory_source_type_predicate,
     own_memory_source,
 )
 from app.repositories.sqlite.id_binding import (
     bind_ids as id_bind_ids,
     drive_by as id_drive_by,
     member_of as id_member_of,
+    not_member_of as id_not_member_of,
 )
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER
 from app.repositories.sqlite.promotion_provenance_store import (
@@ -45,7 +47,9 @@ from app.domain.memory_kg_isolation import (
     MemoryKnowledgeMergeRefused,
     MemoryPromotionRefused,
     PromotionObjectMissing,
+    MERGED_FROM_EVIDENCE_KEY,
     merge_evidence_source_ids,
+    merged_evidence_entry,
     memory_merge_refusal,
 )
 
@@ -1911,6 +1915,85 @@ class GovernanceStore:
         return stripped
 
     @staticmethod
+    def restore_merged_away_on(
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        source_ids: List[str],
+        now: str,
+    ) -> List[str]:
+        """Mirror of the PostgreSQL twin minus its locks (the caller's
+        ``BEGIN IMMEDIATE`` serialises writers): before the objects these
+        Memory sources own are cleared, restore to ``approved`` every object
+        a still-active one of them absorbed by an own-Memory merge
+        (``MERGED_FROM_EVIDENCE_KEY`` on its entries) that is still
+        deprecated, owned by another source, and whose Memory still exists.
+        Returns the restored ids."""
+        ids = sorted(set(source_ids))
+        if not ids:
+            return []
+        owners = id_bind_ids(ids, sort=True)
+        key = f"'$.{MERGED_FROM_EVIDENCE_KEY}'"
+        # drive_by: the sources being cleared are the keys to read (their
+        # objects by idx_knowledge_objects_source); ``+`` keeps the notebook
+        # predicate from driving a walk of the whole notebook.
+        merged_away = sorted({
+            str(row["merged_away"])
+            for row in connection.execute(
+                f"SELECT DISTINCT json_extract(je.value, {key}) AS merged_away "
+                "FROM knowledge_objects ko JOIN json_each(CASE WHEN "
+                "json_valid(ko.evidence) AND json_type(ko.evidence) = 'array' "
+                "THEN ko.evidence ELSE '[]' END) je "
+                f"WHERE {id_drive_by('ko.source_id', owners)} "
+                "AND +ko.notebook_id = ? AND ko.status <> 'deprecated' "
+                f"AND je.type = 'object' AND json_extract(je.value, {key}) IS NOT NULL",
+                (owners.param, notebook_id),
+            ).fetchall()
+            if row["merged_away"]
+        })
+        if not merged_away:
+            return []
+        found = id_bind_ids(merged_away, sort=True)
+        restored = [
+            str(row["id"])
+            for row in connection.execute(
+                "SELECT ko.id FROM knowledge_objects ko "
+                f"WHERE {id_drive_by('ko.id', found)} AND +ko.notebook_id = ? "
+                "AND ko.status = 'deprecated' "
+                f"AND {id_not_member_of('ko.source_id', owners)} "
+                "AND EXISTS (SELECT 1 FROM sources s JOIN memory_items m "
+                "ON m.id = s.memory_id WHERE s.id = ko.source_id "
+                f"AND {memory_source_type_predicate('s.source_type')}) ORDER BY ko.id",
+                (found.param, notebook_id, owners.param),
+            ).fetchall()
+        ]
+        if restored:
+            bound = id_bind_ids(restored, sort=True)
+            connection.execute(
+                "UPDATE knowledge_objects SET status = 'approved', updated_at = ? "
+                f"WHERE {id_drive_by('id', bound)}",
+                (now, bound.param),
+            )
+        return restored
+
+    @staticmethod
+    def detach_memory_merges_on(
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        source_ids: List[str],
+        now: str,
+    ) -> List[str]:
+        """The merge half of clearing Memory sources' graph (removal and
+        re-ingest alike): restore what their merge results absorbed
+        (``restore_merged_away_on``), then strip their own entries from the
+        objects other sources own (``strip_sources_evidence_on``). Returns
+        the restored ids."""
+        restored = GovernanceStore.restore_merged_away_on(
+            connection, notebook_id, source_ids, now
+        )
+        GovernanceStore.strip_sources_evidence_on(connection, notebook_id, source_ids, now)
+        return restored
+
+    @staticmethod
     def detach_promotion_sources_on(
         connection: sqlite3.Connection, rows: List[dict], now: str
     ) -> List[str]:
@@ -2070,12 +2153,15 @@ class GovernanceStore:
         )
         if refusal is not None:
             raise MemoryKnowledgeMergeRefused(refusal)
+        # Reached only past the refusal: Memory-derived on both sides is an
+        # own-Memory pair, whose copied entries record where they came from.
+        own_pair = bool(src["memory_derived"]) and bool(tgt["memory_derived"])
         merged: List[dict] = json.loads(tgt["evidence"] or "[]")
         seen = {(e.get("element_id"), e.get("quoted_span")) for e in merged}
         for item in json.loads(src["evidence"] or "[]"):
             key = (item.get("element_id"), item.get("quoted_span"))
             if key not in seen:
-                merged.append(item)
+                merged.append(merged_evidence_entry(item, source_id, own_pair))
                 seen.add(key)
         merged_json = json.dumps(merged, ensure_ascii=False)
         connection.execute(
