@@ -437,7 +437,20 @@ def assert_a_copy_places_in_the_space_of_the_clusters_it_carries(
     concepts(repo, nb, "s2", "Q Former")
     with legacy_code(monkeypatch):
         rebuild(repo, nb)
+    # A content edit turns the source dirty while the copy is in flight: the
+    # copy's clean seed-space row must not read as the Memory-aware copy's
+    # dirty row in validate_copy (whose cluster count would then follow the
+    # source's live dirty flag and fail the copy).
+    store = repo._runtime.sharing_store
+    validate = store.validate_copy
+
+    def validate_after_an_edit(source_id, new_id):
+        write(repo, "UPDATE unified_kg_state SET dirty=1 WHERE notebook_id=?", (source_id,))
+        return validate(source_id, new_id)
+
+    monkeypatch.setattr(store, "validate_copy", validate_after_an_edit)
     v1_copy = copy_of(repo, nb)
+    monkeypatch.setattr(store, "validate_copy", validate)
     assert space_read_by_placement(repo, v1_copy) == 1
     assert rows(repo, "SELECT dirty FROM unified_kg_state WHERE notebook_id=?",
                 (v1_copy,)) == [{"dirty": 0}]          # a clean copy stays clean
