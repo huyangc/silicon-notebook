@@ -104,6 +104,25 @@ def check_partition_columns_round_trip(repo) -> None:
     assert partition_state(rt, world.other) == (0, "")
 
 
+def check_partition_version_cas(repo) -> None:
+    """With ``expected_version`` the version write is a CAS against the value
+    the publish read after its claim: a ``--cold-partition`` 0 written in
+    between survives (False is returned), while the mode -- how this publish
+    was built -- is written either way."""
+    rt = repo._runtime
+    world = seed(repo)
+    with rt.database.write() as db:
+        assert rt.unified_kg.set_community_partition(
+            db, world.nb, version=1, mode="warm", expected_version=0) is True
+    assert partition_state(rt, world.nb) == (1, "warm")
+    with rt.database.write() as db:
+        rt.unified_kg.set_community_partition(db, world.nb, version=0, mode="warm")
+        assert rt.unified_kg.set_community_partition(
+            db, world.nb, version=1, mode="cold", expected_version=1) is False
+    assert partition_state(rt, world.nb) == (0, "cold")
+    assert partition_state(rt, world.other) == (0, "")
+
+
 def check_kg_delete_resets_the_partition_columns(repo) -> None:
     """Deleting the knowledge graph takes the partition columns back to 0 / '':
     the next rebuild has no previous partition to warm-start from. Another

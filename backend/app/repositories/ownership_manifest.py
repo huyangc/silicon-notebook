@@ -880,6 +880,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.collection_catalog', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.collection_enumeration', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.command_catalog', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.community_partition_state', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.concept_detail', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.concept_whitelist_add', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.concept_whitelist_list', kind='attribute', target='_runtime'),
@@ -1517,6 +1518,16 @@ SURFACE_MEMBERS = (
         kind='property',
         consumers=(
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.command_catalog_service', kind='attribute', target='command_catalog'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='community_partition_state',
+        owner='KnowledgeLifecycleService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/scripts/recluster_kg.py', scope='<module>.main', kind='attribute', target='community_partition_state'),
         ),
         patches=(
         ),

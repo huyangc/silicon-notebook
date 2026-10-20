@@ -40,6 +40,7 @@
         "collection_catalog",
         "collection_enumeration",
         "command_catalog",
+        "community_partition_state",
         "concept_detail",
         "concept_whitelist_add",
         "concept_whitelist_list",

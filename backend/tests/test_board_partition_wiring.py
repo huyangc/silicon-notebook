@@ -196,6 +196,7 @@ def test_the_first_build_is_cold_and_stamps_the_partition(repo, events):
     assert _state(repo, nb) == (PARTITION_ALGO_VERSION, "cold")
     partition = {
         "partition_mode": "cold", "partition_version": PARTITION_ALGO_VERSION,
+        "partition_version_read": 0,
         "partition_cold_reason": "no_published_partition",
         "board_keys_carried": 0, "board_keys_minted": 3, "board_keys_rehashed": 0,
         "previous_boards": 0, "unstable_components": 0,
@@ -327,7 +328,8 @@ def test_a_previous_board_without_a_key_makes_the_previous_partition_unusable(re
     _publish(repo, nb, [("", tuple(CLIQUE_A))])
     events.clear()
     _rebuild(repo, nb, force=True)
-    assert [e["kind"] for e in events].count("community_partition_previous_unusable") == 1
+    [unusable] = [e for e in events if e.get("kind") == "community_partition_previous_unusable"]
+    assert unusable["reason"] == "board_without_key"
     event = _rebuilt(events)
     assert (event["partition_cold_reason"], event["board_keys_minted"]) == (
         "previous_partition_unusable", 1)
@@ -356,16 +358,66 @@ def test_request_cold_community_partition_makes_the_next_build_cold(repo, events
     assert _state(repo, nb) == (PARTITION_ALGO_VERSION, "cold")
 
 
-def test_without_igraph_the_partition_falls_back_cold(repo, events, monkeypatch):
+def _request_cold_after_the_read(repo, monkeypatch) -> None:
+    """Interleave a ``--cold-partition`` request into a build in flight: after
+    the build has claimed its generation and read the partition version, before
+    it publishes."""
+    lifecycle = repo._runtime.knowledge_lifecycle
+    original = lifecycle._partition_boards_for_rebuild
+
+    def partition_then_request(*args, **kwargs):
+        out = original(*args, **kwargs)
+        repo.request_cold_community_partition(args[0])
+        return out
+
+    monkeypatch.setattr(lifecycle, "_partition_boards_for_rebuild", partition_then_request)
+
+
+def test_a_cold_request_during_a_build_survives_its_publish(repo, events, monkeypatch):
+    """The build in flight read version 1 and warm-starts; the operator's
+    request writes 0 before it publishes. The publish CASes the version against
+    what it read: the boards publish, the mode says how (warm), the version stays
+    0, an event says why -- and the next build starts cold."""
     nb = _graph(repo)
     _rebuild(repo, nb)
-    monkeypatch.setitem(sys.modules, "igraph", None)
-    events.clear()
+    with monkeypatch.context() as patched:
+        _request_cold_after_the_read(repo, patched)
+        events.clear()
+        _rebuild(repo, nb, force=True)
+    [held] = [e for e in events if e.get("kind") == "community_partition_version_held"]
+    assert held["reason"] == "version_changed_during_build"
+    assert _rebuilt(events)["partition_mode"] == "warm"
+    assert _state(repo, nb) == (0, "warm")
     _rebuild(repo, nb, force=True)
     event = _rebuilt(events)
     assert (event["partition_mode"], event["partition_cold_reason"]) == (
-        "cold_fallback", "igraph_unavailable")
-    assert _state(repo, nb) == (PARTITION_ALGO_VERSION, "cold_fallback")
+        "cold", "partition_version_changed")
+    assert _state(repo, nb) == (PARTITION_ALGO_VERSION, "cold")
+    assert not [e for e in events if e.get("kind") == "community_partition_version_held"]
+
+
+def test_without_igraph_the_partition_falls_back_cold_and_is_stamped_version_0(
+    repo, events, monkeypatch,
+):
+    """The networkx fallback's boards are not the current algorithm's partition:
+    they are published with version 0 (mode ``cold_fallback``), so the next
+    build with igraph starts cold rather than warm-starting from them."""
+    nb = _graph(repo)
+    _rebuild(repo, nb)
+    with monkeypatch.context() as patched:
+        patched.setitem(sys.modules, "igraph", None)
+        events.clear()
+        _rebuild(repo, nb, force=True)
+    event = _rebuilt(events)
+    assert (event["partition_mode"], event["partition_cold_reason"],
+            event["partition_version"]) == ("cold_fallback", "igraph_unavailable", 0)
+    assert _state(repo, nb) == (0, "cold_fallback")
+    assert not [e for e in events if e.get("kind") == "community_partition_version_held"]
+    _rebuild(repo, nb, force=True)
+    event = _rebuilt(events)
+    assert (event["partition_mode"], event["partition_cold_reason"]) == (
+        "cold", "partition_version_changed")
+    assert _state(repo, nb) == (PARTITION_ALGO_VERSION, "cold")
 
 
 def test_an_unusable_previous_partition_falls_back_cold(repo, events):
@@ -376,21 +428,27 @@ def test_an_unusable_previous_partition_falls_back_cold(repo, events):
     events.clear()
     assert _rebuild(repo, nb, force=True) == 1
     [unusable] = [e for e in events if e.get("kind") == "community_partition_previous_unusable"]
-    assert unusable["error"] == "ValueError"
+    assert unusable["reason"] == "canonical_in_two_boards"
     event = _rebuilt(events)
     assert (event["partition_mode"], event["partition_cold_reason"]) == (
         "cold", "previous_partition_unusable")
 
 
 def test_a_non_default_level_starts_cold_and_leaves_the_partition_columns(repo, events):
+    """The two columns belong to the default level, like ``community_seq``. The
+    precondition is a value a level-1 build would NOT write (version 0, mode
+    'warm'), so a build that wrote them anyway shows."""
     nb = _graph(repo)
     _rebuild(repo, nb)
+    _rebuild(repo, nb, force=True)
+    repo.request_cold_community_partition(nb)
+    assert _state(repo, nb) == (0, "warm")
     events.clear()
     _rebuild(repo, nb, level=1)
     event = _rebuilt(events)
     assert (event["partition_mode"], event["partition_cold_reason"]) == (
         "cold", "non_default_level")
-    assert _state(repo, nb) == (PARTITION_ALGO_VERSION, "cold")
+    assert _state(repo, nb) == (0, "warm")
 
 
 # ------------------------------------------------------------- determinism

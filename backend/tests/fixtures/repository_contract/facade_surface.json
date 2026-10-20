@@ -3015,6 +3015,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.community_partition_state",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.concept_detail",
         "target": "_runtime"
       },
@@ -5342,6 +5348,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self)"
+  },
+  "community_partition_state": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/scripts/recluster_kg.py",
+        "scope": "<module>.main",
+        "target": "community_partition_state"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str') -> 'dict'"
   },
   "concept_detail": {
     "consumers": [
