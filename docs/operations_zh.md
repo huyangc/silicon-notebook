@@ -557,6 +557,21 @@ WHERE c.object_type = 'concept'
   AND NOT EXISTS (SELECT 1 FROM unified_kg_state u WHERE u.notebook_id = c.notebook_id);
 ```
 
+**实测**（本机 PostgreSQL 库副本上的 nb-b37185f4ae：9,400 个概念对象、1,880 条已存合并决定；为排除写代段超时，
+`POSTGRES_STATEMENT_TIMEOUT_SECONDS` 临时调到 900 s）：
+
+| | 升级前代码全量重建 | 升级后第一次「更新分析」 | 再点一次「更新分析」 |
+| --- | --- | --- | --- |
+| 概念种子 → 合并后知识对象 | 7,151 → 6,649 | 7,080 → 6,611 | 跳过（输入未变） |
+| 总耗时 | 86.8 s | 85.3–87.7 s | 0.1 s |
+| 其中写概念簇 | 4.5 s | 4.7–5.0 s | — |
+| 其中 claim 段（含它的写代段） | 58.0 s | 55.3–58.0 s | — |
+| 峰值 RSS | 399 MB | 390–398 MB | — |
+| 重新生成的概念描述 | — | 64（其余 1,128 个按签名复用） | 0 |
+| 决定重算 | — | 已重算 1,875、悬置 5、新增 7 行，保留旧种子 0、冲突 0 | — |
+
+两列耗时相同：第一次「更新分析」的额外开销（决定重算、同名不同写法一档）都在 1 s 以内，大头仍是 claim 段的写代段。
+
 `KG_MERGE_SQUASH_CANDIDATES_MAX`（默认 1000）是「同名不同写法」候选每次至多写入的对数，触顶发
 `kg_merge_squash_candidates_capped`，只保留成员最多的组。
 
