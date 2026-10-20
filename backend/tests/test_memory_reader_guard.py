@@ -285,6 +285,9 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "GovernanceStore.update_edge_review": MAINTENANCE,
         "GovernanceStore.purge_memory_review_rows_on": MAINTENANCE,
         "GovernanceStore.strip_sources_evidence_on": MAINTENANCE,
+        # §13.2-9: a Memory teardown / re-ingest restores the objects its
+        # merge results absorbed (a status write); hands nothing to a reader
+        "GovernanceStore.restore_merged_away_on": MAINTENANCE,
         # PR-E8: a promotion source's teardown strips its entries and deletes
         # only the objects left without evidence; hands nothing to a reader
         "GovernanceStore.detach_promotion_sources_on": MAINTENANCE,
