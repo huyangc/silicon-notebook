@@ -14,7 +14,7 @@
 // 选择器版函数取代——旧函数保留在原文件（已注明 deprecated）等 Task 3 wire
 // 落地后统一清理，本任务文件白名单不含 knowhow-import-logic.ts，不动它）。
 
-import { KIND_LABELS, type ColumnKind, type KnowhowColumnInput, type KnowhowCreateTableInput, type KnowhowTablePatch } from "./knowhow-model.ts";
+import { KIND_LABELS, type ColumnKind, type KnowhowCreateTableInput, type KnowhowTablePatch } from "./knowhow-model.ts";
 import { isBlankTitle } from "./knowhow-import-logic.ts";
 
 // --- 内容类型选项与提示语（规格①，文案逐字）------------------------------------

@@ -40,14 +40,14 @@ import {
   renderPanel,
   routeTable,
   settle,
-  useKnowhowPanelSuite,
+  registerKnowhowPanelSuite,
   wireDetail,
   wireSummary,
   type FakeKnowhowServer,
   type RenderedPanel,
 } from "../../test-support/knowhow-panel-harness.tsx";
 
-const suite = useKnowhowPanelSuite();
+const suite = registerKnowhowPanelSuite();
 
 type User = ReturnType<typeof userEvent.setup>;
 type Fixture = "record" | "anchor";

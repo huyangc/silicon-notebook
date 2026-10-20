@@ -116,10 +116,12 @@ def test_parallel_runs_the_groups_concurrently_and_typechecks_after_the_build(la
     assert events.count("start sync:ui-plugins") == 1
     # test:node only finishes once test:component has started: they overlapped.
     assert "end test:node" in events
-    assert events.index("start lint") > events.index("end build")
+    assert events.index("start typecheck") > events.index("end build")
+    assert events.count("start lint") == 1
     assert [header.split(":")[0] for header in _headers(result.stdout)] == [
         "----- frontend node-tests",
         "----- frontend component-tests",
+        "----- frontend lint",
         "----- frontend build",
         "----- frontend typecheck",
     ]
@@ -132,8 +134,9 @@ def test_parallel_build_failure_skips_only_the_typecheck(lane):
     result, events = lane(FRONTEND_LANE_PARALLEL="1", FAKE_NPM_BUILD="fail")
 
     assert result.returncode == 1
-    assert "start lint" not in events
+    assert "start typecheck" not in events
     assert "end test:node" in events and "end test:component" in events
+    assert "end lint" in events
     assert "----- frontend typecheck: not run (build failed) -----" in result.stdout
     assert "frontend step failed: build (exit 1)" in result.stderr
     assert "typecheck" not in result.stderr
@@ -154,12 +157,25 @@ def test_parallel_reports_a_killed_step_as_interrupted_not_as_skipped(lane):
     assert "----- frontend typecheck: exit=0" in result.stdout
 
 
+def test_parallel_lint_failure_fails_the_lane_and_the_other_groups_still_report(lane):
+    result, events = lane(FRONTEND_LANE_PARALLEL="1", FAKE_NPM_LINT="fail")
+
+    assert result.returncode == 1
+    assert "end test:node" in events and "end test:component" in events
+    assert "end build" in events and "end typecheck" in events
+    assert "----- frontend lint: exit=1" in result.stdout
+    assert "output of lint" in result.stdout
+    assert "frontend step failed: lint (exit 1)" in result.stderr
+
+
 def test_sequential_runs_in_order_and_stops_at_the_first_failure(lane):
     result, events = lane(FRONTEND_LANE_PARALLEL="0")
     assert result.returncode == 0, result.stdout + result.stderr
     assert events == [
         f"{edge} {script}"
-        for script in ("sync:ui-plugins", "test:node", "test:component", "build", "lint")
+        for script in (
+            "sync:ui-plugins", "test:node", "test:component", "lint", "build", "typecheck",
+        )
         for edge in ("start", "end")
     ]
 
@@ -169,3 +185,8 @@ def test_sequential_runs_in_order_and_stops_at_the_first_failure(lane):
         "start sync:ui-plugins", "end sync:ui-plugins",
         "start test:node", "end test:node",
     ]
+
+    result, events = lane(FRONTEND_LANE_PARALLEL="0", FAKE_NPM_LINT="fail")
+    assert result.returncode != 0
+    assert events[-2:] == ["start lint", "end lint"]
+    assert "start build" not in events

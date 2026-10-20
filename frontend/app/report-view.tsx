@@ -58,17 +58,12 @@ import {
 } from "./report-outline-model";
 import type {
   ReportCitationAuditT,
-  ReportCorpusProfileT,
   ReportCredibilityT,
   ReportDetailT,
   ReportDistributionT,
-  ReportFrameAxisT,
-  ReportFrameFacetT,
   ReportFrameT,
   ReportOutlineSectionT,
   ReportSufficiency,
-  ReportSummaryT,
-  ReportUnderstandingT,
 } from "./report-model";
 import { REPORT_DEPTHS, isReportActive, reportQuestionLimitHint } from "./report-model";
 import { formatReportTiming } from "./report-time";

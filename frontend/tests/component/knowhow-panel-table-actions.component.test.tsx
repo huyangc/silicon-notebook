@@ -15,12 +15,12 @@ import {
   renderPanel,
   routeTable,
   settle,
-  useKnowhowPanelSuite,
+  registerKnowhowPanelSuite,
   wirePatchResult,
 } from "../../test-support/knowhow-panel-harness.tsx";
 import type { KnowhowTableDetail } from "../../app/knowhow-model.ts";
 
-const suite = useKnowhowPanelSuite();
+const suite = registerKnowhowPanelSuite();
 
 const LIST = { method: "GET", path: "/notebooks/nb-1/knowhow" } as const;
 const DETAIL = { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" } as const;

@@ -37,19 +37,26 @@ npm run sync:ui-plugins
 # stays unset), but Next's build-time type checker silently drops every diagnostic in
 # `*.test.*`/`*.spec.*` files and `__tests__`/`__mocks__` directories (the ignoreRegex
 # in next/dist/lib/typescript/runTypeCheck.js), so a type error that only exists under
-# frontend/tests/** never fails the build. `npm run lint` (tsc --noEmit) is the one
-# pass that sees those files. It runs after the build so `.next/types` has just been
-# regenerated (a stale tree cannot fail on generated route types), and `incremental`
-# keeps the warm re-check under a second (~5s cold).
+# frontend/tests/** never fails the build. `npm run typecheck` (tsc --noEmit) is the
+# one pass that sees those files. It runs after the build so `.next/types` has just
+# been regenerated (a stale tree cannot fail on generated route types), and
+# `incremental` keeps the warm re-check under a second (~5s cold).
 build_then_typecheck() {
   run_step build env npm_config_ignore_scripts=true npm run build \
-    && run_step typecheck env npm_config_ignore_scripts=true npm run lint
+    && run_step typecheck env npm_config_ignore_scripts=true npm run typecheck
 }
 
-# On a host with at least 8 CPUs the three independent groups -- node tests,
-# component tests, build followed by typecheck -- run concurrently, each into its
-# own log that is printed in a fixed order once all of them finish. Smaller hosts
-# (CI runners) keep the sequential order and stop at the first failure.
+# `npm run lint` is ESLint against the eslint-suppressions.json baseline: a
+# violation the baseline does not cover fails it, and so does a baseline entry
+# that no longer occurs (exit 2), so the baseline only ever shrinks. It reads
+# source files only (no build output, no plugin projection), so it is its own
+# group; `next build` does not lint (`eslint.ignoreDuringBuilds`).
+#
+# On a host with at least 8 CPUs the four independent groups -- node tests,
+# component tests, ESLint, build followed by typecheck -- run concurrently, each
+# into its own log that is printed in a fixed order once all of them finish.
+# Smaller hosts (CI runners) keep the sequential order and stop at the first
+# failure.
 # FRONTEND_LANE_PARALLEL=1/0 overrides the CPU check. Every step stays in this
 # lane's process group, so check.sh's group kill still reaps all of them.
 if [[ -n "${FRONTEND_LANE_PARALLEL:-}" ]]; then
@@ -64,6 +71,7 @@ if [[ "$parallel" != 1 ]]; then
   run_step() { shift; "$@"; }
   run_step node-tests npm run test:node
   run_step component-tests npm run test:component
+  run_step lint npm run lint
   build_then_typecheck
   exit 0
 fi
@@ -83,6 +91,8 @@ run_step node-tests npm run test:node &
 GROUP_PIDS+=("$!")
 run_step component-tests npm run test:component &
 GROUP_PIDS+=("$!")
+run_step lint npm run lint &
+GROUP_PIDS+=("$!")
 build_then_typecheck &
 GROUP_PIDS+=("$!")
 
@@ -94,7 +104,7 @@ done
 # A step without an exit file either never started (only the typecheck, and
 # only after a failed build) or was killed before run_step could record one.
 declare -a FAILED_STEPS=()
-for step in node-tests component-tests build typecheck; do
+for step in node-tests component-tests lint build typecheck; do
   if [[ ! -f "$STEP_LOG_DIR/$step.exit" ]]; then
     if [[ "$step" == typecheck && -f "$STEP_LOG_DIR/build.exit" \
           && "$(cat "$STEP_LOG_DIR/build.exit")" != 0 ]]; then

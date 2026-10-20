@@ -21,10 +21,10 @@ import {
   recordDetail,
   routeTable,
   settle,
-  useKnowhowPanelSuite,
+  registerKnowhowPanelSuite,
 } from "../../test-support/knowhow-panel-harness.tsx";
 
-const suite = useKnowhowPanelSuite();
+const suite = registerKnowhowPanelSuite();
 
 type HostProps = { open: boolean; notebookId?: string; initialTableId?: string; initialRowId?: string };
 

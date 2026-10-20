@@ -157,7 +157,7 @@ test("宽表格与代码块走共用包装，才能在自己的内容块里横�
 
 test("附图在正文引用段落后渲染、只显示图片，并可页内放大", async () => {
   const user = userEvent.setup();
-  const { container } = render(<PublicConversationPage />);
+  render(<PublicConversationPage />);
 
   const img = await screen.findByRole("img", { name: "架构示意" });
   // 别名地址，不是 asset_id：/public/conversations/<token>/assets/<alias>。

@@ -23,7 +23,7 @@ import {
   renderPanel,
   routeTable,
   settle,
-  useKnowhowPanelSuite,
+  registerKnowhowPanelSuite,
 } from "../../test-support/knowhow-panel-harness.tsx";
 
 type DrawerRender = { rowId: string; codeLoaded: boolean; codeColumns: string[] };
@@ -59,7 +59,7 @@ vi.mock("../../app/knowhow-table-grid.tsx", async (importOriginal) => {
   };
 });
 
-const suite = useKnowhowPanelSuite();
+const suite = registerKnowhowPanelSuite();
 
 const R1_TITLE = "供电异常 · 检查电源 · 万用表";
 

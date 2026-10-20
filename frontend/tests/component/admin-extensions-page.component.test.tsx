@@ -86,7 +86,7 @@ afterEach(() => {
 // ⚠ 参数**必须**显式标注 `readonly LoadedExtension[]`。不标注时 TypeScript 从默认值
 // 推断参数类型,而默认值里每一行的 `trust` 都是 `"builtin" as const`——推断出的形参
 // 类型因此是 `trust: "builtin"`,任何传 `"deployment"` 的调用点直接 TS2322。这不是
-// 风格问题:`npm run lint` / `npx tsc --noEmit` 会因此整条红。
+// 风格问题:`npm run typecheck` / `npx tsc --noEmit` 会因此整条红。
 function topology(extensions: readonly LoadedExtension[] = [
   AGENT_PROFILE,
   ...OTHER_IDS.map((id) => ({

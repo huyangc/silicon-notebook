@@ -2467,7 +2467,6 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     let terminalHandled = false;
     let seen = reconnectJob.seen;
     let timer: number | undefined;
-    let capTimer: number | undefined;
     const startedAt = Date.now();
 
     const stopAtCap = () => {
@@ -2482,7 +2481,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       askNotebookIdRef.current = null;
       effectsRef.current.notify("该问答仍在后台进行，请稍后重开查看");
     };
-    capTimer = window.setTimeout(stopAtCap, RECONNECT_CAP_MS);
+    const capTimer = window.setTimeout(stopAtCap, RECONNECT_CAP_MS);
 
     const schedule = () => {
       if (stopped || !sameViewOwner(ownerRef.current, owner)) return;

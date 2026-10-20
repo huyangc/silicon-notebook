@@ -475,7 +475,7 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
   function publish<S extends RootModalSlot>(lease: RootModalLease<S> | null): lease is RootModalLease<S> {
     if (!leaseIsCurrent(lease)) return false;
     const policy = ROOT_MODAL_POLICIES[lease.slot];
-    for (const [slot, active] of [...activeRef.current.entries()]) {
+    for (const [slot] of [...activeRef.current.entries()]) {
       if (
         slot === lease.slot
         || (

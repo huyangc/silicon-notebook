@@ -99,7 +99,7 @@ function conjunctsOf(node, sourceFile) {
  * 的普通 JSX 包裹(比如外包一层 <div>)不影响判定——climb 只按 `.parent` 链走,不关心
  * 中间节点类型,只在每一层检查"这一层的父节点是不是恰好把当前节点当 right/whenTrue"。
  */
-function nearestGate(node, sourceFile) {
+function nearestGate(node, _sourceFile) {
   let current = node;
   while (current) {
     const parent = current.parent;

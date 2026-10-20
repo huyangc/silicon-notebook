@@ -1,4 +1,4 @@
-import { KG_TYPE_STYLE, kgTypeLabel } from "./kg-type-model";
+import { KG_TYPE_STYLE } from "./kg-type-model";
 
 export { KG_TYPE_STYLE, kgTypeLabel } from "./kg-type-model";
 

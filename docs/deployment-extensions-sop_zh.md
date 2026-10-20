@@ -473,7 +473,7 @@ SILICON_NOTEBOOK_UI_PLUGINS=/path/to/silicon-notebook-corp-search/ui/corp-search
   npm run sync:ui-plugins
 ```
 
-这个变量是 `:` 分隔的包目录清单，相对路径按当前目录解析。你很少需要手动跑同步——`postinstall` 与五个 `pre*` 钩子（`predev`、`prebuild`、`prestart`、`pretest`、`prelint`）会替你跑，所以在执行 `npm run dev` / `build` / `test` / `lint` 的那个 shell 里导出变量就够了。
+这个变量是 `:` 分隔的包目录清单，相对路径按当前目录解析。你很少需要手动跑同步——`postinstall` 与五个 `pre*` 钩子（`predev`、`prebuild`、`prestart`、`pretest`、`pretypecheck`）会替你跑，所以在执行 `npm run dev` / `build` / `test` / `typecheck` 的那个 shell 里导出变量就够了。
 
 它产出三份产物，全部被 `.gitignore` 忽略：
 
@@ -501,9 +501,9 @@ cd /path/to/public-checkout/frontend
 node --test tests/guards/extension-*.test.mjs
 
 # 4. 类型检查，覆盖 features/ext-*/ ——`next build` 那遍会静默跳过
-#    `*.test.*`/`*.spec.*` 命名文件里的诊断，`npm run lint` 不会
+#    `*.test.*`/`*.spec.*` 命名文件里的诊断，`npm run typecheck` 不会
 npm run build
-npm run lint
+npm run typecheck
 ```
 
 **装了插件的树跑不过基座的 `npm run test`。** `extension-ui-host.component.test.tsx` 钉住的是「零插件时合并出来的 registry 逐字等于内建目录、长度为 1」——那正是 registry 拆成两个模块要证明的唯一性质，绝不能为了迁就本地插件被放宽成 `>= 1`。你的验收判据是上面第 3、4 项加第 7 节的对账，不是 `npm run test`。
@@ -765,7 +765,7 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 - [ ] `ExtensionModal` 收到 `context={context}`、`actions={actions}` 与一个 `storageKey`；弹窗经 `actions.openDialog()` 打开，没有本地 `open` 状态。
 - [ ] `refreshSources()` 只在动作完成后调一次，且 rejection 被 catch 住。
 - [ ] `check_ui_vocabulary.py --extra-root <src>` 干净。
-- [ ] 同步后，基座的 `extension-*` 守卫、`npm run build` 与 `npm run lint` 干净。
+- [ ] 同步后，基座的 `extension-*` 守卫、`npm run build` 与 `npm run typecheck` 干净。
 - [ ] `CHANGELOG.md` 写明支持的 `api_version`；两处 manifest 的 `version` 一起 bump 过。
 
 ### 运维

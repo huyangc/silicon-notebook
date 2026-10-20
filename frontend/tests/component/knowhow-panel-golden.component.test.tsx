@@ -57,13 +57,13 @@ import {
   renderPanel,
   routeTable,
   settle,
-  useKnowhowPanelSuite,
+  registerKnowhowPanelSuite,
   wireDetail,
   wirePatchResult,
   type RecordedRequest,
 } from "../../test-support/knowhow-panel-harness.tsx";
 
-const suite = useKnowhowPanelSuite();
+const suite = registerKnowhowPanelSuite();
 
 const MODES = [
   { name: "plain render", strict: false },

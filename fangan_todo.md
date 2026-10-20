@@ -421,9 +421,8 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 
 **工程卫生**
 
-- [ ] **前端无 ESLint 门禁**：`frontend/package.json` 的 devDependencies 有 `eslint` 与
-      `eslint-config-next`，但仓库没有 ESLint 配置文件，`npm run lint` 实际是 `tsc --noEmit`；
-      `scripts/check.sh` 与 CI 工作流都不跑 ESLint（后端同样没有 pyflakes / ruff 一类的 lint 门禁）。
+- [ ] **后端无 lint 门禁**：没有 pyflakes / ruff 一类的 lint，`scripts/check.sh` 与 CI 都不跑（原附记在
+      「前端无 ESLint 门禁」一条里；前端那一半已做，见 [fangan_done.md](fangan_done.md) §61）。
 
 ---
 

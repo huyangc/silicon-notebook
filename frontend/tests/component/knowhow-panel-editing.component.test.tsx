@@ -15,11 +15,11 @@ import {
   renderPanel,
   routeTable,
   settle,
-  useKnowhowPanelSuite,
+  registerKnowhowPanelSuite,
   wirePatchResult,
 } from "../../test-support/knowhow-panel-harness.tsx";
 
-const suite = useKnowhowPanelSuite();
+const suite = registerKnowhowPanelSuite();
 
 const R1_TITLE = "供电异常 · 检查电源 · 万用表";
 

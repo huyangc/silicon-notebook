@@ -14,13 +14,13 @@ import {
   renderPanel,
   routeTable,
   settle,
-  useKnowhowPanelSuite,
+  registerKnowhowPanelSuite,
   wireDetail,
   wireRow,
 } from "../../test-support/knowhow-panel-harness.tsx";
 import type { KnowhowRow, KnowhowTableDetail } from "../../app/knowhow-model.ts";
 
-const suite = useKnowhowPanelSuite();
+const suite = registerKnowhowPanelSuite();
 
 /** Serves `current` for the table detail, so a test can change server state. */
 function liveDetail(notebookId: string, initial: KnowhowTableDetail) {

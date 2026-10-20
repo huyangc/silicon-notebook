@@ -19,8 +19,10 @@
     "test": "npm run test:node && npm run test:component",
     "test:node": "node --test --test-concurrency=4 $(find tests/unit tests/guards -name '*.test.mjs' -type f -print)",
     "test:component": "vitest run",
-    "prelint": "npm run sync:ui-plugins",
-    "lint": "tsc --noEmit"
+    "pretypecheck": "npm run sync:ui-plugins",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint --max-warnings 0 .",
+    "lint:prune": "eslint --prune-suppressions ."
   },
   "dependencies": {
     "@types/katex": "^0.16.8",
@@ -37,14 +39,16 @@
     "remark-math": "^6.0.0"
   },
   "devDependencies": {
+    "@eslint/eslintrc": "^3.3.5",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
-    "eslint": "^9.17.0",
+    "eslint": "^9.24.0",
     "eslint-config-next": "^15.3.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
     "jsdom": "^26.1.0",
     "postcss": "8.4.31",
     "typescript": "^5.7.2",

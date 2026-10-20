@@ -12,7 +12,7 @@
 //      屏幕出现 DRAFT_FLUSH_FAILED 警告；二次点 → 强制放行、onHistory 被调用。
 //      （把 History 按钮改回直调 onHistory 绕开守卫时，A 的 onClose 断言仍绿但 B
 //      的「首次不调用」转红——正是被修的静默丢字 bug。）
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
