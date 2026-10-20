@@ -619,7 +619,7 @@ test("已处理的问题留在待处理、写「已处理，更新后核验」�
   expect(within(f1).getByText("已处理，更新后核验（来源已删除）")).toBeInTheDocument();
   expect(within(f1).queryByRole("button", { name: /删除来源|打开来源核对|标为正常/ })).toBeNull();
   const f5 = findingByRule("没建立关联的内容");
-  expect(within(f5).getByText("已处理，更新后核验（已补上关联）")).toBeInTheDocument();
+  expect(within(f5).getByText("已处理，更新后核验（已跑过补上关联）")).toBeInTheDocument();
   expect(within(f5).queryAllByRole("button")).toHaveLength(0);
   expect(screen.getByRole("heading", { name: "待处理（2）", level: 3 })).toBeInTheDocument();
 });
@@ -812,7 +812,7 @@ test("收录来源不出「重新解析」；正在解析的来源写按钮置�
   expect(within(f1).getByText("这篇来源正在解析，完成后再处理")).toBeInTheDocument();
 });
 
-test("没建立关联的内容：可能改变结果时出「补上关联」，在飞禁用，结果写在按钮旁", async () => {
+test("没建立关联的内容：可能改变结果时出「补上关联」，在飞禁用；跑完的结果写在待处理区的区级提示里", async () => {
   const handlers: KgFindingHandlers = { onRelink: vi.fn() };
   const view = renderPanel({ findingHandlers: handlers });
   await ready();
@@ -829,7 +829,45 @@ test("没建立关联的内容：可能改变结果时出「补上关联」，�
     <KgAnalysisView notebookId="nb-1" onClose={() => undefined} canAnalyze onAnalyze={() => undefined}
       findingHandlers={handlers} relinkResult={{ edgesAdded: 12, isolatedAfter: 1818 }} />,
   );
-  expect(within(findingByRule("没建立关联的内容")).getByText("新增 12 条关联，还剩 1,818 个没有关联的知识条目")).toBeInTheDocument();
+  expect(within(zone(/^待处理/)).getByText("补上关联已跑完：新增 12 条关联，还剩 1,818 个没有关联的知识条目")).toBeInTheDocument();
+});
+
+test("补上关联一条都没补上、报告是最新的：那一条移进折叠的诊断数据，结果仍写在看得见的待处理区", async () => {
+  // 场景 A:报告与当前一致,补连 0 条 → 读侧判成 relink_spent、随 passed 那一页回来。
+  const view = renderPanel({ findingHandlers: { onRelink: vi.fn() } });
+  await ready();
+  openRows = [F4, F3, F1, F2];
+  vi.mocked(fetchKgAnalysis).mockResolvedValue(report({
+    findings_summary: summary({ relink: { attempted: true, at_kg_seq: 128, at: "2026-10-20T00:00:00Z", may_change: false } }),
+  }));
+  vi.mocked(fetchKgFindings).mockImplementation(async (_nb, options) => {
+    const zoneName = options?.zone ?? "open";
+    if (zoneName === "passed") return page("passed", [DECIDED, SPENT]);
+    if (zoneName === "dismissed") return page("dismissed", [DISMISSED]);
+    return page("open", openRows);
+  });
+  view.rerender(
+    <KgAnalysisView notebookId="nb-1" onClose={() => undefined} canAnalyze onAnalyze={() => undefined}
+      findingHandlers={{ onRelink: vi.fn() }} findingsRevision="1|0" relinkResult={{ edgesAdded: 0, isolatedAfter: 1830 }} />,
+  );
+  await waitFor(() => expect(findingItems()).toHaveLength(4));
+  const details = document.querySelector("details.kg-findings-diagnostics") as HTMLDetailsElement;
+  await waitFor(() => expect(details.contains(zone("没建立关联的内容"))).toBe(true));
+  expect(details.open).toBe(false);
+  const notice = within(zone(/^待处理/)).getByText("补上关联已跑完：新增 0 条关联，还剩 1,830 个没有关联的知识条目");
+  expect(details.contains(notice)).toBe(false);
+});
+
+test("补上关联一条都没补上、报告已落后：那一条写「已跑过补上关联」，不说「已补上」", async () => {
+  // 场景 B:报告落后,补连 0 条 → 读侧判成 handled / relinked,留在待处理。
+  openRows = [F1, { ...F5, status: "handled", handled_reason: "relinked" }];
+  vi.mocked(fetchKgAnalysis).mockResolvedValue(report({ state: { ...report().state, dirty: true } }));
+  renderPanel({ findingHandlers: { onRelink: vi.fn() }, relinkResult: { edgesAdded: 0, isolatedAfter: 1830 } });
+  await waitFor(() => expect(findingItems()).toHaveLength(2));
+  const f5 = findingByRule("没建立关联的内容");
+  expect(within(f5).getByText("已处理，更新后核验（已跑过补上关联）")).toBeInTheDocument();
+  expect(within(zone(/^待处理/)).queryByText(/已补上关联/)).toBeNull();
+  expect(within(zone(/^待处理/)).getByText("补上关联已跑完：新增 0 条关联，还剩 1,830 个没有关联的知识条目")).toBeInTheDocument();
 });
 
 test("别的图谱任务占着维护槽：补上关联禁用并就地说明", async () => {
@@ -1006,4 +1044,158 @@ test("待处理分页：按 offset 取下一页", async () => {
   expect(screen.getByRole("heading", { name: "待处理（45）", level: 3 })).toBeInTheDocument();
   fireEvent.click(within(zone(/^待处理/)).getByRole("button", { name: /下一页/ }));
   await waitFor(() => expect(vi.mocked(fetchKgFindings)).toHaveBeenLastCalledWith("nb-1", { zone: "open", limit: 20, offset: 20 }));
+});
+
+// ------------------------------------------------------------------ 评审跟进
+
+test("截断了却一条都没有：已通过区写「–」并说明没能检查完整，不画「✓」", async () => {
+  vi.mocked(fetchKgAnalysis).mockResolvedValue(report({
+    findings_summary: summary({
+      rules: {
+        F1: { status: "ran", sources_checked: 49000, sources_too_few_concepts: 0, total: 0, truncated: true },
+        F2: { status: "ran", sources_checked: 49000, total: 0, persisted: 0, truncated: true },
+        F3: { status: "ran", sources_checked: 49000, total: 1 },
+        F4: { status: "ran", canonicals_checked: 9400, groups_decided_apart: 0, total: 1 },
+        F5: { status: "ran", objects_checked: 41713, total: 1 },
+      },
+    }),
+  }));
+  openRows = [F3, F4, F5];
+  renderPanel();
+  await waitFor(() => expect(findingItems()).toHaveLength(3));
+  const passed = zone("已通过");
+  const lines = Array.from(passed.querySelectorAll(".kg-findings-rule-line")).map((line) => line.textContent);
+  expect(lines).toContain("–疑似内容错配：没能检查完整，这次没发现不代表没有");
+  expect(lines).toContain("–疑似重复导入：没能检查完整，这次没发现不代表没有");
+  expect(lines.some((line) => line?.startsWith("✓没发现内容错配") || line?.startsWith("✓没发现重复导入"))).toBe(false);
+  // 待处理区同时说没检查完整——两处说的是同一件事,不再一处打勾一处说没查完。
+  expect(within(zone(/^待处理/)).getByText("疑似重复导入没能检查完整，列出的不是全部")).toBeInTheDocument();
+});
+
+test("一定为空的区不发请求：没有标为正常的问题、账本里没有 F4 且补上关联没跑过时，只取待处理那一页", async () => {
+  vi.mocked(fetchKgAnalysis).mockResolvedValue(report({
+    findings_summary: summary({ counts: { by_rule: { F1: 1, F2: 1, F3: 1, F5: 1 }, dismissed: 0 } }),
+  }));
+  openRows = [F1, F2, F3, F5];
+  renderPanel();
+  await waitFor(() => expect(findingItems()).toHaveLength(4));
+  const zones = vi.mocked(fetchKgFindings).mock.calls.map(([, options]) => options?.zone);
+  expect(zones).not.toContain("passed");
+  expect(zones).not.toContain("dismissed");
+  expect(zones).toContain("open");
+});
+
+test("标为正常之后总览也重取：豁免数从 0 变成 1，「已标为正常」那一页这才去取", async () => {
+  vi.mocked(fetchKgAnalysis).mockResolvedValue(report({
+    findings_summary: summary({ counts: { by_rule: { F1: 1, F2: 1, F3: 1, F5: 1 }, dismissed: 0 } }),
+  }));
+  openRows = [F1, F2, F3, F5];
+  renderPanel();
+  await waitFor(() => expect(findingItems()).toHaveLength(4));
+  expect(vi.mocked(fetchKgFindings).mock.calls.some(([, options]) => options?.zone === "dismissed")).toBe(false);
+  vi.mocked(fetchKgAnalysis).mockResolvedValue(report({
+    findings_summary: summary({ counts: { by_rule: { F1: 1, F2: 1, F3: 1, F5: 1 }, dismissed: 1 } }),
+  }));
+  openRows = [F2, F3, F5];
+  fireEvent.click(within(findingByRule("疑似内容错配")).getByRole("button", { name: "标为正常" }));
+  await waitFor(() => expect(vi.mocked(fetchKgFindings).mock.calls.some(([, options]) => options?.zone === "dismissed")).toBe(true));
+  await waitFor(() => expect(within(zone("已通过")).getByText(/已标为正常：疑似内容错配 · Titans\.pdf/)).toBeInTheDocument());
+});
+
+test("问题页重取失败：上一次读到的列表原样留着，就地说一句没能刷新", async () => {
+  const view = renderPanel({ findingsRevision: "1|0" });
+  await ready();
+  vi.mocked(fetchKgFindings).mockRejectedValue(new Error("flaky"));
+  view.rerender(
+    <KgAnalysisView notebookId="nb-1" onClose={() => undefined} canAnalyze onAnalyze={() => undefined} findingsRevision="2|0" />,
+  );
+  await waitFor(() => expect(within(zone(/^待处理/)).getByText("问题清单没能刷新，下面是上一次读到的内容")).toBeInTheDocument());
+  expect(findingItems()).toHaveLength(5);
+  expect(within(zone(/^待处理/)).queryByRole("alert")).toBeNull();
+  // 下一次取到了:提示消失。
+  vi.mocked(fetchKgFindings).mockImplementation(async (_nb, options) => {
+    const zoneName = options?.zone ?? "open";
+    if (zoneName === "passed") return page("passed", [DECIDED]);
+    if (zoneName === "dismissed") return page("dismissed", [DISMISSED]);
+    return page("open", openRows);
+  });
+  view.rerender(
+    <KgAnalysisView notebookId="nb-1" onClose={() => undefined} canAnalyze onAnalyze={() => undefined} findingsRevision="3|0" />,
+  );
+  await waitFor(() => expect(within(zone(/^待处理/)).queryByText("问题清单没能刷新，下面是上一次读到的内容")).toBeNull());
+});
+
+test("对比整体不可比时，仍可比的规则各写各的计数", async () => {
+  vi.mocked(fetchKgAnalysis).mockResolvedValue(report({
+    findings_summary: summary({
+      comparison: {
+        previous_built_at_seq: 120, previous_built_at_cluster_seq: 6, comparable: false, reason: "truncated_or_not_run",
+        resolved: null, persisting: null, new: null,
+        resolved_samples: [{ rule_id: "F3", subject_kind: "source", subject_key: "s", subject_label: "Minitron.pdf", impact_objects: 9 }],
+        by_rule: {
+          F1: { comparable: false }, F2: { comparable: false },
+          F3: { comparable: true, resolved: 1, persisting: 2, new: 0 },
+        },
+      },
+    }),
+  }));
+  renderPanel();
+  await ready();
+  const head = zone("报告状态");
+  expect(within(head).getByText("上次或这次有规则没能完整检查，本次不与上次比较")).toBeInTheDocument();
+  expect(within(head).getByText("疑似解析残缺：1 条已消失 · 2 条仍在 · 0 条新增")).toBeInTheDocument();
+  expect(within(head).getByText("已消失：Minitron.pdf")).toBeInTheDocument();
+});
+
+test("「已标为正常」停在已经不存在的那一页时退回上一页（撤销第 2 页的最后一条之后）", async () => {
+  let total = 21;
+  const marked = (count: number, from: number) => Array.from({ length: count }, (_, index) => ({
+    ...DISMISSED,
+    subject: { kind: "source", key: `src-m${from + index}`, label: `标过 ${from + index}.pdf` },
+  }));
+  vi.mocked(fetchKgFindings).mockImplementation(async (_nb, options) => {
+    const zoneName = options?.zone ?? "open";
+    const offset = options?.offset ?? 0;
+    if (zoneName === "open") return page("open", openRows);
+    if (zoneName === "passed") return page("passed", [DECIDED]);
+    const rows = offset === 0 ? marked(Math.min(20, total), 1) : marked(Math.max(0, total - 20), 21);
+    return page("dismissed", rows, { offset, total, returned: rows.length, has_more: offset + 20 < total });
+  });
+  renderPanel();
+  await ready();
+  const pager = () => zone("已通过").querySelector('[aria-label="已标为正常的分页"]') as HTMLElement | null;
+  await waitFor(() => expect(pager()).not.toBeNull());
+  fireEvent.click(within(pager()!).getByRole("button", { name: /下一页/ }));
+  await waitFor(() => expect(within(zone("已通过")).getByText(/标过 21\.pdf/)).toBeInTheDocument());
+  total = 20;
+  fireEvent.click(within(zone("已通过")).getByRole("button", { name: "撤销" }));
+  // 第 2 页空了:退回第 1 页,而不是留一页空白。
+  await waitFor(() => expect(within(zone("已通过")).getByText(/标过 20\.pdf/)).toBeInTheDocument());
+  const rows = Array.from(zone("已通过").querySelectorAll(".kg-findings-passed-row")).map((row) => row.textContent ?? "");
+  expect(rows.some((row) => row.includes("标过 21.pdf"))).toBe(false);
+});
+
+test("疑似重复导入的两份同名来源：按钮组名与读屏名带上对象数，分得开", async () => {
+  openRows = [{
+    ...F2,
+    subject: { kind: "source_pair", key: "src-b|src-c", label: "Mamba2.pdf ⇄ Mamba2.pdf" },
+    evidence: {
+      ...F2.evidence,
+      sources: [
+        { source_id: "src-b", label: "Mamba2.pdf", objects: 300, keep: true },
+        { source_id: "src-c", label: "Mamba2.pdf", objects: 280, keep: false },
+      ],
+    },
+    live_sources: [live("src-b", "Mamba2.pdf"), live("src-c", "Mamba2.pdf")],
+  }];
+  renderPanel({ findingHandlers: { onOpenSource: vi.fn(), onDeleteSource: vi.fn() } });
+  await waitFor(() => expect(findingItems()).toHaveLength(1));
+  const f2 = findingItems()[0];
+  const groups = Array.from(f2.querySelectorAll<HTMLElement>(".kg-finding-source-group"));
+  expect(groups.map((group) => group.querySelector(".kg-finding-source-name")?.textContent)).toEqual([
+    "Mamba2.pdf（300 个知识对象）",
+    "Mamba2.pdf（280 个知识对象）",
+  ]);
+  expect(within(f2).getByRole("button", { name: "打开来源核对：Mamba2.pdf（300 个知识对象）" })).toBeInTheDocument();
+  expect(within(f2).getByRole("button", { name: "删除来源：Mamba2.pdf（280 个知识对象）" })).toBeInTheDocument();
 });

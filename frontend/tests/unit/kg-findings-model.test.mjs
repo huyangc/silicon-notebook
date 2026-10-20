@@ -27,6 +27,7 @@ import {
   findingsComparisonView,
   findingsReportLine,
   findingSubjectText,
+  findingsZonesToFetch,
   mergeRulesChanged,
   partitionFindings,
   passedRowText,
@@ -225,6 +226,7 @@ test("对比行:可比时三个数;不可比时写原因;认不出的原因说�
   assert.deepEqual(comparable, {
     comparable: true,
     text: "上次更新后：2 条已消失 · 4 条仍在 · 1 条新增",
+    ruleLines: [],
     resolvedNames: ["Titans.pdf"],
   });
   const reasons = {
@@ -238,9 +240,34 @@ test("对比行:可比时三个数;不可比时写原因;认不出的原因说�
       previous_built_at_seq: null, previous_built_at_cluster_seq: null, comparable: false, reason,
       resolved: null, persisting: null, new: null, resolved_samples: [], by_rule: {},
     });
-    assert.deepEqual(view, { comparable: false, text, resolvedNames: [] }, reason);
+    assert.deepEqual(view, { comparable: false, text, ruleLines: [], resolvedNames: [] }, reason);
   }
   assert.equal(findingsComparisonView(null), null);
+});
+
+test("对比行:整体不可比时,仍可比的规则各写各的计数(大库只要一条规则触顶就整体不可比)", () => {
+  const view = findingsComparisonView({
+    previous_built_at_seq: 120, previous_built_at_cluster_seq: 6, comparable: false, reason: "truncated_or_not_run",
+    resolved: null, persisting: null, new: null,
+    resolved_samples: [{ rule_id: "F3", subject_kind: "source", subject_key: "s", subject_label: "Minitron.pdf", impact_objects: 9 }],
+    by_rule: {
+      F1: { comparable: false },
+      F2: { comparable: false },
+      F3: { comparable: true, resolved: 1, persisting: 2, new: 0 },
+      F4: { comparable: true, resolved: 0, persisting: 1200, new: 3 },
+      F5: { comparable: true, resolved: 0 },
+      S9: { comparable: true, resolved: 1, persisting: 1, new: 1 },
+    },
+  });
+  assert.deepEqual(view, {
+    comparable: false,
+    text: "上次或这次有规则没能完整检查，本次不与上次比较",
+    ruleLines: [
+      "疑似解析残缺：1 条已消失 · 2 条仍在 · 0 条新增",
+      "疑似没合并的同名概念：0 条已消失 · 1,200 条仍在 · 3 条新增",
+    ],
+    resolvedNames: ["Minitron.pdf"],
+  });
 });
 
 test("报告落后时每条问题标「基于变更 #N」,N 取页级 built_at;一致时不标", () => {
@@ -296,7 +323,8 @@ test("已处理:写「已处理，更新后核验」,带上读侧认出的原因
     source_processing: "已处理，更新后核验（来源正在解析）",
     source_reprocessed: "已处理，更新后核验（来源已重新解析）",
     merge_confirmed: "已处理，更新后核验（已确认合并）",
-    relinked: "已处理，更新后核验（已补上关联）",
+    // 补上关联跑过(哪怕一条都没补上)就是这一档:说「已跑过」,不说「已补上」。
+    relinked: "已处理，更新后核验（已跑过补上关联）",
     something_new: "已处理，更新后核验",
   };
   for (const [reason, text] of Object.entries(reasons)) {
@@ -574,6 +602,70 @@ test("已通过:✓ 检查过没发现、– 没法检查、– 部分没判断�
     { ruleId: "F5", state: "clean", text: "没发现没建立关联的内容（检查了 41,713 个知识对象）" },
   ]);
   assert.deepEqual(passedRuleLines(summary({ present: false })), []);
+});
+
+test("已通过:截断了却一条都没有不画成「✓」,归「–」并写明没能检查完整;有问题的截断规则不出这一行", () => {
+  const lines = passedRuleLines(summary({
+    rules: {
+      F1: { status: "ran", sources_checked: 49000, sources_too_few_concepts: 0, total: 0, truncated: true },
+      F2: { status: "ran", sources_checked: 49000, total: 0, truncated: true },
+      F3: { status: "ran", sources_checked: 49000, total: 3, persisted: 3, truncated: true },
+      F5: { status: "ran", objects_checked: 41713, total: 0, truncated: false },
+    },
+  }));
+  assert.deepEqual(lines, [
+    { ruleId: "F1", state: "partial", text: "疑似内容错配：没能检查完整，这次没发现不代表没有" },
+    { ruleId: "F2", state: "partial", text: "疑似重复导入：没能检查完整，这次没发现不代表没有" },
+    { ruleId: "F5", state: "clean", text: "没发现没建立关联的内容（检查了 41,713 个知识对象）" },
+  ]);
+  assert.ok(lines.every((line) => !(line.state === "clean" && (line.ruleId === "F1" || line.ruleId === "F2"))));
+});
+
+test("已通过区的两份清单只在可能非空时才取:豁免数 > 0;账本有 F4,或有 F5 且补上关联已经跑过", () => {
+  const counts = (byRule, dismissed = 0) => ({ by_rule: byRule, dismissed });
+  const spent = { attempted: true, at_kg_seq: 81, at: "", may_change: false };
+  assert.deepEqual(findingsZonesToFetch(summary({ counts: counts({ F1: 3 }) })), { passed: false, dismissed: false });
+  assert.deepEqual(findingsZonesToFetch(summary({ counts: counts({ F1: 3 }, 2) })), { passed: false, dismissed: true });
+  assert.deepEqual(findingsZonesToFetch(summary({ counts: counts({ F4: 1 }) })), { passed: true, dismissed: false });
+  assert.deepEqual(findingsZonesToFetch(summary({ counts: counts({ F5: 1 }), relink: spent })), { passed: true, dismissed: false });
+  // 补上关联还可能改变结果 / 从没跑过:F5 在待处理,passed 那一页一定是空的。
+  for (const relink of [null, { ...spent, may_change: true }, { attempted: false, at_kg_seq: null, at: null, may_change: true }]) {
+    assert.equal(findingsZonesToFetch(summary({ counts: counts({ F5: 1 }), relink })).passed, false, JSON.stringify(relink));
+  }
+  // 跑过且无新内容,但账本里没有 F5:同样是空的。
+  assert.equal(findingsZonesToFetch(summary({ counts: counts({ F1: 1 }), relink: spent })).passed, false);
+  // 清单不在场 / 没有计数:都不取。
+  assert.deepEqual(findingsZonesToFetch(summary({ present: false, counts: counts({ F4: 1 }, 1) })), { passed: false, dismissed: false });
+  assert.deepEqual(findingsZonesToFetch(summary({ counts: null })), { passed: false, dismissed: false });
+  assert.deepEqual(findingsZonesToFetch(null), { passed: false, dismissed: false });
+});
+
+test("动作:两份同名来源的按钮组名带上规模,规模也相同就写第几份;确认框用的标题不变", () => {
+  const f2 = finding({
+    rule_id: "F2", severity: "medium", subject: { kind: "source_pair", key: "a|b", label: "Mamba2.pdf ⇄ Mamba2.pdf" },
+    subject_refs: ["a", "b"],
+    evidence: { sources: [{ source_id: "a", label: "Mamba2.pdf", objects: 300, keep: true }, { source_id: "b", label: "Mamba2.pdf", objects: 280, keep: false }] },
+    actions: [{ kind: "delete_source", capability: "sources:write", source_id: "b" }],
+    live_sources: [live("a", "Mamba2.pdf"), live("b", "Mamba2.pdf")],
+  });
+  const plan = findingActionPlan(f2, CONTEXT);
+  assert.deepEqual(plan.buttons.map((spec) => `${spec.kind}:${spec.label}`), [
+    "open_source:Mamba2.pdf（300 个知识对象）",
+    "open_source:Mamba2.pdf（280 个知识对象）",
+    "delete_source:Mamba2.pdf（280 个知识对象）",
+  ]);
+  assert.ok(plan.buttons.every((spec) => spec.title === "Mamba2.pdf"));
+  const sameSize = findingActionPlan({
+    ...f2,
+    evidence: { sources: [{ source_id: "a", label: "Mamba2.pdf", objects: 280, keep: true }, { source_id: "b", label: "Mamba2.pdf", objects: 280, keep: false }] },
+  }, CONTEXT);
+  assert.deepEqual([...new Set(sameSize.buttons.map((spec) => spec.label))], [
+    "Mamba2.pdf（第 1 份，280 个知识对象）",
+    "Mamba2.pdf（第 2 份，280 个知识对象）",
+  ]);
+  // 标题不同:组名就是标题本身。
+  const distinct = findingActionPlan({ ...f2, live_sources: [live("a", "A.pdf"), live("b", "B.pdf")] }, CONTEXT);
+  assert.deepEqual([...new Set(distinct.buttons.map((spec) => spec.label))], ["A.pdf", "B.pdf"]);
 });
 
 test("已通过:F4 用户判定过不是同一个的组数(groups_decided_apart)单独一行", () => {

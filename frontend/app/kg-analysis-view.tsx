@@ -52,6 +52,7 @@ import {
   type KgAnalysisReport,
   type KgArtifactView,
   type KgFindingRow,
+  type KgFindingsPage,
   type KgSourceOrder,
   type KgSourceProfilePage,
 } from "./kg-analysis-api";
@@ -79,12 +80,14 @@ import {
   convergenceTable,
   countText,
   findingRuleLabel,
+  findingsZonesToFetch,
   findingSubjectText,
   formatCount,
   formatPercent,
   freshnessNote,
   largestClusters,
   relationProvenance,
+  relinkResultText,
   reportHeadline,
   SOURCE_ORDER_LABEL,
   structureSignal,
@@ -195,6 +198,12 @@ function EmptyPayload({ text }: { text: string }) {
   return <p className="kg-analysis-empty">{text}</p>;
 }
 
+/** 停在已经不存在的那一页上(这一页一条都没有、前面还有)时,最后一页的偏移;否则 null。 */
+function lastPageOffset(page: KgFindingsPage | null, pageSize: number): number | null {
+  if (!page || !page.present || page.returned > 0 || page.offset <= 0) return null;
+  return Math.max(0, Math.floor(Math.max(0, page.total - 1) / pageSize) * pageSize);
+}
+
 export function KgAnalysisView({
   notebookId,
   onClose,
@@ -262,6 +271,8 @@ export function KgAnalysisView({
   const [actionBump, setActionBump] = useState(0);
   const [pendingNotice, setPendingNotice] = useState("");
   const [passedNotice, setPassedNotice] = useState("");
+  // 诊断数据默认收起;来源画像表(它要单独发一次分页请求)等展开了再取。
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
 
   // 换库时清掉**笔记本作用域**的那几份 state。
   //
@@ -302,20 +313,33 @@ export function KgAnalysisView({
   }
 
   const findingsToken = `${reloadToken}|${findingsRevision}|${findingsBump}`;
+  // 已通过区的两份清单只在总览说明它们可能非空时才取(见 findingsZonesToFetch)。总览要等
+  // 自己的请求回来,所以这两页比待处理晚一拍——它们在页面最下方,读者先看到的是待处理。
+  const zonesToFetch = findingsZonesToFetch(report?.findings_summary ?? null);
   const openFindings = useFindingsPage(notebookId, "open", FINDINGS_PAGE_SIZE, openOffset, findingsToken);
-  const passedFindings = useFindingsPage(notebookId, "passed", PASSED_PAGE_SIZE, passedOffset, findingsToken);
+  const passedFindings = useFindingsPage(
+    notebookId, "passed", PASSED_PAGE_SIZE, passedOffset, findingsToken, zonesToFetch.passed,
+  );
   const dismissedFindings = useFindingsPage(
-    notebookId, "dismissed", PASSED_PAGE_SIZE, dismissedOffset, findingsToken,
+    notebookId, "dismissed", PASSED_PAGE_SIZE, dismissedOffset, findingsToken, zonesToFetch.dismissed,
   );
   // F5「补上关联已经跑过」随 passed 那一页返回,界面放进诊断数据(§4.5),不在「已通过」列出。
   const relinkSpent = useRelinkSpentRow(passedFindings);
 
   // 处置之后这一页可能变短:停在已经不存在的那一页上时退回最后一页,而不是显示一页空白。
+  // 三个区同一条规则——撤销第 2 页的最后一条「标为正常」之后也要回到第 1 页。
   useEffect(() => {
-    const page = openFindings.page;
-    if (!page || !page.present || page.returned > 0 || page.offset <= 0) return;
-    setOpenOffset(Math.max(0, Math.floor(Math.max(0, page.total - 1) / FINDINGS_PAGE_SIZE) * FINDINGS_PAGE_SIZE));
+    const offset = lastPageOffset(openFindings.page, FINDINGS_PAGE_SIZE);
+    if (offset !== null) setOpenOffset(offset);
   }, [openFindings.page]);
+  useEffect(() => {
+    const offset = lastPageOffset(passedFindings.page, PASSED_PAGE_SIZE);
+    if (offset !== null) setPassedOffset(offset);
+  }, [passedFindings.page]);
+  useEffect(() => {
+    const offset = lastPageOffset(dismissedFindings.page, PASSED_PAGE_SIZE);
+    if (offset !== null) setDismissedOffset(offset);
+  }, [dismissedFindings.page]);
 
   // 区级提示(「已标为正常…」)按自己的计时器消失。
   const noticeTimers = useRef<{ pending: number | null; passed: number | null }>({ pending: null, passed: null });
@@ -336,7 +360,16 @@ export function KgAnalysisView({
     }, FINDINGS_NOTICE_HOLD_MS);
   }, []);
 
-  const refetchFindings = useCallback(() => setFindingsBump((value) => value + 1), []);
+  // 补上关联跑完:结果写在待处理区的区级提示里,按自己的计时器消失。按钮旁已经没有地方写
+  // ——那一条此刻要么移进了诊断数据(补上关联已经跑过、之后没有新内容),要么成了「已处理，
+  // 更新后核验」、没有按钮了;写在折叠起来的诊断数据里等于没写。
+  const shownRelinkResult = useRef<KgRelinkResult | null>(null);
+  useEffect(() => {
+    if (!relinkResult || relinkResult === shownRelinkResult.current) return;
+    shownRelinkResult.current = relinkResult;
+    showNotice("pending", `补上关联已跑完：${relinkResultText(relinkResult)}`);
+  }, [relinkResult, showNotice]);
+
   // 面板里的处置(删除 / 重新解析)回报完成:问题页与总览都重取——总览里的 dirty 与新鲜度
   // 决定「更新分析」此刻该不该可点。
   const afterAction = useCallback(() => {
@@ -344,19 +377,20 @@ export function KgAnalysisView({
     setActionBump((value) => value + 1);
   }, []);
 
-  // 「标为正常」与「撤销」:写完重取三页。这一条从待处理里移走、出现在已通过里(或反过来),
-  // 区级提示说清它去了哪里——按钮所在的那一行已经不在原处了。
+  // 「标为正常」与「撤销」:写完重取问题页与总览(总览里的 `counts.dismissed` 决定「已标为
+  // 正常」那一页要不要取)。这一条从待处理里移走、出现在已通过里(或反过来),区级提示说清
+  // 它去了哪里——按钮所在的那一行已经不在原处了。
   const dismissFinding = useCallback(async (row: KgFindingRow) => {
     await dismissKgFinding(notebookId, row.rule_id, row.subject.key);
-    refetchFindings();
+    afterAction();
     showNotice("pending", `已标为正常：${findingRuleLabel(row.rule_id)} · ${findingSubjectText(row)}。可以在下方「已通过」里撤销。`);
-  }, [notebookId, refetchFindings, showNotice]);
+  }, [notebookId, afterAction, showNotice]);
 
   const undismissFinding = useCallback(async (row: KgFindingRow) => {
     await undismissKgFinding(notebookId, row.rule_id, row.subject.key);
-    refetchFindings();
+    afterAction();
     showNotice("passed", `已撤销：${findingRuleLabel(row.rule_id)} · ${findingSubjectText(row)} 回到了待处理。`);
-  }, [notebookId, refetchFindings, showNotice]);
+  }, [notebookId, afterAction, showNotice]);
 
   // 总览的每一次请求都领一个序号,只有最新的那一次能落地:下面「静默重取」与这里的
   // 显式读取可能同时在飞,晚到的旧回执不能盖掉新的。
@@ -425,6 +459,7 @@ export function KgAnalysisView({
   }, [notebookId, overviewToken]);
 
   useEffect(() => {
+    if (!diagnosticsOpen) return;
     let cancelled = false;
     setSourcesLoading(true);
     setSourcesError("");
@@ -444,7 +479,7 @@ export function KgAnalysisView({
     return () => {
       cancelled = true;
     };
-  }, [notebookId, offset, order, reloadToken]);
+  }, [notebookId, offset, order, reloadToken, diagnosticsOpen]);
 
   const refresh = useCallback(() => {
     setOffset(0);
@@ -496,7 +531,6 @@ export function KgAnalysisView({
     // 补上关联与重新合并 / 整理 / 删除知识图谱共用一个维护槽(`analysisBlocked` 里含 relinking,
     // 那一档由 `relinking` 自己说「补连中…」)。
     maintenanceBusy: analysisRunning || analysisBlocked,
-    relinkResult,
     pendingMerges,
   };
 
@@ -558,7 +592,11 @@ export function KgAnalysisView({
                   <FindingsDevZone report={report} />
                   {/* 诊断数据:原有的全部统计区块原样保留、逐指标的新鲜度标注不变,只是默认收起
                       ——它们是复核用的原始数字,不是要读者先读的结论(设计 §3.4)。 */}
-                  <details className="kg-findings-diagnostics">
+                  <details
+                    className="kg-findings-diagnostics"
+                    open={diagnosticsOpen}
+                    onToggle={(event) => setDiagnosticsOpen(event.currentTarget.open)}
+                  >
                     <summary>
                       <span className="kg-findings-diagnostics-title">诊断数据</span>
                       <span className="kg-findings-diagnostics-hint">

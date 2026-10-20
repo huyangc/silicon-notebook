@@ -12312,6 +12312,15 @@ button.tag:hover {
   color: var(--muted);
 }
 
+/* 整体不可比时仍可比的那几条规则各自的计数。 */
+.kg-findings-compare-rules {
+  margin: 2px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
 .kg-findings-readiness {
   display: flex;
   flex-wrap: wrap;
@@ -12348,6 +12357,13 @@ button.tag:hover {
   border-radius: 8px;
   background: var(--soft);
   font-size: 13px;
+}
+
+/* 重取失败:上一次读到的那一页原样留着,这里就地说一句。 */
+.kg-findings-refresh-failed {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--warning);
 }
 
 .kg-findings-list {

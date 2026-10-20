@@ -46,7 +46,6 @@ import {
   partitionFindings,
   passedRowText,
   passedRuleLines,
-  relinkResultText,
   relinkSpentText,
   truncatedRuleNotes,
   type FindingButtonSpec,
@@ -56,6 +55,7 @@ import type { PendingMerge } from "./workspace-model";
 /** 结果文字在按钮旁停留多久(与「删除知识图谱」的结果同一量级)。 */
 const FINDING_RESULT_HOLD_MS = 8000;
 
+/** 补上关联跑完时它自己返回的计数;结果写在待处理区的区级提示里(kg-analysis-view.tsx)。 */
 export type KgRelinkResult = { edgesAdded: number; isolatedAfter: number };
 
 /** 删除来源与重新解析都先经确认框;确认之后的进展由 page 回报给这一行。 */
@@ -76,7 +76,7 @@ export type KgFindingHandlers = {
   onReparseSource?: (target: KgSourceActionTarget, report: (phase: KgReparsePhase) => void) => void;
   /** 跳到知识图谱视图「待确认合并」里的那一对。 */
   onReviewMerge?: (mergeId: string) => void;
-  /** 「补上关联」(后台任务,结果由 relinkResult 回来)。 */
+  /** 「补上关联」(后台任务;跑完的结果由面板写在待处理区的区级提示里)。 */
   onRelink?: () => void;
 };
 
@@ -87,7 +87,6 @@ export type KgFindingsActionState = {
   relinking: boolean;
   /** 维护槽被占(重新合并 / 整理 / 删除知识图谱在跑):补上关联撞同一把锁,禁用。 */
   maintenanceBusy: boolean;
-  relinkResult: KgRelinkResult | null;
   pendingMerges: readonly PendingMerge[];
 };
 
@@ -129,8 +128,13 @@ function useMountedRef() {
 export type FindingsPageState = {
   page: KgFindingsPage | null;
   loading: boolean;
-  /** 取数失败时给用户看的那句话(已经过 toUserMessage);没有失败时为空串。 */
+  /** 第一次就没取到时给用户看的那句话(已经过 toUserMessage);没有失败时为空串。 */
   failure: string;
+  /**
+   * 屏上已有一页、重取却失败了:那一页原样保留,只在区里就地说一句——与总览的静默重取
+   * 同一个理由,来源解析状态每推进一步都会重取,一次瞬时失败不该把整列换成一句错误。
+   */
+  refreshFailure: string;
   /**
    * `page` 是哪一代取回来的(库 + 失效令牌)。令牌变了、新一页还没回来时,屏上仍是上一代的
    * 那一页,这里也仍是上一代——跨页记住的东西按它对齐,不会拿旧页的内容冒充新一代。
@@ -138,10 +142,15 @@ export type FindingsPageState = {
   generation: string;
 };
 
+const FINDINGS_REFRESH_FAILED = "问题清单没能刷新，下面是上一次读到的内容";
+
 /**
  * 问题清单的一页。`token` 是失效令牌:处置完成(来源删了、重新解析排上了、补上关联跑完、
  * 合并有了决定)或标为正常之后它会变,这一页就按当前偏移重取——「已处理」是读侧派生的,
  * 不靠前端记住「我刚点过」。
+ *
+ * `enabled` 为假时不发请求、也不留旧页:总览的计数已经说明这一区一定是空的(没有标为正常
+ * 的问题、没有可能进「已通过」的行),后端每页都要整读明细,不该为一个空区白读一遍。
  *
  * 换库时在渲染期当场清空(与 KgAnalysisView 同一个理由:effect 要到提交之后才跑,中间那一帧
  * 会拿上一个库的问题渲染出一份完整清单)。
@@ -152,20 +161,28 @@ export function useFindingsPage(
   limit: number,
   offset: number,
   token: string,
+  enabled = true,
 ): FindingsPageState {
   const [page, setPage] = useState<KgFindingsPage | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(enabled);
   const [failure, setFailure] = useState("");
+  const [refreshFailure, setRefreshFailure] = useState("");
   const [generation, setGeneration] = useState("");
   const [shownNotebook, setShownNotebook] = useState(notebookId);
-  if (shownNotebook !== notebookId) {
+  if (shownNotebook !== notebookId || (!enabled && (page !== null || loading || failure || refreshFailure))) {
     setShownNotebook(notebookId);
     setPage(null);
     setGeneration("");
-    setLoading(true);
+    setLoading(enabled);
     setFailure("");
+    setRefreshFailure("");
   }
+  // 重取失败时要知道屏上有没有一页可留:读 ref,不把 page 放进 effect 的依赖(那会让每次
+  // 取回都再取一次)。
+  const pageRef = useRef(page);
+  pageRef.current = page;
   useEffect(() => {
+    if (!enabled) return;
     let cancelled = false;
     setLoading(true);
     setFailure("");
@@ -174,9 +191,14 @@ export function useFindingsPage(
         if (cancelled) return;
         setPage(data);
         setGeneration(`${notebookId}|${token}`);
+        setRefreshFailure("");
       })
       .catch((caught: unknown) => {
         if (cancelled) return;
+        if (pageRef.current) {
+          setRefreshFailure(toUserMessage(caught, FINDINGS_REFRESH_FAILED));
+          return;
+        }
         setPage(null);
         setGeneration("");
         setFailure(toUserMessage(caught, "问题清单暂时打不开，请稍后重试"));
@@ -187,8 +209,8 @@ export function useFindingsPage(
     return () => {
       cancelled = true;
     };
-  }, [notebookId, zone, limit, offset, token]);
-  return { page, loading, failure, generation };
+  }, [notebookId, zone, limit, offset, token, enabled]);
+  return { page, loading, failure, refreshFailure, generation };
 }
 
 /** 「补上关联已经跑过」那一行在 `passed` 列表里的位置(它只有一条)。 */
@@ -317,6 +339,11 @@ export function FindingsHeader({
               {comparison.text}
             </p>
           ) : null}
+          {comparison && comparison.ruleLines.length > 0 ? (
+            <ul className="kg-findings-compare-rules">
+              {comparison.ruleLines.map((line) => <li key={line}>{line}</li>)}
+            </ul>
+          ) : null}
           {comparison && comparison.resolvedNames.length > 0 ? (
             <p className="kg-findings-resolved">
               已消失：{comparison.resolvedNames.join("、")}
@@ -376,7 +403,7 @@ function buttonLabel(spec: FindingButtonSpec, busy: string | null, deleting: boo
 function buttonAria(spec: FindingButtonSpec, text: string, multiSource: boolean): string | undefined {
   if (!multiSource) return undefined;
   if (spec.kind === "open_source" || spec.kind === "delete_source" || spec.kind === "reparse_source") {
-    return `${text.replace(/…$/, "")}：${spec.title}`;
+    return `${text.replace(/…$/, "")}：${spec.label}`;
   }
   return undefined;
 }
@@ -423,7 +450,7 @@ function FindingRowView({
     const sourceId = multiSource && "sourceId" in spec ? spec.sourceId : "";
     let group = groups.find((item) => item.key === sourceId);
     if (!group) {
-      group = { key: sourceId, title: sourceId && "title" in spec ? spec.title : "", specs: [] };
+      group = { key: sourceId, title: sourceId && "label" in spec ? spec.label : "", specs: [] };
       groups.push(group);
     }
     group.specs.push(spec);
@@ -531,7 +558,6 @@ function FindingRowView({
 
   // 「标为正常」只给可编辑成员的待处理问题(已处理的等更新后核验,不再标)。
   const canDismiss = state.canWrite && row.status === "open";
-  const relinkLine = row.rule_id === "F5" && state.relinkResult ? relinkResultText(state.relinkResult) : "";
   const relinkBlocked = row.rule_id === "F5" && state.maintenanceBusy && !state.relinking
     && visible.some((spec) => spec.kind === "relink");
 
@@ -563,7 +589,7 @@ function FindingRowView({
       {evidence.notes.map((note) => <p key={note} className="kg-finding-note">{note}</p>)}
       {handledText ? <p className="kg-finding-handled">{handledText}</p> : null}
       {plan.blocked.map((text) => <p key={text} className="kg-finding-blocked">{text}</p>)}
-      {visible.length > 0 || canDismiss || result || relinkLine ? (
+      {visible.length > 0 || canDismiss || result ? (
         <div className="kg-finding-actions">
           {groups.map((group) => {
             const buttons = group.specs.map((spec) => {
@@ -593,7 +619,6 @@ function FindingRowView({
           })}
           {plan.notes.map((note) => <span key={note} className="kg-finding-action-note">{note}</span>)}
           {relinkBlocked ? <span className="kg-finding-action-note" role="status">其它图谱任务进行中</span> : null}
-          {relinkLine ? <span className="kg-finding-result is-ok" role="status">{relinkLine}</span> : null}
           {result ? <span className={`kg-finding-result is-${result.tone}`} role="status">{result.text}</span> : null}
           {canDismiss ? (
             <button
@@ -633,7 +658,7 @@ export function FindingsPendingZone({
   onDismiss: (row: KgFindingRow) => Promise<void>;
   onChanged: () => void;
 }) {
-  const { page, loading, failure } = pageState;
+  const { page, loading, failure, refreshFailure } = pageState;
   const summary = report.findings_summary;
   // 待处理区 = open + handled(读侧已经按区给了;这里只按行自己的状态再挡一次)。
   const rows = page?.present
@@ -654,6 +679,7 @@ export function FindingsPendingZone({
         </p>
       </div>
       {notice ? <p className="kg-findings-notice" role="status">{notice}</p> : null}
+      {refreshFailure ? <p className="kg-findings-refresh-failed" role="status">{refreshFailure}</p> : null}
       {truncated.map((text) => <p key={text} className="kg-analysis-note">{text}</p>)}
       {failure ? (
         <p className="kg-analysis-error" role="alert">{failure}</p>
@@ -818,6 +844,7 @@ export function FindingsPassedZone({
   const decided = passed.page?.present ? partitionFindings(passed.page.rows).passed : [];
   const marked = dismissed.page?.present ? partitionFindings(dismissed.page.rows).dismissed : [];
   const failure = passed.failure || dismissed.failure;
+  const refreshFailure = passed.refreshFailure || dismissed.refreshFailure;
   const nothing = lines.length === 0 && decided.length === 0 && marked.length === 0;
   return (
     <section className="kg-analysis-block kg-findings-zone kg-findings-passed" aria-label="已通过">
@@ -863,6 +890,7 @@ export function FindingsPassedZone({
         <FindingsPager page={dismissed.page} loading={dismissed.loading} onOffset={onDismissedOffset} label="已标为正常的分页" />
       ) : null}
       {failure ? <p className="kg-analysis-error" role="alert">{failure}</p> : null}
+      {refreshFailure ? <p className="kg-findings-refresh-failed" role="status">{refreshFailure}</p> : null}
       {nothing && !failure ? (
         <p className="kg-analysis-empty">
           {summary.present
