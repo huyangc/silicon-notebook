@@ -42,6 +42,10 @@ def test_paged_write_matches_one_shot_row_for_row(repo):
     cases.check_paged_write_matches_one_shot(repo, postgres=False)
 
 
+def test_pass_b_reads_vectors_in_scratch_insertion_order(repo):
+    cases.check_pass_b_reads_vectors_in_scratch_insertion_order(repo, postgres=False)
+
+
 def test_rebuild_pages_and_a_lost_claim_stops_between_pages(repo, monkeypatch):
     cases.check_rebuild_pages_and_a_lost_claim_stops_between_pages(
         repo, postgres=False, monkeypatch=monkeypatch)

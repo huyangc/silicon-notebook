@@ -296,6 +296,8 @@ def test_scratch_statements_plan_by_key_in_every_statistics_state(
     # this data; a plan that does not deliver key order (fresh statistics: a
     # hash join under a Sort) would then write in hash order.
     assert " ".join(statements["insert"][0].split()).endswith("ORDER BY s.ordinal")
+    # Same for Pass B's vector read, whose order the float32 means depend on.
+    assert " ".join(statements["vectors"][0].split()).endswith("ORDER BY s.ordinal")
     with _explaining(postgres_database) as db:
         for generic in (False, True):
             plans = {name: _plan(db, s, p, generic=generic)
@@ -343,3 +345,16 @@ def test_scratch_statements_plan_by_key_in_every_statistics_state(
 
             for name in ("vectors", "evidence"):
                 _assert_no_unparameterized_inner_scratch((name,) + label, plans[name])
+
+            # Pass B's order is the scratch key: any Sort sorts by s.ordinal,
+            # and a plan the scratch index drives through nested loops needs
+            # none (before the read ordered by s.ordinal, every one of these
+            # plans ended in a Sort on k.ordinal).
+            vectors = plans["vectors"]
+            sorts = [n for n, _p in _nodes(vectors) if n.get("Node Type") == "Sort"]
+            assert all(n["Sort Key"] == ["s.ordinal"] for n in sorts), (label, sorts)
+            (driver,) = _scans(vectors, "kg_cluster_scratch")
+            hashed = [n for n, _p in _nodes(vectors) if n.get("Node Type") == "Hash Join"]
+            if driver.get("Index Name") == "idx_kg_cluster_scratch_nb_run_ordinal" \
+                    and not hashed:
+                assert sorts == [], (label, sorts)

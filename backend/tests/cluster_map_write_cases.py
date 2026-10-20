@@ -204,6 +204,30 @@ def check_paged_write_matches_one_shot(repo, *, postgres: bool) -> None:
                 db, nb, "concept", RUN, CREATED, 11, start=None, page_rows=0)
 
 
+def check_pass_b_reads_vectors_in_scratch_insertion_order(
+    repo, *, postgres: bool,
+) -> tuple[str, list]:
+    """Pass B's vector read returns this run's rows in scratch insertion
+    order -- the stream order Pass A2 wrote them in -- on a scratch whose keys
+    interleave with another run's and another notebook's. Float32 mean
+    accumulation is order-sensitive, so this order is what keeps the seed
+    representatives bit-for-bit stable. Returns the notebook and the rows for
+    a backend-specific comparison."""
+    nb, stream = _seed_world(repo)
+    p = _p(postgres)
+    store = repo._runtime.unified_kg
+    with repo._connect() as db:
+        embedded = {r["object_id"] for r in db.execute(
+            f"SELECT object_id FROM knowledge_embeddings WHERE notebook_id={p}",
+            (nb,)).fetchall()}
+        rows = [(r["seed"], bytes(r["vector"]))
+                for r in store.scratch_vector_rows(db, nb, RUN)]
+    assert len(embedded) == len(NAMES), "precondition: every object has a vector"
+    assert [seed for seed, _vector in rows] == [
+        name.lower() for oid, name in stream if oid in embedded]
+    return nb, rows
+
+
 def _published(repo, nb: str, *, postgres: bool) -> set:
     p = _p(postgres)
     with repo._connect() as db:
