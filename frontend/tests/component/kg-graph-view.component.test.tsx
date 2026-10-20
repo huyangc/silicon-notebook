@@ -296,6 +296,26 @@ test("待确认合并两侧显示概念名；某侧没有名字时回退到去�
 });
 
 
+test("只差写法的一对标「同名不同写法」；按含义找到的、或旧后端不带 kind 的不标", () => {
+  const spelling: PendingMerge = {
+    id: "m-1", canonical_a: "K-llama31", canonical_b: "K-llama3 1", score: 0.62,
+    status: "pending", name_a: "Llama 31", name_b: "Llama 3.1", kind: "spelling_variant",
+  };
+  const similar: PendingMerge = {
+    ...spelling, id: "m-2", canonical_b: "K-mamba", name_b: "Mamba", kind: "similarity",
+  };
+  const older: PendingMerge = { ...similar, id: "m-3", kind: undefined };
+  renderView({ kgGraph: graphView({ pendingMerges: [spelling, similar, older] }) });
+
+  const rows = Array.from(document.querySelectorAll(".kg-merge-row"));
+  const tags = rows.map((row) => row.querySelector(".kg-merge-kind")?.textContent ?? null);
+  expect(tags).toEqual(["同名不同写法", null, null]);
+  // 标记跟着那一行，内部代号不上屏
+  expect(within(rows[0] as HTMLElement).getByText("同名不同写法")).toBeTruthy();
+  expect(screen.queryByText(/spelling_variant/)).toBeNull();
+});
+
+
 test("只读工作区看不到图谱处理、自动判重与逐行合并决定", () => {
   const candidate: PendingMerge = { id: "m-1", canonical_a: "K-A", canonical_b: "K-B", score: 0.91, status: "pending" };
   renderView({

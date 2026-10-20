@@ -329,14 +329,35 @@ def seed_concept_v2(obj) -> str:
     return concept_seed_v2(obj.get("name", ""))
 
 
-def seed_fn_for_type(object_type: str, *, concept_seed_version: int):
+def concept_seed_in_space(name: str, version: int, override=frozenset()) -> str:
+    """The concept seed of ``name`` in seed space ``version`` with the
+    notebook's override keys (v1 seeds a decision recompute kept as
+    ``~v1:<seed>``), WITHOUT the per-batch acronym redirect — the shape the
+    object-level dedups compare (promotion into a public library), matched on
+    the un-aliased v1 seed like the bridge ids."""
+    if check_concept_seed_version(version) == 2 and override:
+        v1 = concept_seed_v1(name)
+        if v1 and v1 in override:
+            return OVERRIDE_SEED_PREFIX + v1
+    return concept_seed_of(name, version)
+
+
+def seed_fn_for_type(object_type: str, *, concept_seed_version: int,
+                     override=frozenset()):
     """The seed function of a KG object type, concepts in seed space
-    ``concept_seed_version`` (the notebook's published space); claim /
-    formula / procedure seeds have no version. Unknown types fall back to
-    ``seed_claim`` (the historical default of the stores' ``seed_fn_for``)."""
+    ``concept_seed_version`` (the notebook's published space) with its
+    ``override`` keys; claim / formula / procedure seeds have no version.
+    Unknown types fall back to ``seed_claim`` (the historical default of the
+    stores' ``seed_fn_for``)."""
     version = check_concept_seed_version(concept_seed_version)
     if object_type == "concept":
-        return seed_concept if version == 1 else seed_concept_v2
+        if version == 1:
+            return seed_concept
+        if override:
+            keys = frozenset(override)
+            return lambda obj: concept_seed_in_space(
+                obj if isinstance(obj, str) else obj.get("name", ""), 2, keys)
+        return seed_concept_v2
     return {
         "claim": seed_claim,
         "formula": seed_formula,

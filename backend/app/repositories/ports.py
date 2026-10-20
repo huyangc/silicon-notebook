@@ -5129,7 +5129,8 @@ class GovernanceStorePort(Protocol):
         ...
     @staticmethod
     def find_base_match(
-        object_type: str, payload: dict, rows: object, *, concept_seed_version: int
+        object_type: str, payload: dict, rows: object, *, concept_seed_version: int,
+        override: frozenset = frozenset(),
     ) -> str: ...
 
 
