@@ -1969,7 +1969,7 @@ def test_postgres_merge_review_job_start_is_single_flight(postgres_database):
 
 
 def test_postgres_pending_refresh_and_a_human_decision_take_rows_in_one_order(
-    postgres_database,
+    postgres_database, postgres_settings,
 ):
     """S1 step 5: the pending refresh locks the v1 decision rows it then
     translates. A human decision locks every row of the displayed pair —
@@ -1980,6 +1980,7 @@ def test_postgres_pending_refresh_and_a_human_decision_take_rows_in_one_order(
     translation waits instead of deadlocking (the DELETE-first order took
     mc-2 before mc-1 and the two deadlocked)."""
     import psycopg
+    from psycopg.rows import dict_row
 
     from app.repositories.postgres.migrator import PostgresMigrator
 
@@ -1998,7 +1999,9 @@ def test_postgres_pending_refresh_and_a_human_decision_take_rows_in_one_order(
     errors: list = []
 
     def human_waits_on_the_refresh() -> bool:
-        with postgres_database.connect() as probe:
+        # Its own connection: the test pool holds two, both in use here.
+        with psycopg.connect(postgres_settings.database_url, autocommit=True,
+                             row_factory=dict_row) as probe:
             for _ in range(200):
                 waiting = probe.execute(
                     "SELECT count(*) AS n FROM pg_stat_activity "
