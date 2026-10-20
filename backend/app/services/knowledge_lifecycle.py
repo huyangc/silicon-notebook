@@ -535,13 +535,26 @@ def _fold_canonical_edges(
             edge_builder.add(si, ti)
 
 
+class PreviousPartitionUnusable(ValueError):
+    """The published generation is not a partition the warm start can use.
+    ``reason`` is the event's reason code: ``canonical_in_two_boards`` or
+    ``board_without_key``."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 def _fold_previous_partition(rows: Any, builder: Any, can2idx: Dict[str, int]) -> None:
     """Fold ``community_board_key_rows``' ``(canonical_id, board_key)`` rows of the
     published generation into a ``kg_partition.PreviousPartitionBuilder``. A
     canonical no longer in the current graph is passed as ``None`` (it still
-    counts toward its old board's size, which the board_key Jaccard needs). A
-    row without a board_key (written by no partition this code knows) makes the
-    previous partition unusable: ``ValueError``, like a canonical in two boards.
+    counts toward its old board's size, which the board_key Jaccard needs).
+
+    Raises `PreviousPartitionUnusable` when the rows are not a partition: a row
+    without a board_key (written by no partition this code knows,
+    ``board_without_key``) or a canonical in two boards of the generation
+    (``canonical_in_two_boards``; the builder's own check).
 
     ``closing`` is load-bearing on PostgreSQL for the same reason as in
     ``_fold_canonical_edges``: ``rows`` is a ``cursor().stream()`` generator.
@@ -549,8 +562,11 @@ def _fold_previous_partition(rows: Any, builder: Any, can2idx: Dict[str, int]) -
     with closing(rows):
         for row in rows:
             if not row["board_key"]:
-                raise ValueError("a board of the previous partition has no board_key")
-            builder.add(can2idx.get(row["canonical_id"]), row["board_key"])
+                raise PreviousPartitionUnusable("board_without_key")
+            try:
+                builder.add(can2idx.get(row["canonical_id"]), row["board_key"])
+            except ValueError as exc:
+                raise PreviousPartitionUnusable("canonical_in_two_boards") from exc
 
 
 def _fold_source_rows(rows: Any, counter: Any, tally: Any = None) -> None:
@@ -7409,6 +7425,7 @@ class KnowledgeLifecycleService:
         `community_edges` 的账本 payload。补账本路径两者都是空的,什么都不写。"""
         analysis_published = False
         partition_replaced_under_us = False
+        version_held = False
         # ---- 发布:板块划分 + 版本戳 + 全部分析产物,**一个**写事务(codex 第 13 轮 P1)
         #
         # 修复前这里是三个事务(板块 → 版本戳 → 产物),中间隔着分钟级的预计算。生产
@@ -7522,9 +7539,13 @@ class KnowledgeLifecycleService:
                             # 下一次重建凭这两列判冷 / 热启动:必须与发布同事务,否则
                             # 「板块已换、版本还是旧的」会让下一代拿一套不同算法的划分
                             # 当上一代(或把同算法的划分当成要冷启动的旧划分)。
-                            self.unified_kg.set_community_partition(
+                            # 版本对认领后读到的值做 CAS:构建期间运维
+                            # `recluster_kg --cold-partition` 写回的 0 不被覆盖(这一趟
+                            # 照常发布,mode 如实记录;下一次重建冷启动)。
+                            version_held = not self.unified_kg.set_community_partition(
                                 db, notebook_id, version=partition["partition_version"],
-                                mode=partition["partition_mode"])
+                                mode=partition["partition_mode"],
+                                expected_version=partition["partition_version_read"])
                 if analysis is not None:
                     if partition is not None:
                         analysis.payloads[ARTIFACT_COMMUNITY_EDGES]["partition"] = dict(partition)
@@ -7579,6 +7600,13 @@ class KnowledgeLifecycleService:
                     else:
                         self._replace_analysis_artifacts(db, notebook_id, seq, analysis, now)
                         analysis_published = True
+        if version_held:
+            # 发布已提交、版本 CAS 落空:构建期间分区版本被改过(运维的冷启动请求)。
+            # 请求保留,下一次真正重建板块图时冷启动。
+            self.event_log.emit({
+                "kind": "community_partition_version_held", "notebook_id": notebook_id,
+                "level": level, "reason": "version_changed_during_build",
+            })
         return analysis_published, partition_replaced_under_us
 
     def _replace_analysis_artifacts(
@@ -7644,32 +7672,33 @@ class KnowledgeLifecycleService:
 
         previous = None
         cold_reason: Optional[str] = None
+        read_version = 0
         if level != DEFAULT_COMMUNITY_LEVEL:
             cold_reason = "non_default_level"
-        elif published_from < 0:
-            cold_reason = "no_published_partition"
         else:
             builder = PreviousPartitionBuilder(len(idx2can))
             try:
                 with self._connect() as db:
                     state = self.unified_kg.state_row(db, notebook_id)
-                    _fold_previous_partition(
-                        self.unified_kg.community_board_key_rows(
-                            db, notebook_id, level, published_from),
-                        builder, can2idx)
-                previous = builder.build()
-            except ValueError as exc:
+                    if state is not None:
+                        read_version = int(state["community_partition_version"])
+                    if published_from >= 0:
+                        _fold_previous_partition(
+                            self.unified_kg.community_board_key_rows(
+                                db, notebook_id, level, published_from),
+                            builder, can2idx)
+                previous = builder.build() if published_from >= 0 else None
+            except PreviousPartitionUnusable as exc:
                 self.event_log.emit({
                     "kind": "community_partition_previous_unusable",
                     "notebook_id": notebook_id, "level": level,
-                    "generation": published_from, "error": type(exc).__name__,
+                    "generation": published_from, "reason": exc.reason,
                 })
                 cold_reason = "previous_partition_unusable"
             else:
-                if not previous.keys:
+                if previous is None or not previous.keys:
                     previous, cold_reason = None, "no_published_partition"
-                elif (state is None or int(state["community_partition_version"])
-                        != PARTITION_ALGO_VERSION):
+                elif read_version != PARTITION_ALGO_VERSION:
                     cold_reason = "partition_version_changed"
         result = partition_boards(
             idx2can, edge_table.src, edge_table.dst, edge_table.weight,
@@ -7680,13 +7709,17 @@ class KnowledgeLifecycleService:
         board_keys = [board.key for board in result.boards]
         deg = {idx2can[i]: float(result.degree[i])
                for i in np.flatnonzero(result.board_of_node >= 0).tolist()}
+        fallback = result.mode == PARTITION_MODE_COLD_FALLBACK
         partition = {
             "partition_mode": result.mode,
-            "partition_version": PARTITION_ALGO_VERSION,
+            # networkx 回退的产物不是当前分区算法划出来的:版本记 0,下一次有 igraph
+            # 的重建按「版本不同」冷启动,而不是从 Louvain 的结果热启动。
+            "partition_version": 0 if fallback else PARTITION_ALGO_VERSION,
+            # 认领之后读到的版本;发布时对它做 CAS(`set_community_partition`)。
+            "partition_version_read": read_version,
             "partition_cold_reason": (
                 None if result.mode == PARTITION_MODE_WARM
-                else "igraph_unavailable" if result.mode == PARTITION_MODE_COLD_FALLBACK
-                else cold_reason),
+                else "igraph_unavailable" if fallback else cold_reason),
             "board_keys_carried": result.carried,
             "board_keys_minted": result.minted,
             "board_keys_rehashed": result.rehashed,
@@ -7708,7 +7741,8 @@ class KnowledgeLifecycleService:
         的「上一套算法建的」同一个判据,`_partition_boards_for_rebuild` 因此冷启动;
         ``community_partition_mode`` 原样留着(它说的仍是那套已发布划分怎么建的)。冷
         启动照样读上一代续用 board_key,成员没变的板块 key 也不变。请求是持久的:这一次
-        重建没跑完,下一次照样冷启动——那正是运维要的。没有 state 行时什么都不写。"""
+        重建没跑完、或被已在飞的那次重建挡住,下一次照样冷启动——在飞那次发布时对认领
+        后读到的版本做 CAS,不会把这个 0 写回去。没有 state 行时什么都不写。"""
         self.get_notebook(notebook_id)
         with self._write() as db:
             state = self.unified_kg.state_row(db, notebook_id)
@@ -7716,6 +7750,18 @@ class KnowledgeLifecycleService:
                 return
             self.unified_kg.set_community_partition(
                 db, notebook_id, version=0, mode=str(state["community_partition_mode"]))
+
+    def community_partition_state(self, notebook_id: str) -> Dict[str, Any]:
+        """已发布划分的 ``{"version", "mode"}``(没有 state 行时 0 / '')。版本 0 = 下一次
+        真正重建板块图时冷启动(存量库、``--cold-partition`` 的请求还没被消费、networkx
+        回退的产物)。``recluster_kg`` 凭它如实报告这一次有没有真的冷启动。"""
+        self.get_notebook(notebook_id)
+        with self._connect() as db:
+            state = self.unified_kg.state_row(db, notebook_id)
+        if state is None:
+            return {"version": 0, "mode": ""}
+        return {"version": int(state["community_partition_version"]),
+                "mode": str(state["community_partition_mode"])}
 
     def _scan_canonical_graph(
         self, notebook_id: str,

@@ -47,6 +47,10 @@ def test_partition_columns_round_trip(postgres_repository):
     cases.check_partition_columns_round_trip(postgres_repository)
 
 
+def test_partition_version_cas(postgres_repository):
+    cases.check_partition_version_cas(postgres_repository)
+
+
 def test_kg_delete_resets_the_partition_columns(postgres_repository):
     cases.check_kg_delete_resets_the_partition_columns(postgres_repository)
 
@@ -304,3 +308,38 @@ def test_the_rebuild_starts_cold_then_warm_and_carries_keys_on_postgres(
     assert (rebuilt["partition_mode"], rebuilt["partition_cold_reason"],
             rebuilt["board_keys_carried"]) == ("cold", "partition_version_changed", 3)
     assert _published(postgres_repository, notebook_id) == first
+
+
+def test_a_cold_request_during_a_build_survives_its_publish_on_postgres(
+    postgres_repository, monkeypatch,
+):
+    """The twin of the SQLite interleaving case: the build in flight read
+    version 1 after its claim; ``--cold-partition`` writes 0 on its own
+    connection before the build publishes. The publish's version CAS misses, the
+    0 survives (mode records the warm publish, an event says why), and the next
+    build starts cold."""
+    events: list = []
+    monkeypatch.setattr(postgres_repository._runtime.event_log, "emit", events.append)
+    lifecycle = postgres_repository._runtime.knowledge_lifecycle
+    notebook_id = _seed_graph(postgres_repository)
+    lifecycle.rebuild_communities(notebook_id)
+    original = lifecycle._partition_boards_for_rebuild
+
+    def partition_then_request(*args, **kwargs):
+        out = original(*args, **kwargs)
+        postgres_repository.request_cold_community_partition(args[0])
+        return out
+
+    with monkeypatch.context() as patched:
+        patched.setattr(lifecycle, "_partition_boards_for_rebuild", partition_then_request)
+        events.clear()
+        lifecycle.rebuild_communities(notebook_id, force=True)
+    [held] = [e for e in events if e.get("kind") == "community_partition_version_held"]
+    assert held["reason"] == "version_changed_during_build"
+    assert cases.partition_state(postgres_repository._runtime, notebook_id) == (0, "warm")
+    events.clear()
+    lifecycle.rebuild_communities(notebook_id, force=True)
+    [rebuilt] = [e for e in events if e.get("kind") == "communities_rebuilt"]
+    assert (rebuilt["partition_mode"], rebuilt["partition_cold_reason"]) == (
+        "cold", "partition_version_changed")
+    assert cases.partition_state(postgres_repository._runtime, notebook_id) == (1, "cold")

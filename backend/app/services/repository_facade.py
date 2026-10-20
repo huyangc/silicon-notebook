@@ -2688,6 +2688,11 @@ class RepositoryFacade:
         self.require_indexing_pipeline_write(notebook_id)
         self._runtime.knowledge_lifecycle.request_cold_community_partition(notebook_id)
 
+    def community_partition_state(self, notebook_id: str) -> dict:
+        """Published board partition ``{"version", "mode"}``
+        (KnowledgeLifecycleService.community_partition_state)."""
+        return self._runtime.knowledge_lifecycle.community_partition_state(notebook_id)
+
     def start_unified_kg_rebuild(self, notebook_id: str) -> dict:
         """Claim the shared KG-maintenance slot for a rebuild (409 source)."""
         self.require_indexing_pipeline_write(notebook_id)

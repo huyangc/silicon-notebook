@@ -29,17 +29,35 @@ def main() -> int:
             settings, confirm_service_stopped=confirmed
         ) as repo:
             if cold_partition:
-                # 持久请求:这次重建没跑完,下一次照样冷启动。
+                # 持久请求:这次重建没跑完、或被在飞的重建挡住,下一次照样冷启动。
                 repo.request_cold_community_partition(nb)
-                print(f"[recluster] {nb}: the next board partition starts cold")
+                print(f"[recluster] {nb}: cold board partition requested")
             # Explicit recluster entrypoint → force a full recompute (bypass the
             # skip-when-unchanged gate; the whole point of this script is to re-cluster).
             n = repo.rebuild_unified_kg(nb, force=True)
             print(f"[recluster] {nb}: rebuilt unified KG (clusters={n})")
+            if cold_partition:
+                _report_cold_partition(nb, repo.community_partition_state(nb))
     except MaintenanceCliError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return exc.exit_code
     return 0
+
+
+def _report_cold_partition(nb: str, state: dict) -> None:
+    """Say what happened to the cold request, not what was hoped for. Version 0
+    after the rebuild means the request is still pending: this run did not
+    publish a partition of its own (another rebuild held the notebook and
+    published over it, or the community layer is off) -- or it partitioned
+    without igraph, whose networkx result is stamped 0 on purpose."""
+    if int(state["version"]) != 0:
+        print(f"[recluster] {nb}: boards re-partitioned ({state['mode']})")
+    elif state["mode"] == "cold_fallback":
+        print(f"[recluster] {nb}: boards re-partitioned without igraph (networkx fallback); "
+              "the next rebuild with igraph starts cold")
+    else:
+        print(f"[recluster] {nb}: this run did not re-partition the boards; the request is "
+              "recorded and the next rebuild that re-partitions the board graph starts cold")
 
 
 if __name__ == "__main__":

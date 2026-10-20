@@ -43,6 +43,10 @@ def test_partition_columns_round_trip(repo):
     cases.check_partition_columns_round_trip(repo)
 
 
+def test_partition_version_cas(repo):
+    cases.check_partition_version_cas(repo)
+
+
 def test_kg_delete_resets_the_partition_columns(repo):
     cases.check_kg_delete_resets_the_partition_columns(repo)
 

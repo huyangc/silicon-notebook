@@ -1918,15 +1918,30 @@ class UnifiedKgStore:
 
     @staticmethod
     def set_community_partition(
-        db: Any, notebook_id: str, *, version: int, mode: str
-    ) -> None:
+        db: Any, notebook_id: str, *, version: int, mode: str,
+        expected_version: Optional[int] = None,
+    ) -> bool:
         """已发布划分的分区算法版本与方式(v98/0078,占位号)。发布路径在翻转指针的
         同一个写事务里调;``--cold-partition`` 把版本写回 0。无 state 行 → no-op
-        (与 `set_community_seq` 同:下一次照样重建)。"""
+        (与 `set_community_seq` 同:下一次照样重建)。
+
+        ``expected_version`` 给了,版本就是 CAS:只在当前值仍是它时才写 ``version``,
+        否则保持原值(发布路径传认领之后读到的版本——期间运维 ``--cold-partition``
+        写回的 0 不被覆盖)。``mode`` 总是写:它说的是这一次发布怎么建的。返回版本
+        是否写成。"""
         db.execute(
-            "UPDATE unified_kg_state SET community_partition_version=%s, "
-            "community_partition_mode=%s WHERE notebook_id=%s",
-            (int(version), str(mode), notebook_id))
+            "UPDATE unified_kg_state SET community_partition_mode=%s WHERE notebook_id=%s",
+            (str(mode), notebook_id))
+        if expected_version is None:
+            cursor = db.execute(
+                "UPDATE unified_kg_state SET community_partition_version=%s "
+                "WHERE notebook_id=%s", (int(version), notebook_id))
+        else:
+            cursor = db.execute(
+                "UPDATE unified_kg_state SET community_partition_version=%s "
+                "WHERE notebook_id=%s AND community_partition_version=%s",
+                (int(version), notebook_id, int(expected_version)))
+        return cursor.rowcount == 1
 
     @staticmethod
     def community_board_key_rows(

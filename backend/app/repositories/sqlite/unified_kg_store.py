@@ -1676,13 +1676,24 @@ class UnifiedKgStore:
 
     @staticmethod
     def set_community_partition(
-        db: sqlite3.Connection, notebook_id: str, *, version: int, mode: str
-    ) -> None:
-        """已发布划分的分区算法版本与方式(v98,占位号);语义见 PG 孪生。"""
+        db: sqlite3.Connection, notebook_id: str, *, version: int, mode: str,
+        expected_version: Optional[int] = None,
+    ) -> bool:
+        """已发布划分的分区算法版本与方式(v98,占位号);``expected_version`` 的 CAS
+        与返回值语义见 PG 孪生。"""
         db.execute(
-            "UPDATE unified_kg_state SET community_partition_version=?, "
-            "community_partition_mode=? WHERE notebook_id=?",
-            (int(version), str(mode), notebook_id))
+            "UPDATE unified_kg_state SET community_partition_mode=? WHERE notebook_id=?",
+            (str(mode), notebook_id))
+        if expected_version is None:
+            cursor = db.execute(
+                "UPDATE unified_kg_state SET community_partition_version=? "
+                "WHERE notebook_id=?", (int(version), notebook_id))
+        else:
+            cursor = db.execute(
+                "UPDATE unified_kg_state SET community_partition_version=? "
+                "WHERE notebook_id=? AND community_partition_version=?",
+                (int(version), notebook_id, int(expected_version)))
+        return cursor.rowcount == 1
 
     @staticmethod
     def community_board_key_rows(
