@@ -1001,6 +1001,29 @@ def test_only_users_a_written_row_needs_are_mapped_or_created(
     assert _count(target["repo"], "SELECT COUNT(*) FROM group_members") == 0
 
 
+def test_a_user_named_only_by_a_grant_on_an_existing_mirror_is_not_created(
+    source, target, package, tmp_path
+):
+    """Authorization rows are seeded only with the notebook this import
+    creates. Once the mirror exists, a membership the source adds later is
+    never written here, so the user it names is not mapped or created."""
+    assert _import(target, package).error == ""
+    _add_user(source["repo"], "user-a-erin", "erin")
+    with source["repo"]._write() as db:
+        db.execute(
+            "INSERT INTO notebook_members(notebook_id,user_id,role,added_at) "
+            "VALUES(?,?,?,?)",
+            (source["exported"], "user-a-erin", "reader", MOMENT),
+        )
+
+    report = _import(target, _export(source, tmp_path / "out-erin"),
+                     create_missing_users=True)
+
+    assert report.error == ""
+    assert _count(target["repo"], "SELECT COUNT(*) FROM users WHERE username='erin'") == 0
+    assert "erin" not in report.user_mapping.unmatched
+
+
 def test_ascii_lower_folds_only_ascii_letters():
     from app.migration.sync.identity import ascii_lower
 
