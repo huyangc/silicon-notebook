@@ -124,7 +124,12 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "副本侧沿用原口径,源侧按快照的决定计数"),
     "backend/app/repositories/sqlite/sharing_store.py": (2, 0, 0, 3, 0,
         "PG 孪生同注记"),
-    "backend/app/repositories/postgres/unified_kg_store.py": (32, 9, 7, 29, 13,
+    "backend/app/repositories/postgres/unified_kg_store.py": (32, 10, 8, 29, 13,
+        "板块划分 S2(v98/0078,占位号):``community_board_key_rows`` 读调用方给定的"
+        "那一代(重建认领时拿到的已发布代 published_from,作为参数 generation = %s "
+        "绑定,两侧都过滤、成员按 m.generation = c.generation 相关对齐),不是本守卫"
+        "计数的谓词写法——B 类(读指定代,与 copy_forward_communities 同形),"
+        "communities 与 community_members 出现数各 +1、谓词不变;"
         "图谱分析问题清单 PR-2:``kg_finding_member_name_rows`` 与展示名读同形的两条腿"
         "(有簇行的成员按 canonical 读、没有簇行的对象用 NOT EXISTS 判「无已发布簇行」),"
         "都配 cluster 谓词,concept_clusters 出现数与 cluster 谓词各 +2;"
@@ -150,7 +155,7 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "谓词各多一次;社区摘要退役删掉 set_community_summary(UPDATE "
         "communities,按 id 写、无谓词)与 community_reports(A 类读,配 "
         "community 谓词),communities 出现数 -2、community 谓词 -1"),
-    "backend/app/repositories/sqlite/unified_kg_store.py": (32, 9, 8, 29, 13,
+    "backend/app/repositories/sqlite/unified_kg_store.py": (32, 10, 9, 29, 13,
         "PG 孪生同注记(两侧 members 出现数差异来自 SQLite 无窗口函数的"
         "community_overview_on 分岔)"),
     "backend/app/repositories/source_subgraph_projection.py": (4, 0, 0, 2, 0,
@@ -170,8 +175,10 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "同 PG 孪生:桥接 id 候选清理的跨代「无簇携带」判定 xa/xb 两处,悬空种子"
         "检查的 published 分页读 2 处(代次作参数绑定);另 2 处 concept_clusters 与"
         "2 处 community_members 同 PG 孪生的补充说明。"),
-    "backend/app/repositories/sqlite/migrations.py": (6, 1, 4, 1, 0,
-        "非站点:DDL(_migration_71 的索引重建);谓词计数来自启动恢复"
+    "backend/app/repositories/sqlite/migrations.py": (6, 2, 4, 1, 0,
+        "非站点:DDL(_migration_71 的索引重建);_migration_98(占位号)把存量板块的 "
+        "board_key 回填成 id(UPDATE communities,C 类跨代:每一代的板块都要有 key,"
+        "已发布代之外的行回填了也无害),communities +1;谓词计数来自启动恢复"
         "_reap_stale_derived_generations 的 state 行现读(逐本取 keep)。"
         "community_members 的两处来自 _migration_84 的一次性去重 DDL "
         "(DELETE ... WHERE rowid NOT IN (SELECT MIN(rowid) ... )):C 类跨代"
