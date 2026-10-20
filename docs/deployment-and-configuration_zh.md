@@ -741,9 +741,10 @@ KG_CLUSTER_ANN_THREADS   # 概念聚类 hnswlib 线程；0（默认）= min(cpu�
 PostgreSQL 连接池使用 `POSTGRES_POOL_MIN_SIZE` / `POSTGRES_POOL_MAX_SIZE` 配置大小，
 `POSTGRES_POOL_ACQUIRE_TIMEOUT_SECONDS` 限制等待连接的时间；
 `POSTGRES_STATEMENT_TIMEOUT_SECONDS` 与 `POSTGRES_LOCK_TIMEOUT_SECONDS` 分别限制单条语句和
-数据库锁等待。离线维护的整表操作，以及知识图谱整理里的两条整表流式读（关系图与按来源的
-对象扫描），会在各自的事务内把语句超时抬到至少 600 秒（只抬不压：配置的值更大则保持，
-`0` 仍表示禁用；事务结束即复原），其余语句仍受这个值约束。按数据库资源与并发工作负载联合调整；这些高级项只用于 PostgreSQL，
+数据库锁等待。离线维护的整表操作、知识图谱整理里的两条整表流式读（关系图与按来源的
+对象扫描），以及整理时写概念簇的每一页（同一对象类型每 2 万个成员一个事务），会在各自的
+事务内把语句超时抬到至少 600 秒（只抬不压：配置的值更大则保持，`0` 仍表示禁用；事务结束
+即复原），其余语句仍受这个值约束。按数据库资源与并发工作负载联合调整；这些高级项只用于 PostgreSQL，
 `SHADOW_DATABASE_URL` 的迁移用途见前面的后端选择说明。
 
 ```text
