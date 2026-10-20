@@ -6,7 +6,7 @@
 //   · 单位从响应的 units 读——换一张单位表,上屏文案必须跟着变;
 //   · 缺失 / 合法缺席 / 本该有却缺失 / 算过但为 0,四种情形四种呈现;
 //   · 俯瞰图的 top-N 截断、长尾汇总、以及「根本没取回」的那一截,分开声明。
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 
 vi.mock("../../app/kg-analysis-api", () => ({
@@ -360,6 +360,20 @@ function blockByTitle(title: string): HTMLElement {
   return block as HTMLElement;
 }
 
+/** 诊断数据默认收起,来源画像表展开了才取:展开它,并等来源表读完。 */
+async function openDiagnostics() {
+  const details = await waitFor(() => {
+    const element = document.querySelector<HTMLDetailsElement>("details.kg-findings-diagnostics");
+    if (!element) throw new Error("诊断数据还没出现");
+    return element;
+  });
+  act(() => {
+    details.open = true;
+    details.dispatchEvent(new Event("toggle"));
+  });
+  await waitFor(() => expect(within(blockByTitle("关联稀疏的来源")).queryByText("正在读取来源清单…")).toBeNull());
+}
+
 // --------------------------------------------------------------- 逐指标新鲜度
 
 test("每一块数据各自标注口径与落后量，而不是页顶挂一条横幅", async () => {
@@ -448,6 +462,7 @@ test("先把技术状态翻译成结论，并解释状态颜色和更新方式",
 test("「来源复核入口」卡被问题清单取代：卡片不在，它额外的那次稀疏首页请求也不再发", async () => {
   renderView();
   await screen.findByRole("heading", { name: "先看结论", level: 3 });
+  await openDiagnostics();
   const readout = blockByTitle("先看结论");
   expect(within(readout).queryByText("来源复核入口")).not.toBeInTheDocument();
   expect(within(readout).queryByText(/当前最先值得复核的是/)).not.toBeInTheDocument();
@@ -460,6 +475,20 @@ test("「来源复核入口」卡被问题清单取代：卡片不在，它额�
   expect(vi.mocked(fetchKgAnalysisSources).mock.calls.slice(before)).toEqual([
     ["nb-1", { limit: 20, offset: 0, order: "connected" }],
   ]);
+});
+
+test("诊断数据收起时不取来源画像表，展开之后才取（它要单独发一次分页请求）", async () => {
+  renderView();
+  await screen.findByRole("heading", { name: "先看结论", level: 3 });
+  // 其它请求都回来了,来源画像表一次都没问。
+  await waitFor(() => expect(vi.mocked(fetchKgFindings)).toHaveBeenCalled());
+  expect(vi.mocked(fetchKgAnalysisSources)).not.toHaveBeenCalled();
+  expect(within(blockByTitle("关联稀疏的来源")).queryByRole("table")).toBeNull();
+
+  await openDiagnostics();
+  expect(vi.mocked(fetchKgAnalysisSources)).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(fetchKgAnalysisSources)).toHaveBeenCalledWith("nb-1", { limit: 20, offset: 0, order: "sparse" });
+  expect(within(blockByTitle("关联稀疏的来源")).getByRole("table")).toBeInTheDocument();
 });
 
 test("诊断数据默认收起，原有区块都在里面", async () => {
@@ -484,6 +513,7 @@ test("诊断数据里每一张表都在自己的横向滚动容器里：窄屏�
   // (收起状态也一样)。jsdom 量不到宽度,这里钉结构,容器与诊断区的 CSS 由
   // tests/guards/kg-analysis-narrow-overflow-guard.test.mjs 钉。
   const { container } = renderView();
+  await openDiagnostics();
   await waitFor(() => expect(blockByTitle("关联稀疏的来源").querySelector("table")).not.toBeNull());
   const details = container.querySelector("details.kg-findings-diagnostics") as HTMLElement;
   const tables = Array.from(details.querySelectorAll("table"));
@@ -612,6 +642,7 @@ test("删除知识图谱这类让分析失效的任务结束后同样重取报�
     />,
   );
   await screen.findByRole("heading", { name: "先看结论", level: 3 });
+  await openDiagnostics();
   const reportCalls = vi.mocked(fetchKgAnalysis).mock.calls.length;
   const sourceCalls = vi.mocked(fetchKgAnalysisSources).mock.calls.length;
 
@@ -781,6 +812,7 @@ test("合法缺席（零板块的库不出来源画像）：说清是刻意不�
   );
   renderView();
   await screen.findByRole("heading", { name: "关联稀疏的来源", level: 3 });
+  await openDiagnostics();
 
   const block = blockByTitle("关联稀疏的来源");
   expect(within(block).getByText(/一个主题板块都没有/)).toBeInTheDocument();
@@ -850,6 +882,7 @@ test("俯瞰图声明三级连线口径：本图画出 / 本次取回 / 库内�
 test("来源表走后端分页：翻页按 offset 重新取，不是一次拉回 4.8 万行", async () => {
   renderView();
   await screen.findByRole("heading", { name: "关联稀疏的来源", level: 3 });
+  await openDiagnostics();
 
   expect(vi.mocked(fetchKgAnalysisSources)).toHaveBeenCalledWith("nb-1", {
     limit: 20,
@@ -870,6 +903,7 @@ test("来源表走后端分页：翻页按 offset 重新取，不是一次拉回
 test("切换排序回到第一页，并按新顺序取数", async () => {
   renderView();
   await screen.findByRole("heading", { name: "关联稀疏的来源", level: 3 });
+  await openDiagnostics();
   const block = blockByTitle("关联稀疏的来源");
 
   fireEvent.click(within(block).getByRole("button", { name: "关联最紧密的在前" }));
@@ -888,6 +922,7 @@ test("切换排序回到第一页，并按新顺序取数", async () => {
 test("切排序时旧的行不会被标上新选的顺序——标注跟着数据走，不跟着控件走", async () => {
   renderView();
   await screen.findByRole("heading", { name: "关联稀疏的来源", level: 3 });
+  await openDiagnostics();
   const block = blockByTitle("关联稀疏的来源");
 
   // 新的一页挂着不返回：屏上留着「关联最稀疏的在前」那一页的行。
@@ -913,6 +948,7 @@ test("切排序时旧的行不会被标上新选的顺序——标注跟着数�
 test("翻页时旧的行不会被标上新的页码", async () => {
   renderView();
   await screen.findByRole("heading", { name: "关联稀疏的来源", level: 3 });
+  await openDiagnostics();
   const block = blockByTitle("关联稀疏的来源");
   expect(within(block).getByText(/第 1–2 个/)).toBeInTheDocument();
 
@@ -933,6 +969,7 @@ test("翻页时旧的行不会被标上新的页码", async () => {
 test("指向已删除来源的那一行标出来，而不是留一个空标题让人猜", async () => {
   renderView();
   await screen.findByRole("heading", { name: "关联稀疏的来源", level: 3 });
+  await openDiagnostics();
   const block = blockByTitle("关联稀疏的来源");
   expect(within(block).getByText("来源已不存在")).toBeInTheDocument();
   expect(within(block).getByText("（没有标题）")).toBeInTheDocument();
@@ -941,6 +978,7 @@ test("指向已删除来源的那一行标出来，而不是留一个空标题�
 test("主体板块的口径读总览里那份数据的单位表（分页响应不带这几个字段的单位）", async () => {
   renderView();
   await screen.findByRole("heading", { name: "关联稀疏的来源", level: 3 });
+  await openDiagnostics();
   const block = blockByTitle("关联稀疏的来源");
   const note = within(block).getByText(/主体板块 =/);
   expect(note.textContent).toContain("累计覆盖 80.0% 成员");
@@ -973,6 +1011,7 @@ test("主体板块口径不与来源画像的缺席同屏打脸：这一页没�
   );
   renderView();
   await screen.findByRole("heading", { name: "关联稀疏的来源", level: 3 });
+  await openDiagnostics();
 
   const block = blockByTitle("关联稀疏的来源");
   expect(within(block).getByText(/一个主题板块都没有/)).toBeInTheDocument();
@@ -989,6 +1028,7 @@ test("主体板块口径不与来源画像的缺席同屏打脸：这一页没�
 test("换库时上一个库的报告与分页位置当场清空，不会先渲染一帧旧数字", async () => {
   const { rerender } = render(<KgAnalysisView notebookId="nb-1" onClose={() => undefined} />);
   await screen.findByRole("heading", { name: "对象构成", level: 3 });
+  await openDiagnostics();
   // 先把分页推到第二页 —— 越界请求就是这么来的。
   fireEvent.click(within(blockByTitle("关联稀疏的来源")).getByRole("button", { name: /下一页/ }));
   expect(vi.mocked(fetchKgAnalysisSources)).toHaveBeenLastCalledWith("nb-1", {
@@ -1018,6 +1058,7 @@ test("同一个库重新渲染不清空报告——复位跟着 notebookId 走�
   // 并把用户的分页位置抹掉。这条钉住「只有 scope 真的变了才复位」。
   const { rerender } = render(<KgAnalysisView notebookId="nb-1" onClose={() => undefined} />);
   await screen.findByRole("heading", { name: "对象构成", level: 3 });
+  await openDiagnostics();
   fireEvent.click(within(blockByTitle("关联稀疏的来源")).getByRole("button", { name: /下一页/ }));
 
   rerender(<KgAnalysisView notebookId="nb-1" onClose={() => undefined} />);

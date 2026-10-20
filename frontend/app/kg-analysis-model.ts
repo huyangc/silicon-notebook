@@ -738,7 +738,8 @@ export const FINDING_HANDLED_REASON_LABEL: Record<string, string> = {
   source_processing: "来源正在解析",
   source_reprocessed: "来源已重新解析",
   merge_confirmed: "已确认合并",
-  relinked: "已补上关联",
+  // 补上关联跑过(哪怕一条都没补上)就记这一档;不说「已补上」,免得读成真的补上了。
+  relinked: "已跑过补上关联",
 };
 
 /** 与上一次问题清单不可比的原因。 */
@@ -843,6 +844,25 @@ export function partitionFindings(rows: readonly KgFindingRow[]): FindingPartiti
     else partition.pending.push(row);
   }
   return partition;
+}
+
+/**
+ * 已通过区的两份清单要不要去取(后端每页都整读明细、不记忆化,令牌又随来源解析状态推进
+ * 频繁变化——一定为空的区不该每次都白读一遍)。判据只读总览里已有的账本计数与标记:
+ *   · `dismissed` 那一页:`counts.dismissed`(只数主体还在当前清单里的豁免)大于 0;
+ *   · `passed` 那一页:它只装 F4 已判定不是同一个与 F5 补上关联已经跑过——账本里有 F4,
+ *     或者有 F5 且补上关联跑过、之后没有新内容(`relink.may_change === false`)。
+ * 清单不在场(还没生成 / 升级后还没生成)时两份都不取。
+ */
+export function findingsZonesToFetch(summary: KgFindingsSummary | null): { passed: boolean; dismissed: boolean } {
+  if (!summary || !summary.present || !summary.counts) return { passed: false, dismissed: false };
+  const byRule = summary.counts.by_rule;
+  const count = (ruleId: string) => finiteNumber(byRule[ruleId]) ?? 0;
+  const relinkSpent = summary.relink?.attempted === true && summary.relink.may_change === false;
+  return {
+    passed: count("F4") > 0 || (count("F5") > 0 && relinkSpent),
+    dismissed: (finiteNumber(summary.counts.dismissed) ?? 0) > 0,
+  };
 }
 
 /** 「已处理，更新后核验」,带上读侧认出来的原因(认不出的原因不说)。 */
@@ -1004,6 +1024,11 @@ export function findingsReportLine(summary: KgFindingsSummary): string {
 export type FindingsComparisonView = {
   comparable: boolean;
   text: string;
+  /**
+   * 整体不可比时,仍然可比的那几条规则各自的计数(「疑似解析残缺：消失 a · 仍在 b · 新增 c」)。
+   * 大库只要有一条规则触顶就整体不可比,不列出来的话对比行就永远是一句原因。
+   */
+  ruleLines: string[];
   /** 已消失的那几条,用发布时存下的名字快照(来源删了也说得出是谁)。 */
   resolvedNames: string[];
 };
@@ -1017,23 +1042,46 @@ export function findingsComparisonView(
   comparison: KgFindingsComparison | null,
 ): FindingsComparisonView | null {
   if (!comparison) return null;
-  if (!comparison.comparable) {
-    return {
-      comparable: false,
-      text: label(FINDING_COMPARISON_REASON_LABEL, comparison.reason ?? "", "本次不与上次比较"),
-      resolvedNames: [],
-    };
-  }
   const names: string[] = [];
   for (const sample of comparison.resolved_samples) {
     const name = sample.subject_label.trim();
     if (name && !names.includes(name)) names.push(name);
   }
+  if (!comparison.comparable) {
+    const ruleLines = comparableRuleLines(comparison.by_rule);
+    return {
+      comparable: false,
+      text: label(FINDING_COMPARISON_REASON_LABEL, comparison.reason ?? "", "本次不与上次比较"),
+      ruleLines,
+      // 消失的样例只来自仍可比的规则;没有可比的规则时一条都不说。
+      resolvedNames: ruleLines.length > 0 ? names : [],
+    };
+  }
   return {
     comparable: true,
     text: `上次更新后：${comparisonCount(comparison.resolved)} 条已消失 · ${comparisonCount(comparison.persisting)} 条仍在 · ${comparisonCount(comparison.new)} 条新增`,
+    ruleLines: [],
     resolvedNames: names,
   };
+}
+
+/** `by_rule` 里仍可比的规则,按 F1…F5 各一句;认不出的规则、缺数的条目不说。 */
+function comparableRuleLines(byRule: Record<string, unknown>): string[] {
+  const lines: string[] = [];
+  for (const ruleId of FINDING_RULE_ORDER) {
+    const entry = byRule[ruleId];
+    if (!entry || typeof entry !== "object") continue;
+    const counts = entry as Record<string, unknown>;
+    if (counts.comparable !== true) continue;
+    const resolved = finiteNumber(counts.resolved);
+    const persisting = finiteNumber(counts.persisting);
+    const added = finiteNumber(counts.new);
+    if (resolved === null || persisting === null || added === null) continue;
+    lines.push(
+      `${FINDING_RULE_LABEL[ruleId]}：${formatCount(resolved)} 条已消失 · ${formatCount(persisting)} 条仍在 · ${formatCount(added)} 条新增`,
+    );
+  }
+  return lines;
 }
 
 /**
@@ -1242,10 +1290,14 @@ export function findingSubjectText(row: KgFindingRow): string {
 
 // ------------------------------------------------------------ 建议动作的呈现计划
 
+/**
+ * 对准一篇来源的按钮。`title` 是这篇来源的标题(确认框与结果文字用它);`label` 是按钮组
+ * 名与读屏名用的——两份来源同名(重复导入最常见)时带上对象数,还分不开就写第几份。
+ */
 export type FindingButtonSpec =
-  | { kind: "open_source"; sourceId: string; title: string }
-  | { kind: "delete_source"; sourceId: string; title: string; sourceType: string }
-  | { kind: "reparse_source"; sourceId: string; title: string; sourceType: string }
+  | { kind: "open_source"; sourceId: string; title: string; label: string }
+  | { kind: "delete_source"; sourceId: string; title: string; label: string; sourceType: string }
+  | { kind: "reparse_source"; sourceId: string; title: string; label: string; sourceType: string }
   | { kind: "review_merge"; mergeId: string }
   | { kind: "relink" };
 
@@ -1339,7 +1391,7 @@ export function findingActionPlan(row: KgFindingRow, context: FindingActionConte
   const addOpen = (sourceId: string, facts: SourceFacts) => {
     if (opened.has(sourceId) || !facts.exists) return;
     opened.add(sourceId);
-    plan.buttons.push({ kind: "open_source", sourceId, title: facts.title });
+    plan.buttons.push({ kind: "open_source", sourceId, title: facts.title, label: facts.title });
   };
   // F2:两份各有一个「打开来源」,删除只放在建议删除的那份旁边。
   if (row.rule_id === "F2") {
@@ -1359,7 +1411,7 @@ export function findingActionPlan(row: KgFindingRow, context: FindingActionConte
       if (facts.processing && !plan.processingSourceIds.includes(sourceId)) {
         plan.processingSourceIds.push(sourceId);
       }
-      plan.buttons.push({ kind: action.kind, sourceId, title: facts.title, sourceType: facts.sourceType });
+      plan.buttons.push({ kind: action.kind, sourceId, title: facts.title, label: facts.title, sourceType: facts.sourceType });
       if (action.kind === "delete_source") {
         if (!plan.notes.includes(DELETE_NOTE)) plan.notes.push(DELETE_NOTE);
         if (row.rule_id === "F2" && !plan.notes.includes(KEEP_NOTE)) plan.notes.push(KEEP_NOTE);
@@ -1373,7 +1425,45 @@ export function findingActionPlan(row: KgFindingRow, context: FindingActionConte
     }
   }
   if (plan.processingSourceIds.length > 0) plan.notes.push(PROCESSING_NOTE);
+  distinguishSameTitles(row, plan.buttons);
   return plan;
+}
+
+/** 一篇来源有多少知识对象(重复导入两侧都有;内容错配的另一份只有概念数)。 */
+function sourceSizeText(row: KgFindingRow, sourceId: string): string {
+  const side = evidenceList(row.evidence, "sources").find((item) => textField(item, "source_id") === sourceId);
+  const objects = numberField(side, "objects");
+  if (objects !== null) return `${formatCount(objects)} 个知识对象`;
+  const partner = evidenceList(row.evidence, "partners").find((item) => textField(item, "source_id") === sourceId);
+  const concepts = numberField(partner, "concepts")
+    ?? (row.subject.key === sourceId ? evidenceNumber(row.evidence, "concepts") : null);
+  return concepts === null ? "" : `${formatCount(concepts)} 个概念`;
+}
+
+/** 同一条问题里两份来源标题相同时,给按钮组名加上规模,还相同就写第几份。 */
+function distinguishSameTitles(row: KgFindingRow, buttons: FindingButtonSpec[]) {
+  const order: string[] = [];
+  const titles = new Map<string, string>();
+  for (const spec of buttons) {
+    if (!("sourceId" in spec) || titles.has(spec.sourceId)) continue;
+    order.push(spec.sourceId);
+    titles.set(spec.sourceId, spec.title);
+  }
+  const labels = new Map<string, string>();
+  for (const sourceId of order) {
+    const title = titles.get(sourceId) ?? "";
+    const twins = order.filter((other) => titles.get(other) === title);
+    if (twins.length < 2) continue;
+    const sizes = twins.map((other) => sourceSizeText(row, other));
+    const size = sizes[twins.indexOf(sourceId)];
+    const sizeIsDistinct = size !== "" && sizes.filter((other) => other === size).length === 1;
+    labels.set(sourceId, sizeIsDistinct
+      ? `${title}（${size}）`
+      : `${title}（第 ${twins.indexOf(sourceId) + 1} 份${size ? `，${size}` : ""}）`);
+  }
+  for (const spec of buttons) {
+    if ("sourceId" in spec && labels.has(spec.sourceId)) spec.label = labels.get(spec.sourceId) ?? spec.label;
+  }
 }
 
 /** 补上关联跑完之后写在按钮旁的那一句(数字是它自己返回的,口径与问题清单不同、不互相核对)。 */
@@ -1470,7 +1560,7 @@ function checkedText(ruleId: string, status: KgFindingRuleStatus): string {
  * 已通过区每条规则一行(§3.4)。三种状态分开写,绝不都画成绿勾:
  *   ✓ 检查过、没发现 —— 写明检查了多少;
  *   – 没法检查 —— 写原因,这一档不算通过;
- *   – 检查了但有一部分没判断(F1 概念太少的来源)—— 同样单列。
+ *   – 检查了但有一部分没判断(F1 概念太少的来源),或没能检查完整(截断)—— 同样单列。
  * 有问题的规则不在这里出「✓」:它的问题在待处理区。
  */
 export function passedRuleLines(summary: KgFindingsSummary): PassedRuleLine[] {
@@ -1490,7 +1580,10 @@ export function passedRuleLines(summary: KgFindingsSummary): PassedRuleLine[] {
     }
     if (rule.status !== "ran") continue;
     if (finiteNumber(rule.total) === 0) {
-      lines.push({ ruleId, state: "clean", text: `没发现${FINDING_CLEAN_NOUN[ruleId]}${checkedText(ruleId, rule)}` });
+      // 截断了却一条都没有(例如疑似重复导入的候选触顶):没检查完,不能画成「✓ 没发现」。
+      lines.push(rule.truncated === true
+        ? { ruleId, state: "partial", text: `${name}：没能检查完整，这次没发现不代表没有` }
+        : { ruleId, state: "clean", text: `没发现${FINDING_CLEAN_NOUN[ruleId]}${checkedText(ruleId, rule)}` });
     }
     const notJudged = ruleId === "F1" ? finiteNumber(rule.sources_too_few_concepts) : null;
     if (notJudged !== null && notJudged > 0) {
