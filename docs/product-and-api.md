@@ -4565,7 +4565,9 @@ says so ("本次规划了 X 项表格分析，超过单次最多 N 项的上限�
 exactly as an invalid single plan did, to the local profile of the first sheet. Every executed
 analysis is its own result card, in plan order, naming its workbook and sheet and, when it comes
 from another library, that library; when a sheet is analysed more than once in the run, those
-cards also carry `analysis_label` (a reading of the parameters, e.g. 「按 Price 降序」), shown after
+cards also carry `analysis_label` (a reading of the parameters, e.g. 「按 Price 降序」; a profile or
+filter without parameters reads 「全部行」/「全部列」; filter values are spelled as JSON, text quoted, so
+`true` and "是" never read the same), shown after
 the operation name on the card and written as `plan=…;` on the synthesis block's title line, so
 two cards of one sheet with the same operation can be told apart; a sheet analysed once carries
 no such field. There is no merged comparison card -- the comparison is the synthesized answer's
@@ -4584,10 +4586,11 @@ when that projection was partial. The persisted/browser result is independently 
 rows, cells (headers included), and serialized table bytes (per result card), while synthesis
 receives a further row-and-byte-bounded preview. Several tables share that preview's one budget
 (`SPREADSHEET_ANALYSIS_PROMPT_BYTES` and the characters the source partition leaves it); it does
-not grow with the number of tables. Every table's title and header lines go in first, in plan
-order, then preview rows round robin, one per table per round (each table shows a prefix of its
-own rows; the first row that does not fit ends that table), so the first table cannot starve the
-others. Table evidence keys run from `k6001` in plan order; plugin-returned external evidence
+not grow with the number of tables. Every table's title line goes in first, in plan order, then
+every table's header line, in plan order (a table whose header does not fit shows no rows), then
+preview rows round robin, one per table per round (each table shows a prefix of its own rows; the
+first row that does not fit ends that table). So a wide header cannot push a later table's title
+line out, a larger budget never lists fewer tables, and the first table cannot starve the others. Table evidence keys run from `k6001` in plan order; plugin-returned external evidence
 shares the 6000 band and now numbers after the table keys instead of restarting at `k6001` (when
 both appeared they used to collide and the merged map overwrote the table receipt); without
 table results external evidence still starts at `k6001`. Two sheets of one workbook keep one

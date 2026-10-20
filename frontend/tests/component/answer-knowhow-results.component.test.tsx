@@ -281,7 +281,15 @@ test("two analyses of one sheet render as two cards, each naming its parameters"
     ...workbookFrom("nb-1"), analysis_label: "按 Qty 降序",
     rows: [{ position: 1, cells: { Price: "1" } }],
   };
+  // Same source_id/sheet/operation: a key built from those alone would be a
+  // duplicate, which React reports through console.error.
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
   renderWorkbooks([byPrice, byQty], "nb-1", { "nb-1": "本库" });
+  const keyWarnings = consoleError.mock.calls.filter((call) =>
+    call.some((part) => typeof part === "string" && part.includes("same key")),
+  );
+  consoleError.mockRestore();
+  expect(keyWarnings).toEqual([]);
   const cards = screen.getAllByRole("region", { name: "Excel 分析：报价单" });
   expect(cards).toHaveLength(2);
   expect(cards[0]).toHaveTextContent("Quotes!A1:B3 · 排序分析（按 Price 降序）");

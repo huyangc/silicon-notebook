@@ -870,6 +870,7 @@ class SpreadsheetAnalysisService:
             return [], None
         plans, tally = planned
         raise_if_cancelled(cancel_event)
+        row_cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
         executed = [
             (plan, result) for plan in plans
             if (result := self._execute(
@@ -877,6 +878,7 @@ class SpreadsheetAnalysisService:
                 manifests,
                 active_notebook_id=notebook_id,
                 notebook_tiers=notebook_tiers or {},
+                row_cache=row_cache,
             )) is not None
         ]
         if not executed:
@@ -952,8 +954,8 @@ class SpreadsheetAnalysisService:
                 return [fallback], tally
             prompt = (
                 "为电子表格问题选择受限的确定性执行计划，写进 targets 列表，每项针对"
-                "一张工作表（source_id + sheet）。问题只涉及一张表时只写一项；问题明确"
-                "要求比较、对照或分别分析多张表时，每张表各写一项，按问题提到的顺序，"
+                "一张工作表（source_id + sheet）。问题只需要对一张表做一种分析时只写一项；"
+                "问题明确要求比较、对照或分别分析多张表时，每张表各写一项，按问题提到的顺序，"
                 f"最多 {tally.limit} 项；同一张表需要几种不同分析时各写一项，完全相同的项只写一次。"
                 "只能使用给定 source_id、"
                 "sheet 和列名；不得生成公式、代码或 SQL。operation 只能是 profile、"
@@ -1182,7 +1184,11 @@ class SpreadsheetAnalysisService:
         *,
         active_notebook_id: str,
         notebook_tiers: Mapping[str, str],
+        row_cache: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
     ) -> SpreadsheetAnalysisResult | None:
+        """Run one validated plan.  ``row_cache`` (one run's) shares a
+        sheet's row dicts between the analyses of that sheet; every operation
+        below only reads them."""
         manifest = next(
             (row for row in manifests if row["source_id"] == plan.get("source_id")), None
         )
@@ -1195,7 +1201,12 @@ class SpreadsheetAnalysisService:
         if sheet is None:
             return None
         headers = sheet["headers"]
-        input_rows = [self._row_dict(row, headers) for row in sheet["rows"]]
+        cache_key = (manifest["source_id"], sheet["name"])
+        input_rows = (row_cache or {}).get(cache_key)
+        if input_rows is None:
+            input_rows = [self._row_dict(row, headers) for row in sheet["rows"]]
+            if row_cache is not None:
+                row_cache[cache_key] = input_rows
         filtered = [row for row in input_rows if self._matches(row, plan.get("filters", []))]
         operation = plan["operation"]
         if operation == "aggregate":
@@ -1602,7 +1613,12 @@ def _plan_identity(plan: dict[str, Any]) -> str:
     """What a validated plan computes: two plans with the same identity
     return the same result, so the second is a duplicate.  Only the fields
     ``_execute`` reads for that operation count -- a stray ``sort_by`` on a
-    profile changes nothing it computes."""
+    profile changes nothing it computes.
+
+    Filters are compared as written, never normalized: two filter lists that
+    happen to select the same rows (``1`` and ``"1"``, reordered conditions)
+    are kept as two analyses.  That errs toward running a redundant card,
+    never toward dropping a different one."""
     used = {
         "profile": (),
         # A count never reads its measure.
@@ -1637,16 +1653,27 @@ def _plan_label(plan: dict[str, Any]) -> str:
         parts.append(
             f"按 {plan['sort_by']} {'升序' if plan.get('order') == 'asc' else '降序'}"
         )
-    elif operation == "filter" and plan.get("columns"):
-        parts.append("列：" + "、".join(plan["columns"]))
+    elif operation == "filter":
+        parts.append(
+            "列：" + "、".join(plan["columns"]) if plan.get("columns") else "全部列"
+        )
     if plan.get("filters"):
         parts.append("筛选：" + "，".join(
             f"{item['column']} "
             f"{_FILTER_OPERATOR_LABELS.get(item['operator'], item['operator'])} "
-            f"{_display_cell(item.get('value'))}"
+            f"{_filter_value_label(item.get('value'))}"
             for item in plan["filters"]
         ))
+    elif operation == "profile":
+        parts.append("全部行")
     return "；".join(parts)
+
+
+def _filter_value_label(value: Any) -> str:
+    """A filter value as JSON spells it: text quoted, ``true`` / ``1`` /
+    ``null`` bare, so two values the identity tells apart (``True`` and
+    ``"是"``, ``1`` and ``"1"``) never read the same on a card."""
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _label_repeated_sheets(
@@ -1881,12 +1908,14 @@ def spreadsheet_prompt_block(
     ``result_rows`` header and the rows shown never disagree with a cut.
 
     Several results (a multi-table plan) SHARE those caps -- the block's
-    budget does not grow with the number of tables -- and are admitted in two
-    passes so the first table cannot starve the others: first every result's
-    key line and column-header line, in plan order; then preview rows round
-    robin (every table's first row, then every table's second row, ...), each
-    table keeping a prefix of its rows (its first row that does not fit ends
-    that table).  Admission depends only on which lines are taken, never on
+    budget does not grow with the number of tables -- and are admitted in
+    three passes so no table can starve the others: first every result's key
+    line, in plan order (so a wide table's header cannot push a later table's
+    key out, and a larger budget never shows fewer tables); then every
+    column-header line, in plan order (a table whose header does not fit gets
+    no rows); then preview rows round robin (every table's first row, then
+    every table's second row, ...), each table keeping a prefix of its rows
+    (its first row that does not fit ends that table).  Admission depends only on which lines are taken, never on
     the order they are counted in, so a single result is admitted -- and
     rendered -- exactly as before.  Rendering keeps each table's lines
     together under its own key, ``k6001`` + plan position.
@@ -1912,11 +1941,12 @@ def spreadsheet_prompt_block(
         )
         if not budget.take(key_line):
             break
-        taken = [key_line]
+        admitted.append((key, result, [key_line]))
+    for _key, result, taken in admitted:
+        headers = [column.name for column in result.columns]
         can_append_rows = not headers or budget.take(" | ".join(headers))
         if headers and can_append_rows:
             taken.append(" | ".join(headers))
-        admitted.append((key, result, taken))
         pending_rows.append([
             " | ".join(row.cells.get(header, "") for header in headers)
             for row in result.rows[: max(1, preview_rows)]
