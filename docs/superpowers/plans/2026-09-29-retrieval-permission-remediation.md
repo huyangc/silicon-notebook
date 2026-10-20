@@ -965,7 +965,7 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
 - **验证**：`check.sh` 后端 17341 / vitest 1618；全量非 PG 17986；整条 PG 泳道 1656（中间一轮 `test_memory_sql_explain_pins` 红过一次，属已知并行泳道下的计划钉偶红：本 PR 对该 SQL 与文件的 diff 为空，单跑 3/3 绿，最终轮绿）；
   基线零松弛；变异：接线退回无查看者（逐调用点 12 处）、缓存键去指纹（fed / ppr / scale）、指纹共用命名空间、配额不剥指纹段、去掉运行内 memo、去掉挂载人跳过、摘要两处、资产路由、加入摘要、查看者顺序、天花板读者、守卫第二次调用、成本闸改回现读，各自变红。
   文档：`docs/product-and-api*.md`「挂载只对能读被挂库的人生效」、`docs/development*.md` 的 `mount_sql` 条目、`architecture.md` 参与集解析、`fangan_done.md` §58、`release-notes/mounted-private-library-for-its-readers.md`。
-- **待拍板**：`mount_sql` 的读权支不含系统管理员旁路（见 §13）。
+- **已决（2026-10-21）**：`mount_sql` 的读权支不含系统管理员旁路，与路由层读守卫同口径，不加（见 §13.2 第 1 条）。
 
 ### PR-E7 回答级与分享
 
@@ -1340,7 +1340,11 @@ PG 泳道 `scripts/check_postgres.sh`（本机一次性测试库；动迁移的 
 
 下面每一条都是用户尚未裁决的事项，括号里是当前落地的默认处理，默认处理都已合入、不阻塞。
 
-1. **系统管理员旁路（#828）**：`mount_sql` 的读权支用 `read_access_clause`，不含系统管理员旁路。管理员看共享库时，被挂的私有库对他不生效，可能与路由层的读权口径不一致。（现状：原样不含旁路。）
+1. **系统管理员旁路（#828）— 已决（2026-10-21）**：核实后发现路由层同样没有管理员旁路，两处都用 `read_access_clause`，口径本来就一致，不加旁路。证据链：
+   ① 读守卫 `api/deps.py::require_notebook_read` → `notebook_sharing.user_can_read_notebook` → 两个后端 `sharing_store.py::user_can_read_notebook` → `access_sql.NOTEBOOK_READ_SQL`（`read_access_clause()` ∧ `NOTEBOOK_LIVE_SQL`，不读 `users.role`）；挂载查看者支 `_VIEWER_REACHES_MOUNT_EXPR` 复用的正是同一个 `read_access_clause`。
+   ② 全局问答的勾选集按 `readable_notebook_ids` / `user_can_read_notebook` 逐库核读权，MCP 侧（`mcp_tools/_shared.py`、`session.py`、`profiles.py`）复核的也是 `user_can_read_notebook`，都不含管理员。`user.role == "admin"` 只出现在群组运维旁路、管理端审计、调试日志、发布公共库、许愿墙、schema 编辑与文档上限豁免，没有一处进入笔记本读权；[产品/API 合同](../../product-and-api_zh.md)「角色」一节写明群组旁路「不放宽笔记本维度的任何读写守卫」。
+   ③ 实测（master `3132d4667`，真实 `create_app()`，SQLite）：把第三个用户设为系统管理员（`/api/me` 返回 `role=admin`），对 Alice 的私有库 `GET /api/notebooks/{lib}`、`GET /api/notebooks/{lib}/sources`、`POST /api/notebooks/{lib}/ask` 均为 404，`GET /api/notebooks` 列表里没有它，`user_can_read_notebook(lib, admin)` 为 False。
+   只给挂载加旁路会造成新的不一致：直接打开是 404，挂在共享库上却能检索，还能经来源代理读全文。合同写进[产品/API 合同](../../product-and-api_zh.md)「挂载只对能读被挂库的人生效」。以下是当时登记的待拍板原文：`mount_sql` 的读权支用 `read_access_clause`，不含系统管理员旁路。管理员看共享库时，被挂的私有库对他不生效，可能与路由层的读权口径不一致。（现状：原样不含旁路。）
 2. **「晋升自」用词（#826）— 已决（2026-10-19）**：用户裁决改为「收录自：<原标题>」／「收录自个人记忆：<记忆标题>」，存量标题在读取时映射、不改库内数据，纳入界面词汇守卫（第七条通道），见[产品/API 合同](../../product-and-api_zh.md)与 `docs/ui-vocabulary.md`。以下是当时登记的待拍板原文：`docs/ui-vocabulary.md` 禁止界面出现「晋升」，而 9-29 裁决的合成来源标题是「晋升自：<原标题>」/「晋升自个人记忆：<记忆标题>」。是否改成「收录自：」之类。（现状：保留裁决原文，在词汇文档里注明为「数据，不是界面文案」，标题不进词表守卫。）
 3. **经通用路径已批准进公共库的 Memory 派生对象（E4-3 存疑 1 / E8 / 体检 H10）**：这些对象已经把 Memory 内容和原始证据带进了公共库。下架、只替换证据，还是剥离 / 删除只靠 Memory 证据支撑的对象？（现状：0067 不处理，体检 H10 只读计数；0068 对其中指向 Memory 来源的证据条目一律丢弃。）
    同一条下的三个迁移边界（#826）：合并进既有对象的个人记忆晋升条目在迁移里无法与通用晋升区分，按通用规则处理（只读普通来源现文，不读 Memory）；一个 Memory 晋升的对象后来又被通用晋升合并时，迁移看到的标签是「晋升自个人记忆」但不读这类条目现文，只保留已批准的摘录；

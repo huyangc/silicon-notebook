@@ -1364,6 +1364,16 @@ mount reader at all: it searches exactly the libraries the asker selected
 (each checked for the asker's own read access), so a library mounted on a
 selected notebook takes part only when it is selected itself.
 
+A system administrator gets **no** mount bypass, matching the notebook read
+guard: the viewer arm's read access is the same `read_access_clause` the read
+guard uses (`require_notebook_read` → `access_sql.NOTEBOOK_READ_SQL`), and
+neither looks at `users.role`. An administrator opening someone else's private
+library directly gets 404, so the same library mounted on a shared notebook the
+administrator can read does not count for them either; they cannot select it
+for Global Ask, and their Agent token cannot read it. Administrators hold only
+the group-dimension operations bypass (see "Roles"), which widens no notebook
+read guard.
+
 ### A deep copy carries the mounts that still hold for the recipient
 
 A deep copy — a user's own copy, and the copy that delivers a shared small
