@@ -260,6 +260,41 @@ def assert_a_rejection_the_new_seeds_would_collapse_keeps_the_old_seeds(
         "K-~v1:q former", "K-~v1:qformer"}], pending
 
 
+def assert_catchup_places_window_members_in_the_published_space(repo, monkeypatch) -> None:
+    """An object fused during the first v2 rebuild lands in the then-published
+    (v1) generation as ``K-q former``; the catch-up after the flip re-places it
+    in the space the flip just published, override included — so it joins the
+    group the user's rejection kept on its old seed, ``K-~v1:q former``, not
+    ``K-qformer`` (code space without the override) nor ``K-q former`` (the
+    retired space)."""
+    nb = notebook(repo, "s1", "s2", "s3")
+    concepts(repo, nb, "s1", "Q-Former")
+    concepts(repo, nb, "s2", "Qformer")
+    decide(repo, nb, "mc-old-rejected", "q former", "qformer", "rejected")
+    with legacy_code(monkeypatch):
+        rebuild(repo, nb, force=True)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    original = lifecycle._write_cluster_map_streamed
+    fired: list = []
+
+    def fuse_during_the_write(notebook_id, object_type, *args, **kwargs):
+        if not fired:
+            fired.append(True)
+            concepts(repo, notebook_id, "s3", "Q Former")
+            object_id = rows(repo, "SELECT id FROM knowledge_objects WHERE notebook_id=? "
+                                   "AND source_id='s3'", (notebook_id,))[0]["id"]
+            lifecycle.append_clusters(notebook_id, [{
+                "canonical_id": "K-q former", "member_object_id": object_id,
+                "canonical_name": "Q Former"}], object_type="concept")
+        return original(notebook_id, object_type, *args, **kwargs)
+
+    monkeypatch.setattr(lifecycle, "_write_cluster_map_streamed", fuse_during_the_write)
+    rebuild(repo, nb)
+    assert fired
+    assert published_space(repo, nb) == 2
+    assert canonical_of(repo, nb)["Q Former"] == "K-~v1:q former"
+
+
 def assert_rows_whose_objects_are_gone_stay_v1_and_are_retried(repo, monkeypatch) -> None:
     """A decision one side of which no current object carries is suspended:
     it stays in space 1 (an event counts it) and the next full rebuild tries
@@ -374,6 +409,7 @@ SCENARIOS = {
     "rejection_collision_override": (
         assert_a_rejection_the_new_seeds_would_collapse_keeps_the_old_seeds),
     "suspended_rows_retried": assert_rows_whose_objects_are_gone_stay_v1_and_are_retried,
+    "catchup_published_space": assert_catchup_places_window_members_in_the_published_space,
     "canonical_keyed_row_translated": assert_a_decision_keyed_by_canonical_ids_is_translated,
     "squash_tier": assert_the_squash_tier_proposes_spelling_variants,
     "duplicates_follow_space": assert_duplicate_blocking_follows_the_published_space,

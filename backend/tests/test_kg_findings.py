@@ -44,7 +44,7 @@ from app.domain.kg_findings_contracts import (
     source_pair_key,
     stamp_ledger_contract,
 )
-from app.domain.kg_merge_seed import concept_seed_v1
+from app.domain.kg_merge_seed import concept_decision_seeds, concept_seed_v1
 from app.services import kg_findings
 from app.services.kg_analysis_precompute import CanonicalEdgeTableBuilder
 from app.services.kg_findings import (
@@ -140,7 +140,10 @@ def _run(lib: _Library, *, cap: int = 1_000_000, object_order: Optional[int] = N
 
     def member_seeds(ids):
         calls.append(list(ids))
-        return {cid: {concept_seed_v1(n) for n in lib.member_names.get(cid, [lib.names[cid]])}
+        # The product's member read: the decision seeds (v1 and v2) of every
+        # member name (``concept_decision_seeds``).
+        return {cid: set().union(*(concept_decision_seeds(n)
+                                   for n in lib.member_names.get(cid, [lib.names[cid]])))
                 for cid in ids if cid in lib.names or cid in lib.member_names}
 
     draft = compute_findings(
@@ -163,7 +166,8 @@ def _run(lib: _Library, *, cap: int = 1_000_000, object_order: Optional[int] = N
                    for sid in request.sources}
         # Like the product's member-name read: the seeds of EVERY member (hidden
         # ones too) of each (None, canonical) key, for F4's evidence.
-        seeds = {cid: {concept_seed_v1(n) for n in lib.member_names.get(cid, [lib.names[cid]])}
+        seeds = {cid: set().union(*(concept_decision_seeds(n)
+                                    for n in lib.member_names.get(cid, [lib.names[cid]])))
                  for source_id, cid in request.names
                  if source_id is None and (cid in lib.names or cid in lib.member_names)}
         # A paged caller: the answers of one round arrive over several calls.
@@ -806,6 +810,42 @@ def test_f4_and_s1_skip_what_the_user_rejected_or_deferred():
                                       "K-q former", "K-qformer"])]
 
 
+def test_f4_matches_decisions_minted_in_seed_space_2():
+    """After a library's first v2 rebuild its decisions are keyed by v2 seeds
+    (``llama3 1``); they keep F4 quiet exactly like the v1 keys did."""
+    lib = _merge_library()
+    lib.decisions = {frozenset(("llama3 1", "llama31")): "rejected"}
+    run = _run(lib)
+    assert run.keys("F4") == []
+    assert run.status("F4")["groups_decided_apart"] == 1
+
+
+def test_f4_reads_an_override_seed_as_its_v1_seed():
+    """A decision the recompute kept on the old seed names ``~v1:<seed>``; it
+    matches the members whose v1 seed it carries."""
+    lib = _merge_library()
+    lib.decisions = {frozenset(("~v1:llama 3 1", "llama31")): "deferred"}
+    run = _run(lib)
+    assert run.keys("F4") == []
+
+
+def test_f4_and_s1_leave_out_canonicals_kept_on_their_old_seed():
+    """A canonical the decision recompute kept on its v1 seed (``K-~v1:…``) is
+    apart by the user's own rejection: it never makes an F4 group or an S1
+    narrow class, whatever its name collides with."""
+    lib = _Library()
+    _mainstream(lib)
+    lib.add_source("n-a", ["K-~v1:llama 3 1", "K-~v1:q former"] +
+                   [f"K-core{k:03d}" for k in range(18)])
+    lib.add_source("n-b", ["K-llama31", "K-~v1:qformer"] +
+                   [f"K-core{k:03d}" for k in range(20, 37)])
+    lib.names.update({"K-~v1:llama 3 1": "Llama 3.1", "K-llama31": "Llama31",
+                      "K-~v1:q former": "Q-Former", "K-~v1:qformer": "Qformer"})
+    run = _run(lib)
+    assert run.keys("F4") == []
+    assert run.status("S1")["narrow_groups"] == 0
+
+
 def test_decisions_survive_a_canonical_id_drift():
     """A canonical id moves when its cluster's minimum member changes; the stored
     decision does not. Same members, new canonical ids: the rejection still
@@ -950,9 +990,12 @@ def test_f4_evidence_carries_the_member_seeds_capped_per_canonical(monkeypatch):
     row = _run(lib).rows("F4")[0]
     seeds = row["evidence"]["member_seeds"]
     assert set(seeds) == {"K-llama 3 1", "K-llama 31", "K-llama31"}
-    assert seeds["K-llama 3 1"] == sorted(
-        {concept_seed_v1(n) for n in ["Llama 3.1", "Llama 3.1 instruct", "llama three one"]})[:2]
-    assert seeds["K-llama 31"] == [concept_seed_v1("Llama 31")]
+    assert seeds["K-llama 3 1"] == sorted(set().union(*(
+        concept_decision_seeds(n)
+        for n in ["Llama 3.1", "Llama 3.1 instruct", "llama three one"])))[:2]
+    # both spaces' seeds of every member: a decision of either space names it
+    assert seeds["K-llama 31"] == sorted(concept_decision_seeds("Llama 31"))
+    assert seeds["K-llama 31"] == ["llama 31", "llama31"]
     assert row["evidence"]["seeds_truncated"] is True
 
 

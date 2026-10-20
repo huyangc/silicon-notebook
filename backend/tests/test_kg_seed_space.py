@@ -275,6 +275,18 @@ def test_decision_seeds_cover_both_spaces_and_the_override():
     assert decision_match_key("qformer") == "qformer"
 
 
+def test_the_read_side_also_asks_for_override_keys():
+    """The findings page reads the stored decisions of an F4 group by its
+    member seeds; a decision the recompute kept on the old seed is keyed
+    ``~v1:<seed>``, so the bound list carries that form too."""
+    from app.services.kg_findings_view import decision_lookup_seeds
+
+    assert decision_lookup_seeds({"K-a": {"llama 3 1", "llama3 1"}, "K-b": {"llama31"}}) == [
+        "llama 3 1", "llama3 1", "llama31",
+        "~v1:llama 3 1", "~v1:llama3 1", "~v1:llama31"]
+    assert decision_lookup_seeds({}) == []
+
+
 def test_object_level_dedup_seed_follows_the_space_and_the_override():
     """Promotion dedup into a public library compares seeds in the base's
     published space, with its override keys (no acronym redirect)."""
