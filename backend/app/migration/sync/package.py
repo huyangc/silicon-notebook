@@ -51,7 +51,19 @@ from typing import Any
 # directory layout are byte-for-byte what v1 had, so a v2 full package is a v1
 # full package plus manifest fields; what a v1 reader could not do is tell a
 # full package from an incremental one, which is exactly why the version moved.
-PACKAGE_FORMAT_VERSION = 2
+#
+# 3 (design doc §11 rulings, 2026-10-19): the same layout, but the package
+# means something a v2 reader would misapply rather than refuse. The Knowhow
+# edit history may be left out (``manifest.knowhow_history``, required from
+# v3 on), ``group_members`` always travels empty and ``groups`` only as
+# ``(id, name)``, because the importer maps groups by name and never creates
+# one. A v2 importer reading that would quietly insert a nameless,
+# memberless group under its source id beside a grant on it -- so the version
+# moves and a v2 importer refuses the package outright. This build reads v2
+# packages too (``READABLE_FORMAT_VERSIONS``): absent ``knowhow_history``
+# means the history is there, as it always was in v2.
+PACKAGE_FORMAT_VERSION = 3
+READABLE_FORMAT_VERSIONS = (2, 3)
 
 # ``manifest.mode``. A full package reconciles the notebooks it names (the
 # importer deletes target rows the package does not carry); an incremental one

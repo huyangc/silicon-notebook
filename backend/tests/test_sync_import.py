@@ -909,7 +909,9 @@ def test_a_case_fold_onto_an_already_matched_user_refuses_the_import(
     unique lower(username) index), so the shape is built by editing the
     package's ``users.jsonl`` and resealing it: ``ALICE`` folds onto the
     target's ``alice``, whom the source's ``alice`` already matched exactly.
-    Refused while only reading -- in a dry run too -- naming both."""
+    The new mirror's membership row is pointed at ``ALICE`` so a written row
+    really needs that user. Refused while only reading -- in a dry run too --
+    naming both."""
     package = _export(source, tmp_path / "out-fold-clash")
     users = package / "users.jsonl"
     lines = users.read_text(encoding="utf-8").splitlines()
@@ -918,6 +920,11 @@ def test_a_case_fold_onto_an_already_matched_user_refuses_the_import(
         "display_name": "Shadow", "role": "user",
     }, ensure_ascii=False, sort_keys=True))
     users.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    members = package / rows_path("notebook_members")
+    members.write_text(
+        members.read_text(encoding="utf-8").replace(BOB[0], "user-a-shadow"),
+        encoding="utf-8",
+    )
     _reseal(package)
 
     for dry_run in (True, False):
@@ -929,6 +936,69 @@ def test_a_case_fold_onto_an_already_matched_user_refuses_the_import(
 
     assert _count(target["repo"], "SELECT COUNT(*) FROM sync_imports") == 0
     assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 0
+
+
+def test_only_users_a_written_row_needs_are_mapped_or_created(
+    source, target, tmp_path
+):
+    """A group's owner/creator never leaves the source (``groups`` travels as
+    ``(id, name)``), so they are not in users.jsonl at all. And a package that
+    does name users no written row needs -- as an older exporter's did, with
+    group owners and whole rosters -- gets no account created for them and no
+    ambiguity check over them: here a roster member ``dave`` and an ``ALICE``
+    that would fold onto the target's matched ``alice``."""
+    _add_user(source["repo"], "user-a-owner", "owner")
+    with source["repo"]._write() as db:
+        db.execute(
+            "UPDATE groups SET owner_id='user-a-owner', created_by='user-a-owner' "
+            "WHERE id='grp-a'"
+        )
+    package = _export(source, tmp_path / "out-owner")
+    shipped = [
+        json.loads(line)
+        for line in (package / "users.jsonl").read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    assert "user-a-owner" not in {row["id"] for row in shipped}
+    # An older exporter's shape: roster rows and the users they name.
+    users = package / "users.jsonl"
+    users.write_text(
+        users.read_text(encoding="utf-8")
+        + "".join(
+            json.dumps({"id": user_id, "username": name, "display_name": name,
+                        "role": "user"}, ensure_ascii=False, sort_keys=True) + "\n"
+            for user_id, name in (("user-a-dave", "dave"), ("user-a-shadow", "ALICE"))
+        ),
+        encoding="utf-8",
+    )
+    roster = package / rows_path("group_members")
+    roster.write_text(
+        "".join(
+            json.dumps({"group_id": "grp-a", "user_id": user_id, "role": "member",
+                        "added_at": MOMENT, "added_by": "user-a-owner"},
+                       ensure_ascii=False, sort_keys=True) + "\n"
+            for user_id in ("user-a-dave", "user-a-shadow")
+        ),
+        encoding="utf-8",
+    )
+    document = _manifest(package)
+    document["tables"]["group_members"]["rows"] = 2
+    (package / MANIFEST_NAME).write_text(
+        json.dumps(document, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    _reseal(package)
+
+    report = _import(target, package, create_missing_users=True)
+
+    assert report.error == ""
+    assert _count(
+        target["repo"],
+        "SELECT COUNT(*) FROM users WHERE username IN ('dave','owner','ALICE')",
+    ) == 0
+    assert set(report.user_mapping.created) == {BOB[0]}
+    assert report.tables["group_members"].skipped == 2
+    assert _count(target["repo"], "SELECT COUNT(*) FROM group_members") == 0
 
 
 def test_ascii_lower_folds_only_ascii_letters():
@@ -1079,6 +1149,30 @@ def test_a_needed_group_without_a_name_or_absent_from_the_package_refuses(
     assert "授权引用的群组 grp-gone 不在包内" in message
 
 
+def test_a_group_an_older_build_created_mid_import_is_named_on_resume(
+    source, target, package, monkeypatch
+):
+    """An older build recorded ``__created__:groups:<id>`` for a group it
+    created and seeded its members later; this build never seeds members, so
+    a resumed or superseding run names that group for the operator."""
+    _fail_partway(target, package, monkeypatch)
+    package_id = _manifest(package)["package_id"]
+    with target["repo"]._write() as db:
+        db.execute(
+            "INSERT INTO sync_import_progress(package_id,table_name,rows_applied,"
+            "completed_at) VALUES(?,?,0,?)",
+            (package_id, "__created__:groups:grp-b", MOMENT),
+        )
+
+    report = _import(target, package)
+
+    assert report.error == ""
+    assert any(
+        "grp-b（shared-team）" in warning and "older build" in warning
+        for warning in report.warnings
+    )
+
+
 def test_a_missing_group_no_new_grant_needs_does_not_wedge_later_imports(
     source, target, package, tmp_path
 ):
@@ -1211,6 +1305,78 @@ def test_a_memory_made_at_the_target_carries_no_source_environment(
     assert mine and "sync_origin" not in mine[0].provenance
     imported = [m for m in _target_memories(target, source["exported"]) if m.id != local.id]
     assert imported and imported[0].provenance["sync_origin"] == SOURCE_ENV
+
+
+# ------------------------------------------------ package format 3 vs 2
+
+
+def _set_manifest(package: Path, **changes) -> None:
+    document = _manifest(package)
+    for key, value in changes.items():
+        if value is _DROP:
+            document.pop(key, None)
+        else:
+            document[key] = value
+    (package / MANIFEST_NAME).write_text(
+        json.dumps(document, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+_DROP = object()
+
+
+def test_this_build_writes_format_3_and_a_format_2_reader_would_refuse_it(
+    source, tmp_path
+):
+    """Format 3 means things a format-2 importer would misapply (an empty
+    roster, ``(id, name)``-only groups, history possibly left out), so the
+    version moved: the old reader's ``!= 2`` check refuses it cleanly."""
+    from app.migration.sync.package import PACKAGE_FORMAT_VERSION, READABLE_FORMAT_VERSIONS
+
+    package = _export(source, tmp_path / "out-v3")
+
+    assert PACKAGE_FORMAT_VERSION == 3
+    assert _manifest(package)["format_version"] == 3
+    assert READABLE_FORMAT_VERSIONS == (2, 3)
+
+
+def test_a_format_2_package_still_imports_with_its_history(
+    source, target, tmp_path
+):
+    """A package an older exporter wrote: format 2, no ``knowhow_history``
+    field, the history rows present. Read as carrying the history, exactly
+    as format 2 always did."""
+    source["settings"].sync_knowhow_history = True
+    package = _export(source, tmp_path / "out-v2")
+    _set_manifest(package, format_version=2, knowhow_history=_DROP)
+    _reseal(package)
+
+    report = _import(target, package)
+
+    assert report.error == ""
+    assert report.knowhow_history is True
+    assert report.tables["knowhow_changes"].inserted == len(_rows(package, "knowhow_changes"))
+
+
+def test_a_format_3_package_must_say_whether_it_carries_the_history(
+    source, target, tmp_path
+):
+    package = _export(source, tmp_path / "out-v3-silent")
+    _set_manifest(package, knowhow_history=_DROP)
+    _reseal(package)
+
+    with pytest.raises(SyncImportError, match="knowhow_history"):
+        _import(target, package, dry_run=True)
+
+
+def test_an_unknown_format_version_is_refused(source, target, tmp_path):
+    package = _export(source, tmp_path / "out-v4")
+    for version in (4, 1, "3", True):
+        _set_manifest(package, format_version=version)
+        _reseal(package)
+        with pytest.raises(SyncImportError, match="format_version"):
+            _import(target, package, dry_run=True)
 
 
 # ------------------------------------------------------------ optional refs
@@ -2671,10 +2837,10 @@ def test_a_source_invitation_link_never_reaches_the_target(
             "invite_created_by=? WHERE id=?",
             ("invite-from-source", MOMENT, ALICE[0], "grp-a"),
         )
-    # Exported AFTER the token exists, so the package really carries it and
-    # the assertions below are about the importer, not about an empty column.
+    # Exported AFTER the token exists: the exporter itself leaves it behind,
+    # with every other column but the two name mapping needs.
     package = _export(source, tmp_path / "out-invite")
-    assert _rows(package, "groups")[0]["invite_token"] == "invite-from-source"
+    assert _rows(package, "groups") == [{"id": "grp-a", "name": "shared-team"}]
 
     report = _import(target, package)
 

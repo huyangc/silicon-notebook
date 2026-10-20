@@ -451,14 +451,15 @@ def test_a_global_row_change_travels_without_a_notebook(baseline):
     repo = baseline["repo"]
     with repo._write() as db:
         db.execute(
-            "UPDATE groups SET description = ? WHERE id = ?",
+            "UPDATE groups SET name = ? WHERE id = ?",
             ("renamed", f"grp-alpha"),
         )
 
     report = _export(baseline["settings"], baseline["out"])
 
     rows = {row["id"]: row for row in _rows(report.package_dir, "groups")}
-    assert rows["grp-alpha"]["description"] == "renamed"
+    # groups travels as (id, name) only: the importer just maps it by name.
+    assert rows["grp-alpha"] == {"id": "grp-alpha", "name": "renamed"}
 
 
 def test_deleting_a_notebook_is_reported_and_not_listed_as_carried(baseline):

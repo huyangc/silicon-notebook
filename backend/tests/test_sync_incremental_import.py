@@ -2880,3 +2880,44 @@ def test_re_running_an_applied_package_reports_its_recorded_history_state(baseli
     assert again.already_applied is True
     assert again.knowhow_history_complete is False
 
+
+def test_stale_history_colliding_with_a_partial_window_is_refused_before_the_claim(
+    baseline,
+):
+    """While the history is incomplete, a milestone the source deleted with
+    the switch off is still here; re-creating one under the same name and
+    shipping it in a window would collide on (table_id, name) partway through
+    the import. It is refused before anything is claimed, naming the key and
+    the fix. A delete in the same window clears it."""
+    table_id = _alpha_table(baseline)
+    source = baseline["source"]["repo"]
+    mirror = baseline["target"]["repo"]
+    _carry_knowhow_history(baseline)
+    _add_milestone(source, table_id, "mstone-v1", "v1", 1)
+    assert _import(baseline["target"], _window(baseline).package_dir).error == ""
+    baseline["source"]["settings"].sync_knowhow_history = False
+    with source._write() as db:
+        db.execute("DELETE FROM knowhow_milestones WHERE id='mstone-v1'")
+    _add_row(source, table_id, "while off")
+    assert _import(baseline["target"], _window(baseline).package_dir).error == ""
+
+    _carry_knowhow_history(baseline)
+    _add_milestone(source, table_id, "mstone-v1-again", "v1", 2)
+    window = _window(baseline)
+    before = _count(mirror, "SELECT COUNT(*) FROM sync_imports")
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(baseline["target"], window.package_dir, dry_run=True)
+    message = str(failure.value)
+    assert "knowhow_milestones" in message and "'v1'" in message
+    assert "sync export --full" in message
+    with pytest.raises(SyncImportError):
+        _import(baseline["target"], window.package_dir)
+    assert _count(mirror, "SELECT COUNT(*) FROM sync_imports") == before
+
+    healed = _import(
+        baseline["target"],
+        _export(baseline["source"], baseline["out"], full=True).package_dir,
+    )
+    assert healed.error == "" and healed.knowhow_history_complete is True
+

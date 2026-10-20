@@ -106,7 +106,7 @@
 | notebooks | created_by | 硬失败，整个包不导入（粒度是包不是笔记本：行相位按表提交，无法只剔一本） |
 | notebook_members | user_id | 跳过该行并记日志 |
 | notebook_grants | principal_id（PRINCIPAL）、created_by | principal 映射不到跳过该行并记日志，everyone 不需要映射；created_by 映射不到置为导入执行者 |
-| groups | created_by、owner_id、invite_created_by | 组按 name 匹配目标端已有组，导入从不建组也不更新组（§4）；三列的规则只为策略表的完备性保留，不可达 |
+| groups | created_by、owner_id、invite_created_by | 组按 name 匹配目标端已有组，导入从不建组也不更新组（§4）。导出端只带 `(id, name)` 两列（`database._PROJECTED_COLUMNS`）：组的创建者/所有者不进 users.jsonl，邀请令牌不出源环境；三列的规则只为策略表的完备性保留，不可达 |
 | group_members | group_id（GROUP）、user_id、added_by | 成员行只随本次导入创建的组播种，而导入从不建组，所以导出端干脆不带成员行（`export._EMPTY_ROW_TABLES`：行文件恒为空、表条目照留，源端成员名单与其用户投影都不出源环境）；目标端组的成员名单归目标端 |
 | notebook_bases、notebook_object_schemas、notebook_assets、knowhow_tables、knowhow_milestones | created_by | 映射不到置为导入执行者 |
 | knowhow_cell_code | updated_by | 映射不到置为导入执行者 |
@@ -143,7 +143,10 @@ users 不同步但导入时可能**创建**：见 §4。
   大小写后对应多个目标用户、或会和另一个源用户落到同一个目标用户，导入在认领前（dry run 同样）
   硬失败，逐条列出「源 X 忽略大小写对应多个目标用户 …」/「源 X 与源 Y 忽略大小写会落到同一个
   目标用户 Z」。按大小写折叠匹配上的每一对写进报告 `user_mapping.case_folded` 并发一条警告
-  「源 X → 目标 Y」（用户裁决 2026-10-19，§11）。两遍都匹配不到时，若 `--create-missing-users`
+  「源 X → 目标 Y」（用户裁决 2026-10-19，§11）。映射只对「本次会被写入的行引用到的用户」做
+  （`import_.py::_referenced_users`）：groups/group_members 的行、目标端已有镜像上的授权边（只随新建
+  笔记本播种）、挂到本端不会存在的库上的挂载边，都不写入，它们引用的用户既不建号、也不参与忽略大小写
+  的歧义判断——旧版导出端带过来的组所有者与整份成员名单同样被忽略。两遍都匹配不到时，若 `--create-missing-users`
   打开则按源端投影建一个无凭据的本地用户，否则按 §3.2 表内规则处理——走到这一步的用户在目标端
   没有任何大小写变体，所以新建不会撞 `lower(username)` 唯一索引。建出来的无凭据账号 username 与
   源端相同；若该 username 就是统一认证返回的工号，该用户下次统一登录会按精确 username 直接进入
@@ -793,7 +796,7 @@ NOT NULL` 是普通（非 `CONCURRENTLY`）建索引，建完之前持有 `sync_
 
 ```
 sync-<source_env>-<from_seq>-<to_seq>-<package_id 前 8 位>/
-  manifest.json      # format_version=2、package_id、source_env、target_env、created_at、schema_pair、
+  manifest.json      # format_version=3（本构建也读 2，见下）、package_id、source_env、target_env、created_at、schema_pair、
                      # embed_runtime_dim、mode（full|incremental）、from_seq/to_seq、
                      # base_package_id（增量包=上次水位的 package_id，全量包为空字符串）、
                      # scoped（true|false：`--notebook` 限定导出为 true，否则 false——增量式
@@ -801,8 +804,8 @@ sync-<source_env>-<from_seq>-<to_seq>-<package_id 前 8 位>/
                      # 「未知」处理，不当 false 用，见下方「下游」判据）、
                      # knowhow_history（true|false：本包是否带 knowhow_milestones/
                      # knowhow_changes，取导出端 SILICON_NOTEBOOK_SYNC_KNOWHOW_HISTORY，默认 false；
-                     # false 时 tables 与 deletes.jsonl 都不提这两张表。增量式字段，缺省的旧包
-                     # 按 true 读——旧构建总是带历史，§11）、
+                     # false 时 tables 与 deletes.jsonl 都不提这两张表。format 3 起必填；
+                     # format 2 的包没有这个字段，按 true 读——旧构建总是带历史，§11）、
                      # notebooks、deleted_notebooks、tables{columns,rows,sha256}、deletes（条数）、
                      # kg_epochs（条数，本 PR 恒 0）、users、files；最后写入，是「包完整」的
                      # 标记，自身不进 checksums.json
@@ -1465,6 +1468,18 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
   大小写变体）。用例：`tests/test_sync_manifest.py` 的 `build_user_mapping` 纯函数用例、
   `tests/test_sync_import.py`（大小写变体映射到目标账号、精确优先、折叠到已匹配用户被拒）、
   `tests/postgres/test_sync_import_pg.py::test_users_fold_ascii_case_and_groups_match_by_name_only_pg`。
+
+- **随裁决一并落地的包格式与预检（2026-10-21 评审跟进）。**
+  - 包格式升到 `format_version=3`（`package.PACKAGE_FORMAT_VERSION`）：布局不变，但 v3 的含义旧导入端会
+    误用（组只带 `(id, name)`、成员行恒空、历史可能不带——旧导入端会以源 id 插入一个无名无成员的组并把
+    授权挂上去），所以升版让 v2 导入端直接拒绝。本构建读 2 和 3（`READABLE_FORMAT_VERSIONS`）：v2 包没有
+    `knowhow_history`，按「带了」读；v3 包必须声明。运维须**两端一起升级**。
+  - 历史不完整时的唯一键预检：窗口带历史而链头不完整时，认领前先探 `knowhow_milestones`/
+    `knowhow_changes` 的二级唯一键（`(table_id, name)`、`(table_id, seq)`），与目标端残留的旧历史行撞键
+    （且该行不在本窗口的删除里、也不被本包同 id 行替换）就拒绝并提示 `sync export --full`
+    （`import_.py::_preflight_partial_history`），不再在行相位中途失败。
+  - 升级续跑：同一源环境未完成的导入若留有旧构建写的 `__created__:groups:<id>` 进度行，导入发警告点名
+    这些组（`_warn_legacy_created_groups`）——旧构建建了组、成员可能还没播种，本构建不会补。
 
 ### 其余
 - `kg_epoch` 折叠延后：§7「压缩」阶段直接忽略 `operation='kg_epoch'` 的日志行，本 PR 的

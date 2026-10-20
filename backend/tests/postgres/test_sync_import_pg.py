@@ -573,7 +573,18 @@ def test_users_fold_ascii_case_and_groups_match_by_name_only_pg(
             "VALUES ('grant-pg',%s,'group','grp-src','reader','user-local',%s)",
             (notebook, MOMENT),
         )
+    # A user only the group row names (its creator) never leaves the source:
+    # groups travels as (id, name) only.
+    _add_pg_user(repo, "user-src-owner", "owner")
+    with repo._write() as db:
+        db.execute("UPDATE groups SET created_by='user-src-owner' WHERE id='grp-src'")
     package = _export_sync_key_source(sync_key_source, tmp_path, "out-rulings", notebook)
+    assert [
+        json.loads(line)
+        for line in (package / "rows" / "groups.jsonl").read_text(encoding="utf-8").splitlines()
+        if line
+    ] == [{"id": "grp-src", "name": "pg-team"}]
+    assert "user-src-owner" not in (package / "users.jsonl").read_text(encoding="utf-8")
     _add_pg_user(target["repo"], "user-tgt-a1", "a1")
 
     for dry_run in (True, False):
@@ -583,7 +594,7 @@ def test_users_fold_ascii_case_and_groups_match_by_name_only_pg(
     assert _one(target["repo"], "SELECT COUNT(*) AS n FROM sync_imports")["n"] == 0
 
     _add_pg_group(target["repo"], "grp-tgt", "pg-team")
-    report = import_package(target["settings"], package)
+    report = import_package(target["settings"], package, create_missing_users=True)
 
     assert report.error == ""
     assert report.user_mapping.case_folded == (("A1", "a1"),)
@@ -596,6 +607,9 @@ def test_users_fold_ascii_case_and_groups_match_by_name_only_pg(
     )["principal_id"] == "grp-tgt"
     assert _one(
         target["repo"], "SELECT COUNT(*) AS n FROM groups WHERE id='grp-src'"
+    )["n"] == 0
+    assert _one(
+        target["repo"], "SELECT COUNT(*) AS n FROM users WHERE username='owner'"
     )["n"] == 0
 
 
