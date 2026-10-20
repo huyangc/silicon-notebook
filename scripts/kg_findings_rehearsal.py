@@ -1569,9 +1569,13 @@ def to_json(report: Mapping[str, Any]) -> str:
 
 
 def write_private(path: str, text: str) -> None:
-    """The report may carry user data (``--show-samples``): owner-only file."""
+    """The report may carry user data (``--show-samples``): owner-only file.
+    The create mode only applies to a new file, so an existing target (say a
+    0644 one) is narrowed to owner-only on the descriptor before any byte of
+    the report reaches it."""
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        os.fchmod(handle.fileno(), 0o600)
         handle.write(text)
 
 

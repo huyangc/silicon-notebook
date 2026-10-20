@@ -968,6 +968,46 @@ def test_f4_rejudges_on_visible_names_and_promotes_the_next_group(monkeypatch):
     assert "GPT_4_0" not in dumped
 
 
+def test_a_cap_filled_mid_lookahead_still_reports_the_rest_as_truncated(monkeypatch):
+    """codex #941 P2: with the lookahead, one round asks for more groups than the
+    free slots. When the cap fills part-way (an earlier group dropped, the next
+    kept), the groups after it were asked but never judged — they must still
+    count (``total > persisted``, ``truncated``), otherwise the ledger claims the
+    list is complete, opens a cross-build comparison, and the skipped groups
+    read as "resolved" next time."""
+    monkeypatch.setattr(kg_findings, "MAX_PERSISTED_FINDINGS", 1)
+    lib = _Library()
+    _mainstream(lib)
+    lib.add_source("h-a", ["K-gpt 4 0", "K-gpt40"] + [f"K-core{k:03d}" for k in range(18)])
+    lib.add_source("h-b", ["K-gpt 4 0", "K-gpt40", "K-llama 3 1", "K-llama31",
+                           "K-mistral 7 1", "K-mistral71"] +
+                   [f"K-core{k:03d}" for k in range(20, 30)])
+    lib.names.update({"K-gpt 4 0": "GPT-4.0", "K-gpt40": "GPT_4_0",
+                      "K-llama 3 1": "Llama 3.1", "K-llama31": "Llama31",
+                      "K-mistral 7 1": "Mistral 7.1", "K-mistral71": "Mistral71"})
+    lib.visible = {"K-gpt40": ["Generative Pretrained Forty"]}   # gpt: unreproducible
+    run = _run(lib)
+    assert len(run.rounds) == 1                       # all three asked in one round
+    assert run.keys("F4") == ["llama31"]              # gpt dropped, llama fills the cap
+    status = run.status("F4")
+    # mistral was asked, never judged: still found, so the cap is not silent
+    assert (status["total"], status["persisted"], status["truncated"]) == (2, 1, True)
+    assert status["groups_unreproducible"] == 1
+
+
+def test_the_s1_window_keeps_its_examples_and_counts_unchanged_at_its_cap():
+    """The S1 window shares the class: its counts come from the full narrow-group
+    pass, never from the window, and a full window only bounds the examples."""
+    lib = _merge_library()
+    for k in range(5):     # five more narrow groups (v1 seeds differ, v2 equal)
+        lib.add_source(f"s1-{k}", [f"K-x{k} y", f"K-x{k}y"] +
+                       [f"K-core{j:03d}" for j in range(40 + 3 * k, 52 + 3 * k)])
+        lib.names.update({f"K-x{k} y": f"X{k} Y", f"K-x{k}y": f"X{k}Y"})
+    status = _run(lib).status("S1")
+    assert status["narrow_groups"] == 7
+    assert len(status["examples"]) == 3
+
+
 # ===================================================================== F5
 def test_f5_is_one_notebook_row_with_top_sources():
     lib = _truth_library()
