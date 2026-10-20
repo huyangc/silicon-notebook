@@ -692,6 +692,83 @@ a large notebook the neighbour view says the node cannot be located yet — that
 built, or that the current preview does not hold this node — until the next index build. A
 neighbour focus the stored preview does not hold is answered the same way.
 
+## Merge rule upgrade: concept seed space 2
+
+This version switches concept merge seeds to a new rule (product contract: "Concept merge seeds" in
+[Unified KG](./product-and-api.md)): a name first loses the whitespace, hyphens and underscores of its
+original text, then other punctuation becomes spaces, so "Q-Former" and "Qformer" are one merged
+knowledge object from now on. `CLUSTER_ALGO_VERSION` moves to 4 at the same time, and the pending-merge
+review gains a "same name, different spelling" candidate tier.
+
+**Release order.** Release after the version that carries the cluster-map write fix (PR #〔fill in at
+merge〕): this version makes every deployed library's next "update analysis" a full re-merge, and
+without that fix the generation-write stage of a first full merge on PostgreSQL can hit
+`POSTGRES_STATEMENT_TIMEOUT_SECONDS`.
+
+**Lazy convergence (nothing is queued).** The upgrade rebuilds no library at startup. Each library is
+re-merged in full by its next "update analysis" or rebuild, and then:
+
+- the merge is redone under the new rule: almost every multi-word concept's merged knowledge object id
+  changes once and the topic boards are recast once; concept descriptions are reused by signature,
+  only those whose representative name changed are written again;
+- stored merge decisions are recomputed into new seed pairs from the current objects' names and land in
+  that merge's pending-merge refresh transaction, with the event `kg_merge_decisions_recomputed`:
+  `translated` rows recomputed, `suspended` rows left as they are because no current object carries a
+  side, `decision_rows_added` decision rows added, `override_keys` keys kept on their old seed
+  (`~v1:<old seed>`) because a rejection would otherwise collapse onto one new seed, `unresolved`
+  rejections that conflict with a confirmation (the confirmation wins). Suspended rows stay in the old
+  space and are retried by every later full merge;
+- until then the KG analysis panel says "merge rules updated, update once", and the "needs
+  development" S1 item says "fixed, applied by the next update analysis".
+
+Until a library has been re-merged, new uploads keep joining the old merged knowledge objects under the
+old rule (`unified_kg_state.concept_seed_version` stays 1); a placement during which that merge
+publishes is placed again under the new rule. So one library never mixes the two id forms. A library
+created after the upgrade uses the new rule from the start. A deep copy keeps the rule of its source's
+published merge; a copy of a source that was waiting for a rebuild carries no merge and places under
+the new rule.
+
+**Mixed cross-library period.** Graph retrieval and federated reasoning treat the same canonical id in
+the active library and a reference library as one hub. While one of them has switched and the other
+has not, cross-library bridges of multi-word concepts are lost until both have been re-merged;
+single-word concepts are unaffected. Re-merge reference libraries (public libraries) first, at low
+peak: online, open the reference library and click "update analysis"; or, in a stopped-service
+maintenance window, run
+
+```bash
+PYTHONPATH=backend python -m app.scripts.recluster_kg <notebook_id> --confirm-service-stopped
+```
+
+and let active libraries switch on their next "update analysis".
+
+**Two kinds of library to update once by hand.** A library that has a merge but no state row places
+under the new rule: a deep copy made before the upgrade and never written to since, and a library
+merged in with `scripts/merge_dbs.py`. If its merge was built under the old rule, new multi-word
+concepts land apart from its existing merged knowledge objects until it is re-merged in full. The third
+query below lists them; one "update analysis" each is enough.
+
+**Progress queries** (both backends):
+
+```sql
+-- libraries still on the old rule that hold a merge
+SELECT notebook_id FROM unified_kg_state WHERE concept_seed_version = 1 AND cluster_count > 0;
+-- a library's decisions not recomputed yet (suspended)
+SELECT count(*) FROM concept_merge_candidates
+WHERE notebook_id = '<id>' AND seed_version = 1 AND status IN ('confirmed','rejected','deferred');
+-- libraries with a merge but no state row
+SELECT DISTINCT c.notebook_id FROM concept_clusters c
+WHERE c.object_type = 'concept'
+  AND NOT EXISTS (SELECT 1 FROM unified_kg_state u WHERE u.notebook_id = c.notebook_id);
+```
+
+`KG_MERGE_SQUASH_CANDIDATES_MAX` (default 1000) caps the "same name, different spelling" pairs one
+refresh writes; hitting it emits `kg_merge_squash_candidates_capped` and keeps the groups with the most
+members.
+
+SQLite deployments with change capture on (`sync capture`): the upgrade backfills the new column of
+every existing state row to 1, which logs one change per row, so the next export re-sends those state
+rows unchanged (volume only); the PostgreSQL migration fires no capture.
+
 ## Promotion provenance in public libraries
 
 A knowledge object promoted into a public library now carries the library's own provenance: one

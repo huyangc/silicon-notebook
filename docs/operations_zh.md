@@ -526,6 +526,68 @@ manifest 字段。
 并区分是图谱预览尚未生成，还是当前预览里还没有这个节点，下一次索引构建后可用。邻居焦点不在落盘预览里时，
 也按同样方式处理。
 
+## 合并规则升级：概念种子空间 2
+
+本版本把概念合并种子换成新规则（产品契约见 [统一 KG](./product-and-api_zh.md) 的「概念合并种子」）：先去掉
+原文里的空白、连字符、下划线，再把其余标点变成空格，「Q-Former」「Qformer」从此是同一个合并后的知识对象；
+`CLUSTER_ALGO_VERSION` 同时升到 4，待确认合并多一档「同名不同写法」候选。
+
+**发布顺序。** 需在包含 cluster-map 写入修复的版本（PR #〔合并时填〕）之后发布：本版本让每个已部署库的下一次
+「更新分析」都全量重新合并一次，没有那个修复，PostgreSQL 上第一次全量合并的写代段可能撞上
+`POSTGRES_STATEMENT_TIMEOUT_SECONDS`。
+
+**懒收敛（不自动排队）。** 升级后不会在启动时自动重建任何库。每个库在下一次「更新分析」或整理时全量重新合并
+一次，届时：
+
+- 合并结果按新规则重排，几乎所有多词概念的合并后知识对象 id 都会变一次，主题板块随之整体重新划分一次；
+  概念描述按签名复用，只有代表名因此换掉的那些会重新生成；
+- 已存的合并决定按当前对象的名字重算成新种子对，在同一次合并的待确认合并刷新事务里落库，发事件
+  `kg_merge_decisions_recomputed`：`translated` 已重算的行数，`suspended` 找不到对应对象而保持原样的行数，
+  `decision_rows_added` 新增的决定行数，`override_keys` 因驳回在新规则下会撞成同一种子、而保留旧种子
+  （`~v1:<旧种子>`）的键数，`unresolved` 与确认决定冲突、只能以确认为准的驳回数。悬置的行留在旧空间，以后
+  每次全量合并都会再试；
+- 图谱分析面板在这之前显示「合并规则已更新，需要更新一次」，「需要开发处理」区的 S1 项显示「已修复，更新
+  分析后生效」。
+
+库完成这次合并之前，新上传的内容照旧按旧规则放进旧的合并后知识对象（`unified_kg_state.concept_seed_version`
+仍为 1）；放置途中这次合并恰好发布的，会按新规则重新放置。所以同一个库里不会混用新旧两种 id。升级后新建的库
+从一开始就用新规则。深拷贝的副本沿用源库已发布合并所用的规则；拷贝时源库待重建的，副本不带合并结果，按新规则
+放置。
+
+**跨库混合期。** 按图检索与联邦推理把活动库与参考库里同一个 canonical id 当作同一个枢纽。一个库已换到新规则、
+另一个还没换时，多词概念的跨库桥接失效，直到两边都完成这次合并；单词概念不受影响。建议先在低峰期重建参考库
+（公共知识库）：在线时打开参考库点「更新分析」，或在停服维护窗口里运行
+
+```bash
+PYTHONPATH=backend python -m app.scripts.recluster_kg <notebook_id> --confirm-service-stopped
+```
+
+然后让活动库在下一次「更新分析」时自然切换。
+
+**两类要手动更新一次的库。** 没有状态行、却带着合并结果的库按新规则放置：升级前做的深拷贝、之后一直没写过
+图谱的副本，以及用 `scripts/merge_dbs.py` 并进来的库。它们的合并结果若还是旧规则建的，新上传的多词概念会和
+已有的合并后知识对象分开，直到这个库全量合并一次。下面第三条查询列出它们；对每个库点一次「更新分析」即可。
+
+**进度查询**（两种后端相同）：
+
+```sql
+-- 还在旧规则上、已有合并结果的库
+SELECT notebook_id FROM unified_kg_state WHERE concept_seed_version = 1 AND cluster_count > 0;
+-- 某个库还没重算（悬置）的决定
+SELECT count(*) FROM concept_merge_candidates
+WHERE notebook_id = '<id>' AND seed_version = 1 AND status IN ('confirmed','rejected','deferred');
+-- 有合并结果、但没有状态行的库
+SELECT DISTINCT c.notebook_id FROM concept_clusters c
+WHERE c.object_type = 'concept'
+  AND NOT EXISTS (SELECT 1 FROM unified_kg_state u WHERE u.notebook_id = c.notebook_id);
+```
+
+`KG_MERGE_SQUASH_CANDIDATES_MAX`（默认 1000）是「同名不同写法」候选每次至多写入的对数，触顶发
+`kg_merge_squash_candidates_capped`，只保留成员最多的组。
+
+开了变更捕获（`sync capture`）的 SQLite 部署：升级迁移把每个已有状态行的新列回填为 1，每行记一条变更，下一次
+导出会把这些状态行原样重发一遍（只是量，内容不变）；PostgreSQL 的迁移不触发捕获。
+
 ## 公共知识库里晋升对象的出处
 
 晋升进公共知识库的知识对象现在由公共库自己承载出处：每个原件对应一个类型为 `promotion` 的可见来源
