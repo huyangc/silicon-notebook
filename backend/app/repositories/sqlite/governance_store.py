@@ -997,7 +997,12 @@ class GovernanceStore:
         )
 
     @staticmethod
-    def delete_pending_merges(connection: sqlite3.Connection, notebook_id: str) -> None:
+    def delete_pending_merges(
+        connection: sqlite3.Connection, notebook_id: str, *, lock_ids: Sequence[str] = (),
+    ) -> None:
+        """The pending refresh's delete. ``lock_ids`` (rows the refresh goes on
+        to update) need no lock here: SQLite's write transaction already
+        excludes every other writer (see the PostgreSQL twin)."""
         connection.execute(
             "DELETE FROM concept_merge_candidates WHERE notebook_id=? AND status='pending'",
             (notebook_id,))
@@ -1061,17 +1066,22 @@ class GovernanceStore:
     @staticmethod
     def merge_decision_rows(
         connection: sqlite3.Connection, notebook_id: str, *, seed_version: int,
+        include_pending: bool = False,
     ) -> List[dict]:
         """The decided rows (confirmed / rejected / deferred) of one seed space,
         ``[{id, key_a, key_b, status}]`` in id order, with the decision keys
         derived as in ``decided_seed_pairs_from``. The full rebuild reads the
         v1 rows before it streams (the recompute's step 1) and the v2 rows
         for its clustering — through ``idx_candidates_nb_status``, bounded by
-        the notebook's decisions."""
+        the notebook's decisions. ``include_pending``: the pending rows too
+        (status ``pending``) — the stream tracks their keys so the refresh can
+        honour one the user settles mid-rebuild."""
+        statuses = ("'confirmed','rejected','deferred','pending'" if include_pending
+                    else "'confirmed','rejected','deferred'")
         rows = connection.execute(
             "SELECT id, canonical_a, canonical_b, seed_a, seed_b, status "
             "FROM concept_merge_candidates WHERE notebook_id=? "
-            "AND status IN ('confirmed','rejected','deferred') AND seed_version=? "
+            f"AND status IN ({statuses}) AND seed_version=? "
             "ORDER BY id",
             (notebook_id, check_concept_seed_version(seed_version)),
         ).fetchall()

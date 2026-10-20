@@ -206,8 +206,16 @@ def assert_a_split_confirmed_group_is_joined_back(repo, monkeypatch) -> dict:
         rebuild(repo, nb, force=True)
     assert len(set(canonical_of(repo, nb).values())) == 1
     events = capture_events(repo, monkeypatch)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    checkpoints_before = lifecycle._cluster_input_version(nb, exclude_emb_count=True)
+    inputs_before = lifecycle._cluster_input_version(nb)
     rebuild(repo, nb)
     assert len(set(canonical_of(repo, nb).values())) == 1, canonical_of(repo, nb)
+    # The recompute's row lands in the pending refresh, before the flip: the
+    # LLM-stage checkpoints are keyed so that a crash between the two resumes
+    # on them (the skip-gate version does move by that row).
+    assert lifecycle._cluster_input_version(nb, exclude_emb_count=True) == checkpoints_before
+    assert lifecycle._cluster_input_version(nb) != inputs_before
     assert decision_rows(repo, nb) == [
         ("llama3 1", "metallama", "confirmed", 2),
         ("llama31", "metallama", "confirmed", 2),
@@ -517,8 +525,50 @@ def assert_a_flip_between_placement_and_write_places_again(repo, monkeypatch) ->
     assert canonical_of(repo, nb)["Q_Former"] == "K-qformer"
 
 
+def assert_a_v1_pending_row_settled_mid_rebuild_stays_out_of_the_queue(
+    repo, monkeypatch,
+) -> None:
+    """A pending row the old code proposed ("Llama 3.1" / "Llama 31", keys in
+    space 1) is rejected while the library's first v2 rebuild runs — after
+    its plan, before its pending refresh. The refresh reads that v1 row live
+    and maps it through the stream's seeds, so the same pair (now
+    ``llama3 1`` / ``llama31``) is not proposed again; the next full rebuild
+    translates the rejection for good."""
+    nb = notebook(repo, "s1", "s2")
+    concepts(repo, nb, "s1", "Llama 3.1")
+    concepts(repo, nb, "s2", "Llama 31")
+    with legacy_code(monkeypatch):
+        rebuild(repo, nb)
+    governance = repo._runtime.knowledge_governance
+    [proposed] = governance.pending_merges(nb)
+    assert rows(repo, "SELECT seed_a, seed_b, seed_version FROM concept_merge_candidates "
+                      "WHERE id=?", (proposed["id"],)) == [
+        {"seed_a": "llama 3 1", "seed_b": "llama 31", "seed_version": 1}]
+    lifecycle = repo._runtime.knowledge_lifecycle
+    real = lifecycle._squash_merge_candidates
+    settled: list = []
+
+    def reject_meanwhile(*args, **kwargs):
+        if not settled:                    # the user, while the rebuild runs
+            settled.append(proposed["id"])
+            governance.reject_merge(nb, proposed["id"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(lifecycle, "_squash_merge_candidates", reject_meanwhile)
+    rebuild(repo, nb)
+    assert settled == [proposed["id"]] and published_space(repo, nb) == 2
+    assert governance.pending_merges(nb) == []
+    assert decision_rows(repo, nb) == [("llama 3 1", "llama 31", "rejected", 1)]
+    monkeypatch.setattr(lifecycle, "_squash_merge_candidates", real)
+    rebuild(repo, nb, force=True)
+    assert governance.pending_merges(nb) == []
+    assert decision_rows(repo, nb) == [("llama3 1", "llama31", "rejected", 2)]
+
+
 SCENARIOS = {
     "published_space_switches": assert_the_published_space_switches_with_the_rebuild,
+    "v1_pending_settled_mid_rebuild": (
+        assert_a_v1_pending_row_settled_mid_rebuild_stays_out_of_the_queue),
     "copy_carries_space": assert_a_copy_places_in_the_space_of_the_clusters_it_carries,
     "memory_copy_carries_space": assert_a_copy_of_a_memory_holding_library_keeps_its_space,
     "flip_mid_placement": assert_a_flip_between_placement_and_write_places_again,

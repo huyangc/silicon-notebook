@@ -1968,6 +1968,81 @@ def test_postgres_merge_review_job_start_is_single_flight(postgres_database):
     assert dict(row) == {"status": "running", "total": 1, "done": 0, "error": ""}
 
 
+def test_postgres_pending_refresh_and_a_human_decision_take_rows_in_one_order(
+    postgres_database,
+):
+    """S1 step 5: the pending refresh locks the v1 decision rows it then
+    translates. A human decision locks every row of the displayed pair —
+    legacy duplicates included, here a v1 rejection (mc-1) and a pending
+    sibling (mc-2) — in ``id COLLATE "C"`` order. The refresh takes its
+    pending rows and the planned v1 rows in that same order, in one
+    statement, so a decision arriving between the refresh's delete and its
+    translation waits instead of deadlocking (the DELETE-first order took
+    mc-2 before mc-1 and the two deadlocked)."""
+    import psycopg
+
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 78
+    _seed_catalog(postgres_database)
+    store = PostgresGovernanceStore(postgres_database, _seams())
+    with postgres_database.write() as connection:
+        for row_id, status in (("mc-1", "rejected"), ("mc-2", "pending")):
+            connection.execute(
+                "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,"
+                "canonical_b,seed_a,seed_b,score,status,seed_version,created_at,updated_at) "
+                "VALUES (%s,'nb-personal','K-a','K-b','a','b',0.9,%s,1,%s,%s)",
+                (row_id, status, NOW, NOW))
+
+    locked = threading.Event()
+    errors: list = []
+
+    def human_waits_on_the_refresh() -> bool:
+        with postgres_database.connect() as probe:
+            for _ in range(200):
+                waiting = probe.execute(
+                    "SELECT count(*) AS n FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND wait_event_type = 'Lock' "
+                    "AND query LIKE '%%concept_merge_candidates%%'").fetchone()["n"]
+                if waiting:
+                    return True
+                threading.Event().wait(0.05)
+        return False
+
+    def refresh():
+        try:
+            with postgres_database.write() as connection:
+                store.delete_pending_merges(connection, "nb-personal", lock_ids=["mc-1"])
+                locked.set()
+                assert human_waits_on_the_refresh()
+                grew, done = store.apply_v1_decision_translation(
+                    connection, "nb-personal", {"mc-1": [("a", "b")]},
+                    {"mc-1": ("a", "b", "rejected")}, NOW)
+                assert (grew, done) == (0, ["mc-1"])
+        except (psycopg.Error, AssertionError) as exc:      # a deadlock lands here
+            errors.append(("refresh", type(exc).__name__))
+
+    def human():
+        assert locked.wait(timeout=10)
+        try:
+            with postgres_database.write() as connection:
+                store.set_merge_decision(connection, "nb-personal", "mc-2", "confirmed", NOW)
+        except psycopg.Error as exc:
+            errors.append(("human", type(exc).__name__))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        for future in (executor.submit(refresh), executor.submit(human)):
+            future.result(timeout=30)
+
+    assert errors == []
+    with postgres_database.connect() as connection:
+        left = [tuple(r.values()) for r in connection.execute(
+            "SELECT id, status, seed_version FROM concept_merge_candidates "
+            "WHERE notebook_id='nb-personal' ORDER BY id").fetchall()]
+    # The refresh translated mc-1 and deleted mc-2; the decision then landed.
+    assert left == [("mc-1", "confirmed", 2)]
+
+
 def test_cluster_append_member_probe_is_bounded_and_batched(knowledge_harness):
     """PR-C:去重探测只查本次要插入的 member id,并按 seams 的批量上限分批。
 

@@ -5607,8 +5607,13 @@ class KnowledgeLifecycleService:
         backfill look like a version change and GC away a possibly hours-long
         adjudication that is still perfectly valid. item_key already provides
         fine-grained correctness within a checkpoint, so dropping emb_c here is
-        safe. The skip-gate itself must keep using the DEFAULT (emb-inclusive)
-        version unchanged — a new/changed embedding is a real reason to recluster.
+        safe. The namespace leaves dec_c out on the same ground: the first v2
+        rebuild's decision recompute adds rows in its pending refresh, BEFORE
+        the flip, so a crash between the two would otherwise GC the hours of
+        adjudication the resumed rebuild still needs (S1 step 5); a decision
+        changes which candidates exist, never what a cached item says. The
+        skip-gate itself must keep using the DEFAULT version unchanged — a
+        new/changed embedding or decision is a real reason to recluster.
 
         ``facts``: the components a rebuild read at its entry
         (``_cluster_input_facts``), so its end-write stores the version of the
@@ -5625,7 +5630,7 @@ class KnowledgeLifecycleService:
                     db, notebook_id, exclude_emb_count=exclude_emb_count
                 )
         seq, obj_c, dec_c, emb_c = facts
-        dec_c = int(dec_c) + int(dec_growth)
+        dec_c = 0 if exclude_emb_count else int(dec_c) + int(dec_growth)
         # runtime_dim 追加(非替换 embed_dim;T3/R4):聚类/融合空间统一到运行时
         # 空间,切 EMBED_RUNTIME_DIM 后版本闸不得跳过重聚(旧空间的簇不再有效)。
         # 算法版本(纯代码分量):归一化/哨兵/护栏等 seed·聚类语义的代码改动不动任何
@@ -6374,10 +6379,14 @@ class KnowledgeLifecycleService:
         with self._connect() as db:
             decided = self.governance_store.decided_seed_pairs_from(
                 db, notebook_id, seed_version=CONCEPT_SEED_VERSION)
+            # Pending v1 rows too: their keys are tracked so a pending row the
+            # user settles while this rebuild runs can be honoured by the
+            # refresh (``DecisionTranslation.live_pairs``); only the decided
+            # ones are translated.
             v1_rows = [
                 StoredDecision(r["id"], r["key_a"], r["key_b"], r["status"])
                 for r in self.governance_store.merge_decision_rows(
-                    db, notebook_id, seed_version=1)
+                    db, notebook_id, seed_version=1, include_pending=True)
             ]
         override = override_keys(decided)
         seeds_of_key: Dict[str, Set[str]] = {}
@@ -6434,16 +6443,20 @@ class KnowledgeLifecycleService:
 
         Order: re-check the in-flight claim (codex #671 R12 P2: the pending
         queue is shared, not generational — a preempted loser must not wipe
-        its successor's candidates); DELETE the pending rows first so
-        PostgreSQL serializes against updates of them; persist the recompute
-        (the store locks its v1 rows and translates only those still as
-        planned); then read the v2 decisions LIVE and filter the ANN and
-        squash rows (one row per canonical pair, ``kg_merge.merge_pending_tiers``)
-        against them, since decisions may land after the clustering snapshot.
-        Returns the growth of the confirmed / rejected row count, which the
-        caller folds into the stored input version."""
+        its successor's candidates); lock the pending rows and the planned v1
+        rows in one statement, in the order a human decision locks a pair's
+        rows (PostgreSQL: ``id COLLATE "C"``, so the two wait for each other
+        instead of deadlocking), and DELETE the pending ones; persist the
+        recompute (translating only the rows still as planned); then read the
+        decisions LIVE — the v2 rows, and the v1 rows this rebuild did not
+        translate mapped through the stream's seeds (``live_pairs``) — and
+        filter the ANN and squash rows (one row per canonical pair,
+        ``kg_merge.merge_pending_tiers``) against them, since decisions may
+        land after the clustering snapshot. Returns the growth of the
+        confirmed / rejected row count, which the caller folds into the
+        stored input version."""
         from app.services.kg_merge import (
-            filter_pending_seeds_by_decisions, merge_pending_tiers,
+            StoredDecision, filter_pending_seeds_by_decisions, merge_pending_tiers,
         )
 
         growth, done = 0, []
@@ -6456,7 +6469,8 @@ class KnowledgeLifecycleService:
                     "generation": generation, "stage": "pending_refresh",
                 })
                 raise KgDerivedGenerationPreempted(notebook_id, generation)
-            self.governance_store.delete_pending_merges(db, notebook_id)
+            self.governance_store.delete_pending_merges(
+                db, notebook_id, lock_ids=sorted(plan.pairs) if plan is not None else ())
             if plan is not None and plan.pairs:
                 growth, done = self.governance_store.apply_v1_decision_translation(
                     db, notebook_id, plan.pairs,
@@ -6464,6 +6478,11 @@ class KnowledgeLifecycleService:
                     now)
             live_decided = self.governance_store.decided_seed_pairs_from(
                 db, notebook_id, seed_version=CONCEPT_SEED_VERSION)
+            if plan is not None:
+                live_decided = {**plan.live_pairs(
+                    StoredDecision(r["id"], r["key_a"], r["key_b"], r["status"])
+                    for r in self.governance_store.merge_decision_rows(
+                        db, notebook_id, seed_version=1)), **live_decided}
             pending_seeds = filter_pending_seeds_by_decisions(
                 merge_pending_tiers(ann_rows, squash_rows), seeds,
                 {pair for pair, st in live_decided.items() if st == "confirmed"},
@@ -6475,7 +6494,7 @@ class KnowledgeLifecycleService:
                 [(self._new_id("mc"), notebook_id, ca, cb, sa, sb, score, now, now)
                  for sa, sb, ca, cb, score in pending_seeds],
                 seed_version=CONCEPT_SEED_VERSION)
-        if plan is not None:
+        if plan is not None and plan.recomputed_any:
             # Rows kept in space 1 are retried by the next full rebuild: the
             # planned rows decided again mid-rebuild, and the suspended ones
             # (a side no current object carries).

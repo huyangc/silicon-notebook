@@ -1078,10 +1078,27 @@ class GovernanceStore:
         )
 
     @staticmethod
-    def delete_pending_merges(connection: Any, notebook_id: str) -> None:
-        connection.execute(
-            "DELETE FROM concept_merge_candidates WHERE notebook_id=%s AND status='pending'",
-            (notebook_id,))
+    def delete_pending_merges(
+        connection: Any, notebook_id: str, *, lock_ids: Sequence[str] = (),
+    ) -> None:
+        """The pending refresh's delete, one statement: lock every pending row
+        of the notebook AND ``lock_ids`` (the v1 decision rows the refresh
+        then translates) in ``id COLLATE "C"`` order — the order
+        ``set_merge_decision`` locks a displayed pair's rows (legacy duplicates
+        included) — then delete the pending ones. Locking the pending rows by
+        the DELETE and the decision rows later would take them in the opposite
+        order to a concurrent human decision on a pair with both kinds of row,
+        and the two would deadlock (S1 step 5). A row updated meanwhile is
+        re-checked by the lock and deleted only if still pending."""
+        bound = id_bind_ids(sorted(set(lock_ids)))
+        id_execute_ids(
+            connection,
+            "WITH locked AS (SELECT id, status FROM concept_merge_candidates "
+            f"WHERE notebook_id=%s AND (status='pending' OR {id_member_of('id', bound)}) "
+            "ORDER BY id COLLATE \"C\" FOR UPDATE) "
+            "DELETE FROM concept_merge_candidates c USING locked l "
+            "WHERE c.notebook_id=%s AND c.id = l.id AND l.status = 'pending'",
+            [notebook_id, bound.param, notebook_id])
 
     @staticmethod
     def insert_pending_merge_rows(
@@ -1145,13 +1162,17 @@ class GovernanceStore:
     @staticmethod
     def merge_decision_rows(
         connection: Any, notebook_id: str, *, seed_version: int,
+        include_pending: bool = False,
     ) -> List[dict]:
         """The decided rows of one seed space, ``[{id, key_a, key_b, status}]``
-        in id order (see the SQLite twin)."""
+        in id order; ``include_pending`` adds the pending rows (see the SQLite
+        twin)."""
+        statuses = ("'confirmed','rejected','deferred','pending'" if include_pending
+                    else "'confirmed','rejected','deferred'")
         rows = connection.execute(
             "SELECT id, canonical_a, canonical_b, seed_a, seed_b, status "
             "FROM concept_merge_candidates WHERE notebook_id=%s "
-            "AND status IN ('confirmed','rejected','deferred') AND seed_version=%s "
+            f"AND status IN ({statuses}) AND seed_version=%s "
             "ORDER BY id",
             (notebook_id, check_concept_seed_version(seed_version)),
         ).fetchall()
