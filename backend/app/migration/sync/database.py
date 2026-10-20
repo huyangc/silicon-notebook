@@ -564,10 +564,26 @@ def _exported_columns(
     """Column names this table contributes to the package. The PostgreSQL
     ``ordinal`` identity column of a rowid-ordinal table is dropped: it is a
     backend-local surrogate for SQLite's rowid and the target reassigns its
-    own (§8)."""
+    own (§8).
+
+    ``groups`` travels as ``(id, name)`` only (``_PROJECTED_COLUMNS``): the
+    importer never writes a groups row, it only maps each one onto a target
+    group by name (design doc §4/§11). Its owner/creator columns would pull
+    those people into users.jsonl for nothing, and the invitation token is a
+    live capability that has no business leaving the environment."""
+    projected = _PROJECTED_COLUMNS.get(table)
+    if projected is not None:
+        return tuple(name for name in columns if name in projected)
     if source.is_postgres and table in POSTGRES_ROWID_ORDINAL_TABLES:
         return tuple(name for name in columns if name != "ordinal")
     return tuple(columns)
+
+
+# Tables a package carries only a fixed column subset of; see
+# _exported_columns.
+_PROJECTED_COLUMNS: dict[str, frozenset[str]] = {
+    "groups": frozenset({"id", "name"}),
+}
 
 # --------------------------------------------------------------- scope SQL
 

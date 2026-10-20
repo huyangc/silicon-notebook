@@ -231,7 +231,7 @@ import os
 import secrets
 import shutil
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -276,6 +276,7 @@ from app.migration.sync.package import (
     MODE_INCREMENTAL,
     NOTEBOOK_FILES_DIR,
     PACKAGE_FORMAT_VERSION,
+    READABLE_FORMAT_VERSIONS,
     USERS_NAME,
     decode_row,
     decode_value,
@@ -1007,10 +1008,10 @@ def _read_manifest(package_dir: Path) -> _PackageManifest:
     if not isinstance(document, dict):
         raise SyncImportError(f"{MANIFEST_NAME} is not a JSON object")
     version = document.get("format_version")
-    if version != PACKAGE_FORMAT_VERSION:
+    if type(version) is not int or version not in READABLE_FORMAT_VERSIONS:
         raise SyncImportError(
             f"unsupported package format_version {version!r}; this build reads "
-            f"{PACKAGE_FORMAT_VERSION}"
+            f"{list(READABLE_FORMAT_VERSIONS)} and writes {PACKAGE_FORMAT_VERSION}"
         )
     mode = document.get("mode")
     if mode is not None and mode not in (MODE_FULL, MODE_INCREMENTAL):
@@ -1018,7 +1019,9 @@ def _read_manifest(package_dir: Path) -> _PackageManifest:
             f"{MANIFEST_NAME} declares the unknown mode {mode!r}; expected "
             f"{MODE_FULL!r} or {MODE_INCREMENTAL!r}"
         )
-    history = document.get("knowhow_history", True)
+    # Required from format 3 on; a v2 package predates the switch and always
+    # carried the history (package.PACKAGE_FORMAT_VERSION).
+    history = document.get("knowhow_history", True if version == 2 else None)
     if not isinstance(history, bool):
         raise SyncImportError(
             f"{MANIFEST_NAME} declares knowhow_history={history!r}; expected "
@@ -2579,6 +2582,8 @@ def _preflight(backend: _Backend, conn: Any, context: _Context) -> bool:
     prior = _prior_imports(backend, conn, manifest.source_env)
     _assert_chain(context, prior)
     _knowhow_history_complete(context)
+    if manifest.knowhow_history and not context.ledger.knowhow_history_complete:
+        _preflight_partial_history(backend, conn, context)
     _reject_backwards_snapshot(prior, context)
     _assert_deleted_notebooks_are_ours(backend, conn, context)
 
@@ -2745,18 +2750,18 @@ def _build_group_mapping(
     return mapping
 
 
-def _groups_this_import_seeds(
-    backend: _Backend, conn: Any, context: _Context
-) -> frozenset[str]:
-    """Source group ids named as a principal by a grant this import will
-    actually write: one on a notebook it creates. "Creates" is the same
-    predicate ``_created_parents`` applies in the row phase -- absent at the
-    target, or left in this source's in-flight marker by an earlier attempt
-    -- so the identity phase and the seed gate never disagree about which
-    grants land."""
+def _mirrors_already_here(
+    backend: _Backend, conn: Any, context: _Context, notebook_ids: Iterable[str]
+) -> set[str]:
+    """Which of ``notebook_ids`` the target already has as something other
+    than this source's in-flight import -- i.e. which ones this import does
+    NOT create. The same predicate ``_created_parents`` applies in the row
+    phase (absent at the target, or left in this source's in-flight marker by
+    an earlier attempt, means "created"), so the identity phase and the seed
+    gate never disagree about which authorization rows land."""
     manifest = context.manifest
     existing: set[str] = set()
-    for batch in _batched(list(manifest.notebooks)):
+    for batch in _batched(sorted(set(notebook_ids))):
         placeholders = ",".join("?" for _ in batch)
         for row in backend.fetch(
             conn,
@@ -2770,16 +2775,179 @@ def _groups_this_import_seeds(
             )
             if not in_flight:
                 existing.add(str(row["id"]))
-    needed: set[str] = set()
+    return existing
+
+
+def _groups_this_import_seeds(
+    backend: _Backend, conn: Any, context: _Context
+) -> frozenset[str]:
+    """Source group ids named as a principal by a grant this import will
+    actually write: one on a notebook it creates (``_mirrors_already_here``).
+    The grants file is read first and the target is asked only about the
+    notebooks a group grant sits on -- usually none, and then nothing is
+    queried at all."""
+    by_notebook: dict[str, set[str]] = {}
     for row in _iter_lines(context.package_dir / rows_path(_GRANTS_TABLE)):
         if str(row.get("principal_type") or "") not in _GROUP_PRINCIPAL_TYPES:
             continue
-        if str(row.get("notebook_id") or "") in existing:
-            continue
         principal = row.get("principal_id")
         if isinstance(principal, str) and principal:
-            needed.add(principal)
-    return frozenset(needed)
+            by_notebook.setdefault(str(row.get("notebook_id") or ""), set()).add(
+                principal
+            )
+    if not by_notebook:
+        return frozenset()
+    existing = _mirrors_already_here(backend, conn, context, by_notebook)
+    return frozenset(
+        principal
+        for notebook_id, principals in by_notebook.items()
+        if notebook_id not in existing
+        for principal in principals
+    )
+
+
+# Synced tables whose package rows the importer never writes: ``groups`` is
+# only read to map names (``_build_group_mapping``), and ``group_members`` is
+# seeded only with a group the import created, which it never does. A user
+# named only there is nobody this import needs (see _referenced_users).
+_NEVER_WRITTEN_TABLES = frozenset({"groups", "group_members"})
+
+
+def _referenced_users(
+    backend: _Backend,
+    conn: Any,
+    context: _Context,
+    package_users: Sequence[UserProjection],
+) -> list[UserProjection]:
+    """The package users some row this import will actually WRITE refers to.
+
+    ``users.jsonl`` is the exporter's closure over every user column it
+    wrote, which is wider than what lands here: the rows of
+    ``_NEVER_WRITTEN_TABLES`` (an older exporter still carried group owners,
+    creators and whole rosters), authorization rows on notebooks the target
+    already mirrors (``_SEED_PARENT`` seeds them only with a notebook this
+    import creates), and a mount edge onto a notebook that will not exist
+    here (``optional_refs``). Mapping a user nothing written refers to can
+    only do harm: ``--create-missing-users`` would mint a credential-less
+    account nobody uses, and the case-insensitive pass could refuse the whole
+    package over an ambiguity in a name no row needs. So identity mapping
+    runs over this subset only; the rows that are not written are skipped by
+    their own rules exactly as before.
+
+    One streaming pass over the tables that carry a user column, plus at most
+    one batched notebooks query for the gated rows."""
+    referenced: set[str] = set()
+    gated: list[tuple[str, tuple[str, ...]]] = []
+    optional: list[tuple[str, tuple[str, ...]]] = []
+    for table in _carried(context.manifest):
+        if table in _NEVER_WRITTEN_TABLES:
+            continue
+        spec = spec_for(table)
+        user_columns = [
+            column.name for column in spec.mapped_columns
+            if column.kind is MappingKind.USER
+        ]
+        principal_columns = [
+            column.name for column in spec.mapped_columns
+            if column.kind is MappingKind.PRINCIPAL
+        ]
+        if not user_columns and not principal_columns:
+            continue
+        seed_parent = _SEED_PARENT.get(table)
+        notebook_refs = [
+            column for column, ref in spec.optional_refs if ref == "notebooks"
+        ]
+        for row in _iter_lines(context.package_dir / rows_path(table)):
+            values = [row.get(column) for column in user_columns]
+            if str(row.get("principal_type") or "") == "user":
+                values.extend(row.get(column) for column in principal_columns)
+            ids = tuple(value for value in values if isinstance(value, str) and value)
+            if not ids:
+                continue
+            if seed_parent is not None:
+                gated.append((str(row.get(seed_parent[0]) or ""), ids))
+            elif notebook_refs:
+                optional.append((str(row.get(notebook_refs[0]) or ""), ids))
+            else:
+                referenced.update(ids)
+    if gated:
+        existing = _mirrors_already_here(
+            backend, conn, context, {notebook_id for notebook_id, _ids in gated}
+        )
+        for notebook_id, ids in gated:
+            if notebook_id not in existing:
+                referenced.update(ids)
+    if optional:
+        # The referenced notebook lands if the package carries it or the
+        # target already has it -- the same test _apply_optional_refs makes
+        # once the package's own notebooks are in.
+        carried = set(context.manifest.notebooks)
+        wanted = {notebook_id for notebook_id, _ids in optional} - carried
+        present = set(carried)
+        for batch in _batched(sorted(wanted)):
+            placeholders = ",".join("?" for _ in batch)
+            present.update(
+                str(row["id"])
+                for row in backend.fetch(
+                    conn,
+                    f"SELECT id FROM notebooks WHERE id IN ({placeholders})",
+                    batch,
+                )
+            )
+        for notebook_id, ids in optional:
+            if notebook_id in present:
+                referenced.update(ids)
+    return [user for user in package_users if user.id in referenced]
+
+
+# ``sync_import_progress.table_name`` prefix an older build recorded for "this
+# package created group X" (it created groups then; this build never does).
+_LEGACY_CREATED_GROUP_PREFIX = "__created__:groups:"
+
+
+def _warn_legacy_created_groups(
+    backend: _Backend, conn: Any, context: _Context
+) -> None:
+    """Name the groups an unfinished import of an older build created.
+
+    That build seeded a created group's members in a later transaction; if
+    it stopped in between, the group exists here with no members, and this
+    build will not seed them (it never writes group_members). Nothing is
+    changed -- the operator is told which groups to look at."""
+    prefix = _LEGACY_CREATED_GROUP_PREFIX
+    group_ids = sorted(
+        {
+            str(row["table_name"])[len(prefix):]
+            for row in backend.fetch(
+                conn,
+                "SELECT p.table_name FROM sync_import_progress p "
+                "JOIN sync_imports i ON i.package_id = p.package_id "
+                "WHERE i.source_env = ? AND i.status <> ?",
+                (context.manifest.source_env, _STATUS_DONE),
+            )
+            if str(row["table_name"]).startswith(prefix)
+        }
+    )
+    if not group_ids:
+        return
+    names: dict[str, str] = {}
+    for batch in _batched(group_ids):
+        placeholders = ",".join("?" for _ in batch)
+        for row in backend.fetch(
+            conn,
+            f"SELECT id, name FROM groups WHERE id IN ({placeholders})",
+            batch,
+        ):
+            names[str(row["id"])] = str(row["name"] or "")
+    listed = "；".join(
+        f"{group_id}（{names[group_id]}）" if group_id in names else group_id
+        for group_id in group_ids
+    )
+    context.ledger.warn(
+        "an unfinished import by an older build created these groups and may "
+        "not have added their members; this build never imports group "
+        f"members, so check them at the target: {listed}"
+    )
 
 
 def _assert_required_identities_resolve(
@@ -3231,6 +3399,68 @@ def _knowhow_history_complete(context: _Context) -> None:
             "HISTORY was off never reached this environment. Run `sync export "
             "--full` at the source once to bring the whole history across "
             "(docs/incremental-sync-design.md §11)"
+        )
+
+
+def _preflight_partial_history(
+    backend: _Backend, conn: Any, context: _Context
+) -> None:
+    """Refuse, before the claim, a window whose Knowhow history rows would
+    collide with stale history this target still holds.
+
+    Only reachable while the history is incomplete (_knowhow_history_complete):
+    the switch was off for a stretch, so rows the source deleted then never
+    left this target, and a row the source made since under the same business
+    key -- a milestone re-created under its old name -- runs into one on a
+    UNIQUE constraint (``(table_id, name)``, ``(table_id, seq)``). The row
+    phase would refuse it too, but only after phases 3a-3c had written; here
+    it is named up front with the one fix that clears it.
+
+    A target row does NOT count when this package replaces it anyway: its key
+    is among the window's deletes (phase 3c runs first), or the package
+    carries a row with its id."""
+    problems: list[str] = []
+    for table in sorted(KNOWHOW_HISTORY_TABLES):
+        primary_key = _sync_key(backend, conn, table)
+        rows = list(_iter_lines(context.package_dir / rows_path(table)))
+        if not rows:
+            continue
+        carried_ids = {
+            tuple(row.get(column) for column in primary_key) for row in rows
+        }
+        cleared = carried_ids | {
+            tuple(entry.key) for entry in context.deletes.get(table, ())
+        }
+        for key in _unique_keys(backend, conn, table, primary_key):
+            wanted = {
+                tuple(row.get(column) for column in key):
+                tuple(row.get(column) for column in primary_key)
+                for row in rows
+                if all(column in row for column in key)
+            }
+            leading = sorted({item[0] for item in wanted}, key=repr)
+            projection = ", ".join(_ident(column) for column in (*primary_key, *key))
+            for chunk in _batched(leading):
+                placeholders = ",".join("?" for _ in chunk)
+                for row in backend.fetch(
+                    conn,
+                    f"SELECT {projection} FROM {_ident(table)} "
+                    f"WHERE {_ident(key[0])} IN ({placeholders})",
+                    chunk,
+                ):
+                    found = tuple(row[column] for column in key)
+                    mine = wanted.get(found)
+                    theirs = tuple(row[column] for column in primary_key)
+                    if mine is not None and theirs != mine and theirs not in cleared:
+                        problems.append(f"{table} {tuple(key)}={found}")
+    if problems:
+        raise SyncImportError(
+            "the Knowhow history at this target is incomplete (it was not "
+            "carried for a while), and this window's history rows collide "
+            "with stale rows it still holds: "
+            + "; ".join(sorted(problems))
+            + ". Run `sync export --full` at the source and import that "
+            "package instead (docs/incremental-sync-design.md §11)."
         )
 
 
@@ -7148,9 +7378,10 @@ def _import(
             return _report(manifest, ledger, _EMPTY_MAPPING, already_applied=True)
         context.importer_user_id = _resolve_importer(backend, conn, importer_user_id)
         package_users = _package_users(package_dir)
+        mapped_users = _referenced_users(backend, conn, context, package_users)
         target_users = _target_users(backend, conn)
         try:
-            mapping = build_user_mapping(package_users, target_users)
+            mapping = build_user_mapping(mapped_users, target_users)
         except ValueError as exc:
             raise SyncImportError(f"identity mapping is ambiguous: {exc}") from None
         if mapping.case_folded:
@@ -7160,6 +7391,7 @@ def _import(
                 )
             ))
         groups = _build_group_mapping(backend, conn, context)
+        _warn_legacy_created_groups(backend, conn, context)
         _assert_required_identities_resolve(
             context,
             mapping,

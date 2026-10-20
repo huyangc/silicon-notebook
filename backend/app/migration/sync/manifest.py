@@ -175,11 +175,14 @@ class TableSyncSpec:
     optional_refs: tuple[tuple[str, str], ...] = ()
     # True: for a row that already exists at the target (matched by primary
     # key), import never overwrites or deletes it; a row that does not
-    # exist there yet is inserted. For notebook_members/notebook_grants/
-    # groups/group_members this means "only written the first time the
-    # parent notebook/group is created at the target, never touched again
-    # by a re-sync" (the target owns membership/sharing decisions made
-    # after that first import). For object_schemas -- an environment-global
+    # exist there yet is inserted. For notebook_members/notebook_grants
+    # this means "only written the first time the parent notebook is
+    # created at the target, never touched again by a re-sync" (the target
+    # owns membership/sharing decisions made after that first import).
+    # groups/group_members are never written at all: the importer maps a
+    # group onto an existing target group by name and never creates one
+    # (design doc §4/§11), so groups travels as (id, name) only and
+    # group_members travels empty. For object_schemas -- an environment-global
     # registry owned by no single notebook -- it means ordinary idempotent-
     # by-primary-key insert: importing a definition the target already has
     # (by object_type) is a no-op. Always False for LOCAL tables.
