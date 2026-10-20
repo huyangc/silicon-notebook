@@ -42,7 +42,10 @@ def test_each_page_runs_under_the_maintenance_statement_timeout_floor(repo):
     maintenance floor (transaction-local, #930's helper): a page is
     ``page_rows`` rows of concept_clusters index maintenance, and a slow disk
     must not turn that into a failed rebuild. The pool's own timeout comes
-    back after the transaction."""
+    back after the transaction. This only sees the setting once the call
+    returns; that the floor is raised BEFORE the bound read and the INSERT (on
+    a non-empty, multi-page run) is pinned per statement in
+    ``test_cluster_map_write_plan_pins._captured``."""
     store = repo._runtime.unified_kg
     nb = repo.create_notebook(cases.NotebookCreate(name="floor")).id
     with repo._write() as db:
