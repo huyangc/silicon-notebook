@@ -2913,6 +2913,7 @@ class UnifiedKgStorePort(Protocol):
     def derived_claim_still_held(
         db: object, notebook_id: str, generation: int
     ) -> bool: ...
+    # 写代段按 keyset 分页:每次写一页,返回下一页起点(末页 None)。
     @staticmethod
     def write_cluster_map_generation(
         db: object,
@@ -2921,7 +2922,10 @@ class UnifiedKgStorePort(Protocol):
         run_id: str,
         created_at: str,
         generation: int,
-    ) -> None: ...
+        *,
+        start: int | None = None,
+        page_rows: int,
+    ) -> int | None: ...
     @staticmethod
     def flip_cluster_generation(
         db: object,

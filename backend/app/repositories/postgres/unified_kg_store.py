@@ -119,6 +119,11 @@ _PUBLISHED_CLUSTER_GEN = (
     "COALESCE((SELECT cluster_generation FROM unified_kg_state "
     "WHERE notebook_id = %s), 0)"
 )
+# write_cluster_map_generation 的 keyset 定义域(kg_cluster_scratch.ordinal 是
+# bigint):首页从下界起、末页收到上界,闭区间覆盖整个定义域,不依赖「identity
+# 从 1 起」(快照导入可显式写入任意历史 rowid)。
+_SCRATCH_ORDINAL_MIN = -(2 ** 63)
+_SCRATCH_ORDINAL_MAX = 2 ** 63 - 1
 # K1 (debt-fix 2026-10-12, rulings 11 + 13): a graph delete keeps the five
 # rebuild-derived tables until the next rebuild. Their rows must not read back
 # in between: re-extracting a concept after the delete mints the SAME
@@ -395,7 +400,10 @@ class UnifiedKgStore:
         # contract is knowledge_objects.ordinal order. PostgreSQL has no rowid
         # on this scratch table, so recover that preserved order via the source
         # object instead of inventing object-id lexical order. Float32 mean
-        # accumulation in Pass B is order-sensitive.
+        # accumulation in Pass B is order-sensitive. (0078 gave the scratch
+        # table that insertion order as ``s.ordinal`` for the paged cluster-map
+        # write; this reader is deliberately left on ``k.ordinal`` -- the same
+        # order for every row, and its join and plan stay untouched.)
         return db.execute(
             "SELECT s.seed AS seed, e.vector AS vector "
             "FROM knowledge_embeddings e "
@@ -471,9 +479,12 @@ class UnifiedKgStore:
         memory, which needs the seed on every row.
 
         ⚠ Registered follow-up (a migration, deliberately not in this batch):
-        ``idx_kg_cluster_scratch_nb_run`` is ``(notebook_id, run_id)`` with no
-        ``seed`` key, so ``seed = ANY`` stays a residual filter over the run's
-        whole scratch table — see the SQLite twin for the full note."""
+        the scratch index is ``(notebook_id, run_id, ordinal)`` since 0079
+        (``(notebook_id, run_id)`` before) — still no ``seed`` key, so
+        ``seed IN`` stays a residual filter over the run's whole scratch
+        table — see the SQLite twin for the full note. The plan stays linear
+        in every statistics state (the scratch side drives, knowledge_objects
+        is a primary-key probe): ``tests/postgres/test_cluster_map_write_plan_pins.py``."""
         values = list(seeds)
         if not values:
             return []
@@ -923,10 +934,60 @@ class UnifiedKgStore:
         run_id: str,
         created_at: str,
         generation: int,
-    ) -> None:
-        """写新代:swap 的 INSERT 半部 + generation 列。**不持 advisory
-        lock、不 DELETE**(设计 §1.2:新代行与 published 代/并发 append 无
-        行冲突,四列唯一按代隔离;锁窗口整个收进翻转微事务)。"""
+        *,
+        start: Optional[int] = None,
+        page_rows: int,
+    ) -> Optional[int]:
+        """写新代的**一页**:swap 的 INSERT 半部 + generation 列。**不持
+        advisory lock、不 DELETE**(设计 §1.2:新代行与 published 代/并发
+        append 无行冲突,四列唯一按代隔离;锁窗口整个收进翻转微事务)。
+
+        分页(调用方每页一个短 ``write()``,页前复读认领):本页 = 本 run 的
+        scratch 行里 ``ordinal`` 落在闭区间 ``[start, bound]`` 的那些,
+        ``bound`` = 从 ``start`` 起第 ``page_rows`` 行的 ordinal(不足一页则
+        取定义域上界、即末页)。返回下一页的 ``start``,末页返回 ``None``。
+        ``start=None`` 从定义域下界起。闭区间按 ordinal 值切,值相同的行
+        永远同页(不会被页边界劈开),所以各页之并逐行等于一次写完的行集。
+        ``ordinal`` 是 0079 加的 identity(Pass A2 的插入序 = stream_seed_rows
+        的 ``ORDER BY o.ordinal``,即 SQLite 侧 rowid 的同一序),
+        ``(notebook_id, run_id, ordinal)`` 索引让每页的界与行都是一段有序
+        区间扫,与页序号无关。
+
+        两条计划红线(``tests/postgres/test_cluster_map_write_plan_pins.py``):
+
+        * c 侧是 ``CROSS JOIN LATERAL (... OFFSET 0)``。每轮重建换新
+          run_id,两张 scratch 表要么没统计、要么统计停在上一轮的 run_id
+          (MCV 只有那一个值)→ 规划器两侧都估 1 行;普通 JOIN 下它选
+          Nested Loop,c 侧只按 ``(notebook_id, run_id)`` 非参数化扫,
+          ``c.seed = s.seed`` 落成 Join Filter,代价 = 成员数 × 种子数
+          (本机副本 claim 29k×28k:8.1 亿行过滤、67 s;生产推算数十小时)。
+          ANALYZE 救不了:跑时 scratch 是空的。LATERAL 让 c 只能按外行参数
+          化探查三键索引,与统计状态无关。``OFFSET 0`` 是优化屏障(阻止
+          子查询上拉回普通 JOIN),且不截断结果——同一 (notebook_id, run_id,
+          seed) 若有多行,产出与旧 JOIN 逐行相同(多行照样撞
+          uq_clusters_nb_type_member_generation 响亮失败,不会像
+          ``LIMIT 1`` 那样静默挑一行)。
+        * 事务内抬 600 s 维护底线(``raise_statement_timeout_floor``,
+          #930 同套路):一页的成本是 ``page_rows`` 行的索引维护,正常远低于
+          30 s;底线只兜慢盘/冷缓存,不替坏计划兜底(坏计划下一页就是几十亿
+          行过滤,600 s 照样响亮失败)。
+
+        与旧写法的行集/行序等价:仍 JOIN knowledge_objects(建 scratch 之后
+        被删的对象照旧不写);行序从 ``ORDER BY k.ordinal`` 改为
+        ``ORDER BY s.ordinal``——s.ordinal 就是 Pass A2 按 k.ordinal 流出的
+        插入序,两者只在「同一 id 的对象在 Pass A2 与写代段之间被删了又
+        重建」时不同,那时这里与 SQLite 孪生(``ORDER BY s.rowid``)一致。"""
+        if page_rows < 1:
+            raise ValueError("page_rows must be >= 1")
+        raise_statement_timeout_floor(db)
+        lo = _SCRATCH_ORDINAL_MIN if start is None else int(start)
+        bound = db.execute(
+            "SELECT s.ordinal FROM kg_cluster_scratch s "
+            "WHERE s.notebook_id=%s AND s.run_id=%s AND s.ordinal >= %s "
+            "ORDER BY s.ordinal OFFSET %s LIMIT 1",
+            (notebook_id, run_id, lo, page_rows - 1),
+        ).fetchone()
+        hi = _SCRATCH_ORDINAL_MAX if bound is None else int(bound["ordinal"])
         db.execute(
             "INSERT INTO concept_clusters "
             "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,"
@@ -935,12 +996,19 @@ class UnifiedKgStore:
             "s.notebook_id,c.canonical_id,s.object_id,c.canonical_name,%s,"
             "c.canonical_description,c.canonical_desc_sig,%s::timestamptz,%s "
             "FROM kg_cluster_scratch s "
-            "JOIN kg_canonical_scratch c "
-            "ON c.notebook_id=s.notebook_id AND c.run_id=s.run_id AND c.seed=s.seed "
+            "CROSS JOIN LATERAL ("
+            "SELECT c.canonical_id,c.canonical_name,c.canonical_description,"
+            "c.canonical_desc_sig FROM kg_canonical_scratch c "
+            "WHERE c.notebook_id=s.notebook_id AND c.run_id=s.run_id AND c.seed=s.seed "
+            "OFFSET 0) c "
             "JOIN knowledge_objects k ON k.id=s.object_id "
-            "WHERE s.notebook_id=%s AND s.run_id=%s ORDER BY k.ordinal",
-            (object_type, created_at, generation, notebook_id, run_id),
+            "WHERE s.notebook_id=%s AND s.run_id=%s "
+            "AND s.ordinal BETWEEN %s AND %s ORDER BY s.ordinal",
+            (object_type, created_at, generation, notebook_id, run_id, lo, hi),
         )
+        if bound is None or hi == _SCRATCH_ORDINAL_MAX:
+            return None
+        return hi + 1
 
     @staticmethod
     def flip_cluster_generation(

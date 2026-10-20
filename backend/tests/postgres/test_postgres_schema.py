@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 78
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 79
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -69,10 +69,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 78
-    assert migrator.migrate() == 78
-    assert migrator.current_version() == 78
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 78
+    assert migrator.migrate() == 79
+    assert migrator.migrate() == 79
+    assert migrator.current_version() == 79
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 79
 
 
 @pytest.mark.postgres_integration
@@ -84,7 +84,7 @@ def test_kg_findings_storage_matches_the_sqlite_v97_contract(postgres_database):
 
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 78
+    assert PostgresMigrator(postgres_database).migrate() == 79
     with postgres_database.connect() as conn:
         def columns(table):
             return [
@@ -155,7 +155,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 78
+    assert migrator.migrate() == 79
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -238,7 +238,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 78
+        assert PostgresMigrator(databases[1]).migrate() == 79
     finally:
         for database in databases:
             database.close()
@@ -341,6 +341,7 @@ def test_packaged_index_migration_phases_are_exact():
         (76, "global_ask_feedback_index"),
         (77, "kg_analysis_findings"),
         (78, "global_ask_job_notebooks"),
+        (79, "kg_cluster_scratch_ordinal"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -859,6 +860,12 @@ def test_packaged_index_migration_phases_are_exact():
     assert index_declarations(78) == [
         (False, "idx_global_ask_job_notebooks_notebook"),
         (False, "idx_global_ask_jobs_unattributed"),
+    ]
+    # Migration 79 (kg_cluster_scratch keyset ordinal) adds the identity
+    # ordinal and replaces (notebook_id, run_id) with the ordered keyset index
+    # the paged cluster-map write walks.
+    assert index_declarations(79) == [
+        (False, "idx_kg_cluster_scratch_nb_run_ordinal")
     ]
     # Spelled without ``IF NOT EXISTS`` on purpose, and that is asserted
     # rather than merely commented: app/migration/shadow/postgres_catalog.py
