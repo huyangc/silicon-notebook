@@ -4703,7 +4703,7 @@ def test_community_overview_reads_one_repeatable_read_snapshot(postgres_database
             [("cm-a", ["k-a", "k-b"]), ("cm-b", ["k-c"])],
             {"k-a": "Alpha", "k-b": "Beta", "k-c": "Gamma"},
             {"k-a": 0.9, "k-b": 0.5, "k-c": 0.7},
-            NOW, 0,
+            NOW, 0, board_keys=["bk-a", "bk-b"],
         )
 
     fired: list[str] = []
@@ -4768,6 +4768,7 @@ def test_board_list_and_board_edges_share_the_caller_snapshot(postgres_database)
             connection, ANALYSIS_NB, 0,
             [("cm-a", ["k-a"]), ("cm-b", ["k-b"])],
             {"k-a": "Alpha", "k-b": "Beta"}, {"k-a": 0.9, "k-b": 0.5}, NOW, 0,
+            board_keys=["bk-a", "bk-b"],
         )
         store.replace_kg_analysis_artifacts(
             connection, ANALYSIS_NB, 12, [("cm-a", "cm-b", 30)], [],
@@ -4809,6 +4810,7 @@ def _recast_boards_and_edges(database) -> None:
         store.write_communities_generation(
             connection, ANALYSIS_NB, 0, [("cm-x", ["k-a"])],
             {"k-a": "Alpha"}, {"k-a": 0.9}, NOW, claim["generation"],
+            board_keys=["bk-x"],
         )
         assert store.flip_community_generation(
             connection, ANALYSIS_NB,

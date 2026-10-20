@@ -179,6 +179,12 @@ LIFECYCLE_STORE_CALLS = {
         "scratch_vector_rows",
         "seed_payload_rows",
         "set_community_seq",
+        # Board partition (design 2026-10-19 §五 S2): the published generation's
+        # (canonical_id, board_key) stream read before the partition (warm start
+        # and key carry), and the version / mode written by the publishing
+        # transaction (and reset by `request_cold_community_partition`).
+        "community_board_key_rows",
+        "set_community_partition",
         "state_row",
         # v97/0077: the inputs-unchanged skip path's guarded write of the
         # merge code component (``_settle_skip_path``).
