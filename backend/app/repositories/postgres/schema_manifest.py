@@ -23,6 +23,9 @@ POSTGRES_ROWID_ORDINAL_TABLES = (
     "concept_merge_candidates",
     "extraction_runs",
     "kg_build_jobs",
+    # Migration 0079: the rebuild writes one run's scratch rows in keyset
+    # pages over this ordinal (SQLite pages over the rowid).
+    "kg_cluster_scratch",
     "knowledge_objects",
     "source_elements",
 )
@@ -494,5 +497,5 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # AND attributed = 0. One new replicated unique surface (the primary key).
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
     sqlite_version=98,
-    postgres_version=78,
+    postgres_version=79,
 )

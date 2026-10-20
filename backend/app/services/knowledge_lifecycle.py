@@ -5571,10 +5571,15 @@ class KnowledgeLifecycleService:
         type(两种类型的 seed 字符串恰好相同时)——镜像 _stream_seed_reps 对
         kg_cluster_scratch 的 clear-at-start。
 
-        写代段(批 3·W2 §1.2,取代旧的 DELETE+INSERT swap):一个 write()
-        块,先复读在飞认领(≠generation 即被 TTL 抢占,响亮作废早停——抢占者
-        预回收扫过的键区不会被本轮再填残行),再纯 SQL INSERT...SELECT 把两张
-        scratch 表连接进 generation 代。**不 DELETE、不持 advisory lock**:
+        写代段(批 3·W2 §1.2,取代旧的 DELETE+INSERT swap):按 scratch 的
+        插入序 keyset 分页,每页 ``_CLUSTER_MAP_PAGE_ROWS`` 行、一个短 write()
+        块——先复读在飞认领(≠generation 即被 TTL 抢占,响亮作废早停——抢占者
+        预回收扫过的键区不会被本轮再填残行;已提交的前几页是 generation 代的
+        残行,读者看不见,交给下一轮预回收/启动恢复),再纯 SQL INSERT...SELECT
+        把两张 scratch 表的这一页连接进 generation 代。各页按 keyset 先后提交,
+        行集与行序与一次写完逐行相同(store docstring 有论证)。分页之前是整类
+        一条语句:生产 claim 数百万成员,单条语句光 concept_clusters 的索引
+        维护就远超 30 s 语句超时。**不 DELETE、不持 advisory lock**:
         新代行与 published 代/并发 append 无行冲突,四列唯一按代隔离,锁窗口
         整个收进翻转微事务。**不 bump cluster_mutation_seq**(两段式红线:
         未发布代的写入对读者不可见,bump 反而制造假失效——版本身份在翻转
@@ -5613,22 +5618,40 @@ class KnowledgeLifecycleService:
         )
 
         # --- Write-generation segment ---------------------------------------
-        # ONE short write transaction: recheck the in-flight claim (same tx as
-        # the write — sqlite 侧 derived_claim_still_held 自带 begin_guarded_write
-        # 接缝,对跨进程抢占者原子),then pure SQL INSERT...SELECT into the
-        # in-flight generation. 刻意没有 DELETE、没有锁、没有 cseq bump——
-        # 三条理由都在 docstring 的「写代段」一节。
-        with self._write() as wdb:
-            if not self.unified_kg.derived_claim_still_held(
-                    wdb, notebook_id, generation):
-                self.event_log.emit({
-                    "kind": "kg_generation_preempted", "notebook_id": notebook_id,
-                    "generation": generation, "stage": f"write:{object_type}",
-                })
-                raise KgDerivedGenerationPreempted(notebook_id, generation)
-            self.unified_kg.write_cluster_map_generation(
-                wdb, notebook_id, object_type, run_id, now, generation
-            )
+        # ONE short write transaction PER PAGE: recheck the in-flight claim
+        # (same tx as the page's write — sqlite 侧 derived_claim_still_held
+        # 自带 begin_guarded_write 接缝,对跨进程抢占者原子),then pure SQL
+        # INSERT...SELECT of that page into the in-flight generation. 刻意没有
+        # DELETE、没有锁、没有 cseq bump——三条理由都在 docstring 的「写代段」
+        # 一节。
+        page_start: Optional[int] = None
+        while True:
+            with self._write() as wdb:
+                if not self.unified_kg.derived_claim_still_held(
+                        wdb, notebook_id, generation):
+                    self.event_log.emit({
+                        "kind": "kg_generation_preempted",
+                        "notebook_id": notebook_id,
+                        "generation": generation, "stage": f"write:{object_type}",
+                    })
+                    raise KgDerivedGenerationPreempted(notebook_id, generation)
+                page_start = self.unified_kg.write_cluster_map_generation(
+                    wdb, notebook_id, object_type, run_id, now, generation,
+                    start=page_start, page_rows=self._CLUSTER_MAP_PAGE_ROWS,
+                )
+            if page_start is None:
+                break
+
+    # 写代段每页的 scratch 行数(上面的分页)。成本预算:一页 = 这么多行的
+    # concept_clusters 索引维护(6 个索引 + FK + 同步捕获触发器)。真实 schema
+    # 的合成库实测每行 25–32 µs(100 万行)到 80–98 µs(400 万行,索引超出
+    # 缓存后上升),2 万行一页中位 0.4–1.8 s、最慢 1.6–7.3 s(开同步捕获时
+    # 最慢),比 30 s 语句超时低一个量级(store 侧另抬 600 s 维护底线兜慢盘)。
+    # 页数(生产 claim 数百万成员 → 数百页)的额外开销是每页一次索引区间取界
+    # + 一次认领复读 + 一次提交:100 万行时 5 千/2 万/5 万行一页与不分页的
+    # 总耗时在测量噪声内(24.8/26.2/24.9 s 对 24.5 s)。与 _CATCHUP_PAGE_ROWS
+    # 同一量级。
+    _CLUSTER_MAP_PAGE_ROWS = 20_000
 
     # 批 3·W2:催收每页行数。窗口本身由 created_at >= 锚点-偏斜 界住,但
     # 背靠背 rebuild 时窗口可能装下上一整代(质量评 P2)——分页把内存峰值

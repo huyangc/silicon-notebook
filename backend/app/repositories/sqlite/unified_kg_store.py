@@ -89,6 +89,11 @@ _PUBLISHED_CLUSTER_GEN = (
     "COALESCE((SELECT cluster_generation FROM unified_kg_state "
     "WHERE notebook_id = ?), 0)"
 )
+# write_cluster_map_generation 的 keyset 定义域(rowid 是 64 位有符号整数):
+# 首页从下界起、末页收到上界,闭区间覆盖整个定义域(PG 孪生的
+# _SCRATCH_ORDINAL_MIN/MAX 同理)。
+_SCRATCH_ROWID_MIN = -(2 ** 63)
+_SCRATCH_ROWID_MAX = 2 ** 63 - 1
 # K1 (debt-fix 2026-10-12, rulings 11 + 13): a graph delete keeps the five
 # rebuild-derived tables until the next rebuild; their rows must not read back
 # in between. The delete writes each layer's seq as the sentinel -2 and the
@@ -790,10 +795,42 @@ class UnifiedKgStore:
         run_id: str,
         created_at: str,
         generation: int,
-    ) -> None:
-        # 行序/连接形状与旧 swap_cluster_map_from_scratch 的 INSERT 半部逐字
-        # 一致(ORDER BY s.rowid,PR#136 行序红线),只多 generation 列、
-        # 少 DELETE 半部。
+        *,
+        start: Optional[int] = None,
+        page_rows: int,
+    ) -> Optional[int]:
+        """写新代的**一页**——分页契约(闭区间 ``[start, bound]``、返回下一页
+        起点、末页 ``None``、同值永不劈页)与 PG 孪生逐条相同,keyset 是
+        scratch 的 rowid:本表的 rowid 就是 Pass A2 的插入序,而
+        ``idx_kg_cluster_scratch_nb_run`` 隐含 rowid 作末列,所以
+        ``(notebook_id, run_id, rowid)`` 区间本来就是一段有序索引扫——不需要
+        PG 0079 那样的显式 ordinal 列与迁移。
+
+        行序/连接形状与旧 swap_cluster_map_from_scratch 的 INSERT 半部逐字
+        一致(ORDER BY s.rowid,PR#136 行序红线),只多 generation 列、
+        少 DELETE 半部、多 rowid 区间谓词;各页按区间先后提交,拼起来就是
+        一次写完的行序。
+
+        两侧形态为何分岔(PG 用 ``CROSS JOIN LATERAL ... OFFSET 0`` + 抬语句
+        超时底线,这里都不用):SQLite 的 c 侧在四种统计状态(无
+        sqlite_stat1——生产从不 ANALYZE;ANALYZE 时 scratch 装着别的 run;
+        ANALYZE 时 scratch 为空;本 run 自己的统计)下、3.45 与 3.53 两个
+        版本都按 ``(notebook_id=? AND run_id=? AND seed=?)`` 三键探查,
+        s 侧都是按本页 rowid 区间的定位扫
+        (``tests/test_cluster_map_write_paging.py`` 钉住),没有 PG 那种
+        「统计估 1 行 → 非参数化内扫」的平方级退化;SQLite 也没有语句超时。
+        分页本身两侧都做:SQLite 的进程级写锁在页间释放,一次重建的整类
+        写入不再独占写锁。"""
+        if page_rows < 1:
+            raise ValueError("page_rows must be >= 1")
+        lo = _SCRATCH_ROWID_MIN if start is None else int(start)
+        bound = db.execute(
+            "SELECT s.rowid AS k FROM kg_cluster_scratch AS s "
+            "WHERE s.notebook_id = ? AND s.run_id = ? AND s.rowid >= ? "
+            "ORDER BY s.rowid LIMIT 1 OFFSET ?",
+            (notebook_id, run_id, lo, page_rows - 1),
+        ).fetchone()
+        hi = _SCRATCH_ROWID_MAX if bound is None else int(bound["k"])
         db.execute(
             "INSERT INTO concept_clusters "
             "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,"
@@ -804,10 +841,13 @@ class UnifiedKgStore:
             "FROM kg_cluster_scratch AS s "
             "JOIN kg_canonical_scratch AS c "
             "  ON c.notebook_id = s.notebook_id AND c.run_id = s.run_id AND c.seed = s.seed "
-            "WHERE s.notebook_id = ? AND s.run_id = ? "
+            "WHERE s.notebook_id = ? AND s.run_id = ? AND s.rowid BETWEEN ? AND ? "
             "ORDER BY s.rowid",
-            (object_type, created_at, generation, notebook_id, run_id),
+            (object_type, created_at, generation, notebook_id, run_id, lo, hi),
         )
+        if bound is None or hi == _SCRATCH_ROWID_MAX:
+            return None
+        return hi + 1
 
     @staticmethod
     def flip_cluster_generation(

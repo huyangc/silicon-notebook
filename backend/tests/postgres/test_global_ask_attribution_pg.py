@@ -237,11 +237,12 @@ def test_backfill_cli_neither_seeds_nor_migrates_pg(legacy, postgres_settings, m
     assert module.main(["--dry-run"]) == 1
     assert admins() == before
     with database.write() as db:
-        db.execute("DELETE FROM silicon_schema_migrations WHERE version = 78")
+        # back to a ledger at 0077: 0078 and every later migration go
+        db.execute("DELETE FROM silicon_schema_migrations WHERE version >= 78")
     assert module.main([]) == module.EXIT_SCHEMA_NOT_READY
     with database.connect() as db:
         assert db.execute(
-            "SELECT COUNT(*) AS c FROM silicon_schema_migrations WHERE version = 78"
+            "SELECT COUNT(*) AS c FROM silicon_schema_migrations WHERE version >= 78"
         ).fetchone()["c"] == 0
     assert admins() == before
 
