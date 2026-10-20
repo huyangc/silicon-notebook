@@ -381,7 +381,7 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 
 **结构**（零行为变化的拆分；有需要时立项，每项先补表征测试）
 
-- [ ] **第二梯队大函数拆分**（四个函数各一个 PR，零行为变化）：`AskService._draft_reasoning_response` 597 行
+- [ ] **第二梯队大函数拆分**（用户裁决 2026-10-19：四个函数各一个 PR、零行为变化）：`AskService._draft_reasoning_response` 597 行
       （`backend/app/services/ask_service.py:6751`）、`AskService._run_reasoning_stage` 515 行
       （同文件 `:5834`）、`KnowledgeLifecycleService.rebuild_unified_kg` 481 行（`knowledge_lifecycle.py:5867`）
       三者仍待做，都在 `scripts/architecture_boundary_baseline.json::function_length_ceiling` 里按现值零松弛钉住。前两个
