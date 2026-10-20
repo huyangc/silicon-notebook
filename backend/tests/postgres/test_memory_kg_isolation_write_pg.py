@@ -3,8 +3,10 @@
 PostgreSQL 是主环境:这里在真 PG 上钉住
 
 * `merge_objects_in_transaction` 在加锁的那条语句里判定:别人的(含孤儿)Memory 派生对象
-  当作不存在(KeyError → 路由 404,与未知 id 同一回答),调用者本人的跨类/同主人合并拒绝
-  (409 文案),拒绝时一行不写;共享对象照常合并;
+  当作不存在(KeyError → 路由 404,与未知 id 同一回答),调用者本人的跨类合并、以及证据里
+  夹着别的来源的同主人合并拒绝(409 文案),拒绝时一行不写;同主人、只由其 Memory 支撑的
+  两个对象照常合并(§13.2 第 9 条);共享对象照常合并;合并先锁 Memory 来源再锁对象,
+  与 Memory 删除的锁序一致(并发删除等合并提交后摘掉合并写进的证据);
 * 按 id 写的路由(PATCH、合并、贡献申请、关系审核)对非属主与「不存在」同答,属主保留 409;
   审批时对象已不存在 → 关闭为 object_missing;含 Memory 的笔记本不能发布为公共库(H11 计数);
 * 增量融合的语句数与库里 Memory 来源条数无关(N = 0 / 5 / 1000,两个分支);
@@ -22,7 +24,6 @@ import pytest
 
 from app.domain.memory_kg_isolation import (
     CROSS_CLASS_MESSAGE,
-    SAME_OWNER_MESSAGE,
     MemoryKnowledgeMergeRefused,
 )
 from app.domain.vector_index import encode_vector
@@ -129,7 +130,6 @@ def _snapshot(database) -> dict:
     [
         ("ko-ma1", "ko-s", CROSS_CLASS_MESSAGE),
         ("ko-s", "ko-ma1", CROSS_CLASS_MESSAGE),
-        ("ko-ma1", "ko-ma2", SAME_OWNER_MESSAGE),
     ],
 )
 def test_pg_store_refuses_the_owners_memory_merges_and_writes_nothing(
@@ -144,6 +144,194 @@ def test_pg_store_refuses_the_owners_memory_merges_and_writes_nothing(
             )
     assert refused.value.user_message == message
     assert _snapshot(database) == before
+
+
+def _evidence_sources(database, object_id: str) -> "set | None":
+    with database.connect() as db:
+        row = db.execute(
+            "SELECT evidence FROM knowledge_objects WHERE id=%s", (object_id,)
+        ).fetchone()
+    return None if row is None else {item["source_id"] for item in row["evidence"]}
+
+
+def test_pg_store_merges_two_of_the_owners_memory_objects(seeded):
+    """§13.2-9 (user ruling 2026-10-21): both u-a's, both backed by her
+    Memory alone → merged; the result keeps its Memory source (still hers
+    alone) and cites her two Memory sources only."""
+    database, store = seeded
+    with database.write() as db:
+        row = store.merge_objects_in_transaction(
+            db, "nb", "ko-ma1", "ko-ma2", NOW, actor_id="u-a"
+        )
+    assert row["id"] == "ko-ma2" and row["source_id"] == "src-ma2"
+    snap = _snapshot(database)
+    assert snap["ko-ma1"][0] == "deprecated" and snap["ko-ma2"][0] == "approved"
+    assert _evidence_sources(database, "ko-ma2") == {"src-ma1", "src-ma2"}
+    for actor in ("u-b", None):
+        with pytest.raises(KeyError):
+            with database.write() as db:
+                store.merge_objects_in_transaction(
+                    db, "nb", "ko-ma2", "ko-ma1", NOW, actor_id=actor
+                )
+
+
+@pytest.mark.parametrize("cited", ["src-s", "src-mb", "src-mo", ""])
+@pytest.mark.parametrize("carrier", ["ko-ma1", "ko-ma2"])
+def test_pg_store_refuses_an_own_pair_not_backed_by_her_memory_alone(
+    seeded, cited, carrier
+):
+    """Same owner is not enough: a shared source, another member's Memory, an
+    orphan Memory source or an entry without a source id in either side's
+    evidence refuses the pair (cross-class copy) and writes nothing."""
+    database, store = seeded
+    with database.write() as db:
+        db.execute(
+            "UPDATE knowledge_objects SET evidence = evidence || "
+            "jsonb_build_array(jsonb_build_object('source_id', %s::text, "
+            "'element_id', 'el-x', 'quoted_span', 'x')) WHERE id = %s",
+            (cited, carrier),
+        )
+    before = _snapshot(database)
+    with pytest.raises(MemoryKnowledgeMergeRefused) as refused:
+        with database.write() as db:
+            store.merge_objects_in_transaction(
+                db, "nb", "ko-ma1", "ko-ma2", NOW, actor_id="u-a"
+            )
+    assert refused.value.user_message == CROSS_CLASS_MESSAGE
+    assert _snapshot(database) == before
+
+
+class _CommitsBetween:
+    """Runs ``side_effect`` once, right after the first statement whose text
+    contains ``marker`` — a concurrent commit landing between two statements
+    of the store method under test."""
+
+    def __init__(self, connection, marker: str, side_effect):
+        self.connection = connection
+        self.marker = marker
+        self.side_effect = side_effect
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+    def execute(self, sql, params=None, **kwargs):
+        result = self.connection.execute(sql, params, **kwargs)
+        if self.side_effect is not None and self.marker in str(sql):
+            effect, self.side_effect = self.side_effect, None
+            effect()
+        return result
+
+
+def test_pg_merge_refuses_when_the_source_gained_a_memory_after_the_pre_lock(seeded):
+    """The pre-lock read pinned the source object's Memory sources; another
+    merge then commits a new Memory citation into it before the row lock.
+    That source was never locked in order, so the merge is refused (retry
+    copy) and writes nothing — it never takes a source lock out of order."""
+    import psycopg
+
+    from app.domain.memory_kg_isolation import MEMORY_MERGE_RETRY_MESSAGE
+
+    database, store = seeded
+
+    def concurrent_merge_commits():
+        with psycopg.connect(database.settings.database_url, autocommit=True) as other:
+            other.execute(
+                "UPDATE knowledge_objects SET evidence = evidence || "
+                "jsonb_build_array(jsonb_build_object('source_id', 'src-ma2', "
+                "'element_id', 'el-src-ma2', 'quoted_span', 'y')) WHERE id = 'ko-ma1'"
+            )
+
+    before = _snapshot(database)
+    with pytest.raises(MemoryKnowledgeMergeRefused) as refused:
+        with database.write() as db:
+            store.merge_objects_in_transaction(
+                _CommitsBetween(db, "FOR KEY SHARE", concurrent_merge_commits),
+                "nb", "ko-ma1", "ko-ma2", NOW, actor_id="u-a",
+            )
+    assert refused.value.user_message == MEMORY_MERGE_RETRY_MESSAGE
+    after = _snapshot(database)
+    assert {k: v for k, v in after.items() if k != "ko-ma1"} == {
+        k: v for k, v in before.items() if k != "ko-ma1"
+    }
+    assert after["ko-ma1"][0] == "approved"
+
+
+def test_pg_editing_a_merged_memory_keeps_the_other_memorys_object(pg_repository):
+    """An edit re-ingests the Memory: under the source lock its evidence is
+    stripped from the object the other Memory owns, then its old graph is
+    cleared — the merged object survives with its own evidence only, instead
+    of being deleted by evidence reference."""
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    with database.write() as db:
+        GovernanceStore.merge_objects_in_transaction(
+            db, "nb", "ko-ma1", "ko-ma2", NOW, actor_id="u-a"
+        )
+    assert _evidence_sources(database, "ko-ma2") == {"src-ma1", "src-ma2"}
+    assert repo._runtime.source_ingestion.ingest_memory_source(
+        "nb", "mem-a1", "t", "edited text"
+    ) == "src-ma1"
+    assert _evidence_sources(database, "ko-ma1") is None
+    assert _evidence_sources(database, "ko-ma2") == {"src-ma2"}
+
+
+def test_pg_memory_removal_waits_for_an_uncommitted_own_merge(pg_repository):
+    """Lock order (source → derived rows): u-a's merge of her two Memory
+    objects holds FOR KEY SHARE on the merged-away Memory's source; deleting
+    that Memory (the path every delete, transfer and member exit takes)
+    blocks on its FOR UPDATE until the merge commits, then strips exactly
+    the entries the merge wrote. Without the pre-lock the teardown's strip
+    runs before the commit, finds nothing, and the merged object keeps the
+    deleted Memory's text (or is deleted with it)."""
+    import threading
+    import time
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    url = database.settings.database_url
+    outcome: dict = {}
+
+    def remove():
+        try:
+            outcome["removed"] = repo._runtime.source_ingestion.remove_memory_sources(
+                ["src-ma1"]
+            )
+        except Exception as exc:  # pragma: no cover - surfaced below
+            outcome["removed"] = repr(exc)
+
+    with psycopg.connect(url, row_factory=dict_row) as merge_tx, \
+            psycopg.connect(url, autocommit=True, row_factory=dict_row) as probe:
+        GovernanceStore.merge_objects_in_transaction(
+            merge_tx, "nb", "ko-ma1", "ko-ma2", NOW, actor_id="u-a"
+        )
+        worker = threading.Thread(target=remove)
+        worker.start()
+        deadline = time.monotonic() + 10
+        waiting = 0
+        while time.monotonic() < deadline:
+            waiting = probe.execute(
+                "SELECT count(*) AS n FROM pg_stat_activity "
+                "WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid()"
+            ).fetchone()["n"]
+            if waiting:
+                break
+            time.sleep(0.02)
+        assert waiting, "the Memory removal never waited on the merge"
+        merge_tx.commit()
+    worker.join(timeout=10)
+    assert outcome == {"removed": 1}
+    assert _evidence_sources(database, "ko-ma1") is None
+    assert _evidence_sources(database, "ko-ma2") == {"src-ma2"}
+    with database.connect() as db:
+        status = db.execute(
+            "SELECT status FROM knowledge_objects WHERE id='ko-ma2'"
+        ).fetchone()["status"]
+    assert status == "approved"
 
 
 @pytest.mark.parametrize(
@@ -321,9 +509,9 @@ class _CapturingConnection:
     def __getattr__(self, name):
         return getattr(self.connection, name)
 
-    def execute(self, sql, params=None):
+    def execute(self, sql, params=None, **kwargs):
         self.statements.append((str(sql), tuple(params or ())))
-        return self.connection.execute(sql, params)
+        return self.connection.execute(sql, params, **kwargs)
 
 
 _EXPLAIN_TABLES = ("sources", "memory_items", "knowledge_objects",
@@ -395,10 +583,41 @@ def test_pg_new_statements_keep_index_paths(seeded):
             merge_capture, "nb", "ko-s", "ko-s2", NOW, actor_id="u-a"
         )
     (locking,) = [s for s in merge_capture.statements if "FOR UPDATE" in s[0]]
+    # An own-Memory pair in the bulk notebook (kox-0 / kox-2: u-a's Memory
+    # sources srcx-0 / srcx-2) exercises the pre-lock's evidence arm and the
+    # own-evidence check.
+    with database.write() as db:
+        for object_id, source in (("kox-0", "srcx-0"), ("kox-2", "srcx-2")):
+            db.execute(
+                "UPDATE knowledge_objects SET evidence = jsonb_build_array("
+                "jsonb_build_object('source_id', %s::text, 'element_id', 'el', "
+                "'quoted_span', 'q')) WHERE id = %s",
+                (source, object_id),
+            )
+    with database.write() as db:
+        own_capture = _CapturingConnection(db)
+        store.merge_objects_in_transaction(
+            own_capture, "nbx", "kox-0", "kox-2", NOW, actor_id="u-a"
+        )
+    (pre_lock,) = [s for s in own_capture.statements if "FOR KEY SHARE" in s[0]]
+    (own_check,) = [
+        s for s in own_capture.statements
+        if "FROM sources s WHERE" in s[0] and "rm.created_by" in s[0]
+    ]
+    (shared_pre_lock,) = [s for s in merge_capture.statements if "FOR KEY SHARE" in s[0]]
 
     with database.connect() as db:
         plans = [_plan(db, sql, params) for sql, params in detection]
         merge_plan = _plan(db, *locking)
+        pre_lock_plans = [_plan(db, *pre_lock), _plan(db, *shared_pre_lock)]
+        own_plan = _plan(db, *own_check)
+    for plan in pre_lock_plans:
+        # Two primary-key probes of the source object, then primary-key
+        # probes of the cited sources: nothing scales with the notebook.
+        assert "Seq Scan" not in plan, plan
+        assert "pk_knowledge_objects" in plan and "pk_sources" in plan, plan
+    assert "Seq Scan" not in own_plan, own_plan
+    assert "pk_sources" in own_plan and "pk_memory_items" in own_plan, own_plan
 
     for plan in plans:
         assert "Seq Scan" not in plan, plan
@@ -463,6 +682,21 @@ def test_pg_non_owner_write_routes_answer_like_a_missing_id(pg_promotion_world):
 def test_pg_owner_keeps_the_reason_on_write_routes(pg_promotion_world):
     cases, world = pg_promotion_world
     cases.owner_keeps_the_reason(world)
+
+
+def test_pg_owner_merges_her_own_memory_objects_through_the_route(pg_promotion_world):
+    cases, world = pg_promotion_world
+    cases.owner_merges_her_own_memory_objects(world)
+
+
+def test_pg_owner_memory_object_with_shared_evidence_cannot_merge(pg_promotion_world):
+    cases, world = pg_promotion_world
+    cases.owner_memory_object_with_shared_evidence_cannot_merge(world)
+
+
+def test_pg_owner_merge_follows_ownership_after_promotion(pg_promotion_world):
+    cases, world = pg_promotion_world
+    cases.owner_merge_follows_ownership_after_promotion(world)
 
 
 def test_pg_proposal_of_a_vanished_object_is_closed_on_approval(pg_promotion_world):

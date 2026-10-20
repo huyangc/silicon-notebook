@@ -247,7 +247,8 @@ def knowledge_graph(notebook_id: str) -> KnowledgeGraph:
 def merge_knowledge(notebook_id: str, knowledge_id: str, payload: MergeRequest,
                     user: UserProfile = Depends(get_current_user)):
     # M1: a side derived from someone else's Memory is "not found" (same 404
-    # body as an unknown id); the caller's own Memory answers 409 with why.
+    # body as an unknown id); the caller's own Memory answers 409 with why,
+    # except a pair of her own objects backed by her own Memory alone.
     try:
         return repository().merge_knowledge(
             notebook_id, knowledge_id, payload, actor_id=user.id

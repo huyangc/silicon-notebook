@@ -5,8 +5,10 @@
 * 确认一条 Memory 后,增量融合(真实抽取收尾 `run_extraction` → `incremental_fuse_source`)
   不把它放进任何共享簇、不产生合并候选;scale fold 走的是同一个方法,直调同样不动。
 * 手工合并跨类返回 409(真实路由,策展文案 + `X-User-Message`),store 层直调同样拒绝,
-  且拒绝时一行不写。同一成员的两个 Memory 对象同样拒绝(判定与理由见
-  `app.domain.memory_kg_isolation`)。
+  且拒绝时一行不写。同一成员的两个 Memory 对象、且两份证据都只出自她本人的 Memory 时
+  允许合并(§13.2 第 9 条,用户裁决 2026-10-21;判定见 `app.domain.memory_kg_isolation`);
+  任一份证据夹着别的来源时照旧拒绝。合并之后删除或编辑其中一条 Memory,另一条 Memory
+  的对象只失去这条 Memory 的证据,不被连带删除。
 * N-1 回归:先尝试把 Memory 对象并进共享对象(被拒),再删除该 Memory —— 共享对象一个
   不少、状态不变。去掉 store 内的判定,这条必须红(合并成功后删除 Memory 会按证据引用把
   共享对象一起删掉)。
@@ -25,7 +27,6 @@ from fastapi.testclient import TestClient
 from app.core.config import Settings
 from app.domain.memory_kg_isolation import (
     CROSS_CLASS_MESSAGE,
-    SAME_OWNER_MESSAGE,
     MemoryKnowledgeMergeRefused,
 )
 from app.models.knowledge import MergeRequest
@@ -258,14 +259,138 @@ def test_store_treats_another_members_memory_as_missing(world):
     assert _snapshot(repo, nb) == before
 
 
-def test_store_refuses_merge_between_one_members_two_memories(world):
+def _evidence(repo, object_id: str) -> list:
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT evidence FROM knowledge_objects WHERE id=?", (object_id,)
+        ).fetchone()
+    return json.loads(row["evidence"]) if row is not None else None
+
+
+def _reverse_index(repo, object_id: str) -> set:
+    with repo._connect() as db:
+        return {
+            r["source_id"] for r in db.execute(
+                "SELECT source_id FROM knowledge_object_sources WHERE object_id=?",
+                (object_id,),
+            ).fetchall()
+        }
+
+
+@pytest.fixture
+def own_pair(world):
+    """Two confirmed Memories of u-a (real pipeline), their concepts merged:
+    a1's concept folded into a2's."""
     repo, nb, _upload = world
+    src_a1 = _confirmed_memory(repo, nb, "mem-a1", "u-a")
+    src_a2 = _confirmed_memory(repo, nb, "mem-a2", "u-a")
+    a1 = _concept(_objects(repo, nb, src_a1))
+    a2 = _concept(_objects(repo, nb, src_a2))
+    with repo._connect() as db:
+        seq_before = tuple(repo._runtime.unified_kg.graph_seq_row(db, nb))
+    row = repo._runtime.knowledge_governance.merge_knowledge(
+        nb, a1, MergeRequest(into_id=a2), actor_id="u-a"
+    )
+    assert row.id == a2
+    with repo._connect() as db:
+        assert tuple(repo._runtime.unified_kg.graph_seq_row(db, nb)) != seq_before
+    return repo, nb, src_a1, src_a2, a1, a2
+
+
+def test_owner_merges_two_of_her_own_memory_objects(own_pair):
+    """§13.2-9 (user ruling 2026-10-21): both sides hers, both supported by
+    her Memory alone → merged. The result keeps a2's Memory source (still
+    hers alone: u-b and an internal caller get "not found"); its evidence and
+    reverse index hold her two Memory sources only."""
+    repo, nb, src_a1, src_a2, a1, a2 = own_pair
+    snap = _snapshot(repo, nb)
+    assert snap[a1][0] == "deprecated" and snap[a2][0] == "approved"
+    assert _objects(repo, nb, src_a2)[a2]["status"] == "approved"  # still a2's source
+    assert {e["source_id"] for e in _evidence(repo, a2)} == {src_a1, src_a2}
+    assert _reverse_index(repo, a2) == {src_a1, src_a2}
+    for actor in ("u-b", None):
+        with pytest.raises(KeyError):
+            _merge_in_store(repo, nb, a2, a1, actor_id=actor)
+
+
+def test_deleting_one_merged_memory_strips_only_its_evidence(own_pair):
+    """Deleting the merged-away Memory: the surviving object (another
+    Memory's) loses exactly that Memory's entries and is never deleted with
+    it; deleting the surviving Memory then removes everything."""
+    repo, nb, src_a1, src_a2, a1, a2 = own_pair
+    repo._runtime.source_ingestion.remove_memory_source("mem-a1")
+    assert _evidence(repo, a1) is None  # a1's own objects are gone
+    assert {e["source_id"] for e in _evidence(repo, a2)} == {src_a2}
+    assert _reverse_index(repo, a2) == {src_a2}
+    assert _snapshot(repo, nb)[a2][0] == "approved"
+    repo._runtime.source_ingestion.remove_memory_source("mem-a2")
+    assert _objects(repo, nb, src_a2) == {} and _evidence(repo, a2) is None
+
+
+def test_editing_one_merged_memory_keeps_the_other_memorys_object(own_pair):
+    """An edit re-ingests the Memory: its old graph is cleared under the
+    source lock, after its evidence is stripped from the object the other
+    Memory owns — which survives with its own evidence only. Without the
+    strip the clear deletes it by evidence reference (N-1 within one owner)."""
+    repo, nb, src_a1, src_a2, a1, a2 = own_pair
+    assert repo._runtime.source_ingestion.ingest_memory_source(
+        nb, "mem-a1", "mem-a1", TEXT + " Edited."
+    ) == src_a1
+    assert _evidence(repo, a1) is None  # a1's old objects were re-extracted away
+    assert _snapshot(repo, nb)[a2][0] == "approved"
+    assert {e["source_id"] for e in _evidence(repo, a2)} == {src_a2}
+    assert _reverse_index(repo, a2) == {src_a2}
+    assert _objects(repo, nb, src_a1)  # the edited Memory has fresh objects
+
+
+def _cite(repo, object_id: str, source_id: str) -> None:
+    evidence = _evidence(repo, object_id) + [{
+        "source_id": source_id, "element_id": f"el-{source_id}",
+        "quoted_span": "cited", "source_title": source_id,
+        "element_type": "paragraph", "location_label": "p1", "confidence": 1.0,
+    }]
+    with repo._write() as db:
+        db.execute(
+            "UPDATE knowledge_objects SET evidence=? WHERE id=?",
+            (json.dumps(evidence), object_id),
+        )
+
+
+@pytest.mark.parametrize("cited", ["shared", "another_members_memory", "no_source_id"])
+@pytest.mark.parametrize("carrier", ["source", "target"])
+def test_own_memory_pair_not_backed_by_her_memory_alone_is_refused(world, cited, carrier):
+    """Same owner is not enough: when either side's evidence cites anything
+    but her own Memory sources of this notebook — a shared source (legacy
+    mixed evidence), another member's Memory, an entry without a source id —
+    the pair is refused with the cross-class copy and nothing is written."""
+    repo, nb, upload = world
     a1 = _concept(_objects(repo, nb, _confirmed_memory(repo, nb, "mem-a1", "u-a")))
     a2 = _concept(_objects(repo, nb, _confirmed_memory(repo, nb, "mem-a2", "u-a")))
+    foreign = _confirmed_memory(repo, nb, "mem-b", "u-b")
+    _cite(
+        repo, a1 if carrier == "source" else a2,
+        {"shared": upload, "another_members_memory": foreign, "no_source_id": ""}[cited],
+    )
     before = _snapshot(repo, nb)
     with pytest.raises(MemoryKnowledgeMergeRefused) as refused:
         _merge_in_store(repo, nb, a1, a2)
-    assert refused.value.user_message == SAME_OWNER_MESSAGE
+    assert refused.value.user_message == CROSS_CLASS_MESSAGE
+    assert _snapshot(repo, nb) == before
+
+
+def test_site_admin_has_no_bypass_on_a_members_memory_pair(world):
+    """§13.2-1 stance: a site admin is not the Memory's owner, so both of
+    u-a's Memory objects are "not found" for her (404), never merged."""
+    repo, nb, _upload = world
+    _user(repo, "u-admin")
+    with repo._write() as db:
+        db.execute("UPDATE users SET role='admin' WHERE id='u-admin'")
+    a1 = _concept(_objects(repo, nb, _confirmed_memory(repo, nb, "mem-a1", "u-a")))
+    a2 = _concept(_objects(repo, nb, _confirmed_memory(repo, nb, "mem-a2", "u-a")))
+    before = _snapshot(repo, nb)
+    with pytest.raises(KeyError) as missing:
+        _merge_in_store(repo, nb, a1, a2, actor_id="u-admin")
+    assert type(missing.value) is KeyError
     assert _snapshot(repo, nb) == before
 
 
@@ -441,6 +566,21 @@ def test_non_owner_write_routes_answer_like_a_missing_id(promotion_world):
 def test_owner_keeps_the_reason_on_write_routes(promotion_world):
     cases, world = promotion_world
     cases.owner_keeps_the_reason(world)
+
+
+def test_owner_merges_her_own_memory_objects_through_the_route(promotion_world):
+    cases, world = promotion_world
+    cases.owner_merges_her_own_memory_objects(world)
+
+
+def test_owner_memory_object_with_shared_evidence_cannot_merge(promotion_world):
+    cases, world = promotion_world
+    cases.owner_memory_object_with_shared_evidence_cannot_merge(world)
+
+
+def test_owner_merge_follows_ownership_after_promotion(promotion_world):
+    cases, world = promotion_world
+    cases.owner_merge_follows_ownership_after_promotion(world)
 
 
 def test_proposal_of_a_vanished_object_is_closed_on_approval(promotion_world):

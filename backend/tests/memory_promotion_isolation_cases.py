@@ -23,8 +23,8 @@ from app.domain.memory_kg_isolation import (
     PROMOTION_OBJECT_MISSING_REASON,
     PROMOTION_PROPOSE_MESSAGE,
     PUBLISH_HOLDS_MEMORY_MESSAGE,
-    SAME_OWNER_MESSAGE,
 )
+from app.models.knowledge import MergeRequest
 from app.models.schemas import NotebookCreate
 
 NOW = "2026-09-29T00:00:00+00:00"
@@ -230,13 +230,14 @@ def non_owner_write_routes_answer_like_a_missing_id(world: World) -> None:
 
 def owner_keeps_the_reason(world: World) -> None:
     """The Memory's creator A still gets the 409 with the reason where the
-    write is refused (merge, promote), and can edit/review her own rows."""
+    write is refused (a merge across Memory and shared, promote), and can
+    edit/review her own rows. Merging two of her own Memory objects is
+    allowed (``owner_merges_her_own_memory_objects``)."""
     before = _kg_rows(world)
     nb = world.nb
     for source_id, into_id, message in (
         (MEMORY_OBJECT, ORDINARY_OBJECT, CROSS_CLASS_MESSAGE),
         (ORDINARY_OBJECT, MEMORY_OBJECT, CROSS_CLASS_MESSAGE),
-        (MEMORY_OBJECT, MEMORY_OBJECT_2, SAME_OWNER_MESSAGE),
     ):
         response = world.client.post(
             f"/api/notebooks/{nb}/knowledge/{source_id}/merge",
@@ -266,6 +267,158 @@ def owner_keeps_the_reason(world: World) -> None:
         headers=world.a, json={"status": "deprecated"},
     )
     assert patch.status_code == 200, patch.text
+
+
+def _object_row(world: World, object_id: str, notebook_id: str | None = None) -> dict:
+    (row,) = _rows(
+        world,
+        "SELECT id, status, source_id, evidence FROM knowledge_objects "
+        "WHERE id=? AND notebook_id=?",
+        (object_id, notebook_id or world.nb),
+    )
+    evidence = row["evidence"]
+    return {**row, "evidence": json.loads(evidence) if isinstance(evidence, str) else evidence}
+
+
+def _listed_claims(world: World, headers: dict) -> set:
+    listed = world.client.get(
+        f"/api/notebooks/{world.nb}/knowledge",
+        params={"type": "claim", "limit": 200}, headers=headers,
+    )
+    assert listed.status_code == 200, listed.text
+    return {item["id"] for item in listed.json()["items"]}
+
+
+def owner_merges_her_own_memory_objects(world: World) -> None:
+    """§13.2-9 (user ruling 2026-10-21): two objects that belong to A alone
+    and are supported by nothing but her Memory merge like any pair. The
+    result keeps the target's Memory source, so it is still hers alone;
+    its evidence is the union of her Memory's entries only. A site admin has
+    no bypass: for R both objects are someone else's Memory (404)."""
+    nb = world.nb
+    for headers in (world.b, world.r):
+        refused = world.client.post(
+            f"/api/notebooks/{nb}/knowledge/{MEMORY_OBJECT}/merge",
+            headers=headers, json={"into_id": MEMORY_OBJECT_2},
+        )
+        assert refused.status_code == 404, refused.text
+    merged = world.client.post(
+        f"/api/notebooks/{nb}/knowledge/{MEMORY_OBJECT}/merge",
+        headers=world.a, json={"into_id": MEMORY_OBJECT_2},
+    )
+    assert merged.status_code == 200, merged.text
+    assert merged.json()["id"] == MEMORY_OBJECT_2
+    folded = _object_row(world, MEMORY_OBJECT)
+    kept = _object_row(world, MEMORY_OBJECT_2)
+    assert folded["status"] == "deprecated"
+    assert kept["status"] == "approved" and kept["source_id"] == "src-memory-a"
+    assert {item["source_id"] for item in kept["evidence"]} == {"src-memory-a"}
+    assert {
+        row["source_id"] for row in _rows(
+            world,
+            "SELECT source_id FROM knowledge_object_sources WHERE object_id=?",
+            (MEMORY_OBJECT_2,),
+        )
+    } <= {"src-memory-a"}
+    # Still A's alone: B (a notebook admin) does not list it, A does.
+    assert MEMORY_OBJECT_2 in _listed_claims(world, world.a)
+    assert MEMORY_OBJECT_2 not in _listed_claims(world, world.b)
+    assert ORDINARY_OBJECT in _listed_claims(world, world.b)  # control
+    # The usual undo path: A restores the merged-away object herself.
+    restored = world.client.patch(
+        f"/api/notebooks/{nb}/knowledge/{MEMORY_OBJECT}",
+        headers=world.a, json={"status": "approved"},
+    )
+    assert restored.status_code == 200, restored.text
+    assert _object_row(world, MEMORY_OBJECT)["status"] == "approved"
+
+
+def owner_memory_object_with_shared_evidence_cannot_merge(world: World) -> None:
+    """A Memory object that carries a shared source's evidence (what a
+    manual merge before the isolation left behind, kept private by the
+    0067 migration) is not "supported by her Memory alone": merging it with
+    her other Memory object, either way round, answers the cross-class 409
+    and writes nothing — as merging with a shared object does."""
+    with world.repo._write() as db:
+        db.execute(
+            world.q("UPDATE knowledge_objects SET evidence=? WHERE id=?"),
+            (
+                json.dumps([
+                    {"source_id": "src-memory-a", "element_id": "el-src-memory-a",
+                     "quoted_span": MEMORY_TEXT},
+                    {"source_id": "src-document", "element_id": "el-src-document",
+                     "quoted_span": "Shared text."},
+                ], ensure_ascii=False),
+                MEMORY_OBJECT_2,
+            ),
+        )
+    before = _kg_rows(world)
+    for source_id, into_id in (
+        (MEMORY_OBJECT, MEMORY_OBJECT_2), (MEMORY_OBJECT_2, MEMORY_OBJECT),
+    ):
+        response = world.client.post(
+            f"/api/notebooks/{world.nb}/knowledge/{source_id}/merge",
+            headers=world.a, json={"into_id": into_id},
+        )
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"] == CROSS_CLASS_MESSAGE
+        assert response.headers.get("X-User-Message") == "1"
+    assert _kg_rows(world) == before
+
+
+def owner_merge_follows_ownership_after_promotion(world: World) -> None:
+    """One of A's Memories was promoted into the public library. The private
+    objects are untouched by the promotion (still hers, still mergeable with
+    each other); the promoted copy is the public library's own object (its
+    source is the library's ``promotion`` source, not a Memory), so there it
+    merges with a native public object like any public pair."""
+    proposed = world.client.post(f"/api/memories/{world.memory_id}/promote", headers=world.a)
+    assert proposed.status_code in (200, 201), proposed.text
+    approved = world.client.post(
+        f"/api/promotion-queue/{proposed.json()['id']}/approve", headers=world.r
+    )
+    assert approved.status_code == 200, approved.text
+    (promoted, *_rest) = approved.json()["base_object_ids"]
+    merged = world.client.post(
+        f"/api/notebooks/{world.nb}/knowledge/{MEMORY_OBJECT}/merge",
+        headers=world.a, json={"into_id": MEMORY_OBJECT_2},
+    )
+    assert merged.status_code == 200, merged.text
+    promoted_row = _object_row(world, promoted, world.base)
+    assert not promoted_row["source_id"]  # no Memory primary source: not Memory-derived
+    assert {
+        row["source_type"] for row in _rows(
+            world,
+            "SELECT source_type FROM sources WHERE notebook_id=?", (world.base,),
+        )
+    } <= {"promotion"}  # whatever the public copy cites is the library's own source
+    with world.repo._write() as db:
+        db.execute(
+            world.q("INSERT INTO sources(id,notebook_id,title,source_type,created_at,"
+                    "updated_at) VALUES (?,?,?,?,?,?)"),
+            ("src-base-native", world.base, "native", "file", NOW, NOW),
+        )
+        kind = db.execute(
+            world.q("SELECT object_type FROM knowledge_objects WHERE id=?"), (promoted,)
+        ).fetchone()["object_type"]
+        db.execute(
+            world.q("INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
+                    "payload,evidence,source_id,created_at,updated_at) "
+                    "VALUES (?,?,?,'approved',?,?,?,?,?)"),
+            (
+                "ko-base-native", world.base, kind, json.dumps({"name": "native"}),
+                json.dumps([{"source_id": "src-base-native", "element_id": "el-native",
+                             "source_title": "native", "element_type": "paragraph",
+                             "location_label": "p1", "confidence": 1.0,
+                             "quoted_span": "Native text."}]),
+                "src-base-native", NOW, NOW,
+            ),
+        )
+    public = world.repo._runtime.knowledge_governance.merge_knowledge(
+        world.base, promoted, MergeRequest(into_id="ko-base-native"), actor_id=world.r_id,
+    )
+    assert public.id == "ko-base-native"
+    assert _object_row(world, promoted, world.base)["status"] == "deprecated"
 
 
 def member_b_cannot_propose_a_memory_object(world: World) -> None:

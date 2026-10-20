@@ -40,7 +40,7 @@ def test_the_module_still_exposes_its_user_copy():
     # Guards the guard: an empty scan would pass vacuously.
     assert set(_copy_constants()) >= {
         "CROSS_CLASS_MESSAGE",
-        "SAME_OWNER_MESSAGE",
+        "MEMORY_MERGE_RETRY_MESSAGE",
         "PROMOTION_PROPOSE_MESSAGE",
         "PROMOTION_APPROVE_MESSAGE",
         "PROMOTION_OBJECT_MISSING_MESSAGE",
