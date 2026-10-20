@@ -2,10 +2,13 @@
 the PR-4 merge): the twin of ``tests/test_board_partition_store.py``. Same world,
 same checks, same literal expectations (``tests/board_partition_store_cases.py``).
 
-Plus the plan pin of the previous-partition read on a production-shaped corpus
-with the planner left alone (no ``enable_seqscan`` games): the statement the
-store streams is captured on its way through ``psycopg.Cursor.stream`` and
-explained with its real parameters.
+Plus the plan pin of the previous-partition read on two corpus shapes (a
+minority share and the production shape where one notebook owns the table) with
+the planner left alone (no ``enable_seqscan`` games): the statement the store
+streams is captured on its way through ``psycopg.Cursor.stream`` and explained
+with its real parameters. What is pinned is that the read returns exactly the
+generation, streamed, and never scans a table once per row -- not a plan shape
+that holds in one corpus only. Also the rebuild path itself on PostgreSQL.
 """
 from __future__ import annotations
 
@@ -131,12 +134,23 @@ USER = "u-ppin"
 NOW = "2026-10-21T00:00:00+00:00"
 BOARDS = 4_000             # boards per generation of the pinned notebook
 MEMBERS = 25               # members per board
-OTHER_NOTEBOOKS = 10
-OTHER_BOARDS = 500
+
+# Two corpus shapes. ``minority``: the pinned notebook's published generation is
+# a small share of the member table (many notebooks, a retired generation each)
+# -- the planner reaches the notebook's rows through its indexes. ``dominant``:
+# one notebook owns nearly the whole table with three generations, the
+# production shape (9 万 boards x 3 generations, 543 万 member rows, 181 万 in
+# the published one) -- the planner reads it with a (parallel) sequential scan
+# and a hash join. Both are right for a read that returns the whole generation.
+SHAPES = {
+    #            (pinned notebook's generations, other notebooks, their boards, their generations)
+    "minority": ((2, 3), 10, 500, (2, 3)),
+    "dominant": ((1, 2, 3), 2, 100, (3,)),
+}
 
 
-@pytest.fixture
-def pin_database(postgres_settings):
+@pytest.fixture(params=sorted(SHAPES))
+def pin_database(request, postgres_settings):
     database = PostgresDatabase(
         postgres_settings.model_copy(update={
             "postgres_pool_min_size": 1,
@@ -149,16 +163,17 @@ def pin_database(postgres_settings):
     )
     try:
         assert PostgresMigrator(database).migrate() == 78
-        _seed(database)
+        _seed(database, *SHAPES[request.param])
         yield database
     finally:
         database.close()
 
 
-def _seed(database: PostgresDatabase) -> None:
-    """The pinned notebook holds two generations of 4 000 boards x 25 members
-    (the published one and a retired one awaiting the reaper) at level 0;
-    10 other notebooks hold two generations of 500 boards x 25 members."""
+def _seed(database: PostgresDatabase, nb_generations, others: int, other_boards: int,
+          other_generations) -> None:
+    """The pinned notebook holds ``BOARDS`` x ``MEMBERS`` at level 0 in each of
+    ``nb_generations`` (generation 3 is the published one); ``others`` notebooks
+    hold ``other_boards`` x ``MEMBERS`` in each of ``other_generations``."""
     with database.write() as db:
         db.execute("SET LOCAL statement_timeout = '0'")
         db.execute(
@@ -168,18 +183,19 @@ def _seed(database: PostgresDatabase) -> None:
             "INSERT INTO notebooks(id,name,created_by,created_at,updated_at) "
             "SELECT id, id, %s, %s, %s FROM (SELECT %s AS id UNION ALL "
             "SELECT 'nb-pother-'||lpad(g::text,2,'0') FROM generate_series(1, %s) g) n",
-            (USER, NOW, NOW, NB, OTHER_NOTEBOOKS))
+            (USER, NOW, NOW, NB, others))
         # boards: (notebook, generation, board index)
         db.execute(
             "INSERT INTO communities(id,notebook_id,level,member_ids,size,created_at,"
             "generation,board_key) "
             "SELECT 'cm-'||n.id||'-'||gen||'-'||b, n.id, 0, '[]'::jsonb, %s, %s, gen, "
             "'bk-'||n.id||'-'||b "
-            "FROM (SELECT %s AS id, %s AS boards UNION ALL "
-            "      SELECT 'nb-pother-'||lpad(o::text,2,'0'), %s "
+            "FROM (SELECT %s AS id, %s AS boards, %s::int[] AS gens UNION ALL "
+            "      SELECT 'nb-pother-'||lpad(o::text,2,'0'), %s, %s::int[] "
             "      FROM generate_series(1, %s) o) n, "
-            "generate_series(2, 3) gen, LATERAL generate_series(0, n.boards - 1) b",
-            (MEMBERS, NOW, NB, BOARDS, OTHER_BOARDS, OTHER_NOTEBOOKS))
+            "LATERAL unnest(n.gens) gen, LATERAL generate_series(0, n.boards - 1) b",
+            (MEMBERS, NOW, NB, BOARDS, list(nb_generations), other_boards,
+             list(other_generations), others))
         db.execute(
             "INSERT INTO community_members(canonical_id,notebook_id,level,community_id,"
             "canonical_name,centrality,generation) "
@@ -190,12 +206,29 @@ def _seed(database: PostgresDatabase) -> None:
         raw.execute("VACUUM (ANALYZE) communities, community_members")
 
 
+def _repeated_scans(node: dict, tables: tuple, inner: bool = False) -> list:
+    """Sequential scans of ``tables`` that sit on the inner side of a nested
+    loop (re-run once per outer row)."""
+    found = []
+    if inner and node.get("Node Type") == "Seq Scan" and node.get("Relation Name") in tables:
+        found.append(node["Relation Name"])
+    children = node.get("Plans", [])
+    for position, child in enumerate(children):
+        child_inner = inner or (node.get("Node Type") == "Nested Loop" and position == 1)
+        found.extend(_repeated_scans(child, tables, child_inner))
+    return found
+
+
 @pytest.mark.xdist_group(name="postgres_board_partition_plan_pins")
-def test_previous_partition_read_is_driven_by_the_published_boards(pin_database):
-    """This notebook's published generation (100 000 member rows among 450 000
-    across generations and notebooks) is reached through its boards
-    (``communities(notebook_id, level)``) and each board's members through an
-    index on ``community_id`` -- neither table is scanned."""
+def test_previous_partition_read_streams_the_generation_without_repeated_scans(pin_database):
+    """The read returns exactly the published generation's member rows, through
+    a server-side stream (the statement is captured on its way through
+    ``psycopg.Cursor.stream``). The plan shape is the planner's call by share
+    (the notebook's rows through its indexes in the minority shape, a
+    sequential scan with a hash join in the dominant one -- parallel on the
+    production shape, 282 ms server side, 1.41 s read into Python); neither
+    shape may scan either table once per row, i.e. a sequential scan on the
+    inner side of a nested loop."""
     store = UnifiedKgStore(pin_database)
     captured: list[tuple[str, object]] = []
     original = psycopg.Cursor.stream
@@ -215,13 +248,21 @@ def test_previous_partition_read_is_driven_by_the_published_boards(pin_database)
     assert count == BOARDS * MEMBERS
     [(sql, params)] = captured
     with pin_database.connect() as db:
-        plan = "\n".join(
-            str(row["QUERY PLAN"])
-            for row in db.execute(f"EXPLAIN {sql}", params, prepare=False).fetchall())
-    for table in ("communities", "community_members"):
-        assert f"Seq Scan on {table} " not in plan + " ", plan
-    assert "idx_communities_nb_level" in plan, plan
-    assert "idx_commmem_nb_comm" in plan or "pk_community_members" in plan, plan
+        [row] = db.execute(f"EXPLAIN (FORMAT JSON) {sql}", params, prepare=False).fetchall()
+    plan = next(iter(dict(row).values()))[0]["Plan"]
+    assert _repeated_scans(plan, ("communities", "community_members")) == [], plan
+
+
+def test_the_repeated_scan_detector_sees_an_inner_seq_scan():
+    """The structural check above is only as good as its detector."""
+    inner = {"Node Type": "Seq Scan", "Relation Name": "community_members"}
+    outer = {"Node Type": "Index Scan", "Relation Name": "communities"}
+    assert _repeated_scans({"Node Type": "Nested Loop", "Plans": [outer, inner]},
+                           ("communities", "community_members")) == ["community_members"]
+    assert _repeated_scans({"Node Type": "Hash Join", "Plans": [
+        inner, {"Node Type": "Hash", "Plans": [{"Node Type": "Seq Scan",
+                                                  "Relation Name": "communities"}]}]},
+        ("communities", "community_members")) == []
 
 
 # ------------------------------------------------- the rebuild on PostgreSQL

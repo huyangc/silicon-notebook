@@ -1956,11 +1956,14 @@ class UnifiedKgStore:
         `cursor().stream()`;调用方必须读完或在离开 `with` 之前 `close()` 它(经
         `closing(...)`),不得在 `write()` 里调、不得在同一个 `with` 里接着发写语句。
 
-        由板块驱动:``communities`` 按 ``(notebook_id, level)``(`idx_communities_nb_level`)
-        取这一代的几万行,每个板块经 ``community_members(notebook_id, community_id)``
-        (`idx_commmem_nb_comm`)取成员,``generation`` 在两侧都是过滤谓词——成员行与板块
-        行同代写入,连接条件里写死 ``m.generation = c.generation``,读不到别的代的成员。
-        行序不承诺:分区按 canonical id 排名、续用按集合比较,都与到达顺序无关。
+        计划交给规划器按占比选:本库已发布代只占成员表一小部分时(多库部署)经本库的索引
+        (``idx_commmem_nb_comm`` / ``idx_communities_nb_level``)取行;一个库独占大半张表时(生产形态:9 万板块 × 3 代、成员 543 万行、已发布代 181 万行)
+        是并行顺扫 + hash join,实测服务端 282 ms、Python 整读 1.41 s。两种都对:这条读
+        本来就要读出这一代的全部成员,有界、走流式;不该出现的是逐行重复扫表(计划钉见
+        `tests/postgres/test_board_partition_store_pg.py`,两种形态都钉)。``generation`` 在
+        两侧都是过滤谓词——成员行与板块行同代写入,连接条件里写死
+        ``m.generation = c.generation``,读不到别的代的成员。行序不承诺:分区按 canonical id
+        排名、续用按集合比较,都与到达顺序无关。
         """
         raise_statement_timeout_floor(db)
         return db.cursor().stream(
