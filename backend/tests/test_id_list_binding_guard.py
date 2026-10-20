@@ -159,6 +159,9 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(ANY, BOUNDED, "cluster ids of the page just read under LIMIT"),),
     ("postgres/governance_store.py", "GovernanceStore.merge_candidate_pairs_for_canonicals"): (
         s(PG_EXP, BATCHED, "canonical ids, the caller batches with _in_fuse_batches"),),
+    ("postgres/governance_store.py", "GovernanceStore.apply_v1_decision_translation"): (
+        s(ANY, BATCHED,
+          "decision recompute v1 row ids, _TRANSLATION_BATCH (500) per statement"),),
     ("postgres/governance_store.py", "GovernanceStore.pending_merge_names"): (
         s("unnest(%s)", BATCHED,
           "the pending list's canonical ids, the caller batches _IN_CHUNK (900)"),),
@@ -506,6 +509,9 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(SQ_EXP, BATCHED, "delta source ids, callers batch with _in_batches (<= 900)"),),
     ("sqlite/governance_store.py", "GovernanceStore.sweep_orphan_clusters_page"): (
         s(SQ_EXP, BATCHED, "cluster ids of one page, _SWEEP_DELETE_ID_CHUNK per statement"),),
+    ("sqlite/governance_store.py", "GovernanceStore.apply_v1_decision_translation"): (
+        s(SQ_EXP, BATCHED,
+          "decision recompute v1 row ids, _TRANSLATION_BATCH (500) per statement"),),
     ("sqlite/governance_store.py", "GovernanceStore.merge_candidate_pairs_for_canonicals"): (
         s(SQ_EXP, BATCHED, "canonical ids, the caller batches with _in_fuse_batches"),),
     ("sqlite/governance_store.py", "GovernanceStore.pending_merge_names"): (

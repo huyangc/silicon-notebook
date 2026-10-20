@@ -612,10 +612,15 @@ class KnowledgeGovernanceService:
     # ------------------------------------------------------------------
 
     def write_merge_candidate(self, notebook_id: str, a: str, b: str, score: float) -> None:
+        """A pending candidate between canonical ids ``a`` and ``b``, minted in
+        the notebook's published concept seed space (read in the same
+        transaction)."""
         now = self._now()
         with self._write() as db:
             self.governance_store.write_merge_candidate(
-                db, notebook_id, a, b, score, now
+                db, notebook_id, a, b, score, now,
+                seed_version=self.governance_store.published_concept_seed_version(
+                    db, notebook_id),
             )
 
     def pending_merges(self, notebook_id: str) -> List[dict]:
@@ -656,12 +661,21 @@ class KnowledgeGovernanceService:
             if scope is not None:
                 for cid, label in scope.cluster_labels(ids).items():
                     names[cid] = label or ""
-        return [
-            {**row,
-             "name_a": names.get(str(row["canonical_a"]), ""),
-             "name_b": names.get(str(row["canonical_b"]), "")}
-            for row in rows
-        ]
+        from app.services.kg_merge import merge_candidate_kind
+
+        # ``kind`` (P4-T6): ``spelling_variant`` when the two sides' decision
+        # keys share a squash key (同名不同写法), else ``similarity``. The
+        # keys themselves stay internal: they are seed strings, not names.
+        out = []
+        for row in rows:
+            kind = merge_candidate_kind(row)
+            item = {key: value for key, value in row.items()
+                    if key not in ("seed_a", "seed_b")}
+            out.append({**item,
+                        "name_a": names.get(str(row["canonical_a"]), ""),
+                        "name_b": names.get(str(row["canonical_b"]), ""),
+                        "kind": kind})
+        return out
 
     def _pending_merges_batch(self, notebook_id: str, limit: int) -> List[dict]:
         """Bounded fetch of pending merge candidates, LIMITed in SQL instead of
@@ -1580,13 +1594,19 @@ class KnowledgeGovernanceService:
         return self.governance_store.decided_pairs(notebook_id)
 
     def decided_seed_pairs(self, notebook_id: str) -> Dict[frozenset, str]:
-        """{frozenset({seed_a, seed_b}): status} for confirmed/rejected/deferred.
+        """{frozenset({seed_a, seed_b}): status} for confirmed/rejected/deferred,
+        the rows minted in the notebook's PUBLISHED concept seed space (the
+        space its clusters live in; ``unified_kg_state.concept_seed_version``).
 
         Seed-name keys are STABLE across rebuilds (canonical ids shift when a
         cluster's min-member changes; seed names don't). Legacy rows written
         before the seed_a/seed_b columns existed carry '' → fall back to
         strip-"K-"(canonical), matching the old decided_pairs key derivation."""
-        return self.governance_store.decided_seed_pairs(notebook_id)
+        with self._connect() as db:
+            version = self.governance_store.published_concept_seed_version(
+                db, notebook_id)
+            return self.governance_store.decided_seed_pairs_from(
+                db, notebook_id, seed_version=version)
 
     def concept_whitelist_terms(self) -> set:
         with self._connect() as db:
@@ -2217,8 +2237,9 @@ class KnowledgeGovernanceService:
         """
         self.get_notebook(notebook_id)
         with self._connect() as db:
+            seed_version = self._duplicate_seed_version(db, notebook_id, object_type)
             seed_rows = self.knowledge.duplicate_seed_rows(db, notebook_id, object_type)
-            by_seed = self._duplicate_blocks(object_type, seed_rows)
+            by_seed = self._duplicate_blocks(object_type, seed_rows, seed_version)
 
             # Pass 2: only blocks that already have >=2 members can possibly be a
             # duplicate group — singleton blocks (the common case) are dropped
@@ -2275,7 +2296,10 @@ class KnowledgeGovernanceService:
                 and (not approved_only or r["status"] == "approved")
             ]
             merged_away = [r for r in rows if r["status"] == "deprecated"]
-            by_seed = self._duplicate_blocks(object_type, live)
+            by_seed = self._duplicate_blocks(
+                object_type, live,
+                self._duplicate_seed_version(db, notebook_id, object_type),
+            )
             pending = [
                 o["id"] for members in by_seed.values() if len(members) >= 2
                 for o in members
@@ -2304,20 +2328,31 @@ class KnowledgeGovernanceService:
             merged_away=refs,
         )
 
+    def _duplicate_seed_version(self, db, notebook_id: str, object_type: str) -> int:
+        """The concept seed space duplicates of ``object_type`` block in: the
+        notebook's PUBLISHED one (the space its clusters were built in) for
+        concept-like types, 1 for claim / formula / procedure, which have no
+        seed version. An unknown type keeps the historical concept default."""
+        if object_type in ("claim", "formula", "procedure"):
+            return 1
+        return self.governance_store.published_concept_seed_version(db, notebook_id)
+
     @staticmethod
-    def _duplicate_blocks(object_type: str, seed_rows: List[dict]) -> Dict[str, List[dict]]:
+    def _duplicate_blocks(
+        object_type: str, seed_rows: List[dict], seed_version: int = 1,
+    ) -> Dict[str, List[dict]]:
         """Block pass-1 rows by normalized seed (``find_duplicates``'s docstring):
-        ``{seed: [thin row, ...]}`` in row order. A procedure row brings its
-        full payload (the steps signature); every other row brings ``name``
-        only, and only that name is seen here."""
-        from app.services.kg_merge import (
-            build_acronym_alias_map, _seed_with_alias,
-            seed_concept, seed_claim, seed_formula, seed_procedure,
+        ``{seed: [thin row, ...]}`` in row order, concepts in concept seed space
+        ``seed_version``. A procedure row brings its full payload (the steps
+        signature); every other row brings ``name`` only, and only that name is
+        seen here."""
+        from app.domain.kg_merge_seed import seed_fn_for_type
+        from app.services.kg_merge import build_acronym_alias_map, _seed_with_alias
+
+        seed_fn = seed_fn_for_type(
+            object_type if object_type in ("claim", "formula", "procedure") else "concept",
+            concept_seed_version=seed_version,
         )
-        seed_fn = {
-            "concept": seed_concept, "claim": seed_claim,
-            "formula": seed_formula, "procedure": seed_procedure,
-        }.get(object_type, seed_concept)
         if object_type == "procedure":
             objs = [
                 {"id": r["id"], "status": r["status"], "payload": r["payload"]}
@@ -2351,12 +2386,13 @@ class KnowledgeGovernanceService:
         # Block by seed: only same-normalized-name objects become candidates.
         # This loop and the seed/alias functions it calls are UNCHANGED from
         # before the two-pass split — only ``objs``'s construction moved.
-        alias_map = build_acronym_alias_map(o["payload"].get("name", "") for o in objs)
+        alias_map = build_acronym_alias_map(
+            (o["payload"].get("name", "") for o in objs), seed_version=seed_version)
         by_seed: Dict[str, List[dict]] = {}
         for o in objs:
             seed = _seed_with_alias(
                 {"name": o["payload"].get("name", ""), "payload": o["payload"]},
-                seed_fn, alias_map)
+                seed_fn, alias_map, seed_version=seed_version)
             if seed:
                 by_seed.setdefault(seed, []).append(o)
         return by_seed

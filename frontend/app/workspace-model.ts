@@ -1048,6 +1048,10 @@ export type PendingMerge = {
   // to show this viewer -- the row then falls back to the id without `K-`.
   name_a?: string;
   name_b?: string;
+  // "spelling_variant": the two names differ only in spaces, hyphens,
+  // underscores, dots or brackets (shown as 「同名不同写法」); "similarity":
+  // found by meaning. Absent from an older backend -- read as "similarity".
+  kind?: "spelling_variant" | "similarity";
 };
 export type UnifiedKgStatus = {
   dirty: boolean;

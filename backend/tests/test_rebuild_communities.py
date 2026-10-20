@@ -319,7 +319,7 @@ def test_communities_hold_no_memory_derived_member(repo):
         comms = db.execute("SELECT member_ids FROM communities WHERE notebook_id=?",
                            (nb_id,)).fetchall()
     assert {r["canonical_id"] for r in members} == {
-        "K-grouped query attention", "K-multi query attention", "K-kv cache"}
+        "K-groupedqueryattention", "K-multiqueryattention", "K-kvcache"}
     assert not {r["canonical_id"] for r in members} & memory
     assert all("secret" not in r["canonical_name"].lower() for r in members)
     assert all(not set(json.loads(r["member_ids"])) & memory for r in comms)
@@ -335,7 +335,7 @@ def test_summary_rows_drop_memory_members_of_a_pre_isolation_community(repo):
     nb_id = world.seed(repo)
     repo.rebuild_unified_kg(nb_id, force=True)
     memory = world.object_ids_by_name(repo, nb_id, world.MEMORY_SOURCE)
-    legacy = ["K-kv cache", memory["SECRET-ALPHA plan"], "K-grouped query attention",
+    legacy = ["K-kvcache", memory["SECRET-ALPHA plan"], "K-groupedqueryattention",
               memory["Secret Beta budget"]]
     with repo._write() as db:
         gen = _published_community_generation(db, nb_id)
@@ -348,7 +348,7 @@ def test_summary_rows_drop_memory_members_of_a_pre_isolation_community(repo):
     with repo._connect() as db:
         rows = {r["id"]: json.loads(r["member_ids"])
                 for r in store.community_rows_for_summary(db, nb_id, 0)}
-    assert rows["comm-legacy"] == ["K-kv cache", "K-grouped query attention"]
+    assert rows["comm-legacy"] == ["K-kvcache", "K-groupedqueryattention"]
     assert all(not set(ids) & set(memory.values()) for ids in rows.values())
 
     # without a Memory source: the very statement that ran before E4-2

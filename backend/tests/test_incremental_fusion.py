@@ -16,14 +16,18 @@ def repo(tmp_path, monkeypatch):
     r = SQLiteRepository(Settings(_env_file=None)); bind_all_embedding_clients(r, FakeEmbedder(dim=16)); return r
 
 
-def test_place_new_concepts_name_seed(repo):
-    from app.services.kg_merge import place_new_concepts, _norm
-    cid_existing = "K-" + _norm("Mixture-of-Experts (MoE)")
+@pytest.mark.parametrize("version", [1, 2])
+def test_place_new_concepts_name_seed(repo, version):
+    from app.domain.kg_merge_seed import concept_seed_of
+    from app.services.kg_merge import place_new_concepts, placement_seed_space
+    cid_existing = "K-" + concept_seed_of("Mixture-of-Experts (MoE)", version)
     existing_names = {cid_existing: "Mixture-of-Experts"}
     new = [{"object_id": "obj-new", "name": "Mixture-of-Experts (MoE)"},
            {"object_id": "obj-x", "name": "Quantization"}]
-    rows = place_new_concepts(new, existing_names,
-                              seed_fn=lambda o: _norm(o["name"]), id_prefix="K-")
+    rows = place_new_concepts(new, existing_names, id_prefix="K-",
+                              seed_space=placement_seed_space(
+                                  "concept", new, existing_names,
+                                  concept_seed_version=version))
     by_oid = {r["member_object_id"]: r for r in rows}
     assert by_oid["obj-new"]["canonical_id"] == cid_existing          # 命中已有簇
     assert by_oid["obj-new"]["canonical_name"] == "Mixture-of-Experts"  # 复用簇名
@@ -594,7 +598,8 @@ def test_tier2_ann_early_stop_below_threshold_bounds_knn_calls(repo, monkeypatch
     # canonical」(缺失记 "")。这里直接调方法、没有走 append,所以本源新对象本就
     # 没有簇行,冻结值就是空串。
     cands = repo._tier2_bridge_candidates_ann(
-        nb.id, idx, proxy, new_objs, {"ko-new": ""})
+        nb.id, idx, proxy, new_objs, {"ko-new": ""},
+        seed_version=1, override=frozenset())
 
     # n_labels = 33 > initial k = 20, tail of the first window is a far claim
     # (sim ~0.1 < lo) -> early stop after exactly ONE knn round, no doubling.
@@ -631,7 +636,8 @@ def test_tier2_ann_symbol_only_new_concept_never_bare_K(repo):
     assert ann is not None
     new_objs = [{"object_id": "ko-sym", "name": "→"}]
     cands = repo._tier2_bridge_candidates_ann(
-        nb.id, idx, ann, new_objs, {"ko-sym": ""})
+        nb.id, idx, ann, new_objs, {"ko-sym": ""},
+        seed_version=1, override=frozenset())
 
     # 向量桥接照常发生(两者很近)……
     assert cands, "expected a bridge candidate — vectors are near"

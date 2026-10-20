@@ -676,7 +676,6 @@ class RepositoryFacade:
             annotate_edge_support=lambda notebook_id, edges: (
                 self._annotate_edge_support(notebook_id, edges)
             ),
-            decided_seed_pairs=lambda notebook_id: self.decided_seed_pairs(notebook_id),
             relations_for_notebook=lambda notebook_id: (
                 self.relations_for_notebook(notebook_id)
             ),
@@ -2394,16 +2393,20 @@ class RepositoryFacade:
 
     def _tier2_bridge_candidates_ann(self, notebook_id: str, idx, ann,
                                      new_objs: list,
-                                     frozen_canonical: Dict[str, str]) -> list:
+                                     frozen_canonical: Dict[str, str], *,
+                                     seed_version: int,
+                                     override: "frozenset[str]") -> list:
         """ANN-backed Tier2 bridge candidate detection — KnowledgeLifecycleService
         owns the body (Task 15); frozen-signature delegate.
 
         PR-C:整表 ``cluster_map_`` 形参换成了 ``frozen_canonical`` —— ANN 命中的
         canonical 折叠改走有界 ``cluster_fold_rows``,但**本批新对象**那几个 id 的
         取值必须由调用方在 ``append_clusters`` 之前冻结好交进来(合同与理由见服务端
-        方法的 docstring)。"""
+        方法的 docstring)。``seed_version`` / ``override``:库已发布的概念种子空间
+        (桥接 id 与本次安置同一个空间)。"""
         return self._runtime.knowledge_lifecycle._tier2_bridge_candidates_ann(
-            notebook_id, idx, ann, new_objs, frozen_canonical
+            notebook_id, idx, ann, new_objs, frozen_canonical,
+            seed_version=seed_version, override=override,
         )
     def cluster_map(self, notebook_id: str) -> Dict[str, str]:
         """Cached {member_object_id: canonical_id} — RetrievalCandidateService owns
@@ -2644,12 +2647,16 @@ class RepositoryFacade:
         return self._runtime.knowledge_lifecycle._object_meta(
             notebook_id, folded_ids, cmap
         )
-    def _stream_seed_reps(self, notebook_id: str, object_type: str, seed_fn,
-                          run_id: str = "", compute_reps: bool = True):
+    def _stream_seed_reps(self, notebook_id: str, object_type: str, *,
+                          concept_seed_version: int, run_id: str = "",
+                          compute_reps: bool = True):
         """Streamed seed aggregation (ORDER BY rowid anchored) — lifecycle-owned
-        (Task 15; the canonical patch seat is repo._runtime.knowledge_lifecycle)."""
+        (Task 15; the canonical patch seat is repo._runtime.knowledge_lifecycle).
+        Seeds come from the type's seed space, concepts in
+        ``concept_seed_version``."""
         return self._runtime.knowledge_lifecycle._stream_seed_reps(
-            notebook_id, object_type, seed_fn, run_id=run_id, compute_reps=compute_reps
+            notebook_id, object_type, concept_seed_version=concept_seed_version,
+            run_id=run_id, compute_reps=compute_reps,
         )
     def _write_cluster_map_streamed(self, notebook_id: str, object_type: str,
                                     seed_to_canonical: Dict[str, str],
@@ -2819,17 +2826,22 @@ class RepositoryFacade:
             candidate_id, reviewer_id=reviewer_id
         )
 
-    def _seed_fn_for(self, object_type: str):
-        """Return the kg_merge seed function for a KG object type."""
-        return self._runtime.governance.seed_for(object_type)
+    def _seed_fn_for(self, object_type: str, *, concept_seed_version: int):
+        """Return the kg_merge seed function for a KG object type, concepts in
+        seed space ``concept_seed_version``."""
+        return self._runtime.governance.seed_for(
+            object_type, concept_seed_version=concept_seed_version)
 
     def _find_base_dedup_match(
-        self, object_type: str, src_payload: dict, base_objs: List[object]
+        self, object_type: str, src_payload: dict, base_objs: List[object], *,
+        concept_seed_version: int,
     ) -> str:
         """Exact-seed dedup (v1) — canonical body lives with the governance
-        store's promotion primitive (Task 13)."""
+        store's promotion primitive (Task 13); concepts compared in the base
+        notebook's published seed space."""
         return self._runtime.governance.find_base_match(
-            object_type, src_payload, base_objs
+            object_type, src_payload, base_objs,
+            concept_seed_version=concept_seed_version,
         )
 
     def _merge_evidence_lists(self, base_ev: list, src_ev: list) -> list:

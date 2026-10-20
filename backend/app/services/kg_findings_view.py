@@ -42,6 +42,7 @@ from app.domain.kg_findings_contracts import (
     finding_actions,
     finding_sort_key,
 )
+from app.domain.kg_merge_seed import OVERRIDE_SEED_PREFIX
 from app.services.kg_findings import (
     UNDER_MERGE_CONFIRMED,
     UNDER_MERGE_DECIDED_APART,
@@ -116,7 +117,8 @@ def source_is_processing(state: Mapping[str, object]) -> bool:
 
 
 def f4_member_seeds(rows: Iterable[Mapping[str, object]]) -> Dict[str, Set[str]]:
-    """canonical id → v1 seeds, for every canonical of every F4 group in the detail,
+    """canonical id → decision seeds (v1 and v2), for every canonical of every F4
+    group in the detail,
     straight from the evidence (``member_seeds``, written at publication from ALL
     members, hidden ones included) plus the canonical id's own seed (``K-`` + min
     seed, the key legacy decision rows fell back to). No member object is read:
@@ -136,6 +138,16 @@ def f4_member_seeds(rows: Iterable[Mapping[str, object]]) -> Dict[str, Set[str]]
                 seeds.setdefault(cid, set()).update(
                     own, (str(seed) for seed in stored.get(cid) or []))
     return seeds
+
+
+def decision_lookup_seeds(member_seeds: Mapping[str, Set[str]]) -> List[str]:
+    """The stored decision keys that can name these members: each member seed
+    (v1 or v2) as is, and as the override seed ``~v1:<seed>`` a recomputed
+    decision keeps a collided v1 seed under (``kg_merge_seed.decision_match_key``
+    reads it back as the seed). Sorted, deduplicated — the bound list of
+    ``merge_candidate_states_for_seeds``."""
+    plain = set().union(*member_seeds.values()) if member_seeds else set()
+    return sorted(plain | {OVERRIDE_SEED_PREFIX + seed for seed in plain})
 
 
 def decisions_from_candidates(rows: Iterable[Mapping[str, object]]) -> Dict[frozenset, str]:
@@ -333,14 +345,35 @@ def page_row(
 
 
 # ---------------------------------------------------------------- summary
-def dev_items(rules: Mapping[str, Mapping[str, object]]) -> List[Dict[str, object]]:
+# ``dev_items[].status``: whether the running code already fixes the defect.
+DEV_ITEM_OPEN = "open"
+# The fix is deployed, the library's published merge predates it; the next
+# "更新分析" applies it (S1: the library still publishes concept seed space 1
+# while the code builds in space 2 — design §五 S1 「实施细化」 last item).
+DEV_ITEM_FIXED_PENDING_UPDATE = "fixed_pending_update"
+
+
+def dev_items(
+    rules: Mapping[str, Mapping[str, object]], *,
+    published_seed_version: int, code_seed_version: int,
+) -> List[Dict[str, object]]:
     """The "needs development" zone: B-tier items measured to affect THIS library
-    (today only S1; §3.4 — an item without measurable impact is not shown)."""
+    (today only S1; §3.4 — an item without measurable impact is not shown).
+
+    ``status``: ``fixed_pending_update`` while the library's published merge
+    is in an older concept seed space than the running code (its seeds still
+    carry the defect; "更新分析" rebuilds it in the fixed space), else ``open``.
+    Judged off ``unified_kg_state.concept_seed_version`` at read time, so it
+    flips as soon as a rebuild publishes, even before the findings are
+    recomputed."""
     s1 = rules.get(RULE_SEED_DEFECT) or {}
     if s1.get("status") != RULE_STATUS_RAN or not int(s1.get("narrow_groups") or 0):  # type: ignore[arg-type]
         return []
     return [{
         "item_id": RULE_SEED_DEFECT,
+        "status": (DEV_ITEM_FIXED_PENDING_UPDATE
+                   if int(published_seed_version) < int(code_seed_version)
+                   else DEV_ITEM_OPEN),
         "groups": int(s1.get("narrow_groups") or 0),             # type: ignore[arg-type]
         "objects": int(s1.get("narrow_group_objects") or 0),     # type: ignore[arg-type]
         "samples": list(s1.get("examples") or []),               # type: ignore[arg-type]

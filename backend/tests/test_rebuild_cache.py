@@ -390,7 +390,11 @@ def test_cluster_input_version_hash_is_byte_identical(monkeypatch):
     import app.services.kg_merge as kg_merge
     from app.services.knowledge_lifecycle import KnowledgeLifecycleService
 
-    assert kg_merge.CLUSTER_ALGO_VERSION == 3
+    # The digests pin the FORMULA; they were computed with algorithm version 3.
+    # PR-4's bump to 4 changes the value folded in (one re-merge per library,
+    # on purpose), not the formula.
+    assert kg_merge.CLUSTER_ALGO_VERSION == 4
+    monkeypatch.setattr(kg_merge, "CLUSTER_ALGO_VERSION", 3)
 
     class Facts:
         def cluster_input_facts(self, db, notebook_id, *, exclude_emb_count=False):
@@ -409,6 +413,14 @@ def test_cluster_input_version_hash_is_byte_identical(monkeypatch):
         "1f7d16b71218551b2031625ba5a2c33f2e3533fc")
     stub.settings = SimpleNamespace(embed_dim=16, embed_runtime_dim=0)
     assert version(stub, "nb-golden") == "8b872b5fcf47fb3ef83eb2bc6fcf1c0d99b4bbbf"
+    # A rebuild's end-write hashes its ENTRY facts with the decision recompute's
+    # row growth folded into dec_c: exactly the version the next rebuild reads
+    # once those rows exist (S1 step 5).
+    assert version(stub, "nb-golden", facts=(17, 230, 9, 412), dec_growth=2) == \
+        version(SimpleNamespace(_connect=connect, settings=stub.settings,
+                                unified_kg=SimpleNamespace(
+                                    cluster_input_facts=lambda db, nb, **kw: (17, 230, 11, 412))),
+                "nb-golden")
 
 
 def test_cluster_code_version_reads_the_same_three_components(repo, monkeypatch):

@@ -2971,7 +2971,12 @@ class UnifiedKgStorePort(Protocol):
         generation: int,
         catchup_from_ts: str,
         now: str,
-    ) -> bool: ...
+        concept_seed_version: int,
+    ) -> bool:
+        """Publish ``generation`` (double CAS on the published pointer and the
+        in-flight claim) and record the concept seed space it was built in,
+        in ONE statement (``unified_kg_state.concept_seed_version``)."""
+        ...
     @staticmethod
     def flip_community_generation(
         db: object,
@@ -5004,11 +5009,32 @@ class GovernanceStorePort(Protocol):
     @staticmethod
     def delete_pending_merges(connection: object, notebook_id: str) -> None: ...
     def insert_clusters(self, connection: object, notebook_id: str, object_type: str, rows: object, now: str) -> None: ...
-    def insert_merge_candidate(self, connection: object, notebook_id: str, a: str, b: str, score: float, now: str, *, id_prefix: str = "mc") -> None: ...
+    def insert_merge_candidate(self, connection: object, notebook_id: str, a: str, b: str, score: float, now: str, *, seed_version: int, id_prefix: str = "mc") -> None: ...
     @staticmethod
-    def insert_pending_merge_rows(connection: object, rows: object) -> None: ...
+    def insert_pending_merge_rows(connection: object, rows: object, *, seed_version: int) -> None: ...
     @staticmethod
-    def decided_seed_pairs_from(connection: object, notebook_id: str) -> dict[frozenset, str]: ...
+    def decided_seed_pairs_from(connection: object, notebook_id: str, *, seed_version: int | None) -> dict[frozenset, str]: ...
+    @staticmethod
+    def merge_decision_rows(
+        connection: object, notebook_id: str, *, seed_version: int
+    ) -> list[dict]:
+        """The decided rows (confirmed / rejected / deferred) minted in one
+        concept seed space, ``[{id, key_a, key_b, status}]`` in id order —
+        decision keys derived as in ``decided_seed_pairs_from``."""
+        ...
+    def apply_v1_decision_translation(
+        self,
+        connection: object,
+        notebook_id: str,
+        pairs: dict[str, list[tuple[str, str]]],
+        expected: dict[str, tuple[str, str, str]],
+        now: str,
+    ) -> tuple[int, list[str]]:
+        """Persist the recompute of v1 decisions into seed space 2 in the
+        caller's transaction: per still-matching v1 row, the first pair in
+        place, one inserted row per further pair. Returns (growth of the
+        confirmed / rejected row count, translated row ids)."""
+        ...
     @staticmethod
     def merge_candidate_pairs(db: object, notebook_id: str, statuses: object) -> list[Any]: ...
     @staticmethod
@@ -5058,7 +5084,12 @@ class GovernanceStorePort(Protocol):
     @staticmethod
     def valid_object_ids(db: object, object_ids: object, *, exclude_memory_derived: bool = False) -> set[str]: ...
     @staticmethod
-    def seed_for(object_type: str): ...
+    def seed_for(object_type: str, *, concept_seed_version: int): ...
+    @staticmethod
+    def published_concept_seed_version(connection: object, notebook_id: str) -> int:
+        """The concept seed space of the notebook's published merge (no
+        ``unified_kg_state`` row = 1), read in the caller's transaction."""
+        ...
     @staticmethod
     def merge_evidence(base_evidence: list, source_evidence: list) -> list: ...
     @staticmethod
@@ -5097,7 +5128,9 @@ class GovernanceStorePort(Protocol):
         and unchanged by this contract."""
         ...
     @staticmethod
-    def find_base_match(object_type: str, payload: dict, rows: object) -> str: ...
+    def find_base_match(
+        object_type: str, payload: dict, rows: object, *, concept_seed_version: int
+    ) -> str: ...
 
 
 @runtime_checkable

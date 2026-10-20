@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.core.text_whitespace import PY_STRIP_WHITESPACE
 from app.repositories.sqlite.database import SqliteDatabase
@@ -38,6 +38,7 @@ from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER
 from app.repositories.sqlite.promotion_provenance_store import (
     materialize_promotion_evidence,
 )
+from app.domain.kg_merge_seed import check_concept_seed_version
 from app.domain.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
     USABLE_STATUSES,
@@ -95,6 +96,9 @@ def _only_own_memory_evidence_sql(alias: str) -> str:
         f" OR (json_type({e}) = 'object' AND NOT EXISTS (SELECT 1 FROM json_each({e})))"
         f" OR (json_type({e}) = 'text' AND json_extract({e}, '$') = ''))))"
     )
+# Row ids per statement when the decision recompute re-reads its v1 rows
+# (``apply_v1_decision_translation``); a page size, not a cap.
+_TRANSLATION_BATCH = 500
 
 # Pagination width for the review queue's endpoint-object lookup — a page size,
 # not a cap: every endpoint id is fetched.  500 is the store-wide convention
@@ -125,17 +129,42 @@ def _review_endpoint_ids(relation_rows) -> List[str]:
     return ordered
 
 
-def seed_fn_for(object_type: str):
-    """Return the kg_merge seed function for a KG object type."""
-    from app.domain.kg_merge_seed import (
-        seed_claim, seed_concept, seed_formula, seed_procedure,
+def seed_fn_for(object_type: str, *, concept_seed_version: int):
+    """Return the kg_merge seed function for a KG object type, concepts in the
+    notebook's published seed space (``kg_merge_seed.seed_fn_for_type``)."""
+    from app.domain.kg_merge_seed import seed_fn_for_type
+    return seed_fn_for_type(object_type, concept_seed_version=concept_seed_version)
+
+
+def _strip_concept_prefix(cid: str) -> str:
+    return cid[2:] if cid.startswith("K-") else cid
+
+
+def _decision_keys(r) -> tuple:
+    """A decided row's decision keys: its seed, else the canonical id without
+    ``K-`` — the derivation ``decided_seed_pairs_from`` uses."""
+    return (
+        r["seed_a"] or _strip_concept_prefix(r["canonical_a"]),
+        r["seed_b"] or _strip_concept_prefix(r["canonical_b"]),
     )
-    return {
-        "concept": seed_concept,
-        "claim": seed_claim,
-        "formula": seed_formula,
-        "procedure": seed_procedure,
-    }.get(object_type, seed_claim)
+
+
+def _decision_row(r) -> dict:
+    """A decided row's id, decision keys (``_decision_keys``) and status."""
+    key_a, key_b = _decision_keys(r)
+    return {"id": r["id"], "key_a": key_a, "key_b": key_b, "status": r["status"]}
+
+
+def published_concept_seed_version_on(connection, notebook_id: str) -> int:
+    """The concept seed space of ``notebook_id``'s published merge
+    (``unified_kg_state.concept_seed_version``; no row = 1), read in the
+    caller's transaction."""
+    from app.domain.kg_merge_seed import published_concept_seed_version
+    row = connection.execute(
+        "SELECT concept_seed_version FROM unified_kg_state WHERE notebook_id=?",
+        (notebook_id,),
+    ).fetchone()
+    return published_concept_seed_version(row)
 
 
 def base_dedup_evidence(connection: sqlite3.Connection, object_id: str) -> list:
@@ -157,12 +186,15 @@ def base_dedup_evidence(connection: sqlite3.Connection, object_id: str) -> list:
 
 
 def find_base_dedup_match(
-    object_type: str, src_payload: dict, base_objs: List[sqlite3.Row]
+    object_type: str, src_payload: dict, base_objs: List[sqlite3.Row], *,
+    concept_seed_version: int,
 ) -> str:
     """Exact-seed dedup (v1): return the id of an existing base object whose
     normalized seed matches the source payload, else ''. This works at cold
-    start without vectors (the plan's v1 shortcut)."""
-    seed_fn = seed_fn_for(object_type)
+    start without vectors (the plan's v1 shortcut). Concepts are compared in the
+    BASE notebook's published seed space (``concept_seed_version``), the space its
+    clusters were built in."""
+    seed_fn = seed_fn_for(object_type, concept_seed_version=concept_seed_version)
     src_seed = seed_fn({"name": src_payload.get("name", ""), "payload": src_payload})
     if not src_seed:
         return ""
@@ -252,12 +284,22 @@ class GovernanceStore:
         self.seams = seams
 
     @staticmethod
-    def seed_for(object_type: str):
-        return seed_fn_for(object_type)
+    def seed_for(object_type: str, *, concept_seed_version: int):
+        return seed_fn_for(object_type, concept_seed_version=concept_seed_version)
 
     @staticmethod
-    def find_base_match(object_type: str, payload: dict, rows) -> str:
-        return find_base_dedup_match(object_type, payload, rows)
+    def published_concept_seed_version(connection, notebook_id: str) -> int:
+        """The concept seed space of the notebook's published merge
+        (``unified_kg_state.concept_seed_version``; no state row = 1), in the
+        caller's transaction. One primary-key read."""
+        return published_concept_seed_version_on(connection, notebook_id)
+
+    @staticmethod
+    def find_base_match(
+        object_type: str, payload: dict, rows, *, concept_seed_version: int
+    ) -> str:
+        return find_base_dedup_match(
+            object_type, payload, rows, concept_seed_version=concept_seed_version)
 
     @staticmethod
     def merge_evidence(base_evidence: list, source_evidence: list) -> list:
@@ -750,13 +792,18 @@ class GovernanceStore:
         score: float,
         now: str,
         *,
+        seed_version: int,
         id_prefix: str = "mc",
     ) -> None:
         # id_prefix keeps the historical surrogate prefixes byte-stable:
         # write_merge_candidate mints "mc-", incremental fusion minted "cm-".
+        # seed_version: the seed space ``a`` / ``b`` were minted in (a bridge
+        # candidate's ids are bridge ids of the PUBLISHED space) — always
+        # explicit, never the column default.
         connection.execute(
-            "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) VALUES (?,?,?,?,?, 'pending', ?, ?)",
-            (self.seams.new_id(id_prefix), notebook_id, a, b, score, now, now))
+            "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,score,status,seed_version,created_at,updated_at) VALUES (?,?,?,?,?, 'pending', ?, ?, ?)",
+            (self.seams.new_id(id_prefix), notebook_id, a, b, score,
+             check_concept_seed_version(seed_version), now, now))
 
     def write_merge_candidate(
         self,
@@ -766,15 +813,22 @@ class GovernanceStore:
         b: str,
         score: float,
         now: str,
+        *,
+        seed_version: int,
     ) -> None:
-        self.insert_merge_candidate(connection, notebook_id, a, b, score, now)
+        self.insert_merge_candidate(connection, notebook_id, a, b, score, now,
+                                    seed_version=seed_version)
 
     @staticmethod
     def pending_merges(connection: sqlite3.Connection, notebook_id: str) -> List[dict]:
+        """Every pending candidate. ``seed_a`` / ``seed_b`` ride along for the
+        service's spelling-variant flag (``kg_merge.merge_candidate_kind``),
+        which pops them before the row leaves the service."""
         rows = connection.execute(
             "SELECT * FROM concept_merge_candidates WHERE notebook_id=? AND status='pending'",
             (notebook_id,)).fetchall()
-        return [{"id": r["id"], "canonical_a": r["canonical_a"], "canonical_b": r["canonical_b"], "score": r["score"], "status": r["status"]} for r in rows]
+        return [{"id": r["id"], "canonical_a": r["canonical_a"], "canonical_b": r["canonical_b"], "score": r["score"], "status": r["status"],
+                 "seed_a": r["seed_a"] or "", "seed_b": r["seed_b"] or ""} for r in rows]
 
     @staticmethod
     def pending_merge_names(
@@ -900,15 +954,17 @@ class GovernanceStore:
 
     @staticmethod
     def insert_pending_merge_rows(
-        connection: sqlite3.Connection, rows: List[tuple]
+        connection: sqlite3.Connection, rows: List[tuple], *, seed_version: int
     ) -> None:
         """Refresh pending candidates in the caller's transaction. Rows carry
-        seed_a/seed_b — the rebuild-stable decision keys (PR#145) — verbatim."""
+        seed_a/seed_b — the rebuild-stable decision keys (PR#145) — verbatim,
+        minted in seed space ``seed_version`` (always explicit)."""
+        version = check_concept_seed_version(seed_version)
         connection.executemany(
             "INSERT INTO concept_merge_candidates "
-            "(id,notebook_id,canonical_a,canonical_b,seed_a,seed_b,score,status,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?, 'pending', ?, ?)",
-            rows)
+            "(id,notebook_id,canonical_a,canonical_b,seed_a,seed_b,score,status,seed_version,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?, 'pending', ?, ?, ?)",
+            [(*row[:-2], version, *row[-2:]) for row in rows])
 
     def decided_pairs(self, notebook_id: str) -> Dict[tuple, str]:
         with self.database.connect() as db:
@@ -917,32 +973,126 @@ class GovernanceStore:
 
     @staticmethod
     def decided_seed_pairs_from(
-        connection: sqlite3.Connection, notebook_id: str
+        connection: sqlite3.Connection, notebook_id: str, *,
+        seed_version: Optional[int],
     ) -> Dict[frozenset, str]:
         """{frozenset({seed_a, seed_b}): status} for confirmed/rejected/deferred.
 
         Seed-name keys are STABLE across rebuilds (canonical ids shift when a
         cluster's min-member changes; seed names don't). Legacy rows written
         before the seed_a/seed_b columns existed carry '' → fall back to
-        strip-"K-"(canonical), matching the old decided_pairs key derivation."""
+        strip-"K-"(canonical), matching the old decided_pairs key derivation.
+        ``seed_version``: only the rows minted in that seed space (the
+        clustering of a space must not read the other space's keys); ``None``
+        — every row (the findings rules match both, see
+        ``kg_merge_seed.concept_decision_seeds``). Always explicit."""
+        version_sql, params = "", [notebook_id]
+        if seed_version is not None:
+            version_sql = " AND seed_version=?"
+            params.append(check_concept_seed_version(seed_version))
         rows = connection.execute(
             "SELECT canonical_a, canonical_b, seed_a, seed_b, status "
             "FROM concept_merge_candidates WHERE notebook_id=? "
-            "AND status IN ('confirmed','rejected','deferred')",
-            (notebook_id,),
+            "AND status IN ('confirmed','rejected','deferred')" + version_sql,
+            params,
         ).fetchall()
-        def _strip(cid: str) -> str:
-            return cid[2:] if cid.startswith("K-") else cid
         out: Dict[frozenset, str] = {}
         for r in rows:
-            a = r["seed_a"] or _strip(r["canonical_a"])
-            b = r["seed_b"] or _strip(r["canonical_b"])
-            out[frozenset((a, b))] = r["status"]
+            out[frozenset(_decision_keys(r))] = r["status"]
         return out
 
-    def decided_seed_pairs(self, notebook_id: str) -> Dict[frozenset, str]:
+    def decided_seed_pairs(
+        self, notebook_id: str, *, seed_version: Optional[int]
+    ) -> Dict[frozenset, str]:
         with self.database.connect() as db:
-            return self.decided_seed_pairs_from(db, notebook_id)
+            return self.decided_seed_pairs_from(
+                db, notebook_id, seed_version=seed_version)
+
+    @staticmethod
+    def merge_decision_rows(
+        connection: sqlite3.Connection, notebook_id: str, *, seed_version: int,
+    ) -> List[dict]:
+        """The decided rows (confirmed / rejected / deferred) of one seed space,
+        ``[{id, key_a, key_b, status}]`` in id order, with the decision keys
+        derived as in ``decided_seed_pairs_from``. The full rebuild reads the
+        v1 rows before it streams (the recompute's step 1) and the v2 rows
+        for its clustering — through ``idx_candidates_nb_status``, bounded by
+        the notebook's decisions."""
+        rows = connection.execute(
+            "SELECT id, canonical_a, canonical_b, seed_a, seed_b, status "
+            "FROM concept_merge_candidates WHERE notebook_id=? "
+            "AND status IN ('confirmed','rejected','deferred') AND seed_version=? "
+            "ORDER BY id",
+            (notebook_id, check_concept_seed_version(seed_version)),
+        ).fetchall()
+        return [_decision_row(r) for r in rows]
+
+    def apply_v1_decision_translation(
+        self,
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        pairs: Dict[str, List[Tuple[str, str]]],
+        expected: Dict[str, Tuple[str, str, str]],
+        now: str,
+    ) -> Tuple[int, List[str]]:
+        """Persist the recompute of v1 decisions into seed space 2, in the
+        caller's pending-refresh transaction (§五 S1 step 5; SQLite's write
+        transaction already excludes every other writer, the PostgreSQL twin
+        locks the rows FOR UPDATE).
+
+        For each row id in ``pairs`` still at seed version 1 with the keys and
+        status it had when the plan was made (``expected``: ``(key_a, key_b,
+        status)``): the FIRST pair updates the row in place — id, created_at,
+        score, reviewer, confidence and rationale kept — and every further
+        pair is inserted as a new row carrying the same decision. The rows'
+        canonical ids become ``"K-" + seed`` (the v2 bridge form of the seed,
+        so the Memory purge's versioned match finds them). A row whose keys or
+        status changed since the plan stays v1 — the next rebuild retries it.
+        Returns ``(rows the confirmed / rejected count grew by, translated row
+        ids)``: the caller folds the first into the stored input version's
+        decision count (deferred rows are not counted there)."""
+        ids = sorted(pairs)
+        found: Dict[str, sqlite3.Row] = {}
+        for at in range(0, len(ids), _TRANSLATION_BATCH):
+            batch = ids[at:at + _TRANSLATION_BATCH]
+            for r in connection.execute(
+                "SELECT id, canonical_a, canonical_b, seed_a, seed_b, status, score, "
+                "confidence, rationale, reviewed_by, created_at "
+                "FROM concept_merge_candidates WHERE notebook_id=? AND seed_version=1 "
+                "AND status IN ('confirmed','rejected','deferred') "
+                f"AND id IN ({','.join('?' for _ in batch)})",
+                (notebook_id, *batch),
+            ).fetchall():
+                found[r["id"]] = r
+        grew = 0
+        done: List[str] = []
+        for row_id in ids:
+            r = found.get(row_id)
+            if r is None:
+                continue
+            row = _decision_row(r)
+            if (row["key_a"], row["key_b"], row["status"]) != tuple(expected[row_id]):
+                continue
+            first, rest = pairs[row_id][0], pairs[row_id][1:]
+            connection.execute(
+                "UPDATE concept_merge_candidates SET seed_a=?, seed_b=?, "
+                "canonical_a=?, canonical_b=?, seed_version=2, updated_at=? "
+                "WHERE id=? AND notebook_id=?",
+                (first[0], first[1], "K-" + first[0], "K-" + first[1], now,
+                 row_id, notebook_id))
+            if rest:
+                connection.executemany(
+                    "INSERT INTO concept_merge_candidates "
+                    "(id,notebook_id,canonical_a,canonical_b,seed_a,seed_b,score,status,"
+                    "confidence,rationale,reviewed_by,seed_version,created_at,updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,2,?,?)",
+                    [(self.seams.new_id("mc"), notebook_id, "K-" + a, "K-" + b, a, b,
+                      r["score"], r["status"], r["confidence"], r["rationale"],
+                      r["reviewed_by"], r["created_at"], now) for a, b in rest])
+            if r["status"] in ("confirmed", "rejected"):
+                grew += len(rest)
+            done.append(row_id)
+        return grew, done
 
     # ------------------------------------------------------ merge review job
     @staticmethod
@@ -1593,7 +1743,10 @@ class GovernanceStore:
                 ),
                 (base_nb_id, object_type, *USABLE_STATUSES),
             ).fetchall()
-            base_match_id = find_base_dedup_match(object_type, payload, base_objs)
+            base_match_id = find_base_dedup_match(
+                object_type, payload, base_objs,
+                concept_seed_version=published_concept_seed_version_on(
+                    connection, base_nb_id))
             if base_match_id:
                 merged_evidence = merge_evidence_lists(
                     base_dedup_evidence(connection, base_match_id), evidence
@@ -1732,7 +1885,10 @@ class GovernanceStore:
             ),
             (base_nb_id, object_type, *USABLE_STATUSES),
         ).fetchall()
-        base_match_id = find_base_dedup_match(object_type, src_payload, base_objs)
+        base_match_id = find_base_dedup_match(
+            object_type, src_payload, base_objs,
+            concept_seed_version=published_concept_seed_version_on(
+                connection, base_nb_id))
 
         if base_match_id:
             # Merge: combine evidence into the matched base object; keep its id.
@@ -1840,7 +1996,7 @@ class GovernanceStore:
         notebook_id: str,
         source_ids: List[str],
         *,
-        bridge_canonical_ids: List[str],
+        bridge_canonical_ids: Dict[int, List[str]],
     ) -> int:
         """Mirror of the PostgreSQL twin (its docstring carries the rules):
         the merge candidates naming the Memory's clusters, an id minted from
@@ -1864,7 +2020,16 @@ class GovernanceStore:
             "AND (mc.member_object_id IN (SELECT id FROM owned) "
             f"OR {cluster_seed_object_id('mc')} IN (SELECT id FROM owned))"
         )
-        bridge = id_bind_ids(sorted(set(bridge_canonical_ids)), sort=True)
+        v1 = id_bind_ids(sorted(set(bridge_canonical_ids.get(1, ()))), sort=True)
+        v2 = id_bind_ids(sorted(set(bridge_canonical_ids.get(2, ()))), sort=True)
+
+        def bridged(side: str) -> str:
+            # A row is matched only by the bridge ids of its OWN seed space.
+            return (
+                f"((seed_version = 1 AND {id_member_of(f'canonical_{side}', v1)}) "
+                f"OR (seed_version = 2 AND {id_member_of(f'canonical_{side}', v2)}))"
+            )
+
         connection.execute(
             f"WITH {owned}, doomed AS ({doomed}) "
             "DELETE FROM concept_merge_candidates WHERE notebook_id = ? AND ("
@@ -1874,15 +2039,16 @@ class GovernanceStore:
             "IN (SELECT id FROM owned) "
             f"OR {cluster_seed_object_id('concept_merge_candidates', 'canonical_b')} "
             "IN (SELECT id FROM owned) "
-            f"OR ({id_member_of('canonical_a', bridge)} AND NOT EXISTS ("
+            f"OR ({bridged('a')} AND NOT EXISTS ("
             "SELECT 1 FROM concept_clusters xa "
             "WHERE xa.notebook_id = concept_merge_candidates.notebook_id "
             "AND xa.canonical_id = concept_merge_candidates.canonical_a)) "
-            f"OR ({id_member_of('canonical_b', bridge)} AND NOT EXISTS ("
+            f"OR ({bridged('b')} AND NOT EXISTS ("
             "SELECT 1 FROM concept_clusters xb "
             "WHERE xb.notebook_id = concept_merge_candidates.notebook_id "
             "AND xb.canonical_id = concept_merge_candidates.canonical_b)))",
-            (notebook_id, *ids, notebook_id, notebook_id, bridge.param, bridge.param),
+            (notebook_id, *ids, notebook_id, notebook_id,
+             v1.param, v2.param, v1.param, v2.param),
         )
         removed = connection.execute(
             f"WITH {owned} DELETE FROM concept_clusters WHERE notebook_id = ? "

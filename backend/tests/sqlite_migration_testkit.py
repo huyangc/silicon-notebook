@@ -44,10 +44,21 @@ V78_AUTH_TABLES = {
 }
 
 
+def rollback_v102(db: sqlite3.Connection) -> None:
+    """Remove what SQLite migration 102 added:
+    ``concept_merge_candidates.seed_version`` and
+    ``unified_kg_state.concept_seed_version``. Callers lower ``user_version``
+    themselves."""
+    db.execute("ALTER TABLE concept_merge_candidates DROP COLUMN seed_version")
+    db.execute("ALTER TABLE unified_kg_state DROP COLUMN concept_seed_version")
+
+
 def rollback_v101(db: sqlite3.Connection) -> None:
     """Remove what SQLite migration 101 added: ``chunks.navigation``,
     ``sources.navigation_scanned_at`` and ``sources.navigation_version``.
-    Callers lower ``user_version`` themselves."""
+    v102 is undone first (newest-first). Callers lower ``user_version``
+    themselves."""
+    rollback_v102(db)
     db.execute("ALTER TABLE chunks DROP COLUMN navigation")
     db.execute("ALTER TABLE sources DROP COLUMN navigation_scanned_at")
     db.execute("ALTER TABLE sources DROP COLUMN navigation_version")

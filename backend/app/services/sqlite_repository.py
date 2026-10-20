@@ -323,8 +323,9 @@ class SQLiteRepository(RepositoryFacade):
         return SharingStore.insert_row_values(db, table, data)
 
     @staticmethod
-    def _seed_fn_for(object_type: str):
-        return GovernanceStore.seed_for(object_type)
+    def _seed_fn_for(object_type: str, *, concept_seed_version: int):
+        return GovernanceStore.seed_for(
+            object_type, concept_seed_version=concept_seed_version)
 
     @staticmethod
     def _merge_evidence_lists(base_ev: list, src_ev: list) -> list:

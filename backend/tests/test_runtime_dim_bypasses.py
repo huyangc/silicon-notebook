@@ -192,7 +192,7 @@ def test_tier2_ann_guard_compares_runtime_dim_and_truncates_query(repo):
     ann = _FakeAnn()
     out = repo._tier2_bridge_candidates_ann(
         nb.id, idx, ann, [{"object_id": "new1", "name": "Precision Voltage Source"}],
-        {"new1": ""})
+        {"new1": ""}, seed_version=1, override=frozenset())
 
     assert ann.query_dims and set(ann.query_dims) == {16}   # 查询已截断到运行时维
     assert out, "运行时维 ANN 下 Tier2 应产出候选而非被守卫静默拦下"
@@ -216,7 +216,7 @@ def test_stream_seed_reps_truncates_both_blob_and_json_branches(repo):
 
     from app.services.kg_merge import _norm
     reps, members, first = repo._stream_seed_reps(
-        nb.id, "concept", lambda o: _norm(o["name"]), run_id="t4", compute_reps=True)
+        nb.id, "concept", concept_seed_version=1, run_id="t4", compute_reps=True)
 
     assert reps, "reps 非空"
     seed = _norm("Low Dropout Regulator")

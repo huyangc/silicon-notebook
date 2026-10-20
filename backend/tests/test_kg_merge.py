@@ -1,4 +1,7 @@
 import time
+
+import pytest
+
 from app.services.kg_merge import cluster_concepts, _norm
 
 def _concept(oid, name): return {"object_id": oid, "name": name}
@@ -40,14 +43,15 @@ def test_is_initialism_of():
 
 def test_build_acronym_alias_map_maps_bare_initialism_to_expansion():
     from app.services.kg_merge import build_acronym_alias_map
-    amap = build_acronym_alias_map(["Compressed Sparse Attention (CSA)", "CSA", "other"])
+    amap = build_acronym_alias_map(["Compressed Sparse Attention (CSA)", "CSA", "other"],
+                                   seed_version=1)
     assert amap.get(_norm("CSA")) == _norm("Compressed Sparse Attention")
 
 
 def test_build_acronym_alias_map_skips_non_initialism():
     from app.services.kg_merge import build_acronym_alias_map
     # "LP"/"HP" are not initialisms of "Filter" -> no alias recorded.
-    amap = build_acronym_alias_map(["Filter (LP)", "Filter (HP)"])
+    amap = build_acronym_alias_map(["Filter (LP)", "Filter (HP)"], seed_version=1)
     assert amap == {}
 
 
@@ -55,8 +59,8 @@ def test_build_acronym_alias_map_deterministic_on_conflict():
     from app.services.kg_merge import build_acronym_alias_map
     # Same acronym "AL" initialism of two distinct expansions: must resolve
     # deterministically (stable across input order), never last-writer-wins.
-    fwd = build_acronym_alias_map(["Alpha Layer (AL)", "Adaptive Loop (AL)"])
-    rev = build_acronym_alias_map(["Adaptive Loop (AL)", "Alpha Layer (AL)"])
+    fwd = build_acronym_alias_map(["Alpha Layer (AL)", "Adaptive Loop (AL)"], seed_version=1)
+    rev = build_acronym_alias_map(["Adaptive Loop (AL)", "Alpha Layer (AL)"], seed_version=1)
     assert fwd == rev                                   # order-independent
     # tie-break = lexicographically smallest expansion seed
     assert fwd.get(_norm("AL")) == min(_norm("Alpha Layer"), _norm("Adaptive Loop"))
@@ -534,20 +538,23 @@ def test_same_symbol_name_still_isolated():
     assert got["cluster_map"]["o1"] != got["cluster_map"]["o2"]
 
 
-def test_place_new_concepts_empty_seed_unique():
-    from app.services.kg_merge import place_new_concepts, _norm
+@pytest.mark.parametrize("version", [1, 2])
+def test_place_new_concepts_empty_seed_unique(version):
+    from app.services.kg_merge import place_new_concepts, placement_seed_space
+    new = [{"object_id": "n1", "name": "→"}, {"object_id": "n2", "name": "☆"}]
     rows = place_new_concepts(
-        [{"object_id": "n1", "name": "→"}, {"object_id": "n2", "name": "☆"}],
-        {}, seed_fn=lambda o: _norm(o.get("name", "")))
+        new, {}, seed_space=placement_seed_space(
+            "concept", new, {}, concept_seed_version=version))
     cids = {r["canonical_id"] for r in rows}
     assert len(cids) == 2 and "K-" not in cids
 
 
-def test_detect_bridge_empty_name_never_emits_bare_K():
+@pytest.mark.parametrize("version", [1, 2])
+def test_detect_bridge_empty_name_never_emits_bare_K(version):
     from app.services.kg_merge import detect_bridge_candidates
     out = detect_bridge_candidates(
         [{"object_id": "n1", "name": "→"}], {"n1": [1.0, 0.0]},
         [{"object_id": "e1", "name": "cascode"}], {"e1": [1.0, 0.0]},
-        {"e1": "K-cascode"}, set())
+        {"e1": "K-cascode"}, set(), seed_version=version)
     assert len(out) == 1                        # 向量桥接仍然发生
     assert all("K-" not in (c["canonical_a"], c["canonical_b"]) for c in out)

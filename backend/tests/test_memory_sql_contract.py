@@ -336,8 +336,11 @@ def test_cluster_seed_object_id_matches_how_kg_merge_mints_canonical_ids(world):
     from app.services import knowledge_lifecycle
 
     source = open(knowledge_lifecycle.__file__, encoding="utf-8").read()
+    # The prefixes appear as ``id_prefix="K-"`` and in the per-type prefix
+    # tables (``{"claim": "KL-", ...}``; the seed functions moved into the
+    # seed spaces of ``kg_merge.seed_space_for``).
     prefixes = set(re.findall(r'id_prefix="(K[A-Z]?-)"', source)) | set(
-        re.findall(r'\(seed_\w+, "(K[A-Z]?-)"\)', source)
+        re.findall(r'"(?:concept|claim|formula|procedure)": "(K[A-Z]?-)"', source)
     )
     assert prefixes == {"K-", "KL-", "KF-", "KP-"}, prefixes
     for prefix in sorted(prefixes):

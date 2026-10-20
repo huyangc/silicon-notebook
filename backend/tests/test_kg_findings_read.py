@@ -342,8 +342,24 @@ def test_the_overview_summary_reads_the_ledger(repo, built):
     assert summary.freshness.stale is False
     assert summary.counts == {"by_rule": {"F1": 1, "F2": 1, "F3": 1, "F4": 1, "F5": 1},
                               "dismissed": 0}
-    assert summary.dev_items == [{"item_id": "S1", "groups": 1, "objects": 2,
+    # The world's merge is published in seed space 1 (the state row's default)
+    # while the code builds in 2: the fix is deployed, "更新分析" applies it.
+    assert summary.dev_items == [{"item_id": "S1", "status": "fixed_pending_update",
+                                  "groups": 1, "objects": 2,
                                   "samples": [{"names": ["Q-Former", "Qformer"]}]}]
+
+
+def test_the_s1_dev_item_reads_open_once_the_library_publishes_the_fixed_space(
+    repo, built,
+):
+    """``dev_items[].status`` is judged off ``unified_kg_state`` at read time:
+    a library already publishing seed space 2 that still shows the narrow half
+    reads ``open`` (the fix did not cover it), not "fixed, update to apply"."""
+    with repo._write() as db:
+        db.execute("UPDATE unified_kg_state SET concept_seed_version=2 "
+                   "WHERE notebook_id=?", (built,))
+    summary = _service(repo).overview(built).findings_summary
+    assert [item["status"] for item in summary.dev_items] == ["open"]
     assert "examples" not in summary.rules["S1"]
     assert summary.structure["island_components"] == 1
     assert summary.comparison["reason"] == "no_previous"

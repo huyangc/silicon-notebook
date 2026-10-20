@@ -61,7 +61,7 @@ def test_a_rebuild_puts_no_memory_derived_object_in_any_cluster_pg(repo):
     repo.rebuild_unified_kg(nb_id, force=True)
     layers = world.assert_no_memory_in_derived_layers(repo, nb_id)
     assert len([r for r in layers["clusters"]
-                if r["canonical_id"] == "K-grouped query attention"]) == 2
+                if r["canonical_id"] == "K-groupedqueryattention"]) == 2
     assert layers["canonical_relations"] and layers["mention_edges"]
     assert layers["community_members"]
     assert _state(repo, nb_id)["dirty"] == 0
@@ -177,7 +177,7 @@ def test_summary_rows_drop_memory_members_of_a_pre_isolation_community_pg(repo):
     nb_id = world.seed(repo)
     repo.rebuild_unified_kg(nb_id, force=True)
     memory = world.object_ids_by_name(repo, nb_id, world.MEMORY_SOURCE)
-    legacy = ["K-kv cache", memory["SECRET-ALPHA plan"], "K-grouped query attention",
+    legacy = ["K-kvcache", memory["SECRET-ALPHA plan"], "K-groupedqueryattention",
               memory["Secret Beta budget"]]
     gen = world.rows(repo, "SELECT community_generation AS g FROM unified_kg_state "
                            "WHERE notebook_id=?", (nb_id,))[0]["g"]
@@ -191,7 +191,7 @@ def test_summary_rows_drop_memory_members_of_a_pre_isolation_community_pg(repo):
     with repo._connect() as db:
         rows = {r["id"]: json.loads(r["member_ids"])
                 for r in store.community_rows_for_summary(db, nb_id, 0)}
-    assert rows["comm-legacy"] == ["K-kv cache", "K-grouped query attention"]
+    assert rows["comm-legacy"] == ["K-kvcache", "K-groupedqueryattention"]
     assert all(not set(ids) & set(memory.values()) for ids in rows.values())
 
 

@@ -11,7 +11,11 @@ Note — transitive-reject limitation (v1):
 from __future__ import annotations
 import logging
 from collections import Counter
-from typing import Dict, Iterable, List, Set, FrozenSet
+from dataclasses import dataclass, field
+from typing import (
+    Callable, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set,
+    Tuple,
+)
 
 import numpy as np
 
@@ -25,10 +29,17 @@ from app.domain.kg_merge_seed import (
     _norm_statement,
     _steps_signature,
     _strip_paren_acronym,
+    CONCEPT_SEED_VERSION,
+    OVERRIDE_SEED_PREFIX,
+    check_concept_seed_version,
+    concept_seed_of,
+    concept_seed_parts,
+    concept_seed_v2,
     seed_claim,
     seed_concept,
     seed_formula,
     seed_procedure,
+    seed_squash_key,
 )
 
 _MAX_REPS = 4000  # sanity constant; no longer causes skipping the vector tier
@@ -49,7 +60,20 @@ _log = logging.getLogger(__name__)
 # v2: Unicode-safe _norm(NFKC+\w) + seed_or_unique 空seed哨兵(2026-07-08)。
 # v3: rejected/deferred 是 canonical component 间的 cannot-link；pending 按
 # canonical pair 去重，避免同一簇对通过另一个 seed 邻居反复进入审阅队列。
-CLUSTER_ALGO_VERSION = 3
+# v4 (KG-analysis findings PR-4, design 2026-10-19 §五 S1 + §4.4): concepts are
+#   seeded in seed space 2 (``concept_seed_v2``: ORIGINAL whitespace / hyphen /
+#   underscore dropped before punctuation turns into spaces, so "Q-Former" and
+#   "Qformer" share ``qformer`` while "Llama 3.1" / "Llama 31" stay apart); the
+#   first v2 full rebuild of a library recomputes its stored v1 merge decisions
+#   into v2 seed pairs (``translate_v1_decisions``, collisions with a rejection
+#   keep the old seed as ``~v1:<seed>``) and records the published space in
+#   ``unified_kg_state.concept_seed_version``; the pending refresh gains the
+#   squash-key candidate tier (``squash_pending_candidates``: one star per group
+#   of canonicals whose seeds differ only in punctuation-made spaces). With the
+#   merge code component (``cluster_code_version``) this bump is what makes an
+#   upgraded library read "合并规则已更新，需要更新一次" instead of "无需更新".
+#   Claim / formula / procedure seeds are unchanged.
+CLUSTER_ALGO_VERSION = 4
 
 
 def cluster_code_components(settings) -> tuple[int, int, int]:
@@ -96,37 +120,71 @@ def seed_or_unique(seed: str, object_id: str) -> str:
     return seed if seed else f"~{object_id}"
 
 
-def bridge_canonical_id(name: str, object_id: str) -> str:
+def bridge_canonical_id(
+    name: str, object_id: str, *, seed_version: int,
+    override: FrozenSet[str] = frozenset(),
+) -> str:
     """The canonical id a concept object is bridged under (Tier-2 bridge
     candidates, the ANN twin, and the Memory purge that removes candidates
-    naming it): ``"K-" + seed_or_unique(_norm(name), object_id)``. Never
-    goes through the acronym alias redirect (``place_new_concepts`` does),
-    so it can name a cluster no row carries. One definition for every site."""
-    return "K-" + seed_or_unique(_norm(name or ""), object_id)
+    naming it), in seed space ``seed_version`` — the notebook's PUBLISHED
+    space, the same one its placement uses:
+
+      · v1: ``"K-" + seed_or_unique(_norm(name), object_id)``;
+      · v2: ``"K-" + seed_or_unique(concept_seed_v2(name), object_id)``, or
+        ``"K-~v1:" + <v1 seed>`` when the object's v1 seed is one of the
+        notebook's override keys (``override``: the collision exception of
+        the decision recompute, read off the stored v2 decisions).
+
+    Never goes through the acronym alias redirect (``place_new_concepts``
+    does), so it can name a cluster no row carries; for the same reason the
+    override is matched on the UN-aliased v1 seed — the one the Memory purge
+    can recompute from a name alone (``purge_bridge_canonical_ids``). One
+    definition for every site."""
+    version = check_concept_seed_version(seed_version)
+    v1 = seed_or_unique(_norm(name or ""), object_id)
+    if version == 1:
+        return "K-" + v1
+    if v1 in override:
+        return "K-" + OVERRIDE_SEED_PREFIX + v1
+    return "K-" + seed_or_unique(concept_seed_v2(name or ""), object_id)
 
 
-def purge_bridge_canonical_ids(objects: Iterable[dict]) -> List[str]:
+def purge_bridge_canonical_ids(objects: Iterable[dict]) -> Dict[int, List[str]]:
     """For objects ``[{object_id, object_type, name}]`` about to be purged:
-    the bridge ids of the concept objects (``bridge_canonical_id``). They may
-    also be carried by a live shared cluster, so the purge acts on a merge
-    candidate naming one only when no cluster row carries it. (The ids that
-    can only have been minted from a purged object are recognised in SQL by
-    ``memory_sql.cluster_seed_object_id``.)"""
-    return sorted({
-        bridge_canonical_id(item.get("name") or "", item["object_id"])
-        for item in objects
-        if item.get("object_type") == "concept"
-    })
+    every bridge id their concept objects can have been bridged under, per
+    the seed space of the candidate rows that may carry it —
+    ``{1: [v1 ids], 2: [v2 ids + override ids]}``. A candidate row is matched
+    only by the ids of its OWN ``seed_version`` (``bridge_canonical_id``
+    above, both forms computed from the name alone: the purge runs whatever
+    space the notebook has published, and a library mid-switch holds rows of
+    both). They may also be carried by a live shared cluster, so the purge
+    acts on a merge candidate naming one only when no cluster row carries it.
+    (The ids that can only have been minted from a purged object are
+    recognised in SQL by ``memory_sql.cluster_seed_object_id``.)"""
+    v1_ids: Set[str] = set()
+    v2_ids: Set[str] = set()
+    for item in objects:
+        if item.get("object_type") != "concept":
+            continue
+        name, object_id = item.get("name") or "", item["object_id"]
+        v1_ids.add(bridge_canonical_id(name, object_id, seed_version=1))
+        v2_ids.add(bridge_canonical_id(name, object_id, seed_version=2))
+        v1 = seed_or_unique(_norm(name), object_id)
+        v2_ids.add(bridge_canonical_id(
+            name, object_id, seed_version=2, override=frozenset({v1})))
+    return {1: sorted(v1_ids), 2: sorted(v2_ids)}
 
 
-def build_acronym_alias_map(names: Iterable[str]) -> Dict[str, str]:
-    """For every "Full (ACR)" name where ACR is the initialism of Full, map the
-    acronym's seed to the expansion's seed: ``{_norm(ACR): _norm(Full)}``. Lets
-    a bare "ACR" elsewhere in the batch be redirected onto the expansion's
-    cluster. Deterministic on conflict: if one acronym is the initialism of two
-    distinct expansions, the lexicographically smallest expansion seed wins
-    (never last-writer-wins → result is independent of input order)."""
-    alias: Dict[str, str] = {}
+def build_acronym_alias_maps(
+    names: Iterable[str], seed_versions: Sequence[int],
+) -> Dict[int, Dict[str, str]]:
+    """``build_acronym_alias_map`` for several seed spaces in ONE pass over
+    ``names`` (the full rebuild streams them from the database once)."""
+    seed_fns = {
+        check_concept_seed_version(v): (_norm if v == 1 else concept_seed_v2)
+        for v in seed_versions
+    }
+    maps: Dict[int, Dict[str, str]] = {v: {} for v in seed_fns}
     for name in names:
         m = _PAREN_ACRONYM_RE.match(name or "")
         if not m:
@@ -134,13 +192,29 @@ def build_acronym_alias_map(names: Iterable[str]) -> Dict[str, str]:
         head, tok = m.group(1), m.group(2)
         if not _ACRONYM_TOKEN_RE.match(tok) or not _is_initialism_of(tok, head):
             continue
-        acr_seed, exp_seed = _norm(tok), _norm(head)
-        if not acr_seed or not exp_seed or acr_seed == exp_seed:
-            continue
-        prev = alias.get(acr_seed)
-        if prev is None or exp_seed < prev:
-            alias[acr_seed] = exp_seed
-    return alias
+        for version, seed_fn in seed_fns.items():
+            acr_seed, exp_seed = seed_fn(tok), seed_fn(head)
+            if not acr_seed or not exp_seed or acr_seed == exp_seed:
+                continue
+            alias = maps[version]
+            prev = alias.get(acr_seed)
+            if prev is None or exp_seed < prev:
+                alias[acr_seed] = exp_seed
+    return maps
+
+
+def build_acronym_alias_map(names: Iterable[str], *, seed_version: int) -> Dict[str, str]:
+    """For every "Full (ACR)" name where ACR is the initialism of Full, map the
+    acronym's seed to the expansion's seed, both in seed space
+    ``seed_version``: ``{seed(ACR): seed(Full)}`` (v1: ``_norm``; v2:
+    ``concept_seed_v2`` — the alias is matched on words, the values are squashed
+    like every v2 seed). Lets a bare "ACR" elsewhere in the batch be redirected
+    onto the expansion's cluster. Deterministic on conflict: if one acronym is
+    the initialism of two distinct expansions, the lexicographically smallest
+    expansion seed wins (never last-writer-wins → result is independent of
+    input order). Claim / formula / procedure batches always pass 1."""
+    version = check_concept_seed_version(seed_version)
+    return build_acronym_alias_maps(names, (version,))[version]
 
 
 _CONTRAST_GROUPS = [
@@ -280,17 +354,144 @@ class _UF:
     def union(self, a, b): self.p[self.find(a)] = self.find(b)
 
 
-def _seed_with_alias(obj, seed_fn, alias_map: Dict[str, str]) -> str:
+def _seed_with_alias(obj, seed_fn, alias_map: Dict[str, str], *, seed_version: int) -> str:
     """Compute seed via ``seed_fn``, then redirect bare-acronym seeds onto their
-    expansion (alias_map). Only redirects when the seed equals ``_norm(name)`` —
+    expansion (alias_map, built in the same ``seed_version``). Only redirects
+    when the seed equals the plain concept seed of the name in that space —
     i.e. a plain concept seed — so a richer seed (procedure name#steps-signature)
-    is never collapsed by a coincidental acronym key."""
+    is never collapsed by a coincidental acronym key. Claim / formula /
+    procedure seeds pass ``seed_version=1`` (their alias rule is unchanged)."""
     name = obj.get("name", "") if isinstance(obj, dict) else obj
     base = seed_fn(obj)
-    nm = _norm(name)
+    nm = concept_seed_of(name, seed_version)
     if base == nm and nm in alias_map:
         return alias_map[nm]
     return base
+
+
+def _v1_probe(keys: FrozenSet[str], v1_alias: Mapping[str, str]) -> FrozenSet[str]:
+    """The squashed pre-alias texts (``concept_seed_parts``' second value) a
+    name must have for its v1 seed to be able to equal one of ``keys``.
+
+    A concept's v1 seed is ``v1_alias.get(n1, n1)`` with ``n1 =
+    _ALIASES.get(cleaned, cleaned)`` and ``cleaned`` the v1 form, whose squash
+    is the name's squashed pre-alias text. So the v1 seed is a key ``k`` only
+    when ``cleaned`` is ``k``, an acronym whose expansion is ``k``, or a static
+    alias key whose value is one of those two. A superset test: the caller
+    still compares the exact v1 seed."""
+    targets = set(keys)
+    targets.update(acr for acr, exp in v1_alias.items() if exp in keys)
+    probe = {t.replace(" ", "") for t in targets}
+    probe.update(k.replace(" ", "") for k, v in _ALIASES.items() if v in targets)
+    probe.discard("")
+    return frozenset(probe)
+
+
+class ConceptSeedSpace:
+    """The final cluster seed of every concept of one batch in one notebook's
+    concept seed space (``CONCEPT_SEED_VERSION`` for a full rebuild, the
+    published ``concept_seed_version`` for incremental placement).
+
+    ``seed(obj, object_id)`` = ``seed_or_unique`` of the space's seed after the
+    batch's acronym alias redirect, except that in space 2 an object whose v1
+    seed (with the v1 alias redirect) is in ``override`` keeps it as
+    ``"~v1:" + <v1 seed>`` (the collision exception of
+    ``translate_v1_decisions``). ``seed_and_key`` additionally returns that v1
+    seed when it is in ``track`` (the keys of stored v1 decisions the first v2
+    rebuild recomputes), else ``None``.
+
+    The v1 seed is computed only for names whose squashed pre-alias text can
+    lead to a key (``_v1_probe``), so a space with no override and no tracked
+    key pays nothing over the plain v2 seed."""
+
+    __slots__ = ("version", "alias", "v1_alias", "override", "track", "_probe")
+
+    def __init__(
+        self, version: int, alias: Dict[str, str], *,
+        v1_alias: Optional[Dict[str, str]] = None,
+        override: Iterable[str] = (), track: Iterable[str] = (),
+    ) -> None:
+        self.version = check_concept_seed_version(version)
+        override = frozenset(override) if self.version != 1 else frozenset()
+        track = frozenset(track) if self.version != 1 else frozenset()
+        if (override or track) and v1_alias is None:
+            raise ValueError("an override or tracked key needs the v1 alias map")
+        self.alias = alias
+        self.v1_alias = v1_alias or {}
+        self.override = override
+        self.track = track
+        self._probe = _v1_probe(override | track, self.v1_alias) if (override or track) \
+            else frozenset()
+
+    @classmethod
+    def from_names(
+        cls, names: Iterable[str], *, version: int,
+        override: Iterable[str] = (), track: Iterable[str] = (),
+    ) -> "ConceptSeedSpace":
+        version = check_concept_seed_version(version)
+        override, track = frozenset(override), frozenset(track)
+        need_v1 = version != 1 and bool(override or track)
+        maps = build_acronym_alias_maps(names, (version, 1) if need_v1 else (version,))
+        return cls(version, maps[version], v1_alias=maps.get(1) if need_v1 else None,
+                   override=override, track=track)
+
+    def v1_seed(self, name: str, object_id: str) -> str:
+        """The object's seed in space 1 (with the v1 acronym redirect)."""
+        n1 = _norm(name)
+        return seed_or_unique(self.v1_alias.get(n1, n1), object_id)
+
+    def seed_and_key(self, obj, object_id: str) -> Tuple[str, Optional[str]]:
+        name = obj.get("name", "") if isinstance(obj, dict) else obj
+        if self.version == 1:
+            n1 = _norm(name)
+            return seed_or_unique(self.alias.get(n1, n1), object_id), None
+        s2, squashed = concept_seed_parts(name)
+        seed = seed_or_unique(self.alias.get(s2, s2), object_id)
+        if not self._probe or (squashed and squashed not in self._probe):
+            return seed, None
+        v1 = self.v1_seed(name, object_id)
+        if v1 in self.override:
+            seed = OVERRIDE_SEED_PREFIX + v1
+        return seed, (v1 if v1 in self.track else None)
+
+    def seed(self, obj, object_id: str) -> str:
+        return self.seed_and_key(obj, object_id)[0]
+
+
+_TYPE_SEED_FNS = {"claim": seed_claim, "formula": seed_formula, "procedure": seed_procedure}
+
+
+class TypeSeedSpace:
+    """Claim / formula / procedure seeds — the v1 rule, unchanged (no seed
+    version): the type's seed function, the v1 acronym redirect of plain
+    concept-shaped seeds, ``seed_or_unique``."""
+
+    __slots__ = ("seed_fn", "alias")
+
+    def __init__(self, object_type: str, names: Iterable[str]) -> None:
+        self.seed_fn = _TYPE_SEED_FNS[object_type]
+        self.alias = build_acronym_alias_map(names, seed_version=1)
+
+    def seed_and_key(self, obj, object_id: str) -> Tuple[str, Optional[str]]:
+        return seed_or_unique(
+            _seed_with_alias(obj, self.seed_fn, self.alias, seed_version=1), object_id
+        ), None
+
+    def seed(self, obj, object_id: str) -> str:
+        return self.seed_and_key(obj, object_id)[0]
+
+
+def seed_space_for(
+    object_type: str, names: Iterable[str], *, concept_seed_version: int,
+    override: Iterable[str] = (), track: Iterable[str] = (),
+):
+    """The seed space of one object type for one batch of names: concepts in
+    ``concept_seed_version`` (with ``override`` / ``track``), other types by
+    their unchanged v1 rule. ``names`` feeds the acronym alias map(s)."""
+    if object_type == "concept":
+        return ConceptSeedSpace.from_names(
+            names, version=concept_seed_version, override=override, track=track)
+    return TypeSeedSpace(object_type, names)
 
 
 def filter_pending_seeds_by_decisions(
@@ -458,8 +659,13 @@ def cluster_objects(
     # "Full" coincide; this only catches the standalone "ACR" form. We only
     # redirect when the object's seed is a pure _norm(name) (i.e. concepts) so a
     # richer seed (e.g. procedure name#steps-signature) is never clobbered.
-    alias_map = build_acronym_alias_map([c.get("name", "") for c in objects])
-    seed_of = {c["object_id"]: seed_or_unique(_seed_with_alias(c, seed_fn, alias_map),
+    # Legacy (test-only) helper: the acronym redirect stays in seed space 1,
+    # as do the ``_norm`` seeds ``cluster_concepts`` passes. The production
+    # full rebuild seeds through ``ConceptSeedSpace`` (rebuild_unified_kg).
+    alias_map = build_acronym_alias_map([c.get("name", "") for c in objects],
+                                        seed_version=1)
+    seed_of = {c["object_id"]: seed_or_unique(_seed_with_alias(c, seed_fn, alias_map,
+                                                               seed_version=1),
                                               c["object_id"]) for c in objects}
     seeds = sorted(set(seed_of.values()))
 
@@ -520,10 +726,14 @@ def cluster_concepts(
 
 
 def detect_bridge_candidates(new_items, new_vectors, existing_items, existing_vectors,
-                             existing_cluster_map, rejected, *, hi=0.94, lo=0.82, top_k=5):
+                             existing_cluster_map, rejected, *, seed_version: int,
+                             override: FrozenSet[str] = frozenset(),
+                             hi=0.94, lo=0.82, top_k=5):
     """新对象 embedding 对已有对象做余弦,命中 ≥lo 且落在不同 canonical 簇、且对未被 rejected →
     桥接候选。返回 [{canonical_a, canonical_b, score}](a<b 去序)。new-vs-existing 分块 numpy,
-    不动已有。new_items/existing_items: [{'object_id','name'}];vectors: {object_id: [float]}。"""
+    不动已有。new_items/existing_items: [{'object_id','name'}];vectors: {object_id: [float]}。
+    新对象的桥接 id 按库**已发布**的种子空间算(``seed_version`` / ``override``,
+    见 ``bridge_canonical_id``),与本次安置用同一个空间。"""
     import numpy as np
     if not new_vectors or not existing_vectors:
         return []
@@ -541,7 +751,8 @@ def detect_bridge_candidates(new_items, new_vectors, existing_items, existing_ve
         q = np.asarray(v, dtype="float32"); q /= (np.linalg.norm(q) + 1e-9)
         sims = EX @ q
         idx = np.argsort(-sims)[:top_k]
-        my_cid = bridge_canonical_id(it.get("name", ""), it["object_id"])
+        my_cid = bridge_canonical_id(it.get("name", ""), it["object_id"],
+                                     seed_version=seed_version, override=override)
         for j in idx:
             s = float(sims[j])
             if s < lo:
@@ -557,10 +768,28 @@ def detect_bridge_candidates(new_items, new_vectors, existing_items, existing_ve
     return out
 
 
-def place_new_concepts(new_objects, existing_canon_names,
-                       *, seed_fn, id_prefix="K-"):
-    """Tier-1 名种子放置:每个新对象按 seed_fn → canonical_id 追加到已有簇或建新簇。
-    不重排任何已有对象(已有 canonical_id 不变 → 无簇分布漂移)。
+def placement_seed_space(
+    object_type: str, new_objects: Sequence[dict],
+    existing_canon_names: Mapping[str, str], *, concept_seed_version: int,
+    override: Iterable[str] = (),
+):
+    """The seed space ``place_new_concepts`` places one batch in: the acronym
+    alias map is built from the new objects' names plus every existing
+    canonical name of the type (a bare "ACR" lands in the cluster of an
+    existing "Expansion (ACR)"); concepts in the notebook's PUBLISHED
+    ``concept_seed_version`` with its ``override`` keys, other types by their
+    unchanged rule."""
+    return seed_space_for(
+        object_type,
+        [o.get("name", "") for o in new_objects] + list(existing_canon_names.values()),
+        concept_seed_version=concept_seed_version, override=override,
+    )
+
+
+def place_new_concepts(new_objects, existing_canon_names, *, seed_space, id_prefix="K-"):
+    """Tier-1 名种子放置:每个新对象按 ``seed_space``(``placement_seed_space`` 建的
+    该类型种子空间:已发布的概念种子空间 + 别名表 + 覆盖键)→ canonical_id 追加到
+    已有簇或建新簇。不重排任何已有对象(已有 canonical_id 不变 → 无簇分布漂移)。
     existing_canon_names: {canonical_id: canonical_name}(本 object_type 的既有簇)。
     返回 [{canonical_id, member_object_id, canonical_name}]。
 
@@ -594,19 +823,14 @@ def place_new_concepts(new_objects, existing_canon_names,
         **更一致的那一侧**(只信当场读到的 canon_names),旧写法则会因为陈旧 cmap
         里缺一个 cid 而把已有簇名丢掉、改写成新对象自己的 name。
 
-    仍留的全库依赖:``existing_canon_names.values()`` 要整份喂
-    ``build_acronym_alias_map``(下面一行)——见 knowledge_lifecycle
-    ``incremental_fuse_source`` 里的登记说明,那一读**无法**安全收窄。
+    仍留的全库依赖:``existing_canon_names.values()`` 要整份喂别名表
+    (``placement_seed_space``)——见 knowledge_lifecycle ``incremental_fuse_source``
+    里的登记说明,那一读**无法**安全收窄。
     """
-    # Acronym aliasing: redirect bare-acronym seeds onto an expansion's seed when
-    # an "Expansion (ACR)" name is present among the new objects or existing
-    # canonical names. Keeps a standalone "ACR" landing in the expansion cluster.
-    alias_map = build_acronym_alias_map(
-        [o.get("name", "") for o in new_objects] + list(existing_canon_names.values()))
     rows = []
     for o in new_objects:
         name = o.get("name", "")
-        seed = seed_or_unique(_seed_with_alias(o, seed_fn, alias_map), o["object_id"])
+        seed = seed_space.seed(o, o["object_id"])
         cid = f"{id_prefix}{seed}"
         rows.append({"canonical_id": cid, "member_object_id": o["object_id"],
                      "canonical_name": existing_canon_names.get(cid, name)})
@@ -665,3 +889,281 @@ def limit_graph_by_degree(graph: dict, limit: int) -> dict:
     kept_edges = [e for e in edges
                   if e["source_object_id"] in keep and e["target_object_id"] in keep]
     return {"nodes": kept_nodes, "edges": kept_edges}
+
+
+# ===========================================================================
+# Stored-decision recompute (PR-4, design 2026-10-19 §五 S1 「实施细化」 steps 1–5)
+# ===========================================================================
+
+DECIDED_MERGE_STATUSES = ("confirmed", "rejected", "deferred")
+_APART_STATUSES = ("rejected", "deferred")
+
+
+@dataclass(frozen=True)
+class StoredDecision:
+    """One stored v1 decision row, as the recompute reads it: ``key_a`` /
+    ``key_b`` are its decision keys (``seed_x``, or the canonical id without
+    ``K-`` when the seed is empty — ``decided_seed_pairs_from``'s fallback)."""
+
+    row_id: str
+    key_a: str
+    key_b: str
+    status: str
+
+
+@dataclass
+class DecisionTranslation:
+    """The recompute of a notebook's v1 decisions into seed space 2.
+
+    ``pairs``: row id → its v2 seed pairs, first pair first (the store updates
+    the row in place with it — id, timestamps and reviewer kept — and inserts
+    one row per further pair). ``rows``: the plan-time snapshot of each
+    translated row; the store translates a row only while its status and keys
+    still equal it (a row decided again mid-rebuild stays v1 and is retried).
+    ``suspended``: rows a side of which no current object carries — they stay
+    v1, the next full rebuild retries them. ``override``: the v1 keys whose
+    objects keep their old seed as ``~v1:<key>`` (only grows). ``unresolved``:
+    rejections still collapsed after every key that could move was overridden
+    — only a confirmed decision can do that, and confirmed stays authoritative
+    as everywhere in ``cluster_seeds``."""
+
+    pairs: Dict[str, List[Tuple[str, str]]] = field(default_factory=dict)
+    rows: Dict[str, StoredDecision] = field(default_factory=dict)
+    suspended: List[str] = field(default_factory=list)
+    override: FrozenSet[str] = frozenset()
+    unresolved: int = 0
+
+    def decided_pairs(self) -> Dict[FrozenSet[str], str]:
+        """``{frozenset(v2 pair): status}`` of the translated rows — what the
+        clustering of this rebuild uses before the rows are persisted."""
+        out: Dict[FrozenSet[str], str] = {}
+        for row_id in sorted(self.pairs):
+            status = self.rows[row_id].status
+            for a, b in self.pairs[row_id]:
+                out[frozenset((a, b))] = status
+        return out
+
+
+def override_keys(decided: Iterable[FrozenSet[str]]) -> FrozenSet[str]:
+    """The v1 seeds a notebook keeps as ``~v1:<seed>``: read off its stored
+    v2 decision keys (the override lives in the decision rows' seeds, no
+    separate table). Every full rebuild and every incremental placement in
+    space 2 applies them, or the decision naming ``~v1:<seed>`` would match
+    nothing and the rejected pair would collapse into one seed again."""
+    width = len(OVERRIDE_SEED_PREFIX)
+    return frozenset(
+        key[width:] for pair in decided for key in pair
+        if key.startswith(OVERRIDE_SEED_PREFIX)
+    )
+
+
+def _translated_seeds(
+    key: str, seeds_of_key: Mapping[str, Set[str]], override: FrozenSet[str],
+) -> Set[str]:
+    found = seeds_of_key.get(key) or set()
+    if found and key in override:
+        return {OVERRIDE_SEED_PREFIX + key}
+    return set(found)
+
+
+def _row_pairs(side_a: Set[str], side_b: Set[str]) -> List[Tuple[str, str]]:
+    """Every pair of the two sides (sorted, deterministic) except self pairs —
+    unless every pair is one, then one self pair keeps the decision as a row."""
+    pairs = [(x, y) for x in sorted(side_a) for y in sorted(side_b) if x != y]
+    if not pairs:
+        both = sorted(side_a & side_b)
+        pairs = [(both[0], both[0])]
+    return pairs
+
+
+def translate_v1_decisions(
+    rows: Sequence[StoredDecision],
+    seeds_of_key: Mapping[str, Set[str]],
+    *,
+    override: Iterable[str] = (),
+    v2_confirmed: Iterable[FrozenSet[str]] = (),
+) -> DecisionTranslation:
+    """Recompute stored v1 decisions into v2 seed pairs (§五 S1 steps 3–4).
+
+    ``seeds_of_key``: v1 key → the seeds (in space 2, under ``override``)
+    of the current objects whose v1 seed is that key, as the full rebuild's
+    seed stream recorded them (step 2). A v1 key cannot be turned into v2
+    seeds from its string — the origin of each space is lost ("Llama 3.1" and
+    "Llama-3-1" both gave ``llama 3 1``) — so only the objects' own names can.
+
+    Step 3: a row whose either side has no current object is suspended; a
+    confirmed row becomes every pair of its two sides' seeds (an old group S1
+    splits is joined back by these pairs); a rejected / deferred row becomes
+    every pair as cannot-link. Step 4: the v2 seeds are joined by the
+    confirmed pairs (translated, plus ``v2_confirmed`` already stored); a
+    rejected / deferred row whose sides fall into ONE component in space 2 but
+    were apart in space 1 (v1 components of the v1 confirmed rows) is a
+    violation — the same seed means the same group, which no cannot-link can
+    undo. Its two keys join the override set (their objects keep
+    ``~v1:<key>``); when both already did, every key whose seeds sit in the
+    collapsed component joins. Repeat until no violation; the override only
+    grows, and with every key overridden the v2 components restricted to the
+    keys are the v1 ones, so it terminates."""
+    rows = [r for r in rows if r.status in DECIDED_MERGE_STATUSES]
+    v2_confirmed = [tuple(p) for p in v2_confirmed if len(p) == 2]
+    v1_uf = _UF({k for r in rows for k in (r.key_a, r.key_b)})
+    for r in rows:
+        if r.status == "confirmed":
+            v1_uf.union(r.key_a, r.key_b)
+    keys = sorted({k for r in rows for k in (r.key_a, r.key_b) if seeds_of_key.get(k)})
+    over = frozenset(override)
+    unresolved = 0
+    while True:
+        sides = {k: _translated_seeds(k, seeds_of_key, over) for k in keys}
+        live = [r for r in rows if sides.get(r.key_a) and sides.get(r.key_b)]
+        pairs = {r.row_id: _row_pairs(sides[r.key_a], sides[r.key_b]) for r in live}
+        nodes = {s for ps in pairs.values() for p in ps for s in p}
+        nodes.update(s for p in v2_confirmed for s in p)
+        uf = _UF(nodes)
+        for r in live:
+            if r.status == "confirmed":
+                for a, b in pairs[r.row_id]:
+                    uf.union(a, b)
+        for a, b in v2_confirmed:
+            uf.union(a, b)
+        add: Set[str] = set()
+        unresolved = 0
+        for r in live:
+            if r.status not in _APART_STATUSES:
+                continue
+            if v1_uf.find(r.key_a) == v1_uf.find(r.key_b):
+                continue        # already contradictory in space 1: confirmed wins
+            roots = {uf.find(x) for x in sides[r.key_a]} & {uf.find(y) for y in sides[r.key_b]}
+            if not roots:
+                continue
+            fresh = {k for k in (r.key_a, r.key_b) if k not in over}
+            if not fresh:
+                fresh = {k for k in keys if k not in over
+                         and any(s in uf.p and uf.find(s) in roots for s in sides[k])}
+            if fresh:
+                add |= fresh
+            else:
+                unresolved += 1
+        if not add:
+            break
+        over = over | add
+    suspended = sorted(r.row_id for r in rows if r.row_id not in pairs)
+    return DecisionTranslation(
+        pairs=pairs, rows={r.row_id: r for r in rows if r.row_id in pairs},
+        suspended=suspended, override=over, unresolved=unresolved,
+    )
+
+
+# ===========================================================================
+# The squash-key candidate tier of the pending refresh (P3, design §4.4)
+# ===========================================================================
+
+MERGE_KIND_SPELLING = "spelling_variant"   # 同名不同写法
+MERGE_KIND_SIMILAR = "similarity"
+
+
+def squash_pending_candidates(
+    seed_to_canonical: Mapping[str, str],
+    members_count: Mapping[str, int],
+    reps: Mapping[str, "np.ndarray"],
+    *,
+    limit: int,
+) -> Tuple[List[tuple], int]:
+    """Pending candidates for canonicals whose v2 seeds share a squash key —
+    the names differ only in the spaces punctuation made ("Llama 3.1" /
+    "Llama 31"), the wide half of F4 that S1 deliberately leaves to a human.
+
+    Seeds starting with ``~`` (the per-object sentinel, the ``~v1:`` override)
+    are never grouped. Two distinct seeds can share a squash key only when one
+    of them has a space, so the groups are found from the spaced seeds alone
+    (a set of their squash keys, then one pass) — no notebook-wide dict of
+    squash keys. Per group of ≥ 2 canonicals: the canonical with the most
+    members (all its seeds; ties by id) is the anchor and every other one gets
+    ONE pair with it (a star, never a chain). Each side is represented by its
+    seed in the group with the most members (ties by seed); the score is the
+    cosine of those two seeds' representative vectors, 0 when either has none.
+
+    Rows are ``(seed_a, seed_b, canonical_a, canonical_b, score)`` — the
+    shape of ``cluster_seeds``' ``pending_seeds`` — heaviest group first (by
+    the members of its canonicals), then by squash key. Returns the first
+    ``limit`` rows and the total before the cap (the caller reports a cap)."""
+    spaced = {
+        seed.replace(" ", "") for seed in seed_to_canonical
+        if " " in seed and not seed.startswith("~")
+    }
+    if not spaced:
+        return [], 0
+    groups: Dict[str, Dict[str, List[str]]] = {}
+    for seed, cid in seed_to_canonical.items():
+        key = seed_squash_key(seed)
+        if key and key in spaced:
+            groups.setdefault(key, {}).setdefault(cid, []).append(seed)
+    groups = {key: by_cid for key, by_cid in groups.items() if len(by_cid) >= 2}
+    if not groups:
+        return [], 0
+    involved = {cid for by_cid in groups.values() for cid in by_cid}
+    total: Dict[str, int] = {cid: 0 for cid in involved}
+    for seed, cid in seed_to_canonical.items():
+        if cid in total:
+            total[cid] += int(members_count.get(seed, 0))
+
+    def rep_seed(seeds: List[str]) -> str:
+        return min(seeds, key=lambda s: (-int(members_count.get(s, 0)), s))
+
+    def cosine(a: str, b: str) -> float:
+        va, vb = reps.get(a), reps.get(b)
+        if va is None or vb is None:
+            return 0.0
+        na, nb = float(np.linalg.norm(va)), float(np.linalg.norm(vb))
+        if na == 0.0 or nb == 0.0:
+            return 0.0
+        return float(np.dot(va, vb) / (na * nb))
+
+    ordered = sorted(groups.items(),
+                     key=lambda item: (-sum(total[c] for c in item[1]), item[0]))
+    rows: List[tuple] = []
+    for _key, by_cid in ordered:
+        cids = sorted(by_cid, key=lambda c: (-total[c], c))
+        anchor = cids[0]
+        sa = rep_seed(by_cid[anchor])
+        for other in cids[1:]:
+            sb = rep_seed(by_cid[other])
+            rows.append((sa, sb, anchor, other, cosine(sa, sb)))
+    return rows[:max(0, int(limit))], len(rows)
+
+
+def merge_pending_tiers(ann_rows: Sequence[tuple], squash_rows: Sequence[tuple]) -> List[tuple]:
+    """The ANN pending rows followed by the squash rows, one row per canonical
+    pair. A pair both tiers found keeps the ANN row's place and the higher
+    score, with the squash tier's seeds — so the row reads as a spelling
+    variant (``merge_candidate_kind``) whichever tier found it first."""
+    out = list(ann_rows)
+    at = {frozenset((row[2], row[3])): index for index, row in enumerate(out)}
+    for row in squash_rows:
+        key = frozenset((row[2], row[3]))
+        index = at.get(key)
+        if index is None:
+            at[key] = len(out)
+            out.append(tuple(row))
+        else:
+            ann = out[index]
+            out[index] = (row[0], row[1], ann[2], ann[3], max(float(ann[4]), float(row[4])))
+    return out
+
+
+def merge_candidate_kind(row: Mapping[str, object]) -> str:
+    """``spelling_variant`` (同名不同写法) when the two sides of a merge
+    candidate have the same squash key — the names differ only in spaces,
+    hyphens, underscores, dots or brackets — else ``similarity``. Read off the
+    row's decision keys (``seed_x``, or the canonical id without ``K-``), so
+    a bridge candidate and a row of either seed space are judged alike: a v1
+    seed squashes to the same key as the v2 seed of the same name."""
+    def key(side: str) -> str:
+        seed = str(row.get(f"seed_{side}") or "")
+        if not seed:
+            cid = str(row.get(f"canonical_{side}") or "")
+            seed = cid[2:] if cid.startswith("K-") else ""
+        return seed_squash_key(seed)
+
+    a, b = key("a"), key("b")
+    return MERGE_KIND_SPELLING if a and a == b else MERGE_KIND_SIMILAR

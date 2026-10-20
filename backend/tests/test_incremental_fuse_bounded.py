@@ -22,8 +22,10 @@ import json
 import pytest
 
 from app.core.config import Settings
+from app.domain.kg_merge_seed import concept_seed_v2
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
+from app.services.kg_merge import seed_or_unique
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients
 
@@ -62,18 +64,21 @@ def repo(make_repo):
 
 def _legacy_place_new_concepts(new_objects, existing_cluster_map, existing_canon_names,
                                *, seed_fn, id_prefix="K-"):
-    """origin/master 的 kg_merge.place_new_concepts,逐字拷贝(仅改名)。"""
+    """origin/master 的 kg_merge.place_new_concepts,逐字拷贝(仅改名)。种子空间
+    是那时唯一的 1(PR-4 起两个别名函数要显式传版本,这里传 1 —— 种子逐字不变)。"""
     from app.services.kg_merge import (
         build_acronym_alias_map, seed_or_unique, _seed_with_alias,
     )
 
     existing_cids = set(existing_cluster_map.values())
     alias_map = build_acronym_alias_map(
-        [o.get("name", "") for o in new_objects] + list(existing_canon_names.values()))
+        [o.get("name", "") for o in new_objects] + list(existing_canon_names.values()),
+        seed_version=1)
     rows = []
     for o in new_objects:
         name = o.get("name", "")
-        seed = seed_or_unique(_seed_with_alias(o, seed_fn, alias_map), o["object_id"])
+        seed = seed_or_unique(_seed_with_alias(o, seed_fn, alias_map, seed_version=1),
+                              o["object_id"])
         cid = f"{id_prefix}{seed}"
         canon_name = existing_canon_names.get(cid, name) if cid in existing_cids else name
         rows.append({"canonical_id": cid, "member_object_id": o["object_id"],
@@ -190,12 +195,22 @@ def _legacy_seams(repo, monkeypatch):
     monkeypatch.setattr(store, "_existing_cluster_members", legacy_existing_members)
 
     # ④ place_new_concepts:master 的旧签名 + existing_cids 守卫,cmap 取入口快照。
+    #    这些夹具库没有 unified_kg_state 行 → 已发布种子空间是 1,master 的种子
+    #    函数按类型前缀取回(PR-4 起融合传的是种子空间,不再传 seed_fn)。
     import app.services.kg_merge as kg_merge
 
-    def legacy_place(new_objects, existing_canon_names, *, seed_fn, id_prefix="K-"):
+    seed_by_prefix = {
+        "K-": lambda o: kg_merge._norm(o.get("name", "")),
+        "KL-": kg_merge.seed_claim, "KF-": kg_merge.seed_formula,
+        "KP-": kg_merge.seed_procedure,
+    }
+
+    def legacy_place(new_objects, existing_canon_names, *, seed_space, id_prefix="K-"):
+        if id_prefix == "K-":
+            assert seed_space.version == 1     # the fixture library publishes space 1
         return _legacy_place_new_concepts(
             new_objects, dict(snapshot), existing_canon_names,
-            seed_fn=seed_fn, id_prefix=id_prefix)
+            seed_fn=seed_by_prefix[id_prefix], id_prefix=id_prefix)
 
     monkeypatch.setattr(kg_merge, "place_new_concepts", legacy_place)
 
@@ -525,11 +540,12 @@ def test_place_new_concepts_matches_frozen_master_copy(cmap, canon, new_objects)
 
     前提是 ``keys(canon) ⊆ values(cmap)``(生产恒成立,理由见函数 docstring),
     参数化里的每一组都满足它。"""
-    from app.services.kg_merge import place_new_concepts, _norm
+    from app.services.kg_merge import place_new_concepts, placement_seed_space, _norm
 
     assert set(canon) <= set(cmap.values())     # 前提本身也钉住
     seed_fn = (lambda o: _norm(o.get("name", "")))
-    assert place_new_concepts(new_objects, canon, seed_fn=seed_fn, id_prefix="K-") == \
+    space = placement_seed_space("concept", new_objects, canon, concept_seed_version=1)
+    assert place_new_concepts(new_objects, canon, seed_space=space, id_prefix="K-") == \
         _legacy_place_new_concepts(new_objects, cmap, canon,
                                    seed_fn=seed_fn, id_prefix="K-")
 
@@ -540,7 +556,7 @@ def _inline_bridge_cid(obj):
     """``detect_bridge_candidates`` / ``_tier2_bridge_candidates_ann`` 里内联的
     那条式子,逐字拷贝 —— 排除集的有界键必须与它同构,否则查出来的对根本不含
     真正要排除的那些,已决/已 pending 的对会被重新入队。"""
-    from app.services.kg_merge import _norm, seed_or_unique
+    from app.services.kg_merge import _norm
 
     return "K-" + seed_or_unique(_norm(obj.get("name", "")), obj["object_id"])
 
@@ -561,8 +577,16 @@ def test_bridge_canonical_ids_match_the_inline_expression(new_objs):
     from app.services.knowledge_lifecycle import KnowledgeLifecycleService
 
     expected = list(dict.fromkeys(_inline_bridge_cid(o) for o in new_objs))
-    assert KnowledgeLifecycleService._bridge_canonical_ids(new_objs) == expected
+    assert KnowledgeLifecycleService._bridge_canonical_ids(
+        new_objs, seed_version=1, override=frozenset()) == expected
     assert not any(cid == "K-" for cid in expected)     # 哨兵没退化成裸 K-
+    # Space 2: the same expression on the v2 seed (no "K-" collapse either).
+    v2 = KnowledgeLifecycleService._bridge_canonical_ids(
+        new_objs, seed_version=2, override=frozenset())
+    assert v2 == list(dict.fromkeys(
+        "K-" + seed_or_unique(concept_seed_v2(o.get("name", "")), o["object_id"])
+        for o in new_objs))
+    assert not any(cid == "K-" for cid in v2)
 
 
 def test_bridge_canonical_ids_do_not_follow_the_acronym_alias_redirect():
@@ -576,15 +600,20 @@ def test_bridge_canonical_ids_do_not_follow_the_acronym_alias_redirect():
 
     new_objs = [{"object_id": "o-acr", "name": "CSA"}]
     alias_map = build_acronym_alias_map(
-        ["Compressed Sparse Attention (CSA)", "CSA"])
+        ["Compressed Sparse Attention (CSA)", "CSA"], seed_version=1)
     assert alias_map == {"csa": "compressed sparse attention"}   # 别名确实存在
     redirected = "K-" + _seed_with_alias(
-        new_objs[0], lambda o: _norm(o.get("name", "")), alias_map)
+        new_objs[0], lambda o: _norm(o.get("name", "")), alias_map, seed_version=1)
     assert redirected == "K-compressed sparse attention"
 
-    got = KnowledgeLifecycleService._bridge_canonical_ids(new_objs)
+    got = KnowledgeLifecycleService._bridge_canonical_ids(
+        new_objs, seed_version=1, override=frozenset())
     assert got == ["K-csa"] == [_inline_bridge_cid(new_objs[0])]
     assert redirected not in got
+    # Space 2 keeps the contract: the redirect target is the squashed
+    # expansion, the bridge id stays the bare acronym.
+    assert KnowledgeLifecycleService._bridge_canonical_ids(
+        new_objs, seed_version=2, override=frozenset()) == ["K-csa"]
 
 
 # ── 有界守卫 ────────────────────────────────────────────────────────────────

@@ -708,6 +708,13 @@ class Settings(BaseSettings):
     kg_tier2_ann_pad_factor: int = Field(4, validation_alias="KG_TIER2_ANN_PAD_FACTOR")
     # unified 聚类 rep-ANN 上限:唯一 name-seed 超此值则分片建 ANN + WARNING(绝不静默截断)。
     kg_cluster_rep_ann_max: int = Field(2_000_000, validation_alias="KG_CLUSTER_REP_ANN_MAX")
+    # 待确认合并「同名不同写法」候选档(设计 2026-10-19 §4.4 / P3)每次全量重建至多写入的
+    # 星形对数——成本上限,不是判定口径(判据是 squash key 相等)。触顶时只保留成员最多的
+    # 那些组,发 kg_merge_squash_candidates_capped 事件(total / kept),绝不静默。
+    kg_merge_squash_candidates_max: int = Field(
+        1000, ge=0, le=100_000,
+        validation_alias="KG_MERGE_SQUASH_CANDIDATES_MAX",
+    )
     # 同时抽取的文档数上限（业务作业池容量）。模型调用由服务 scheduler 全局封顶。
     kg_job_concurrency: int = Field(8, validation_alias="KG_JOB_CONCURRENCY")
     # 0 = auto:未显式设置时按核数解析为 min(cpu_count, 32)(见 _resolve_core_bound_defaults)。

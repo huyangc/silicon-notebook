@@ -2188,7 +2188,7 @@ class MemoryStore:
         db: object,
         sources: Sequence[Mapping[str, Any]],
         *,
-        bridge_canonical_ids_of: Callable[[list[dict]], list[str]],
+        bridge_canonical_ids_of: Callable[[list[dict]], dict[int, list[str]]],
     ) -> dict[str, list[str]]:
         """The Memory-specific half of a purge page, inside the teardown's
         transaction (``SourceIngestionService.remove_memory_sources`` calls it

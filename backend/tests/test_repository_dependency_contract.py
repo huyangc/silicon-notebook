@@ -79,6 +79,9 @@ LIFECYCLE_STORE_CALLS = {
         "validate_stage_source_elements",
     },
     "governance_store": {
+        # S1 (design 2026-10-19 §五): the first v2 full rebuild persists the
+        # recompute of the stored v1 decisions inside its pending refresh.
+        "apply_v1_decision_translation",
         # Rebuild must re-read live decisions inside the pending-publication
         # transaction so a decision committed after clustering cannot resurface.
         "decided_seed_pairs_from",
@@ -94,6 +97,10 @@ LIFECYCLE_STORE_CALLS = {
         # what makes a regression to the unbounded read fail closed — mirroring
         # the `relink_rows` note above.
         "merge_candidate_pairs_for_canonicals",
+        # S1: the v1 decision rows the recompute tracks, and the published
+        # concept seed space incremental placement / catch-up follow.
+        "merge_decision_rows",
+        "published_concept_seed_version",
         # Z6: renamed from `sweep_orphan_clusters` — now a keyset PAGE primitive
         # (NOT EXISTS, bounded per batch) rather than one unbounded NOT IN
         # anti-join; the loop lives in `_sweep_orphan_clusters_page_loop`.

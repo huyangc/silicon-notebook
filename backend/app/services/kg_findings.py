@@ -105,10 +105,15 @@ from app.domain.kg_findings_contracts import (
     source_pair_key,
 )
 from app.domain.kg_merge_seed import (
+    OVERRIDE_SEED_PREFIX,
     concept_seed_v1,
     concept_seed_v2,
     concept_squash_key,
+    decision_match_key,
 )
+
+# Canonical ids of the groups a decision recompute kept in their v1 seed.
+_OVERRIDE_CANONICAL_PREFIX = "K-" + OVERRIDE_SEED_PREFIX
 
 # F3 sub-signal codes carried in the evidence (``signals``).
 F3_SIGNAL_FRAGMENTED_NAMES = "fragmented_names"
@@ -761,8 +766,9 @@ class _Lookups:
     def __init__(self) -> None:
         self.names: Dict[NameKey, List[str]] = {}
         self.sources: Dict[str, SourceFacts] = {}
-        # canonical id → v1 seeds of ALL its members (hidden ones included),
-        # answered with the (None, canonical) name keys; stored in F4 evidence.
+        # canonical id → decision seeds (v1 and v2) of ALL its members (hidden
+        # ones included), answered with the (None, canonical) name keys; stored
+        # in F4 evidence.
         self.seeds: Dict[str, Set[str]] = {}
 
     def candidates(self, key: NameKey) -> List[str]:
@@ -1173,6 +1179,11 @@ def _names_pass(
         named_idx.append(index)
         if search(name):
             fragmented_idx.append(index)
+        if canonical_id.startswith(_OVERRIDE_CANONICAL_PREFIX):
+            # A canonical a stored rejection keeps in its v1 seed
+            # (``~v1:<seed>``, the decision recompute's collision exception)
+            # is apart by the user's own decision — never an F4 / S1 group.
+            continue
         squash = concept_squash_key(name)
         if squash:
             hashes.append(hash(squash))
@@ -1253,19 +1264,22 @@ def _member_seed_sets(
     canonical_ids: Sequence[str],
     member_seeds: Callable[[Sequence[str]], Mapping[str, Iterable[str]]],
 ) -> Dict[str, Set[str]]:
-    """v1 seeds of every member of each canonical, asked in bounded batches.
+    """The decision seeds (``kg_merge_seed.concept_decision_seeds``: v1 and v2)
+    of every member of each canonical, asked in bounded batches, as
+    ``decision_match_key`` reads them.
 
     The canonical id itself (``"K-" + min seed``) is a member seed too, and it
     is the key legacy decision rows fell back to when ``seed_a/seed_b`` were
     empty — so it is always included."""
     seeds: Dict[str, Set[str]] = {
-        cid: ({cid[2:]} if cid.startswith("K-") else set()) for cid in canonical_ids
+        cid: ({decision_match_key(cid[2:])} if cid.startswith("K-") else set())
+        for cid in canonical_ids
     }
     for at in range(0, len(canonical_ids), _MEMBER_SEED_BATCH):
         batch = list(canonical_ids[at:at + _MEMBER_SEED_BATCH])
         for cid, found in member_seeds(batch).items():
             if cid in seeds:
-                seeds[cid].update(str(seed) for seed in found if seed)
+                seeds[cid].update(decision_match_key(str(seed)) for seed in found if seed)
     return seeds
 
 
@@ -1288,7 +1302,7 @@ def _apart_adjacency(
     for key, status in decisions.items():
         if status not in DECISION_APART_STATUSES:
             continue
-        pair = tuple(key)
+        pair = tuple(decision_match_key(str(seed)) for seed in key)
         if len(pair) != 2:
             continue
         left, right = owners.get(pair[0], ()), owners.get(pair[1], ())
@@ -1342,9 +1356,12 @@ def under_merge_decision(
       · ``open`` otherwise.
 
     ``classes``: the evidence's ``classes`` (canonical ids per v2 spelling).
-    ``member_seeds``: canonical id → the v1 seeds of its member names, as
+    ``member_seeds``: canonical id → the decision seeds (v1 and v2,
+    ``concept_decision_seeds``) of its member names, as
     `kg_finding_member_name_rows` reads them (hidden members included); the
-    canonical id's own seed is added here, as in the engine."""
+    canonical id's own seed is added here, as in the engine. Decision keys are
+    read through ``decision_match_key`` (an override ``~v1:<seed>`` names the
+    members of that v1 seed)."""
     canonical_ids = sorted({cid for cls in classes for cid in cls})
     seeds_of = _member_seed_sets(
         canonical_ids, lambda batch: {cid: member_seeds.get(cid, ()) for cid in batch}
@@ -1358,7 +1375,7 @@ def under_merge_decision(
         for seed in seeds:
             owners.setdefault(seed, set()).add(class_of[cid])
     for key, status in decisions.items():
-        pair = tuple(key)
+        pair = tuple(decision_match_key(str(seed)) for seed in key)
         if status != DECISION_CONFIRMED or len(pair) != 2:
             continue
         left, right = owners.get(pair[0], set()), owners.get(pair[1], set())
@@ -1493,7 +1510,7 @@ def _under_merge_pending(
         # The whole group, not just the shown sample: the read side re-judges
         # "the user rejected / deferred / confirmed it" on these classes with
         # the decisions stored at read time (`under_merge_decision`), matched
-        # by the members' v1 seeds stored here — so it never reads members.
+        # by the members' decision seeds stored here — so it never reads members.
         evidence["canonical_ids"] = kept
         evidence["classes"] = sorted(sorted(classes[seed]) for seed in open_classes)
         member_seeds: Dict[str, List[str]] = {}
@@ -1687,7 +1704,7 @@ class FindingsDraft:
         member_seeds: Optional[Mapping[str, Iterable[str]]] = None,
     ) -> None:
         """Add answers to the current round: name rows, facts per source id, and
-        for the ``(None, canonical)`` keys the v1 seeds of ALL that canonical's
+        for the ``(None, canonical)`` keys the decision seeds of ALL that canonical's
         members (hidden ones included — they decide, never display; F4 stores
         them so the read side matches decisions without reading members).
 
@@ -1777,8 +1794,10 @@ def compute_findings(
                            empty-seed legacy rows already keyed by the canonical
                            id minus ``K-``). Rejected / deferred pairs are never
                            reported by F4 / S1 (§4.4);
-      ``member_seeds``     ``(canonical_ids) -> {canonical_id: v1 seeds}``: the
-                           ``concept_seed_v1`` of the name of EVERY member object
+      ``member_seeds``     ``(canonical_ids) -> {canonical_id: seeds}``: the
+                           ``concept_decision_seeds`` (v1 and v2 — a stored
+                           decision of either seed space names the member) of
+                           the name of EVERY member object
                            of each canonical — hidden (memory / knowhow) members
                            included: the seeds only decide, they are never shown.
                            The engine calls it only for canonicals in a squash-key

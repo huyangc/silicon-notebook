@@ -731,10 +731,13 @@
     "member_seeds": {
      "K-llama 3 1": [
       "llama 3 1",
-      "llama three one"
+      "llama three one",
+      "llama3 1",
+      "llamathreeone"
      ],
      "K-llama 31": [
-      "llama 31"
+      "llama 31",
+      "llama31"
      ]
     },
     "member_sources": 2,
@@ -831,7 +834,8 @@
        "Qformer"
       ]
      }
-    ]
+    ],
+    "status": "fixed_pending_update"
    }
   ],
   "freshness": {

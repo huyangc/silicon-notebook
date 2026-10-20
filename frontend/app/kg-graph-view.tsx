@@ -8,7 +8,7 @@ import { LatexText } from "./answer-panel";
 import { KgEvidenceList } from "./kg-evidence-list";
 import { fieldLabel, KgOccurrenceList, KgProcedureStepCard, kgNodeName } from "./kg-object-cards";
 import { KG_TYPE_STYLE, KgTypeMark, kgTypeLabel } from "./kg-type-mark";
-import { pendingMergeSides } from "./kg-merge-model.ts";
+import { isSpellingVariant, pendingMergeSides } from "./kg-merge-model.ts";
 import { KG_RANGE_STEPS } from "./kg-workspace-model.ts";
 import { Pagination } from "./Pagination";
 import { formatRelativeTime } from "./relative-time.ts";
@@ -583,7 +583,12 @@ export function KgGraphView({
                 id={pendingMergeAnchor(m.id)}
                 tabIndex={-1}
               >
-                <span>{sideA} ↔ {sideB} <em>({m.score.toFixed(2)})</em></span>
+                <span>
+                  {sideA} ↔ {sideB} <em>({m.score.toFixed(2)})</em>
+                  {isSpellingVariant(m) && (
+                    <span className="kg-merge-kind" title="两个名字只差空格、连字符、点号或括号">同名不同写法</span>
+                  )}
+                </span>
                 {!readOnlyWorkspace && <span className="kg-merge-actions">
                   {/* 确认会连带跑一次全量概念合并重建；重建完成前锁住整列，避免新决定
                       与正在发布的旧候选代次竞态。拒绝不重建，但提交期间同样防重复点。 */}

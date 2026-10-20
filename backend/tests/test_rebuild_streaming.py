@@ -330,7 +330,7 @@ def test_a_rebuild_puts_no_memory_derived_object_in_any_cluster(repo):
     nb_id = world.seed(repo)
     repo.rebuild_unified_kg(nb_id, force=True)
     layers = world.assert_no_memory_in_derived_layers(repo, nb_id)
-    gqa = [r for r in layers["clusters"] if r["canonical_id"] == "K-grouped query attention"]
+    gqa = [r for r in layers["clusters"] if r["canonical_id"] == "K-groupedqueryattention"]
     assert len(gqa) == 2
     assert layers["canonical_relations"] and layers["mention_edges"]
     assert layers["community_members"]

@@ -460,22 +460,35 @@ def published_descriptions(repo, notebook_id):
     }
 
 
-def switch_seed_function(monkeypatch):
-    """S1 的形状:合并种子函数变了,并照规矩 bump ``CLUSTER_ALGO_VERSION``(否则重建的
-    版本闸会把它跳过)。每个概念的 canonical id 因此都变,名字与引文一个字没变。"""
-    from app.services import kg_merge
+_DEPLOYED_CODE = {}
 
-    # rebuild_unified_kg 在函数体内 ``from app.services.kg_merge import _norm``,
-    # 换的是 kg_merge 这一处名字。
-    real_norm = kg_merge._norm
-    monkeypatch.setattr(kg_merge, "_norm", lambda s: "v2 " + real_norm(s))
-    monkeypatch.setattr(
-        kg_merge, "CLUSTER_ALGO_VERSION", kg_merge.CLUSTER_ALGO_VERSION + 1)
+
+def run_legacy_code(monkeypatch):
+    """The code before S1: concept seed space 1, algorithm version 3."""
+    from app.services import kg_merge, knowledge_lifecycle
+
+    _DEPLOYED_CODE.update(seed=knowledge_lifecycle.CONCEPT_SEED_VERSION,
+                          algo=kg_merge.CLUSTER_ALGO_VERSION)
+    monkeypatch.setattr(knowledge_lifecycle, "CONCEPT_SEED_VERSION", 1)
+    monkeypatch.setattr(kg_merge, "CLUSTER_ALGO_VERSION", 3)
+
+
+def switch_seed_function(monkeypatch):
+    """S1 itself: the deployed code seeds in space 2 under algorithm version 4
+    (the bump is what makes the version gate let the rebuild through). Every
+    multi-word concept's canonical id changes ("cascode stage" →
+    ``cascodestage``, "MOSFET" → ``mostransistor``), names and quotes not a
+    character."""
+    from app.services import kg_merge, knowledge_lifecycle
+
+    monkeypatch.setattr(knowledge_lifecycle, "CONCEPT_SEED_VERSION", _DEPLOYED_CODE["seed"])
+    monkeypatch.setattr(kg_merge, "CLUSTER_ALGO_VERSION", _DEPLOYED_CODE["algo"])
 
 
 def moved_id_scenario(repo, monkeypatch, *, add_mosfet_quote: bool):
-    """两个跨来源合并的概念(MOSFET、cascode)先建一次图(2 次描述调用),再切换种子函数
-    重建。``add_mosfet_quote`` 时同时给 MOSFET 多一条新引文(只有它的签名变)。
+    """两个跨来源合并的概念(MOSFET、cascode stage)先用 S1 之前的代码(种子空间 1)建
+    一次图(2 次描述调用),再换成部署后的代码(种子空间 2)重建。``add_mosfet_quote``
+    时同时给 MOSFET 多一条新引文(只有它的签名变)。
 
     返回 (假模型, 首建的已发布描述, 重建后的已发布描述)。"""
     llm = _DescLLM()
@@ -485,13 +498,14 @@ def moved_id_scenario(repo, monkeypatch, *, add_mosfet_quote: bool):
         _add_source(repo, nb, source_id)
     repo.store_kg(nb, "s1", [
         _concept_with_evidence("a1", "MOSFET", "mosfet A"),
-        _concept_with_evidence("b1", "cascode", "cascode A"),
+        _concept_with_evidence("b1", "cascode stage", "cascode A"),
     ], [])
     repo.store_kg(nb, "s2", [
         _concept_with_evidence("a2", "mosfet", "mosfet B"),
-        _concept_with_evidence("b2", "Cascode", "cascode B"),
+        _concept_with_evidence("b2", "Cascode Stage", "cascode B"),
     ], [])
     lifecycle = repo._runtime.knowledge_lifecycle
+    run_legacy_code(monkeypatch)
     lifecycle.rebuild_unified_kg(nb)
     assert llm.calls == 2
     before = published_descriptions(repo, nb)
@@ -514,7 +528,7 @@ def assert_moved_ids_reuse_every_description(repo, monkeypatch):
     assert llm.calls == 2, f"id 变了、名字与引文没变却重写了描述: {llm.names_seen}"
     # 描述逐字不变,签名不变,只是挂到了新 id 上。
     was, now = _by_description(before), _by_description(after)
-    assert set(now) == set(was) == {"desc-for::MOSFET", "desc-for::cascode"}
+    assert set(now) == set(was) == {"desc-for::MOSFET", "desc-for::cascode stage"}
     for desc, (cid, sig) in now.items():
         assert sig == was[desc][1] and cid != was[desc][0]
 
@@ -526,7 +540,7 @@ def assert_changed_signature_still_regenerates(repo, monkeypatch):
     assert llm.calls == 3, llm.names_seen
     assert llm.names_seen[-1] == "MOSFET"
     was, now = _by_description(before), _by_description(after)
-    assert now["desc-for::cascode"][1] == was["desc-for::cascode"][1]
+    assert now["desc-for::cascode stage"][1] == was["desc-for::cascode stage"][1]
     assert now["desc-for::MOSFET"][1] != was["desc-for::MOSFET"][1]
 
 
