@@ -312,7 +312,6 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "UnifiedKgStore.source_canonical_rows": DERIVED_LAYER,
         "UnifiedKgStore.resolve_focal": DERIVED_LAYER,
         "UnifiedKgStore.scratch_vector_rows": DERIVED_LAYER,
-        "UnifiedKgStore.stream_scratch_rows": DERIVED_LAYER,
         "UnifiedKgStore.relation_endpoint_name_rows": KEY_BOUNDED,
         # KG analysis findings (v97/0077): sample display names, by the
         # (source, canonical) keys the precompute holds; the statement also

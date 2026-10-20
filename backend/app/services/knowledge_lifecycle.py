@@ -5442,8 +5442,9 @@ class KnowledgeLifecycleService:
             cur = self.unified_kg.stream_seed_rows(rdb, notebook_id, object_type)
             # 写锁瘦身:Python 计算(_fast_loads / seed_or_unique / alias 匹配)留在
             # 事务外,只有 executemany 进写锁。kg_cluster_scratch 有三个读者——
-            # scratch_vector_rows(Pass B)、stream_scratch_rows(_write_cluster_map_
-            # streamed)、cluster_evidence_rows(concept_desc 阶段)——但三者都只在
+            # scratch_vector_rows(Pass B)、write_cluster_map_generation(_write_
+            # cluster_map_streamed 的写代段,逐页)、cluster_evidence_rows
+            # (concept_desc 阶段)——但三者都只在
             # 本 Pass A2 循环*之后*才被调用;循环运行期间没有并发读者,分批提交不
             # 产生任何可见中间态。三者都按 run_id 过滤,这保证了并发 rebuild 之间
             # 不会串(见下面的不变量注释:这一保证要求本循环跑到耗尽)。

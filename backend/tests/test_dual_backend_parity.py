@@ -61,9 +61,6 @@ REGISTERED_BACKEND_ONLY = {
     ("memory", "postgres"): {
         "memory_rows_lock_sql": "FOR SHARE lock statement of the share transaction",
     },
-    ("unified_kg", "postgres"): {
-        "stream_scratch_rows": "server-side streaming read of cluster scratch rows",
-    },
 }
 
 
