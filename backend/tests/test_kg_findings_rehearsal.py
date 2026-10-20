@@ -283,6 +283,27 @@ def test_write_private_creates_an_owner_only_file(tmp_path):
     assert stat.S_IMODE(os.stat(target).st_mode) == 0o600
 
 
+def test_write_private_narrows_an_existing_readable_file_before_writing(tmp_path, monkeypatch):
+    """codex #941 P2: ``os.open``'s mode only applies on create — overwriting a
+    group/world-readable target must still leave it owner-only, and the report
+    must not land in it while it is still readable by others."""
+    target = tmp_path / "report.json"
+    target.write_text("old contents", encoding="utf-8")
+    os.chmod(target, 0o644)
+    seen: List[Any] = []
+    real_fchmod = os.fchmod
+
+    def spy(fd, mode):
+        seen.append((stat.S_IMODE(os.fstat(fd).st_mode), target.read_text(encoding="utf-8")))
+        real_fchmod(fd, mode)
+
+    monkeypatch.setattr(rehearsal.os, "fchmod", spy)
+    rehearsal.write_private(str(target), '{"samples": ["secret title"]}')
+    assert seen == [(0o644, "")]            # narrowed while still empty
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o600
+    assert target.read_text(encoding="utf-8") == '{"samples": ["secret title"]}'
+
+
 # ================================================================== S1 impact
 def test_s1_impact_known_examples():
     names = ["Q-Former", "Qformer", "Q Former", "Llama 3.1", "Llama-3-1", "Llama 31", None, ""]

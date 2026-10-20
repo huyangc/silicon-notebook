@@ -1540,9 +1540,12 @@ class _Window:
 
     ``lookahead`` asks for more candidates than the free slots per round (S1
     needs 3 examples; asking 3 at a time would cost one round per 3 failures).
-    Candidates verified past the cap are simply not used."""
+    Candidates still awaiting when the cap fills mid-round are not judged —
+    they stay counted in `unverified` (found, never re-checked), so a cap that
+    cut the window is never reported as "everything persisted"."""
 
-    __slots__ = ("_candidates", "_cap", "_lookahead", "_next", "_awaiting", "kept", "dropped")
+    __slots__ = ("_candidates", "_cap", "_lookahead", "_next", "_awaiting", "kept",
+                 "dropped", "_unjudged")
 
     def __init__(self, candidates: List[_Pending], cap: int, lookahead: int = 0) -> None:
         self._candidates = candidates
@@ -1552,6 +1555,9 @@ class _Window:
         self._awaiting: List[_Pending] = []
         self.kept: List[dict] = []
         self.dropped = 0
+        # pulled into the window (``_next`` moved past them) but never built
+        # because the cap filled first in the same round
+        self._unjudged = 0
 
     def refill(self) -> None:
         free = self._cap - len(self.kept)
@@ -1569,8 +1575,10 @@ class _Window:
         """Build every awaiting candidate (their lookups have all been asked)."""
         if not self._awaiting:
             return False
-        for item in self._awaiting:
+        for position, item in enumerate(self._awaiting):
             if len(self.kept) >= self._cap:
+                # the rest of this round's lookahead: asked, never judged
+                self._unjudged += len(self._awaiting) - position
                 break
             row = item.build(lookups)
             if row is None:
@@ -1581,7 +1589,10 @@ class _Window:
         return True
 
     def unverified(self) -> int:
-        return len(self._candidates) - self._next
+        """Candidates found on canonical names but never re-checked on visible
+        names: never pulled into the window, or pulled in a round whose cap
+        filled before their turn."""
+        return len(self._candidates) - self._next + self._unjudged
 
 
 class FindingsDraft:
