@@ -218,3 +218,89 @@ def test_previous_partition_read_is_driven_by_the_published_boards(pin_database)
         assert f"Seq Scan on {table} " not in plan + " ", plan
     assert "idx_communities_nb_level" in plan, plan
     assert "idx_commmem_nb_comm" in plan or "pk_community_members" in plan, plan
+
+
+# ------------------------------------------------- the rebuild on PostgreSQL
+
+# The two cliques and the triangle of tests/test_board_partition_wiring.py (the
+# SQLite contract suite); here the rebuild path itself runs on PostgreSQL: the
+# previous partition is streamed inside the rebuild, the version and mode are
+# written by the publishing transaction.
+_CLIQUES = (["K-a1", "K-a2", "K-a3", "K-a4"], ["K-b1", "K-b2", "K-b3", "K-b4"],
+            ["K-c1", "K-c2", "K-c3"])
+
+
+def _seed_graph(repository) -> str:
+    import itertools
+    import json
+
+    from app.models.schemas import NotebookCreate
+
+    notebook_id = repository.create_notebook(NotebookCreate(name="pg-boards")).id
+    runtime = repository._runtime
+    nodes = sorted(node for clique in _CLIQUES for node in clique)
+    edges = [pair for clique in _CLIQUES for pair in itertools.combinations(clique, 2)]
+    edges.append(("K-a1", "K-b1"))
+    source_id = f"src-{notebook_id}"
+    objects = [(f"o-{notebook_id}-{n}", notebook_id, "concept", "approved",
+                json.dumps({"name": n}), "[]", source_id, NOW, NOW) for n in nodes]
+    clusters = [(f"cl-{notebook_id}-{n}", notebook_id, n, f"o-{notebook_id}-{n}", n,
+                 "concept", "", "", NOW) for n in nodes]
+    relations = [(f"r-{notebook_id}-{i}", notebook_id, source_id, f"o-{notebook_id}-{a}",
+                  f"o-{notebook_id}-{b}", "related_to", "[]", NOW)
+                 for i, (a, b) in enumerate(edges)]
+    with runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+            "file_name,file_path,file_size,file_hash,summary,created_at,updated_at,"
+            "doc_type) VALUES (%s,%s,%s,'markdown','extracted','parsed','','',0,%s,'',"
+            "%s,%s,'')",
+            (source_id, notebook_id, source_id, source_id, NOW, NOW))
+        runtime.knowledge.insert_object_chunk(db, objects)
+        runtime.knowledge.insert_relation_chunk(db, relations)
+        runtime.unified_kg.replace_cluster_rows_streamed(db, notebook_id, "concept", clusters)
+    return notebook_id
+
+
+def _published(repository, notebook_id: str) -> list:
+    with repository._runtime.database.connect() as db:
+        rows = db.execute(
+            "SELECT c.board_key AS board_key, m.canonical_id AS canonical_id "
+            "FROM communities c JOIN community_members m ON m.community_id = c.id "
+            "AND m.generation = c.generation WHERE c.notebook_id=%s AND c.level=0 "
+            "AND c.generation = (SELECT community_generation FROM unified_kg_state "
+            "WHERE notebook_id=%s)", (notebook_id, notebook_id)).fetchall()
+    boards: dict = {}
+    for row in rows:
+        boards.setdefault(row["board_key"], []).append(row["canonical_id"])
+    return sorted((key, tuple(sorted(members))) for key, members in boards.items())
+
+
+def test_the_rebuild_starts_cold_then_warm_and_carries_keys_on_postgres(
+    postgres_repository, monkeypatch,
+):
+    events: list = []
+    monkeypatch.setattr(postgres_repository._runtime.event_log, "emit", events.append)
+    rebuild = postgres_repository._runtime.knowledge_lifecycle.rebuild_communities
+    notebook_id = _seed_graph(postgres_repository)
+
+    assert rebuild(notebook_id) == 3
+    first = _published(postgres_repository, notebook_id)
+    assert sorted(members for _key, members in first) == sorted(tuple(c) for c in _CLIQUES)
+    assert cases.partition_state(postgres_repository._runtime, notebook_id) == (1, "cold")
+
+    events.clear()
+    assert rebuild(notebook_id, force=True) == 3
+    assert _published(postgres_repository, notebook_id) == first
+    [rebuilt] = [e for e in events if e.get("kind") == "communities_rebuilt"]
+    assert (rebuilt["partition_mode"], rebuilt["board_keys_carried"]) == ("warm", 3)
+    assert cases.partition_state(postgres_repository._runtime, notebook_id) == (1, "warm")
+
+    postgres_repository.request_cold_community_partition(notebook_id)
+    assert cases.partition_state(postgres_repository._runtime, notebook_id) == (0, "warm")
+    events.clear()
+    rebuild(notebook_id, force=True)
+    [rebuilt] = [e for e in events if e.get("kind") == "communities_rebuilt"]
+    assert (rebuilt["partition_mode"], rebuilt["partition_cold_reason"],
+            rebuilt["board_keys_carried"]) == ("cold", "partition_version_changed", 3)
+    assert _published(postgres_repository, notebook_id) == first
