@@ -415,17 +415,6 @@ class UnifiedKgStore:
         )
 
     @staticmethod
-    def stream_scratch_rows(db: Any, notebook_id: str, run_id: str):
-        # Keep the same upstream insertion/ordinal contract as the vector reader.
-        return db.execute(
-            "SELECT s.object_id,s.seed FROM kg_cluster_scratch s "
-            "JOIN knowledge_objects k ON k.id=s.object_id "
-            "  AND k.notebook_id=s.notebook_id "
-            "WHERE s.notebook_id=%s AND s.run_id=%s ORDER BY k.ordinal",
-            (notebook_id, run_id),
-        )
-
-    @staticmethod
     def replace_cluster_rows_streamed(
         db: Any,
         notebook_id: str,
