@@ -1,0 +1,149 @@
+{
+ "copy_id": "",
+ "db_diff": {
+  "notebooks": {
+   "added": [],
+   "removed": [
+    {
+     "access_scope": "",
+     "created_at": "2020-01-01T00:00:00+00:00",
+     "created_by": "u-recipient",
+     "expected_questions": [],
+     "id": "nb-stale-recipient",
+     "indexing_pipeline": null,
+     "indexing_pipeline_generation": "",
+     "indexing_pipeline_job_id": "",
+     "indexing_pipeline_version": "builtin.chunk.v1",
+     "is_shared": 0,
+     "metadata_generation": 0,
+     "name": "book nb-stale-recipient",
+     "name_auto": 0,
+     "primary_domain": "Semiconductor",
+     "purpose": "",
+     "purpose_auto": 0,
+     "share_token": null,
+     "source_types": [],
+     "status": "copying",
+     "sync_origin": "",
+     "target_users": "",
+     "taxonomy": [],
+     "template": "",
+     "tier": "personal",
+     "updated_at": "2020-01-01T00:00:00+00:00"
+    }
+   ]
+  },
+  "sources": {
+   "added": [],
+   "removed": [
+    {
+     "agent_profile_id": null,
+     "chunked_at": null,
+     "created_at": "2020-01-01T00:00:00+00:00",
+     "doc_type": "",
+     "error_message": "",
+     "file_hash": "",
+     "file_name": "",
+     "file_path": "",
+     "file_size": 0,
+     "id": "src-stale",
+     "memory_id": null,
+     "notebook_id": "nb-stale-recipient",
+     "parse_status": "ready",
+     "source_type": "document",
+     "source_url": "",
+     "status": "ready",
+     "summary": "",
+     "title": "half",
+     "updated_at": "2020-01-01T00:00:00+00:00",
+     "uploaded_by": null
+    }
+   ]
+  }
+ },
+ "fs_diff": {
+  "added": {},
+  "removed": [
+   "assets/nb-stale-recipient",
+   "assets/nb-stale-recipient/asset-x.png",
+   "notebooks/nb-stale-recipient",
+   "notebooks/nb-stale-recipient/old.md"
+  ]
+ },
+ "logs": [],
+ "outcome": {
+  "message": "'nb-ccw-missing'",
+  "raised": "KeyError"
+ },
+ "timeline": [
+  {
+   "args": [],
+   "call": "store.sweep_stale_copies",
+   "kwargs": {
+    "created_by": "u-recipient",
+    "on_reaped": "<callable>"
+   },
+   "ret": [
+    "nb-stale-recipient"
+   ]
+  },
+  {
+   "params": [
+    "u-recipient",
+    "<ts>"
+   ],
+   "sql": "SELECT id FROM notebooks WHERE status='copying' AND created_by=%s AND created_at<%s"
+  },
+  {
+   "params": [
+    "nb-stale-recipient",
+    "<ts>"
+   ],
+   "sql": "SELECT 1 FROM notebooks WHERE id=%s AND status='copying' AND created_at<%s FOR UPDATE"
+  },
+  {
+   "params": [
+    "nb-stale-recipient"
+   ],
+   "sql": "DELETE FROM knowledge_embeddings WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-stale-recipient"
+   ],
+   "sql": "DELETE FROM notebooks WHERE id=%s"
+  },
+  {
+   "args": [
+    "<storage>/notebooks/nb-stale-recipient"
+   ],
+   "fs": "rmtree",
+   "kwargs": {
+    "ignore_errors": true
+   }
+  },
+  {
+   "args": [
+    "<storage>/assets/nb-stale-recipient"
+   ],
+   "fs": "rmtree",
+   "kwargs": {
+    "ignore_errors": true
+   }
+  },
+  {
+   "args": [
+    "nb-ccw-missing"
+   ],
+   "call": "catalog.get_notebook",
+   "kwargs": {},
+   "raised": "KeyError: 'nb-ccw-missing'"
+  },
+  {
+   "params": [
+    "nb-ccw-missing"
+   ],
+   "sql": "SELECT notebooks.*, u.username AS _owner_username, COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') AS _published_pipeline_version, EXISTS(SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id = notebooks.id AND ng.principal_type IN ('group', 'group_admins')) AS _shared_to_groups FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by LEFT JOIN unified_kg_state ip ON ip.notebook_id=notebooks.id WHERE notebooks.id = %s AND notebooks.status NOT IN ('copying','deleting','importing')"
+  }
+ ]
+}

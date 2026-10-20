@@ -1,0 +1,1660 @@
+{
+ "copy_id": "nb-c0001",
+ "db_diff": {
+  "chunks": {
+   "added": [
+    {
+     "created_at": "2026-09-29T00:00:00+00:00",
+     "element_ids": [
+      "el-c0003"
+     ],
+     "id": "ck-c0004",
+     "notebook_id": "nb-c0001",
+     "ordinal": 2,
+     "question_indexed_at": null,
+     "section_path": "",
+     "source_id": "src-c0002",
+     "text": "plain chunk"
+    }
+   ],
+   "removed": []
+  },
+  "knowledge_objects": {
+   "added": [
+    {
+     "created_at": "2026-09-29T00:00:00+00:00",
+     "evidence": [
+      {
+       "confidence": "float:0.9",
+       "element_id": "el-c0003",
+       "element_type": "paragraph",
+       "location_label": "shared p1",
+       "quoted_span": "shared quoted el-plain",
+       "source_id": "src-c0002",
+       "source_title": "shared title src-plain"
+      }
+     ],
+     "id": "ko-c0005",
+     "last_reviewed": null,
+     "notebook_id": "nb-c0001",
+     "object_type": "concept",
+     "ordinal": 2,
+     "owner": "",
+     "payload": {
+      "name": "plain"
+     },
+     "source_candidate_id": null,
+     "source_id": "src-c0002",
+     "status": "approved",
+     "updated_at": "2026-09-29T00:00:00+00:00"
+    }
+   ],
+   "removed": []
+  },
+  "notebooks": {
+   "added": [
+    {
+     "access_scope": "",
+     "created_at": "2026-10-01T08:00:00+00:00",
+     "created_by": "u-recipient",
+     "expected_questions": [],
+     "id": "nb-c0001",
+     "indexing_pipeline": null,
+     "indexing_pipeline_generation": "",
+     "indexing_pipeline_job_id": "",
+     "indexing_pipeline_version": "builtin.chunk.v1",
+     "is_shared": 0,
+     "metadata_generation": 0,
+     "name": "手动命名",
+     "name_auto": 0,
+     "primary_domain": "Semiconductor",
+     "purpose": "",
+     "purpose_auto": 0,
+     "share_token": null,
+     "source_types": [],
+     "status": "draft",
+     "sync_origin": "",
+     "target_users": "",
+     "taxonomy": [],
+     "template": "",
+     "tier": "personal",
+     "updated_at": "2026-10-01T08:00:00+00:00"
+    }
+   ],
+   "removed": []
+  },
+  "source_elements": {
+   "added": [
+    {
+     "created_at": "2026-09-29T00:00:00+00:00",
+     "element_type": "paragraph",
+     "id": "el-c0003",
+     "location_label": "p1",
+     "metadata": {},
+     "ordinal": 2,
+     "source_id": "src-c0002",
+     "text": "plain element"
+    }
+   ],
+   "removed": []
+  },
+  "sources": {
+   "added": [
+    {
+     "agent_profile_id": null,
+     "chunked_at": null,
+     "created_at": "2026-09-29T00:00:00+00:00",
+     "doc_type": "",
+     "error_message": "",
+     "file_hash": "",
+     "file_name": "",
+     "file_path": "",
+     "file_size": 0,
+     "id": "src-c0002",
+     "memory_id": "",
+     "notebook_id": "nb-c0001",
+     "parse_status": "ready",
+     "source_type": "document",
+     "source_url": "",
+     "status": "ready",
+     "summary": "",
+     "title": "plain",
+     "updated_at": "2026-09-29T00:00:00+00:00",
+     "uploaded_by": null
+    }
+   ],
+   "removed": []
+  }
+ },
+ "fs_diff": {
+  "added": {},
+  "removed": []
+ },
+ "logs": [],
+ "outcome": {
+  "returned": {
+   "access": "owner",
+   "access_scope": "",
+   "ask_available": true,
+   "base_kg_available": false,
+   "base_kg_notebook_ids": [],
+   "base_notebooks": [],
+   "can_manage_content": false,
+   "counts": {
+    "cases": 0,
+    "checklist_items": 0,
+    "glossary": 0,
+    "memories": 0,
+    "methods": 0,
+    "risks": 0,
+    "rules": 0,
+    "sources": 1
+   },
+   "created_label": "2026年10月1日",
+   "document_limit": 20,
+   "expected_questions": [],
+   "granted_via": [],
+   "id": "nb-c0001",
+   "indexing_pipeline_available": true,
+   "indexing_pipeline_id": null,
+   "indexing_pipeline_missing": false,
+   "indexing_pipeline_pending": false,
+   "indexing_pipeline_stale": false,
+   "indexing_pipeline_version": "builtin.chunk.v1",
+   "is_shared": false,
+   "kg_build": null,
+   "kg_building": false,
+   "kg_pending_sources": 0,
+   "kg_ready": true,
+   "local_evidence_available": true,
+   "name": "手动命名",
+   "paper_meta_backfilling": false,
+   "paper_meta_missing": false,
+   "primary_domain": "Semiconductor",
+   "purpose": "",
+   "shared_from": "",
+   "source_types": [],
+   "status": "draft",
+   "sync_origin": "",
+   "target_users": "",
+   "taxonomy": [],
+   "tier": "personal"
+  }
+ },
+ "timeline": [
+  {
+   "args": [],
+   "call": "store.sweep_stale_copies",
+   "kwargs": {
+    "created_by": "u-recipient",
+    "on_reaped": "<callable>"
+   },
+   "ret": []
+  },
+  {
+   "params": [
+    "u-recipient",
+    "<ts>"
+   ],
+   "sql": "SELECT id FROM notebooks WHERE status='copying' AND created_by=%s AND created_at<%s"
+  },
+  {
+   "args": [
+    "nb-ccw-plain"
+   ],
+   "call": "catalog.get_notebook",
+   "kwargs": {},
+   "ret": {
+    "access": "owner",
+    "access_scope": "",
+    "ask_available": true,
+    "base_kg_available": false,
+    "base_kg_notebook_ids": [],
+    "base_notebooks": [],
+    "can_manage_content": false,
+    "counts": {
+     "cases": 0,
+     "checklist_items": 0,
+     "glossary": 0,
+     "memories": 0,
+     "methods": 0,
+     "risks": 0,
+     "rules": 0,
+     "sources": 1
+    },
+    "created_label": "2026年9月29日",
+    "document_limit": 20,
+    "expected_questions": [],
+    "granted_via": [],
+    "id": "nb-ccw-plain",
+    "indexing_pipeline_available": true,
+    "indexing_pipeline_id": null,
+    "indexing_pipeline_missing": false,
+    "indexing_pipeline_pending": false,
+    "indexing_pipeline_stale": false,
+    "indexing_pipeline_version": "builtin.chunk.v1",
+    "is_shared": false,
+    "kg_build": null,
+    "kg_building": false,
+    "kg_pending_sources": 0,
+    "kg_ready": true,
+    "local_evidence_available": true,
+    "name": "book nb-ccw-plain",
+    "paper_meta_backfilling": false,
+    "paper_meta_missing": false,
+    "primary_domain": "Semiconductor",
+    "purpose": "",
+    "shared_from": "",
+    "source_types": [],
+    "status": "draft",
+    "sync_origin": "",
+    "target_users": "",
+    "taxonomy": [],
+    "tier": "personal"
+   }
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT notebooks.*, u.username AS _owner_username, COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') AS _published_pipeline_version, EXISTS(SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id = notebooks.id AND ng.principal_type IN ('group', 'group_admins')) AS _shared_to_groups FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by LEFT JOIN unified_kg_state ip ON ip.notebook_id=notebooks.id WHERE notebooks.id = %s AND notebooks.status NOT IN ('copying','deleting','importing')"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT id FROM sources WHERE notebook_id=%s AND source_type = 'memory'"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS count FROM sources WHERE notebook_id = %s AND source_type NOT IN ('memory', 'knowhow')"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain",
+    "nb-ccw-plain",
+    "nb-ccw-plain"
+   ],
+   "sql": "WITH total AS (SELECT object_type, status, COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=%s GROUP BY object_type, status), memory AS (SELECT mo.object_type, mo.status, COUNT(*) AS c FROM knowledge_objects mo WHERE mo.source_id = ANY(ARRAY(SELECT s.id FROM sources s WHERE s.notebook_id=%s AND s.source_type = 'memory')) AND mo.notebook_id=%s GROUP BY mo.object_type, mo.status) SELECT t.object_type, t.status, t.c - COALESCE(m.c, 0) AS c, COALESCE(m.c, 0) AS m FROM total t LEFT JOIN memory m ON m.object_type = t.object_type AND m.status = t.status"
+  },
+  {
+   "params": [
+    null,
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT b.id AS id, b.name AS name, b.tier AS tier, EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id) AS has_kg FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF(CAST(%s AS text), '') AS uid) v WHERE e.notebook_id = %s AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name COLLATE \"C\", b.id COLLATE \"C\""
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id=%s) AS exists"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM sources s JOIN LATERAL (SELECT 1 AS found FROM source_elements e WHERE e.source_id=s.id LIMIT 1) parsed ON TRUE LEFT JOIN LATERAL (SELECT er.status,er.error_message FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.ordinal DESC LIMIT 1) latest_kg ON TRUE LEFT JOIN LATERAL (SELECT 1 AS found FROM knowledge_objects k WHERE k.source_id=s.id AND k.source_id!='' LIMIT 1) source_kg ON TRUE WHERE s.notebook_id=%s AND s.source_type NOT IN ('memory','knowhow') AND s.source_type <> 'promotion' AND (source_kg.found IS NULL OR COALESCE(latest_kg.status,'completed')!='completed' OR COALESCE(latest_kg.error_message,'') ~ 'windows_failed=[1-9][0-9]*/[0-9]+' OR strpos(COALESCE(latest_kg.error_message,''),'retry_incomplete=1')>0) AND NOT (COALESCE(latest_kg.status,'')='completed' AND starts_with(COALESCE(latest_kg.error_message,''),'kg objects=0 ') AND COALESCE(latest_kg.error_message,'') !~ 'windows_failed=[1-9][0-9]*/[0-9]+')"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM chunks WHERE notebook_id=%s) AS exists"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM sources s WHERE s.notebook_id=%s AND s.source_type NOT IN ('memory','knowhow') AND s.source_type <> 'promotion' AND s.doc_type IN ('','academic_paper') AND s.parse_status IN ('parsed','extracting','extracted') AND NOT EXISTS(SELECT 1 FROM source_paper_meta m WHERE m.source_id=s.id)) AS exists"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT * FROM kg_build_jobs WHERE notebook_id=%s ORDER BY created_at DESC,ordinal DESC LIMIT 1"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT nb.created_by AS owner_id,u.role AS owner_role FROM notebooks nb LEFT JOIN users u ON u.id=nb.created_by WHERE nb.id=%s"
+  },
+  {
+   "params": [
+    "user-local"
+   ],
+   "sql": "SELECT upload_document_limit FROM user_profiles WHERE user_id=%s"
+  },
+  {
+   "params": [
+    "upload_document_limit_default"
+   ],
+   "sql": "SELECT value FROM app_settings WHERE key=%s"
+  },
+  {
+   "id": "nb-c0001",
+   "new_id": "nb"
+  },
+  {
+   "now": "2026-10-01T08:00:00+00:00"
+  },
+  {
+   "args": [
+    "nb-ccw-plain"
+   ],
+   "call": "store.snapshot_copy_rows",
+   "kwargs": {},
+   "ret": {
+    "chunk_embeddings": 0,
+    "chunk_questions": 0,
+    "chunks": 1,
+    "concept_clusters": 0,
+    "element_embeddings": 0,
+    "knowhow_cell_code": 0,
+    "knowhow_cells": 0,
+    "knowhow_columns": 0,
+    "knowhow_rows": 0,
+    "knowhow_tables": 0,
+    "knowledge_embeddings": 0,
+    "knowledge_objects": 1,
+    "knowledge_relations": 0,
+    "knowledge_source_fact_backfills": 0,
+    "knowledge_source_fact_elements": 0,
+    "knowledge_source_facts": 0,
+    "notebook_assets": 0,
+    "notebook_bases": 0,
+    "notebook_object_schemas": 0,
+    "notebooks": 1,
+    "relation_embeddings": 0,
+    "source_authors": 0,
+    "source_elements": 1,
+    "source_paper_meta": 0,
+    "sources": 1
+   }
+  },
+  {
+   "params": null,
+   "sql": "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT * FROM notebooks WHERE id=%s AND status NOT IN ('copying','deleting','importing')"
+  },
+  {
+   "params": [
+    "nb-ccw-plain",
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT 1 WHERE EXISTS (SELECT 1 FROM sources WHERE notebook_id = %s AND source_type = 'memory') OR EXISTS (SELECT 1 FROM unified_kg_state WHERE notebook_id = %s AND dirty = 1)"
+  },
+  {
+   "params": [
+    "nb-ccw-plain",
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT (SELECT COUNT(*) FROM chunks WHERE notebook_id=%s) + (SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id=%s) AS n"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT * FROM notebooks WHERE id=%s AND status NOT IN ('copying','deleting','importing')) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT * FROM notebook_bases WHERE notebook_id=%s) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT * FROM sources WHERE notebook_id=%s) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT m.* FROM source_paper_meta m JOIN sources s ON s.id=m.source_id WHERE s.notebook_id=%s AND s.source_type<>'knowhow') AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT a.* FROM source_authors a JOIN sources s ON s.id=a.source_id WHERE s.notebook_id=%s AND s.source_type<>'knowhow') AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT e.* FROM source_elements e JOIN sources s ON s.id=e.source_id WHERE s.notebook_id=%s ORDER BY e.ordinal) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT * FROM chunks WHERE notebook_id=%s ORDER BY ordinal) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT * FROM knowledge_objects WHERE notebook_id=%s AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow') ORDER BY ordinal) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT * FROM knowledge_source_facts WHERE notebook_id=%s AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow')) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT * FROM knowledge_source_fact_elements WHERE notebook_id=%s AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow')) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT * FROM knowledge_source_fact_backfills WHERE notebook_id=%s AND status IN ('complete','incomplete') AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow')) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT * FROM knowledge_relations WHERE notebook_id=%s AND (source_id IS NULL OR source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow'))) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT * FROM chunk_embeddings WHERE notebook_id=%s) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT * FROM chunk_questions WHERE notebook_id=%s) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT e.* FROM element_embeddings e JOIN sources s ON s.id=e.source_id WHERE s.notebook_id=%s AND s.source_type<>'knowhow') AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT * FROM knowledge_embeddings WHERE notebook_id=%s) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT * FROM relation_embeddings WHERE notebook_id=%s) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT * FROM concept_clusters WHERE notebook_id=%s AND generation = COALESCE((SELECT cluster_generation FROM unified_kg_state u WHERE u.notebook_id = concept_clusters.notebook_id), 0)) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT * FROM notebook_object_schemas WHERE notebook_id=%s) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT * FROM knowhow_tables WHERE notebook_id=%s) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT c.* FROM knowhow_columns c JOIN knowhow_tables t ON t.id=c.table_id WHERE t.notebook_id=%s) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT r.* FROM knowhow_rows r JOIN knowhow_tables t ON t.id=r.table_id WHERE t.notebook_id=%s) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT c.* FROM knowhow_cells c JOIN knowhow_rows r ON r.id=c.row_id JOIN knowhow_tables t ON t.id=r.table_id WHERE t.notebook_id=%s) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT c.* FROM knowhow_cell_code c JOIN knowhow_rows r ON r.id=c.row_id JOIN knowhow_tables t ON t.id=r.table_id WHERE t.notebook_id=%s) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS n FROM (SELECT * FROM notebook_assets WHERE notebook_id=%s) AS _c"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT * FROM notebook_bases WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT * FROM sources WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT m.* FROM source_paper_meta m JOIN sources s ON s.id=m.source_id WHERE s.notebook_id=%s AND s.source_type<>'knowhow'"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT a.* FROM source_authors a JOIN sources s ON s.id=a.source_id WHERE s.notebook_id=%s AND s.source_type<>'knowhow'"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT e.* FROM source_elements e JOIN sources s ON s.id=e.source_id WHERE s.notebook_id=%s ORDER BY e.ordinal"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT * FROM chunks WHERE notebook_id=%s ORDER BY ordinal"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT * FROM knowledge_objects WHERE notebook_id=%s AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow') ORDER BY ordinal"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT * FROM knowledge_source_facts WHERE notebook_id=%s AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow')"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT * FROM knowledge_source_fact_elements WHERE notebook_id=%s AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow')"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT * FROM knowledge_source_fact_backfills WHERE notebook_id=%s AND status IN ('complete','incomplete') AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow')"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT * FROM knowledge_relations WHERE notebook_id=%s AND (source_id IS NULL OR source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow'))"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT * FROM chunk_embeddings WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT * FROM chunk_questions WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT e.* FROM element_embeddings e JOIN sources s ON s.id=e.source_id WHERE s.notebook_id=%s AND s.source_type<>'knowhow'"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT * FROM knowledge_embeddings WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT * FROM relation_embeddings WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT * FROM concept_clusters WHERE notebook_id=%s AND generation = COALESCE((SELECT cluster_generation FROM unified_kg_state u WHERE u.notebook_id = concept_clusters.notebook_id), 0)"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT * FROM notebook_object_schemas WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT * FROM knowhow_tables WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT c.* FROM knowhow_columns c JOIN knowhow_tables t ON t.id=c.table_id WHERE t.notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT r.* FROM knowhow_rows r JOIN knowhow_tables t ON t.id=r.table_id WHERE t.notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT c.* FROM knowhow_cells c JOIN knowhow_rows r ON r.id=c.row_id JOIN knowhow_tables t ON t.id=r.table_id WHERE t.notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT c.* FROM knowhow_cell_code c JOIN knowhow_rows r ON r.id=c.row_id JOIN knowhow_tables t ON t.id=r.table_id WHERE t.notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT * FROM notebook_assets WHERE notebook_id=%s"
+  },
+  {
+   "args": [
+    "notebooks",
+    [
+     {
+      "access_scope": "",
+      "created_at": "2026-10-01T08:00:00+00:00",
+      "created_by": "u-recipient",
+      "expected_questions": "[]",
+      "id": "nb-c0001",
+      "indexing_pipeline": null,
+      "indexing_pipeline_generation": "",
+      "indexing_pipeline_job_id": "",
+      "indexing_pipeline_version": "builtin.chunk.v1",
+      "is_shared": 0,
+      "metadata_generation": 0,
+      "name": "手动命名",
+      "name_auto": 0,
+      "primary_domain": "Semiconductor",
+      "purpose": "",
+      "purpose_auto": 0,
+      "share_token": null,
+      "source_types": "[]",
+      "status": "copying",
+      "sync_origin": "",
+      "target_users": "",
+      "taxonomy": "[]",
+      "template": "",
+      "tier": "personal",
+      "updated_at": "2026-10-01T08:00:00+00:00"
+     }
+    ]
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-c0001",
+    "手动命名",
+    "",
+    "Semiconductor",
+    "copying",
+    "u-recipient",
+    "2026-10-01T08:00:00+00:00",
+    "2026-10-01T08:00:00+00:00",
+    "",
+    "[]",
+    "[]",
+    "[]",
+    "",
+    "",
+    0,
+    "personal",
+    0,
+    null,
+    null,
+    "builtin.chunk.v1",
+    "",
+    "",
+    0,
+    0,
+    ""
+   ],
+   "sql": "Composed([SQL('INSERT INTO '), Identifier('notebooks'), SQL(' ('), Composed([Identifier('id'), SQL(','), Identifier('name'), SQL(','), Identifier('purpose'), SQL(','), Identifier('primary_domain'), SQL(','), Identifier('status'), SQL(','), Identifier('created_by'), SQL(','), Identifier('created_at'), SQL(','), Identifier('updated_at'), SQL(','), Identifier('target_users'), SQL(','), Identifier('expected_questions'), SQL(','), Identifier('source_types'), SQL(','), Identifier('taxonomy'), SQL(','), Identifier('access_scope'), SQL(','), Identifier('template'), SQL(','), Identifier('purpose_auto'), SQL(','), Identifier('tier'), SQL(','), Identifier('is_shared'), SQL(','), Identifier('share_token'), SQL(','), Identifier('indexing_pipeline'), SQL(','), Identifier('indexing_pipeline_version'), SQL(','), Identifier('indexing_pipeline_generation'), SQL(','), Identifier('indexing_pipeline_job_id'), SQL(','), Identifier('name_auto'), SQL(','), Identifier('metadata_generation'), SQL(','), Identifier('sync_origin')]), SQL(') VALUES ('), Composed([Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder()]), SQL(')')])"
+  },
+  {
+   "id": "src-c0002",
+   "new_id": "src"
+  },
+  {
+   "args": [
+    "sources",
+    [
+     {
+      "agent_profile_id": null,
+      "chunked_at": null,
+      "created_at": "2026-09-29T00:00:00+00:00",
+      "doc_type": "",
+      "error_message": "",
+      "file_hash": "",
+      "file_name": "",
+      "file_path": "",
+      "file_size": 0,
+      "id": "src-c0002",
+      "memory_id": "",
+      "notebook_id": "nb-c0001",
+      "parse_status": "ready",
+      "source_type": "document",
+      "source_url": "",
+      "status": "ready",
+      "summary": "",
+      "title": "plain",
+      "updated_at": "2026-09-29T00:00:00+00:00",
+      "uploaded_by": null
+     }
+    ]
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "params": [
+    "src-c0002",
+    "nb-c0001",
+    "plain",
+    "document",
+    "ready",
+    "ready",
+    "",
+    "",
+    "",
+    0,
+    "",
+    "",
+    "",
+    "2026-09-29T00:00:00+00:00",
+    "2026-09-29T00:00:00+00:00",
+    "",
+    "",
+    null,
+    null,
+    null
+   ],
+   "sql": "Composed([SQL('INSERT INTO '), Identifier('sources'), SQL(' ('), Composed([Identifier('id'), SQL(','), Identifier('notebook_id'), SQL(','), Identifier('title'), SQL(','), Identifier('source_type'), SQL(','), Identifier('status'), SQL(','), Identifier('parse_status'), SQL(','), Identifier('file_name'), SQL(','), Identifier('file_path'), SQL(','), Identifier('source_url'), SQL(','), Identifier('file_size'), SQL(','), Identifier('file_hash'), SQL(','), Identifier('summary'), SQL(','), Identifier('error_message'), SQL(','), Identifier('created_at'), SQL(','), Identifier('updated_at'), SQL(','), Identifier('doc_type'), SQL(','), Identifier('memory_id'), SQL(','), Identifier('chunked_at'), SQL(','), Identifier('agent_profile_id'), SQL(','), Identifier('uploaded_by')]), SQL(') VALUES ('), Composed([Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder()]), SQL(')')])"
+  },
+  {
+   "args": [
+    "source_paper_meta",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "source_authors",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "notebook_object_schemas",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "knowhow_tables",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "knowhow_columns",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "knowhow_rows",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "notebook_assets",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "knowhow_cells",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "knowhow_cell_code",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    []
+   ],
+   "call": "store.seed_copied_knowhow_genesis",
+   "kwargs": {
+    "actor": "分享链接",
+    "new_id": "<callable>",
+    "note": "随笔记本《book nb-ccw-plain》复制而来",
+    "now": "<callable>"
+   },
+   "ret": null
+  },
+  {
+   "id": "el-c0003",
+   "new_id": "el"
+  },
+  {
+   "args": [
+    "source_elements",
+    [
+     {
+      "created_at": "2026-09-29T00:00:00+00:00",
+      "element_type": "paragraph",
+      "id": "el-c0003",
+      "location_label": "p1",
+      "metadata": "{}",
+      "source_id": "src-c0002",
+      "text": "plain element"
+     }
+    ]
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "params": [
+    "el-c0003",
+    "src-c0002",
+    "paragraph",
+    "p1",
+    "plain element",
+    {
+     "jsonb": {}
+    },
+    "2026-09-29T00:00:00+00:00"
+   ],
+   "sql": "Composed([SQL('INSERT INTO '), Identifier('source_elements'), SQL(' ('), Composed([Identifier('id'), SQL(','), Identifier('source_id'), SQL(','), Identifier('element_type'), SQL(','), Identifier('location_label'), SQL(','), Identifier('text'), SQL(','), Identifier('metadata'), SQL(','), Identifier('created_at')]), SQL(') VALUES ('), Composed([Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder()]), SQL(')')])"
+  },
+  {
+   "id": "ck-c0004",
+   "new_id": "ck"
+  },
+  {
+   "args": [
+    "chunks",
+    [
+     {
+      "created_at": "2026-09-29T00:00:00+00:00",
+      "element_ids": "[\"el-c0003\"]",
+      "id": "ck-c0004",
+      "notebook_id": "nb-c0001",
+      "question_indexed_at": null,
+      "section_path": "",
+      "source_id": "src-c0002",
+      "text": "plain chunk"
+     }
+    ]
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "params": [
+    "ck-c0004",
+    "nb-c0001",
+    "src-c0002",
+    "plain chunk",
+    "",
+    {
+     "jsonb": [
+      "el-c0003"
+     ]
+    },
+    "2026-09-29T00:00:00+00:00",
+    null
+   ],
+   "sql": "Composed([SQL('INSERT INTO '), Identifier('chunks'), SQL(' ('), Composed([Identifier('id'), SQL(','), Identifier('notebook_id'), SQL(','), Identifier('source_id'), SQL(','), Identifier('text'), SQL(','), Identifier('section_path'), SQL(','), Identifier('element_ids'), SQL(','), Identifier('created_at'), SQL(','), Identifier('question_indexed_at')]), SQL(') VALUES ('), Composed([Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder()]), SQL(')')])"
+  },
+  {
+   "id": "ko-c0005",
+   "new_id": "ko"
+  },
+  {
+   "args": [
+    "knowledge_objects",
+    [
+     {
+      "created_at": "2026-09-29T00:00:00+00:00",
+      "evidence": "[{\"source_id\": \"src-c0002\", \"confidence\": 0.9, \"element_id\": \"el-c0003\", \"quoted_span\": \"shared quoted el-plain\", \"element_type\": \"paragraph\", \"source_title\": \"shared title src-plain\", \"location_label\": \"shared p1\"}]",
+      "id": "ko-c0005",
+      "last_reviewed": null,
+      "notebook_id": "nb-c0001",
+      "object_type": "concept",
+      "owner": "",
+      "payload": "{\"name\": \"plain\"}",
+      "source_candidate_id": null,
+      "source_id": "src-c0002",
+      "status": "approved",
+      "updated_at": "2026-09-29T00:00:00+00:00"
+     }
+    ]
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "params": [
+    "ko-c0005",
+    "nb-c0001",
+    "concept",
+    "approved",
+    "",
+    {
+     "jsonb": {
+      "name": "plain"
+     }
+    },
+    {
+     "jsonb": [
+      {
+       "confidence": "float:0.9",
+       "element_id": "el-c0003",
+       "element_type": "paragraph",
+       "location_label": "shared p1",
+       "quoted_span": "shared quoted el-plain",
+       "source_id": "src-c0002",
+       "source_title": "shared title src-plain"
+      }
+     ]
+    },
+    null,
+    "src-c0002",
+    "2026-09-29T00:00:00+00:00",
+    "2026-09-29T00:00:00+00:00",
+    null
+   ],
+   "sql": "Composed([SQL('INSERT INTO '), Identifier('knowledge_objects'), SQL(' ('), Composed([Identifier('id'), SQL(','), Identifier('notebook_id'), SQL(','), Identifier('object_type'), SQL(','), Identifier('status'), SQL(','), Identifier('owner'), SQL(','), Identifier('payload'), SQL(','), Identifier('evidence'), SQL(','), Identifier('source_candidate_id'), SQL(','), Identifier('source_id'), SQL(','), Identifier('created_at'), SQL(','), Identifier('updated_at'), SQL(','), Identifier('last_reviewed')]), SQL(') VALUES ('), Composed([Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder(), SQL(','), Placeholder()]), SQL(')')])"
+  },
+  {
+   "args": [
+    "extraction_runs",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "knowledge_source_facts",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "knowledge_source_fact_elements",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "knowledge_source_fact_backfills",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "knowledge_relations",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "chunk_questions",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "chunk_embeddings",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "element_embeddings",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "knowledge_embeddings",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "relation_embeddings",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "concept_clusters",
+    []
+   ],
+   "call": "store.insert_copy_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "INSERT INTO kg_objects_fts(object_id, notebook_id, name) VALUES (?, ?, ?)",
+    [
+     [
+      "ko-c0005",
+      "nb-c0001",
+      "plain"
+     ]
+    ]
+   ],
+   "call": "store.insert_fts_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "INSERT INTO chunks_fts(chunk_id, notebook_id, text) VALUES (?, ?, ?)",
+    [
+     [
+      "ck-c0004",
+      "nb-c0001",
+      "plain chunk"
+     ]
+    ]
+   ],
+   "call": "store.insert_fts_rows",
+   "kwargs": {
+    "chunk_size": 1000
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "nb-ccw-plain",
+    "nb-c0001"
+   ],
+   "call": "store.validate_copy",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT 1 FROM unified_kg_state WHERE notebook_id = %s"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM sources WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM sources WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM source_paper_meta WHERE notebook_id=%s AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow')"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM source_paper_meta WHERE notebook_id=%s AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow')"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM source_authors WHERE notebook_id=%s AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow')"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM source_authors WHERE notebook_id=%s AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow')"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM chunks WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM chunks WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM chunk_questions WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM chunk_questions WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=%s AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow')"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=%s AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow')"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowledge_source_facts WHERE notebook_id=%s AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow')"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowledge_source_facts WHERE notebook_id=%s AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow')"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowledge_source_fact_elements WHERE notebook_id=%s AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow')"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowledge_source_fact_elements WHERE notebook_id=%s AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow')"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowledge_source_fact_backfills WHERE notebook_id=%s AND status IN ('complete','incomplete') AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow')"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowledge_source_fact_backfills WHERE notebook_id=%s AND status IN ('complete','incomplete') AND source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow')"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowledge_relations WHERE notebook_id=%s AND (source_id IS NULL OR source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow'))"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowledge_relations WHERE notebook_id=%s AND (source_id IS NULL OR source_id NOT IN (SELECT id FROM sources WHERE source_type='knowhow'))"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM concept_clusters WHERE notebook_id=%s AND generation = COALESCE((SELECT cluster_generation FROM unified_kg_state u WHERE u.notebook_id = concept_clusters.notebook_id), 0)"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM concept_clusters WHERE notebook_id=%s AND generation = COALESCE((SELECT cluster_generation FROM unified_kg_state u WHERE u.notebook_id = concept_clusters.notebook_id), 0)"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM notebook_object_schemas WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM notebook_object_schemas WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowhow_tables WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowhow_tables WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM notebook_assets WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM notebook_assets WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowhow_columns x JOIN knowhow_tables t ON t.id=x.table_id WHERE t.notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowhow_columns x JOIN knowhow_tables t ON t.id=x.table_id WHERE t.notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowhow_rows x JOIN knowhow_tables t ON t.id=x.table_id WHERE t.notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowhow_rows x JOIN knowhow_tables t ON t.id=x.table_id WHERE t.notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowhow_cells x JOIN knowhow_rows r ON r.id=x.row_id JOIN knowhow_tables t ON t.id=r.table_id WHERE t.notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowhow_cells x JOIN knowhow_rows r ON r.id=x.row_id JOIN knowhow_tables t ON t.id=r.table_id WHERE t.notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowhow_cell_code x JOIN knowhow_rows r ON r.id=x.row_id JOIN knowhow_tables t ON t.id=r.table_id WHERE t.notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-ccw-plain"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowhow_cell_code x JOIN knowhow_rows r ON r.id=x.row_id JOIN knowhow_tables t ON t.id=r.table_id WHERE t.notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-c0001",
+    "nb-c0001",
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowledge_relations r WHERE r.notebook_id=%s AND (r.source_object_id NOT IN (SELECT id FROM knowledge_objects WHERE notebook_id=%s) OR r.target_object_id NOT IN (SELECT id FROM knowledge_objects WHERE notebook_id=%s))"
+  },
+  {
+   "args": [
+    "nb-c0001",
+    "draft"
+   ],
+   "call": "store.publish_copy",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "now": "2026-10-01T08:00:00+00:00"
+  },
+  {
+   "params": [
+    "draft",
+    "2026-10-01T08:00:00+00:00",
+    "nb-c0001"
+   ],
+   "sql": "UPDATE notebooks SET status=%s,updated_at=%s WHERE id=%s"
+  },
+  {
+   "args": [
+    "nb-c0001"
+   ],
+   "call": "catalog.get_notebook",
+   "kwargs": {},
+   "ret": {
+    "access": "owner",
+    "access_scope": "",
+    "ask_available": true,
+    "base_kg_available": false,
+    "base_kg_notebook_ids": [],
+    "base_notebooks": [],
+    "can_manage_content": false,
+    "counts": {
+     "cases": 0,
+     "checklist_items": 0,
+     "glossary": 0,
+     "memories": 0,
+     "methods": 0,
+     "risks": 0,
+     "rules": 0,
+     "sources": 1
+    },
+    "created_label": "2026年10月1日",
+    "document_limit": 20,
+    "expected_questions": [],
+    "granted_via": [],
+    "id": "nb-c0001",
+    "indexing_pipeline_available": true,
+    "indexing_pipeline_id": null,
+    "indexing_pipeline_missing": false,
+    "indexing_pipeline_pending": false,
+    "indexing_pipeline_stale": false,
+    "indexing_pipeline_version": "builtin.chunk.v1",
+    "is_shared": false,
+    "kg_build": null,
+    "kg_building": false,
+    "kg_pending_sources": 0,
+    "kg_ready": true,
+    "local_evidence_available": true,
+    "name": "手动命名",
+    "paper_meta_backfilling": false,
+    "paper_meta_missing": false,
+    "primary_domain": "Semiconductor",
+    "purpose": "",
+    "shared_from": "",
+    "source_types": [],
+    "status": "draft",
+    "sync_origin": "",
+    "target_users": "",
+    "taxonomy": [],
+    "tier": "personal"
+   }
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT notebooks.*, u.username AS _owner_username, COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') AS _published_pipeline_version, EXISTS(SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id = notebooks.id AND ng.principal_type IN ('group', 'group_admins')) AS _shared_to_groups FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by LEFT JOIN unified_kg_state ip ON ip.notebook_id=notebooks.id WHERE notebooks.id = %s AND notebooks.status NOT IN ('copying','deleting','importing')"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT id FROM sources WHERE notebook_id=%s AND source_type = 'memory'"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS count FROM sources WHERE notebook_id = %s AND source_type NOT IN ('memory', 'knowhow')"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-c0001",
+    "nb-c0001",
+    "nb-c0001"
+   ],
+   "sql": "WITH total AS (SELECT object_type, status, COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=%s GROUP BY object_type, status), memory AS (SELECT mo.object_type, mo.status, COUNT(*) AS c FROM knowledge_objects mo WHERE mo.source_id = ANY(ARRAY(SELECT s.id FROM sources s WHERE s.notebook_id=%s AND s.source_type = 'memory')) AND mo.notebook_id=%s GROUP BY mo.object_type, mo.status) SELECT t.object_type, t.status, t.c - COALESCE(m.c, 0) AS c, COALESCE(m.c, 0) AS m FROM total t LEFT JOIN memory m ON m.object_type = t.object_type AND m.status = t.status"
+  },
+  {
+   "params": [
+    null,
+    "nb-c0001"
+   ],
+   "sql": "SELECT b.id AS id, b.name AS name, b.tier AS tier, EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id) AS has_kg FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF(CAST(%s AS text), '') AS uid) v WHERE e.notebook_id = %s AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name COLLATE \"C\", b.id COLLATE \"C\""
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id=%s) AS exists"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM sources s JOIN LATERAL (SELECT 1 AS found FROM source_elements e WHERE e.source_id=s.id LIMIT 1) parsed ON TRUE LEFT JOIN LATERAL (SELECT er.status,er.error_message FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.ordinal DESC LIMIT 1) latest_kg ON TRUE LEFT JOIN LATERAL (SELECT 1 AS found FROM knowledge_objects k WHERE k.source_id=s.id AND k.source_id!='' LIMIT 1) source_kg ON TRUE WHERE s.notebook_id=%s AND s.source_type NOT IN ('memory','knowhow') AND s.source_type <> 'promotion' AND (source_kg.found IS NULL OR COALESCE(latest_kg.status,'completed')!='completed' OR COALESCE(latest_kg.error_message,'') ~ 'windows_failed=[1-9][0-9]*/[0-9]+' OR strpos(COALESCE(latest_kg.error_message,''),'retry_incomplete=1')>0) AND NOT (COALESCE(latest_kg.status,'')='completed' AND starts_with(COALESCE(latest_kg.error_message,''),'kg objects=0 ') AND COALESCE(latest_kg.error_message,'') !~ 'windows_failed=[1-9][0-9]*/[0-9]+')"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM chunks WHERE notebook_id=%s) AS exists"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM sources s WHERE s.notebook_id=%s AND s.source_type NOT IN ('memory','knowhow') AND s.source_type <> 'promotion' AND s.doc_type IN ('','academic_paper') AND s.parse_status IN ('parsed','extracting','extracted') AND NOT EXISTS(SELECT 1 FROM source_paper_meta m WHERE m.source_id=s.id)) AS exists"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT * FROM kg_build_jobs WHERE notebook_id=%s ORDER BY created_at DESC,ordinal DESC LIMIT 1"
+  },
+  {
+   "params": [
+    "nb-c0001"
+   ],
+   "sql": "SELECT nb.created_by AS owner_id,u.role AS owner_role FROM notebooks nb LEFT JOIN users u ON u.id=nb.created_by WHERE nb.id=%s"
+  },
+  {
+   "params": [
+    "u-recipient"
+   ],
+   "sql": "SELECT upload_document_limit FROM user_profiles WHERE user_id=%s"
+  },
+  {
+   "params": [
+    "upload_document_limit_default"
+   ],
+   "sql": "SELECT value FROM app_settings WHERE key=%s"
+  }
+ ]
+}
