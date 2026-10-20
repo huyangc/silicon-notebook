@@ -2921,3 +2921,29 @@ def test_stale_history_colliding_with_a_partial_window_is_refused_before_the_cla
     )
     assert healed.error == "" and healed.knowhow_history_complete is True
 
+
+def test_a_partial_window_that_deletes_the_stale_row_itself_is_not_refused(baseline):
+    """The preflight only counts a target row this package does not replace:
+    a window that deletes the old milestone and re-creates the name in one go
+    replays the delete first (phase 3c), so it imports."""
+    table_id = _alpha_table(baseline)
+    source = baseline["source"]["repo"]
+    mirror = baseline["target"]["repo"]
+    _carry_knowhow_history(baseline)
+    _add_milestone(source, table_id, "mstone-v1", "v1", 1)
+    assert _import(baseline["target"], _window(baseline).package_dir).error == ""
+    baseline["source"]["settings"].sync_knowhow_history = False
+    _add_row(source, table_id, "while off")
+    assert _import(baseline["target"], _window(baseline).package_dir).error == ""
+
+    _carry_knowhow_history(baseline)
+    with source._write() as db:
+        db.execute("DELETE FROM knowhow_milestones WHERE id='mstone-v1'")
+    _add_milestone(source, table_id, "mstone-v1-again", "v1", 2)
+    report = _import(baseline["target"], _window(baseline).package_dir)
+
+    assert report.error == "" and report.knowhow_history_complete is False
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM knowhow_milestones WHERE id='mstone-v1-again'"
+    ) == 1
+
