@@ -276,18 +276,18 @@ def test_backfill_skips_rows_a_concurrent_stamp_holds_and_never_waits(legacy):
                     db, "nb-gb", "2999-01-01T00:00:00+00:00", marker="%s"
                 )
                 locked.set()
-                release.wait(10)
+                release.wait(120)
         except Exception as exc:  # noqa: BLE001 - surfaced below
             errors.append(exc)
 
     thread = threading.Thread(target=holder)
     thread.start()
     try:
-        assert locked.wait(10)
+        assert locked.wait(120)
         first = cases.backfill(legacy.maintenance)
     finally:
         release.set()
-        thread.join(10)
+        thread.join(120)
     assert not errors
     # The stamp locks the jobs nb-gb takes part in except gaj-14, whose
     # earlier stamp it keeps: 01, 02, 05, 06, 07, 08 and 09 are skipped; 03,
@@ -300,21 +300,40 @@ def test_backfill_skips_rows_a_concurrent_stamp_holds_and_never_waits(legacy):
         cases.assert_rows_match_attribution_sql(db, dialect="postgres", q="%s")
 
 
-def test_stamp_waits_for_a_backfill_page_without_a_deadlock(legacy, monkeypatch):
+def _stamp_is_waiting_on_a_lock(probe, pid) -> bool:
+    row = probe.execute(
+        "SELECT wait_event_type FROM pg_stat_activity "
+        "WHERE datname = current_database() AND pid = %s "
+        "AND query LIKE %s",
+        (pid, "%UPDATE global_ask_jobs SET retained_until%"),
+    ).fetchone()
+    return row is not None and row[0] == "Lock"
+
+
+def test_stamp_waits_for_a_backfill_page_without_a_deadlock(legacy, postgres_settings, monkeypatch):
     """The other interleaving: the backfill holds its page's row locks (it is
     paused between the UPDATE and the INSERT) while a deletion's stamp runs.
     The stamp waits; the backfill never waits on anything, so the two cannot
-    form a cycle -- both finish, no 40P01."""
+    form a cycle -- both finish, no 40P01.
+
+    Handshakes only, no sleeps: the backfill holds its page until the stamp's
+    own backend is SEEN waiting on a lock in ``pg_stat_activity`` (its pid,
+    this database, its statement), and the stamp's transaction runs with
+    ``lock_timeout = 0`` so a slow CI runner cannot turn the wait into a
+    timeout. The probe is a separate connection: the test pool has only two."""
     import threading
+    import time
+
+    import psycopg
 
     database = legacy._runtime.database
     store = legacy._runtime.global_ask_store
-    holding, release = threading.Event(), threading.Event()
+    holding, release, stamp_pid_known = threading.Event(), threading.Event(), threading.Event()
     original = store._insert_attribution_rows
 
     def paused(db, pairs):
         holding.set()
-        release.wait(10)
+        assert release.wait(120), "the stamp was never seen waiting"
         return original(db, pairs)
 
     monkeypatch.setattr(store, "_insert_attribution_rows", paused)
@@ -329,24 +348,38 @@ def test_stamp_waits_for_a_backfill_page_without_a_deadlock(legacy, monkeypatch)
     def stamp():
         try:
             with database.write() as db:
+                db.execute("SET LOCAL lock_timeout = '0'")
+                stamped["pid"] = db.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"]
+                stamp_pid_known.set()
                 stamped["n"] = GlobalAskStore.stamp_retained_turns(
                     db, "nb-gb", "2999-01-01T00:00:00+00:00", marker="%s"
                 )
         except Exception as exc:  # noqa: BLE001 - surfaced below
             stamped["error"] = exc
+        finally:
+            stamp_pid_known.set()
 
     worker = threading.Thread(target=backfill)
     stamper = threading.Thread(target=stamp)
     worker.start()
+    seen_waiting = False
     try:
-        assert holding.wait(10)
+        assert holding.wait(120)
         stamper.start()
-        stamper.join(1.0)
-        assert stamper.is_alive()  # waiting on the page's row locks, as designed
+        assert stamp_pid_known.wait(120)
+        with psycopg.connect(postgres_settings.database_url, autocommit=True) as probe:
+            deadline = time.monotonic() + 120
+            while "error" not in stamped and time.monotonic() < deadline:
+                if _stamp_is_waiting_on_a_lock(probe, stamped["pid"]):
+                    seen_waiting = True
+                    break
+                stamper.join(0.05)
     finally:
         release.set()
-        worker.join(15)
-        stamper.join(15)
+        worker.join(120)
+        stamper.join(120)
+    assert seen_waiting, stamped
+    assert not worker.is_alive() and not stamper.is_alive()
     assert "error" not in outcome and "error" not in stamped, (outcome, stamped)
     assert outcome["result"].written == 11
     assert stamped["n"] == 7  # gaj-14 keeps its earlier stamp
