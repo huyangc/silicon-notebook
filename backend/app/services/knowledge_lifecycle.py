@@ -82,6 +82,7 @@ from app.domain.kg_findings_contracts import (
 )
 from app.domain.kg_merge_seed import (
     CONCEPT_SEED_VERSION,
+    ConceptSeedSpaceMoved,
     concept_decision_seeds,
 )
 from app.services.kg_findings import (
@@ -2638,12 +2639,33 @@ class KnowledgeLifecycleService:
         # Explicit invalidation, not the version tuple, is what's load-bearing here.
         self._invalidate_unified_cache(notebook_id)
 
-    def append_clusters(self, notebook_id: str, rows: list, object_type: str = "concept") -> int:
-        """追加写 concept_clusters(不 DELETE);member_object_id 幂等(已在则跳过)。返回新增数。"""
+    def _place_new_concepts_again(self, notebook_id: str, new_objs: list):
+        """``incremental_fuse_source``'s concept placement, read and computed
+        afresh after ``ConceptSeedSpaceMoved``: the published space, its
+        override keys and the cluster names, on one connection."""
+        from app.services.kg_merge import place_new_concepts, placement_seed_space
+
+        with self._connect() as db:
+            cn = self.governance_store.incremental_cluster_rows(db, notebook_id, "concept")
+            seed_version, override = self._published_seed_space(db, notebook_id)
+        canon_names = {r["canonical_id"]: r["canonical_name"] for r in cn}
+        rows = place_new_concepts(
+            new_objs, canon_names, id_prefix="K-",
+            seed_space=placement_seed_space(
+                "concept", new_objs, canon_names,
+                concept_seed_version=seed_version, override=override))
+        return seed_version, override, rows
+
+    def append_clusters(self, notebook_id: str, rows: list, object_type: str = "concept",
+                        *, concept_seed_version: Optional[int] = None) -> int:
+        """追加写 concept_clusters(不 DELETE);member_object_id 幂等(已在则跳过)。返回新增数。
+        ``concept_seed_version``:增量安置所用的概念种子空间,锁后与已发布空间
+        复核,变了抛 ``ConceptSeedSpaceMoved``、一行不写(S1)。"""
         now = self._now()
         with self._write() as db:
             added = self.governance_store.insert_clusters(
-                db, notebook_id, object_type, rows, now
+                db, notebook_id, object_type, rows, now,
+                concept_seed_version=concept_seed_version,
             )
             # P0-A: only bump when a row actually landed (a no-op call — every
             # member already present — must not manufacture a fake change signal).
@@ -2874,7 +2896,20 @@ class KnowledgeLifecycleService:
             # 有簇行,冻结下来的是**命中值**而不是缺失 —— master 第二次融合确实会
             # 看见它们并产出这类对,所以不能一律记成 miss。
             frozen_canonical = self._freeze_new_object_canonicals(notebook_id, new_objs)
-            self.append_clusters(notebook_id, rows, object_type="concept")
+            try:
+                self.append_clusters(notebook_id, rows, object_type="concept",
+                                     concept_seed_version=seed_version)
+            except ConceptSeedSpaceMoved:
+                # The library's first full rebuild in the new space flipped
+                # between the read above and the write lock: nothing was
+                # written, place again in the space now published (a space
+                # changes once per library, so once is enough).
+                seed_version, override, rows = self._place_new_concepts_again(
+                    notebook_id, new_objs)
+                frozen_canonical = self._freeze_new_object_canonicals(
+                    notebook_id, new_objs)
+                self.append_clusters(notebook_id, rows, object_type="concept",
+                                     concept_seed_version=seed_version)
             # Tier2 桥接候选来源三分支(P1-3,perf audit):
             #   1) 有可用 kg ANN(即使版本漂移/stale,advisory 桥接可接受)→ ANN 近邻查询,
             #      任意规模可用,恢复大库(> max_entities)上一直被静默跳过的跨文档桥接。
@@ -6310,7 +6345,8 @@ class KnowledgeLifecycleService:
                                      "notebook_id": notebook_id,
                                      "error_class": type(exc).__name__})
 
-    def _stream_concept_seed_space(self, notebook_id: str, run_id: str):
+    def _stream_concept_seed_space(self, notebook_id: str, run_id: str,
+                                   generation: int):
         """The concept seed stream of a full rebuild, in ``CONCEPT_SEED_VERSION``,
         with the recompute of stored v1 decisions (design 2026-10-19 §五 S1
         「实施细化」 steps 1–4). Returns ``(reps, members_count,
@@ -6357,6 +6393,9 @@ class KnowledgeLifecycleService:
             v2_confirmed=[pair for pair, st in decided.items() if st == "confirmed"])
         if plan.override != override:
             del stream          # the first stream's seed vectors go before the second's
+            # Two whole concept streams can run before the rebuild's first
+            # stage boundary: renew the claim between them (R13 heartbeat).
+            self._refresh_generation_lease(notebook_id, generation)
             stream = self._stream_seed_reps(
                 notebook_id, "concept", concept_seed_version=CONCEPT_SEED_VERSION,
                 run_id=run_id, override=plan.override)
@@ -6672,7 +6711,7 @@ class KnowledgeLifecycleService:
         # and the decisions in that space (v1 ones recomputed, §五 S1).
         _t = _time.perf_counter()
         reps, members_count, seed_first_name, decided, run.seed_plan = \
-            self._stream_concept_seed_space(notebook_id, run_id)
+            self._stream_concept_seed_space(notebook_id, run_id, run.generation)
         # IMPORTANT: include seeds with NO vector (name-only) — use members_count
         # keys, not reps keys, to match the legacy all-objects path.
         seeds = sorted(members_count)

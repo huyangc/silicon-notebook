@@ -651,11 +651,13 @@ def test_v97_adds_the_findings_tables_and_the_code_version_column(tmp_path):
 @pytest.mark.legacy_upgrade_contract
 @pytest.mark.real_sqlite_migration
 def test_v100_adds_the_concept_seed_space_columns(tmp_path):
-    """concept_merge_candidates.seed_version and
-    unified_kg_state.concept_seed_version, both INTEGER NOT NULL DEFAULT 1: an
+    """concept_merge_candidates.seed_version (INTEGER NOT NULL DEFAULT 1) and
+    unified_kg_state.concept_seed_version (INTEGER NOT NULL DEFAULT 2): an
     existing decision row and an existing state row read as minted in seed
-    space 1 (the space every merge before this migration was built in). A
-    fresh database and a v99 upgrade end up the same; a second run is a no-op."""
+    space 1 (the space every merge before this migration was built in), a
+    state row created afterwards starts in space 2, the code's. A fresh
+    database and a v99 upgrade end up the same; a second run is a no-op and
+    never touches a row written since."""
     from tests.sqlite_migration_testkit import rollback_v100
 
     database, settings = _fresh_migrated_database(tmp_path)
@@ -670,7 +672,7 @@ def test_v100_adds_the_concept_seed_space_columns(tmp_path):
     with database.connect() as db:
         fresh = shape(db)
     assert fresh == (("seed_version", "INTEGER", 1, "1", 0),
-                     ("concept_seed_version", "INTEGER", 1, "1", 0))
+                     ("concept_seed_version", "INTEGER", 1, "2", 0))
     with database.write() as db:
         db.execute(
             "INSERT INTO notebooks (id, name, created_at, updated_at) VALUES "
@@ -689,12 +691,22 @@ def test_v100_adds_the_concept_seed_space_columns(tmp_path):
         db.execute("PRAGMA user_version = 99")
 
     assert SqliteMigrator(database, settings).migrate() == [100]
+    with database.write() as db:
+        db.execute(
+            "INSERT INTO notebooks (id, name, created_at, updated_at) VALUES "
+            "('nb-v100', 'n', '2026-10-21T00:00:00+00:00', '2026-10-21T00:00:00+00:00')"
+        )
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, updated_at) "
+            "VALUES ('nb-v100', '2026-10-21T00:00:00+00:00')"
+        )
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db) == fresh
-        assert db.execute(
-            "SELECT concept_seed_version FROM unified_kg_state WHERE notebook_id='nb-v99'"
-        ).fetchone()[0] == 1
+        assert dict(db.execute(
+            "SELECT notebook_id, concept_seed_version FROM unified_kg_state "
+            "WHERE notebook_id IN ('nb-v99', 'nb-v100')"
+        ).fetchall()) == {"nb-v99": 1, "nb-v100": 2}
         assert db.execute(
             "SELECT seed_version FROM concept_merge_candidates WHERE id='mc-old'"
         ).fetchone()[0] == 1

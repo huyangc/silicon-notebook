@@ -239,6 +239,10 @@ def concept_squash_key(name: str) -> str:
 # Claim / formula / procedure seeds have no version: they are unchanged.
 # ---------------------------------------------------------------------------
 
+# ⚠ ``unified_kg_state.concept_seed_version``'s column DEFAULT is this value
+# (SQLite v98 / PostgreSQL 0078): a state row created from now on starts in
+# the space the code builds in. A future space 3 needs a migration that moves
+# the default as well.
 CONCEPT_SEED_VERSION = 2
 CONCEPT_SEED_VERSIONS = (1, 2)
 # A v2 decision row whose seed starts with this prefix keeps the OLD v1 seed of
@@ -365,12 +369,27 @@ def seed_fn_for_type(object_type: str, *, concept_seed_version: int,
     }.get(object_type, seed_claim)
 
 
+class ConceptSeedSpaceMoved(RuntimeError):
+    """An incremental placement computed in one concept seed space met another
+    one under the cluster write lock: the library's full rebuild published a
+    new space in between (S1). Nothing was written; the writer places again
+    in the space now published."""
+
+    def __init__(self, notebook_id: str, placed_in: int, published: int):
+        super().__init__(f"concept seed space moved from {placed_in} to {published}")
+        self.notebook_id = notebook_id
+        self.placed_in = placed_in
+        self.published = published
+
+
 def published_concept_seed_version(state_row) -> int:
     """The concept seed space of a library's published merge, read off its
-    ``unified_kg_state`` row (``None``: no row — nothing published — is 1,
-    the column's default)."""
+    ``unified_kg_state`` row. ``None`` — no row: a notebook that never wrote a
+    graph, a deep copy (which carries its source's published clusters) — reads
+    as ``CONCEPT_SEED_VERSION``, the column's default for every row created
+    after the upgrade; only the rows that existed before it hold 1."""
     if state_row is None:
-        return 1
+        return CONCEPT_SEED_VERSION
     return check_concept_seed_version(int(state_row["concept_seed_version"]))
 
 

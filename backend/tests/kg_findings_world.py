@@ -247,9 +247,12 @@ def seed_world(repo, *, postgres: bool, community_min_size: int = 2,
             # a chain inside every source; shared concepts join the core chains
             for left, right in zip(concept_names, concept_names[1:]):
                 rel(source_id, left, right)
+        # Canonical ids are seed-space-1 forms: the library's published merge
+        # was built before S1, in space 1 (a notebook created now starts in
+        # the code's space, the column's default).
         db.execute(
-            f"UPDATE unified_kg_state SET kg_mutation_seq=5, cluster_mutation_seq=2 "
-            f"WHERE notebook_id={p}",
+            f"UPDATE unified_kg_state SET kg_mutation_seq=5, cluster_mutation_seq=2, "
+            f"concept_seed_version=1 WHERE notebook_id={p}",
             (notebook_id,),
         )
     return world

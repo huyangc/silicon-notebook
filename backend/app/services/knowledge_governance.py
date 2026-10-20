@@ -620,7 +620,7 @@ class KnowledgeGovernanceService:
             self.governance_store.write_merge_candidate(
                 db, notebook_id, a, b, score, now,
                 seed_version=self.governance_store.published_concept_seed_space(
-                    db, notebook_id)[0],
+                    db, notebook_id, override_keys=False)[0],
             )
 
     def pending_merges(self, notebook_id: str) -> List[dict]:
@@ -1604,7 +1604,7 @@ class KnowledgeGovernanceService:
         strip-"K-"(canonical), matching the old decided_pairs key derivation."""
         with self._connect() as db:
             version, _override = self.governance_store.published_concept_seed_space(
-                db, notebook_id)
+                db, notebook_id, override_keys=False)
             return self.governance_store.decided_seed_pairs_from(
                 db, notebook_id, seed_version=version)
 

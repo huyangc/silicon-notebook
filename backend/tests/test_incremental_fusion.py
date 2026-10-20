@@ -13,7 +13,27 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("EMBED_DIM", "16")   # 与 FakeEmbedder(16) 对齐,使 Tier2 向量过 settings.embed_dim 滤
-    r = SQLiteRepository(Settings(_env_file=None)); bind_all_embedding_clients(r, FakeEmbedder(dim=16)); return r
+    r = SQLiteRepository(Settings(_env_file=None)); bind_all_embedding_clients(r, FakeEmbedder(dim=16))
+    _built_before_upgrade(r, monkeypatch)
+    return r
+
+
+def _built_before_upgrade(r, monkeypatch):
+    """The libraries here are written with seed-space-1 canonical ids
+    (``"K-" + _norm(name)``): built before S1, their published merge is in
+    concept seed space 1. A notebook created now starts in the code's space
+    (``unified_kg_state.concept_seed_version`` DEFAULT 2), so every notebook
+    this repository creates is marked as built in space 1."""
+    create = r.create_notebook
+
+    def create_notebook(*args, **kwargs):
+        notebook = create(*args, **kwargs)
+        with r._write() as db:
+            db.execute("UPDATE unified_kg_state SET concept_seed_version=1 "
+                       "WHERE notebook_id=?", (notebook.id,))
+        return notebook
+
+    monkeypatch.setattr(r, "create_notebook", create_notebook)
 
 
 @pytest.mark.parametrize("version", [1, 2])
@@ -959,6 +979,7 @@ def test_fusion_statements_do_not_grow_with_memory_sources(tmp_path, monkeypatch
         monkeypatch.setenv("EMBED_DIM", "16")
         r = SQLiteRepository(Settings(_env_file=None))
         bind_all_embedding_clients(r, FakeEmbedder(dim=16))
+        _built_before_upgrade(r, monkeypatch)
         nb = r.create_notebook(NotebookCreate(name="kb"))
         now = "2026-09-29T00:00:00"
         if n == "deprecated":

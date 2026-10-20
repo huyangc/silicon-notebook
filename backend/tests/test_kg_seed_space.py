@@ -19,11 +19,11 @@ from app.domain.kg_merge_seed import (
     _norm,
     concept_decision_seeds,
     concept_seed_in_space,
-    decision_match_key,
     concept_seed_parts,
     concept_seed_v1,
     concept_seed_v2,
     concept_squash_key,
+    decision_match_key,
     published_concept_seed_version,
     seed_fn_for_type,
     seed_squash_key,
@@ -219,8 +219,10 @@ def test_other_types_have_no_seed_version():
     assert seed_fn_for_type("concept", concept_seed_version=2)({"name": "Q-Former"}) == "qformer"
 
 
-def test_published_version_of_a_missing_state_row_is_1():
-    assert published_concept_seed_version(None) == 1
+def test_published_version_of_a_missing_state_row_is_the_code_space():
+    """No state row: nothing published, or a copy carrying its source's
+    clusters -- read like a row created now (the column's DEFAULT)."""
+    assert published_concept_seed_version(None) == CONCEPT_SEED_VERSION == 2
     assert published_concept_seed_version({"concept_seed_version": 2}) == 2
     with pytest.raises(ValueError):
         published_concept_seed_version({"concept_seed_version": 7})

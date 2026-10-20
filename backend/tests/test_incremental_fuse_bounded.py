@@ -91,8 +91,14 @@ def _legacy_place_new_concepts(new_objects, existing_cluster_map, existing_canon
 def _seed(repo, notebook_id, objects, clusters, candidates=()):
     """objects: [(oid, type, name, source_id, payload_extra, vector|None)]
     clusters: [(canonical_id, member_object_id, canonical_name, object_type)]
-    candidates: [(canonical_a, canonical_b, status)]"""
+    candidates: [(canonical_a, canonical_b, status)]
+
+    The canonical ids are seed-space-1 forms (``_norm``, master's seeds): the
+    library was built before S1, so its published merge is marked as space 1
+    (a notebook created now starts in the code's space)."""
     with repo._write() as db:
+        db.execute("UPDATE unified_kg_state SET concept_seed_version=1 "
+                   "WHERE notebook_id=?", (notebook_id,))
         for index, (oid, otype, name, src, extra, vec) in enumerate(objects):
             payload = {"name": name}
             payload.update(extra or {})
@@ -195,7 +201,7 @@ def _legacy_seams(repo, monkeypatch):
     monkeypatch.setattr(store, "_existing_cluster_members", legacy_existing_members)
 
     # ④ place_new_concepts:master 的旧签名 + existing_cids 守卫,cmap 取入口快照。
-    #    这些夹具库没有 unified_kg_state 行 → 已发布种子空间是 1,master 的种子
+    #    这些夹具库由 _seed 标成升级前建成(已发布种子空间 1),master 的种子
     #    函数按类型前缀取回(PR-4 起融合传的是种子空间,不再传 seed_fn)。
     import app.services.kg_merge as kg_merge
 

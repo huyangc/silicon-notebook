@@ -286,6 +286,30 @@ def test_the_pass_leaves_shared_only_totals_even_when_the_input_looks_unchanged(
     assert (status["objects"], status["relations"]) == (shared_objects, shared_relations)
 
 
+def test_the_bridge_purge_matches_each_candidate_in_its_own_seed_space(repo):
+    """S1: the pass's purge recomputes a Memory concept's bridge ids in both
+    concept seed spaces and matches each merge candidate by its OWN
+    ``seed_version``. "Secret Project" (bob's Memory) bridges as
+    ``K-secret project`` in space 1 and as ``K-secretproject`` /
+    ``K-~v1:secret project`` in space 2: the space-2 rows naming those go, a
+    space-1 row naming the space-2 form stays (not a bridge id of its space)."""
+    service = MemoryIsolationRebuild.for_repository(repo)
+    with repo._runtime.database.write() as db:
+        for mid, side, version in (("mc-s1-v2", "K-secretproject", 2),
+                                   ("mc-s1-override", "K-~v1:secret project", 2),
+                                   ("mc-s1-decoy", "K-secretproject", 1)):
+            db.execute(
+                "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,"
+                "canonical_b,score,status,seed_version,created_at,updated_at) "
+                "VALUES (?,?,?,'K-xtal',0.9,'rejected',?,'t','t')",
+                (mid, cases.NB_F, side, version))
+    service._purge_bridge_candidates(cases.NB_F)
+    with repo._runtime.database.connect() as db:
+        left = {r[0] for r in db.execute(
+            "SELECT id FROM concept_merge_candidates WHERE id LIKE 'mc-s1-%'").fetchall()}
+    assert left == {"mc-s1-decoy"}
+
+
 def test_a_notebook_rebuilt_meanwhile_is_skipped(repo, events):
     """The marker is read again right before each notebook: one cleared since
     the pending list was taken (a manual rebuild, another pass) is skipped

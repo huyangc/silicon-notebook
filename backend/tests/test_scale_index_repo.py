@@ -148,8 +148,8 @@ def test_rebuild_releases_concept_reps_before_derivation_tail(repo, monkeypatch)
     holder: dict = {}
     real_reps = lifecycle._stream_seed_reps
 
-    def spy_reps(notebook_id, object_type, seed_fn, **kw):
-        reps, mc, sfn = real_reps(notebook_id, object_type, seed_fn, **kw)
+    def spy_reps(notebook_id, object_type, **kw):
+        reps, mc, sfn = real_reps(notebook_id, object_type, **kw)
         if object_type == "concept" and reps:
             holder["ref"] = weakref.ref(next(iter(reps.values())))
         return reps, mc, sfn

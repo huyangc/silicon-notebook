@@ -6170,19 +6170,33 @@ class SqliteMigrator:
         ``unified_kg_state.concept_seed_version`` records the concept seed
         space of the library's PUBLISHED merge, written by the flip statement
         that publishes a full rebuild; incremental fusion, catch-up and
-        bridge ids follow it. 1 for every existing row and for a library with
-        nothing published. Neither table is captured by a sync trigger that
-        names columns (``unified_kg_state``'s capture serialises the whole
-        row; ``concept_merge_candidates`` is LOCAL), so no trigger changes."""
+        bridge ids follow it. Every existing row is set to 1 (its merge was
+        built in space 1); the column's DEFAULT is 2, so a row created from
+        now on (a new notebook, a copy's dirty row, a lazy upsert) starts in
+        the space the code builds in — such a library has nothing published
+        in space 1. PostgreSQL gets the same result with ``ADD COLUMN ...
+        DEFAULT 1`` followed by ``SET DEFAULT 2``; SQLite cannot change a
+        column default, so the column is added with DEFAULT 2 and the rows
+        that exist are set to 1 in the same transaction (only when the column
+        is new, so a rerun never touches a row written since). Neither table
+        is captured by a sync trigger that names columns
+        (``unified_kg_state``'s capture serialises the whole row;
+        ``concept_merge_candidates`` is LOCAL), so no trigger changes. With
+        change capture switched on, that UPDATE logs one key-only upsert per
+        existing state row (PostgreSQL's ADD COLUMN default fires no trigger):
+        the next export re-sends those rows as they are, an accepted SQLite-only
+        difference in export volume, not in content."""
         with self._connect() as db:
             self.add_column_if_missing(
                 db, "concept_merge_candidates", "seed_version",
                 "INTEGER NOT NULL DEFAULT 1",
             )
-            self.add_column_if_missing(
-                db, "unified_kg_state", "concept_seed_version",
-                "INTEGER NOT NULL DEFAULT 1",
-            )
+            columns = {row[1] for row in db.execute(
+                "PRAGMA table_info(unified_kg_state)").fetchall()}
+            if "concept_seed_version" not in columns:
+                db.execute("ALTER TABLE unified_kg_state ADD COLUMN "
+                           "concept_seed_version INTEGER NOT NULL DEFAULT 2")
+                db.execute("UPDATE unified_kg_state SET concept_seed_version = 1")
 
     def migrate(self) -> list[int]:
         with self._connect() as db:

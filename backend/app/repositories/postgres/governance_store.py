@@ -44,7 +44,7 @@ from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER
 from app.repositories.postgres.promotion_provenance_store import (
     materialize_promotion_evidence,
 )
-from app.domain.kg_merge_seed import check_concept_seed_version
+from app.domain.kg_merge_seed import ConceptSeedSpaceMoved, check_concept_seed_version
 from app.domain.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
     USABLE_STATUSES,
@@ -255,8 +255,9 @@ def _decision_row(r) -> dict:
 
 def published_concept_seed_version_on(connection, notebook_id: str) -> int:
     """The concept seed space of ``notebook_id``'s published merge
-    (``unified_kg_state.concept_seed_version``; no row = 1), read in the
-    caller's transaction."""
+    (``unified_kg_state.concept_seed_version``; no row reads as
+    ``CONCEPT_SEED_VERSION``, the column default), read in the caller's
+    transaction."""
     from app.domain.kg_merge_seed import published_concept_seed_version
     row = connection.execute(
         "SELECT concept_seed_version FROM unified_kg_state WHERE notebook_id=%s",
@@ -391,12 +392,18 @@ class GovernanceStore:
         return seed_fn_for(object_type, concept_seed_version=concept_seed_version)
 
     @staticmethod
-    def published_concept_seed_space(connection, notebook_id: str) -> "tuple[int, frozenset]":
+    def published_concept_seed_space(
+        connection, notebook_id: str, *, override_keys: bool = True,
+    ) -> "tuple[int, frozenset]":
         """``(version, override keys)`` of the notebook's published merge, in
         the caller's transaction: ``unified_kg_state.concept_seed_version`` (no
-        state row = 1; one primary-key read) and, in space 2 only, the v1 seeds
-        its stored decisions keep as ``~v1:<seed>`` (one read of the decided
-        rows that carry such a seed, through ``idx_candidates_nb_status``)."""
+        state row = ``CONCEPT_SEED_VERSION``; one primary-key read) and, in
+        space 2 only, the v1 seeds its stored decisions keep as ``~v1:<seed>``
+        (one read of the decided rows that carry such a seed, through
+        ``idx_candidates_nb_status``). ``override_keys=False``: the version
+        alone (empty keys), for a caller that does not place or seed."""
+        if not override_keys:
+            return published_concept_seed_version_on(connection, notebook_id), frozenset()
         return published_concept_seed_space_on(connection, notebook_id)
 
     @staticmethod
@@ -793,9 +800,17 @@ class GovernanceStore:
         object_type: str,
         rows: List[dict],
         now: str,
+        *,
+        concept_seed_version: "int | None" = None,
     ) -> int:
         """Insert cluster member rows, skipping member ids already present in
         the (notebook, type) slice — the append_clusters idempotency contract.
+
+        ``concept_seed_version`` (incremental placement only): the seed space
+        ``rows`` were placed in. It is compared, under the same lock as the
+        generation pointer, with the space published now; a full rebuild that
+        published another space in between raises ``ConceptSeedSpaceMoved``
+        before any row is written, and the caller places again (S1).
         After delete_clusters in the same transaction the existing set is
         empty, so the write_clusters path inserts every row unchanged.
 
@@ -811,9 +826,18 @@ class GovernanceStore:
         批 3·W2 §2.2 锁序红线:published 代指针必须在 advisory lock **之后**
         读——翻转微事务持全 4 类锁改指针,append 与它串行后要么读到旧 P(行落
         P 代,created_at 在锚点窗口内,催收兜住),要么读到新 G(直接写对),
-        两个分支都闭合;锁前读则可能拿旧 P 写在翻转提交之后,永久丢行。"""
+        两个分支都闭合;锁前读则可能拿旧 P 写在翻转提交之后,永久丢行。
+        「直接写对」还要求安置用的概念种子空间仍是已发布的那个(S1):库的第一次
+        v2 全量重建可能恰在融合锁外读空间与这里之间翻转,所以空间在同一把锁后
+        复核(``concept_seed_version``),变了就不写、抛 ``ConceptSeedSpaceMoved``
+        由融合方按新空间重新安置——催收只重放退休代里的行,看不到写进新代的
+        旧空间行。"""
         lock_cluster_artifact_type(connection, notebook_id, object_type)
         generation = self._published_cluster_generation(connection, notebook_id)
+        if concept_seed_version is not None:
+            published = published_concept_seed_version_on(connection, notebook_id)
+            if published != concept_seed_version:
+                raise ConceptSeedSpaceMoved(notebook_id, concept_seed_version, published)
         existing = self._existing_cluster_members(
             connection, notebook_id, object_type, rows, generation
         )
@@ -1162,6 +1186,8 @@ class GovernanceStore:
         grew = 0
         done: List[str] = []
         now_ts = normalize_timestamp(now)
+        updates: List[tuple] = []
+        inserts: List[tuple] = []
         for row_id in ids:
             r = found.get(row_id)
             if r is None:
@@ -1170,25 +1196,29 @@ class GovernanceStore:
             if (row["key_a"], row["key_b"], row["status"]) != tuple(expected[row_id]):
                 continue
             first, rest = pairs[row_id][0], pairs[row_id][1:]
-            connection.execute(
-                "UPDATE concept_merge_candidates SET seed_a=%s, seed_b=%s, "
-                "canonical_a=%s, canonical_b=%s, seed_version=2, updated_at=%s "
-                "WHERE id=%s AND notebook_id=%s",
-                (first[0], first[1], "K-" + first[0], "K-" + first[1], now_ts,
-                 row_id, notebook_id))
-            if rest:
-                execute_many(
-                    connection,
-                    "INSERT INTO concept_merge_candidates "
-                    "(id,notebook_id,canonical_a,canonical_b,seed_a,seed_b,score,status,"
-                    "confidence,rationale,reviewed_by,seed_version,created_at,updated_at) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,2,%s,%s)",
-                    [(self.seams.new_id("mc"), notebook_id, "K-" + a, "K-" + b, a, b,
-                      r["score"], r["status"], r["confidence"], r["rationale"],
-                      r["reviewed_by"], r["created_at"], now_ts) for a, b in rest])
+            updates.append((first[0], first[1], "K-" + first[0], "K-" + first[1], now_ts,
+                            row_id, notebook_id))
+            inserts.extend(
+                (self.seams.new_id("mc"), notebook_id, "K-" + a, "K-" + b, a, b,
+                 r["score"], r["status"], r["confidence"], r["rationale"],
+                 r["reviewed_by"], r["created_at"], now_ts) for a, b in rest)
             if r["status"] in ("confirmed", "rejected"):
                 grew += len(rest)
             done.append(row_id)
+        for at in range(0, len(updates), _TRANSLATION_BATCH):
+            execute_many(
+                connection,
+                "UPDATE concept_merge_candidates SET seed_a=%s, seed_b=%s, "
+                "canonical_a=%s, canonical_b=%s, seed_version=2, updated_at=%s "
+                "WHERE id=%s AND notebook_id=%s", updates[at:at + _TRANSLATION_BATCH])
+        for at in range(0, len(inserts), _TRANSLATION_BATCH):
+            execute_many(
+                connection,
+                "INSERT INTO concept_merge_candidates "
+                "(id,notebook_id,canonical_a,canonical_b,seed_a,seed_b,score,status,"
+                "confidence,rationale,reviewed_by,seed_version,created_at,updated_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,2,%s,%s)",
+                inserts[at:at + _TRANSLATION_BATCH])
         return grew, done
 
     # ------------------------------------------------------ merge review job
@@ -1881,6 +1911,7 @@ class GovernanceStore:
         base_object_ids: list[str] = []
         created_object_ids: list[str] = []
         merged_object_ids: list[str] = []
+        base_space = None       # the base library's published seed space, read once
         for extracted in candidates:
             object_type = str(extracted.get("object_type") or "")
             payload = extracted.get("payload")
@@ -1891,8 +1922,9 @@ class GovernanceStore:
             base_objs = _base_dedup_rows_for_update(
                 connection, base_nb_id, object_type
             )
-            seed_version, override = published_concept_seed_space_on(
-                connection, base_nb_id)
+            if base_space is None:
+                base_space = published_concept_seed_space_on(connection, base_nb_id)
+            seed_version, override = base_space
             base_match_id = find_base_dedup_match(
                 object_type, payload, base_objs,
                 concept_seed_version=seed_version, override=override)

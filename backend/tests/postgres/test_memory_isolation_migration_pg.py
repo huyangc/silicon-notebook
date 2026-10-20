@@ -336,6 +336,41 @@ def test_rebuild_pass_sets_the_marker_through_the_ordinary_slot(
         repository.close()
 
 
+def test_the_bridge_purge_matches_each_candidate_in_its_own_seed_space_pg(
+    upgraded, postgres_settings
+):
+    """Twin of the SQLite case. S1: the pass's purge recomputes a Memory concept's bridge ids in both
+    concept seed spaces and matches each merge candidate by its OWN
+    ``seed_version``. "Secret Project" (bob's Memory) bridges as
+    ``K-secret project`` in space 1 and as ``K-secretproject`` /
+    ``K-~v1:secret project`` in space 2: the space-2 rows naming those go, a
+    space-1 row naming the space-2 form stays (not a bridge id of its space)."""
+    from app.services.memory_isolation_rebuild import MemoryIsolationRebuild
+    from app.services.postgres_repository import PostgresRepository
+
+    database, _before, _after = upgraded
+    repository = PostgresRepository(postgres_settings)
+    try:
+        service = MemoryIsolationRebuild.for_repository(repository)
+        with database.write() as db:
+            for mid, side, version in (("mc-s1-v2", "K-secretproject", 2),
+                                       ("mc-s1-override", "K-~v1:secret project", 2),
+                                       ("mc-s1-decoy", "K-secretproject", 1)):
+                db.execute(
+                    "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,"
+                    "canonical_b,score,status,seed_version,created_at,updated_at) "
+                    "VALUES (%s,%s,%s,'K-xtal',0.9,'rejected',%s,now(),now())",
+                    (mid, cases.NB_F, side, version))
+        service._purge_bridge_candidates(cases.NB_F)
+        with database.connect() as db:
+            left = {r["id"] for r in db.execute(
+                "SELECT id FROM concept_merge_candidates WHERE id LIKE 'mc-s1-%%'"
+            ).fetchall()}
+        assert left == {"mc-s1-decoy"}
+    finally:
+        repository.close()
+
+
 def test_the_pass_leaves_shared_only_totals_even_when_the_input_looks_unchanged_pg(
     upgraded, postgres_settings
 ):

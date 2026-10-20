@@ -342,8 +342,9 @@ def test_the_overview_summary_reads_the_ledger(repo, built):
     assert summary.freshness.stale is False
     assert summary.counts == {"by_rule": {"F1": 1, "F2": 1, "F3": 1, "F4": 1, "F5": 1},
                               "dismissed": 0}
-    # The world's merge is published in seed space 1 (the state row's default)
-    # while the code builds in 2: the fix is deployed, "更新分析" applies it.
+    # The world's merge is published in seed space 1 (built before the
+    # upgrade) while the code builds in 2: the fix is deployed, "更新分析"
+    # applies it.
     assert summary.dev_items == [{"item_id": "S1", "status": "fixed_pending_update",
                                   "groups": 1, "objects": 2,
                                   "samples": [{"names": ["Q-Former", "Qformer"]}]}]
