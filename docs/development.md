@@ -521,7 +521,9 @@ keeps every package both sides need at the runtime lock's version.
 `scripts/lock_python_deps.sh` compiles them with pip-tools `--generate-hashes`
 into `backend/requirements.txt` (runtime lock) and
 `backend/requirements-dev.txt` (test lock). It resolves with CPython 3.13, the
-version CI and production run (`LOCK_PYTHON`, default `python3.13`), from a
+version CI and production run (`LOCK_PYTHON`, default `python3.13`); every locked
+version also publishes wheels for 3.14, so a local 3.14 environment installs the
+same locks (hnswlib builds from source on either). It runs from a
 private venv under `.local/` with pinned pip and pip-tools versions. The hashes
 cover every file PyPI publishes for each pinned version, so one lock installs on
 macOS and Linux; resolving on either platform gives the same files while no
@@ -555,9 +557,25 @@ edited `.in` file that was never relocked fails it. It also fails when a direct
 requirement is missing from its lock or pinned outside its range, a pin is
 unhashed, no longer required or required by something unlocked, a lock is not
 the lock script's Python 3.13 output, the test lock disagrees with the runtime
-lock on a shared package, or a test tool reaches the runtime lock. The first lock
-(2026-10-21) took exactly the 87 versions the `master` CI run of `3132d4667`
-installed.
+lock on a shared package, or a test tool reaches the runtime lock. It also walks
+each locked package's own `Requires-Dist` (markers and requested extras
+evaluated) and fails when a requirement is missing from the lock; that check
+reads installed metadata, so it covers every package where the environment was
+installed from the locks, as in CI. `backend/tests/test_third_party_imports_resolve.py`
+imports every third-party module `backend/app` and `scripts/` import, including
+the lazy, fail-open ones inside functions, checks every imported name and every
+attribute read on a lazily imported module, and requires the providing
+distribution to be locked; `test_parsers_pdf_python.py` converts a real PDF with
+the installed pymupdf4llm. Together they keep an upgrade from locking a broken
+release that a fail-open fallback would hide.
+
+The first lock (2026-10-21) kept the versions the `master` CI run of `3132d4667`
+installed, with one exception: that run, like every fresh install since PyPI
+published it, got `pymupdf4llm` 2.0, an empty placeholder with no module, so
+the PDF fallback had silently dropped to pypdf plain text. `requirements.in`
+caps it below 2 and the lock pins 1.28.2 with its dependencies (PyMuPDF,
+pymupdf-layout, onnxruntime and four more), which adds about 200 MB to a
+backend environment.
 
 ### GitHub Actions CI
 

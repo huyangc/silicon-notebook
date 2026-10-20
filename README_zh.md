@@ -26,6 +26,7 @@
 
 ### 环境要求
 
+- macOS 或 Linux（不支持 Windows，请在 WSL 中运行）
 - Python 3.13+
 - Node.js 26（只支持这一个大版本，钉在 `.nvmrc`，npm 会拒绝其他版本）与 npm
 - git
@@ -38,7 +39,7 @@ git clone <repo-url> silicon-notebook
 cd silicon-notebook
 
 python3 -m venv .venv
-source .venv/bin/activate            # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 python -m pip install --upgrade pip
 # 带哈希锁定的运行依赖；要跑测试门禁再加 -r backend/requirements-dev.txt
 python -m pip install --require-hashes -r backend/requirements.txt

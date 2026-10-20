@@ -407,7 +407,9 @@ pytest 主控预热字体缓存用的 matplotlib）；其中 `-c requirements.tx
 包保持运行锁里的版本。`scripts/lock_python_deps.sh` 用 pip-tools `--generate-hashes`
 把它们编译成 `backend/requirements.txt`（运行锁）与 `backend/requirements-dev.txt`
 （测试锁）。解析固定用 CI 与生产所跑的 CPython 3.13（`LOCK_PYTHON`，默认
-`python3.13`），在 `.local/` 下的私有 venv 里跑钉死版本的 pip 与 pip-tools。哈希覆盖
+`python3.13`）；锁定的每个版本也发布了 3.14 的 wheel，本机 3.14 环境同样能装这两份锁
+（hnswlib 在哪个版本上都是源码编译）。锁脚本在 `.local/` 下的私有 venv 里跑钉死版本的
+pip 与 pip-tools。哈希覆盖
 PyPI 为每个钉定版本发布的全部文件，所以同一份锁在 macOS 与 Linux 上都能装；只要没有
 依赖在两个平台间按平台条件区分，在哪个平台解析结果都相同；若锁漏了这样的依赖，
 `pip install --require-hashes` 会响亮失败，而不是装上别的东西。
@@ -433,8 +435,18 @@ PyPI 为每个钉定版本发布的全部文件，所以同一份锁在 macOS �
 `.in` 文件的指纹（`scripts/python_lockfiles.py`；注释、顺序、空白不计），改了 `.in`
 却没重锁就会红。以下情况同样会红：直接依赖不在锁里或钉版超出范围；某个钉版没有哈希、
 已不再被需要、或被未锁定的包需要；锁不是锁脚本在 Python 3.13 下的产物；测试锁与运行锁
-在共享包上不一致；测试工具进了运行锁。首份锁（2026-10-21）与 `3132d4667` 那次 `master`
-CI 实际安装的 87 个版本完全一致。
+在共享包上不一致；测试工具进了运行锁。它还沿每个锁定包自己的 `Requires-Dist`（按 marker
+与被请求的 extras 求值）逐条检查，缺进锁的依赖就红；这一步读已安装包的元数据，所以在按锁
+安装的环境（如 CI）里覆盖全部锁定包。`backend/tests/test_third_party_imports_resolve.py`
+把 `backend/app` 与 `scripts/` 引用的每个第三方模块都导入一遍（包括函数内 fail-open 的
+懒加载），核对每个被导入的名字、每个对懒加载模块读取的属性，并要求提供它的发行包在锁里；
+`test_parsers_pdf_python.py` 用已安装的 pymupdf4llm 真转换一份 PDF。两者合起来，防止一次
+升级把某个坏版本锁进来、又被 fail-open 兜底悄悄吞掉。
+
+首份锁（2026-10-21）沿用 `3132d4667` 那次 `master` CI 实际安装的版本，只有一个例外：那次
+CI 和 PyPI 发布它以来的每次全新安装，装到的都是 `pymupdf4llm` 2.0——一个没有模块的空壳
+占名包，PDF 兜底因此一直静默退回 pypdf 纯文本。`requirements.in` 把它限制在 2 以下，锁里
+钉 1.28.2 及其依赖（PyMuPDF、pymupdf-layout、onnxruntime 等七个包），后端环境约增 200 MB。
 
 ### GitHub Actions CI
 

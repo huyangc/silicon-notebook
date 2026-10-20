@@ -26,6 +26,7 @@ The interface starts in auto mode for upload-and-ask use. Advanced mode exposes 
 
 ### Requirements
 
+- macOS or Linux (Windows is not supported; use WSL)
 - Python 3.13+
 - Node.js 26 (exactly this major; pinned in `.nvmrc`, npm refuses others) and npm
 - git
@@ -38,7 +39,7 @@ git clone <repo-url> silicon-notebook
 cd silicon-notebook
 
 python3 -m venv .venv
-source .venv/bin/activate            # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 python -m pip install --upgrade pip
 # hash-locked runtime dependencies; for the test gates add -r backend/requirements-dev.txt
 python -m pip install --require-hashes -r backend/requirements.txt

@@ -251,6 +251,8 @@ database-wide advisory lock，命令结束时释放并关闭 repository。在线
 - **wheelhouse 装不上(版本标签不匹配)**:wheel 是按打包机 python 小版本(如 cp313)编译的。若目标机
   python 小版本不同,C 扩展 wheel 会装不上——`install.sh` 会自动回退到按 `backend/requirements.txt`(带哈希的
   运行依赖锁)`--require-hashes` 在线安装。最稳做法是让打包机 python 小版本与目标机一致。
+- **不要全局设置 `PIP_REQUIRE_HASHES=1`**:锁文件自带哈希,安装时已自动校验;这个环境变量还会被 pip 带进
+  编译 hnswlib 的隔离构建环境,而构建依赖没有哈希,编译会失败(打包机上同理)。
 - **`THESE PACKAGES DO NOT MATCH THE HASHES`**:离线安装校验 `wheelhouse/locked-wheels.txt`、在线安装校验
   `backend/requirements.txt` 里的哈希;不符说明包被改动或 pip 源返回了不同的文件。不要绕过校验,换用原始包
   或可信源重装。

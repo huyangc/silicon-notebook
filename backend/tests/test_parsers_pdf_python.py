@@ -68,3 +68,29 @@ def test_pymupdf4llm_error_uses_last_resort_pypdf(tmp_path, monkeypatch):
     monkeypatch.setattr(parsers, "parse_pdf_pypdf", lambda source_id, path: expected)
 
     assert parsers.parse_pdf_python("src-1", tmp_path / "paper.pdf") == expected
+
+
+def test_the_installed_pymupdf4llm_parses_a_real_pdf(tmp_path):
+    """No stub: the locked pymupdf4llm must import and convert a real PDF.
+
+    ``parse_pdf_python`` fails open to pypdf on any error, so a broken or empty
+    pymupdf4llm release (PyPI's 2.0 is a placeholder with no module) would
+    otherwise only show up as every non-MinerU PDF degrading to plain text.
+    """
+    import pymupdf
+
+    path = tmp_path / "smoke.pdf"
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 96), "Hash locked dependencies", fontsize=22)
+    page.insert_text((72, 140), "The fallback parser reads this paragraph.", fontsize=11)
+    document.save(str(path))
+    document.close()
+
+    elements = parsers.parse_pdf_python("src-smoke", path)
+
+    assert elements, "pymupdf4llm returned nothing for a one-page PDF"
+    assert {element.metadata["parser"] for element in elements} == {"pymupdf4llm"}
+    text = "\n".join(element.text for element in elements)
+    assert "Hash locked dependencies" in text
+    assert "The fallback parser reads this paragraph." in text

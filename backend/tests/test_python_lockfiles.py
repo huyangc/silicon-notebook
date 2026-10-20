@@ -11,10 +11,12 @@ have produced from the committed inputs.
 from __future__ import annotations
 
 import hashlib
+from importlib import metadata
 import importlib.util
 from pathlib import Path
 import sys
 
+from packaging.markers import default_environment
 from packaging.requirements import Requirement
 from packaging.version import Version
 import pytest
@@ -108,6 +110,67 @@ def test_every_locked_package_is_still_required(source, lock) -> None:
                 assert parent in entries, (
                     f"{lock.name}: {name} is required by {reason!r}, which is not locked"
                 )
+
+
+def _installed_at(name: str, version: str) -> metadata.Distribution | None:
+    try:
+        dist = metadata.distribution(name)
+    except metadata.PackageNotFoundError:
+        return None
+    return dist if Version(dist.version) == Version(version) else None
+
+
+def _missing_requirements(source: Path, lock: Path) -> dict[str, list[str]]:
+    """What the locked packages require, per their own metadata, but the lock lacks.
+
+    Walks Requires-Dist from the ``.in`` file's direct requirements (with the
+    extras they request, and the extras each requirement asks of its target),
+    evaluating markers for this interpreter. Only a package installed at its
+    locked version has metadata this check can trust. CI installs exactly the
+    two locks (``pip install --require-hashes`` refuses anything else), so
+    there every locked package is examined.
+    """
+    entries = lockfiles.parse_lock(lock)
+    extras: dict[str, set[str]] = {}
+    for name, requirement in _direct_requirements(source).items():
+        extras.setdefault(name, set()).update(requirement.extras)
+    pending = list(extras)
+    examined: set[tuple[str, frozenset[str]]] = set()
+    missing: dict[str, list[str]] = {}
+    environment = default_environment()
+    while pending:
+        name = pending.pop()
+        key = (name, frozenset(extras.get(name, set())))
+        if key in examined or name not in entries:
+            continue
+        examined.add(key)
+        dist = _installed_at(name, entries[name].version)
+        if dist is None:
+            continue
+        for raw in dist.requires or []:
+            requirement = Requirement(raw)
+            wanted = requirement.marker is None or any(
+                requirement.marker.evaluate({**environment, "extra": extra})
+                for extra in ("", *sorted(extras.get(name, set())))
+            )
+            if not wanted:
+                continue
+            child = lockfiles.canonical_name(requirement.name)
+            if child not in entries:
+                missing.setdefault(name, []).append(raw)
+                continue
+            before = set(extras.get(child, set()))
+            extras.setdefault(child, set()).update(requirement.extras)
+            if extras[child] != before or (child, frozenset(before)) not in examined:
+                pending.append(child)
+    return missing
+
+
+@pytest.mark.parametrize(("source", "lock"), PAIRS, ids=lambda path: path.name)
+def test_every_requirement_of_a_locked_package_is_locked_too(source, lock) -> None:
+    """A transitive pin deleted from a lock (sniffio, say) fails here even
+    though nothing else in the lock names it."""
+    assert _missing_requirements(source, lock) == {}
 
 
 def test_the_dev_lock_installs_on_top_of_the_runtime_lock() -> None:

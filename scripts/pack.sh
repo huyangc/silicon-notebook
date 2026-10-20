@@ -151,8 +151,9 @@ else
   log "预编译 python wheelhouse(numpy/scipy/hnswlib/… 就地编译)…"
   mkdir -p "$STAGE/wheelhouse"
   idx=(); [[ -n "${PIP_INDEX_URL:-}" ]] && idx=(--index-url "$PIP_INDEX_URL")
-  # --require-hashes:下载的每个 wheel/sdist 都按锁文件的哈希校验;从已校验 sdist 就地编译的
-  # wheel(hnswlib)没有 PyPI 哈希,locked-wheels.txt 记下它在本机编译出的文件哈希。
+  # --require-hashes:锁文件里每个 wheel/sdist 下载后都按锁的哈希校验。例外:编译 hnswlib 时
+  # pip 按 PEP 517 往隔离构建环境里装的构建依赖(setuptools/numpy/pybind11 等)不在锁里,也不校验
+  # 哈希。从已校验 sdist 就地编译的 wheel 没有 PyPI 哈希,locked-wheels.txt 记下它在本机的文件哈希。
   "$PACK_PYTHON" -m pip wheel --require-hashes -r "$ROOT_DIR/backend/requirements.txt" -w "$STAGE/wheelhouse" ${idx[@]+"${idx[@]}"} \
     || die "pip wheel 失败;修复后重试,或用 SKIP_WHEELHOUSE=1 改纯在线安装。"
   "$PACK_PYTHON" "$ROOT_DIR/scripts/python_lockfiles.py" wheelhouse \

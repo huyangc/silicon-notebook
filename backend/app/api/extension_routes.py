@@ -441,7 +441,7 @@ def _dependant_calls(dependant: Any) -> set[Any]:
     """Every dependency callable reachable from ``dependant``, transitively.
 
     ``APIRoute.dependant`` is FastAPI's semi-public solved-dependency tree
-    (pinned by ``backend/requirements.txt:1`` — ``fastapi==0.135.3``). There is
+    (pinned by ``backend/requirements.in:5`` — ``fastapi==0.135.3``). There is
     no public API that answers "does this route run core's notebook gate?", and
     the alternative — trusting a plugin's own declaration — is exactly what the
     check below exists to avoid. If a FastAPI upgrade changes this shape, the
@@ -799,7 +799,7 @@ def _wrap_handler_unauthorized(
     pristine endpoint, so no signature, annotation, or ``__globals__`` question
     arises. This is the same semi-public ``route.dependant`` surface the gate
     check above already depends on (fastapi pinned in
-    ``backend/requirements.txt:1``); the 401-translation tests fail loudly if a
+    ``backend/requirements.in:5``); the 401-translation tests fail loudly if a
     future version changes it.
 
     Generator endpoints are skipped: FastAPI calls ``dependant.call`` directly
