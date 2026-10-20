@@ -342,6 +342,9 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 - [ ] **退役 chunk 流水线：不做**（用户 2026-10-19 裁决）。通用问答（chunk）与深度分析（reasoning）两种模式
       长期并存；高级界面默认模式改为 reasoning（「高级模式」名字不改）。原「问答方法归一」路线的第 ④ 步
       及其放量前置（chunk / reasoning 对照、对照基线核实）随之作废。
+- [ ] **SQLite 后端退役：不做**（用户 2026-10-19 裁决）。SQLite 长期保留，支持离线、单机与测试；
+      PostgreSQL 仍是规范定义。2026-07-22 的退役计划（`docs/superpowers/plans/2026-07-22-postgresql-sqlite-retirement.md`）
+      从未执行，状态头已标「已放弃」。双后端义务与能力对等矩阵见 `architecture.md` 2.2.2 节。
 
 **性能**（理由来自整改程序的性能设计稿与分片评审；重开前一律先差分测量）
 
@@ -431,10 +434,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 - [ ] **前端无 ESLint 门禁**：`frontend/package.json` 的 devDependencies 有 `eslint` 与
       `eslint-config-next`，但仓库没有 ESLint 配置文件，`npm run lint` 实际是 `tsc --noEmit`；
       `scripts/check.sh` 与 CI 工作流都不跑 ESLint（后端同样没有 pyflakes / ruff 一类的 lint 门禁）。
-- [ ] **没有 SQLite / PostgreSQL 双后端能力对等矩阵**：两端对等靠各特性的 conformance 用例分别守，
-      没有一张按能力列出两端是否都实现的总表；`docs/superpowers/specs/2026-08-21-architecture-review.md`
-      提过「由测试从 manifest 生成缺口报告」，未做。PostgreSQL 是主环境、SQLite 是可选后端，做之前先
-      决定 SQLite 的支持范围。
 
 ---
 

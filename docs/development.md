@@ -386,6 +386,17 @@ statement-local planner settings (measured in both directions).
 
 ### Schema and migration authoring
 
+- SQLite and PostgreSQL are both kept long-term (product decision of 2026-10-19).
+  PostgreSQL is the canonical definition; SQLite is the mirror supported for offline,
+  single-machine and test use. The support scope and the capability parity matrix are owned
+  by [the architecture document](../architecture.md#222-双后端长期并存与能力对等矩阵). A storage
+  change (schema, store method, SQL predicate or lock order) lands on both adapters in the
+  same PR: settle the PostgreSQL form first, mirror the same semantics on SQLite, and register
+  the paired migrations in `POSTGRES_SCHEMA_MANIFEST`. A structure that exists only for
+  performance and whose absence leaves SQLite's results unchanged may be PostgreSQL-only, but
+  it is registered in the matrix. Behavior tests come in pairs (the SQLite one in G1, its
+  PostgreSQL twin in the PG lane); `backend/tests/test_dual_backend_parity.py` checks the
+  version pairing, port implementation and public method sets statically.
 - SQLite schema changes append `_migration_N` and bump `SCHEMA_VERSION` in
   [the migrator](../backend/app/repositories/sqlite/migrations.py); never modify a
   sealed migration. Startup recovery, stable seeds and administrator upgrades remain
@@ -631,7 +642,9 @@ three-minute optimization target; a successful test result alone does not prove 
 that target, and cold-cache installation time is included in the observation.
 The lane covers direct PostgreSQL behavior only; retired tests for the SQLite
 backend implementation, SQLite-to-PostgreSQL import/forward-shadow, and
-cross-backend parity are not active coverage.
+cross-backend parity are not active coverage. Current dual-backend parity is held by each
+feature's SQLite tests and their PostgreSQL twins in this lane, plus the database-free
+`backend/tests/test_dual_backend_parity.py` in G1.
 
 CI portability is part of the gate contract: every filesystem, data, and
 dependency path used by a CI-executed test is repository-relative and

@@ -1070,3 +1070,44 @@ def test_default_notebook_name_is_documented_as_a_contract_not_copy():
         "立即创建 `Untitled notebook`",
         "内部标识符与已持久化默认值保持不变",
     ))
+
+
+def test_long_term_dual_backend_decision_is_owned_by_architecture_and_paired_docs():
+    """2026-10-19: SQLite stays; architecture owns the matrix, the pairs route to it."""
+    retirement_plan = "docs/superpowers/plans/2026-07-22-postgresql-sqlite-retirement.md"
+    section = _between(
+        "architecture.md", "### 2.2.2 双后端长期并存与能力对等矩阵", "### 2.3 ",
+    )
+    for phrase in (
+        "SQLite 后端长期保留，与 PostgreSQL 长期并存",
+        "PostgreSQL 是规范定义",
+        "支持范围是离线、单机和测试",
+        "新功能的双后端义务",
+        retirement_plan,
+        "backend/tests/test_dual_backend_parity.py",
+    ):
+        assert "".join(phrase.split()) in "".join(section.split()), phrase
+    assert "状态：已放弃（2026-10-19 用户裁决：SQLite 长期保留）" in _read(retirement_plan)
+    matrix_link = "../architecture.md#222-双后端长期并存与能力对等矩阵"
+    for name, phrases in {
+        "docs/development.md": (
+            "SQLite and PostgreSQL are both kept long-term",
+            "lands on both adapters in the same PR",
+            "settle the PostgreSQL form first",
+        ),
+        "docs/development_zh.md": (
+            "SQLite 与 PostgreSQL 两个后端长期并存",
+            "在同一个 PR 里两侧都做",
+            "先定 PostgreSQL 口径",
+        ),
+        "docs/deployment-and-configuration.md": (
+            "SQLite's support scope is offline use",
+            "supports PostgreSQL only",
+        ),
+        "docs/deployment-and-configuration_zh.md": (
+            "SQLite 的支持范围：离线",
+            "只支持 PostgreSQL",
+        ),
+    }.items():
+        _assert_contract(name, phrases)
+        assert matrix_link in _markdown_link_targets(_read(name), _read(name)), name
