@@ -822,7 +822,7 @@ def _synthesis_step_detail(
         # 之前逐键相等。
         **{
             key: counts[key]
-            for key in ("included_document_reads",)
+            for key in ("included_document_reads", "included_spreadsheets")
             if key in counts
         },
         # 本轮产生的类型化集合清单数(诊断字段,不上屏)。清单本身
@@ -3840,16 +3840,18 @@ class AskService:
         # down to only the ids whose "k<n>:" line actually survived truncation
         # — counting before that step over-reports what really entered the
         # prompt. Elements live in the isolated k4001+ (_ELEMENT_KEY_BASE)
-        # namespace; everything else in source_map here is a chunk. A hybrid-
-        # scope request CAN pass structured_block (and the collection-map
-        # block) together with chunks, but both are appended with an empty id
-        # map and contribute no keys, so every low-range key counted here is a
-        # surviving chunk line — no ambiguity.
+        # namespace, collection-preview rows in k5001+, workbook results in
+        # k6001+ (``spreadsheet_prompt_block``, one key per executed analysis,
+        # carried in through ``structured_map``) and sampled document reads in
+        # k7001+; everything below the element band is a chunk. The
+        # collection-map block is appended with an empty id map and
+        # contributes no keys.
         # 分区判定按**去掉本节偏移之后**的号段来做:节偏移是 10000 的倍数,不减
         # 掉的话第 2 节的 chunk(k10001)会被算成"集合清单"(>=5000),整份 synthesis
         # 计数从第二节起全错。
         included_elements = 0
         included_collections = 0
+        included_spreadsheets = 0
         included_document_reads = 0
         for key in source_map:
             try:
@@ -3857,16 +3859,20 @@ class AskService:
             except (TypeError, ValueError):
                 continue
             # 7000+ 在 5000+ 之前判:按篇原文取样的号段在集合清单之上,反过来写
-            # 的话每一段原文摘录都会被算成一行清单。外部证据的 6000 段不在这里
-            # ——它是在 source_map/kg_map 合并之后才拼进 id_map 的。
+            # 的话每一段原文摘录都会被算成一行清单。6000 段在这里只有表格结果
+            # (经 structured_map 进来),单独计数,不再算成集合清单行;外部证据
+            # 也在 6000 段,但它是在 source_map/kg_map 合并之后才拼进 id_map 的。
             if key_num >= self._DOCUMENT_READ_KEY_BASE:
                 included_document_reads += 1
+            elif key_num >= self._EXTERNAL_KEY_BASE:
+                included_spreadsheets += 1
             elif key_num >= self._COLLECTION_KEY_BASE:
                 included_collections += 1
             elif key_num >= self._ELEMENT_KEY_BASE:
                 included_elements += 1
         included_chunks = (len(source_map) - included_elements
-                           - included_collections - included_document_reads)
+                           - included_collections - included_spreadsheets
+                           - included_document_reads)
         counts = {
             "included_kg": included_kg,
             "included_chunks": included_chunks,
@@ -3877,6 +3883,10 @@ class AskService:
             # 之前逐键相等(恒零地写进去会改掉每一条既有答案的持久化 payload)。
             **({"included_document_reads": included_document_reads}
                if included_document_reads else {}),
+            # 进 prompt 的表格分析结果数,同样**稀疏**:没有表格结果的一轮
+            # counts 逐键不变。
+            **({"included_spreadsheets": included_spreadsheets}
+               if included_spreadsheets else {}),
             # 外部证据的装入/丢弃披露,**稀疏**:没有外部证据的一轮这里什么都不
             # 加,counts 与接入这个特性之前逐键相等(理由见
             # ``_append_external_context``)。

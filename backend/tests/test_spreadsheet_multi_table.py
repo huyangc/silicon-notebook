@@ -17,6 +17,7 @@ import json
 import pytest
 
 from app.services.spreadsheet_analysis import spreadsheet_prompt_block
+from tests.test_exact_lookup import repo  # noqa: F401  (fixture)
 from tests.test_spreadsheet_federation import (
     _COMPARE,
     _Planner,
@@ -341,7 +342,7 @@ def test_targets_over_the_cap_are_cut_in_plan_order_and_disclosed(tmp_path):
     ]
     disclosure = (
         "本次规划了 4 项表格分析，超过单次最多 3 项的上限，按规划顺序只做了前 3 项；"
-        "未做：A 报价表 · Sheet（数据概况）。"
+        "未做：A 报价表 · Sheet（数据概况：全部行）。"
     )
     # Said once, on the last card -- where the missing table would follow.
     assert results[-1].warnings[-1] == disclosure
@@ -508,6 +509,53 @@ def test_only_an_exact_repeat_is_a_duplicate(tmp_path):
     }
 
 
+_COUNT_A = {"source_id": "quote-a", "sheet": "Sheet", "operation": "aggregate",
+            "aggregation": "count", "group_by": "Vendor"}
+_FILTER_A = {"source_id": "quote-a", "sheet": "Sheet", "operation": "filter",
+             "columns": ["Item"]}
+
+# One pair per identity field: the two targets differ in that field alone,
+# so they compute different things and both must run.
+_IDENTITY_PAIRS = {
+    "top.sort_by": (_TOP_A, {**_TOP_A, "sort_by": "Vendor"}),
+    "top.order": (_TOP_A, {**_TOP_A, "order": "asc"}),
+    "aggregate.measure": (_SUM_A, {**_SUM_A, "measure": "Item"}),
+    "aggregate.aggregation": (_SUM_A, {**_SUM_A, "aggregation": "max"}),
+    "aggregate.group_by": (_COUNT_A, {**_COUNT_A, "group_by": "Item"}),
+    "filter.columns": (_FILTER_A, {**_FILTER_A, "columns": ["Price"]}),
+    "filters": (_TOP_A, {**_TOP_A, "filters": [
+        {"column": "Vendor", "operator": "eq", "value": "x"},
+    ]}),
+}
+
+
+@pytest.mark.parametrize("field", sorted(_IDENTITY_PAIRS))
+def test_targets_differing_in_one_identity_field_both_run(tmp_path, field):
+    first, second = _IDENTITY_PAIRS[field]
+    _planner, results, trace = _same_sheet_run(tmp_path, [first, second])
+    assert len(results) == 2, field
+    assert results[0].analysis_label != results[1].analysis_label, field
+    [step] = trace
+    assert step.detail["targets"]["duplicate"] == 0, field
+
+
+def test_filter_values_that_differ_read_differently(tmp_path):
+    """``True`` and 「是」 are different filter values; their labels differ."""
+    yes = {**_FILTER_A, "filters": [{"column": "Vendor", "operator": "eq", "value": "是"}]}
+    true = {**_FILTER_A, "filters": [{"column": "Vendor", "operator": "eq", "value": True}]}
+    _planner, results, _trace = _same_sheet_run(tmp_path, [yes, true])
+    assert [r.analysis_label for r in results] == [
+        '列：Item；筛选：Vendor = "是"', "列：Item；筛选：Vendor = true",
+    ]
+
+
+def test_parameterless_profile_and_filter_still_name_themselves(tmp_path):
+    profile = {"source_id": "quote-a", "sheet": "Sheet", "operation": "profile"}
+    every_column = {"source_id": "quote-a", "sheet": "Sheet", "operation": "filter"}
+    _planner, results, _trace = _same_sheet_run(tmp_path, [profile, every_column, _TOP_A])
+    assert [r.analysis_label for r in results] == ["全部行", "全部列", "按 Price 降序"]
+
+
 def test_same_sheet_analyses_past_the_cap_are_named_in_the_disclosure(tmp_path):
     _planner, results, _trace = _same_sheet_run(tmp_path, [
         _TOP_A, _SUM_A, _TOP_B,
@@ -516,7 +564,7 @@ def test_same_sheet_analyses_past_the_cap_are_named_in_the_disclosure(tmp_path):
     assert len(results) == 3
     assert results[-1].warnings[-1] == (
         "本次规划了 4 项表格分析，超过单次最多 3 项的上限，按规划顺序只做了前 3 项；"
-        "未做：A 报价表 · Sheet（排序分析：按 Price 降序；筛选：Vendor = x）。"
+        "未做：A 报价表 · Sheet（排序分析：按 Price 降序；筛选：Vendor = \"x\"）。"
     )
 
 
@@ -646,6 +694,44 @@ def test_tables_share_one_block_budget_and_none_is_starved(
         assert entry["snippet"] == f"{last['Item']} | {last['Price']}"
 
 
+def _wide_then_narrow(tmp_path):
+    """Table 1 has 20 columns, tables 2 and 3 have two."""
+    analysis, _artifacts = _service(tmp_path)
+    wide = tuple(f"Column{index:02d}" for index in range(20))
+    _compile(analysis, tmp_path, "nb-1", "wide", title="宽表", header=wide,
+             rows=(tuple(range(20)),))
+    for name in ("narrow-1", "narrow-2"):
+        _compile(analysis, tmp_path, "nb-1", name, title=name,
+                 header=("Item", "Price"), rows=(("bolt", 3),))
+    planner = _Planner({"targets": [
+        {"source_id": source_id, "sheet": "Sheet", "operation": "filter"}
+        for source_id in ("wide", "narrow-1", "narrow-2")
+    ]})
+    ask = _ask(analysis, planner, participants=(), visible={
+        "nb-1": ("wide", "narrow-1", "narrow-2"),
+    })
+    results, _trace = _run_lane(ask, "比较这三张 Excel 报价表")
+    assert len(results) == 3
+    return results
+
+
+@pytest.mark.parametrize("max_chars", range(260, 601, 20))
+def test_a_wide_header_never_pushes_a_later_tables_key_out(tmp_path, max_chars):
+    """Every key line goes in before any header line, so a wide first header
+    cannot cost a later table its key, and a larger budget never shows fewer
+    tables than a smaller one."""
+    results = _wide_then_narrow(tmp_path)
+    block, evidence = spreadsheet_prompt_block(
+        results, preview_rows=20, max_bytes=65_536, max_chars=max_chars,
+    )
+    assert len(block) <= max_chars
+    assert list(evidence) == ["k6001", "k6002", "k6003"], (max_chars, block)
+    smaller, _ = spreadsheet_prompt_block(
+        results, preview_rows=20, max_bytes=65_536, max_chars=max_chars - 20,
+    )
+    assert sum(line.startswith("k600") for line in smaller.splitlines()) <= 3
+
+
 def test_one_table_under_a_tight_budget_keeps_its_greedy_prefix(tmp_path):
     """With one table the round robin is the old greedy walk."""
     [result] = _wide_results(tmp_path, 1)
@@ -693,29 +779,17 @@ def _external_ask():
     return ask
 
 
-def _shifted(block: str, sheet_map: dict, offset: int) -> tuple[str, dict]:
-    """The block and map as an outline section ``offset`` would number them."""
-    def key(name: str) -> str:
-        return f"k{offset + int(name[1:])}"
-
-    lines = [
-        key(line.split(":", 1)[0]) + ":" + line.split(":", 1)[1]
-        if line.startswith("k600") else line
-        for line in block.splitlines()
-    ]
-    return "\n".join(lines), {key(name): value for name, value in sheet_map.items()}
-
-
-@pytest.mark.parametrize("key_offset", [0, 10_000])
-def test_external_evidence_numbers_after_the_workbook_keys(tmp_path, key_offset):
+def test_external_evidence_numbers_after_the_workbook_keys(tmp_path):
+    # Only the single synthesis carries the workbook block (outline sections
+    # are not given ``structured_block``), so this is key_offset 0.
     results = _wide_results(tmp_path, 2)
-    block, sheet_map = _shifted(*spreadsheet_prompt_block(
+    block, sheet_map = spreadsheet_prompt_block(
         results, preview_rows=2, max_bytes=65_536,
-    ), key_offset)
-    context, merged, admitted, _counts = _external_ask()._append_external_context(
-        block, dict(sheet_map), [_external(1), _external(2)], key_offset=key_offset,
     )
-    keys = [f"k{key_offset + 6000 + n}" for n in (1, 2, 3, 4)]
+    context, merged, admitted, _counts = _external_ask()._append_external_context(
+        block, dict(sheet_map), [_external(1), _external(2)], key_offset=0,
+    )
+    keys = [f"k{6000 + n}" for n in (1, 2, 3, 4)]
     assert [merged[key]["source_id"] for key in keys[:2]] == [
         result.source_id for result in results
     ]
@@ -733,3 +807,44 @@ def test_external_evidence_without_workbook_keys_still_starts_at_k6001():
     )
     assert sorted(merged) == ["k1", "k6001"]
     assert merged["k6001"]["object_type"] == "external"
+
+
+# ---------------------------------------------------------------------------
+# Synthesis counts: workbook results are not collection rows
+# ---------------------------------------------------------------------------
+
+class _EchoAnswer:
+    configured = True
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        return json.dumps({"answer": "结论。", "grounded": False})
+
+
+@pytest.fixture
+def ask_repo(repo):  # noqa: F811
+    from app.models.schemas import NotebookCreate
+    from tests.model_testkit import bind_chat_client
+
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    bind_chat_client(repo, "ask_answer", _EchoAnswer())
+    return repo._runtime.ask_service(), notebook.id
+
+
+@pytest.mark.parametrize("tables", [0, 1, 3])
+def test_synthesis_counts_workbook_results_on_their_own(ask_repo, tmp_path, tables):
+    svc, notebook_id = ask_repo
+    if tables:
+        block, sheet_map = spreadsheet_prompt_block(
+            _wide_results(tmp_path, tables), preview_rows=2, max_bytes=65_536,
+        )
+    else:
+        block, sheet_map = "", {}
+    counts: dict = {}
+    svc._answer_reasoning(
+        notebook_id, "q", [], [], chunks=[], chunk_context_chars=20_000,
+        structured_block=block, structured_map=sheet_map, counts_sink=counts,
+    )
+    assert counts["included_collections"] == 0
+    assert counts["included_chunks"] == 0
+    # Sparse: a run without workbook results has no such key at all.
+    assert counts.get("included_spreadsheets") == (tables or None)
