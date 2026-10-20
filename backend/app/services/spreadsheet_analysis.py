@@ -730,11 +730,7 @@ class SpreadsheetAnalysisService:
                 )
                 owner = {"notebook_id": result.notebook_id}
             else:
-                summary = f"已分析 {len(results)} 张表：" + "；".join(
-                    (f"「{result.notebook_name}」中的 " if result.notebook_name else "")
-                    + f"{result.source_title} · {result.sheet}"
-                    for result in results
-                )
+                summary = _multi_summary(results, libraries=True)
                 for table, result in zip(trace.detail["tables"], results):
                     table["notebook_id"] = result.notebook_id
                 owner = {}
@@ -874,8 +870,8 @@ class SpreadsheetAnalysisService:
             return [], None
         plans, tally = planned
         raise_if_cancelled(cancel_event)
-        results = [
-            result for plan in plans
+        executed = [
+            (plan, result) for plan in plans
             if (result := self._execute(
                 plan,
                 manifests,
@@ -883,8 +879,10 @@ class SpreadsheetAnalysisService:
                 notebook_tiers=notebook_tiers or {},
             )) is not None
         ]
-        if not results:
+        if not executed:
             return [], None
+        _label_repeated_sheets(executed)
+        results = [result for _plan, result in executed]
         if tally.over_limit:
             results[-1].warnings.append(tally.over_limit_disclosure(manifests))
         duration_ms = round((perf_counter() - started) * 1000)
@@ -892,9 +890,7 @@ class SpreadsheetAnalysisService:
             summary = f"已分析 {results[0].source_title} · {results[0].sheet}"
             detail = _table_detail(results[0])
         else:
-            summary = f"已分析 {len(results)} 张表：" + "；".join(
-                f"{result.source_title} · {result.sheet}" for result in results
-            )
+            summary = _multi_summary(results, libraries=False)
             detail = {"tables": [_table_detail(result) for result in results]}
         if tally.planned > 1:
             detail["targets"] = tally.detail(executed=len(results))
@@ -958,7 +954,8 @@ class SpreadsheetAnalysisService:
                 "为电子表格问题选择受限的确定性执行计划，写进 targets 列表，每项针对"
                 "一张工作表（source_id + sheet）。问题只涉及一张表时只写一项；问题明确"
                 "要求比较、对照或分别分析多张表时，每张表各写一项，按问题提到的顺序，"
-                f"最多 {tally.limit} 项，同一张工作表只写一次。只能使用给定 source_id、"
+                f"最多 {tally.limit} 项；同一张表需要几种不同分析时各写一项，完全相同的项只写一次。"
+                "只能使用给定 source_id、"
                 "sheet 和列名；不得生成公式、代码或 SQL。operation 只能是 profile、"
                 "aggregate、top、filter。aggregate 使用 aggregation=sum|avg|min|max|count，"
                 "可选 measure/group_by；top 使用 sort_by/order=asc|desc；filter 可选 filters，"
@@ -1010,15 +1007,17 @@ class SpreadsheetAnalysisService:
         """The planner's targets, validated one by one, in the planner's order.
 
         A target that fails validation is dropped on its own (it never stands
-        in for another table); a second target on a sheet already planned is
-        dropped too -- the ruling is about several TABLES, and the card, the
-        receipt and the citation identity are all per sheet.  The first
-        ``tally.limit`` distinct valid targets are executed; the valid ones
-        past the cap are kept on the tally for the result card's disclosure.
+        in for another table).  One sheet may be analysed several ways (user
+        ruling 2026-10-21: a sum and a ranking of the same table are two
+        cards, each taking a seat under the cap); only a target that would
+        compute exactly what an earlier one computes (``_plan_identity``) is
+        dropped as a duplicate.  The first ``tally.limit`` distinct valid
+        targets are executed; the valid ones past the cap are kept on the
+        tally for the result card's disclosure.
         """
         tally.planned = len(targets)
         plans: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
+        seen: set[str] = set()
         for target in targets:
             plan = (
                 self._validate_plan(target, manifests)
@@ -1027,7 +1026,7 @@ class SpreadsheetAnalysisService:
             if plan is None:
                 tally.invalid += 1
                 continue
-            identity = (plan["source_id"], plan["sheet"])
+            identity = _plan_identity(plan)
             if identity in seen:
                 tally.duplicate += 1
                 continue
@@ -1035,7 +1034,7 @@ class SpreadsheetAnalysisService:
             if len(plans) < tally.limit:
                 plans.append(plan)
             else:
-                tally.over_limit.append(identity)
+                tally.over_limit.append(plan)
         return plans
 
     def _bounded_planner_catalog(
@@ -1585,6 +1584,103 @@ def _table_detail(result: SpreadsheetAnalysisResult) -> dict[str, Any]:
     }
 
 
+# The result card's operation names (``SPREADSHEET_OPERATION_LABELS`` in
+# ``frontend/app/answer-panel.tsx``), for the over-limit disclosure that names
+# the analyses it did not run.
+_OPERATION_LABELS = {
+    "profile": "数据概况", "aggregate": "分组汇总", "top": "排序分析", "filter": "条件筛选",
+}
+_AGGREGATION_LABELS = {
+    "sum": "求和", "avg": "平均", "min": "最小值", "max": "最大值", "count": "计数",
+}
+_FILTER_OPERATOR_LABELS = {
+    "eq": "=", "ne": "≠", "gt": ">", "gte": "≥", "lt": "<", "lte": "≤", "contains": "包含",
+}
+
+
+def _plan_identity(plan: dict[str, Any]) -> str:
+    """What a validated plan computes: two plans with the same identity
+    return the same result, so the second is a duplicate.  Only the fields
+    ``_execute`` reads for that operation count -- a stray ``sort_by`` on a
+    profile changes nothing it computes."""
+    used = {
+        "profile": (),
+        # A count never reads its measure.
+        "aggregate": (
+            ("aggregation", "group_by") if plan["aggregation"] == "count"
+            else ("aggregation", "measure", "group_by")
+        ),
+        "top": ("sort_by", "order"),
+        "filter": ("columns",),
+    }[plan["operation"]]
+    return json.dumps(
+        [plan["source_id"], plan["sheet"], plan["operation"], plan["filters"],
+         [plan[field] for field in used]],
+        ensure_ascii=False, sort_keys=True, default=str,
+    )
+
+
+def _plan_label(plan: dict[str, Any]) -> str:
+    """A short reading of a plan's parameters, e.g. 「按 Price 降序」."""
+    operation = plan["operation"]
+    parts: list[str] = []
+    if operation == "aggregate":
+        aggregation = _AGGREGATION_LABELS.get(plan["aggregation"], plan["aggregation"])
+        measure = plan.get("measure") or ""
+        parts.append(
+            aggregation if plan["aggregation"] == "count" or not measure
+            else f"{measure} {aggregation}"
+        )
+        if plan.get("group_by"):
+            parts.append(f"按 {plan['group_by']} 分组")
+    elif operation == "top":
+        parts.append(
+            f"按 {plan['sort_by']} {'升序' if plan.get('order') == 'asc' else '降序'}"
+        )
+    elif operation == "filter" and plan.get("columns"):
+        parts.append("列：" + "、".join(plan["columns"]))
+    if plan.get("filters"):
+        parts.append("筛选：" + "，".join(
+            f"{item['column']} "
+            f"{_FILTER_OPERATOR_LABELS.get(item['operator'], item['operator'])} "
+            f"{_display_cell(item.get('value'))}"
+            for item in plan["filters"]
+        ))
+    return "；".join(parts)
+
+
+def _label_repeated_sheets(
+    executed: Sequence[tuple[dict[str, Any], SpreadsheetAnalysisResult]],
+) -> None:
+    """Name the parameters of every analysis whose sheet is analysed more
+    than once in this run, so its card and its synthesis line can be told
+    apart from the sheet's other analyses.  A sheet analysed once keeps an
+    empty label (absent from the wire), so one-analysis-per-sheet runs are
+    unchanged."""
+    counts = Counter((result.source_id, result.sheet) for _plan, result in executed)
+    for plan, result in executed:
+        if counts[(result.source_id, result.sheet)] > 1:
+            result.analysis_label = _plan_label(plan)
+
+
+def _multi_summary(
+    results: Sequence[SpreadsheetAnalysisResult], *, libraries: bool,
+) -> str:
+    """The trace summary of a run that executed two or more analyses."""
+    sheets = {(result.source_id, result.sheet) for result in results}
+    head = (
+        f"已分析 {len(results)} 张表："
+        if len(sheets) == len(results)
+        else f"已对 {len(sheets)} 张表做了 {len(results)} 项分析："
+    )
+    return head + "；".join(
+        (f"「{result.notebook_name}」中的 " if libraries and result.notebook_name else "")
+        + f"{result.source_title} · {result.sheet}"
+        + (f"（{result.analysis_label}）" if result.analysis_label else "")
+        for result in results
+    )
+
+
 def _planned_targets(reply: dict[str, Any]) -> list[Any]:
     """The target list of one planner reply.
 
@@ -1605,10 +1701,10 @@ class _PlanningTally:
     """What one planner reply asked for, beyond the plans that run.
 
     ``planned`` counts the targets the reply named, ``invalid`` /
-    ``duplicate`` the ones dropped by validation or as a second target on an
-    already planned sheet, and ``over_limit`` lists the distinct valid
-    targets past ``limit`` (``(source_id, sheet)``, in plan order) -- the
-    one loss the user is told about, on the last executed card.
+    ``duplicate`` the ones dropped by validation or as an exact repeat of an
+    earlier target, and ``over_limit`` lists the distinct valid plans past
+    ``limit``, in plan order -- the one loss the user is told about, on the
+    last executed card.
     """
 
     def __init__(self, *, limit: int) -> None:
@@ -1616,7 +1712,7 @@ class _PlanningTally:
         self.planned = 0
         self.invalid = 0
         self.duplicate = 0
-        self.over_limit: list[tuple[str, str]] = []
+        self.over_limit: list[dict[str, Any]] = []
 
     def detail(self, *, executed: int) -> dict[str, int]:
         return {
@@ -1631,18 +1727,22 @@ class _PlanningTally:
     def over_limit_disclosure(self, manifests: Sequence[dict[str, Any]]) -> str:
         by_id = {manifest["source_id"]: manifest for manifest in manifests}
         names = []
-        for source_id, sheet in self.over_limit:
-            manifest = by_id.get(source_id, {})
+        for plan in self.over_limit:
+            manifest = by_id.get(plan["source_id"], {})
             library = manifest.get(_LIBRARY_KEY, "")
+            label = _plan_label(plan)
             names.append(
-                f"{manifest.get('source_title', '') or source_id}"
+                f"{manifest.get('source_title', '') or plan['source_id']}"
                 + (f"（{library}）" if library else "")
-                + f" · {sheet}"
+                + f" · {plan['sheet']}"
+                + f"（{_OPERATION_LABELS.get(plan['operation'], plan['operation'])}"
+                + (f"：{label}" if label else "")
+                + "）"
             )
         return (
-            f"本次规划选了 {self.limit + len(self.over_limit)} 张表，超过单次最多 "
-            f"{self.limit} 张的上限，按规划顺序只分析了前 {self.limit} 张；"
-            f"未分析：{'、'.join(names)}。"
+            f"本次规划了 {self.limit + len(self.over_limit)} 项表格分析，超过单次最多 "
+            f"{self.limit} 项的上限，按规划顺序只做了前 {self.limit} 项；"
+            f"未做：{'、'.join(names)}。"
         )
 
 
@@ -1804,7 +1904,10 @@ def spreadsheet_prompt_block(
         key_line = (
             f"{key}: [spreadsheet] {result.source_title} · {result.sheet}!{result.range} "
             + (f"library={library}; " if library else "")
-            + f"operation={result.operation}; scanned={result.coverage.scanned_rows}; "
+            + f"operation={result.operation}; "
+            # Only when this sheet is analysed more than once in the run.
+            + (f"plan={label}; " if (label := getattr(result, 'analysis_label', '')) else "")
+            + f"scanned={result.coverage.scanned_rows}; "
             f"result_rows={result.coverage.total_rows}"
         )
         if not budget.take(key_line):

@@ -726,6 +726,10 @@ class SpreadsheetAnalysisResult(BaseModel):
     # 两个库里同名的工作簿。单库问答恒为空串、整体从 JSON 缺席，逐字节不变。界面上
     # 显示库名仍以前端自己的库名表为准（与引用卡同口径）。
     notebook_name: str = Field(default="", exclude_if=lambda value: not value)
+    # 同一轮里同一张工作表做了多项分析时（用户裁决 2026-10-21），这一项分析的参数
+    # 读法（如「按 Price 降序」），卡片与合成表格块据此区分同表的几张卡。一张表只做
+    # 一项分析时恒为空串、整体从 JSON 缺席，逐字节不变。
+    analysis_label: str = Field(default="", exclude_if=lambda value: not value)
 
 
 # Deliberately NOT a reuse of ``StructuredResultCoverage``: that model's

@@ -340,8 +340,8 @@ def test_targets_over_the_cap_are_cut_in_plan_order_and_disclosed(tmp_path):
         "quote-d", "quote-b", "quote-c",
     ]
     disclosure = (
-        "本次规划选了 4 张表，超过单次最多 3 张的上限，按规划顺序只分析了前 3 张；"
-        "未分析：A 报价表 · Sheet。"
+        "本次规划了 4 项表格分析，超过单次最多 3 项的上限，按规划顺序只做了前 3 项；"
+        "未做：A 报价表 · Sheet（数据概况）。"
     )
     # Said once, on the last card -- where the missing table would follow.
     assert results[-1].warnings[-1] == disclosure
@@ -363,8 +363,8 @@ def test_the_cap_is_a_setting(tmp_path):
     [result] = results
     assert result.source_id == "quote-b"
     assert result.warnings[-1] == (
-        "本次规划选了 2 张表，超过单次最多 1 张的上限，按规划顺序只分析了前 1 张；"
-        "未分析：A 报价表 · Sheet。"
+        "本次规划了 2 项表格分析，超过单次最多 1 项的上限，按规划顺序只做了前 1 项；"
+        "未做：A 报价表 · Sheet（排序分析：按 Price 降序）。"
     )
     [(_hint, options)] = planner.calls
     assert options["max_tokens"] == 500
@@ -390,8 +390,9 @@ def test_invalid_and_duplicate_targets_are_dropped_on_their_own(tmp_path):
         {"source_id": "quote-a", "sheet": "Sheet", "operation": "top",
          "sort_by": "Missing"},
         _target("b"),
-        # A second target on an already planned sheet.
-        {**_target("b"), "operation": "aggregate", "aggregation": "count"},
+        # An exact repeat of an earlier target (a stray sort_by changes
+        # nothing a profile computes).
+        {**_target("b"), "sort_by": "Price"},
         # Not an object.
         "quote-c",
         # An unknown source.
@@ -414,6 +415,109 @@ def test_invalid_and_duplicate_targets_are_dropped_on_their_own(tmp_path):
         "planned": 6, "executed": 2, "invalid": 3, "duplicate": 1,
         "over_limit": 0, "limit": 3,
     }
+
+
+def _same_sheet_run(tmp_path, targets, **overrides):
+    analysis, _artifacts = _service(tmp_path, **overrides)
+    _two_quote_tables(analysis, tmp_path)
+    planner = _Planner({"targets": targets})
+    ask = _ask(analysis, planner, participants=(), visible={
+        "nb-1": ("quote-a", "quote-b"),
+    })
+    results, trace = _run_lane(ask, "统计 A 报价表的价格合计并按价格排名")
+    return planner, results, trace
+
+
+_SUM_A = {"source_id": "quote-a", "sheet": "Sheet", "operation": "aggregate",
+          "aggregation": "sum", "measure": "Price", "group_by": "Vendor"}
+
+
+def test_one_sheet_may_be_summed_and_ranked_in_one_plan(tmp_path):
+    """User ruling 2026-10-21: two different analyses of one table are two
+    cards, each a seat under the cap; each names its parameters so the two
+    cards (and the two synthesis lines) can be told apart."""
+    planner, results, trace = _same_sheet_run(tmp_path, [_SUM_A, _TOP_A])
+
+    assert len(planner.prompts) == 1
+    assert [(r.source_id, r.operation) for r in results] == [
+        ("quote-a", "aggregate"), ("quote-a", "top"),
+    ]
+    assert [r.analysis_label for r in results] == [
+        "Price 求和；按 Vendor 分组", "按 Price 降序",
+    ]
+    [step] = trace
+    assert step.summary == (
+        "已对 1 张表做了 2 项分析：A 报价表 · Sheet（Price 求和；按 Vendor 分组）；"
+        "A 报价表 · Sheet（按 Price 降序）"
+    )
+    assert step.detail["targets"]["duplicate"] == 0
+    block, evidence = spreadsheet_prompt_block(
+        results, preview_rows=20, max_bytes=65_536,
+    )
+    heads = [line for line in block.splitlines() if line.startswith("k600")]
+    assert [head.split(":", 1)[0] for head in heads] == ["k6001", "k6002"]
+    assert "operation=aggregate; plan=Price 求和；按 Vendor 分组; " in heads[0]
+    assert "operation=top; plan=按 Price 降序; " in heads[1]
+    assert [evidence[key]["source_id"] for key in ("k6001", "k6002")] == [
+        "quote-a", "quote-a",
+    ]
+    # The wire carries the label only on the repeated sheet's cards.
+    assert results[0].model_dump(mode="json")["analysis_label"]
+
+
+def test_the_same_operation_on_different_columns_is_two_cards(tmp_path):
+    by_vendor = {**_TOP_A, "sort_by": "Vendor", "order": "asc"}
+    _planner, results, _trace = _same_sheet_run(tmp_path, [_TOP_A, by_vendor, _TOP_B])
+
+    assert [(r.source_id, r.operation, r.analysis_label) for r in results] == [
+        ("quote-a", "top", "按 Price 降序"),
+        ("quote-a", "top", "按 Vendor 升序"),
+        # B is analysed once: no label, its card and line as before.
+        ("quote-b", "top", ""),
+    ]
+    assert "analysis_label" not in results[2].model_dump(mode="json")
+    assert [row.cells["Item"] for row in results[0].rows] == ["gear", "bolt", "nut"]
+    assert [row.cells["Item"] for row in results[1].rows][0] == "bolt"
+    block, _evidence = spreadsheet_prompt_block(
+        results, preview_rows=20, max_bytes=65_536,
+    )
+    heads = [line for line in block.splitlines() if line.startswith("k600")]
+    assert "plan=" not in heads[2]
+
+
+def test_only_an_exact_repeat_is_a_duplicate(tmp_path):
+    count_a = {"source_id": "quote-a", "sheet": "Sheet", "operation": "aggregate",
+               "aggregation": "count", "group_by": "Vendor"}
+    _planner, results, trace = _same_sheet_run(tmp_path, [
+        _TOP_A,
+        dict(_TOP_A),                                    # exact repeat
+        {**_TOP_A, "columns": ["Item"]},                 # columns: unread by top
+        count_a,
+        {**count_a, "measure": "Price"},                 # a count never reads it
+        {**_TOP_A, "order": "asc"},                      # a different ranking
+    ])
+    assert [(r.operation, r.analysis_label) for r in results] == [
+        ("top", "按 Price 降序"),
+        ("aggregate", "计数；按 Vendor 分组"),
+        ("top", "按 Price 升序"),
+    ]
+    [step] = trace
+    assert step.detail["targets"] == {
+        "planned": 6, "executed": 3, "invalid": 0, "duplicate": 3,
+        "over_limit": 0, "limit": 3,
+    }
+
+
+def test_same_sheet_analyses_past_the_cap_are_named_in_the_disclosure(tmp_path):
+    _planner, results, _trace = _same_sheet_run(tmp_path, [
+        _TOP_A, _SUM_A, _TOP_B,
+        {**_TOP_A, "filters": [{"column": "Vendor", "operator": "eq", "value": "x"}]},
+    ])
+    assert len(results) == 3
+    assert results[-1].warnings[-1] == (
+        "本次规划了 4 项表格分析，超过单次最多 3 项的上限，按规划顺序只做了前 3 项；"
+        "未做：A 报价表 · Sheet（排序分析：按 Price 降序；筛选：Vendor = x）。"
+    )
 
 
 @pytest.mark.parametrize("reply", [

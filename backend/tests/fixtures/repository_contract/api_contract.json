@@ -12599,6 +12599,11 @@
         "SpreadsheetAnalysisResult": {
           "description": "A calculation receipt and its bounded tabular result.\n\nThis is neither ranked evidence nor a Knowhow table. ``coverage`` states\nhow much of the selected worksheet region the deterministic executor read;\n``rows`` is only the bounded wire preview of the calculated output.",
           "properties": {
+            "analysis_label": {
+              "default": "",
+              "title": "Analysis Label",
+              "type": "string"
+            },
             "columns": {
               "items": {
                 "$ref": "#/components/schemas/StructuredResultColumn"

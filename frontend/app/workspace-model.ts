@@ -523,6 +523,8 @@ export type SpreadsheetAnalysisResult = {
   tier?: string;
   /** 归属库名，只在全局问答里由后端填（给合成模型区分同名工作簿）；界面显示库名仍查 `notebookNames`。 */
   notebook_name?: string;
+  /** 同一轮里同一张工作表做了多项分析时，这一项的参数读法（如「按 Price 降序」）；只做一项时缺席。 */
+  analysis_label?: string;
 };
 
 export type KnowhowBatchCoverage = {

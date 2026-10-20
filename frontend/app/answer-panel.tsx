@@ -242,7 +242,11 @@ function SpreadsheetResultCard({
             来自「<span className="tier-badge-source-name">{sourceName}</span>」（{label(TIER, tier, "未知来源")}）
           </span>
         )}
-        <span>{resultSet.sheet}!{resultSet.range} · {label(SPREADSHEET_OPERATION_LABELS, resultSet.operation, "专业分析")}</span>
+        <span>
+          {resultSet.sheet}!{resultSet.range} · {label(SPREADSHEET_OPERATION_LABELS, resultSet.operation, "专业分析")}
+          {/* 同一张表在这一轮做了几项分析时才有：区分同表的几张卡。 */}
+          {resultSet.analysis_label ? `（${resultSet.analysis_label}）` : ""}
+        </span>
         {onOpenSource && resultSet.source_id && (
           <button
             className="answer-knowhow-open"
@@ -796,7 +800,7 @@ function KnowhowResultSets({
           假定 `.rows`/`.columns` 存在,一份没有这两个字段的 collection 行会在
           `.rows.slice(...)` 上抛 TypeError,炸穿整个答案面板(且答案持久化后,
           历史重开会继续炸)。这正是本函数存在的理由。 */}
-      {resultSets.map((resultSet) => {
+      {resultSets.map((resultSet, position) => {
         if (resultSet.kind === "knowhow") {
           return (
             <KnowhowResultSetCard
@@ -827,8 +831,11 @@ function KnowhowResultSets({
         }
         if (resultSet.kind === "spreadsheet") {
           return (
+            // 同一张表可以在一轮里做几项分析（用户裁决 2026-10-21），两次 top 的
+            // source_id/sheet/operation 全相同，所以 key 并入结果在本轮里的位置
+            // （result_sets 随答案定型、不重排，位置就是这张卡的身份）。
             <SpreadsheetResultCard
-              key={`spreadsheet-${resultSet.source_id}-${resultSet.sheet}-${resultSet.operation}`}
+              key={`spreadsheet-${position}-${resultSet.source_id}-${resultSet.sheet}-${resultSet.operation}`}
               resultSet={resultSet}
               notebookId={notebookId}
               notebookNames={notebookNames}
