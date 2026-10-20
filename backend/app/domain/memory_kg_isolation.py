@@ -1,5 +1,5 @@
-"""M1 写侧:个人记忆派生的知识对象只属于它的主人,不与任何其他对象合并、不经通用路径
-进公共库;含个人记忆的笔记本不能发布为公共库。
+"""M1 写侧:个人记忆派生的知识对象只属于它的主人,只能与同一主人、同样只由其 Memory
+支撑的对象合并,不经通用路径进公共库;含个人记忆的笔记本不能发布为公共库。
 
 「派生自 Memory」的判据只有一处定义(`repositories/*/memory_sql.py` 的
 `memory_derived_object`:主 `source_id` 指向 `source_type='memory'` 的来源);「这是
@@ -17,11 +17,22 @@
 
 * 两个对象都不是 Memory 派生 → 照常合并;
 * 恰有一个是(调用者本人的)Memory 派生 → `CROSS_CLASS_MESSAGE`;
-* 两个都是调用者本人的 Memory 派生 → 同样拒绝,`SAME_OWNER_MESSAGE`。理由:合并会把
-  一条 Memory 的证据并进另一条 Memory 的对象,而删除/编辑/转移一条 Memory 时按证据
-  引用清理对象(`clear_source_graph_state`),于是动其中一条会连带删掉另一条 Memory 的
-  对象——正是 N-1 的形状,只是发生在同一个人名下;也破坏「Memory 对象永远是单例、
-  删除只删到该 Memory 自己的对象」这条不变量(计划 §2 D4、§3)。
+* 两个都是调用者本人的 Memory 派生,且两份证据的每一条都出自调用者本人在本库的
+  Memory 来源(「只由本人的 Memory 支撑」,`only_own_memory_evidence`)→ 照常合并
+  (用户裁决 2026-10-21,计划 §13.2 第 9 条)。合并结果的主来源仍是目标对象的 Memory
+  来源,所以它照旧只对主人可见;证据只是两份本人 Memory 证据的并集。
+* 两个都是 Memory 派生,但任一份证据里有一条不出自调用者本人的 Memory(普通来源、
+  别人的 Memory、缺来源 id——隔离上线前手工合并留下的混合证据)→ 同样是
+  `CROSS_CLASS_MESSAGE`:那条对象带着共享证据,等同于公共对象。
+
+放开同主人合并之后,「删除/编辑一条 Memory 只删到该 Memory 自己的对象」由两处维持:
+删除/转移/退出走 `remove_memory_sources`,先把该来源的证据从别的来源拥有的对象上
+摘掉(`strip_sources_evidence_on`)再拆;编辑后重抽(`ingest_memory_source`)在清旧
+产物之前做同一次摘除。被合并的另一条 Memory 的对象因此只失去这条 Memory 贡献的证据,
+不会随它一起被删。PostgreSQL 上合并先按 id 序对源对象的主来源与证据引用的 Memory
+来源取 `FOR KEY SHARE`,再锁两个对象——与拆除、重抽「先来源、后派生行」同一锁序,
+所以并发的删除/退出/编辑要么排在合并之后(看得到合并写进的证据并摘掉),要么排在
+之前(合并读到的是已摘净的行)。
 
 本模块的每个字符串常量都是界面文案(路由原样交给 `user_error`,前端原样上屏),
 `tests/test_memory_kg_isolation_vocabulary.py` 逐条跑界面词汇守卫的 `terms_in`:动态
@@ -30,8 +41,14 @@
 
 from __future__ import annotations
 
+from typing import Any, Callable, Iterable
+
+from app.domain.promotion_provenance import evidence_source_ids
+
 CROSS_CLASS_MESSAGE = "由个人记忆生成的知识对象不能与共享的知识对象合并"
-SAME_OWNER_MESSAGE = "由个人记忆生成的知识对象不能相互合并"
+#: PostgreSQL 上合并读到的源对象证据在加锁前后不一致(另一个合并刚把新的 Memory 证据
+#: 并进了它):这次不合并、一行不写,重试即可。
+MEMORY_MERGE_RETRY_MESSAGE = "要合并的知识对象刚被修改，请稍后重试"
 
 # 贡献到公共知识库(通用路径 `propose_promotion` → `approve_promotion_in_transaction`)。
 # Memory 进公共库只有一条路:创建者本人的 `propose_memory_promotion`,它只带经过
@@ -59,7 +76,8 @@ PUBLISH_HOLDS_MEMORY_MESSAGE = (
 
 
 class MemoryKnowledgeMergeRefused(ValueError):
-    """`merge_objects_in_transaction` 拒绝合并调用者本人的 Memory 派生对象。
+    """`merge_objects_in_transaction` 拒绝一次涉及调用者本人 Memory 派生对象的合并
+    (跨类,或 PostgreSQL 上读到的源对象证据在加锁前后变了)。
 
     `user_message` 是完整的中文用户文案,路由原样交给 `user_error(409, ...)`。
     继承 `ValueError`:未专门处理它的调用方仍把它当作无效请求。
@@ -108,13 +126,29 @@ class NotebookHoldsMemory(ValueError):
         self.user_message = PUBLISH_HOLDS_MEMORY_MESSAGE
 
 
-def memory_merge_refusal(source_derived: bool, into_derived: bool) -> str | None:
+def memory_merge_refusal(
+    source_derived: bool,
+    into_derived: bool,
+    only_own_memory_evidence: Callable[[], bool],
+) -> str | None:
     """返回应拒绝时的用户文案,可以合并时返回 None。两个后端共用这一份规则。
 
     调用前提:两行都已通过 `foreign_memory_object_excluded(调用者)`,所以任何一侧
-    是 Memory 派生,就一定是调用者本人的。"""
+    是 Memory 派生,就一定是调用者本人的。`only_own_memory_evidence` 只在两侧都是
+    Memory 派生时调用(它要多读一次来源表):两份证据的每一条都出自调用者本人在本库的
+    Memory 来源时为真。"""
     if not source_derived and not into_derived:
         return None
-    if source_derived and into_derived:
-        return SAME_OWNER_MESSAGE
+    if source_derived and into_derived and only_own_memory_evidence():
+        return None
     return CROSS_CLASS_MESSAGE
+
+
+def merge_evidence_source_ids(*evidence_lists: Iterable[Any]) -> frozenset[str] | None:
+    """几份证据引用的来源 id(`promotion_provenance.evidence_source_ids` 的读法);有一条
+    不是带非空 `source_id` 的对象时返回 None——这样的条目无从证明出自本人的 Memory,
+    `only_own_memory_evidence` 因此判假(那个读法会把它跳过)。"""
+    items = [item for evidence in evidence_lists for item in evidence]
+    if not all(isinstance(item, dict) and str(item.get("source_id") or "") for item in items):
+        return None
+    return frozenset(evidence_source_ids(items))

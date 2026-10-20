@@ -286,6 +286,13 @@ class SourceIngestionService:
         # (narrow test doubles) removes the sources only.
         memory_detach: Optional[Callable[[Any, List[dict]], Any]] = None,
         memory_after_teardown: Optional[Callable[[Any, Any], None]] = None,
+        # ``memory_evidence_detach(db, notebook_id, source_ids, now)``: the
+        # evidence strip of ``memory_detach`` alone (the governance store's
+        # ``strip_sources_evidence_on``), run by a Memory re-ingest before it
+        # clears the source's old graph — a merge of two of the owner's
+        # Memory objects can have put this source's evidence on an object
+        # another Memory source owns. ``None`` (narrow test doubles) skips it.
+        memory_evidence_detach: Optional[Callable[[Any, str, List[str], str], Any]] = None,
         # PR-E8: ``promotion_detach(db, rows, now)`` runs for the promotion
         # sources of a teardown after the source lock and before the clear:
         # it removes those sources' entries from the evidence of the objects
@@ -323,6 +330,7 @@ class SourceIngestionService:
         self.clear_sources_extraction_state = clear_sources_extraction_state
         self.memory_detach = memory_detach
         self.memory_after_teardown = memory_after_teardown
+        self.memory_evidence_detach = memory_evidence_detach
         self.promotion_detach = promotion_detach
         self.begin_extraction_run = begin_extraction_run
         self.finish_extraction_run = finish_extraction_run
@@ -2265,6 +2273,15 @@ class SourceIngestionService:
                         db, source_id, notebook_id
                     ):
                         raise KeyError(source_id)
+                    # Under the source lock, before the clear: an object
+                    # ANOTHER Memory source owns that gained this source's
+                    # evidence through a merge of two of the owner's Memory
+                    # objects loses exactly those entries, instead of being
+                    # deleted with them (the removal's ``memory_detach`` takes
+                    # the same step; a merge takes FOR KEY SHARE on this row
+                    # first, so it cannot slip in between).
+                    if self.memory_evidence_detach is not None:
+                        self.memory_evidence_detach(db, notebook_id, [source_id], now)
                     # Reparse semantics: drop this source's prior extraction
                     # derivatives (KG objects/relations/embeddings/extraction
                     # runs) in the SAME transaction as the element swap below —

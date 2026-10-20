@@ -31,6 +31,8 @@ from app.repositories.postgres.memory_sql import (
     foreign_memory_relation_excluded,
     memory_derived_object,
     memory_derived_relation,
+    memory_source_type_predicate,
+    own_memory_source,
 )
 from app.repositories.postgres.id_binding import (
     bind_ids as id_bind_ids,
@@ -47,10 +49,12 @@ from app.domain.knowledge_contracts import (
     PromotionApproval,
 )
 from app.domain.memory_kg_isolation import (
+    MEMORY_MERGE_RETRY_MESSAGE,
     PROMOTION_APPROVE_MESSAGE,
     MemoryKnowledgeMergeRefused,
     MemoryPromotionRefused,
     PromotionObjectMissing,
+    merge_evidence_source_ids,
     memory_merge_refusal,
 )
 
@@ -2247,6 +2251,41 @@ class GovernanceStore:
         }
 
     @staticmethod
+    def _own_memory_merge_evidence(
+        connection: Any,
+        notebook_id: str,
+        actor_id: str | None,
+        src: Any,
+        tgt: Any,
+        pinned: frozenset,
+    ) -> bool:
+        """Both locked rows are the caller's own Memory objects: does every
+        evidence entry of both cite one of the caller's own Memory sources
+        of this notebook (``own_memory_source``, the readers' definition)?
+        Raises ``MemoryKnowledgeMergeRefused(MEMORY_MERGE_RETRY_MESSAGE)``
+        when the source object cites a Memory source the pre-lock did not
+        pin (its evidence changed between that read and the row lock)."""
+        src_cited = merge_evidence_source_ids(json_value(src["evidence"], []))
+        cited = merge_evidence_source_ids(
+            json_value(src["evidence"], []), json_value(tgt["evidence"], [])
+        )
+        if src_cited is None or cited is None:
+            return False
+        if cited:
+            found = id_bind_ids(sorted(cited))
+            own = id_execute_ids(
+                connection,
+                f"SELECT s.id FROM sources s WHERE {id_member_of('s.id', found)} "
+                f"AND s.notebook_id = %s AND {own_memory_source('s')}",
+                (found.param, notebook_id, actor_id),
+            ).fetchall()
+            if len(own) != len(cited):
+                return False
+        if not (src_cited | {src["source_id"]}) <= pinned:
+            raise MemoryKnowledgeMergeRefused(MEMORY_MERGE_RETRY_MESSAGE)
+        return True
+
+    @staticmethod
     def merge_objects_in_transaction(
         connection: Any,
         notebook_id: str,
@@ -2260,19 +2299,54 @@ class GovernanceStore:
         into the target, maintain the reverse index, deprecate the source in
         place, and return the refetched target row.
 
-        M1: a Memory-derived object is never folded into, or folded with,
-        another object (``app.domain.memory_kg_isolation`` has the rule and
-        why same-owner pairs are refused too). Both halves ride the same
-        statement that takes the row locks — no extra round trip, and no
-        window between the check and the write:
+        M1 (``app.domain.memory_kg_isolation`` has the rule): a
+        Memory-derived object merges only with another one of the same
+        owner, and only when both are supported by nothing but that owner's
+        Memory. The classification rides the statement that takes the row
+        locks — no window between the check and the write:
 
         * an object derived from someone else's Memory (not ``actor_id``'s,
           or an orphan Memory source) is filtered out by
           ``foreign_memory_object_excluded`` and raises the same ``KeyError``
           as a missing id (no existence probe);
-        * what survives and is Memory-derived is the caller's own, and raises
+        * what survives and is Memory-derived is the caller's own; a pair
+          with exactly one such side, or two whose evidence cites anything
+          but the caller's own Memory sources of this notebook
+          (``_own_memory_merge_evidence``), raises
           ``MemoryKnowledgeMergeRefused`` (409 with the reason) before
-          anything is written."""
+          anything is written.
+
+        Lock order. Before the object rows, the Memory sources this merge
+        makes the target cite — the source object's primary source and,
+        when it is Memory-derived, every Memory source its evidence cites —
+        take ``FOR KEY SHARE`` in id order: the order of the Memory teardown
+        (``lock_sources_for_teardown_tx``, then the evidence strip and the
+        object deletes) and of the Memory re-ingest (``FOR UPDATE`` on the
+        source, then the strip and the clear). A concurrent delete,
+        transfer, member exit or edit of one of those Memories therefore
+        either commits first (this merge then reads rows already stripped,
+        or finds an object gone: ``KeyError``) or waits for this commit and
+        strips what the merge wrote. A shared merge locks no row here (no
+        Memory source; the evidence arm is cut by its filter). The target's
+        own citations need no lock: a concurrent strip already counts the
+        target among its candidates and re-reads it after this commit."""
+        pinned = frozenset(
+            row["id"]
+            for row in connection.execute(
+                "SELECT s.id FROM sources s "
+                f"WHERE {memory_source_type_predicate('s.source_type')} AND s.id IN ("
+                "SELECT ko.source_id FROM knowledge_objects ko "
+                "WHERE ko.id = %s AND ko.notebook_id = %s "
+                "UNION ALL SELECT ev.value->>'source_id' FROM knowledge_objects ko "
+                "CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN "
+                "jsonb_typeof(ko.evidence) = 'array' THEN ko.evidence "
+                "ELSE '[]'::jsonb END) ev "
+                "WHERE ko.id = %s AND ko.notebook_id = %s "
+                f"AND {memory_derived_object('ko')}) "
+                "ORDER BY s.id FOR KEY SHARE OF s",
+                (source_id, notebook_id, source_id, notebook_id),
+            ).fetchall()
+        )
         locked = connection.execute(
             "SELECT ko.*, "
             f"{memory_derived_object('ko')} AS memory_derived "
@@ -2290,7 +2364,11 @@ class GovernanceStore:
         if src["object_type"] != tgt["object_type"]:
             raise ValueError("can only merge knowledge objects of the same type")
         refusal = memory_merge_refusal(
-            bool(src["memory_derived"]), bool(tgt["memory_derived"])
+            bool(src["memory_derived"]),
+            bool(tgt["memory_derived"]),
+            lambda: GovernanceStore._own_memory_merge_evidence(
+                connection, notebook_id, actor_id, src, tgt, pinned
+            ),
         )
         if refusal is not None:
             raise MemoryKnowledgeMergeRefused(refusal)

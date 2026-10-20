@@ -1778,6 +1778,9 @@ class RepositoryRuntime:
                 db, rows, bridge_canonical_ids_of=purge_bridge_canonical_ids
             ),
             memory_after_teardown=self.memory_store.drop_memory_lexical_rows_on,
+            # A Memory re-ingest strips the same evidence before it clears the
+            # source's old graph (an owner's merge of two Memory objects).
+            memory_evidence_detach=self.governance.strip_sources_evidence_on,
             # PR-E8: a promotion source's teardown strips its entries and
             # deletes only the objects left without evidence.
             promotion_detach=self.governance.detach_promotion_sources_on,

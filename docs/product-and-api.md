@@ -2529,7 +2529,8 @@ shared one may be proposed again after the rebuild. A merge candidate that names
 object's bridge id is removed only when no cluster carries that id; a live shared cluster with the
 same id keeps its candidates. If a curator manually merged a Memory-derived object into another
 object, the surviving object only loses the evidence that Memory contributed; it is never deleted
-with the Memory. Every other removal of a Memory's derived source does the same cleanup:
+with the Memory (an edit that re-extracts the Memory strips the same entries before clearing its old
+graph). Every other removal of a Memory's derived source does the same cleanup:
 deprecating a confirmed Memory, moving it to another notebook with `POST /memories/transfer`, and
 the cleanup after an extraction that finished once the Memory was no longer confirmed. Bulk
 deletes write a content-free audit event (notebook, user, count).
@@ -2682,16 +2683,34 @@ evidence and attached objects under the same viewer rule), and other members get
 
 **Writes, merges and publishing.** Knowledge objects and relations derived from a member's
 personal Memory belong to that member only: they never join a shared concept cluster, never appear
-as a merge suggestion or conflict candidate, and cannot be merged by hand or proposed through the
-knowledge list. Every write that addresses a knowledge object or relation by id —
+as a merge suggestion or conflict candidate, can be merged by hand only with another object of the
+same member's Memory, and cannot be proposed through the knowledge list. Every write that addresses a knowledge object or relation by id —
 `PATCH /api/notebooks/{notebook_id}/knowledge/{knowledge_id}`, `POST …/knowledge/{knowledge_id}/merge`
 (both ids), `POST …/knowledge/{knowledge_id}/promote`,
 `POST /api/notebooks/{notebook_id}/relations/{rel_id}/review` — answers a caller who is not the
 Memory's creator exactly as it answers for an id that does not exist (404, same body); an object
 whose Memory row is gone belongs to nobody. For the creator, merge checks in this order: an object
 merged into itself or two different types → 400; a missing object → 404; one side from her Memory
-→ 409 「由个人记忆生成的知识对象不能与共享的知识对象合并」; both sides from her Memory → 409
-「由个人记忆生成的知识对象不能相互合并」. Proposing her own such object answers 409
+→ 409 「由个人记忆生成的知识对象不能与共享的知识对象合并」; both sides from her Memory and every
+evidence entry of both citing one of her own Memory sources in this notebook → merged like any pair
+(user ruling 2026-10-21): the result keeps the target's Memory source, so it stays visible to her
+alone, its evidence is the union of her Memory's entries, and the merged-away object is deprecated
+in place (she can restore it with `PATCH … {"status": "approved"}`, as after any merge). Both sides
+from her Memory but either one also citing anything else — an ordinary source (what a manual merge
+before the isolation left behind), another member's Memory, an entry without a source id → the same
+cross-class 409, because that object carries shared evidence. A site admin has no bypass: for her a
+member's Memory object is someone else's (404). Once merged, deleting, moving or editing one of the
+two Memories strips only that Memory's entries from the object the other Memory owns — it is never
+deleted with them; an edit re-extracts the edited Memory into fresh objects of its own. Deleting the
+Memory that owns the merged object deletes it with that Memory, and the other Memory's merged-away
+object stays deprecated until she restores it. On PostgreSQL a merge locks the Memory sources it
+makes the target cite before the object rows (the order of every Memory removal and re-ingest), so
+a concurrent delete, member exit or edit of one of them waits for the merge and then strips what it
+wrote; in the rare case that another merge put a new Memory's evidence on the source object between
+those two steps, the merge answers 409 「要合并的知识对象刚被修改，请稍后重试」 and writes nothing.
+A promoted Memory does not change any of this: the promotion copies into the public library and
+leaves her private objects as they were, and the public copy is the library's own object (its
+evidence cites the library's `promotion` source), merging there like any public object. Proposing her own such object answers 409
 「由个人记忆生成的知识对象不能在这里申请贡献到公共知识库，请在你的记忆里提交」 and queues nothing; a Memory
 reaches a public library only through its creator's `POST /api/memories/{memory_id}/promote`.
 Nothing is written on a refusal. The upgrade migration closes open generic proposals of such

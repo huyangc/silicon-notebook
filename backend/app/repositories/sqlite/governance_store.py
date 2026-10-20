@@ -24,6 +24,7 @@ from app.repositories.sqlite.memory_sql import (
     foreign_memory_relation_excluded,
     memory_derived_object,
     memory_derived_relation,
+    own_memory_source,
 )
 from app.repositories.sqlite.id_binding import (
     bind_ids as id_bind_ids,
@@ -44,6 +45,7 @@ from app.domain.memory_kg_isolation import (
     MemoryKnowledgeMergeRefused,
     MemoryPromotionRefused,
     PromotionObjectMissing,
+    merge_evidence_source_ids,
     memory_merge_refusal,
 )
 
@@ -1993,6 +1995,34 @@ class GovernanceStore:
         ).fetchone()
 
     @staticmethod
+    def _own_memory_merge_evidence(
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        actor_id: str | None,
+        src: sqlite3.Row,
+        tgt: sqlite3.Row,
+    ) -> bool:
+        """Mirror of the PostgreSQL twin (minus its pre-lock check): does
+        every evidence entry of both rows cite one of the caller's own
+        Memory sources of this notebook (``own_memory_source``)?"""
+        cited = merge_evidence_source_ids(
+            json.loads(src["evidence"] or "[]"), json.loads(tgt["evidence"] or "[]")
+        )
+        if cited is None:
+            return False
+        if not cited:
+            return True
+        # drive_by: the cited ids are the keys to read (a primary-key seek
+        # each); the notebook would otherwise drive a walk of all its sources.
+        found = id_bind_ids(sorted(cited), sort=True)
+        own = connection.execute(
+            f"SELECT s.id FROM sources s WHERE {id_drive_by('s.id', found)} "
+            f"AND s.notebook_id = ? AND {own_memory_source('s')}",
+            (found.param, notebook_id, actor_id),
+        ).fetchall()
+        return len(own) == len(cited)
+
+    @staticmethod
     def merge_objects_in_transaction(
         connection: sqlite3.Connection,
         notebook_id: str,
@@ -2006,15 +2036,19 @@ class GovernanceStore:
         into the target, maintain the reverse index, deprecate the source in
         place, and return the refetched target row.
 
-        M1: a Memory-derived object is never folded into, or folded with,
-        another object (``app.domain.memory_kg_isolation`` has the rule and
-        why same-owner pairs are refused too). The classification rides the
-        two reads this body already makes, inside the caller's write
-        transaction (SQLite's single writer: nothing can change either row
-        between these reads and the UPDATEs): an object derived from someone
-        else's Memory is filtered out (``foreign_memory_object_excluded``) and
-        raises the same ``KeyError`` as a missing id; one of the caller's own
-        raises ``MemoryKnowledgeMergeRefused`` before anything is written."""
+        M1 (``app.domain.memory_kg_isolation`` has the rule): a
+        Memory-derived object merges only with another one of the same
+        owner, and only when both are supported by nothing but that owner's
+        Memory. The classification rides the two reads this body already
+        makes, inside the caller's write transaction (SQLite's single writer:
+        nothing can change either row, nor any source, between these reads
+        and the UPDATEs — so, unlike the PostgreSQL twin, no source lock is
+        taken): an object derived from someone else's Memory is filtered out
+        (``foreign_memory_object_excluded``) and raises the same ``KeyError``
+        as a missing id; a pair with exactly one of the caller's own, or two
+        whose evidence cites anything but the caller's own Memory sources of
+        this notebook (``_own_memory_merge_evidence``), raises
+        ``MemoryKnowledgeMergeRefused`` before anything is written."""
         read = (
             "SELECT ko.*, "
             f"{memory_derived_object('ko')} AS memory_derived "
@@ -2028,7 +2062,11 @@ class GovernanceStore:
         if src["object_type"] != tgt["object_type"]:
             raise ValueError("can only merge knowledge objects of the same type")
         refusal = memory_merge_refusal(
-            bool(src["memory_derived"]), bool(tgt["memory_derived"])
+            bool(src["memory_derived"]),
+            bool(tgt["memory_derived"]),
+            lambda: GovernanceStore._own_memory_merge_evidence(
+                connection, notebook_id, actor_id, src, tgt
+            ),
         )
         if refusal is not None:
             raise MemoryKnowledgeMergeRefused(refusal)

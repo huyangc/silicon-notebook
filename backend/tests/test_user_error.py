@@ -187,9 +187,10 @@ ALLOWED_DYNAMIC_USER_ERROR = {
     ),
     "app/api/knowledge_routes.py::merge_knowledge": (
         "唯一的动态实参是 MemoryKnowledgeMergeRefused.user_message:它只可能是 "
-        "app/domain/memory_kg_isolation.py 的两个中文模块常量之一(CROSS_CLASS_MESSAGE / "
-        "SAME_OWNER_MESSAGE),由 memory_merge_refusal 选出,两个后端的 "
-        "merge_objects_in_transaction 只用这个结果构造异常;不拼异常原文或对象内容。"
+        "app/domain/memory_kg_isolation.py 的两个中文模块常量之一(CROSS_CLASS_MESSAGE,"
+        "由 memory_merge_refusal 选出;MEMORY_MERGE_RETRY_MESSAGE,PostgreSQL 的 "
+        "_own_memory_merge_evidence 在加锁前后证据不一致时用),两个后端的 "
+        "merge_objects_in_transaction 只用它们构造异常;不拼异常原文或对象内容。"
         "tests/test_memory_kg_isolation_vocabulary.py 对该模块每个文案常量跑词汇守卫;"
         "tests/test_memory_kg_isolation_write.py 的路由用例覆盖真实 409 响应。"
     ),

@@ -2345,7 +2345,10 @@ class KnowledgeGovernanceService:
         ``actor_id``'s, or an orphan Memory source) raises ``KeyError`` — the
         same 404 as an unknown id; a merge that involves the caller's own
         Memory-derived object raises ``MemoryKnowledgeMergeRefused`` (the
-        route answers 409 with its curated copy). The check has exactly one
+        route answers 409 with its curated copy) unless both sides are hers
+        and supported by nothing but her own Memory, which merges like any
+        pair (the result keeps the target's Memory source, so it stays
+        visible to her alone). The check has exactly one
         home — the store's ``merge_objects_in_transaction``, evaluated in the
         statement that locks both rows — so there is no service-side pre-read
         that a concurrent write could invalidate, and nothing is written or
