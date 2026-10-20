@@ -357,7 +357,7 @@ F3 与 F1 的界线是本规格最要紧的判别：
 - **C** 对两种删改都稳（≤ 0.5%），模块度还略高于现状，同输入重跑是不动点。
   - 代价是**依赖历史**：划分不再只是当前图的函数，而是「当前图 + 上一代划分」的函数。冷启动得到的划分，与增量演化出来的不同。⚠ **冷启动不能以 `force` 为判据**：每一次真正的重新合并都会以 `force=True` 调 `rebuild_communities`，照那个判据热启动永远不会发生。冷启动只在下列情形：没有已发布的划分；已发布划分的分区版本与当前代码不同（首次切换就是这一档）；走 networkx 回退；运维显式要求（`backend/app/scripts/recluster_kg.py --cold-partition`）。
   - 第一次从 Louvain 切过去，会一次性动约 10% 的节点。
-  - `initial_membership` 只有 igraph 的 Leiden 有。`rebuild_communities` 在没装 igraph 时还有一条 networkx 回退路径；那条路径保持今天的冷启动 Louvain，并在账本里记 `partition_mode: cold_fallback`，不假装稳定。igraph 是 `requirements.txt` 的依赖，回退只在缺包时出现。
+  - `initial_membership` 只有 igraph 的 Leiden 有。`rebuild_communities` 在没装 igraph 时还有一条 networkx 回退路径；那条路径保持今天的冷启动 Louvain，并在账本里记 `partition_mode: cold_fallback`，不假装稳定。igraph 是 `requirements.txt` 的依赖，回退只在缺包时出现。回退的产物不是当前分区算法划出来的，发布时分区版本记 0，所以下一次有 igraph 的重建按「版本不同」冷启动，不会从 Louvain 的结果热启动（S2 评审裁决，2026-10-21）。
 - 这与「换 Leiden 当质量杠杆」被证伪并不矛盾。那条证伪的是「换个算法让板块更好」（模块度只 +0.003）。这里用 Leiden，是因为它支持 `initial_membership`，买的是稳定性。
 
 **建议**：以 C 为主。冷启动时按 B 的方式跑（分量 + canonical id 序），这样冷启动本身也是确定的。另外加**板块 id 续用**：新旧板块的成员 Jaccard 互为最佳且 ≥ 0.5 时，沿用旧 id。本机在 C 下 84/84 个板块都找得到这样的继任者。只有 id 能续用，快照对比和检索才谈得上「同一个板块」。
