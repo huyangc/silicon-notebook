@@ -85,7 +85,8 @@ that is a semantic property the behaviour tests of each path pin
 statement a PL/pgSQL function builds at run time (``EXECUTE format(...)``) is out
 of its reach as well.
 
-The copy path (``NotebookCopyService.copy_notebook`` -> ``insert_copy_rows("chunks")``)
+The copy path (``NotebookCopyService.copy_notebook`` -> ``_copy_elements_and_chunks`` ->
+``insert_copy_rows("chunks")``)
 does not call the refusal. Which chunk rows it copies is decided by the copy
 statement set of ``sharing_store.py``, and the guard reports the path as "guarded
 by the copy snapshot predicate" exactly when, on BOTH backends, the chunks copy
@@ -1877,7 +1878,7 @@ REVIEWED: dict[tuple, tuple[str, str]] = {
                 "schema (migrate_to_current), then the secondary's notebooks are copied "
                 "verbatim by plain INSERT ... SELECT; a sources row is only ever inserted"),
     # -- the copy path: reason decided by the copy snapshot ------------------------
-    ("backend/app/services/notebook_sharing.py", "NotebookCopyService.copy_notebook",
+    ("backend/app/services/notebook_sharing.py", "NotebookCopyService._copy_elements_and_chunks",
      "insert_copy_rows", "'chunks'"):
         (COPY_BY_SNAPSHOT, "insert_copy_rows(\"chunks\", ...) of the notebook copy"),
     # -- late-bound seats: calls through SharingStore.insert_row are checked as calls

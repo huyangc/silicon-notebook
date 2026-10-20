@@ -5,6 +5,7 @@ import logging
 import re
 import secrets
 import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, TYPE_CHECKING
 
@@ -324,6 +325,65 @@ def _insert_copy_fts_mirrors(
     )
 
 
+@dataclass
+class _NotebookCopyRun:
+    """One deep copy's state, threaded through ``copy_notebook``'s phase helpers.
+
+    The identity values (``new_id``/``now``/``chunk_size``) are read from the seams
+    ONCE, at the start of ``copy_notebook``, exactly as before the split. The remap
+    maps are shared by identity: each phase fills the ones later phases read
+    (``json_maps`` holds the very same dicts, so an object id remapped earlier in
+    the objects loop is already visible to the next object's payload). The two
+    ``*_copied`` flags record what this copy actually wrote to disk — set the moment
+    it happens, inside whichever phase does it — so the compensation removes only
+    those directories.
+    """
+
+    source_notebook_id: str
+    source_notebook: NotebookSummary
+    new_owner_id: str
+    new_id: str
+    now: str
+    chunk_size: int
+    destination_dir: Path
+    # PR-2+3 Task 13: notebook_assets' on-disk files live in a SEPARATE
+    # tree from source_dir (storage_dir/assets/<nb>/, not
+    # storage_dir/notebooks/<nb>/ — see app.services.knowhow.assets.
+    # AssetService.path_for), so they need their own copied-flag +
+    # destination path for the same "compensate only what we actually
+    # wrote" discipline as destination_dir.
+    assets_dest_dir: Path
+    copied_files: bool = False
+    assets_copied: bool = False
+    source_map: dict = field(default_factory=dict)
+    element_map: dict = field(default_factory=dict)
+    chunk_map: dict = field(default_factory=dict)
+    object_map: dict = field(default_factory=dict)
+    fact_map: dict = field(default_factory=dict)
+    generation_map: "dict[tuple[str, str], str]" = field(default_factory=dict)
+    relation_map: dict = field(default_factory=dict)
+    # PR-2+3 Task 13: knowhow business-table + hidden-source-content
+    # remap maps. ``knowhow_source_ids_old`` is captured from the
+    # RAW (not-yet-mutated) snapshot, before anything rewrites
+    # snapshot["knowhow_tables"]' own dicts in place — it is how the
+    # elements/chunks loops tell a knowhow row apart from an ordinary
+    # document row (both share the same snapshot queries now that
+    # neither is excluded).
+    khtbl_map: dict = field(default_factory=dict)
+    khcol_map: dict = field(default_factory=dict)
+    khrow_map: dict = field(default_factory=dict)
+    khcel_map: dict = field(default_factory=dict)
+    khcode_map: dict = field(default_factory=dict)
+    asset_map: dict = field(default_factory=dict)
+    knowhow_source_ids_old: set = field(default_factory=set)
+    # old element id -> NEW row id, populated by the elements_out
+    # loop; the chunks_out loop reads it to recompute each
+    # knowhow chunk's id from ITS row (a chunk has no row_id column
+    # of its own — only its element_ids[0] indirectly names one).
+    element_row_new: dict = field(default_factory=dict)
+    json_maps: dict = field(default_factory=dict)
+
+
 class NotebookCopyService:
     """Deep-copy orchestration: ID remapping, chunked transactions through the
     store, filesystem copy and compensation ordering.
@@ -405,32 +465,31 @@ class NotebookCopyService:
         directory → insert copying sentinel → copy each table in configured
         chunks → validate counts and references → publish original status.
         Failure compensates ONLY the destination rows/files.
+
+        The tables are written in FK-safe order, one ``insert_copy_rows`` per
+        table, by the phase helpers below; each fills the remap maps on
+        ``_NotebookCopyRun`` that the later phases read.
         """
         self.sweep_stuck_copies(new_owner_id)
         source_notebook = self._catalog.get_notebook(source_notebook_id)
         new_id = self._seams.new_id("nb")
         now = self._seams.now()
         chunk_size = self._seams.copy_chunk_size()
-
-        def remapped_id(old: str) -> str:
-            prefix = old.split("-", 1)[0] if old else "id"
-            return self._seams.new_id(prefix)
-
         source_dir = self._storage_dir() / "notebooks" / source_notebook_id
-        destination_dir = self._storage_dir() / "notebooks" / new_id
-        # PR-2+3 Task 13: notebook_assets' on-disk files live in a SEPARATE
-        # tree from source_dir (storage_dir/assets/<nb>/, not
-        # storage_dir/notebooks/<nb>/ — see app.services.knowhow.assets.
-        # AssetService.path_for), so they need their own copied-flag +
-        # destination path for the same "compensate only what we actually
-        # wrote" discipline as destination_dir below.
-        assets_dest_dir = self._storage_dir() / "assets" / new_id
-        copied_files = False
-        assets_copied = False
+        run = _NotebookCopyRun(
+            source_notebook_id=source_notebook_id,
+            source_notebook=source_notebook,
+            new_owner_id=new_owner_id,
+            new_id=new_id,
+            now=now,
+            chunk_size=chunk_size,
+            destination_dir=self._storage_dir() / "notebooks" / new_id,
+            assets_dest_dir=self._storage_dir() / "assets" / new_id,
+        )
         try:
             if source_dir.exists():
-                shutil.copytree(source_dir, destination_dir)
-                copied_files = True
+                shutil.copytree(source_dir, run.destination_dir)
+                run.copied_files = True
 
             # snapshot_copy_rows enforces the copyable-row bound ATOMICALLY inside
             # its own stable-snapshot read transaction (raises
@@ -440,529 +499,20 @@ class NotebookCopyService:
             # above is disk, not memory; the except below rmtree's it on a raise.
             snapshot = self._store.snapshot_copy_rows(source_notebook_id)
 
-            notebook_row = snapshot["notebooks"][0]
-            _reset_copied_notebook_row(
-                notebook_row,
-                new_id=new_id,
-                name=new_name or f"{source_notebook.name} (副本)",
-                new_owner_id=new_owner_id,
-                now=now,
-                manual_name=bool(new_name),
-            )
-            # 哨兵行必须先**提交**（不只是"已插入"）：下一步的挂载有效性判定跑在
-            # store 的另一条连接上，还要 join 目的地这一行取 created_by。
-            self._store.insert_copy_rows("notebooks", [notebook_row], chunk_size=chunk_size)
-            _carry_valid_mount_edges(
-                self._store, snapshot["notebook_bases"], new_id=new_id,
-                new_owner_id=new_owner_id, now=now, chunk_size=chunk_size,
-            )
-
-            source_map: dict = {}
-            element_map: dict = {}
-            chunk_map: dict = {}
-            object_map: dict = {}
-            fact_map: dict = {}
-            generation_map: dict[tuple[str, str], str] = {}
-            relation_map: dict = {}
-            # PR-2+3 Task 13: knowhow business-table + hidden-source-content
-            # remap maps. ``knowhow_source_ids_old`` is captured from the
-            # RAW (not-yet-mutated) snapshot, before anything below rewrites
-            # snapshot["knowhow_tables"]' own dicts in place — it is how the
-            # elements/chunks loops further down tell a knowhow row apart
-            # from an ordinary document row (both share the same snapshot
-            # queries now that neither is excluded).
-            khtbl_map: dict = {}
-            khcol_map: dict = {}
-            khrow_map: dict = {}
-            khcel_map: dict = {}
-            khcode_map: dict = {}
-            asset_map: dict = {}
-            knowhow_source_ids_old = {
+            self._insert_copy_sentinel(run, snapshot, new_name=new_name)
+            run.knowhow_source_ids_old = {
                 t["hidden_source_id"]
                 for t in snapshot["knowhow_tables"]
                 if t.get("hidden_source_id")
             }
-            # old element id -> NEW row id, populated by the elements_out
-            # loop below; the chunks_out loop reads it to recompute each
-            # knowhow chunk's id from ITS row (a chunk has no row_id column
-            # of its own — only its element_ids[0] indirectly names one).
-            element_row_new: dict = {}
-
-            sources_out = []
-            for data in snapshot["sources"]:
-                data["id"] = source_map.setdefault(data["id"], remapped_id(data["id"]))
-                data["notebook_id"] = new_id
-                if data.get("file_path"):
-                    data["file_path"] = str(destination_dir / Path(data["file_path"]).name)
-                # Task 6: memory_id is NOT an id that gets remapped — it points
-                # at a Memory row that is owner-private and never travels with
-                # a copy. Force it empty (insert_source's own "no link"
-                # default) so the copy doesn't dangle-reference a Memory the
-                # recipient can't see, and doesn't collide with the global
-                # partial unique index idx_sources_memory_id (which the
-                # source row's own unchanged memory_id still occupies).
-                data["memory_id"] = ""
-                # v48 provenance is likewise not an identity that travels with a
-                # copy: the copy row is created by the USER's copy action, so it
-                # is user-added by definition. Force NULL — not "" — because the
-                # projection derives ``agent_created`` from IS NOT NULL, and an
-                # empty string would read as "an Agent added this". Clearing it
-                # moves every copied row into the protected class (a source an
-                # Agent may never delete), which is the conservative direction:
-                # carrying the id over would hand an Agent delete rights on rows
-                # in a notebook it never touched.
-                data.update(agent_profile_id=None, uploaded_by=None)
-                sources_out.append(data)
-            self._store.insert_copy_rows("sources", sources_out, chunk_size=chunk_size)
-
-            paper_meta_out = []
-            for data in snapshot["source_paper_meta"]:
-                data["source_id"] = source_map[data["source_id"]]
-                data["notebook_id"] = new_id
-                paper_meta_out.append(data)
-            self._store.insert_copy_rows(
-                "source_paper_meta", paper_meta_out, chunk_size=chunk_size
-            )
-
-            authors_out = []
-            for data in snapshot["source_authors"]:
-                new_source_id = source_map[data["source_id"]]
-                # Deterministic id scheme mirrors SourceStore.upsert_paper_meta's
-                # write-time convention exactly, so a copy's author rows are
-                # indistinguishable from freshly-extracted ones.
-                data["id"] = f"{new_source_id}:auth:{int(data['position']):03d}"
-                data["source_id"] = new_source_id
-                data["notebook_id"] = new_id
-                authors_out.append(data)
-            self._store.insert_copy_rows(
-                "source_authors", authors_out, chunk_size=chunk_size
-            )
-
-            schema_rows = []
-            for data in snapshot["notebook_object_schemas"]:
-                data["notebook_id"] = new_id
-                data["created_by"] = new_owner_id
-                schema_rows.append(data)
-            self._store.insert_copy_rows(
-                "notebook_object_schemas", schema_rows, chunk_size=chunk_size
-            )
-
-            # --- PR-2+3 Task 13: knowhow business tables ------------------
-            # Order is FK-safe (each leg's remap map is fully populated
-            # before the next leg that depends on it runs): tables (needs
-            # source_map for hidden_source_id) -> columns/rows (need
-            # khtbl_map) -> assets (independent; builds asset_map) -> cells
-            # (needs khrow_map + khcol_map + asset_map, for the content_md
-            # asset:// rewrite) -> cell_code (needs khrow_map + khcol_map).
-            tables_out = []
-            for data in snapshot["knowhow_tables"]:
-                data["id"] = khtbl_map.setdefault(data["id"], remapped_id(data["id"]))
-                data["notebook_id"] = new_id
-                data["created_by"] = new_owner_id
-                old_hidden = data.get("hidden_source_id")
-                data["hidden_source_id"] = (
-                    source_map.get(old_hidden, old_hidden) if old_hidden else old_hidden
-                )
-                tables_out.append(data)
-            self._store.insert_copy_rows("knowhow_tables", tables_out, chunk_size=chunk_size)
-
-            columns_out = []
-            for data in snapshot["knowhow_columns"]:
-                data["id"] = khcol_map.setdefault(data["id"], remapped_id(data["id"]))
-                data["table_id"] = khtbl_map[data["table_id"]]
-                columns_out.append(data)
-            self._store.insert_copy_rows("knowhow_columns", columns_out, chunk_size=chunk_size)
-
-            rows_out = []
-            for data in snapshot["knowhow_rows"]:
-                data["id"] = khrow_map.setdefault(data["id"], remapped_id(data["id"]))
-                data["table_id"] = khtbl_map[data["table_id"]]
-                # The copy has not been (re)projected yet regardless of what
-                # the SOURCE row's own status was — 'pending' is the schema
-                # default for exactly this "not yet projected" state (see
-                # migrations.py _migration_16), and the scheduling loop at
-                # the end of this method is what will settle it.
-                data["projection_status"] = "pending"
-                rows_out.append(data)
-            self._store.insert_copy_rows("knowhow_rows", rows_out, chunk_size=chunk_size)
-
-            assets_out = []
-            asset_files: list[tuple[str, str, str]] = []  # (old_id, new_id, mime)
-            for data in snapshot["notebook_assets"]:
-                old_asset_id = data["id"]
-                new_asset_id = asset_map.setdefault(old_asset_id, remapped_id(old_asset_id))
-                data["id"] = new_asset_id
-                _remap_copied_asset_row(data, new_id, source_map)
-                asset_files.append((old_asset_id, new_asset_id, data["mime"]))
-                assets_out.append(data)
-            self._store.insert_copy_rows("notebook_assets", assets_out, chunk_size=chunk_size)
-
-            if asset_files:
-                assets_src_dir = self._storage_dir() / "assets" / source_notebook_id
-                assets_dest_dir.mkdir(parents=True, exist_ok=True)
-                assets_copied = True
-                for old_asset_id, new_asset_id, mime in asset_files:
-                    ext = ALLOWED_MIME_EXTENSIONS.get(mime, "bin")
-                    src_path = assets_src_dir / f"{old_asset_id}.{ext}"
-                    if src_path.is_file():
-                        shutil.copy2(src_path, assets_dest_dir / f"{new_asset_id}.{ext}")
-
-            cells_out = []
-            for data in snapshot["knowhow_cells"]:
-                data["id"] = khcel_map.setdefault(data["id"], remapped_id(data["id"]))
-                data["row_id"] = khrow_map[data["row_id"]]
-                data["column_id"] = khcol_map[data["column_id"]]
-                data["content_md"] = _rewrite_asset_refs(
-                    data.get("content_md") or "", asset_map
-                )
-                cells_out.append(data)
-            self._store.insert_copy_rows("knowhow_cells", cells_out, chunk_size=chunk_size)
-
-            cell_code_out = []
-            for data in snapshot["knowhow_cell_code"]:
-                data["id"] = khcode_map.setdefault(data["id"], remapped_id(data["id"]))
-                data["row_id"] = khrow_map[data["row_id"]]
-                data["column_id"] = khcol_map[data["column_id"]]
-                cell_code_out.append(data)
-            self._store.insert_copy_rows(
-                "knowhow_cell_code", cell_code_out, chunk_size=chunk_size
-            )
-            # 版本管理创世流水（codex 第 2 轮 P2）：knowhow 表内容已全部插完，
-            # 为每个拷贝表补一条 table_create，让它有可回退到的拷贝态起点——
-            # 单表 copy_table 早就这么做了，整本深拷贝这条路径此前漏了。指纹在
-            # 此刻算才反映完整表状态，故必须放在 cell/cell_code 插入之后。
-            self._store.seed_copied_knowhow_genesis(
-                list(khtbl_map.values()),
-                new_id=self._seams.new_id,
-                now=self._seams.now,
-                actor=new_owner_id if actor_label is None else actor_label,
-                note=f"随笔记本《{source_notebook.name}》复制而来",
-            )
-            # --- end knowhow business tables -------------------------------
-
-            elements_out = _copy_source_elements(
-                snapshot["source_elements"],
-                knowhow_source_ids_old=knowhow_source_ids_old,
-                khtbl_map=khtbl_map,
-                khrow_map=khrow_map,
-                khcol_map=khcol_map,
-                source_map=source_map,
-                asset_map=asset_map,
-                element_map=element_map,
-                element_row_new=element_row_new,
-                remapped_id=remapped_id,
-            )
-            self._store.insert_copy_rows(
-                "source_elements", elements_out, chunk_size=chunk_size
-            )
-
-            json_maps = {
-                "element_id": element_map,
-                "element_ids": element_map,
-                "source_id": source_map,
-                "object_id": object_map,
-            }
-
-            chunks_out = []
-            for data in snapshot["chunks"]:
-                old_chunk_id = data["id"]
-                if data["source_id"] in knowhow_source_ids_old:
-                    # Recompute the SAME stable chunk id project_table would
-                    # (app.services.knowhow.projection.cell_chunk_id): the
-                    # trailing "part" number (column-position-derived) is
-                    # unchanged by a copy (column position is copied as-is),
-                    # so it is read straight off the OLD id; only the
-                    # row-hash segment (a pure function of row_id) needs
-                    # recomputing for the remapped row. This is the crux of
-                    # the zero-re-embed contract — landing on this exact id
-                    # with unchanged text+section_path is what makes the
-                    # post-copy project_table pass see "nothing changed".
-                    old_element_ids = json.loads(data.get("element_ids") or "[]")
-                    if not old_element_ids:
-                        # Defensive only — the projector always writes exactly
-                        # one element id per knowhow chunk (_write_chunks).
-                        # Failing loud INSIDE the try means a genuinely
-                        # malformed source row compensates the whole copy
-                        # instead of silently producing a chunk whose id the
-                        # post-copy reprojection could never reconcile.
-                        raise ValueError(
-                            f"copy_notebook: knowhow chunk {old_chunk_id} "
-                            "缺 element_ids，无法重算稳定 id"
-                        )
-                    new_row_id = element_row_new[old_element_ids[0]]
-                    part = int(old_chunk_id.rsplit("-", 1)[-1])
-                    new_chunk_id = cell_chunk_id(new_row_id, part)
-                    chunk_map[old_chunk_id] = new_chunk_id
-                    data["id"] = new_chunk_id
-                else:
-                    data["id"] = chunk_map.setdefault(
-                        old_chunk_id, remapped_id(old_chunk_id)
-                    )
-                data["notebook_id"] = new_id
-                data["source_id"] = source_map[data["source_id"]]
-                element_ids = {"element_ids": json.loads(data.get("element_ids") or "[]")}
-                data["element_ids"] = json.dumps(
-                    self._seams.remap_json_ids(element_ids, json_maps)["element_ids"]
-                )
-                chunks_out.append(data)
-            # chunk_elements（element→chunk 反查表，v46）刻意**不**随深拷贝复制：
-            # unified_kg_state 不在拷贝表集合内（至多有 insert_copy_rows 写的标脏行,
-            # 该列取默认 0），所以副本的 chunk_elements_indexed 恒缺失或为 0，读路径
-            # 走 legacy 全量扫描——反查行缺席是正确且自洽的。
-            # ⚠ 若将来把 unified_kg_state 加进深拷贝表集合，**必须**同时复制
-            # chunk_elements（或显式把副本的 chunk_elements_indexed 归零）：
-            # 否则副本继承一个为真的标记而反查表是空的，点查路径会静默返回空
-            # 证据——不报错、无自愈路径。knowhow 单表 copy_table 的目标是**已存在**
-            # 的 notebook，所以那条路不能豁免，见 knowhow_transfer_store。
-            # 与同为派生表的 chunk_questions（本方法下方确实复制）非对称，理由
-            # 就在这里：那张表自描述（有行即可用），而 chunk_elements 的可用性
-            # 由一个**不随拷贝走**的标记声明，所以「不拷贝」才是自洽的那一侧。
-            self._store.insert_copy_rows("chunks", chunks_out, chunk_size=chunk_size)
-
-            objects_out = []
-            for data in snapshot["knowledge_objects"]:
-                old_source_id = data["source_id"]
-                old_candidate_id = data.get("source_candidate_id")
-                data["id"] = object_map.setdefault(data["id"], remapped_id(data["id"]))
-                data["notebook_id"] = new_id
-                data["source_id"] = source_map.get(old_source_id, old_source_id)
-                if old_candidate_id:
-                    data["source_candidate_id"] = source_map.get(
-                        old_candidate_id, old_candidate_id
-                    )
-                data["payload"] = json.dumps(
-                    self._seams.remap_json_ids(json.loads(data.get("payload") or "{}"), json_maps)
-                )
-                data["evidence"] = json.dumps(
-                    self._seams.remap_json_ids(json.loads(data.get("evidence") or "[]"), json_maps)
-                )
-                objects_out.append(data)
-            self._store.insert_copy_rows(
-                "knowledge_objects", objects_out, chunk_size=chunk_size
-            )
-
-            # Source-local facts are generation-bound: maintenance and the
-            # read-only audit accept a projection only when its generation is
-            # backed by a successful KG extraction run in the SAME notebook.
-            # Operational extraction history deliberately does not travel
-            # with a deep copy, so mint one copy-local completed generation
-            # for every source represented by the copied terminal ledger (or,
-            # for an older projection without a ledger, its newest fact
-            # generation).  Facts, bindings and ledger rows below all remap
-            # through the same (source,generation) key.
-            generations_by_source: dict[str, dict[str, str]] = {}
-            fact_counts_by_generation: dict[tuple[str, str], int] = {}
-            for data in snapshot["knowledge_source_facts"]:
-                source_id = str(data["source_id"])
-                generation = str(data.get("source_generation") or "")
-                if generation:
-                    generations_by_source.setdefault(source_id, {})[generation] = str(
-                        data.get("updated_at") or data.get("created_at") or ""
-                    )
-                    key = (source_id, generation)
-                    fact_counts_by_generation[key] = (
-                        fact_counts_by_generation.get(key, 0) + 1
-                    )
-            active_generation_by_source: dict[str, str] = {}
-            scanned_by_source: dict[str, int] = {}
-            for data in snapshot["knowledge_source_fact_backfills"]:
-                source_id = str(data["source_id"])
-                generation = str(data.get("source_generation") or "")
-                if not generation:
-                    continue
-                active_generation_by_source[source_id] = generation
-                scanned_by_source[source_id] = int(data.get("objects_scanned") or 0)
-                generations_by_source.setdefault(source_id, {})[generation] = str(
-                    data.get("updated_at") or data.get("created_at") or ""
-                )
-            for data in snapshot["knowledge_source_fact_elements"]:
-                source_id = str(data["source_id"])
-                generation = str(data.get("source_generation") or "")
-                if generation:
-                    generations_by_source.setdefault(source_id, {}).setdefault(
-                        generation, str(data.get("created_at") or "")
-                    )
-
-            copy_generation_runs = []
-            for old_source_id, generations in generations_by_source.items():
-                for old_generation in generations:
-                    generation_map[(old_source_id, old_generation)] = remapped_id(
-                        old_generation
-                    )
-                active_generation = active_generation_by_source.get(old_source_id)
-                if not active_generation:
-                    active_generation = max(
-                        generations,
-                        key=lambda generation: (generations[generation], generation),
-                    )
-                new_generation = generation_map[(old_source_id, active_generation)]
-                copied_fact_count = fact_counts_by_generation.get(
-                    (old_source_id, active_generation), 0
-                )
-                object_count = scanned_by_source.get(old_source_id, copied_fact_count)
-                copy_generation_runs.append(
-                    {
-                        "id": new_generation,
-                        "notebook_id": new_id,
-                        "source_id": source_map[old_source_id],
-                        "run_type": "kg",
-                        "status": "completed",
-                        "error_message": (
-                            f"kg objects={object_count} relations=0 copied_generation=1"
-                        ),
-                        "created_at": now,
-                        "updated_at": now,
-                    }
-                )
-            self._store.insert_copy_rows(
-                "extraction_runs", copy_generation_runs, chunk_size=chunk_size
-            )
-
-            source_facts_out = []
-            for data in snapshot["knowledge_source_facts"]:
-                old_fact_id = data["id"]
-                old_source_id = str(data["source_id"])
-                old_generation = str(data.get("source_generation") or "")
-                data["id"] = fact_map.setdefault(old_fact_id, remapped_id(old_fact_id))
-                data["notebook_id"] = new_id
-                data["source_id"] = source_map[old_source_id]
-                if old_generation:
-                    data["source_generation"] = generation_map[
-                        (old_source_id, old_generation)
-                    ]
-                data["global_object_id"] = object_map.get(
-                    data.get("global_object_id") or "",
-                    data.get("global_object_id") or "",
-                )
-                data["payload"] = json.dumps(
-                    self._seams.remap_json_ids(
-                        json.loads(data.get("payload") or "{}"), json_maps
-                    )
-                )
-                data["evidence"] = json.dumps(
-                    self._seams.remap_json_ids(
-                        json.loads(data.get("evidence") or "[]"), json_maps
-                    )
-                )
-                source_facts_out.append(data)
-            self._store.insert_copy_rows(
-                "knowledge_source_facts", source_facts_out, chunk_size=chunk_size
-            )
-
-            source_fact_elements_out = []
-            for data in snapshot["knowledge_source_fact_elements"]:
-                old_source_id = str(data["source_id"])
-                old_generation = str(data.get("source_generation") or "")
-                data["fact_id"] = fact_map[data["fact_id"]]
-                data["notebook_id"] = new_id
-                data["source_id"] = source_map[old_source_id]
-                if old_generation:
-                    data["source_generation"] = generation_map[
-                        (old_source_id, old_generation)
-                    ]
-                data["element_id"] = element_map[data["element_id"]]
-                source_fact_elements_out.append(data)
-            self._store.insert_copy_rows(
-                "knowledge_source_fact_elements",
-                source_fact_elements_out,
-                chunk_size=chunk_size,
-            )
-
-            source_fact_backfills_out = []
-            for data in snapshot["knowledge_source_fact_backfills"]:
-                old_source_id = str(data["source_id"])
-                old_generation = str(data.get("source_generation") or "")
-                data["source_id"] = source_map[old_source_id]
-                data["notebook_id"] = new_id
-                if old_generation:
-                    data["source_generation"] = generation_map[
-                        (old_source_id, old_generation)
-                    ]
-                old_after = data.get("after_object_id") or ""
-                data["after_object_id"] = object_map.get(old_after, "")
-                source_fact_backfills_out.append(data)
-            self._store.insert_copy_rows(
-                "knowledge_source_fact_backfills",
-                source_fact_backfills_out,
-                chunk_size=chunk_size,
-            )
-
-            relations_out = []
-            for data in snapshot["knowledge_relations"]:
-                old_source_id = data["source_id"]
-                data["id"] = relation_map.setdefault(data["id"], remapped_id(data["id"]))
-                data["notebook_id"] = new_id
-                data["source_id"] = source_map.get(old_source_id, old_source_id)
-                data["source_object_id"] = object_map[data["source_object_id"]]
-                data["target_object_id"] = object_map[data["target_object_id"]]
-                data["evidence"] = json.dumps(
-                    self._seams.remap_json_ids(json.loads(data.get("evidence") or "[]"), json_maps)
-                )
-                relations_out.append(data)
-            self._store.insert_copy_rows(
-                "knowledge_relations", relations_out, chunk_size=chunk_size
-            )
-
-            chunk_questions_out = []
-            for data in snapshot["chunk_questions"]:
-                data["id"] = remapped_id(data["id"])
-                data["chunk_id"] = chunk_map[data["chunk_id"]]
-                data["notebook_id"] = new_id
-                data["source_id"] = source_map[data["source_id"]]
-                chunk_questions_out.append(data)
-            self._store.insert_copy_rows(
-                "chunk_questions", chunk_questions_out, chunk_size=chunk_size
-            )
-
-            chunk_embeddings_out = []
-            for data in snapshot["chunk_embeddings"]:
-                data["chunk_id"] = chunk_map[data["chunk_id"]]
-                data["notebook_id"] = new_id
-                chunk_embeddings_out.append(data)
-            self._store.insert_copy_rows(
-                "chunk_embeddings", chunk_embeddings_out, chunk_size=chunk_size
-            )
-
-            element_embeddings_out = []
-            for data in snapshot["element_embeddings"]:
-                data["element_id"] = element_map[data["element_id"]]
-                data["source_id"] = source_map[data["source_id"]]
-                data["notebook_id"] = new_id
-                element_embeddings_out.append(data)
-            self._store.insert_copy_rows(
-                "element_embeddings", element_embeddings_out, chunk_size=chunk_size
-            )
-
-            knowledge_embeddings_out = []
-            for data in snapshot["knowledge_embeddings"]:
-                data["object_id"] = object_map[data["object_id"]]
-                data["notebook_id"] = new_id
-                knowledge_embeddings_out.append(data)
-            self._store.insert_copy_rows(
-                "knowledge_embeddings", knowledge_embeddings_out, chunk_size=chunk_size
-            )
-
-            relation_embeddings_out = []
-            for data in snapshot["relation_embeddings"]:
-                data["relation_id"] = relation_map[data["relation_id"]]
-                data["notebook_id"] = new_id
-                relation_embeddings_out.append(data)
-            self._store.insert_copy_rows(
-                "relation_embeddings", relation_embeddings_out, chunk_size=chunk_size
-            )
-
-            clusters_out = []
-            for data in snapshot["concept_clusters"]:
-                data["id"] = remapped_id(data["id"])
-                data["notebook_id"], data["generation"] = new_id, 0
-                data["canonical_id"] = object_map.get(data["canonical_id"], data["canonical_id"])
-                data["member_object_id"] = object_map.get(
-                    data["member_object_id"], data["member_object_id"]
-                )
-                clusters_out.append(data)
-            self._store.insert_copy_rows(
-                "concept_clusters", clusters_out, chunk_size=chunk_size
-            )
+            self._copy_source_tables(run, snapshot)
+            self._copy_knowhow_tables(run, snapshot, actor_label=actor_label)
+            chunks_out = self._copy_elements_and_chunks(run, snapshot)
+            objects_out = self._copy_knowledge_objects(run, snapshot)
+            self._insert_copy_generation_runs(run, snapshot)
+            self._copy_source_facts(run, snapshot)
+            self._copy_relations(run, snapshot)
+            self._copy_chunk_and_vector_rows(run, snapshot)
 
             _insert_copy_fts_mirrors(
                 self._store, new_id=new_id, objects_out=objects_out,
@@ -972,11 +522,7 @@ class NotebookCopyService:
             self._store.validate_copy(source_notebook_id, new_id)
             self._store.publish_copy(new_id, source_notebook.status)
         except Exception:
-            self._store.compensate_copy(new_id)
-            if copied_files:
-                shutil.rmtree(destination_dir, ignore_errors=True)
-            if assets_copied:
-                shutil.rmtree(assets_dest_dir, ignore_errors=True)
+            self._compensate_failed_copy(run)
             raise
         # Success-only path — publish_copy above flipped the sentinel off
         # 'copying', and compensate_copy can no longer reap the notebooks row
@@ -986,32 +532,629 @@ class NotebookCopyService:
         # copy's chunks_fts/kg_objects_fts/knowledge_embeddings rows and
         # rmtree'd its files while the (already published) row SURVIVED — a
         # persistent, silently-corrupted copy sweep_stale_copies never reaps.
-        #
-        # PR-2+3 Task 13: schedule ONE structural reprojection per copied
-        # knowhow table (khtbl_map.values() are all NEW table ids, still in
-        # scope from the completed try; empty for a notebook with no knowhow
-        # tables, so this is a zero-cost no-op for the common case). The
-        # chunks/vectors already sitting in the copy are byte-identical to
-        # what project_table will independently recompute, so this rebuilds
-        # the KO/edge graph (dynamic column-name types) without a single
-        # additional embedder call — see element_id/cell_chunk_id above. A
-        # scheduling failure (realistic: threading.Timer.start() RuntimeError
-        # under thread/fd exhaustion — this codebase has documented history
-        # there) is LOGGED, never compensated: the copy itself is complete
-        # and valid; the table's manual 重建投影 button (or any later edit,
-        # which schedules the same full pass) covers a missed schedule.
-        for new_table_id in khtbl_map.values():
+        self._schedule_copied_projections(run)
+        return self._catalog.get_notebook(new_id)
+
+    def _remapped_id(self, old: str) -> str:
+        """A fresh id for a copied row, keeping the old id's prefix."""
+        prefix = old.split("-", 1)[0] if old else "id"
+        return self._seams.new_id(prefix)
+
+    def _compensate_failed_copy(self, run: _NotebookCopyRun) -> None:
+        """Remove ONLY what this copy wrote: the destination rows, and the two
+        destination directories if (and only if) this copy created them."""
+        self._store.compensate_copy(run.new_id)
+        if run.copied_files:
+            shutil.rmtree(run.destination_dir, ignore_errors=True)
+        if run.assets_copied:
+            shutil.rmtree(run.assets_dest_dir, ignore_errors=True)
+
+    def _insert_copy_sentinel(
+        self, run: _NotebookCopyRun, snapshot: dict, *, new_name: "str | None"
+    ) -> None:
+        """Insert the copy's hidden 'copying' notebooks row, then carry the mounts
+        that are valid for the recipient."""
+        new_id, now = run.new_id, run.now
+        new_owner_id, chunk_size = run.new_owner_id, run.chunk_size
+        notebook_row = snapshot["notebooks"][0]
+        _reset_copied_notebook_row(
+            notebook_row,
+            new_id=new_id,
+            name=new_name or f"{run.source_notebook.name} (副本)",
+            new_owner_id=new_owner_id,
+            now=now,
+            manual_name=bool(new_name),
+        )
+        # 哨兵行必须先**提交**（不只是"已插入"）：下一步的挂载有效性判定跑在
+        # store 的另一条连接上，还要 join 目的地这一行取 created_by。
+        self._store.insert_copy_rows("notebooks", [notebook_row], chunk_size=chunk_size)
+        _carry_valid_mount_edges(
+            self._store, snapshot["notebook_bases"], new_id=new_id,
+            new_owner_id=new_owner_id, now=now, chunk_size=chunk_size,
+        )
+
+    def _copy_source_tables(self, run: _NotebookCopyRun, snapshot: dict) -> None:
+        """sources (fills ``source_map``), paper metadata, authors, object schemas."""
+        new_id, new_owner_id, chunk_size = run.new_id, run.new_owner_id, run.chunk_size
+        source_map, destination_dir = run.source_map, run.destination_dir
+        remapped_id = self._remapped_id
+
+        sources_out = []
+        for data in snapshot["sources"]:
+            data["id"] = source_map.setdefault(data["id"], remapped_id(data["id"]))
+            data["notebook_id"] = new_id
+            if data.get("file_path"):
+                data["file_path"] = str(destination_dir / Path(data["file_path"]).name)
+            # Task 6: memory_id is NOT an id that gets remapped — it points
+            # at a Memory row that is owner-private and never travels with
+            # a copy. Force it empty (insert_source's own "no link"
+            # default) so the copy doesn't dangle-reference a Memory the
+            # recipient can't see, and doesn't collide with the global
+            # partial unique index idx_sources_memory_id (which the
+            # source row's own unchanged memory_id still occupies).
+            data["memory_id"] = ""
+            # v48 provenance is likewise not an identity that travels with a
+            # copy: the copy row is created by the USER's copy action, so it
+            # is user-added by definition. Force NULL — not "" — because the
+            # projection derives ``agent_created`` from IS NOT NULL, and an
+            # empty string would read as "an Agent added this". Clearing it
+            # moves every copied row into the protected class (a source an
+            # Agent may never delete), which is the conservative direction:
+            # carrying the id over would hand an Agent delete rights on rows
+            # in a notebook it never touched.
+            data.update(agent_profile_id=None, uploaded_by=None)
+            sources_out.append(data)
+        self._store.insert_copy_rows("sources", sources_out, chunk_size=chunk_size)
+
+        paper_meta_out = []
+        for data in snapshot["source_paper_meta"]:
+            data["source_id"] = source_map[data["source_id"]]
+            data["notebook_id"] = new_id
+            paper_meta_out.append(data)
+        self._store.insert_copy_rows(
+            "source_paper_meta", paper_meta_out, chunk_size=chunk_size
+        )
+
+        authors_out = []
+        for data in snapshot["source_authors"]:
+            new_source_id = source_map[data["source_id"]]
+            # Deterministic id scheme mirrors SourceStore.upsert_paper_meta's
+            # write-time convention exactly, so a copy's author rows are
+            # indistinguishable from freshly-extracted ones.
+            data["id"] = f"{new_source_id}:auth:{int(data['position']):03d}"
+            data["source_id"] = new_source_id
+            data["notebook_id"] = new_id
+            authors_out.append(data)
+        self._store.insert_copy_rows(
+            "source_authors", authors_out, chunk_size=chunk_size
+        )
+
+        schema_rows = []
+        for data in snapshot["notebook_object_schemas"]:
+            data["notebook_id"] = new_id
+            data["created_by"] = new_owner_id
+            schema_rows.append(data)
+        self._store.insert_copy_rows(
+            "notebook_object_schemas", schema_rows, chunk_size=chunk_size
+        )
+
+    def _copy_knowhow_tables(
+        self, run: _NotebookCopyRun, snapshot: dict, *, actor_label: "str | None"
+    ) -> None:
+        """PR-2+3 Task 13: the knowhow business tables, the notebook's assets, and
+        each copied table's version-history genesis.
+
+        Order is FK-safe (each leg's remap map is fully populated
+        before the next leg that depends on it runs): tables (needs
+        source_map for hidden_source_id) -> columns/rows (need
+        khtbl_map) -> assets (independent; builds asset_map) -> cells
+        (needs khrow_map + khcol_map + asset_map, for the content_md
+        asset:// rewrite) -> cell_code (needs khrow_map + khcol_map).
+        """
+        new_id, new_owner_id, chunk_size = run.new_id, run.new_owner_id, run.chunk_size
+        source_map, khtbl_map = run.source_map, run.khtbl_map
+        khcol_map, khrow_map, khcel_map = run.khcol_map, run.khrow_map, run.khcel_map
+        khcode_map, asset_map = run.khcode_map, run.asset_map
+        remapped_id = self._remapped_id
+
+        tables_out = []
+        for data in snapshot["knowhow_tables"]:
+            data["id"] = khtbl_map.setdefault(data["id"], remapped_id(data["id"]))
+            data["notebook_id"] = new_id
+            data["created_by"] = new_owner_id
+            old_hidden = data.get("hidden_source_id")
+            data["hidden_source_id"] = (
+                source_map.get(old_hidden, old_hidden) if old_hidden else old_hidden
+            )
+            tables_out.append(data)
+        self._store.insert_copy_rows("knowhow_tables", tables_out, chunk_size=chunk_size)
+
+        columns_out = []
+        for data in snapshot["knowhow_columns"]:
+            data["id"] = khcol_map.setdefault(data["id"], remapped_id(data["id"]))
+            data["table_id"] = khtbl_map[data["table_id"]]
+            columns_out.append(data)
+        self._store.insert_copy_rows("knowhow_columns", columns_out, chunk_size=chunk_size)
+
+        rows_out = []
+        for data in snapshot["knowhow_rows"]:
+            data["id"] = khrow_map.setdefault(data["id"], remapped_id(data["id"]))
+            data["table_id"] = khtbl_map[data["table_id"]]
+            # The copy has not been (re)projected yet regardless of what
+            # the SOURCE row's own status was — 'pending' is the schema
+            # default for exactly this "not yet projected" state (see
+            # migrations.py _migration_16), and the post-publish scheduling
+            # (_schedule_copied_projections) is what will settle it.
+            data["projection_status"] = "pending"
+            rows_out.append(data)
+        self._store.insert_copy_rows("knowhow_rows", rows_out, chunk_size=chunk_size)
+
+        self._copy_notebook_assets(run, snapshot)
+
+        cells_out = []
+        for data in snapshot["knowhow_cells"]:
+            data["id"] = khcel_map.setdefault(data["id"], remapped_id(data["id"]))
+            data["row_id"] = khrow_map[data["row_id"]]
+            data["column_id"] = khcol_map[data["column_id"]]
+            data["content_md"] = _rewrite_asset_refs(
+                data.get("content_md") or "", asset_map
+            )
+            cells_out.append(data)
+        self._store.insert_copy_rows("knowhow_cells", cells_out, chunk_size=chunk_size)
+
+        cell_code_out = []
+        for data in snapshot["knowhow_cell_code"]:
+            data["id"] = khcode_map.setdefault(data["id"], remapped_id(data["id"]))
+            data["row_id"] = khrow_map[data["row_id"]]
+            data["column_id"] = khcol_map[data["column_id"]]
+            cell_code_out.append(data)
+        self._store.insert_copy_rows(
+            "knowhow_cell_code", cell_code_out, chunk_size=chunk_size
+        )
+        # 版本管理创世流水（codex 第 2 轮 P2）：knowhow 表内容已全部插完，
+        # 为每个拷贝表补一条 table_create，让它有可回退到的拷贝态起点——
+        # 单表 copy_table 早就这么做了，整本深拷贝这条路径此前漏了。指纹在
+        # 此刻算才反映完整表状态，故必须放在 cell/cell_code 插入之后。
+        self._store.seed_copied_knowhow_genesis(
+            list(khtbl_map.values()),
+            new_id=self._seams.new_id,
+            now=self._seams.now,
+            actor=new_owner_id if actor_label is None else actor_label,
+            note=f"随笔记本《{run.source_notebook.name}》复制而来",
+        )
+
+    def _copy_notebook_assets(self, run: _NotebookCopyRun, snapshot: dict) -> None:
+        """notebook_assets rows (fills ``asset_map``), then their files.
+
+        ``run.assets_copied`` is set the moment the destination directory is
+        created, before any file lands in it, so a failure mid-way through the
+        files still has the directory removed by the compensation."""
+        new_id, chunk_size = run.new_id, run.chunk_size
+        source_map, asset_map = run.source_map, run.asset_map
+        assets_dest_dir = run.assets_dest_dir
+        remapped_id = self._remapped_id
+
+        assets_out = []
+        asset_files: list[tuple[str, str, str]] = []  # (old_id, new_id, mime)
+        for data in snapshot["notebook_assets"]:
+            old_asset_id = data["id"]
+            new_asset_id = asset_map.setdefault(old_asset_id, remapped_id(old_asset_id))
+            data["id"] = new_asset_id
+            _remap_copied_asset_row(data, new_id, source_map)
+            asset_files.append((old_asset_id, new_asset_id, data["mime"]))
+            assets_out.append(data)
+        self._store.insert_copy_rows("notebook_assets", assets_out, chunk_size=chunk_size)
+
+        if asset_files:
+            assets_src_dir = self._storage_dir() / "assets" / run.source_notebook_id
+            assets_dest_dir.mkdir(parents=True, exist_ok=True)
+            run.assets_copied = True
+            for old_asset_id, new_asset_id, mime in asset_files:
+                ext = ALLOWED_MIME_EXTENSIONS.get(mime, "bin")
+                src_path = assets_src_dir / f"{old_asset_id}.{ext}"
+                if src_path.is_file():
+                    shutil.copy2(src_path, assets_dest_dir / f"{new_asset_id}.{ext}")
+
+    def _copy_elements_and_chunks(self, run: _NotebookCopyRun, snapshot: dict) -> list[dict]:
+        """source_elements (fills ``element_map``), the JSON remap maps, and chunks
+        (fills ``chunk_map``); returns the copied chunk rows for the FTS mirror."""
+        new_id, chunk_size = run.new_id, run.chunk_size
+        source_map, element_map, chunk_map = run.source_map, run.element_map, run.chunk_map
+        knowhow_source_ids_old, element_row_new = run.knowhow_source_ids_old, run.element_row_new
+        remapped_id = self._remapped_id
+
+        elements_out = _copy_source_elements(
+            snapshot["source_elements"],
+            knowhow_source_ids_old=knowhow_source_ids_old,
+            khtbl_map=run.khtbl_map,
+            khrow_map=run.khrow_map,
+            khcol_map=run.khcol_map,
+            source_map=source_map,
+            asset_map=run.asset_map,
+            element_map=element_map,
+            element_row_new=element_row_new,
+            remapped_id=remapped_id,
+        )
+        self._store.insert_copy_rows(
+            "source_elements", elements_out, chunk_size=chunk_size
+        )
+
+        run.json_maps = json_maps = {
+            "element_id": element_map,
+            "element_ids": element_map,
+            "source_id": source_map,
+            "object_id": run.object_map,
+        }
+
+        chunks_out = []
+        for data in snapshot["chunks"]:
+            old_chunk_id = data["id"]
+            if data["source_id"] in knowhow_source_ids_old:
+                # Recompute the SAME stable chunk id project_table would
+                # (app.services.knowhow.projection.cell_chunk_id): the
+                # trailing "part" number (column-position-derived) is
+                # unchanged by a copy (column position is copied as-is),
+                # so it is read straight off the OLD id; only the
+                # row-hash segment (a pure function of row_id) needs
+                # recomputing for the remapped row. This is the crux of
+                # the zero-re-embed contract — landing on this exact id
+                # with unchanged text+section_path is what makes the
+                # post-copy project_table pass see "nothing changed".
+                old_element_ids = json.loads(data.get("element_ids") or "[]")
+                if not old_element_ids:
+                    # Defensive only — the projector always writes exactly
+                    # one element id per knowhow chunk (_write_chunks).
+                    # Failing loud INSIDE the try means a genuinely
+                    # malformed source row compensates the whole copy
+                    # instead of silently producing a chunk whose id the
+                    # post-copy reprojection could never reconcile.
+                    raise ValueError(
+                        f"copy_notebook: knowhow chunk {old_chunk_id} "
+                        "缺 element_ids，无法重算稳定 id"
+                    )
+                new_row_id = element_row_new[old_element_ids[0]]
+                part = int(old_chunk_id.rsplit("-", 1)[-1])
+                new_chunk_id = cell_chunk_id(new_row_id, part)
+                chunk_map[old_chunk_id] = new_chunk_id
+                data["id"] = new_chunk_id
+            else:
+                data["id"] = chunk_map.setdefault(
+                    old_chunk_id, remapped_id(old_chunk_id)
+                )
+            data["notebook_id"] = new_id
+            data["source_id"] = source_map[data["source_id"]]
+            element_ids = {"element_ids": json.loads(data.get("element_ids") or "[]")}
+            data["element_ids"] = json.dumps(
+                self._seams.remap_json_ids(element_ids, json_maps)["element_ids"]
+            )
+            chunks_out.append(data)
+        # chunk_elements（element→chunk 反查表，v46）刻意**不**随深拷贝复制：
+        # unified_kg_state 不在拷贝表集合内（至多有 insert_copy_rows 写的标脏行,
+        # 该列取默认 0），所以副本的 chunk_elements_indexed 恒缺失或为 0，读路径
+        # 走 legacy 全量扫描——反查行缺席是正确且自洽的。
+        # ⚠ 若将来把 unified_kg_state 加进深拷贝表集合，**必须**同时复制
+        # chunk_elements（或显式把副本的 chunk_elements_indexed 归零）：
+        # 否则副本继承一个为真的标记而反查表是空的，点查路径会静默返回空
+        # 证据——不报错、无自愈路径。knowhow 单表 copy_table 的目标是**已存在**
+        # 的 notebook，所以那条路不能豁免，见 knowhow_transfer_store。
+        # 与同为派生表的 chunk_questions（_copy_chunk_and_vector_rows 确实复制）非对称，
+        # 理由就在这里：那张表自描述（有行即可用），而 chunk_elements 的可用性
+        # 由一个**不随拷贝走**的标记声明，所以「不拷贝」才是自洽的那一侧。
+        self._store.insert_copy_rows("chunks", chunks_out, chunk_size=chunk_size)
+        return chunks_out
+
+    def _copy_knowledge_objects(self, run: _NotebookCopyRun, snapshot: dict) -> list[dict]:
+        """knowledge_objects (fills ``object_map``); returns the copied rows for the
+        FTS mirror."""
+        new_id, chunk_size = run.new_id, run.chunk_size
+        source_map, object_map, json_maps = run.source_map, run.object_map, run.json_maps
+        remapped_id = self._remapped_id
+
+        objects_out = []
+        for data in snapshot["knowledge_objects"]:
+            old_source_id = data["source_id"]
+            old_candidate_id = data.get("source_candidate_id")
+            data["id"] = object_map.setdefault(data["id"], remapped_id(data["id"]))
+            data["notebook_id"] = new_id
+            data["source_id"] = source_map.get(old_source_id, old_source_id)
+            if old_candidate_id:
+                data["source_candidate_id"] = source_map.get(
+                    old_candidate_id, old_candidate_id
+                )
+            data["payload"] = json.dumps(
+                self._seams.remap_json_ids(json.loads(data.get("payload") or "{}"), json_maps)
+            )
+            data["evidence"] = json.dumps(
+                self._seams.remap_json_ids(json.loads(data.get("evidence") or "[]"), json_maps)
+            )
+            objects_out.append(data)
+        self._store.insert_copy_rows(
+            "knowledge_objects", objects_out, chunk_size=chunk_size
+        )
+        return objects_out
+
+    def _insert_copy_generation_runs(self, run: _NotebookCopyRun, snapshot: dict) -> None:
+        """Mint the copy-local completed KG generations (fills ``generation_map``).
+
+        Source-local facts are generation-bound: maintenance and the
+        read-only audit accept a projection only when its generation is
+        backed by a successful KG extraction run in the SAME notebook.
+        Operational extraction history deliberately does not travel
+        with a deep copy, so mint one copy-local completed generation
+        for every source represented by the copied terminal ledger (or,
+        for an older projection without a ledger, its newest fact
+        generation).  Facts, bindings and ledger rows all remap
+        through the same (source,generation) key.
+        """
+        new_id, now, chunk_size = run.new_id, run.now, run.chunk_size
+        source_map, generation_map = run.source_map, run.generation_map
+        remapped_id = self._remapped_id
+
+        generations_by_source: dict[str, dict[str, str]] = {}
+        fact_counts_by_generation: dict[tuple[str, str], int] = {}
+        for data in snapshot["knowledge_source_facts"]:
+            source_id = str(data["source_id"])
+            generation = str(data.get("source_generation") or "")
+            if generation:
+                generations_by_source.setdefault(source_id, {})[generation] = str(
+                    data.get("updated_at") or data.get("created_at") or ""
+                )
+                key = (source_id, generation)
+                fact_counts_by_generation[key] = (
+                    fact_counts_by_generation.get(key, 0) + 1
+                )
+        active_generation_by_source: dict[str, str] = {}
+        scanned_by_source: dict[str, int] = {}
+        for data in snapshot["knowledge_source_fact_backfills"]:
+            source_id = str(data["source_id"])
+            generation = str(data.get("source_generation") or "")
+            if not generation:
+                continue
+            active_generation_by_source[source_id] = generation
+            scanned_by_source[source_id] = int(data.get("objects_scanned") or 0)
+            generations_by_source.setdefault(source_id, {})[generation] = str(
+                data.get("updated_at") or data.get("created_at") or ""
+            )
+        for data in snapshot["knowledge_source_fact_elements"]:
+            source_id = str(data["source_id"])
+            generation = str(data.get("source_generation") or "")
+            if generation:
+                generations_by_source.setdefault(source_id, {}).setdefault(
+                    generation, str(data.get("created_at") or "")
+                )
+
+        copy_generation_runs = []
+        for old_source_id, generations in generations_by_source.items():
+            for old_generation in generations:
+                generation_map[(old_source_id, old_generation)] = remapped_id(
+                    old_generation
+                )
+            active_generation = active_generation_by_source.get(old_source_id)
+            if not active_generation:
+                active_generation = max(
+                    generations,
+                    key=lambda generation: (generations[generation], generation),
+                )
+            new_generation = generation_map[(old_source_id, active_generation)]
+            copied_fact_count = fact_counts_by_generation.get(
+                (old_source_id, active_generation), 0
+            )
+            object_count = scanned_by_source.get(old_source_id, copied_fact_count)
+            copy_generation_runs.append(
+                {
+                    "id": new_generation,
+                    "notebook_id": new_id,
+                    "source_id": source_map[old_source_id],
+                    "run_type": "kg",
+                    "status": "completed",
+                    "error_message": (
+                        f"kg objects={object_count} relations=0 copied_generation=1"
+                    ),
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+        self._store.insert_copy_rows(
+            "extraction_runs", copy_generation_runs, chunk_size=chunk_size
+        )
+
+    def _copy_source_facts(self, run: _NotebookCopyRun, snapshot: dict) -> None:
+        """The three source-fact tables, onto the copy's own generations (fills
+        ``fact_map``)."""
+        new_id, chunk_size = run.new_id, run.chunk_size
+        source_map, element_map, object_map = run.source_map, run.element_map, run.object_map
+        fact_map, generation_map, json_maps = run.fact_map, run.generation_map, run.json_maps
+        remapped_id = self._remapped_id
+
+        source_facts_out = []
+        for data in snapshot["knowledge_source_facts"]:
+            old_fact_id = data["id"]
+            old_source_id = str(data["source_id"])
+            old_generation = str(data.get("source_generation") or "")
+            data["id"] = fact_map.setdefault(old_fact_id, remapped_id(old_fact_id))
+            data["notebook_id"] = new_id
+            data["source_id"] = source_map[old_source_id]
+            if old_generation:
+                data["source_generation"] = generation_map[
+                    (old_source_id, old_generation)
+                ]
+            data["global_object_id"] = object_map.get(
+                data.get("global_object_id") or "",
+                data.get("global_object_id") or "",
+            )
+            data["payload"] = json.dumps(
+                self._seams.remap_json_ids(
+                    json.loads(data.get("payload") or "{}"), json_maps
+                )
+            )
+            data["evidence"] = json.dumps(
+                self._seams.remap_json_ids(
+                    json.loads(data.get("evidence") or "[]"), json_maps
+                )
+            )
+            source_facts_out.append(data)
+        self._store.insert_copy_rows(
+            "knowledge_source_facts", source_facts_out, chunk_size=chunk_size
+        )
+
+        source_fact_elements_out = []
+        for data in snapshot["knowledge_source_fact_elements"]:
+            old_source_id = str(data["source_id"])
+            old_generation = str(data.get("source_generation") or "")
+            data["fact_id"] = fact_map[data["fact_id"]]
+            data["notebook_id"] = new_id
+            data["source_id"] = source_map[old_source_id]
+            if old_generation:
+                data["source_generation"] = generation_map[
+                    (old_source_id, old_generation)
+                ]
+            data["element_id"] = element_map[data["element_id"]]
+            source_fact_elements_out.append(data)
+        self._store.insert_copy_rows(
+            "knowledge_source_fact_elements",
+            source_fact_elements_out,
+            chunk_size=chunk_size,
+        )
+
+        source_fact_backfills_out = []
+        for data in snapshot["knowledge_source_fact_backfills"]:
+            old_source_id = str(data["source_id"])
+            old_generation = str(data.get("source_generation") or "")
+            data["source_id"] = source_map[old_source_id]
+            data["notebook_id"] = new_id
+            if old_generation:
+                data["source_generation"] = generation_map[
+                    (old_source_id, old_generation)
+                ]
+            old_after = data.get("after_object_id") or ""
+            data["after_object_id"] = object_map.get(old_after, "")
+            source_fact_backfills_out.append(data)
+        self._store.insert_copy_rows(
+            "knowledge_source_fact_backfills",
+            source_fact_backfills_out,
+            chunk_size=chunk_size,
+        )
+
+    def _copy_relations(self, run: _NotebookCopyRun, snapshot: dict) -> None:
+        """knowledge_relations (fills ``relation_map``)."""
+        new_id, chunk_size = run.new_id, run.chunk_size
+        source_map, object_map = run.source_map, run.object_map
+        relation_map, json_maps = run.relation_map, run.json_maps
+        remapped_id = self._remapped_id
+
+        relations_out = []
+        for data in snapshot["knowledge_relations"]:
+            old_source_id = data["source_id"]
+            data["id"] = relation_map.setdefault(data["id"], remapped_id(data["id"]))
+            data["notebook_id"] = new_id
+            data["source_id"] = source_map.get(old_source_id, old_source_id)
+            data["source_object_id"] = object_map[data["source_object_id"]]
+            data["target_object_id"] = object_map[data["target_object_id"]]
+            data["evidence"] = json.dumps(
+                self._seams.remap_json_ids(json.loads(data.get("evidence") or "[]"), json_maps)
+            )
+            relations_out.append(data)
+        self._store.insert_copy_rows(
+            "knowledge_relations", relations_out, chunk_size=chunk_size
+        )
+
+    def _copy_chunk_and_vector_rows(self, run: _NotebookCopyRun, snapshot: dict) -> None:
+        """chunk_questions, the four vector tables and concept_clusters — rows that
+        only point at already-copied rows."""
+        new_id, chunk_size = run.new_id, run.chunk_size
+        source_map, element_map, chunk_map = run.source_map, run.element_map, run.chunk_map
+        object_map, relation_map = run.object_map, run.relation_map
+        remapped_id = self._remapped_id
+
+        chunk_questions_out = []
+        for data in snapshot["chunk_questions"]:
+            data["id"] = remapped_id(data["id"])
+            data["chunk_id"] = chunk_map[data["chunk_id"]]
+            data["notebook_id"] = new_id
+            data["source_id"] = source_map[data["source_id"]]
+            chunk_questions_out.append(data)
+        self._store.insert_copy_rows(
+            "chunk_questions", chunk_questions_out, chunk_size=chunk_size
+        )
+
+        chunk_embeddings_out = []
+        for data in snapshot["chunk_embeddings"]:
+            data["chunk_id"] = chunk_map[data["chunk_id"]]
+            data["notebook_id"] = new_id
+            chunk_embeddings_out.append(data)
+        self._store.insert_copy_rows(
+            "chunk_embeddings", chunk_embeddings_out, chunk_size=chunk_size
+        )
+
+        element_embeddings_out = []
+        for data in snapshot["element_embeddings"]:
+            data["element_id"] = element_map[data["element_id"]]
+            data["source_id"] = source_map[data["source_id"]]
+            data["notebook_id"] = new_id
+            element_embeddings_out.append(data)
+        self._store.insert_copy_rows(
+            "element_embeddings", element_embeddings_out, chunk_size=chunk_size
+        )
+
+        knowledge_embeddings_out = []
+        for data in snapshot["knowledge_embeddings"]:
+            data["object_id"] = object_map[data["object_id"]]
+            data["notebook_id"] = new_id
+            knowledge_embeddings_out.append(data)
+        self._store.insert_copy_rows(
+            "knowledge_embeddings", knowledge_embeddings_out, chunk_size=chunk_size
+        )
+
+        relation_embeddings_out = []
+        for data in snapshot["relation_embeddings"]:
+            data["relation_id"] = relation_map[data["relation_id"]]
+            data["notebook_id"] = new_id
+            relation_embeddings_out.append(data)
+        self._store.insert_copy_rows(
+            "relation_embeddings", relation_embeddings_out, chunk_size=chunk_size
+        )
+
+        clusters_out = []
+        for data in snapshot["concept_clusters"]:
+            data["id"] = remapped_id(data["id"])
+            data["notebook_id"], data["generation"] = new_id, 0
+            data["canonical_id"] = object_map.get(data["canonical_id"], data["canonical_id"])
+            data["member_object_id"] = object_map.get(
+                data["member_object_id"], data["member_object_id"]
+            )
+            clusters_out.append(data)
+        self._store.insert_copy_rows(
+            "concept_clusters", clusters_out, chunk_size=chunk_size
+        )
+
+    def _schedule_copied_projections(self, run: _NotebookCopyRun) -> None:
+        """PR-2+3 Task 13: schedule ONE structural reprojection per copied
+        knowhow table, after publish.
+
+        ``khtbl_map.values()`` are all NEW table ids (empty for a notebook with
+        no knowhow tables, so this is a zero-cost no-op for the common case).
+        The chunks/vectors already sitting in the copy are byte-identical to
+        what project_table will independently recompute, so this rebuilds the
+        KO/edge graph (dynamic column-name types) without a single additional
+        embedder call — see element_id/cell_chunk_id in
+        ``_copy_elements_and_chunks``. A scheduling failure (realistic:
+        threading.Timer.start() RuntimeError under thread/fd exhaustion — this
+        codebase has documented history there) is LOGGED, never compensated:
+        the copy itself is complete and valid; the table's manual 重建投影
+        button (or any later edit, which schedules the same full pass) covers
+        a missed schedule.
+        """
+        for new_table_id in run.khtbl_map.values():
             try:
                 self._schedule_projection(new_table_id)
             except Exception:  # noqa: BLE001 — published copy must survive a scheduling failure
                 _log.warning(
                     "copy_notebook: 副本 %s 的 knowhow 表 %s 投影调度失败"
                     "（副本数据完整，可在表内手动重建投影）",
-                    new_id,
+                    run.new_id,
                     new_table_id,
                     exc_info=True,
                 )
-        return self._catalog.get_notebook(new_id)
 
 
 class NotebookSharingService:
