@@ -13,6 +13,17 @@ from app.repositories.ports import NotebookRepository, OfflineMaintenanceBusyErr
 create_repository = create_application_repository
 
 
+def create_schema_guest_repository(settings: Settings) -> NotebookRepository:
+    """Compose a repository for a process that does NOT own the schema:
+    ``migrate=False, seed=False``. No migration DDL is applied to a database a
+    service may be serving, and the seed step's unconditional admin-password
+    rewrite never runs. Callers check the schema version they need themselves
+    (see ``global_ask_attribution_backfill.main``)."""
+    from app.bootstrap import create_repository as compose
+
+    return compose(settings, migrate=False, seed=False)
+
+
 class MaintenanceCliError(RuntimeError):
     """Expected operator-facing failure from a direct maintenance command."""
 

@@ -24,7 +24,7 @@ npm run cli -- batch ingest --input-dir ./papers --notebook-name "资料库"
 | `batch`（兼容名 `batch-ingest`） | 原 `batch_ingest.py` 的所有阶段和参数 |
 | `scale` | 原 `build_scale_index.py` 的 inspect/build/export/import |
 | `kg` | 原 `app.scripts` 中的 build/recluster/reembed/backfill-relations |
-| `maintain` | chunks、kg-embeddings、reextract、denoise、knowhow、promotion-targets、delete-leftovers、selected-source |
+| `maintain` | chunks、kg-embeddings、reextract、denoise、knowhow、promotion-targets、delete-leftovers、global-attribution、selected-source |
 | `database` | migrate-postgres、shadow、merge、retrieval-indexes、hotpath-indexes |
 | `diag` / `diagnose` | 原统一只读诊断；另有 postgres、retrieval、mineru 专项诊断 |
 | `source` | mineru-batch、embed-images |
@@ -330,6 +330,21 @@ PYTHONPATH=backend python scripts/sweep_legacy_delete_leftovers.py --apply    # 
 ```
 
 退出码 0/1/2 与细节见 `docs/operations_zh.md` 的「存量删除残渣清扫」。
+
+### `backfill_global_ask_attribution.py` —— 全局问答归因回填
+
+SQLite v98 / PostgreSQL 0078 起，全局问答完成时把归入的笔记本写进
+`global_ask_job_notebooks`；升级前已完成的作业没有这些行，服务就绪后会在后台自动补写一遍。本工具用于
+手动补跑或 dry run：按作业 id 分页（每页一个事务、从不等待行锁，被锁住的行留到下一次），幂等、可续跑、
+可在服务运行时执行；它不迁移、不 seed（不会改写 admin 密码），库还没迁移就拒绝（退出码 3）；读不回的
+作业只报告、不改动，仍按旧判据计数。
+
+```bash
+PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py --dry-run   # 只计数
+PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py             # 补写
+```
+
+退出码 0/1/2/3 与细节见 `docs/operations_zh.md` 的「全局问答归因回填」。
 
 ---
 

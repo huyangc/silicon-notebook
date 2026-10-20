@@ -408,6 +408,12 @@ PgBouncer 的 transaction pooling 会把后续语句挪到别的后端连接，�
 锁会话上限 + 同时在跑的 CLI 条数」来预算。完整步骤、两机 pin 清单与恢复方式见
 [运维文档](./operations_zh.md#离线--异机-scale-构建scriptsbuild_scale_indexpy)。
 
+已有全局问答记录的库升级到 SQLite v98 / PostgreSQL 0078 后无需手动操作：服务就绪后会用一次后台回填为升级前
+已完成的全局问答补写归因行（启动日志写出待补数）；补完之前，知识分析看板对这些作业走较慢的 payload 判据，
+数字相同。`PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py`（统一入口
+`maintain global-attribution`）可手动补跑，它从不迁移、不 seed，库还没迁移就拒绝。不涉及任何配置项。细节见
+[运维文档](./operations_zh.md#全局问答归因回填scriptsbackfill_global_ask_attributionpy)。
+
 改 URL 不会搬运既有行。全新目标可停服务后改 URL、启动并验证空库/bootstrap 状态。
 对于存量 SQLite，已交付的 forward-shadow CLI 可在 SQLite 继续 active 时建立并持续维护
 PostgreSQL 影子库。它要求 PostgreSQL 16、专用且可恢复的目标库、已验证的源/目标备份、

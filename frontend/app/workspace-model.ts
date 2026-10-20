@@ -864,7 +864,9 @@ export const EMPTY_KNOWLEDGE: Record<string, KnowledgeItem[] | null> = {};
 export type KnowledgeRef = { id: string; object_type: string; headline: string; status: string };
 export type DuplicateGroup = { object_type: string; similarity: number; members: KnowledgeRef[] };
 export type NotebookAnalytics = {
+  /** 提问数已含归入本库的全局问答;`answers_global` 是其中全局问答那一份。 */
   answers_total: number;
+  answers_global?: number;
   /** 👍 / 👎 已含归入本库的全局问答评分;`*_global` 是其中全局问答那一份。 */
   feedback_useful: number;
   feedback_not_useful: number;

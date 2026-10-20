@@ -339,7 +339,11 @@ class MountedByCount(BaseModel):
 
 
 class NotebookAnalytics(BaseModel):
+    # In-notebook answers plus the finished global Ask runs attributed to this
+    # notebook (the same rule as the ratings below, counted once per attributed
+    # library); ``answers_global`` is that global subset.
     answers_total: int = 0
+    answers_global: int = 0
     # 👍 / 👎 include the global Ask ratings attributed to this notebook (the
     # libraries a run searched or cited; ``global_ask_attribution``); the
     # ``*_global`` fields are that subset. ``low_rated_questions`` lists

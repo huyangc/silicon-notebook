@@ -570,6 +570,8 @@ _LOCAL: tuple[TableSyncSpec, ...] = (
     TableSyncSpec("reports", SyncClass.LOCAL),
     TableSyncSpec("global_ask_conversations", SyncClass.LOCAL),
     TableSyncSpec("global_ask_jobs", SyncClass.LOCAL),
+    # 全局问答作业的归因行（SQLite v98 / PostgreSQL 0078）：随作业留在本环境。
+    TableSyncSpec("global_ask_job_notebooks", SyncClass.LOCAL),
     TableSyncSpec("retrieval_experiences", SyncClass.LOCAL),
     TableSyncSpec("agent_observations", SyncClass.LOCAL),
     TableSyncSpec("agent_notebook_profile", SyncClass.LOCAL),

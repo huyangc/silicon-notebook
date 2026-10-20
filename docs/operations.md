@@ -192,6 +192,41 @@ stamp is a full table scan (an `instr` byte prefilter on the raw payload, then `
 pass) inside the deletion's final write transaction -- SQLite is a mirror deployment of bounded size, and
 this is a known trade-off.
 
+### Global Ask attribution backfill (`scripts/backfill_global_ask_attribution.py`)
+
+From SQLite v98 / PostgreSQL 0078 on, the transaction that moves a global Ask job to `done` writes the
+notebooks it is attributed to into `global_ask_job_notebooks(job_id, notebook_id)` (searched ∪ cited; when
+both are empty, the participants minus the skipped ones — `global_ask_attribution.job_attribution`) and sets
+`global_ask_jobs.attributed = 1`. The notebook analytics panel's 「提问」 counts the global answers attributed
+to the notebook from it. The migration does **not** backfill: jobs that finished before the upgrade carry
+`attributed = 0` and no rows, and the panel keeps counting them through the old payload predicate
+(`attribution_sql`) — the same number as after the backfill, only slower. Run once after upgrading:
+
+```bash
+PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py --dry-run   # read-only, reports what is pending
+PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py             # write
+```
+
+- Pages by job id (`--batch-size`, default 500, one transaction per page); every job's UPDATE is guarded on
+  `attributed = 0`, so the pass is idempotent and a plain re-run after an interruption handles only what is
+  left; `--after-id` resumes after a given id, `--limit` caps one run.
+- Safe while the service runs: the completion path only writes rows it moves out of `running`, never one
+  this tool selects; no `--confirm-service-stopped` is needed on PostgreSQL.
+- A job whose payload does not read back as a `GlobalAskJob` is only reported (`--report` writes one
+  `{"job_id", "reason": "payload_unreadable"}` line each, never content) and left as it is, still counted
+  through the payload predicate; exit status 1 when there are such jobs, else 0; 2 on a usage error.
+- Progress: `SELECT COUNT(*) FROM global_ask_jobs WHERE status='done' AND attributed=0` is what is left (it
+  reads the partial index `idx_global_ask_jobs_unattributed`, empty once the backfill is done).
+
+**Cost before the backfill** (measured locally: 5000 done global jobs site-wide, ~8 KB payloads, 50 of
+them in the notebook; the panel read's extra time over not counting global answers at all): on PostgreSQL the
+unattributed part reads only this notebook's participating jobs through the partial index intersected with
+the participation GIN index — +1.2 ms with nothing backfilled, +0.3 ms after; SQLite has no participation
+index, so the unattributed part parses the payload of **every** unattributed job of the site — +33 ms with
+nothing backfilled, +16 ms half-way, +0.04 ms after (proportional to the unattributed count). Run the
+backfill soon after upgrading a SQLite deployment. The rows the completion path writes add a negligible
+amount to the job's final write transaction (PostgreSQL +0.05 ms; within noise on SQLite).
+
 ## Ownerless Memory sources
 
 After the service reports ready, every server start runs one background pass (job name

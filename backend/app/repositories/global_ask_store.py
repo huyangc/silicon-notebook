@@ -12,6 +12,7 @@ from app.core.capability_tokens import (
 # Safety ceiling on how many turns one public page renders; the same name the
 # notebook-scoped public read caps its fetch by. Pure leaf module, no cycle.
 from app.domain.conversation_public_view import MAX_TURNS
+from app.domain.global_ask_attribution import job_attribution
 from app.domain.global_ask_retention import (
     auto_title_on_expired_first_turn_sql,
     conversation_live_sql,
@@ -71,6 +72,14 @@ def _dialect(marker) -> str:
 # How many ids one purge statement names: far below SQLite's bound-parameter
 # ceiling and PostgreSQL's comfortable IN-list size.
 _PURGE_BATCH = 500
+
+# The attribution schema (``global_ask_job_notebooks`` + ``attributed``).
+ATTRIBUTION_SQLITE_VERSION = 98
+ATTRIBUTION_POSTGRES_VERSION = 78
+# Attribution rows per INSERT statement (two bound values each).
+_ATTRIBUTION_INSERT_BATCH = 500
+# Whole-page attempts when PostgreSQL reports a deadlock anyway.
+_DEADLOCK_RETRIES = 3
 
 
 class GlobalAskStore:
@@ -367,14 +376,144 @@ class GlobalAskStore:
         # cancel/finish race must not carry an instant the row never had.
         stamp = _transition_now()
         payload = _payload_json(job.model_copy(update={"updated_at": stamp}))
+        # A ``done`` transition records the job's attribution in the same
+        # transaction (``attributed = 1`` plus its ``global_ask_job_notebooks``
+        # rows, SQLite v98 / PostgreSQL 0078), so no reader ever sees a done
+        # job flagged attributed without its rows. ``done`` is final (only a
+        # ``running`` row is updated here), so the rows never go stale. A
+        # failed, cancelled or interrupted job gets none.
+        done = job.status == "done"
         with self.database.write() as db:
             cursor = db.execute(self._sql(
                 "UPDATE global_ask_jobs SET status=?,payload_json=?,updated_at=?,"
-                "error_detail=? WHERE id=? AND user_id=? AND status='running'"
-            ), (job.status, payload, stamp, error_detail or "", job.job_id, user_id))
+                "error_detail=?,attributed=? WHERE id=? AND user_id=? AND status='running'"
+            ), (job.status, payload, stamp, error_detail or "", 1 if done else 0, job.job_id, user_id))
+            if cursor.rowcount == 1 and done:
+                self._insert_attribution(db, job.job_id, job_attribution(job))
         if cursor.rowcount == 1:
             job.updated_at = stamp
         return cursor.rowcount == 1
+
+    def _insert_attribution(self, db, job_id, notebook_ids):
+        """One multi-row INSERT of a done job's attributed libraries
+        (``job_attribution`` output: already de-duplicated, participant order)."""
+        if not notebook_ids:
+            return
+        values = ",".join("(?,?)" for _ in notebook_ids)
+        params = [value for notebook_id in notebook_ids for value in (job_id, notebook_id)]
+        db.execute(self._sql(
+            f"INSERT INTO global_ask_job_notebooks (job_id,notebook_id) VALUES {values}"
+        ), params)
+
+    # ------------------------------------------- attribution backfill
+    # The reads/writes of the attribution backfill
+    # (``app/services/global_ask_attribution_backfill.py``: the post-readiness
+    # background pass and ``scripts/backfill_global_ask_attribution.py``):
+    # done jobs written before SQLite v98 / PostgreSQL 0078 carry
+    # ``attributed = 0`` and are counted through the payload predicate until
+    # this pass gives them rows.
+
+    def attribution_schema_ready(self):
+        """Whether the database carries the attribution schema (SQLite v98 /
+        PostgreSQL 0078 or later). A process that does not own the schema (the
+        backfill CLI composes with ``migrate=False``) checks this instead of
+        migrating."""
+        with self.database.connect() as db:
+            if self.marker == "%s":
+                row = db.execute(
+                    "SELECT COALESCE(MAX(version), 0) AS v FROM silicon_schema_migrations"
+                ).fetchone()
+                return int(row["v"]) >= ATTRIBUTION_POSTGRES_VERSION
+            row = db.execute("PRAGMA user_version").fetchone()
+            return int(row[0]) >= ATTRIBUTION_SQLITE_VERSION
+
+    def unattributed_done_count(self):
+        """How many done jobs still wait for their attribution rows."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT COUNT(*) AS c FROM global_ask_jobs WHERE status='done' AND attributed=0"
+            ).fetchone()
+        return int(row["c"])
+
+    def unattributed_done_page(self, after_id, limit):
+        """One keyset page (by id) of done jobs with ``attributed = 0``: ``[(id,
+        payload_json)]``, read from the partial ``idx_global_ask_jobs_unattributed``
+        (the WHERE repeats its own predicate), already in id order. A plain
+        read: no row lock is taken here."""
+        # SQLite would rather walk the status index and sort; pin the partial
+        # index there (PostgreSQL proves the index predicate on its own).
+        # ``INDEXED BY`` naming an index that does not exist is a hard error
+        # ("no such index"), never a silent table scan -- the schema check
+        # above runs first.
+        pinned = "" if self.marker == "%s" else " INDEXED BY idx_global_ask_jobs_unattributed"
+        with self.database.connect() as db:
+            rows = db.execute(self._sql(
+                f"SELECT id,payload_json FROM global_ask_jobs{pinned} "
+                "WHERE status='done' AND attributed=0 AND id > ? ORDER BY id LIMIT ?"
+            ), (after_id, int(limit))).fetchall()
+        return [(row["id"], row["payload_json"]) for row in rows]
+
+    def write_backfilled_attributions(self, attributions):
+        """Flag the ``(job_id, notebook_ids)`` done jobs attributed and insert
+        their rows -- one transaction for the page. Returns how many jobs this
+        call attributed; the rest stay at ``attributed = 0`` for a later pass.
+
+        Never waits on a row lock, so it cannot join a lock cycle with a
+        serving writer (a notebook deletion's ``stamp_retained_turns`` locks
+        the participating jobs in heap order, the opposite of this page's id
+        order; #931 was such a cycle). On PostgreSQL the page's rows are
+        locked first with ``FOR UPDATE SKIP LOCKED`` in id order: a row
+        another transaction holds is skipped, not waited for, and the single
+        UPDATE then touches only what this transaction locked. SQLite has one
+        writer, so its single guarded UPDATE cannot wait on another row.
+        Either way the UPDATE re-checks ``status='done' AND attributed=0``: a
+        row the completion path or an earlier pass attributed, or one purged
+        meanwhile, is left alone and not counted -- the pass is idempotent.
+        A deadlock report (``40P01``) all the same retries the whole page."""
+        by_id = {job_id: list(notebook_ids) for job_id, notebook_ids in attributions}
+        if not by_id:
+            return 0
+        ids = sorted(by_id)
+        for attempt in range(_DEADLOCK_RETRIES):
+            try:
+                with self.database.write() as db:
+                    updated = self._attribute_page(db, ids)
+                    self._insert_attribution_rows(
+                        db, [(job_id, nb) for job_id in updated for nb in by_id[job_id]]
+                    )
+                return len(updated)
+            except Exception as exc:  # noqa: BLE001 - only a deadlock is retried
+                if getattr(exc, "sqlstate", None) != "40P01" or attempt + 1 >= _DEADLOCK_RETRIES:
+                    raise
+        return 0  # pragma: no cover - the loop returns or raises
+
+    def _attribute_page(self, db, ids):
+        if self.marker == "%s":
+            locked = [row["id"] for row in db.execute(
+                "SELECT id FROM global_ask_jobs WHERE id = ANY(%s) AND status='done' "
+                "AND attributed=0 ORDER BY id FOR UPDATE SKIP LOCKED", (ids,),
+            ).fetchall()]
+            if not locked:
+                return []
+            rows = db.execute(
+                "UPDATE global_ask_jobs SET attributed=1 WHERE id = ANY(%s) "
+                "AND status='done' AND attributed=0 RETURNING id", (locked,),
+            ).fetchall()
+        else:
+            placeholders = ",".join("?" for _ in ids)
+            rows = db.execute(
+                f"UPDATE global_ask_jobs SET attributed=1 WHERE id IN ({placeholders}) "
+                "AND status='done' AND attributed=0 RETURNING id", tuple(ids),
+            ).fetchall()
+        return sorted(row["id"] for row in rows)
+
+    def _insert_attribution_rows(self, db, pairs):
+        for offset in range(0, len(pairs), _ATTRIBUTION_INSERT_BATCH):
+            chunk = pairs[offset:offset + _ATTRIBUTION_INSERT_BATCH]
+            values = ",".join("(?,?)" for _ in chunk)
+            db.execute(self._sql(
+                f"INSERT INTO global_ask_job_notebooks (job_id,notebook_id) VALUES {values}"
+            ), [value for pair in chunk for value in pair])
 
     def save_progress(self, job, user_id):
         """Patch coverage and trace only; never resend the question or overwrite

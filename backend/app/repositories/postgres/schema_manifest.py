@@ -65,6 +65,7 @@ POSTGRES_BUSINESS_TABLES = (
     "concept_whitelist",
     "conversations",
     "global_ask_conversations",
+    "global_ask_job_notebooks",
     "global_ask_jobs",
     "element_embeddings",
     "extension_runtime_toggles",
@@ -482,7 +483,16 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # subject_key, kind), CHECK on kind, FK to notebooks ON DELETE CASCADE) and
 # unified_kg_state.cluster_code_version (text NOT NULL DEFAULT ''); no
 # backfill, no secondary index.
+# SQLite v98 / PostgreSQL 0078 add the global_ask_job_notebooks table (job_id,
+# notebook_id; primary key over the pair, FK job_id -> global_ask_jobs ON
+# DELETE CASCADE, NON-UNIQUE idx_global_ask_job_notebooks_notebook over
+# (notebook_id, job_id)): the libraries a done global Ask job is attributed
+# to, written when it finishes; global_ask_jobs.attributed (integer NOT NULL
+# DEFAULT 0, no backfill in the migration -- the offline
+# backfill_global_ask_attribution.py writes the existing done jobs' rows) and
+# the partial idx_global_ask_jobs_unattributed over (id) WHERE status = 'done'
+# AND attributed = 0. One new replicated unique surface (the primary key).
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=97,
-    postgres_version=77,
+    sqlite_version=98,
+    postgres_version=78,
 )

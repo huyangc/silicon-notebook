@@ -28,6 +28,24 @@ def touched_notebook_ids(
     return [value for value in ordered if value in touched]
 
 
+def job_attribution(job) -> list[str]:
+    """``touched_notebook_ids`` over one global Ask job's own fields.
+
+    The ONE place a job (a ``GlobalAskJob``, read duck-typed so this module
+    stays a leaf) is turned into its attributed libraries: the completion hook
+    (``GlobalAskService._note_completed``), the completion write of the
+    attribution rows (``GlobalAskStore.save`` -> ``global_ask_job_notebooks``,
+    SQLite v98 / PostgreSQL 0078) and the offline backfill of those rows all
+    call it, so the stored attribution cannot drift from the rule.
+    """
+    return touched_notebook_ids(
+        job.resolved_notebook_ids,
+        job.searched_notebook_ids,
+        job.cited_notebook_ids,
+        [entry.notebook_id for entry in job.skipped_notebooks],
+    )
+
+
 def attribution_sql(
     *, dialect: str, marker: str, document: str | None = None,
 ) -> tuple[str, int]:

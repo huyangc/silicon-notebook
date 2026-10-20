@@ -141,6 +141,35 @@ run 直接抛出取消，两个事件都不发。改动之前被旧复核整份�
 盖戳是一次全表扫描（先用 `instr` 在原始 payload 上做字节预筛，再对命中的行做 `json_each`），在删除的
 最终写事务里执行——SQLite 只作镜像部署，规模有限，这是已知取舍。
 
+### 全局问答归因回填(`scripts/backfill_global_ask_attribution.py`)
+
+自 SQLite v98 / PostgreSQL 0078 起，全局问答作业落为 `done` 时在同一事务里把它归入的笔记本写进
+`global_ask_job_notebooks(job_id, notebook_id)`（检索到 ∪ 引用到；两者皆空时为参与库减被跳过的库，
+`global_ask_attribution.job_attribution`），并把 `global_ask_jobs.attributed` 置 1。知识分析看板的「提问」
+据此计入归入本库的全局问答。迁移**不回填**：升级前已完成的作业 `attributed = 0`、没有归因行，看板对它们
+沿用旧的 payload 判据（`attribution_sql`），数字与回填后完全相同，只是更慢。升级后跑一次：
+
+```bash
+PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py --dry-run   # 只读，报待补数
+PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py             # 补写
+```
+
+- 按作业 id 分页（`--batch-size`，默认 500，每页一个事务），每个作业的 UPDATE 都带 `attributed = 0`
+  守卫：幂等，中断后原样重跑只处理剩下的；`--after-id` 从某个 id 之后续跑，`--limit` 限制本次条数。
+- 服务运行时可以跑：完成路径只写它从 `running` 移走的行，与本工具选中的行不相交；PostgreSQL 上不需要
+  `--confirm-service-stopped`。
+- payload 读不回 `GlobalAskJob` 的作业只报告（`--report` 逐行写 `{"job_id", "reason": "payload_unreadable"}`，
+  不写正文）、不改动，继续走 payload 判据计数；有这类作业时退出码为 1，否则 0，参数错误为 2。
+- 进度：`SELECT COUNT(*) FROM global_ask_jobs WHERE status='done' AND attributed=0` 即剩余数（命中部分索引
+  `idx_global_ask_jobs_unattributed`，回填完成后该索引为空）。
+
+**回填前的代价**（本机实测：全站 5000 个已完成全局作业、每份 payload 约 8 KB、本库参与 50 个；看板一次读取
+「新计数」比不计全局回答时多出的耗时）：PostgreSQL 上未回填部分经部分索引与参与库 GIN 索引的交集只读本库
+参与的作业，全部未回填 +1.2 ms、回填后 +0.3 ms；SQLite 没有参与库索引，未回填部分要解析**全站**每个未回填
+作业的 payload——全部未回填 +33 ms、一半未回填 +16 ms、回填后 +0.04 ms（与未回填作业数成正比）。所以 SQLite
+部署升级后尽早跑回填。完成路径多写的归因行对一次作业落定的写事务影响可忽略（PostgreSQL +0.05 ms，SQLite
+在测量噪声内）。
+
 ## 无主 Memory 来源
 
 服务就绪之后，每次服务启动都会跑一次后台清扫（作业名 `memory-orphan-sweep`），删除 Memory 已不存在的

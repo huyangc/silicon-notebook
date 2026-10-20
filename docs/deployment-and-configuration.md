@@ -500,6 +500,15 @@ plus the service's concurrent-build lock sessions plus one per concurrently runn
 invocation. Full procedure, the two-machine pin list and recovery steps are in
 [Operations](./operations.md#offline--off-host-scale-builds-scriptsbuild_scale_indexpy).
 
+A database that already holds global Ask history needs no manual step after upgrading to SQLite v98 /
+PostgreSQL 0078: once the service is ready it attributes the global Ask jobs that finished before the
+upgrade in one background pass (the startup log reports how many are pending). Until it has caught up the
+notebook analytics panel counts those jobs through the slower payload predicate, with the same result.
+`PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py` (`maintain global-attribution` in the
+unified CLI) re-runs the pass by hand; it never migrates or seeds and refuses a database that is not
+migrated yet. No configuration is involved. Details:
+[Operations](./operations.md#global-ask-attribution-backfill-scriptsbackfill_global_ask_attributionpy).
+
 Changing the URL never moves existing rows. For a fresh target, stop the service, change
 the URL, start, and verify the empty/bootstrap state. For an existing SQLite source, the
 delivered forward-shadow CLI can build and continuously maintain a PostgreSQL shadow while

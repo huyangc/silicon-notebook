@@ -1423,6 +1423,11 @@
         "type": "index"
       },
       {
+        "name": "idx_global_ask_job_notebooks_notebook",
+        "sql_sha256": "a87b4979156d94c64cbe653cd18874c0a3ed0b317cd019dac2e99eb5eb3e924f",
+        "type": "index"
+      },
+      {
         "name": "idx_global_ask_jobs_feedback",
         "sql_sha256": "129c14ee1bbf5c50040a4830cb911eefe89d21cdc0aeb96c56fc69eef161074d",
         "type": "index"
@@ -1435,6 +1440,11 @@
       {
         "name": "idx_global_ask_jobs_status_mode_created",
         "sql_sha256": "ef079771f91ef62bd560a13481f8969038079b5616638a6712dc26309d1315f3",
+        "type": "index"
+      },
+      {
+        "name": "idx_global_ask_jobs_unattributed",
+        "sql_sha256": "804406ffc5a0d36ba56d2c060a23272c33058c0346ddf0c4687d450a944c364a",
         "type": "index"
       },
       {
@@ -2188,8 +2198,13 @@
         "type": "table"
       },
       {
+        "name": "global_ask_job_notebooks",
+        "sql_sha256": "6f972c35a9fcb1029c8abf7f605e2fbde71958da272a6bb8dc300ee8851eb79b",
+        "type": "table"
+      },
+      {
         "name": "global_ask_jobs",
-        "sql_sha256": "2ff92cd1e41007b0828be49f09285b048b24910612bf9e36752d6e85c415ba60",
+        "sql_sha256": "73ffe3a7366d8ef5f887535373325bf100288eaaef92433d8b3b49ca7f9ce9b5",
         "type": "table"
       },
       {
@@ -3318,6 +3333,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 97
+    "user_version": 98
   }
 }

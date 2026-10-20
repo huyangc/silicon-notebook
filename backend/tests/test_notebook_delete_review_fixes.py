@@ -574,6 +574,13 @@ _NOT_NOTEBOOK_SCOPED = frozenset({
     # bookkeeping, not notebook content, and its lifetime is owned by the
     # capture gate (``sync capture disable`` clears the whole log).
     "sync_change_log",
+    # ``global_ask_job_notebooks`` (SQLite v98 / PostgreSQL 0078) HAS a
+    # notebook_id column but belongs to its global Ask job, not to the
+    # notebook: deleting a library stamps every job that ran over it
+    # (``retained_until``), the retained turn keeps its whole attribution for
+    # the window, and the purge deletes the job, which cascades to its rows
+    # (``global_ask_retention_cases.case_attribution_rows_follow_the_turn_...``).
+    "global_ask_job_notebooks",
 })
 # ⚠ ``retrieval_experiences`` left this set at SQLite v79: it now HAS a
 # ``notebook_id`` column (a partition key, still no foreign key into

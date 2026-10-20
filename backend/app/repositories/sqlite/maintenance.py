@@ -1849,6 +1849,26 @@ class SQLiteMaintenanceAdapter:
         with self._runtime.database.connect() as db:
             return self._runtime.knowledge.chunk_elements_indexed(db, notebook_id)
 
+    # ------------------------------------- global Ask attribution backfill
+    # The attribution backfill's reads/writes, delegated to the backend-shared
+    # ``GlobalAskStore`` (the SQL lives there, once for both backends). Not on
+    # ``ports.py`` for the same reason as the backfill-images trio below: one
+    # consumer (``app/services/global_ask_attribution_backfill.py`` -- the
+    # post-readiness pass and its CLI), which depends on them through its own
+    # narrow Protocol.
+
+    def global_ask_attribution_schema_ready(self) -> bool:
+        return self._runtime.global_ask_store.attribution_schema_ready()
+
+    def global_ask_unattributed_count(self) -> int:
+        return self._runtime.global_ask_store.unattributed_done_count()
+
+    def global_ask_unattributed_page(self, after_id: str, limit: int) -> list[tuple[str, str]]:
+        return self._runtime.global_ask_store.unattributed_done_page(after_id, limit)
+
+    def write_global_ask_attributions(self, attributions: list[tuple[str, list[str]]]) -> int:
+        return self._runtime.global_ask_store.write_backfilled_attributions(attributions)
+
     # ------------------------------------------------- backfill-images (离线)
     # `batch_ingest backfill-images` 的三个读写口。刻意不进 `ports.py` 的
     # Protocol：那个文件的方法总数钉在零余量上限上（只许降），而这三个方法只有

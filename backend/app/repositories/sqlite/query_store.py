@@ -195,6 +195,47 @@ def global_feedback_counts_sql() -> tuple[str, int]:
         binds,
     )
 
+
+_GLOBAL_TURN_LIVE_J = live_turn_sql(dialect="sqlite", alias="j")
+
+
+def _global_answers_count(db: sqlite3.Connection, notebook_id: str) -> int:
+    """How many finished global Ask runs are attributed to ``notebook_id``.
+
+    Same attribution as the 👍 / 👎 count and the learning chain
+    (``global_ask_attribution``), counted once per attributed library, done
+    jobs only, a turn past its retention stamp nowhere. Two disjoint arms
+    (``global_answers_count_sql``): a job whose attribution was recorded
+    (``attributed = 1``) is counted from ``global_ask_job_notebooks`` through
+    ``idx_global_ask_job_notebooks_notebook`` plus one primary-key probe per
+    attributed job, no payload read; a done job not yet backfilled
+    (``attributed = 0``) is counted through the payload predicate
+    (``attribution_sql``) over the rows of the partial
+    ``idx_global_ask_jobs_unattributed`` -- an empty arm once the offline
+    backfill has run. ``INDEXED BY`` pins that index (the WHERE repeats its
+    predicate verbatim, SQLite's condition for being allowed to): left to
+    itself the planner prefers ``idx_global_ask_jobs_status_mode_created``
+    on ``status='done'``, which walks every done job of the site. SQLite has no participation index, so before
+    the backfill that arm parses every unattributed done payload.
+    """
+    statement, binds = global_answers_count_sql()
+    row = db.execute(statement, (notebook_id,) * binds).fetchone()
+    return int(row["attributed"]) + int(row["legacy"])
+
+
+def global_answers_count_sql() -> tuple[str, int]:
+    """``_global_answers_count``' statement and how many times it binds the
+    notebook id (exposed so the plan pin reads the very statement served)."""
+    attributed, binds = attribution_sql(dialect="sqlite", marker="?")
+    return (
+        "SELECT (SELECT COUNT(*) FROM global_ask_job_notebooks a "
+        "JOIN global_ask_jobs j ON j.id = a.job_id "
+        f"WHERE a.notebook_id = ? AND j.attributed = 1 AND {_GLOBAL_TURN_LIVE_J}) AS attributed,"
+        "(SELECT COUNT(*) FROM global_ask_jobs INDEXED BY idx_global_ask_jobs_unattributed "
+        f"WHERE status='done' AND attributed=0 AND {_GLOBAL_TURN_LIVE} AND {attributed}) AS legacy",
+        binds + 1,
+    )
+
 class QueryStore:
     def __init__(
         self, database: SqliteDatabase, settings: "Settings | None" = None
@@ -1995,6 +2036,7 @@ class QueryStore:
                 ).fetchone()["c"]
             )
             global_useful, global_not_useful = _global_feedback_counts(db, notebook_id)
+            answers_global = _global_answers_count(db, notebook_id)
             low_rated = [
                 row["question"]
                 for row in db.execute(
@@ -2054,7 +2096,8 @@ class QueryStore:
         not_useful += global_not_useful
         rated = useful + not_useful
         return NotebookAnalytics(
-            answers_total=answers_total,
+            answers_total=answers_total + answers_global,
+            answers_global=answers_global,
             feedback_useful=useful,
             feedback_not_useful=not_useful,
             feedback_useful_global=global_useful,
