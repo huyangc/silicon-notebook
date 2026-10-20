@@ -226,6 +226,23 @@ def test_fixed_point_holds_with_sub_min_size_communities_inside_a_large_componen
     _assert_same_partition(warm, _partition(graph, previous=_published(warm), warm=True))
 
 
+@pytest.mark.parametrize("seed", [51, 72, 96, 161])
+def test_the_sub_min_size_fixtures_still_tell_the_rule_apart(monkeypatch, seed):
+    """反事实:上面那条用例的种子是在 igraph 1.0.0 上搜出来的,而 requirements 只要求
+    ``>=0.11``。在同一夹具上关掉被测规则(起点不把不足 min_size 的段拆成单点),冷启动的输出
+    就不再是热启动的不动点。升级 igraph 后种子若失去区分力,这条变红,而不是让上面那条静默
+    变成恒真。"""
+    graph = _Graph()
+    _cliques_with_dangling_pairs(graph, seed)
+    original = kg_partition._restart_from
+    monkeypatch.setattr(kg_partition, "_restart_from",
+                        lambda labels, lo, hi, min_size: original(labels, lo, hi, 1))
+    cold = _partition(graph)
+    warm = _partition(graph, previous=_published(cold), warm=True)
+    again = _partition(graph, previous=_published(warm), warm=True)
+    assert _boards(warm) != _boards(cold) or _boards(again) != _boards(warm)
+
+
 def test_a_board_left_disconnected_is_split_in_the_start_not_after_the_fact(monkeypatch):
     """上一代把只挂在 Y 上的 f1–f2 留在了 X 的板块里。拆不连通的社区发生在**起点**里:
     f1–f2 这一代就从起点里的单点并进 Y,下一代原样不变。若改成输出前的后处理,这一代只会
