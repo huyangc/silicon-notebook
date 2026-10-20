@@ -296,6 +296,13 @@ store 决定，两个后端一致。清单只有属于以下三类之一时才�
 
 ### Schema 与迁移编写
 
+- SQLite 与 PostgreSQL 两个后端长期并存（2026-10-19 产品决定），PostgreSQL 是规范定义，
+  SQLite 是支持离线、单机与测试的镜像；支持范围与能力对等矩阵归
+  [架构文档](../architecture.md#222-双后端长期并存与能力对等矩阵)。存储层改动（schema、store 方法、
+  SQL 谓词与锁序）在同一个 PR 里两侧都做：先定 PostgreSQL 口径，SQLite 按同一语义镜像，
+  两侧迁移成对登记 `POSTGRES_SCHEMA_MANIFEST`；只为性能存在、SQLite 没有也不改变结果的结构可以
+  只做 PostgreSQL，但要登记进矩阵。行为用例两侧各一份（SQLite 进 G1，PostgreSQL 孪生进 PG 泳道）；
+  `backend/tests/test_dual_backend_parity.py` 静态核对版本配对、端口实现与公开方法集合。
 - SQLite schema 变更新增 `_migration_N`，同步提升
   [migrator](../backend/app/repositories/sqlite/migrations.py) 的 `SCHEMA_VERSION`；
   不修改已封存迁移。启动恢复、稳定 seed 与管理员原地升级不进入版本门，每次启动照跑。
@@ -492,6 +499,8 @@ OS/架构/Python/requirements/构建策略 key，不回退到通用缓存，仍�
 实测需计入冷缓存时的依赖安装。
 该泳道只覆盖直接 PostgreSQL 行为；已退役的 SQLite 后端实现专项测试、
 SQLite→PostgreSQL 导入/正向 shadow 测试与跨后端 parity 测试不属于当前覆盖。
+当前的双后端对等由各特性的 SQLite 用例与本泳道里的 PostgreSQL 孪生用例分别守，
+外加 G1 里不连数据库的 `backend/tests/test_dual_backend_parity.py`。
 
 CI 可移植性属于门禁契约：所有由 CI 执行的测试使用的文件系统、数据和依赖
 路径都必须相对仓库，并且独立于进程 cwd。已提交 fixture 必须从其仓库文件位置

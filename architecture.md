@@ -19,7 +19,7 @@
 - notebook 内页是来源栏 + 主区域的两列 workspace，主区域有 问答 (Ask) / 知识库 (Knowledge) / 记忆 (Memory) / 深度报告 (Deep Report) 四个 tab；没有固定 Studio 右栏。
 - Memory 独立于 source/chunk/KG，始终绑定创建者和一个 notebook；Agent candidate 与 confirmed-only notebook 正式检索是两个隔离平面。
 
-本地 beta 保持 FastAPI + Next.js 的双进程形态，repository backend 由 `DATABASE_URL` 在 PostgreSQL 与 SQLite 之间选择；PostgreSQL 是默认部署选项，当前开发和生产环境均使用 PostgreSQL，不要求 pgvector、Docker、GPU 或本地模型服务器。SQLite 仍作为可选后端受支持。生产启动固定为一个 FastAPI/Uvicorn worker，保证进程内的系统模型服务调度器就是部署全局容量边界。chat、embedding 与 reranker 仍只通过 URL 服务访问。MinerU 是独立的解析适配器：`MINERU_MODE=http` 调用远端 `mineru-api`，`MINERU_MODE=cli` 在隔离子进程运行 MinerU Python API，`MINERU_MODE=off` 使用 PyMuPDF4LLM 版面/Markdown 回退（pypdf 仅最后兜底）。未配置服务时使用离线、确定性的回退路径。全新数据库不创建 demo notebook 或合成来源。
+本地 beta 保持 FastAPI + Next.js 的双进程形态，repository backend 由 `DATABASE_URL` 在 PostgreSQL 与 SQLite 之间选择；PostgreSQL 是默认部署选项，当前开发和生产环境均使用 PostgreSQL，不要求 pgvector、Docker、GPU 或本地模型服务器。SQLite 作为长期保留的镜像后端受支持（2026-10-19 产品决定；支持范围、双后端义务与能力对等矩阵见 2.2.2）。生产启动固定为一个 FastAPI/Uvicorn worker，保证进程内的系统模型服务调度器就是部署全局容量边界。chat、embedding 与 reranker 仍只通过 URL 服务访问。MinerU 是独立的解析适配器：`MINERU_MODE=http` 调用远端 `mineru-api`，`MINERU_MODE=cli` 在隔离子进程运行 MinerU Python API，`MINERU_MODE=off` 使用 PyMuPDF4LLM 版面/Markdown 回退（pypdf 仅最后兜底）。未配置服务时使用离线、确定性的回退路径。全新数据库不创建 demo notebook 或合成来源。
 
 运维 CLI 的公开目录由 `scripts/cli.py` 显式注册并按用途分组，`scripts/cli.sh` 只选择解释器并转交；旧脚本与 `app.scripts` 实现继续持有参数、业务流程和锁合同。应用类 CLI 与服务启动共用不依赖 `app` 的 `scripts/python_env.py`，在 exec 目标 Python 前准备 dotenv 和模块搜索路径；需要在自身参数解析后才能选环境的 reflect `report`/`search` 则在脚本启动层调用同一模块同步当前进程路径，不在 Settings、插件 configure 或应用业务 workflow 中修改 `sys.path`。独立诊断/显式环境工具保留自身配置策略。分发层不构造 repository、不启动插件配套服务；`extensions check` 只调用现有 discovery 检查导入与设置，运行时拓扑和管理员 admission 仍由既有组合根负责。命令与环境细节分别归 `docs/operations*.md`、`docs/deployment-and-configuration*.md` 所有。
 
@@ -38,7 +38,7 @@
 
 - `backend/app/main.py` 创建 FastAPI 应用，挂载认证、请求上下文、CORS、日志中间件和 `/api` 路由；生产拓扑固定单 Uvicorn worker，不允许用多进程复制模型容量。
 - `frontend/` 是唯一前端；Next.js/React/TypeScript 负责 notebook collection 与 notebook workspace。
-- 开发和生产环境通过 `DATABASE_URL` 显式选择 PostgreSQL；完全未配置该项时，代码仍以 `.local/silicon_notebook.db` 的 SQLite 数据库兜底。原始来源文件默认位于 `.local/storage`。DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。PostgreSQL 是默认部署选项，SQLite 仍受支持。`SHADOW_DATABASE_URL` 不选择 active backend，单独设置也不启动同步；只有临时 `migration/shadow` 运维组合根会把它作为 PostgreSQL target 读取。
+- 开发和生产环境通过 `DATABASE_URL` 显式选择 PostgreSQL；完全未配置该项时，代码仍以 `.local/silicon_notebook.db` 的 SQLite 数据库兜底。原始来源文件默认位于 `.local/storage`。DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。PostgreSQL 是默认部署选项，SQLite 长期保留并受支持（见 2.2.2）。`SHADOW_DATABASE_URL` 不选择 active backend，单独设置也不启动同步；只有临时 `migration/shadow` 运维组合根会把它作为 PostgreSQL target 读取。
 - SQLite 使用标准库 `sqlite3`、WAL 与 `busy_timeout`，模型向量存 float32 BLOB。PostgreSQL 使用有界 Psycopg pool、数据库事务/row/advisory lock 支持跨进程访问，向量存 float32 `bytea`；不安装也不需要 pgvector。
 
 ### 2.1.1 数据表组织
@@ -310,6 +310,53 @@ Retrieval 的 point-specific proposal source 与通用 admission reader 是两�
 完整执行步骤、兼容转换、校验/回滚条件见[运维参考](./docs/operations_zh.md#sqlite--postgresql-正向影子同步)
 与[停服迁移 runbook](./docs/postgres-migration-runbook.md)；迁移编写与验证规则见
 [开发文档](./docs/development_zh.md#架构边界)。
+
+### 2.2.2 双后端长期并存与能力对等矩阵
+
+**产品决定（2026-10-19，用户裁决）：SQLite 后端长期保留，与 PostgreSQL 长期并存。**
+2026-07-22 写下、从未执行的 SQLite 退役计划
+（`docs/superpowers/plans/2026-07-22-postgresql-sqlite-retirement.md`）已放弃，不再是待办。
+
+- **PostgreSQL 是规范定义。** 生产与日常开发都跑 PostgreSQL；schema、SQL 口径、计划钉与性能
+  验收以 PostgreSQL 为准，规格里的 SQL 写 PostgreSQL 方言。
+- **SQLite 是受支持的镜像，支持范围是离线、单机和测试。** 离线指无数据库服务的本地或打包部署；
+  单机指一台机器、一个服务进程；测试指 G1 标准门（`scripts/check.sh`）全程跑 SQLite、不接触
+  PostgreSQL。多用户生产部署与大库（离线 scale 构建、数万来源级别的热路径调优）只按 PostgreSQL
+  承诺：同一条路径在 SQLite 上语义相同，但不承诺同等延迟。
+- **新功能的双后端义务。** 存储层改动（schema、store 方法、SQL 谓词与锁序）在同一个 PR 里两侧
+  都做：先定 PostgreSQL 口径，SQLite 按同一语义镜像，两侧迁移成对登记在
+  `POSTGRES_SCHEMA_MANIFEST`。只为性能存在的结构（索引、访问路径提示、离线构建器）可以只做
+  PostgreSQL，前提是 SQLite 没有它时结果相同，并登记进下表。只在一侧实现的功能不算完成。编写规则见
+  [开发文档](./docs/development_zh.md#schema-与迁移编写)。
+
+能力对等矩阵逐项按代码核实。「出处」列形如 `文件:符号`（SQL 文件为 `文件:标识符`），由守卫逐条解析，
+文件或符号消失即报红。
+
+| 能力 | PostgreSQL（规范） | SQLite（镜像） | 差异与义务 | 出处 |
+|---|---|---|---|---|
+| schema 版本配对 | 连续编号 SQL 迁移，版本数即 `postgres_version` | `_migration_N` + `SCHEMA_VERSION` | 两侧编号不相等（PostgreSQL 基线建得晚），每一对只在 manifest 登记一次；守卫钉住三处同值与连续编号 | `backend/app/repositories/postgres/schema_manifest.py:POSTGRES_SCHEMA_MANIFEST`、`backend/app/repositories/sqlite/migrations.py:SCHEMA_VERSION`、`backend/app/repositories/postgres/migrator.py:load_migrations` |
+| store 端口面 | 每个 bundle 座位一个具体 store | 同 | 每个端口成员两侧都实现；两侧公开方法集合相同，只有守卫登记的少数后端专用辅助成员例外 | `backend/app/repositories/bundle.py:PersistenceBundle`、`backend/app/repositories/sqlite/bundle.py:SqlitePersistenceBundle`、`backend/app/repositories/postgres/bundle.py:PostgresPersistenceBundle` |
+| 词法检索 | `pg_trgm` GIN；每个词项一条 `%` / `ILIKE` 候选探针，并集后用确定性词项分数排序；不用 tsvector | FTS5 `trigram` 虚表（知识对象名、chunk、Memory）；知识对象名与 chunk 的分数取 `-bm25` | 两侧探同一组词项；分数与并列次序不逐位相等，排序相关用例按后端各自钉住 | `backend/app/repositories/lexical_query.py:corpus_gated_recall_terms`、`backend/app/repositories/postgres/knowledge_store.py:_lexical_candidate_union`、`backend/app/repositories/postgres/search.py:deterministic_lexical_score_terms`、`backend/app/repositories/sqlite/knowledge_store.py:KnowledgeStore.fts_search`、`backend/app/repositories/postgres/migrations/0006_search_gin.sql:gin_trgm_ops` |
+| 知识对象名 KNN 早停 | GiST `<->`，`POSTGRES_LEXICAL_KNN_ENABLED` 控制 | 接收参数后忽略 | 只影响性能；FTS5 候选本来就有界 | `backend/app/repositories/postgres/search.py:knn_name_index_available` |
+| 来源列表 / 元素 / payload 搜索索引 | 复合 GIN trgm 与非空元素部分索引（0042、0048） | 不建索引，`LIKE '%…%'` 在本库范围内扫描 | 只影响性能；SQLite 2 万来源库上 2 字符多命中检索中位数 +15% 已在代码旁登记 | `backend/app/repositories/postgres/migrations/0048_source_search_trgm_indexes.sql:gin_trgm_ops`、`backend/app/repositories/postgres/migrations/0042_hotpath_batch2_search_indexes.sql:idx_source_elements_nonblank`、`backend/app/repositories/sqlite/source_store.py:SourceStore.list_sources_page` |
+| 向量 | float32 `bytea`；离线构建按 keyset 分页读取 | float32 BLOB | 都不用 pgvector；相似度在进程内计算，scale ANN 索引在文件系统，两侧共用 | `backend/app/domain/vector_index.py:top_k_sims`、`backend/app/repositories/postgres/embedding_store.py:EmbeddingStore.vector_pages` |
+| JSON 表达式 / 部分索引 | 支持；另有 jsonb GIN 回答「参与库列表包含本库」 | 支持部分表达式索引（`json_extract`），没有 GIN | 评分只读已评分行（#935，两侧同一条部分索引）；「参与库包含本库」在 SQLite 上走 `json_each` EXISTS，沿按用户的索引逐行解析 payload；按本库计全局回答数要逐个解析参与作业的 payload（SQLite 没有参与库索引，只能全表扫描），用户已裁决另加物理归因列使它成为索引查询 | `backend/app/repositories/postgres/migrations/0062_global_ask_job_sampling.sql:idx_global_ask_jobs_participants`、`backend/app/repositories/sqlite/migrations.py:SqliteMigrator._migration_96`、`backend/app/domain/global_ask_attribution.py:attribution_sql` |
+| 并发写 | 没有进程级 Python 锁；MVCC + 行锁 / advisory lock；`write()` 不可嵌套 | 进程内公平 `threading.Lock` 串行全部写，同线程可嵌套；WAL + `busy_timeout`；跨进程写者靠 `BEGIN IMMEDIATE` 围住检查与写入 | SQLite 同一时刻只有一个写者，批量写与交互写排队；生产两侧都只有一个 Uvicorn worker | `backend/app/repositories/postgres/database.py:PostgresDatabase.write`、`backend/app/repositories/postgres/database.py:NestedPostgresWriteError`、`backend/app/repositories/sqlite/database.py:SqliteDatabase.write`、`backend/app/repositories/sqlite/database.py:SqliteDatabase.begin_immediate` |
+| 跨进程协调 | advisory lock：Knowhow 投影、概念簇产物、认证、scale 构建认领 | 投影锁为空操作（进程内调度器）；认证用 `BEGIN IMMEDIATE`；scale 构建只有服务进程内的认领 | 离线 CLI 与服务进程的并发只在 PostgreSQL 上被跨进程排除 | `backend/app/repositories/postgres/database.py:PostgresDatabase.table_projection_lock`、`backend/app/repositories/postgres/cluster_lock.py:lock_cluster_artifact_types`、`backend/app/repositories/auth_store.py:AuthStore.lock`、`backend/app/repositories/sqlite/database.py:SqliteDatabase.try_scale_build_lock` |
+| 读预算与超时 | 池级 `statement_timeout` / `lock_timeout`；chunk 词法腿在 savepoint 内用私有 deadline | progress handler 中断，并按剩余预算收紧 `busy_timeout` | 超时语义同为「放弃这条读」；数值旋钮只在 PostgreSQL | `backend/app/repositories/postgres/knowledge_store.py:KnowledgeStore.chunk_fts_search`、`backend/app/repositories/sqlite/database.py:_BudgetedReadConnection` |
+| id 列表绑定 | 一个数组参数，`prepare=False` 按真实列表规划 | 一个 JSON 参数，`+col` 只过滤；绕开 32,766 变量上限 | 规则与实测见开发文档「Binding id lists in SQL」 | `backend/app/repositories/postgres/id_binding.py:execute_ids`、`backend/app/repositories/sqlite/id_binding.py:member_of` |
+| 规划器与计划钉 | autoanalyze 与可见性图会翻转计划；计划钉在 PostgreSQL 泳道 | 生产库没有 `sqlite_stat1`，计划须在有无统计时都成立；CI 是 SQLite 3.45、本机 3.53，规划器不同 | 新加 SQLite EXPLAIN 钉要两个版本都通过 | `backend/tests/test_memory_live_predicate_plans.py`、`backend/tests/postgres/test_cluster_generation_explain_pins.py` |
+| 行序 | 登记的表追加 identity `ordinal` 列 | `rowid` | 同一排序语义；PostgreSQL 侧凡 SQLite 用 `rowid` 的地方必须用 `ordinal` | `backend/app/repositories/postgres/schema_manifest.py:POSTGRES_ROWID_ORDINAL_TABLES` |
+| 大库 scale 构建 | 服务内构建 + 离线 CLI（跨进程认领）；同步引入后自动重建 | 只在服务进程内构建；离线 CLI 拒绝，同步引入记为跳过 | 大库只按 PostgreSQL 承诺 | `backend/app/services/scale_build_cli.py:require_postgres`、`backend/app/migration/sync/scale_rebuild.py:SKIPPED_SQLITE` |
+| 跨环境增量同步 | 触发器捕获 + 补偿窗口（读回上次导出时仍在途的事务） | 触发器捕获，没有补偿窗口（单写者不需要） | 两侧都支持导出与引入 | `backend/app/migration/sync/incremental.py:compensation_rows` |
+| 只在 PostgreSQL 的运维 | 热路径 / 检索索引并发构建、热路径诊断、离线维护会话（数据库级 advisory lock + `--confirm-service-stopped`）；扩展前置 `pg_trgm`、`btree_gin` | 无对应物 | SQLite 不需要这些工具 | `scripts/build_hotpath_indexes.py`、`scripts/build_postgres_retrieval_indexes.py`、`scripts/diag_pg_hotpaths.py`、`backend/app/repositories/postgres/database.py:PostgresDatabase.offline_maintenance_session` |
+| 只在 SQLite 的运维 | 无对应物 | 两库离线合并、`vectors-to-blob` 格式修复、备份快照校验、DFX 只读证据快照、写锁观测、`mode=ro` 评测读取器 | 这些工具直接读写 SQLite 文件，PostgreSQL 不需要 | `scripts/merge_dbs.py:preflight`、`backend/app/services/batch_ingest.py:run_vectors_to_blob`、`scripts/verify_repository_snapshot.py:main`、`scripts/diag_db.py:main`、`backend/app/repositories/sqlite/write_lock_stats.py:WriteLockStats`、`backend/app/repositories/sqlite/maintenance.py:ReadOnlySQLiteInspector` |
+| 跨后端迁移 | 目标端 | 源端：停服快照导入、正向 shadow | 只有 SQLite → PostgreSQL 单向；没有 PostgreSQL → SQLite 回写 | `backend/app/migration/sqlite_to_postgres.py`、`backend/app/migration/shadow/manifest.py:RUNNING_SCHEMA_PAIR` |
+
+`backend/tests/test_dual_backend_parity.py` 把能机械核对的部分钉住：schema 版本在三处同值且
+PostgreSQL 迁移连续编号；每个 bundle 座位两侧都实现端口的全部成员；两侧公开方法集合之差恰好等于
+守卫里登记的例外（新的后端专用公开成员必须先登记，过时的登记同样报红）；本表「出处」列逐条可解析。
+语义对等仍由各特性的 SQLite 用例与 `backend/tests/postgres/` 下的孪生用例分别守。
 
 ### 2.3 API、模型与领域服务
 
@@ -921,6 +968,7 @@ G0–G3 分级、环境隔离、并发和 CI 要求统一见[开发文档的验�
 | 文档归属与当前契约 | `backend/tests/test_architecture_documentation.py` |
 | Ask 断连/取消与联邦检索 | `backend/tests/test_ask_stream_cancel.py`、`test_two_tier_federated.py` |
 | Repository 组合与旧库兼容 | `backend/tests/test_repository_v9_fixture.py`、`test_repository_snapshot_verifier.py` |
+| 双后端对等（2.2.2 矩阵） | `backend/tests/test_dual_backend_parity.py` |
 | 依赖方向与兼容 facade | `scripts/check_architecture_boundaries.py` |
 
 旧库 snapshot 验证器与 backup-only 边界见[开发文档](./docs/development_zh.md#架构边界)；

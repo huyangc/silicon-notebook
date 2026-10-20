@@ -1,5 +1,9 @@
 # PostgreSQL SQLite Retirement Implementation Plan
 
+**状态：已放弃（2026-10-19 用户裁决：SQLite 长期保留）。** 本计划从未执行（Release A / B 均未开始），
+不再是待办来源。两个后端长期并存，PostgreSQL 为规范定义、SQLite 为支持离线 / 单机 / 测试的镜像；
+现行决定、双后端义务与能力对等矩阵见 `architecture.md` 2.2.2 节。下文保留为历史记录。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** After PostgreSQL has proved stable for the full observation window, irreversibly declare it the only authority, preserve a final audited SQLite snapshot and a standalone legacy import tool, then remove SQLite and shadow replication from the formal runtime and primary test architecture.

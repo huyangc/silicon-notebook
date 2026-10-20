@@ -2,6 +2,9 @@
 
 > 日期：2026-07-22
 > 状态：用户已确认设计，实施计划已编写
+> 2026-10-19 更新：第 4 阶段「退役期」已放弃（用户裁决：SQLite 长期保留），对应计划
+> `docs/superpowers/plans/2026-07-22-postgresql-sqlite-retirement.md` 不再执行；下文「SQLite adapter
+> 最终必须退役」等表述只作历史记录。现行决定见 `architecture.md` 2.2.2 节。
 > 适用项目：`silicon-notebook`
 
 ## 1. 决策摘要

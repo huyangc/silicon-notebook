@@ -8,7 +8,8 @@
 
 silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端——并由 `DATABASE_URL`
 选择唯一 repository。PostgreSQL 16 是默认部署选项，当前开发和生产环境均使用 PostgreSQL；
-部署前准备可访问的数据库，并显式设置 `DATABASE_URL`。SQLite 仍作为无需数据库服务的可选后端受支持。
+部署前准备可访问的数据库，并显式设置 `DATABASE_URL`。SQLite 作为无需数据库服务的可选后端长期保留并受支持
+（2026-10-19 产品决定），支持范围是离线、单机与测试，见 3.1 节。
 两种后端均不要求 GPU 或本地模型服务。LLM、嵌入和 rerank 仍只通过 URL 服务访问；MinerU 则独立支持
 远端 HTTP（`MINERU_MODE=http`）、同机隔离子进程（`MINERU_MODE=cli`）或 PyMuPDF4LLM 回退
 （`MINERU_MODE=off`）。未配置模型服务或 MinerU parser 时，整条管线以确定性回退离线运行。
@@ -299,6 +300,12 @@ DATABASE_URL=postgresql://silicon_app:change-me@127.0.0.1:5432/silicon_notebook
 默认部署选项与未配置时的代码兜底不同：完全省略 `DATABASE_URL` 时，`Settings` 仍使用
 `sqlite:///.local/silicon_notebook.db`。开发和生产环境显式配置 PostgreSQL；`.env.example`
 也采用这一部署选项。
+
+SQLite 的支持范围：离线（无数据库服务的本地或打包部署）、单机（一台机器、一个服务进程）和测试。
+功能与 PostgreSQL 相同，但同一时刻只有一个写者，没有跨进程协调锁。多用户生产部署和大库应使用
+PostgreSQL：离线 scale 索引构建（`scripts/cli.sh scale`）只支持 PostgreSQL，SQLite 部署只能在服务进程内构建；
+热路径与检索索引构建、PostgreSQL 热路径诊断也只针对 PostgreSQL。两个后端逐项的能力差异见
+[架构文档](../architecture.md#222-双后端长期并存与能力对等矩阵)。
 
 PostgreSQL 必须使用 UTF-8，并把 `pg_trgm` 安装在 `public`。数据库 owner 可让 migration
 0001 创建，也可由 DBA 预装；同名扩展位于其他 schema 时会被拒绝。自 schema v42 起，

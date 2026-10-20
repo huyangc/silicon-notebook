@@ -9,8 +9,9 @@ This is the detailed source-checkout deployment and configuration reference. For
 silicon-notebook runs as two processes — a FastAPI backend and a Next.js frontend — over
 one repository selected by `DATABASE_URL`. PostgreSQL 16 is the default deployment choice;
 both the current development and production environments use PostgreSQL. Provision an
-accessible database and set `DATABASE_URL` explicitly. SQLite remains a supported alternative
-without a database server. Neither backend requires a GPU or local model server.
+accessible database and set `DATABASE_URL` explicitly. SQLite is kept long-term as a supported
+alternative without a database server (product decision of 2026-10-19); its support scope is
+offline, single-machine and test use, see section 3.1. Neither backend requires a GPU or local model server.
 LLM, embeddings, and rerank stay URL-based; MinerU separately supports remote
 HTTP (`MINERU_MODE=http`), an isolated same-host subprocess (`MINERU_MODE=cli`), or the
 PyMuPDF4LLM fallback (`MINERU_MODE=off`, with pypdf as last resort). The pipeline runs offline with deterministic fallbacks
@@ -358,6 +359,16 @@ DATABASE_URL=postgresql://silicon_app:change-me@127.0.0.1:5432/silicon_notebook
 The deployment default is distinct from the unset-setting fallback: if `DATABASE_URL` is
 omitted entirely, `Settings` still uses `sqlite:///.local/silicon_notebook.db`. Development
 and production explicitly configure PostgreSQL; `.env.example` follows that deployment choice.
+
+SQLite's support scope is offline use (a local or packaged deployment without a database
+server), single-machine use (one host, one service process) and tests. It offers the same
+features as PostgreSQL, but admits one writer at a time and has no cross-process coordination
+locks. Multi-user production deployments and large notebooks should use PostgreSQL: the
+offline scale-index build (`scripts/cli.sh scale`) supports PostgreSQL only, so a SQLite
+deployment builds inside the service process, and the hot-path/retrieval index builders and
+PostgreSQL hot-path diagnostics target PostgreSQL only. The per-capability differences
+between the two backends are listed in
+[the architecture document](../architecture.md#222-双后端长期并存与能力对等矩阵).
 
 PostgreSQL must use UTF-8 and have `pg_trgm` installed in `public`. The database owner may
 let migration 0001 create it, or a DBA may preinstall it. An extension of that name in

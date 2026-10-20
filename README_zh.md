@@ -138,7 +138,7 @@ Extension SDK 的 baseline-preserving retrieval host 会执行实时 capability 
 
 ## 当前边界
 
-- PostgreSQL 16 是开发和生产的默认部署选项，SQLite 仍受支持；切换数据库不会自动复制或同步既有数据。
+- PostgreSQL 16 是开发和生产的默认部署选项，SQLite 长期保留，用于离线、单机与测试；切换数据库不会自动复制或同步既有数据。
 - 扫描 PDF、公式和图片的最高保真解析需要 MinerU；本地解析器提供确定性降级。
 - 模型回答和知识抽取需要对应工作负载绑定；离线模式仍可完成导入与确定性流程。
 - Ask 模式只有 `chunk`（默认）与 `reasoning`；已退役的 `graph`、`fast`、`global` 引擎 id 仍作为内置模式的别名解析；generated-question recall 由部署方显式开启且默认 `off`。
