@@ -37,6 +37,7 @@ from app.services.kg_analysis import (
     ABSENCE_UPGRADE_PENDING,
 )
 from app.services.kg_analysis_precompute import analysis_ledger_is_current
+from app.services.kg_findings_view import relink_view
 from app.services.sqlite_repository import SQLiteRepository
 from app.domain.kg_merge_seed import concept_seed_v1
 from tests.kg_findings_world import (
@@ -396,6 +397,71 @@ def test_relink_mark_with_zero_edges(repo):
     marks = _marks(repo, world.notebook_id)
     assert [(m["rule_id"], m["subject_key"], m["kind"], m["at_kg_seq"]) for m in marks] == [
         ("F5", "notebook", MARK_RELINK_ATTEMPTED, kg_seq)]
+
+
+def _relinkable_pair(repo, world, tag: str) -> None:
+    """A claim and a concept of one world source sharing an evidence element and
+    no relation: relink links them (shared element, ``about``)."""
+    from tests.kg_findings_world import T0
+
+    with repo._runtime.database.write() as db:
+        for suffix, object_type in (("c", "claim"), ("k", "concept")):
+            db.execute(
+                "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,payload,"
+                "evidence,source_id,created_at,updated_at) VALUES (?,?,?,'approved',?,?,?,?,?)",
+                (f"ko-{tag}-{suffix}", world.notebook_id, object_type,
+                 json.dumps({"name": f"{tag} {object_type}"}),
+                 json.dumps([{"element_id": f"el-{tag}"}]), world.sources[0], T0, T0))
+
+
+def _relink_mark(repo, notebook_id: str) -> tuple:
+    marks = _marks(repo, notebook_id)
+    kg_seq, _cluster = _seq(repo, notebook_id)
+    view = relink_view(marks, kg_seq)
+    return kg_seq, view["at_kg_seq"], view["may_change"]
+
+
+def test_relink_mark_lands_on_the_generation_its_own_writes_reached(repo):
+    """No other writer: the seq moved only by the run's own per-source commits,
+    so the run saw exactly the current content — the mark is the current
+    generation and running it again cannot link more."""
+    world = seed_world(repo, postgres=False)
+    _relinkable_pair(repo, world, "iso")
+    started, _cluster = _seq(repo, world.notebook_id)
+    result = repo._runtime.knowledge_lifecycle.relink_notebook_kg(world.notebook_id)
+    assert result["edges_added"] >= 1
+    assert _relink_mark(repo, world.notebook_id) == (started + 1, started + 1, False)
+
+
+def test_relink_mark_falls_back_to_its_start_when_an_ingest_lands_mid_run(
+        repo, monkeypatch):
+    """codex #941 R2: the maintenance slot does not hold back ordinary ingestion.
+    A KG write landing after a source's partition was relinked is content the run
+    never read — marking the final generation would claim "running it again is
+    useless" (F5 → relink_spent). The mark falls back to the generation the run
+    started on, so ``may_change`` stays true."""
+    from tests.kg_findings_world import T0
+
+    world = seed_world(repo, postgres=False)
+    _relinkable_pair(repo, world, "iso")
+    lifecycle = repo._runtime.knowledge_lifecycle
+    original = lifecycle._relink_one_source
+    landed: list = []
+
+    def one_source_then_an_ingest(notebook_id, source_id, written):
+        counts = original(notebook_id, source_id, written)
+        if not landed:                  # an ordinary ingest commits mid-run
+            with repo._runtime.database.write() as db:
+                repo._runtime.unified_kg.mark_dirty(db, notebook_id, T0)
+            landed.append(source_id)
+        return counts
+
+    monkeypatch.setattr(lifecycle, "_relink_one_source", one_source_then_an_ingest)
+    started, _cluster = _seq(repo, world.notebook_id)
+    result = lifecycle.relink_notebook_kg(world.notebook_id)
+    assert result["edges_added"] >= 1 and landed
+    # own bump + the ingest's; the mark stays at the start
+    assert _relink_mark(repo, world.notebook_id) == (started + 2, started, True)
 
 
 def test_a_failed_relink_leaves_no_mark(repo, monkeypatch):
