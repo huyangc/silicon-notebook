@@ -819,6 +819,8 @@ def _assert_compensated(obs: Observation, raised: str, *, swept: bool = True) ->
     assert not added, added
     created = [p for p in obs.fs_diff["added"] if obs.copy_id and obs.copy_id in p]
     assert not created, created
+    # Projections are scheduled only for a published copy, never on the failure path.
+    assert not [e for e in obs.timeline if "schedule" in e], obs.timeline
 
 
 def _assert_published_copy(obs: Observation, *, expected_name: str, name_auto: int,
@@ -827,6 +829,10 @@ def _assert_published_copy(obs: Observation, *, expected_name: str, name_auto: i
     assert obs.outcome["returned"]["id"] == copy_id
     assert obs.outcome["returned"]["name"] == expected_name
     assert obs.store_calls() == published_store_sequence(mounts=mounts), obs.store_calls()
+    # Scheduling is post-publish: nothing past publish may sit inside the compensated try.
+    published = next(i for i, e in enumerate(obs.timeline) if e.get("call") == "store.publish_copy")
+    scheduled = [i for i, e in enumerate(obs.timeline) if "schedule" in e]
+    assert not scheduled or scheduled[0] > published, (scheduled, published)
     (row,) = obs.added("notebooks")
     assert (row["id"], row["created_by"], row["status"], row["tier"]) == (
         copy_id, RECIPIENT, "draft", "personal")
@@ -961,6 +967,18 @@ def expect_destination_exists(obs: Observation) -> None:
     assert f"notebooks/{obs.copy_id}/keep.txt" not in obs.fs_diff["removed"]
 
 
+def expect_destination_kept_without_source_directory(obs: Observation) -> None:
+    """No source directory, so copytree never ran and the copy owns no destination
+    tree: the already-existing directory survives the compensation of a later failure,
+    while the assets directory this copy did create is removed."""
+    _assert_compensated(obs, "RuntimeError")
+    assert not [e for e in obs.timeline if e.get("fs") == "copytree"]
+    rmtree = [e["args"][0] for e in obs.timeline if e.get("fs") == "rmtree"]
+    assert f"{STORAGE}/notebooks/{obs.copy_id}" not in rmtree, rmtree
+    assert rmtree[-1] == f"{STORAGE}/assets/{obs.copy_id}", rmtree
+    assert f"notebooks/{obs.copy_id}/keep.txt" not in obs.fs_diff["removed"]
+
+
 def expect_schedule_failure(obs: Observation) -> None:
     expect_full_copy(obs)
     warnings = [log for log in obs.logs if log["level"] == "WARNING"]
@@ -995,6 +1013,11 @@ SCENARIOS = (
              expect_compensated("ValueError"), files=FULL_FILES),
     Scenario("destination_directory_exists", full_world, expect_destination_exists,
              files=FULL_FILES, pre_dirs=("notebooks/nb-c0001",)),
+    Scenario("destination_directory_exists_without_source_directory", full_world,
+             expect_destination_kept_without_source_directory,
+             files={k: v for k, v in FULL_FILES.items() if not k.startswith(f"notebooks/{NB}/")},
+             pre_dirs=("notebooks/nb-c0001",),
+             store_faults={("validate_copy", None): RuntimeError("injected validation")}),
     Scenario("projection_scheduling_fails", full_world, expect_schedule_failure,
              files=FULL_FILES, schedule_fault_at=1),
     Scenario("missing_notebook", full_world, expect_missing, files=FULL_FILES,

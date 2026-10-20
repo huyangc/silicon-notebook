@@ -381,7 +381,18 @@ class _NotebookCopyRun:
     # knowhow chunk's id from ITS row (a chunk has no row_id column
     # of its own — only its element_ids[0] indirectly names one).
     element_row_new: dict = field(default_factory=dict)
-    json_maps: dict = field(default_factory=dict)
+    # The remap maps every stored-JSON rewrite reads (``seams.remap_json_ids``),
+    # built from the very same dict objects as the fields above — never a copy —
+    # so every phase sees the entries the earlier phases have added.
+    json_maps: dict = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.json_maps = {
+            "element_id": self.element_map,
+            "element_ids": self.element_map,
+            "source_id": self.source_map,
+            "object_id": self.object_map,
+        }
 
 
 class NotebookCopyService:
@@ -756,8 +767,8 @@ class NotebookCopyService:
                     shutil.copy2(src_path, assets_dest_dir / f"{new_asset_id}.{ext}")
 
     def _copy_elements_and_chunks(self, run: _NotebookCopyRun, snapshot: dict) -> list[dict]:
-        """source_elements (fills ``element_map``), the JSON remap maps, and chunks
-        (fills ``chunk_map``); returns the copied chunk rows for the FTS mirror."""
+        """source_elements (fills ``element_map``), then chunks (fills
+        ``chunk_map``); returns the copied chunk rows for the FTS mirror."""
         new_id, chunk_size = run.new_id, run.chunk_size
         source_map, element_map, chunk_map = run.source_map, run.element_map, run.chunk_map
         knowhow_source_ids_old, element_row_new = run.knowhow_source_ids_old, run.element_row_new
@@ -779,12 +790,7 @@ class NotebookCopyService:
             "source_elements", elements_out, chunk_size=chunk_size
         )
 
-        run.json_maps = json_maps = {
-            "element_id": element_map,
-            "element_ids": element_map,
-            "source_id": source_map,
-            "object_id": run.object_map,
-        }
+        json_maps = run.json_maps
 
         chunks_out = []
         for data in snapshot["chunks"]:
