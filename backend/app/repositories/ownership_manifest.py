@@ -1792,16 +1792,6 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
-        name='decided_seed_pairs',
-        owner='KnowledgeGovernanceService',
-        kind='method',
-        consumers=(
-            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.__init__.<lambda>', kind='attribute', target='decided_seed_pairs'),
-        ),
-        patches=(
-        ),
-    ),
-    SurfaceMember(
         name='delete_conversation',
         owner='AskStateStore',
         kind='method',

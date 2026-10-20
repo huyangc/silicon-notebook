@@ -517,6 +517,7 @@ def test_merge_candidate_batches_preserve_persisted_ordinal(knowledge_harness):
                 f"canonical-{index + 1}",
                 1.0 - index / 10,
                 NOW,
+                seed_version=2,
             )
         first = knowledge_harness.governance.pending_merges_batch(
             connection, "nb-personal", 2
@@ -1931,6 +1932,7 @@ def test_postgres_merge_review_job_start_is_single_flight(postgres_database):
             "canonical-b",
             0.9,
             NOW,
+            seed_version=2,
         )
 
     callers_ready = threading.Barrier(2)
