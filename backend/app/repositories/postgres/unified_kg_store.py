@@ -599,8 +599,8 @@ class UnifiedKgStore:
         循环体 ~1.9–2.0 → ~2.1–2.3 µs/行),按 836 万行是秒级,不是回退。
 
         行序与口径**一字不动**:SQL 文本、参数、`ORDER BY kr.id COLLATE "C"` 都与
-        `execute` 形态逐字相同 —— Louvain 对边序敏感,行序漂了就是已部署库的板块划分全
-        漂(见 `rebuild_communities` 里「首次出现序」那段说明)。`stream()` 只改
+        `execute` 形态逐字相同(划分已与行序无关——`kg_partition` 按 canonical id 排名,
+        2026-10-19 §五 S2;孪生守卫仍逐行比对两侧)。`stream()` 只改
         「结果怎么到客户端」,不改「服务端算出什么」。
 
         两侧形态**刻意分岔**:SQLite 侧不用改 —— `sqlite3` 的游标本来就是惰性取行,没有

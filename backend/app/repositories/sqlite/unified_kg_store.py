@@ -544,7 +544,7 @@ class UnifiedKgStore:
         }
         # ``src`` (KG findings F3b): the relation's own source, counted per row by
         # the caller. A column of the row already read — the plan and the row
-        # order (``ORDER BY kr.id``, Louvain's input) are unchanged.
+        # order (``ORDER BY kr.id``, the edge table's input) are unchanged.
         relations = db.execute(
             "SELECT COALESCE(cs.canonical_id, kr.source_object_id) AS s, "
             "       COALESCE(ct.canonical_id, kr.target_object_id) AS t, "
