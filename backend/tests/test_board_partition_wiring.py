@@ -30,7 +30,12 @@ from app.domain.kg_analysis_contracts import ARTIFACT_COMMUNITY_EDGES
 from app.models.schemas import NotebookCreate
 from app.services import kg_partition
 from app.services.embedding import FakeEmbedder
-from app.services.kg_partition import PARTITION_ALGO_VERSION, mint_board_key
+from app.services.kg_partition import (
+    PARTITION_ALGO_VERSION,
+    PreviousPartitionBuilder,
+    mint_board_key,
+)
+from app.services.knowledge_lifecycle import _fold_previous_partition
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients
 
@@ -473,3 +478,25 @@ def test_the_kg_analysis_route_returns_the_board_keys(tmp_path, monkeypatch):
     assert sorted(board["board_key"] for board in boards) == [
         key for key, _ms in _published(repository, nb)]
     assert all(board["board_key"].startswith("bk-") for board in boards)
+
+
+def test_the_previous_partition_fold_closes_the_row_stream_on_an_error():
+    """On PostgreSQL the rows are a ``cursor().stream()`` generator: one left
+    suspended keeps the connection ACTIVE and the caller's rollback blocks
+    (see ``tests/test_fold_canonical_edges.py``). The fold closes it when a row
+    makes the previous partition unusable."""
+    closed: list = []
+
+    def rows():
+        try:
+            yield {"canonical_id": "K-1", "board_key": "bk-1"}
+            yield {"canonical_id": "K-2", "board_key": ""}
+            yield {"canonical_id": "K-3", "board_key": "bk-3"}
+        finally:
+            closed.append(True)
+
+    stream = rows()  # the test frame keeps referencing it: only the fold's close() runs finally
+    with pytest.raises(ValueError):
+        _fold_previous_partition(stream, PreviousPartitionBuilder(3),
+                                 {"K-1": 0, "K-2": 1, "K-3": 2})
+    assert closed == [True]
