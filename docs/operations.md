@@ -200,32 +200,57 @@ both are empty, the participants minus the skipped ones — `global_ask_attribut
 `global_ask_jobs.attributed = 1`. The notebook analytics panel's 「提问」 counts the global answers attributed
 to the notebook from it. The migration does **not** backfill: jobs that finished before the upgrade carry
 `attributed = 0` and no rows, and the panel keeps counting them through the old payload predicate
-(`attribution_sql`) — the same number as after the backfill, only slower. Run once after upgrading:
+(`attribution_sql`) — the same number as after the backfill, only slower.
+
+**Automatic backfill**: on every start, once the service is ready (beside `memory-orphan-sweep`; it never
+delays readiness), the startup log first writes `global ask attribution: N done job(s) with attributed=0`;
+when N is above 0 it submits **one** background pass (job name `global-ask-attribution-backfill`) that ends
+with `global ask attribution backfill: written=… skipped=… unreadable=… pending_after=…` (counts and an
+exception class only). Normally nothing has to be done by hand after an upgrade.
+
+**Manual re-run / preview**:
 
 ```bash
 PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py --dry-run   # read-only, reports what is pending
 PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py             # write
 ```
 
-- Pages by job id (`--batch-size`, default 500, one transaction per page); every job's UPDATE is guarded on
-  `attributed = 0`, so the pass is idempotent and a plain re-run after an interruption handles only what is
-  left; `--after-id` resumes after a given id, `--limit` caps one run.
-- Safe while the service runs: the completion path only writes rows it moves out of `running`, never one
-  this tool selects; no `--confirm-service-stopped` is needed on PostgreSQL.
+- Both share `run_backfill`: pages by job id (`--batch-size`, default 500), one transaction per page. On
+  PostgreSQL the page's rows are first locked with `SELECT … ORDER BY id FOR UPDATE SKIP LOCKED`, **never
+  waiting**: a row another transaction holds (a notebook deletion's `stamp_retained_turns`, say) is skipped
+  and left for the next pass (counted in `skipped`, reported by `pending_after`), so the pass cannot form a
+  lock cycle with a deletion; one UPDATE … RETURNING that re-checks `attributed = 0` then flags them and the
+  rows are inserted. A `40P01` all the same retries the page. Idempotent; a plain re-run after an
+  interruption handles only what is left; `--after-id` resumes after a given id, `--limit` caps one run.
+- The command **does not own the schema**: it composes the repository with `migrate=False, seed=False` — no
+  migration DDL against a live database, no seed step (which rewrites the admin password unconditionally). A
+  database not yet at v98 / 0078 is refused (exit status 3), never migrated. Safe while the service runs.
 - A job whose payload does not read back as a `GlobalAskJob` is only reported (`--report` writes one
   `{"job_id", "reason": "payload_unreadable"}` line each, never content) and left as it is, still counted
-  through the payload predicate; exit status 1 when there are such jobs, else 0; 2 on a usage error.
+  through the payload predicate. Exit status: 0 done, 1 such jobs exist, 2 usage error, 3 not migrated.
 - Progress: `SELECT COUNT(*) FROM global_ask_jobs WHERE status='done' AND attributed=0` is what is left (it
-  reads the partial index `idx_global_ask_jobs_unattributed`, empty once the backfill is done).
+  reads the partial index `idx_global_ask_jobs_unattributed`, empty once the backfill is done). After a large
+  backfill run `VACUUM ANALYZE global_ask_jobs` (and `global_ask_job_notebooks`) on PostgreSQL: the pass
+  rewrote most done job rows, and the planner only picks plans for the new distribution once statistics and
+  the visibility map are refreshed.
 
-**Cost before the backfill** (measured locally: 5000 done global jobs site-wide, ~8 KB payloads, 50 of
-them in the notebook; the panel read's extra time over not counting global answers at all): on PostgreSQL the
-unattributed part reads only this notebook's participating jobs through the partial index intersected with
-the participation GIN index — +1.2 ms with nothing backfilled, +0.3 ms after; SQLite has no participation
-index, so the unattributed part parses the payload of **every** unattributed job of the site — +33 ms with
-nothing backfilled, +16 ms half-way, +0.04 ms after (proportional to the unattributed count). Run the
-backfill soon after upgrading a SQLite deployment. The rows the completion path writes add a negligible
-amount to the job's final write transaction (PostgreSQL +0.05 ms; within noise on SQLite).
+**Cost until the backfill has caught up**: on PostgreSQL the unattributed part reads only the unattributed
+jobs **this notebook took part in**, through the partial index intersected with the participation GIN index,
+so its cost is proportional to that number — #935 measured ~270–300 ms for 1535 participating jobs with
+production-size payloads; SQLite has no participation index, so the unattributed part parses the payload of
+**every** unattributed job of the site, proportional to the site's unattributed count. Local ABAB (5000 done
+global jobs site-wide, ~8 KB payloads; the panel read's extra time over not counting global answers at all):
+
+| Notebook took part in | Backend | Nothing backfilled | Half | Backfilled |
+| --- | --- | --- | --- | --- |
+| 50 | PostgreSQL | +1.2 ms | +1.4 ms | +0.3 ms |
+| 50 | SQLite | +34 ms | +17 ms | +0.04 ms |
+| 1500 | PostgreSQL | +23 ms | +19 ms | +3.2 ms |
+| 1500 | SQLite | +34 ms | +17 ms | +0.33 ms |
+
+That is why the service backfills on its own after readiness; once it has, the panel's count reads the
+attribution table only. The rows the completion path writes add a negligible amount to the job's final
+write transaction (PostgreSQL about +0.05 ms; within noise on SQLite).
 
 ## Ownerless Memory sources
 

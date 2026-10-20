@@ -147,28 +147,48 @@ run 直接抛出取消，两个事件都不发。改动之前被旧复核整份�
 `global_ask_job_notebooks(job_id, notebook_id)`（检索到 ∪ 引用到；两者皆空时为参与库减被跳过的库，
 `global_ask_attribution.job_attribution`），并把 `global_ask_jobs.attributed` 置 1。知识分析看板的「提问」
 据此计入归入本库的全局问答。迁移**不回填**：升级前已完成的作业 `attributed = 0`、没有归因行，看板对它们
-沿用旧的 payload 判据（`attribution_sql`），数字与回填后完全相同，只是更慢。升级后跑一次：
+沿用旧的 payload 判据（`attribution_sql`），数字与回填后完全相同，只是更慢。
+
+**自动回填**：每次服务启动、就绪之后（与 `memory-orphan-sweep` 同一位置，从不推迟就绪），启动日志先写一行
+`global ask attribution: N done job(s) with attributed=0`；N 大于 0 时提交**一次**后台回填（作业名
+`global-ask-attribution-backfill`），结束时记 `global ask attribution backfill: written=… skipped=…
+unreadable=… pending_after=…`（只有计数与异常类名）。正常情况下升级后无需手动操作。
+
+**手动补跑 / 预览**：
 
 ```bash
 PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py --dry-run   # 只读，报待补数
 PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py             # 补写
 ```
 
-- 按作业 id 分页（`--batch-size`，默认 500，每页一个事务），每个作业的 UPDATE 都带 `attributed = 0`
-  守卫：幂等，中断后原样重跑只处理剩下的；`--after-id` 从某个 id 之后续跑，`--limit` 限制本次条数。
-- 服务运行时可以跑：完成路径只写它从 `running` 移走的行，与本工具选中的行不相交；PostgreSQL 上不需要
-  `--confirm-service-stopped`。
+- 两条路径共用 `run_backfill`：按作业 id 分页（`--batch-size`，默认 500），每页一个事务。PostgreSQL 上先
+  `SELECT … ORDER BY id FOR UPDATE SKIP LOCKED` 拿这一页的行锁、**从不等待**——别的事务（例如删库的
+  `stamp_retained_turns`）正持有的行被跳过、留给下一次（计入 `skipped`，`pending_after` 报出），所以不会与删库
+  组成锁环；再用一条带 `attributed = 0` 复核的 UPDATE … RETURNING 置位、插入归因行。万一仍报 `40P01`，整页重试。
+  幂等，中断后原样重跑只处理剩下的；`--after-id` 从某个 id 之后续跑，`--limit` 限制本次条数。
+- 命令**不拥有 schema**：以 `migrate=False, seed=False` 组装仓储——不对在役库跑迁移 DDL，也不跑会无条件
+  重写 admin 密码的 seed。库还没迁移到 v98 / 0078 时直接拒绝（退出码 3），不替它迁移。服务运行时可以跑。
 - payload 读不回 `GlobalAskJob` 的作业只报告（`--report` 逐行写 `{"job_id", "reason": "payload_unreadable"}`，
-  不写正文）、不改动，继续走 payload 判据计数；有这类作业时退出码为 1，否则 0，参数错误为 2。
+  不写正文）、不改动，继续走 payload 判据计数；退出码：0 完成，1 有这类作业，2 参数错误，3 库未迁移。
 - 进度：`SELECT COUNT(*) FROM global_ask_jobs WHERE status='done' AND attributed=0` 即剩余数（命中部分索引
-  `idx_global_ask_jobs_unattributed`，回填完成后该索引为空）。
+  `idx_global_ask_jobs_unattributed`，回填完成后该索引为空）。大量回填后对 PostgreSQL 执行一次
+  `VACUUM ANALYZE global_ask_jobs`（以及 `global_ask_job_notebooks`）：回填改写了大部分已完成作业行，刷新统计
+  和可见性图后规划器才会按新分布选计划。
 
-**回填前的代价**（本机实测：全站 5000 个已完成全局作业、每份 payload 约 8 KB、本库参与 50 个；看板一次读取
-「新计数」比不计全局回答时多出的耗时）：PostgreSQL 上未回填部分经部分索引与参与库 GIN 索引的交集只读本库
-参与的作业，全部未回填 +1.2 ms、回填后 +0.3 ms；SQLite 没有参与库索引，未回填部分要解析**全站**每个未回填
-作业的 payload——全部未回填 +33 ms、一半未回填 +16 ms、回填后 +0.04 ms（与未回填作业数成正比）。所以 SQLite
-部署升级后尽早跑回填。完成路径多写的归因行对一次作业落定的写事务影响可忽略（PostgreSQL +0.05 ms，SQLite
-在测量噪声内）。
+**回填完成前的代价**：PostgreSQL 上未回填部分经部分索引与参与库 GIN 索引的交集只读**本库参与过的**未回填
+作业，代价与这个数成正比——#935 在生产量级 payload 上测得本库参与 1535 个作业时约 270–300 ms；SQLite 没有
+参与库索引，未回填部分要解析**全站**每个未回填作业的 payload，与全站未回填数成正比。本机 ABAB（全站 5000 个
+已完成全局作业、每份 payload 约 8 KB；看板一次读取比不计全局回答时多出的耗时）：
+
+| 本库参与 | 后端 | 全部未回填 | 一半未回填 | 回填后 |
+| --- | --- | --- | --- | --- |
+| 50 | PostgreSQL | +1.2 ms | +1.4 ms | +0.3 ms |
+| 50 | SQLite | +34 ms | +17 ms | +0.04 ms |
+| 1500 | PostgreSQL | +23 ms | +19 ms | +3.2 ms |
+| 1500 | SQLite | +34 ms | +17 ms | +0.33 ms |
+
+所以服务就绪后会自动回填；回填完成后看板计数只读归因表。完成路径多写的归因行对一次作业落定的写事务影响
+可忽略（PostgreSQL 约 +0.05 ms，SQLite 在测量噪声内）。
 
 ## 无主 Memory 来源
 
