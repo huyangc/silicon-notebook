@@ -650,15 +650,15 @@ def test_v97_adds_the_findings_tables_and_the_code_version_column(tmp_path):
 
 @pytest.mark.legacy_upgrade_contract
 @pytest.mark.real_sqlite_migration
-def test_v100_adds_the_concept_seed_space_columns(tmp_path):
+def test_v102_adds_the_concept_seed_space_columns(tmp_path):
     """concept_merge_candidates.seed_version (INTEGER NOT NULL DEFAULT 1) and
     unified_kg_state.concept_seed_version (INTEGER NOT NULL DEFAULT 2): an
     existing decision row and an existing state row read as minted in seed
     space 1 (the space every merge before this migration was built in), a
     state row created afterwards starts in space 2, the code's. A fresh
-    database and a v99 upgrade end up the same; a second run is a no-op and
+    database and a v101 upgrade end up the same; a second run is a no-op and
     never touches a row written since."""
-    from tests.sqlite_migration_testkit import rollback_v100
+    from tests.sqlite_migration_testkit import rollback_v102
 
     database, settings = _fresh_migrated_database(tmp_path)
 
@@ -676,37 +676,37 @@ def test_v100_adds_the_concept_seed_space_columns(tmp_path):
     with database.write() as db:
         db.execute(
             "INSERT INTO notebooks (id, name, created_at, updated_at) VALUES "
-            "('nb-v99', 'n', '2026-10-21T00:00:00+00:00', '2026-10-21T00:00:00+00:00')"
+            "('nb-v101', 'n', '2026-10-21T00:00:00+00:00', '2026-10-21T00:00:00+00:00')"
         )
-        rollback_v100(db)
+        rollback_v102(db)
         db.execute(
             "INSERT INTO unified_kg_state (notebook_id, cluster_input_version, updated_at) "
-            "VALUES ('nb-v99', 'v-old', '2026-10-21T00:00:00+00:00')"
+            "VALUES ('nb-v101', 'v-old', '2026-10-21T00:00:00+00:00')"
         )
         db.execute(
             "INSERT INTO concept_merge_candidates (id, notebook_id, canonical_a, "
             "canonical_b, score, status, created_at, updated_at) VALUES "
-            "('mc-old', 'nb-v99', 'K-a b', 'K-c', 0.9, 'rejected', 't', 't')"
+            "('mc-old', 'nb-v101', 'K-a b', 'K-c', 0.9, 'rejected', 't', 't')"
         )
-        db.execute("PRAGMA user_version = 99")
+        db.execute("PRAGMA user_version = 101")
 
-    assert SqliteMigrator(database, settings).migrate() == [100]
+    assert SqliteMigrator(database, settings).migrate() == [102]
     with database.write() as db:
         db.execute(
             "INSERT INTO notebooks (id, name, created_at, updated_at) VALUES "
-            "('nb-v100', 'n', '2026-10-21T00:00:00+00:00', '2026-10-21T00:00:00+00:00')"
+            "('nb-v102', 'n', '2026-10-21T00:00:00+00:00', '2026-10-21T00:00:00+00:00')"
         )
         db.execute(
             "INSERT INTO unified_kg_state (notebook_id, updated_at) "
-            "VALUES ('nb-v100', '2026-10-21T00:00:00+00:00')"
+            "VALUES ('nb-v102', '2026-10-21T00:00:00+00:00')"
         )
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db) == fresh
         assert dict(db.execute(
             "SELECT notebook_id, concept_seed_version FROM unified_kg_state "
-            "WHERE notebook_id IN ('nb-v99', 'nb-v100')"
-        ).fetchall()) == {"nb-v99": 1, "nb-v100": 2}
+            "WHERE notebook_id IN ('nb-v101', 'nb-v102')"
+        ).fetchall()) == {"nb-v101": 1, "nb-v102": 2}
         assert db.execute(
             "SELECT seed_version FROM concept_merge_candidates WHERE id='mc-old'"
         ).fetchone()[0] == 1
@@ -916,7 +916,7 @@ def test_v100_adds_the_notebook_delete_window_without_backfilling(tmp_path):
                 (notebook_id, notebook_id, status, now, now),
             )
 
-    assert SqliteMigrator(database, settings).migrate() == [100, 101]
+    assert SqliteMigrator(database, settings).migrate() == [100, 101, 102]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db) == fresh
@@ -974,7 +974,7 @@ def test_v101_adds_the_navigation_marker_columns_without_backfilling(tmp_path):
     finally:
         raw.close()
 
-    assert SqliteMigrator(database, settings).migrate() == [101]
+    assert SqliteMigrator(database, settings).migrate() == [101, 102]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db) == fresh
@@ -985,4 +985,71 @@ def test_v101_adds_the_navigation_marker_columns_without_backfilling(tmp_path):
         assert db.execute(
             "SELECT navigation_version FROM sources WHERE id='src-v101'"
         ).fetchone()[0] == 0
+    database.close_local()
+
+
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
+def test_v102_adds_the_board_partition_columns_and_backfills_board_keys(tmp_path):
+    """Board partition columns (v102, with the concept seed space columns):
+    unified_kg_state.community_partition_version / community_partition_mode
+    default to 0 / '' -- "built by the algorithm before this one", so the next
+    rebuild starts cold -- and communities.board_key is backfilled to each
+    row's own id, every generation. A fresh database and a v101 upgrade end up
+    the same; a re-run after an interrupted UPDATE finishes the backfill and
+    touches nothing else."""
+    from tests.sqlite_migration_testkit import rollback_v102
+
+    database, settings = _fresh_migrated_database(tmp_path)
+
+    def shape(db):
+        state = {row[1]: tuple(row)[1:] for row in db.execute("PRAGMA table_info(unified_kg_state)")}
+        communities = {row[1]: tuple(row)[1:] for row in db.execute("PRAGMA table_info(communities)")}
+        return (state["community_partition_version"], state["community_partition_mode"],
+                communities["board_key"])
+
+    with database.connect() as db:
+        fresh = shape(db)
+    # PRAGMA table_info minus cid: (name, type, notnull, dflt_value, pk)
+    assert fresh == (
+        ("community_partition_version", "INTEGER", 1, "0", 0),
+        ("community_partition_mode", "TEXT", 1, "''", 0),
+        ("board_key", "TEXT", 1, "''", 0),
+    )
+    now = "2026-10-21T00:00:00+00:00"
+    with database.write() as db:
+        db.execute(
+            "INSERT INTO notebooks (id, name, created_at, updated_at) VALUES "
+            "('nb-v101', 'n', ?, ?)", (now, now))
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, cluster_input_version, updated_at) "
+            "VALUES ('nb-v101', 'v-old', ?)", (now,))
+        rollback_v102(db)
+        for cid, generation in (("cm-a", 1), ("cm-b", 1), ("cm-c", 2)):
+            db.execute(
+                "INSERT INTO communities (id, notebook_id, level, member_ids, size, created_at, "
+                "generation) VALUES (?, 'nb-v101', 0, '[\"K-x\"]', 1, ?, ?)", (cid, now, generation))
+        db.execute("PRAGMA user_version = 101")
+
+    assert SqliteMigrator(database, settings).migrate() == [102]
+    assert SqliteMigrator(database, settings).migrate() == []
+    with database.connect() as db:
+        assert shape(db) == fresh
+        state = db.execute(
+            "SELECT community_partition_version, community_partition_mode FROM unified_kg_state "
+            "WHERE notebook_id = 'nb-v101'").fetchone()
+        assert tuple(state) == (0, "")
+        keys = {row[0]: row[1] for row in db.execute("SELECT id, board_key FROM communities")}
+        assert keys == {"cm-a": "cm-a", "cm-b": "cm-b", "cm-c": "cm-c"}
+
+    # An interruption between the ALTERs and the UPDATE leaves defaults behind;
+    # re-running the migration finishes the backfill and touches nothing else.
+    with database.write() as db:
+        db.execute("UPDATE communities SET board_key = '' WHERE id = 'cm-b'")
+        db.execute("UPDATE communities SET board_key = 'bk-kept' WHERE id = 'cm-c'")
+        db.execute("PRAGMA user_version = 101")
+    assert SqliteMigrator(database, settings).migrate() == [102]
+    with database.connect() as db:
+        keys = {row[0]: row[1] for row in db.execute("SELECT id, board_key FROM communities")}
+        assert keys == {"cm-a": "cm-a", "cm-b": "cm-b", "cm-c": "bk-kept"}
     database.close_local()

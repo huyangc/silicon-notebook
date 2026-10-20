@@ -1114,6 +1114,7 @@ class KgBuildJobStore:
                 # The derived tables (clusters, decisions) were just cleared:
                 # nothing is published, the code's seed space (S1).
                 f"concept_seed_version={int(CONCEPT_SEED_VERSION)},"
+                "community_partition_version=0,community_partition_mode='',"
                 "community_seq=-1,canonical_rel_seq=-1,"
                 "mention_seq=-1,"
                 # 代际重置——理由见 PG 孪生(codex #671 R18 P1)。

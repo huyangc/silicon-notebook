@@ -341,12 +341,16 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # NOT NULL DEFAULT 0: +1 whenever the source's set of flagged chunks changes;
 # the selected-source snapshot cache keys on it). No index, no backfill in the migration:
 # the service judges existing sources after readiness. See ``_migration_101``.
-# v102 (paired with PostgreSQL 0083_kg_concept_seed_space.sql) adds
-# concept_merge_candidates.seed_version and unified_kg_state.concept_seed_version
-# (INTEGER NOT NULL DEFAULT 1): the concept seed space a merge decision's keys
-# and a library's published merge were minted in. No backfill (each library's
-# first full rebuild in seed space 2 recomputes its v1 decisions). See
-# ``_migration_102``.
+# v102 (paired with PostgreSQL 0083_kg_seed_space_and_board_partition.sql) is
+# PR-4 of the KG analysis findings design: the concept seed space
+# (concept_merge_candidates.seed_version, INTEGER NOT NULL DEFAULT 1, and
+# unified_kg_state.concept_seed_version, NOT NULL, every existing row 1 and
+# DEFAULT 2 for rows created afterwards) and the board partition
+# (unified_kg_state.community_partition_version INTEGER NOT NULL DEFAULT 0 and
+# community_partition_mode TEXT NOT NULL DEFAULT '', communities.board_key TEXT
+# NOT NULL DEFAULT '' backfilled to the row's own id). Stored decisions are not
+# rewritten here (each library's first full rebuild in seed space 2 recomputes
+# its v1 decisions). See ``_migration_102``.
 SCHEMA_VERSION = 102
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
@@ -6154,18 +6158,22 @@ class SqliteMigrator:
             )
 
     def _migration_102(self) -> None:
-        """KG concept seed space, parity with PostgreSQL
-        ``0083_kg_concept_seed_space.sql`` (design
+        """KG concept seed space and board partition, parity with PostgreSQL
+        ``0083_kg_seed_space_and_board_partition.sql`` (design
         docs/superpowers/specs/2026-10-19-kg-analysis-findings-design_zh.md
-        §五 S1 「实施细化」).
+        §五 S1 「实施细化」 and §五 S2; ``app.services.kg_partition``). The two
+        land in one version because one event applies both: a library's first
+        full rebuild after the upgrade re-merges its concepts in seed space 2
+        and re-partitions its topic boards cold.
 
-        ``concept_merge_candidates.seed_version`` records the concept seed
-        space a row's decision keys were minted in (``seed_a`` / ``seed_b``,
-        or the canonical ids without ``K-`` for a row without seeds); every
-        existing row was minted in space 1. Nothing is rewritten here: a v1
-        decision's v2 seeds can only be recomputed from the current objects'
-        names, which each library's first full rebuild in space 2 does inside
-        its pending refresh (``kg_merge.translate_v1_decisions``).
+        Concept seed space (S1). ``concept_merge_candidates.seed_version``
+        records the concept seed space a row's decision keys were minted in
+        (``seed_a`` / ``seed_b``, or the canonical ids without ``K-`` for a
+        row without seeds); every existing row was minted in space 1. Nothing
+        is rewritten here: a v1 decision's v2 seeds can only be recomputed
+        from the current objects' names, which each library's first full
+        rebuild in space 2 does inside its pending refresh
+        (``kg_merge.translate_v1_decisions``).
 
         ``unified_kg_state.concept_seed_version`` records the concept seed
         space of the library's PUBLISHED merge, written by the flip statement
@@ -6178,14 +6186,33 @@ class SqliteMigrator:
         DEFAULT 1`` followed by ``SET DEFAULT 2``; SQLite cannot change a
         column default, so the column is added with DEFAULT 2 and the rows
         that exist are set to 1 in the same transaction (only when the column
-        is new, so a rerun never touches a row written since). Neither table
-        is captured by a sync trigger that names columns
-        (``unified_kg_state``'s capture serialises the whole row;
-        ``concept_merge_candidates`` is LOCAL), so no trigger changes. With
-        change capture switched on, that UPDATE logs one key-only upsert per
-        existing state row (PostgreSQL's ADD COLUMN default fires no trigger):
-        the next export re-sends those rows as they are, an accepted SQLite-only
-        difference in export volume, not in content."""
+        is new, so a rerun never touches a row written since).
+
+        Board partition (S2). ``unified_kg_state.community_partition_version``
+        is the ``kg_partition.PARTITION_ALGO_VERSION`` the published board
+        partition was built with, and ``community_partition_mode`` how
+        (``warm`` / ``cold`` / ``cold_fallback``); both are written in the
+        transaction that publishes the partition. ``0`` / ``''`` read as
+        "built by the algorithm before this one": the next rebuild therefore
+        starts cold, which is the one-time re-partition the design announces.
+        ``communities.board_key`` is a board's identity across generations
+        (``communities.id`` is re-minted every generation). Existing rows are
+        backfilled to their own id, so the first partition built by the new
+        algorithm can carry a matching board's key forward. The UPDATE only
+        touches rows still at the default, so a re-run after an interruption
+        between the ALTER and the UPDATE finishes the job.
+
+        Change capture. No capture trigger names a non-key column (the change
+        log records row keys only; ``unified_kg_state`` and ``communities``
+        are SYNCED, ``concept_merge_candidates`` is LOCAL), so no trigger
+        changes. With
+        change capture switched on, the two backfill UPDATEs log upserts: one
+        key-only upsert per existing state row for the seed space (SQLite
+        only: PostgreSQL's ADD COLUMN default fires no trigger) and one per
+        board for ``board_key`` (both backends). The next export re-sends
+        those rows as they are and the receiving side backfills the same
+        values: a difference in export volume, not in content.
+        """
         with self._connect() as db:
             self.add_column_if_missing(
                 db, "concept_merge_candidates", "seed_version",
@@ -6197,6 +6224,15 @@ class SqliteMigrator:
                 db.execute("ALTER TABLE unified_kg_state ADD COLUMN "
                            "concept_seed_version INTEGER NOT NULL DEFAULT 2")
                 db.execute("UPDATE unified_kg_state SET concept_seed_version = 1")
+            self.add_column_if_missing(
+                db, "unified_kg_state", "community_partition_version",
+                "INTEGER NOT NULL DEFAULT 0")
+            self.add_column_if_missing(
+                db, "unified_kg_state", "community_partition_mode",
+                "TEXT NOT NULL DEFAULT ''")
+            self.add_column_if_missing(
+                db, "communities", "board_key", "TEXT NOT NULL DEFAULT ''")
+            db.execute("UPDATE communities SET board_key = id WHERE board_key = ''")
 
     def migrate(self) -> list[int]:
         with self._connect() as db:

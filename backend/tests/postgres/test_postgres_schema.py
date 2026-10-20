@@ -454,7 +454,7 @@ def test_packaged_index_migration_phases_are_exact():
         (80, "ask_job_report_id"),
         (81, "notebook_delete_grace"),
         (82, "chunk_navigation"),
-        (83, "kg_concept_seed_space"),
+        (83, "kg_seed_space_and_board_partition"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -991,8 +991,10 @@ def test_packaged_index_migration_phases_are_exact():
     ]
     # Migration 82 (navigation-page marker) adds three columns and no index.
     assert index_declarations(82) == []
-    # Migration 83 (the concept seed space) adds two columns: no index (the
-    # recompute reads a notebook's decided rows through idx_candidates_nb_status).
+    # Migration 83 (the concept seed space and the board partition) adds five
+    # columns and backfills one: no index (the recompute reads a notebook's
+    # decided rows through idx_candidates_nb_status; board_key is only read
+    # through a notebook's published generation).
     assert index_declarations(83) == []
     # Spelled without ``IF NOT EXISTS`` on purpose, and that is asserted
     # rather than merely commented: app/migration/shadow/postgres_catalog.py

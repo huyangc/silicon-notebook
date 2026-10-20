@@ -1066,6 +1066,8 @@
         "cluster_input_version": "fixture-cluster-v1",
         "cluster_mutation_seq": 1,
         "community_generation": 0,
+        "community_partition_mode": "",
+        "community_partition_version": 0,
         "community_seq": -1,
         "concept_seed_version": 1,
         "derived_building_claimed_at": null,
@@ -2159,7 +2161,7 @@
       },
       {
         "name": "communities",
-        "sql_sha256": "a05b3ea1257fa96a6c4ff99393539a9300356e0f4ae8c633d4c571cc12ea70bd",
+        "sql_sha256": "db407def4a70a69540a0adbe40a90010a5eec769e6cdeac5711a358fe2f0ae4a",
         "type": "table"
       },
       {
@@ -2609,7 +2611,7 @@
       },
       {
         "name": "unified_kg_state",
-        "sql_sha256": "39be3686309deb036b42d43a7e8d126f14495295e807cfe92c1ef7c73b886b46",
+        "sql_sha256": "8c19ec8d5f3ad6ad2c6e554ebfec0347dafcdd484ba65f98975640e16835aa49",
         "type": "table"
       },
       {
