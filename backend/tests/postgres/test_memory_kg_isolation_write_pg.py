@@ -1180,6 +1180,13 @@ def _fusion_seed(repository, existing_source_type: str) -> None:
             "VALUES ('cc-e','nbf',%s,'ko-e','Expert Routing','concept',%s,0)",
             ("K-" + _norm("Expert Routing"), NOW),
         )
+        # A space-1 canonical id: the library was built before S1, so its
+        # published merge is in concept seed space 1.
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, concept_seed_version, updated_at) "
+            "VALUES ('nbf', 1, %s) ON CONFLICT (notebook_id) DO UPDATE SET "
+            "concept_seed_version = 1", (NOW,),
+        )
 
 
 def _clusters_and_candidates(repository):
@@ -1924,6 +1931,12 @@ def _cost_seed(
             "VALUES (%s,%s,%s,%s,'Expert Routing','concept',%s,0)",
             (f"{notebook_id}-cc", notebook_id, "K-" + _norm("Expert Routing"),
              f"{notebook_id}-ko-s", NOW),
+        )
+        # A space-1 canonical id: built before S1 (published space 1).
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, concept_seed_version, updated_at) "
+            "VALUES (%s, 1, %s) ON CONFLICT (notebook_id) DO UPDATE SET "
+            "concept_seed_version = 1", (notebook_id, NOW),
         )
 
 
