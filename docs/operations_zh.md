@@ -668,8 +668,9 @@ GROUP BY ko.notebook_id;
 
 **一次性重新划分。** 迁移 v98 / 0078 给 `unified_kg_state` 加 `community_partition_version` 与
 `community_partition_mode`（存量库一律是 0 / ''），并把每个存量板块的 `board_key` 回填成它自己的
-id。每个库下一次重建（刷新图谱、合并之后的重建、`recluster_kg`）读到版本 0 就**冷启动**：用新算法
-从头划分一次。不需要手动步骤，也没有额外一趟，成本就是那一次重建本身。冷启动照样读已发布的
+id。每个库下一次**真正重建板块图**的重建（图谱变过之后的刷新图谱、合并之后的重建、`recluster_kg`）
+读到版本 0 就**冷启动**：用新算法从头划分一次。图谱没变时点刷新图谱只补分析账本、不划分，版本
+仍是 0。不需要手动步骤，也没有额外一趟，成本就是那一次重建本身。冷启动照样读已发布的
 板块来续用 key：新板块的成员大部分来自某个旧板块（互为最佳匹配，Jaccard ≥ 1/2）时沿用旧 key，
 所以旧 id 会以 key 的身份留下来。删除知识图谱、发布新的索引流水线都会把这两列复位，之后的那次
 重建同样冷启动。
@@ -679,9 +680,14 @@ id。每个库下一次重建（刷新图谱、合并之后的重建、`recluste
 
 **按需冷启动。** `PYTHONPATH=backend python -m app.scripts.recluster_kg <notebook_id>
 --cold-partition --confirm-service-stopped` 先把该库的版本写回 0，再重建：丢掉划分的历史，key 仍按
-成员续用。请求在某次重建发布之前一直有效，所以中途中断的话，下一次重建照样冷启动。
+成员续用。请求在某次重建发布它自己的划分之前一直有效，所以中途中断的话，下一次重建照样冷启动。
+SQLite 部署下脚本不要求停服，可能已有一次重建在飞：这时脚本自己的那次重建被挡住、不划分，脚本会
+如实说明（「请求已记下，下一次真正重建板块图时冷启动」），而不是说已经冷启动。在飞的那次照常发布
+板块，但不会覆盖这个请求：它写版本时对自己认领后读到的值做比较再写（CAS），0 保留下来，并记一条
+`community_partition_version_held`。
 
-**没装 igraph** 时划分回退到 networkx Louvain，一律冷启动（`partition_mode=cold_fallback`）。
+**没装 igraph** 时划分回退到 networkx Louvain，一律冷启动（`partition_mode=cold_fallback`），发布时
+版本记 0：那不是当前分区算法的划分，所以下一次有 igraph 的重建冷启动，而不是从它热启动。
 
 **看什么。**
 
@@ -693,13 +699,22 @@ id。每个库下一次重建（刷新图谱、合并之后的重建、`recluste
   什么都不写。
 - `community_partition_unstable`：某个连通分量跑满 64 轮仍未到不动点。划分照样发布、照样确定；
   反复出现值得报告。
-- `community_partition_previous_unusable`：已发布的那一代不是一份合法划分（一个 canonical 落在两个
-  板块里）。重建没有失败，改为冷启动。
-- 哪些库还在等一次性重新划分（两个后端同一条 SQL）：
+- `community_partition_previous_unusable`：已发布的那一代不是一份合法划分；`reason` 为
+  `canonical_in_two_boards`（一个 canonical 落在两个板块里）或 `board_without_key`（板块没有
+  `board_key`）。重建没有失败，改为冷启动。
+- `community_partition_version_held`（reason `version_changed_during_build`）：一次重建发布板块时，
+  版本在它构建期间被改过（`--cold-partition` 请求）；请求保留，下一次重建冷启动。
+- 哪些库有已发布的板块、且下一次真正重建时会冷启动（两个后端同一条 SQL）——v98 / 0078 之后的
+  一次性重新划分、还没被消费的 `--cold-partition` 请求，以及 networkx 回退
+  （`community_partition_mode = 'cold_fallback'`）。板块仍在第 0 代的库（批 3 代际化之前建的）包括
+  在内；删过知识图谱、重新发布过索引流水线的库没有板块，不在其中。`merge_dbs` 导入的库没有 state
+  行，这条查询也看不到：它下一次重建因为没有可比的版本而冷启动。
 
 ```sql
-SELECT notebook_id, community_partition_mode FROM unified_kg_state
-WHERE community_partition_version = 0 AND community_generation > 0;
+SELECT u.notebook_id, u.community_partition_mode FROM unified_kg_state u
+WHERE u.community_partition_version = 0
+  AND EXISTS (SELECT 1 FROM communities c WHERE c.notebook_id = u.notebook_id
+              AND c.level = 0 AND c.generation = u.community_generation);
 ```
 
 ## Agent token 权限五档

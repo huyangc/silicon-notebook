@@ -872,9 +872,11 @@ the relations arrive in.
 
 **One-time re-partition.** Migration v98 / 0078 adds `unified_kg_state.community_partition_version`
 and `community_partition_mode` (0 / '' on every existing notebook) and backfills each existing
-board's `board_key` with its id. The next rebuild of each notebook (刷新图谱, the rebuild after a
-merge, `recluster_kg`) reads version 0 and starts **cold**: its boards are partitioned from scratch
-once, by the new algorithm. There is no manual step and no extra pass; the cost is that rebuild's.
+board's `board_key` with its id. The next rebuild of each notebook that actually rebuilds the board
+graph (刷新图谱 after the graph changed, the rebuild after a merge, `recluster_kg`) reads version 0
+and starts **cold**: its boards are partitioned from scratch once, by the new algorithm. A 刷新图谱
+on an unchanged graph only backfills the analysis ledger and partitions nothing, so it leaves the
+version at 0. There is no manual step and no extra pass; the cost is that rebuild's.
 A cold start still reads the published boards to carry keys: a new board whose members are
 mostly an old board's (mutual best match, Jaccard >= 1/2) keeps that board's key, so the old id
 lives on as its key. Deleting a notebook's knowledge graph, or publishing a new indexing pipeline,
@@ -887,10 +889,17 @@ start: every real re-merge rebuilds with `force`.
 **Cold start on request.** `PYTHONPATH=backend python -m app.scripts.recluster_kg <notebook_id>
 --cold-partition --confirm-service-stopped` writes the notebook's version back to 0, then rebuilds:
 the partition history is dropped, keys are still carried by membership. The request holds until a
-rebuild publishes, so an interrupted run leaves the next rebuild cold as well.
+rebuild publishes a partition of its own, so an interrupted run leaves the next rebuild cold as
+well. On SQLite the script does not require the service to be stopped, so a rebuild may already be
+in flight: the script's own rebuild is then held off and does not re-partition, and it says so
+("the request is recorded and the next rebuild that re-partitions the board graph starts cold")
+instead of claiming a cold partition. The build in flight publishes its boards but does not
+overwrite the request: its version write is a compare-and-set against the version it read, so
+the 0 stays and `community_partition_version_held` is logged.
 
 **Without igraph** the partition falls back to networkx Louvain, always cold
-(`partition_mode=cold_fallback`).
+(`partition_mode=cold_fallback`), and is published with version 0: it is not the current
+algorithm's partition, so the next rebuild with igraph starts cold rather than warm-starting from it.
 
 **What to watch.**
 
@@ -902,13 +911,25 @@ rebuild publishes, so an interrupted run leaves the next rebuild cold as well.
   `partition`; a ledger-only backfill partitions nothing and writes none.
 - `community_partition_unstable`: a component reached the cap of 64 rounds without a fixed point.
   The partition is still published and still deterministic; a recurring one is worth a report.
-- `community_partition_previous_unusable`: the published generation was not a partition (one
-  canonical in two boards). The rebuild did not fail; it started cold instead.
-- Which notebooks still await the one-time re-partition (same SQL on both backends):
+- `community_partition_previous_unusable`: the published generation was not a partition; `reason`
+  is `canonical_in_two_boards` (one canonical in two boards) or `board_without_key` (a board with
+  no `board_key`). The rebuild did not fail; it started cold instead.
+- `community_partition_version_held` (reason `version_changed_during_build`): a build published
+  its boards while the version was changed under it (a `--cold-partition` request); the request
+  stands and the next rebuild starts cold.
+- Which notebooks have published boards and will be partitioned cold by their next real rebuild
+  (same SQL on both backends) -- the one-time re-partition after v98 / 0078, a pending
+  `--cold-partition` request, or a networkx fallback (`community_partition_mode = 'cold_fallback'`).
+  Boards still in generation 0 (built before the batch-3 generational swap) are included; notebooks
+  whose knowledge graph was deleted or whose indexing pipeline was republished have no boards and
+  are not. A notebook imported by `merge_dbs` has no state row and is not listed either: its next
+  rebuild starts cold because there is no version to match.
 
 ```sql
-SELECT notebook_id, community_partition_mode FROM unified_kg_state
-WHERE community_partition_version = 0 AND community_generation > 0;
+SELECT u.notebook_id, u.community_partition_mode FROM unified_kg_state u
+WHERE u.community_partition_version = 0
+  AND EXISTS (SELECT 1 FROM communities c WHERE c.notebook_id = u.notebook_id
+              AND c.level = 0 AND c.generation = u.community_generation);
 ```
 
 ## Agent token permission tiers
