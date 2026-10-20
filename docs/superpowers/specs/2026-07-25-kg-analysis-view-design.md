@@ -589,6 +589,14 @@ edge_src: int32[M]    edge_dst: int32[M]    edge_weight: int32[M]
 
 **两条必须用真实数据验证的不变量（不能只靠推理）**：
 
+> **不变量 1 已被推翻（2026-10-21，`docs/superpowers/specs/2026-10-19-kg-analysis-findings-design_zh.md`
+> §五 S2）。** 板块划分改由 `backend/app/services/kg_partition.py` 逐连通分量跑 Leiden、以已发布的
+> 划分热启动：节点按 canonical id 排名编号、边按 (lo, hi) 排序，到达顺序不再进入结果，「与
+> Louvain 改前逐字一致」也就不再是要守的东西。取代它的合同是「**同一输入图 + 同一上一代划分 →
+> 逐字相同的划分（含 board_key）**」，钉在 `backend/tests/test_board_partition_wiring.py` 与
+> `backend/tests/test_kg_partition.py`。存量库在下一次重建时一次性冷启动重新划分（`docs/operations.md`）。
+> 不变量 2（折叠结果逐字等价）与下文的内存模型不受影响。下面原文保留作历史。
+
 1. **Louvain 输出逐字不变。** Louvain 对边的输入顺序敏感，而 Python dict 保持插入顺序，
    所以现状的 `list(ew.keys())` 是「首次出现顺序」。数组化后聚合的输出顺序必须与之
    **逐字一致** —— 否则板块划分会漂，已部署库的社区、`community_seq`、以及所有依赖

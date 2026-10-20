@@ -659,6 +659,49 @@ GROUP BY ko.notebook_id;
 也不计入知识库画像的语料统计，无需维护。它的 `parse_status` 是终态 `extracted`，来源列表从不把它显示为处理中。删除它
 时从引用它的知识条目证据里摘掉它的条目，只删除因此失去全部证据的条目；被合并进来的本库原生条目保留自己的证据。
 
+## 主题板块划分：热启动与一次性重新划分
+
+主题板块（`communities`，图谱分析视图里的板块列表）由 `backend/app/services/kg_partition.py`
+划分：逐连通分量跑 Leiden，以已发布的划分热启动，每个板块带一个跨重建不变的 `board_key`（设计
+`docs/superpowers/specs/2026-10-19-kg-analysis-findings-design_zh.md` 第五节 S2）。同一张图、同一份已发布
+划分永远给出同样的板块与同样的 key，与关系到达的先后无关。
+
+**一次性重新划分。** 迁移 v98 / 0078 给 `unified_kg_state` 加 `community_partition_version` 与
+`community_partition_mode`（存量库一律是 0 / ''），并把每个存量板块的 `board_key` 回填成它自己的
+id。每个库下一次重建（刷新图谱、合并之后的重建、`recluster_kg`）读到版本 0 就**冷启动**：用新算法
+从头划分一次。不需要手动步骤，也没有额外一趟，成本就是那一次重建本身。冷启动照样读已发布的
+板块来续用 key：新板块的成员大部分来自某个旧板块（互为最佳匹配，Jaccard ≥ 1/2）时沿用旧 key，
+所以旧 id 会以 key 的身份留下来。删除知识图谱、发布新的索引流水线都会把这两列复位，之后的那次
+重建同样冷启动。
+
+**此后每次重建都热启动，`force` 也一样。** 起点是已发布的划分；只有图本身带来真实的模块度增益时
+板块才会变。强制重建不是冷启动：每一次真正的重新合并都以 `force` 重建。
+
+**按需冷启动。** `PYTHONPATH=backend python -m app.scripts.recluster_kg <notebook_id>
+--cold-partition --confirm-service-stopped` 先把该库的版本写回 0，再重建：丢掉划分的历史，key 仍按
+成员续用。请求在某次重建发布之前一直有效，所以中途中断的话，下一次重建照样冷启动。
+
+**没装 igraph** 时划分回退到 networkx Louvain，一律冷启动（`partition_mode=cold_fallback`）。
+
+**看什么。**
+
+- `communities_rebuilt` 事件带 `partition_mode`（`warm` / `cold` / `cold_fallback`）、
+  `partition_cold_reason`（`no_published_partition`、`partition_version_changed`、
+  `previous_partition_unusable`、`non_default_level`、`igraph_unavailable`；热启动为 null）、
+  `board_keys_carried` / `_minted` / `_rehashed`、`previous_boards` 与 `unstable_components`。图谱分析账本
+  在 `community_edges` 那一行的 payload 里以 `partition` 键存同一份统计；只补账本的那一趟没有划分，
+  什么都不写。
+- `community_partition_unstable`：某个连通分量跑满 64 轮仍未到不动点。划分照样发布、照样确定；
+  反复出现值得报告。
+- `community_partition_previous_unusable`：已发布的那一代不是一份合法划分（一个 canonical 落在两个
+  板块里）。重建没有失败，改为冷启动。
+- 哪些库还在等一次性重新划分（两个后端同一条 SQL）：
+
+```sql
+SELECT notebook_id, community_partition_mode FROM unified_kg_state
+WHERE community_partition_version = 0 AND community_generation > 0;
+```
+
 ## Agent token 权限五档
 
 升级到 **PostgreSQL 0069 / SQLite v89** 时，每个 Agent token（含已撤销的）的权限改写为五档
