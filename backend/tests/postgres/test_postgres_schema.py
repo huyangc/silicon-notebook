@@ -69,10 +69,36 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 82
-    assert migrator.migrate() == 82
-    assert migrator.current_version() == 82
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 82
+    assert migrator.migrate() == 83
+    assert migrator.migrate() == 83
+    assert migrator.current_version() == 83
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 83
+
+
+@pytest.mark.postgres_integration
+def test_concept_seed_space_columns_match_the_sqlite_v102_contract(postgres_database):
+    """0083 mirrors SQLite v102: concept_merge_candidates.seed_version and
+    unified_kg_state.concept_seed_version, NOT NULL DEFAULT 1 (bigint here,
+    INTEGER there) — an existing decision and an existing published merge read
+    as minted in seed space 1."""
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 83
+    with postgres_database.connect() as conn:
+        found = {
+            (row["table_name"], row["column_name"]): (
+                row["data_type"], row["is_nullable"], row["column_default"])
+            for row in conn.execute(
+                "SELECT table_name, column_name, data_type, is_nullable, column_default "
+                "FROM information_schema.columns WHERE table_schema=current_schema() "
+                "AND ((table_name='concept_merge_candidates' AND column_name='seed_version') "
+                "OR (table_name='unified_kg_state' AND column_name='concept_seed_version'))"
+            ).fetchall()
+        }
+    assert found == {
+        ("concept_merge_candidates", "seed_version"): ("bigint", "NO", "1"),
+        ("unified_kg_state", "concept_seed_version"): ("bigint", "NO", "1"),
+    }
 
 
 @pytest.mark.postgres_integration
@@ -409,6 +435,7 @@ def test_packaged_index_migration_phases_are_exact():
         (80, "ask_job_report_id"),
         (81, "notebook_delete_grace"),
         (82, "chunk_navigation"),
+        (83, "kg_concept_seed_space"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -945,6 +972,9 @@ def test_packaged_index_migration_phases_are_exact():
     ]
     # Migration 82 (navigation-page marker) adds three columns and no index.
     assert index_declarations(82) == []
+    # Migration 83 (the concept seed space) adds two columns: no index (the
+    # recompute reads a notebook's decided rows through idx_candidates_nb_status).
+    assert index_declarations(83) == []
     # Spelled without ``IF NOT EXISTS`` on purpose, and that is asserted
     # rather than merely commented: app/migration/shadow/postgres_catalog.py
     # parses CREATE INDEX straight out of these files to build the catalog

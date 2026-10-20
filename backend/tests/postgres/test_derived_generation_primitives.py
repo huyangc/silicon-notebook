@@ -89,7 +89,7 @@ def test_flip_double_cas_rejects_both_stale_directions(postgres_database):
         # 方向一:在飞认领已被抢占(building≠自己)→ 作废。
         assert not UnifiedKgStore.flip_cluster_generation(
             db, "nb-flip", published_from=0, generation=claim["generation"] + 7,
-            catchup_from_ts=claim["ts"], now=_NOW,
+            catchup_from_ts=claim["ts"], now=_NOW, concept_seed_version=2,
         )
         # 正常翻转:指针前进、认领清零、催收欠账落库、cseq bump 同语句。
         before = db.execute(
@@ -98,14 +98,16 @@ def test_flip_double_cas_rejects_both_stale_directions(postgres_database):
         ).fetchone()["cluster_mutation_seq"]
         assert UnifiedKgStore.flip_cluster_generation(
             db, "nb-flip", published_from=0, generation=claim["generation"],
-            catchup_from_ts=claim["ts"], now=_NOW,
+            catchup_from_ts=claim["ts"], now=_NOW, concept_seed_version=2,
         )
         state = db.execute(
             "SELECT cluster_generation, cluster_mutation_seq, "
             "derived_building_generation, derived_building_claimed_at, "
-            "derived_catchup_from FROM unified_kg_state "
+            "derived_catchup_from, concept_seed_version FROM unified_kg_state "
             "WHERE notebook_id='nb-flip'"
         ).fetchone()
+        # The seed space of the published generation, in the same statement.
+        assert state["concept_seed_version"] == 2
         assert state["cluster_generation"] == claim["generation"]
         assert state["cluster_mutation_seq"] == before + 1
         assert state["derived_building_generation"] == 0
@@ -119,7 +121,7 @@ def test_flip_double_cas_rejects_both_stale_directions(postgres_database):
         assert stale is not None
         assert not UnifiedKgStore.flip_cluster_generation(
             db, "nb-flip", published_from=0, generation=stale["generation"],
-            catchup_from_ts=stale["ts"], now=_NOW,
+            catchup_from_ts=stale["ts"], now=_NOW, concept_seed_version=2,
         )
         UnifiedKgStore.release_derived_claim(db, "nb-flip", stale["generation"])
         # 催收标记 CAS:别人的 ts 清不动,自己的 ts 清得掉。
