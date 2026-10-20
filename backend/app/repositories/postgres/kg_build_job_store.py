@@ -24,6 +24,7 @@ from app.repositories.postgres.source_store import (
     NOT_PROMOTION_SOURCE_PREDICATE,
     VISIBLE_SOURCE_TYPES_PREDICATE,
 )
+from app.domain.kg_merge_seed import CONCEPT_SEED_VERSION
 from app.domain.indexing_pipeline import (
     IndexingPipelineMemorySourceError,
     IndexingPipelineStalePlanError,
@@ -1085,7 +1086,9 @@ class KgBuildJobStore:
                 "dirty=1,kg_mutation_seq=unified_kg_state.kg_mutation_seq+1,"
                 "cluster_mutation_seq=unified_kg_state.cluster_mutation_seq+1,"
                 "cluster_input_version='',cluster_code_version='',"
-                "concept_seed_version=1,"
+                # The derived tables (clusters, decisions) were just cleared:
+                # nothing is published, the code's seed space (S1).
+                f"concept_seed_version={int(CONCEPT_SEED_VERSION)},"
                 "community_seq=-1,canonical_rel_seq=-1,"
                 "mention_seq=-1,"
                 # 代际重置(codex #671 R18 P1):本次发布刚整表清空三张

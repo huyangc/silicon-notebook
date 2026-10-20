@@ -390,6 +390,9 @@ def test_incremental_fuse_source_result_matches_oracle(repo):
     from app.services.kg_merge import _norm
     cid = "K-" + _norm("Mixture-of-Experts (MoE)")
     with repo._write() as db:
+        # Space-1 canonical ids: a library built before S1 (published space 1).
+        db.execute("UPDATE unified_kg_state SET concept_seed_version=1 "
+                   "WHERE notebook_id=?", (nb.id,))
         db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,"
                    "payload,evidence,source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                    ("ko-A", nb.id, "concept", "approved", "",

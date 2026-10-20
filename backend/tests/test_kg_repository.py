@@ -780,12 +780,13 @@ def test_delete_notebook_kg_resets_generation_pointers_but_never_the_counter(rep
         assert store.flip_cluster_generation(
             db, nb.id, published_from=claim["cluster_generation"],
             generation=claim["generation"], catchup_from_ts=claim["ts"],
-            now=claim["ts"], concept_seed_version=2,
+            now=claim["ts"], concept_seed_version=1,
         )
-        # The flip statement records the space it published (S1).
+        # The flip statement records the space it published (S1) -- space 1
+        # here, a library published before the upgrade, so the reset shows.
         assert db.execute(
             "SELECT concept_seed_version FROM unified_kg_state WHERE notebook_id=?",
-            (nb.id,)).fetchone()[0] == 2
+            (nb.id,)).fetchone()[0] == 1
     # 在飞认领占位的场景:再取一个号并保持在飞,终局必须把它清掉。
     with repo._write() as db:
         holding = store.claim_derived_generation(db, nb.id, ttl_seconds=3600)
@@ -801,9 +802,9 @@ def test_delete_notebook_kg_resets_generation_pointers_but_never_the_counter(rep
             "FROM unified_kg_state WHERE notebook_id=?", (nb.id,)
         ).fetchone())
     assert row["cluster_generation"] == 0
-    # Nothing is published any more: the seed space reads 1, like a library
-    # that never had a v2 merge (cluster_code_version '' says the same).
-    assert row["concept_seed_version"] == 1
+    # Nothing is published any more: the seed space is the code's, like a
+    # notebook created now (cluster_code_version '' says nothing is built).
+    assert row["concept_seed_version"] == 2
     # K1:社区指针写哨兵 -1(保留的社区行一律不可读,直到重建翻转)。
     assert row["community_generation"] == -1
     assert row["derived_building_generation"] == 0

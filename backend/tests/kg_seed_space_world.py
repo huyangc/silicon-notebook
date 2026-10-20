@@ -110,6 +110,20 @@ def published_space(repo, nb: str) -> int:
                           "WHERE notebook_id=?", (nb,))[0]["concept_seed_version"])
 
 
+def copy_of(repo, nb: str) -> str:
+    return repo._runtime.sharing.copy_notebook(nb, new_owner_id="user-local").id
+
+
+def space_read_by_placement(repo, nb: str) -> int:
+    """The published space incremental placement reads (a missing state row
+    included)."""
+    from app.domain.kg_merge_seed import published_concept_seed_version
+
+    found = rows(repo, "SELECT concept_seed_version FROM unified_kg_state "
+                       "WHERE notebook_id=?", (nb,))
+    return published_concept_seed_version(found[0] if found else None)
+
+
 def decide(repo, nb: str, row_id: str, a: str, b: str, status: str, *,
            seeds: bool = True) -> None:
     """A decision stored before the upgrade: keys ``a`` / ``b`` in seed space 1,
@@ -335,6 +349,10 @@ def assert_a_row_decided_again_mid_rebuild_stays_v1(repo) -> None:
     for the next rebuild, which plans it afresh."""
     nb = notebook(repo)
     decide(repo, nb, "mc-x", "a b", "c", "confirmed")
+    # The decision's provenance travels to every row the recompute writes.
+    write(repo, "UPDATE concept_merge_candidates SET reviewed_by=?, confidence=?, "
+                "rationale=?, created_at=? WHERE id='mc-x'",
+          ("user-curator", 0.75, "one module", "2026-01-02T03:04:05"))
     store = repo._runtime.governance
     with repo._write() as db:
         grew, done = store.apply_v1_decision_translation(
@@ -348,9 +366,13 @@ def assert_a_row_decided_again_mid_rebuild_stays_v1(repo) -> None:
             {"mc-x": ("a b", "c", "confirmed")}, NOW)
     assert (grew, done) == (1, ["mc-x"])
     assert decision_rows(repo, nb) == [("a1b", "c", "confirmed", 2), ("ab", "c", "confirmed", 2)]
-    copied = rows(repo, "SELECT reviewed_by, score, created_at FROM concept_merge_candidates "
-                        "WHERE notebook_id=? ORDER BY id", (nb,))
-    assert len({(r["reviewed_by"], float(r["score"])) for r in copied}) == 1
+    copied = rows(repo, "SELECT reviewed_by, score, confidence, rationale, created_at "
+                        "FROM concept_merge_candidates WHERE notebook_id=? ORDER BY id", (nb,))
+    assert len(copied) == 2
+    for r in copied:
+        assert (r["reviewed_by"], float(r["score"]), float(r["confidence"]),
+                r["rationale"]) == ("user-curator", 0.9, 0.75, "one module"), r
+        assert str(r["created_at"]).startswith("2026-01-02"), r
 
 
 def assert_the_squash_tier_proposes_spelling_variants(repo, monkeypatch) -> None:
@@ -402,8 +424,91 @@ def assert_duplicate_blocking_follows_the_published_space(repo, monkeypatch) -> 
     assert len(groups) == 1 and len(groups[0].members) == 2, groups
 
 
+def assert_a_copy_places_in_the_space_of_the_clusters_it_carries(
+    repo, monkeypatch,
+) -> None:
+    """A deep copy carries its source's published clusters, so placement in
+    the copy follows the source's published space: a copy of a library not
+    yet rebuilt since the upgrade keeps space 1 ("Q_Former" joins the copied
+    ``K-q former``), a copy of a rebuilt one reads space 2 without a state row
+    of its own. A dirty source's copy carries no clusters: the code's space."""
+    nb = notebook(repo, "s1", "s2")
+    concepts(repo, nb, "s1", "Q-Former")
+    concepts(repo, nb, "s2", "Q Former")
+    with legacy_code(monkeypatch):
+        rebuild(repo, nb)
+    v1_copy = copy_of(repo, nb)
+    assert space_read_by_placement(repo, v1_copy) == 1
+    assert rows(repo, "SELECT dirty FROM unified_kg_state WHERE notebook_id=?",
+                (v1_copy,)) == [{"dirty": 0}]          # a clean copy stays clean
+    fuse(repo, v1_copy, "c1-s3", "Q_Former")
+    assert canonical_of(repo, v1_copy)["Q_Former"] == "K-q former"
+
+    rebuild(repo, nb)
+    v2_copy = copy_of(repo, nb)
+    assert rows(repo, "SELECT 1 FROM unified_kg_state WHERE notebook_id=?",
+                (v2_copy,)) == []
+    assert space_read_by_placement(repo, v2_copy) == 2
+    fuse(repo, v2_copy, "c2-s3", "Q_Former")
+    assert canonical_of(repo, v2_copy)["Q_Former"] == "K-qformer"
+
+    with legacy_code(monkeypatch):
+        rebuild(repo, nb, force=True)
+    fuse(repo, nb, "s4", "Transformer")                # the source is dirty now
+    dropped = copy_of(repo, nb)
+    assert rows(repo, "SELECT COUNT(*) AS c FROM concept_clusters WHERE notebook_id=?",
+                (dropped,))[0]["c"] == 0
+    assert space_read_by_placement(repo, dropped) == 2
+
+
+def assert_a_copy_of_a_memory_holding_library_keeps_its_space(repo, monkeypatch) -> None:
+    """The Memory-aware copy writes a dirty state row; the source's space is
+    set on that row (``ON CONFLICT``), not lost to the column default."""
+    nb = notebook(repo, "s1", "s2")
+    concepts(repo, nb, "s1", "Q-Former")
+    concepts(repo, nb, "s2", "Q Former")
+    with legacy_code(monkeypatch):
+        rebuild(repo, nb)
+    write(repo, "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+                "created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+          ("mem-src", nb, "memory", "memory", "ready", NOW, NOW))
+    copy = copy_of(repo, nb)
+    assert rows(repo, "SELECT dirty, concept_seed_version FROM unified_kg_state "
+                      "WHERE notebook_id=?", (copy,)) == [
+        {"dirty": 1, "concept_seed_version": 1}]
+
+
+def assert_a_flip_between_placement_and_write_places_again(repo, monkeypatch) -> None:
+    """Incremental placement reads the published space outside the cluster
+    write lock; the library's first v2 rebuild can publish in between. The
+    space is checked again under the lock, and the placement redone in the
+    space published then — never a space-1 row in a space-2 generation."""
+    nb = notebook(repo, "s1")
+    concepts(repo, nb, "s1", "Q-Former")
+    with legacy_code(monkeypatch):
+        rebuild(repo, nb)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    real = lifecycle._freeze_new_object_canonicals
+    flips: list = []
+
+    def freeze(notebook_id, new_objs):
+        if not flips:                                   # after the placement, before the write
+            flips.append(notebook_id)
+            write(repo, "UPDATE unified_kg_state SET concept_seed_version=2 "
+                        "WHERE notebook_id=?", (notebook_id,))
+        return real(notebook_id, new_objs)
+
+    monkeypatch.setattr(lifecycle, "_freeze_new_object_canonicals", freeze)
+    fuse(repo, nb, "s2", "Q_Former")
+    assert flips == [nb]
+    assert canonical_of(repo, nb)["Q_Former"] == "K-qformer"
+
+
 SCENARIOS = {
     "published_space_switches": assert_the_published_space_switches_with_the_rebuild,
+    "copy_carries_space": assert_a_copy_places_in_the_space_of_the_clusters_it_carries,
+    "memory_copy_carries_space": assert_a_copy_of_a_memory_holding_library_keeps_its_space,
+    "flip_mid_placement": assert_a_flip_between_placement_and_write_places_again,
     "split_group_joined_back": assert_a_split_confirmed_group_is_joined_back,
     "next_update_skipped": assert_the_next_update_is_skipped,
     "rejection_collision_override": (

@@ -44,7 +44,7 @@ from app.domain.kg_findings_contracts import (
     source_pair_key,
     stamp_ledger_contract,
 )
-from app.domain.kg_merge_seed import concept_decision_seeds, concept_seed_v1
+from app.domain.kg_merge_seed import concept_decision_seeds
 from app.services import kg_findings
 from app.services.kg_analysis_precompute import CanonicalEdgeTableBuilder
 from app.services.kg_findings import (

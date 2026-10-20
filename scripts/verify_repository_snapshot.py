@@ -1279,6 +1279,20 @@ _V87_INSERTED_COLUMNS = frozenset({
 })
 
 
+# Columns a migration AFTER v87 added with a backfill that differs from the
+# column's declared default, and the value every row existing at that
+# migration holds: v100 adds ``concept_seed_version`` with DEFAULT 2 (rows
+# created from then on start in the code's seed space) and sets every row that
+# already existed -- the rows v87 inserted among them -- to 1.
+_POST_V87_BACKFILLS = {"concept_seed_version": 1}
+
+
+def _post_v87_default(column: str, defaults: Dict[str, Any]) -> Any:
+    if column in _POST_V87_BACKFILLS:
+        return _POST_V87_BACKFILLS[column]
+    return defaults.get(column)
+
+
 def _v87_inserted_row_shape(
     post: Dict[str, Any],
     defaults: Dict[str, Any],
@@ -1289,7 +1303,7 @@ def _v87_inserted_row_shape(
     ``None`` (see the comment above ``_V87_RESET_COLUMNS``)."""
     notebook = post.get("notebook_id")
     if not post.get("updated_at") or any(
-        post.get(column) != defaults.get(column)
+        post.get(column) != _post_v87_default(column, defaults)
         for column in post if column not in _V87_INSERTED_COLUMNS
     ):
         return None
@@ -6000,18 +6014,22 @@ MIGRATION_MANIFEST[(100, 101)] = {
 
 # v102 (parity with PostgreSQL 0083_kg_concept_seed_space.sql): the concept
 # seed space a merge decision's keys were minted in
-# (``concept_merge_candidates.seed_version``) and the one a library's
-# published merge was built in (``unified_kg_state.concept_seed_version``),
-# both INTEGER NOT NULL DEFAULT 1 (the default is the whole backfill: every
-# existing decision and merge was minted in space 1). Both tables predate the
-# v9 fixture, so the columns are pinned per column, not through the tables'
-# text. No table, index, trigger or view.
+# (``concept_merge_candidates.seed_version``, INTEGER NOT NULL DEFAULT 1: the
+# default is the whole backfill, every existing decision was minted in space
+# 1) and the one a library's published merge was built in
+# (``unified_kg_state.concept_seed_version``, INTEGER NOT NULL DEFAULT 2 --
+# rows created from then on start in the code's space -- with every row that
+# existed set to 1). Both tables predate the v9 fixture, so the columns are
+# pinned per column, not through the tables' text; a table's digest spans its
+# pre-migration columns only, so the backfill moves no compared row (the v87
+# queue check reads it through ``_POST_V87_BACKFILLS``). No table, index,
+# trigger or view.
 KG_SEED_SPACE_COLUMNS = {
     "concept_merge_candidates": {
         "seed_version": ("seed_version", "INTEGER", 1, "1", 0),
     },
     "unified_kg_state": {
-        "concept_seed_version": ("concept_seed_version", "INTEGER", 1, "1", 0),
+        "concept_seed_version": ("concept_seed_version", "INTEGER", 1, "2", 0),
     },
 }
 MIGRATION_MANIFEST = {

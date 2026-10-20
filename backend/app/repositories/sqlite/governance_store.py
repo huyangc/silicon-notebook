@@ -38,7 +38,7 @@ from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER
 from app.repositories.sqlite.promotion_provenance_store import (
     materialize_promotion_evidence,
 )
-from app.domain.kg_merge_seed import check_concept_seed_version
+from app.domain.kg_merge_seed import ConceptSeedSpaceMoved, check_concept_seed_version
 from app.domain.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
     USABLE_STATUSES,
@@ -160,8 +160,9 @@ def _decision_row(r) -> dict:
 
 def published_concept_seed_version_on(connection, notebook_id: str) -> int:
     """The concept seed space of ``notebook_id``'s published merge
-    (``unified_kg_state.concept_seed_version``; no row = 1), read in the
-    caller's transaction."""
+    (``unified_kg_state.concept_seed_version``; no row reads as
+    ``CONCEPT_SEED_VERSION``, the column default), read in the caller's
+    transaction."""
     from app.domain.kg_merge_seed import published_concept_seed_version
     row = connection.execute(
         "SELECT concept_seed_version FROM unified_kg_state WHERE notebook_id=?",
@@ -315,12 +316,18 @@ class GovernanceStore:
         return seed_fn_for(object_type, concept_seed_version=concept_seed_version)
 
     @staticmethod
-    def published_concept_seed_space(connection, notebook_id: str) -> "tuple[int, frozenset]":
+    def published_concept_seed_space(
+        connection, notebook_id: str, *, override_keys: bool = True,
+    ) -> "tuple[int, frozenset]":
         """``(version, override keys)`` of the notebook's published merge, in
         the caller's transaction: ``unified_kg_state.concept_seed_version`` (no
-        state row = 1; one primary-key read) and, in space 2 only, the v1 seeds
-        its stored decisions keep as ``~v1:<seed>`` (one read of the decided
-        rows that carry such a seed, through ``idx_candidates_nb_status``)."""
+        state row = ``CONCEPT_SEED_VERSION``; one primary-key read) and, in
+        space 2 only, the v1 seeds its stored decisions keep as ``~v1:<seed>``
+        (one read of the decided rows that carry such a seed, through
+        ``idx_candidates_nb_status``). ``override_keys=False``: the version
+        alone (empty keys), for a caller that does not place or seed."""
+        if not override_keys:
+            return published_concept_seed_version_on(connection, notebook_id), frozenset()
         return published_concept_seed_space_on(connection, notebook_id)
 
     @staticmethod
@@ -723,9 +730,17 @@ class GovernanceStore:
         object_type: str,
         rows: List[dict],
         now: str,
+        *,
+        concept_seed_version: "int | None" = None,
     ) -> int:
         """Insert cluster member rows, skipping member ids already present in
         the (notebook, type) slice — the append_clusters idempotency contract.
+
+        ``concept_seed_version`` (incremental placement only): the seed space
+        ``rows`` were placed in. It is compared, under the same lock as the
+        generation pointer, with the space published now; a full rebuild that
+        published another space in between raises ``ConceptSeedSpaceMoved``
+        before any row is written, and the caller places again (S1).
         After delete_clusters in the same transaction the existing set is
         empty, so the write_clusters path inserts every row unchanged.
 
@@ -754,6 +769,10 @@ class GovernanceStore:
         # 此处刻意不用。
         now = datetime.now().astimezone().isoformat(timespec="microseconds")
         generation = self._published_cluster_generation(connection, notebook_id)
+        if concept_seed_version is not None:
+            published = published_concept_seed_version_on(connection, notebook_id)
+            if published != concept_seed_version:
+                raise ConceptSeedSpaceMoved(notebook_id, concept_seed_version, published)
         existing = self._existing_cluster_members(
             connection, notebook_id, object_type, rows, generation
         )
@@ -1076,9 +1095,14 @@ class GovernanceStore:
         status)``): the FIRST pair updates the row in place — id, created_at,
         score, reviewer, confidence and rationale kept — and every further
         pair is inserted as a new row carrying the same decision. The rows'
-        canonical ids become ``"K-" + seed`` (the v2 bridge form of the seed,
-        so the Memory purge's versioned match finds them). A row whose keys or
-        status changed since the plan stays v1 — the next rebuild retries it.
+        canonical ids become ``"K-" + seed``, the id a full rebuild gives that
+        seed's cluster (a seed the acronym alias redirected, or an override
+        seed taken from an aliased v1 seed, is not a form the Memory purge
+        recomputes from an object's name — it never needs to be: a decision
+        whose side is only a Memory object has no current object and stays
+        v1, where the purge's v1 forms match it). A row whose keys or status
+        changed since the plan stays v1 — the next rebuild retries it. The
+        writes are batched (one ``executemany`` per statement and batch).
         Returns ``(rows the confirmed / rejected count grew by, translated row
         ids)``: the caller folds the first into the stored input version's
         decision count (deferred rows are not counted there)."""
@@ -1097,6 +1121,8 @@ class GovernanceStore:
                 found[r["id"]] = r
         grew = 0
         done: List[str] = []
+        updates: List[tuple] = []
+        inserts: List[tuple] = []
         for row_id in ids:
             r = found.get(row_id)
             if r is None:
@@ -1105,24 +1131,26 @@ class GovernanceStore:
             if (row["key_a"], row["key_b"], row["status"]) != tuple(expected[row_id]):
                 continue
             first, rest = pairs[row_id][0], pairs[row_id][1:]
-            connection.execute(
-                "UPDATE concept_merge_candidates SET seed_a=?, seed_b=?, "
-                "canonical_a=?, canonical_b=?, seed_version=2, updated_at=? "
-                "WHERE id=? AND notebook_id=?",
-                (first[0], first[1], "K-" + first[0], "K-" + first[1], now,
-                 row_id, notebook_id))
-            if rest:
-                connection.executemany(
-                    "INSERT INTO concept_merge_candidates "
-                    "(id,notebook_id,canonical_a,canonical_b,seed_a,seed_b,score,status,"
-                    "confidence,rationale,reviewed_by,seed_version,created_at,updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,2,?,?)",
-                    [(self.seams.new_id("mc"), notebook_id, "K-" + a, "K-" + b, a, b,
-                      r["score"], r["status"], r["confidence"], r["rationale"],
-                      r["reviewed_by"], r["created_at"], now) for a, b in rest])
+            updates.append((first[0], first[1], "K-" + first[0], "K-" + first[1], now,
+                            row_id, notebook_id))
+            inserts.extend(
+                (self.seams.new_id("mc"), notebook_id, "K-" + a, "K-" + b, a, b,
+                 r["score"], r["status"], r["confidence"], r["rationale"],
+                 r["reviewed_by"], r["created_at"], now) for a, b in rest)
             if r["status"] in ("confirmed", "rejected"):
                 grew += len(rest)
             done.append(row_id)
+        for at in range(0, len(updates), _TRANSLATION_BATCH):
+            connection.executemany(
+                "UPDATE concept_merge_candidates SET seed_a=?, seed_b=?, "
+                "canonical_a=?, canonical_b=?, seed_version=2, updated_at=? "
+                "WHERE id=? AND notebook_id=?", updates[at:at + _TRANSLATION_BATCH])
+        for at in range(0, len(inserts), _TRANSLATION_BATCH):
+            connection.executemany(
+                "INSERT INTO concept_merge_candidates "
+                "(id,notebook_id,canonical_a,canonical_b,seed_a,seed_b,score,status,"
+                "confidence,rationale,reviewed_by,seed_version,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,2,?,?)", inserts[at:at + _TRANSLATION_BATCH])
         return grew, done
 
     # ------------------------------------------------------ merge review job
@@ -1760,6 +1788,7 @@ class GovernanceStore:
         base_object_ids: list[str] = []
         created_object_ids: list[str] = []
         merged_object_ids: list[str] = []
+        base_space = None       # the base library's published seed space, read once
         for extracted in candidates:
             object_type = str(extracted.get("object_type") or "")
             payload = extracted.get("payload")
@@ -1774,8 +1803,9 @@ class GovernanceStore:
                 ),
                 (base_nb_id, object_type, *USABLE_STATUSES),
             ).fetchall()
-            seed_version, override = published_concept_seed_space_on(
-                connection, base_nb_id)
+            if base_space is None:
+                base_space = published_concept_seed_space_on(connection, base_nb_id)
+            seed_version, override = base_space
             base_match_id = find_base_dedup_match(
                 object_type, payload, base_objs,
                 concept_seed_version=seed_version, override=override)

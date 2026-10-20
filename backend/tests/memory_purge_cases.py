@@ -405,6 +405,13 @@ def seed_world(repo: Any, *, postgres: bool) -> dict:
     elsewhere = _as_user(
         bob, lambda: repo.create_notebook(NotebookCreate(name="Bob elsewhere"))
     ).id
+    # The world's canonical ids are seed-space-1 forms ("K-phase margin"):
+    # its libraries were built before S1, their published merge is in space 1
+    # (a notebook created now starts in the code's space, the default).
+    sql.write(
+        "UPDATE unified_kg_state SET concept_seed_version=1 "
+        "WHERE notebook_id IN (?,?,?)", (shared, alice_home, elsewhere),
+    )
     repo._runtime.sharing.add_member(shared, alice.id)
     repo._runtime.sharing.add_member(shared, bob.id)
     repo._runtime.sharing.add_member(elsewhere, alice.id)

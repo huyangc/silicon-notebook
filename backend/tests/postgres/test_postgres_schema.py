@@ -77,14 +77,32 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
 @pytest.mark.postgres_integration
 def test_concept_seed_space_columns_match_the_sqlite_v102_contract(postgres_database):
-    """0083 mirrors SQLite v102: concept_merge_candidates.seed_version and
-    unified_kg_state.concept_seed_version, NOT NULL DEFAULT 1 (bigint here,
-    INTEGER there) — an existing decision and an existing published merge read
-    as minted in seed space 1."""
+    """0083 mirrors SQLite v102: concept_merge_candidates.seed_version NOT NULL
+    DEFAULT 1 and unified_kg_state.concept_seed_version NOT NULL DEFAULT 2
+    (bigint here, INTEGER there) — an existing decision and an existing
+    published merge read as minted in seed space 1, a state row created after
+    the migration starts in space 2, the code's."""
     from app.repositories.postgres.migrator import PostgresMigrator
 
+    assert PostgresMigrator(postgres_database).migrate(target_version=82) == 82
+    with postgres_database.write() as conn:
+        for notebook_id in ("nb-0082", "nb-0083"):
+            conn.execute(
+                "INSERT INTO notebooks(id,name,created_at,updated_at) "
+                "VALUES (%s,'n',now(),now())", (notebook_id,))
+        conn.execute("INSERT INTO unified_kg_state (notebook_id, updated_at) "
+                     "VALUES ('nb-0082', now())")
     assert PostgresMigrator(postgres_database).migrate() == 83
+    with postgres_database.write() as conn:
+        conn.execute("INSERT INTO unified_kg_state (notebook_id, updated_at) "
+                     "VALUES ('nb-0083', now())")
     with postgres_database.connect() as conn:
+        spaces = {
+            row["notebook_id"]: row["concept_seed_version"]
+            for row in conn.execute(
+                "SELECT notebook_id, concept_seed_version FROM unified_kg_state "
+                "WHERE notebook_id IN ('nb-0082', 'nb-0083')").fetchall()
+        }
         found = {
             (row["table_name"], row["column_name"]): (
                 row["data_type"], row["is_nullable"], row["column_default"])
@@ -97,8 +115,9 @@ def test_concept_seed_space_columns_match_the_sqlite_v102_contract(postgres_data
         }
     assert found == {
         ("concept_merge_candidates", "seed_version"): ("bigint", "NO", "1"),
-        ("unified_kg_state", "concept_seed_version"): ("bigint", "NO", "1"),
+        ("unified_kg_state", "concept_seed_version"): ("bigint", "NO", "2"),
     }
+    assert spaces == {"nb-0082": 1, "nb-0083": 2}
 
 
 @pytest.mark.postgres_integration

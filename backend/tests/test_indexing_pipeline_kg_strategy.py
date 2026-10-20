@@ -659,7 +659,7 @@ def test_plugin_kg_success_atomically_publishes_graph_facts_and_identity(
         )
         db.execute(
             "UPDATE unified_kg_state SET cluster_input_version='v-in', "
-            "cluster_code_version='code-1', concept_seed_version=2 "
+            "cluster_code_version='code-1', concept_seed_version=1 "
             "WHERE notebook_id=?",
             (notebook.id,),
         )
@@ -777,8 +777,8 @@ def test_plugin_kg_success_atomically_publishes_graph_facts_and_identity(
     }
     assert (state["cluster_input_version"], state["cluster_code_version"]) == ("", "")
     # The publication cleared the clusters and the decisions: nothing is
-    # published in any seed space, which reads as 1 (S1).
-    assert state["concept_seed_version"] == 1
+    # published, the space is the code's (S1).
+    assert state["concept_seed_version"] == 2
     assert repo._runtime.kg_build_jobs.get(response["job_id"])["status"] == "succeeded"
 
 

@@ -29,6 +29,9 @@ def test_deferred_pair_not_reproposed_on_new_source(repo):
     cid_old = "K-" + _norm("Expert Routing")
     cid_new = "K-" + _norm("MoE Gating")
     with repo._write() as db:
+        # Space-1 canonical ids: a library built before S1 (published space 1).
+        db.execute("UPDATE unified_kg_state SET concept_seed_version=1 "
+                   "WHERE notebook_id=?", (nb.id,))
         for oid, nm, src in [("ko-old", "Expert Routing", "src-A"), ("ko-new", "MoE Gating", "src-B")]:
             db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
                        "VALUES (?,?,?,?,?,?,?,?,?,?)",

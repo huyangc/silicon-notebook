@@ -190,8 +190,9 @@ def _reset_copied_notebook_row(
     """Rewrite the copied notebooks row's identity/lifecycle/authority columns.
 
     索引管线四列一律复位成内建：published identity 住在 unified_kg_state 里而它
-    刻意不进深拷贝（副本至多得到 insert_copy_rows 写的一条标脏行，各列取默认值，
-    published identity 即内建），照抄 desired 选择会让副本天生 desired≠published、每一次写入
+    刻意不进深拷贝（副本至多得到 insert_copy_rows 写的一条状态行——标脏行，或只带
+    源库已发布概念种子空间的干净行（S1，见 sharing_store 的 _COPY_SEED_SPACE）——
+    其余各列取默认值，published identity 即内建），照抄 desired 选择会让副本天生 desired≠published、每一次写入
     409 直到手动全库重建；照抄 generation/job_id 更会让副本的状态投影 join 到
     *源库*正在跑的 job 行。与「授权边/share_token/agent_profile_id 不随副本走」
     同一条论证——副本由新 owner 重新选择并显式重建（既有 chunk 是核心 schema，
@@ -823,8 +824,8 @@ class NotebookCopyWriter:
                 )
                 chunks_out.append(data)
             # chunk_elements（element→chunk 反查表，v46）刻意**不**随深拷贝复制：
-            # unified_kg_state 不在拷贝表集合内（至多有 insert_copy_rows 写的标脏行,
-            # 该列取默认 0），所以副本的 chunk_elements_indexed 恒缺失或为 0，读路径
+            # unified_kg_state 不在拷贝表集合内（至多有 insert_copy_rows 写的一条
+            # 状态行——标脏行或只带概念种子空间的干净行——该列取默认 0），所以副本的 chunk_elements_indexed 恒缺失或为 0，读路径
             # 走 legacy 全量扫描——反查行缺席是正确且自洽的。
             # ⚠ 若将来把 unified_kg_state 加进深拷贝表集合，**必须**同时复制
             # chunk_elements（或显式把副本的 chunk_elements_indexed 归零）：

@@ -7,6 +7,9 @@ from datetime import datetime, timedelta
 from typing import Callable, Iterator, Sequence
 
 from app.core.config import Settings
+from app.domain.kg_merge_seed import (
+    CONCEPT_SEED_VERSION, check_concept_seed_version, published_concept_seed_version,
+)
 from app.domain.promotion_source import presented_source_title
 from app.repositories.copy_memory_evidence import (
     EVIDENCE_TABLES,
@@ -260,9 +263,20 @@ def _visible_cluster(alias: str) -> str:
 # clustering is not the source's), or the source is itself dirty (its clustering
 # is already out of date — e.g. a Memory deleted since the last rebuild left its
 # seeded cluster name on shared members). A copy of a clean notebook without
-# Memory gets no state row, exactly as before. `validate_copy` reads the same
-# decision back from the copy (a state row exists iff the tag was set).
+# Memory gets no dirty state row, exactly as before. `validate_copy` reads the
+# same decision back from the copy (a DIRTY state row exists iff the tag was set).
 _COPY_DIRTY_MARK = "_copy_starts_dirty"
+# Second root tag (S1, design 2026-10-19 §五): the concept seed space of the
+# source's PUBLISHED merge, read in the snapshot, set only when the copy keeps
+# the source's clusters and that space is not the one a state row created now
+# starts in (``CONCEPT_SEED_VERSION``, the column default; a missing row reads
+# the same). `insert_copy_rows` writes it into the copy's state row — the dirty
+# row, or a clean one (dirty 0, every other column its default) — so placement
+# in the copy matches the clusters it carries until its first full rebuild. The
+# merge decisions are not copied: keys the source keeps on the old seed
+# (``~v1:``) are not applied in the copy, whose clusters still carry them.
+_COPY_SEED_SPACE = "_copy_concept_seed_version"
+_COPY_ROOT_TAGS = (_COPY_DIRTY_MARK, _COPY_SEED_SPACE)
 #: Values of the root tag: why the copy starts dirty. `insert_copy_rows` records
 #: whether the copy's clusters were dropped (`_CLUSTERS_DROPPED`) so `validate_copy`
 #: judges by the snapshot's decision, not by the source's live `dirty` (a content-only
@@ -275,7 +289,12 @@ _COPY_DIRTY_SQL = (
     f"AND {memory_sql.memory_source_type_predicate()}) "
     "OR EXISTS (SELECT 1 FROM unified_kg_state WHERE notebook_id = ? AND dirty = 1)"
 )
-_COPY_FILTERED_SQL = "SELECT 1 FROM unified_kg_state WHERE notebook_id = ?"
+_COPY_FILTERED_SQL = (
+    "SELECT 1 FROM unified_kg_state WHERE notebook_id = ? AND dirty = 1"
+)
+_SOURCE_SEED_SPACE_SQL = (
+    "SELECT concept_seed_version FROM unified_kg_state WHERE notebook_id = ?"
+)
 # The notebook's Memory sources (any member's), whose evidence entries are
 # stripped from the rows the copy keeps. Read into Python, never bound back.
 _MEMORY_SOURCE_IDS_SQL = (
@@ -1258,11 +1277,17 @@ class SharingStore:
             if not snapshot[root_table]:
                 raise KeyError(notebook_id)
             queries = self._copy_queries(db, notebook_id)
+            clusters_dropped = False
             if queries is _MEMORY_COPY_SNAPSHOT_QUERIES:
                 source_dirty = db.execute(_SOURCE_DIRTY_SQL, (notebook_id,)).fetchone()
+                clusters_dropped = bool(source_dirty)
                 snapshot[root_table][0][_COPY_DIRTY_MARK] = (
                     _CLUSTERS_DROPPED if source_dirty else _HOLDS_MEMORY
                 )
+            seed_space = published_concept_seed_version(
+                db.execute(_SOURCE_SEED_SPACE_SQL, (notebook_id,)).fetchone())
+            if not clusters_dropped and seed_space != CONCEPT_SEED_VERSION:
+                snapshot[root_table][0][_COPY_SEED_SPACE] = seed_space
             keys_box: dict = {}
             violation = self._copy_limit_violation(db, notebook_id, queries, keys_box)
             if violation is not None:
@@ -1551,8 +1576,9 @@ class SharingStore:
             with self.database.write() as db:
                 for data in rows[index:index + chunk_size]:
                     starts_dirty = data.get(_COPY_DIRTY_MARK)
-                    if starts_dirty is not None:
-                        data = {k: v for k, v in data.items() if k != _COPY_DIRTY_MARK}
+                    seed_space = data.get(_COPY_SEED_SPACE)
+                    if starts_dirty is not None or seed_space is not None:
+                        data = {k: v for k, v in data.items() if k not in _COPY_ROOT_TAGS}
                     self.insert_row(db, table, data)
                     if starts_dirty and table == "notebooks":
                         self._record_clusters_dropped(
@@ -1563,6 +1589,17 @@ class SharingStore:
                         # in kg_mutation's FULL CENSUS (deep copy entry): a brand-new
                         # notebook id, same transaction as its own birth row.
                         UnifiedKgStore.mark_dirty(db, data["id"], self.now())
+                    if seed_space is not None and table == "notebooks":
+                        # See _COPY_SEED_SPACE. Not a KG mutation (no counter
+                        # moves): the copy's clusters were built in this space.
+                        db.execute(
+                            "INSERT INTO unified_kg_state "
+                            "(notebook_id, concept_seed_version, updated_at) "
+                            "VALUES (?, ?, ?) ON CONFLICT(notebook_id) DO UPDATE SET "
+                            "concept_seed_version = excluded.concept_seed_version",
+                            (data["id"], check_concept_seed_version(seed_space),
+                             self.now()),
+                        )
 
     def seed_copied_knowhow_genesis(
         self,
@@ -1663,7 +1700,8 @@ class SharingStore:
         with self.database.connect() as db:
             # The snapshot's statement-set decision, read back from the copy: the
             # Memory-aware set was used iff the copy got its dirty state row (nothing
-            # else writes one while the copy is still behind its 'copying' sentinel).
+            # else writes one while the copy is still behind its 'copying' sentinel;
+            # the clean row carrying the seed space, _COPY_SEED_SPACE, is dirty 0).
             filtered = db.execute(_COPY_FILTERED_SQL, (new_id,)).fetchone()
             validated = _MEMORY_COPY_VALIDATED_TABLES if filtered else _COPY_VALIDATED_TABLES
             clusters_dropped = self._take_clusters_dropped(new_id)

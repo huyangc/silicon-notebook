@@ -18,6 +18,14 @@ def repo(tmp_path, monkeypatch):
     return r
 
 
+def _built_before_upgrade(repo, nb):
+    """The rows below are written as the migration left them (seed_version 1):
+    a library whose published merge is in seed space 1, built before S1."""
+    with repo._write() as db:
+        db.execute("UPDATE unified_kg_state SET concept_seed_version=1 "
+                   "WHERE notebook_id=?", (nb,))
+
+
 def _mk(repo, nb, cid, ca, cb, sa, sb, status):
     with repo._write() as db:
         db.execute(
@@ -29,6 +37,7 @@ def _mk(repo, nb, cid, ca, cb, sa, sb, status):
 
 def test_columns_exist_and_decided_seed_pairs(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    _built_before_upgrade(repo, nb)
     # 精确 seed 行(confirmed / rejected / deferred)
     _mk(repo, nb, "m1", "K-x", "K-y", "x", "y", "confirmed")
     _mk(repo, nb, "m2", "K-p", "K-q", "p", "q", "rejected")
@@ -44,6 +53,7 @@ def test_columns_exist_and_decided_seed_pairs(repo):
 
 def test_decided_seed_pairs_falls_back_to_canonical(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    _built_before_upgrade(repo, nb)
     # 存量行:seed_a/seed_b 为空 → 回退 strip-"K-"
     _mk(repo, nb, "m1", "K-foo", "K-bar", "", "", "rejected")
     dsp = repo.decided_seed_pairs(nb)
