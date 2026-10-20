@@ -470,7 +470,7 @@ class CanonicalEdgeTable:
     ``src[i] <= dst[i]``(无向归一),``(src[i], dst[i])`` 两两不同,``weight[i]`` 是
     这一对 canonical 在 `community_graph_rows` 里出现的次数。行序 = **首次出现序**,
     与它取代的那张 `dict[(int, int), int]` 的插入序逐字一致 —— 见 `CanonicalEdgeTableBuilder.build`
-    里那段说明,那不是审美问题,Louvain 的输出会随边序变。
+    里那段说明(板块划分已不依赖它:2026-10-19 §五 S2 起 `kg_partition` 按 canonical id 排名)。
 
     为什么不是 dict(codex 第 2/7/9 轮连续三轮 P1 的共同根源,设计 §3.32):
     ``dict[(int, int), int]`` 的每条边都要一个新分配的 int 二元组 + 一对 int 对象 +
@@ -568,11 +568,11 @@ class CanonicalEdgeTableBuilder:
     def build(self, n_nodes: int) -> CanonicalEdgeTable:
         """聚合成唯一边表。**行序 = 首次出现序**,这是本方法唯一难的地方。
 
-        ⚠ **Louvain 对边的输入顺序敏感。** 旧模型喂给 igraph 的是 `list(ew.keys())`,
-        而 Python dict 保持插入顺序 —— 也就是每对 canonical 的**首次出现序**。数组化
-        之后若按排序序或任何别的顺序喂,板块划分会漂:已部署库的 `communities`、
-        `community_seq`、以及一切依赖板块的产物跟着全漂。这不是性能问题,是正确性问题
-        (设计 §3.32 的不变量 1,有真实库的逐字比对)。
+        这条曾是正确性要求(设计 §3.32 不变量 1:Louvain 对边序敏感,旧模型喂给 igraph 的
+        是 `list(ew.keys())` 的首次出现序)。2026-10-19 §五 S2 起板块划分由 `kg_partition`
+        按 canonical id 排名、边按 (lo, hi) 排序,与这里的行序无关,不变量 1 已推翻。行序
+        仍保留首次出现序:边表在同一输入上逐字可复现,`test_edge_table_rows_keep_the_first_
+        appearance_order_of_the_dict_it_replaced` 钉着它。
 
         所以聚合是「稳定排序 + 取每组最小原下标 + 按该下标重排」:
           1. 复合键 ``src * n_nodes + dst``(int64,``n_nodes`` 上界 ~171 万 → 键上界

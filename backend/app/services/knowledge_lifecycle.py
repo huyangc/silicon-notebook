@@ -7431,7 +7431,7 @@ class KnowledgeLifecycleService:
         if not graph_fresh:
             with self._write() as db:
                 # 写段前复读认领,与 cluster 侧写代段同一条纪律
-                # (codex #671 R3 P2):Louvain/预计算超过 TTL 被抢占、或
+                # (codex #671 R3 P2):划分/预计算超过 TTL 被抢占、或
                 # standalone delete 重置认领后,继任者的预回收已扫过这个
                 # 键区——不复读就会把整代不可见行留到下一轮回收。sqlite
                 # 侧 derived_claim_still_held 自带 begin_guarded_write
@@ -8155,7 +8155,7 @@ class KnowledgeLifecycleService:
         两侧 store 的 `check_artifact_payloads` 当场复核少盖/多盖 —— 盖与查刻意分在
         不同的函数里,同一个函数里既盖又查的守卫恒真。
 
-        ``partition_rebuilt``:``kept_rows`` 是这一轮 Louvain 刚跑出来的(True),还是
+        ``partition_rebuilt``:``kept_rows`` 是这一轮刚划分出来的(True),还是
         从库里读回来的现成划分(False,「只补账本」那条路径)。依赖板块的两份产物据此
         决定盖不盖那个戳:后一档的板块划分建在哪一代合并结果上**没有地方记**,而边与
         来源映射是按当前 cluster_map 现算的 —— 产物是混合世代的,只能如实记「无从判断」
