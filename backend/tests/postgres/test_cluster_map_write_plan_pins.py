@@ -108,11 +108,19 @@ def _seed(postgres_database, statistics: str) -> None:
 
 
 class _Recording:
-    def __init__(self, inner, log):
+    """Logs ``(statement, params)`` of every execute. With ``timeouts`` it also
+    logs the ``statement_timeout`` in force when each statement starts (read
+    on the same connection, so inside the same transaction)."""
+
+    def __init__(self, inner, log, timeouts=None):
         object.__setattr__(self, "_inner", inner)
         object.__setattr__(self, "_log", log)
+        object.__setattr__(self, "_timeouts", timeouts)
 
     def execute(self, statement, params=(), **kwargs):
+        if self._timeouts is not None:
+            self._timeouts.append(self._inner.execute(
+                "SHOW statement_timeout").fetchone()["statement_timeout"])
         self._log.append((statement, tuple(params or ())))
         return self._inner.execute(statement, params, **kwargs)
 
@@ -123,23 +131,51 @@ class _Recording:
         setattr(self._inner, name, value)
 
 
+_PAGE_STATEMENTS = (
+    ("floor", lambda s: s.startswith("SELECT set_config('statement_timeout'")),
+    ("bound", lambda s: s.startswith("SELECT s.ordinal FROM kg_cluster_scratch")),
+    ("insert", lambda s: s.startswith("INSERT INTO concept_clusters")),
+)
+
+
+def _page_roles(log: list) -> list[str]:
+    roles = []
+    for statement, _params in log:
+        text = " ".join(statement.split())
+        (role,) = [name for name, matches in _PAGE_STATEMENTS if matches(text)] or ["?"]
+        roles.append(role)
+    return roles
+
+
 def _captured(postgres_database) -> dict[str, tuple[str, tuple]]:
     from app.repositories.postgres.unified_kg_store import UnifiedKgStore
 
-    # A middle page of a production-shaped run (a page is a small slice of the
-    # run: 20k of a claim type's millions): page 2 of 30, both ends real
-    # ordinals. Only the second page's statements are kept.
-    first: list = []
-    with postgres_database.write() as db:
-        start = UnifiedKgStore.write_cluster_map_generation(
-            _Recording(db, first), NB, "claim", RUN, NOW, 5, start=None,
-            page_rows=PAGE_ROWS)
-    assert start is not None
-    log: list = []
-    with postgres_database.write() as db:
-        assert UnifiedKgStore.write_cluster_map_generation(
-            _Recording(db, log), NB, "claim", RUN, NOW, 5, start=start,
-            page_rows=PAGE_ROWS) is not None
+    # The first three pages of a production-shaped run (a page is a small
+    # slice of the run: 20k of a claim type's millions), each in its own write
+    # transaction like the service's. Every page runs exactly: the timeout
+    # floor, then the bound read, then the INSERT -- and the bound read and the
+    # INSERT both start under the raised floor (the pool's own timeout here is
+    # 2 s). Moving the floor below either statement, or out of the page's
+    # transaction, is red. Page 2 (both ends real ordinals) is kept for the
+    # plans.
+    pages: list[list] = []
+    start = None
+    for _page in range(3):
+        log: list = []
+        timeouts: list = []
+        with postgres_database.write() as db:
+            pool_timeout = db.execute("SHOW statement_timeout").fetchone()[
+                "statement_timeout"]
+            start = UnifiedKgStore.write_cluster_map_generation(
+                _Recording(db, log, timeouts), NB, "claim", RUN, NOW, 5,
+                start=start, page_rows=PAGE_ROWS)
+        assert start is not None
+        assert _page_roles(log) == ["floor", "bound", "insert"], [
+            s[:50] for s, _p in log]
+        assert pool_timeout != "10min"
+        assert timeouts == [pool_timeout, "10min", "10min"], timeouts
+        pages.append(log)
+    log = list(pages[1])
     with postgres_database.connect() as db:
         recording = _Recording(db, log)
         list(UnifiedKgStore.scratch_vector_rows(recording, NB, RUN))
