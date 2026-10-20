@@ -8,10 +8,20 @@ database or starting a process:
 
 * the schema-version pair is the same number in all three places, and both
   migration sequences are gap-free;
-* every member of every bundle seat's port is implemented by both stores;
-* the two stores' public surfaces differ only by the registered
-  backend-only helpers below (a new one must be registered; a stale entry fails);
-* every code reference in the architecture matrix still resolves.
+* every member of every bundle seat's port is implemented by both stores
+  (instance attributes bound in a constructor anywhere in the MRO count);
+* the two stores' class-level public members, excluding instance attributes,
+  differ only by the registered backend-only helpers below (a new one must be
+  registered; a stale entry fails). Instance attributes are composition wiring
+  (database, settings, collaborating stores); the ones a port declares are
+  already covered by the port check above;
+* every code reference in the architecture matrix still resolves, and every
+  row names a distinct capability.
+
+The reference check proves only that a citation still exists (``.py``: an AST
+definition; other files: a substring; a bare path: the file). It does not prove
+the row's description is right: a PR that changes a cited symbol's behavior
+re-checks that row by hand.
 """
 from __future__ import annotations
 
@@ -34,8 +44,8 @@ MATRIX_END = "### 2.3 "
 # backend-private helper no backend-neutral caller reaches through the port.
 REGISTERED_BACKEND_ONLY = {
     ("database", "sqlite"): {
-        "begin_immediate": "cross-process writer fence; callers are SQLite-only "
-        "(auth lock branch, sync CLI)",
+        "begin_immediate": "cross-process writer fence; called mostly by the "
+        "SQLite stores themselves, plus SQLite-only branches (auth lock, sync)",
         "close_local": "drops the per-thread reused connection; PostgreSQL pools",
     },
     ("database", "postgres"): {
@@ -71,8 +81,20 @@ def _seats() -> dict[str, tuple[type, type, type]]:
 
 
 def _assigned_in_init(cls: type) -> set[str]:
-    """Names the constructor binds on ``self`` (instance data members)."""
-    tree = ast.parse(textwrap.dedent(inspect.getsource(cls)))
+    """Names any constructor in the MRO binds on ``self`` (instance data members)."""
+    names: set[str] = set()
+    for klass in cls.__mro__:
+        if klass is not object:
+            names |= _assigned_in_own_init(klass)
+    return names
+
+
+def _assigned_in_own_init(cls: type) -> set[str]:
+    try:
+        source = inspect.getsource(cls)
+    except (OSError, TypeError):  # builtin / C-level base: binds nothing in Python
+        return set()
+    tree = ast.parse(textwrap.dedent(source))
     names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "__init__":
@@ -98,6 +120,7 @@ def _missing_members(port: type, store: type) -> set[str]:
 
 
 def _public(cls: type) -> set[str]:
+    """Class-level public members (``dir`` of the class: no instance attributes)."""
     return {name for name in dir(cls) if not name.startswith("_")}
 
 
@@ -161,7 +184,11 @@ def test_missing_member_detection_sees_methods_and_instance_attributes():
         def __init__(self) -> None:
             self.other = object()
 
+    class Inherited(Complete):
+        """Binds ``handle`` only through the base class constructor."""
+
     assert _missing_members(Port, Complete) == set()
+    assert _missing_members(Port, Inherited) == set()
     assert _missing_members(Port, Incomplete) == {"handle", "read"}
 
 
@@ -171,15 +198,17 @@ def _matrix_section() -> str:
     return text.split(MATRIX_START, 1)[1].split(MATRIX_END, 1)[0]
 
 
-def _matrix_references() -> dict[str, list[str]]:
+def _matrix_references(section: str) -> list[tuple[str, list[str]]]:
+    """(capability, cited references) per row, in document order. A list, so a
+    repeated capability name is visible instead of overwriting its twin."""
     rows = [
-        line for line in _matrix_section().splitlines()
+        line for line in section.splitlines()
         if line.startswith("|") and not re.fullmatch(r"\|[-|\s]+\|", line)
     ][1:]  # header row
-    references = {}
+    references = []
     for row in rows:
         cells = [cell.strip() for cell in row.strip("|").split("|")]
-        references[cells[0]] = re.findall(r"`([^`]+)`", cells[-1])
+        references.append((cells[0], re.findall(r"`([^`]+)`", cells[-1])))
     return references
 
 
@@ -214,16 +243,26 @@ def _unresolved(reference: str) -> str | None:
 
 
 def test_every_matrix_row_cites_code_that_still_exists():
-    references = _matrix_references()
-    assert len(references) >= 10, references
-    assert all(references.values()), {row: refs for row, refs in references.items() if not refs}
+    rows = _matrix_references(_matrix_section())
+    assert len(rows) >= 10, rows
+    capabilities = [capability for capability, _refs in rows]
+    assert len(capabilities) == len(set(capabilities)), capabilities
+    assert [capability for capability, refs in rows if not refs] == []
     broken = {
         reference: reason
-        for refs in references.values()
+        for _capability, refs in rows
         for reference in refs
         if (reason := _unresolved(reference))
     }
     assert broken == {}
+
+
+def test_matrix_parsing_keeps_repeated_capability_rows():
+    section = (
+        "| 能力 | PG | SQLite | 差异 | 出处 |\n|---|---|---|---|---|\n"
+        "| 词法 | a | b | c | `x.py:f` |\n| 词法 | a | b | c | `y.py:g` |\n"
+    )
+    assert _matrix_references(section) == [("词法", ["x.py:f"]), ("词法", ["y.py:g"])]
 
 
 def test_reference_resolution_rejects_stale_symbols_and_files():

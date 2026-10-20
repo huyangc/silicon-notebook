@@ -362,8 +362,8 @@ and production explicitly configure PostgreSQL; `.env.example` follows that depl
 
 SQLite's support scope is offline use (a local or packaged deployment without a database
 server), single-machine use (one host, one service process) and tests. It offers the same
-features as PostgreSQL, but admits one writer at a time and has no cross-process coordination
-locks. Multi-user production deployments and large notebooks should use PostgreSQL: the
+features as PostgreSQL, but admits one writer at a time and has no advisory-style
+cross-process coordination locks (only the `BEGIN IMMEDIATE` write fence). Multi-user production deployments and large notebooks should use PostgreSQL: the
 offline scale-index build (`scripts/cli.sh scale`) supports PostgreSQL only, so a SQLite
 deployment builds inside the service process, and the hot-path/retrieval index builders and
 PostgreSQL hot-path diagnostics target PostgreSQL only. The per-capability differences

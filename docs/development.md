@@ -395,8 +395,10 @@ statement-local planner settings (measured in both directions).
   the paired migrations in `POSTGRES_SCHEMA_MANIFEST`. A structure that exists only for
   performance and whose absence leaves SQLite's results unchanged may be PostgreSQL-only, but
   it is registered in the matrix. Behavior tests come in pairs (the SQLite one in G1, its
-  PostgreSQL twin in the PG lane); `backend/tests/test_dual_backend_parity.py` checks the
-  version pairing, port implementation and public method sets statically.
+  PostgreSQL twin in the PG lane); `backend/tests/test_dual_backend_parity.py` statically checks
+  the version pairing, port implementation, class-level public member sets and that every
+  matrix citation still resolves (existence only: a PR that changes a cited symbol's behavior
+  re-checks its matrix row by hand).
 - SQLite schema changes append `_migration_N` and bump `SCHEMA_VERSION` in
   [the migrator](../backend/app/repositories/sqlite/migrations.py); never modify a
   sealed migration. Startup recovery, stable seeds and administrator upgrades remain
@@ -640,10 +642,11 @@ OS/architecture/Python/requirements/policy key, with no generic fallback cache;
 `HNSWLIB_NO_NATIVE=1` remains mandatory. The whole PG job is measured against a
 three-minute optimization target; a successful test result alone does not prove it met
 that target, and cold-cache installation time is included in the observation.
-The lane covers direct PostgreSQL behavior only; retired tests for the SQLite
-backend implementation, SQLite-to-PostgreSQL import/forward-shadow, and
-cross-backend parity are not active coverage. Current dual-backend parity is held by each
-feature's SQLite tests and their PostgreSQL twins in this lane, plus the database-free
+The lane covers direct PostgreSQL behavior only. The dedicated suites removed in
+2026-07 (SQLite-adapter implementation tests, SQLite-to-PostgreSQL import/forward-shadow
+tests and a standalone cross-backend parity suite) are not active coverage; removing them did
+not retire the SQLite backend, which is kept long-term. Dual-backend parity is held by each
+feature's SQLite tests in G1 and their PostgreSQL twins in this lane, plus the database-free
 `backend/tests/test_dual_backend_parity.py` in G1.
 
 CI portability is part of the gate contract: every filesystem, data, and
