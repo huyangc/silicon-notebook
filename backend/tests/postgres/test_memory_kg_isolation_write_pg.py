@@ -403,6 +403,20 @@ def test_pg_clearing_the_merged_away_memory_restores_nothing(pg_repository):
     assert _evidence_sources(database, "ko-ma2") == {"src-ma2"}
 
 
+def test_pg_an_orphaned_merged_away_object_is_not_restored(pg_repository):
+    """mem-a1's row is gone (its source is an orphan): clearing the merge
+    result does not bring ko-ma1 back."""
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    _pg_own_merge(repo, "ko-ma1", "ko-ma2")
+    with database.write() as db:
+        db.execute("UPDATE sources SET memory_id=NULL WHERE id='src-ma1'")
+    _pg_change_memory(repo, "mem-a2", "delete")
+    assert _pg_status(database, "ko-ma2") is None
+    assert _pg_status(database, "ko-ma1") == "deprecated"
+
+
 def test_pg_a_merge_chain_restores_one_level_per_cleared_result(pg_repository):
     """ko-ma1 → ko-ma2 → ko-ma3: deleting mem-a3 restores ko-ma2 (still
     carrying ko-ma1's entries), ko-ma1 stays deprecated; deleting mem-a2
