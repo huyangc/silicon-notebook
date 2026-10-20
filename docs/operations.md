@@ -761,6 +761,23 @@ WHERE c.object_type = 'concept'
   AND NOT EXISTS (SELECT 1 FROM unified_kg_state u WHERE u.notebook_id = c.notebook_id);
 ```
 
+**Measured** (nb-b37185f4ae on a local PostgreSQL copy: 9,400 concept objects, 1,880 stored merge
+decisions; `POSTGRES_STATEMENT_TIMEOUT_SECONDS` temporarily raised to 900 s to keep the generation write
+from timing out):
+
+| | Full rebuild, code before the upgrade | First "update analysis" after it | "Update analysis" again |
+| --- | --- | --- | --- |
+| Concept seeds → merged knowledge objects | 7,151 → 6,649 | 7,080 → 6,611 | skipped (inputs unchanged) |
+| Total time | 86.8 s | 85.3–87.7 s | 0.1 s |
+| of which writing concept clusters | 4.5 s | 4.7–5.0 s | — |
+| of which the claim stage (with its generation write) | 58.0 s | 55.3–58.0 s | — |
+| Peak RSS | 399 MB | 390–398 MB | — |
+| Concept descriptions written again | — | 64 (the other 1,128 reused by signature) | 0 |
+| Decision recompute | — | 1,875 recomputed, 5 suspended, 7 rows added, 0 kept on the old seed, 0 conflicts | — |
+
+The two columns take the same time: what the first "update analysis" adds (the decision recompute, the
+spelling-variant tier) stays under 1 s; the claim stage's generation write is still the bulk.
+
 `KG_MERGE_SQUASH_CANDIDATES_MAX` (default 1000) caps the "same name, different spelling" pairs one
 refresh writes; hitting it emits `kg_merge_squash_candidates_capped` and keeps the groups with the most
 members.
