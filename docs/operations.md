@@ -826,6 +826,56 @@ processing. Deleting it removes its entries from the evidence of the objects tha
 cite it and deletes only the objects left without evidence; a native object a promotion was merged into keeps its own
 evidence.
 
+## Topic-board partition: warm starts and the one-time re-partition
+
+The topic boards (`communities`; the board list of the KG analysis view) are partitioned by
+`backend/app/services/kg_partition.py`: Leiden run per connected component, warm-started from the
+published partition, every board carrying a `board_key` that survives rebuilds (design
+`docs/superpowers/specs/2026-10-19-kg-analysis-findings-design_zh.md` section 五 S2). The same graph
+and the same published partition always give the same boards under the same keys, whatever order
+the relations arrive in.
+
+**One-time re-partition.** Migration v98 / 0078 adds `unified_kg_state.community_partition_version`
+and `community_partition_mode` (0 / '' on every existing notebook) and backfills each existing
+board's `board_key` with its id. The next rebuild of each notebook (刷新图谱, the rebuild after a
+merge, `recluster_kg`) reads version 0 and starts **cold**: its boards are partitioned from scratch
+once, by the new algorithm. There is no manual step and no extra pass; the cost is that rebuild's.
+A cold start still reads the published boards to carry keys: a new board whose members are
+mostly an old board's (mutual best match, Jaccard >= 1/2) keeps that board's key, so the old id
+lives on as its key. Deleting a notebook's knowledge graph, or publishing a new indexing pipeline,
+resets both columns, so the rebuild after either starts cold too.
+
+**Afterwards every rebuild warm-starts, `force` included.** The published partition is the start;
+a board changes only when the graph gives a real modularity gain. A forced rebuild is not a cold
+start: every real re-merge rebuilds with `force`.
+
+**Cold start on request.** `PYTHONPATH=backend python -m app.scripts.recluster_kg <notebook_id>
+--cold-partition --confirm-service-stopped` writes the notebook's version back to 0, then rebuilds:
+the partition history is dropped, keys are still carried by membership. The request holds until a
+rebuild publishes, so an interrupted run leaves the next rebuild cold as well.
+
+**Without igraph** the partition falls back to networkx Louvain, always cold
+(`partition_mode=cold_fallback`).
+
+**What to watch.**
+
+- `communities_rebuilt` carries `partition_mode` (`warm` / `cold` / `cold_fallback`),
+  `partition_cold_reason` (`no_published_partition`, `partition_version_changed`,
+  `previous_partition_unusable`, `non_default_level`, `igraph_unavailable`; null when warm),
+  `board_keys_carried` / `_minted` / `_rehashed`, `previous_boards` and `unstable_components`. The
+  KG analysis ledger keeps the same statistics in the `community_edges` row's payload under
+  `partition`; a ledger-only backfill partitions nothing and writes none.
+- `community_partition_unstable`: a component reached the cap of 64 rounds without a fixed point.
+  The partition is still published and still deterministic; a recurring one is worth a report.
+- `community_partition_previous_unusable`: the published generation was not a partition (one
+  canonical in two boards). The rebuild did not fail; it started cold instead.
+- Which notebooks still await the one-time re-partition (same SQL on both backends):
+
+```sql
+SELECT notebook_id, community_partition_mode FROM unified_kg_state
+WHERE community_partition_version = 0 AND community_generation > 0;
+```
+
 ## Agent token permission tiers
 
 Upgrading to **PostgreSQL 0069 / SQLite v89** rewrites every Agent token's permissions (revoked ones
