@@ -249,12 +249,18 @@ REGISTRY = {
     ("services/report_engine.py", "ReportEngine._assemble._sub", "splat:element_id"): (
         "global-unreachable", _import_gate("services/report_engine.py"),
         "deep reports run per notebook, never under a global run plan", 1),
-    ("services/notebook_sharing.py", "NotebookCopyService.copy_notebook", 'dict:"element_id"'): (
+    ("services/notebook_sharing.py", "NotebookCopyService._copy_elements_and_chunks",
+     'dict:"element_id"'): (
         "global-unreachable", _import_gate("services/notebook_sharing.py"),
         "notebook copy job remaps stored rows", 1),
-    ("services/notebook_sharing.py", "NotebookCopyService.copy_notebook", 'store:["element_id"]'): (
+    ("services/notebook_sharing.py", "NotebookCopyService._copy_source_facts",
+     'store:["element_id"]'): (
         "global-unreachable", _import_gate("services/notebook_sharing.py"),
-        "notebook copy job remaps stored rows", 2),
+        "notebook copy job remaps stored rows", 1),
+    ("services/notebook_sharing.py", "NotebookCopyService._copy_chunk_and_vector_rows",
+     'store:["element_id"]'): (
+        "global-unreachable", _import_gate("services/notebook_sharing.py"),
+        "notebook copy job remaps stored rows", 1),
     ("services/knowledge_lifecycle.py", "KnowledgeLifecycleService.complete_relations_for_source",
      "splat:element_id"): (
         "global-unreachable", _import_gate("services/knowledge_lifecycle.py"),
