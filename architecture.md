@@ -349,6 +349,7 @@ Retrieval 的 point-specific proposal source 与通用 admission reader 是两�
 | id 列表绑定 | 一个数组参数，`prepare=False` 按真实列表规划 | 一个 JSON 参数，`+col` 只过滤；绕开 32,766 变量上限 | 规则与实测见开发文档「Binding id lists in SQL」 | `backend/app/repositories/postgres/id_binding.py:execute_ids`、`backend/app/repositories/sqlite/id_binding.py:member_of` |
 | 规划器与计划钉 | autoanalyze 与可见性图会翻转计划；计划钉在 PostgreSQL 泳道 | 生产库没有 `sqlite_stat1`，计划须在有无统计时都成立；CI 是 SQLite 3.45、本机 3.53，规划器不同 | 新加 SQLite EXPLAIN 钉要两个版本都通过 | `backend/tests/test_memory_live_predicate_plans.py`、`backend/tests/postgres/test_cluster_generation_explain_pins.py` |
 | 行序 | 登记的表追加 identity `ordinal` 列 | `rowid` | 同一排序语义；PostgreSQL 侧凡 SQLite 用 `rowid` 的地方必须用 `ordinal` | `backend/app/repositories/postgres/schema_manifest.py:POSTGRES_ROWID_ORDINAL_TABLES` |
+| 重建写簇图（写代段） | 按 `kg_cluster_scratch.ordinal`（0079，即 rowid 的 identity 镜像）keyset 分页；canonical scratch 用 `CROSS JOIN LATERAL … OFFSET 0` 按种子参数化探查；每页事务内抬 600 s 维护底线 | 按 `rowid` keyset 分页；普通 JOIN | 分页、页界、行集与行序两侧相同，各有用例孪生；LATERAL 与超时底线只在 PostgreSQL：scratch 每轮换 run_id、统计不可靠，普通 JOIN 会退化成「成员数 × 种子数」，SQLite 在有无统计、3.45/3.53 下都是三键探查且没有语句超时 | `backend/app/repositories/postgres/unified_kg_store.py:UnifiedKgStore.write_cluster_map_generation`、`backend/app/repositories/sqlite/unified_kg_store.py:UnifiedKgStore.write_cluster_map_generation`、`backend/app/repositories/postgres/migrations/0079_kg_cluster_scratch_ordinal.sql:idx_kg_cluster_scratch_nb_run_ordinal` |
 | 大库 scale 构建 | 服务内构建 + 离线 CLI（跨进程认领）；同步引入后自动重建 | 只在服务进程内构建；离线 CLI 拒绝，同步引入记为跳过 | 大库只按 PostgreSQL 承诺 | `backend/app/services/scale_build_cli.py:require_postgres`、`backend/app/migration/sync/scale_rebuild.py:SKIPPED_SQLITE` |
 | 跨环境增量同步 | 触发器捕获 + 补偿窗口（读回上次导出时仍在途的事务） | 触发器捕获，没有补偿窗口（单写者不需要） | 两侧都支持导出与引入；包格式与后端无关，可跨后端双向引入（SQLite 包进 PostgreSQL 目标、PostgreSQL 包进 SQLite 目标都有用例） | `backend/app/migration/sync/incremental.py:compensation_rows`、`backend/tests/postgres/test_sync_import_pg.py:test_a_sqlite_package_lands_native_postgres_values`、`backend/tests/postgres/test_sync_import_pg.py:test_a_postgres_package_lands_in_a_sqlite_target` |
 | 只在 PostgreSQL 的运维 | 热路径 / 检索索引并发构建、热路径诊断、离线维护会话（数据库级 advisory lock + `--confirm-service-stopped`）；扩展前置 `pg_trgm`、`btree_gin` | 无对应物 | SQLite 不需要这些工具 | `scripts/build_hotpath_indexes.py`、`scripts/build_postgres_retrieval_indexes.py`、`scripts/diag_pg_hotpaths.py`、`backend/app/repositories/postgres/database.py:PostgresDatabase.offline_maintenance_session` |
@@ -808,7 +809,13 @@ published 指针（`cluster_generation`/`community_generation`，无 state 行 �
    2× 规划。催收欠账标记在时整库跳过回收。
 3. **写新代**：INSERT 进在飞代，不持 advisory lock、不 DELETE、不推进任何
    版本序（两段式红线：未发布代写入对读者不可见，bump=假失效）；每个写段
-   先复读在飞认领，被 TTL 抢占/终局重置即响亮作废早停。
+   先复读在飞认领，被 TTL 抢占/终局重置即响亮作废早停。簇图写段按 scratch
+   插入序 keyset 分页（PG 用 0079 给 `kg_cluster_scratch` 加的 identity
+   `ordinal`，SQLite 用 rowid；每页一条 INSERT…SELECT、一个短写事务、页前
+   复读认领），各页之并与一次写完逐行同序；中途被抢占时已提交的页是在飞代
+   残行，读者不可见，由下一轮预回收清理。PG 侧 canonical scratch 以
+   `CROSS JOIN LATERAL … OFFSET 0` 按种子参数化探查——两张 scratch 表每轮
+   换 run_id，统计要么没有要么过期，普通 JOIN 会退化成「成员数 × 种子数」。
 4. **翻指针**：毫秒级微事务——cluster 侧按 key 字节序取齐全 4 类 advisory
    lock 后双 CAS（published 未被动过 ∧ 认领仍是自己），
    `cluster_mutation_seq` 在同一条 UPDATE 里推进（版本身份与可见性同提交）；
