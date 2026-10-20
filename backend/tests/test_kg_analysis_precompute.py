@@ -1523,6 +1523,61 @@ def test_boards_and_all_three_product_tables_publish_in_one_transaction(
     )
 
 
+_STATE_SET = re.compile(
+    r"\bUPDATE\s+unified_kg_state\s+SET\s+(.*?)\s+WHERE\b", re.I | re.S)
+
+
+def _trace_state_columns_per_transaction(repo, monkeypatch) -> list:
+    """Every write transaction's ``unified_kg_state`` columns written by an
+    ``UPDATE ... SET`` (column names, not the table: the pointer flip alone
+    already touches the table)."""
+    database = repo._runtime.database
+    original_write = database.write
+    per_transaction: list[set] = []
+
+    @contextmanager
+    def tracing_write(**kwargs):
+        with original_write(**kwargs) as db:
+            columns: set = set()
+            per_transaction.append(columns)
+
+            def trace(statement: str) -> None:
+                for set_clause in _STATE_SET.findall(statement):
+                    columns.update(re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*=", set_clause))
+
+            db.set_trace_callback(trace)
+            try:
+                yield db
+            finally:
+                db.set_trace_callback(None)
+
+    monkeypatch.setattr(database, "write", tracing_write)
+    return per_transaction
+
+
+def test_the_seq_and_the_partition_columns_are_written_by_the_flip_transaction(
+    repo, monkeypatch
+):
+    """By column, not by table: ``community_seq`` (the community gate) and
+    ``community_partition_version`` / ``_mode`` (the next build's cold / warm
+    criterion) are written in the very transaction that flips
+    ``community_generation`` -- the table-level guard above cannot see either of
+    them moved into a transaction of its own (the flip alone touches the table).
+    Split apart, a reader of the state row sees new boards with the old seq, or
+    the next build takes a partition for one the version does not describe."""
+    notebook_id = _seed(repo)
+    per_transaction = _trace_state_columns_per_transaction(repo, monkeypatch)
+    repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id)
+
+    flips = [columns for columns in per_transaction if "community_generation" in columns]
+    assert len(flips) == 1, per_transaction
+    assert {"community_seq", "community_partition_version",
+            "community_partition_mode"} <= flips[0], flips[0]
+    others = [columns for columns in per_transaction if columns is not flips[0]]
+    assert all(not ({"community_seq", "community_partition_version",
+                     "community_partition_mode"} & columns) for columns in others), others
+
+
 def test_the_backfill_transaction_publishes_products_without_touching_the_boards(
     repo, monkeypatch
 ):
