@@ -1,0 +1,490 @@
+{
+ "copy_id": "nb-c0001",
+ "db_diff": {
+  "notebooks": {
+   "added": [],
+   "removed": [
+    {
+     "access_scope": "",
+     "created_at": "2020-01-01T00:00:00+00:00",
+     "created_by": "u-recipient",
+     "expected_questions": "",
+     "id": "nb-stale-recipient",
+     "indexing_pipeline": null,
+     "indexing_pipeline_generation": "",
+     "indexing_pipeline_job_id": "",
+     "indexing_pipeline_version": "builtin.chunk.v1",
+     "is_shared": 0,
+     "metadata_generation": 0,
+     "name": "book nb-stale-recipient",
+     "name_auto": 0,
+     "primary_domain": "Semiconductor",
+     "purpose": "",
+     "purpose_auto": 0,
+     "share_token": null,
+     "source_types": "",
+     "status": "copying",
+     "sync_origin": "",
+     "target_users": "",
+     "taxonomy": "",
+     "template": "",
+     "tier": "personal",
+     "updated_at": "2020-01-01T00:00:00+00:00"
+    }
+   ]
+  },
+  "sources": {
+   "added": [],
+   "removed": [
+    {
+     "agent_profile_id": null,
+     "chunked_at": null,
+     "created_at": "2020-01-01T00:00:00+00:00",
+     "doc_type": "",
+     "error_message": "",
+     "file_hash": "",
+     "file_name": "",
+     "file_path": "",
+     "file_size": 0,
+     "id": "src-stale",
+     "memory_id": null,
+     "notebook_id": "nb-stale-recipient",
+     "parse_status": "ready",
+     "source_type": "document",
+     "source_url": "",
+     "status": "ready",
+     "summary": "",
+     "title": "half",
+     "updated_at": "2020-01-01T00:00:00+00:00",
+     "uploaded_by": null
+    }
+   ]
+  }
+ },
+ "fs_diff": {
+  "added": {},
+  "removed": [
+   "assets/nb-stale-recipient",
+   "assets/nb-stale-recipient/asset-x.png",
+   "notebooks/nb-stale-recipient",
+   "notebooks/nb-stale-recipient/old.md"
+  ]
+ },
+ "logs": [],
+ "outcome": {
+  "message": "[Errno 17] File exists: '<storage>/notebooks/nb-c0001'",
+  "raised": "FileExistsError"
+ },
+ "timeline": [
+  {
+   "args": [],
+   "call": "store.sweep_stale_copies",
+   "kwargs": {
+    "created_by": "u-recipient",
+    "on_reaped": "<callable>"
+   },
+   "ret": [
+    "nb-stale-recipient"
+   ]
+  },
+  {
+   "sql": "SELECT id FROM notebooks WHERE status = 'copying' AND created_by = 'u-recipient' AND created_at < '<ts>'"
+  },
+  {
+   "sql": "SELECT 1 FROM notebooks WHERE id = 'nb-stale-recipient' AND status = 'copying' AND created_at < '<ts>'"
+  },
+  {
+   "sql": "BEGIN"
+  },
+  {
+   "sql": "DELETE FROM kg_objects_fts WHERE notebook_id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM chunks_fts WHERE notebook_id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM knowledge_embeddings WHERE notebook_id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-stale-recipient'"
+  },
+  {
+   "sql": "COMMIT"
+  },
+  {
+   "args": [
+    "<storage>/notebooks/nb-stale-recipient"
+   ],
+   "fs": "rmtree",
+   "kwargs": {
+    "ignore_errors": true
+   }
+  },
+  {
+   "args": [
+    "<storage>/assets/nb-stale-recipient"
+   ],
+   "fs": "rmtree",
+   "kwargs": {
+    "ignore_errors": true
+   }
+  },
+  {
+   "args": [
+    "nb-ccw"
+   ],
+   "call": "catalog.get_notebook",
+   "kwargs": {},
+   "ret": {
+    "access": "owner",
+    "access_scope": "",
+    "ask_available": true,
+    "base_kg_available": false,
+    "base_kg_notebook_ids": [],
+    "base_notebooks": [
+     {
+      "id": "nb-base-public",
+      "name": "book nb-base-public",
+      "tier": "base"
+     },
+     {
+      "id": "nb-base-everyone",
+      "name": "book nb-base-everyone",
+      "tier": "personal"
+     }
+    ],
+    "can_manage_content": false,
+    "counts": {
+     "cases": 0,
+     "checklist_items": 0,
+     "glossary": 0,
+     "memories": 0,
+     "methods": 0,
+     "risks": 0,
+     "rules": 0,
+     "sources": 2
+    },
+    "created_label": "2026年9月29日",
+    "document_limit": 20,
+    "expected_questions": [],
+    "granted_via": [],
+    "id": "nb-ccw",
+    "indexing_pipeline_available": false,
+    "indexing_pipeline_id": "plugin-x",
+    "indexing_pipeline_missing": true,
+    "indexing_pipeline_pending": true,
+    "indexing_pipeline_stale": true,
+    "indexing_pipeline_version": "v9",
+    "is_shared": true,
+    "kg_build": null,
+    "kg_building": false,
+    "kg_pending_sources": 0,
+    "kg_ready": true,
+    "local_evidence_available": true,
+    "name": "Shared",
+    "paper_meta_backfilling": false,
+    "paper_meta_missing": false,
+    "primary_domain": "Semiconductor",
+    "purpose": "",
+    "shared_from": "",
+    "source_types": [],
+    "status": "draft",
+    "sync_origin": "env-upstream",
+    "target_users": "",
+    "taxonomy": [],
+    "tier": "personal"
+   }
+  },
+  {
+   "sql": "SELECT notebooks.*, u.username AS _owner_username, COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') AS _published_pipeline_version, EXISTS(SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id = notebooks.id AND ng.principal_type IN ('group', 'group_admins')) AS _shared_to_groups FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by LEFT JOIN unified_kg_state ip ON ip.notebook_id=notebooks.id WHERE notebooks.id = 'nb-ccw' AND notebooks.status NOT IN ('copying','deleting','importing')"
+  },
+  {
+   "sql": "SELECT id FROM sources WHERE notebook_id = 'nb-ccw' AND source_type = 'memory'"
+  },
+  {
+   "sql": "SELECT COUNT(*) AS count FROM sources WHERE notebook_id = 'nb-ccw' AND source_type NOT IN ('memory', 'knowhow')"
+  },
+  {
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-ccw'"
+  },
+  {
+   "sql": "WITH total AS (SELECT object_type, status, COUNT(*) AS c FROM knowledge_objects WHERE notebook_id='nb-ccw' GROUP BY object_type, status), memory AS (SELECT mo.object_type, mo.status, COUNT(*) AS c FROM knowledge_objects mo WHERE mo.source_id IN (SELECT s.id FROM sources s WHERE s.notebook_id='nb-ccw' AND s.source_type IN ('memory','knowhow') AND s.source_type = 'memory') AND +mo.notebook_id='nb-ccw' GROUP BY mo.object_type, mo.status) SELECT t.object_type, t.status, t.c - COALESCE(m.c, 0) AS c, COALESCE(m.c, 0) AS m FROM total t LEFT JOIN memory m ON m.object_type = t.object_type AND m.status = t.status"
+  },
+  {
+   "sql": "SELECT b.id AS id, b.name AS name, b.tier AS tier, EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id) AS has_kg FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF(NULL, '') AS uid) v WHERE e.notebook_id = 'nb-ccw' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id"
+  },
+  {
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-ccw'"
+  },
+  {
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-ccw'"
+  },
+  {
+   "sql": "SELECT COUNT(*) FROM sources s WHERE s.notebook_id = 'nb-ccw' AND s.source_type NOT IN ('memory','knowhow') AND s.source_type <> 'promotion' AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id) AND NOT EXISTS (SELECT 1 FROM knowledge_objects k WHERE k.source_id = s.id AND k.source_id != '' AND COALESCE(( SELECT er.status FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC, er.rowid DESC LIMIT 1), 'completed')='completed' AND NOT (COALESCE((SELECT er.error_message FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'') GLOB '*windows_failed=[1-9]*/*' OR instr(COALESCE((SELECT er.error_message FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),''),'retry_incomplete=1')>0)) AND NOT (COALESCE((SELECT er.status FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'')='completed' AND COALESCE((SELECT er.error_message FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'') GLOB 'kg objects=0 *' AND COALESCE((SELECT er.error_message FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'') NOT GLOB '*windows_failed=[1-9]*/*')"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM chunks WHERE notebook_id = 'nb-ccw')"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM sources s WHERE s.notebook_id = 'nb-ccw' AND s.source_type NOT IN ('memory', 'knowhow') AND s.source_type <> 'promotion' AND s.doc_type IN ('', 'academic_paper') AND s.parse_status IN ('parsed', 'extracting', 'extracted') AND NOT EXISTS (SELECT 1 FROM source_paper_meta m WHERE m.source_id = s.id))"
+  },
+  {
+   "sql": "SELECT * FROM kg_build_jobs WHERE notebook_id='nb-ccw' ORDER BY created_at DESC, rowid DESC LIMIT 1"
+  },
+  {
+   "sql": "SELECT nb.created_by AS owner_id, u.role AS owner_role FROM notebooks nb LEFT JOIN users u ON u.id = nb.created_by WHERE nb.id = 'nb-ccw'"
+  },
+  {
+   "sql": "SELECT upload_document_limit FROM user_profiles WHERE user_id = 'user-local'"
+  },
+  {
+   "sql": "SELECT value FROM app_settings WHERE key = 'upload_document_limit_default'"
+  },
+  {
+   "id": "nb-c0001",
+   "new_id": "nb"
+  },
+  {
+   "now": "2026-10-01T08:00:00+00:00"
+  },
+  {
+   "args": [
+    "<storage>/notebooks/nb-ccw",
+    "<storage>/notebooks/nb-c0001"
+   ],
+   "fs": "copytree",
+   "kwargs": {},
+   "raised": "FileExistsError"
+  },
+  {
+   "args": [
+    "nb-c0001"
+   ],
+   "call": "store.compensate_copy",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "sql": "BEGIN"
+  },
+  {
+   "sql": "DELETE FROM kg_objects_fts WHERE notebook_id = 'nb-c0001'"
+  },
+  {
+   "sql": "DELETE FROM chunks_fts WHERE notebook_id = 'nb-c0001'"
+  },
+  {
+   "sql": "DELETE FROM knowledge_embeddings WHERE notebook_id = 'nb-c0001'"
+  },
+  {
+   "sql": "DELETE FROM notebooks WHERE id = 'nb-c0001' AND status = 'copying'"
+  },
+  {
+   "sql": "COMMIT"
+  }
+ ]
+}
