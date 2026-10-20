@@ -617,7 +617,7 @@ def case_governance_lists(world, monkeypatch):
         merges = get(world, who, "/unified-kg/pending-merges")
         assert_clean(world, merges, f"{who} pending merges")
         pairs = {frozenset((m["canonical_a"], m["canonical_b"])) for m in merges.json()}
-        assert frozenset(("K-moe gating", "K-expert routing")) in pairs, merges.text
+        assert frozenset(("K-moegating", "K-expertrouting")) in pairs, merges.text
         conflicts = get(world, who, "/kg/conflicts/pending")
         assert_clean(world, conflicts, f"{who} pending conflicts")
         body = conflicts.json()

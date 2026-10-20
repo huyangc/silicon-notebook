@@ -158,7 +158,6 @@ def test_stream_seed_reps_pass_b_mixed_json_and_blob_matches_all_json_oracle(rep
     """_stream_seed_reps Pass B joins knowledge_embeddings by object_id and means
     the vectors per seed. A table with some BLOB rows (new writes/backfilled) and
     some legacy JSON rows must produce identical reps to an all-JSON table."""
-    from app.services.kg_merge import seed_concept
 
     embed_dim = repo.settings.embed_dim
     rng = np.random.default_rng(9)
@@ -174,7 +173,7 @@ def test_stream_seed_reps_pass_b_mixed_json_and_blob_matches_all_json_oracle(rep
         _seed_concept_with_vector(repo, nb.id, oid, name, vec, now, mode)
 
     reps_mixed, members_mixed, _ = repo._stream_seed_reps(
-        nb.id, "concept", seed_concept, run_id="r1", compute_reps=True)
+        nb.id, "concept", concept_seed_version=1, run_id="r1", compute_reps=True)
 
     # Oracle: identical concepts/vectors, all stored as legacy JSON text.
     # object_id is globally unique (not notebook-scoped) — use distinct ids.
@@ -182,7 +181,7 @@ def test_stream_seed_reps_pass_b_mixed_json_and_blob_matches_all_json_oracle(rep
     for oid, name, vec, _mode in specs:
         _seed_concept_with_vector(repo, nb2.id, f"{oid}-o", name, vec, now, "json")
     reps_oracle, members_oracle, _ = repo._stream_seed_reps(
-        nb2.id, "concept", seed_concept, run_id="r2", compute_reps=True)
+        nb2.id, "concept", concept_seed_version=1, run_id="r2", compute_reps=True)
 
     assert set(reps_mixed.keys()) == set(reps_oracle.keys()) == {"widget", "gadget assembly"}
     assert members_mixed == members_oracle == {"widget": 2, "gadget assembly": 1}
@@ -193,7 +192,6 @@ def test_stream_seed_reps_pass_b_mixed_json_and_blob_matches_all_json_oracle(rep
 def test_stream_seed_reps_pass_b_skips_wrong_dim_blob_row(repo):
     """A BLOB row whose decoded length != settings.embed_dim must be skipped,
     same as the legacy JSON wrong-length skip (mirrors the old length filter)."""
-    from app.services.kg_merge import seed_concept
 
     embed_dim = repo.settings.embed_dim
     now = "2026-01-01T00:00:00"
@@ -204,7 +202,7 @@ def test_stream_seed_reps_pass_b_skips_wrong_dim_blob_row(repo):
     _seed_concept_with_vector(repo, nb.id, "ko-bad", "gadget", bad_vec, now, "blob")
 
     reps, members, _ = repo._stream_seed_reps(
-        nb.id, "concept", seed_concept, run_id="r1", compute_reps=True)
+        nb.id, "concept", concept_seed_version=1, run_id="r1", compute_reps=True)
 
     assert "widget" in reps  # good vector produced a rep
     assert "gadget" not in reps  # wrong-dim vector skipped, no rep for that seed

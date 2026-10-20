@@ -911,7 +911,8 @@ def test_decisions_are_read_and_keyed_like_the_product_reader():
             seen.append((sql, params))
             return _Result(rows)
 
-    product = GovernanceStore.decided_seed_pairs_from(_Connection(), NOTEBOOK)
+    product = GovernanceStore.decided_seed_pairs_from(
+        _Connection(), NOTEBOOK, seed_version=None)
     sql, params = seen[0]
     mine_sql, mine_params = rehearsal.decisions_query(NOTEBOOK)
     assert _flat(mine_sql) == _flat(sql) and tuple(mine_params) == tuple(params)
@@ -922,10 +923,12 @@ def test_decisions_are_read_and_keyed_like_the_product_reader():
     assert product[frozenset(("x", "y"))] == "rejected"
 
 
-def test_member_seeds_are_the_v1_seeds_of_every_member_name():
+def test_member_seeds_are_the_decision_seeds_of_every_member_name():
+    """v1 and v2 seeds (a decision of either space names the member); an
+    empty name names nothing."""
     seeds = rehearsal.member_seeds_from_rows(
         [("K-1", "Q-Former"), ("K-1", "Q Former"), ("K-1", None), ("K-2", "Qformer")])
-    assert seeds == {"K-1": {"q former", ""}, "K-2": {"qformer"}}
+    assert seeds == {"K-1": {"q former", "qformer"}, "K-2": {"qformer"}}
 
 
 # ============================================================== partition bench

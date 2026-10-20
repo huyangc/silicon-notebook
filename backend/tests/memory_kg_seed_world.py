@@ -276,8 +276,8 @@ def assert_legacy_memory_endpoints_stay_out(repo) -> None:
     repo.rebuild_unified_kg(nb_id, force=True)
     before = _canonical_rows(repo, nb_id)
     assert {key: value[0] for key, value in before.items()} == {
-        ("K-grouped query attention", "depends_on", "K-multi query attention"): 1,
-        ("K-grouped query attention", "depends_on", "K-kv cache"): 1,
+        ("K-groupedqueryattention", "depends_on", "K-multiqueryattention"): 1,
+        ("K-groupedqueryattention", "depends_on", "K-kvcache"): 1,
     }
     memory = object_ids_by_name(repo, nb_id, MEMORY_SOURCE)
     shared = object_ids_by_name(repo, nb_id, "s2")
@@ -324,10 +324,10 @@ def assert_memory_builds_no_mention_bridge(repo) -> None:
     repo.rebuild_unified_kg(nb_id, force=True)
     shared_claim = object_ids_by_name(repo, nb_id, "s3")[
         "GQA uses fewer KV heads than MQA while keeping quality."]
-    expected = ({(shared_claim, "K-grouped query attention")}, [])
+    expected = ({(shared_claim, "K-groupedqueryattention")}, [])
     assert _bridge(repo, nb_id) == expected
     memory = object_ids_by_name(repo, nb_id, MEMORY_SOURCE)
-    _insert_cluster_row(repo, nb_id, "cc-legacy", "K-multi query attention",
+    _insert_cluster_row(repo, nb_id, "cc-legacy", "K-multiqueryattention",
                         memory["Multi-Query Attention (MQA)"],
                         "Multi-Query Attention (MQA)",
                         _published_cluster_generation(repo, nb_id))
@@ -352,15 +352,15 @@ def assert_analysis_readers_skip_legacy_memory_rows(repo) -> None:
     provenance = repo._runtime.unified_kg.relation_provenance_counts(nb_id)
     memory = object_ids_by_name(repo, nb_id, MEMORY_SOURCE)
     generation = _published_cluster_generation(repo, nb_id)
-    _insert_cluster_row(repo, nb_id, "cc-legacy", "K-grouped query attention",
+    _insert_cluster_row(repo, nb_id, "cc-legacy", "K-groupedqueryattention",
                         memory["SECRET-ALPHA plan"], "Grouped-query attention (GQA)",
                         generation)
-    _insert_cluster_row(repo, nb_id, "cc-legacy-2", "K-secret beta budget",
+    _insert_cluster_row(repo, nb_id, "cc-legacy-2", "K-secretbetabudget",
                         memory["Secret Beta budget"], "Secret Beta budget", generation)
     assert repo._runtime.unified_kg.cluster_size_histogram(nb_id) == histogram
     assert repo._runtime.unified_kg.largest_clusters(nb_id) == largest
     head = {c["canonical_id"]: c["members"] for c in largest["clusters"]}
-    assert head["K-grouped query attention"] == 2
+    assert head["K-groupedqueryattention"] == 2
     assert SECRET not in json.dumps(largest).lower()
     assert provenance["total_rows"] == 2, provenance
     assert provenance["counted"] == 2

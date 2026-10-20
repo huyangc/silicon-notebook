@@ -18,7 +18,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 from urllib.parse import quote
 
 from app.repositories.sqlite.access_sql import NOTEBOOK_LIVE_SQL
@@ -441,23 +441,27 @@ class MemoryIsolationStore:
 
     @staticmethod
     def purge_bridge_candidates(
-        db: Any, notebook_id: str, bridge_ids: List[str]
+        db: Any, notebook_id: str, bridge_ids: Dict[int, List[str]]
     ) -> int:
         """See the PostgreSQL twin (merge candidates naming a Memory concept's
-        bridge id that no cluster row carries; ids through a temp table)."""
-        ids = sorted(set(bridge_ids))
+        bridge id of their own seed space that no cluster row carries; ids
+        through a temp table)."""
+        ids = sorted({(i, int(v)) for v, found in bridge_ids.items() for i in found})
         if not ids:
             return 0
         db.execute("DROP TABLE IF EXISTS temp.mib_bridge")
-        db.execute("CREATE TEMP TABLE mib_bridge (id TEXT PRIMARY KEY)")
-        db.executemany("INSERT INTO mib_bridge (id) VALUES (?)", [(i,) for i in ids])
+        db.execute("CREATE TEMP TABLE mib_bridge (id TEXT NOT NULL, "
+                   "seed_version INTEGER NOT NULL, PRIMARY KEY (id, seed_version))")
+        db.executemany("INSERT INTO mib_bridge (id, seed_version) VALUES (?, ?)", ids)
         cursor = db.execute(
             "DELETE FROM concept_merge_candidates WHERE notebook_id = ? AND ("
-            "(canonical_a IN (SELECT id FROM mib_bridge) AND NOT EXISTS ("
+            "((canonical_a, seed_version) IN (SELECT id, seed_version FROM mib_bridge) "
+            "AND NOT EXISTS ("
             "SELECT 1 FROM concept_clusters xa "
             "WHERE xa.notebook_id = concept_merge_candidates.notebook_id "
             "AND xa.canonical_id = concept_merge_candidates.canonical_a)) OR "
-            "(canonical_b IN (SELECT id FROM mib_bridge) AND NOT EXISTS ("
+            "((canonical_b, seed_version) IN (SELECT id, seed_version FROM mib_bridge) "
+            "AND NOT EXISTS ("
             "SELECT 1 FROM concept_clusters xb "
             "WHERE xb.notebook_id = concept_merge_candidates.notebook_id "
             "AND xb.canonical_id = concept_merge_candidates.canonical_b)))",

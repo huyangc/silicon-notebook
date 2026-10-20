@@ -514,7 +514,13 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # are judged) and sources.navigation_version (integer NOT NULL DEFAULT 0: +1
 # whenever the source's set of flagged chunks changes). No backfill in the migration (the service judges existing
 # sources after readiness), no index, no FK or unique-surface change.
+# SQLite v102 / PostgreSQL 0083 add concept_merge_candidates.seed_version and
+# unified_kg_state.concept_seed_version (bigint NOT NULL DEFAULT 1 / SQLite
+# INTEGER NOT NULL DEFAULT 1): the concept seed space a decision row's keys
+# and a library's published merge were minted in. No table, FK, index or
+# unique-surface change; no backfill (the first v2 full rebuild of a library
+# recomputes its v1 decisions in Python).
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=101,
-    postgres_version=82,
+    sqlite_version=102,
+    postgres_version=83,
 )

@@ -659,7 +659,8 @@ def test_plugin_kg_success_atomically_publishes_graph_facts_and_identity(
         )
         db.execute(
             "UPDATE unified_kg_state SET cluster_input_version='v-in', "
-            "cluster_code_version='code-1' WHERE notebook_id=?",
+            "cluster_code_version='code-1', concept_seed_version=2 "
+            "WHERE notebook_id=?",
             (notebook.id,),
         )
         # 批 3·W2(codex #671 R18):预置一份代际状态——published 指针、在飞
@@ -709,7 +710,8 @@ def test_plugin_kg_success_atomically_publishes_graph_facts_and_identity(
         ).fetchone()["c"])
         state = dict(db.execute(
             "SELECT dirty,kg_mutation_seq,cluster_mutation_seq,indexing_pipeline_id,"
-            "indexing_pipeline_version,cluster_input_version,cluster_code_version "
+            "indexing_pipeline_version,cluster_input_version,cluster_code_version,"
+            "concept_seed_version "
             "FROM unified_kg_state WHERE notebook_id=?",
             (notebook.id,),
         ).fetchone())
@@ -749,7 +751,7 @@ def test_plugin_kg_success_atomically_publishes_graph_facts_and_identity(
     with repo._write() as db:
         assert not _UKS.flip_cluster_generation(
             db, notebook.id, published_from=7, generation=9,
-            catchup_from_ts=_now(), now=_now())
+            catchup_from_ts=_now(), now=_now(), concept_seed_version=2)
     assert names == ["Pipeline Strategy", "The strategy is core-admitted."]
     assert facts == 2
     assert extraction == {
@@ -774,6 +776,9 @@ def test_plugin_kg_success_atomically_publishes_graph_facts_and_identity(
         "kg_analysis_findings": 0, "kg_analysis_marks": 2,
     }
     assert (state["cluster_input_version"], state["cluster_code_version"]) == ("", "")
+    # The publication cleared the clusters and the decisions: nothing is
+    # published in any seed space, which reads as 1 (S1).
+    assert state["concept_seed_version"] == 1
     assert repo._runtime.kg_build_jobs.get(response["job_id"])["status"] == "succeeded"
 
 

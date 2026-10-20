@@ -80,7 +80,10 @@ from app.domain.kg_findings_contracts import (
     NOTEBOOK_SUBJECT_KEY,
     RULE_ISOLATED_OBJECTS,
 )
-from app.domain.kg_merge_seed import concept_seed_v1
+from app.domain.kg_merge_seed import (
+    CONCEPT_SEED_VERSION,
+    concept_decision_seeds,
+)
 from app.services.kg_findings import (
     FindingsDraft,
     FindingsObjectTally,
@@ -567,8 +570,9 @@ class _UnifiedKgRebuildRun:
     notebook_id: str
     progress: Optional[Callable[[str, int, int], None]]
     fresh: bool
-    #: The clustering-inputs version captured once at entry (stored at the end).
-    ver: str
+    #: The clustering inputs read once at entry (``_cluster_input_facts``):
+    #: the END-write stores their version, plus ``dec_growth``.
+    facts: Tuple[int, int, int, int]
     claim: dict
     generation: int
     published_from: int
@@ -580,7 +584,14 @@ class _UnifiedKgRebuildRun:
     members_count: Optional[Dict[str, int]] = None
     #: The concept clustering result; its ``seed_to_canonical`` is the one copy.
     sd: Optional[Dict[str, Any]] = None
+    #: The squash-key candidate tier, computed while the seed vectors exist.
+    squash_rows: Optional[List[tuple]] = None
+    #: The stored v1 decisions' recompute (S1); ``None`` is a real value (the
+    #: notebook holds no v1 decision), so it is read directly, not via ``ready``.
+    seed_plan: Any = None
     now: Optional[str] = None
+    #: The decision recompute's confirmed / rejected row growth (pending refresh).
+    dec_growth: Optional[int] = None
     cluster_count: Optional[int] = None
 
     def ready(self, name: str) -> Any:
@@ -631,7 +642,6 @@ class KnowledgeLifecycleService:
         ),
         cluster_map: Callable[[str], Dict[str, str]],
         annotate_edge_support: Callable[[str, List[dict]], List[dict]],
-        decided_seed_pairs: Callable[[str], Dict[frozenset, str]],
         relations_for_notebook: Callable[[str], List[dict]],
         notebook_copy_stats: Callable[[str], dict],
         note_model_error: Callable[..., None],
@@ -728,7 +738,6 @@ class KnowledgeLifecycleService:
         self._wait_ingestion_drain = wait_ingestion_drain
         self.cluster_map = cluster_map
         self._annotate_edge_support = annotate_edge_support
-        self.decided_seed_pairs = decided_seed_pairs
         self.relations_for_notebook = relations_for_notebook
         self.notebook_copy_stats = notebook_copy_stats
         self._note_model_error = note_model_error
@@ -2790,7 +2799,7 @@ class KnowledgeLifecycleService:
                     if len(_ORPHAN_SWEEP_DONE) >= _ORPHAN_SWEEP_DONE_MAX:
                         _ORPHAN_SWEEP_DONE.clear()
                     _ORPHAN_SWEEP_DONE.add(notebook_id)
-        from app.services.kg_merge import place_new_concepts, _norm
+        from app.services.kg_merge import place_new_concepts, placement_seed_space
         # PR-C 有界化:这里曾经 `cmap = self.cluster_map(notebook_id)` —— 整表物化
         # {member_object_id: canonical_id}(生产 9.1M 行 ≈2GB dict),而且每次融合的
         # append 都推进 cluster_mutation_seq、当场作废版本缓存,于是下一个来源再付
@@ -2820,6 +2829,14 @@ class KnowledgeLifecycleService:
                 )
                 if new_objs else []
             )
+            # 安置、桥接 id 一律按**已发布**那一代的概念种子空间(设计 2026-10-19
+            # §五 S1「实施细化」):部署之后、该库重建之前,「Q-Former」仍进
+            # ``K-q former``,翻转之后才进 ``K-qformer``;与簇名同一个连接读,
+            # 本源没有新 concept 时同样不读。
+            seed_version, override = (
+                self._published_seed_space(db, notebook_id)
+                if new_objs else (1, frozenset())
+            )
         if new_objs:
             # ⚠登记:这一读**无法**安全收窄,刻意保留该 (notebook, object_type)
             # 切片的 DISTINCT 扫描。place_new_concepts 对它有两个消费:①按候选 cid
@@ -2838,8 +2855,11 @@ class KnowledgeLifecycleService:
             # 已收窄的是**触发次数**:仅在本源确有该类型新对象时才读(上面的条件),
             # 非 concept 类型同理(见下)。
             canon_names = {r["canonical_id"]: r["canonical_name"] for r in cn}
-            rows = place_new_concepts(new_objs, canon_names,
-                                      seed_fn=lambda o: _norm(o["name"]), id_prefix="K-")
+            rows = place_new_concepts(
+                new_objs, canon_names, id_prefix="K-",
+                seed_space=placement_seed_space(
+                    "concept", new_objs, canon_names,
+                    concept_seed_version=seed_version, override=override))
             # ⚠折叠时刻必须冻结在 append **之前**(双评审同条 P1)。master 在方法
             # 开头读一次整表 cluster_map,所以本源刚抽出的新 concept 在那份快照里
             # **没有簇行** → Tier2 的 ANN 命中里凡是同源新对象都被
@@ -2868,7 +2888,8 @@ class KnowledgeLifecycleService:
             cands: list = []
             if ann is not None:
                 cands = self._tier2_bridge_candidates_ann(
-                    notebook_id, idx, ann, new_objs, frozen_canonical)
+                    notebook_id, idx, ann, new_objs, frozen_canonical,
+                    seed_version=seed_version, override=override)
             else:
                 # The ANN branch never consumes the existing concept payloads:
                 # its labels/vectors already come from the persisted scale index.
@@ -2887,7 +2908,8 @@ class KnowledgeLifecycleService:
             if ann is None and len(ex) <= self.settings.kg_incremental_tier2_max_entities:
                 # PR-C:桥接候选对恒含本次新对象的某个 canonical id(见
                 # _bridge_canonical_ids),故 pending/已决两份排除集都按这些 id 有界取。
-                my_cids = self._bridge_canonical_ids(new_objs)
+                my_cids = self._bridge_canonical_ids(
+                    new_objs, seed_version=seed_version, override=override)
                 with self._connect() as db:
                     # 只读 concept 向量:本分支唯一的向量消费方
                     # `detect_bridge_candidates` 只按 `new_objs` / `existing_items`
@@ -2946,7 +2968,9 @@ class KnowledgeLifecycleService:
                 exclude = {frozenset((r["canonical_a"], r["canonical_b"])) for r in _decided}
                 exclude |= {frozenset((r["canonical_a"], r["canonical_b"])) for r in pend}
                 from app.services.kg_merge import detect_bridge_candidates
-                cands = detect_bridge_candidates(new_objs, new_vecs, existing_items, vecs, ex_cmap, exclude)
+                cands = detect_bridge_candidates(
+                    new_objs, new_vecs, existing_items, vecs, ex_cmap, exclude,
+                    seed_version=seed_version, override=override)
             elif ann is None:
                 self.event_log.emit({
                     "kind": "tier2_skipped", "notebook_id": notebook_id,
@@ -2958,11 +2982,10 @@ class KnowledgeLifecycleService:
                     for c in cands:
                         self.governance_store.insert_merge_candidate(
                             db, notebook_id, c["canonical_a"], c["canonical_b"],
-                            c["score"], now, id_prefix="cm")
-        from app.services.kg_merge import seed_claim, seed_formula, seed_procedure
-        _TYPES = {"claim": (seed_claim, "KL-"), "formula": (seed_formula, "KF-"),
-                  "procedure": (seed_procedure, "KP-")}
-        for t, (sfn, prefix) in _TYPES.items():
+                            c["score"], now, seed_version=seed_version,
+                            id_prefix="cm")
+        _TYPES = {"claim": "KL-", "formula": "KF-", "procedure": "KP-"}
+        for t, prefix in _TYPES.items():
             with self._connect() as db:
                 trows = self.knowledge.incremental_object_rows(
                     db, notebook_id, source_id, t
@@ -2980,29 +3003,51 @@ class KnowledgeLifecycleService:
             if not tnew:
                 continue
             # ⚠同上登记:acronym 别名表要整份既有簇名,不可点查(见 concept 分支注释)。
+            # 这三类没有种子版本(规则不变),版本参数只对 concept 有意义。
             tcanon = {r["canonical_id"]: r["canonical_name"] for r in tcn}
-            trows_w = place_new_concepts(tnew, tcanon,
-                                         seed_fn=lambda o, _s=sfn: _s(o), id_prefix=prefix)
+            trows_w = place_new_concepts(
+                tnew, tcanon, id_prefix=prefix,
+                seed_space=placement_seed_space(
+                    t, tnew, tcanon, concept_seed_version=CONCEPT_SEED_VERSION))
             self.append_clusters(notebook_id, trows_w, object_type=t)
         self._invalidate_unified_cache(notebook_id)
 
     @staticmethod
-    def _bridge_canonical_ids(new_objs: list) -> List[str]:
+    def _bridge_canonical_ids(
+        new_objs: list, *, seed_version: int, override: "frozenset[str]",
+    ) -> List[str]:
         """本次新对象在 Tier2 桥接里用的 canonical id(``my_cid``)。
 
         必须与 ``kg_merge.detect_bridge_candidates`` 和
-        ``_tier2_bridge_candidates_ann`` 内联的那条式子**逐字**同构 ——
-        ``"K-" + seed_or_unique(_norm(name), object_id)``。注意它刻意**不**过
-        ``_seed_with_alias``:桥接侧从来不做 acronym 别名重定向(与
+        ``_tier2_bridge_candidates_ann`` 用的同一个 ``kg_merge.bridge_canonical_id``
+        ——按库**已发布**的种子空间(``seed_version`` / ``override``,与本次安置同
+        一个空间)。注意它刻意**不**过 acronym 别名重定向:桥接侧从来不做(与
         ``place_new_concepts`` 的既有差异,本 PR 不改)。这些 id 是排除集查询的
         有界键——凡是会被判 ``frozenset((a, b)) in exclude`` 的对,``a``/``b``
         必有一个出自这里。"""
         from app.services.kg_merge import bridge_canonical_id
 
         return list(dict.fromkeys(
-            bridge_canonical_id(o.get("name", ""), o["object_id"])
+            bridge_canonical_id(o.get("name", ""), o["object_id"],
+                                seed_version=seed_version, override=override)
             for o in new_objs
         ))
+
+    def _published_seed_space(self, db, notebook_id: str) -> "Tuple[int, frozenset]":
+        """``(concept seed version, override keys)`` of the notebook's PUBLISHED
+        merge, read on the caller's connection: incremental placement,
+        catch-up and bridge ids follow it until the next full rebuild switches
+        the library (§五 S1). The override keys (v1 seeds kept as
+        ``~v1:<seed>``, the collision exception) are read off the stored v2
+        decisions — a read bounded by the notebook's decisions, only for a
+        library already in space 2."""
+        from app.services.kg_merge import override_keys
+
+        version = self.governance_store.published_concept_seed_version(db, notebook_id)
+        if version == 1:
+            return 1, frozenset()
+        return version, override_keys(self.governance_store.decided_seed_pairs_from(
+            db, notebook_id, seed_version=version))
 
     def _freeze_new_object_canonicals(
         self, notebook_id: str, new_objs: list
@@ -3068,7 +3113,9 @@ class KnowledgeLifecycleService:
 
     def _tier2_bridge_candidates_ann(self, notebook_id: str, idx, ann,
                                      new_objs: list,
-                                     frozen_canonical: Dict[str, str]) -> list:
+                                     frozen_canonical: Dict[str, str], *,
+                                     seed_version: int,
+                                     override: "frozenset[str]") -> list:
         """ANN-backed Tier2 bridge candidate detection (P1-3, perf audit).
 
         Same candidate-set semantics as `kg_merge.detect_bridge_candidates`
@@ -3131,7 +3178,8 @@ class KnowledgeLifecycleService:
             )
             _decided = self._bridge_exclude_rows(
                 db, notebook_id, ("confirmed", "rejected", "deferred", "pending"),
-                self._bridge_canonical_ids(new_objs),
+                self._bridge_canonical_ids(
+                    new_objs, seed_version=seed_version, override=override),
             )
         exclude = {frozenset((r["canonical_a"], r["canonical_b"])) for r in _decided}
         new_vecs = {}
@@ -3225,7 +3273,8 @@ class KnowledgeLifecycleService:
             # 与 kg_merge.detect_bridge_candidates 一致的空 seed 守卫:符号-only 名
             # (_norm→"")绝不塌缩成裸 "K-"——否则该退化 canonical 会被写进
             # concept_merge_candidates,与真实簇(K-~oid)错位且互相污染。
-            my_cid = bridge_canonical_id(name_by_obj.get(oid, ""), oid)
+            my_cid = bridge_canonical_id(name_by_obj.get(oid, ""), oid,
+                                         seed_version=seed_version, override=override)
             q = np.asarray(qvec, dtype=np.float32)
             k = first_k
             eligible: list = []  # [(node_id, canonical_id, sim)] — alive concepts, not self
@@ -5479,7 +5528,20 @@ class KnowledgeLifecycleService:
     # Streamed unified rebuild
     # ------------------------------------------------------------------
 
-    def _cluster_input_version(self, notebook_id: str, *, exclude_emb_count: bool = False) -> str:
+    def _cluster_input_facts(
+        self, notebook_id: str, *, exclude_emb_count: bool = False,
+    ) -> "Tuple[int, int, int, int]":
+        """``(seq, obj_c, dec_c, emb_c)``: the data-derived components of
+        ``_cluster_input_version``, read once (``cluster_input_facts``)."""
+        with self._connect() as db:
+            return self.unified_kg.cluster_input_facts(
+                db, notebook_id, exclude_emb_count=exclude_emb_count
+            )
+
+    def _cluster_input_version(
+        self, notebook_id: str, *, exclude_emb_count: bool = False,
+        facts: "Optional[Tuple[int, int, int, int]]" = None, dec_growth: int = 0,
+    ) -> str:
         """O(1) content-hash gating rebuild_unified_kg's skip-when-unchanged path.
 
         PRIMARY change signal = the monotonic kg_mutation_seq, bumped by
@@ -5518,11 +5580,23 @@ class KnowledgeLifecycleService:
         fine-grained correctness within a checkpoint, so dropping emb_c here is
         safe. The skip-gate itself must keep using the DEFAULT (emb-inclusive)
         version unchanged — a new/changed embedding is a real reason to recluster.
+
+        ``facts``: the components a rebuild read at its entry
+        (``_cluster_input_facts``), so its end-write stores the version of the
+        inputs it consumed; ``None`` reads them now. ``dec_growth``: the rows
+        the first v2 rebuild's decision recompute added to the confirmed /
+        rejected count (one v1 decision can become several v2 pairs, §五 S1
+        step 5). Folded into ``dec_c`` here, the stored version equals what
+        the next rebuild reads — otherwise that "update" would recluster again
+        for a change nobody made.
         """
-        with self._connect() as db:
-            seq, obj_c, dec_c, emb_c = self.unified_kg.cluster_input_facts(
-                db, notebook_id, exclude_emb_count=exclude_emb_count
-            )
+        if facts is None:
+            with self._connect() as db:
+                facts = self.unified_kg.cluster_input_facts(
+                    db, notebook_id, exclude_emb_count=exclude_emb_count
+                )
+        seq, obj_c, dec_c, emb_c = facts
+        dec_c = int(dec_c) + int(dec_growth)
         # runtime_dim 追加(非替换 embed_dim;T3/R4):聚类/融合空间统一到运行时
         # 空间,切 EMBED_RUNTIME_DIM 后版本闸不得跳过重聚(旧空间的簇不再有效)。
         # 算法版本(纯代码分量):归一化/哨兵/护栏等 seed·聚类语义的代码改动不动任何
@@ -5544,11 +5618,21 @@ class KnowledgeLifecycleService:
         parts += [int(dec_c), embed_dim, runtime_dim, algo_version]
         return hashlib.sha1("|".join(map(str, parts)).encode()).hexdigest()
 
-    def _stream_seed_reps(self, notebook_id: str, object_type: str, seed_fn,
-                          run_id: str = "", compute_reps: bool = True):
+    def _stream_seed_reps(self, notebook_id: str, object_type: str, *,
+                          concept_seed_version: int, run_id: str = "",
+                          compute_reps: bool = True,
+                          override: "frozenset[str]" = frozenset(),
+                          track: "frozenset[str]" = frozenset(),
+                          seeds_of_key: "Optional[Dict[str, Set[str]]]" = None):
         """Stream knowledge_objects of one type → populate kg_cluster_scratch
         (object_id → seed) and accumulate seed-level aggregates, memory-bounded
-        by #unique seeds (NOT #objects). Returns (reps, members_count,
+        by #unique seeds (NOT #objects). Seeds come from the type's seed space
+        (``kg_merge.seed_space_for``): concepts in ``concept_seed_version``
+        with ``override`` (v1 seeds kept as ``~v1:<seed>``), the other types by
+        their unchanged rule. ``track``: v1 decision keys — every concept whose
+        v1 seed is one adds its final seed to ``seeds_of_key[key]`` (the
+        decision recompute's step 2; the v1 seed is computed only for names
+        that can lead to a key). Returns (reps, members_count,
         seed_first_name):
           - reps[seed]          = mean of member vectors (dim-filtered); empty
                                   dict when compute_reps=False (skips Pass B).
@@ -5564,8 +5648,7 @@ class KnowledgeLifecycleService:
         cluster_seeds receives {} vectors anyway — avoids a large ANN over
         non-concept seeds."""
         import numpy as np
-        from app.services.kg_merge import (build_acronym_alias_map, _seed_with_alias,
-                                           _norm, seed_or_unique)
+        from app.services.kg_merge import seed_space_for
 
         embed_dim = self.settings.embed_dim
         # Scratch is scoped to (notebook_id, run_id); clear only this run's rows
@@ -5580,7 +5663,9 @@ class KnowledgeLifecycleService:
                 cur = self.unified_kg.seed_payload_rows(db, notebook_id, object_type)
                 for r in cur:
                     yield _fast_loads(r["payload"] or "{}").get("name", "")
-        alias_map = build_acronym_alias_map(_name_gen())
+        space = seed_space_for(object_type, _name_gen(),
+                               concept_seed_version=concept_seed_version,
+                               override=override, track=track)
 
         # Pass A2: stream (id, name) → seed; accumulate counts/first-name; buffer
         # (notebook_id, id, seed) into scratch in batches.
@@ -5631,9 +5716,9 @@ class KnowledgeLifecycleService:
                 for r in cur:
                     pay = _fast_loads(r["payload"] or "{}")
                     name = pay.get("name", "")
-                    seed = seed_or_unique(
-                        _seed_with_alias({"name": name, "payload": pay}, seed_fn, alias_map),
-                        r["id"])
+                    seed, key = space.seed_and_key({"name": name, "payload": pay}, r["id"])
+                    if key is not None:
+                        seeds_of_key.setdefault(key, set()).add(seed)
                     members_count[seed] = members_count.get(seed, 0) + 1
                     seed_first_name.setdefault(seed, name)
                     local.append((notebook_id, run_id, r["id"], seed))
@@ -5826,13 +5911,12 @@ class KnowledgeLifecycleService:
         安置幂等,且 added>0 才 bump cluster_mutation_seq——「催收是 published
         代写入,必须推进版本身份」(复评 P1-2)与「无新增不制造假信号」两条
         红线同时满足。期间被删的对象在窗口查询里 join 不到,天然跳过。"""
-        from app.services.kg_merge import (place_new_concepts, _norm,
-                                           seed_claim, seed_formula,
-                                           seed_procedure)
-        _SEEDS = {"concept": (lambda o: _norm(o["name"]), "K-"),
-                  "claim": (seed_claim, "KL-"),
-                  "formula": (seed_formula, "KF-"),
-                  "procedure": (seed_procedure, "KP-")}
+        from app.services.kg_merge import place_new_concepts, placement_seed_space
+        _PREFIXES = {"concept": "K-", "claim": "KL-", "formula": "KF-",
+                     "procedure": "KP-"}
+        # 重放进 published 代 → 按它的种子空间安置(翻转后即本轮写下的空间)。
+        with self._connect() as db:
+            seed_version, override = self._published_seed_space(db, notebook_id)
         skew = self.settings.kg_catchup_skew_seconds
         after_type, after_member = "", ""
         replayed = moved = 0
@@ -5866,13 +5950,12 @@ class KnowledgeLifecycleService:
             short_page = len(rows) < self._CATCHUP_PAGE_ROWS
             del rows
             for t, objs in by_type.items():
-                picked = _SEEDS.get(t)
-                if picked is None:
+                prefix = _PREFIXES.get(t)
+                if prefix is None:
                     # 四类之外的窗口行今天不存在;真出现时如实上报再跳过,
                     # 不静默(质量评 P3)。
                     unknown_types.add(t)
                     continue
-                sfn, prefix = picked
                 replayed += len(objs)
                 canon = canon_by_type.get(t)
                 if canon is None:
@@ -5882,8 +5965,11 @@ class KnowledgeLifecycleService:
                     canon = {r["canonical_id"]: r["canonical_name"]
                              for r in cn}
                     canon_by_type[t] = canon
-                placed = place_new_concepts(objs, canon, seed_fn=sfn,
-                                            id_prefix=prefix)
+                placed = place_new_concepts(
+                    objs, canon, id_prefix=prefix,
+                    seed_space=placement_seed_space(
+                        t, objs, canon, concept_seed_version=seed_version,
+                        override=override))
                 moved += self.append_clusters(notebook_id, placed,
                                               object_type=t)
                 for r in placed:
@@ -6230,6 +6316,147 @@ class KnowledgeLifecycleService:
                                      "notebook_id": notebook_id,
                                      "error_class": type(exc).__name__})
 
+    def _stream_concept_seed_space(self, notebook_id: str, run_id: str):
+        """The concept seed stream of a full rebuild, in ``CONCEPT_SEED_VERSION``,
+        with the recompute of stored v1 decisions (design 2026-10-19 §五 S1
+        「实施细化」 steps 1–4). Returns ``(reps, members_count,
+        seed_first_name, decided, plan)``: the stream's aggregates, the seed
+        pair decisions this clustering uses, and the recompute (``None`` when
+        the notebook holds no v1 decision any more).
+
+        1. Before the stream: the stored v2 decisions (whose ``~v1:`` seeds
+           are the override keys every v2 rebuild applies) and the v1 rows
+           (their keys are what the stream tracks).
+        2. The stream records, for each tracked key, the final seeds of the
+           objects whose v1 seed it is — the v1 seed is computed only for
+           names that can lead to a key, and only while v1 rows exist.
+        3–4. ``kg_merge.translate_v1_decisions``. A new override key (a
+           rejection the new seeds would collapse) changes those objects'
+           seeds, so the stream runs once more with it — only then.
+
+        The plan is persisted by the pending refresh
+        (``_refresh_pending_merges``) and is idempotent: a rebuild that fails
+        before that leaves every v1 row as it was, the next one redoes it."""
+        from app.services.kg_merge import (
+            StoredDecision, override_keys, translate_v1_decisions,
+        )
+
+        with self._connect() as db:
+            decided = self.governance_store.decided_seed_pairs_from(
+                db, notebook_id, seed_version=CONCEPT_SEED_VERSION)
+            v1_rows = [
+                StoredDecision(r["id"], r["key_a"], r["key_b"], r["status"])
+                for r in self.governance_store.merge_decision_rows(
+                    db, notebook_id, seed_version=1)
+            ]
+        override = override_keys(decided)
+        seeds_of_key: Dict[str, Set[str]] = {}
+        stream = self._stream_seed_reps(
+            notebook_id, "concept", concept_seed_version=CONCEPT_SEED_VERSION,
+            run_id=run_id, override=override,
+            track=frozenset(k for r in v1_rows for k in (r.key_a, r.key_b)),
+            seeds_of_key=seeds_of_key)
+        if not v1_rows:
+            return (*stream, decided, None)
+        plan = translate_v1_decisions(
+            v1_rows, seeds_of_key, override=override,
+            v2_confirmed=[pair for pair, st in decided.items() if st == "confirmed"])
+        if plan.override != override:
+            del stream          # the first stream's seed vectors go before the second's
+            stream = self._stream_seed_reps(
+                notebook_id, "concept", concept_seed_version=CONCEPT_SEED_VERSION,
+                run_id=run_id, override=plan.override)
+        return (*stream, {**decided, **plan.decided_pairs()}, plan)
+
+    def _squash_merge_candidates(
+        self, notebook_id: str, seed_to_canonical: Dict[str, str],
+        members_count: Dict[str, int], reps: Dict[str, Any],
+    ) -> List[tuple]:
+        """The squash-key candidate tier of the pending refresh (design §4.4,
+        P3): one star per group of canonicals whose seeds differ only in the
+        spaces punctuation made — ``kg_merge.squash_pending_candidates``. Its
+        cap is the Settings field ``kg_merge_squash_candidates_max``; hitting it
+        emits ``kg_merge_squash_candidates_capped`` (never silent). Runs while
+        the seed vectors are still in hand (the score is their cosine)."""
+        from app.services.kg_merge import squash_pending_candidates
+
+        rows, total = squash_pending_candidates(
+            seed_to_canonical, members_count, reps,
+            limit=self.settings.kg_merge_squash_candidates_max)
+        if total > len(rows):
+            self.event_log.emit({
+                "kind": "kg_merge_squash_candidates_capped",
+                "notebook_id": notebook_id, "total": total, "kept": len(rows),
+            })
+        return rows
+
+    def _refresh_pending_merges(
+        self, notebook_id: str, generation: int, seeds: List[str],
+        ann_rows: List[tuple], squash_rows: List[tuple], plan, now: str,
+    ) -> int:
+        """Refresh the pending candidates in ONE transaction (per-candidate
+        inserts were the rebuild hotspot at scale); confirmed / rejected /
+        deferred rows are untouched except by the decision recompute's
+        persistence (§五 S1 step 5), which lands in this same transaction.
+
+        Order: re-check the in-flight claim (codex #671 R12 P2: the pending
+        queue is shared, not generational — a preempted loser must not wipe
+        its successor's candidates); DELETE the pending rows first so
+        PostgreSQL serializes against updates of them; persist the recompute
+        (the store locks its v1 rows and translates only those still as
+        planned); then read the v2 decisions LIVE and filter the ANN and
+        squash rows (one row per canonical pair, ``kg_merge.merge_pending_tiers``)
+        against them, since decisions may land after the clustering snapshot.
+        Returns the growth of the confirmed / rejected row count, which the
+        caller folds into the stored input version."""
+        from app.services.kg_merge import (
+            filter_pending_seeds_by_decisions, merge_pending_tiers,
+        )
+
+        growth, done = 0, []
+        with self._write() as db:
+            if not self.unified_kg.derived_claim_still_held(
+                    db, notebook_id, generation):
+                self.event_log.emit({
+                    "kind": "kg_generation_preempted",
+                    "notebook_id": notebook_id,
+                    "generation": generation, "stage": "pending_refresh",
+                })
+                raise KgDerivedGenerationPreempted(notebook_id, generation)
+            self.governance_store.delete_pending_merges(db, notebook_id)
+            if plan is not None and plan.pairs:
+                growth, done = self.governance_store.apply_v1_decision_translation(
+                    db, notebook_id, plan.pairs,
+                    {rid: (r.key_a, r.key_b, r.status) for rid, r in plan.rows.items()},
+                    now)
+            live_decided = self.governance_store.decided_seed_pairs_from(
+                db, notebook_id, seed_version=CONCEPT_SEED_VERSION)
+            pending_seeds = filter_pending_seeds_by_decisions(
+                merge_pending_tiers(ann_rows, squash_rows), seeds,
+                {pair for pair, st in live_decided.items() if st == "confirmed"},
+                {pair for pair, st in live_decided.items()
+                 if st in ("rejected", "deferred")},
+            )
+            self.governance_store.insert_pending_merge_rows(
+                db,
+                [(self._new_id("mc"), notebook_id, ca, cb, sa, sb, score, now, now)
+                 for sa, sb, ca, cb, score in pending_seeds],
+                seed_version=CONCEPT_SEED_VERSION)
+        if plan is not None:
+            # Rows kept in space 1 are retried by the next full rebuild: the
+            # planned rows decided again mid-rebuild, and the suspended ones
+            # (a side no current object carries).
+            self.event_log.emit({
+                "kind": "kg_merge_decisions_recomputed",
+                "notebook_id": notebook_id,
+                "translated": len(done),
+                "suspended": len(plan.suspended) + len(plan.pairs) - len(done),
+                "decision_rows_added": growth,
+                "override_keys": len(plan.override),
+                "unresolved": plan.unresolved,
+            })
+        return growth
+
     @notebook_model_artifact_scope
     def rebuild_unified_kg(self, notebook_id: str,
                            progress: Optional[Callable[[str, int, int], None]] = None,
@@ -6267,15 +6494,15 @@ class KnowledgeLifecycleService:
         # 两个 CLI caller 已保证 force=(rebuild_only or fresh)/force=fresh;这里在函数边界再兜一层,
         # 防将来新增 caller 传 force=False+fresh=True 时被 skip-gate 静默跳过、clear 落空(defense-in-depth)。
         force = force or fresh
-        # Content-version of the clustering inputs, captured ONCE at entry. Reused
-        # both for the skip gate below and for the END-write (so the stored version
-        # reflects the inputs this rebuild actually consumed).
-        _ver = self._cluster_input_version(notebook_id)
+        # Clustering inputs, read ONCE at entry: their version gates the skip below,
+        # and the END-write stores the version of the inputs this rebuild consumed.
+        _facts = self._cluster_input_facts(notebook_id)
+        _ver = self._cluster_input_version(notebook_id, facts=_facts)
         if not force:
             cached = self._unified_rebuild_skip(notebook_id, _ver, progress)
             if cached is not None:
                 return cached
-        run = self._unified_rebuild_claim(notebook_id, _ver, progress, fresh)
+        run = self._unified_rebuild_claim(notebook_id, _facts, progress, fresh)
 
         # The whole rebuild body below runs under try/finally so a crash,
         # exception, or cancellation ANYWHERE in it (not just during Pass A2
@@ -6343,7 +6570,7 @@ class KnowledgeLifecycleService:
         return None
 
     def _unified_rebuild_claim(
-        self, notebook_id: str, ver: str,
+        self, notebook_id: str, facts: "Tuple[int, int, int, int]",
         progress: Optional[Callable[[str, int, int], None]], fresh: bool,
     ) -> "_UnifiedKgRebuildRun":
         """Claim the in-flight derived generation and mint this round's run id."""
@@ -6375,7 +6602,7 @@ class KnowledgeLifecycleService:
         # Each rebuild gets a unique run_id so concurrent rebuilds of the SAME
         # notebook never wipe or read each other's scratch rows.
         return _UnifiedKgRebuildRun(
-            notebook_id=notebook_id, progress=progress, fresh=fresh, ver=ver,
+            notebook_id=notebook_id, progress=progress, fresh=fresh, facts=facts,
             claim=_claim, generation=int(_claim["generation"]),
             published_from=int(_claim["cluster_generation"]),
             anchor_ts=_claim["ts"], run_id=_uuid4().hex,
@@ -6436,27 +6663,28 @@ class KnowledgeLifecycleService:
 
     def _unified_rebuild_concepts(self, run: "_UnifiedKgRebuildRun") -> None:
         """Concept clustering (vector + name seeds) with the optional LLM merge
-        review and its re-cluster; leaves seeds, member counts and the
-        clustering result on ``run``."""
+        review and its re-cluster; leaves seeds, member counts, the clustering
+        result, the squash candidate tier and the v1 decisions' recompute on
+        ``run``."""
         import time as _time
 
-        from app.services.kg_merge import _discriminative_conflict, _norm, cluster_seeds
+        from app.services.kg_merge import _discriminative_conflict, cluster_seeds
         notebook_id, run_id = run.notebook_id, run.run_id
         def _stage(msg: str) -> None:
             self._unified_rebuild_stage(run, msg)
         # --- Concepts (vector + name-seed clustering) ----------------------
-        # _stream_seed_reps re-populates kg_cluster_scratch for object_type=concept
-        # (object_id -> seed) and returns seed-level aggregates only.
+        # Seed space CONCEPT_SEED_VERSION; re-populates kg_cluster_scratch for
+        # object_type=concept (object_id -> seed), returns seed-level aggregates
+        # and the decisions in that space (v1 ones recomputed, §五 S1).
         _t = _time.perf_counter()
-        reps, members_count, seed_first_name = self._stream_seed_reps(
-            notebook_id, "concept", lambda o: _norm(o["name"]), run_id=run_id)
+        reps, members_count, seed_first_name, decided, run.seed_plan = \
+            self._stream_concept_seed_space(notebook_id, run_id)
         # IMPORTANT: include seeds with NO vector (name-only) — use members_count
         # keys, not reps keys, to match the legacy all-objects path.
         seeds = sorted(members_count)
         _stage(f"concept: streamed {sum(members_count.values())} objs → "
                f"{len(seeds)} seeds, {len(reps)} vecs "
                f"({_time.perf_counter() - _t:.1f}s)")
-        decided = self.decided_seed_pairs(notebook_id)
         confirmed = {p for p, s in decided.items() if s == "confirmed"}
         rejected = {p for p, s in decided.items() if s in ("rejected", "deferred")}
         _t_cluster = _time.perf_counter()
@@ -6492,13 +6720,16 @@ class KnowledgeLifecycleService:
                f"{len(set(sd['seed_to_canonical'].values()))} canonicals, "
                f"{len(sd.get('auto_candidates', []))} auto-cand "
                f"({_time.perf_counter() - _t_cluster:.1f}s)")
+        run.squash_rows = self._squash_merge_candidates(
+            notebook_id, sd["seed_to_canonical"], members_count, reps)
         # reps (concept mean-vectors, ~18GB at 4.4M seeds) is dead after
-        # clustering — its only consumers are the cluster_seeds calls above.
-        # Drop it BEFORE the derivation tail (canonical relations / mention
-        # bridge / build_viz / communities) so its ~18GB doesn't ride
-        # resident and stack on top of those stages (OOM audit P0-2). dict of
-        # numpy arrays → freed immediately by refcount, no gc needed. It never
-        # goes onto ``run``, so it dies with this frame at the latest.
+        # clustering — its only consumers are the cluster_seeds calls and the
+        # squash tier above. Drop it BEFORE the derivation tail (canonical
+        # relations / mention bridge / build_viz / communities) so its ~18GB
+        # doesn't ride resident and stack on top of those stages (OOM audit
+        # P0-2). dict of numpy arrays → freed immediately by refcount, no gc
+        # needed. It never goes onto ``run``, so it dies with this frame at the
+        # latest.
         del reps
         run.seeds, run.members_count, run.sd = seeds, members_count, sd
 
@@ -6576,7 +6807,7 @@ class KnowledgeLifecycleService:
         """Seed-exact cross-document merge of claims, formulas and procedures."""
         import time as _time
 
-        from app.services.kg_merge import cluster_seeds, seed_claim, seed_formula, seed_procedure
+        from app.services.kg_merge import cluster_seeds
         notebook_id, run_id, generation = run.notebook_id, run.run_id, run.generation
         # Cross-doc exact-normalized merge for non-concept types (v1: seed-based;
         # vector near-dup remains concept-only). Each type isolated by id prefix.
@@ -6584,14 +6815,12 @@ class KnowledgeLifecycleService:
         # exact-seed grouping, matching the legacy cluster_objects(tobjs, {}, ...).
         # compute_reps=False skips Pass B entirely (no embeddings join) since
         # cluster_seeds receives {} anyway — avoids wasted ANN at scale.
-        _TYPE_MERGE = {"claim": (seed_claim, "KL-"),
-                       "formula": (seed_formula, "KF-"),
-                       "procedure": (seed_procedure, "KP-")}
-        for t, (sfn, prefix) in _TYPE_MERGE.items():
+        _TYPE_MERGE = {"claim": "KL-", "formula": "KF-", "procedure": "KP-"}
+        for t, prefix in _TYPE_MERGE.items():
             _t = _time.perf_counter()
-            reps_t, mc_t, sfn_t = self._stream_seed_reps(notebook_id, t, sfn,
-                                                          run_id=run_id,
-                                                          compute_reps=False)
+            reps_t, mc_t, sfn_t = self._stream_seed_reps(
+                notebook_id, t, concept_seed_version=CONCEPT_SEED_VERSION,
+                run_id=run_id, compute_reps=False)
             # Empty type → scratch empty → _write_cluster_map_streamed clears rows
             # (same as legacy write_clusters([], object_type=t)).
             sd_t = cluster_seeds(sorted(mc_t), reps_t, mc_t, sfn_t, set(), set(),
@@ -6606,53 +6835,20 @@ class KnowledgeLifecycleService:
 
     def _unified_rebuild_pending(self, run: "_UnifiedKgRebuildRun") -> None:
         """Replace the pending merge candidates in one transaction, filtered by
-        the decisions live at that moment."""
+        the decisions live at that moment, together with the persistence of
+        the v1 decisions' recompute (``_refresh_pending_merges``); leaves the
+        recompute's row growth on ``run``."""
         import time as _time
 
-        from app.services.kg_merge import filter_pending_seeds_by_decisions
         notebook_id, generation = run.notebook_id, run.generation
-        sd, seeds = run.ready("sd"), run.ready("seeds")
-        # Refresh pending candidates in ONE transaction (per-candidate inserts
-        # were the rebuild hotspot at scale). confirmed/rejected rows untouched.
+        # Pending refresh + the decision recompute's persistence, ONE
+        # transaction (see _refresh_pending_merges).
         now = self._now()
         run.now = now
         _t = _time.perf_counter()
-        with self._write() as db:
-            # 写段前复读认领(codex #671 R12 P2):pending 队列是**共享**
-            # 状态(不代次化)——被 TTL 抢占的败者在这里整表删写,会把
-            # 继任者的候选抹掉、把败者代次的候选留给人审,哪怕它随后的
-            # 翻转必然作废。与写代段同一条纪律,响亮早停。
-            if not self.unified_kg.derived_claim_still_held(
-                    db, notebook_id, generation):
-                self.event_log.emit({
-                    "kind": "kg_generation_preempted",
-                    "notebook_id": notebook_id,
-                    "generation": generation, "stage": "pending_refresh",
-                })
-                raise KgDerivedGenerationPreempted(notebook_id, generation)
-            self.governance_store.delete_pending_merges(db, notebook_id)
-            # Decisions may land after the earlier cluster_seeds snapshot.
-            # DELETE first so PostgreSQL serializes against updates of the
-            # old pending rows; then read decisions and filter in this same
-            # transaction before publishing replacement rows.
-            live_decided = self.governance_store.decided_seed_pairs_from(
-                db, notebook_id
-            )
-            live_confirmed = {
-                pair for pair, status in live_decided.items()
-                if status == "confirmed"
-            }
-            live_rejected = {
-                pair for pair, status in live_decided.items()
-                if status in ("rejected", "deferred")
-            }
-            pending_seeds = filter_pending_seeds_by_decisions(
-                sd["pending_seeds"], seeds, live_confirmed, live_rejected
-            )
-            self.governance_store.insert_pending_merge_rows(
-                db,
-                [(self._new_id("mc"), notebook_id, ca, cb, sa, sb, score, now, now)
-                 for sa, sb, ca, cb, score in pending_seeds])
+        run.dec_growth = self._refresh_pending_merges(
+            notebook_id, generation, run.ready("seeds"), run.ready("sd")["pending_seeds"],
+            run.ready("squash_rows"), run.seed_plan, now)
         self._unified_rebuild_stage(run, f"pending refresh ({_time.perf_counter() - _t:.1f}s)")
 
     def _unified_rebuild_publish(self, run: "_UnifiedKgRebuildRun") -> None:
@@ -6674,7 +6870,8 @@ class KnowledgeLifecycleService:
         with self._write() as db:
             _flipped = self.unified_kg.flip_cluster_generation(
                 db, notebook_id, published_from=_published_from,
-                generation=generation, catchup_from_ts=_anchor_ts, now=now)
+                generation=generation, catchup_from_ts=_anchor_ts, now=now,
+                concept_seed_version=CONCEPT_SEED_VERSION)
         if not _flipped:
             self.event_log.emit({
                 "kind": "kg_generation_preempted", "notebook_id": notebook_id,
@@ -6708,17 +6905,23 @@ class KnowledgeLifecycleService:
                     r["canonical_id"]
                     for r in self.governance_store.incremental_cluster_rows(
                         db, notebook_id, "concept")})
+        # The version of the inputs read at ENTRY, with the decision
+        # recompute's row growth folded in (§五 S1 step 5): what the next
+        # rebuild reads, so its "update" is the skip path.
+        stored_ver = self._cluster_input_version(
+            notebook_id, facts=run.facts, dec_growth=run.ready("dec_growth"))
         with self._write() as db:
             # CRITICAL: the store's finish_rebuild_state UPSERT stores
-            # cluster_input_version=_ver (captured at ENTRY) and clears dirty
-            # only while kg_mutation_seq still equals the claim's (input_seq:
-            # a change that arrived mid-rebuild keeps dirty=1), but MUST NOT
-            # touch kg_mutation_seq — omitted from both the column list and
-            # the SET so the counter is PRESERVED. Bumping it would advance the
-            # version past what was just stored (gate never skips); resetting
-            # it would lose mutations that arrived mid-rebuild.
+            # cluster_input_version=stored_ver (from the facts captured at
+            # ENTRY) and clears dirty only while kg_mutation_seq still equals
+            # the claim's (input_seq: a change that arrived mid-rebuild keeps
+            # dirty=1), but MUST NOT touch kg_mutation_seq — omitted from both
+            # the column list and the SET so the counter is PRESERVED. Bumping
+            # it would advance the version past what was just stored (gate
+            # never skips); resetting it would lose mutations that arrived
+            # mid-rebuild.
             self.unified_kg.finish_rebuild_state(
-                db, notebook_id, run.ver, cluster_count, now,
+                db, notebook_id, stored_ver, cluster_count, now,
                 published_generation=generation,
                 input_seq=_claim["kg_mutation_seq"],
                 cluster_code_version=cluster_code_version(self.settings))
@@ -7768,7 +7971,7 @@ class KnowledgeLifecycleService:
           ⑤ 来源画像那一趟对象流**同时**喂 `FindingsObjectTally` —— 零板块的库也照跑
              (问题清单是必需产物,只是不建 `SourceBoardCounter`、不写来源画像);
           ⑥ drain 之后、``can2idx.clear()`` 之前 `compute_findings`(已存的合并决定按
-             v1 种子判,成员名按批有界读),随即清 ``can2idx``,再按 `draft.pending()`
+             成员 v1 / v2 两个空间的种子判,成员名按批有界读),随即清 ``can2idx``,再按 `draft.pending()`
              的有界清单点查展示名、来源标题(全部在写事务之外),最后读一次标记表算出
              要清掉的过期豁免;
           ⑦ 三条统计快照照旧跑在更低的水位上(⑥ 新增的结构到这里已全部释放)。
@@ -7999,12 +8202,13 @@ class KnowledgeLifecycleService:
     ) -> "FindingsDraft":
         """第 ⑥ 步的规则计算(设计 2026-10-19 §7.1),写事务之外。
 
-        已存的合并决定(``decided_seed_pairs_from``,按 v1 种子)一次短快照读;成员种子
+        已存的合并决定(``decided_seed_pairs_from``,两个种子空间的行都要)一次短快照读;成员种子
         按引擎给的批(≤ 500 个 canonical)各开一次短快照点查 —— 不把一个 REPEATABLE READ
         快照挂过整段规则计算(那会拖住 PG 的 xmin horizon)。两者分属不同快照只影响「这
         一刻刚落下的决定」:读侧按当时的决定重判 F4(`under_merge_decision`),不会漏。"""
         with self.unified_kg.read_snapshot() as db:
-            decisions = self.governance_store.decided_seed_pairs_from(db, notebook_id)
+            decisions = self.governance_store.decided_seed_pairs_from(
+                db, notebook_id, seed_version=None)
 
         def member_seeds(canonical_ids: "Sequence[str]") -> "Dict[str, Set[str]]":
             with self.unified_kg.read_snapshot() as db:
@@ -8012,7 +8216,7 @@ class KnowledgeLifecycleService:
                     db, notebook_id, canonical_ids)
             seeds: "Dict[str, Set[str]]" = {}
             for canonical_id, name, _visible, _count in rows:
-                seeds.setdefault(canonical_id, set()).add(concept_seed_v1(name))
+                seeds.setdefault(canonical_id, set()).update(concept_decision_seeds(name))
             return seeds
 
         return compute_findings(
@@ -8049,7 +8253,7 @@ class KnowledgeLifecycleService:
                         db, notebook_id, members)
                     seeds: "Dict[str, Set[str]]" = {}
                     for cid, name, _visible, _count in rows:
-                        seeds.setdefault(cid, set()).add(concept_seed_v1(name))
+                        seeds.setdefault(cid, set()).update(concept_decision_seeds(name))
                     # 展示名只取可见成员;种子取全部成员(含隐藏),F4 把它存进证据,读侧
                     # 按种子匹配已存决定、不再读成员。
                     draft.supply(

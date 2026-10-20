@@ -59,12 +59,14 @@ def _old_find_duplicates(repo, notebook_id: str, object_type: str) -> list:
         objs = governance._knowledge_objects(db, notebook_id, object_type, statuses=None)
     objs = [o for o in objs if o.get("status") != "deprecated"]
 
-    alias_map = build_acronym_alias_map(o["payload"].get("name", "") for o in objs)
+    # The fixture libraries publish seed space 1 (no unified_kg_state row).
+    alias_map = build_acronym_alias_map(
+        (o["payload"].get("name", "") for o in objs), seed_version=1)
     by_seed: dict = {}
     for o in objs:
         seed = _seed_with_alias(
             {"name": o["payload"].get("name", ""), "payload": o["payload"]},
-            seed_fn, alias_map)
+            seed_fn, alias_map, seed_version=1)
         if seed:
             by_seed.setdefault(seed, []).append(o)
 

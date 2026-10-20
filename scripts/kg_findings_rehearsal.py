@@ -122,6 +122,7 @@ from app.domain.kg_findings_contracts import (  # noqa: E402
     UBIQUITOUS_SOURCE_COUNT,
 )
 from app.domain.kg_merge_seed import (  # noqa: E402
+    concept_decision_seeds,
     concept_seed_v1,
     concept_seed_v2,
     concept_squash_key,
@@ -588,11 +589,12 @@ def decisions_from_rows(rows: Iterable[tuple]) -> Dict[frozenset, str]:
 
 
 def member_seeds_from_rows(rows: Iterable[Sequence[Any]]) -> Dict[str, Set[str]]:
-    """Member-name rows ``(canonical_id, name, ...)`` -> the v1 seeds of each
-    canonical (every member, hidden ones included — as the product's)."""
+    """Member-name rows ``(canonical_id, name, ...)`` -> the decision seeds of
+    each canonical (v1 and v2, ``concept_decision_seeds`` — what the engine
+    stores; every member, hidden ones included — as the product's)."""
     out: Dict[str, Set[str]] = {}
     for row in rows:
-        out.setdefault(row[0], set()).add(concept_seed_v1(row[1] or ""))
+        out.setdefault(row[0], set()).update(concept_decision_seeds(row[1] or ""))
     return out
 
 

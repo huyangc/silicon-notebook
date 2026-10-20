@@ -111,12 +111,13 @@ def seed_concept(obj) -> str:
 # Concept seed spaces v1 / v2 and the squash key (KG-analysis findings design
 # 2026-10-19, §4.4 + §五 S1 「实施细化」).
 #
-# These are PURE functions added ahead of the seed switch. Nothing calls v2 to
-# build clusters yet: the switch (alias table, ``_seed_with_alias``,
-# ``bridge_canonical_id``, the unified-rebuild seed stream, catch-up and
-# incremental fusion, all parameterised by seed version) lands with PR-4 of
-# that plan. Today they feed only the findings rules (F4 narrow / wide split,
-# S1 "needs development" count).
+# Full rebuilds seed concepts in space 2 (``CONCEPT_SEED_VERSION`` below);
+# the alias table, ``_seed_with_alias``, ``bridge_canonical_id``, the
+# unified-rebuild seed stream, catch-up and incremental fusion are all
+# parameterised by seed version (``app.services.kg_merge.ConceptSeedSpace``),
+# and a library keeps placing new objects in the space it PUBLISHED until its
+# next full rebuild. The findings rules use both (F4 narrow / wide split, S1
+# "needs development" count).
 #
 # ⚠ ``_norm`` is deliberately NOT changed. ``kg_merge._discriminative_conflict``
 # tokenises ``_norm`` output on spaces to detect "only one contrast word
@@ -198,9 +199,7 @@ def concept_seed_v2(name: str) -> str:
     ``test_v2_drops_original_separators_before_punctuation`` pins the order.
     """
     base = _seed_base(name)
-    text = _ORIGINAL_SEPARATORS_RE.sub("", base)
-    text = _NON_SEED_CHARS_RE.sub(" ", text)
-    text = _WHITESPACE_RUN_RE.sub(" ", text).strip()
+    text = _v2_text_before_aliases(base)
     if text.replace(" ", "") in _ALIAS_KEYS_SQUASHED:
         alias = _ALIASES.get(_v1_unaliased_from_base(base))
         if alias is not None:
@@ -214,7 +213,8 @@ def concept_squash_key(name: str) -> str:
     Coarser than the v2 seed (it also erases the punctuation-made spaces, so
     "Llama 3.1" and "Llama 31" share ``llama31``) but it still keeps ``+`` and
     ``/`` ("C++" ≠ "C", "I/O" ≠ "IO"). It is the F4 subject key and the one
-    function F4 (and later PR-4's squash candidate tier) groups by:
+    function F4 and the squash candidate tier of the pending refresh
+    (``kg_merge.squash_pending_candidates``, by ``seed_squash_key``) group by:
 
       · v1 seeds differ, v2 seeds equal  → the **narrow** half: a seed defect S1
         fixes automatically ("Q-Former" / "Qformer", "RMS Norm" / "RMSNorm");
@@ -223,6 +223,134 @@ def concept_squash_key(name: str) -> str:
         ("Llama 3.1" / "Llama 31").
     """
     return concept_seed_v2(name).replace(" ", "")
+
+
+# ---------------------------------------------------------------------------
+# The concept seed SPACE a notebook publishes (PR-4, design §五 S1 「实施细化」).
+#
+# ``CONCEPT_SEED_VERSION`` is the space the running code builds full merges in.
+# Every notebook records the space of its PUBLISHED merge in
+# ``unified_kg_state.concept_seed_version`` (written by the flip statement that
+# publishes a full rebuild; 1 for every merge built before this column, and
+# after a graph delete / index publication that leaves nothing published).
+# Incremental fusion, catch-up, bridge ids, duplicate blocking and promotion
+# dedup follow the PUBLISHED space, so a library that has not been rebuilt yet
+# keeps placing "Q-Former" in ``K-q former``; the next full rebuild switches it.
+# Claim / formula / procedure seeds have no version: they are unchanged.
+# ---------------------------------------------------------------------------
+
+CONCEPT_SEED_VERSION = 2
+CONCEPT_SEED_VERSIONS = (1, 2)
+# A v2 decision row whose seed starts with this prefix keeps the OLD v1 seed of
+# the objects it names (the collision exception of the decision recompute,
+# ``kg_merge.translate_v1_decisions``): ``"~v1:" + <v1 seed>``. ``~`` never
+# survives either normalizer, so no real name can produce it.
+OVERRIDE_SEED_PREFIX = "~v1:"
+
+
+def check_concept_seed_version(version: object) -> int:
+    """The version as an int, or ``ValueError`` — never a silent default."""
+    if isinstance(version, bool) or not isinstance(version, int) \
+            or version not in CONCEPT_SEED_VERSIONS:
+        raise ValueError(f"unknown concept seed version: {version!r}")
+    return version
+
+
+def concept_seed_of(name: str, version: int) -> str:
+    """The concept seed of ``name`` in seed space ``version`` (static aliases
+    applied, the per-batch acronym alias map NOT — see
+    ``kg_merge.ConceptSeedSpace`` for the full seed)."""
+    if check_concept_seed_version(version) == 1:
+        return concept_seed_v1(name)
+    return concept_seed_v2(name)
+
+
+def seed_squash_key(seed: str) -> str:
+    """The squash key of a v2 SEED (its spaces removed) — equal to
+    ``concept_squash_key(name)`` for every name whose v2 seed it is. The
+    pending refresh groups seeds by it; seeds starting with ``~`` (the per-object
+    sentinel of an empty name, the ``~v1:`` override) have none (``""``)."""
+    if not seed or seed.startswith("~"):
+        return ""
+    return seed.replace(" ", "")
+
+
+def _v2_text_before_aliases(base: str) -> str:
+    """v2's steps 3–4 on a ``_seed_base`` result, before any alias lookup."""
+    text = _ORIGINAL_SEPARATORS_RE.sub("", base)
+    text = _NON_SEED_CHARS_RE.sub(" ", text)
+    return _WHITESPACE_RUN_RE.sub(" ", text).strip()
+
+
+def concept_seed_parts(name: str) -> "tuple[str, str]":
+    """``(v2 seed, squashed pre-alias text)`` in one normalisation pass.
+
+    The second value — the name with every char outside ``[\\w+/]`` and every
+    ``_`` removed — is ALSO what deleting the spaces from the v1 form before the
+    static aliases gives (``_ALIAS_KEYS_SQUASHED``' argument). It lets a caller
+    decide cheaply whether the v1 seed can be one of a few keys
+    (``kg_merge.ConceptSeedSpace``) before paying for it."""
+    base = _seed_base(name)
+    text = _v2_text_before_aliases(base)
+    squashed = text.replace(" ", "")
+    if squashed in _ALIAS_KEYS_SQUASHED:
+        alias = _ALIASES.get(_v1_unaliased_from_base(base))
+        if alias is not None:
+            return alias.replace(" ", ""), squashed
+    return text, squashed
+
+
+def concept_decision_seeds(name: str) -> "frozenset[str]":
+    """Every seed a stored merge decision may name a member called ``name`` by:
+    its v1 seed (rows of seed version 1, and the canonical-id fallback of rows
+    written in the v1 space) and its v2 seed. An override seed
+    ``~v1:<v1 seed>`` (the collision exception) names the member by its v1 seed
+    once ``decision_match_key`` strips the prefix. The findings rules match
+    decisions by these, so one matching works before a library's first v2
+    rebuild, after it, and across a recompute interrupted between the pending
+    refresh and the flip. Empty seeds are left out (a decision never names a
+    member by the per-object sentinel through its name)."""
+    return frozenset(s for s in (concept_seed_v1(name), concept_seed_v2(name)) if s)
+
+
+def decision_match_key(seed: str) -> str:
+    """A stored decision key as the findings rules match it against member
+    seeds: an override seed ``~v1:<v1 seed>`` names exactly the members whose
+    v1 seed it carries, so the prefix is dropped; any other key as is."""
+    if seed.startswith(OVERRIDE_SEED_PREFIX):
+        return seed[len(OVERRIDE_SEED_PREFIX):]
+    return seed
+
+
+def seed_concept_v2(obj) -> str:
+    """``seed_concept`` in seed space 2. obj may be a dict or a str."""
+    if isinstance(obj, str):
+        return concept_seed_v2(obj)
+    return concept_seed_v2(obj.get("name", ""))
+
+
+def seed_fn_for_type(object_type: str, *, concept_seed_version: int):
+    """The seed function of a KG object type, concepts in seed space
+    ``concept_seed_version`` (the notebook's published space); claim /
+    formula / procedure seeds have no version. Unknown types fall back to
+    ``seed_claim`` (the historical default of the stores' ``seed_fn_for``)."""
+    version = check_concept_seed_version(concept_seed_version)
+    if object_type == "concept":
+        return seed_concept if version == 1 else seed_concept_v2
+    return {
+        "claim": seed_claim,
+        "formula": seed_formula,
+        "procedure": seed_procedure,
+    }.get(object_type, seed_claim)
+
+
+def published_concept_seed_version(state_row) -> int:
+    """The concept seed space of a library's published merge, read off its
+    ``unified_kg_state`` row (``None``: no row — nothing published — is 1,
+    the column's default)."""
+    if state_row is None:
+        return 1
+    return check_concept_seed_version(int(state_row["concept_seed_version"]))
 
 
 def seed_claim(obj) -> str:

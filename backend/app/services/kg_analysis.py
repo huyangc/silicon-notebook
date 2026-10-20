@@ -98,6 +98,10 @@ from app.domain.kg_findings_contracts import (
     FINDINGS_PAYLOAD_UNITS,
     KG_FINDINGS_PAGE_MAX,
 )
+from app.domain.kg_merge_seed import (
+    CONCEPT_SEED_VERSION,
+    published_concept_seed_version,
+)
 from app.services import kg_findings_view as findings_view
 from app.services.kg_analysis_precompute import (
     ARTIFACT_CLUSTER_HISTOGRAM,
@@ -713,7 +717,9 @@ class KgAnalysisService:
                 ledger, state.kg_mutation_seq, state.cluster_mutation_seq,
                 edge_rows, edge_limit,
             ),
-            findings_summary=_findings_summary(ledger, marks, state, len(dismissed_present)),
+            findings_summary=_findings_summary(
+                ledger, marks, state, len(dismissed_present),
+                published_seed_version=published_concept_seed_version(state_row)),
             merge_code=_merge_code(state_row, self._current_merge_code()),
         )
 
@@ -753,7 +759,8 @@ class KgAnalysisService:
             if _detail_rows_are_readable(ARTIFACT_FINDINGS, ledger):
                 detail = self._unified_kg.kg_analysis_finding_rows(db, notebook_id)
                 marks = self._unified_kg.kg_analysis_mark_rows(db, notebook_id)
-                # F4 的已存决定按**种子**匹配(组成员的 v1 种子存在证据里,不读成员对象);
+                # F4 的已存决定按**种子**匹配(组成员 v1 / v2 两个空间的种子存在证据里,
+                # 不读成员对象;重算保留的 ~v1:<种子> 也一并查);
                 # 没有 F4 行、或一条相关决定都没有,整步跳过。
                 decisions: Dict[frozenset, str] = {}
                 seeds = findings_view.f4_member_seeds(detail)
@@ -761,7 +768,7 @@ class KgAnalysisService:
                     decisions = findings_view.decisions_from_candidates(
                         self._governance.merge_candidate_states_for_seeds(
                             db, notebook_id, findings_view.DECIDED_CANDIDATE_STATUSES,
-                            sorted(set().union(*seeds.values()))))
+                            findings_view.decision_lookup_seeds(seeds)))
                 in_zone = findings_view.zone_rows(
                     detail, zone, marks=marks, decisions=decisions, member_seeds=seeds,
                     relink=findings_view.relink_view(marks, state.kg_mutation_seq),
@@ -1321,10 +1328,12 @@ def _findings_built_at(
 
 def _findings_summary(
     ledger: Dict[str, Dict[str, Any]], marks: List[Dict[str, Any]], state: KgState,
-    dismissed: int,
+    dismissed: int, *, published_seed_version: int,
 ) -> FindingsSummary:
     """总览里问题清单那一格:只读账本行 + 标记(设计 §8.4),不读明细。``dismissed``
-    是主体还在当前明细里的豁免数(调用方主键点查得出)。"""
+    是主体还在当前明细里的豁免数(调用方主键点查得出)。``published_seed_version``:
+    库已发布的概念种子空间(同一份 state 行),「需要开发处理」的 S1 据此判「已修复,
+    更新分析后生效」。"""
     entry = ledger.get(ARTIFACT_FINDINGS)
     freshness = _artifact_freshness(
         ARTIFACT_FINDINGS, entry, state.kg_mutation_seq, state.cluster_mutation_seq)
@@ -1350,7 +1359,10 @@ def _findings_summary(
         created_at=str(entry["created_at"]),
         counts=findings_view.summary_counts(rules, dismissed),
         rules=rules,
-        dev_items=findings_view.dev_items(payload.get("rules") or {}),
+        dev_items=findings_view.dev_items(
+            payload.get("rules") or {},
+            published_seed_version=published_seed_version,
+            code_seed_version=CONCEPT_SEED_VERSION),
         structure=payload.get("structure"),
         comparison=payload.get("comparison"),
         relink=findings_view.relink_view(marks, state.kg_mutation_seq),

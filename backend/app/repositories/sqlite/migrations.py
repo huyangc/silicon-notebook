@@ -341,7 +341,13 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # NOT NULL DEFAULT 0: +1 whenever the source's set of flagged chunks changes;
 # the selected-source snapshot cache keys on it). No index, no backfill in the migration:
 # the service judges existing sources after readiness. See ``_migration_101``.
-SCHEMA_VERSION = 101
+# v102 (paired with PostgreSQL 0083_kg_concept_seed_space.sql) adds
+# concept_merge_candidates.seed_version and unified_kg_state.concept_seed_version
+# (INTEGER NOT NULL DEFAULT 1): the concept seed space a merge decision's keys
+# and a library's published merge were minted in. No backfill (each library's
+# first full rebuild in seed space 2 recomputes its v1 decisions). See
+# ``_migration_102``.
+SCHEMA_VERSION = 102
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
 # when v87 was written (a migration must not change meaning when the live
@@ -6145,6 +6151,37 @@ class SqliteMigrator:
             self.add_column_if_missing(db, "sources", "navigation_scanned_at", "TEXT")
             self.add_column_if_missing(
                 db, "sources", "navigation_version", "INTEGER NOT NULL DEFAULT 0"
+            )
+
+    def _migration_102(self) -> None:
+        """KG concept seed space, parity with PostgreSQL
+        ``0083_kg_concept_seed_space.sql`` (design
+        docs/superpowers/specs/2026-10-19-kg-analysis-findings-design_zh.md
+        §五 S1 「实施细化」).
+
+        ``concept_merge_candidates.seed_version`` records the concept seed
+        space a row's decision keys were minted in (``seed_a`` / ``seed_b``,
+        or the canonical ids without ``K-`` for a row without seeds); every
+        existing row was minted in space 1. Nothing is rewritten here: a v1
+        decision's v2 seeds can only be recomputed from the current objects'
+        names, which each library's first full rebuild in space 2 does inside
+        its pending refresh (``kg_merge.translate_v1_decisions``).
+
+        ``unified_kg_state.concept_seed_version`` records the concept seed
+        space of the library's PUBLISHED merge, written by the flip statement
+        that publishes a full rebuild; incremental fusion, catch-up and
+        bridge ids follow it. 1 for every existing row and for a library with
+        nothing published. Neither table is captured by a sync trigger that
+        names columns (``unified_kg_state``'s capture serialises the whole
+        row; ``concept_merge_candidates`` is LOCAL), so no trigger changes."""
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "concept_merge_candidates", "seed_version",
+                "INTEGER NOT NULL DEFAULT 1",
+            )
+            self.add_column_if_missing(
+                db, "unified_kg_state", "concept_seed_version",
+                "INTEGER NOT NULL DEFAULT 1",
             )
 
     def migrate(self) -> list[int]:

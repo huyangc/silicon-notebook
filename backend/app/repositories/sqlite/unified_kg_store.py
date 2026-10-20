@@ -76,6 +76,7 @@ from app.domain.kg_analysis_contracts import (
     check_artifact_payloads,
     check_mark_kind,
 )
+from app.domain.kg_merge_seed import check_concept_seed_version
 from app.domain.knowledge_contracts import (
     COMMUNITY_OVERVIEW_MAX,
     COMMUNITY_TOP_MEMBERS_MAX,
@@ -864,17 +865,24 @@ class UnifiedKgStore:
         generation: int,
         catchup_from_ts: str,
         now: str,
+        concept_seed_version: int,
     ) -> bool:
+        """See the PostgreSQL twin. ``concept_seed_version`` (the seed space
+        the published generation was built in) is written by the SAME
+        statement that publishes it: incremental fusion reads it to place new
+        objects in the published space, so the pointer and the space can
+        never be seen apart."""
         cur = db.execute(
             "UPDATE unified_kg_state SET "
             "cluster_generation=?, cluster_mutation_seq=cluster_mutation_seq+1, "
             "derived_building_generation=0, derived_building_claimed_at=NULL, "
-            "derived_catchup_from=?, updated_at=? "
+            "derived_catchup_from=?, concept_seed_version=?, updated_at=? "
             "WHERE notebook_id=? AND cluster_generation=? "
             "AND derived_building_generation=?",
             (
-                generation, catchup_from_ts, now, notebook_id, published_from,
-                generation,
+                generation, catchup_from_ts,
+                check_concept_seed_version(concept_seed_version), now,
+                notebook_id, published_from, generation,
             ),
         )
         return cur.rowcount == 1
@@ -2937,7 +2945,8 @@ class UnifiedKgStore:
         两个消费方,都只读不展示以外的东西:
           · 问题清单 F4 / S1 判「用户已驳回 / 暂缓」:已存的合并决定按 v1 **种子**存
             (`decided_seed_pairs_from`),canonical id 会随簇的最小成员漂,所以要拿
-            成员名现算 `concept_seed_v1`。隐藏来源(Memory / knowhow)的成员也算 ——
+            成员名现算种子(`concept_decision_seeds`:v1 与 v2 两个种子空间都算,决定
+            行可能是任一空间铸的)。隐藏来源(Memory / knowhow)的成员也算 ——
             种子只用于判定、从不展示;
           · F4 / S1 的展示名:只取 ``visible`` 的(可用状态、来源不是隐藏合成来源;
             孤儿引用照常算,与 `source_canonical_rows` 同一条 ``NOT EXISTS``)。

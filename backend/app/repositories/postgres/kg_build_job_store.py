@@ -1085,6 +1085,7 @@ class KgBuildJobStore:
                 "dirty=1,kg_mutation_seq=unified_kg_state.kg_mutation_seq+1,"
                 "cluster_mutation_seq=unified_kg_state.cluster_mutation_seq+1,"
                 "cluster_input_version='',cluster_code_version='',"
+                "concept_seed_version=1,"
                 "community_seq=-1,canonical_rel_seq=-1,"
                 "mention_seq=-1,"
                 # 代际重置(codex #671 R18 P1):本次发布刚整表清空三张

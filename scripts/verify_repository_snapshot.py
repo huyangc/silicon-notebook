@@ -5998,5 +5998,42 @@ MIGRATION_MANIFEST[(100, 101)] = {
     "views": {},
 }
 
+# v102 (parity with PostgreSQL 0083_kg_concept_seed_space.sql): the concept
+# seed space a merge decision's keys were minted in
+# (``concept_merge_candidates.seed_version``) and the one a library's
+# published merge was built in (``unified_kg_state.concept_seed_version``),
+# both INTEGER NOT NULL DEFAULT 1 (the default is the whole backfill: every
+# existing decision and merge was minted in space 1). Both tables predate the
+# v9 fixture, so the columns are pinned per column, not through the tables'
+# text. No table, index, trigger or view.
+KG_SEED_SPACE_COLUMNS = {
+    "concept_merge_candidates": {
+        "seed_version": ("seed_version", "INTEGER", 1, "1", 0),
+    },
+    "unified_kg_state": {
+        "concept_seed_version": ("concept_seed_version", "INTEGER", 1, "1", 0),
+    },
+}
+MIGRATION_MANIFEST = {
+    (key[0], 102, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            **{
+                table: {**manifest["columns"].get(table, {}), **columns}
+                for table, columns in KG_SEED_SPACE_COLUMNS.items()
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(101, 102)] = {
+    "tables": {},
+    "columns": KG_SEED_SPACE_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

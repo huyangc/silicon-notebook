@@ -158,13 +158,18 @@ def legacy_fuse(
     ``kg_merge.detect_bridge_candidates``) and written with fusion's cluster
     shape and its candidate writer (``insert_merge_candidate``), so the rows
     have exactly the production shape whether or not fusion still clusters
-    Memory objects today."""
+    Memory objects today. Placement, bridge ids and the candidates'
+    ``seed_version`` follow the notebook's PUBLISHED concept seed space, as
+    fusion does."""
     from app.services.kg_merge import (
-        _norm,
         detect_bridge_candidates,
         place_new_concepts,
+        placement_seed_space,
     )
 
+    governance = world.repo._runtime.governance
+    with world.repo._runtime.database.connect() as db:
+        seed_version = governance.published_concept_seed_version(db, notebook_id)
     sql = world.sql
     objects = [
         {"object_id": row["id"], "name": str(row["name"] or "")}
@@ -184,7 +189,8 @@ def legacy_fuse(
     )
     canon_names = {row["canonical_id"]: row["canonical_name"] for row in clusters}
     placed = place_new_concepts(
-        objects, canon_names, seed_fn=lambda item: _norm(item["name"])
+        objects, canon_names, seed_space=placement_seed_space(
+            "concept", objects, canon_names, concept_seed_version=seed_version)
     )
     for row in placed:
         sql.write(
@@ -220,13 +226,14 @@ def legacy_fuse(
         {item["object_id"]: vector(item["name"]) for item in existing},
         {row["member_object_id"]: row["canonical_id"] for row in clusters},
         set(),
+        seed_version=seed_version,
     )
-    governance = world.repo._runtime.governance
     with world.repo._runtime.database.write() as db:
         for candidate in candidates:
             governance.insert_merge_candidate(
                 db, notebook_id, candidate["canonical_a"], candidate["canonical_b"],
-                candidate["score"], _GRANT_CREATED_AT, id_prefix="cm",
+                candidate["score"], _GRANT_CREATED_AT, seed_version=seed_version,
+                id_prefix="cm",
             )
 
 
@@ -1170,6 +1177,63 @@ def case_merge_candidates_written_by_fusion_are_deleted(world: World) -> None:
     assert_purged(world, "twin")
 
 
+def case_v2_bridge_candidates_are_deleted_in_their_own_space(world: World) -> None:
+    """S1 (design 2026-10-19 §五): in a library whose published merge is in
+    concept seed space 2, fusion names the Memory's concepts by their v2
+    bridge ids ("twin private idea" → ``K-twinprivateidea``) and writes the
+    candidates with ``seed_version`` 2; the purge recomputes both forms from
+    the names and matches each row by its OWN space. A v1-space row that names
+    a v1 form is deleted too, as is a v2 row naming the override form
+    (``K-~v1:<v1 seed>``); a v2 row that happens to carry a v1 form survives
+    — that string is not a bridge id of its space."""
+    bind_all_embedding_clients(world.repo, _TwinEmbedder(dim=EMBED_DIM))
+    _fused_doc_object(world, "Twin locked loop (TLL)")
+    _fused_doc_object(world, "Twin shared notes")
+    world.sql.write(
+        "UPDATE unified_kg_state SET concept_seed_version=2 WHERE notebook_id=?",
+        (world.shared,),
+    )
+    _fused_doc_object(world, "Twin other notes")
+    make_memory(
+        world, "twin", world.shared, world.alice, names=("TLL", "twin private idea"),
+        bridge_embedder=_TwinEmbedder(dim=EMBED_DIM),
+    )
+    rows = {
+        (row["canonical_a"], row["canonical_b"]): int(row["seed_version"])
+        for row in world.sql.rows(
+            "SELECT canonical_a,canonical_b,seed_version FROM concept_merge_candidates "
+            "WHERE notebook_id=?", (world.shared,))
+    }
+    assert any("K-twinprivateidea" in pair for pair in rows), rows
+    # Fusion writes in the space published at the time: the pair fused before
+    # the switch is a v1 row, every later one a v2 row.
+    assert rows[("K-twin locked loop", "K-twin shared notes")] == 1, rows
+    assert all(version == 2 for pair, version in rows.items()
+               if pair != ("K-twin locked loop", "K-twin shared notes")), rows
+    for mid, a, version in (
+        ("mc-s1-v1form", "K-twin private idea", 1),     # v1 row, v1 form: deleted
+        ("mc-s1-override", "K-~v1:twin private idea", 2),  # v2 row, override form: deleted
+        ("mc-s1-decoy", "K-twin private idea", 2),      # v2 row, v1 form: kept
+    ):
+        world.sql.write(
+            "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,"
+            "canonical_b,score,status,seed_version,created_at,updated_at) "
+            "VALUES (?,?,?,'K-twinothernotes',0.9,'rejected',?,?,?)",
+            (mid, world.shared, a, version, _GRANT_CREATED_AT, _GRANT_CREATED_AT),
+        )
+    world.repo.delete_memory(world.projections["twin"].memory_id, world.alice.id)
+    after = {
+        row["id"]: (row["canonical_a"], row["canonical_b"])
+        for row in world.sql.rows(
+            "SELECT id,canonical_a,canonical_b FROM concept_merge_candidates "
+            "WHERE notebook_id=?", (world.shared,))
+    }
+    assert not any("K-twinprivateidea" in pair for pair in after.values()), after
+    assert "mc-s1-v1form" not in after and "mc-s1-override" not in after, after
+    assert "mc-s1-decoy" in after, after
+    assert_purged(world, "twin")
+
+
 def _seed_memory_named_cluster(world: World) -> str:
     """The B2 legacy state (E5-1 spec review and the fix2 re-review's probe):
     Alice's live Memory object seeded the cluster ``K-alice-private plan`` —
@@ -1559,6 +1623,7 @@ CASES: dict[str, Callable[..., None]] = {
     "approved_promotion_survives": case_approved_promotion_survives_deletion,
     "review_candidates_deleted": case_review_candidates_of_deleted_objects_are_deleted,
     "merge_candidates_real_writer": case_merge_candidates_written_by_fusion_are_deleted,
+    "merge_candidates_v2_space": case_v2_bridge_candidates_are_deleted_in_their_own_space,
     "whole_memory_clusters_removed": case_whole_clusters_of_the_memory_are_removed,
     "deprecate_then_exit_clean": case_deprecate_then_exit_leaves_nothing_memory_named,
     "transfer_move_clean": case_transfer_move_leaves_nothing_memory_named,

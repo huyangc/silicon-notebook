@@ -413,6 +413,45 @@ def test_deployed_v96_database_verifies_kg_findings(tmp_path, _upgraded_v9):
 
 @pytest.mark.legacy_upgrade_contract
 @pytest.mark.real_sqlite_migration
+def test_deployed_v99_database_verifies_the_concept_seed_space(tmp_path, _upgraded_v9):
+    """A deployed v99 database is missing exactly _migration_100's two columns:
+    ``concept_merge_candidates.seed_version`` and
+    ``unified_kg_state.concept_seed_version`` (INTEGER NOT NULL DEFAULT 1, the
+    default is the whole backfill). Nothing else moves."""
+    module = _load_verifier()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
+    with sqlite3.connect(database) as rollback:
+        rollback_v100(rollback)
+        rollback.execute("PRAGMA user_version = 99")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 99
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+    manifest = module.MIGRATION_MANIFEST[(99, 100)]
+    original = dict(manifest)
+    try:
+        # A migration that added the column with another default is a
+        # discrepancy, not a silent pass.
+        module.MIGRATION_MANIFEST[(99, 100)] = {
+            **manifest,
+            "columns": {**manifest["columns"], "concept_merge_candidates": {
+                "seed_version": ("seed_version", "INTEGER", 1, "2", 0)}},
+        }
+        (tmp_path / "again").mkdir()
+        database2, storage2 = _copy_upgraded_fixture(tmp_path / "again", _upgraded_v9)
+        with sqlite3.connect(database2) as rollback:
+            rollback_v100(rollback)
+            rollback.execute("PRAGMA user_version = 99")
+        assert not module.verify_snapshot(database2, storage2).ok
+    finally:
+        module.MIGRATION_MANIFEST[(99, 100)] = original
+
+
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_v97_hop_holds_the_findings_triggers_to_the_generator(tmp_path, _upgraded_v9):
     """The v97 hop's trigger expectation comes from the same generator the
     migration runs; a migration that installed a different trigger text (or

@@ -327,6 +327,12 @@ ASCII_TERMS = {
     "reparse placeholder": re.compile(r"(?<![A-Za-z])reparse placeholders?(?![A-Za-z])", re.IGNORECASE),
     # 两个来源的概念集合重合度在界面上叫「概念重合度」,算法名不上屏。
     "Jaccard": re.compile(r"(?<![A-Za-z])jaccard(?![A-Za-z])", re.IGNORECASE),
+    # 待确认合并的「同名不同写法」(kind=spelling_variant,设计 2026-10-19 §4.4):
+    # squash key 是合并种子的内部口径,英文词名不上屏。
+    "squash": re.compile(r"(?<![A-Za-z])squash(?![A-Za-z])", re.IGNORECASE),
+    "spelling variant": re.compile(
+        r"(?<![A-Za-z])spelling[ _]variants?(?![A-Za-z])", re.IGNORECASE
+    ),
 }
 
 # CJK jargon. Regex (not plain substring) so the ambiguous rows can carry their

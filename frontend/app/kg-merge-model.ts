@@ -14,6 +14,15 @@ export function pendingMergeSides(candidate: PendingMerge): [string, string] {
 }
 
 
+// A pending merge whose two names differ only in how they are written
+// (spaces, hyphens, underscores, dots, brackets): the row carries the
+// 「同名不同写法」 tag. Any other kind -- or none, from an older backend -- is
+// a candidate found by meaning and shows no tag.
+export function isSpellingVariant(candidate: PendingMerge): boolean {
+  return candidate.kind === "spelling_variant";
+}
+
+
 export function mergePairKey(candidate: PendingMerge): string {
   return [candidate.canonical_a, candidate.canonical_b].sort().join("\u0000");
 }

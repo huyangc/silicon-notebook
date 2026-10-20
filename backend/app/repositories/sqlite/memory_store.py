@@ -2014,7 +2014,7 @@ class MemoryStore:
         db: sqlite3.Connection,
         sources: Sequence[Mapping[str, Any]],
         *,
-        bridge_canonical_ids_of: Callable[[list[dict]], list[str]],
+        bridge_canonical_ids_of: Callable[[list[dict]], dict[int, list[str]]],
     ) -> dict[str, list[str]]:
         """Mirror of the PostgreSQL twin: inside the teardown's transaction,
         after the merge half (``GovernanceStore.detach_memory_merges_on``,

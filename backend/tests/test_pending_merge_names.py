@@ -68,7 +68,8 @@ def _without_ids(rows):
 def names_world(repo) -> str:
     """Two published clusters with names that differ from their seeds
     ("ZORBLAX" under ``K-zorblax``, "Quixel Cascade" under
-    ``K-quixel cascade``), a third ("Vantor Gap"), and two candidates: one
+    ``K-quixelcascade`` — seed space 2), a third ("Vantor Gap"), and two
+    candidates: one
     between the first two, one naming an id no cluster row carries. A row of
     a NON-published generation for ``K-zorblax``, whose member id sorts before
     every real member and whose name is ``STALE NAME``, must never answer."""
@@ -85,8 +86,8 @@ def names_world(repo) -> str:
                              _concept("c2", "Vantor Gap", "v2")], [])
     repo._runtime.knowledge_lifecycle.rebuild_unified_kg(nb)
     governance = repo._runtime.knowledge_governance
-    governance.write_merge_candidate(nb, "K-zorblax", "K-quixel cascade", 0.91)
-    governance.write_merge_candidate(nb, "K-vantor gap", "K-not formed yet", 0.85)
+    governance.write_merge_candidate(nb, "K-zorblax", "K-quixelcascade", 0.91)
+    governance.write_merge_candidate(nb, "K-vantorgap", "K-not formed yet", 0.85)
     with repo._runtime.database.write() as db:
         db.execute(_sql(repo,
             "INSERT INTO concept_clusters (id,notebook_id,canonical_id,"
@@ -97,12 +98,12 @@ def names_world(repo) -> str:
 
 
 EXPECTED_NAMES = [
-    {"canonical_a": "K-zorblax", "canonical_b": "K-quixel cascade",
+    {"canonical_a": "K-zorblax", "canonical_b": "K-quixelcascade",
      "score": 0.91, "status": "pending",
-     "name_a": "ZORBLAX", "name_b": "Quixel Cascade"},
-    {"canonical_a": "K-vantor gap", "canonical_b": "K-not formed yet",
+     "name_a": "ZORBLAX", "name_b": "Quixel Cascade", "kind": "similarity"},
+    {"canonical_a": "K-vantorgap", "canonical_b": "K-not formed yet",
      "score": 0.85, "status": "pending",
-     "name_a": "Vantor Gap", "name_b": ""},
+     "name_a": "Vantor Gap", "name_b": "", "kind": "similarity"},
 ]
 
 
@@ -142,7 +143,7 @@ def assert_hidden_members_never_name_a_side(repo, build_scenario, as_user) -> No
         s.nb, s.ids.engram_canonical, s.ids.secret_canonical, 0.88)
     base = {"canonical_a": s.ids.engram_canonical,
             "canonical_b": s.ids.secret_canonical,
-            "score": 0.88, "status": "pending"}
+            "score": 0.88, "status": "pending", "kind": "similarity"}
     member = as_user(s.b, governance.pending_merges, s.nb)
     assert _without_ids(member) == [{**base, "name_a": "Engram", "name_b": ""}]
     # by design: both ids come back as they are stored (rows unfiltered) ...

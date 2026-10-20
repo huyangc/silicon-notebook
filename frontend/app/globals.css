@@ -11259,6 +11259,16 @@ button.tag:hover {
   background: #fff;
 }
 
+.kg-merge-kind {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .kg-merge-actions {
   display: flex;
   gap: 6px;

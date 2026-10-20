@@ -101,6 +101,7 @@ from app.domain.kg_analysis_contracts import (
     check_artifact_payloads,
     check_mark_kind,
 )
+from app.domain.kg_merge_seed import check_concept_seed_version
 from app.domain.knowledge_contracts import (
     CLUSTER_OBJECT_TYPES,
     COMMUNITY_OVERVIEW_MAX,
@@ -129,7 +130,10 @@ _SCRATCH_ORDINAL_MAX = 2 ** 63 - 1
 # K1 (debt-fix 2026-10-12, rulings 11 + 13): a graph delete keeps the five
 # rebuild-derived tables until the next rebuild. Their rows must not read back
 # in between: re-extracting a concept after the delete mints the SAME
-# canonical id (``"K-" + _norm(name)``), so co-mention peers, relation support
+# canonical id (``"K-" + <the name's concept seed in the published seed space>``,
+# ``kg_merge.ConceptSeedSpace``: ``concept_seed_v1`` = ``_norm`` while the
+# library publishes space 1, ``concept_seed_v2`` once it publishes space 2 --
+# either way a deterministic function of the name), so co-mention peers, relation support
 # and mention edges keyed on it would come back from the deleted graph. The
 # delete writes each layer's seq as the dedicated sentinel -2
 # (``DELETED_LAYER_SEQ``; canonical_rel_seq for canonical_relations,
@@ -1018,6 +1022,7 @@ class UnifiedKgStore:
         generation: int,
         catchup_from_ts: str,
         now: str,
+        concept_seed_version: int,
     ) -> bool:
         """四类一把翻的微事务(设计 §1.2):先按 key 字节序取齐四把
         advisory lock(append 与翻转互相串行,两者皆毫秒级——链 c 的 5s
@@ -1026,7 +1031,9 @@ class UnifiedKgStore:
         delete_notebook_kg 重置——本轮作废不发布,调用方响亮失败。
         ``cluster_mutation_seq`` 在同一语句 bump(版本身份与指针行变化同
         提交,kg_mutation.py 两段式红线);``derived_catchup_from`` 同事务
-        落库(崩溃后下轮先补欠账,设计 §1.5)。"""
+        落库(崩溃后下轮先补欠账,设计 §1.5)。``concept_seed_version``
+        (发布这一代所用的概念种子空间,设计 2026-10-19 §五 S1)同一语句写:
+        增量融合按它安置新对象,指针与空间不可能被分开看到。"""
         lock_cluster_artifact_types(db, notebook_id, CLUSTER_OBJECT_TYPES)
         row = db.execute(
             """
@@ -1036,6 +1043,7 @@ class UnifiedKgStore:
               derived_building_generation=0,
               derived_building_claimed_at=NULL,
               derived_catchup_from=%s::timestamptz,
+              concept_seed_version=%s,
               updated_at=%s
             WHERE notebook_id=%s AND cluster_generation=%s
               AND derived_building_generation=%s
@@ -1043,6 +1051,7 @@ class UnifiedKgStore:
             """,
             (
                 generation, normalize_timestamp(catchup_from_ts),
+                check_concept_seed_version(concept_seed_version),
                 normalize_timestamp(now), notebook_id, published_from,
                 generation,
             ),

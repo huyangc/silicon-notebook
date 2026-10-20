@@ -33,6 +33,7 @@
 | deprecated（toast 直出） | 已弃用 |
 | community / 社区 | 主题板块 |
 | canonical 簇 / cluster | 合并后的知识对象 |
+| squash 同名 / spelling variant（待确认合并里两个名字只差空格、连字符、下划线、点号或括号的一对，`kind=spelling_variant`） | 同名不同写法 |
 | outlier source | 关联稀疏的来源 |
 | centrality | 核心度 |
 | finding（图谱分析问题清单里的一条） | 问题 |

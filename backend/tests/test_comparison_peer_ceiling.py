@@ -43,9 +43,9 @@ MIXED = "Mixed Widget"          # 天花板内外共同支撑 → 必须保留
 HIDDEN = "Hidden Widget"        # 只由 s-hidden 支撑 → 必须裁掉
 
 CANONICAL = {
-    FOCAL: "K-focal widget",
-    MIXED: "K-mixed widget",
-    HIDDEN: "K-hidden widget",
+    FOCAL: "K-focalwidget",
+    MIXED: "K-mixedwidget",
+    HIDDEN: "K-hiddenwidget",
 }
 
 

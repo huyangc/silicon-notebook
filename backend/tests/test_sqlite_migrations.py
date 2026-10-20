@@ -648,6 +648,59 @@ def test_v97_adds_the_findings_tables_and_the_code_version_column(tmp_path):
     database.close_local()
 
 
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
+def test_v100_adds_the_concept_seed_space_columns(tmp_path):
+    """concept_merge_candidates.seed_version and
+    unified_kg_state.concept_seed_version, both INTEGER NOT NULL DEFAULT 1: an
+    existing decision row and an existing state row read as minted in seed
+    space 1 (the space every merge before this migration was built in). A
+    fresh database and a v99 upgrade end up the same; a second run is a no-op."""
+    from tests.sqlite_migration_testkit import rollback_v100
+
+    database, settings = _fresh_migrated_database(tmp_path)
+
+    def shape(db):
+        candidates = {row[1]: tuple(row)[1:] for row in db.execute(
+            "PRAGMA table_info(concept_merge_candidates)")}
+        state = {row[1]: tuple(row)[1:] for row in db.execute(
+            "PRAGMA table_info(unified_kg_state)")}
+        return candidates["seed_version"], state["concept_seed_version"]
+
+    with database.connect() as db:
+        fresh = shape(db)
+    assert fresh == (("seed_version", "INTEGER", 1, "1", 0),
+                     ("concept_seed_version", "INTEGER", 1, "1", 0))
+    with database.write() as db:
+        db.execute(
+            "INSERT INTO notebooks (id, name, created_at, updated_at) VALUES "
+            "('nb-v99', 'n', '2026-10-21T00:00:00+00:00', '2026-10-21T00:00:00+00:00')"
+        )
+        rollback_v100(db)
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, cluster_input_version, updated_at) "
+            "VALUES ('nb-v99', 'v-old', '2026-10-21T00:00:00+00:00')"
+        )
+        db.execute(
+            "INSERT INTO concept_merge_candidates (id, notebook_id, canonical_a, "
+            "canonical_b, score, status, created_at, updated_at) VALUES "
+            "('mc-old', 'nb-v99', 'K-a b', 'K-c', 0.9, 'rejected', 't', 't')"
+        )
+        db.execute("PRAGMA user_version = 99")
+
+    assert SqliteMigrator(database, settings).migrate() == [100]
+    assert SqliteMigrator(database, settings).migrate() == []
+    with database.connect() as db:
+        assert shape(db) == fresh
+        assert db.execute(
+            "SELECT concept_seed_version FROM unified_kg_state WHERE notebook_id='nb-v99'"
+        ).fetchone()[0] == 1
+        assert db.execute(
+            "SELECT seed_version FROM concept_merge_candidates WHERE id='mc-old'"
+        ).fetchone()[0] == 1
+    database.close_local()
+
+
 @pytest.mark.real_sqlite_migration
 def test_v84_installs_only_its_own_capture_set(tmp_path, monkeypatch):
     """The ladder stopped at v84 installs exactly v84's 138 capture triggers,

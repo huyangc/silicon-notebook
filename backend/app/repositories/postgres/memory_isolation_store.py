@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import time
 from contextlib import contextmanager
-from typing import Any, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from app.repositories.postgres._store_utils import execute_many
 from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
@@ -534,29 +534,33 @@ class MemoryIsolationStore:
 
     @staticmethod
     def purge_bridge_candidates(
-        db: Any, notebook_id: str, bridge_ids: List[str]
+        db: Any, notebook_id: str, bridge_ids: Dict[int, List[str]]
     ) -> int:
         """Delete the merge candidates (any status) of ``notebook_id`` that
         name one of ``bridge_ids`` -- the bridge canonical ids of the
         notebook's Memory concepts, which only ``kg_merge``'s normaliser can
-        derive -- where no cluster row carries that id (a live shared cluster
-        that happens to carry the same seed keeps its candidates). The ids go
+        derive (``{seed_version: ids}``: a row is matched only by the ids of
+        its own ``seed_version``, ``kg_merge.purge_bridge_canonical_ids``) --
+        where no cluster row carries that id (a live shared cluster that
+        happens to carry the same seed keeps its candidates). The ids go
         through a transaction-local temp table, never one bound list."""
-        ids = sorted(set(bridge_ids))
+        ids = sorted({(i, int(v)) for v, found in bridge_ids.items() for i in found})
         if not ids:
             return 0
         db.execute(
-            'CREATE TEMP TABLE IF NOT EXISTS mib_bridge (id text COLLATE "C" '
-            "PRIMARY KEY) ON COMMIT DROP"
+            'CREATE TEMP TABLE IF NOT EXISTS mib_bridge_v (id text COLLATE "C" NOT NULL, '
+            "seed_version bigint NOT NULL, PRIMARY KEY (id, seed_version)) ON COMMIT DROP"
         )
-        db.execute("DELETE FROM mib_bridge")
-        execute_many(db, "INSERT INTO mib_bridge (id) VALUES (%s)", [(i,) for i in ids])
+        db.execute("DELETE FROM mib_bridge_v")
+        execute_many(db, "INSERT INTO mib_bridge_v (id, seed_version) VALUES (%s, %s)", ids)
         cursor = db.execute(
             "DELETE FROM concept_merge_candidates m WHERE m.notebook_id = %s AND ("
-            "(m.canonical_a IN (SELECT id FROM mib_bridge) AND NOT EXISTS ("
+            "((m.canonical_a, m.seed_version) IN (SELECT id, seed_version FROM mib_bridge_v) "
+            "AND NOT EXISTS ("
             "SELECT 1 FROM concept_clusters xa WHERE xa.notebook_id = m.notebook_id "
             "AND xa.canonical_id = m.canonical_a)) OR "
-            "(m.canonical_b IN (SELECT id FROM mib_bridge) AND NOT EXISTS ("
+            "((m.canonical_b, m.seed_version) IN (SELECT id, seed_version FROM mib_bridge_v) "
+            "AND NOT EXISTS ("
             "SELECT 1 FROM concept_clusters xb WHERE xb.notebook_id = m.notebook_id "
             "AND xb.canonical_id = m.canonical_b)))",
             (notebook_id,),
