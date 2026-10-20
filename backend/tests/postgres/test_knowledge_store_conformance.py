@@ -4323,6 +4323,7 @@ def _seed_analysis_fixture(harness) -> None:
             {"canonical-quad": 0.2, "canonical-solo": 0.9, "canonical-blank": 0.5},
             NOW,
             0,
+            board_keys=["bk-big", "bk-small"],
         )
         # level > 0:板块查询按 level 归属,没有这条记录那个谓词从未被执行到。
         unified.write_communities_generation(
@@ -4334,6 +4335,7 @@ def _seed_analysis_fixture(harness) -> None:
             {"canonical-quad": 1.0},
             NOW,
             0,
+            board_keys=["bk-l1"],
         )
         # 别的 notebook 也有板块:板块查询的 notebook 归属谓词的证人。
         unified.write_communities_generation(
@@ -4345,6 +4347,7 @@ def _seed_analysis_fixture(harness) -> None:
             {"canonical-elsewhere": 1.0},
             NOW,
             0,
+            board_keys=["bk-foreign"],
         )
         placeholder = "%s"
         # 一个**没有任何成员行**的板块(损坏/半写数据)。PG 侧的窗口函数写法用
@@ -4467,6 +4470,7 @@ def test_community_overview_matches_on_postgres(knowledge_harness):
         "communities": [
             {
                 "id": "cm-big",
+                "board_key": "bk-big",
                 "size": 3,
                 # centrality 降序:solo(0.9) > blank(0.5) > quad(0.2)
                 "top_members": ["Solo concept", "Blank-name concept"],
@@ -4475,13 +4479,16 @@ def test_community_overview_matches_on_postgres(knowledge_harness):
             {
                 # 成员行缺失的板块照样出现(PG 侧靠窗口函数外的 LEFT JOIN),
                 # top_members 为空 + truncated 说明「还有 size 个没给出来」。
+                # 裸 INSERT 没写 board_key:列默认值 ''。
                 "id": "cm-orphan",
+                "board_key": "",
                 "size": 2,
                 "top_members": [],
                 "top_members_truncated": True,
             },
             {
                 "id": "cm-small",
+                "board_key": "bk-small",
                 "size": 1,
                 "top_members": ["Solo concept"],
                 "top_members_truncated": False,
@@ -4503,7 +4510,7 @@ def test_community_overview_matches_on_postgres(knowledge_harness):
         "limit": 10,
         "top_members_limit": 5,
         "communities": [
-            {"id": "cm-l1", "size": 1,
+            {"id": "cm-l1", "board_key": "bk-l1", "size": 1,
              "top_members": ["Level one board"], "top_members_truncated": False},
         ],
     }

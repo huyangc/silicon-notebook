@@ -1641,7 +1641,7 @@ def test_overview_refuses_to_cache_when_a_board_recast_would_not_move_it(
         assert claim is not None
         unified.write_communities_generation(
             db, NB, 0, [("cm-new", ["K1"])], {"K1": "name of K1"}, {"K1": 1.0},
-            "2026-01-02T09:00:00", claim["generation"],
+            "2026-01-02T09:00:00", claim["generation"], board_keys=["bk-new"],
         )
         assert unified.flip_community_generation(
             db, NB, published_from=claim["community_generation"],

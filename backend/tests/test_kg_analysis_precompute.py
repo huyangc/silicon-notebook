@@ -172,12 +172,14 @@ def test_fold_normalizes_pair_direction_by_board_id_not_by_node_index():
 
 
 def test_edge_table_rows_keep_the_first_appearance_order_of_the_dict_it_replaced():
-    """**设计 §3.32 不变量 1**:数组化后的边序必须与旧 dict 的插入序逐字一致。
+    """数组化后的边序与旧 dict 的插入序(每对 canonical 的**首次出现序**)逐字一致。
 
-    Louvain 对边的输入顺序敏感,而旧模型喂给 igraph 的是 `list(ew.keys())` ——
-    Python dict 保持插入顺序,也就是每对 canonical 的**首次出现序**。数组化后若按
-    排序序(或任何别的顺序)喂,板块划分会漂:已部署库的 `communities`、
-    `community_seq`、一切依赖板块的产物跟着全漂。这不是性能问题,是正确性问题。
+    这条原是**设计 §3.32 不变量 1**(「Louvain 输出逐字不变」):Louvain 对边序敏感,
+    边序一漂板块划分就全漂。那条不变量已被 2026-10-19 §五 S2 推翻——划分改由
+    `kg_partition` 按 canonical id 排名、边按 (lo, hi) 排序,与到达顺序无关,新契约是
+    「同一输入图 + 同一上一代划分 → 逐字相同(含 board_key)」(见
+    `tests/test_board_partition_wiring.py`)。边表的首次出现序仍然保留:跨板块边折叠
+    与问题清单的计数都按它的下标工作,这里钉住它没有变成别的顺序。
 
     ⚠ 规模刻意不小(几千条、重复率高):首次出现序靠 `argsort(kind="stable")` 保证,
     而 numpy 的非稳定排序在**小**数组上会退化成插入排序(碰巧也稳定)—— 只用一个
@@ -863,9 +865,10 @@ def test_the_real_rebuild_holds_no_second_copy_of_the_edge_graph(repo, monkeypat
     都释放不掉。数组化把那个别名结构性地消掉了(`igraph_edges()` 是独立缓冲区的临时
     值),但**同一类**缺陷换个形态照样能回来:
 
-      · **Louvain 那张 igraph 图**就是今天的「第二份边表」:igraph 把 836 万条边整个
-        拷进了自己的 C 结构,而它的全部产出(membership / degree)在折叠开始前早已被
-        抄成 Python 侧的 comms/deg。它活着跨进折叠,就是原样的第 7 轮缺陷换了个持有者;
+      · **划分建的 igraph 图**就是今天的「第二份边表」:`kg_partition` 逐连通分量建图,
+        igraph 把那一段边整个拷进自己的 C 结构(主连通块 ~800 万条),而划分的全部产出
+        (板块、board_key、度数)在折叠开始前早已抄进 kept_rows/deg。**任何一张**活着
+        跨进折叠,就是原样的第 7 轮缺陷换了个持有者;
       · 三列若最终指向建表缓冲的**切片视图**,整块 65536 槽的缓冲会跟着活着 ——
         `base is not None` 当场抓到。⚠ 今天光把 `_drain_column` 的 `.copy()` 删掉是
         **抓不到**的:`build` 末尾那次 fancy-index 无条件产出新缓冲,视图只活在
@@ -903,7 +906,7 @@ def test_the_real_rebuild_holds_no_second_copy_of_the_edge_graph(repo, monkeypat
             weakref.ref(column)
             for column in (edge_table.src, edge_table.dst, edge_table.weight)
         )
-        graph_alive = bool(graph_ref) and graph_ref[-1]() is not None
+        graph_alive = any(ref() is not None for ref in graph_ref)
         folded = original(edge_table, community_of_index)
         observed.append((
             edge_count,
@@ -918,12 +921,12 @@ def test_the_real_rebuild_holds_no_second_copy_of_the_edge_graph(repo, monkeypat
     assert repo._runtime.knowledge_lifecycle.rebuild_communities(notebook_id) == 2
 
     assert len(observed) == 1
-    assert graph_ref, "仪器没装上:Louvain 那张图一次都没被建"
+    assert graph_ref, "仪器没装上:划分一张 igraph 图都没建(夹具的分量都走了整块捷径)"
     edges, columns_alive, column_bases, graph_alive = observed[0]
     assert edges > 0, "夹具必须真的有边,否则这条守卫是空的"
     assert not graph_alive, (
-        "折叠时 Louvain 的 igraph 图还活着 —— 那是边表的第二份拷贝(836 万边),"
-        "它的 membership/degree 早已被抄进 comms/deg"
+        "折叠时划分建的 igraph 图还活着 —— 那是边表的第二份拷贝(主连通块 ~800 万边),"
+        "划分的产出早已被抄进 kept_rows/deg"
     )
     assert column_bases == (None, None, None), (
         "边表的列是视图,底下那块更大的建表缓冲跟着活着"
@@ -2180,7 +2183,7 @@ def _usurp_the_board_partition(repo, notebook_id: str) -> list[str]:
         assert claim is not None, "夹具前提:没有别的在飞认领"
         store.write_communities_generation(
             db, notebook_id, 0, list(zip(fresh_ids, members)), {}, {},
-            "2026-01-01T00:00:00", claim["generation"],
+            "2026-01-01T00:00:00", claim["generation"], board_keys=fresh_ids,
         )
         assert store.flip_community_generation(
             db, notebook_id, published_from=claim["community_generation"],

@@ -184,6 +184,7 @@
         "report_share_token",
         "report_source_identity_rows",
         "report_source_rows",
+        "request_cold_community_partition",
         "require_agent_access",
         "require_indexing_pipeline_write",
         "resolve_agent_token",
@@ -290,7 +291,7 @@
       "rerank"
     ]
   },
-  "ports_protocol_method_count": 1004,
+  "ports_protocol_method_count": 1006,
   "function_length_ceiling": {
     "backend/app/extensions/ask.py::AskCompletedObserverHost.observe_application": 154,
     "backend/app/extensions/parser_chain.py::ParserProviderChainHost._run": 307,
@@ -300,7 +301,7 @@
     "backend/app/services/ask_service.py::AskService._run_reasoning_stage": 67,
     "backend/app/services/ask_service.py::AskService.ask_chunk": 159,
     "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.complete_relations_for_source": 425,
-    "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.rebuild_communities": 389,
+    "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.rebuild_communities": 336,
     "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.rebuild_unified_kg": 65,
     "backend/app/services/memory_service.py::MemoryService.transfer": 389,
     "backend/app/services/notebook_sharing.py::NotebookCopyService.copy_notebook": 75,

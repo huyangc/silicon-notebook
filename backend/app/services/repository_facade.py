@@ -2682,6 +2682,12 @@ class RepositoryFacade:
         return self._runtime.knowledge_lifecycle.rebuild_unified_kg(
             notebook_id, progress, force, fresh
         )
+    def request_cold_community_partition(self, notebook_id: str) -> None:
+        """``recluster_kg --cold-partition``: the next board partition starts cold
+        (KnowledgeLifecycleService.request_cold_community_partition)."""
+        self.require_indexing_pipeline_write(notebook_id)
+        self._runtime.knowledge_lifecycle.request_cold_community_partition(notebook_id)
+
     def start_unified_kg_rebuild(self, notebook_id: str) -> dict:
         """Claim the shared KG-maintenance slot for a rebuild (409 source)."""
         self.require_indexing_pipeline_write(notebook_id)

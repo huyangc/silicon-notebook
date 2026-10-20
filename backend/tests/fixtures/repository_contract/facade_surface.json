@@ -3861,6 +3861,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.request_cold_community_partition",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.require_agent_access",
         "target": "_runtime"
       },
@@ -9391,6 +9397,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', report_id: 'str') -> 'str'"
   },
+  "request_cold_community_partition": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/scripts/recluster_kg.py",
+        "scope": "<module>.main",
+        "target": "request_cold_community_partition"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str') -> 'None'"
+  },
   "require_agent_access": {
     "consumers": [
       {
@@ -9559,6 +9580,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.relink_notebook_kg",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.request_cold_community_partition",
         "target": "require_indexing_pipeline_write"
       },
       {
