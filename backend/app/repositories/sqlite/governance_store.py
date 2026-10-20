@@ -315,11 +315,13 @@ class GovernanceStore:
         return seed_fn_for(object_type, concept_seed_version=concept_seed_version)
 
     @staticmethod
-    def published_concept_seed_version(connection, notebook_id: str) -> int:
-        """The concept seed space of the notebook's published merge
-        (``unified_kg_state.concept_seed_version``; no state row = 1), in the
-        caller's transaction. One primary-key read."""
-        return published_concept_seed_version_on(connection, notebook_id)
+    def published_concept_seed_space(connection, notebook_id: str) -> "tuple[int, frozenset]":
+        """``(version, override keys)`` of the notebook's published merge, in
+        the caller's transaction: ``unified_kg_state.concept_seed_version`` (no
+        state row = 1; one primary-key read) and, in space 2 only, the v1 seeds
+        its stored decisions keep as ``~v1:<seed>`` (one read of the decided
+        rows that carry such a seed, through ``idx_candidates_nb_status``)."""
+        return published_concept_seed_space_on(connection, notebook_id)
 
     @staticmethod
     def find_base_match(

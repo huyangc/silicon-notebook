@@ -100,7 +100,7 @@ LIFECYCLE_STORE_CALLS = {
         # S1: the v1 decision rows the recompute tracks, and the published
         # concept seed space incremental placement / catch-up follow.
         "merge_decision_rows",
-        "published_concept_seed_version",
+        "published_concept_seed_space",
         # Z6: renamed from `sweep_orphan_clusters` — now a keyset PAGE primitive
         # (NOT EXISTS, bounded per batch) rather than one unbounded NOT IN
         # anti-join; the loop lives in `_sweep_orphan_clusters_page_loop`.

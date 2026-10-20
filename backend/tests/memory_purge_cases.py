@@ -169,7 +169,7 @@ def legacy_fuse(
 
     governance = world.repo._runtime.governance
     with world.repo._runtime.database.connect() as db:
-        seed_version = governance.published_concept_seed_version(db, notebook_id)
+        seed_version, override = governance.published_concept_seed_space(db, notebook_id)
     sql = world.sql
     objects = [
         {"object_id": row["id"], "name": str(row["name"] or "")}
@@ -190,7 +190,8 @@ def legacy_fuse(
     canon_names = {row["canonical_id"]: row["canonical_name"] for row in clusters}
     placed = place_new_concepts(
         objects, canon_names, seed_space=placement_seed_space(
-            "concept", objects, canon_names, concept_seed_version=seed_version)
+            "concept", objects, canon_names, concept_seed_version=seed_version,
+            override=override)
     )
     for row in placed:
         sql.write(
@@ -226,7 +227,7 @@ def legacy_fuse(
         {item["object_id"]: vector(item["name"]) for item in existing},
         {row["member_object_id"]: row["canonical_id"] for row in clusters},
         set(),
-        seed_version=seed_version,
+        seed_version=seed_version, override=override,
     )
     with world.repo._runtime.database.write() as db:
         for candidate in candidates:
