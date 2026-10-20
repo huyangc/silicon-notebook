@@ -424,6 +424,34 @@ def case_a_reopened_retained_conversation_can_be_continued(repo):
     assert (untouched.mode, untouched.notebook_ids) == ("include", ["nb-b"])
 
 
+def case_attribution_rows_follow_the_turn_through_deletion_and_purge(repo):
+    """The attribution rows (SQLite v98 / PostgreSQL 0078) of a turn that ran
+    over a deleted library stay with the retained turn -- the other library's
+    panel keeps counting it during the window -- stop counting the moment the
+    window passes, and go with the turn when it is purged (FK cascade)."""
+    world = build(repo)
+    world.turn("job-1", "conv-1", ["nb-a", "nb-b"], new_conversation=True)
+    world.turn("job-2", "conv-1", ["nb-a"])
+
+    def rows():
+        return sorted(
+            (row["job_id"], row["notebook_id"])
+            for row in world.fetch("SELECT job_id, notebook_id FROM global_ask_job_notebooks")
+        )
+
+    def global_answers(notebook_id):
+        return world.repo._runtime.queries.notebook_analytics(notebook_id).answers_global
+
+    assert rows() == [("job-1", "nb-a"), ("job-1", "nb-b"), ("job-2", "nb-a")]
+    world.delete_notebook("nb-b")
+    assert rows() == [("job-1", "nb-a"), ("job-1", "nb-b"), ("job-2", "nb-a")]
+    assert global_answers("nb-a") == 2
+    world.expire("job-1")
+    assert global_answers("nb-a") == 1
+    world.repo._recover_interrupted_jobs()
+    assert rows() == [("job-2", "nb-a")]
+
+
 CASES = [
     case_the_owner_still_reads_a_turn_whose_library_was_deleted,
     case_a_non_owner_and_an_allowlisted_caller_still_get_404,
@@ -438,5 +466,6 @@ CASES = [
     case_the_bell_follows_the_conversation_read,
     case_the_read_gate_covers_every_content_reader,
     case_a_reopened_retained_conversation_can_be_continued,
+    case_attribution_rows_follow_the_turn_through_deletion_and_purge,
 ]
 CASE_IDS = [case.__name__.removeprefix("case_") for case in CASES]

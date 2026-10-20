@@ -150,6 +150,46 @@ def global_feedback_counts_sql() -> tuple[str, int]:
 # index ``idx_global_ask_jobs_participants`` (0062) so the planner matches it.
 _PARTICIPATES = "(payload_json::jsonb->'resolved_notebook_ids') @> jsonb_build_array(%s::text)"
 
+_GLOBAL_TURN_LIVE_J = live_turn_sql(dialect="postgres", alias="j")
+
+
+def _global_answers_count(db, notebook_id: str) -> int:
+    """How many finished global Ask runs are attributed to ``notebook_id``.
+
+    Same attribution as the 👍 / 👎 count and the learning chain
+    (``global_ask_attribution``), counted once per attributed library, done
+    jobs only (a failed or cancelled run produced no answer), a turn past its
+    retention stamp nowhere. Two disjoint arms (``global_answers_count_sql``):
+    a job whose attribution was recorded (``attributed = 1``, written by the
+    completion transition or the offline backfill) is counted from
+    ``global_ask_job_notebooks`` through
+    ``idx_global_ask_job_notebooks_notebook`` -- an index range plus one
+    primary-key probe per attributed job for the retention stamp, no payload
+    read; a done job written before SQLite v98 / PostgreSQL 0078 and not yet
+    backfilled (``attributed = 0``) is counted through the payload predicate
+    (``attribution_sql``) over the rows the partial
+    ``idx_global_ask_jobs_unattributed`` and the participation GIN index
+    both hold -- an empty arm once the backfill has run.
+    """
+    statement, binds = global_answers_count_sql()
+    row = db.execute(statement, (notebook_id,) * binds).fetchone()
+    return int(row["attributed"]) + int(row["legacy"])
+
+
+def global_answers_count_sql() -> tuple[str, int]:
+    """``_global_answers_count``' statement and how many times it binds the
+    notebook id (exposed so the plan pin reads the very statement served)."""
+    attributed, binds = attribution_sql(dialect="postgres", marker="%s", document="p")
+    return (
+        "SELECT (SELECT COUNT(*) FROM global_ask_job_notebooks a "
+        "JOIN global_ask_jobs j ON j.id = a.job_id "
+        f"WHERE a.notebook_id = %s AND j.attributed = 1 AND {_GLOBAL_TURN_LIVE_J}) AS attributed,"
+        "(SELECT COUNT(*) FROM (SELECT payload_json::jsonb AS p FROM global_ask_jobs "
+        f"WHERE status = 'done' AND attributed = 0 AND {_GLOBAL_TURN_LIVE} "
+        f"AND {_PARTICIPATES} OFFSET 0) unattributed WHERE {attributed}) AS legacy",
+        binds + 2,
+    )
+
 
 def _compat_notebook_rows(rows):
     return [sqlite_compatible_notebook_row(row) for row in rows]
@@ -1886,6 +1926,7 @@ class QueryStore:
                 ).fetchone()["c"]
             )
             global_useful, global_not_useful = _global_feedback_counts(db, notebook_id)
+            answers_global = _global_answers_count(db, notebook_id)
             low_rated = [
                 row["question"]
                 for row in db.execute(
@@ -1948,7 +1989,8 @@ class QueryStore:
         not_useful += global_not_useful
         rated = useful + not_useful
         return NotebookAnalytics(
-            answers_total=answers_total,
+            answers_total=answers_total + answers_global,
+            answers_global=answers_global,
             feedback_useful=useful,
             feedback_not_useful=not_useful,
             feedback_useful_global=global_useful,

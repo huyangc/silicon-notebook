@@ -5813,5 +5813,73 @@ MIGRATION_MANIFEST[(96, 97)] = {
     "views": {},
 }
 
+# v98 (parity with PostgreSQL 0078_global_ask_job_notebooks.sql): the
+# attribution rows of done global Ask jobs -- the global_ask_job_notebooks
+# table (composite primary key, FK job_id -> global_ask_jobs ON DELETE CASCADE)
+# and its (notebook_id, job_id) index -- plus global_ask_jobs.attributed
+# INTEGER NOT NULL DEFAULT 0 (no backfill in the migration) and the partial
+# idx_global_ask_jobs_unattributed over the done rows still at 0. The ALTERed
+# global_ask_jobs text is conditional like v95 (only a lineage that holds the
+# table carries it); the fixture holds no global rows. No trigger or view.
+GLOBAL_ASK_ATTRIBUTED_COLUMNS = {
+    "global_ask_jobs": {
+        "attributed": ("attributed", "INTEGER", 1, "0", 0),
+    },
+}
+GLOBAL_ASK_JOBS_V98_FROM = " retained_until TEXT)"
+GLOBAL_ASK_JOBS_V98_TO = " retained_until TEXT, attributed INTEGER NOT NULL DEFAULT 0)"
+GLOBAL_ASK_ATTRIBUTION_TABLES = {
+    "global_ask_job_notebooks": """CREATE TABLE global_ask_job_notebooks (
+                    job_id TEXT NOT NULL
+                        REFERENCES global_ask_jobs(id) ON DELETE CASCADE,
+                    notebook_id TEXT NOT NULL,
+                    PRIMARY KEY (job_id, notebook_id)
+                )""",
+}
+GLOBAL_ASK_ATTRIBUTION_INDEXES = {
+    "idx_global_ask_job_notebooks_notebook": (
+        "CREATE INDEX idx_global_ask_job_notebooks_notebook\n"
+        "                    ON global_ask_job_notebooks(notebook_id, job_id)"
+    ),
+    "idx_global_ask_jobs_unattributed": (
+        "CREATE INDEX idx_global_ask_jobs_unattributed\n"
+        "                    ON global_ask_jobs(id) WHERE status='done' AND attributed=0"
+    ),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 98, *key[2:]): {
+        **manifest,
+        "tables": {
+            **manifest["tables"],
+            **(
+                {
+                    "global_ask_jobs": manifest["tables"]["global_ask_jobs"].replace(
+                        GLOBAL_ASK_JOBS_V98_FROM, GLOBAL_ASK_JOBS_V98_TO,
+                    )
+                }
+                if "global_ask_jobs" in manifest["tables"]
+                else {}
+            ),
+            **GLOBAL_ASK_ATTRIBUTION_TABLES,
+        },
+        "columns": {
+            **manifest["columns"],
+            "global_ask_jobs": {
+                **manifest["columns"].get("global_ask_jobs", {}),
+                **GLOBAL_ASK_ATTRIBUTED_COLUMNS["global_ask_jobs"],
+            },
+        },
+        "indexes": {**manifest["indexes"], **GLOBAL_ASK_ATTRIBUTION_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(97, 98)] = {
+    "tables": GLOBAL_ASK_ATTRIBUTION_TABLES,
+    "columns": GLOBAL_ASK_ATTRIBUTED_COLUMNS,
+    "indexes": GLOBAL_ASK_ATTRIBUTION_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

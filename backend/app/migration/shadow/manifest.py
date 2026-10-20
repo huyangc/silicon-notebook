@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=97, postgres_version=77, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=98, postgres_version=78, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -818,6 +818,17 @@ _TABLES = (
     ),
     _table("global_ask_conversations", ("id",), ReplicationKeyKind.DECLARED_PK, 96, "identity"),
     _table("global_ask_jobs", ("id",), ReplicationKeyKind.DECLARED_PK, 97, "identity"),
+    # SQLite v98 / PostgreSQL 0078: the attribution rows of a done global Ask
+    # job (FK job_id -> global_ask_jobs, so it ranks after it). Replicated
+    # with its job: the attribution is part of the job's record, written by
+    # the same completion transition.
+    _table(
+        "global_ask_job_notebooks",
+        ("job_id", "notebook_id"),
+        ReplicationKeyKind.DECLARED_PK,
+        98,
+        "identity",
+    ),
     TableSpec("auth_transactions", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 101),
     _table("auth_identity_audit", ("id",), ReplicationKeyKind.DECLARED_PK, 102, "timestamptz"),
     # SQLite v83 / PostgreSQL 0063: cross-environment notebook sync control

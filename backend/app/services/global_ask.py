@@ -22,7 +22,7 @@ from app.domain.cancellation import (
     ATTACH_STALL_SECONDS, AskExecutorGone, AskFollowFailed, AskWaitAbandoned,
 )
 from app.domain.conversation_public_view import MAX_TURNS
-from app.domain.global_ask_attribution import touched_notebook_ids
+from app.domain.global_ask_attribution import job_attribution
 from app.models.ask import AskRequest, QueryIntentContract, TraceStep
 from app.models.global_ask import (
     GlobalAskIntentPreviewRequest, GlobalAskJob, GlobalAskRequest,
@@ -2089,19 +2089,17 @@ class GlobalAskService:
     def _note_completed(self, job, user_id):
         """Hand the finished run to the learning chains, fail-open.
 
-        The libraries handed over follow ``touched_notebook_ids`` -- the ONE
-        attribution rule the overlay sampler's global arm applies as well, so
-        a library is told "this member finished an Ask in you" exactly when
-        that member's overlay sample will contain the run.
+        The libraries handed over follow ``touched_notebook_ids`` (through
+        ``job_attribution``, the same call that wrote this job's
+        ``global_ask_job_notebooks`` rows) -- the ONE attribution rule the
+        overlay sampler's global arm applies as well, so a library is told
+        "this member finished an Ask in you" exactly when that member's
+        overlay sample will contain the run.
         """
         if self.note_ask_completed is None:
             return
         try:
-            ordered = touched_notebook_ids(
-                job.resolved_notebook_ids, job.searched_notebook_ids,
-                job.cited_notebook_ids,
-                [entry.notebook_id for entry in job.skipped_notebooks],
-            )
+            ordered = job_attribution(job)
             # The anchor (``nominal_active``, the run's naming library) is
             # handed over on its own: it identifies the run to observers even
             # when the attributed list is empty (every leg skipped), and it is

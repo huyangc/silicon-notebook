@@ -2079,6 +2079,26 @@ class PostgresMaintenanceAdapter:
         with self._runtime.database.connect() as db:
             return self._runtime.knowledge.chunk_elements_indexed(db, notebook_id)
 
+    # ------------------------------------- global Ask attribution backfill
+    # The attribution backfill's reads/writes, delegated to the backend-shared
+    # ``GlobalAskStore`` (the SQL lives there, once for both backends). Not on
+    # ``ports.py`` for the same reason as the backfill-images trio below: one
+    # consumer (``app/services/global_ask_attribution_backfill.py`` -- the
+    # post-readiness pass and its CLI), which depends on them through its own
+    # narrow Protocol.
+
+    def global_ask_attribution_schema_ready(self) -> bool:
+        return self._runtime.global_ask_store.attribution_schema_ready()
+
+    def global_ask_unattributed_count(self) -> int:
+        return self._runtime.global_ask_store.unattributed_done_count()
+
+    def global_ask_unattributed_page(self, after_id: str, limit: int) -> list[tuple[str, str]]:
+        return self._runtime.global_ask_store.unattributed_done_page(after_id, limit)
+
+    def write_global_ask_attributions(self, attributions: list[tuple[str, list[str]]]) -> int:
+        return self._runtime.global_ask_store.write_backfilled_attributions(attributions)
+
     # ------------------------------------------------- backfill-images (离线)
     # SQLite 侧 `SQLiteMaintenanceAdapter` 的逐字对等半（双后端同修红线）。
     # 同样刻意不进 `ports.py`：那里的 Protocol 方法总数是只许降的零余量上限，

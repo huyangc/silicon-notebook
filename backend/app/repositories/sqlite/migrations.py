@@ -316,7 +316,14 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # kg_analysis_marks (local; dismissed / relink_attempted) and
 # unified_kg_state.cluster_code_version (TEXT NOT NULL DEFAULT ''). No
 # backfill. See ``_migration_97``.
-SCHEMA_VERSION = 97
+# v98 (paired with PostgreSQL 0078_global_ask_job_notebooks.sql) adds the
+# global_ask_job_notebooks table (job_id, notebook_id): the libraries a
+# finished global Ask is attributed to (``job_attribution``), written when the
+# job turns ``done``; global_ask_jobs.attributed (INTEGER NOT NULL DEFAULT 0:
+# 1 = that table holds this done job's attribution) and two indexes. No
+# backfill here: existing done jobs are attributed by the offline
+# ``scripts/backfill_global_ask_attribution.py``. See ``_migration_98``.
+SCHEMA_VERSION = 98
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
 # when v87 was written (a migration must not change meaning when the live
@@ -5999,6 +6006,46 @@ class SqliteMigrator:
             for name, (_table, sql) in sqlite_trigger_sql(added_at=97).items():
                 db.execute(f'DROP TRIGGER IF EXISTS "{name}"')
                 db.execute(sql)
+
+    def _migration_98(self) -> None:
+        """Physical attribution of finished global Ask jobs, parity with
+        PostgreSQL ``0078_global_ask_job_notebooks.sql``.
+
+        ``global_ask_job_notebooks`` holds one row per library a ``done``
+        global job is attributed to -- ``global_ask_attribution.job_attribution``
+        (searched or cited, else participants minus the skipped ones), the
+        rule ``attribution_sql`` spells over the payload -- written by the
+        completion transition itself (``GlobalAskStore.save``). Deleting the
+        job (purge, conversation delete) cascades to its rows; ``notebook_id``
+        has no foreign key because a retained turn outlives its deleted
+        library. ``(notebook_id, job_id)`` is what the notebook analytics
+        count reads.
+
+        ``global_ask_jobs.attributed`` is 1 once the table holds a done job's
+        attribution (possibly no row: a run attributed to no library), 0 for
+        every row this migration finds. No backfill here: parsing every
+        payload belongs to the offline, resumable
+        ``scripts/backfill_global_ask_attribution.py``. Until it has run, the
+        readers count a done job with ``attributed = 0`` through the old
+        payload predicate; the partial ``idx_global_ask_jobs_unattributed``
+        holds exactly those rows, so that arm is empty after the backfill.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "global_ask_jobs", "attributed", "INTEGER NOT NULL DEFAULT 0"
+            )
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS global_ask_job_notebooks (
+                    job_id TEXT NOT NULL
+                        REFERENCES global_ask_jobs(id) ON DELETE CASCADE,
+                    notebook_id TEXT NOT NULL,
+                    PRIMARY KEY (job_id, notebook_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_global_ask_job_notebooks_notebook
+                    ON global_ask_job_notebooks(notebook_id, job_id);
+                CREATE INDEX IF NOT EXISTS idx_global_ask_jobs_unattributed
+                    ON global_ask_jobs(id) WHERE status='done' AND attributed=0;
+            """)
 
     def migrate(self) -> list[int]:
         with self._connect() as db:

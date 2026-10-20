@@ -132,6 +132,42 @@ def test_global_ask_merge_preserves_history_or_rejects_identity_conflicts(tmp_pa
         right.close()
 
 
+def test_global_ask_merge_carries_an_imported_jobs_attribution_rows(tmp_path):
+    """v98: an imported done job keeps its ``attributed`` flag and brings its
+    ``global_ask_job_notebooks`` rows; a job id the primary already holds keeps
+    the primary's rows (the primary wins), never the secondary's."""
+    primary, secondary = tmp_path / "primary.db", tmp_path / "secondary.db"
+    for path in (primary, secondary):
+        merge_dbs.migrate_to_current(path)
+    left, right = sqlite3.connect(primary), sqlite3.connect(secondary)
+    try:
+        _global_ask_record(left, "conv-main", "job-main", request="main-key")
+        _global_ask_record(right, "conv-main", "job-main", request="main-key")
+        _global_ask_record(right, "conv-import", "job-import", request="import-key")
+        left.execute("UPDATE global_ask_jobs SET attributed=1 WHERE id='job-main'")
+        left.execute("INSERT INTO global_ask_job_notebooks VALUES ('job-main','nb-left')")
+        left.commit()
+        right.execute("UPDATE global_ask_jobs SET attributed=1")
+        right.executemany(
+            "INSERT INTO global_ask_job_notebooks VALUES (?,?)",
+            [("job-main", "nb-right"), ("job-import", "nb-a"), ("job-import", "nb-b")],
+        )
+        right.commit()
+        right.close()
+        left.execute("ATTACH DATABASE ? AS sec", (str(secondary),))
+        with left:
+            merge_dbs._merge_global_ask(left)
+        assert left.execute(
+            "SELECT job_id,notebook_id FROM global_ask_job_notebooks ORDER BY job_id,notebook_id"
+        ).fetchall() == [("job-import", "nb-a"), ("job-import", "nb-b"), ("job-main", "nb-left")]
+        assert left.execute(
+            "SELECT attributed FROM global_ask_jobs WHERE id='job-import'"
+        ).fetchone() == (1,)
+    finally:
+        left.close()
+        right.close()
+
+
 def _schema_db(definition: tuple[str, ...]) -> sqlite3.Connection:
     db = sqlite3.connect(":memory:")
     db.execute(

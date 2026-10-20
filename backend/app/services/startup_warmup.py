@@ -805,6 +805,7 @@ def run_startup(lease: object | None) -> object | None:
         )
         _reproject_legacy_knowhow_tables(repo)
         _sweep_orphan_memory_sources(repo)
+        _backfill_global_ask_attribution(repo)
         _rebuild_memory_isolated_notebooks(repo)
         return repo
     except Exception as exc:  # noqa: BLE001 — surface via readiness, never crash
@@ -927,6 +928,28 @@ def _sweep_orphan_memory_sources(repo) -> None:
         MemoryOrphanSweep.for_repository(repo).schedule()
     except Exception:  # noqa: BLE001 — best-effort, must never affect readiness
         logger.exception("startup: memory orphan sweep scheduling failed (non-fatal)")
+
+
+def _backfill_global_ask_attribution(repo) -> None:
+    """Post-readiness step for the global Ask attribution rows (SQLite v98 /
+    PostgreSQL 0078): log how many done jobs are still at ``attributed = 0``
+    and hand them to ONE background pass
+    (``app.services.global_ask_attribution_backfill``, which owns the whole
+    contract: ``run_backfill``, keyset pages, one transaction per page that
+    never waits on a row lock, content-free logs). Until it has caught up the
+    analytics panel counts those jobs through the slower payload predicate,
+    with the same result, so nothing here is a readiness precondition.
+
+    Same placement and failure discipline as ``_sweep_orphan_memory_sources``:
+    strictly AFTER ``mark_ready()`` and every exception is swallowed (the
+    scheduler swallows its own too). With nothing pending it is one COUNT and
+    no job."""
+    try:
+        from app.services.global_ask_attribution_backfill import schedule_attribution_backfill
+
+        schedule_attribution_backfill(repo)
+    except Exception:  # noqa: BLE001 — best-effort, must never affect readiness
+        logger.exception("startup: global ask attribution backfill scheduling failed (non-fatal)")
 
 
 def _rebuild_memory_isolated_notebooks(repo) -> None:

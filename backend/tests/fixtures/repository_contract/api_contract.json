@@ -8519,6 +8519,11 @@
         },
         "NotebookAnalytics": {
           "properties": {
+            "answers_global": {
+              "default": 0,
+              "title": "Answers Global",
+              "type": "integer"
+            },
             "answers_total": {
               "default": 0,
               "title": "Answers Total",

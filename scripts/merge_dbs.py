@@ -185,6 +185,12 @@ OBJECT_SCHEMA_SEMANTIC_COLUMNS = (
 # 同样随行走——它记的是那次删除已经发生, 合并不让被删的库复活, 所以到期时刻
 # 原样保留, 到期后照常由启动恢复/下一次删库清理。
 GLOBAL_ASK_TABLES = ("global_ask_conversations", "global_ask_jobs")
+# v98 全局问答归因行: global_ask_job_notebooks(job_id, notebook_id) 是一个已完成作业
+# 归入的笔记本(检索到 ∪ 引用到, 两者皆空时为参与库减被跳过的库)。它跟着自己的作业
+# 走: 副库作业被导入时, 它的归因行一并导入(`attributed` 列随作业行原样搬运, 两者
+# 因而保持一致——作业是 1 就带着行, 是 0 就没有行、留给离线回填); 主库已有的同 id
+# 作业以主库为准, 副库那份归因行不导入。笔记本 id 合并时不改写, 所以行原样有效。
+GLOBAL_ASK_ATTRIBUTION_TABLE = "global_ask_job_notebooks"
 
 # 外部内容 FTS —— 导入后 rebuild
 EXTERNAL_FTS_TABLES = ["memory_items_fts"]
@@ -320,6 +326,7 @@ def assert_taxonomy_complete(conn: sqlite3.Connection) -> None:
         | {t for (t, *_rest) in CHILD_TABLES}
         | set(GLOBAL_UNION_TABLES)
         | set(GLOBAL_ASK_TABLES)
+        | {GLOBAL_ASK_ATTRIBUTION_TABLE}
         | set(SKIP_SECONDARY_TABLES)
     )
     classified_virtual = set(FTS_NOTEBOOK_TABLES) | set(EXTERNAL_FTS_TABLES)
@@ -554,6 +561,9 @@ def sweep_orphan_group_grants(conn: sqlite3.Connection) -> int:
 
 def _merge_global_ask(conn: sqlite3.Connection) -> None:
     """Preserve both owners' histories; fail on conflicting identity or request keys."""
+    carry_attribution = _table_exists(conn, GLOBAL_ASK_ATTRIBUTION_TABLE, "sec") and _table_exists(
+        conn, GLOBAL_ASK_ATTRIBUTION_TABLE, "main"
+    )
     for table in GLOBAL_ASK_TABLES:
         if not (_table_exists(conn, table, "main") and _table_exists(conn, table, "sec")):
             continue
@@ -597,6 +607,13 @@ def _merge_global_ask(conn: sqlite3.Connection) -> None:
                 f"INSERT INTO main.{table} ({','.join(columns)}) VALUES ({placeholders})",
                 [values[column] for column in columns],
             )
+            if table == "global_ask_jobs" and carry_attribution:
+                conn.execute(
+                    f"INSERT INTO main.{GLOBAL_ASK_ATTRIBUTION_TABLE} (job_id, notebook_id) "
+                    f"SELECT job_id, notebook_id FROM sec.{GLOBAL_ASK_ATTRIBUTION_TABLE} "
+                    "WHERE job_id=?",
+                    (values["id"],),
+                )
 
 
 def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
