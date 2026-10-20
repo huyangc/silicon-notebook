@@ -16,6 +16,7 @@ default 1)."""
 from __future__ import annotations
 
 import json
+import sys
 from contextlib import contextmanager
 from typing import Dict, List
 
@@ -232,8 +233,9 @@ def assert_a_rejection_the_new_seeds_would_collapse_keeps_the_old_seeds(
     the decision row), every later rebuild applies it (read back from the
     decisions), and incremental placement does too."""
     nb = notebook(repo, "s1", "s2")
-    concepts(repo, nb, "s1", "Q-Former")
-    concepts(repo, nb, "s2", "Qformer")
+    text = "bridge module that queries frozen vision features for a language model"
+    concepts(repo, nb, "s1", "Q-Former", definition=text)
+    concepts(repo, nb, "s2", "Qformer", definition=text)
     decide(repo, nb, "mc-old-rejected", "q former", "qformer", "rejected")
     with legacy_code(monkeypatch):
         rebuild(repo, nb, force=True)
@@ -241,6 +243,13 @@ def assert_a_rejection_the_new_seeds_would_collapse_keeps_the_old_seeds(
     assert canonical_of(repo, nb) == {
         "Q-Former": "K-~v1:q former", "Qformer": "K-~v1:qformer"}
     assert decision_rows(repo, nb) == [("~v1:q former", "~v1:qformer", "rejected", 2)]
+    # 查重 and promotion dedup read the same override: the pair the user kept
+    # apart is not offered as duplicates either.
+    assert repo._runtime.knowledge_governance.find_duplicates(nb, "concept") == []
+    store_module = sys.modules[type(repo._runtime.governance).__module__]
+    with repo._connect() as db:
+        assert store_module.published_concept_seed_space_on(db, nb) == (
+            2, frozenset({"q former", "qformer"}))
     rebuild(repo, nb, force=True)                     # the override is read back
     assert canonical_of(repo, nb) == {
         "Q-Former": "K-~v1:q former", "Qformer": "K-~v1:qformer"}

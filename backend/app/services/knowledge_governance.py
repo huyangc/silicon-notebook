@@ -2237,9 +2237,9 @@ class KnowledgeGovernanceService:
         """
         self.get_notebook(notebook_id)
         with self._connect() as db:
-            seed_version = self._duplicate_seed_version(db, notebook_id, object_type)
+            space = self._duplicate_seed_space(db, notebook_id, object_type)
             seed_rows = self.knowledge.duplicate_seed_rows(db, notebook_id, object_type)
-            by_seed = self._duplicate_blocks(object_type, seed_rows, seed_version)
+            by_seed = self._duplicate_blocks(object_type, seed_rows, *space)
 
             # Pass 2: only blocks that already have >=2 members can possibly be a
             # duplicate group — singleton blocks (the common case) are dropped
@@ -2298,7 +2298,7 @@ class KnowledgeGovernanceService:
             merged_away = [r for r in rows if r["status"] == "deprecated"]
             by_seed = self._duplicate_blocks(
                 object_type, live,
-                self._duplicate_seed_version(db, notebook_id, object_type),
+                *self._duplicate_seed_space(db, notebook_id, object_type),
             )
             pending = [
                 o["id"] for members in by_seed.values() if len(members) >= 2
@@ -2328,31 +2328,42 @@ class KnowledgeGovernanceService:
             merged_away=refs,
         )
 
-    def _duplicate_seed_version(self, db, notebook_id: str, object_type: str) -> int:
-        """The concept seed space duplicates of ``object_type`` block in: the
-        notebook's PUBLISHED one (the space its clusters were built in) for
-        concept-like types, 1 for claim / formula / procedure, which have no
-        seed version. An unknown type keeps the historical concept default."""
+    def _duplicate_seed_space(
+        self, db, notebook_id: str, object_type: str,
+    ) -> "tuple[int, frozenset]":
+        """The concept seed space duplicates of ``object_type`` block in, as
+        ``(seed_version, override_keys)``: the notebook's PUBLISHED space (the
+        one its clusters were built in) with its override keys for
+        concept-like types; ``(1, frozenset())`` for claim / formula /
+        procedure, which have no seed version. An unknown type keeps the
+        historical concept default."""
+        from app.services.kg_merge import override_keys
+
         if object_type in ("claim", "formula", "procedure"):
-            return 1
-        return self.governance_store.published_concept_seed_version(db, notebook_id)
+            return 1, frozenset()
+        seed_version = self.governance_store.published_concept_seed_version(
+            db, notebook_id)
+        override = (
+            override_keys(self.governance_store.decided_seed_pairs_from(
+                db, notebook_id, seed_version=seed_version))
+            if seed_version != 1 else frozenset()
+        )
+        return seed_version, override
 
     @staticmethod
     def _duplicate_blocks(
         object_type: str, seed_rows: List[dict], seed_version: int = 1,
+        override: frozenset = frozenset(),
     ) -> Dict[str, List[dict]]:
         """Block pass-1 rows by normalized seed (``find_duplicates``'s docstring):
         ``{seed: [thin row, ...]}`` in row order, concepts in concept seed space
-        ``seed_version``. A procedure row brings its full payload (the steps
-        signature); every other row brings ``name`` only, and only that name is
-        seen here."""
-        from app.domain.kg_merge_seed import seed_fn_for_type
-        from app.services.kg_merge import build_acronym_alias_map, _seed_with_alias
+        ``seed_version`` with its ``override`` keys. A procedure row brings its
+        full payload (the steps signature); every other row brings ``name``
+        only, and only that name is seen here."""
+        from app.services.kg_merge import seed_space_for
 
-        seed_fn = seed_fn_for_type(
-            object_type if object_type in ("claim", "formula", "procedure") else "concept",
-            concept_seed_version=seed_version,
-        )
+        space_type = (object_type if object_type in ("claim", "formula", "procedure")
+                      else "concept")
         if object_type == "procedure":
             objs = [
                 {"id": r["id"], "status": r["status"], "payload": r["payload"]}
@@ -2386,15 +2397,18 @@ class KnowledgeGovernanceService:
         # Block by seed: only same-normalized-name objects become candidates.
         # This loop and the seed/alias functions it calls are UNCHANGED from
         # before the two-pass split — only ``objs``'s construction moved.
-        alias_map = build_acronym_alias_map(
-            (o["payload"].get("name", "") for o in objs), seed_version=seed_version)
+        # Same seeds as a rebuild of this notebook would mint (alias map
+        # over the batch's names); an empty seed is the per-object sentinel
+        # ``~<id>`` — a block of one, never a duplicate group.
+        space = seed_space_for(
+            space_type, (o["payload"].get("name", "") for o in objs),
+            concept_seed_version=seed_version, override=override)
         by_seed: Dict[str, List[dict]] = {}
         for o in objs:
-            seed = _seed_with_alias(
+            seed = space.seed(
                 {"name": o["payload"].get("name", ""), "payload": o["payload"]},
-                seed_fn, alias_map, seed_version=seed_version)
-            if seed:
-                by_seed.setdefault(seed, []).append(o)
+                o["id"])
+            by_seed.setdefault(seed, []).append(o)
         return by_seed
 
     def _duplicate_groups(

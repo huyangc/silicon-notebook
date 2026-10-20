@@ -18,6 +18,8 @@ from app.domain.kg_merge_seed import (
     OVERRIDE_SEED_PREFIX,
     _norm,
     concept_decision_seeds,
+    concept_seed_in_space,
+    decision_match_key,
     concept_seed_parts,
     concept_seed_v1,
     concept_seed_v2,
@@ -266,8 +268,23 @@ def test_purge_computes_every_form_per_space():
 
 
 def test_decision_seeds_cover_both_spaces_and_the_override():
-    assert concept_decision_seeds("Q-Former") == {"q former", "qformer", "~v1:q former"}
+    assert concept_decision_seeds("Q-Former") == {"q former", "qformer"}
     assert concept_decision_seeds("") == frozenset()
+    # An override seed names the members of its v1 seed.
+    assert decision_match_key("~v1:q former") == "q former"
+    assert decision_match_key("qformer") == "qformer"
+
+
+def test_object_level_dedup_seed_follows_the_space_and_the_override():
+    """Promotion dedup into a public library compares seeds in the base's
+    published space, with its override keys (no acronym redirect)."""
+    v1 = seed_fn_for_type("concept", concept_seed_version=1)
+    v2 = seed_fn_for_type("concept", concept_seed_version=2)
+    kept = seed_fn_for_type("concept", concept_seed_version=2, override={"q former"})
+    assert (v1({"name": "Q-Former"}), v2({"name": "Q-Former"})) == ("q former", "qformer")
+    assert kept({"name": "Q Former"}) == "~v1:q former"
+    assert kept({"name": "Qformer"}) == "qformer"
+    assert concept_seed_in_space("Q-Former", 1, {"q former"}) == "q former"  # space 1: no override
 
 
 def test_override_keys_are_read_off_v2_decisions():

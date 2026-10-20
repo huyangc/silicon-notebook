@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { canContinueKgBuild } from "../../app/kg-build-status.ts";
-import { withoutDecidedMerge } from "../../app/kg-merge-model.ts";
+import { isSpellingVariant, withoutDecidedMerge } from "../../app/kg-merge-model.ts";
 import {
   declarations,
   jsxElements,
@@ -63,6 +63,14 @@ test("KG merge decisions remove id and duplicate-pair rows", () => {
   );
 
   assert.deepEqual(remaining.map((item) => item.id), ["merge-3"]);
+});
+
+test("only a spelling-variant pending merge reads as 同名不同写法", () => {
+  const base = { id: "m", canonical_a: "K-a", canonical_b: "K-b", score: 0.5, status: "pending" };
+  assert.equal(isSpellingVariant({ ...base, kind: "spelling_variant" }), true);
+  assert.equal(isSpellingVariant({ ...base, kind: "similarity" }), false);
+  // An older backend sends no kind: never a spelling variant.
+  assert.equal(isSpellingVariant(base), false);
 });
 
 test("interrupted KG continuation stays hidden for read-only notebook members", () => {

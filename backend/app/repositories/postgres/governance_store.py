@@ -224,11 +224,14 @@ def base_dedup_evidence(connection: Any, object_id: str) -> list:
     return json_value(row["evidence"], []) if row is not None else []
 
 
-def seed_fn_for(object_type: str, *, concept_seed_version: int):
+def seed_fn_for(object_type: str, *, concept_seed_version: int,
+                override: frozenset = frozenset()):
     """Return the kg_merge seed function for a KG object type, concepts in the
-    notebook's published seed space (``kg_merge_seed.seed_fn_for_type``)."""
+    notebook's published seed space with its override keys
+    (``kg_merge_seed.seed_fn_for_type``)."""
     from app.domain.kg_merge_seed import seed_fn_for_type
-    return seed_fn_for_type(object_type, concept_seed_version=concept_seed_version)
+    return seed_fn_for_type(object_type, concept_seed_version=concept_seed_version,
+                            override=override)
 
 
 def _strip_concept_prefix(cid: str) -> str:
@@ -262,16 +265,40 @@ def published_concept_seed_version_on(connection, notebook_id: str) -> int:
     return published_concept_seed_version(row)
 
 
+def published_concept_seed_space_on(connection, notebook_id: str) -> "tuple[int, frozenset]":
+    """``(published concept seed version, override keys)`` of ``notebook_id``
+    in the caller's transaction: the override keys are the v1 seeds its v2
+    decisions keep as ``~v1:<seed>`` (none in space 1). The decision read is
+    bounded by the notebook's decided rows (``idx_candidates_nb_status``)."""
+    from app.domain.kg_merge_seed import OVERRIDE_SEED_PREFIX
+    version = published_concept_seed_version_on(connection, notebook_id)
+    if version == 1:
+        return 1, frozenset()
+    rows = connection.execute(
+        "SELECT seed_a, seed_b FROM concept_merge_candidates WHERE notebook_id=%s "
+        "AND status IN ('confirmed','rejected','deferred') AND seed_version=%s "
+        "AND (seed_a LIKE '~v1:%%' OR seed_b LIKE '~v1:%%')",
+        (notebook_id, version),
+    ).fetchall()
+    width = len(OVERRIDE_SEED_PREFIX)
+    return version, frozenset(
+        seed[width:] for row in rows for seed in (row["seed_a"], row["seed_b"])
+        if seed and seed.startswith(OVERRIDE_SEED_PREFIX)
+    )
+
+
 def find_base_dedup_match(
     object_type: str, src_payload: dict, base_objs: List[dict], *,
     concept_seed_version: int,
+    override: frozenset = frozenset(),
 ) -> str:
     """Exact-seed dedup (v1): return the id of an existing base object whose
     normalized seed matches the source payload, else ''. This works at cold
     start without vectors (the plan's v1 shortcut). Concepts are compared in the
     BASE notebook's published seed space (``concept_seed_version``), the space its
-    clusters were built in."""
-    seed_fn = seed_fn_for(object_type, concept_seed_version=concept_seed_version)
+    clusters were built in, with its override keys)."""
+    seed_fn = seed_fn_for(object_type, concept_seed_version=concept_seed_version,
+                          override=override)
     src_seed = seed_fn({"name": src_payload.get("name", ""), "payload": src_payload})
     if not src_seed:
         return ""
@@ -372,10 +399,12 @@ class GovernanceStore:
 
     @staticmethod
     def find_base_match(
-        object_type: str, payload: dict, rows, *, concept_seed_version: int
+        object_type: str, payload: dict, rows, *, concept_seed_version: int,
+        override: frozenset = frozenset(),
     ) -> str:
         return find_base_dedup_match(
-            object_type, payload, rows, concept_seed_version=concept_seed_version)
+            object_type, payload, rows, concept_seed_version=concept_seed_version,
+            override=override)
 
     @staticmethod
     def merge_evidence(base_evidence: list, source_evidence: list) -> list:
@@ -1860,10 +1889,11 @@ class GovernanceStore:
             base_objs = _base_dedup_rows_for_update(
                 connection, base_nb_id, object_type
             )
+            seed_version, override = published_concept_seed_space_on(
+                connection, base_nb_id)
             base_match_id = find_base_dedup_match(
                 object_type, payload, base_objs,
-                concept_seed_version=published_concept_seed_version_on(
-                    connection, base_nb_id))
+                concept_seed_version=seed_version, override=override)
             if base_match_id:
                 merged_evidence = merge_evidence_lists(
                     base_dedup_evidence(connection, base_match_id), evidence
@@ -2018,10 +2048,11 @@ class GovernanceStore:
         base_objs = _base_dedup_rows_for_update(
             connection, base_nb_id, object_type
         )
+        seed_version, override = published_concept_seed_space_on(
+            connection, base_nb_id)
         base_match_id = find_base_dedup_match(
             object_type, src_payload, base_objs,
-            concept_seed_version=published_concept_seed_version_on(
-                connection, base_nb_id))
+            concept_seed_version=seed_version, override=override)
 
         if base_match_id:
             # Merge: combine evidence into the matched base object; keep its id.
