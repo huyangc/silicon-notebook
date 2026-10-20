@@ -3041,13 +3041,7 @@ class KnowledgeLifecycleService:
         ``~v1:<seed>``, the collision exception) are read off the stored v2
         decisions — a read bounded by the notebook's decisions, only for a
         library already in space 2."""
-        from app.services.kg_merge import override_keys
-
-        version = self.governance_store.published_concept_seed_version(db, notebook_id)
-        if version == 1:
-            return 1, frozenset()
-        return version, override_keys(self.governance_store.decided_seed_pairs_from(
-            db, notebook_id, seed_version=version))
+        return self.governance_store.published_concept_seed_space(db, notebook_id)
 
     def _freeze_new_object_canonicals(
         self, notebook_id: str, new_objs: list

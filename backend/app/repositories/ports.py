@@ -5086,9 +5086,12 @@ class GovernanceStorePort(Protocol):
     @staticmethod
     def seed_for(object_type: str, *, concept_seed_version: int): ...
     @staticmethod
-    def published_concept_seed_version(connection: object, notebook_id: str) -> int:
-        """The concept seed space of the notebook's published merge (no
-        ``unified_kg_state`` row = 1), read in the caller's transaction."""
+    def published_concept_seed_space(
+        connection: object, notebook_id: str
+    ) -> tuple[int, frozenset]:
+        """``(concept seed version, override keys)`` of the notebook's
+        published merge (no ``unified_kg_state`` row = 1, no override in space
+        1), read in the caller's transaction."""
         ...
     @staticmethod
     def merge_evidence(base_evidence: list, source_evidence: list) -> list: ...

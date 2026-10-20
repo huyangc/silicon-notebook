@@ -619,8 +619,8 @@ class KnowledgeGovernanceService:
         with self._write() as db:
             self.governance_store.write_merge_candidate(
                 db, notebook_id, a, b, score, now,
-                seed_version=self.governance_store.published_concept_seed_version(
-                    db, notebook_id),
+                seed_version=self.governance_store.published_concept_seed_space(
+                    db, notebook_id)[0],
             )
 
     def pending_merges(self, notebook_id: str) -> List[dict]:
@@ -1603,7 +1603,7 @@ class KnowledgeGovernanceService:
         before the seed_a/seed_b columns existed carry '' → fall back to
         strip-"K-"(canonical), matching the old decided_pairs key derivation."""
         with self._connect() as db:
-            version = self.governance_store.published_concept_seed_version(
+            version, _override = self.governance_store.published_concept_seed_space(
                 db, notebook_id)
             return self.governance_store.decided_seed_pairs_from(
                 db, notebook_id, seed_version=version)
@@ -2237,7 +2237,7 @@ class KnowledgeGovernanceService:
         """
         self.get_notebook(notebook_id)
         with self._connect() as db:
-            space = self._duplicate_seed_space(db, notebook_id, object_type)
+            space = self.governance_store.published_concept_seed_space(db, notebook_id)
             seed_rows = self.knowledge.duplicate_seed_rows(db, notebook_id, object_type)
             by_seed = self._duplicate_blocks(object_type, seed_rows, *space)
 
@@ -2298,7 +2298,7 @@ class KnowledgeGovernanceService:
             merged_away = [r for r in rows if r["status"] == "deprecated"]
             by_seed = self._duplicate_blocks(
                 object_type, live,
-                *self._duplicate_seed_space(db, notebook_id, object_type),
+                *self.governance_store.published_concept_seed_space(db, notebook_id),
             )
             pending = [
                 o["id"] for members in by_seed.values() if len(members) >= 2
@@ -2327,28 +2327,6 @@ class KnowledgeGovernanceService:
             groups=self._duplicate_groups(object_type, by_seed, payloads),
             merged_away=refs,
         )
-
-    def _duplicate_seed_space(
-        self, db, notebook_id: str, object_type: str,
-    ) -> "tuple[int, frozenset]":
-        """The concept seed space duplicates of ``object_type`` block in, as
-        ``(seed_version, override_keys)``: the notebook's PUBLISHED space (the
-        one its clusters were built in) with its override keys for
-        concept-like types; ``(1, frozenset())`` for claim / formula /
-        procedure, which have no seed version. An unknown type keeps the
-        historical concept default."""
-        from app.services.kg_merge import override_keys
-
-        if object_type in ("claim", "formula", "procedure"):
-            return 1, frozenset()
-        seed_version = self.governance_store.published_concept_seed_version(
-            db, notebook_id)
-        override = (
-            override_keys(self.governance_store.decided_seed_pairs_from(
-                db, notebook_id, seed_version=seed_version))
-            if seed_version != 1 else frozenset()
-        )
-        return seed_version, override
 
     @staticmethod
     def _duplicate_blocks(
