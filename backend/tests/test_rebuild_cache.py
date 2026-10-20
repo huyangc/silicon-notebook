@@ -409,8 +409,13 @@ def test_cluster_input_version_hash_is_byte_identical(monkeypatch):
         settings=SimpleNamespace(embed_dim=1024, embed_runtime_dim=512))
     version = KnowledgeLifecycleService._cluster_input_version
     assert version(stub, "nb-golden") == "c79f39c5d55aa529d1a60b8bd90dcfe38648b065"
+    # The LLM-checkpoint namespace leaves dec_c out since PR-4 (S1 step 5: the
+    # decision recompute adds rows before the flip, and a crash between the
+    # two must resume on the checkpoints). Its digest moved once -- that only
+    # re-keys checkpoints, which the algorithm bump re-keys anyway; the
+    # skip-gate digests above and below are unchanged.
     assert version(stub, "nb-golden", exclude_emb_count=True) == (
-        "1f7d16b71218551b2031625ba5a2c33f2e3533fc")
+        "94b6cf4a859a114234b2f537c63c050362230981")
     stub.settings = SimpleNamespace(embed_dim=16, embed_runtime_dim=0)
     assert version(stub, "nb-golden") == "8b872b5fcf47fb3ef83eb2bc6fcf1c0d99b4bbbf"
     # A rebuild's end-write hashes its ENTRY facts with the decision recompute's

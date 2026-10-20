@@ -925,13 +925,42 @@ class DecisionTranslation:
     objects keep their old seed as ``~v1:<key>`` (only grows). ``unresolved``:
     rejections still collapsed after every key that could move was overridden
     — only a confirmed decision can do that, and confirmed stays authoritative
-    as everywhere in ``cluster_seeds``."""
+    as everywhere in ``cluster_seeds``. ``seeds_of_key``: the stream's map
+    (v1 key → the seeds of the current objects carrying it), kept for
+    ``live_pairs``."""
 
     pairs: Dict[str, List[Tuple[str, str]]] = field(default_factory=dict)
     rows: Dict[str, StoredDecision] = field(default_factory=dict)
     suspended: List[str] = field(default_factory=list)
     override: FrozenSet[str] = frozenset()
     unresolved: int = 0
+    seeds_of_key: Dict[str, Set[str]] = field(default_factory=dict)
+
+    @property
+    def recomputed_any(self) -> bool:
+        """Whether there were v1 decisions to recompute (the plan may exist
+        only to map v1 pending keys, see ``live_pairs``)."""
+        return bool(self.pairs or self.suspended)
+
+    def live_pairs(self, rows: Iterable[StoredDecision]) -> Dict[FrozenSet[str], str]:
+        """``{frozenset(v2 pair): status}`` of v1 decision rows read LIVE in the
+        pending refresh: the rows this rebuild did not translate — decided, or
+        decided again, after the plan was made (a v1 pending row the user
+        settles while the rebuild runs is one) — mapped through the stream's
+        v1 → v2 seeds under the final override. The refresh honours a decision
+        made while the rebuild ran for v1 rows as it does for v2 rows; the
+        next full rebuild translates them for good. A key no current object
+        carries maps to nothing."""
+        out: Dict[FrozenSet[str], str] = {}
+        for r in rows:
+            if r.status not in DECIDED_MERGE_STATUSES:
+                continue
+            side_a = _translated_seeds(r.key_a, self.seeds_of_key, self.override)
+            side_b = _translated_seeds(r.key_b, self.seeds_of_key, self.override)
+            if side_a and side_b:
+                for a, b in _row_pairs(side_a, side_b):
+                    out[frozenset((a, b))] = r.status
+        return out
 
     def decided_pairs(self) -> Dict[FrozenSet[str], str]:
         """``{frozenset(v2 pair): status}`` of the translated rows — what the
@@ -1051,6 +1080,7 @@ def translate_v1_decisions(
     return DecisionTranslation(
         pairs=pairs, rows={r.row_id: r for r in rows if r.row_id in pairs},
         suspended=suspended, override=over, unresolved=unresolved,
+        seeds_of_key={k: set(v) for k, v in seeds_of_key.items()},
     )
 
 
