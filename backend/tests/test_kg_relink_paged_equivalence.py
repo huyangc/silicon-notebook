@@ -455,12 +455,14 @@ def test_relink_one_source_advances_the_signal_without_relink_notebook_kg_ever_r
     nb, _ids = _build_multi_source_notebook(repo)
     lifecycle = repo._runtime.knowledge_lifecycle
     seq_before = _kg_mutation_seq(repo, nb)
-    written = {"edges": 0}
+    written = {"edges": 0, "seq_bumps": 0}
 
     lifecycle._relink_one_source(nb, "src-a", written)
 
     assert written["edges"] > 0, "fixture wrote no edges for src-a — test is vacuous"
-    assert _kg_mutation_seq(repo, nb) > seq_before
+    # exactly one bump, and the ledger counts it (the relink mark relies on it)
+    assert _kg_mutation_seq(repo, nb) == seq_before + 1
+    assert written["seq_bumps"] == 1
 
 
 def test_partial_failure_leaves_the_first_sources_signal_durable_before_the_run_finishes(

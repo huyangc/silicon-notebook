@@ -2188,6 +2188,11 @@ class KnowledgeLifecycleService:
 
         Returns {"isolated_before", "edges_added", "isolated_after"}."""
         self.get_notebook(notebook_id)  # KeyError if missing
+        # The generation the run starts on — the relink mark falls back to it
+        # when something other than this run moved the KG (`_mark_relink_attempted`).
+        with self._connect() as db:
+            state = self.unified_kg.state_row(db, notebook_id)
+        started_at_seq = int(state["kg_mutation_seq"]) if state else 0
         isolated_before = isolated_after = 0
         # 「至今写过任何边」的账目,刻意是可变的、写完一个来源就立刻记账,供下面
         # `finally` 判断要不要驱逐进程内缓存。**持久**的变更信号
@@ -2198,8 +2203,10 @@ class KnowledgeLifecycleService:
         # 持久信号改在 `_relink_one_source` 里、与该来源的边插入同一个写事务原子
         # 提交(镜像 `write_clusters` 的 `_bump_cluster_mutation_seq(db, ...)`)。
         # 这里的 `finally` 只负责进程内缓存驱逐——那是廉价、幂等的,晚一点/多做
-        # 一次都无所谓,不需要事务级原子性。
-        written = {"edges": 0}
+        # 一次都无所谓,不需要事务级原子性。`seq_bumps` 记本次自己推进了几次
+        # `kg_mutation_seq`(每个写了边的来源一次),供结尾的标记分辨「世代只被
+        # 本次推进过」与「期间还有别的写入」。
+        written = {"edges": 0, "seq_bumps": 0}
         try:
             for source_id in self._relink_source_partitions(notebook_id):
                 # 批 3·W1 PR-3 §4.2 选项 A 的检查点(relinkkg-,逐来源边界)。
@@ -2224,23 +2231,33 @@ class KnowledgeLifecycleService:
                 # happened per-source (durably, in-transaction) — this is
                 # process-local cache eviction only.
                 self._invalidate_unified_cache(notebook_id)
-        self._mark_relink_attempted(notebook_id)
+        self._mark_relink_attempted(notebook_id, started_at_seq, written["seq_bumps"])
         return {
             "isolated_before": isolated_before,
             "edges_added": written["edges"],
             "isolated_after": isolated_after,
         }
 
-    def _mark_relink_attempted(self, notebook_id: str) -> None:
+    def _mark_relink_attempted(
+        self, notebook_id: str, started_at_seq: int, own_bumps: int,
+    ) -> None:
         """「补上关联」跑完的持久标记(设计 2026-10-19 §4.5 / §8.3):F5 靠它判断再跑一次
         还有没有用 —— `GET /kg/relink/status` 只在内存里,重启即 ``idle``,「跑过但一条都
         没补上」也不留痕迹。
 
         只在**成功跑完**时写(中途异常不写:没跑完的一次不能说「再跑也没用」),补了
-        零条也写 —— 零条正是「确定性、幂等,再跑还是补不上」的那一档。``at_kg_seq`` 在
-        这个写事务里读:逐来源的写事务已各自推进了 `kg_mutation_seq`,记的是跑完那一刻
-        的世代;读侧拿它与当前世代比(之后有新内容进来,才可能补上新的)。一个很小的
+        零条也写 —— 零条正是「确定性、幂等,再跑还是补不上」的那一档。读侧拿
+        ``at_kg_seq`` 与当前世代比(之后有新内容进来,才可能补上新的)。一个很小的
         写事务:一行 state 点读 + 一行标记 upsert。
+
+        ``at_kg_seq`` 取哪个世代(codex #941 R2):当前世代在这个写事务里读。若它恰好等于
+        ``started_at_seq + own_bumps`` —— 开跑以来只有本次逐来源的写事务推进过它 —— 本次
+        看过的就是当前全部内容,记当前世代。否则期间还有别的写入(维护槽只串行维护任务,
+        **不挡普通摄取**:某来源的分区处理完之后又被摄取改动,本次并没看过那批新内容),
+        记**开跑时**的世代:之后 `kg_mutation_seq` 一定大于它,读侧 ``may_change`` 保持为真,
+        F5 不会把「再跑一次也没用」说早。不选「不写标记」:保守世代同样让按钮留着,又不丢掉
+        「这次跑过」的事实;下一次期间没有别的写入的那一跑会把它盖成当前世代。保守的代价
+        只是 F5 多显示一次按钮。没有并发写入时行为不变。
 
         ⚠ 补边已经提交:标记写失败**不得**把一次成功的「补上关联」报成失败(那会让
         运维和用户以为边没补上)。吞掉异常、发一条事件 —— 事件**只记异常类名**,不记
@@ -2249,10 +2266,12 @@ class KnowledgeLifecycleService:
         try:
             with self._write() as db:
                 state = self.unified_kg.state_row(db, notebook_id)
+                current = int(state["kg_mutation_seq"]) if state else 0
+                only_this_run = current == started_at_seq + own_bumps
                 self.unified_kg.write_kg_analysis_mark(
                     db, notebook_id, RULE_ISOLATED_OBJECTS, NOTEBOOK_SUBJECT_KEY,
                     MARK_RELINK_ATTEMPTED,
-                    at_kg_seq=int(state["kg_mutation_seq"]) if state else 0,
+                    at_kg_seq=current if only_this_run else started_at_seq,
                     actor_user_id="", note="", now=self._now(),
                 )
         except Exception as exc:  # noqa: BLE001 -- reported as an event, by class only
@@ -2316,7 +2335,8 @@ class KnowledgeLifecycleService:
         """One bounded relink work unit: read this source, write its new edges.
 
         Returns ``(isolated_before, isolated_after)`` for THIS source; the caller
-        sums them into the notebook totals. Edges written are reported through
+        sums them into the notebook totals. Edges written (and the one
+        ``kg_mutation_seq`` bump their commit carries) are reported through
         ``written`` — a mutable ledger rather than a return value — because the
         caller has to know "did the graph already change" even on the path where
         this call raises after its transaction committed.
@@ -2413,8 +2433,10 @@ class KnowledgeLifecycleService:
                 # append_clusters' "no-op call manufactures no signal" rule.
                 self._mark_unified_kg_dirty_in_tx(db, notebook_id)
             # Committed — record it BEFORE anything else can raise, so the run's
-            # cache-invalidation `finally` sees it even on a later failure.
+            # cache-invalidation `finally` sees it even on a later failure. The
+            # one seq bump it carried is the run's own, for the relink mark.
             written["edges"] += len(new_rows)
+            written["seq_bumps"] += 1
 
         now_connected = connected | {
             oid for r in new_rows for oid in (r[3], r[4])
