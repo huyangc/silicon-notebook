@@ -511,6 +511,54 @@ State-file regression tests force replacement after open: JSON readers may consu
 the already-open, owner-owned regular-file snapshot after its final link disappears,
 while lock/writable handles still require one link and unsafe files remain rejected.
 
+### Python dependencies
+
+Python dependencies are hash-locked, and installing never resolves anything.
+`backend/requirements.in` declares the runtime ranges and
+`backend/requirements-dev.in` the test and gate tools (pytest, pytest-xdist and
+matplotlib, which the pytest controller prewarms); its `-c requirements.txt` line
+keeps every package both sides need at the runtime lock's version.
+`scripts/lock_python_deps.sh` compiles them with pip-tools `--generate-hashes`
+into `backend/requirements.txt` (runtime lock) and
+`backend/requirements-dev.txt` (test lock). It resolves with CPython 3.13, the
+version CI and production run (`LOCK_PYTHON`, default `python3.13`), from a
+private venv under `.local/` with pinned pip and pip-tools versions. The hashes
+cover every file PyPI publishes for each pinned version, so one lock installs on
+macOS and Linux; resolving on either platform gives the same files while no
+dependency is platform-conditional between them, and a lock that missed such a
+dependency fails `pip install --require-hashes` loudly rather than installing
+something else.
+
+| Install | Command |
+| --- | --- |
+| CI, and a development environment that runs the gates | `python -m pip install --require-hashes -r backend/requirements.txt -r backend/requirements-dev.txt` |
+| Deployment (`scripts/prod.sh`, README/deployment instructions) | `python -m pip install --require-hashes -r backend/requirements.txt` |
+| Offline bundle (`scripts/pack.sh` → `packaging/install.sh`) | `pip wheel --require-hashes` from the runtime lock, then `pip install --no-index --require-hashes -r wheelhouse/locked-wheels.txt` |
+
+Changing dependencies is an explicit, reviewed edit:
+
+- Add, remove or re-range a dependency: edit the `.in` file, run
+  `bash scripts/lock_python_deps.sh`, and commit the `.in` file together with
+  both lock files. Every existing pin that still satisfies the ranges is kept,
+  so the diff shows only what the edit requires.
+- Upgrade: `bash scripts/lock_python_deps.sh --upgrade-package NAME` (repeatable,
+  `NAME==VERSION` allowed) upgrades just those packages; `--upgrade` upgrades
+  everything the ranges allow. The FastAPI/Pydantic exact pins below still
+  require an OpenAPI regeneration.
+- `bash scripts/lock_python_deps.sh --check` relocks into a temporary copy and
+  fails if a committed lock would change (needs the package index).
+
+`backend/tests/test_python_lockfiles.py` is the offline gate in the backend lane.
+Each lock carries the fingerprint of the `.in` file it was compiled from
+(`scripts/python_lockfiles.py`; comments, order and spacing do not count), so an
+edited `.in` file that was never relocked fails it. It also fails when a direct
+requirement is missing from its lock or pinned outside its range, a pin is
+unhashed, no longer required or required by something unlocked, a lock is not
+the lock script's Python 3.13 output, the test lock disagrees with the runtime
+lock on a shared package, or a test tool reaches the runtime lock. The first lock
+(2026-10-21) took exactly the 87 versions the `master` CI run of `3132d4667`
+installed.
+
 ### GitHub Actions CI
 
 Each workflow has at most three jobs, because every job shows up as a check on
@@ -578,14 +626,14 @@ schema, while the store's deployed-v52 upgrade test keeps the real ladder and it
 old-schema assertions.
 
 The committed OpenAPI contract is byte-semantically frozen, so
-`backend/requirements.txt` pins FastAPI `0.135.3` and Pydantic `2.12.4`
+`backend/requirements.in` pins FastAPI `0.135.3` and Pydantic `2.12.4`
 exactly. Upgrade either framework only together with an intentional OpenAPI
 contract regeneration and a clean-environment G2 extended-gate run.
 
 The workflow is read-only, does not receive model or deployment secrets, and
 uses four backend pytest workers per runner to avoid oversubscribing the hosted runner.
 Backend installation sets `HNSWLIB_NO_NATIVE=1`; G1 Python lanes share G3's dedicated
-portable-wheel cache with an exact OS/architecture/Python/requirements/policy key
+portable-wheel cache with an exact OS/architecture/Python/lock-file/policy key
 and no fallback to another cache. G2 continues to disable pip's wheel cache:
 `hnswlib` otherwise builds with `-march=native`, and a cached locally built
 wheel can crash with `SIGILL` when restored on a hosted runner with different
@@ -638,7 +686,7 @@ start or contact PostgreSQL. The PG launcher always reports slow setup/call/tear
 durations and writes `backend/.local/postgres-junit.xml`, uploaded by CI even on failure.
 It does not forward arbitrary `PYTEST_ADDOPTS` into its isolated child environment.
 The PG dependency cache uses a dedicated portable-wheel directory and an exact
-OS/architecture/Python/requirements/policy key, with no generic fallback cache;
+OS/architecture/Python/lock-file/policy key, with no generic fallback cache;
 `HNSWLIB_NO_NATIVE=1` remains mandatory. The whole PG job is measured against a
 three-minute optimization target; a successful test result alone does not prove it met
 that target, and cold-cache installation time is included in the observation.
@@ -654,9 +702,10 @@ dependency path used by a CI-executed test is repository-relative and
 independent of the process cwd. Committed fixtures are located relative to
 their repository files, never through a developer checkout path or `HOME`,
 and tests never read repository-external source documents. Every third-party
-package imported during test startup is declared in `backend/requirements.txt`;
-a clean hosted runner installs from that file and `frontend/package-lock.json`,
-then passes from those declarations alone. Lane timings remain visible for
+package imported during test startup is declared in `backend/requirements.in` or
+`backend/requirements-dev.in` and locked; a clean hosted runner installs from the
+two lock files and `frontend/package-lock.json`, then passes from those
+declarations alone. Lane timings remain visible for
 observation, while the under-100-second target applies only to the verified
 Apple Silicon Homebrew warm gate.
 

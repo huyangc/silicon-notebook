@@ -164,8 +164,8 @@ ensure_port_free "backend" "$BACKEND_PORT"
 ensure_port_free "frontend" "$FRONTEND_PORT"
 
 if [[ "${SKIP_INSTALL:-0}" != "1" ]]; then
-  echo "installing backend dependencies from backend/requirements.txt ..."
-  "$PYTHON_BIN" -m pip install --disable-pip-version-check \
+  echo "installing backend dependencies from the hash-locked backend/requirements.txt ..."
+  "$PYTHON_BIN" -m pip install --disable-pip-version-check --require-hashes \
     -r "$ROOT_DIR/backend/requirements.txt"
   echo "installing frontend dependencies from frontend/package-lock.json ..."
   npm ci --prefix "$ROOT_DIR/frontend"

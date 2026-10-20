@@ -421,10 +421,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 
 **工程卫生**
 
-- [ ] **Python 依赖未锁定**：`backend/requirements.txt` 33 行里只有 `fastapi`、`pydantic`、`json-repair`
-      三行用 `==` 钉死，其余 30 行是下界或区间；仓库没有任何锁文件（无 `requirements.lock` / `uv.lock` /
-      `poetry.lock`），安装结果随发布时间漂移；`pytest`、`pytest-xdist` 与运行依赖混在同一个文件里，
-      生产安装会带上测试依赖。
 - [ ] **前端无 ESLint 门禁**：`frontend/package.json` 的 devDependencies 有 `eslint` 与
       `eslint-config-next`，但仓库没有 ESLint 配置文件，`npm run lint` 实际是 `tsc --noEmit`；
       `scripts/check.sh` 与 CI 工作流都不跑 ESLint（后端同样没有 pyflakes / ruff 一类的 lint 门禁）。

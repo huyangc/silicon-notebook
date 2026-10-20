@@ -426,12 +426,12 @@ When an answer is going into a chat tool (a group message, a ticket comment), do
 
 ## 6. Runnable official-client example
 
-[scripts/example_mcp_memory_client.py](../scripts/example_mcp_memory_client.py) uses the official Python `mcp` client (the version range is declared in `backend/requirements.txt`). It is read-only by default and the token needs at least `read`; `--propose` creates an idempotent candidate for UI review (needs `contribute`). The script connects to `http://127.0.0.1:8000/mcp/` by default; for a remote deployment point `--url` or the `SILICON_NOTEBOOK_MCP_URL` environment variable at the address the onboarding instructions print.
+[scripts/example_mcp_memory_client.py](../scripts/example_mcp_memory_client.py) uses the official Python `mcp` client (the version range is declared in `backend/requirements.in` and locked in `backend/requirements.txt`). It is read-only by default and the token needs at least `read`; `--propose` creates an idempotent candidate for UI review (needs `contribute`). The script connects to `http://127.0.0.1:8000/mcp/` by default; for a remote deployment point `--url` or the `SILICON_NOTEBOOK_MCP_URL` environment variable at the address the onboarding instructions print.
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r backend/requirements.txt
+python -m pip install --require-hashes -r backend/requirements.txt
 
 export SILICON_NOTEBOOK_AGENT_TOKEN='<token copied from the Agent access page>'
 python scripts/example_mcp_memory_client.py \
@@ -545,7 +545,7 @@ A `401` at step 1 is a token problem. `400 Missing session ID` at step 3 means t
 | Claude Code sends a literal `${...}` as the token | The variable was not exported in the shell that launched `claude`, or its name is misspelled — an undefined variable is passed through verbatim. Export it and start a new session. |
 | `claude mcp list` does not show the server in another directory | `claude mcp add` defaults to the local, per-directory scope. Re-add it with `-s user`. |
 | Candidate is missing | `search(include="memory")` reads candidates with `read`; formal context (`search` with the default `include="formal"`, `ask`) intentionally excludes them. |
-| Python cannot import `mcp`/`httpx` | Activate the project venv and install `backend/requirements.txt`. |
+| Python cannot import `mcp`/`httpx` | Activate the project venv and install `backend/requirements.txt` (`python -m pip install --require-hashes -r backend/requirements.txt`). |
 | Remote plain HTTP | Loopback HTTP is fine. Remotely, plain HTTP is currently *allowed* by default — the backend only logs a startup warning and relaxes Host/Origin checks — so the bearer token crosses every hop in cleartext. A configured hostname does not make a deployment secure: treat plain HTTP as acceptable only on a trusted private network, and set `MCP_REQUIRE_HTTPS=1` with `MCP_PUBLIC_URL` on the public HTTPS `/mcp` URL for anything crossing an untrusted one. |
 | With `MCP_REQUIRE_HTTPS=1` set, requests answer `403 {"detail":"remote MCP transport requires HTTPS"}` | Expected: a plain-HTTP request from a non-loopback client is refused. Use the HTTPS address the deployment publishes (`MCP_PUBLIC_URL`), or connect over loopback. |
 | `build` refuses with `[busy]`: a build is already running | Expected queueing signal, not an error. The notebook-scoped single-flight guard is doing its job; poll `get_notebook` until it clears instead of retrying immediately. |

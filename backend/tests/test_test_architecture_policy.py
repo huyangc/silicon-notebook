@@ -211,7 +211,7 @@ def test_frontend_lane_recovers_the_test_file_diagnostics_next_drops():
 def test_openapi_framework_versions_are_exactly_pinned():
     requirements = {
         line.split("#", 1)[0].strip()
-        for line in (ROOT / "backend" / "requirements.txt").read_text(
+        for line in (ROOT / "backend" / "requirements.in").read_text(
             encoding="utf-8"
         ).splitlines()
         if line.split("#", 1)[0].strip()

@@ -37,7 +37,8 @@ cd silicon-notebook
 python3 -m venv .venv
 source .venv/bin/activate            # Windows: .venv\Scripts\activate
 python -m pip install --upgrade pip
-python -m pip install -r backend/requirements.txt
+# 带哈希锁定的运行依赖（见 docs/development_zh.md「Python 依赖」）
+python -m pip install --require-hashes -r backend/requirements.txt
 
 # 前端
 ( cd frontend && npm install )
@@ -195,8 +196,9 @@ npm run stop
 ```
 
 `npm run start` 调用 `scripts/prod.sh`:先用
-`python -m pip install -r backend/requirements.txt` 把后端依赖安装到 `PYTHON_BIN`
-所在环境，再用 `npm ci --prefix frontend` 按 lockfile 重建前端依赖树。然后在前台
+`python -m pip install --require-hashes -r backend/requirements.txt` 把带哈希锁定的
+后端依赖安装到 `PYTHON_BIN` 所在环境（每个包都换成锁里的精确版本，哈希不符的文件
+一律拒装），再用 `npm ci --prefix frontend` 按 lockfile 重建前端依赖树。然后在前台
 完成 `next build`，并用 `nohup` 且脱离标准输入的方式后台启动
 `next start` 与单 worker Uvicorn，两者日志都落在 `.local/logs/`。
 两个脱离 terminal 的进程拉起后，`npm run start` 立即退出，不轮询后端 readiness

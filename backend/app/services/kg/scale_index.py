@@ -637,7 +637,7 @@ def runtime_library_versions() -> dict:
 
     写进 manifest 的 ``library_versions``,给**异机构建**留下比对依据:工件本身
     可移植(manifest 无机器绑定、npy/npz 平台无关、hnswlib ``.bin`` 是数据),
-    但 ``requirements`` 只有下界 ``>=``,两台机器的 hnswlib 漂移是常态,而
+    但两台机器未必装自同一版锁文件(backend/requirements.txt),hnswlib 会漂移,而
     ``.bin`` **没有格式版本头** —— 版本不符时 ``load_index`` 可能不报错而读出
     垃圾,被 open_ann 的 fail-open 吞成「静默零召回」。所以版本必须随工件落盘。
 

@@ -1,7 +1,7 @@
 # scripts/ 使用说明
 
 仓库运维 / 开发 / 评测脚本。**除非特别说明,都在仓库根目录运行**,Python 用装好
-`backend/requirements.txt` 依赖的解释器(激活对应环境,或用 `PYTHON_BIN=...` 覆盖脚本默认)。
+`backend/requirements.txt`(带哈希的运行依赖锁;跑测试再加 `backend/requirements-dev.txt`)依赖的解释器(激活对应环境,或用 `PYTHON_BIN=...` 覆盖脚本默认)。
 
 ## 统一 CLI 入口
 
@@ -78,7 +78,7 @@ scripts/backend.sh restart    # 停当前 + 启 silicon-notebook
 - **"重启后 notebook 全没了 / 一直 404"** —— 多半是 :8000 被**别的服务**(如 `EDA Agent`,它有 `/v1/chat/completions` 但没有 `/api/notebooks`)占了。先 `scripts/backend.sh status`:若显示不是 silicon-notebook,`scripts/backend.sh restart` 一键换回。**数据不会丢**——notebook 都在 `.local/silicon_notebook.db`,这只是"端口上跑错了服务"。
 - 改了 `.env`(模型 / `CHUNK_MMR_K` / DB 等)需要让后端重新加载 → `restart`(后端**没带 `--reload`**,改 config/代码必须重启才生效)。
 
-**关键:** DB / storage / `.env` 的相对路径已在代码层锚定到**仓库根**(见 `backend/app/core/config.py` 的 `_ROOT_DIR`),从哪个目录启动 uvicorn 都指向同一套 `仓库根/.local` 与根 `.env`——后端启动日志首行会打印解析后的绝对路径,可一眼核对。脚本仍从 `backend/` 目录启动只是为了模块导入(`app.main`)。注意:多 worktree 时各 worktree 锚各自的根(`.local` 互相独立)。生产启动用仓库根的 `npm run start`（`scripts/prod.sh`：先安装后端 requirements 与 lockfile 锁定的前端依赖，再前端 build、从 git 历史重新生成 `release-manifest.json`（更新通知清单；失败只警告并删除旧清单，不阻断启动），最后 `nohup` 后台 start，后端固定 `--workers 1`）；两个后台进程拉起后它立即退出，不做 readiness/HTTP 校验，服务在关闭 terminal 后仍运行，由运维方自行校验并用 `npm run stop` 停止。只有预装环境用 `SKIP_INSTALL=1` 跳过安装。交接完成前中断会同时 TERM 两个直接子进程，最多等待 `START_CLEANUP_GRACE_SECONDS` 后强制清理并回收；端口占用以监听行为准，不依赖 PID 可见性。模型调度容量位于单个后端进程内，禁止以多 worker 乘大 TOML 声明的容量。
+**关键:** DB / storage / `.env` 的相对路径已在代码层锚定到**仓库根**(见 `backend/app/core/config.py` 的 `_ROOT_DIR`),从哪个目录启动 uvicorn 都指向同一套 `仓库根/.local` 与根 `.env`——后端启动日志首行会打印解析后的绝对路径,可一眼核对。脚本仍从 `backend/` 目录启动只是为了模块导入(`app.main`)。注意:多 worktree 时各 worktree 锚各自的根(`.local` 互相独立)。生产启动用仓库根的 `npm run start`（`scripts/prod.sh`：先按带哈希的 `backend/requirements.txt`(`--require-hashes`)安装后端依赖、按 lockfile 安装前端依赖，再前端 build、从 git 历史重新生成 `release-manifest.json`（更新通知清单；失败只警告并删除旧清单，不阻断启动），最后 `nohup` 后台 start，后端固定 `--workers 1`）；两个后台进程拉起后它立即退出，不做 readiness/HTTP 校验，服务在关闭 terminal 后仍运行，由运维方自行校验并用 `npm run stop` 停止。只有预装环境用 `SKIP_INSTALL=1` 跳过安装。交接完成前中断会同时 TERM 两个直接子进程，最多等待 `START_CLEANUP_GRACE_SECONDS` 后强制清理并回收；端口占用以监听行为准，不依赖 PID 可见性。模型调度容量位于单个后端进程内，禁止以多 worker 乘大 TOML 声明的容量。
 
 大库默认在 `/api/ready` 前加载全部已发布 scale 索引、启用的 ANN handle 与可安全复用的单索引 PPR core；不会启动时全量复制跨库 mounted 组合图，以免千万节点图成倍常驻导致 OOM。`backend.sh start` 会打印 `warming` / `preloading_indexes` 的进度，默认最多等 1,800 秒，避免原 40 秒窗口误杀正常的大索引加载；极慢磁盘用 `START_TIMEOUT_SECONDS=3600 scripts/backend.sh start` 覆盖。若显示 `error`，脚本会立即清理本次进程并提示看日志。索引数不得超过 `SCALE_IDX_CACHE_MAX`，否则无法保证“全部加载后仍常驻”。
 
@@ -139,6 +139,17 @@ contracts 与前端合在一个 job（`bash scripts/check.sh --lane contracts --
 仍隔离部署环境并在 `backend/.local` 生成 JUnit 耗时文件，CI 上传保留七天。完整验收仍执行
 不带参数的 `check.sh`，job 划分见
 [`docs/development_zh.md`](../docs/development_zh.md#github-actions-ci)。
+
+### `lock_python_deps.sh` —— 重新生成带哈希的 Python 依赖锁
+
+```bash
+bash scripts/lock_python_deps.sh                          # 改了 backend/requirements*.in 后重锁(保留仍满足范围的钉版)
+bash scripts/lock_python_deps.sh --upgrade-package NAME   # 只升指定包;--upgrade 全部升级
+bash scripts/lock_python_deps.sh --check                  # 重锁到临时副本,锁会变化则失败
+```
+
+需要 CPython 3.13(`LOCK_PYTHON`,默认 `python3.13`)与包索引访问;规则见
+[`docs/development_zh.md`](../docs/development_zh.md#python-依赖)。
 
 ### `check_postgres.sh` —— 独立 PostgreSQL 门禁
 

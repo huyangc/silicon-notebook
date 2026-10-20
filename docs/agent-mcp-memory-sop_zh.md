@@ -400,14 +400,14 @@ claude mcp list
 
 ## 6. 可直接运行的官方 MCP client 示例
 
-仓库提供 [scripts/example_mcp_memory_client.py](../scripts/example_mcp_memory_client.py)。它使用官方 `mcp` Python client（版本范围以 `backend/requirements.txt` 为准），默认只做读取，token 至少要有 `read`；加 `--propose` 才会提交一个幂等 candidate（需要 `contribute`）。脚本默认连 `http://127.0.0.1:8000/mcp/`，远程部署用 `--url` 或环境变量 `SILICON_NOTEBOOK_MCP_URL` 指向接入说明印出的地址。
+仓库提供 [scripts/example_mcp_memory_client.py](../scripts/example_mcp_memory_client.py)。它使用官方 `mcp` Python client（版本范围声明在 `backend/requirements.in`，锁定在 `backend/requirements.txt`），默认只做读取，token 至少要有 `read`；加 `--propose` 才会提交一个幂等 candidate（需要 `contribute`）。脚本默认连 `http://127.0.0.1:8000/mcp/`，远程部署用 `--url` 或环境变量 `SILICON_NOTEBOOK_MCP_URL` 指向接入说明印出的地址。
 
 安装依赖后，在项目根目录运行：
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r backend/requirements.txt
+python -m pip install --require-hashes -r backend/requirements.txt
 
 export SILICON_NOTEBOOK_AGENT_TOKEN='<从 Agent 接入页复制的 token>'
 python scripts/example_mcp_memory_client.py \
@@ -541,7 +541,7 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 | 本机 HTTP 可以，远程不安全 | loopback 用 HTTP 没问题。远程当前**默认也允许**明文 HTTP——后端只打一条启动告警并放宽 Host/Origin 校验——于是 Bearer token 每一跳都是明文。填上域名不等于自动安全：明文 HTTP 只在可信内网可接受，跨不受信网络必须设置 `MCP_REQUIRE_HTTPS=1` 并把 `MCP_PUBLIC_URL` 指向公开 HTTPS `/mcp`。 |
 | 设置 `MCP_REQUIRE_HTTPS=1` 后返回 `403 {"detail":"remote MCP transport requires HTTPS"}` | 非 loopback 的明文请求被拒绝，这是预期行为。改用部署公布的 HTTPS 地址（`MCP_PUBLIC_URL`），或在本机 loopback 上访问。 |
 | 只看到 confirmed，看不到 candidate | `search(include="memory")` 用 `read` 档就能读到 candidate；正式上下文（`search` 默认的 `include="formal"`、`ask`）本来就刻意排除 candidate。 |
-| Python 示例缺少 `mcp`/`httpx` | 激活项目虚拟环境并安装 `backend/requirements.txt`。 |
+| Python 示例缺少 `mcp`/`httpx` | 激活项目虚拟环境并安装 `backend/requirements.txt`（`python -m pip install --require-hashes -r backend/requirements.txt`）。 |
 | `build` 以 `[busy]` 拒绝：已有构建在运行 | 这是预期的排队信号，不是错误。笔记本级单飞守卫正在生效；轮询 `get_notebook` 直到它清空，不要立刻重试。 |
 | `delete_source` 拒绝：该来源由用户添加 | 设计如此。MCP 只能删除 Agent 添加的来源；界面来源列表用「Agent 添加」徽标标出哪些是。用户的文档请在界面删除。 |
 | 某个来源或构建写入工具在一个读得到的笔记本上被拒 | 来源管理与构建写入一律 owner-only。白名单里可能包含 token 所有者只是以只读成员身份加入的笔记本：那里读得到，但这些写入永远进不去。唯一例外是 `contribute` 档的格子代码写入与观察记录——它们按设计由档位决定，只读成员也可写。另外，签发或修改时白名单里没有自己拥有的笔记本，`manage`/`delete` 根本勾不上。 |

@@ -43,23 +43,28 @@ fi
 
 PIP=(".venv/bin/python" -m pip)
 
-# --- 3) 装 python 依赖:优先离线 wheelhouse,缺的回退在线(python 源) ---
+# --- 3) 装 python 依赖:按带哈希的锁文件装,优先离线 wheelhouse,装不上回退在线(python 源) ---
+# backend/requirements.txt 是带哈希的运行依赖锁;wheelhouse/locked-wheels.txt 是打包时按它
+# 生成的同版本清单,哈希指向包内每个 wheel(含打包机就地编译的 hnswlib)。
 REQ="$SCRIPT_DIR/backend/requirements.txt"
+WHEEL_REQ="$SCRIPT_DIR/wheelhouse/locked-wheels.txt"
 [[ -f "$REQ" ]] || die "缺 $REQ,包不完整。"
 index_args=()
 [[ -n "${PIP_INDEX_URL:-}" ]] && index_args=(--index-url "$PIP_INDEX_URL")
 
 if compgen -G "$SCRIPT_DIR/wheelhouse/*.whl" >/dev/null 2>&1; then
+  [[ -f "$WHEEL_REQ" ]] || die "wheelhouse 里缺 locked-wheels.txt,包不完整(用当前 scripts/pack.sh 重新打包)。"
   log "从 wheelhouse 离线安装依赖…"
-  if "${PIP[@]}" install --no-index --find-links wheelhouse -r "$REQ"; then
+  if "${PIP[@]}" install --no-index --find-links wheelhouse --require-hashes -r "$WHEEL_REQ"; then
     log "离线安装完成。"
   else
-    log "wheelhouse 不全,回退在线补装(python 源)…"
-    "${PIP[@]}" install --find-links wheelhouse ${index_args[@]+"${index_args[@]}"} -r "$REQ"
+    # 不带 --find-links:包内就地编译的 wheel 不在锁文件哈希里,混进来会让哈希校验失败。
+    log "wheelhouse 装不上,回退按锁文件在线安装(python 源)…"
+    "${PIP[@]}" install --require-hashes ${index_args[@]+"${index_args[@]}"} -r "$REQ"
   fi
 else
-  log "无 wheelhouse,从 python 源在线安装依赖…"
-  "${PIP[@]}" install ${index_args[@]+"${index_args[@]}"} -r "$REQ"
+  log "无 wheelhouse,按锁文件从 python 源在线安装依赖…"
+  "${PIP[@]}" install --require-hashes ${index_args[@]+"${index_args[@]}"} -r "$REQ"
 fi
 
 # --- 4) 系统模型服务配置 ---

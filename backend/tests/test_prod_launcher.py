@@ -146,7 +146,8 @@ def test_prod_launcher_detaches_without_waiting_for_readiness(tmp_path: Path) ->
 
         install_calls = install_calls_file.read_text(encoding="utf-8").splitlines()
         assert install_calls == [
-            f"python -m pip install --disable-pip-version-check -r {backend / 'requirements.txt'}",
+            "python -m pip install --disable-pip-version-check --require-hashes"
+            f" -r {backend / 'requirements.txt'}",
             f"npm ci --prefix {root / 'frontend'}",
         ]
 
