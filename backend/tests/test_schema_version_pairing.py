@@ -1,11 +1,12 @@
 """Constant-only guard: the shadow migration module's pinned schema pair must
 track the live repository schema-version pair.
 
-This is NOT a reintroduction of the retired shadow-functionality test suite
-(SQLite-backend implementation tests, SQLite->PostgreSQL import/forward-shadow
-tests, and cross-backend parity tests stay retired per the current test
-architecture). It imports zero database connections and starts zero
-processes; it only compares two module-level constants.
+It opens no database and starts no process; it only compares two
+module-level constants. The wider dual-backend parity checks (the SQLite
+migrator's ``SCHEMA_VERSION`` against the same pair, gap-free migrations on
+both sides, port and store-surface parity) live in
+``test_dual_backend_parity.py``; this file stays the narrow, import-time-error
+guard for the shadow module described below.
 
 Why this exists: `backend/app/migration/shadow/manifest.py` hardcodes
 `RUNNING_SCHEMA_PAIR` as a literal `(sqlite_version, postgres_version, epoch)`

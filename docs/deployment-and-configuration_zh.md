@@ -302,7 +302,7 @@ DATABASE_URL=postgresql://silicon_app:change-me@127.0.0.1:5432/silicon_notebook
 也采用这一部署选项。
 
 SQLite 的支持范围：离线（无数据库服务的本地或打包部署）、单机（一台机器、一个服务进程）和测试。
-功能与 PostgreSQL 相同，但同一时刻只有一个写者，没有跨进程协调锁。多用户生产部署和大库应使用
+功能与 PostgreSQL 相同，但同一时刻只有一个写者，没有 advisory lock 那样的跨进程协调锁（只有 `BEGIN IMMEDIATE` 写入围栏）。多用户生产部署和大库应使用
 PostgreSQL：离线 scale 索引构建（`scripts/cli.sh scale`）只支持 PostgreSQL，SQLite 部署只能在服务进程内构建；
 热路径与检索索引构建、PostgreSQL 热路径诊断也只针对 PostgreSQL。两个后端逐项的能力差异见
 [架构文档](../architecture.md#222-双后端长期并存与能力对等矩阵)。
