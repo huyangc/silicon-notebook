@@ -4554,16 +4554,25 @@ one entry per sheet, at most `SPREADSHEET_ANALYSIS_MAX_TARGETS` entries (default
 and is told to write more than one only when the question explicitly compares, contrasts or
 separately analyses several tables; it is still that one planner call (its output allowance
 scales to 500 tokens per entry). Each entry is validated on its own: an invalid entry drops only
-itself and is never replaced by another table; a second entry on an already planned sheet is
-dropped; the distinct valid entries run in plan order up to the cap, the rest are cut in plan
-order and the last result card says so ("本次规划选了 X 张表，超过单次最多 N 张的上限，按规划顺序只分析了前
-N 张；未分析：…"). A reply with no usable entry (an empty list, not a list, all invalid) falls back
+itself and is never replaced by another table. One sheet may be analysed several ways (user ruling
+2026-10-21, e.g. a sum and a ranking of the same table): each analysis takes a seat under the cap
+and gets its own card; only an entry that computes exactly what an earlier one computes (same
+sheet, same operation, same parameters and filters that operation actually reads -- a count
+ignores its measure, a ranking its result columns) is dropped as a duplicate. The distinct valid
+entries run in plan order up to the cap, the rest are cut in plan order and the last result card
+says so ("本次规划了 X 项表格分析，超过单次最多 N 项的上限，按规划顺序只做了前 N 项；未做：工作簿 · 工作表（操作：
+参数）…"). A reply with no usable entry (an empty list, not a list, all invalid) falls back
 exactly as an invalid single plan did, to the local profile of the first sheet. Every executed
-table is its own result card, in plan order, naming its workbook and sheet and, when it comes
-from another library, that library; there is no merged comparison card -- the comparison is the
-synthesized answer's job. When one table runs, the card, the trace step, the synthesis table
-block and its citable map are byte-identical to before; with several, the trace summary reads
-"已分析 N 张表：…" and `detail.tables[]` lists the per-table fields, and whenever the reply named
+analysis is its own result card, in plan order, naming its workbook and sheet and, when it comes
+from another library, that library; when a sheet is analysed more than once in the run, those
+cards also carry `analysis_label` (a reading of the parameters, e.g. 「按 Price 降序」), shown after
+the operation name on the card and written as `plan=…;` on the synthesis block's title line, so
+two cards of one sheet with the same operation can be told apart; a sheet analysed once carries
+no such field. There is no merged comparison card -- the comparison is the synthesized answer's
+job. When one analysis runs, the card, the trace step, the synthesis table block and its citable
+map are byte-identical to before; with several, the trace summary reads "已分析 N 张表：…" (all
+different sheets) or "已对 M 张表做了 N 项分析：…", and `detail.tables[]` lists the per-analysis
+fields, and whenever the reply named
 more than one entry `detail.targets` adds `planned`, `executed`, `invalid`, `duplicate`,
 `over_limit` and `limit`.
 Successful output adds a `spreadsheet` trace step, citable bounded evidence, and one

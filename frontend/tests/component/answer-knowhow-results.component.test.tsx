@@ -257,7 +257,7 @@ test("a multi-table plan renders one card per table, in plan order, each naming 
 
 
 test("two tables of the current library render as two badge-free cards, the cap disclosure on the last", () => {
-  const disclosure = "本次规划选了 4 张表，超过单次最多 3 张的上限，按规划顺序只分析了前 3 张；未分析：丁 · Quotes。";
+  const disclosure = "本次规划了 4 项表格分析，超过单次最多 3 项的上限，按规划顺序只做了前 3 项；未做：丁 · Quotes（数据概况）。";
   const first = { ...workbookFrom("nb-1"), source_id: "src-1", source_title: "甲报价表" };
   const second = {
     ...workbookFrom("nb-1"), source_id: "src-2", source_title: "乙报价表", warnings: [disclosure],
@@ -270,6 +270,29 @@ test("two tables of the current library render as two badge-free cards, the cap 
   expect(screen.queryByText(/来自「/)).not.toBeInTheDocument();
   expect(cards[0]).not.toHaveTextContent(disclosure);
   expect(cards[1]).toHaveTextContent(disclosure);
+});
+
+
+test("two analyses of one sheet render as two cards, each naming its parameters", () => {
+  // Two rankings of the same sheet: source_id, sheet and operation are all
+  // equal, so only the parameter reading tells the cards apart.
+  const byPrice = { ...workbookFrom("nb-1"), analysis_label: "按 Price 降序" };
+  const byQty = {
+    ...workbookFrom("nb-1"), analysis_label: "按 Qty 降序",
+    rows: [{ position: 1, cells: { Price: "1" } }],
+  };
+  renderWorkbooks([byPrice, byQty], "nb-1", { "nb-1": "本库" });
+  const cards = screen.getAllByRole("region", { name: "Excel 分析：报价单" });
+  expect(cards).toHaveLength(2);
+  expect(cards[0]).toHaveTextContent("Quotes!A1:B3 · 排序分析（按 Price 降序）");
+  expect(cards[1]).toHaveTextContent("Quotes!A1:B3 · 排序分析（按 Qty 降序）");
+  expect(cards[1]).toHaveTextContent("1");
+});
+
+
+test("a sheet analysed once shows no parameter reading", () => {
+  renderWorkbooks([workbookFrom("nb-1")], "nb-1", { "nb-1": "本库" });
+  expect(screen.getByText("Quotes!A1:B3 · 排序分析")).toBeInTheDocument();
 });
 
 
