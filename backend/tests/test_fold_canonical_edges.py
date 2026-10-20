@@ -1,7 +1,7 @@
 """`_fold_canonical_edges` / `_fold_source_rows`:两条 KG 重活流式读的折叠循环契约。
 
 1. 折叠语义不变:`_fold_canonical_edges` 丢掉空端点与自环,canonical 下标按**首次出现序**
-   分配(Louvain 对边序敏感),每条边原样喂给 builder;`_fold_source_rows` 把每行的
+   分配(划分已与它无关,见 `tests/test_board_partition_wiring.py`),每条边原样喂给 builder;`_fold_source_rows` 把每行的
    `(source_id, canonical_id)` 原样喂给计数器。
 2. 循环中途抛异常时,行流必须被 `close()`。PostgreSQL 上这条流是 `cursor().stream()`
    生成器:被丢下却仍被栈帧引用时,连接处于 ACTIVE 状态,调用方 `with self._connect()`

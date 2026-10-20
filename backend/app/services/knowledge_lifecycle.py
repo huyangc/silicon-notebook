@@ -117,6 +117,13 @@ from app.services.kg_analysis_precompute import (
     reusable_artifact_payloads,
     stamp_cluster_seq,
 )
+from app.services.kg_partition import (
+    PARTITION_ALGO_VERSION,
+    PARTITION_MODE_COLD_FALLBACK,
+    PARTITION_MODE_WARM,
+    PreviousPartitionBuilder,
+    partition_boards,
+)
 from app.services.model_work import notebook_model_artifact_scope
 from app.services.kg_viewer_scope import answer_graph_by, store_viewer_kwargs
 from app.services.knowledge_governance import KnowledgeGovernanceService
@@ -497,8 +504,9 @@ def _fold_canonical_edges(
 ) -> None:
     """Fold ``community_graph_rows``' ``(s, t)`` rows into the int32 edge table.
 
-    ``can2idx`` hands out canonical indices in first-appearance order (Louvain
-    is edge-order sensitive), self-loops and empty endpoints are dropped.
+    ``can2idx`` hands out canonical indices in first-appearance order (the board
+    partition no longer depends on it: ``kg_partition`` ranks nodes by canonical
+    id), self-loops and empty endpoints are dropped.
 
     ``relations_by_source`` (KG findings F3b, design 2026-10-19 §7.1 ①): when
     given, EVERY row is counted under its ``src`` (``kr.source_id``) before the
@@ -525,6 +533,24 @@ def _fold_canonical_edges(
             si = can2idx.setdefault(s, len(can2idx))
             ti = can2idx.setdefault(t, len(can2idx))
             edge_builder.add(si, ti)
+
+
+def _fold_previous_partition(rows: Any, builder: Any, can2idx: Dict[str, int]) -> None:
+    """Fold ``community_board_key_rows``' ``(canonical_id, board_key)`` rows of the
+    published generation into a ``kg_partition.PreviousPartitionBuilder``. A
+    canonical no longer in the current graph is passed as ``None`` (it still
+    counts toward its old board's size, which the board_key Jaccard needs). A
+    row without a board_key (written by no partition this code knows) makes the
+    previous partition unusable: ``ValueError``, like a canonical in two boards.
+
+    ``closing`` is load-bearing on PostgreSQL for the same reason as in
+    ``_fold_canonical_edges``: ``rows`` is a ``cursor().stream()`` generator.
+    """
+    with closing(rows):
+        for row in rows:
+            if not row["board_key"]:
+                raise ValueError("a board of the previous partition has no board_key")
+            builder.add(can2idx.get(row["canonical_id"]), row["board_key"])
 
 
 def _fold_source_rows(rows: Any, counter: Any, tally: Any = None) -> None:
@@ -7368,13 +7394,19 @@ class KnowledgeLifecycleService:
         self, notebook_id: str, level: int, *,
         graph_fresh: bool, kept_rows, names, deg, analysis,
         ledger_speaks: bool, seq: int, generation: int, published_from: int,
-        partition_generation: int,
+        partition_generation: int, board_keys: Sequence[str],
+        partition: "Optional[Dict[str, Any]]",
     ) -> "Tuple[bool, bool]":
         """communities 族的写新代 + 发布(批 3·W2 §1.3,从 rebuild_communities
         原地抽出——零余量热函数天花板逼出的切分,行为逐字保留):写段先复读
         认领再 INSERT 新代(事务外);发布事务 copy-forward + 双 CAS 翻指针 +
         账本作废 + seq + 产物,一个事务。返回 (analysis_published,
-        partition_replaced_under_us)。"""
+        partition_replaced_under_us)。
+
+        板块划分(设计 2026-10-19 §五 S2):``board_keys`` 与 ``kept_rows`` 逐行对齐写进
+        新代;``partition``(全量路径才有)的分区版本与方式在翻转指针的**同一个**写事务里
+        写进 state(与 `set_community_seq` 同为默认层独有),并作为 ``partition`` 键并进
+        `community_edges` 的账本 payload。补账本路径两者都是空的,什么都不写。"""
         analysis_published = False
         partition_replaced_under_us = False
         # ---- 发布:板块划分 + 版本戳 + 全部分析产物,**一个**写事务(codex 第 13 轮 P1)
@@ -7416,7 +7448,7 @@ class KnowledgeLifecycleService:
                         notebook_id, generation)
                 self.unified_kg.write_communities_generation(
                     db, notebook_id, level, kept_rows, names, deg,
-                    self._now(), generation
+                    self._now(), generation, board_keys=board_keys,
                 )
         if not graph_fresh or analysis is not None:
             now = self._now()
@@ -7486,7 +7518,16 @@ class KnowledgeLifecycleService:
                         # **同事务**:分开提交会留下「板块已换、seq 还是旧的」的窗口,
                         # 而闸正是拿 seq 判「建过没有」。
                         self.unified_kg.set_community_seq(db, notebook_id, seq)
+                        if partition is not None:
+                            # 下一次重建凭这两列判冷 / 热启动:必须与发布同事务,否则
+                            # 「板块已换、版本还是旧的」会让下一代拿一套不同算法的划分
+                            # 当上一代(或把同算法的划分当成要冷启动的旧划分)。
+                            self.unified_kg.set_community_partition(
+                                db, notebook_id, version=partition["partition_version"],
+                                mode=partition["partition_mode"])
                 if analysis is not None:
+                    if partition is not None:
+                        analysis.payloads[ARTIFACT_COMMUNITY_EDGES]["partition"] = dict(partition)
                     # ⚠ **发布前复核板块划分还在**(codex 第 16 轮 P2)。只有「只补账本」
                     # 那一档需要:它的 `kept_rows` 是**写事务之外**从库里读回来的,而随后
                     # 的 `_compute_kg_analysis` 在生产(878 万对象 / 836 万边)上是分钟级
@@ -7565,6 +7606,117 @@ class KnowledgeLifecycleService:
             prune_marks=analysis.prune_marks,
         )
 
+    def _partition_boards_for_rebuild(
+        self, notebook_id: str, level: int, published_from: int,
+        idx2can: List[str], can2idx: Dict[str, int], edge_table: CanonicalEdgeTable,
+    ) -> "Tuple[List[Tuple[str, List[str]]], List[str], Dict[str, float], Dict[str, Any]]":
+        """`rebuild_communities` 的板块划分(设计 2026-10-19 §五 S2,`app.services.kg_partition`)。
+
+        返回 ``(kept_rows, board_keys, deg, partition)``:``kept_rows`` 与今天同形
+        (新铸的 ``cm-`` id + 按 canonical id 升序的成员),``board_keys`` 与它逐行对齐,
+        ``deg`` 只含保留板块的成员(写库只按成员取 centrality),``partition`` 是写进
+        `community_edges` 账本 payload、`communities_rebuilt` 事件与 state 两列的统计。
+
+        **冷 / 热启动的判据**(⚠ **不是** ``force``:每一次真正的重新合并都以
+        ``force=True`` 调 `rebuild_communities`,照那个判据热启动永远不会发生):
+          · 没有已发布的划分(指针 ``published_from`` 是 -1 = 删过知识图谱,或指着的那一代
+            一个板块都没有:从没建过、索引发布清空了)→ 冷启动;
+          · 已发布划分的 ``community_partition_version`` 不是当前的
+            `PARTITION_ALGO_VERSION`(含存量库的 0 = 上一套算法,以及
+            ``recluster_kg --cold-partition`` 写回的 0)→ 冷启动;
+          · 没装 igraph → `kg_partition` 自己走 networkx 冷启动,mode 记 ``cold_fallback``;
+          · 其余 → 以已发布那一代(``published_from``)的板块热启动。
+        只要有已发布的划分,冷启动也照样读它当 ``previous``(``warm=False``):只用来
+        续用 board_key。⚠ 指针为 0 也要读:批 3·W2 之前建的库、`merge_dbs` 导入的库,
+        已发布的板块就在第 0 代(存量行的 board_key 由 v98/0078 回填成 id)。非默认层没有
+        自己的版本列(两列与 `community_seq` 一样归默认层),一律冷启动、不读上一代。
+
+        上一代读不成一份合法的划分(同一代里一个 canonical 落在两个板块里,或板块没有
+        board_key)时**不**让重建失败:发 `community_partition_previous_unusable` 事件,当作
+        没有上一代冷启动。
+        ``min_size`` 钳位到 >= 1:`COMMUNITY_MIN_SIZE` 没有下界,今天设 0 也能跑。
+
+        版本列与上一代都在**认领之后**读(调用方已持有本次构建的代际认领,认领期间没有
+        别的发布能翻指针,所以读到的版本说的正是 ``published_from`` 那一代);都在写事务
+        之外(流式读,`_fold_previous_partition` 用 ``closing`` 兜住)。
+        """
+        import numpy as np
+
+        previous = None
+        cold_reason: Optional[str] = None
+        if level != DEFAULT_COMMUNITY_LEVEL:
+            cold_reason = "non_default_level"
+        elif published_from < 0:
+            cold_reason = "no_published_partition"
+        else:
+            builder = PreviousPartitionBuilder(len(idx2can))
+            try:
+                with self._connect() as db:
+                    state = self.unified_kg.state_row(db, notebook_id)
+                    _fold_previous_partition(
+                        self.unified_kg.community_board_key_rows(
+                            db, notebook_id, level, published_from),
+                        builder, can2idx)
+                previous = builder.build()
+            except ValueError as exc:
+                self.event_log.emit({
+                    "kind": "community_partition_previous_unusable",
+                    "notebook_id": notebook_id, "level": level,
+                    "generation": published_from, "error": type(exc).__name__,
+                })
+                cold_reason = "previous_partition_unusable"
+            else:
+                if not previous.keys:
+                    previous, cold_reason = None, "no_published_partition"
+                elif (state is None or int(state["community_partition_version"])
+                        != PARTITION_ALGO_VERSION):
+                    cold_reason = "partition_version_changed"
+        result = partition_boards(
+            idx2can, edge_table.src, edge_table.dst, edge_table.weight,
+            min_size=max(1, int(self.settings.community_min_size)),
+            previous=previous, warm=cold_reason is None,
+        )
+        kept_rows = [(self._new_id("cm"), list(board.members)) for board in result.boards]
+        board_keys = [board.key for board in result.boards]
+        deg = {idx2can[i]: float(result.degree[i])
+               for i in np.flatnonzero(result.board_of_node >= 0).tolist()}
+        partition = {
+            "partition_mode": result.mode,
+            "partition_version": PARTITION_ALGO_VERSION,
+            "partition_cold_reason": (
+                None if result.mode == PARTITION_MODE_WARM
+                else "igraph_unavailable" if result.mode == PARTITION_MODE_COLD_FALLBACK
+                else cold_reason),
+            "board_keys_carried": result.carried,
+            "board_keys_minted": result.minted,
+            "board_keys_rehashed": result.rehashed,
+            "previous_boards": result.previous_boards,
+            "unstable_components": result.unstable_components,
+        }
+        if result.unstable_components:
+            self.event_log.emit({
+                "kind": "community_partition_unstable", "notebook_id": notebook_id,
+                "level": level, "unstable_components": result.unstable_components,
+                "components": result.components,
+            })
+        return kept_rows, board_keys, deg, partition
+
+    def request_cold_community_partition(self, notebook_id: str) -> None:
+        """``recluster_kg --cold-partition``:让下一次划分从冷启动开始(丢掉划分的历史)。
+
+        做法是把已发布划分的 ``community_partition_version`` 写回 0 —— 与存量库升级时
+        的「上一套算法建的」同一个判据,`_partition_boards_for_rebuild` 因此冷启动;
+        ``community_partition_mode`` 原样留着(它说的仍是那套已发布划分怎么建的)。冷
+        启动照样读上一代续用 board_key,成员没变的板块 key 也不变。请求是持久的:这一次
+        重建没跑完,下一次照样冷启动——那正是运维要的。没有 state 行时什么都不写。"""
+        self.get_notebook(notebook_id)
+        with self._write() as db:
+            state = self.unified_kg.state_row(db, notebook_id)
+            if state is None:
+                return
+            self.unified_kg.set_community_partition(
+                db, notebook_id, version=0, mode=str(state["community_partition_mode"]))
+
     def _scan_canonical_graph(
         self, notebook_id: str,
     ) -> "Tuple[Dict[str, str], Dict[str, int], List[str], CanonicalEdgeTable, Dict[str, int], str]":
@@ -7586,13 +7738,13 @@ class KnowledgeLifecycleService:
         dict、要么依赖不缩哈希表的 `popitem`。三个数组把同一份数据压到约 100 MB,折叠是
         纯向量化。
 
-        行序 = 每对 canonical 的**首次出现序**,与被它取代的那张 dict 的插入序逐字一致
-        —— Louvain 对边序敏感,漂了就是已部署库的板块划分全漂(设计 §3.32 不变量 1)。
-        `build` 里那段说明写了为什么必须是稳定排序。
+        行序仍是每对 canonical 的**首次出现序**(`build` 的稳定排序),但划分已经与它无关:
+        设计 §3.32 的「Louvain 输出逐字不变」被 2026-10-19 §五 S2 推翻——`kg_partition`
+        按 canonical id 排名编号、边按 (lo, hi) 排序,到达顺序不进入结果。
 
         ``relations_by_source``(问题清单 F3b,设计 2026-10-19 §7.1 ①):同一趟读里按
         ``kr.source_id`` 数**每一行**关系(自环与空端点也算,在跳过之前数),O(来源数)
-        的一个 dict。只多读一列,行序与 Louvain 的输入逐字不变;PG 侧这条读是流式游标
+        的一个 dict。只多读一列,行序与边表逐字不变;PG 侧这条读是流式游标
         + 600 s 下限(#930),``closing`` 兜住异常路径(见 `_fold_canonical_edges`)。
         """
         can2idx: "Dict[str, int]" = {}
@@ -7610,11 +7762,11 @@ class KnowledgeLifecycleService:
         return names, can2idx, idx2can, edge_table, relations_by_source, scanned_at
 
     def rebuild_communities(self, notebook_id: str, level: int = 0, force: bool = False) -> int:
-        """在 canonical 实体图(关系两端经 cluster_map 映射)上跑 Louvain 社区检测,
-        持久化到 communities + community_members(反向索引,存 canonical_name/centrality)。
-        无 LLM、确定性(seed=42)。后端:igraph(装了即用,整数边表+C 核,10^6–10^7 边
-        内存/耗时有界)优先,缺失回退 networkx;仅 networkx 回退且大库(scale-tier)无 CSR
-        时拒(emit community_build_refused 返回 0,避免 OOM)。返回入库社区数。
+        """在 canonical 实体图(关系两端经 cluster_map 映射)上划分主题板块,持久化到
+        communities + community_members(反向索引,存 canonical_name/centrality)。无 LLM、
+        确定性(同一输入图 + 同一上一代划分 → 逐字相同,含 board_key)。划分见 `kg_partition`
+        (igraph Leiden,缺失回退 networkx),冷 / 热判据见 `_partition_boards_for_rebuild`;
+        仅 networkx 回退且大库无 CSR 时拒(emit community_build_refused 返回 0)。返回入库板块数。
 
         为何喂 canonical 图:裸 knowledge_relations 逐篇封闭(每篇的同名实体是不同
         object_id)→ 社区不跨文档。经 cluster_map 把两端映射到 canonical_id 后,不同
@@ -7623,21 +7775,21 @@ class KnowledgeLifecycleService:
         ⚠ **两个独立的新鲜度闸,别把它们合成一个。** 社区图与 KG 分析产物是两份产物,
         可以各自陈旧:
 
-        · 社区图闸(历史行为):`community_seq == kg_mutation_seq` → 不重跑 Louvain、
+        · 社区图闸(历史行为):`community_seq == kg_mutation_seq` → 不重新划分、
           不重写成员表。
         · 分析账本闸:`kg_analysis_artifacts` 齐全,且每一行都建在**当前的两个世代**
           上 —— KG 世代 `kg_mutation_seq`,以及依赖合并结果的那四份还要对齐簇世代
           `cluster_mutation_seq`(判据见 `kg_analysis_precompute.artifact_is_current`)。
 
         只有**两个闸都过**才是真正的 no-op。图新鲜而账本不新鲜时走「只补账本」路径:
-        重建 canonical 边图并沿用库里**已有**的板块划分,跳过 Louvain、跳过
+        重建 canonical 边图并沿用库里**已有**的板块划分,跳过划分、跳过
         社区两表的新代写入(那是 171 万成员行量级)、也不重新铸板块 id。
 
         为什么必须这样(评审 B1):生产 base 库在本特性上线**之前**就已经建好社区且
         `community_seq == kg_mutation_seq`。如果分析产物跟着社区图闸走,那么部署之后
         任何一次非 force 的 `rebuild_communities` 都会在闸上直接返回,
         `kg_analysis_artifacts` **永远是空的** —— 用户打开视图只看得到「产物缺失」,
-        唯一的恢复手段是 `force=True`,而那是 836 万边全量 join + Louvain + 重写 171 万
+        唯一的恢复手段是 `force=True`,而那是 836 万边全量 join + 划分 + 重写 171 万
         成员行,正是设计 §3.2 说本工具不该让用户付的那笔钱。同一个机制还会让「预计算
         失败」变成**永久**失败:失败后账本是空的,而社区图闸照样短路。
 
@@ -7761,7 +7913,7 @@ class KnowledgeLifecycleService:
             _ig = None
         # 大库守卫:仅在 networkx 回退(无 igraph)时才拒 scale-tier 无 CSR(避免 OOM)。
         # igraph 路径整数边表 + C 核,10^7 边安全,无需 CSR、不拒。
-        # 只补账本时同样要过这道守卫:那条路径不跑 Louvain,但仍然要把 canonical 边图
+        # 只补账本时同样要过这道守卫:那条路径不划分,但仍然要把 canonical 边图
         # 拉进内存,拒的理由(内存)一样成立。区别只在返回值 —— 社区还在,如实返回它的
         # 数量,不能因为一份辅助报告没补上就谎报「一个社区都没有」。
         if (_ig is None
@@ -7789,8 +7941,8 @@ class KnowledgeLifecycleService:
             _partition_generation = 0
             deg: "Dict[str, float]" = {}
             if graph_fresh:
-                # 只补账本:板块划分从库里读回来(`communities.member_ids` 就是 Louvain 那次
-                # 写下的 canonical 列表),Louvain / centrality / 两表重写全部跳过。
+                # 只补账本:板块划分从库里读回来(`communities.member_ids` 就是划分那次
+                # 写下的 canonical 列表),划分 / centrality / 两表重写全部跳过。
                 # 批 3·W2(复评 P1-6):连带记下读取时的 community_generation——
                 # 发布事务内重读比对,变了即整份放弃。先读 state 后读行:若一次
                 # 翻转恰好插在两读之间,行读到的是新代、记下的是旧代,发布时
@@ -7805,71 +7957,18 @@ class KnowledgeLifecycleService:
                             db, notebook_id, level
                         )
                     ]
-                kept = len(kept_rows)
+                kept, board_keys, partition = len(kept_rows), [], None
             else:
-                # 社区检测 + 度中心度(deg: canonical -> degree)。comms: list[list[canonical]]。
-                comms: "List[List[str]]" = []
-                if n_nodes:
-                    if _ig is not None:
-                        import random as _random
-                        _random.seed(42)
-                        try:
-                            _ig.set_random_number_generator(_random)   # 确定性(seed=42)
-                        except Exception:
-                            pass
-                        # igraph 直接吃 numpy 边数组。`igraph_edges()` 返回的 (M, 2) 数组
-                        # 是**独立缓冲区**(column_stack 是拷贝,不是视图),所以第 7 轮
-                        # 评审抓到的那个别名 —— `list(ew.keys())` 与 `ew` 共享同一批 key
-                        # 元组、一个活着另一个一个字节都放不掉 —— 在数组模型下不存在。
-                        # 仍然写成临时值:igraph 拷进 C 结构后这一句就结束、拷贝当场回收。
-                        G = _ig.Graph(n=n_nodes, edges=edge_table.igraph_edges())
-                        G.es["weight"] = edge_table.weight.tolist()
-                        membership = G.community_multilevel(weights="weight").membership
-                        degs = G.degree()
-                        buckets: "Dict[int, List[str]]" = {}
-                        for _i, _m in enumerate(membership):
-                            buckets.setdefault(_m, []).append(idx2can[_i])
-                            deg[idx2can[_i]] = float(degs[_i])
-                        comms = list(buckets.values())
-                        # ⚠ Louvain 的图到此为止,当场放掉。igraph 把整张边表拷进了自己的
-                        # C 结构(生产 836 万边),而它的全部产出(membership / degree)
-                        # 已经抄进 `comms` / `deg`。留着它就会一路跨过下面预计算里的四次
-                        # 全表扫 —— 与折叠结果不释放(codex 第 9 轮 P1-2)是同一类缺陷,
-                        # 只是换了一个持有者。
-                        del G, membership, degs, buckets
-                    else:
-                        import networkx as nx
-                        from networkx.algorithms.community import louvain_communities
-                        g = nx.Graph()
-                        for _a, _b, _w in zip(
-                            edge_table.src.tolist(),
-                            edge_table.dst.tolist(),
-                            edge_table.weight.tolist(),
-                        ):
-                            g.add_edge(_a, _b, weight=_w)
-                        comms = [[idx2can[_i] for _i in c]
-                                 for c in louvain_communities(g, weight="weight", seed=42)]
-                        for _i, _d in g.degree():
-                            deg[idx2can[_i]] = float(_d)
-                        # 与 igraph 分支那句 `del G, …` 同一条不变式:图的全部产出已经抄进
-                        # `comms` / `deg`,而 networkx 的 dict-of-dicts 比 igraph 的 C 结构
-                        # 更占地方。不放掉它就会一路跨过下面预计算的四趟全表扫。
-                        del g
-                min_size = self.settings.community_min_size
-                # Policy (min-size filter + id minting + member ordering) stays here;
-                # the store owns the two-table full rewrite.
-                kept_rows = [(self._new_id("cm"), sorted(comm))
-                             for comm in comms if len(comm) >= min_size]
+                # 板块划分(设计 2026-10-19 §五 S2):`kg_partition` 逐连通分量跑 Leiden,
+                # 以已发布那一代热启动并续用 board_key;冷 / 热判据见 helper(不是 force)。
+                kept_rows, board_keys, deg, partition = self._partition_boards_for_rebuild(
+                    notebook_id, level, _published_from, idx2can, can2idx, edge_table)
                 kept = len(kept_rows)
-                del comms
-            # ⚠ 社区检测的中间结果到此为止(codex 第 14 轮 P2)。`kept_rows` 已经把要发布的
-            # 内容全抄走了,而 `comms` / `idx2can` 装的是**同一批 canonical 字符串的另一份
-            # 引用**、`g`(networkx 兜底)是整张图。它们此前一直活到函数返回,也就是活着跨过
-            # 下面**新增的**那四趟全表扫(来源画像 + 三条统计快照),把两个内存峰值叠在一起;
-            # 生产 171 万 canonical 的量级下这不是可忽略的常数。
-            # 这与 `_compute_kg_analysis` 内部「`can2idx` / `community_of_index` 用完即放」
-            # 是同一条不变式的两半 —— 那半由「membership 不得活着跨过三条统计快照」守着。
-            # `can2idx` 本身**不能**在这里清:`SourceBoardCounter` 还要用它做 canonical→下标。
+            # ⚠ 划分的中间结果到此为止(codex 第 14 轮 P2):`kept_rows` 已经把要发布的内容全
+            # 抄走了,`idx2can` 装的是**同一批 canonical 字符串的另一份引用**,不放掉就会活着
+            # 跨过下面那四趟全表扫(来源画像 + 三条统计快照),把两个内存峰值叠在一起。这与
+            # `_compute_kg_analysis` 内部「`can2idx` / `community_of_index` 用完即放」是同一条
+            # 不变式的两半。`can2idx` 本身**不能**在这里清:`SourceBoardCounter` 还要用它。
             idx2can.clear()
             # KG 质量分析的预计算产物(设计 §3.2/§3.3):挂在这一次图构建上顺带**算出来**,
             # 与板块划分一起在下面那**一个**写事务里发布(codex 第 13 轮 P1)。
@@ -7951,7 +8050,7 @@ class KnowledgeLifecycleService:
                 self._publish_communities_generation(
                     notebook_id, level,
                     graph_fresh=graph_fresh, kept_rows=kept_rows, names=names,
-                    deg=deg, analysis=analysis,
+                    deg=deg, analysis=analysis, board_keys=board_keys, partition=partition,
                     ledger_speaks=_ledger_speaks_for_level, seq=_seq,
                     generation=_generation, published_from=_published_from,
                     partition_generation=_partition_generation))
@@ -7984,7 +8083,7 @@ class KnowledgeLifecycleService:
                     })
                 return kept
             self.event_log.emit({"kind": "communities_rebuilt", "notebook_id": notebook_id,
-                                 "level": level, "communities": kept, "nodes": n_nodes})
+                                 "level": level, "communities": kept, "nodes": n_nodes, **partition})
             return kept
         finally:
             # 释放通道 b(finally CAS):翻转成功时 building 已清零 → no-op;

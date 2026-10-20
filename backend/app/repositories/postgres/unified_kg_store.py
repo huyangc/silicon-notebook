@@ -1802,15 +1802,21 @@ class UnifiedKgStore:
         deg: Dict[str, float],
         now: str,
         generation: int,
+        *,
+        board_keys: Sequence[str],
     ) -> None:
         """写新代(批 3·W2 §1.3,取代旧 replace_communities 的整表重写):
         (cid, sorted members) 对写进 generation 代,**不 DELETE**——旧代行由
         发布路径前的预回收清理,指针翻转在既有发布事务里(D-W2-6)。min-size
-        策略仍归 orchestration。"""
-        for cid, members in kept:
+        策略仍归 orchestration。``board_keys`` 与 ``kept`` 逐行对齐,是每个板块
+        的跨代身份(v98/0078,占位号)。"""
+        if len(board_keys) != len(kept):
+            raise ValueError("write_communities_generation: board_keys 必须与 kept 逐行对齐")
+        for (cid, members), board_key in zip(kept, board_keys):
             db.execute(
-                "INSERT INTO communities (id, notebook_id, level, member_ids, size, created_at, generation) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                "INSERT INTO communities (id, notebook_id, level, member_ids, size, created_at, "
+                "generation, board_key) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     cid,
                     notebook_id,
@@ -1819,6 +1825,7 @@ class UnifiedKgStore:
                     len(members),
                     normalize_timestamp(now),
                     generation,
+                    board_key,
                 ))
             # ON CONFLICT (community_id, canonical_id) DO NOTHING: only the 0064
             # composite primary key's conflict is swallowed, nothing else.
@@ -1847,21 +1854,22 @@ class UnifiedKgStore:
         复制集按设计恒小,换取两端一致的 id 铸造接缝。"""
         rows = db.execute(
             "SELECT id, level, member_ids::text AS member_ids, size, title, "
-            "summary, findings::text AS findings, created_at "
+            "summary, findings::text AS findings, created_at, board_key "
             "FROM communities WHERE notebook_id=%s AND level != %s AND generation=%s",
             (notebook_id, exclude_level, from_generation)).fetchall()
         remap: Dict[str, str] = {}
         for r in rows:
             new_id = mint_id()
             remap[str(r["id"])] = new_id
+            # board_key 原样带过去:id 每代重铸,跨代身份正是 board_key。
             db.execute(
                 "INSERT INTO communities "
                 "(id, notebook_id, level, member_ids, size, title, summary, "
-                "findings, created_at, generation) "
-                "VALUES (%s,%s,%s,%s::jsonb,%s,%s,%s,%s::jsonb,%s,%s)",
+                "findings, created_at, generation, board_key) "
+                "VALUES (%s,%s,%s,%s::jsonb,%s,%s,%s,%s::jsonb,%s,%s,%s)",
                 (new_id, notebook_id, r["level"], r["member_ids"], r["size"],
                  r["title"], r["summary"], r["findings"], r["created_at"],
-                 to_generation))
+                 to_generation, r["board_key"]))
         if remap:
             mrows = db.execute(
                 "SELECT canonical_id, level, community_id, canonical_name, centrality "
@@ -1907,6 +1915,47 @@ class UnifiedKgStore:
     def set_community_seq(db: Any, notebook_id: str, seq: int) -> None:
         db.execute("UPDATE unified_kg_state SET community_seq=%s WHERE notebook_id=%s",
                    (seq, notebook_id))
+
+    @staticmethod
+    def set_community_partition(
+        db: Any, notebook_id: str, *, version: int, mode: str
+    ) -> None:
+        """已发布划分的分区算法版本与方式(v98/0078,占位号)。发布路径在翻转指针的
+        同一个写事务里调;``--cold-partition`` 把版本写回 0。无 state 行 → no-op
+        (与 `set_community_seq` 同:下一次照样重建)。"""
+        db.execute(
+            "UPDATE unified_kg_state SET community_partition_version=%s, "
+            "community_partition_mode=%s WHERE notebook_id=%s",
+            (int(version), str(mode), notebook_id))
+
+    @staticmethod
+    def community_board_key_rows(
+        db: Any, notebook_id: str, level: int, generation: int
+    ):
+        """``generation`` 那一代 ``level`` 层每个板块成员的 ``(canonical_id, board_key)``
+        —— 下一代分区的「上一代划分」(热启动的起点与 board_key 续用)。
+
+        **流式读**,理由与 `community_graph_rows` 相同:行数 = 已发布板块的成员数(生产
+        ~171 万),`execute()` 会把整份结果收进 libpq 的客户端缓冲。所以同样先
+        `raise_statement_timeout_floor(db)`(事务本地、只抬不压的 600 s 底线),再
+        `cursor().stream()`;调用方必须读完或在离开 `with` 之前 `close()` 它(经
+        `closing(...)`),不得在 `write()` 里调、不得在同一个 `with` 里接着发写语句。
+
+        由板块驱动:``communities`` 按 ``(notebook_id, level)``(`idx_communities_nb_level`)
+        取这一代的几万行,每个板块经 ``community_members(notebook_id, community_id)``
+        (`idx_commmem_nb_comm`)取成员,``generation`` 在两侧都是过滤谓词——成员行与板块
+        行同代写入,连接条件里写死 ``m.generation = c.generation``,读不到别的代的成员。
+        行序不承诺:分区按 canonical id 排名、续用按集合比较,都与到达顺序无关。
+        """
+        raise_statement_timeout_floor(db)
+        return db.cursor().stream(
+            "SELECT m.canonical_id AS canonical_id, c.board_key AS board_key "
+            "FROM communities c "
+            "JOIN community_members m ON m.notebook_id = c.notebook_id "
+            "AND m.community_id = c.id AND m.generation = c.generation "
+            "WHERE c.notebook_id=%s AND c.level=%s AND c.generation=%s",
+            (notebook_id, int(level), int(generation)),
+        )
 
     @staticmethod
     def community_member_ids(
@@ -2384,7 +2433,7 @@ class UnifiedKgStore:
         rows = db.execute(
             f"""
             WITH picked AS (
-              SELECT id, size FROM communities
+              SELECT id, size, board_key FROM communities
               WHERE notebook_id=%s AND level=%s
                 AND generation = {_PUBLISHED_COMMUNITY_GEN}
               ORDER BY size DESC, id COLLATE "C" ASC LIMIT %s
@@ -2400,7 +2449,7 @@ class UnifiedKgStore:
                 AND m.generation = {_PUBLISHED_COMMUNITY_GEN}
                 AND m.community_id IN (SELECT id FROM picked)
             )
-            SELECT p.id AS id, p.size AS size,
+            SELECT p.id AS id, p.size AS size, p.board_key AS board_key,
                    r.canonical_name AS canonical_name, r.rn AS rn
             FROM picked p
             LEFT JOIN ranked r ON r.community_id = p.id AND r.rn <= %s
@@ -2409,10 +2458,10 @@ class UnifiedKgStore:
             (notebook_id, level, notebook_id, limit,
              notebook_id, level, notebook_id, top_k),
         ).fetchall()
-        communities: List[Tuple[str, int, List[str]]] = []
+        communities: List[Tuple[str, int, List[str], str]] = []
         for row in rows:
             if not communities or communities[-1][0] != row["id"]:
-                communities.append((row["id"], int(row["size"]), []))
+                communities.append((row["id"], int(row["size"]), [], row["board_key"]))
             if row["rn"] is not None:
                 communities[-1][2].append(row["canonical_name"] or "")
         return _community_overview_payload(communities, total, level, limit, top_k)

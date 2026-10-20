@@ -1021,6 +1021,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.report_share_token', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.report_source_identity_rows', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.report_source_rows', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.request_cold_community_partition', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.require_agent_access', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.require_indexing_pipeline_write', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.resolve_agent_token', kind='attribute', target='_runtime'),
@@ -3106,6 +3107,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='request_cold_community_partition',
+        owner='KnowledgeLifecycleService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/scripts/recluster_kg.py', scope='<module>.main', kind='attribute', target='request_cold_community_partition'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='require_agent_access',
         owner='MemoryService',
         kind='method',
@@ -3145,6 +3156,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.rebuild_notebook_kg', kind='attribute', target='require_indexing_pipeline_write'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.rebuild_unified_kg', kind='attribute', target='require_indexing_pipeline_write'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.relink_notebook_kg', kind='attribute', target='require_indexing_pipeline_write'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.request_cold_community_partition', kind='attribute', target='require_indexing_pipeline_write'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.run_conflict_resolution_job', kind='attribute', target='require_indexing_pipeline_write'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.run_notebook_relink_job', kind='attribute', target='require_indexing_pipeline_write'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.run_unified_kg_rebuild_job', kind='attribute', target='require_indexing_pipeline_write'),

@@ -3038,7 +3038,7 @@
           "type": "object"
         },
         "BoardOverview": {
-          "description": "主题板块列表。**实时读**板块表,而那张表本身是上次社区重建的快照 —— 所以它的\n戳是 ``community_seq``,不是账本里的任何一个 seq。\n\n``payload``:``{level, total, returned, truncated, limit, top_members_limit,\ncommunities: [{id, size, top_members, top_members_truncated}]}``。",
+          "description": "主题板块列表。**实时读**板块表,而那张表本身是上次社区重建的快照 —— 所以它的\n戳是 ``community_seq``,不是账本里的任何一个 seq。\n\n``payload``:``{level, total, returned, truncated, limit, top_members_limit,\ncommunities: [{id, board_key, size, top_members, top_members_truncated}]}``。\n``id`` 每次重新划分都重铸;``board_key`` 是板块的跨代身份(新旧成员互为最佳且\nJaccard ≥ 1/2 时沿用),供快照对比认出「同一个板块」。",
           "properties": {
             "freshness": {
               "$ref": "#/components/schemas/Freshness"

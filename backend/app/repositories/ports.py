@@ -2817,6 +2817,13 @@ class UnifiedKgStorePort(Protocol):
     def community_graph_rows(db: object, notebook_id: str) -> object: ...
     @staticmethod
     def community_member_ids(db: object, notebook_id: str, level: int) -> list[Any]: ...
+    # 上一代划分(设计 2026-10-19 §五 S2):``generation`` 那一代 ``level`` 层每个板块成员
+    # 的 ``(canonical_id, board_key)``,成员表按 ``(community_id, generation)`` 连回板块。
+    # 流式读,契约与 `community_graph_rows` 相同:读完或在离开 `with` 之前 `close()`;PG
+    # 实现把调用方事务剩余部分的 `statement_timeout` 抬到 ≥600 s,所以不得在 `write()`
+    # 里调,也不得在同一个 `with` 里接着发写语句。行序不承诺(分区与续用都与它无关)。
+    @staticmethod
+    def community_board_key_rows(db: object, notebook_id: str, level: int, generation: int) -> object: ...
     @staticmethod
     def community_rows_for_summary(db: object, notebook_id: str, level: int) -> list[Any]: ...
     # (批 3·W2:旧 `board_partition_still_holds` 已退役——代次化后「行还在」
@@ -2905,8 +2912,10 @@ class UnifiedKgStorePort(Protocol):
     # 发布事务**外**先行(write_communities_generation,无 DELETE),发布事务
     # 内 copy-forward 未重建的 level(板块 id 重铸+成员行重映射)再翻
     # community_generation 指针(flip_community_generation,双 CAS)。
+    # ``board_keys``(v98/0078,占位号)与 ``kept`` 逐行对齐:第 i 个板块的跨代身份
+    # (`kg_partition.Board.key`),写进 `communities.board_key`。
     @staticmethod
-    def write_communities_generation(db: object, notebook_id: str, level: int, kept: object, names: object, deg: object, now: str, generation: int) -> None: ...
+    def write_communities_generation(db: object, notebook_id: str, level: int, kept: object, names: object, deg: object, now: str, generation: int, *, board_keys: Sequence[str]) -> None: ...
     @staticmethod
     def copy_forward_communities(db: object, notebook_id: str, exclude_level: int, from_generation: int, to_generation: int, mint_id: object) -> int: ...
     # ⚠ 必须与社区发布(copy-forward + 指针翻转)在**同一个写事务**里调:板块 id 被重铸(发布)的那一刻,
@@ -2927,6 +2936,11 @@ class UnifiedKgStorePort(Protocol):
     def seed_payload_rows(db: object, notebook_id: str, object_type: str) -> object: ...
     @staticmethod
     def set_community_seq(db: object, notebook_id: str, seq: int) -> None: ...
+    # 已发布划分的分区算法版本与方式(`kg_partition.PARTITION_ALGO_VERSION` /
+    # `BoardPartition.mode`)。发布路径在翻转指针的同一个写事务里调;
+    # ``--cold-partition`` 把版本写回 0(「下一次从冷启动开始」)。
+    @staticmethod
+    def set_community_partition(db: object, notebook_id: str, *, version: int, mode: str) -> None: ...
     @staticmethod
     def state_row(db: object, notebook_id: str) -> Any: ...
     @staticmethod

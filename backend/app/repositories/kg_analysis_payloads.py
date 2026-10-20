@@ -392,16 +392,20 @@ def largest_clusters_payload(
 
 
 def community_overview_payload(
-    communities: Sequence[Tuple[str, int, Sequence[str]]],
+    communities: Sequence[Tuple[str, int, Sequence[str], str]],
     total: int,
     level: int,
     limit: int,
     top_k: int,
 ) -> Dict[str, object]:
-    """``[(community_id, size, top_member_names)]`` → 主题板块列表载荷。
+    """``[(community_id, size, top_member_names, board_key)]`` → 主题板块列表载荷。
 
     ``total``/``returned``/``truncated`` 三件套让「还有多少板块没返回」是显式的;每个
     板块另带 ``top_members_truncated``(成员数 > K),避免把 top-K 误读成板块全貌。
+
+    ``id`` 每一代重铸;``board_key``(v98/0078)是板块的跨代身份——新旧板块成员互为
+    最佳且 Jaccard ≥ 1/2 时沿用(`app.services.kg_partition`),供快照对比认出「同一个
+    板块」。
     """
     return {
         "level": level,
@@ -413,11 +417,12 @@ def community_overview_payload(
         "communities": [
             {
                 "id": cid,
+                "board_key": board_key,
                 "size": size,
                 "top_members": list(names),
                 "top_members_truncated": size > len(names),
             }
-            for cid, size, names in communities
+            for cid, size, names, board_key in communities
         ],
     }
 

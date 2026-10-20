@@ -118,7 +118,9 @@ class BoardOverview(BaseModel):
     戳是 ``community_seq``,不是账本里的任何一个 seq。
 
     ``payload``:``{level, total, returned, truncated, limit, top_members_limit,
-    communities: [{id, size, top_members, top_members_truncated}]}``。
+    communities: [{id, board_key, size, top_members, top_members_truncated}]}``。
+    ``id`` 每次重新划分都重铸;``board_key`` 是板块的跨代身份(新旧成员互为最佳且
+    Jaccard ≥ 1/2 时沿用),供快照对比认出「同一个板块」。
     """
 
     freshness: Freshness
