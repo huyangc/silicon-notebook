@@ -1,26 +1,23 @@
-"""Characterization rig for ``NotebookCopyService.copy_notebook`` — the deep copy.
+"""Behaviour rig for ``NotebookCopyService.copy_notebook`` — the deep copy.
 
 **两端吃同一份世界、同一套观测、同一组场景**:``tests/test_notebook_copy_characterization.py``
 (SQLite)与 ``tests/postgres/test_notebook_copy_characterization_pg.py``(PostgreSQL)各自只写
-一个 ``Backend`` 适配器(怎么插行、有哪些表、怎么录 SQL)。不是测试模块(没有 ``test_``
-前缀),pytest 不会收集它。
+一个 ``Backend`` 适配器(怎么插行、有哪些表)。不是测试模块(没有 ``test_`` 前缀),pytest 不会
+收集它。
 
-两层,按 AGENTS.md「不做只为重构服务的金标快照」分开:
+``observe`` 录下拷贝服务与外界交换的一切,按发生顺序:对 store / catalog / 投影调度 / 文件系统
+的每一次调用(规范化后的参数与返回值)、id 铸造与取时钟、日志,外加整库逐表的增删差分、存储
+目录的增删差分与返回值/异常。``Scenario.expect`` 只断言其中用户与下游可见的事实——副本里有
+哪些行、引用是否都落在副本自己身上、哪些东西不随副本走(Memory、成员、授权边、分享口令、同步
+来源、对新主人无效的挂载边)、失败时只补偿目的地、写库调用按外键安全的冻结顺序发生。
 
-* **行为层**(``Scenario.expect``,长期保留):用户与下游可见的事实——副本里有哪些行、引用
-  是否都落在副本自己身上、哪些东西不随副本走(Memory、成员、授权边、分享口令、同步来源、
-  对新主人无效的挂载边)、失败时只补偿目的地、写库调用按外键安全的冻结顺序发生。
-* **拆分 oracle 层**(``observe`` 的完整观测 + 逐字节快照):拷贝服务与外界交换的一切,按
-  发生顺序——拷贝服务对 store / catalog / 投影调度 / 文件系统的每一次调用(规范化后的全部
-  参数与返回值)、id 铸造与取时钟、本线程发出的每一条 SQL(带参数),外加整库逐表的增删
-  差分、存储目录的增删差分、日志与返回值/异常。它只为 ``copy_notebook`` 的零行为变化拆分
-  服务:拆分前采集、拆分后逐字节不变,拆分完成后随快照目录一起退役。
+这套世界与场景最初是 ``copy_notebook`` 零行为变化拆分的表征:拆分前在两端采集的逐字节快照
+(另含本线程的每条 SQL)拆分后不变,随后按 AGENTS.md「不做只为重构服务的金标快照」退役,只留
+本行为层。
 
 确定性:行 id 来自计数器(``<前缀>-c<序号>``,只在拷贝期间替换 ``_new_id``),拷贝时钟固定为
 ``COPY_NOW``;世界里的时间戳都取自 ``FIXED_INSTANTS``,其余时间戳(收割的截止时刻、store
-自己取的墙钟)一律打码成 ``<ts>``;存储根目录打码成 ``<storage>``。没有浮点(向量是字节)。
-SQLite 的 trace 只记应用自己发的语句(跳过 FTS5 的嵌套语句,它们随 SQLite 版本变);
-PostgreSQL 跳过连接池自己的借还探测。只记拷贝所在线程。
+自己取的墙钟)一律打码成 ``<ts>``;存储根目录打码成 ``<storage>``。只记拷贝所在线程。
 """
 from __future__ import annotations
 
@@ -34,7 +31,7 @@ import re
 import shutil as real_shutil
 import threading
 from pathlib import Path
-from typing import Any, Callable, ContextManager, Optional
+from typing import Any, Callable, Optional
 
 from app.services import notebook_sharing
 from app.services.knowhow.ids import cell_chunk_id, element_id
@@ -582,7 +579,6 @@ class Backend:
     name: str
     insert: Callable[[Any, str, dict], None]
     tables: Callable[[Any], list[str]]
-    record_sql: Callable[[Any, Recorder, Any], ContextManager]
     invalidate_caches: Callable[[], None]
 
 
@@ -594,12 +590,6 @@ class Observation:
     db_diff: dict
     fs_diff: dict
     logs: list
-
-    def oracle(self) -> dict:
-        return {
-            "copy_id": self.copy_id, "outcome": self.outcome, "timeline": self.timeline,
-            "db_diff": self.db_diff, "fs_diff": self.fs_diff, "logs": self.logs,
-        }
 
     def added(self, table: str) -> list[dict]:
         return self.db_diff.get(table, {}).get("added", [])
@@ -712,7 +702,7 @@ def _seam_modules(repo: Any) -> list[Any]:
 def observe(repo: Any, backend: Backend, scenario: Scenario, storage_dir: Path,
             monkeypatch: Any) -> Observation:
     """Seed the scenario's world, run one copy with every collaborator recorded, and
-    return the whole observation (behaviour facts and split oracle alike)."""
+    return the whole observation."""
     canon = Canon(storage_dir)
     recorder = Recorder(canon)
     _seed(repo, backend, scenario.world(), storage_dir)
@@ -762,18 +752,17 @@ def observe(repo: Any, backend: Backend, scenario: Scenario, storage_dir: Path,
     logger.addHandler(capture)
     logger.setLevel(logging.DEBUG)
     try:
-        with backend.record_sql(repo, recorder, monkeypatch):
-            recorder.active = True
-            try:
-                summary = copies.copy_notebook(
-                    scenario.copy_of, new_owner_id=RECIPIENT,
-                    actor_label=scenario.actor_label, new_name=scenario.new_name,
-                )
-                outcome = {"returned": canon(summary)}
-            except Exception as exc:  # noqa: BLE001 — the raise IS the observation
-                outcome = {"raised": type(exc).__name__, "message": canon(str(exc))}
-            finally:
-                recorder.active = False
+        recorder.active = True
+        try:
+            summary = copies.copy_notebook(
+                scenario.copy_of, new_owner_id=RECIPIENT,
+                actor_label=scenario.actor_label, new_name=scenario.new_name,
+            )
+            outcome = {"returned": canon(summary)}
+        except Exception as exc:  # noqa: BLE001 — the raise IS the observation
+            outcome = {"raised": type(exc).__name__, "message": canon(str(exc))}
+        finally:
+            recorder.active = False
     finally:
         logger.removeHandler(capture)
         logger.setLevel(previous_level)
@@ -787,30 +776,6 @@ def observe(repo: Any, backend: Backend, scenario: Scenario, storage_dir: Path,
         fs_diff=_fs_diff(fs_before, fs_after),
         logs=capture.records,
     )
-
-
-# --------------------------------------------------------- the oracle layer
-
-
-def oracle_text(observation: Observation) -> str:
-    return json.dumps(observation.oracle(), indent=1, sort_keys=True, ensure_ascii=False) + "\n"
-
-
-def assert_matches_oracle(observation: Observation, path: Path, *, regen: bool) -> None:
-    text = oracle_text(observation)
-    if regen:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-        return
-    assert path.is_file(), f"missing split oracle {path}"
-    expected = path.read_text(encoding="utf-8")
-    if text != expected:
-        import difflib
-
-        delta = "".join(list(difflib.unified_diff(
-            expected.splitlines(True), text.splitlines(True), "oracle", "observed", n=2,
-        ))[:200])
-        raise AssertionError(f"copy_notebook split oracle drifted ({path.name}):\n{delta}")
 
 
 # ------------------------------------------------------- the behaviour layer
