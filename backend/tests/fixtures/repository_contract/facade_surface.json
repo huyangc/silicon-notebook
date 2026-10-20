@@ -6039,21 +6039,6 @@
     "scope": "facade",
     "signature": "(self) -> 'Path'"
   },
-  "decided_seed_pairs": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.__init__.<lambda>",
-        "target": "decided_seed_pairs"
-      }
-    ],
-    "kind": "method",
-    "owner": "KnowledgeGovernanceService",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self, notebook_id: 'str') -> 'Dict[frozenset, str]'"
-  },
   "delete_conversation": {
     "consumers": [
       {
