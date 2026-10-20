@@ -18,6 +18,10 @@ const output =
 const nextConfig = {
   typedRoutes: true,
   output,
+  // ESLint is its own gate (`npm run lint`, with the eslint-suppressions.json
+  // baseline). Next's build-time lint would see eslint.config.mjs, lint again
+  // without that baseline and fail the build on pre-existing violations.
+  eslint: { ignoreDuringBuilds: true },
   experimental: {
     // Idle timeout in milliseconds; API/MCP stream heartbeats keep active calls alive.
     proxyTimeout: 300_000,

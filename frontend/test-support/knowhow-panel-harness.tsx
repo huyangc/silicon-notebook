@@ -317,7 +317,7 @@ export function captureConsole(): { unexpectedErrors: unknown[][] } {
  * fake server, and the after-test checks (no unrouted request, no unexpected
  * console.error).
  */
-export function useKnowhowPanelSuite(): { server: () => FakeKnowhowServer } {
+export function registerKnowhowPanelSuite(): { server: () => FakeKnowhowServer } {
   let server: FakeKnowhowServer;
   let consoleState: { unexpectedErrors: unknown[][] };
   beforeEach(() => {

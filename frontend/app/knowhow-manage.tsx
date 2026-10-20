@@ -156,8 +156,8 @@ export function KnowhowCreateWizard({ notebookId, onClose, onCreated }: KnowhowC
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 同
-    // knowhow-import.tsx：列 requestClose 实际捕获的值，而非每渲染新引用的函数。
+    // 同 knowhow-import.tsx：列 requestClose 实际捕获的值，而非每渲染新引用的函数。
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 见上
   }, [onClose, submitting]);
 
   const validationError = createValidationError(title, header.columns);

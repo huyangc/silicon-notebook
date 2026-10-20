@@ -36,12 +36,12 @@ import {
   renderPanel,
   routeTable,
   settle,
-  useKnowhowPanelSuite,
+  registerKnowhowPanelSuite,
   wireDetail,
   wireSummary,
 } from "../../test-support/knowhow-panel-harness.tsx";
 
-const suite = useKnowhowPanelSuite();
+const suite = registerKnowhowPanelSuite();
 
 // ---------------------------------------------------------------------------
 // 1. Lifecycle

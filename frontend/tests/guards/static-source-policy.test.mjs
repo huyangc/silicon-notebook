@@ -36,6 +36,8 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // Reads package/config metadata only.
   "tests/guards/test-runner-config.test.mjs",
   "tests/guards/test-location-guard.test.mjs",
+  // Reads eslint-suppressions.json and package.json: the lint baseline and scripts.
+  "tests/guards/eslint-baseline-guard.test.mjs",
   // Reads globals.css to compare selector specificity. Not production TS source and
   // not a source-position query — a stylesheet cascade contract has no AST to consume,
   // and jsdom's getComputedStyle ignores specificity, so text is the only honest input.

@@ -31,7 +31,7 @@ set -euo pipefail
 #      so this brings the sample's Chinese UI strings under the vocabulary
 #      rail without needing an `--extra-root` (the plugin's *Python* half does
 #      need one, and gets it in check_contracts.sh).
-#   5. `npm run lint` (tsc --noEmit) — `prelint` re-syncs with this same
+#   5. `npm run typecheck` (tsc --noEmit) — `pretypecheck` re-syncs with this same
 #      env var (idempotent), and this is the check that actually type-checks
 #      the copied package (next build's type-check silently drops
 #      *.test.* files, but nothing here is a test file).
@@ -91,4 +91,4 @@ test -f "$SYNCED/workspace-plugin.tsx" \
   || { echo "check_sample_plugin: sync produced no $SYNCED/workspace-plugin.tsx" >&2; exit 1; }
 npm run test:node
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/check_ui_vocabulary.py"
-npm run lint
+npm run typecheck

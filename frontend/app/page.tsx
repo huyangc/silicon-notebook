@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, GitMerge, LayoutDashboard, LayoutGrid, Link2, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, Users, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, BarChart3, Cpu, Database, ExternalLink, GitMerge, LayoutDashboard, LayoutGrid, Link2, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, Users, X } from "lucide-react";
 import "katex/dist/katex.min.css";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
 import { AuthedImage } from "./authed-image";
@@ -53,7 +53,6 @@ import { formatRelativeTime } from "./relative-time.ts";
 import { KgAnalysisView } from "./kg-analysis-view";
 import { AgentProfilePanel } from "./agent-profile-panel";
 import { kgBandTarget, kgBandVelocity, kgTypeBandTargets } from "./kg-layout";
-import { withoutDecidedMerge } from "./kg-merge-model";
 import {
   groupOf, groupLabel,
   requiresKg, streamsTrace,
@@ -140,13 +139,13 @@ import {
   type RootModalOwner,
   type RootModalSlot,
 } from "./use-root-modal-coordinator.ts";
-import { KG_RANGE_DEFAULT, kgCanvasState } from "./kg-workspace-model.ts";
+import { kgCanvasState } from "./kg-workspace-model.ts";
 import { refreshKgDeleteDependents } from "./kg-delete-dependents.ts";
 import { API_BASE } from "./api-config";
 import { clearRejectedToken, getToken, subscribeTokenChanges } from "./auth-session";
 import { copyTextSafely } from "./copy-text";
 import { useCopyResult } from "./copy-result";
-import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors.ts";
+import { httpErrorStatus, toUserMessage } from "./errors.ts";
 import { DEFAULT_SUPPORTED_SOURCE_EXTENSIONS, fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ParserEngineCapability, type ReadySnapshot } from "./system-api";
 import { AnalyticsAnswerQuality } from "./analytics-answer-quality";
 import { backfillPaperMetadata, fetchNotebookAnalytics, fetchNotebookContentOverview, fetchNotebookIndexingPipeline, getNotebook, listNotebooks } from "./notebook-api";
@@ -265,7 +264,7 @@ import {
   withSectionDividers,
 } from "./source-element-display";
 import { composeTablePartsHtml, groupTableParts, sanitizeTableHtml } from "./table-part-groups";
-import { SchemaManager, type SchemaView } from "./schema-manager";
+import { SchemaManager } from "./schema-manager";
 import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
 import { canSeeAdminUsage } from "./admin/usage/format.ts";
 import { shouldResumeScaleIndex } from "./in-progress-resume";
@@ -312,7 +311,6 @@ import {
   type FgLink,
   type FgNode,
   type Health,
-  type KgBuildJobStatus,
   type KgObject,
   type KnowledgeItem,
   type KnowledgeKind,
@@ -685,7 +683,7 @@ export default function Home() {
   const [supportedSourceExtensions, setSupportedSourceExtensions] = useState<string[]>(
     DEFAULT_SUPPORTED_SOURCE_EXTENSIONS,
   );
-  const [parserEngines, setParserEngines] = useState<ParserEngineCapability[]>([]);
+  const [, setParserEngines] = useState<ParserEngineCapability[]>([]);
   const supportedSourceAccept = useMemo(
     () => supportedSourceExtensions.map((ext) => `.${ext}`).join(","),
     [supportedSourceExtensions],

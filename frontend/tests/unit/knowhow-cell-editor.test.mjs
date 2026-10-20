@@ -85,7 +85,6 @@ import {
 import {
   callbackFlowsIn,
   callSitesIn,
-  callsIn,
   controlFlowIn,
   declarations,
   findFunction,

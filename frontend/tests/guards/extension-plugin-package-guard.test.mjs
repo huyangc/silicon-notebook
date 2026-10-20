@@ -33,12 +33,12 @@ const LIFECYCLE_HOOKS = [
   "prebuild",
   "prestart",
   "pretest",
-  "prelint",
+  "pretypecheck",
 ];
-// npm 只在**同名脚本存在**时运行它的 `pre*`：`prelint` 配 `lint`、`predev` 配 `dev`……
+// npm 只在**同名脚本存在**时运行它的 `pre*`：`pretypecheck` 配 `typecheck`、`predev` 配 `dev`……
 // 任何一个基名被删掉或改名，它的 `pre*` 就静默变成一个永不触发的孤儿 key，
 // 生命周期断言照样全绿而那条路径跑在缺生成物的树上。
-const HOOKED_BASE_SCRIPTS = ["dev", "build", "start", "test", "lint"];
+const HOOKED_BASE_SCRIPTS = ["dev", "build", "start", "test", "typecheck"];
 
 const EXT_PACKAGE_RULE = "/frontend/features/ext-*/";
 const LOCAL_REGISTRY_RULE = "/frontend/features/extension-sdk/registry.local.ts";

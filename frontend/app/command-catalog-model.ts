@@ -9,7 +9,6 @@ import type {
   CommandCatalogDismissResult,
   CommandCatalogJob,
   CommandCatalogPreview,
-  CommandCatalogProgress,
 } from "./command-catalog-api.ts";
 
 // ---------------------------------------------------------------- 任务状态

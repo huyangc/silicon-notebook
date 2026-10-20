@@ -23,6 +23,7 @@ REQUIRED_LAYERS = {
         "npm run test:node",
         "npm run test:component",
         "npm run build",
+        "npm run typecheck",
         "npm run lint",
     ),
 }
@@ -184,13 +185,13 @@ def test_frontend_lane_recovers_the_test_file_diagnostics_next_drops():
     build_command = (
         "run_step build env npm_config_ignore_scripts=true npm run build \\"
     )
-    lint_command = (
-        "&& run_step typecheck env npm_config_ignore_scripts=true npm run lint"
+    typecheck_command = (
+        "&& run_step typecheck env npm_config_ignore_scripts=true npm run typecheck"
     )
     assert commands.count(sync_command) == 1
     # The typecheck is chained on the build's success, in the one function both
     # the sequential and the parallel path call.
-    assert commands.index(lint_command) == commands.index(build_command) + 1
+    assert commands.index(typecheck_command) == commands.index(build_command) + 1
     assert commands.count(build_command) == 1
     assert commands.count("build_then_typecheck") == 1
     assert commands.count("build_then_typecheck &") == 1
@@ -206,6 +207,14 @@ def test_frontend_lane_recovers_the_test_file_diagnostics_next_drops():
     for half in ("node-tests npm run test:node", "component-tests npm run test:component"):
         assert commands.count(f"run_step {half}") == 1
         assert commands.count(f"run_step {half} &") == 1
+    # ESLint runs once per path, and the package scripts keep the two passes
+    # apart: `typecheck` is tsc, `lint` is ESLint against its baseline.
+    assert commands.count("run_step lint npm run lint") == 1
+    assert commands.count("run_step lint npm run lint &") == 1
+    assert package["scripts"]["typecheck"] == "tsc --noEmit"
+    assert package["scripts"]["lint"] == "eslint --max-warnings 0 ."
+    # Next's own build-time lint would run without the baseline.
+    assert "ignoreDuringBuilds: true" in next_config
 
 
 def test_openapi_framework_versions_are_exactly_pinned():

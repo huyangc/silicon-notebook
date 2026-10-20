@@ -26,7 +26,7 @@ import {
   renderPanel,
   routeTable,
   settle,
-  useKnowhowPanelSuite,
+  registerKnowhowPanelSuite,
   wireDetail,
   wireSummary,
 } from "../../test-support/knowhow-panel-harness.tsx";
@@ -47,7 +47,7 @@ vi.mock("../../app/knowhow-table-grid.tsx", async (importOriginal) => {
   };
 });
 
-const suite = useKnowhowPanelSuite();
+const suite = registerKnowhowPanelSuite();
 
 const LIST = { method: "GET", path: "/notebooks/nb-1/knowhow" } as const;
 const DETAIL = { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" } as const;

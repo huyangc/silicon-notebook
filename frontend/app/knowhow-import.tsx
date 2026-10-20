@@ -154,10 +154,10 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- requestClose 是
-    // 组件内的普通函数（未 useCallback），依赖数组直接列它没有意义（每次渲染
-    // 都是新引用）；改列它实际捕获的值，effect 才会在 submitting/onClose 真
-    // 变化时才重新订阅监听器，而不是每次渲染都重新订阅。
+    // requestClose 是组件内的普通函数（未 useCallback），依赖数组直接列它没有
+    // 意义（每次渲染都是新引用）；改列它实际捕获的值，effect 才会在
+    // submitting/onClose 真变化时才重新订阅监听器，而不是每次渲染都重新订阅。
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 见上
   }, [onClose, submitting]);
 
   // 行标题列 0..1 由单选选择器天然保证（规格①「至多一」）。提交前置校验集中在

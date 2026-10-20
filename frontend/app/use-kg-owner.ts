@@ -128,7 +128,6 @@ export function useKgOwner({ actorId, notebookId, fanOut }: UseKgOwnerOptions) {
     pendingNotebookSnapshotRef.current = null;
     fanOutRef.current.adoptOwner(owner, notebookSnapshot);
     forceOwnerRender((value) => value + 1);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [actorId, notebookId, ownerVersion]);
 
   const beginNotebookTransition = (): KgWorkspaceTransition => {

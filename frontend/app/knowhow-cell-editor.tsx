@@ -117,7 +117,6 @@ import {
   hasUnsavedChanges,
   insertAtCursor,
   insertCodeFence,
-  insertImageMarkdown,
   insertListMarker,
   insertViaExecCommandOrFallback,
   isCellReformatLoading,
@@ -707,7 +706,7 @@ export function KnowhowCellEditor({
     );
     return { stored, offer: shouldOfferDraftRestore(stored, savedContent) };
   });
-  const [draftText, setDraftText] = useState<string | null>(draftScan.offer ? draftScan.stored : null);
+  const [draftText] = useState<string | null>(draftScan.offer ? draftScan.stored : null);
   const [showRestoreBanner, setShowRestoreBanner] = useState(draftScan.offer);
   const [savingMode, setSavingMode] = useState<"save" | "next" | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
