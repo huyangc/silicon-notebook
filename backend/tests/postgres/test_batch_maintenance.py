@@ -765,7 +765,8 @@ def test_delete_notebook_kg_clears_findings_and_relink_marks_keeps_dismissals(
     """PostgreSQL twin of test_kg_repository.py's test of the same name
     (SQLite v97 / PostgreSQL 0077): findings go with the ledger,
     relink-attempt marks go with the kg_mutation_seq they record, dismissals
-    stay, and cluster_code_version is emptied with cluster_input_version."""
+    stay, cluster_code_version is emptied with cluster_input_version and the
+    published concept seed space goes back to 1 (nothing is published)."""
     rt = postgres_repository._runtime
     nb = postgres_repository.create_notebook(NotebookCreate(name="findings delete")).id
     other = postgres_repository.create_notebook(
@@ -786,7 +787,8 @@ def test_delete_notebook_kg_clears_findings_and_relink_marks_keeps_dismissals(
                 (notebook_id, now, notebook_id, now))
             db.execute(
                 "UPDATE unified_kg_state SET cluster_input_version='v-in', "
-                "cluster_code_version='code-1' WHERE notebook_id=%s", (notebook_id,))
+                "cluster_code_version='code-1', concept_seed_version=2 "
+                "WHERE notebook_id=%s", (notebook_id,))
 
     counts = rt.knowledge_lifecycle.delete_notebook_kg(nb)
 
@@ -798,14 +800,14 @@ def test_delete_notebook_kg_clears_findings_and_relink_marks_keeps_dismissals(
                     "WHERE notebook_id=%s")
         marks = ("SELECT rule_id, kind FROM kg_analysis_marks WHERE notebook_id=%s "
                  "ORDER BY kind")
-        state = ("SELECT cluster_input_version, cluster_code_version FROM "
-                 "unified_kg_state WHERE notebook_id=%s")
+        state = ("SELECT cluster_input_version, cluster_code_version, "
+                 "concept_seed_version FROM unified_kg_state WHERE notebook_id=%s")
         assert rows(findings, nb) == []
         assert rows(marks, nb) == [("F1", "dismissed")]
-        assert rows(state, nb) == [("", "")]
+        assert rows(state, nb) == [("", "", 1)]
         assert rows(findings, other) == [("F1", "src-1")]
         assert rows(marks, other) == [("F1", "dismissed"), ("F5", "relink_attempted")]
-        assert rows(state, other) == [("v-in", "code-1")]
+        assert rows(state, other) == [("v-in", "code-1", 2)]
     assert counts["kg_analysis_findings"] == 1
     assert counts["kg_analysis_marks"] == 1
 
