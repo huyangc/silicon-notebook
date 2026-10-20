@@ -2094,7 +2094,8 @@ claim 生生灭灭都在普通门面路径内部，见下面残留一节）：
 | 生产 `.env` | 构建机必须用生产 `.env`（storage 根可以不同） | 无自动检查——这是运维纪律 |
 
 工件本身是可移植的：manifest 无机器绑定，npy/npz 平台无关，hnswlib `.bin` 是数据。
-真正的风险全在上表里，因为 `requirements` 只给下界 `>=`，两台机器漂移是常态。
+真正的风险全在上表里：`backend/requirements.txt` 虽然钉死精确版本，但两台机器未必装自
+同一版锁文件（或根本不是按锁安装，例如 `SKIP_INSTALL=1`），漂移仍可能发生。
 每次构建都会把 `library_versions`（hnswlib/numpy/scipy）写进 manifest，`inspect` 会
 把它和本机版本一起打出来。
 

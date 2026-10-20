@@ -1,0 +1,34 @@
+# Runtime dependencies: the ranges the backend accepts. Never install this file
+# directly — install the hash-locked backend/requirements.txt generated from it
+# by scripts/lock_python_deps.sh (docs/development.md, "Python dependencies").
+# Test-only tools live in requirements-dev.in.
+fastapi==0.135.3
+uvicorn[standard]>=0.44.0
+pydantic==2.12.4
+pydantic-settings>=2.0.0
+python-dotenv>=1.0.0
+openai>=2.31.0
+requests>=2.32.0    # rerank_client 的 HTTP 调用(此前无任何已声明包拉它、纯靠环境碰巧装上,真漏,补为直接依赖)
+httpx>=0.27         # core/llm.py 直接 import(虽由 openai 传递保证,但直接 import 就该直接声明)
+mcp>=1.26.0,<2         # 上界不能省:2.0.0 移走了 mcp.server.fastmcp,而 mcp_server.py 依赖 1.x 的 server API
+python-multipart>=0.0.20
+python-docx>=1.2.0     # DOCX 兜底解析的最后一环(mammoth 缺失/出错时)
+mammoth>=1.6,<2        # DOCX 兜底解析首选:Word 样式→语义化 HTML,保住标题层级/列表/表格结构。上界不能省:convert_to_html/images 是 1.x 的 API,而兜底链 fail-open 会把大版本破坏吞成静默降级(回落 python-docx)而不是响亮失败
+python-pptx>=1.0,<2    # PPTX 兜底解析首选:形状/表格/图表标题/备注,原始 XML 抽取降为最后一环。上界同理:shape/table 公开 API(is_merge_origin 等)属 1.x,破坏后只会静默退回原始 XML 抽取
+pypdf>=5.0.0
+pymupdf4llm>=1.27.2.3
+openpyxl>=3.1.0
+xlrd>=2.0,<3           # 旧版 .xls 兜底解析（MinerU 不支持二进制 OLE 格式）
+markdown-it-py>=3.0.0
+numpy>=2.0.0
+networkx>=3.0
+python-igraph>=0.11    # 社区检测 scale 路径(整数边表+C 核,10^6-10^7 边;缺失则回退 networkx)
+rustworkx>=0.15.0
+pyyaml>=6.0
+psycopg[binary]>=3.2,<4
+psycopg-pool>=3.2,<4
+hnswlib>=0.8.0
+scipy>=1.11
+orjson>=3
+json-repair==0.63.3  # bounded fallback for malformed JSON model responses
+jsonschema>=4.23,<5  # validate provider-constrained JSON against the actual wire schema

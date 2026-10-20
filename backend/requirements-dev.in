@@ -1,0 +1,8 @@
+# Test and gate dependencies, installed on top of the runtime lock. Packages
+# both sides need resolve to the runtime lock's versions through the -c line.
+# Lock with scripts/lock_python_deps.sh; install the generated
+# backend/requirements-dev.txt together with backend/requirements.txt.
+-c requirements.txt
+pytest>=8.0
+pytest-xdist>=3.6
+matplotlib>=3.10       # pytest controller 直接预热字体缓存(python-igraph 的 drawing adapter 会懒加载它),CI 不得依赖开发机碰巧预装

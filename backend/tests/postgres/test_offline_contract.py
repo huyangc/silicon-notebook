@@ -419,7 +419,7 @@ def test_invalid_host_probe_uses_dummy_when_lane_pgpass_is_empty(
 def test_psycopg_binary_and_pool_have_explicit_compatible_major_ranges():
     requirements = {
         line.split("#", 1)[0].strip()
-        for line in (REPO_ROOT / "backend" / "requirements.txt")
+        for line in (REPO_ROOT / "backend" / "requirements.in")
         .read_text(encoding="utf-8")
         .splitlines()
         if line.split("#", 1)[0].strip()

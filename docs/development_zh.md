@@ -399,6 +399,43 @@ CI 上量到 3.19 s），对真回退也没有鉴别力。分享拷贝的钉子�
 JSON 读取方可读取已打开、当前用户所有的普通文件快照，即使其最后一个链接已移除；
 锁和可写句柄仍要求单链接，不安全文件仍被拒绝。
 
+### Python 依赖
+
+Python 依赖带哈希锁定，安装时不做任何解析。`backend/requirements.in` 声明运行依赖的
+版本范围，`backend/requirements-dev.in` 声明测试与门禁工具（pytest、pytest-xdist，以及
+pytest 主控预热字体缓存用的 matplotlib）；其中 `-c requirements.txt` 一行让两边都需要的
+包保持运行锁里的版本。`scripts/lock_python_deps.sh` 用 pip-tools `--generate-hashes`
+把它们编译成 `backend/requirements.txt`（运行锁）与 `backend/requirements-dev.txt`
+（测试锁）。解析固定用 CI 与生产所跑的 CPython 3.13（`LOCK_PYTHON`，默认
+`python3.13`），在 `.local/` 下的私有 venv 里跑钉死版本的 pip 与 pip-tools。哈希覆盖
+PyPI 为每个钉定版本发布的全部文件，所以同一份锁在 macOS 与 Linux 上都能装；只要没有
+依赖在两个平台间按平台条件区分，在哪个平台解析结果都相同；若锁漏了这样的依赖，
+`pip install --require-hashes` 会响亮失败，而不是装上别的东西。
+
+| 安装场景 | 命令 |
+| --- | --- |
+| CI，以及要跑门禁的开发环境 | `python -m pip install --require-hashes -r backend/requirements.txt -r backend/requirements-dev.txt` |
+| 部署（`scripts/prod.sh`、README/部署文档） | `python -m pip install --require-hashes -r backend/requirements.txt` |
+| 离线包（`scripts/pack.sh` → `packaging/install.sh`） | 按运行锁 `pip wheel --require-hashes`，再 `pip install --no-index --require-hashes -r wheelhouse/locked-wheels.txt` |
+
+改依赖是显式、可评审的改动：
+
+- 新增、删除或改范围：编辑 `.in` 文件，运行 `bash scripts/lock_python_deps.sh`，
+  把 `.in` 与两份锁文件一起提交。仍满足范围的既有钉版全部保留，diff 里只出现这次
+  改动必需的变化。
+- 升级：`bash scripts/lock_python_deps.sh --upgrade-package NAME`（可重复，允许
+  `NAME==VERSION`）只升指定包；`--upgrade` 把所有包升到范围允许的最新版。下文
+  FastAPI/Pydantic 的精确钉版仍须连同 OpenAPI 重生一起升级。
+- `bash scripts/lock_python_deps.sh --check` 在临时副本里重锁，若已提交的锁会变化
+  就失败（需要访问包索引）。
+
+`backend/tests/test_python_lockfiles.py` 是后端泳道里的离线门禁。每份锁都带着编译它的
+`.in` 文件的指纹（`scripts/python_lockfiles.py`；注释、顺序、空白不计），改了 `.in`
+却没重锁就会红。以下情况同样会红：直接依赖不在锁里或钉版超出范围；某个钉版没有哈希、
+已不再被需要、或被未锁定的包需要；锁不是锁脚本在 Python 3.13 下的产物；测试锁与运行锁
+在共享包上不一致；测试工具进了运行锁。首份锁（2026-10-21）与 `3132d4667` 那次 `master`
+CI 实际安装的 87 个版本完全一致。
+
 ### GitHub Actions CI
 
 每个 workflow 最多三个 job，因为每个 job 都会作为一个 check 出现在 PR 上。不设只做汇总的
@@ -452,14 +489,14 @@ backend 与 contracts wrapper 单独执行时仍隔离部署环境，打印慢 p
 独立副本，store 的「已部署 v52 升级」用例仍执行真实迁移梯并保留旧 schema 断言。
 
 已提交的 OpenAPI 契约是字节语义冻结契约，因此
-`backend/requirements.txt` 精确固定 FastAPI `0.135.3` 与 Pydantic
+`backend/requirements.in` 精确固定 FastAPI `0.135.3` 与 Pydantic
 `2.12.4`。只能在有意重生 OpenAPI 契约并在干净环境跑 G2 扩展门时，
 才同步升级这两个框架。
 
 该 workflow 只有读权限，不接收模型或部署 secrets，并把后端 pytest worker
 限制为每台 runner 4 个，避免 GitHub 托管 runner 过度抢占。后端安装设置
 `HNSWLIB_NO_NATIVE=1`，G1 Python 泳道共享 G3 专用的可移植 wheel cache，使用精确的
-OS/架构/Python/requirements/策略 key，不回退到其他缓存；G2 继续禁用 pip wheel cache。
+OS/架构/Python/锁文件/策略 key，不回退到其他缓存；G2 继续禁用 pip wheel cache。
 `hnswlib` 默认会用
 `-march=native` 编译，把这种本机 wheel 缓存后恢复到 CPU 特性不同的托管
 runner，可能以 `SIGILL` 崩溃。CI 使用可移植构建，以少量 ANN 性能换取确定性；
@@ -495,7 +532,7 @@ batch2 的 payload 计划矩阵只创建一次 10 万行笔记本：先检查稀
 或连接 PostgreSQL。PG launcher 固定报告慢 setup/call/teardown，并输出
 `backend/.local/postgres-junit.xml`，CI 即使失败也上传；不会把任意 `PYTEST_ADDOPTS`
 转发给隔离的子进程。PG 依赖缓存使用专属 portable wheel 目录及精确的
-OS/架构/Python/requirements/构建策略 key，不回退到通用缓存，仍必须设置
+OS/架构/Python/锁文件/构建策略 key，不回退到通用缓存，仍必须设置
 `HNSWLIB_NO_NATIVE=1`。整条 PG job 以三分钟为优化目标，测试全绿本身不代表达到目标，
 实测需计入冷缓存时的依赖安装。
 该泳道只覆盖直接 PostgreSQL 行为。2026-07 删除的几组专项测试（SQLite 适配器实现测试、
@@ -507,9 +544,9 @@ SQLite→PostgreSQL 导入/正向 shadow 测试与独立的跨后端 parity 套�
 CI 可移植性属于门禁契约：所有由 CI 执行的测试使用的文件系统、数据和依赖
 路径都必须相对仓库，并且独立于进程 cwd。已提交 fixture 必须从其仓库文件位置
 定位，禁止依赖开发机 checkout 绝对路径或 `HOME`，测试也不得读取仓库外源文档。
-测试启动时直接导入的第三方包必须声明在 `backend/requirements.txt`；干净 hosted
-runner 必须从该文件和 `frontend/package-lock.json` 安装，并且只凭这些声明即可
-全绿。各 lane 时长继续输出供观察，100 秒内目标只约束已验证的 Apple Silicon
+测试启动时直接导入的第三方包必须声明在 `backend/requirements.in` 或
+`backend/requirements-dev.in` 并已锁定；干净 hosted runner 必须从两份锁文件和
+`frontend/package-lock.json` 安装，并且只凭这些声明即可全绿。各 lane 时长继续输出供观察，100 秒内目标只约束已验证的 Apple Silicon
 Homebrew warm gate。
 
 依赖仓库外 PDF 解析产物的 gold 生成、构建与校验脚本仍属于 developer-only

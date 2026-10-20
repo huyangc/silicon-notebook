@@ -44,7 +44,7 @@ jobs:
       - name: Install backend dependencies
         env:
           HNSWLIB_NO_NATIVE: "1"
-        run: python -m pip install --no-cache-dir -r backend/requirements.txt
+        run: python -m pip install --no-cache-dir --require-hashes -r backend/requirements.txt -r backend/requirements-dev.txt
 
       - name: Run standard backend lane
         env:
@@ -86,7 +86,7 @@ jobs:
       - name: Install backend dependencies
         env:
           HNSWLIB_NO_NATIVE: "1"
-        run: python -m pip install --no-cache-dir -r backend/requirements.txt
+        run: python -m pip install --no-cache-dir --require-hashes -r backend/requirements.txt -r backend/requirements-dev.txt
 
       - name: Install frontend dependencies
         run: npm ci --prefix frontend
@@ -141,7 +141,7 @@ jobs:
       - name: Install backend dependencies
         env:
           HNSWLIB_NO_NATIVE: "1"
-        run: python -m pip install --no-cache-dir -r backend/requirements.txt
+        run: python -m pip install --no-cache-dir --require-hashes -r backend/requirements.txt -r backend/requirements-dev.txt
 
       - name: Install frontend dependencies
         run: npm ci --prefix frontend

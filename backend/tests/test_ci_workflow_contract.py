@@ -19,6 +19,16 @@ WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 DAILY_EXTENDED_WORKFLOW_PATH = (
     ROOT / ".github" / "workflows" / "daily-extended.yml"
 )
+# Every job installs the two hash-locked files (runtime, then test tools) and
+# never resolves: upgrading a dependency is scripts/lock_python_deps.sh, not CI.
+LOCKED_INSTALL = (
+    "python -m pip install --require-hashes"
+    " -r backend/requirements.txt -r backend/requirements-dev.txt"
+)
+DAILY_LOCKED_INSTALL = LOCKED_INSTALL.replace(
+    "pip install --require-hashes", "pip install --no-cache-dir --require-hashes"
+)
+LOCK_FILES_HASH = "hashFiles('backend/requirements.txt', 'backend/requirements-dev.txt')"
 
 
 def _load_workflow() -> dict[str, object]:
@@ -161,11 +171,11 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
     assert cache["with"]["path"] == "${{ env.PIP_CACHE_DIR }}"
     assert "portable-hnsw-v1" in cache["with"]["key"]
     assert "runner.arch" in cache["with"]["key"]
-    assert "hashFiles('backend/requirements.txt')" in cache["with"]["key"]
+    assert LOCK_FILES_HASH in cache["with"]["key"]
     assert "restore-keys" not in cache["with"]
     install = _named_step(job, "Install backend dependencies")
     assert install["env"] == {"HNSWLIB_NO_NATIVE": "1"}
-    assert install["run"] == "python -m pip install -r backend/requirements.txt"
+    assert install["run"] == LOCKED_INSTALL
 
     timings = _named_step(job, "Upload PostgreSQL test timings")
     assert timings["if"] == "always()"
@@ -197,12 +207,14 @@ def test_ci_builds_hnswlib_portably_without_reusing_native_wheels(job_name) -> N
 
     install = _named_step(job, "Install backend dependencies")
     assert install["env"] == {"HNSWLIB_NO_NATIVE": "1"}
-    assert install["run"] == "python -m pip install -r backend/requirements.txt"
+    assert install["run"] == LOCKED_INSTALL
     assert job["env"]["PIP_CACHE_DIR"] == "${{ github.workspace }}/.local/pip-portable-v1"
     cache = _uses_step(job, "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830")
     assert cache["with"] == {
         "path": "${{ env.PIP_CACHE_DIR }}",
-        "key": "${{ runner.os }}-${{ runner.arch }}-py313-portable-hnsw-v1-${{ hashFiles('backend/requirements.txt') }}",
+        "key": "${{ runner.os }}-${{ runner.arch }}-py313-portable-hnsw-v1-${{ "
+        + LOCK_FILES_HASH
+        + " }}",
     }
 
 
@@ -288,7 +300,7 @@ def test_pr_ci_runs_every_g1_lane_in_two_jobs() -> None:
     backend = jobs["standard-backend"]
     assert backend["timeout-minutes"] == "30"
     assert _run_commands(backend) == [
-        "python -m pip install -r backend/requirements.txt",
+        LOCKED_INSTALL,
         "bash scripts/check_backend.sh",
     ]
     assert _named_step(backend, "Run standard backend lane")["env"] == {
@@ -298,7 +310,7 @@ def test_pr_ci_runs_every_g1_lane_in_two_jobs() -> None:
     rest = jobs["standard-contracts-frontend"]
     assert rest["timeout-minutes"] == "20"
     assert _run_commands(rest) == [
-        "python -m pip install -r backend/requirements.txt",
+        LOCKED_INSTALL,
         "npm ci --prefix frontend",
         G1_REMAINING_LANES_COMMAND,
     ]
@@ -477,9 +489,7 @@ def test_daily_extended_gate_runs_once_per_day_and_is_manually_dispatchable() ->
         if any("pip install" in command for command in _run_commands(job)):
             install = _named_step(job, "Install backend dependencies")
             assert install["env"] == {"HNSWLIB_NO_NATIVE": "1"}
-            assert install["run"] == (
-                "python -m pip install --no-cache-dir -r backend/requirements.txt"
-            )
+            assert install["run"] == DAILY_LOCKED_INSTALL
 
 
 def test_daily_extended_gate_runs_every_g1_lane_exactly_as_pr_ci_does() -> None:
@@ -492,7 +502,7 @@ def test_daily_extended_gate_runs_every_g1_lane_exactly_as_pr_ci_does() -> None:
 
     def same_install(commands: list[str]) -> list[str]:
         return [
-            command.replace("pip install -r", "pip install --no-cache-dir -r")
+            DAILY_LOCKED_INSTALL if command == LOCKED_INSTALL else command
             for command in commands
         ]
 
@@ -533,7 +543,7 @@ def test_daily_extended_complement_job_runs_only_the_complement_wrapper() -> Non
     assert job["name"] == "level-2-complement"
     commands = _run_commands(job)
     assert commands == [
-        "python -m pip install --no-cache-dir -r backend/requirements.txt",
+        DAILY_LOCKED_INSTALL,
         "npm ci --prefix frontend",
         "bash scripts/check_extended.sh --complement-only",
     ]

@@ -8,7 +8,10 @@ import re
 
 ROOT = Path(__file__).resolve().parents[2]
 HARNESS_TESTS = ROOT / "fangan" / "testcases" / "harness" / "tests"
-REQUIREMENTS = ROOT / "backend" / "requirements.txt"
+# The declared ranges; the hash-locked .txt files are generated from them
+# (test_python_lockfiles.py keeps the two in step).
+REQUIREMENTS = ROOT / "backend" / "requirements.in"
+DEV_REQUIREMENTS = ROOT / "backend" / "requirements-dev.in"
 _REQUIREMENT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
@@ -24,11 +27,11 @@ def _absolute_path_literals(path: Path) -> tuple[str, ...]:
     return tuple(matches)
 
 
-def _declared_requirement_names() -> frozenset[str]:
+def _declared_requirement_names(path: Path = REQUIREMENTS) -> frozenset[str]:
     names: set[str] = set()
-    for raw_line in REQUIREMENTS.read_text(encoding="utf-8").splitlines():
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.partition("#")[0].strip()
-        if not line:
+        if not line or line.startswith("-"):
             continue
         match = _REQUIREMENT_NAME.match(line)
         assert match is not None, f"unsupported requirement line: {raw_line!r}"
@@ -46,7 +49,10 @@ def test_ci_harness_tests_do_not_embed_absolute_paths() -> None:
 
 
 def test_pytest_controller_matplotlib_import_is_declared() -> None:
-    assert "matplotlib" in _declared_requirement_names()
+    # Only the test controller imports it (conftest.py prewarms its font
+    # cache), so it is a test dependency, not a runtime one.
+    assert "matplotlib" in _declared_requirement_names(DEV_REQUIREMENTS)
+    assert "matplotlib" not in _declared_requirement_names()
 
 
 def test_mcp_requirement_keeps_an_upper_bound() -> None:

@@ -40,7 +40,8 @@ cd silicon-notebook
 python3 -m venv .venv
 source .venv/bin/activate            # Windows: .venv\Scripts\activate
 python -m pip install --upgrade pip
-python -m pip install -r backend/requirements.txt
+# hash-locked runtime dependencies (docs/development.md, "Python dependencies")
+python -m pip install --require-hashes -r backend/requirements.txt
 
 # Frontend
 ( cd frontend && npm install )
@@ -234,8 +235,10 @@ npm run start
 npm run stop
 ```
 
-`npm run start` runs `scripts/prod.sh`: it first installs the backend requirements into
-`PYTHON_BIN`'s environment with `python -m pip install -r backend/requirements.txt`, then
+`npm run start` runs `scripts/prod.sh`: it first installs the hash-locked backend dependencies
+into `PYTHON_BIN`'s environment with
+`python -m pip install --require-hashes -r backend/requirements.txt`, which moves every
+package to the lock's exact version and refuses any file whose hash differs, then
 recreates the locked frontend dependency tree with `npm ci --prefix frontend`. It completes
 `next build` in the foreground, then launches `next start` and the single-worker Uvicorn
 backend under `nohup`, with stdin detached and both logs written under `.local/logs/`.

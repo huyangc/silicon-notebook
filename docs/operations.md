@@ -2652,8 +2652,9 @@ the ordinary facade path — see the leftovers section below):
 
 The artifacts themselves are portable: the manifest carries no machine binding,
 npy/npz are platform-independent, and the hnswlib `.bin` is data. Every real
-risk is in the table above, because `requirements` only pins lower bounds
-(`>=`), so drift between two machines is the normal case. Every build records
+risk is in the table above: `backend/requirements.txt` pins exact versions, but
+two machines need not run the same lock revision (or were installed some other
+way, e.g. `SKIP_INSTALL=1`), so drift between them stays possible. Every build records
 `library_versions` (hnswlib/numpy/scipy) in the manifest, and `inspect` prints
 it next to this machine's versions.
 

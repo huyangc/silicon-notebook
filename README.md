@@ -40,7 +40,8 @@ cd silicon-notebook
 python3 -m venv .venv
 source .venv/bin/activate            # Windows: .venv\Scripts\activate
 python -m pip install --upgrade pip
-python -m pip install -r backend/requirements.txt
+# hash-locked runtime dependencies; for the test gates add -r backend/requirements-dev.txt
+python -m pip install --require-hashes -r backend/requirements.txt
 
 ( cd frontend && npm install )
 ```

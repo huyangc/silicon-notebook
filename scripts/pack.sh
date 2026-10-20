@@ -151,8 +151,13 @@ else
   log "预编译 python wheelhouse(numpy/scipy/hnswlib/… 就地编译)…"
   mkdir -p "$STAGE/wheelhouse"
   idx=(); [[ -n "${PIP_INDEX_URL:-}" ]] && idx=(--index-url "$PIP_INDEX_URL")
-  "$PACK_PYTHON" -m pip wheel -r "$ROOT_DIR/backend/requirements.txt" -w "$STAGE/wheelhouse" ${idx[@]+"${idx[@]}"} \
+  # --require-hashes:下载的每个 wheel/sdist 都按锁文件的哈希校验;从已校验 sdist 就地编译的
+  # wheel(hnswlib)没有 PyPI 哈希,locked-wheels.txt 记下它在本机编译出的文件哈希。
+  "$PACK_PYTHON" -m pip wheel --require-hashes -r "$ROOT_DIR/backend/requirements.txt" -w "$STAGE/wheelhouse" ${idx[@]+"${idx[@]}"} \
     || die "pip wheel 失败;修复后重试,或用 SKIP_WHEELHOUSE=1 改纯在线安装。"
+  "$PACK_PYTHON" "$ROOT_DIR/scripts/python_lockfiles.py" wheelhouse \
+    "$ROOT_DIR/backend/requirements.txt" "$STAGE/wheelhouse" "$STAGE/wheelhouse/locked-wheels.txt" \
+    || die "wheelhouse 与 backend/requirements.txt 对不上(每个锁定包须恰好一个同版本 wheel)。"
   # 追加 pip/setuptools/wheel,供目标机在缺 ensurepip 时引导 pip
   "$PACK_PYTHON" -m pip download pip setuptools wheel -d "$STAGE/wheelhouse" ${idx[@]+"${idx[@]}"} \
     || log "warn: pip/setuptools/wheel 预取失败(仅影响目标机缺 ensurepip 的兜底路径)。"

@@ -11,7 +11,7 @@ CPython 3.13 的 PyMutex 交接语义,见 `backend/app/repositories/sqlite/datab
 backend/       后端源码(FastAPI,纯 python)
 frontend/      前端 standalone 产物(node server.js,自带精简 node_modules)
 node/          便携 node 运行时(bin/node)
-wheelhouse/    预编译的 python 依赖 wheel(离线安装用;若打包时 SKIP_WHEELHOUSE 则无)
+wheelhouse/    预编译的 python 依赖 wheel + locked-wheels.txt(逐个 wheel 的哈希;离线安装用;若打包时 SKIP_WHEELHOUSE 则无)
 scripts/       运行时/升级脚本(autotune.sh、migrate_legacy_model_env.py)
 .env.example   配置模板
 model-services.example.toml  系统模型服务模板(无密钥)
@@ -249,8 +249,11 @@ database-wide advisory lock，命令结束时释放并关闭 repository。在线
   `--without-pip` + 用 wheelhouse 里的 pip 轮子兜底;仍失败时按提示让管理员 `apt-get install python3-venv`,
   或设 `PYTHON_BIN` 指向 conda/pyenv 的 python。
 - **wheelhouse 装不上(版本标签不匹配)**:wheel 是按打包机 python 小版本(如 cp313)编译的。若目标机
-  python 小版本不同,C 扩展 wheel 会装不上——`install.sh` 会自动回退到在线 pip 补装。最稳做法是让打包机
-  python 小版本与目标机一致。
+  python 小版本不同,C 扩展 wheel 会装不上——`install.sh` 会自动回退到按 `backend/requirements.txt`(带哈希的
+  运行依赖锁)`--require-hashes` 在线安装。最稳做法是让打包机 python 小版本与目标机一致。
+- **`THESE PACKAGES DO NOT MATCH THE HASHES`**:离线安装校验 `wheelhouse/locked-wheels.txt`、在线安装校验
+  `backend/requirements.txt` 里的哈希;不符说明包被改动或 pip 源返回了不同的文件。不要绕过校验,换用原始包
+  或可信源重装。
 - **前端起来但接口 404 / CORS**:前端通过同源反代把 `/api/*` 转发到后端 `127.0.0.1:8000`。确认后端已在
   `.local/logs/backend.log` 正常起来,且未改动后端端口而没同步改反代目标(反代目标在打包时烘焙)。
 - **来源上传仍显示/卡在 10 MB**:当前包已把 Next.js rewrite 的整请求传输上限按协议最大值预构建，
