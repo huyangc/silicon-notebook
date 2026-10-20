@@ -340,8 +340,10 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 
 **性能**（理由来自整改程序的性能设计稿与分片评审；重开前一律先差分测量）
 
-- [ ] **`kg_cluster_scratch` 的 `(notebook_id, run_id, seed)` 索引：已被测量证伪，不做**。现状只有
-      `idx_kg_cluster_scratch_nb_run (notebook_id, run_id)`（PostgreSQL `0004_knowledge_indexes.sql`）。
+- [ ] **`kg_cluster_scratch` 的 `(notebook_id, run_id, seed)` 索引：已被测量证伪，不做**。现状：SQLite 只有
+      `idx_kg_cluster_scratch_nb_run (notebook_id, run_id)`（隐含 rowid 作末列）；PostgreSQL 自 0079 起是
+      `idx_kg_cluster_scratch_nb_run_ordinal (notebook_id, run_id, ordinal)`（写代段 keyset 分页用，替换了
+      `0004_knowledge_indexes.sql` 的 `(notebook_id, run_id)`），两侧都没有 `seed` 键。
       计划曾拟用带 `seed` 的复合索引替换它，1M 行夹具实测：claim 型 seed（平均 186 字节）百万行插入
       2.7 s → 7.0 s、WAL 2.1×、索引 7 MB → 564 MB；只有 concept 描述阶段受益，claim / formula /
       procedure 只付成本，生产端到端多半净负；而且迁移在启动时跑、受 30 s 语句超时约束，残留 9M 行
