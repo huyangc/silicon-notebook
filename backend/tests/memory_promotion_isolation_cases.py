@@ -711,3 +711,209 @@ def shared_review_surfaces_leave_memory_rows_out(world: World) -> None:
         groups = [{m["id"] for m in group["members"]} for group in procs.json()]
         assert {"ko-proc-shared-1", "ko-proc-shared-2"} in groups, groups   # control
         assert all("ko-proc-memory" not in group for group in groups), groups
+
+
+# -- the owner's own-Memory duplicate groups (GET .../duplicates/own-memory) ----
+
+OWN_DUP_NAME = "own dup claim"
+
+
+def _ev(source_id: str) -> dict:
+    return {"source_id": source_id, "element_id": f"el-{source_id}",
+            "source_title": source_id, "element_type": "paragraph",
+            "location_label": "p1", "confidence": 1.0, "quoted_span": f"text {source_id}"}
+
+
+def _seed_own_dup_world(world: World) -> None:
+    """A gets a second Memory (src-memory-a2), B one of her own (src-memory-b).
+    Every object below has the same normalized name, so the seed blocks them
+    together if they are in the input set at all."""
+    q = world.q
+    b_id = _rows(world, "SELECT id FROM users WHERE username=?", ("b00300002",))[0]["id"]
+    with world.repo._write() as db:
+        for memory_id, owner in (("mem-own-a2", world.a_id), ("mem-own-b", b_id)):
+            db.execute(
+                q("INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
+                  "content_md,created_at,updated_at) "
+                  "VALUES (?,?,?,'ask_answer','confirmed','t','c',?,?)"),
+                (memory_id, world.nb, owner, NOW, NOW),
+            )
+        for source_id, memory_id in (("src-memory-a2", "mem-own-a2"),
+                                     ("src-memory-b", "mem-own-b")):
+            db.execute(
+                q("INSERT INTO sources(id,notebook_id,title,source_type,memory_id,"
+                  "created_at,updated_at) VALUES (?,?,?,'memory',?,?,?)"),
+                (source_id, world.nb, source_id, memory_id, NOW, NOW),
+            )
+        for object_id, object_type, source_id, name, status, evidence in (
+            # A's, supported by her Memory alone (one cites her other Memory,
+            # one has no evidence at all): the group
+            ("ko-own-dup-1", "claim", "src-memory-a", OWN_DUP_NAME, "approved",
+             [_ev("src-memory-a")]),
+            ("ko-own-dup-2", "claim", "src-memory-a2", "Own  DUP claim", "approved",
+             [_ev("src-memory-a2"), _ev("src-memory-a")]),
+            ("ko-own-dup-bare", "claim", "src-memory-a2", OWN_DUP_NAME, "approved", []),
+            # A's, but the merge would refuse them: shared evidence, an entry
+            # without a source id; and one already merged away
+            ("ko-own-dup-mixed", "claim", "src-memory-a", OWN_DUP_NAME, "approved",
+             [_ev("src-memory-a"), _ev("src-document")]),
+            ("ko-own-dup-nosrc", "claim", "src-memory-a", OWN_DUP_NAME, "approved",
+             [{"element_id": "el-x", "quoted_span": "orphan entry"}]),
+            ("ko-own-dup-gone", "claim", "src-memory-a", OWN_DUP_NAME, "deprecated",
+             [_ev("src-memory-a")]),
+            # A's object citing B's Memory is not supported by A's alone
+            ("ko-own-dup-cites-b", "claim", "src-memory-a", OWN_DUP_NAME, "approved",
+             [_ev("src-memory-b")]),
+            # B's pair: hers, never A's
+            ("ko-b-dup-1", "claim", "src-memory-b", OWN_DUP_NAME, "approved",
+             [_ev("src-memory-b")]),
+            ("ko-b-dup-2", "claim", "src-memory-b", OWN_DUP_NAME, "approved",
+             [_ev("src-memory-b")]),
+            # A's procedure pair (the procedure seed reads the steps)
+            ("ko-own-proc-1", "procedure", "src-memory-a", "own calibration", "approved",
+             [_ev("src-memory-a")]),
+            ("ko-own-proc-2", "procedure", "src-memory-a2", "own calibration", "approved",
+             [_ev("src-memory-a2")]),
+        ):
+            payload = {"name": name}
+            if object_type == "procedure":
+                payload["steps"] = ["measure", "trim"]
+            db.execute(
+                q("INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
+                  "payload,evidence,source_id,created_at,updated_at) "
+                  "VALUES (?,?,?,?,?,?,?,?,?)"),
+                (object_id, world.nb, object_type, status, json.dumps(payload),
+                 json.dumps(evidence, ensure_ascii=False), source_id, NOW, NOW),
+            )
+
+
+def _shared_dup_seed(world: World) -> None:
+    with world.repo._write() as db:
+        for object_id in ("ko-shared-dup-1", "ko-shared-dup-2"):
+            db.execute(
+                world.q("INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
+                        "payload,evidence,source_id,created_at,updated_at) "
+                        "VALUES (?,?,'claim','approved',?,?,'src-document',?,?)"),
+                (object_id, world.nb, json.dumps({"name": OWN_DUP_NAME}),
+                 json.dumps([_ev("src-document")]), NOW, NOW),
+            )
+
+
+def _own_groups(world: World, headers: dict, object_type: str = "claim",
+                notebook_id: str | None = None) -> list:
+    response = world.client.get(
+        f"/api/notebooks/{notebook_id or world.nb}/duplicates/own-memory",
+        params={"type": object_type}, headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    return [[m["id"] for m in group["members"]] for group in response.json()]
+
+
+def _shared_text(world: World, headers: dict, object_type: str = "claim") -> str:
+    response = world.client.get(
+        f"/api/notebooks/{world.nb}/duplicates", params={"type": object_type},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    return response.text
+
+
+def owner_lists_her_own_memory_duplicates(world: World) -> None:
+    """The owner's groups hold her own Memory objects supported by her own
+    Memory alone — the shared groups never list them, and nobody else sees
+    them. The shared response is byte-identical before and after her Memory
+    objects exist, for every member."""
+    _shared_dup_seed(world)
+    shared_before = {
+        name: _shared_text(world, headers)
+        for name, headers in (("a", world.a), ("b", world.b))
+    }
+    assert "ko-shared-dup-1" in shared_before["a"]
+    assert _own_groups(world, world.a) == []        # no duplicates of hers yet
+    _seed_own_dup_world(world)
+
+    # the shared groups: unchanged bytes, the same for everyone
+    for name, headers in (("a", world.a), ("b", world.b)):
+        assert _shared_text(world, headers) == shared_before[name]
+    assert shared_before["a"] == shared_before["b"]
+
+    groups = _own_groups(world, world.a)
+    assert [set(group) for group in groups] == [
+        {"ko-own-dup-1", "ko-own-dup-2", "ko-own-dup-bare"}
+    ], groups
+    assert [set(g) for g in _own_groups(world, world.a, "procedure")] == [
+        {"ko-own-proc-1", "ko-own-proc-2"}
+    ]
+    response = world.client.get(
+        f"/api/notebooks/{world.nb}/duplicates/own-memory",
+        params={"type": "claim"}, headers=world.a,
+    ).json()
+    (group,) = response
+    assert group["object_type"] == "claim"
+    assert {m["headline"] for m in group["members"]} == {OWN_DUP_NAME, "Own  DUP claim"}
+    assert all("_merged_into" not in json.dumps(m) for m in group["members"])
+    # B (a notebook admin) sees her own pair only, never A's
+    assert [set(g) for g in _own_groups(world, world.b)] == [{"ko-b-dup-1", "ko-b-dup-2"}]
+    # the site admin has no bypass: as a reader of the notebook who owns no
+    # Memory here she gets the empty answer (not a 404 that would say more)
+    world.repo._runtime.sharing.add_member(world.nb, world.r_id)
+    assert _own_groups(world, world.r) == []
+    # a notebook where A owns no Memory: nothing
+    other = world.client.post("/api/notebooks", headers=world.a, json={"name": "Mine"}).json()
+    assert _own_groups(world, world.a, notebook_id=other["id"]) == []
+    missing = world.client.get(
+        "/api/notebooks/nb-does-not-exist/duplicates/own-memory",
+        params={"type": "claim"}, headers=world.a,
+    )
+    assert missing.status_code == 404
+
+    # exactly the pairs the merge accepts: every listed pair merges, every
+    # left-out object of hers is refused against a listed one
+    for left_out in ("ko-own-dup-mixed", "ko-own-dup-nosrc", "ko-own-dup-cites-b"):
+        refused = world.client.post(
+            f"/api/notebooks/{world.nb}/knowledge/{left_out}/merge",
+            headers=world.a, json={"into_id": "ko-own-dup-1"},
+        )
+        assert refused.status_code == 409, (left_out, refused.text)
+        assert refused.json()["detail"] == CROSS_CLASS_MESSAGE
+    merged = world.client.post(
+        f"/api/notebooks/{world.nb}/knowledge/ko-own-dup-2/merge",
+        headers=world.a, json={"into_id": "ko-own-dup-1"},
+    )
+    assert merged.status_code == 200, merged.text
+    # the merged-away object leaves the group; the result (which now cites
+    # both of her Memories) stays in it
+    assert [set(g) for g in _own_groups(world, world.a)] == [
+        {"ko-own-dup-1", "ko-own-dup-bare"}
+    ]
+    merged = world.client.post(
+        f"/api/notebooks/{world.nb}/knowledge/ko-own-dup-bare/merge",
+        headers=world.a, json={"into_id": "ko-own-dup-1"},
+    )
+    assert merged.status_code == 200, merged.text
+    assert _own_groups(world, world.a) == []
+    for name, headers in (("a", world.a), ("b", world.b)):
+        assert _shared_text(world, headers) == shared_before[name]
+
+
+def owner_duplicates_follow_the_memory_channel(world: World) -> None:
+    """Service level: the same read with the private-Memory channel closed (an
+    Agent token without ``read``) returns nothing, her own included."""
+    from app.core.request_context import reset_request_user, set_request_user
+    from app.services.source_scope import memory_access_context
+
+    _seed_own_dup_world(world)
+    token = world.a["Authorization"].split(" ", 1)[1]
+    profile = world.repo._runtime.identity.resolve_session(token)
+    service = world.repo._runtime.knowledge_governance
+    ctx = set_request_user(profile)
+    try:
+        opened = service.find_own_memory_duplicates(world.nb, "claim")
+        with memory_access_context(False):
+            closed = service.find_own_memory_duplicates(world.nb, "claim")
+    finally:
+        reset_request_user(ctx)
+    assert [{m.id for m in g.members} for g in opened] == [
+        {"ko-own-dup-1", "ko-own-dup-2", "ko-own-dup-bare"}
+    ]
+    assert closed == []

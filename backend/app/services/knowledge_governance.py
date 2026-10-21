@@ -2197,60 +2197,15 @@ class KnowledgeGovernanceService:
         sort's stable tie-break all depend on would otherwise be silently
         lost to whatever order ``id = ANY(...)``/``id IN (...)`` happens to
         return.
-        """
-        from app.services.kg_merge import (
-            build_acronym_alias_map, _seed_with_alias,
-            seed_concept, seed_claim, seed_formula, seed_procedure,
-        )
-        seed_fn = {
-            "concept": seed_concept, "claim": seed_claim,
-            "formula": seed_formula, "procedure": seed_procedure,
-        }.get(object_type, seed_concept)
 
+        The blocking (``_duplicate_blocks``) and the grouping
+        (``_duplicate_groups``) are shared with the owner's own-Memory groups
+        (``find_own_memory_duplicates``); only the input rows differ.
+        """
         self.get_notebook(notebook_id)
         with self._connect() as db:
             seed_rows = self.knowledge.duplicate_seed_rows(db, notebook_id, object_type)
-            if object_type == "procedure":
-                objs = [
-                    {"id": r["id"], "status": r["status"], "payload": r["payload"]}
-                    for r in seed_rows
-                ]
-            else:
-                # SQL already extracted payload.name; NULL means "absent, JSON
-                # null, or a payload that is not an object" — all of which the
-                # old ``dict.get("name", "")`` (or, for a non-string/non-None
-                # value, the old full-payload read) turned into "" or fed
-                # verbatim into ``_norm``. ``str()`` here is the SAME
-                # registered dialect-reconciling coercion the review-queue
-                # endpoint read uses (``review_queue`` above) — a string or
-                # integer ``name`` renders identically on both backends; a
-                # bool/float/object/array can render differently across
-                # PostgreSQL's ``->>`` and SQLite's ``json_extract`` + ``str()``
-                # (not a regression: both engines only reach this coercion for
-                # shapes the OLD unrestricted ``_norm(non_str)`` path would
-                # already raise on).
-                objs = [
-                    {
-                        "id": r["id"],
-                        "status": r["status"],
-                        "payload": {
-                            "name": str(r["name"]) if r["name"] is not None else ""
-                        },
-                    }
-                    for r in seed_rows
-                ]
-
-            # Block by seed: only same-normalized-name objects become candidates.
-            # This loop and the seed/alias functions it calls are UNCHANGED from
-            # before the two-pass split — only ``objs``'s construction moved.
-            alias_map = build_acronym_alias_map(o["payload"].get("name", "") for o in objs)
-            by_seed: Dict[str, List[dict]] = {}
-            for o in objs:
-                seed = _seed_with_alias(
-                    {"name": o["payload"].get("name", ""), "payload": o["payload"]},
-                    seed_fn, alias_map)
-                if seed:
-                    by_seed.setdefault(seed, []).append(o)
+            by_seed = self._duplicate_blocks(object_type, seed_rows)
 
             # Pass 2: only blocks that already have >=2 members can possibly be a
             # duplicate group — singleton blocks (the common case) are dropped
@@ -2265,7 +2220,103 @@ class KnowledgeGovernanceService:
                     db, notebook_id, pending_ids
                 )
                 full_by_id = {r["id"]: r["payload"] for r in full_rows}
+        return self._duplicate_groups(object_type, by_seed, full_by_id)
 
+    def find_own_memory_duplicates(
+        self, notebook_id: str, object_type: str,
+    ) -> List[DuplicateGroup]:
+        """The viewer's own duplicate groups: the same blocking and grouping as
+        ``find_duplicates`` (seed, acronym alias, similarity, order), run on the
+        viewer's own live Memory objects whose evidence cites only her own
+        Memory sources of this notebook
+        (``GovernanceStore.own_memory_duplicate_rows``) — the objects the
+        shared groups leave out for everyone, and exactly the pairs
+        ``merge_knowledge`` lets her merge. Nobody else's Memory can appear:
+        the read starts from her own Memory sources, a site admin has no
+        bypass, and with the Memory channel closed (``viewer_identity`` ''),
+        or in a notebook where she owns no Memory, the answer is ``[]``.
+
+        ``find_duplicates`` and what it returns are untouched, and nothing is
+        cached here (the shared groups are not cached either): the cost is the
+        viewer scope (``memory_source_ids`` alone for a notebook without
+        Memory) plus, when she owns Memory there, two statements bounded by
+        her own Memory in this notebook."""
+        self.get_notebook(notebook_id)
+        scope = self._viewer_scope(notebook_id)
+        if scope is None or not scope.own_memory:
+            return []
+        with self._connect() as db:
+            rows = self.governance_store.own_memory_duplicate_rows(
+                db, notebook_id, object_type, scope.viewer_id
+            )
+        by_seed = self._duplicate_blocks(object_type, rows)
+        return self._duplicate_groups(
+            object_type, by_seed, {r["id"]: r["payload"] for r in rows}
+        )
+
+    @staticmethod
+    def _duplicate_blocks(object_type: str, seed_rows: List[dict]) -> Dict[str, List[dict]]:
+        """Block pass-1 rows by normalized seed (``find_duplicates``'s docstring):
+        ``{seed: [thin row, ...]}`` in row order. A procedure row brings its
+        full payload (the steps signature); every other row brings ``name``
+        only, and only that name is seen here."""
+        from app.services.kg_merge import (
+            build_acronym_alias_map, _seed_with_alias,
+            seed_concept, seed_claim, seed_formula, seed_procedure,
+        )
+        seed_fn = {
+            "concept": seed_concept, "claim": seed_claim,
+            "formula": seed_formula, "procedure": seed_procedure,
+        }.get(object_type, seed_concept)
+        if object_type == "procedure":
+            objs = [
+                {"id": r["id"], "status": r["status"], "payload": r["payload"]}
+                for r in seed_rows
+            ]
+        else:
+            # SQL already extracted payload.name; NULL means "absent, JSON
+            # null, or a payload that is not an object" — all of which the
+            # old ``dict.get("name", "")`` (or, for a non-string/non-None
+            # value, the old full-payload read) turned into "" or fed
+            # verbatim into ``_norm``. ``str()`` here is the SAME
+            # registered dialect-reconciling coercion the review-queue
+            # endpoint read uses (``review_queue`` above) — a string or
+            # integer ``name`` renders identically on both backends; a
+            # bool/float/object/array can render differently across
+            # PostgreSQL's ``->>`` and SQLite's ``json_extract`` + ``str()``
+            # (not a regression: both engines only reach this coercion for
+            # shapes the OLD unrestricted ``_norm(non_str)`` path would
+            # already raise on).
+            objs = [
+                {
+                    "id": r["id"],
+                    "status": r["status"],
+                    "payload": {
+                        "name": str(r["name"]) if r["name"] is not None else ""
+                    },
+                }
+                for r in seed_rows
+            ]
+
+        # Block by seed: only same-normalized-name objects become candidates.
+        # This loop and the seed/alias functions it calls are UNCHANGED from
+        # before the two-pass split — only ``objs``'s construction moved.
+        alias_map = build_acronym_alias_map(o["payload"].get("name", "") for o in objs)
+        by_seed: Dict[str, List[dict]] = {}
+        for o in objs:
+            seed = _seed_with_alias(
+                {"name": o["payload"].get("name", ""), "payload": o["payload"]},
+                seed_fn, alias_map)
+            if seed:
+                by_seed.setdefault(seed, []).append(o)
+        return by_seed
+
+    def _duplicate_groups(
+        self, object_type: str, by_seed: Dict[str, List[dict]],
+        full_by_id: Dict[str, dict],
+    ) -> List[DuplicateGroup]:
+        """Blocks of two or more become groups, each member re-keyed onto its
+        full payload (``full_by_id``), sorted by size then similarity."""
         groups: List[DuplicateGroup] = []
         for members in by_seed.values():
             if len(members) < 2:

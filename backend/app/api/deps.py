@@ -47,6 +47,11 @@ def notebook_catalog_repository() -> NotebookCatalogRepository:
 def notebook_question_suggestions_service():
     return repository()._runtime.question_suggestions  # type: ignore[attr-defined]
 
+def knowledge_governance_service():
+    """The owner's own-Memory duplicate groups read it directly: a new read,
+    deliberately not a facade seat (the facade's public surface is frozen)."""
+    return repository()._runtime.knowledge_governance  # type: ignore[attr-defined]
+
 def notebook_delete_repository():
     """批 3·W1 PR-3 §T-2 的删除 tombstone + 后台作业入口；不进
     `NotebookCatalogRepository` Protocol——`delete_notebook`（同步、

@@ -275,6 +275,9 @@ _REGISTRY: dict[str, dict[str, str]] = {
         # P4-T6: the pending list's own cluster ids; the service relabels them
         # by the viewer rule (KgViewerScope.cluster_labels)
         "GovernanceStore.pending_merge_names": KEY_BOUNDED,
+        # the owner's own duplicate groups: driven by her own Memory sources
+        # (own_memory_source), so nobody else's Memory object is ever read
+        "GovernanceStore.own_memory_duplicate_rows": OWN_MEMORY,
         "GovernanceStore.promotion_object_type_row": KEY_BOUNDED,
         "GovernanceStore.locate_approved_base_object": KEY_BOUNDED,
         "GovernanceStore.locate_approved_memory_base_objects": KEY_BOUNDED,

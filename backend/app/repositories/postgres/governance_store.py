@@ -67,6 +67,7 @@ from app.domain.memory_kg_isolation import (
     heal_action,
     patched_payload,
     merge_evidence_source_ids,
+    evidence_only_from_own_memory,
     memory_merge_refusal,
     plan_merge_follow_actions,
 )
@@ -2678,6 +2679,65 @@ class GovernanceStore:
             "updated_at": iso_timestamp(result["updated_at"]),
             "last_reviewed": iso_timestamp(result["last_reviewed"]),
         }
+
+    @staticmethod
+    def own_memory_duplicate_rows(
+        connection: Any,
+        notebook_id: str,
+        object_type: str,
+        viewer_id: str,
+    ) -> List[dict]:
+        """The owner's duplicate-group input: the viewer's own live Memory
+        objects of ``object_type`` whose evidence cites nothing but her own
+        Memory sources of this notebook (``evidence_only_from_own_memory``,
+        the merge's ``only_own_memory_evidence`` judged one object at a time)
+        — exactly the objects ``merge_objects_in_transaction`` lets her merge
+        with one another. Shared duplicate groups never list them
+        (``duplicate_seed_rows`` leaves every Memory-derived row out), and
+        nobody else's Memory is read here: both statements start from
+        ``own_memory_source``, so a site admin, another member and the empty
+        viewer (the Memory channel closed) get nothing.
+
+        Returns ``{"id", "status", "name", "payload"}`` in the order
+        ``duplicate_seed_rows`` uses (``created_at``, ``id``), ``name`` read the
+        way that reader reads it (``->>``), so the blocking the service runs on
+        both lists sees the same text. Two statements, both bounded by the
+        viewer's own Memory in this notebook: her Memory sources (an index read
+        of ``idx_sources_nb_hidden_type``), then her live objects of the type,
+        ``= ANY(ARRAY(subquery))`` driven by those sources through
+        ``idx_knowledge_objects_source`` (the form ``unified_graph_rows``'s
+        overlay uses; a join hash-joins the notebook). No own Memory source,
+        no second statement."""
+        if not viewer_id:
+            return []
+        own = frozenset(
+            row["id"] for row in connection.execute(
+                "SELECT s.id FROM sources s "
+                f"WHERE s.notebook_id=%s AND {own_memory_source('s')}",
+                (notebook_id, viewer_id),
+            ).fetchall()
+        )
+        if not own:
+            return []
+        rows = connection.execute(
+            "SELECT o.id, o.status, o.payload->>'name' AS name, o.payload, o.evidence "
+            "FROM knowledge_objects o "
+            "WHERE o.source_id = ANY(ARRAY(SELECT s.id FROM sources s "
+            f"WHERE s.notebook_id=%s AND {own_memory_source('s')})) "
+            "AND o.notebook_id=%s AND o.object_type=%s AND o.status!='deprecated' "
+            "ORDER BY o.created_at ASC, o.id ASC",
+            (notebook_id, viewer_id, notebook_id, object_type),
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "status": row["status"],
+                "name": row["name"],
+                "payload": json_value(row["payload"], {}),
+            }
+            for row in rows
+            if evidence_only_from_own_memory(json_value(row["evidence"], []), own)
+        ]
 
     @staticmethod
     def _own_memory_merge_evidence(

@@ -21580,6 +21580,60 @@
           "summary": "Find Duplicates"
         }
       },
+      "/api/notebooks/{notebook_id}/duplicates/own-memory": {
+        "get": {
+          "description": "The caller's own duplicate groups: objects derived from her own Memory\nand supported by it alone, which the shared ``/duplicates`` leaves out for\neveryone. A separate route because ``/duplicates`` answers a bare list, so\na per-viewer field would change its shape for every existing client. Anyone\nelse — another member, a site admin — gets ``[]``, the same answer as a\nviewer who owns no Memory here.",
+          "operationId": "find_own_memory_duplicates_api_notebooks__notebook_id__duplicates_own_memory_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "type",
+              "required": false,
+              "schema": {
+                "default": "rules",
+                "title": "Type",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/DuplicateGroup"
+                    },
+                    "title": "Response Find Own Memory Duplicates Api Notebooks  Notebook Id  Duplicates Own Memory Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Find Own Memory Duplicates"
+        }
+      },
       "/api/notebooks/{notebook_id}/edge-review-queue": {
         "get": {
           "description": "Return edges ranked by review priority (high centrality × low trust) desc,\nplus the queue's true total size (independent of `limit`; R3 T-A3 v4).\nExcludes already-rejected edges.\n\nONE call (``review_queue_page``) instead of the v3 shape's two independent\nreads — ``items`` and ``total`` come from the same seq-gated memo entry so\nthey can never describe two different KG versions.",
