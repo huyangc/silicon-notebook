@@ -3056,6 +3056,16 @@ class UnifiedKgStore:
         的写法区分 —— 两者都是 ``= ANY``,custom plan 按真实列表长度出计划。多批读在一个
         REPEATABLE READ 快照里完成。挂写事务守卫。"""
         self._reject_inside_write_transaction("问题样例展示名")
+        with self._read_snapshot(repeatable=True) as db:
+            return self._display_name_rows_in(db, notebook_id, pairs)
+
+    @staticmethod
+    def _display_name_rows_in(
+        db: Any, notebook_id: str, pairs: Sequence[Tuple[str, str]]
+    ) -> List[Tuple[str, str, str, int]]:
+        """`kg_finding_display_name_rows` on a connection the caller holds (the
+        read-only rehearsal script sends these exact statements on its own
+        connection; ``tests/postgres/test_kg_findings_plan_pins.py`` pins them)."""
         wanted = list(dict.fromkeys((str(s), str(c)) for s, c in pairs))
         if not wanted:
             return []
@@ -3067,42 +3077,41 @@ class UnifiedKgStore:
             "AND hs.source_type IN ('memory','knowhow'))"
         )
         raw: List[tuple] = []
-        with self._read_snapshot(repeatable=True) as db:
-            for start in range(0, len(canonicals), 500):
-                batch = canonicals[start:start + 500]
-                batch_set = set(batch)
-                canon = bind_ids(batch)
-                sources = bind_ids(sorted({s for s, c in wanted if c in batch_set}))
-                raw.extend(
-                    (row["source_id"], row["canonical_id"], row["name"])
-                    for row in execute_ids(
-                        db,
-                        "SELECT o.source_id AS source_id, c.canonical_id AS canonical_id, "
-                        "o.payload->>'name' AS name "
-                        "FROM concept_clusters c "
-                        "JOIN knowledge_objects o ON o.id = c.member_object_id "
-                        f"WHERE {member_of('c.canonical_id', canon)} "
-                        "AND c.notebook_id = %s "
-                        f"AND c.generation = {_PUBLISHED_CLUSTER_GEN} "
-                        "AND o.notebook_id = c.notebook_id "
-                        f"AND o.status IN ({statuses}) "
-                        f"AND {member_of('o.source_id', sources)} AND {hidden} "
-                        "UNION ALL "
-                        "SELECT o.source_id, o.id, o.payload->>'name' "
-                        "FROM knowledge_objects o "
-                        f"WHERE {member_of('o.id', canon)} AND o.notebook_id = %s "
-                        f"AND o.status IN ({statuses}) "
-                        f"AND {member_of('o.source_id', sources)} AND {hidden} "
-                        "AND NOT EXISTS (SELECT 1 FROM concept_clusters cc "
-                        "WHERE cc.notebook_id = o.notebook_id "
-                        "AND cc.member_object_id = o.id "
-                        f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN})",
-                        [canon.param, notebook_id, notebook_id, *USABLE_STATUSES,
-                         sources.param,
-                         canon.param, notebook_id, *USABLE_STATUSES, sources.param,
-                         notebook_id],
-                    ).fetchall()
-                )
+        for start in range(0, len(canonicals), 500):
+            batch = canonicals[start:start + 500]
+            batch_set = set(batch)
+            canon = bind_ids(batch)
+            sources = bind_ids(sorted({s for s, c in wanted if c in batch_set}))
+            raw.extend(
+                (row["source_id"], row["canonical_id"], row["name"])
+                for row in execute_ids(
+                    db,
+                    "SELECT o.source_id AS source_id, c.canonical_id AS canonical_id, "
+                    "o.payload->>'name' AS name "
+                    "FROM concept_clusters c "
+                    "JOIN knowledge_objects o ON o.id = c.member_object_id "
+                    f"WHERE {member_of('c.canonical_id', canon)} "
+                    "AND c.notebook_id = %s "
+                    f"AND c.generation = {_PUBLISHED_CLUSTER_GEN} "
+                    "AND o.notebook_id = c.notebook_id "
+                    f"AND o.status IN ({statuses}) "
+                    f"AND {member_of('o.source_id', sources)} AND {hidden} "
+                    "UNION ALL "
+                    "SELECT o.source_id, o.id, o.payload->>'name' "
+                    "FROM knowledge_objects o "
+                    f"WHERE {member_of('o.id', canon)} AND o.notebook_id = %s "
+                    f"AND o.status IN ({statuses}) "
+                    f"AND {member_of('o.source_id', sources)} AND {hidden} "
+                    "AND NOT EXISTS (SELECT 1 FROM concept_clusters cc "
+                    "WHERE cc.notebook_id = o.notebook_id "
+                    "AND cc.member_object_id = o.id "
+                    f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN})",
+                    [canon.param, notebook_id, notebook_id, *USABLE_STATUSES,
+                     sources.param,
+                     canon.param, notebook_id, *USABLE_STATUSES, sources.param,
+                     notebook_id],
+                ).fetchall()
+            )
         return _display_name_rows(raw, wanted)
 
     @staticmethod

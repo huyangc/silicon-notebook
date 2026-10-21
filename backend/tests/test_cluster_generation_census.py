@@ -195,10 +195,12 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
     "scripts/diag_slow.py": (1, 1, 0, 0, 0, "C:只读诊断对照组"),
     "scripts/verify_repository_snapshot.py": (1, 0, 0, 0, 0,
         "C:离线迁移一致性校验(v24 去重投影),只读"),
-    "scripts/kg_findings_rehearsal.py": (7, 0, 0, 6, 0,
+    "scripts/kg_findings_rehearsal.py": (4, 0, 0, 3, 0,
         "A:问题清单的生产只读演练(只读连接 + 只发 SELECT),镜像产品的图读 / 对象读 /"
-        "名字读;7 处读全部带代次谓词,取自产品 PG store 的 `_PUBLISHED_CLUSTER_GEN`"
-        "(6 次取值:图读的两条 LEFT JOIN 共用一次)"),
+        "名字读;4 处读全部带代次谓词,取自产品 PG store 的 `_PUBLISHED_CLUSTER_GEN`"
+        "(3 次取值:图读的两条 LEFT JOIN 共用一次)。成员名与样例名的点查直接调用产品"
+        " store 的语句(`kg_finding_member_name_rows` / `_display_name_rows_in`,在 store"
+        " 的登记里),本脚本不再自写"),
 }
 
 
