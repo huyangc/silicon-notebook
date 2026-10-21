@@ -5,4 +5,5 @@
 -c requirements.txt
 pytest>=8.0
 pytest-xdist>=3.6
+ruff==0.16.10          # 后端 lint 门(scripts/check_backend_lint.py)钉死版本:规则行为随版本变,升级要连同基线一起重算
 matplotlib>=3.10       # pytest controller 直接预热字体缓存(python-igraph 的 drawing adapter 会懒加载它),CI 不得依赖开发机碰巧预装
