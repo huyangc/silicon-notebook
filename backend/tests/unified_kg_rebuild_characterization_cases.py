@@ -5,41 +5,34 @@
 各自只写一个 ``Backend`` 适配器(有哪些表、占位符)。不是测试模块(没有 ``test_`` 前缀),
 pytest 不会收集它。
 
-``observe`` 录下 rebuild 与外界交换的一切,按发生顺序:对 store(unified_kg / governance /
-knowledge)、scale_artifacts、event_log、模型客户端的每一次调用(规范化后的参数与返回值)、
-对本服务自身协作方法与 ``kg_merge`` / ``concept_merge_review`` 模块函数的调用、读写连接的
-进出、id 铸造、取时钟、run id、模型收到的每一条提示词,外加整库逐表的增删差分、存储目录
-差分、日志与返回值/异常。``Scenario.expect`` 只断言其中用户与下游可见的事实——返回的簇数或
-抛出的异常、发布代是否翻转、在飞认领在每个出口都已释放、两张 scratch 表不留本轮的行、
-``kg_mutation_seq`` 不被 rebuild 推进(期间到达的变更让 ``dirty`` 保持 1)、发布出来的合并
-分组与待审候选、跳过路径零重算、派生尾部(规范关系、共提桥接、viz、自动索引、社区)按序以
-``force=True`` 调度且各自 fail-open、checkpoint 的保留/清空。
+``observe`` 录下 rebuild 在本线程对外的调用,按发生顺序:对 store(unified_kg / governance /
+knowledge)、scale_artifacts、event_log、模型客户端的每一次调用(参数与返回值)、对本服务自身
+协作方法与 ``kg_merge`` / ``concept_merge_review`` 模块函数的调用,外加模型收到的提示词、本线程
+的日志、进度回调、rebuild 前后有变化的表名与返回值/异常。``Scenario.expect`` 只断言其中用户与
+下游可见的事实——返回的簇数或抛出的异常、发布代是否翻转、在飞认领在每个出口都已释放(取号之后
+任何一步失败也一样)、两张 scratch 表不留本轮的行、``kg_mutation_seq`` 不被 rebuild 推进(期间
+到达的变更让 ``dirty`` 保持 1)、发布出来的合并分组与待审候选、跳过路径零重算、派生尾部(规范
+关系、共提桥接、viz、自动索引、社区)按序以 ``force=True`` 调度且各自 fail-open、checkpoint 的
+保留/清空。
 
 这套世界与场景最初是 ``rebuild_unified_kg`` 零行为变化拆分的表征:拆分前在两端采集的逐字节
-快照(另含本线程的每条 SQL)拆分后不变,随后按 AGENTS.md「不做只为重构服务的金标快照」退役,
-只留本行为层。
+快照(另含本线程的每条 SQL、id 铸造、取时钟与整库/存储目录差分)拆分后不变,随后按 AGENTS.md
+「不做只为重构服务的金标快照」退役,只留本行为层。
 
-确定性:行 id 来自计数器(``<前缀>-r<序号>``),run id 来自 ``uuid.uuid4`` 的计数器替身;
-造世界的时钟固定为 ``SEED_NOW``、被测 rebuild 的时钟固定为 ``REBUILD_NOW``(远未来,
-让本轮期间的并发追加落进催收窗口);数据库自己的墙钟(``datetime('now')`` / ``now()``)
-一律打码成 ``<ts>``,库侧随机的簇行 id 打码成 ``cc-<rand>``,日志里的耗时打码成 ``<dur>s``。
-只记 rebuild 所在线程(模型调用另记一条全线程通道,工作线程固定为 1)。
+时钟:造世界固定为 ``SEED_NOW``、被测 rebuild 固定为 ``REBUILD_NOW``(远未来,让本轮期间的
+并发追加落进催收窗口)。日志与进度里的耗时记成 ``<dur>s``。模型调用另记一条全线程通道
+(工作线程固定为 1)。
 """
 from __future__ import annotations
 
 import collections
 import dataclasses
-import datetime as dt
 import hashlib
 import json
 import logging
 import re
 import threading
-import uuid
-from pathlib import Path
 from typing import Any, Callable, Optional
-
-import numpy as np
 
 from app.models.schemas import NotebookCreate
 from tests.model_testkit import bind_all_embedding_clients
@@ -47,11 +40,6 @@ from tests.model_testkit import bind_all_embedding_clients
 SEED_NOW = "2026-09-30T00:00:00+00:00"
 REBUILD_NOW = "2999-01-01T00:00:00+00:00"
 DEBT_TS = "2026-09-30 00:00:00"
-FIXED_INSTANTS = frozenset(
-    dt.datetime.fromisoformat(value).astimezone(dt.timezone.utc)
-    for value in (SEED_NOW, REBUILD_NOW)
-)
-STORAGE = "<storage>"
 EMBED_DIM = 16
 MISSING_NB = "nb-missing"
 
@@ -130,7 +118,7 @@ class FakeModels:
     def note(self, entry: dict) -> None:
         if self.recorder.active:
             with self._lock:
-                self.calls.append(self.recorder.canon(entry))
+                self.calls.append(entry)
 
     def configured(self, workload: str) -> bool:
         return workload in self.configured_workloads
@@ -171,87 +159,24 @@ LLM_ALL = frozenset({"kg_merge_review", "kg_concept_description"})
 
 # ------------------------------------------------------------- normalisation
 
-_TIMESTAMP = re.compile(
-    r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:[+-]\d{2}:?\d{2}|Z)?"
-)
-_RANDOM_CLUSTER_ID = re.compile(r"cc-[0-9a-f]{32}")
 _DURATION = re.compile(r"\d+\.\ds\b")
 
 
-def _instant(value: dt.datetime) -> str:
-    if value.tzinfo is None:
-        return "<ts>"
-    utc = value.astimezone(dt.timezone.utc)
-    return utc.isoformat() if utc in FIXED_INSTANTS else "<ts>"
-
-
-def _timestamp_text(match: "re.Match[str]") -> str:
-    text = match.group(0)
-    if text == DEBT_TS:
-        return text
-    try:
-        return _instant(dt.datetime.fromisoformat(text))
-    except ValueError:
-        return "<ts>"
-
-
-class Canon:
-    """The stable projection of every recorded value."""
-
-    def __init__(self, storage_dir: Path) -> None:
-        self.storage = str(storage_dir)
-        self.tmp = str(storage_dir.parent)
-
-    def text(self, value: str) -> str:
-        value = value.replace(self.storage, STORAGE).replace(self.tmp, "<tmp>")
-        value = _RANDOM_CLUSTER_ID.sub("cc-<rand>", value)
-        value = _DURATION.sub("<dur>s", value)
-        return _TIMESTAMP.sub(_timestamp_text, value)
-
-    def __call__(self, value: Any) -> Any:
-        if value is None or isinstance(value, (bool, int)):
-            return value
-        if isinstance(value, float):
-            return f"float:{value!r}"
-        if isinstance(value, np.ndarray):
-            return (f"ndarray:{value.dtype}:{list(value.shape)}:"
-                    + hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest()[:16])
-        if isinstance(value, np.generic):
-            return self(value.item())
-        if isinstance(value, str):
-            return self.text(value)
-        if isinstance(value, (bytes, bytearray, memoryview)):
-            return "bytes:" + hashlib.sha256(bytes(value)).hexdigest()[:16]
-        if isinstance(value, dt.datetime):
-            return _instant(value)
-        if isinstance(value, (dt.date, dt.time)):
-            return value.isoformat()
-        if isinstance(value, Path):
-            return self.text(str(value))
-        if isinstance(value, dict):
-            return {str(self(k) if not isinstance(k, str) else self.text(k)): self(v)
-                    for k, v in sorted(value.items(), key=lambda kv: _dumps(self(kv[0])))}
-        if isinstance(value, (list, tuple)):
-            return [self(v) for v in value]
-        if isinstance(value, (set, frozenset)):
-            return sorted((self(v) for v in value), key=_dumps)
-        if type(value).__name__ == "Settings":
-            return "<Settings>"  # never dump configuration (it can carry secrets)
-        if hasattr(value, "model_dump"):
-            return self(value.model_dump(mode="json"))
-        if hasattr(value, "keys") and hasattr(value, "__getitem__"):
-            return {"row": self({k: value[k] for k in value.keys()})}
-        if hasattr(value, "obj") and type(value).__name__ == "Jsonb":
-            return {"jsonb": self(value.obj)}
-        if type(value).__name__ == "module":
-            return f"<module {value.__name__}>"
-        if callable(value):
-            return "<callable>"
-        return f"<{type(value).__name__}>"
-
-
-def _dumps(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, ensure_ascii=False)
+def plain(value: Any) -> Any:
+    """What an assertion reads of a recorded value: containers as lists/dicts,
+    stage durations as ``<dur>s``, anything else opaque reduced to its type name
+    (no live cursor or vector is kept on the timeline)."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return _DURATION.sub("<dur>s", value)
+    if isinstance(value, dict):
+        return {k: plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [plain(v) for v in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted((plain(v) for v in value), key=repr)
+    return f"<{type(value).__name__}>"
 
 
 # ------------------------------------------------------------------ recorder
@@ -260,8 +185,7 @@ def _dumps(value: Any) -> str:
 class Recorder:
     """One scenario's ordered timeline; ``active`` gates every channel."""
 
-    def __init__(self, canon: Canon) -> None:
-        self.canon = canon
+    def __init__(self) -> None:
         self.active = False
         self.thread = threading.get_ident()
         self.timeline: list[dict] = []
@@ -288,12 +212,11 @@ class Hooks:
 def _recorded(label: str, name: str, attr: Callable, recorder: Recorder,
               hooks: Hooks) -> Callable:
     key = f"{label}.{name}"
-    canon = recorder.canon
 
     def call(*args: Any, **kwargs: Any) -> Any:
         if not recorder.active:
             return attr(*args, **kwargs)
-        entry = recorder.note({"call": key, "args": canon(args), "kwargs": canon(kwargs)})
+        entry = recorder.note({"call": key, "args": plain(args), "kwargs": plain(kwargs)})
         if key in hooks.before:
             hooks.before[key](*args, **kwargs)
         try:
@@ -302,11 +225,11 @@ def _recorded(label: str, name: str, attr: Callable, recorder: Recorder,
             else:
                 result = attr(*args, **kwargs)
         except BaseException as exc:
-            entry["raised"] = f"{type(exc).__name__}: {canon(str(exc))}"
+            entry["raised"] = f"{type(exc).__name__}: {exc}"
             raise
         if key in hooks.after:
             hooks.after[key](result, *args, **kwargs)
-        entry["ret"] = canon(result)
+        entry["ret"] = plain(result)
         return result
 
     return call
@@ -323,22 +246,6 @@ class _Spy:
         if name.startswith("__") or not callable(attr):
             return attr
         return _recorded(self._label, name, attr, self._recorder, self._hooks)
-
-
-class _RecordedTx:
-    """Wraps one ``_connect()`` / ``_write()`` context: enter and exit on the timeline."""
-
-    def __init__(self, kind: str, inner: Any, recorder: Recorder) -> None:
-        self.kind, self.inner, self.recorder = kind, inner, recorder
-
-    def __enter__(self):
-        self.recorder.note({"tx": f"{self.kind}:enter"})
-        return self.inner.__enter__()
-
-    def __exit__(self, exc_type, exc, tb):
-        self.recorder.note({"tx": f"{self.kind}:exit",
-                            "exc": exc_type.__name__ if exc_type else None})
-        return self.inner.__exit__(exc_type, exc, tb)
 
 
 # ----------------------------------------------------------------- the world
@@ -419,9 +326,6 @@ class Rig:
         statement = statement.replace("?", self.backend.placeholder)
         with self.repo._runtime.database.connect() as db:
             return [dict(r) for r in db.execute(statement, params).fetchall()]
-
-    def hook(self, name: str) -> None:
-        self.recorder.note({"hook": name})
 
     def add_source(self, source_id: str) -> None:
         self.sql("INSERT INTO sources (id, notebook_id, title, source_type, status, parse_status, "
@@ -528,8 +432,8 @@ class Observation:
     timeline: list
     llm: list
     progress: list
-    db_diff: dict
-    fs_diff: dict
+    #: Tables whose rows differ after the rebuild (whole database, both directions).
+    changed_tables: list
     logs: list
     before: dict
     after: dict
@@ -580,47 +484,19 @@ def _facts(rig: Rig) -> dict:
     return out
 
 
-def _dump_db(repo: Any, backend: Backend, canon: Canon) -> dict[str, collections.Counter]:
+def _table_rows(repo: Any, backend: Backend) -> dict[str, collections.Counter]:
     out: dict[str, collections.Counter] = {}
     with repo._runtime.database.connect() as db:
         for table in backend.tables(repo):
             rows = db.execute(f"SELECT * FROM {table}").fetchall()
-            out[table] = collections.Counter(_dumps(canon(dict(row))) for row in rows)
+            out[table] = collections.Counter(
+                json.dumps(dict(row), sort_keys=True, default=repr) for row in rows)
     return out
 
 
-def _dump_fs(storage_dir: Path) -> dict[str, str]:
-    out: dict[str, str] = {}
-    if not storage_dir.exists():
-        return out
-    for path in sorted(storage_dir.rglob("*")):
-        key = path.relative_to(storage_dir).as_posix()
-        out[key] = (
-            "dir" if path.is_dir()
-            else "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()[:16]
-        )
-    return out
-
-
-def _db_diff(before: dict, after: dict) -> dict:
-    diff = {}
-    for table in sorted(set(before) | set(after)):
-        old, new = before.get(table, collections.Counter()), after.get(table, collections.Counter())
-        added = sorted((new - old).elements())
-        removed = sorted((old - new).elements())
-        if added or removed:
-            diff[table] = {
-                "added": [json.loads(r) for r in added],
-                "removed": [json.loads(r) for r in removed],
-            }
-    return diff
-
-
-def _fs_diff(before: dict, after: dict) -> dict:
-    return {
-        "added": {k: v for k, v in sorted(after.items()) if before.get(k) != v},
-        "removed": sorted(k for k in before if k not in after),
-    }
+def _changed_tables(before: dict, after: dict) -> list[str]:
+    return sorted(t for t in set(before) | set(after)
+                  if before.get(t, collections.Counter()) != after.get(t, collections.Counter()))
 
 
 class _LogCapture(logging.Handler):
@@ -630,14 +506,15 @@ class _LogCapture(logging.Handler):
         self.records: list[dict] = []
 
     def emit(self, record: logging.LogRecord) -> None:
-        if not self.recorder.active:
+        # Only the rebuild's own thread: a background job elsewhere in the
+        # process must not land in (or break) an exact-equality assertion.
+        if not self.recorder.active or record.thread != self.recorder.thread:
             return
         entry = {"logger": record.name, "level": record.levelname,
-                 "message": self.recorder.canon(record.getMessage())}
+                 "message": plain(record.getMessage())}
         if record.exc_info and record.exc_info[0] is not None:
             entry["exc"] = record.exc_info[0].__name__
         self.records.append(entry)
-        self.recorder.note({"log": entry["level"]})
 
 
 def _seam_modules(repo: Any) -> list[Any]:
@@ -689,52 +566,25 @@ def _install_recording(rig: Rig, monkeypatch: Any) -> None:
         for name in names:
             monkeypatch.setattr(module, name, _recorded(
                 "fn", name, getattr(module, name), recorder, hooks))
-    for kind in ("_connect", "_write"):
-        original = getattr(lifecycle, kind)
-
-        def opener(original=original, kind=kind):
-            if not recorder.active:
-                return original()
-            return _RecordedTx(kind.strip("_"), original(), recorder)
-
-        monkeypatch.setattr(lifecycle, kind, opener)
     monkeypatch.setattr(lifecycle, "model_clients", _Spy("models", rig.models, recorder, hooks))
 
 
-def observe(repo: Any, backend: Backend, scenario: Scenario, storage_dir: Path,
-            monkeypatch: Any) -> Observation:
+def observe(repo: Any, backend: Backend, scenario: Scenario, monkeypatch: Any) -> Observation:
     """Build the scenario's world, run one rebuild with every collaborator recorded,
     and return the whole observation."""
-    canon = Canon(storage_dir)
-    recorder = Recorder(canon)
+    recorder = Recorder()
     hooks = Hooks()
     models = FakeModels(scenario.models, recorder)
     rig = Rig(repo=repo, backend=backend, recorder=recorder, hooks=hooks, models=models)
     bind_all_embedding_clients(repo, DesignedEmbedder())
 
-    counter = iter(range(1, 1_000_000))
     clock = {"now": SEED_NOW}
 
-    def new_id(prefix: str) -> str:
-        value = f"{prefix}-r{next(counter):04d}"
-        recorder.note({"new_id": prefix, "id": value})
-        return value
-
     def now() -> str:
-        recorder.note({"now": clock["now"]})
         return clock["now"]
 
-    uuids = iter(range(1, 1_000_000))
-
-    def uuid4() -> uuid.UUID:
-        value = uuid.UUID(int=0xA000_0000 + next(uuids))
-        recorder.note({"uuid4": value.hex})
-        return value
-
     for module in _seam_modules(repo):
-        monkeypatch.setattr(module, "_new_id", new_id, raising=False)
         monkeypatch.setattr(module, "_now", now, raising=False)
-    monkeypatch.setattr(uuid, "uuid4", uuid4)
     _install_recording(rig, monkeypatch)
 
     scenario.world(rig)
@@ -744,13 +594,13 @@ def observe(repo: Any, backend: Backend, scenario: Scenario, storage_dir: Path,
     lifecycle = rig.lifecycle
     lifecycle.unified_cache.clear()
     before_facts = _facts(rig) if rig.notebook_id != MISSING_NB else {}
-    db_before, fs_before = _dump_db(repo, backend, canon), _dump_fs(storage_dir)
+    db_before = _table_rows(repo, backend)
     building_before = set(lifecycle.kg_building)
 
     progress_calls: list = []
 
     def progress(message: str, done: int, total: int) -> None:
-        progress_calls.append([canon(message), done, total])
+        progress_calls.append([plain(message), done, total])
         if scenario.progress == "raise":
             raise RuntimeError("progress sink failed")
 
@@ -769,10 +619,10 @@ def observe(repo: Any, backend: Backend, scenario: Scenario, storage_dir: Path,
                 progress=None if scenario.progress is None else progress,
                 force=scenario.force, fresh=scenario.fresh,
             )
-            outcome = {"returned": canon(count)}
+            outcome = {"returned": count}
         except Exception as exc:  # noqa: BLE001 — the raise IS the observation
-            outcome = {"raised": type(exc).__name__, "message": canon(str(exc)),
-                       "attrs": canon({k: v for k, v in vars(exc).items()
+            outcome = {"raised": type(exc).__name__, "message": str(exc),
+                       "attrs": plain({k: v for k, v in vars(exc).items()
                                        if not k.startswith("_")})}
         finally:
             recorder.active = False
@@ -780,7 +630,7 @@ def observe(repo: Any, backend: Backend, scenario: Scenario, storage_dir: Path,
         for lg, level in zip(loggers, levels):
             lg.removeHandler(capture)
             lg.setLevel(level)
-    db_after, fs_after = _dump_db(repo, backend, canon), _dump_fs(storage_dir)
+    db_after = _table_rows(repo, backend)
     after_facts = _facts(rig) if rig.notebook_id != MISSING_NB else {}
     assert set(lifecycle.kg_building) == building_before, "rebuild never touches kg_building"
     return Observation(
@@ -789,8 +639,7 @@ def observe(repo: Any, backend: Backend, scenario: Scenario, storage_dir: Path,
         timeline=recorder.timeline,
         llm=models.calls,
         progress=progress_calls,
-        db_diff=_db_diff(db_before, db_after),
-        fs_diff=_fs_diff(fs_before, fs_after),
+        changed_tables=_changed_tables(db_before, db_after),
         logs=capture.records,
         before=before_facts,
         after=after_facts,
@@ -968,11 +817,18 @@ def expect_forced_second(obs: Observation) -> None:
     caught up into the new generation and counted."""
     _assert_published(obs, merged_by_llm=True, writes_mid_run=1)
     before, after = _state(obs, "before"), _state(obs)
-    # The generation counter is shared with the community layer: the two seeding
-    # rebuilds published clusters 1 and 3 (communities took 2 and 4).
-    assert before["cluster_generation"] == 3 and after["cluster_generation"] == 5
-    assert [r["generation"] for r in obs.after["generations"]] == [3, 5]
-    assert obs.calls("self._reap_stale_cluster_generations")[0]["kwargs"]["keep"] == [3, 5]
+    # Relative to this round's claim (the generation counter is shared with the
+    # community layer, so absolute numbers say nothing): the new generation is
+    # published, pre-reaping kept exactly (previously published, in-flight), and
+    # only those two generations remain.
+    claimed = obs.calls("unified_kg.claim_derived_generation")[0]["ret"]["generation"]
+    published_before = before["cluster_generation"]
+    assert published_before > 0 and claimed > published_before
+    assert after["cluster_generation"] == claimed
+    keep = obs.calls("self._reap_stale_cluster_generations")[0]["kwargs"]["keep"]
+    assert set(keep) == {published_before, claimed}, keep
+    assert [r["generation"] for r in obs.after["generations"]] == sorted(
+        {published_before, claimed})
     assert "kg_generation_reaped" in obs.event_kinds()
     # The checkpointed adjudication is reused; only the description whose reply was
     # unusable last time (cascode) is asked again, MOSFET's is reused by signature.
@@ -1018,7 +874,7 @@ def expect_claim_refused(obs: Observation) -> None:
     held = _state(obs, "before")["derived_building_generation"]
     assert held and _state(obs) == _state(obs, "before")
     assert not obs.calls("self._stream_seed_reps")
-    assert set(obs.db_diff) <= {"sync_change_log"}, sorted(obs.db_diff)
+    assert set(obs.changed_tables) <= {"sync_change_log"}, obs.changed_tables
 
 
 def expect_stranded_debt(obs: Observation) -> None:
@@ -1049,6 +905,23 @@ def _assert_aborted(obs: Observation, raised: str) -> None:
 def expect_deleting(obs: Observation) -> None:
     _assert_aborted(obs, "NotebookDeletingAbortsMaintenanceError")
     assert not obs.calls("self._write_cluster_map_streamed")
+
+
+def expect_prepare_failure(raising: str) -> Callable[[Observation], None]:
+    """A step right after the claim fails (pre-reaping, or reading the
+    checkpoint version): every step after the claim is inside the finally, so
+    the error propagates and the claim is still released — otherwise the
+    notebook stays locked for the whole TTL."""
+
+    def expect(obs: Observation) -> None:
+        assert obs.calls("unified_kg.claim_derived_generation")[0]["ret"]
+        failed = [e for e in obs.calls(raising) if "raised" in e]
+        assert failed, f"{raising} never failed"
+        assert obs.outcome["message"] == "injected prepare failure", obs.outcome
+        _assert_aborted(obs, "RuntimeError")
+        assert obs.calls("unified_kg.release_derived_claim")
+        assert not obs.calls("self._stream_seed_reps")
+    return expect
 
 
 def expect_preempted_pending(obs: Observation) -> None:
@@ -1101,7 +974,7 @@ def expect_empty_again(obs: Observation) -> None:
 def expect_missing(obs: Observation) -> None:
     assert obs.outcome["raised"] == "KeyError"
     assert not obs.calls("unified_kg.claim_derived_generation")
-    assert set(obs.db_diff) <= {"sync_change_log"}, sorted(obs.db_diff)
+    assert set(obs.changed_tables) <= {"sync_change_log"}, obs.changed_tables
 
 
 def expect_llm_unconfigured(obs: Observation) -> None:
@@ -1122,7 +995,6 @@ def _after_last_type(rig: Rig, action: Callable[[], None]) -> None:
 
     def after(result, notebook_id, object_type, *args, **kwargs):
         if object_type == "procedure":
-            rig.hook("after_last_type")
             action()
 
     rig.hooks.after["self._write_cluster_map_streamed"] = after
@@ -1212,6 +1084,20 @@ def install_deleting(rig: Rig) -> None:
     rig.hooks.replace["self._notebook_deleting"] = lambda real, notebook_id: True
 
 
+def install_reap_failure(rig: Rig) -> None:
+    rig.hooks.replace["self._reap_stale_cluster_generations"] = _raise(
+        "injected prepare failure")
+
+
+def install_checkpoint_version_failure(rig: Rig) -> None:
+    def replace(real, notebook_id, **kwargs):
+        if kwargs.get("exclude_emb_count"):
+            raise RuntimeError("injected prepare failure")
+        return real(notebook_id, **kwargs)
+
+    rig.hooks.replace["self._cluster_input_version"] = replace
+
+
 def install_preempt_before_pending(rig: Rig) -> None:
     _after_last_type(rig, lambda: rig.sql(
         "UPDATE unified_kg_state SET derived_building_generation=99 WHERE notebook_id=?",
@@ -1220,7 +1106,6 @@ def install_preempt_before_pending(rig: Rig) -> None:
 
 def install_flip_lost(rig: Rig) -> None:
     def before(db, notebook_id, **kwargs):
-        rig.hook("before_flip")
         db.execute("UPDATE unified_kg_state SET cluster_generation=cluster_generation+100 "
                    "WHERE notebook_id=" + rig.backend.placeholder, (notebook_id,))
 
@@ -1246,6 +1131,12 @@ SCENARIOS = (
              install=install_debt_marker, env={"VIZ_SYNC_BUILD_MAX_OBJECTS": "1"}),
     Scenario("notebook_deleting", kg_world, expect_deleting, force=True,
              install=install_deleting),
+    Scenario("pre_reaping_fails", kg_world_rebuilt(), force=True,
+             expect=expect_prepare_failure("self._reap_stale_cluster_generations"),
+             install=install_reap_failure),
+    Scenario("checkpoint_version_read_fails", kg_world, force=True,
+             expect=expect_prepare_failure("self._cluster_input_version"),
+             install=install_checkpoint_version_failure),
     Scenario("preempted_before_pending_refresh", kg_world, expect_preempted_pending,
              force=True, install=install_preempt_before_pending),
     Scenario("flip_lost", kg_world, expect_flip_lost, force=True, install=install_flip_lost),

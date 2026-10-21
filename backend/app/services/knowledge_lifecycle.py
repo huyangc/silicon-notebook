@@ -43,7 +43,7 @@ import re
 import threading
 import time
 from contextlib import closing
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import (
     Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set,
@@ -500,7 +500,14 @@ class _UnifiedKgRebuildRun:
     helper to phase helper by identity. It holds only what a later phase reads
     (the concept vectors never land here, see ``_unified_rebuild_concepts``) and
     no callable pointing back at it, so it is freed by refcount when the call
-    returns, exactly when the single method's locals were."""
+    returns. What lives on it lives exactly as long as the single method's
+    locals did; what stays a helper's local (the seed first names, the concept
+    descriptions, the other types' per-type results, the live decision sets) is
+    now freed when that phase returns, earlier than before and never later.
+
+    The fields below ``run_id`` are set by the phase that produces them and
+    start as ``None``; a phase reads them through ``ready`` so that running the
+    phases out of order fails loudly instead of reading an empty default."""
 
     notebook_id: str
     progress: Optional[Callable[[str, int, int], None]]
@@ -512,14 +519,22 @@ class _UnifiedKgRebuildRun:
     published_from: int
     anchor_ts: str
     run_id: str
-    ck_ver: str = ""
-    t_total: float = 0.0
-    seeds: List[str] = field(default_factory=list)
-    members_count: Dict[str, int] = field(default_factory=dict)
-    sd: Dict[str, Any] = field(default_factory=dict)
-    seed_to_canonical: Dict[str, str] = field(default_factory=dict)
-    now: str = ""
-    cluster_count: int = 0
+    ck_ver: Optional[str] = None
+    t_total: Optional[float] = None
+    seeds: Optional[List[str]] = None
+    members_count: Optional[Dict[str, int]] = None
+    #: The concept clustering result; its ``seed_to_canonical`` is the one copy.
+    sd: Optional[Dict[str, Any]] = None
+    now: Optional[str] = None
+    cluster_count: Optional[int] = None
+
+    def ready(self, name: str) -> Any:
+        """A phase-produced field, refusing one its phase has not set yet."""
+        value = getattr(self, name)
+        if value is None:
+            raise RuntimeError(
+                f"rebuild_unified_kg phase read run.{name} before the phase that sets it")
+        return value
 
 
 class KnowledgeLifecycleService:
@@ -6169,25 +6184,25 @@ class KnowledgeLifecycleService:
             self._unified_rebuild_cleanup(run)
         import time as _time
         self._unified_rebuild_stage(
-            run, f"DONE {run.cluster_count} canonicals, "
-                 f"total {_time.perf_counter() - run.t_total:.1f}s")
+            run, f"DONE {run.ready('cluster_count')} canonicals, "
+                 f"total {_time.perf_counter() - run.ready('t_total'):.1f}s")
         self._unified_rebuild_derived_tail(notebook_id)
-        return run.cluster_count
+        return run.ready("cluster_count")
 
     def _unified_rebuild_skip(
-        self, notebook_id: str, _ver: str,
+        self, notebook_id: str, ver: str,
         progress: Optional[Callable[[str, int, int], None]],
     ) -> Optional[int]:
         """The skip-when-unchanged gate of ``rebuild_unified_kg``: the cached
-        cluster count when the stored input version still equals ``_ver`` and
+        cluster count when the stored input version still equals ``ver`` and
         clusters exist (after the skip path's own settle step and its three
         gated derived passes), else ``None`` — the caller rebuilds."""
         with self._connect() as db:
             row = self.unified_kg.state_row(db, notebook_id)
             cc = self.unified_kg.concept_clusters_count(db, notebook_id)
-        if row and row["cluster_input_version"] and row["cluster_input_version"] == _ver and cc > 0:
+        if row and row["cluster_input_version"] and row["cluster_input_version"] == ver and cc > 0:
             cached = int(row["cluster_count"] or 0)
-            self._settle_skip_path(notebook_id, row, _ver)
+            self._settle_skip_path(notebook_id, row, ver)
             self.event_log.logger.info(
                 "kg-rebuild[%s] skipped — inputs unchanged since last rebuild (%s clusters)",
                 notebook_id, cached)
@@ -6220,7 +6235,7 @@ class KnowledgeLifecycleService:
         return None
 
     def _unified_rebuild_claim(
-        self, notebook_id: str, _ver: str,
+        self, notebook_id: str, ver: str,
         progress: Optional[Callable[[str, int, int], None]], fresh: bool,
     ) -> "_UnifiedKgRebuildRun":
         """Claim the in-flight derived generation and mint this round's run id."""
@@ -6252,7 +6267,7 @@ class KnowledgeLifecycleService:
         # Each rebuild gets a unique run_id so concurrent rebuilds of the SAME
         # notebook never wipe or read each other's scratch rows.
         return _UnifiedKgRebuildRun(
-            notebook_id=notebook_id, progress=progress, fresh=fresh, ver=_ver,
+            notebook_id=notebook_id, progress=progress, fresh=fresh, ver=ver,
             claim=_claim, generation=int(_claim["generation"]),
             published_from=int(_claim["cluster_generation"]),
             anchor_ts=_claim["ts"], run_id=_uuid4().hex,
@@ -6342,7 +6357,6 @@ class KnowledgeLifecycleService:
                            rep_ann_max=self.settings.kg_cluster_rep_ann_max,
                            ann_threads=self.settings.kg_cluster_ann_threads)
         # LLM 兜底: ≥hi 的 auto_candidates 经复核确认后并入 confirmed, 重聚一次
-        from app.services.concept_merge_review import review_merge_candidates
         autoc = sd.get("auto_candidates", [])
         _t_mr = _time.perf_counter()
         if autoc and self.model_clients.configured("kg_merge_review"):
@@ -6351,8 +6365,7 @@ class KnowledgeLifecycleService:
             # defensive parse); this outer guard covers any other unexpected error in the
             # block so the rebuild always proceeds to write the cluster map.
             try:
-                extra = self._unified_rebuild_merge_review(
-                    run, autoc, review_merge_candidates)
+                extra = self._unified_rebuild_merge_review(run, autoc)
             except Exception:
                 self.event_log.logger.exception(
                     "unified-KG merge-review adjudication failed for %s; proceeding without it",
@@ -6382,12 +6395,15 @@ class KnowledgeLifecycleService:
         run.seeds, run.members_count, run.sd = seeds, members_count, sd
 
     def _unified_rebuild_merge_review(
-        self, run: "_UnifiedKgRebuildRun", autoc, review_merge_candidates,
+        self, run: "_UnifiedKgRebuildRun", autoc,
     ) -> set:
         """LLM adjudication of the ≥hi auto candidates (checkpointed per
         candidate pair); returns the seed pairs to union. The caller's guard
         turns any error here into "no extra merges"."""
-        notebook_id, generation, _ck_ver = run.notebook_id, run.generation, run.ck_ver
+        from app.services.concept_merge_review import review_merge_candidates
+
+        notebook_id, generation = run.notebook_id, run.generation
+        _ck_ver = run.ready("ck_ver")
         cand_dicts = [{"id": f"ac{i}", "canonical_a": a, "canonical_b": b, "score": s}
                       for i, (a, b, s) in enumerate(autoc)]
         # ac{i} → canonical id 对的稳定键(续跑复用的锚)。
@@ -6436,12 +6452,11 @@ class KnowledgeLifecycleService:
         notebook_id, run_id, generation = run.notebook_id, run.run_id, run.generation
         def _stage(msg: str) -> None:
             self._unified_rebuild_stage(run, msg)
-        sd = run.sd
+        sd = run.ready("sd")
         seed_to_canonical = sd["seed_to_canonical"]
-        run.seed_to_canonical = seed_to_canonical
         desc_by_cid, desc_sig_by_cid = self._concept_description_stage(
-            notebook_id, sd, seed_to_canonical, run.members_count, run_id,
-            run.ck_ver, run.progress, _stage, _time, generation)
+            notebook_id, sd, seed_to_canonical, run.ready("members_count"), run_id,
+            run.ready("ck_ver"), run.progress, _stage, _time, generation)
         _t = _time.perf_counter()
         self._write_cluster_map_streamed(notebook_id, "concept", seed_to_canonical,
                                          sd["canonical_names"], desc_by_cid,
@@ -6487,7 +6502,8 @@ class KnowledgeLifecycleService:
         import time as _time
 
         from app.services.kg_merge import filter_pending_seeds_by_decisions
-        notebook_id, generation, sd, seeds = run.notebook_id, run.generation, run.sd, run.seeds
+        notebook_id, generation = run.notebook_id, run.generation
+        sd, seeds = run.ready("sd"), run.ready("seeds")
         # Refresh pending candidates in ONE transaction (per-candidate inserts
         # were the rebuild hotspot at scale). confirmed/rejected rows untouched.
         now = self._now()
@@ -6535,11 +6551,11 @@ class KnowledgeLifecycleService:
         """Flip the published generation, catch up the window's appends into it
         and store the rebuild state; sets ``run.cluster_count``."""
         from app.services.kg_merge import cluster_code_version
-        notebook_id, generation, now = run.notebook_id, run.generation, run.now
+        notebook_id, generation, now = run.notebook_id, run.generation, run.ready("now")
         _claim, _published_from, _anchor_ts = run.claim, run.published_from, run.anchor_ts
         # #distinct concept canonicals (== set of cluster_map values in the legacy
         # path: every canonical has ≥1 seed and every concept seed has a canonical).
-        cluster_count = len(set(run.seed_to_canonical.values()))
+        cluster_count = len(set(run.ready("sd")["seed_to_canonical"].values()))
         # ---- 翻指针(批 3·W2 §1.2 微事务) ------------------------------
         # store 侧先按 key 字节序取齐全 4 类 advisory lock(append 与翻转
         # 互相串行,两者皆毫秒级),同事务双 CAS:published 指针未被动过 且
