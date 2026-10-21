@@ -114,8 +114,13 @@ def schema_refusal_message(state: SchemaCurrency) -> str:
                 f"版本 {state.checksum_mismatch_at:04d} 的 checksum 与本构建的迁移 SQL 不同"
             )
         else:
-            recorded = ", ".join(f"{v:04d}" for v in state.recorded_versions)
-            reason = f"记录的版本 [{recorded}] 不是连续的 0001 起序列"
+            missing = sorted(set(range(1, state.current + 1)) - set(state.recorded_versions))
+            shown = ", ".join(f"{v:04d}" for v in missing[:5])
+            reason = (
+                f"记录的版本不是连续的 0001 起序列，缺少版本 {shown}{' 等' if len(missing) > 5 else ''}"
+                if missing
+                else "记录的版本不是连续的 0001 起序列，有重复版本"
+            )
         return (
             f"PostgreSQL 迁移账本与本构建不一致（{reason}，本构建需要 {required}）："
             "数据库是由另一套迁移 SQL 迁移的。请改用与在役服务完全相同版本的代码运行本命令。"

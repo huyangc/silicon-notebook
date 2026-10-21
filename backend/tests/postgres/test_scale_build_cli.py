@@ -160,7 +160,7 @@ def test_a_composition_with_seed_off_never_writes_the_admin_credential(
 # ───────────────────────────────────────────── the migration ledger gate ──
 
 def test_the_ledger_preflight_refuses_an_unmigrated_database(postgres_scope):
-    with pytest.raises(cli.ScaleBuildCliError, match="no silicon_schema_migrations"):
+    with pytest.raises(cli.ScaleBuildCliError, match="没有迁移账本"):
         cli.verify_migration_ledger(postgres_scope.url)
 
 
@@ -189,7 +189,7 @@ def test_the_ledger_preflight_refuses_edited_sql_under_the_same_version(
             "UPDATE silicon_schema_migrations SET checksum = 'deadbeef' "
             "WHERE version = 1"
         )
-    with pytest.raises(cli.ScaleBuildCliError, match="checksum mismatch"):
+    with pytest.raises(cli.ScaleBuildCliError, match="版本 0001 的 checksum"):
         cli.verify_migration_ledger(postgres_scope.url)
 
 
@@ -205,7 +205,11 @@ def test_the_ledger_preflight_refuses_a_checkout_that_is_ahead(
             "DELETE FROM silicon_schema_migrations "
             "WHERE version = (SELECT max(version) FROM silicon_schema_migrations)"
         )
-    with pytest.raises(cli.ScaleBuildCliError, match="migration ledger mismatch"):
+    expected = cli.packaged_migration_count()
+    with pytest.raises(
+        cli.ScaleBuildCliError,
+        match=f"PostgreSQL {expected - 1:04d}，本构建需要 PostgreSQL {expected:04d}",
+    ):
         cli.verify_migration_ledger(postgres_scope.url)
 
 
@@ -227,7 +231,7 @@ def test_the_ledger_preflight_refuses_a_gap_in_the_middle(
         connection.execute(
             "DELETE FROM silicon_schema_migrations WHERE version = 2"
         )
-    with pytest.raises(cli.ScaleBuildCliError, match="migration ledger mismatch"):
+    with pytest.raises(cli.ScaleBuildCliError, match="缺少版本 0002"):
         cli.verify_migration_ledger(postgres_scope.url)
 
 
