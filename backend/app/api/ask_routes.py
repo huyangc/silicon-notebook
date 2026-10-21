@@ -16,7 +16,11 @@ from app.core.capability_tokens import (
     is_answer_link_token,
     is_global_conversation_share_token,
 )
-from app.domain.report_followup import LinkedReportNotFound, LinkedReportNotReady
+from app.domain.report_followup import (
+    REASON_REPORT_UNAVAILABLE,
+    LinkedReportNotFound,
+    LinkedReportNotReady,
+)
 from app.api.deps import (
     answer_link_repository,
     ask_component,
@@ -297,8 +301,21 @@ def _require_non_empty_scope(
     resolved_source_scope: SourceScope | None,
     resolved_base_scope: BaseNotebookScope | None,
 ) -> None:
-    """Reject a retrieval scope whose evidence universe is empty across BOTH
-    dimensions at once.
+    """Reject (409) a retrieval scope whose evidence universe is empty across
+    BOTH dimensions at once -- the refusal ``_scope_is_empty`` decides."""
+    if _scope_is_empty(notebook, resolved_source_scope, resolved_base_scope):
+        raise user_error(409, "当前检索范围为空，请至少选择一个来源或挂载参考库")
+
+
+def _scope_is_empty(
+    notebook: NotebookSummary,
+    resolved_source_scope: SourceScope | None,
+    resolved_base_scope: BaseNotebookScope | None,
+) -> bool:
+    """Whether a retrieval scope's evidence universe is empty across BOTH
+    dimensions at once -- the one definition ``_require_non_empty_scope`` turns
+    into a 409 and the follow-up scope (``report_routes``) asks before it hands
+    a selection back, so what the Ask box would refuse is never offered.
 
     Lives here rather than inside ``_validate_source_scope`` (where the local
     half used to be) because it needs the frozen base-library scope too, and in
@@ -320,7 +337,7 @@ def _require_non_empty_scope(
     all and is left alone -- ``ask_available`` is the authority there.
     """
     if resolved_source_scope is None and resolved_base_scope is None:
-        return
+        return False
     # 本地维度的证据宇宙 ≠ 可见导入来源数。ask_available 的判据里有**三个**是本地的
     # (任意 chunk[含 Knowhow 格子]、本地可用 KG、该用户的已确认 Memory),而
     # counts["sources"] 只覆盖第一个的一部分:Knowhow 表与 Memory 根本没有可见来源行。
@@ -360,8 +377,7 @@ def _require_non_empty_scope(
         if resolved_base_scope is not None
         else bool(notebook.base_notebooks)
     )
-    if not has_local and not has_base:
-        raise user_error(409, "当前检索范围为空，请至少选择一个来源或挂载参考库")
+    return not has_local and not has_base
 
 
 def _scope_receipt(
@@ -528,9 +544,13 @@ def check_ask_report_link(
     #
     # 「这样提问会读到这份关联报告吗?」——发送之前、在输入框旁的标签上回答。
     # 与 /ask 同一串前置:mode(未知 → 422)→ 可用性与两维范围冻结(空库/空范围
-    # → 409,逐字同 /ask)→ 报告闸(404/409)。判词本身不在路由里算:交给 Ask 服务
-    # 的 report_link_check,它在提问真正会安装的那个检索上限下调用提问执行用的
-    # 同一个函数(_report_followup,不复原证据),所以标签上的结论就是这一轮会做的。
+    # → 409,逐字同 /ask)。判词本身不在路由里算:交给 Ask 服务的 report_link_check,
+    # 它在提问真正会安装的那个检索上限下调用提问执行用的同一个函数
+    # (_report_followup,不复原证据),所以标签上的结论就是这一轮会做的。
+    # 报告闸(404/409)不预读:服务读报告行时就过了同一道门(load_linked_report),
+    # 报告不可用时它只回 report_unavailable 这一个判词码——只有这时路由才再过一遍
+    # 闸,把它说成 404/409(不存在/不是你的/不在本笔记本 → 404,未完成 → 409)。
+    # 于是常规路径上报告行只读一遍。
     # 只读:不建任务、不建会话、不写回答。
     repo = repository()
     try:
@@ -546,15 +566,17 @@ def check_ask_report_link(
     resolved_source_scope, resolved_base_scope = _require_ask_available(
         notebook, repo, payload.source_scope, payload.base_scope
     )
-    _require_linked_report(repo, notebook_id, payload.report_id, user.id)
     try:
-        return ask_component().report_link_check(
+        verdict = ask_component().report_link_check(
             notebook_id, payload.report_id, user_id=user.id,
             mode_supported=report_mode_supported(spec),
             source_scope=resolved_source_scope, base_scope=resolved_base_scope,
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+    if verdict.reason_code == REASON_REPORT_UNAVAILABLE:
+        _require_linked_report(repo, notebook_id, payload.report_id, user.id)
+    return verdict
 
 
 @router.get("/notebooks/{notebook_id}/search", response_model=NotebookSearchResponse, dependencies=[Depends(require_notebook_read)])

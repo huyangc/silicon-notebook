@@ -424,6 +424,32 @@ def case_check_validates_like_ask(world: World) -> None:
     assert check(world, "r" * 201).status_code == 422
 
 
+def case_check_does_not_read_the_report_before_the_verdict(world: World) -> None:
+    """The report row is read where the verdict is taken (the Ask service, one
+    gate), not once more in front of it: the route touches the report itself
+    only to tell a report that is not available apart (404 against 409)."""
+    ready(world)
+    report_id = make_report(world, world.alice, [source_ref(world.doc_source, "k1")])
+    unfinished = make_report(world, world.alice, [], finished=False)
+    reads: list[str] = []
+    original = world.repo.get_report
+
+    def spy(notebook_id: str, report: str):
+        reads.append(report)
+        return original(notebook_id, report)
+
+    world.monkeypatch.setattr(world.repo, "get_report", spy)
+    assert check(world, report_id).json()["readable"] is True
+    assert reads == []
+    assert check(world, report_id, mode="reasoning").json()["readable"] is True
+    assert reads == []
+    # Not available: the service's verdict says so, the route names which.
+    for report, status in (("rep-never-existed", 404), (unfinished, 409)):
+        assert check(world, report).status_code == status
+        assert reads[-1] == report
+    assert len(reads) == 2
+
+
 def case_check_writes_nothing(world: World) -> None:
     ready(world)
     report_id = make_report(world, world.alice, [source_ref(world.doc_source, "k1")])
@@ -531,6 +557,42 @@ def case_followup_falls_back_to_everything_when_nothing_selected_is_left(
     assert body["base_scope"]["mode"] == "exclude" and body["base_scope"]["notebook_ids"] == []
     # What was lost is still counted, so the tag can say so.
     assert (body["dropped_sources"], body["dropped_libraries"]) == (1, 1)
+
+
+def case_followup_falls_back_when_a_library_only_notebook_loses_its_ticked_library(
+    world: World,
+) -> None:
+    """A notebook that holds nothing itself and only mounts libraries has no
+    local evidence to stand on: the local dimension is not narrowed, but once
+    the one ticked library is unmounted the reduced selection is empty by the
+    very rule ``/ask`` applies, so the scope goes back to everything instead of
+    handing over a selection the Ask box refuses."""
+    headers = world.alice.headers
+    create = lambda name: world.client.post(  # noqa: E731 - three one-line creates
+        "/api/notebooks", json={"name": name}, headers=headers).json()["id"]
+    bare, first, second = create("只挂参考库"), create("库甲"), create("库乙")
+    local = replace(world, notebook=bare)
+
+    def mount_for_alice(libraries: list[str]) -> None:
+        put = world.client.put(f"/api/notebooks/{bare}/bases",
+                               json={"base_notebook_ids": libraries}, headers=headers)
+        assert put.status_code == 200, put.text
+
+    mount_for_alice([first, second])
+    report_id = scoped_report(
+        local, base_scope={"mode": "include", "notebook_ids": [first]})
+    assert world.repo.get_report(bare, report_id)["understanding"]["base_scope"][
+        "narrowed"] is True
+    body = followup(local, world.alice, report_id).json()
+    assert body["base_scope"]["notebook_ids"] == [first]
+    assert body["fell_back_to_all"] is False
+
+    mount_for_alice([second])
+    body = followup(local, world.alice, report_id).json()
+    assert body["fell_back_to_all"] is True
+    assert body["source_scope"]["mode"] == "exclude" and body["source_scope"]["source_ids"] == []
+    assert body["base_scope"]["mode"] == "exclude" and body["base_scope"]["notebook_ids"] == []
+    assert body["dropped_libraries"] == 1
 
 
 def case_followup_is_the_owners_and_finished_only(world: World) -> None:

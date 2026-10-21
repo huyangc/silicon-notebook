@@ -60,6 +60,7 @@ from app.models.source_scope import (
 from app.api.ask_routes import (
     _report_not_ready_error,
     _require_non_empty_scope,
+    _scope_is_empty,
     _validate_base_scope,
     _validate_source_scope,
 )
@@ -410,7 +411,7 @@ def get_report(notebook_id: str, report_id: str) -> ReportDetail:
 # ``source_ids`` ``max_length``). A frozen report scope is a server snapshot and
 # may be longer (a 48k-source notebook narrowed by unchecking a few), but the
 # scope this endpoint hands back is what the browser submits next, so it has to
-# fit the request model; ``test_report_followup_scope_cap_matches_the_request_model``
+# fit the request model; ``test_followup_scope_cap_matches_the_request_model``
 # pins the equality.
 _SCOPE_IDS_MAX = 10_000
 
@@ -430,12 +431,13 @@ def _stored_include_ids(stored: object, ids_key: str) -> list[str] | None:
     return list(dict.fromkeys(item for item in ids if isinstance(item, str) and item))
 
 
-def _followup_source_scope(repo, notebook_id: str, kept: list[str]) -> SourceScope:
+def _followup_source_scope(repo, notebook_id: str, kept: list[str]) -> SourceScope | None:
     """``kept`` (the frozen selection that is still visible) as a scope the
     browser can submit: the include list, or -- when that is longer than a
     request may carry -- the complement as an exclude list (the shape the
-    browser itself uses for "all but a few"). Both too long: the selection has
-    no submittable form, and the user is told to choose by hand."""
+    browser itself uses for "all but a few"). None when neither form fits: the
+    browser could not submit that selection either, so the caller hands back
+    everything instead."""
     if len(kept) <= _SCOPE_IDS_MAX:
         return SourceScope(mode="include", source_ids=kept)
     selected = set(kept)
@@ -444,7 +446,7 @@ def _followup_source_scope(repo, notebook_id: str, kept: list[str]) -> SourceSco
         if source_id not in selected
     ]
     if len(excluded) > _SCOPE_IDS_MAX:
-        raise user_error(409, "这份报告生成时勾选的资料太多，无法自动恢复检索范围，请手动选择后再提问")
+        return None
     return SourceScope(mode="exclude", source_ids=excluded)
 
 
@@ -458,10 +460,16 @@ def _report_followup_scope(repo, notebook_id: str, report_id: str, row: dict) ->
     exists now -- ``visible_source_scope_snapshot`` for the notebook's sources,
     the mount roster (the same one ``_validate_base_scope`` checks against) for
     the reference libraries -- and what fell out is counted, not silently
-    dropped. When the narrowed selection of BOTH dimensions has nothing left
-    (the whole frozen selection is gone), a scope with nothing to search would
-    be refused by the Ask box, so both dimensions go back to everything and
-    ``fell_back_to_all`` says so. Reads only.
+    dropped.
+
+    Both dimensions go back to everything, and ``fell_back_to_all`` says so,
+    when the Ask box would refuse the reduced selection -- ``_scope_is_empty``,
+    the very rule ``/ask`` applies, on the narrowed dimensions as reduced and
+    the notebook's real evidence for the one that was not narrowed (a notebook
+    with only mounted libraries has no local evidence to stand on once its
+    ticked library is gone) -- or when the reduced selection fits no request
+    (``_followup_source_scope``). Everything is always a selection the user
+    sees and can change, and it covers whatever the report used. Reads only.
     """
     understanding = row.get("understanding") or {}
     frozen_sources = _stored_include_ids(understanding.get("source_scope"), "source_ids")
@@ -469,24 +477,32 @@ def _report_followup_scope(repo, notebook_id: str, report_id: str, row: dict) ->
     source_scope = SourceScope(mode="exclude", source_ids=[])
     base_scope = BaseNotebookScope(mode="exclude", notebook_ids=[])
     dropped_sources = dropped_libraries = 0
-    local_empty = base_empty = False
-    if frozen_sources is not None:
-        kept_sources, _universe = repo.visible_source_scope_snapshot(
-            notebook_id, frozen_sources
-        )
-        dropped_sources = len(frozen_sources) - len(kept_sources)
-        local_empty = not kept_sources
-        source_scope = _followup_source_scope(repo, notebook_id, kept_sources)
-    if frozen_libraries is not None or local_empty:
-        mounted = {ref.id for ref in repo.get_notebook(notebook_id).base_notebooks}
-        if frozen_libraries is None:
-            base_empty = not mounted
-        else:
+    fell_back = False
+    if frozen_sources is not None or frozen_libraries is not None:
+        notebook = repo.get_notebook(notebook_id)
+        reduced_sources = reduced_libraries = None
+        if frozen_sources is not None:
+            kept_sources, _universe = repo.visible_source_scope_snapshot(
+                notebook_id, frozen_sources
+            )
+            dropped_sources = len(frozen_sources) - len(kept_sources)
+            reduced_sources = ResolvedSourceScope(
+                mode="include", source_ids=kept_sources, narrowed=True
+            )
+            submittable = _followup_source_scope(repo, notebook_id, kept_sources)
+            if submittable is None:
+                fell_back = True
+            else:
+                source_scope = submittable
+        if frozen_libraries is not None:
+            mounted = {ref.id for ref in notebook.base_notebooks}
             kept_libraries = [item for item in frozen_libraries if item in mounted]
             dropped_libraries = len(frozen_libraries) - len(kept_libraries)
-            base_empty = not kept_libraries
+            reduced_libraries = BaseNotebookScope(
+                mode="include", notebook_ids=kept_libraries, narrowed=True
+            )
             base_scope = BaseNotebookScope(mode="include", notebook_ids=kept_libraries)
-    fell_back = local_empty and base_empty
+        fell_back = fell_back or _scope_is_empty(notebook, reduced_sources, reduced_libraries)
     if fell_back:
         source_scope = SourceScope(mode="exclude", source_ids=[])
         base_scope = BaseNotebookScope(mode="exclude", notebook_ids=[])
