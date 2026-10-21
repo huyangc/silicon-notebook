@@ -6,12 +6,14 @@ import { COPY_RESULT_HOLD_MS } from "../../app/copy-result.ts";
 import { parseGroupLeavePreview } from "../../app/group-api.ts";
 import {
   GroupLeaveDialog,
+  LEAVE_ALREADY_GONE_TEXT,
   LEAVE_EXPORT_TOO_LARGE_TEXT,
   LEAVE_KEPT_TEXT,
   LEAVE_NOTHING_HIDDEN_TEXT,
   LEAVE_PREVIEW_UNAVAILABLE_TEXT,
   LEAVE_WAIT_FOR_EXPORT_TEXT,
   leaveHiddenText,
+  useLeaveExports,
 } from "../../app/group-leave-dialog.tsx";
 import { anchorAt } from "../../app/use-notebook-exit.ts";
 
@@ -72,21 +74,32 @@ const exportOk = (id: string): Handler => (call) =>
     })
     : undefined;
 
-function mount(props: Partial<Parameters<typeof GroupLeaveDialog>[0]> = {}) {
+type HostProps = Omit<Parameters<typeof GroupLeaveDialog>[0], "exports"> & { open: boolean };
+
+/** 导出状态由宿主(群组页)持有,面板可以关掉再打开。 */
+function Host({ open, ...props }: HostProps) {
+  const exports = useLeaveExports();
+  return open ? <GroupLeaveDialog {...props} exports={exports} /> : null;
+}
+
+function mount(props: Partial<HostProps> = {}) {
   const onCancel = vi.fn();
   const onConfirm = vi.fn();
-  const view = render(
-    <GroupLeaveDialog
-      groupId="g1"
-      anchor={anchorAt(40, 60)}
-      leaving={false}
-      failure=""
-      onCancel={onCancel}
-      onConfirm={onConfirm}
-      {...props}
-    />,
-  );
-  return { onCancel, onConfirm, ...view };
+  const onGone = vi.fn();
+  const base: HostProps = {
+    open: true,
+    groupId: "g1",
+    anchor: anchorAt(40, 60),
+    leaving: false,
+    failure: "",
+    onCancel,
+    onConfirm,
+    onGone,
+    ...props,
+  };
+  const view = render(<Host {...base} />);
+  const setOpen = (open: boolean) => view.rerender(<Host {...base} open={open} />);
+  return { onCancel, onConfirm, onGone, setOpen, ...view };
 }
 
 const panel = () => screen.findByRole("dialog", { name: "退出群组" });
@@ -256,4 +269,50 @@ test("没有在途请求时 Escape 关闭;退出失败的原因落在面板里",
   expect(within(dialog).getByRole("alert")).toHaveTextContent("唯一的组管理员");
   await user.keyboard("{Escape}");
   expect(onCancel).toHaveBeenCalledOnce();
+});
+
+test("告知回 404(已经不在这个群组里):如实说明、请群组页刷新清单,不让人重试也不放行确认", async () => {
+  installServer([previewOf({ detail: "群组不存在" }, 404)]);
+  const { onGone } = mount();
+
+  const dialog = await panel();
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent(LEAVE_ALREADY_GONE_TEXT);
+  expect(within(dialog).queryByText(LEAVE_PREVIEW_UNAVAILABLE_TEXT)).not.toBeInTheDocument();
+  expect(within(dialog).queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+  expect(within(dialog).queryByRole("button", { name: "确认退出" })).not.toBeInTheDocument();
+  expect(within(dialog).getByRole("button", { name: "取消" })).toBeEnabled();
+  expect(onGone).toHaveBeenCalledOnce();
+});
+
+test("导出在途时关掉面板再打开:仍显示「正在导出…」、仍不能确认;落定后结果照常显示", async () => {
+  const user = userEvent.setup();
+  const gate = deferred<Response>();
+  const calls = installServer([
+    previewOf(PREVIEW),
+    (call) => (call.path === "/api/notebooks/nb-a/memories/export" ? gate.promise : undefined),
+  ]);
+  const { setOpen } = mount();
+
+  let dialog = await panel();
+  const row = (await within(dialog).findAllByRole("listitem"))[0];
+  await user.click(within(row).getByRole("button", { name: /导出「封装工艺库」/ }));
+  setOpen(false);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  setOpen(true);
+
+  dialog = await panel();
+  const reopened = (await within(dialog).findAllByRole("listitem"))[0];
+  expect(within(reopened).getByRole("button", { name: /导出「封装工艺库」/ })).toHaveTextContent("正在导出…");
+  expect(within(dialog).getByRole("button", { name: "确认退出" })).toBeDisabled();
+  expect(within(dialog).getByText(LEAVE_WAIT_FOR_EXPORT_TEXT)).toBeInTheDocument();
+
+  await act(async () => {
+    gate.resolve(new Response("# 记忆", {
+      status: 200,
+      headers: { "Content-Disposition": "attachment; filename=\"memories-nb-a.md\"" },
+    }));
+  });
+  await waitFor(() => expect(within(reopened).getByRole("button", { name: /导出「封装工艺库」/ })).toHaveTextContent("已导出"));
+  expect(within(dialog).getByRole("button", { name: "确认退出" })).toBeEnabled();
+  expect(calls.filter((call) => call.path.endsWith("/memories/export"))).toHaveLength(1);
 });
