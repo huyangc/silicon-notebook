@@ -69,3 +69,12 @@ def receipt_linked_report(raw: Any) -> Optional[LinkedReportRef]:
     except ValidationError:
         return None
     return job_linked_report(receipt.report_id, receipt.title)
+
+
+def receipt_linked_report_fields(raw: Any) -> Optional[dict[str, str]]:
+    """:func:`receipt_linked_report` as the plain ``{"report_id", "title"}``
+    dict a one-turn read (``conversation_turn``) hands out, ``None`` when the
+    receipt names no report. The same reading rules, so a conversation shows
+    the report the list shows."""
+    ref = receipt_linked_report(raw)
+    return None if ref is None else ref.model_dump()

@@ -155,6 +155,19 @@ def assert_in_flight_turn_names_the_report_by_its_current_title(repo) -> None:
     assert gone == LinkedReportRef(report_id=report_id, title="")
 
 
+def assert_one_turn_read_names(repo, conversation_id: str, expected) -> None:
+    """``conversation_turn`` carries ``linked_report`` for every index of the
+    conversation: ``expected`` (a ``LinkedReportRef`` or ``None``) as a plain
+    ``{"report_id", "title"}`` dict or ``None``."""
+    store = repo._runtime.ask_state
+    count = store.conversation_turn(conversation_id, 0)["turn_count"]
+    assert count >= 1
+    wanted = None if expected is None else expected.model_dump()
+    for index in range(count):
+        found = store.conversation_turn(conversation_id, index)
+        assert found["linked_report"] == wanted, (index, found["linked_report"], wanted)
+
+
 def assert_summary_and_detail_follow_the_last_turn(repo, save_turn: SaveTurn) -> None:
     """The summary and the detail both name the report of the conversation's
     LAST answer (a skipped turn still named its report), the title is the
@@ -168,6 +181,10 @@ def assert_summary_and_detail_follow_the_last_turn(repo, save_turn: SaveTurn) ->
         summary = _summary(repo, nb, conversation_id).linked_report
         detail = repo.get_conversation(conversation_id).linked_report
         assert summary == detail, (summary, detail)
+        # The one-turn read (MCP ``get_conversation``) names the same report
+        # whichever turn it reads -- the conversation's, not the turn's -- as
+        # the plain dict a conversation row is built from.
+        assert_one_turn_read_names(repo, conversation_id, summary)
         return summary
 
     def reasoned(conversation_id: str) -> bool:
@@ -242,11 +259,13 @@ def assert_unreadable_receipt_reads_as_no_report(
         assert detail.turns[-1].response.linked_report is None, receipt
         assert detail.linked_report is None, receipt
         assert _summary(repo, nb, conversation).linked_report is None, receipt
+        assert_one_turn_read_names(repo, conversation, None)
 
     overwrite_payload(conversation, {"report_id": "", "title": "no id", "status": "read"})
     detail = repo.get_conversation(conversation)
     assert detail.linked_report is None
     assert _summary(repo, nb, conversation).linked_report is None
+    assert_one_turn_read_names(repo, conversation, None)
 
     # The tolerance reads the field as absent; a valid receipt in the same
     # place still reads, so the loop above is not just an always-empty path.
@@ -256,3 +275,5 @@ def assert_unreadable_receipt_reads_as_no_report(
         report_id="rep-1", title="fine")
     assert _summary(repo, nb, conversation).linked_report == LinkedReportRef(
         report_id="rep-1", title="fine")
+    assert_one_turn_read_names(
+        repo, conversation, LinkedReportRef(report_id="rep-1", title="fine"))
