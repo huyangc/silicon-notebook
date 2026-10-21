@@ -826,7 +826,7 @@ Notebook；仅有 `group_admins` 边的库不向普通成员披露。owner 与�
 
 ### 端点面
 
-`group_routes.py` 里 27 个端点（含 P2 审批流 7 个），另加笔记本 router 上一个只读端点。
+`group_routes.py` 里 28 个端点（含 P2 审批流 7 个），另加笔记本 router 上一个只读端点。
 
 | 端点 | 谁可以调 | 说明 |
 | --- | --- | --- |
@@ -839,6 +839,7 @@ Notebook；仅有 `group_admins` 边的库不向普通成员披露。owner 与�
 | `PUT /groups/{id}/members/{user_id}` | 组管理员 | 加人与改角色同一个端点 |
 | `DELETE /groups/{id}/members/{user_id}` | 组管理员 | owner 必须先转让；移除最后一名管理员也返回 409 |
 | `DELETE /groups/{id}/membership` | 成员本人 | 自助退出；owner 必须先转让，最后一名管理员返回 409 |
+| `GET /groups/{id}/membership/leave-preview` | 成员本人（无系统管理员旁路） | 退群前告知：退出后哪些笔记本里本人的记忆会看不到、各几条（见「Memory 与 Agent MCP」一节「本人退出群组」段） |
 | `GET` / `POST` / `DELETE /groups/{id}/invite-link` | 组管理员（系统管理员恢复旁路） | 无副作用查看、创建/复用或撤销本组当前的 bearer 邀请链接 |
 | `POST /groups/{id}/invite-link/rotate` | 组管理员（系统管理员恢复旁路） | 原子换新 token，旧链接立即停止解析 |
 | `POST /group-invites/{token}/join` | 已登录 | 原子加入为 `member`；已有角色幂等保留；无效/已撤销/组已删除统一 404 |
@@ -1803,6 +1804,21 @@ Markdown 文件（`<笔记本>-记忆-<YYYYMMDD>.md`，每条含标题、类型�
 收回访问权的操作都不会删除记忆：取消共享（同时清空成员名单）、撤销授权边、把人移出持有授权的群组，都只是
 收回访问权。权限常常是临时的，所以记忆保留；无权期间任何人（包括创建者本人）都读不到它，权限恢复后创建者
 立即重新看到。删除整本笔记本不同：它会删除其中的一切，包括各成员的记忆（见上文）。
+
+本人退出群组（`DELETE /groups/{id}/membership`）同样不删除记忆，只删掉本人在这个组里的那一行成员关系；
+经这个组才读得到的笔记本退出后就读不到了，里面本人的记忆也随之看不到（用户 2026-10-21 裁决：退出前告知，
+允许先导出，记忆不删）。退出前，`GET /groups/{id}/membership/leave-preview` 返回
+`{"notebook_count": N, "memory_count": M, "notebooks": [{"notebook_id", "name", "memory_count"}]}`：
+调用者本人有记忆、此刻能读、退群后读不到的笔记本，逐本给出名字与本人记忆条数（各种状态都算，与退出共享的
+告知和导出同一口径），按名字排序；N、M 是这份清单的本数与条数之和，由服务端算。口径就是退出真正做的那件事：
+读权谓词（`access_sql.read_access_clause`）此刻为真，而在剔除这一行成员关系之后
+（`read_access_after_group_exit_clause`：两条 `group_members` 子查询各多一个 `group_id` 不等条件）为假。
+凭所有者身份、笔记本成员关系、个人授权、everyone 授权或**别的**群组仍能读的笔记本不算；本人已经读不到的
+（删除中、早已被移出）也不算。只回答调用者本人的退出：不是成员时与组不存在同为 404，不带系统管理员旁路。
+它只是读，退出本身不要求回传确认数。网页的退出确认面板据此说明「退出后，你将看不到 N 个笔记本里你的 M 条
+记忆」，逐本列出并各带一个「导出」（复用 `GET /notebooks/{id}/memories/export`，只导出本人在那一本里的记忆），
+导出进行中「确认退出」不可用；M 为 0 时只说明记忆不会因退出而看不到，不出现导出入口。重新加入群组后，仍共享给
+这个组的笔记本里的记忆会再次可见。
 
 仓库内固定 Memory 评测计算 Recall@5、MRR、nDCG，以及三项零容忍计数：candidate 进入正式
 平面、跨用户、跨 notebook 泄漏。A/B harness 比较 no-Memory、KB-only 与
