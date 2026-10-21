@@ -5478,7 +5478,7 @@
           "type": "object"
         },
         "GroupLeavePreview": {
-          "description": "``GET /groups/{id}/membership/leave-preview``:本人退出这个群组之后,哪些笔记本里\n自己的记忆会看不到。\n\n只列调用者本人有记忆、且退群后失去读权的笔记本(仍能凭所有者身份、成员关系、个人\n授权、全员授权或别的群组读到的不算)。退群不删除任何记忆:这些笔记本仍共享给本组时,\n重新加入后照样能看到。``notebook_count`` / ``memory_count`` 是 ``notebooks`` 的条数与\n条数之和,由服务端算好。",
+          "description": "``GET /groups/{id}/membership/leave-preview``:本人退出这个群组之后,哪些笔记本里\n自己的记忆会看不到。\n\n只列调用者本人有记忆、且退群后失去读权的笔记本(仍能凭所有者身份、成员关系、个人\n授权、全员授权或别的群组读到的不算)。退群不删除任何记忆:重新加入后,以那时的身份仍能\n读到的笔记本(仍共享给本组;只共享给组管理员的,须以组管理员身份重新加入)里照样能看到。\n``notebook_count`` / ``memory_count`` 是 ``notebooks`` 的条数与\n条数之和,由服务端算好。",
           "properties": {
             "memory_count": {
               "title": "Memory Count",

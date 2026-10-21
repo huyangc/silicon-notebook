@@ -253,6 +253,30 @@ def case_rejoining_shows_the_memory_again(world: World) -> None:
     assert preview(world) == rows
 
 
+def case_rejoining_as_a_plain_member_does_not_bring_back_admin_only_notebooks(
+    world: World,
+) -> None:
+    """A former group admin who rejoins as a plain member (what an invite
+    link does) reads the group-shared notebook again, but not the one shared
+    with the group's admins only: its Memory stays hidden (and undeleted)."""
+    visible_before = visible_memory_by_notebook(world)
+    assert leave(world) is True
+    world.repo._runtime.groups.upsert_member(
+        world.group, world.leaver.id, role="member", added_by=world.owner.id
+    )
+    assert readable(world, "only_group")
+    assert not readable(world, "only_group_admins")
+    visible_after = visible_memory_by_notebook(world)
+    admins_only = world.notebooks["only_group_admins"]
+    assert admins_only not in visible_after
+    assert visible_after == {
+        notebook_id: count for notebook_id, count in visible_before.items()
+        if notebook_id != admins_only
+    }
+    assert memory_rows(world, "only_group_admins") == world.leaver_memory["only_group_admins"]
+    assert [row["notebook_id"] for row in preview(world)] == [world.notebooks["only_group"]]
+
+
 def case_a_plain_member_does_not_count_group_admins_grants(world: World) -> None:
     """Demoted to a plain member, the leaver no longer reads the notebook
     shared with the group's admins only: it is no longer theirs to lose."""
