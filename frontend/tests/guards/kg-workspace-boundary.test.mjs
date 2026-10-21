@@ -224,6 +224,8 @@ test("every KG file has a positive dependency allowlist and no cross-workspace o
     ])],
     ["use-kg-knowledge.ts", new Set([
       "react",
+      // the merge outcome is shown in place: status + user text of a failed merge
+      "./errors",
       "./kg-workspace-model",
       "./knowledge-api",
       "../features/kg-maintenance/kg-api",
@@ -544,10 +546,21 @@ test("read-only review recovery and every provider-side write are policy gated",
     assert.match(text.slice(at, at + 900), /policyRef\.current\.canWriteKg/);
   }
   const knowledgeText = knowledge.getText(knowledge);
-  for (const name of ["updateKnowledge", "findDuplicates", "mergeKnowledge"]) {
+  {
+    const at = knowledgeText.indexOf("const updateKnowledge =");
+    assert.ok(at >= 0, "updateKnowledge");
+    assert.match(knowledgeText.slice(at, at + 900), /policyRef\.current\.canGovernKnowledge/);
+  }
+  // 查重与合并按分区门控:共享组跟知识治理权,「我的记忆里的重复」跟本人记忆合并权
+  // (只读成员也有,镜像上没有)。两条命令都先过 partitionAllowed,它读的正是这两位。
+  const gateAt = knowledgeText.indexOf("const partitionAllowed =");
+  assert.ok(gateAt >= 0, "partitionAllowed");
+  const gate = knowledgeText.slice(gateAt, gateAt + 400);
+  assert.match(gate, /partition === "shared"[\s\S]*policyRef\.current\.canGovernKnowledge[\s\S]*policyRef\.current\.canMergeOwnMemory/);
+  for (const name of ["findDuplicates", "mergeKnowledge"]) {
     const at = knowledgeText.indexOf(`const ${name} =`);
     assert.ok(at >= 0, name);
-    assert.match(knowledgeText.slice(at, at + 900), /policyRef\.current\.canGovernKnowledge/);
+    assert.match(knowledgeText.slice(at, at + 900), /partitionAllowed/, name);
   }
   const schemaText = schema.getText(schema);
   for (const name of ["selectSchemaView", "mutateSchema", "induceSchemas"]) {

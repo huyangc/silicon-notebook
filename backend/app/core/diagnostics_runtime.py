@@ -78,6 +78,8 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("knowledge", None, "merge"),
     ("knowledge", None, "promote"),
     ("duplicates",),
+    # 本人记忆里的重复组:两段都是字面量,整条路径原样进诊断快照。
+    ("duplicates", "own-memory"),
     ("graph",),
     ("search",),
     ("ask",),
