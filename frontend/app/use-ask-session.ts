@@ -448,6 +448,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   const linkedReportRef = useRef<LinkedReportTag | null>(null);
   const linkedReportNoteTimerRef = useRef<number | undefined>(undefined);
   const linkedReportCheckSeqRef = useRef(0);
+  // The inputs (and re-check serial) of the verdict `linkedReportCheck` holds,
+  // read by the check effect without depending on the state itself; kept in
+  // step with it: set when a verdict is taken, null whenever it is dropped.
+  const linkedReportVerdictRef = useRef<{ key: string; recheck: number } | null>(null);
 
   const policyRef = useRef(policy);
   policyRef.current = policy;
@@ -675,6 +679,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   // a new session) drops all three.
   function clearLinkedReport() {
     setLinkedReport(null);
+    linkedReportVerdictRef.current = null;
     setLinkedReportCheck(null);
     showLinkedReportNote("");
   }
@@ -1112,6 +1117,14 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   function attachIntentRun(run: AskIntentRunRecord, owner: AskSessionOwner) {
     // The returning question (in flight, or handed back as a draft) is the
     // newest thing asked here: the tag it was submitted with is the sticky one.
+    //
+    // Deliberately unlike a failure on the page that sent it: there the draft
+    // goes back to the input under the tag the user has on screen NOW (they may
+    // have replaced it while the question ran — R2 — and that choice is live
+    // state of this very view). A run re-attached after leaving has no such
+    // state to honour: whatever the user did to the tag before leaving was
+    // never persisted and the leave reset it, so the only record of which
+    // report this question goes with is the one frozen into the run (R).
     setLinkedReport(run.scopeSnapshot.linkedReport);
     if (run.phase === "failed") {
       // The preview failed while the user was away: say so now and give the
@@ -1220,7 +1233,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
 
   function attachDetachedRun(run: AskRunRecord, owner: AskSessionOwner) {
     // In flight (or handed back as a draft), this run is the newest question
-    // here: the tag it was submitted with is the sticky one.
+    // here: the tag it was submitted with is the sticky one. Same reason as in
+    // `attachIntentRun` for differing from an on-page failure (which keeps the
+    // tag the user has on screen): a re-attach has only the frozen report.
     setLinkedReport(run.linkedReport);
     if (run.failure) {
       dropRecord(inFlightRunsRef.current, run);
@@ -2215,6 +2230,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         return true;
       }
       effectsRef.current.reportError(error);
+      // The question went back to the input above; the tag is left as the
+      // user has it now (deliberately not reset to the frozen one — see
+      // `attachIntentRun` for why a re-attached failure differs).
       recheckLinkedReport(scopeSnapshot);
     } finally {
       // Ended without `started` (failed, stopped, or a transport that never
@@ -2767,8 +2785,12 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     )
     : "";
   // With no searchable scope the server refuses the check the way it refuses
-  // /ask (409); there is no verdict to fetch.
-  const linkedReportCheckBlocked = policy.askUnavailable || policy.scopeBlocked;
+  // /ask (409); there is no verdict to fetch. While a conversation (or a
+  // notebook) is loading, the tag on screen may still be the previous view's —
+  // the detail about to land decides the tag — so nothing is checked until it
+  // has: a check for the outgoing tag would only flash its answer (or "已不存在")
+  // in the incoming conversation.
+  const linkedReportCheckBlocked = policy.askUnavailable || policy.scopeBlocked || sessionLoading;
 
   /**
    * In-place pre-send check ("这样提问会读到这份报告吗"), shown beside the tag.
@@ -2779,6 +2801,12 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
    * (the report is gone or not the asker's) removes the tag and says so beside
    * it; any other failure leaves no verdict — the turn's own receipt is then
    * the authority on what was read.
+   *
+   * A verdict already held for exactly these inputs is not asked for again
+   * when only the view owner moved (a pre-start Stop, a session with the same
+   * tag and scope): the verdict depends on the inputs, not on the
+   * conversation. A failed send that carried the report bumps
+   * `linkedReportRecheck`, which does ask again.
    */
   useEffect(() => {
     const seq = ++linkedReportCheckSeqRef.current;
@@ -2788,6 +2816,8 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       !linkedReportCheckInputs || linkedReportCheckBlocked || !owner || !report
       || owner.actorId !== actorIdRef.current || owner.notebookId !== notebookIdRef.current
     ) return;
+    const held = linkedReportVerdictRef.current;
+    if (held && held.key === linkedReportCheckInputs && held.recheck === linkedReportRecheck) return;
     const currentPolicy = policyRef.current;
     const body = {
       report_id: report.id,
@@ -2796,6 +2826,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       base_scope: copyBaseScope(currentPolicy.baseScope),
     };
     const inputs = linkedReportCheckInputs;
+    const recheck = linkedReportRecheck;
     const stillCurrent = () => (
       linkedReportCheckSeqRef.current === seq
       && sameViewOwner(ownerRef.current, owner)
@@ -2807,6 +2838,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       checkReportLink(owner.notebookId, body, controller.signal).then(
         (result) => {
           if (!stillCurrent()) return;
+          linkedReportVerdictRef.current = { key: inputs, recheck };
           setLinkedReportCheck({
             key: inputs,
             verdict: {
@@ -2825,6 +2857,11 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         },
         (error: unknown) => {
           if (isAbortError(error) || !stillCurrent()) return;
+          // Whatever failed, no verdict about these inputs is known any more —
+          // including one an earlier check of the same inputs returned (a
+          // re-check after a failed send must not leave that one standing).
+          linkedReportVerdictRef.current = null;
+          setLinkedReportCheck(null);
           if (httpErrorStatus(error) !== 404) return;
           linkedReportRef.current = null;
           setLinkedReportState(null);
@@ -2938,6 +2975,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       setTurns([]);
       setConversationId(null);
       clearPendingTurn();
+      // The report tag is deliberately kept, like the engine and the effort:
+      // these are settings of the input area, not content of the deleted
+      // conversation, and the tag stays visible (removable) above the input.
     }
     if (currentOwner) await loadSessionsFor(currentOwner).catch(() => {});
     if (sameViewOwner(ownerRef.current, owner)) effectsRef.current.notify("会话已删除");
