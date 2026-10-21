@@ -34,6 +34,7 @@ from app.domain.report_followup import (
 )
 from app.services.report_followup import (
     REPORT_BLOCK_HEADER,
+    ReportAdmissionCounts,
     SUMMARY_TRUNCATED_SUFFIX,
     followup_receipt,
     load_linked_report,
@@ -146,8 +147,11 @@ def test_digest_splits_a_body_the_real_engine_assembled(engine_repo):
     digest = report_digest(row)
 
     assert digest.title == "带隙基准的温度系数从哪里来"
-    assert digest.summary == "总结第一句[k1]。第二句。"
-    assert digest.summary_keys == ("k1",)
+    # The engine stores the summary unnumbered (only section bodies are
+    # renumbered to the references' keys): its marker names nothing.
+    assert "## 执行摘要\n\n总结第一句[k1]。第二句。" in content_md
+    assert digest.summary == "总结第一句。第二句。"
+    assert digest.summary_keys == ()
     assert digest.section_titles == ("工作原理", "失败的一节", "工程取舍")
     first, failed, last = digest.sections
     assert [s.index for s in digest.sections] == [1, 2, 3]
@@ -166,6 +170,15 @@ def test_digest_splits_a_body_the_real_engine_assembled(engine_repo):
         assert leaked not in everything
     assert [dict(r) for r in digest.references] == references
     assert digest.memory_used == ("mem-1",)
+
+    # Rendered for a turn that restored every reference: the summary carries no
+    # marker at all -- neither the stored one nor a rewrite into a turn key.
+    selection = select_report_sections(digest, "温度", 12000)
+    assert selection.keys == ("k1", "k2", "k3")
+    block = render_report_block(digest, selection, {"k1": "k4001", "k2": "k4002", "k3": "k4003"})
+    summary_line = block.split("\n")[3]
+    assert summary_line == "总结第一句。第二句。"
+    assert "正向压降随温度下降 [k4001]。" in block
 
 
 def test_digest_without_references_stops_at_the_limitations_note(engine_repo):
@@ -213,6 +226,31 @@ def test_heading_spellings_models_vary_on_still_align():
         ["背景介绍", "二、方法", "结论"],
     ))
     assert [s.body for s in digest.sections] == ["一", "二", "三"]
+
+
+def test_a_heading_inside_the_summary_block_stays_in_the_summary():
+    """The summary's own ``##`` (matching no section) neither opens section 1
+    early nor lets the source-basis block that follows leak into it."""
+    digest = report_digest(_row(
+        "# 深度报告:q\n\n## 执行摘要\n\n摘要一 [k9]。\n## 模型写的小标题\n摘要二。\n\n"
+        "## 资料基础\n\n统计。\n\n## A\n甲 [k1]\n\n## B\n乙",
+        ["A", "B"],
+    ))
+    assert digest.summary == "摘要一 。\n## 模型写的小标题\n摘要二。"
+    assert [s.body for s in digest.sections] == ["甲 [k1]", "乙"]
+
+
+def test_a_later_section_title_written_inside_a_section_does_not_open_it_early():
+    """Section 1 closes with its own ``## 结论`` while section 3 is also called
+    结论: jumping to section 3 there would skip 方法, which is still a heading
+    further down, so the heading is section 1's text."""
+    digest = report_digest(_row(
+        _body("## 背景\n正文\n## 结论\n小结论", "## 方法\n方法正文", "## 结论\n真正的结论"),
+        ["背景", "方法", "结论"],
+    ))
+    assert [s.body for s in digest.sections] == [
+        "正文\n## 结论\n小结论", "方法正文", "真正的结论",
+    ]
 
 
 def test_an_unmatched_first_heading_opens_the_first_section_not_the_basis_block():
@@ -580,16 +618,28 @@ def test_reason_text_is_worded_once():
         ("丁 [k2]。", "丁 。"),
         ("戊 [k2, k4]。", "戊 。"),
         ("己【k3】与（k1）", "己[k13]与[k11]"),
-        ("庚 [ k1 , k3 ]", "庚 [k11, k13]"),
+        # Never renumbered by the engine (strict MARKER_RE only): removed, not rewritten.
+        ("庚 [ k1 , k3 ]", "庚 "),
+        ("癸 [k1 ] 与 [k3]", "癸  与 [k13]"),
         ("辛 [k1, k5]", "辛 [k11]"),
         ("无标记的文本", "无标记的文本"),
     ],
     ids=["single", "compound", "localised-separators", "unknown", "all-unknown",
-         "localised-brackets", "inner-spaces", "two-keys-one-item", "none"],
+         "localised-brackets", "inner-spaces", "trailing-inner-space",
+         "two-keys-one-item", "none"],
 )
 def test_markers_point_at_this_turns_keys_or_disappear(text, expected):
     key_map = {"k1": "k11", "k3": "k13", "k5": "k11"}
     assert rewrite_report_markers(text, key_map) == expected
+
+
+def test_only_renumbered_markers_count_as_section_keys():
+    digest = report_digest(_row(_body("## A\n甲 [k1]，乙 [ k2 ]，丙 [k3 ]，丁【k4】"), ["A"]))
+    assert digest.sections[0].keys == ("k1", "k4")
+    selection = select_report_sections(digest, "", 12000)
+    assert selection.keys == ("k1", "k4")
+    block = render_report_block(digest, selection, {f"k{i}": f"k{i}0" for i in range(1, 5)})
+    assert "甲 [k10]，乙 ，丙 ，丁[k40]" in block
 
 
 # ---------------------------------------------------------------------------
@@ -613,10 +663,9 @@ def _report(summary="执行摘要第一句[k1]。第二句[k2]。", sections=Non
         _section(2, "温度系数", "温度系数正文" * 40 + " [k4]"),
         _section(3, "修调", "修调正文" * 40 + " [k5]"),
     )
-    return ReportDigest(
-        title="带隙基准", summary=summary, sections=tuple(sections),
-        summary_keys=("k1", "k2") if summary else (),
-    )
+    # A hand-built digest may still carry summary markers; selection and
+    # rendering must drop them anyway (``report_digest`` already does).
+    return ReportDigest(title="带隙基准", summary=summary, sections=tuple(sections))
 
 
 _WIDE = {f"k{i}": "k4999" for i in range(1, 50)}
@@ -627,11 +676,11 @@ def test_everything_fits_so_everything_is_read():
     selection = select_report_sections(digest, "无关的问题", 12000)
     assert selection.read_indices == (1, 2, 3)
     assert not selection.summary_truncated
-    assert selection.summary == digest.summary
-    assert selection.keys == ("k1", "k2", "k3", "k4", "k5")
+    assert selection.summary == "执行摘要第一句。第二句。"
+    assert selection.keys == ("k3", "k4", "k5")
     block = render_report_block(digest, selection, {"k1": "k7", "k4": "k8"})
     assert block.startswith(REPORT_BLOCK_HEADER + "\nTitle: 《带隙基准》\nExecutive summary:\n")
-    assert "执行摘要第一句[k7]。第二句。" in block
+    assert "\n执行摘要第一句。第二句。\n" in block and "k7" not in block
     assert "Sections (3 in total):\n## 1. 背景\n" in block
     assert NOT_LOADED not in block
 
@@ -648,7 +697,7 @@ def test_over_budget_keeps_whole_sections_by_relevance_in_report_order():
     budget = _budget_for(digest, 1)
     selection = select_report_sections(digest, "温度系数从哪里来", budget)
     assert selection.read_indices == (2,)
-    assert selection.keys == ("k1", "k2", "k4")
+    assert selection.keys == ("k4",)
     block = render_report_block(digest, selection, _WIDE)
     assert len(block) <= budget
     # Whole bodies or the placeholder, never half a section; report order kept.
@@ -680,52 +729,53 @@ def test_a_question_naming_a_section_title_selects_it():
     assert selection.read_indices == (3,)
 
 
-def test_a_section_without_body_counts_as_read_and_says_so():
+def test_a_section_without_body_is_listed_but_never_read():
     digest = _report(sections=(_section(1, "空节", ""), _section(2, "有正文", "正文 [k3]")))
     selection = select_report_sections(digest, "", 12000)
-    assert selection.read_indices == (1, 2)
+    assert selection.read_indices == (2,)
     block = render_report_block(digest, selection, {})
     assert f"## 1. 空节\n{NO_BODY}\n## 2. 有正文\n正文 " in block
+    # Even a selection that names it does not make it read.
+    forced = SectionSelection(read_indices=(1, 2), summary="摘要")
+    followup = ReportFollowup(
+        report_id="r", title="t", digest=digest, verdict=ReportLinkVerdict(),
+    )
+    receipt = followup_receipt(
+        followup, selection=forced, admission_counts=ReportAdmissionCounts(), read=True,
+    )
+    assert [(s.index, s.read) for s in receipt.sections] == [(1, False), (2, True)]
 
 
 def test_an_overlong_summary_is_clipped_at_a_sentence_end_and_marked_once():
     summary = "".join(f"第{i}句话说明一个事实[k{i}]。" for i in range(1, 400))
+    plain = "".join(f"第{i}句话说明一个事实。" for i in range(1, 400))
     digest = _report(summary=summary)
     budget = 2000
     selection = select_report_sections(digest, "温度系数", budget)
     assert selection.summary_truncated
     assert selection.summary.endswith("。" + SUMMARY_TRUNCATED_SUFFIX)
-    assert selection.read_indices == ()
+    assert selection.read_indices == () and selection.keys == ()
     clipped = selection.summary.removesuffix(SUMMARY_TRUNCATED_SUFFIX)
-    assert summary.startswith(clipped)
-    assert selection.keys == tuple(f"k{i}" for i in range(1, clipped.count("[") + 1))
+    assert plain.startswith(clipped) and "[" not in clipped
     block = render_report_block(digest, selection, _WIDE)
     assert len(block) <= budget
     assert block.count(SUMMARY_TRUNCATED_SUFFIX) == 1
     assert block.count(NOT_LOADED) == 3
 
 
-def test_a_summary_without_sentence_ends_is_cut_hard_but_never_inside_a_marker():
-    lead = "没有句号的长摘要" * 250
-    summary = lead + "[k1, k2, k3]" + "尾巴" * 300
+def test_a_summary_without_sentence_ends_is_cut_hard_at_the_budget():
+    summary = "没有标点的长摘要" * 4300   # 34,400 characters, no sentence end at all
     digest = _report(summary=summary, sections=(_section(1, "节", "正文"),))
-    # Everything in the block but the summary text, so the budgets below put the
-    # cut before, inside and after the marker.
     overhead = len(render_report_block(digest, SectionSelection(summary="x"), {})) - 1
-    widest = len("[k99999, k99999, k99999]")
-    with_marker = lead + "[k1, k2, k3]"
-    cuts = set()
-    for room in range(len(lead) - 3, len(lead) + widest + 3):
-        budget = overhead + len(SUMMARY_TRUNCATED_SUFFIX) + room
+    for budget in (2000, 12000, 60000 - 1):
         selection = select_report_sections(digest, "", budget)
+        room = budget - overhead - len(SUMMARY_TRUNCATED_SUFFIX)
+        if room >= len(summary):
+            assert not selection.summary_truncated and selection.summary == summary
+            continue
         assert selection.summary_truncated
-        clipped = selection.summary.removesuffix(SUMMARY_TRUNCATED_SUFFIX)
-        assert summary.startswith(clipped)
-        # Either short of the marker or past its end -- never half of it.
-        assert len(clipped) <= len(lead) or clipped.startswith(with_marker)
-        cuts.add(clipped[: len(with_marker)])
+        assert selection.summary == summary[:room] + SUMMARY_TRUNCATED_SUFFIX
         assert len(render_report_block(digest, selection, _WIDE)) <= budget
-    assert {lead, with_marker} <= cuts
 
 
 def test_unread_sections_show_a_placeholder_and_the_block_rewrites_markers():
@@ -779,7 +829,7 @@ def test_a_read_receipt_reports_sections_counts_and_memory():
     selection = SectionSelection(read_indices=(2, 3), summary="摘要")
     receipt = followup_receipt(
         followup, selection=selection,
-        admission_counts={"restored": 18, "over_budget": 4}, read=True,
+        admission_counts=ReportAdmissionCounts(restored=18, over_budget=4), read=True,
     )
     assert receipt.status == "read" and receipt.reason_code == ""
     assert [(s.index, s.read) for s in receipt.sections] == [
@@ -795,7 +845,8 @@ def test_a_read_receipt_reports_sections_counts_and_memory():
 def test_a_turn_that_did_not_read_gets_a_skipped_receipt():
     readable = _followup()
     receipt = followup_receipt(
-        readable, selection=SectionSelection(), admission_counts={"restored": 3}, read=False,
+        readable, selection=SectionSelection(),
+        admission_counts=ReportAdmissionCounts(restored=3), read=False,
     )
     assert receipt.status == "skipped" and receipt.reason_code == REASON_NO_SYNTHESIS
     assert receipt.reason == REASON_PREFIX + REASON_CLAUSES[REASON_NO_SYNTHESIS]
@@ -807,7 +858,8 @@ def test_a_turn_that_did_not_read_gets_a_skipped_receipt():
         gone=5, out_of_scope_count=2,
     ))
     receipt = followup_receipt(
-        conflict, selection=SectionSelection(), admission_counts={}, read=False,
+        conflict, selection=SectionSelection(), admission_counts=ReportAdmissionCounts(),
+        read=False,
     )
     assert receipt.reason_code == REASON_SCOPE_SOURCES
     assert receipt.reason == "本轮不读取这份报告：它引用的 2 份资料不在当前检索范围内"
@@ -817,7 +869,10 @@ def test_a_turn_that_did_not_read_gets_a_skipped_receipt():
 def test_a_report_the_verdict_refused_cannot_be_receipted_as_read():
     conflict = _followup(unread_verdict(REASON_READ_FAILED))
     with pytest.raises(ValueError):
-        followup_receipt(conflict, selection=SectionSelection(), admission_counts={}, read=True)
+        followup_receipt(
+            conflict, selection=SectionSelection(),
+            admission_counts=ReportAdmissionCounts(), read=True,
+        )
 
 
 def test_skipped_receipt_uses_the_verdicts_wording_only_for_its_own_code():
@@ -837,49 +892,78 @@ def test_skipped_receipt_uses_the_verdicts_wording_only_for_its_own_code():
     }
 
 
-def _receipt(read=(), *, truncated=False, restored=0, gone=0, over=0, total=6):
-    followup = _followup(
-        ReportLinkVerdict(gone=gone),
-        digest=ReportDigest(
-            title="带隙基准", summary="摘要",
-            sections=tuple(_section(i, f"第{i}节", f"正文{i}") for i in range(1, total + 1)),
+def _read_turn(read=(), *, truncated=False, restored=0, gone=0, over=0, total=6, blank=()):
+    """``(receipt, digest)`` of a turn that read the report; ``blank`` are the
+    sections without body text."""
+    digest = ReportDigest(
+        title="带隙基准", summary="摘要",
+        sections=tuple(
+            _section(i, f"第{i}节", "" if i in blank else f"正文{i}")
+            for i in range(1, total + 1)
         ),
     )
-    return followup_receipt(
-        followup,
+    receipt = followup_receipt(
+        _followup(ReportLinkVerdict(gone=gone), digest=digest),
         selection=SectionSelection(read_indices=tuple(read), summary_truncated=truncated),
-        admission_counts={"restored": restored, "over_budget": over}, read=True,
+        admission_counts=ReportAdmissionCounts(restored=restored, over_budget=over),
+        read=True,
     )
+    return receipt, digest
 
 
 @pytest.mark.parametrize(
-    ("receipt", "summary"),
+    ("turn", "summary"),
     [
-        (_receipt(range(1, 7)), "已读取关联报告《带隙基准》全文"),
-        (_receipt(range(1, 7), restored=18, gone=2),
+        (_read_turn(range(1, 7)), "已读取关联报告《带隙基准》全文"),
+        (_read_turn(range(1, 7), restored=18, gone=2),
          "已读取关联报告《带隙基准》全文；复原引用证据 18 条，2 条已失效"),
-        (_receipt((2, 3), restored=18, gone=2),
+        (_read_turn((2, 3), restored=18, gone=2),
          "已读取关联报告《带隙基准》：执行摘要与第 2、3 节（共 6 节，按与问题的相关度选取）；"
          "复原引用证据 18 条，2 条已失效"),
-        (_receipt((), truncated=True, restored=5, over=3),
+        (_read_turn((), truncated=True, restored=5, over=3),
          "已读取关联报告《带隙基准》：执行摘要（已截断）与各节标题（共 6 节，正文超出篇幅未读入）；"
          "复原引用证据 5 条，3 条超出篇幅未读入"),
-        (_receipt(range(1, 7), truncated=True),
+        (_read_turn(range(1, 7), truncated=True),
          "已读取关联报告《带隙基准》：执行摘要（已截断）与全部 6 节"),
-        (_receipt((), truncated=True, total=0), "已读取关联报告《带隙基准》：执行摘要（已截断）"),
+        (_read_turn((), truncated=True, total=0), "已读取关联报告《带隙基准》：执行摘要（已截断）"),
+        # A section without body text is never listed as read, and never
+        # described as left out by the budget.
+        (_read_turn(range(1, 7), blank=(2,)),
+         "已读取关联报告《带隙基准》全文（第 2 节没有单独的正文）"),
+        (_read_turn((1, 3), blank=(2,)),
+         "已读取关联报告《带隙基准》：执行摘要与第 1、3 节"
+         "（共 6 节，按与问题的相关度选取，第 2 节没有单独的正文）"),
+        (_read_turn(range(1, 7), truncated=True, blank=(2, 5)),
+         "已读取关联报告《带隙基准》：执行摘要（已截断）与第 1、3、4、6 节"
+         "（共 6 节，第 2、5 节没有单独的正文）"),
     ],
     ids=["full", "full-with-evidence", "partial", "headings-only", "summary-clipped",
-         "no-sections"],
+         "no-sections", "full-with-blank", "partial-with-blank", "clipped-with-blank"],
 )
-def test_trace_step_says_what_was_read(receipt, summary):
-    step = report_trace_step(receipt)
+def test_trace_step_says_what_was_read(turn, summary):
+    receipt, digest = turn
+    step = report_trace_step(receipt, digest=digest)
     assert step.step_type == "report"
     assert step.summary == summary
     assert step.detail["status"] == "read"
     assert step.detail["sections_total"] == len(receipt.sections)
     assert step.detail["sections_read"] == [s.index for s in receipt.sections if s.read]
+    blank = {s.index for s in digest.sections if not s.body}
+    assert not blank & set(step.detail["sections_read"])
     assert "reason_code" not in step.detail
     assert "memory_used" not in step.detail
+
+
+def test_admission_counts_are_a_typed_value():
+    followup = _followup()
+    with pytest.raises(TypeError):
+        followup_receipt(
+            followup, selection=SectionSelection(),
+            admission_counts={"restored": 1, "over_budget": 0}, read=True,
+        )
+    for bad in ({"restored": -1}, {"over_budget": 1.5}, {"restored": True}):
+        with pytest.raises(ValueError):
+            ReportAdmissionCounts(**bad)
 
 
 def test_trace_step_says_why_nothing_was_read():
@@ -887,7 +971,7 @@ def test_trace_step_says_why_nothing_was_read():
         reason_code=REASON_MEMORY_CLOSED,
         reason=report_reason_text(REASON_MEMORY_CLOSED, memory_channel_open=True),
     ))
-    step = report_trace_step(skipped_receipt(followup, REASON_MEMORY_CLOSED))
+    step = report_trace_step(skipped_receipt(followup, REASON_MEMORY_CLOSED), digest=None)
     assert step.summary == (
         "未读取关联报告《带隙基准》：它用到了你的个人记忆，而收窄检索范围后本轮不读取个人记忆"
     )
@@ -898,12 +982,13 @@ def test_trace_step_says_why_nothing_was_read():
         report_id="rep-x", title="", digest=None,
         verdict=unread_verdict(REASON_REPORT_UNAVAILABLE),
     )
-    step = report_trace_step(skipped_receipt(gone, REASON_REPORT_UNAVAILABLE))
+    step = report_trace_step(skipped_receipt(gone, REASON_REPORT_UNAVAILABLE), digest=None)
     assert step.summary == "未读取关联报告：这份报告已删除或不再是已完成状态"
 
 
 def test_no_internal_detail_leaks_into_the_trace():
-    step = report_trace_step(_receipt((1,), restored=1))
+    receipt, digest = _read_turn((1,), restored=1)
+    step = report_trace_step(receipt, digest=digest)
     assert set(step.detail) == {
         "report_id", "status", "sections_total", "sections_read", "summary_truncated",
         "evidence_restored", "evidence_gone", "evidence_over_budget",
