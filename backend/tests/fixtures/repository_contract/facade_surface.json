@@ -1605,6 +1605,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
+        "scope": "<module>.knowledge_governance_service",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
         "scope": "<module>.memory_membership_service",
         "target": "_runtime"
       },
@@ -8176,6 +8182,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/knowledge_routes.py",
+        "scope": "<module>._merge_with_write",
+        "target": "merge_knowledge"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowledge_routes.py",
         "scope": "<module>.merge_knowledge",
         "target": "merge_knowledge"
       },
@@ -8190,7 +8202,7 @@
     "owner": "KnowledgeGovernanceService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', source_id: 'str', payload: 'MergeRequest', *, actor_id: 'Optional[str]' = None) -> 'RuleCard'"
+    "signature": "(self, notebook_id: 'str', source_id: 'str', payload: 'MergeRequest', *, actor_id: 'Optional[str]' = None, own_pair_only: 'bool' = False) -> 'RuleCard'"
   },
   "merge_review_job_status": {
     "consumers": [

@@ -24734,6 +24734,7 @@
       },
       "/api/notebooks/{notebook_id}/knowledge/{knowledge_id}/merge": {
         "post": {
+          "description": "Two authorisation paths (user ruling 2026-10-22).\n\nWith ``knowledge:write`` (owner, notebook admin): as before -- the\ncapability, then the mirror fence (409), then the store's M1 rules: a side\nderived from someone else's Memory is \"not found\" (the 404 an unknown id\ngets), the caller's own Memory answers 409 with why, except a pair of her\nown objects backed by her own Memory alone.\n\nWith read access only: the store merges two of the caller's own Memory\nobjects supported by her own Memory alone (``own_pair_only``), and refuses\nanything else in the statement that locks and classifies the pair. Every\nrefusal answers the 404 this caller got for any merge before -- an unknown\nid, a shared or someone else's object, a cross-class pair -- so she learns\nnothing about the other object. On a mirror the read path does not apply\n(the knowledge:write fence, as for every knowledge write there): 404 as\nbefore. The only other answer is the PostgreSQL retry 409 of her own pair.",
           "operationId": "merge_knowledge_api_notebooks__notebook_id__knowledge__knowledge_id__merge_post",
           "parameters": [
             {

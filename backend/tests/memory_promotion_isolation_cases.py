@@ -920,6 +920,119 @@ def owner_lists_her_own_memory_duplicates(world: World) -> None:
         assert _shared_text(world, headers) == shared_before[name]
 
 
+def _reader_with_memory(world: World) -> dict:
+    """C: a read-only member of the notebook (no grant) with a Memory of her
+    own (src-memory-c) and three objects derived from it -- a pair supported
+    by her Memory alone, and one that also cites a shared source."""
+    c, c_id = _register(world.client, "c00300004")
+    world.repo._runtime.sharing.add_member(world.nb, c_id)
+    q = world.q
+    with world.repo._write() as db:
+        db.execute(
+            q("INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
+              "content_md,created_at,updated_at) "
+              "VALUES ('mem-own-c',?,?,'ask_answer','confirmed','t','c',?,?)"),
+            (world.nb, c_id, NOW, NOW),
+        )
+        db.execute(
+            q("INSERT INTO sources(id,notebook_id,title,source_type,memory_id,"
+              "created_at,updated_at) "
+              "VALUES ('src-memory-c',?,'src-memory-c','memory','mem-own-c',?,?)"),
+            (world.nb, NOW, NOW),
+        )
+        for object_id, evidence in (
+            ("ko-c-dup-1", [_ev("src-memory-c")]),
+            ("ko-c-dup-2", [_ev("src-memory-c")]),
+            ("ko-c-mixed", [_ev("src-memory-c"), _ev("src-document")]),
+        ):
+            db.execute(
+                q("INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
+                  "payload,evidence,source_id,created_at,updated_at) "
+                  "VALUES (?,?,'claim','approved',?,?,'src-memory-c',?,?)"),
+                (object_id, world.nb, json.dumps({"name": "reader claim"}),
+                 json.dumps(evidence, ensure_ascii=False), NOW, NOW),
+            )
+    return c
+
+
+def _merge(world: World, headers: dict, source_id: str, into_id: str, nb: str | None = None):
+    return world.client.post(
+        f"/api/notebooks/{nb or world.nb}/knowledge/{source_id}/merge",
+        headers=headers, json={"into_id": into_id},
+    )
+
+
+def reader_merges_only_her_own_memory_pair(world: World) -> None:
+    """User ruling 2026-10-22: with read access alone, a member merges two of
+    her own Memory objects supported by her own Memory alone. Every other merge
+    she asks for is refused with the 404 a reader got for any merge before --
+    the same body whether the other object is unknown, shared, someone else's
+    Memory, her own cross-class pair or a pair with shared evidence -- and
+    writes nothing. Owners and notebook admins keep their answers."""
+    c = _reader_with_memory(world)
+    assert [set(g) for g in _own_groups(world, c)] == [{"ko-c-dup-1", "ko-c-dup-2"}]
+    refused_body = {"detail": "Notebook not found"}
+    before = _kg_rows(world)
+    for source_id, into_id in (
+        ("ko-does-not-exist", "ko-does-not-exist-2"),   # unknown ids
+        (ORDINARY_OBJECT, ORDINARY_OBJECT_2),           # a shared pair
+        ("ko-c-dup-1", ORDINARY_OBJECT),                # her own into shared
+        (ORDINARY_OBJECT, "ko-c-dup-1"),                # shared into her own
+        ("ko-c-dup-1", MEMORY_OBJECT),                  # into A's Memory object
+        (MEMORY_OBJECT, MEMORY_OBJECT_2),               # A's own pair
+        ("ko-c-mixed", "ko-c-dup-1"),                   # her pair, shared evidence
+        ("ko-c-dup-1", "ko-c-dup-1"),                   # itself
+        ("ko-c-dup-1", "ko-does-not-exist"),            # her own into nothing
+    ):
+        response = _merge(world, c, source_id, into_id)
+        assert (response.status_code, response.json()) == (404, refused_body), (
+            source_id, into_id, response.text)
+        assert "X-User-Message" not in response.headers
+    assert _kg_rows(world) == before
+
+    merged = _merge(world, c, "ko-c-dup-2", "ko-c-dup-1")
+    assert merged.status_code == 200, merged.text
+    assert _object_row(world, "ko-c-dup-2")["status"] == "deprecated"
+    assert _own_groups(world, c) == []
+
+    # notebook admin and owner: unchanged answers
+    cross = _merge(world, world.a, MEMORY_OBJECT, ORDINARY_OBJECT)
+    assert cross.status_code == 409 and cross.json()["detail"] == CROSS_CLASS_MESSAGE
+    foreign = _merge(world, world.b, MEMORY_OBJECT, ORDINARY_OBJECT)
+    assert (foreign.status_code, foreign.json()) == (
+        404, {"detail": "Knowledge object not found"})
+    shared = _merge(world, world.b, ORDINARY_OBJECT, ORDINARY_OBJECT_2)
+    assert shared.status_code == 200, shared.text
+    # someone who cannot read the notebook: the read guard's 404, as before
+    outsider, _ = _register(world.client, "d00300005")
+    response = _merge(world, outsider, "ko-c-dup-1", MEMORY_OBJECT_2)
+    assert (response.status_code, response.json()) == (404, refused_body)
+
+
+def merges_on_a_mirror_keep_the_write_fence(world: World) -> None:
+    """On a mirror the read-level path does not apply: the knowledge:write
+    fence holds for every merge, as for every other knowledge write there. A
+    reader's own pair answers the 404 she got before; the owner's own pair and
+    an admin's shared pair the 409 ``notebook_mirrored``. Nothing is written."""
+    c = _reader_with_memory(world)
+    with world.repo._write() as db:
+        db.execute(world.q("UPDATE notebooks SET sync_origin='env-src' WHERE id=?"),
+                   (world.nb,))
+    before = _kg_rows(world)
+    response = _merge(world, c, "ko-c-dup-2", "ko-c-dup-1")
+    assert (response.status_code, response.json()) == (404, {"detail": "Notebook not found"})
+    for headers, source_id, into_id in (
+        (world.a, MEMORY_OBJECT, MEMORY_OBJECT_2),
+        (world.b, ORDINARY_OBJECT, ORDINARY_OBJECT_2),
+    ):
+        response = _merge(world, headers, source_id, into_id)
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["code"] == "notebook_mirrored"
+    assert _kg_rows(world) == before
+    # the groups still read (a GET): she sees them, the merge is fenced
+    assert [set(g) for g in _own_groups(world, c)] == [{"ko-c-dup-1", "ko-c-dup-2"}]
+
+
 def owner_duplicates_follow_the_memory_channel(world: World) -> None:
     """Service level: the same read with the private-Memory channel closed (an
     Agent token without ``read``) returns nothing, her own included."""

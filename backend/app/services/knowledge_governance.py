@@ -2389,9 +2389,15 @@ class KnowledgeGovernanceService:
 
     def merge_knowledge(
         self, notebook_id: str, source_id: str, payload: MergeRequest,
-        *, actor_id: Optional[str] = None,
+        *, actor_id: Optional[str] = None, own_pair_only: bool = False,
     ) -> RuleCard:
         """Fold ``source_id`` into ``payload.into_id``.
+
+        ``own_pair_only``: the caller lacks ``knowledge:write`` (the route's
+        read-level path); the store then merges only two of her own Memory
+        objects supported by her own Memory alone and raises
+        ``MergeNeedsKnowledgeWrite`` for any other pair, in the same locking
+        statement that classifies it.
 
         M1 refusal: a side derived from someone else's Memory (not
         ``actor_id``'s, or an orphan Memory source) raises ``KeyError`` — the
@@ -2412,7 +2418,8 @@ class KnowledgeGovernanceService:
         now = self._now()
         with self._write() as db:
             row = self.governance_store.merge_objects_in_transaction(
-                db, notebook_id, source_id, into_id, now, actor_id=actor_id
+                db, notebook_id, source_id, into_id, now, actor_id=actor_id,
+                own_pair_only=own_pair_only,
             )
             # merge deprecates one object in place (COUNT unchanged) — bump the
             # monotonic seq so _scale_index_version / _cluster_input_version fast

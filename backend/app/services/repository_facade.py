@@ -2888,14 +2888,16 @@ class RepositoryFacade:
 
     def merge_knowledge(
         self, notebook_id: str, source_id: str, payload: MergeRequest,
-        *, actor_id: Optional[str] = None,
+        *, actor_id: Optional[str] = None, own_pair_only: bool = False,
     ) -> RuleCard:
         """Merge one knowledge object into another —
         KnowledgeGovernanceService owns the orchestration (Task 16; the frozen
         commit→dirty→invalidate mirror-image order is unchanged).
-        Frozen-signature delegate; ``actor_id`` (M1) is additive."""
+        Frozen-signature delegate; ``actor_id`` (M1) and ``own_pair_only``
+        (the read-level own-Memory merge, 2026-10-22) are additive."""
         return self._runtime.knowledge_governance.merge_knowledge(
-            notebook_id, source_id, payload, actor_id=actor_id
+            notebook_id, source_id, payload, actor_id=actor_id,
+            own_pair_only=own_pair_only,
         )
 
     def search_notebook(self, notebook_id: str, query: str) -> NotebookSearchResponse:

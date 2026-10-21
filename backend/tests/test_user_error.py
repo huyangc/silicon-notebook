@@ -186,6 +186,13 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "唯一的动态实参是 app/domain/agent_tools.py 的中文模块常量 OWNER_ONLY_TIERS_MESSAGE(签发/修改 token 勾了「管理」「删除」而白名单里没有自己拥有的笔记本),AgentOwnerOnlyTierError 也只用它构造;另一个动态实参是同文件的中文模块常量 ANSWER_LINKS_REQUIRE_ASK_MESSAGE(开了「允许签发回答链接」却没有问答档),AgentAnswerLinksNeedAskError 只用它构造;都不拼异常原文。tests/test_agent_tools_vocabulary.py 对它们跑词汇守卫;tests/test_agent_tokens.py 覆盖签发与修改两条 422。"
     ),
     "app/api/knowledge_routes.py::merge_knowledge": (
+        "只读成员那条路(2026-10-22):唯一的动态实参是 MemoryKnowledgeMergeRefused."
+        "user_message,且只在它等于 app/domain/memory_kg_isolation.py 的中文模块常量 "
+        "MEMORY_MERGE_RETRY_MESSAGE 时才交给 user_error(其余拒绝一律答读守卫那句 404);"
+        "tests/test_memory_kg_isolation_vocabulary.py 对该常量跑词汇守卫。"
+    ),
+    "app/api/knowledge_routes.py::_merge_with_write": (
+        "有 knowledge:write 的那条路(原 merge_knowledge 的体,原样搬来)。"
         "唯一的动态实参是 MemoryKnowledgeMergeRefused.user_message:它只可能是 "
         "app/domain/memory_kg_isolation.py 的两个中文模块常量之一(CROSS_CLASS_MESSAGE,"
         "由 memory_merge_refusal 选出;MEMORY_MERGE_RETRY_MESSAGE,PostgreSQL 的 "
