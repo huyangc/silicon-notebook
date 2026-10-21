@@ -84,6 +84,9 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("ask", "intent"),
     ("ask", "intent", "stream"),
     ("ask", "stream"),
+    # 关联报告的就地预检:第二段是固定字面量,report_id 与范围都在请求体里,
+    # 整条路径可原样进诊断快照;少了它会落到兜底 {redacted},丢观测。
+    ("ask", "report-check"),
     ("ask", "jobs", None),
     ("ask", "jobs", None, "cancel"),
     ("conversations",),
@@ -153,6 +156,8 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("reports", None, "outline"),
     ("reports", None, "generate"),
     ("reports", None, "cancel"),
+    # 「就此追问」读报告生成时的检索范围:report_id 走 None 打 {id},末段是字面量。
+    ("reports", None, "followup"),
     ("indexing-pipeline",),
     ("question-suggestions",),
     # 公开分享链接的发布/撤销。第三段之后是固定字面量，token 只出现在
