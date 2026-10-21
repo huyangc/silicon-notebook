@@ -96,12 +96,15 @@ class GlobalAskStorePort(Protocol):
     def running_job_ids(self, conversation_id: str, user_id: str) -> list[str]: ...
     # Agent history reads (``GlobalAskService.agent_conversations`` /
     # ``agent_conversation_turn``): the owner's whole conversation list in
-    # ``list_conversations`` order; one row per live job with only the
-    # notebook-id paths ``_snapshot_notebook_ids`` reads (``{"conversation_id",
-    # "job_id", "status", "payload"}``); and the ``index``-th live job that is
-    # no longer running, oldest first, or ``None``.
+    # ``list_conversations`` order; every live job without its payload
+    # (``{"conversation_id", "job_id", "status", "updated_at"}``); one row per
+    # live job (or per listed ``job_ids``) with only the notebook-id paths
+    # ``_snapshot_notebook_ids`` reads (the head keys plus ``"payload"``); and
+    # the ``index``-th live job that is no longer running, oldest first, or
+    # ``None``.
     def all_conversations(self, user_id: str) -> list[GlobalConversationSummary]: ...
-    def job_scope_rows(self, user_id: str, conversation_id: str | None = None) -> list[dict]: ...
+    def job_scope_heads(self, user_id: str, conversation_id: str | None = None) -> list[dict]: ...
+    def job_scope_rows(self, user_id: str, conversation_id: str | None = None, *, job_ids: Sequence[str] | None = None) -> list[dict]: ...
     def finished_job_at(self, conversation_id: str, user_id: str, index: int) -> GlobalAskJob | None: ...
     # The ids among ``notebook_ids`` with no ``notebooks`` row at all: the
     # deleted participants a retained turn's owner read tolerates

@@ -17,11 +17,14 @@ grants go through the HTTP API; global turns are seeded as rows with
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from itertools import count
 
 import pytest
 
-from app.services.global_ask import GlobalAskError
+from app.models.global_ask import GlobalAskJob
+from app.services.global_ask import _AGENT_SCOPE_CACHE_ENTRIES, GlobalAskError
+from app.services.vector_cache import LRUProcessCache
 from tests.answer_link_service_cases import _notebook, _user
 from tests.global_ask_history_store_cases import global_job_payload
 from tests.global_ask_share_cases import insert_conversation, insert_job
@@ -240,23 +243,125 @@ async def a_turn_shifted_in_after_the_judgement_is_rechecked(env):
     # Before the change the conversation is visible and index 1 is ``second``.
     assert _read(env, cid, owner_id, [nb_a], 1)[1].job_id == second
     store = _store(env)
-    judged = store.job_scope_rows
+    judged = store.job_scope_heads
     changed = []
 
     def judged_then_changed(user_id, conversation_id=None):
-        rows = judged(user_id, conversation_id=conversation_id)
+        heads = judged(user_id, conversation_id=conversation_id)
         with store.database.write() as db:
             db.execute(store._sql("DELETE FROM global_ask_jobs WHERE id=?"), (first,))
         changed.append(_turn(env, cid, owner_id, [nb_b],
                              created_at="2026-01-01T00:00:03+00:00"))
-        return rows
+        return heads
 
-    env.monkeypatch.setattr(store, "job_scope_rows", judged_then_changed)
+    env.monkeypatch.setattr(store, "job_scope_heads", judged_then_changed)
     _refused(env, cid, owner_id, [nb_a], 1)
-    # The judgement ran on the old rows (all inside the allowlist); what was
+    # The judgement ran on the old jobs (all inside the allowlist); what was
     # read at index 1 is the shifted-in turn over nb_b, refused by the re-check.
     assert len(changed) == 1
     assert store.finished_job_at(cid, owner_id, 1).job_id == changed[0]
+
+
+# ------------------------------------------------------------------ the finished-turn cache
+
+
+def _spy_projection(env) -> list:
+    """Record which job ids each ``job_scope_rows`` call projects."""
+    store = _store(env)
+    projected: list = []
+    real = store.job_scope_rows
+
+    def spy(user_id, conversation_id=None, *, job_ids=None):
+        projected.append(sorted(job_ids) if job_ids is not None else None)
+        return real(user_id, conversation_id, job_ids=job_ids)
+
+    env.monkeypatch.setattr(store, "job_scope_rows", spy)
+    return projected
+
+
+def _cold(env):
+    """Forget every remembered scope, as a freshly started process would."""
+    env.monkeypatch.setattr(env.global_service, "_agent_scope_cache",
+                            LRUProcessCache(max_entries=_AGENT_SCOPE_CACHE_ENTRIES))
+
+
+async def remembered_scopes_answer_exactly_like_cold_ones(env):
+    owner, owner_id = _user(env)
+    nb_a, nb_b = _notebook(env, owner, "甲"), _notebook(env, owner, "乙")
+    inside = _conversation(env, owner_id)
+    inside_jobs = [_turn(env, inside, owner_id, [nb_a], anchors=[nb_a]) for _ in range(3)]
+    crossing = _conversation(env, owner_id)
+    crossing_jobs = [_turn(env, crossing, owner_id, [nb_a]),
+                     _turn(env, crossing, owner_id, [nb_a], citations=[nb_b])]
+    projected = _spy_projection(env)
+
+    def everything():
+        return (
+            env.global_service.agent_conversations(user_id=owner_id, allowed_notebook_ids=[nb_a]),
+            [_read(env, inside, owner_id, [nb_a], offset) for offset in range(4)],
+        )
+
+    cold = everything()
+    warm = everything()
+    _cold(env)
+    cold_again = everything()
+
+    assert cold == warm == cold_again
+    assert [item.summary.id for item in cold[0]] == [inside]
+    assert [job.job_id if job else None for _, job in cold[1]] == [*inside_jobs, None]
+    # Cold: every finished job of the owner projected once, then the one
+    # conversation's three from the cache. Warm: nothing projected at all.
+    assert projected[0] == sorted(inside_jobs + crossing_jobs)
+    assert len(projected) == 2 and projected[1] == sorted(inside_jobs + crossing_jobs)
+    # The conversation crossing the allowlist stays hidden on a warm read too.
+    _refused(env, crossing, owner_id, [nb_a])
+
+
+async def a_running_turn_is_never_remembered_and_is_judged_again_once_finished(env):
+    owner, owner_id = _user(env)
+    nb_a, nb_b = _notebook(env, owner, "甲"), _notebook(env, owner, "乙")
+    cid = _conversation(env, owner_id)
+    done = _turn(env, cid, owner_id, [nb_a])
+    stamp = "2026-01-02T00:00:00+00:00"  # after every ``_turn`` default stamp
+    running = _turn(env, cid, owner_id, [nb_a], status="running", created_at=stamp)
+    projected = _spy_projection(env)
+
+    assert _listed(env, owner_id, [nb_a]) == [(cid, (nb_a,), 1)]
+    assert _listed(env, owner_id, [nb_a]) == [(cid, (nb_a,), 1)]
+    # The running job is projected on every call; the finished one only once.
+    assert projected == [sorted([done, running]), [running]]
+
+    # It finishes citing nb_b, outside the allowlist: the conversation goes.
+    finished = GlobalAskJob.model_validate(global_job_payload(
+        running, cid, status="done", created_at=stamp, resolved=[nb_a], anchors=[nb_b],
+    ))
+    assert _store(env).save(finished, owner_id)
+    assert _listed(env, owner_id, [nb_a]) == []
+    _refused(env, cid, owner_id, [nb_a])
+    assert _listed(env, owner_id, [nb_a, nb_b]) == [(cid, tuple(sorted([nb_a, nb_b])), 2)]
+
+
+async def a_deleted_or_expired_turn_never_comes_back_through_the_cache(env):
+    owner, owner_id = _user(env)
+    nb_a, nb_b = _notebook(env, owner, "甲"), _notebook(env, owner, "乙")
+    expiring = _conversation(env, owner_id)
+    expired_job = _turn(env, expiring, owner_id, [nb_a])
+    replaced = _conversation(env, owner_id)
+    replaced_job = _turn(env, replaced, owner_id, [nb_a])
+    assert {row[0] for row in _listed(env, owner_id, [nb_a])} == {expiring, replaced}
+
+    store = _store(env)
+    past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    with store.database.write() as db:
+        db.execute(store._sql("UPDATE global_ask_jobs SET retained_until=? WHERE id=?"),
+                   (past, expired_job))
+        db.execute(store._sql("DELETE FROM global_ask_jobs WHERE id=?"), (replaced_job,))
+    # The remembered turn over nb_a is gone; what is left crosses the allowlist.
+    _turn(env, replaced, owner_id, [nb_a, nb_b])
+
+    assert _listed(env, owner_id, [nb_a]) == []
+    _refused(env, expiring, owner_id, [nb_a])
+    _refused(env, replaced, owner_id, [nb_a])
 
 
 CASES = {case.__name__: case for case in (
@@ -269,4 +374,7 @@ CASES = {case.__name__: case for case in (
     only_running_turn_is_visible_with_zero_turns_and_no_job,
     turn_is_read_oldest_first,
     a_turn_shifted_in_after_the_judgement_is_rechecked,
+    remembered_scopes_answer_exactly_like_cold_ones,
+    a_running_turn_is_never_remembered_and_is_judged_again_once_finished,
+    a_deleted_or_expired_turn_never_comes_back_through_the_cache,
 )}
