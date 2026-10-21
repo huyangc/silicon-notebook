@@ -240,17 +240,41 @@ class ReportStore:
             )
         return cursor.rowcount > 0
 
+    # The columns one list row is made of. ``section_count`` and
+    # ``generation_started_at`` live inside JSON columns; they are derived here,
+    # by the same two expressions ``row_to_dict`` evaluates in Python (the
+    # outline's length, the understanding contract's ``_generation_started_at``
+    # key), so a list does not carry every report's body, sections, references
+    # and whole understanding contract back just to count and read one key.
+    _SUMMARY_COLUMNS = (
+        "id, notebook_id, question, status, progress, error, created_by, "
+        "created_at, updated_at, depth, "
+        "json_array_length(COALESCE(NULLIF(outline_json, ''), '[]')) "
+        "AS section_count, "
+        "json_extract(COALESCE(NULLIF(understanding_json, ''), '{}'), "
+        "'$._generation_started_at') AS generation_started_at"
+    )
+
+    @staticmethod
+    def _summary(row, generation_started_at: str, section_count: int) -> dict:
+        """The one shape of a report's summary part, for a full row
+        (``row_to_dict``) and for a list row (``list_reports``) alike."""
+        return {"id": row["id"], "notebook_id": row["notebook_id"], "question": row["question"],
+                "status": row["status"], "progress": row["progress"], "error": row["error"],
+                "created_by": row["created_by"], "created_at": row["created_at"],
+                "generation_started_at": generation_started_at,
+                "updated_at": row["updated_at"], "depth": row["depth"],
+                "section_count": section_count}
+
     def row_to_dict(self, row, *, full: bool) -> dict:
         understanding = json.loads(row["understanding_json"] or "{}")
         generation_started_at = str(
             understanding.pop("_generation_started_at", "") or ""
         )
-        d = {"id": row["id"], "notebook_id": row["notebook_id"], "question": row["question"],
-             "status": row["status"], "progress": row["progress"], "error": row["error"],
-             "created_by": row["created_by"], "created_at": row["created_at"],
-             "generation_started_at": generation_started_at,
-             "updated_at": row["updated_at"], "depth": row["depth"],
-             "section_count": len(json.loads(row["outline_json"] or "[]"))}
+        d = self._summary(
+            row, generation_started_at,
+            len(json.loads(row["outline_json"] or "[]")),
+        )
         if full:
             understanding, sections, memory_used = split_report_memory_use(
                 understanding, json.loads(row["sections_json"] or "[]")
@@ -386,8 +410,12 @@ class ReportStore:
         deliberately want the whole notebook.  The predicate is pushed into
         SQL rather than applied to the result so paging/ordering semantics
         stay identical for both shapes.
+
+        One statement over the summary columns (``_SUMMARY_COLUMNS``): the
+        rows are the ones ``row_to_dict(full=False)`` builds, without reading
+        the bodies, sections and references of every report in the notebook.
         """
-        sql = "SELECT * FROM reports WHERE notebook_id = ?"
+        sql = f"SELECT {self._SUMMARY_COLUMNS} FROM reports WHERE notebook_id = ?"
         args: list = [notebook_id]
         if created_by is not None:
             sql += " AND created_by = ?"
@@ -395,7 +423,12 @@ class ReportStore:
         sql += " ORDER BY created_at DESC, id"
         with self.database.connect() as db:
             rows = db.execute(sql, args).fetchall()
-        return [self.row_to_dict(r, full=False) for r in rows]
+        return [
+            self._summary(
+                r, str(r["generation_started_at"] or ""), int(r["section_count"])
+            )
+            for r in rows
+        ]
 
     def delete_report(self, notebook_id: str, report_id: str) -> None:
         with self.database.write() as db:

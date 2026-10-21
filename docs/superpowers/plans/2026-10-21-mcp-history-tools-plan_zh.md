@@ -155,7 +155,9 @@ excerpts inside their own report」，而现行检索已不再让他人私人记
 （凭证主人本人的读取，按「检索层负责权限」的裁决，不在呈现层二次过滤），**标识符更严**：
 - 参考文献永不输出 `memory_id`、`memory_owner_id`（`CITATION_MEMORY_RECORD_FIELDS`）、`provenance`、`family_key`、
   `memory_used` 等内部字段；
-- 记录为他人记忆（`memory_id` 非空且 `memory_owner_id != owner`）的条目**不铸 `ref`**；
+- 记录为他人记忆（`memory_id` 非空且 `memory_owner_id != owner`）的条目**不铸 `ref`**，且其 `source_id`、
+  `element_id` 置为 `""`（保留键名、行形状不变，摘录与标签照给）：他人记忆的投影来源 id 与那条记忆一一对应，
+  等于同一个标识换了命名空间，不能因为「不是 `memory_id`」就放行；
 - 作者本人记忆：`object_type == "memory"` 的条目铸 `mem` ref（`n` = 报告所在笔记本，`m` = `object_id`），
   其余有 `source_id`+`element_id` 的条目铸 `el` ref；`read_reference` 打开时照常按属主与参与集复核
   （他人记忆来源对 `el` 也会被它拒绝）。
@@ -166,8 +168,11 @@ excerpts inside their own report」，而现行检索已不再让他人私人记
 
 **D10 失败小节原文不经 MCP 输出。** 报告正文里旧格式的「（本节生成失败:<原始错误>）」用公开投影同一个函数
 `neutralize_failure_notes(content_md, failed_errors)` 改写（`failed_errors` = `row["sections"]` 中 `failed is True`
-的 `error`，非字符串记 `""`）；顶层 `error` 只在含中文（`_messages.has_cjk`）时原样给出，否则给中性文案。
-与 `notebook_view`「失败任务的存储错误从不回显」同一原则。
+的 `error`，非字符串记 `""`）；顶层 `error`（仅 `status == "failed"` 时有）**含中文**（`_messages.has_cjk`）时原样
+给出，与网页作者本人看到的一致，因此可能带「<服务名> / 报告提纲 failed (timeout …)」这类服务名、诊断片段；
+不含中文的（异常原文）改给中性文案。小节失败的原始错误（`sections[].error`）是另一回事，永不原样输出：
+正文里的失败小节一律改写成固定中性句。这条判定与全局问答先例一致，不更严；代码注释与文档都不要写成
+「只有中文文案才原样给出」。
 
 **D11 列表工具的 `notebook_id` 省略 = 全部。** `list_conversations` / `list_reports` 省略 `notebook_id` 时列出
 白名单内、主人当前仍可读的**全部**笔记本（逐个 `user_can_read_notebook`，读不了的静默跳过，同
@@ -275,6 +280,11 @@ get_conversation(conversation_id: str, ctx, turn_offset: int = 0,
 list_reports(ctx, notebook_id: str = "", limit: int = 20, offset: int = 0)       tier="read"
 ```
 - 参数与鉴权同 §2.2（D11、D12）。数据：对目标笔记本逐个 `repo.list_reports(nb, created_by=owner)`（SQL 已按创建者下推）。
+  store 的 `list_reports` 只取摘要列、每个笔记本一条语句：`section_count`（大纲长度）与 `generation_started_at`
+  （理解契约里的 `_generation_started_at`）在 SQL 里由 JSON 列派生（SQLite `json_array_length`/`json_extract`，
+  PostgreSQL `jsonb_array_length`/`->>`），不再 `SELECT *` 把每份报告的正文、小节、参考文献整行拉回；网页
+  `GET /notebooks/{nb}/reports` 共用这条路径，逐字段不变（`tests/report_list_summary_cases.py` 两端钉住，含无大纲、
+  无理解契约的旧行）。不加 facade 成员。
 - 排序：`created_at` 时刻降序，并列 `report_id` 降序。返回 `{"items", "total", "next_offset"}`，行：
   ```json
   {"report_id": "rep-…", "notebook_id": "nb-…", "question": "<≤300 码点>", "status": "done",
@@ -301,6 +311,7 @@ get_report(report_id: str, ctx, notebook_id: str = "",
    "tier": "personal", "notebook_id": "<仅当来自挂载库且 ≠ 报告笔记本>", "ref": "<见 D9>",
    "content_is_untrusted_evidence": true}
   ```
+  记录为他人记忆的条目：无 `ref`，`source_id`/`element_id` 为 `""`（D9）。
 - 页形状（顶层 16 键 + `truncation`）：
   ```json
   {"report_id", "notebook_id", "question": "<≤2000>", "status", "depth", "created_at", "updated_at",
@@ -308,10 +319,16 @@ get_report(report_id: str, ctx, notebook_id: str = "",
    "references": [...], "next_reference_offset": 20, "total_references": 45,
    "error": "", "content_is_untrusted_evidence": true}
   ```
-  `error`：`status == "failed"` 时，存储值含中文则原样，否则「这份报告没有生成完成，请在网页上重新生成」；其余状态 `""`。
+  `error`：`status == "failed"` 时，存储值**含中文**则原样（与网页作者本人所见一致，可能带服务名等诊断片段），
+  否则「这份报告没有生成完成，请在网页上重新生成」；其余状态 `""`（D10）。
+- 续页：任一 offset > 0 的页，`question` 截到 `_CONTINUATION_QUESTION_CHARS`（200）码点（尾部 `…`），并多一个
+  `question_truncated`（bool，该页的 question 是否被截短；顶层 17 键 + `truncation`）；首页（两个 offset 都为 0）
+  照旧给 ≤ 2,000 码点的 question、不带 `question_truncated`。理由：调用方首页已拿到完整 question，续页每页重复
+  最多 2,000 字会吃掉预算的一半，读完 2 万字正文的调用次数翻倍。续页的 `question` 不在「原样留存」核对之内，
+  也不计入 `truncation`（由 `question_truncated` 披露）。
 - 收敛循环：`content_count` 初值 `6_000`（同 `citations._ELEMENT_PAGE_CHARS`），`reference_count = min(RESULT_LIMIT, 剩余)`；
   缩减顺序：正文半缩直到 ≤ 1_500 → 参考文献半缩到 1 → 正文继续半缩到 1 → `internal`。接受条件：`content` 原样、
-  参考文献 `(key, source_id, element_id)` 与 `ref` 序列原样、`report_id`/`notebook_id`/`question`/各游标原样。
+  参考文献 `(key, source_id, element_id)` 与 `ref` 序列原样、`report_id`/`notebook_id`/各游标原样；首页另核 `question` 原样。
   传 `reference_offset >= total_references` 得到空参考文献页（只读正文时这样传），`content_offset` 同理。
 
 ### 2.6 错误文案（新常量，各放在所属工具模块里）

@@ -250,18 +250,39 @@ class ReportStore:
             ).fetchone()
         return row is not None
 
+    # Mirror of the SQLite store's ``_SUMMARY_COLUMNS``: the columns one list
+    # row is made of, with ``section_count`` and ``generation_started_at``
+    # derived from the jsonb columns by the expressions ``row_to_dict``
+    # evaluates in Python.
+    _SUMMARY_COLUMNS = (
+        "id, notebook_id, question, status, progress, error, created_by, "
+        "created_at, updated_at, depth, "
+        "CASE WHEN jsonb_typeof(outline_json) = 'array' "
+        "THEN jsonb_array_length(outline_json) ELSE 0 END AS section_count, "
+        "understanding_json ->> '_generation_started_at' "
+        "AS generation_started_at"
+    )
+
+    @staticmethod
+    def _summary(row, generation_started_at: str, section_count: int) -> dict:
+        """The one shape of a report's summary part, for a full row
+        (``row_to_dict``) and for a list row (``list_reports``) alike."""
+        return {"id": row["id"], "notebook_id": row["notebook_id"], "question": row["question"],
+                "status": row["status"], "progress": row["progress"], "error": row["error"],
+                "created_by": row["created_by"],
+                "created_at": iso_timestamp(row["created_at"]),
+                "generation_started_at": generation_started_at,
+                "updated_at": iso_timestamp(row["updated_at"]), "depth": row["depth"],
+                "section_count": section_count}
+
     def row_to_dict(self, row, *, full: bool) -> dict:
         understanding = dict(json_value(row["understanding_json"], {}))
         generation_started_at = str(
             understanding.pop("_generation_started_at", "") or ""
         )
-        d = {"id": row["id"], "notebook_id": row["notebook_id"], "question": row["question"],
-             "status": row["status"], "progress": row["progress"], "error": row["error"],
-             "created_by": row["created_by"],
-             "created_at": iso_timestamp(row["created_at"]),
-             "generation_started_at": generation_started_at,
-             "updated_at": iso_timestamp(row["updated_at"]), "depth": row["depth"],
-             "section_count": len(json_value(row["outline_json"], []))}
+        d = self._summary(
+            row, generation_started_at, len(json_value(row["outline_json"], []))
+        )
         if full:
             understanding, sections, memory_used = split_report_memory_use(
                 understanding, list(json_value(row["sections_json"], []))
@@ -399,8 +420,9 @@ class ReportStore:
     def list_reports(self, notebook_id: str, *, created_by: str | None) -> list:
         """Mirror of the SQLite store — see its docstring for why ``created_by``
         is keyword-only and required, and why the predicate is pushed into SQL
-        instead of being applied to the returned rows."""
-        sql = "SELECT * FROM reports WHERE notebook_id = %s"
+        instead of being applied to the returned rows. One statement over the
+        summary columns (``_SUMMARY_COLUMNS``), not every report's body."""
+        sql = f"SELECT {self._SUMMARY_COLUMNS} FROM reports WHERE notebook_id = %s"
         args: list = [notebook_id]
         if created_by is not None:
             sql += " AND created_by = %s"
@@ -408,7 +430,12 @@ class ReportStore:
         sql += " ORDER BY created_at DESC, id COLLATE \"C\""
         with self.database.connect() as db:
             rows = db.execute(sql, args).fetchall()
-        return [self.row_to_dict(r, full=False) for r in rows]
+        return [
+            self._summary(
+                r, str(r["generation_started_at"] or ""), int(r["section_count"])
+            )
+            for r in rows
+        ]
 
     def delete_report(self, notebook_id: str, report_id: str) -> None:
         with self.database.write() as db:

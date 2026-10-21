@@ -21,11 +21,21 @@ What a report page carries and what it does not:
 * Identifiers are stricter than the web page. A reference never carries the
   memory record the report engine stored on it (``memory_id``,
   ``memory_owner_id``) or any other internal field, and one recorded as another
-  member's memory gets no ``ref`` at all. ``read_reference`` still re-runs the
-  full authorization of whatever a ``ref`` opens.
+  member's memory gets no ``ref`` and no ``source_id`` / ``element_id`` (the
+  keys stay, empty): the projection source of a memory is one-to-one with the
+  memory, so its id would be the same identifier under another name.
+  ``read_reference`` still re-runs the full authorization of whatever a
+  ``ref`` opens.
 * A failed section's raw error never leaves: the body note is rewritten to the
-  fixed neutral sentence (the same function the anonymous page uses) and the
-  top-level ``error`` is passed through only when it is already Chinese copy.
+  fixed neutral sentence, the same function the anonymous page uses. The
+  top-level ``error`` is the report's stored error as the web page shows it to
+  its author whenever it contains Chinese, which can carry a service name or
+  another diagnostic fragment; a stored error with no Chinese in it (an
+  exception text) is replaced by a neutral sentence.
+* A continuation page (either offset above zero) carries a shortened
+  ``question`` flagged ``question_truncated``: the caller has the whole
+  question from the first page, and repeating up to 2,000 characters of it on
+  every page costs a large share of each page's budget.
 """
 from __future__ import annotations
 
@@ -75,6 +85,9 @@ _REPORT_PAGE_CHARS = 6_000
 #: what its ``[kN]`` markers point at and can be paged separately.
 _CONTENT_FLOOR = 1_500
 _QUESTION_CHARS = 2_000
+#: The question on a continuation page (either offset above zero), which only
+#: reminds the caller what the report is about.
+_CONTINUATION_QUESTION_CHARS = 200
 _LIST_QUESTION_CHARS = 300
 
 _LIST_FIELD_LIMITS = {"question": _LIST_QUESTION_CHARS}
@@ -114,13 +127,20 @@ def _reference_row(
     memory (``object_type == "memory"``) as a ``mem`` ref, any other reference
     that names a source element as an ``el`` ref -- read in the report's
     notebook, whose participant set already includes a mounted library. A
-    reference the report engine recorded as another member's memory gets none.
+    reference the report engine recorded as another member's memory gets none,
+    and its ``source_id`` / ``element_id`` are emptied.
     """
     row = reference if isinstance(reference, Mapping) else {}
     object_type = str(row.get("object_type") or "")
-    source_id = str(row.get("source_id") or "")
-    element_id = str(row.get("element_id") or "")
     library_id = str(row.get("notebook_id") or "")
+    recorded_memory = str(row.get(_MEMORY_ID_FIELD) or "")
+    foreign_memory = bool(recorded_memory) and (
+        str(row.get(_MEMORY_OWNER_FIELD) or "") != owner_id
+    )
+    # Another member's memory is cited by its excerpt alone: the projection
+    # source and element ids are that memory's identity under another name.
+    source_id = "" if foreign_memory else str(row.get("source_id") or "")
+    element_id = "" if foreign_memory else str(row.get("element_id") or "")
     result: dict[str, Any] = {
         "key": str(row.get("key") or ""),
         "label": str(
@@ -136,10 +156,6 @@ def _reference_row(
     }
     if library_id and library_id != notebook_id:
         result["notebook_id"] = library_id
-    recorded_memory = str(row.get(_MEMORY_ID_FIELD) or "")
-    foreign_memory = bool(recorded_memory) and (
-        str(row.get(_MEMORY_OWNER_FIELD) or "") != owner_id
-    )
     if foreign_memory:
         ref = None
     elif object_type == MEMORY_OBJECT_TYPE:
@@ -164,20 +180,24 @@ def _failed_errors(sections: Any) -> list[str]:
 
 
 def _report_error(report: Mapping[str, Any]) -> str:
-    """The page's ``error``: only a failed report has one, and only Chinese
-    copy leaves as stored -- an English one is an exception text."""
+    """The page's ``error``: only a failed report has one.
+
+    A stored error containing Chinese is given as stored -- what the web page
+    shows the report's author, so it may carry a service name or another
+    diagnostic fragment. One with no Chinese in it is an exception text and is
+    replaced by the neutral notice."""
     if report.get("status") != "failed":
         return ""
     stored = str(report.get("error") or "")
     return stored if has_cjk(stored) else _FAILED_REPORT_NOTICE
 
 
-def _clip_question(question: str) -> tuple[str, int]:
-    """The question within ``_QUESTION_CHARS`` and how many characters were cut
-    (an ellipsis replaces the cut tail), so the cut shows up in ``truncation``."""
-    if len(question) <= _QUESTION_CHARS:
+def _clip_question(question: str, limit: int) -> tuple[str, int]:
+    """The question within ``limit`` characters and how many were cut (an
+    ellipsis replaces the cut tail)."""
+    if len(question) <= limit:
         return question, 0
-    return question[:_QUESTION_CHARS - 1] + "…", len(question) - (_QUESTION_CHARS - 1)
+    return question[:limit - 1] + "…", len(question) - (limit - 1)
 
 
 def _reference_identity(rows: Sequence[Mapping[str, Any]]) -> list[tuple[Any, ...]]:
@@ -201,6 +221,11 @@ def report_page(
     the cursors can never skip text or a reference. The body shrinks first,
     down to ``_CONTENT_FLOOR`` characters, then the references down to one,
     then the body again.
+
+    The first page (both offsets zero) carries the question up to
+    ``_QUESTION_CHARS`` and keeps it exact; a continuation page carries it
+    cut to ``_CONTINUATION_QUESTION_CHARS`` with ``question_truncated``, and
+    the question is not part of what must survive the budget there.
     """
     notebook_id = str(report.get("notebook_id") or "")
     content = neutralize_failure_notes(
@@ -211,7 +236,13 @@ def report_page(
         for item in report.get("references") or []
         if isinstance(item, Mapping)
     ]
-    question, question_omitted = _clip_question(str(report.get("question") or ""))
+    continuation = content_offset > 0 or reference_offset > 0
+    question, question_omitted = _clip_question(
+        str(report.get("question") or ""), _QUESTION_CHARS
+    )
+    if continuation:
+        question, cut = _clip_question(question, _CONTINUATION_QUESTION_CHARS)
+        question_omitted = 0
     error = _report_error(report)
     content_count = _REPORT_PAGE_CHARS
     reference_count = min(
@@ -242,6 +273,8 @@ def report_page(
             "error": error,
             "content_is_untrusted_evidence": True,
         }
+        if continuation:
+            payload["question_truncated"] = cut > 0
         packed = _budget_response(
             payload,
             field_limits={**_PAGE_FIELD_LIMITS, "content": max(1, content_count)},
@@ -252,10 +285,11 @@ def report_page(
             and _reference_identity(packed.get("references", []))
             == _reference_identity(page)
             and all(packed.get(key) == payload[key] for key in (
-                "report_id", "notebook_id", "question", "content_offset",
+                "report_id", "notebook_id", "content_offset",
                 "next_content_offset", "next_reference_offset",
                 "total_characters", "total_references",
             ))
+            and (continuation or packed.get("question") == question)
         ):
             return packed
         if len(text) > _CONTENT_FLOOR:
