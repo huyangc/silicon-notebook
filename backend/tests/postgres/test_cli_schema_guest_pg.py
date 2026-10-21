@@ -33,14 +33,12 @@ from app.repositories.schema_currency import (
 )
 from tests.cli_schema_guest_support import (
     CASES,
+    ROOT,
     CliContext,
     Opened,
-    ROOT,
     guest_seam_spy,
-    load_script,
     run_case,
 )
-
 
 pytestmark = [
     pytest.mark.postgres_integration,

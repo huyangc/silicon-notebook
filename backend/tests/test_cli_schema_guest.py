@@ -37,7 +37,6 @@ from tests.cli_schema_guest_support import (
     run_case,
 )
 
-
 OWNER_PASSWORD = "owner-secret-at-first-start"
 SHELL_PASSWORD = "a-different-operator-shell-secret"
 

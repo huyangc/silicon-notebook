@@ -23,7 +23,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SCANNED = ("backend/app", "scripts", "examples")
 CONSTRUCTORS = frozenset({
