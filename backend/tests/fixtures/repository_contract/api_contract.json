@@ -7883,7 +7883,7 @@
           "type": "object"
         },
         "LinkedReportRef": {
-          "description": "A report named by an in-flight job or summarised on a conversation: the\nid, and the title as it reads now (empty once the report was deleted).",
+          "description": "A report named by an in-flight job or summarised on a conversation.\n\n``title`` means two different things by where the ref is read:\n\n* on ``ConversationSummary`` / ``ConversationDetail`` it is the\n  ``reports.question`` snapshot of the conversation's LAST turn receipt, so\n  it does not change when the report is later deleted;\n* on ``ActiveAskJob`` it is the report's CURRENT question, read when the\n  conversation is opened, and empty once the report was deleted (the job\n  row stores the id only).\n\n``ConversationDetail`` inherits ``linked_report`` from the summary and fills\nit the same way the summary does.",
           "properties": {
             "report_id": {
               "title": "Report Id",

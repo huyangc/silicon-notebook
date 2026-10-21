@@ -7,6 +7,7 @@ from pydantic import (
     Field,
     PrivateAttr,
     StrictInt,
+    StringConstraints,
     field_validator,
     model_validator,
 )
@@ -383,15 +384,19 @@ def normalized_client_request_id(value: Optional[str]) -> Optional[str]:
 ASK_REPORT_ID_MAX_CHARS = 200
 
 
-def normalized_report_id(value: Optional[str]) -> Optional[str]:
-    """The one spelling of a linked-report id on a request: surrounding
-    whitespace dropped, blank read as no report (``None``). Both Ask request
-    models validate through it, so a padded or blank id never reaches the
-    report gate or an ``ask_jobs`` row."""
-    if value is None:
-        return None
-    value = value.strip()
-    return value or None
+def normalized_report_id(value: object) -> object:
+    """The one spelling of a linked-report id on an Ask request: surrounding
+    whitespace dropped BEFORE the length rail is checked, blank read as no
+    report (``None``). Both Ask request models validate through it (as a
+    ``before`` validator, so a padded id is judged by what it names), and a
+    padded or blank id never reaches the report gate or an ``ask_jobs`` row.
+    A non-string is passed on for pydantic to refuse.
+    ``ReportLinkCheckRequest`` states the same strip-then-check rule through
+    ``StringConstraints``; the only difference is that a check request has no
+    "no report" reading, so a blank id there is a 422."""
+    if isinstance(value, str):
+        return value.strip() or None
+    return value
 
 
 class AskIntentPreviewRequest(BaseModel):
@@ -408,9 +413,9 @@ class AskIntentPreviewRequest(BaseModel):
     # of being asked back. Blank reads as no report.
     report_id: Optional[str] = Field(default=None, max_length=ASK_REPORT_ID_MAX_CHARS)
 
-    @field_validator("report_id")
+    @field_validator("report_id", mode="before")
     @classmethod
-    def validate_report_id(cls, value: Optional[str]) -> Optional[str]:
+    def validate_report_id(cls, value: object) -> object:
         return normalized_report_id(value)
 
 
@@ -526,9 +531,9 @@ class AskRequest(BaseModel):
     def validate_client_request_id(cls, value: Optional[str]) -> Optional[str]:
         return normalized_client_request_id(value)
 
-    @field_validator("report_id")
+    @field_validator("report_id", mode="before")
     @classmethod
-    def validate_report_id(cls, value: Optional[str]) -> Optional[str]:
+    def validate_report_id(cls, value: object) -> object:
         return normalized_report_id(value)
 
     @field_validator("asked_at")
@@ -563,7 +568,12 @@ class ReportLinkCheckRequest(BaseModel):
     the verdict depends on -- the report, the submission mode and the two scope
     dimensions -- never the question text."""
 
-    report_id: str = Field(min_length=1, max_length=ASK_REPORT_ID_MAX_CHARS)
+    report_id: Annotated[
+        str,
+        StringConstraints(
+            strip_whitespace=True, min_length=1, max_length=ASK_REPORT_ID_MAX_CHARS
+        ),
+    ]
     mode: str = "chunk"
     source_scope: Optional[SourceScope] = None
     base_scope: Optional[BaseNotebookScope] = None
@@ -582,6 +592,14 @@ class ReportLinkCheck(BaseModel):
     readable: bool
     reason_code: str = ""
     reason: str = ""
+
+    @model_validator(mode="after")
+    def _reason_exactly_when_unreadable(self) -> "ReportLinkCheck":
+        if self.readable and (self.reason_code or self.reason):
+            raise ValueError("a readable report check carries no reason")
+        if not self.readable and not self.reason_code:
+            raise ValueError("an unreadable report check must carry its reason_code")
+        return self
 
 
 class AnswerAnchor(BaseModel):
@@ -1038,10 +1056,47 @@ class LinkedReportReceipt(BaseModel):
         default_factory=list, exclude_if=lambda value: not value
     )
 
+    @model_validator(mode="after")
+    def _skipped_receipt_reports_nothing_read(self) -> "LinkedReportReceipt":
+        """A skipped turn read nothing, so it may not report reading something:
+        no sections, no summary clipping, no restored/gone/over-budget counts
+        and no personal-memory ids (the share disclosure counts those for a
+        ``read`` turn only)."""
+        if self.status != "skipped":
+            return self
+        carried = [
+            name
+            for name, present in (
+                ("sections", bool(self.sections)),
+                ("summary_truncated", self.summary_truncated),
+                ("evidence_restored", self.evidence_restored != 0),
+                ("evidence_gone", self.evidence_gone != 0),
+                ("evidence_over_budget", self.evidence_over_budget != 0),
+                ("memory_used", bool(self.memory_used)),
+            )
+            if present
+        ]
+        if carried:
+            raise ValueError(
+                "a skipped report receipt cannot carry " + ", ".join(carried)
+            )
+        return self
+
 
 class LinkedReportRef(BaseModel):
-    """A report named by an in-flight job or summarised on a conversation: the
-    id, and the title as it reads now (empty once the report was deleted)."""
+    """A report named by an in-flight job or summarised on a conversation.
+
+    ``title`` means two different things by where the ref is read:
+
+    * on ``ConversationSummary`` / ``ConversationDetail`` it is the
+      ``reports.question`` snapshot of the conversation's LAST turn receipt, so
+      it does not change when the report is later deleted;
+    * on ``ActiveAskJob`` it is the report's CURRENT question, read when the
+      conversation is opened, and empty once the report was deleted (the job
+      row stores the id only).
+
+    ``ConversationDetail`` inherits ``linked_report`` from the summary and fills
+    it the same way the summary does."""
 
     report_id: str
     title: str = ""
