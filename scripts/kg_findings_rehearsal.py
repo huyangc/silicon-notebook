@@ -77,8 +77,17 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
 from typing import (
-    Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence,
-    Set, Tuple,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
 )
 
 import numpy as np

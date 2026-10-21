@@ -39,17 +39,17 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 # Storage-level contract (PR-1, SQLite v97 / PostgreSQL 0077): the detail-row
 # columns and the per-notebook row cap the write entry enforces, plus the
-# ledger-wide contract stamp. Re-exported so rule code has one import.
-from app.domain.kg_analysis_contracts import (  # noqa: F401  (re-exports)
-    FINDING_ROW_FIELDS,
-    KG_FINDINGS_ROWS_MAX,
-    LEDGER_CONTRACT_KEY,
-    LEDGER_CONTRACT_VERSION,
-    check_ledger_contract,
-    ledger_row_predates_findings,
-    stamp_ledger_contract,
+# ledger-wide contract stamp. Re-exported so rule code has one import (the
+# redundant ``X as X`` alias is the explicit re-export form).
+from app.domain.kg_analysis_contracts import FINDING_ROW_FIELDS as FINDING_ROW_FIELDS
+from app.domain.kg_analysis_contracts import KG_FINDINGS_ROWS_MAX as KG_FINDINGS_ROWS_MAX
+from app.domain.kg_analysis_contracts import LEDGER_CONTRACT_KEY as LEDGER_CONTRACT_KEY
+from app.domain.kg_analysis_contracts import LEDGER_CONTRACT_VERSION as LEDGER_CONTRACT_VERSION
+from app.domain.kg_analysis_contracts import check_ledger_contract as check_ledger_contract
+from app.domain.kg_analysis_contracts import (
+    ledger_row_predates_findings as ledger_row_predates_findings,
 )
-
+from app.domain.kg_analysis_contracts import stamp_ledger_contract as stamp_ledger_contract
 
 # ------------------------------------------------------------------ rule codes
 # A tier (§四): the user can act on these from the panel.

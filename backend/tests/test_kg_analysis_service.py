@@ -23,6 +23,7 @@ import threading
 import pytest
 
 from app.core.config import Settings
+from app.domain.kg_analysis_contracts import ARTIFACT_FINDINGS, stamp_ledger_contract
 from app.models.kg_analysis import KgAnalysisResponse, SourceProfilePageResponse
 from app.services.kg_analysis import (
     ABSENCE_EXPECTED,
@@ -54,7 +55,6 @@ from app.services.kg_analysis_precompute import (
     CLUSTER_DEPENDENT_ARTIFACT_KINDS,
     stamp_cluster_seq,
 )
-from app.domain.kg_analysis_contracts import ARTIFACT_FINDINGS, stamp_ledger_contract
 from app.services.knowledge_contracts import (
     COMMUNITY_OVERVIEW_MAX,
     COMMUNITY_TOP_MEMBERS_MAX,
@@ -220,10 +220,14 @@ def _profiles_payload(**overrides) -> dict:
 def _findings_payload() -> dict:
     """问题清单账本 payload 的真实形状:跑一次纯规则引擎(空库 → 每条规则 skipped),
     再经 `finalize_findings` 补上对比摘要 —— 不手抄,形状漂移不会让夹具自洽地错。"""
-    from app.services.kg_findings import (
-        FindingsObjectTally, GraphStructure, compute_findings, finalize_findings,
-    )
     import numpy as np
+
+    from app.services.kg_findings import (
+        FindingsObjectTally,
+        GraphStructure,
+        compute_findings,
+        finalize_findings,
+    )
 
     structure = GraphStructure.from_edges(np.empty(0), np.empty(0), 0)
     draft = compute_findings(

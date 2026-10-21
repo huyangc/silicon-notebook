@@ -21,21 +21,37 @@ import pytest
 
 from app.domain import kg_findings_contracts as contracts
 from app.domain.kg_analysis_contracts import (
-    ARTIFACT_FINDINGS, ARTIFACT_KINDS, CLUSTER_SEQ_PAYLOAD_KEY,
+    ARTIFACT_FINDINGS,
+    ARTIFACT_KINDS,
+    CLUSTER_SEQ_PAYLOAD_KEY,
 )
 from app.domain.kg_findings_contracts import (
-    ACTION_DELETE_SOURCE, ACTION_RELINK, ACTION_REPARSE_SOURCE, ACTION_REVIEW_MERGE,
-    FINDING_EVIDENCE_UNITS, FINDINGS_PAYLOAD_UNITS, LEDGER_CONTRACT_KEY,
-    LEDGER_CONTRACT_VERSION, NOTEBOOK_SUBJECT_KEY, RULES_VERSION,
-    check_findings_comparison, check_findings_ledger, check_ledger_contract,
-    finding_actions, ledger_row_predates_findings, source_pair_key,
+    ACTION_DELETE_SOURCE,
+    ACTION_RELINK,
+    ACTION_REPARSE_SOURCE,
+    ACTION_REVIEW_MERGE,
+    FINDING_EVIDENCE_UNITS,
+    FINDINGS_PAYLOAD_UNITS,
+    LEDGER_CONTRACT_KEY,
+    LEDGER_CONTRACT_VERSION,
+    NOTEBOOK_SUBJECT_KEY,
+    RULES_VERSION,
+    check_findings_comparison,
+    check_findings_ledger,
+    check_ledger_contract,
+    finding_actions,
+    ledger_row_predates_findings,
+    source_pair_key,
     stamp_ledger_contract,
 )
 from app.domain.kg_merge_seed import concept_seed_v1
 from app.services import kg_findings
 from app.services.kg_analysis_precompute import CanonicalEdgeTableBuilder
 from app.services.kg_findings import (
-    FindingsObjectTally, GraphStructure, SourceFacts, compute_findings,
+    FindingsObjectTally,
+    GraphStructure,
+    SourceFacts,
+    compute_findings,
     finalize_findings,
 )
 
@@ -1360,8 +1376,10 @@ def test_findings_kind_is_registered_with_its_producer():
     (cluster-dependent) but NOT the board partition — a board recast does not
     void it, and the backfill path stamps it with an integer merge generation."""
     from app.domain.kg_analysis_contracts import (
-        BOARD_DEPENDENT_ARTIFACT_KINDS, CLUSTER_DEPENDENT_ARTIFACT_KINDS,
-        OPTIONAL_ARTIFACT_KINDS, REQUIRED_ARTIFACT_KINDS,
+        BOARD_DEPENDENT_ARTIFACT_KINDS,
+        CLUSTER_DEPENDENT_ARTIFACT_KINDS,
+        OPTIONAL_ARTIFACT_KINDS,
+        REQUIRED_ARTIFACT_KINDS,
     )
     from app.services.kg_analysis_precompute import stamp_cluster_seq
 
