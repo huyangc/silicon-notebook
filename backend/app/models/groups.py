@@ -192,6 +192,10 @@ class GroupLeavePreviewNotebook(BaseModel):
     notebook_id: str
     name: str = ""
     memory_count: int
+    # 这本库正在删除窗口里(所有者已删除,`delete_after` 起永久删除):退群后连
+    # 导出的机会也没了,界面标「即将删除」并提示先导出(裁决 B12)。
+    pending_delete: bool = False
+    delete_after: Optional[str] = None
 
 
 class GroupLeavePreview(BaseModel):

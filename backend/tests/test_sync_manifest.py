@@ -152,6 +152,11 @@ def test_notebooks_target_owned_columns_are_pinned():
         "is_shared",
         "share_token",
         "sync_origin",
+        # The deletion window (SQLite v100 / PostgreSQL 0081) is the target's own.
+        "delete_after",
+        "delete_requested_at",
+        "delete_requested_by",
+        "status_before_delete",
     )
 
 

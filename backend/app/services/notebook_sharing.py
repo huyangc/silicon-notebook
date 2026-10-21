@@ -1392,8 +1392,9 @@ class NotebookSharingService:
         self, notebook_id: str, user_id: str
     ) -> bool:
         """`DELETE /api/notebooks/{id}` 依赖专属（codex #659 R6 P2）——见
-        store 层同名方法的完整理由。唯一消费点是 `deps.require_notebook_
-        delete`,其它任何调用点都不得复用它。"""
+        store 层同名方法的完整理由。消费点只有 `deps.require_notebook_
+        delete` 与 `deps.require_notebook_cancel_delete`(删除窗口里主人撤销),
+        其它任何调用点都不得复用它。"""
         return self._store.user_owns_notebook_regardless_of_lifecycle(
             notebook_id, user_id
         )

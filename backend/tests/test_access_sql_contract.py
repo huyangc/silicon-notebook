@@ -863,6 +863,12 @@ _CALLABLE_PROBES = {
     "live_read_access_exists_clause": lambda mod: mod.live_read_access_exists_clause(
         "m"
     ),
+    # 删除整本笔记本的一天窗口:窗口谓词与「存活或窗口开放」的导出/转移读谓词。
+    "notebook_delete_window_open_sql": lambda mod: mod.notebook_delete_window_open_sql(
+        "nb"
+    ),
+    "notebook_delete_due_sql": lambda mod: mod.notebook_delete_due_sql("nb"),
+    "export_access_exists_clause": lambda mod: mod.export_access_exists_clause("m"),
     "read_access_after_group_exit_clause": (
         lambda mod: mod.read_access_after_group_exit_clause(
             user_ref="outer.user_id", group_ref="outer.group_id"

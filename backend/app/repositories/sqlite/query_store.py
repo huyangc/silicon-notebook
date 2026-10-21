@@ -45,6 +45,7 @@ from app.repositories.pending_action_rows import (
     RUNNING_ASK_ROWS,
     RUNNING_ASK_STATUSES,
     merge_running_asks,
+    pending_delete_notice_row,
     running_ask_item,
 )
 from app.repositories.sqlite.database import SqliteDatabase
@@ -79,6 +80,7 @@ from app.domain.global_ask_retention import (
     retained_gone_participant_sql,
 )
 from app.domain.knowledge_contracts import USABLE_STATUSES
+from app.domain.notebook_delete_grace import stored_instant_text
 from app.domain.notebook_scale import NotebookScaleFacts
 from app.domain.global_ask_attribution import attribution_sql
 
@@ -2260,6 +2262,62 @@ class QueryStore:
             )
             for row in rows
         ]
+
+    def pending_delete_notices(
+        self,
+        user_id: str,
+        *,
+        now: Any,
+        notebook_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """The deletion-window notices ``user_id`` sees
+        (``app.domain.notebook_delete_grace``): every notebook whose window is
+        open at ``now`` and that the user can read (the read predicate without
+        the lifecycle term -- the window is exactly when that term is false),
+        oldest deadline first. Each item: ``notebook_id``, ``name``,
+        ``delete_after`` (UTC ISO), ``is_owner``, ``memory_count`` (the user's
+        own Memory there, every status -- what the export holds) and
+        ``transferable_count`` (the confirmed ones the move rule accepts:
+        not ``promotion_state='proposed'``).
+
+        Without ``notebook_id`` only the notice audience is listed: the owner
+        and readers holding at least one Memory there (ruling B3). With it,
+        any reader of that one notebook gets its row (the explanation of
+        ``GET /notebooks/{id}``'s 404).
+
+        Driven by the partial ``idx_notebooks_pending_delete_due``: with no
+        notebook inside a window the statement reads an empty index
+        (plan pinned in ``tests/test_notebook_delete_grace_plans.py``)."""
+        params: list[Any] = [user_id, user_id, user_id, stored_instant_text(now)]
+        where = [
+            access_sql.notebook_delete_window_open_sql("nb"),
+            access_sql.read_access_clause("nb", "nm"),
+        ]
+        params.extend(access_sql.read_access_params(user_id))
+        if notebook_id is None:
+            where.append(
+                "(nb.created_by = ? OR EXISTS (SELECT 1 FROM memory_items om "
+                "WHERE om.created_by = ? AND om.notebook_id = nb.id))"
+            )
+            params.extend((user_id, user_id))
+        else:
+            where.append("nb.id = ?")
+            params.append(notebook_id)
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT nb.id AS notebook_id, nb.name AS name, "
+                "nb.delete_after AS delete_after, "
+                "(nb.created_by = ?) AS is_owner, "
+                "(SELECT COUNT(*) FROM memory_items m WHERE m.created_by = ? "
+                "AND m.notebook_id = nb.id) AS memory_count, "
+                "(SELECT COUNT(*) FROM memory_items m WHERE m.created_by = ? "
+                "AND m.notebook_id = nb.id AND m.status = 'confirmed' "
+                "AND m.promotion_state <> 'proposed') AS transferable_count "
+                "FROM notebooks nb WHERE " + " AND ".join(where)
+                + " ORDER BY nb.delete_after, nb.id",
+                params,
+            ).fetchall()
+        return [pending_delete_notice_row(row) for row in rows]
 
     def pending_actions_projection_rows(self, user_id: str) -> dict:
         items: list[dict[str, Any]] = []

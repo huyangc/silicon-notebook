@@ -759,7 +759,7 @@ def plain_memory(world: World, notebook_id: str, user: Any, key: str, status: st
 
 
 def export_text(world: World, user: Any, notebook_id: str) -> str:
-    return "".join(service(world).export_markdown(notebook_id, user.id, "Shared"))
+    return "".join(service(world).export_markdown(notebook_id, user.id).pieces)
 
 
 class _CountingConnection:
@@ -1441,8 +1441,9 @@ def case_mixed_statuses_are_counted_exported_and_deleted_together(world: World) 
 def case_export_needs_read_access_and_is_lazy(world: World) -> None:
     stranger = world.repo._runtime.identity.create_user("s00100005", "pw123456")
     try:
-        service(world).export_markdown(world.shared, stranger.id, "Shared")
-    except PermissionError:
+        service(world).export_markdown(world.shared, stranger.id)
+    except KeyError:
+        # The snapshot's own first statement refuses a non-reader (HTTP 404).
         pass
     else:  # pragma: no cover - the assertion below explains the failure
         raise AssertionError("a non-reader was handed an export")
@@ -2089,13 +2090,13 @@ def case_an_export_whose_pages_disagree_with_its_count_is_refused(
     store = service(world).store
     original = store._export_page_on
 
-    def drop_the_first_row(db, notebook_id, user_id, after, page):
-        rows, cursor = original(db, notebook_id, user_id, after, page)
+    def drop_the_first_row(db, notebook_id, user_id, after, page, *rest):
+        rows, cursor = original(db, notebook_id, user_id, after, page, *rest)
         return (rows[1:] if after is None else rows), cursor
 
     monkeypatch.setattr(store, "_export_page_on", drop_the_first_row)
     try:
-        service(world).export_markdown(world.shared, world.alice.id, "Shared")
+        service(world).export_markdown(world.shared, world.alice.id)
     except RuntimeError as exc:
         assert "1 of 2" in str(exc)
     else:  # pragma: no cover - the assertion below explains the failure
@@ -2134,7 +2135,7 @@ def case_an_export_over_the_byte_limit_is_refused_early(
 
     monkeypatch.setattr(store, "_export_page_on", counting)
     try:
-        svc.export_markdown(world.shared, world.alice.id, "Shared")
+        svc.export_markdown(world.shared, world.alice.id)
     except MemoryExportTooLarge as exc:
         assert (exc.memory_count, exc.limit_bytes) == (3, limit)
     else:  # pragma: no cover - the assertion below explains the failure

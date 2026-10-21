@@ -28,7 +28,10 @@ from app.services.embedding import FakeEmbedder
 from tests.model_testkit import bind_all_embedding_clients
 
 EMBED_DIM = 16
-NON_LIVE_STATES = ("deleting", "copying", "importing")
+# ``pending_delete`` is seeded without a deadline here (a closed window): every
+# reader, the export included, must hide it. The open window -- where the
+# export alone comes back -- is ``assert_open_window_opens_only_the_export``.
+NON_LIVE_STATES = ("deleting", "copying", "importing", "pending_delete")
 _NOW = "2026-10-01T00:00:00+00:00"
 
 
@@ -145,6 +148,18 @@ def _promotion_gate_passed(world: World, user_id: str, memory_id: str) -> bool:
     raise AssertionError("a stale snapshot must never be promoted")
 
 
+def _exports(store: Any, notebook_id: str, user_id: str) -> bool:
+    """The export snapshot hands this user's Memory out (a hidden notebook is
+    a ``KeyError``; a closed deletion window is its subclass)."""
+    try:
+        snapshot = store.memory_export_snapshot(
+            notebook_id, user_id, page_size=50, max_bytes=10**6, now=_NOW
+        )
+    except KeyError:
+        return False
+    return bool(snapshot.items)
+
+
 def reader_results(world: World, user: Any) -> dict[str, bool]:
     """Whether each Memory / ask / report reader returns this user's rows."""
     runtime = world.repo._runtime
@@ -181,9 +196,7 @@ def reader_results(world: World, user: Any) -> dict[str, bool]:
         "answer_memory_links": store.answer_memory_links(nb, user.id, [f"ans-{tag}"])
         == {f"ans-{tag}": confirmed_id},
         "propose_promotion_on": _promotion_gate_passed(world, user.id, confirmed_id),
-        "export_snapshot": bool(
-            store.memory_export_snapshot(nb, user.id, page_size=50, max_bytes=10**6)
-        ),
+        "export_snapshot": _exports(store, nb, user.id),
         "list_memories.items": {item.id for item in page.items}
         == {candidate_id, confirmed_id},
         "list_memories.count": page.total_count == 2,
@@ -222,6 +235,44 @@ def assert_readers_follow_lifecycle(world: World, state: str) -> None:
     for user in (world.owner, world.member):
         again = reader_results(world, user)
         assert all(again.values()), {k: v for k, v in again.items() if not v}
+
+
+def assert_open_window_opens_only_the_export(world: World) -> None:
+    """A notebook inside an OPEN deletion window (deadline after ``_NOW``):
+    every Memory / ask / report reader still hides it -- for the owner and
+    the member alike -- except the export snapshot, the window's one Memory
+    read (with the transfer's id listing); closing the window (deadline
+    passed, not promoted) closes the export too."""
+    world.write(
+        "UPDATE notebooks SET status='pending_delete',status_before_delete='ready',"
+        "delete_after=? WHERE id=?",
+        ("2026-10-02T00:00:00+00:00", world.notebook_id),
+    )
+    store = world.repo._runtime.memory_store
+    for user in (world.owner, world.member):
+        seen = reader_results(world, user)
+        assert {k for k, v in seen.items() if v} == {"export_snapshot"}, seen
+        _candidate, confirmed_id = world.memories[user.id]
+        assert store.delete_window_transferable_ids(
+            world.notebook_id, user.id, now=_NOW
+        ) == [confirmed_id]
+        assert store.delete_window_state(world.notebook_id, user.id, now=_NOW) == "open"
+    world.write(
+        "UPDATE notebooks SET delete_after=? WHERE id=?",
+        ("2026-09-30T00:00:00+00:00", world.notebook_id),
+    )
+    for user in (world.owner, world.member):
+        assert not any(reader_results(world, user).values())
+        assert store.delete_window_state(
+            world.notebook_id, user.id, now=_NOW
+        ) == "closed"
+    world.write(
+        "UPDATE notebooks SET status='ready',status_before_delete='',"
+        "delete_after=NULL WHERE id=?",
+        (world.notebook_id,),
+    )
+    for user in (world.owner, world.member):
+        assert all(reader_results(world, user).values())
 
 
 # ---------------------------------------------------------------- the writes

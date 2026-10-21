@@ -10,23 +10,35 @@ from app.models.memory import MemoryRevision, MemoryWrite
 from app.models.identity import AgentProfile, AgentTokenAccess, AgentTokenSummary
 from app.models.memory import (
     MemberExitSnapshot,
+    MemoryExportSnapshot,
     MemoryNotebookOption,
     MemoryRecord,
     PaginatedMemories,
 )
 from app.core.json_safety import strict_json_dumps
 from app.core.memory_inputs import MemoryExportTooLarge
+from app.domain.notebook_delete_grace import (
+    WINDOW_CLOSED,
+    WINDOW_OPEN,
+    classify_delete_window,
+    instant_text,
+    stored_instant_text,
+)
 from app.repositories.identity_errors import (
     AgentTokenAccessConflictError,
     AgentTokenInactiveError,
 )
+from app.repositories.ports import DeleteWindowClosedError
 from app.repositories.sqlite.access_sql import (
     GRANT_PROBE_SQL,
     MEMBER_PROBE_SQL,
     NOTEBOOK_LIVE_SQL,
+    NOTEBOOK_PENDING_DELETE_STATUS,
     NOTEBOOK_READ_SQL,
+    export_access_exists_clause,
     grant_access_expr,
     grant_probe_params,
+    notebook_delete_window_open_sql,
     read_access_after_group_exit_clause,
     read_access_clause,
     live_read_access_exists_clause,
@@ -789,23 +801,88 @@ class MemoryStore:
         return row
 
     def memory_for_user(
-        self, memory_id: str, user_id: str, *, live_only: bool = True
+        self,
+        memory_id: str,
+        user_id: str,
+        *,
+        live_only: bool = True,
+        delete_window_now: Any = None,
     ) -> MemoryRecord:
         # live_only=False 只给「这行 Memory 还在不在」的存在性复读用(抽图作业
         # 收尾);读权照旧,只是不看笔记本存活——删库期间不能把它误判成已删。
-        access = (
-            self._read_access_clause() if live_only else read_access_exists_clause("m")
-        )
+        # delete_window_now 只给删除窗口期的「转移到我的笔记本」读源用:读权照旧,
+        # 存活放宽成「存活或窗口在这一刻还开着」(`export_access_exists_clause`)。
+        params: tuple[Any, ...] = (memory_id, user_id, *read_access_params(user_id))
+        if delete_window_now is not None:
+            access = export_access_exists_clause("m")
+            params += (stored_instant_text(delete_window_now),)
+        elif live_only:
+            access = self._read_access_clause()
+        else:
+            access = read_access_exists_clause("m")
         with self.database.connect() as db:
             row = db.execute(
                 f"SELECT {self._select_columns()} FROM memory_items m "
                 "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
                 f"WHERE m.id=? AND m.created_by=? AND {access}",
-                (memory_id, user_id, *read_access_params(user_id)),
+                params,
             ).fetchone()
         if row is None:
             raise KeyError(memory_id)
         return self._record(row)
+
+    # ---------------------------------------------- the deletion window's exits
+
+    @staticmethod
+    def _delete_window_row_on(
+        db: Any, notebook_id: str, user_id: str, now: str
+    ) -> Any:
+        """One notebook's standing for the caller's two Memory exits:
+        ``classify_delete_window`` reads this row (read predicate without the
+        lifecycle term, ``NOTEBOOK_LIVE_SQL``, the window predicate at
+        ``now``)."""
+        return db.execute(
+            "SELECT nb.name AS name, nb.status AS status, "
+            "nb.delete_after AS delete_after, "
+            f"({read_access_clause('nb', 'nm')}) AS readable, "
+            f"(nb.{NOTEBOOK_LIVE_SQL}) AS live, "
+            f"({notebook_delete_window_open_sql('nb')}) AS window_open "
+            "FROM notebooks nb WHERE nb.id=?",
+            (*read_access_params(user_id), now, notebook_id),
+        ).fetchone()
+
+    def delete_window_state(
+        self, notebook_id: str, user_id: str, *, now: Any
+    ) -> str | None:
+        """``classify_delete_window`` of one notebook for one caller at ``now``
+        (``"live"`` / ``"open"`` / ``"closed"`` / ``None``)."""
+        with self.database.connect() as db:
+            row = self._delete_window_row_on(
+                db, notebook_id, user_id, stored_instant_text(now)
+            )
+        return classify_delete_window(row)
+
+    def delete_window_transferable_ids(
+        self, notebook_id: str, user_id: str, *, now: Any
+    ) -> list[str]:
+        """The caller's own Memory a deletion-window transfer moves: every
+        ``confirmed`` item the move rule accepts (not
+        ``promotion_state='proposed'``), oldest first, under the same window
+        predicate as the export. Candidates and proposed items stay behind
+        (the notice counts them so the interface can say how many)."""
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT m.id FROM memory_items m WHERE m.notebook_id=? "
+                "AND m.created_by=? AND m.status='confirmed' "
+                "AND m.promotion_state<>'proposed' AND "
+                + export_access_exists_clause("m")
+                + " ORDER BY m.created_at,m.id",
+                (
+                    notebook_id, user_id, *read_access_params(user_id),
+                    stored_instant_text(now),
+                ),
+            ).fetchall()
+        return [row["id"] for row in rows]
 
     def memory_by_answer(self, user_id: str, answer_id: str) -> MemoryRecord | None:
         with self.database.connect() as db:
@@ -1766,35 +1843,49 @@ class MemoryStore:
         return MemberExitSnapshot(token is not None, keeps, count)
 
     def group_exit_memory_preview(
-        self, group_id: str, user_id: str
+        self, group_id: str, user_id: str, *, now: Any = None
     ) -> list[dict[str, Any]]:
         """Mirror of the PostgreSQL twin: the notebooks ``user_id`` reads
         now but would stop reading once their ``group_members`` row in
         ``group_id`` is gone, each with how many of the user's own Memory items
         (every status) it holds. Only notebooks holding such Memory are listed;
-        empty when the user is not a member of the group."""
+        empty when the user is not a member of the group.
+
+        A notebook inside its deletion window is listed too (ruling B12):
+        leaving would also close the caller's way to export that Memory
+        before the deadline. Such rows carry ``pending_delete=True`` and the
+        window's ``delete_after``; every other row ``False`` / ``None``."""
         readable_now = read_access_clause("nb", "nm", user_ref="gm.user_id")
         readable_after = read_access_after_group_exit_clause(
             "nb", "xnm", user_ref="gm.user_id", group_ref="gm.group_id",
             grant_alias="xg", group_alias="xgm", group_admin_alias="xga",
         )
+        instant = stored_instant_text(self.now() if now is None else now)
         with self.database.connect() as db:
             rows = db.execute(
                 "SELECT nb.id AS notebook_id, nb.name AS name, "
+                "nb.status AS status, nb.delete_after AS delete_after, "
                 "own.memory_count AS memory_count FROM group_members gm "
                 "CROSS JOIN (SELECT notebook_id, COUNT(*) AS memory_count "
                 "FROM memory_items WHERE created_by=? GROUP BY notebook_id) own "
                 "JOIN notebooks nb ON nb.id=own.notebook_id "
                 "WHERE gm.group_id=? AND gm.user_id=? "
-                f"AND nb.{NOTEBOOK_LIVE_SQL} AND {readable_now} "
+                f"AND (nb.{NOTEBOOK_LIVE_SQL} OR "
+                f"{notebook_delete_window_open_sql('nb')}) AND {readable_now} "
                 f"AND NOT {readable_after}",
-                (user_id, group_id, user_id),
+                (user_id, group_id, user_id, instant),
             ).fetchall()
         return [
             {
                 "notebook_id": row["notebook_id"],
                 "name": row["name"],
                 "memory_count": int(row["memory_count"]),
+                "pending_delete": row["status"] == NOTEBOOK_PENDING_DELETE_STATUS,
+                "delete_after": (
+                    instant_text(row["delete_after"])
+                    if row["status"] == NOTEBOOK_PENDING_DELETE_STATUS
+                    else None
+                ),
             }
             for row in rows
         ]
@@ -1922,8 +2013,14 @@ class MemoryStore:
         return deleted
 
     def memory_export_snapshot(
-        self, notebook_id: str, user_id: str, *, page_size: int, max_bytes: int
-    ) -> list[MemoryRecord]:
+        self,
+        notebook_id: str,
+        user_id: str,
+        *,
+        page_size: int,
+        max_bytes: int,
+        now: Any = None,
+    ) -> MemoryExportSnapshot:
         """Mirror of the PostgreSQL twin: this user's own Memory in one
         notebook, every status, oldest first, read-gated — the count and every
         keyset page in ONE explicit read transaction (``BEGIN DEFERRED``: one
@@ -1933,14 +2030,28 @@ class MemoryStore:
         on exit (read only); never takes over a transaction the caller holds.
         Content past ``max_bytes`` (UTF-8) stops the read with
         ``MemoryExportTooLarge``. Raises ``RuntimeError`` when the pages
-        disagree with the count."""
+        disagree with the count.
+
+        The first statement of the snapshot classifies the notebook
+        (``classify_delete_window`` at ``now``; ``None`` reads the store
+        clock): unreadable / missing -> ``KeyError``, deletion window closed
+        -> ``DeleteWindowClosedError``; live or inside an open window -> the
+        items, with the notebook's name and (inside a window) its deadline
+        taken from that same statement."""
         page = max(1, min(int(page_size), 500))
+        instant = stored_instant_text(self.now() if now is None else now)
         db = self.database.connect()
         owned = not db.in_transaction
         if owned:
             db.execute("BEGIN DEFERRED")
         try:
-            where, params = self._export_where(notebook_id, user_id)
+            standing = self._delete_window_row_on(db, notebook_id, user_id, instant)
+            state = classify_delete_window(standing)
+            if state is None:
+                raise KeyError(notebook_id)
+            if state == WINDOW_CLOSED:
+                raise DeleteWindowClosedError(notebook_id)
+            where, params = self._export_where(notebook_id, user_id, instant)
             total = int(db.execute(
                 f"SELECT count(*) AS n FROM memory_items m WHERE {where}", params
             ).fetchone()["n"])
@@ -1948,7 +2059,9 @@ class MemoryStore:
             size = 0
             after: tuple[Any, str] | None = None
             while True:
-                rows, after = self._export_page_on(db, notebook_id, user_id, after, page)
+                rows, after = self._export_page_on(
+                    db, notebook_id, user_id, after, page, instant
+                )
                 for row in rows:
                     record = self._record(row)
                     size += len(record.content_md.encode("utf-8"))
@@ -1964,11 +2077,22 @@ class MemoryStore:
             raise RuntimeError(
                 f"memory export read {len(items)} of {total} items in one snapshot"
             )
-        return items
+        return MemoryExportSnapshot(
+            title=str(standing["name"] or ""),
+            delete_after=(
+                instant_text(standing["delete_after"]) if state == WINDOW_OPEN else None
+            ),
+            items=tuple(items),
+        )
 
-    def _export_where(self, notebook_id: str, user_id: str) -> tuple[str, list[Any]]:
-        clauses = ["m.notebook_id=?", "m.created_by=?", self._read_access_clause()]
-        return " AND ".join(clauses), [notebook_id, user_id, *read_access_params(user_id)]
+    def _export_where(
+        self, notebook_id: str, user_id: str, now: str
+    ) -> tuple[str, list[Any]]:
+        # 读权 ∧ (存活 ∨ 删除窗口开放):窗口期内仍可导出本人记忆。
+        clauses = ["m.notebook_id=?", "m.created_by=?", export_access_exists_clause("m")]
+        return " AND ".join(clauses), [
+            notebook_id, user_id, *read_access_params(user_id), now,
+        ]
 
     def _export_page_on(
         self,
@@ -1977,9 +2101,10 @@ class MemoryStore:
         user_id: str,
         after: tuple[Any, str] | None,
         page: int,
+        now: str,
     ) -> tuple[list[Any], tuple[Any, str] | None]:
         """One keyset page on the caller's connection (PostgreSQL twin)."""
-        where, params = self._export_where(notebook_id, user_id)
+        where, params = self._export_where(notebook_id, user_id, now)
         if after is not None:
             where += " AND (m.created_at>? OR (m.created_at=? AND m.id>?))"
             params.extend((after[0], after[0], after[1]))

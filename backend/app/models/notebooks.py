@@ -315,10 +315,33 @@ class SharedByMeItem(BaseModel):
 
 
 class NotebookDeleteResponse(BaseModel):
-    """202 响应体（批 3·W1 PR-3 §T-2/§5）：CAS tombstone 已提交、删除作业已排入
-    后台，实际清理异步进行。前端刻意零改动——`requestVoid` 只看 2xx 就丢弃
-    body，`status` 字段只为 API 契约的可读性存在，不驱动任何前端逻辑。"""
-    status: str = "deleting"
+    """202 响应体：这本库已进入一天的删除窗口（``app.domain.notebook_delete_grace``），
+    立即对所有人不可用，``delete_after`` 起由删除作业永久删除；在此之前主人可以撤销。
+    前端读 ``delete_after``（UTC ISO）展示「何时永久删除」，一切时长以它为准。"""
+    status: str = "pending_delete"
+    delete_after: str
+
+
+class NotebookDeletionNotice(BaseModel):
+    """一本正在删除窗口里的笔记本，从调用者的角度看（``GET /api/me/notebook-
+    deletions`` 的条目，也是 ``GET /notebooks/{id}`` 404 说明码的载荷）。
+
+    ``memory_count`` 是调用者本人在这里的记忆条数（各状态，即导出的内容），
+    ``transferable_count`` 是其中「转移到我的笔记本」会移走的那部分（已确认、
+    且不在公共知识库的晋升审批中）；两者之差就是「无法转移，请先导出」的条数。"""
+
+    notebook_id: str
+    name: str = ""
+    delete_after: str
+    is_owner: bool
+    memory_count: int = 0
+    transferable_count: int = 0
+
+
+class NotebookDeletionNotices(BaseModel):
+    """``GET /api/me/notebook-deletions``：按截止时刻升序。"""
+
+    items: List[NotebookDeletionNotice] = Field(default_factory=list)
 
 
 class SetTierRequest(BaseModel):

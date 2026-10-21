@@ -906,6 +906,9 @@
         "access_scope": "private",
         "created_at": "<timestamp>",
         "created_by": "<user-id-1>",
+        "delete_after": null,
+        "delete_requested_at": null,
+        "delete_requested_by": null,
         "expected_questions": [
           "Why is gain stable?"
         ],
@@ -926,6 +929,7 @@
           "markdown"
         ],
         "status": "active",
+        "status_before_delete": "",
         "sync_origin": "",
         "target_users": "circuit designers",
         "taxonomy": [
@@ -1793,6 +1797,11 @@
         "type": "index"
       },
       {
+        "name": "idx_notebooks_pending_delete_due",
+        "sql_sha256": "69c676762ef03f8cd1cc5cf03a572140bde26da1e1cdb8b44976c5162845fe57",
+        "type": "index"
+      },
+      {
         "name": "idx_notebooks_share_token",
         "sql_sha256": "910ca22a12f3c1b45d2a6c5fa669b187ea333c272b078cbcc051784ccf5774e3",
         "type": "index"
@@ -2489,7 +2498,7 @@
       },
       {
         "name": "notebooks",
-        "sql_sha256": "0aba25e8505a7bfde0a5dd78b2d175a21ea57e84967ad6b83dd6677ec0fec420",
+        "sql_sha256": "fc1ca830f15e241dc19b40e37176e5a908e599d1e36cb39851f606d6743e2aa5",
         "type": "table"
       },
       {

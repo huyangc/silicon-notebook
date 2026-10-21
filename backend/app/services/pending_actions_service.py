@@ -22,14 +22,52 @@ class PendingActionsService:
     a single request — see test_retained_scale_runtime_does_not_transitively_retain_repository).
     """
 
-    def __init__(self, projections, *, scale_runtime, source_ingestion=None) -> None:
+    def __init__(
+        self, projections, *, scale_runtime, source_ingestion=None, now=None
+    ) -> None:
         self.projections = projections
         self.scale_runtime = scale_runtime
         self.source_ingestion = source_ingestion
+        # The repository clock seam; the deletion-window notices compare
+        # ``delete_after`` against it (``app.domain.notebook_delete_grace``).
+        self.now = now
+
+    def deletion_notices(self, user_id: str) -> list[dict[str, Any]]:
+        """The notebooks inside a deletion window that concern ``user_id``
+        (owner, or a reader holding Memory there), oldest deadline first --
+        the payload of ``GET /api/me/notebook-deletions`` and of the bell's
+        ``notebook_pending_delete`` items."""
+        if self.now is None:
+            return []
+        return self.projections.pending_delete_notices(user_id, now=self.now())
+
+    def deletion_notice(self, user_id: str, notebook_id: str) -> dict[str, Any] | None:
+        """``notebook_id``'s notice for any reader of it (not only the notice
+        audience): the explanation code of ``GET /notebooks/{id}``'s 404.
+        ``None`` when it is not inside an open window or the caller cannot
+        read it."""
+        if self.now is None:
+            return None
+        rows = self.projections.pending_delete_notices(
+            user_id, now=self.now(), notebook_id=notebook_id
+        )
+        return rows[0] if rows else None
 
     def list_for_user(self, user_id: str) -> dict:
         projection = self.projections.pending_actions_projection_rows(user_id)
-        items = projection["items"]
+        # 删除窗口里的库排在最前:它们有截止时刻,而且计入未读(见 count)。
+        items = [
+            {
+                "type": "notebook_pending_delete",
+                "notebook_id": notice["notebook_id"],
+                "notebook_name": notice["name"],
+                "delete_after": notice["delete_after"],
+                "is_owner": notice["is_owner"],
+                "memory_count": notice["memory_count"],
+                "transferable_count": notice["transferable_count"],
+            }
+            for notice in self.deletion_notices(user_id)
+        ] + projection["items"]
         for notebook_id in projection["notebook_ids"]:
             try:
                 status = self.scale_runtime.status(notebook_id)
@@ -69,7 +107,8 @@ class PendingActionsService:
         count = sum(
             1
             for item in items
-            if item["type"] in ("report_outline", "governance", "share_request")
+            if item["type"]
+            in ("report_outline", "governance", "share_request", "notebook_pending_delete")
             or (
                 item["type"] == "index"
                 and item["state"] in ("stale", "suggested")

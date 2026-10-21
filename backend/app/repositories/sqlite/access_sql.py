@@ -135,7 +135,43 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
 # 源环境、几乎必然早于任何阈值,共用同一个值等于让清道夫随时删掉正在导入的库。
 # 半导入的库是**可续跑**的,不是垃圾。读侧两者同义(都「还不算存在」),所以只有
 # 这条谓词收它。
-NOTEBOOK_LIVE_SQL = "status NOT IN ('copying','deleting','importing')"
+# `pending_delete` 是删除整本笔记本的一天导出窗口(`app.domain.notebook_delete_grace`):
+# 主人确认删除后,这本库立即对所有人不可用——所以它和 deleting 一样「还不算存在」,
+# 一处改动让全部读侧站点同时隐藏它。窗口期内仍然开着的五个例外入口各自用下面的
+# `notebook_delete_window_open_sql` / `export_access_exists_clause`,不经这条谓词。
+NOTEBOOK_PENDING_DELETE_STATUS = "pending_delete"
+NOTEBOOK_LIVE_SQL = (
+    "status NOT IN ('copying','deleting','importing','pending_delete')"
+)
+
+
+def notebook_delete_window_open_sql(nb_alias: str = "") -> str:
+    """「这本库正在删除窗口里、窗口还开着」:`status='pending_delete'` 且
+    `delete_after` 晚于调用方给的时刻。消费**一个**参数。
+
+    ⚠ 这里是**裸文本比较**,成立的前提是存储值与参数都经
+    `app.domain.notebook_delete_grace.stored_instant_text` 写成同一种定宽 UTC 串
+    (微秒恒写、偏移恒为 +00:00,字节序即时间序)——窗口列的三条写路径与全部绑定
+    参数都走它。这样两个后端的谓词逐字相同(`test_access_sql_contract` 钉住),部分
+    索引 `idx_notebooks_pending_delete_due`(`WHERE status='pending_delete'`)也能直接
+    服务这个范围。别把别的形态的时刻串绑进来;`_stale_cutoff_iso` 那种带本机偏移的
+    串必须先经 `stored_instant_text`。`nb_alias` 为空时用裸列名。"""
+    prefix = f"{nb_alias}." if nb_alias else ""
+    return (
+        f"({prefix}status='{NOTEBOOK_PENDING_DELETE_STATUS}' "
+        f"AND {prefix}delete_after > ?)"
+    )
+
+
+def notebook_delete_due_sql(nb_alias: str = "") -> str:
+    """「删除窗口已到期、还没被扫尾推进」:`status='pending_delete'` 且
+    `delete_after` 不晚于调用方给的时刻。消费**一个**参数,前提同上一条。与上一条
+    互补(同一时刻下一本 pending 库恰好落在其中一边)。"""
+    prefix = f"{nb_alias}." if nb_alias else ""
+    return (
+        f"({prefix}status='{NOTEBOOK_PENDING_DELETE_STATUS}' "
+        f"AND {prefix}delete_after <= ?)"
+    )
 
 # 成员探测:该用户在 notebook_members 里是否有行。供 `is_member` 与两段式带锁探测复用。
 MEMBER_PROBE_SQL = (
@@ -517,6 +553,25 @@ def live_read_access_exists_clause(
     return f"{base[:-1]} AND {nb_alias}.{NOTEBOOK_LIVE_SQL})"
 
 
+def export_access_exists_clause(
+    row_alias: str = "m",
+    nb_alias: str = "access_nb",
+    member_alias: str = "access_nm",
+) -> str:
+    """删除窗口期的两个本人记忆出口(导出、转移到自己的另一本库)的读谓词:
+    读权 ∧ (库存活 ∨ 删除窗口还开着)。
+
+    与 `live_read_access_exists_clause` 同形,只把存活项放宽成「存活或窗口开放」;
+    读权一项不放宽——窗口期内失去读权的人同样导不出。参数是
+    `read_access_params(user_id)` 之后再跟**一个**时刻(窗口判据的那个 `?`,必须经 `stored_instant_text`)。
+    只给这两个出口用:其余任何 Memory 读都必须继续走 `live_read_access_exists_clause`。"""
+    base = read_access_exists_clause(row_alias, nb_alias, member_alias)
+    return (
+        f"{base[:-1]} AND ({nb_alias}.{NOTEBOOK_LIVE_SQL} OR "
+        f"{notebook_delete_window_open_sql(nb_alias)}))"
+    )
+
+
 # 读权/管理权片段消费几个位置参数——从谓词自己的占位符数**推导**而不是手写常量:
 # 谓词长一条臂,这个数就自动跟着长,不存在「改了 SQL 忘了改常量」的漂移形态。
 _READ_ACCESS_PARAM_COUNT = read_access_clause().count("?")
@@ -573,9 +628,10 @@ NOTEBOOK_WRITE_SQL = (
 )
 
 # 删除端点专属的 owner 判定（codex #659 R6 P2）：裸 owner 比对，**刻意不带**
-# NOTEBOOK_LIVE_SQL。不是第四条通用授权谓词——唯一消费点是 `DELETE
-# /api/notebooks/{id}` 的 FastAPI 依赖，其余任何写端点都必须继续走
-# NOTEBOOK_WRITE_SQL（连同它的生命周期过滤）。
+# NOTEBOOK_LIVE_SQL。不是第四条通用授权谓词——消费点只有两个：`DELETE
+# /api/notebooks/{id}` 的 FastAPI 依赖，与一天删除窗口里主人的
+# `POST /api/notebooks/{id}/cancel-delete`（要撤销的正是一本不可用的库）。其余任何
+# 写端点都必须继续走 NOTEBOOK_WRITE_SQL（连同它的生命周期过滤）。
 #
 # 理由：首次 DELETE 把 notebooks 行 CAS 成 `status='deleting'` 后，若用户重试同一
 # 请求（网络抖动/前端重放），NOTEBOOK_WRITE_SQL 的生命周期过滤会让这一行对依赖层

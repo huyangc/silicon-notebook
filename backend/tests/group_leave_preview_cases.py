@@ -17,7 +17,10 @@ notebook in every read-path combination the read predicate distinguishes:
   someone else's)                                                    -> not listed;
 * someone else's private notebook still holding the leaver's Memory from an
   old membership (unreadable already)                                -> not listed;
-* a notebook being deleted (not live)                                -> not listed.
+* a notebook being deleted (not live)                                -> not listed;
+* a notebook inside its deletion window (ruling B12: leaving also ends the
+  leaver's export there)                         -> listed, ``pending_delete``;
+* a notebook whose deletion window has closed                        -> not listed.
 
 Every case drives the production entry points: the preview through the
 service, the leave through ``group_store.remove_member`` (the route's call),
@@ -32,6 +35,8 @@ from app.models.schemas import NotebookCreate
 from tests.memory_purge_cases import Sql, _as_user, wire_world
 
 _STAMP = "2026-10-21T00:00:00+00:00"
+# The open deletion window's deadline (see build_world).
+PENDING_DEADLINE = "2999-01-01T00:00:00+00:00"
 
 
 @dataclass
@@ -76,7 +81,7 @@ def _memory(world: World, key: str, user: Any, n: int, *, status: str = "confirm
 
 
 # Notebooks the leaver stops reading by leaving ``group`` (and holds Memory in).
-EXPECTED_HIDDEN = ("only_group", "only_group_admins")
+EXPECTED_HIDDEN = ("only_group", "only_group_admins", "pending_delete")
 # Every other notebook of the world holding the leaver's Memory.
 EXPECTED_KEPT = (
     "also_other_group", "also_member", "also_user_grant", "also_everyone", "own",
@@ -120,10 +125,13 @@ def build_world(repo: Any, *, postgres: bool) -> World:
     notebook("no_leaver_memory", owner, "H 只有别人的记忆")
     notebook("old_private", owner, "I 早已读不到")
     notebook("deleting", owner, "J 删除中")
+    notebook("pending_delete", owner, "K 即将删除")
+    notebook("pending_closed", owner, "L 删除窗口已过")
 
     for key in (
         "only_group", "also_other_group", "also_member", "also_user_grant",
-        "also_everyone", "own", "no_leaver_memory", "deleting",
+        "also_everyone", "own", "no_leaver_memory", "deleting", "pending_delete",
+        "pending_closed",
     ):
         _grant(world, key, "group", group)
     _grant(world, "only_group_admins", "group_admins", group)
@@ -148,6 +156,20 @@ def build_world(repo: Any, *, postgres: bool) -> World:
         "UPDATE notebooks SET status='deleting' WHERE id=?",
         (world.notebooks["deleting"],),
     )
+    # Inside its deletion window (ruling B12: listed, flagged, so the leaver
+    # can export first) and one whose window has already closed (not listed:
+    # nothing can be exported from it any more). The deadlines are far from
+    # any real clock on purpose: the preview reads the repository clock.
+    _memory(world, "pending_delete", leaver, 2)
+    _memory(world, "pending_closed", leaver, 1)
+    for key, deadline in (
+        ("pending_delete", PENDING_DEADLINE), ("pending_closed", "2000-01-01T00:00:00+00:00"),
+    ):
+        sql.write(
+            "UPDATE notebooks SET status='pending_delete',status_before_delete='ready',"
+            "delete_after=? WHERE id=?",
+            (deadline, world.notebooks[key]),
+        )
     return world
 
 
@@ -162,6 +184,14 @@ def preview(world: World, user: Any | None = None, group: str | None = None) -> 
 
 def readable(world: World, key: str, user: Any | None = None) -> bool:
     return world.repo._runtime.sharing.user_can_read_notebook(
+        world.notebooks[key], (user or world.leaver).id
+    )
+
+
+def exits(world: World, key: str, user: Any | None = None) -> str | None:
+    """The notebook's standing for the user's own-Memory exits (export /
+    transfer) right now: ``"open"`` inside a deletion window they can read."""
+    return world.repo._runtime.memory_service.delete_window_state(
         world.notebooks[key], (user or world.leaver).id
     )
 
@@ -202,13 +232,16 @@ def case_preview_lists_only_what_the_group_alone_lets_the_leaver_read(world: Wor
             "notebook_id": world.notebooks[key],
             "name": name,
             "memory_count": world.leaver_memory[key],
+            "pending_delete": key == "pending_delete",
+            "delete_after": PENDING_DEADLINE if key == "pending_delete" else None,
         }
         for key, name in (
             ("only_group_admins", "A 只经本组管理员"),
             ("only_group", "B 只经本组"),
+            ("pending_delete", "K 即将删除"),
         )
     ]
-    assert sum(row["memory_count"] for row in rows) == 5
+    assert sum(row["memory_count"] for row in rows) == 7
 
 
 def case_preview_matches_what_the_leave_actually_hides(world: World) -> None:
@@ -218,6 +251,10 @@ def case_preview_matches_what_the_leave_actually_hides(world: World) -> None:
     rows = preview(world)
     holding = [key for key, count in world.leaver_memory.items() if count]
     before = {key: readable(world, key) for key in holding}
+    # A notebook inside its deletion window is no longer "readable" (it is
+    # hidden from everyone); what the leave takes away there is the window's
+    # export: its standing for the leaver goes from "open" to nothing.
+    window_before = exits(world, "pending_delete")
     visible_before = visible_memory_by_notebook(world)
     rows_before = {key: memory_rows(world, key) for key in holding}
 
@@ -225,6 +262,8 @@ def case_preview_matches_what_the_leave_actually_hides(world: World) -> None:
 
     after = {key: readable(world, key) for key in holding}
     flipped = {key for key in holding if before[key] and not after[key]}
+    assert window_before == "open" and exits(world, "pending_delete") is None
+    flipped.add("pending_delete")
     assert {row["notebook_id"] for row in rows} == {
         world.notebooks[key] for key in flipped
     }
@@ -235,7 +274,10 @@ def case_preview_matches_what_the_leave_actually_hides(world: World) -> None:
         for notebook_id, count in visible_before.items()
         if count != visible_after.get(notebook_id, 0)
     }
-    assert lost == {row["notebook_id"]: row["memory_count"] for row in rows}
+    assert lost == {
+        row["notebook_id"]: row["memory_count"] for row in rows
+        if not row["pending_delete"]
+    }
     # Leaving deletes nothing: every row is still there.
     assert {key: memory_rows(world, key) for key in holding} == rows_before
     # After the leave there is nothing left to preview for this group.
@@ -274,7 +316,9 @@ def case_rejoining_as_a_plain_member_does_not_bring_back_admin_only_notebooks(
         if notebook_id != admins_only
     }
     assert memory_rows(world, "only_group_admins") == world.leaver_memory["only_group_admins"]
-    assert [row["notebook_id"] for row in preview(world)] == [world.notebooks["only_group"]]
+    assert [row["notebook_id"] for row in preview(world)] == [
+        world.notebooks["only_group"], world.notebooks["pending_delete"],
+    ]
 
 
 def case_a_plain_member_does_not_count_group_admins_grants(world: World) -> None:
@@ -285,7 +329,7 @@ def case_a_plain_member_does_not_count_group_admins_grants(world: World) -> None
     )
     assert not readable(world, "only_group_admins")
     assert [row["notebook_id"] for row in preview(world)] == [
-        world.notebooks["only_group"]
+        world.notebooks["only_group"], world.notebooks["pending_delete"],
     ]
 
 
@@ -308,11 +352,15 @@ def case_preview_counts_only_the_callers_own_memory(world: World) -> None:
             "notebook_id": world.notebooks["only_group"],
             "name": "B 只经本组",
             "memory_count": 1,
+            "pending_delete": False,
+            "delete_after": None,
         },
         {
             "notebook_id": world.notebooks["no_leaver_memory"],
             "name": "H 只有别人的记忆",
             "memory_count": 2,
+            "pending_delete": False,
+            "delete_after": None,
         },
     ]
 

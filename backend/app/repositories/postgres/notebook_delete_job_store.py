@@ -39,9 +39,24 @@ from app.repositories.postgres._store_utils import (
     normalized_clock,
     utc_now,
 )
-from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
+from app.domain.notebook_delete_grace import (
+    delete_after_for,
+    instant_text,
+    utc_instant,
+)
+from app.repositories.postgres.access_sql import (
+    NOTEBOOK_LIVE_SQL,
+    NOTEBOOK_PENDING_DELETE_STATUS,
+    notebook_delete_due_sql,
+    notebook_delete_window_open_sql,
+)
 from app.repositories.postgres.database import PostgresDatabase
-from app.repositories.ports import NotebookAlreadyDeletingError, StaleLeaseFinalizeError
+from app.repositories.ports import (
+    NotebookAlreadyDeletingError,
+    NotebookDeleteDueError,
+    NotebookPendingDeleteError,
+    StaleLeaseFinalizeError,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -121,16 +136,131 @@ class NotebookDeleteJobStore:
                 if existing is None:
                     raise KeyError(notebook_id)
                 raise NotebookAlreadyDeletingError(notebook_id)
-            job_id = self.new_id("ndj")
-            connection.execute(
-                "INSERT INTO notebook_delete_jobs"
-                "(id,notebook_id,status,phase,cursor_table,cursor_key,"
-                "deleted_rows,lease_token,attempts,error_code,error_message,"
-                "created_at,updated_at,finished_at) "
-                "VALUES (%s,%s,'queued','mark','','',0,'',0,'','',%s,%s,NULL)",
-                (job_id, notebook_id, now, now),
-            )
+            job_id = self._insert_job_on(connection, notebook_id, now)
         return self.get(job_id)
+
+    def _insert_job_on(self, connection, notebook_id: str, now) -> str:
+        """The fresh ``'queued'``/``'mark'`` job row of a notebook this same
+        transaction has just moved to ``'deleting'`` (``request`` and the
+        grace window's promotion share it)."""
+        job_id = self.new_id("ndj")
+        connection.execute(
+            "INSERT INTO notebook_delete_jobs"
+            "(id,notebook_id,status,phase,cursor_table,cursor_key,"
+            "deleted_rows,lease_token,attempts,error_code,error_message,"
+            "created_at,updated_at,finished_at) "
+            "VALUES (%s,%s,'queued','mark','','',0,'',0,'','',%s,%s,NULL)",
+            (job_id, notebook_id, now, now),
+        )
+        return job_id
+
+    # ------------------------------------------------------------------
+    # The one-day deletion window (``app.domain.notebook_delete_grace``):
+    # T1 request_pending, T2 cancel_pending, T3 promote_due_pending. Each is a
+    # compare-and-set on the notebooks row. T2 and T3 race on the same row:
+    # the first to take its row lock commits, and under READ COMMITTED the
+    # second re-evaluates its WHERE against the committed row (status no
+    # longer 'pending_delete') and matches nothing -- even when the two
+    # callers' clocks disagree about the deadline. The SQLite twin's comments
+    # cover the rest; behavior is statement-for-statement the same.
+    # ------------------------------------------------------------------
+
+    def _instant(self, now: object):
+        return utc_instant(self.now() if now is None else now)
+
+    def request_pending(
+        self, notebook_id: str, requested_by: str, *, now: object = None
+    ) -> dict:
+        """T1. See the SQLite twin for the contract."""
+        requested_at = self._instant(now)
+        delete_after = delete_after_for(requested_at)
+        with self.database.write() as connection:
+            cas = connection.execute(
+                "UPDATE notebooks SET status_before_delete=status,"
+                f"status='{NOTEBOOK_PENDING_DELETE_STATUS}',"
+                "delete_requested_at=%s,delete_requested_by=%s,delete_after=%s "
+                f"WHERE id=%s AND {NOTEBOOK_LIVE_SQL}",
+                (requested_at, requested_by, delete_after, notebook_id),
+            )
+            if cas.rowcount != 1:
+                existing = connection.execute(
+                    "SELECT status,delete_after FROM notebooks WHERE id=%s",
+                    (notebook_id,),
+                ).fetchone()
+                if existing is None:
+                    raise KeyError(notebook_id)
+                if existing["status"] == NOTEBOOK_PENDING_DELETE_STATUS:
+                    raise NotebookPendingDeleteError(
+                        notebook_id, instant_text(existing["delete_after"])
+                    )
+                raise NotebookAlreadyDeletingError(notebook_id)
+        return {"notebook_id": notebook_id, "delete_after": instant_text(delete_after)}
+
+    def cancel_pending(self, notebook_id: str, *, now: object = None) -> str:
+        """T2. See the SQLite twin for the contract."""
+        instant = self._instant(now)
+        with self.database.write() as connection:
+            cas = connection.execute(
+                "UPDATE notebooks SET "
+                "status=COALESCE(NULLIF(status_before_delete,''),'draft'),"
+                "status_before_delete='',delete_after=NULL,"
+                "delete_requested_at=NULL,delete_requested_by=NULL "
+                f"WHERE id=%s AND {notebook_delete_window_open_sql()}",
+                (notebook_id, instant),
+            )
+            if cas.rowcount == 1:
+                return "cancelled"
+            existing = connection.execute(
+                f"SELECT status,({NOTEBOOK_LIVE_SQL}) AS live FROM notebooks "
+                "WHERE id=%s",
+                (notebook_id,),
+            ).fetchone()
+        if existing is None:
+            raise KeyError(notebook_id)
+        if existing["live"]:
+            return "already_live"
+        if existing["status"] in (NOTEBOOK_PENDING_DELETE_STATUS, "deleting"):
+            raise NotebookDeleteDueError(notebook_id)
+        raise KeyError(notebook_id)
+
+    def list_due_pending(self, *, now: object = None) -> list[str]:
+        """Driver C's candidates (partial ``idx_notebooks_pending_delete_due``)."""
+        instant = self._instant(now)
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                f"SELECT id FROM notebooks WHERE {notebook_delete_due_sql()} "
+                'ORDER BY delete_after, id COLLATE "C"',
+                (instant,),
+            ).fetchall()
+        return [row["id"] for row in rows]
+
+    def promote_due_pending(
+        self, notebook_id: str, *, now: object = None
+    ) -> dict | None:
+        """T3. See the SQLite twin for the contract."""
+        instant = self._instant(now)
+        with self.database.write() as connection:
+            cas = connection.execute(
+                "UPDATE notebooks SET status='deleting',updated_at=%s "
+                f"WHERE id=%s AND {notebook_delete_due_sql()}",
+                (self.now(), notebook_id, instant),
+            )
+            if cas.rowcount != 1:
+                return None
+            job_id = self._insert_job_on(connection, notebook_id, self.now())
+        return self.get(job_id)
+
+    def delete_notice_audience(self, notebook_id: str) -> list[str]:
+        """See the SQLite twin."""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT created_by AS user_id FROM notebooks "
+                "WHERE id=%s AND created_by IS NOT NULL "
+                "UNION SELECT DISTINCT created_by FROM memory_items "
+                "WHERE notebook_id=%s AND created_by IS NOT NULL",
+                (notebook_id, notebook_id),
+            ).fetchall()
+        return sorted({row["user_id"] for row in rows if row["user_id"]})
 
 
     def recreate_for_deleting_notebook(

@@ -513,6 +513,46 @@ def test_the_imported_notebook_is_stamped_as_a_mirror(
     assert row["status"] == "draft"
 
 
+def test_a_source_inside_its_deletion_window_exports_and_the_mirror_starts_outside_it(
+    source, target, tmp_path
+):
+    """The deletion window (SQLite v99 / PostgreSQL 0080) is each environment's
+    own: a source notebook inside its window still exports (the exporter does
+    not look at the lifecycle), the package carries the source's window
+    columns, and the mirror it creates starts outside any window -- the four
+    columns at their defaults, status the target's own ``draft``."""
+    window = (
+        "2026-10-23T08:00:00.000000+00:00", "2026-10-22T08:00:00.000000+00:00",
+        ALICE[0],
+    )
+    with source["repo"]._write() as db:
+        db.execute(
+            "UPDATE notebooks SET status='pending_delete',status_before_delete='draft',"
+            "delete_after=?,delete_requested_at=?,delete_requested_by=? WHERE id=?",
+            (*window, source["exported"]),
+        )
+    package = _export(source, tmp_path / "pending-out")
+    [exported] = [
+        row for row in _rows(package, "notebooks") if row["id"] == source["exported"]
+    ]
+    from app.domain.notebook_delete_grace import utc_instant
+
+    assert (
+        utc_instant(exported["delete_after"]), utc_instant(exported["delete_requested_at"]),
+        exported["delete_requested_by"],
+    ) == (utc_instant(window[0]), utc_instant(window[1]), window[2])
+
+    _import(target, package)
+
+    row = _one(
+        target["repo"],
+        "SELECT status, status_before_delete, delete_after, delete_requested_at, "
+        "delete_requested_by FROM notebooks WHERE id=?",
+        (source["exported"],),
+    )
+    assert tuple(row) == ("draft", "", None, None, None)
+
+
 def test_a_notebook_is_hidden_until_the_run_finishes(source, target, package):
     """A half-imported notebook must not be visible. The row commits with the
     in-flight ``copying`` marker NOTEBOOK_LIVE_SQL hides, and only the finish

@@ -42,7 +42,10 @@ from typing import Any
 
 import pytest
 
-from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
+from app.repositories.postgres.access_sql import (
+    NOTEBOOK_LIVE_SQL,
+    notebook_delete_window_open_sql,
+)
 
 pytestmark = [
     pytest.mark.postgres_integration,
@@ -61,18 +64,43 @@ LIVE_PROJECTION = f", (nb.{NOTEBOOK_LIVE_SQL}) AS notebook_live"
 # with require_live) and the in-transaction access recheck.
 LOCK_TAIL = f"WHERE id=%s AND {NOTEBOOK_LIVE_SQL} FOR SHARE"
 APPROVAL_TAIL = f" AND n.{NOTEBOOK_LIVE_SQL}) AS has_access"
-MARKERS = (LIVE_TAIL, LIVE_PROJECTION, LOCK_TAIL, APPROVAL_TAIL)
+# The export's form (deletion window, ``export_access_exists_clause``): "live
+# or inside an open window" -- the one tail that carries a placeholder (the
+# window's instant), so recovering the old statement also drops that param.
+EXPORT_TAIL = (
+    f" AND (access_nb.{NOTEBOOK_LIVE_SQL} OR "
+    f"{notebook_delete_window_open_sql('access_nb')}))"
+)
+MARKERS = (LIVE_TAIL, LIVE_PROJECTION, LOCK_TAIL, APPROVAL_TAIL, EXPORT_TAIL)
 
 
 def old_statement(sql: str) -> str:
     """The statement as it was before K3, recovered from the captured one."""
     return (
-        sql.replace(LIVE_TAIL, ")")
+        sql.replace(EXPORT_TAIL, ")")
+        .replace(LIVE_TAIL, ")")
         .replace(LIVE_PROJECTION, "")
         .replace(LOCK_TAIL, "WHERE id=%s FOR SHARE")
         .replace(APPROVAL_TAIL, " AS has_access")
         .replace("SELECT m.notebook_id,(", "SELECT m.notebook_id,")
     )
+
+
+def old_params(sql: str, params: Any) -> Any:
+    """``params`` without the ones the dropped tails consumed (only the export
+    tail has one: the window's instant), so they line up with
+    ``old_statement(sql)``."""
+    if params is None or EXPORT_TAIL not in sql:
+        return params
+    values = list(params)
+    start = 0
+    dropped: list[int] = []
+    while (at := sql.find(EXPORT_TAIL, start)) != -1:
+        dropped.append(sql[:at].count("%s") + EXPORT_TAIL.count("%s") - 1)
+        start = at + len(EXPORT_TAIL)
+    for index in reversed(dropped):
+        del values[index]
+    return type(params)(values) if isinstance(params, tuple) else values
 HEAVY = "k3-heavy"
 
 SCALES = {
@@ -431,10 +459,15 @@ def compare_plans(repo, captured) -> dict[str, list[dict[str, Any]]]:
                 assert not any(marker in old_sql for marker in MARKERS), label
                 entry: dict[str, Any] = {"statement": index, "sql": sql[:160]}
                 for mode in ("custom", "generic"):
-                    old = _plan(connection, old_sql, params, generic=mode == "generic")
+                    old = _plan(
+                        connection, old_sql, old_params(sql, params),
+                        generic=mode == "generic",
+                    )
                     new = _plan(connection, sql, params, generic=mode == "generic")
                     if LIVE_TAIL in sql or LOCK_TAIL in sql:  # not projections
                         assert "deleting" in json.dumps(new), (label, mode)
+                    if EXPORT_TAIL in sql:
+                        assert "pending_delete" in json.dumps(new), (label, mode)
                     entry[mode] = {
                         "same_shape": shape(old) == shape(new),
                         "old": summary(old),

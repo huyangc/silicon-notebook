@@ -87,14 +87,19 @@ def _insert_notebook(db, nid: str, owner: str, status: str = "ready") -> None:
     )
 
 
-@pytest.fixture
-def lifecycle(repo):
+@pytest.fixture(params=["deleting", "pending_delete"])
+def lifecycle(repo, request):
     """一套贯穿全部 16 个读方法的种子数据。
 
     三本「被观测」的笔记本(active/copying/deleting)全部**先以正常状态**建好、
     挂满全部辅助数据(成员、群组授权边、挂载边、ask_jobs、sources),**最后**才
     把 copying/deleting 两本直接 UPDATE 翻转状态——这正是真实场景:一本已经建
     好、有成员有分享有挂载的库,进入删除流程后不该再从任何读路径冒出来。
+
+    「删除中」那本按参数跑两遍:``deleting``(六相位删除进行中)与
+    ``pending_delete``(一天的删除窗口,截止还远——窗口**开着**也一样对所有读路径
+    不存在,`app.domain.notebook_delete_grace`)。每条读方法的断言因此对两种状态
+    都成立,不必逐条复制。
     """
     owner_id = "u-owner"
     member_id = "u-member"
@@ -177,7 +182,11 @@ def lifecycle(repo):
 
         # 全部辅助数据挂完之后,才把两本翻转成半拷贝/删除中——真实的时序。
         db.execute("UPDATE notebooks SET status='copying' WHERE id=?", (copying_id,))
-        db.execute("UPDATE notebooks SET status='deleting' WHERE id=?", (deleting_id,))
+        db.execute(
+            "UPDATE notebooks SET status=?,status_before_delete='ready',delete_after=? "
+            "WHERE id=?",
+            (request.param, "2999-01-01T00:00:00.000000+00:00", deleting_id),
+        )
 
     return {
         "owner_id": owner_id,
@@ -474,6 +483,10 @@ def memory_world(repo):
 @pytest.mark.parametrize("state", live_cases.NON_LIVE_STATES)
 def test_memory_readers_hide_non_live_notebooks(memory_world, state):
     live_cases.assert_readers_follow_lifecycle(memory_world, state)
+
+
+def test_memory_open_delete_window_opens_only_the_export(memory_world):
+    live_cases.assert_open_window_opens_only_the_export(memory_world)
 
 
 @pytest.mark.parametrize("state", live_cases.NON_LIVE_STATES)

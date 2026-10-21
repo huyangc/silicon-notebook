@@ -2116,6 +2116,7 @@ class RepositoryRuntime:
             # sequence (wire_source_ingestion runs after this) — backfilled
             # below once it's built, same seam as catalog.source_ingestion.
             source_ingestion=self.source_ingestion,
+            now=self.seams.now,
         )
 
     def wire_knowledge_lifecycle(

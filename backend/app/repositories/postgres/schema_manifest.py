@@ -499,7 +499,14 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # NULL DEFAULT ''): the deep report an in-flight Ask turn was asked about, ''
 # when it carries none; the default is the whole backfill. No table, index, FK
 # or unique-surface change.
+# SQLite v100 / PostgreSQL 0081 add the notebook deletion grace window's four
+# notebooks columns -- delete_after and delete_requested_at (nullable
+# timestamptz; SQLite TEXT holding aware UTC ISO instants),
+# delete_requested_by (nullable text COLLATE "C", a users.id kept as audit with
+# no FK) and status_before_delete (text NOT NULL DEFAULT '') -- plus the
+# partial idx_notebooks_pending_delete_due over (delete_after) WHERE status =
+# 'pending_delete'. No backfill, no table, FK or unique-surface change.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=99,
-    postgres_version=80,
+    sqlite_version=100,
+    postgres_version=81,
 )
