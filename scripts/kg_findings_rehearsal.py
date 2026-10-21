@@ -92,6 +92,7 @@ from typing import (
 
 import numpy as np
 import psycopg
+from psycopg.rows import dict_row
 
 ROOT = Path(__file__).resolve().parents[1]
 _BACKEND = str(ROOT / "backend")
@@ -142,6 +143,11 @@ from app.services.kg_findings import (  # noqa: E402
 
 SCRIPT_VERSION = 1
 APPLICATION_NAME = "kg_findings_rehearsal"
+# The whole stderr line for a driver error, besides the exception's class name:
+# the driver's own text is never printed (AGENTS.md: no exception text in logs).
+DATABASE_ERROR_HINT = (
+    "数据库连接或查询失败(详情不输出:请核对 DSN、网络可达性与该角色的只读权限)"
+)
 
 # Same as ``Settings.kg_findings_max_candidate_pairs`` (pinned by a test): the
 # cost cap on F2 pair GENERATIONS the product runs with by default.
@@ -348,48 +354,40 @@ def decisions_query(notebook_id: str) -> Query:
     )
 
 
-def member_names_query(notebook_id: str, canonical_ids: Sequence[str]) -> Query:
-    """Every member object's name of each canonical (hidden members included)."""
-    generation = _store()._PUBLISHED_CLUSTER_GEN
-    return (
-        f"SELECT c.canonical_id AS cid, o.payload->>'name' AS name "
-        f"FROM concept_clusters c JOIN knowledge_objects o ON o.id = c.member_object_id "
-        f"WHERE c.notebook_id=%s AND c.generation = {generation} "
-        f"AND c.canonical_id = ANY(%s)",
-        (notebook_id, notebook_id, list(canonical_ids)),
-    )
+class StoreReads:
+    """The product store's own findings name reads, sent on this script's
+    connection: ``kg_finding_member_name_rows`` (every member of each listed
+    canonical, with its ``visible`` flag) and the display-name read behind
+    ``kg_finding_display_name_rows`` (a source's own objects in a canonical).
 
+    The SAME statements the product sends (codex #941 R4): batched by canonical
+    id (≤ 500 per statement), driven by the canonical / primary-key indexes
+    (``tests/postgres/test_kg_findings_plan_pins.py`` pins their plans on a
+    production-shaped corpus), answered with the product's row order — never one
+    ``COALESCE(c.canonical_id, o.id) = %s`` scan per key. The store reads rows by
+    column name, so each statement gets a dict-row cursor; ``statements`` counts
+    them for the report."""
 
-def visible_name_query(notebook_id: str, canonical_id: str) -> Query:
-    """Names of any visible member of a canonical (``(None, canonical_id)`` lookups)."""
-    generation = _store()._PUBLISHED_CLUSTER_GEN
-    placeholders = ",".join("%s" for _ in USABLE_STATUSES)
-    return (
-        f"SELECT o.payload->>'name' AS name FROM knowledge_objects o "
-        f"LEFT JOIN concept_clusters c ON c.notebook_id=o.notebook_id "
-        f"AND c.member_object_id=o.id AND c.generation={generation} "
-        f"WHERE o.notebook_id=%s AND COALESCE(c.canonical_id, o.id)=%s "
-        f"AND o.status IN ({placeholders}) AND o.source_id != '' "
-        f"AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id=o.source_id "
-        f"AND s.notebook_id=o.notebook_id AND s.source_type IN ('memory','knowhow')) "
-        f"ORDER BY o.payload->>'name', o.id",
-        (notebook_id, notebook_id, canonical_id, *USABLE_STATUSES),
-    )
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+        self.statements = 0
 
+    def execute(self, sql: str, params: Any = (), **kwargs: Any) -> Any:
+        self.statements += 1
+        cursor = self._conn.cursor(row_factory=dict_row)
+        cursor.execute(sql, params, **kwargs)
+        return cursor
 
-def own_name_query(notebook_id: str, source_id: str, canonical_id: str) -> Query:
-    """Names of one source's own objects in a canonical (``(source_id, canonical_id)``)."""
-    generation = _store()._PUBLISHED_CLUSTER_GEN
-    placeholders = ",".join("%s" for _ in USABLE_STATUSES)
-    return (
-        f"SELECT o.payload->>'name' AS name FROM knowledge_objects o "
-        f"LEFT JOIN concept_clusters c ON c.notebook_id=o.notebook_id "
-        f"AND c.member_object_id=o.id AND c.generation={generation} "
-        f"WHERE o.notebook_id=%s AND o.source_id=%s "
-        f"AND COALESCE(c.canonical_id, o.id)=%s "
-        f"AND o.status IN ({placeholders}) ORDER BY o.payload->>'name', o.id",
-        (notebook_id, notebook_id, source_id, canonical_id, *USABLE_STATUSES),
-    )
+    def member_name_rows(
+        self, notebook_id: str, canonical_ids: Sequence[str]
+    ) -> List[Tuple[str, str, bool, int]]:
+        return _store().UnifiedKgStore.kg_finding_member_name_rows(
+            self, notebook_id, canonical_ids)
+
+    def display_name_rows(
+        self, notebook_id: str, pairs: Sequence[Tuple[str, str]]
+    ) -> List[Tuple[str, str, str, int]]:
+        return _store().UnifiedKgStore._display_name_rows_in(self, notebook_id, pairs)
 
 
 def source_facts_query(source_ids: Sequence[str], *, with_titles: bool) -> Query:
@@ -589,37 +587,50 @@ def decisions_from_rows(rows: Iterable[tuple]) -> Dict[frozenset, str]:
     return out
 
 
-def member_seeds_from_rows(rows: Iterable[tuple]) -> Dict[str, Set[str]]:
-    """``(canonical_id, member name)`` rows -> the v1 seeds of each canonical."""
+def member_seeds_from_rows(rows: Iterable[Sequence[Any]]) -> Dict[str, Set[str]]:
+    """Member-name rows ``(canonical_id, name, ...)`` -> the v1 seeds of each
+    canonical (every member, hidden ones included — as the product's)."""
     out: Dict[str, Set[str]] = {}
-    for canonical_id, name in rows:
-        out.setdefault(canonical_id, set()).add(concept_seed_v1(name or ""))
+    for row in rows:
+        out.setdefault(row[0], set()).add(concept_seed_v1(row[1] or ""))
     return out
 
 
 # ================================================================== lookups
 class DbLookups:
-    """Answers the engine's point-lookup rounds from the database (read-only)."""
+    """Answers the engine's point-lookup rounds from the database (read-only),
+    the way the product's ``_findings_lookups`` does, through `StoreReads`:
+
+      · ``(None, canonical_id)`` (F4 / S1 re-judging) → one batched member-name
+        read: the visible members' names answer the key, every member's v1 seed
+        goes to F4's evidence. These decide counts, so they are always asked;
+      · ``(source_id, canonical_id)`` → only sample names: read only when samples
+        are asked for (``with_titles``), otherwise left unanswered (the engine
+        omits the sample, exactly as for a vanished object);
+      · sources → creation time (F2's tie-break), titles only with samples."""
 
     def __init__(self, conn: Any, notebook_id: str, *, with_titles: bool) -> None:
         self._conn = conn
         self._notebook_id = notebook_id
         self._with_titles = with_titles
+        self.reads = StoreReads(conn)
 
     def __call__(
         self, request: LookupRequest
     ) -> Tuple[List[Tuple[Optional[str], str, str]], Dict[str, SourceFacts], Dict[str, Set[str]]]:
         names: List[Tuple[Optional[str], str, str]] = []
-        for source_id, canonical_id in request.names:
-            query = (
-                visible_name_query(self._notebook_id, canonical_id)
-                if source_id is None
-                else own_name_query(self._notebook_id, source_id, canonical_id)
-            )
+        pairs = [key for key in request.names if key[0] is not None]
+        if pairs and self._with_titles:
             names.extend(
-                (source_id, canonical_id, name)
-                for (name,) in fetch_all(self._conn, query) if name
+                (source_id, canonical_id, name) for source_id, canonical_id, name, _count
+                in self.reads.display_name_rows(self._notebook_id, pairs)
             )
+        members = sorted({cid for sid, cid in request.names if sid is None})
+        rows = self.reads.member_name_rows(self._notebook_id, members) if members else []
+        # Like the product: names shown come from visible members only; the v1
+        # seeds of ALL members (hidden ones included) go to F4's evidence.
+        names.extend((None, cid, name) for cid, name, visible, _count in rows if visible)
+        seeds = member_seeds_from_rows(rows)
         sources: Dict[str, SourceFacts] = {}
         if request.sources:
             for row in fetch_all(
@@ -629,11 +640,6 @@ class DbLookups:
                 sources[source_id] = SourceFacts(
                     title or "", created.isoformat() if created else None
                 )
-        # Like the product: the (None, canonical) keys also get the v1 seeds of ALL
-        # members (hidden ones included), which F4 stores in its evidence.
-        members = sorted({cid for sid, cid in request.names if sid is None})
-        seeds = (member_seeds_from_rows(fetch_all(
-            self._conn, member_names_query(self._notebook_id, members))) if members else {})
         return names, sources, seeds
 
 
@@ -1473,11 +1479,11 @@ def run_rehearsal(conn: Any, notebook_id: str, options: Options, timer: PhaseTim
         conn.commit()
 
     seed_calls: List[int] = []
+    seed_reads = StoreReads(conn)
 
     def member_seeds(canonical_ids: Sequence[str]) -> Dict[str, Set[str]]:
         seed_calls.append(len(canonical_ids))
-        return member_seeds_from_rows(
-            fetch_all(conn, member_names_query(notebook_id, canonical_ids)))
+        return member_seeds_from_rows(seed_reads.member_name_rows(notebook_id, canonical_ids))
 
     with timer.phase("6_engine_compute", product=True):
         draft = compute_findings(
@@ -1491,6 +1497,9 @@ def run_rehearsal(conn: Any, notebook_id: str, options: Options, timer: PhaseTim
         result, lookup_counts = drive_draft(draft, lookups)
         conn.commit()
     del draft
+    # statements the name reads sent (batched by canonical, never one per key)
+    lookup_counts["member_seed_statements"] = seed_reads.statements
+    lookup_counts["lookup_name_statements"] = lookups.reads.statements
 
     report["graph"] = graph_section(graph, structure, unique_edges)
     engine, engine_samples = engine_section(
@@ -1651,9 +1660,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"kg_findings_rehearsal: {exc}", file=sys.stderr)
         return 2
     except psycopg.Error as exc:
-        # The driver's message names the failure, never the DSN's password.
-        reason = (str(exc).strip().splitlines() or [""])[0]
-        print(f"kg_findings_rehearsal: database error {type(exc).__name__}: {reason}",
+        # The driver's text can carry the server address, a socket path or SQL
+        # (codex #941 R4): only the class name and a fixed hint leave the process.
+        print(f"kg_findings_rehearsal: {DATABASE_ERROR_HINT} ({type(exc).__name__})",
               file=sys.stderr)
         return 3
     text = to_json(report)

@@ -138,18 +138,70 @@ class _Result:
         return list(self._rows)
 
 
+class _DictCursor:
+    """The dict-row cursor `StoreReads` opens for the product store's reads."""
+
+    def __init__(self, conn: "FakeConn") -> None:
+        self._conn = conn
+        self._rows: List[dict] = []
+
+    def execute(self, sql, params=(), **kwargs):
+        self._conn.store_kwargs.append(kwargs)
+        self._rows = self._conn.answer_store(sql, params)
+        return self
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+def _bound_lists(params) -> List[List[str]]:
+    """The id lists a store statement bound (``id_binding.bind_ids``: one text
+    parameter joined by ``ID_SEPARATOR``, or an array), in parameter order."""
+    from app.domain.knowledge_contracts import USABLE_STATUSES
+    from app.repositories.postgres.id_binding import ID_SEPARATOR
+
+    lists = []
+    for param in params:
+        if isinstance(param, list):
+            lists.append([str(value) for value in param])
+        elif isinstance(param, str) and param != NOTEBOOK and param not in USABLE_STATUSES:
+            lists.append(param.split(ID_SEPARATOR))
+    return lists
+
+
 class FakeConn:
     """Routes each statement to canned rows; records every statement it saw."""
 
     def __init__(self, lib: _Lib) -> None:
         self.lib = lib
         self.statements: List[str] = []
+        self.store_kwargs: List[dict] = []
         self.commits = 0
         self.closed = False
         self.read_only = True
 
-    def cursor(self) -> _Cursor:
-        return _Cursor(self)
+    def cursor(self, row_factory=None):
+        return _Cursor(self) if row_factory is None else _DictCursor(self)
+
+    def answer_store(self, sql: str, params) -> List[dict]:
+        """The product store's own findings reads (`StoreReads`)."""
+        self.statements.append(sql)
+        flat = " ".join(sql.split())
+        lib = self.lib
+        if "AS visible" in flat:                        # kg_finding_member_name_rows
+            canonicals = _bound_lists(params)[0]
+            rows = []
+            for cid in canonicals:
+                visible = lib.visible.get(cid, [lib.names.get(cid)])
+                for name in lib.member_names.get(cid, visible):
+                    rows.append({"canonical_id": cid, "name": name,
+                                 "visible": name in visible})
+            return rows
+        if "AS source_id, c.canonical_id AS canonical_id" in flat:   # display names
+            canonicals, sources = _bound_lists(params)[:2]
+            return [{"source_id": sid, "canonical_id": cid, "name": f"{cid}@{sid}"}
+                    for cid in canonicals for sid in sources]
+        raise AssertionError(f"unrouted store statement: {flat[:160]}")
 
     def execute(self, sql, params=()):
         return _Result(self.answer(sql, params))
@@ -176,20 +228,12 @@ class FakeConn:
             return lib.objects
         if "FROM concept_merge_candidates" in flat:
             return lib.decision_rows
-        if "c.canonical_id = ANY(%s)" in flat:
-            return [(cid, name) for cid in params[2]
-                    for name in lib.member_names.get(cid, [lib.names.get(cid)])]
         if flat.startswith("SELECT id, title, created_at FROM sources"):
             return [(sid, lib.titles[sid], lib.created.get(sid)) for sid in params[0]]
         if flat.startswith("SELECT id, created_at FROM sources"):
             return [(sid, lib.created.get(sid)) for sid in params[0]]
         if flat.startswith("SELECT id, title FROM sources"):
             return [(sid, lib.titles[sid]) for sid in params[0]]
-        if "o.source_id=%s" in flat and "COALESCE(c.canonical_id, o.id)=%s" in flat:
-            return [(f"{params[3]}@{params[2]}",)]
-        if "COALESCE(c.canonical_id, o.id)=%s" in flat:
-            cid = params[2]
-            return [(name,) for name in lib.visible.get(cid, [lib.names.get(cid)])]
         if "FROM chunks" in flat:
             return list(lib.chunks.items())
         if "o.object_type='concept' AND o.status <> 'deprecated'" in flat:
@@ -603,8 +647,7 @@ def test_the_query_builders_only_build_selects():
     builders = [
         rehearsal.state_query(NOTEBOOK), rehearsal.names_query(NOTEBOOK),
         rehearsal.graph_query(NOTEBOOK), rehearsal.object_query(NOTEBOOK),
-        rehearsal.decisions_query(NOTEBOOK), rehearsal.member_names_query(NOTEBOOK, ["K-a"]),
-        rehearsal.visible_name_query(NOTEBOOK, "K-a"), rehearsal.own_name_query(NOTEBOOK, "s", "K-a"),
+        rehearsal.decisions_query(NOTEBOOK),
         rehearsal.source_facts_query(["s"], with_titles=True),
         rehearsal.source_facts_query(["s"], with_titles=False),
         rehearsal.source_titles_query(["s"]), rehearsal.chunk_counts_query(NOTEBOOK),
@@ -722,14 +765,68 @@ def test_nonsensical_numeric_flags_are_rejected_before_connecting(monkeypatch, f
     assert caught.value.code == 2
 
 
-def test_a_database_failure_is_reported_without_a_traceback(monkeypatch, capsys):
+def test_a_database_failure_is_reported_by_class_without_its_text(monkeypatch, capsys):
+    """codex #941 R4: the driver's text can carry the server address, a socket
+    path or SQL — stderr gets the exception's class name and a fixed hint only."""
     def refuse(*_a, **_k):
-        raise rehearsal.psycopg.OperationalError("connection refused")
+        raise rehearsal.psycopg.OperationalError(
+            'connection to server on socket "/var/run/secret-pg-7/.s.PGSQL.5432" failed: '
+            'FATAL: role "svc_private" does not exist (host db-internal.example:5432)')
 
     monkeypatch.setattr(rehearsal.psycopg, "connect", refuse)
     assert rehearsal.main(["--dsn", "postgresql://u:pw@h/db", "--notebook", NOTEBOOK]) == 3
     err = capsys.readouterr().err
-    assert "OperationalError: connection refused" in err and "pw@" not in err
+    assert "OperationalError" in err and rehearsal.DATABASE_ERROR_HINT in err
+    for detail in ("secret-pg-7", ".s.PGSQL", "svc_private", "db-internal", "FATAL",
+                   "pw@", "connection to server"):
+        assert detail not in err, detail
+    assert "Traceback" not in err
+
+
+def test_a_query_failure_mid_run_is_reported_the_same_way(monkeypatch, capsys):
+    """A driver error raised by a query (not the connect) takes the same path:
+    no SQL text, no server detail."""
+    class _Failing(FakeConn):
+        def answer(self, sql, params):
+            raise rehearsal.psycopg.errors.QueryCanceled(
+                "canceling statement due to statement timeout; SELECT secret_column FROM x")
+
+    monkeypatch.setattr(rehearsal.psycopg, "connect", lambda *_a, **_k: _Failing(_library()))
+    assert rehearsal.main(["--dsn", "postgresql://u@h/db", "--notebook", NOTEBOOK]) == 3
+    err = capsys.readouterr().err
+    assert "QueryCanceled" in err and "secret_column" not in err and "SELECT" not in err
+
+
+def test_name_lookups_are_batched_store_reads_and_samples_off_reads_no_names():
+    """codex #941 R4: the lookup rounds send the product store's batched,
+    index-driven reads — one member-name statement per ≤ 500 canonicals of a
+    round, never one statement per key — and without ``--show-samples`` the
+    sample-name keys are not read at all."""
+    report, conn = _rehearse(_library())
+    engine = report["engine"]
+    member_reads = [s for s in conn.statements if "AS visible" in " ".join(s.split())]
+    display_reads = [s for s in conn.statements
+                     if "AS source_id, c.canonical_id AS canonical_id" in " ".join(s.split())]
+    assert display_reads == []                                   # samples off: no names
+    assert engine["lookup_name_keys"] > engine["lookup_rounds"]  # several keys per round
+    assert engine["lookup_name_statements"] <= engine["lookup_rounds"]
+    assert engine["member_seed_statements"] == len(engine["member_seed_calls"])
+    assert len(member_reads) == (engine["lookup_name_statements"]
+                                 + engine["member_seed_statements"])
+    assert not any("COALESCE(c.canonical_id, o.id)=%s" in " ".join(s.split())
+                   for s in conn.statements)
+    assert all(kwargs == {"prepare": False} for kwargs in conn.store_kwargs)
+    # the F4 group is still re-judged on visible names: the counts do not need samples
+    assert engine["rows_per_rule"]["F4"] == 1
+
+
+def test_with_samples_the_display_names_are_one_batched_read_per_round():
+    report, conn = _rehearse(_library(), show_samples=True)
+    display_reads = [s for s in conn.statements
+                     if "AS source_id, c.canonical_id AS canonical_id" in " ".join(s.split())]
+    assert 1 <= len(display_reads) <= report["engine"]["lookup_rounds"]
+    samples = report["samples"]["findings"]["F1"][0]["evidence"]["samples"]
+    assert samples and all("@x-island" in name for name in samples)
 
 
 def test_a_notebook_without_a_kg_state_row_is_reported_not_crashed(capsys):

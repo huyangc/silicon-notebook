@@ -662,12 +662,18 @@ PYTHONPATH=backend python3 scripts/kg_findings_rehearsal.py \
   不重实现。`backend/tests/test_kg_findings_rehearsal.py` 钉住这条:产品 SQL 的 FROM 起的
   文本漂移、引擎内部函数改名改签名都会让它红。
 - **成本**:一次关系流(服务端先排序)、一次对象流、一次 concept_clusters 名字流,各是该笔记本
-  的整表扫描;随后是引擎的 CPU 和有界的点查轮。`phases` 标出哪些阶段是产品也要付的成本
+  的整表扫描;随后是引擎的 CPU 和有界的点查轮。点查直接发产品 store 的语句
+  (`kg_finding_member_name_rows` 与样例名那条读),按 canonical 每批至多 500 个、走 canonical 与
+  主键索引,一轮一条而不是每个键一条;不带 `--show-samples` 时样例名一条都不查(F4 / S1 的可见
+  名仍要查,它们决定计数)。`engine.member_seed_statements` / `engine.lookup_name_statements`
+  记下实发的语句数。`phases` 标出哪些阶段是产品也要付的成本
   (`product_cost: true`)、哪些只是演练自己的测量;`4b_snapshot_for_distributions` 起的 RSS 含
   一份 tally 快照(约每个概念对象 8 字节),读产品内存成本时请扣除。
 - **输出**:一份 JSON,含 `graph` / `objects` / `concepts`(通用概念界要看的 df 分布)/
   `f1`..`f5`(分布与阈值敏感度)/ `engine`(产品那遍的各规则状态与逐条数字证据,无标题)/
   `s1_impact` / `partition_bench` / `phases` / `notes`。
+- **出错**:连接或查询失败时 stderr 只有一行固定提示加异常类名(退出码 3),驱动自带的文本
+  (服务器地址、socket 路径、SQL 片段)一概不输出;阶段进度行只有阶段名、耗时与 RSS。
 
 ---
 
