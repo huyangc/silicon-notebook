@@ -816,6 +816,38 @@ def test_postgresql_selection_does_not_mask_nested_import_failures(monkeypatch, 
         factory.create_repository(settings)
 
 
+@pytest.mark.parametrize(
+    "missing",
+    ("app.services.postgres_repository", "app.repositories.postgres"),
+)
+def test_postgresql_selection_reports_a_missing_adapter_as_unavailable(
+    monkeypatch, tmp_path, missing
+):
+    """The wrapper module or the adapter package being absent is the one
+    failure the factory turns into ``RepositoryBackendUnavailableError``; the
+    wrapper now lives in services, so its module name is what the check names."""
+    factory = _repository_factory_module()
+    _forget_module(monkeypatch, "app.services.postgres_repository")
+    real_import = builtins.__import__
+
+    def import_with_missing_adapter(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "app.services.postgres_repository":
+            raise ModuleNotFoundError(f"No module named {missing!r}", name=missing)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", import_with_missing_adapter)
+    settings = _settings(
+        tmp_path,
+        database_url="postgresql://active:secret@db.example/notebook",
+    )
+
+    with pytest.raises(
+        factory.RepositoryBackendUnavailableError,
+        match="PostgreSQL repository backend is not available",
+    ):
+        factory.create_repository(settings)
+
+
 def test_backend_status_delegates_database_identity_to_python_helper():
     root = Path(__file__).resolve().parents[2]
     script = (root / "scripts" / "backend.sh").read_text(encoding="utf-8")
