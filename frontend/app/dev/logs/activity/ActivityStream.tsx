@@ -9,6 +9,7 @@ import { recordedSubmittedViaLabel } from "../../../submitted-via.ts";
 import { REPORT_DEPTH, label } from "../../../vocabulary.ts";
 import {
   activityKindLabel,
+  activityNotebookName,
   activityStatusLabel,
   activityTitle,
   activityTone,
@@ -52,6 +53,7 @@ function ActivityRow({
   now?: Date;
 }) {
   const title = activityTitle(item);
+  const notebookName = activityNotebookName(item);
   // 未记录（历史行）不显示标签，避免每条旧提问都挂一个「未记录」。
   const via = item.type === "source" ? "" : recordedSubmittedViaLabel(item.submitted_via);
   return (
@@ -97,6 +99,11 @@ function ActivityRow({
       <div className="logrow-preview" title={title}>
         {title}
       </div>
+      {notebookName ? (
+        <div className="logrow-ts activity-row-notebook" title={notebookName}>
+          笔记本：{notebookName}
+        </div>
+      ) : null}
       {/* 报告的时间与总耗时只能出自 formatReportTiming:未完成的报告只显示创建时间,
           缺 generation_started_at 的旧报告不显示耗时。绝不能拿
           updated_at - created_at 顶替——那会把用户确认大纲的等待算进去。 */}

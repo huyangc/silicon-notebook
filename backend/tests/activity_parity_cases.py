@@ -133,6 +133,42 @@ REPORT_SCOPE_AFTER_SHARED_DELETE_CASES = (
 )
 
 
+# ----------------------------------------------------- 提问 / 报告条目带库名
+#
+# 只看提问 / 只看报告含共享库里的提交,而左栏只列自有库:行上的库名是唯一能看出
+# 「问在哪个库」的地方。夹具沿用上面 REPORT_SCOPE 的 u1/n1/n2(库名按 "NB-{id}"
+# 写入),再加两条提问。场景同时喂 SQLite 与 PostgreSQL 两份实现。
+NOTEBOOK_NAME_ASKS = (
+    # (job_id, notebook_id, created_by, created_at)
+    ("ask-own", "n1", "u1", "2026-08-01T12:30:00+00:00"),
+    ("ask-shared", "n2", "u1", "2026-08-01T11:30:00+00:00"),
+)
+
+# (说明, list_user_activity("u1", **kwargs), 期望的 {id: notebook_name})
+NOTEBOOK_NAME_CASES = (
+    ("self ask-only names own and shared libraries",
+     {"activity_type": "ask"},
+     {"ask-own": "NB-n1", "ask-shared": "NB-n2"}),
+    ("self report-only names own and shared libraries",
+     {"activity_type": "report"},
+     {"rep-own": "NB-n1", "rep-shared": "NB-n2"}),
+    ("mixed stream names its ask and report rows",
+     {},
+     {"ask-own": "NB-n1", "rep-own": "NB-n1"}),
+    ("explicit notebook_id names its rows",
+     {"notebook_id": "n1"},
+     {"ask-own": "NB-n1", "rep-own": "NB-n1"}),
+)
+
+# 库名是读的那一刻的当前名,不是提交时的快照:改名后再读,行上跟着变;管理员审计
+# 视图在撤掉共享库读权之后仍带库名(与 /admin/questions 的「笔记本」列同口径)。
+NOTEBOOK_NAME_RENAMED = "改名后的共享库"
+NOTEBOOK_NAME_AFTER_RENAME_AND_REVOKE = {
+    "ask-own": "NB-n1",
+    "ask-shared": NOTEBOOK_NAME_RENAMED,
+}
+
+
 # 畸形边界:两个后端必须抛同一种异常(ValueError),不许一个静默返回一页、另一个 500。
 MALFORMED_BOUNDS = (
     "not-a-date",

@@ -130,6 +130,7 @@
 /* 中栏 · 活动流 */
 .activity-row .logrow-head { flex-wrap: wrap; row-gap: 4px; }
 .activity-stream-question-overview .logrow-preview { white-space: pre-wrap; overflow: visible; overflow-wrap: anywhere; text-overflow: clip; line-height: 1.5; }
+.activity-row-notebook { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .activity-chip { border-radius: 6px; padding: 1px 7px; font-size: 11px; background: var(--soft); color: var(--muted); border: 1px solid var(--line); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 异常小字容器。徽标本身的样式在 globals.css 的 .anomaly-badge 系列里，这里只排版。 */

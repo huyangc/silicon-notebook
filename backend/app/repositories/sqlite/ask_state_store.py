@@ -1125,9 +1125,14 @@ class AskStateStore:
                 "answer_id,error,asked_at,output FROM ask_jobs WHERE id=? AND created_by=?",
                 (job_id, actor_id),
             ).fetchone()
-            if row is not None and db.execute(
-                "SELECT 1 FROM notebooks WHERE id=?", (row["notebook_id"],)
-            ).fetchone() is not None:
+            notebook = (
+                db.execute(
+                    "SELECT name FROM notebooks WHERE id=?", (row["notebook_id"],)
+                ).fetchone()
+                if row is not None
+                else None
+            )
+            if notebook is not None:
                 if reader_id is not None and db.execute(
                     NOTEBOOK_READ_SQL,
                     (row["notebook_id"], *read_access_params(reader_id)),
@@ -1146,6 +1151,7 @@ class AskStateStore:
                     "error": row["error"],
                     "asked_at": row["asked_at"] or "",
                     "output": row["output"],
+                    "notebook_name": notebook["name"] or "",
                 }
                 answer_detail = None
                 if row["answer_id"]:

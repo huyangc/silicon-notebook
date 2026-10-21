@@ -261,6 +261,31 @@ def test_activity_allowed_for_admin_any_user(client):
     assert resp.status_code == 200
 
 
+def test_activity_rows_and_ask_detail_name_their_live_notebook(client):
+    """存活笔记本的提问 / 报告条目与两个详情都带库名,经响应模型原样下发。"""
+    user = _auth(client, 5)
+    uid = _me(client, user)
+    nb = _create_notebook(client, user, name="芯片选型库")
+    with _repo()._runtime.database.write() as db:
+        _insert_ask_job(db, "job-named", nb, uid, "2026-08-01T10:00:00+00:00")
+        _insert_report(db, "report-named", nb, uid, "2026-08-01T09:00:00+00:00")
+    admin = _auth_admin(client)
+    for activity_type in ("ask", "report"):
+        resp = client.get(
+            f"/api/admin/users/{uid}/activity",
+            params={"activity_type": activity_type},
+            headers=admin,
+        )
+        assert resp.status_code == 200
+        assert [row["notebook_name"] for row in resp.json()["items"]] == ["芯片选型库"]
+    ask = client.get(f"/api/admin/users/{uid}/asks/job-named", headers=admin)
+    assert ask.status_code == 200
+    assert ask.json()["notebook_name"] == "芯片选型库"
+    report = client.get(f"/api/admin/users/{uid}/reports/report-named", headers=admin)
+    assert report.status_code == 200
+    assert report.json()["notebook_name"] == "芯片选型库"
+
+
 def test_analysis_issue_log_is_admin_only_read_only_and_content_minimal(
     client, tmp_path
 ):

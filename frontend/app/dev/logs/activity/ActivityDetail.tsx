@@ -19,7 +19,7 @@ import { REPORT_DEPTH, label } from "../../../vocabulary.ts";
 import type { AskResponse } from "../../../workspace-model.ts";
 import { withDeletedSources } from "../../../global-deleted-sources.ts";
 import { ActivityDetailBoundary } from "./DetailBoundary.tsx";
-import { activityStatusLabel, activityTitle, activityTone } from "./format.ts";
+import { activityNotebookName, activityStatusLabel, activityTitle, activityTone } from "./format.ts";
 import { SourceAnomalies } from "./source-view.tsx";
 import type { ActivityItem, ActivityReport, ActivitySource, AskDetail, ReportDetail } from "./types";
 
@@ -85,6 +85,15 @@ function askEndedWithoutTextCopy(status: string): string {
   return "";
 }
 
+function NotebookFact({ name }: { name: string }) {
+  return (
+    <dl className="activity-detail-facts">
+      <dt>笔记本</dt>
+      <dd title={name}>{name}</dd>
+    </dl>
+  );
+}
+
 function AskDetailPane({
   item,
   detail,
@@ -133,6 +142,11 @@ function AskDetailPane({
     : notebookNames;
   const participantNotebooks = (detail?.notebook_ids ?? [])
     .map((id) => mergedNotebookNames[id] || id);
+  // 笔记本内提问所在的库。详情到达后以详情的库名为准(列表之后改过名也跟上);
+  // 删除后的留存由上方说明写出原库名,这里不再重复一行。
+  const notebookName = isGlobal || retentionItem.notebook_deleted_at
+    ? ""
+    : activityNotebookName({ ...item, notebook_name: detail?.notebook_name || item.notebook_name });
   return (
     <div className="activity-detail-body">
       <div className="activity-detail-head">
@@ -148,6 +162,7 @@ function AskDetailPane({
       </div>
       <h2 className="activity-detail-title">{activityTitle(item)}</h2>
       <RetainedActivityNotice item={retentionItem} now={now} />
+      {notebookName ? <NotebookFact name={notebookName} /> : null}
       {isGlobal && participantNotebooks.length > 0 ? (
         <dl className="activity-detail-facts">
           <dt>参与笔记本</dt>
@@ -268,15 +283,17 @@ function ReportDetailPane({
         created_at: detail.created_at,
         updated_at: detail.updated_at,
         generation_started_at: detail.generation_started_at,
+        notebook_name: detail.notebook_name || item.notebook_name,
         ...(detail.notebook_deleted_at
           ? {
-              notebook_name: detail.notebook_name || item.notebook_name,
               notebook_deleted_at: detail.notebook_deleted_at,
               retained_until: detail.retained_until || item.retained_until,
             }
           : {}),
       }
     : item;
+  // 与 AskDetailPane 同一条规则:删除后的留存由上方说明写出原库名。
+  const notebookName = displayItem.notebook_deleted_at ? "" : activityNotebookName(displayItem);
   const failed = displayItem.status === "failed";
   // 失败区块与下面的空态互补(空态排除 showFailure):少了这一条,「非 failed
   // 但有 error、无正文」这种边界会两边条件都不满足,右栏空白一片而不是给出点什么。
@@ -293,6 +310,7 @@ function ReportDetailPane({
       </div>
       <h2 className="activity-detail-title">{activityTitle(item)}</h2>
       <RetainedActivityNotice item={displayItem} now={now} />
+      {notebookName ? <NotebookFact name={notebookName} /> : null}
       {/* 与活动流行上同一条规则：耗时只能来自 generation_started_at → updated_at。 */}
       <p className="activity-detail-time">
         {formatReportTiming(

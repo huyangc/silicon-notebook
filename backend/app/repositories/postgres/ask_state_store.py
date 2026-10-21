@@ -971,7 +971,7 @@ class AskStateStore:
             if row is not None:
                 notebook_id = row["notebook_id"]
                 root = db.execute(
-                    "SELECT created_by FROM notebooks WHERE id=%s FOR KEY SHARE",
+                    "SELECT created_by, name FROM notebooks WHERE id=%s FOR KEY SHARE",
                     (notebook_id,),
                 ).fetchone()
                 if root is not None:
@@ -1003,6 +1003,7 @@ class AskStateStore:
                         "error": row["error"],
                         "asked_at": row["asked_at"] or "",
                         "output": row["output"],
+                        "notebook_name": root["name"] or "",
                     }
                     answer_detail = None
                     if row["answer_id"]:

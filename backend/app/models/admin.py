@@ -236,6 +236,8 @@ class ActivityAsk(BaseModel):
     # synthesis evidence and stored no answer and no conversation. Every other
     # row, and every global/report row, is "answer". See app.models.ask.AskOutput.
     output: StoredAskOutput = "answer"
+    # 所在笔记本的库名:存活笔记本取当前名,删除后的留存摘要取删除时的名;
+    # 全局问答恒为空串(参与库见 ``AskDetail.notebook_names``)。
     notebook_name: str = ""
     notebook_deleted_at: str = ""
     retained_until: str = ""
@@ -284,6 +286,7 @@ class ActivityReport(BaseModel):
     status: str = ""
     generation_started_at: str = ""
     submitted_via: StoredSubmittedVia = ""
+    # 所在笔记本的库名:存活笔记本取当前名,删除后的留存摘要取删除时的名。
     notebook_name: str = ""
     notebook_deleted_at: str = ""
     retained_until: str = ""

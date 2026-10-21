@@ -24,6 +24,10 @@ from tests.activity_parity_cases import (
     LOCAL_DAY_SINCE,
     LOCAL_DAY_UNTIL,
     MALFORMED_BOUNDS,
+    NOTEBOOK_NAME_AFTER_RENAME_AND_REVOKE,
+    NOTEBOOK_NAME_ASKS,
+    NOTEBOOK_NAME_CASES,
+    NOTEBOOK_NAME_RENAMED,
     REPORT_SCOPE_AFTER_SHARED_DELETE_CASES,
     REPORT_SCOPE_CASES,
     REPORT_SCOPE_REPORTS,
@@ -440,6 +444,42 @@ def test_report_overview_paginates_shared_library_reports(repo):
     )
     assert [item["id"] for item in second["items"]] == ["rep-shared"]
     assert second["has_more"] is False
+
+
+def test_ask_and_report_items_carry_their_notebook_name(repo):
+    """提问 / 报告条目带所在笔记本的当前库名(PostgreSQL 侧跑同一张场景表)。"""
+    _seed_report_scope_rows(repo)
+    with repo._write() as db:
+        for job_id, notebook_id, created_by, created_at in NOTEBOOK_NAME_ASKS:
+            _insert_ask(db, job_id, notebook_id, created_by, created_at)
+    for label, kwargs, expected in NOTEBOOK_NAME_CASES:
+        result = repo._runtime.queries.list_user_activity("u1", limit=50, **kwargs)
+        assert {
+            item["id"]: item["notebook_name"] for item in result["items"]
+        } == expected, label
+    with repo.guarded_ask_detail(
+        "ask-shared", actor_id="u1", reader_id="u1"
+    ) as snapshot:
+        assert snapshot["job"]["notebook_name"] == "NB-n2"
+
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET name=? WHERE id=?", (NOTEBOOK_NAME_RENAMED, "n2")
+        )
+        db.execute(
+            "DELETE FROM notebook_members WHERE notebook_id=? AND user_id=?",
+            ("n2", "u1"),
+        )
+    audit = repo._runtime.queries.list_user_activity(
+        "u1", activity_type="ask", include_inaccessible_questions=True, limit=50
+    )
+    assert {
+        item["id"]: item["notebook_name"] for item in audit["items"]
+    } == NOTEBOOK_NAME_AFTER_RENAME_AND_REVOKE
+    with repo.guarded_ask_detail(
+        "ask-shared", actor_id="u1", reader_id=None
+    ) as snapshot:
+        assert snapshot["job"]["notebook_name"] == NOTEBOOK_NAME_RENAMED
 
 
 def test_creator_wide_question_overview_uses_activity_keyset_index(repo):
