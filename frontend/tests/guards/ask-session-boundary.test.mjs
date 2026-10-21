@@ -60,6 +60,9 @@ test("Ask-session hook has a narrow dependency boundary", () => {
     "./ask-stream.ts",
     "./conversation-cleanup.ts",
     "./errors.ts",
+    // 关联报告（就此追问）的纯推导：恢复粘性标签、预检身份、协议常量。报告的 HTTP
+    // 不经这里——就地预检走 ask-api，下面那条「不许 import 任何 *-api」照旧成立。
+    "./linked-report.ts",
     "./source-scope.ts",
     // 停止风格（情形一 / 情形二的轨迹判据）全站一份，两个问答面共用同一个谓词。
     "./stopped-turn.tsx",
@@ -128,6 +131,9 @@ test("Ask-session public surface exposes readonly views and named commands, neve
     "deleteSession",
     "bulkCleanup",
     "submitFeedback",
+    "linkReport",
+    "unlinkReport",
+    "beginReportFollowup",
   ]) {
     assert.ok(properties.includes(command), `missing named Ask command ${command}`);
   }

@@ -52,7 +52,7 @@ let counter = 0;
 function run(overrides = {}) {
   counter += 1;
   return {
-    version: 2,
+    version: 3,
     id: `run-${counter}`,
     savedAt: counter,
     actorId: "user-a",
@@ -64,6 +64,7 @@ function run(overrides = {}) {
     retrievalEffort: "standard",
     sourceScope: { mode: "exclude", source_ids: [] },
     baseScope: { mode: "exclude", notebook_ids: [] },
+    linkedReport: null,
     phase: "preview",
     contract: null,
     understandingMs: 0,
@@ -147,7 +148,7 @@ test("review entries need a well-formed contract; malformed entries are dropped 
   assert.equal(isPersistedIntentRun(run({ phase: "review", contract: null })), false);
   assert.equal(isPersistedIntentRun(run({ phase: "review", contract: { objective: "q" } })), false);
   assert.equal(isPersistedIntentRun(run({ question: "   " })), false);
-  assert.equal(isPersistedIntentRun(run({ version: 3 })), false);
+  assert.equal(isPersistedIntentRun(run({ version: 4 })), false);
   // version 1 预日期于 `advanced` 字段:它说不出自己出自哪个界面,而恢复规则完全
   // 依赖这一点,所以读到即丢弃。sessionStorage 短命,且 version 1 只可能是高级界面
   // 留下的——简化界面本来就会丢掉它,行为与旧版一致。
@@ -161,6 +162,56 @@ test("review entries need a well-formed contract; malformed entries are dropped 
   assert.equal(isPersistedIntentRun(run({ sourceScope: { mode: "all" } })), false);
   assert.equal(isPersistedIntentRun(run({ conversationIdAtStart: 42 })), false);
   assert.equal(isPersistedIntentRun(run()), true);
+});
+
+
+test("the attached report round-trips with the submission it was frozen into", () => {
+  const store = fakeStorage();
+  const attached = run({ linkedReport: { id: "report-1", title: "《电池》安全性综述" } });
+  savePersistedIntentRun(attached, store);
+  const [read] = findPersistedIntentRuns("user-a", "notebook-a", store);
+  assert.equal(read.version, 3);
+  assert.deepEqual(read.linkedReport, { id: "report-1", title: "《电池》安全性综述" });
+  // A record from a failed read carries the report id with an empty title.
+  savePersistedIntentRun({ ...attached, linkedReport: { id: "report-1", title: "" } }, store);
+  assert.deepEqual(
+    findPersistedIntentRuns("user-a", "notebook-a", store)[0].linkedReport,
+    { id: "report-1", title: "" },
+  );
+});
+
+
+test("a version-2 entry (written before reports could be attached) resumes as one without a report", () => {
+  const { linkedReport: _absent, ...legacy } = run({ version: 2, question: "older question" });
+  const store = fakeStorage({ [PENDING_INTENT_STORAGE_KEY]: JSON.stringify([legacy]) });
+  const [read] = readPersistedIntentRuns(store);
+  assert.equal(read.question, "older question");
+  assert.equal(read.version, 3);
+  assert.equal(read.linkedReport, null);
+  // Saving anything rewrites the store in the current version only.
+  savePersistedIntentRun(run({ question: "newer" }), store);
+  const raw = JSON.parse(store.getItem(PENDING_INTENT_STORAGE_KEY));
+  assert.deepEqual(raw.map((item) => item.version), [3, 3]);
+  assert.deepEqual(raw.map((item) => item.linkedReport), [null, null]);
+});
+
+
+test("a version-3 entry with a malformed report is dropped whole, never resumed without it", () => {
+  const malformed = [
+    run({ linkedReport: undefined }),
+    run({ linkedReport: "report-1" }),
+    run({ linkedReport: { id: "", title: "t" } }),
+    run({ linkedReport: { id: "report-1" } }),
+    run({ linkedReport: { id: 7, title: "t" } }),
+  ];
+  for (const entry of malformed) {
+    const store = fakeStorage({ [PENDING_INTENT_STORAGE_KEY]: JSON.stringify([entry]) });
+    assert.deepEqual(readPersistedIntentRuns(store), [], JSON.stringify(entry.linkedReport));
+  }
+  // A version-2 entry cannot smuggle a report in: whatever it carries is ignored.
+  const smuggled = run({ version: 2, linkedReport: { id: "report-x", title: "x" } });
+  const store = fakeStorage({ [PENDING_INTENT_STORAGE_KEY]: JSON.stringify([smuggled]) });
+  assert.equal(readPersistedIntentRuns(store)[0].linkedReport, null);
 });
 
 

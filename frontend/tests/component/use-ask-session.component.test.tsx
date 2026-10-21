@@ -4,15 +4,19 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { AskIntentConfirmation, QueryIntentContract } from "../../app/ask-intent-model";
 import type { AskJobDetail } from "../../app/ask-reconnect";
 import type { ReasoningTraceStep } from "../../app/ask-stream";
+import { humanizedError } from "../../app/errors";
 import type {
   AskResponse,
   ConversationDetail,
   ConversationSummary,
+  LinkedReportReceipt,
+  ReportLinkCheck,
 } from "../../app/workspace-model";
 
 const api = vi.hoisted(() => ({
   bulkDeleteConversations: vi.fn(),
   cancelAskJob: vi.fn(),
+  checkReportLink: vi.fn(),
   deleteConversation: vi.fn(),
   fetchAskModes: vi.fn(),
   getAskJob: vi.fn(),
@@ -202,6 +206,11 @@ beforeEach(() => {
   api.renameConversation.mockResolvedValue(undefined);
   api.submitFeedback.mockResolvedValue(undefined);
   api.bulkDeleteConversations.mockResolvedValue({ deleted: 0, deleted_ids: [] });
+  api.checkReportLink.mockImplementation(async (_nb: string, body: { report_id: string }) => ({
+    report_id: body.report_id,
+    title: "",
+    readable: true,
+  }));
 });
 
 afterEach(() => {
@@ -1661,6 +1670,7 @@ test("intent confirmation reuses the exact preview scope snapshot", async () => 
     originalPolicy.sourceScope,
     originalPolicy.baseScope,
     expect.any(Function),
+    null,
   );
 
   view.rerender(<Harness policy={changedPolicy} />);
@@ -5578,4 +5588,515 @@ test("a failed cancellation leaves no stopped turn and keeps Stop retryable", as
   await act(async () => { await submitting; });
   expect(signal?.aborted).toBe(true);
   expect(value!.stoppedTurn?.question).toBe("cancel fails once");
+});
+
+// ---------------------------------------------------------------------------
+// 关联报告（就此追问）：标签、提交冻结、重开恢复、就地预检。
+// ---------------------------------------------------------------------------
+
+const REPORT = { id: "report-1", title: "电池安全综述" };
+const OTHER_REPORT = { id: "report-2", title: "储能政策梳理" };
+
+function withReceipt(
+  response: AskResponse,
+  report: { id: string; title: string },
+  overrides: Partial<LinkedReportReceipt> = {},
+): AskResponse {
+  return {
+    ...response,
+    linked_report: { report_id: report.id, title: report.title, status: "read", ...overrides },
+  };
+}
+
+function reportCheck(overrides: Partial<ReportLinkCheck> = {}): ReportLinkCheck {
+  return { report_id: REPORT.id, title: REPORT.title, readable: true, ...overrides };
+}
+
+async function passCheckDebounce() {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(300);
+  });
+}
+
+test("the report tag is attached, replaced and removed only by the user", () => {
+  render(<Harness />);
+  beginOwnedNotebook();
+  expect(value!.linkedReport).toBeNull();
+  act(() => value!.linkReport(REPORT));
+  expect(value!.linkedReport).toEqual(REPORT);
+  act(() => value!.linkReport(OTHER_REPORT));
+  expect(value!.linkedReport).toEqual(OTHER_REPORT);
+  act(() => value!.unlinkReport());
+  expect(value!.linkedReport).toBeNull();
+});
+
+test("a submission freezes the tag into its request; changing it afterwards only reaches the next one", async () => {
+  const stream = deferred<AskResponse>();
+  api.runAskStream.mockReturnValueOnce(stream.promise);
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.linkReport(REPORT));
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("第三节的结论有依据吗");
+  });
+  expect(payloadOf(0)).toMatchObject({ question: "第三节的结论有依据吗", report_id: "report-1" });
+  expect(value!.pendingLinkedReport).toEqual(REPORT);
+
+  // Replaced while the question is in flight: the pending turn keeps its own.
+  act(() => value!.linkReport(OTHER_REPORT));
+  expect(value!.pendingLinkedReport).toEqual(REPORT);
+  stream.resolve(withReceipt(answer("conversation-r"), REPORT));
+  await act(async () => {
+    await submitting;
+  });
+  expect(value!.pendingLinkedReport).toBeNull();
+  // Sticky: the user's latest choice stays for the next question.
+  expect(value!.linkedReport).toEqual(OTHER_REPORT);
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+
+  api.runAskStream.mockResolvedValueOnce(answer("conversation-r", "answer-2"));
+  await act(async () => {
+    await value!.submit("下一问");
+  });
+  expect(payloadOf(1)).toMatchObject({ report_id: "report-2" });
+
+  act(() => value!.unlinkReport());
+  api.runAskStream.mockResolvedValueOnce(answer("conversation-r", "answer-3"));
+  await act(async () => {
+    await value!.submit("不带报告的一问");
+  });
+  // No report: the request body is exactly what it was before the feature.
+  expect(payloadOf(2)).not.toHaveProperty("report_id");
+});
+
+test("a reasoning question sends its frozen report to the understanding step, the mirror and the durable run", async () => {
+  const contract = contractFor("报告第三节说得对吗", true);
+  api.previewAskIntent.mockResolvedValue(contract);
+  api.runAskStream.mockResolvedValue({ ...answer("conversation-r"), mode: "reasoning" });
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+  act(() => value!.linkReport(REPORT));
+  await act(async () => {
+    await value!.submit("报告第三节说得对吗");
+  });
+  expect(api.previewAskIntent.mock.calls[0]?.[7]).toBe("report-1");
+  expect(value!.intentReview?.linkedReport).toEqual(REPORT);
+  expect(value!.pendingLinkedReport).toEqual(REPORT);
+  expect((pendingIntentStore()[0] as { linkedReport: unknown }).linkedReport).toEqual(REPORT);
+
+  // Removing the tag while the clarification card is open does not reach it.
+  act(() => value!.unlinkReport());
+  await act(async () => {
+    await value!.confirmIntent({
+      contract,
+      resolved_question: "报告第三节的结论",
+      answers: [{ id: "which", answer: "第三节" }],
+    });
+  });
+  expect(payloadOf(0)).toMatchObject({ question: "报告第三节说得对吗", report_id: "report-1" });
+  expect(value!.linkedReport).toBeNull();
+});
+
+test("reopening a conversation restores the tag: the running question's report first, else the last answer's", async () => {
+  const answered = detail("conversation-a");
+  answered.turns[0].response = withReceipt(answered.turns[0].response, REPORT);
+  const running = detail("conversation-b", "notebook-a", {
+    activeJob: {
+      job_id: "job-b",
+      question: "还在回答的一问",
+      asked_at: "2026-10-21T00:00:00Z",
+      mode: "chunk",
+      trace: [],
+      linked_report: { report_id: OTHER_REPORT.id, title: OTHER_REPORT.title },
+    },
+  });
+  running.turns[0].response = withReceipt(running.turns[0].response, REPORT);
+  const unlinked = detail("conversation-c", "notebook-a", {
+    activeJob: {
+      job_id: "job-c",
+      question: "去掉标签后问的",
+      asked_at: "2026-10-21T00:00:00Z",
+      mode: "chunk",
+      trace: [],
+    },
+  });
+  unlinked.turns[0].response = withReceipt(unlinked.turns[0].response, REPORT);
+  const byId: Record<string, ConversationDetail> = {
+    "conversation-a": answered,
+    "conversation-b": running,
+    "conversation-c": unlinked,
+  };
+  api.getConversation.mockImplementation(async (id: string) => byId[id]);
+  api.getAskJob.mockReturnValue(new Promise(() => {}));
+  render(<Harness />);
+  beginOwnedNotebook();
+
+  await act(async () => {
+    await value!.openSession("conversation-a", 2);
+  });
+  expect(value!.linkedReport).toEqual(REPORT);
+  // Removed but not asked with: a reopen brings it back.
+  act(() => value!.unlinkReport());
+  await act(async () => {
+    await value!.openSession("conversation-a", 3);
+  });
+  expect(value!.linkedReport).toEqual(REPORT);
+
+  await act(async () => {
+    await value!.openSession("conversation-b", 4);
+  });
+  expect(value!.asking).toBe(true);
+  expect(value!.linkedReport).toEqual(OTHER_REPORT);
+  expect(value!.pendingLinkedReport).toEqual(OTHER_REPORT);
+
+  // The running question was asked without a report: the removal stands.
+  await act(async () => {
+    await value!.openSession("conversation-c", 5);
+  });
+  expect(value!.linkedReport).toBeNull();
+  expect(value!.pendingLinkedReport).toBeNull();
+});
+
+test("a new session, another notebook and leaving the workspace all drop the tag", () => {
+  const view = render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.linkReport(REPORT));
+  act(() => value!.startNewSession(2));
+  expect(value!.linkedReport).toBeNull();
+
+  act(() => value!.linkReport(REPORT));
+  view.rerender(<Harness notebookId="notebook-b" />);
+  act(() => {
+    value!.beginNotebookTransition({ actorId: "user-a", notebookId: "notebook-b", workspaceEpoch: 3 });
+  });
+  expect(value!.linkedReport).toBeNull();
+  view.rerender(<Harness notebookId="notebook-a" />);
+  act(() => {
+    value!.beginNotebookTransition({ actorId: "user-a", notebookId: "notebook-a", workspaceEpoch: 4 });
+  });
+  // Coming back does not resurrect the other notebook's tag.
+  expect(value!.linkedReport).toBeNull();
+
+  act(() => value!.linkReport(REPORT));
+  act(() => value!.leaveWorkspace());
+  act(() => {
+    value!.beginNotebookTransition({ actorId: "user-a", notebookId: "notebook-a", workspaceEpoch: 5 });
+  });
+  expect(value!.linkedReport).toBeNull();
+});
+
+test("「就此追问」 opens a new conversation with the report attached and a self-clearing note", async () => {
+  vi.useFakeTimers();
+  api.listConversations.mockResolvedValue([summary("conversation-old")]);
+  api.getConversation.mockResolvedValue(detail("conversation-old"));
+  render(<Harness />);
+  const owner = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+  });
+  expect(value!.conversationId).toBe("conversation-old");
+
+  let opened = false;
+  act(() => {
+    opened = value!.beginReportFollowup(REPORT, 2, "已按报告生成时的检索范围勾选；其中 1 份资料现在无法勾选，已略去");
+  });
+  expect(opened).toBe(true);
+  expect(value!.conversationId).toBeNull();
+  expect(value!.turns).toEqual([]);
+  expect(value!.linkedReport).toEqual(REPORT);
+  expect(value!.linkedReportNote).toBe("已按报告生成时的检索范围勾选；其中 1 份资料现在无法勾选，已略去");
+  expect(effects.ensureAskVisible).toHaveBeenCalled();
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(8000);
+  });
+  expect(value!.linkedReportNote).toBe("");
+  expect(value!.linkedReport).toEqual(REPORT);
+});
+
+test("「就此追问」 without an open notebook does nothing", () => {
+  render(<Harness />);
+  let opened = true;
+  act(() => {
+    opened = value!.beginReportFollowup(REPORT, 1);
+  });
+  expect(opened).toBe(false);
+  expect(value!.linkedReport).toBeNull();
+});
+
+test("the pre-send check is debounced, sends the current inputs, and only its latest answer counts", async () => {
+  vi.useFakeTimers();
+  const first = deferred<ReportLinkCheck>();
+  const second = deferred<ReportLinkCheck>();
+  api.checkReportLink.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  const view = render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.linkReport(REPORT));
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(299);
+  });
+  expect(api.checkReportLink).not.toHaveBeenCalled();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1);
+  });
+  expect(api.checkReportLink).toHaveBeenCalledTimes(1);
+  expect(api.checkReportLink.mock.calls[0]?.[0]).toBe("notebook-a");
+  expect(api.checkReportLink.mock.calls[0]?.[1]).toEqual({
+    report_id: "report-1",
+    mode: "chunk",
+    source_scope: DEFAULT_POLICY.sourceScope,
+    base_scope: DEFAULT_POLICY.baseScope,
+  });
+  const firstSignal = api.checkReportLink.mock.calls[0]?.[2] as AbortSignal;
+
+  // The scope narrows: the request in flight is aborted, a new one follows.
+  const narrowed: AskPolicy = {
+    ...DEFAULT_POLICY,
+    sourceScope: { mode: "include", source_ids: ["source-1"] },
+  };
+  view.rerender(<Harness policy={narrowed} />);
+  expect(firstSignal.aborted).toBe(true);
+  await passCheckDebounce();
+  expect(api.checkReportLink).toHaveBeenCalledTimes(2);
+  expect(api.checkReportLink.mock.calls[1]?.[1]).toMatchObject({
+    source_scope: { mode: "include", source_ids: ["source-1"] },
+  });
+
+  // The superseded request answers anyway, late: it is not taken.
+  first.resolve(reportCheck());
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(value!.linkedReportCheck).toBeNull();
+
+  const reason = "本轮不读取这份报告：它引用的 2 份资料不在当前检索范围内";
+  second.resolve(reportCheck({ readable: false, reason_code: "scope_sources", reason }));
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(value!.linkedReportCheck).toEqual({ readable: false, reason });
+
+  // Back to the whole notebook: a verdict about the narrowed scope no longer shows.
+  view.rerender(<Harness />);
+  expect(value!.linkedReportCheck).toBeNull();
+  // The engine is part of the inputs too.
+  view.rerender(<Harness policy={narrowed} />);
+  expect(value!.linkedReportCheck).toEqual({ readable: false, reason });
+  act(() => value!.selectMode("reasoning"));
+  expect(value!.linkedReportCheck).toBeNull();
+  await passCheckDebounce();
+  expect(api.checkReportLink.mock.calls.at(-1)?.[1]).toMatchObject({ mode: "reasoning" });
+});
+
+test("a check answered for a view that has moved on is dropped, even a 404", async () => {
+  vi.useFakeTimers();
+  const stale = deferred<ReportLinkCheck>();
+  const fresh = deferred<ReportLinkCheck>();
+  api.checkReportLink.mockReturnValueOnce(stale.promise).mockReturnValueOnce(fresh.promise);
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.linkReport(REPORT));
+  await passCheckDebounce();
+  expect(api.checkReportLink).toHaveBeenCalledTimes(1);
+
+  // Another session (another view generation), the same report attached again.
+  act(() => value!.startNewSession(2));
+  act(() => value!.linkReport(REPORT));
+  stale.reject(humanizedError("找不到这份报告，它可能已被删除", 404));
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(value!.linkedReport).toEqual(REPORT);
+  expect(value!.linkedReportNote).toBe("");
+
+  await passCheckDebounce();
+  expect(api.checkReportLink).toHaveBeenCalledTimes(2);
+  fresh.resolve(reportCheck());
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(value!.linkedReportCheck).toEqual({ readable: true, reason: "" });
+});
+
+test("a check that finds the report gone removes the tag and says so beside it, briefly", async () => {
+  vi.useFakeTimers();
+  api.checkReportLink.mockRejectedValueOnce(humanizedError("找不到这份报告，它可能已被删除", 404));
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.linkReport(REPORT));
+  await passCheckDebounce();
+  expect(value!.linkedReport).toBeNull();
+  expect(value!.linkedReportCheck).toBeNull();
+  expect(value!.linkedReportNote).toBe("关联的报告已不存在，已移除");
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(7999);
+  });
+  expect(value!.linkedReportNote).toBe("关联的报告已不存在，已移除");
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1);
+  });
+  expect(value!.linkedReportNote).toBe("");
+});
+
+test("any other check failure keeps the tag and shows no verdict", async () => {
+  vi.useFakeTimers();
+  api.checkReportLink.mockRejectedValueOnce(humanizedError("当前检索范围为空", 409));
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.linkReport(REPORT));
+  await passCheckDebounce();
+  expect(api.checkReportLink).toHaveBeenCalledTimes(1);
+  expect(value!.linkedReport).toEqual(REPORT);
+  expect(value!.linkedReportCheck).toBeNull();
+  expect(value!.linkedReportNote).toBe("");
+});
+
+test("no check is sent while the scope has nothing to search", async () => {
+  vi.useFakeTimers();
+  render(<Harness policy={{ ...DEFAULT_POLICY, scopeBlocked: true }} />);
+  beginOwnedNotebook();
+  act(() => value!.linkReport(REPORT));
+  await passCheckDebounce();
+  expect(api.checkReportLink).not.toHaveBeenCalled();
+  expect(value!.linkedReportCheck).toBeNull();
+});
+
+test("a restored tag without a title (a failed read's receipt) gets it back from the check", async () => {
+  vi.useFakeTimers();
+  const failedRead = detail("conversation-failed");
+  failedRead.turns[0].response = withReceipt(
+    failedRead.turns[0].response,
+    { id: REPORT.id, title: "" },
+    { status: "skipped", reason_code: "read_failed", reason: "本轮不读取这份报告：读取报告时出错，请重试" },
+  );
+  api.listConversations.mockResolvedValue([summary("conversation-failed")]);
+  api.getConversation.mockResolvedValue(failedRead);
+  api.checkReportLink.mockResolvedValueOnce(reportCheck());
+  render(<Harness />);
+  const owner = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+  });
+  expect(value!.linkedReport).toEqual({ id: REPORT.id, title: "" });
+  await passCheckDebounce();
+  expect(value!.linkedReport).toEqual(REPORT);
+  expect(value!.linkedReportCheck).toEqual({ readable: true, reason: "" });
+});
+
+test("a send refused because the report is gone re-checks the tag and removes it", async () => {
+  vi.useFakeTimers();
+  api.checkReportLink
+    .mockResolvedValueOnce(reportCheck())
+    .mockRejectedValueOnce(humanizedError("找不到这份报告，它可能已被删除", 404));
+  api.runAskStream.mockRejectedValueOnce(humanizedError("找不到这份报告，它可能已被删除", 404));
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.linkReport(REPORT));
+  await passCheckDebounce();
+  expect(value!.linkedReportCheck).toEqual({ readable: true, reason: "" });
+
+  await act(async () => {
+    await value!.submit("报告还在吗");
+  });
+  expect(effects.reportError).toHaveBeenCalledTimes(1);
+  expect(value!.question).toBe("报告还在吗");
+  await passCheckDebounce();
+  expect(api.checkReportLink).toHaveBeenCalledTimes(2);
+  expect(value!.linkedReport).toBeNull();
+  expect(value!.linkedReportNote).toBe("关联的报告已不存在，已移除");
+});
+
+test("a reload resumes the stored clarification with the report it was frozen with", async () => {
+  const contract = contractFor("stored question", true);
+  seedPendingIntentStore([persistedReview({ version: 3, linkedReport: REPORT, contract })]);
+  api.listConversations.mockResolvedValue([]);
+  api.runAskStream.mockResolvedValue({ ...answer("conversation-resumed"), mode: "reasoning" });
+  render(<Harness />);
+  const owner = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.intentReview?.question).toBe("stored question");
+  expect(value!.intentReview?.linkedReport).toEqual(REPORT);
+  expect(value!.linkedReport).toEqual(REPORT);
+  expect(value!.pendingLinkedReport).toEqual(REPORT);
+
+  await act(async () => {
+    await value!.confirmIntent({
+      contract,
+      resolved_question: "stored question, resolved",
+      answers: [{ id: "which", answer: "that one" }],
+    });
+  });
+  expect(payloadOf(0)).toMatchObject({ question: "stored question", report_id: "report-1" });
+});
+
+test("a reload between hand-off and started re-sends the submission with its report", async () => {
+  const contract = contractFor("handed off with a report", false);
+  seedPendingIntentStore([persistedReview({
+    version: 3,
+    id: "run-handoff",
+    question: "handed off with a report",
+    phase: "handoff",
+    contract,
+    linkedReport: REPORT,
+    confirmation: { contract, resolved_question: "handed off with a report", answers: [] },
+  })]);
+  api.listConversations.mockResolvedValue([]);
+  api.runAskStream.mockReturnValue(new Promise(() => {}));
+  render(<Harness />);
+  const owner = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  await settleSubmit();
+  expect(api.previewAskIntent).not.toHaveBeenCalled();
+  expect(payloadOf(0)).toMatchObject({
+    question: "handed off with a report",
+    client_request_id: "run-handoff",
+    report_id: "report-1",
+  });
+  expect(value!.pendingLinkedReport).toEqual(REPORT);
+  expect(value!.linkedReport).toEqual(REPORT);
+});
+
+test("a re-attached job finishing does not overwrite the tag the user set for the next question", async () => {
+  vi.useFakeTimers();
+  const running = detail("conversation-running", "notebook-a", {
+    activeJob: {
+      job_id: "job-r",
+      question: "还在回答",
+      asked_at: "2026-10-21T00:00:00Z",
+      mode: "chunk",
+      trace: [],
+      linked_report: { report_id: REPORT.id, title: REPORT.title },
+    },
+  });
+  const finished = detail("conversation-running");
+  finished.turns[0].response = withReceipt(finished.turns[0].response, REPORT);
+  api.listConversations.mockResolvedValue([summary("conversation-running")]);
+  api.getConversation.mockResolvedValueOnce(running).mockResolvedValueOnce(finished);
+  api.getAskJob.mockResolvedValueOnce(doneJob("job-r"));
+  render(<Harness />);
+  const owner = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.linkedReport).toEqual(REPORT);
+  expect(value!.pendingLinkedReport).toEqual(REPORT);
+
+  act(() => value!.linkReport(OTHER_REPORT));
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1500);
+  });
+  expect(api.getConversation).toHaveBeenCalledTimes(2);
+  expect(value!.asking).toBe(false);
+  expect(value!.pendingLinkedReport).toBeNull();
+  expect(value!.linkedReport).toEqual(OTHER_REPORT);
 });

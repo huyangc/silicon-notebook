@@ -1,6 +1,7 @@
 import type { CitationImageLike } from "./answer-formatting.ts";
 import { countCodePoints } from "./input-limits.ts";
 import type { ReportCoverage } from "./report-outline-model.ts";
+import type { BaseScopePayload, SourceScopePayload } from "./source-scope.ts";
 
 /** Stable report-workspace protocol values shared by the owner and view. */
 export const REPORT_DEPTHS = [1, 2, 4, 8, 16] as const;
@@ -160,6 +161,27 @@ export type ReportUnderstandingT = {
   corpus_profile?: ReportCorpusProfileT;
   report_frame?: ReportFrameT;
   credibility?: ReportCredibilityT;
+  /** 报告创建时冻结的两维检索范围（服务端快照，`narrowed` 说明是否真的收窄过）。
+   *  「就此追问」不直接读它，而是问 `GET …/followup` 要一份按现状过滤过的范围。 */
+  source_scope?: SourceScopePayload & { narrowed?: boolean | null };
+  base_scope?: BaseScopePayload & { narrowed?: boolean | null };
+};
+
+/**
+ * `GET /notebooks/{nb}/reports/{rid}/followup`：「就此追问」起步用的检索范围——报告
+ * 生成时冻结的范围，减去如今已无法勾选的部分。真源：`backend/app/models/reports.py
+ * ReportFollowupScope`。没收窄过的一维是「什么都不排除」（`exclude` + 空表）。
+ * `dropped_*` 是冻结时勾选、现在已无法勾选的条数；`fell_back_to_all` 为真时两维都
+ * 已退回全选（冻结的选择已无可用部分，或无法按原样恢复）。
+ */
+export type ReportFollowupScopeT = {
+  report_id: string;
+  title: string;
+  source_scope: SourceScopePayload;
+  base_scope: BaseScopePayload;
+  dropped_sources?: number;
+  dropped_libraries?: number;
+  fell_back_to_all?: boolean;
 };
 
 export type ReportDetailT = ReportSummaryT & {

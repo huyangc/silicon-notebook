@@ -23,6 +23,7 @@ import type {
   ConversationDetail,
   ConversationShareResponse,
   ConversationSummary,
+  ReportLinkCheck,
 } from "./workspace-model.ts";
 import { requestTaskStream } from "./request-task-stream.ts";
 import {
@@ -121,6 +122,9 @@ export const previewAskIntent = (
   // 范围就会出现「预检说搜得到、执行搜不到」。省略即历史行为（全部挂载库参与）。
   baseScope?: BaseScopePayload,
   onHeartbeat?: (elapsedMs: number) => void | Promise<void>,
+  // 这次提交挂的关联报告（与范围同一时点冻结）。理解步骤因此知道「这份报告」「第三节」
+  // 指的是什么；没挂时省略，请求体与以往逐字节相同。
+  reportId?: string | null,
 ) => requestTaskStream<QueryIntentContract>(
   `/notebooks/${notebookId}/ask/intent/stream`,
   {
@@ -131,6 +135,7 @@ export const previewAskIntent = (
       conversation_id: conversationId || undefined,
       source_scope: sourceScope,
       base_scope: baseScope,
+      report_id: reportId || undefined,
     }),
     signal,
   },
@@ -187,6 +192,30 @@ export async function runAskStream<TResponse = AskResponse>(
   if (!finalResponse) throw new Error("Streaming response ended without a final answer");
   return finalResponse;
 }
+
+export type ReportLinkCheckRequest = {
+  report_id: string;
+  /** 这次会提交的回答方式（`submissionAskMode` 的结果）；扩展引擎不读报告。 */
+  mode: string;
+  source_scope: SourceScopePayload;
+  base_scope: BaseScopePayload;
+};
+
+/**
+ * 发送之前的就地预检：这样提问会不会读这份关联报告（判词放在输入框旁的报告标签上）。
+ * 只读，不建任务。报告不存在/不是自己的 404，未完成 409，空范围与 `/ask` 一样 409，
+ * 这几种都带可展示的中文文案。
+ */
+export const checkReportLink = (
+  nb: string,
+  body: ReportLinkCheckRequest,
+  signal?: AbortSignal,
+) => requestJson<ReportLinkCheck>(`/notebooks/${nb}/ask/report-check`, {
+  ...options,
+  method: "POST",
+  body: JSON.stringify(body),
+  signal,
+});
 
 export const cancelAskJob = (nb: string, id: string) =>
   requestVoid(`/notebooks/${nb}/ask/jobs/${id}/cancel`, {

@@ -499,6 +499,15 @@ export function useSourceLibrary({
     setSourceScopeSelection((previous) => toggleSourceSelection(previous, sourceId));
   }
 
+  /**
+   * Replace the whole source selection at once (「就此追问」 restores the scope a
+   * report was generated under). Copied, so the caller's set can never alias
+   * the selection this hook owns.
+   */
+  function applySourceScopeSelection(selection: SourceScopeSelection) {
+    setSourceScopeSelection({ allSelected: selection.allSelected, ids: new Set(selection.ids) });
+  }
+
   function commitUploadedSources(
     owner: SourceLibraryOwner | null,
     uploaded: readonly SourceSummary[],
@@ -887,6 +896,7 @@ export function useSourceLibrary({
     selectAllSources,
     clearSourceSelection,
     toggleSource,
+    applySourceScopeSelection,
     commitUploadedSources,
     commitUrlSources,
     openSourceById,
