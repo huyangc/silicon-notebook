@@ -33,9 +33,14 @@ from typing import Any, Iterator
 import pytest
 
 from app.core.request_context import reset_request_user, set_request_user
-from app.domain.report_followup import CitedReportReference, RestoredReportEvidence
+from app.domain.report_followup import (
+    CitedReportReference,
+    ReportRestoreScopeError,
+    RestoredReportEvidence,
+)
 from app.models.notebooks import NotebookCreate
 from app.services.source_scope import (
+    current_source_scope,
     default_ceiling_context,
     memory_access_context,
     source_scope_context,
@@ -216,6 +221,73 @@ def _restored_ids(restored: RestoredReportEvidence) -> set[tuple[str, str]]:
     return set(restored.key_by_object)
 
 
+class _Spy:
+    """Forwards every attribute of ``target``; a call is logged first."""
+
+    def __init__(self, target: Any, label: str, calls: list[str]) -> None:
+        self._target, self._label, self._calls = target, label, calls
+
+    def __getattr__(self, name: str) -> Any:
+        value = getattr(self._target, name)
+        if not callable(value):
+            return value
+
+        def logged(*args: Any, **kwargs: Any) -> Any:
+            self._calls.append(f"{self._label}.{name}")
+            return value(*args, **kwargs)
+
+        return logged
+
+
+_SPIED_SEATS = ("sources", "chunks", "knowledge", "notebooks", "memory_retriever")
+
+
+@contextmanager
+def counting_reads(world: World) -> Iterator[list[str]]:
+    """Every connection the candidate owner opens and every call it makes on
+    its stores and its Memory retriever, in order."""
+    candidates = world.repo.retrieval.candidates
+    calls: list[str] = []
+    connect = candidates._connect
+    saved = {name: getattr(candidates, name) for name in _SPIED_SEATS}
+
+    def counted_connect():
+        calls.append("connect")
+        return connect()
+
+    candidates._connect = counted_connect
+    for name, value in saved.items():
+        setattr(candidates, name, None if value is None else _Spy(value, name, calls))
+    try:
+        yield calls
+    finally:
+        del candidates._connect
+        for name, value in saved.items():
+            setattr(candidates, name, value)
+
+
+@contextmanager
+def as_request_user(user: Any) -> Iterator[None]:
+    token = set_request_user(user)
+    try:
+        yield
+    finally:
+        reset_request_user(token)
+
+
+def assert_refused_before_any_read(
+    world: World, cited: list[CitedReportReference], actor_id: str,
+) -> None:
+    """Under whatever frame the caller installed: the restore raises the
+    wiring error and has opened no connection and called no store."""
+    with counting_reads(world) as calls:
+        with pytest.raises(ReportRestoreScopeError):
+            world.repo.retrieval.restore_report_references(
+                world.nb, actor_id, cited,
+            )
+    assert calls == []
+
+
 # --------------------------------------------------------------- scenarios
 def scenario_each_kind_reads_back_the_current_text(world: World) -> None:
     """A passage, an element, a knowledge object and the asker's own Memory
@@ -362,33 +434,36 @@ def scenario_outside_the_ceiling_reads_nothing(world: World) -> None:
     assert _restored_ids(foreign) == set()
     assert foreign.gone == 5
 
-    # Under a scope that freezes no library and admits every source id, an
-    # unmounted library's items still read back nothing: the participant set,
-    # the passage statement's notebook predicate and the element / knowledge
-    # object ownership checks are the restore's own, not only the default
-    # ceiling's.
-    token = set_request_user(world.alice)
-    try:
-        with source_scope_context(world.nb, {
-            "mode": "exclude", "source_ids": [], "narrowed": False,
-        }):
-            unmounted = world.repo.retrieval.restore_report_references(
-                world.nb, world.alice.id, [
-                    ref("k1", "chunk", "c-other", notebook_id=world.other,
-                        source_id="other-src"),
-                    ref("k2", "element", "el-other", notebook_id=world.other,
-                        source_id="other-src"),
-                    ref("k3", "chunk", "c-lib", notebook_id=world.lib,
-                        source_id="lib-src"),
-                    ref("k4", "element", "el-other", source_id="other-src"),
-                    ref("k5", "concept", "kg-other", source_id="other-src"),
-                    ref("k6", "chunk", "c-other", source_id="other-src"),
-                ],
-            )
-    finally:
-        reset_request_user(token)
-    assert _restored_ids(unmounted) == {("chunk", "c-lib")}
-    assert unmounted.gone == 5
+    # A ceiling of the right shape that lists MORE than this run may read --
+    # other libraries' sources in the notebook's own include list, and a
+    # frozen list for a library nobody mounted: the participant set, the
+    # passage statement's notebook predicate and the element / knowledge
+    # object ownership checks are the restore's own, so none of it reads back.
+    overwide_local = {
+        "mode": "include", "source_ids": ["src-a", "other-src", "lib-src"],
+        "narrowed": False, "owner_id": world.alice.id,
+    }
+    with as_request_user(world.alice), source_scope_context(
+        world.nb, overwide_local, None,
+        {world.lib: ["lib-src"], world.other: ["other-src"]},
+        ceilings_total=True,
+    ):
+        overwide = world.repo.retrieval.restore_report_references(
+            world.nb, world.alice.id, [
+                ref("k1", "chunk", "c-other", notebook_id=world.other,
+                    source_id="other-src"),
+                ref("k2", "element", "el-other", notebook_id=world.other,
+                    source_id="other-src"),
+                ref("k3", "chunk", "c-lib", notebook_id=world.lib,
+                    source_id="lib-src"),
+                ref("k4", "element", "el-other", source_id="other-src"),
+                ref("k5", "concept", "kg-other", source_id="other-src"),
+                ref("k6", "chunk", "c-other", source_id="other-src"),
+                ref("k7", "element", "el-lib", source_id="lib-src"),
+            ],
+        )
+    assert _restored_ids(overwide) == {("chunk", "c-lib")}
+    assert overwide.gone == 6
 
 
 def scenario_other_members_memory_never_reads_back(world: World) -> None:
@@ -416,19 +491,33 @@ def scenario_other_members_memory_never_reads_back(world: World) -> None:
         ref("k2", "chunk", "c-mem-alice", source_id="src-mem-alice"),
     ], user=world.bob)) == set()
 
-    # The passage owner predicate holds even under a ceiling that admits
-    # Bob's projection source (an all-admitting local scope).
-    token = set_request_user(world.alice)
-    try:
-        with source_scope_context(world.nb, {
-            "mode": "exclude", "source_ids": [], "narrowed": False,
-        }):
-            loose = world.repo.retrieval.restore_report_references(
-                world.nb, world.alice.id, [cited[1]],
-            )
-    finally:
-        reset_request_user(token)
-    assert _restored_ids(loose) == set()
+    # A loose scope -- an ``exclude`` local dimension admits Bob's projection
+    # source -- is refused before anything is read, for every kind of Bob's
+    # Memory and its derivatives, whether or not it claims to freeze its
+    # libraries.
+    loose = {
+        "mode": "exclude", "source_ids": [], "narrowed": False,
+        "owner_id": world.alice.id,
+    }
+    for frozen_libraries in (False, True):
+        with as_request_user(world.alice), source_scope_context(
+            world.nb, loose, ceilings_total=frozen_libraries,
+        ):
+            for reference in cited:
+                assert_refused_before_any_read(world, [reference], world.alice.id)
+
+    # The passage owner predicate is the statement's own: under a ceiling of
+    # the right shape that (wrongly) lists Bob's projection source for Alice,
+    # his passage still does not read back.
+    with as_request_user(world.alice), source_scope_context(world.nb, {
+        "mode": "include", "source_ids": ["src-a", "src-mem-bob"],
+        "narrowed": False, "owner_id": world.alice.id,
+    }, ceilings_total=True):
+        listed = world.repo.retrieval.restore_report_references(
+            world.nb, world.alice.id, [cited[1]],
+        )
+    assert _restored_ids(listed) == set()
+    assert listed.gone == 1
 
 
 def scenario_closed_memory_channel_reads_no_memory(world: World) -> None:
@@ -473,31 +562,97 @@ def scenario_relation_reads_back_as_its_evidence_element(world: World) -> None:
     assert outside.gone == 2
 
 
-def scenario_unreadable_types_are_gone(world: World) -> None:
-    restored = restore(world, [
+def scenario_source_and_external_references_are_skipped(world: World) -> None:
+    """A whole-source row and external material name no single item to give
+    back: not read, not restored, and NOT gone (nothing was deleted). A row
+    with no type, or a type that finds no knowledge object, is gone."""
+    skipped = [
         ref("k1", "external", "https://example.org/paper"),
         ref("k2", "source", "src-a", source_id="src-a"),
+    ]
+    with counting_reads(world) as calls:
+        only_skipped = restore(world, skipped)
+    assert calls == []
+    assert _restored_ids(only_skipped) == set()
+    assert only_skipped.gone == 0
+
+    mixed = restore(world, [
+        *skipped,
         ref("k3", "", "c-a", source_id="src-a"),
         ref("k4", "concept", "c-a", source_id="src-a"),
+        ref("k5", "chunk", "c-a", source_id="src-a"),
     ])
-    assert _restored_ids(restored) == set()
-    assert restored.gone == 4
+    assert _restored_ids(mixed) == {("chunk", "c-a")}
+    assert mixed.gone == 2
 
 
-def scenario_needs_the_runs_own_ceiling(world: World) -> None:
-    cited = [ref("k1", "chunk", "c-a", source_id="src-a")]
-    retrieval = world.repo.retrieval
-    token = set_request_user(world.alice)
-    try:
-        with pytest.raises(RuntimeError):
-            retrieval.restore_report_references(world.nb, world.alice.id, cited)
-        with default_ceiling_context(
-            world.lib, world.alice.id, real_readers(world.repo),
+def scenario_reads_only_the_kinds_asked_for(world: World) -> None:
+    """An element-only request reads the participant set and the element
+    tables, and opens no connection for passages, relations or objects."""
+    with counting_reads(world) as calls:
+        restored = restore(world, [ref("k1", "element", "el-a1", source_id="src-a")])
+    assert _restored_ids(restored) == {("element", "el-a1")}
+    assert calls == [
+        "connect", "notebooks.participant_tiers",
+        "sources.evidence_elements", "sources.source_metadata",
+    ]
+
+
+def scenario_wiring_faults_refuse_before_any_read(world: World) -> None:
+    """Every frame but the run's own frozen ceiling, read as its owner, is
+    refused with the dedicated wiring error before a connection is opened."""
+    cited = [
+        ref("k1", "chunk", "c-a", source_id="src-a"),
+        ref("k2", "memory", "mem-bob"),
+        ref("k3", "element", "el-mem-bob", source_id="src-mem-bob"),
+        ref("k4", "concept", "kg-bob", source_id="src-mem-bob"),
+    ]
+    alice, bob = world.alice.id, world.bob.id
+    with as_request_user(world.alice):
+        # No ceiling at all.
+        assert_refused_before_any_read(world, cited, alice)
+        # Another notebook's ceiling.
+        with default_ceiling_context(world.lib, alice, real_readers(world.repo)):
+            assert_refused_before_any_read(world, cited, alice)
+        # A subjectless (global) run's ceiling, although it names this notebook.
+        with source_scope_context(
+            world.nb, None, None,
+            {world.nb: ["src-a", "src-b"], world.lib: ["lib-src"]},
+            subjectless=True, ceilings_total=True,
         ):
-            with pytest.raises(RuntimeError):
-                retrieval.restore_report_references(world.nb, world.alice.id, cited)
-    finally:
-        reset_request_user(token)
+            assert_refused_before_any_read(world, cited, alice)
+        # This notebook's include list, but its libraries are not frozen.
+        with source_scope_context(world.nb, {
+            "mode": "include", "source_ids": ["src-a", "src-b"],
+            "hidden_source_ids": ["src-mem-alice"], "narrowed": False,
+            "owner_id": alice,
+        }):
+            assert_refused_before_any_read(world, cited, alice)
+        # Libraries frozen, but an exclude local dimension.
+        with source_scope_context(world.nb, {
+            "mode": "exclude", "source_ids": ["src-b"], "owner_id": alice,
+        }, ceilings_total=True):
+            assert_refused_before_any_read(world, cited, alice)
+        # Alice's own Ask ceiling, read as Bob (or as nobody).
+        with default_ceiling_context(world.nb, alice, real_readers(world.repo)):
+            assert_refused_before_any_read(world, cited, bob)
+            assert_refused_before_any_read(world, cited, "")
+        # A submitted local scope that carries no owner belongs to the run's
+        # viewer: Alice's run cannot read it as Bob either.
+        with default_ceiling_context(
+            world.nb, alice, real_readers(world.repo),
+            local_scope={"mode": "include", "source_ids": ["src-a"], "narrowed": True},
+        ):
+            assert current_source_scope().owner_id == ""
+            assert_refused_before_any_read(world, cited, bob)
+            assert _restored_ids(world.repo.retrieval.restore_report_references(
+                world.nb, alice, cited[:1],
+            )) == {("chunk", "c-a")}
+    # Alice's ceiling, Alice as actor, but the run's viewer is Bob.
+    with as_request_user(world.bob), default_ceiling_context(
+        world.nb, alice, real_readers(world.repo),
+    ):
+        assert_refused_before_any_read(world, cited, alice)
 
 
 def scenario_memory_hits_by_ids(world: World) -> None:
@@ -522,7 +677,8 @@ SCENARIOS = (
     scenario_other_members_memory_never_reads_back,
     scenario_closed_memory_channel_reads_no_memory,
     scenario_relation_reads_back_as_its_evidence_element,
-    scenario_unreadable_types_are_gone,
-    scenario_needs_the_runs_own_ceiling,
+    scenario_source_and_external_references_are_skipped,
+    scenario_reads_only_the_kinds_asked_for,
+    scenario_wiring_faults_refuse_before_any_read,
     scenario_memory_hits_by_ids,
 )

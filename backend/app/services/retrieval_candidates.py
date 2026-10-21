@@ -27,12 +27,14 @@ from app.models.common import Evidence
 from app.domain.extensions import GENERATED_QUESTION_ACCESS_CAPABILITY
 from app.domain.promotion_source import presented_source_title
 from app.domain.report_followup import (
+    RESTORE_SKIPPED_OBJECT_TYPES,
     RESTORED_KIND_CHUNK,
     RESTORED_KIND_ELEMENT,
     RESTORED_KIND_KG,
     RESTORED_KIND_MEMORY,
     RESTORED_KINDS,
     CitedReportReference,
+    ReportRestoreScopeError,
     RestoredReportEvidence,
 )
 from app.domain.retrieval import ChunkRetrievalPlan
@@ -326,23 +328,15 @@ def _hydrated_chunk_row(r) -> dict:
     }
 
 
-#: Report reference types that name nothing a follow-up can read back: an
-#: ``external`` item (plugin material outside the notebook), a whole ``source``
-#: (collection and workbook rows), or a row without a type.
-_REPORT_UNRESTORABLE_TYPES = frozenset({"", "external", "source"})
-
-
-def _report_restore_kind(object_type: str) -> str | None:
-    """How ``restore_report_references`` reads one reference type back:
-    ``chunk`` / ``element`` / ``relation`` / ``memory`` by their own reader,
-    ``None`` for a type with nothing to read, and every other type -- the
-    graph's open-ended object types -- as a knowledge object (a type that is
-    no knowledge object simply finds no row)."""
+def _report_restore_kind(object_type: str) -> str:
+    """How ``restore_report_references`` reads one (not skipped) reference type
+    back: ``chunk`` / ``element`` / ``relation`` / ``memory`` by their own
+    reader, every other type -- the graph's open-ended object types, and a row
+    with no type -- as a knowledge object (a type that is no knowledge object
+    simply finds no row and counts as gone)."""
     value = str(object_type or "")
     if value in {"chunk", "element", "relation", "memory"}:
         return value
-    if value in _REPORT_UNRESTORABLE_TYPES:
-        return None
     return "kg"
 
 
@@ -4726,19 +4720,30 @@ class CandidateRetrievalService(_RetrievalState):
         CURRENT text, as this run's ceiling admits them (a follow-up question
         about the report; plan 2026-10-21 §2.7).
 
-        The retrieval layer owns this read, so it judges every reference
-        itself and trusts nothing the caller decided: a reference the report
-        link verdict never saw, or one that names a library or a source the
-        ceiling leaves out, reads back nothing and counts as ``gone``. That is
-        what lets the verdict stay a disclosure (why the report is not read)
-        rather than the permission check. The checkpoints, per kind:
+        The retrieval layer owns this read -- the one channel that puts
+        evidence chosen EARLIER back into a prompt -- so it judges every
+        reference itself and trusts nothing the caller decided: a reference
+        the report link verdict never saw, or one that names a library or a
+        source the ceiling leaves out, reads back nothing and counts as
+        ``gone``. That is what lets the verdict stay a disclosure (why the
+        report is not read) rather than the permission check.
 
-        * every kind: the run's single-notebook ceiling must be installed for
-          ``active_notebook_id`` (``_report_restore_scope`` raises otherwise:
-          there is no "unscoped" form of this read), and the reference's
-          library must be one of this run's participants for its viewer after
-          the library dimension (``_retrieval_participants``) -- an unchecked,
-          unmounted or unreadable library contributes nothing;
+        The frame is checked before anything is read (``_report_restore_
+        scope``): the ceiling must be installed, be this notebook's
+        single-notebook ceiling, and have the frozen shape every Ask run
+        installs -- ``ceilings_total`` (each other library it covers carries
+        its own frozen source list) and this notebook's own include list --
+        and ``actor_id`` must be the ceiling's owner and the run's viewer. A
+        looser scope (an ``exclude`` local dimension admits any source id,
+        another member's Memory projection included) or another identity is
+        a wiring fault: ``ReportRestoreScopeError`` is raised, nothing is
+        read, and the caller's fail-soft must re-raise it. The checkpoints,
+        per kind:
+
+        * every kind: the reference's library must be one of this run's
+          participants for its viewer after the library dimension
+          (``_retrieval_participants``) -- an unchecked, unmounted or
+          unreadable library contributes nothing;
         * ``chunk``: per library, ONE ``retrieval_contribution_rows`` read
           (in ``_in_batches`` windows) whose ``include`` list holds only the
           cited sources ``scope.allows`` -- the ceiling is in the SQL before
@@ -4762,18 +4767,31 @@ class CandidateRetrievalService(_RetrievalState):
           the same two doors as the Ask Memory channel (``_memory_hits`` and
           ``MemoryRetriever.context``).
 
-        Bounded by construction: the reads are the references' own ids (one
-        batch per kind and library, plus one primary-key read per cited
-        Memory entry, the only by-id form that store has); nothing here
-        enumerates a notebook. The objects come back as the native retrieval
-        values, stamped with their library, in the order the references first
-        name them; ``key_by_object`` maps each one to the report keys that
-        point at it.
+        ``source`` and ``external`` references (``RESTORE_SKIPPED_OBJECT_
+        TYPES``) name no single item to give back: they are skipped -- not
+        read, not counted as gone.
+
+        Bounded by construction: the reads are the references' own ids, and a
+        kind is read only when some reference asks for it (one batch per kind
+        and library); nothing here enumerates a notebook. The one per-id read
+        is Memory (``memory_for_user``, the only by-id form that store has):
+        at most one primary-key read per cited Memory entry, and those are
+        bounded by the report's own references, which the report's evidence
+        budget bounds when it is written. The objects come back as the native
+        retrieval values, stamped with their library, in the order the
+        references first name them; ``key_by_object`` maps each one to the
+        report keys that point at it.
         """
-        scope = self._report_restore_scope(active_notebook_id)
+        scope = self._report_restore_scope(active_notebook_id, actor_id)
+        readable = [
+            reference for reference in cited
+            if str(reference.object_type or "") not in RESTORE_SKIPPED_OBJECT_TYPES
+        ]
+        if not readable:
+            return RestoredReportEvidence()
         tiers = dict(self._retrieval_participants(active_notebook_id))
         planned: list[tuple[str | None, str, CitedReportReference]] = []
-        for reference in cited:
+        for reference in readable:
             library = str(reference.notebook_id or active_notebook_id)
             kind = _report_restore_kind(reference.object_type)
             planned.append((kind if library in tiers else None, library, reference))
@@ -4817,27 +4835,60 @@ class CandidateRetrievalService(_RetrievalState):
         )
 
     @staticmethod
-    def _report_restore_scope(active_notebook_id: str):
-        """The installed ceiling this restore must run under, or a loud error.
+    def _report_restore_scope(active_notebook_id: str, actor_id: str):
+        """The installed ceiling this restore must run under, or
+        ``ReportRestoreScopeError`` before anything is read.
 
         A report belongs to one notebook and its follow-up is a single-notebook
         run (a global run never attaches one), so the only acceptable scope is
-        that run's own: installed, for ``active_notebook_id``, not subjectless.
-        Anything else is a wiring fault, and reading without the ceiling would
-        be the one unscoped read on the Ask path -- so it raises instead of
-        guessing; the Ask caller's fail-soft turns it into "the report was not
-        read"."""
+        that run's own, in the shape ``default_ceiling_context`` freezes for
+        every Ask run:
+
+        * installed, for ``active_notebook_id``, not subjectless;
+        * ``ceilings_total`` -- every other library it covers carries its own
+          frozen visible-source list, and a library it does not name is not a
+          participant (``covers_notebook``), so a cited library is either read
+          through its own frozen list or not at all;
+        * this notebook's own include list (or a per-notebook ceiling naming
+          it) -- an ``exclude`` local dimension, the shape of a direct
+          service-layer scope, admits every source id not listed, another
+          member's Memory projection included, and the element and knowledge
+          reads have no owner predicate of their own to fall back on;
+        * ``actor_id`` is the ceiling's owner (``owner_id``; a submitted scope
+          that carries none is owned by the run's viewer) and the run's viewer
+          (``current_viewer_id``, whom the participant set is resolved for):
+          the Memory and passage owner predicates read as ``actor_id``, so a
+          caller must not be able to read as someone else under Alice's
+          ceiling.
+
+        Anything else is a wiring fault -- reading would be the one unscoped
+        read on the Ask path -- so it raises, and the caller's fail-soft must
+        let it through."""
         from app.services.source_scope import current_source_scope
 
         scope = current_source_scope()
+        if scope is None:
+            raise ReportRestoreScopeError("no retrieval ceiling is installed")
+        if scope.subjectless or scope.notebook_id != active_notebook_id:
+            raise ReportRestoreScopeError(
+                "the installed ceiling is not this notebook's single-notebook "
+                "ceiling"
+            )
+        if not scope.ceilings_total:
+            raise ReportRestoreScopeError(
+                "the installed ceiling does not freeze its libraries"
+            )
         if (
-            scope is None
-            or scope.subjectless
-            or scope.notebook_id != active_notebook_id
+            scope.mode != "include"
+            and scope.source_ceiling_for(active_notebook_id) is None
         ):
-            raise RuntimeError(
-                "restoring report references needs this run's single-notebook "
-                "retrieval ceiling"
+            raise ReportRestoreScopeError(
+                "the installed ceiling has no include list for this notebook"
+            )
+        viewer = current_viewer_id()
+        if not actor_id or actor_id != (scope.owner_id or viewer) or actor_id != viewer:
+            raise ReportRestoreScopeError(
+                "the actor is not the installed ceiling's owner"
             )
         return scope
 
@@ -4847,7 +4898,10 @@ class CandidateRetrievalService(_RetrievalState):
     ) -> dict[CitedReportReference, RetrievedChunk]:
         """``chunk`` references -> their passages; see ``restore_report_
         references`` for the checkpoints. A passage that moved to another
-        source (or a reference without one) does not read back."""
+        source (or a reference without one) does not read back. No reference,
+        no connection."""
+        if not references:
+            return {}
         by_library: dict[str, list[CitedReportReference]] = {}
         for library, reference in references:
             by_library.setdefault(library, []).append(reference)

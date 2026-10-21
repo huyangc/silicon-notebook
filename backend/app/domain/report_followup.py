@@ -101,6 +101,20 @@ class LinkedReportNotReady(Exception):
     no finished body to follow up."""
 
 
+class ReportRestoreScopeError(RuntimeError):
+    """``restore_report_references`` was called outside the frame it may read
+    in: no retrieval ceiling installed, a ceiling of another notebook or of a
+    subjectless (global) run, a ceiling not in the frozen shape every Ask run
+    installs (``ceilings_total`` with the notebook's own include list), or an
+    ``actor_id`` that is not the ceiling's owner.
+
+    A WIRING fault, never a data state: nothing is read when it is raised. The
+    report-reading fail-soft (plan D6) must NOT swallow it -- re-raise it as it
+    re-raises ``AskCancelled`` and ``RetrievalControlError`` -- because turning
+    it into "the report was not read" would hide the bug that let a restore run
+    without its ceiling."""
+
+
 # --- values -----------------------------------------------------------------
 @dataclass(frozen=True)
 class ReportSection:
@@ -200,6 +214,14 @@ RESTORED_KINDS = (
 )
 
 
+#: Report reference types that name no single item the notebook can give
+#: back -- a whole ``source`` (workbook and collection rows) and ``external``
+#: material from outside the notebook. The restore skips them: they are not
+#: read and not counted as gone (nothing was deleted), and their markers are
+#: dropped from the report block like any key the turn does not carry.
+RESTORE_SKIPPED_OBJECT_TYPES = frozenset({"source", "external"})
+
+
 @dataclass(frozen=True)
 class CitedReportReference:
     """One stored report reference the retrieval layer is asked to read back
@@ -216,10 +238,12 @@ class CitedReportReference:
     How each ``object_type`` is read back: ``chunk`` as its passage,
     ``element`` as its element, ``relation`` as its evidence element (the
     stored ``element_id``, else the relation's first current evidence element),
-    ``memory`` as the asker's own confirmed Memory entry, and any other graph
-    type as the knowledge object ``object_id``. ``external`` and ``source``
-    rows (and a row with no ``object_type``) name nothing that can be read
-    back and count as gone."""
+    ``memory`` as the asker's own confirmed Memory entry, and any other type
+    (the graph's open-ended object types; also a row with no type) as the
+    knowledge object ``object_id``. ``source`` (a whole-source row, such as a
+    workbook result) and ``external`` (material from outside the notebook)
+    references name no single item the notebook can give back: they are
+    neither read nor counted as gone (``RESTORE_SKIPPED_OBJECT_TYPES``)."""
 
     key: str
     object_type: str
@@ -243,7 +267,10 @@ class RestoredReportEvidence:
     evidence element -- ``("element", element_id)``. ``kind`` is one of
     ``RESTORED_KINDS`` (anything else raises ``ValueError``), and the mapping
     is made read-only on construction. ``gone`` counts references whose item no
-    longer exists or lies outside the ceiling the read ran under."""
+    longer exists or lies outside the ceiling the read ran under. A reference
+    of a type in ``RESTORE_SKIPPED_OBJECT_TYPES`` is in neither: it names
+    nothing to restore and nothing was deleted, so it is simply absent from
+    ``key_by_object`` and not counted."""
 
     chunks: tuple[RetrievedChunk, ...] = ()
     elements: tuple[RetrievedElement, ...] = ()
@@ -295,6 +322,7 @@ __all__ = [
     "REASON_REPORT_UNAVAILABLE",
     "REASON_SCOPE_LIBRARIES",
     "REASON_SCOPE_SOURCES",
+    "RESTORE_SKIPPED_OBJECT_TYPES",
     "RESTORED_KINDS",
     "RESTORED_KIND_CHUNK",
     "RESTORED_KIND_ELEMENT",
@@ -303,6 +331,7 @@ __all__ = [
     "ReportDigest",
     "ReportFollowup",
     "ReportLinkVerdict",
+    "ReportRestoreScopeError",
     "ReportSection",
     "RestoredKind",
     "RestoredReportEvidence",
