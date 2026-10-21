@@ -26,7 +26,7 @@ from app.domain.global_ask_attribution import job_attribution
 from app.models.ask import AskRequest, QueryIntentContract, TraceStep
 from app.models.global_ask import (
     GlobalAskIntentPreviewRequest, GlobalAskJob, GlobalAskRequest,
-    GlobalConversationDetail, GlobalNotebookScope, GLOBAL_ASK_PAGE_MAX,
+    GlobalConversationDetail, GlobalConversationSummary, GlobalNotebookScope, GLOBAL_ASK_PAGE_MAX,
     GLOBAL_ASK_PAGE_SIZE, GlobalAskSkippedNotebook, global_answer_citations,
     FLAGGED_CITATION_MESSAGE, global_citation_flagged, global_job_notebook_ids,
 )
@@ -558,6 +558,39 @@ def _public_turn_row(job: Any) -> dict[str, Any]:
         "question": payload.get("question") or "",
         "payload": answer if isinstance(answer, dict) else {},
     }
+
+
+@dataclass(frozen=True)
+class AgentGlobalConversation:
+    """One global conversation as an Agent token may see it.
+
+    ``notebook_ids`` is every library its live turns use (``_snapshot_notebook_ids``
+    per turn, unioned), sorted; ``turn_count`` counts its live turns that are no
+    longer running -- a running question is not a turn until it finishes.
+    """
+    summary: GlobalConversationSummary
+    notebook_ids: tuple[str, ...]
+    turn_count: int
+
+
+def _agent_scopes(rows) -> dict[str, tuple[set[str], int]]:
+    """``{conversation_id: (libraries used, finished turns)}`` over the rows of
+    ``GlobalAskStore.job_scope_rows``. The libraries of each turn are exactly
+    ``_snapshot_notebook_ids`` of its (narrowed) payload -- the one definition
+    the public share re-check uses -- so the Agent rule has no second spelling."""
+    scopes: dict[str, tuple[set[str], int]] = {}
+    for row in rows:
+        used, finished = scopes.get(row["conversation_id"], (set(), 0))
+        used |= _snapshot_notebook_ids([row["payload"]])
+        scopes[row["conversation_id"]] = (used, finished + (row["status"] != "running"))
+    return scopes
+
+
+def _agent_visible(scope, allowed: frozenset, readable: set) -> bool:
+    """The ONE visibility predicate of a global conversation for an Agent token
+    (list and read alike): at least one live turn, and every library any live
+    turn uses is both on the allowlist and readable by the owner now."""
+    return scope is not None and scope[0] <= allowed and scope[0] <= readable
 
 
 class GlobalAskService:
@@ -2302,6 +2335,95 @@ class GlobalAskService:
             **conversation.model_dump(), turns=list(reversed(turns)), has_more=has_more,
             next_offset=offset + limit if has_more else None,
         )
+
+    # ------------------------------------------------------------------
+    # Agent history (MCP ``list_conversations`` / ``get_conversation``).
+    #
+    # ⚠ NO REQUEST USER ON THESE PATHS: the owner and the token's allowlist come
+    # in as arguments and every read below takes them explicitly.
+    #
+    # The rule (plan D5), judged on the WHOLE conversation, never on one page:
+    # conversation C is visible to token T iff C belongs to T's owner, holds at
+    # least one live turn (any status), and the union of the libraries ALL of
+    # its live turns use -- per turn ``_snapshot_notebook_ids``: the libraries
+    # it ran over plus every library its evidence names -- is inside T's
+    # allowlist AND readable by the owner now. A deleted library is unreadable
+    # here: unlike ``_check_turns``' owner tolerance, an allowlist-bounded
+    # caller cannot prove it was ever allowed it. An invisible conversation is
+    # absent from the list (title, turn count and all) and reads as missing.
+    # This is stricter than ``conversation()``, which checks only the current
+    # page's ``resolved`` ids; that method is left as it is for the browser.
+    # ------------------------------------------------------------------
+
+    def _agent_readable(self, ids, user_id) -> set[str]:
+        """The libraries among ``ids`` the owner can read now: the same read
+        ``_check`` makes (``can_read_many`` when wired, else ``can_read`` one
+        by one), in one batch."""
+        ids = set(ids)
+        if not ids:
+            return set()
+        if self.can_read_many:
+            return set(self.can_read_many(sorted(ids), user_id))
+        return {notebook_id for notebook_id in ids if self.can_read(notebook_id, user_id)}
+
+    def agent_conversations(self, *, user_id, allowed_notebook_ids) -> list[AgentGlobalConversation]:
+        """Every global conversation of ``user_id`` an Agent token bounded by
+        ``allowed_notebook_ids`` may see (the rule above), in the browser list's
+        order (most recently updated first). No request user: identity and the
+        allowlist are explicit. One read of the conversations, one narrowed
+        read of every live turn's libraries, one batched read check."""
+        allowed = frozenset(allowed_notebook_ids)
+        summaries = self.store.all_conversations(user_id)
+        scopes = _agent_scopes(self.store.job_scope_rows(user_id))
+        # Only libraries on the allowlist can make a conversation visible, so
+        # only those need the read check.
+        readable = self._agent_readable(
+            {notebook_id for used, _ in scopes.values() for notebook_id in used} & allowed,
+            user_id,
+        )
+        return [
+            AgentGlobalConversation(
+                summary=summary,
+                notebook_ids=tuple(sorted(scopes[summary.id][0])),
+                turn_count=scopes[summary.id][1],
+            )
+            for summary in summaries
+            if _agent_visible(scopes.get(summary.id), allowed, readable)
+        ]
+
+    def agent_conversation_turn(self, conversation_id, *, user_id, allowed_notebook_ids,
+                                turn_offset) -> tuple[AgentGlobalConversation, GlobalAskJob | None]:
+        """``(conversation, job)``: the conversation as ``agent_conversations``
+        lists it and its ``turn_offset``-th finished turn, oldest first
+        (``None`` when ``turn_offset`` is outside ``0 <= turn_offset <
+        turn_count``, or that turn vanished in between). No request user:
+        identity and the allowlist are explicit.
+
+        Refusals are ``GlobalAskError(404)``: missing or not the owner's (the
+        same as ``conversation()``), and invisible by the rule above. The turn
+        that is read is checked once more against what it names
+        (``_check``): between the judgement and the read a turn can be
+        deleted or expire, shifting a later one -- possibly one that finished
+        meanwhile over another library -- into this index.
+        """
+        allowed = frozenset(allowed_notebook_ids)
+        summary = self._conversation(conversation_id, user_id)
+        scope = _agent_scopes(
+            self.store.job_scope_rows(user_id, conversation_id=conversation_id)
+        ).get(conversation_id)
+        readable = self._agent_readable(scope[0] & allowed, user_id) if scope else set()
+        if not _agent_visible(scope, allowed, readable):
+            raise GlobalAskError(404, "部分笔记本已无法访问，请重新选择范围。")
+        used, finished = scope
+        conversation = AgentGlobalConversation(
+            summary=summary, notebook_ids=tuple(sorted(used)), turn_count=finished,
+        )
+        job = None
+        if 0 <= turn_offset < finished:
+            job = self.store.finished_job_at(conversation_id, user_id, turn_offset)
+            if job is not None:
+                self._check(global_job_notebook_ids(job), user_id, allowed_notebook_ids)
+        return conversation, job
 
     def rename_conversation(self, conversation_id, title, *, user_id):
         self._conversation(conversation_id, user_id)
