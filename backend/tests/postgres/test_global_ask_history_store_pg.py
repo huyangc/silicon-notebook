@@ -13,7 +13,6 @@ from app.repositories.global_ask_store import GlobalAskStore
 from app.repositories.postgres.migrator import PostgresMigrator
 from tests.global_ask_history_store_cases import CASE_IDS, CASES
 
-
 pytestmark = pytest.mark.postgres_integration
 
 

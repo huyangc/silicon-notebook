@@ -23,7 +23,10 @@ from types import SimpleNamespace
 
 from app.domain.report_failure_note import SECTION_FAILURE_COPY
 from tests.answer_link_service_cases import (
-    _notebook, _set_access, _user, _write,
+    _notebook,
+    _set_access,
+    _user,
+    _write,
 )
 from tests.citation_check_testkit import seed_source
 from tests.mcp_answer_link_cases import _agent, _clients, _error, _payload
