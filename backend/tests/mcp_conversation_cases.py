@@ -769,9 +769,12 @@ async def a_conversation_that_followed_a_report_names_it_and_each_turn_carries_i
             "evidence_over_budget": 0,
         }}
         # The pages are still the 17 keys of a turn page (the report rides in
-        # two keys that were already there).
+        # two keys that were already there), and nothing was cut to fit: the
+        # shapes sit inside the key, depth and text budgets.
         for page in pages:
             assert len(page) == 18, sorted(page)
+            assert page["truncation"]["truncated"] is False, page["truncation"]
+        assert listing["truncation"]["truncated"] is False
 
         # The receipt's Memory ids never leave: not as ``memory_used``, not as
         # an id. Nor does the report a running job names.
