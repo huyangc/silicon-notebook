@@ -2474,8 +2474,19 @@ as an unknown group, with no system-admin bypass. It is a plain read; the leave 
 acknowledgement. The web confirmation panel says 「退出后，你将看不到 N 个笔记本里你的 M 条记忆」,
 lists each notebook with its own 「导出」 (reusing `GET /notebooks/{id}/memories/export`, which
 exports only the caller's Memory in that notebook) and keeps 「确认退出」 disabled while an export
-runs; when M is 0 it only says no Memory will be hidden by leaving, with no export entry.
-Rejoining the group shows the Memory again in the notebooks still shared with it.
+runs on any notebook (the export reads and read-checks every item in one snapshot before its
+first byte, so a leave cannot cut the file short, but a leave landing before the export's read
+makes the export fail); in-flight exports are tracked per notebook at the groups-page level, so
+a cancelled and reopened panel still sees them. When M is 0 it only says no Memory will be hidden
+by leaving, with no export entry. If the disclosure cannot be read the panel does not allow the
+leave (as the notebook exit does not leave blind) and offers a retry; a 404 disclosure (the caller
+is no longer a member, e.g. left in another tab) says 「你已经不在这个群组里了」 and refreshes the
+group list. The in-flight leave and its failure are tracked per group: switching to another group
+carries neither 「正在退出…」 nor the failure text over. Rejoining shows the Memory again only in
+the notebooks the rejoined member can read: those still shared with the group come back; one shared
+with the group's admins only (`group_admins`) comes back only to someone who rejoins as a group admin
+(an invite link joins as a plain member). The export file's note line states both that leaving the
+shared notebook deletes these items and that leaving a group does not.
 
 The committed deterministic Memory evaluation reports Recall@5, MRR, nDCG, and three
 zero-tolerance counters: candidate-to-formal-plane leakage, cross-user leakage, and
