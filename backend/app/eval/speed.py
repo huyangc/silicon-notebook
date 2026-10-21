@@ -99,10 +99,10 @@ def measure_speed(source_md_path: str, char_steps: Optional[List[int]] = None,
     """对一份源 md 按 char_steps 各截一段、真实抽取计时。用临时 notebook,跑完清理。"""
     from app.core.config import Settings
     from app.models.notebooks import NotebookCreate
-    from app.services.sqlite_repository import SQLiteRepository
+    from app.services.maintenance_cli import create_bare_schema_guest_repository
     char_steps = char_steps or [5000, 20000, 50000, 100000, 200000]
     settings = Settings()
-    repo = SQLiteRepository(settings)
+    repo = create_bare_schema_guest_repository(settings, sqlite_only=True)
     assert repo.configured("kg_extract"), "kg_extract workload 未配置"
     full = pathlib.Path(source_md_path).read_text(encoding="utf-8")
     tmpdir = tempfile.mkdtemp()

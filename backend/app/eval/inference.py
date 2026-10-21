@@ -74,8 +74,8 @@ def run_inference(notebook_id: str,
     from app.core.config import Settings
     from app.models.ask import AskRequest
     from app.services.kg.client import make_client
-    from app.services.sqlite_repository import SQLiteRepository
-    repo = SQLiteRepository(Settings())
+    from app.services.maintenance_cli import create_bare_schema_guest_repository
+    repo = create_bare_schema_guest_repository(Settings(), sqlite_only=True)
     judge_client = make_client("EVAL_JUDGE_")
     assert judge_client.configured, "EVAL_JUDGE_OPENAI_COMPAT_* 未配置"
     questions = load_questions(questions_path)

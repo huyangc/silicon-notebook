@@ -26,7 +26,7 @@ def main() -> int:
             print(f"[recluster] {nb}: rebuilt unified KG (clusters={n})")
     except MaintenanceCliError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 2
+        return exc.exit_code
     return 0
 
 

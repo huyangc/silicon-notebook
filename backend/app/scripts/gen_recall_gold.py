@@ -6,7 +6,10 @@ leakage_ratio > 0.6 的题剔除(泄漏)。生成后人工抽检并入 recall_go
 import argparse, json, yaml, random
 from app.core.config import get_settings
 from app.core.model_values import as_text
-from app.services.sqlite_repository import SQLiteRepository
+from app.services.maintenance_cli import (
+    MaintenanceCliError,
+    create_bare_schema_guest_repository,
+)
 from app.services.kg.client import make_client
 from app.services.retrieval import _payload_text
 from app.eval.retrieval_metrics import leakage_ratio
@@ -35,7 +38,11 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=42)
     a = ap.parse_args()
     rng = random.Random(a.seed)
-    repo = SQLiteRepository(get_settings())
+    try:  # schema guest: never migrates or seeds
+        repo = create_bare_schema_guest_repository(get_settings(), sqlite_only=True)
+    except MaintenanceCliError as exc:
+        print(f"error: {exc}")
+        return exc.exit_code
     client = make_client("GOLDGEN_")
     assert client.configured, "GOLDGEN_OPENAI_COMPAT_* 未配置"
     out, dropped = [], 0

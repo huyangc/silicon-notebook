@@ -41,7 +41,7 @@ def main() -> int:
             print(f"total chunks: {mnt.count_chunks(notebook_id)}", flush=True)
     except MaintenanceCliError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 2
+        return exc.exit_code
     return 0
 
 

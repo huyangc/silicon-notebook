@@ -30,7 +30,7 @@ def main() -> int:
             print(f"[reextract] re-extracted {len(done)} source(s): {done}")
     except MaintenanceCliError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 2
+        return exc.exit_code
     return 0
 
 

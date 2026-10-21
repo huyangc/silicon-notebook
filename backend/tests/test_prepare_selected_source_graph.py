@@ -9,8 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core.config import Settings
 
-ROOT = Path(__file__).resolve().parents[2]
+
+ROOT =Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "prepare_selected_source_graph.py"
 
 
@@ -286,8 +288,7 @@ def test_invalid_receipt_identity_fails_closed(tmp_path):
     assert caught.value.code == "receipt_identity_mismatch"
 
 
-def test_main_prepares_empty_sqlite_database_and_enables_env(monkeypatch, tmp_path):
-    module = _load_module()
+def _deployment_env(monkeypatch, tmp_path):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("SILICON_NOTEBOOK_STORAGE_DIR", raising=False)
     env_file = tmp_path / "deployment.env"
@@ -297,6 +298,21 @@ def test_main_prepares_empty_sqlite_database_and_enables_env(monkeypatch, tmp_pa
         f"DATABASE_URL=sqlite:///{database}\nSILICON_NOTEBOOK_STORAGE_DIR={storage}\n",
         encoding="utf-8",
     )
+    return env_file, database, storage
+
+
+def test_main_prepares_a_service_initialized_sqlite_database_and_enables_env(
+    monkeypatch, tmp_path
+):
+    module = _load_module()
+    env_file, database, storage = _deployment_env(monkeypatch, tmp_path)
+    # The service's own first start creates, migrates and seeds the database;
+    # this command is a schema guest and never does.
+    from app.services.sqlite_repository import SQLiteRepository
+
+    SQLiteRepository(
+        Settings(_env_file=None, database_url=f"sqlite:///{database}", storage_dir=str(storage))
+    ).close()
 
     exit_code = module.main(
         ["--env-file", str(env_file), "--confirm-service-stopped"]
@@ -314,6 +330,33 @@ def test_main_prepares_empty_sqlite_database_and_enables_env(monkeypatch, tmp_pa
     )
     assert receipt["status"] == "complete"
     assert receipt["notebook_count"] == 0
+
+
+def test_main_refuses_a_database_the_service_never_created(monkeypatch, tmp_path, capsys):
+    """Step 1 no longer migrates: a database that is not at this build's schema
+    is refused with exit 3, the shared reason-plus-remedy wording and a stable
+    receipt code, and the env file is left exactly as it was."""
+    module = _load_module()
+    env_file, database, storage = _deployment_env(monkeypatch, tmp_path)
+    before = env_file.read_text(encoding="utf-8")
+
+    exit_code = module.main(
+        ["--env-file", str(env_file), "--confirm-service-stopped"]
+    )
+
+    assert exit_code == 3
+    assert not database.exists()
+    assert env_file.read_text(encoding="utf-8") == before
+    err = capsys.readouterr().err
+    assert "schema_not_current" in err
+    assert "启动一次服务" in err
+    receipt = json.loads(
+        (storage / "maintenance" / "selected-source-graph-deployment.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert receipt["failure_code"] == "schema_not_current"
+    assert receipt["failed_phase"] == "open_repository"
 
 
 def test_main_rejects_missing_env_file_without_creating_it(tmp_path):

@@ -1056,7 +1056,7 @@ def cmd_report(args: argparse.Namespace, runner: Runner) -> int:
     )
     out = runner.out_dir / "report-trace.jsonl"
     runner.say("in-process ReportEngine",
-               "app.bootstrap.create_application_repository(Settings()) -> "
+               "maintenance_cli.create_schema_guest_repository(Settings()) -> "
                "_runtime.report_execution.engine_factory")
     runner.say("on_step JSONL", str(out))
     for item in plan:
@@ -1122,14 +1122,21 @@ def _run_reports(
     args: argparse.Namespace, runner: Runner, plan: Sequence[dict],
     state: dict, out: Path,
 ) -> int:
-    from app.bootstrap import create_application_repository
     from app.core.config import Settings
     from app.core.request_context import reset_request_user, set_request_user
+    from app.services.maintenance_cli import (
+        MaintenanceCliError,
+        create_schema_guest_repository,
+    )
     from app.services.model_work import ModelPriority, model_work_scope
     from app.services.source_scope import default_ceiling_context
 
     engine_class = _tracing_engine_class()
-    repo = create_application_repository(Settings())
+    try:  # schema guest: production wiring, but never migrates or seeds
+        repo = create_schema_guest_repository(Settings())
+    except MaintenanceCliError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return exc.exit_code
     profile = repo.maintenance.resolve_owner_profile(args.user)
     if profile is None:
         print(f"ERROR: 找不到 fixture 用户: {args.user}", file=sys.stderr)
@@ -1994,10 +2001,15 @@ def _search_repository(settings: Any) -> Any:
     可能带写路径的扩展面没有收益。这个函数是**唯一**接线点,好让用例直接
     monkeypatch `create_repository` 断言这两个关键字,而不必真的跑一遍
     `_run_search` 那一整条 HTTP/并发路径。
-    """
-    from app.repositories.factory import create_repository
 
-    return create_repository(settings, migrate=False, seed=False)
+    现在经共享的 schema guest 入口
+    (`maintenance_cli.create_bare_schema_guest_repository`):同样不带插件宿主、
+    同样 `migrate=False, seed=False`,另外先做一次库版本闸——库版本不是本构建的
+    就以统一文案拒绝(退出码 3),不在一个对不上的 schema 上跑检索。
+    """
+    from app.services.maintenance_cli import create_bare_schema_guest_repository
+
+    return create_bare_schema_guest_repository(settings)
 
 
 def _run_search(
@@ -2022,7 +2034,13 @@ def _run_search(
         runner, args.database_url, settings,
         args.concurrency,
     )
-    repo = _search_repository(settings)
+    from app.services.maintenance_cli import MaintenanceCliError
+
+    try:
+        repo = _search_repository(settings)
+    except MaintenanceCliError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return exc.exit_code
     profile = repo.maintenance.resolve_owner_profile(args.owner)
     if profile is None:
         print(f"ERROR: 主库里找不到属主: {args.owner or '<第一个 admin>'}",

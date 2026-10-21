@@ -24,9 +24,10 @@ row to ``'failed'``), so even a "writes nothing" dry-run could otherwise mutate
 schema/state. The deterministic rule normalizer is a pure function of the cell
 content, so no repository (and no model resolution) is needed to plan it. Only
 ``--use-llm`` (needs the system ``knowhow_reformat`` workload) and ``--apply`` (writes)
-construct the repository, and both print a one-line notice first: opening the
-database read-write may run pending migrations/recovery, so run it when the
-backend is idle.
+construct the repository, and both print a one-line notice first. That
+repository is a schema guest (``maintenance_cli.create_bare_schema_guest_repository``):
+it never migrates or seeds, and a database not at this build's schema is refused
+(exit status 3) before anything is opened read-write.
 
 ``--apply`` is atomic (one store-level write transaction for the whole
 reviewed plan -- a mid-run failure leaves zero cells modified, not an
@@ -77,7 +78,10 @@ from urllib.parse import quote
 from app.core.config import Settings
 from app.services.knowhow import md_normalize
 from app.services.knowhow.api import build_projector, reformat_cell
-from app.services.sqlite_repository import SQLiteRepository
+from app.services.maintenance_cli import (
+    MaintenanceCliError,
+    create_bare_schema_guest_repository,
+)
 
 
 def _build_plan(tables, use_llm: bool, reformat_fn) -> list[dict]:
@@ -708,9 +712,8 @@ def _run_apply_from_plan(repo, args) -> int:
 
 
 _DB_OPEN_NOTICE = (
-    "[notice] 即将以【可写】方式打开数据库并构造仓库：这会执行尚未完成的迁移与崩溃恢复"
-    "（可能把仍处于 pending/syncing 的行判为 failed）——建议后端空闲时执行。"
-    "（默认 dry-run 是只读打开，随时可安全执行。）"
+    "[notice] 即将以【可写】方式打开数据库并构造仓库（不迁移、不 seed；库版本不是本构建的"
+    "就拒绝）——建议后端空闲时执行。（默认 dry-run 是只读打开，随时可安全执行。）"
 )
 
 
@@ -736,9 +739,13 @@ def main(argv: "list[str] | None" = None) -> int:
     if not args.apply and not args.use_llm:
         return _run_dry_run_readonly(args)
 
-    # Opening the DB read-write here may run pending migrations/recovery.
+    # Opening the DB read-write here, as a schema guest: no migration, no seed.
     print(_DB_OPEN_NOTICE, file=sys.stderr)
-    repo = SQLiteRepository(Settings())
+    try:
+        repo = create_bare_schema_guest_repository(Settings(), sqlite_only=True)
+    except MaintenanceCliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return exc.exit_code
 
     if not args.apply:
         return _run_dry_run(repo, args)

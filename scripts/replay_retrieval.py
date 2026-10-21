@@ -42,10 +42,18 @@ def record_run(notebook_id: str, questions: list, full: bool, plan_map: dict,
     # 操作,notebook 存在性校验走 `repo.get_notebook`(不存在则 KeyError)。
     from app.core.config import Settings
     from app.core.request_context import set_request_user, reset_request_user
-    from app.services.sqlite_repository import SQLiteRepository
     from app.services.batch_ingest import _resolve_owner_profile
+    from app.services.maintenance_cli import (
+        MaintenanceCliError,
+        create_bare_schema_guest_repository,
+    )
 
-    repo = SQLiteRepository(Settings())
+    # Schema guest (no migration, no seed); same bare composition as before.
+    try:
+        repo = create_bare_schema_guest_repository(Settings(), sqlite_only=True)
+    except MaintenanceCliError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(exc.exit_code)
     if not repo.configured("retrieval_query_embedding"):
         print(
             "ERROR: retrieval_query_embedding workload 未绑定系统模型服务;"

@@ -25,10 +25,12 @@ Two drivers share ``run_backfill``:
   keeps counting those jobs through the slower payload predicate, with the
   same result;
 * **by hand** -- ``scripts/backfill_global_ask_attribution.py`` (``main``) for
-  a re-run or a dry run. It does NOT own the schema: it composes the
-  repository with ``migrate=False, seed=False`` (no migration DDL against a
-  live database, no seed rewrite of the admin credential) and refuses a
-  database that is not at SQLite v98 / PostgreSQL 0078 yet.
+  a re-run or a dry run. It does NOT own the schema: like every maintenance
+  CLI it is a schema guest (``maintenance_cli.create_schema_guest_repository``:
+  ``migrate=False, seed=False`` -- no migration DDL against a live database, no
+  seed rewrite of the admin credential) and refuses, with the shared wording,
+  a database that is not at this build's schema (so never one short of SQLite
+  v98 / PostgreSQL 0078).
 
 Resumable and idempotent: pages are read by job id (keyset) from the partial
 index of still-unattributed done jobs, and each page is written in one
@@ -58,12 +60,13 @@ from pydantic import ValidationError
 
 from app.domain.global_ask_attribution import job_attribution
 from app.models.global_ask import GlobalAskJob
+from app.repositories.schema_currency import EXIT_SCHEMA_NOT_CURRENT
 
 DEFAULT_BATCH_SIZE = 500
 PAYLOAD_UNREADABLE = "payload_unreadable"
 #: Diagnostic name of the one post-readiness background thread.
 JOB_NAME = "global-ask-attribution-backfill"
-EXIT_SCHEMA_NOT_READY = 3
+EXIT_SCHEMA_NOT_READY = EXIT_SCHEMA_NOT_CURRENT  # 3, shared by every schema guest
 
 logger = logging.getLogger("silicon_notebook.global_ask_attribution")
 
@@ -211,7 +214,8 @@ def open_attribution_repository(settings: Any) -> Iterator[Any]:
     """Compose the repository WITHOUT owning its schema: no migration (DDL a
     running service never asked for), no seed (whose unconditional admin
     password rewrite would reset the production credential whenever the
-    operator's environment lacks it). The caller checks the schema instead."""
+    operator's environment lacks it). The shared schema-guest gate raises
+    ``MaintenanceCliSchemaError`` before anything is composed."""
     from app.services.maintenance_cli import create_schema_guest_repository
 
     repository = create_schema_guest_repository(settings)
@@ -246,23 +250,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"scanned={result.scanned} written={result.written} skipped={result.skipped} "
               f"unreadable={result.unreadable} last_id={result.last_id}", flush=True)
 
-    with open_attribution_repository(Settings()) as repository:
-        if not repository.maintenance.global_ask_attribution_schema_ready():
-            print(
-                "error: this database is not migrated to SQLite v98 / PostgreSQL 0078 yet; "
-                "this command never migrates -- start the upgraded service once first",
-                flush=True,
+    from app.services.maintenance_cli import MaintenanceCliSchemaError
+
+    try:
+        with open_attribution_repository(Settings()) as repository:
+            result = run_backfill(
+                repository.maintenance,
+                after_id=args.after_id,
+                limit=args.limit,
+                batch_size=args.batch_size,
+                dry_run=args.dry_run,
+                on_unreadable=_report_writer(args.report),
+                progress=progress,
             )
-            return EXIT_SCHEMA_NOT_READY
-        result = run_backfill(
-            repository.maintenance,
-            after_id=args.after_id,
-            limit=args.limit,
-            batch_size=args.batch_size,
-            dry_run=args.dry_run,
-            on_unreadable=_report_writer(args.report),
-            progress=progress,
-        )
+    except MaintenanceCliSchemaError as exc:
+        print(f"error: {exc}", flush=True)
+        return EXIT_SCHEMA_NOT_READY
     label = "dry-run" if args.dry_run else "done"
     print(f"backfill-global-ask-attribution {label}: {json.dumps(result.as_dict())}", flush=True)
     return 1 if result.unreadable else 0

@@ -2446,7 +2446,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
     except (MaintenanceCliError, ImageBackfillRefused) as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 2
+        return getattr(exc, "exit_code", 2)  # schema-guest refusal: 3
     except KeyboardInterrupt:
         # 收尾已在被中断的那层各自完成(kg 会把 job 落成「已中断」终态);
         # 这里只负责不要用 traceback 糊住终端,并给出 shell 惯例退出码 130。
