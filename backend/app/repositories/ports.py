@@ -1156,7 +1156,7 @@ class AskExecutionPort(Protocol):
         self, notebook_id: str, question: str, history: str = "",
         cancel_event: CancelEvent = None, *,
         source_scope: Any = None, base_scope: Any = None,
-        user_id: str | None = None,
+        user_id: str | None = None, report_id: str | None = None,
     ) -> QueryIntentContract: ...
     def validate_reasoning_submission(
         self, notebook_id: str, payload: AskRequest

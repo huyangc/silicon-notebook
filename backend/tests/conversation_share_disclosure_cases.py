@@ -362,6 +362,118 @@ def case_public_conversation_page_marks_the_authors_memory(world: World) -> None
     assert world.memories["a1"][0] not in page.text
 
 
+# --- a turn that read the asker's deep report (plan 2026-10-21, D14) ---------
+
+REPORT_TITLE = "敏感的报告题目：退火工艺差异"
+
+
+def read_receipt(world: World, *keys: str) -> dict:
+    """A ``read`` receipt as the engine stores it on an answer: the report the
+    turn read and the author's Memory it was written from."""
+    return {
+        "report_id": "rep-linked-1", "title": REPORT_TITLE, "status": "read",
+        "sections": [{"index": 1, "title": "第一节 温度窗口", "read": True},
+                     {"index": 2, "title": "第二节 保温时间", "read": False}],
+        "evidence_restored": 3, "evidence_gone": 1, "evidence_over_budget": 0,
+        "memory_used": [world.memories[key][0] for key in keys],
+    }
+
+
+def skipped_receipt() -> dict:
+    return {
+        "report_id": "rep-linked-1", "title": REPORT_TITLE, "status": "skipped",
+        "reason_code": "scope_sources",
+        "reason": "本轮不读取这份报告：它引用的 1 份资料不在当前检索范围内",
+    }
+
+
+def with_receipt(payload: dict, receipt: dict) -> dict:
+    return {**payload, "linked_report": receipt}
+
+
+def case_a_turn_that_read_a_report_counts_the_reports_memory(world: World) -> None:
+    """The report text entered the answer prompt, and the answer may restate
+    what came from the author's Memory without any Memory anchor: the share
+    counts it and asks the author first, exactly as for the report's own share."""
+    make_memory(world, world.alice, "a1")
+    make_memory(world, world.alice, "a2")
+    cid, (first,) = seed_conversation(world, world.alice, [
+        with_receipt(answer([source_anchor(world.doc_source, "k1")]),
+                     read_receipt(world, "a1", "a2")),
+    ])
+    assert disclose(world, world.alice, cid, first).json() == counts(2, 2)
+    refused = publish(world, world.alice, cid, first)
+    assert refused.status_code == 409 and refused.json() == required(2, 2)
+    assert share_state(world, cid)["share_token"] == ""
+    accepted = publish(world, world.alice, cid, first, acknowledged=2)
+    assert accepted.status_code == 200, accepted.text
+
+
+def case_a_skipped_report_receipt_counts_nothing(world: World) -> None:
+    """A turn that did not read the report put none of it into the prompt."""
+    make_memory(world, world.alice, "a1")
+    cid, (first,) = seed_conversation(world, world.alice, [
+        with_receipt(answer([source_anchor(world.doc_source, "k1")]), skipped_receipt()),
+    ])
+    assert disclose(world, world.alice, cid, first).json() == counts(0, 0)
+    published = publish(world, world.alice, cid, first)
+    assert published.status_code == 200, published.text
+
+
+def case_report_memory_is_one_memory_with_the_anchors_that_name_it(world: World) -> None:
+    """The count is distinct Memory entries: a Memory the report was written
+    from and the answer also cites by anchor is one."""
+    for key in ("a1", "a2", "a3"):
+        make_memory(world, world.alice, key)
+    cid, _ids = seed_conversation(world, world.alice, [
+        with_receipt(answer([memory_anchor(world, "a1", "k1")]),
+                     read_receipt(world, "a1", "a2")),
+        with_receipt(answer([source_anchor(world.memories["a3"][1], "k1")]),
+                     read_receipt(world, "a2")),
+    ])
+    assert disclose(world, world.alice, cid).json() == counts(3, 3)
+
+
+def case_report_memory_is_new_relative_to_the_published_watermark(world: World) -> None:
+    """The published snapshot's receipts count on the other side too, so an
+    update adds only the Memory the page does not carry yet."""
+    make_memory(world, world.alice, "a1")
+    make_memory(world, world.alice, "a2")
+    cid, (first,) = seed_conversation(world, world.alice, [
+        with_receipt(answer([source_anchor(world.doc_source, "k1")]),
+                     read_receipt(world, "a1")),
+    ])
+    assert publish(world, world.alice, cid, first, acknowledged=1).status_code == 200
+    second = add_answer(world, cid, with_receipt(
+        answer([source_anchor(world.doc_source, "k1")]), read_receipt(world, "a1", "a2"),
+    ), 20)
+    assert disclose(world, world.alice, cid, second).json() == counts(2, 1)
+    assert disclose(world, world.alice, cid, first).json() == counts(1, 0)
+    refused = publish(world, world.alice, cid, second, acknowledged=1)
+    assert refused.status_code == 409 and refused.json() == required(2, 1)
+    assert publish(world, world.alice, cid, second, acknowledged=2).status_code == 200
+
+
+def case_the_public_page_carries_neither_the_report_nor_the_receipt(world: World) -> None:
+    """The public projection is an allowlist that names no ``linked_report``:
+    the page of a turn that read a report is byte for byte the page of the same
+    answer without the receipt -- no title, no id, no section, no Memory id."""
+    make_memory(world, world.alice, "a1")
+    plain = answer([source_anchor(world.doc_source, "k1")])
+    cid, (first,) = seed_conversation(world, world.alice, [
+        with_receipt(plain, read_receipt(world, "a1")),
+    ])
+    bare, (bare_first,) = seed_conversation(world, world.alice, [plain])
+    token = publish(world, world.alice, cid, first, acknowledged=1).json()["share_token"]
+    bare_token = publish(world, world.alice, bare, bare_first).json()["share_token"]
+    page = public_page(world, token)
+    assert page.status_code == 200
+    for secret in ("linked_report", REPORT_TITLE, "rep-linked-1", "第一节 温度窗口",
+                   "evidence_restored", world.memories["a1"][0]):
+        assert secret not in page.text, secret
+    assert page.json()["turns"] == public_page(world, bare_token).json()["turns"]
+
+
 NOTEBOOK_CASES: dict[str, Callable[[World], None]] = {
     name: case for name, case in globals().items()
     if name.startswith("case_") and callable(case)

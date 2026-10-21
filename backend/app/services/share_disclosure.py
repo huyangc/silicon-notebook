@@ -108,6 +108,7 @@ __all__ = [
     "author_memory_sources",
     "conversation_share_disclosure",
     "conversation_share_window",
+    "linked_report_memory_ids",
     "public_memory_title",
     "reference_memory_id",
     "report_foreign_memory_ids",
@@ -297,7 +298,17 @@ def share_memory_guard(
 #   ``memory_store.memory_sources_for_source_ids(source_ids, author_id)`` (the
 #   statement behind ``memory_ids_for_source_ids``, on
 #   ``memory_sql.memory_source_readable``) for the window and the published
-#   snapshot together.
+#   snapshot together;
+# * the author's Memory a turn's attached deep report was written from, when the
+#   turn read the report (``linked_report`` with ``status == "read"``,
+#   ``memory_used``): the report text entered the answer prompt, and the answer
+#   may restate what came from the author's Memory without any Memory anchor.
+#   This is the report's own disclosure rule (``report["memory_used"]`` above)
+#   applied to the turn that read it -- a turn that did not read the report
+#   (``skipped``) put none of it into the prompt and counts none. The page
+#   itself carries neither the report nor the receipt (the public projection
+#   is an allowlist that names neither), only the answer text those ids stand
+#   behind.
 #
 # ``new_memory_count`` is how many of them are not already on the page the link
 # serves now (the snapshot behind the current watermark): 0 when nothing new is
@@ -379,6 +390,22 @@ def public_memory_title(title: str) -> str:
     return title
 
 
+def linked_report_memory_ids(payload: Any) -> frozenset[str]:
+    """The author's Memory ids a stored answer's report receipt carries: only a
+    ``read`` receipt (the report text reached the answer prompt) counts, and
+    only its ``memory_used`` list. Anything not in the stored receipt shape
+    counts nothing -- the receipt is read tolerantly, like every other part of
+    a stored payload here."""
+    row = payload if isinstance(payload, Mapping) else {}
+    receipt = row.get("linked_report")
+    if not isinstance(receipt, Mapping) or receipt.get("status") != "read":
+        return frozenset()
+    used = receipt.get("memory_used")
+    if not isinstance(used, list):
+        return frozenset()
+    return frozenset(item for item in used if isinstance(item, str) and item)
+
+
 def turn_references(payload: Any) -> list[Mapping[str, Any]]:
     """Every anchor and citation of one stored answer (an ``AskResponse``
     payload; a global turn's legacy ``response`` has the same two lists)."""
@@ -427,14 +454,17 @@ def conversation_share_disclosure(
         reader, unresolved_source_ids(window + published), author_id
     )
 
-    def ids(references: list[Mapping[str, Any]]) -> frozenset[str]:
+    def ids(
+        references: list[Mapping[str, Any]], turns: Sequence[Any]
+    ) -> frozenset[str]:
         return frozenset(
             memory_id for reference in references
             if (memory_id := reference_memory_id(reference, memory_by_source))
-        )
+        ).union(*(linked_report_memory_ids(turn) for turn in turns))
 
     return ConversationShareDisclosure(
-        memory_ids=ids(window), published_memory_ids=ids(published)
+        memory_ids=ids(window, payloads),
+        published_memory_ids=ids(published, published_payloads),
     )
 
 

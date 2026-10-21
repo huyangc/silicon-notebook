@@ -16,8 +16,10 @@ from app.core.capability_tokens import (
     is_answer_link_token,
     is_global_conversation_share_token,
 )
+from app.domain.report_followup import LinkedReportNotFound, LinkedReportNotReady
 from app.api.deps import (
     answer_link_repository,
+    ask_component,
     get_current_user,
     global_ask_service,
     notebook_access_repository,
@@ -51,6 +53,8 @@ from app.models.ask import (
     NotebookSearchResponse,
     PublicConversation,
     QueryIntentContract,
+    ReportLinkCheck,
+    ReportLinkCheckRequest,
 )
 from app.models.identity import UserProfile
 from app.repositories.ports import (
@@ -70,6 +74,7 @@ from app.services.ask_modes import (
     user_facing_modes,
 )
 from app.services.cancellation import AskCancelled
+from app.services.report_followup import load_linked_report, report_mode_supported
 from app.services.query_intent import (
     conversation_intent_history,
     validate_confirmed_intent,
@@ -475,6 +480,83 @@ def _require_ask_available(
     return resolved_source_scope, resolved_base_scope
 
 
+def _report_not_ready_error() -> HTTPException:
+    """The refusal for a finished-report-only action on a report that is the
+    caller's own but not ``done`` yet (the follow-up endpoints). One sentence,
+    one place: ``/ask`` and ``/reports/{id}/followup`` answer it alike."""
+    return user_error(409, "这份报告还没有生成完成，完成后才能就此追问")
+
+
+def _require_linked_report(
+    repo, notebook_id: str, report_id: str | None, user_id: str
+) -> None:
+    """The report gate of every Ask entry that carries ``report_id``: runs
+    above any durable state (a job, a conversation, a stream header), so a
+    refused report leaves nothing behind.
+
+    ``load_linked_report`` is the one predicate (the report's owner, this
+    notebook, finished): a report that does not exist, is another member's or
+    belongs to another notebook is the SAME 404 -- an Ask box must not become
+    an oracle for "does this report id exist" (``_own_report_or_404`` is the
+    same rule on the report routes). A report of the caller's own that is not
+    ``done`` is a 409. No ``report_id`` is no check, no read.
+
+    The run judges the report again where the engine is entered (it may have
+    been deleted since); what this gate buys is the early, honest refusal.
+    """
+    if not report_id:
+        return
+    try:
+        load_linked_report(repo.get_report, notebook_id, report_id, user_id)
+    except LinkedReportNotFound:
+        raise user_error(404, "找不到这份报告，它可能已被删除") from None
+    except LinkedReportNotReady:
+        raise _report_not_ready_error() from None
+
+
+@router.post(
+    "/notebooks/{notebook_id}/ask/report-check",
+    response_model=ReportLinkCheck,
+    dependencies=[Depends(require_notebook_read)],
+)
+def check_ask_report_link(
+    notebook_id: str,
+    payload: ReportLinkCheckRequest,
+    user: UserProfile = Depends(get_current_user),
+) -> ReportLinkCheck:
+    # 说明写成注释而不是 docstring(OpenAPI 形状是冻结契约,见 search_notebook)。
+    #
+    # 「这样提问会读到这份关联报告吗?」——发送之前、在输入框旁的标签上回答。
+    # 与 /ask 同一串前置:mode(未知 → 422)→ 可用性与两维范围冻结(空库/空范围
+    # → 409,逐字同 /ask)→ 报告闸(404/409)。判词本身不在路由里算:交给 Ask 服务
+    # 的 report_link_check,它在提问真正会安装的那个检索上限下调用提问执行用的
+    # 同一个函数(_report_followup,不复原证据),所以标签上的结论就是这一轮会做的。
+    # 只读:不建任务、不建会话、不写回答。
+    repo = repository()
+    try:
+        notebook = repo.get_notebook(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    try:
+        spec = resolve_mode(payload.mode, _extension_ask_modes())
+    except UnknownAskMode as exc:
+        raise HTTPException(status_code=422, detail={
+            "error": "unknown ask mode", "mode": exc.mode,
+            "valid": _valid_ask_mode_ids()})
+    resolved_source_scope, resolved_base_scope = _require_ask_available(
+        notebook, repo, payload.source_scope, payload.base_scope
+    )
+    _require_linked_report(repo, notebook_id, payload.report_id, user.id)
+    try:
+        return ask_component().report_link_check(
+            notebook_id, payload.report_id, user_id=user.id,
+            mode_supported=report_mode_supported(spec),
+            source_scope=resolved_source_scope, base_scope=resolved_base_scope,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
 @router.get("/notebooks/{notebook_id}/search", response_model=NotebookSearchResponse, dependencies=[Depends(require_notebook_read)])
 async def search_notebook(
     notebook_id: str,
@@ -555,6 +637,7 @@ async def preview_ask_intent(
         resolved_source_scope, resolved_base_scope = _require_ask_available(
             notebook, repo, payload.source_scope, payload.base_scope
         )
+        _require_linked_report(repo, notebook_id, payload.report_id, user.id)
         history = _intent_history(
             repo, notebook_id, payload.conversation_id, user.id
         )
@@ -580,6 +663,7 @@ async def preview_ask_intent(
             notebook_id, question, history, cancel_event=cancel_event,
             source_scope=resolved_source_scope,
             base_scope=resolved_base_scope, user_id=user.id,
+            report_id=payload.report_id,
         )
 
     task = asyncio.create_task(asyncio.to_thread(run_preview))
@@ -635,6 +719,7 @@ async def preview_ask_intent_stream(
         resolved_source_scope, resolved_base_scope = _require_ask_available(
             notebook, repo, payload.source_scope, payload.base_scope
         )
+        _require_linked_report(repo, notebook_id, payload.report_id, user.id)
         history = _intent_history(
             repo, notebook_id, payload.conversation_id, user.id
         )
@@ -652,6 +737,7 @@ async def preview_ask_intent_stream(
             notebook_id, question, history, cancel_event=cancel_event,
             source_scope=resolved_source_scope,
             base_scope=resolved_base_scope, user_id=user.id,
+            report_id=payload.report_id,
         )
 
     return task_stream_response(
@@ -746,6 +832,9 @@ def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
     )
     resolved_source_scope, resolved_base_scope = _require_ask_available(
         notebook, repo, payload.source_scope, payload.base_scope
+    )
+    _require_linked_report(
+        repo, notebook_id, payload.report_id, repo.current_user().id
     )
     payload = _apply_resolved_scopes(
         payload, resolved_source_scope, resolved_base_scope
@@ -897,6 +986,11 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
         resolved_source_scope, resolved_base_scope = _require_ask_available(
             notebook, repo, payload.source_scope, payload.base_scope
         )  # 空库/空检索范围权威拒绝
+        # 关联报告闸:同样在任何 durable 状态之前;keyed 接回(attach_only)在
+        # prepare_ask_stream 之前返回,不经这里(原提交已过闸)。
+        _require_linked_report(
+            repo, notebook_id, payload.report_id, repo.current_user().id
+        )
         updated_payload = _apply_resolved_scopes(
             payload, resolved_source_scope, resolved_base_scope
         )
