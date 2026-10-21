@@ -35,6 +35,7 @@ from app.repositories.postgres.access_sql import (
     NOTEBOOK_LIVE_SQL,
     grant_access_expr,
     grant_probe_params,
+    read_access_after_group_exit_clause,
     read_access_clause,
     live_read_access_exists_clause,
     read_access_exists_clause,
@@ -1931,6 +1932,47 @@ class MemoryStore:
                     (notebook_id, user_id),
                 ).fetchone()["c"])
         return MemberExitSnapshot(token is not None, keeps, count)
+
+    def group_exit_memory_preview(
+        self, group_id: str, user_id: str
+    ) -> list[dict[str, Any]]:
+        """What leaving ``group_id`` hides of ``user_id``'s own Memory: the
+        notebooks the user reads now (``read_access_clause``) but not once
+        their ``group_members`` row in that group is gone
+        (``read_access_after_group_exit_clause``: ownership, a membership
+        row, a personal or everyone grant and grants through OTHER groups
+        still count), each with how many of the user's Memory items (every
+        status, as the notebook exit and the export count them) it holds.
+        Leaving deletes nothing, so this is a plain read. Notebooks without
+        the user's Memory are not listed; a non-member gets nothing (the
+        ``gm`` row drives the query). One statement: the user's Memory is
+        counted per notebook through ``idx_memory_owner_notebook_status``
+        before either predicate runs."""
+        readable_now = read_access_clause("nb", "nm", user_ref="gm.user_id")
+        readable_after = read_access_after_group_exit_clause(
+            "nb", "xnm", user_ref="gm.user_id", group_ref="gm.group_id",
+            grant_alias="xg", group_alias="xgm", group_admin_alias="xga",
+        )
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT nb.id AS notebook_id, nb.name AS name, "
+                "own.memory_count AS memory_count FROM group_members gm "
+                "CROSS JOIN (SELECT notebook_id, COUNT(*) AS memory_count "
+                "FROM memory_items WHERE created_by=%s GROUP BY notebook_id) own "
+                "JOIN notebooks nb ON nb.id=own.notebook_id "
+                "WHERE gm.group_id=%s AND gm.user_id=%s "
+                f"AND nb.{NOTEBOOK_LIVE_SQL} AND {readable_now} "
+                f"AND NOT {readable_after}",
+                (user_id, group_id, user_id),
+            ).fetchall()
+        return [
+            {
+                "notebook_id": row["notebook_id"],
+                "name": row["name"],
+                "memory_count": int(row["memory_count"]),
+            }
+            for row in rows
+        ]
 
     def finish_member_exit(
         self, notebook_id: str, user_id: str, membership_token: Any

@@ -198,6 +198,7 @@ def test_group_and_grant_endpoints_have_a_domain_owner():
         "put_group_member_route": "app.api.group_routes",
         "remove_group_member_route": "app.api.group_routes",
         "leave_group_route": "app.api.group_routes",
+        "leave_group_preview_route": "app.api.group_routes",
         "get_group_invite_route": "app.api.group_routes",
         "create_group_invite_route": "app.api.group_routes",
         "rotate_group_invite_route": "app.api.group_routes",

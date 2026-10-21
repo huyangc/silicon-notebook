@@ -45,6 +45,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.api.deps import (
     get_current_user,
     group_repository,
+    memory_membership_service,
     require_notebook_capability,
     user_error,
 )
@@ -60,6 +61,8 @@ from app.models.groups import (
     GroupCreate,
     GroupDetail,
     GroupInviteState,
+    GroupLeavePreview,
+    GroupLeavePreviewNotebook,
     GroupMemberItem,
     GroupMemberRoleRequest,
     GroupOwnerTransferRequest,
@@ -529,6 +532,26 @@ def remove_group_member_route(
         raise user_error(404, "该用户不是这个群组的成员")
     # 被移出组的人如果原来是组管理员,他的铃铛里这个组的待审批数要消失。
     publish_snapshot(user_id)
+
+
+@router.get("/groups/{group_id}/membership/leave-preview", response_model=GroupLeavePreview)
+def leave_group_preview_route(
+    group_id: str, user: UserProfile = Depends(get_current_user)
+) -> GroupLeavePreview:
+    """退群前告知:本人退出这个群组之后,哪些笔记本里自己的记忆会看不到、各几条。
+
+    只回答**调用者本人**的退出(路径里没有用户参数),守卫与退出本身相同:不是成员 → 404,
+    不带系统管理员旁路。口径是退出真正执行的那件事——删掉本人在这个组里的那一行成员
+    关系——之后的读权:仍能凭所有者身份、成员关系、个人授权、全员授权或别的群组读到的
+    笔记本不算(见 `access_sql.read_access_after_group_exit_clause`)。退群不删除记忆,
+    所以这里只是读,不要求退出时回传确认数。"""
+    _require_own_membership(group_id, user)
+    rows = memory_membership_service().group_exit_preview(group_id, user.id)
+    return GroupLeavePreview(
+        notebook_count=len(rows),
+        memory_count=sum(row["memory_count"] for row in rows),
+        notebooks=[GroupLeavePreviewNotebook(**row) for row in rows],
+    )
 
 
 @router.delete("/groups/{group_id}/membership", status_code=204)

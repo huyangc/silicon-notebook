@@ -1252,6 +1252,20 @@ class MemoryService:
             notebook_id, user_id, claim=False
         ).memory_count
 
+    def group_exit_preview(
+        self, group_id: str, user_id: str
+    ) -> list[dict[str, Any]]:
+        """What leaving ``group_id`` hides of the caller's own Memory: the
+        notebooks the caller stops reading once their membership of that
+        group ends, each with its name and how many of the caller's Memory
+        items (every status) it holds; notebooks holding none are left out.
+        Leaving a group deletes no Memory (``remove_member`` drops the one
+        ``group_members`` row), so rejoining while those notebooks are still
+        shared with the group shows them again. Ordered by name, then id —
+        the same on both backends whatever the database collation."""
+        rows = self.store.group_exit_memory_preview(group_id, user_id)
+        return sorted(rows, key=lambda row: (row["name"], row["notebook_id"]))
+
     def leave_notebook(
         self,
         notebook_id: str,

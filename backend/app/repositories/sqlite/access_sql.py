@@ -95,6 +95,9 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
   `create_answer_with_initial_revision`(答案存 Memory 的范围校验;同名的
   `_answer_save_scope_locked_on` 是不含 SQL 的空接缝,谓词不在那儿)、
   `validate_promotion_approval_access_on`(晋升审批写事务内复核,用列引用形式)。
+* `sqlite/memory_store.py::group_exit_memory_preview` —— 本人退群预览:`read_access_clause`
+  (此刻可读)∧ NOT `read_access_after_group_exit_clause`(退群后可读),两条都用列引用
+  形式(`gm.user_id` / `gm.group_id`),不消费参数。
 * `sqlite/mount_sql.py::MOUNT_VALID_EXPR` —— 「读权 ⇒ 可挂载」,用列引用形式嵌入
   (`b` 是被挂库、`a.created_by` 是挂载方 owner),故不消费任何参数。
 * `sqlite/memory_store.py::_lock_memory_aggregate_on` —— ⚠ **两段式写法,刻意保留**:
@@ -161,6 +164,8 @@ def _restricted_principal_arms(
     user_ref: str,
     group_alias: str,
     group_admin_alias: str,
+    *,
+    excluded_group_ref: str | None = None,
 ) -> str:
     """**受限**主体的三条臂(user / group / group_admins),不含 `everyone`。
 
@@ -171,18 +176,30 @@ def _restricted_principal_arms(
     消费三个 `user_ref`。臂的顺序是「便宜的先算」+「与设计文档的枚举顺序一致」的
     折中,语义与顺序无关。
     """
+    # 退群预览(`read_access_after_group_exit_clause`)把「user 在 excluded_group_ref 这个
+    # 组里的那一行」当作已删除:两条 group_members 子查询各多一个 group_id 不等条件,
+    # 恰好剔除 `remove_member` 要删的那一行 (excluded_group_ref, user_ref)。缺省 None 时
+    # 输出与加这个参数之前逐字相同。
+    without = (
+        "" if excluded_group_ref is None
+        else f" AND {group_alias}.group_id<>{excluded_group_ref}"
+    )
+    without_admin = (
+        "" if excluded_group_ref is None
+        else f" AND {group_admin_alias}.group_id<>{excluded_group_ref}"
+    )
     return (
         f"({grant_alias}.principal_type='user' "
         f"AND {grant_alias}.principal_id={user_ref})"
         f" OR ({grant_alias}.principal_type='group' AND EXISTS ("
         f"SELECT 1 FROM group_members {group_alias} "
         f"WHERE {group_alias}.group_id={grant_alias}.principal_id "
-        f"AND {group_alias}.user_id={user_ref}))"
+        f"AND {group_alias}.user_id={user_ref}{without}))"
         f" OR ({grant_alias}.principal_type='group_admins' AND EXISTS ("
         f"SELECT 1 FROM group_members {group_admin_alias} "
         f"WHERE {group_admin_alias}.group_id={grant_alias}.principal_id "
         f"AND {group_admin_alias}.user_id={user_ref} "
-        f"AND {group_admin_alias}.role='admin'))"
+        f"AND {group_admin_alias}.role='admin'{without_admin}))"
     )
 
 
@@ -199,6 +216,8 @@ def _principal_match_expr(
     user_ref: str,
     group_alias: str,
     group_admin_alias: str,
+    *,
+    excluded_group_ref: str | None = None,
 ) -> str:
     """授权边主体判定:四个已知 `principal_type` 各一条臂,没有兜底分支。
 
@@ -208,7 +227,8 @@ def _principal_match_expr(
     return (
         "("
         + _restricted_principal_arms(
-            grant_alias, user_ref, group_alias, group_admin_alias
+            grant_alias, user_ref, group_alias, group_admin_alias,
+            excluded_group_ref=excluded_group_ref,
         )
         + " OR "
         + _everyone_principal_arm(grant_alias)
@@ -377,6 +397,46 @@ def read_access_clause(
         + ")"
     )
 
+
+
+def read_access_after_group_exit_clause(
+    nb_alias: str = "nb",
+    member_alias: str = "nm",
+    *,
+    user_ref: str,
+    group_ref: str,
+    grant_alias: str = "ng",
+    group_alias: str = "ngm",
+    group_admin_alias: str = "nga",
+) -> str:
+    """读权谓词在「user_ref 已不在 group_ref 这个组里」那一刻的值 —— 本人退出群组的预览。
+
+    退群(`group_store.remove_member`)只删一行 `group_members (group_ref, user_ref)`,
+    别的什么都不动(记忆不删)。这条谓词就是 `read_access_clause` 本身,唯一的差别是两条
+    `group_members` 子查询都把那一行当作已删除(`_restricted_principal_arms` 的
+    `excluded_group_ref`):owner、`notebook_members` 成员行、个人授权边、`everyone` 边、
+    经**别的**群组的授权边一律照旧成立。所以「读权此刻为真 ∧ 这条为假」恰好是「退群后
+    失去读权」,与退群真正执行后 `NOTEBOOK_READ_SQL` 的结果逐格相同(行为等价钉在
+    `tests/test_access_sql_contract.py`)。
+
+    两个 ref 都必须是外层查询的**列引用**(例如 `gm.user_id` / `gm.group_id`),一个参数
+    都不消费——占位符形式要手数 user / group 两种参数的交错位置,刻意不提供。唯一消费者:
+    两个后端 `memory_store.group_exit_memory_preview`。
+    """
+    return (
+        f"({nb_alias}.created_by={user_ref} OR "
+        + member_exists_expr(f"{nb_alias}.id", user_ref, member_alias)
+        + " OR "
+        + _grant_exists_expr(
+            f"{nb_alias}.id",
+            grant_alias,
+            _principal_match_expr(
+                grant_alias, user_ref, group_alias, group_admin_alias,
+                excluded_group_ref=group_ref,
+            ),
+        )
+        + ")"
+    )
 
 def admin_access_clause(
     nb_alias: str = "nb",

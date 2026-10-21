@@ -116,23 +116,37 @@ def _restricted_principal_arms(
     user_ref: str,
     group_alias: str,
     group_admin_alias: str,
+    *,
+    excluded_group_ref: str | None = None,
 ) -> str:
     """**受限**主体的三条臂(user / group / group_admins),不含 `everyone`。
 
     拆分理由与 SQLite 那一份同款(挂载有效性要区别对待,读权不区别对待)。
     """
+    # 退群预览(`read_access_after_group_exit_clause`)把「user 在 excluded_group_ref 这个
+    # 组里的那一行」当作已删除:两条 group_members 子查询各多一个 group_id 不等条件,
+    # 恰好剔除 `remove_member` 要删的那一行 (excluded_group_ref, user_ref)。缺省 None 时
+    # 输出与加这个参数之前逐字相同。
+    without = (
+        "" if excluded_group_ref is None
+        else f" AND {group_alias}.group_id<>{excluded_group_ref}"
+    )
+    without_admin = (
+        "" if excluded_group_ref is None
+        else f" AND {group_admin_alias}.group_id<>{excluded_group_ref}"
+    )
     return (
         f"({grant_alias}.principal_type='user' "
         f"AND {grant_alias}.principal_id={user_ref})"
         f" OR ({grant_alias}.principal_type='group' AND EXISTS ("
         f"SELECT 1 FROM group_members {group_alias} "
         f"WHERE {group_alias}.group_id={grant_alias}.principal_id "
-        f"AND {group_alias}.user_id={user_ref}))"
+        f"AND {group_alias}.user_id={user_ref}{without}))"
         f" OR ({grant_alias}.principal_type='group_admins' AND EXISTS ("
         f"SELECT 1 FROM group_members {group_admin_alias} "
         f"WHERE {group_admin_alias}.group_id={grant_alias}.principal_id "
         f"AND {group_admin_alias}.user_id={user_ref} "
-        f"AND {group_admin_alias}.role='admin'))"
+        f"AND {group_admin_alias}.role='admin'{without_admin}))"
     )
 
 
@@ -146,6 +160,8 @@ def _principal_match_expr(
     user_ref: str,
     group_alias: str,
     group_admin_alias: str,
+    *,
+    excluded_group_ref: str | None = None,
 ) -> str:
     """授权边主体判定:四个已知 `principal_type` 各一条臂,没有兜底分支。
 
@@ -154,7 +170,8 @@ def _principal_match_expr(
     return (
         "("
         + _restricted_principal_arms(
-            grant_alias, user_ref, group_alias, group_admin_alias
+            grant_alias, user_ref, group_alias, group_admin_alias,
+            excluded_group_ref=excluded_group_ref,
         )
         + " OR "
         + _everyone_principal_arm(grant_alias)
@@ -430,6 +447,36 @@ def read_access_clause(
         + ")"
     )
 
+
+
+def read_access_after_group_exit_clause(
+    nb_alias: str = "nb",
+    member_alias: str = "nm",
+    *,
+    user_ref: str,
+    group_ref: str,
+    grant_alias: str = "ng",
+    group_alias: str = "ngm",
+    group_admin_alias: str = "nga",
+) -> str:
+    """读权谓词在「user_ref 已不在 group_ref 这个组里」那一刻的值 —— 本人退出群组的预览。
+
+    语义、等价论证与「两个 ref 只收列引用」的理由见 SQLite 那一份。
+    """
+    return (
+        f"({nb_alias}.created_by={user_ref} OR "
+        + member_exists_expr(f"{nb_alias}.id", user_ref, member_alias)
+        + " OR "
+        + _grant_exists_expr(
+            f"{nb_alias}.id",
+            grant_alias,
+            _principal_match_expr(
+                grant_alias, user_ref, group_alias, group_admin_alias,
+                excluded_group_ref=group_ref,
+            ),
+        )
+        + ")"
+    )
 
 def admin_access_clause(
     nb_alias: str = "nb",

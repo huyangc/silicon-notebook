@@ -184,3 +184,26 @@ class ShareRequestItem(BaseModel):
     decided_by: Optional[str] = None
     decided_at: Optional[str] = None
     created_at: str = ""
+
+
+class GroupLeavePreviewNotebook(BaseModel):
+    """退群后会看不到的一本笔记本:名字与其中调用者本人的记忆条数(各种状态都算)。"""
+
+    notebook_id: str
+    name: str = ""
+    memory_count: int
+
+
+class GroupLeavePreview(BaseModel):
+    """``GET /groups/{id}/membership/leave-preview``:本人退出这个群组之后,哪些笔记本里
+    自己的记忆会看不到。
+
+    只列调用者本人有记忆、且退群后失去读权的笔记本(仍能凭所有者身份、成员关系、个人
+    授权、全员授权或别的群组读到的不算)。退群不删除任何记忆:这些笔记本仍共享给本组时,
+    重新加入后照样能看到。``notebook_count`` / ``memory_count`` 是 ``notebooks`` 的条数与
+    条数之和,由服务端算好。
+    """
+
+    notebook_count: int
+    memory_count: int
+    notebooks: List[GroupLeavePreviewNotebook] = Field(default_factory=list)
