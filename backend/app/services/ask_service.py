@@ -179,16 +179,15 @@ from app.services.report_evidence import (
     ReportTurn,
     assemble_report_evidence,
     citation_identity,
+    report_read_back,
     report_readable,
     scrub_report_marks,
     with_report_selected,
 )
 from app.services.report_followup import (
-    ReportAdmissionCounts,
     ReportFollowupReaders,
     current_report_followup,
     followup_outline,
-    followup_receipt,
     load_linked_report,
     report_digest,
     report_followup_context,
@@ -731,6 +730,15 @@ def _with_report_outline(history: str, outline: str) -> str:
     return f"{history}\n\n{outline}" if history else outline
 
 
+def _report_admitted_any(report: "ReportTurn | None") -> bool:
+    """Whether the turn's report evidence partition put any cited item into
+    the context (``ReportTurn.admitted_keys``, after the assembly). A
+    retrieval-only output whose own retrieval is empty is "no evidence" --
+    with its notice -- unless this holds: a readable report whose cited items
+    are all gone, external or whole sources adds nothing an Agent could use."""
+    return report is not None and bool(report.admitted_keys)
+
+
 def _bounded_gap_model_json(
     client: object, prompt: str, schema_hint: str, *,
     cancel_event: object, deadline: float,
@@ -881,6 +889,7 @@ def _synthesis_step_detail(
     sectioned: Any,
     outline_fallback: bool,
     outline_skipped: Sequence[str],
+    outline_bypassed: str = "",
 ) -> dict:
     """The terminal ``synthesis`` trace step's ``detail`` — a pure builder.
 
@@ -994,8 +1003,28 @@ def _synthesis_step_detail(
                 ]
                 if sectioned is not None else []
             ),
+            # 为什么有 ≥2 节却没按节写(``_outline_bypass_reason``,闭合取值,
+            # 目前只有 ``linked_report``,D8)。**稀疏**:只在这种绕过时出现,
+            # 与「大纲不足两节」(同样 ``outline_sections == 0``)区分开。
+            **({"outline_bypassed": outline_bypassed} if outline_bypassed else {}),
         })
     return detail
+
+
+#: ``outline_bypassed``'s one value: the turn read an attached report (D8).
+OUTLINE_BYPASSED_LINKED_REPORT = "linked_report"
+
+
+def _outline_bypass_reason(report: "ReportTurn | None", outline_slices: Sequence[Any]) -> str:
+    """Why a run whose outline had two or more sections with evidence was
+    still written in one synthesis, for the synthesis step's sparse
+    ``outline_bypassed`` key: ``linked_report`` when the turn read an attached
+    report (plan D8 -- the report block and its evidence are whole-turn
+    context, cut into sections they would either be repeated k times or kept
+    from a section); "" otherwise, the key then absent."""
+    if report is not None and len(outline_slices) >= 2:
+        return OUTLINE_BYPASSED_LINKED_REPORT
+    return ""
 
 
 class DefaultResponseDraftStage:
@@ -3421,7 +3450,8 @@ class AskService:
         adds ``report is None`` (D8: a turn that reads the report keeps one
         synthesis -- the report block and its evidence are whole-turn
         context, and cutting them into sections would either repeat the block
-        k times or hide the report from a section); the synthesis trigger
+        k times or hide the report from a section -- and the synthesis step
+        says so, ``outline_bypassed``); the synthesis trigger
         adds the turn (the chunk engine's rule); the restored keys join the
         exact keys, the restored passages the anchor image candidates, their
         cards the card-image exclusion (as on the chunk engine, the anchors
@@ -3460,24 +3490,18 @@ class AskService:
             {"included_report_evidence": len(partition.id_map) - len(id_map)},
         )
 
-    @staticmethod
-    def _report_read_back(report: ReportTurn) -> int:
-        """How many report keys of the text the turn reads name an item the
-        run read back from the notebook -- the membership the evidence
-        partition starts from (an item in ``RestoredReportEvidence
-        .key_by_object`` that came back). The partition later splits them
-        into loaded and not loaded, which the receipt reports."""
-        restored = report.followup.restored or RestoredReportEvidence()
-        present = {
-            *((RESTORED_KIND_CHUNK, item.chunk_id) for item in restored.chunks),
-            *((RESTORED_KIND_ELEMENT, item.element_id) for item in restored.elements),
-            *((RESTORED_KIND_KG, item.object_id) for item in restored.knowledge),
-            *((RESTORED_KIND_MEMORY, item.memory_id) for item in restored.memory),
-        }
-        object_of = {
-            key: obj for obj, keys in restored.key_by_object.items() for key in keys
-        }
-        return sum(1 for key in report.selection.keys if object_of.get(key) in present)
+    def _reasoning_synthesizes(self, prepared) -> bool:
+        """Whether this reasoning run's draft would put the report block into
+        an answer prompt at all, decided before retrieval: the retrieval-only
+        output stands in for that prompt (``_draft_reasoning_evidence`` writes
+        a ``read`` receipt without any model), and an answer needs a
+        configured ``ask_answer`` client -- with a readable report the draft
+        synthesises whenever that client is configured (the report alone
+        triggers it). The run's other short circuits never reach the report
+        step."""
+        if getattr(prepared, "output", "answer") == "evidence":
+            return True
+        return bool(getattr(self.model_clients.chat("ask_answer"), "configured", False))
 
     def _reasoning_report_step(self, prepared) -> "TraceStep | None":
         """The reasoning trace's ``report`` step (``report_trace_step``), or
@@ -3487,13 +3511,17 @@ class AskService:
         sections -- after the intent step, before the Memory step -- so it
         says what the engine did then: which parts it reads (the sections are
         final here) and how many of their cited items it read back from the
-        notebook, or why it reads nothing. The evidence partition is
-        assembled later, at synthesis; how many of those items then entered
-        the prompt and how many were left out for space is the receipt's
-        account (``LinkedReportReceipt``), so the step's ``evidence_restored``
-        is the read-back count and its ``evidence_over_budget`` is 0 -- the
-        Memory step's rule: the trace records the recall, not the
-        attribution. ``duration_ms`` is the judging and reading done at the
+        notebook (``report_evidence.report_read_back``, the partition's own
+        membership rule), under the trace's own name and words; or why it
+        reads nothing. How many of those items then enter the prompt, and how
+        many are left out for space, is decided at synthesis and reported by
+        the receipt and the synthesis step only.
+
+        Its form follows the receipt: a run whose draft will call no answer
+        model (``_reasoning_synthesizes``: an empty model registry, no
+        ``ask_answer`` client) reads nothing into any prompt, so the step says
+        "not read" with the receipt's own reason (``no_synthesis``) rather
+        than "read". ``duration_ms`` is the judging and reading done at the
         engine entry (``ReportFollowup.read_ms``) plus the selection, so the
         trace still accounts for the whole run."""
         followup = getattr(prepared, "report_followup", None)
@@ -3501,20 +3529,15 @@ class AskService:
             return None
         started = time.perf_counter()
         report = self._reasoning_report_turn(prepared)
-        if report is None:
-            receipt = skipped_receipt(
-                followup, followup.verdict.reason_code or REASON_NO_SYNTHESIS,
+        if report is not None and not self._reasoning_synthesizes(prepared):
+            step = report_trace_step(followup, reason_code=REASON_NO_SYNTHESIS)
+        elif report is not None:
+            step = report_trace_step(
+                followup, selection=report.selection,
+                read_back=report_read_back(followup, report.selection),
             )
         else:
-            receipt = followup_receipt(
-                followup, selection=report.selection, read=True,
-                admission_counts=ReportAdmissionCounts(
-                    restored=self._report_read_back(report),
-                ),
-            )
-        step = report_trace_step(
-            receipt, digest=followup.digest if report is not None else None,
-        )
+            step = report_trace_step(followup)
         return step.model_copy(update={"duration_ms": (followup.read_ms or 0) + round(
             (time.perf_counter() - started) * 1000
         )})
@@ -3526,11 +3549,12 @@ class AskService:
         """``_run_reasoning_stage``'s Memory-step seat, with the attached
         report's step (``_reasoning_report_step``) recorded just before it:
         after the intent step, and -- like the Memory step -- only on a run
-        that got past every short circuit, so a turn that never answers
-        leaves no "read the report" behind (its receipt says
-        ``no_synthesis``). ``record`` is the stage's ``checked_pre_trace``.
-        One call at the seat the Memory step already had, so the capped
-        ``_run_reasoning_stage`` does not grow."""
+        that got past every short circuit (a run that short-circuits leaves
+        no report step; its receipt says ``no_synthesis``). The step itself
+        says "not read" for a run that gets here but whose draft will call no
+        answer model, as its receipt does. ``record`` is the stage's
+        ``checked_pre_trace``. One call at the seat the Memory step already
+        had, so the capped ``_run_reasoning_stage`` does not grow."""
         step = self._reasoning_report_step(prepared)
         if step is not None:
             record(step)
@@ -5789,18 +5813,24 @@ class AskService:
                 cancel_event=cancel_event, ask_stage=ask_stage,
             )
             raise_if_cancelled(cancel_event)
-            if not (r.selected or r.kg_id_map or memory_hits or report):
+            retrieved = bool(r.selected or r.kg_id_map or memory_hits)
+            built = None
+            if retrieved or report is not None:
+                built = self._chunk_synthesis_context(
+                    r.selected, r.kg_block, r.kg_id_map, memory_hits,
+                    overlay_on=r.overlay_on, notebook_id=notebook_id,
+                    report=report,
+                )
+            # A readable report whose partition admitted nothing adds no
+            # evidence: an empty retrieval stays "no evidence" (``_report_admitted_any``).
+            if built is None or not (retrieved or _report_admitted_any(report)):
                 evidence = AskEvidence(
                     mode="chunk", evidence_kind="none",
                     notice=_CHUNK_NO_EVIDENCE_MESSAGE,
                     counts=AskEvidenceCounts(recalled=r.recalled),
                 )
             else:
-                context_block, id_map, budget_chars = self._chunk_synthesis_context(
-                    r.selected, r.kg_block, r.kg_id_map, memory_hits,
-                    overlay_on=r.overlay_on, notebook_id=notebook_id,
-                    report=report,
-                )
+                context_block, id_map, budget_chars = built
                 evidence = build_ask_evidence(
                     context_block, id_map,
                     parse_anchors=self._parse_answer_anchors,
@@ -8363,7 +8393,7 @@ class AskService:
                     document_read_block_dropped=document_read_block_dropped,
                     outline_planned=outline_planned, sectioned=sectioned,
                     outline_fallback=outline_fallback,
-                    outline_skipped=outline_skipped,
+                    outline_skipped=outline_skipped, outline_bypassed=_outline_bypass_reason(report, outline_slices),
                 ),
                 duration_ms=round((time.perf_counter() - synthesis_started) * 1000),
             )
@@ -8510,12 +8540,15 @@ class AskService:
         commit boundary returns ``draft.evidence`` and saves nothing.
 
         An attached report the turn reads (``_reasoning_report_turn``) is
-        handled as by the answer: it makes the turn one with evidence, its
-        partition joins the context, its objects count under their own kinds
-        (``with_report_selected``) and the output carries the ``read``
-        receipt -- the output stands in for the answer prompt the block would
-        have entered (an unread report is stamped ``skipped`` by
-        ``ask_evidence``).
+        handled as by the answer: its partition joins the context, its
+        objects count under their own kinds (``with_report_selected``) and the
+        output carries the ``read`` receipt -- the output stands in for the
+        answer prompt the block would have entered (an unread report is
+        stamped ``skipped`` by ``ask_evidence``). When the turn retrieved
+        nothing itself and the partition admitted nothing either (every cited
+        item gone, external or a whole source), the output is the "no
+        evidence" one, notice included, as without a report
+        (``_report_admitted_any``); the receipt is written all the same.
         """
         from app.application.ask_reasoning import (
             ReasoningResponseDraft,
@@ -8544,15 +8577,13 @@ class AskService:
             "intent": stage.intent_contract,
         }
         report = self._reasoning_report_turn(prepared)
-        if not (stage.top_hits or stage.elements or stage.chunks or stage.chains
-                or stage.memory_hits or stage.structured_batch is not None
-                or stage.enumerations or map_block or stage.external_evidence
-                or report):
-            evidence = AskEvidence(
-                mode="reasoning", evidence_kind="none",
-                notice=_NO_RETRIEVAL_EVIDENCE_MESSAGE, **common,
-            )
-        else:
+        retrieved = bool(
+            stage.top_hits or stage.elements or stage.chunks or stage.chains
+            or stage.memory_hits or stage.structured_batch is not None
+            or stage.enumerations or map_block or stage.external_evidence
+        )
+        context = None
+        if retrieved or report is not None:
             context = self._assemble_reasoning_context(
                 prepared.notebook_id, prepared.research_question,
                 list(stage.top_hits), list(stage.elements),
@@ -8567,6 +8598,12 @@ class AskService:
                 refine=False,
                 report=report,
             )
+        if context is None or not (retrieved or _report_admitted_any(report)):
+            evidence = AskEvidence(
+                mode="reasoning", evidence_kind="none",
+                notice=_NO_RETRIEVAL_EVIDENCE_MESSAGE, **common,
+            )
+        else:
             manifest = stage.candidate_manifest
             recalled = (
                 len(manifest.candidate_knowledge) + len(manifest.candidate_chunks)

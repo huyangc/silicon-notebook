@@ -1080,6 +1080,29 @@ def test_the_retrieval_only_output_of_a_conflicting_turn_says_why(make_world, mo
     )
 
 
+def test_a_report_with_nothing_to_load_leaves_an_empty_retrieval_no_evidence(
+    make_world, monkeypatch,
+):
+    """The turn retrieved nothing and every item the report cites is gone,
+    external or a whole source: the retrieval-only output is the "no
+    evidence" one with its notice, as without a report -- and the receipt is
+    written all the same."""
+    world = make_world()
+    report = insert_report(
+        world, "rep-evidence-empty", references=REFERENCES[5:],
+        content_md=_content("摘要。", ("外部资料 [k6]，整份来源 [k7]，已删段落 [k8]。", "无引用。")),
+    )
+    stub_retrieval(monkeypatch)
+    bind_models(world, "unused")
+
+    evidence = ask(world, report, output="evidence")
+
+    assert evidence.evidence_kind == "none"
+    assert evidence.notice and evidence.items == []
+    receipt = evidence.linked_report
+    assert (receipt.status, receipt.evidence_restored, receipt.evidence_gone) == ("read", 0, 1)
+
+
 # ---------------------------------------------------------------- public view
 def test_the_public_projection_carries_no_linked_report(make_world, monkeypatch):
     world = make_world()

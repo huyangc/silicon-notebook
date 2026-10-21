@@ -939,14 +939,16 @@ def _listed(numbers: Iterable[int]) -> str:
     return "、".join(str(number) for number in numbers)
 
 
-def _evidence_note(receipt: LinkedReportReceipt) -> str:
-    if not (receipt.evidence_restored or receipt.evidence_gone or receipt.evidence_over_budget):
+def _read_back_note(read_back: int, gone: int) -> str:
+    """The trace's account of the report's cited items before any partition
+    exists: how many the run read back, and how many no longer exist.
+    Deliberately not the receipt's words ("复原"): the receipt counts what
+    entered the prompt, which is decided later."""
+    if not (read_back or gone):
         return ""
-    note = f"；复原引用证据 {receipt.evidence_restored} 条"
-    if receipt.evidence_gone:
-        note += f"，{receipt.evidence_gone} 条已失效"
-    if receipt.evidence_over_budget:
-        note += f"，{receipt.evidence_over_budget} 条超出篇幅未读入"
+    note = f"；读回报告引用 {read_back} 条"
+    if gone:
+        note += f"，{gone} 条已失效"
     return note
 
 
@@ -991,36 +993,75 @@ def _read_summary(receipt: LinkedReportReceipt, blank: Collection[int]) -> str:
 
 
 def report_trace_step(
-    receipt: LinkedReportReceipt, *, digest: Optional[ReportDigest],
+    followup: ReportFollowup,
+    *,
+    selection: Optional[SectionSelection] = None,
+    read_back: int = 0,
+    reason_code: str = "",
 ) -> TraceStep:
-    """The reasoning trace's ``report`` step: what the turn read of the
-    attached report and how many cited items it read back, or why it read
-    nothing (the receipt's own reason clause). ``digest`` is the turn's
-    ``ReportFollowup.digest`` (None when the report was not read): it tells
-    a section without body text from one the budget left out, which the
-    receipt's ``read`` flags alone cannot."""
-    if receipt.status == "read":
-        blank = {
-            section.index for section in (digest.sections if digest is not None else ())
-            if not section.body
-        }
-        summary = _read_summary(receipt, blank) + _evidence_note(receipt)
-    else:
+    """The reasoning trace's ``report`` step, written where the run has
+    judged and read the report and selected its sections -- before retrieval
+    and long before the evidence partition is assembled.
+
+    ``selection`` given (the turn reads the report): the step says what it
+    reads -- the sections are final here; a section without body text is told
+    from one the budget left out -- and how many of the read text's cited
+    items the run read back from the notebook (``read_back``,
+    ``report_evidence.report_read_back``) under a name and words of their own
+    (``evidence_read_back``, "读回报告引用 N 条"), plus the references that no
+    longer exist (``evidence_gone``, the receipt's own count). How many of the
+    items then enter the prompt and how many are left out for space is
+    decided at synthesis, and only the receipt (``evidence_restored`` /
+    ``evidence_over_budget``) and the synthesis step report it.
+
+    ``selection`` None (the turn reads nothing): the step says why in the
+    receipt's own words (``skipped_receipt``) -- ``reason_code``, by default
+    the verdict's."""
+    if selection is None:
+        receipt = skipped_receipt(
+            followup, reason_code or followup.verdict.reason_code or REASON_NO_SYNTHESIS,
+        )
         clause = receipt.reason.removeprefix(REASON_PREFIX)
-        summary = f"未读取关联报告{_report_name(receipt.title)}：{clause}"
-    detail: dict[str, Any] = {
-        "report_id": receipt.report_id,
-        "status": receipt.status,
-        "sections_total": len(receipt.sections),
-        "sections_read": [section.index for section in receipt.sections if section.read],
-        "summary_truncated": receipt.summary_truncated,
-        "evidence_restored": receipt.evidence_restored,
-        "evidence_gone": receipt.evidence_gone,
-        "evidence_over_budget": receipt.evidence_over_budget,
+        return TraceStep(
+            step_type="report",
+            summary=f"未读取关联报告{_report_name(receipt.title)}：{clause}",
+            detail={
+                "report_id": receipt.report_id,
+                "status": receipt.status,
+                "sections_total": 0,
+                "sections_read": [],
+                "summary_truncated": False,
+                "evidence_read_back": 0,
+                "evidence_gone": 0,
+                "reason_code": receipt.reason_code,
+            },
+        )
+    # The receipt's own section rule (a section is read exactly when its body
+    # entered the prompt); its admission counts are not read here.
+    receipt = followup_receipt(
+        followup, selection=selection, admission_counts=ReportAdmissionCounts(),
+        read=True,
+    )
+    digest = followup.digest
+    blank = {
+        section.index for section in (digest.sections if digest is not None else ())
+        if not section.body
     }
-    if receipt.reason_code:
-        detail["reason_code"] = receipt.reason_code
-    return TraceStep(step_type="report", summary=summary, detail=detail)
+    return TraceStep(
+        step_type="report",
+        summary=_read_summary(receipt, blank) + _read_back_note(
+            read_back, receipt.evidence_gone,
+        ),
+        detail={
+            "report_id": receipt.report_id,
+            "status": receipt.status,
+            "sections_total": len(receipt.sections),
+            "sections_read": [section.index for section in receipt.sections if section.read],
+            "summary_truncated": receipt.summary_truncated,
+            "evidence_read_back": read_back,
+            "evidence_gone": receipt.evidence_gone,
+        },
+    )
 
 
 # --- the run's attached report ------------------------------------------------

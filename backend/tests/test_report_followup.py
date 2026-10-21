@@ -1046,9 +1046,9 @@ def test_skipped_receipt_uses_the_verdicts_wording_only_for_its_own_code():
     }
 
 
-def _read_turn(read=(), *, truncated=False, restored=0, gone=0, over=0, total=6, blank=()):
-    """``(receipt, digest)`` of a turn that read the report; ``blank`` are the
-    sections without body text."""
+def _read_turn(read=(), *, truncated=False, read_back=0, gone=0, total=6, blank=()):
+    """``(trace step, digest)`` of a turn that reads the report; ``blank`` are
+    the sections without body text."""
     digest = ReportDigest(
         title="带隙基准", summary="摘要",
         sections=tuple(
@@ -1056,27 +1056,26 @@ def _read_turn(read=(), *, truncated=False, restored=0, gone=0, over=0, total=6,
             for i in range(1, total + 1)
         ),
     )
-    receipt = followup_receipt(
+    step = report_trace_step(
         _followup(ReportLinkVerdict(gone=gone), digest=digest),
         selection=SectionSelection(read_indices=tuple(read), summary_truncated=truncated),
-        admission_counts=ReportAdmissionCounts(restored=restored, over_budget=over),
-        read=True,
+        read_back=read_back,
     )
-    return receipt, digest
+    return step, digest
 
 
 @pytest.mark.parametrize(
     ("turn", "summary"),
     [
         (_read_turn(range(1, 7)), "已读取关联报告《带隙基准》全文"),
-        (_read_turn(range(1, 7), restored=18, gone=2),
-         "已读取关联报告《带隙基准》全文；复原引用证据 18 条，2 条已失效"),
-        (_read_turn((2, 3), restored=18, gone=2),
+        (_read_turn(range(1, 7), read_back=18, gone=2),
+         "已读取关联报告《带隙基准》全文；读回报告引用 18 条，2 条已失效"),
+        (_read_turn((2, 3), read_back=18, gone=2),
          "已读取关联报告《带隙基准》：执行摘要与第 2、3 节（共 6 节，按与问题的相关度选取）；"
-         "复原引用证据 18 条，2 条已失效"),
-        (_read_turn((), truncated=True, restored=5, over=3),
+         "读回报告引用 18 条，2 条已失效"),
+        (_read_turn((), truncated=True, read_back=5),
          "已读取关联报告《带隙基准》：执行摘要（已截断）与各节标题（共 6 节，正文超出篇幅未读入）；"
-         "复原引用证据 5 条，3 条超出篇幅未读入"),
+         "读回报告引用 5 条"),
         (_read_turn(range(1, 7), truncated=True),
          "已读取关联报告《带隙基准》：执行摘要（已截断）与全部 6 节"),
         (_read_turn((), truncated=True, total=0), "已读取关联报告《带隙基准》：执行摘要（已截断）"),
@@ -1095,17 +1094,28 @@ def _read_turn(read=(), *, truncated=False, restored=0, gone=0, over=0, total=6,
          "no-sections", "full-with-blank", "partial-with-blank", "clipped-with-blank"],
 )
 def test_trace_step_says_what_was_read(turn, summary):
-    receipt, digest = turn
-    step = report_trace_step(receipt, digest=digest)
+    step, digest = turn
     assert step.step_type == "report"
     assert step.summary == summary
     assert step.detail["status"] == "read"
-    assert step.detail["sections_total"] == len(receipt.sections)
-    assert step.detail["sections_read"] == [s.index for s in receipt.sections if s.read]
+    assert step.detail["sections_total"] == len(digest.sections)
     blank = {s.index for s in digest.sections if not s.body}
     assert not blank & set(step.detail["sections_read"])
     assert "reason_code" not in step.detail
     assert "memory_used" not in step.detail
+
+
+def test_the_trace_counts_what_was_read_back_never_in_the_receipts_words():
+    """The trace step is written before the evidence partition exists: its
+    count is the items read back, under its own name and words. The
+    receipt's split (restored into the prompt / left out for space) and its
+    word "复原" never appear in it."""
+    step, _digest = _read_turn((1, 2), read_back=5, gone=1)
+    assert step.detail["evidence_read_back"] == 5
+    assert step.detail["evidence_gone"] == 1
+    assert "evidence_restored" not in step.detail
+    assert "evidence_over_budget" not in step.detail
+    assert "复原" not in step.summary and "超出篇幅" not in step.summary.split("；")[-1]
 
 
 def test_admission_counts_are_a_typed_value():
@@ -1125,27 +1135,32 @@ def test_trace_step_says_why_nothing_was_read():
         reason_code=REASON_MEMORY_CLOSED,
         reason=report_reason_text(REASON_MEMORY_CLOSED, memory_channel_open=True),
     ))
-    step = report_trace_step(skipped_receipt(followup, REASON_MEMORY_CLOSED), digest=None)
+    step = report_trace_step(followup)
     assert step.summary == (
         "未读取关联报告《带隙基准》：它用到了你的个人记忆，而收窄检索范围后本轮不读取个人记忆"
     )
     assert step.detail["reason_code"] == REASON_MEMORY_CLOSED
-    assert step.detail["sections_read"] == [] and step.detail["evidence_restored"] == 0
+    assert step.detail["sections_read"] == [] and step.detail["evidence_read_back"] == 0
 
     gone = ReportFollowup(
         report_id="rep-x", title="", digest=None,
         verdict=unread_verdict(REASON_REPORT_UNAVAILABLE),
     )
-    step = report_trace_step(skipped_receipt(gone, REASON_REPORT_UNAVAILABLE), digest=None)
+    step = report_trace_step(gone)
     assert step.summary == "未读取关联报告：这份报告已删除或不再是已完成状态"
+
+    # A readable report the turn will put into no answer prompt: the step
+    # says so in the receipt's own words.
+    step = report_trace_step(_followup(), reason_code=REASON_NO_SYNTHESIS)
+    assert step.summary == "未读取关联报告《带隙基准》：本轮没有调用回答模型"
+    assert (step.detail["status"], step.detail["reason_code"]) == ("skipped", REASON_NO_SYNTHESIS)
 
 
 def test_no_internal_detail_leaks_into_the_trace():
-    receipt, digest = _read_turn((1,), restored=1)
-    step = report_trace_step(receipt, digest=digest)
+    step, _digest = _read_turn((1,), read_back=1)
     assert set(step.detail) == {
         "report_id", "status", "sections_total", "sections_read", "summary_truncated",
-        "evidence_restored", "evidence_gone", "evidence_over_budget",
+        "evidence_read_back", "evidence_gone",
     }
 
 
