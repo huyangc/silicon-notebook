@@ -19,7 +19,12 @@ when no model service or MinerU parser is configured.
 
 ### Prerequisites
 
-- **macOS or Linux.** Windows is not supported; run it inside WSL.
+- **macOS 14+ on Apple Silicon, or Linux x86_64/aarch64 with glibc 2.28+.** Several
+  locked packages publish no wheel below these floors: onnxruntime 1.31.0 has only
+  `macosx_14_0_arm64` and `manylinux_2_28` wheels and no source distribution, and
+  igraph, PyMuPDF and pymupdf-layout also start at `manylinux_2_28`. Intel Macs are
+  not supported (no onnxruntime wheel at all; cryptography would also have to build
+  from source), nor is Windows; on Windows run it inside WSL.
 - **Python ≥ 3.13** — the SQLite write lock's fairness depends on CPython 3.13's
   `PyMutex`-backed `threading.Lock` handoff; older interpreters silently regress to
   writer starvation (see `backend/app/repositories/sqlite/database.py`).
@@ -29,7 +34,8 @@ when no model service or MinerU parser is configured.
 - An accessible **PostgreSQL 16** database for the default deployment; extension prerequisites are listed in section 3.1.
 - A **C/C++ toolchain** — `hnswlib` 0.8.0 publishes only a source distribution, so pip
   always builds it: install Xcode Command Line Tools (macOS) or `build-essential`
-  (Debian/Ubuntu). The other locked packages install from prebuilt wheels.
+  (Debian/Ubuntu). On the supported platforms above, every other locked package
+  installs from a prebuilt wheel.
 
 ### 1 · Install
 
@@ -254,6 +260,16 @@ hide a bind failure in the newly launched process. Use `npm run stop` for the de
 Prebuilt images that already
 contain both dependency sets may set `SKIP_INSTALL=1`; with that escape hatch, a missing
 `frontend/node_modules/.bin/next` still fails before build rather than silently continuing.
+
+The backend install can leave a dependency conflict behind without stopping the start. When
+moving packages to the lock's versions breaks a requirement of something else installed in
+that environment (typically a deployment plugin that wants a newer version of a shared
+package), pip prints `ERROR: pip's dependency resolver does not currently take into account
+all the packages that are installed…` with the `… requires …, but you have … which is
+incompatible` lines, still exits 0, and `npm run start` carries on. Check an environment with
+`"$PYTHON_BIN" -m pip check` (exit 1 and one line per broken requirement when there is a
+conflict); fix the plugin's requirement or the lock. Until then, `SKIP_INSTALL=1 npm run
+start` starts without reinstalling anything, so the environment keeps the versions it has.
 
 Before launching the backend, `npm run start` regenerates `release-manifest.json` at the repo
 root with the same `scripts/build_release_manifest.py` that `pack.sh` uses, so a

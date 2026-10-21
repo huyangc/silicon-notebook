@@ -16,7 +16,11 @@ silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端—�
 
 ### 前置条件
 
-- **macOS 或 Linux。** 不支持 Windows，请在 WSL 中运行。
+- **Apple Silicon 上的 macOS 14+，或 glibc ≥ 2.28 的 Linux x86_64/aarch64。** 若干锁定的包
+  在更低的平台上没有 wheel：onnxruntime 1.31.0 只有 `macosx_14_0_arm64` 与 `manylinux_2_28`
+  wheel、没有源码包；igraph、PyMuPDF、pymupdf-layout 也从 `manylinux_2_28` 起步。不支持
+  Intel Mac（onnxruntime 完全没有可用 wheel，cryptography 也得从源码编译），也不支持
+  Windows；Windows 请在 WSL 中运行。
 - **Python ≥ 3.13**——SQLite 写锁的公平性依赖 CPython 3.13 中 `threading.Lock`（由
   `PyMutex` 支撑）的交接语义；更低版本会静默退化为抢占式（barging），写者饿死无声
   重现（见 `backend/app/repositories/sqlite/database.py`）。
@@ -25,8 +29,8 @@ silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端—�
 - **git**
 - 默认部署需要可访问的 **PostgreSQL 16** 数据库；扩展前置条件见 3.1 节。
 - **C/C++ 工具链**——`hnswlib` 0.8.0 只发布源码包,pip 每次都要本地编译它:请装 Xcode
-  Command Line Tools(macOS)或 `build-essential`(Debian/Ubuntu)。其余锁定的包都从
-  预编译 wheel 安装。
+  Command Line Tools(macOS)或 `build-essential`(Debian/Ubuntu)。在上面支持的平台上,
+  其余锁定的包都从预编译 wheel 安装。
 
 ### 1 · 安装
 
@@ -211,6 +215,14 @@ npm run stop
 后台服务用 `npm run stop` 停止。
 已同时预装两端依赖的镜像可设 `SKIP_INSTALL=1`；该模式下若缺少
 `frontend/node_modules/.bin/next`，仍会在 build 前直接报错，不会带病继续。
+
+后端依赖安装可能留下依赖冲突却不阻断启动：把包换成锁定版本后，若破坏了同一环境里其他已装
+包的要求（典型是部署插件想要某个共用包的更新版本），pip 会打印
+`ERROR: pip's dependency resolver does not currently take into account all the packages that are installed…`
+以及若干行 `… requires …, but you have … which is incompatible`，但退出码仍为 0，
+`npm run start` 照常继续。用 `"$PYTHON_BIN" -m pip check` 检查环境（有冲突时退出码 1，
+每条坏掉的要求一行），再去修插件的依赖范围或锁文件；修好之前可以用
+`SKIP_INSTALL=1 npm run start` 临时跳过重装，环境保持现有版本启动。
 
 启动后端之前，`npm run start` 会用与 `pack.sh` 相同的 `scripts/build_release_manifest.py`
 在仓库根目录重新生成 `release-manifest.json`，因此「`git pull` + `npm run start`」的部署方式

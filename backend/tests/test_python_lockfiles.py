@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 from importlib import metadata
 import importlib.util
+import os
 from pathlib import Path
 import sys
 
@@ -120,15 +121,18 @@ def _installed_at(name: str, version: str) -> metadata.Distribution | None:
     return dist if Version(dist.version) == Version(version) else None
 
 
-def _missing_requirements(source: Path, lock: Path) -> dict[str, list[str]]:
+def _missing_requirements(
+    source: Path, lock: Path,
+) -> tuple[dict[str, list[str]], set[str]]:
     """What the locked packages require, per their own metadata, but the lock lacks.
 
     Walks Requires-Dist from the ``.in`` file's direct requirements (with the
     extras they request, and the extras each requirement asks of its target),
     evaluating markers for this interpreter. Only a package installed at its
-    locked version has metadata this check can trust. CI installs exactly the
-    two locks (``pip install --require-hashes`` refuses anything else), so
-    there every locked package is examined.
+    locked version has metadata this check can trust, so the walk also returns
+    the packages whose metadata it actually read. CI installs exactly the two
+    locks (``pip install --require-hashes`` refuses anything else), so there
+    that is every locked package, which the test asserts.
     """
     entries = lockfiles.parse_lock(lock)
     extras: dict[str, set[str]] = {}
@@ -137,6 +141,7 @@ def _missing_requirements(source: Path, lock: Path) -> dict[str, list[str]]:
     pending = list(extras)
     examined: set[tuple[str, frozenset[str]]] = set()
     missing: dict[str, list[str]] = {}
+    read: set[str] = set()
     environment = default_environment()
     while pending:
         name = pending.pop()
@@ -147,6 +152,7 @@ def _missing_requirements(source: Path, lock: Path) -> dict[str, list[str]]:
         dist = _installed_at(name, entries[name].version)
         if dist is None:
             continue
+        read.add(name)
         for raw in dist.requires or []:
             requirement = Requirement(raw)
             wanted = requirement.marker is None or any(
@@ -163,14 +169,24 @@ def _missing_requirements(source: Path, lock: Path) -> dict[str, list[str]]:
             extras.setdefault(child, set()).update(requirement.extras)
             if extras[child] != before or (child, frozenset(before)) not in examined:
                 pending.append(child)
-    return missing
+    return missing, read
 
 
 @pytest.mark.parametrize(("source", "lock"), PAIRS, ids=lambda path: path.name)
 def test_every_requirement_of_a_locked_package_is_locked_too(source, lock) -> None:
     """A transitive pin deleted from a lock (sniffio, say) fails here even
-    though nothing else in the lock names it."""
-    assert _missing_requirements(source, lock) == {}
+    though nothing else in the lock names it.
+
+    Outside CI the environment need not come from the locks, so only the
+    packages installed at their locked version are walked; the missing-
+    requirement assertion itself always runs. In CI (``CI=true``, set by GitHub
+    Actions) the environment is the locks, so the walk must have read every
+    locked package; otherwise the check would quietly cover less there too.
+    """
+    missing, read = _missing_requirements(source, lock)
+    assert missing == {}
+    if os.environ.get("CI") == "true":
+        assert read == set(lockfiles.parse_lock(lock))
 
 
 def test_the_dev_lock_installs_on_top_of_the_runtime_lock() -> None:
