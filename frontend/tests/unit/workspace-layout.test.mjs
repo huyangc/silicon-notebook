@@ -287,6 +287,7 @@ test("workspace capabilities separate notebook type ownership from the global ba
     mirrorHidesNotebookManage: false,
     canWriteNotebook: false,
     canGovernKnowledge: false,
+    canMergeOwnMemory: true,
     canRebuildIndexes: false,
     canGrantAccess: false,
     canConfigureNotebook: false,
@@ -303,6 +304,7 @@ test("workspace capabilities separate notebook type ownership from the global ba
     mirrorHidesNotebookManage: false,
     canWriteNotebook: true,
     canGovernKnowledge: true,
+    canMergeOwnMemory: true,
     canRebuildIndexes: true,
     canGrantAccess: true,
     canConfigureNotebook: true,
@@ -319,6 +321,7 @@ test("workspace capabilities separate notebook type ownership from the global ba
     mirrorHidesNotebookManage: false,
     canWriteNotebook: true,
     canGovernKnowledge: true,
+    canMergeOwnMemory: true,
     canRebuildIndexes: true,
     canGrantAccess: true,
     canConfigureNotebook: true,
@@ -342,6 +345,7 @@ test("group admins get the content-management bits on a notebook that is still `
     mirrorHidesNotebookManage: false,
     canWriteNotebook: true,
     canGovernKnowledge: true,
+    canMergeOwnMemory: true,
     canRebuildIndexes: true,
     canGrantAccess: true,
     // ⚠ 挂载配置(notebook:mount)与链接分享(notebook:configure)**都恒 owner**
@@ -409,6 +413,9 @@ test("镜像逐格映射围栏表:内容写被挡,索引/链接分享/报告照�
   // 挡(True 的那几格):内容写、图谱类型、改名/tier、挂载、删库。
   assert.equal(mirror.canWriteNotebook, false);
   assert.equal(mirror.canGovernKnowledge, false);
+  // 本人记忆合并:镜像上后端不开读权这条路,入口跟着收。
+  assert.equal(mirror.canMergeOwnMemory, false);
+  assert.equal(local.canMergeOwnMemory, true);
   assert.equal(mirror.canManageNotebookSchemas, false);
   assert.equal(mirror.canManageNotebook, false);
   assert.equal(mirror.canMountBases, false);
@@ -441,10 +448,18 @@ test("镜像 × 只读成员:收的那一侧不会被围栏放宽", () => {
   assert.equal(mirror.canMountBases, false);
   assert.equal(mirror.canManageNotebook, false);
   assert.equal(mirror.canDeleteNotebook, false);
+  // 只读成员唯一的一格写能力(合并本人的两条记忆对象)在镜像上被围栏收走。
+  assert.equal(workspaceCapabilities("reader", "user").canMergeOwnMemory, true);
+  assert.equal(mirror.canMergeOwnMemory, false);
   assert.deepEqual(
     mirror,
-    { ...workspaceCapabilities("reader", "user"), mirrored: true, mirrorOrigin: "site-a" },
-    "只读成员这一行除了两个标注位,镜像与本地逐位相同",
+    {
+      ...workspaceCapabilities("reader", "user"),
+      mirrored: true,
+      mirrorOrigin: "site-a",
+      canMergeOwnMemory: false,
+    },
+    "只读成员这一行除了两个标注位与本人记忆合并,镜像与本地逐位相同",
   );
 });
 
