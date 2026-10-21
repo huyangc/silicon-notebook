@@ -328,8 +328,12 @@ def test_two_leavers_merged_into_the_same_shared_objects_do_not_deadlock(
     and X, Dave's into X and Y — opposite orders by source. Each exit takes
     the shared rows' locks in ONE id-ordered statement, so the two queue
     instead of deadlocking; a barrier right after the strip makes the two
-    transactions overlap on every run. (Locking source by source, in source
-    order, deadlocks here: Carol holds Y and waits for X, Dave the reverse.)"""
+    transactions overlap whenever both reach it. (Locking source by source,
+    in source order, deadlocks here: Carol holds Y and waits for X, Dave the
+    reverse.) Since the own-Memory merge round the teardown takes every row
+    it writes up front (``lock_memory_teardown_objects_on``), so the second
+    exit usually queues before its strip and the first one's barrier wait
+    times out; the order and the outcome are the same."""
     shared_x = _fused_doc_object(world, "Shared x notes")
     shared_y = _fused_doc_object(world, "Shared y notes")
     shared_x, shared_y = sorted([shared_x, shared_y])
@@ -358,8 +362,8 @@ def test_two_leavers_merged_into_the_same_shared_objects_do_not_deadlock(
     original = governance_module.GovernanceStore.strip_sources_evidence_on
     stripped_by: dict[str, set[str]] = {}
 
-    def strip_then_meet(connection, notebook_id, source_ids, now):
-        stripped = original(connection, notebook_id, source_ids, now)
+    def strip_then_meet(connection, notebook_id, source_ids, now, **reused):
+        stripped = original(connection, notebook_id, source_ids, now, **reused)
         stripped_by.setdefault(threading.current_thread().name, set()).update(stripped)
         try:
             barrier.wait(timeout=3)
