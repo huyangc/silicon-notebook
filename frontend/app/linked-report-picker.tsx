@@ -49,10 +49,13 @@ function LinkedReportOptions({
   notebookId,
   linkedId,
   onPick,
+  onRetry,
 }: {
   notebookId: string;
   linkedId: string | null;
   onPick: (report: LinkedReportTag) => void;
+  /** 「重试」按下的那一刻:重试键随即被「正在读取」替换,调用方把焦点留在弹出层里。 */
+  onRetry: () => void;
 }) {
   // 「重试」递增它：同一个笔记本再读一次。结果按这把钥匙认领，旧请求的结果不会盖住新的。
   const [attempt, setAttempt] = useState(0);
@@ -93,7 +96,14 @@ function LinkedReportOptions({
     return (
       <div className="linked-report-picker-state failed" role="status">
         <span>暂时无法读取报告列表，请重试</span>
-        <button type="button" className="linked-report-picker-retry" onClick={() => setAttempt((value) => value + 1)}>
+        <button
+          type="button"
+          className="linked-report-picker-retry"
+          onClick={() => {
+            onRetry();
+            setAttempt((value) => value + 1);
+          }}
+        >
           重试
         </button>
       </div>
@@ -143,7 +153,7 @@ function LinkedReportOptions({
 /**
  * 「关联报告」选择器：一颗按钮 + 向上弹出的报告清单。选中即挂标签并收起；当前已挂的那份
  * 标为已选。`disabled`（提交中、问题理解中、审阅卡在场、会话加载中）时按钮禁用，已打开的
- * 弹出层随之收起。
+ * 弹出层随之收起。选中后弹出层卸载，`onSelect` 的调用方负责把焦点送到下一处（问答里是输入框）。
  */
 export function LinkedReportPicker({
   notebookId,
@@ -159,6 +169,7 @@ export function LinkedReportPicker({
   // 记下是为哪个笔记本打开的：换了笔记本，旧的弹出层（连同它的清单）当场作废。
   const [openFor, setOpenFor] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
   // null = 用 CSS 的默认位(右对齐控件);量出越界才写具体 left。
   const [popoverLeft, setPopoverLeft] = useState<number | null>(null);
@@ -196,7 +207,9 @@ export function LinkedReportPicker({
     return () => window.removeEventListener("resize", sync);
   }, [open]);
 
-  // 点外部 / Esc 收起（与 effort-picker 同一写法）。
+  // 点外部 / Esc 收起（与 effort-picker 同一写法）。焦点规则:持焦点的节点随弹出层卸载时,
+  // 焦点不能掉到 body——在弹出层里按 Esc 收起,焦点回到触发按钮;点外部收起不动焦点(用户
+  // 已经点在别处);选中报告后焦点去哪由调用方决定(问答里是送进输入框,见 page.tsx)。
   useEffect(() => {
     if (!open) return;
     function handlePointerDown(event: PointerEvent) {
@@ -205,7 +218,11 @@ export function LinkedReportPicker({
       setOpenFor(null);
     }
     function handleKeyDown(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape") setOpenFor(null);
+      if (event.key !== "Escape") return;
+      const focusInside = document.activeElement instanceof Node
+        && Boolean(rootRef.current?.contains(document.activeElement));
+      setOpenFor(null);
+      if (focusInside) triggerRef.current?.focus();
     }
     window.addEventListener("pointerdown", handlePointerDown);
     window.addEventListener("keydown", handleKeyDown);
@@ -218,6 +235,7 @@ export function LinkedReportPicker({
   return (
     <div className="linked-report-picker" ref={rootRef}>
       <button
+        ref={triggerRef}
         type="button"
         className={open ? "linked-report-picker-chip open" : "linked-report-picker-chip"}
         disabled={disabled}
@@ -233,6 +251,8 @@ export function LinkedReportPicker({
           className="linked-report-picker-popover"
           role="dialog"
           aria-label="选择关联报告"
+          // 可编程聚焦(不进 Tab 序):「重试」键被替换时焦点停在这里,而不是掉到 body。
+          tabIndex={-1}
           ref={popoverRef}
           style={popoverLeft === null ? undefined : { left: popoverLeft, right: "auto" }}
         >
@@ -248,6 +268,7 @@ export function LinkedReportPicker({
               setOpenFor(null);
               onSelect(report);
             }}
+            onRetry={() => popoverRef.current?.focus()}
           />
         </div>
       )}

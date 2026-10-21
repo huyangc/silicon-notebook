@@ -6148,9 +6148,10 @@ export default function Home() {
                   disabled={askBlocked || sessionLoading || Boolean(askIntentReview)}
                   submitBlocked={askQuestionOverLimit !== null}
                   focusSignal={askComposerFocusSignal}
-                  // 「关联报告」标签:挂着报告、或只剩一句就地说明(报告已不存在而被移除)时出现。
+                  // 「关联报告」标签:挂着报告、或只剩一句就地说明(报告已不存在而被移除)时出现——
+                  // 判据只在 LinkedReportChip 里(两样都没有时它渲染 null),这里不另写一份条件。
                   // 两种界面模式都挂——自动模式也要能移除/更换标签(计划 D16)。
-                  attachment={askSession.linkedReport || askSession.linkedReportNote ? (
+                  attachment={(
                     <LinkedReportChip
                       report={askSession.linkedReport}
                       verdict={askSession.linkedReportCheck}
@@ -6161,7 +6162,7 @@ export default function Home() {
                         setAskComposerFocusSignal((value) => value + 1);
                       }}
                     />
-                  ) : null}
+                  )}
                 >
                   {/* 与来源页签工具条同一句话的第二处显示 —— 共用 retrievalScopeText，
                       两处不一致在结构上就不可能发生。 */}
@@ -6173,7 +6174,11 @@ export default function Home() {
                       notebookId={currentNotebookId}
                       linked={askSession.linkedReport}
                       disabled={askLinkedReportLocked}
-                      onSelect={askSession.linkReport}
+                      // 选中即挂上,焦点送进输入框(弹出层随之卸载,焦点不能落在 body)。
+                      onSelect={(report) => {
+                        askSession.linkReport(report);
+                        setAskComposerFocusSignal((value) => value + 1);
+                      }}
                     />
                   )}
                   {/* 超限提示优先于引号回执:它是此刻唯一挡着提交的东西。

@@ -133,26 +133,25 @@ test("「就此追问」先取报告的检索范围、再开会话切页签,最�
 });
 
 
-test("AskComposer 的 attachment 是 askSession 关联报告视图上的标签,不是常量", () => {
+test("AskComposer 的 attachment 就是 askSession 关联报告视图上的标签,不另加条件", () => {
   const composers = jsxNodes("AskComposer");
   assert.equal(composers.length, 1, "page.tsx 应当恰好挂一处 AskComposer");
-  const attachment = attributeExpression(composers[0], "attachment");
+  let attachment = attributeExpression(composers[0], "attachment");
   assert.ok(attachment, "AskComposer 没有 attachment:关联报告标签无处显示");
+  while (ts.isParenthesizedExpression(attachment)) attachment = attachment.expression;
+  // 「什么时候出现」只在 LinkedReportChip 里判(报告与说明都为空时它渲染 null)。page 再包
+  // 一层条件就是第二份判据:写成只看 note,用选择器挂上的报告就不显示、也摘不掉,提交却
+  // 照样带着它——而条件表达式里 chip 自己的 report 属性会让文本匹配恒真,所以这里要求
+  // attachment **就是** chip 元素本身。
+  const chip = ts.isJsxSelfClosingElement(attachment)
+    ? attachment
+    : ts.isJsxElement(attachment) ? attachment.openingElement : null;
   assert.ok(
-    attachment.kind !== ts.SyntaxKind.NullKeyword,
-    "AskComposer 的 attachment 写成了常量 null",
+    chip && chip.tagName.getText(page) === "LinkedReportChip",
+    "AskComposer 的 attachment 不是直接的 <LinkedReportChip>(包了条件、写成常量或换了元素)",
   );
-  assert.match(
-    attachment.getText(page),
-    /\baskSession\.linkedReport\b/,
-    "attachment 的出现条件没有读 askSession.linkedReport",
-  );
-  const chips = jsxNodes("LinkedReportChip");
-  assert.equal(chips.length, 1, "page.tsx 应当恰好挂一处 LinkedReportChip");
-  assert.ok(
-    ancestors(chips[0]).includes(attachment),
-    "LinkedReportChip 不在 AskComposer 的 attachment 里",
-  );
+  assert.equal(jsxNodes("LinkedReportChip").length, 1, "page.tsx 应当恰好挂一处 LinkedReportChip");
+  const chips = [chip];
   const bound = (name) => attributeExpression(chips[0], name)?.getText(page);
   assert.equal(bound("report"), "askSession.linkedReport");
   assert.equal(bound("verdict"), "askSession.linkedReportCheck");
@@ -190,7 +189,12 @@ test("「关联报告」选择器挂在 AskComposer 里,两种界面模式都挂
   }
   const bound = (name) => attributeExpression(pickers[0], name)?.getText(page);
   assert.equal(bound("linked"), "askSession.linkedReport");
-  assert.equal(bound("onSelect"), "askSession.linkReport");
+  const onSelect = attributeExpression(pickers[0], "onSelect");
+  assert.ok(onSelect, "LinkedReportPicker 没有 onSelect");
+  const selectCalls = orderedCalls(onSelect).map((call) => call.target);
+  assert.ok(selectCalls.includes("askSession.linkReport"), "选择器选中后没有调 askSession.linkReport");
+  // 选中后弹出层卸载,焦点要送进输入框,不能落在 body。
+  assert.ok(selectCalls.includes("setAskComposerFocusSignal"), "选择器选中后没有把焦点送进输入框");
 });
 
 
