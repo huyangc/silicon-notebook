@@ -33,7 +33,7 @@ import time
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import (
-    Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence,
+    Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence,
     TYPE_CHECKING,
 )
 
@@ -61,7 +61,6 @@ from app.domain.report_followup import (
     RESTORED_KIND_ELEMENT,
     RESTORED_KIND_KG,
     RESTORED_KIND_MEMORY,
-    RESTORED_KINDS,
     LinkedReportNotFound,
     LinkedReportNotReady,
     ReportFollowup,
@@ -101,7 +100,6 @@ from app.models.ask import (
     ExternalEvidenceSection,
     AskRequest,
     AskResponse,
-    LinkedReportReceipt,
     stored_ask_question,
     Citation,
     ConversationBulkDeleteResult,
@@ -142,9 +140,13 @@ from app.services.federated_run import (
 )
 # Leaves: the retrieval-only output's context splitter and anchor-sourced item
 # builder, and the boundary recorder every context assembler writes through.
-from app.services.ask_evidence import _EvidenceAssemblyClient, build_ask_evidence, kind_for_key
-from app.services.context_spans import Glue, clip, concat, joined, recording_spans
-from app.services.evidence_context import CitationLookups, anchor_image_targets
+from app.services.ask_evidence import _EvidenceAssemblyClient, build_ask_evidence
+from app.services.context_spans import Glue, clip, concat, recording_spans
+from app.services.evidence_context import (
+    CitationLookups,
+    KnowledgeContextOutcome,
+    anchor_image_targets,
+)
 from app.services.model_work import MalformedModelResponse, ModelNotConfiguredError
 from app.core.model_values import as_text_list
 
@@ -174,14 +176,20 @@ from app.services.prompts import (
     answer_prompt,
     followup_rewrite_prompt,
 )
+from app.services.report_evidence import (
+    ReportCards,
+    ReportEvidencePartition,
+    ReportTurn,
+    assemble_report_evidence,
+    citation_identity,
+    report_readable,
+    with_report_selected,
+)
 from app.services.report_followup import (
-    ReportAdmissionCounts,
     ReportFollowupReaders,
     current_report_followup,
     followup_outline,
-    followup_receipt,
     load_linked_report,
-    render_report_block,
     report_digest,
     report_followup_context,
     report_link_verdict,
@@ -333,123 +341,6 @@ class _OverviewPrep:
     catalog: Any
     prepared: Any
     notice: str
-
-
-def _report_readable(followup: "ReportFollowup | None") -> bool:
-    """Whether this run reads its attached report into the synthesis: the
-    verdict lets it AND the run itself parsed the body and read the cited
-    items back (``AskService._read_report_followup``; a followup that carries
-    only the meta digest is never rendered). Reads nothing but the value."""
-    return (
-        followup is not None and followup.verdict.readable
-        and followup.digest is not None and followup.restored is not None
-    )
-
-
-class _ReportPartition(NamedTuple):
-    """``AskService._append_report_evidence``'s result: the synthesis context
-    with the attached report's evidence partition appended (plan D1, §2.7).
-
-    ``key_map`` maps each report key of the selected text whose item is in the
-    prompt to the key that item has there -- its own partition key, or the key
-    of the same object this turn retrieved itself; ``admitted_keys`` are those
-    turn keys. ``counts`` is what the receipt reports, per report key:
-    ``restored`` (mapped) and ``over_budget`` (read back, but left out by the
-    partition budget or its native key band). ``selected_by_kind`` counts the
-    restored objects per evidence kind the partition tried to render (not the
-    ones it reused): the retrieval-only output's "selected" side."""
-
-    context_block: str
-    id_map: dict
-    key_map: Mapping[str, str]
-    admitted_keys: frozenset
-    counts: ReportAdmissionCounts
-    selected_by_kind: Mapping[str, int]
-
-
-@dataclass
-class _ReportTurn:
-    """The attached report as one turn's synthesis uses it (plan T7/T8).
-
-    Built by ``AskService._report_prompt_parts`` once the turn's query is
-    known (the sections are selected for it); the context assembler records
-    the evidence partition it appended (``admit``) and the answer helper
-    renders the report block from that partition's ``key_map``
-    (``enter_prompt``), which is also what makes the receipt ``read``
-    (``receipt``). Mutable on purpose: the answer helpers run inside
-    ``_answer_with_retry`` and hand back only the answer, so the assembly's
-    outcome travels on this object -- each attempt assembles the same
-    partition and overwrites the same fields."""
-
-    followup: ReportFollowup
-    selection: SectionSelection
-    partition: Optional[_ReportPartition] = None
-    prompted: bool = False
-
-    def admit(self, partition: _ReportPartition) -> None:
-        self.partition = partition
-
-    @property
-    def key_map(self) -> Mapping[str, str]:
-        return self.partition.key_map if self.partition is not None else {}
-
-    @property
-    def admitted_keys(self) -> frozenset:
-        return self.partition.admitted_keys if self.partition is not None else frozenset()
-
-    def enter_prompt(self) -> str:
-        """The report block for the answer prompt being built, its markers
-        rewritten through the partition's ``key_map``; records that the block
-        entered an answer prompt."""
-        self.prompted = True
-        return render_report_block(self.followup.digest, self.selection, self.key_map)
-
-    def receipt(self, *, read: Optional[bool] = None) -> LinkedReportReceipt:
-        """The turn's receipt: ``read`` when the block entered the answer
-        prompt (``read`` overrides it -- the retrieval-only output, which
-        stands in for that prompt, passes True), else ``skipped`` /
-        ``no_synthesis`` (``followup_receipt``)."""
-        counts = (
-            self.partition.counts if self.partition is not None
-            else ReportAdmissionCounts()
-        )
-        return followup_receipt(
-            self.followup, selection=self.selection, admission_counts=counts,
-            read=self.prompted if read is None else read,
-        )
-
-
-class _ReportCards(NamedTuple):
-    """``AskService._report_citations_and_keys``'s result: the citation cards
-    of the restored items the answer bound (deduplicated against the turn's
-    own cards), the bound restored passages (whose element ids join the
-    anchor image candidates) and the bound keys for ``classify_evidence``'s
-    deterministic door. Empty without a report."""
-
-    citations: tuple = ()
-    chunks: tuple = ()
-    exact_keys: frozenset = frozenset()
-
-
-def _with_report_selected(selected: Mapping[str, int], report: "_ReportTurn | None") -> dict:
-    """``selected`` (``_recount_selected``'s per-kind input) plus the objects
-    the report partition tried to render, each under its own kind."""
-    merged = dict(selected)
-    if report is not None and report.partition is not None:
-        for kind, number in report.partition.selected_by_kind.items():
-            merged[kind] = merged.get(kind, 0) + int(number)
-    return merged
-
-
-def _citation_identity(citation: Citation) -> tuple:
-    """What makes two citation cards the same card: the Memory entry, else
-    the (source, element) pair; a snapshot card naming neither is told apart
-    by its label and quote."""
-    if citation.memory_id:
-        return ("memory", citation.memory_id)
-    if citation.source_id or citation.element_id:
-        return ("element", citation.source_id, citation.element_id)
-    return ("snapshot", citation.label, citation.quoted_span)
 
 
 def _merged_section_baseline(rows: Sequence[Mapping[str, Any]]) -> dict:
@@ -1180,7 +1071,6 @@ class AskService:
         RESTORED_KIND_MEMORY: (_MEMORY_KEY_BASE + 1, _ELEMENT_KEY_BASE - 1),
         RESTORED_KIND_ELEMENT: (_ELEMENT_KEY_BASE + 1, _COLLECTION_KEY_BASE - 1),
     }
-    _REPORT_EVIDENCE_HEADING = "Evidence the attached report cited"
 
     def __init__(
         self,
@@ -3283,53 +3173,47 @@ class AskService:
 
     def _report_prompt_parts(
         self, followup: "ReportFollowup | None", query: str,
-    ) -> "_ReportTurn | None":
+    ) -> "ReportTurn | None":
         """The attached report as this turn's synthesis will use it, or None
         when the turn does not read it (no report, a verdict that keeps it
-        out, or a followup without the parsed body -- ``_report_readable``).
+        out, or a followup without the parsed body -- ``report_readable``).
 
         Selects the sections for ``query`` within
-        ``ask_report_context_max_chars`` (``select_report_sections``, D12):
-        the chunk engine passes its rewritten retrieval query, the reasoning
-        engine its research question. The block itself is rendered only once
-        the evidence partition has mapped the report's keys
-        (``_ReportTurn.enter_prompt``).
+        ``ask_report_context_max_chars`` (``select_report_sections``, D12),
+        ranking them by relevance to it -- the same ranking orders the
+        evidence partition: the chunk engine passes its rewritten retrieval
+        query, the reasoning engine its research question. The block itself
+        is rendered only once the evidence partition has mapped the report's
+        keys (``ReportTurn.enter_prompt``).
 
         ``ask_chunk`` (a capped hot function) grew by three statements for
         the report, 156 -> 159 lines in ``architecture_boundary_baseline``:
         this call, ``_report_citations_and_keys`` and extending its cards; the
         rest of the wiring rides on lines it already had."""
-        if not _report_readable(followup):
+        if not report_readable(followup):
             return None
-        return _ReportTurn(followup, select_report_sections(
+        return ReportTurn(followup, select_report_sections(
             followup.digest, query, self.settings.ask_report_context_max_chars,
         ))
-
-    @staticmethod
-    def _report_band_start(id_map: Mapping[str, Any], low: int, high: int) -> int:
-        """The first free key number of the band ``[low, high]``: one past the
-        highest key ``id_map`` already holds in it (``_external_key_offset``'s
-        rule), ``low`` when it holds none."""
-        taken = [
-            int(match.group(1)) for key in id_map
-            if (match := re.fullmatch(r"k(\d+)", str(key))) is not None
-            and low <= int(match.group(1)) <= high
-        ]
-        return max(taken, default=low - 1) + 1
 
     def _render_report_kind(
         self, kind: str, items: Sequence[Any], *, notebook_id: str,
         id_offset: int, budget_chars: int,
+        outcome: "KnowledgeContextOutcome | None" = None,
+        lookups: "CitationLookups | None" = None,
     ) -> tuple[str, dict]:
         """One kind of restored item through its native renderer -- the same
         lines, id_map entries and ``object_type`` the turn's own retrieval of
         that object would get (D1), keys from ``id_offset + 1``, within
-        ``budget_chars``. Memory's renderer has its own per-entry and total
-        caps but no budget: the longest prefix of ``items`` that fits."""
+        ``budget_chars``. Passages share ``lookups`` (one partition's batch
+        reads, reused by its citation cards); knowledge objects report what
+        they folded or withheld into ``outcome``. Memory's renderer has its
+        own per-entry and total caps but no budget: the longest prefix of
+        ``items`` that fits."""
         if kind == RESTORED_KIND_CHUNK:
             return self._chunk_answer_context(
                 list(items), budget_chars=budget_chars, notebook_id=notebook_id,
-                id_offset=id_offset,
+                id_offset=id_offset, lookup_sink=lookups,
             )
         if kind == RESTORED_KIND_ELEMENT:
             return self.evidence_context.element_context(
@@ -3337,9 +3221,9 @@ class AskService:
                 budget_chars=budget_chars,
             )
         if kind == RESTORED_KIND_KG:
-            return self._answer_context(
+            return self.evidence_context.knowledge_context(
                 notebook_id, list(items), id_offset=id_offset,
-                budget_chars=budget_chars,
+                budget_chars=budget_chars, outcome=outcome,
             )
         for count in range(len(items), 0, -1):
             block, block_map = self.memory_retriever.context(
@@ -3358,146 +3242,45 @@ class AskService:
         *,
         notebook_id: str,
         key_offset: int = 0,
-    ) -> _ReportPartition:
-        """Append the attached report's evidence partition (plan D1, §2.7):
-        the items the report cited in the text this turn reads, as the
-        notebook holds them now, rendered as ordinary evidence.
-
-        Only the report keys of the selected text (``selection.keys``, in
-        first-appearance order) are wanted; the run already read every cited
-        item back (``followup.restored``, judged under the run's ceiling by
-        the retrieval layer). Each wanted object:
-
-        * already in ``id_map`` as the same kind and object (``kind_for_key``
-          over the entries the turn retrieved itself) -> not rendered again;
-          its report keys map to that key;
-        * otherwise rendered by its kind's native renderer
-          (``_render_report_kind``) in that kind's native band
-          (``_REPORT_KEY_BANDS``, continuing after the band's highest key in
-          ``id_map``, plus ``key_offset``), kinds in order of first
-          appearance; a passage whose content repeats an earlier restored
-          passage of the same source shares that passage's key.
-
-        The partition has its own budget, ``ask_report_evidence_budget_chars``
-        (heading included), apart from the turn's retrieval budget: it sits
-        after everything the caller already budgeted, clipped and refined,
-        and before external evidence, and the turn's retrieval can never
-        crowd it out. A wanted item it cannot fit -- budget spent, or its
-        band full -- is counted ``over_budget`` per report key; a key whose
-        item was not read back (gone, outside the ceiling, a skipped type) is
-        counted by neither. One heading, ``_REPORT_EVIDENCE_HEADING``, through
-        ``_bounded_context_append`` (so the retrieval-only output's spans
-        record it as glue). Nothing wanted or nothing fitting: the context
-        and ``id_map`` come back as they were.
+    ) -> ReportEvidencePartition:
+        """Append the attached report's evidence partition (plan D1, §2.7) --
+        ``report_evidence.assemble_report_evidence`` (the rules: relevance
+        order, reuse, native bands, own budget, not-loaded keys) with this
+        service's seats: the native renderers (``_render_report_kind``), the
+        partition budget ``ask_report_evidence_budget_chars``, the key bands
+        (``_REPORT_KEY_BANDS``) and ``_bounded_context_append``.
 
         Shared by the chunk engine (``_chunk_synthesis_context``) and the
-        reasoning engine's assembly."""
-        restored = followup.restored or RestoredReportEvidence()
-        object_of = {
-            key: obj for obj, keys in restored.key_by_object.items() for key in keys
-        }
-        values: dict[str, dict[str, Any]] = {
-            RESTORED_KIND_CHUNK: {item.chunk_id: item for item in restored.chunks},
-            RESTORED_KIND_ELEMENT: {item.element_id: item for item in restored.elements},
-            RESTORED_KIND_KG: {item.object_id: item for item in restored.knowledge},
-            RESTORED_KIND_MEMORY: {item.memory_id: item for item in restored.memory},
-        }
-        wanted: dict[tuple[str, str], list[str]] = {}
-        for key in selection.keys:
-            obj = object_of.get(key)
-            if obj is not None and obj[1] in values.get(obj[0], {}):
-                wanted.setdefault(obj, []).append(key)
-        retrieved: dict[tuple[str, str], str] = {}
-        for key, entry in id_map.items():
-            kind = kind_for_key(key, id_map)
-            if kind in RESTORED_KINDS:
-                retrieved.setdefault((kind, str(entry.get("object_id") or "")), key)
-        key_map: dict[str, str] = {}
-        pending: dict[str, list[tuple[str, str]]] = {}
-        alias: dict[tuple[str, str], tuple[str, str]] = {}
-        contents: dict[tuple[str, str], tuple[str, str]] = {}
-        for obj, keys in wanted.items():
-            if obj in retrieved:
-                key_map.update(dict.fromkeys(keys, retrieved[obj]))
-                continue
-            if obj[0] == RESTORED_KIND_CHUNK:
-                first = contents.setdefault(
-                    source_chunk_content_key(values[obj[0]][obj[1]]), obj,
-                )
-                if first != obj:
-                    alias[obj] = first
-                    continue
-            pending.setdefault(obj[0], []).append(obj)
-        prefix = ("\n\n" if context_block else "") + f"[{self._REPORT_EVIDENCE_HEADING}]\n"
-        room = self.settings.ask_report_evidence_budget_chars - len(prefix)
-        parts: list[str] = []
-        block_map: dict = {}
-        rendered: dict[tuple[str, str], str] = {}
-        used = 0
-        for kind, objects in pending.items():
-            low, high = self._REPORT_KEY_BANDS[kind]
-            start = self._report_band_start(id_map, low + key_offset, high + key_offset)
-            items = [values[kind][object_id] for _kind, object_id in objects]
-            items = items[:max(0, high + key_offset - start + 1)]
-            remaining = room - used - (1 if parts else 0)
-            if not items or remaining <= 0:
-                continue
-            block, kind_map = self._render_report_kind(
-                kind, items, notebook_id=notebook_id, id_offset=start - 1,
-                budget_chars=remaining,
-            )
-            if not kind_map:
-                continue
-            used += (1 if parts else 0) + len(block)
-            parts.append(block)
-            block_map.update(kind_map)
-            for key, entry in kind_map.items():
-                rendered[(kind, str(entry.get("object_id") or ""))] = key
-        merged = id_map
-        if parts:
-            partition = joined(parts, "\n")
-            context_block, merged = self._bounded_context_append(
-                context_block, id_map, partition, block_map,
-                # The partition budget is already spent by the renderers;
-                # this bound only keeps the append from cutting it again.
-                budget_chars=len(context_block) + len(prefix) + len(partition),
-                heading=self._REPORT_EVIDENCE_HEADING,
-            )
-        over_budget = 0
-        for obj, keys in wanted.items():
-            if keys[0] in key_map:
-                continue
-            target = rendered.get(alias.get(obj, obj))
-            if target is not None and target in merged:
-                key_map.update(dict.fromkeys(keys, target))
-            else:
-                over_budget += len(keys)
-        return _ReportPartition(
-            context_block=context_block,
-            id_map=merged,
-            key_map=key_map,
-            admitted_keys=frozenset(key_map.values()),
-            counts=ReportAdmissionCounts(restored=len(key_map), over_budget=over_budget),
-            selected_by_kind={kind: len(objects) for kind, objects in pending.items()},
+        reasoning engine's assembly (pass its section ``key_offset``)."""
+
+        def render(kind: str, items: Sequence[Any], **kwargs: Any) -> tuple[str, dict]:
+            return self._render_report_kind(kind, items, notebook_id=notebook_id, **kwargs)
+
+        return assemble_report_evidence(
+            context_block, id_map, followup, selection,
+            budget_chars=self.settings.ask_report_evidence_budget_chars,
+            bands=self._REPORT_KEY_BANDS, render=render,
+            append=self._bounded_context_append, key_offset=key_offset,
         )
 
     def _report_citations_and_keys(
         self,
-        report: "_ReportTurn | None",
+        report: "ReportTurn | None",
         anchors: Sequence[AnswerAnchor],
         notebook_id: str,
         *,
         existing: Iterable[Citation] = (),
-    ) -> _ReportCards:
+    ) -> ReportCards:
         """The answer's cards and grounding keys for the report evidence it
         bound (plan §2.7).
 
         Only anchors on a key the partition admitted count. Their restored
         objects get cards from the native builders -- passages
-        (``chunk_citations``, anchor order), elements (``element_citations``),
-        knowledge objects (``citations_from`` over the bound objects only),
-        Memory (``_memory_citations``) -- minus any card the turn already has
-        (``existing``, by ``_citation_identity``). The bound keys go to
+        (``chunk_citations``, anchor order, reusing the partition's batch
+        reads), elements (``element_citations``), knowledge objects
+        (``citations_from`` over the bound objects only), Memory
+        (``_memory_citations``) -- minus any card the turn already has
+        (``existing``, by ``citation_identity``). The bound keys go to
         ``classify_evidence(exact_evidence_keys=...)``: a restored item has no
         retrieval score of its own, and the report's citation is
         deterministic evidence the same way an external item is
@@ -3505,10 +3288,10 @@ class AskService:
         anchor image candidates (``anchor_image_targets``). Reads nothing
         when no restored item is bound."""
         if report is None or not report.admitted_keys:
-            return _ReportCards()
+            return ReportCards()
         bound = [anchor for anchor in anchors if anchor.key in report.admitted_keys]
         if not bound:
-            return _ReportCards()
+            return ReportCards()
         restored = report.followup.restored or RestoredReportEvidence()
 
         def bound_ids(*types: str, other: bool = False) -> set:
@@ -3529,6 +3312,7 @@ class AskService:
         if chunks:
             cards.extend(card for card, _ids in self.evidence_context.chunk_citations(
                 chunks, notebook_id=notebook_id, anchors=bound,
+                lookups=report.partition.lookups,
             ))
         if elements:
             cards.extend(self.evidence_context.element_citations(
@@ -3542,14 +3326,14 @@ class AskService:
             ))
         if memory:
             cards.extend(self._memory_citations(bound, memory))
-        seen = {_citation_identity(card) for card in existing}
+        seen = {citation_identity(card) for card in existing}
         fresh: list[Citation] = []
         for card in cards:
-            identity = _citation_identity(card)
+            identity = citation_identity(card)
             if identity not in seen:
                 seen.add(identity)
                 fresh.append(card)
-        return _ReportCards(
+        return ReportCards(
             citations=tuple(fresh), chunks=tuple(chunks),
             exact_keys=frozenset(anchor.key for anchor in bound),
         )
@@ -4122,7 +3906,7 @@ class AskService:
 
     def _chunk_synthesis_context(
         self, chunks, kg_block, kg_id_map, memory_hits, *,
-        overlay_on: bool, notebook_id: str, report: "_ReportTurn | None" = None,
+        overlay_on: bool, notebook_id: str, report: "ReportTurn | None" = None,
     ) -> tuple:
         """The chunk engine's synthesis context: ``(context_block, id_map,
         budget_chars)`` exactly as ``_answer_chunks`` (``overlay_on=False``)
@@ -4137,7 +3921,7 @@ class AskService:
         ``report`` (the turn reads an attached report, ``_report_prompt_parts``):
         its evidence partition follows the Memory block
         (``_append_report_evidence``, own budget) and is recorded on it
-        (``_ReportTurn.admit``); ``budget_chars`` then adds what the partition
+        (``ReportTurn.admit``); ``budget_chars`` then adds what the partition
         actually took, so the context still never exceeds it. None: as before,
         byte for byte.
         """
@@ -4193,7 +3977,7 @@ class AskService:
         llm_client=None,
         baseline_sink: dict | None = None,
         style_block: str = "",
-        report: "_ReportTurn | None" = None,
+        report: "ReportTurn | None" = None,
     ) -> tuple:
         """长上下文综合:把 MMR 精选的 chunk 原文喂给答案 LLM。返回
         (answer, llm_grounded, anchors)。复用 answer_prompt 的 [k] 标注协议。
@@ -4248,7 +4032,7 @@ class AskService:
         llm_client=None,
         baseline_sink: dict | None = None,
         style_block: str = "",
-        report: "_ReportTurn | None" = None,
+        report: "ReportTurn | None" = None,
     ) -> tuple:
         """mix 长上下文综合:chunk 段(k1..kN)+ KG 段(k1001+),统一 id_map。
         chunk 段不再二次预算(选择阶段已 token 预算),故 budget_chars 给极大值。
@@ -5191,7 +4975,7 @@ class AskService:
             ceiling_binds_for_run, document_source_admitted,
         )
 
-        if _report_readable(current_report_followup()):
+        if report_readable(current_report_followup()):
             return None
         intent = overview_intent(payload.question)
         if intent is None or self.collection_enumeration is None:
@@ -5797,7 +5581,7 @@ class AskService:
                     budget_chars=budget_chars,
                 )
                 # The report partition's objects count under their own kinds.
-                _recount_selected(evidence, _with_report_selected({
+                _recount_selected(evidence, with_report_selected({
                     "chunk": len({c.chunk_id for c in r.selected}),
                     **({"kg": len(r.kg_id_map)} if r.kg_id_map else {}),
                     **({"memory": len(memory_hits)} if memory_hits else {}),

@@ -23,6 +23,8 @@ from app.domain.report_followup import (
     REASON_REPORT_UNAVAILABLE,
     REASON_SCOPE_LIBRARIES,
     REASON_SCOPE_SOURCES,
+    REPORT_BLOCK_END,
+    REPORT_EVIDENCE_NOT_LOADED,
     LinkedReportNotFound,
     LinkedReportNotReady,
     ReportDigest,
@@ -823,7 +825,69 @@ def test_unread_sections_show_a_placeholder_and_the_block_rewrites_markers():
         "## 1. 背景", "背景正文" * 40 + " [k4001]",
         "## 2. 温度系数", NOT_LOADED,
         "## 3. 修调", NOT_LOADED,
+        REPORT_BLOCK_END,
     ]
+
+
+def test_markers_whose_evidence_was_not_loaded_say_so_instead_of_vanishing():
+    """A key whose item was read back but left out by the evidence budget is
+    not a deleted claim: its marker shows ``REPORT_EVIDENCE_NOT_LOADED``,
+    after any mapped keys of the same marker; a key that is neither mapped
+    nor not-loaded (its item is gone) is still removed."""
+    key_map = {"k1": "k11"}
+    not_loaded = {"k2"}
+    cases = {
+        "甲 [k2]。": f"甲 {REPORT_EVIDENCE_NOT_LOADED}。",
+        "乙 [k1, k2]。": f"乙 [k11]{REPORT_EVIDENCE_NOT_LOADED}。",
+        "丙 [k2, k3]。": f"丙 {REPORT_EVIDENCE_NOT_LOADED}。",
+        "丁 [k3]。": "丁 。",
+        "戊 [ k2 ]。": "戊 。",
+    }
+    for text, expected in cases.items():
+        assert rewrite_report_markers(text, key_map, not_loaded=not_loaded) == expected
+    digest = _report(sections=(_section(1, "背景", "背景正文 [k3]，另见 [k4]。"),))
+    selection = select_report_sections(digest, "", 12000)
+    block = render_report_block(digest, selection, {"k3": "k2"}, not_loaded={"k4"})
+    assert f"背景正文 [k2]，另见 {REPORT_EVIDENCE_NOT_LOADED}。" in block
+
+
+def test_the_budget_holds_the_widest_rewrite_including_the_not_loaded_mark():
+    """Selection measures each marker at its widest rewrite -- all but one key
+    mapped to the widest key and the last one not loaded -- so the block
+    stays within budget whatever the partition admits."""
+    body = "正文 [k1, k2, k3]。" * 30
+    digest = _report(sections=(_section(1, "背景", body), _section(2, "其他", body)))
+    budget = len(render_report_block(digest, SectionSelection(summary=digest.summary), {})) + 1500
+    selection = select_report_sections(digest, "背景", budget)
+    assert selection.read_indices == (1,)
+    widest = {"k1": "k99999", "k2": "k99999"}
+    block = render_report_block(digest, selection, widest, not_loaded={"k3"})
+    assert len(block) <= budget
+
+
+def test_evidence_keys_follow_section_relevance_even_when_everything_fits():
+    """Every body fits, so every section is read in report order -- but the
+    evidence partition admits the cited items of the section the query is
+    about first, each section's keys in first-appearance order."""
+    digest = _report()
+    selection = select_report_sections(digest, "修调", 12000)
+    assert selection.read_indices == (1, 2, 3)
+    assert selection.keys == ("k3", "k4", "k5")
+    assert selection.evidence_keys[0] == "k5"
+    assert sorted(selection.evidence_keys) == ["k3", "k4", "k5"]
+    over = select_report_sections(digest, "温度系数从哪里来", _budget_for(digest, 1))
+    assert over.evidence_keys == over.keys == ("k4",)
+    assert SectionSelection(keys=("k1", "k2")).evidence_keys == ("k1", "k2")
+    with pytest.raises(ValueError):
+        SectionSelection(keys=("k1",), evidence_keys=("k2",))
+
+
+def test_the_block_is_bounded_by_its_header_and_end_line():
+    digest = _report()
+    block = render_report_block(digest, select_report_sections(digest, "", 12000), {})
+    assert block.startswith(REPORT_BLOCK_HEADER + "\n")
+    assert block.endswith("\n" + REPORT_BLOCK_END)
+    assert block.count(REPORT_BLOCK_END) == 1
 
 
 def test_outline_lines():
@@ -838,6 +902,10 @@ def test_outline_lines():
     assert report_outline_text(digest, False) == unreadable
     assert report_outline_text("带隙基准", False) == unreadable
     assert report_outline_text("带隙基准", True) == "Attached report: 《带隙基准》"
+    # No title to show (the report is gone or could not be read): no empty brackets.
+    assert report_outline_text("", False) == (
+        "Attached report (it cannot be read in this turn; answer from the notebook evidence)"
+    )
 
 
 # ---------------------------------------------------------------------------

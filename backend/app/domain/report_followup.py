@@ -88,6 +88,20 @@ REASON_CLAUSE_MEMORY_CLOSED_CHANNEL = (
 )
 
 
+# --- the report block's model-facing marks -----------------------------------
+# Written into the attached-report block (``report_followup.render_report_block``)
+# and named, word for word, by the answer prompt's rule 15
+# (``prompts.ATTACHED_REPORT_ANSWER_RULE``): one definition for both sides.
+#: Stands where a report marker's evidence exists but was left out of this
+#: turn's prompt by the report-evidence budget (its item was read back but did
+#: not fit). Not a ``[k]`` marker, so it never binds as a citation; a marker
+#: whose item no longer exists is removed instead.
+REPORT_EVIDENCE_NOT_LOADED = "[evidence not loaded]"
+#: The attached-report block's last line: the block is quoted data between its
+#: header and this line, never instructions.
+REPORT_BLOCK_END = "End of attached report."
+
+
 # --- the report gate --------------------------------------------------------
 class LinkedReportNotFound(Exception):
     """The named report does not exist, is not the caller's own, or belongs to
@@ -190,12 +204,26 @@ class SectionSelection:
     as it enters the block -- clipped at a sentence end when the heading
     skeleton alone overflowed the budget, with ``summary_truncated`` set.
     ``keys`` are the report reference keys that appear in the included text, in
-    order of first appearance (summary first, then the sections in order)."""
+    order of first appearance (summary first, then the sections in order).
+    ``evidence_keys`` are the same keys in the order the turn's evidence
+    partition admits their items: the read sections by their relevance to the
+    turn's query (the score that selected them, ties by section order), each
+    section's keys in order of first appearance -- so the section the question
+    is about gets its evidence first when the partition budget runs out. Left
+    empty it is ``keys``; otherwise it must hold exactly the same keys
+    (``ValueError``)."""
 
     read_indices: tuple[int, ...] = ()
     summary: str = ""
     summary_truncated: bool = False
     keys: tuple[str, ...] = ()
+    evidence_keys: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.evidence_keys:
+            object.__setattr__(self, "evidence_keys", tuple(self.keys))
+        elif sorted(self.evidence_keys) != sorted(self.keys):
+            raise ValueError("evidence_keys must order exactly the selection's keys")
 
 
 #: The kinds of object a report reference is restored as -- a subset of
@@ -321,6 +349,8 @@ __all__ = [
     "REASON_REPORT_UNAVAILABLE",
     "REASON_SCOPE_LIBRARIES",
     "REASON_SCOPE_SOURCES",
+    "REPORT_BLOCK_END",
+    "REPORT_EVIDENCE_NOT_LOADED",
     "RESTORE_SKIPPED_OBJECT_TYPES",
     "RESTORED_KINDS",
     "RESTORED_KIND_CHUNK",
