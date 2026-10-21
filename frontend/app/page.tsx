@@ -243,7 +243,7 @@ import { useClientPagination } from "./use-client-pagination.ts";
 import { NotebookCollectionSection } from "./notebook-collection-section.tsx";
 import { AskSessionHistoryList } from "./ask-session-history-list.tsx";
 import { ShareOverviewMembers } from "./share-overview-members.tsx";
-import { DuplicateGroupList } from "./duplicate-group-list.tsx";
+import { DuplicateResults } from "./duplicate-group-list.tsx";
 import { downloadReportArchive, downloadReportMarkdown, ReportsPanel, type ReportDetailT } from "./report-view";
 import { followupScopeSelections } from "./linked-report.ts";
 import { LinkedReportChip, LinkedReportPicker, LinkedReportTurnTag } from "./linked-report-picker.tsx";
@@ -310,6 +310,7 @@ import {
   type ChatMode,
   type ConversationSummary,
   type DuplicateGroup,
+  type DuplicatePartition,
   type Evidence,
   type FgLink,
   type FgNode,
@@ -319,6 +320,7 @@ import {
   type KnowledgeKind,
   type KnowledgeTypeCount,
   type MemoryRecord,
+  type MergeOutcome,
   type NodeContext,
   type CheckupResponse,
   type NotebookAnalytics,
@@ -999,6 +1001,7 @@ export default function Home() {
     notebookId: currentNotebookId,
     policy: {
       canGovernKnowledge: kgWorkspaceCapabilities.canGovernKnowledge,
+      canMergeOwnMemory: kgWorkspaceCapabilities.canMergeOwnMemory,
       canManageNotebookSchemas: kgWorkspaceCapabilities.canManageNotebookSchemas,
       canManageGlobalSchemas: kgWorkspaceCapabilities.canManageGlobalSchemas,
       canWriteKg: kgWorkspaceCapabilities.canWriteNotebook,
@@ -6082,6 +6085,8 @@ export default function Home() {
                     onOwner={(id, owner) => kgWorkspace.updateKnowledge(id, { owner })}
                     onFindDuplicates={kgWorkspace.findDuplicates}
                     onMerge={kgWorkspace.mergeKnowledge}
+                    ownDuplicates={kgKnowledge.ownDuplicates}
+                    canMergeOwnMemory={capabilities.canMergeOwnMemory}
                     reload={kgWorkspace.refreshKnowledge}
                     tier={currentNotebook?.tier}
                     onPropose={(id) => submitPromotion(id).catch(reportError)}
@@ -8154,6 +8159,8 @@ function KnowledgeBrowser({
   onOwner,
   onFindDuplicates,
   onMerge,
+  ownDuplicates,
+  canMergeOwnMemory,
   reload,
   tier,
   onPropose,
@@ -8177,8 +8184,14 @@ function KnowledgeBrowser({
   // 返回 Promise:面板据此在扫描期间禁用「查重」并改文案(全库规范名归一化比对,大库不是
   // 瞬时的)。父层的 `() => findDuplicates(kind).catch(reportError)` 本就返回 Promise。
   onFindDuplicates: () => void | Promise<void>;
-  // 同上,返回 Promise 供面板做「合并中…」的忙碌态。
-  onMerge: (sourceId: string, intoId: string) => void | Promise<void>;
+  // 返回 Promise:面板据此做「合并中…」的忙碌态,并把结果就地显示在那一组旁边。
+  onMerge: (
+    sourceId: string, intoId: string, partition: DuplicatePartition,
+  ) => Promise<MergeOutcome | null> | void;
+  /** 本人记忆分区(`null` = 还没点「查重」)。 */
+  ownDuplicates: DuplicateGroup[] | null;
+  /** 合并本人两条记忆对象只要读权;镜像上为 false。 */
+  canMergeOwnMemory: boolean;
   reload: () => void;
   tier?: string;
   onPropose?: (id: string) => void;
@@ -8189,19 +8202,13 @@ function KnowledgeBrowser({
   readOnly?: boolean;
 }) {
   const [dupBusy, setDupBusy] = useState(false);
-  // 正在合并的重复条目 id。onMerge 会连着重拉知识列表、类型统计并**重跑一次查重**,
-  // 是这个面板里最慢的一步;不锁住的话在几个重复组上连点会并发排出若干次全量重扫。
-  const [mergingId, setMergingId] = useState<string | null>(null);
   const runFindDuplicates = async () => {
     if (dupBusy) return;
     setDupBusy(true);
     try { await onFindDuplicates(); } finally { setDupBusy(false); }
   };
-  const runMerge = async (sourceId: string, intoId: string) => {
-    if (mergingId) return;
-    setMergingId(sourceId);
-    try { await onMerge(sourceId, intoId); } finally { setMergingId(null); }
-  };
+  // 只读成员也有「查重」:入口里只有「我的记忆里的重复」一段(合并本人两条记忆只要读权)。
+  const canFindDuplicates = !readOnly || canMergeOwnMemory;
   const statuses = ["all", ...KNOWLEDGE_STATUS_OPTIONS];
   // Build tabs purely from the dynamic /knowledge-types response.
   const tabs: Array<{ key: string; label: string; count?: number }> = types.map((t) => ({
@@ -8228,27 +8235,21 @@ function KnowledgeBrowser({
           {statuses.map((value) => <option key={value} value={value}>{value === "all" ? "全部状态" : label(KNOWLEDGE_STATUS, value, "其他")}</option>)}
         </select>
         <button className="sort-button" onClick={reload}>刷新</button>
-        {!readOnly && (
+        {canFindDuplicates && (
           <button className="sort-button" disabled={dupBusy} onClick={() => { void runFindDuplicates(); }}>
             {dupBusy ? "查重中…" : "查重"}
           </button>
         )}
       </div>
-      {duplicates !== null && (
-        <div className="knowledge-panel">
-          <p className="section-title">重复组（规范名归一化后相同）</p>
-          {duplicates.length === 0 ? (
-            <p className="tool-hint">未发现重复。</p>
-          ) : (
-            <DuplicateGroupList
-              duplicates={duplicates}
-              readOnly={readOnly}
-              mergingId={mergingId}
-              onMerge={(sourceId, intoId) => { void runMerge(sourceId, intoId); }}
-              resetKey={kind}
-            />
-          )}
-        </div>
+      {(duplicates !== null || ownDuplicates !== null) && (
+        <DuplicateResults
+          shared={duplicates}
+          own={ownDuplicates}
+          canMergeShared={!readOnly}
+          canMergeOwn={canMergeOwnMemory}
+          onMerge={onMerge}
+          resetKey={kind}
+        />
       )}
       {items === null ? (
         <p className="tool-hint">加载中…</p>
