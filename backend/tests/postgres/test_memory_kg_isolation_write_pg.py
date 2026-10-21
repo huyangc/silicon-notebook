@@ -417,13 +417,8 @@ def test_pg_an_orphaned_merged_away_object_is_not_restored(pg_repository):
     assert _pg_status(database, "ko-ma1") == "deprecated"
 
 
-def test_pg_a_merge_chain_restores_one_level_per_cleared_result(pg_repository):
-    """ko-ma1 → ko-ma2 → ko-ma3: deleting mem-a3 restores ko-ma2 (still
-    carrying ko-ma1's entries), ko-ma1 stays deprecated; deleting mem-a2
-    then restores ko-ma1."""
-    repo = pg_repository
-    database = repo._runtime.database
-    _seed(database)
+def _pg_add_third_memory(database) -> None:
+    """u-a's third Memory (mem-a3 → src-ma3 → ko-ma3) for the chain cases."""
     with database.write() as db:
         db.execute(
             "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
@@ -443,6 +438,16 @@ def test_pg_a_merge_chain_restores_one_level_per_cleared_result(pg_repository):
             (json.dumps([{"source_id": "src-ma3", "element_id": "el-src-ma3",
                           "quoted_span": "ko-ma3"}]), NOW, NOW),
         )
+
+
+def test_pg_a_merge_chain_restores_one_level_per_cleared_result(pg_repository):
+    """ko-ma1 → ko-ma2 → ko-ma3: deleting mem-a3 restores ko-ma2 (still
+    carrying ko-ma1's entries), ko-ma1 stays deprecated; deleting mem-a2
+    then restores ko-ma1."""
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    _pg_add_third_memory(database)
     _pg_own_merge(repo, "ko-ma1", "ko-ma2")
     _pg_own_merge(repo, "ko-ma2", "ko-ma3")
     _pg_change_memory(repo, "mem-a3", "delete")
@@ -519,6 +524,43 @@ def test_pg_a_skipped_restore_is_rerun_after_the_commit(pg_repository, holder_en
         worker.join(timeout=10)
     assert not worker.is_alive()
     assert outcome == {"removed": 1}
+    assert _pg_status(database, "ko-ma1") == "approved"
+
+
+def test_pg_shared_merges_record_no_merge_marker(seeded):
+    """Shared objects' merges write no marker: the merged-away row's payload
+    is what it was."""
+    database, store = seeded
+    with database.connect() as db:
+        before = db.execute(
+            "SELECT payload FROM knowledge_objects WHERE id='ko-s'"
+        ).fetchone()["payload"]
+    with database.write() as db:
+        store.merge_objects_in_transaction(db, "nb", "ko-s", "ko-s2", NOW)
+    with database.connect() as db:
+        after = db.execute(
+            "SELECT payload FROM knowledge_objects WHERE id='ko-s'"
+        ).fetchone()["payload"]
+    assert after == before and "_merged_into" not in after
+
+
+def test_pg_clearing_a_merged_away_link_repoints_its_followers(pg_repository):
+    """ko-ma1 → ko-ma2 → ko-ma3, then mem-a2 is deleted: ko-ma1 is not
+    restored (ko-ma3 carries its evidence) but now points at ko-ma3."""
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    _pg_add_third_memory(database)
+    _pg_own_merge(repo, "ko-ma1", "ko-ma2")
+    _pg_own_merge(repo, "ko-ma2", "ko-ma3")
+    _pg_change_memory(repo, "mem-a2", "delete")
+    assert _pg_status(database, "ko-ma1") == "deprecated"
+    with database.connect() as db:
+        payload = db.execute(
+            "SELECT payload FROM knowledge_objects WHERE id='ko-ma1'"
+        ).fetchone()["payload"]
+    assert payload["_merged_into"] == "ko-ma3"
+    _pg_change_memory(repo, "mem-a3", "delete")
     assert _pg_status(database, "ko-ma1") == "approved"
 
 
