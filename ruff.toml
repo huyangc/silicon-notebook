@@ -1,0 +1,19 @@
+# Backend lint gate (docs/development.md "Backend lint gate"). The gate runs
+# `ruff check --config ruff.toml` over backend/app, backend/tests and scripts
+# through scripts/check_backend_lint.py, against the per-file, per-rule
+# baseline in scripts/backend_lint_baseline.json. Lint rules only: there is no
+# formatter and no style rule. Every key here is pinned by
+# backend/tests/test_backend_lint_gate.py; change both together.
+target-version = "py313"
+
+[lint]
+select = [
+    "F",     # pyflakes
+    "E9",    # file the parser cannot read
+    "E722",  # bare except
+    "PLE",   # pylint errors
+    # flake8-bugbear, the subset that flags likely bugs rather than style.
+    "B002", "B003", "B004", "B005", "B006", "B012", "B013", "B014", "B015",
+    "B016", "B017", "B018", "B019", "B020", "B021", "B022", "B025", "B026",
+    "B029", "B030", "B031", "B032", "B033", "B034", "B035", "B039",
+]

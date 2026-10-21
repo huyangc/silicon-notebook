@@ -419,11 +419,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       `except RetrievalControlError` 照抛。`weak_support_relations` 会不会触达参与集座位尚未核实；
       先排查，成立再改为照抛（这是可见行为变化，要配用例）。
 
-**工程卫生**
-
-- [ ] **后端无 lint 门禁**：没有 pyflakes / ruff 一类的 lint，`scripts/check.sh` 与 CI 都不跑（原附记在
-      「前端无 ESLint 门禁」一条里；前端那一半已做，见 [fangan_done.md](fangan_done.md) §61）。
-
 ---
 
 ## 验证基线（每完成一项都要保持）

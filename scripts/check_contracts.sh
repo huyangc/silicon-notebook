@@ -115,6 +115,7 @@ PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   "$ROOT_DIR/scripts/check_claude_md_budget.py"
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   "$ROOT_DIR/scripts/check_architecture_boundaries.py" --root "$ROOT_DIR"
+"$PYTHON_BIN" "$ROOT_DIR/scripts/check_backend_lint.py"
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   "$ROOT_DIR/scripts/generate_ui_extension_contract.py" --check
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
