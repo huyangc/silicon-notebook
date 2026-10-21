@@ -169,6 +169,30 @@ CONVERSATION_ENTRY_POINT_SQL = (
     "ORDER BY julianday(j.created_at), j.created_at, j.rowid LIMIT 1) END"
 )
 
+
+def _conversation_turn(row, submitted_via: str) -> ConversationTurn:
+    """One ``answers`` row (``id, question, payload, created_at``) as a
+    conversation turn. The one construction ``get_conversation`` and
+    ``conversation_turn`` share, so a turn read alone is the turn read with
+    its conversation."""
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    # Pre-answered_at rows retain their authoritative completion time in the
+    # answers table.  Project it into the response so old and new
+    # conversations render identically without a migration.
+    payload["answered_at"] = str(payload.get("answered_at") or row["created_at"] or "")
+    return ConversationTurn(
+        answer_id=row["id"],
+        question=row["question"],
+        response=AskResponse(**payload),
+        asked_at=str(payload.get("asked_at") or ""),
+        created_at=row["created_at"],
+        submitted_via=submitted_via,
+    )
+
+
 class AskStateStore:
     def __init__(self, database: SqliteDatabase, seams) -> None:
         self.database = database
@@ -1438,28 +1462,9 @@ class AskStateStore:
                 (conversation_id,),
             ).fetchone()
             job_trace = self.read_trace(db, job["id"]) if job is not None else []
-        turns = []
-        for row in rows:
-            try:
-                payload = json.loads(row["payload"] or "{}")
-            except (TypeError, ValueError):
-                payload = {}
-            # Pre-answered_at rows retain their authoritative completion time
-            # in the answers table.  Project it into the response so old and
-            # new conversations render identically without a migration.
-            payload["answered_at"] = str(
-                payload.get("answered_at") or row["created_at"] or ""
-            )
-            turns.append(
-                ConversationTurn(
-                    answer_id=row["id"],
-                    question=row["question"],
-                    response=AskResponse(**payload),
-                    asked_at=str(payload.get("asked_at") or ""),
-                    created_at=row["created_at"],
-                    submitted_via=turn_via.get(row["id"], ""),
-                )
-            )
+        turns = [
+            _conversation_turn(row, turn_via.get(row["id"], "")) for row in rows
+        ]
         used_reasoning = bool(turns[-1].response.reasoning_trace) if turns else False
         active_job = None
         if job is not None:
@@ -1481,6 +1486,62 @@ class AskStateStore:
             turns=turns,
             active_job=active_job,
         )
+
+    def conversation_turn(self, conversation_id: str, index: int) -> "dict | None":
+        """One turn of a conversation without reading the others.
+
+        ``None`` when the conversation does not exist. Otherwise the
+        conversation's own fields (``id``, ``notebook_id``, ``title``,
+        ``updated_at``, ``submitted_via``), ``turn_count`` (its saved answers)
+        and ``turn``: its ``index``-th answer in ``CONVERSATION_ANSWERS_ORDER_ASC``
+        order, built exactly as ``get_conversation`` builds that turn -- or
+        ``None`` when ``index`` is outside ``0 <= index < turn_count`` or the
+        answer went away between the count and the read.
+
+        ``get_conversation`` validates every answer's payload and reads the
+        running job's trace; a reader that wants one turn (MCP
+        ``get_conversation``, one turn per call) pays for that one answer: a
+        count, one answer row by position, and its job's entry point.
+        """
+        with self.database.connect() as db:
+            conv = db.execute(
+                "SELECT c.id, c.notebook_id, c.title, c.updated_at, "
+                "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) "
+                "AS turn_count, "
+                + CONVERSATION_ENTRY_POINT_SQL + " AS submitted_via "
+                "FROM conversations c WHERE c.id = ?",
+                (conversation_id,),
+            ).fetchone()
+            if conv is None:
+                return None
+            row = via = None
+            if 0 <= index < conv["turn_count"]:
+                row = db.execute(
+                    "SELECT id, question, payload, created_at FROM answers "
+                    "WHERE conversation_id = ? " + CONVERSATION_ANSWERS_ORDER_ASC
+                    + " LIMIT 1 OFFSET ?",
+                    (conversation_id, index),
+                ).fetchone()
+            if row is not None:
+                # The oldest job naming this answer, as get_conversation's
+                # setdefault over the same order picks it.
+                via = db.execute(
+                    "SELECT submitted_via FROM ask_jobs "
+                    "WHERE conversation_id = ? AND answer_id = ? "
+                    "ORDER BY julianday(created_at), created_at, rowid LIMIT 1",
+                    (conversation_id, row["id"]),
+                ).fetchone()
+        return {
+            "id": conv["id"],
+            "notebook_id": conv["notebook_id"],
+            "title": conv["title"] or "",
+            "updated_at": conv["updated_at"] or "",
+            "submitted_via": conv["submitted_via"] or "",
+            "turn_count": int(conv["turn_count"]),
+            "turn": None if row is None else _conversation_turn(
+                row, (via["submitted_via"] or "") if via is not None else ""
+            ),
+        }
 
     def list_conversations(
         self, notebook_id: str, user_id: str

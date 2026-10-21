@@ -217,16 +217,21 @@ list_conversations(ctx, notebook_id: str = "", limit: int = 20, offset: int = 0)
   （`_live_principal` + `principal_has_capability(p, "history:read")`，否则
   `AgentAccessDenied("scope_missing", tier=capability_tier("history:read"))`）。
 - 数据：
-  - 单库：对目标笔记本集合（D11）逐个在 `_owner_request_context(principal)` 里调 `repo.list_conversations(nb)`
-    （facade 按当前用户 = 主人过滤；`KeyError` 跳过）。
+  - 目标笔记本集合（D11）：省略 `notebook_id` 时一条语句批量判读权（`list_pages.readable_allowlist` →
+    `deps.notebook_read_authority().readable_notebook_ids`，与 `user_can_read_notebook` 同一谓词），不逐库判。
+  - 单库：对目标笔记本逐个调 store 自己的 `list_conversations(nb, owner)`（`deps.ask_history_store()`，主人显式传入）；
+    不走 facade 的 `list_conversations`——它为证明笔记本存在先构建整个笔记本摘要（含记忆计数）。不兜 `KeyError`。
   - 全局：`global_ask_service().agent_conversations(user_id=owner, allowed_notebook_ids=principal.notebook_ids)`（§2.7），
     有 `notebook_id` 时只留 `notebook_id in item.notebook_ids` 的。
   - 合并排序：`updated_at` 解析成 UTC 时刻降序（`app.core.activity_time.parse_activity_instant`，解析失败用
     `UNRESOLVED_INSTANT`），并列按 `conversation_id` 降序。
-- 返回（经 `_budget_response`，与 `list_notebooks` 相同的「只按实际交付的条目前进」循环）：
+- 返回（经 `_budget_response`，与 `list_notebooks` 相同的「只按实际交付的条目前进」循环；另核每行 `notebook_ids`
+  原样，被预算截短的行不算交付）：
   ```json
   {"items": [<conversation_row>...], "total": 37, "next_offset": 20, "truncation": {...}}
   ```
+- 游标形态不变（与其他 MCP 列表工具一致的 offset）。工具描述写明：翻页期间有会话更新时，它会移到最前，本次枚举
+  可能看不到它或在边界重复一条；需要完整快照时从 `offset=0` 重新列。
 - `conversation_row`（一个构造函数，T3 定义在 `mcp_tools/conversations.py`）：
   ```json
   {"conversation_id": "conv-…|gconv-…", "kind": "notebook|global",
@@ -244,10 +249,15 @@ get_conversation(conversation_id: str, ctx, turn_offset: int = 0,
 - 任一 offset < 0 → `invalid_argument`（同上文案）。`conversation_id` 去首尾空白后不以 `conv-`/`gconv-` 开头、
   或超过 `ask.CONVERSATION_ID_MAX_LENGTH`（200）→ `not_found`（同 `get_ask` 对未知前缀）。以上都在仓库工作前。
 - `conv-`（单库）：`history_principal` → `conversation_owner(cid) == owner` 否则 `not_found` →
-  `repo.get_conversation(cid)`（`KeyError` → `not_found`）→ `repo.require_agent_access(p, "history:read", nb)`
-  （`inactive`/`scope_missing` 原样抛，其余 `not_found`）→ 范围检查（下）→ `_record_agent_call(repo, p, nb, "history:read")`
-  → 第 `turn_offset` 条回答 → `notebook_view("", nb, turn.response, {"status": "done", "conversation_id": cid,
-  "mode": turn.response.mode}, True)`（D2 注释）→ `turn_page`。
+  `deps.ask_history_store().conversation_turn(cid, turn_offset)`（会话不存在 `None` → `not_found`）→
+  `repo.require_agent_access(p, "history:read", nb)`（`inactive`/`scope_missing` 原样抛，其余 `not_found`）→
+  范围检查（下；必须在归属与读权之后，越界不得向被拒的调用方透露轮数）→ 计过数但该轮已被删 → `not_found` →
+  `_record_agent_call(repo, p, nb, "history:read")` → `notebook_view("", nb, turn.response, {"status": "done",
+  "conversation_id": cid, "mode": turn.response.mode}, True)`（D2 注释）→ `turn_page`。
+  `conversation_turn`（两端 store 同语义，不上 facade、不进 `ports.py`）只读会话行、答案计数、按
+  `CONVERSATION_ANSWERS_ORDER_ASC` 取第 N 条答案（`LIMIT 1 OFFSET N`）与指向它的最早任务的 `submitted_via`；
+  不读其他轮 payload、推理轨迹与运行中任务；该轮与 `get_conversation` 共用同一个构造函数（`_conversation_turn`），
+  逐字相同。
 - `gconv-`（全局）：`history_principal` → `global_ask_service().agent_conversation_turn(cid, user_id=owner,
   allowed_notebook_ids=p.notebook_ids, turn_offset=turn_offset)`；它抛的 `GlobalAskError` 经
   `global_ask_tool_error` 译码后，凡 `not_found`/`notebook_unreadable` 一律改成本工具的 `not_found` 文案，其余原样；
@@ -265,14 +275,20 @@ get_conversation(conversation_id: str, ctx, turn_offset: int = 0,
    "completeness_notice": "", "error": "", "scope": {"kind": "notebook", "notebook_ids": ["nb-…"]},
    "content_is_untrusted_evidence": true}
   ```
-  `asked_at` 取该轮 `asked_at`，为空退回 `created_at`。`question` 超过 2000 码点先截到 1999 + `…`，截掉的字符数作为
-  `_budget_response(initial_omitted_characters=…)` 记进 `truncation`。单库每轮 `status` 恒为 `answered`、`error` 为 `""`；
+  `asked_at` 取该轮 `asked_at`，为空退回 `created_at`。单库每轮 `status` 恒为 `answered`、`error` 为 `""`；
   全局取 `global_view` 的 `status`/`error`（`error` 只含中文提示）。
+- `question`：首页（两个 offset 都为 0）给 ≤ 2000 码点；续页（`answer_offset` 或 `citation_offset` > 0）截到
+  `list_pages.CONTINUATION_QUESTION_CHARS`（200，与 `get_report` 共用）。截短一律保留前 `limit-1` 码点 + `…`，
+  截掉的字符数经 `_budget_response(initial_omitted_characters=…)` 计入 `truncation.truncated`/`omitted_characters`；
+  不新增顶层键（键数仍 17 + `truncation`），截短后的值仍在原样核对集合里。工具描述写明这一点。
 - 空页：`{"conversation": …, "turn_offset": 0, "next_turn_offset": null, "status": "empty", "content_is_untrusted_evidence": true}`。
-- 收敛循环（照 `answer_page`）：`answer_count = TEXT_LIMIT`，`citation_count = min(RESULT_LIMIT, 剩余)`；接受条件：
-  `answer` 原样、引用的 `(notebook_id, source_id, element_id)` 与 `ref` 序列原样、`conversation` 子对象原样、
-  `question`、`turn_offset`/`next_turn_offset`/`next_answer_offset`/`next_citation_offset` 原样；否则先半缩引用、再半缩正文，
-  缩无可缩 → `internal`「结果暂时无法完整返回，请稍后重试」。
+- 收敛搜索：正文尺寸从 `min(TEXT_LIMIT, 剩余)` 起半缩到 1（正文已读完则为 0），对每个正文尺寸，引用从
+  `min(RESULT_LIMIT, 剩余)` 起半缩到 0（正文已读完而引用未读完时最少 1 条，保证每页推进一个游标）；正文优先于引用。
+  接受条件：`answer` 原样、引用的 `(notebook_id, source_id, element_id)` 与 `ref` 序列原样、`conversation` 子对象原样、
+  `question`（截短后的值）、`turn_offset`/`next_turn_offset`/`next_answer_offset`/`next_citation_offset` 原样。全部尺寸都
+  放不下时（首页连完整 question 都放不下）把 question 按同一方式再半缩、重试。真实数据下任何一轮都能逐页读完；
+  只有单条引用自身的标识符或会话行超过整页预算这种不可能的数据才会落到 `internal`「结果暂时无法完整返回，请稍后重试」。
+  实测：2000 字问题 + 6000 字回答 + 20 条普通引用 4 页读完（改前 12 页）；字段写满的引用 + 30 个库 id 也能读完。
 
 ### 2.4 `list_reports`
 

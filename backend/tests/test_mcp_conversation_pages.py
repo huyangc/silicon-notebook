@@ -146,11 +146,16 @@ def test_turn_page_keeps_every_ref_whole() -> None:
 
     # A ref too long for the output budget is dropped whole by it while the
     # citation's ids still fit: such a citation is never delivered without
-    # its ref -- the page cannot be built at all.
+    # its ref. The text still reads and the citation cursor stays put; once no
+    # text is left the page cannot be built at all -- the one way left to an
+    # ``internal``, reachable only with identifiers longer than the budget.
     unfit = _citation(1, element_id="el-" + "y" * 4_600)
     assert len(unfit["ref"]) > 6_000 and len(unfit["element_id"]) < 6_000
+    page = _page(_view("回答。", [unfit]))
+    assert page["answer"] == "回答。" and page["citations"] == []
+    assert page["next_citation_offset"] == 0 and page["next_answer_offset"] is None
     with pytest.raises(AgentToolError) as refused:
-        _page(_view("回答。", [unfit]))
+        _page(_view("回答。", [unfit]), answer_offset=3)
     assert refused.value.code == "internal"
 
 
@@ -184,6 +189,98 @@ def test_long_question_is_clipped_and_reported() -> None:
     short = _page(_view(), question="短问题")
     assert short["question"] == "短问题"
     assert short["truncation"]["truncated"] is False
+
+
+def _read_turn(view, *, row, question):
+    """Every page of one turn, following both cursors to the end (a finished
+    cursor is parked at its total, as a caller reading the other one does)."""
+    answer_total = len(view["answer"])
+    citation_total = len(view["citations"])
+    pages, answer_offset, citation_offset = [], 0, 0
+    while answer_offset is not None or citation_offset is not None:
+        page = _page(
+            view, row=row, question=question,
+            answer_offset=answer_total if answer_offset is None else answer_offset,
+            citation_offset=citation_total if citation_offset is None else citation_offset,
+        )
+        pages.append(page)
+        assert _serialized_size(page) <= 12_000 and set(page) == PAGE_KEYS
+        assert page["conversation"] == row
+        answer_offset = page["next_answer_offset"]
+        citation_offset = page["next_citation_offset"]
+        assert len(pages) < 200, "a cursor stopped moving"
+    return pages
+
+
+def _full_citation(index: int) -> dict:
+    """A citation whose display fields are all at their caps."""
+    source_id, element_id = f"src-{index:03d}-" + "s" * 40, f"el-{index:03d}-" + "e" * 40
+    return {
+        "label": "标" * 300, "source_title": "题" * 300, "location_label": "位" * 300,
+        "quoted_span": "摘" * 200, "source_file_name": "文" * 300, "tier": "personal",
+        "source_id": source_id, "element_id": element_id,
+        "notebook_id": f"nb-{index % 30:02d}-" + "n" * 30,
+        "content_is_untrusted_evidence": True,
+        "ref": element_ref(NOTEBOOK, source_id, element_id),
+    }
+
+
+def test_continuation_pages_carry_a_short_question() -> None:
+    question = _body(2_000)
+    view = _view(_body(6_000), [_citation(index) for index in range(20)])
+    pages = _read_turn(view, row=_row(), question=question)
+    first, rest = pages[0], pages[1:]
+    # The first page carries the whole question; no cut is reported for it.
+    assert first["question"] == question
+    assert first["truncation"]["omitted_characters"] == 0
+    assert rest, "the turn took more than one page"
+    for page in rest:
+        assert len(page) == 18
+        assert len(page["question"]) <= 200 and page["question"].endswith("…")
+        assert page["question"][:199] == question[:199]
+        assert page["truncation"]["truncated"] is True
+        assert page["truncation"]["omitted_characters"] >= 2_000 - 199
+    # With the room the short question leaves, the turn reads in few calls.
+    assert len(pages) <= 6, len(pages)
+    assert "".join(page["answer"] for page in pages) == view["answer"]
+
+
+@pytest.mark.parametrize("question_chars", [1_500, 2_000])
+def test_every_turn_reads_to_the_end(question_chars) -> None:
+    # The worst page a real turn makes: a long question, a long answer,
+    # citations whose fields are all at their caps, a global scope over 30
+    # libraries and a row naming its libraries. Every page fits, the cursors
+    # always move, and nothing is skipped -- never ``internal``.
+    question = _body(question_chars)
+    libraries = [f"nb-{index:02d}-" + "n" * 30 for index in range(30)]
+    row = _row(conversation_id="gconv-1", kind="global", title="题" * 200,
+               notebook_ids=libraries)
+    view = _view(
+        _body(6_000), [_full_citation(index) for index in range(25)],
+        scope={"kind": "global", "mode": "include", "notebook_ids": libraries},
+    )
+    pages = _read_turn(view, row=row, question=question)
+    assert pages[0]["question"] == question
+    assert "".join(page["answer"] for page in pages) == view["answer"]
+    delivered = [item["element_id"] for page in pages for item in page["citations"]]
+    assert delivered == [item["element_id"] for item in view["citations"]]
+    assert all(len(page["question"]) <= 200 for page in pages[1:])
+
+
+def test_question_is_cut_on_the_first_page_only_when_nothing_else_fits() -> None:
+    # A row whose library ids alone take half the budget leaves no room for a
+    # 2,000-character question beside even one character of text: the first
+    # page cuts the question the way a continuation page does, and says so.
+    row = _row(notebook_ids=[f"nb-{index:02d}-" + "n" * 290 for index in range(20)])
+    question = _body(2_000)
+    view = _view(_body(3_000))
+    pages = _read_turn(view, row=row, question=question)
+    first = pages[0]
+    assert first["question"].endswith("…") and len(first["question"]) < 2_000
+    assert first["question"][:-1] == question[:len(first["question"]) - 1]
+    assert first["truncation"]["omitted_characters"] >= 2_000 - len(first["question"])
+    assert first["answer"], "the page still moved the text cursor"
+    assert "".join(page["answer"] for page in pages) == view["answer"]
 
 
 def test_turn_page_has_room_for_two_more_keys() -> None:

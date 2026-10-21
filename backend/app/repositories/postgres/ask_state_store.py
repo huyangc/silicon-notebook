@@ -134,6 +134,26 @@ CONVERSATION_ENTRY_POINT_SQL = (
     "ORDER BY j.created_at, j.id COLLATE \"C\" LIMIT 1) END"
 )
 
+
+def _conversation_turn(row, submitted_via: str) -> ConversationTurn:
+    """One ``answers`` row (``id, question, payload, created_at``) as a
+    conversation turn. The one construction ``get_conversation`` and
+    ``conversation_turn`` share, so a turn read alone is the turn read with
+    its conversation."""
+    payload = json_value(row["payload"], {})
+    payload["answered_at"] = str(
+        payload.get("answered_at") or iso_timestamp(row["created_at"])
+    )
+    return ConversationTurn(
+        answer_id=row["id"],
+        question=row["question"],
+        response=AskResponse(**payload),
+        asked_at=str(payload.get("asked_at") or ""),
+        created_at=iso_timestamp(row["created_at"]),
+        submitted_via=submitted_via,
+    )
+
+
 class AskStateStore:
     def __init__(self, database: PostgresDatabase, seams) -> None:
         self.database = database
@@ -1283,22 +1303,9 @@ class AskStateStore:
                 (conversation_id,),
             ).fetchone()
             job_trace = self.read_trace(db, job["id"]) if job is not None else []
-        turns = []
-        for row in rows:
-            payload = json_value(row["payload"], {})
-            payload["answered_at"] = str(
-                payload.get("answered_at") or iso_timestamp(row["created_at"])
-            )
-            turns.append(
-                ConversationTurn(
-                    answer_id=row["id"],
-                    question=row["question"],
-                    response=AskResponse(**payload),
-                    asked_at=str(payload.get("asked_at") or ""),
-                    created_at=iso_timestamp(row["created_at"]),
-                    submitted_via=turn_via.get(row["id"], ""),
-                )
-            )
+        turns = [
+            _conversation_turn(row, turn_via.get(row["id"], "")) for row in rows
+        ]
         used_reasoning = bool(turns[-1].response.reasoning_trace) if turns else False
         active_job = None
         if job is not None:
@@ -1320,6 +1327,52 @@ class AskStateStore:
             turns=turns,
             active_job=active_job,
         )
+
+    def conversation_turn(self, conversation_id: str, index: int) -> "dict | None":
+        """One turn of a conversation without reading the others. Same
+        contract as the SQLite adapter's ``conversation_turn`` (see there):
+        ``None`` for a missing conversation, else its fields, ``turn_count``
+        and its ``index``-th answer built as ``get_conversation`` builds it
+        (``None`` outside the range or when it went away meanwhile)."""
+        with self.database.connect() as db:
+            conv = db.execute(
+                "SELECT c.id, c.notebook_id, c.title, c.updated_at, "
+                "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) "
+                "AS turn_count, "
+                + CONVERSATION_ENTRY_POINT_SQL + " AS submitted_via "
+                "FROM conversations c WHERE c.id = %s",
+                (conversation_id,),
+            ).fetchone()
+            if conv is None:
+                return None
+            row = via = None
+            if 0 <= index < conv["turn_count"]:
+                row = db.execute(
+                    "SELECT id, question, payload, created_at FROM answers "
+                    "WHERE conversation_id = %s " + CONVERSATION_ANSWERS_ORDER_ASC
+                    + " LIMIT 1 OFFSET %s",
+                    (conversation_id, index),
+                ).fetchone()
+            if row is not None:
+                # The oldest job naming this answer, as get_conversation's
+                # setdefault over the same order picks it.
+                via = db.execute(
+                    "SELECT submitted_via FROM ask_jobs "
+                    "WHERE conversation_id = %s AND answer_id = %s "
+                    "ORDER BY created_at, id COLLATE \"C\" LIMIT 1",
+                    (conversation_id, row["id"]),
+                ).fetchone()
+        return {
+            "id": conv["id"],
+            "notebook_id": conv["notebook_id"],
+            "title": conv["title"] or "",
+            "updated_at": iso_timestamp(conv["updated_at"]),
+            "submitted_via": conv["submitted_via"] or "",
+            "turn_count": int(conv["turn_count"]),
+            "turn": None if row is None else _conversation_turn(
+                row, (via["submitted_via"] or "") if via is not None else ""
+            ),
+        }
 
     def list_conversations(
         self, notebook_id: str, user_id: str

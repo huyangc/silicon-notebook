@@ -1551,6 +1551,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
+        "scope": "<module>.ask_history_store",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
         "scope": "<module>.ask_intent_handle_repository",
         "target": "_runtime"
       },
@@ -1642,6 +1648,12 @@
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
         "scope": "<module>.notebook_question_suggestions_service",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
+        "scope": "<module>.notebook_read_authority",
         "target": "_runtime"
       },
       {
@@ -6501,9 +6513,9 @@
         "target": "get_conversation"
       },
       {
-        "kind": "attribute",
-        "path": "backend/app/api/mcp_tools/conversations.py",
-        "scope": "<module>._notebook_turn",
+        "kind": "patch",
+        "path": "backend/tests/mcp_conversation_cases.py",
+        "scope": "<module>.notebook_turn_reads_only_the_asked_answer",
         "target": "get_conversation"
       },
       {
@@ -6528,6 +6540,14 @@
     "kind": "method",
     "owner": "AskStateStore",
     "patch_targets": [
+      {
+        "base": "env.repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/mcp_conversation_cases.py",
+        "scope": "<module>.notebook_turn_reads_only_the_asked_answer",
+        "target": "get_conversation"
+      },
       {
         "base": "RepositoryFacade",
         "compatibility": "test-only",
@@ -6925,6 +6945,12 @@
       },
       {
         "kind": "patch",
+        "path": "backend/tests/mcp_conversation_cases.py",
+        "scope": "<module>.unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "patch",
         "path": "backend/tests/test_notebook_delete_review_fixes.py",
         "scope": "<module>.test_asset_recheck_survives_actor_access_loss",
         "target": "get_notebook"
@@ -6963,6 +6989,14 @@
     "kind": "method",
     "owner": "NotebookCatalogService",
     "patch_targets": [
+      {
+        "base": "env.repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/mcp_conversation_cases.py",
+        "scope": "<module>.unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary",
+        "target": "get_notebook"
+      },
       {
         "base": "repo",
         "compatibility": "test-only",
@@ -7427,9 +7461,9 @@
         "target": "list_conversations"
       },
       {
-        "kind": "attribute",
-        "path": "backend/app/api/mcp_tools/conversations.py",
-        "scope": "<module>._notebook_rows",
+        "kind": "patch",
+        "path": "backend/tests/mcp_conversation_cases.py",
+        "scope": "<module>.unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary",
         "target": "list_conversations"
       },
       {
@@ -7447,7 +7481,16 @@
     ],
     "kind": "method",
     "owner": "AskService",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "env.repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/mcp_conversation_cases.py",
+        "scope": "<module>.unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary",
+        "target": "list_conversations"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> \"'List[ConversationSummary]'\""
   },
@@ -11170,12 +11213,6 @@
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/mcp_tools/list_pages.py",
-        "scope": "<module>.readable_allowlist",
-        "target": "user_can_read_notebook"
-      },
-      {
-        "kind": "attribute",
         "path": "backend/app/api/mcp_tools/profiles.py",
         "scope": "<module>.register_profile_tools.add_observation.run",
         "target": "user_can_read_notebook"
@@ -11191,11 +11228,26 @@
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>.public_report_route",
         "target": "user_can_read_notebook"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/mcp_conversation_cases.py",
+        "scope": "<module>.unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary",
+        "target": "user_can_read_notebook"
       }
     ],
     "kind": "method",
     "owner": "NotebookSharingService",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "env.repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/mcp_conversation_cases.py",
+        "scope": "<module>.unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary",
+        "target": "user_can_read_notebook"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', user_id: 'str') -> 'bool'"
   },

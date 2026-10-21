@@ -34,7 +34,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from app.api.deps import notebook_access_repository
+from app.api.deps import ask_history_store, notebook_access_repository
 from app.domain.agent_tools import AgentAccessDenied
 
 from . import global_ask as _global
@@ -43,7 +43,6 @@ from ._shared import (
     TEXT_LIMIT,
     AgentToolError,
     _budget_response,
-    _owner_request_context,
     _record_agent_call,
     _run_with_progress,
     _selected_notebook,
@@ -52,6 +51,7 @@ from .ask import CONVERSATION_ID_MAX_LENGTH, notebook_view
 from .ask_pages import _FIELD_LIMITS
 from .global_ask import _citation_keys, global_view
 from .list_pages import (
+    CONTINUATION_QUESTION_CHARS,
     HISTORY_CAPABILITY,
     NEGATIVE_OFFSET,
     history_principal,
@@ -127,11 +127,14 @@ def conversation_row(
     }
 
 
-def _notebook_row(conversation: Any, turn_count: int) -> dict[str, Any]:
+def _notebook_row(conversation: Mapping[str, Any]) -> dict[str, Any]:
+    """A single-notebook conversation's fields (a ``ConversationSummary`` dump,
+    or ``conversation_turn``'s result)."""
     return conversation_row(
-        conversation_id=conversation.id, kind="notebook", title=conversation.title,
-        notebook_ids=[conversation.notebook_id], turn_count=turn_count,
-        updated_at=conversation.updated_at, submitted_via=conversation.submitted_via,
+        conversation_id=conversation["id"], kind="notebook",
+        title=conversation["title"], notebook_ids=[conversation["notebook_id"]],
+        turn_count=conversation["turn_count"], updated_at=conversation["updated_at"],
+        submitted_via=conversation["submitted_via"],
     )
 
 
@@ -147,19 +150,17 @@ def _global_row(conversation: Any) -> dict[str, Any]:
     )
 
 
-def _notebook_rows(repo: Any, principal: Any, targets: Sequence[str]) -> list[dict[str, Any]]:
-    """The owner's single-notebook conversations in ``targets`` (the facade
-    lists the request user's own, so it runs as the owner). A notebook that
-    vanished meanwhile is skipped."""
-    rows: list[dict[str, Any]] = []
-    with _owner_request_context(principal):
-        for notebook_id in targets:
-            try:
-                conversations = repo.list_conversations(notebook_id)
-            except KeyError:
-                continue
-            rows.extend(_notebook_row(item, item.turn_count) for item in conversations)
-    return rows
+def _notebook_rows(principal: Any, targets: Sequence[str]) -> list[dict[str, Any]]:
+    """The owner's single-notebook conversations in ``targets``, which the
+    caller has already found readable: the store's own list (one statement
+    per notebook, the owner passed explicitly), not the facade's, which would
+    first build each notebook's whole summary only to prove it exists."""
+    store = ask_history_store()
+    return [
+        _notebook_row(item.model_dump())
+        for notebook_id in targets
+        for item in store.list_conversations(notebook_id, principal.owner_id)
+    ]
 
 
 def _global_rows(principal: Any, notebook_id: str) -> list[dict[str, Any]]:
@@ -219,6 +220,18 @@ def _citation_refs(rows: Sequence[Mapping[str, Any]]) -> list[Any]:
     return [row.get("ref") for row in rows]
 
 
+def _sizes(start: int, *, fewest: int) -> list[int]:
+    """The page sizes to try, largest first: ``start`` and its halvings down
+    to 1, then 0 when ``fewest`` is 0."""
+    sizes = []
+    while start >= 1:
+        sizes.append(start)
+        start //= 2
+    if fewest == 0:
+        sizes.append(0)
+    return sizes
+
+
 def turn_page(
     conversation: Mapping[str, Any], view: Mapping[str, Any], *, question: str,
     asked_at: str, submitted_via: str, turn_offset: int, turn_count: int,
@@ -238,62 +251,84 @@ def turn_page(
     The answer text and the citations page independently, each with its own
     cursor. A page is accepted only after the output budget demonstrably left
     the delivered text, every delivered citation identity and ``ref``, the
-    ``conversation``, the question and every cursor intact; otherwise the
-    citations halve, then the text, and the page is tried again -- so following
-    the cursors can never skip text or a citation.
+    ``conversation``, the question and every cursor intact; otherwise a
+    smaller page is tried -- so following the cursors can never skip text or a
+    citation. Text is preferred over citations: for each text size, largest
+    first, the citations halve down to none (down to one when no text is left,
+    so every page moves a cursor).
+
+    The question is repeated whole on the first page (up to
+    ``_QUESTION_CHARS``) and cut to ``CONTINUATION_QUESTION_CHARS`` on a
+    continuation page (an offset above zero): the caller already has it, and
+    the room goes to the answer. Only when not even one character of text, or
+    the one citation a page owes, fits beside the question is the question cut
+    further. Every cut ends in an ellipsis and counts in ``truncation``.
+    Whatever cut was made is the question the page is checked against.
     """
     answer = str(view.get("answer") or "")
     citations = list(view.get("citations") or [])
-    clipped, question_omitted = _clip(str(question or ""), _QUESTION_CHARS)
-    next_turn = turn_offset + 1 if turn_offset + 1 < turn_count else None
-    answer_count = TEXT_LIMIT
-    citation_count = min(
-        RESULT_LIMIT, len(citations) - min(citation_offset, len(citations))
+    question = str(question or "")
+    answer_left = max(0, len(answer) - answer_offset)
+    citations_left = max(0, len(citations) - citation_offset)
+    answer_sizes = _sizes(min(TEXT_LIMIT, answer_left), fewest=1 if answer_left else 0)
+    citation_sizes = _sizes(
+        min(RESULT_LIMIT, citations_left),
+        fewest=0 if answer_left or not citations_left else 1,
     )
+    next_turn = turn_offset + 1 if turn_offset + 1 < turn_count else None
+    fixed = {
+        "conversation": dict(conversation),
+        "turn_offset": turn_offset,
+        "next_turn_offset": next_turn,
+        "asked_at": str(asked_at or ""),
+        "submitted_via": str(submitted_via or ""),
+        "status": view["status"],
+        "mode": str(view.get("mode") or ""),
+        "total_citations": len(citations),
+        "completeness_notice": str(view.get("completeness_notice") or ""),
+        "error": str(view.get("error") or ""),
+        "scope": dict(view.get("scope") or {}),
+        "content_is_untrusted_evidence": True,
+    }
+    continuation = answer_offset > 0 or citation_offset > 0
+    question_limit = CONTINUATION_QUESTION_CHARS if continuation else _QUESTION_CHARS
     while True:
-        text = answer[answer_offset:answer_offset + answer_count]
-        refs = citations[citation_offset:citation_offset + citation_count]
-        answer_end = answer_offset + len(text)
-        citation_end = citation_offset + len(refs)
-        payload: dict[str, Any] = {
-            "conversation": dict(conversation),
-            "turn_offset": turn_offset,
-            "next_turn_offset": next_turn,
-            "question": clipped,
-            "asked_at": str(asked_at or ""),
-            "submitted_via": str(submitted_via or ""),
-            "status": view["status"],
-            "mode": str(view.get("mode") or ""),
-            "answer": text,
-            "next_answer_offset": answer_end if answer_end < len(answer) else None,
-            "citations": refs,
-            "next_citation_offset": (
-                citation_end if citation_end < len(citations) else None
-            ),
-            "total_citations": len(citations),
-            "completeness_notice": str(view.get("completeness_notice") or ""),
-            "error": str(view.get("error") or ""),
-            "scope": dict(view.get("scope") or {}),
-            "content_is_untrusted_evidence": True,
-        }
-        packed = _budget_response(
-            payload, field_limits=_TURN_FIELD_LIMITS,
-            initial_omitted_characters=question_omitted,
-        )
-        delivered = packed.get("citations", [])
-        if (
-            packed.get("answer") == text
-            and _citation_keys(delivered) == _citation_keys(refs)
-            and _citation_refs(delivered) == _citation_refs(refs)
-            and all(packed.get(key) == payload[key] for key in _TURN_EXACT_KEYS)
-        ):
-            return packed
-        if citation_count > 1:
-            citation_count //= 2
-        elif answer_count > 1:
-            answer_count //= 2
-        else:
+        clipped, question_omitted = _clip(question, question_limit)
+        for answer_count in answer_sizes:
+            text = answer[answer_offset:answer_offset + answer_count]
+            answer_end = answer_offset + len(text)
+            for citation_count in citation_sizes:
+                refs = citations[citation_offset:citation_offset + citation_count]
+                citation_end = citation_offset + len(refs)
+                payload: dict[str, Any] = {
+                    **fixed,
+                    "question": clipped,
+                    "answer": text,
+                    "next_answer_offset": (
+                        answer_end if answer_end < len(answer) else None
+                    ),
+                    "citations": refs,
+                    "next_citation_offset": (
+                        citation_end if citation_end < len(citations) else None
+                    ),
+                }
+                packed = _budget_response(
+                    payload, field_limits=_TURN_FIELD_LIMITS,
+                    initial_omitted_characters=question_omitted,
+                )
+                delivered = packed.get("citations", [])
+                if (
+                    packed.get("answer") == text
+                    and _citation_keys(delivered) == _citation_keys(refs)
+                    and _citation_refs(delivered) == _citation_refs(refs)
+                    and all(packed.get(key) == payload[key] for key in _TURN_EXACT_KEYS)
+                ):
+                    return packed
+        if len(clipped) <= 1:
+            # Not even a one-character question fits: only identifiers longer
+            # than the whole response budget get here.
             raise AgentToolError("internal", _PAGE_FAILURE)
+        question_limit = len(clipped) // 2
 
 
 def empty_turn_page(conversation: Mapping[str, Any]) -> dict[str, Any]:
@@ -333,30 +368,37 @@ def _notebook_turn(
     answer_offset: int, citation_offset: int,
 ) -> dict[str, Any]:
     """A ``conv-`` conversation's turn: the owner check first (before anything
-    about the conversation is loaded), then the notebook gate. Every refusal
-    but a dead token or a missing tier is the one ``not_found``."""
+    about the conversation is loaded), then the notebook gate, and only then
+    the offset -- an offset past the end must not tell a refused caller how
+    many turns there are. Every refusal but a dead token or a missing tier is
+    the one ``not_found``.
+
+    Only the asked turn is read (``conversation_turn``: the count and one
+    answer), not the whole conversation with every payload and the running
+    job's trace -- a caller pages a long conversation one turn per call."""
     if notebook_access_repository().conversation_owner(conversation_id) != principal.owner_id:
         raise _not_found()
-    try:
-        with _owner_request_context(principal):
-            conversation = repo.get_conversation(conversation_id)
-    except KeyError:
-        raise _not_found() from None
-    notebook_id = conversation.notebook_id
+    found = ask_history_store().conversation_turn(conversation_id, turn_offset)
+    if found is None:
+        raise _not_found()
+    notebook_id = found["notebook_id"]
     try:
         repo.require_agent_access(principal, HISTORY_CAPABILITY, notebook_id)
     except AgentAccessDenied as exc:
         if exc.reason in ("inactive", "scope_missing"):
             raise
         raise _not_found() from None
-    turns = conversation.turns
-    _check_turn_offset(turn_offset, len(turns))
+    turn_count = found["turn_count"]
+    _check_turn_offset(turn_offset, turn_count)
+    turn = found["turn"]
+    if turn_count and turn is None:
+        # Counted, then gone (deleted) before it was read.
+        raise _not_found()
     # Every gate has cleared: booked on the conversation's notebook.
     _record_agent_call(repo, principal, notebook_id, HISTORY_CAPABILITY)
-    row = _notebook_row(conversation, len(turns))
-    if not turns:
+    row = _notebook_row(found)
+    if turn is None:
         return empty_turn_page(row)
-    turn = turns[turn_offset]
     # ``allow_memory=True`` with no replay gate, unlike ``get_ask``: this tool
     # needs ``history:read``, which sits in the same tier as ``memory:read``,
     # so a caller here may always read Memory. Pinned by
@@ -372,7 +414,7 @@ def _notebook_turn(
         row, view, question=turn.question,
         asked_at=turn.asked_at or turn.created_at,
         submitted_via=turn.submitted_via, turn_offset=turn_offset,
-        turn_count=len(turns), answer_offset=answer_offset,
+        turn_count=turn_count, answer_offset=answer_offset,
         citation_offset=citation_offset,
     )
 
@@ -431,8 +473,12 @@ def register_conversation_tools(
             "the cross-notebook ones that used it. A cross-notebook "
             "conversation is listed only while every notebook any of its turns "
             "used is in the allowlist and still readable by the owner. limit (at "
-            "most 20) / offset; follow next_offset until null. Read one with "
-            "get_conversation. Requires the read permission."
+            "most 20) / offset; follow next_offset until null. Pages are by "
+            "offset over the newest-activity order: a conversation updated while "
+            "you page moves to the front, so this pass may miss it or repeat one "
+            "row at a page boundary -- for a complete snapshot, list again from "
+            "offset=0. Read one with get_conversation. Requires the read "
+            "permission."
         ),
         tier="read",
     )
@@ -450,13 +496,11 @@ def register_conversation_tools(
                 principal, selected = _selected_notebook(
                     repo, notebook_id, HISTORY_CAPABILITY
                 )
-                rows = _notebook_rows(repo, principal, [selected])
+                rows = _notebook_rows(principal, [selected])
                 rows += _global_rows(principal, selected)
             else:
                 principal = history_principal(repo)
-                rows = _notebook_rows(
-                    repo, principal, readable_allowlist(repo, principal)
-                )
+                rows = _notebook_rows(principal, readable_allowlist(principal))
                 rows += _global_rows(principal, "")
             return newest_first(rows)
 
@@ -472,7 +516,13 @@ def register_conversation_tools(
             "next_citation_offset). Then call again with "
             "turn_offset=next_turn_offset and both other offsets at 0, until "
             "next_turn_offset is null; `conversation` repeats the list row, "
-            "turn_count included. Conversations started in the browser are "
+            "turn_count included. A page may carry no citations while answer "
+            "text is left: keep following next_citation_offset. A page past the "
+            "first (answer_offset or citation_offset above 0) repeats the "
+            "question cut to 200 characters, ending in …; the first page "
+            "carries it whole up to 2,000 characters, cut the same way only if "
+            "the page could not fit otherwise; every cut counts in "
+            "truncation.omitted_characters. Conversations started in the browser are "
             "readable too (get_ask re-reads only jobs started through MCP). A "
             "question still being answered becomes a turn once it finishes; a "
             "conversation with no finished turn returns status=\"empty\". Each "

@@ -11,7 +11,8 @@ class ReplacedJobUnavailable(Exception):
 
 
 class GlobalAskAuthorityStorePort(Protocol):
-    """Batch read authority used only by global orchestration."""
+    """Batch read authority: global orchestration, and the MCP history lists
+    that span a token's allowlist (``deps.notebook_read_authority``)."""
     def readable_notebook_names(self, user_id: str) -> dict[str, str]: ...
     def readable_notebook_ids(self, notebook_ids: Sequence[str], user_id: str) -> set[str]: ...
 

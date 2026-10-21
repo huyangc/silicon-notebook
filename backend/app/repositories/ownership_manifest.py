@@ -636,6 +636,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.admin_query_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.analysis_issue_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.answer_link_repository', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.ask_history_store', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.ask_intent_handle_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.content_overview_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.extension_toggle_repository', kind='attribute', target='_runtime'),
@@ -652,6 +653,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_catalog_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_delete_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_question_suggestions_service', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_read_authority', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_sharing_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_store_port', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.retrieval_experience_jobs_service', kind='attribute', target='_runtime'),
@@ -2075,12 +2077,13 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._intent_history', kind='attribute', target='get_conversation'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.get_conversation', kind='attribute', target='get_conversation'),
             ConsumerSite(path='backend/app/api/mcp_tools/ask.py', scope='<module>._conversation', kind='attribute', target='get_conversation'),
-            ConsumerSite(path='backend/app/api/mcp_tools/conversations.py', scope='<module>._notebook_turn', kind='attribute', target='get_conversation'),
+            ConsumerSite(path='backend/tests/mcp_conversation_cases.py', scope='<module>.notebook_turn_reads_only_the_asked_answer', kind='patch', target='get_conversation'),
             ConsumerSite(path='backend/tests/test_admin_user_activity_api.py', scope='<module>.test_ask_detail_does_not_load_full_conversation_history', kind='patch', target='get_conversation'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='get_conversation'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='get_conversation'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/mcp_conversation_cases.py', scope='<module>.notebook_turn_reads_only_the_asked_answer', kind='patch', target='get_conversation'),
             ConsumerSite(path='backend/tests/test_admin_user_activity_api.py', scope='<module>.test_ask_detail_does_not_load_full_conversation_history', kind='patch', target='get_conversation'),
         ),
     ),
@@ -2190,6 +2193,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_question_index', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/services/image_backfill_phase.py', scope='<module>.run_backfill_images', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.__init__.<lambda>', kind='attribute', target='get_notebook'),
+            ConsumerSite(path='backend/tests/mcp_conversation_cases.py', scope='<module>.unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary', kind='patch', target='get_notebook'),
             ConsumerSite(path='backend/tests/test_notebook_delete_review_fixes.py', scope='<module>.test_asset_recheck_survives_actor_access_loss', kind='patch', target='get_notebook'),
             ConsumerSite(path='scripts/denoise_reextract_nb.py', scope='<module>.main', kind='attribute', target='get_notebook'),
             ConsumerSite(path='scripts/reflect_shadow_rig.py', scope='<module>._search_corpus_facts', kind='attribute', target='get_notebook'),
@@ -2198,6 +2202,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='get_notebook'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/mcp_conversation_cases.py', scope='<module>.unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary', kind='patch', target='get_notebook'),
             ConsumerSite(path='backend/tests/test_notebook_delete_review_fixes.py', scope='<module>.test_asset_recheck_survives_actor_access_loss', kind='patch', target='get_notebook'),
         ),
     ),
@@ -2414,11 +2419,12 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.list_conversations', kind='attribute', target='list_conversations'),
-            ConsumerSite(path='backend/app/api/mcp_tools/conversations.py', scope='<module>._notebook_rows', kind='attribute', target='list_conversations'),
+            ConsumerSite(path='backend/tests/mcp_conversation_cases.py', scope='<module>.unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary', kind='patch', target='list_conversations'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='list_conversations'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='list_conversations'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/mcp_conversation_cases.py', scope='<module>.unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary', kind='patch', target='list_conversations'),
         ),
     ),
     SurfaceMember(
@@ -3868,12 +3874,13 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._public_conversation_or_404', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/mcp_tools/_shared.py', scope='<module>._record_agent_call', kind='attribute', target='user_can_read_notebook'),
-            ConsumerSite(path='backend/app/api/mcp_tools/list_pages.py', scope='<module>.readable_allowlist', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/mcp_tools/profiles.py', scope='<module>.register_profile_tools.add_observation.run', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/mcp_tools/session.py', scope='<module>.register_session_tools.list_notebooks.load', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.public_report_route', kind='attribute', target='user_can_read_notebook'),
+            ConsumerSite(path='backend/tests/mcp_conversation_cases.py', scope='<module>.unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary', kind='patch', target='user_can_read_notebook'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/mcp_conversation_cases.py', scope='<module>.unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary', kind='patch', target='user_can_read_notebook'),
         ),
     ),
     SurfaceMember(
