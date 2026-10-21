@@ -216,17 +216,36 @@ _JOB_PLUMBING = (
 )
 
 
-def _lifecycle_function_source(name: str) -> str:
+def _lifecycle_tree() -> tuple[str, ast.AST]:
     path = (
         Path(__file__).resolve().parents[1]
         / "app" / "services" / "knowledge_lifecycle.py"
     )
     source = path.read_text(encoding="utf-8")
-    tree = ast.parse(source)
+    return source, ast.parse(source)
+
+
+def _lifecycle_function_source(name: str) -> str:
+    source, tree = _lifecycle_tree()
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return ast.get_source_segment(source, node) or ""
     raise AssertionError(f"{name} not found in knowledge_lifecycle.py")
+
+
+def _rebuild_pass_source() -> str:
+    """``rebuild_unified_kg`` and the phase helpers it was split into
+    (``_unified_rebuild_*``): the pass is all of them together."""
+    source, tree = _lifecycle_tree()
+    names = sorted(
+        node.name for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name.startswith("_unified_rebuild_")
+    )
+    assert names, "the rebuild phase helpers (_unified_rebuild_*) went missing"
+    return "\n".join(
+        _lifecycle_function_source(name) for name in ["rebuild_unified_kg", *names]
+    )
 
 
 def test_rebuild_unified_kg_body_knows_nothing_about_the_job_slot():
@@ -238,7 +257,7 @@ def test_rebuild_unified_kg_body_knows_nothing_about_the_job_slot():
     handling inside it would both break those callers and make "the algorithm is
     untouched" unverifiable — the exact regression this guard is aimed at.
     """
-    body = _lifecycle_function_source("rebuild_unified_kg")
+    body = _rebuild_pass_source()
     offenders = [name for name in _JOB_PLUMBING if name in body]
     assert offenders == [], (
         f"rebuild_unified_kg 的函数体里出现了任务槽管道 {offenders} —— "

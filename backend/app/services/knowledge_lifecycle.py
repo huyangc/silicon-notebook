@@ -43,6 +43,7 @@ import re
 import threading
 import time
 from contextlib import closing
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import (
     Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set,
@@ -491,6 +492,34 @@ def _fold_source_rows(rows: Any, counter: Any) -> None:
     with closing(rows):
         for row in rows:
             counter.add(row["source_id"], row["canonical_id"])
+
+
+@dataclass
+class _UnifiedKgRebuildRun:
+    """Cross-phase state of one ``rebuild_unified_kg`` run, handed from phase
+    helper to phase helper by identity. It holds only what a later phase reads
+    (the concept vectors never land here, see ``_unified_rebuild_concepts``) and
+    no callable pointing back at it, so it is freed by refcount when the call
+    returns, exactly when the single method's locals were."""
+
+    notebook_id: str
+    progress: Optional[Callable[[str, int, int], None]]
+    fresh: bool
+    #: The clustering-inputs version captured once at entry (stored at the end).
+    ver: str
+    claim: dict
+    generation: int
+    published_from: int
+    anchor_ts: str
+    run_id: str
+    ck_ver: str = ""
+    t_total: float = 0.0
+    seeds: List[str] = field(default_factory=list)
+    members_count: Dict[str, int] = field(default_factory=dict)
+    sd: Dict[str, Any] = field(default_factory=dict)
+    seed_to_canonical: Dict[str, str] = field(default_factory=dict)
+    now: str = ""
+    cluster_count: int = 0
 
 
 class KnowledgeLifecycleService:
@@ -6103,7 +6132,13 @@ class KnowledgeLifecycleService:
         names) are held in RAM, so peak memory scales with #unique name-seeds,
         not #objects. Clustering semantics are identical to the legacy
         all-objects-in-memory path (guarded by tests/test_unified_kg_repository,
-        test_cross_doc_merge, test_kg_merge, test_rebuild_streaming)."""
+        test_cross_doc_merge, test_kg_merge, test_rebuild_streaming).
+
+        The body runs as one private helper per phase (``_unified_rebuild_*``,
+        in call order below) over a single ``_UnifiedKgRebuildRun`` that carries
+        the cross-phase state by identity; the store calls, statements,
+        transactions and lock order are those of the single method it was split
+        from."""
         self.get_notebook(notebook_id)
         # fresh 隐含强制重建:fresh 要清 checkpoint 并重裁,只有真正走到 rebuild 分支才有意义。
         # 两个 CLI caller 已保证 force=(rebuild_only or fresh)/force=fresh;这里在函数边界再兜一层,
@@ -6114,41 +6149,81 @@ class KnowledgeLifecycleService:
         # reflects the inputs this rebuild actually consumed).
         _ver = self._cluster_input_version(notebook_id)
         if not force:
-            with self._connect() as db:
-                row = self.unified_kg.state_row(db, notebook_id)
-                cc = self.unified_kg.concept_clusters_count(db, notebook_id)
-            if row and row["cluster_input_version"] and row["cluster_input_version"] == _ver and cc > 0:
-                cached = int(row["cluster_count"] or 0)
-                self._settle_skip_path(notebook_id, row, _ver)
-                self.event_log.logger.info(
-                    "kg-rebuild[%s] skipped — inputs unchanged since last rebuild (%s clusters)",
-                    notebook_id, cached)
-                if progress is not None:
-                    try:
-                        progress(f"跳过:自上次 rebuild 起输入未变化({cached} clusters)", 0, 0)
-                    except Exception:
-                        pass
-                # canonical 关系层(派生)同款增量:自带 seq 闸,KG 未变即秒级 no-op。
-                try:
-                    self.rebuild_canonical_relations(notebook_id)
-                except Exception as exc:  # noqa: BLE001
-                    self.event_log.emit({"kind": "canonical_relations_rebuild_failed",
-                                         "notebook_id": notebook_id, "error": str(exc)[:200]})
-                # 共提桥接层(派生)同款增量:自带 mention_seq 闸,KG 未变即秒级 no-op。
-                try:
-                    self.rebuild_mention_bridge(notebook_id)
-                except Exception as exc:  # noqa: BLE001
-                    self.event_log.emit({"kind": "mention_bridge_rebuild_failed",
-                                         "notebook_id": notebook_id, "error": str(exc)[:200]})
-                # 增量:聚类被跳过(输入未变),但社区可能未建/过期 → rebuild_communities
-                # 自带版本闸,只在需要时建(纯图、无 LLM、秒级)。这让「只需重建社区」的
-                # 场景在原有刷新流程里零额外成本达成;fail-open,不拖垮跳过路径。
-                try:
-                    self.rebuild_communities(notebook_id, level=0)
-                except Exception as exc:  # noqa: BLE001
-                    self.event_log.emit({"kind": "communities_rebuild_failed",
-                                         "notebook_id": notebook_id, "error": str(exc)[:200]})
+            cached = self._unified_rebuild_skip(notebook_id, _ver, progress)
+            if cached is not None:
                 return cached
+        run = self._unified_rebuild_claim(notebook_id, _ver, progress, fresh)
+
+        # The whole rebuild body below runs under try/finally so a crash,
+        # exception, or cancellation ANYWHERE in it (not just during Pass A2
+        # of _stream_seed_reps) still clears this run's kg_cluster_scratch
+        # rows — see _unified_rebuild_cleanup.
+        try:
+            self._unified_rebuild_prepare(run)
+            self._unified_rebuild_concepts(run)
+            self._unified_rebuild_write_concepts(run)
+            self._unified_rebuild_other_types(run)
+            self._unified_rebuild_pending(run)
+            self._unified_rebuild_publish(run)
+        finally:
+            self._unified_rebuild_cleanup(run)
+        import time as _time
+        self._unified_rebuild_stage(
+            run, f"DONE {run.cluster_count} canonicals, "
+                 f"total {_time.perf_counter() - run.t_total:.1f}s")
+        self._unified_rebuild_derived_tail(notebook_id)
+        return run.cluster_count
+
+    def _unified_rebuild_skip(
+        self, notebook_id: str, _ver: str,
+        progress: Optional[Callable[[str, int, int], None]],
+    ) -> Optional[int]:
+        """The skip-when-unchanged gate of ``rebuild_unified_kg``: the cached
+        cluster count when the stored input version still equals ``_ver`` and
+        clusters exist (after the skip path's own settle step and its three
+        gated derived passes), else ``None`` — the caller rebuilds."""
+        with self._connect() as db:
+            row = self.unified_kg.state_row(db, notebook_id)
+            cc = self.unified_kg.concept_clusters_count(db, notebook_id)
+        if row and row["cluster_input_version"] and row["cluster_input_version"] == _ver and cc > 0:
+            cached = int(row["cluster_count"] or 0)
+            self._settle_skip_path(notebook_id, row, _ver)
+            self.event_log.logger.info(
+                "kg-rebuild[%s] skipped — inputs unchanged since last rebuild (%s clusters)",
+                notebook_id, cached)
+            if progress is not None:
+                try:
+                    progress(f"跳过:自上次 rebuild 起输入未变化({cached} clusters)", 0, 0)
+                except Exception:
+                    pass
+            # canonical 关系层(派生)同款增量:自带 seq 闸,KG 未变即秒级 no-op。
+            try:
+                self.rebuild_canonical_relations(notebook_id)
+            except Exception as exc:  # noqa: BLE001
+                self.event_log.emit({"kind": "canonical_relations_rebuild_failed",
+                                     "notebook_id": notebook_id, "error": str(exc)[:200]})
+            # 共提桥接层(派生)同款增量:自带 mention_seq 闸,KG 未变即秒级 no-op。
+            try:
+                self.rebuild_mention_bridge(notebook_id)
+            except Exception as exc:  # noqa: BLE001
+                self.event_log.emit({"kind": "mention_bridge_rebuild_failed",
+                                     "notebook_id": notebook_id, "error": str(exc)[:200]})
+            # 增量:聚类被跳过(输入未变),但社区可能未建/过期 → rebuild_communities
+            # 自带版本闸,只在需要时建(纯图、无 LLM、秒级)。这让「只需重建社区」的
+            # 场景在原有刷新流程里零额外成本达成;fail-open,不拖垮跳过路径。
+            try:
+                self.rebuild_communities(notebook_id, level=0)
+            except Exception as exc:  # noqa: BLE001
+                self.event_log.emit({"kind": "communities_rebuild_failed",
+                                     "notebook_id": notebook_id, "error": str(exc)[:200]})
+            return cached
+        return None
+
+    def _unified_rebuild_claim(
+        self, notebook_id: str, _ver: str,
+        progress: Optional[Callable[[str, int, int], None]], fresh: bool,
+    ) -> "_UnifiedKgRebuildRun":
+        """Claim the in-flight derived generation and mint this round's run id."""
         # ---- 取号(批 3·W2 §1.2:数据级跨进程单飞) --------------------------
         # skip-gate 在前、取号在后:无副作用的刷新不烧号、不占认领。取号微事务
         # 是 counter+1 并登记在飞代;被占且未过 TTL → KgMaintenanceAlreadyRunning
@@ -6161,9 +6236,6 @@ class KnowledgeLifecycleService:
                 ttl_seconds=self.settings.kg_derived_build_ttl_seconds)
         if _claim is None:
             raise KgMaintenanceAlreadyRunning(notebook_id, "rebuild")
-        generation = int(_claim["generation"])
-        _published_from = int(_claim["cluster_generation"])
-        _anchor_ts = _claim["ts"]
         # 断点续跑:进到这里=已确定真正要重算(force=True,或 force=False 因版本
         # 失配落空)——checkpoint GC/clear 移到这里(而非版本闸之前)才对:早前放在
         # 闸前时,force=False 且判定跳过的路径也会顺带做一次 GC 写,破坏了「跳过=零
@@ -6172,342 +6244,415 @@ class KnowledgeLifecycleService:
         # --rebuild-only 续跑不会因 emb_c 变了就把 merge_review/concept_desc
         # checkpoint 当作「输入变了」GC 掉、被迫重新走一遍可能数小时的 LLM 裁决;
         # item_key 已经提供细粒度正确性。fresh 仍清全部 checkpoint(强制两个 LLM
-        # 阶段重跑)。fail-open。checkpoint GC 与 _ck_ver 的 DB 读都在下面的
-        # try 里——取号之后任何可失败的一步都必须被 finally 的释放通道覆盖,
-        # 否则一次连接抖动就把认领留到 TTL(数小时)。
+        # 阶段重跑)。fail-open。checkpoint GC 与 _ck_ver 的 DB 读都在
+        # _unified_rebuild_prepare 里(调用方的 try 之内)——取号之后任何可失败的
+        # 一步都必须被 finally 的释放通道覆盖,否则一次连接抖动就把认领留到 TTL
+        # (数小时)。
         from uuid import uuid4 as _uuid4
-        from app.services.kg_merge import (cluster_seeds, filter_pending_seeds_by_decisions,
-                                           _norm, _discriminative_conflict, cluster_code_version,
-                                           seed_claim, seed_formula, seed_procedure)
         # Each rebuild gets a unique run_id so concurrent rebuilds of the SAME
         # notebook never wipe or read each other's scratch rows.
-        run_id = _uuid4().hex
+        return _UnifiedKgRebuildRun(
+            notebook_id=notebook_id, progress=progress, fresh=fresh, ver=_ver,
+            claim=_claim, generation=int(_claim["generation"]),
+            published_from=int(_claim["cluster_generation"]),
+            anchor_ts=_claim["ts"], run_id=_uuid4().hex,
+        )
 
-        # The whole rebuild body below runs under try/finally so a crash,
-        # exception, or cancellation ANYWHERE in it (not just during Pass A2
-        # of _stream_seed_reps) still clears this run's kg_cluster_scratch
-        # rows — see the finally at the bottom of this function.
+    def _unified_rebuild_prepare(self, run: "_UnifiedKgRebuildRun") -> None:
+        """Checkpoint maintenance, a stranded catch-up and pre-reaping, then
+        start the stage clock."""
+        notebook_id, fresh, generation = run.notebook_id, run.fresh, run.generation
+        _claim, _published_from = run.claim, run.published_from
+        _ck_ver = self._cluster_input_version(notebook_id, exclude_emb_count=True)
+        run.ck_ver = _ck_ver
         try:
-            _ck_ver = self._cluster_input_version(notebook_id, exclude_emb_count=True)
+            if fresh:
+                self.unified_kg.checkpoint_clear(notebook_id)
+            else:
+                self.unified_kg.checkpoint_gc(notebook_id, _ck_ver)
+        except Exception:  # noqa: BLE001 — checkpoint 维护失败不能打断 rebuild
+            self.event_log.logger.warning(
+                "rebuild checkpoint GC/clear 失败 for %s", notebook_id, exc_info=True)
+        # [催收欠账] 上轮翻转后崩溃留下的落库标记:先补欠账再谈本轮
+        # (设计 §1.5——标记在,退休代行就还没被回收,窗口集合冻结)。
+        if _claim["catchup_from"]:
+            self._settle_generation_catchup(
+                notebook_id, published_generation=_published_from,
+                since_ts=_claim["catchup_from"])
+        # [预回收] 残代有界分页回收——唯一的回收通道是这里+启动恢复,刻意
+        # 没有 finally 回收:跨翻转的在飞读者拿整整一轮 rebuild 的宽限
+        # (设计 D-W2-7)。keep = (published, 本轮在飞 G)。首号短路:
+        # G==1 ⇒ 本库从未有人取过号,表里只可能有 0 代存量(∈keep),
+        # 整趟键区走查纯属空证明,跳过(codex #671 R4 成本口径)。
+        if generation > 1:
+            self._reap_stale_cluster_generations(
+                notebook_id, keep=(_published_from, generation))
+        # Sub-stage instrumentation: log each stage's name+counts+elapsed on two
+        # channels (event_log INFO + progress banner). Pure logging — no effect on
+        # clustering results or the progress=None data path.
+        import time as _time
+        run.t_total = _time.perf_counter()
+
+    def _unified_rebuild_stage(self, run: "_UnifiedKgRebuildRun", msg: str) -> None:
+        """One stage boundary of ``rebuild_unified_kg``: the deleting checkpoint,
+        the claim heartbeat, then the log line and the progress banner."""
+        notebook_id, generation, progress = run.notebook_id, run.generation, run.progress
+        # 批 3·W1 PR-3 §4.2 选项 A 的检查点(unifiedkg-)——十个阶段
+        # 边界共用这一处改动(design doc 明文点名这是全篇成本最低的
+        # 插入点)。理由与 relink 检查点相同,见那条注释。
+        if self._notebook_deleting(notebook_id):
+            raise NotebookDeletingAbortsMaintenanceError(notebook_id)
+        # 同一处顺带认领心跳(R13):阶段边界即续租点。
+        self._refresh_generation_lease(notebook_id, generation)
+        self.event_log.logger.info("kg-rebuild[%s] %s", notebook_id, msg)
+        if progress is not None:
             try:
-                if fresh:
-                    self.unified_kg.checkpoint_clear(notebook_id)
-                else:
-                    self.unified_kg.checkpoint_gc(notebook_id, _ck_ver)
-            except Exception:  # noqa: BLE001 — checkpoint 维护失败不能打断 rebuild
-                self.event_log.logger.warning(
-                    "rebuild checkpoint GC/clear 失败 for %s", notebook_id, exc_info=True)
-            # [催收欠账] 上轮翻转后崩溃留下的落库标记:先补欠账再谈本轮
-            # (设计 §1.5——标记在,退休代行就还没被回收,窗口集合冻结)。
-            if _claim["catchup_from"]:
-                self._settle_generation_catchup(
-                    notebook_id, published_generation=_published_from,
-                    since_ts=_claim["catchup_from"])
-            # [预回收] 残代有界分页回收——唯一的回收通道是这里+启动恢复,刻意
-            # 没有 finally 回收:跨翻转的在飞读者拿整整一轮 rebuild 的宽限
-            # (设计 D-W2-7)。keep = (published, 本轮在飞 G)。首号短路:
-            # G==1 ⇒ 本库从未有人取过号,表里只可能有 0 代存量(∈keep),
-            # 整趟键区走查纯属空证明,跳过(codex #671 R4 成本口径)。
-            if generation > 1:
-                self._reap_stale_cluster_generations(
-                    notebook_id, keep=(_published_from, generation))
-            # Sub-stage instrumentation: log each stage's name+counts+elapsed on two
-            # channels (event_log INFO + progress banner). Pure logging — no effect on
-            # clustering results or the progress=None data path.
-            import time as _time
-            _t_total = _time.perf_counter()
-            def _stage(msg: str) -> None:
-                # 批 3·W1 PR-3 §4.2 选项 A 的检查点(unifiedkg-)——十个阶段
-                # 边界共用这一处改动(design doc 明文点名这是全篇成本最低的
-                # 插入点)。理由与 relink 检查点相同,见那条注释。
-                if self._notebook_deleting(notebook_id):
-                    raise NotebookDeletingAbortsMaintenanceError(notebook_id)
-                # 同一处顺带认领心跳(R13):阶段边界即续租点。
-                self._refresh_generation_lease(notebook_id, generation)
-                self.event_log.logger.info("kg-rebuild[%s] %s", notebook_id, msg)
-                if progress is not None:
-                    try:
-                        progress(msg, 0, 0)
-                    except Exception:
-                        pass
+                progress(msg, 0, 0)
+            except Exception:
+                pass
 
-            # --- Concepts (vector + name-seed clustering) ----------------------
-            # _stream_seed_reps re-populates kg_cluster_scratch for object_type=concept
-            # (object_id -> seed) and returns seed-level aggregates only.
+    def _unified_rebuild_concepts(self, run: "_UnifiedKgRebuildRun") -> None:
+        """Concept clustering (vector + name seeds) with the optional LLM merge
+        review and its re-cluster; leaves seeds, member counts and the
+        clustering result on ``run``."""
+        import time as _time
+
+        from app.services.kg_merge import _discriminative_conflict, _norm, cluster_seeds
+        notebook_id, run_id = run.notebook_id, run.run_id
+        def _stage(msg: str) -> None:
+            self._unified_rebuild_stage(run, msg)
+        # --- Concepts (vector + name-seed clustering) ----------------------
+        # _stream_seed_reps re-populates kg_cluster_scratch for object_type=concept
+        # (object_id -> seed) and returns seed-level aggregates only.
+        _t = _time.perf_counter()
+        reps, members_count, seed_first_name = self._stream_seed_reps(
+            notebook_id, "concept", lambda o: _norm(o["name"]), run_id=run_id)
+        # IMPORTANT: include seeds with NO vector (name-only) — use members_count
+        # keys, not reps keys, to match the legacy all-objects path.
+        seeds = sorted(members_count)
+        _stage(f"concept: streamed {sum(members_count.values())} objs → "
+               f"{len(seeds)} seeds, {len(reps)} vecs "
+               f"({_time.perf_counter() - _t:.1f}s)")
+        decided = self.decided_seed_pairs(notebook_id)
+        confirmed = {p for p, s in decided.items() if s == "confirmed"}
+        rejected = {p for p, s in decided.items() if s in ("rejected", "deferred")}
+        _t_cluster = _time.perf_counter()
+        sd = cluster_seeds(seeds, reps, members_count, seed_first_name, confirmed, rejected,
+                           conflict_fn=_discriminative_conflict, id_prefix="K-",
+                           rep_ann_max=self.settings.kg_cluster_rep_ann_max,
+                           ann_threads=self.settings.kg_cluster_ann_threads)
+        # LLM 兜底: ≥hi 的 auto_candidates 经复核确认后并入 confirmed, 重聚一次
+        from app.services.concept_merge_review import review_merge_candidates
+        autoc = sd.get("auto_candidates", [])
+        _t_mr = _time.perf_counter()
+        if autoc and self.model_clients.configured("kg_merge_review"):
+            # Optional LLM adjudication is an enhancement — it must NEVER be able to
+            # crash the rebuild. review_merge_candidates is already fail-open (chunked +
+            # defensive parse); this outer guard covers any other unexpected error in the
+            # block so the rebuild always proceeds to write the cluster map.
+            try:
+                extra = self._unified_rebuild_merge_review(
+                    run, autoc, review_merge_candidates)
+            except Exception:
+                self.event_log.logger.exception(
+                    "unified-KG merge-review adjudication failed for %s; proceeding without it",
+                    notebook_id,
+                )
+                extra = set()
+            if extra:
+                confirmed = set(confirmed) | extra
+                sd = cluster_seeds(seeds, reps, members_count, seed_first_name, confirmed, rejected,
+                                   conflict_fn=_discriminative_conflict, id_prefix="K-",
+                                   rep_ann_max=self.settings.kg_cluster_rep_ann_max,
+                                   ann_threads=self.settings.kg_cluster_ann_threads)
+            _stage(f"concept: merge-review {len(autoc)} candidates → "
+                   f"{len(extra)} merged ({_time.perf_counter() - _t_mr:.1f}s)")
+        _stage(f"concept: clustered {len(seeds)} seeds → "
+               f"{len(set(sd['seed_to_canonical'].values()))} canonicals, "
+               f"{len(sd.get('auto_candidates', []))} auto-cand "
+               f"({_time.perf_counter() - _t_cluster:.1f}s)")
+        # reps (concept mean-vectors, ~18GB at 4.4M seeds) is dead after
+        # clustering — its only consumers are the cluster_seeds calls above.
+        # Drop it BEFORE the derivation tail (canonical relations / mention
+        # bridge / build_viz / communities) so its ~18GB doesn't ride
+        # resident and stack on top of those stages (OOM audit P0-2). dict of
+        # numpy arrays → freed immediately by refcount, no gc needed. It never
+        # goes onto ``run``, so it dies with this frame at the latest.
+        del reps
+        run.seeds, run.members_count, run.sd = seeds, members_count, sd
+
+    def _unified_rebuild_merge_review(
+        self, run: "_UnifiedKgRebuildRun", autoc, review_merge_candidates,
+    ) -> set:
+        """LLM adjudication of the ≥hi auto candidates (checkpointed per
+        candidate pair); returns the seed pairs to union. The caller's guard
+        turns any error here into "no extra merges"."""
+        notebook_id, generation, _ck_ver = run.notebook_id, run.generation, run.ck_ver
+        cand_dicts = [{"id": f"ac{i}", "canonical_a": a, "canonical_b": b, "score": s}
+                      for i, (a, b, s) in enumerate(autoc)]
+        # ac{i} → canonical id 对的稳定键(续跑复用的锚)。
+        id_to_key = {f"ac{i}": _pair_key(a, b) for i, (a, b, s) in enumerate(autoc)}
+        # 已决(同 input_version)命中即跳过 LLM;只把未决候选发出去。
+        cached = self.unified_kg.checkpoint_load(
+            notebook_id, _ck_ver, "merge_review")
+        todo = [c for c in cand_dicts if id_to_key[c["id"]] not in cached]
+
+        def _persist(chunk_decisions):
+            # LLM 阶段的分块回调兼认领心跳(R13):merge review
+            # 可以单阶段跑数小时,只靠 stage 边界续租不够。
+            self._refresh_generation_lease(notebook_id, generation)
+            rows = [(id_to_key[d["candidate_id"]],
+                     {"decision": d["decision"], "confidence": d["confidence"]})
+                    for d in chunk_decisions if d.get("candidate_id") in id_to_key]
+            if rows:
+                self.unified_kg.checkpoint_put(
+                    notebook_id, _ck_ver, "merge_review", rows, self._now())
+
+        new = review_merge_candidates(
+            self.model_clients.chat("kg_merge_review"), todo,
+            batch_size=self.settings.kg_merge_review_batch_size,
+            max_workers=self.model_clients.parallelism("kg_merge_review"),
+            on_chunk=_persist,
+        )
+        # 合并 缓存 ∪ 新决策,按 pair_key 索引。
+        decided = dict(cached)
+        for d in new:
+            k = id_to_key.get(d.get("candidate_id"))
+            if k:
+                decided[k] = {"decision": d["decision"], "confidence": d["confidence"]}
+        extra = set()
+        for i, (a, b, s) in enumerate(autoc):
+            dec = decided.get(_pair_key(a, b))
+            if dec and dec.get("decision") == "merge" and \
+                    float(dec.get("confidence", 0)) >= self.settings.kg_merge_confirm_threshold:
+                extra.add(frozenset((a[2:] if a.startswith("K-") else a,
+                                     b[2:] if b.startswith("K-") else b)))
+        return extra
+
+    def _unified_rebuild_write_concepts(self, run: "_UnifiedKgRebuildRun") -> None:
+        """Concept descriptions, then the concept cluster map into the
+        in-flight generation."""
+        import time as _time
+        notebook_id, run_id, generation = run.notebook_id, run.run_id, run.generation
+        def _stage(msg: str) -> None:
+            self._unified_rebuild_stage(run, msg)
+        sd = run.sd
+        seed_to_canonical = sd["seed_to_canonical"]
+        run.seed_to_canonical = seed_to_canonical
+        desc_by_cid, desc_sig_by_cid = self._concept_description_stage(
+            notebook_id, sd, seed_to_canonical, run.members_count, run_id,
+            run.ck_ver, run.progress, _stage, _time, generation)
+        _t = _time.perf_counter()
+        self._write_cluster_map_streamed(notebook_id, "concept", seed_to_canonical,
+                                         sd["canonical_names"], desc_by_cid,
+                                         desc_sig_by_cid, run_id=run_id,
+                                         generation=generation)
+        _stage(f"concept: wrote clusters ({_time.perf_counter() - _t:.1f}s)")
+
+    def _unified_rebuild_other_types(self, run: "_UnifiedKgRebuildRun") -> None:
+        """Seed-exact cross-document merge of claims, formulas and procedures."""
+        import time as _time
+
+        from app.services.kg_merge import cluster_seeds, seed_claim, seed_formula, seed_procedure
+        notebook_id, run_id, generation = run.notebook_id, run.run_id, run.generation
+        # Cross-doc exact-normalized merge for non-concept types (v1: seed-based;
+        # vector near-dup remains concept-only). Each type isolated by id prefix.
+        # These types carry no vectors → reps_t is empty → cluster_seeds does only
+        # exact-seed grouping, matching the legacy cluster_objects(tobjs, {}, ...).
+        # compute_reps=False skips Pass B entirely (no embeddings join) since
+        # cluster_seeds receives {} anyway — avoids wasted ANN at scale.
+        _TYPE_MERGE = {"claim": (seed_claim, "KL-"),
+                       "formula": (seed_formula, "KF-"),
+                       "procedure": (seed_procedure, "KP-")}
+        for t, (sfn, prefix) in _TYPE_MERGE.items():
             _t = _time.perf_counter()
-            reps, members_count, seed_first_name = self._stream_seed_reps(
-                notebook_id, "concept", lambda o: _norm(o["name"]), run_id=run_id)
-            # IMPORTANT: include seeds with NO vector (name-only) — use members_count
-            # keys, not reps keys, to match the legacy all-objects path.
-            seeds = sorted(members_count)
-            _stage(f"concept: streamed {sum(members_count.values())} objs → "
-                   f"{len(seeds)} seeds, {len(reps)} vecs "
-                   f"({_time.perf_counter() - _t:.1f}s)")
-            decided = self.decided_seed_pairs(notebook_id)
-            confirmed = {p for p, s in decided.items() if s == "confirmed"}
-            rejected = {p for p, s in decided.items() if s in ("rejected", "deferred")}
-            _t_cluster = _time.perf_counter()
-            sd = cluster_seeds(seeds, reps, members_count, seed_first_name, confirmed, rejected,
-                               conflict_fn=_discriminative_conflict, id_prefix="K-",
-                               rep_ann_max=self.settings.kg_cluster_rep_ann_max,
-                               ann_threads=self.settings.kg_cluster_ann_threads)
-            # LLM 兜底: ≥hi 的 auto_candidates 经复核确认后并入 confirmed, 重聚一次
-            from app.services.concept_merge_review import review_merge_candidates
-            autoc = sd.get("auto_candidates", [])
-            _t_mr = _time.perf_counter()
-            if autoc and self.model_clients.configured("kg_merge_review"):
-                # Optional LLM adjudication is an enhancement — it must NEVER be able to
-                # crash the rebuild. review_merge_candidates is already fail-open (chunked +
-                # defensive parse); this outer guard covers any other unexpected error in the
-                # block so the rebuild always proceeds to write the cluster map.
-                try:
-                    cand_dicts = [{"id": f"ac{i}", "canonical_a": a, "canonical_b": b, "score": s}
-                                  for i, (a, b, s) in enumerate(autoc)]
-                    # ac{i} → canonical id 对的稳定键(续跑复用的锚)。
-                    id_to_key = {f"ac{i}": _pair_key(a, b) for i, (a, b, s) in enumerate(autoc)}
-                    # 已决(同 input_version)命中即跳过 LLM;只把未决候选发出去。
-                    cached = self.unified_kg.checkpoint_load(
-                        notebook_id, _ck_ver, "merge_review")
-                    todo = [c for c in cand_dicts if id_to_key[c["id"]] not in cached]
-
-                    def _persist(chunk_decisions):
-                        # LLM 阶段的分块回调兼认领心跳(R13):merge review
-                        # 可以单阶段跑数小时,只靠 stage 边界续租不够。
-                        self._refresh_generation_lease(notebook_id, generation)
-                        rows = [(id_to_key[d["candidate_id"]],
-                                 {"decision": d["decision"], "confidence": d["confidence"]})
-                                for d in chunk_decisions if d.get("candidate_id") in id_to_key]
-                        if rows:
-                            self.unified_kg.checkpoint_put(
-                                notebook_id, _ck_ver, "merge_review", rows, self._now())
-
-                    new = review_merge_candidates(
-                        self.model_clients.chat("kg_merge_review"), todo,
-                        batch_size=self.settings.kg_merge_review_batch_size,
-                        max_workers=self.model_clients.parallelism("kg_merge_review"),
-                        on_chunk=_persist,
-                    )
-                    # 合并 缓存 ∪ 新决策,按 pair_key 索引。
-                    decided = dict(cached)
-                    for d in new:
-                        k = id_to_key.get(d.get("candidate_id"))
-                        if k:
-                            decided[k] = {"decision": d["decision"], "confidence": d["confidence"]}
-                    extra = set()
-                    for i, (a, b, s) in enumerate(autoc):
-                        dec = decided.get(_pair_key(a, b))
-                        if dec and dec.get("decision") == "merge" and \
-                                float(dec.get("confidence", 0)) >= self.settings.kg_merge_confirm_threshold:
-                            extra.add(frozenset((a[2:] if a.startswith("K-") else a,
-                                                b[2:] if b.startswith("K-") else b)))
-                except Exception:
-                    self.event_log.logger.exception(
-                        "unified-KG merge-review adjudication failed for %s; proceeding without it",
-                        notebook_id,
-                    )
-                    extra = set()
-                if extra:
-                    confirmed = set(confirmed) | extra
-                    sd = cluster_seeds(seeds, reps, members_count, seed_first_name, confirmed, rejected,
-                                       conflict_fn=_discriminative_conflict, id_prefix="K-",
-                                       rep_ann_max=self.settings.kg_cluster_rep_ann_max,
-                                       ann_threads=self.settings.kg_cluster_ann_threads)
-                _stage(f"concept: merge-review {len(autoc)} candidates → "
-                       f"{len(extra)} merged ({_time.perf_counter() - _t_mr:.1f}s)")
-            _stage(f"concept: clustered {len(seeds)} seeds → "
-                   f"{len(set(sd['seed_to_canonical'].values()))} canonicals, "
-                   f"{len(sd.get('auto_candidates', []))} auto-cand "
-                   f"({_time.perf_counter() - _t_cluster:.1f}s)")
-            # reps (concept mean-vectors, ~18GB at 4.4M seeds) is dead after
-            # clustering — its only consumers are the cluster_seeds calls above.
-            # Drop it BEFORE the derivation tail (canonical relations / mention
-            # bridge / build_viz / communities) so its ~18GB doesn't ride
-            # resident and stack on top of those stages (OOM audit P0-2). dict of
-            # numpy arrays → freed immediately by refcount, no gc needed.
-            del reps
-            seed_to_canonical = sd["seed_to_canonical"]
-            desc_by_cid, desc_sig_by_cid = self._concept_description_stage(
-                notebook_id, sd, seed_to_canonical, members_count, run_id,
-                _ck_ver, progress, _stage, _time, generation)
-            _t = _time.perf_counter()
-            self._write_cluster_map_streamed(notebook_id, "concept", seed_to_canonical,
-                                             sd["canonical_names"], desc_by_cid,
-                                             desc_sig_by_cid, run_id=run_id,
+            reps_t, mc_t, sfn_t = self._stream_seed_reps(notebook_id, t, sfn,
+                                                          run_id=run_id,
+                                                          compute_reps=False)
+            # Empty type → scratch empty → _write_cluster_map_streamed clears rows
+            # (same as legacy write_clusters([], object_type=t)).
+            sd_t = cluster_seeds(sorted(mc_t), reps_t, mc_t, sfn_t, set(), set(),
+                                 conflict_fn=None, id_prefix=prefix,
+                                 rep_ann_max=self.settings.kg_cluster_rep_ann_max,
+                                 ann_threads=self.settings.kg_cluster_ann_threads)
+            self._write_cluster_map_streamed(notebook_id, t, sd_t["seed_to_canonical"],
+                                             sd_t["canonical_names"], run_id=run_id,
                                              generation=generation)
-            _stage(f"concept: wrote clusters ({_time.perf_counter() - _t:.1f}s)")
-            # Cross-doc exact-normalized merge for non-concept types (v1: seed-based;
-            # vector near-dup remains concept-only). Each type isolated by id prefix.
-            # These types carry no vectors → reps_t is empty → cluster_seeds does only
-            # exact-seed grouping, matching the legacy cluster_objects(tobjs, {}, ...).
-            # compute_reps=False skips Pass B entirely (no embeddings join) since
-            # cluster_seeds receives {} anyway — avoids wasted ANN at scale.
-            _TYPE_MERGE = {"claim": (seed_claim, "KL-"),
-                           "formula": (seed_formula, "KF-"),
-                           "procedure": (seed_procedure, "KP-")}
-            for t, (sfn, prefix) in _TYPE_MERGE.items():
-                _t = _time.perf_counter()
-                reps_t, mc_t, sfn_t = self._stream_seed_reps(notebook_id, t, sfn,
-                                                              run_id=run_id,
-                                                              compute_reps=False)
-                # Empty type → scratch empty → _write_cluster_map_streamed clears rows
-                # (same as legacy write_clusters([], object_type=t)).
-                sd_t = cluster_seeds(sorted(mc_t), reps_t, mc_t, sfn_t, set(), set(),
-                                     conflict_fn=None, id_prefix=prefix,
-                                     rep_ann_max=self.settings.kg_cluster_rep_ann_max,
-                                     ann_threads=self.settings.kg_cluster_ann_threads)
-                self._write_cluster_map_streamed(notebook_id, t, sd_t["seed_to_canonical"],
-                                                 sd_t["canonical_names"], run_id=run_id,
-                                                 generation=generation)
-                _stage(f"{t}: streamed+clustered+wrote ({_time.perf_counter() - _t:.1f}s)")
-            # Refresh pending candidates in ONE transaction (per-candidate inserts
-            # were the rebuild hotspot at scale). confirmed/rejected rows untouched.
-            now = self._now()
-            _t = _time.perf_counter()
-            with self._write() as db:
-                # 写段前复读认领(codex #671 R12 P2):pending 队列是**共享**
-                # 状态(不代次化)——被 TTL 抢占的败者在这里整表删写,会把
-                # 继任者的候选抹掉、把败者代次的候选留给人审,哪怕它随后的
-                # 翻转必然作废。与写代段同一条纪律,响亮早停。
-                if not self.unified_kg.derived_claim_still_held(
-                        db, notebook_id, generation):
-                    self.event_log.emit({
-                        "kind": "kg_generation_preempted",
-                        "notebook_id": notebook_id,
-                        "generation": generation, "stage": "pending_refresh",
-                    })
-                    raise KgDerivedGenerationPreempted(notebook_id, generation)
-                self.governance_store.delete_pending_merges(db, notebook_id)
-                # Decisions may land after the earlier cluster_seeds snapshot.
-                # DELETE first so PostgreSQL serializes against updates of the
-                # old pending rows; then read decisions and filter in this same
-                # transaction before publishing replacement rows.
-                live_decided = self.governance_store.decided_seed_pairs_from(
-                    db, notebook_id
-                )
-                live_confirmed = {
-                    pair for pair, status in live_decided.items()
-                    if status == "confirmed"
-                }
-                live_rejected = {
-                    pair for pair, status in live_decided.items()
-                    if status in ("rejected", "deferred")
-                }
-                pending_seeds = filter_pending_seeds_by_decisions(
-                    sd["pending_seeds"], seeds, live_confirmed, live_rejected
-                )
-                self.governance_store.insert_pending_merge_rows(
-                    db,
-                    [(self._new_id("mc"), notebook_id, ca, cb, sa, sb, score, now, now)
-                     for sa, sb, ca, cb, score in pending_seeds])
-            _stage(f"pending refresh ({_time.perf_counter() - _t:.1f}s)")
-            # #distinct concept canonicals (== set of cluster_map values in the legacy
-            # path: every canonical has ≥1 seed and every concept seed has a canonical).
-            cluster_count = len(set(seed_to_canonical.values()))
-            # ---- 翻指针(批 3·W2 §1.2 微事务) ------------------------------
-            # store 侧先按 key 字节序取齐全 4 类 advisory lock(append 与翻转
-            # 互相串行,两者皆毫秒级),同事务双 CAS:published 指针未被动过 且
-            # 在飞认领仍是自己;cluster_mutation_seq 在同一语句 bump(版本身份
-            # 与指针行变化同提交);催收锚点同事务落库(崩溃后下轮先补欠账)。
-            # 零行更新 = 被 TTL 抢占或被 delete_notebook_kg 重置——本轮作废
-            # 不发布,响亮失败(写好的 G 代行留给下一轮预回收清理)。
-            with self._write() as db:
-                _flipped = self.unified_kg.flip_cluster_generation(
-                    db, notebook_id, published_from=_published_from,
-                    generation=generation, catchup_from_ts=_anchor_ts, now=now)
-            if not _flipped:
+            self._unified_rebuild_stage(
+                run, f"{t}: streamed+clustered+wrote ({_time.perf_counter() - _t:.1f}s)")
+
+    def _unified_rebuild_pending(self, run: "_UnifiedKgRebuildRun") -> None:
+        """Replace the pending merge candidates in one transaction, filtered by
+        the decisions live at that moment."""
+        import time as _time
+
+        from app.services.kg_merge import filter_pending_seeds_by_decisions
+        notebook_id, generation, sd, seeds = run.notebook_id, run.generation, run.sd, run.seeds
+        # Refresh pending candidates in ONE transaction (per-candidate inserts
+        # were the rebuild hotspot at scale). confirmed/rejected rows untouched.
+        now = self._now()
+        run.now = now
+        _t = _time.perf_counter()
+        with self._write() as db:
+            # 写段前复读认领(codex #671 R12 P2):pending 队列是**共享**
+            # 状态(不代次化)——被 TTL 抢占的败者在这里整表删写,会把
+            # 继任者的候选抹掉、把败者代次的候选留给人审,哪怕它随后的
+            # 翻转必然作废。与写代段同一条纪律,响亮早停。
+            if not self.unified_kg.derived_claim_still_held(
+                    db, notebook_id, generation):
                 self.event_log.emit({
-                    "kind": "kg_generation_preempted", "notebook_id": notebook_id,
-                    "generation": generation, "stage": "flip",
+                    "kind": "kg_generation_preempted",
+                    "notebook_id": notebook_id,
+                    "generation": generation, "stage": "pending_refresh",
                 })
                 raise KgDerivedGenerationPreempted(notebook_id, generation)
-            self._invalidate_unified_cache(notebook_id)
-            _stage("flipped cluster generation "
-                   f"{_published_from} → {generation}")
-            # ---- 催收(设计 §1.5:单遍搬运) --------------------------------
-            # 翻转后 append 全落新 published 代;此前窗口内的融合行完整躺在
-            # 退休代且集合冻结——重放安置进新代(幂等,append_clusters 的
-            # added>0 判据推进版本身份),完成后 CAS 清锚点标记。
-            _caught_up = self._settle_generation_catchup(
-                notebook_id, published_generation=generation,
-                since_ts=_anchor_ts)
-            if _caught_up:
-                # codex #671 R1 P2:催收把窗口 append 安置进了新 published 代,
-                # 其中可能有本轮聚类没见过的新 canonical——cluster_count 是
-                # 催收前从 seed_to_canonical 算的,原样持久化会让
-                # unified_kg_status 低报到下一次 rebuild。按 published 代的
-                # 既有 DISTINCT 切片重算(与 incremental fuse 的簇名读同一条
-                # 已登记不可收窄的读,只在真有新增时付一次)。
-                with self._connect() as db:
-                    # 按 canonical_id 去重(codex #671 R10 P2):该读返回
-                    # DISTINCT (canonical_id, canonical_name) 对,一个 canonical
-                    # 合法拥有多个名字时按行数计会虚高;口径必须与
-                    # len(set(seed_to_canonical.values()))(distinct concept
-                    # canonicals)一致。
-                    cluster_count = len({
-                        r["canonical_id"]
-                        for r in self.governance_store.incremental_cluster_rows(
-                            db, notebook_id, "concept")})
+            self.governance_store.delete_pending_merges(db, notebook_id)
+            # Decisions may land after the earlier cluster_seeds snapshot.
+            # DELETE first so PostgreSQL serializes against updates of the
+            # old pending rows; then read decisions and filter in this same
+            # transaction before publishing replacement rows.
+            live_decided = self.governance_store.decided_seed_pairs_from(
+                db, notebook_id
+            )
+            live_confirmed = {
+                pair for pair, status in live_decided.items()
+                if status == "confirmed"
+            }
+            live_rejected = {
+                pair for pair, status in live_decided.items()
+                if status in ("rejected", "deferred")
+            }
+            pending_seeds = filter_pending_seeds_by_decisions(
+                sd["pending_seeds"], seeds, live_confirmed, live_rejected
+            )
+            self.governance_store.insert_pending_merge_rows(
+                db,
+                [(self._new_id("mc"), notebook_id, ca, cb, sa, sb, score, now, now)
+                 for sa, sb, ca, cb, score in pending_seeds])
+        self._unified_rebuild_stage(run, f"pending refresh ({_time.perf_counter() - _t:.1f}s)")
+
+    def _unified_rebuild_publish(self, run: "_UnifiedKgRebuildRun") -> None:
+        """Flip the published generation, catch up the window's appends into it
+        and store the rebuild state; sets ``run.cluster_count``."""
+        from app.services.kg_merge import cluster_code_version
+        notebook_id, generation, now = run.notebook_id, run.generation, run.now
+        _claim, _published_from, _anchor_ts = run.claim, run.published_from, run.anchor_ts
+        # #distinct concept canonicals (== set of cluster_map values in the legacy
+        # path: every canonical has ≥1 seed and every concept seed has a canonical).
+        cluster_count = len(set(run.seed_to_canonical.values()))
+        # ---- 翻指针(批 3·W2 §1.2 微事务) ------------------------------
+        # store 侧先按 key 字节序取齐全 4 类 advisory lock(append 与翻转
+        # 互相串行,两者皆毫秒级),同事务双 CAS:published 指针未被动过 且
+        # 在飞认领仍是自己;cluster_mutation_seq 在同一语句 bump(版本身份
+        # 与指针行变化同提交);催收锚点同事务落库(崩溃后下轮先补欠账)。
+        # 零行更新 = 被 TTL 抢占或被 delete_notebook_kg 重置——本轮作废
+        # 不发布,响亮失败(写好的 G 代行留给下一轮预回收清理)。
+        with self._write() as db:
+            _flipped = self.unified_kg.flip_cluster_generation(
+                db, notebook_id, published_from=_published_from,
+                generation=generation, catchup_from_ts=_anchor_ts, now=now)
+        if not _flipped:
+            self.event_log.emit({
+                "kind": "kg_generation_preempted", "notebook_id": notebook_id,
+                "generation": generation, "stage": "flip",
+            })
+            raise KgDerivedGenerationPreempted(notebook_id, generation)
+        self._invalidate_unified_cache(notebook_id)
+        self._unified_rebuild_stage(run, "flipped cluster generation "
+                                    f"{_published_from} → {generation}")
+        # ---- 催收(设计 §1.5:单遍搬运) --------------------------------
+        # 翻转后 append 全落新 published 代;此前窗口内的融合行完整躺在
+        # 退休代且集合冻结——重放安置进新代(幂等,append_clusters 的
+        # added>0 判据推进版本身份),完成后 CAS 清锚点标记。
+        _caught_up = self._settle_generation_catchup(
+            notebook_id, published_generation=generation,
+            since_ts=_anchor_ts)
+        if _caught_up:
+            # codex #671 R1 P2:催收把窗口 append 安置进了新 published 代,
+            # 其中可能有本轮聚类没见过的新 canonical——cluster_count 是
+            # 催收前从 seed_to_canonical 算的,原样持久化会让
+            # unified_kg_status 低报到下一次 rebuild。按 published 代的
+            # 既有 DISTINCT 切片重算(与 incremental fuse 的簇名读同一条
+            # 已登记不可收窄的读,只在真有新增时付一次)。
+            with self._connect() as db:
+                # 按 canonical_id 去重(codex #671 R10 P2):该读返回
+                # DISTINCT (canonical_id, canonical_name) 对,一个 canonical
+                # 合法拥有多个名字时按行数计会虚高;口径必须与
+                # len(set(seed_to_canonical.values()))(distinct concept
+                # canonicals)一致。
+                cluster_count = len({
+                    r["canonical_id"]
+                    for r in self.governance_store.incremental_cluster_rows(
+                        db, notebook_id, "concept")})
+        with self._write() as db:
+            # CRITICAL: the store's finish_rebuild_state UPSERT stores
+            # cluster_input_version=_ver (captured at ENTRY) and clears dirty
+            # only while kg_mutation_seq still equals the claim's (input_seq:
+            # a change that arrived mid-rebuild keeps dirty=1), but MUST NOT
+            # touch kg_mutation_seq — omitted from both the column list and
+            # the SET so the counter is PRESERVED. Bumping it would advance the
+            # version past what was just stored (gate never skips); resetting
+            # it would lose mutations that arrived mid-rebuild.
+            self.unified_kg.finish_rebuild_state(
+                db, notebook_id, run.ver, cluster_count, now,
+                published_generation=generation,
+                input_seq=_claim["kg_mutation_seq"],
+                cluster_code_version=cluster_code_version(self.settings))
+        run.cluster_count = cluster_count
+
+    def _unified_rebuild_cleanup(self, run: "_UnifiedKgRebuildRun") -> None:
+        """The unconditional ``finally`` of ``rebuild_unified_kg``: drop this
+        run's scratch rows, then release the claim (CAS)."""
+        notebook_id, run_id, generation = run.notebook_id, run.run_id, run.generation
+        # Final cleanup: drop only THIS run's scratch rows (run_id-scoped
+        # so a concurrent rebuild with a different run_id is unaffected).
+        # MUST be unconditional (finally, not straight-line): Pass A2
+        # now commits each insert_scratch_rows batch independently (see the
+        # comment at its call sites), so a crash/exception/cancellation
+        # anywhere in the try of rebuild_unified_kg — not just during Pass A2 —
+        # would otherwise strand this run_id's rows forever: kg_cluster_scratch
+        # has no timestamp column, and every DELETE against it in the codebase
+        # is run_id-scoped, so nothing could ever reclaim them. Before batching,
+        # an interrupted Pass A2 rolled its scratch rows back atomically (one
+        # txn); batching traded that for per-batch durability, so cleanup must
+        # now be explicit here instead. Swallow+log so a cleanup failure never
+        # masks whatever exception is already propagating out of the try.
+        #
+        # kg_canonical_scratch (write-lock slimming improvement point 2's
+        # preparation-segment table) gets the SAME treatment, in the SAME
+        # write() block: _write_cluster_map_streamed only clears its OWN
+        # run's rows at the START of each per-type call (to keep two
+        # back-to-back types in the same run from cross-contaminating —
+        # see its docstring), so nothing clears the LAST type's rows once
+        # the whole rebuild finishes, and a crash inside
+        # _write_cluster_map_streamed (prep or swap) would otherwise
+        # strand them forever for the same reason kg_cluster_scratch rows
+        # would.
+        try:
             with self._write() as db:
-                # CRITICAL: the store's finish_rebuild_state UPSERT stores
-                # cluster_input_version=_ver (captured at ENTRY) and clears dirty
-                # only while kg_mutation_seq still equals the claim's (input_seq:
-                # a change that arrived mid-rebuild keeps dirty=1), but MUST NOT
-                # touch kg_mutation_seq — omitted from both the column list and
-                # the SET so the counter is PRESERVED. Bumping it would advance the
-                # version past what was just stored (gate never skips); resetting
-                # it would lose mutations that arrived mid-rebuild.
-                self.unified_kg.finish_rebuild_state(
-                    db, notebook_id, _ver, cluster_count, now,
-                    published_generation=generation,
-                    input_seq=_claim["kg_mutation_seq"],
-                    cluster_code_version=cluster_code_version(self.settings))
-        finally:
-            # Final cleanup: drop only THIS run's scratch rows (run_id-scoped
-            # so a concurrent rebuild with a different run_id is unaffected).
-            # MUST be unconditional (finally, not straight-line): Pass A2 above
-            # now commits each insert_scratch_rows batch independently (see the
-            # comment at its call sites), so a crash/exception/cancellation
-            # anywhere in the try above — not just during Pass A2 — would
-            # otherwise strand this run_id's rows forever: kg_cluster_scratch has
-            # no timestamp column, and every DELETE against it in the codebase is
-            # run_id-scoped, so nothing could ever reclaim them. Before batching,
-            # an interrupted Pass A2 rolled its scratch rows back atomically (one
-            # txn); batching traded that for per-batch durability, so cleanup must
-            # now be explicit here instead. Swallow+log so a cleanup failure never
-            # masks whatever exception is already propagating out of the try.
-            #
-            # kg_canonical_scratch (write-lock slimming improvement point 2's
-            # preparation-segment table) gets the SAME treatment, in the SAME
-            # write() block: _write_cluster_map_streamed only clears its OWN
-            # run's rows at the START of each per-type call (to keep two
-            # back-to-back types in the same run from cross-contaminating —
-            # see its docstring), so nothing clears the LAST type's rows once
-            # the whole rebuild finishes, and a crash inside
-            # _write_cluster_map_streamed (prep or swap) would otherwise
-            # strand them forever for the same reason kg_cluster_scratch rows
-            # would.
-            try:
-                with self._write() as db:
-                    self.unified_kg.clear_scratch_run(db, notebook_id, run_id)
-                    self.unified_kg.clear_canonical_scratch_run(db, notebook_id, run_id)
-            except Exception:  # noqa: BLE001
-                self.event_log.logger.warning(
-                    "rebuild scratch cleanup 失败 for %s run_id=%s",
-                    notebook_id, run_id, exc_info=True)
-            # 释放通道 b(finally CAS,设计 §1.2/复评 P0-2):覆盖异常、翻转
-            # CAS 作废、抢占后迟到释放(CAS 只清自己 → 天然 no-op)全部出口;
-            # 翻转成功时 building 已在翻转事务清零,这里同样 no-op。少了这条,
-            # 一次普通失败就把整库按 TTL(数小时)锁在 409。swallow+log:释放
-            # 失败不得掩盖 try 里正在冒泡的真异常(最坏 TTL 兜底)。
-            try:
-                with self._write() as db:
-                    self.unified_kg.release_derived_claim(
-                        db, notebook_id, generation)
-            except Exception:  # noqa: BLE001
-                self.event_log.logger.warning(
-                    "rebuild 代际认领释放失败 for %s generation=%s(TTL 兜底)",
-                    notebook_id, generation, exc_info=True)
-        _stage(f"DONE {cluster_count} canonicals, total {_time.perf_counter() - _t_total:.1f}s")
+                self.unified_kg.clear_scratch_run(db, notebook_id, run_id)
+                self.unified_kg.clear_canonical_scratch_run(db, notebook_id, run_id)
+        except Exception:  # noqa: BLE001
+            self.event_log.logger.warning(
+                "rebuild scratch cleanup 失败 for %s run_id=%s",
+                notebook_id, run_id, exc_info=True)
+        # 释放通道 b(finally CAS,设计 §1.2/复评 P0-2):覆盖异常、翻转
+        # CAS 作废、抢占后迟到释放(CAS 只清自己 → 天然 no-op)全部出口;
+        # 翻转成功时 building 已在翻转事务清零,这里同样 no-op。少了这条,
+        # 一次普通失败就把整库按 TTL(数小时)锁在 409。swallow+log:释放
+        # 失败不得掩盖 try 里正在冒泡的真异常(最坏 TTL 兜底)。
+        try:
+            with self._write() as db:
+                self.unified_kg.release_derived_claim(
+                    db, notebook_id, generation)
+        except Exception:  # noqa: BLE001
+            self.event_log.logger.warning(
+                "rebuild 代际认领释放失败 for %s generation=%s(TTL 兜底)",
+                notebook_id, generation, exc_info=True)
+
+    def _unified_rebuild_derived_tail(self, notebook_id: str) -> None:
+        """Everything after a published rebuild: the derived layers (forced,
+        each fail-open), the viz refresh and the retrieval-index trigger."""
         # canonical 关系层(派生):聚类刚重算 → force=True(闸可能误跳)。fail-open。
         try:
             self.rebuild_canonical_relations(notebook_id, force=True)
@@ -6536,7 +6681,6 @@ class KnowledgeLifecycleService:
         except Exception as exc:  # noqa: BLE001
             self.event_log.emit({"kind": "communities_rebuild_failed",
                                  "notebook_id": notebook_id, "error": str(exc)[:200]})
-        return cluster_count
 
 
     def _refresh_viz_after_rebuild(self, notebook_id: str) -> None:

@@ -4418,7 +4418,7 @@ class NotebookDeletingAbortsMaintenanceError(RuntimeError):
     `run_unified_kg_rebuild_job`），不新开一条通道——这正是选项 A（检查点）
     相对选项 B（主动 abort 需要新建注册表）更便宜的地方。落点三处：
     `knowledge_lifecycle.py` 的 `relink_notebook_kg` 逐源循环、
-    `rebuild_unified_kg` 的 `_stage`（10 个阶段边界共用一处改动）、
+    `rebuild_unified_kg` 的阶段边界 `_unified_rebuild_stage`（10 个阶段边界共用一处改动）、
     T-5a 的 `_drain_graph_rows_before_reset` 逐批检查点。
 
     第三个检查点（`buildkg-`/`rebuildkg-` 的批循环）不用这个类——那条路径走
