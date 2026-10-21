@@ -44,6 +44,14 @@ CONNECTION_FAILED_MESSAGE = (
     "原始错误不打印）。请检查 DATABASE_URL 的写法（密码里的特殊字符须 URL 编码）、"
     "数据库是否在运行、网络是否可达以及用户名和密码，再重跑本命令。"
 )
+#: Connected, but the ledger read failed (statement timeout, lock wait,
+#: missing privilege). Equally free of connection details and of the server's
+#: own error text.
+QUERY_FAILED_MESSAGE = (
+    "已连上 PostgreSQL，但读取 schema 迁移账本失败（查询超时、锁等待或权限不足；为免泄露，"
+    "原始错误不打印）。请确认该数据库用户能读 silicon_schema_migrations、库上没有长时间持锁的"
+    "操作，必要时调大 POSTGRES_STATEMENT_TIMEOUT_SECONDS，再重跑本命令。"
+)
 #: ``connect_timeout`` used when a caller has no ``Settings`` to read it from.
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 5
 DEFAULT_STATEMENT_TIMEOUT_MS = 30_000
@@ -115,14 +123,32 @@ def version_label(backend: str, version: int) -> str:
     return f"SQLite v{version}"
 
 
-def schema_refusal_message(state: SchemaCurrency, *, migrating: bool = False) -> str:
+def schema_refusal_message(
+    state: SchemaCurrency, *, migrating: bool = False, target_file: str | None = None
+) -> str:
     """The one refusal wording: the reason, then the way out.
 
     ``migrating`` is the ``database migrate`` command's own refusal: it does
     migrate, so its wording for a never-initialized database says what it does
     not do (create one) instead of "this command does not migrate".
+
+    ``target_file`` is a tool that takes an explicit SQLite ``--db`` path rather
+    than the deployment settings: the remedies then name that file, because
+    ``database migrate`` and the service act on ``DATABASE_URL``, which need
+    not point at it.
     """
     required = version_label(state.backend, state.required)
+    service = "以该库启动一次服务" if target_file else "启动一次服务"
+    upgraded_service = "以该库启动一次升级后的服务" if target_file else "启动一次升级后的服务"
+    if target_file:
+        migrate = (
+            f"对该文件设置 `DATABASE_URL=sqlite:///{target_file}` 后停服运行 `{MIGRATE_COMMAND}`"
+            f"（离线包里是 `{MIGRATE_MODULE_COMMAND}`）"
+        )
+    else:
+        migrate = (
+            f"停服并运行 `{MIGRATE_COMMAND}`（离线包里是 `{MIGRATE_MODULE_COMMAND}`）"
+        )
     if not state.initialized:
         if state.sqlite_file_missing:
             reason = "SQLite 库文件不存在"
@@ -137,7 +163,7 @@ def schema_refusal_message(state: SchemaCurrency, *, migrating: bool = False) ->
         )
         return (
             f"数据库还没有初始化（{reason}），本构建需要 {required}；{scope}。"
-            "请先启动一次服务，由服务建库并写入内置账户，再重跑本命令。"
+            f"请先{service}，由服务建库并写入内置账户，再重跑本命令。"
         )
     if not state.ledger_consistent:
         if state.checksum_mismatch_at is not None:
@@ -164,8 +190,7 @@ def schema_refusal_message(state: SchemaCurrency, *, migrating: bool = False) ->
         )
     return (
         f"数据库 schema 版本是 {current}，本构建需要 {required}；本命令不迁移数据库。"
-        f"请先停服并运行 `{MIGRATE_COMMAND}`（离线包里是 `{MIGRATE_MODULE_COMMAND}`），"
-        "或启动一次升级后的服务（启动时自动迁移），"
+        f"请先{migrate}，或{upgraded_service}（启动时自动迁移），"
         "再重跑本命令；若这个库属于仍在运行旧版本的服务，请改用与该服务相同版本的代码运行本命令。"
     )
 
@@ -183,13 +208,17 @@ def inspect_sqlite_schema(path: Path) -> SchemaCurrency:
     existed (a read-only connection cannot remove them), so the probe picks the
     open that creates nothing:
 
-    * no ``-wal`` and no ``-shm`` beside the file -- nobody holds the database
-      open and every committed page is in the main file, so ``immutable=1``
-      (no locks, no side files) reads the true ``user_version``;
-    * either side file present -- some connection has the database open (a
-      serving process, typically), the newest ``user_version`` may still sit in
-      the WAL, and the side files already exist, so an ordinary ``mode=ro``
-      open reads through the WAL and adds nothing new.
+    * no ``-wal``, ``-shm`` or ``-journal`` beside the file -- nobody holds the
+      database open and every committed page is in the main file, so
+      ``immutable=1`` (no locks, no side files) reads the true ``user_version``;
+    * any of them present -- some connection has the database open (a serving
+      process, typically), the newest ``user_version`` may still sit in the
+      WAL, or a DELETE-mode rollback journal (hot, or a writer mid-transaction)
+      holds pages the main file must not be trusted without; the side file
+      already exists, so an ordinary ``mode=ro`` open takes the locks and
+      either reads through the WAL or, for a hot journal it cannot roll back
+      read-only, fails (``SchemaInspectionError``) instead of reading unrolled
+      pages -- and adds nothing new.
     """
     import sqlite3
 
@@ -201,7 +230,8 @@ def inspect_sqlite_schema(path: Path) -> SchemaCurrency:
         )
     resolved = path.resolve()
     side_files = any(
-        resolved.with_name(resolved.name + suffix).exists() for suffix in ("-wal", "-shm")
+        resolved.with_name(resolved.name + suffix).exists()
+        for suffix in ("-wal", "-shm", "-journal")
     )
     flags = "mode=ro" if side_files else "mode=ro&immutable=1"
     try:
@@ -235,18 +265,24 @@ def _read_postgres_ledger(
     quiet and replaces any connect failure -- a conninfo parse error quoting a
     password token, a wrong password naming the user, an unreachable host --
     with a generic error, which this function then replaces with the fixed
-    wording, dropping the cause (``from None``). ``connect_timeout`` bounds the
+    wording, dropping the cause (``from None``). A session that connected but
+    could not read the ledger (statement timeout, lock wait, privilege) gets
+    the second fixed wording, equally free of the server's error text. ``connect_timeout`` bounds the
     handshake (an unreachable host otherwise waits on the OS TCP timeout, about
     two minutes); ``statement_timeout`` bounds the two reads."""
     from app.repositories.postgres.database import _SafeDiagnosticConnection
 
     try:
-        with _SafeDiagnosticConnection.connect(
+        connection = _SafeDiagnosticConnection.connect(
             database_url,
             autocommit=True,
             connect_timeout=max(1, int(connect_timeout_seconds)),
             application_name="silicon-notebook-schema-check",
-        ) as connection:
+        )
+    except Exception:
+        raise SchemaInspectionError(CONNECTION_FAILED_MESSAGE) from None
+    try:
+        with connection:
             connection.execute(
                 "SELECT set_config('statement_timeout', %s, false)",
                 (f"{max(1, int(statement_timeout_ms))}ms",),
@@ -261,7 +297,7 @@ def _read_postgres_ledger(
                 "ORDER BY version"
             ).fetchall()
     except Exception:
-        raise SchemaInspectionError(CONNECTION_FAILED_MESSAGE) from None
+        raise SchemaInspectionError(QUERY_FAILED_MESSAGE) from None
 
 
 def inspect_postgres_schema(

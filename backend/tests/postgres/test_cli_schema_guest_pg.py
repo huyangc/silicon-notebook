@@ -313,6 +313,36 @@ def test_the_maintenance_opener_rechecks_the_ledger_under_the_lock(guest_pg, mon
     assert f"PostgreSQL {REQUIRED + 1:04d}" in str(caught.value)
 
 
+def test_a_ledger_read_that_times_out_gets_the_query_wording(
+    guest_pg, tmp_path, monkeypatch, capfd
+):
+    """Connected, but the ledger is held under an exclusive lock: the read hits
+    the configured statement timeout and the operator sees the second fixed
+    wording -- bounded in time, no connection details, no server text."""
+    import time
+    from urllib.parse import urlsplit
+
+    monkeypatch.setenv("POSTGRES_STATEMENT_TIMEOUT_SECONDS", "1")
+    monkeypatch.setenv("POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS", "0.5")  # must not exceed it
+    get_settings.cache_clear()
+    case = next(case for case in CASES if case.name == "batch_ingest embed")
+    with psycopg.connect(guest_pg) as holder:
+        holder.execute("LOCK TABLE silicon_schema_migrations IN ACCESS EXCLUSIVE MODE")
+        started = time.monotonic()
+        code = run_case(case, _ctx(tmp_path), monkeypatch)
+        elapsed = time.monotonic() - started
+        holder.rollback()
+
+    output = capfd.readouterr()
+    text = output.out + output.err
+    assert code == 2, text
+    assert "已连上 PostgreSQL，但读取 schema 迁移账本失败" in text
+    assert elapsed < 15
+    parts = urlsplit(guest_pg)
+    for token in (str(parts.hostname), parts.path.lstrip("/"), "canceling statement"):
+        assert token not in text, f"{token!r} leaked: {text}"
+
+
 @pytest.mark.parametrize(
     "probe",
     ["database migrate", "batch_ingest embed", "build_chunks", "scale ledger preflight"],

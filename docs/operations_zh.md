@@ -73,6 +73,8 @@ selected-source 准备的约定相同。
 提示同时给出原因和解决办法（迁移命令的两种写法：统一入口与离线包里的模块写法），并且什么都不创建——
 不建 SQLite 文件、不留 `-wal`/`-shm`，也不建 PostgreSQL 账本。PostgreSQL 检查根本连不上时（URL 写法
 有误、凭据不对、主机不可达），以退出码 2 退出，只打印一条固定提示，不含用户名、密码、主机、端口或库名；
+连上了但读不出账本（查询超时、锁等待、权限不足）时同样退出码 2，打印另一条固定提示，同样不含连接信息
+与服务端原始错误；
 握手受 `POSTGRES_POOL_ACQUIRE_TIMEOUT_SECONDS` 约束，两次读取受 `POSTGRES_STATEMENT_TIMEOUT_SECONDS`
 约束。停服维护命令拿到维护锁之后会再核对一次 schema，期间若有人跑过 `database migrate` 也不会在
 对不上的库上干活：
@@ -2489,7 +2491,8 @@ PYTHONPATH=backend python scripts/backfill_promotion_targets.py --db .local/sili
 
 和 `merge_dbs.py` 「总是写全新输出」的约定不同,本工具直接就地修改你给的 `--db` 路径;
 它是 [schema guest](#schema-归属只有服务和-database-migrate-迁移)：从不迁移这个文件，库不是本构建的 schema
-时以退出码 3 拒绝（提示原因和解决办法）——先启动一次升级后的服务，或运行 `database migrate`。
+时以退出码 3 拒绝（提示原因和解决办法）。解决办法指向这个文件：对它设置 `DATABASE_URL=sqlite:///<该路径>` 后停服运行
+`database migrate`，或以该库启动一次升级后的服务。
 
 **重要提醒:** 运行 `apply` 前请先停止后端服务——本工具直接打开 `--db` 文件且不设
 `busy_timeout`,若后端正持有该库的活跃事务,同时写入可能相互冲突。

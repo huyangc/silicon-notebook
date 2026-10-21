@@ -94,7 +94,9 @@ the reason and the remedy — both spellings of the migration command, the unifi
 offline package's module form — and creates nothing: no SQLite file, no `-wal`/`-shm` pair, no
 PostgreSQL ledger. When the PostgreSQL check cannot connect at all (a malformed URL, wrong
 credentials, an unreachable host) it exits with status 2 and one fixed message that names no
-user, password, host, port or database; the handshake is bounded by
+user, password, host, port or database; when it connects but cannot read the ledger (a
+statement timeout, a lock wait, a missing privilege) it exits 2 with a second fixed message,
+equally free of connection details and of the server's error text. The handshake is bounded by
 `POSTGRES_POOL_ACQUIRE_TIMEOUT_SECONDS` and the two reads by `POSTGRES_STATEMENT_TIMEOUT_SECONDS`.
 Stopped-service maintenance commands re-check the schema after taking the maintenance lock, so a
 `database migrate` that ran in between is never worked against.
@@ -3091,7 +3093,7 @@ PYTHONPATH=backend python scripts/backfill_promotion_targets.py --db .local/sili
 - `apply` — writes `target_base_id` for every candidate that resolves unambiguously (auto, or via `--set`); candidates that are still blocked (notebook has no mount) or ambiguous (multiple mounts and no matching `--set`) are left untouched and reported, so a second pass after mounting a base (or supplying `--set`) picks up exactly the remainder. Writes immediately by default, matching `merge_dbs.py`'s convention; pass `--dry-run` to preview without writing.
 - `--set NOTEBOOK_ID=BASE_ID` — required to resolve a notebook that has more than one mounted public knowledge base; repeatable for several notebooks. A target outside that notebook's mounted set aborts the entire run before any row is written (no partial writes).
 
-Unlike `merge_dbs.py`'s always-write-a-new-output convention, this tool patches the `--db` path you give it in place. It is a [schema guest](#schema-ownership-only-the-service-and-database-migrate-migrate): it never migrates the file, and refuses (exit status 3, with the reason and the remedy) one that is not at this build's schema — start the upgraded service once, or run `database migrate`, first.
+Unlike `merge_dbs.py`'s always-write-a-new-output convention, this tool patches the `--db` path you give it in place. It is a [schema guest](#schema-ownership-only-the-service-and-database-migrate-migrate): it never migrates the file, and refuses (exit status 3, with the reason and the remedy) one that is not at this build's schema. The remedy names that file: set `DATABASE_URL=sqlite:///<that path>` and run `database migrate` (service stopped), or start the upgraded service once on that database, first.
 
 **Important:** stop the backend service before running `apply` — this tool opens the `--db` file directly with no `busy_timeout`, so writing against it while the backend holds it open can collide with a live transaction.
 ### Backfilling knowhow-cell Markdown formatting (`scripts/backfill_knowhow_md.py`)

@@ -31,6 +31,7 @@ from app.services.batch_ingest import (
     run_backfill_source_index,
 )
 from app.services.maintenance_cli import (
+    DeploymentFileSettings,
     MaintenanceCliSchemaError,
     open_maintenance_cli_repository,
 )
@@ -54,22 +55,6 @@ class PreparationError(RuntimeError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
-
-
-class _DeploymentFileSettings(Settings):
-    """Read this command's target only from init overrides and its env file."""
-
-    @classmethod
-    def settings_customise_sources(
-        cls,
-        settings_cls,
-        init_settings,
-        env_settings,
-        dotenv_settings,
-        file_secret_settings,
-    ):
-        del settings_cls, env_settings, file_secret_settings
-        return init_settings, dotenv_settings
 
 
 def _now() -> str:
@@ -236,7 +221,8 @@ def _audit_notebooks(settings: Settings, notebook_ids: Sequence[str]) -> dict[st
 
 
 def _settings(env_file: Path) -> Settings:
-    return _DeploymentFileSettings(
+    # Init overrides and this env file only (shared with `database migrate`).
+    return DeploymentFileSettings(
         _env_file=env_file if env_file.exists() else None,
         SOURCE_SUBGRAPH_PPR_ENABLED=True,
         SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED=True,

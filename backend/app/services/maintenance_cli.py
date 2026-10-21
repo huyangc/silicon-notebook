@@ -92,12 +92,15 @@ def require_current_sqlite_file(path) -> None:
     instead of the deployment settings."""
     from pathlib import Path
 
+    target = Path(path)
     try:
-        state = inspect_sqlite_schema(Path(path))
+        state = inspect_sqlite_schema(target)
     except SchemaInspectionError as exc:
         raise MaintenanceCliConnectionError(str(exc)) from None
     if not state.is_current:
-        raise MaintenanceCliSchemaError(schema_refusal_message(state))
+        raise MaintenanceCliSchemaError(
+            schema_refusal_message(state, target_file=str(target.resolve()))
+        )
 
 
 def create_schema_guest_repository(settings: Settings) -> NotebookRepository:
