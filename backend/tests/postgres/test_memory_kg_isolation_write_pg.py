@@ -766,6 +766,116 @@ def test_pg_one_backstop_pass_per_notebook_however_many_follow_ups_time_out(
     assert _pg_status(database, "ko-ma1c") == "approved"
 
 
+def test_pg_a_follow_up_timing_out_during_the_pass_gets_another_round(
+    pg_repository, monkeypatch
+):
+    """Quality P3-1(a): the notebook's backstop pass is running — it has
+    already read its page — when another follow-up of the same notebook
+    times out. That request submits no second pass but marks the notebook;
+    the running pass reads it again when it is done, so both candidates are
+    restored, and the notebook never had two passes."""
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from app.services import background_jobs
+    from app.services import source_ingestion as ingestion_module
+
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    _pg_add_third_memory(database)
+    with database.write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,payload,"
+            "evidence,source_id,created_at,updated_at) "
+            "VALUES ('ko-ma1c','nb','claim','approved','{}',%s,'src-ma1',%s,%s)",
+            (json.dumps([{"source_id": "src-ma1", "element_id": "el-ko-ma1c",
+                          "quoted_span": "ko-ma1c"}]), NOW, NOW),
+        )
+    _pg_own_merge(repo, "ko-ma1", "ko-ma2")
+    _pg_own_merge(repo, "ko-ma1c", "ko-ma3")
+    monkeypatch.setattr(ingestion_module, "MERGE_FOLLOWUP_LOCK_TIMEOUT_MS", 200)
+    scheduled: list = []
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda fn, *args, name=None, **kwargs: scheduled.append(fn),
+    )
+    ingestion = repo._runtime.source_ingestion
+    url = database.settings.database_url
+
+    def hold_src_ma1_and(action):
+        with psycopg.connect(url, row_factory=dict_row) as holder:
+            holder.execute("SELECT id FROM sources WHERE id='src-ma1' FOR UPDATE")
+            action()
+            holder.rollback()
+
+    hold_src_ma1_and(lambda: ingestion.remove_memory_sources(["src-ma2"]))
+    (run,) = scheduled
+    original = ingestion.memory_merge_heal_candidates
+    reads: list = []
+
+    def read_then_second_timeout(*args, **kwargs):
+        page, after = original(*args, **kwargs)
+        reads.append([a.object_id for a in page])
+        if len(reads) == 1:
+            # While the pass runs (its page already read): mem-a3 is deleted
+            # and its follow-up times out on the same held source.
+            hold_src_ma1_and(lambda: ingestion.remove_memory_sources(["src-ma3"]))
+        return page, after
+
+    monkeypatch.setattr(ingestion, "memory_merge_heal_candidates", read_then_second_timeout)
+    assert run() == 2
+    assert len(scheduled) == 1  # the second timeout submitted nothing
+    assert reads[0] == ["ko-ma1"] and "ko-ma1c" in reads[1]
+    assert _pg_status(database, "ko-ma1") == "approved"
+    assert _pg_status(database, "ko-ma1c") == "approved"
+    assert ingestion._merge_heal_pending == set() and ingestion._merge_heal_again == set()
+
+
+def test_pg_a_repoint_whose_target_is_deleted_while_waiting_is_deferred(pg_repository):
+    """Quality P3-1(b): the backstop plans "re-point ko-ma1 at ko-ma3" and
+    waits on ko-ma3's row lock; the holder deletes ko-ma3 and commits. The
+    locked rows then lack the target: the re-point is deferred, the
+    backstop's next round re-checks ko-ma1 without ko-ma3 and restores it."""
+    import threading
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    _pg_add_third_memory(database)
+    _pg_own_merge(repo, "ko-ma1", "ko-ma2")
+    _pg_own_merge(repo, "ko-ma2", "ko-ma3")
+    with database.write() as db:
+        db.execute("DELETE FROM knowledge_objects WHERE id='ko-ma2'")
+    outcome: dict = {}
+
+    def heal():
+        try:
+            outcome["applied"] = repo._runtime.source_ingestion.heal_memory_merges(
+                lock_timeout_ms=10000
+            )
+        except Exception as exc:  # pragma: no cover - surfaced below
+            outcome["applied"] = repr(exc)
+
+    url = database.settings.database_url
+    with psycopg.connect(url, row_factory=dict_row) as holder, \
+            psycopg.connect(url, autocommit=True, row_factory=dict_row) as probe:
+        holder.execute("SELECT id FROM knowledge_objects WHERE id='ko-ma3' FOR UPDATE")
+        worker = threading.Thread(target=heal)
+        worker.start()
+        _wait_for_lock_wait(probe, "%FROM knowledge_objects%FOR UPDATE%", worker, outcome)
+        holder.execute("DELETE FROM knowledge_objects WHERE id='ko-ma3'")
+        holder.commit()
+        worker.join(timeout=15)
+    assert not worker.is_alive()
+    assert outcome == {"applied": 1}
+    assert _pg_status(database, "ko-ma3") is None
+    assert _pg_status(database, "ko-ma1") == "approved"
+
+
 def test_pg_the_backstop_never_repoints_to_a_hand_deprecated_holder(pg_repository):
     """Spec P3-1(a) on PostgreSQL: ko-ma1 → ko-ma3, the owner restores ko-ma1
     and deprecates ko-ma3 by hand, ko-ma1 → ko-ma2, and ko-ma2 vanishes

@@ -728,6 +728,40 @@ def test_a_repoint_opens_the_follower_gate_on_its_target(world):
     assert _status(repo, a1) == "approved"
 
 
+def test_a_repoint_whose_target_vanished_is_deferred_and_then_restored(world):
+    """Quality P3-1(b): a1 → a2 → a3 and a2 vanished without its follow-ups,
+    so the backstop plans "re-point a1 at a3" — and a3 is deleted between
+    that read and the apply. The re-point is deferred (a1 untouched), the
+    backstop's next round re-checks a1 without a3 and, with no eligible
+    holder left, restores it."""
+    repo, nb, _upload = world
+    sources = [_confirmed_memory(repo, nb, f"mem-a{n}", "u-a") for n in (1, 2, 3)]
+    a1, a2, a3 = (_concept(_objects(repo, nb, s)) for s in sources)
+    _governance(repo).merge_knowledge(nb, a1, MergeRequest(into_id=a2), actor_id="u-a")
+    _governance(repo).merge_knowledge(nb, a2, MergeRequest(into_id=a3), actor_id="u-a")
+    with repo._write() as db:
+        db.execute("DELETE FROM knowledge_objects WHERE id=?", (a2,))
+    ingestion = repo._runtime.source_ingestion
+    original = ingestion.memory_merge_heal_candidates
+    planned: list = []
+
+    def read_then_delete_the_target(*args, **kwargs):
+        page, after = original(*args, **kwargs)
+        if not planned and page:
+            planned.extend(page)
+            with repo._write() as db:
+                db.execute("DELETE FROM knowledge_objects WHERE id=?", (a3,))
+        return page, after
+
+    ingestion.memory_merge_heal_candidates = read_then_delete_the_target
+    try:
+        assert ingestion.heal_memory_merges() == 1
+    finally:
+        ingestion.memory_merge_heal_candidates = original
+    assert [(a.object_id, a.kind, a.repoint_to) for a in planned] == [(a1, "repoint", a3)]
+    assert _status(repo, a1) == "approved"
+
+
 def _sqlite_plan(db, sql: str, params: tuple) -> str:
     return "\n".join(
         str(row[3]) for row in db.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()

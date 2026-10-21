@@ -1972,9 +1972,11 @@ class GovernanceStore:
         ``BEGIN IMMEDIATE`` serialises writers, so nothing is ever skipped):
         rewrite each still-deprecated row whose marker still equals the
         action's ``expected_target`` and whose Memory row still exists.
-        Returns ``(applied, skipped)``; ``skipped`` is always empty."""
+        Returns ``(applied, skipped)``; ``skipped`` holds only the re-points
+        whose target no longer exists (deferred, as on PostgreSQL)."""
         del wait, lock_timeout_ms  # nothing to wait for under SQLite's single writer
         applied: List[MergeFollowAction] = []
+        skipped: List[MergeFollowAction] = []
         by_notebook: Dict[str, Dict[str, MergeFollowAction]] = {}
         for action in actions:
             by_notebook.setdefault(action.notebook_id, {})[action.object_id] = action
@@ -1992,8 +1994,16 @@ class GovernanceStore:
                 (found.param, notebook_id),
             ).fetchall()
             gated: set = set()
+            deferred: List[MergeFollowAction] = []
             for row in rows:
                 action = wanted[str(row["id"])]
+                if action.kind == FOLLOW_REPOINT and not GovernanceStore._object_exists_on(
+                    connection, notebook_id, action.repoint_to
+                ):
+                    # See the PostgreSQL twin: the target vanished after the
+                    # backstop read it; the row stays and is reported back.
+                    deferred.append(action)
+                    continue
                 payload = json.loads(row["payload"] or "{}")
                 if row["status"] != "deprecated" or not isinstance(payload, dict) or (
                     payload.get(MERGED_INTO_PAYLOAD_KEY) != action.expected_target
@@ -2016,7 +2026,17 @@ class GovernanceStore:
                     GovernanceStore._open_follower_gate_on(
                         connection, notebook_id, action.repoint_to
                     )
-        return applied, []
+            skipped.extend(deferred)
+        return applied, skipped
+
+    @staticmethod
+    def _object_exists_on(
+        connection: sqlite3.Connection, notebook_id: str, object_id: str
+    ) -> bool:
+        return connection.execute(
+            "SELECT 1 FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
+            (object_id, notebook_id),
+        ).fetchone() is not None
 
     @staticmethod
     def _open_follower_gate_on(

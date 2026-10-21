@@ -2297,8 +2297,10 @@ class GovernanceStore:
         caller to re-run after its commit with ``wait=True`` (a short
         transaction of its own that holds nothing else). ``lock_timeout_ms``
         bounds that wait (``SET LOCAL lock_timeout``): a holder that keeps its
-        lock longer fails the re-run, which is left to the backstop. Returns
-        ``(applied, skipped)``."""
+        lock longer fails the re-run, which is left to the backstop. A
+        re-point whose target is not among the locked rows (deleted while the
+        statement waited, or held under ``SKIP LOCKED``) is not applied and is
+        returned with the skipped ones. Returns ``(applied, skipped)``."""
         applied: List[MergeFollowAction] = []
         skipped: List[MergeFollowAction] = []
         skip = "" if wait else " SKIP LOCKED"
@@ -2344,12 +2346,25 @@ class GovernanceStore:
             by_locked = {str(row["id"]): row for row in locked}
             done = set()
             gated: set = set()
+            deferred: List[MergeFollowAction] = []
             for object_id in live:
                 row = by_locked.get(object_id)
                 if row is None:
                     continue
                 action = wanted[object_id]
                 done.add(action.object_id)
+                if action.kind == FOLLOW_REPOINT and action.repoint_to not in by_locked:
+                    # The target was not locked: under SKIP LOCKED someone holds
+                    # it (the re-run will wait for it); while waiting it was
+                    # deleted. Re-pointing at a missing object would hand the
+                    # row to the backstop with stale holder knowledge, and
+                    # restoring blindly could make a second copy of knowledge
+                    # another holder still carries — so the row stays as it is
+                    # (its marker names a missing object) and is reported back:
+                    # the caller re-runs the backstop, whose fresh re-check
+                    # picks another eligible holder or, with none, restores.
+                    deferred.append(action)
+                    continue
                 payload = json_value(row["payload"], {})
                 if row["status"] != "deprecated" or (
                     payload.get(MERGED_INTO_PAYLOAD_KEY) != action.expected_target
@@ -2383,6 +2398,7 @@ class GovernanceStore:
                     action for object_id, action in sorted(wanted.items())
                     if object_id not in done
                 )
+            skipped.extend(deferred)
         return applied, skipped
 
     @staticmethod
