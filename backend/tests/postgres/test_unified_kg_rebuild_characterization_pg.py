@@ -51,7 +51,7 @@ def test_rebuild_unified_kg_characterization_pg(scenario, postgres_scope, tmp_pa
         monkeypatch.setenv(key, value)
     repo = create_repository(Settings())
     try:
-        observation = cases.observe(repo, BACKEND, scenario, storage, monkeypatch)
+        observation = cases.observe(repo, BACKEND, scenario, monkeypatch)
     finally:
         repo.close()
     scenario.expect(observation)

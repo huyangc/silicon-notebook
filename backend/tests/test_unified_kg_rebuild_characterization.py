@@ -46,7 +46,7 @@ def test_rebuild_unified_kg_characterization(scenario, tmp_path, monkeypatch):
         monkeypatch.setenv(key, value)
     repo = SQLiteRepository(Settings())
     try:
-        observation = cases.observe(repo, BACKEND, scenario, storage, monkeypatch)
+        observation = cases.observe(repo, BACKEND, scenario, monkeypatch)
     finally:
         repo.close()
     scenario.expect(observation)
