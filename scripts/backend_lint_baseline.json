@@ -896,7 +896,7 @@
   },
   "backend/app/services/knowledge_lifecycle.py": {
     "F401": 1,
-    "I001": 11
+    "I001": 10
   },
   "backend/app/services/knowledge_query.py": {
     "I001": 1

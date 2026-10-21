@@ -389,13 +389,12 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 
 - [ ] **第二梯队大函数拆分**（用户裁决 2026-10-19：四个函数各一个 PR、零行为变化）：`AskService._draft_reasoning_response` 597 行
       （`backend/app/services/ask_service.py:6751`）、`AskService._run_reasoning_stage` 515 行
-      （同文件 `:5834`）、`KnowledgeLifecycleService.rebuild_unified_kg` 481 行（`knowledge_lifecycle.py:5867`）
-      三者仍待做，都在 `scripts/architecture_boundary_baseline.json::function_length_ceiling` 里按现值零松弛钉住。前两个
-      牵涉合成与绑定、流式输出与提示词字节，且 `_run_reasoning_stage` 是参与者守卫登记的 fail-soft
-      站点，目前没有表征测试，要先复用 `ReasoningRetriever.run` 拆分（PR #899）的表征做法；
-      `rebuild_unified_kg` 的前置 K1（#905）已合入、T-5b 已定为不做，可以动手但没有排期。
-      进度：`NotebookCopyService.copy_notebook` 已拆完（621 → 83 行，按阶段抽成私有 helper，
-      拆分前采集的两端逐字节快照不变后退役，见 [fangan_done.md](fangan_done.md) 第 61 节）。
+      （同文件 `:5834`）两者仍待做，都在 `scripts/architecture_boundary_baseline.json::function_length_ceiling`
+      里按现值零松弛钉住。两者都牵涉合成与绑定、流式输出与提示词字节，且 `_run_reasoning_stage` 是参与者守卫
+      登记的 fail-soft 站点，目前没有表征测试，要先复用 `ReasoningRetriever.run` 拆分（PR #899）的表征做法。
+      进度：`NotebookCopyService.copy_notebook`（621 → 83 行）与 `KnowledgeLifecycleService.rebuild_unified_kg`
+      （458 → 65 行）已拆完，都是按阶段抽成私有 helper、拆分前采集的两端逐字节快照不变后退役，见
+      [fangan_done.md](fangan_done.md) 第 61 节。
 - [ ] **≥ 150 行的函数共 182 个**（`backend/app` 全量，含嵌套函数），`ask_service.py` 7468 行、
       `knowledge_lifecycle.py` 7442 行两个大文件。函数天花板守卫只盯基线里登记的 24 个函数，新出现的长
       函数不会被自动纳入。没有统一拆分计划，按触碰到的模块逐个处理。
