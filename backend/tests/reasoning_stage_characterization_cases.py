@@ -1,49 +1,34 @@
-"""Characterization rig for ``AskService._run_reasoning_stage`` (the reasoning Ask orchestrator).
+"""Behaviour rig for ``AskService._run_reasoning_stage`` (the reasoning Ask orchestrator).
 
 **两端吃同一份世界、同一套观测、同一组场景**:``tests/test_reasoning_stage_characterization.py``
 (SQLite)与 ``tests/postgres/test_reasoning_stage_characterization_pg.py``(PostgreSQL)各自只写
-一个 ``Backend`` 适配器(有哪些表、怎么录 SQL)。不是测试模块(没有 ``test_`` 前缀),pytest 不会
+一个 ``Backend`` 适配器(有哪些表、缓存怎么清)。不是测试模块(没有 ``test_`` 前缀),pytest 不会
 收集它。
 
 每个场景经生产入口(``AskService.ask`` / ``AskService.ask_evidence``,即 ``_engine_scope`` 装好
 检索天花板与 retrieval run 之后)跑一次真实的逐步推理 Ask:真实仓库、真实检索与合成,只有模型是
-脚本化的确定性替身。
+脚本化的确定性替身。``observe`` 录下断言要读的东西:对服务自身协作方法与 ``execute_*_stage`` /
+``kg_in_scope_for`` / 结构化枚举 / ``_egress_question`` 的调用(规范化后的参数与返回值)、模型收到
+的提示词、查询 embedding、流式推送的每一步、本线程日志、表的增删行数、两个请求级 ContextVar 在
+调用之后的值,以及返回值或异常。``Scenario.expect`` 断言用户与下游可见的事实——走了哪条短路、
+``llm_mode`` / ``kg_required`` / 完整性披露、轨迹的步骤序列与流式推送、记忆那一步、模型错误、站外
+补充、答案与会话是否落库、取消与异常的类型。
 
-两层,按 AGENTS.md「不做只为重构服务的金标快照」分开:
-
-* **行为层**(``Scenario.expect``,长期保留):用户与下游可见的事实——走了哪条短路、``llm_mode`` /
-  ``kg_required`` / 完整性披露、轨迹的步骤序列与流式推送、记忆那一步、模型错误、站外补充、
-  答案与会话是否落库、取消与异常的类型。
-* **拆分 oracle 层**(``observe`` 的完整观测 + 逐字节快照):编排器与外界交换的一切,按发生顺序——
-  对服务自身协作方法(``_memory_hits``、``_build_reasoning_retriever``、``_draft_reasoning_response``、
-  ``_commit_reasoning_draft`` …)与 ``execute_*_stage`` / ``kg_in_scope_for`` / 结构化枚举模块函数的
-  调用(规范化后的全部参数与返回值)、``raise_if_cancelled`` 的每一次检查、两个请求级 ContextVar
-  的 set/reset、模型收到的每一条提示词(逐字)与回复、流式推送的每一步、event log、本线程发出的
-  每一条 SQL、整库逐表的增删差分、日志与返回值/异常属性。它只为 ``_run_reasoning_stage`` 的零
-  行为变化拆分服务:拆分前采集、拆分后逐字节不变,拆分完成后随快照目录一起退役。
-
-确定性(跨平台,见 memory「逐字快照要跨平台稳定」):行 id 来自计数器(主线程与工作线程各一个,
-工作线程铸造的 id 打码成 ``<wid>``);数据库与服务自己取的墙钟一律打码成 ``<ts>``,耗时
-(``*_ms`` / ``*duration*``)打码;浮点数(向量分数随 BLAS 末位而变)一律打码成 ``<float>``,只留
-id 次序,夹具里的文本与名字两两不同、没有数学并列;SQLite 只记应用自己的语句;PostgreSQL 跳过
-连接池的借还探测。只记被测 Ask 所在线程;工作线程上的模型调用、推送与事件另记为多重集合。
+这套世界与场景最初是 ``_run_reasoning_stage`` 零行为变化拆分的表征:拆分前在两端采集的逐字节快照
+(另含每次取消检查、ContextVar 的 set/reset、事件日志、本线程的每条 SQL 与整库逐行差分)拆分后不变,
+随后按 AGENTS.md「不做只为重构服务的金标快照」退役,只留本行为层。
 """
 from __future__ import annotations
 
 import collections
-import contextlib
 import dataclasses
-import datetime as dt
 import enum
-import hashlib
 import json
 import logging
 import re
-import sys
 import threading
-import uuid
 from pathlib import Path
-from typing import Any, Callable, ContextManager, Optional
+from typing import Any, Callable, Optional
 
 from app.models.ask import (
     AskIntentConfirmation,
@@ -60,70 +45,27 @@ from tests.model_testkit import bind_all_embedding_clients, bind_chat_client
 
 EMBED_DIM = 16
 ASKED_AT = "2026-10-21T08:00:00+08:00"
-STORAGE = "<storage>"
 
 # --------------------------------------------------------------------- canon
 
-_TIMESTAMP = re.compile(
-    r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:[+-]\d{2}:?\d{2}|Z)?"
-)
-#: Ids minted on a worker thread (their order is scheduling, not behaviour).
-_WORKER_UUID_BASE = 0xF000_0000_0000
-_DURATION_KEY = re.compile(r"(?:_ms|_seconds|duration|elapsed)$")
-_SCORE_IN_TEXT = re.compile(r"(?<![\w.])\d+\.\d{4,}(?![\w.])")
-_DURATION_IN_JSON = re.compile(
-    r'("[A-Za-z_]*(?:_ms|_seconds|duration|elapsed)"\s*:\s*)-?\d+(?:\.\d+)?')
-
 
 class Canon:
-    """The stable projection of every recorded value."""
-
-    def __init__(self, storage_dir: Path) -> None:
-        self.storage = str(storage_dir)
-        self.tmp = str(storage_dir.parent)
-
-    def text(self, value: str) -> str:
-        value = value.replace(self.storage, STORAGE).replace(self.tmp, "<tmp>")
-        value = _worker_ids(value)
-        value = _TIMESTAMP.sub("<ts>", value)
-        value = _DURATION_IN_JSON.sub(r'\1"<dur>"', value)
-        value = _LITERAL_IN_LIST.sub(_sorted_in_list, value)
-        value = _BUSY_TIMEOUT.sub("PRAGMA busy_timeout = <left>", value)
-        return _SCORE_IN_TEXT.sub("<float>", value)
+    """A plain JSON-shaped projection of a recorded value (dataclasses and
+    pydantic models become ``{"dc:<Type>": ...}`` / ``{"pd:<Type>": ...}``)."""
 
     def __call__(self, value: Any, _depth: int = 0) -> Any:
         if _depth > 24:
             return f"<deep {type(value).__name__}>"
         depth = _depth + 1
-        if value is None or isinstance(value, bool):
+        if value is None or isinstance(value, (bool, int, float, str)):
             return value
         if isinstance(value, enum.Enum):
             return self(value.value, depth)
-        if isinstance(value, int):
-            return value
-        if isinstance(value, float):
-            return "<float>"
-        if isinstance(value, str):
-            return self.text(value)
-        if isinstance(value, (bytes, bytearray, memoryview)):
-            return "bytes:" + hashlib.sha256(bytes(value)).hexdigest()[:16]
-        if isinstance(value, (dt.datetime, dt.date, dt.time)):
-            return "<ts>"
-        if isinstance(value, Path):
-            return self.text(str(value))
         if isinstance(value, threading.Event):
             return {"event": value.is_set()}
         if isinstance(value, dict):
-            out = {}
-            for key, item in value.items():
-                name = key if isinstance(key, str) else _dumps(self(key, depth))
-                name = self.text(name)
-                if _DURATION_KEY.search(name) and isinstance(item, (int, float)) \
-                        and not isinstance(item, bool):
-                    out[name] = "<dur>"
-                else:
-                    out[name] = self(item, depth)
-            return out
+            return {key if isinstance(key, str) else repr(key): self(item, depth)
+                    for key, item in value.items()}
         if isinstance(value, (list, tuple)):
             return [self(v, depth) for v in value]
         if isinstance(value, (set, frozenset)):
@@ -137,41 +79,13 @@ class Canon:
             }, depth)}
         if hasattr(value, "model_dump"):
             return {"pd:" + type(value).__name__: self(value.model_dump(mode="python"), depth)}
-        if hasattr(value, "keys") and hasattr(value, "__getitem__"):
-            return {"row": self({k: value[k] for k in value.keys()}, depth)}
-        if hasattr(value, "obj") and type(value).__name__ == "Jsonb":
-            return {"jsonb": self(value.obj, depth)}
-        if type(value).__name__ == "module":
-            return f"<module {value.__name__}>"
-        if hasattr(value, "_asdict"):
-            return {"nt:" + type(value).__name__: self(value._asdict(), depth)}
         if callable(value):
             return f"<callable {getattr(value, '__name__', type(value).__name__)}>"
         return f"<{type(value).__name__}>"
 
 
-#: ``IN ('a','b')`` literal lists the store builds from a Python set: their
-#: order follows the hash seed, so they are compared as sets.
-_LITERAL_IN_LIST = re.compile(r"\bIN \(('[^']*'(?:,\s*'[^']*')+)\)")
-
-
-#: The SQLite write lock wait is the time left on a wall-clock budget.
-_BUSY_TIMEOUT = re.compile(r"PRAGMA busy_timeout = \d+")
-
-
-def _sorted_in_list(match: "re.Match[str]") -> str:
-    items = re.findall(r"'[^']*'", match.group(1))
-    return "IN (" + ",".join(sorted(items)) + ")"
-
-
-def _worker_ids(text: str) -> str:
-    # uuid4 counter values minted on a worker thread: ``f000000000xx`` style.
-    return re.sub(r"0{8,}f000000[0-9a-f]{5}|00000000-0000-0000-0000-f000000[0-9a-f]{5}",
-                  "<wid>", text)
-
-
 def _dumps(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, ensure_ascii=False)
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
 
 
 # ------------------------------------------------------------------ recorder
@@ -243,24 +157,6 @@ def _recorded(label: str, name: str, attr: Callable, recorder: Recorder,
     return call
 
 
-class _VarSpy:
-    """Records ``set``/``reset`` of one request-scoped ContextVar; ``get`` passes."""
-
-    def __init__(self, label: str, var: Any, recorder: Recorder) -> None:
-        self._label, self._var, self._recorder = label, var, recorder
-
-    def set(self, value):
-        self._recorder.note({"ctxvar": self._label, "set": self._recorder.canon(value)})
-        return self._var.set(value)
-
-    def reset(self, token):
-        self._recorder.note({"ctxvar": self._label, "reset": True})
-        return self._var.reset(token)
-
-    def get(self, *args):
-        return self._var.get(*args)
-
-
 # -------------------------------------------------------------------- models
 
 
@@ -292,21 +188,13 @@ class ScriptedModels:
     def answer(self, workload, messages, schema_hint, kwargs):
         hint = str(schema_hint or "")
         prompt = "\n".join(str(m.get("content", "")) for m in messages)
-        entry = {
-            "model": workload,
-            "roles": [m.get("role") for m in messages],
-            "messages": self.recorder.canon(messages),
-            "schema_sha": hashlib.sha256(hint.encode()).hexdigest()[:16],
-            "kwargs": self.recorder.canon(kwargs),
-        }
+        entry = {"model": workload, "messages": self.recorder.canon(messages)}
         self.recorder.note(entry)
         failure = self.script.failures.get(workload)
         if failure is not None:
             entry["raised"] = type(failure).__name__
             raise failure
-        reply = self._reply(workload, prompt, hint)
-        entry["reply"] = self.recorder.canon(reply)
-        return reply
+        return self._reply(workload, prompt, hint)
 
     def _reply(self, workload: str, prompt: str, hint: str) -> str:
         script = self.script
@@ -618,7 +506,6 @@ class Backend:
     name: str
     placeholder: str
     tables: Callable[[Any], list[str]]
-    record_sql: Callable[[Any, Recorder, Any], ContextManager]
     invalidate_caches: Callable[[], None]
 
 
@@ -638,13 +525,6 @@ class Observation:
     #: The two request-scoped ContextVars once the Ask returned or raised.
     context_after: dict = dataclasses.field(default_factory=dict)
 
-    def oracle(self) -> dict:
-        return {
-            "outcome": self.outcome, "timeline": self.timeline,
-            "worker": sorted(self.worker, key=_dumps), "stream": self.stream,
-            "db_diff": self.db_diff, "logs": self.logs,
-        }
-
     def calls(self, key: str) -> list[dict]:
         return [e for e in self.timeline if e.get("call") == key]
 
@@ -661,29 +541,29 @@ class Observation:
     def trace_kinds(self) -> list[str]:
         return [step.step_type for step in (self.response.reasoning_trace or [])]
 
-    def events(self) -> list[dict]:
-        return [e["event"] for e in self.timeline + self.worker if "event" in e]
+    def embedded(self) -> list[str]:
+        """Every query text the run embedded, on any thread."""
+        return [e["embed_query"] for e in self.timeline + self.worker if "embed_query" in e]
 
 
-def _dump_db(repo: Any, backend: Backend, canon: Canon) -> dict:
+def _dump_db(repo: Any, backend: Backend) -> dict:
     out: dict[str, collections.Counter] = {}
     with repo._runtime.database.connect() as db:
         for table in backend.tables(repo):
             rows = db.execute(f"SELECT * FROM {table}").fetchall()
-            out[table] = collections.Counter(_dumps(canon(dict(row))) for row in rows)
+            out[table] = collections.Counter(_dumps(dict(row)) for row in rows)
     return out
 
 
 def _db_diff(before: dict, after: dict) -> dict:
+    """Per table, how many rows the run added and removed (an update is both)."""
     diff = {}
     for table in sorted(set(before) | set(after)):
         old = before.get(table, collections.Counter())
         new = after.get(table, collections.Counter())
-        added = sorted((new - old).elements())
-        removed = sorted((old - new).elements())
+        added, removed = sum((new - old).values()), sum((old - new).values())
         if added or removed:
-            diff[table] = {"added": [json.loads(r) for r in added],
-                           "removed": [json.loads(r) for r in removed]}
+            diff[table] = {"added": added, "removed": removed}
     return diff
 
 
@@ -701,7 +581,6 @@ class _LogCapture(logging.Handler):
         if record.exc_info and record.exc_info[0] is not None:
             entry["exc"] = record.exc_info[0].__name__
         self.records.append(entry)
-        self.recorder.note({"log": entry["level"]})
 
 
 #: Methods of the service the orchestrator (and its stages) call, recorded at
@@ -734,8 +613,6 @@ _MODULE_FUNCTIONS = (
 def _install_recording(rig: Rig, monkeypatch: Any) -> None:
     import importlib
 
-    from app.services import ask_service as ask_module
-
     recorder, hooks, service = rig.recorder, rig.hooks, rig.service
     for name in _SELF_METHODS:
         monkeypatch.setattr(service, name,
@@ -745,52 +622,6 @@ def _install_recording(rig: Rig, monkeypatch: Any) -> None:
         for name in names:
             monkeypatch.setattr(module, name, _recorded(
                 "fn", name, getattr(module, name), recorder, hooks))
-    monkeypatch.setattr(ask_module, "raise_if_cancelled", _recorded(
-        "fn", "raise_if_cancelled", ask_module.raise_if_cancelled, recorder, hooks))
-    for name in ("_ASK_MODEL_ERRORS", "_ASK_EMBED_CACHE"):
-        monkeypatch.setattr(ask_module, name, _VarSpy(name, getattr(ask_module, name),
-                                                      recorder))
-    log = rig.repo._runtime.event_log
-    original_emit = log.emit
-
-    def emit(event, *args, **kwargs):
-        recorder.note({"event": recorder.canon(event)})
-        return original_emit(event, *args, **kwargs)
-
-    monkeypatch.setattr(log, "emit", emit)
-
-
-@contextlib.contextmanager
-def _deterministic_ids(recorder: Recorder):
-    """``uuid4`` → two counters: the Ask's own thread, and every other thread
-    (those ids are masked: their order is scheduling)."""
-    real = uuid.uuid4
-    counters = {"main": 0, "worker": 0}
-    lock = threading.Lock()
-
-    def fake_uuid4():
-        with lock:
-            if threading.get_ident() == recorder.thread:
-                counters["main"] += 1
-                return uuid.UUID(int=counters["main"])
-            counters["worker"] += 1
-            return uuid.UUID(int=_WORKER_UUID_BASE + counters["worker"])
-
-    patched = []
-    uuid.uuid4 = fake_uuid4
-    for name, module in list(sys.modules.items()):
-        if not name.startswith("app.") or module is None:
-            continue
-        if getattr(module, "uuid4", None) is real:
-            module.uuid4 = fake_uuid4
-            patched.append(module)
-    try:
-        yield
-    finally:
-        uuid.uuid4 = real
-        for module in patched + list(sys.modules.values()):
-            if module is not None and getattr(module, "uuid4", None) is fake_uuid4:
-                module.uuid4 = real
 
 
 #: The only process-level configuration a scenario runs with; everything else
@@ -808,7 +639,7 @@ _SCENARIO_ENV = {
 
 def scrub_environment(monkeypatch: Any, tmp_path: Path, database_url: str) -> None:
     """No local ``.env`` and no deployment variable exported by the developer's
-    shell may reach a recording; every path points under this test's tmp_path."""
+    shell may reach a scenario; every path points under this test's tmp_path."""
     import os
 
     from app.core.config import Settings
@@ -883,11 +714,11 @@ def make_gap_host():
     return build_extension_runtime((bundle,)).gap_consult
 
 
-def observe(repo: Any, backend: Backend, scenario: Scenario, storage_dir: Path,
-            tmp_path: Path, monkeypatch: Any) -> Observation:
-    """Build the scenario's world, run one reasoning Ask with every collaborator
-    recorded, and return the whole observation (behaviour facts and split oracle)."""
-    canon = Canon(storage_dir)
+def observe(repo: Any, backend: Backend, scenario: Scenario, tmp_path: Path,
+            monkeypatch: Any) -> Observation:
+    """Build the scenario's world, run one reasoning Ask with its collaborators
+    recorded, and return what the behaviour assertions read."""
+    canon = Canon()
     recorder = Recorder(canon)
     hooks = Hooks()
     models = ScriptedModels(recorder, scenario.script)
@@ -897,64 +728,58 @@ def observe(repo: Any, backend: Backend, scenario: Scenario, storage_dir: Path,
     for workload_id, workload in WORKLOADS.items():
         if workload.kind == "chat":
             bind_chat_client(repo, workload_id, ScriptedChat(workload_id, models))
-    with _deterministic_ids(recorder):
-        _clear_process_caches(backend)
-        scenario.world(rig)
-        _install_recording(rig, monkeypatch)
-        if scenario.install is not None:
-            scenario.install(rig)
-        payload = scenario.request(rig)
-        job_id = ""
-        cancel = threading.Event() if scenario.cancel_event else None
-        rig.cancel = cancel
-        if scenario.job:
-            job_id, _conversation = rig.service.ask_state.begin_durable_job(
-                rig.notebook_id, payload, "reasoning", rig.user_id)
-        _drain_background(repo)
-        _clear_process_caches(backend)
-        db_before = _dump_db(repo, backend, canon)
-        stream: list = []
+    _clear_process_caches(backend)
+    scenario.world(rig)
+    _install_recording(rig, monkeypatch)
+    if scenario.install is not None:
+        scenario.install(rig)
+    payload = scenario.request(rig)
+    job_id = ""
+    cancel = threading.Event() if scenario.cancel_event else None
+    rig.cancel = cancel
+    if scenario.job:
+        job_id, _conversation = rig.service.ask_state.begin_durable_job(
+            rig.notebook_id, payload, "reasoning", rig.user_id)
+    _drain_background(repo)
+    _clear_process_caches(backend)
+    db_before = _dump_db(repo, backend)
+    stream: list = []
 
-        def on_trace(step) -> None:
-            projected = {"step_type": step.step_type, "summary": canon(step.summary),
-                         "detail": canon(step.detail or {})}
-            stream.append(projected)
-            recorder.note({"stream": step.step_type})
-            hook = hooks.after.get("on_trace")
-            if hook is not None:
-                hook(step)
+    def on_trace(step) -> None:
+        stream.append({"step_type": step.step_type, "summary": step.summary,
+                       "detail": canon(step.detail or {})})
+        hook = hooks.after.get("on_trace")
+        if hook is not None:
+            hook(step)
 
-        loggers = [logging.getLogger("silicon_notebook"), logging.getLogger("app")]
-        capture = _LogCapture(recorder)
-        levels = [lg.level for lg in loggers]
-        for lg in loggers:
-            lg.addHandler(capture)
-            lg.setLevel(logging.DEBUG)
-        response = error = None
+    loggers = [logging.getLogger("silicon_notebook"), logging.getLogger("app")]
+    capture = _LogCapture(recorder)
+    levels = [lg.level for lg in loggers]
+    for lg in loggers:
+        lg.addHandler(capture)
+        lg.setLevel(logging.DEBUG)
+    response = error = None
+    try:
+        recorder.active = True
         try:
-            with backend.record_sql(repo, recorder, monkeypatch):
-                recorder.active = True
-                try:
-                    response = _invoke(rig, scenario, payload, job_id, cancel,
-                                       on_trace if scenario.stream else None)
-                    outcome = {"returned": canon(response)}
-                except Exception as exc:  # noqa: BLE001 — the raise IS the observation
-                    error = exc
-                    outcome = {"raised": type(exc).__name__, "message": canon(str(exc)),
-                               "attrs": canon({k: v for k, v in vars(exc).items()
-                                               if not k.startswith("_")})}
-                finally:
-                    recorder.active = False
+            response = _invoke(rig, scenario, payload, job_id, cancel,
+                               on_trace if scenario.stream else None)
+            outcome = {"returned": type(response).__name__}
+        except Exception as exc:  # noqa: BLE001 — the raise IS the observation
+            error = exc
+            outcome = {"raised": type(exc).__name__, "message": str(exc)}
         finally:
-            for lg, level in zip(loggers, levels):
-                lg.removeHandler(capture)
-                lg.setLevel(level)
-        from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
+            recorder.active = False
+    finally:
+        for lg, level in zip(loggers, levels):
+            lg.removeHandler(capture)
+            lg.setLevel(level)
+    from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
 
-        context_after = {"model_errors": _ASK_MODEL_ERRORS.get(),
-                         "embed_cache": _ASK_EMBED_CACHE.get()}
-        _drain_background(repo)
-        db_after = _dump_db(repo, backend, canon)
+    context_after = {"model_errors": _ASK_MODEL_ERRORS.get(),
+                     "embed_cache": _ASK_EMBED_CACHE.get()}
+    _drain_background(repo)
+    db_after = _dump_db(repo, backend)
     return Observation(
         notebook_id=rig.notebook_id, user_id=rig.user_id, job_id=job_id,
         outcome=outcome, timeline=recorder.timeline, worker=recorder.worker,
@@ -983,30 +808,6 @@ def _drain_background(repo: Any) -> None:
     quiesce_process_background_work()
 
 
-# --------------------------------------------------------- the oracle layer
-
-
-def oracle_text(observation: Observation) -> str:
-    return json.dumps(observation.oracle(), indent=1, sort_keys=True, ensure_ascii=False) + "\n"
-
-
-def assert_matches_oracle(observation: Observation, path: Path, *, regen: bool) -> None:
-    text = oracle_text(observation)
-    if regen:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-        return
-    assert path.is_file(), f"missing split oracle {path}"
-    expected = path.read_text(encoding="utf-8")
-    if text != expected:
-        import difflib
-
-        delta = "".join(list(difflib.unified_diff(
-            expected.splitlines(True), text.splitlines(True), "oracle", "observed", n=2,
-        ))[:200])
-        raise AssertionError(f"_run_reasoning_stage split oracle drifted ({path.name}):\n{delta}")
-
-
 # ------------------------------------------------------- the behaviour layer
 
 NO_SOURCES = "当前笔记本没有可检索的来源"
@@ -1024,7 +825,7 @@ def _common(obs: Observation) -> None:
 
 
 def _added(obs: Observation, table: str) -> int:
-    return len(obs.db_diff.get(table, {}).get("added", []))
+    return obs.db_diff.get(table, {}).get("added", 0)
 
 
 def _called(obs: Observation, key: str) -> bool:
@@ -1053,7 +854,7 @@ def _raised(obs: Observation, name: str, message: str = "") -> None:
     """The Ask raised: nothing answered, nothing saved."""
     _common(obs)
     assert obs.outcome.get("raised") == name, obs.outcome
-    assert message in obs.outcome["message"]
+    assert message in obs.outcome["message"], obs.outcome
     assert _added(obs, "answers") == 0
     assert not _called(obs, "self._save_answer")
 
@@ -1119,6 +920,19 @@ def _expect_answer_sync(obs: Observation) -> None:
     # The draft saw the whole trace the response reports, in the same order.
     assert [s["pd:TraceStep"]["step_type"] for s in draft["trace"]] == kinds[:-1]
     assert _called(obs, "fn.kg_in_scope_for")
+    # The run's authority is re-verified right before the draft stage, not
+    # only on entry and before persisting.
+    points = [call["args"][1] for call in obs.calls("self._assert_reasoning_runtime")]
+    assert points == ["prepare", "reasoning-stage-entry", "response-draft", "before-persist"]
+    # The selected-source graph lane gets the configured passage cap.
+    from app.core.config import Settings
+
+    (activate,) = obs.calls("self._activate_selected_source_graph")
+    assert activate["kwargs"]["max_results"] == Settings.model_fields["ppr_top_chunks"].default
+    # Inside the run's embedding memo every query is embedded once; the
+    # research question twice -- the Memory recall runs before the memo exists.
+    embedded = collections.Counter(obs.embedded())
+    assert embedded.pop(QUESTION) == 2 and set(embedded.values()) <= {1}, embedded
 
 
 def _expect_streamed_memory(obs: Observation) -> None:
@@ -1238,7 +1052,9 @@ def _expect_structured(*, aggregate: bool, stream: bool, job: bool = False,
         assert response.result_coverage.returned_rows == 3 and response.result_sets
         assert obs.trace_kinds() == ["intent", "enumerate", "answer"]
         assert response.reasoning_trace[2].summary == "完整枚举 3 行"
-        assert response.reasoning_trace[2].detail["returned_rows"] == 3
+        assert response.reasoning_trace[2].detail == {
+            "complete": True, "scanned_rows": 3, "returned_rows": 3,
+            "known_total_rows": 3, "truncated_reason": ""}
         assert obs.stream_kinds() == (obs.trace_kinds() if stream else [])
         # The structured answer returns before memory is ever read.
         assert not _called(obs, "self._memory_hits")
@@ -1379,6 +1195,24 @@ def _expect_gap(obs: Observation) -> None:
     assert obs.trace_kinds()[-3:] == ["synthesis", "gap_consult", "external_evidence"]
     # The draft cannot have seen the outside material.
     assert "Physical Design Survey" not in _prompt(obs, "ask_answer")
+    # Only what was noted before the draft returned is the answer's model
+    # errors; an alarm raised while the outside sources are consulted is not.
+    assert response.model_errors == []
+
+
+def _expect_cancel_at_memory(obs: Observation) -> None:
+    _raised(obs, "AskCancelled")
+    # The memory step is checked before it is recorded or streamed, so a Stop
+    # during the recall ends the run before retrieval.
+    assert obs.stream_kinds() == ["intent"]
+    assert not _called(obs, "fn.execute_reasoning_retrieval_stage")
+
+
+def _expect_sink_checks_cancel(obs: Observation) -> None:
+    _raised(obs, "AskCancelled")
+    # The trace sink handed to retrieval checks the Stop before it streams.
+    assert PROBE_STEP not in [step["summary"] for step in obs.stream]
+    assert obs.models("reasoning_agent") == []
 
 
 def _expect_injected(obs: Observation) -> None:
@@ -1573,6 +1407,24 @@ def _invalid_inputs(rig: Rig, payload, job_id, cancel, on_trace):
     return outcomes
 
 
+def _without_run(rig: Rig, payload, job_id, cancel, on_trace):
+    """``ask_reasoning`` called directly, outside ``_engine_scope``: no retrieval
+    run (and so no run-level embedding memo), the orchestrator's own only."""
+    return rig.service.ask_reasoning(rig.notebook_id, payload, user_id=rig.user_id,
+                                     job_id=job_id, on_trace=on_trace, cancel_event=cancel)
+
+
+def _expect_without_run(obs: Observation) -> None:
+    response = _answered(obs, llm_mode="grounded")
+    _ran_stages(obs)
+    # The orchestrator's embedding memo is the only one here: inside it each
+    # query is embedded once (the research question also by the Memory recall,
+    # which runs before the memo exists).
+    embedded = collections.Counter(obs.embedded())
+    assert embedded.pop(QUESTION) == 2 and set(embedded.values()) <= {1}, embedded
+    assert "[k1]" in response.answer
+
+
 def _narrowed(rig: Rig) -> AskRequest:
     """The library Ask with the sign-off document unticked: a narrowed source
     scope, the only kind of run that captures a retrieval baseline manifest."""
@@ -1671,6 +1523,28 @@ def _expect_unconfigured_completeness(obs: Observation) -> None:
     assert response.completeness_notice == INCOMPLETE, response.completeness_notice
 
 
+PROBE_STEP = "探针步"
+
+
+def _sink_probe(rig: Rig) -> None:
+    """Stop, then hand a step to the retrieval runtime's trace sink."""
+    from app.models.ask import TraceStep
+
+    def probe(real, retriever, stage, runtime):
+        rig.cancel.set()
+        runtime.trace_sink(TraceStep(step_type="plan", summary=PROBE_STEP))
+        return real(retriever, stage, runtime)
+
+    rig.hooks.replace["fn.execute_reasoning_retrieval_stage"] = probe
+
+
+def _gap_alarm(rig: Rig) -> None:
+    """A model alarm noted while the outside sources are being consulted."""
+    rig.hooks.before["self._consult_gap_sources"] = (
+        lambda *a, **k: rig.repo._runtime.models.note_model_error(
+            "gap_consult", RuntimeError("gap down"), workload_id="gap_consult_query"))
+
+
 def _model_timeout() -> BaseException:
     from app.services.model_work import ModelQueueTimeout
 
@@ -1743,6 +1617,10 @@ SCENARIOS = [
     Scenario("cancelled_at_intent_stream", knowhow_world,
              confirmed(LIST_ALL, topics=(), result_scope="complete", completeness=True),
              _expect_cancel_at_intent, stream=True, install=_cancel_on_stream("intent")),
+    Scenario("cancelled_at_memory_step", library_world, plain(), _expect_cancel_at_memory,
+             stream=True, install=_cancel_after("self._memory_hits")),
+    Scenario("retrieval_sink_checks_cancel", library_world, plain(),
+             _expect_sink_checks_cancel, stream=True, install=_sink_probe),
     Scenario("answer_model_fails", library_world, plain(), _expect_answer_model_failed(stream=True), stream=True,
              script=Script(failures={"ask_answer": RuntimeError("answer model down")})),
     Scenario("answer_model_timeout", library_world, plain(), _expect_answer_model_failed(stream=False),
@@ -1752,7 +1630,7 @@ SCENARIOS = [
     Scenario("gap_consult_attached", library_world,
              confirmed(topics=("寄生电容如何控制", "工艺角怎么选", "布线层怎么分配",
                                "签核顺序是什么"), effort="overview"),
-             _expect_gap, stream=True, gap_plugin=True),
+             _expect_gap, stream=True, gap_plugin=True, install=_gap_alarm),
     Scenario("gap_consult_evidence_output", library_world, plain(), _expect_evidence_gap,
              entry="evidence", gap_plugin=True),
     Scenario("injected_stage_response", library_world, plain(), _expect_injected,
@@ -1765,6 +1643,8 @@ SCENARIOS = [
              _expect_workbook_failed, install=_workbook_lane_fails),
     Scenario("retrieval_snapshot_extras", library_world, _narrowed, _expect_snapshot_extras,
              install=_snapshot_extras),
+    Scenario("direct_entry_without_run", library_world, plain(), _expect_without_run,
+             invoke=_without_run),
     Scenario("activation_fails_soft", library_world, _narrowed, _expect_activation_fails,
              install=_activation_fails),
     Scenario("unconfigured_completeness", library_world,
