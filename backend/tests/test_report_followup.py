@@ -11,11 +11,9 @@ import json
 import pytest
 
 from app.domain.report_followup import (
-    LinkedReportNotFound,
-    LinkedReportNotReady,
-    REASON_CLAUSES,
     REASON_CLAUSE_MEMORY_CLOSED_CHANNEL,
     REASON_CLAUSE_MEMORY_CLOSED_NARROWED,
+    REASON_CLAUSES,
     REASON_ENGINE_UNSUPPORTED,
     REASON_LIBRARY_UNAVAILABLE,
     REASON_MEMORY_CLOSED,
@@ -25,6 +23,8 @@ from app.domain.report_followup import (
     REASON_REPORT_UNAVAILABLE,
     REASON_SCOPE_LIBRARIES,
     REASON_SCOPE_SOURCES,
+    LinkedReportNotFound,
+    LinkedReportNotReady,
     ReportDigest,
     ReportFollowup,
     ReportLinkVerdict,
@@ -34,8 +34,8 @@ from app.domain.report_followup import (
 )
 from app.services.report_followup import (
     REPORT_BLOCK_HEADER,
-    ReportAdmissionCounts,
     SUMMARY_TRUNCATED_SUFFIX,
+    ReportAdmissionCounts,
     followup_receipt,
     load_linked_report,
     render_report_block,
@@ -52,7 +52,6 @@ from app.services.report_followup import (
     unread_verdict,
 )
 from tests.model_testkit import RecordingModelProvider
-
 
 NOT_LOADED = "(body not loaded this turn: over the report-context budget)"
 NO_BODY = "(this section has no separate body text in the stored report)"
