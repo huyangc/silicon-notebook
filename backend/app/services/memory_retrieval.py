@@ -170,9 +170,11 @@ class MemoryRetriever:
         it returns. A closed Memory channel (``memory:read``) answers empty
         before the store is touched, the same seam as every hit method above.
 
-        One primary-key read per id: the ids come from one report's
-        references, so the reads are bounded by that count, and the store has
-        no other by-id form. There is no query, so the hits carry no relevance
+        One primary-key read per id, deliberately without a cap of its own:
+        the ids are one report's cited Memory references, so the reads are
+        bounded by that count -- and the report's references are bounded by
+        its evidence budget when it is written -- and the store has no other
+        by-id form. There is no query, so the hits carry no relevance
         (``score`` 0.0); ``authority`` is the entry's own.
         """
         if not memory_channel_allowed():
