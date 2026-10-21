@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.deps import (
     get_current_user,
+    knowledge_governance_service,
     notebook_capability_allowed,
     repository,
     require_notebook_capability,
@@ -228,6 +229,29 @@ def find_duplicates(notebook_id: str, type: str = Query("rules")) -> List[Duplic
     object_type = _KNOWLEDGE_TYPE_MAP.get(type, type)
     try:
         return repository().find_duplicates(notebook_id, object_type)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get(
+    "/notebooks/{notebook_id}/duplicates/own-memory",
+    response_model=List[DuplicateGroup],
+    dependencies=[Depends(require_notebook_read)],
+)
+def find_own_memory_duplicates(
+    notebook_id: str, type: str = Query("rules"),
+) -> List[DuplicateGroup]:
+    """The caller's own duplicate groups: objects derived from her own Memory
+    and supported by it alone, which the shared ``/duplicates`` leaves out for
+    everyone. A separate route because ``/duplicates`` answers a bare list, so
+    a per-viewer field would change its shape for every existing client. Anyone
+    else — another member, a site admin — gets ``[]``, the same answer as a
+    viewer who owns no Memory here."""
+    object_type = _KNOWLEDGE_TYPE_MAP.get(type, type)
+    try:
+        return knowledge_governance_service().find_own_memory_duplicates(
+            notebook_id, object_type
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 

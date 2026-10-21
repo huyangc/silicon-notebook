@@ -27,6 +27,7 @@ import os
 import pytest
 
 from app.repositories.postgres import knowledge_counts_cache
+from app.repositories.postgres.governance_store import GovernanceStore
 from app.repositories.postgres.knowledge_store import KnowledgeStore
 from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.query_store import QueryStore
@@ -159,6 +160,9 @@ def _captured(postgres_database, notebook_id: str, viewer: str) -> list[tuple]:
             store.unified_graph_rows(db, notebook_id, viewer_id=viewer, own_memory_only=True)
             store.relations_for_notebook(db, notebook_id, viewer_id=viewer,
                                          own_memory_only=True)
+            # the owner's duplicate groups (her Memory sources, her objects);
+            # on ``plain`` she owns no Memory source, so only the first runs
+            GovernanceStore.own_memory_duplicate_rows(db, notebook_id, "concept", viewer)
     return [(s, p) for s, p in log if "kg_mutation_seq" not in s
             and "pg_index" not in s and "SAVEPOINT" not in s]
 

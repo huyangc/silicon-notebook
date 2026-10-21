@@ -69,7 +69,7 @@ PostgreSQL 上这一步对被处理对象的 Memory 来源取 `FOR KEY SHARE SKI
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Mapping
+from typing import AbstractSet, Any, Callable, Iterable, Mapping
 
 from app.domain.promotion_provenance import evidence_source_ids
 
@@ -343,3 +343,18 @@ def merge_evidence_source_ids(*evidence_lists: Iterable[Any]) -> frozenset[str] 
     if not all(isinstance(item, dict) and str(item.get("source_id") or "") for item in items):
         return None
     return frozenset(evidence_source_ids(items))
+
+
+def evidence_only_from_own_memory(
+    evidence: Iterable[Any], own_memory_source_ids: AbstractSet[str],
+) -> bool:
+    """One object's half of the merge's ``only_own_memory_evidence``: every entry
+    cites one of ``own_memory_source_ids`` (the caller's own Memory sources of the
+    notebook, read with ``own_memory_source``). Read the way the merge reads it
+    (``merge_evidence_source_ids``): an entry without a source id fails it, and
+    empty evidence passes. Two of the caller's own Memory objects merge exactly
+    when both pass (the merge judges the union of both evidence lists, which is
+    the same test), so the owner's duplicate groups (``own_memory_duplicate_rows``)
+    list only pairs the merge accepts."""
+    cited = merge_evidence_source_ids(evidence)
+    return cited is not None and cited <= own_memory_source_ids

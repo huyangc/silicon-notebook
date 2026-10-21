@@ -60,6 +60,7 @@ from app.domain.memory_kg_isolation import (
     heal_action,
     patched_payload,
     merge_evidence_source_ids,
+    evidence_only_from_own_memory,
     memory_merge_refusal,
     plan_merge_follow_actions,
 )
@@ -2310,6 +2311,61 @@ class GovernanceStore:
             "SELECT * FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
             (object_id, notebook_id),
         ).fetchone()
+
+    @staticmethod
+    def own_memory_duplicate_rows(
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        object_type: str,
+        viewer_id: str,
+    ) -> List[dict]:
+        """The owner's duplicate-group input (see the PostgreSQL twin): the
+        viewer's own live Memory objects of ``object_type`` whose evidence
+        cites nothing but her own Memory sources of this notebook — the
+        objects ``merge_objects_in_transaction`` lets her merge with one
+        another. ``{"id", "status", "name", "payload"}`` in
+        ``duplicate_seed_rows`` order (``name`` read the way that reader
+        reads it, so blocking sees the same text); the empty viewer owns
+        nothing.
+
+        Both statements are driven by the notebook's Memory sources
+        (``idx_sources_nb_hidden_type``, join order pinned by ``CROSS
+        JOIN``), objects then by ``idx_knowledge_objects_source``: the cost
+        follows the viewer's own Memory in this notebook, never the
+        notebook's size."""
+        if not viewer_id:
+            return []
+        own = frozenset(
+            row["id"] for row in connection.execute(
+                "SELECT s.id FROM sources s "
+                f"WHERE s.notebook_id=? AND {hidden_type_index_term('s')} "
+                f"AND {own_memory_source('s')}",
+                (notebook_id, viewer_id),
+            ).fetchall()
+        )
+        if not own:
+            return []
+        rows = connection.execute(
+            "SELECT o.id, o.status, json_extract(o.payload, '$.name') AS name, "
+            "o.payload, o.evidence FROM sources s "
+            "CROSS JOIN knowledge_objects o "
+            f"WHERE s.notebook_id=? AND {hidden_type_index_term('s')} "
+            f"AND {own_memory_source('s')} "
+            "AND o.source_id=s.id AND o.notebook_id=s.notebook_id "
+            "AND o.object_type=? AND o.status!='deprecated' "
+            "ORDER BY o.created_at ASC, o.id ASC",
+            (notebook_id, viewer_id, object_type),
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "status": row["status"],
+                "name": row["name"],
+                "payload": json.loads(row["payload"] or "{}"),
+            }
+            for row in rows
+            if evidence_only_from_own_memory(json.loads(row["evidence"] or "[]"), own)
+        ]
 
     @staticmethod
     def _own_memory_merge_evidence(

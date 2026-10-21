@@ -1521,6 +1521,16 @@ def test_pg_shared_review_surfaces_leave_memory_rows_out(pg_promotion_world):
     cases.shared_review_surfaces_leave_memory_rows_out(world)
 
 
+def test_pg_owner_lists_her_own_memory_duplicates(pg_promotion_world):
+    cases, world = pg_promotion_world
+    cases.owner_lists_her_own_memory_duplicates(world)
+
+
+def test_pg_owner_duplicates_follow_the_memory_channel(pg_promotion_world):
+    cases, world = pg_promotion_world
+    cases.owner_duplicates_follow_the_memory_channel(world)
+
+
 def test_pg_queued_memory_object_proposal_is_refused_and_closed(pg_promotion_world):
     cases, world = pg_promotion_world
     cases.queued_memory_proposal_is_refused_on_approval(world)

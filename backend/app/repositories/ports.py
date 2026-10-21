@@ -4861,6 +4861,17 @@ class GovernanceStorePort(Protocol):
         published cluster row carries is absent. The caller batches."""
         ...
     @staticmethod
+    def own_memory_duplicate_rows(
+        connection: object, notebook_id: str, object_type: str, viewer_id: str
+    ) -> list[dict]:
+        """The owner's duplicate-group input: ``viewer_id``'s own live Memory
+        objects of ``object_type`` in this notebook whose evidence cites only
+        her own Memory sources there (the pairs ``merge_objects_in_transaction``
+        lets her merge), ``{id, status, name, payload}`` in the order and
+        ``name`` reading of ``duplicate_seed_rows``. Driven by her Memory
+        sources; ``""`` returns nothing."""
+        ...
+    @staticmethod
     def valid_object_ids(db: object, object_ids: object, *, exclude_memory_derived: bool = False) -> set[str]: ...
     @staticmethod
     def seed_for(object_type: str): ...
