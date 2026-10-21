@@ -1073,7 +1073,7 @@ selections in the add-library list persist across its pages.
 
 ### Endpoints
 
-Twenty-seven endpoints in `group_routes.py` (including the seven P2 approval-flow
+Twenty-eight endpoints in `group_routes.py` (including the seven P2 approval-flow
 endpoints), plus one read-only addition on the notebook router.
 
 | Endpoint | Who | Notes |
@@ -1087,6 +1087,7 @@ endpoints), plus one read-only addition on the notebook router.
 | `PUT /groups/{id}/members/{user_id}` | group admin | add or change role in one call |
 | `DELETE /groups/{id}/members/{user_id}` | group admin | 409 for the owner (transfer first) or if it would remove the last admin |
 | `DELETE /groups/{id}/membership` | member | self-service leave; the owner must transfer first; 409 for the last remaining admin |
+| `GET /groups/{id}/membership/leave-preview` | member (no system-admin bypass) | before leaving: which notebooks' Memory of the caller leaving would hide, and how many items each (see the "Leaving a group" paragraph under "Memory and Agent MCP") |
 | `GET` / `POST` / `DELETE /groups/{id}/invite-link` | group admin (admin recovery bypass) | inspect without side effects, create/reuse, or revoke the group's current reusable bearer invitation |
 | `POST /groups/{id}/invite-link/rotate` | group admin (admin recovery bypass) | atomically replace the token; the old link stops resolving immediately |
 | `POST /group-invites/{token}/join` | signed in | atomically join as `member`; idempotently preserves an existing role; invalid/revoked/deleted tokens are 404 |
@@ -2453,6 +2454,28 @@ member list), revoking a grant, or removing someone from a granted group only wi
 Access is often temporary, so the Memory stays; while access is gone nobody can read it, its
 owner included, and it is visible to its owner again as soon as access returns. Deleting the
 whole notebook is different: it deletes everything in it, members' Memory included (above).
+
+Leaving a group (`DELETE /groups/{id}/membership`) does not delete Memory either: it removes only
+the caller's one membership row in that group. Notebooks the caller read only through that group
+become unreadable, and the caller's Memory in them with them (user ruling 2026-10-21: disclose
+before leaving, allow exporting first, never delete). Before leaving,
+`GET /groups/{id}/membership/leave-preview` returns
+`{"notebook_count": N, "memory_count": M, "notebooks": [{"notebook_id", "name", "memory_count"}]}`:
+the notebooks holding the caller's own Memory that the caller reads now and would no longer read
+after leaving, each with its name and the caller's Memory count (every status, as the notebook
+exit disclosure and the export count them), ordered by name; N and M are that list's length and
+sum, computed by the server. The measure is exactly what the leave does: the read predicate
+(`access_sql.read_access_clause`) holds now and fails once that one membership row is taken out
+(`read_access_after_group_exit_clause`: both `group_members` subqueries gain a `group_id` inequality).
+Notebooks still readable through ownership, a notebook membership, a personal grant, an everyone
+grant or **another** group are not listed; nor are ones the caller cannot read already (being
+deleted, removed long ago). It answers only the caller's own leave: a non-member gets the same 404
+as an unknown group, with no system-admin bypass. It is a plain read; the leave itself takes no
+acknowledgement. The web confirmation panel says 「退出后，你将看不到 N 个笔记本里你的 M 条记忆」,
+lists each notebook with its own 「导出」 (reusing `GET /notebooks/{id}/memories/export`, which
+exports only the caller's Memory in that notebook) and keeps 「确认退出」 disabled while an export
+runs; when M is 0 it only says no Memory will be hidden by leaving, with no export entry.
+Rejoining the group shows the Memory again in the notebooks still shared with it.
 
 The committed deterministic Memory evaluation reports Recall@5, MRR, nDCG, and three
 zero-tolerance counters: candidate-to-formal-plane leakage, cross-user leakage, and
