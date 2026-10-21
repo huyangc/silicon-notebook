@@ -97,3 +97,44 @@ def test_no_hidden_member_text_is_served_on_postgres(postgres_repository):
     assert _status(repository, notebook_id, "passed") == {
         ("F4", "llama31"): ("decided_not_same", None)}
     assert hidden_text_served(repository, notebook_id) == []
+
+
+def test_a_full_unified_rebuild_publishes_findings_on_postgres(postgres_repository):
+    """PostgreSQL form of the hook check: the split ``rebuild_unified_kg``
+    publishes the findings through its (fail-open) derived tail, and an
+    unchanged rerun takes the skip path that stamps the merge code."""
+    from app.domain.kg_analysis_contracts import ARTIFACT_FINDINGS
+    from app.services.kg_analysis_precompute import analysis_ledger_is_current
+
+    repository = postgres_repository
+    notebook_id = seed_world(repository, postgres=True).notebook_id
+    lifecycle = repository._runtime.knowledge_lifecycle
+    events: list = []
+    original_emit = lifecycle.event_log.emit
+    lifecycle.event_log.emit = lambda event: (events.append(event), original_emit(event))[1]
+    try:
+        assert lifecycle.rebuild_unified_kg(notebook_id, force=True) > 0
+    finally:
+        lifecycle.event_log.emit = original_emit
+    assert [e for e in events if str(e.get("kind", "")).endswith("_failed")] == []
+    store = repository._runtime.unified_kg
+    with store.read_snapshot() as db:
+        ledger = store.kg_analysis_artifact_rows(db, notebook_id)
+        state = store.state_row(db, notebook_id)
+        rows = store.kg_analysis_finding_rows(db, notebook_id)
+    assert ARTIFACT_FINDINGS in ledger
+    assert analysis_ledger_is_current(ledger, int(state["kg_mutation_seq"]),
+                                      int(state["cluster_mutation_seq"]), has_boards=True)
+    assert ("F5", "notebook") in [(r["rule_id"], r["subject_key"]) for r in rows]
+
+    with repository._runtime.database.write() as db:
+        db.execute("UPDATE unified_kg_state SET cluster_code_version="
+                   "'algo=1;embed_dim=1;runtime_dim=0' WHERE notebook_id=%s", (notebook_id,))
+    service = repository._runtime.kg_analysis
+    assert service.overview(notebook_id).merge_code.matches is False
+    seqs = (int(state["kg_mutation_seq"]), int(state["cluster_mutation_seq"]))
+    lifecycle.rebuild_unified_kg(notebook_id)                     # unchanged: skip path
+    with store.read_snapshot() as db:
+        after = store.state_row(db, notebook_id)
+    assert (int(after["kg_mutation_seq"]), int(after["cluster_mutation_seq"])) == seqs
+    assert service.overview(notebook_id).merge_code.matches is True

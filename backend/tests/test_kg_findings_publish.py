@@ -353,6 +353,41 @@ def test_findings_built_on_older_rules_are_stale_and_rebuilt(repo):
     assert _view(_overview(repo, world.notebook_id), ARTIFACT_FINDINGS).freshness.stale is False
 
 
+def test_a_full_unified_rebuild_publishes_findings_and_a_skip_stamps_the_merge_code(repo):
+    """The hooks this feature hangs on, reached the way production reaches them:
+    ``rebuild_unified_kg`` (split into phase helpers) publishes the findings
+    through its derived tail's ``rebuild_communities`` — a tail that is
+    fail-open, so a broken wire would otherwise go unnoticed — and an unchanged
+    rerun takes the skip path, which stamps the merge code the overview's
+    ``merge_code`` compares."""
+    world = seed_world(repo, postgres=False)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    events: list = []
+    original_emit = lifecycle.event_log.emit
+    lifecycle.event_log.emit = lambda event: (events.append(event), original_emit(event))[1]
+    try:
+        assert lifecycle.rebuild_unified_kg(world.notebook_id, force=True) > 0
+    finally:
+        lifecycle.event_log.emit = original_emit
+    assert [e for e in events if str(e.get("kind", "")).endswith("_failed")] == []
+    ledger = _ledger(repo, world.notebook_id)
+    kg_seq, cluster_seq = _seq(repo, world.notebook_id)
+    assert ARTIFACT_FINDINGS in ledger
+    assert analysis_ledger_is_current(ledger, kg_seq, cluster_seq, has_boards=True)
+    assert ledger[ARTIFACT_FINDINGS]["payload"]["rules_version"] == RULES_VERSION
+    assert ("F5", "notebook") in _keys(_rows(repo, world.notebook_id))
+
+    with repo._runtime.database.write() as db:                     # an older merge code
+        db.execute("UPDATE unified_kg_state SET cluster_code_version="
+                   "'algo=1;embed_dim=1;runtime_dim=0' WHERE notebook_id=?",
+                   (world.notebook_id,))
+    assert _overview(repo, world.notebook_id).merge_code.matches is False
+    before = _seq(repo, world.notebook_id)
+    lifecycle.rebuild_unified_kg(world.notebook_id)               # unchanged: skip path
+    assert _seq(repo, world.notebook_id) == before                # nothing recomputed
+    assert _overview(repo, world.notebook_id).merge_code.matches is True
+
+
 def test_zero_board_still_writes_findings(repo):
     """No relation at all → no board, no source profiles (legal absence), but
     findings are required: the object scan still runs and F5 reports every
