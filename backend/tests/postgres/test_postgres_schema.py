@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 79
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 80
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -69,10 +69,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 79
-    assert migrator.migrate() == 79
-    assert migrator.current_version() == 79
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 79
+    assert migrator.migrate() == 80
+    assert migrator.migrate() == 80
+    assert migrator.current_version() == 80
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 80
 
 
 @pytest.mark.postgres_integration
@@ -84,7 +84,7 @@ def test_kg_findings_storage_matches_the_sqlite_v97_contract(postgres_database):
 
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 79
+    assert PostgresMigrator(postgres_database).migrate() == 80
     with postgres_database.connect() as conn:
         def columns(table):
             return [
@@ -151,11 +151,68 @@ def test_kg_findings_storage_matches_the_sqlite_v97_contract(postgres_database):
 
 
 @pytest.mark.postgres_integration
+def test_ask_job_report_id_matches_the_sqlite_v99_contract(postgres_database):
+    """0080 mirrors SQLite v99: ``ask_jobs.report_id`` is text NOT NULL DEFAULT
+    '' under the "C" collation like its neighbours, a turn that exists before
+    the migration reads '' afterwards, and a row may carry a report id."""
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    migrator = PostgresMigrator(postgres_database)
+    assert migrator.migrate(target_version=79) == 79
+    with postgres_database.write() as db:
+        db.execute(
+            "INSERT INTO notebooks (id, name, created_at, updated_at) "
+            "VALUES ('nb-v80', 'n', now(), now())"
+        )
+        db.execute(
+            "INSERT INTO ask_jobs (id, notebook_id, question, status, created_at, "
+            "updated_at) VALUES ('job-v79', 'nb-v80', 'why?', 'running', now(), now())"
+        )
+    assert migrator.migrate() == 80
+    assert migrator.migrate() == 80
+    with postgres_database.connect() as conn:
+        column = conn.execute(
+            "SELECT data_type, is_nullable, column_default, collation_name FROM "
+            "information_schema.columns WHERE table_schema=current_schema() "
+            "AND table_name='ask_jobs' AND column_name='report_id'"
+        ).fetchone()
+        legacy = conn.execute(
+            "SELECT report_id FROM ask_jobs WHERE id='job-v79'"
+        ).fetchone()
+        indexes = conn.execute(
+            "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() "
+            "AND tablename='ask_jobs' AND indexdef ILIKE '%report_id%'"
+        ).fetchall()
+    assert dict(column) == {
+        "data_type": "text", "is_nullable": "NO", "column_default": "''::text",
+        "collation_name": "C",
+    }
+    assert legacy["report_id"] == ""
+    assert indexes == []
+    with postgres_database.write() as db:
+        db.execute(
+            "INSERT INTO ask_jobs (id, notebook_id, question, status, report_id, "
+            "created_at, updated_at) VALUES ('job-v80', 'nb-v80', 'why?', "
+            "'running', 'rep-1', now(), now())"
+        )
+        db.execute(
+            "INSERT INTO ask_jobs (id, notebook_id, question, status, created_at, "
+            "updated_at) VALUES ('job-plain', 'nb-v80', 'why?', 'running', now(), now())"
+        )
+    with postgres_database.connect() as conn:
+        stored = {
+            row["id"]: row["report_id"]
+            for row in conn.execute("SELECT id, report_id FROM ask_jobs").fetchall()
+        }
+    assert stored == {"job-v79": "", "job-v80": "rep-1", "job-plain": ""}
+
+
+@pytest.mark.postgres_integration
 def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_path):
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 79
+    assert migrator.migrate() == 80
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -238,7 +295,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 79
+        assert PostgresMigrator(databases[1]).migrate() == 80
     finally:
         for database in databases:
             database.close()
@@ -342,6 +399,7 @@ def test_packaged_index_migration_phases_are_exact():
         (77, "kg_analysis_findings"),
         (78, "global_ask_job_notebooks"),
         (79, "kg_cluster_scratch_ordinal"),
+        (80, "ask_job_report_id"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -867,6 +925,9 @@ def test_packaged_index_migration_phases_are_exact():
     assert index_declarations(79) == [
         (False, "idx_kg_cluster_scratch_nb_run_ordinal")
     ]
+    # Migration 80 (ask_jobs.report_id) adds a defaulted column nothing
+    # filters or joins on: no index.
+    assert index_declarations(80) == []
     # Spelled without ``IF NOT EXISTS`` on purpose, and that is asserted
     # rather than merely commented: app/migration/shadow/postgres_catalog.py
     # parses CREATE INDEX straight out of these files to build the catalog

@@ -5881,5 +5881,36 @@ MIGRATION_MANIFEST[(97, 98)] = {
     "views": {},
 }
 
+# v99 (parity with PostgreSQL 0080_ask_job_report_id.sql): ask_jobs.report_id
+# TEXT NOT NULL DEFAULT '' -- the deep report an in-flight Ask turn was asked
+# about ('' = none; the default is the whole backfill). Columns only: like
+# v91's ask_jobs.memory_access, the manifest tracks no CREATE TABLE text for
+# ask_jobs. No table, index, trigger or view.
+ASK_JOBS_REPORT_ID_COLUMNS = {
+    "ask_jobs": {
+        "report_id": ("report_id", "TEXT", 1, "''", 0),
+    },
+}
+MIGRATION_MANIFEST = {
+    (key[0], 99, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "ask_jobs": {
+                **manifest["columns"].get("ask_jobs", {}),
+                **ASK_JOBS_REPORT_ID_COLUMNS["ask_jobs"],
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(98, 99)] = {
+    "tables": {},
+    "columns": ASK_JOBS_REPORT_ID_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

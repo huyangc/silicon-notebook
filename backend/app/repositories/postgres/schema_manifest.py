@@ -495,7 +495,11 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # backfill_global_ask_attribution.py writes the existing done jobs' rows) and
 # the partial idx_global_ask_jobs_unattributed over (id) WHERE status = 'done'
 # AND attributed = 0. One new replicated unique surface (the primary key).
+# SQLite v99 / PostgreSQL 0080 add ask_jobs.report_id (text COLLATE "C" NOT
+# NULL DEFAULT ''): the deep report an in-flight Ask turn was asked about, ''
+# when it carries none; the default is the whole backfill. No table, index, FK
+# or unique-surface change.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=98,
-    postgres_version=79,
+    sqlite_version=99,
+    postgres_version=80,
 )

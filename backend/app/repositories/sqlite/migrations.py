@@ -323,7 +323,11 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # 1 = that table holds this done job's attribution) and two indexes. No
 # backfill here: existing done jobs are attributed by the offline
 # ``scripts/backfill_global_ask_attribution.py``. See ``_migration_98``.
-SCHEMA_VERSION = 98
+# v99 (paired with PostgreSQL 0080_ask_job_report_id.sql) adds
+# ask_jobs.report_id (TEXT NOT NULL DEFAULT ''): the deep report an in-flight
+# Ask turn was asked about; '' = no linked report. No backfill, no index, no
+# foreign key. See ``_migration_99``.
+SCHEMA_VERSION = 99
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
 # when v87 was written (a migration must not change meaning when the live
@@ -6046,6 +6050,25 @@ class SqliteMigrator:
                 CREATE INDEX IF NOT EXISTS idx_global_ask_jobs_unattributed
                     ON global_ask_jobs(id) WHERE status='done' AND attributed=0;
             """)
+
+    def _migration_99(self) -> None:
+        """The report an in-flight Ask turn was asked about, parity with
+        PostgreSQL ``0080_ask_job_report_id.sql``.
+
+        ``ask_jobs.report_id`` holds the id of the deep report the turn is a
+        follow-up on, ``''`` when it carries none. ``NOT NULL DEFAULT ''`` is
+        the whole backfill: no turn that exists before this version was linked
+        to a report. The column lets a repeated ``client_request_id`` be
+        compared against the report it first carried and lets an in-flight
+        turn show its report before its answer exists. No index (a job is read
+        by id or by conversation) and no foreign key (a deleted report must
+        not reach back into the job that asked about it).
+        ``add_column_if_missing`` keeps the migration re-runnable.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "ask_jobs", "report_id", "TEXT NOT NULL DEFAULT ''"
+            )
 
     def migrate(self) -> list[int]:
         with self._connect() as db:
