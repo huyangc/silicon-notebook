@@ -197,8 +197,9 @@
   `create_application_repository(settings)` / `SQLiteRepository(settings)`。版本闸
   （`app.repositories.schema_currency`）与唯一一条拒绝文案共用；拒绝经
   `MaintenanceCliError.exit_code` 以退出码 3 退出。只有服务启动与 `database migrate` 拥有
-  schema。`backend/tests/test_schema_guest_guard.py` 让其余任何不带字面 guest 关键字的构造
-  报红；确实拥有临时库的工具在那里登记理由。
+  schema。`backend/tests/test_schema_guest_guard.py` 让服务进程、登记过的 guest 入口与 schema
+  所有者之外的任何构造报红——自己写 guest 关键字也算，因为那会跳过版本闸；确实拥有临时库的
+  工具在那里登记理由。连不上库时只输出那条不含凭据的固定文案（退出码 2）。
 
 ### 前端实现护栏
 
