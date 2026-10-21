@@ -373,7 +373,90 @@ def test_promotion_targets_refuses_a_database_one_version_behind(guest_db, capsy
 
     err = capsys.readouterr().err
     assert f"SQLite v{SCHEMA_VERSION - 1}" in err and MIGRATE_COMMAND in err
+    # The remedy names the --db file, not whatever DATABASE_URL points at.
+    assert f"DATABASE_URL=sqlite:///{guest_db.resolve()}" in err
+    assert "以该库启动一次升级后的服务" in err
     assert _schema(guest_db) == schema
+
+
+def test_promotion_targets_remedy_for_an_uninitialized_file_names_that_file(tmp_path, capsys):
+    module = load_script("backfill_promotion_targets")
+    db = tmp_path / "empty.db"
+    sqlite3.connect(db).close()  # exists, user_version 0
+
+    assert module.main(["--db", str(db), "list"]) == 3
+
+    err = capsys.readouterr().err
+    assert "SQLite 库的 schema 版本为 0" in err and "以该库启动一次服务" in err
+
+
+def test_the_sqlite_probe_never_reads_immutable_beside_a_rollback_journal(
+    tmp_path, monkeypatch
+):
+    """A ``-journal`` (hot, or a DELETE-mode writer mid-transaction) means the
+    main file alone cannot be trusted: the probe must take the ordinary
+    locked ``mode=ro`` path, never ``immutable=1``."""
+    import sqlite3 as sqlite3_module
+
+    from app.repositories.schema_currency import inspect_sqlite_schema
+
+    db = tmp_path / "rollback.db"
+    connection = sqlite3.connect(db)
+    connection.execute("PRAGMA user_version = 9")
+    connection.commit()
+    connection.close()
+    (tmp_path / "rollback.db-journal").write_bytes(b"")
+    opened: list[str] = []
+    real_connect = sqlite3_module.connect
+
+    def recording_connect(target, *args, **kwargs):
+        opened.append(str(target))
+        return real_connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3_module, "connect", recording_connect)
+
+    assert inspect_sqlite_schema(db).current == 9
+    assert opened and all("immutable" not in uri for uri in opened)
+    assert all("mode=ro" in uri for uri in opened)
+
+
+def test_a_connected_but_failed_ledger_read_has_its_own_credential_free_wording(
+    tmp_path, monkeypatch, capfd
+):
+    """Connected, then the read fails (timeout, lock wait, privilege): the
+    operator sees the second fixed wording, never the server's text."""
+    from app.repositories.postgres import database as postgres_database
+
+    class _Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, *args, **kwargs):
+            raise RuntimeError(
+                'permission denied for table silicon_schema_migrations '
+                '(user "opsuser" at db-secret-host/secretdb, password s3cret)'
+            )
+
+    monkeypatch.setattr(
+        postgres_database._SafeDiagnosticConnection,
+        "connect",
+        classmethod(lambda cls, *args, **kwargs: _Session()),
+    )
+    monkeypatch.setenv("DATABASE_URL", "postgresql://opsuser:s3cret@db-secret-host:5432/secretdb")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    get_settings.cache_clear()
+
+    assert _migrate(["--confirm-service-stopped"]) == 2
+
+    output = capfd.readouterr()
+    text = output.out + output.err
+    assert "已连上 PostgreSQL，但读取 schema 迁移账本失败" in text
+    assert "无法连接 PostgreSQL" not in text
+    for token in SECRET_TOKENS + ("permission denied",):
+        assert token not in text, f"{token!r} leaked: {text}"
 
 
 def test_promotion_targets_runs_on_a_current_database(guest_db):
