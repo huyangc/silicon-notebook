@@ -2499,9 +2499,9 @@ class GovernanceStore:
 
         ``own_pair_only`` (the caller lacks ``knowledge:write``, user ruling
         2026-10-22): only a pair of the caller's own Memory objects supported
-        by her own Memory alone may merge; any other pair that passes every
-        check below raises ``NeedsKnowledgeWrite`` -- decided on the same
-        reads that classify the pair, before anything is written.
+        by her own Memory alone, both approved, may merge; any other pair that
+        passes every check below raises ``NeedsKnowledgeWrite`` -- decided on
+        the same reads that classify the pair, before anything is written.
 
         M1 (``app.domain.memory_kg_isolation`` has the rule): a
         Memory-derived object merges only with another one of the same
@@ -2541,7 +2541,12 @@ class GovernanceStore:
         # own-Memory pair; its merged-away row records the target
         # (MERGED_INTO_PAYLOAD_KEY) so clearing the target can restore it.
         own_pair = bool(src["memory_derived"]) and bool(tgt["memory_derived"])
-        if own_pair_only and not own_pair:
+        # The read-level merge also needs both sides approved: merging and then
+        # restoring would otherwise lift a conflict / reviewed object to approved,
+        # around the read-level PATCH's approved <-> deprecated rule.
+        if own_pair_only and not (
+            own_pair and src["status"] == "approved" and tgt["status"] == "approved"
+        ):
             raise NeedsKnowledgeWrite()
         merged: List[dict] = json.loads(tgt["evidence"] or "[]")
         seen = {(e.get("element_id"), e.get("quoted_span")) for e in merged}

@@ -2236,7 +2236,7 @@ class KnowledgeGovernanceService:
         return self._duplicate_groups(object_type, by_seed, full_by_id)
 
     def find_own_memory_duplicates(
-        self, notebook_id: str, object_type: str,
+        self, notebook_id: str, object_type: str, *, approved_only: bool = False,
     ) -> OwnMemoryDuplicates:
         """The viewer's own duplicate groups: the same blocking and grouping as
         ``find_duplicates`` (seed, acronym alias, similarity, order), run on the
@@ -2256,7 +2256,12 @@ class KnowledgeGovernanceService:
         payload of the members of a group of two or more and of the merged-away
         objects only. ``find_duplicates`` and what it returns are untouched, and
         nothing is cached (the shared groups are not cached either). No
-        notebook-wide viewer scope is built: the identity is all this read needs."""
+        notebook-wide viewer scope is built: the identity is all this read needs.
+
+        ``approved_only`` (the viewer lacks ``knowledge:write``): her groups hold
+        approved objects only -- the only ones the read-level merge accepts
+        (``merge_objects_in_transaction(own_pair_only=True)``); a writer's groups
+        are unchanged. ``merged_away`` is the same for both."""
         self.get_notebook(notebook_id)
         viewer = viewer_identity(self._current_user_id())
         if not viewer:
@@ -2265,7 +2270,10 @@ class KnowledgeGovernanceService:
             rows = self.governance_store.own_memory_duplicate_seed_rows(
                 db, notebook_id, object_type, viewer
             )
-            live = [r for r in rows if r["status"] != "deprecated"]
+            live = [
+                r for r in rows if r["status"] != "deprecated"
+                and (not approved_only or r["status"] == "approved")
+            ]
             merged_away = [r for r in rows if r["status"] == "deprecated"]
             by_seed = self._duplicate_blocks(object_type, live)
             pending = [

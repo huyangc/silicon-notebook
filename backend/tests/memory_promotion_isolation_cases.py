@@ -1124,6 +1124,40 @@ def reader_restores_her_own_merged_object(world: World) -> None:
     assert (response.status_code, response.json()) == (404, refused_body)
 
 
+def reader_merges_approved_own_objects_only(world: World) -> None:
+    """The read-level merge needs both of her objects approved: merging and
+    then restoring would otherwise lift a conflict object to approved, around
+    the read-level PATCH's approved <-> deprecated rule. Her groups therefore
+    list approved objects only; a writer's groups and merges are unchanged."""
+    c = _reader_with_memory(world)
+    with world.repo._write() as db:
+        for object_id, source_id, name in (
+            ("ko-c-conflict", "src-memory-c", "reader claim"),
+            # A's conflict object named like her MEMORY_OBJECT_2
+            ("ko-a-conflict", "src-memory-a", "private loop margin"),
+        ):
+            db.execute(
+                world.q("INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
+                        "payload,evidence,source_id,created_at,updated_at) "
+                        "VALUES (?,?,'claim','conflict',?,?,?,?,?)"),
+                (object_id, world.nb, json.dumps({"name": name}),
+                 json.dumps([_ev(source_id)], ensure_ascii=False), source_id, NOW, NOW),
+            )
+    # the reader's groups leave the conflict object out; the writer's keep hers
+    assert [set(g) for g in _own_groups(world, c)] == [{"ko-c-dup-1", "ko-c-dup-2"}]
+    assert {"ko-a-conflict", MEMORY_OBJECT_2} in [set(g) for g in _own_groups(world, world.a)]
+    before = _kg_rows(world)
+    for source_id, into_id in (("ko-c-conflict", "ko-c-dup-1"), ("ko-c-dup-1", "ko-c-conflict")):
+        response = _merge(world, c, source_id, into_id)
+        assert (response.status_code, response.json()) == (
+            404, {"detail": "Notebook not found"}), (source_id, into_id, response.text)
+    assert _kg_rows(world) == before
+    # the owner (a writer) merges her conflict object as before
+    merged = _merge(world, world.a, "ko-a-conflict", MEMORY_OBJECT_2)
+    assert merged.status_code == 200, merged.text
+    assert _object_row(world, "ko-a-conflict")["status"] == "deprecated"
+
+
 def status_patches_on_a_mirror_keep_the_write_fence(world: World) -> None:
     """On a mirror the read-level PATCH does not open either: a reader's own
     status toggle answers 404 as before, the owner's PATCH 409."""

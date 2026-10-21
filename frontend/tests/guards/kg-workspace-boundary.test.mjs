@@ -557,7 +557,7 @@ test("read-only review recovery and every provider-side write are policy gated",
   assert.ok(gateAt >= 0, "partitionAllowed");
   const gate = knowledgeText.slice(gateAt, gateAt + 400);
   assert.match(gate, /partition === "shared"[\s\S]*policyRef\.current\.canGovernKnowledge[\s\S]*policyRef\.current\.canMergeOwnMemory/);
-  for (const name of ["findDuplicates", "mergeKnowledge"]) {
+  for (const name of ["findDuplicates", "mergeKnowledge", "restoreOwnMemoryObject"]) {
     const at = knowledgeText.indexOf(`const ${name} =`);
     assert.ok(at >= 0, name);
     assert.match(knowledgeText.slice(at, at + 900), /partitionAllowed/, name);

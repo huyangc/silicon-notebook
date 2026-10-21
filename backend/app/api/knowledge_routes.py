@@ -265,6 +265,7 @@ def find_duplicates(notebook_id: str, type: str = Query("rules")) -> List[Duplic
 )
 def find_own_memory_duplicates(
     notebook_id: str, type: str = Query("rules"),
+    user: UserProfile = Depends(get_current_user),
 ) -> OwnMemoryDuplicates:
     """The caller's own duplicate groups: objects derived from her own Memory
     and supported by it alone, which the shared ``/duplicates`` leaves out for
@@ -272,11 +273,16 @@ def find_own_memory_duplicates(
     can restore). A separate route because ``/duplicates`` answers a bare list,
     so a per-viewer field would change its shape for every existing client.
     Anyone else — another member, a site admin — gets two empty lists, the same
-    answer as a viewer who owns no Memory here."""
+    answer as a viewer who owns no Memory here. A viewer without
+    ``knowledge:write`` gets groups of approved objects only: the read-level
+    merge accepts nothing else."""
     object_type = _KNOWLEDGE_TYPE_MAP.get(type, type)
     try:
         return knowledge_governance_service().find_own_memory_duplicates(
-            notebook_id, object_type
+            notebook_id, object_type,
+            approved_only=not notebook_capability_allowed(
+                "knowledge:write", notebook_id, user.id
+            ),
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
@@ -311,7 +317,7 @@ def merge_knowledge(notebook_id: str, knowledge_id: str, payload: MergeRequest,
     own objects backed by her own Memory alone.
 
     With read access only: the store merges two of the caller's own Memory
-    objects supported by her own Memory alone (``own_pair_only``), and refuses
+    objects supported by her own Memory alone, both approved (``own_pair_only``), and refuses
     anything else in the statement that locks and classifies the pair. Every
     refusal answers the 404 this caller got for any merge before -- an unknown
     id, a shared or someone else's object, a cross-class pair -- so she learns
