@@ -25,6 +25,14 @@
   别人的 Memory、缺来源 id——隔离上线前手工合并留下的混合证据)→ 同样是
   `CROSS_CLASS_MESSAGE`:那条对象带着共享证据,等同于公共对象。
 
+鉴权分两条路(用户裁决 2026-10-22):有 `knowledge:write` 的调用者照上面的规则合并;
+只有读权的成员只能合并「两边都是她本人、证据只出自她本人记忆」的一对——判据就是上面
+第三条,由 store 在同一条加锁语句读出的两行上判定(`own_pair_only=True`),不是本人对就
+抛 `MergeNeedsKnowledgeWrite`,任何写入之前。路由把只读成员的每一种拒绝都答成读守卫
+那句 404,不透露另一侧对象存不存在、是什么。镜像库上读权这条路不开(与 knowledge:write
+的围栏同口径)。本人的重复组(`own_memory_duplicate_rows`)按
+`evidence_only_from_own_memory` 逐个对象判同一条,所以列出来的每一对都正是合并会接受的。
+
 放开同主人合并之后,「删除/编辑一条 Memory 只删到该 Memory 自己的对象」由两处维持:
 删除/转移/退出走 `remove_memory_sources`,先把该来源的证据从别的来源拥有的对象上
 摘掉(`strip_sources_evidence_on`)再拆;编辑后重抽(`ingest_memory_source`)在清旧
@@ -130,6 +138,18 @@ class MemoryKnowledgeMergeRefused(ValueError):
     def __init__(self, user_message: str) -> None:
         super().__init__(user_message)
         self.user_message = user_message
+
+
+class MergeNeedsKnowledgeWrite(LookupError):
+    """A caller without ``knowledge:write`` asked to merge a pair that is not two
+    of her own Memory objects supported by her own Memory alone.
+
+    Raised by ``merge_objects_in_transaction(own_pair_only=True)`` in the
+    statement that locks and classifies both rows, before anything is written,
+    so the read-level path can never merge anything else. The route answers it
+    exactly as it answers that caller for every other refusal: the read guard's
+    404, the body a missing notebook gets, so nothing tells her whether the other
+    object exists or what it is."""
 
 
 class PromotionRefused(ValueError):

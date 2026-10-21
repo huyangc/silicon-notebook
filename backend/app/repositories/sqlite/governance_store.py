@@ -46,6 +46,7 @@ from app.domain.knowledge_contracts import (
 from app.domain.memory_kg_isolation import (
     PROMOTION_APPROVE_MESSAGE,
     MemoryKnowledgeMergeRefused,
+    MergeNeedsKnowledgeWrite,
     MemoryPromotionRefused,
     PromotionObjectMissing,
     FOLLOW_REPOINT,
@@ -2404,10 +2405,17 @@ class GovernanceStore:
         now: str,
         *,
         actor_id: str | None = None,
+        own_pair_only: bool = False,
     ) -> sqlite3.Row:
         """The in-transaction body of merge_knowledge: fold source evidence
         into the target, maintain the reverse index, deprecate the source in
         place, and return the refetched target row.
+
+        ``own_pair_only`` (the caller lacks ``knowledge:write``, user ruling
+        2026-10-22): only a pair of the caller's own Memory objects supported
+        by her own Memory alone may merge; any other pair that passes every
+        check below raises ``MergeNeedsKnowledgeWrite`` -- decided on the same
+        reads that classify the pair, before anything is written.
 
         M1 (``app.domain.memory_kg_isolation`` has the rule): a
         Memory-derived object merges only with another one of the same
@@ -2447,6 +2455,8 @@ class GovernanceStore:
         # own-Memory pair; its merged-away row records the target
         # (MERGED_INTO_PAYLOAD_KEY) so clearing the target can restore it.
         own_pair = bool(src["memory_derived"]) and bool(tgt["memory_derived"])
+        if own_pair_only and not own_pair:
+            raise MergeNeedsKnowledgeWrite()
         merged: List[dict] = json.loads(tgt["evidence"] or "[]")
         seen = {(e.get("element_id"), e.get("quoted_span")) for e in merged}
         for item in json.loads(src["evidence"] or "[]"):

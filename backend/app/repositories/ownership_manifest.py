@@ -645,6 +645,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.global_ask_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.group_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.identity_repository', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.knowledge_governance_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.memory_membership_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.memory_preview_client', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.model_provider_if_initialized', kind='attribute', target='_runtime'),
@@ -2656,6 +2657,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>._merge_with_write', kind='attribute', target='merge_knowledge'),
             ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.merge_knowledge', kind='attribute', target='merge_knowledge'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='merge_knowledge'),
         ),

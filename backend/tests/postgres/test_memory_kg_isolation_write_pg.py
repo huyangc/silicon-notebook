@@ -1531,6 +1531,16 @@ def test_pg_owner_duplicates_follow_the_memory_channel(pg_promotion_world):
     cases.owner_duplicates_follow_the_memory_channel(world)
 
 
+def test_pg_reader_merges_only_her_own_memory_pair(pg_promotion_world):
+    cases, world = pg_promotion_world
+    cases.reader_merges_only_her_own_memory_pair(world)
+
+
+def test_pg_merges_on_a_mirror_keep_the_write_fence(pg_promotion_world):
+    cases, world = pg_promotion_world
+    cases.merges_on_a_mirror_keep_the_write_fence(world)
+
+
 def test_pg_queued_memory_object_proposal_is_refused_and_closed(pg_promotion_world):
     cases, world = pg_promotion_world
     cases.queued_memory_proposal_is_refused_on_approval(world)

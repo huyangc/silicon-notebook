@@ -7,7 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.api.deps import (
     get_current_user,
     knowledge_governance_service,
+    mirrored_notebook_error,
     notebook_capability_allowed,
+    notebook_mirror_fence,
     repository,
     require_notebook_capability,
     require_notebook_read,
@@ -28,7 +30,10 @@ from app.models.knowledge import (
     ObjectSchemaUpdate,
     PaginatedKnowledge,
 )
-from app.domain.memory_kg_isolation import MemoryKnowledgeMergeRefused
+from app.domain.memory_kg_isolation import (
+    MEMORY_MERGE_RETRY_MESSAGE,
+    MemoryKnowledgeMergeRefused,
+)
 from app.services.knowledge_contracts import KnowledgeGraphTooLargeError
 from app.services.schema_registry import SchemaConflictError
 
@@ -267,12 +272,53 @@ def knowledge_graph(notebook_id: str) -> KnowledgeGraph:
         raise HTTPException(status_code=413, detail=str(exc))
 
 
-@router.post("/notebooks/{notebook_id}/knowledge/{knowledge_id}/merge", dependencies=[Depends(require_notebook_capability("knowledge:write"))])
+#: What a caller without ``knowledge:write`` gets for every merge refusal: the
+#: read guard's own 404 body, the one she got for any merge before 2026-10-22.
+_MERGE_NOT_PERMITTED = "Notebook not found"
+
+
+@router.post("/notebooks/{notebook_id}/knowledge/{knowledge_id}/merge", dependencies=[Depends(require_notebook_read)])
 def merge_knowledge(notebook_id: str, knowledge_id: str, payload: MergeRequest,
                     user: UserProfile = Depends(get_current_user)):
-    # M1: a side derived from someone else's Memory is "not found" (same 404
-    # body as an unknown id); the caller's own Memory answers 409 with why,
-    # except a pair of her own objects backed by her own Memory alone.
+    """Two authorisation paths (user ruling 2026-10-22).
+
+    With ``knowledge:write`` (owner, notebook admin): as before -- the
+    capability, then the mirror fence (409), then the store's M1 rules: a side
+    derived from someone else's Memory is "not found" (the 404 an unknown id
+    gets), the caller's own Memory answers 409 with why, except a pair of her
+    own objects backed by her own Memory alone.
+
+    With read access only: the store merges two of the caller's own Memory
+    objects supported by her own Memory alone (``own_pair_only``), and refuses
+    anything else in the statement that locks and classifies the pair. Every
+    refusal answers the 404 this caller got for any merge before -- an unknown
+    id, a shared or someone else's object, a cross-class pair -- so she learns
+    nothing about the other object. On a mirror the read path does not apply
+    (the knowledge:write fence, as for every knowledge write there): 404 as
+    before. The only other answer is the PostgreSQL retry 409 of her own pair."""
+    if notebook_capability_allowed("knowledge:write", notebook_id, user.id):
+        mirrored = notebook_mirror_fence("knowledge:write", notebook_id)
+        if mirrored:
+            raise mirrored_notebook_error(mirrored)
+        return _merge_with_write(notebook_id, knowledge_id, payload, user)
+    if notebook_mirror_fence("knowledge:write", notebook_id):
+        raise HTTPException(status_code=404, detail=_MERGE_NOT_PERMITTED)
+    try:
+        return repository().merge_knowledge(
+            notebook_id, knowledge_id, payload, actor_id=user.id, own_pair_only=True
+        )
+    except MemoryKnowledgeMergeRefused as exc:
+        if exc.user_message == MEMORY_MERGE_RETRY_MESSAGE:
+            raise user_error(409, exc.user_message)
+        raise HTTPException(status_code=404, detail=_MERGE_NOT_PERMITTED)
+    except (LookupError, ValueError):
+        # KeyError (unknown or someone else's object), MergeNeedsKnowledgeWrite
+        # (not her own pair), ValueError (self-merge, mismatched types)
+        raise HTTPException(status_code=404, detail=_MERGE_NOT_PERMITTED)
+
+
+def _merge_with_write(notebook_id: str, knowledge_id: str, payload: MergeRequest,
+                      user: UserProfile):
     try:
         return repository().merge_knowledge(
             notebook_id, knowledge_id, payload, actor_id=user.id
