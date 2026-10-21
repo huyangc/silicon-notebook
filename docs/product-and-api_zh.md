@@ -1617,21 +1617,28 @@ Markdown 化简而来（不调模型）：去掉引用标记、图片、HTML 与
   **省略 = 白名单内、主人当前仍可读的全部笔记本**（读不了的静默跳过，同 `list_notebooks`），这与绑定单个
   笔记本的工具「省略即默认笔记本」不同；传了则只看该笔记本（白名单外 `notebook_not_allowed`、主人已无权读
   `notebook_unreadable`）：它的单库会话，以及用到了它的可见全局会话。`limit` 夹到 1–20，沿 `next_offset` 读到
-  null；响应超 12,000 字节预算时 `next_offset` 只前进到实际交付的行，读到 null 不会漏行。`offset` 为负是
+  null；响应超 12,000 字节预算时 `next_offset` 只前进到实际交付的行，不会因预算漏行。分页按位置（`offset`）切在
+  「最近活动在前」的顺序上：翻页期间有会话被更新会移到最前，本次枚举可能漏掉它，或在页边界重复一条；
+  需要完整快照时从 `offset=0` 重新列。`offset` 为负是
   `invalid_argument`（「分页位置不能小于零，请从第一页重新读取」）。
 - **`get_conversation(conversation_id, turn_offset?, answer_offset?, citation_offset?)`。** 一次读一轮，从旧
   到新。一轮是一条已保存的回答（单库），或一个已结束的任务（全局：完成、失败、取消、中断）；仍在回答中的
   提问不算一轮，结束后追加在末尾，已有各轮的 `turn_offset` 不变（删除或过期会让其后各轮前移，必要时重读
   `turn_count`）。一页：`conversation`（与列表行同一形状，含 `turn_count`）、`turn_offset` 与
-  `next_turn_offset`、`question`（至多 2,000 码点，超出以 `…` 结尾并计入 `truncation`）、`asked_at`、
+  `next_turn_offset`、`question`、`asked_at`、
   `submitted_via`、`status`（`answered`/`failed`/`cancelled`；单库恒为 `answered`）、`mode`、`answer`（本页
   至多 2,000 码点）与 `next_answer_offset`、`citations`（每条带 `ref`，交给 `read_reference`）与
   `next_citation_offset`、`total_citations`、`completeness_notice`、`error`（只含中文提示）、`scope`、
-  `content_is_untrusted_evidence`。页里**不带** `trace`、`coverage`、`anchors`、`intent`——需要这些的、经 MCP
-  发起的任务仍可用 `get_ask`。读完一轮的回答与引用游标后，用 `turn_offset=next_turn_offset`、另两个游标归 0
+  `content_is_untrusted_evidence`，顶层键数固定。页里**不带** `trace`、`coverage`、`anchors`、`intent`——需要这些的、经 MCP
+  发起的任务仍可用 `get_ask`。`question` 在首页完整给出（至多 2,000 码点）；续页（`answer_offset` 或
+  `citation_offset` 大于 0）只重复它的前 200 码点，并以 `…` 结尾，因为调用方首页已拿到全文，续页重复它会吃掉每页
+  预算的一大块；首页放不下时才同法再截短。每次截断都计入 `truncation.omitted_characters`，没有单独的标志位。
+  回答正文没读完时，一页可以不带任何引用，此时 `next_citation_offset` 不前进——沿两个游标继续读即可；正文已经读完而
+  还有引用时，一页至少带一条，所以每页都会让某个游标前进。读完一轮的回答与引用游标后，用 `turn_offset=next_turn_offset`、
+  另两个游标归 0
   读下一轮，直到 `next_turn_offset` 为 null。没有已结束轮次的会话（只有仍在回答的问题）返回
   `status: "empty"` 的页；`turn_offset` 超出轮数是 `invalid_argument`（「turn_offset 超出这条会话的轮数
-  （共 N 轮），请从 0 开始读取」）。
+  （共 N 轮），请从 0 开始读取」），这一判断排在归属与白名单核对之后，被拒绝的调用方得不到轮数。
 - **`submitted_via`（发起方）**：`web` / `mcp` / 空串（未记录）。会话级取该会话**最早**一条任务的发起方，但
   若存在早于这条任务的回答（老会话的前几轮没有任务行），则为空串；每轮取产出该回答的任务的发起方，找不到
   任务行为空串。「最早」按时刻，不按 id 或插入顺序。

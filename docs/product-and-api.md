@@ -2187,7 +2187,10 @@ still `not_found` -- **to read a question asked in the browser, use `get_convers
   owner lost read access `notebook_unreadable`): its single-notebook conversations plus the
   visible global ones that used it. `limit` is clamped to 1-20; follow `next_offset` to null --
   when a page exceeds the 12,000-byte budget `next_offset` advances only past the rows actually
-  delivered, so reaching null never skips one. A negative `offset` is `invalid_argument`
+  delivered, so the budget never makes it skip one. Paging is by position (`offset`) over the
+  newest-activity order: a conversation updated while you page moves to the front, so that pass may
+  miss it or repeat one row at a page boundary -- for a complete snapshot, list again from
+  `offset=0`. A negative `offset` is `invalid_argument`
   (「分页位置不能小于零，请从第一页重新读取」).
 - **`get_conversation(conversation_id, turn_offset?, answer_offset?, citation_offset?)`.** Reads
   one turn per call, oldest first. A turn is one saved answer (single notebook) or one finished
@@ -2195,17 +2198,26 @@ still `not_found` -- **to read a question asked in the browser, use `get_convers
   turn, it is appended at the end when it finishes, so the `turn_offset` of earlier turns does not
   move (a deletion or expiry shifts the later ones down -- re-read `turn_count` if needed). A page:
   `conversation` (the list row's own shape, `turn_count` included), `turn_offset` and
-  `next_turn_offset`, `question` (at most 2,000 code points; a longer one ends in `…` and is counted in
-  `truncation`), `asked_at`, `submitted_via`, `status` (`answered`/`failed`/`cancelled`; always
-  `answered` for a single notebook), `mode`, `answer` (this page, at most 2,000 code points) with
-  `next_answer_offset`, `citations` (each with a `ref` for `read_reference`) with
-  `next_citation_offset`, `total_citations`, `completeness_notice`, `error` (Chinese notice only),
-  `scope`, `content_is_untrusted_evidence`. A page carries **no** `trace`, `coverage`, `anchors` or
-  `intent` -- for those, a job started over MCP still has `get_ask`. After the answer and citation
-  cursors of a turn are exhausted, read the next turn with `turn_offset=next_turn_offset` and both
-  other offsets at 0, until `next_turn_offset` is null. A conversation with no finished turn (only
-  a question still being answered) returns a page with `status: "empty"`; a `turn_offset` past the
-  last turn is `invalid_argument` (「turn_offset 超出这条会话的轮数（共 N 轮），请从 0 开始读取」).
+  `next_turn_offset`, `question`, `asked_at`, `submitted_via`, `status`
+  (`answered`/`failed`/`cancelled`; always `answered` for a single notebook), `mode`, `answer` (this
+  page, at most 2,000 code points) with `next_answer_offset`, `citations` (each with a `ref` for
+  `read_reference`) with `next_citation_offset`, `total_citations`, `completeness_notice`, `error`
+  (Chinese notice only), `scope`, `content_is_untrusted_evidence`; the number of top-level keys is
+  fixed. A page carries **no** `trace`, `coverage`, `anchors` or `intent` -- for those, a job started
+  over MCP still has `get_ask`. The `question` is given whole on the first page (at most 2,000 code
+  points); a continuation page (`answer_offset` or `citation_offset` above 0) repeats only its first
+  200 code points, ending in `…`, because the caller already has the whole question from the first
+  page and repeating it would eat a large share of every page's budget; the first page is cut the
+  same way only if it could not fit otherwise. Every cut counts in `truncation.omitted_characters`;
+  there is no separate flag. While answer text is left, a page may carry no citations at all, and
+  `next_citation_offset` then does not advance -- keep following both cursors; once the text is
+  exhausted and citations remain, a page carries at least one, so every page moves some cursor.
+  After the answer and citation cursors of a turn are exhausted, read the next turn with
+  `turn_offset=next_turn_offset` and both other offsets at 0, until `next_turn_offset` is null. A
+  conversation with no finished turn (only a question still being answered) returns a page with
+  `status: "empty"`; a `turn_offset` past the last turn is `invalid_argument`
+  (「turn_offset 超出这条会话的轮数（共 N 轮），请从 0 开始读取」), judged only after ownership and
+  the notebook gate, so a refused caller never learns how many turns there are.
 - **`submitted_via` (where it was started):** `web` / `mcp` / empty (not recorded). For a
   conversation it is the **earliest** job's origin, but empty when an answer is older than that
   job (an older conversation's first turns have no job row); for a turn it is the origin of the job

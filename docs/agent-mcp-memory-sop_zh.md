@@ -412,9 +412,11 @@ claude mcp list
 
 1. **列出。** `list_conversations` 列会话（单库 `conv-` 与跨笔记本 `gconv-` 并在一起，最近活动在前，`submitted_via` 标明
    是 `web` 还是 `mcp` 发起，空串为未记录），`list_reports` 列深度报告。两者的 `notebook_id` **省略 = 白名单内全部仍可读的笔记本**
-   （与「省略即默认笔记本」的其他工具不同）；沿 `next_offset` 翻页直到 null。
+   （与「省略即默认笔记本」的其他工具不同）；沿 `next_offset` 翻页直到 null。会话列表按位置在「最近活动在前」的顺序上翻页，翻页期间被更新的会话会移到最前，
+   本次枚举可能漏掉它或在页边界重复一条；需要完整快照时从 `offset=0` 重新列。
 2. **读一轮。** `get_conversation(conversation_id)` 一次读一轮，从最早的一轮开始：看 `question`、`answer` 与 `citations`；
-   回答或引用没读完就沿 `next_answer_offset` / `next_citation_offset` 继续；这一轮读完后用
+   回答或引用没读完就沿 `next_answer_offset` / `next_citation_offset` 继续（回答没读完时，一页可以不带引用，两个游标都要继续跟；
+   续页里的 `question` 只重复前 200 个字符并以 … 结尾，完整问题以首页为准）；这一轮读完后用
    `turn_offset=next_turn_offset`（另两个游标归 0）读下一轮，直到 `next_turn_offset` 为 null。仍在回答中的问题不算一轮，
    没有已结束轮次时返回 `status: "empty"`。页里没有 `trace`、`coverage`；每条引用的 `ref` 交给 `read_reference` 读原文。
 3. **读报告。** `get_report(report_id, notebook_id)` 要同时传 `list_reports` 那一行里的 `report_id` 与 `notebook_id`
