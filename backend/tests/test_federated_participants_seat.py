@@ -49,6 +49,12 @@ _GATES = (
 _STAMPS = (
     "_peer_owner",
 )
+# Ask's attached deep report: restoring the evidence a report cited re-reads
+# objects from the libraries this run may search, so it takes the participant
+# set (and any override) from the same seat -- neither a leg, a gate nor a stamp.
+_RESTORES = (
+    "restore_report_references",
+)
 
 
 def _seat_file_index() -> PythonSourceIndex:
@@ -88,7 +94,7 @@ def test_three_federated_legs_read_one_seat():
         finding.key.scope.rsplit(".", 1)[-1]: finding.count
         for finding in index.calls(target="self._retrieval_participants")
     }
-    assert seated == {name: 1 for name in (*_LEGS, *_GATES, *_STAMPS)}, seated
+    assert seated == {name: 1 for name in (*_LEGS, *_GATES, *_STAMPS, *_RESTORES)}, seated
 
 
 def test_the_seat_lives_on_the_shared_base_class():
