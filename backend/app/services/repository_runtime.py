@@ -1778,10 +1778,14 @@ class RepositoryRuntime:
                 db, rows, bridge_canonical_ids_of=purge_bridge_canonical_ids
             ),
             memory_after_teardown=self.memory_store.drop_memory_lexical_rows_on,
-            # A Memory re-ingest runs the same merge half before it clears the
-            # source's old graph: restore what its merge results absorbed,
-            # strip its entries from objects other sources own.
+            # The merge half of every Memory-source clear (removal and
+            # re-ingest): lock the rows the teardown writes, settle the objects
+            # merged into its objects, strip its entries from objects other
+            # sources own; what a held lock skipped is re-run after the commit,
+            # and the startup backstop reads with the heal reader.
             memory_evidence_detach=self.governance.detach_memory_merges_on,
+            memory_merge_actions_on=self.governance.apply_merge_follow_actions_on,
+            memory_merge_heal_candidates_on=self.governance.heal_merged_away_candidates_on,
             # PR-E8: a promotion source's teardown strips its entries and
             # deletes only the objects left without evidence.
             promotion_detach=self.governance.detach_promotion_sources_on,

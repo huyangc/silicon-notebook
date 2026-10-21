@@ -29,15 +29,28 @@
 删除/转移/退出走 `remove_memory_sources`,先把该来源的证据从别的来源拥有的对象上
 摘掉(`strip_sources_evidence_on`)再拆;编辑后重抽(`ingest_memory_source`)在清旧
 产物之前做同一次摘除。被合并的另一条 Memory 的对象因此只失去这条 Memory 贡献的证据,
-不会随它一起被删。反过来,拥有合并结果的那条 Memory 被编辑、转移或删除时,合并结果随它
-清掉;清掉之前(同一事务、同一处 `detach_memory_merges_on`),它证据里
-`MERGED_FROM_EVIDENCE_KEY` 记下的、直接并进来的对象若仍是弃用状态、且它自己的 Memory
-仍在,就恢复为 approved(用户裁决 2026-10-21),于是那条 Memory 的知识重新进入检索;
-来源 Memory 已不在的不恢复。只看仍在用的合并结果:一个已被并走的对象被清掉时,它的
-条目早已随它进了下一层的合并结果,不需要恢复。PostgreSQL 上恢复先对被恢复对象的 Memory
-来源取 `FOR KEY SHARE SKIP LOCKED`(拿不到锁 = 那条 Memory 正被删除或重抽,它的对象
-反正要被清掉,不恢复),再锁对象行——不等待,所以两条 Memory 交叉合并后同时删除也不会
-互相死锁。PostgreSQL 上合并先按 id 序对源对象的主来源与证据引用的 Memory
+不会随它一起被删。
+
+反过来,拥有合并结果的那条 Memory 被编辑、转移或删除时,合并结果随它清掉(用户裁决
+2026-10-21:被并走那条 Memory 的知识不能因此静默消失)。记录在被并走的那一行自己身上:
+本人两条 Memory 对象合并时,被并走对象的 payload 写入 `MERGED_INTO_PAYLOAD_KEY`
+(= 目标 id;以 `_` 开头的 payload 键不展示、不进检索文本,不需要迁移)。它再被并进
+别处时覆盖为最新目标;手动改它的状态或内容(PATCH)时清掉——主人手动弃用的对象因此
+永远不会被自动恢复。共享对象之间的合并不写它(行与证据逐字节不变)。清掉 Memory 来源的
+对象之前(同一事务、同一处 `detach_memory_merges_on`),标记指向这些对象的弃用对象按
+`plan_merge_follow_actions` 处理:被清掉的目标仍在用 → 恢复为 approved、去掉标记,
+重新进入检索;目标本身也已被并走 → 标记改指它的下一层(每清掉一层只恢复一层,a1→a2→a3
+清 a2 时 a1 改指 a3,清 a3 时才恢复);目标是手动弃用的 → 只去掉标记。只处理自己的
+Memory 仍在的对象。#824 之前的合并没有标记,无法与手动弃用区分,不自动恢复。
+
+PostgreSQL 上这一步对被处理对象的 Memory 来源取 `FOR KEY SHARE SKIP LOCKED`,再按 id 序
+锁对象行:拿不到锁的(持锁者可能是那条 Memory 的删除或重抽,也可能是关系补全、抽取
+发布、元素替换,或一个随后回滚的事务)不在事务里等,提交后由 `apply_merge_follow_actions`
+带等待地在独立短事务里补跑(同一锁序,幂等:行已不在、标记已变则跳过)。补跑也失败时,
+启动后的兜底扫描(`heal_merged_away_candidates`)按自愈判据「弃用、标记指向的对象已不在、
+自己的 Memory 仍在」恢复。拆除开始时用一条按 id 排序的语句锁住「本来源自有对象 ∪ 摘证据
+候选」(`lock_memory_teardown_objects_on`),再摘证据、再删除,所以两条 Memory 交叉合并后
+同时删除不会死锁。PostgreSQL 上合并先按 id 序对源对象的主来源与证据引用的 Memory
 来源取 `FOR KEY SHARE`,再锁两个对象——与拆除、重抽「先来源、后派生行」同一锁序,
 所以并发的删除/退出/编辑要么排在合并之后(看得到合并写进的证据并摘掉),要么排在
 之前(合并读到的是已摘净的行)。
@@ -49,7 +62,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable
+from dataclasses import dataclass
+from typing import Any, Callable, Iterable, Mapping
 
 from app.domain.promotion_provenance import evidence_source_ids
 
@@ -58,12 +72,15 @@ CROSS_CLASS_MESSAGE = "由个人记忆生成的知识对象不能与共享的知
 #: 并进了它):这次不合并、一行不写,重试即可。
 MEMORY_MERGE_RETRY_MESSAGE = "要合并的知识对象刚被修改，请稍后重试"
 
-#: 本人两条 Memory 对象合并时,从被并走对象拷进目标的每一条证据都带上这个键,值是被并走
-#: 对象的 id——「谁曾并进这里」的持久记录,随证据条目本身存放,不需要新列或迁移
-#: (`Evidence` 模型忽略多余的键,界面与接口不显示它)。链式合并时覆盖为最近一次的直接
-#: 来源(a1→a2→a3 后 a3 里 a1 的条目记的是 a2),所以清掉合并结果时只恢复直接并进来的
-#: 那一层。共享对象的合并不写这个键(证据逐字节不变)。
-MERGED_FROM_EVIDENCE_KEY = "merged_from"
+#: 本人两条 Memory 对象合并时写进**被并走对象** payload 的键,值是合并目标的 id(见模块
+#: docstring)。以 `_` 开头:`knowledge_record`、`payload_join`、检索文本与词法索引都跳过
+#: 这类键,所以它不展示、不进检索,也不需要新列或迁移。
+MERGED_INTO_PAYLOAD_KEY = "_merged_into"
+
+#: `MergeFollowAction.kind` 的三个取值。
+FOLLOW_RESTORE = "restore"
+FOLLOW_REPOINT = "repoint"
+FOLLOW_FORGET = "forget"
 
 # 贡献到公共知识库(通用路径 `propose_promotion` → `approve_promotion_in_transaction`)。
 # Memory 进公共库只有一条路:创建者本人的 `propose_memory_promotion`,它只带经过
@@ -159,12 +176,83 @@ def memory_merge_refusal(
     return CROSS_CLASS_MESSAGE
 
 
-def merged_evidence_entry(item: Any, merged_away_id: str, own_memory_pair: bool) -> Any:
-    """一条从被并走对象拷进目标的证据:本人 Memory 对之间的合并带上
-    `MERGED_FROM_EVIDENCE_KEY`(覆盖旧值),其余合并原样。"""
-    if own_memory_pair and isinstance(item, dict):
-        return {**item, MERGED_FROM_EVIDENCE_KEY: merged_away_id}
-    return item
+@dataclass(frozen=True)
+class MergeFollowAction:
+    """一条被并走对象在它的合并目标被清掉时要做的事。
+
+    `expected_target` 是做这件事的前提:行仍是弃用状态、标记仍等于它(补跑与兜底扫描
+    据此做成幂等,行已被改过就什么也不做)。`kind`:`FOLLOW_RESTORE` 恢复为 approved
+    并去掉标记;`FOLLOW_REPOINT` 把标记改成 `repoint_to`;`FOLLOW_FORGET` 只去掉标记。
+    """
+
+    notebook_id: str
+    object_id: str
+    expected_target: str
+    kind: str
+    repoint_to: str = ""
+
+
+@dataclass(frozen=True)
+class MemoryMergeDetach:
+    """`detach_memory_merges_on` 的结果:事务内已做的,以及因拿不到锁而跳过、要在提交后
+    带等待补跑的(只有 PostgreSQL 会有)。"""
+
+    applied: tuple = ()
+    skipped: tuple = ()
+
+
+def plan_merge_follow_actions(
+    notebook_id: str,
+    followers: Iterable[tuple[str, str]],
+    cleared: Mapping[str, tuple[str, str]],
+) -> list[MergeFollowAction]:
+    """`followers` 是 `(对象 id, 它的标记)`,标记指向 `cleared` 里某个将被清掉的对象;
+    `cleared` 是这些对象的 `id → (status, 它自己的标记)`。沿标记往下走过同样要被清掉
+    的层:停在一个仍在用的(恢复)、手动弃用的(只去标记)或不在 `cleared` 里的对象
+    (改指它)。遇到环一律恢复。两个后端共用这一份规则。"""
+    actions: list[MergeFollowAction] = []
+    for object_id, marker in followers:
+        seen = {object_id}
+        current = marker
+        kind, repoint_to = FOLLOW_RESTORE, ""
+        while current in cleared and current not in seen:
+            seen.add(current)
+            status, onward = cleared[current]
+            if status != "deprecated":
+                kind = FOLLOW_RESTORE
+                break
+            if not onward:
+                kind = FOLLOW_FORGET
+                break
+            if onward in seen:
+                kind = FOLLOW_RESTORE
+                break
+            if onward not in cleared:
+                kind, repoint_to = FOLLOW_REPOINT, onward
+                break
+            current = onward
+        actions.append(
+            MergeFollowAction(notebook_id, object_id, marker, kind, repoint_to)
+        )
+    return actions
+
+
+def followed_payload(payload: Mapping[str, Any], action: MergeFollowAction) -> dict:
+    """按 `action` 改写一行的 payload(恢复与去标记删掉键,改指写新目标)。"""
+    result = {k: v for k, v in payload.items() if k != MERGED_INTO_PAYLOAD_KEY}
+    if action.kind == FOLLOW_REPOINT:
+        result[MERGED_INTO_PAYLOAD_KEY] = action.repoint_to
+    return result
+
+
+def without_merge_marker(payload: Mapping[str, Any]) -> dict:
+    """手动修改(PATCH 状态或内容)之后的 payload:合并标记只由合并写入。"""
+    return {k: v for k, v in payload.items() if k != MERGED_INTO_PAYLOAD_KEY}
+
+
+def marked_merged_into(payload: Mapping[str, Any], into_id: str) -> dict:
+    """本人 Memory 对之间合并时被并走对象的新 payload(覆盖旧标记)。"""
+    return {**payload, MERGED_INTO_PAYLOAD_KEY: into_id}
 
 
 def merge_evidence_source_ids(*evidence_lists: Iterable[Any]) -> frozenset[str] | None:

@@ -296,6 +296,13 @@ class SourceIngestionService:
         # (restored before the result is cleared). ``None`` (narrow test
         # doubles) skips it.
         memory_evidence_detach: Optional[Callable[[Any, str, List[str], str], Any]] = None,
+        # ``memory_merge_actions_on(db, actions, now, wait=...)`` applies merge
+        # follow-ups (the governance store's ``apply_merge_follow_actions_on``)
+        # after a teardown's commit; ``memory_merge_heal_candidates_on(db,
+        # limit, after)`` reads one page of the startup backstop. ``None``
+        # (narrow test doubles) skips both.
+        memory_merge_actions_on: Optional[Callable[..., Any]] = None,
+        memory_merge_heal_candidates_on: Optional[Callable[..., Any]] = None,
         # PR-E8: ``promotion_detach(db, rows, now)`` runs for the promotion
         # sources of a teardown after the source lock and before the clear:
         # it removes those sources' entries from the evidence of the objects
@@ -334,6 +341,8 @@ class SourceIngestionService:
         self.memory_detach = memory_detach
         self.memory_after_teardown = memory_after_teardown
         self.memory_evidence_detach = memory_evidence_detach
+        self.memory_merge_actions_on = memory_merge_actions_on
+        self.memory_merge_heal_candidates_on = memory_merge_heal_candidates_on
         self.promotion_detach = promotion_detach
         self.begin_extraction_run = begin_extraction_run
         self.finish_extraction_run = finish_extraction_run
@@ -2270,6 +2279,7 @@ class SourceIngestionService:
 
             elements = parse_markdown_text(source_id, content_md)
             now = self.now()
+            merge_skipped: List[Any] = []
             with self.write() as db:
                 if existing_id is not None:
                     if not self.sources.source_exists_for_update_tx(
@@ -2281,13 +2291,17 @@ class SourceIngestionService:
                     # evidence through a merge of two of the owner's Memory
                     # objects loses exactly those entries, instead of being
                     # deleted with them; and an object of another Memory that
-                    # one of this source's objects absorbed by such a merge is
-                    # restored before that merge result is cleared (the
-                    # removal's ``memory_detach`` takes the same steps; a
+                    # was merged into one of this source's objects is settled
+                    # (restored, or re-pointed down a chain) before that merge
+                    # result is cleared — the removal takes the same steps; a
                     # merge takes FOR KEY SHARE on this row first, so it
-                    # cannot slip in between).
-                    if self.memory_evidence_detach is not None:
-                        self.memory_evidence_detach(db, notebook_id, [source_id], now)
+                    # cannot slip in between. A restore is a graph change of
+                    # its own: it announces itself in this transaction.
+                    merge_applied, merge_skipped = self._detach_memory_merges_tx(
+                        db, [{"id": source_id, "notebook_id": notebook_id}]
+                    )
+                    if merge_applied:
+                        self.kg_mutations.mark_unified_kg_dirty_in_tx(db, notebook_id)
                     # Reparse semantics: drop this source's prior extraction
                     # derivatives (KG objects/relations/embeddings/extraction
                     # runs) in the SAME transaction as the element swap below —
@@ -2319,6 +2333,7 @@ class SourceIngestionService:
                     ],
                     created_at=now,
                 )
+            self._finish_memory_merge_followups(merge_skipped)
 
             try:
                 # Deliberately embed_source only — NEVER embed_chunks_for_source,
@@ -2430,6 +2445,7 @@ class SourceIngestionService:
                 raise ValueError(f"not a Memory-derived source: {foreign[0]}")
             if not rows:
                 return 0
+            _merge_applied, merge_skipped = self._detach_memory_merges_tx(db, rows)
             detached = (
                 self.memory_detach(db, rows) if self.memory_detach is not None else None
             )
@@ -2438,6 +2454,7 @@ class SourceIngestionService:
                 self.kg_mutations.mark_unified_kg_dirty_in_tx(db, notebook_id)
             if self.memory_after_teardown is not None:
                 self.memory_after_teardown(db, detached)
+        self._finish_memory_merge_followups(merge_skipped)
         try:
             self._after_sources_removed(rows)
         except Exception as exc:  # noqa: BLE001 - the removal has committed
@@ -2449,6 +2466,94 @@ class SourceIngestionService:
                 "memory source post-commit cleanup failed (%s)", type(exc).__name__
             )
         return len(rows)
+
+    def _detach_memory_merges_tx(
+        self, db: Any, rows: Sequence[Mapping[str, Any]]
+    ) -> tuple[List[Any], List[Any]]:
+        """The merge half of clearing Memory sources' graph, in the caller's
+        transaction and under its source locks, one notebook at a time in
+        notebook order (``memory_evidence_detach``: lock every row the
+        teardown writes, settle the objects merged into the sources' objects,
+        strip the sources' entries from other sources' objects). Returns the
+        actions applied and the ones skipped for want of a lock, which the
+        caller re-runs after its commit (``_finish_memory_merge_followups``)."""
+        applied: List[Any] = []
+        skipped: List[Any] = []
+        if self.memory_evidence_detach is None:
+            return applied, skipped
+        by_notebook: dict[str, List[str]] = {}
+        for row in rows:
+            by_notebook.setdefault(str(row["notebook_id"]), []).append(str(row["id"]))
+        now = self.now()
+        for notebook_id in sorted(by_notebook):
+            result = self.memory_evidence_detach(
+                db, notebook_id, sorted(by_notebook[notebook_id]), now
+            )
+            applied.extend(getattr(result, "applied", ()) or ())
+            skipped.extend(getattr(result, "skipped", ()) or ())
+        return applied, skipped
+
+    def _finish_memory_merge_followups(self, actions: Sequence[Any]) -> int:
+        """Re-run, after the commit, the merge follow-ups a teardown skipped
+        because a row lock was held (PostgreSQL ``SKIP LOCKED``): one short
+        write transaction per notebook that holds nothing else and therefore
+        waits, in the same source → object lock order; each action re-checks
+        its row (still deprecated, marker unchanged), so re-running is
+        harmless. A failure is logged by class and left to the startup
+        backstop (``heal_memory_merges``), never raised: the removal or edit
+        has committed. Returns how many actions were applied."""
+        if not actions or self.memory_merge_actions_on is None:
+            return 0
+        by_notebook: dict[str, List[Any]] = {}
+        for action in actions:
+            by_notebook.setdefault(action.notebook_id, []).append(action)
+        total = 0
+        for notebook_id in sorted(by_notebook):
+            try:
+                with self.write() as db:
+                    applied, _ = self.memory_merge_actions_on(
+                        db, by_notebook[notebook_id], self.now(), wait=True
+                    )
+                    if applied:
+                        self.kg_mutations.mark_unified_kg_dirty_in_tx(db, notebook_id)
+                if applied:
+                    total += len(applied)
+                    self.kg_mutations.invalidate_unified_cache(notebook_id)
+            except Exception as exc:  # noqa: BLE001 - the teardown has committed
+                self.event_log.logger.warning(
+                    "memory merge follow-up failed (%s)", type(exc).__name__
+                )
+        return total
+
+    def has_memory_merges_to_heal(self) -> bool:
+        """One bounded probe for the startup backstop: is any deprecated Memory
+        object's merge target gone while its own Memory still exists?"""
+        if self.memory_merge_heal_candidates_on is None:
+            return False
+        with self.write() as db:
+            return bool(self.memory_merge_heal_candidates_on(db, 1, ""))
+
+    def heal_memory_merges(self, *, page_size: int = 500) -> int:
+        """Startup backstop (after readiness, background): restore every
+        deprecated Memory object whose merge marker names an object that no
+        longer exists while its own Memory still exists — what a skipped
+        in-transaction follow-up whose after-commit re-run also failed left
+        behind. Keyset-paged on the object id; each page is applied through
+        ``_finish_memory_merge_followups`` (waiting, re-checked, idempotent).
+        Returns how many objects were restored."""
+        if self.memory_merge_heal_candidates_on is None:
+            return 0
+        restored = 0
+        after = ""
+        while True:
+            with self.write() as db:
+                page = self.memory_merge_heal_candidates_on(db, page_size, after)
+            if not page:
+                return restored
+            after = page[-1].object_id
+            restored += self._finish_memory_merge_followups(page)
+            if len(page) < page_size:
+                return restored
 
     def _teardown_sources_tx(
         self,

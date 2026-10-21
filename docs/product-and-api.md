@@ -2705,13 +2705,26 @@ deleted with them; an edit re-extracts the edited Memory into fresh objects of i
 moving or deleting the Memory that owns the merge result clears the result with that Memory; just
 before, every object merged directly into it is restored to approved, and so is retrievable again,
 when that object is still deprecated and its own Memory still exists (user ruling 2026-10-21). An
-object whose Memory is gone is not restored. Each copied evidence entry records the object it came
-from, so a chain restores one level per cleared result: after a1 → a2 → a3, clearing a3 restores
-a2 (which still carries a1's evidence) and leaves a1 deprecated, and clearing a2 later restores a1.
-An object the owner deprecated by hand is never restored this way. On PostgreSQL the restore takes
-the restored objects' Memory sources `FOR KEY SHARE SKIP LOCKED` before their rows: a Memory being
-deleted or re-extracted at that moment is skipped (its objects are cleared anyway), so two Memories
-merged into each other's objects and deleted at once never wait for each other. On PostgreSQL a merge locks the Memory sources it
+object whose Memory is gone is not restored. The record is on the merged-away object itself: the
+merge writes the target's id into a hidden payload key (`_merged_into`; keys starting with `_` are
+never shown or searched), a later merge of the same object moves it to the newest target, and a
+hand edit of its status or content (`PATCH`) clears it — so an object the owner deprecated by hand
+is never restored, and an object is never restored twice. Merges between shared objects write
+nothing. A chain restores one level per cleared result: after a1 → a2 → a3, clearing a3 restores
+a2 (which still carries a1's evidence) and leaves a1 deprecated, and clearing a2 later restores
+a1; clearing a2 first (itself merged away) re-points a1 at a3. If the cleared result had been
+deprecated by hand, the objects merged into it only lose the record. Only merges made from this
+version on are restored automatically: a merge of one's own Memory objects left from before #824
+has no record and cannot be told apart from a hand deprecation, so the owner restores such an
+object herself with `PATCH … {"status": "approved"}` (user ruling 2026-10-22). On PostgreSQL the
+teardown locks every object it will write — its own and the objects whose evidence it strips — in
+one id-ordered statement first, so two Memories merged into each other's objects and deleted at
+once queue instead of deadlocking; the restore then takes the restored objects' Memory sources and
+rows with `SKIP LOCKED` and never waits inside the teardown. The lock may be held by that Memory's
+deletion or re-extraction, but also by relation completion, an extraction publish, an element swap
+or a transaction that then rolls back, so whatever was skipped is re-run right after the commit in a
+short transaction that waits (same lock order, re-checked, harmless to repeat); what even that
+misses — a crash in between — is restored by a background pass after the next start. On PostgreSQL a merge locks the Memory sources it
 makes the target cite before the object rows (the order of every Memory removal and re-ingest), so
 a concurrent delete, member exit or edit of one of them waits for the merge and then strips what it
 wrote; in the rare case that another merge put a new Memory's evidence on the source object between

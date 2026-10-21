@@ -453,12 +453,35 @@ def test_pg_a_merge_chain_restores_one_level_per_cleared_result(pg_repository):
     assert _pg_status(database, "ko-ma1") == "approved"
 
 
-def test_pg_restore_skips_a_memory_being_removed_and_never_waits(pg_repository):
-    """Lock order for the restore: its Memory sources are taken FOR KEY
-    SHARE SKIP LOCKED. While mem-a1's source is held FOR UPDATE (a
-    concurrent removal or re-ingest, which clears ko-ma1 anyway), deleting
-    mem-a2 neither waits for it nor restores ko-ma1 — so two Memories merged
-    into each other's objects and removed at once cannot deadlock."""
+def _wait_for_lock_wait(probe, needle: str, worker, outcome) -> None:
+    """Block until another backend of this database is waiting on a lock in
+    a statement matching ``needle`` (the test_concurrency.py probe)."""
+    import time
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        assert worker.is_alive(), f"finished without waiting: {outcome!r}"
+        waiting = probe.execute(
+            "SELECT count(*) AS n FROM pg_stat_activity "
+            "WHERE pid <> pg_backend_pid() AND datname = current_database() "
+            "AND wait_event_type = 'Lock' AND state = 'active' AND query ILIKE %s",
+            (needle,),
+        ).fetchone()["n"]
+        if waiting:
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"no backend waited on {needle!r}")
+
+
+@pytest.mark.parametrize("holder_ends", ["rollback", "commit"])
+def test_pg_a_skipped_restore_is_rerun_after_the_commit(pg_repository, holder_ends):
+    """Quality P2-1: while mem-a1's source is held FOR UPDATE by something
+    that does NOT clear ko-ma1 — a transaction that then rolls back, or a
+    relation-completion / extraction-publish style holder that commits
+    without touching the graph — deleting mem-a2 does not wait inside its
+    teardown (ko-ma2 is gone while the holder still holds the lock; the
+    restore was skipped), then re-runs the restore after its commit in a
+    short transaction that waits; when the holder ends, ko-ma1 is restored."""
     import threading
 
     import psycopg
@@ -478,16 +501,145 @@ def test_pg_restore_skips_a_memory_being_removed_and_never_waits(pg_repository):
         except Exception as exc:  # pragma: no cover - surfaced below
             outcome["removed"] = repr(exc)
 
-    with psycopg.connect(database.settings.database_url, row_factory=dict_row) as holder:
+    url = database.settings.database_url
+    with psycopg.connect(url, row_factory=dict_row) as holder, \
+            psycopg.connect(url, autocommit=True, row_factory=dict_row) as probe:
         holder.execute("SELECT id FROM sources WHERE id='src-ma1' FOR UPDATE")
         worker = threading.Thread(target=remove)
         worker.start()
+        # The teardown committed without waiting; its follow-up now waits.
+        _wait_for_lock_wait(probe, "%FOR KEY SHARE OF s%", worker, outcome)
+        assert _pg_status(database, "ko-ma2") is None
+        assert _pg_status(database, "ko-ma1") == "deprecated"
+        if holder_ends == "rollback":
+            holder.rollback()
+        else:
+            holder.execute("UPDATE sources SET updated_at = updated_at WHERE id='src-ma1'")
+            holder.commit()
         worker.join(timeout=10)
-        assert not worker.is_alive(), "the removal waited on the held Memory source"
-        holder.rollback()
+    assert not worker.is_alive()
     assert outcome == {"removed": 1}
-    assert _pg_status(database, "ko-ma2") is None
+    assert _pg_status(database, "ko-ma1") == "approved"
+
+
+def test_pg_a_hand_status_change_clears_the_merge_marker(pg_repository):
+    """Only a merge writes the marker; a PATCH of status (the owner restoring
+    and deprecating ko-ma1 by hand) clears it, so clearing ko-ma2 then
+    leaves the hand-deprecated ko-ma1 alone."""
+    from app.models.knowledge import KnowledgeUpdate
+
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    _pg_own_merge(repo, "ko-ma1", "ko-ma2")
+    for status in ("approved", "deprecated"):
+        with database.write() as db:
+            GovernanceStore.update_object_in_transaction(
+                db, "nb", "ko-ma1", KnowledgeUpdate(status=status), NOW, actor_id="u-a"
+            )
+    with database.connect() as db:
+        payload = db.execute(
+            "SELECT payload FROM knowledge_objects WHERE id='ko-ma1'"
+        ).fetchone()["payload"]
+    assert "_merged_into" not in payload
+    _pg_change_memory(repo, "mem-a2", "delete")
     assert _pg_status(database, "ko-ma1") == "deprecated"
+
+
+def test_pg_the_startup_backstop_restores_what_a_crash_left_behind(pg_repository):
+    """Self-healing criterion on PostgreSQL: deprecated, the marker names an
+    object that no longer exists, its own Memory still exists."""
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    _pg_own_merge(repo, "ko-ma1", "ko-ma2")
+    with database.write() as db:
+        db.execute("DELETE FROM knowledge_objects WHERE id='ko-ma2'")
+    ingestion = repo._runtime.source_ingestion
+    assert ingestion.has_memory_merges_to_heal() is True
+    assert ingestion.heal_memory_merges(page_size=1) == 1
+    assert _pg_status(database, "ko-ma1") == "approved"
+    assert ingestion.has_memory_merges_to_heal() is False
+
+
+def test_pg_cross_merged_memories_removed_at_once_do_not_deadlock(pg_repository):
+    """Quality P2-2: A(S)→B(T) and D(T)→C(S), then T and S are removed at
+    once, both source locks taken first. Each teardown is driven step by step
+    on its own connection — the steps of ``remove_memory_sources``: source
+    lock, merge half (``detach_memory_merges_on``), graph clear, source-row
+    delete. T runs its merge half, S runs its merge half in a thread, then T
+    deletes. Without the ordered up-front lock T's strip takes C and S's strip
+    takes B, S's delete waits on C and T's delete waits on B: a deadlock.
+    With it S queues on C before taking B, and both removals finish."""
+    import threading
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from app.repositories.postgres.source_store import SourceStore
+
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    with database.write() as db:
+        for object_id, source_id in (("ko-ma1c", "src-ma1"), ("ko-ma2d", "src-ma2")):
+            db.execute(
+                "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,payload,"
+                "evidence,source_id,created_at,updated_at) "
+                "VALUES (%s,'nb','claim','approved','{}',%s,%s,%s,%s)",
+                (object_id, json.dumps([{"source_id": source_id,
+                                         "element_id": f"el-{object_id}",
+                                         "quoted_span": object_id}]),
+                 source_id, NOW, NOW),
+            )
+    _pg_own_merge(repo, "ko-ma1", "ko-ma2")    # A(S) → B(T)
+    _pg_own_merge(repo, "ko-ma2d", "ko-ma1c")  # D(T) → C(S)
+    knowledge = repo._runtime.knowledge
+    sources = repo._runtime.source_store
+    url = database.settings.database_url
+    outcome: dict = {}
+
+    def finish(connection, source_id: str) -> None:
+        knowledge.clear_sources_extraction_state(
+            connection, [source_id], "nb", clear_embeddings=True
+        )
+        sources.delete_source_rows(connection, [source_id])
+        connection.commit()
+
+    with psycopg.connect(url, row_factory=dict_row) as t_tx, \
+            psycopg.connect(url, row_factory=dict_row) as s_tx, \
+            psycopg.connect(url, autocommit=True, row_factory=dict_row) as probe:
+
+        def remove_s():
+            try:
+                GovernanceStore.detach_memory_merges_on(s_tx, "nb", ["src-ma1"], NOW)
+                finish(s_tx, "src-ma1")
+                outcome["s"] = "ok"
+            except Exception as exc:  # surfaced below
+                s_tx.rollback()
+                outcome["s"] = type(exc).__name__
+
+        SourceStore.lock_sources_for_teardown_tx(t_tx, ["src-ma2"])
+        SourceStore.lock_sources_for_teardown_tx(s_tx, ["src-ma1"])
+        GovernanceStore.detach_memory_merges_on(t_tx, "nb", ["src-ma2"], NOW)
+        worker = threading.Thread(target=remove_s)
+        worker.start()
+        _wait_for_lock_wait(probe, "%knowledge_objects%", worker, outcome)
+        try:
+            finish(t_tx, "src-ma2")
+            outcome["t"] = "ok"
+        except Exception as exc:  # surfaced below
+            t_tx.rollback()
+            outcome["t"] = type(exc).__name__
+        worker.join(timeout=15)
+    assert not worker.is_alive()
+    assert outcome == {"t": "ok", "s": "ok"}
+    with database.connect() as db:
+        left = db.execute(
+            "SELECT id FROM knowledge_objects WHERE id IN "
+            "('ko-ma1','ko-ma1c','ko-ma2','ko-ma2d')"
+        ).fetchall()
+    assert left == []
 
 
 @pytest.mark.parametrize(
@@ -723,7 +875,7 @@ def _bulk_seed(database) -> None:
             raw.execute(f"VACUUM (ANALYZE) {table}")
 
 
-def test_pg_new_statements_keep_index_paths(seeded):
+def test_pg_new_statements_keep_index_paths(seeded, monkeypatch):
     database, store = seeded
     _bulk_seed(database)
     with database.connect() as db:
@@ -775,30 +927,79 @@ def test_pg_new_statements_keep_index_paths(seeded):
     assert "Seq Scan" not in own_plan, own_plan
     assert "pk_sources" in own_plan and "pk_memory_items" in own_plan, own_plan
 
-    # The restore half of clearing kox-2's Memory (it absorbed kox-0): the
-    # tag read starts from the cleared source's objects (source index); the
-    # source lock and the restoring UPDATE reach the recorded ids by an index
-    # — the primary key, or (notebook, status='deprecated') when statistics
-    # say the notebook holds few deprecated rows — never a scan.
+    # The merge half of clearing kox-2's Memory (kox-0 was merged into it):
+    # the up-front lock reaches the source's objects and the reverse index by
+    # index; the follower read is driven by the notebook's Memory sources;
+    # the follow-up lock and UPDATE reach the recorded ids by an index — the
+    # primary key, or (notebook, status='deprecated') when statistics say
+    # the notebook holds few deprecated rows. Never a scan.
     with database.write() as db:
-        restore_capture = _CapturingConnection(db)
-        restored = GovernanceStore.restore_merged_away_on(
-            restore_capture, "nbx", ["srcx-2"], NOW
+        merge_half = _CapturingConnection(db)
+        detached = GovernanceStore.detach_memory_merges_on(
+            merge_half, "nbx", ["srcx-2"], NOW
         )
         db.execute("ROLLBACK")
-    assert restored == ["kox-0"]
-    assert len(restore_capture.statements) == 3
+    assert [a.object_id for a in detached.applied] == ["kox-0"]
+    assert detached.skipped == ()
+    (up_front,) = [s for s in merge_half.statements if "FOR UPDATE OF ko" in s[0]]
+    (followers,) = [s for s in merge_half.statements if "JOIN knowledge_objects ko ON" in s[0]]
+    follow_ups = [
+        s for s in merge_half.statements
+        if "FOR KEY SHARE OF s SKIP LOCKED" in s[0] or "FOR UPDATE SKIP LOCKED" in s[0]
+        or s[0].startswith("UPDATE knowledge_objects SET payload = %s, status = %s")
+    ]
+    assert len(follow_ups) == 3
     with database.connect() as db:
-        restore_plans = [_plan(db, *s) for s in restore_capture.statements]
-    for plan in restore_plans:
+        up_front_plan = _plan(db, *up_front)
+        followers_plan = _plan(db, *followers)
+        follow_up_plans = [_plan(db, *s) for s in follow_ups]
+    for plan in (up_front_plan, followers_plan, *follow_up_plans):
         assert "Seq Scan" not in plan, plan
-    assert "idx_knowledge_objects_source" in restore_plans[0], restore_plans[0]
-    for plan in restore_plans[1:]:
+    # nbx has no certified reverse index: the candidates are read first (by
+    # source index / containment, as the strip reads them) and locked by id.
+    assert (
+        "idx_knowledge_objects_source" in up_front_plan
+        or "using pk_knowledge_objects" in up_front_plan
+    ), up_front_plan
+    # Either side of the join may drive, by statistics: the notebook's Memory
+    # sources, or its deprecated objects — both notebook-bounded indexes.
+    assert (
+        "idx_sources_nb_hidden_type" in followers_plan
+        or "using idx_knowledge_objects_nb_status" in followers_plan
+    ), followers_plan
+    for plan in follow_up_plans:
         assert (
             "using pk_knowledge_objects" in plan
             or "using idx_knowledge_objects_nb_status" in plan
         ), plan
-        assert "pk_sources" in plan or "Update on knowledge_objects" in plan, plan
+
+    # A plain Memory removal (no merge anywhere near it) pays, over the strip
+    # it always ran: with a certified reverse index (production's normal
+    # state) exactly two indexed statements — the up-front lock and the
+    # follower read; without one, also the read of the sources' own object
+    # ids (the containment scan itself is read once and handed to the strip).
+    def statement_delta() -> int:
+        with database.write() as db:
+            plain = _CapturingConnection(db)
+            nothing = GovernanceStore.detach_memory_merges_on(
+                plain, "nbx", ["srcx-4"], NOW
+            )
+            db.execute("ROLLBACK")
+        assert nothing.applied == () and nothing.skipped == ()
+        with database.write() as db:
+            strip_only = _CapturingConnection(db)
+            GovernanceStore.strip_sources_evidence_on(strip_only, "nbx", ["srcx-4"], NOW)
+            db.execute("ROLLBACK")
+        return len(plain.statements) - len(strip_only.statements)
+
+    assert statement_delta() == 3
+    from app.repositories.postgres.knowledge_store import KnowledgeStore as _Knowledge
+
+    monkeypatch.setattr(
+        _Knowledge, "source_index_backfilled", staticmethod(lambda db, nb: True)
+    )
+    assert statement_delta() == 2
+    monkeypatch.undo()
 
     for plan in plans:
         assert "Seq Scan" not in plan, plan

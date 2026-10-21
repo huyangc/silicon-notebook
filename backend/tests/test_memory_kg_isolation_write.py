@@ -27,6 +27,7 @@ from fastapi.testclient import TestClient
 from app.core.config import Settings
 from app.domain.memory_kg_isolation import (
     CROSS_CLASS_MESSAGE,
+    MERGED_INTO_PAYLOAD_KEY,
     MemoryKnowledgeMergeRefused,
 )
 from app.models.knowledge import KnowledgeUpdate, MergeRequest
@@ -439,35 +440,151 @@ def test_a_hand_deprecated_object_of_the_same_memory_stays_deprecated(own_pair):
     assert _status(repo, claim) == "deprecated"
 
 
+def _payload(repo, object_id: str) -> dict:
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT payload FROM knowledge_objects WHERE id=?", (object_id,)
+        ).fetchone()
+    return json.loads(row["payload"])
+
+
+def _governance(repo):
+    return repo._runtime.knowledge_governance
+
+
 def test_a_merge_chain_restores_one_level_per_cleared_result(world):
-    """a1 → a2 → a3. The copied entries record the DIRECT merged-away object
-    (a1's entries in a3 say a2), so deleting mem-a3 restores a2 — which
-    still carries a1's evidence — and leaves a1 deprecated (a2 represents
-    it); deleting mem-a2 afterwards restores a1."""
+    """a1 → a2 → a3. Each merged-away row records its own target, so
+    deleting mem-a3 restores a2 — which still carries a1's evidence — and
+    leaves a1 deprecated (a2 represents it); deleting mem-a2 afterwards
+    restores a1."""
     repo, nb, _upload = world
     sources = [_confirmed_memory(repo, nb, f"mem-a{n}", "u-a") for n in (1, 2, 3)]
     a1, a2, a3 = (_concept(_objects(repo, nb, s)) for s in sources)
-    governance = repo._runtime.knowledge_governance
-    governance.merge_knowledge(nb, a1, MergeRequest(into_id=a2), actor_id="u-a")
-    governance.merge_knowledge(nb, a2, MergeRequest(into_id=a3), actor_id="u-a")
-    assert {e.get("merged_from") for e in _evidence(repo, a3)} == {None, a2}
+    _governance(repo).merge_knowledge(nb, a1, MergeRequest(into_id=a2), actor_id="u-a")
+    _governance(repo).merge_knowledge(nb, a2, MergeRequest(into_id=a3), actor_id="u-a")
+    assert _payload(repo, a1)[MERGED_INTO_PAYLOAD_KEY] == a2
+    assert _payload(repo, a2)[MERGED_INTO_PAYLOAD_KEY] == a3
     _change_memory(repo, nb, "mem-a3", "delete")
     assert _status(repo, a2) == "approved" and _status(repo, a1) == "deprecated"
+    assert MERGED_INTO_PAYLOAD_KEY not in _payload(repo, a2)
     assert {e["source_id"] for e in _evidence(repo, a2)} == set(sources[:2])
     _change_memory(repo, nb, "mem-a2", "delete")
     assert _status(repo, a1) == "approved"
     assert {e["source_id"] for e in _evidence(repo, a1)} == {sources[0]}
 
 
-def test_shared_merges_record_no_merge_provenance(world):
-    """Shared objects' merges keep their evidence byte for byte."""
+def test_clearing_a_merged_away_link_of_a_chain_repoints_its_followers(world):
+    """a1 → a2 → a3, then mem-a2 (whose object is itself merged away) is
+    deleted: a1 is not restored (a3 still carries its evidence) but now
+    points at a3, so deleting mem-a3 restores a1."""
+    repo, nb, _upload = world
+    sources = [_confirmed_memory(repo, nb, f"mem-a{n}", "u-a") for n in (1, 2, 3)]
+    a1, a2, a3 = (_concept(_objects(repo, nb, s)) for s in sources)
+    _governance(repo).merge_knowledge(nb, a1, MergeRequest(into_id=a2), actor_id="u-a")
+    _governance(repo).merge_knowledge(nb, a2, MergeRequest(into_id=a3), actor_id="u-a")
+    _change_memory(repo, nb, "mem-a2", "delete")
+    assert _status(repo, a2) is None
+    assert _status(repo, a1) == "deprecated"
+    assert _payload(repo, a1)[MERGED_INTO_PAYLOAD_KEY] == a3
+    _change_memory(repo, nb, "mem-a3", "delete")
+    assert _status(repo, a1) == "approved"
+
+
+def test_a_merged_away_object_with_fully_deduplicated_evidence_is_restored(world):
+    """Spec review P2-1: a sibling whose every evidence entry was already in
+    the target (deduplicated, so nothing of it is copied) still records the
+    target on its own row, and is restored with a1 when the target goes."""
+    repo, nb, _upload = world
+    s1 = _confirmed_memory(repo, nb, "mem-a1", "u-a")
+    s2 = _confirmed_memory(repo, nb, "mem-a2", "u-a")
+    a1 = _concept(_objects(repo, nb, s1))
+    a2 = _concept(_objects(repo, nb, s2))
+    with repo._write() as db:
+        cols = [r[1] for r in db.execute("PRAGMA table_info(knowledge_objects)").fetchall()]
+        picked = ",".join("'ko-sibling'" if c == "id" else c for c in cols)
+        db.execute(
+            f"INSERT INTO knowledge_objects ({','.join(cols)}) "
+            f"SELECT {picked} FROM knowledge_objects WHERE id=?",
+            (a1,),
+        )
+    _governance(repo).merge_knowledge(nb, a1, MergeRequest(into_id=a2), actor_id="u-a")
+    before = _evidence(repo, a2)
+    _governance(repo).merge_knowledge(
+        nb, "ko-sibling", MergeRequest(into_id=a2), actor_id="u-a"
+    )
+    assert _evidence(repo, a2) == before  # every sibling entry was a duplicate
+    _change_memory(repo, nb, "mem-a2", "delete")
+    assert _status(repo, a1) == "approved"
+    assert _status(repo, "ko-sibling") == "approved"
+
+
+def test_a_hand_edit_clears_the_merge_marker(own_pair):
+    """Quality P3-1 / spec P3-2: only a merge writes the marker; changing the
+    merged-away object's status by hand clears it, so an object its owner
+    deprecated by hand is never restored automatically."""
+    repo, nb, _src_a1, _src_a2, a1, a2 = own_pair
+    governance = _governance(repo)
+    governance.update_knowledge(nb, a1, KnowledgeUpdate(status="approved"), actor_id="u-a")
+    governance.update_knowledge(nb, a1, KnowledgeUpdate(status="deprecated"), actor_id="u-a")
+    assert MERGED_INTO_PAYLOAD_KEY not in _payload(repo, a1)
+    _change_memory(repo, nb, "mem-a2", "delete")
+    assert _status(repo, a2) is None
+    assert _status(repo, a1) == "deprecated"
+
+
+def test_merging_a_merged_away_object_again_moves_its_marker(world):
+    """Quality P3-2: a1 → a2, then a1 (deprecated) → a3. The marker follows
+    the latest target: clearing a2 restores nothing, clearing a3 restores
+    a1 — never two copies of it."""
+    repo, nb, _upload = world
+    sources = [_confirmed_memory(repo, nb, f"mem-a{n}", "u-a") for n in (1, 2, 3)]
+    a1, a2, a3 = (_concept(_objects(repo, nb, s)) for s in sources)
+    _governance(repo).merge_knowledge(nb, a1, MergeRequest(into_id=a2), actor_id="u-a")
+    _governance(repo).merge_knowledge(nb, a1, MergeRequest(into_id=a3), actor_id="u-a")
+    assert _payload(repo, a1)[MERGED_INTO_PAYLOAD_KEY] == a3
+    _change_memory(repo, nb, "mem-a2", "delete")
+    assert _status(repo, a1) == "deprecated"
+    _change_memory(repo, nb, "mem-a3", "delete")
+    assert _status(repo, a1) == "approved"
+
+
+def test_the_startup_backstop_restores_what_a_crash_left_behind(own_pair):
+    """Self-healing criterion: deprecated, the marker names an object that no
+    longer exists, its own Memory still exists. Simulates a teardown whose
+    follow-up never ran (the target deleted behind its back)."""
+    repo, nb, _src_a1, _src_a2, a1, a2 = own_pair
+    with repo._write() as db:
+        db.execute("DELETE FROM knowledge_objects WHERE id=?", (a2,))
+    ingestion = repo._runtime.source_ingestion
+    assert ingestion.has_memory_merges_to_heal() is True
+    assert ingestion.heal_memory_merges(page_size=1) == 1
+    assert _status(repo, a1) == "approved"
+    assert MERGED_INTO_PAYLOAD_KEY not in _payload(repo, a1)
+    assert ingestion.has_memory_merges_to_heal() is False
+    assert ingestion.heal_memory_merges() == 0
+
+
+def test_shared_merges_record_no_merge_marker(world):
+    """Quality P3-4: shared objects' merges write no marker — the merged-away
+    row's payload and the target's evidence are byte for byte what they were
+    without this feature."""
     repo, nb, upload = world
     other = _upload_source(repo, nb, "src-upload-2")
     a = _concept(_objects(repo, nb, upload))
     b = _concept(_objects(repo, nb, other))
     expected = _evidence(repo, b) + _evidence(repo, a)
+    with repo._connect() as db:
+        payload_before = db.execute(
+            "SELECT payload FROM knowledge_objects WHERE id=?", (a,)
+        ).fetchone()["payload"]
     repo.merge_knowledge(nb, a, MergeRequest(into_id=b))
     assert _evidence(repo, b) == expected
+    with repo._connect() as db:
+        payload_after = db.execute(
+            "SELECT payload FROM knowledge_objects WHERE id=?", (a,)
+        ).fetchone()["payload"]
+    assert payload_after == payload_before
+    assert MERGED_INTO_PAYLOAD_KEY not in json.loads(payload_after)
 
 
 def _cite(repo, object_id: str, source_id: str) -> None:
