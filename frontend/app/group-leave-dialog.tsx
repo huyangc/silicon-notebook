@@ -13,8 +13,15 @@
 // (不是破坏性按钮);Tab 只在面板内循环;Escape 关闭(退出请求在途时不关:结果要给人看)。
 //
 // 遵循「无退路弹窗」契约:「取消」永不禁用,挂死的请求也有出口;在途的退出请求收不回来,
-// 由群组页按「正在退出…」占住入口按钮直到它落定,失败原因落在按钮旁。导出的结果落在导出
-// 按钮自身(已导出 / 导出失败),超过导出上限的原因写在那一行下面。
+// 由群组页按群组 id 占住那个组的入口按钮(「正在退出…」)直到它落定,失败原因落在那个组的
+// 按钮旁。导出同理:在途的导出按笔记本 id 记在群组页那一层(`useLeaveExports`),面板取消
+// 再打开也认得它。导出端点在发出第一个字节之前就在一个快照里读完全部条目(读权在同一个
+// 快照里复核),所以退出不会让文件缺页;但退出若抢在导出的读权复核之前落定,导出会失败——
+// 因此任何一本还在导出时都不能确认退出。导出的结果落在导出按钮自身(已导出 / 导出失败),
+// 超过上限的原因写在那一行下面。
+//
+// 告知读不到就不放行确认(与退出共享「不盲退」一致);告知回 404 说明此刻已经不是这个组的
+// 成员(比如在别的标签页退过了),如实说出来、请群组页刷新清单,不让人「稍后重试」。
 
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -29,6 +36,7 @@ import { useDialogFocus } from "./use-dialog-focus.ts";
 import type { ExitAnchor } from "./use-notebook-exit.ts";
 
 export const LEAVE_PREVIEW_UNAVAILABLE_TEXT = "暂时无法确认退出后会看不到哪些记忆，请稍后重试。";
+export const LEAVE_ALREADY_GONE_TEXT = "你已经不在这个群组里了。";
 export const LEAVE_WAIT_FOR_EXPORT_TEXT = "正在导出，导出完成后才能退出。";
 export const LEAVE_EXPORT_TOO_LARGE_TEXT =
   "这个笔记本里你的记忆内容太多，超过了一次导出的上限，没能导出。";
@@ -37,37 +45,90 @@ export const LEAVE_EXPORT_TOO_LARGE_TEXT =
 export const leaveHiddenText = (notebookCount: number, memoryCount: number): string =>
   `退出后，你将看不到 ${notebookCount} 个笔记本里你的 ${memoryCount} 条记忆。`;
 
+/** 重新加入后能否再看到取决于那时的身份(邀请链接以普通成员加入,只共享给组管理员的笔记本
+ *  就读不到),所以只说带条件的那一句。 */
 export const LEAVE_KEPT_TEXT =
-  "记忆不会删除。重新加入本群组后，仍共享给本群组的笔记本里的记忆会再次显示。退出前可以先导出为文件保存。";
+  "记忆不会删除。重新加入本群组后，以你那时的身份仍能读到的笔记本里，记忆会再次显示。退出前可以先导出为文件保存。";
 export const LEAVE_NOTHING_HIDDEN_TEXT = "你的记忆不会因为退出而看不到。";
 
 type PreviewState =
   | { status: "loading" }
   | { status: "unavailable" }
+  | { status: "gone" }
   | { status: "ready"; preview: GroupLeavePreview };
+
+/** 退群面板的导出状态。由群组页持有(面板取消再打开、换组再回来都还在),按笔记本 id 记。 */
+export function useLeaveExports() {
+  const [exporting, setExporting] = useState<ReadonlySet<string>>(new Set());
+  const [reasons, setReasons] = useState<ReadonlyMap<string, string>>(new Map());
+  const exportingRef = useRef<Set<string>>(new Set());
+  const result = useCopyResult();
+  const { report } = result;
+
+  const exportNotebook = useCallback(async (notebookId: string) => {
+    // 同步闸:state 更新是异步的,快速双击会在它生效前发出第二个下载。
+    if (exportingRef.current.has(notebookId)) return;
+    exportingRef.current.add(notebookId);
+    setExporting(new Set(exportingRef.current));
+    setReasons((current) => {
+      const next = new Map(current);
+      next.delete(notebookId);
+      return next;
+    });
+    const key = `export:${notebookId}`;
+    try {
+      const { blob, filename } = await exportOwnMemories(notebookId);
+      saveBlobAsFile(blob, filename);
+      report(key, true);
+    } catch (error) {
+      if (httpErrorStatus(error) === 413) {
+        setReasons((current) => new Map(current).set(notebookId, LEAVE_EXPORT_TOO_LARGE_TEXT));
+      }
+      report(key, false);
+    } finally {
+      exportingRef.current.delete(notebookId);
+      setExporting(new Set(exportingRef.current));
+    }
+  }, [report]);
+
+  return {
+    /** 正在导出的笔记本 id。 */
+    exporting,
+    /** 上一次导出失败、且有可以说给用户听的原因时,按笔记本 id 记的原因。 */
+    reasons,
+    resultFor: (notebookId: string) => result.resultFor(`export:${notebookId}`),
+    exportNotebook,
+  };
+}
+
+export type LeaveExports = ReturnType<typeof useLeaveExports>;
 
 export type GroupLeaveDialogProps = {
   groupId: string;
   anchor: ExitAnchor;
-  /** 群组页的退出请求在途(含取消面板之后仍在途的那一次)。 */
+  /** 这个组的退出请求在途(含取消面板之后仍在途的那一次)。 */
   leaving: boolean;
-  /** 退出没有成功时的原因(已翻成人话),落在确认按钮旁。 */
+  /** 这个组上一次退出没有成功的原因(已翻成人话),落在确认按钮旁。 */
   failure: string;
+  /** 群组页持有的导出状态(`useLeaveExports`)。 */
+  exports: LeaveExports;
   onCancel: () => void;
   onConfirm: () => void;
+  /** 告知回 404:此刻已经不是这个组的成员,群组页据此刷新清单。 */
+  onGone: () => void;
 };
 
-function GroupLeavePanel({ groupId, anchor, leaving, failure, onCancel, onConfirm }: GroupLeaveDialogProps) {
+function GroupLeavePanel({
+  groupId, anchor, leaving, failure, exports, onCancel, onConfirm, onGone,
+}: GroupLeaveDialogProps) {
   const panelRef = useRef<HTMLDivElement | null>(null);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
   const leadId = useId();
   const hintId = useId();
   const [state, setState] = useState<PreviewState>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);
-  const [exporting, setExporting] = useState<ReadonlySet<string>>(new Set());
-  const [exportReasons, setExportReasons] = useState<ReadonlyMap<string, string>>(new Map());
-  const exportingRef = useRef<Set<string>>(new Set());
-  const exportResult = useCopyResult();
+  const onGoneRef = useRef(onGone);
+  onGoneRef.current = onGone;
 
   usePanelPlacement(panelRef, anchor);
   useDialogFocus({
@@ -85,41 +146,21 @@ function GroupLeavePanel({ groupId, anchor, leaving, failure, onCancel, onConfir
       .then((preview) => {
         if (!controller.signal.aborted) setState({ status: "ready", preview });
       })
-      .catch(() => {
-        if (!controller.signal.aborted) setState({ status: "unavailable" });
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        if (httpErrorStatus(error) === 404) {
+          setState({ status: "gone" });
+          onGoneRef.current();
+          return;
+        }
+        setState({ status: "unavailable" });
       });
     return () => controller.abort();
   }, [groupId, attempt]);
 
-  const exportNotebook = useCallback(async (notebookId: string) => {
-    // 同步闸:state 更新是异步的,快速双击会在它生效前发出第二个下载。
-    if (exportingRef.current.has(notebookId)) return;
-    exportingRef.current.add(notebookId);
-    setExporting(new Set(exportingRef.current));
-    setExportReasons((reasons) => {
-      const next = new Map(reasons);
-      next.delete(notebookId);
-      return next;
-    });
-    const key = `export:${notebookId}`;
-    try {
-      const { blob, filename } = await exportOwnMemories(notebookId);
-      saveBlobAsFile(blob, filename);
-      exportResult.report(key, true);
-    } catch (error) {
-      if (httpErrorStatus(error) === 413) {
-        setExportReasons((reasons) => new Map(reasons).set(notebookId, LEAVE_EXPORT_TOO_LARGE_TEXT));
-      }
-      exportResult.report(key, false);
-    } finally {
-      exportingRef.current.delete(notebookId);
-      setExporting(new Set(exportingRef.current));
-    }
-  }, [exportResult]);
-
   const ready = state.status === "ready" ? state.preview : null;
   const hidden = ready !== null && ready.memory_count > 0;
-  const exportBusy = exporting.size > 0;
+  const exportBusy = exports.exporting.size > 0;
   const confirmDisabled = ready === null || leaving || exportBusy;
 
   return (
@@ -138,6 +179,9 @@ function GroupLeavePanel({ groupId, anchor, leaving, failure, onCancel, onConfir
       {state.status === "unavailable" && (
         <p id={leadId} className="notebook-exit-lead" role="alert">{LEAVE_PREVIEW_UNAVAILABLE_TEXT}</p>
       )}
+      {state.status === "gone" && (
+        <p id={leadId} className="notebook-exit-lead" role="alert">{LEAVE_ALREADY_GONE_TEXT}</p>
+      )}
       {ready && !hidden && (
         <>
           <p id={leadId} className="notebook-exit-lead">退出后，你将失去经本群组获得的知识库访问权。</p>
@@ -153,9 +197,9 @@ function GroupLeavePanel({ groupId, anchor, leaving, failure, onCancel, onConfir
           <ul className="group-leave-list" aria-label="退出后会看不到的笔记本">
             {ready.notebooks.map((notebook) => {
               const name = notebook.name || "未命名笔记本";
-              const busy = exporting.has(notebook.notebook_id);
-              const result = exportResult.resultFor(`export:${notebook.notebook_id}`);
-              const reason = exportReasons.get(notebook.notebook_id) ?? "";
+              const busy = exports.exporting.has(notebook.notebook_id);
+              const result = exports.resultFor(notebook.notebook_id);
+              const reason = exports.reasons.get(notebook.notebook_id) ?? "";
               return (
                 <li key={notebook.notebook_id} className="group-leave-row">
                   <span className="group-leave-name">{name}</span>
@@ -167,7 +211,7 @@ function GroupLeavePanel({ groupId, anchor, leaving, failure, onCancel, onConfir
                       : result === "failed" ? "sort-button copy-result-failed" : "sort-button"}
                     disabled={busy || leaving}
                     aria-label={`导出「${name}」里你的 ${notebook.memory_count} 条记忆`}
-                    onClick={() => { void exportNotebook(notebook.notebook_id); }}
+                    onClick={() => { void exports.exportNotebook(notebook.notebook_id); }}
                   >
                     {busy ? "正在导出…" : result === "copied" ? "已导出" : result === "failed" ? "导出失败" : "导出"}
                   </button>
@@ -188,7 +232,7 @@ function GroupLeavePanel({ groupId, anchor, leaving, failure, onCancel, onConfir
         )}
         {/* 取消永不禁用:不因忙碌而失效,挂死的请求才有出口。 */}
         <button ref={cancelRef} type="button" className="sort-button" onClick={onCancel}>取消</button>
-        {state.status !== "unavailable" && (
+        {(state.status === "loading" || state.status === "ready") && (
           <button
             type="button"
             className="new-pill danger-pill"

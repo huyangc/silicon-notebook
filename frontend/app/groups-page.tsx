@@ -60,7 +60,7 @@ import {
   type GroupPageTab,
   type ShareRequest,
 } from "./group-api.ts";
-import { GroupLeaveDialog } from "./group-leave-dialog.tsx";
+import { GroupLeaveDialog, useLeaveExports } from "./group-leave-dialog.tsx";
 import { Pagination } from "./Pagination";
 import { anchorOf, type ExitAnchor } from "./use-notebook-exit.ts";
 import { useClientPagination } from "./use-client-pagination.ts";
@@ -154,10 +154,17 @@ export function GroupsPage({
   const [grantManage, setGrantManage] = useState(false);
   const [transferTarget, setTransferTarget] = useState("");
   const [confirming, setConfirming] = useState("");
-  // 退出群组的确认面板:落点(按下那一刻的「退出群组」按钮)与退出失败的原因。面板被取消
-  // 之后在途的退出仍会落定;失败原因那时落在「退出群组」按钮旁,而不是页面顶部。
+  // 退出群组的确认面板:落点(按下那一刻的「退出群组」按钮)、在途的退出与退出失败的原因。
+  // 在途与失败都**按群组 id 记**(无退路弹窗契约:放弃的写入按对象占位到落定):面板被取消、
+  // 换到别的组之后,在途的退出仍会落定,它的「正在退出…」与失败原因只出现在它自己那个组的
+  // 「退出群组」按钮上/旁,不会落到正在看的另一个组上;切回那个组仍看得到原因。
   const [leaveAnchor, setLeaveAnchor] = useState<ExitAnchor | null>(null);
-  const [leaveFailure, setLeaveFailure] = useState("");
+  const [leavingGroups, setLeavingGroups] = useState<ReadonlySet<string>>(new Set());
+  const leavingRef = useRef<Set<string>>(new Set());
+  const [leaveFailure, setLeaveFailure] = useState<{ groupId: string; text: string } | null>(null);
+  const leaveExports = useLeaveExports();
+  const detailIdRef = useRef<string | null>(null);
+  detailIdRef.current = detail?.id ?? null;
   // 批准失败而申请仍在队列里(例如那本笔记本正在删除)时,原因落在那一行旁边。
   const [requestFailure, setRequestFailure] = useState<{ id: string; text: string } | null>(null);
   // 决定已提交、但随后的列表刷新失败时,在审批列表上方如实说明(不是顶部横幅)。
@@ -188,7 +195,6 @@ export function GroupsPage({
     setInvite(null);
     setPickedNotebooks(new Set());
     setConfirming("");
-    setLeaveFailure("");
     setRequestFailure(null);
     setRequestsNotice("");
     try {
@@ -279,31 +285,46 @@ export function GroupsPage({
     }
   }
 
-  // 退出群组。不经 run():退出没有成功时原因要落在确认面板里(面板已取消时落在「退出群组」
-  // 按钮旁),而退出已经成功、只是随后刷新群组列表失败时,不能说成「退出失败」。
+  // 退出群组。不经 run():页面级 busy 只有一格,在途的退出要按组记(见上面 leavingGroups);
+  // 闸只认这个组自己的在途退出——别的操作在途不挡它,也就不会出现「按了没反应」。退出没有
+  // 成功时原因落在面板里(面板已取消时落在那个组的按钮旁);退出成功、只是随后刷新群组列表
+  // 失败时,不能说成「退出失败」。退出落定时用户已经换到别的组,就只把它从清单里拿掉,不动
+  // 用户正在看的那个组。
   async function confirmLeave(groupId: string) {
-    if (busy) return;
-    setBusy("leave");
-    setError("");
-    setNotice("");
-    setLeaveFailure("");
+    if (leavingRef.current.has(groupId)) return;
+    leavingRef.current.add(groupId);
+    setLeavingGroups(new Set(leavingRef.current));
+    setLeaveFailure((current) => (current?.groupId === groupId ? null : current));
     try {
       try {
         await leaveGroup(groupId);
       } catch (err) {
-        setLeaveFailure(toUserMessage(err, "退出群组失败"));
+        setLeaveFailure({ groupId, text: toUserMessage(err, "退出群组失败") });
         return;
       }
-      setDetail(null); setShared(null); setRequests(null); setConfirming("");
       try {
-        await selectAfterGroupRemoval(groupId);
+        if (detailIdRef.current === groupId) {
+          setDetail(null); setShared(null); setRequests(null); setConfirming("");
+          await selectAfterGroupRemoval(groupId);
+        } else {
+          removedGroupIds.current.add(groupId);
+          setGroups((items) => items?.filter((item) => item.id !== groupId) ?? items);
+          await refreshGroups(scope);
+        }
       } catch (err) {
         setError(toUserMessage(err, "已退出群组，但群组列表没能刷新"));
       }
       onChanged();
     } finally {
-      setBusy("");
+      leavingRef.current.delete(groupId);
+      setLeavingGroups(new Set(leavingRef.current));
     }
+  }
+
+  // 退群告知回 404:此刻已经不是这个组的成员(别的标签页退过了、被移出了)。面板如实说明,
+  // 这里刷新群组清单,让它从「我的群组」里消失。
+  function leavePreviewGone() {
+    refreshGroups(scope).catch((err) => setError(toUserMessage(err, "群组清单加载失败")));
   }
 
   // 批准失败后重拉队列:申请还在(笔记本正在删除时后端回 409、申请保留)就把原因标在那一
@@ -788,12 +809,13 @@ export function GroupsPage({
                   <div className="group-settings-actions">{isOwner ? (confirming === "delete" ? <div className="group-inline-confirm"><button className="new-pill danger-pill" onClick={() => { void run("delete", async () => {
                     const removedGroupId = detail.id; await deleteGroup(removedGroupId); setDetail(null); setShared(null); setRequests(null); setConfirming(""); await selectAfterGroupRemoval(removedGroupId); onChanged();
                   }, "删除群组失败"); }}>确认删除群组</button><button className="sort-button" onClick={() => setConfirming("")}>取消</button></div> : <button className="new-pill danger-pill" onClick={() => setConfirming("delete")}>删除群组</button>)
-                    : <button className="sort-button danger-text" disabled={busy === "leave"} aria-busy={busy === "leave" || undefined} onClick={(event) => {
-                      setLeaveFailure(""); setLeaveAnchor(anchorOf(event.currentTarget)); setConfirming("leave");
-                    }}>{busy === "leave" ? "正在退出…" : "退出群组"}</button>}</div>
-                  {!isOwner && leaveFailure && confirming !== "leave" && <p className="group-leave-failure" role="alert">{leaveFailure}</p>}
-                  {!isOwner && confirming === "leave" && leaveAnchor && <GroupLeaveDialog groupId={detail.id} anchor={leaveAnchor} leaving={busy === "leave"} failure={leaveFailure}
-                    onCancel={() => setConfirming("")} onConfirm={() => { void confirmLeave(detail.id); }} />}
+                    : <button className="sort-button danger-text" disabled={leavingGroups.has(detail.id)} aria-busy={leavingGroups.has(detail.id) || undefined} onClick={(event) => {
+                      setLeaveAnchor(anchorOf(event.currentTarget)); setConfirming("leave");
+                    }}>{leavingGroups.has(detail.id) ? "正在退出…" : "退出群组"}</button>}</div>
+                  {!isOwner && leaveFailure?.groupId === detail.id && confirming !== "leave" && <p className="group-leave-failure" role="alert">{leaveFailure.text}</p>}
+                  {!isOwner && confirming === "leave" && leaveAnchor && <GroupLeaveDialog groupId={detail.id} anchor={leaveAnchor} leaving={leavingGroups.has(detail.id)}
+                    failure={leaveFailure?.groupId === detail.id ? leaveFailure.text : ""} exports={leaveExports}
+                    onCancel={() => setConfirming("")} onConfirm={() => { void confirmLeave(detail.id); }} onGone={leavePreviewGone} />}
                 </section>
               </>)}
             </div>
