@@ -191,6 +191,58 @@ test("Esc 与点外部都会收起弹出层", async () => {
   expect(screen.queryByRole("dialog", { name: "选择关联报告" })).toBeNull();
 });
 
+// 键盘用户:持焦点的节点随弹出层卸载时,焦点不能掉到 body。
+test("在弹出层里按 Esc 收起，焦点回到「关联报告」按钮", async () => {
+  const user = userEvent.setup();
+  reportApi.listReports.mockResolvedValue([summary("r-1", "电池安全综述")]);
+  renderPicker();
+  await user.tab();
+  expect(openButton()).toHaveFocus();
+  await user.keyboard("{Enter}");
+  const option = await screen.findByRole("button", { name: /电池安全综述/ });
+  await user.tab();
+  expect(option).toHaveFocus();
+  await user.keyboard("{Escape}");
+  expect(screen.queryByRole("dialog", { name: "选择关联报告" })).toBeNull();
+  expect(openButton()).toHaveFocus();
+});
+
+test("点外部收起不抢焦点", async () => {
+  const user = userEvent.setup();
+  reportApi.listReports.mockResolvedValue([]);
+  render(
+    <>
+      <input aria-label="别处的输入框" />
+      <LinkedReportPicker notebookId="notebook-a" linked={null} disabled={false} onSelect={vi.fn()} />
+    </>,
+  );
+  await user.click(openButton());
+  await user.click(screen.getByRole("textbox", { name: "别处的输入框" }));
+  expect(screen.queryByRole("dialog", { name: "选择关联报告" })).toBeNull();
+  expect(screen.getByRole("textbox", { name: "别处的输入框" })).toHaveFocus();
+});
+
+test("按「重试」后重试键被替换，焦点留在弹出层里", async () => {
+  const user = userEvent.setup();
+  const retried = deferred<ReportSummaryT[]>();
+  reportApi.listReports
+    .mockRejectedValueOnce(new Error("network down"))
+    .mockReturnValueOnce(retried.promise);
+  renderPicker();
+  await user.click(openButton());
+  const popover = screen.getByRole("dialog", { name: "选择关联报告" });
+  const retry = await within(popover).findByRole("button", { name: "重试" });
+  retry.focus();
+  await user.keyboard("{Enter}");
+  expect(within(popover).getByText("正在读取报告…")).toBeVisible();
+  expect(within(popover).queryByRole("button", { name: "重试" })).toBeNull();
+  expect(popover).toHaveFocus();
+  await act(async () => {
+    retried.resolve([summary("r-1", "电池安全综述")]);
+  });
+  expect(within(popover).getByRole("button", { name: /电池安全综述/ })).toBeVisible();
+});
+
 test("提交中（禁用）时按钮不可点，已打开的弹出层随之收起", async () => {
   const user = userEvent.setup();
   reportApi.listReports.mockResolvedValue([summary("r-1", "电池安全综述")]);
@@ -314,6 +366,7 @@ let session: ReturnType<typeof useAskSession> | null = null;
 
 function AskBox() {
   const [question, setQuestion] = useState("");
+  const [focusSignal, setFocusSignal] = useState(0);
   session = useAskSession({
     actorId: "user-a",
     notebookId: "notebook-a",
@@ -328,20 +381,24 @@ function AskBox() {
       onSubmit={() => undefined}
       onAbort={() => undefined}
       running={false}
-      attachment={session.linkedReport || session.linkedReportNote ? (
+      focusSignal={focusSignal}
+      attachment={(
         <LinkedReportChip
           report={session.linkedReport}
           verdict={session.linkedReportCheck}
           note={session.linkedReportNote}
           onRemove={session.unlinkReport}
         />
-      ) : null}
+      )}
     >
       <LinkedReportPicker
         notebookId="notebook-a"
         linked={session.linkedReport}
         disabled={false}
-        onSelect={session.linkReport}
+        onSelect={(report) => {
+          session!.linkReport(report);
+          setFocusSignal((value) => value + 1);
+        }}
       />
     </AskComposer>
   );
@@ -398,4 +455,19 @@ test("范围冲突时，这一轮不读报告的原因就地显示在标签旁",
   expect(status.parentElement).toBe(chip.parentElement);
   await waitFor(() => expect(askApi.checkReportLink).toHaveBeenCalledTimes(1));
   expect(askApi.checkReportLink.mock.calls[0]?.[1]).toMatchObject({ report_id: "r-1" });
+});
+
+test("用键盘选中报告：标签挂上，焦点送进输入框", async () => {
+  const user = userEvent.setup();
+  reportApi.listReports.mockResolvedValue([summary("r-1", "电池安全综述")]);
+  render(<AskBox />);
+  openNotebook();
+  screen.getByRole("button", { name: "关联报告" }).focus();
+  await user.keyboard("{Enter}");
+  const option = await screen.findByRole("button", { name: /电池安全综述/ });
+  option.focus();
+  await user.keyboard("{Enter}");
+  expect(screen.queryByRole("dialog", { name: "选择关联报告" })).toBeNull();
+  expect(screen.getByText("关联报告：电池安全综述")).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "提问" })).toHaveFocus();
 });

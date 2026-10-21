@@ -244,14 +244,14 @@ function Shell({
           onAbort={() => undefined}
           running={false}
           focusSignal={focusSignal}
-          attachment={session.linkedReport || session.linkedReportNote ? (
+          attachment={(
             <LinkedReportChip
               report={session.linkedReport}
               verdict={session.linkedReportCheck}
               note={session.linkedReportNote}
               onRemove={session.unlinkReport}
             />
-          ) : null}
+          )}
         >
           <LinkedReportPicker
             notebookId="notebook-a"

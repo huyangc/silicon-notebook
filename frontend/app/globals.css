@@ -12480,8 +12480,13 @@ button.tag:hover {
 }
 /* Pagination */
 .pagination { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 2px; }
-.pagination-info { font-size: 12px; color: var(--muted, #667085); margin-right: auto; }
-.pagination-page { font-size: 13px; color: #20242a; }
+/* 「关联报告」弹出层(linked-report-picker.tsx)住在问答输入框里,那里的 `.chat-input-bar span`
+   (一类+一元素)会压过下面两个单类选择器,把分页文字改成 13px/#667085。两条规则各并入一个
+   带弹出层前缀的选择器(两个类),让那里的分页沿用同一份样式,而不是另抄一份数值。 */
+.pagination-info,
+.linked-report-picker-popover .pagination-info { font-size: 12px; color: var(--muted, #667085); margin-right: auto; }
+.pagination-page,
+.linked-report-picker-popover .pagination-page { font-size: 13px; color: #20242a; }
 .pagination-jump { width: 68px; box-sizing: border-box; border: 1px solid #d9dfeb; border-radius: 8px; padding: 5px 8px; font-size: 13px; }
 /* 窄侧栏:区间独占一行,箭头按钮收成小圆钮。 */
 .pagination.compact { gap: 6px; }
