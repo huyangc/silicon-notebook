@@ -2731,9 +2731,11 @@ short transaction (same lock order, re-checked, harmless to repeat). That re-run
 delete's or edit's own request, so its wait is bounded to a few seconds (`lock_timeout`); a lock
 held longer hands the notebook to one background pass that waits longer, and whatever even that
 misses — or a crash in between — is settled by a background pass after the next start. That
-background pass runs in the light maintenance pool, at most one per notebook at a time in a process.
-So the only window that waits for the next start is a re-run and its background pass both failing,
-or the process being killed between the commit and the re-run. These
+background pass runs in the light maintenance pool, at most one per notebook at a time in a
+process; a re-run that times out while that pass runs marks the notebook, and the pass reads it again
+from the start when it is done, so nothing left meanwhile is skipped. So the only window that waits
+for the next start is a re-run and the background pass after it both failing, or the process being
+killed between the commit and the re-run (or during the background pass). These
 passes read on a read-only connection, Memory sources first and then their objects, so their cost
 follows the amount of Memory, not the size of the notebook. Before restoring, a pass checks whether
 another source's object still carries all of the object's own evidence (a chain link the skipped
@@ -2741,9 +2743,11 @@ step would have re-pointed to) and re-points it there instead, so an object is n
 second copy; only an object still in use that carries the merge mark, or a deprecated chain link that
 itself carries the record, qualifies as such a target (a hand-deprecated one does not, and the object
 is restored), and re-pointing also marks the target. A candidate whose evidence is empty cannot be
-compared and is always restored, and a step that would only have dropped the record (its result had
-been deprecated by hand) is restored by the background pass: only when all three layers fail can an
-object whose result the owner deprecated by hand come back. The merge also marks its target (a hidden `_absorbs` key, kept across hand edits; a
+compared and is always restored. A step that would only have dropped the record (its result had
+been deprecated by hand) and that was skipped inside the transaction and not completed by the
+in-request re-run either is handled by the background pass as a restore. If a re-point's target is
+deleted while the step waits for its lock, the step is left as it was and the pass re-reads it: with
+no other eligible holder left, the object is restored. The merge also marks its target (a hidden `_absorbs` key, kept across hand edits; a
 stale mark only costs one more read): a Memory removal or edit whose objects carry no such mark
 skips the follower read entirely, so with a certified reverse index a plain Memory removal pays one
 statement more than before this feature. On PostgreSQL a merge locks the Memory sources it

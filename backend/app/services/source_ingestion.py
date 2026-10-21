@@ -355,6 +355,8 @@ class SourceIngestionService:
         # Notebooks with a backstop pass queued or running in this process.
         self._merge_heal_lock = threading.Lock()
         self._merge_heal_pending: set[str] = set()
+        # Notebooks marked for another round while their pass runs.
+        self._merge_heal_again: set[str] = set()
         self.promotion_detach = promotion_detach
         self.begin_extraction_run = begin_extraction_run
         self.finish_extraction_run = finish_extraction_run
@@ -2524,21 +2526,39 @@ class SourceIngestionService:
         ``MERGE_FOLLOWUP_LOCK_TIMEOUT_MS``): this runs on the request thread
         of a delete or an edit, and the holder may keep its lock for long. A
         failure — that timeout or anything else — is logged by class, never
-        raised (the removal or edit has committed), and hands the notebook to
-        ONE background backstop pass (``heal_memory_merges`` for that
-        notebook) unless ``reschedule`` is off (the backstop itself). Returns
-        how many actions were applied."""
+        raised (the removal or edit has committed); so is an action left
+        unapplied because its re-point target vanished while it waited (the
+        store defers it: its marker still names a missing object, and the
+        backstop's fresh re-check settles it). Either hands the notebook to
+        a background backstop pass (``_schedule_memory_merge_heal``) unless
+        ``reschedule`` is off (the backstop itself, which re-reads instead).
+        Returns how many actions were applied."""
+        applied, unsettled = self._apply_memory_merge_followups(
+            actions, lock_timeout_ms=lock_timeout_ms
+        )
+        if reschedule:
+            for notebook_id in unsettled:
+                self._schedule_memory_merge_heal(notebook_id)
+        return applied
+
+    def _apply_memory_merge_followups(
+        self, actions: Sequence[Any], *, lock_timeout_ms: Optional[int]
+    ) -> tuple[int, List[str]]:
+        """One bounded write transaction per notebook. Returns how many actions
+        were applied and the notebooks left unsettled (a failed transaction,
+        or an action the store deferred)."""
         if not actions or self.memory_merge_actions_on is None:
-            return 0
+            return 0, []
         timeout = MERGE_FOLLOWUP_LOCK_TIMEOUT_MS if lock_timeout_ms is None else lock_timeout_ms
         by_notebook: dict[str, List[Any]] = {}
         for action in actions:
             by_notebook.setdefault(action.notebook_id, []).append(action)
         total = 0
+        unsettled: List[str] = []
         for notebook_id in sorted(by_notebook):
             try:
                 with self.write() as db:
-                    applied, _ = self.memory_merge_actions_on(
+                    applied, deferred = self.memory_merge_actions_on(
                         db, by_notebook[notebook_id], self.now(), wait=True,
                         lock_timeout_ms=timeout,
                     )
@@ -2547,36 +2567,51 @@ class SourceIngestionService:
                 if applied:
                     total += len(applied)
                     self.kg_mutations.invalidate_unified_cache(notebook_id)
+                if deferred:
+                    unsettled.append(notebook_id)
             except Exception as exc:  # noqa: BLE001 - the teardown has committed
                 self.event_log.logger.warning(
                     "memory merge follow-up failed (%s)", type(exc).__name__
                 )
-                if reschedule:
-                    self._schedule_memory_merge_heal(notebook_id)
-        return total
+                unsettled.append(notebook_id)
+        return total, unsettled
 
     def _schedule_memory_merge_heal(self, notebook_id: str) -> None:
-        """Hand one notebook to a background backstop pass (after a follow-up
-        could not take its locks in time), in the light maintenance pool
-        (``memory-merge-heal``, bounded concurrency). Deduplicated per notebook
-        in this process: while one pass for the notebook is queued or
-        running, another request (the next page of a member-exit purge whose
-        follow-up timed out too) submits nothing — that pass reads every
-        candidate of the notebook anyway. Best-effort: a failure to submit
-        leaves the rows to the startup pass."""
+        """Hand one notebook to a background backstop pass, in the light
+        maintenance pool (``memory-merge-heal``, bounded concurrency).
+
+        At most one pass per notebook runs (or waits) in this process. A
+        request arriving while one is queued or running submits nothing but
+        marks the notebook for another round: the running pass may already
+        have read past the candidates this request left, so when it finishes
+        it reads the notebook again from the start, as long as the mark is
+        set (clearing it first), and only then releases the notebook. No
+        candidate is swallowed, and two passes never run for one notebook.
+        Best-effort: a failure to submit leaves the rows to the startup
+        pass."""
         with self._merge_heal_lock:
             if notebook_id in self._merge_heal_pending:
+                self._merge_heal_again.add(notebook_id)
                 return
             self._merge_heal_pending.add(notebook_id)
 
         def run() -> int:
+            applied = 0
             try:
-                return self.heal_memory_merges(
-                    notebook_id=notebook_id, lock_timeout_ms=MERGE_HEAL_LOCK_TIMEOUT_MS
-                )
-            finally:
+                while True:
+                    applied += self.heal_memory_merges(
+                        notebook_id=notebook_id, lock_timeout_ms=MERGE_HEAL_LOCK_TIMEOUT_MS
+                    )
+                    with self._merge_heal_lock:
+                        if notebook_id not in self._merge_heal_again:
+                            self._merge_heal_pending.discard(notebook_id)
+                            return applied
+                        self._merge_heal_again.discard(notebook_id)
+            except BaseException:
                 with self._merge_heal_lock:
                     self._merge_heal_pending.discard(notebook_id)
+                    self._merge_heal_again.discard(notebook_id)
+                raise
 
         try:
             from app.services import background_jobs
@@ -2585,6 +2620,7 @@ class SourceIngestionService:
         except Exception as exc:  # noqa: BLE001 - the startup pass is the backstop
             with self._merge_heal_lock:
                 self._merge_heal_pending.discard(notebook_id)
+                self._merge_heal_again.discard(notebook_id)
             self.event_log.logger.warning(
                 "memory merge heal scheduling failed (%s)", type(exc).__name__
             )
@@ -2600,6 +2636,10 @@ class SourceIngestionService:
         page, _after = self.memory_merge_heal_candidates(1, ("", ""))
         return bool(page)
 
+    #: Read rounds of one backstop call: another round only after one left an
+    #: action deferred (its re-point target vanished meanwhile).
+    _HEAL_ROUNDS = 3
+
     def heal_memory_merges(
         self,
         *,
@@ -2610,28 +2650,38 @@ class SourceIngestionService:
         """The backstop (after readiness at startup, or for one notebook after
         a follow-up timed out): settle every deprecated Memory object whose
         merge marker names an object that no longer exists while its own
-        Memory still exists — restore it, or re-point it at the object that
-        still carries its evidence (the store's ``heal_action`` re-check).
-        Reads are keyset-paged on ``(source id, object id)`` on a read-only
-        connection; each page is applied through
-        ``_finish_memory_merge_followups`` (re-checked, idempotent, a bounded
-        wait, never rescheduling itself). Returns how many were applied."""
+        Memory still exists — restore it, or re-point it at an eligible
+        object that still carries its evidence (the store's ``heal_action``
+        re-check). Reads are keyset-paged on ``(source id, object id)`` on a
+        read-only connection; each page is applied in a bounded write
+        transaction (re-checked, idempotent). An action the store deferred
+        (its re-point target was deleted while it waited) leaves its row as
+        it was, so a fresh round — up to ``_HEAL_ROUNDS`` — re-reads it and
+        re-checks its holders without the vanished one. Returns how many were
+        applied."""
         if self.memory_merge_heal_candidates is None:
             return 0
         timeout = MERGE_HEAL_LOCK_TIMEOUT_MS if lock_timeout_ms is None else lock_timeout_ms
         applied = 0
-        after: tuple = ("", "")
-        while True:
-            page, after = self.memory_merge_heal_candidates(
-                page_size, after, notebook_id=notebook_id
-            )
-            if not page:
-                return applied
-            applied += self._finish_memory_merge_followups(
-                page, lock_timeout_ms=timeout, reschedule=False
-            )
-            if len(page) < page_size:
-                return applied
+        for _round in range(self._HEAL_ROUNDS):
+            deferred = False
+            after: tuple = ("", "")
+            while True:
+                page, after = self.memory_merge_heal_candidates(
+                    page_size, after, notebook_id=notebook_id
+                )
+                if not page:
+                    break
+                count, unsettled = self._apply_memory_merge_followups(
+                    page, lock_timeout_ms=timeout
+                )
+                applied += count
+                deferred = deferred or bool(unsettled)
+                if len(page) < page_size:
+                    break
+            if not deferred:
+                break
+        return applied
 
     def _teardown_sources_tx(
         self,

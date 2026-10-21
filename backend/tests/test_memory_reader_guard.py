@@ -295,6 +295,7 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "GovernanceStore.heal_merged_away_candidates": MAINTENANCE,
         "GovernanceStore._merge_heal_holders_on": MAINTENANCE,
         "GovernanceStore._open_follower_gate_on": MAINTENANCE,
+        "GovernanceStore._object_exists_on": STATE_PROBE,
         # PR-E8: a promotion source's teardown strips its entries and deletes
         # only the objects left without evidence; hands nothing to a reader
         "GovernanceStore.detach_promotion_sources_on": MAINTENANCE,
