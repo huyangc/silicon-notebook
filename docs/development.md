@@ -443,11 +443,11 @@ The verification gates are tiered:
 | Grade | Scope | Frequency |
 | --- | --- | --- |
 | G0 targeted | Tests selected for the files and behavior being changed | During the edit loop |
-| G1 standard | `scripts/check.sh`: stable backend, contracts/harness, frontend tests, frontend ESLint against its baseline, typechecking production build, and the package typecheck for test files | Local handoff and every PR/push/manual CI run |
+| G1 standard | `scripts/check.sh`: stable backend, contracts/harness, backend ruff against its baseline, frontend tests, frontend ESLint against its baseline, typechecking production build, and the package typecheck for test files | Local handoff and every PR/push/manual CI run |
 | G2 extended | `scripts/check_extended.sh`: G1 plus real-index/performance, cold graph/index contracts, repository-wide semantic scans (heavy subset), real child-process contracts, and the old-version upgrade matrix | Once daily at `17 18 * * *` UTC (02:17 Asia/Shanghai), plus manual dispatch |
 | G3 PostgreSQL | `scripts/check_postgres.sh`: direct PostgreSQL adapter integration | Independent PR/push/manual CI job |
 
-G1 runs three bounded lanes concurrently: `check_backend.sh` executes the stable backend pytest suite with default 16 backend pytest workers (override with `BACKEND_PYTEST_WORKERS`; CI pins 4); `check_contracts.sh` executes syntax/dependency preflight, hermetic smoke paths, contract checks, and the deterministic extraction-scoring harness; `check_frontend.sh` executes every recursively discovered `*.test.mjs`, every `*.component.test.tsx`, ESLint (`npm run lint`, see [Frontend ESLint gate](#frontend-eslint-gate)), the production frontend build, and the package typecheck. On a host with at least eight CPUs, after the one plugin sync, four groups run concurrently — node tests, component tests, ESLint, and the build followed by the typecheck — each into its own log, printed in a fixed order with every step's exit status once all finish; smaller hosts (CI runners) keep the sequential order and stop at the first failure, and `FRONTEND_LANE_PARALLEL=1`/`0` overrides the CPU check. Node's test runner and Vitest are each capped at four workers, leaving CPU headroom for the backend critical path. The Next build must keep `ignoreBuildErrors` unset and stays the fail-closed typecheck for production code, but Next's build-time type checker silently filters out every diagnostic reported in `*.test.*`/`*.spec.*` files and `__tests__`/`__mocks__` directories (the `ignoreRegex` in `next/dist/lib/typescript/runTypeCheck.js`, verified on Next 15.5), so a type error that only exists under `frontend/tests/**` never fails the build. The frontend lane therefore runs `npm run typecheck` (`tsc --noEmit`) after the build — after, so it type-checks the freshly regenerated `.next/types` rather than a stale tree — as the one pass that sees those files; with `incremental` the warm re-check costs under a second (~5s cold), so the duplicate parse the lane once avoided is no longer a budget concern. Its backend lane excludes `slow` real-index/performance tests, `graph_index_contract` cold graph/index contracts, `architecture_contract_heavy` (the eight repository-wide semantic scans in `_ARCHITECTURE_CONTRACT_HEAVY_TESTS`; the remaining lightweight `architecture_contract` tests run in G1), `process_contract` (tests that start a real child process — subprocess, multiprocessing spawn or fork — to check a process-level contract: service start/stop and launcher signal handoff, release-manifest git history and packaging, the batch-ingest process pool, real-process startup refusal, script and CLI entry points), `legacy_upgrade_contract` (tests that upgrade a deployed old-version database: the snapshot verifier's deployed-vNN cases, the old-version migration matrix, and the memory-isolation rebuild that such an upgrade schedules; current-schema, fresh-database and source-consistency checks in the same modules stay in G1), and the PostgreSQL tree. By the 2026-10-14 decision that set the local target to 80 seconds, these process-level and old-version contracts are reported by the daily G2 gate rather than on every pull request. `process_contract` and `legacy_upgrade_contract` are applied per test, so one file can mix them with G1 tests. The lane-partition guard below starts a child process but stays unmarked in G1, because a G2-only copy would stop running the moment a broken expression deselected it. G2 first runs G1 and then the exact complementary backend marker set — `backend/tests/test_test_architecture_policy.py::test_verification_lane_markers_partition_every_architecture_contract_test` proves that split empirically via `--collect-only`, not just by pinning the two `-m` strings. Each lane has its own process group, so interrupting or terminating the controller also terminates and reaps pytest, npm, and Next.js descendants. The official-client MCP smoke pins exactly the 17 published tools: two discovery/overview, two search/point-read, two ask, two contribute, four source, one build, and four knowhow tools. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
+G1 runs three bounded lanes concurrently: `check_backend.sh` executes the stable backend pytest suite with default 16 backend pytest workers (override with `BACKEND_PYTEST_WORKERS`; CI pins 4); `check_contracts.sh` executes syntax/dependency preflight, hermetic smoke paths, contract checks, the backend lint gate (see [Backend lint gate](#backend-lint-gate)), and the deterministic extraction-scoring harness; `check_frontend.sh` executes every recursively discovered `*.test.mjs`, every `*.component.test.tsx`, ESLint (`npm run lint`, see [Frontend ESLint gate](#frontend-eslint-gate)), the production frontend build, and the package typecheck. On a host with at least eight CPUs, after the one plugin sync, four groups run concurrently — node tests, component tests, ESLint, and the build followed by the typecheck — each into its own log, printed in a fixed order with every step's exit status once all finish; smaller hosts (CI runners) keep the sequential order and stop at the first failure, and `FRONTEND_LANE_PARALLEL=1`/`0` overrides the CPU check. Node's test runner and Vitest are each capped at four workers, leaving CPU headroom for the backend critical path. The Next build must keep `ignoreBuildErrors` unset and stays the fail-closed typecheck for production code, but Next's build-time type checker silently filters out every diagnostic reported in `*.test.*`/`*.spec.*` files and `__tests__`/`__mocks__` directories (the `ignoreRegex` in `next/dist/lib/typescript/runTypeCheck.js`, verified on Next 15.5), so a type error that only exists under `frontend/tests/**` never fails the build. The frontend lane therefore runs `npm run typecheck` (`tsc --noEmit`) after the build — after, so it type-checks the freshly regenerated `.next/types` rather than a stale tree — as the one pass that sees those files; with `incremental` the warm re-check costs under a second (~5s cold), so the duplicate parse the lane once avoided is no longer a budget concern. Its backend lane excludes `slow` real-index/performance tests, `graph_index_contract` cold graph/index contracts, `architecture_contract_heavy` (the eight repository-wide semantic scans in `_ARCHITECTURE_CONTRACT_HEAVY_TESTS`; the remaining lightweight `architecture_contract` tests run in G1), `process_contract` (tests that start a real child process — subprocess, multiprocessing spawn or fork — to check a process-level contract: service start/stop and launcher signal handoff, release-manifest git history and packaging, the batch-ingest process pool, real-process startup refusal, script and CLI entry points), `legacy_upgrade_contract` (tests that upgrade a deployed old-version database: the snapshot verifier's deployed-vNN cases, the old-version migration matrix, and the memory-isolation rebuild that such an upgrade schedules; current-schema, fresh-database and source-consistency checks in the same modules stay in G1), and the PostgreSQL tree. By the 2026-10-14 decision that set the local target to 80 seconds, these process-level and old-version contracts are reported by the daily G2 gate rather than on every pull request. `process_contract` and `legacy_upgrade_contract` are applied per test, so one file can mix them with G1 tests. The lane-partition guard below starts a child process but stays unmarked in G1, because a G2-only copy would stop running the moment a broken expression deselected it. G2 first runs G1 and then the exact complementary backend marker set — `backend/tests/test_test_architecture_policy.py::test_verification_lane_markers_partition_every_architecture_contract_test` proves that split empirically via `--collect-only`, not just by pinning the two `-m` strings. Each lane has its own process group, so interrupting or terminating the controller also terminates and reaps pytest, npm, and Next.js descendants. The official-client MCP smoke pins exactly the 17 published tools: two discovery/overview, two search/point-read, two ask, two contribute, four source, one build, and four knowhow tools. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
 
 Use the project’s Homebrew/Miniconda interpreter for acceptance:
 
@@ -515,8 +515,8 @@ while lock/writable handles still require one link and unsafe files remain rejec
 
 Python dependencies are hash-locked, and installing never resolves anything.
 `backend/requirements.in` declares the runtime ranges and
-`backend/requirements-dev.in` the test and gate tools (pytest, pytest-xdist and
-matplotlib, which the pytest controller prewarms); its `-c requirements.txt` line
+`backend/requirements-dev.in` the test and gate tools (pytest, pytest-xdist, ruff
+and matplotlib, which the pytest controller prewarms); its `-c requirements.txt` line
 keeps every package both sides need at the runtime lock's version.
 `scripts/lock_python_deps.sh` compiles them with pip-tools `--generate-hashes`
 into `backend/requirements.txt` (runtime lock) and
@@ -625,6 +625,81 @@ in the same change. Do not absorb a new violation with `eslint --suppress-all` o
 `// eslint-disable-next-line <rule> -- <reason>` comment directly above the reported
 line. ESLint is its own group on the parallel path (about 5 s cold on the reference
 machine, under the build), so it does not lengthen the frontend lane.
+
+### Backend lint gate
+
+`scripts/check_backend_lint.py` runs ruff, at the exact version pinned in
+`backend/requirements-dev.in`, with the repository's `ruff.toml` over
+`backend/app`, `backend/tests` and `scripts`: every Python file git sees there,
+tracked or untracked but not ignored. Nothing is excluded, because no generated
+Python lives under those roots. It runs in the contracts lane and takes under a
+second, so it is off the backend critical path. Run it locally from the
+development environment (the dev lock installs ruff) with
+`python scripts/check_backend_lint.py`.
+
+The rules are lint rules only; there is no formatter and no style rule:
+
+- pyflakes (`F`), `E9` (files the parser cannot read) and `E722` (bare
+  `except`);
+- pylint errors (`PLE`);
+- the flake8-bugbear rules that flag likely bugs: mutable argument and
+  `ContextVar` defaults, `return`/`break`/`continue` in `finally`, duplicate or
+  empty exception tuples, `pytest.raises(Exception)`, pointless comparisons and
+  expressions, `lru_cache` on methods, duplicate set items and the like. The
+  full list is in `ruff.toml`.
+
+Left out on purpose:
+
+- `B008`: FastAPI's `Depends()` defaults.
+- `B904`, `B905`, `B007`, `B009`/`B010`: exception chaining, `zip(strict=)`,
+  unused loop variables, constant `getattr`/`setattr`. These are style or a
+  behavior change.
+- `B023`: loop variables in closures; most hits are closures called inside the
+  loop.
+- `UP` and `I`: modernization and import sorting.
+
+Violations that predate the gate are recorded in
+`scripts/backend_lint_baseline.json`, as file → rule → count. The gate fails when:
+
+- a (file, rule) count is higher than its entry (a new violation);
+- an entry is higher than what still occurs (stale);
+- the baseline names a file the gate does not lint, or a rule that is never
+  baselined (`F821`, `F822`, `F823`, `E902` and syntax errors are always fixed);
+- ruff lints a different set of files from the one git sees under the roots;
+- the installed ruff is not the pinned version.
+
+`backend/tests/test_backend_lint_gate.py` (backend lane) covers what that leaves
+open:
+
+- Each rule's total count and number of files are pinned in `BASELINE_CEILING`
+  with zero slack.
+- `ruff.toml` must equal the expected configuration: no `ignore`,
+  `per-file-ignores`, `exclude`, preview or `extend-*` keys. No other ruff
+  configuration may sit under the roots, and the roots and the empty exclusion
+  list are pinned.
+- Line suppressions that name a gated rule are pinned per rule in
+  `SUPPRESSION_CEILING`. The existing ones predate the gate: pytest fixtures
+  imported for injection, re-exports and side-effect imports. A blanket `# noqa`
+  and the file-level `# ruff: noqa` and `# flake8: noqa` are forbidden.
+
+The pins are per-rule totals. Debt moved between files under one rule (one
+violation fixed in file A, one added in file B) keeps every number, and only
+review of the baseline diff catches it.
+
+To lower the baseline:
+
+1. Fix violations.
+2. Run `python scripts/check_backend_lint.py --prune`. It only lowers entries
+   and drops the ones that reach zero, and it writes nothing while any new
+   violation exists.
+3. Lower `BASELINE_CEILING`, and `SUPPRESSION_CEILING` if a suppression went, in
+   the same change.
+
+No command adds an entry. Do not absorb a new violation by editing the baseline
+or adding a `# noqa`: fix it. A name kept only as a re-export belongs in the
+module's `__all__`. Upgrading ruff is a reviewed change of its own: bump the
+pin, relock, and recompute the baseline and both ceilings together, because rule
+behavior changes between versions.
 
 ### GitHub Actions CI
 

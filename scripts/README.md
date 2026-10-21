@@ -151,6 +151,17 @@ bash scripts/lock_python_deps.sh --check                  # 重锁到临时副�
 需要 CPython 3.13(`LOCK_PYTHON`,默认 `python3.13`)与包索引访问;规则见
 [`docs/development_zh.md`](../docs/development_zh.md#python-依赖)。
 
+### `check_backend_lint.py` —— 后端 lint 门(ruff + 只降不升的基线)
+
+```bash
+python scripts/check_backend_lint.py           # 门禁本身(contracts lane 也跑这一条)
+python scripts/check_backend_lint.py --prune   # 修掉违反后把过期的基线格调低
+```
+
+需要按测试锁装好的环境(ruff 版本钉在 `backend/requirements-dev.in`)。新违反一律修掉,
+不进基线;规则、基线与降基线流程见
+[`docs/development_zh.md`](../docs/development_zh.md#后端-lint-门)。
+
 ### `check_postgres.sh` —— 独立 PostgreSQL 门禁
 
 本地串行运行需显式 `TEST_POSTGRES_URL` 指向专用 `silicon_notebook_*_test` 数据库。

@@ -341,11 +341,11 @@ bash scripts/check.sh
 | 级别 | 范围 | 执行频率 |
 | --- | --- | --- |
 | G0 目标测试 | 按当前改动文件与行为选跑 | 编辑循环中随时执行 |
-| G1 标准门 | `scripts/check.sh`：稳定后端、契约/harness、前端测试、对照基线的前端 ESLint、负责类型检查的 production build 与补测试文件诊断的包内类型检查 | 本地交付前以及每次 PR/push/手动 CI |
+| G1 标准门 | `scripts/check.sh`：稳定后端、契约/harness、对照基线的后端 ruff、前端测试、对照基线的前端 ESLint、负责类型检查的 production build 与补测试文件诊断的包内类型检查 | 本地交付前以及每次 PR/push/手动 CI |
 | G2 扩展门 | `scripts/check_extended.sh`：G1 加真实索引/性能测试、冷图/索引契约、全仓语义扫描（重活子集）、真实子进程合同与老版本升级矩阵 | 每天 `17 18 * * *` UTC（北京时间次日 02:17）一次，也可手动触发 |
 | G3 PostgreSQL | `scripts/check_postgres.sh`：直接 PostgreSQL adapter 集成 | 独立的 PR/push/手动 CI job |
 
-G1 并行运行三个有界 lane：`check_backend.sh` 以默认 16 个 worker 执行稳定 backend pytest（CI 固定 4 个）；`check_contracts.sh` 执行语法/依赖预检、hermetic smoke、契约检查与确定性抽取评分 harness；`check_frontend.sh` 执行递归发现的全部 `*.test.mjs`、全部 `*.component.test.tsx`、ESLint（`npm run lint`，见[前端 ESLint 门](#前端-eslint-门)）、production build 与包内类型检查。在不少于 8 个 CPU 的主机上，同步一次插件投影之后，node 测试、组件测试、ESLint 与「build 之后类型检查」四组并发运行，各自写独立日志，全部结束后按固定顺序打印并逐步给出退出码；更小的主机（CI runner）保持串行顺序、在第一个失败处停止，`FRONTEND_LANE_PARALLEL=1`/`0` 可覆盖 CPU 判断。Node 原生 test runner 和 Vitest 各限制为 4 workers，为 backend 临界路径保留 CPU；Next build 不得启用 `ignoreBuildErrors`、仍是生产代码类型检查的权威，但 Next 的构建期类型检查会静默丢弃 `*.test.*`/`*.spec.*` 文件与 `__tests__`/`__mocks__` 目录里的全部诊断（`next/dist/lib/typescript/runTypeCheck.js` 的 `ignoreRegex`，Next 15.5 实测），只存在于 `frontend/tests/**` 的类型错误对 build 完全不可见；因此前端 lane 在 build **之后**补跑 `npm run typecheck`（`tsc --noEmit`）——排在 build 后是让它检查刚重新生成的 `.next/types` 而不是脏树上的陈旧生成物——这是唯一看得见测试文件的检查；`incremental` 使 warm 重查不到 1 秒（冷 ~5 秒），当初「同一程序重复解析两遍」要省的成本已不再成立。G1 backend 排除 `slow` 真实索引/性能用例、`graph_index_contract` 冷图/索引契约、`architecture_contract_heavy`（`_ARCHITECTURE_CONTRACT_HEAVY_TESTS` 中的八条全仓语义扫描）、`process_contract`（启动真实子进程——subprocess、multiprocessing spawn 或 fork——检查进程级合同的用例：服务启停与 launcher 信号交接、release manifest 的 git 历史与打包、batch ingest 进程池、真进程拒启、脚本与 CLI 入口）、`legacy_upgrade_contract`（升级已部署老版本库的用例：快照 verifier 的「已部署 vNN」用例、老版本迁移矩阵，以及这类升级排上的记忆隔离重建；同一模块里的当前 schema、新库与源码一致性检查仍留在 G1）和 PostgreSQL 树，其余轻量 `architecture_contract` 测试随 G1 每次 PR/push 跑。按 2026-10-14 把本机目标定为 80 秒的裁决，这些进程级与老版本合同由每日 G2 报告，不再每个 PR 即时覆盖。`process_contract` 与 `legacy_upgrade_contract` 逐测试标注，同一个文件可以与 G1 用例混排。下文的 lane 划分守卫虽然启动子进程，仍不加标记、留在 G1：只放在 G2 的话，表达式一旦写坏把它排除掉，它就再也不会运行。G2 先执行 G1，再执行精确互补的 backend marker 集——`backend/tests/test_test_architecture_policy.py::test_verification_lane_markers_partition_every_architecture_contract_test` 用 `--collect-only` 实测验证这个划分，不只是钉两条 `-m` 字符串。每个 lane 都有独立进程组，因此中断或终止 controller 时，也会终止并回收 pytest、npm 和 Next.js 的后代进程。官方 client MCP smoke 精确锁定已公开的十七个工具：发现与概况两个、搜索与点查两个、问答两个、提交两个、来源四个、构建一个与四个 knowhow 工具。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
+G1 并行运行三个有界 lane：`check_backend.sh` 以默认 16 个 worker 执行稳定 backend pytest（CI 固定 4 个）；`check_contracts.sh` 执行语法/依赖预检、hermetic smoke、契约检查、后端 lint 门（见[后端 lint 门](#后端-lint-门)）与确定性抽取评分 harness；`check_frontend.sh` 执行递归发现的全部 `*.test.mjs`、全部 `*.component.test.tsx`、ESLint（`npm run lint`，见[前端 ESLint 门](#前端-eslint-门)）、production build 与包内类型检查。在不少于 8 个 CPU 的主机上，同步一次插件投影之后，node 测试、组件测试、ESLint 与「build 之后类型检查」四组并发运行，各自写独立日志，全部结束后按固定顺序打印并逐步给出退出码；更小的主机（CI runner）保持串行顺序、在第一个失败处停止，`FRONTEND_LANE_PARALLEL=1`/`0` 可覆盖 CPU 判断。Node 原生 test runner 和 Vitest 各限制为 4 workers，为 backend 临界路径保留 CPU；Next build 不得启用 `ignoreBuildErrors`、仍是生产代码类型检查的权威，但 Next 的构建期类型检查会静默丢弃 `*.test.*`/`*.spec.*` 文件与 `__tests__`/`__mocks__` 目录里的全部诊断（`next/dist/lib/typescript/runTypeCheck.js` 的 `ignoreRegex`，Next 15.5 实测），只存在于 `frontend/tests/**` 的类型错误对 build 完全不可见；因此前端 lane 在 build **之后**补跑 `npm run typecheck`（`tsc --noEmit`）——排在 build 后是让它检查刚重新生成的 `.next/types` 而不是脏树上的陈旧生成物——这是唯一看得见测试文件的检查；`incremental` 使 warm 重查不到 1 秒（冷 ~5 秒），当初「同一程序重复解析两遍」要省的成本已不再成立。G1 backend 排除 `slow` 真实索引/性能用例、`graph_index_contract` 冷图/索引契约、`architecture_contract_heavy`（`_ARCHITECTURE_CONTRACT_HEAVY_TESTS` 中的八条全仓语义扫描）、`process_contract`（启动真实子进程——subprocess、multiprocessing spawn 或 fork——检查进程级合同的用例：服务启停与 launcher 信号交接、release manifest 的 git 历史与打包、batch ingest 进程池、真进程拒启、脚本与 CLI 入口）、`legacy_upgrade_contract`（升级已部署老版本库的用例：快照 verifier 的「已部署 vNN」用例、老版本迁移矩阵，以及这类升级排上的记忆隔离重建；同一模块里的当前 schema、新库与源码一致性检查仍留在 G1）和 PostgreSQL 树，其余轻量 `architecture_contract` 测试随 G1 每次 PR/push 跑。按 2026-10-14 把本机目标定为 80 秒的裁决，这些进程级与老版本合同由每日 G2 报告，不再每个 PR 即时覆盖。`process_contract` 与 `legacy_upgrade_contract` 逐测试标注，同一个文件可以与 G1 用例混排。下文的 lane 划分守卫虽然启动子进程，仍不加标记、留在 G1：只放在 G2 的话，表达式一旦写坏把它排除掉，它就再也不会运行。G2 先执行 G1，再执行精确互补的 backend marker 集——`backend/tests/test_test_architecture_policy.py::test_verification_lane_markers_partition_every_architecture_contract_test` 用 `--collect-only` 实测验证这个划分，不只是钉两条 `-m` 字符串。每个 lane 都有独立进程组，因此中断或终止 controller 时，也会终止并回收 pytest、npm 和 Next.js 的后代进程。官方 client MCP smoke 精确锁定已公开的十七个工具：发现与概况两个、搜索与点查两个、问答两个、提交两个、来源四个、构建一个与四个 knowhow 工具。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
 
 验收时使用项目一直采用的 Homebrew/Miniconda Python：
 
@@ -402,7 +402,7 @@ JSON 读取方可读取已打开、当前用户所有的普通文件快照，即
 ### Python 依赖
 
 Python 依赖带哈希锁定，安装时不做任何解析。`backend/requirements.in` 声明运行依赖的
-版本范围，`backend/requirements-dev.in` 声明测试与门禁工具（pytest、pytest-xdist，以及
+版本范围，`backend/requirements-dev.in` 声明测试与门禁工具（pytest、pytest-xdist、ruff，以及
 pytest 主控预热字体缓存用的 matplotlib）；其中 `-c requirements.txt` 一行让两边都需要的
 包保持运行锁里的版本。`scripts/lock_python_deps.sh` 用 pip-tools `--generate-hashes`
 把它们编译成 `backend/requirements.txt`（运行锁）与 `backend/requirements-dev.txt`
@@ -481,6 +481,64 @@ hooks 规则都解析为 error，且没有规则停在 warn；`react-hooks/rules
 不要用 `eslint --suppress-all` 或 `--suppress-rule` 收编新违反：修掉它；代码确属刻意如此时，在被
 报告那一行的正上方写 `// eslint-disable-next-line <rule> -- <理由>`。并行路径上 ESLint 自成一组
 （参考机冷跑约 5 秒，被 build 盖住），不拉长前端 lane。
+
+### 后端 lint 门
+
+`scripts/check_backend_lint.py` 用 `backend/requirements-dev.in` 钉死的那个 ruff 版本，
+按仓库根的 `ruff.toml` 检查 `backend/app`、`backend/tests` 与 `scripts`：git 在这三处看得见的
+每个 Python 文件，已跟踪的和未跟踪但未被忽略的都算。三处都没有生成的 Python，所以不排除任何
+文件。它在 contracts lane 里跑，耗时不到 1 秒，不在 backend 临界路径上。本机在开发环境里
+（测试锁会装上 ruff）直接跑 `python scripts/check_backend_lint.py`。
+
+只开 lint 规则，不开格式化，也不开风格类规则：
+
+- pyflakes（`F`）、`E9`（解析器读不了的文件）与 `E722`（裸 `except`）；
+- pylint 的错误类（`PLE`）；
+- flake8-bugbear 里指向疑似 bug 的那部分：可变的参数默认值与 `ContextVar` 默认值、`finally`
+  里的 `return`/`break`/`continue`、重复或空的异常元组、`pytest.raises(Exception)`、无意义的
+  比较与表达式、方法上的 `lru_cache`、集合里的重复项等。完整清单见 `ruff.toml`。
+
+刻意不开：
+
+- `B008`：FastAPI 的 `Depends()` 默认值。
+- `B904`、`B905`、`B007`、`B009`/`B010`：异常链、`zip(strict=)`、未用的循环变量、常量
+  `getattr`/`setattr`。这几条属于风格，或者改了会改变行为。
+- `B023`：闭包里引用循环变量；命中的大多是在循环体内当场调用的闭包。
+- `UP` 与 `I`：语法现代化与 import 排序。
+
+门禁之前就有的违反记在 `scripts/backend_lint_baseline.json`，形状是「文件 → 规则 → 条数」。
+出现下面任何一种情况，门禁都会失败：
+
+- 某个（文件, 规则）的条数高于基线（新违反）；
+- 基线某格高于实际仍存在的条数（过期）；
+- 基线里出现门禁不检查的文件，或出现永不进基线的规则（`F821`、`F822`、`F823`、`E902`
+  与语法错误一律当场修）；
+- ruff 实际检查的文件集合与 git 在这三处看到的不一致；
+- 装的 ruff 不是钉死的版本。
+
+`backend/tests/test_backend_lint_gate.py`（backend lane）补门禁自己看不到的几处：
+
+- 每条规则的总条数与涉及文件数零松弛钉在 `BASELINE_CEILING`。
+- `ruff.toml` 必须与预期配置逐项相等：不许有 `ignore`、`per-file-ignores`、`exclude`、
+  preview 或 `extend-*` 键。三处目录下不许再有别的 ruff 配置；检查的根目录和空的排除清单也
+  都钉死。
+- 点名受检规则的行级豁免按规则钉在 `SUPPRESSION_CEILING`。现有的都早于这道门：为注入而
+  导入的 pytest fixture、再导出、为副作用而做的导入。不带规则码的 `# noqa`，以及文件级的
+  `# ruff: noqa`、`# flake8: noqa`，一律禁止。
+
+这些数字按规则合计。同一条规则下「A 文件修掉一条、B 文件新增一条」各项数字都不变，只能靠
+评审基线的 diff 发现。
+
+降基线的步骤：
+
+1. 修掉违反。
+2. 跑 `python scripts/check_backend_lint.py --prune`。它只调低基线、删掉降到零的格；只要
+   还有新违反，它什么都不写。
+3. 在同一个改动里调低 `BASELINE_CEILING`；若删掉了豁免注释，也调低 `SUPPRESSION_CEILING`。
+
+没有任何命令会往基线里加格。新违反不许靠改基线或加 `# noqa` 收编，一律修掉；只为再导出而
+保留的名字写进模块的 `__all__`。升级 ruff 自成一次需要评审的改动：改钉版、重锁，并在同一个
+改动里重算基线和两张上限表，因为规则行为会随版本变化。
 
 ### GitHub Actions CI
 
