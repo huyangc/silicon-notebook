@@ -18,6 +18,7 @@ vi.mock("../../app/group-api.ts", async (importOriginal) => {
     shareNotebookToGroup: vi.fn(),
     transferGroupOwner: vi.fn(),
     leaveGroup: vi.fn(),
+    getGroupLeavePreview: vi.fn(),
     removeGroupMember: vi.fn(),
   };
 });
@@ -32,6 +33,7 @@ import {
   listGroups,
   listMyPendingShareRequests,
   leaveGroup,
+  getGroupLeavePreview,
   rejectShareRequest,
   removeGroupMember,
   shareNotebookToGroup,
@@ -90,6 +92,7 @@ beforeEach(() => {
   ]);
   vi.mocked(listGroupShareRequests).mockResolvedValue([]);
   vi.mocked(listMyPendingShareRequests).mockResolvedValue([]);
+  vi.mocked(getGroupLeavePreview).mockResolvedValue({ notebook_count: 0, memory_count: 0, notebooks: [] });
 });
 
 function renderPage(detail: GroupDetail = OWNER_DETAIL, openingNotebookId: string | null = null) {
@@ -692,6 +695,82 @@ test("群组设置：改名与改说明同样给出余量提示，还早时不�
   expect(screen.getByText("群组说明已达上限 1000 个字")).toBeInTheDocument();
 });
 
+/** 退出群组走确认面板:等退群预览读到、「确认退出」可用之后再按。 */
+async function confirmLeaveInDialog(user: ReturnType<typeof userEvent.setup>) {
+  const dialog = await screen.findByRole("dialog", { name: "退出群组" });
+  const confirm = within(dialog).getByRole("button", { name: "确认退出" });
+  await waitFor(() => expect(confirm).toBeEnabled());
+  await user.click(confirm);
+}
+
+const MEMBER_DETAIL: GroupDetail = { ...OWNER_DETAIL, owner_id: "u2", my_role: "member" };
+
+test("退出群组先告知退出后会看不到的笔记本与记忆,确认后才发退出请求", async () => {
+  const user = userEvent.setup();
+  vi.mocked(getGroupLeavePreview).mockResolvedValue({
+    notebook_count: 1,
+    memory_count: 4,
+    notebooks: [{ notebook_id: "nb-shared", name: "共享可靠性资料", memory_count: 4 }],
+  });
+  vi.mocked(leaveGroup).mockResolvedValue(undefined);
+  renderPage(MEMBER_DETAIL);
+
+  await screen.findByRole("heading", { name: "先进封装项目" });
+  await user.click(screen.getByRole("button", { name: "设置" }));
+  await user.click(screen.getByRole("button", { name: "退出群组" }));
+  const dialog = await screen.findByRole("dialog", { name: "退出群组" });
+  expect(await within(dialog).findByText("退出后，你将看不到 1 个笔记本里你的 4 条记忆。")).toBeInTheDocument();
+  expect(getGroupLeavePreview).toHaveBeenCalledWith("g1", expect.anything());
+  expect(leaveGroup).not.toHaveBeenCalled();
+  await user.click(within(dialog).getByRole("button", { name: "取消" }));
+  expect(screen.queryByRole("dialog", { name: "退出群组" })).not.toBeInTheDocument();
+  expect(leaveGroup).not.toHaveBeenCalled();
+  // 焦点还给「退出群组」按钮。
+  await waitFor(() => expect(screen.getByRole("button", { name: "退出群组" })).toHaveFocus());
+});
+
+test("退出被拒(唯一的组管理员):原因落在面板里,面板不关、仍是这个群组", async () => {
+  const user = userEvent.setup();
+  vi.mocked(leaveGroup).mockRejectedValue(
+    humanizedError("你是这个群组唯一的组管理员,请先指定其他组管理员再退出", 409),
+  );
+  const { onNavigate } = renderPage(MEMBER_DETAIL);
+
+  await screen.findByRole("heading", { name: "先进封装项目" });
+  await user.click(screen.getByRole("button", { name: "设置" }));
+  await user.click(screen.getByRole("button", { name: "退出群组" }));
+  await confirmLeaveInDialog(user);
+
+  const dialog = screen.getByRole("dialog", { name: "退出群组" });
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent("唯一的组管理员");
+  expect(within(dialog).getByRole("button", { name: "确认退出" })).toBeEnabled();
+  expect(screen.getByRole("heading", { name: "先进封装项目" })).toBeInTheDocument();
+  expect(onNavigate).not.toHaveBeenCalledWith("", "notebooks");
+});
+
+test("退出在途时取消面板:入口按钮占住为「正在退出…」,失败原因落在按钮旁", async () => {
+  const user = userEvent.setup();
+  let reject!: (reason: unknown) => void;
+  vi.mocked(leaveGroup).mockImplementation(() => new Promise<void>((_, fail) => { reject = fail; }));
+  renderPage(MEMBER_DETAIL);
+
+  await screen.findByRole("heading", { name: "先进封装项目" });
+  await user.click(screen.getByRole("button", { name: "设置" }));
+  await user.click(screen.getByRole("button", { name: "退出群组" }));
+  await confirmLeaveInDialog(user);
+  const dialog = screen.getByRole("dialog", { name: "退出群组" });
+  expect(within(dialog).getByRole("button", { name: "正在退出…" })).toBeDisabled();
+  await user.click(within(dialog).getByRole("button", { name: "取消" }));
+  expect(screen.queryByRole("dialog", { name: "退出群组" })).not.toBeInTheDocument();
+  const entry = screen.getByRole("button", { name: "正在退出…" });
+  expect(entry).toBeDisabled();
+
+  await act(async () => { reject(humanizedError("退出群组失败", 500)); });
+  expect(await screen.findByRole("alert")).toHaveTextContent("退出群组失败");
+  expect(screen.getByRole("button", { name: "退出群组" })).toBeEnabled();
+  expect(leaveGroup).toHaveBeenCalledTimes(1);
+});
+
 test("退出后更新 hash 并自动选择剩余群组", async () => {
   const user = userEvent.setup();
   const memberDetail: GroupDetail = { ...OWNER_DETAIL, owner_id: "u2", my_role: "member" };
@@ -710,7 +789,7 @@ test("退出后更新 hash 并自动选择剩余群组", async () => {
   vi.mocked(getGroup).mockResolvedValue(remaining);
   await user.click(screen.getByRole("button", { name: "设置" }));
   await user.click(screen.getByRole("button", { name: "退出群组" }));
-  await user.click(screen.getByRole("button", { name: "确认退出" }));
+  await confirmLeaveInDialog(user);
 
   await waitFor(() => expect(onNavigate).toHaveBeenCalledWith("g2", "notebooks"));
   expect(await screen.findByRole("heading", { name: "剩余群组" })).toBeInTheDocument();
@@ -731,7 +810,7 @@ test("退出最后一个群组时立即失效旧 hash 请求且不把 404 写回
 
   await user.click(screen.getByRole("button", { name: "设置" }));
   await user.click(screen.getByRole("button", { name: "退出群组" }));
-  await user.click(screen.getByRole("button", { name: "确认退出" }));
+  await confirmLeaveInDialog(user);
 
   await waitFor(() => expect(onNavigate).toHaveBeenCalledWith("", "notebooks"));
   expect(getGroup).toHaveBeenCalledTimes(1);

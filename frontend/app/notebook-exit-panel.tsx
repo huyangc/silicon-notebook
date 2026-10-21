@@ -29,7 +29,8 @@ import { DestinationPicker } from "./transfer-picker.tsx";
 import { useDialogFocus } from "./use-dialog-focus.ts";
 import type { ExitAnchor, NotebookExit } from "./use-notebook-exit.ts";
 
-function usePanelPlacement(ref: RefObject<HTMLDivElement | null>, anchor: ExitAnchor) {
+/** 浮层面板跟着入口控件摆(退群确认面板 group-leave-dialog.tsx 也用这一份)。 */
+export function usePanelPlacement(ref: RefObject<HTMLDivElement | null>, anchor: ExitAnchor) {
   const place = useCallback(() => {
     const panel = ref.current;
     if (!panel) return;
