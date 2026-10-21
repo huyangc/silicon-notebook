@@ -14,7 +14,7 @@ import json
 import pytest
 
 from app.api.mcp_tools import global_ask as global_tools
-from app.api.mcp_tools._shared import AgentToolError, _serialized_size
+from app.api.mcp_tools._shared import AgentToolError, _budget_response, _serialized_size
 from app.api.mcp_tools.ask_pages import linked_report_view
 from app.api.mcp_tools.conversations import (
     _CONVERSATION_NOT_FOUND,
@@ -473,6 +473,29 @@ def test_the_report_id_of_a_turns_receipt_is_never_cut() -> None:
         answer_offset = page["next_answer_offset"]
         citation_offset = page["next_citation_offset"]
     assert pages >= 4
+
+
+def test_the_budget_sheds_everything_else_before_a_report_id() -> None:
+    """The ordinary pass shrinks the longest strings first (down to 32
+    characters) and then drops list items; a 36-character report id is an
+    identifier, so it is neither shrunk by the first nor reached by the second."""
+    packed = _budget_response({
+        "scope": {"linked_report": {"report_id": GENERATED_REPORT_ID}},
+        "labels": [f"标签{index:03d}" + "标" * 40 for index in range(400)],
+    })
+    assert packed["scope"]["linked_report"]["report_id"] == GENERATED_REPORT_ID
+    assert packed["truncation"]["truncated"] is True, "the pressure was real"
+
+
+def test_a_turn_page_never_carries_a_cut_report_id() -> None:
+    """Only a report id longer than the whole response budget -- not one a
+    report has -- is shortened, as the budget's last resort; the page that
+    carries it is then refused at every size, never delivered with a handle
+    that opens nothing."""
+    scope = _receipt_scope("rep-" + "x" * 13_000)
+    with pytest.raises(AgentToolError) as refused:
+        _page(_view("回答。", scope=scope))
+    assert refused.value.code == "internal"
 
 
 def test_list_page_cuts_a_followed_reports_title_and_counts_it() -> None:
