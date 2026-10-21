@@ -769,6 +769,12 @@ def _seed_own_dup_world(world: World) -> None:
              [_ev("src-memory-b")]),
             ("ko-b-dup-2", "claim", "src-memory-b", OWN_DUP_NAME, "approved",
              [_ev("src-memory-b")]),
+            # A's smaller group; its ids sort first, so only the size order
+            # puts it after the group of three
+            ("ko-own-a-pair-1", "claim", "src-memory-a", "own pair", "approved",
+             [_ev("src-memory-a")]),
+            ("ko-own-a-pair-2", "claim", "src-memory-a", "own pair", "approved",
+             [_ev("src-memory-a")]),
             # A's procedure pair (the procedure seed reads the steps)
             ("ko-own-proc-1", "procedure", "src-memory-a", "own calibration", "approved",
              [_ev("src-memory-a")]),
@@ -788,13 +794,19 @@ def _seed_own_dup_world(world: World) -> None:
 
 
 def _shared_dup_seed(world: World) -> None:
+    """Shared groups of three and of two; the pair's ids sort first, so only
+    the size order puts it second."""
     with world.repo._write() as db:
-        for object_id in ("ko-shared-dup-1", "ko-shared-dup-2"):
+        for object_id, name in (
+            ("ko-shared-dup-1", OWN_DUP_NAME), ("ko-shared-dup-2", OWN_DUP_NAME),
+            ("ko-shared-dup-3", OWN_DUP_NAME),
+            ("ko-shared-a-pair-1", "shared pair"), ("ko-shared-a-pair-2", "shared pair"),
+        ):
             db.execute(
                 world.q("INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
                         "payload,evidence,source_id,created_at,updated_at) "
                         "VALUES (?,?,'claim','approved',?,?,'src-document',?,?)"),
-                (object_id, world.nb, json.dumps({"name": OWN_DUP_NAME}),
+                (object_id, world.nb, json.dumps({"name": name}),
                  json.dumps([_ev("src-document")]), NOW, NOW),
             )
 
@@ -828,7 +840,13 @@ def owner_lists_her_own_memory_duplicates(world: World) -> None:
         name: _shared_text(world, headers)
         for name, headers in (("a", world.a), ("b", world.b))
     }
-    assert "ko-shared-dup-1" in shared_before["a"]
+    shared_groups = [
+        {m["id"] for m in group["members"]} for group in json.loads(shared_before["a"])
+    ]
+    assert shared_groups == [
+        {"ko-shared-dup-1", "ko-shared-dup-2", "ko-shared-dup-3"},
+        {"ko-shared-a-pair-1", "ko-shared-a-pair-2"},
+    ], shared_groups
     assert _own_groups(world, world.a) == []        # no duplicates of hers yet
     _seed_own_dup_world(world)
 
@@ -838,8 +856,10 @@ def owner_lists_her_own_memory_duplicates(world: World) -> None:
     assert shared_before["a"] == shared_before["b"]
 
     groups = _own_groups(world, world.a)
+    # the shared order: larger groups first
     assert [set(group) for group in groups] == [
-        {"ko-own-dup-1", "ko-own-dup-2", "ko-own-dup-bare"}
+        {"ko-own-dup-1", "ko-own-dup-2", "ko-own-dup-bare"},
+        {"ko-own-a-pair-1", "ko-own-a-pair-2"},
     ], groups
     assert [set(g) for g in _own_groups(world, world.a, "procedure")] == [
         {"ko-own-proc-1", "ko-own-proc-2"}
@@ -848,7 +868,7 @@ def owner_lists_her_own_memory_duplicates(world: World) -> None:
         f"/api/notebooks/{world.nb}/duplicates/own-memory",
         params={"type": "claim"}, headers=world.a,
     ).json()
-    (group,) = response
+    group = response[0]
     assert group["object_type"] == "claim"
     assert {m["headline"] for m in group["members"]} == {OWN_DUP_NAME, "Own  DUP claim"}
     assert all("_merged_into" not in json.dumps(m) for m in group["members"])
@@ -883,15 +903,19 @@ def owner_lists_her_own_memory_duplicates(world: World) -> None:
     assert merged.status_code == 200, merged.text
     # the merged-away object leaves the group; the result (which now cites
     # both of her Memories) stays in it
-    assert [set(g) for g in _own_groups(world, world.a)] == [
-        {"ko-own-dup-1", "ko-own-dup-bare"}
-    ]
+    remaining = [frozenset(g) for g in _own_groups(world, world.a)]
+    assert set(remaining) == {
+        frozenset({"ko-own-dup-1", "ko-own-dup-bare"}),
+        frozenset({"ko-own-a-pair-1", "ko-own-a-pair-2"}),
+    } and len(remaining) == 2, remaining
     merged = world.client.post(
         f"/api/notebooks/{world.nb}/knowledge/ko-own-dup-bare/merge",
         headers=world.a, json={"into_id": "ko-own-dup-1"},
     )
     assert merged.status_code == 200, merged.text
-    assert _own_groups(world, world.a) == []
+    assert [set(g) for g in _own_groups(world, world.a)] == [
+        {"ko-own-a-pair-1", "ko-own-a-pair-2"}
+    ]
     for name, headers in (("a", world.a), ("b", world.b)):
         assert _shared_text(world, headers) == shared_before[name]
 
@@ -914,6 +938,7 @@ def owner_duplicates_follow_the_memory_channel(world: World) -> None:
     finally:
         reset_request_user(ctx)
     assert [{m.id for m in g.members} for g in opened] == [
-        {"ko-own-dup-1", "ko-own-dup-2", "ko-own-dup-bare"}
+        {"ko-own-dup-1", "ko-own-dup-2", "ko-own-dup-bare"},
+        {"ko-own-a-pair-1", "ko-own-a-pair-2"},
     ]
     assert closed == []
