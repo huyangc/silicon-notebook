@@ -151,6 +151,24 @@ ANSWER_AUTHOR_PROBE_SQL = (
     "WHERE a.id=?"
 )
 
+#: Where a conversation was started (``ConversationSummary.submitted_via``), as
+#: a SELECT-list expression over a ``conversations c`` row: the EARLIEST
+#: ask_jobs row's ``submitted_via`` (``conversations`` has no such column) --
+#: unless an answer is older than that job. The first turns of an older
+#: conversation were saved without any job row (before the job table, or by a
+#: compatibility path), so a later MCP follow-up creates the FIRST job and that
+#: job says nothing about where the conversation began: "" (not recorded). No
+#: job row at all is NULL, which the caller reads as "". Shared by the list and
+#: the detail so the two cannot drift; rides idx_ask_jobs_conv.
+CONVERSATION_ENTRY_POINT_SQL = (
+    "CASE WHEN (SELECT MIN(julianday(a.created_at)) FROM answers a "
+    "WHERE a.conversation_id = c.id) < "
+    "(SELECT MIN(julianday(j.created_at)) FROM ask_jobs j "
+    "WHERE j.conversation_id = c.id) THEN '' ELSE "
+    "(SELECT j.submitted_via FROM ask_jobs j WHERE j.conversation_id = c.id "
+    "ORDER BY julianday(j.created_at), j.created_at, j.rowid LIMIT 1) END"
+)
+
 class AskStateStore:
     def __init__(self, database: SqliteDatabase, seams) -> None:
         self.database = database
@@ -1392,12 +1410,7 @@ class AskStateStore:
         with self.database.connect() as db:
             conv = db.execute(
                 "SELECT c.id, c.notebook_id, c.title, c.updated_at, "
-                # The conversation's entry point = its earliest job's. Rides
-                # idx_ask_jobs_conv; a conversation without job rows reads "".
-                "(SELECT j.submitted_via FROM ask_jobs j "
-                "  WHERE j.conversation_id = c.id "
-                "  ORDER BY julianday(j.created_at), j.created_at, j.rowid LIMIT 1) "
-                "AS submitted_via "
+                + CONVERSATION_ENTRY_POINT_SQL + " AS submitted_via "
                 "FROM conversations c WHERE c.id = ?",
                 (conversation_id,),
             ).fetchone()
@@ -1482,12 +1495,7 @@ class AskStateStore:
                 "(SELECT COALESCE(json_array_length(json_extract(a.payload, '$.reasoning_trace')), 0) > 0 "
                 "   FROM answers a WHERE a.conversation_id = c.id "
                 "  ORDER BY a.rowid DESC LIMIT 1) AS used_reasoning, "
-                # The conversation's entry point = its earliest job's (rides
-                # idx_ask_jobs_conv); no job row reads as NULL -> "".
-                "(SELECT j.submitted_via FROM ask_jobs j "
-                "  WHERE j.conversation_id = c.id "
-                "  ORDER BY julianday(j.created_at), j.created_at, j.rowid LIMIT 1) "
-                "AS submitted_via "
+                + CONVERSATION_ENTRY_POINT_SQL + " AS submitted_via "
                 "FROM conversations c WHERE c.notebook_id = ? AND c.created_by = ? "
                 # julianday compares the absolute instant across legacy/local
                 # UTC offsets; the raw ISO value preserves microsecond order

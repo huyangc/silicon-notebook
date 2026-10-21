@@ -1168,8 +1168,11 @@ class ConversationSummary(BaseModel):
     used_reasoning: bool = False
     # Where the conversation was started from. ``conversations`` has no such
     # column, so it is read from the conversation's EARLIEST ask_jobs row
-    # (that row's ``submitted_via``); "" (not recorded) when the conversation
-    # has no job row -- an older answer or imported data.
+    # (that row's ``submitted_via``). "" (not recorded) when the conversation
+    # has no job row, or when an answer is OLDER than its earliest job: the
+    # first turns were saved without a job row (older data or a compatibility
+    # path) and a later follow-up created the first job, which says nothing
+    # about where the conversation began.
     submitted_via: StoredSubmittedVia = ""
 
 

@@ -124,8 +124,11 @@ C 属于 T 的主人、至少有一个未过期任务（任意状态），且 C 
 **D6 `submitted_via`（发起方）不加迁移，读时从 `ask_jobs` 推导。** 单库 `conversations` 表没有这列
 （`migrations.py:767-774`），任务行 `ask_jobs.submitted_via` 有。核实：现行网页流式、网页同步 `POST /ask`、
 MCP `ask` 都经 `begin_durable_job` / `begin_or_attach_durable_job` 先建任务行再存回答，所以新数据每条回答都有
-任务行；更早的历史回答、导入数据可能没有。规则：会话级 = 该会话**最早**一条任务的 `submitted_via`；每轮 =
-`ask_jobs.answer_id` 指向该回答的任务的 `submitted_via`；找不到任务行或列为空 → `""`（未记录）。
+任务行；更早的历史回答、导入数据可能没有。规则：会话级 = 该会话**最早**一条任务的 `submitted_via`，
+**但若该会话存在 `created_at` 早于这条最早任务的回答则为 `""`**（老会话的前几轮没有任务行，之后经 MCP 续问才建出
+第一条任务，它说明不了会话从哪里发起）；每轮 = `ask_jobs.answer_id` 指向该回答的任务的 `submitted_via`
+（同一回答多条任务行取 `created_at` 最早的一条）；找不到任务行或列为空 → `""`（未记录）。
+「最早」一律按 `created_at` 的时刻，而不是 id / 插入顺序。
 因此 `get_conversation` 读回答**不**走 `_read_notebook_job`/`ask_job_detail`（那条路依赖任务行），而是读
 `repo.get_conversation` 的 `ConversationDetail.turns`，再用 `notebook_view` 投影。落地为
 `ConversationSummary.submitted_via` 与 `ConversationTurn.submitted_via` 两个新字段（默认 `""`，类型
@@ -381,10 +384,10 @@ def agent_conversation_turn(self, conversation_id, *, user_id, allowed_notebook_
 - `backend/app/models/ask.py`：`ConversationSummary` 加 `submitted_via: StoredSubmittedVia = ""`（注释写 D6 的会话级规则），
   `ConversationTurn` 加同名字段（注释写每轮规则）。`ConversationDetail` 继承即可。
 - `backend/app/repositories/sqlite/ask_state_store.py`：
-  - `list_conversations`（`:1447`）SELECT 加
-    `(SELECT j.submitted_via FROM ask_jobs j WHERE j.conversation_id = c.id ORDER BY julianday(j.created_at), j.created_at, j.rowid LIMIT 1) AS submitted_via`，
-    构造时 `submitted_via=row["submitted_via"] or ""`。
-  - `get_conversation`（`:1383`）：会话行查询同样带该子查询；在同一连接里加一次
+  - `list_conversations`（`:1447`）SELECT 加模块级常量 `CONVERSATION_ENTRY_POINT_SQL`（D6：最早任务的
+    `submitted_via`，`ORDER BY julianday(j.created_at), j.created_at, j.rowid LIMIT 1`；若有回答的 `created_at`
+    早于最早任务则 `''`）`AS submitted_via`，构造时 `submitted_via=row["submitted_via"] or ""`。
+  - `get_conversation`（`:1383`）：会话行查询同样带该常量；在同一连接里加一次
     `SELECT answer_id, submitted_via FROM ask_jobs WHERE conversation_id = ? AND answer_id <> '' ORDER BY julianday(created_at), created_at, rowid`
     建 `{answer_id: submitted_via}`（同一 answer 多行取第一行），每个 `ConversationTurn(..., submitted_via=…)`。
 - `backend/app/repositories/postgres/ask_state_store.py`：`list_conversations`（`:1291`）与 `get_conversation`（`:1233`）
