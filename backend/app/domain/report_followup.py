@@ -201,6 +201,35 @@ RESTORED_KINDS = (
 
 
 @dataclass(frozen=True)
+class CitedReportReference:
+    """One stored report reference the retrieval layer is asked to read back
+    (``AskCandidatePort.restore_report_references``).
+
+    ``key`` is the report's own marker key (``"k3"``); ``object_type``,
+    ``object_id``, ``source_id`` and ``element_id`` are the stored reference
+    row's fields; ``notebook_id`` is the library that owns the cited item, as
+    the verdict resolved it ("" = the notebook being asked). A REQUEST, not an
+    authority: the restore judges every field again under the retrieval
+    ceiling installed for the run, so a reference that names a library or a
+    source the ceiling does not admit reads back nothing.
+
+    How each ``object_type`` is read back: ``chunk`` as its passage,
+    ``element`` as its element, ``relation`` as its evidence element (the
+    stored ``element_id``, else the relation's first current evidence element),
+    ``memory`` as the asker's own confirmed Memory entry, and any other graph
+    type as the knowledge object ``object_id``. ``external`` and ``source``
+    rows (and a row with no ``object_type``) name nothing that can be read
+    back and count as gone."""
+
+    key: str
+    object_type: str
+    object_id: str
+    notebook_id: str = ""
+    source_id: str = ""
+    element_id: str = ""
+
+
+@dataclass(frozen=True)
 class RestoredReportEvidence:
     """The report's cited items, read back from the notebook's current text.
 
@@ -250,6 +279,7 @@ class ReportFollowup:
 
 
 __all__ = [
+    "CitedReportReference",
     "LinkedReportNotFound",
     "LinkedReportNotReady",
     "REASON_CLAUSES",

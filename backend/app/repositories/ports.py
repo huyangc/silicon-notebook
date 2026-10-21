@@ -41,6 +41,7 @@ from app.domain.cancellation import CancelEvent
 from app.domain.graph import FollowChainResult
 from app.domain.knowledge_contracts import CONCEPT_DETAIL_PAGE_MAX
 from app.domain.notebook_scale import NotebookScaleFacts
+from app.domain.report_followup import CitedReportReference, RestoredReportEvidence
 from app.domain.retrieval_experience import (
     SITUATION_ASK_MODES,
     clip_trace_text,
@@ -3442,6 +3443,9 @@ class AskCandidatePort(Protocol):
     # rewrite removed its last port-mediated call site; the protocol-coverage
     # guard requires every declared member to have a live service/route call.
     def select_chunk_candidates(self, scored: list[RetrievedChunk], ids: list[str], matrix: np.ndarray | None, k: int, lambda_: float, *, active_notebook_id: str) -> list[RetrievedChunk]: ...
+    # A finished report's cited items read back for a follow-up question; the
+    # retrieval layer judges every reference under the run's installed ceiling.
+    def restore_report_references(self, active_notebook_id: str, actor_id: str, cited: Iterable[CitedReportReference]) -> RestoredReportEvidence: ...
     # has_kg / any_base_has_kg moved to ``RetrievalPort`` when the KG-availability
     # fact got a single evaluation point (``reasoning_retrieval.kg_in_scope_for``,
     # which both ask's no-KG early exit and reasoning's graph gates read):
