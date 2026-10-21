@@ -26,6 +26,15 @@ from app.core.config import (
 from app.models.common import Evidence
 from app.domain.extensions import GENERATED_QUESTION_ACCESS_CAPABILITY
 from app.domain.promotion_source import presented_source_title
+from app.domain.report_followup import (
+    RESTORED_KIND_CHUNK,
+    RESTORED_KIND_ELEMENT,
+    RESTORED_KIND_KG,
+    RESTORED_KIND_MEMORY,
+    RESTORED_KINDS,
+    CitedReportReference,
+    RestoredReportEvidence,
+)
 from app.domain.retrieval import ChunkRetrievalPlan
 from app.domain.retrieval_control import RetrievalControlError
 from app.repositories.ports import ChunkLexicalSearchTimeout
@@ -315,6 +324,26 @@ def _hydrated_chunk_row(r) -> dict:
         "section_path": r["section_path"], "source_title": r["source_title"],
         "element_ids": json.loads(r["element_ids"] or "[]"),
     }
+
+
+#: Report reference types that name nothing a follow-up can read back: an
+#: ``external`` item (plugin material outside the notebook), a whole ``source``
+#: (collection and workbook rows), or a row without a type.
+_REPORT_UNRESTORABLE_TYPES = frozenset({"", "external", "source"})
+
+
+def _report_restore_kind(object_type: str) -> str | None:
+    """How ``restore_report_references`` reads one reference type back:
+    ``chunk`` / ``element`` / ``relation`` / ``memory`` by their own reader,
+    ``None`` for a type with nothing to read, and every other type -- the
+    graph's open-ended object types -- as a knowledge object (a type that is
+    no knowledge object simply finds no row)."""
+    value = str(object_type or "")
+    if value in {"chunk", "element", "relation", "memory"}:
+        return value
+    if value in _REPORT_UNRESTORABLE_TYPES:
+        return None
+    return "kg"
 
 
 class _RetrievalState:
@@ -4686,6 +4715,349 @@ class CandidateRetrievalService(_RetrievalState):
             # outside the freeze is the bound read's answer.
             chunks = [chunk for chunk in chunks if chunk.source_id in unbound]
         return chunks
+
+    def restore_report_references(
+        self,
+        active_notebook_id: str,
+        actor_id: str,
+        cited: Iterable[CitedReportReference],
+    ) -> RestoredReportEvidence:
+        """Read a finished report's cited items back from the notebook's
+        CURRENT text, as this run's ceiling admits them (a follow-up question
+        about the report; plan 2026-10-21 §2.7).
+
+        The retrieval layer owns this read, so it judges every reference
+        itself and trusts nothing the caller decided: a reference the report
+        link verdict never saw, or one that names a library or a source the
+        ceiling leaves out, reads back nothing and counts as ``gone``. That is
+        what lets the verdict stay a disclosure (why the report is not read)
+        rather than the permission check. The checkpoints, per kind:
+
+        * every kind: the run's single-notebook ceiling must be installed for
+          ``active_notebook_id`` (``_report_restore_scope`` raises otherwise:
+          there is no "unscoped" form of this read), and the reference's
+          library must be one of this run's participants for its viewer after
+          the library dimension (``_retrieval_participants``) -- an unchecked,
+          unmounted or unreadable library contributes nothing;
+        * ``chunk``: per library, ONE ``retrieval_contribution_rows`` read
+          (in ``_in_batches`` windows) whose ``include`` list holds only the
+          cited sources ``scope.allows`` -- the ceiling is in the SQL before
+          the rows are read, and the statement's own owner predicate keeps
+          another member's Memory passage out whatever the list says;
+        * ``element`` / ``relation`` (D2: a relation reads back as its evidence
+          element -- the stored ``element_id``, else the relation's first
+          current evidence element through ``follow_relation_evidence_rows``):
+          ``evidence_elements`` reads by primary key, so each row must still
+          be in the cited source, that source must belong to the reference's
+          library (``source_metadata``) and ``scope.allows`` it;
+        * knowledge objects: ONE ``usable_object_rows_on`` read by id, the row
+          must belong to the reference's library, and the hits pass
+          ``filter_retrieval_items(..., "knowledge", ...)`` -- the result
+          boundary every graph leg has, which strips evidence outside the
+          ceiling and drops an object left without any (another member's
+          Memory-derived object among them);
+        * ``memory``: only the asker's own confirmed entries of this notebook
+          (``MemoryRetriever.memory_hits_by_ids``), and none at all when the
+          Memory channel is closed or the run narrowed its local sources --
+          the same two doors as the Ask Memory channel (``_memory_hits`` and
+          ``MemoryRetriever.context``).
+
+        Bounded by construction: the reads are the references' own ids (one
+        batch per kind and library, plus one primary-key read per cited
+        Memory entry, the only by-id form that store has); nothing here
+        enumerates a notebook. The objects come back as the native retrieval
+        values, stamped with their library, in the order the references first
+        name them; ``key_by_object`` maps each one to the report keys that
+        point at it.
+        """
+        scope = self._report_restore_scope(active_notebook_id)
+        tiers = dict(self._retrieval_participants(active_notebook_id))
+        planned: list[tuple[str | None, str, CitedReportReference]] = []
+        for reference in cited:
+            library = str(reference.notebook_id or active_notebook_id)
+            kind = _report_restore_kind(reference.object_type)
+            planned.append((kind if library in tiers else None, library, reference))
+
+        def of(kind: str) -> list[tuple[str, CitedReportReference]]:
+            return [(library, ref) for k, library, ref in planned if k == kind]
+
+        found: dict[CitedReportReference, tuple[str, Any]] = {}
+        for kind, restored in (
+            (RESTORED_KIND_CHUNK, self._restore_report_chunks(
+                scope, actor_id, of("chunk"))),
+            (RESTORED_KIND_ELEMENT, self._restore_report_elements(
+                scope, of("element"), of("relation"))),
+            (RESTORED_KIND_KG, self._restore_report_knowledge(
+                active_notebook_id, tiers, of("kg"))),
+            (RESTORED_KIND_MEMORY, self._restore_report_memory(
+                scope, active_notebook_id, actor_id, of("memory"))),
+        ):
+            for reference, value in restored.items():
+                found[reference] = (kind, value)
+        objects: dict[str, dict[str, Any]] = {kind: {} for kind in RESTORED_KINDS}
+        keys: dict[tuple[str, str], list[str]] = {}
+        gone = 0
+        for _kind, _library, reference in planned:
+            if reference not in found:
+                gone += 1
+                continue
+            kind, value = found[reference]
+            object_id = (
+                value.element_id if kind == RESTORED_KIND_ELEMENT else value.object_id
+            )
+            objects[kind].setdefault(object_id, value)
+            keys.setdefault((kind, object_id), []).append(reference.key)
+        return RestoredReportEvidence(
+            chunks=tuple(objects[RESTORED_KIND_CHUNK].values()),
+            elements=tuple(objects[RESTORED_KIND_ELEMENT].values()),
+            knowledge=tuple(objects[RESTORED_KIND_KG].values()),
+            memory=tuple(objects[RESTORED_KIND_MEMORY].values()),
+            key_by_object={key: tuple(values) for key, values in keys.items()},
+            gone=gone,
+        )
+
+    @staticmethod
+    def _report_restore_scope(active_notebook_id: str):
+        """The installed ceiling this restore must run under, or a loud error.
+
+        A report belongs to one notebook and its follow-up is a single-notebook
+        run (a global run never attaches one), so the only acceptable scope is
+        that run's own: installed, for ``active_notebook_id``, not subjectless.
+        Anything else is a wiring fault, and reading without the ceiling would
+        be the one unscoped read on the Ask path -- so it raises instead of
+        guessing; the Ask caller's fail-soft turns it into "the report was not
+        read"."""
+        from app.services.source_scope import current_source_scope
+
+        scope = current_source_scope()
+        if (
+            scope is None
+            or scope.subjectless
+            or scope.notebook_id != active_notebook_id
+        ):
+            raise RuntimeError(
+                "restoring report references needs this run's single-notebook "
+                "retrieval ceiling"
+            )
+        return scope
+
+    def _restore_report_chunks(
+        self, scope, actor_id: str,
+        references: list[tuple[str, CitedReportReference]],
+    ) -> dict[CitedReportReference, RetrievedChunk]:
+        """``chunk`` references -> their passages; see ``restore_report_
+        references`` for the checkpoints. A passage that moved to another
+        source (or a reference without one) does not read back."""
+        by_library: dict[str, list[CitedReportReference]] = {}
+        for library, reference in references:
+            by_library.setdefault(library, []).append(reference)
+        read: dict[tuple[str, str], RetrievedChunk] = {}
+        with self._connect() as db:
+            for library, library_references in by_library.items():
+                admitted = tuple(dict.fromkeys(
+                    reference.source_id for reference in library_references
+                    if reference.source_id
+                    and scope.allows(library, reference.source_id)
+                ))
+                if not admitted:
+                    continue
+                admitted_set = set(admitted)
+                wanted = [
+                    reference.object_id for reference in library_references
+                    if reference.source_id in admitted_set
+                ]
+                for batch in self._in_batches(wanted):
+                    for row in self.chunks.retrieval_contribution_rows(
+                        db, library, batch, actor_id=actor_id,
+                        source_mode="include", source_ids=admitted,
+                    ):
+                        read[(library, str(row["id"]))] = RetrievedChunk(
+                            chunk_id=str(row["id"]),
+                            source_id=str(row["source_id"]),
+                            source_title=str(row["source_title"]),
+                            section_path=str(row["section_path"]),
+                            text=str(row["text"]),
+                            element_ids=list(json.loads(row["element_ids"] or "[]")),
+                            notebook_id=str(row["chunk_notebook_id"]),
+                        )
+        restored: dict[CitedReportReference, RetrievedChunk] = {}
+        for library, reference in references:
+            chunk = read.get((library, reference.object_id))
+            if chunk is not None and chunk.source_id == reference.source_id:
+                restored[reference] = chunk
+        return restored
+
+    def _restore_report_elements(
+        self, scope,
+        element_references: list[tuple[str, CitedReportReference]],
+        relation_references: list[tuple[str, CitedReportReference]],
+    ) -> dict[CitedReportReference, RetrievedElement]:
+        """``element`` references -> their elements, ``relation`` references ->
+        their evidence element (D2). The stored element is tried first; a
+        relation whose stored element does not read back (missing, re-parsed
+        away, outside the ceiling) is tried once more with the relation's
+        first CURRENT evidence element, judged by the same checks."""
+        restored = self._admitted_report_elements(scope, [
+            *((library, reference, reference.object_id, reference.source_id)
+              for library, reference in element_references),
+            *((library, reference, reference.element_id, reference.source_id)
+              for library, reference in relation_references
+              if reference.element_id),
+        ])
+        fallback = [
+            (library, reference) for library, reference in relation_references
+            if reference not in restored
+        ]
+        if fallback:
+            restored.update(self._admitted_report_elements(
+                scope, self._relation_first_evidence(fallback),
+            ))
+        return restored
+
+    def _relation_first_evidence(
+        self, references: list[tuple[str, CitedReportReference]],
+    ) -> list[tuple[str, CitedReportReference, str, str]]:
+        """Each relation's first current evidence element, as ``(library,
+        reference, element_id, source_id)``: one ``follow_relation_evidence_
+        rows`` read per library, restricted to relations of that library."""
+        by_library: dict[str, list[str]] = {}
+        for library, reference in references:
+            by_library.setdefault(library, []).append(reference.object_id)
+        first: dict[tuple[str, str], tuple[str, str]] = {}
+        with self._connect() as db:
+            for library, relation_ids in by_library.items():
+                for batch in self._in_batches(relation_ids):
+                    for row in self.knowledge.follow_relation_evidence_rows(
+                        db, batch, notebook_id=library,
+                    ):
+                        for item in json.loads(row["evidence"] or "[]"):
+                            element_id = (
+                                str(item.get("element_id") or "")
+                                if isinstance(item, dict) else ""
+                            )
+                            if element_id:
+                                first[(library, str(row["id"]))] = (
+                                    element_id, str(item.get("source_id") or ""),
+                                )
+                                break
+        return [
+            (library, reference, *first[(library, reference.object_id)])
+            for library, reference in references
+            if (library, reference.object_id) in first
+        ]
+
+    def _admitted_report_elements(
+        self, scope,
+        wanted: list[tuple[str, CitedReportReference, str, str]],
+    ) -> dict[CitedReportReference, RetrievedElement]:
+        """``(library, reference, element_id, cited source_id)`` -> the element,
+        when it still exists in that source, the source belongs to that
+        library and the ceiling admits it. One ``evidence_elements`` read and
+        one ``source_metadata`` read (ownership and the display title) for the
+        whole list."""
+        if not wanted:
+            return {}
+        rows = self.sources.evidence_elements(
+            [element_id for _library, _reference, element_id, _source in wanted]
+        )
+        metadata = self.sources.source_metadata([
+            str(row.get("source_id") or "") for row in rows.values()
+        ])
+        admitted: dict[CitedReportReference, RetrievedElement] = {}
+        for library, reference, element_id, cited_source in wanted:
+            row = rows.get(element_id)
+            if row is None:
+                continue
+            source_id = str(row.get("source_id") or "")
+            meta = metadata.get(source_id)
+            if (
+                not source_id
+                or source_id != cited_source
+                or meta is None
+                or str(meta.get("notebook_id") or "") != library
+                or not scope.allows(library, source_id)
+            ):
+                continue
+            admitted[reference] = RetrievedElement(
+                element_id=element_id,
+                source_id=source_id,
+                # The naming rule of the element arm and of the citation card.
+                source_title=source_display_title(meta),
+                location_label=str(row.get("location_label") or ""),
+                element_type=str(row.get("element_type") or ""),
+                text=str(row.get("text") or ""),
+                notebook_id=library,
+            )
+        return admitted
+
+    def _restore_report_knowledge(
+        self, active_notebook_id: str, tiers: dict[str, str],
+        references: list[tuple[str, CitedReportReference]],
+    ) -> dict[CitedReportReference, RetrievedKnowledge]:
+        """Knowledge-object references -> usable objects of their library,
+        through the graph legs' result boundary (``filter_retrieval_items``),
+        built as the neighbour expansion builds them."""
+        from app.services.source_scope import filter_retrieval_items
+
+        if not references:
+            return {}
+        with self._connect() as db:
+            rows = self.knowledge.usable_object_rows_on(
+                db,
+                list(dict.fromkeys(ref.object_id for _library, ref in references)),
+                USABLE_STATUSES,
+            )
+        by_id = {str(row["id"]): row for row in rows}
+        hits: dict[tuple[str, str], RetrievedKnowledge] = {}
+        for library, reference in references:
+            row = by_id.get(reference.object_id)
+            if row is None or str(row["notebook_id"]) != library:
+                continue
+            if (library, reference.object_id) in hits:
+                continue
+            keys = row.keys()
+            hits[(library, reference.object_id)] = RetrievedKnowledge(
+                object_id=str(row["id"]), object_type=row["object_type"],
+                payload=json.loads(row["payload"] or "{}"),
+                evidence=[Evidence(**e) for e in json.loads(row["evidence"] or "[]")],
+                score=0.0, relevance=0.0, status=row["status"], owner=row["owner"],
+                last_reviewed=row["last_reviewed"] if "last_reviewed" in keys else "",
+                notebook_id=library, tier=tiers.get(library, "personal"),
+            )
+        kept = {
+            (hit.notebook_id, hit.object_id): hit
+            for hit in filter_retrieval_items(
+                active_notebook_id, "knowledge", list(hits.values()),
+            )
+        }
+        return {
+            reference: kept[(library, reference.object_id)]
+            for library, reference in references
+            if (library, reference.object_id) in kept
+        }
+
+    def _restore_report_memory(
+        self, scope, active_notebook_id: str, actor_id: str,
+        references: list[tuple[str, CitedReportReference]],
+    ) -> dict[CitedReportReference, Any]:
+        """``memory`` references -> the asker's own confirmed entries of this
+        notebook; nothing on a narrowed run (the Ask Memory channel's own door,
+        ``AskService._memory_hits``) or a closed channel (the retriever's)."""
+        if not references or scope.restricted or self.memory_retriever is None:
+            return {}
+        hits = {
+            hit.memory_id: hit
+            for hit in self.memory_retriever.memory_hits_by_ids(
+                actor_id, active_notebook_id,
+                [ref.object_id for library, ref in references
+                 if library == active_notebook_id],
+            )
+        }
+        return {
+            reference: hits[reference.object_id]
+            for library, reference in references
+            if library == active_notebook_id and reference.object_id in hits
+        }
 
     # Compatibility for internal subclasses and older tests.  Composition
     # boundaries use the public RetrievalPort method above.

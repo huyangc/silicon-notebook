@@ -725,6 +725,15 @@ class RetrievalService:
             notebook_id, actor_id, candidate_ids
         )
 
+    def restore_report_references(
+        self, active_notebook_id: str, actor_id: str, cited
+    ):
+        """A report's cited items, read back under the run's ceiling (the
+        candidate owner judges every reference; see its docstring)."""
+        return self.candidates.restore_report_references(
+            active_notebook_id, actor_id, cited
+        )
+
     def edge_support_map(self, notebook_id):
         return self.graph._edge_support_map(notebook_id)
 

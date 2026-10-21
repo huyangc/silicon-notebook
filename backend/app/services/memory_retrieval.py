@@ -154,6 +154,50 @@ class MemoryRetriever:
         statuses = ("confirmed", "candidate") if include_candidates else ("confirmed",)
         return self._hits(user_id, notebook_id, query, statuses, limit)
 
+    def memory_hits_by_ids(
+        self, user_id: str, notebook_id: str, memory_ids: Iterable[str]
+    ) -> list[MemoryHit]:
+        """The named Memory entries as hits, read back by id -- for a report's
+        cited Memory, which a follow-up question restores as evidence
+        (``CandidateRetrievalService.restore_report_references``).
+
+        Only ``user_id``'s OWN entries, of ``notebook_id``, still
+        ``confirmed``, are returned, in the order the ids were given (repeats
+        dropped); any other id -- another member's entry, one of another
+        notebook, a candidate, rejected or deleted one -- is simply absent.
+        Ownership and the live-notebook read check are the store's
+        (``memory_for_user``); notebook and status are checked here on the row
+        it returns. A closed Memory channel (``memory:read``) answers empty
+        before the store is touched, the same seam as every hit method above.
+
+        One primary-key read per id: the ids come from one report's
+        references, so the reads are bounded by that count, and the store has
+        no other by-id form. There is no query, so the hits carry no relevance
+        (``score`` 0.0); ``authority`` is the entry's own.
+        """
+        if not memory_channel_allowed():
+            return []
+        hits: list[MemoryHit] = []
+        for memory_id in dict.fromkeys(str(value) for value in memory_ids if value):
+            try:
+                item = self.store.memory_for_user(memory_id, user_id)
+            except KeyError:
+                continue
+            if item.notebook_id != notebook_id or item.status != "confirmed":
+                continue
+            hits.append(
+                MemoryHit(
+                    memory_id=item.id,
+                    title=item.title,
+                    text=item.content_md,
+                    status=item.status,
+                    authority=MEMORY_AUTHORITY[item.status],
+                    score=0.0,
+                    provenance=dict(item.provenance),
+                )
+            )
+        return hits
+
     @staticmethod
     def context(
         hits: Sequence[MemoryHit], *, id_offset: int = 3000
