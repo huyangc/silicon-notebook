@@ -23,7 +23,9 @@ from typing import Any, Mapping, Sequence
 from app.api.deps import notebook_read_authority
 from app.core.activity_time import UNRESOLVED_INSTANT, parse_activity_instant
 from app.domain.agent_tools import (
-    AgentAccessDenied, capability_tier, principal_has_capability,
+    AgentAccessDenied,
+    capability_tier,
+    principal_has_capability,
 )
 from app.models.identity import AgentPrincipal
 
