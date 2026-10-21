@@ -248,6 +248,16 @@ contributor constraints, not a second implementation history.
   composition, and holds the per-notebook claim through publication. Reuse the shared
   artifact staging/swap and claim checks for every root, including rollback/retirement;
   never patch a live tree in place. See the [operational SOP](./operations.md).
+- Every non-serving entry point is a schema guest: open the database through
+  `app.services.maintenance_cli` (`open_cli_repository`, `open_maintenance_cli_repository`,
+  `create_schema_guest_repository`, or `create_bare_schema_guest_repository` for a tool that
+  never had extension seats), never `create_application_repository(settings)` /
+  `SQLiteRepository(settings)` with their seeding defaults. The version gate
+  (`app.repositories.schema_currency`) and its single refusal wording are shared; refusals
+  exit 3 via `MaintenanceCliError.exit_code`. Only server startup and `database migrate`
+  own the schema. `backend/tests/test_schema_guest_guard.py` fails any other construction
+  that lacks the literal guest keywords; a tool that really owns a scratch database is
+  listed there with its reason.
 
 ### Frontend implementation guardrails
 

@@ -6097,12 +6097,13 @@ class SqliteMigrator:
 
         ``migrate``/``seed`` 镜像 PostgreSQL 侧
         ``PostgresPersistenceBundleFactory`` 的同名开关（见其 docstring）：
-        默认都是 ``True``，保持既有行为逐字不变。唯一允许传 ``False`` 的调用者
-        是不拥有这份 schema 的**只读**工具——目前是
-        ``scripts/reflect_shadow_rig.py`` 的 `search` 子命令，它对主库整条路
-        只读，而 ``seed()`` 的 ``UPDATE users`` 会用 ``settings.admin_password``
-        无条件重写 admin 密码哈希（同一类问题已经在 PostgreSQL 主库上真实发生
-        过一次）。任何要落库/建图/写数据的调用者都不得传 ``False``。
+        默认都是 ``True``，只给服务启动（与临时库测试）用。所有不拥有这份
+        schema 的进程——全部非服务 CLI，经 ``app.services.maintenance_cli`` 的
+        schema guest 入口——都传 ``False``：``seed()`` 的 ``UPDATE users`` 会用
+        ``settings.admin_password`` 无条件重写 admin 密码哈希（同一类问题已经在
+        PostgreSQL 主库上真实发生过一次）。guest 在组合前先校验库已是本构建的
+        schema（``app.repositories.schema_currency``），所以落库/建图的 CLI 也
+        不需要顺手迁移；显式迁移走 ``database migrate``。
         """
         applied = self.migrate() if migrate else []
         if seed:

@@ -243,6 +243,13 @@ database-wide advisory lock，命令结束时释放并关闭 repository。在线
 `vectors-to-blob` 只用于 SQLite 旧文本向量，PostgreSQL 已使用 `bytea`，会在连接前拒绝。
 `--dry-run` 只扫描文件系统，不构造 repository，因此两种配置都可使用。
 
+批处理与所有维护命令都**不迁移、不 seed**（不会改写 admin 密码）：库不是本构建的 schema
+（包括服务从未启动过的新库）时以退出码 3 拒绝，提示原因和解决办法。首次离线导入前先 `./start.sh`
+启动一次服务；升级后要在停服状态下维护，先运行
+`PYTHONPATH=backend .venv/bin/python -m app.scripts.migrate_database --confirm-service-stopped`
+（在包根目录执行；只迁移、不 seed，退出码 0 完成 / 2 缺确认参数或维护锁被占 / 3 迁不了），
+或启动再停止一次服务。
+
 ## 排障
 
 - **`python -m venv` 失败(缺 ensurepip / python3-venv)**:装它需 root。`install.sh` 会自动尝试

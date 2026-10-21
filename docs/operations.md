@@ -54,6 +54,47 @@ different from resumable ingestion, and online scale builds keep their own per-n
 lock instead of the offline batch-index maintenance lock. Developer gates, examples,
 benchmarks and hardcoded historical scripts remain outside the operator catalog.
 
+### Schema ownership: only the service and `database migrate` migrate
+
+Two processes migrate the schema: the service at startup (which also seeds the built-in
+accounts) and the explicit migration command:
+
+```bash
+# stop the API and every background writer first
+bash scripts/cli.sh database migrate --confirm-service-stopped
+# or (also in the offline package, from its root):
+# PYTHONPATH=backend python -m app.scripts.migrate_database --confirm-service-stopped
+```
+
+Every other command that opens the database is a *schema guest*: `batch` (every phase,
+including `backfill-images`), the `maintain`, `kg` and `scale` commands, `maintain
+selected-source`, `maintain knowhow` with `--use-llm`/`--apply`, `maintain global-attribution`,
+`eval replay`, the reflect rig's `search`/`report`, and the developer eval helpers. A guest
+never migrates and never seeds, so it never rewrites the admin password, whatever
+`SILICON_NOTEBOOK_ADMIN_PASSWORD` the operator's shell carries. Before it opens anything it
+checks, on one bare connection, that the database is at exactly this build's schema (SQLite
+`user_version`; the PostgreSQL ledger is exactly `1..N` with matching checksums). Otherwise it
+exits with status 3 (`build_scale_index.py` keeps its documented status 2) and a message naming
+the reason and the remedy, and creates nothing — no SQLite file, no PostgreSQL ledger:
+
+| What the check found | Remedy the message gives |
+| --- | --- |
+| One or more versions behind (`SQLite v97`, this build needs `SQLite v98`) | stop the service and run `database migrate`, or start the upgraded service once (startup migrates); if the database belongs to a service still running the older version, run the command from that version's checkout |
+| Never initialized (no SQLite file, `user_version` 0, no PostgreSQL ledger) | start the service once — only it creates the database and writes the built-in accounts |
+| Newer than this build, or a ledger with gaps or different checksums | run the command from the checkout the service runs |
+
+An upgrade that is followed by offline maintenance is therefore: stop the service → upgrade the
+checkout → `database migrate --confirm-service-stopped` (or start and stop the upgraded service
+once) → run the maintenance commands → start the service.
+
+`database migrate` requires `--confirm-service-stopped` on both backends (the flag is an
+operator assertion; it does not stop anything). It runs the same migrations the service runs at
+startup, holds the same database-wide maintenance lock as every PostgreSQL maintenance command
+(a held lock is reported, not waited on), never seeds, and is a no-op on a current database. It
+refuses a database that was never initialized, one newer than this build, or a mismatched ledger.
+Exit status: 0 migrated or already current, 2 missing confirmation or the maintenance lock is
+held, 3 the database cannot be migrated by this build. The database URL is never printed.
+
 ## Plugin companion services
 
 The development, production, backend-only, and packaged startup entries prepare
@@ -222,9 +263,11 @@ PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py            
   lock cycle with a deletion; one UPDATE … RETURNING that re-checks `attributed = 0` then flags them and the
   rows are inserted. A `40P01` all the same retries the page. Idempotent; a plain re-run after an
   interruption handles only what is left; `--after-id` resumes after a given id, `--limit` caps one run.
-- The command **does not own the schema**: it composes the repository with `migrate=False, seed=False` — no
-  migration DDL against a live database, no seed step (which rewrites the admin password unconditionally). A
-  database not yet at v98 / 0078 is refused (exit status 3), never migrated. Safe while the service runs.
+- The command **does not own the schema**: like every maintenance command it is a
+  [schema guest](#schema-ownership-only-the-service-and-database-migrate-migrate) — no migration DDL against a
+  live database, no seed step (which rewrites the admin password unconditionally). A database not at this build's
+  schema (so never one short of v98 / 0078) is refused (exit status 3, with the reason and the remedy), never
+  migrated. Safe while the service runs.
 - A job whose payload does not read back as a `GlobalAskJob` is only reported (`--report` writes one
   `{"job_id", "reason": "payload_unreadable"}` line each, never content) and left as it is, still counted
   through the payload predicate. Exit status: 0 done, 1 such jobs exist, 2 usage error, 3 not migrated.
@@ -2146,6 +2189,10 @@ The portable phases `ingest`, `kg`, `index`, `all`, `embed`, `metadata`, `questi
 `backfill-source-index`, `backfill-chunk-elements`, and `backfill-images` select SQLite or PostgreSQL from `DATABASE_URL`. Direct PostgreSQL
 maintenance is strictly offline: stop the API and every background writer, then append
 `--confirm-service-stopped`. The flag records an operator assertion; it does not stop services.
+Every phase is a [schema guest](#schema-ownership-only-the-service-and-database-migrate-migrate):
+it never migrates or seeds, and a database not at this build's schema — including a SQLite
+database the service has never created — is refused with exit status 3 before anything is
+opened. Start the service once (or run `database migrate` while it is stopped) first.
 A fail-fast database-wide advisory lock prevents overlapping maintenance CLIs. Source, durable and
 limited KG-target, metadata, re-extraction, vector, relation, and reverse-index drivers use bounded
 keyset pages — including the `index` stage's whole-notebook embedding-matrix load, which reads a
@@ -2933,6 +2980,8 @@ Exit codes are the verdict — safe to wire directly into CI or a script gate: `
 For an existing deployment, stop the API and every background writer, then run from the repository root:
 
 ```bash
+# bring the schema to this build first -- the preparation itself never migrates
+bash scripts/cli.sh database migrate --confirm-service-stopped
 PYTHONPATH=backend python scripts/prepare_selected_source_graph.py \
   --env-file /path/to/deployment.env \
   --confirm-service-stopped
@@ -2940,7 +2989,7 @@ PYTHONPATH=backend python scripts/prepare_selected_source_graph.py \
 
 The env file must already exist; this prevents a mistyped production path from silently selecting the local default database. For this command it is the authoritative settings source: exported shell variables cannot redirect maintenance to a different database/storage root. The final atomic edit preserves the existing env file's mode, owner, group, and supported metadata; only a newly created receipt is forced to 0600. The confirmation is an operator assertion; the script does not stop services. It always covers every notebook in the configured database and holds the central offline-maintenance lock for the database phase. Its execution state is:
 
-1. Open the repository, apply pending schema migrations, and inventory notebooks.
+1. Run `database migrate --confirm-service-stopped` first (above; it reads the deployment's root `.env` like every deployment-aware command — when `--env-file` names a different file, start the upgraded service on that file once instead). The command then opens the repository as a [schema guest](#schema-ownership-only-the-service-and-database-migrate-migrate) — it never migrates or seeds; a database not at this build's schema fails with code `schema_not_current`, exit status 3, the reason and the remedy, and nothing changed — and inventories notebooks.
 2. Resume each notebook's reverse source index from its durable page cursor. A current completed generation is skipped; KG generation drift fails closed and is restarted on the next attempt.
 3. Resume source-fact projection through the existing per-source generation ledgers. Any busy, generation-less, failed, or incomplete source blocks activation.
 4. Revalidate the main scale manifest and source-partition root against the current KG version and visible-source count. A current complete companion is skipped; otherwise the ordinary bounded builder republishes it and the script revalidates the result.
@@ -3024,7 +3073,7 @@ Knowhow tables normalize Excel-style formatting (Tab-indented `•` bullets, `A.
 
 **Dry-run first, then apply a reviewed plan file.** A dry-run never writes to the database; it always saves the full plan to a JSON file (and prints its path) so you can review exactly what would change, then re-applies *that file* verbatim — so what lands is exactly what you reviewed.
 
-**The default dry-run is read-only and safe to run anytime.** The default (rules-only) dry-run opens the database read-only and never constructs the write-capable repository, so it is safe to run against a live/busy backend. `--use-llm` (needs the rewrite model) and `--apply` (writes) instead open the database read-write, which may run any pending schema migrations and crash-recovery on open — the tool prints a one-line notice when it does this, so prefer running those when the backend is idle.
+**The default dry-run is read-only and safe to run anytime.** The default (rules-only) dry-run opens the database read-only and never constructs the write-capable repository, so it is safe to run against a live/busy backend. `--use-llm` (needs the rewrite model) and `--apply` (writes) instead open the database read-write — the tool prints a one-line notice when it does this, so prefer running those when the backend is idle. That repository is a [schema guest](#schema-ownership-only-the-service-and-database-migrate-migrate): it never migrates or seeds, and a database not at this build's schema is refused with exit status 3 (reason and remedy in the message) before it is opened.
 
 ```bash
 # dry-run (default): prints the per-cell diff + summary AND writes a plan file

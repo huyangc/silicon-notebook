@@ -1,11 +1,13 @@
-#!/usr/bin/env python3
 """Bring the configured database to this build's schema: migrate, never seed.
 
 Usage (stop the API and every background writer first):
 
-    PYTHONPATH=backend python scripts/migrate_database.py --confirm-service-stopped
+    bash scripts/cli.sh database migrate --confirm-service-stopped
 
-or ``bash scripts/cli.sh database migrate --confirm-service-stopped``.
+or, where the unified entry is not shipped (the offline package), from the
+install root: ``PYTHONPATH=backend .venv/bin/python -m app.scripts.migrate_database
+--confirm-service-stopped``. A module under ``backend/`` so the offline package,
+which ships ``backend/`` but not the repository's ``scripts/``, carries it.
 
 This and the serving process's startup are the only two places the schema is
 migrated; every other maintenance command is a schema guest and refuses a

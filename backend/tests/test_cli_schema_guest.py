@@ -182,7 +182,10 @@ def test_the_one_refusal_wording_names_reason_and_remedy(state, reason, remedy):
 
 
 def _migrate(argv):
-    return load_script("migrate_database").main(argv)
+    from app.scripts import migrate_database
+
+    get_settings.cache_clear()
+    return migrate_database.main(argv)
 
 
 def test_database_migrate_brings_a_behind_database_current_without_seeding(
@@ -245,5 +248,7 @@ def test_database_migrate_is_in_the_unified_catalog():
     cli = load_script("cli")
 
     command = cli.COMMANDS[("database", "migrate")]
-    assert command.script == "migrate_database.py"
+    # A backend module, so the offline package (which ships backend/ only) has it.
+    assert command.script == "app.scripts.migrate_database"
+    assert command.module is True
     assert command.deployment_env is True

@@ -213,6 +213,15 @@ or PostgreSQL datastore, creates the `.local/storage` and `.local/logs` director
 seeds only the local user. Always run the backend **without `--reload`**: a reload restart kills in-flight
 ingestion background tasks and leaves uploads stuck at `extracting`.
 
+Only the backend's startup and the explicit `bash scripts/cli.sh database migrate
+--confirm-service-stopped` (stopped service, never seeds) migrate the schema. Every other command-line
+tool — `batch_ingest.py` and the other maintenance, backfill, eval and diagnostic commands — is a
+schema guest: it never migrates and never seeds (so it never rewrites the admin password), and it
+refuses a database not at this build's schema, including one the backend has never created, with exit
+status 3 and a message naming the reason and the remedy. Start the backend once before the first
+offline import, and after an upgrade start it once (or run `database migrate`) before offline
+maintenance. Details: [Operations](./operations.md#schema-ownership-only-the-service-and-database-migrate-migrate).
+
 All relative paths (database, storage, logs, `.env`) are **anchored to the repo root in
 code**, regardless of which directory a script `cd`s into to launch a process — the
 launch directory no longer matters. The backend's first log line prints the resolved
@@ -525,8 +534,8 @@ PostgreSQL 0078: once the service is ready it attributes the global Ask jobs tha
 upgrade in one background pass (the startup log reports how many are pending). Until it has caught up the
 notebook analytics panel counts those jobs through the slower payload predicate, with the same result.
 `PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py` (`maintain global-attribution` in the
-unified CLI) re-runs the pass by hand; it never migrates or seeds and refuses a database that is not
-migrated yet. No configuration is involved. Details:
+unified CLI) re-runs the pass by hand; like every maintenance command it never migrates or seeds and
+refuses (exit status 3) a database that is not at this build's schema. No configuration is involved. Details:
 [Operations](./operations.md#global-ask-attribution-backfill-scriptsbackfill_global_ask_attributionpy).
 
 Changing the URL never moves existing rows. For a fresh target, stop the service, change
@@ -1808,7 +1817,7 @@ EXTENSION_ADMISSION_REFRESH_SECONDS  # how often a serving process re-reads the 
                                      # to converge its in-memory admission snapshot (default 3.0; range 1..300)
 ```
 
-This is a second, database-backed switch layered on top of the TOML topology above, not an alternative to it: `EXTENSIONS_CONFIG`'s `enabled` key still means "load or don't load", still takes effect only on restart, and a plugin it never names or marks `enabled = false` never registers regardless of this switch. Once a `trust="deployment"` plugin *is* loaded, an admin can turn it on or off at `/admin/extensions` (`PATCH /api/admin/extensions/{plugin_id}`) without a restart; the current value lives in the `extension_runtime_toggles` table, keyed by plugin id, with no row meaning enabled. That row survives the plugin being dropped from `EXTENSIONS_CONFIG` and later reintroduced — a plugin unloaded and then re-loaded comes back with whatever runtime switch an admin last set for its id, not reset to enabled. The process that performs the admin write republishes its own in-memory snapshot immediately; every other serving process in the deployment (additional replicas) converges on its own `EXTENSION_ADMISSION_REFRESH_SECONDS` tick. A process with zero loaded `trust="deployment"` plugins starts no refresh thread at all — a stock deployment with no deployment plugins still pays the one-time startup prime (the same composition-time read and table migration every process already does), it just never starts a recurring poll on top of it. Offline CLI and batch processes (`batch_ingest.py` and friends) prime this snapshot once, at startup composition, and never refresh it again during that run — a toggle an admin flips mid-run is not visible to an already-running batch job until its next invocation. See [`docs/deployment-extensions-sop.md`](deployment-extensions-sop.md) for the operational playbook.
+This is a second, database-backed switch layered on top of the TOML topology above, not an alternative to it: `EXTENSIONS_CONFIG`'s `enabled` key still means "load or don't load", still takes effect only on restart, and a plugin it never names or marks `enabled = false` never registers regardless of this switch. Once a `trust="deployment"` plugin *is* loaded, an admin can turn it on or off at `/admin/extensions` (`PATCH /api/admin/extensions/{plugin_id}`) without a restart; the current value lives in the `extension_runtime_toggles` table, keyed by plugin id, with no row meaning enabled. That row survives the plugin being dropped from `EXTENSIONS_CONFIG` and later reintroduced — a plugin unloaded and then re-loaded comes back with whatever runtime switch an admin last set for its id, not reset to enabled. The process that performs the admin write republishes its own in-memory snapshot immediately; every other serving process in the deployment (additional replicas) converges on its own `EXTENSION_ADMISSION_REFRESH_SECONDS` tick. A process with zero loaded `trust="deployment"` plugins starts no refresh thread at all — a stock deployment with no deployment plugins still pays the one-time startup prime (the same composition-time read every process already does; the table itself is migrated only by the service's startup or `database migrate`), it just never starts a recurring poll on top of it. Offline CLI and batch processes (`batch_ingest.py` and friends) prime this snapshot once, at startup composition, and never refresh it again during that run — a toggle an admin flips mid-run is not visible to an already-running batch job until its next invocation. See [`docs/deployment-extensions-sop.md`](deployment-extensions-sop.md) for the operational playbook.
 
 
 ## External authentication deployment
