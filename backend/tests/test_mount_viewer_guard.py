@@ -129,6 +129,11 @@ _SITES = {
      "RepositoryRuntime._viewer_participant_notebook_ids",
      "participant_notebook_ids"):
         (_EXPLICIT, 1, "the ceiling's participant reader: the ceiling's owner"),
+    ("app/services/ask_service.py",
+     "AskService._read_report_followup", "participant_notebook_ids"):
+        (_EXPLICIT, 1, "the asker (the run's ``user_id``, the installed "
+                       "ceiling's owner): the libraries an attached deep "
+                       "report's verdict may count as usable"),
     ("app/services/retrieval_candidates.py",
      "_RetrievalState._viewer_graph_participants.read", "participant_rows"):
         (_EXPLICIT, 1, "current_viewer_id() bound once: the same value keys "

@@ -1551,6 +1551,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
+        "scope": "<module>.ask_component",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
         "scope": "<module>.ask_history_store",
         "target": "_runtime"
       },
@@ -4739,6 +4745,12 @@
         "path": "backend/app/api/mcp_tools/ask.py",
         "scope": "<module>._read_notebook_job",
         "target": "ask_answer_detail"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/answer_links.py",
+        "scope": "<module>._notebook_row",
+        "target": "ask_answer_detail"
       }
     ],
     "kind": "method",
@@ -4799,6 +4811,12 @@
         "path": "backend/app/api/mcp_tools/ask.py",
         "scope": "<module>._recheck_notebook_delivery",
         "target": "ask_job_origin"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/answer_links.py",
+        "scope": "<module>._notebook_row",
+        "target": "ask_job_origin"
       }
     ],
     "kind": "method",
@@ -4814,11 +4832,26 @@
         "path": "backend/app/api/mcp_tools/ask.py",
         "scope": "<module>._run_notebook",
         "target": "ask_with_job"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/mcp_answer_link_cases.py",
+        "scope": "<module>._fake_engine",
+        "target": "ask_with_job"
       }
     ],
     "kind": "method",
     "owner": "AskService",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "env.repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/mcp_answer_link_cases.py",
+        "scope": "<module>._fake_engine",
+        "target": "ask_with_job"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', payload: 'AskRequest', *, submitted_via: 'StoredSubmittedVia' = '', attach_only: 'bool' = False, stop: 'Any' = None, output: 'AskOutput' = 'answer') -> \"'tuple[AskResponse | AskEvidence | None, str] | None'\""
   },
@@ -6945,6 +6978,12 @@
       },
       {
         "kind": "patch",
+        "path": "backend/tests/mcp_answer_link_cases.py",
+        "scope": "<module>._fake_engine",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "patch",
         "path": "backend/tests/mcp_conversation_cases.py",
         "scope": "<module>.unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary",
         "target": "get_notebook"
@@ -6989,6 +7028,14 @@
     "kind": "method",
     "owner": "NotebookCatalogService",
     "patch_targets": [
+      {
+        "base": "env.repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/mcp_answer_link_cases.py",
+        "scope": "<module>._fake_engine",
+        "target": "get_notebook"
+      },
       {
         "base": "env.repo",
         "compatibility": "test-only",
@@ -7939,6 +7986,12 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/services/global_ask_attribution_backfill.py",
+        "scope": "<module>.schedule_attribution_backfill",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/services/image_backfill_phase.py",
         "scope": "<module>._discard_unreferenced",
         "target": "maintenance"
@@ -8425,6 +8478,12 @@
         "target": "participant_notebook_ids"
       },
       {
+        "kind": "attribute",
+        "path": "backend/app/services/answer_links.py",
+        "scope": "<module>._notebook_row",
+        "target": "participant_notebook_ids"
+      },
+      {
         "kind": "patch",
         "path": "backend/tests/public_page_mount_recheck_cases.py",
         "scope": "<module>.case_report_of_local_citations_reads_no_ownership",
@@ -8600,7 +8659,7 @@
       }
     ],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', question: 'str', history: 'str' = '', cancel_event: 'CancelEvent' = None, *, source_scope: 'Any' = None, base_scope: 'Any' = None, user_id: 'str | None' = None) -> 'QueryIntentContract'"
+    "signature": "(self, notebook_id: 'str', question: 'str', history: 'str' = '', cancel_event: 'CancelEvent' = None, *, source_scope: 'Any' = None, base_scope: 'Any' = None, user_id: 'str | None' = None, report_id: 'str | None' = None) -> 'QueryIntentContract'"
   },
   "process_source": {
     "consumers": [
@@ -9173,6 +9232,12 @@
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/global_ask.py",
         "scope": "<module>._authorize",
+        "target": "refresh_agent_principal"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/answer_links.py",
+        "scope": "<module>._live_issuer",
         "target": "refresh_agent_principal"
       }
     ],
@@ -11227,6 +11292,12 @@
         "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>.public_report_route",
+        "target": "user_can_read_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/answer_links.py",
+        "scope": "<module>._notebook_row",
         "target": "user_can_read_notebook"
       },
       {

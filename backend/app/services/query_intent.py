@@ -415,6 +415,7 @@ def plan_query_intent(
     status: dict[str, bool] | None = None,
     keywords: bool = False,
     corpus_langs: list[str] | None = None,
+    linked_report: str = "",
 ) -> dict:
     """Build one bounded intent contract without reading corpus content.
 
@@ -424,6 +425,16 @@ def plan_query_intent(
     carries ``high_level_keywords`` / ``low_level_keywords`` and their
     ``keyword_basis``. Off by default, and the returned dict then has none of
     the three keys -- byte for byte the contract reports and older callers get.
+
+    ``linked_report`` is non-empty exactly when the request attached a deep
+    report (``report_id``): the report's outline line
+    (``report_followup.followup_outline``), or for a caller that only gates
+    any non-empty marker. It reaches the prompt after the history
+    (``query_intent_prompt(report_block=...)``), and the two deterministic
+    wording rules below stand down: the request names its referent itself --
+    the attached report -- just as the open library is the request's own
+    container (plan D5). Only its being non-empty decides that; the question
+    text is never searched for "the report". Empty: byte for byte as before.
     """
     from app.services.prompts import (
         QUERY_INTENT_KEYWORDS_SCHEMA_HINT,
@@ -449,6 +460,7 @@ def plan_query_intent(
                     max_topics=max_topics,
                     history_block=history,
                     purpose=purpose,
+                    report_block=linked_report,
                     **keyword_kwargs,
                 )}],
                 QUERY_INTENT_KEYWORDS_SCHEMA_HINT
@@ -522,8 +534,9 @@ def plan_query_intent(
     # "它/这个/that" is the model's to resolve from the question and history.
     # The two wording rules below only stand in when no usable understanding
     # exists (unconfigured, failed or malformed model output), which includes
-    # every ``client=None`` gate on the direct-compatibility path.
-    if not understanding_succeeded:
+    # every ``client=None`` gate on the direct-compatibility path -- and never
+    # on a request that attached a report (``linked_report``, see above).
+    if not understanding_succeeded and not linked_report:
         normalized_candidate = as_text(data.get("normalized_question"))
         context_for_referent = f"{question}\n{history}".casefold()
         has_verified_referent = any(
@@ -730,8 +743,14 @@ def followup_gate(
     history: str = "",
     *,
     max_topics: int,
+    linked_report: str = "",
 ) -> tuple[dict | None, str]:
     """Judge a follow-up question's clarity, optionally through a rewrite.
+
+    ``linked_report`` non-empty = the request attached a deep report: both
+    deterministic plans get it, so their two wording rules stand down
+    (``plan_query_intent``, plan D5) and the request is admitted. Only its
+    being non-empty is read (no model sees it here); empty = as before.
 
     The one construction every caller shares that must decide whether a
     reasoning Ask may proceed without a client-confirmed intent. Returns
@@ -766,7 +785,9 @@ def followup_gate(
     through), and truncating it would hand retrieval half a sentence — an
     over-long rewrite is a failed rewrite, not a shorter one.
     """
-    seed = plan_query_intent(None, original, history, max_topics=max_topics)
+    seed = plan_query_intent(
+        None, original, history, max_topics=max_topics, linked_report=linked_report,
+    )
     rewritten = str(resolved or "").strip()
     if len(rewritten) > RESOLVED_QUESTION_MAX_CHARS:
         rewritten = ""
@@ -774,7 +795,9 @@ def followup_gate(
         if seed.get("needs_clarification"):
             return None, clarification_gate_message(seed)
         return seed, ""
-    probe = plan_query_intent(None, rewritten, history, max_topics=max_topics)
+    probe = plan_query_intent(
+        None, rewritten, history, max_topics=max_topics, linked_report=linked_report,
+    )
     if probe.get("needs_clarification"):
         return None, clarification_gate_message(seed)
     seed["resolved_question"] = rewritten

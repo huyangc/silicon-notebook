@@ -123,6 +123,17 @@ def retrieval_experience_jobs_service():
     return repository()._runtime.retrieval_experience_jobs  # type: ignore[attr-defined]
 
 
+def ask_component():
+    """The runtime's ``AskService``, for the pre-send report check
+    (``POST /ask/report-check`` -> ``AskService.report_link_check``).
+
+    Not on the facade, for the reason ``retrieval_experience_jobs_service``
+    gives: the facade's public surface may only shrink, and one consumer does
+    not earn it a new method. The service is the runtime's one lazily
+    composed instance (``RepositoryRuntime.ask_service``)."""
+    return repository()._runtime.ask_component  # type: ignore[attr-defined]
+
+
 def global_ask_repository():
     """The global Ask store itself, for the administrator activity detail: it
     reads one owner's job with its admin-only record columns and applies its

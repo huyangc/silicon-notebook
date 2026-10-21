@@ -106,6 +106,7 @@ from app.services import background_jobs
 from app.services.ask_execution import AskCancellationRegistry, AskExecutionCoordinator
 # Task 24: Ask mode engines + synthesis (appended — same convention).
 from app.services.ask_service import AskService
+from app.services.report_followup import ReportFollowupReaders
 from app.services.notebook_scale import CopyStatsMemo, NotebookScaleProfile
 from app.services.pending_actions_service import PendingActionsService
 from app.services.parser_chain_execution import BuiltinParserChainHost
@@ -2779,6 +2780,16 @@ class RepositoryRuntime:
                 # ceiling (``AskService._retrieval_ceiling``) reads through
                 # these -- the same readers the report worker uses.
                 ceiling_readers=self.ceiling_readers(),
+                # A question about a deep report: the report row (gated by
+                # owner and status in the service), the cited items' owners,
+                # and the asker's participant set -- the ceiling's own
+                # participant reader, its viewer passed explicitly.
+                report_followup_readers=ReportFollowupReaders(
+                    read_report=self.report_store.get_report,
+                    source_owners=self.source_store.source_owners,
+                    object_owners=self.knowledge.object_owners,
+                    participant_notebook_ids=self._viewer_participant_notebook_ids,
+                ),
             )
         return self.ask
 
