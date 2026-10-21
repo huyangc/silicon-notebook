@@ -845,6 +845,7 @@ of an empty one. Page sizes:
 | 已分享 modal — shared notebooks; each notebook's read-only link members | 20 | the modal reopens |
 | Ask conversation history (the 历史 popover; the left column once the source panel is collapsed) | 20 | the panel reopens or the source panel is collapsed again |
 | Knowledge browser — duplicate groups | 20 | the object type tab changes |
+| Knowledge browser — 「我的记忆里的重复」 (paged apart from the shared groups) | 20 | the object type tab changes |
 | Knowledge object occurrences (Knowledge browser item context and Knowledge Graph detail; numbering continues across pages) | 10 | another node is selected |
 | Knowledge Graph — pending merges; a selected node's adjacent relations | 20 | another node is selected (relations) |
 | Deep report list | 20 | the notebook changes or a new report is submitted; an opened report on a later page turns the list to that page |
@@ -2712,7 +2713,8 @@ the legacy graph, the unified graph's live path and the viewer's own-Memory over
 preview, neighbour edges, KG search (lexical candidates are filtered before their limit; ANN hits
 at hydration) and the notebook search box's knowledge leg; the viewer's own are included. Without
 the `memory:read` capability (a token without the `read` tier) no Memory-derived row is returned, the viewer's own included. Community summaries,
-duplicate groups and the edge-review ranking never include Memory-derived rows. The notebook list
+the shared duplicate groups and the edge-review ranking never include Memory-derived rows (the
+owner's own duplicate groups have a route of their own, see "The owner's duplicate groups" below). The notebook list
 asks which of its notebooks hold Memory once per request, not once per notebook. While a notebook
 awaits its isolated rebuild, a cluster that holds Memory the viewer may not read is answered by its
 first visible member's object id, never by the cluster's id: in KG search hits, in the graph view's
@@ -2740,7 +2742,22 @@ in place (she can restore it with `PATCH … {"status": "approved"}`, as after a
 from her Memory but either one also citing anything else — an ordinary source (what a manual merge
 before the isolation left behind), another member's Memory, an entry without a source id → the same
 cross-class 409, because that object carries shared evidence. A site admin has no bypass: for her a
-member's Memory object is someone else's (404). Once merged, deleting, moving or editing one of the
+member's Memory object is someone else's (404). The merge route requires notebook read access and
+authorizes along two paths (user ruling 2026-10-22). A caller with `knowledge:write` (the notebook
+owner and admin-level grantees) is checked in the order above, and on a mirror still gets 409
+`notebook_mirrored`. A member with read access only can merge too, but only a pair whose two sides
+both come from her own Memory and whose evidence entries all cite her own Memory sources in this
+notebook. That verdict is reached on the rows of the read that locks both objects, in the merge's
+own transaction, before anything is written; every other merge she asks for — shared objects,
+another member's Memory, a cross-class pair, a pair carrying shared evidence, a self-merge, two
+types, a missing object — answers exactly the 404 it answered before
+(`{"detail": "Notebook not found"}`, the body a notebook she cannot read gets), so she learns nothing
+about whether the other object exists or what it is. On PostgreSQL her own pair can also answer the
+409 「要合并的知识对象刚被修改，请稍后重试」 under a concurrent change. On a mirror the read path
+does not open (the same fence as `knowledge:write`): every merge by a read-only member answers that
+404. A read-only member has no `PATCH`, so after a merge she cannot set the merged-away object back to
+approved herself; it is restored automatically as below when the Memory that owns the result is
+edited, moved or deleted. Once merged, deleting, moving or editing one of the
 two Memories strips only that Memory's entries from the object the other Memory owns — it is never
 deleted with them; an edit re-extracts the edited Memory into fresh objects of its own. Editing,
 moving or deleting the Memory that owns the merge result clears the result with that Memory; just
@@ -2818,8 +2835,33 @@ reaches a public library only through its creator's `POST /api/memories/{memory_
 Checkup item H11 (read-only, `fix: none`, shown as a notice card, never rings the bell) counts the
 Memory sources a public library still holds — possible only for libraries published before these
 guards, or a public library received through sync import (which copies the `notebooks` row without
-going through publishing). The edge review queue, the bell's edge-review count and duplicate groups
-leave Memory-derived rows out for everyone.
+going through publishing). The edge review queue, the bell's edge-review count and the shared
+duplicate groups (`GET …/duplicates`) leave Memory-derived rows out for everyone, the Memory's owner
+included.
+
+**The owner's duplicate groups.** `GET /api/notebooks/{id}/duplicates/own-memory?type=` answers the
+caller alone: among her own live Memory-derived objects of the requested type, those whose evidence
+entries all cite her own Memory sources in this notebook (the merge rule above, judged one object at a
+time, so every listed pair merges), grouped by the same rules as the shared groups — normalized-name
+seed, acronym alias, similarity hint and order (larger groups first). It requires notebook read
+access; another member, a site admin and a token without `memory:read` all get `[]` (not 404), the
+same answer as a caller who owns no Memory here. It is a route of its own because `/duplicates`
+answers a bare list, so a field only for the owner would change its shape for every client; the
+shared groups, their read and their response bytes are unchanged. Neither is cached. The owner's
+groups cost the viewer-scope decision (one read for a notebook without Memory) plus two statements
+driven by her own Memory sources (her Memory sources, then her objects through their source index),
+growing with her Memory in the notebook, not with the notebook. They take no part in merge
+suggestions or model review.
+
+The knowledge browser's 「查重」 shows them as a section of their own below the shared groups,
+「我的记忆里的重复」, with the line 「这些条目来自你的个人记忆，只有你能看到」, expanded and paged on its
+own, and absent when she has no such group. A read-only member gets 「查重」 too, with only that
+section; she never asks for the shared `/duplicates`. Mirrors show no 「查重」. Both sections answer a
+merge where it happened — in the group merged into, or at the top of that section's list when the
+merge left the group with a single member — and clear the answer on their own timer, instead of a
+page toast: success 「已合并，原条目已弃用」; a 409 shows the server's words and reloads that section;
+a 404 shows 「这条已不在了」 and reloads that section. While a merge runs its button reads 「合并中…」
+and every merge button of both sections is disabled.
 
 **Checkup.** `GET /api/notebooks/{id}/checkup` also lists four read-only items: H9 (the notebook's
 knowledge graph awaits the one-time background check and rebuild after the upgrade), H10 (approved
@@ -4586,7 +4628,7 @@ Key local beta APIs:
 - KG quality-analysis report reads (notebook-read gated): `GET /api/notebooks/{id}/kg-analysis` — optional `boards`/`top_members`/`edges` limits, returns object composition, per-object-type convergence, the topic-community list, and cross-community edges, each stamped with the `kg_mutation_seq` it was built at; `GET /api/notebooks/{id}/kg-analysis/sources` — optional `limit`/`offset`/`order=sparse|connected`, paginates per-source profiles. Both only read the `kg_community_edges` / `kg_source_profiles` / `kg_analysis_artifacts` precompute product tables written by `unified-kg/rebuild`. The editor-only in-panel generate/update control calls the existing `POST /api/notebooks/{id}/unified-kg/rebuild`; it is not a third analysis endpoint.
 - Global graph-type baseline (admin writes): `GET /api/object-schemas`, `POST /api/object-schemas`, `PATCH /api/object-schemas/{type}`, `DELETE /api/object-schemas/{type}`.
 - Notebook-effective graph types: `GET /api/notebooks/{id}/object-schemas` requires notebook read access; `POST /api/notebooks/{id}/object-schemas`, `PATCH /api/notebooks/{id}/object-schemas/{type}`, and `DELETE /api/notebooks/{id}/object-schemas/{type}` require notebook owner access. Patching an inherited global type creates a notebook override. Deleting an override restores inheritance; deleting a notebook-only type removes it only when no knowledge object of that type remains. `POST /api/notebooks/{id}/schema-proposals` stores review-only proposed types in that notebook rather than the global baseline; a proposal never suppresses an inherited type until the owner explicitly activates it. Global and notebook writes are serialized across both registries and proposal results are rechecked after the model call. Database merge preflight rejects same-name global definitions whose semantic columns differ rather than silently keeping the destination row. `object_type` and every field key must start with a lowercase ASCII letter, contain only lowercase ASCII letters, digits, and underscores, and contain at most 80 characters. A definition may contain at most 64 unique fields and 64 unique list fields; `primary` must be one of `fields`, and every list field must also be in `fields`. Each human-facing schema text value (`plural`, `label`, `description`, and proposal `rationale`) is limited to 2,000 characters. The browser applies the same creation/editing rails before submission; the API remains authoritative.
-- `GET /api/notebooks/{id}/duplicates`, `POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
+- `GET /api/notebooks/{id}/duplicates`, `GET /api/notebooks/{id}/duplicates/own-memory` (the owner's own groups), `POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge` (read access; a read-only member merges only two of her own Memory objects, see "Memory in the knowledge graph")
 - Two-tier: `POST /api/notebooks/{id}/tier` body `{tier: "base" | "personal"}` → returns the updated `NotebookSummary` (400 on bad tier, 404 on missing notebook). Sets the notebook's federation tier (base = publishable as a public knowledge base, personal = default user notes); a `base` notebook only participates in another notebook's retrieval once that notebook explicitly mounts it (`GET`/`PUT /api/notebooks/{id}/bases`, candidates via `GET /api/notebooks/{id}/mountable`).
 - Reference-library mounts: `GET /api/notebooks/{id}/bases` → `MountedBase[]` (this notebook's mount edges, including greyed-out inactive ones); `PUT /api/notebooks/{id}/bases` body `{base_notebook_ids}` → full replace, returns the updated `MountedBase[]` (400 if any id is outside the mountable candidate set; owner-only); `GET /api/notebooks/{id}/mountable` → `MountableNotebook[]` (mountable candidates: every public knowledge base, this notebook's own same-owner libraries, and — since group knowledge sharing — every library this notebook's owner can read, subject to the borrowed-mount gate; each candidate carries `origin ∈ {base, mine, shared}` so the picker can group them truthfully).
 - Group, membership, invitation and notebook-grant routes: [Group sharing endpoints](#endpoints); authorization and lifecycle rules are defined in the same chapter.
