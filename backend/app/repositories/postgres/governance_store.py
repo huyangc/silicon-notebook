@@ -2827,7 +2827,24 @@ class GovernanceStore:
         strips what the merge wrote. A shared merge locks no row here (no
         Memory source; the evidence arm is cut by its filter). The target's
         own citations need no lock: a concurrent strip already counts the
-        target among its candidates and re-reads it after this commit."""
+        target among its candidates and re-reads it after this commit.
+
+        With ``own_pair_only`` an unlocked read first refuses, before any lock,
+        a pair that is not two of the caller's own Memory-derived objects: a
+        read-only member asking about shared or someone else's ids takes no row
+        or source lock, so she can neither queue behind nor hold up other writers
+        with them. It only ever refuses; acceptance is still decided on the
+        locked rows below."""
+        if own_pair_only:
+            own_rows = connection.execute(
+                "SELECT ko.id FROM knowledge_objects ko "
+                "WHERE ko.notebook_id = %s AND ko.id IN (%s, %s) "
+                f"AND {memory_derived_object('ko')} "
+                f"AND {foreign_memory_object_excluded('ko')}",
+                (notebook_id, source_id, into_id, actor_id),
+            ).fetchall()
+            if len(own_rows) < 2:
+                raise MergeNeedsKnowledgeWrite()
         pinned = frozenset(
             row["id"]
             for row in connection.execute(

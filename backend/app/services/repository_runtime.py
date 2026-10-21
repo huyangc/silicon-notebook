@@ -2234,6 +2234,7 @@ class RepositoryRuntime:
             viewer_scope=lambda notebook_id, active_notebook_id=None: (
                 self.knowledge_query.viewer_scope(notebook_id, active_notebook_id)
             ),
+            current_user_id=self._current_user_id,
         )
         if self.memory_service is not None:
             self.memory_service.set_promotion_service(self.knowledge_governance)
