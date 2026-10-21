@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Mapping, NamedTuple, Optional
+from typing import Any, Callable, Collection, Iterable, Mapping, NamedTuple, Optional
 
 from app.domain.report_followup import (
     REPORT_EVIDENCE_NOT_LOADED,
@@ -118,26 +118,107 @@ def _band_start(keys: Iterable[str], low: int, high: int) -> int:
     return max(taken, default=low - 1) + 1
 
 
-#: The least text (characters after its ``kN: `` key) a CUT evidence entry
-#: must keep to enter the partition. A cut entry carries a key, so the report
-#: block points a claim at it and rule 15 has the model check the claim
-#: against it; a few dozen characters of a passage rarely hold the sentence
-#: the report cited, and the model would then call a supported claim
-#: unsupported -- the very failure ``REPORT_EVIDENCE_NOT_LOADED`` exists to
-#: prevent. 160 is about a quarter of a passage at the chunker's 600-character
-#: target. Below it the item is not loaded (its marker says so) instead. An
-#: entry that is short in full is never held to it.
+#: The least content a CUT evidence entry must keep to enter the partition:
+#: characters of the item's own text after the renderer's head (the key and
+#: the labels, titles and location it writes before the text --
+#: ``_entry_head``). A cut entry carries a key, so the report block points a
+#: claim at it and rule 15 has the model check the claim against it; a few
+#: dozen characters of a passage rarely hold the sentence the report cited,
+#: and the model would then call a supported claim unsupported -- the very
+#: failure ``REPORT_EVIDENCE_NOT_LOADED`` exists to prevent. 160 is about a
+#: quarter of a passage at the chunker's 600-character target. Below it the
+#: item is not loaded (its marker says so) instead. An entry that is short in
+#: full is never held to it.
 REPORT_EVIDENCE_MIN_CUT_CHARS = 160
+
+#: Kept free for the ``relations:`` items among the admitted knowledge objects
+#: when two or more are wanted: the knowledge renderer writes them only into
+#: the budget its entries leave, so a list sized to fill the whole budget
+#: would always lose them. About six relation items (``kA -[edge]-> kB``).
+REPORT_RELATIONS_RESERVE_CHARS = 240
+
+#: ``knowledge_context`` writes at most this much of an object's definition
+#: into its entry (its ``min(300, ...)``); the knowledge share counts every
+#: object at this upper bound before it is read (``_knowledge_share``).
+_KNOWLEDGE_DEFINITION_CAP = 300
+_DEFINITION_LEAD = " — def: "
 
 _RELATIONS_PREFIX = "relations: "
 _RELATION_ITEM = re.compile(r"(k\d+) -\[[^\]]*\]-> (k\d+)(?: \(×\d+源\))?")
 
 
+def _knowledge_head(key: str, object_type: Any, tier: Any, name: Any) -> str:
+    """The head ``knowledge_context`` writes before an object's definition."""
+    return f"{key}: [{object_type}][{tier}] {name}"
+
+
+def _entry_head(kind: str, key: str, entry: Mapping[str, Any], text: str) -> int:
+    """How many characters of a rendered entry are its renderer's head (key,
+    labels, title, location) rather than the item's own text, rebuilt from
+    the renderer's own id_map entry with the renderer's line shapes
+    (``evidence_context.chunk_context`` / ``element_context`` /
+    ``knowledge_context``, ``MemoryRetriever.context``). An entry that does
+    not start with the rebuilt head (a renderer whose shape changed) counts
+    as all head: a cut of it is never admitted, a whole one is unaffected."""
+    if kind == RESTORED_KIND_CHUNK:
+        head = f"{key}: "
+    elif kind == RESTORED_KIND_ELEMENT:
+        head = (
+            f"{key}: [source-element][{entry.get('tier', '')}] "
+            f"{entry.get('source_title', '')} · {entry.get('location_label', '')} — "
+        )
+    elif kind == RESTORED_KIND_MEMORY:
+        head = f"{key}: [memory][personal][confirmed] {entry.get('name', '')} — "
+    else:
+        head = _knowledge_head(key, entry.get("object_type"), entry.get("tier"), entry.get("name"))
+        if text.startswith(head + _DEFINITION_LEAD):
+            head += _DEFINITION_LEAD
+    return len(head) if text.startswith(head) else len(text)
+
+
+class _Candidate(NamedTuple):
+    """One entry as the admission walk sees it: its full length, how much of
+    it is the renderer's head, and whether it is whole (not cut by its
+    renderer)."""
+
+    length: int
+    head: int
+    whole: bool
+
+
+def _walk(
+    order: Iterable, candidate: Callable[[Any], Optional[_Candidate]], room: int,
+) -> dict:
+    """``{object: characters admitted}``, deciding in ``order`` (relevance)
+    across kinds: an entry that fits whole goes in; one that does not is cut
+    to the room left if it keeps ``REPORT_EVIDENCE_MIN_CUT_CHARS`` of its own
+    text after its head (a renderer's cut is held to the same floor),
+    otherwise it is skipped and later, smaller entries may still fit. One
+    separator between admitted entries."""
+    taken: dict = {}
+    used = 0
+    for obj in order:
+        entry = candidate(obj)
+        if entry is None or used >= room:
+            continue
+        separator = 1 if taken else 0
+        if entry.whole and used + separator + entry.length <= room:
+            taken[obj] = entry.length
+            used += separator + entry.length
+            continue
+        keep = min(entry.length, room - used - separator)
+        if keep - entry.head < REPORT_EVIDENCE_MIN_CUT_CHARS:
+            continue
+        taken[obj] = keep
+        used += separator + keep
+    return taken
+
+
 class _RenderedKinds(NamedTuple):
     """What the one renderer call per kind produced: each rendered object's
-    ``(key, entry text)`` and whether its renderer cut it, each kind's id_map
-    entries, the knowledge kind's ``relations:`` line, and the objects the
-    knowledge renderer folded (-> key) or withheld."""
+    ``(key, entry text, head length)`` and whether its renderer cut it, each
+    kind's id_map entries, the knowledge kind's ``relations:`` line, and the
+    objects the knowledge renderer folded (-> key) or withheld."""
 
     entries: dict
     cut: frozenset
@@ -147,87 +228,137 @@ class _RenderedKinds(NamedTuple):
     withheld: frozenset
 
 
+def _knowledge_share(
+    queue: list, kg_objects: list, hits: Mapping[str, Any], start: int,
+    entries: Mapping[Any, tuple], cut: Collection, room: int,
+) -> tuple[list, int]:
+    """``(knowledge objects to render, their renderer budget)``, decided
+    BEFORE any of them is read: the admission walk (``_walk``) over the
+    already rendered entries of the other kinds and the knowledge objects at
+    their largest possible entry (head plus ``_KNOWLEDGE_DEFINITION_CAP`` --
+    an upper bound, so the share errs on the side of rendering fewer),
+    within the room less ``REPORT_RELATIONS_RESERVE_CHARS`` when two or more
+    are wanted. Only the objects that walk admits are rendered (each costs
+    the renderer a read), and the budget is the room less what the more
+    relevant entries of other kinds take, so the renderer's entries leave
+    the reserve to its ``relations:`` line."""
+    heads: dict = {}
+    for index, obj in enumerate(kg_objects):
+        hit = hits[obj[1]]
+        heads[obj] = len(_knowledge_head(
+            f"k{start + index}", hit.object_type, getattr(hit, "tier", "personal"),
+            str(hit.payload.get("name", "")).strip(),
+        )) + len(_DEFINITION_LEAD)
+
+    def candidate(obj: Any) -> Optional[_Candidate]:
+        if obj in heads:
+            return _Candidate(heads[obj] + _KNOWLEDGE_DEFINITION_CAP, heads[obj], True)
+        if obj in entries:
+            _key, text, head = entries[obj]
+            return _Candidate(len(text), head, obj not in cut)
+        return None
+
+    reserve = REPORT_RELATIONS_RESERVE_CHARS if len(kg_objects) >= 2 else 0
+    taken = _walk(queue, candidate, room - reserve)
+    others = sum(keep + 1 for obj, keep in taken.items() if obj not in heads)
+    return [obj for obj in kg_objects if obj in taken], room - others
+
+
 def _render_kinds(
     queue: list, values: Mapping[str, Mapping[str, Any]], id_map: Mapping[str, Any],
     *, room: int, bands: Mapping[str, tuple[int, int]], key_offset: int,
     render: Callable[..., tuple[str, dict]], lookups: CitationLookups,
 ) -> _RenderedKinds:
-    """Render every queued object, ONE call per kind (relevance order within
-    the kind, budget ``room``: no kind may need more than the whole
-    partition), and read each entry back at the boundaries the renderer
-    recorded (``context_spans``) -- never by searching the text. A kind whose
-    block fills ``room`` exactly had its last entry cut by its renderer."""
+    """Render the queued objects, ONE call per kind (relevance order within
+    the kind), and read each entry back at the boundaries the renderer
+    recorded (``context_spans``) -- never by searching the text.
+
+    The passage, element and Memory kinds go first, each with the whole
+    partition as its budget (no kind may need more). The knowledge kind goes
+    last with only the objects and the budget ``_knowledge_share`` leaves it:
+    its renderer reads every object it is handed, and writes its
+    ``relations:`` line only into what its entries leave. A kind whose block
+    (relations line aside) fills its budget exactly had its last entry cut
+    by its renderer."""
     by_kind: dict[str, list] = {}
     for obj in queue:
         by_kind.setdefault(obj[0], []).append(obj)
+    starts: dict[str, int] = {}
+    for kind in by_kind:
+        low, high = bands[kind]
+        starts[kind] = _band_start(id_map, low + key_offset, high + key_offset)
+        by_kind[kind] = by_kind[kind][:max(0, high + key_offset - starts[kind] + 1)]
     entries: dict = {}
     cut: set = set()
     id_maps: dict = {}
     relations = ""
     folded: dict = {}
     withheld: set = set()
-    if room <= 0:
-        return _RenderedKinds(entries, frozenset(), id_maps, relations, folded, frozenset())
-    with recording_spans():
-        for kind, objects in by_kind.items():
-            low, high = bands[kind]
-            start = _band_start(id_map, low + key_offset, high + key_offset)
-            objects = objects[:max(0, high + key_offset - start + 1)]
-            if not objects:
-                continue
-            outcome = KnowledgeContextOutcome()
-            block, kind_map = render(
-                kind, [values[kind][object_id] for _kind, object_id in objects],
-                id_offset=start - 1, budget_chars=room, outcome=outcome,
-                lookups=lookups,
-            )
-            folded.update(((kind, object_id), key) for object_id, key in outcome.folded.items())
-            withheld.update((kind, object_id) for object_id in outcome.withheld)
-            id_maps[kind] = dict(kind_map)
-            texts: dict[str, str] = {}
-            trailer = 0
-            for span in recorded_spans(block) or ():
-                text = block[span.start:span.end]
-                if span.key:
-                    texts[span.key] = text
-                elif not span.glue and kind == RESTORED_KIND_KG and text.startswith(_RELATIONS_PREFIX):
-                    relations, trailer = text, len(text) + 1
-            last = None
-            for key, entry in kind_map.items():
-                if key in texts:
-                    obj = (kind, str(entry.get("object_id") or ""))
-                    entries[obj] = (key, texts[key])
-                    last = obj
-            # The chunk, element and knowledge renderers spend their budget to
-            # the last character only by cutting their last entry; Memory's
-            # entries are whole (``AskService._render_report_kind``).
-            if last is not None and kind != RESTORED_KIND_MEMORY and len(block) - trailer >= room:
-                cut.add(last)
+
+    def run(kind: str, objects: list, budget: int) -> None:
+        nonlocal relations
+        if not objects or budget <= 0:
+            return
+        outcome = KnowledgeContextOutcome()
+        block, kind_map = render(
+            kind, [values[kind][object_id] for _kind, object_id in objects],
+            id_offset=starts[kind] - 1, budget_chars=budget, outcome=outcome,
+            lookups=lookups,
+        )
+        folded.update(((kind, object_id), key) for object_id, key in outcome.folded.items())
+        withheld.update((kind, object_id) for object_id in outcome.withheld)
+        id_maps[kind] = dict(kind_map)
+        texts: dict[str, str] = {}
+        trailer = 0
+        for span in recorded_spans(block) or ():
+            text = block[span.start:span.end]
+            if span.key:
+                texts[span.key] = text
+            elif not span.glue and kind == RESTORED_KIND_KG and text.startswith(_RELATIONS_PREFIX):
+                relations, trailer = text, len(text) + 1
+        last = None
+        for key, entry in kind_map.items():
+            if key in texts:
+                obj = (kind, str(entry.get("object_id") or ""))
+                entries[obj] = (key, texts[key], _entry_head(kind, key, entry, texts[key]))
+                last = obj
+        # The chunk, element and knowledge renderers spend their budget to
+        # the last character only by cutting their last entry; Memory's
+        # entries are whole (``AskService._render_report_kind``).
+        if last is not None and kind != RESTORED_KIND_MEMORY and len(block) - trailer >= budget:
+            cut.add(last)
+
+    if room > 0:
+        with recording_spans():
+            for kind, objects in by_kind.items():
+                if kind != RESTORED_KIND_KG:
+                    run(kind, objects, room)
+            if RESTORED_KIND_KG in by_kind:
+                run(RESTORED_KIND_KG, *_knowledge_share(
+                    queue, by_kind[RESTORED_KIND_KG], values[RESTORED_KIND_KG],
+                    starts[RESTORED_KIND_KG], entries, cut, room,
+                ))
     return _RenderedKinds(entries, frozenset(cut), id_maps, relations, folded, frozenset(withheld))
 
 
 def _admit_entries(queue: list, rendering: _RenderedKinds, room: int) -> tuple[dict, str]:
     """``({object: entry text as admitted}, relations line)``: the rendered
-    entries the partition takes, deciding in relevance order across kinds
-    (see ``assemble_report_evidence``), and the knowledge kind's
-    ``relations:`` items among the admitted entries when they still fit."""
+    entries the partition takes (``_walk``, relevance order across kinds),
+    and the knowledge kind's ``relations:`` items among the admitted entries
+    when they still fit."""
+
+    def candidate(obj: Any) -> Optional[_Candidate]:
+        if obj not in rendering.entries:
+            return None
+        _key, text, head = rendering.entries[obj]
+        return _Candidate(len(text), head, obj not in rendering.cut)
+
+    taken = _walk(queue, candidate, room)
     admitted: dict = {}
-    used = 0
-    for obj in queue:
-        if obj not in rendering.entries or used >= room:
-            continue
-        key, text = rendering.entries[obj]
-        separator = 1 if admitted else 0
-        whole = obj not in rendering.cut
-        if whole and used + separator + len(text) <= room:
-            admitted[obj] = text
-            used += separator + len(text)
-            continue
-        keep = min(len(text), room - used - separator)
-        if keep - len(f"{key}: ") < REPORT_EVIDENCE_MIN_CUT_CHARS:
-            continue
+    for obj, keep in taken.items():
+        text = rendering.entries[obj][1]
         admitted[obj] = text if keep == len(text) else text[:keep - 1] + "…"
-        used += separator + keep
+    used = sum(taken.values()) + max(0, len(taken) - 1)
     relations = _relations_among(
         rendering.relations,
         {rendering.entries[obj][0] for obj in admitted if obj[0] == RESTORED_KIND_KG},
@@ -279,8 +410,10 @@ def assemble_report_evidence(
       source -> shares that passage's key;
     * otherwise rendered by ``render(kind, items, id_offset=, budget_chars=,
       outcome=, lookups=)`` -- the caller's native renderer for the kind --
-      ONE call per kind with all of that kind's objects in relevance order,
-      in the kind's native band (``bands[kind]`` plus ``key_offset``,
+      ONE call per kind with that kind's objects in relevance order (the
+      knowledge kind last, handed only the objects and the budget its share
+      admits -- ``_knowledge_share``), in the kind's native band
+      (``bands[kind]`` plus ``key_offset``,
       continuing after the band's highest key already taken; objects past
       the band's end are not rendered). One call per kind is the renderers'
       own contract: ``knowledge_context`` derives its ``relations:`` line and
@@ -291,8 +424,9 @@ def assemble_report_evidence(
 
     Admission is then decided across kinds, in relevance order, over the
     rendered entries (``_admit_entries``): an entry that fits whole goes in;
-    the first that does not is cut to the room left -- if the text it keeps
-    after its key is at least ``REPORT_EVIDENCE_MIN_CUT_CHARS``, otherwise
+    the first that does not is cut to the room left -- if the item's own text
+    it keeps after the renderer's head (key, labels, title, location --
+    ``_entry_head``) is at least ``REPORT_EVIDENCE_MIN_CUT_CHARS``, otherwise
     it is not loaded and smaller entries after it may still fit. A
     renderer's own cut (a kind that alone overflowed the room) is held to
     the same floor. So the section the question is about takes the budget
@@ -521,6 +655,7 @@ __all__ = [
     "ReportTurn",
     "assemble_report_evidence",
     "REPORT_EVIDENCE_MIN_CUT_CHARS",
+    "REPORT_RELATIONS_RESERVE_CHARS",
     "citation_identity",
     "report_readable",
     "scrub_report_marks",

@@ -745,6 +745,156 @@ def test_an_item_the_budget_would_cut_to_a_fragment_is_not_loaded(make_world, mo
     assert (receipt.evidence_restored, receipt.evidence_over_budget) == (1, 3)
 
 
+def test_a_cut_element_is_measured_by_its_own_text_not_its_head(make_world, monkeypatch):
+    """An element whose source has a long title: the room left after the
+    passage the question is about holds its head (key, labels, title,
+    location) plus a few dozen characters of its text. Measured from the key
+    it would pass the fragment floor; measured by its own text it does not,
+    so it is not loaded rather than a key with almost no checkable text."""
+    budget = 2000
+    world = make_world(ask_report_evidence_budget_chars=budget)
+    room = budget - len(f"\n\n[{REPORT_EVIDENCE_HEADING}]\n")
+    world.execute("UPDATE sources SET title={ph} WHERE id={ph}", ("乙" * 120, "src-b"))
+    world.execute(
+        "UPDATE source_elements SET text={ph} WHERE id={ph}", ("乙元素原文" * 120, "el-b1"),
+    )
+    keep = 240  # what the element would get: its head plus well under 160 characters
+    world.execute(
+        "UPDATE chunks SET text={ph} WHERE id={ph}",
+        ("甲" * (room - keep - 1 - len("k2: ")), "c-a"),
+    )
+    report = insert_report(
+        world, "rep-element-head",
+        content_md=_content("摘要。", ("甲的温度窗口较窄 [k1]，乙元素 [k2]。", SECTION_TWO)),
+    )
+    stub_retrieval(monkeypatch, C_B)
+    answer_llm, _rewrite = bind_models(world, "甲[k2]。", rewritten="甲的温度窗口较窄 乙元素")
+
+    response = ask(world, report)
+
+    prompt = answer_llm.prompts[0]
+    assert f"乙元素 {REPORT_EVIDENCE_NOT_LOADED}。" in report_block_of(prompt)
+    partition = knowledge_items_of(prompt).split(f"[{REPORT_EVIDENCE_HEADING}]")[1]
+    assert "k4001" not in partition and "乙元素原文" not in partition
+    assert response.linked_report.evidence_over_budget >= 1
+
+
+def _many_concepts(world: World, count: int) -> list[dict]:
+    """``count`` knowledge objects of ``src-a`` (``kg-n00`` ...), each defined
+    by one long element, and ``kg-n00 -[depends_on]-> kg-n01``; returns their
+    report references ``k20`` ...."""
+    world.execute(
+        "INSERT INTO source_elements (id,source_id,element_type,location_label,"
+        "text,metadata,created_at) VALUES ('el-long','src-a','paragraph','p9',{ph},{js},{ph})",
+        ("长定义" * 150, "{}", NOW),
+    )
+    evidence = json.dumps([{
+        "source_id": "src-a", "source_title": "", "element_id": "el-long",
+        "element_type": "paragraph", "location_label": "p9",
+        "quoted_span": "长定义", "confidence": 1.0,
+    }])
+    for n in range(count):
+        object_id = f"kg-n{n:02d}"
+        world.execute(
+            "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,"
+            "payload,evidence,source_id,created_at,updated_at) "
+            "VALUES ({ph},{ph},'concept','approved','',{js},{js},'src-a',{ph},{ph})",
+            (object_id, world.nb, json.dumps({"name": f"概念{n:02d}"}), evidence, NOW, NOW),
+        )
+        world.execute(
+            "INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id) "
+            "VALUES ({ph},'src-a',{ph})",
+            (object_id, world.nb),
+        )
+    world.execute(
+        "INSERT INTO knowledge_relations (id,notebook_id,source_id,source_object_id,"
+        "target_object_id,edge_type,evidence,created_at) "
+        "VALUES ('rel-n',{ph},'src-a','kg-n00','kg-n01','depends_on',{js},{ph})",
+        (world.nb, evidence, NOW),
+    )
+    return [
+        _ref(f"k{20 + n}", "concept", f"kg-n{n:02d}", source_id="src-a")
+        for n in range(count)
+    ]
+
+
+def _count_node_reads(monkeypatch) -> list[str]:
+    reads: list[str] = []
+    real = EvidenceContextService._node_context_row
+
+    def counted(self, origin, object_id):
+        reads.append(object_id)
+        return real(self, origin, object_id)
+
+    monkeypatch.setattr(EvidenceContextService, "_node_context_row", counted)
+    return reads
+
+
+def test_many_cited_knowledge_objects_keep_their_relations_and_bounded_reads(
+    make_world, monkeypatch,
+):
+    """Thirty cited knowledge objects at the smallest budget: only those the
+    partition can admit are handed to the knowledge renderer (each costs it a
+    read), and they leave room for the relation between the two most
+    relevant -- handing it all thirty with the whole budget filled the budget
+    with entries and lost every relation."""
+    world = make_world(ask_report_evidence_budget_chars=2000)
+    references = _many_concepts(world, 30)
+    report = insert_report(
+        world, "rep-many-kg",
+        references=[*REFERENCES, *references],
+        content_md=_content("摘要。", (
+            " ".join(f"概念{n:02d} [k{20 + n}]" for n in range(30)), SECTION_TWO,
+        )),
+    )
+    stub_retrieval(monkeypatch, C_B)
+    reads = _count_node_reads(monkeypatch)
+    answer_llm, _rewrite = bind_models(world, "概念[k1001]。", rewritten="概念00 概念01")
+
+    response = ask(world, report)
+
+    concept_reads = [object_id for object_id in reads if object_id.startswith("kg-n")]
+    admitted = keys_in(report_block_of(answer_llm.prompts[0])) & {
+        f"k{1001 + n}" for n in range(30)
+    }
+    assert {"k1001", "k1002"} <= admitted
+    assert len(concept_reads) == len(admitted) < 30
+    partition = knowledge_items_of(answer_llm.prompts[0]).split(f"[{REPORT_EVIDENCE_HEADING}]")[1]
+    assert "\nrelations: k1001 -[depends_on]-> k1002" in partition
+    assert response.linked_report.evidence_over_budget >= 30 - len(admitted)
+
+
+def test_knowledge_objects_the_partition_cannot_admit_are_never_read(
+    make_world, monkeypatch,
+):
+    """The passage the question is about takes the whole partition: the
+    cited knowledge objects after it are not loaded, and the knowledge
+    renderer never reads them."""
+    budget = 2000
+    world = make_world(ask_report_evidence_budget_chars=budget)
+    room = budget - len(f"\n\n[{REPORT_EVIDENCE_HEADING}]\n")
+    world.execute("UPDATE chunks SET text={ph} WHERE id={ph}", ("甲" * (room - 40), "c-a"))
+    references = _many_concepts(world, 10)
+    report = insert_report(
+        world, "rep-kg-unread",
+        references=[*REFERENCES, *references],
+        content_md=_content("摘要。", (
+            "甲的温度窗口较窄 [k1]，" + " ".join(f"概念{n:02d} [k{20 + n}]" for n in range(10)),
+            SECTION_TWO,
+        )),
+    )
+    stub_retrieval(monkeypatch, C_B)
+    reads = _count_node_reads(monkeypatch)
+    answer_llm, _rewrite = bind_models(world, "甲[k2]。", rewritten="甲的温度窗口较窄")
+
+    response = ask(world, report)
+
+    assert [object_id for object_id in reads if object_id.startswith("kg-n")] == []
+    block = report_block_of(answer_llm.prompts[0])
+    assert f"概念00 {REPORT_EVIDENCE_NOT_LOADED}" in block
+    assert response.linked_report.evidence_restored >= 1
+
+
 def test_the_not_loaded_mark_never_reaches_the_answer(make_world, monkeypatch):
     """Rule 15 forbids copying the mark; the persistence seam removes it
     anyway, from the answer and its conclusion, as returned and as stored."""
