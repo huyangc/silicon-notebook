@@ -283,6 +283,11 @@ REGISTRY = {
     ("api/mcp_tools/ask.py", "_anchor_row", 'dict:"element_id"'): (
         "single-notebook-only", _import_gate("api/mcp_tools/ask.py"),
         "MCP ask (single-notebook) output (answer anchors and evidence items): a notebook ask, never a global run", 1),
+    # The MCP report tool projects a stored deep report's references: a report
+    # belongs to one notebook and is read outside any run plan.
+    ("api/mcp_tools/reports.py", "_reference_row", 'dict:"element_id"'): (
+        "global-unreachable", _import_gate("api/mcp_tools/reports.py"),
+        "MCP get_report projects a stored per-notebook deep report, never under a global run plan", 1),
 }
 
 CLASSIFICATIONS = {
