@@ -174,6 +174,7 @@ from app.services.report_followup import (
     report_digest,
     report_followup_context,
     report_link_verdict,
+    report_meta_digest,
     report_mode_supported,
     report_owner_ids,
     report_restore_request,
@@ -1434,30 +1435,40 @@ class AskService:
 
         None when the request attached no report or the run is global (a
         global run never reads a report, D7). An extension engine
-        (``mode_supported`` False) is ``engine_unsupported`` before anything
-        is read -- no report row, owners, participants, skipped libraries,
-        library names or restore. Otherwise ``_read_report_followup``.
+        (``mode_supported`` False) is ``engine_unsupported`` after ONE read,
+        the report row through its gate, for the receipt's title -- no
+        ceiling, owners, participants, skipped libraries, library names or
+        restore. Otherwise the installed ceiling is resolved first, OUTSIDE
+        the fail-soft below (a lazy ceiling is built here: one that cannot be
+        built fails the call exactly as it would anywhere else), and
+        ``_read_report_followup`` judges the report under it.
 
         Fail-soft in the safe direction (D6): when one of its data reads
         raises -- the report row, the owner maps, the participant set, the
-        restore -- the turn does not read the report (``read_failed``) and a
-        content-free ``ask_report_followup_failed`` event names the error's
-        class only. A Stop (``AskCancelled``), a participant-override control
-        error (``RetrievalControlError``) and a restore called outside its
-        frame (``ReportRestoreScopeError``, a wiring fault, not a data state)
-        are raised as they are: turning them into "not read" would hide
-        them."""
+        restore -- the turn does not read the report (``read_failed``, with no
+        title) and a content-free ``ask_report_followup_failed`` event names
+        the error's class only. A Stop (``AskCancelled``), a
+        participant-override control error (``RetrievalControlError``) and a
+        restore called outside its frame (``ReportRestoreScopeError``, a
+        wiring fault, not a data state) are raised as they are: turning them
+        into "not read" would hide them."""
+        from app.services.source_scope import current_source_scope
+
         report_id = str(report_id or "").strip()
         if not report_id or subjectless_run_active():
             return None
-        if not mode_supported:
-            return ReportFollowup(
-                report_id, "", None, unread_verdict(REASON_ENGINE_UNSUPPORTED),
-            )
-        title: list[str] = []
+        scope = None
+        if mode_supported:
+            scope = current_source_scope()
+            if scope is None:
+                # A wiring fault: the verdict is judged under the run's
+                # ceiling or not at all.
+                raise ReportRestoreScopeError("no retrieval ceiling is installed")
         try:
+            if scope is None:
+                return self._unsupported_report_followup(notebook_id, report_id, user_id)
             return self._read_report_followup(
-                notebook_id, report_id, user_id, restore=restore, title=title,
+                notebook_id, report_id, user_id, scope=scope, restore=restore,
             )
         except (AskCancelled, RetrievalControlError, ReportRestoreScopeError):
             raise
@@ -1466,9 +1477,36 @@ class AskService:
                 "kind": "ask_report_followup_failed", "notebook_id": notebook_id,
                 "error_type": type(exc).__name__, "status": "failed",
             })
+            return ReportFollowup(report_id, "", None, unread_verdict(REASON_READ_FAILED))
+
+    def _linked_report_row(self, notebook_id: str, report_id: str, user_id: str):
+        """The attached report's row through its gate, or None when the asker
+        may not follow it (another member's, another notebook's, missing or
+        unfinished -- one answer for all, ``report_unavailable``)."""
+        readers = getattr(self, "report_followup_readers", None)
+        if readers is None:
+            raise RuntimeError("AskService has no report follow-up readers")
+        try:
+            return load_linked_report(readers.read_report, notebook_id, report_id, user_id)
+        except (LinkedReportNotFound, LinkedReportNotReady):
+            return None
+
+    def _unsupported_report_followup(
+        self, notebook_id: str, report_id: str, user_id: str,
+    ) -> ReportFollowup:
+        """An extension engine's turn: the report is not read (D7), but its
+        receipt -- and so the conversation summary and the sticky tag a
+        reopened conversation restores -- names it. The one read is the
+        report row through its gate; nothing it cites is looked up."""
+        row = self._linked_report_row(notebook_id, report_id, user_id)
+        if row is None:
             return ReportFollowup(
-                report_id, "".join(title), None, unread_verdict(REASON_READ_FAILED),
+                report_id, "", None, unread_verdict(REASON_REPORT_UNAVAILABLE),
             )
+        return ReportFollowup(
+            report_id, report_meta_digest(row).title, None,
+            unread_verdict(REASON_ENGINE_UNSUPPORTED),
+        )
 
     def _read_report_followup(
         self,
@@ -1476,42 +1514,33 @@ class AskService:
         report_id: str,
         user_id: str,
         *,
+        scope: Any,
         restore: bool,
-        title: list,
     ) -> ReportFollowup:
-        """The reads behind ``_report_followup``, each bounded by the report:
-        the report row through its gate (another member's, another notebook's,
-        a missing or an unfinished report -> ``report_unavailable``), ONE
-        batch read per owner map over the cited ids (skipped when there are
-        none), the asker's participant set only when a cited item lives in
-        another library, the installed ceiling's own facts, and -- only when
-        the verdict lets the turn read the report and ``restore`` asks for it
+        """The reads behind ``_report_followup`` under the installed ``scope``,
+        each bounded by the report: the report row through its gate
+        (``report_unavailable`` when the asker may not follow it), ONE batch
+        read per owner map over the cited ids (skipped when there are none),
+        the asker's participant set only when a cited item lives in another
+        library, the ceiling's own facts, and -- only when the verdict lets
+        the turn read the report and ``restore`` asks for it (the run itself)
         -- ONE restore through the retrieval layer of every reference the
         verdict did not count gone (``report_restore_request``). The library
         names are read only when the verdict names unticked libraries.
-        ``title`` receives the report's title as soon as it is known, so a
-        later failure still names the report on its receipt."""
-        from app.services.source_scope import (
-            current_skipped_mounted_libraries,
-            current_source_scope,
-        )
 
-        readers = getattr(self, "report_followup_readers", None)
-        if readers is None:
-            raise RuntimeError("AskService has no report follow-up readers")
-        scope = current_source_scope()
-        if scope is None:
-            # A wiring fault, raised past the fail-soft: the verdict is judged
-            # under the run's ceiling or not at all.
-            raise ReportRestoreScopeError("no retrieval ceiling is installed")
-        try:
-            row = load_linked_report(readers.read_report, notebook_id, report_id, user_id)
-        except (LinkedReportNotFound, LinkedReportNotReady):
+        The verdict reads the report's meta digest (``report_meta_digest``);
+        ``content_md`` is parsed (``report_digest``) only for the run that
+        will render the report block -- restore asked and verdict readable --
+        so the pre-send check and the understanding step never parse it. A
+        followup that carries the meta digest is one whose report block is
+        never rendered."""
+        row = self._linked_report_row(notebook_id, report_id, user_id)
+        if row is None:
             return ReportFollowup(
                 report_id, "", None, unread_verdict(REASON_REPORT_UNAVAILABLE),
             )
-        digest = report_digest(row)
-        title.append(digest.title)
+        readers = self.report_followup_readers
+        digest = report_meta_digest(row)
         source_ids, object_ids = report_owner_ids(digest)
         source_owners = dict(readers.source_owners(list(source_ids))) if source_ids else {}
         object_owners = dict(readers.object_owners(list(object_ids))) if object_ids else {}
@@ -1528,7 +1557,7 @@ class AskService:
             notebook_id=notebook_id,
             scope=scope,
             participants=participants,
-            skipped_libraries=current_skipped_mounted_libraries(),
+            skipped_libraries=scope.skipped_mounted_libraries(),
             source_owners=source_owners,
             object_owners=object_owners,
             # The doors of the Ask Memory channel (``_memory_hits`` and
@@ -1542,20 +1571,22 @@ class AskService:
                 lambda: self._mounted_library_names(notebook_id)
             ),
         )
-        restored = None
-        if verdict.readable and restore:
-            restored = self.candidates.restore_report_references(
-                notebook_id, user_id, report_restore_request(
-                    digest, source_owners=source_owners, object_owners=object_owners,
-                ),
-            )
-        return ReportFollowup(report_id, digest.title, digest, verdict, restored)
+        if not (verdict.readable and restore):
+            return ReportFollowup(report_id, digest.title, digest, verdict)
+        restored = self.candidates.restore_report_references(
+            notebook_id, user_id, report_restore_request(
+                digest, source_owners=source_owners, object_owners=object_owners,
+            ),
+        )
+        return ReportFollowup(
+            report_id, digest.title, report_digest(row), verdict, restored,
+        )
 
     def _mounted_library_names(self, notebook_id: str) -> dict:
-        """``{library id: the name the notebook mounts it under}`` for the
-        verdict's ``scope_libraries`` wording; display-only, so a failed read
-        names nothing rather than costing the verdict (``_skipped_libraries``
-        reads names the same way)."""
+        """``{library id: the name the notebook mounts it under}``, for the
+        verdict's ``scope_libraries`` wording and the answer's skipped-library
+        notice (``_skipped_libraries``); display-only, so a failed read names
+        nothing rather than costing either."""
         try:
             return {
                 str(ref.id): str(ref.name or "")
@@ -1588,14 +1619,22 @@ class AskService:
         route froze), minus the restore: the verdict reads the report row, the
         owners and the participant set, never a cited item's content. Writes
         nothing. The route has already applied the report gate; a report that
-        vanished since reads ``report_unavailable`` like the run would."""
-        with self._retrieval_ceiling(
-            notebook_id, user_id, local_scope=source_scope, base_scope=base_scope,
-        ):
+        vanished since reads ``report_unavailable`` like the run would.
+
+        An extension engine (``mode_supported`` False) never reads a report,
+        so no ceiling is built for it: the answer is ``engine_unsupported``
+        after the report row alone (its title)."""
+        if not mode_supported:
             followup = self._report_followup(
-                notebook_id, report_id, user_id,
-                mode_supported=mode_supported, restore=False,
+                notebook_id, report_id, user_id, mode_supported=False, restore=False,
             )
+        else:
+            with self._retrieval_ceiling(
+                notebook_id, user_id, local_scope=source_scope, base_scope=base_scope,
+            ):
+                followup = self._report_followup(
+                    notebook_id, report_id, user_id, mode_supported=True, restore=False,
+                )
         if followup is None:
             raise ValueError("report_link_check needs a report_id")
         verdict = followup.verdict
@@ -3156,13 +3195,8 @@ class AskService:
         skipped = current_skipped_mounted_libraries()
         if not skipped:
             return []
-        try:
-            names = {
-                str(ref.id): str(ref.name or "")
-                for ref in self.notebooks.get_notebook(notebook_id).base_notebooks
-            }
-        except Exception:  # noqa: BLE001 - the notice must not cost the answer
-            names = {}
+        # Unbound: ``_save_answer`` (and so this) is called on narrow doubles.
+        names = AskService._mounted_library_names(self, notebook_id)
         return [
             RetrievalScopeBaseReceipt(
                 notebook_id=library, name=names.get(library, "")[:500],

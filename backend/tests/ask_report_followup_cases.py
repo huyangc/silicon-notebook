@@ -178,17 +178,20 @@ def scenario_all_selected_reads_the_report_and_restores_it(world: World) -> None
     readable, and each item -- a passage, an element, a mounted library's
     knowledge object, a relation (as its evidence element), the asker's
     Memory -- is read back under the key the report gave it. The external
-    reference counts as gone; the whole-source one is neither read nor
-    gone."""
+    and the whole-source references name no item to read back: neither is
+    read, neither counts as gone. The run (and only the run) carries the
+    parsed body."""
     report = insert_report(world, "rep-all")
     followup = judged(world, report)
 
     assert followup.title == TITLE
     assert followup.verdict.readable and followup.verdict.reason_code == ""
-    assert followup.verdict.gone == 1  # the external reference
+    assert followup.verdict.gone == 0
     assert followup.verdict.uses_memory
     assert followup.digest is not None
     assert followup.digest.section_titles == ("工艺甲", "工艺乙")
+    assert followup.digest.summary == "两种工艺在温度窗口上不同。"
+    assert followup.digest.sections[0].keys == ("k1", "k2", "k4")
     restored = followup.restored
     assert restored is not None
     assert dict(restored.key_by_object) == {
@@ -204,8 +207,9 @@ def scenario_all_selected_reads_the_report_and_restores_it(world: World) -> None
 
 def scenario_deleted_source_is_gone_not_a_conflict(world: World) -> None:
     """A source deleted since the report is no conflict: the report stays
-    readable, its references count as gone in the verdict, and they are not
-    sent to the restore (which would count them a second time)."""
+    readable, the items it cited count as gone in the verdict (the
+    whole-source reference to it does not: it names no item), and they are
+    not sent to the restore (which would count them a second time)."""
     report = insert_report(world, "rep-deleted")
     for table in ("chunks", "source_elements", "knowledge_object_sources"):
         world.execute(f"DELETE FROM {table} WHERE source_id={{ph}}", ("src-b",))
@@ -215,7 +219,7 @@ def scenario_deleted_source_is_gone_not_a_conflict(world: World) -> None:
     followup = judged(world, report)
 
     assert followup.verdict.readable
-    assert followup.verdict.gone == 3  # k2 and k7 (src-b), k6 (external)
+    assert followup.verdict.gone == 1  # k2 (an element of src-b)
     assert followup.restored is not None
     assert ("element", "el-b1") not in followup.restored.key_by_object
     assert followup.restored.gone == 0

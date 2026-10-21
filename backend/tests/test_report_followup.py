@@ -41,6 +41,7 @@ from app.services.report_followup import (
     render_report_block,
     report_digest,
     report_link_verdict,
+    report_meta_digest,
     report_outline_text,
     report_owner_ids,
     report_reason_text,
@@ -169,6 +170,25 @@ def test_digest_splits_a_body_the_real_engine_assembled(engine_repo):
         assert leaked not in everything
     assert [dict(r) for r in digest.references] == references
     assert digest.memory_used == ("mem-1",)
+
+    # The meta digest -- all the verdict, the pre-send check and the
+    # understanding step read -- is the same report without its body, and it
+    # never looks at content_md.
+    class _BodyUnread(dict):
+        def get(self, key, default=None):
+            assert key != "content_md", "the meta digest must not read the body"
+            return super().get(key, default)
+
+        def __getitem__(self, key):
+            assert key != "content_md", "the meta digest must not read the body"
+            return super().__getitem__(key)
+
+    meta = report_meta_digest(_BodyUnread(row))
+    assert (meta.title, meta.section_titles, meta.references, meta.memory_used) == (
+        digest.title, digest.section_titles, digest.references, digest.memory_used,
+    )
+    assert meta.summary == ""
+    assert all(section.body == "" and section.keys == () for section in meta.sections)
 
     # Rendered for a turn that restored every reference: the summary carries no
     # marker at all -- neither the stored one nor a rewrite into a turn key.
@@ -420,16 +440,29 @@ def test_a_report_inside_the_scope_is_readable():
 
 
 def test_deleted_items_only_count_as_gone():
+    """A deleted item counts as gone and is no conflict. A whole-source or
+    external reference names no item the turn could read back, so it is
+    never gone -- the same rule the restore applies
+    (``RESTORE_SKIPPED_OBJECT_TYPES``)."""
     digest = _digest([
         *_EVERYTHING,
         _ref("k5", "chunk", "c-x", "s-deleted"),
         _ref("k6", "concept", "ko-deleted"),
         _ref("k7", "external", "plugin-item-1"),
         _ref("k8", "chunk", "", ""),
+        _ref("k9", "source", "s-deleted", "s-deleted"),
     ])
     verdict = _verdict(digest)
     assert verdict.readable
-    assert verdict.gone == 4
+    assert verdict.gone == 3  # k5, k6 and k8
+
+
+def test_a_live_whole_source_reference_is_still_judged_by_the_scope():
+    verdict = _verdict(
+        _digest([_ref("k1", "source", "s-own", "s-own")]),
+        scope=_Scope(excluded={("nb", "s-own")}),
+    )
+    assert verdict.reason_code == REASON_SCOPE_SOURCES and verdict.gone == 0
 
 
 def test_owner_ids_are_batched_once_each_and_skip_memory_and_external():
