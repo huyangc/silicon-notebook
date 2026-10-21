@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   mergeSessionListFallback,
   recordStartedConversation,
+  upsertSessionFromDetail,
 } from "../../app/ask-session-state.ts";
 
 
@@ -100,4 +101,72 @@ test("a failed authority refresh fallback preserves optimistic durable sessions"
     "conv-old",
   ]);
   assert.equal(result[1].updated_at, "2026-07-24T10:04:00.000Z");
+});
+
+
+function openedDetail(overrides = {}) {
+  return {
+    id: "conv-a",
+    title: "opened",
+    updated_at: "2026-10-21T10:00:00Z",
+    turn_count: 3,
+    used_reasoning: false,
+    turns: [],
+    ...overrides,
+  };
+}
+
+test("an opened conversation keeps its row's linked report and every field the detail does not carry", () => {
+  const sessions = [
+    { id: "conv-b", title: "other", updated_at: "2026-10-20T00:00:00Z", turn_count: 1 },
+    {
+      id: "conv-a",
+      title: "stale title",
+      updated_at: "2026-10-19T00:00:00Z",
+      turn_count: 2,
+      used_reasoning: true,
+      linked_report: { report_id: "r-old", title: "旧报告" },
+      submitted_via: "web",
+    },
+  ];
+  const result = upsertSessionFromDetail(sessions, openedDetail({
+    linked_report: { report_id: "r-1", title: "电池安全综述" },
+  }));
+  assert.deepEqual(result.map((session) => session.id), ["conv-b", "conv-a"], "the row stays in place");
+  assert.deepEqual(result[1], {
+    id: "conv-a",
+    title: "opened",
+    updated_at: "2026-10-21T10:00:00Z",
+    turn_count: 3,
+    used_reasoning: false,
+    linked_report: { report_id: "r-1", title: "电池安全综述" },
+    submitted_via: "web",
+  });
+  assert.equal(sessions[1].title, "stale title", "the prior state is not mutated");
+});
+
+test("a last turn without a report clears the row's badge instead of keeping an older one", () => {
+  const sessions = [{
+    id: "conv-a",
+    title: "t",
+    updated_at: "2026-10-19T00:00:00Z",
+    turn_count: 2,
+    linked_report: { report_id: "r-old", title: "旧报告" },
+  }];
+  const [row] = upsertSessionFromDetail(sessions, openedDetail());
+  assert.equal("linked_report" in row, false);
+});
+
+test("a conversation the list does not have yet is inserted first, with its report", () => {
+  const result = upsertSessionFromDetail(
+    [{ id: "conv-b", title: "other", updated_at: "2026-10-20T00:00:00Z", turn_count: 1 }],
+    openedDetail({
+      linked_report: { report_id: "r-1", title: "电池安全综述" },
+      turns: [{ response: { reasoning_trace: [{ step_type: "plan" }] } }],
+      used_reasoning: undefined,
+    }),
+  );
+  assert.deepEqual(result.map((session) => session.id), ["conv-a", "conv-b"]);
+  assert.deepEqual(result[0].linked_report, { report_id: "r-1", title: "电池安全综述" });
+  assert.equal(result[0].used_reasoning, true, "falls back to the last turn's trace");
 });
