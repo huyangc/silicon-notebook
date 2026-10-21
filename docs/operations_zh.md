@@ -47,18 +47,35 @@ Selected-source 准备和非 dry-run 的 reflect `report`/`search` 会额外合�
 ```bash
 # 先停止 API 与全部后台 writer
 bash scripts/cli.sh database migrate --confirm-service-stopped
-# 或（离线包同样可用，在包根目录执行）：
-# PYTHONPATH=backend python -m app.scripts.migrate_database --confirm-service-stopped
+# 或显式指定部署 env 文件（只按该文件选库）：
+bash scripts/cli.sh database migrate --env-file /path/to/deployment.env --confirm-service-stopped
+# 离线包里，在包根目录执行：
+PYTHONPATH=backend .venv/bin/python -m app.scripts.migrate_database --confirm-service-stopped
 ```
 
+不带 `--env-file` 时按常规部署配置读取：先看已导出的环境变量，再看 `SILICON_NOTEBOOK_ENV_FILE`
+指向的文件，都没有才读根目录 `.env`。带 `--env-file` 时只读这个文件、忽略已导出的变量——与下文
+selected-source 准备的约定相同。
+
+另有三个转换工具也会写 schema，它们刻意不在这条规则内，因为都只作用于没有服务在用的目标或副本，
+从不就地改在役库：`database migrate-postgres`（`migrate_sqlite_to_postgres.py`，目标必须是专用空库、
+不许复用）、`database shadow start-forward`（forward shadow 的目标库，从不承接应用流量）、
+`database merge`（`merge_dbs.py`，只迁移私有临时副本，并写出全新的输出库）。
+
 其余所有会打开数据库的命令都是 *schema guest*：`batch`（全部阶段，含 `backfill-images`）、
-`maintain`、`kg`、`scale` 各命令、`maintain selected-source`、带 `--use-llm`/`--apply` 的
+`maintain`、`kg`、`scale` 各命令（含直接开库的 `maintain delete-leftovers` 与
+`maintain promotion-targets`）、`maintain selected-source`、带 `--use-llm`/`--apply` 的
 `maintain knowhow`、`maintain global-attribution`、`eval replay`、reflect rig 的 `search`/`report`，
 以及开发用的 eval 辅助脚本。guest 从不迁移、从不 seed，因此不论运维 shell 里的
 `SILICON_NOTEBOOK_ADMIN_PASSWORD` 是什么，都不会改写 admin 密码。打开任何东西之前，它先用一条
 裸连接确认库正好是本构建的 schema（SQLite 看 `user_version`；PostgreSQL 迁移账本须正好是
 `1..N` 且 checksum 一致）。不是就以退出码 3 退出（`build_scale_index.py` 保留它文档里的退出码 2），
-提示同时给出原因和解决办法，并且什么都不创建——不建 SQLite 文件，也不建 PostgreSQL 账本：
+提示同时给出原因和解决办法（迁移命令的两种写法：统一入口与离线包里的模块写法），并且什么都不创建——
+不建 SQLite 文件、不留 `-wal`/`-shm`，也不建 PostgreSQL 账本。PostgreSQL 检查根本连不上时（URL 写法
+有误、凭据不对、主机不可达），以退出码 2 退出，只打印一条固定提示，不含用户名、密码、主机、端口或库名；
+握手受 `POSTGRES_POOL_ACQUIRE_TIMEOUT_SECONDS` 约束，两次读取受 `POSTGRES_STATEMENT_TIMEOUT_SECONDS`
+约束。停服维护命令拿到维护锁之后会再核对一次 schema，期间若有人跑过 `database migrate` 也不会在
+对不上的库上干活：
 
 | 检查结果 | 提示给出的解决办法 |
 | --- | --- |
@@ -72,7 +89,8 @@ bash scripts/cli.sh database migrate --confirm-service-stopped
 `database migrate` 在两种后端上都要求 `--confirm-service-stopped`（只是运维声明，不会替你停服）。
 它执行与服务启动相同的迁移，持有与所有 PostgreSQL 维护命令相同的库级维护锁（锁被占用时直接报告、
 不等待），从不 seed，库已是当前版本时什么都不做；从未初始化的库、比本构建新的库、账本对不上的库
-一律拒绝。退出码：0 已迁移或已是当前版本，2 缺少确认参数或维护锁被占用，3 本构建无法迁移这个库。
+一律拒绝。退出码：0 已迁移或已是当前版本，2 缺少确认参数、`--env-file` 读不了、维护锁被占用或连不上库，
+3 本构建无法迁移这个库。
 不打印数据库 URL。
 
 ## 插件配套服务
@@ -205,7 +223,8 @@ PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py            
   ——不对在役库跑迁移 DDL，也不跑会无条件重写 admin 密码的 seed。库不是本构建的 schema（因而不可能还没到
   v98 / 0078）时直接拒绝（退出码 3，提示原因和解决办法），不替它迁移。服务运行时可以跑。
 - payload 读不回 `GlobalAskJob` 的作业只报告（`--report` 逐行写 `{"job_id", "reason": "payload_unreadable"}`，
-  不写正文）、不改动，继续走 payload 判据计数；退出码：0 完成，1 有这类作业，2 参数错误，3 库未迁移。
+  不写正文）、不改动，继续走 payload 判据计数；退出码：0 完成，1 有这类作业，2 参数错误或连不上库，
+  3 库不是本构建的 schema（落后、从未初始化、比本构建新、账本有缺口或 checksum 不同）。
 - 进度：`SELECT COUNT(*) FROM global_ask_jobs WHERE status='done' AND attributed=0` 即剩余数（命中部分索引
   `idx_global_ask_jobs_unattributed`，回填完成后该索引为空）。大量回填后对 PostgreSQL 执行一次
   `VACUUM ANALYZE global_ask_jobs`（以及 `global_ask_job_notebooks`）：回填改写了大部分已完成作业行，刷新统计
@@ -2355,7 +2374,9 @@ python scripts/replay_retrieval.py --compare before.json after.json --mode topk 
 
 ```bash
 # 先把 schema 迁到本构建——准备命令本身从不迁移
-bash scripts/cli.sh database migrate --confirm-service-stopped
+bash scripts/cli.sh database migrate \
+  --env-file /path/to/deployment.env \
+  --confirm-service-stopped
 PYTHONPATH=backend python scripts/prepare_selected_source_graph.py \
   --env-file /path/to/deployment.env \
   --confirm-service-stopped
@@ -2363,7 +2384,7 @@ PYTHONPATH=backend python scripts/prepare_selected_source_graph.py \
 
 env 文件必须已经存在，避免生产路径拼错后静默操作本地默认数据库。对该命令而言，这个文件是权威 settings 来源，shell 已导出的变量不能把维护重定向到另一套数据库/存储目录。最终原子修改会保留既有 env 文件的 mode、owner、group 及系统支持的元数据；只有新建 receipt 被强制设为 0600。确认参数只是运维人员声明已经停服，脚本不会代替你停止服务。它固定覆盖当前数据库的全部 notebook，并在数据库阶段持有中央离线维护锁。执行态依次为：
 
-1. 先运行 `database migrate --confirm-service-stopped`（见上；它与其它部署类命令一样读取部署根目录的 `.env`——`--env-file` 指向别的文件时，改为用该文件启动一次升级后的服务）。命令随后以 [schema guest](#schema-归属只有服务和-database-migrate-迁移) 方式打开 repository——从不迁移、从不 seed；库不是本构建的 schema 时以 `schema_not_current` 失败、退出码 3，提示原因和解决办法，什么都不改——并枚举全部 notebook。
+1. 先运行 `database migrate --env-file <同一个文件> --confirm-service-stopped`（见上）：带 `--env-file` 时它与本命令一样只按该文件选库，不论 shell 导出了什么，两条命令作用于同一个库。命令随后以 [schema guest](#schema-归属只有服务和-database-migrate-迁移) 方式打开 repository——从不迁移、从不 seed；库不是本构建的 schema 时以 `schema_not_current` 失败、退出码 3，提示原因和解决办法，什么都不改——并枚举全部 notebook。
 2. 按 notebook 持久页游标续跑来源反查索引；当前代次已完成则跳过，KG 代次漂移先失败关闭，下次按新代次重建。
 3. 通过既有的来源/代次账本续跑 source-fact 投影；存在 busy、无代次、failed 或 incomplete 来源就阻断启用。
 4. 按当前 KG 版本和可见来源数复验主 scale manifest 与来源 partition root；当前完整产物直接跳过，否则调用普通有界 builder 重新发布并再次复验。
@@ -2467,7 +2488,8 @@ PYTHONPATH=backend python scripts/backfill_promotion_targets.py --db .local/sili
   会在任何写入之前直接中止(不会出现部分写入)。
 
 和 `merge_dbs.py` 「总是写全新输出」的约定不同,本工具直接就地修改你给的 `--db` 路径;
-如果该库还没迁移到 `SCHEMA_VERSION>=20` 则拒绝运行。
+它是 [schema guest](#schema-归属只有服务和-database-migrate-迁移)：从不迁移这个文件，库不是本构建的 schema
+时以退出码 3 拒绝（提示原因和解决办法）——先启动一次升级后的服务，或运行 `database migrate`。
 
 **重要提醒:** 运行 `apply` 前请先停止后端服务——本工具直接打开 `--db` 文件且不设
 `busy_timeout`,若后端正持有该库的活跃事务,同时写入可能相互冲突。
@@ -2747,7 +2769,8 @@ PYTHONPATH=backend python scripts/sweep_legacy_delete_leftovers.py --apply
 语句超时可用 `--statement-timeout-seconds` 覆写，默认 3600）。退出码：
 `0` 完成；`1` apply 有跳过（在线模式的直删根/年龄闸/锁被占）、删不掉的
 路径或残余孤儿行——重跑或换停服窗口即可收敛，仍剩则按输出的 id 逐本排
-查；`2` 参数拒绝。在线模式（不带停服确认）：孤儿行两后端都可清（有界写
+查；`2` 参数拒绝或连不上库；`3` 库不是本构建的 schema（本工具是
+[schema guest](#schema-归属只有服务和-database-migrate-迁移)，不迁移、不 seed）。在线模式（不带停服确认）：孤儿行两后端都可清（有界写
 事务）；scale 三根仅 PostgreSQL 可清（真 advisory claim 互斥），SQLite
 的 scale 根与两棵直删根一样只报告；`notebooks`/`assets` 两根在两个后端
 都必须停服窗口执行。

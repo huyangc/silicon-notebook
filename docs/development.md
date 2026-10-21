@@ -255,9 +255,11 @@ contributor constraints, not a second implementation history.
   `SQLiteRepository(settings)` with their seeding defaults. The version gate
   (`app.repositories.schema_currency`) and its single refusal wording are shared; refusals
   exit 3 via `MaintenanceCliError.exit_code`. Only server startup and `database migrate`
-  own the schema. `backend/tests/test_schema_guest_guard.py` fails any other construction
-  that lacks the literal guest keywords; a tool that really owns a scratch database is
-  listed there with its reason.
+  own the schema. `backend/tests/test_schema_guest_guard.py` fails any construction outside
+  the serving process, the listed guest entries and the listed schema owners — writing the
+  guest keywords yourself counts too, because it skips the version gate; a tool that really
+  owns a scratch database is listed there with its reason. Connection failures surface only
+  the fixed credential-free wording (exit 2).
 
 ### Frontend implementation guardrails
 

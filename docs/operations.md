@@ -62,12 +62,27 @@ accounts) and the explicit migration command:
 ```bash
 # stop the API and every background writer first
 bash scripts/cli.sh database migrate --confirm-service-stopped
-# or (also in the offline package, from its root):
-# PYTHONPATH=backend python -m app.scripts.migrate_database --confirm-service-stopped
+# or name the deployment's env file explicitly (it alone selects the database):
+bash scripts/cli.sh database migrate --env-file /path/to/deployment.env --confirm-service-stopped
+# in the offline package, from its root:
+PYTHONPATH=backend .venv/bin/python -m app.scripts.migrate_database --confirm-service-stopped
 ```
 
+Without `--env-file` the command reads the ordinary deployment settings: exported environment
+variables first, then the file `SILICON_NOTEBOOK_ENV_FILE` names, else the root `.env`. With
+`--env-file` it reads that file alone and ignores exported variables — the same contract as the
+selected-source preparation below.
+
+Three conversion tools also write schema, and are deliberately outside this rule because each one
+works on a target or copy no service is using, never on the live database in place:
+`database migrate-postgres` (`migrate_sqlite_to_postgres.py`, a dedicated empty PostgreSQL target
+it refuses to reuse), `database shadow start-forward` (the forward-shadow target, which never
+receives application traffic), and `database merge` (`merge_dbs.py`, which migrates private
+temporary copies and writes a brand-new output database).
+
 Every other command that opens the database is a *schema guest*: `batch` (every phase,
-including `backfill-images`), the `maintain`, `kg` and `scale` commands, `maintain
+including `backfill-images`), the `maintain`, `kg` and `scale` commands (including `maintain
+delete-leftovers` and `maintain promotion-targets`, which open the database directly), `maintain
 selected-source`, `maintain knowhow` with `--use-llm`/`--apply`, `maintain global-attribution`,
 `eval replay`, the reflect rig's `search`/`report`, and the developer eval helpers. A guest
 never migrates and never seeds, so it never rewrites the admin password, whatever
@@ -75,7 +90,14 @@ never migrates and never seeds, so it never rewrites the admin password, whateve
 checks, on one bare connection, that the database is at exactly this build's schema (SQLite
 `user_version`; the PostgreSQL ledger is exactly `1..N` with matching checksums). Otherwise it
 exits with status 3 (`build_scale_index.py` keeps its documented status 2) and a message naming
-the reason and the remedy, and creates nothing — no SQLite file, no PostgreSQL ledger:
+the reason and the remedy — both spellings of the migration command, the unified entry and the
+offline package's module form — and creates nothing: no SQLite file, no `-wal`/`-shm` pair, no
+PostgreSQL ledger. When the PostgreSQL check cannot connect at all (a malformed URL, wrong
+credentials, an unreachable host) it exits with status 2 and one fixed message that names no
+user, password, host, port or database; the handshake is bounded by
+`POSTGRES_POOL_ACQUIRE_TIMEOUT_SECONDS` and the two reads by `POSTGRES_STATEMENT_TIMEOUT_SECONDS`.
+Stopped-service maintenance commands re-check the schema after taking the maintenance lock, so a
+`database migrate` that ran in between is never worked against.
 
 | What the check found | Remedy the message gives |
 | --- | --- |
@@ -92,8 +114,9 @@ operator assertion; it does not stop anything). It runs the same migrations the 
 startup, holds the same database-wide maintenance lock as every PostgreSQL maintenance command
 (a held lock is reported, not waited on), never seeds, and is a no-op on a current database. It
 refuses a database that was never initialized, one newer than this build, or a mismatched ledger.
-Exit status: 0 migrated or already current, 2 missing confirmation or the maintenance lock is
-held, 3 the database cannot be migrated by this build. The database URL is never printed.
+Exit status: 0 migrated or already current, 2 missing confirmation, an unreadable `--env-file`,
+the maintenance lock is held, or the database cannot be reached, 3 the database cannot be migrated
+by this build. The database URL is never printed.
 
 ## Plugin companion services
 
@@ -270,7 +293,9 @@ PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py            
   migrated. Safe while the service runs.
 - A job whose payload does not read back as a `GlobalAskJob` is only reported (`--report` writes one
   `{"job_id", "reason": "payload_unreadable"}` line each, never content) and left as it is, still counted
-  through the payload predicate. Exit status: 0 done, 1 such jobs exist, 2 usage error, 3 not migrated.
+  through the payload predicate. Exit status: 0 done, 1 such jobs exist, 2 usage error or the database
+  cannot be reached, 3 the database is not at this build's schema (behind, never initialized, newer than
+  this build, or a ledger with gaps or different checksums).
 - Progress: `SELECT COUNT(*) FROM global_ask_jobs WHERE status='done' AND attributed=0` is what is left (it
   reads the partial index `idx_global_ask_jobs_unattributed`, empty once the backfill is done). After a large
   backfill run `VACUUM ANALYZE global_ask_jobs` (and `global_ask_job_notebooks`) on PostgreSQL: the pass
@@ -2981,7 +3006,9 @@ For an existing deployment, stop the API and every background writer, then run f
 
 ```bash
 # bring the schema to this build first -- the preparation itself never migrates
-bash scripts/cli.sh database migrate --confirm-service-stopped
+bash scripts/cli.sh database migrate \
+  --env-file /path/to/deployment.env \
+  --confirm-service-stopped
 PYTHONPATH=backend python scripts/prepare_selected_source_graph.py \
   --env-file /path/to/deployment.env \
   --confirm-service-stopped
@@ -2989,7 +3016,7 @@ PYTHONPATH=backend python scripts/prepare_selected_source_graph.py \
 
 The env file must already exist; this prevents a mistyped production path from silently selecting the local default database. For this command it is the authoritative settings source: exported shell variables cannot redirect maintenance to a different database/storage root. The final atomic edit preserves the existing env file's mode, owner, group, and supported metadata; only a newly created receipt is forced to 0600. The confirmation is an operator assertion; the script does not stop services. It always covers every notebook in the configured database and holds the central offline-maintenance lock for the database phase. Its execution state is:
 
-1. Run `database migrate --confirm-service-stopped` first (above; it reads the deployment's root `.env` like every deployment-aware command — when `--env-file` names a different file, start the upgraded service on that file once instead). The command then opens the repository as a [schema guest](#schema-ownership-only-the-service-and-database-migrate-migrate) — it never migrates or seeds; a database not at this build's schema fails with code `schema_not_current`, exit status 3, the reason and the remedy, and nothing changed — and inventories notebooks.
+1. Run `database migrate --env-file <the same file> --confirm-service-stopped` first (above): with `--env-file` it selects the database from that file alone, exactly like this command, so both act on the same database whatever the shell exports. The command then opens the repository as a [schema guest](#schema-ownership-only-the-service-and-database-migrate-migrate) — it never migrates or seeds; a database not at this build's schema fails with code `schema_not_current`, exit status 3, the reason and the remedy, and nothing changed — and inventories notebooks.
 2. Resume each notebook's reverse source index from its durable page cursor. A current completed generation is skipped; KG generation drift fails closed and is restarted on the next attempt.
 3. Resume source-fact projection through the existing per-source generation ledgers. Any busy, generation-less, failed, or incomplete source blocks activation.
 4. Revalidate the main scale manifest and source-partition root against the current KG version and visible-source count. A current complete companion is skipped; otherwise the ordinary bounded builder republishes it and the script revalidates the result.
@@ -3064,7 +3091,7 @@ PYTHONPATH=backend python scripts/backfill_promotion_targets.py --db .local/sili
 - `apply` — writes `target_base_id` for every candidate that resolves unambiguously (auto, or via `--set`); candidates that are still blocked (notebook has no mount) or ambiguous (multiple mounts and no matching `--set`) are left untouched and reported, so a second pass after mounting a base (or supplying `--set`) picks up exactly the remainder. Writes immediately by default, matching `merge_dbs.py`'s convention; pass `--dry-run` to preview without writing.
 - `--set NOTEBOOK_ID=BASE_ID` — required to resolve a notebook that has more than one mounted public knowledge base; repeatable for several notebooks. A target outside that notebook's mounted set aborts the entire run before any row is written (no partial writes).
 
-Unlike `merge_dbs.py`'s always-write-a-new-output convention, this tool patches the `--db` path you give it in place, and refuses to run against a database that has not yet migrated to `SCHEMA_VERSION>=20`.
+Unlike `merge_dbs.py`'s always-write-a-new-output convention, this tool patches the `--db` path you give it in place. It is a [schema guest](#schema-ownership-only-the-service-and-database-migrate-migrate): it never migrates the file, and refuses (exit status 3, with the reason and the remedy) one that is not at this build's schema — start the upgraded service once, or run `database migrate`, first.
 
 **Important:** stop the backend service before running `apply` — this tool opens the `--db` file directly with no `busy_timeout`, so writing against it while the backend holds it open can collide with a live transaction.
 ### Backfilling knowhow-cell Markdown formatting (`scripts/backfill_knowhow_md.py`)
@@ -3425,7 +3452,10 @@ default 3600). Exit codes: `0` done; `1` the apply had skips (live-mode
 direct roots, the age gate, or busy claims), undeletable paths, or
 residual orphan rows — re-running (or a stopped window for the direct
 roots) converges, and anything that remains is investigated per printed
-id; `2` argument refusal. In live mode (no stopped-service confirmation)
+id; `2` argument refusal or the database cannot be reached; `3` the
+database is not at this build's schema (the tool is a
+[schema guest](#schema-ownership-only-the-service-and-database-migrate-migrate):
+it never migrates or seeds). In live mode (no stopped-service confirmation)
 orphan rows are swept on both backends (bounded write transactions); the
 three scale roots are swept live on PostgreSQL only (real advisory
 claim), while on SQLite they are reported like the direct roots; deleting
