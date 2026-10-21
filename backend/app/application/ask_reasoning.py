@@ -150,6 +150,12 @@ class PreparedReasoningAsk:
     # See ``ReasoningRunInput.intent_keywords``; frozen once, here, from the
     # confirmed contract.
     intent_keywords: str = ""
+    # The deep report the request attached, as the engine entry judged and
+    # read it (``domain.report_followup.ReportFollowup``; None = no report).
+    # Carried on the envelope rather than read from the run's context so the
+    # stage seams stay explicit (plan 2026-10-21 D11). Typed ``object`` like
+    # the evidence tuples: this layer transfers it, it does not read it.
+    report_followup: object | None = None
 
 
 @dataclass(frozen=True, slots=True)

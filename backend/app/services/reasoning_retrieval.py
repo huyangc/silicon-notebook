@@ -3927,6 +3927,7 @@ class ReasoningRetriever:
         identity_store=None,
         reflect_action_host=None,
         plugin_egress_question: str = "",
+        report_outline: str = "",
     ):
         self.retrieval = retrieval
         self.model_clients = model_clients
@@ -3989,6 +3990,12 @@ class ReasoningRetriever:
         # 出站。空串 ⇒ 本 run 一条插件动作都不提供(fail-closed:没接线的调用方
         # 拿到的是关闭态,不是「拿手边那个串顶上」)。
         self.plugin_egress_question = plugin_egress_question
+        # 本轮提问挂上的深度报告的大纲行(``report_followup.followup_outline``:
+        # 题目 + 节标题;本轮不读报告时只有题目)。reflect 没有对话历史,规划那一侧
+        # 经 ``history`` 拿到同一行,这里是它进每轮 reflect 摘要的唯一入口
+        # (``_reflect_round_context_blocks``)。只有 Ask 的 reasoning 路径传它;
+        # 缺省空串 ⇒ 没挂报告的 run 与报告逐节深挖、knowhow 补全逐字节不变。
+        self.report_outline = report_outline
         # Ask keeps its historical fail-open retrieval behavior. Authoring
         # flows such as knowhow completion opt into strict execution so a
         # failed plan/reflect/retrieval cannot masquerade as deep reasoning.
@@ -8277,6 +8284,12 @@ class ReasoningRetriever:
         if nudge_note:
             summary = f"{summary}\n\n{nudge_note}"
             state.outline_nudges += 1
+        # 挂上的深度报告的大纲行(题目 + 节标题,本轮不读时只有题目;见
+        # ``self.report_outline``):reflect 没有对话历史,「第三节」「这份报告」
+        # 在这里才有所指。同样排在集合地图之前,理由同下一条注释;空串时摘要
+        # 逐字节不变。
+        if self.report_outline:
+            summary = f"{summary}\n\n{self.report_outline}"
         # 理解块排在集合地图**之前**:地图后面紧跟着一个按剩余额度算出来的
         # 后缀(``_allowance_suffix``),两者是一句话;把理解块插进它们中间会
         # 把那个额度句从它解释的计数上拆开。reflect 的 prompt 签名零改动——

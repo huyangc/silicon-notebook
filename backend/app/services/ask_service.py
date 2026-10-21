@@ -184,9 +184,11 @@ from app.services.report_evidence import (
     with_report_selected,
 )
 from app.services.report_followup import (
+    ReportAdmissionCounts,
     ReportFollowupReaders,
     current_report_followup,
     followup_outline,
+    followup_receipt,
     load_linked_report,
     report_digest,
     report_followup_context,
@@ -195,6 +197,7 @@ from app.services.report_followup import (
     report_mode_supported,
     report_owner_ids,
     report_restore_request,
+    report_trace_step,
     select_report_sections,
     skipped_receipt,
     unread_verdict,
@@ -708,6 +711,26 @@ def _egress_question(prepared: object) -> str:
     return ""
 
 
+def _report_outline_of(prepared: object) -> str:
+    """The outline line of the deep report a prepared reasoning Ask carries
+    (``PreparedReasoningAsk.report_followup``, plan D11): title and section
+    titles when the run reads the report, the title alone when it does not
+    (D5), "" without a report (``followup_outline``). What the planning
+    (through the history) and every reflect round (``ReasoningRetriever
+    .report_outline``) know of the report -- never its body."""
+    return followup_outline(getattr(prepared, "report_followup", None))
+
+
+def _with_report_outline(history: str, outline: str) -> str:
+    """``history`` with the attached report's ``outline`` line after it; the
+    history unchanged when there is no outline. One spelling for the chunk
+    engine's rewrite and expansion (``AskService._report_outline_history``)
+    and the reasoning engine's planning (``ReasoningRunInput.history``)."""
+    if not outline:
+        return history
+    return f"{history}\n\n{outline}" if history else outline
+
+
 def _bounded_gap_model_json(
     client: object, prompt: str, schema_hint: str, *,
     cancel_event: object, deadline: float,
@@ -895,10 +918,14 @@ def _synthesis_step_detail(
         },
         # 按篇原文取样(``read_document``)真正进合成 prompt 的原文元素数。
         # 同样**稀疏**、同样的理由:没有按篇取样的一轮的 detail 与接入这个特性
-        # 之前逐键相等。
+        # 之前逐键相等。关联报告复原证据分区自己进 prompt 的条目数
+        # (``included_report_evidence``)同一条纪律:没读报告的一轮没有这个键。
         **{
             key: counts[key]
-            for key in ("included_document_reads", "included_spreadsheets")
+            for key in (
+                "included_document_reads", "included_spreadsheets",
+                "included_report_evidence",
+            )
             if key in counts
         },
         # 本轮产生的类型化集合清单数(诊断字段,不上屏)。清单本身
@@ -1440,11 +1467,23 @@ class AskService:
         with its cited items read back (``restore=True``). An extension engine
         (``report_mode_supported``) gets ``engine_unsupported`` without a
         single read; a request without a report, or a global run, gets None --
-        installed all the same, so no outer run's report is ever inherited."""
-        return report_followup_context(self._report_followup(
+        installed all the same, so no outer run's report is ever inherited.
+
+        The time the judging and reading took rides on the followup
+        (``ReportFollowup.read_ms``): it happens before any engine runs, and
+        the reasoning trace's ``report`` step is its only account."""
+        import dataclasses
+
+        started = time.perf_counter()
+        followup = self._report_followup(
             notebook_id, getattr(payload, "report_id", None), user_id,
             mode_supported=report_mode_supported(spec), restore=True,
-        ))
+        )
+        if followup is not None:
+            followup = dataclasses.replace(
+                followup, read_ms=round((time.perf_counter() - started) * 1000),
+            )
+        return report_followup_context(followup)
 
     def _report_followup(
         self,
@@ -3169,10 +3208,7 @@ class AskService:
         "这份报告" resolve to the report's own words, and makes a first turn
         with a report rewrite too. The answer prompt keeps the plain history:
         the report reaches it as its own block. Unchanged without a report."""
-        outline = followup_outline(current_report_followup())
-        if not outline:
-            return history
-        return f"{history}\n\n{outline}" if history else outline
+        return _with_report_outline(history, followup_outline(current_report_followup()))
 
     def _report_prompt_parts(
         self, followup: "ReportFollowup | None", query: str,
@@ -3340,6 +3376,165 @@ class AskService:
             citations=tuple(fresh), chunks=tuple(chunks),
             exact_keys=frozenset(anchor.key for anchor in bound),
         )
+
+    def _extend_report_cards(
+        self,
+        citations: List[Citation],
+        report: "ReportTurn | None",
+        anchors: Sequence[AnswerAnchor],
+        notebook_id: str,
+    ) -> ReportCards:
+        """``_report_citations_and_keys`` for the reasoning draft: the fresh
+        cards of the restored items the answer bound are appended to
+        ``citations`` in place (deduplicated against what it already holds),
+        and the ``ReportCards`` are returned for the grounding keys, the anchor
+        image candidates and the card-image exclusion. One call, so the capped
+        ``_draft_reasoning_response`` spends one line on it."""
+        cards = self._report_citations_and_keys(
+            report, anchors, notebook_id, existing=citations,
+        )
+        citations.extend(cards.citations)
+        return cards
+
+    # --- the reasoning engine's side (plan T8) ---------------------------
+
+    def _reasoning_report_turn(self, prepared) -> "ReportTurn | None":
+        """The attached report as a reasoning turn's synthesis uses it, or
+        None when the turn does not read it: the envelope's followup
+        (``PreparedReasoningAsk.report_followup``, D11) with its sections
+        selected for the run's research question (``_report_prompt_parts``,
+        D12) -- the question the understanding step resolved "第三节" or
+        "这份报告" into.
+
+        Deterministic for the envelope, so the trace's ``report`` step
+        (``_reasoning_report_step``), the answer draft and the retrieval-only
+        draft each build it and select the same sections (a lexical score over
+        at most ``REPORT_MAX_SECTIONS`` sections) instead of a mutable turn
+        crossing the stage seams; each draft records its own partition on its
+        own turn.
+
+        ``_draft_reasoning_response`` (a capped hot function) grew by two
+        statements for the report, 564 -> 566 lines in
+        ``architecture_boundary_baseline``: this call and
+        ``_extend_report_cards``. The rest of the wiring rides on lines it
+        already had: the synthesis call takes the turn; the sectioned gate
+        adds ``report is None`` (D8: a turn that reads the report keeps one
+        synthesis -- the report block and its evidence are whole-turn
+        context, and cutting them into sections would either repeat the block
+        k times or hide the report from a section); the synthesis trigger
+        adds the turn (the chunk engine's rule); the restored keys join the
+        exact keys, the restored passages the anchor image candidates, their
+        cards the card-image exclusion (as on the chunk engine, the anchors
+        bring their images); and the response carries the receipt."""
+        return self._report_prompt_parts(
+            getattr(prepared, "report_followup", None), prepared.research_question,
+        )
+
+    def _append_reasoning_report_evidence(
+        self,
+        context_block: str,
+        id_map: dict,
+        report: "ReportTurn | None",
+        *,
+        notebook_id: str,
+        key_offset: int,
+    ) -> tuple[str, dict, int, dict]:
+        """``_assemble_reasoning_context``'s report partition:
+        ``(context_block, id_map, chars it took, counts)``. Without a report
+        the inputs come back as they are, 0 and ``{}``; otherwise the shared
+        ``_append_report_evidence`` appends the partition, the turn records it
+        (``ReportTurn.admit``) and ``counts`` is
+        ``{"included_report_evidence": n}`` -- the partition's own entries in
+        the prompt (items reused from the turn's retrieval are counted where
+        they already were)."""
+        if report is None:
+            return context_block, id_map, 0, {}
+        partition = self._append_report_evidence(
+            context_block, id_map, report.followup, report.selection,
+            notebook_id=notebook_id, key_offset=key_offset,
+        )
+        report.admit(partition)
+        return (
+            partition.context_block, partition.id_map,
+            len(partition.context_block) - len(context_block),
+            {"included_report_evidence": len(partition.id_map) - len(id_map)},
+        )
+
+    @staticmethod
+    def _report_read_back(report: ReportTurn) -> int:
+        """How many report keys of the text the turn reads name an item the
+        run read back from the notebook -- the membership the evidence
+        partition starts from (an item in ``RestoredReportEvidence
+        .key_by_object`` that came back). The partition later splits them
+        into loaded and not loaded, which the receipt reports."""
+        restored = report.followup.restored or RestoredReportEvidence()
+        present = {
+            *((RESTORED_KIND_CHUNK, item.chunk_id) for item in restored.chunks),
+            *((RESTORED_KIND_ELEMENT, item.element_id) for item in restored.elements),
+            *((RESTORED_KIND_KG, item.object_id) for item in restored.knowledge),
+            *((RESTORED_KIND_MEMORY, item.memory_id) for item in restored.memory),
+        }
+        object_of = {
+            key: obj for obj, keys in restored.key_by_object.items() for key in keys
+        }
+        return sum(1 for key in report.selection.keys if object_of.get(key) in present)
+
+    def _reasoning_report_step(self, prepared) -> "TraceStep | None":
+        """The reasoning trace's ``report`` step (``report_trace_step``), or
+        None when the request attached no report.
+
+        Written where the run has judged and read the report and selected its
+        sections -- after the intent step, before the Memory step -- so it
+        says what the engine did then: which parts it reads (the sections are
+        final here) and how many of their cited items it read back from the
+        notebook, or why it reads nothing. The evidence partition is
+        assembled later, at synthesis; how many of those items then entered
+        the prompt and how many were left out for space is the receipt's
+        account (``LinkedReportReceipt``), so the step's ``evidence_restored``
+        is the read-back count and its ``evidence_over_budget`` is 0 -- the
+        Memory step's rule: the trace records the recall, not the
+        attribution. ``duration_ms`` is the judging and reading done at the
+        engine entry (``ReportFollowup.read_ms``) plus the selection, so the
+        trace still accounts for the whole run."""
+        followup = getattr(prepared, "report_followup", None)
+        if followup is None:
+            return None
+        started = time.perf_counter()
+        report = self._reasoning_report_turn(prepared)
+        if report is None:
+            receipt = skipped_receipt(
+                followup, followup.verdict.reason_code or REASON_NO_SYNTHESIS,
+            )
+        else:
+            receipt = followup_receipt(
+                followup, selection=report.selection, read=True,
+                admission_counts=ReportAdmissionCounts(
+                    restored=self._report_read_back(report),
+                ),
+            )
+        step = report_trace_step(
+            receipt, digest=followup.digest if report is not None else None,
+        )
+        return step.model_copy(update={"duration_ms": (followup.read_ms or 0) + round(
+            (time.perf_counter() - started) * 1000
+        )})
+
+    def _record_report_and_memory_steps(
+        self, prepared, record: Callable[[TraceStep], None],
+        record_memory_step: Callable[[], None],
+    ) -> None:
+        """``_run_reasoning_stage``'s Memory-step seat, with the attached
+        report's step (``_reasoning_report_step``) recorded just before it:
+        after the intent step, and -- like the Memory step -- only on a run
+        that got past every short circuit, so a turn that never answers
+        leaves no "read the report" behind (its receipt says
+        ``no_synthesis``). ``record`` is the stage's ``checked_pre_trace``.
+        One call at the seat the Memory step already had, so the capped
+        ``_run_reasoning_stage`` does not grow."""
+        step = self._reasoning_report_step(prepared)
+        if step is not None:
+            record(step)
+        record_memory_step()
 
     def _needs_index(self, notebook_id: str) -> bool:
         """大库且磁盘完全无 scale 索引(从未建过)→ True。用于 AskResponse.index_required:
@@ -4264,11 +4459,23 @@ class AskService:
         trailing_chunks=(),
         refine: bool = True,
         citation_lookups: "CitationLookups | None" = None,
+        report: "ReportTurn | None" = None,
     ) -> "_ReasoningContext":
         """The reasoning synthesis context, assembled exactly as
         ``_answer_reasoning`` sends it (its parameters, same meaning; see that
         docstring): partitions, budgets, keys, the external segment and the
         per-partition counts, plus the baseline-manifest capture.
+
+        ``report`` (the turn reads an attached report,
+        ``_reasoning_report_turn``): its evidence partition
+        (``_append_report_evidence``, own budget, native key bands after this
+        section's keys) goes after the total-budget clip and the refinement
+        and before the external segment, and is recorded on it
+        (``ReportTurn.admit``). ``baseline["budget_chars"]`` adds what the
+        partition actually took, the way it adds the external segment's, and
+        ``counts`` gains ``included_report_evidence`` (the partition's own
+        entries in the prompt; sparse: absent without a report). None: as
+        before, byte for byte.
 
         ``refine`` runs the optional ``evidence_refine`` call that prepends a
         model-written summary.  ``_answer_reasoning`` refines outside the
@@ -4447,6 +4654,14 @@ class AskService:
                 budget_chars=total_context_budget,
             )
         context_block = clip(context_block, total_context_budget)
+        # 关联报告的复原证据分区:总预算截断与精炼之后、外部证据之前,自带预算
+        # (见 docstring 的 ``report`` 一段)。
+        context_block, id_map, report_chars, report_counts = (
+            self._append_reasoning_report_evidence(
+                context_block, id_map, report,
+                notebook_id=notebook_id, key_offset=key_offset,
+            )
+        )
         # 外部证据段拼在最后,自带独立预算——理由见 ``_append_external_context``。
         # ``has_external`` 是 answer_prompt 那条规则唯一的闸:块真的进了上下文
         # 才追加规则句(设计文档 §九 不变量 9 的另一半在 reflect 侧)。
@@ -4515,6 +4730,9 @@ class AskService:
             # 加,counts 与接入这个特性之前逐键相等(理由见
             # ``_append_external_context``)。
             **external_counts,
+            # 关联报告复原证据分区自己进 prompt 的条目数,同样**稀疏**:没挂报告
+            # (或本轮不读报告)时不出现。
+            **report_counts,
         }
         baseline = {
             "context_block": context_block,
@@ -4528,8 +4746,9 @@ class AskService:
             # 才是真实上界——而且是**实际**占用而不是名义上限
             # ``EXTERNAL_EVIDENCE_CONTEXT_CHARS``,否则零外部证据的一轮会
             # 报出一个从来没打算花的额度。
+            # 关联报告的复原证据分区同理:另加的独立预算,按实际占用计入。
             "budget_chars": (
-                total_context_budget
+                total_context_budget + report_chars
                 + len(context_block) - len(pre_external_block)
             ),
             "capture_error_count": int(
@@ -4580,6 +4799,7 @@ class AskService:
         *,
         trailing_chunks=(),
         citation_lookups: "CitationLookups | None" = None,
+        report: "ReportTurn | None" = None,
     ):
         """Synthesise the reasoning-mode answer. When PPR chunks are present they
         become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
@@ -4634,6 +4854,11 @@ class AskService:
         的每一节、``_answer_with_retry`` 的重试与回退的单次合成都传同一份,所以
         同一个键在一个 run 里至多读一次;缺省则本次装配新建一份。
 
+        ``report``:本轮读入的关联报告(``_reasoning_report_turn``)——复原证据分区
+        进上下文(见 ``_assemble_reasoning_context``)、报告块进
+        ``answer_prompt(report_block=...)``;只出现在单次合成里(D8:读入报告的
+        轮次不按节合成)。None = 接入前逐字行为。
+
         """
         context = self._assemble_reasoning_context(
             notebook_id, question, top_hits, elements,
@@ -4655,6 +4880,7 @@ class AskService:
                 citation_lookups if citation_lookups is not None
                 else CitationLookups()
             ),
+            report=report,
         )
         context_block, id_map, has_external = (
             context.context_block, context.id_map, context.has_external)
@@ -4681,6 +4907,7 @@ class AskService:
                 style_block=style_block,
                 external_rules=has_external,
                 peer_notebooks=subjectless_run_active(),
+                report_block=report.enter_prompt() if report is not None else "",
             )}],
             ANSWER_SCHEMA_HINT,
             timeout=self.settings.reasoning_timeout_seconds,
@@ -5833,8 +6060,15 @@ class AskService:
         followup = current_followup_resolution()
         if followup is not None and followup.question != question:
             followup = None
+        # The deep report the request attached, as the engine entry judged and
+        # read it (plan D11): it rides on the envelope to the later stages. A
+        # request that names one names its referent itself, so the
+        # compatibility gate stands down for it (D5) -- as the entry gate
+        # already did, which is what admitted the request this far.
+        linked_report = current_report_followup()
         intent_contract = self._confirmed_reasoning_intent(
             payload, history, followup.resolved_question if followup else "",
+            linked_report=followup_outline(linked_report),
         )
         reasoning_history = history
         limits = ask_retrieval_limits(payload.retrieval_effort)
@@ -5932,6 +6166,7 @@ class AskService:
             job_id=job_id,
             asked_at=payload.asked_at,
             retrieval_effort=payload.retrieval_effort,
+            report_followup=linked_report,
         )
 
     def _commit_reasoning_draft(self, draft, runtime, prepared):
@@ -6617,6 +6852,7 @@ class AskService:
 
     def _build_reasoning_retriever(
         self, *, cancel_event, user_id: str, egress_question: str = "",
+        report_outline: str = "",
     ):
         """The one production ``ReasoningRetriever`` construction for Ask.
 
@@ -6629,6 +6865,10 @@ class AskService:
         ``egress_question`` 是插件 reflect 动作**唯一**会被送出部署的用户措辞
         (由 ``_egress_question(prepared)`` 算出,与 gap consultation 同一把
         privacy 闸)。缺省空串是 fail-closed:没传就一条插件动作都不提供。
+
+        ``report_outline``:本轮挂上的深度报告的大纲行(``_report_outline_of
+        (prepared)``),进每轮 reflect 摘要(``ReasoningRetriever.report_outline``);
+        缺省空串 = 没挂报告,reflect prompt 逐字节不变。
         """
         from app.services.reasoning_retrieval import ReasoningRetriever
 
@@ -6671,6 +6911,7 @@ class AskService:
             # `_plugin_actions_offered`),所以「没接线」的失败方向是关闭而不是
             # 拿一个不该出站的串去顶。
             plugin_egress_question=egress_question,
+            report_outline=report_outline,
         )
 
     def _attach_gap_consult_result(
@@ -7074,7 +7315,7 @@ class AskService:
             # stays idempotent because the structured branch may emit it earlier.
             # 记忆那一步排在这里:上面每一条短路返回都不会产出答案,在它们之前记
             # 就等于给一次没发生的作答留下「用过你的记忆」的痕迹。
-            record_memory_step()
+            self._record_report_and_memory_steps(prepared, checked_pre_trace, record_memory_step)
 
             def checked_trace(step):
                 raise_if_cancelled(cancel_event)
@@ -7094,7 +7335,7 @@ class AskService:
 
                 retriever = self._build_reasoning_retriever(
                     cancel_event=cancel_event, user_id=user_id,
-                    egress_question=_egress_question(prepared))
+                    egress_question=_egress_question(prepared), report_outline=_report_outline_of(prepared))
                 retrieval_runtime = ReasoningRetrievalRuntime(
                     scope=runtime.scope,
                     retrieval_run=runtime.retrieval_run,
@@ -7106,7 +7347,7 @@ class AskService:
                     retriever,
                     ReasoningRunInput(
                         notebook_id=notebook_id, question=research_question,
-                        history=reasoning_history,
+                        history=_with_report_outline(reasoning_history, _report_outline_of(prepared)),
                         top_n=None, max_steps=None,
                         intent_queries=tuple(intent_queries), limits=limits, intent_keywords=prepared.intent_keywords,
                         # 关闭字段投影与 intent trace 同源；检索器只能通过
@@ -7742,6 +7983,7 @@ class AskService:
         reasoning_outline = list(stage.outline)
         reasoning_outline_evidence = list(stage.outline_evidence)
         historical_reasoning_chunks = list(stage.historical_chunks)
+        report = self._reasoning_report_turn(prepared)  # 关联报告:见其 docstring
         on_trace = runtime.trace_sink
         cancel_event = runtime.cancellation
         # 与 ``_answer_with_retry`` 同一条惯例:响应内报警表是请求局部
@@ -7834,7 +8076,7 @@ class AskService:
                 baseline_sink=reasoning_baseline,
                 external_evidence=stage.external_evidence,
                 external_sink=admitted_external,
-                style_block=style_block, citation_lookups=run_lookups)
+                style_block=style_block, citation_lookups=run_lookups, report=report)
             return ans, llm_grounded_, anchors_
 
         # ---------------------------------------------- 按节合成(设计文档 §3.1)
@@ -7886,7 +8128,7 @@ class AskService:
                 # 单次合成路径的清单预览/覆盖披露机制是成熟的,清单类问题本来
                 # 就该走它;清单进节切片是 v2 的设计题,不在绕过里偷做。
                 if (len(outline_slices) >= 2 and not enumerations
-                        and structured_batch is None):
+                        and structured_batch is None and report is None):
                     outline_attempted = True
                     sectioned = self._answer_reasoning_sections(
                         notebook_id, research_question, outline_slices,
@@ -7922,7 +8164,7 @@ class AskService:
         elif answer_client.configured and (
                 top_hits or elements or chunks or chains or memory_hits
                 or structured_batch is not None or enumerations
-                or collection_map_prompt_block or stage.external_evidence):
+                or collection_map_prompt_block or stage.external_evidence or report):
             # 空 content 有界重试 + 诚实降级 + 可观测,统一走 _answer_with_retry(见其 docstring)。
             fallback_err_mark = len(_err_sink)
             answer, llm_grounded, anchors, _ok = self._answer_with_retry(
@@ -7998,6 +8240,7 @@ class AskService:
         # 这些卡不参与附图(见下面 attach_citation_images 处按身份排除的理由)。
         chunk_cards = self._reasoning_chunk_cards(chunks, reasoning_baseline, notebook_id)
         citations.extend(chunk_cards)
+        report_cards = self._extend_report_cards(citations, report, anchors, notebook_id)
         # Typed collection rows have their own deterministic k5001+
         # bindings.  Mirror the cited rows into the fallback Citation
         # contract as well, while keeping the anchor path authoritative.
@@ -8006,7 +8249,7 @@ class AskService:
         # 里(`typed_collection_results` 把同一个对象挂进 `TypedCollectionItem
         # .citation`),所以下面那次 `attach_citation_images` 必须按身份把它们
         # 排除——理由写在那处。
-        collection_citation_ids: set[int] = {id(c) for c in chunk_cards}
+        collection_citation_ids: set[int] = {id(c) for c in (*chunk_cards, *report_cards.citations)}
         for anchor in anchors:
             citation = collection_item_citations.get(anchor.object_id)
             if citation is None:
@@ -8042,7 +8285,7 @@ class AskService:
             key
             for key, context in structured_map.items()
             if context.get("source_id") and context.get("element_id")
-        } | self._external_exact_keys(anchors)
+        } | self._external_exact_keys(anchors) | report_cards.exact_keys
         evidence_level, top_relevance = classify_evidence(
             evidence_pool, anchors, llm_grounded,
             self.settings.evidence_tau_low, self.settings.evidence_tau_high,
@@ -8089,7 +8332,7 @@ class AskService:
         # 引了同一段时锚点候选已含它——不排除就是同一张图在每答案预算里扣两次。
         self.evidence_context.attach_citation_images(
             anchor_image_targets(
-                anchors, {item.chunk_id: item.element_ids for item in chunks}
+                anchors, {item.chunk_id: item.element_ids for item in (*chunks, *report_cards.chunks)}
             ) + [
                 (citation, ()) for citation in citations
                 if id(citation) not in collection_citation_ids
@@ -8222,7 +8465,7 @@ class AskService:
             # 走到这里说明这一轮真的跑了检索与作答,但「本笔记本还没有知识
             # 图谱」这件事没有因此变成假的:旗标继续如实上报,前端的建图提示
             # 与答案并存。它只是不再是一道闸。
-            kg_required=no_usable_kg,
+            kg_required=no_usable_kg, linked_report=report.receipt() if report else None,
         )
 
         response.mode = "reasoning"
@@ -8265,6 +8508,14 @@ class AskService:
         and the trace) so the stage-boundary type checks and
         ``_commit_reasoning_draft``'s identity sweep apply unchanged; the
         commit boundary returns ``draft.evidence`` and saves nothing.
+
+        An attached report the turn reads (``_reasoning_report_turn``) is
+        handled as by the answer: it makes the turn one with evidence, its
+        partition joins the context, its objects count under their own kinds
+        (``with_report_selected``) and the output carries the ``read``
+        receipt -- the output stands in for the answer prompt the block would
+        have entered (an unread report is stamped ``skipped`` by
+        ``ask_evidence``).
         """
         from app.application.ask_reasoning import (
             ReasoningResponseDraft,
@@ -8292,9 +8543,11 @@ class AskService:
             "retrieval_query": prepared.research_question,
             "intent": stage.intent_contract,
         }
+        report = self._reasoning_report_turn(prepared)
         if not (stage.top_hits or stage.elements or stage.chunks or stage.chains
                 or stage.memory_hits or stage.structured_batch is not None
-                or stage.enumerations or map_block or stage.external_evidence):
+                or stage.enumerations or map_block or stage.external_evidence
+                or report):
             evidence = AskEvidence(
                 mode="reasoning", evidence_kind="none",
                 notice=_NO_RETRIEVAL_EVIDENCE_MESSAGE, **common,
@@ -8312,6 +8565,7 @@ class AskService:
                 collection_map_block=map_block,
                 external_evidence=stage.external_evidence,
                 refine=False,
+                report=report,
             )
             manifest = stage.candidate_manifest
             recalled = (
@@ -8331,14 +8585,17 @@ class AskService:
                 budget_chars=int(context.baseline.get("budget_chars") or 0),
                 **common,
             )
-            _recount_selected(evidence, {
+            # The report partition's objects count under their own kinds.
+            _recount_selected(evidence, with_report_selected({
                 "chunk": len({item.chunk_id for item in stage.chunks}),
                 "kg": len({hit.object_id for hit in stage.top_hits})
                 + len(stage.chains),
                 "element": len(stage.elements),
                 "external": len(stage.external_evidence),
                 "memory": len(stage.memory_hits),
-            })
+            }, report))
+        if report is not None:
+            evidence.linked_report = report.receipt(read=True)
         step = TraceStep(
             step_type="skip",
             summary=f"仅检索：已返回 {len(evidence.items)} 条证据，未生成回答",

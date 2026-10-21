@@ -323,13 +323,20 @@ class ReportFollowup:
 
     ``digest`` is None when the report could not be read at all (gone, not
     finished, read error, extension engine) and ``restored`` is None unless the
-    verdict is readable and the references were read back."""
+    verdict is readable and the references were read back.
+
+    ``read_ms`` is how long the run's own judging and reading took (the
+    report row, the owner maps, the participant set, the restore), measured
+    where the engine is entered; None when nobody measured it. It is the
+    reasoning trace's account of that work (its ``report`` step) and takes no
+    part in comparing two followups."""
 
     report_id: str
     title: str
     digest: Optional[ReportDigest]
     verdict: ReportLinkVerdict
     restored: Optional[RestoredReportEvidence] = None
+    read_ms: Optional[int] = field(default=None, compare=False)
 
 
 __all__ = [
