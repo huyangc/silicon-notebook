@@ -292,7 +292,8 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "GovernanceStore.lock_memory_teardown_objects_on": MAINTENANCE,
         "GovernanceStore.merge_followers_on": MAINTENANCE,
         "GovernanceStore.apply_merge_follow_actions_on": MAINTENANCE,
-        "GovernanceStore.heal_merged_away_candidates_on": MAINTENANCE,
+        "GovernanceStore.heal_merged_away_candidates": MAINTENANCE,
+        "GovernanceStore._merge_heal_holders_on": MAINTENANCE,
         # PR-E8: a promotion source's teardown strips its entries and deletes
         # only the objects left without evidence; hands nothing to a reader
         "GovernanceStore.detach_promotion_sources_on": MAINTENANCE,

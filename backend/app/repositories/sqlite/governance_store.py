@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from app.core.text_whitespace import PY_STRIP_WHITESPACE
 from app.repositories.sqlite.database import SqliteDatabase
@@ -49,18 +49,24 @@ from app.domain.memory_kg_isolation import (
     MemoryPromotionRefused,
     PromotionObjectMissing,
     FOLLOW_RESTORE,
+    ABSORBS_PAYLOAD_KEY,
     MERGED_INTO_PAYLOAD_KEY,
     MemoryMergeDetach,
     MergeFollowAction,
     followed_payload,
+    marked_absorbs,
     marked_merged_into,
+    heal_action,
+    patched_payload,
     merge_evidence_source_ids,
     memory_merge_refusal,
     plan_merge_follow_actions,
-    without_merge_marker,
 )
 
 _REVIEW_STATUSES = frozenset({"pending", "verified", "rejected"})
+
+#: Memory sources per objects statement of the merge-heal backstop read.
+_HEAL_SOURCE_BATCH = 200
 
 # Pagination width for the review queue's endpoint-object lookup — a page size,
 # not a cap: every endpoint id is fetched.  500 is the store-wide convention
@@ -1959,13 +1965,14 @@ class GovernanceStore:
         now: str,
         *,
         wait: bool,
+        lock_timeout_ms: Optional[int] = None,
     ) -> tuple:
         """Mirror of the PostgreSQL twin minus its locks (the caller's
         ``BEGIN IMMEDIATE`` serialises writers, so nothing is ever skipped):
         rewrite each still-deprecated row whose marker still equals the
         action's ``expected_target`` and whose Memory row still exists.
         Returns ``(applied, skipped)``; ``skipped`` is always empty."""
-        del wait  # nothing to wait for under SQLite's single writer
+        del wait, lock_timeout_ms  # nothing to wait for under SQLite's single writer
         applied: List[MergeFollowAction] = []
         by_notebook: Dict[str, Dict[str, MergeFollowAction]] = {}
         for action in actions:
@@ -2022,7 +2029,9 @@ class GovernanceStore:
             dict(row)
             for row in connection.execute(
                 "SELECT id, source_id, status, "
-                f"CASE WHEN json_valid(payload) THEN {marker} END AS marker "
+                f"CASE WHEN json_valid(payload) THEN {marker} END AS marker, "
+                "CASE WHEN json_valid(payload) THEN "
+                f"json_extract(payload, '$.{ABSORBS_PAYLOAD_KEY}') END AS absorbs "
                 "FROM knowledge_objects "
                 f"WHERE {id_drive_by('source_id', owners)} AND +notebook_id = ?",
                 (owners.param, notebook_id),
@@ -2046,8 +2055,12 @@ class GovernanceStore:
             connection, notebook_id, ids
         )
         applied: List[MergeFollowAction] = []
-        followers = GovernanceStore.merge_followers_on(
-            connection, notebook_id, ids, [str(row["id"]) for row in own]
+        followers = (
+            GovernanceStore.merge_followers_on(
+                connection, notebook_id, ids, [str(row["id"]) for row in own]
+            )
+            if any(row["absorbs"] for row in own)
+            else []
         )
         if followers:
             actions = plan_merge_follow_actions(
@@ -2061,34 +2074,101 @@ class GovernanceStore:
         GovernanceStore.strip_sources_evidence_on(connection, notebook_id, ids, now)
         return MemoryMergeDetach(tuple(applied), ())
 
-    @staticmethod
-    def heal_merged_away_candidates_on(
-        connection: sqlite3.Connection, limit: int, after: str = ""
-    ) -> List[MergeFollowAction]:
-        """Mirror of the PostgreSQL twin: one keyset page of restore actions
-        for deprecated Memory objects whose merge marker names an object that
-        no longer exists and whose Memory row still exists."""
-        marker = f"json_extract(ko.payload, '$.{MERGED_INTO_PAYLOAD_KEY}')"
-        rows = connection.execute(
-            f"SELECT ko.notebook_id, ko.id, {marker} AS marker "
-            "FROM sources s JOIN knowledge_objects ko ON ko.source_id = s.id "
-            "AND ko.notebook_id = s.notebook_id "
-            f"WHERE {hidden_type_index_term('s')} "
-            f"AND {memory_source_type_predicate('s.source_type')} "
-            "AND ko.status = 'deprecated' AND json_valid(ko.payload) "
-            f"AND {marker} IS NOT NULL AND ko.id > ? "
-            "AND EXISTS (SELECT 1 FROM memory_items m WHERE m.id = s.memory_id) "
-            "AND NOT EXISTS (SELECT 1 FROM knowledge_objects t "
-            f"WHERE t.id = {marker}) "
-            "ORDER BY ko.id LIMIT ?",
-            (after, max(1, int(limit))),
-        ).fetchall()
-        return [
-            MergeFollowAction(
-                str(row["notebook_id"]), str(row["id"]), str(row["marker"]),
-                FOLLOW_RESTORE,
+    def heal_merged_away_candidates(
+        self,
+        limit: int,
+        after: tuple = ("", ""),
+        *,
+        notebook_id: Optional[str] = None,
+    ) -> tuple:
+        """Mirror of the PostgreSQL twin, on a plain read connection (never
+        ``BEGIN IMMEDIATE``: the backstop blocks no writer while it reads).
+        The walk is pinned to the Memory volume: the Memory sources come from
+        the partial index of hidden sources (``INDEXED BY
+        idx_sources_nb_hidden_type`` — without statistics SQLite would
+        otherwise walk the whole sources table, or the objects' primary key),
+        their objects from ``idx_knowledge_objects_source``."""
+        limit = max(1, int(limit))
+        key = f"'$.{MERGED_INTO_PAYLOAD_KEY}'"
+        actions: List[MergeFollowAction] = []
+        next_after = tuple(after)
+        with self.database.connect() as db:
+            scope = " AND s.notebook_id = ?" if notebook_id else ""
+            sources = sorted(
+                str(row["id"])
+                for row in db.execute(
+                    "SELECT s.id FROM sources s INDEXED BY idx_sources_nb_hidden_type "
+                    "JOIN memory_items m ON m.id = s.memory_id "
+                    f"WHERE {hidden_type_index_term('s')} "
+                    f"AND {memory_source_type_predicate('s.source_type')}{scope}",
+                    (notebook_id,) if notebook_id else (),
+                ).fetchall()
+                if str(row["id"]) >= next_after[0]
             )
-            for row in rows
+            backfilled: Dict[str, bool] = {}
+            for offset in range(0, len(sources), _HEAL_SOURCE_BATCH):
+                bound = id_bind_ids(sources[offset:offset + _HEAL_SOURCE_BATCH], sort=True)
+                marker = f"json_extract(ko.payload, {key})"
+                rows = db.execute(
+                    f"SELECT ko.id, ko.source_id, ko.notebook_id, {marker} AS marker, "
+                    "ko.evidence FROM knowledge_objects ko "
+                    "INDEXED BY idx_knowledge_objects_source "
+                    f"WHERE {id_drive_by('ko.source_id', bound)} "
+                    "AND ko.status = 'deprecated' AND json_valid(ko.payload) "
+                    f"AND {marker} IS NOT NULL "
+                    "AND NOT EXISTS (SELECT 1 FROM knowledge_objects t "
+                    f"WHERE t.id = {marker})",
+                    (bound.param,),
+                ).fetchall()
+                for row in sorted(rows, key=lambda r: (str(r["source_id"]), str(r["id"]))):
+                    position = (str(row["source_id"]), str(row["id"]))
+                    if position <= next_after:
+                        continue
+                    evidence = json.loads(row["evidence"] or "[]")
+                    holders = (
+                        GovernanceStore._merge_heal_holders_on(db, row, backfilled)
+                        if evidence else []
+                    )
+                    actions.append(heal_action(
+                        str(row["notebook_id"]), str(row["id"]), str(row["marker"]),
+                        evidence, holders,
+                    ))
+                    next_after = position
+                    if len(actions) >= limit:
+                        return actions, next_after
+        return actions, next_after
+
+    @staticmethod
+    def _merge_heal_holders_on(
+        connection: sqlite3.Connection, row: Any, backfilled: Dict[str, bool]
+    ) -> List[tuple]:
+        """Mirror of the PostgreSQL twin."""
+        notebook_id = str(row["notebook_id"])
+        if notebook_id not in backfilled:
+            backfilled[notebook_id] = KnowledgeStore.source_index_backfilled(
+                connection, notebook_id
+            )
+        if backfilled[notebook_id]:
+            rows = connection.execute(
+                "SELECT o.id, o.status, o.evidence FROM knowledge_object_sources kos "
+                "JOIN knowledge_objects o ON o.id = kos.object_id "
+                "WHERE kos.source_id = ? AND kos.notebook_id = ? AND o.id <> ? "
+                "AND o.source_id IS NOT ?",
+                (row["source_id"], notebook_id, row["id"], row["source_id"]),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT DISTINCT ko.id, ko.status, ko.evidence FROM knowledge_objects ko "
+                "JOIN json_each(CASE WHEN json_valid(ko.evidence) AND "
+                "json_type(ko.evidence) = 'array' THEN ko.evidence ELSE '[]' END) AS item "
+                "WHERE ko.notebook_id = ? AND ko.id <> ? AND ko.source_id IS NOT ? "
+                "AND item.type = 'object' "
+                "AND json_extract(item.value, '$.source_id') = ?",
+                (notebook_id, row["id"], row["source_id"], row["source_id"]),
+            ).fetchall()
+        return [
+            (str(r["id"]), str(r["status"]), json.loads(r["evidence"] or "[]"))
+            for r in rows
         ]
 
     @staticmethod
@@ -2163,8 +2243,11 @@ class GovernanceStore:
             # A hand edit of status or content clears the merge marker: only a
             # merge writes it, so a hand-deprecated object is never restored.
             parsed = json.loads(new_payload or "{}")
-            if isinstance(parsed, dict) and MERGED_INTO_PAYLOAD_KEY in parsed:
-                new_payload = json.dumps(without_merge_marker(parsed), ensure_ascii=False)
+            old = json.loads(row["payload"] or "{}")
+            if isinstance(parsed, dict) and isinstance(old, dict):
+                patched = patched_payload(parsed, old)
+                if patched != parsed:
+                    new_payload = json.dumps(patched, ensure_ascii=False)
         new_status = payload.status if payload.status is not None else row["status"]
         new_owner = payload.owner if payload.owner is not None else row["owner"]
         # Stamp last_reviewed whenever a curator changes status.
@@ -2290,6 +2373,16 @@ class GovernanceStore:
                         ensure_ascii=False,
                     ),
                     source_id,
+                ),
+            )
+            connection.execute(
+                "UPDATE knowledge_objects SET payload = ? WHERE id = ?",
+                (
+                    json.dumps(
+                        marked_absorbs(json.loads(tgt["payload"] or "{}")),
+                        ensure_ascii=False,
+                    ),
+                    into_id,
                 ),
             )
         return connection.execute(

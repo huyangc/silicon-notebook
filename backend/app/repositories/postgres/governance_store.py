@@ -56,18 +56,24 @@ from app.domain.memory_kg_isolation import (
     MemoryPromotionRefused,
     PromotionObjectMissing,
     FOLLOW_RESTORE,
+    ABSORBS_PAYLOAD_KEY,
     MERGED_INTO_PAYLOAD_KEY,
     MemoryMergeDetach,
     MergeFollowAction,
     followed_payload,
+    marked_absorbs,
     marked_merged_into,
+    heal_action,
+    patched_payload,
     merge_evidence_source_ids,
     memory_merge_refusal,
     plan_merge_follow_actions,
-    without_merge_marker,
 )
 
 _REVIEW_STATUSES = frozenset({"pending", "verified", "rejected"})
+
+#: Memory sources per objects statement of the merge-heal backstop read.
+_HEAL_SOURCE_BATCH = 200
 
 # Pagination width for the review queue's endpoint-object lookup — a page size,
 # not a cap: every endpoint id is fetched.  500 is the store-wide convention
@@ -2186,7 +2192,10 @@ class GovernanceStore:
         owners = id_bind_ids(ids)
         key = MERGED_INTO_PAYLOAD_KEY
         backfilled = KnowledgeStore.source_index_backfilled(connection, notebook_id)
-        columns = f"ko.id, ko.source_id, ko.status, ko.payload->>'{key}' AS marker"
+        columns = (
+            f"ko.id, ko.source_id, ko.status, ko.payload->>'{key}' AS marker, "
+            f"COALESCE(ko.payload->>'{ABSORBS_PAYLOAD_KEY}', '') = 'true' AS absorbs"
+        )
         cited: Optional[set] = None
         if backfilled:
             rows = id_execute_ids(
@@ -2268,6 +2277,7 @@ class GovernanceStore:
         now: str,
         *,
         wait: bool,
+        lock_timeout_ms: Optional[int] = None,
     ) -> tuple[List[MergeFollowAction], List[MergeFollowAction]]:
         """Apply ``actions`` (``plan_merge_follow_actions``) in the caller's
         transaction, per notebook. Lock order, source → object rows: the
@@ -2284,11 +2294,15 @@ class GovernanceStore:
         extraction publish, an element swap, or a transaction about to roll
         back — and what could not be locked is returned as skipped, for the
         caller to re-run after its commit with ``wait=True`` (a short
-        transaction of its own that holds nothing else). Returns
+        transaction of its own that holds nothing else). ``lock_timeout_ms``
+        bounds that wait (``SET LOCAL lock_timeout``): a holder that keeps its
+        lock longer fails the re-run, which is left to the backstop. Returns
         ``(applied, skipped)``."""
         applied: List[MergeFollowAction] = []
         skipped: List[MergeFollowAction] = []
         skip = "" if wait else " SKIP LOCKED"
+        if wait and lock_timeout_ms:
+            connection.execute(f"SET LOCAL lock_timeout = '{int(lock_timeout_ms)}ms'")
         by_notebook: Dict[str, Dict[str, MergeFollowAction]] = {}
         for action in actions:
             by_notebook.setdefault(action.notebook_id, {})[action.object_id] = action
@@ -2364,8 +2378,15 @@ class GovernanceStore:
         )
         applied: List[MergeFollowAction] = []
         skipped: List[MergeFollowAction] = []
-        followers = GovernanceStore.merge_followers_on(
-            connection, notebook_id, source_ids, [row["id"] for row in own]
+        # The follower read only when one of the sources' own objects has
+        # absorbed an own-Memory merge (ABSORBS_PAYLOAD_KEY): a plain Memory
+        # removal or edit pays the up-front lock and nothing else.
+        followers = (
+            GovernanceStore.merge_followers_on(
+                connection, notebook_id, source_ids, [row["id"] for row in own]
+            )
+            if any(row["absorbs"] for row in own)
+            else []
         )
         if followers:
             actions = plan_merge_follow_actions(
@@ -2381,37 +2402,116 @@ class GovernanceStore:
         )
         return MemoryMergeDetach(tuple(applied), tuple(skipped))
 
-    @staticmethod
-    def heal_merged_away_candidates_on(
-        connection: Any, limit: int, after: str = ""
-    ) -> List[MergeFollowAction]:
-        """The self-healing backstop's read (startup, after readiness): one
-        keyset page of restore actions for the deprecated Memory objects
-        whose merge marker names an object that no longer exists and whose
-        own Memory row still exists — what a skipped in-transaction step
-        whose after-commit re-run also failed left behind. Driven by the
-        Memory sources (``idx_sources_nb_hidden_type``); no lock (the apply
-        step locks and re-checks)."""
+    def heal_merged_away_candidates(
+        self,
+        limit: int,
+        after: tuple = ("", ""),
+        *,
+        notebook_id: Optional[str] = None,
+    ) -> tuple[List[MergeFollowAction], tuple]:
+        """The self-healing backstop's read, on a read-only connection of its
+        own (never inside a write transaction): one keyset page — keyed on
+        ``(source id, object id)`` — of follow-up actions for the deprecated
+        Memory objects whose merge marker names an object that no longer
+        exists and whose own Memory row still exists: what a skipped
+        in-transaction step whose after-commit re-run also failed left
+        behind. ``notebook_id`` limits it to one notebook.
+
+        Bounded by the Memory volume, never by the tables: the Memory sources
+        with a live Memory row are read first (``idx_sources_nb_hidden_type``,
+        a partial index of the hidden sources), then their objects by source
+        (``idx_knowledge_objects_source``), ``_HEAL_SOURCE_BATCH`` sources per
+        statement; with nothing to heal that is the same walk and an empty
+        page. Each candidate is re-checked with ``heal_action``: if another
+        object still carries all of its own evidence entries (a chain link
+        the skipped step would have re-pointed to), it is re-pointed there
+        instead of restored, so the backstop never restores a second copy.
+        Returns ``(actions, next_after)``; no lock (the apply step locks and
+        re-checks every row)."""
+        limit = max(1, int(limit))
         key = MERGED_INTO_PAYLOAD_KEY
-        rows = connection.execute(
-            f"SELECT ko.notebook_id, ko.id, ko.payload->>'{key}' AS marker "
-            "FROM sources s JOIN knowledge_objects ko ON ko.source_id = s.id "
-            "AND ko.notebook_id = s.notebook_id "
-            f"WHERE {memory_source_type_predicate('s.source_type')} "
-            f"AND ko.status = 'deprecated' AND ko.payload->>'{key}' IS NOT NULL "
-            "AND ko.id COLLATE \"C\" > %s "
-            "AND EXISTS (SELECT 1 FROM memory_items m WHERE m.id = s.memory_id) "
-            "AND NOT EXISTS (SELECT 1 FROM knowledge_objects t "
-            f"WHERE t.id = ko.payload->>'{key}') "
-            "ORDER BY ko.id COLLATE \"C\" LIMIT %s",
-            (after, max(1, int(limit))),
-        ).fetchall()
-        return [
-            MergeFollowAction(
-                str(row["notebook_id"]), str(row["id"]), str(row["marker"]),
-                FOLLOW_RESTORE,
+        actions: List[MergeFollowAction] = []
+        next_after = tuple(after)
+        with self.database.connect() as db:
+            db.read_only = True
+            scope = " AND s.notebook_id = %s" if notebook_id else ""
+            sources = sorted(
+                str(row["id"])
+                for row in db.execute(
+                    "SELECT s.id FROM sources s JOIN memory_items m ON m.id = s.memory_id "
+                    f"WHERE {memory_source_type_predicate('s.source_type')}{scope}",
+                    (notebook_id,) if notebook_id else (),
+                ).fetchall()
+                if str(row["id"]) >= next_after[0]
             )
-            for row in rows
+            backfilled: Dict[str, bool] = {}
+            for offset in range(0, len(sources), _HEAL_SOURCE_BATCH):
+                bound = id_bind_ids(sources[offset:offset + _HEAL_SOURCE_BATCH])
+                rows = id_execute_ids(
+                    db,
+                    # One correlated probe of idx_knowledge_objects_source per
+                    # Memory source (LATERAL): with few deprecated rows in its
+                    # statistics the planner would otherwise walk a status
+                    # index over the whole table.
+                    f"SELECT ko.id, ko.source_id, ko.notebook_id, ko.marker, ko.evidence "
+                    f"FROM unnest({bound.sql}) AS src(id) CROSS JOIN LATERAL ("
+                    f"SELECT o.id, o.source_id, o.notebook_id, o.payload->>'{key}' AS marker, "
+                    "o.evidence FROM knowledge_objects o WHERE o.source_id = src.id "
+                    f"AND o.status = 'deprecated' AND o.payload->>'{key}' IS NOT NULL "
+                    "AND NOT EXISTS (SELECT 1 FROM knowledge_objects t "
+                    f"WHERE t.id = o.payload->>'{key}')) ko",
+                    (bound.param,),
+                ).fetchall()
+                for row in sorted(rows, key=lambda r: (str(r["source_id"]), str(r["id"]))):
+                    position = (str(row["source_id"]), str(row["id"]))
+                    if position <= next_after:
+                        continue
+                    evidence = json_value(row["evidence"], [])
+                    holders = (
+                        GovernanceStore._merge_heal_holders_on(db, row, backfilled)
+                        if evidence else []
+                    )
+                    actions.append(heal_action(
+                        str(row["notebook_id"]), str(row["id"]), str(row["marker"]),
+                        evidence, holders,
+                    ))
+                    next_after = position
+                    if len(actions) >= limit:
+                        return actions, next_after
+        return actions, next_after
+
+    @staticmethod
+    def _merge_heal_holders_on(
+        connection: Any, row: Any, backfilled: Dict[str, bool]
+    ) -> List[tuple]:
+        """``(id, status, evidence)`` of the objects of OTHER sources citing
+        the candidate's own source — where a merge put its entries (a sibling
+        of the same source quoting the same element is not a merge result):
+        the reverse index when the notebook's is certified, evidence
+        containment otherwise (background only)."""
+        notebook_id = str(row["notebook_id"])
+        if notebook_id not in backfilled:
+            backfilled[notebook_id] = KnowledgeStore.source_index_backfilled(
+                connection, notebook_id
+            )
+        if backfilled[notebook_id]:
+            rows = connection.execute(
+                "SELECT o.id, o.status, o.evidence FROM knowledge_object_sources kos "
+                "JOIN knowledge_objects o ON o.id = kos.object_id "
+                "WHERE kos.source_id = %s AND kos.notebook_id = %s AND o.id <> %s "
+                "AND o.source_id IS DISTINCT FROM %s",
+                (row["source_id"], notebook_id, row["id"], row["source_id"]),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT id, status, evidence FROM knowledge_objects "
+                "WHERE notebook_id = %s AND id <> %s AND source_id IS DISTINCT FROM %s "
+                "AND evidence @> jsonb_build_array("
+                "jsonb_build_object('source_id', %s::text))",
+                (notebook_id, row["id"], row["source_id"], row["source_id"]),
+            ).fetchall()
+        return [
+            (str(r["id"]), str(r["status"]), json_value(r["evidence"], [])) for r in rows
         ]
 
     @staticmethod
@@ -2499,7 +2599,10 @@ class GovernanceStore:
         if payload.status is not None or payload.payload is not None:
             # A hand edit of status or content clears the merge marker: only a
             # merge writes it, so a hand-deprecated object is never restored.
-            document = without_merge_marker(document)
+            document = patched_payload(
+                document,
+                _json_document(row["payload"], expected=dict, field="knowledge payload"),
+            )
         new_payload = jsonb(document)
         new_status = payload.status if payload.status is not None else row["status"]
         new_owner = payload.owner if payload.owner is not None else row["owner"]
@@ -2692,6 +2795,10 @@ class GovernanceStore:
                     jsonb(marked_merged_into(json_value(src["payload"], {}), into_id)),
                     source_id,
                 ),
+            )
+            connection.execute(
+                "UPDATE knowledge_objects SET payload = %s WHERE id = %s",
+                (jsonb(marked_absorbs(json_value(tgt["payload"], {}))), into_id),
             )
         result = connection.execute(
             "SELECT * FROM knowledge_objects WHERE id = %s", (into_id,)

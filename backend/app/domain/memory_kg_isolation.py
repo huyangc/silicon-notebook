@@ -41,14 +41,20 @@
 `plan_merge_follow_actions` 处理:被清掉的目标仍在用 → 恢复为 approved、去掉标记,
 重新进入检索;目标本身也已被并走 → 标记改指它的下一层(每清掉一层只恢复一层,a1→a2→a3
 清 a2 时 a1 改指 a3,清 a3 时才恢复);目标是手动弃用的 → 只去掉标记。只处理自己的
-Memory 仍在的对象。#824 之前的合并没有标记,无法与手动弃用区分,不自动恢复。
+Memory 仍在的对象。#824 之前的合并没有标记,无法与手动弃用区分,不自动恢复。合并同时在
+目标上写 `ABSORBS_PAYLOAD_KEY` 门闸:被清掉的对象里没有带它的,就不读跟随者——没有任何
+合并的普通 Memory 删除与编辑只多付前置锁这一条语句。
 
 PostgreSQL 上这一步对被处理对象的 Memory 来源取 `FOR KEY SHARE SKIP LOCKED`,再按 id 序
 锁对象行:拿不到锁的(持锁者可能是那条 Memory 的删除或重抽,也可能是关系补全、抽取
-发布、元素替换,或一个随后回滚的事务)不在事务里等,提交后由 `apply_merge_follow_actions`
-带等待地在独立短事务里补跑(同一锁序,幂等:行已不在、标记已变则跳过)。补跑也失败时,
-启动后的兜底扫描(`heal_merged_away_candidates`)按自愈判据「弃用、标记指向的对象已不在、
-自己的 Memory 仍在」恢复。拆除开始时用一条按 id 排序的语句锁住「本来源自有对象 ∪ 摘证据
+发布、元素替换,或一个随后回滚的事务)不在事务里等,提交后由服务层在独立短事务里补跑
+(同一锁序,幂等:行已不在、标记已变则跳过)。补跑在删除/编辑的请求线程上,等待有上限
+(`SET LOCAL lock_timeout`,几秒);超时就把这本笔记本交给一次后台兜底(等得更久),
+再不行留给下次启动的兜底扫描。兜底(`heal_merged_away_candidates`,只读连接,先取 Memory
+来源、再按来源取对象,代价随 Memory 量而不随全表)按自愈判据「弃用、标记指向的对象已不在、
+自己的 Memory 仍在」挑出候选,并用 `heal_action` 复核:别的来源的对象仍带着它自己的全部
+证据条目(链上它本该被改指去的那一层),就改指过去而不是恢复——兜底因此不会把同一份
+知识恢复成两份。拆除开始时用一条按 id 排序的语句锁住「本来源自有对象 ∪ 摘证据
 候选」(`lock_memory_teardown_objects_on`),再摘证据、再删除,所以两条 Memory 交叉合并后
 同时删除不会死锁。PostgreSQL 上合并先按 id 序对源对象的主来源与证据引用的 Memory
 来源取 `FOR KEY SHARE`,再锁两个对象——与拆除、重抽「先来源、后派生行」同一锁序,
@@ -76,6 +82,12 @@ MEMORY_MERGE_RETRY_MESSAGE = "要合并的知识对象刚被修改，请稍后�
 #: docstring)。以 `_` 开头:`knowledge_record`、`payload_join`、检索文本与词法索引都跳过
 #: 这类键,所以它不展示、不进检索,也不需要新列或迁移。
 MERGED_INTO_PAYLOAD_KEY = "_merged_into"
+
+#: 本人两条 Memory 对象合并时写进**目标** payload 的门闸:`true` 表示「可能有对象
+#: 并进过它」。清掉一条 Memory 来源时,只有它自己的对象里有带这个键的,才去读跟随者
+#: (`merge_followers_on`),所以没有任何合并的普通 Memory 删除与编辑不付这次读。它不会被
+#: 合并以外的写入清除(PATCH 保留它):残留为 true 只多一次读,从不会漏处理。
+ABSORBS_PAYLOAD_KEY = "_absorbs"
 
 #: `MergeFollowAction.kind` 的三个取值。
 FOLLOW_RESTORE = "restore"
@@ -246,13 +258,66 @@ def followed_payload(payload: Mapping[str, Any], action: MergeFollowAction) -> d
 
 
 def without_merge_marker(payload: Mapping[str, Any]) -> dict:
-    """手动修改(PATCH 状态或内容)之后的 payload:合并标记只由合并写入。"""
+    """去掉合并标记(恢复、去标记时用)。"""
     return {k: v for k, v in payload.items() if k != MERGED_INTO_PAYLOAD_KEY}
+
+
+def patched_payload(new: Mapping[str, Any], old: Mapping[str, Any]) -> dict:
+    """手动修改(PATCH 状态或内容)之后的 payload:两个合并键都只由合并写入——
+    调用方传来的一律丢掉,`MERGED_INTO_PAYLOAD_KEY` 因此被清掉(手动弃用的对象不会被
+    自动恢复),目标的 `ABSORBS_PAYLOAD_KEY` 从旧行原样带过来(界面编辑内容时提交的
+    payload 不含 `_` 开头的键,不保留它会让以后的清除漏掉跟随者)。"""
+    result = {
+        k: v for k, v in new.items()
+        if k not in (MERGED_INTO_PAYLOAD_KEY, ABSORBS_PAYLOAD_KEY)
+    }
+    if old.get(ABSORBS_PAYLOAD_KEY):
+        result[ABSORBS_PAYLOAD_KEY] = True
+    return result
 
 
 def marked_merged_into(payload: Mapping[str, Any], into_id: str) -> dict:
     """本人 Memory 对之间合并时被并走对象的新 payload(覆盖旧标记)。"""
     return {**payload, MERGED_INTO_PAYLOAD_KEY: into_id}
+
+
+def marked_absorbs(payload: Mapping[str, Any]) -> dict:
+    """本人 Memory 对之间合并时目标的新 payload(打开跟随者门闸)。"""
+    return {**payload, ABSORBS_PAYLOAD_KEY: True}
+
+
+def evidence_keys(evidence: Iterable[Any]) -> frozenset:
+    """证据条目的去重键 `(element_id, quoted_span)`——合并按它去重,兜底按它判断
+    一个被并走对象的条目是否仍在别的对象上。"""
+    return frozenset(
+        (item.get("element_id"), item.get("quoted_span"))
+        for item in evidence if isinstance(item, dict)
+    )
+
+
+def heal_action(
+    notebook_id: str,
+    object_id: str,
+    marker: str,
+    own_evidence: Iterable[Any],
+    holders: Iterable[tuple[str, str, Any]],
+) -> MergeFollowAction:
+    """启动兜底对一个候选(弃用、标记指向的对象已不在、自己的 Memory 仍在)的复核:
+    `holders` 是 `(id, status, evidence)`——同一来源证据的其他对象。仍有对象带着它自己的
+    全部条目(它的知识还在那里),就改指过去(优先仍在用的),否则才恢复。证据为空时
+    无从比对,恢复。这样兜底永远不会把同一份知识恢复成两份。"""
+    keys = evidence_keys(own_evidence)
+    if keys:
+        carrying = sorted(
+            (status == "deprecated", holder_id)
+            for holder_id, status, evidence in holders
+            if holder_id != object_id and keys <= evidence_keys(evidence)
+        )
+        if carrying:
+            return MergeFollowAction(
+                notebook_id, object_id, marker, FOLLOW_REPOINT, carrying[0][1]
+            )
+    return MergeFollowAction(notebook_id, object_id, marker, FOLLOW_RESTORE)
 
 
 def merge_evidence_source_ids(*evidence_lists: Iterable[Any]) -> frozenset[str] | None:
