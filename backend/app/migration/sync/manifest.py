@@ -377,7 +377,14 @@ _SYNCED_WITH_MAPPING: tuple[TableSyncSpec, ...] = (
         "notebooks",
         SyncClass.SYNCED_WITH_MAPPING,
         mapped_columns=(MappedColumn("created_by", MappingKind.USER),),
-        target_owned_columns=("status", "is_shared", "share_token", "sync_origin"),
+        # 删除窗口四列(SQLite v100 / PG 0081)同样归目标端:镜像不继承源端的删除
+        # 窗口(镜像只能由导入器退役,目标端删不了它),新建镜像行取默认值
+        # (`import_._insert_overrides`)。
+        target_owned_columns=(
+            "status", "is_shared", "share_token", "sync_origin",
+            "delete_after", "delete_requested_at", "delete_requested_by",
+            "status_before_delete",
+        ),
         notes="created_by 映射不到时硬失败，整个笔记本不导入。",
         # notebooks 自己是根：它没有指向自己的 notebook_id 列，它的主键 id
         # 就是「这一行属于哪个笔记本」的答案。scope_chain() 对 NOTEBOOK 表

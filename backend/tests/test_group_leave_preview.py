@@ -105,7 +105,10 @@ def test_preview_reports_notebooks_and_counts_of_every_status(http):
         "notebook_count": 1,
         "memory_count": 2,
         "notebooks": [
-            {"notebook_id": http["notebook"], "name": "组里的库", "memory_count": 2}
+            {
+                "notebook_id": http["notebook"], "name": "组里的库", "memory_count": 2,
+                "pending_delete": False, "delete_after": None,
+            }
         ],
     }
 

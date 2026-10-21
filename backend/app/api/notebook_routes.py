@@ -12,12 +12,18 @@ from app.api.deps import (
     notebook_delete_repository,
     notebook_sharing_repository,
     repository,
+    require_notebook_cancel_delete,
     require_notebook_capability,
     require_notebook_delete,
     require_notebook_read,
+    require_notebook_read_or_delete_notice,
     user_error,
 )
 from app.core.audit_actor import session_audit_principal
+from app.domain.notebook_delete_grace import (
+    NOTEBOOK_DELETE_DUE_CODE,
+    NOTEBOOK_PENDING_DELETE_CODE,
+)
 from app.domain.indexing_pipeline import (
     IndexingPipelineLargeLibraryError,
     IndexingPipelineRebuildActiveError,
@@ -56,6 +62,8 @@ from app.repositories.ports import (
     KgBuildAlreadyRunning,
     KgMaintenanceAlreadyRunning,
     NotebookAlreadyDeletingError,
+    NotebookDeleteDueError,
+    NotebookPendingDeleteError,
 )
 
 
@@ -96,8 +104,14 @@ def create_notebook(payload: NotebookCreate) -> NotebookSummary:
     return notebook_catalog_repository().create_notebook(payload)
 
 
-@router.get("/notebooks/{notebook_id}", response_model=NotebookSummary, dependencies=[Depends(require_notebook_read)])
+@router.get(
+    "/notebooks/{notebook_id}",
+    response_model=NotebookSummary,
+    dependencies=[Depends(require_notebook_read_or_delete_notice)],
+)
 def get_notebook(notebook_id: str) -> NotebookSummary:
+    """单本笔记本。读不到 → 404;正在删除窗口里、调用者能读它 → 404 带说明码
+    (`require_notebook_read_or_delete_notice`)。"""
     try:
         return notebook_catalog_repository().get_notebook(notebook_id)
     except KeyError:
@@ -185,24 +199,65 @@ def update_notebook(
 def delete_notebook(
     notebook_id: str, user: UserProfile = Depends(get_current_user)
 ) -> NotebookDeleteResponse:
-    """批 3·W1 PR-3 §T-2/§5:CAS tombstone 提交后立即返回 202——实际清理由
-    后台删除作业异步完成(六相位,见 `services/notebook_delete.py`)。前端
-    零改动:`requestVoid` 只看 2xx 就丢弃 body(`frontend/app/api-client.ts`),
-    202 与之前的 204 对它完全透明。
+    """删除整本笔记本:进入一天的删除窗口(`app.domain.notebook_delete_grace`,T1)。
+    CAS 提交后立即返回 202 `{"status": "pending_delete", "delete_after"}`——这本
+    库此刻起对所有人不可用,`delete_after` 起由删除扫尾推进成 `deleting`,交给
+    后台删除作业(六相位,见 `services/notebook_delete.py`)永久删除。在此之前
+    主人可以 `POST /notebooks/{id}/cancel-delete` 撤销。
 
-    守卫改用 `require_notebook_delete`（codex #659 R6 P2）而不是
+    重复 DELETE:窗口里 → 409 `{"code": "notebook_pending_delete",
+    "delete_after", "message"}`;正在删除/拷贝/导入 → 沿用 409 文案。
+
+    守卫用 `require_notebook_delete`（codex #659 R6 P2）而不是
     `require_notebook_capability("notebook:delete")`：后者的
     NOTEBOOK_WRITE_SQL 带生命周期过滤，会把重复/重试的 DELETE 挡成假 404；
-    这道守卫仍是 owner-only，只是放行 owner 自己正在删除/拷贝中的库，让下面
-    这段 `except NotebookAlreadyDeletingError` 真正有机会跑到。"""
+    这道守卫仍是 owner-only，只是放行 owner 自己不可用的库，让下面
+    这两段 409 真正有机会跑到。"""
     try:
         return NotebookDeleteResponse(
-            **notebook_delete_repository().request(notebook_id, user.id)
+            **notebook_delete_repository().request_pending(notebook_id, user.id)
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+    except NotebookPendingDeleteError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": NOTEBOOK_PENDING_DELETE_CODE,
+                "delete_after": exc.delete_after,
+                "message": "这本笔记本已安排删除，可以在笔记本列表顶部撤销。",
+            },
+        )
     except NotebookAlreadyDeletingError:
         raise user_error(409, "该笔记本正在被拷贝或已经在删除中，请稍后刷新查看。")
+
+
+@router.post(
+    "/notebooks/{notebook_id}/cancel-delete",
+    response_model=NotebookSummary,
+    dependencies=[Depends(require_notebook_cancel_delete)],
+)
+def cancel_notebook_delete(
+    notebook_id: str, user: UserProfile = Depends(get_current_user)
+) -> NotebookSummary:
+    """主人撤销删除(T2,只有主人能撤销——裁决 B1)。截止前:这本库回到删除前的
+    状态,成员、授权、挂载、分享链接、会话与在途结果原样回来;窗口期内被成员转走的
+    记忆留在它们的新笔记本里,不会回来。重复撤销返回同一份摘要(幂等)。截止已过
+    (还没推进也算)或已在删除中 → 409 `{"code": "notebook_delete_due", "message"}`;
+    不存在 → 404。"""
+    try:
+        notebook_delete_repository().cancel_pending(notebook_id, user.id)
+        return notebook_catalog_repository().get_notebook(notebook_id)
+    except NotebookDeleteDueError:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": NOTEBOOK_DELETE_DUE_CODE,
+                "message": "删除时间已到，已无法撤销。",
+            },
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
 
 
 @router.post("/notebooks/{notebook_id}/tier", response_model=NotebookSummary, dependencies=[Depends(require_notebook_capability("notebook:manage"))])

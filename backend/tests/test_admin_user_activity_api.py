@@ -21,6 +21,8 @@ import threading
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.notebook_delete_window_testkit import close_delete_windows
+
 
 def _make_client(tmp_path, monkeypatch, *, activity_view_enabled: bool | None = None):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/t.db")
@@ -460,6 +462,7 @@ def test_retrieval_only_ask_is_marked_in_activity_detail_and_survives_notebook_d
     assert client.delete(
         f"/api/notebooks/{notebook_id}", headers=owner
     ).status_code == 202
+    close_delete_windows(_repo()._runtime)  # the delete starts once its window closes
     from app.services import background_jobs
     background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
     admin = _auth_admin(client)
@@ -492,6 +495,7 @@ def test_retained_retrieval_only_ask_detail_keeps_output(client):
     assert client.delete(
         f"/api/notebooks/{notebook_id}", headers=owner
     ).status_code == 202
+    close_delete_windows(_repo()._runtime)  # the delete starts once its window closes
     from app.services import background_jobs
     background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
     admin = _auth_admin(client)
@@ -1012,6 +1016,7 @@ def test_global_ask_detail_self_readable_while_retained_after_participant_delete
     assert still_readable.status_code == 200
 
     assert client.delete(f"/api/notebooks/{nb_id}", headers=owner).status_code == 202
+    close_delete_windows(_repo()._runtime)  # the delete starts once its window closes
     from app.services import background_jobs
     background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
 
@@ -1321,6 +1326,7 @@ def test_admin_activity_survives_notebook_delete_without_answer_or_trace(client)
     assert client.delete(
         f"/api/notebooks/{notebook_id}", headers=owner
     ).status_code == 202
+    close_delete_windows(_repo()._runtime)  # the delete starts once its window closes
     from app.services import background_jobs
     background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
 
@@ -1934,6 +1940,7 @@ def test_admin_report_detail_survives_notebook_delete_as_summary(client):
     assert client.delete(
         f"/api/notebooks/{notebook_id}", headers=owner
     ).status_code == 202
+    close_delete_windows(_repo()._runtime)  # the delete starts once its window closes
     from app.services import background_jobs
     background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
 

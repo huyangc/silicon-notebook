@@ -11,6 +11,7 @@ from app.core.request_context import set_request_user, reset_request_user
 from app.services.model_work import model_artifact_scope
 from app.models.identity import UserProfile
 from app.bootstrap import application_extension_runtime, create_application_repository
+from app.domain.notebook_delete_grace import NOTEBOOK_PENDING_DELETE_CODE
 from app.domain.report_export import ReportExporterHostPort
 from app.repositories.global_ask_ports import GlobalAskAuthorityStorePort
 from app.repositories.ports import AdminQueryRepository, AnswerMemorySourceRepository, ExtensionToggleStorePort, GroupStorePort, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, NotebookStorePort, RetrievalExperienceStorePort, SourceRepository, AskStreamPort, McpMemoryRepository, MemoryRepository, WishStorePort
@@ -253,6 +254,52 @@ async def require_notebook_delete(
         raise HTTPException(status_code=404, detail="Notebook not found")
     await _raise_if_mirrored(notebook_id)
     return notebook_id
+
+
+async def require_notebook_cancel_delete(
+    notebook_id: str, user: UserProfile = Depends(get_current_user)
+) -> str:
+    """`POST /api/notebooks/{id}/cancel-delete` 专属守卫:只认主人(裁决 B1,
+    管理员、成员都不能撤销),且与 `require_notebook_delete` 一样**不**要求 live
+    ——要撤销的正是一本不可用的库。非主人 404(不泄露存在性);镜像 409,与删除
+    端点同一道围栏、同一个顺序。只挂这一条路由。"""
+    allowed = await run_in_threadpool(
+        notebook_access_repository().user_owns_notebook_regardless_of_lifecycle,
+        notebook_id, user.id,
+    )
+    if not allowed:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    await _raise_if_mirrored(notebook_id)
+    return notebook_id
+
+
+def pending_actions_service():
+    return repository()._runtime.pending_actions_service  # type: ignore[attr-defined]
+
+
+async def require_notebook_read_or_delete_notice(
+    notebook_id: str, user: UserProfile = Depends(get_current_user)
+) -> str:
+    """`GET /api/notebooks/{id}` 的读守卫:与 `require_notebook_read` 同一判定,
+    只多一件事——拒绝时如果这本库正在删除窗口里、调用者对它有读权,404 带上
+    说明码 `{"code": "notebook_pending_delete", "notebook_id", "name",
+    "delete_after", "is_owner", "memory_count", "transferable_count"}`,让打开
+    旧链接的人看到「这本笔记本已被删除」而不是「不存在」。其他人仍是普通 404。
+    只挂这一条路由:子资源、写端点与其余读端点照旧普通 404。"""
+    allowed = await run_in_threadpool(
+        notebook_access_repository().user_can_read_notebook, notebook_id, user.id
+    )
+    if allowed:
+        return notebook_id
+    notice = await run_in_threadpool(
+        pending_actions_service().deletion_notice, user.id, notebook_id
+    )
+    if notice is None:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    raise HTTPException(
+        status_code=404,
+        detail={"code": NOTEBOOK_PENDING_DELETE_CODE, **notice},
+    )
 
 
 async def require_notebook_admin(

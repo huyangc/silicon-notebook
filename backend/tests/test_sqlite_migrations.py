@@ -801,3 +801,66 @@ def test_v99_adds_ask_jobs_report_id(tmp_path):
         stored = dict(db.execute("SELECT id, report_id FROM ask_jobs").fetchall())
     assert stored == {"job-v98": "", "job-v99": "rep-1", "job-plain": ""}
     database.close_local()
+
+
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
+def test_v100_adds_the_notebook_delete_window_without_backfilling(tmp_path):
+    """v100 adds the four notebooks deletion-window columns and the partial
+    ``idx_notebooks_pending_delete_due``. A notebook (and a deleting one --
+    an in-flight delete keeps running) that a v99 database already holds
+    comes back outside any window: NULL deadline / requester / instant and
+    ``status_before_delete=''``, its status untouched. A fresh database and a
+    v99 upgrade carry the same schema; a second run is a no-op."""
+    from tests.sqlite_migration_testkit import rollback_v100
+
+    database, settings = _fresh_migrated_database(tmp_path)
+    window_columns = (
+        "delete_after", "delete_requested_at", "delete_requested_by",
+        "status_before_delete",
+    )
+
+    def shape(db):
+        columns = {row[1]: tuple(row[2:]) for row in db.execute("PRAGMA table_info(notebooks)")}
+        index = db.execute(
+            "SELECT sql FROM sqlite_master WHERE name='idx_notebooks_pending_delete_due'"
+        ).fetchone()
+        return {name: columns.get(name) for name in window_columns}, (
+            index[0] if index else None
+        )
+
+    with database.connect() as db:
+        fresh = shape(db)
+    columns, index_sql = fresh
+    assert columns == {
+        "delete_after": ("TEXT", 0, None, 0),
+        "delete_requested_at": ("TEXT", 0, None, 0),
+        "delete_requested_by": ("TEXT", 0, None, 0),
+        "status_before_delete": ("TEXT", 1, "''", 0),
+    }
+    assert index_sql.endswith("ON notebooks(delete_after) WHERE status='pending_delete'")
+
+    now = "2026-10-22T00:00:00+00:00"
+    with database.write() as db:
+        rollback_v100(db)
+        db.execute("PRAGMA user_version = 99")
+        for notebook_id, status in (("nb-v100-ready", "ready"), ("nb-v100-del", "deleting")):
+            db.execute(
+                "INSERT INTO notebooks (id, name, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (notebook_id, notebook_id, status, now, now),
+            )
+
+    assert SqliteMigrator(database, settings).migrate() == [100]
+    assert SqliteMigrator(database, settings).migrate() == []
+    with database.connect() as db:
+        assert shape(db) == fresh
+        rows = db.execute(
+            "SELECT id, status, delete_after, delete_requested_at, delete_requested_by, "
+            "status_before_delete FROM notebooks WHERE id LIKE 'nb-v100-%' ORDER BY id"
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("nb-v100-del", "deleting", None, None, None, ""),
+        ("nb-v100-ready", "ready", None, None, None, ""),
+    ]
+    database.close_local()

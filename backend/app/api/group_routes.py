@@ -50,6 +50,9 @@ from app.api.deps import (
     user_error,
 )
 from app.core.capability_tokens import new_capability_token
+from app.domain.notebook_delete_grace import (
+    PENDING_DELETE_STATUS as NOTEBOOK_PENDING_DELETE_STATUS,
+)
 from app.models.groups import (
     GRANT_ROLES,
     GRANTABLE_PRINCIPAL_TYPES,
@@ -953,6 +956,8 @@ def approve_share_request_route(
         # 里。现存申请实际只会遇到删除中,其余状态给不点名的兜底。
         if exc.status == "deleting":
             raise user_error(409, "这本笔记本正在删除,无法批准这条申请")
+        if exc.status == NOTEBOOK_PENDING_DELETE_STATUS:
+            raise user_error(409, "这本笔记本已安排删除，不能再共享。")
         raise user_error(409, "这本笔记本暂时不可用,请稍后再批准")
     if decided is None:
         raise user_error(404, "这条待审批的共享申请不存在或已被处理")

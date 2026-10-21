@@ -19,7 +19,9 @@ CI 里比行为测试更快、更精确地指出出事的那一行——但角�
 1. **读侧「这行还不算存在」谓词**——单点收敛进
    ``postgres/access_sql.NOTEBOOK_LIVE_SQL`` /
    ``sqlite/access_sql.NOTEBOOK_LIVE_SQL``(均为
-   ``"status NOT IN ('copying','deleting','importing')"``——``importing`` 是
+   ``"status NOT IN ('copying','deleting','importing','pending_delete')"``——
+   ``pending_delete`` 是删除整本笔记本的一天导出窗口,窗口期内的五个例外入口
+   各自走 ``access_sql`` 的窗口谓词、不经这条常量,见下面那条守卫;``importing`` 是
    跨环境导入器的在途哨兵,PR-2 加入;它与 ``copying`` 在**读侧**同义,在写侧
    不同义,理由见 ``access_sql.py`` 常量上方的注释)。折的是 40 处站点
    (``postgres/`` 20 + ``sqlite/`` 20,本次逐行枚举见规格 §T-1/摸底 5)。
@@ -381,16 +383,59 @@ def test_diag_db_notebook_live_predicate_matches_access_sql():
     assert diag_common.NOTEBOOK_LIVE_SQL == pg_access_sql.NOTEBOOK_LIVE_SQL
     assert (
         diag_common.NOTEBOOK_LIVE_SQL
-        == "status NOT IN ('copying','deleting','importing')"
+        == "status NOT IN ('copying','deleting','importing','pending_delete')"
     )
 
     # frozenset 的状态集合必须与 SQL 常量里 `NOT IN (...)` 的状态列表逐值一致,
     # 两份副本不能各说各话。
     sql_statuses = frozenset(
-        re.findall(r"'([a-z]+)'", pg_access_sql.NOTEBOOK_LIVE_SQL)
+        re.findall(r"'([a-z_]+)'", pg_access_sql.NOTEBOOK_LIVE_SQL)
     )
     assert sql_statuses, "NOTEBOOK_LIVE_SQL 的 NOT IN 列表解析失败,正则需要复核"
     assert diag_common.NOTEBOOK_HIDDEN_STATUSES == sql_statuses
+
+
+# 删除窗口的 SQL 状态字面量 `'pending_delete'`(带单引号的 SQL 形)只许出现在:两个
+# 后端的 NOTEBOOK_LIVE_SQL 常量、诊断脚本的 app-free 副本、SQLite v100 迁移冻结的
+# 部分索引 DDL(及快照校验器对它的逐字期望)。其余一切窗口判据都必须经 access_sql 的
+# `notebook_delete_window_open_sql` / `notebook_delete_due_sql` /
+# `export_access_exists_clause`(它们用 NOTEBOOK_PENDING_DELETE_STATUS 拼),否则
+# 「窗口开着」的判据会长出第二份拼写——尤其是漏掉 delete_after 的那种。
+_PENDING_DELETE_SQL_LITERAL = "'pending_delete'"
+_PENDING_DELETE_LITERAL_FILES = frozenset({
+    "backend/app/repositories/postgres/access_sql.py",
+    "backend/app/repositories/sqlite/access_sql.py",
+    "backend/app/repositories/sqlite/migrations.py",
+    "scripts/diag_common.py",
+    "scripts/verify_repository_snapshot.py",
+})
+
+
+@pytest.mark.xdist_group(name="notebook_live_status_literals")
+def test_pending_delete_sql_literal_confined_to_the_constants():
+    violations: list[str] = []
+    for rel, node in _all_scanned_constants():
+        if _PENDING_DELETE_SQL_LITERAL not in node.value:
+            continue
+        if rel not in _PENDING_DELETE_LITERAL_FILES:
+            violations.append(f"{rel}:{node.lineno}: {node.value!r}")
+    assert not violations, (
+        "删除窗口的状态字面量只许出现在 access_sql 常量 / 诊断副本 / v100 迁移里,"
+        "其余站点必须走窗口谓词函数:\n" + "\n".join(violations)
+    )
+
+
+def test_pending_delete_status_spelled_once_across_layers():
+    """领域常量、两个后端的 NOTEBOOK_PENDING_DELETE_STATUS、NOTEBOOK_LIVE_SQL 的列表
+    成员是同一个值:窗口状态在任何一层改名都会让另外几层静默失配。"""
+    from app.domain.notebook_delete_grace import PENDING_DELETE_STATUS
+    from app.repositories.postgres import access_sql as pg_access_sql
+    from app.repositories.sqlite import access_sql as sqlite_access_sql
+
+    assert PENDING_DELETE_STATUS == "pending_delete"
+    assert pg_access_sql.NOTEBOOK_PENDING_DELETE_STATUS == PENDING_DELETE_STATUS
+    assert sqlite_access_sql.NOTEBOOK_PENDING_DELETE_STATUS == PENDING_DELETE_STATUS
+    assert f"'{PENDING_DELETE_STATUS}'" in pg_access_sql.NOTEBOOK_LIVE_SQL
 
 
 def test_scan_targets_are_non_empty_sanity_check():

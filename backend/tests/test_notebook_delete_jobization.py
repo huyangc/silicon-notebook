@@ -83,6 +83,17 @@ def _drain():
     background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
 
 
+def _after_the_window():
+    """An instant past any deletion window opened just now (driver C's clock)."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.domain.notebook_delete_grace import NOTEBOOK_DELETE_GRACE_SECONDS
+
+    return datetime.now(timezone.utc) + timedelta(
+        seconds=NOTEBOOK_DELETE_GRACE_SECONDS + 60
+    )
+
+
 # ---------------------------------------------------------------------------
 # 1. Tombstone CAS (§T-2)
 # ---------------------------------------------------------------------------
@@ -145,10 +156,10 @@ def test_deleting_notebook_is_immediately_invisible_via_the_api(tmp_path, monkey
 
     resp = client.delete(f"/api/notebooks/{nb}", headers=headers)
     assert resp.status_code == 202
-    assert resp.json() == {"status": "deleting"}
-    # T-1's NOTEBOOK_LIVE_SQL filter hides it immediately — before the
-    # background job has necessarily finished (§5: "deleting 的库经 T-1
-    # 统一谓词一律不可见").
+    # The DELETE opens the one-day window (pending_delete); T-1's
+    # NOTEBOOK_LIVE_SQL filter hides it immediately — long before any delete
+    # job exists (§5: "不可用的库经 T-1 统一谓词一律不可见").
+    assert resp.json()["status"] == "pending_delete"
     assert client.get(f"/api/notebooks/{nb}", headers=headers).status_code == 404
 
     _drain()
@@ -203,6 +214,12 @@ def test_second_sequential_delete_request_gets_409_from_the_owner_scoped_guard(
     try:
         first = client.delete(f"/api/notebooks/{nb}", headers=headers)
         assert first.status_code == 202
+        # Inside the window a repeat is the window's own 409 (and no job).
+        in_window = client.delete(f"/api/notebooks/{nb}", headers=headers)
+        assert in_window.status_code == 409
+        assert in_window.json()["detail"]["code"] == "notebook_pending_delete"
+        # Close the window: driver C promotes it and submits the job.
+        assert rt.notebook_delete.sweep_once(now=_after_the_window()) == 1
         assert worker_entered.wait(10.0), "delete job never entered its worker"
         second = client.delete(f"/api/notebooks/{nb}", headers=headers)
         assert second.status_code == 409

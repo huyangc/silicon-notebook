@@ -12,10 +12,12 @@ from app.api.deps import (
     identity_repository,
     model_service_binding_summary,
     model_status_service,
+    pending_actions_service,
     repository,
     user_error,
 )
 from app.core.config import SOURCE_UPLOAD_MAX_FILES_PER_BATCH, get_settings
+from app.models.notebooks import NotebookDeletionNotices
 from app.models.identity import (
     PasswordChangeRequest,
     SearchProfileUpdate,
@@ -270,6 +272,18 @@ def me_pending_actions(user: UserProfile = Depends(get_current_user)) -> dict:
     只读转调 repository().pending_actions；聚合逻辑与三源覆盖见该方法本身
     （Task 1 已有专门单测），此处只做 HTTP 薄包装。"""
     return repository().pending_actions(user.id)
+
+
+@router.get("/me/notebook-deletions", response_model=NotebookDeletionNotices)
+def me_notebook_deletions(
+    user: UserProfile = Depends(get_current_user),
+) -> NotebookDeletionNotices:
+    """正在删除窗口里、与调用者有关的笔记本(主人,或在那里有记忆的读者——裁决
+    B3),按截止时刻升序。笔记本列表顶部「即将永久删除的笔记本」区块读它;铃铛
+    里的 `notebook_pending_delete` 条目是同一份投影。"""
+    return NotebookDeletionNotices(
+        items=pending_actions_service().deletion_notices(user.id)
+    )
 
 
 @router.get("/me/pending-actions/stream")

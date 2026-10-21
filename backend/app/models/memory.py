@@ -222,3 +222,27 @@ class MemoryTransferRequest(BaseModel):
     target_notebook_id: str
     mode: Literal["copy", "move"]
     extract_kg: bool = True
+
+
+class DeleteWindowTransferRequest(BaseModel):
+    """``POST /notebooks/{id}/memories/transfer``: move the caller's own
+    confirmed Memory out of a notebook inside its deletion window. The mode
+    is always ``move`` and the server picks the items (ruling 2026-10-22);
+    only the destination is the caller's choice."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_notebook_id: str
+
+
+@dataclass(frozen=True)
+class MemoryExportSnapshot:
+    """One consistent read of what the caller's export of a notebook holds.
+
+    ``title`` is the notebook's name and ``delete_after`` the deadline when
+    the notebook is inside its deletion window (``None`` while it is live) --
+    both read in the same snapshot as ``items``."""
+
+    title: str
+    delete_after: Optional[str]
+    items: tuple["MemoryRecord", ...]

@@ -280,6 +280,10 @@ def test_memory_readers_hide_non_live_notebooks(memory_world, state):
     live_cases.assert_readers_follow_lifecycle(memory_world, state)
 
 
+def test_memory_open_delete_window_opens_only_the_export(memory_world):
+    live_cases.assert_open_window_opens_only_the_export(memory_world)
+
+
 @pytest.mark.parametrize("state", live_cases.NON_LIVE_STATES)
 def test_memory_writes_refused_in_non_live_notebook(memory_world, state):
     live_cases.assert_writes_refused_then_allowed(memory_world, state)

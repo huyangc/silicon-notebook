@@ -4333,6 +4333,21 @@
           "title": "ConversationTurn",
           "type": "object"
         },
+        "DeleteWindowTransferRequest": {
+          "additionalProperties": false,
+          "description": "``POST /notebooks/{id}/memories/transfer``: move the caller's own\nconfirmed Memory out of a notebook inside its deletion window. The mode\nis always ``move`` and the server picks the items (ruling 2026-10-22);\nonly the destination is the caller's choice.",
+          "properties": {
+            "target_notebook_id": {
+              "title": "Target Notebook Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "target_notebook_id"
+          ],
+          "title": "DeleteWindowTransferRequest",
+          "type": "object"
+        },
         "DetectDocTypeItem": {
           "description": "One file's name + leading text sample for upload-time type detection.",
           "properties": {
@@ -6109,6 +6124,17 @@
         "GroupLeavePreviewNotebook": {
           "description": "退群后会看不到的一本笔记本:名字与其中调用者本人的记忆条数(各种状态都算)。",
           "properties": {
+            "delete_after": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Delete After"
+            },
             "memory_count": {
               "title": "Memory Count",
               "type": "integer"
@@ -6121,6 +6147,11 @@
             "notebook_id": {
               "title": "Notebook Id",
               "type": "string"
+            },
+            "pending_delete": {
+              "default": false,
+              "title": "Pending Delete",
+              "type": "boolean"
             }
           },
           "required": [
@@ -9462,15 +9493,75 @@
           "type": "object"
         },
         "NotebookDeleteResponse": {
-          "description": "202 响应体（批 3·W1 PR-3 §T-2/§5）：CAS tombstone 已提交、删除作业已排入\n后台，实际清理异步进行。前端刻意零改动——`requestVoid` 只看 2xx 就丢弃\nbody，`status` 字段只为 API 契约的可读性存在，不驱动任何前端逻辑。",
+          "description": "202 响应体：这本库已进入一天的删除窗口（``app.domain.notebook_delete_grace``），\n立即对所有人不可用，``delete_after`` 起由删除作业永久删除；在此之前主人可以撤销。\n前端读 ``delete_after``（UTC ISO）展示「何时永久删除」，一切时长以它为准。",
           "properties": {
+            "delete_after": {
+              "title": "Delete After",
+              "type": "string"
+            },
             "status": {
-              "default": "deleting",
+              "default": "pending_delete",
               "title": "Status",
               "type": "string"
             }
           },
+          "required": [
+            "delete_after"
+          ],
           "title": "NotebookDeleteResponse",
+          "type": "object"
+        },
+        "NotebookDeletionNotice": {
+          "description": "一本正在删除窗口里的笔记本，从调用者的角度看（``GET /api/me/notebook-\ndeletions`` 的条目，也是 ``GET /notebooks/{id}`` 404 说明码的载荷）。\n\n``memory_count`` 是调用者本人在这里的记忆条数（各状态，即导出的内容），\n``transferable_count`` 是其中「转移到我的笔记本」会移走的那部分（已确认、\n且不在公共知识库的晋升审批中）；两者之差就是「无法转移，请先导出」的条数。",
+          "properties": {
+            "delete_after": {
+              "title": "Delete After",
+              "type": "string"
+            },
+            "is_owner": {
+              "title": "Is Owner",
+              "type": "boolean"
+            },
+            "memory_count": {
+              "default": 0,
+              "title": "Memory Count",
+              "type": "integer"
+            },
+            "name": {
+              "default": "",
+              "title": "Name",
+              "type": "string"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "transferable_count": {
+              "default": 0,
+              "title": "Transferable Count",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "notebook_id",
+            "delete_after",
+            "is_owner"
+          ],
+          "title": "NotebookDeletionNotice",
+          "type": "object"
+        },
+        "NotebookDeletionNotices": {
+          "description": "``GET /api/me/notebook-deletions``：按截止时刻升序。",
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/components/schemas/NotebookDeletionNotice"
+              },
+              "title": "Items",
+              "type": "array"
+            }
+          },
+          "title": "NotebookDeletionNotices",
           "type": "object"
         },
         "NotebookGrantItem": {
@@ -19876,6 +19967,25 @@
           "summary": "Me"
         }
       },
+      "/api/me/notebook-deletions": {
+        "get": {
+          "description": "正在删除窗口里、与调用者有关的笔记本(主人,或在那里有记忆的读者——裁决\nB3),按截止时刻升序。笔记本列表顶部「即将永久删除的笔记本」区块读它;铃铛\n里的 `notebook_pending_delete` 条目是同一份投影。",
+          "operationId": "me_notebook_deletions_api_me_notebook_deletions_get",
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/NotebookDeletionNotices"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            }
+          },
+          "summary": "Me Notebook Deletions"
+        }
+      },
       "/api/me/password": {
         "patch": {
           "description": "自助修改密码：校验当前密码后更新，并吊销本用户其他会话（保留当前会话）。\n空白新密码在这里就地拒绝，store 里的 ValueError 只是防御——不再宽 catch\nValueError，避免把 verify 阶段的意外错误(如损坏的 salt)误报成「新密码不能为空」。",
@@ -20722,7 +20832,7 @@
       },
       "/api/notebooks/{notebook_id}": {
         "delete": {
-          "description": "批 3·W1 PR-3 §T-2/§5:CAS tombstone 提交后立即返回 202——实际清理由\n后台删除作业异步完成(六相位,见 `services/notebook_delete.py`)。前端\n零改动:`requestVoid` 只看 2xx 就丢弃 body(`frontend/app/api-client.ts`),\n202 与之前的 204 对它完全透明。\n\n守卫改用 `require_notebook_delete`（codex #659 R6 P2）而不是\n`require_notebook_capability(\"notebook:delete\")`：后者的\nNOTEBOOK_WRITE_SQL 带生命周期过滤，会把重复/重试的 DELETE 挡成假 404；\n这道守卫仍是 owner-only，只是放行 owner 自己正在删除/拷贝中的库，让下面\n这段 `except NotebookAlreadyDeletingError` 真正有机会跑到。",
+          "description": "删除整本笔记本:进入一天的删除窗口(`app.domain.notebook_delete_grace`,T1)。\nCAS 提交后立即返回 202 `{\"status\": \"pending_delete\", \"delete_after\"}`——这本\n库此刻起对所有人不可用,`delete_after` 起由删除扫尾推进成 `deleting`,交给\n后台删除作业(六相位,见 `services/notebook_delete.py`)永久删除。在此之前\n主人可以 `POST /notebooks/{id}/cancel-delete` 撤销。\n\n重复 DELETE:窗口里 → 409 `{\"code\": \"notebook_pending_delete\",\n\"delete_after\", \"message\"}`;正在删除/拷贝/导入 → 沿用 409 文案。\n\n守卫用 `require_notebook_delete`（codex #659 R6 P2）而不是\n`require_notebook_capability(\"notebook:delete\")`：后者的\nNOTEBOOK_WRITE_SQL 带生命周期过滤，会把重复/重试的 DELETE 挡成假 404；\n这道守卫仍是 owner-only，只是放行 owner 自己不可用的库，让下面\n这两段 409 真正有机会跑到。",
           "operationId": "delete_notebook_api_notebooks__notebook_id__delete",
           "parameters": [
             {
@@ -20760,6 +20870,7 @@
           "summary": "Delete Notebook"
         },
         "get": {
+          "description": "单本笔记本。读不到 → 404;正在删除窗口里、调用者能读它 → 404 带说明码\n(`require_notebook_read_or_delete_notice`)。",
           "operationId": "get_notebook_api_notebooks__notebook_id__get",
           "parameters": [
             {
@@ -21665,6 +21776,46 @@
             }
           },
           "summary": "Set Notebook Bases Route"
+        }
+      },
+      "/api/notebooks/{notebook_id}/cancel-delete": {
+        "post": {
+          "description": "主人撤销删除(T2,只有主人能撤销——裁决 B1)。截止前:这本库回到删除前的\n状态,成员、授权、挂载、分享链接、会话与在途结果原样回来;窗口期内被成员转走的\n记忆留在它们的新笔记本里,不会回来。重复撤销返回同一份摘要(幂等)。截止已过\n(还没推进也算)或已在删除中 → 409 `{\"code\": \"notebook_delete_due\", \"message\"}`;\n不存在 → 404。",
+          "operationId": "cancel_notebook_delete_api_notebooks__notebook_id__cancel_delete_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/NotebookSummary"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Cancel Notebook Delete"
         }
       },
       "/api/notebooks/{notebook_id}/checkup": {
@@ -25814,7 +25965,7 @@
       },
       "/api/notebooks/{notebook_id}/memories/export": {
         "get": {
-          "description": "The caller's OWN Memory in this notebook as a Markdown download — the\nway out before leaving a shared notebook deletes it. Every status (the\nexit deletes candidates too; they are marked), oldest first, nothing of\nother users. Every item is read in one snapshot BEFORE the response\nstarts (a purge running meanwhile can never cut the file short), then\nsent piece by piece. Read-gated: works only while the caller can read\nthe notebook (404). No Memory of the caller here: 404\n``{\"code\": \"nothing_to_export\"}``, never an empty file. Content past\n``MEMORY_EXPORT_MAX_BYTES``: 413 ``{\"code\": \"export_too_large\",\n\"memory_count\", \"limit_bytes\"}`` before anything is sent.",
+          "description": "The caller's OWN Memory in this notebook as a Markdown download — the\nway out before leaving a shared notebook deletes it, and before a\ndeleted notebook's one-day window closes. Every status (the exit deletes\ncandidates too; they are marked), oldest first, nothing of other users.\nEvery item is read in one snapshot BEFORE the response starts (a purge\nrunning meanwhile can never cut the file short), then sent piece by\npiece. Read-gated: works while the caller can read the notebook, live or\ninside its deletion window (404 otherwise). The window has closed: 404\n``{\"code\": \"delete_window_closed\"}``. No Memory of the caller here: 404\n``{\"code\": \"nothing_to_export\"}``, never an empty file. Content past\n``MEMORY_EXPORT_MAX_BYTES``: 413 ``{\"code\": \"export_too_large\",\n\"memory_count\", \"limit_bytes\"}`` before anything is sent.",
           "operationId": "export_notebook_memories_api_notebooks__notebook_id__memories_export_get",
           "parameters": [
             {
@@ -25897,6 +26048,58 @@
             }
           },
           "summary": "Create Memory From Answer"
+        }
+      },
+      "/api/notebooks/{notebook_id}/memories/transfer": {
+        "post": {
+          "description": "「转移到我的笔记本」during a notebook's deletion window: move every\none of the caller's confirmed Memory items here (those the move rule\naccepts) into ``target_notebook_id``, a live notebook the caller owns.\nAlways a move; the server picks the items; the answer has the shape of\n``POST /memories/transfer`` (``{\"results\": [...]}``, one entry per item).\nMoved items do not come back if the owner cancels the deletion. Window\nclosed: 404 ``delete_window_closed`` (before the first item), or per item\n``error_code=\"delete_window_closed\"`` (closed part-way). Unreadable\nnotebook, or a target the caller cannot write: 404.",
+          "operationId": "transfer_memories_out_of_delete_window_api_notebooks__notebook_id__memories_transfer_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteWindowTransferRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Transfer Memories Out Of Delete Window Api Notebooks  Notebook Id  Memories Transfer Post",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Transfer Memories Out Of Delete Window"
         }
       },
       "/api/notebooks/{notebook_id}/mountable": {

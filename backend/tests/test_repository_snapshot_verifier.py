@@ -30,6 +30,7 @@ from tests.sqlite_migration_testkit import (
     rollback_v97,
     rollback_v98,
     rollback_v99,
+    rollback_v100,
 )
 
 
@@ -240,6 +241,27 @@ def test_v92_changed_surviving_column_of_a_trimmed_table_fails(
     assert not result.ok
     assert result.changed_tables == ["auth_identity_audit"]
     assert any("row-digest-changed" in item for item in result.discrepancies)
+
+
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
+def test_deployed_v99_database_verifies_the_notebook_delete_window(tmp_path, _upgraded_v9):
+    """A deployed v99 database is missing exactly _migration_100's schema: the
+    four notebooks deletion-window columns and the partial
+    idx_notebooks_pending_delete_due. The fixture's notebooks rows come back
+    outside any window (NULL / '' defaults), so no table changes."""
+    module = _load_verifier()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
+    with sqlite3.connect(database) as rollback:
+        rollback_v100(rollback)
+        rollback.execute("PRAGMA user_version = 99")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 99
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
 
 
 @pytest.mark.legacy_upgrade_contract

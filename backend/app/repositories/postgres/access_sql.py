@@ -84,7 +84,33 @@
 # 源环境、几乎必然早于任何阈值,共用同一个值等于让清道夫随时删掉正在导入的库。
 # 半导入的库是**可续跑**的,不是垃圾。读侧两者同义(都「还不算存在」),所以只有
 # 这条谓词收它。
-NOTEBOOK_LIVE_SQL = "status NOT IN ('copying','deleting','importing')"
+# `pending_delete`(删除整本笔记本的一天导出窗口)同样「还不算存在」,理由与五个
+# 例外入口的取舍见 SQLite 那一份。
+NOTEBOOK_PENDING_DELETE_STATUS = "pending_delete"
+NOTEBOOK_LIVE_SQL = (
+    "status NOT IN ('copying','deleting','importing','pending_delete')"
+)
+
+
+def notebook_delete_window_open_sql(nb_alias: str = "") -> str:
+    """删除窗口还开着:`status='pending_delete' AND delete_after > %s`。消费**一个**
+    参数(aware 时刻)。`delete_after` 是 timestamptz,直接比较。状态等值项命中部分
+    索引 `idx_notebooks_pending_delete_due`。语义见 SQLite 那一份。"""
+    prefix = f"{nb_alias}." if nb_alias else ""
+    return (
+        f"({prefix}status='{NOTEBOOK_PENDING_DELETE_STATUS}' "
+        f"AND {prefix}delete_after > %s)"
+    )
+
+
+def notebook_delete_due_sql(nb_alias: str = "") -> str:
+    """删除窗口已到期、还没被推进:`status='pending_delete' AND delete_after <= %s`。
+    消费**一个**参数。"""
+    prefix = f"{nb_alias}." if nb_alias else ""
+    return (
+        f"({prefix}status='{NOTEBOOK_PENDING_DELETE_STATUS}' "
+        f"AND {prefix}delete_after <= %s)"
+    )
 
 # 成员探测:该用户在 notebook_members 里是否有行。
 MEMBER_PROBE_SQL = (
@@ -533,6 +559,20 @@ def live_read_access_exists_clause(
     return f"{base[:-1]} AND {nb_alias}.{NOTEBOOK_LIVE_SQL})"
 
 
+def export_access_exists_clause(
+    row_alias: str = "m",
+    nb_alias: str = "access_nb",
+    member_alias: str = "access_nm",
+) -> str:
+    """删除窗口期两个本人记忆出口(导出、转移)的读谓词:读权 ∧ (存活 ∨ 窗口开放)。
+    参数是 `read_access_params(user_id)` 之后跟**一个**时刻。理由见 SQLite 那一份。"""
+    base = read_access_exists_clause(row_alias, nb_alias, member_alias)
+    return (
+        f"{base[:-1]} AND ({nb_alias}.{NOTEBOOK_LIVE_SQL} OR "
+        f"{notebook_delete_window_open_sql(nb_alias)}))"
+    )
+
+
 # 读权/管理权片段消费几个位置参数——从谓词自己的占位符数**推导**而不是手写常量。
 _READ_ACCESS_PARAM_COUNT = read_access_clause().count("%s")
 _ADMIN_ACCESS_PARAM_COUNT = admin_access_clause().count("%s")
@@ -578,8 +618,8 @@ NOTEBOOK_WRITE_SQL = (
 )
 
 # 删除端点专属的 owner 判定（codex #659 R6 P2）：裸 owner 比对，**刻意不带**
-# NOTEBOOK_LIVE_SQL。不是第四条通用授权谓词——唯一消费点是 `DELETE
-# /api/notebooks/{id}` 的 FastAPI 依赖，其余任何写端点都必须继续走
+# NOTEBOOK_LIVE_SQL。不是第四条通用授权谓词——消费点只有 `DELETE
+# /api/notebooks/{id}` 与删除窗口里主人的 `cancel-delete` 两个 FastAPI 依赖，其余任何写端点都必须继续走
 # NOTEBOOK_WRITE_SQL（连同它的生命周期过滤）。理由见 SQLite 版同名常量的完整注释
 # （access_sql.py 两侧逐字同义，唯一定义点分裂成两份是本模块既有惯例）。
 NOTEBOOK_DELETE_OWNER_SQL = "SELECT 1 FROM notebooks WHERE id=%s AND created_by=%s"

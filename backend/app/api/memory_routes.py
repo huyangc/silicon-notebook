@@ -20,7 +20,6 @@ from app.api.deps import (
     memory_preview_client,
     memory_service,
     notebook_access_repository,
-    notebook_catalog_repository,
     require_notebook_read,
     user_error,
 )
@@ -46,9 +45,11 @@ from app.repositories.identity_errors import (
     AgentTokenInactiveError,
     AgentTokenSecretUnavailableError,
 )
+from app.domain.notebook_delete_grace import DELETE_WINDOW_CLOSED_CODE, WINDOW_CLOSED
 from app.models.memory import (
     AnswerMemoryLinksRequest,
     AnswerMemoryLinksResponse,
+    DeleteWindowTransferRequest,
     MemoryBulkDeleteRequest,
     MemoryCreateFromAnswer,
     MemoryOrigin,
@@ -61,7 +62,11 @@ from app.models.memory import (
     PaginatedMemories,
 )
 from app.models.admin import PromoteRequest, PromotionCandidate
-from app.repositories.ports import AnswerMemorySourceRepository, MemoryRepository
+from app.repositories.ports import (
+    AnswerMemorySourceRepository,
+    DeleteWindowClosedError,
+    MemoryRepository,
+)
 from app.services.prompts import MEMORY_PREVIEW_SCHEMA_HINT, memory_preview_prompt
 from app.services.knowledge_governance import PromotionTargetError
 from app.services.memory_service import NothingToExport
@@ -285,6 +290,34 @@ def _not_found(detail: str = "Memory not found") -> HTTPException:
     return HTTPException(status_code=404, detail=detail)
 
 
+def _delete_window_closed() -> HTTPException:
+    """The notebook's deletion window has closed: its Memory can no longer be
+    exported or moved out (``app.domain.notebook_delete_grace``)."""
+    return HTTPException(
+        status_code=404, detail={"code": DELETE_WINDOW_CLOSED_CODE}
+    )
+
+
+async def require_memory_export_access(
+    notebook_id: str, user: UserProfile = Depends(get_current_user)
+) -> str:
+    """The guard of the two own-Memory exits that stay open during a
+    notebook's deletion window (export, transfer to my notebook): the caller
+    reads the notebook, live or inside its window. Not readable / missing:
+    404; window closed: 404 ``delete_window_closed``. The routes' own reads
+    re-check inside their transaction -- this only fails fast. Mounted on
+    those two routes only; every other Memory route keeps
+    ``require_notebook_read``."""
+    state = await run_in_threadpool(
+        memory_membership_service().delete_window_state, notebook_id, user.id
+    )
+    if state is None:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    if state == WINDOW_CLOSED:
+        raise _delete_window_closed()
+    return notebook_id
+
+
 async def _memory_call(call, *args, **kwargs):
     try:
         return await run_in_threadpool(call, *args, **kwargs)
@@ -355,23 +388,26 @@ async def list_notebook_memories(
 
 @memory_router.get("/notebooks/{notebook_id}/memories/export")
 def export_notebook_memories(
-    notebook_id: str = Depends(require_notebook_read),
+    notebook_id: str = Depends(require_memory_export_access),
     user: UserProfile = Depends(get_current_user),
 ) -> StreamingResponse:
     """The caller's OWN Memory in this notebook as a Markdown download — the
-    way out before leaving a shared notebook deletes it. Every status (the
-    exit deletes candidates too; they are marked), oldest first, nothing of
-    other users. Every item is read in one snapshot BEFORE the response
-    starts (a purge running meanwhile can never cut the file short), then
-    sent piece by piece. Read-gated: works only while the caller can read
-    the notebook (404). No Memory of the caller here: 404
+    way out before leaving a shared notebook deletes it, and before a
+    deleted notebook's one-day window closes. Every status (the exit deletes
+    candidates too; they are marked), oldest first, nothing of other users.
+    Every item is read in one snapshot BEFORE the response starts (a purge
+    running meanwhile can never cut the file short), then sent piece by
+    piece. Read-gated: works while the caller can read the notebook, live or
+    inside its deletion window (404 otherwise). The window has closed: 404
+    ``{"code": "delete_window_closed"}``. No Memory of the caller here: 404
     ``{"code": "nothing_to_export"}``, never an empty file. Content past
     ``MEMORY_EXPORT_MAX_BYTES``: 413 ``{"code": "export_too_large",
     "memory_count", "limit_bytes"}`` before anything is sent."""
     service = memory_membership_service()
     try:
-        title = notebook_catalog_repository().get_notebook(notebook_id).name
-        pieces = service.export_markdown(notebook_id, user.id, title)
+        export = service.export_markdown(notebook_id, user.id)
+    except DeleteWindowClosedError:
+        raise _delete_window_closed()
     except (KeyError, PermissionError):
         raise _not_found()
     except NothingToExport:
@@ -388,9 +424,9 @@ def export_notebook_memories(
             },
         )
     day = str(service.now())[:10].replace("-", "")
-    filename = f"{safe_download_name(title, fallback='笔记本')}-记忆-{day}.md"
+    filename = f"{safe_download_name(export.title, fallback='笔记本')}-记忆-{day}.md"
     return StreamingResponse(
-        (piece.encode("utf-8") for piece in pieces),
+        (piece.encode("utf-8") for piece in export.pieces),
         media_type="text/markdown; charset=utf-8",
         headers={
             "Content-Disposition": attachment_content_disposition(
@@ -669,4 +705,32 @@ async def transfer_memories(
         payload.mode,
         payload.extract_kg,
     )
+    return {"results": results}
+
+
+@memory_router.post("/notebooks/{notebook_id}/memories/transfer")
+async def transfer_memories_out_of_delete_window(
+    payload: DeleteWindowTransferRequest,
+    notebook_id: str = Depends(require_memory_export_access),
+    user: UserProfile = Depends(get_current_user),
+) -> dict:
+    """「转移到我的笔记本」during a notebook's deletion window: move every
+    one of the caller's confirmed Memory items here (those the move rule
+    accepts) into ``target_notebook_id``, a live notebook the caller owns.
+    Always a move; the server picks the items; the answer has the shape of
+    ``POST /memories/transfer`` (``{"results": [...]}``, one entry per item).
+    Moved items do not come back if the owner cancels the deletion. Window
+    closed: 404 ``delete_window_closed`` (before the first item), or per item
+    ``error_code="delete_window_closed"`` (closed part-way). Unreadable
+    notebook, or a target the caller cannot write: 404."""
+    service = memory_membership_service()
+    try:
+        results = await run_in_threadpool(
+            service.transfer_out_of_delete_window,
+            user.id, notebook_id, payload.target_notebook_id,
+        )
+    except DeleteWindowClosedError:
+        raise _delete_window_closed()
+    except (KeyError, PermissionError):
+        raise _not_found("Notebook not found")
     return {"results": results}

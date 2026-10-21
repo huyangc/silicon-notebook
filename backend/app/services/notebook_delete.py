@@ -111,6 +111,7 @@ from app.services.notebook_delete_tables import (
     Chain,
     DirectTable,
 )
+from app.services.pending_bus import publish_snapshot
 
 _log = logging.getLogger("silicon_notebook.notebook_delete")
 
@@ -397,6 +398,90 @@ class NotebookDeleteJobRunner:
         job = self.delete_jobs.request(notebook_id, actor)
         self._submit(job["id"], notebook_id)
         return {"status": "deleting"}
+
+    # ------------------------------------------------------------------
+    # The one-day deletion window (``app.domain.notebook_delete_grace``).
+    # ``request`` above stays the immediate tombstone (no web route reaches
+    # it); ``DELETE /api/notebooks/{id}`` goes through ``request_pending``.
+    # ------------------------------------------------------------------
+
+    def request_pending(self, notebook_id: str, actor: str) -> dict:
+        """T1: open the window. Returns ``{"status": "pending_delete",
+        "delete_after"}``; raises ``KeyError`` (404),
+        ``NotebookPendingDeleteError`` / ``NotebookAlreadyDeletingError``
+        (409). The owner's and every Memory holder's bell gains the notice
+        after the commit."""
+        window = self.delete_jobs.request_pending(notebook_id, actor)
+        self._log_window_event("notebook_delete_requested", notebook_id, actor)
+        self._publish_notice_change(notebook_id)
+        return {"status": "pending_delete", "delete_after": window["delete_after"]}
+
+    def cancel_pending(self, notebook_id: str, actor: str) -> str:
+        """T2: the owner takes the deletion back. ``"cancelled"`` or
+        ``"already_live"`` (a repeated cancel); raises
+        ``NotebookDeleteDueError`` (409) / ``KeyError`` (404)."""
+        outcome = self.delete_jobs.cancel_pending(notebook_id)
+        if outcome == "cancelled":
+            self._log_window_event("notebook_delete_cancelled", notebook_id, actor)
+            self._publish_notice_change(notebook_id)
+        return outcome
+
+    def _promote_due_windows(self, now: Any) -> int:
+        """Driver C: every window whose deadline has passed moves to
+        ``'deleting'`` with its job row (one transaction each), and the job
+        is submitted like a fresh delete. One clock reading per tick, taken
+        by the caller. A row cancelled or promoted by another process between
+        the listing and its CAS is skipped."""
+        submitted = 0
+        try:
+            due = self.delete_jobs.list_due_pending(now=now)
+        except Exception:  # noqa: BLE001 - driver B must still run this tick
+            _log.warning("listing due deletion windows failed", exc_info=True)
+            return 0
+        for notebook_id in due:
+            try:
+                job = self.delete_jobs.promote_due_pending(notebook_id, now=now)
+            except Exception:  # noqa: BLE001 - one window must not hold back the rest
+                # Still 'pending_delete': the next tick retries it.
+                _log.warning(
+                    "notebook %s: promoting its due deletion window failed",
+                    notebook_id, exc_info=True,
+                )
+                continue
+            if job is None:
+                continue
+            self._log_window_event("notebook_delete_promoted", notebook_id, "")
+            self._publish_notice_change(notebook_id)
+            if self._submit(job["id"], notebook_id):
+                submitted += 1
+        return submitted
+
+    def _publish_notice_change(self, notebook_id: str) -> None:
+        """Refresh the bell of everyone a window transition concerns.
+        Fail-open: the transition has committed; a lost push is caught up
+        by the next snapshot."""
+        try:
+            audience = self.delete_jobs.delete_notice_audience(notebook_id)
+        except Exception:  # noqa: BLE001 - notification is fail-open
+            _log.warning(
+                "notebook %s: reading the deletion notice audience failed",
+                notebook_id, exc_info=True,
+            )
+            return
+        for user_id in audience:
+            publish_snapshot(user_id)
+
+    def _log_window_event(self, event: str, notebook_id: str, actor: str) -> None:
+        """Audit line of a window transition: who and which notebook, never
+        any content."""
+        if self._event_log is None:
+            return
+        try:
+            self._event_log.emit(
+                {"event": event, "notebook_id": notebook_id, "actor": actor}
+            )
+        except Exception:  # noqa: BLE001 - logging must not break the flow
+            _log.warning("notebook %s: %s event failed", notebook_id, event)
 
     def _submit(self, job_id: str, notebook_id: str) -> bool:
         """Hand the job to the delete pool once; ``False`` = already in this
@@ -1138,10 +1223,14 @@ class NotebookDeleteJobRunner:
     # NOTEBOOK_DELETE_SWEEP_SECONDS
     # ------------------------------------------------------------------
 
-    def sweep_once(self) -> int:
+    def sweep_once(self, *, now: Any = None) -> int:
         """Driver A: resume stale active job rows (a worker died mid-phase,
         or a quiesce/claim wait parked the row 'waiting'/'queued'). Driver
-        B: recreate a missing job row for a 'deleting' notebook with none
+        C: promote every deletion window whose deadline has passed
+        (``pending_delete -> deleting`` plus its job row, one transaction
+        each; ``_promote_due_windows``) -- the startup sweep runs it too, so
+        a window that closed while the server was down is promoted on boot.
+        Driver B: recreate a missing job row for a 'deleting' notebook with none
         (the CAS committed but the INSERT failed, or the job row was
         deleted out of band) — P1-E: subject to an exponential backoff
         window and a hard attempt ceiling once this notebook has failed
@@ -1156,7 +1245,12 @@ class NotebookDeleteJobRunner:
             # ordinary one.
             if self._submit(job["id"], job["notebook_id"]):
                 submitted += 1
-        now = datetime.now(timezone.utc)
+        # One clock reading per tick, through the injected seam (or the
+        # caller's ``now``): driver C's deadline comparison and driver B's
+        # backoff window both use it.
+        tick = self._now() if now is None else now
+        submitted += self._promote_due_windows(tick)
+        now = _parse_timestamp(tick) or datetime.now(timezone.utc)
         for candidate in self.delete_jobs.list_notebooks_missing_job():
             notebook_id = candidate["notebook_id"]
             attempts = candidate["last_attempts"] or 0

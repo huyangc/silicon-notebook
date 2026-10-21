@@ -19,7 +19,10 @@ from typing import Any
 import pytest
 
 from app.core.config import Settings
-from app.repositories.sqlite.access_sql import NOTEBOOK_LIVE_SQL
+from app.repositories.sqlite.access_sql import (
+    NOTEBOOK_LIVE_SQL,
+    notebook_delete_window_open_sql,
+)
 from app.services.sqlite_repository import SQLiteRepository
 
 _NOW = "2026-10-01T00:00:00"
@@ -28,7 +31,13 @@ LIVE_TAIL = f" AND access_nb.{NOTEBOOK_LIVE_SQL})"
 LIVE_PROJECTION = f", (nb.{NOTEBOOK_LIVE_SQL}) AS notebook_live"
 LOCK_TAIL = f"WHERE id=? AND {NOTEBOOK_LIVE_SQL}"
 APPROVAL_TAIL = f" AND n.{NOTEBOOK_LIVE_SQL}) AS has_access"
-MARKERS = (LIVE_TAIL, LIVE_PROJECTION, LOCK_TAIL, APPROVAL_TAIL)
+# The export's deletion-window form (``export_access_exists_clause``): the one
+# tail with a placeholder (the window's instant); ``_old_params`` drops it.
+EXPORT_TAIL = (
+    f" AND (access_nb.{NOTEBOOK_LIVE_SQL} OR "
+    f"{notebook_delete_window_open_sql('access_nb')}))"
+)
+MARKERS = (LIVE_TAIL, LIVE_PROJECTION, LOCK_TAIL, APPROVAL_TAIL, EXPORT_TAIL)
 N_NOTEBOOKS, N_LIGHT, N_MEMORIES, N_HEAVY = 300, 40, 12000, 4800
 
 
@@ -211,9 +220,25 @@ def _recorded(repo, monkeypatch):
         yield statements
 
 
+def _old_params(sql: str, params) -> Any:
+    """``params`` without the window instants the dropped export tails bound."""
+    if not params or EXPORT_TAIL not in sql:
+        return params
+    values = list(params)
+    start = 0
+    dropped: list[int] = []
+    while (at := sql.find(EXPORT_TAIL, start)) != -1:
+        dropped.append(sql[:at].count("?") + EXPORT_TAIL.count("?") - 1)
+        start = at + len(EXPORT_TAIL)
+    for index in reversed(dropped):
+        del values[index]
+    return values
+
+
 def _old(sql: str) -> str:
     return (
-        sql.replace(LIVE_TAIL, ")")
+        sql.replace(EXPORT_TAIL, ")")
+        .replace(LIVE_TAIL, ")")
         .replace(LIVE_PROJECTION, "")
         .replace(LOCK_TAIL, "WHERE id=?")
         .replace(APPROVAL_TAIL, " AS has_access")
@@ -309,7 +334,8 @@ def test_live_predicate_keeps_every_sqlite_reader_plan(repo, monkeypatch):
             for index, (sql, params) in enumerate(live):
                 old_sql = _old(sql)
                 assert old_sql != sql
-                old, new = _plan(db, old_sql, params), _plan(db, sql, params)
+                old = _plan(db, old_sql, _old_params(sql, params))
+                new = _plan(db, sql, params)
                 compared += 1
                 if old != new:
                     differing[(label, index)] = (old, new)

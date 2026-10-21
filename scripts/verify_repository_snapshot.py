@@ -5912,5 +5912,49 @@ MIGRATION_MANIFEST[(98, 99)] = {
     "views": {},
 }
 
+# v100 (parity with PostgreSQL 0081_notebook_delete_grace.sql): the notebook
+# deletion grace window -- four notebooks columns (delete_after,
+# delete_requested_at, delete_requested_by nullable TEXT; status_before_delete
+# TEXT NOT NULL DEFAULT '') and the partial idx_notebooks_pending_delete_due
+# over delete_after WHERE status='pending_delete'. notebooks predates the v9
+# fixture, so like v80's sync_origin the columns are pinned per column, not
+# through the table's text. No backfill (NULL / '' are "outside a window"); no
+# table, trigger or view.
+NOTEBOOK_DELETE_GRACE_COLUMNS = {
+    "notebooks": {
+        "delete_after": ("delete_after", "TEXT", 0, None, 0),
+        "delete_requested_at": ("delete_requested_at", "TEXT", 0, None, 0),
+        "delete_requested_by": ("delete_requested_by", "TEXT", 0, None, 0),
+        "status_before_delete": ("status_before_delete", "TEXT", 1, "''", 0),
+    },
+}
+NOTEBOOK_DELETE_GRACE_INDEXES = {
+    "idx_notebooks_pending_delete_due": (
+        "CREATE INDEX idx_notebooks_pending_delete_due\n"
+        "                    ON notebooks(delete_after) WHERE status='pending_delete'"
+    ),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 100, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "notebooks": {
+                **manifest["columns"].get("notebooks", {}),
+                **NOTEBOOK_DELETE_GRACE_COLUMNS["notebooks"],
+            },
+        },
+        "indexes": {**manifest["indexes"], **NOTEBOOK_DELETE_GRACE_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(99, 100)] = {
+    "tables": {},
+    "columns": NOTEBOOK_DELETE_GRACE_COLUMNS,
+    "indexes": NOTEBOOK_DELETE_GRACE_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

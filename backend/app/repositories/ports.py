@@ -686,7 +686,8 @@ class NotebookAccessRepository(NotebookAccessReadRepository, Protocol):
     # `DELETE /api/notebooks/{id}` 依赖专属（codex #659 R6 P2）:owner 判定
     # 不带生命周期过滤,好让 owner 对自己正在删除/拷贝中的库仍然"看得见"这一行,
     # 使路由体内的 request() 走到它自己的 409 分支而不是被依赖层挡成假 404。
-    # 唯一消费点是 `deps.require_notebook_delete`;其它任何写端点都必须继续用
+    # 消费点只有 `deps.require_notebook_delete` 与 `deps.require_notebook_cancel_delete`;
+    # 其它任何写端点都必须继续用
     # `user_can_access_notebook`(连同它的生命周期过滤)。
     def user_owns_notebook_regardless_of_lifecycle(
         self, notebook_id: str, user_id: str
@@ -1329,6 +1330,17 @@ class NotebookDeleteJobStorePort(Protocol):
     覆盖新主人的进度。"""
 
     def request(self, notebook_id: str, created_by: str) -> dict: ...
+    # 删除整本笔记本的一天窗口（``app.domain.notebook_delete_grace``）：T1/T2/T3
+    # 三个同事务 CAS，时刻一律显式传入（``None`` = 读一次 store 注入的时钟）。
+    def request_pending(
+        self, notebook_id: str, requested_by: str, *, now: object = None
+    ) -> dict: ...
+    def cancel_pending(self, notebook_id: str, *, now: object = None) -> str: ...
+    def list_due_pending(self, *, now: object = None) -> list[str]: ...
+    def promote_due_pending(
+        self, notebook_id: str, *, now: object = None
+    ) -> dict | None: ...
+    def delete_notice_audience(self, notebook_id: str) -> list[str]: ...
     def recreate_for_deleting_notebook(
         self, notebook_id: str, *, attempts: int = 0
     ) -> dict:
@@ -4249,8 +4261,20 @@ class MemoryStorePort(Protocol):
         self, write: MemoryWrite, changed_by: str, reason: str
     ) -> MemoryRecord: ...
     def memory_for_user(
-        self, memory_id: str, user_id: str, *, live_only: bool = True
+        self,
+        memory_id: str,
+        user_id: str,
+        *,
+        live_only: bool = True,
+        delete_window_now: Any = None,
     ) -> MemoryRecord: ...
+    # 删除窗口期的两个本人记忆出口（导出、转移）读这两个：窗口判定与可转移 id。
+    def delete_window_state(
+        self, notebook_id: str, user_id: str, *, now: Any
+    ) -> str | None: ...
+    def delete_window_transferable_ids(
+        self, notebook_id: str, user_id: str, *, now: Any
+    ) -> list[str]: ...
     def append_revision(
         self, memory_id: str, snapshot: dict, changed_by: str, reason: str
     ) -> None: ...
@@ -4468,6 +4492,36 @@ class NotebookAlreadyDeletingError(RuntimeError):
     def __init__(self, notebook_id: str) -> None:
         super().__init__(notebook_id)
         self.notebook_id = notebook_id
+
+
+class NotebookPendingDeleteError(NotebookAlreadyDeletingError):
+    """删除请求撞见这本库**已经在删除窗口里**（``status='pending_delete'``，
+    ``app.domain.notebook_delete_grace``）：路由映射 409
+    ``{"code": "notebook_pending_delete", "delete_after"}``，让主人的第二次点击
+    看到「已安排删除、何时永久删除」，而不是笼统的「正在删除」。
+
+    是 ``NotebookAlreadyDeletingError`` 的子类：所有只认父类的既有调用方（离线
+    脚本、测试）行为不变。"""
+
+    def __init__(self, notebook_id: str, delete_after: str) -> None:
+        super().__init__(notebook_id)
+        self.delete_after = delete_after
+
+
+class NotebookDeleteDueError(RuntimeError):
+    """撤销删除来得太晚：截止时刻已过（扫尾还没推进也算），或者这本库已经进入
+    ``'deleting'``。路由映射 409 ``{"code": "notebook_delete_due"}``。"""
+
+    def __init__(self, notebook_id: str) -> None:
+        super().__init__(notebook_id)
+        self.notebook_id = notebook_id
+
+
+class DeleteWindowClosedError(KeyError):
+    """导出 / 转移本人记忆时，这本库的删除窗口已经关闭（到期未推进，或已在
+    ``'deleting'``、成员行还没被删）。路由映射 404
+    ``{"code": "delete_window_closed"}``；删库阶段 3 删掉成员行之后自然退化为
+    普通 404。``KeyError`` 的子类：没单独识别它的调用方仍按「不存在」处理。"""
 
 
 class StaleLeaseFinalizeError(RuntimeError):
@@ -5401,6 +5455,9 @@ class QueryStorePort(Protocol):
     ) -> dict[str, Any]: ...
     def notebook_analytics(self, notebook_id: str, *, viewer_id: str | None = None) -> NotebookAnalytics: ...
     def pending_actions_projection_rows(self, user_id: str) -> dict: ...
+    def pending_delete_notices(
+        self, user_id: str, *, now: Any, notebook_id: str | None = None
+    ) -> list[dict[str, Any]]: ...
     def load_notebook_scale_facts(self, notebook_id: str) -> NotebookScaleFacts: ...
     def warm_open_path_caches(
         self, progress: Callable[[int, int], None] | None = None

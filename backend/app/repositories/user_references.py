@@ -64,6 +64,10 @@ USER_REFERENCE_COLUMNS: tuple[UserReference, ...] = (
     UserReference("auth_identity_audit", "actor_id", "audit_kept"),
     UserReference("auth_identity_audit", "target_user_id", "audit_kept"),
     _blocking("notebooks", "created_by", "笔记本"),
+    # Who asked for a notebook's deletion (its one-day window, SQLite v100 /
+    # PostgreSQL 0081): audit of that request only, no FK. Always the owner,
+    # whose notebooks.created_by already blocks.
+    UserReference("notebooks", "delete_requested_by", "audit_kept"),
     _blocking("notebook_bases", "created_by", "笔记本"),
     _blocking("notebook_assets", "created_by", "笔记本"),
     _blocking("notebook_object_schemas", "created_by", "知识图谱"),

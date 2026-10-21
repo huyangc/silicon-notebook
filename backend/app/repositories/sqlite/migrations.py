@@ -327,7 +327,13 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # ask_jobs.report_id (TEXT NOT NULL DEFAULT ''): the deep report an in-flight
 # Ask turn was asked about; '' = no linked report. No backfill, no index, no
 # foreign key. See ``_migration_99``.
-SCHEMA_VERSION = 99
+# v100 (paired with PostgreSQL 0081_notebook_delete_grace.sql) adds the
+# notebook deletion grace window's four notebooks columns -- delete_after,
+# delete_requested_at, delete_requested_by (nullable TEXT, UTC ISO instants /
+# a user id) and status_before_delete (TEXT NOT NULL DEFAULT '') -- plus the
+# partial idx_notebooks_pending_delete_due over delete_after WHERE
+# status='pending_delete'. No backfill. See ``_migration_100``.
+SCHEMA_VERSION = 100
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
 # when v87 was written (a migration must not change meaning when the live
@@ -6069,6 +6075,37 @@ class SqliteMigrator:
         with self._connect() as db:
             self.add_column_if_missing(
                 db, "ask_jobs", "report_id", "TEXT NOT NULL DEFAULT ''"
+            )
+
+    def _migration_100(self) -> None:
+        """The notebook deletion grace window, parity with PostgreSQL
+        ``0081_notebook_delete_grace.sql`` (that file's header has the full
+        account).
+
+        ``DELETE /api/notebooks/{id}`` moves a notebook to
+        ``status='pending_delete'`` for one day instead of tombstoning it at
+        once; the delete sweep's driver C promotes a due row to ``'deleting'``
+        and inserts its delete job in one transaction. ``delete_after`` /
+        ``delete_requested_at`` hold aware UTC ISO instants (the shape
+        ``app.domain.notebook_delete_grace.stored_instant_text`` writes: fixed-width
+        UTC text whose byte order is time order, compared as plain text so the
+        window predicate is the same SQL as PostgreSQL's), ``delete_requested_by`` the requesting user's id
+        (audit only, no FK), ``status_before_delete`` the status a cancel
+        restores. Every existing row is outside a window, which NULL / ''
+        record: no backfill. The partial index holds only the rows inside a
+        window.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(db, "notebooks", "delete_after", "TEXT")
+            self.add_column_if_missing(db, "notebooks", "delete_requested_at", "TEXT")
+            self.add_column_if_missing(db, "notebooks", "delete_requested_by", "TEXT")
+            self.add_column_if_missing(
+                db, "notebooks", "status_before_delete", "TEXT NOT NULL DEFAULT ''"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notebooks_pending_delete_due\n"
+                "                    ON notebooks(delete_after) "
+                "WHERE status='pending_delete'"
             )
 
     def migrate(self) -> list[int]:

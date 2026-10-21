@@ -17,6 +17,11 @@ from app.domain.agent_tools import (
     AgentAccessDenied,
     capability_tier,
 )
+from app.domain.notebook_delete_grace import (
+    DELETE_WINDOW_CLOSED_CODE,
+    WINDOW_CLOSED,
+    utc_instant,
+)
 from app.models.identity import (
     AgentPrincipal,
     AgentProfile,
@@ -39,6 +44,7 @@ from app.repositories.identity_errors import (
 )
 from app.repositories.ports import (
     AskStateStorePort,
+    DeleteWindowClosedError,
     MemoryStorePort,
     NotebookAccessRepository,
 )
@@ -303,6 +309,32 @@ class NothingToExport(Exception):
     """The caller has no Memory in this notebook to export (none were ever
     saved, or a purge removed them all before the export's snapshot). HTTP
     404 ``nothing_to_export`` — never an empty file."""
+
+
+@dataclass(frozen=True)
+class MemoryExport:
+    """``MemoryService.export_markdown``'s answer: the notebook's name (for
+    the file name; read in the export's own snapshot) and the document."""
+
+    title: str
+    pieces: Iterator[str]
+
+
+def _export_instant(delete_after: str, clock_reading: Any) -> str:
+    """The deadline as the export header writes it: in the offset of the
+    export's own clock reading (the "导出时间" line just above), to the
+    minute, so both instants of the header read in one time zone."""
+    deadline = utc_instant(delete_after)
+    try:
+        reading = (
+            clock_reading if isinstance(clock_reading, datetime)
+            else datetime.fromisoformat(str(clock_reading))
+        )
+    except ValueError:
+        reading = None
+    if reading is not None and reading.tzinfo is not None:
+        deadline = deadline.astimezone(reading.tzinfo)
+    return deadline.strftime("%Y-%m-%d %H:%M")
 
 
 class _PurgeCleanupFailed(Exception):
@@ -1377,44 +1409,66 @@ class MemoryService:
             return max(fallback, 0)
 
     # ---------------------------------------------------------------- export
-    def export_markdown(
-        self, notebook_id: str, user_id: str, notebook_title: str
-    ) -> Iterator[str]:
+    def export_markdown(self, notebook_id: str, user_id: str) -> "MemoryExport":
         """The caller's own Memory in one notebook as a Markdown document,
         yielded in pieces. Every status is included (candidates are marked —
         leaving deletes them too); nothing of other users.
 
-        Everything is read NOW, before the first piece exists: the read check,
-        then every item in one snapshot read (``memory_export_snapshot``: one
+        Everything is read NOW, before the first piece exists: the read check
+        and every item in one snapshot read (``memory_export_snapshot``: one
         read-only transaction whose length is the server's reads, never the
-        client's download). A purge running at the same time — this member's
-        exit from another tab or device, a delete, a transfer's move — either
-        committed before the snapshot (those items are not in it) or after
-        (the file still has them all): the download can never silently stop
-        part-way. Nothing to export raises ``NothingToExport`` (HTTP 404)
-        instead of handing out an empty file. Memory use: the items are held
-        while the file is sent; their content is capped at
-        ``export_max_bytes`` (``MEMORY_EXPORT_MAX_BYTES``) — past it the read
-        stops with ``MemoryExportTooLarge`` (HTTP 413)."""
-        self._require_notebook(notebook_id, user_id)
-        items = self.store.memory_export_snapshot(
+        client's download; its first statement decides readability and the
+        deletion window, and yields the notebook's name for the file). A
+        purge running at the same time — this member's exit from another tab
+        or device, a delete, a transfer's move, a deletion window's promotion
+        — either committed before the snapshot (those items are not in it) or
+        after (the file still has them all): the download can never silently
+        stop part-way. A notebook inside its deletion window exports like a
+        live one, with one more header line naming the deadline; once the
+        window has closed the read raises ``DeleteWindowClosedError`` (HTTP
+        404 ``delete_window_closed``). Nothing to export raises
+        ``NothingToExport`` (HTTP 404) instead of handing out an empty file.
+        Memory use: the items are held while the file is sent; their content
+        is capped at ``export_max_bytes`` (``MEMORY_EXPORT_MAX_BYTES``) — past
+        it the read stops with ``MemoryExportTooLarge`` (HTTP 413)."""
+        snapshot = self.store.memory_export_snapshot(
             notebook_id, user_id, page_size=_EXPORT_PAGE,
-            max_bytes=self.export_max_bytes,
+            max_bytes=self.export_max_bytes, now=self.now(),
         )
-        if not items:
+        if not snapshot.items:
             raise NothingToExport()
-        return self._export_pieces(items, notebook_title)
+        return MemoryExport(
+            title=snapshot.title,
+            pieces=self._export_pieces(
+                snapshot.items, snapshot.title, snapshot.delete_after
+            ),
+        )
+
+    def delete_window_state(self, notebook_id: str, user_id: str) -> str | None:
+        """Where ``notebook_id`` stands for the caller's two Memory exits right
+        now (``classify_delete_window``): the routes' early check."""
+        return self.store.delete_window_state(notebook_id, user_id, now=self.now())
 
     def _export_pieces(
-        self, items: Sequence[MemoryRecord], notebook_title: str
+        self,
+        items: Sequence[MemoryRecord],
+        notebook_title: str,
+        delete_after: str | None = None,
     ) -> Iterator[str]:
+        now = self.now()
         yield (
             f"# {_one_line(notebook_title) or '笔记本'} · 我的记忆\n\n"
-            f"导出时间：{self.now()}\n\n"
+            f"导出时间：{now}\n\n"
             "只包含你本人在这本笔记本里的记忆。标为「候选」的尚未确认；"
             "退出这本共享笔记本时，这里列出的全部记忆都会被永久删除；"
             "退出群组不会删除它们。\n"
         )
+        if delete_after is not None:
+            yield (
+                "\n这本笔记本已被所有者删除，"
+                f"{_export_instant(delete_after, now)}起其中的全部内容"
+                "（包括这些记忆）将被永久删除。\n"
+            )
         for index, item in enumerate(items, start=1):
             yield _export_section(index, item)
         yield f"\n---\n\n共导出 {len(items)} 条记忆。\n"
@@ -1458,13 +1512,79 @@ class MemoryService:
         self._require_notebook(notebook_id, user_id)
         return self.store.answer_memory_links(notebook_id, user_id, unique_ids)
 
+    def transfer_out_of_delete_window(
+        self, user_id: str, notebook_id: str, target_notebook_id: str
+    ) -> list[dict]:
+        """「转移到我的笔记本」(ruling 2026-10-22, the fifth deletion-window
+        exit): move every one of the caller's ``confirmed`` Memory items the
+        move rule accepts out of ``notebook_id`` -- live, or inside its
+        deletion window -- into ``target_notebook_id`` (a live notebook the
+        caller owns). Always ``move``, ``extract_kg`` as the Memory page's
+        transfer defaults it (on); the server picks the items
+        (``delete_window_transferable_ids``), candidates and proposed items
+        stay behind. Each item goes through ``transfer``'s own checks and
+        lands in its result list, same shape.
+
+        The instant is taken once, before anything is read: the window must
+        be open when the transfer starts (the deadline means "start before
+        it"). Each item re-checks the window with that instant
+        (``_transfer_source``); once the promotion has committed, the items
+        not yet moved fail one by one with ``delete_window_closed`` and the
+        ones already moved stay moved. A moved item never returns to the
+        notebook, even if the owner cancels the deletion afterwards.
+
+        Raises ``KeyError`` (unreadable / missing: 404),
+        ``DeleteWindowClosedError`` (404 ``delete_window_closed``) and
+        ``PermissionError`` (the target is not a live notebook the caller
+        owns: 404)."""
+        now = self.now()
+        state = self.store.delete_window_state(notebook_id, user_id, now=now)
+        if state is None:
+            raise KeyError(notebook_id)
+        if state == WINDOW_CLOSED:
+            raise DeleteWindowClosedError(notebook_id)
+        ids = self.store.delete_window_transferable_ids(notebook_id, user_id, now=now)
+        return self.transfer(
+            user_id, ids, target_notebook_id, "move", True,
+            delete_window=(notebook_id, now),
+        )
+
+    def _transfer_source(
+        self, memory_id: str, user_id: str, delete_window: "tuple[str, Any] | None"
+    ) -> MemoryRecord:
+        """The source item of one ``transfer`` step. Outside a deletion-window
+        transfer: the caller's own Memory under the ordinary live read. Inside
+        one (``delete_window`` = ``(notebook_id, instant)``): under the window
+        read at that instant, and only from that notebook; when the item is
+        no longer readable because the window has closed (promoted, or the
+        membership already removed), the step fails with
+        ``delete_window_closed`` instead of a generic "not found"."""
+        if delete_window is None:
+            return self.store.memory_for_user(memory_id, user_id)
+        notebook_id, instant = delete_window
+        try:
+            source = self.store.memory_for_user(
+                memory_id, user_id, delete_window_now=instant
+            )
+        except KeyError:
+            state = self.store.delete_window_state(notebook_id, user_id, now=instant)
+            if state in (None, WINDOW_CLOSED):
+                raise _TransferRejected(
+                    "删除时间已到，记忆已无法转移",
+                    error_code=DELETE_WINDOW_CLOSED_CODE,
+                )
+            raise
+        if source.notebook_id != notebook_id:
+            raise KeyError(memory_id)
+        return source
+
     def transfer(
         self,
         user_id: str,
         memory_ids: "Sequence[str]",
         target_notebook_id: str,
         mode: str,
-        extract_kg: bool = True,
+        extract_kg: bool = True, delete_window: "tuple[str, Any] | None" = None,
     ) -> list[dict]:
         if mode not in {"copy", "move"}:
             raise ValueError(f"unknown transfer mode: {mode}")
@@ -1474,7 +1594,7 @@ class MemoryService:
         results: list[dict] = []
         for memory_id in memory_ids:
             try:
-                source = self.store.memory_for_user(memory_id, user_id)
+                source = self._transfer_source(memory_id, user_id, delete_window)
                 if source.notebook_id == target_notebook_id:
                     raise ValueError("源与目标不能是同一个 notebook")
                 if source.status != "confirmed":

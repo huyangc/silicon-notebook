@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from app.core.activity_time import UNRESOLVED_INSTANT, parse_activity_instant
+from app.domain.notebook_delete_grace import instant_text
 
 
 #: 「这次提问还在跑」的**精确**状态集合。
@@ -127,3 +128,18 @@ def merge_running_asks(
     ]
     pool.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
     return [item for _, _, item in pool[:RUNNING_ASK_ROWS]]
+
+
+def pending_delete_notice_row(row: Any) -> dict[str, Any]:
+    """One deletion-window notice (``QueryStore.pending_delete_notices``) in
+    the shape both backends hand out: ``delete_after`` as aware UTC ISO text,
+    the two counts as ints, ``is_owner`` as a bool -- whatever the driver
+    returned (a PostgreSQL ``datetime`` / ``bool``, a SQLite string / 0-1)."""
+    return {
+        "notebook_id": row["notebook_id"],
+        "name": row["name"] or "",
+        "delete_after": instant_text(row["delete_after"]),
+        "is_owner": bool(row["is_owner"]),
+        "memory_count": int(row["memory_count"] or 0),
+        "transferable_count": int(row["transferable_count"] or 0),
+    }

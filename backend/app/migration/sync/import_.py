@@ -4295,6 +4295,11 @@ def _insert_overrides(table: str, context: _Context) -> dict[str, Any]:
       mirror precisely because of that), and carrying the source's token
       across would publish a link nobody at this environment created.
       ``copy_notebook`` mints a fresh token for the same reason.
+    - the deletion-window columns (SQLite v100 / PostgreSQL 0081): a source
+      notebook inside its one-day window still exports (the export does not
+      look at ``status``), but its window is that environment's decision --
+      the mirror starts outside any window, exactly as the column defaults
+      say.
 
     Everything else comes from ``_STATIC_INSERT_OVERRIDES``.
     """
@@ -4304,6 +4309,10 @@ def _insert_overrides(table: str, context: _Context) -> dict[str, Any]:
             "status": _IMPORT_IN_FLIGHT_STATUS,
             "is_shared": 0,
             "share_token": None,
+            "delete_after": None,
+            "delete_requested_at": None,
+            "delete_requested_by": None,
+            "status_before_delete": "",
         }
     return dict(_STATIC_INSERT_OVERRIDES.get(table, {}))
 

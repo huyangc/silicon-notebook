@@ -46,8 +46,22 @@ V78_AUTH_TABLES = {
 
 def rollback_v99(db: sqlite3.Connection) -> None:
     """Remove ``ask_jobs.report_id``, the column SQLite migration 99 added.
-    Callers lower ``user_version`` themselves."""
+    v100 is undone first (newest-first). Callers lower ``user_version``
+    themselves."""
+    rollback_v100(db)
     db.execute("ALTER TABLE ask_jobs DROP COLUMN report_id")
+
+
+def rollback_v100(db: sqlite3.Connection) -> None:
+    """Remove what SQLite migration 100 added: the four notebooks deletion-window
+    columns and ``idx_notebooks_pending_delete_due``. Callers lower
+    ``user_version`` themselves."""
+    db.execute("DROP INDEX idx_notebooks_pending_delete_due")
+    for column in (
+        "status_before_delete", "delete_requested_by", "delete_requested_at",
+        "delete_after",
+    ):
+        db.execute(f"ALTER TABLE notebooks DROP COLUMN {column}")
 
 
 def rollback_v98(db: sqlite3.Connection) -> None:

@@ -39,6 +39,7 @@ from app.repositories.pending_action_rows import (
     RUNNING_ASK_ROWS,
     RUNNING_ASK_STATUSES,
     merge_running_asks,
+    pending_delete_notice_row,
     running_ask_item,
 )
 from app.repositories.postgres import access_sql
@@ -79,6 +80,7 @@ from app.domain.global_ask_retention import (
     retained_gone_participant_sql,
 )
 from app.domain.knowledge_contracts import USABLE_STATUSES
+from app.domain.notebook_delete_grace import utc_instant
 from app.domain.notebook_scale import NotebookScaleFacts
 from app.domain.global_ask_attribution import attribution_sql
 
@@ -2125,6 +2127,49 @@ class QueryStore:
             )
             for row in rows
         ]
+
+    def pending_delete_notices(
+        self,
+        user_id: str,
+        *,
+        now: Any,
+        notebook_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """The deletion-window notices ``user_id`` sees; contract in the SQLite
+        twin. Driven by the partial ``idx_notebooks_pending_delete_due``
+        (``delete_after > $now`` is that index's own key range), so with no
+        notebook inside a window the statement reads an empty index (plan
+        pinned in ``tests/postgres/test_notebook_delete_grace_plans_pg.py``)."""
+        params: list[Any] = [user_id, user_id, user_id, utc_instant(now)]
+        where = [
+            access_sql.notebook_delete_window_open_sql("nb"),
+            access_sql.read_access_clause("nb", "nm"),
+        ]
+        params.extend(access_sql.read_access_params(user_id))
+        if notebook_id is None:
+            where.append(
+                "(nb.created_by = %s OR EXISTS (SELECT 1 FROM memory_items om "
+                "WHERE om.created_by = %s AND om.notebook_id = nb.id))"
+            )
+            params.extend((user_id, user_id))
+        else:
+            where.append("nb.id = %s")
+            params.append(notebook_id)
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT nb.id AS notebook_id, nb.name AS name, "
+                "nb.delete_after AS delete_after, "
+                "(nb.created_by = %s) AS is_owner, "
+                "(SELECT COUNT(*) FROM memory_items m WHERE m.created_by = %s "
+                "AND m.notebook_id = nb.id) AS memory_count, "
+                "(SELECT COUNT(*) FROM memory_items m WHERE m.created_by = %s "
+                "AND m.notebook_id = nb.id AND m.status = 'confirmed' "
+                "AND m.promotion_state <> 'proposed') AS transferable_count "
+                "FROM notebooks nb WHERE " + " AND ".join(where)
+                + ' ORDER BY nb.delete_after, nb.id COLLATE "C"',
+                params,
+            ).fetchall()
+        return [pending_delete_notice_row(row) for row in rows]
 
     def pending_actions_projection_rows(self, user_id: str) -> dict:
         items: list[dict[str, Any]] = []
