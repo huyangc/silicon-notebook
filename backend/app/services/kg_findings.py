@@ -42,7 +42,15 @@ from array import array
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import (
-    Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
     Tuple,
 )
 
@@ -54,14 +62,14 @@ from app.domain.kg_analysis_contracts import (
     MARK_DISMISSED,
 )
 from app.domain.kg_findings_contracts import (
+    DECISION_APART_STATUSES,
+    DECISION_CONFIRMED,
     DUP_J_MIN,
     F1_MIN_CONCEPTS,
     F1_SHARED_MAX,
     F3A_MIN_NAMES,
     F3A_MIN_SINGLE_CHAR_RUN,
     F3A_SHARE_MIN,
-    DECISION_APART_STATUSES,
-    DECISION_CONFIRMED,
     F3B_ISOLATED_SHARE_FACTOR,
     F3B_ISOLATED_SHARE_FLOOR,
     F3B_MIN_ISOLATED,
@@ -69,10 +77,10 @@ from app.domain.kg_findings_contracts import (
     F3B_RELATIONS_PER_OBJECT_FRACTION,
     F5_TOP_SOURCES,
     FINDING_RULES,
+    MAX_MEMBER_SEEDS_PER_CANONICAL,
     MAX_PERSISTED_FINDINGS,
     MAX_RESOLVED_SAMPLES,
     MAX_SAMPLES,
-    MAX_MEMBER_SEEDS_PER_CANONICAL,
     MAX_SUBJECT_REFS,
     NOTEBOOK_SUBJECT_KEY,
     RULE_DUPLICATE_IMPORT,

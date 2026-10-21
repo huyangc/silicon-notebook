@@ -29,7 +29,6 @@ from app.domain.kg_merge_seed import (
 )
 from app.services.kg_merge import _discriminative_conflict
 
-
 # Golden v1 outputs, recorded from ``seed_concept`` as it stands on 2026-10-19.
 _V1_GOLDEN = {
     "Q-Former": "q former",

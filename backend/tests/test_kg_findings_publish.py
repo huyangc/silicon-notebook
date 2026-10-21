@@ -30,6 +30,7 @@ from app.domain.kg_findings_contracts import (
     MAX_PERSISTED_FINDINGS,
     RULES_VERSION,
 )
+from app.domain.kg_merge_seed import concept_seed_v1
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.kg_analysis import (
@@ -39,7 +40,6 @@ from app.services.kg_analysis import (
 from app.services.kg_analysis_precompute import analysis_ledger_is_current
 from app.services.kg_findings_view import relink_view
 from app.services.sqlite_repository import SQLiteRepository
-from app.domain.kg_merge_seed import concept_seed_v1
 from tests.kg_findings_world import (
     KNOWHOW_HIDDEN_SEED_NAME,
     KNOWHOW_SECRET,
