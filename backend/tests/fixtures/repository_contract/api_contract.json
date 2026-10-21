@@ -13,6 +13,16 @@
               "title": "Job Id",
               "type": "string"
             },
+            "linked_report": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/LinkedReportRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "mode": {
               "default": "",
               "title": "Mode",
@@ -2463,6 +2473,18 @@
               "title": "Question",
               "type": "string"
             },
+            "report_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Report Id"
+            },
             "source_scope": {
               "anyOf": [
                 {
@@ -2540,6 +2562,18 @@
               "maxLength": 4000,
               "title": "Question",
               "type": "string"
+            },
+            "report_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Report Id"
             },
             "retrieval_effort": {
               "default": "standard",
@@ -2695,6 +2729,16 @@
               "default": false,
               "title": "Kg Required",
               "type": "boolean"
+            },
+            "linked_report": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/LinkedReportReceipt"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "llm_mode": {
               "default": "",
@@ -4049,6 +4093,16 @@
               "title": "Id",
               "type": "string"
             },
+            "linked_report": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/LinkedReportRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "notebook_id": {
               "title": "Notebook Id",
               "type": "string"
@@ -4184,6 +4238,16 @@
             "id": {
               "title": "Id",
               "type": "string"
+            },
+            "linked_report": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/LinkedReportRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "notebook_id": {
               "title": "Notebook Id",
@@ -7744,6 +7808,121 @@
             "units"
           ],
           "title": "LastRebuild",
+          "type": "object"
+        },
+        "LinkedReportReceipt": {
+          "description": "What one turn did with the report it was asked to follow up.\n\nA receipt exists exactly when the request named a report: the turn either\nread it (``status=\"read\"``) or did not (``\"skipped\"``, with the reason shown\nbeside the report tag), so a missing report in the answer is never silent.\n``title`` is the ``reports.question`` snapshot, whole. Not public: the\nshared-conversation projection is a whitelist and does not carry it.\n\nEvery optional field follows the ``exclude_if`` convention, so a turn that\nattached no report serializes byte-identically to every historical payload.\nA skipped turn read nothing: it carries no ``sections`` and its counts stay\n0 (what was not read is not reported as read).",
+          "properties": {
+            "evidence_gone": {
+              "default": 0,
+              "title": "Evidence Gone",
+              "type": "integer"
+            },
+            "evidence_over_budget": {
+              "default": 0,
+              "title": "Evidence Over Budget",
+              "type": "integer"
+            },
+            "evidence_restored": {
+              "default": 0,
+              "title": "Evidence Restored",
+              "type": "integer"
+            },
+            "memory_used": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Memory Used",
+              "type": "array"
+            },
+            "reason": {
+              "default": "",
+              "title": "Reason",
+              "type": "string"
+            },
+            "reason_code": {
+              "default": "",
+              "title": "Reason Code",
+              "type": "string"
+            },
+            "report_id": {
+              "title": "Report Id",
+              "type": "string"
+            },
+            "sections": {
+              "items": {
+                "$ref": "#/components/schemas/LinkedReportSection"
+              },
+              "title": "Sections",
+              "type": "array"
+            },
+            "status": {
+              "enum": [
+                "read",
+                "skipped"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "summary_truncated": {
+              "default": false,
+              "title": "Summary Truncated",
+              "type": "boolean"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "report_id",
+            "title",
+            "status"
+          ],
+          "title": "LinkedReportReceipt",
+          "type": "object"
+        },
+        "LinkedReportRef": {
+          "description": "A report named by an in-flight job or summarised on a conversation: the\nid, and the title as it reads now (empty once the report was deleted).",
+          "properties": {
+            "report_id": {
+              "title": "Report Id",
+              "type": "string"
+            },
+            "title": {
+              "default": "",
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "report_id"
+          ],
+          "title": "LinkedReportRef",
+          "type": "object"
+        },
+        "LinkedReportSection": {
+          "description": "One section of the attached report, in the report's own order.\n\n``read`` is whether the section's body entered this turn's prompt (the\nreport block is bounded; the heading of every section always does).",
+          "properties": {
+            "index": {
+              "title": "Index",
+              "type": "integer"
+            },
+            "read": {
+              "title": "Read",
+              "type": "boolean"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "index",
+            "title",
+            "read"
+          ],
+          "title": "LinkedReportSection",
           "type": "object"
         },
         "MemberExitResult": {

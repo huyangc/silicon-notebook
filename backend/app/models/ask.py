@@ -375,6 +375,25 @@ def normalized_client_request_id(value: Optional[str]) -> Optional[str]:
     return value
 
 
+# Upper bound of ``AskRequest.report_id`` / ``AskIntentPreviewRequest.report_id``
+# / ``ReportLinkCheckRequest.report_id``: the same 200 the other opaque handles
+# on these request models (``conversation_id``) carry. A report id is minted by
+# the server, so the bound only refuses a caller storing arbitrary text in the
+# ``ask_jobs.report_id`` column.
+ASK_REPORT_ID_MAX_CHARS = 200
+
+
+def normalized_report_id(value: Optional[str]) -> Optional[str]:
+    """The one spelling of a linked-report id on a request: surrounding
+    whitespace dropped, blank read as no report (``None``). Both Ask request
+    models validate through it, so a padded or blank id never reaches the
+    report gate or an ``ask_jobs`` row."""
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
 class AskIntentPreviewRequest(BaseModel):
     question: str = Field(min_length=1, max_length=ASK_QUESTION_MAX_CHARS)
     conversation_id: Optional[str] = Field(default=None, max_length=200)
@@ -383,6 +402,16 @@ class AskIntentPreviewRequest(BaseModel):
     # participating unconditionally. Independent dimension from source_scope:
     # this selects whole mounted reference libraries, never sources within them.
     base_scope: Optional[BaseNotebookScope] = None
+    # The finished deep report this question follows up (single-notebook Ask
+    # only). Same field as ``AskRequest.report_id``: the intent step has to know
+    # the report is attached so "the report" / "section 3" resolve to it instead
+    # of being asked back. Blank reads as no report.
+    report_id: Optional[str] = Field(default=None, max_length=ASK_REPORT_ID_MAX_CHARS)
+
+    @field_validator("report_id")
+    @classmethod
+    def validate_report_id(cls, value: Optional[str]) -> Optional[str]:
+        return normalized_report_id(value)
 
 
 # Ceiling on the reported understanding-phase wall clock (one hour). Mirrored
@@ -484,11 +513,23 @@ class AskRequest(BaseModel):
     # progress and final answer. Persisted on ``ask_jobs.client_request_id``;
     # never part of ordering, authorization or retrieval.
     client_request_id: Optional[str] = Field(default=None, max_length=ASK_CLIENT_REQUEST_ID_MAX_CHARS)
+    # The finished deep report of this notebook that this question follows up.
+    # An explicit handle and nothing else: the question's wording never selects
+    # a report. None (and blank, which reads as None) preserves the historical
+    # request. Persisted on ``ask_jobs.report_id``; the report is read inside
+    # the retrieval ceiling already installed for the run, so it can only ever
+    # narrow what the run reads, never widen it.
+    report_id: Optional[str] = Field(default=None, max_length=ASK_REPORT_ID_MAX_CHARS)
 
     @field_validator("client_request_id")
     @classmethod
     def validate_client_request_id(cls, value: Optional[str]) -> Optional[str]:
         return normalized_client_request_id(value)
+
+    @field_validator("report_id")
+    @classmethod
+    def validate_report_id(cls, value: Optional[str]) -> Optional[str]:
+        return normalized_report_id(value)
 
     @field_validator("asked_at")
     @classmethod
@@ -513,6 +554,34 @@ def validate_asked_at_value(value: str) -> str:
     if parsed.tzinfo is None:
         raise ValueError("asked_at must include a timezone offset")
     return value
+
+
+class ReportLinkCheckRequest(BaseModel):
+    """Body of ``POST /notebooks/{id}/ask/report-check``: "would this question
+    read the attached report under these settings?", asked before the question
+    is sent so the verdict can sit next to the report tag. Carries only what
+    the verdict depends on -- the report, the submission mode and the two scope
+    dimensions -- never the question text."""
+
+    report_id: str = Field(min_length=1, max_length=ASK_REPORT_ID_MAX_CHARS)
+    mode: str = "chunk"
+    source_scope: Optional[SourceScope] = None
+    base_scope: Optional[BaseNotebookScope] = None
+
+
+class ReportLinkCheck(BaseModel):
+    """The verdict ``ReportLinkCheckRequest`` gets back: the same function the
+    run itself applies, evaluated under the same ceiling, so what the tag says
+    before the send is what the turn then does.
+
+    ``reason_code`` / ``reason`` are empty exactly when ``readable``; ``reason``
+    is displayable Chinese (``app.domain.report_followup``)."""
+
+    report_id: str
+    title: str
+    readable: bool
+    reason_code: str = ""
+    reason: str = ""
 
 
 class AnswerAnchor(BaseModel):
@@ -919,6 +988,65 @@ class ExternalEvidenceSection(BaseModel):
     conflicts: List[ExternalEvidenceConflict] = Field(default_factory=list)
 
 
+class LinkedReportSection(BaseModel):
+    """One section of the attached report, in the report's own order.
+
+    ``read`` is whether the section's body entered this turn's prompt (the
+    report block is bounded; the heading of every section always does)."""
+
+    index: int  # 1-based, the position shown in the report
+    title: str
+    read: bool
+
+
+class LinkedReportReceipt(BaseModel):
+    """What one turn did with the report it was asked to follow up.
+
+    A receipt exists exactly when the request named a report: the turn either
+    read it (``status="read"``) or did not (``"skipped"``, with the reason shown
+    beside the report tag), so a missing report in the answer is never silent.
+    ``title`` is the ``reports.question`` snapshot, whole. Not public: the
+    shared-conversation projection is a whitelist and does not carry it.
+
+    Every optional field follows the ``exclude_if`` convention, so a turn that
+    attached no report serializes byte-identically to every historical payload.
+    A skipped turn read nothing: it carries no ``sections`` and its counts stay
+    0 (what was not read is not reported as read).
+    """
+
+    report_id: str
+    title: str
+    status: Literal["read", "skipped"]
+    reason_code: str = Field(default="", exclude_if=lambda value: not value)
+    reason: str = Field(default="", exclude_if=lambda value: not value)
+    sections: List[LinkedReportSection] = Field(
+        default_factory=list, exclude_if=lambda value: not value
+    )
+    summary_truncated: bool = Field(default=False, exclude_if=lambda value: not value)
+    # Cited items of the report that entered this turn's prompt, including
+    # those that were already among the turn's own retrieval results.
+    evidence_restored: int = 0
+    # Cited items that no longer exist (the source was deleted or re-parsed).
+    evidence_gone: int = 0
+    # Cited items read back but left out of the prompt by the evidence budget.
+    evidence_over_budget: int = 0
+    # The author's own personal-memory entries the report was written from,
+    # present only for a ``read`` turn: the report body entered the prompt, so
+    # the answer may restate memory-derived text without a memory anchor and the
+    # share disclosure has to count it.
+    memory_used: List[str] = Field(
+        default_factory=list, exclude_if=lambda value: not value
+    )
+
+
+class LinkedReportRef(BaseModel):
+    """A report named by an in-flight job or summarised on a conversation: the
+    id, and the title as it reads now (empty once the report was deleted)."""
+
+    report_id: str
+    title: str = ""
+
+
 class AskResponse(BaseModel):
     answer_id: str = ""
     asked_at: str = Field(default="", exclude_if=lambda value: not value)
@@ -1026,6 +1154,12 @@ class AskResponse(BaseModel):
     # 全局问答终态引用核对的汇总,只在有引用未通过核对时出现(见
     # ``CitationCheckSummary``);单库回答永远没有这个键。
     citation_check: Optional[CitationCheckSummary] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    # What this turn did with the report its request attached (read it, or why
+    # it did not). Absent -- byte-identical to every historical payload -- when
+    # the request attached none.
+    linked_report: Optional[LinkedReportReceipt] = Field(
         default=None, exclude_if=lambda value: value is None
     )
 
@@ -1140,6 +1274,11 @@ class AskEvidence(BaseModel):
     skipped_libraries: List[RetrievalScopeBaseReceipt] = Field(default_factory=list)
     index_required: bool = False
     model_errors: List[ModelError] = Field(default_factory=list)
+    # Same receipt ``AskResponse`` carries; absent when the request attached no
+    # report.
+    linked_report: Optional[LinkedReportReceipt] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class ConversationRenameRequest(BaseModel):
@@ -1174,6 +1313,12 @@ class ConversationSummary(BaseModel):
     # path) and a later follow-up created the first job, which says nothing
     # about where the conversation began.
     submitted_via: StoredSubmittedVia = ""
+    # The report named by the conversation's LAST answer (its receipt), so a
+    # reopened conversation can restore the sticky report tag. Absent when the
+    # last turn attached none.
+    linked_report: Optional[LinkedReportRef] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class ConversationTurn(BaseModel):
@@ -1194,6 +1339,12 @@ class ActiveAskJob(BaseModel):
     asked_at: str = ""
     mode: str = ""
     trace: List[dict] = Field(default_factory=list)
+    # The report the in-flight turn was asked about (from the job row, so a
+    # reopened or second device shows it before the answer lands). Absent when
+    # the turn attached none.
+    linked_report: Optional[LinkedReportRef] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @field_validator("trace", mode="before")
     @classmethod

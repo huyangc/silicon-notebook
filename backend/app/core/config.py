@@ -430,6 +430,19 @@ class Settings(BaseSettings):
     report_max_sections: int = Field(
         6, ge=1, validation_alias="REPORT_MAX_SECTIONS"
     )
+    # 问答就一份已完成的深度报告追问时,报告进入回答 prompt 的两笔预算(各自独立,
+    # 与本轮检索证据的预算分开)。两者都是质量/成本旋钮:报告块超出
+    # ``ask_report_context_max_chars`` 时按与问题的相关度整节选入并向用户披露;复原
+    # 证据超出 ``ask_report_evidence_budget_chars`` 时计入回执的「超出预算」。
+    # 下限 2000 保证标题骨架与执行摘要有处落脚。
+    # 报告块(题目+执行摘要+全部节标题+选入的节正文)的字符上限。
+    ask_report_context_max_chars: int = Field(
+        12000, ge=2000, le=60000, validation_alias="ASK_REPORT_CONTEXT_MAX_CHARS"
+    )
+    # 复原证据分区(报告引用按 id 读回当前原文后注入)的字符上限。
+    ask_report_evidence_budget_chars: int = Field(
+        8000, ge=2000, le=60000, validation_alias="ASK_REPORT_EVIDENCE_BUDGET_CHARS"
+    )
     # One section may execute several independently approved retrieval
     # directions.  This is both a prompt contract and an API/UI validation
     # rail; user-authored directions over the cap are rejected rather than

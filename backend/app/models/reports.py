@@ -75,6 +75,28 @@ class ReportExportRequest(BaseModel):
     report_ids: List[str] = Field(default_factory=list)
 
 
+class ReportFollowupScope(BaseModel):
+    """Body of ``GET /notebooks/{id}/reports/{rid}/followup``: the retrieval
+    scope a "follow up on this report" Ask starts from -- the scope the report
+    was generated under, reduced to what still exists.
+
+    ``title`` is the report's ``reports.question`` snapshot, whole. A report
+    generated without narrowing comes back as both dimensions in their "nothing
+    excluded" (whole-notebook) shape. ``dropped_*`` count frozen selections that
+    are no longer selectable (the source is no longer visible, the reference
+    library is no longer mounted); when both dimensions end up empty the scope
+    falls back to everything and ``fell_back_to_all`` says so.
+    """
+
+    report_id: str
+    title: str
+    source_scope: SourceScope
+    base_scope: BaseNotebookScope
+    dropped_sources: int = 0
+    dropped_libraries: int = 0
+    fell_back_to_all: bool = False
+
+
 class ReportDetail(ReportSummary):
     outline: List[dict] = Field(default_factory=list)
     sections: List[dict] = Field(default_factory=list)
