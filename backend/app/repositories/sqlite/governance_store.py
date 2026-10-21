@@ -2005,27 +2005,46 @@ class GovernanceStore:
         return applied, []
 
     @staticmethod
+    def lock_memory_teardown_objects_on(
+        connection: sqlite3.Connection, notebook_id: str, source_ids: List[str]
+    ) -> tuple:
+        """Mirror of the PostgreSQL twin's read half. There are no row locks
+        to take up front: the caller's ``BEGIN IMMEDIATE`` already serialises
+        every writer, so two teardowns can never interleave. Returns the
+        sources' own rows ``{id, source_id, status, marker}``, ``False``
+        (SQLite's strip reads its own reverse-index verdict) and ``None``."""
+        ids = sorted(set(source_ids))
+        if not ids:
+            return [], False, None
+        owners = id_bind_ids(ids, sort=True)
+        marker = f"json_extract(payload, '$.{MERGED_INTO_PAYLOAD_KEY}')"
+        own = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT id, source_id, status, "
+                f"CASE WHEN json_valid(payload) THEN {marker} END AS marker "
+                "FROM knowledge_objects "
+                f"WHERE {id_drive_by('source_id', owners)} AND +notebook_id = ?",
+                (owners.param, notebook_id),
+            ).fetchall()
+        ]
+        return own, False, None
+
+    @staticmethod
     def detach_memory_merges_on(
         connection: sqlite3.Connection,
         notebook_id: str,
         source_ids: List[str],
         now: str,
     ) -> MemoryMergeDetach:
-        """Mirror of the PostgreSQL twin (no row locks to take up front: the
-        caller's ``BEGIN IMMEDIATE`` already serialises every writer): settle
-        the objects merged into the sources' own objects, then strip the
-        sources' entries from the objects other sources own."""
+        """Mirror of the PostgreSQL twin: read the sources' own objects
+        (``lock_memory_teardown_objects_on``), settle the objects merged into
+        them, then strip the sources' entries from the objects other sources
+        own."""
         ids = sorted(set(source_ids))
-        own = []
-        if ids:
-            owners = id_bind_ids(ids, sort=True)
-            marker = f"json_extract(payload, '$.{MERGED_INTO_PAYLOAD_KEY}')"
-            own = connection.execute(
-                f"SELECT id, status, CASE WHEN json_valid(payload) THEN {marker} END "
-                "AS marker FROM knowledge_objects "
-                f"WHERE {id_drive_by('source_id', owners)} AND +notebook_id = ?",
-                (owners.param, notebook_id),
-            ).fetchall()
+        own, _backfilled, _cited = GovernanceStore.lock_memory_teardown_objects_on(
+            connection, notebook_id, ids
+        )
         applied: List[MergeFollowAction] = []
         followers = GovernanceStore.merge_followers_on(
             connection, notebook_id, ids, [str(row["id"]) for row in own]
