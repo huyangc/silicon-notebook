@@ -7,7 +7,9 @@
 // 断言（只读样式表——样式表没有可消费的 AST）：
 //   1. 气泡的样式表不碰 `.chat-input-bar`；
 //   2. 笔记本工作区里（`:has(.chat-panel)`）气泡不超过 40px、离角不超过 8px——
-//      空白角横竖各 42px（页面边距 24 + 面板内边距 18），再大就压到输入框的内容。
+//      空白角横竖各 42px（页面边距 24 + 面板内边距 18），再大就压到输入框的内容；
+//   3. 笔记本列表上气泡带字（「全局问答」不靠悬停才出现），进笔记本才把字收起——
+//      只有图标时用户认不出它。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -30,4 +32,13 @@ test("inside a notebook the bubble fits the empty corner", () => {
     assert.ok(px("width") <= 40 && px("height") <= 40, `bubble too large: ${block}`);
     assert.ok(px("right") <= 8 && px("bottom") <= 8, `bubble too far from the corner: ${block}`);
   }
+});
+
+test("on the notebook list the bubble's name is visible without hovering", () => {
+  const base = RULES.match(/(?:^|\n)\.global-bubble-label\s*\{([^}]*)\}/)?.[1];
+  assert.ok(base, "the base label rule is missing");
+  assert.doesNotMatch(base, /opacity:\s*0\s*[;}]|opacity:\s*0$|display:\s*none|position:\s*absolute/);
+  assert.doesNotMatch(RULES, /:hover\s+\.global-bubble-label/, "the label must not depend on hover");
+  const inNotebook = RULES.match(/body:has\(\.chat-panel\) \.global-bubble-label\s*\{([^}]*)\}/)?.[1];
+  assert.ok(inNotebook && /max-width:\s*0/.test(inNotebook), "inside a notebook the label must fold away");
 });

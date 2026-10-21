@@ -1,16 +1,38 @@
-.global-ask-bubble { position: fixed; right: max(24px, env(safe-area-inset-right)); bottom: max(24px, env(safe-area-inset-bottom)); z-index: 40; width: 58px; height: 58px; display: grid; place-items: center; padding: 0; border: 1px solid color-mix(in srgb, var(--panel) 18%, transparent); border-radius: 50%; background: var(--ink); color: var(--panel); box-shadow: 0 6px 24px color-mix(in srgb, var(--ink) 20%, transparent); }
+/* 集合页上气泡是带字的胶囊（图标 + 「全局问答」）：只有图标时用户认不出它是什么。
+   宽度写死而不是 auto——auto 与 40px 之间没法过渡，进/出笔记本时胶囊要看得见地收成
+   圆、再展开回来。四个汉字 14px 宽 56px，加图标、间距与左右内边距正好 124px。 */
+.global-ask-bubble { position: fixed; right: max(24px, env(safe-area-inset-right)); bottom: max(24px, env(safe-area-inset-bottom)); z-index: 40; width: 124px; height: 48px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0; overflow: hidden; white-space: nowrap; border: 1px solid color-mix(in srgb, var(--panel) 18%, transparent); border-radius: 24px; background: var(--ink); color: var(--panel); font-size: 14px; font-weight: 600; box-shadow: 0 6px 24px color-mix(in srgb, var(--ink) 20%, transparent); transition: width 220ms ease, height 220ms ease, right 220ms ease, bottom 220ms ease, gap 220ms ease, background-color 120ms ease, transform 80ms ease; }
 .global-ask-bubble[hidden] { display: none; }
+.global-ask-bubble svg { flex: none; transition: width 220ms ease, height 220ms ease; }
+.global-bubble-label { max-width: 4em; opacity: 1; overflow: hidden; transition: max-width 220ms ease, opacity 160ms ease; }
 /* 笔记本工作区里，视口右下角恰好是问答输入框的右下角。输入框**不为气泡让位**——
-   它左右留白必须对称；让位的是气泡：缩到 40px、退进输入框右下方那块空白角
-   （页面边距 24px + 面板内边距 18px，横竖各 42px）。40px 的圆贴着 8px 的角放，
-   与输入框 14px 圆角之间还剩五六个像素，碰不到按键提示与发送键。
-   `:has(.chat-panel)`：只有打开了笔记本才有这个面板；主页上气泡保持 58px。
+   它左右留白必须对称；让位的是气泡：收起文字、缩到 40px 的圆、退进输入框右下方那块
+   空白角（页面边距 24px + 面板内边距 18px，横竖各 42px）。40px 的圆贴着 8px 的角放，
+   与输入框 14px 圆角之间还剩五六个像素，碰不到按键提示与发送键。名字仍在 title 与
+   aria-label 上。
+   `:has(.chat-panel)`：只有打开了笔记本才有这个面板。
    规则放在这份样式里：只有挂了气泡的页面才会加载它。 */
-body:has(.chat-panel) .global-ask-bubble { right: max(8px, env(safe-area-inset-right)); bottom: max(8px, env(safe-area-inset-bottom)); width: 40px; height: 40px; }
+body:has(.chat-panel) .global-ask-bubble { right: max(8px, env(safe-area-inset-right)); bottom: max(8px, env(safe-area-inset-bottom)); width: 40px; height: 40px; gap: 0; }
 body:has(.chat-panel) .global-ask-bubble svg { width: 18px; height: 18px; }
+body:has(.chat-panel) .global-bubble-label { max-width: 0; opacity: 0; }
 .global-ask-bubble:hover { background: color-mix(in srgb, var(--ink) 85%, var(--panel)); }
-.global-bubble-label { position: absolute; right: calc(100% + 10px); white-space: nowrap; padding: 7px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--ink); font-size: 12px; opacity: 0; pointer-events: none; }
-.global-ask-bubble:hover .global-bubble-label, .global-ask-bubble:focus-visible .global-bubble-label { opacity: 1; }
+.global-ask-bubble:active { transform: scale(0.96); }
+/* 胶囊比原来的圆宽：集合页底部多留出它的高度，滚到底时最后一排卡片不被它压住。 */
+.collection-view { padding-bottom: 96px; }
+
+/* 首次提示：一次性、不抢焦点、不挡别的东西——贴在气泡正上方，小三角指着它。 */
+.global-ask-hint { position: fixed; right: max(24px, env(safe-area-inset-right)); bottom: calc(max(24px, env(safe-area-inset-bottom)) + 48px + 12px); z-index: 40; width: min(260px, calc(100vw - 48px)); display: grid; gap: 10px; padding: 14px 16px 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--ink); box-shadow: 0 10px 32px color-mix(in srgb, var(--ink) 16%, transparent); animation: global-ask-hint-in 240ms ease both; }
+.global-ask-hint::after { content: ""; position: absolute; right: 57px; bottom: -6px; width: 10px; height: 10px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--panel); transform: rotate(45deg); }
+.global-ask-hint p { margin: 0; font-size: 13px; line-height: 1.55; color: var(--muted); }
+.global-ask-hint strong { display: block; margin-bottom: 2px; font-size: 14px; color: var(--ink); }
+.global-ask-hint-dismiss { justify-self: end; padding: 5px 12px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--ink); font-size: 12px; cursor: pointer; transition: background-color 120ms ease, transform 80ms ease; }
+.global-ask-hint-dismiss:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.global-ask-hint-dismiss:active { transform: scale(0.96); background: color-mix(in srgb, var(--ink) 12%, transparent); }
+@keyframes global-ask-hint-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .global-ask-bubble, .global-ask-bubble svg, .global-bubble-label { transition: none; }
+  .global-ask-hint { animation: none; }
+}
 .global-ask-window { padding: 0; border: 1px solid var(--line); background: var(--panel); color: var(--ink); overflow: hidden; }
 .global-ask-window.is-compact { position: fixed; inset: auto 24px 24px auto; margin: 0; width: min(440px, calc(100vw - 32px)); height: min(680px, calc(100dvh - 104px)); max-width: none; max-height: none; border-radius: 22px; box-shadow: 0 18px 70px color-mix(in srgb, var(--ink) 19%, transparent); z-index: 45; }
 .global-ask-window.is-full { position: fixed; inset: 0; margin: 0; width: 100%; height: 100dvh; max-width: none; max-height: none; border: 0; border-radius: 0; }
@@ -18,7 +40,8 @@ body:has(.chat-panel) .global-ask-bubble svg { width: 18px; height: 18px; }
 .global-ask-window .global-ask-page { height: 100%; min-height: 0; }
 .global-window-loading { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 24px; font-size: 13px; }
 @media (max-width: 700px) {
-  .global-ask-bubble { right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom)); width: 54px; height: 54px; }
+  .global-ask-bubble { right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom)); }
+  .global-ask-hint { right: max(16px, env(safe-area-inset-right)); bottom: calc(max(16px, env(safe-area-inset-bottom)) + 48px + 12px); width: min(260px, calc(100vw - 32px)); }
   body:has(.chat-panel) .global-ask-bubble { right: max(8px, env(safe-area-inset-right)); bottom: max(8px, env(safe-area-inset-bottom)); width: 36px; height: 36px; }
   .global-ask-window.is-compact { right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); width: calc(100% - 24px); height: min(680px, calc(100dvh - 80px)); }
 }

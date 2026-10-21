@@ -167,9 +167,13 @@ Each notebook limits uploaded documents to `USER_UPLOAD_DOCUMENT_LIMIT` (default
 ## Global Ask
 
 Global Ask opens from a bottom-right bubble in the authenticated collection and notebook workspace.
-The bubble is 58px on the collection page; inside a notebook workspace it shrinks to 40px and tucks into
-the empty corner below-right of the Ask composer — the composer never makes room for it, so its left and
-right margins stay symmetric.
+On the collection page the bubble is a labelled pill (icon plus 「全局问答」, 124×48px) so people can tell
+what it is without hovering; inside a notebook workspace the label folds away and the pill animates down to
+a 40px circle tucked into the empty corner below-right of the Ask composer — the composer never makes room
+for it, so its left and right margins stay symmetric. The first time a user sees the collection page, a
+one-time hint above the pill says what Global Ask does; it never takes focus, and it is retired for that user
+(remembered in the browser's local storage) once they dismiss it, open Global Ask, or leave the list after
+seeing it.
 Clicking opens a compact chat; expanding fills the viewport with history and chat.
 Minimizing, reopening and switching size retain the same mounted conversation, draft, scope and task
 progress; minimizing does not cancel a task. Embedded chat leaves the host URL unchanged and loads

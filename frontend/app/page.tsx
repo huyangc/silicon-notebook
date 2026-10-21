@@ -7835,7 +7835,10 @@ export default function Home() {
         />
       )}
 
-      <GlobalAskLauncher key={currentUser.id} presentation={rootModals} uiMode={uiMode} openRequest={globalAskRequest} />
+      {/* 首次提示只在笔记本列表上出现:那里是新用户第一眼看到气泡的地方,
+          进了笔记本气泡已让位成小圆、不再适合在旁边讲解。 */}
+      <GlobalAskLauncher key={currentUser.id} presentation={rootModals} uiMode={uiMode} openRequest={globalAskRequest}
+        discoveryHint={{ userId: currentUser.id, active: !isWorkspace && outerView === "notebooks" }} />
       <ToastRegion
         message={toast}
         lingerMs={toast && toast === exitToast ? TOAST_EXIT_MS : TOAST_DEFAULT_MS}
