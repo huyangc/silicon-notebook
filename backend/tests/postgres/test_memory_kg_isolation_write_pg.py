@@ -623,23 +623,39 @@ def test_pg_the_backstop_repoints_instead_of_restoring_a_second_copy(pg_reposito
 
 
 def test_pg_a_long_held_lock_bounds_the_follow_up_and_hands_it_to_the_backstop(
-    pg_repository, monkeypatch
+    postgres_settings, tmp_path, monkeypatch
 ):
     """Quality P3-1: the after-commit follow-up runs on the delete's own
-    thread, so its wait is bounded (``SET LOCAL lock_timeout``). With
-    mem-a1's source held far longer, deleting mem-a2 returns in bounded
-    time, ko-ma1 still deprecated, and the notebook is handed to a
-    background backstop pass — which restores ko-ma1 once the lock goes."""
+    thread, so its wait is bounded by its own ``SET LOCAL lock_timeout`` —
+    not only by the deployment's (``POSTGRES_LOCK_TIMEOUT_SECONDS``, set to
+    30 s here so the bound under test is the follow-up's). With mem-a1's
+    source held far longer, deleting mem-a2 returns in bounded time, ko-ma1
+    still deprecated, and the notebook is handed to a background backstop
+    pass — which restores ko-ma1 once the lock goes."""
+    from app.repositories.postgres.repository import PostgresRepository
+    from app.services import background_jobs
+    from app.services import source_ingestion as ingestion_module
+
+    postgres_settings.storage_dir = str(tmp_path / "storage")
+    postgres_settings.event_log_enabled = False
+    postgres_settings.llm_log_enabled = False
+    postgres_settings.kg_auto_extract = False
+    postgres_settings.embed_dim = 16
+    postgres_settings.postgres_lock_timeout_seconds = 30
+    repo = PostgresRepository(postgres_settings)
+    try:
+        _run_the_bounded_follow_up_case(repo, monkeypatch, ingestion_module, background_jobs)
+    finally:
+        repo._runtime.database.close()
+
+
+def _run_the_bounded_follow_up_case(repo, monkeypatch, ingestion_module, background_jobs):
     import threading
     import time
 
     import psycopg
     from psycopg.rows import dict_row
 
-    from app.services import background_jobs
-    from app.services import source_ingestion as ingestion_module
-
-    repo = pg_repository
     database = repo._runtime.database
     _seed(database)
     _pg_own_merge(repo, "ko-ma1", "ko-ma2")
