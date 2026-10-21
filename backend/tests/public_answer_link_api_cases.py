@@ -23,7 +23,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from itertools import count
-from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 

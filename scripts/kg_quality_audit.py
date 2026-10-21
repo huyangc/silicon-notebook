@@ -500,7 +500,7 @@ def report_concepts(items: List[dict], whitelist: set, show_samples: bool,
             probe[tag] += 1
             if show_samples and len(probe_samples[tag]) < 6:
                 probe_samples[tag].append(n)
-    print(f"  probes.classify_concept 疑似信号(比过滤器口径宽):")
+    print("  probes.classify_concept 疑似信号(比过滤器口径宽):")
     if not probe:
         print("    (无命中)")
     for tag, c in probe.most_common():
@@ -753,7 +753,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not full:
             print("  ⚠ 以下所有比例来自抽样,不是全量。DF(文档频次)在抽样下被系统性")
             print("    低估 —— 只在 1 篇出现的名字里,有一部分其实在没抽到的来源中也出现。")
-            print(f"    要全量:重跑并加 --sources 0(千万级库会很慢)。")
+            print("    要全量:重跑并加 --sources 0(千万级库会很慢)。")
 
         # 不挂来源的对象(晋升 / Memory→KG 写路径刻意写 source_id='')按来源永远抽
         # 不到。全量模式必须纳入,抽样模式至少要把它们的存在和数量说出来 —— 否则

@@ -12,7 +12,6 @@ import os
 import pathlib
 import sys
 import threading
-import traceback
 
 import yaml
 from dotenv import load_dotenv

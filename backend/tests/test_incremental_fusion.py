@@ -458,7 +458,7 @@ def test_tier2_ann_bridge_survives_stale_index(repo, monkeypatch):
     for oid, name, vec in existing:
         _seed_concept(repo, nb.id, oid, name, "src-A", vec, now)
     _build_small_base(repo, nb.id, existing, now)
-    manifest = repo.build_scale_index(nb.id)
+    repo.build_scale_index(nb.id)
     fresh = repo._scale_index(nb.id)
     assert fresh is not None and fresh.manifest.get("version") is not None
 

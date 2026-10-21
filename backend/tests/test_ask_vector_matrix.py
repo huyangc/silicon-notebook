@@ -1,7 +1,6 @@
 """ask() 走 vector_index 的 float32 矩阵路径(低内存),而非把所有向量
 materialize 成 Python list。验证矩阵构建 + 端到端 ask 仍正确。"""
 import json
-import math
 
 import numpy as np
 import pytest

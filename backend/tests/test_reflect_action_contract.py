@@ -435,10 +435,10 @@ def test_an_over_length_parameter_description_fails_startup_without_echoing_it()
         "\x1b",
         "\x7f",      # DEL
         "\x85",      # C1 NEL: a line break to many tokenizers
-        " ",    # LINE SEPARATOR
-        " ",    # PARAGRAPH SEPARATOR
-        "‮",    # bidi override: reverses the rendered line
-        "⁦",    # bidi isolate
+        "\u2028",    # LINE SEPARATOR
+        "\u2029",    # PARAGRAPH SEPARATOR
+        "\u202e",    # bidi override: reverses the rendered line
+        "\u2066",    # bidi isolate
     ],
 )
 def test_a_control_character_in_a_descriptor_string_fails_startup(control):

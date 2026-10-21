@@ -185,7 +185,7 @@ def test_pending_actions_index_state(repo, monkeypatch):
 
 def test_pending_actions_index_building_not_counted(repo, monkeypatch):
     """building/queued 不计入 count(不是"待用户确认"的动作项)。"""
-    nb = _seed_user_nb(repo, "user-a")
+    _seed_user_nb(repo, "user-a")
     monkeypatch.setattr(repo.__dict__["_runtime"].scale_artifacts, "status",
                          lambda notebook_id: {"state": "building", "total_chunks": 100, "delta_chunks": 40})
     out = repo.pending_actions("user-a")
@@ -198,7 +198,7 @@ def test_pending_actions_index_building_not_counted(repo, monkeypatch):
 def test_pending_actions_index_queued_state_passthrough_no_progress(repo, monkeypatch):
     """queued 不再被伪装成 building —— 排队态没有构建进度这种误导字段
     (total-delta)/total 是构建进度,不是排队进度)。"""
-    nb = _seed_user_nb(repo, "user-a")
+    _seed_user_nb(repo, "user-a")
     monkeypatch.setattr(
         repo.__dict__["_runtime"].scale_artifacts,
         "status",
@@ -214,7 +214,7 @@ def test_pending_actions_index_queued_state_passthrough_no_progress(repo, monkey
 
 def test_pending_actions_index_building_still_has_progress(repo, monkeypatch):
     """building 仍要有构建进度(只有 queued 被排除在进度计算之外)。"""
-    nb = _seed_user_nb(repo, "user-a")
+    _seed_user_nb(repo, "user-a")
     monkeypatch.setattr(
         repo.__dict__["_runtime"].scale_artifacts,
         "status",

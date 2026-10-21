@@ -99,8 +99,8 @@ def _configure_ask(repo):
 def test_build_notebook_kg_runs_extraction_per_kgless_source(repo, monkeypatch):
     _configure_llm(repo)
     nb = repo.create_notebook(NotebookCreate(name="n"))
-    s1 = _make_source(repo, nb.id, "s1")
-    s2 = _make_source(repo, nb.id, "s2")
+    _make_source(repo, nb.id, "s1")
+    _make_source(repo, nb.id, "s2")
     calls = []
     monkeypatch.setattr(
         repo._runtime.source_ingestion,
@@ -114,11 +114,11 @@ def test_build_notebook_kg_runs_extraction_per_kgless_source(repo, monkeypatch):
 def test_build_notebook_kg_skips_sources_with_kg(repo, monkeypatch):
     _configure_llm(repo)
     nb = repo.create_notebook(NotebookCreate(name="n"))
-    s1 = _make_source(repo, nb.id, "s1")
+    _make_source(repo, nb.id, "s1")
     repo.store_kg(nb.id, "s1", [
         {"local_id": "K1", "object_type": "concept",
          "payload": {"name": "X"}, "evidence": []}], [])   # s1 already has KG
-    s2 = _make_source(repo, nb.id, "s2")
+    _make_source(repo, nb.id, "s2")
     calls = []
     monkeypatch.setattr(
         repo._runtime.source_ingestion,

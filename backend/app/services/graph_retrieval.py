@@ -27,9 +27,10 @@ import heapq
 import json
 import math
 import time
-from typing import Callable, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from app.domain.citation_origin import owned_by_another_library
+from app.domain.retrieval import RetrievedChunk
 from app.models.common import Evidence
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.retrieval import RetrievedKnowledge
@@ -45,6 +46,9 @@ from app.services.retrieval_participants import (
     override_fingerprint,
 )
 from app.services.retrieval_run import current_viewer_id, memoized_retrieval_value
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
 #: Rows per batched hnswlib ``knn_query`` in the cross-layer synonym bridge.
@@ -558,7 +562,6 @@ class GraphRetrievalService(_RetrievalState):
                 nodes: dict = {}
                 all_relations: list = []
                 cluster_groups: dict = {}
-                ph = ",".join("?" for _ in USABLE_STATUSES)
                 # gate ii (T3, knowhow KG-node retrieval): the ONE switch for the
                 # whole feature. Flag OFF ⇒ node meta carries no table_id/rows ⇒
                 # byte-identical federated graph (and render → knowhow None). The
@@ -668,7 +671,6 @@ class GraphRetrievalService(_RetrievalState):
                    self.settings.mention_bridge_enabled, self.settings.mention_edge_weight,)
 
         def _load():
-            ph = ",".join("?" for _ in USABLE_STATUSES)
             kg_nodes: Dict[str, dict] = {}
             chunk_ids: list = []
             relations: list = []
@@ -1648,7 +1650,6 @@ class GraphRetrievalService(_RetrievalState):
             return FollowChainResult()
         max_fan_out = max(1, min(int(max_fan_out), 16))
         max_results = max(1, min(int(max_results), 16))
-        status_ph = ",".join("?" for _ in USABLE_STATUSES)
 
         with self._connect() as db:
             # Authorization/scope gate: an action may only start from the active

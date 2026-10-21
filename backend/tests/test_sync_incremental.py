@@ -452,7 +452,7 @@ def test_a_global_row_change_travels_without_a_notebook(baseline):
     with repo._write() as db:
         db.execute(
             "UPDATE groups SET name = ? WHERE id = ?",
-            ("renamed", f"grp-alpha"),
+            ("renamed", "grp-alpha"),
         )
 
     report = _export(baseline["settings"], baseline["out"])

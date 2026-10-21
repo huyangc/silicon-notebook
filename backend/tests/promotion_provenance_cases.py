@@ -589,7 +589,6 @@ def a_search_for_the_current_wording_finds_a_legacy_titled_promotion(world: Worl
     repo = world.repo
     source_id = world.promotion_source
     legacy = f"{LEGACY_PREFIX}{ORIGIN_TITLE}"
-    shown = f"{CURRENT_PREFIX}{ORIGIN_TITLE}"
     world.write("UPDATE sources SET title=? WHERE id=?", (legacy, source_id))
     # an uploaded document carrying the legacy words as its own title
     seed_document(repo, world.sql, world.base, "s-own", f"{LEGACY_PREFIX}我自己的文档",

@@ -307,7 +307,7 @@ def test_nonblank_partial_index_chosen_with_literal_and_not_with_bound_param(
     assert (
         PostgresMigrator(postgres_repository._runtime.database).migrate() == 79
     )
-    notebook_id = _seed_notebook_with_source(postgres_repository, "nonblank-partial")
+    _seed_notebook_with_source(postgres_repository, "nonblank-partial")
     runtime = postgres_repository._runtime
     now = normalize_timestamp(runtime.seams.now())
     with runtime.database.write() as db:

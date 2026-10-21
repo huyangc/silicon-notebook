@@ -153,7 +153,7 @@ def test_complete_gate_delegates_every_required_verification_layer():
             assert responsibility in source, f"{relative}: {responsibility}"
 
     for lane_name in ("backend", "contracts", "frontend"):
-        assert f"check_${{lane}}.sh" in coordinator or (
+        assert "check_${lane}.sh" in coordinator or (
             f"check_{lane_name}.sh" in coordinator
         )
 

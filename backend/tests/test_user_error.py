@@ -312,11 +312,13 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "(断言 413 + X-User-Message 头 + detail 含上限数字)。"
     ),
     "app/api/report_routes.py::update_report_outline": (
-        "两处动态 detail 均为纯中文上限模板 f-string，各只插入一个部署配置整数："
-        "「每个章节最多可保留 N 条检索方向」(Settings.report_max_subqueries_per_section) 与"
-        "「报告大纲最多可保留 N 个章节」(Settings.report_max_sections)——无内部黑话、"
-        "无异常原文。真实响应由 tests/test_report_api.py 的 outline PATCH 422 用例覆盖"
-        "(断言 detail 含上限数字)。"
+        "两处动态 detail 都是本函数内的纯中文模板 f-string，只插入部署配置派生的"
+        "整数护栏：「报告大纲最多可保留 N 个章节」（report_max_sections）与"
+        "「每个章节最多可保留 N 条检索方向」（report_max_subqueries_per_section）；"
+        "同函数其余 user_error 文案都是中文字面量。真实响应由 test_report_api.py::"
+        "test_outline_patch_rejects_excess_sections 与"
+        "test_outline_patch_rejects_excess_retrieval_directions 覆盖"
+        "（断言 422 + detail 含上限数字）。"
     ),
     "app/api/knowhow_routes.py::_knowhow_import_user_error": (
         "detail 只能来自 GridParseError 或 KnowhowImportValidationError 的 user_message；"
@@ -335,15 +337,6 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "test_intent_confirmation_requires_answers_then_resumes_planning 与"
         "test_report_intent_confirmation_rejects_a_blank_resolved_question 覆盖，"
         "均断言逐字 detail。"
-    ),
-    "app/api/report_routes.py::update_report_outline": (
-        "两处动态 detail 都是本函数内的纯中文模板 f-string，只插入部署配置派生的"
-        "整数护栏：「报告大纲最多可保留 N 个章节」（report_max_sections）与"
-        "「每个章节最多可保留 N 条检索方向」（report_max_subqueries_per_section）；"
-        "同函数其余 user_error 文案都是中文字面量。真实响应由 test_report_api.py::"
-        "test_outline_patch_rejects_excess_sections 与"
-        "test_outline_patch_rejects_excess_retrieval_directions 覆盖"
-        "（断言 422 + detail 含上限数字）。"
     ),
     "app/api/agent_profile_routes.py::update_understanding_block": (
         "四处动态 detail 全部是本文件顶部维护的中文模块常量（_DISABLED_MESSAGE/"

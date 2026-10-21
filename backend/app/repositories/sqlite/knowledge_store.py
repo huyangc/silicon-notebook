@@ -2369,9 +2369,9 @@ class KnowledgeStore:
                 # ``sources_only`` (E4-4) narrows this form too: the id, the
                 # element's library and its (CASE-gated) source only.
                 text_columns = "" if sources_only else (
-                    f", CASE WHEN os.notebook_id=o.nb THEN se.element_type END AS element_type, "
-                    f"CASE WHEN os.notebook_id=o.nb THEN se.location_label END AS location_label, "
-                    f"CASE WHEN os.notebook_id=o.nb THEN se.text END AS text"
+                    ", CASE WHEN os.notebook_id=o.nb THEN se.element_type END AS element_type, "
+                    "CASE WHEN os.notebook_id=o.nb THEN se.location_label END AS location_label, "
+                    "CASE WHEN os.notebook_id=o.nb THEN se.text END AS text"
                 )
                 rows = db.execute(
                     f"SELECT se.id, os.notebook_id AS element_notebook_id, "

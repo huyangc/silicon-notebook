@@ -32,7 +32,7 @@ from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.source_scope import source_scope_context
 from tests.model_testkit import (
-    bind_all_embedding_clients, bind_chat_client, bind_rerank_client,
+    bind_all_embedding_clients, bind_chat_client,
 )
 
 

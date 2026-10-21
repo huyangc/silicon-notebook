@@ -9,7 +9,6 @@ The instrumentation is pure logging: it must NOT change the returned cluster
 count, the persisted concept_clusters, or the progress=None path (aside from
 the always-emitted INFO lines).
 """
-import json
 
 import pytest
 

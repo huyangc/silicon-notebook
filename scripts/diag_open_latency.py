@@ -27,9 +27,8 @@ from pathlib import Path
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
-import diag_common  # noqa: E402 — stdlib sibling; database-target resolution
+import diag_common  # noqa: E402 — stdlib sibling; database-target resolution, bounded historical offline log reader
 import diag_slow  # noqa: E402 — stdlib sibling host diagnostic; reuse its helpers
-import diag_common  # noqa: E402 — bounded historical offline log reader
 
 USABLE = ("approved", "reviewed", "project_specific", "conflict")
 
@@ -116,7 +115,7 @@ def _main(argv=None) -> int:
             kg_seq = int(diag_common.finite_number(st["ks"]) or 0)
             cluster_seq = int(diag_common.finite_number(st["cs"]) or 0)
             mention_seq = int(diag_common.finite_number(st["ms"], minimum=-2) or 0)
-            dirty = st["dirty"] in {1, True, "1", "true"}
+            dirty = st["dirty"] in {1, "1", "true"}
             print(f"  unified_kg_state: kg_seq={kg_seq} cluster_seq={cluster_seq} "
                   f"mention_seq={mention_seq} dirty={int(dirty)}"
                   + ("   ⚠dirty=1:有未 rebuild 的 KG 变更,计数/图缓存可能反复失效" if dirty else ""))

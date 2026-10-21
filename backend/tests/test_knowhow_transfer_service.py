@@ -354,7 +354,7 @@ def test_copy_gives_asset_row_independent_source_id(repo):
     column_id = repo.get_knowhow_table(tid)["columns"][0]["id"]
     repo.add_knowhow_row(tid, {column_id: f"![img](asset://{asset['id']})"})
 
-    new_tid = kh_transfer.copy_table(repo, tid, dst_nb, creator_id="user-x")
+    kh_transfer.copy_table(repo, tid, dst_nb, creator_id="user-x")
 
     with repo._connect() as db:
         new_assets = [

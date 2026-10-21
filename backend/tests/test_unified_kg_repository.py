@@ -138,7 +138,7 @@ def test_store_kg_invalidates_unified_cache(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo.store_kg(nb.id, None, [{"local_id":"a","object_type":"concept","payload":{"name":"A","section_path":""},"evidence":[]}], [])
     repo.rebuild_unified_kg(nb.id)
-    g1 = repo.unified_graph(nb.id, level="concept")
+    repo.unified_graph(nb.id, level="concept")
     assert (nb.id, "concept") in repo._unified_cache
     # a new store_kg must evict the cache
     repo.store_kg(nb.id, None, [{"local_id":"b","object_type":"concept","payload":{"name":"B","section_path":""},"evidence":[]}], [])

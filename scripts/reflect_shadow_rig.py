@@ -2167,7 +2167,6 @@ def _search_loop(
     )
     runner.out_dir.mkdir(parents=True, exist_ok=True)
     handles: dict[str, Any] = {}
-    verified: set[str] = set()
     failed = 0
     log = (runner.out_dir / "search-runs.log").open("a", encoding="utf-8")
     try:
@@ -2355,7 +2354,6 @@ def _search_loop_concurrent(
     runner.out_dir.mkdir(parents=True, exist_ok=True)
     handles: dict[str, Any] = {}
     write_lock = threading.Lock()
-    verified: set[str] = set()
     active_events: list[threading.Event] = []
     active_lock = threading.Lock()
     aborted = threading.Event()

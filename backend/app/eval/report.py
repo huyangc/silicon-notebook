@@ -53,7 +53,7 @@ def render_speed_report(measured: list, extrapolated: list,
     out += ["", "## 外推", "", "| 字数 | 窗口数 | 预估耗时(s) |", "|---|---|---|"]
     for r in extrapolated:
         out.append(f"| {r['chars']} | {r['n_windows']} | {r['est_s']:.1f} |")
-    out += ["", f"## 推荐文档上限",
+    out += ["", "## 推荐文档上限",
             f"满足 ≤ {target_seconds}s 的最大**成功**文档约 **{recommended_max_chars} 字符**"
             f"(已排除失败档);超出建议拆分上传或调整 kg_extract 绑定服务的容量。"]
     return "\n".join(out) + "\n"

@@ -244,7 +244,6 @@ def test_t4deleg_conflict_resolution_rows_delegate(repo, monkeypatch):
     import types
 
     notebook = repo.create_notebook(NotebookCreate(name="conflict"))
-    governance = repo._runtime.knowledge_governance
     # Get past the "LLM not configured -> skip" guard so the compound
     # conflict-resolution read is actually reached.
     bind_chat_client(

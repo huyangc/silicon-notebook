@@ -71,14 +71,11 @@ class RefAwareFakeLLM:
         import re
         self.calls.append(messages)
         prompt = messages[0]["content"] if messages else ""
-        left_ref = right_ref = None
+        left_ref = None
         for line in prompt.splitlines():
             m = re.match(r"Left ref:\s+(\S+)", line)
             if m:
                 left_ref = m.group(1)
-            m = re.match(r"Right ref:\s+(\S+)", line)
-            if m:
-                right_ref = m.group(1)
         return json.dumps({
             "conflict_type": "mutual",
             "resolution": "discard",
@@ -227,7 +224,7 @@ def test_e2e_conflict_skipped_when_flag_disabled(repo):
             ).fetchall()
         }
 
-    result = repo.build_notebook_kg(nb.id)
+    repo.build_notebook_kg(nb.id)
 
     # LLM must NOT have been called (conflict hook never ran)
     assert fake_llm.calls == [], (

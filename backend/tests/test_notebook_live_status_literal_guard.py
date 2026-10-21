@@ -198,7 +198,7 @@ def test_no_raw_copying_read_side_literal_outside_the_constant():
             violations.append(f"{rel}:{node.lineno}: {node.value!r}")
     assert not violations, (
         "读侧可见性谓词必须走 access_sql.NOTEBOOK_LIVE_SQL 单点,"
-        f"发现游离字面量:\n" + "\n".join(violations)
+        "发现游离字面量:\n" + "\n".join(violations)
     )
 
 
@@ -215,7 +215,7 @@ def test_copying_write_side_sentinel_confined_to_sharing_store_whitelist():
             violations.append(f"{rel}:{node.lineno} (in {func!r}): {node.value!r}")
     assert not violations, (
         "写侧 copying 哨兵只许出现在 compensate_copy/sweep_stale_copies 内,"
-        f"发现白名单外站点:\n" + "\n".join(violations)
+        "发现白名单外站点:\n" + "\n".join(violations)
     )
 
 
@@ -240,7 +240,7 @@ def test_deleting_never_folds_into_the_copying_write_side_sentinel():
             violations.append(f"{rel}:{node.lineno} (in {func!r}): {node.value!r}")
     assert not violations, (
         "写侧 copying 哨兵绝不能折进两值谓词(会让 sweep_stale_copies 把 deleting "
-        f"中的库当半拷贝整删):\n" + "\n".join(violations)
+        "中的库当半拷贝整删):\n" + "\n".join(violations)
     )
 
 

@@ -146,8 +146,8 @@ def test_deprecated_filter_pushdown_catches_a_regression_if_removed(repo, monkey
     from app.repositories.sqlite.knowledge_store import KnowledgeStore
 
     nb = repo.create_notebook(NotebookCreate(name="deprecated-mutation"))
-    a = repo._test_insert_object(nb.id, "concept", {"name": "Amplifier"})
-    b = repo._test_insert_object(nb.id, "concept", {"name": "amplifier"})
+    repo._test_insert_object(nb.id, "concept", {"name": "Amplifier"})
+    repo._test_insert_object(nb.id, "concept", {"name": "amplifier"})
     dead = repo._test_insert_object(nb.id, "concept", {"name": "AMPLIFIER"})
     with repo._write() as db:
         db.execute("UPDATE knowledge_objects SET status='deprecated' WHERE id=?", (dead,))

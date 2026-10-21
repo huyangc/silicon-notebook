@@ -206,7 +206,7 @@ def test_candidates_detected_and_queued(repo):
 def test_high_confidence_discard_applies_and_marks_applied(repo):
     nb_id, oid_a, oid_b, rel_a, rel_b = _seed_notebook_with_contradicting_claims(repo)
 
-    relations = repo.relations_for_notebook(nb_id)
+    repo.relations_for_notebook(nb_id)
     # Find the expected pair — shared_pair_diff_edge between rel_a and rel_b
     # Canonical ordering: smaller id goes left
     left_ref, right_ref = (rel_a, rel_b) if rel_a < rel_b else (rel_b, rel_a)

@@ -6080,7 +6080,6 @@ class AskService:
         reaches the atomic save.
         """
         from app.application.ask_reasoning import (
-            CommittedReasoningAnswer,
             PreparedReasoningAsk,
             ReasoningResponseDraft,
             ReasoningRetrievalRuntime,
@@ -6106,8 +6105,7 @@ class AskService:
         notebook_id = prepared.notebook_id
         question = prepared.question
         conversation_id = prepared.conversation_id
-        history = reasoning_history = prepared.history
-        style_block = prepared.style_block
+        reasoning_history = prepared.history
         from app.models.ask import QueryIntentContract
 
         intent_contract = QueryIntentContract.model_validate_json(

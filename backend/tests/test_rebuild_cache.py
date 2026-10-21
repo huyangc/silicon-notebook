@@ -230,7 +230,7 @@ def test_rename_same_second_moves_version_and_recomputes(repo, monkeypatch):
     _freeze_now(monkeypatch)  # every write shares one timestamp — no MAX signal
     # Two DISTINCT concept names -> two separate canonicals.
     nb = _make_kg(repo, names=("alpha", "beta"))
-    first = repo.rebuild_unified_kg(nb.id)
+    repo.rebuild_unified_kg(nb.id)
     rows_before = [tuple(r) for r in _cluster_rows(repo, nb.id)]
     n_canon_before = len({r[2] for r in rows_before})   # canonical_id set
     assert n_canon_before == 2                          # alpha, beta distinct

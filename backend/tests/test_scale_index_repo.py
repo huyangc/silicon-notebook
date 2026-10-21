@@ -383,7 +383,7 @@ def test_run_kg_rebuild_only_rebuilds_scale_index_for_base(repo):
     ], [])
     # rebuild_unified_kg required before run_kg rebuild_only so clusters exist
     repo.rebuild_unified_kg(nb.id)
-    res = batch_ingest.run_kg(repo, nb.id, rebuild_only=True)
+    batch_ingest.run_kg(repo, nb.id, rebuild_only=True)
     assert repo._scale_index(nb.id) is not None  # base tier -> index (re)built after rebuild
 
 

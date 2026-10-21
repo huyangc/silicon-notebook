@@ -9,6 +9,7 @@ from __future__ import annotations
 import gc
 import secrets
 import time
+from functools import partial
 from typing import Any, Callable, Optional, Sequence
 
 import numpy as np
@@ -667,8 +668,8 @@ class ScaleIndexBuilder:
             membership_counts,
         ) = timed(
             "gather",
-            lambda: self.gather_graph(
-                notebook_id, synonym_edges=synonyms, as_arrays=True
+            partial(
+                self.gather_graph, notebook_id, synonym_edges=synonyms, as_arrays=True
             ),
         )
         del synonyms
@@ -692,8 +693,9 @@ class ScaleIndexBuilder:
 
         transition, _ = timed(
             "transition",
-            lambda: scale_index_module.build_transition_arrays(
-                node_ids, edge_src, edge_tgt, edge_weight
+            partial(
+                scale_index_module.build_transition_arrays,
+                node_ids, edge_src, edge_tgt, edge_weight,
             ),
         )
         del edge_src, edge_tgt, edge_weight

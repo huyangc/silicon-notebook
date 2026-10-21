@@ -39,7 +39,6 @@ from tests.memory_artifact_fixture import (
     mix_a_shared_object_into_a_memory_cluster,
     seed_notebook_without_memory,
     seed_shared_notebook_with_memory,
-    sql,
 )
 from tests.model_testkit import bind_all_embedding_clients
 

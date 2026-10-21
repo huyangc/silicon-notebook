@@ -25,7 +25,6 @@ from app.repositories.filesystem.scale_artifact_store import (
     SwapInterruptGuard,
 )
 from app.repositories.scale_build_lock import (
-    SCALE_BUILD_LOCK_UNAVAILABLE,
     ScaleBuildLockLost,
 )
 from app.services import scale_build_cli as cli

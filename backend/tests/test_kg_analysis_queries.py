@@ -1056,7 +1056,6 @@ def test_analysis_stores_never_sniff_the_backend_at_runtime():
     注意:两侧 SQL **形态**允许分岔(community_overview 在 PG 上是窗口函数),被禁的是
     「同一份代码在运行时判自己跑在哪个后端上」,不是「两侧各写各的方言 SQL」。
     """
-    import inspect
     from pathlib import Path
 
     from app.repositories.postgres.unified_kg_store import (

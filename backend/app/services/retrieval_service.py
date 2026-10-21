@@ -566,9 +566,6 @@ class RetrievalService:
                         found.setdefault(str(row["object_id"]), []).append(source_id)
         return found
 
-    def merge_chunk_candidates(self, base, extra):
-        return self.candidates._union_chunk_candidates(base, extra)
-
     def select_chunk_candidates(
         self, scored, ids, matrix, k, lambda_, *, active_notebook_id,
     ):

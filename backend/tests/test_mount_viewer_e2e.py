@@ -60,7 +60,7 @@ import time
 import httpx
 import pytest
 
-from app.api.deps import identity_repository, notebook_sharing_repository, repository
+from app.api.deps import notebook_sharing_repository, repository
 from app.api.mcp_tools.refs import element_ref
 from app.core.request_context import reset_request_user, set_request_user
 from app.models.identity import AgentProfile, UserProfile
