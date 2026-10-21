@@ -5863,6 +5863,13 @@ button.chat-session-card {
   border-top: 1px solid #e1e6ee;
 }
 
+/* 只读成员只有这一段:没有上面的共享组,也就不画分隔线。 */
+.dup-own-section:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
 /* 一次合并的结果:就地显示在那一组里(或该段列表最上方),按时收起,不走页顶提示。 */
 .dup-merge-result {
   margin: 6px 0 0;
