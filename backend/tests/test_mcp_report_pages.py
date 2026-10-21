@@ -152,11 +152,17 @@ def test_reference_projection_never_carries_memory_identity_or_internals() -> No
         "source_file_name", "memory_used", "credibility",
     ):
         assert internal not in dumped, internal
+    # The third reference is another member's memory: its projection source and
+    # element ids (one-to-one with that memory) are emptied, not forwarded.
+    foreign = page["references"][2]
+    assert foreign["source_id"] == "" and foreign["element_id"] == ""
+    assert "src-3" not in dumped and "el-3" not in dumped
 
 
 def test_foreign_memory_reference_gets_no_ref_but_keeps_its_excerpt() -> None:
     foreign = _reference(
         1, memory_id="mem-other", memory_owner_id="owner-b",
+        source_id="src-foreign-projection", element_id="el-foreign-projection",
         snippet="另一位成员存下的摘录",
     )
     own = _reference(2, memory_id="mem-own", memory_owner_id=OWNER)
@@ -164,9 +170,17 @@ def test_foreign_memory_reference_gets_no_ref_but_keeps_its_excerpt() -> None:
     first, second = page["references"]
     assert "ref" not in first
     assert first["snippet"] == "另一位成员存下的摘录" and first["label"] == "文献1"
-    assert "mem-other" not in json.dumps(page, ensure_ascii=False)
+    # The shape is unchanged (the keys stay), but the ids that name another
+    # member's memory projection are empty and appear nowhere in the output.
+    assert first["source_id"] == "" and first["element_id"] == ""
+    assert set(first) == set(second) - {"ref"}
+    dumped = json.dumps(page, ensure_ascii=False)
+    for identity in ("mem-other", "owner-b", "src-foreign-projection",
+                     "el-foreign-projection"):
+        assert identity not in dumped, identity
     # The author's own recorded memory element is still an element ref.
     assert decode_ref(second["ref"])[0] == "el"
+    assert second["source_id"] == "src-2" and second["element_id"] == "el-2"
 
 
 def test_own_memory_object_gets_a_mem_ref() -> None:
@@ -222,6 +236,73 @@ def test_raw_failure_note_is_neutralized_and_error_is_neutral() -> None:
     # A report with no failed section keeps the author's own text as is.
     quoted = "例：（本节生成失败:示例）\n"
     assert report_page(_report(quoted), owner_id=OWNER)["content"] == quoted
+
+
+def test_error_containing_chinese_is_given_as_the_web_page_shows_it() -> None:
+    # The decision is "Chinese in it = as stored", the web page's own rule for
+    # its author, so a stored error can carry a service name or another
+    # diagnostic fragment next to the Chinese. Pinned so it is a choice, not a
+    # surprise; the section notes in the body are the part that never leaks.
+    stored = "报告提纲 failed (timeout 30s) service=outline-model"
+    page = report_page(
+        _report("正文。", status="failed", error=stored), owner_id=OWNER
+    )
+    assert page["error"] == stored
+    # No Chinese: an exception text, replaced.
+    page = report_page(
+        _report("正文。", status="failed", error="outline failed (timeout 30s)"),
+        owner_id=OWNER,
+    )
+    assert page["error"] == "这份报告没有生成完成，请在网页上重新生成"
+
+
+def test_continuation_pages_carry_a_short_question_and_cost_fewer_calls() -> None:
+    question = "问" * 2_000
+    content = _body(20_000)
+    report = _report(content, question=question)
+
+    first = report_page(report, owner_id=OWNER)
+    # The first page is exactly what it was: the whole question, no flag.
+    assert first["question"] == question and "question_truncated" not in first
+    assert set(first) == PAGE_KEYS and first["truncation"]["omitted_characters"] == 0
+
+    text, offset, calls = first["content"], first["next_content_offset"], 1
+    pages = [first]
+    while offset is not None:
+        page = report_page(report, owner_id=OWNER, content_offset=offset)
+        assert _serialized_size(page) <= 12_000
+        assert set(page) == PAGE_KEYS | {"question_truncated"}
+        assert page["question"] == "问" * 199 + "…" and page["question_truncated"] is True
+        # The shortened question is disclosed by the flag, not counted as lost
+        # page content in ``truncation``.
+        assert page["truncation"]["omitted_characters"] == 0
+        text += page["content"]
+        offset = page["next_content_offset"]
+        calls += 1
+        pages.append(page)
+        assert calls < 100
+    assert text == content
+
+    # The 2,000-character question used to ride on every page and leave the
+    # body 1,500 characters of room; a continuation page now reads more than
+    # twice that, so the whole body takes about half the calls.
+    assert len(pages[1]["content"]) >= 2 * len(first["content"])
+    per_page_before = len(first["content"])
+    calls_before = -(-len(content) // per_page_before)
+    assert calls * 2 <= calls_before, (calls, calls_before)
+
+    # A question that already fits keeps its text and says so.
+    short = report_page(
+        _report(content, question="短问题"), owner_id=OWNER, content_offset=100
+    )
+    assert short["question"] == "短问题" and short["question_truncated"] is False
+    # Either cursor makes a page a continuation, including parking the
+    # reference cursor to read the body alone.
+    parked = report_page(
+        _report(content, [_reference(1)], question=question), owner_id=OWNER,
+        reference_offset=1,
+    )
+    assert parked["question_truncated"] is True and len(parked["question"]) == 200
 
 
 def test_long_question_is_clipped_and_reported() -> None:

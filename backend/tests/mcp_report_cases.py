@@ -179,9 +179,12 @@ async def own_report_is_listed_and_readable_through_refs(env):
         # Another member's recorded memory: the excerpt stays, the handle and
         # every memory identifier do not.
         assert "ref" not in other and other["snippet"] == "另一位成员存下的摘录"
+        # ...and the projection ids that name that memory are emptied too.
+        assert other["source_id"] == "" and other["element_id"] == ""
         dumped = json.dumps(page, ensure_ascii=False)
         for internal in ("mem-of-someone-else", "someone-else", "memory_owner_id",
-                         "provenance", "family_key", "source_file_name"):
+                         "provenance", "family_key", "source_file_name",
+                         "src-foreign", "el-foreign"):
             assert internal not in dumped, internal
 
 
@@ -456,6 +459,40 @@ async def content_and_references_page_exactly(env):
         assert keys == [f"k{index}" for index in range(45)]
 
 
+async def continuation_pages_carry_a_short_question(env):
+    world = _world(env)
+    question = "问" * 2_000
+    body = "".join(chr(0x4E00 + (index * 7919) % 4000) for index in range(20_000))
+    report_id = _insert_report(
+        env, world.nb, world.owner_id, report_id="rep-long-question",
+        question=question, content=body,
+    )
+    async with _clients(env, world.raw) as (client,):
+        first = _payload(await client.call("get_report", {
+            "report_id": report_id, "notebook_id": world.nb,
+        }))
+        # The first page is unchanged: the whole question, no flag.
+        assert first["question"] == question and "question_truncated" not in first
+        text, offset, calls, widest = first["content"], first["next_content_offset"], 1, 0
+        while offset is not None:
+            page = _payload(await client.call("get_report", {
+                "report_id": report_id, "notebook_id": world.nb,
+                "content_offset": offset,
+            }))
+            assert page["question"] == "问" * 199 + "…"
+            assert page["question_truncated"] is True
+            text += page["content"]
+            widest = max(widest, len(page["content"]))
+            offset = page["next_content_offset"]
+            calls += 1
+            assert calls < 100
+        assert text == body
+        # Pages that no longer repeat 2,000 characters of question hold twice
+        # the body, so the whole report takes half the calls.
+        assert widest >= 2 * len(first["content"])
+        assert calls * 2 <= -(-len(body) // len(first["content"]))
+
+
 async def failed_report_never_returns_the_raw_error(env):
     world = _world(env)
     raw = 'Traceback (most recent call last): File "/srv/app/report.py", line 9 boom'
@@ -536,6 +573,7 @@ CASES = {
         downgrade_to_no_read,
         list_pages_are_exact,
         content_and_references_page_exactly,
+        continuation_pages_carry_a_short_question,
         failed_report_never_returns_the_raw_error,
         report_get_books_one_history_call,
     )
