@@ -3151,8 +3151,47 @@ Must be run from the main checkout root (it needs the real `.env`/database confi
 
 ## Notebook delete jobs
 
-`DELETE /api/notebooks/{id}` (batch 3·W1 PR-3) commits a single-row
-tombstone — `notebooks.status='deleting'` — and returns 202 immediately. The
+**The one-day window first.** `DELETE /api/notebooks/{id}` now opens a
+one-day deletion window (SQLite v100 / PostgreSQL 0081; product contract in
+[Deleting a whole notebook: the one-day window](./product-and-api.md#deleting-a-whole-notebook-the-one-day-window)):
+`notebooks.status='pending_delete'` with `delete_after` one day later and
+`status_before_delete` recording what a cancel restores. The notebook is
+already invisible everywhere, but nothing has been deleted and no delete
+job exists yet. The delete sweep's driver C (same thread and cadence as the
+two drivers below) promotes every window whose `delete_after` has passed to
+`status='deleting'` and inserts its job row in one transaction; from there
+everything below applies unchanged. A window promoted later than expected
+means the sweep did not run (the server was down, or the sweeper thread is
+gone — the startup sweep catches up). Read-only checks:
+
+```sql
+-- Notebooks inside their window (none, most of the time); the partial
+-- index idx_notebooks_pending_delete_due serves both queries.
+SELECT id, created_by, delete_requested_by, delete_requested_at, delete_after
+FROM notebooks WHERE status = 'pending_delete' ORDER BY delete_after;
+
+-- Overdue: the deadline passed more than two sweep intervals ago and the
+-- row is still not promoted. PostgreSQL:
+SELECT id, delete_after FROM notebooks
+WHERE status = 'pending_delete' AND delete_after < now() - interval '10 minutes';
+-- SQLite (delete_after holds UTC ISO text with microseconds):
+SELECT id, delete_after FROM notebooks
+WHERE status = 'pending_delete'
+  AND julianday(delete_after) < julianday('now', '-10 minutes');
+```
+
+To give a notebook back before its deadline the owner uses 「撤销删除」 (there
+is no administrator cancel, ruling B1); an operator who must do it by hand
+restores exactly what the cancel writes: `UPDATE notebooks SET
+status = CASE WHEN status_before_delete = '' THEN 'draft' ELSE status_before_delete END,
+status_before_delete = '', delete_after = NULL, delete_requested_at = NULL,
+delete_requested_by = NULL WHERE id = '<id>' AND status = 'pending_delete'`.
+Never set `status='deleting'` by hand for a window: let driver C promote it,
+so the job row is inserted in the same transaction.
+
+**Then the tombstone.** A promoted window (or an immediate delete from the
+synchronous paths that skip the window: sync-import propagation, scripts)
+commits a single-row tombstone — `notebooks.status='deleting'`. The
 notebook is invisible on every list/read/search/mount surface from that
 instant on (the same visibility predicate that already hides a half-copied
 notebook). The actual cleanup runs afterward as a background job in its own

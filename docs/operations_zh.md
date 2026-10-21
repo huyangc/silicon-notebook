@@ -2542,8 +2542,35 @@ v21 为 `(column_id, JS-trim(content_md), row_id)` 建立索引；guarded 成员
 
 ## 笔记本删除作业
 
-`DELETE /api/notebooks/{id}`（批 3·W1 PR-3）提交一次单行 tombstone
-——`notebooks.status='deleting'`——后立即返回 202。从这一刻起该笔记本在
+**先是一天窗口。** `DELETE /api/notebooks/{id}` 现在先开一天删除窗口（SQLite v100 / PostgreSQL 0081；
+产品合同见[删除整本笔记本：一天窗口](./product-and-api_zh.md#删除整本笔记本一天窗口)）：
+`notebooks.status='pending_delete'`，`delete_after` 为一天之后，`status_before_delete` 记下撤销要恢复
+的状态。这本库已经处处不可见，但什么都还没删，也还没有删除作业。删除扫尾的驱动 C（与下面两个驱动同一个
+线程、同一个节拍）把 `delete_after` 已过的窗口在一个事务里推进成 `status='deleting'` 并插入作业行；之后
+下文一切照旧。推进得比预期晚，说明扫尾没在跑（服务停机，或扫尾线程不在了——启动扫尾会补上）。只读核查：
+
+```sql
+-- 正在窗口里的笔记本(通常一本都没有);两条查询都走部分索引 idx_notebooks_pending_delete_due。
+SELECT id, created_by, delete_requested_by, delete_requested_at, delete_after
+FROM notebooks WHERE status = 'pending_delete' ORDER BY delete_after;
+
+-- 逾期未推进:截止已过两个扫尾间隔以上、仍是 pending_delete。PostgreSQL:
+SELECT id, delete_after FROM notebooks
+WHERE status = 'pending_delete' AND delete_after < now() - interval '10 minutes';
+-- SQLite(delete_after 存的是带微秒的 UTC ISO 文本):
+SELECT id, delete_after FROM notebooks
+WHERE status = 'pending_delete'
+  AND julianday(delete_after) < julianday('now', '-10 minutes');
+```
+
+截止前要把一本库还给主人，由主人自己点「撤销删除」（没有管理员撤销，裁决 B1）；运维非手工不可时，只写撤销
+本身写的那些列：`UPDATE notebooks SET status = CASE WHEN status_before_delete = '' THEN 'draft' ELSE
+status_before_delete END, status_before_delete = '', delete_after = NULL, delete_requested_at = NULL,
+delete_requested_by = NULL WHERE id = '<id>' AND status = 'pending_delete'`。绝不要手工把一个窗口改成
+`status='deleting'`：让驱动 C 推进，作业行才会在同一个事务里插入。
+
+**然后才是 tombstone。** 推进后的窗口（或跳过窗口的同步路径上的立即删除：同步导入的传播删除、脚本）提交
+一次单行 tombstone——`notebooks.status='deleting'`。从这一刻起该笔记本在
 列表/详情/搜索/挂载等一切读侧视图里都不可见（与半拷贝笔记本沿用同一条
 可见性谓词）。真正的清理由此后在独立后台工作池（`NOTEBOOK_DELETE_
 CONCURRENCY`，默认 1，独立于维护池与轻活池——见「部署与配置」）里跑完，
