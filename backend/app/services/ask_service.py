@@ -23,6 +23,7 @@
 """
 from __future__ import annotations
 
+import collections.abc
 import json
 from itertools import islice
 import logging
@@ -51,6 +52,16 @@ from app.core.ask_retrieval_policy import RetrievalEffort, ask_retrieval_limits
 from app.core.config import Settings
 from app.core.llm import cap_kwargs
 from app.domain.citation_origin import foreign_notebook_id
+from app.domain.report_followup import (
+    REASON_ENGINE_UNSUPPORTED,
+    REASON_NO_SYNTHESIS,
+    REASON_READ_FAILED,
+    REASON_REPORT_UNAVAILABLE,
+    LinkedReportNotFound,
+    LinkedReportNotReady,
+    ReportFollowup,
+    ReportRestoreScopeError,
+)
 from app.domain.gap_consult import (
     GAP_CONSULT_MAX_GAP_PHRASES,
     GAP_CONSULT_MAX_SUGGESTIONS,
@@ -73,6 +84,7 @@ from app.models.ask import (
     TRACE_ANCHOR_EVIDENCE_IDS_MAX,
     AnswerAnchor,
     AskEvidence,
+    ReportLinkCheck,
     AskEvidenceCounts,
     AskEvidenceItem,
     AskEvidenceKindCount,
@@ -154,6 +166,20 @@ from app.services.prompts import (
     answer_prompt,
     followup_rewrite_prompt,
 )
+from app.services.report_followup import (
+    ReportFollowupReaders,
+    current_report_followup,
+    followup_outline,
+    load_linked_report,
+    report_digest,
+    report_followup_context,
+    report_link_verdict,
+    report_mode_supported,
+    report_owner_ids,
+    report_restore_request,
+    skipped_receipt,
+    unread_verdict,
+)
 from app.services.retrieval import (
     RetrievedKnowledge,
     active_reserve_rule,
@@ -210,6 +236,12 @@ _MARKER_GROUP_RE = MARKER_RE
 # separate from _MARKER_GROUP_RE so strict anchor resolution is unchanged.
 _LOOSE_MARKER_GROUP_RE = LOOSE_MARKER_RE
 
+# What ``resolve_reasoning_followup`` hands the deterministic follow-up gate
+# for a request that attached a report: only its being non-empty matters there
+# (no model reads it), and the entry gate reads nothing to make it -- the
+# report's outline is computed where the run reads the report.
+_LINKED_REPORT_GATE_MARKER = "Attached report"
+
 _NO_RETRIEVAL_EVIDENCE_MESSAGE = (
     "当前检索没有找到足以支撑回答的来源证据。资料可能已经导入，"
     "但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。"
@@ -221,6 +253,31 @@ _NO_RETRIEVAL_EVIDENCE_MESSAGE = (
 _CHUNK_NO_EVIDENCE_MESSAGE = (
     "No indexed content matches this question yet. Upload sources or build chunks."
 )
+
+
+class _LazyLibraryNames(collections.abc.Mapping):
+    """``{library id: mount name}`` read on first lookup: only a verdict that
+    names unticked libraries (``scope_libraries``) looks a name up, so every
+    other report turn pays no notebook read for it."""
+
+    def __init__(self, read: Callable[[], Mapping[str, str]]) -> None:
+        self._read = read
+        self._names: "Mapping[str, str] | None" = None
+
+    def _loaded(self) -> Mapping[str, str]:
+        if self._names is None:
+            self._names = dict(self._read())
+        return self._names
+
+    def __getitem__(self, key: str) -> str:
+        return self._loaded()[key]
+
+    def __iter__(self):
+        return iter(self._loaded())
+
+    def __len__(self) -> int:
+        return len(self._loaded())
+
 
 @dataclass(frozen=True)
 class _ChunkRetrieval:
@@ -1036,6 +1093,7 @@ class AskService:
         overview_source_generation=None,
         note_ask_completed: "Callable[[str, str, str], None] | None" = None,
         ceiling_readers: "CeilingReaders | None" = None,
+        report_followup_readers: "ReportFollowupReaders | None" = None,
     ) -> None:
         self.ask_state = ask_state
         self.overview_sources = overview_sources
@@ -1119,6 +1177,12 @@ class AskService:
         # ``None`` = unwired, and an unwired service refuses to ask rather
         # than run without a ceiling.
         self.ceiling_readers = ceiling_readers
+        # The store reads a question about a deep report is judged with
+        # (``RepositoryRuntime.ask_service``; see ``_report_followup``).
+        # ``None`` = the feature is not wired: narrow doubles stay
+        # constructible, and a request that attaches a report there gets a
+        # ``read_failed`` receipt rather than an unscoped read.
+        self.report_followup_readers = report_followup_readers
 
     def _ask_modes(self):
         host = getattr(self, "ask_engine_host", None)
@@ -1302,6 +1366,11 @@ class AskService:
         same ceiling, the same ``run_kind`` (``ask_<mode>``) and the same
         Memory channel as the answer it stands in for -- it cannot reach a
         piece of evidence the answer could not.
+
+        Inside all of that, the deep report the request attached
+        (``payload.report_id``) is judged and read once
+        (``_report_followup_scope``) and carried to the engine through
+        ``report_followup_context`` (plan D11).
         """
         from app.services.retrieval_run import retrieval_run
         from app.services.model_work import ModelPriority, model_work_scope
@@ -1320,7 +1389,8 @@ class AskService:
             cancel_event=cancel_event,
         ):
             if not run:
-                yield
+                with self._report_followup_scope(spec, notebook_id, payload, user_id):
+                    yield
                 return
             # All built-in Ask modes share the same request-local query-embedding
             # memo.  Ask keeps its historical internal concurrency: the
@@ -1331,8 +1401,250 @@ class AskService:
                 correlation_id=job_id,
                 actor_id=user_id,
                 cancel_event=cancel_event,
-            ):
+            ), self._report_followup_scope(spec, notebook_id, payload, user_id):
                 yield
+
+    def _report_followup_scope(self, spec, notebook_id: str, payload, user_id: str):
+        """``report_followup_context`` for one engine run: the report the
+        request attached, judged under the ceiling (and, for a built-in
+        engine, inside the retrieval run) ``_engine_scope`` has just entered,
+        with its cited items read back (``restore=True``). An extension engine
+        (``report_mode_supported``) gets ``engine_unsupported`` without a
+        single read; a request without a report, or a global run, gets None --
+        installed all the same, so no outer run's report is ever inherited."""
+        return report_followup_context(self._report_followup(
+            notebook_id, getattr(payload, "report_id", None), user_id,
+            mode_supported=report_mode_supported(spec), restore=True,
+        ))
+
+    def _report_followup(
+        self,
+        notebook_id: str,
+        report_id: "str | None",
+        user_id: str,
+        *,
+        mode_supported: bool,
+        restore: bool,
+    ) -> "ReportFollowup | None":
+        """What this run knows about the deep report its request attached --
+        the single computation behind the run (``_engine_scope``), the
+        reasoning intent precheck (``preview_reasoning_intent``) and the
+        pre-send check (``report_link_check``), so the three can never
+        disagree (plan D4). Reads only under the ceiling already installed.
+
+        None when the request attached no report or the run is global (a
+        global run never reads a report, D7). An extension engine
+        (``mode_supported`` False) is ``engine_unsupported`` before anything
+        is read -- no report row, owners, participants, skipped libraries,
+        library names or restore. Otherwise ``_read_report_followup``.
+
+        Fail-soft in the safe direction (D6): when one of its data reads
+        raises -- the report row, the owner maps, the participant set, the
+        restore -- the turn does not read the report (``read_failed``) and a
+        content-free ``ask_report_followup_failed`` event names the error's
+        class only. A Stop (``AskCancelled``), a participant-override control
+        error (``RetrievalControlError``) and a restore called outside its
+        frame (``ReportRestoreScopeError``, a wiring fault, not a data state)
+        are raised as they are: turning them into "not read" would hide
+        them."""
+        report_id = str(report_id or "").strip()
+        if not report_id or subjectless_run_active():
+            return None
+        if not mode_supported:
+            return ReportFollowup(
+                report_id, "", None, unread_verdict(REASON_ENGINE_UNSUPPORTED),
+            )
+        title: list[str] = []
+        try:
+            return self._read_report_followup(
+                notebook_id, report_id, user_id, restore=restore, title=title,
+            )
+        except (AskCancelled, RetrievalControlError, ReportRestoreScopeError):
+            raise
+        except Exception as exc:  # noqa: BLE001 - D6: not reading the report is the safe side
+            self._emit_report_event({
+                "kind": "ask_report_followup_failed", "notebook_id": notebook_id,
+                "error_type": type(exc).__name__, "status": "failed",
+            })
+            return ReportFollowup(
+                report_id, "".join(title), None, unread_verdict(REASON_READ_FAILED),
+            )
+
+    def _read_report_followup(
+        self,
+        notebook_id: str,
+        report_id: str,
+        user_id: str,
+        *,
+        restore: bool,
+        title: list,
+    ) -> ReportFollowup:
+        """The reads behind ``_report_followup``, each bounded by the report:
+        the report row through its gate (another member's, another notebook's,
+        a missing or an unfinished report -> ``report_unavailable``), ONE
+        batch read per owner map over the cited ids (skipped when there are
+        none), the asker's participant set only when a cited item lives in
+        another library, the installed ceiling's own facts, and -- only when
+        the verdict lets the turn read the report and ``restore`` asks for it
+        -- ONE restore through the retrieval layer of every reference the
+        verdict did not count gone (``report_restore_request``). The library
+        names are read only when the verdict names unticked libraries.
+        ``title`` receives the report's title as soon as it is known, so a
+        later failure still names the report on its receipt."""
+        from app.services.source_scope import (
+            current_skipped_mounted_libraries,
+            current_source_scope,
+        )
+
+        readers = getattr(self, "report_followup_readers", None)
+        if readers is None:
+            raise RuntimeError("AskService has no report follow-up readers")
+        scope = current_source_scope()
+        if scope is None:
+            # A wiring fault, raised past the fail-soft: the verdict is judged
+            # under the run's ceiling or not at all.
+            raise ReportRestoreScopeError("no retrieval ceiling is installed")
+        try:
+            row = load_linked_report(readers.read_report, notebook_id, report_id, user_id)
+        except (LinkedReportNotFound, LinkedReportNotReady):
+            return ReportFollowup(
+                report_id, "", None, unread_verdict(REASON_REPORT_UNAVAILABLE),
+            )
+        digest = report_digest(row)
+        title.append(digest.title)
+        source_ids, object_ids = report_owner_ids(digest)
+        source_owners = dict(readers.source_owners(list(source_ids))) if source_ids else {}
+        object_owners = dict(readers.object_owners(list(object_ids))) if object_ids else {}
+        participants: "frozenset[str]" = frozenset()
+        if any(owner != notebook_id for owner in (
+            *source_owners.values(), *object_owners.values(),
+        )):
+            participants = frozenset(readers.participant_notebook_ids(
+                notebook_id, viewer_id=user_id,
+            ))
+        memory_channel_open = memory_channel_allowed()
+        verdict = report_link_verdict(
+            digest,
+            notebook_id=notebook_id,
+            scope=scope,
+            participants=participants,
+            skipped_libraries=current_skipped_mounted_libraries(),
+            source_owners=source_owners,
+            object_owners=object_owners,
+            # The doors of the Ask Memory channel (``_memory_hits`` and
+            # ``MemoryRetriever.context``).
+            memory_open=memory_channel_open and not (
+                source_scope_restricted() or subjectless_run_active()
+            ),
+            memory_channel_open=memory_channel_open,
+            mode_supported=True,
+            library_names=_LazyLibraryNames(
+                lambda: self._mounted_library_names(notebook_id)
+            ),
+        )
+        restored = None
+        if verdict.readable and restore:
+            restored = self.candidates.restore_report_references(
+                notebook_id, user_id, report_restore_request(
+                    digest, source_owners=source_owners, object_owners=object_owners,
+                ),
+            )
+        return ReportFollowup(report_id, digest.title, digest, verdict, restored)
+
+    def _mounted_library_names(self, notebook_id: str) -> dict:
+        """``{library id: the name the notebook mounts it under}`` for the
+        verdict's ``scope_libraries`` wording; display-only, so a failed read
+        names nothing rather than costing the verdict (``_skipped_libraries``
+        reads names the same way)."""
+        try:
+            return {
+                str(ref.id): str(ref.name or "")
+                for ref in self.notebooks.get_notebook(notebook_id).base_notebooks
+            }
+        except Exception:  # noqa: BLE001 - names are display-only
+            return {}
+
+    def _emit_report_event(self, event: dict) -> None:
+        emit = getattr(getattr(self, "event_log", None), "emit", None)
+        if emit is not None:
+            emit(event)
+
+    def report_link_check(
+        self,
+        notebook_id: str,
+        report_id: str,
+        *,
+        user_id: str,
+        mode_supported: bool,
+        source_scope: Any = None,
+        base_scope: Any = None,
+    ) -> ReportLinkCheck:
+        """"Would a question with these settings read the attached report?"
+        -- answered before the question is sent, for the tag next to the
+        input (``POST /ask/report-check``).
+
+        The run's own computation (``_report_followup``) under the ceiling the
+        run would install (``_retrieval_ceiling``, eager, with the scopes the
+        route froze), minus the restore: the verdict reads the report row, the
+        owners and the participant set, never a cited item's content. Writes
+        nothing. The route has already applied the report gate; a report that
+        vanished since reads ``report_unavailable`` like the run would."""
+        with self._retrieval_ceiling(
+            notebook_id, user_id, local_scope=source_scope, base_scope=base_scope,
+        ):
+            followup = self._report_followup(
+                notebook_id, report_id, user_id,
+                mode_supported=mode_supported, restore=False,
+            )
+        if followup is None:
+            raise ValueError("report_link_check needs a report_id")
+        verdict = followup.verdict
+        return ReportLinkCheck(
+            report_id=followup.report_id,
+            title=followup.title,
+            readable=verdict.readable,
+            reason_code=verdict.reason_code,
+            reason=verdict.reason,
+        )
+
+    def _stamp_report_receipt(self, notebook_id: str, target: Any) -> None:
+        """Every answer, and every retrieval-only output, of a request that
+        attached a report carries a receipt (plan D11): the engine writes it
+        when the report block reached the answer prompt; otherwise --
+        the extension engine, a short-circuit that never called the answer
+        model, a verdict that kept the report out -- it is written here, as
+        ``skipped`` with the verdict's reason, or ``no_synthesis`` when the
+        verdict allowed reading. Also the one place the content-free
+        ``ask_report_followup`` event is emitted, from the final receipt.
+
+        Called as ``AskService._stamp_report_receipt(self, ...)`` from
+        ``_save_answer`` (which narrow doubles call unbound) and from
+        ``ask_evidence``; reads nothing but ``current_report_followup()``.
+        The event field is ``receipt_status`` rather than ``status``: the
+        event log reads ``status`` as a severity, and a read report is no
+        warning."""
+        followup = current_report_followup()
+        if followup is None:
+            return
+        if target.linked_report is None:
+            target.linked_report = skipped_receipt(
+                followup, followup.verdict.reason_code or REASON_NO_SYNTHESIS,
+            )
+        receipt = target.linked_report
+        digest = followup.digest
+        AskService._emit_report_event(self, {
+            "kind": "ask_report_followup",
+            "notebook_id": notebook_id,
+            "receipt_status": receipt.status,
+            "reason_code": receipt.reason_code,
+            "references": len(digest.references) if digest is not None else 0,
+            "restored": receipt.evidence_restored,
+            "gone": receipt.evidence_gone,
+            "over_budget": receipt.evidence_over_budget,
+            "sections_total": len(digest.sections) if digest is not None else 0,
+            "sections_read": sum(1 for section in receipt.sections if section.read),
+            "summary_truncated": receipt.summary_truncated,
+        })
 
     def ask_evidence(
         self,
@@ -1387,6 +1699,8 @@ class AskService:
             # -- the same two facts ``_save_answer`` stamps on an answer.
             evidence.skipped_libraries = self._skipped_libraries(notebook_id)
             evidence.index_required = self._needs_index(notebook_id)
+            # And the attached report's receipt, as on an answer.
+            AskService._stamp_report_receipt(self, notebook_id, evidence)
         return evidence
 
     @contextmanager
@@ -1504,8 +1818,10 @@ class AskService:
         conversation_id: "str | None",
     ) -> None:
         """An attached key must name THIS request: same surface, question
-        (compared in its stored spelling, ``stored_ask_question``), mode and
-        -- when the caller named one -- conversation. ``conversation_id`` is
+        (compared in its stored spelling, ``stored_ask_question``), mode,
+        attached deep report (``report_id``, '' for none -- the same question
+        about another report is another request) and -- when the caller named
+        one -- conversation. ``conversation_id`` is
         the caller's ORIGINAL value: the store's attach rewrites the payload's
         to the existing job's. A key reused for a different question would
         otherwise silently return the old answer.
@@ -1522,6 +1838,7 @@ class AskService:
         if (
             origin.get("question") != stored_ask_question(payload.question)
             or origin.get("mode") != mode
+            or origin.get("report_id", "") != (getattr(payload, "report_id", None) or "")
             or (conversation_id and origin.get("conversation_id") != conversation_id)
         ):
             raise AskRequestKeyReused("question")
@@ -2285,6 +2602,7 @@ class AskService:
         source_scope: Any = None,
         base_scope: Any = None,
         user_id: str | None = None,
+        report_id: str | None = None,
     ) -> QueryIntentContract:
         """Understand a reasoning request before any corpus retrieval starts.
 
@@ -2294,6 +2612,14 @@ class AskService:
         no source-scoped corpus today, so it pays no ceiling read, and anything
         that ever does read the scope in here gets the full default ceiling.
         ``user_id`` defaults to the request's user.
+
+        ``report_id`` (a question about a deep report): the run's own verdict
+        (``_report_followup``, no restore) is taken first -- which builds the
+        lazy ceiling -- and the understanding sees the report's outline
+        (``followup_outline``: title and section titles, or the title alone
+        when the run will not read the report); its deterministic wording
+        rules stand down (``plan_query_intent(linked_report=...)``, D5).
+        Without one, nothing here reads anything before the model call.
 
         The same single model call also writes the whole-request keyword pair
         the confirmed run's first-round lexical seed arm reads (that path never
@@ -2315,6 +2641,9 @@ class AskService:
             # built if something actually reads it.
             lazy=True,
         ):
+            linked_report = followup_outline(self._report_followup(
+                notebook_id, report_id, actor_id, mode_supported=True, restore=False,
+            ))
             contract = plan_query_intent(
                 self.model_clients.chat("reasoning_agent"),
                 question,
@@ -2323,6 +2652,7 @@ class AskService:
                 purpose="step-by-step evidence-grounded answer",
                 cancel_event=cancel_event,
                 status=status,
+                linked_report=linked_report,
                 **self._intent_keyword_kwargs(notebook_id, actor_id, cancel_event),
             )
         result = QueryIntentContract(**contract)
@@ -2426,9 +2756,17 @@ class AskService:
         into the "still ambiguous" verdict of the original seed. There is no
         cancel handle at this point (no durable job exists yet), so the
         rewrite call is not cancellable; ``cancel_event`` is passed as None.
+
+        A request that attached a deep report (``payload.report_id``) names
+        its referent itself: the gate's deterministic wording rules stand down
+        (``followup_gate(linked_report=...)``, D5), decided from the field
+        being set alone -- zero reads, and the question text is not searched.
         """
         from app.services.query_intent import followup_gate
 
+        linked_report = (
+            _LINKED_REPORT_GATE_MARKER if getattr(payload, "report_id", None) else ""
+        )
         question = payload.question.strip()
         admitted = FollowupResolution(
             question=question,
@@ -2440,7 +2778,9 @@ class AskService:
             return admitted
         if payload.intent is not None:
             return admitted
-        _seed, gate_message = followup_gate(question, "", "", max_topics=1)
+        _seed, gate_message = followup_gate(
+            question, "", "", max_topics=1, linked_report=linked_report,
+        )
         if not gate_message:
             return admitted
         # ``history`` supplied means the caller owns the conversation model and
@@ -2474,7 +2814,7 @@ class AskService:
         )
         rewrite_ms = round((time.perf_counter() - started) * 1000)
         _probe, gate_message = followup_gate(
-            question, rewritten, history, max_topics=1
+            question, rewritten, history, max_topics=1, linked_report=linked_report,
         )
         if gate_message:
             return FollowupResolution(
@@ -2495,8 +2835,13 @@ class AskService:
         payload: AskRequest,
         history: str,
         resolved_question: str = "",
+        linked_report: str = "",
     ) -> QueryIntentContract:
-        """Freeze submitted intent; direct legacy callers get deterministic guard."""
+        """Freeze submitted intent; direct legacy callers get deterministic guard.
+
+        ``linked_report`` is the attached report's outline line when the run
+        has one (``followup_outline``): on the compatibility branch the
+        deterministic gate then stands down (``followup_gate``, D5)."""
         from app.services.query_intent import (
             finalize_query_intent,
             followup_gate,
@@ -2529,7 +2874,8 @@ class AskService:
         # would fire on replays and on direct ``repo.ask`` callers that the
         # entry-point gate never saw.
         seed, gate_message = followup_gate(
-            original, resolved_question, history, max_topics=4
+            original, resolved_question, history, max_topics=4,
+            linked_report=linked_report,
         )
         if gate_message:
             raise ValueError(gate_message)
@@ -2850,6 +3196,8 @@ class AskService:
             response.retrieval_scope = receipt
         # Same sink: a mounted library the ceiling had to leave out.
         response.skipped_libraries = AskService._skipped_libraries(self, notebook_id)
+        # Same sink: a request that attached a report always gets its receipt.
+        AskService._stamp_report_receipt(self, notebook_id, response)
         response.asked_at = asked_at or response.asked_at
         AskService._drop_dangling_references(self, response)
         # A DETACHED turn owns its own persistence. The three assignments above

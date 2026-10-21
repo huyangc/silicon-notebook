@@ -17,8 +17,10 @@ reaches -- so this guard pins the structure, with equality assertions, over
   ``_engine_scope`` (entered by ``ask`` -- HTTP, stream, detached jobs, MCP
   ``ask``, extension engines -- and by ``ask_evidence``, the
   retrieval-only output), ``preview_reasoning_intent`` (both intent
-  prechecks) and the two current-user engine calls; the engines themselves
-  are reached only through those;
+  prechecks), ``report_link_check`` (the pre-send verdict on an attached
+  deep report, judged under the ceiling its run would install) and the two
+  current-user engine calls; the engines themselves are reached only
+  through those;
 * no installer is imported under another name, and the production
   ``AskService`` is built with ``ceiling_readers``.
 
@@ -90,6 +92,7 @@ def test_every_ask_entry_goes_through_the_one_installation():
     assert _call_sites(index, "_retrieval_ceiling") == {
         (ask, "<module>.AskService._engine_scope"),
         (ask, "<module>.AskService.preview_reasoning_intent"),
+        (ask, "<module>.AskService.report_link_check"),
         (ask, "<module>.AskService.ask_chunk_current"),
         (ask, "<module>.AskService.ask_reasoning_current"),
     }

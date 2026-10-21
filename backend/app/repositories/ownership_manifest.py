@@ -636,6 +636,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.admin_query_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.analysis_issue_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.answer_link_repository', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.ask_component', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.ask_history_store', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.ask_intent_handle_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.content_overview_service', kind='attribute', target='_runtime'),
@@ -1295,6 +1296,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/mcp_tools/ask.py', scope='<module>._read_notebook_job', kind='attribute', target='ask_answer_detail'),
+            ConsumerSite(path='backend/app/services/answer_links.py', scope='<module>._notebook_row', kind='attribute', target='ask_answer_detail'),
         ),
         patches=(
         ),
@@ -1320,6 +1322,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/mcp_tools/ask.py', scope='<module>._read_notebook_job', kind='attribute', target='ask_job_origin'),
             ConsumerSite(path='backend/app/api/mcp_tools/ask.py', scope='<module>._recheck_notebook_delivery', kind='attribute', target='ask_job_origin'),
+            ConsumerSite(path='backend/app/services/answer_links.py', scope='<module>._notebook_row', kind='attribute', target='ask_job_origin'),
         ),
         patches=(
         ),
@@ -1330,8 +1333,10 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/mcp_tools/ask.py', scope='<module>._run_notebook', kind='attribute', target='ask_with_job'),
+            ConsumerSite(path='backend/tests/mcp_answer_link_cases.py', scope='<module>._fake_engine', kind='patch', target='ask_with_job'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/mcp_answer_link_cases.py', scope='<module>._fake_engine', kind='patch', target='ask_with_job'),
         ),
     ),
     SurfaceMember(
@@ -2193,6 +2198,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_question_index', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/services/image_backfill_phase.py', scope='<module>.run_backfill_images', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.__init__.<lambda>', kind='attribute', target='get_notebook'),
+            ConsumerSite(path='backend/tests/mcp_answer_link_cases.py', scope='<module>._fake_engine', kind='patch', target='get_notebook'),
             ConsumerSite(path='backend/tests/mcp_conversation_cases.py', scope='<module>.unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary', kind='patch', target='get_notebook'),
             ConsumerSite(path='backend/tests/test_notebook_delete_review_fixes.py', scope='<module>.test_asset_recheck_survives_actor_access_loss', kind='patch', target='get_notebook'),
             ConsumerSite(path='scripts/denoise_reextract_nb.py', scope='<module>.main', kind='attribute', target='get_notebook'),
@@ -2202,6 +2208,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='get_notebook'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/mcp_answer_link_cases.py', scope='<module>._fake_engine', kind='patch', target='get_notebook'),
             ConsumerSite(path='backend/tests/mcp_conversation_cases.py', scope='<module>.unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary', kind='patch', target='get_notebook'),
             ConsumerSite(path='backend/tests/test_notebook_delete_review_fixes.py', scope='<module>.test_asset_recheck_survives_actor_access_loss', kind='patch', target='get_notebook'),
         ),
@@ -2595,6 +2602,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_question_index', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_reparse', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.source_id_by_hash', kind='attribute', target='maintenance'),
+            ConsumerSite(path='backend/app/services/global_ask_attribution_backfill.py', scope='<module>.schedule_attribution_backfill', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/image_backfill_phase.py', scope='<module>._discard_unreferenced', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/image_backfill_phase.py', scope='<module>._source_pages', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/image_backfill_phase.py', scope='<module>.apply_plan', kind='attribute', target='maintenance'),
@@ -2795,6 +2803,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._public_conversation_or_404', kind='attribute', target='participant_notebook_ids'),
             ConsumerSite(path='backend/app/api/mcp_tools/citations.py', scope='<module>._read_element.<lambda>', kind='attribute', target='participant_notebook_ids'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._report_mounts_still_effective', kind='attribute', target='participant_notebook_ids'),
+            ConsumerSite(path='backend/app/services/answer_links.py', scope='<module>._notebook_row', kind='attribute', target='participant_notebook_ids'),
             ConsumerSite(path='backend/tests/public_page_mount_recheck_cases.py', scope='<module>.case_report_of_local_citations_reads_no_ownership', kind='patch', target='participant_notebook_ids'),
         ),
         patches=(
@@ -3007,6 +3016,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/mcp_tools/_shared.py', scope='<module>._live_principal', kind='attribute', target='refresh_agent_principal'),
             ConsumerSite(path='backend/app/api/mcp_tools/ask.py', scope='<module>._refreshed_principal', kind='attribute', target='refresh_agent_principal'),
             ConsumerSite(path='backend/app/api/mcp_tools/global_ask.py', scope='<module>._authorize', kind='attribute', target='refresh_agent_principal'),
+            ConsumerSite(path='backend/app/services/answer_links.py', scope='<module>._live_issuer', kind='attribute', target='refresh_agent_principal'),
         ),
         patches=(
         ),
@@ -3877,6 +3887,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/mcp_tools/profiles.py', scope='<module>.register_profile_tools.add_observation.run', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/mcp_tools/session.py', scope='<module>.register_session_tools.list_notebooks.load', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.public_report_route', kind='attribute', target='user_can_read_notebook'),
+            ConsumerSite(path='backend/app/services/answer_links.py', scope='<module>._notebook_row', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/tests/mcp_conversation_cases.py', scope='<module>.unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary', kind='patch', target='user_can_read_notebook'),
         ),
         patches=(

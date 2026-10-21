@@ -898,6 +898,12 @@ _SEAT_FAILSOFT_SITES = (
     # 就是一次「这轮没有表格结果」的正常回答。
     ("app/services/ask_service.py",
      "AskService._spreadsheet_reasoning_results", "_peer_workbook_results"),
+    # 关联报告的读取(计划 2026-10-21 D6):``_read_report_followup`` ->
+    # ``candidates.restore_report_references`` -> ``_retrieval_participants``
+    # -> 参与集座位。宽 handler 把数据侧失败降级为「本轮不读报告」,吞掉
+    # 身份复核失败就是一次照常作答却悄悄少读了报告的回答。
+    ("app/services/ask_service.py",
+     "AskService._report_followup", "_read_report_followup"),
     ("app/services/reasoning_retrieval.py",
      "ReasoningRetriever._chunk_seed_search", "search_chunks"),
     # 首轮播种外层并发度按参与库数收紧:``chunk_participant_count`` ->

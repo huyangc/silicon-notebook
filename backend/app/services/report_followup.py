@@ -20,22 +20,41 @@ down in ``app.domain.report_followup``.
   ``rewrite_report_markers`` / ``report_outline_text`` -- what of the report
   enters the prompts, bounded by ``ask_report_context_max_chars``;
 * ``followup_receipt`` / ``skipped_receipt`` / ``report_trace_step`` -- what
-  the turn tells the reader it did with the report.
+  the turn tells the reader it did with the report;
+* ``report_followup_context`` / ``current_report_followup`` -- the run's
+  ``ReportFollowup``, computed once where the engine is entered
+  (``AskService._engine_scope``) and read by the engines and the answer's
+  persistence seam; ``ReportFollowupReaders`` are the store reads behind it,
+  ``report_restore_request`` what it asks the retrieval layer to read back,
+  ``report_mode_supported`` which engines read a report at all and
+  ``followup_outline`` the outline line the understanding and rewriting steps
+  see.
 """
 from __future__ import annotations
 
 import re
 import unicodedata
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Callable, Collection, Iterable, Mapping, Optional, Protocol, Union
+from typing import (
+    Any,
+    Callable,
+    Collection,
+    Iterable,
+    Iterator,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Union,
+)
 
 from app.domain.report_followup import (
-    LinkedReportNotFound,
-    LinkedReportNotReady,
-    REASON_CLAUSES,
     REASON_CLAUSE_MEMORY_CLOSED_CHANNEL,
     REASON_CLAUSE_MEMORY_CLOSED_NARROWED,
+    REASON_CLAUSES,
     REASON_ENGINE_UNSUPPORTED,
     REASON_LIBRARY_UNAVAILABLE,
     REASON_MEMORY_CLOSED,
@@ -43,6 +62,10 @@ from app.domain.report_followup import (
     REASON_PREFIX,
     REASON_SCOPE_LIBRARIES,
     REASON_SCOPE_SOURCES,
+    RESTORE_SKIPPED_OBJECT_TYPES,
+    CitedReportReference,
+    LinkedReportNotFound,
+    LinkedReportNotReady,
     ReportDigest,
     ReportFollowup,
     ReportLinkVerdict,
@@ -50,6 +73,7 @@ from app.domain.report_followup import (
     SectionSelection,
 )
 from app.models.ask import LinkedReportReceipt, LinkedReportSection, TraceStep
+from app.services.ask_modes import ASK_MODES
 from app.services.citation_markers import LOOSE_MARKER_RE, MARKER_RE, marker_keys
 from app.services.retrieval import KeywordBasis, _tokens, keyword_basis
 
@@ -888,20 +912,140 @@ def report_trace_step(
     return TraceStep(step_type="report", summary=summary, detail=detail)
 
 
+# --- the run's attached report ------------------------------------------------
+@dataclass(frozen=True)
+class ReportFollowupReaders:
+    """The store reads ``AskService`` judges an attached report with (the
+    runtime binds them; ``None`` on the service = the feature is not wired).
+
+    ``read_report(notebook_id, report_id)`` is ``ReportStore.get_report`` (by
+    notebook only, ``KeyError`` when absent -- ``load_linked_report`` applies
+    the owner and status gate). ``source_owners`` / ``object_owners`` take a
+    list of ids and answer ``{id: notebook_id}`` for the rows that still exist,
+    hidden projections included, in ONE statement each.
+    ``participant_notebook_ids(notebook_id, viewer_id=...)`` is the libraries
+    the named viewer may use with the notebook (the same read the ceiling's
+    participant reader makes, its viewer passed explicitly)."""
+
+    read_report: Callable[[str, str], Mapping[str, Any]]
+    source_owners: Callable[[Sequence[str]], Mapping[str, str]]
+    object_owners: Callable[[Sequence[str]], Mapping[str, str]]
+    participant_notebook_ids: Callable[..., Collection[str]]
+
+
+#: The engines that read an attached report: the built-in ones. An extension
+#: engine (``ask.engine``, plan D7) is handed no history and no intent, and
+#: has no way to receive a report either.
+_REPORT_READING_HANDLERS = frozenset(mode.handler for mode in ASK_MODES.values())
+
+
+def report_mode_supported(mode: Any) -> bool:
+    """Whether the engine a resolved Ask mode (``ask_modes.resolve_mode``)
+    dispatches to reads an attached report. False for an extension engine:
+    that turn answers as usual and its receipt says the report was not read
+    (``engine_unsupported``), decided before anything is read."""
+    return getattr(mode, "handler", None) in _REPORT_READING_HANDLERS
+
+
+def report_restore_request(
+    digest: ReportDigest,
+    *,
+    source_owners: Mapping[str, str],
+    object_owners: Mapping[str, str],
+) -> tuple[CitedReportReference, ...]:
+    """The references a readable turn asks the retrieval layer to read back
+    (``AskCandidatePort.restore_report_references``), in report order.
+
+    Left out: the references whose item the verdict already counted gone (no
+    owner any more -- restoring them would count them gone a second time) and
+    the types the restore skips (``RESTORE_SKIPPED_OBJECT_TYPES``). Each names
+    the library that owns its item now, as the verdict resolved it; a Memory
+    reference names none. The request is not an authority: the restore judges
+    every one again under the run's ceiling."""
+    cited: list[CitedReportReference] = []
+    for reference in digest.references:
+        object_type = _field(reference, "object_type")
+        if object_type in RESTORE_SKIPPED_OBJECT_TYPES:
+            continue
+        library = ""
+        if object_type != _MEMORY_TYPE:
+            owner = report_reference_owner(
+                reference, source_owners=source_owners, object_owners=object_owners,
+            )
+            if owner is None:
+                continue
+            library = owner
+        cited.append(CitedReportReference(
+            key=_field(reference, "key"),
+            object_type=object_type,
+            object_id=_field(reference, "object_id"),
+            notebook_id=library,
+            source_id=_field(reference, "source_id"),
+            element_id=_field(reference, "element_id"),
+        ))
+    return tuple(cited)
+
+
+def followup_outline(followup: Optional[ReportFollowup]) -> str:
+    """The attached report as the understanding, rewriting, expansion and
+    planning steps see it (``report_outline_text``): title and section titles
+    when the turn may read the report, the title alone otherwise (D5 -- the
+    section titles were written from evidence the turn may not see). "" when
+    the request attached no report."""
+    if followup is None:
+        return ""
+    readable = followup.verdict.readable and followup.digest is not None
+    return report_outline_text(
+        followup.digest if readable else followup.title, readable,
+    )
+
+
+_CURRENT_REPORT_FOLLOWUP: ContextVar[Optional[ReportFollowup]] = ContextVar(
+    "current_report_followup", default=None
+)
+
+
+@contextmanager
+def report_followup_context(followup: Optional[ReportFollowup]) -> Iterator[None]:
+    """Carry the run's ``ReportFollowup`` from the engine entry to the engines
+    and to the answer's persistence seam (plan D11; the same shape as the
+    display-only retrieval-scope receipt's context in ``source_scope``). Entered by
+    ``AskService._engine_scope`` alone -- with ``None`` too, so a run without
+    a report never sees an outer run's. ``background_jobs.submit`` copies the
+    caller's context, so a worker thread of the run reads the same value."""
+    token = _CURRENT_REPORT_FOLLOWUP.set(followup)
+    try:
+        yield
+    finally:
+        _CURRENT_REPORT_FOLLOWUP.reset(token)
+
+
+def current_report_followup() -> Optional[ReportFollowup]:
+    """The run's attached report (read or why not), or None when its request
+    attached none, it is a global run, or no engine entry installed one."""
+    return _CURRENT_REPORT_FOLLOWUP.get()
+
+
 __all__ = [
     "REPORT_BLOCK_HEADER",
     "ReportAdmissionCounts",
+    "ReportFollowupReaders",
     "ReportScope",
     "SUMMARY_TRUNCATED_SUFFIX",
+    "current_report_followup",
+    "followup_outline",
     "followup_receipt",
     "load_linked_report",
     "render_report_block",
     "report_digest",
+    "report_followup_context",
     "report_link_verdict",
+    "report_mode_supported",
     "report_outline_text",
     "report_owner_ids",
     "report_reason_text",
     "report_reference_owner",
+    "report_restore_request",
     "report_trace_step",
     "rewrite_report_markers",
     "select_report_sections",

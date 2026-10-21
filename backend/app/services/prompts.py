@@ -1625,12 +1625,22 @@ QUERY_INTENT_KEYWORDS_SCHEMA_HINT = (
     '"confidence":0.0,"needs_clarification":false}')
 
 
+#: Follows the attached report's outline line in the understanding prompt
+#: (``query_intent_prompt(report_block=...)``): the request names its referent
+#: by attaching the report, so the model must not ask which report is meant.
+ATTACHED_REPORT_REFERENCE_RULE = (
+    'References such as "the report", "section 3" or "its conclusion" refer to '
+    "this attached report; do not ask which report is meant."
+)
+
+
 def query_intent_prompt(question: str, max_topics: int = 6,
                         history_block: str = "", *,
                         purpose: str = "deep report",
                         confirmation_mode: bool = False,
                         keywords: bool = False,
-                        corpus_langs: Optional[List[str]] = None) -> str:
+                        corpus_langs: Optional[List[str]] = None,
+                        report_block: str = "") -> str:
     """The corpus-blind intent contract prompt.
 
     ``keywords`` = also ask for the whole-request ``high_level_keywords`` /
@@ -1641,10 +1651,19 @@ def query_intent_prompt(question: str, max_topics: int = 6,
     they were before the pair existed (reports never turn it on).
     ``corpus_langs`` is read only when ``keywords`` is on: language codes are
     corpus metadata, not corpus text, so the step stays corpus-blind.
+
+    ``report_block`` is the outline line of the deep report the request
+    attached (``report_followup.report_outline_text``: title and section
+    titles, or the title alone when the turn may not read the report). It
+    follows the history, with ``ATTACHED_REPORT_REFERENCE_RULE``. Empty (every
+    caller without a report): the prompt is byte for byte as before.
     """
     history_section = (
         f"Prior conversation (context only; the latest request wins):\n{history_block}\n\n"
         if history_block else ""
+    )
+    report_section = (
+        f"{report_block}\n{ATTACHED_REPORT_REFERENCE_RULE}\n\n" if report_block else ""
     )
     confirmation_rule = (
         "The user has already reviewed the earlier understanding and supplied the "
@@ -1735,7 +1754,7 @@ def query_intent_prompt(question: str, max_topics: int = 6,
         "fields when the request is only an overview.\n"
         f"{keyword_rule}"
         f"{confirmation_rule}\n"
-        f"{history_section}User request: {question}\n\n"
+        f"{history_section}{report_section}User request: {question}\n\n"
         f"Return JSON only: {schema_hint}"
     )
 
