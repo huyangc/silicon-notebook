@@ -1,0 +1,4467 @@
+{
+ "db_diff": {
+  "concept_clusters": {
+   "added": [
+    {
+     "canonical_desc_sig": "",
+     "canonical_description": "",
+     "canonical_id": "K-bandgap reference",
+     "canonical_name": "cascode",
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "generation": 1,
+     "id": "cc-<rand>",
+     "member_object_id": "ko-r0004",
+     "notebook_id": "nb-r0001",
+     "object_type": "concept"
+    },
+    {
+     "canonical_desc_sig": "",
+     "canonical_description": "",
+     "canonical_id": "K-bandgap reference",
+     "canonical_name": "cascode",
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "generation": 1,
+     "id": "cc-<rand>",
+     "member_object_id": "ko-r0006",
+     "notebook_id": "nb-r0001",
+     "object_type": "concept"
+    },
+    {
+     "canonical_desc_sig": "",
+     "canonical_description": "",
+     "canonical_id": "K-bandgap reference",
+     "canonical_name": "cascode",
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "generation": 1,
+     "id": "cc-<rand>",
+     "member_object_id": "ko-r0018",
+     "notebook_id": "nb-r0001",
+     "object_type": "concept"
+    },
+    {
+     "canonical_desc_sig": "",
+     "canonical_description": "",
+     "canonical_id": "K-finfet",
+     "canonical_name": "FinFET",
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "generation": 1,
+     "id": "cc-<rand>",
+     "member_object_id": "ko-r0003",
+     "notebook_id": "nb-r0001",
+     "object_type": "concept"
+    },
+    {
+     "canonical_desc_sig": "",
+     "canonical_description": "",
+     "canonical_id": "K-gaafet",
+     "canonical_name": "GAAFET",
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "generation": 1,
+     "id": "cc-<rand>",
+     "member_object_id": "ko-r0015",
+     "notebook_id": "nb-r0001",
+     "object_type": "concept"
+    },
+    {
+     "canonical_desc_sig": "",
+     "canonical_description": "",
+     "canonical_id": "K-nanosheet fet",
+     "canonical_name": "Nanosheet FET",
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "generation": 1,
+     "id": "cc-<rand>",
+     "member_object_id": "ko-r0017",
+     "notebook_id": "nb-r0001",
+     "object_type": "concept"
+    },
+    {
+     "canonical_desc_sig": "",
+     "canonical_description": "",
+     "canonical_id": "K-nmos switch",
+     "canonical_name": "NMOS switch",
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "generation": 1,
+     "id": "cc-<rand>",
+     "member_object_id": "ko-r0005",
+     "notebook_id": "nb-r0001",
+     "object_type": "concept"
+    },
+    {
+     "canonical_desc_sig": "",
+     "canonical_description": "",
+     "canonical_id": "K-pmos switch",
+     "canonical_name": "PMOS switch",
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "generation": 1,
+     "id": "cc-<rand>",
+     "member_object_id": "ko-r0016",
+     "notebook_id": "nb-r0001",
+     "object_type": "concept"
+    },
+    {
+     "canonical_desc_sig": "",
+     "canonical_description": "",
+     "canonical_id": "KF-i_d=k(v_gs-v_th)^2",
+     "canonical_name": "I_D = k (V_GS - V_th)^2",
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "generation": 1,
+     "id": "cc-<rand>",
+     "member_object_id": "ko-r0008",
+     "notebook_id": "nb-r0001",
+     "object_type": "formula"
+    },
+    {
+     "canonical_desc_sig": "",
+     "canonical_description": "",
+     "canonical_id": "KF-i_d=k(v_gs-v_th)^2",
+     "canonical_name": "I_D = k (V_GS - V_th)^2",
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "generation": 1,
+     "id": "cc-<rand>",
+     "member_object_id": "ko-r0021",
+     "notebook_id": "nb-r0001",
+     "object_type": "formula"
+    },
+    {
+     "canonical_desc_sig": "",
+     "canonical_description": "",
+     "canonical_id": "KL-vth drops with temperature",
+     "canonical_name": "Vth drops with temperature",
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "generation": 1,
+     "id": "cc-<rand>",
+     "member_object_id": "ko-r0007",
+     "notebook_id": "nb-r0001",
+     "object_type": "claim"
+    },
+    {
+     "canonical_desc_sig": "",
+     "canonical_description": "",
+     "canonical_id": "KL-vth drops with temperature",
+     "canonical_name": "Vth drops with temperature",
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "generation": 1,
+     "id": "cc-<rand>",
+     "member_object_id": "ko-r0020",
+     "notebook_id": "nb-r0001",
+     "object_type": "claim"
+    },
+    {
+     "canonical_desc_sig": "",
+     "canonical_description": "",
+     "canonical_id": "KP-measure vth#bias the gate|sweep the drain",
+     "canonical_name": "Measure Vth",
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "generation": 1,
+     "id": "cc-<rand>",
+     "member_object_id": "ko-r0009",
+     "notebook_id": "nb-r0001",
+     "object_type": "procedure"
+    },
+    {
+     "canonical_desc_sig": "",
+     "canonical_description": "",
+     "canonical_id": "KP-measure vth#bias the gate|sweep the drain",
+     "canonical_name": "Measure Vth",
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "generation": 1,
+     "id": "cc-<rand>",
+     "member_object_id": "ko-r0022",
+     "notebook_id": "nb-r0001",
+     "object_type": "procedure"
+    },
+    {
+     "canonical_desc_sig": "56ff368a5f4b753afdea637c8826eb028431786c",
+     "canonical_description": "描述 737 Write a conc",
+     "canonical_id": "K-metal oxide semiconductor fet",
+     "canonical_name": "MOSFET",
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "generation": 1,
+     "id": "cc-<rand>",
+     "member_object_id": "ko-r0002",
+     "notebook_id": "nb-r0001",
+     "object_type": "concept"
+    },
+    {
+     "canonical_desc_sig": "56ff368a5f4b753afdea637c8826eb028431786c",
+     "canonical_description": "描述 737 Write a conc",
+     "canonical_id": "K-metal oxide semiconductor fet",
+     "canonical_name": "MOSFET",
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "generation": 1,
+     "id": "cc-<rand>",
+     "member_object_id": "ko-r0013",
+     "notebook_id": "nb-r0001",
+     "object_type": "concept"
+    },
+    {
+     "canonical_desc_sig": "56ff368a5f4b753afdea637c8826eb028431786c",
+     "canonical_description": "描述 737 Write a conc",
+     "canonical_id": "K-metal oxide semiconductor fet",
+     "canonical_name": "MOSFET",
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "generation": 1,
+     "id": "cc-<rand>",
+     "member_object_id": "ko-r0014",
+     "notebook_id": "nb-r0001",
+     "object_type": "concept"
+    }
+   ],
+   "removed": []
+  },
+  "concept_merge_candidates": {
+   "added": [
+    {
+     "canonical_a": "K-finfet",
+     "canonical_b": "K-metal oxide semiconductor fet",
+     "confidence": "float:0.0",
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "id": "mc-r0025",
+     "notebook_id": "nb-r0001",
+     "ordinal": 4,
+     "rationale": "",
+     "reviewed_by": "",
+     "score": "float:0.8574929237365723",
+     "seed_a": "finfet",
+     "seed_b": "mos transistor",
+     "status": "pending",
+     "updated_at": "2999-01-01T00:00:00+00:00"
+    }
+   ],
+   "removed": []
+  },
+  "kg_rebuild_checkpoint": {
+   "added": [
+    {
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "input_version": "3fb2904116e575b72fa6d632d51de90cf7af09d1",
+     "item_key": "K-metal oxide semiconductor fet",
+     "notebook_id": "nb-r0001",
+     "payload": {
+      "description": "描述 737 Write a conc",
+      "sig": "56ff368a5f4b753afdea637c8826eb028431786c"
+     },
+     "stage": "concept_desc"
+    },
+    {
+     "created_at": "2999-01-01T00:00:00+00:00",
+     "input_version": "3fb2904116e575b72fa6d632d51de90cf7af09d1",
+     "item_key": "K-metal oxide semiconductor fet\u001fK-mos transistor",
+     "notebook_id": "nb-r0001",
+     "payload": {
+      "confidence": "float:0.97",
+      "decision": "merge"
+     },
+     "stage": "merge_review"
+    }
+   ],
+   "removed": []
+  },
+  "unified_kg_state": {
+   "added": [
+    {
+     "canonical_rel_seq": -1,
+     "chunk_elements_indexed": 0,
+     "cluster_code_version": "algo=3;embed_dim=16;runtime_dim=0",
+     "cluster_count": 7,
+     "cluster_generation": 1,
+     "cluster_input_version": "c2fb0ae2680a59bc03127a0afefd95fc2de76cc2",
+     "cluster_mutation_seq": 1,
+     "community_generation": 0,
+     "community_seq": -1,
+     "derived_building_claimed_at": null,
+     "derived_building_generation": 0,
+     "derived_catchup_from": null,
+     "derived_generation_counter": 1,
+     "dirty": 0,
+     "indexing_pipeline_id": "",
+     "indexing_pipeline_version": "builtin.chunk.v1",
+     "kg_mutation_seq": 2,
+     "kg_reset_epoch": 0,
+     "last_rebuild_at": "2999-01-01T00:00:00+00:00",
+     "memory_isolation_version": 1,
+     "mention_seq": -1,
+     "notebook_id": "nb-r0001",
+     "object_count": 17,
+     "relation_count": 5,
+     "source_index_backfilled": 1,
+     "updated_at": "2999-01-01T00:00:00+00:00"
+    }
+   ],
+   "removed": [
+    {
+     "canonical_rel_seq": -1,
+     "chunk_elements_indexed": 0,
+     "cluster_code_version": "",
+     "cluster_count": 0,
+     "cluster_generation": 0,
+     "cluster_input_version": "",
+     "cluster_mutation_seq": 0,
+     "community_generation": 0,
+     "community_seq": -1,
+     "derived_building_claimed_at": null,
+     "derived_building_generation": 0,
+     "derived_catchup_from": null,
+     "derived_generation_counter": 0,
+     "dirty": 1,
+     "indexing_pipeline_id": "",
+     "indexing_pipeline_version": "builtin.chunk.v1",
+     "kg_mutation_seq": 2,
+     "kg_reset_epoch": 0,
+     "last_rebuild_at": null,
+     "memory_isolation_version": 1,
+     "mention_seq": -1,
+     "notebook_id": "nb-r0001",
+     "object_count": 0,
+     "relation_count": 0,
+     "source_index_backfilled": 1,
+     "updated_at": "2026-09-30T00:00:00+00:00"
+    }
+   ]
+  }
+ },
+ "fs_diff": {
+  "added": {
+   "kg_viz": "dir",
+   "kg_viz/nb-r0001": "dir",
+   "kg_viz/nb-r0001/manifest.json": "sha256:7e6f3c0c18f3233b",
+   "kg_viz/nb-r0001/viz.npz": "sha256:fb97d9a1f3a62950",
+   "kg_viz/nb-r0001/viz_adj.npz": "sha256:6c46563c9d548b41"
+  },
+  "removed": []
+ },
+ "llm": [
+  {
+   "prompt": "Review candidate concept merges for a technical/scientific knowledge graph.\nMerge only when the two names denote the SAME concept, including acronym/full-name pairs (e.g. 'MoE' and 'Mixture-of-Experts') and trivial spelling/plural variants.\nTwo names that are TRANSLATIONS of each other for the SAME concept (e.g. a Chinese name and its English equivalent or acronym — '低噪声放大器' / 'LNA' / 'Low Noise Amplifier') SHOULD merge. Write the rationale in the candidates' language. confidence is a number between 0 and 1 (e.g. 0.85) — never a word such as high/medium/low.\nKeep separate when one is a subtype, a different version/size/variant (e.g. 'V2' vs 'V3', '7B' vs '72B'), a related-but-distinct method, a parameter, a cause/effect, or a broader/narrower term.\nReturn JSON only, one decision per candidate. candidate_id is the value of that candidate's leading id field — the text right after its equals sign, up to the space — copied exactly as a string.\n\nCandidates:\n- id=ac0 score=0.995\n  A: K-metal oxide semiconductor fet\n  B: K-mos transistor",
+   "reply": "{\"decisions\": [{\"candidate_id\": \"ac0\", \"decision\": \"merge\", \"confidence\": 0.97, \"rationale\": \"scripted\"}]}",
+   "workload": "kg_merge_review"
+  },
+  {
+   "prompt": "Write a concise 1-2 sentence technical description of the concept \"cascode\" for a semiconductor/IC-design knowledge base, synthesizing the source snippets below (which mention it across documents). Merge the snippets, resolve any contradictions into a single coherent description, stay factual to the snippets, third person, include the concept name. Preserve entity/concept names, formula expressions and canonical labels EXACTLY as they appear in the source, in their original language — do NOT translate or transliterate them; write the description in the language of the source snippets. Return JSON only with a 'description' field.\n\nConcept: cascode\n\nSource snippets:\n- a cascode stage\n- bandgap reference is stable\n- cascode raises output impedance",
+   "reply": "not json",
+   "workload": "kg_concept_description"
+  },
+  {
+   "prompt": "Write a concise 1-2 sentence technical description of the concept \"MOSFET\" for a semiconductor/IC-design knowledge base, synthesizing the source snippets below (which mention it across documents). Merge the snippets, resolve any contradictions into a single coherent description, stay factual to the snippets, third person, include the concept name. Preserve entity/concept names, formula expressions and canonical labels EXACTLY as they appear in the source, in their original language — do NOT translate or transliterate them; write the description in the language of the source snippets. Return JSON only with a 'description' field.\n\nConcept: MOSFET\n\nSource snippets:\n- MOSFET switches current\n- a mosfet has a gate\n- metal oxide gate",
+   "reply": "{\"description\": \"\\u63cf\\u8ff0 737 Write a conc\"}",
+   "workload": "kg_concept_description"
+  }
+ ],
+ "logs": [
+  {
+   "level": "INFO",
+   "logger": "silicon_notebook.events",
+   "message": "kg-rebuild[nb-r0001] concept: streamed 11 objs → 9 seeds, 8 vecs (<dur>s)"
+  },
+  {
+   "level": "INFO",
+   "logger": "silicon_notebook.events",
+   "message": "kg-rebuild[nb-r0001] concept: merge-review 1 candidates → 1 merged (<dur>s)"
+  },
+  {
+   "level": "INFO",
+   "logger": "silicon_notebook.events",
+   "message": "kg-rebuild[nb-r0001] concept: clustered 9 seeds → 7 canonicals, 0 auto-cand (<dur>s)"
+  },
+  {
+   "level": "INFO",
+   "logger": "silicon_notebook.events",
+   "message": "kg-rebuild[nb-r0001] concept: descriptions 1 (<dur>s)"
+  },
+  {
+   "level": "INFO",
+   "logger": "silicon_notebook.events",
+   "message": "kg-rebuild[nb-r0001] concept: wrote clusters (<dur>s)"
+  },
+  {
+   "level": "INFO",
+   "logger": "silicon_notebook.events",
+   "message": "kg-rebuild[nb-r0001] claim: streamed+clustered+wrote (<dur>s)"
+  },
+  {
+   "level": "INFO",
+   "logger": "silicon_notebook.events",
+   "message": "kg-rebuild[nb-r0001] formula: streamed+clustered+wrote (<dur>s)"
+  },
+  {
+   "level": "INFO",
+   "logger": "silicon_notebook.events",
+   "message": "kg-rebuild[nb-r0001] procedure: streamed+clustered+wrote (<dur>s)"
+  },
+  {
+   "level": "INFO",
+   "logger": "silicon_notebook.events",
+   "message": "kg-rebuild[nb-r0001] pending refresh (<dur>s)"
+  },
+  {
+   "level": "INFO",
+   "logger": "silicon_notebook.events",
+   "message": "kg-rebuild[nb-r0001] flipped cluster generation 0 → 1"
+  },
+  {
+   "level": "INFO",
+   "logger": "silicon_notebook.events",
+   "message": "kg-rebuild[nb-r0001] DONE 7 canonicals, total <dur>s"
+  },
+  {
+   "exc": "RuntimeError",
+   "level": "ERROR",
+   "logger": "silicon_notebook.events",
+   "message": "maybe_auto_index failed after rebuild for nb-r0001"
+  }
+ ],
+ "notebook_id": "nb-r0001",
+ "outcome": {
+  "returned": 7
+ },
+ "progress": [
+  [
+   "concept: streamed 11 objs → 9 seeds, 8 vecs (<dur>s)",
+   0,
+   0
+  ],
+  [
+   "concept: merge-review 1 candidates → 1 merged (<dur>s)",
+   0,
+   0
+  ],
+  [
+   "concept: clustered 9 seeds → 7 canonicals, 0 auto-cand (<dur>s)",
+   0,
+   0
+  ],
+  [
+   "concept_desc",
+   1,
+   2
+  ],
+  [
+   "concept_desc",
+   2,
+   2
+  ],
+  [
+   "concept: descriptions 1 (<dur>s)",
+   0,
+   0
+  ],
+  [
+   "concept: wrote clusters (<dur>s)",
+   0,
+   0
+  ],
+  [
+   "claim: streamed+clustered+wrote (<dur>s)",
+   0,
+   0
+  ],
+  [
+   "formula: streamed+clustered+wrote (<dur>s)",
+   0,
+   0
+  ],
+  [
+   "procedure: streamed+clustered+wrote (<dur>s)",
+   0,
+   0
+  ],
+  [
+   "pending refresh (<dur>s)",
+   0,
+   0
+  ],
+  [
+   "flipped cluster generation 0 → 1",
+   0,
+   0
+  ],
+  [
+   "DONE 7 canonicals, total <dur>s",
+   0,
+   0
+  ]
+ ],
+ "timeline": [
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self.get_notebook",
+   "kwargs": {},
+   "ret": {
+    "access": "owner",
+    "access_scope": "",
+    "ask_available": true,
+    "base_kg_available": false,
+    "base_kg_notebook_ids": [],
+    "base_notebooks": [],
+    "can_manage_content": false,
+    "counts": {
+     "cases": 0,
+     "checklist_items": 0,
+     "glossary": 0,
+     "memories": 0,
+     "methods": 0,
+     "risks": 0,
+     "rules": 0,
+     "sources": 3
+    },
+    "created_label": "2026年9月30日",
+    "document_limit": 20,
+    "expected_questions": [],
+    "granted_via": [],
+    "id": "nb-r0001",
+    "indexing_pipeline_available": true,
+    "indexing_pipeline_id": null,
+    "indexing_pipeline_missing": false,
+    "indexing_pipeline_pending": false,
+    "indexing_pipeline_stale": false,
+    "indexing_pipeline_version": "builtin.chunk.v1",
+    "is_shared": false,
+    "kg_build": null,
+    "kg_building": false,
+    "kg_pending_sources": 0,
+    "kg_ready": true,
+    "local_evidence_available": true,
+    "name": "rebuild world",
+    "paper_meta_backfilling": false,
+    "paper_meta_missing": false,
+    "primary_domain": "Semiconductor",
+    "purpose": "",
+    "shared_from": "",
+    "source_types": [],
+    "status": "draft",
+    "sync_origin": "",
+    "target_users": "",
+    "taxonomy": [],
+    "tier": "personal"
+   }
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT notebooks.*, u.username AS _owner_username, COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') AS _published_pipeline_version, EXISTS(SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id = notebooks.id AND ng.principal_type IN ('group', 'group_admins')) AS _shared_to_groups FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by LEFT JOIN unified_kg_state ip ON ip.notebook_id=notebooks.id WHERE notebooks.id = %s AND notebooks.status NOT IN ('copying','deleting','importing')"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT id FROM sources WHERE notebook_id=%s AND source_type = 'memory'"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT COUNT(*) AS count FROM sources WHERE notebook_id = %s AND source_type NOT IN ('memory', 'knowhow')"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "nb-r0001",
+    "nb-r0001"
+   ],
+   "sql": "WITH total AS (SELECT object_type, status, COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=%s GROUP BY object_type, status), memory AS (SELECT mo.object_type, mo.status, COUNT(*) AS c FROM knowledge_objects mo WHERE mo.source_id = ANY(ARRAY(SELECT s.id FROM sources s WHERE s.notebook_id=%s AND s.source_type = 'memory')) AND mo.notebook_id=%s GROUP BY mo.object_type, mo.status) SELECT t.object_type, t.status, t.c - COALESCE(m.c, 0) AS c, COALESCE(m.c, 0) AS m FROM total t LEFT JOIN memory m ON m.object_type = t.object_type AND m.status = t.status"
+  },
+  {
+   "params": [
+    null,
+    "nb-r0001"
+   ],
+   "sql": "SELECT b.id AS id, b.name AS name, b.tier AS tier, EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id) AS has_kg FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF(CAST(%s AS text), '') AS uid) v WHERE e.notebook_id = %s AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name COLLATE \"C\", b.id COLLATE \"C\""
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id=%s) AS exists"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM sources s JOIN LATERAL (SELECT 1 AS found FROM source_elements e WHERE e.source_id=s.id LIMIT 1) parsed ON TRUE LEFT JOIN LATERAL (SELECT er.status,er.error_message FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.ordinal DESC LIMIT 1) latest_kg ON TRUE LEFT JOIN LATERAL (SELECT 1 AS found FROM knowledge_objects k WHERE k.source_id=s.id AND k.source_id!='' LIMIT 1) source_kg ON TRUE WHERE s.notebook_id=%s AND s.source_type NOT IN ('memory','knowhow') AND s.source_type <> 'promotion' AND (source_kg.found IS NULL OR COALESCE(latest_kg.status,'completed')!='completed' OR COALESCE(latest_kg.error_message,'') ~ 'windows_failed=[1-9][0-9]*/[0-9]+' OR strpos(COALESCE(latest_kg.error_message,''),'retry_incomplete=1')>0) AND NOT (COALESCE(latest_kg.status,'')='completed' AND starts_with(COALESCE(latest_kg.error_message,''),'kg objects=0 ') AND COALESCE(latest_kg.error_message,'') !~ 'windows_failed=[1-9][0-9]*/[0-9]+')"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM chunks WHERE notebook_id=%s) AS exists"
+  },
+  {
+   "params": [
+    "nb-r0001",
+    [
+     "approved",
+     "reviewed",
+     "project_specific",
+     "conflict"
+    ]
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id=%s AND status=ANY(%s)) AS exists"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM sources s WHERE s.notebook_id=%s AND s.source_type NOT IN ('memory','knowhow') AND s.source_type <> 'promotion' AND s.doc_type IN ('','academic_paper') AND s.parse_status IN ('parsed','extracting','extracted') AND NOT EXISTS(SELECT 1 FROM source_paper_meta m WHERE m.source_id=s.id)) AS exists"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT * FROM kg_build_jobs WHERE notebook_id=%s ORDER BY created_at DESC,ordinal DESC LIMIT 1"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT nb.created_by AS owner_id,u.role AS owner_role FROM notebooks nb LEFT JOIN users u ON u.id=nb.created_by WHERE nb.id=%s"
+  },
+  {
+   "params": [
+    "user-local"
+   ],
+   "sql": "SELECT upload_document_limit FROM user_profiles WHERE user_id=%s"
+  },
+  {
+   "params": [
+    "upload_document_limit_default"
+   ],
+   "sql": "SELECT value FROM app_settings WHERE key=%s"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self._cluster_input_version",
+   "kwargs": {},
+   "ret": "c2fb0ae2680a59bc03127a0afefd95fc2de76cc2"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001"
+   ],
+   "call": "unified_kg.cluster_input_facts",
+   "kwargs": {
+    "exclude_emb_count": false
+   },
+   "ret": [
+    2,
+    17,
+    2,
+    17
+   ]
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=%s AND status!='deprecated'"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM concept_merge_candidates WHERE notebook_id=%s AND status IN ('confirmed','rejected')"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowledge_embeddings WHERE notebook_id=%s"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001"
+   ],
+   "call": "unified_kg.claim_derived_generation",
+   "kwargs": {
+    "ttl_seconds": 14400
+   },
+   "ret": {
+    "catchup_from": null,
+    "cluster_generation": 0,
+    "community_generation": 0,
+    "generation": 1,
+    "kg_mutation_seq": 2,
+    "ts": "<ts>"
+   }
+  },
+  {
+   "params": [
+    "nb-r0001",
+    14400
+   ],
+   "sql": "INSERT INTO unified_kg_state (notebook_id, derived_generation_counter, derived_building_generation, derived_building_claimed_at, updated_at) VALUES (%s, 1, 1, now(), now()) ON CONFLICT(notebook_id) DO UPDATE SET derived_generation_counter=unified_kg_state.derived_generation_counter+1, derived_building_generation=unified_kg_state.derived_generation_counter+1, derived_building_claimed_at=now(), updated_at=now() WHERE unified_kg_state.derived_building_generation = 0 OR unified_kg_state.derived_building_claimed_at < now() - make_interval(secs => %s) RETURNING derived_generation_counter AS generation, cluster_generation, community_generation, derived_catchup_from, now() AS ts, kg_mutation_seq"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "uuid4": "000000000000000000000000a0000001"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self._cluster_input_version",
+   "kwargs": {
+    "exclude_emb_count": true
+   },
+   "ret": "3fb2904116e575b72fa6d632d51de90cf7af09d1"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001"
+   ],
+   "call": "unified_kg.cluster_input_facts",
+   "kwargs": {
+    "exclude_emb_count": true
+   },
+   "ret": [
+    2,
+    17,
+    2,
+    0
+   ]
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=%s AND status!='deprecated'"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM concept_merge_candidates WHERE notebook_id=%s AND status IN ('confirmed','rejected')"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    "3fb2904116e575b72fa6d632d51de90cf7af09d1"
+   ],
+   "call": "unified_kg.checkpoint_gc",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "3fb2904116e575b72fa6d632d51de90cf7af09d1"
+   ],
+   "sql": "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=%s AND input_version!=%s"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    "concept",
+    "<callable>"
+   ],
+   "call": "self._stream_seed_reps",
+   "kwargs": {
+    "run_id": "000000000000000000000000a0000001"
+   },
+   "ret": [
+    {
+     "cascode": "ndarray:float32:[16]:65436344097bfebf",
+     "finfet": "ndarray:float32:[16]:e52dd61635a4b50e",
+     "gaafet": "ndarray:float32:[16]:543e997f76ec43ec",
+     "metal oxide semiconductor fet": "ndarray:float32:[16]:6040362c9c2e47ac",
+     "mos transistor": "ndarray:float32:[16]:ae5140b4f95bf592",
+     "nanosheet fet": "ndarray:float32:[16]:956374e84092a7f0",
+     "nmos switch": "ndarray:float32:[16]:f5149347973da3eb",
+     "pmos switch": "ndarray:float32:[16]:e1f98e6095aca6bd"
+    },
+    {
+     "bandgap reference": 1,
+     "cascode": 2,
+     "finfet": 1,
+     "gaafet": 1,
+     "metal oxide semiconductor fet": 1,
+     "mos transistor": 2,
+     "nanosheet fet": 1,
+     "nmos switch": 1,
+     "pmos switch": 1
+    },
+    {
+     "bandgap reference": "bandgap reference",
+     "cascode": "cascode",
+     "finfet": "FinFET",
+     "gaafet": "GAAFET",
+     "metal oxide semiconductor fet": "Metal Oxide Semiconductor FET",
+     "mos transistor": "MOSFET",
+     "nanosheet fet": "Nanosheet FET",
+     "nmos switch": "NMOS switch",
+     "pmos switch": "PMOS switch"
+    }
+   ]
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "call": "unified_kg.clear_scratch_run",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "sql": "DELETE FROM kg_cluster_scratch WHERE notebook_id=%s AND run_id=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "concept"
+   ],
+   "call": "unified_kg.seed_payload_rows",
+   "kwargs": {},
+   "ret": "<Cursor>"
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "concept"
+   ],
+   "sql": "SELECT o.payload::text AS payload FROM knowledge_objects o WHERE o.notebook_id=%s AND o.object_type=%s AND o.status!='deprecated' AND NOT EXISTS (SELECT 1 FROM sources ds WHERE ds.id = o.source_id AND ds.notebook_id = o.notebook_id AND ds.source_type = 'memory') ORDER BY o.ordinal"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "concept"
+   ],
+   "call": "unified_kg.stream_seed_rows",
+   "kwargs": {},
+   "ret": "<Cursor>"
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "concept"
+   ],
+   "sql": "SELECT o.id,o.payload::text AS payload FROM knowledge_objects o WHERE o.notebook_id=%s AND o.object_type=%s AND o.status!='deprecated' AND NOT EXISTS (SELECT 1 FROM sources ds WHERE ds.id = o.source_id AND ds.notebook_id = o.notebook_id AND ds.source_type = 'memory') ORDER BY o.ordinal"
+  },
+  {
+   "args": [
+    "<generator>",
+    "<callable>"
+   ],
+   "call": "self._bulk_write",
+   "kwargs": {},
+   "ret": 1
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    [
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "ko-r0002",
+      "mos transistor"
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "ko-r0003",
+      "finfet"
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "ko-r0004",
+      "cascode"
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "ko-r0005",
+      "nmos switch"
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "ko-r0006",
+      "bandgap reference"
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "ko-r0013",
+      "mos transistor"
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "ko-r0014",
+      "metal oxide semiconductor fet"
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "ko-r0015",
+      "gaafet"
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "ko-r0016",
+      "pmos switch"
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "ko-r0017",
+      "nanosheet fet"
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "ko-r0018",
+      "cascode"
+     ]
+    ]
+   ],
+   "call": "unified_kg.insert_scratch_rows",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "ko-r0002",
+     "mos transistor"
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "ko-r0003",
+     "finfet"
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "ko-r0004",
+     "cascode"
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "ko-r0005",
+     "nmos switch"
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "ko-r0006",
+     "bandgap reference"
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "ko-r0013",
+     "mos transistor"
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "ko-r0014",
+     "metal oxide semiconductor fet"
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "ko-r0015",
+     "gaafet"
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "ko-r0016",
+     "pmos switch"
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "ko-r0017",
+     "nanosheet fet"
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "ko-r0018",
+     "cascode"
+    ]
+   ],
+   "sql_many": "INSERT INTO kg_cluster_scratch (notebook_id, run_id, object_id, seed) VALUES (%s,%s,%s,%s)"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "call": "unified_kg.scratch_vector_rows",
+   "kwargs": {},
+   "ret": "<Cursor>"
+  },
+  {
+   "params": [
+    "000000000000000000000000a0000001",
+    "nb-r0001"
+   ],
+   "sql": "SELECT s.seed AS seed, e.vector AS vector FROM knowledge_embeddings e JOIN kg_cluster_scratch s ON s.object_id=e.object_id AND s.notebook_id=e.notebook_id AND s.run_id=%s JOIN knowledge_objects k ON k.id=s.object_id AND k.notebook_id=s.notebook_id WHERE e.notebook_id=%s ORDER BY s.ordinal"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self._notebook_deleting",
+   "kwargs": {},
+   "ret": false
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT status FROM notebooks WHERE id=%s"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    1
+   ],
+   "call": "self._refresh_generation_lease",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1
+   ],
+   "call": "unified_kg.refresh_derived_claim",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1
+   ],
+   "sql": "UPDATE unified_kg_state SET derived_building_claimed_at=now() WHERE notebook_id=%s AND derived_building_generation=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "log": "INFO"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self.decided_seed_pairs",
+   "kwargs": {},
+   "ret": {
+    "['bandgap reference', 'cascode']": "confirmed",
+    "['finfet', 'gaafet']": "rejected",
+    "['gaafet', 'nanosheet fet']": "deferred"
+   }
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT canonical_a, canonical_b, seed_a, seed_b, status FROM concept_merge_candidates WHERE notebook_id=%s AND status IN ('confirmed','rejected','deferred')"
+  },
+  {
+   "args": [
+    [
+     "bandgap reference",
+     "cascode",
+     "finfet",
+     "gaafet",
+     "metal oxide semiconductor fet",
+     "mos transistor",
+     "nanosheet fet",
+     "nmos switch",
+     "pmos switch"
+    ],
+    {
+     "cascode": "ndarray:float32:[16]:65436344097bfebf",
+     "finfet": "ndarray:float32:[16]:e52dd61635a4b50e",
+     "gaafet": "ndarray:float32:[16]:543e997f76ec43ec",
+     "metal oxide semiconductor fet": "ndarray:float32:[16]:6040362c9c2e47ac",
+     "mos transistor": "ndarray:float32:[16]:ae5140b4f95bf592",
+     "nanosheet fet": "ndarray:float32:[16]:956374e84092a7f0",
+     "nmos switch": "ndarray:float32:[16]:f5149347973da3eb",
+     "pmos switch": "ndarray:float32:[16]:e1f98e6095aca6bd"
+    },
+    {
+     "bandgap reference": 1,
+     "cascode": 2,
+     "finfet": 1,
+     "gaafet": 1,
+     "metal oxide semiconductor fet": 1,
+     "mos transistor": 2,
+     "nanosheet fet": 1,
+     "nmos switch": 1,
+     "pmos switch": 1
+    },
+    {
+     "bandgap reference": "bandgap reference",
+     "cascode": "cascode",
+     "finfet": "FinFET",
+     "gaafet": "GAAFET",
+     "metal oxide semiconductor fet": "Metal Oxide Semiconductor FET",
+     "mos transistor": "MOSFET",
+     "nanosheet fet": "Nanosheet FET",
+     "nmos switch": "NMOS switch",
+     "pmos switch": "PMOS switch"
+    },
+    [
+     [
+      "bandgap reference",
+      "cascode"
+     ]
+    ],
+    [
+     [
+      "finfet",
+      "gaafet"
+     ],
+     [
+      "gaafet",
+      "nanosheet fet"
+     ]
+    ]
+   ],
+   "call": "fn.cluster_seeds",
+   "kwargs": {
+    "ann_threads": 18,
+    "conflict_fn": "<callable>",
+    "id_prefix": "K-",
+    "rep_ann_max": 2000000
+   },
+   "ret": {
+    "auto_candidates": [
+     [
+      "K-metal oxide semiconductor fet",
+      "K-mos transistor",
+      "float:0.9950371384620667"
+     ]
+    ],
+    "canonical_names": {
+     "K-bandgap reference": "cascode",
+     "K-finfet": "FinFET",
+     "K-gaafet": "GAAFET",
+     "K-metal oxide semiconductor fet": "Metal Oxide Semiconductor FET",
+     "K-mos transistor": "MOSFET",
+     "K-nanosheet fet": "Nanosheet FET",
+     "K-nmos switch": "NMOS switch",
+     "K-pmos switch": "PMOS switch"
+    },
+    "capped": false,
+    "pending": [
+     [
+      "K-finfet",
+      "K-mos transistor",
+      "float:0.8574929237365723"
+     ],
+     [
+      "K-finfet",
+      "K-metal oxide semiconductor fet",
+      "float:0.8532373309135437"
+     ]
+    ],
+    "pending_seeds": [
+     [
+      "finfet",
+      "mos transistor",
+      "K-finfet",
+      "K-mos transistor",
+      "float:0.8574929237365723"
+     ],
+     [
+      "finfet",
+      "metal oxide semiconductor fet",
+      "K-finfet",
+      "K-metal oxide semiconductor fet",
+      "float:0.8532373309135437"
+     ]
+    ],
+    "seed_to_canonical": {
+     "bandgap reference": "K-bandgap reference",
+     "cascode": "K-bandgap reference",
+     "finfet": "K-finfet",
+     "gaafet": "K-gaafet",
+     "metal oxide semiconductor fet": "K-metal oxide semiconductor fet",
+     "mos transistor": "K-mos transistor",
+     "nanosheet fet": "K-nanosheet fet",
+     "nmos switch": "K-nmos switch",
+     "pmos switch": "K-pmos switch"
+    }
+   }
+  },
+  {
+   "args": [
+    "kg_merge_review"
+   ],
+   "call": "models.configured",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "args": [
+    "nb-r0001",
+    "3fb2904116e575b72fa6d632d51de90cf7af09d1",
+    "merge_review"
+   ],
+   "call": "unified_kg.checkpoint_load",
+   "kwargs": {},
+   "ret": {}
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "3fb2904116e575b72fa6d632d51de90cf7af09d1",
+    "merge_review"
+   ],
+   "sql": "SELECT item_key, payload FROM kg_rebuild_checkpoint WHERE notebook_id=%s AND input_version=%s AND stage=%s"
+  },
+  {
+   "args": [
+    "kg_merge_review"
+   ],
+   "call": "models.chat",
+   "kwargs": {},
+   "ret": "<FakeChat>"
+  },
+  {
+   "args": [
+    "kg_merge_review"
+   ],
+   "call": "models.parallelism",
+   "kwargs": {},
+   "ret": 1
+  },
+  {
+   "args": [
+    "<FakeChat>",
+    [
+     {
+      "canonical_a": "K-metal oxide semiconductor fet",
+      "canonical_b": "K-mos transistor",
+      "id": "ac0",
+      "score": "float:0.9950371384620667"
+     }
+    ]
+   ],
+   "call": "fn.review_merge_candidates",
+   "kwargs": {
+    "batch_size": 30,
+    "max_workers": 1,
+    "on_chunk": "<callable>"
+   },
+   "ret": [
+    {
+     "candidate_id": "ac0",
+     "confidence": "float:0.97",
+     "decision": "merge",
+     "rationale": "scripted"
+    }
+   ]
+  },
+  {
+   "args": [
+    "nb-r0001",
+    1
+   ],
+   "call": "self._refresh_generation_lease",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1
+   ],
+   "call": "unified_kg.refresh_derived_claim",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1
+   ],
+   "sql": "UPDATE unified_kg_state SET derived_building_claimed_at=now() WHERE notebook_id=%s AND derived_building_generation=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "now": "2999-01-01T00:00:00+00:00"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    "3fb2904116e575b72fa6d632d51de90cf7af09d1",
+    "merge_review",
+    [
+     [
+      "K-metal oxide semiconductor fet\u001fK-mos transistor",
+      {
+       "confidence": "float:0.97",
+       "decision": "merge"
+      }
+     ]
+    ],
+    "2999-01-01T00:00:00+00:00"
+   ],
+   "call": "unified_kg.checkpoint_put",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    [
+     "nb-r0001",
+     "3fb2904116e575b72fa6d632d51de90cf7af09d1",
+     "merge_review",
+     "K-metal oxide semiconductor fet\u001fK-mos transistor",
+     {
+      "jsonb": {
+       "confidence": "float:0.97",
+       "decision": "merge"
+      }
+     },
+     "2999-01-01T00:00:00+00:00"
+    ]
+   ],
+   "sql_many": "INSERT INTO kg_rebuild_checkpoint (notebook_id, input_version, stage, item_key, payload, created_at) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (notebook_id,input_version,stage,item_key) DO UPDATE SET payload=EXCLUDED.payload,created_at=EXCLUDED.created_at"
+  },
+  {
+   "args": [
+    [
+     "bandgap reference",
+     "cascode",
+     "finfet",
+     "gaafet",
+     "metal oxide semiconductor fet",
+     "mos transistor",
+     "nanosheet fet",
+     "nmos switch",
+     "pmos switch"
+    ],
+    {
+     "cascode": "ndarray:float32:[16]:65436344097bfebf",
+     "finfet": "ndarray:float32:[16]:e52dd61635a4b50e",
+     "gaafet": "ndarray:float32:[16]:543e997f76ec43ec",
+     "metal oxide semiconductor fet": "ndarray:float32:[16]:6040362c9c2e47ac",
+     "mos transistor": "ndarray:float32:[16]:ae5140b4f95bf592",
+     "nanosheet fet": "ndarray:float32:[16]:956374e84092a7f0",
+     "nmos switch": "ndarray:float32:[16]:f5149347973da3eb",
+     "pmos switch": "ndarray:float32:[16]:e1f98e6095aca6bd"
+    },
+    {
+     "bandgap reference": 1,
+     "cascode": 2,
+     "finfet": 1,
+     "gaafet": 1,
+     "metal oxide semiconductor fet": 1,
+     "mos transistor": 2,
+     "nanosheet fet": 1,
+     "nmos switch": 1,
+     "pmos switch": 1
+    },
+    {
+     "bandgap reference": "bandgap reference",
+     "cascode": "cascode",
+     "finfet": "FinFET",
+     "gaafet": "GAAFET",
+     "metal oxide semiconductor fet": "Metal Oxide Semiconductor FET",
+     "mos transistor": "MOSFET",
+     "nanosheet fet": "Nanosheet FET",
+     "nmos switch": "NMOS switch",
+     "pmos switch": "PMOS switch"
+    },
+    [
+     [
+      "bandgap reference",
+      "cascode"
+     ],
+     [
+      "metal oxide semiconductor fet",
+      "mos transistor"
+     ]
+    ],
+    [
+     [
+      "finfet",
+      "gaafet"
+     ],
+     [
+      "gaafet",
+      "nanosheet fet"
+     ]
+    ]
+   ],
+   "call": "fn.cluster_seeds",
+   "kwargs": {
+    "ann_threads": 18,
+    "conflict_fn": "<callable>",
+    "id_prefix": "K-",
+    "rep_ann_max": 2000000
+   },
+   "ret": {
+    "auto_candidates": [],
+    "canonical_names": {
+     "K-bandgap reference": "cascode",
+     "K-finfet": "FinFET",
+     "K-gaafet": "GAAFET",
+     "K-metal oxide semiconductor fet": "MOSFET",
+     "K-nanosheet fet": "Nanosheet FET",
+     "K-nmos switch": "NMOS switch",
+     "K-pmos switch": "PMOS switch"
+    },
+    "capped": false,
+    "pending": [
+     [
+      "K-finfet",
+      "K-metal oxide semiconductor fet",
+      "float:0.8574929237365723"
+     ]
+    ],
+    "pending_seeds": [
+     [
+      "finfet",
+      "mos transistor",
+      "K-finfet",
+      "K-metal oxide semiconductor fet",
+      "float:0.8574929237365723"
+     ]
+    ],
+    "seed_to_canonical": {
+     "bandgap reference": "K-bandgap reference",
+     "cascode": "K-bandgap reference",
+     "finfet": "K-finfet",
+     "gaafet": "K-gaafet",
+     "metal oxide semiconductor fet": "K-metal oxide semiconductor fet",
+     "mos transistor": "K-metal oxide semiconductor fet",
+     "nanosheet fet": "K-nanosheet fet",
+     "nmos switch": "K-nmos switch",
+     "pmos switch": "K-pmos switch"
+    }
+   }
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self._notebook_deleting",
+   "kwargs": {},
+   "ret": false
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT status FROM notebooks WHERE id=%s"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    1
+   ],
+   "call": "self._refresh_generation_lease",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1
+   ],
+   "call": "unified_kg.refresh_derived_claim",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1
+   ],
+   "sql": "UPDATE unified_kg_state SET derived_building_claimed_at=now() WHERE notebook_id=%s AND derived_building_generation=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "log": "INFO"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self._notebook_deleting",
+   "kwargs": {},
+   "ret": false
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT status FROM notebooks WHERE id=%s"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    1
+   ],
+   "call": "self._refresh_generation_lease",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1
+   ],
+   "call": "unified_kg.refresh_derived_claim",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1
+   ],
+   "sql": "UPDATE unified_kg_state SET derived_building_claimed_at=now() WHERE notebook_id=%s AND derived_building_generation=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "log": "INFO"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    {
+     "auto_candidates": [],
+     "canonical_names": {
+      "K-bandgap reference": "cascode",
+      "K-finfet": "FinFET",
+      "K-gaafet": "GAAFET",
+      "K-metal oxide semiconductor fet": "MOSFET",
+      "K-nanosheet fet": "Nanosheet FET",
+      "K-nmos switch": "NMOS switch",
+      "K-pmos switch": "PMOS switch"
+     },
+     "capped": false,
+     "pending": [
+      [
+       "K-finfet",
+       "K-metal oxide semiconductor fet",
+       "float:0.8574929237365723"
+      ]
+     ],
+     "pending_seeds": [
+      [
+       "finfet",
+       "mos transistor",
+       "K-finfet",
+       "K-metal oxide semiconductor fet",
+       "float:0.8574929237365723"
+      ]
+     ],
+     "seed_to_canonical": {
+      "bandgap reference": "K-bandgap reference",
+      "cascode": "K-bandgap reference",
+      "finfet": "K-finfet",
+      "gaafet": "K-gaafet",
+      "metal oxide semiconductor fet": "K-metal oxide semiconductor fet",
+      "mos transistor": "K-metal oxide semiconductor fet",
+      "nanosheet fet": "K-nanosheet fet",
+      "nmos switch": "K-nmos switch",
+      "pmos switch": "K-pmos switch"
+     }
+    },
+    {
+     "bandgap reference": "K-bandgap reference",
+     "cascode": "K-bandgap reference",
+     "finfet": "K-finfet",
+     "gaafet": "K-gaafet",
+     "metal oxide semiconductor fet": "K-metal oxide semiconductor fet",
+     "mos transistor": "K-metal oxide semiconductor fet",
+     "nanosheet fet": "K-nanosheet fet",
+     "nmos switch": "K-nmos switch",
+     "pmos switch": "K-pmos switch"
+    },
+    {
+     "bandgap reference": 1,
+     "cascode": 2,
+     "finfet": 1,
+     "gaafet": 1,
+     "metal oxide semiconductor fet": 1,
+     "mos transistor": 2,
+     "nanosheet fet": 1,
+     "nmos switch": 1,
+     "pmos switch": 1
+    },
+    "000000000000000000000000a0000001",
+    "3fb2904116e575b72fa6d632d51de90cf7af09d1",
+    "<callable>",
+    "<callable>",
+    "<module time>",
+    1
+   ],
+   "call": "self._concept_description_stage",
+   "kwargs": {},
+   "ret": [
+    {
+     "K-metal oxide semiconductor fet": "描述 737 Write a conc"
+    },
+    {
+     "K-metal oxide semiconductor fet": "56ff368a5f4b753afdea637c8826eb028431786c"
+    }
+   ]
+  },
+  {
+   "args": [
+    "kg_concept_description"
+   ],
+   "call": "models.configured",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001"
+   ],
+   "call": "unified_kg.cluster_description_rows",
+   "kwargs": {},
+   "ret": []
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "nb-r0001"
+   ],
+   "sql": "SELECT DISTINCT canonical_id, canonical_description, canonical_desc_sig FROM concept_clusters WHERE notebook_id=%s AND object_type='concept' AND generation = COALESCE((SELECT cluster_generation FROM unified_kg_state WHERE notebook_id = %s), 0)"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    "3fb2904116e575b72fa6d632d51de90cf7af09d1",
+    "concept_desc"
+   ],
+   "call": "unified_kg.checkpoint_load",
+   "kwargs": {},
+   "ret": {}
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "3fb2904116e575b72fa6d632d51de90cf7af09d1",
+    "concept_desc"
+   ],
+   "sql": "SELECT item_key, payload FROM kg_rebuild_checkpoint WHERE notebook_id=%s AND input_version=%s AND stage=%s"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "000000000000000000000000a0000001",
+    [
+     "bandgap reference",
+     "cascode",
+     "metal oxide semiconductor fet",
+     "mos transistor"
+    ]
+   ],
+   "call": "unified_kg.cluster_evidence_rows",
+   "kwargs": {},
+   "ret": [
+    {
+     "evidence": "[{\"source_id\": \"s1\", \"confidence\": 1.0, \"element_id\": \"el-s1\", \"quoted_span\": \"MOSFET switches current\", \"element_type\": \"paragraph\", \"source_title\": \"s1\", \"location_label\": \"p1\"}]",
+     "seed": "mos transistor"
+    },
+    {
+     "evidence": "[{\"source_id\": \"s1\", \"confidence\": 1.0, \"element_id\": \"el-s1\", \"quoted_span\": \"cascode raises output impedance\", \"element_type\": \"paragraph\", \"source_title\": \"s1\", \"location_label\": \"p1\"}]",
+     "seed": "cascode"
+    },
+    {
+     "evidence": "[{\"source_id\": \"s1\", \"confidence\": 1.0, \"element_id\": \"el-s1\", \"quoted_span\": \"bandgap reference is stable\", \"element_type\": \"paragraph\", \"source_title\": \"s1\", \"location_label\": \"p1\"}]",
+     "seed": "bandgap reference"
+    },
+    {
+     "evidence": "[{\"source_id\": \"s2\", \"confidence\": 1.0, \"element_id\": \"el-s2\", \"quoted_span\": \"a mosfet has a gate\", \"element_type\": \"paragraph\", \"source_title\": \"s2\", \"location_label\": \"p1\"}]",
+     "seed": "mos transistor"
+    },
+    {
+     "evidence": "[{\"source_id\": \"s2\", \"confidence\": 1.0, \"element_id\": \"el-s2\", \"quoted_span\": \"metal oxide gate\", \"element_type\": \"paragraph\", \"source_title\": \"s2\", \"location_label\": \"p1\"}]",
+     "seed": "metal oxide semiconductor fet"
+    },
+    {
+     "evidence": "[{\"source_id\": \"s2\", \"confidence\": 1.0, \"element_id\": \"el-s2\", \"quoted_span\": \"a cascode stage\", \"element_type\": \"paragraph\", \"source_title\": \"s2\", \"location_label\": \"p1\"}]",
+     "seed": "cascode"
+    }
+   ]
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "000000000000000000000000a0000001",
+    "bandgap reference",
+    "cascode",
+    "metal oxide semiconductor fet",
+    "mos transistor"
+   ],
+   "sql": "SELECT s.seed AS seed, k.evidence::text AS evidence FROM knowledge_objects k JOIN kg_cluster_scratch s ON s.object_id=k.id WHERE s.notebook_id=%s AND s.run_id=%s AND s.seed IN (%s,%s,%s,%s)"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "args": [
+    "kg_concept_description"
+   ],
+   "call": "models.chat",
+   "kwargs": {},
+   "ret": "<FakeChat>"
+  },
+  {
+   "args": [
+    "kg_concept_description"
+   ],
+   "call": "models.parallelism",
+   "kwargs": {},
+   "ret": 1
+  },
+  {
+   "now": "2999-01-01T00:00:00+00:00"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    "3fb2904116e575b72fa6d632d51de90cf7af09d1",
+    "concept_desc",
+    [
+     [
+      "K-metal oxide semiconductor fet",
+      {
+       "description": "描述 737 Write a conc",
+       "sig": "56ff368a5f4b753afdea637c8826eb028431786c"
+      }
+     ]
+    ],
+    "2999-01-01T00:00:00+00:00"
+   ],
+   "call": "unified_kg.checkpoint_put",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    [
+     "nb-r0001",
+     "3fb2904116e575b72fa6d632d51de90cf7af09d1",
+     "concept_desc",
+     "K-metal oxide semiconductor fet",
+     {
+      "jsonb": {
+       "description": "描述 737 Write a conc",
+       "sig": "56ff368a5f4b753afdea637c8826eb028431786c"
+      }
+     },
+     "2999-01-01T00:00:00+00:00"
+    ]
+   ],
+   "sql_many": "INSERT INTO kg_rebuild_checkpoint (notebook_id, input_version, stage, item_key, payload, created_at) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (notebook_id,input_version,stage,item_key) DO UPDATE SET payload=EXCLUDED.payload,created_at=EXCLUDED.created_at"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self._notebook_deleting",
+   "kwargs": {},
+   "ret": false
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT status FROM notebooks WHERE id=%s"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    1
+   ],
+   "call": "self._refresh_generation_lease",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1
+   ],
+   "call": "unified_kg.refresh_derived_claim",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1
+   ],
+   "sql": "UPDATE unified_kg_state SET derived_building_claimed_at=now() WHERE notebook_id=%s AND derived_building_generation=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "log": "INFO"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    "concept",
+    {
+     "bandgap reference": "K-bandgap reference",
+     "cascode": "K-bandgap reference",
+     "finfet": "K-finfet",
+     "gaafet": "K-gaafet",
+     "metal oxide semiconductor fet": "K-metal oxide semiconductor fet",
+     "mos transistor": "K-metal oxide semiconductor fet",
+     "nanosheet fet": "K-nanosheet fet",
+     "nmos switch": "K-nmos switch",
+     "pmos switch": "K-pmos switch"
+    },
+    {
+     "K-bandgap reference": "cascode",
+     "K-finfet": "FinFET",
+     "K-gaafet": "GAAFET",
+     "K-metal oxide semiconductor fet": "MOSFET",
+     "K-nanosheet fet": "Nanosheet FET",
+     "K-nmos switch": "NMOS switch",
+     "K-pmos switch": "PMOS switch"
+    },
+    {
+     "K-metal oxide semiconductor fet": "描述 737 Write a conc"
+    },
+    {
+     "K-metal oxide semiconductor fet": "56ff368a5f4b753afdea637c8826eb028431786c"
+    }
+   ],
+   "call": "self._write_cluster_map_streamed",
+   "kwargs": {
+    "generation": 1,
+    "run_id": "000000000000000000000000a0000001"
+   },
+   "ret": null
+  },
+  {
+   "now": "2999-01-01T00:00:00+00:00"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "call": "unified_kg.clear_canonical_scratch_run",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "sql": "DELETE FROM kg_canonical_scratch WHERE notebook_id=%s AND run_id=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "args": [
+    "<generator>",
+    "<callable>"
+   ],
+   "call": "self._bulk_write",
+   "kwargs": {},
+   "ret": 1
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    [
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "bandgap reference",
+      "K-bandgap reference",
+      "cascode",
+      "",
+      ""
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "cascode",
+      "K-bandgap reference",
+      "cascode",
+      "",
+      ""
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "finfet",
+      "K-finfet",
+      "FinFET",
+      "",
+      ""
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "gaafet",
+      "K-gaafet",
+      "GAAFET",
+      "",
+      ""
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "metal oxide semiconductor fet",
+      "K-metal oxide semiconductor fet",
+      "MOSFET",
+      "描述 737 Write a conc",
+      "56ff368a5f4b753afdea637c8826eb028431786c"
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "mos transistor",
+      "K-metal oxide semiconductor fet",
+      "MOSFET",
+      "描述 737 Write a conc",
+      "56ff368a5f4b753afdea637c8826eb028431786c"
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "nanosheet fet",
+      "K-nanosheet fet",
+      "Nanosheet FET",
+      "",
+      ""
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "nmos switch",
+      "K-nmos switch",
+      "NMOS switch",
+      "",
+      ""
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "pmos switch",
+      "K-pmos switch",
+      "PMOS switch",
+      "",
+      ""
+     ]
+    ]
+   ],
+   "call": "unified_kg.insert_canonical_scratch_rows",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "bandgap reference",
+     "K-bandgap reference",
+     "cascode",
+     "",
+     ""
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "cascode",
+     "K-bandgap reference",
+     "cascode",
+     "",
+     ""
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "finfet",
+     "K-finfet",
+     "FinFET",
+     "",
+     ""
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "gaafet",
+     "K-gaafet",
+     "GAAFET",
+     "",
+     ""
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "metal oxide semiconductor fet",
+     "K-metal oxide semiconductor fet",
+     "MOSFET",
+     "描述 737 Write a conc",
+     "56ff368a5f4b753afdea637c8826eb028431786c"
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "mos transistor",
+     "K-metal oxide semiconductor fet",
+     "MOSFET",
+     "描述 737 Write a conc",
+     "56ff368a5f4b753afdea637c8826eb028431786c"
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "nanosheet fet",
+     "K-nanosheet fet",
+     "Nanosheet FET",
+     "",
+     ""
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "nmos switch",
+     "K-nmos switch",
+     "NMOS switch",
+     "",
+     ""
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "pmos switch",
+     "K-pmos switch",
+     "PMOS switch",
+     "",
+     ""
+    ]
+   ],
+   "sql_many": "INSERT INTO kg_canonical_scratch (notebook_id,run_id,seed,canonical_id,canonical_name,canonical_description,canonical_desc_sig) VALUES (%s,%s,%s,%s,%s,%s,%s)"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1
+   ],
+   "call": "unified_kg.derived_claim_still_held",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1
+   ],
+   "sql": "SELECT 1 FROM unified_kg_state WHERE notebook_id=%s AND derived_building_generation=%s"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "concept",
+    "000000000000000000000000a0000001",
+    "2999-01-01T00:00:00+00:00",
+    1
+   ],
+   "call": "unified_kg.write_cluster_map_generation",
+   "kwargs": {
+    "page_rows": 20000,
+    "start": null
+   },
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "000000000000000000000000a0000001",
+    -9223372036854775808,
+    19999
+   ],
+   "sql": "SELECT s.ordinal FROM kg_cluster_scratch s WHERE s.notebook_id=%s AND s.run_id=%s AND s.ordinal >= %s ORDER BY s.ordinal OFFSET %s LIMIT 1"
+  },
+  {
+   "params": [
+    "concept",
+    "2999-01-01T00:00:00+00:00",
+    1,
+    "nb-r0001",
+    "000000000000000000000000a0000001",
+    -9223372036854775808,
+    9223372036854775807
+   ],
+   "sql": "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,canonical_desc_sig,created_at,generation) SELECT 'cc-' || md5(random()::text || clock_timestamp()::text || s.object_id), s.notebook_id,c.canonical_id,s.object_id,c.canonical_name,%s,c.canonical_description,c.canonical_desc_sig,%s::timestamptz,%s FROM kg_cluster_scratch s CROSS JOIN LATERAL (SELECT c.canonical_id,c.canonical_name,c.canonical_description,c.canonical_desc_sig FROM kg_canonical_scratch c WHERE c.notebook_id=s.notebook_id AND c.run_id=s.run_id AND c.seed=s.seed OFFSET 0) c JOIN knowledge_objects k ON k.id=s.object_id WHERE s.notebook_id=%s AND s.run_id=%s AND s.ordinal BETWEEN %s AND %s ORDER BY s.ordinal"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self._notebook_deleting",
+   "kwargs": {},
+   "ret": false
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT status FROM notebooks WHERE id=%s"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    1
+   ],
+   "call": "self._refresh_generation_lease",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1
+   ],
+   "call": "unified_kg.refresh_derived_claim",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1
+   ],
+   "sql": "UPDATE unified_kg_state SET derived_building_claimed_at=now() WHERE notebook_id=%s AND derived_building_generation=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "log": "INFO"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    "claim",
+    "<callable>"
+   ],
+   "call": "self._stream_seed_reps",
+   "kwargs": {
+    "compute_reps": false,
+    "run_id": "000000000000000000000000a0000001"
+   },
+   "ret": [
+    {},
+    {
+     "vth drops with temperature": 2
+    },
+    {
+     "vth drops with temperature": "Vth drops with temperature"
+    }
+   ]
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "call": "unified_kg.clear_scratch_run",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "sql": "DELETE FROM kg_cluster_scratch WHERE notebook_id=%s AND run_id=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "claim"
+   ],
+   "call": "unified_kg.seed_payload_rows",
+   "kwargs": {},
+   "ret": "<Cursor>"
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "claim"
+   ],
+   "sql": "SELECT o.payload::text AS payload FROM knowledge_objects o WHERE o.notebook_id=%s AND o.object_type=%s AND o.status!='deprecated' AND NOT EXISTS (SELECT 1 FROM sources ds WHERE ds.id = o.source_id AND ds.notebook_id = o.notebook_id AND ds.source_type = 'memory') ORDER BY o.ordinal"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "claim"
+   ],
+   "call": "unified_kg.stream_seed_rows",
+   "kwargs": {},
+   "ret": "<Cursor>"
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "claim"
+   ],
+   "sql": "SELECT o.id,o.payload::text AS payload FROM knowledge_objects o WHERE o.notebook_id=%s AND o.object_type=%s AND o.status!='deprecated' AND NOT EXISTS (SELECT 1 FROM sources ds WHERE ds.id = o.source_id AND ds.notebook_id = o.notebook_id AND ds.source_type = 'memory') ORDER BY o.ordinal"
+  },
+  {
+   "args": [
+    "<generator>",
+    "<callable>"
+   ],
+   "call": "self._bulk_write",
+   "kwargs": {},
+   "ret": 1
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    [
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "ko-r0007",
+      "vth drops with temperature"
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "ko-r0020",
+      "vth drops with temperature"
+     ]
+    ]
+   ],
+   "call": "unified_kg.insert_scratch_rows",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "ko-r0007",
+     "vth drops with temperature"
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "ko-r0020",
+     "vth drops with temperature"
+    ]
+   ],
+   "sql_many": "INSERT INTO kg_cluster_scratch (notebook_id, run_id, object_id, seed) VALUES (%s,%s,%s,%s)"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "args": [
+    [
+     "vth drops with temperature"
+    ],
+    {},
+    {
+     "vth drops with temperature": 2
+    },
+    {
+     "vth drops with temperature": "Vth drops with temperature"
+    },
+    [],
+    []
+   ],
+   "call": "fn.cluster_seeds",
+   "kwargs": {
+    "ann_threads": 18,
+    "conflict_fn": null,
+    "id_prefix": "KL-",
+    "rep_ann_max": 2000000
+   },
+   "ret": {
+    "auto_candidates": [],
+    "canonical_names": {
+     "KL-vth drops with temperature": "Vth drops with temperature"
+    },
+    "capped": false,
+    "pending": [],
+    "pending_seeds": [],
+    "seed_to_canonical": {
+     "vth drops with temperature": "KL-vth drops with temperature"
+    }
+   }
+  },
+  {
+   "args": [
+    "nb-r0001",
+    "claim",
+    {
+     "vth drops with temperature": "KL-vth drops with temperature"
+    },
+    {
+     "KL-vth drops with temperature": "Vth drops with temperature"
+    }
+   ],
+   "call": "self._write_cluster_map_streamed",
+   "kwargs": {
+    "generation": 1,
+    "run_id": "000000000000000000000000a0000001"
+   },
+   "ret": null
+  },
+  {
+   "now": "2999-01-01T00:00:00+00:00"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "call": "unified_kg.clear_canonical_scratch_run",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "sql": "DELETE FROM kg_canonical_scratch WHERE notebook_id=%s AND run_id=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "args": [
+    "<generator>",
+    "<callable>"
+   ],
+   "call": "self._bulk_write",
+   "kwargs": {},
+   "ret": 1
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    [
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "vth drops with temperature",
+      "KL-vth drops with temperature",
+      "Vth drops with temperature",
+      "",
+      ""
+     ]
+    ]
+   ],
+   "call": "unified_kg.insert_canonical_scratch_rows",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "vth drops with temperature",
+     "KL-vth drops with temperature",
+     "Vth drops with temperature",
+     "",
+     ""
+    ]
+   ],
+   "sql_many": "INSERT INTO kg_canonical_scratch (notebook_id,run_id,seed,canonical_id,canonical_name,canonical_description,canonical_desc_sig) VALUES (%s,%s,%s,%s,%s,%s,%s)"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1
+   ],
+   "call": "unified_kg.derived_claim_still_held",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1
+   ],
+   "sql": "SELECT 1 FROM unified_kg_state WHERE notebook_id=%s AND derived_building_generation=%s"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "claim",
+    "000000000000000000000000a0000001",
+    "2999-01-01T00:00:00+00:00",
+    1
+   ],
+   "call": "unified_kg.write_cluster_map_generation",
+   "kwargs": {
+    "page_rows": 20000,
+    "start": null
+   },
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "000000000000000000000000a0000001",
+    -9223372036854775808,
+    19999
+   ],
+   "sql": "SELECT s.ordinal FROM kg_cluster_scratch s WHERE s.notebook_id=%s AND s.run_id=%s AND s.ordinal >= %s ORDER BY s.ordinal OFFSET %s LIMIT 1"
+  },
+  {
+   "params": [
+    "claim",
+    "2999-01-01T00:00:00+00:00",
+    1,
+    "nb-r0001",
+    "000000000000000000000000a0000001",
+    -9223372036854775808,
+    9223372036854775807
+   ],
+   "sql": "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,canonical_desc_sig,created_at,generation) SELECT 'cc-' || md5(random()::text || clock_timestamp()::text || s.object_id), s.notebook_id,c.canonical_id,s.object_id,c.canonical_name,%s,c.canonical_description,c.canonical_desc_sig,%s::timestamptz,%s FROM kg_cluster_scratch s CROSS JOIN LATERAL (SELECT c.canonical_id,c.canonical_name,c.canonical_description,c.canonical_desc_sig FROM kg_canonical_scratch c WHERE c.notebook_id=s.notebook_id AND c.run_id=s.run_id AND c.seed=s.seed OFFSET 0) c JOIN knowledge_objects k ON k.id=s.object_id WHERE s.notebook_id=%s AND s.run_id=%s AND s.ordinal BETWEEN %s AND %s ORDER BY s.ordinal"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self._notebook_deleting",
+   "kwargs": {},
+   "ret": false
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT status FROM notebooks WHERE id=%s"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    1
+   ],
+   "call": "self._refresh_generation_lease",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1
+   ],
+   "call": "unified_kg.refresh_derived_claim",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1
+   ],
+   "sql": "UPDATE unified_kg_state SET derived_building_claimed_at=now() WHERE notebook_id=%s AND derived_building_generation=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "log": "INFO"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    "formula",
+    "<callable>"
+   ],
+   "call": "self._stream_seed_reps",
+   "kwargs": {
+    "compute_reps": false,
+    "run_id": "000000000000000000000000a0000001"
+   },
+   "ret": [
+    {},
+    {
+     "i_d=k(v_gs-v_th)^2": 2
+    },
+    {
+     "i_d=k(v_gs-v_th)^2": "I_D = k (V_GS - V_th)^2"
+    }
+   ]
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "call": "unified_kg.clear_scratch_run",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "sql": "DELETE FROM kg_cluster_scratch WHERE notebook_id=%s AND run_id=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "formula"
+   ],
+   "call": "unified_kg.seed_payload_rows",
+   "kwargs": {},
+   "ret": "<Cursor>"
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "formula"
+   ],
+   "sql": "SELECT o.payload::text AS payload FROM knowledge_objects o WHERE o.notebook_id=%s AND o.object_type=%s AND o.status!='deprecated' AND NOT EXISTS (SELECT 1 FROM sources ds WHERE ds.id = o.source_id AND ds.notebook_id = o.notebook_id AND ds.source_type = 'memory') ORDER BY o.ordinal"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "formula"
+   ],
+   "call": "unified_kg.stream_seed_rows",
+   "kwargs": {},
+   "ret": "<Cursor>"
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "formula"
+   ],
+   "sql": "SELECT o.id,o.payload::text AS payload FROM knowledge_objects o WHERE o.notebook_id=%s AND o.object_type=%s AND o.status!='deprecated' AND NOT EXISTS (SELECT 1 FROM sources ds WHERE ds.id = o.source_id AND ds.notebook_id = o.notebook_id AND ds.source_type = 'memory') ORDER BY o.ordinal"
+  },
+  {
+   "args": [
+    "<generator>",
+    "<callable>"
+   ],
+   "call": "self._bulk_write",
+   "kwargs": {},
+   "ret": 1
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    [
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "ko-r0008",
+      "i_d=k(v_gs-v_th)^2"
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "ko-r0021",
+      "i_d=k(v_gs-v_th)^2"
+     ]
+    ]
+   ],
+   "call": "unified_kg.insert_scratch_rows",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "ko-r0008",
+     "i_d=k(v_gs-v_th)^2"
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "ko-r0021",
+     "i_d=k(v_gs-v_th)^2"
+    ]
+   ],
+   "sql_many": "INSERT INTO kg_cluster_scratch (notebook_id, run_id, object_id, seed) VALUES (%s,%s,%s,%s)"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "args": [
+    [
+     "i_d=k(v_gs-v_th)^2"
+    ],
+    {},
+    {
+     "i_d=k(v_gs-v_th)^2": 2
+    },
+    {
+     "i_d=k(v_gs-v_th)^2": "I_D = k (V_GS - V_th)^2"
+    },
+    [],
+    []
+   ],
+   "call": "fn.cluster_seeds",
+   "kwargs": {
+    "ann_threads": 18,
+    "conflict_fn": null,
+    "id_prefix": "KF-",
+    "rep_ann_max": 2000000
+   },
+   "ret": {
+    "auto_candidates": [],
+    "canonical_names": {
+     "KF-i_d=k(v_gs-v_th)^2": "I_D = k (V_GS - V_th)^2"
+    },
+    "capped": false,
+    "pending": [],
+    "pending_seeds": [],
+    "seed_to_canonical": {
+     "i_d=k(v_gs-v_th)^2": "KF-i_d=k(v_gs-v_th)^2"
+    }
+   }
+  },
+  {
+   "args": [
+    "nb-r0001",
+    "formula",
+    {
+     "i_d=k(v_gs-v_th)^2": "KF-i_d=k(v_gs-v_th)^2"
+    },
+    {
+     "KF-i_d=k(v_gs-v_th)^2": "I_D = k (V_GS - V_th)^2"
+    }
+   ],
+   "call": "self._write_cluster_map_streamed",
+   "kwargs": {
+    "generation": 1,
+    "run_id": "000000000000000000000000a0000001"
+   },
+   "ret": null
+  },
+  {
+   "now": "2999-01-01T00:00:00+00:00"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "call": "unified_kg.clear_canonical_scratch_run",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "sql": "DELETE FROM kg_canonical_scratch WHERE notebook_id=%s AND run_id=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "args": [
+    "<generator>",
+    "<callable>"
+   ],
+   "call": "self._bulk_write",
+   "kwargs": {},
+   "ret": 1
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    [
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "i_d=k(v_gs-v_th)^2",
+      "KF-i_d=k(v_gs-v_th)^2",
+      "I_D = k (V_GS - V_th)^2",
+      "",
+      ""
+     ]
+    ]
+   ],
+   "call": "unified_kg.insert_canonical_scratch_rows",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "i_d=k(v_gs-v_th)^2",
+     "KF-i_d=k(v_gs-v_th)^2",
+     "I_D = k (V_GS - V_th)^2",
+     "",
+     ""
+    ]
+   ],
+   "sql_many": "INSERT INTO kg_canonical_scratch (notebook_id,run_id,seed,canonical_id,canonical_name,canonical_description,canonical_desc_sig) VALUES (%s,%s,%s,%s,%s,%s,%s)"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1
+   ],
+   "call": "unified_kg.derived_claim_still_held",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1
+   ],
+   "sql": "SELECT 1 FROM unified_kg_state WHERE notebook_id=%s AND derived_building_generation=%s"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "formula",
+    "000000000000000000000000a0000001",
+    "2999-01-01T00:00:00+00:00",
+    1
+   ],
+   "call": "unified_kg.write_cluster_map_generation",
+   "kwargs": {
+    "page_rows": 20000,
+    "start": null
+   },
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "000000000000000000000000a0000001",
+    -9223372036854775808,
+    19999
+   ],
+   "sql": "SELECT s.ordinal FROM kg_cluster_scratch s WHERE s.notebook_id=%s AND s.run_id=%s AND s.ordinal >= %s ORDER BY s.ordinal OFFSET %s LIMIT 1"
+  },
+  {
+   "params": [
+    "formula",
+    "2999-01-01T00:00:00+00:00",
+    1,
+    "nb-r0001",
+    "000000000000000000000000a0000001",
+    -9223372036854775808,
+    9223372036854775807
+   ],
+   "sql": "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,canonical_desc_sig,created_at,generation) SELECT 'cc-' || md5(random()::text || clock_timestamp()::text || s.object_id), s.notebook_id,c.canonical_id,s.object_id,c.canonical_name,%s,c.canonical_description,c.canonical_desc_sig,%s::timestamptz,%s FROM kg_cluster_scratch s CROSS JOIN LATERAL (SELECT c.canonical_id,c.canonical_name,c.canonical_description,c.canonical_desc_sig FROM kg_canonical_scratch c WHERE c.notebook_id=s.notebook_id AND c.run_id=s.run_id AND c.seed=s.seed OFFSET 0) c JOIN knowledge_objects k ON k.id=s.object_id WHERE s.notebook_id=%s AND s.run_id=%s AND s.ordinal BETWEEN %s AND %s ORDER BY s.ordinal"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self._notebook_deleting",
+   "kwargs": {},
+   "ret": false
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT status FROM notebooks WHERE id=%s"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    1
+   ],
+   "call": "self._refresh_generation_lease",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1
+   ],
+   "call": "unified_kg.refresh_derived_claim",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1
+   ],
+   "sql": "UPDATE unified_kg_state SET derived_building_claimed_at=now() WHERE notebook_id=%s AND derived_building_generation=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "log": "INFO"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    "procedure",
+    "<callable>"
+   ],
+   "call": "self._stream_seed_reps",
+   "kwargs": {
+    "compute_reps": false,
+    "run_id": "000000000000000000000000a0000001"
+   },
+   "ret": [
+    {},
+    {
+     "measure vth#bias the gate|sweep the drain": 2
+    },
+    {
+     "measure vth#bias the gate|sweep the drain": "Measure Vth"
+    }
+   ]
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "call": "unified_kg.clear_scratch_run",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "sql": "DELETE FROM kg_cluster_scratch WHERE notebook_id=%s AND run_id=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "procedure"
+   ],
+   "call": "unified_kg.seed_payload_rows",
+   "kwargs": {},
+   "ret": "<Cursor>"
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "procedure"
+   ],
+   "sql": "SELECT o.payload::text AS payload FROM knowledge_objects o WHERE o.notebook_id=%s AND o.object_type=%s AND o.status!='deprecated' AND NOT EXISTS (SELECT 1 FROM sources ds WHERE ds.id = o.source_id AND ds.notebook_id = o.notebook_id AND ds.source_type = 'memory') ORDER BY o.ordinal"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "procedure"
+   ],
+   "call": "unified_kg.stream_seed_rows",
+   "kwargs": {},
+   "ret": "<Cursor>"
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "procedure"
+   ],
+   "sql": "SELECT o.id,o.payload::text AS payload FROM knowledge_objects o WHERE o.notebook_id=%s AND o.object_type=%s AND o.status!='deprecated' AND NOT EXISTS (SELECT 1 FROM sources ds WHERE ds.id = o.source_id AND ds.notebook_id = o.notebook_id AND ds.source_type = 'memory') ORDER BY o.ordinal"
+  },
+  {
+   "args": [
+    "<generator>",
+    "<callable>"
+   ],
+   "call": "self._bulk_write",
+   "kwargs": {},
+   "ret": 1
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    [
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "ko-r0009",
+      "measure vth#bias the gate|sweep the drain"
+     ],
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "ko-r0022",
+      "measure vth#bias the gate|sweep the drain"
+     ]
+    ]
+   ],
+   "call": "unified_kg.insert_scratch_rows",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "ko-r0009",
+     "measure vth#bias the gate|sweep the drain"
+    ],
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "ko-r0022",
+     "measure vth#bias the gate|sweep the drain"
+    ]
+   ],
+   "sql_many": "INSERT INTO kg_cluster_scratch (notebook_id, run_id, object_id, seed) VALUES (%s,%s,%s,%s)"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "args": [
+    [
+     "measure vth#bias the gate|sweep the drain"
+    ],
+    {},
+    {
+     "measure vth#bias the gate|sweep the drain": 2
+    },
+    {
+     "measure vth#bias the gate|sweep the drain": "Measure Vth"
+    },
+    [],
+    []
+   ],
+   "call": "fn.cluster_seeds",
+   "kwargs": {
+    "ann_threads": 18,
+    "conflict_fn": null,
+    "id_prefix": "KP-",
+    "rep_ann_max": 2000000
+   },
+   "ret": {
+    "auto_candidates": [],
+    "canonical_names": {
+     "KP-measure vth#bias the gate|sweep the drain": "Measure Vth"
+    },
+    "capped": false,
+    "pending": [],
+    "pending_seeds": [],
+    "seed_to_canonical": {
+     "measure vth#bias the gate|sweep the drain": "KP-measure vth#bias the gate|sweep the drain"
+    }
+   }
+  },
+  {
+   "args": [
+    "nb-r0001",
+    "procedure",
+    {
+     "measure vth#bias the gate|sweep the drain": "KP-measure vth#bias the gate|sweep the drain"
+    },
+    {
+     "KP-measure vth#bias the gate|sweep the drain": "Measure Vth"
+    }
+   ],
+   "call": "self._write_cluster_map_streamed",
+   "kwargs": {
+    "generation": 1,
+    "run_id": "000000000000000000000000a0000001"
+   },
+   "ret": null
+  },
+  {
+   "now": "2999-01-01T00:00:00+00:00"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "call": "unified_kg.clear_canonical_scratch_run",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "sql": "DELETE FROM kg_canonical_scratch WHERE notebook_id=%s AND run_id=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "args": [
+    "<generator>",
+    "<callable>"
+   ],
+   "call": "self._bulk_write",
+   "kwargs": {},
+   "ret": 1
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    [
+     [
+      "nb-r0001",
+      "000000000000000000000000a0000001",
+      "measure vth#bias the gate|sweep the drain",
+      "KP-measure vth#bias the gate|sweep the drain",
+      "Measure Vth",
+      "",
+      ""
+     ]
+    ]
+   ],
+   "call": "unified_kg.insert_canonical_scratch_rows",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    [
+     "nb-r0001",
+     "000000000000000000000000a0000001",
+     "measure vth#bias the gate|sweep the drain",
+     "KP-measure vth#bias the gate|sweep the drain",
+     "Measure Vth",
+     "",
+     ""
+    ]
+   ],
+   "sql_many": "INSERT INTO kg_canonical_scratch (notebook_id,run_id,seed,canonical_id,canonical_name,canonical_description,canonical_desc_sig) VALUES (%s,%s,%s,%s,%s,%s,%s)"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1
+   ],
+   "call": "unified_kg.derived_claim_still_held",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1
+   ],
+   "sql": "SELECT 1 FROM unified_kg_state WHERE notebook_id=%s AND derived_building_generation=%s"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "procedure",
+    "000000000000000000000000a0000001",
+    "2999-01-01T00:00:00+00:00",
+    1
+   ],
+   "call": "unified_kg.write_cluster_map_generation",
+   "kwargs": {
+    "page_rows": 20000,
+    "start": null
+   },
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "000000000000000000000000a0000001",
+    -9223372036854775808,
+    19999
+   ],
+   "sql": "SELECT s.ordinal FROM kg_cluster_scratch s WHERE s.notebook_id=%s AND s.run_id=%s AND s.ordinal >= %s ORDER BY s.ordinal OFFSET %s LIMIT 1"
+  },
+  {
+   "params": [
+    "procedure",
+    "2999-01-01T00:00:00+00:00",
+    1,
+    "nb-r0001",
+    "000000000000000000000000a0000001",
+    -9223372036854775808,
+    9223372036854775807
+   ],
+   "sql": "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,canonical_desc_sig,created_at,generation) SELECT 'cc-' || md5(random()::text || clock_timestamp()::text || s.object_id), s.notebook_id,c.canonical_id,s.object_id,c.canonical_name,%s,c.canonical_description,c.canonical_desc_sig,%s::timestamptz,%s FROM kg_cluster_scratch s CROSS JOIN LATERAL (SELECT c.canonical_id,c.canonical_name,c.canonical_description,c.canonical_desc_sig FROM kg_canonical_scratch c WHERE c.notebook_id=s.notebook_id AND c.run_id=s.run_id AND c.seed=s.seed OFFSET 0) c JOIN knowledge_objects k ON k.id=s.object_id WHERE s.notebook_id=%s AND s.run_id=%s AND s.ordinal BETWEEN %s AND %s ORDER BY s.ordinal"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self._notebook_deleting",
+   "kwargs": {},
+   "ret": false
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT status FROM notebooks WHERE id=%s"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    1
+   ],
+   "call": "self._refresh_generation_lease",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1
+   ],
+   "call": "unified_kg.refresh_derived_claim",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1
+   ],
+   "sql": "UPDATE unified_kg_state SET derived_building_claimed_at=now() WHERE notebook_id=%s AND derived_building_generation=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "log": "INFO"
+  },
+  {
+   "now": "2999-01-01T00:00:00+00:00"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1
+   ],
+   "call": "unified_kg.derived_claim_still_held",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1
+   ],
+   "sql": "SELECT 1 FROM unified_kg_state WHERE notebook_id=%s AND derived_building_generation=%s"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001"
+   ],
+   "call": "governance_store.delete_pending_merges",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "DELETE FROM concept_merge_candidates WHERE notebook_id=%s AND status='pending'"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001"
+   ],
+   "call": "governance_store.decided_seed_pairs_from",
+   "kwargs": {},
+   "ret": {
+    "['bandgap reference', 'cascode']": "confirmed",
+    "['finfet', 'gaafet']": "rejected",
+    "['gaafet', 'nanosheet fet']": "deferred"
+   }
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT canonical_a, canonical_b, seed_a, seed_b, status FROM concept_merge_candidates WHERE notebook_id=%s AND status IN ('confirmed','rejected','deferred')"
+  },
+  {
+   "args": [
+    [
+     [
+      "finfet",
+      "mos transistor",
+      "K-finfet",
+      "K-metal oxide semiconductor fet",
+      "float:0.8574929237365723"
+     ]
+    ],
+    [
+     "bandgap reference",
+     "cascode",
+     "finfet",
+     "gaafet",
+     "metal oxide semiconductor fet",
+     "mos transistor",
+     "nanosheet fet",
+     "nmos switch",
+     "pmos switch"
+    ],
+    [
+     [
+      "bandgap reference",
+      "cascode"
+     ]
+    ],
+    [
+     [
+      "finfet",
+      "gaafet"
+     ],
+     [
+      "gaafet",
+      "nanosheet fet"
+     ]
+    ]
+   ],
+   "call": "fn.filter_pending_seeds_by_decisions",
+   "kwargs": {},
+   "ret": [
+    [
+     "finfet",
+     "mos transistor",
+     "K-finfet",
+     "K-metal oxide semiconductor fet",
+     "float:0.8574929237365723"
+    ]
+   ]
+  },
+  {
+   "id": "mc-r0025",
+   "new_id": "mc"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    [
+     [
+      "mc-r0025",
+      "nb-r0001",
+      "K-finfet",
+      "K-metal oxide semiconductor fet",
+      "finfet",
+      "mos transistor",
+      "float:0.8574929237365723",
+      "2999-01-01T00:00:00+00:00",
+      "2999-01-01T00:00:00+00:00"
+     ]
+    ]
+   ],
+   "call": "governance_store.insert_pending_merge_rows",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    [
+     "mc-r0025",
+     "nb-r0001",
+     "K-finfet",
+     "K-metal oxide semiconductor fet",
+     "finfet",
+     "mos transistor",
+     "float:0.8574929237365723",
+     "2999-01-01T00:00:00+00:00",
+     "2999-01-01T00:00:00+00:00"
+    ]
+   ],
+   "sql_many": "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,seed_a,seed_b,score,status,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s, 'pending', %s, %s)"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self._notebook_deleting",
+   "kwargs": {},
+   "ret": false
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT status FROM notebooks WHERE id=%s"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    1
+   ],
+   "call": "self._refresh_generation_lease",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1
+   ],
+   "call": "unified_kg.refresh_derived_claim",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1
+   ],
+   "sql": "UPDATE unified_kg_state SET derived_building_claimed_at=now() WHERE notebook_id=%s AND derived_building_generation=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "log": "INFO"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001"
+   ],
+   "call": "unified_kg.flip_cluster_generation",
+   "kwargs": {
+    "catchup_from_ts": "<ts>",
+    "generation": 1,
+    "now": "2999-01-01T00:00:00+00:00",
+    "published_from": 0
+   },
+   "ret": true
+  },
+  {
+   "params": [
+    "silicon-notebook:cluster-artifact:nb-r0001:concept_clusters:claim"
+   ],
+   "sql": "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
+  },
+  {
+   "params": [
+    "silicon-notebook:cluster-artifact:nb-r0001:concept_clusters:concept"
+   ],
+   "sql": "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
+  },
+  {
+   "params": [
+    "silicon-notebook:cluster-artifact:nb-r0001:concept_clusters:formula"
+   ],
+   "sql": "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
+  },
+  {
+   "params": [
+    "silicon-notebook:cluster-artifact:nb-r0001:concept_clusters:procedure"
+   ],
+   "sql": "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
+  },
+  {
+   "params": [
+    1,
+    "<ts>",
+    "2999-01-01T00:00:00+00:00",
+    "nb-r0001",
+    0,
+    1
+   ],
+   "sql": "UPDATE unified_kg_state SET cluster_generation=%s, cluster_mutation_seq=cluster_mutation_seq+1, derived_building_generation=0, derived_building_claimed_at=NULL, derived_catchup_from=%s::timestamptz, updated_at=%s WHERE notebook_id=%s AND cluster_generation=%s AND derived_building_generation=%s RETURNING notebook_id"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self._invalidate_unified_cache",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self._notebook_deleting",
+   "kwargs": {},
+   "ret": false
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT status FROM notebooks WHERE id=%s"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    1
+   ],
+   "call": "self._refresh_generation_lease",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1
+   ],
+   "call": "unified_kg.refresh_derived_claim",
+   "kwargs": {},
+   "ret": false
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1
+   ],
+   "sql": "UPDATE unified_kg_state SET derived_building_claimed_at=now() WHERE notebook_id=%s AND derived_building_generation=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "log": "INFO"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self._settle_generation_catchup",
+   "kwargs": {
+    "published_generation": 1,
+    "since_ts": "<ts>"
+   },
+   "ret": 0
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1,
+    "<ts>",
+    300,
+    20000
+   ],
+   "call": "unified_kg.catchup_window_members",
+   "kwargs": {
+    "after_member_object_id": "",
+    "after_object_type": ""
+   },
+   "ret": []
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1,
+    "nb-r0001",
+    "<ts>",
+    300,
+    "",
+    "",
+    20000
+   ],
+   "sql": "SELECT c.member_object_id, c.object_type, MIN(o.payload::text) AS payload FROM concept_clusters c JOIN knowledge_objects o ON o.id = c.member_object_id AND o.status != 'deprecated' WHERE c.notebook_id=%s AND c.generation != %s AND c.generation NOT IN ( SELECT derived_building_generation FROM unified_kg_state u WHERE u.notebook_id = %s AND derived_building_generation != 0) AND c.created_at >= %s::timestamptz - make_interval(secs => %s) AND NOT EXISTS (SELECT 1 FROM knowledge_objects xo WHERE xo.id = c.member_object_id AND xo.notebook_id = c.notebook_id AND EXISTS (SELECT 1 FROM sources ds WHERE ds.id = xo.source_id AND ds.notebook_id = xo.notebook_id AND ds.source_type = 'memory')) AND (c.object_type, c.member_object_id) > (%s, %s) GROUP BY c.object_type, c.member_object_id ORDER BY c.object_type, c.member_object_id LIMIT %s"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "<ts>",
+    1
+   ],
+   "call": "unified_kg.clear_catchup_marker",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "<ts>",
+    1
+   ],
+   "sql": "UPDATE unified_kg_state SET derived_catchup_from=NULL, updated_at=now() WHERE notebook_id=%s AND derived_catchup_from=%s::timestamptz AND cluster_generation=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<Settings>"
+   ],
+   "call": "fn.cluster_code_version",
+   "kwargs": {},
+   "ret": "algo=3;embed_dim=16;runtime_dim=0"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "c2fb0ae2680a59bc03127a0afefd95fc2de76cc2",
+    7,
+    "2999-01-01T00:00:00+00:00"
+   ],
+   "call": "unified_kg.finish_rebuild_state",
+   "kwargs": {
+    "cluster_code_version": "algo=3;embed_dim=16;runtime_dim=0",
+    "input_seq": 2,
+    "published_generation": 1
+   },
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowledge_objects o WHERE o.notebook_id=%s AND o.status!='deprecated' AND NOT EXISTS (SELECT 1 FROM sources ds WHERE ds.id = o.source_id AND ds.notebook_id = o.notebook_id AND ds.source_type = 'memory')"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM knowledge_relations kr WHERE kr.notebook_id=%s AND NOT EXISTS (SELECT 1 FROM sources ds WHERE ds.id = kr.source_id AND ds.notebook_id = kr.notebook_id AND ds.source_type = 'memory')"
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1,
+    "c2fb0ae2680a59bc03127a0afefd95fc2de76cc2",
+    "algo=3;embed_dim=16;runtime_dim=0",
+    "2999-01-01T00:00:00+00:00",
+    17,
+    5,
+    7,
+    "2999-01-01T00:00:00+00:00",
+    2,
+    1
+   ],
+   "sql": "INSERT INTO unified_kg_state (notebook_id, dirty, cluster_input_version, cluster_code_version, last_rebuild_at, object_count, relation_count, cluster_count, updated_at, memory_isolation_version) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1) ON CONFLICT(notebook_id) DO UPDATE SET dirty=CASE WHEN unified_kg_state.kg_mutation_seq = %s THEN 0 ELSE 1 END, memory_isolation_version=1, cluster_input_version=excluded.cluster_input_version, cluster_code_version=excluded.cluster_code_version, last_rebuild_at=excluded.last_rebuild_at, object_count=excluded.object_count, relation_count=excluded.relation_count, cluster_count=excluded.cluster_count, updated_at=excluded.updated_at WHERE unified_kg_state.cluster_generation = %s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "call": "unified_kg.clear_scratch_run",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "sql": "DELETE FROM kg_cluster_scratch WHERE notebook_id=%s AND run_id=%s"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "call": "unified_kg.clear_canonical_scratch_run",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "000000000000000000000000a0000001"
+   ],
+   "sql": "DELETE FROM kg_canonical_scratch WHERE notebook_id=%s AND run_id=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1
+   ],
+   "call": "unified_kg.release_derived_claim",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1
+   ],
+   "sql": "UPDATE unified_kg_state SET derived_building_generation=0, derived_building_claimed_at=NULL, updated_at=now() WHERE notebook_id=%s AND derived_building_generation=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self._notebook_deleting",
+   "kwargs": {},
+   "ret": false
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT status FROM notebooks WHERE id=%s"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    1
+   ],
+   "call": "self._refresh_generation_lease",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001",
+    1
+   ],
+   "call": "unified_kg.refresh_derived_claim",
+   "kwargs": {},
+   "ret": false
+  },
+  {
+   "params": [
+    "nb-r0001",
+    1
+   ],
+   "sql": "UPDATE unified_kg_state SET derived_building_claimed_at=now() WHERE notebook_id=%s AND derived_building_generation=%s"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "log": "INFO"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self.rebuild_canonical_relations",
+   "kwargs": {
+    "force": true
+   },
+   "raised": "RuntimeError: injected derived failure"
+  },
+  {
+   "args": [
+    {
+     "error": "injected derived failure",
+     "kind": "canonical_relations_rebuild_failed",
+     "notebook_id": "nb-r0001"
+    }
+   ],
+   "call": "event_log.emit",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self.rebuild_mention_bridge",
+   "kwargs": {
+    "force": true
+   },
+   "raised": "RuntimeError: injected derived failure"
+  },
+  {
+   "args": [
+    {
+     "error": "injected derived failure",
+     "kind": "mention_bridge_rebuild_failed",
+     "notebook_id": "nb-r0001"
+    }
+   ],
+   "call": "event_log.emit",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self._refresh_viz_after_rebuild",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<_SafeDiagnosticConnection>",
+    "nb-r0001"
+   ],
+   "call": "knowledge.active_object_count",
+   "kwargs": {},
+   "ret": 17
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT COUNT(*) c FROM knowledge_objects WHERE notebook_id=%s AND status!='deprecated'"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "scale_artifacts.build_viz",
+   "kwargs": {},
+   "ret": {
+    "cluster_seq": 1,
+    "memory_isolation": 1,
+    "memory_sources_digest": "",
+    "n_viz_edges": 5,
+    "n_viz_nodes": 13,
+    "version": [
+     "nb-r0001",
+     18,
+     "2026-09-30T00:00:00+00:00",
+     5,
+     "2026-09-30T00:00:00+00:00",
+     0,
+     "",
+     17,
+     "2999-01-01T00:00:00+00:00",
+     17,
+     "2026-09-30T00:00:00+00:00",
+     "indexing_pipeline",
+     "",
+     "builtin.chunk.v1",
+     "float:0.5",
+     true,
+     "float:0.83",
+     20,
+     0,
+     true,
+     "float:0.5",
+     "memory_isolation",
+     1,
+     -1,
+     "",
+     "builtin.chunk.v1",
+     "edge_schema",
+     1
+    ]
+   }
+  },
+  {
+   "params": null,
+   "sql": "SET application_name = 'silicon-notebook-notebook-exclusive-lock'"
+  },
+  {
+   "params": null,
+   "sql": "SET idle_session_timeout = 0"
+  },
+  {
+   "params": [
+    1396919362,
+    -560808301
+   ],
+   "sql": "SELECT pg_try_advisory_lock(%s, %s) AS acquired"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT notebooks.*, u.username AS _owner_username, COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') AS _published_pipeline_version, EXISTS(SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id = notebooks.id AND ng.principal_type IN ('group', 'group_admins')) AS _shared_to_groups FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by LEFT JOIN unified_kg_state ip ON ip.notebook_id=notebooks.id WHERE notebooks.id = %s AND notebooks.status NOT IN ('copying','deleting','importing')"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT id FROM sources WHERE notebook_id=%s AND source_type = 'memory'"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT COUNT(*) AS count FROM sources WHERE notebook_id = %s AND source_type NOT IN ('memory', 'knowhow')"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    null,
+    "nb-r0001"
+   ],
+   "sql": "SELECT b.id AS id, b.name AS name, b.tier AS tier, EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id) AS has_kg FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF(CAST(%s AS text), '') AS uid) v WHERE e.notebook_id = %s AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name COLLATE \"C\", b.id COLLATE \"C\""
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id=%s) AS exists"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM chunks WHERE notebook_id=%s) AS exists"
+  },
+  {
+   "params": [
+    "nb-r0001",
+    [
+     "approved",
+     "reviewed",
+     "project_specific",
+     "conflict"
+    ]
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id=%s AND status=ANY(%s)) AS exists"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM sources s WHERE s.notebook_id=%s AND s.source_type NOT IN ('memory','knowhow') AND s.source_type <> 'promotion' AND s.doc_type IN ('','academic_paper') AND s.parse_status IN ('parsed','extracting','extracted') AND NOT EXISTS(SELECT 1 FROM source_paper_meta m WHERE m.source_id=s.id)) AS exists"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT * FROM kg_build_jobs WHERE notebook_id=%s ORDER BY created_at DESC,ordinal DESC LIMIT 1"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT nb.created_by AS owner_id,u.role AS owner_role FROM notebooks nb LEFT JOIN users u ON u.id=nb.created_by WHERE nb.id=%s"
+  },
+  {
+   "params": [
+    "user-local"
+   ],
+   "sql": "SELECT upload_document_limit FROM user_profiles WHERE user_id=%s"
+  },
+  {
+   "params": [
+    "upload_document_limit_default"
+   ],
+   "sql": "SELECT value FROM app_settings WHERE key=%s"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT id FROM sources WHERE notebook_id=%s AND source_type = 'memory'"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c, MAX(updated_at) AS ts FROM knowledge_objects WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c, MAX(created_at) AS ts FROM knowledge_relations WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c, MAX(created_at) AS ts FROM chunks WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "nb-r0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c, MAX(created_at) AS ts FROM concept_clusters WHERE notebook_id=%s AND generation = COALESCE((SELECT cluster_generation FROM unified_kg_state WHERE notebook_id = %s), 0)"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT COUNT(*) AS c, MAX(created_at) AS ts FROM knowledge_embeddings WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT indexing_pipeline_id,indexing_pipeline_version FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT notebooks.*, u.username AS _owner_username, COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') AS _published_pipeline_version, EXISTS(SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id = notebooks.id AND ng.principal_type IN ('group', 'group_admins')) AS _shared_to_groups FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by LEFT JOIN unified_kg_state ip ON ip.notebook_id=notebooks.id WHERE notebooks.id = %s AND notebooks.status NOT IN ('copying','deleting','importing')"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT id FROM sources WHERE notebook_id=%s AND source_type = 'memory'"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT COUNT(*) AS count FROM sources WHERE notebook_id = %s AND source_type NOT IN ('memory', 'knowhow')"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    null,
+    "nb-r0001"
+   ],
+   "sql": "SELECT b.id AS id, b.name AS name, b.tier AS tier, EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id) AS has_kg FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF(CAST(%s AS text), '') AS uid) v WHERE e.notebook_id = %s AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name COLLATE \"C\", b.id COLLATE \"C\""
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id=%s) AS exists"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM chunks WHERE notebook_id=%s) AS exists"
+  },
+  {
+   "params": [
+    "nb-r0001",
+    [
+     "approved",
+     "reviewed",
+     "project_specific",
+     "conflict"
+    ]
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id=%s AND status=ANY(%s)) AS exists"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM sources s WHERE s.notebook_id=%s AND s.source_type NOT IN ('memory','knowhow') AND s.source_type <> 'promotion' AND s.doc_type IN ('','academic_paper') AND s.parse_status IN ('parsed','extracting','extracted') AND NOT EXISTS(SELECT 1 FROM source_paper_meta m WHERE m.source_id=s.id)) AS exists"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT * FROM kg_build_jobs WHERE notebook_id=%s ORDER BY created_at DESC,ordinal DESC LIMIT 1"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT nb.created_by AS owner_id,u.role AS owner_role FROM notebooks nb LEFT JOIN users u ON u.id=nb.created_by WHERE nb.id=%s"
+  },
+  {
+   "params": [
+    "user-local"
+   ],
+   "sql": "SELECT upload_document_limit FROM user_profiles WHERE user_id=%s"
+  },
+  {
+   "params": [
+    "upload_document_limit_default"
+   ],
+   "sql": "SELECT value FROM app_settings WHERE key=%s"
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "nb-r0001",
+    10000
+   ],
+   "sql": "SELECT id,object_type,(payload ->> 'name') COLLATE \"C\" AS name,ordinal FROM knowledge_objects WHERE notebook_id=%s AND status!='deprecated' AND (source_id IS NULL OR source_id NOT IN (SELECT id FROM sources WHERE notebook_id=%s AND id IS NOT NULL AND source_type = 'memory')) ORDER BY ordinal LIMIT %s"
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "nb-r0001"
+   ],
+   "sql": "SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations WHERE notebook_id=%s AND (source_id IS NULL OR source_id NOT IN (SELECT id FROM sources WHERE notebook_id=%s AND id IS NOT NULL AND source_type = 'memory'))"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "nb-r0001"
+   ],
+   "sql": "SELECT member_object_id, canonical_id FROM concept_clusters WHERE notebook_id=%s AND generation = COALESCE((SELECT cluster_generation FROM unified_kg_state WHERE notebook_id = %s), 0)"
+  },
+  {
+   "params": [
+    "nb-r0001"
+   ],
+   "sql": "SELECT cluster_generation FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-r0001",
+    "nb-r0001",
+    "nb-r0001",
+    1
+   ],
+   "sql": "SELECT DISTINCT c.canonical_id FROM knowledge_objects o JOIN concept_clusters c ON c.member_object_id = o.id WHERE o.notebook_id=%s AND o.source_id = ANY(ARRAY(SELECT id FROM sources WHERE notebook_id=%s AND source_type = 'memory')) AND c.notebook_id=%s AND c.generation=%s"
+  },
+  {
+   "params": [
+    1396919362,
+    3734158995
+   ],
+   "sql": "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid() AND classid = %s::oid AND objid = %s::oid) AS held"
+  },
+  {
+   "params": [
+    1396919362,
+    -560808301
+   ],
+   "sql": "SELECT pg_advisory_unlock(%s, %s)"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "scale_artifacts.maybe_auto_index",
+   "kwargs": {},
+   "raised": "RuntimeError: injected index failure"
+  },
+  {
+   "log": "ERROR"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self.rebuild_communities",
+   "kwargs": {
+    "force": true,
+    "level": 0
+   },
+   "raised": "RuntimeError: injected derived failure"
+  },
+  {
+   "args": [
+    {
+     "error": "injected derived failure",
+     "kind": "communities_rebuild_failed",
+     "notebook_id": "nb-r0001"
+    }
+   ],
+   "call": "event_log.emit",
+   "kwargs": {},
+   "ret": null
+  }
+ ]
+}

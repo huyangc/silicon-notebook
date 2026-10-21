@@ -1,0 +1,29 @@
+{
+ "db_diff": {},
+ "fs_diff": {
+  "added": {},
+  "removed": []
+ },
+ "llm": [],
+ "logs": [],
+ "notebook_id": "nb-missing",
+ "outcome": {
+  "attrs": {},
+  "message": "'nb-missing'",
+  "raised": "KeyError"
+ },
+ "progress": [],
+ "timeline": [
+  {
+   "args": [
+    "nb-missing"
+   ],
+   "call": "self.get_notebook",
+   "kwargs": {},
+   "raised": "KeyError: 'nb-missing'"
+  },
+  {
+   "sql": "SELECT notebooks.*, u.username AS _owner_username, COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') AS _published_pipeline_version, EXISTS(SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id = notebooks.id AND ng.principal_type IN ('group', 'group_admins')) AS _shared_to_groups FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by LEFT JOIN unified_kg_state ip ON ip.notebook_id=notebooks.id WHERE notebooks.id = 'nb-missing' AND notebooks.status NOT IN ('copying','deleting','importing')"
+  }
+ ]
+}
