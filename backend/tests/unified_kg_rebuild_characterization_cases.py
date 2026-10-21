@@ -1,31 +1,29 @@
-"""Characterization rig for ``KnowledgeLifecycleService.rebuild_unified_kg``.
+"""Behaviour rig for ``KnowledgeLifecycleService.rebuild_unified_kg``.
 
 **两端吃同一份世界、同一套观测、同一组场景**:``tests/test_unified_kg_rebuild_characterization.py``
 (SQLite)与 ``tests/postgres/test_unified_kg_rebuild_characterization_pg.py``(PostgreSQL)
-各自只写一个 ``Backend`` 适配器(有哪些表、怎么录 SQL、占位符)。不是测试模块(没有
-``test_`` 前缀),pytest 不会收集它。
+各自只写一个 ``Backend`` 适配器(有哪些表、占位符)。不是测试模块(没有 ``test_`` 前缀),
+pytest 不会收集它。
 
-两层,按 AGENTS.md「不做只为重构服务的金标快照」分开:
+``observe`` 录下 rebuild 与外界交换的一切,按发生顺序:对 store(unified_kg / governance /
+knowledge)、scale_artifacts、event_log、模型客户端的每一次调用(规范化后的参数与返回值)、
+对本服务自身协作方法与 ``kg_merge`` / ``concept_merge_review`` 模块函数的调用、读写连接的
+进出、id 铸造、取时钟、run id、模型收到的每一条提示词,外加整库逐表的增删差分、存储目录
+差分、日志与返回值/异常。``Scenario.expect`` 只断言其中用户与下游可见的事实——返回的簇数或
+抛出的异常、发布代是否翻转、在飞认领在每个出口都已释放、两张 scratch 表不留本轮的行、
+``kg_mutation_seq`` 不被 rebuild 推进(期间到达的变更让 ``dirty`` 保持 1)、发布出来的合并
+分组与待审候选、跳过路径零重算、派生尾部(规范关系、共提桥接、viz、自动索引、社区)按序以
+``force=True`` 调度且各自 fail-open、checkpoint 的保留/清空。
 
-* **行为层**(``Scenario.expect``,长期保留):用户与下游可见的事实——返回的簇数或抛出的
-  异常、发布代是否翻转、在飞认领在每个出口都已释放、两张 scratch 表不留本轮的行、
-  ``kg_mutation_seq`` 不被 rebuild 推进(期间到达的变更让 ``dirty`` 保持 1)、发布出来的
-  合并分组与待审候选、跳过路径零重算、派生尾部(规范关系、共提桥接、viz、自动索引、社区)
-  按序以 ``force=True`` 调度且各自 fail-open、checkpoint 的保留/清空。
-* **拆分 oracle 层**(``observe`` 的完整观测 + 逐字节快照):rebuild 与外界交换的一切,按
-  发生顺序——对 store(unified_kg / governance / knowledge)、scale_artifacts、event_log、
-  模型客户端的每一次调用(规范化后的全部参数与返回值)、对本服务自身协作方法与
-  ``kg_merge`` / ``concept_merge_review`` 模块函数的调用、读写连接的进出、id 铸造、取时钟、
-  run id、本线程发出的每一条 SQL(带参数)、模型收到的每一条提示词,外加整库逐表的增删
-  差分、存储目录差分、日志与返回值/异常。它只为 ``rebuild_unified_kg`` 的零行为变化拆分
-  服务:拆分前采集、拆分后逐字节不变,拆分完成后随快照目录一起退役。
+这套世界与场景最初是 ``rebuild_unified_kg`` 零行为变化拆分的表征:拆分前在两端采集的逐字节
+快照(另含本线程的每条 SQL)拆分后不变,随后按 AGENTS.md「不做只为重构服务的金标快照」退役,
+只留本行为层。
 
 确定性:行 id 来自计数器(``<前缀>-r<序号>``),run id 来自 ``uuid.uuid4`` 的计数器替身;
 造世界的时钟固定为 ``SEED_NOW``、被测 rebuild 的时钟固定为 ``REBUILD_NOW``(远未来,
 让本轮期间的并发追加落进催收窗口);数据库自己的墙钟(``datetime('now')`` / ``now()``)
 一律打码成 ``<ts>``,库侧随机的簇行 id 打码成 ``cc-<rand>``,日志里的耗时打码成 ``<dur>s``。
-SQLite 的 trace 只记应用自己发的语句;PostgreSQL 跳过连接池的借还探测。只记 rebuild
-所在线程(模型调用另记一条全线程通道,工作线程固定为 1)。
+只记 rebuild 所在线程(模型调用另记一条全线程通道,工作线程固定为 1)。
 """
 from __future__ import annotations
 
@@ -39,7 +37,7 @@ import re
 import threading
 import uuid
 from pathlib import Path
-from typing import Any, Callable, ContextManager, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -456,6 +454,9 @@ def kg_world(rig: Rig) -> None:
         rig.sql("DELETE FROM knowledge_embeddings WHERE object_id=?", (oid,))
     for cid, a, b, status in (("mc-seed-confirmed", "cascode", "bandgap reference", "confirmed"),
                               ("mc-seed-rejected", "finfet", "gaafet", "rejected"),
+                              # Not a candidate itself; it tells a correct live refresh
+                              # from one that reads its decisions crossed.
+                              ("mc-seed-rejected-far", "gaafet", "mos transistor", "rejected"),
                               ("mc-seed-deferred", "gaafet", "nanosheet fet", "deferred")):
         rig.sql("INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,"
                 "seed_a,seed_b,score,status,created_at,updated_at) "
@@ -517,7 +518,6 @@ class Backend:
     name: str
     placeholder: str
     tables: Callable[[Any], list[str]]
-    record_sql: Callable[[Any, Recorder, Any], ContextManager]
     invalidate_caches: Callable[[], None]
 
 
@@ -533,13 +533,6 @@ class Observation:
     logs: list
     before: dict
     after: dict
-
-    def oracle(self) -> dict:
-        return {
-            "notebook_id": self.notebook_id, "outcome": self.outcome,
-            "timeline": self.timeline, "llm": self.llm, "progress": self.progress,
-            "db_diff": self.db_diff, "fs_diff": self.fs_diff, "logs": self.logs,
-        }
 
     def calls(self, key: str) -> list[dict]:
         return [e for e in self.timeline if e.get("call") == key]
@@ -559,6 +552,7 @@ _FACT_QUERIES = {
     "state": "SELECT * FROM unified_kg_state WHERE notebook_id=?",
     "published": (
         "SELECT c.object_type, c.canonical_id, c.canonical_name, c.canonical_description, "
+        "c.canonical_desc_sig, "
         "o.payload FROM concept_clusters c JOIN knowledge_objects o ON o.id = c.member_object_id "
         "WHERE c.notebook_id=? AND c.generation = COALESCE((SELECT cluster_generation "
         "FROM unified_kg_state WHERE notebook_id=c.notebook_id), 0) "
@@ -573,6 +567,8 @@ _FACT_QUERIES = {
     "canonical_scratch": "SELECT COUNT(*) AS n FROM kg_canonical_scratch WHERE notebook_id=?",
     "checkpoints": ("SELECT stage, COUNT(*) AS n FROM kg_rebuild_checkpoint "
                     "WHERE notebook_id=? GROUP BY stage ORDER BY stage"),
+    "checkpoint_versions": ("SELECT DISTINCT input_version FROM kg_rebuild_checkpoint "
+                            "WHERE notebook_id=? ORDER BY input_version"),
 }
 
 
@@ -708,7 +704,7 @@ def _install_recording(rig: Rig, monkeypatch: Any) -> None:
 def observe(repo: Any, backend: Backend, scenario: Scenario, storage_dir: Path,
             monkeypatch: Any) -> Observation:
     """Build the scenario's world, run one rebuild with every collaborator recorded,
-    and return the whole observation (behaviour facts and split oracle alike)."""
+    and return the whole observation."""
     canon = Canon(storage_dir)
     recorder = Recorder(canon)
     hooks = Hooks()
@@ -766,21 +762,20 @@ def observe(repo: Any, backend: Backend, scenario: Scenario, storage_dir: Path,
         lg.setLevel(logging.DEBUG)
     clock["now"] = REBUILD_NOW
     try:
-        with backend.record_sql(repo, recorder, monkeypatch):
-            recorder.active = True
-            try:
-                count = lifecycle.rebuild_unified_kg(
-                    rig.notebook_id,
-                    progress=None if scenario.progress is None else progress,
-                    force=scenario.force, fresh=scenario.fresh,
-                )
-                outcome = {"returned": canon(count)}
-            except Exception as exc:  # noqa: BLE001 — the raise IS the observation
-                outcome = {"raised": type(exc).__name__, "message": canon(str(exc)),
-                           "attrs": canon({k: v for k, v in vars(exc).items()
-                                           if not k.startswith("_")})}
-            finally:
-                recorder.active = False
+        recorder.active = True
+        try:
+            count = lifecycle.rebuild_unified_kg(
+                rig.notebook_id,
+                progress=None if scenario.progress is None else progress,
+                force=scenario.force, fresh=scenario.fresh,
+            )
+            outcome = {"returned": canon(count)}
+        except Exception as exc:  # noqa: BLE001 — the raise IS the observation
+            outcome = {"raised": type(exc).__name__, "message": canon(str(exc)),
+                       "attrs": canon({k: v for k, v in vars(exc).items()
+                                       if not k.startswith("_")})}
+        finally:
+            recorder.active = False
     finally:
         for lg, level in zip(loggers, levels):
             lg.removeHandler(capture)
@@ -800,30 +795,6 @@ def observe(repo: Any, backend: Backend, scenario: Scenario, storage_dir: Path,
         before=before_facts,
         after=after_facts,
     )
-
-
-# --------------------------------------------------------- the oracle layer
-
-
-def oracle_text(observation: Observation) -> str:
-    return json.dumps(observation.oracle(), indent=1, sort_keys=True, ensure_ascii=False) + "\n"
-
-
-def assert_matches_oracle(observation: Observation, path: Path, *, regen: bool) -> None:
-    text = oracle_text(observation)
-    if regen:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-        return
-    assert path.is_file(), f"missing split oracle {path}"
-    expected = path.read_text(encoding="utf-8")
-    if text != expected:
-        import difflib
-
-        delta = "".join(list(difflib.unified_diff(
-            expected.splitlines(True), text.splitlines(True), "oracle", "observed", n=2,
-        ))[:200])
-        raise AssertionError(f"rebuild_unified_kg split oracle drifted ({path.name}):\n{delta}")
 
 
 # ------------------------------------------------------- the behaviour layer
@@ -895,6 +866,19 @@ def _assert_published(obs: Observation, *, merged_by_llm: bool, writes_mid_run: 
     assert not any("Deprecated thing" in v for v in groups.values()), groups
     for object_type in ("claim", "formula", "procedure"):
         assert len(_groups(obs, object_type)) == 1, (object_type, _groups(obs, object_type))
+    # Canonical ids keep each type's prefix (types never share an id space).
+    prefixes = {"concept": "K-", "claim": "KL-", "formula": "KF-", "procedure": "KP-"}
+    for row in obs.after["published"]:
+        assert row["canonical_id"].startswith(prefixes[row["object_type"]]), row
+    # Every stage boundary renews the claim (the heartbeat that keeps TTL
+    # pre-emption for dead rebuilds only), and the keyed caches are dropped
+    # right after the flip.
+    stage_lines = [log for log in obs.logs if log["message"].startswith(
+        f"kg-rebuild[{obs.notebook_id}] ")]
+    assert len(obs.calls("self._refresh_generation_lease")) >= len(stage_lines) > 0
+    calls = [e.get("call") for e in obs.timeline]
+    flip_at = calls.index("unified_kg.flip_cluster_generation")
+    assert "self._invalidate_unified_cache" in calls[flip_at:], "cache kept after flip"
     # The skip gate reads its "inputs unchanged" verdict only from this state.
     assert after["cluster_code_version"]
 
@@ -914,6 +898,12 @@ def expect_first_rebuild(obs: Observation) -> None:
     descriptions = {r["canonical_name"]: r["canonical_description"]
                     for r in obs.after["published"] if r["object_type"] == "concept"}
     assert descriptions["MOSFET"] and not descriptions["cascode"], descriptions
+    # The reuse key is stored next to the text (the next rebuild reuses by it).
+    sigs = {r["canonical_name"]: r["canonical_desc_sig"]
+            for r in obs.after["published"] if r["object_type"] == "concept"}
+    assert sigs["MOSFET"] and not sigs["cascode"], sigs
+    # Both LLM stages checkpoint under the one embedding-blind version.
+    assert len(obs.after["checkpoint_versions"]) == 1, obs.after["checkpoint_versions"]
     assert [p for p in obs.progress if p[0] == "concept_desc"] == [
         ["concept_desc", 1, 2], ["concept_desc", 2, 2]]
     assert [s.split(" (")[0] for s in _stages(obs)] == [
