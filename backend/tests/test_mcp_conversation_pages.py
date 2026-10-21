@@ -479,12 +479,14 @@ def test_the_budget_sheds_everything_else_before_a_report_id() -> None:
     """The ordinary pass shrinks the longest strings first (down to 32
     characters) and then drops list items; a 36-character report id is an
     identifier, so it is neither shrunk by the first nor reached by the second."""
+    # Twenty rows of twenty 44-character strings: over the budget even with
+    # every one of them shrunk to 32, so the pass reaches the 36-character id.
     packed = _budget_response({
         "scope": {"linked_report": {"report_id": GENERATED_REPORT_ID}},
-        "rows": [{"label": f"标签{index:03d}" + "标" * 40} for index in range(400)],
+        "rows": [{f"k{field:02d}": "标" * 44 for field in range(20)} for _ in range(20)],
     })
     assert packed["scope"]["linked_report"]["report_id"] == GENERATED_REPORT_ID
-    assert packed["truncation"]["truncated"] is True, "the pressure was real"
+    assert packed["truncation"]["omitted_characters"] > 0, "the pressure was real"
 
 
 def test_a_turn_page_never_carries_a_cut_report_id() -> None:
