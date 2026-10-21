@@ -6100,3 +6100,150 @@ test("a re-attached job finishing does not overwrite the tag the user set for th
   expect(value!.pendingLinkedReport).toBeNull();
   expect(value!.linkedReport).toEqual(OTHER_REPORT);
 });
+
+test("a re-check of the same inputs that fails takes down the verdict it had before", async () => {
+  vi.useFakeTimers();
+  api.checkReportLink
+    .mockResolvedValueOnce(reportCheck())
+    .mockRejectedValueOnce(humanizedError("服务暂时不可用，请稍后再试", 502));
+  api.runAskStream.mockRejectedValueOnce(humanizedError("服务暂时不可用，请稍后再试", 502));
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.linkReport(REPORT));
+  await passCheckDebounce();
+  expect(value!.linkedReportCheck).toEqual({ readable: true, reason: "" });
+
+  await act(async () => {
+    await value!.submit("服务出错的一问");
+  });
+  await passCheckDebounce();
+  expect(api.checkReportLink).toHaveBeenCalledTimes(2);
+  // Same report, engine and scope as the verdict on screen — but the check of
+  // them failed, so no verdict is known; the tag itself stays.
+  expect(value!.linkedReportCheck).toBeNull();
+  expect(value!.linkedReport).toEqual(REPORT);
+  expect(value!.linkedReportNote).toBe("");
+});
+
+test("nothing is checked while a conversation is loading: the outgoing tag is not asked about", async () => {
+  vi.useFakeTimers();
+  const loading = deferred<ConversationDetail>();
+  api.getConversation.mockReturnValueOnce(loading.promise);
+  api.checkReportLink.mockRejectedValue(humanizedError("找不到这份报告，它可能已被删除", 404));
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.linkReport(REPORT));
+  let opening!: Promise<boolean>;
+  act(() => {
+    opening = value!.openSession("conversation-b", 2);
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(600);
+  });
+  expect(api.checkReportLink).not.toHaveBeenCalled();
+
+  loading.resolve(detail("conversation-b"));
+  await act(async () => {
+    await opening;
+  });
+  await passCheckDebounce();
+  // The opened conversation has no report: nothing to check, and no
+  // "已不存在" from the previous view's tag flashes here.
+  expect(value!.linkedReport).toBeNull();
+  expect(api.checkReportLink).not.toHaveBeenCalled();
+  expect(value!.linkedReportNote).toBe("");
+});
+
+test("a verdict for unchanged inputs is not fetched again when only the view moved", async () => {
+  vi.useFakeTimers();
+  api.runAskStream.mockReturnValueOnce(new Promise(() => {}));
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.linkReport(REPORT));
+  await passCheckDebounce();
+  expect(api.checkReportLink).toHaveBeenCalledTimes(1);
+
+  // Stop before `started`: the question goes back, the view generation moves.
+  act(() => {
+    void value!.submit("还没开始就停");
+  });
+  act(() => value!.abort());
+  expect(value!.question).toBe("还没开始就停");
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(600);
+  });
+  expect(api.checkReportLink).toHaveBeenCalledTimes(1);
+  expect(value!.linkedReportCheck).toEqual({ readable: true, reason: "" });
+});
+
+test("only the newest request may answer, even when the inputs came back to an older one's", async () => {
+  vi.useFakeTimers();
+  const first = deferred<ReportLinkCheck>();
+  const second = deferred<ReportLinkCheck>();
+  const third = deferred<ReportLinkCheck>();
+  api.checkReportLink
+    .mockReturnValueOnce(first.promise)
+    .mockReturnValueOnce(second.promise)
+    .mockReturnValueOnce(third.promise);
+  const narrowed: AskPolicy = {
+    ...DEFAULT_POLICY,
+    sourceScope: { mode: "include", source_ids: ["source-1"] },
+  };
+  const view = render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.linkReport(REPORT));
+  await passCheckDebounce();
+  view.rerender(<Harness policy={narrowed} />);
+  await passCheckDebounce();
+  view.rerender(<Harness />);
+  await passCheckDebounce();
+  expect(api.checkReportLink).toHaveBeenCalledTimes(3);
+
+  // The first request asked about these very inputs, but a newer one is out.
+  first.resolve(reportCheck({ readable: false, reason: "本轮不读取这份报告：过时的判词" }));
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(value!.linkedReportCheck).toBeNull();
+  third.resolve(reportCheck());
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(value!.linkedReportCheck).toEqual({ readable: true, reason: "" });
+});
+
+test("in the simplified surface the check asks about the engine that surface submits with", async () => {
+  vi.useFakeTimers();
+  render(<Harness policy={{ ...DEFAULT_POLICY, advanced: false }} />);
+  // The hidden selector still holds a named engine from the advanced surface.
+  beginOwnedNotebook();
+  expect(value!.mode).toBe("chunk");
+  act(() => value!.linkReport(REPORT));
+  await passCheckDebounce();
+  expect(api.checkReportLink.mock.calls[0]?.[1]).toMatchObject({ mode: "reasoning" });
+});
+
+test("leaving the page or the notebook aborts a check in flight", async () => {
+  vi.useFakeTimers();
+  api.checkReportLink.mockReturnValue(new Promise(() => {}));
+  const first = render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.linkReport(REPORT));
+  await passCheckDebounce();
+  const unmounted = api.checkReportLink.mock.calls[0]?.[2] as AbortSignal;
+  expect(unmounted.aborted).toBe(false);
+  first.unmount();
+  expect(unmounted.aborted).toBe(true);
+
+  const view = render(<Harness />);
+  beginOwnedNotebook(2);
+  act(() => value!.linkReport(REPORT));
+  await passCheckDebounce();
+  const switched = api.checkReportLink.mock.calls[1]?.[2] as AbortSignal;
+  expect(switched.aborted).toBe(false);
+  view.rerender(<Harness notebookId="notebook-b" />);
+  act(() => {
+    value!.beginNotebookTransition({ actorId: "user-a", notebookId: "notebook-b", workspaceEpoch: 3 });
+  });
+  expect(switched.aborted).toBe(true);
+});
