@@ -64,3 +64,21 @@ def test_onboarding_document_lists_the_live_public_tool_manifest():
     for tool in PUBLIC_TOOLS:
         assert document.count(f"- `{tool}`") == 1
     assert "agent-token-secret" not in document
+
+
+def test_onboarding_document_explains_reading_past_conversations_and_reports():
+    from app.api.agent_mcp_onboarding import render_agent_mcp_onboarding
+
+    document = render_agent_mcp_onboarding("http://127.0.0.1:8000/mcp")
+
+    heading = "## Reading past conversations and reports"
+    assert document.count(heading) == 1
+    # The section sits between "Asking questions" and the closing checks, and
+    # stops at the next heading, so the assertions below read only it.
+    assert document.index("## Asking questions") < document.index(heading)
+    section = document.split(heading, 1)[1].split("\n## ", 1)[0]
+    for needle in (
+        "get_conversation", "get_report", "list_conversations", "list_reports",
+        "notebook_id", "get_ask", "untrusted evidence",
+    ):
+        assert needle in section, needle

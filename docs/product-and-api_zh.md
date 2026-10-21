@@ -1265,7 +1265,7 @@ tag 原始列表会先按 20 条限额校验，再 trim/去重；空白 tag 直�
 Agent profile 并签发 token。
 Token 有过期时间、默认 notebook、notebook allowlist，并只授予所需的权限档位——存储与对外 API
 只有五档：`read`（读取：来源/知识/Knowhow、主人本人的 confirmed 与 candidate 个人记忆、库理解、
-引用原文、来源与构建状态）、`ask`（问答：笔记本问答与全局问答，不依赖 `read`）、`contribute`
+引用原文、来源与构建状态，以及主人本人的问答记录——单库与全局会话——和深度报告）、`ask`（问答：笔记本问答与全局问答，不依赖 `read`）、`contribute`
 （提交：记忆候选、Knowhow 代码附件、观察记录）、`manage`（管理：添加/重新解析来源、触发图谱与
 检索索引构建；仅对 owner 拥有的笔记本生效）、`delete`（删除：只删 Agent 自己添加的来源；仅对
 owner 拥有的笔记本生效）。代码内部仍按细粒度能力（`knowledge:read`、`sources:write` 等）请求
@@ -1316,7 +1316,7 @@ Authorization 的 Agent 知道解法；工具清单从部署实例的冻结目�
 *idle* 超时——一次调用在若干秒内既没给出响应、也没发过任何 progress 通知就被中断——别的
 客户端则是每次调用一个固定上限。`reasoning` 档的 `ask` 动辄跑几分钟（理解、规划、联邦
 检索、反思循环、答案合成），部署的插件引擎可能更久，所以没有心跳时客户端会放弃一次服务端仍在正常
-执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 17 个 core 工具的阻塞主体一律
+执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 21 个 core 工具的阻塞主体一律
 跑在同一道心跳下，**每 5 秒**一拍，内容只有工具名与已耗墙钟秒数——绝不带问题原文、笔记本或
 来源名称，与观测事件同一条口径。不需要它的场合是免费的：客户端没有在请求 `_meta` 里带
 `progressToken` 时该通知是 no-op，而第一拍要等满一个间隔，所以毫秒级返回的工具（绝大多数）
@@ -1375,8 +1375,8 @@ token 的默认笔记本（`list_notebooks` 用 `is_default` 标出）。每个�
 重跑原读取的全部鉴权。报错统一为 `[<code>] <中文说明>`，code 取值 `token_inactive`、`scope_missing`、
 `notebook_not_allowed`、`notebook_unreadable`、`owner_only`、`forbidden`、`not_found`、`invalid_argument`、`busy`、
 `mirrored`、`unavailable`、`internal`。`ValueError` 只有在文本以中文开头（或属于已知校验器形状并被译成中文）
-时才作为 `invalid_argument` 带出原文；其他意外错误一律是 `internal`，文本从不回显。默认 core 的十七个工具如下；
-`mcp_server.PUBLIC_TOOLS` 就是下面这 17 条本身，不是更大的组合目录——它与 `mcp_server.CORE_TOOLS`
+时才作为 `invalid_argument` 带出原文；其他意外错误一律是 `internal`，文本从不回显。默认 core 的二十一个工具如下；
+`mcp_server.PUBLIC_TOOLS` 就是下面这 21 条本身，不是更大的组合目录——它与 `mcp_server.CORE_TOOLS`
 是同一份清单：
 
 | 分组 | 工具 | Scope |
@@ -1385,6 +1385,7 @@ token 的默认笔记本（`list_notebooks` 用 `is_default` 标出）。每个�
 | 笔记本概况（计数、构建状态、库理解） | `get_notebook` | `read` |
 | 搜索与点查 | `search`、`read_reference` | `read` |
 | 问答（同步；单库或 2–8 库） | `ask`、`get_ask` | `ask` |
+| 问答记录与深度报告（只读，仅凭证主人自己的） | `list_conversations`、`get_conversation`、`list_reports`、`get_report` | `read` |
 | 提交 | `propose_memory`、`add_observation` | `contribute` |
 | 来源读取 | `list_sources` | `read` |
 | 来源管理 | `add_source`、`reparse_source` | `manage`（owner-only） |
@@ -1394,7 +1395,7 @@ token 的默认笔记本（`list_notebooks` 用 `is_default` 标出）。每个�
 | Knowhow 代码写入 | `put_knowhow_cell_code` | `contribute` |
 
 实际部署以 server-local frozen catalog 作为 discovery 与 onboarding 的权威清单：它精确等于上表
-17 个工具，由九个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
+21 个工具，由十一个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
 手抄。每次调用都重新检查 live token/档位/allowlist/成员权，`manage` 与 `delete` 两档都强制经过 owner-only
 notebook 闸。缺档时工具报错是写明缺哪一档的中文文案（例：「此凭证缺少「读取」权限，请在 Agent 接入页为它勾选后重试」），
 不再只给笔记本 id；token 失效、笔记本不在白名单、主人已无权读该笔记本也各有一句可读文案。结果在构造时就被复制进有界形状——深度不超过 5 层，逐字段/map/list 施加上限——超大容器不会
@@ -1474,7 +1475,7 @@ client_request_id?)` 取代原先的单库与全局问答工具，只需要 `ask
 以及单库路径的 `anchors`。`get_ask(job_id, answer_offset?, citation_offset?, coverage_offset?,
 trace_offset?)` 按任务 id（`askjob-` 或 `gask-`）重读任意一页；每次调用都重新检查 token、白名单与读权限。
 它只覆盖经 MCP 发起、且属于同一 owner 的任务：浏览器发起的任务（两类都是）、他人的任务或未知 id
-一律 `not_found`。已完成但答案行缺失的任务读作 `failed`，绝不是空的 `answered` 页；答案为空时回退到
+一律 `not_found`——读浏览器里的问答用 `get_conversation`（见下「问答记录与深度报告」）。已完成但答案行缺失的任务读作 `failed`，绝不是空的 `answered` 页；答案为空时回退到
 结论；`ask` 首页与每次 `get_ask` 的 trace 取自同一条任务行，游标因此一致。
 
 `mode="reasoning"` 时，`ask` 与网页端走同一套「先理解问题、清晰就继续、理解不了就交回
@@ -1602,7 +1603,81 @@ Markdown 化简而来（不调模型）：去掉引用标记、图片、HTML 与
 链接形如 `{PUBLIC_WEB_BASE_URL}/c/alnk-…`，持有链接的人**无需登录**即可看完整回答，所以 `ask` 说明里明写了
 这一点。
 
-**`ref` 与 `read_reference`。** `search` 的命中与 `ask`/`get_ask` 的每条引用都带不透明的 `ref`
+**问答记录与深度报告（`list_conversations`、`get_conversation`、`list_reports`、`get_report`）。**
+四个只读工具，都只要 `read` 档（内部能力名 `history:read`，并入 `read`，没有新档位也没有新开关；已签发的
+`read` 凭证无需改动立即获得，调用记录里显示为「读问答记录和报告」）。它们读**凭证主人本人**的问答记录与深度
+报告，不论当初是在浏览器里还是经 Agent 发起；他人的会话、他人创建的报告一律读不到，也不暴露他人的记忆。
+`get_ask` 的语义不变：它只重读经 MCP 发起的任务，浏览器里发起的任务仍是 `not_found`——**读浏览器里的问答
+用 `get_conversation`**。
+
+- **`list_conversations(notebook_id?, limit?, offset?)`。** 列出本人的会话，单库（`conv-`）与跨笔记本
+  （全局，`gconv-`）并在一起，按最近活动在前。行：`conversation_id`、`kind`（`notebook`/`global`）、
+  `title`（至多 200 码点）、`notebook_ids`（排序，至多 20 个；`notebook_count` 是全部个数。单库为会话所在
+  笔记本，全局为它各轮用到的全部笔记本）、`turn_count`、`updated_at`、`submitted_via`。`notebook_id`
+  **省略 = 白名单内、主人当前仍可读的全部笔记本**（读不了的静默跳过，同 `list_notebooks`），这与绑定单个
+  笔记本的工具「省略即默认笔记本」不同；传了则只看该笔记本（白名单外 `notebook_not_allowed`、主人已无权读
+  `notebook_unreadable`）：它的单库会话，以及用到了它的可见全局会话。`limit` 夹到 1–20，沿 `next_offset` 读到
+  null；响应超 12,000 字节预算时 `next_offset` 只前进到实际交付的行，读到 null 不会漏行。`offset` 为负是
+  `invalid_argument`（「分页位置不能小于零，请从第一页重新读取」）。
+- **`get_conversation(conversation_id, turn_offset?, answer_offset?, citation_offset?)`。** 一次读一轮，从旧
+  到新。一轮是一条已保存的回答（单库），或一个已结束的任务（全局：完成、失败、取消、中断）；仍在回答中的
+  提问不算一轮，结束后追加在末尾，已有各轮的 `turn_offset` 不变（删除或过期会让其后各轮前移，必要时重读
+  `turn_count`）。一页：`conversation`（与列表行同一形状，含 `turn_count`）、`turn_offset` 与
+  `next_turn_offset`、`question`（至多 2,000 码点，超出以 `…` 结尾并计入 `truncation`）、`asked_at`、
+  `submitted_via`、`status`（`answered`/`failed`/`cancelled`；单库恒为 `answered`）、`mode`、`answer`（本页
+  至多 2,000 码点）与 `next_answer_offset`、`citations`（每条带 `ref`，交给 `read_reference`）与
+  `next_citation_offset`、`total_citations`、`completeness_notice`、`error`（只含中文提示）、`scope`、
+  `content_is_untrusted_evidence`。页里**不带** `trace`、`coverage`、`anchors`、`intent`——需要这些的、经 MCP
+  发起的任务仍可用 `get_ask`。读完一轮的回答与引用游标后，用 `turn_offset=next_turn_offset`、另两个游标归 0
+  读下一轮，直到 `next_turn_offset` 为 null。没有已结束轮次的会话（只有仍在回答的问题）返回
+  `status: "empty"` 的页；`turn_offset` 超出轮数是 `invalid_argument`（「turn_offset 超出这条会话的轮数
+  （共 N 轮），请从 0 开始读取」）。
+- **`submitted_via`（发起方）**：`web` / `mcp` / 空串（未记录）。会话级取该会话**最早**一条任务的发起方，但
+  若存在早于这条任务的回答（老会话的前几轮没有任务行），则为空串；每轮取产出该回答的任务的发起方，找不到
+  任务行为空串。「最早」按时刻，不按 id 或插入顺序。
+- **可见规则（每次调用都重读凭证，列表与读取同一口径）。** 先查 `read` 档，缺档 `scope_missing`（点名「读取」）
+  先于任何存在性判断，没有该档的凭证无法借 id 探测。单库会话须是主人本人的，所在笔记本须在白名单内、
+  主人当前仍可读——比网页上只核创建者的会话详情更严，因为凭证是长期委托，白名单与主人的读权是它的天花板；
+  回答里引用的挂载参考库随该笔记本可读，不要求挂载库也在白名单里（与 `get_ask`、`read_reference` 一致）。
+  全局会话**整条判**：它全部未过期轮次用到的笔记本（逐轮的范围、引用与锚点上的笔记本，与公开分享复核同一函数）
+  都在白名单内且主人当前仍可读，被删的笔记本按不可读处理；有一个不满足，整条不给，列表里连标题、轮数都不
+  出现。不存在、不是主人的、不满足上述条件、id 不以 `conv-`/`gconv-` 开头或超过 200 字符，一律同一条
+  `not_found`（「没有找到这个会话（不存在、不属于此凭证的主人，或它用到的笔记本不在此凭证的白名单里、主人已
+  无权读取）」），措辞不透露是哪一项没过；凭证失效是 `token_inactive`。
+- **`list_reports(notebook_id?, limit?, offset?)`。** 列出主人本人创建的深度报告（共享笔记本里别人的报告
+  不列），按创建时间新的在前；`notebook_id` 省略与分页同 `list_conversations`。行：`report_id`、`notebook_id`、
+  `question`（至多 300 码点）、`status`（`planning`/`intent_ready`/`outline_ready`/`generating`/`done`/
+  `failed`/`cancelled`）、`depth`、`section_count`、`created_at`、`updated_at`；不带 `error`、`progress`、
+  `created_by`。
+- **`get_report(report_id, notebook_id?, content_offset?, reference_offset?)`。** 报告 id 不携带笔记本，所以
+  传 `list_reports` 返回的 `notebook_id`（省略即凭证的默认笔记本）。只读主人本人创建的报告；不存在、是别人创建
+  的、不在这个笔记本里、id 不以 `rep-` 开头或超过 200 字符，一律同一条 `not_found`（「没有找到这份报告（…；请传
+  list_reports 返回的 notebook_id）」），白名单外与失权照 `notebook_not_allowed` / `notebook_unreadable`。一页：
+  `report_id`、`notebook_id`、`question`、`status`、`depth`、`created_at`、`updated_at`，Markdown 正文
+  `content`（首页至多 6,000 字符，预算不够会更短）与 `content_offset`、`next_content_offset`、
+  `total_characters`，参考文献 `references` 与 `next_reference_offset`、`total_references`，`error`，
+  `content_is_untrusted_evidence`。正文与参考文献各有游标、互不影响；只想读其中一个时，把另一个游标设为它的
+  总量，得到空页。首页的 `question` 至多 2,000 码点；任一游标大于 0 的续页，`question` 截到 200 码点（以 `…`
+  结尾）并多一个 `question_truncated`，因为调用方首页已拿到全文，续页重复它会吃掉每页预算的一大块。
+  参考文献行：`key`（正文里 `[kN]` 标记的编号）、`label`、`location_label`、`snippet`、`object_type`、
+  `source_id`、`element_id`、`tier`，来自挂载参考库的另带 `notebook_id`，指向来源元素或本人记忆的另带 `ref`。
+- **报告里的记忆与标识符。** 正文与摘录同网页上作者本人所见（按「检索层负责权限」，不在呈现层再过滤，旧报告
+  里存下的他人记忆摘录也照常给出），标识符更严：参考文献永不带报告引擎存下的记忆记录（`memory_id`、
+  `memory_owner_id`）及 `provenance`、`family_key` 等内部字段；记录为**他人记忆**的条目不铸 `ref`，
+  `source_id`、`element_id` 置为空串（键名保留），因为他人记忆的来源 id 与那条记忆一一对应，等于同一个标识换了
+  命名空间；本人记忆铸 `mem`、其余来源元素铸 `el` 的 `ref`，打开原文时 `read_reference` 照常重跑全部鉴权。
+- **失败的报告与失败小节。** 正文里旧格式的「（本节生成失败:<原始错误>）」一律改写成固定中性句，小节的原始错误
+  永不输出。顶层 `error` 只有 `status` 为 `failed` 时才有：存下的错误**含中文**时原样给出（与作者本人在网页
+  上看到的一致，因此可能带服务名等诊断片段），不含中文的（异常原文）换成「这份报告没有生成完成，请在网页上
+  重新生成」。
+- **私人记忆与调用记录。** `history:read` 与 `memory:read` 同属 `read` 档，能调用这些工具的凭证必然能读私人记忆，
+  所以读取存下的回答时不再另套 `get_ask` 的私人记忆回放闸；这条同档不变量由测试钉住，将来拆档必须先把
+  那道闸补进 `get_conversation` / `get_report`。单库 `get_conversation`、带 `notebook_id` 的两个列表调用与
+  `get_report` 在全部闸门通过后各记一条 `history:read`；不带 `notebook_id` 的列表与全局会话读取不记（没有单个
+  笔记本可记，同 `list_notebooks` 与 `gask-` 的 `get_ask`）。
+
+**`ref` 与 `read_reference`。** `search` 的命中、`ask`/`get_ask`/`get_conversation` 的每条引用，以及
+`get_report` 里指向来源元素或本人记忆的参考文献，都带不透明的 `ref`
 （无填充的 `base64url(json)`；不签名——`read_reference` 每次调用都重跑原读取的全部鉴权）。
 `read_reference(ref, offset?)` 取回它背后的文本：一个来源元素（自身文本、在文档中的位置和文档显示标题）、
 主人自己的一条 Memory，或全局回答引用的元素。披露范围不超过 ref 所属笔记本的答案本来就可以引用的内容——
@@ -2715,10 +2790,12 @@ Agent 维护一份低成本、经 LLM 巡固的、关于笔记本的理解摘要
 记的是这次调用被准许时用的**能力**（`ask:execute`、`knowledge:read`…，即代码内部请求的细粒度能力，不是 token 存的五档）而不是工具名：
 那个唯一收口本来就要收到能力档才能放行，所以新加的工具天然被记上、不需要作者记得去登记；
 代价是同一档下的两个工具在记录里读起来一样（已登记）。被**鉴权**拒绝的调用不留痕（一份「谁被拒了」
-的日志是另一种东西，隐私后果也不同）——**包括收口之后才做的那些鉴权**。这样的闸一共三道，
+的日志是另一种东西，隐私后果也不同）——**包括收口之后才做的那些鉴权**。这样的闸有好几道，
 每一道都关掉自动记账、在自己放行之后再记：写类工具在 `require_agent_access` 之后的
-owner-only 检查、`read_reference` 读候选 Memory 要求的 `memory:read_candidates`、以及
-`delete_source` 那条「Agent 令牌只许删 Agent 自己添加的资料」。所以这条不变式是
+owner-only 检查、`read_reference` 读候选 Memory 要求的 `memory:read_candidates`、
+`delete_source` 那条「Agent 令牌只许删 Agent 自己添加的资料」，以及问答记录与报告工具的归属核对
+（`get_report` 的「报告是凭证主人创建的」、单库 `get_conversation` 的会话归属与轮次范围——不存在的报告
+id 与别人的报告一样，不留痕）。所以这条不变式是
 「**每一道鉴权**都过了才记」，而不是「在收口处记」。
 
 **已登记的划线：查不到不是鉴权。** 一次点名了不存在的 id、或那份资料属于别的笔记本的调用
@@ -3232,7 +3309,7 @@ MCP 任务**签发限时链接（`answer_links` 表，SQLite v94 / PostgreSQL `0
 - `POST /api/notebooks/{id}/ask/stream` — Ask 进度的 NDJSON stream（同样接受可选的带时区 `asked_at` 请求字段；先发带持久化 `job_id` 和 `conversation_id` 的 `started` 事件，再发进度/最终事件）；前端用该会话 id 在答案生成前立即入历史并支持重新打开。`mode` 在 job 创建时已经解析为具体注册表 id，`ask_jobs.mode` 全程即为该 id，没有延迟选择引擎的窗口；`started` 之后的合成 start 步随即发出。前端在 `started` 之前离开再回到同一笔记本时，仍从本地在途记录接回该提问并继续读同一条流。推理模式提交前的意图理解与澄清确认同样不因离开而中止：理解在离开期间继续，清晰则直接启动 Ask job，需要澄清则在重开笔记本时重新弹出确认。这两个阶段还按标签页存在浏览器会话存储里：同一标签页整页刷新后回到该笔记本，理解会重新发起、澄清确认卡会重开；关闭标签页则丢弃。请求另接受可选的 `client_request_id`（字母、数字、`.`、`_`、`:`、`-`，至多 128 字符），每次提交一个键，官方浏览器每次提交都带上；同一用户带同一个键重复 POST 不会建第二个 job——流会以既有的 job 与会话 id 重发 `started`，回放已持久化的进度步骤，最后把已保存的答案作为 `final`（或该 job 的 `cancelled`/`error`）发出。刷新落在推理预检交接之后、`started` 之前的窗口时就靠这一点自动续上：标签页用同一个键重发同一次提交并接回，而不是把问题退回输入框。接回的判定在路由自己的前置校验（可用性、检索范围、模式注册表）之前——只有笔记本鉴权挡在它前面——所以即使此刻新提问会被拒绝，重发仍回放原 job。同一用户在另一笔记本已用过的键会让流以 `error` 事件结束且不创建任何东西。同步的 `POST …/ask` 接受该字段但不持久化、不去重：永远新建。transport 断开连接只会停止当前客户端继续接收，后台 job 仍继续并可保存回答
 - `GET /api/notebooks/{id}/ask/jobs/{job_id}` — 供重连/恢复流程读取 detached Ask job 的 `status`、`trace` 与 `answer_id`；job 必须属于路径中的 notebook 和当前用户；状态为 `done` 后，前端重新加载 conversation 取得最终 `AskResponse`
 - `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel` — 用户显式中断端点；job 必须属于路径中的 notebook 和当前用户；设置取消事件并在保存被取消的最终回答前停止 worker
-- `GET /api/notebooks/{id}/conversations`、`GET|PATCH|DELETE /api/conversations/{id}`
+- `GET /api/notebooks/{id}/conversations`、`GET|PATCH|DELETE /api/conversations/{id}`——列表摘要与详情带 `submitted_via`（`web` / `mcp` / 空串表示未记录；取该会话最早一条任务的发起方，若有回答早于这条任务则为空串），详情的每一轮也带自己的 `submitted_via`（产出该回答的任务的发起方）；浏览器不读它，MCP 的 `list_conversations` / `get_conversation` 报告的就是它
 - `POST /api/answers/{answer_id}/feedback`
 - Memory：`GET /api/memories`、`GET /api/notebooks/{id}/memories`、`GET|PATCH /api/memories/{memory_id}`、`POST /api/memories/{memory_id}/confirm|reject|deprecate|promote`、`POST /api/answers/{answer_id}/memory-preview/stream`（网页端；`/memory-preview` 保持 JSON 兼容）、`POST /api/notebooks/{id}/memories/from-answer`
   - 接受回答 id 的接口（`POST /api/answers/{answer_id}/memory-preview`、`.../memory-preview/stream`、`POST /api/answers/{answer_id}/feedback`、`POST /api/notebooks/{notebook_id}/memories/from-answer`）只作用于调用者自己的回答：调用者必须能读该笔记本，并且必须是该回答所属会话的创建者。他人的回答（含笔记本所有者）、没有会话的回答、不存在的回答 id 一律返回同一个 404 `Answer not found`。共享存储里的 `answer_owner` 返回的是笔记本所有者，不用于授权。
