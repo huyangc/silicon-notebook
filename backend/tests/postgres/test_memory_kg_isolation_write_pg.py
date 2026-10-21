@@ -1551,6 +1551,49 @@ def test_pg_status_patches_on_a_mirror_keep_the_write_fence(pg_promotion_world):
     cases.status_patches_on_a_mirror_keep_the_write_fence(world)
 
 
+@pytest.mark.parametrize("write", ["merge", "patch"])
+def test_pg_a_reader_is_judged_on_the_locked_row(pg_promotion_world, write):
+    """The unlocked prefilter only ever refuses; acceptance is decided on the
+    row the locking read returns. The reader's request passes the prefilter
+    (both objects hers, her evidence alone), then waits on the row lock while
+    another transaction gives the object a shared evidence entry and commits:
+    the locked read sees it and refuses with the reader's 404, writing nothing."""
+    import threading
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    cases, world = pg_promotion_world
+    c = cases._reader_with_memory(world)
+    target = "ko-c-dup-1" if write == "merge" else "ko-c-dup-2"
+    url = world.repo._runtime.database.settings.database_url
+    outcome: dict = {}
+
+    def ask() -> None:
+        if write == "merge":
+            response = cases._merge(world, c, "ko-c-dup-2", "ko-c-dup-1")
+        else:
+            response = cases._patch(world, c, "ko-c-dup-2", {"status": "deprecated"})
+        outcome["answer"] = (response.status_code, response.json())
+
+    with psycopg.connect(url, row_factory=dict_row) as holder, \
+            psycopg.connect(url, autocommit=True, row_factory=dict_row) as probe:
+        holder.execute("SELECT id FROM knowledge_objects WHERE id=%s FOR UPDATE", (target,))
+        worker = threading.Thread(target=ask, daemon=True)
+        worker.start()
+        _wait_for_lock_wait(probe, "%FOR UPDATE%", worker, outcome)
+        holder.execute(
+            "UPDATE knowledge_objects SET evidence = evidence || %s::jsonb WHERE id=%s",
+            (json.dumps([{"source_id": "src-document", "element_id": "el-src-document",
+                          "quoted_span": "Shared text."}]), target),
+        )
+        holder.commit()
+        worker.join(timeout=10)
+    assert not worker.is_alive()
+    assert outcome["answer"] == (404, {"detail": "Notebook not found"}), outcome
+    assert cases._object_row(world, "ko-c-dup-2")["status"] == "approved"
+
+
 def test_pg_a_readers_refused_merge_takes_no_lock(pg_promotion_world):
     """A read-only member's merge of a pair that is not her own is refused by
     an unlocked read before the merge's locking statements: with the shared
