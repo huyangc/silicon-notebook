@@ -168,21 +168,36 @@ def _payload_receipt(row) -> object:
     return payload.get("linked_report") if isinstance(payload, dict) else None
 
 
+#: The conversation's LAST answer, joined onto a ``conversations c`` row as ``last``
+#: -- the one definition of "last" for ``LIST_CONVERSATIONS_SQL`` and
+#: ``CONVERSATION_TURN_HEAD_SQL``, so the list and the one-turn read cannot name
+#: different answers. The lateral locates it by its unique ``ordinal`` alone (a
+#: read of ``idx_answers_conversation`` that never touches a payload) and the
+#: second join reads that ONE row. ``ORDER BY a.ordinal + 0`` is deliberate: ordering
+#: by the bare column offers the planner a backward walk of the unique ``ordinal``
+#: index filtered by ``conversation_id``, which passes every newer answer of every
+#: other conversation before it reaches this conversation's own; the expression is
+#: not that index's order, so the lookup stays on ``idx_answers_conversation`` (a
+#: handful of rows). A conversation without answers has no ``last`` row (every
+#: ``last`` column NULL). Nothing in the ``ORDER BY ... LIMIT`` subquery may read
+#: ``payload``: ``->`` there would run for every answer of the conversation under
+#: the top-N sort (``tests/test_postgres_answers_last_read_sql.py``).
+LAST_ANSWER_JOIN_SQL = (
+    "LEFT JOIN LATERAL (SELECT a.ordinal FROM answers a "
+    "  WHERE a.conversation_id = c.id ORDER BY a.ordinal + 0 DESC LIMIT 1) newest ON true "
+    "LEFT JOIN answers last ON last.ordinal = newest.ordinal "
+)
+#: The receipt of that last answer (jsonb; NULL when it attached none).
+LAST_ANSWER_LINKED_REPORT_SQL = "last.payload->'linked_report'"
+
 #: The one statement behind ``list_conversations`` (module-level so a plan check
 #: looks at exactly what production sends; ``%s`` binds the notebook id, then the
 #: creator). ``used_reasoning`` and ``linked_report`` both describe the
-#: conversation's LAST answer, so the lateral first locates that answer by its
-#: unique ``ordinal`` (a read of ``idx_answers_conversation`` that never touches
-#: the payload) and only then reads ``payload`` -- once per conversation, not once
-#: per answer: ``payload`` is a large jsonb that every answer of the conversation
-#: would otherwise have to detoast before ``ORDER BY ... LIMIT 1`` kept one.
-#: ``ORDER BY a.ordinal + 0`` is deliberate: ordering by the bare column offers the
-#: planner a backward walk of the unique ``ordinal`` index filtered by
-#: ``conversation_id``, which passes every newer answer of every other conversation
-#: before it reaches this conversation's own; the expression is not that index's
-#: order, so the lookup stays on ``idx_answers_conversation`` (a handful of rows).
-#: A conversation without answers has no ``last`` row (both columns NULL, which
-#: reads as no reasoning and no report). ``submitted_via`` is the shared
+#: conversation's LAST answer, which ``LAST_ANSWER_JOIN_SQL`` locates by
+#: ``ordinal`` before ``payload`` is read -- once per conversation, not once per
+#: answer: ``payload`` is a large jsonb that every answer of the conversation
+#: would otherwise have to detoast before ``ORDER BY ... LIMIT 1`` kept one (see
+#: there for why the ordering is ``ordinal + 0``). ``submitted_via`` is the shared
 #: ``CONVERSATION_ENTRY_POINT_SQL`` over ``c`` and does not touch ``last``.
 LIST_CONVERSATIONS_SQL = (
     "SELECT c.id, c.notebook_id, c.title, c.updated_at, "
@@ -191,13 +206,33 @@ LIST_CONVERSATIONS_SQL = (
     "WHEN jsonb_typeof(last.payload->'reasoning_trace')='array' "
     "THEN last.payload->'reasoning_trace' ELSE '[]'::jsonb END), 0) > 0) AS used_reasoning, "
     + CONVERSATION_ENTRY_POINT_SQL + " AS submitted_via, "
-    "last.payload->'linked_report' AS linked_report "
+    + LAST_ANSWER_LINKED_REPORT_SQL + " AS linked_report "
     "FROM conversations c "
-    "LEFT JOIN LATERAL (SELECT a.ordinal FROM answers a "
-    "  WHERE a.conversation_id = c.id ORDER BY a.ordinal + 0 DESC LIMIT 1) newest ON true "
-    "LEFT JOIN answers last ON last.ordinal = newest.ordinal "
+    + LAST_ANSWER_JOIN_SQL +
     "WHERE c.notebook_id = %s AND c.created_by = %s "
     "ORDER BY c.updated_at DESC, c.id COLLATE \"C\""
+)
+
+#: The conversation head behind ``conversation_turn`` (module-level, as above;
+#: ``%s`` binds the conversation id): the conversation's own fields, its answer
+#: count, its entry point, and the receipt of its LAST answer. The receipt is read
+#: exactly as ``LIST_CONVERSATIONS_SQL`` reads it -- the lateral locates the last
+#: answer by ``ordinal`` alone, and only that one row's ``payload`` is then read
+#: through the join on its unique ``ordinal``. Writing the extraction inside the
+#: ``ORDER BY ... LIMIT 1`` subquery instead (``SELECT a.payload->'linked_report'
+#: ... ORDER BY a.ordinal + 0 DESC LIMIT 1``) evaluates ``->`` for EVERY answer of
+#: the conversation under the top-N sort, detoasting each large jsonb payload to
+#: keep one (a 60-answer conversation of ~195 kB payloads: 1739 buffers and
+#: 2.9 ms against 77 and 0.13 ms). ``tests/test_postgres_answers_last_read_sql.py``
+#: holds this shape.
+CONVERSATION_TURN_HEAD_SQL = (
+    "SELECT c.id, c.notebook_id, c.title, c.updated_at, "
+    "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) AS turn_count, "
+    + CONVERSATION_ENTRY_POINT_SQL + " AS submitted_via, "
+    + LAST_ANSWER_LINKED_REPORT_SQL + " AS linked_report "
+    "FROM conversations c "
+    + LAST_ANSWER_JOIN_SQL +
+    "WHERE c.id = %s"
 )
 
 
@@ -1400,20 +1435,12 @@ class AskStateStore:
         and its ``index``-th answer built as ``get_conversation`` builds it
         (``None`` outside the range or when it went away meanwhile). Its
         ``linked_report`` is the receipt of the conversation's LAST answer,
-        read as ``LIST_CONVERSATIONS_SQL`` reads it: ``ORDER BY a.ordinal + 0``
-        keeps the lookup on ``idx_answers_conversation`` (see there), and only
-        the ``linked_report`` key of the last payload is taken."""
+        read as ``LIST_CONVERSATIONS_SQL`` reads it (``CONVERSATION_TURN_HEAD_SQL``):
+        the last answer is located by ``ordinal`` first, so only that one
+        payload is decoded -- never every answer's under a top-N sort."""
         with self.database.connect() as db:
             conv = db.execute(
-                "SELECT c.id, c.notebook_id, c.title, c.updated_at, "
-                "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) "
-                "AS turn_count, "
-                + CONVERSATION_ENTRY_POINT_SQL + " AS submitted_via, "
-                "(SELECT a.payload->'linked_report' FROM answers a "
-                "  WHERE a.conversation_id = c.id "
-                "  ORDER BY a.ordinal + 0 DESC LIMIT 1) AS linked_report "
-                "FROM conversations c WHERE c.id = %s",
-                (conversation_id,),
+                CONVERSATION_TURN_HEAD_SQL, (conversation_id,)
             ).fetchone()
             if conv is None:
                 return None

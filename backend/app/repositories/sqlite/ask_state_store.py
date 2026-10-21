@@ -174,6 +174,28 @@ CONVERSATION_ENTRY_POINT_SQL = (
     "ORDER BY julianday(j.created_at), j.created_at, j.rowid LIMIT 1) END"
 )
 
+#: Two SELECT-list expressions over a ``conversations c`` row that both describe
+#: the conversation's LAST answer -- the newest by insertion order (``rowid``),
+#: one definition of "last" for the list (``list_conversations``) and the one-turn
+#: read (``conversation_turn``) so they cannot name different answers or drift:
+#: whether that turn used reasoning, and the ``linked_report`` receipt it stored
+#: (JSON text; NULL when it attached none). ``json_valid`` guards both: SQLite's
+#: ``json_extract`` raises on a payload that is not JSON, and one such answer
+#: must not fail the read of every other turn of its conversation or the whole
+#: list -- it reads as "no reasoning, no report", as the model layer reads a
+#: malformed receipt (``receipt_linked_report``).
+LAST_ANSWER_USED_REASONING_SQL = (
+    "(SELECT CASE WHEN json_valid(a.payload) THEN "
+    "COALESCE(json_array_length(json_extract(a.payload, '$.reasoning_trace')), 0) > 0 "
+    "ELSE 0 END FROM answers a WHERE a.conversation_id = c.id "
+    "ORDER BY a.rowid DESC LIMIT 1)"
+)
+LAST_ANSWER_LINKED_REPORT_SQL = (
+    "(SELECT CASE WHEN json_valid(a.payload) THEN "
+    "json_extract(a.payload, '$.linked_report') END FROM answers a "
+    "WHERE a.conversation_id = c.id ORDER BY a.rowid DESC LIMIT 1)"
+)
+
 
 def _conversation_turn(row, submitted_via: str) -> ConversationTurn:
     """One ``answers`` row (``id, question, payload, created_at``) as a
@@ -1542,9 +1564,11 @@ class AskStateStore:
         running job's trace; a reader that wants one turn (MCP
         ``get_conversation``, one turn per call) pays for that one answer: a
         count, one answer row by position, and its job's entry point. The
-        last answer's receipt is one scalar subquery of the conversation's
-        own row (a JSON path, never the whole payload, and never validated
-        as an answer).
+        last answer's receipt is ``LAST_ANSWER_LINKED_REPORT_SQL``, the
+        expression ``list_conversations`` shares: one scalar subquery of the
+        conversation's own row (a JSON path, never the whole payload, never
+        validated as an answer, and NULL for a payload that is not JSON -- so
+        one malformed last answer fails no other turn's read).
         """
         with self.database.connect() as db:
             conv = db.execute(
@@ -1552,9 +1576,7 @@ class AskStateStore:
                 "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) "
                 "AS turn_count, "
                 + CONVERSATION_ENTRY_POINT_SQL + " AS submitted_via, "
-                "(SELECT json_extract(a.payload, '$.linked_report') "
-                "   FROM answers a WHERE a.conversation_id = c.id "
-                "  ORDER BY a.rowid DESC LIMIT 1) AS linked_report "
+                + LAST_ANSWER_LINKED_REPORT_SQL + " AS linked_report "
                 "FROM conversations c WHERE c.id = ?",
                 (conversation_id,),
             ).fetchone()
@@ -1600,16 +1622,12 @@ class AskStateStore:
             rows = db.execute(
                 "SELECT c.id, c.notebook_id, c.title, c.updated_at, "
                 "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) AS turn_count, "
-                "(SELECT COALESCE(json_array_length(json_extract(a.payload, '$.reasoning_trace')), 0) > 0 "
-                "   FROM answers a WHERE a.conversation_id = c.id "
-                "  ORDER BY a.rowid DESC LIMIT 1) AS used_reasoning, "
+                + LAST_ANSWER_USED_REASONING_SQL + " AS used_reasoning, "
                 + CONVERSATION_ENTRY_POINT_SQL + " AS submitted_via, "
                 # The report the LAST answer's receipt names (the same last
                 # answer as ``used_reasoning``): JSON text, NULL when that
                 # turn attached none.
-                "(SELECT json_extract(a.payload, '$.linked_report') "
-                "   FROM answers a WHERE a.conversation_id = c.id "
-                "  ORDER BY a.rowid DESC LIMIT 1) AS linked_report "
+                + LAST_ANSWER_LINKED_REPORT_SQL + " AS linked_report "
                 "FROM conversations c WHERE c.notebook_id = ? AND c.created_by = ? "
                 # julianday compares the absolute instant across legacy/local
                 # UTC offsets; the raw ISO value preserves microsecond order

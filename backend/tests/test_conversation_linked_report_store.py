@@ -10,6 +10,7 @@ import json
 import pytest
 
 from app.core.config import Settings
+from app.models.notebooks import NotebookCreate
 from app.models.schemas import AskResponse, TraceStep
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
@@ -80,3 +81,44 @@ def test_unreadable_receipt_reads_as_no_report(repo):
 
     cases.assert_unreadable_receipt_reads_as_no_report(
         repo, _save_turn(repo), overwrite_payload)
+
+
+def test_a_last_answer_that_is_not_json_fails_no_other_turn_and_no_list(repo):
+    """SQLite stores the payload as text, and ``json_extract`` raises on text
+    that is not JSON. One such LAST answer must not fail the list (which reads
+    ``used_reasoning`` and the receipt off it) nor the one-turn read of any OTHER
+    turn (which reads the receipt off it): it reads as 'no report, no reasoning',
+    as an unreadable receipt does. (PostgreSQL's jsonb cannot hold one.)"""
+    nb = repo.create_notebook(NotebookCreate(name="not-json")).id
+    report = repo.create_report(nb, "Report question")
+    save = _save_turn(repo)
+    conversation = save(
+        nb, None, "q1", cases._receipt(report, "Report question"), reasoning=True)
+    conversation = save(
+        nb, conversation, "q2", cases._receipt(report, "Report question"), reasoning=True)
+    store = repo._runtime.ask_state
+    owner = repo.current_user().id
+
+    def summary():
+        [item] = [
+            item for item in store.list_conversations(nb, owner)
+            if item.id == conversation
+        ]
+        return item
+
+    # Valid first: the receipt and the reasoning flag are those of the last turn.
+    assert summary().linked_report is not None and summary().used_reasoning is True
+    assert store.conversation_turn(conversation, 0)["linked_report"] == {
+        "report_id": report, "title": "Report question"}
+
+    with repo._connect() as db:
+        db.execute(
+            "UPDATE answers SET payload=? WHERE conversation_id=? AND question=?",
+            ("{this is not json", conversation, "q2"),
+        )
+    item = summary()
+    assert item.linked_report is None and item.used_reasoning is False
+    assert item.turn_count == 2
+    first = store.conversation_turn(conversation, 0)
+    assert first["linked_report"] is None and first["turn_count"] == 2
+    assert first["turn"].question == "q1"

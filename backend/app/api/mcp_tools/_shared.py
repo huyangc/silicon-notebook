@@ -358,6 +358,9 @@ def _shrink_longest_string(
     identifier_fields = {
         "notebook_id", "selected_notebook_id", "memory_id", "answer_id",
         "object_id", "source_id", "element_id", "key", "intent_token",
+        # ``rep-`` plus a generated suffix: longer than the 32 characters the
+        # ordinary pass shrinks to, and the handle ``get_report`` opens.
+        "report_id",
     } | WHOLE_OR_NOTHING_FIELDS
     # Preserve ordinary identifiers exactly. They become shrinkable only if a
     # compromised downstream producer supplied an identifier large enough to

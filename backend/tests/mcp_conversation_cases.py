@@ -35,6 +35,7 @@ from app.domain.report_followup import (
     REASON_REPORT_UNAVAILABLE,
 )
 from tests.answer_link_service_cases import _notebook, _set_access, _user, _write
+from tests.answers_last_read_sql_testkit import answers_payload_read_problems
 from tests.citation_check_testkit import seed_source
 from tests.global_ask_history_store_cases import global_job_payload
 from tests.global_ask_share_cases import insert_conversation, insert_job
@@ -957,6 +958,13 @@ async def notebook_turn_reads_only_the_asked_answer(env):
         assert page == expected[1]
         reads = [sql for sql in seen if "payload" in sql]
         assert reads and all("LIMIT 1" in sql for sql in reads), reads
+        # ``LIMIT 1`` alone also holds for a receipt extracted under the top-N
+        # sort, which decodes EVERY answer's payload to keep one: the
+        # statements actually sent (PostgreSQL's -- SQLite has no ``->``) take
+        # it from the one row located by ordinal.
+        assert any("linked_report" in sql for sql in reads), reads
+        for sql in reads:
+            assert answers_payload_read_problems(sql) == [], sql
         assert not any("ask_trace_steps" in sql or "running" in sql for sql in seen), seen
 
         # Counted, then deleted before it was read: missing, not an empty turn.
