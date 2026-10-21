@@ -29,7 +29,6 @@ from typing import Any, Literal, Mapping, Optional
 from app.domain.retrieval import RetrievedChunk, RetrievedElement, RetrievedKnowledge
 from app.models.memory import MemoryHit
 
-
 # --- reason codes -----------------------------------------------------------
 # Stored on the turn's receipt (``LinkedReportReceipt.reason_code``) and returned
 # by the pre-send check (``ReportLinkCheck.reason_code``). ``report_link_verdict``

@@ -11,7 +11,6 @@ from app.models.schemas import AskResponse, TraceStep
 from app.repositories.postgres._store_utils import jsonb
 from tests import conversation_linked_report_cases as cases
 
-
 pytestmark = [
     pytest.mark.postgres_integration,
     pytest.mark.xdist_group(name="postgres_conversation_linked_report_store"),
