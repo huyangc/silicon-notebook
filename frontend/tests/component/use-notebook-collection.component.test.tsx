@@ -1,6 +1,7 @@
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
+import { deleteScheduledText } from "../../app/notebook-deletion-copy";
 import type { NotebookSummary } from "../../app/workspace-model";
 
 const notebookApi = vi.hoisted(() => ({
@@ -57,6 +58,9 @@ function notebook(
     sync_origin: syncOrigin,
   };
 }
+
+// DELETE /notebooks/{id} → 202: the notebook entered its one-day deletion window.
+const DELETE_ACCEPTED = { status: "pending_delete", delete_after: "2026-10-23T08:00:00+00:00" };
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -173,7 +177,7 @@ beforeEach(() => {
     rebuild_status: "pending",
     job_id: "job-1",
   }));
-  notebookApi.deleteNotebook.mockResolvedValue(undefined);
+  notebookApi.deleteNotebook.mockResolvedValue(DELETE_ACCEPTED);
   basesApi.listMountable.mockResolvedValue([]);
   basesApi.listBases.mockResolvedValue([]);
   basesApi.mountedByCount.mockResolvedValue({ count: 0 });
@@ -1218,7 +1222,7 @@ test("a published permission downgrade closes an owner-only delete confirmation"
 });
 
 test("an in-flight delete reports backend rejection after a transient list omission", async () => {
-  const deletion = deferred<undefined>();
+  const deletion = deferred<typeof DELETE_ACCEPTED>();
   const rejection = new Error("delete rejected");
   notebookApi.deleteNotebook.mockReturnValueOnce(deletion.promise);
   render(<Harness />);
@@ -1237,7 +1241,7 @@ test("an in-flight delete reports backend rejection after a transient list omiss
 });
 
 test("dismissing the confirmation does not withdraw a DELETE already on the wire", async () => {
-  const deletion = deferred<undefined>();
+  const deletion = deferred<typeof DELETE_ACCEPTED>();
   notebookApi.deleteNotebook.mockReturnValueOnce(deletion.promise);
   render(<Harness />);
   publish([notebook("a")]);
@@ -1249,15 +1253,17 @@ test("dismissing the confirmation does not withdraw a DELETE already on the wire
   expect(value!.deletion).toBeNull();
   expect(effects.notify).toHaveBeenCalledWith("删除请求仍在进行；结果稍后会反映在列表里。");
 
-  await act(async () => deletion.resolve(undefined));
+  await act(async () => deletion.resolve(DELETE_ACCEPTED));
   await deleting;
   expect(effects.onNotebookDeleted).toHaveBeenCalledWith("a");
-  expect(effects.notify).toHaveBeenCalledWith("笔记本已删除");
+  expect(effects.notify).toHaveBeenCalledWith(
+    deleteScheduledText("a", DELETE_ACCEPTED.delete_after),
+  );
   expect(value!.rows).toEqual([]);
 });
 
 test("a delete that fails after its confirmation was dismissed still reports", async () => {
-  const deletion = deferred<undefined>();
+  const deletion = deferred<typeof DELETE_ACCEPTED>();
   const rejection = new Error("delete rejected");
   notebookApi.deleteNotebook.mockReturnValueOnce(deletion.promise);
   render(<Harness />);
@@ -1277,11 +1283,11 @@ test("a delete that fails after its confirmation was dismissed still reports", a
 test("a confirmation reopened over a pending DELETE shows it pending and recovers", async () => {
   // 关掉再打开时行还在（DELETE 没落定），一个崭新的 busy:false 确认框会给出一个
   // confirmDelete 永远静默拒绝的「确认」——挂死的请求下它永远按不动（codex #629 R1 P2）。
-  const first = deferred<undefined>();
+  const first = deferred<typeof DELETE_ACCEPTED>();
   const rejection = new Error("delete rejected");
   notebookApi.deleteNotebook
     .mockReturnValueOnce(first.promise)
-    .mockResolvedValueOnce(undefined);
+    .mockResolvedValueOnce(DELETE_ACCEPTED);
   render(<Harness />);
   publish([notebook("a")]);
   await act(async () => value!.openDelete("a"));
@@ -1307,7 +1313,7 @@ test("a confirmation reopened over a pending DELETE shows it pending and recover
 test("a confirmation reopened after re-login still recovers from its old DELETE", async () => {
   // 与设置弹窗同一条：deletingRef 按 actor id 记账，登出再登录回同一账号时键还在，
   // 释放若绑在发起时的 generation 上，重开的框会永远卡在「删除中」（codex #629 R2 P2）。
-  const stuck = deferred<undefined>();
+  const stuck = deferred<typeof DELETE_ACCEPTED>();
   notebookApi.deleteNotebook.mockReturnValueOnce(stuck.promise);
   const view = render(<Harness />);
   publish([notebook("a")]);
@@ -1329,7 +1335,7 @@ test("a confirmation reopened after re-login still recovers from its old DELETE"
 });
 
 test("a completed delete does not close a confirmation opened for another notebook", async () => {
-  const stuck = deferred<undefined>();
+  const stuck = deferred<typeof DELETE_ACCEPTED>();
   notebookApi.deleteNotebook.mockReturnValueOnce(stuck.promise);
   render(<Harness />);
   publish([notebook("a"), notebook("b")]);
@@ -1341,7 +1347,7 @@ test("a completed delete does not close a confirmation opened for another notebo
   await act(async () => value!.openDelete("b"));
   expect(value!.deletion?.target.id).toBe("b");
 
-  await act(async () => stuck.resolve(undefined));
+  await act(async () => stuck.resolve(DELETE_ACCEPTED));
   await deleting;
 
   // A 删成功不该顺手把 B 的确认框关掉（codex #629 R3 P2）。
@@ -1352,7 +1358,7 @@ test("a completed delete does not close a confirmation opened for another notebo
 test("a delete that fails after re-login reports into the dialog it recovered", async () => {
   // 确认框刻意跨 actor 世代显示为在途，那么它的失败也必须按同一条身份权威汇报——
   // 否则忙碌位悄悄清掉，用户得不到任何解释（codex #629 R4 P2）。
-  const stuck = deferred<undefined>();
+  const stuck = deferred<typeof DELETE_ACCEPTED>();
   const rejection = new Error("delete rejected");
   notebookApi.deleteNotebook.mockReturnValueOnce(stuck.promise);
   const view = render(<Harness />);
@@ -1387,7 +1393,7 @@ test("closing the confirmation without a delete in flight says nothing", async (
 });
 
 test("delete is single-flight and a pre-delete list cannot resurrect its tombstone", async () => {
-  const deletion = deferred<undefined>();
+  const deletion = deferred<typeof DELETE_ACCEPTED>();
   notebookApi.deleteNotebook.mockReturnValueOnce(deletion.promise);
   render(<Harness />);
   publish([notebook("a")]);
@@ -1400,7 +1406,7 @@ test("delete is single-flight and a pre-delete list cannot resurrect its tombsto
     void value!.confirmDelete();
   });
   expect(notebookApi.deleteNotebook).toHaveBeenCalledTimes(1);
-  await act(async () => deletion.resolve(undefined));
+  await act(async () => deletion.resolve(DELETE_ACCEPTED));
   await deleting;
   expect(value!.rows).toEqual([]);
   act(() => { value!.commitListSnapshot(staleRead, [notebook("a")]); });
@@ -1408,10 +1414,10 @@ test("delete is single-flight and a pre-delete list cannot resurrect its tombsto
 });
 
 test("delete releases its single-flight key after failure and permits one retry", async () => {
-  const first = deferred<undefined>();
+  const first = deferred<typeof DELETE_ACCEPTED>();
   notebookApi.deleteNotebook
     .mockReturnValueOnce(first.promise)
-    .mockResolvedValueOnce(undefined);
+    .mockResolvedValueOnce(DELETE_ACCEPTED);
   render(<Harness />);
   publish([notebook("a")]);
   await act(async () => value!.openDelete("a"));
@@ -1445,8 +1451,25 @@ test("only a post-delete snapshot may garbage-collect a tombstone", async () => 
   expect(value!.rows).toEqual([]);
 });
 
+test("a cancelled deletion lifts the tombstone so the notebook comes back", async () => {
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openDelete("a"));
+  await act(async () => value!.confirmDelete());
+  expect(value!.rows).toEqual([]);
+  // The tombstone outlives any read that still shows the notebook ...
+  publish([notebook("a")]);
+  expect(value!.rows).toEqual([]);
+  // ... until the owner cancels the deletion inside its window.
+  const refreshes = vi.mocked(effects.refreshComposite).mock.calls.length;
+  act(() => { value!.showCancelledNotebook(notebook("a")); });
+  expect(vi.mocked(effects.refreshComposite).mock.calls.length).toBe(refreshes + 1);
+  publish([notebook("a")]);
+  expect(value!.rows.map((row) => row.id)).toEqual(["a"]);
+});
+
 test("a delete completed across actor A to B to A removes the restored A card", async () => {
-  const deletion = deferred<undefined>();
+  const deletion = deferred<typeof DELETE_ACCEPTED>();
   notebookApi.deleteNotebook.mockReturnValueOnce(deletion.promise);
   const view = render(<Harness />);
   publish([notebook("a")]);
@@ -1462,7 +1485,7 @@ test("a delete completed across actor A to B to A removes the restored A card", 
   publish([notebook("a")]);
   expect(value!.rows.map((row) => row.id)).toEqual(["a"]);
 
-  await act(async () => deletion.resolve(undefined));
+  await act(async () => deletion.resolve(DELETE_ACCEPTED));
   await deleting;
   expect(value!.rows).toEqual([]);
 });

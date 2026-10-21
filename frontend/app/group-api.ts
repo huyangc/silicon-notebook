@@ -181,8 +181,16 @@ export const removeGroupMember = (groupId: string, userId: string): Promise<void
 export const leaveGroup = (groupId: string): Promise<void> =>
   requestVoid(`/groups/${groupId}/membership`, { method: "DELETE", tag: TAG });
 
-/** 退群后会看不到的一本笔记本(后端 `GroupLeavePreviewNotebook` 的镜像)。 */
-export type GroupLeaveNotebook = { notebook_id: string; name: string; memory_count: number };
+/** 退群后会看不到的一本笔记本(后端 `GroupLeavePreviewNotebook` 的镜像)。
+ *  `pending_delete`:所有者已删除它、正在一天的删除窗口里(`delete_after` 起永久删除)
+ *  ——退群后连导出的机会也没了。旧服务端不带这两个字段时按「不在窗口里」读。 */
+export type GroupLeaveNotebook = {
+  notebook_id: string;
+  name: string;
+  memory_count: number;
+  pending_delete?: boolean;
+  delete_after?: string | null;
+};
 
 /** 本人退出这个群组之后,哪些笔记本里自己的记忆会看不到(后端 `GroupLeavePreview`)。
  *  只列本人有记忆、退群后失去读权的笔记本;退群不删除记忆。数字全由服务端给出。 */
@@ -208,7 +216,14 @@ export function parseGroupLeavePreview(raw: unknown): GroupLeavePreview {
       || typeof row.name !== "string" || !isCount(row.memory_count)) {
       throw new Error("malformed group leave preview");
     }
-    return { notebook_id: row.notebook_id, name: row.name, memory_count: row.memory_count };
+    const pending = row.pending_delete === true && typeof row.delete_after === "string";
+    return {
+      notebook_id: row.notebook_id,
+      name: row.name,
+      memory_count: row.memory_count,
+      pending_delete: pending,
+      delete_after: pending ? row.delete_after : null,
+    };
   });
   return { notebook_count: body.notebook_count, memory_count: body.memory_count, notebooks };
 }

@@ -55,6 +55,9 @@ function authenticationServer(options: ServerOptions = {}) {
     if (path === "/api/auth/login") return Response.json({ token: "new-local-session", user: { id: "user-1", username: "alice", role: "user", ui_mode: "auto", search_profile: null } });
     if (path === "/api/notebooks") return Response.json([]);
     if (path === "/api/me/pending-actions") return Response.json({ count: 0, items: [] });
+    // The notebook list's deletion-window block reads its notices (fail-closed
+    // when unreadable, so the fixture answers it).
+    if (path === "/api/me/notebook-deletions") return Response.json({ items: [] });
     if (path === "/api/me/pending-actions/stream") {
       // Keep the request pending: the test observes admission, not reconnects.
       return new Promise<Response>(() => {});

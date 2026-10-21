@@ -1,4 +1,4 @@
-import { requestJson, requestVoid } from "./api-client.ts";
+import { requestJson } from "./api-client.ts";
 import type {
   NotebookAnalytics,
   NotebookContentOverview,
@@ -80,8 +80,12 @@ export const setNotebookIndexingPipeline = (id: string, pipelineId: string | nul
     body: JSON.stringify({ pipeline_id: pipelineId }),
   });
 
+/** 202 `{status: "pending_delete", delete_after}`:这本笔记本进入一天的删除窗口——此刻起
+ *  对所有人不可用,`delete_after`(UTC ISO)起永久删除,在此之前主人可以撤销。 */
+export type NotebookDeleteResponse = Readonly<{ status: string; delete_after: string }>;
+
 export const deleteNotebook = (id: string) =>
-  requestVoid(`/notebooks/${id}`, { ...options, method: "DELETE" });
+  requestJson<NotebookDeleteResponse>(`/notebooks/${id}`, { ...options, method: "DELETE" });
 
 export const fetchNotebookAnalytics = (id: string) =>
   requestJson<NotebookAnalytics>(`/notebooks/${id}/analytics`, options);

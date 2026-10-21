@@ -5,6 +5,7 @@ import { Bell } from "lucide-react";
 import { performApiRequest } from "./api-client.ts";
 import { getToken } from "./auth";
 import { itemSig, currentSigs, doneMessage, pruneSigs, pendingView, askElapsedLabel, pendingItemOrigin } from "./pending-actions";
+import { bellDeletionHint, bellDeletionLabel } from "./notebook-deletion-copy.ts";
 
 // 「进行中的提问」在铃铛打开时的重算间隔。快照只在提问起止时推送,已进行时长要
 // 自己走时钟;只在面板打开且真有在途提问时起表,关掉即停。
@@ -19,7 +20,15 @@ const saveSigs = (key: string, v: string[]) => {
 };
 
 export type PendingItem = {
-  type: "report_outline" | "governance" | "index" | "paper_meta" | "share_request" | "ask";
+  type:
+    | "report_outline" | "governance" | "index" | "paper_meta" | "share_request" | "ask"
+    | "notebook_pending_delete";
+  // notebook_pending_delete:正在一天删除窗口里、与我有关的笔记本(我是主人,或我在那里
+  // 有记忆)。计入未读;点击打开笔记本列表顶部的区块并定位到这一行。
+  delete_after?: string;
+  is_owner?: boolean;
+  memory_count?: number;
+  transferable_count?: number;
   // share_request 是**组维度**的项——没有 notebook,所以这两个字段对它是可选/空。
   notebook_id?: string;
   notebook_name?: string;
@@ -257,7 +266,9 @@ export function PendingBell(props: {
   };
 
   const groups: { key: string; label: string; items: PendingItem[] }[] = [
-    // 排在最前:离开页面后回来找「我刚才那个问题跑到哪了」,是打开铃铛最常见的动机。
+    // 有截止时刻的排最前:过了 delete_after,里面的记忆就再也导不出来了。
+    { key: "notebook_pending_delete", label: "即将永久删除的笔记本", items: view.visibleItems.filter((i) => i.type === "notebook_pending_delete") },
+    // 离开页面后回来找「我刚才那个问题跑到哪了」,是打开铃铛最常见的动机。
     { key: "ask", label: "进行中的提问", items: view.visibleItems.filter((i) => i.type === "ask") },
     { key: "report_outline", label: "深度报告待确认", items: view.visibleItems.filter((i) => i.type === "report_outline") },
     { key: "share_request", label: "共享申请", items: view.visibleItems.filter((i) => i.type === "share_request") },
@@ -267,6 +278,9 @@ export function PendingBell(props: {
   ];
 
   const labelFor = (it: PendingItem): string => {
+    if (it.type === "notebook_pending_delete") {
+      return bellDeletionLabel(it.notebook_name ?? "", it.delete_after ?? "");
+    }
     if (it.type === "report_outline") return `深度报告《${it.title}》`;
     if (it.type === "ask") {
       // 库名已由 pending-row-nb 单独呈现,这里不再重复(与报告条目同一处理)。
@@ -339,6 +353,9 @@ export function PendingBell(props: {
                         改成「有库名」——名字为空(旧数据/库已删)时不渲染一个空格子。 */}
                     {pendingItemOrigin(it) && <span className="pending-row-nb">{pendingItemOrigin(it)}</span>}
                     <span className="pending-row-label">{labelFor(it)}</span>
+                    {it.type === "notebook_pending_delete" && bellDeletionHint(Boolean(it.is_owner), it.memory_count ?? 0) && (
+                      <span className="pending-row-hint">{bellDeletionHint(Boolean(it.is_owner), it.memory_count ?? 0)}</span>
+                    )}
                   </span>
                   <span className="pending-row-x" title="关掉"
                         onClick={(e) => { e.stopPropagation(); dismissItem(itemSig(it)); }}>×</span>

@@ -15,6 +15,7 @@ import {
   leaveHiddenText,
   useLeaveExports,
 } from "../../app/group-leave-dialog.tsx";
+import { LEAVE_PENDING_TAG, leavePendingDeleteText } from "../../app/notebook-deletion-copy.ts";
 import { anchorAt } from "../../app/use-notebook-exit.ts";
 
 // 「退出群组」确认面板:先读服务端的退群预览(会看不到几个笔记本、几条本人的记忆),
@@ -184,7 +185,30 @@ test("读不懂的预览当失败处理,不放人确认", async () => {
   expect(await within(dialog).findByRole("alert")).toHaveTextContent(LEAVE_PREVIEW_UNAVAILABLE_TEXT);
   expect(() => parseGroupLeavePreview({ notebook_count: 1, memory_count: 1, notebooks: [{ notebook_id: "", name: "", memory_count: 1 }] }))
     .toThrow();
-  expect(parseGroupLeavePreview(PREVIEW)).toEqual(PREVIEW);
+  // An older server sends no window fields: every row reads "not inside a window".
+  expect(parseGroupLeavePreview(PREVIEW)).toEqual({
+    ...PREVIEW,
+    notebooks: PREVIEW.notebooks.map((row) => ({ ...row, pending_delete: false, delete_after: null })),
+  });
+});
+
+test("所有者已删除、正在删除窗口里的笔记本:标「即将删除」,行下提示退群后无法再导出", async () => {
+  const deleteAfter = "2026-10-23T08:00:00+00:00";
+  installServer([previewOf({
+    notebook_count: 2,
+    memory_count: 5,
+    notebooks: [
+      { notebook_id: "nb-a", name: "封装工艺库", memory_count: 3, pending_delete: true, delete_after: deleteAfter },
+      { notebook_id: "nb-b", name: "测试库", memory_count: 2, pending_delete: false, delete_after: null },
+    ],
+  })]);
+  mount();
+  const dialog = await panel();
+  const [pendingRow, liveRow] = await within(dialog).findAllByRole("listitem");
+  expect(within(pendingRow).getByText(LEAVE_PENDING_TAG)).toBeInTheDocument();
+  expect(within(pendingRow).getByText(leavePendingDeleteText(deleteAfter))).toBeInTheDocument();
+  expect(within(pendingRow).getByRole("button", { name: "导出「封装工艺库」里你的 3 条记忆" })).toBeEnabled();
+  expect(within(liveRow).queryByText(LEAVE_PENDING_TAG)).toBeNull();
 });
 
 test("导出只导这一本:结果落在按钮自身;导出没完不能确认退出", async () => {

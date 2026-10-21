@@ -7,10 +7,8 @@ import {
   parseMemoryHash,
   parseWorkspaceHash,
 } from "../../app/memory-model.ts";
-import {
-  NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING,
-  openMemoryDeepLink,
-} from "../../app/workspace-transitions.ts";
+import { deleteConfirmText } from "../../app/notebook-deletion-copy.ts";
+import { openMemoryDeepLink } from "../../app/workspace-transitions.ts";
 import { CHAT_MODES } from "../../app/workspace-model.ts";
 import {
   callSitesIn,
@@ -214,6 +212,9 @@ test("global Memory navigation owns and forwards explicit destination state", as
 
 
 test("notebook deletion warning states private lifecycle cleanup without counts", () => {
-  assert.match(NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING, /私有记忆/);
-  assert.doesNotMatch(NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING, /\d/);
+  // The owner's confirmation names everyone's own Memory as deleted with the
+  // notebook, and never how many members or items there are.
+  const text = deleteConfirmText("资料库");
+  assert.match(text, /每个人各自保存在这里的记忆/);
+  assert.doesNotMatch(text, /\d/);
 });
