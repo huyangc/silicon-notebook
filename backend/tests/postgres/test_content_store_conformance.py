@@ -537,57 +537,67 @@ def test_create_report_records_submitted_via(content_harness):
 def test_conversation_submitted_via_comes_from_its_jobs(content_harness):
     """The PostgreSQL twin of the SQLite test of the same name: ``conversations``
     has no entry-point column, so the list/detail read it from ``ask_jobs`` --
-    the conversation's is its EARLIEST job's, a turn's is the job whose
-    ``answer_id`` is that answer, and no job row reads as "" (not recorded).
-    The seams stamp every row with one instant, so the oldest-first order here
-    is the id tie-break the SQL writes (``j.id COLLATE "C"``)."""
+    the conversation's is its EARLIEST job's (by ``created_at``, not by id), a
+    turn's is the job whose ``answer_id`` is that answer, and no job row reads as
+    "" (not recorded). So does a conversation with an answer OLDER than its
+    earliest job: an MCP follow-up on turns saved without job rows. The seams
+    stamp every row with one instant, so steps that need distinct times set
+    ``created_at`` explicitly."""
     ask = content_harness.ask
 
-    # 1) first turn submitted from the web, the follow-up through MCP
-    first_request = AskRequest(question="asked in the browser")
-    first_job, conversation_id = ask.begin_durable_job(
-        "nb-content", first_request, "chunk", "user-content", submitted_via="web"
-    )
-    first_answer = ask.save_answer(
-        "nb-content", conversation_id, first_request.question,
-        AskResponse(conclusion="c1", conversation_id=conversation_id), "user-content",
-    )
-    assert ask.finish_job(first_job, "done", answer_id=first_answer) == conversation_id
-    follow_up = AskRequest(
-        question="asked by an agent", conversation_id=conversation_id
-    )
-    second_job, same_conversation = ask.begin_durable_job(
-        "nb-content", follow_up, "chunk", "user-content", submitted_via="mcp"
+    def ask_turn(question, via, conversation_id=None):
+        request = AskRequest(question=question, conversation_id=conversation_id)
+        job_id, conversation = ask.begin_durable_job(
+            "nb-content", request, "chunk", "user-content", submitted_via=via
+        )
+        answer_id = ask.save_answer(
+            "nb-content", conversation, question,
+            AskResponse(conclusion=question, conversation_id=conversation),
+            "user-content",
+        )
+        assert ask.finish_job(job_id, "done", answer_id=answer_id) == conversation
+        return job_id, conversation, answer_id
+
+    def set_job_time(job_id, stamp):
+        with content_harness.database.write() as connection:
+            connection.execute(
+                "UPDATE ask_jobs SET created_at=%s::timestamptz WHERE id=%s",
+                (stamp, job_id),
+            )
+
+    def listed_via(conversation_id):
+        rows = ask.list_conversations("nb-content", "user-content")
+        return next(c for c in rows if c.id == conversation_id).submitted_via
+
+    # 1) first turn submitted from the web, the follow-up through MCP. Every
+    #    row shares one instant here (job and answer too): an answer is not
+    #    OLDER than its job, so the conversation keeps its first job's value.
+    first_job, conversation_id, first_answer = ask_turn("asked in the browser", "web")
+    _, same_conversation, second_answer = ask_turn(
+        "asked by an agent", "mcp", conversation_id
     )
     assert same_conversation == conversation_id
-    second_answer = ask.save_answer(
-        "nb-content", conversation_id, follow_up.question,
-        AskResponse(conclusion="c2", conversation_id=conversation_id), "user-content",
-    )
-    assert ask.finish_job(second_job, "done", answer_id=second_answer) == conversation_id
-
-    listed = {c.id: c for c in ask.list_conversations("nb-content", "user-content")}
-    assert listed[conversation_id].submitted_via == "web"
+    assert listed_via(conversation_id) == "web"
     detail = ask.get_conversation(conversation_id)
     assert detail.submitted_via == "web"
     assert [(t.answer_id, t.submitted_via) for t in detail.turns] == [
         (first_answer, "web"), (second_answer, "mcp")]
 
     # 2) answers with no job row at all: not recorded, at both levels
+    legacy = "2020-03-01T00:00:00+00:00"
     with content_harness.database.write() as connection:
         connection.execute(
             "INSERT INTO conversations(id,notebook_id,title,created_by,created_at,"
             "updated_at) VALUES (%s,%s,%s,%s,%s,%s)",
-            ("conv-no-job-rows", "nb-content", "bare", "user-content", NOW, NOW),
+            ("conv-no-job-rows", "nb-content", "bare", "user-content", legacy, legacy),
         )
         connection.execute(
             "INSERT INTO answers(id,notebook_id,question,payload,created_at,"
             "conversation_id) VALUES (%s,%s,%s,%s::jsonb,%s,%s)",
             ("ans-no-job-row", "nb-content", "q",
-             json.dumps({"conclusion": "old answer"}), NOW, "conv-no-job-rows"),
+             json.dumps({"conclusion": "old answer"}), legacy, "conv-no-job-rows"),
         )
-    listed = {c.id: c for c in ask.list_conversations("nb-content", "user-content")}
-    assert listed["conv-no-job-rows"].submitted_via == ""
+    assert listed_via("conv-no-job-rows") == ""
     bare = ask.get_conversation("conv-no-job-rows")
     assert bare.submitted_via == ""
     assert [t.submitted_via for t in bare.turns] == [""]
@@ -601,14 +611,39 @@ def test_conversation_submitted_via_comes_from_its_jobs(content_harness):
     )
     assert ask.get_conversation("conv-no-job-rows").submitted_via == ""
 
-    # 4) two job rows naming one answer: the older job's entry point wins
+    # 4) an older conversation whose first turn has no job row, continued
+    #    through MCP: the follow-up's job is the conversation's FIRST job, but an
+    #    answer is older than it, so it says nothing about where it began
+    _, _, legacy_answer = ask_turn("continued by an agent", "mcp", "conv-no-job-rows")
+    assert listed_via("conv-no-job-rows") == ""
+    continued = ask.get_conversation("conv-no-job-rows")
+    assert continued.submitted_via == ""
+    assert [(t.answer_id, t.submitted_via) for t in continued.turns] == [
+        ("ans-no-job-row", ""), (legacy_answer, "mcp")]
+
+    # 5) "earliest" is a point in time, not a row order: turn the clocks around
+    #    so the job created FIRST (web, the lower id) is the later one by
+    #    created_at. Both jobs still predate their answers.
+    web_job, reversed_id, web_answer = ask_turn("reversed web", "web")
+    mcp_job, same_reversed, mcp_answer = ask_turn("reversed mcp", "mcp", reversed_id)
+    assert same_reversed == reversed_id
+    set_job_time(web_job, "2020-01-02T00:00:00+00:00")
+    set_job_time(mcp_job, "2020-01-01T00:00:00+00:00")
+    assert listed_via(reversed_id) == "mcp"
+    reversed_detail = ask.get_conversation(reversed_id)
+    assert reversed_detail.submitted_via == "mcp"
+    assert [(t.answer_id, t.submitted_via) for t in reversed_detail.turns] == [
+        (web_answer, "web"), (mcp_answer, "mcp")]
+
+    # 6) two job rows naming one answer: the one with the earlier created_at
+    #    wins (here the one with the higher id), whatever the row order
     with content_harness.database.write() as connection:
         connection.execute(
-            "UPDATE ask_jobs SET answer_id=%s WHERE id=%s", (first_answer, second_job)
+            "UPDATE ask_jobs SET answer_id=%s WHERE id=%s", (web_answer, mcp_job)
         )
-    shared = ask.get_conversation(conversation_id)
+    shared = ask.get_conversation(reversed_id)
     assert [(t.answer_id, t.submitted_via) for t in shared.turns] == [
-        (first_answer, "web"), (second_answer, "")]
+        (web_answer, "mcp"), (mcp_answer, "")]
 
 
 def test_recent_user_ask_traces_scopes_to_the_reading_member(content_harness):

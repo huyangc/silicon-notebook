@@ -229,8 +229,10 @@ def test_conversation_routes(tmp_path, monkeypatch):
 def test_conversation_submitted_via_comes_from_its_jobs(repo):
     """``conversations`` has no entry-point column, so the list/detail read it
     from ``ask_jobs``: the conversation's is its EARLIEST job's, a turn's is the
-    job whose ``answer_id`` is that answer. No job row (an older answer, imported
-    data) reads as "" -- not recorded -- never a guess."""
+    job whose ``answer_id`` is that answer ("earliest" by ``created_at``, not by
+    row order). No job row (an older answer, imported data) reads as "" -- not
+    recorded -- never a guess; so does a conversation with an answer OLDER than
+    its earliest job (an MCP follow-up on turns saved without job rows)."""
     from app.models.schemas import AskResponse
 
     nb = _seed(repo)
@@ -261,7 +263,7 @@ def test_conversation_submitted_via_comes_from_its_jobs(repo):
 
     # 2) answers with no job row at all: not recorded, at both levels
     bare = "conv-no-job-rows"
-    stamp = "2026-07-29T09:05:00+08:00"
+    stamp = "2020-03-01T09:05:00+08:00"
     with repo._connect() as db:
         db.execute(
             "INSERT INTO conversations "
@@ -288,12 +290,57 @@ def test_conversation_submitted_via_comes_from_its_jobs(repo):
         "chunk", user_id, submitted_via="mcp", output="evidence")
     assert repo.get_conversation(bare).submitted_via == ""
 
-    # 4) two job rows naming one answer: the older job's entry point wins
+    # 4) an older conversation whose first turn has no job row, continued through
+    #    MCP: the follow-up's job is the conversation's FIRST job, but an answer
+    #    is older than it, so it says nothing about where the conversation began
+    legacy_follow_up = AskRequest(
+        question="continued by an agent", mode="chunk", conversation_id=bare)
+    legacy_job, same_bare = store.begin_durable_job(
+        nb.id, legacy_follow_up, "chunk", user_id, submitted_via="mcp")
+    assert same_bare == bare
+    legacy_answer = store.save_answer_for_job(
+        legacy_job, nb.id, bare, "continued by an agent",
+        AskResponse(conclusion="c3", conversation_id=bare), user_id)
+    assert next(c for c in repo.list_conversations(nb.id) if c.id == bare).submitted_via == ""
+    continued = repo.get_conversation(bare)
+    assert continued.submitted_via == ""
+    assert [(t.answer_id, t.submitted_via) for t in continued.turns] == [
+        ("ans-no-job-row", ""), (legacy_answer, "mcp")]
+
+    # 5) "earliest" is a point in time, not a row order: turn the clocks around
+    #    so the job inserted FIRST (web) is the later one by created_at. Both
+    #    jobs still predate their answers, so this is an ordinary conversation.
+    web_job, rid = store.begin_durable_job(
+        nb.id, AskRequest(question="reversed web", mode="chunk"), "chunk", user_id,
+        submitted_via="web")
+    web_answer = store.save_answer_for_job(
+        web_job, nb.id, rid, "reversed web",
+        AskResponse(conclusion="r1", conversation_id=rid), user_id)
+    mcp_job, same_rid = store.begin_durable_job(
+        nb.id, AskRequest(question="reversed mcp", mode="chunk", conversation_id=rid),
+        "chunk", user_id, submitted_via="mcp")
+    assert same_rid == rid
+    mcp_answer = store.save_answer_for_job(
+        mcp_job, nb.id, rid, "reversed mcp",
+        AskResponse(conclusion="r2", conversation_id=rid), user_id)
     with repo._connect() as db:
-        db.execute("UPDATE ask_jobs SET answer_id=? WHERE id=?", (first_answer, second_job))
-    shared = repo.get_conversation(cid)
+        db.execute("UPDATE ask_jobs SET created_at=? WHERE id=?",
+                   ("2020-01-02T00:00:00+00:00", web_job))
+        db.execute("UPDATE ask_jobs SET created_at=? WHERE id=?",
+                   ("2020-01-01T00:00:00+00:00", mcp_job))
+    assert next(c for c in repo.list_conversations(nb.id) if c.id == rid).submitted_via == "mcp"
+    reversed_detail = repo.get_conversation(rid)
+    assert reversed_detail.submitted_via == "mcp"
+    assert [(t.answer_id, t.submitted_via) for t in reversed_detail.turns] == [
+        (web_answer, "web"), (mcp_answer, "mcp")]
+
+    # 6) two job rows naming one answer: the one with the earlier created_at
+    #    wins (here the one inserted later), whatever the row order
+    with repo._connect() as db:
+        db.execute("UPDATE ask_jobs SET answer_id=? WHERE id=?", (web_answer, mcp_job))
+    shared = repo.get_conversation(rid)
     assert [(t.answer_id, t.submitted_via) for t in shared.turns] == [
-        (first_answer, "web"), (second_answer, "")]
+        (web_answer, "mcp"), (mcp_answer, "")]
 
 
 def test_conversation_routes_carry_submitted_via(tmp_path, monkeypatch):
