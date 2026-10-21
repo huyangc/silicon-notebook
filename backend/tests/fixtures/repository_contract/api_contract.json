@@ -11274,6 +11274,48 @@
           "title": "ReportExportRequest",
           "type": "object"
         },
+        "ReportFollowupScope": {
+          "description": "Body of ``GET /notebooks/{id}/reports/{rid}/followup``: the retrieval\nscope a \"follow up on this report\" Ask starts from -- the scope the report\nwas generated under, reduced to what still exists.\n\n``title`` is the report's ``reports.question`` snapshot, whole. A report\ngenerated without narrowing comes back as both dimensions in their \"nothing\nexcluded\" (whole-notebook) shape. ``dropped_*`` count frozen selections that\nare no longer selectable (the source is no longer visible, the reference\nlibrary is no longer mounted); when both dimensions end up empty the scope\nfalls back to everything and ``fell_back_to_all`` says so.",
+          "properties": {
+            "base_scope": {
+              "$ref": "#/components/schemas/BaseNotebookScope"
+            },
+            "dropped_libraries": {
+              "default": 0,
+              "title": "Dropped Libraries",
+              "type": "integer"
+            },
+            "dropped_sources": {
+              "default": 0,
+              "title": "Dropped Sources",
+              "type": "integer"
+            },
+            "fell_back_to_all": {
+              "default": false,
+              "title": "Fell Back To All",
+              "type": "boolean"
+            },
+            "report_id": {
+              "title": "Report Id",
+              "type": "string"
+            },
+            "source_scope": {
+              "$ref": "#/components/schemas/SourceScope"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "report_id",
+            "title",
+            "source_scope",
+            "base_scope"
+          ],
+          "title": "ReportFollowupScope",
+          "type": "object"
+        },
         "ReportGenerateRequest": {
           "properties": {
             "depth": {
@@ -11312,6 +11354,81 @@
             "resolved_question"
           ],
           "title": "ReportIntentConfirm",
+          "type": "object"
+        },
+        "ReportLinkCheck": {
+          "description": "The verdict ``ReportLinkCheckRequest`` gets back: the same function the\nrun itself applies, evaluated under the same ceiling, so what the tag says\nbefore the send is what the turn then does.\n\n``reason_code`` / ``reason`` are empty exactly when ``readable``; ``reason``\nis displayable Chinese (``app.domain.report_followup``).",
+          "properties": {
+            "readable": {
+              "title": "Readable",
+              "type": "boolean"
+            },
+            "reason": {
+              "default": "",
+              "title": "Reason",
+              "type": "string"
+            },
+            "reason_code": {
+              "default": "",
+              "title": "Reason Code",
+              "type": "string"
+            },
+            "report_id": {
+              "title": "Report Id",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "report_id",
+            "title",
+            "readable"
+          ],
+          "title": "ReportLinkCheck",
+          "type": "object"
+        },
+        "ReportLinkCheckRequest": {
+          "description": "Body of ``POST /notebooks/{id}/ask/report-check``: \"would this question\nread the attached report under these settings?\", asked before the question\nis sent so the verdict can sit next to the report tag. Carries only what\nthe verdict depends on -- the report, the submission mode and the two scope\ndimensions -- never the question text.",
+          "properties": {
+            "base_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/BaseNotebookScope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mode": {
+              "default": "chunk",
+              "title": "Mode",
+              "type": "string"
+            },
+            "report_id": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Report Id",
+              "type": "string"
+            },
+            "source_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/SourceScope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "report_id"
+          ],
+          "title": "ReportLinkCheckRequest",
           "type": "object"
         },
         "ReportOutlineUpdate": {
@@ -20653,6 +20770,55 @@
           "summary": "Cancel Ask Job"
         }
       },
+      "/api/notebooks/{notebook_id}/ask/report-check": {
+        "post": {
+          "operationId": "check_ask_report_link_api_notebooks__notebook_id__ask_report_check_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReportLinkCheckRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ReportLinkCheck"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Check Ask Report Link"
+        }
+      },
       "/api/notebooks/{notebook_id}/ask/stream": {
         "post": {
           "operationId": "ask_stream_api_notebooks__notebook_id__ask_stream_post",
@@ -25766,6 +25932,54 @@
             }
           },
           "summary": "Cancel Report Endpoint"
+        }
+      },
+      "/api/notebooks/{notebook_id}/reports/{report_id}/followup": {
+        "get": {
+          "operationId": "get_report_followup_scope_api_notebooks__notebook_id__reports__report_id__followup_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "report_id",
+              "required": true,
+              "schema": {
+                "title": "Report Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ReportFollowupScope"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Report Followup Scope"
         }
       },
       "/api/notebooks/{notebook_id}/reports/{report_id}/generate": {

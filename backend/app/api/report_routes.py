@@ -19,6 +19,7 @@ from app.models.reports import (
     ReportIntentConfirm,
     ReportDetail,
     ReportExportRequest,
+    ReportFollowupScope,
     ReportGenerateRequest,
     ReportOutlineUpdate,
     ReportShareResponse,
@@ -54,8 +55,10 @@ from app.services.reports.intent_confirmation import (
 from app.models.source_scope import (
     BaseNotebookScope,
     ResolvedSourceScope,
+    SourceScope,
 )
 from app.api.ask_routes import (
+    _report_not_ready_error,
     _require_non_empty_scope,
     _validate_base_scope,
     _validate_source_scope,
@@ -401,6 +404,116 @@ def get_report(notebook_id: str, report_id: str) -> ReportDetail:
     repo = repository()
     r = _own_report_or_404(repo, notebook_id, report_id)
     return ReportDetail(**{k: v for k, v in r.items() if k in ReportDetail.model_fields})
+
+
+# The id list a submitted ``SourceScope`` may carry (``models.source_scope``:
+# ``source_ids`` ``max_length``). A frozen report scope is a server snapshot and
+# may be longer (a 48k-source notebook narrowed by unchecking a few), but the
+# scope this endpoint hands back is what the browser submits next, so it has to
+# fit the request model; ``test_report_followup_scope_cap_matches_the_request_model``
+# pins the equality.
+_SCOPE_IDS_MAX = 10_000
+
+
+def _stored_include_ids(stored: object, ids_key: str) -> list[str] | None:
+    """The ids a stored scope dimension was narrowed to, or None for "the whole
+    dimension": absent, not narrowed (an all-selected freeze is an include list
+    too, but it narrows nothing), not an include list, or malformed. Reading a
+    stored value that does not look right as "everything selected" only sets
+    the checkboxes the user can still change -- the ask itself re-freezes and
+    re-authorizes whatever it is sent."""
+    if not isinstance(stored, dict) or not stored.get("narrowed"):
+        return None
+    ids = stored.get(ids_key)
+    if stored.get("mode") != "include" or not isinstance(ids, list):
+        return None
+    return list(dict.fromkeys(item for item in ids if isinstance(item, str) and item))
+
+
+def _followup_source_scope(repo, notebook_id: str, kept: list[str]) -> SourceScope:
+    """``kept`` (the frozen selection that is still visible) as a scope the
+    browser can submit: the include list, or -- when that is longer than a
+    request may carry -- the complement as an exclude list (the shape the
+    browser itself uses for "all but a few"). Both too long: the selection has
+    no submittable form, and the user is told to choose by hand."""
+    if len(kept) <= _SCOPE_IDS_MAX:
+        return SourceScope(mode="include", source_ids=kept)
+    selected = set(kept)
+    excluded = [
+        source_id for source_id in repo.all_visible_source_ids(notebook_id)
+        if source_id not in selected
+    ]
+    if len(excluded) > _SCOPE_IDS_MAX:
+        raise user_error(409, "这份报告生成时勾选的资料太多，无法自动恢复检索范围，请手动选择后再提问")
+    return SourceScope(mode="exclude", source_ids=excluded)
+
+
+def _report_followup_scope(repo, notebook_id: str, report_id: str, row: dict) -> ReportFollowupScope:
+    """The retrieval scope a "follow up on this report" Ask starts from: the
+    scope the report was generated under (``understanding``'s frozen
+    ``source_scope`` / ``base_scope``), reduced to what can still be selected.
+
+    A dimension the report did not narrow comes back as the whole dimension
+    (``exclude`` + an empty list). A narrowed one is intersected with what
+    exists now -- ``visible_source_scope_snapshot`` for the notebook's sources,
+    the mount roster (the same one ``_validate_base_scope`` checks against) for
+    the reference libraries -- and what fell out is counted, not silently
+    dropped. When the narrowed selection of BOTH dimensions has nothing left
+    (the whole frozen selection is gone), a scope with nothing to search would
+    be refused by the Ask box, so both dimensions go back to everything and
+    ``fell_back_to_all`` says so. Reads only.
+    """
+    understanding = row.get("understanding") or {}
+    frozen_sources = _stored_include_ids(understanding.get("source_scope"), "source_ids")
+    frozen_libraries = _stored_include_ids(understanding.get("base_scope"), "notebook_ids")
+    source_scope = SourceScope(mode="exclude", source_ids=[])
+    base_scope = BaseNotebookScope(mode="exclude", notebook_ids=[])
+    dropped_sources = dropped_libraries = 0
+    local_empty = base_empty = False
+    if frozen_sources is not None:
+        kept_sources, _universe = repo.visible_source_scope_snapshot(
+            notebook_id, frozen_sources
+        )
+        dropped_sources = len(frozen_sources) - len(kept_sources)
+        local_empty = not kept_sources
+        source_scope = _followup_source_scope(repo, notebook_id, kept_sources)
+    if frozen_libraries is not None or local_empty:
+        mounted = {ref.id for ref in repo.get_notebook(notebook_id).base_notebooks}
+        if frozen_libraries is None:
+            base_empty = not mounted
+        else:
+            kept_libraries = [item for item in frozen_libraries if item in mounted]
+            dropped_libraries = len(frozen_libraries) - len(kept_libraries)
+            base_empty = not kept_libraries
+            base_scope = BaseNotebookScope(mode="include", notebook_ids=kept_libraries)
+    fell_back = local_empty and base_empty
+    if fell_back:
+        source_scope = SourceScope(mode="exclude", source_ids=[])
+        base_scope = BaseNotebookScope(mode="exclude", notebook_ids=[])
+    return ReportFollowupScope(
+        report_id=report_id,
+        title=str(row.get("question") or ""),
+        source_scope=source_scope,
+        base_scope=base_scope,
+        dropped_sources=dropped_sources,
+        dropped_libraries=dropped_libraries,
+        fell_back_to_all=fell_back,
+    )
+
+
+@router.get("/notebooks/{notebook_id}/reports/{report_id}/followup",
+            response_model=ReportFollowupScope,
+            dependencies=[Depends(require_notebook_read)])
+def get_report_followup_scope(notebook_id: str, report_id: str) -> ReportFollowupScope:
+    # 说明写成注释而不是 docstring(OpenAPI 形状是冻结契约)。「就此追问」的起点:
+    # 报告生成时冻结的检索范围,减去如今已不存在的来源/已卸载的参考库(计数,不静默
+    # 丢)。门与报告其它端点同一道:行级 created_by(404 不区分「不存在」与「不是你的」),
+    # 再要求已完成(409)。只读。
+    repo = repository()
+    row = _own_report_or_404(repo, notebook_id, report_id)
+    if row.get("status") != "done":
+        raise _report_not_ready_error()
+    return _report_followup_scope(repo, notebook_id, report_id, row)
 
 
 @router.patch("/notebooks/{notebook_id}/reports/{report_id}/outline",
