@@ -25,7 +25,6 @@ from app.domain.evidence_fingerprint import element_text_sha
 from app.domain.source_display import summary_display_title
 from app.domain.source_positions import normalize_positions, positions_page
 from app.models.question_suggestions import QUESTION_SUGGESTION_REVISION_PAGE_SIZE
-from app.repositories.sqlite.memory_sql import memory_source_type_predicate
 from app.domain.promotion_source import PROMOTION_SOURCE_TYPE, presented_source_title
 from app.repositories.promotion_title_sql import (
     mapped_title_sql,

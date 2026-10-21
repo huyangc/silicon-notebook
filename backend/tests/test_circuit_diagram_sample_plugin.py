@@ -1044,7 +1044,7 @@ def test_unprintable_characters_are_replaced_so_core_admits_the_description(
     spy = _PostSpy(
         _answer_bytes(
             True,
-            netlist="R1​in﻿out 10k",
+            netlist="R1\u200bin\ufeffout 10k",
             function="分压　网络 说明",
         )
     )

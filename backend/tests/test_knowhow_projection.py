@@ -683,7 +683,7 @@ def test_project_table_sweeps_chunks_for_a_column_removed_from_the_table(
     row_id and reinserts only current columns, so it never had this bug)."""
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)
-    row_id = store.add_knowhow_row(table_id, {
+    store.add_knowhow_row(table_id, {
         cols["违例类型"]: "过冲问题",
         cols["现象识别"]: "- 观察上升沿过冲",
         cols["修复方法"]: "1. 增加阻尼电阻",

@@ -112,7 +112,7 @@ def test_pending_count_one_when_one_missing_kg(repo):
     """2 parsed sources, 1 with KG, 1 without → pending count == 1."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     src_with_kg = _insert_source(repo, nb.id)
-    src_no_kg = _insert_source(repo, nb.id)
+    _insert_source(repo, nb.id)
     # Give KG only to src_with_kg
     repo._test_insert_object(nb.id, "concept", {"name": "Oxide"}, source_id=src_with_kg)
     with repo._connect() as db:

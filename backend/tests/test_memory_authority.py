@@ -6,7 +6,7 @@ import re
 from app.eval.memory_agent_ab import run_agent_ab, run_fixed_agent_ab
 from app.eval.memory_retrieval import evaluate_cases, run_fixed_gold
 from app.models.schemas import MemoryHit
-from app.services.memory_retrieval import authority_rank, rerank_eligible_memory_hits
+from app.services.memory_retrieval import rerank_eligible_memory_hits
 from app.services.prompts import answer_prompt
 
 

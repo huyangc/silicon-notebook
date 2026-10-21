@@ -204,7 +204,7 @@ def test_small_notebook_keeps_legacy_fallback(repo, monkeypatch):
     assert called["n"] == 1, "small notebook must keep legacy rustworkx fallback"
     # cross-doc bridge should still work via the legacy path (byte-identical behavior)
     ids = [c.chunk_id for c in result]
-    assert f"cA" in ids and f"cB" in ids
+    assert "cA" in ids and "cB" in ids
     refusal = [e for e in events if e.get("kind") == "ppr_fallback_refused"]
     assert refusal == []
 

@@ -390,7 +390,7 @@ def test_sweep_driver_b_stops_recreating_after_the_attempt_ceiling(repo):
 def test_sweep_driver_b_respects_the_backoff_window_before_the_ceiling(repo):
     """还没到上限,但离上一次失败太近——不该立刻又补建一个。"""
     _seed_user_and_notebook(repo, status="deleting")
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timezone
 
     just_now = datetime.now(timezone.utc).astimezone().isoformat(timespec="microseconds")
     with repo._runtime.database.write() as db:

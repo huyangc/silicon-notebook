@@ -535,7 +535,7 @@ def test_high_fanout_dependents_are_predrained_in_bounded_pages(repo, monkeypatc
     monkeypatch.setattr(service, "_graph_drain_budget_rows", 3)
     notebook = repo.create_notebook(NotebookCreate(name="fanout"))
     _seed_graph(repo, notebook.id, doc_objects=4)
-    now = _now()
+    _now()
     with repo._runtime.database.write() as db:
         # 每个对象 5 条 provenance 行(合并对象形状):20 行 >> 预算 3。
         for i in range(4):
@@ -707,7 +707,6 @@ def test_final_reset_pins_isolation_as_the_first_statement(repo, monkeypatch):
     调用删掉(或挪到探针之后)→ 首语句不再是隔离钉,报红。PG 侧语句形由
     同名 static 的 fake-db 断言钉住:REPEATABLE READ 快照钉在第一条语句,
     事务内探针才原子界定其后所有 DELETE。"""
-    service = repo._runtime.knowledge_lifecycle
     notebook = repo.create_notebook(NotebookCreate(name="iso"))
     _seed_graph(repo, notebook.id, doc_objects=2)
 

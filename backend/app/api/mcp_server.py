@@ -16,7 +16,6 @@ from app.api.mcp_tools._shared import (
     AgentBearerMiddleware,
     PROGRESS_HEARTBEAT_SECONDS,
     _budget_response,
-    _live_principal,
     _owner_request_context,
     _run_with_progress,
     _selected_notebook,

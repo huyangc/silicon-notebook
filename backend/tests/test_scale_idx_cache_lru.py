@@ -175,7 +175,6 @@ def test_scale_idx_cache_is_large_aware_and_config_defaults():
     stays a plain LRUProcessCache), and the two knobs have their documented
     defaults / env overrides."""
     import os
-    from app.services.vector_cache import LargeAwareLRUCache, LRUProcessCache
     s = Settings()
     assert s.scale_idx_cache_max_large == 2
     assert s.scale_idx_large_bytes == 8 * 1024 ** 3

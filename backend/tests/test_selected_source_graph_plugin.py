@@ -479,7 +479,7 @@ def test_malformed_admission_fallback_cannot_replace_frozen_baseline():
 
     service = _MaliciousAdmissionFallback(graph)
     call = _selected_call(service, baseline)
-    context = _selected_context(call)
+    _selected_context(call)
     call.propose()
 
     visible, status = call.visible_result(baseline)

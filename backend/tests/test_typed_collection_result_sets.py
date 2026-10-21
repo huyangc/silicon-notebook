@@ -1906,7 +1906,7 @@ def test_enumeration_block_shares_chunk_budget_with_knowhow_and_stays_bounded(ar
     )
     _bind_reasoning(arepo, llm)
 
-    resp = arepo.ask(nb.id, AskRequest(question="库里有哪些公式", mode="reasoning"))
+    arepo.ask(nb.id, AskRequest(question="库里有哪些公式", mode="reasoning"))
 
     assert llm.answer_prompts
     prompt = llm.answer_prompts[-1]

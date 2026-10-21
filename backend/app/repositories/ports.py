@@ -1162,16 +1162,16 @@ class AskExecutionPort(Protocol):
     ) -> None: ...
     # PR-C: the entry point's follow-up preflight, run above the job-publishing
     # step like ``validate_reasoning_submission``.  Returns a
-    # ``app.services.ask_followup.FollowupResolution``; the name is spelled as
-    # a string rather than imported because ``repositories`` may not grow a new
-    # import edge into ``services`` (see
+    # ``app.services.ask_followup.FollowupResolution``; it is annotated
+    # ``object`` rather than imported because ``repositories`` may not grow a
+    # new import edge into ``services``, not even under ``TYPE_CHECKING`` (see
     # ``scripts/check_architecture_boundaries.py::
-    # repository_service_import_counts``, an intentional debt ceiling).  The
-    # module has ``from __future__ import annotations``, so nothing resolves it
-    # at runtime.
+    # repository_service_import_counts``, an intentional debt ceiling), and a
+    # string naming a class this module never binds is an undefined name to
+    # the backend lint gate (F821).
     def resolve_reasoning_followup(
         self, notebook_id: str, payload: AskRequest
-    ) -> "FollowupResolution": ...
+    ) -> object: ...
     def ask(
         self,
         notebook_id: str,

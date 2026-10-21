@@ -107,7 +107,7 @@ def test_repeating_one_phrase_is_not_too_many_spans(monkeypatch):
     关掉——正好关在它最该生效的地方。
     """
     expanded = " ".join(
-        [f'目标:"static timing analysis"']
+        ['目标:"static timing analysis"']
         + [f'必答主题{i}:"static timing analysis"'
            for i in range(MAX_QUOTED_PHRASES + 3)]
     )

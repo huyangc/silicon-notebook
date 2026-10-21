@@ -1615,7 +1615,7 @@ def test_guarded_ask_detail_freezes_running_to_done_snapshot(client):
 def test_guarded_ask_detail_holds_member_authority_until_snapshot_released(client):
     owner = _auth(client, 32)
     reader = _auth(client, 33)
-    owner_id = _me(client, owner)
+    _me(client, owner)
     reader_id = _me(client, reader)
     notebook_id = _create_notebook(client, owner, "详情权限撤销竞态")
     with _repo()._write() as db:

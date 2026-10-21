@@ -1002,7 +1002,6 @@ class KgBuildJobStore:
                     ("knowledge_embeddings", "object_id", object_vectors),
                     ("relation_embeddings", "relation_id", relation_vectors),
                 ):
-                    dimension = None
                     encoded_rows: list[tuple] = []
                     for row in vectors:
                         encoded_rows.append(

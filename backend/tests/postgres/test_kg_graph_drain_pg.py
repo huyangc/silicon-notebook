@@ -428,7 +428,6 @@ def test_conflict_write_waits_for_an_in_flight_reset_on_postgres(
     不落行。变异钉:去掉 ``FOR SHARE`` → 插入不等待、立刻按旧纪元落一行,
     报红。"""
     import threading
-    import time
 
     runtime = postgres_repository._runtime
     governance = runtime.knowledge_governance

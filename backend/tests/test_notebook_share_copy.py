@@ -498,7 +498,7 @@ def test_copy_notebook_never_carries_a_memory_source(repo):
         store.insert_source(
             source_id=source_id,
             notebook_id=nb,
-            title=f"Memory: foo" if source_type == "memory" else "plain",
+            title="Memory: foo" if source_type == "memory" else "plain",
             source_type=source_type,
             status="ready",
             parse_status="ready",

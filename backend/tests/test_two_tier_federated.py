@@ -122,11 +122,6 @@ class TestTask3:
         personal_nb = repo.create_notebook(NotebookCreate(name="personal"))
         repo.replace_notebook_bases(personal_nb.id, [base_nb.id], "user-local")
 
-        base_hit = RetrievedKnowledge(
-            object_id="b1", object_type="claim", payload={}, score=0.20, relevance=0.20)
-        personal_hit = RetrievedKnowledge(
-            object_id="p1", object_type="claim", payload={}, score=0.20, relevance=0.20)
-
         def fake_retrieve_scored(nid, query, **kwargs):
             if nid == base_nb.id:
                 return [RetrievedKnowledge(
@@ -200,7 +195,7 @@ class TestTask5:
 
     def test_single_notebook_anchor_tier_is_personal(self, repo):
         """Anchors in a single-notebook ask() must default to tier='personal'."""
-        nb = self._seed_single(repo)
+        self._seed_single(repo)
         id_map = {
             "k1": {"object_id": "S1", "object_type": "claim", "name": "Oxide BV",
                    "definition": "oxide breakdown", "snippet": None,

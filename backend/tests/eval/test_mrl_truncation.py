@@ -4,7 +4,6 @@
 流式分块与全量一致、e2e overlap 评测(无损前缀 → 重合率 1.0;坏行/维度不符
 跳过并计数)、gold 评测(注入 FakeEmbedder,零 API)、判据映射。
 """
-import json
 import sqlite3
 
 import numpy as np

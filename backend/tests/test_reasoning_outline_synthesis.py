@@ -1395,7 +1395,7 @@ def test_every_section_receives_the_external_block_in_its_own_segment(
         external_evidence=[_external_item(1)],
     ))
     llm = _CaptureAnswerLLM()
-    response = _ask(repo, notebook, llm)
+    _ask(repo, notebook, llm)
 
     assert len(llm.prompts) == 2
     first, second = llm.prompts

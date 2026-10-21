@@ -2,7 +2,6 @@
 """Task 10 smoke: drive the REAL product KG extraction (_run_extraction with the
 deepseek-v4-flash OpenAICompatibleClient) on one academic + one textbook source,
 asserting non-zero grounded KG nodes/edges. Main-session only (needs network)."""
-import os
 import pathlib
 import sys
 import tempfile

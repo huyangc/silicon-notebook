@@ -30,7 +30,6 @@ reasoning_retrieval.py 的候选池汇总 "answer" 步,以及 ``step_limit`` 截
 from __future__ import annotations
 
 import json
-import re
 from unittest import mock
 
 import pytest
@@ -633,7 +632,6 @@ class _CaptureAnswerLLM:
         self._answer_text = answer_text
 
     def chat_json(self, messages, schema_hint, **kwargs):
-        content = messages[-1]["content"]
         if "sub_queries" in schema_hint:
             return json.dumps({"sub_queries": [{"query": "版图设计要点"}]})
         if "next_action" in schema_hint:

@@ -9,7 +9,6 @@ and in exclude mode.  Both databases are seeded with identical rows.
 from __future__ import annotations
 
 import shutil
-from pathlib import Path
 
 import pytest
 

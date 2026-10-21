@@ -115,7 +115,6 @@ def _artifact_bytes(directory: str) -> bytes:
 def test_viz_artifact_has_no_memory_object_name_or_memory_only_edge(repo):
     seeded = seed_shared_notebook_with_memory(repo)
     nb_id = seeded["notebook_id"]
-    ids = seeded["objects"]
 
     manifest = repo._runtime.scale_artifacts.build_viz(nb_id)
     idx = repo._viz_index(nb_id)

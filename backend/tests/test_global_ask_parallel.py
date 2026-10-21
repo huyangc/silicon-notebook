@@ -22,7 +22,7 @@ from app.core.config import Settings
 from app.models.global_ask import GlobalAskRequest
 from app.services.global_ask import GlobalAskError
 from app.services.federated_run import current_federated_run_plan
-from tests.test_global_ask import setup, finished, _stage_job_threads
+from tests.test_global_ask import setup, finished
 
 
 def _libraries(service, readable, names):

@@ -45,7 +45,7 @@ def table(repo, store):
 
 
 def test_milestone_names_must_be_unique_per_table(hist, store, table):
-    row = store.add_knowhow_row(table["id"], {table["anchor"]: "A"})
+    store.add_knowhow_row(table["id"], {table["anchor"]: "A"})
     seq = hist.head_seq(table["id"])
     hist.create_milestone(table["id"], seq, "评审前", "", "user-1")
     import sqlite3
@@ -76,7 +76,7 @@ def test_prune_deletes_only_the_oldest_prefix(hist, store, table):
 
 
 def test_prune_never_removes_the_head(hist, store, table):
-    row = store.add_knowhow_row(table["id"], {table["anchor"]: "A"})
+    store.add_knowhow_row(table["id"], {table["anchor"]: "A"})
     head = hist.head_seq(table["id"])
     with hist.database.write() as db:
         db.execute(
@@ -186,7 +186,7 @@ def test_delete_milestone_requires_table_id_isolation(hist, store, repo, table):
     )
 
     # 在表 A 上建一个里程碑
-    row_a = store.add_knowhow_row(table["id"], {table["anchor"]: "A"})
+    store.add_knowhow_row(table["id"], {table["anchor"]: "A"})
     seq_a = hist.head_seq(table["id"])
     milestone = hist.create_milestone(table["id"], seq_a, "里程碑A", "", "user-1")
     milestone_id = milestone["id"]
@@ -209,13 +209,13 @@ def test_delete_milestone_requires_table_id_isolation(hist, store, repo, table):
 def test_revert_after_prune_preserves_full_replayability(hist, store, table):
     """prune 删掉最老流水后，剩余链仍能完整回退到任意中间点。"""
     row = store.add_knowhow_row(table["id"], {table["anchor"]: "A"})
-    seq_after_row = hist.head_seq(table["id"])
+    hist.head_seq(table["id"])
 
     # 对同一格子做 5 次更新，记下中间的内容状态
     for i in range(5):
         store.update_knowhow_cell(row, table["plain"], f"版本{i}")
 
-    head_before_prune = hist.head_seq(table["id"])
+    hist.head_seq(table["id"])
     all_changes = hist.list_changes(table["id"], limit=100)
 
     # 确认有足够的流水

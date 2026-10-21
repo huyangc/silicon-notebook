@@ -634,7 +634,7 @@ def test_refine_context_passes_reasoning_kwargs(rrepo):
     rrepo.settings.kg_query_refine_enabled = True
     llm = _AnswerRecordingLLM()
     # Call _refine_context directly with a non-empty context block.
-    result = rrepo._refine_context("问题", "k1: RTL到GDSII流程概述", llm)
+    rrepo._refine_context("问题", "k1: RTL到GDSII流程概述", llm)
     assert llm.calls, "_refine_context must call chat_json"
     assert llm.calls[0].get("timeout") == 77
     assert llm.calls[0].get("max_retries") == 3

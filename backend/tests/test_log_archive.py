@@ -85,7 +85,6 @@ def test_rollover_enqueues_prev_day_gzip(tmp_path, monkeypatch):
     lg = _logger(tmp_path, monkeypatch)
     # 用一个可控 now 逐步推进日期
     seq = iter(["2026-03-01", "2026-03-01", "2026-03-02"])
-    real = el.datetime
 
     class FakeDT:
         @staticmethod

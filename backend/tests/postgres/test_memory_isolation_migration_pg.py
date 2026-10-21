@@ -535,7 +535,6 @@ def _seed_large(database, *, f_notebooks: int, objects_per_f: int,
     mention edges, co-mentions, canonical relations, communities, merge
     candidates and chunks. Pure SQL (generate_series), so millions of rows
     are seconds."""
-    per_f_mem = max(1, objects_per_f // 20)
     # a document yields tens of objects: one public-library source per 50
     # objects (at least 200), so per-source statistics look like a library's
     base_sources = max(200, base_objects // 50)

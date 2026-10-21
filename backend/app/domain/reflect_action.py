@@ -112,9 +112,9 @@ _CONTROL_CHARACTERS_RE = re.compile(
     "["
     "\x00-\x1f"        # C0, newline and carriage return included
     "\x7f-\x9f"        # DEL and the C1 block
-    "  "     # LINE SEPARATOR, PARAGRAPH SEPARATOR
-    "‪-‮"    # bidi embedding/override
-    "⁦-⁩"    # bidi isolates
+    "\u2028\u2029"     # LINE SEPARATOR, PARAGRAPH SEPARATOR
+    "\u202a-\u202e"    # bidi embedding/override
+    "\u2066-\u2069"    # bidi isolates
     "]"
 )
 

@@ -35,7 +35,6 @@ from app.domain.knowledge_contracts import CONCEPT_DETAIL_PAGE_MAX
 from app.domain.indexing_pipeline import (
     IndexingPipelineHostPort,
     IndexingPipelineStalePlanError,
-    IndexingPipelineUnavailableError,
 )
 from app.core.request_context import (
     _REQUEST_USER,
@@ -64,7 +63,6 @@ from app.models.notebooks import (
 from app.models.sources import (
     AddUrlSourcesResult,
     PaginatedSources,
-    RejectedUrl,
     SourceDetail,
     SourceElement,
     SourceImportRequest,
@@ -79,6 +77,8 @@ from app.models.ask import (
     AskResponse,
     Citation,
     ConversationBulkDeleteResult,
+    ConversationDetail,
+    ConversationSummary,
     FeedbackRequest,
     FeedbackResponse,
     ModelError,
@@ -89,10 +89,7 @@ from app.models.ask import (
 )
 from app.models.knowledge import (
     DuplicateGroup,
-    KnowledgeEdge,
-    KnowledgeFieldValue,
     KnowledgeGraph,
-    KnowledgeNode,
     KnowledgeRecord,
     KnowledgeRef,
     KnowledgeTypeCount,
@@ -103,19 +100,14 @@ from app.models.knowledge import (
     MergeRequest,
     PaginatedKnowledge,
 )
-from app.domain.retrieval import ChunkRetrievalPlan
+from app.domain.retrieval import ChunkRetrievalPlan, RetrievedChunk, RetrievedRelation
 from app.services import kg_ingest
 from app.services.ask_followup import FollowupResolution
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.vector_cache import LargeAwareLRUCache, LRUProcessCache
 from app.services.extraction_profiles import (
-    LIST_FIELDS,
-    OBJECT_SCHEMAS,
-    OBJECT_TYPE_LABELS,
     PROFILES,
     ObjectSchema,
-    get_profile,
-    resolve_profile,
 )
 
 
@@ -158,18 +150,7 @@ from app.services.retrieval import (
     RetrievedElement,
     W_KEYWORD,
     W_SEMANTIC,
-    _TYPE_WEIGHT,
     _fuse,
-    _payload_text,
-    bm25_scores,
-    cosine,
-    keyword_score,
-    rrf_fuse,
-    score_knowledge,
-    score_elements,
-    type_weight,
-    ensure_procedure_quota,
-    classify_evidence,
 )
 
 

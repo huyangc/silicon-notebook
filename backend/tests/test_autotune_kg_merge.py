@@ -6,13 +6,11 @@ from app.services import kg_merge
 
 def _reps(names):
     # 造两组明显分离的向量,保证有 ≥1 条近邻候选边(sim≥lo)。
-    rng = np.arange(len(names), dtype=np.float32)
     return {n: np.array([1.0, 0.001 * i], dtype=np.float32) for i, n in enumerate(names)}
 
 
 def test_ann_candidates_passes_thread_count(monkeypatch):
     seen = {}
-    real_index = kg_merge.__dict__.get("hnswlib")  # not imported at module top; patch the module
 
     import hnswlib
 

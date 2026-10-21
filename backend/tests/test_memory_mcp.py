@@ -567,7 +567,6 @@ async def test_access_is_rechecked_after_revoke_and_membership_loss(mcp_env):
 @pytest.mark.anyio
 async def test_same_profile_lower_scope_token_cannot_reuse_an_initialized_session(mcp_env):
     app = mcp_env["app"]
-    notebook_id = mcp_env["notebook"].id
     async with app.router.lifespan_context(app):
         async with OfficialMcpClient(
             app, mcp_env["token_b"].token, manage_lifespan=False
@@ -1572,7 +1571,6 @@ async def test_mcp_ask_passes_the_external_evidence_url_through(
     (与之相对的是**匿名**公开分享页,它刻意只给 ``is_external`` 标记、不给
     链接——见 ``test_conversation_public_view``。)"""
     service = mcp_env["service"]
-    notebook_id = mcp_env["notebook"].id
     monkeypatch.setattr(service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env))
 
     monkeypatch.setattr(
@@ -1705,7 +1703,6 @@ async def test_mcp_ask_preserves_answer_text_under_realistic_citation_load(
     ~112 characters in a real repro.
     """
     service = mcp_env["service"]
-    notebook_id = mcp_env["notebook"].id
     monkeypatch.setattr(service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env))
 
     filler = "知识图谱检索增强生成技术在企业级应用中的落地实践与挑战分析"
@@ -2615,7 +2612,6 @@ async def test_mcp_ask_accepts_a_registered_available_plugin_mode(
     ``ask_service.py``'s job, not this tool's -- this only proves the mode
     string is not rewritten or rejected on the way in."""
     service = mcp_env["service"]
-    notebook_id = mcp_env["notebook"].id
     monkeypatch.setattr(
         service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
     )
@@ -3452,7 +3448,6 @@ async def test_search_memory_hydrates_fresh_records_and_drops_terminal_races(
 async def test_propose_memory_preserves_legitimate_nested_null_and_sdk_normalization(
     mcp_env,
 ):
-    notebook_id = mcp_env["notebook"].id
     async with OfficialMcpClient(
         mcp_env["app"], mcp_env["token_a"].token
     ) as client:
@@ -3541,7 +3536,6 @@ async def test_propose_memory_rejects_unbounded_envelopes_before_live_service_wo
     )
 
     service = mcp_env["service"]
-    notebook_id = mcp_env["notebook"].id
     base = {
         "title": "Proposal title",
         "content_md": "Proposal content",
@@ -3623,7 +3617,6 @@ async def test_propose_memory_rejects_unbounded_envelopes_before_live_service_wo
 
 @pytest.mark.anyio
 async def test_propose_memory_accepts_payloads_within_exact_core_json_limits(mcp_env):
-    notebook_id = mcp_env["notebook"].id
     task_context = {"private": "x" * 8_050}
     evidence_refs = [{"quote": "x" * 600} for _ in range(21)]
 
@@ -3656,7 +3649,6 @@ async def test_propose_memory_accepts_payloads_within_exact_core_json_limits(mcp
 
 @pytest.mark.anyio
 async def test_propose_memory_delegates_exact_tag_normalization_to_core(mcp_env):
-    notebook_id = mcp_env["notebook"].id
     raw_tags = [" analog ", "analog"] + [f"tag-{index}" for index in range(18)]
     async with OfficialMcpClient(
         mcp_env["app"], mcp_env["token_a"].token
@@ -4726,7 +4718,6 @@ async def test_add_source_file_group_accepts_registered_binary_formats(
     mcp_env, scheduled_jobs, file_name, payload
 ):
     repo = repository()
-    notebook_id = mcp_env["notebook"].id
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
     ) as client:
@@ -5496,7 +5487,6 @@ async def test_delete_source_accepts_a_row_stamped_by_a_sibling_agent_profile(
     ``test_delete_source_removes_an_agent_source_but_never_a_user_one``.
     """
     repo = repository()
-    notebook_id = mcp_env["notebook"].id
     app = mcp_env["app"]
 
     async with app.router.lifespan_context(app):
@@ -5740,7 +5730,6 @@ async def test_build_kg_target_refuses_when_no_chat_model_is_configured(mcp_env)
     kg_routes.build_kg's own 409 guards against -- without any extra setup.
     The message must not name the deployment's env vars (mirrors
     add_source_url's MinerUCloudNotConfigured wording)."""
-    notebook_id = mcp_env["notebook"].id
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _MAINTENANCE)
     ) as client:
@@ -5842,7 +5831,6 @@ async def test_build_index_target_lets_ineligibility_through(mcp_env):
     ("notebook too small and not base-tier...") comes through unedited,
     exactly like add_source (url) lets add_url_sources' rejection wording
     through."""
-    notebook_id = mcp_env["notebook"].id
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _MAINTENANCE)
     ) as client:
@@ -5905,7 +5893,6 @@ async def test_get_notebook_build_status_reports_kg_and_scale_index_state(mcp_en
     sources/current job) and scale_index (exists/building/eligible/state)
     sub-objects both present in a single call, readable by a plain
     knowledge:read token."""
-    notebook_id = mcp_env["notebook"].id
     async with OfficialMcpClient(
         mcp_env["app"], _agent_token(mcp_env, _SOURCE_READ)
     ) as client:
@@ -5958,7 +5945,6 @@ async def test_read_alone_opens_no_build_and_manage_opens_them(
     ``manage`` (source writes and builds are one tier since the tier merge)
     opens the build."""
     repo = repository()
-    notebook_id = mcp_env["notebook"].id
     bind_chat_client(repo, "kg_extract", _KgExtractStub())
     app = mcp_env["app"]
 
@@ -6560,7 +6546,6 @@ async def test_token_level_failure_after_append_keeps_the_rows(
 
 @pytest.mark.anyio
 async def test_add_observation_requires_its_own_scope(mcp_env):
-    notebook_id = mcp_env["notebook"].id
     token = _agent_token(mcp_env, ["read"])
 
     async with OfficialMcpClient(mcp_env["app"], token) as client:
@@ -6652,7 +6637,6 @@ async def test_a_failing_ledger_write_never_fails_the_tool_call(
     """记账是「关于这次调用的账」,不是这次调用的一部分。写失败只该留在日志
     里,绝不能把一次已经通过鉴权的工具调用变成 Agent 看到的错误。"""
     repo = repository()
-    notebook_id = mcp_env["notebook"].id
     token = _agent_token(mcp_env, _SOURCE_READ)
 
     def explode(*args, **kwargs):

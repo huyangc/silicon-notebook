@@ -3,7 +3,7 @@ import threading
 from pathlib import Path
 from typing import Callable, List, Sequence
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from starlette.datastructures import FormData, UploadFile as StarletteUploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser

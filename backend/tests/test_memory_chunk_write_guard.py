@@ -514,7 +514,7 @@ def _writes(statement: Statement) -> list[Write]:
                 seg = re.search(rf"\bSET\b(.*?){_SEG_END}", rest, re.I | re.S)
                 segment = seg.group(1) if seg else rest
             elif verb == "insert":
-                seg = re.search(rf"\bDO\s+UPDATE\s+SET\b(.*?)(?=\bWHERE\b|\bRETURNING\b|$)", rest, re.I | re.S)
+                seg = re.search(r"\bDO\s+UPDATE\s+SET\b(.*?)(?=\bWHERE\b|\bRETURNING\b|$)", rest, re.I | re.S)
                 segment = seg.group(1) if seg else ""
             replace = bool(match.groupdict().get("rep")) or (
                 (match.groupdict().get("orx") or "").upper() == "REPLACE"

@@ -146,7 +146,7 @@ def test_external_evidence_reaches_the_synthesis_prompt_as_a_citable_item(
     _bind(arepo, llm)
     _patch_retrieval(monkeypatch, external=[_external()])
 
-    response = _ask(arepo, notebook)
+    _ask(arepo, notebook)
 
     prompt = llm.answer_prompts[-1]
     assert f"{EXTERNAL_KEY}: [external · IEEE Xplore] 外部论文-1 (§1) — 外部摘录-1" in prompt

@@ -105,7 +105,7 @@ def test_copy_observes_new_id_patched_after_construction(repo, monkeypatch):
 def test_notebook_copy_separates_owner_id_from_knowhow_genesis_actor(repo):
     src = _seed(repo, n=1)
     _seed_user(repo, "user-audit-copy")
-    table_id = repo.create_knowhow_table(
+    repo.create_knowhow_table(
         src, "T", "", [{"name": "C", "role": "attribute"}]
     )
 
