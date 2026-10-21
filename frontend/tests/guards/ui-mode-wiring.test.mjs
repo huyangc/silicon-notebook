@@ -392,9 +392,23 @@ function enclosingFunctionName(node) {
 }
 
 
-test("三处提交引擎判据都必须过 submissionAskMode，且确认闸/放弃闸按 run 冻结的界面", () => {
-  // 判据一共只有三处，且各自读的「界面」是刻意不同的：
+/** 直接包着该调用的 `const name = …` 的变量名；不是变量初始化式则 null。 */
+function enclosingVariableName(node) {
+  let current = node.parent;
+  while (current && (ts.isParenthesizedExpression(current) || ts.isAsExpression(current))) {
+    current = current.parent;
+  }
+  return current && ts.isVariableDeclaration(current) && ts.isIdentifier(current.name)
+    ? current.name.text
+    : null;
+}
+
+
+test("四处提交引擎判据都必须过 submissionAskMode，且确认闸/放弃闸按 run 冻结的界面", () => {
+  // 判据一共只有四处，且各自读的「界面」是刻意不同的：
   //   · 提交汇聚点读**当前**界面——这一刻才决定这次提交走哪个引擎；
+  //   · 关联报告的就地预检同样读**当前**界面：它回答的是「此刻按发送会不会读这份
+  //     报告」，判的就是提交汇聚点马上要用的那个引擎（扩展引擎不读报告）；
   //   · confirmIntent 的上下文变化闸与 mid-preview abandon effect 读**这条 run 提交时
   //     冻结的**界面。头像菜单随时可点，审阅卡开着时切界面不能让确认闸判成 chunk 而
   //     bail（问题连同澄清答案一起丢），也不能让随后任何一次可见 mode 回填
@@ -404,13 +418,23 @@ test("三处提交引擎判据都必须过 submissionAskMode，且确认闸/放�
     args: call.arguments.map((argument) => argument.getText(askSession)),
     fn: enclosingFunctionName(call),
     deps: enclosingEffectDeps(call),
+    variable: enclosingVariableName(call),
   }));
   assert.equal(
     calls.length,
-    3,
-    `submissionAskMode 调用点应恰好三处（提交、确认闸、abandon effect），实际 ${calls.length}：${
+    4,
+    `submissionAskMode 调用点应恰好四处（提交、报告预检、确认闸、abandon effect），实际 ${calls.length}：${
       JSON.stringify(shapes)}`,
   );
+
+  const checkCall = shapes.find((shape) => shape.variable === "linkedReportCheckMode");
+  assert.ok(checkCall, `关联报告预检缺少 submissionAskMode 调用：${JSON.stringify(shapes)}`);
+  assert.deepEqual(
+    checkCall.args,
+    ["policy.advanced", "mode"],
+    "报告预检必须按当前界面判定这次提交的引擎，与提交汇聚点同一口径",
+  );
+  assert.equal(checkCall.deps, null, "报告预检的引擎在渲染期求值一次，effect 只读这一个值");
 
   const submitCall = shapes.find((shape) => shape.fn === "submit");
   assert.ok(submitCall, `提交汇聚点缺少 submissionAskMode 调用：${JSON.stringify(shapes)}`);

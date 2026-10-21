@@ -4,7 +4,12 @@ import { throwShareFailure } from "./share-failure.ts";
 // 类型化的 409 披露确认异常的定义在中立模块 `share-failure.ts`（会话分享共用）；报告 hook 的
 // 依赖边界只许经 report-api，所以这里转出。
 export { ShareDisclosureRequired } from "./share-failure.ts";
-import type { ReportDetailT, ReportFrameT, ReportSummaryT } from "./report-model.ts";
+import type {
+  ReportDetailT,
+  ReportFollowupScopeT,
+  ReportFrameT,
+  ReportSummaryT,
+} from "./report-model.ts";
 import type { BaseScopePayload, SourceScopePayload } from "./source-scope.ts";
 
 const options = { tag: "api", unauthorized: "clear-and-reload" as const };
@@ -72,6 +77,11 @@ export const listReports = (nb: string) =>
 
 export const getReport = (nb: string, id: string) =>
   requestJson<ReportDetailT>(`/notebooks/${nb}/reports/${id}`, options);
+
+/** 「就此追问」起步用的检索范围（只读）。只对自己的、已完成的报告：别人的/不存在 404，
+ *  未完成 409（带可展示的中文原因）。 */
+export const getReportFollowupScope = (nb: string, id: string) =>
+  requestJson<ReportFollowupScopeT>(`/notebooks/${nb}/reports/${id}/followup`, options);
 
 export const cancelReport = (nb: string, id: string) =>
   requestJson<{ status: string }>(`/notebooks/${nb}/reports/${id}/cancel`, {

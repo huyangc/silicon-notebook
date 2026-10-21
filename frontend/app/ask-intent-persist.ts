@@ -23,6 +23,7 @@
 import { newClientRequestId } from "./client-request-id.ts";
 import type { AskIntentConfirmation, QueryIntentContract } from "./ask-intent-model.ts";
 import type { AskRetrievalEffortId } from "./ask-retrieval-effort.ts";
+import type { LinkedReportTag } from "./linked-report.ts";
 import type { BaseScopePayload, SourceScopePayload } from "./source-scope.ts";
 
 export const PENDING_INTENT_STORAGE_KEY = "silicon_notebook_pending_intent";
@@ -34,7 +35,12 @@ export type PersistedIntentRun = {
   // entry is read as invalid and dropped — sessionStorage is short-lived, and a
   // version-1 entry can only have come from the advanced surface, which the
   // simplified surface discarded anyway.
-  version: 2;
+  // Bumped to 3 when `linkedReport` was added. A version-2 entry is still
+  // accepted, read as "no report": it was written before any report could be
+  // attached, so resuming it without one re-sends exactly what was submitted
+  // (and an Ask without a report reads nothing a report would have scoped).
+  // Writes are always version 3.
+  version: 3;
   id: string;
   savedAt: number;
   actorId: string;
@@ -51,6 +57,9 @@ export type PersistedIntentRun = {
   retrievalEffort: AskRetrievalEffortId;
   sourceScope: SourceScopePayload;
   baseScope: BaseScopePayload;
+  // The report tag frozen with the scope at submission (null: none attached).
+  // A resumed preview re-sends it, a resumed hand-off re-submits it.
+  linkedReport: LinkedReportTag | null;
   // "handoff": the intent is settled and the durable /ask/stream POST is in
   // flight but the server has not acknowledged `started` yet — the only copy of
   // the question is still this record, so it stays until `started` (then the
@@ -160,9 +169,37 @@ export function isAskIntentConfirmationShape(value: unknown): value is AskIntent
   return isOptional(value.understanding_ms, (v) => typeof v === "number" && Number.isFinite(v));
 }
 
-/** 只接受形状完整的条目；坏条目整条丢弃，绝不把半截状态续回界面。 */
+function isLinkedReportTagShape(value: unknown): value is LinkedReportTag | null {
+  if (value === null) return true;
+  return isRecord(value)
+    && typeof value.id === "string"
+    && Boolean(value.id)
+    && typeof value.title === "string";
+}
+
+/**
+ * 读一条 storage 条目：形状完整才放行，坏条目整条丢弃（返回 null），绝不把半截状态续回
+ * 界面。版本 2 的条目（关联报告出现之前写下的）读作「没挂报告」的版本 3；版本 3 的条目
+ * `linkedReport` 必须显式是 null 或完整的 `{id, title}`。
+ */
+export function parsePersistedIntentRun(value: unknown): PersistedIntentRun | null {
+  if (!isRecord(value) || (value.version !== 2 && value.version !== 3)) return null;
+  const linkedReport = value.version === 2 ? null : value.linkedReport;
+  if (!isLinkedReportTagShape(linkedReport)) return null;
+  if (!hasPersistedIntentFields(value)) return null;
+  return {
+    ...(value as Omit<PersistedIntentRun, "version" | "linkedReport">),
+    version: 3,
+    linkedReport: linkedReport ? { id: linkedReport.id, title: linkedReport.title } : null,
+  };
+}
+
+/** 当前版本（3）的完整条目。 */
 export function isPersistedIntentRun(value: unknown): value is PersistedIntentRun {
-  if (!isRecord(value) || value.version !== 2) return false;
+  return isRecord(value) && value.version === 3 && parsePersistedIntentRun(value) !== null;
+}
+
+function hasPersistedIntentFields(value: Record<string, unknown>): boolean {
   if (typeof value.id !== "string" || !value.id) return false;
   if (typeof value.savedAt !== "number" || !Number.isFinite(value.savedAt)) return false;
   if (typeof value.actorId !== "string" || !value.actorId) return false;
@@ -190,7 +227,12 @@ export function readPersistedIntentRuns(
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isPersistedIntentRun);
+    const runs: PersistedIntentRun[] = [];
+    for (const item of parsed) {
+      const run = parsePersistedIntentRun(item);
+      if (run) runs.push(run);
+    }
+    return runs;
   } catch {
     return [];
   }

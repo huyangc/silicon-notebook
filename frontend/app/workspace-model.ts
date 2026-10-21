@@ -668,6 +668,59 @@ export type GapEgress = {
   source_queries?: Record<string, string[]>;
 };
 
+/**
+ * 一轮挂了关联报告时，这一轮对报告做了什么（就此追问）。真源：
+ * `backend/app/models/ask.py LinkedReportReceipt`。请求带了报告就必有回执：读入
+ * (`read`) 或没读 (`skipped`，`reason` 是可原样展示的中文原因)。可选字段按后端
+ * `exclude_if` 惯例缺省即缺席；`skipped` 时不带 `sections`、计数恒为 0。
+ * `title` 是 `reports.question` 的整串快照；读取报告出错（`reason_code ===
+ * "read_failed"`）的回执题目为空串，显示时用不含题目的兜底文案。
+ * 后端的 `memory_used`（作者本人个人记忆 id，只供分享披露计数）不在这里声明：界面不读它。
+ */
+export type LinkedReportSection = {
+  /** 1 起，报告自己的节序。 */
+  index: number;
+  title: string;
+  /** 这一节的正文是否进入了本轮回答所读的内容。 */
+  read: boolean;
+};
+
+export type LinkedReportReceipt = {
+  report_id: string;
+  title: string;
+  status: "read" | "skipped";
+  reason_code?: string;
+  reason?: string;
+  sections?: LinkedReportSection[];
+  summary_truncated?: boolean;
+  evidence_restored?: number;
+  evidence_gone?: number;
+  evidence_over_budget?: number;
+};
+
+/**
+ * 报告的指针（`backend/app/models/ask.py LinkedReportRef`）。`title` 的含义按出处
+ * 不同：会话摘要/详情上是最后一轮回执里的快照；在途任务上是报告**当前**的题目，
+ * 报告已删除时为空串。
+ */
+export type LinkedReportRef = {
+  report_id: string;
+  title?: string;
+};
+
+/**
+ * `POST /notebooks/{nb}/ask/report-check` 的判词：按这次的回答方式与两维检索范围
+ * 提问，会不会读这份关联报告。与提问执行同一个判据。`readable` 时 `reason` 为空串；
+ * 否则 `reason` 是可原样展示的中文原因（与这一轮回执里的同一句）。
+ */
+export type ReportLinkCheck = {
+  report_id: string;
+  title: string;
+  readable: boolean;
+  reason_code?: string;
+  reason?: string;
+};
+
 export type ExternalEvidenceSection = {
   text: string;
   conflicts: {
@@ -739,6 +792,8 @@ export type AskResponse = {
   /** 全局问答终态引用核对的汇总，只在 `failed > 0` 时出现。回答照常交付，答案下方
    *  一句说明（citation-verification.ts）；单库回答恒缺席。 */
   citation_check?: CitationCheckSummary;
+  /** 这一轮挂了关联报告时的回执；没挂报告的回答整键缺席。 */
+  linked_report?: LinkedReportReceipt;
 };
 
 export type ChatTurn = { question: string; response: AskResponse; askedAt?: string };
@@ -748,6 +803,8 @@ export type ConversationSummary = {
   updated_at: string;
   turn_count: number;
   used_reasoning?: boolean;
+  /** 最后一轮回执里的报告（快照）；最后一轮没挂报告时缺席。 */
+  linked_report?: LinkedReportRef;
 };
 export type ConversationDetail = {
   id: string;
@@ -756,6 +813,8 @@ export type ConversationDetail = {
   updated_at: string;
   turn_count: number;
   used_reasoning?: boolean;
+  /** 同 `ConversationSummary.linked_report`。 */
+  linked_report?: LinkedReportRef;
   turns: {
     answer_id: string;
     question: string;
@@ -769,6 +828,8 @@ export type ConversationDetail = {
     asked_at: string;
     mode: string;
     trace: ReasoningTraceStep[];
+    /** 在途这一轮挂的报告；没挂时缺席。题目是报告当前的题目，已删除时为空串。 */
+    linked_report?: LinkedReportRef;
   };
 };
 

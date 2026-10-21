@@ -5,6 +5,7 @@ import {
   askQuestionLimitHint,
   bulkDeleteConversations,
   cancelAskJob,
+  checkReportLink,
   conversationTitleLimitHint,
   deleteConversation,
   fetchAskModes,
@@ -58,7 +59,17 @@ import {
   type PersistedIntentRun,
 } from "./ask-intent-persist.ts";
 import { jobPollDone, newTraceSteps } from "./ask-reconnect.ts";
-import { humanizedError, toUserMessage } from "./errors.ts";
+import { httpErrorStatus, humanizedError, toUserMessage } from "./errors.ts";
+import {
+  LINKED_REPORT_CHECK_DEBOUNCE_MS,
+  LINKED_REPORT_GONE_NOTE,
+  LINKED_REPORT_NOTE_MS,
+  linkedReportCheckKey,
+  linkedReportFromActiveJob,
+  restoredLinkedReport,
+  type LinkedReportTag,
+  type LinkedReportVerdict,
+} from "./linked-report.ts";
 import { mergeSessionListFallback, recordStartedConversation } from "./ask-session-state.ts";
 import { hasProcessOutput } from "./stopped-turn.tsx";
 import {
@@ -139,7 +150,45 @@ type IntentReview = Readonly<{
   askedAt: string;
   sourceScope: SourceScopePayload;
   baseScope: BaseScopePayload;
+  linkedReport: LinkedReportTag | null;
 }>;
+
+/**
+ * What a submission freezes at the moment it is made, in one object so no path
+ * that carries the scope can forget the report: both retrieval-scope
+ * dimensions and the report tag. Changing the tag (or the checkboxes) after
+ * submitting never reaches a request already on its way — the preview, the
+ * clarification review, the hand-off, a reload resume and the durable run all
+ * re-send this snapshot, not the current view.
+ */
+type SubmissionSnapshot = {
+  sourceScope: SourceScopePayload;
+  baseScope: BaseScopePayload;
+  linkedReport: LinkedReportTag | null;
+};
+
+/** A pre-send verdict and the exact inputs it was given (`linkedReportCheckKey`). */
+type LinkedReportCheckState = Readonly<{ key: string; verdict: LinkedReportVerdict }>;
+
+/**
+ * Show a note beside the report tag and clear it on its own timer. Module-level
+ * (refs and the state setter passed in) so the pre-send check effect can call
+ * it without listing a per-render closure as a dependency.
+ */
+function scheduleLinkedReportNote(
+  timerRef: { current: number | undefined },
+  setNote: (value: string) => void,
+  text: string,
+) {
+  if (timerRef.current !== undefined) window.clearTimeout(timerRef.current);
+  timerRef.current = undefined;
+  setNote(text);
+  if (!text) return;
+  timerRef.current = window.setTimeout(() => {
+    timerRef.current = undefined;
+    setNote("");
+  }, LINKED_REPORT_NOTE_MS);
+}
 
 /**
  * One turn the user stopped AFTER retrieval/reasoning output was already on
@@ -202,6 +251,10 @@ type AskRunRecord = DetachableRecord & {
   askedAt: string;
   mode: string;
   retrievalEffort: AskRetrievalEffortId;
+  // The report tag frozen at submission (SubmissionSnapshot). A returning view
+  // shows it on the pending turn and restores it as the sticky tag: the
+  // in-flight question's report outranks the last answer's.
+  linkedReport: LinkedReportTag | null;
   trace: ReasoningTraceStep[];
   conversationIdAtStart: string | null;
   conversationId: string | null;
@@ -274,7 +327,7 @@ type AskIntentRunRecord = DetachableRecord & {
   // submission (resumable there) from an advanced one (never resumed there).
   advanced: boolean;
   retrievalEffort: AskRetrievalEffortId;
-  scopeSnapshot: { sourceScope: SourceScopePayload; baseScope: BaseScopePayload };
+  scopeSnapshot: SubmissionSnapshot;
   controller: AbortController;
   draftToken: object;
   flowGeneration: number;
@@ -378,6 +431,23 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   const [reconnectJob, setReconnectJob] = useState<{ jobId: string; seen: number; askedAt: string } | null>(null);
   const [ownerSerial, setOwnerSerial] = useState(0);
   const [askModeProjectionSerial, setAskModeProjectionSerial] = useState(0);
+  // The report tag above the input ("关联报告"): sticky for the conversation
+  // until removed or replaced, frozen into every submission (SubmissionSnapshot).
+  const [linkedReport, setLinkedReportState] = useState<LinkedReportTag | null>(null);
+  // The latest pre-send verdict, tagged with the inputs it judged; the view
+  // shows it only while those are still the inputs of the next submission.
+  const [linkedReportCheck, setLinkedReportCheck] = useState<LinkedReportCheckState | null>(null);
+  // A note beside the tag (scope filtered, report gone); cleared on its own timer.
+  const [linkedReportNote, setLinkedReportNote] = useState("");
+  // The report the pending (in-flight) turn was submitted with.
+  const [pendingLinkedReport, setPendingLinkedReport] = useState<LinkedReportTag | null>(null);
+  // Bumped after a submission that carried a report failed: the tag may name a
+  // report deleted since its last check, so it is checked again (and removed,
+  // with a note, if it is gone) instead of failing every resend the same way.
+  const [linkedReportRecheck, setLinkedReportRecheck] = useState(0);
+  const linkedReportRef = useRef<LinkedReportTag | null>(null);
+  const linkedReportNoteTimerRef = useRef<number | undefined>(undefined);
+  const linkedReportCheckSeqRef = useRef(0);
 
   const policyRef = useRef(policy);
   policyRef.current = policy;
@@ -588,6 +658,30 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     setPendingAskedAt("");
     setPendingMode(DEFAULT_ASK_MODE);
     setPendingTrace([]);
+    setPendingLinkedReport(null);
+  }
+
+  function setLinkedReport(next: LinkedReportTag | null) {
+    linkedReportRef.current = next;
+    setLinkedReportState(next);
+  }
+
+  function showLinkedReportNote(text: string) {
+    scheduleLinkedReportNote(linkedReportNoteTimerRef, setLinkedReportNote, text);
+  }
+
+  // The tag, its verdict and its note belong to the conversation view they
+  // were set in: every reset of that view (another notebook, a leave, logout,
+  // a new session) drops all three.
+  function clearLinkedReport() {
+    setLinkedReport(null);
+    setLinkedReportCheck(null);
+    showLinkedReportNote("");
+  }
+
+  // A submission that carried a report failed on screen: re-check the tag.
+  function recheckLinkedReport(snapshot: SubmissionSnapshot) {
+    if (snapshot.linkedReport) setLinkedReportRecheck((value) => value + 1);
   }
 
   function abortIntentPreview() {
@@ -637,7 +731,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   function persistIntentRun(run: AskIntentRunRecord) {
     if (run.phase === "failed" || !run.mirrored) return;
     savePersistedIntentRun({
-      version: 2,
+      version: 3,
       id: run.persistId,
       savedAt: Date.now(),
       actorId: run.owner.actorId,
@@ -649,6 +743,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       retrievalEffort: run.retrievalEffort,
       sourceScope: run.scopeSnapshot.sourceScope,
       baseScope: run.scopeSnapshot.baseScope,
+      linkedReport: run.scopeSnapshot.linkedReport,
       phase: run.phase,
       contract: run.contract,
       understandingMs: run.understandingMs,
@@ -663,7 +758,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   function persistHandoff(run: AskIntentRunRecord, confirmation: AskIntentConfirmation) {
     if (!run.mirrored) return;
     savePersistedIntentRun({
-      version: 2,
+      version: 3,
       id: run.persistId,
       savedAt: Date.now(),
       actorId: run.owner.actorId,
@@ -675,6 +770,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       retrievalEffort: run.retrievalEffort,
       sourceScope: run.scopeSnapshot.sourceScope,
       baseScope: run.scopeSnapshot.baseScope,
+      linkedReport: run.scopeSnapshot.linkedReport,
       phase: "handoff",
       contract: run.contract,
       understandingMs: run.understandingMs,
@@ -773,6 +869,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     // The effort frozen at submission (normalised against bad storage), the
     // same expression the wiring guard pins for every re-sent frozen value.
     setRetrievalEffort(retrievalEffortFromTurn({ response: { retrieval_effort: record.retrievalEffort } }));
+    // The re-sent question is the conversation's in-flight one, so its report
+    // is the sticky tag now (over the one the detail restore just applied).
+    setLinkedReport(record.linkedReport);
     // Its submission time is its place in line, as for a resumed preview.
     nextRunSerial(record.savedAt);
     void startAskRun(
@@ -785,6 +884,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       {
         sourceScope: copySourceScope(record.sourceScope),
         baseScope: copyBaseScope(record.baseScope),
+        linkedReport: record.linkedReport,
       },
       retrievalEffortFromTurn({ response: { retrieval_effort: record.retrievalEffort } }),
       record.conversationIdAtStart,
@@ -910,6 +1010,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       scopeSnapshot: {
         sourceScope: copySourceScope(persisted.sourceScope),
         baseScope: copyBaseScope(persisted.baseScope),
+        linkedReport: persisted.linkedReport,
       },
       controller: new AbortController(),
       draftToken: {},
@@ -1003,11 +1104,15 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       askedAt: run.askedAt,
       sourceScope: run.scopeSnapshot.sourceScope,
       baseScope: run.scopeSnapshot.baseScope,
+      linkedReport: run.scopeSnapshot.linkedReport,
     });
     effectsRef.current.notify("问题存在会改变检索方向的歧义，请先补充确认");
   }
 
   function attachIntentRun(run: AskIntentRunRecord, owner: AskSessionOwner) {
+    // The returning question (in flight, or handed back as a draft) is the
+    // newest thing asked here: the tag it was submitted with is the sticky one.
+    setLinkedReport(run.scopeSnapshot.linkedReport);
     if (run.phase === "failed") {
       // The preview failed while the user was away: say so now and give the
       // question back instead of pretending nothing was asked. Back in the input
@@ -1047,6 +1152,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     pendingModeSourceRef.current = "reasoning";
     setPendingMode("reasoning");
     setPendingTrace(run.trace);
+    setPendingLinkedReport(run.scopeSnapshot.linkedReport);
     if (run.phase === "review" && run.contract) presentIntentReview(run, run.contract);
     else setIntentChecking(true);
     effectsRef.current.ensureAskVisible();
@@ -1104,12 +1210,18 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     turnsRef.current = next;
     setTurns(next);
     setConversationId(response.conversation_id);
+    // This answer is the conversation's last turn now; its report (the one the
+    // run was submitted with) is the sticky tag, as a reopen would restore it.
+    setLinkedReport(run.linkedReport);
     clearPendingTurn();
     setAsking(false);
     effectsRef.current.ensureAskVisible();
   }
 
   function attachDetachedRun(run: AskRunRecord, owner: AskSessionOwner) {
+    // In flight (or handed back as a draft), this run is the newest question
+    // here: the tag it was submitted with is the sticky one.
+    setLinkedReport(run.linkedReport);
     if (run.failure) {
       dropRecord(inFlightRunsRef.current, run);
       setQuestion(run.question);
@@ -1136,6 +1248,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     setPendingAskedAt(run.askedAt);
     setPendingMode(run.mode);
     setPendingTrace([...run.trace]);
+    setPendingLinkedReport(run.linkedReport);
     setAsking(true);
     setConversationId(run.conversationId ?? run.conversationIdAtStart);
     effectsRef.current.ensureAskVisible();
@@ -1169,6 +1282,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     // A stopped turn belongs to the conversation it was stopped in; this view
     // is being emptied for a new notebook / a leave / a deleted conversation.
     setStoppedTurn(null);
+    clearLinkedReport();
   }
 
   function activateActor(nextActorId: string) {
@@ -1314,7 +1428,17 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     return owner ? loadSessionsFor(owner) : null;
   }
 
-  async function applySessionDetail(id: string, expected: AskSessionOwner): Promise<boolean> {
+  /**
+   * `restoreTag`: whether this read (re)opens the conversation, which restores
+   * the sticky report tag from it (`restoredLinkedReport`). The reconnect poll
+   * re-reads the conversation the view is already on once its job is done; the
+   * tag there is whatever the user left it at for the next question.
+   */
+  async function applySessionDetail(
+    id: string,
+    expected: AskSessionOwner,
+    restoreTag = true,
+  ): Promise<boolean> {
     const detail = await getConversation(id);
     if (
       !sameViewOwner(ownerRef.current, expected)
@@ -1350,6 +1474,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     setMode(restoredMode);
     setRetrievalEffort(retrievalEffortFromTurn(detail.turns[detail.turns.length - 1]));
     setConversationId(id);
+    if (restoreTag) {
+      setLinkedReport(restoredLinkedReport(detail));
+      showLinkedReportNote("");
+    }
     clearPendingTurn();
     effectsRef.current.ensureAskVisible();
     setSessionPanelOpen(false);
@@ -1368,6 +1496,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         askModesRef.current,
       ));
       setPendingTrace(active.trace ?? []);
+      setPendingLinkedReport(linkedReportFromActiveJob(active));
       setAsking(true);
       askJobIdRef.current = active.job_id;
       askNotebookIdRef.current = expected.notebookId;
@@ -1624,12 +1753,47 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     }
   }
 
-  function startNewSession(workspaceEpoch: number) {
+  function openBlankSession(workspaceEpoch: number): boolean {
     const owner = nextSessionOwner(workspaceEpoch);
-    if (!owner) return;
+    if (!owner) return false;
     setSessionLoading(false);
     resetConversationView();
     effectsRef.current.ensureAskVisible();
+    return true;
+  }
+
+  function startNewSession(workspaceEpoch: number) {
+    openBlankSession(workspaceEpoch);
+  }
+
+  /**
+   * Attach a report to the next question(s) of this conversation ("关联报告"
+   * picker). Sticky until removed or replaced; each submission freezes the tag
+   * it was made with, so changing it never touches a request already sent.
+   */
+  function linkReport(ref: LinkedReportTag) {
+    if (!currentNotebookOwner() || !ref.id) return;
+    setLinkedReport({ id: ref.id, title: ref.title });
+    showLinkedReportNote("");
+  }
+
+  function unlinkReport() {
+    if (!currentNotebookOwner()) return;
+    setLinkedReport(null);
+    showLinkedReportNote("");
+  }
+
+  /**
+   * 「就此追问」: a new conversation with the report attached. `note` is said
+   * beside the tag (e.g. how the report's retrieval scope was restored); the
+   * scope itself is the source/library owners' to set, not this hook's.
+   * Returns whether the new session was opened (false: no current notebook).
+   */
+  function beginReportFollowup(ref: LinkedReportTag, workspaceEpoch: number, note = ""): boolean {
+    if (!ref.id || !openBlankSession(workspaceEpoch)) return false;
+    setLinkedReport({ id: ref.id, title: ref.title });
+    showLinkedReportNote(note);
+    return true;
   }
 
   function releaseQuestion(value: string) {
@@ -1773,9 +1937,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     intent: AskIntentConfirmation | undefined,
     traceSeed: ReasoningTraceStep[] = [],
     askedAt = new Date().toISOString(),
-    scopeSnapshot = {
+    scopeSnapshot: SubmissionSnapshot = {
       sourceScope: copySourceScope(policyRef.current.sourceScope),
       baseScope: copyBaseScope(policyRef.current.baseScope),
+      linkedReport: linkedReportRef.current,
     },
     effort?: AskRetrievalEffortId,
     serial?: number,
@@ -1825,7 +1990,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     intent: AskIntentConfirmation | undefined,
     traceSeed: ReasoningTraceStep[],
     askedAt: string,
-    scopeSnapshot: { sourceScope: SourceScopePayload; baseScope: BaseScopePayload },
+    scopeSnapshot: SubmissionSnapshot,
     effort: AskRetrievalEffortId,
     conversationIdAtStart: string | null,
     // A run handed over from an intent preview keeps that preview's submission
@@ -1858,6 +2023,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       askedAt,
       mode: selectedMode,
       retrievalEffort: effort,
+      linkedReport: scopeSnapshot.linkedReport,
       trace: [...traceSeed],
       conversationIdAtStart,
       conversationId: null,
@@ -1884,6 +2050,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       pendingModeSourceRef.current = selectedMode;
       setPendingMode(selectedMode);
       setPendingTrace(traceSeed);
+      setPendingLinkedReport(scopeSnapshot.linkedReport);
       setAsking(true);
       askJobIdRef.current = null;
       askAbortRef.current = controller;
@@ -1900,6 +2067,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         base_scope: scopeSnapshot.baseScope,
         client_request_id: clientRequestId,
         ...(intent ? { intent } : {}),
+        // Only when a report is attached: a question without one sends the
+        // same body as before the feature existed.
+        ...(scopeSnapshot.linkedReport ? { report_id: scopeSnapshot.linkedReport.id } : {}),
       };
       const response = await runAskStream<AskResponse>(
         runOwner.notebookId,
@@ -2045,6 +2215,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         return true;
       }
       effectsRef.current.reportError(error);
+      recheckLinkedReport(scopeSnapshot);
     } finally {
       // Ended without `started` (failed, stopped, or a transport that never
       // reached the server): the question is back with the user, not pending —
@@ -2089,9 +2260,12 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       return;
     }
     const askedAt = new Date().toISOString();
-    const scopeSnapshot = {
+    // The report tag is frozen in the same breath as the scope it is judged
+    // under: what the run reads is what was on screen when Send was pressed.
+    const scopeSnapshot: SubmissionSnapshot = {
       sourceScope: copySourceScope(currentPolicy.sourceScope),
       baseScope: copyBaseScope(currentPolicy.baseScope),
+      linkedReport: linkedReportRef.current,
     };
     draftModeRef.current = null;
     if (submitMode !== "reasoning") {
@@ -2134,6 +2308,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     pendingModeSourceRef.current = "reasoning";
     setPendingMode("reasoning");
     setPendingTrace(run.trace);
+    setPendingLinkedReport(scopeSnapshot.linkedReport);
     setIntentChecking(true);
     // Own this submission across tabs BEFORE exposing its mirror: a tab copied
     // from this one must find the lock already taken, never a record it can
@@ -2185,6 +2360,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
             setPendingTrace(run.trace);
           }
         },
+        run.scopeSnapshot.linkedReport?.id ?? null,
       );
       if (run.cancelRequested || run.phase === "failed") return;
       const understandingMs = elapsedMs(understandingStartedAt, Date.now());
@@ -2266,7 +2442,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       // reloaded tab re-issues it from the stored record).
       if (run.keepMirror || pageUnloadingRef.current) return;
       forgetPersistedIntent(run);
-      if (!isAbortError(error) && attached()) effectsRef.current.reportError(error);
+      if (!isAbortError(error) && attached()) {
+        effectsRef.current.reportError(error);
+        recheckLinkedReport(run.scopeSnapshot);
+      }
       const draft = askIntentDraftRef.current;
       if (askIntentAbortRef.current === run.controller && releaseIntentDraft(run.draftToken)) {
         setQuestion(draft || run.question);
@@ -2336,9 +2515,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       intentConfirmedStep(confirmation.resolved_question, confirmation.answers.length),
     ];
     askIntentTraceRef.current = traceSeed;
-    const scopeSnapshot = {
+    const scopeSnapshot: SubmissionSnapshot = {
       sourceScope: copySourceScope(review.sourceScope),
       baseScope: copyBaseScope(review.baseScope),
+      linkedReport: review.linkedReport,
     };
     try {
       const started = await executeAsk(
@@ -2507,6 +2687,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
               const applied = await applySessionDetail(
                 reconnectConversationIdRef.current ?? "",
                 owner,
+                false,
               );
               if (!applied) {
                 if (!sameViewOwner(ownerRef.current, owner)) return;
@@ -2571,6 +2752,104 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       if (capTimer !== undefined) window.clearTimeout(capTimer);
     };
   }, [reconnectJob?.jobId, ownerSerial]);
+
+  // The pre-send check's inputs: the tag, the engine this view would submit
+  // with, and both scope dimensions — exactly what the verdict depends on. The
+  // engine is judged like `submit` judges it, by the CURRENT surface: the check
+  // answers for the submission the user would make now.
+  const linkedReportCheckMode = submissionAskMode(policy.advanced, mode);
+  const linkedReportCheckInputs = linkedReport
+    ? linkedReportCheckKey(
+      linkedReport.id,
+      linkedReportCheckMode,
+      policy.sourceScope,
+      policy.baseScope,
+    )
+    : "";
+  // With no searchable scope the server refuses the check the way it refuses
+  // /ask (409); there is no verdict to fetch.
+  const linkedReportCheckBlocked = policy.askUnavailable || policy.scopeBlocked;
+
+  /**
+   * In-place pre-send check ("这样提问会读到这份报告吗"), shown beside the tag.
+   * Debounced: one request once the inputs have held still for
+   * LINKED_REPORT_CHECK_DEBOUNCE_MS. Any change of inputs (or of the view
+   * owner) aborts the request in flight, and a result is taken only while it
+   * is still the latest request, for the same view and the same report. 404
+   * (the report is gone or not the asker's) removes the tag and says so beside
+   * it; any other failure leaves no verdict — the turn's own receipt is then
+   * the authority on what was read.
+   */
+  useEffect(() => {
+    const seq = ++linkedReportCheckSeqRef.current;
+    const owner = ownerRef.current;
+    const report = linkedReportRef.current;
+    if (
+      !linkedReportCheckInputs || linkedReportCheckBlocked || !owner || !report
+      || owner.actorId !== actorIdRef.current || owner.notebookId !== notebookIdRef.current
+    ) return;
+    const currentPolicy = policyRef.current;
+    const body = {
+      report_id: report.id,
+      mode: linkedReportCheckMode,
+      source_scope: copySourceScope(currentPolicy.sourceScope),
+      base_scope: copyBaseScope(currentPolicy.baseScope),
+    };
+    const inputs = linkedReportCheckInputs;
+    const stillCurrent = () => (
+      linkedReportCheckSeqRef.current === seq
+      && sameViewOwner(ownerRef.current, owner)
+      && linkedReportRef.current?.id === report.id
+    );
+    let controller: AbortController | null = null;
+    const timer = window.setTimeout(() => {
+      controller = new AbortController();
+      checkReportLink(owner.notebookId, body, controller.signal).then(
+        (result) => {
+          if (!stillCurrent()) return;
+          setLinkedReportCheck({
+            key: inputs,
+            verdict: {
+              readable: result.readable === true,
+              reason: result.readable === true ? "" : result.reason ?? "",
+            },
+          });
+          // A tag restored from a receipt without a title (a failed read) or
+          // from a job whose report title was not known gets it back here.
+          const shown = linkedReportRef.current;
+          if (shown && !shown.title && result.title) {
+            const titled = { id: shown.id, title: result.title };
+            linkedReportRef.current = titled;
+            setLinkedReportState(titled);
+          }
+        },
+        (error: unknown) => {
+          if (isAbortError(error) || !stillCurrent()) return;
+          if (httpErrorStatus(error) !== 404) return;
+          linkedReportRef.current = null;
+          setLinkedReportState(null);
+          scheduleLinkedReportNote(linkedReportNoteTimerRef, setLinkedReportNote, LINKED_REPORT_GONE_NOTE);
+        },
+      );
+    }, LINKED_REPORT_CHECK_DEBOUNCE_MS);
+    return () => {
+      window.clearTimeout(timer);
+      controller?.abort();
+    };
+  }, [
+    linkedReportCheckInputs,
+    linkedReportCheckMode,
+    linkedReportCheckBlocked,
+    ownerSerial,
+    linkedReportRecheck,
+  ]);
+
+  useEffect(() => {
+    const noteTimer = linkedReportNoteTimerRef;
+    return () => {
+      if (noteTimer.current !== undefined) window.clearTimeout(noteTimer.current);
+    };
+  }, []);
 
   function toggleSessionPanel() {
     if (!currentNotebookOwner()) return;
@@ -2742,6 +3021,13 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     sessionTitleOverLimit: conversationTitleLimitHint(sessionTitleDraft.trim()),
     feedbackSent: ownerIsVisible ? feedbackSent : EMPTY_FEEDBACK_SENT,
     inFlight: ownerIsVisible && (asking || intentChecking || Boolean(intentReview)),
+    linkedReport: ownerIsVisible ? linkedReport : null,
+    // Only a verdict about the inputs the next submission would carry.
+    linkedReportCheck: ownerIsVisible && linkedReportCheck?.key === linkedReportCheckInputs
+      ? linkedReportCheck.verdict
+      : null,
+    linkedReportNote: ownerIsVisible ? linkedReportNote : "",
+    pendingLinkedReport: ownerIsVisible ? pendingLinkedReport : null,
     activateActor,
     beginNotebookTransition,
     finishNotebookTransition,
@@ -2750,6 +3036,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     abortForLogout,
     openSession,
     startNewSession,
+    beginReportFollowup,
+    linkReport,
+    unlinkReport,
     releaseQuestion,
     editStoppedTurn,
     selectMode,

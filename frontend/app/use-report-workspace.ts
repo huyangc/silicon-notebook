@@ -10,6 +10,7 @@ import {
   fetchReportsZip,
   generateReport,
   getReport,
+  getReportFollowupScope,
   getReportShare,
   getReportShareDisclosure,
   listReports,
@@ -24,6 +25,7 @@ import {
   REPORT_DEPTHS,
   REPORT_POLL_INTERVAL_MS,
   type ReportDetailT,
+  type ReportFollowupScopeT,
   type ReportFrameT,
   type ReportOutlineSectionT,
   type ReportSummaryT,
@@ -854,6 +856,23 @@ export function useReportWorkspace({
     }
   };
 
+  // 「就此追问」起步用的检索范围（只读，不改本 hook 的任何状态）：报告生成时冻结的范围，
+  // 按现状过滤过。页面不得直接调 report-api（report-workspace-boundary 守卫），所以经这里
+  // 取。归属在请求期间变了（换笔记本/换人/离开报告页签）返回 null，失败也不再抛给已不属于
+  // 它的界面；仍归属时失败原样抛出，由发起的按钮就地显示失败态。
+  const readFollowupScope = async (reportId: string): Promise<ReportFollowupScopeT | null> => {
+    const owner = currentOwner();
+    if (!owner) return null;
+    let scope: ReportFollowupScopeT;
+    try {
+      scope = await getReportFollowupScope(owner.notebookId, reportId);
+    } catch (error) {
+      if (owns(owner)) throw error;
+      return null;
+    }
+    return owns(owner) && scope.report_id === reportId ? scope : null;
+  };
+
   const visible = Boolean(currentOwner());
   return {
     reports: visible ? reports : null,
@@ -900,5 +919,6 @@ export function useReportWorkspace({
     toggleSelectMode,
     toggleSelected,
     downloadSelected,
+    readFollowupScope,
   };
 }

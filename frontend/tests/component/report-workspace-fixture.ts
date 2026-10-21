@@ -54,6 +54,8 @@ export function reportWorkspaceFixture(
     toggleSelectMode: vi.fn(),
     toggleSelected: vi.fn(),
     downloadSelected: vi.fn(),
+    // 默认 resolve(null)=「归属已变，不切范围」。
+    readFollowupScope: vi.fn(async () => null),
     ...overrides,
   };
 }
