@@ -1,0 +1,1712 @@
+{
+ "db_diff": {
+  "unified_kg_state": {
+   "added": [
+    {
+     "canonical_rel_seq": 2,
+     "chunk_elements_indexed": 0,
+     "cluster_code_version": "algo=3;embed_dim=16;runtime_dim=0",
+     "cluster_count": 7,
+     "cluster_generation": 1,
+     "cluster_input_version": "c2fb0ae2680a59bc03127a0afefd95fc2de76cc2",
+     "cluster_mutation_seq": 1,
+     "community_generation": 2,
+     "community_seq": 2,
+     "derived_building_claimed_at": null,
+     "derived_building_generation": 0,
+     "derived_catchup_from": null,
+     "derived_generation_counter": 3,
+     "dirty": 0,
+     "indexing_pipeline_id": "",
+     "indexing_pipeline_version": "builtin.chunk.v1",
+     "kg_mutation_seq": 2,
+     "kg_reset_epoch": 0,
+     "last_rebuild_at": "2026-09-30T00:00:00+00:00",
+     "memory_isolation_version": 1,
+     "mention_seq": 2,
+     "notebook_id": "nb-r0001",
+     "object_count": 17,
+     "relation_count": 5,
+     "source_index_backfilled": 1,
+     "updated_at": "<ts>"
+    }
+   ],
+   "removed": [
+    {
+     "canonical_rel_seq": 2,
+     "chunk_elements_indexed": 0,
+     "cluster_code_version": "",
+     "cluster_count": 7,
+     "cluster_generation": 1,
+     "cluster_input_version": "c2fb0ae2680a59bc03127a0afefd95fc2de76cc2",
+     "cluster_mutation_seq": 1,
+     "community_generation": 2,
+     "community_seq": 2,
+     "derived_building_claimed_at": null,
+     "derived_building_generation": 0,
+     "derived_catchup_from": "2026-09-30 00:00:00",
+     "derived_generation_counter": 2,
+     "dirty": 0,
+     "indexing_pipeline_id": "",
+     "indexing_pipeline_version": "builtin.chunk.v1",
+     "kg_mutation_seq": 2,
+     "kg_reset_epoch": 0,
+     "last_rebuild_at": "2026-09-30T00:00:00+00:00",
+     "memory_isolation_version": 1,
+     "mention_seq": 2,
+     "notebook_id": "nb-r0001",
+     "object_count": 17,
+     "relation_count": 5,
+     "source_index_backfilled": 1,
+     "updated_at": "2026-09-30T00:00:00+00:00"
+    }
+   ]
+  }
+ },
+ "fs_diff": {
+  "added": {},
+  "removed": []
+ },
+ "llm": [],
+ "logs": [
+  {
+   "level": "INFO",
+   "logger": "silicon_notebook.events",
+   "message": "kg-rebuild[nb-r0001] skipped — inputs unchanged since last rebuild (7 clusters)"
+  }
+ ],
+ "notebook_id": "nb-r0001",
+ "outcome": {
+  "returned": 7
+ },
+ "progress": [
+  [
+   "跳过:自上次 rebuild 起输入未变化(7 clusters)",
+   0,
+   0
+  ]
+ ],
+ "timeline": [
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self.get_notebook",
+   "kwargs": {},
+   "ret": {
+    "access": "owner",
+    "access_scope": "",
+    "ask_available": true,
+    "base_kg_available": false,
+    "base_kg_notebook_ids": [],
+    "base_notebooks": [],
+    "can_manage_content": false,
+    "counts": {
+     "cases": 0,
+     "checklist_items": 0,
+     "glossary": 0,
+     "memories": 0,
+     "methods": 0,
+     "risks": 0,
+     "rules": 0,
+     "sources": 3
+    },
+    "created_label": "2026年9月30日",
+    "document_limit": 20,
+    "expected_questions": [],
+    "granted_via": [],
+    "id": "nb-r0001",
+    "indexing_pipeline_available": true,
+    "indexing_pipeline_id": null,
+    "indexing_pipeline_missing": false,
+    "indexing_pipeline_pending": false,
+    "indexing_pipeline_stale": false,
+    "indexing_pipeline_version": "builtin.chunk.v1",
+    "is_shared": false,
+    "kg_build": null,
+    "kg_building": false,
+    "kg_pending_sources": 0,
+    "kg_ready": true,
+    "local_evidence_available": true,
+    "name": "rebuild world",
+    "paper_meta_backfilling": false,
+    "paper_meta_missing": false,
+    "primary_domain": "Semiconductor",
+    "purpose": "",
+    "shared_from": "",
+    "source_types": [],
+    "status": "draft",
+    "sync_origin": "",
+    "target_users": "",
+    "taxonomy": [],
+    "tier": "personal"
+   }
+  },
+  {
+   "sql": "SELECT notebooks.*, u.username AS _owner_username, COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') AS _published_pipeline_version, EXISTS(SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id = notebooks.id AND ng.principal_type IN ('group', 'group_admins')) AS _shared_to_groups FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by LEFT JOIN unified_kg_state ip ON ip.notebook_id=notebooks.id WHERE notebooks.id = 'nb-r0001' AND notebooks.status NOT IN ('copying','deleting','importing')"
+  },
+  {
+   "sql": "SELECT id FROM sources WHERE notebook_id = 'nb-r0001' AND source_type = 'memory'"
+  },
+  {
+   "sql": "SELECT COUNT(*) AS count FROM sources WHERE notebook_id = 'nb-r0001' AND source_type NOT IN ('memory', 'knowhow')"
+  },
+  {
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "sql": "WITH total AS (SELECT object_type, status, COUNT(*) AS c FROM knowledge_objects WHERE notebook_id='nb-r0001' GROUP BY object_type, status), memory AS (SELECT mo.object_type, mo.status, COUNT(*) AS c FROM knowledge_objects mo WHERE mo.source_id IN (SELECT s.id FROM sources s WHERE s.notebook_id='nb-r0001' AND s.source_type IN ('memory','knowhow') AND s.source_type = 'memory') AND +mo.notebook_id='nb-r0001' GROUP BY mo.object_type, mo.status) SELECT t.object_type, t.status, t.c - COALESCE(m.c, 0) AS c, COALESCE(m.c, 0) AS m FROM total t LEFT JOIN memory m ON m.object_type = t.object_type AND m.status = t.status"
+  },
+  {
+   "sql": "SELECT b.id AS id, b.name AS name, b.tier AS tier, EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id) AS has_kg FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF(NULL, '') AS uid) v WHERE e.notebook_id = 'nb-r0001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = 'nb-r0001')"
+  },
+  {
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "sql": "SELECT COUNT(*) FROM sources s WHERE s.notebook_id = 'nb-r0001' AND s.source_type NOT IN ('memory','knowhow') AND s.source_type <> 'promotion' AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id) AND NOT EXISTS (SELECT 1 FROM knowledge_objects k WHERE k.source_id = s.id AND k.source_id != '' AND COALESCE(( SELECT er.status FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC, er.rowid DESC LIMIT 1), 'completed')='completed' AND NOT (COALESCE((SELECT er.error_message FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'') GLOB '*windows_failed=[1-9]*/*' OR instr(COALESCE((SELECT er.error_message FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),''),'retry_incomplete=1')>0)) AND NOT (COALESCE((SELECT er.status FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'')='completed' AND COALESCE((SELECT er.error_message FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'') GLOB 'kg objects=0 *' AND COALESCE((SELECT er.error_message FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'') NOT GLOB '*windows_failed=[1-9]*/*')"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM chunks WHERE notebook_id = 'nb-r0001')"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = 'nb-r0001' AND status IN ('approved','reviewed','project_specific','conflict'))"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM sources s WHERE s.notebook_id = 'nb-r0001' AND s.source_type NOT IN ('memory', 'knowhow') AND s.source_type <> 'promotion' AND s.doc_type IN ('', 'academic_paper') AND s.parse_status IN ('parsed', 'extracting', 'extracted') AND NOT EXISTS (SELECT 1 FROM source_paper_meta m WHERE m.source_id = s.id))"
+  },
+  {
+   "sql": "SELECT * FROM kg_build_jobs WHERE notebook_id='nb-r0001' ORDER BY created_at DESC, rowid DESC LIMIT 1"
+  },
+  {
+   "sql": "SELECT nb.created_by AS owner_id, u.role AS owner_role FROM notebooks nb LEFT JOIN users u ON u.id = nb.created_by WHERE nb.id = 'nb-r0001'"
+  },
+  {
+   "sql": "SELECT upload_document_limit FROM user_profiles WHERE user_id = 'user-local'"
+  },
+  {
+   "sql": "SELECT value FROM app_settings WHERE key = 'upload_document_limit_default'"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self._cluster_input_version",
+   "kwargs": {},
+   "ret": "c2fb0ae2680a59bc03127a0afefd95fc2de76cc2"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001"
+   ],
+   "call": "unified_kg.cluster_input_facts",
+   "kwargs": {
+    "exclude_emb_count": false
+   },
+   "ret": [
+    2,
+    17,
+    2,
+    17
+   ]
+  },
+  {
+   "sql": "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "sql": "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id='nb-r0001' AND status!='deprecated'"
+  },
+  {
+   "sql": "SELECT COUNT(*) AS c FROM concept_merge_candidates WHERE notebook_id='nb-r0001' AND status IN ('confirmed','rejected')"
+  },
+  {
+   "sql": "SELECT COUNT(*) AS c FROM knowledge_embeddings WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001"
+   ],
+   "call": "unified_kg.state_row",
+   "kwargs": {},
+   "ret": {
+    "row": {
+     "canonical_rel_seq": 2,
+     "chunk_elements_indexed": 0,
+     "cluster_code_version": "",
+     "cluster_count": 7,
+     "cluster_generation": 1,
+     "cluster_input_version": "c2fb0ae2680a59bc03127a0afefd95fc2de76cc2",
+     "cluster_mutation_seq": 1,
+     "community_generation": 2,
+     "community_seq": 2,
+     "derived_building_claimed_at": null,
+     "derived_building_generation": 0,
+     "derived_catchup_from": "2026-09-30 00:00:00",
+     "derived_generation_counter": 2,
+     "dirty": 0,
+     "indexing_pipeline_id": "",
+     "indexing_pipeline_version": "builtin.chunk.v1",
+     "kg_mutation_seq": 2,
+     "kg_reset_epoch": 0,
+     "last_rebuild_at": "2026-09-30T00:00:00+00:00",
+     "memory_isolation_version": 1,
+     "mention_seq": 2,
+     "notebook_id": "nb-r0001",
+     "object_count": 17,
+     "relation_count": 5,
+     "source_index_backfilled": 1,
+     "updated_at": "2026-09-30T00:00:00+00:00"
+    }
+   }
+  },
+  {
+   "sql": "SELECT * FROM unified_kg_state WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001"
+   ],
+   "call": "unified_kg.concept_clusters_count",
+   "kwargs": {},
+   "ret": 17
+  },
+  {
+   "sql": "SELECT COUNT(*) AS c FROM concept_clusters WHERE notebook_id='nb-r0001' AND generation = COALESCE((SELECT cluster_generation FROM unified_kg_state WHERE notebook_id = 'nb-r0001'), 0)"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "args": [
+    "nb-r0001",
+    {
+     "row": {
+      "canonical_rel_seq": 2,
+      "chunk_elements_indexed": 0,
+      "cluster_code_version": "",
+      "cluster_count": 7,
+      "cluster_generation": 1,
+      "cluster_input_version": "c2fb0ae2680a59bc03127a0afefd95fc2de76cc2",
+      "cluster_mutation_seq": 1,
+      "community_generation": 2,
+      "community_seq": 2,
+      "derived_building_claimed_at": null,
+      "derived_building_generation": 0,
+      "derived_catchup_from": "2026-09-30 00:00:00",
+      "derived_generation_counter": 2,
+      "dirty": 0,
+      "indexing_pipeline_id": "",
+      "indexing_pipeline_version": "builtin.chunk.v1",
+      "kg_mutation_seq": 2,
+      "kg_reset_epoch": 0,
+      "last_rebuild_at": "2026-09-30T00:00:00+00:00",
+      "memory_isolation_version": 1,
+      "mention_seq": 2,
+      "notebook_id": "nb-r0001",
+      "object_count": 17,
+      "relation_count": 5,
+      "source_index_backfilled": 1,
+      "updated_at": "2026-09-30T00:00:00+00:00"
+     }
+    },
+    "c2fb0ae2680a59bc03127a0afefd95fc2de76cc2"
+   ],
+   "call": "self._settle_skip_path",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001"
+   ],
+   "call": "unified_kg.claim_derived_generation",
+   "kwargs": {
+    "ttl_seconds": 14400
+   },
+   "ret": {
+    "catchup_from": "2026-09-30 00:00:00",
+    "cluster_generation": 1,
+    "community_generation": 2,
+    "generation": 3,
+    "kg_mutation_seq": 2,
+    "ts": "<ts>"
+   }
+  },
+  {
+   "sql": "BEGIN"
+  },
+  {
+   "sql": "INSERT OR IGNORE INTO unified_kg_state (notebook_id, updated_at) VALUES ('nb-r0001', datetime('now'))"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET derived_generation_counter = derived_generation_counter + 1, derived_building_generation = derived_generation_counter + 1, derived_building_claimed_at = datetime('now'), updated_at = datetime('now') WHERE notebook_id = 'nb-r0001' AND (derived_building_generation = 0 OR datetime(COALESCE(derived_building_claimed_at, '1970-01-01')) < datetime('now', '-' || CAST(14400 AS TEXT) || ' seconds'))"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET derived_generation_counter = derived_generation_counter + 1, derived_building_generation = derived_generation_counter + 1, derived_building_claimed_at = datetime('now'), updated_at = datetime('now') WHERE notebook_id = 'nb-r0001' AND (derived_building_generation = 0 OR datetime(COALESCE(derived_building_claimed_at, '1970-01-01')) < datetime('now', '-' || CAST(14400 AS TEXT) || ' seconds'))"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET derived_generation_counter = derived_generation_counter + 1, derived_building_generation = derived_generation_counter + 1, derived_building_claimed_at = datetime('now'), updated_at = datetime('now') WHERE notebook_id = 'nb-r0001' AND (derived_building_generation = 0 OR datetime(COALESCE(derived_building_claimed_at, '1970-01-01')) < datetime('now', '-' || CAST(14400 AS TEXT) || ' seconds'))"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET derived_generation_counter = derived_generation_counter + 1, derived_building_generation = derived_generation_counter + 1, derived_building_claimed_at = datetime('now'), updated_at = datetime('now') WHERE notebook_id = 'nb-r0001' AND (derived_building_generation = 0 OR datetime(COALESCE(derived_building_claimed_at, '1970-01-01')) < datetime('now', '-' || CAST(14400 AS TEXT) || ' seconds'))"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET derived_generation_counter = derived_generation_counter + 1, derived_building_generation = derived_generation_counter + 1, derived_building_claimed_at = datetime('now'), updated_at = datetime('now') WHERE notebook_id = 'nb-r0001' AND (derived_building_generation = 0 OR datetime(COALESCE(derived_building_claimed_at, '1970-01-01')) < datetime('now', '-' || CAST(14400 AS TEXT) || ' seconds'))"
+  },
+  {
+   "sql": "SELECT derived_generation_counter AS generation, cluster_generation, community_generation, derived_catchup_from, datetime('now') AS ts, kg_mutation_seq FROM unified_kg_state WHERE notebook_id = 'nb-r0001'"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "sql": "COMMIT"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self._settle_generation_catchup",
+   "kwargs": {
+    "published_generation": 1,
+    "since_ts": "2026-09-30 00:00:00"
+   },
+   "ret": 0
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001",
+    1,
+    "2026-09-30 00:00:00",
+    300,
+    20000
+   ],
+   "call": "unified_kg.catchup_window_members",
+   "kwargs": {
+    "after_member_object_id": "",
+    "after_object_type": ""
+   },
+   "ret": []
+  },
+  {
+   "sql": "SELECT c.member_object_id, c.object_type, MIN(o.payload) AS payload FROM concept_clusters c JOIN knowledge_objects o ON o.id = c.member_object_id AND o.status != 'deprecated' WHERE c.notebook_id='nb-r0001' AND c.generation != 1 AND c.generation NOT IN ( SELECT derived_building_generation FROM unified_kg_state u WHERE u.notebook_id = 'nb-r0001' AND derived_building_generation != 0) AND datetime(c.created_at) >= datetime('2026-09-30 00:00:00', '-' || CAST(300 AS TEXT) || ' seconds') AND NOT EXISTS (SELECT 1 FROM knowledge_objects xo WHERE xo.id = c.member_object_id AND xo.notebook_id = c.notebook_id AND EXISTS (SELECT 1 FROM sources ds WHERE ds.id = xo.source_id AND ds.notebook_id = xo.notebook_id AND ds.source_type = 'memory')) AND (c.object_type, c.member_object_id) > ('', '') GROUP BY c.object_type, c.member_object_id ORDER BY c.object_type, c.member_object_id LIMIT 20000"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001",
+    "2026-09-30 00:00:00",
+    1
+   ],
+   "call": "unified_kg.clear_catchup_marker",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "sql": "BEGIN"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET derived_catchup_from=NULL, updated_at=datetime('now') WHERE notebook_id='nb-r0001' AND derived_catchup_from='2026-09-30 00:00:00' AND cluster_generation=1"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET derived_catchup_from=NULL, updated_at=datetime('now') WHERE notebook_id='nb-r0001' AND derived_catchup_from='2026-09-30 00:00:00' AND cluster_generation=1"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET derived_catchup_from=NULL, updated_at=datetime('now') WHERE notebook_id='nb-r0001' AND derived_catchup_from='2026-09-30 00:00:00' AND cluster_generation=1"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET derived_catchup_from=NULL, updated_at=datetime('now') WHERE notebook_id='nb-r0001' AND derived_catchup_from='2026-09-30 00:00:00' AND cluster_generation=1"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET derived_catchup_from=NULL, updated_at=datetime('now') WHERE notebook_id='nb-r0001' AND derived_catchup_from='2026-09-30 00:00:00' AND cluster_generation=1"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "sql": "COMMIT"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001",
+    3
+   ],
+   "call": "unified_kg.release_derived_claim",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "sql": "BEGIN"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET derived_building_generation=0, derived_building_claimed_at=NULL, updated_at=datetime('now') WHERE notebook_id='nb-r0001' AND derived_building_generation=3"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET derived_building_generation=0, derived_building_claimed_at=NULL, updated_at=datetime('now') WHERE notebook_id='nb-r0001' AND derived_building_generation=3"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET derived_building_generation=0, derived_building_claimed_at=NULL, updated_at=datetime('now') WHERE notebook_id='nb-r0001' AND derived_building_generation=3"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET derived_building_generation=0, derived_building_claimed_at=NULL, updated_at=datetime('now') WHERE notebook_id='nb-r0001' AND derived_building_generation=3"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET derived_building_generation=0, derived_building_claimed_at=NULL, updated_at=datetime('now') WHERE notebook_id='nb-r0001' AND derived_building_generation=3"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "sql": "COMMIT"
+  },
+  {
+   "args": [
+    "<Settings>"
+   ],
+   "call": "fn.cluster_code_version",
+   "kwargs": {},
+   "ret": "algo=3;embed_dim=16;runtime_dim=0"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001",
+    "c2fb0ae2680a59bc03127a0afefd95fc2de76cc2",
+    "algo=3;embed_dim=16;runtime_dim=0"
+   ],
+   "call": "unified_kg.stamp_cluster_code_version",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "sql": "BEGIN"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET cluster_code_version = 'algo=3;embed_dim=16;runtime_dim=0' WHERE notebook_id = 'nb-r0001' AND cluster_input_version = 'c2fb0ae2680a59bc03127a0afefd95fc2de76cc2' AND cluster_input_version <> '' AND cluster_code_version <> 'algo=3;embed_dim=16;runtime_dim=0'"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET cluster_code_version = 'algo=3;embed_dim=16;runtime_dim=0' WHERE notebook_id = 'nb-r0001' AND cluster_input_version = 'c2fb0ae2680a59bc03127a0afefd95fc2de76cc2' AND cluster_input_version <> '' AND cluster_code_version <> 'algo=3;embed_dim=16;runtime_dim=0'"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET cluster_code_version = 'algo=3;embed_dim=16;runtime_dim=0' WHERE notebook_id = 'nb-r0001' AND cluster_input_version = 'c2fb0ae2680a59bc03127a0afefd95fc2de76cc2' AND cluster_input_version <> '' AND cluster_code_version <> 'algo=3;embed_dim=16;runtime_dim=0'"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET cluster_code_version = 'algo=3;embed_dim=16;runtime_dim=0' WHERE notebook_id = 'nb-r0001' AND cluster_input_version = 'c2fb0ae2680a59bc03127a0afefd95fc2de76cc2' AND cluster_input_version <> '' AND cluster_code_version <> 'algo=3;embed_dim=16;runtime_dim=0'"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET cluster_code_version = 'algo=3;embed_dim=16;runtime_dim=0' WHERE notebook_id = 'nb-r0001' AND cluster_input_version = 'c2fb0ae2680a59bc03127a0afefd95fc2de76cc2' AND cluster_input_version <> '' AND cluster_code_version <> 'algo=3;embed_dim=16;runtime_dim=0'"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "sql": "COMMIT"
+  },
+  {
+   "log": "INFO"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self.rebuild_canonical_relations",
+   "kwargs": {},
+   "ret": 0
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self.get_notebook",
+   "kwargs": {},
+   "ret": {
+    "access": "owner",
+    "access_scope": "",
+    "ask_available": true,
+    "base_kg_available": false,
+    "base_kg_notebook_ids": [],
+    "base_notebooks": [],
+    "can_manage_content": false,
+    "counts": {
+     "cases": 0,
+     "checklist_items": 0,
+     "glossary": 0,
+     "memories": 0,
+     "methods": 0,
+     "risks": 0,
+     "rules": 0,
+     "sources": 3
+    },
+    "created_label": "2026年9月30日",
+    "document_limit": 20,
+    "expected_questions": [],
+    "granted_via": [],
+    "id": "nb-r0001",
+    "indexing_pipeline_available": true,
+    "indexing_pipeline_id": null,
+    "indexing_pipeline_missing": false,
+    "indexing_pipeline_pending": false,
+    "indexing_pipeline_stale": false,
+    "indexing_pipeline_version": "builtin.chunk.v1",
+    "is_shared": false,
+    "kg_build": null,
+    "kg_building": false,
+    "kg_pending_sources": 0,
+    "kg_ready": true,
+    "local_evidence_available": true,
+    "name": "rebuild world",
+    "paper_meta_backfilling": false,
+    "paper_meta_missing": false,
+    "primary_domain": "Semiconductor",
+    "purpose": "",
+    "shared_from": "",
+    "source_types": [],
+    "status": "draft",
+    "sync_origin": "",
+    "target_users": "",
+    "taxonomy": [],
+    "tier": "personal"
+   }
+  },
+  {
+   "sql": "SELECT notebooks.*, u.username AS _owner_username, COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') AS _published_pipeline_version, EXISTS(SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id = notebooks.id AND ng.principal_type IN ('group', 'group_admins')) AS _shared_to_groups FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by LEFT JOIN unified_kg_state ip ON ip.notebook_id=notebooks.id WHERE notebooks.id = 'nb-r0001' AND notebooks.status NOT IN ('copying','deleting','importing')"
+  },
+  {
+   "sql": "SELECT id FROM sources WHERE notebook_id = 'nb-r0001' AND source_type = 'memory'"
+  },
+  {
+   "sql": "SELECT COUNT(*) AS count FROM sources WHERE notebook_id = 'nb-r0001' AND source_type NOT IN ('memory', 'knowhow')"
+  },
+  {
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "sql": "SELECT b.id AS id, b.name AS name, b.tier AS tier, EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id) AS has_kg FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF(NULL, '') AS uid) v WHERE e.notebook_id = 'nb-r0001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = 'nb-r0001')"
+  },
+  {
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM chunks WHERE notebook_id = 'nb-r0001')"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = 'nb-r0001' AND status IN ('approved','reviewed','project_specific','conflict'))"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM sources s WHERE s.notebook_id = 'nb-r0001' AND s.source_type NOT IN ('memory', 'knowhow') AND s.source_type <> 'promotion' AND s.doc_type IN ('', 'academic_paper') AND s.parse_status IN ('parsed', 'extracting', 'extracted') AND NOT EXISTS (SELECT 1 FROM source_paper_meta m WHERE m.source_id = s.id))"
+  },
+  {
+   "sql": "SELECT * FROM kg_build_jobs WHERE notebook_id='nb-r0001' ORDER BY created_at DESC, rowid DESC LIMIT 1"
+  },
+  {
+   "sql": "SELECT nb.created_by AS owner_id, u.role AS owner_role FROM notebooks nb LEFT JOIN users u ON u.id = nb.created_by WHERE nb.id = 'nb-r0001'"
+  },
+  {
+   "sql": "SELECT upload_document_limit FROM user_profiles WHERE user_id = 'user-local'"
+  },
+  {
+   "sql": "SELECT value FROM app_settings WHERE key = 'upload_document_limit_default'"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001"
+   ],
+   "call": "unified_kg.state_row",
+   "kwargs": {},
+   "ret": {
+    "row": {
+     "canonical_rel_seq": 2,
+     "chunk_elements_indexed": 0,
+     "cluster_code_version": "algo=3;embed_dim=16;runtime_dim=0",
+     "cluster_count": 7,
+     "cluster_generation": 1,
+     "cluster_input_version": "c2fb0ae2680a59bc03127a0afefd95fc2de76cc2",
+     "cluster_mutation_seq": 1,
+     "community_generation": 2,
+     "community_seq": 2,
+     "derived_building_claimed_at": null,
+     "derived_building_generation": 0,
+     "derived_catchup_from": null,
+     "derived_generation_counter": 3,
+     "dirty": 0,
+     "indexing_pipeline_id": "",
+     "indexing_pipeline_version": "builtin.chunk.v1",
+     "kg_mutation_seq": 2,
+     "kg_reset_epoch": 0,
+     "last_rebuild_at": "2026-09-30T00:00:00+00:00",
+     "memory_isolation_version": 1,
+     "mention_seq": 2,
+     "notebook_id": "nb-r0001",
+     "object_count": 17,
+     "relation_count": 5,
+     "source_index_backfilled": 1,
+     "updated_at": "<ts>"
+    }
+   }
+  },
+  {
+   "sql": "SELECT * FROM unified_kg_state WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001"
+   ],
+   "call": "unified_kg.canonical_relations_count",
+   "kwargs": {},
+   "ret": 0
+  },
+  {
+   "sql": "SELECT COUNT(*) AS c FROM canonical_relations WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001"
+   ],
+   "call": "unified_kg.canonical_relation_seed_rows",
+   "kwargs": {},
+   "ret": "<_DiagnosticCursor>"
+  },
+  {
+   "sql": "SELECT kr.id AS rid, kr.source_id AS src_doc, kr.edge_type AS et, COALESCE(cs.canonical_id, kr.source_object_id) AS s, COALESCE(ct.canonical_id, kr.target_object_id) AS t, so.object_type AS st, tp.object_type AS tt FROM knowledge_relations kr JOIN knowledge_objects so ON so.id=kr.source_object_id JOIN knowledge_objects tp ON tp.id=kr.target_object_id LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id AND cs.member_object_id=kr.source_object_id AND cs.generation = COALESCE((SELECT cluster_generation FROM unified_kg_state WHERE notebook_id = 'nb-r0001'), 0) LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id AND ct.member_object_id=kr.target_object_id AND ct.generation = COALESCE((SELECT cluster_generation FROM unified_kg_state WHERE notebook_id = 'nb-r0001'), 0) WHERE kr.notebook_id='nb-r0001' AND kr.review_status!='rejected' AND NOT EXISTS (SELECT 1 FROM sources ds WHERE ds.id = kr.source_id AND ds.notebook_id = kr.notebook_id AND ds.source_type = 'memory') AND NOT EXISTS (SELECT 1 FROM knowledge_objects xs WHERE xs.id = kr.source_object_id AND xs.notebook_id = kr.notebook_id AND EXISTS (SELECT 1 FROM sources ds WHERE ds.id = xs.source_id AND ds.notebook_id = xs.notebook_id AND ds.source_type = 'memory')) AND NOT EXISTS (SELECT 1 FROM knowledge_objects xt WHERE xt.id = kr.target_object_id AND xt.notebook_id = kr.notebook_id AND EXISTS (SELECT 1 FROM sources ds WHERE ds.id = xt.source_id AND ds.notebook_id = xt.notebook_id AND ds.source_type = 'memory'))"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "now": "2999-01-01T00:00:00+00:00"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001",
+    [],
+    2
+   ],
+   "call": "unified_kg.replace_canonical_relations",
+   "kwargs": {
+    "reset_epoch": 0
+   },
+   "ret": true
+  },
+  {
+   "sql": "BEGIN"
+  },
+  {
+   "sql": "DELETE FROM canonical_relations WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET canonical_rel_seq=2 WHERE notebook_id='nb-r0001' AND COALESCE(kg_reset_epoch, 0)=0"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET canonical_rel_seq=2 WHERE notebook_id='nb-r0001' AND COALESCE(kg_reset_epoch, 0)=0"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET canonical_rel_seq=2 WHERE notebook_id='nb-r0001' AND COALESCE(kg_reset_epoch, 0)=0"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET canonical_rel_seq=2 WHERE notebook_id='nb-r0001' AND COALESCE(kg_reset_epoch, 0)=0"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET canonical_rel_seq=2 WHERE notebook_id='nb-r0001' AND COALESCE(kg_reset_epoch, 0)=0"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "sql": "COMMIT"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self.rebuild_mention_bridge",
+   "kwargs": {},
+   "ret": 0
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self.get_notebook",
+   "kwargs": {},
+   "ret": {
+    "access": "owner",
+    "access_scope": "",
+    "ask_available": true,
+    "base_kg_available": false,
+    "base_kg_notebook_ids": [],
+    "base_notebooks": [],
+    "can_manage_content": false,
+    "counts": {
+     "cases": 0,
+     "checklist_items": 0,
+     "glossary": 0,
+     "memories": 0,
+     "methods": 0,
+     "risks": 0,
+     "rules": 0,
+     "sources": 3
+    },
+    "created_label": "2026年9月30日",
+    "document_limit": 20,
+    "expected_questions": [],
+    "granted_via": [],
+    "id": "nb-r0001",
+    "indexing_pipeline_available": true,
+    "indexing_pipeline_id": null,
+    "indexing_pipeline_missing": false,
+    "indexing_pipeline_pending": false,
+    "indexing_pipeline_stale": false,
+    "indexing_pipeline_version": "builtin.chunk.v1",
+    "is_shared": false,
+    "kg_build": null,
+    "kg_building": false,
+    "kg_pending_sources": 0,
+    "kg_ready": true,
+    "local_evidence_available": true,
+    "name": "rebuild world",
+    "paper_meta_backfilling": false,
+    "paper_meta_missing": false,
+    "primary_domain": "Semiconductor",
+    "purpose": "",
+    "shared_from": "",
+    "source_types": [],
+    "status": "draft",
+    "sync_origin": "",
+    "target_users": "",
+    "taxonomy": [],
+    "tier": "personal"
+   }
+  },
+  {
+   "sql": "SELECT notebooks.*, u.username AS _owner_username, COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') AS _published_pipeline_version, EXISTS(SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id = notebooks.id AND ng.principal_type IN ('group', 'group_admins')) AS _shared_to_groups FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by LEFT JOIN unified_kg_state ip ON ip.notebook_id=notebooks.id WHERE notebooks.id = 'nb-r0001' AND notebooks.status NOT IN ('copying','deleting','importing')"
+  },
+  {
+   "sql": "SELECT id FROM sources WHERE notebook_id = 'nb-r0001' AND source_type = 'memory'"
+  },
+  {
+   "sql": "SELECT COUNT(*) AS count FROM sources WHERE notebook_id = 'nb-r0001' AND source_type NOT IN ('memory', 'knowhow')"
+  },
+  {
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "sql": "SELECT b.id AS id, b.name AS name, b.tier AS tier, EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id) AS has_kg FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF(NULL, '') AS uid) v WHERE e.notebook_id = 'nb-r0001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = 'nb-r0001')"
+  },
+  {
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM chunks WHERE notebook_id = 'nb-r0001')"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = 'nb-r0001' AND status IN ('approved','reviewed','project_specific','conflict'))"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM sources s WHERE s.notebook_id = 'nb-r0001' AND s.source_type NOT IN ('memory', 'knowhow') AND s.source_type <> 'promotion' AND s.doc_type IN ('', 'academic_paper') AND s.parse_status IN ('parsed', 'extracting', 'extracted') AND NOT EXISTS (SELECT 1 FROM source_paper_meta m WHERE m.source_id = s.id))"
+  },
+  {
+   "sql": "SELECT * FROM kg_build_jobs WHERE notebook_id='nb-r0001' ORDER BY created_at DESC, rowid DESC LIMIT 1"
+  },
+  {
+   "sql": "SELECT nb.created_by AS owner_id, u.role AS owner_role FROM notebooks nb LEFT JOIN users u ON u.id = nb.created_by WHERE nb.id = 'nb-r0001'"
+  },
+  {
+   "sql": "SELECT upload_document_limit FROM user_profiles WHERE user_id = 'user-local'"
+  },
+  {
+   "sql": "SELECT value FROM app_settings WHERE key = 'upload_document_limit_default'"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001"
+   ],
+   "call": "unified_kg.state_row",
+   "kwargs": {},
+   "ret": {
+    "row": {
+     "canonical_rel_seq": 2,
+     "chunk_elements_indexed": 0,
+     "cluster_code_version": "algo=3;embed_dim=16;runtime_dim=0",
+     "cluster_count": 7,
+     "cluster_generation": 1,
+     "cluster_input_version": "c2fb0ae2680a59bc03127a0afefd95fc2de76cc2",
+     "cluster_mutation_seq": 1,
+     "community_generation": 2,
+     "community_seq": 2,
+     "derived_building_claimed_at": null,
+     "derived_building_generation": 0,
+     "derived_catchup_from": null,
+     "derived_generation_counter": 3,
+     "dirty": 0,
+     "indexing_pipeline_id": "",
+     "indexing_pipeline_version": "builtin.chunk.v1",
+     "kg_mutation_seq": 2,
+     "kg_reset_epoch": 0,
+     "last_rebuild_at": "2026-09-30T00:00:00+00:00",
+     "memory_isolation_version": 1,
+     "mention_seq": 2,
+     "notebook_id": "nb-r0001",
+     "object_count": 17,
+     "relation_count": 5,
+     "source_index_backfilled": 1,
+     "updated_at": "<ts>"
+    }
+   }
+  },
+  {
+   "sql": "SELECT * FROM unified_kg_state WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001"
+   ],
+   "call": "unified_kg.mention_edges_count",
+   "kwargs": {},
+   "ret": 0
+  },
+  {
+   "sql": "SELECT COUNT(*) AS c FROM mention_edges WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001"
+   ],
+   "call": "unified_kg.mention_seed_rows",
+   "kwargs": {},
+   "ret": [
+    [
+     {
+      "row": {
+       "cid": "K-metal oxide semiconductor fet",
+       "cname": "MOSFET",
+       "src": "s1"
+      }
+     },
+     {
+      "row": {
+       "cid": "K-finfet",
+       "cname": "FinFET",
+       "src": "s1"
+      }
+     },
+     {
+      "row": {
+       "cid": "K-bandgap reference",
+       "cname": "cascode",
+       "src": "s1"
+      }
+     },
+     {
+      "row": {
+       "cid": "K-nmos switch",
+       "cname": "NMOS switch",
+       "src": "s1"
+      }
+     },
+     {
+      "row": {
+       "cid": "K-bandgap reference",
+       "cname": "cascode",
+       "src": "s1"
+      }
+     },
+     {
+      "row": {
+       "cid": "K-metal oxide semiconductor fet",
+       "cname": "MOSFET",
+       "src": "s2"
+      }
+     },
+     {
+      "row": {
+       "cid": "K-metal oxide semiconductor fet",
+       "cname": "MOSFET",
+       "src": "s2"
+      }
+     },
+     {
+      "row": {
+       "cid": "K-gaafet",
+       "cname": "GAAFET",
+       "src": "s2"
+      }
+     },
+     {
+      "row": {
+       "cid": "K-pmos switch",
+       "cname": "PMOS switch",
+       "src": "s2"
+      }
+     },
+     {
+      "row": {
+       "cid": "K-nanosheet fet",
+       "cname": "Nanosheet FET",
+       "src": "s2"
+      }
+     },
+     {
+      "row": {
+       "cid": "K-bandgap reference",
+       "cname": "cascode",
+       "src": "s2"
+      }
+     }
+    ],
+    [
+     {
+      "row": {
+       "id": "ko-r0007",
+       "nm": "Vth drops with temperature"
+      }
+     },
+     {
+      "row": {
+       "id": "ko-r0020",
+       "nm": "Vth drops with temperature."
+      }
+     }
+    ]
+   ]
+  },
+  {
+   "sql": "SELECT cc.canonical_id AS cid, cc.canonical_name AS cname, ko.source_id AS src FROM concept_clusters cc JOIN knowledge_objects ko ON ko.id=cc.member_object_id WHERE cc.notebook_id='nb-r0001' AND cc.object_type='concept' AND cc.generation = COALESCE((SELECT cluster_generation FROM unified_kg_state WHERE notebook_id = 'nb-r0001'), 0) AND NOT EXISTS (SELECT 1 FROM knowledge_objects xo WHERE xo.id = cc.member_object_id AND xo.notebook_id = cc.notebook_id AND EXISTS (SELECT 1 FROM sources ds WHERE ds.id = xo.source_id AND ds.notebook_id = xo.notebook_id AND ds.source_type = 'memory'))"
+  },
+  {
+   "sql": "SELECT o.id AS id, json_extract(o.payload,'$.name') AS nm FROM knowledge_objects o WHERE o.notebook_id='nb-r0001' AND o.object_type='claim' AND o.status!='deprecated' AND NOT EXISTS (SELECT 1 FROM sources ds WHERE ds.id = o.source_id AND ds.notebook_id = o.notebook_id AND ds.source_type = 'memory')"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  },
+  {
+   "args": [
+    [
+     [
+      "ko-r0007",
+      "vth drops with temperature"
+     ],
+     [
+      "ko-r0020",
+      "vth drops with temperature."
+     ]
+    ],
+    [
+     "cascode",
+     "mosfet"
+    ]
+   ],
+   "call": "unified_kg.mention_alias_candidate_batches",
+   "kwargs": {},
+   "ret": "<callable>"
+  },
+  {
+   "sql": "CREATE VIRTUAL TABLE temp.mention_scan_fts USING fts5(text, tokenize='trigram')"
+  },
+  {
+   "sql": "BEGIN"
+  },
+  {
+   "sql": "INSERT INTO temp.mention_scan_fts(rowid, text) VALUES (1,'vth drops with temperature')"
+  },
+  {
+   "sql": "INSERT INTO temp.mention_scan_fts(rowid, text) VALUES (2,'vth drops with temperature.')"
+  },
+  {
+   "sql": "SELECT rowid FROM temp.mention_scan_fts WHERE mention_scan_fts MATCH '\"cascode\"'"
+  },
+  {
+   "sql": "SELECT rowid FROM temp.mention_scan_fts WHERE mention_scan_fts MATCH '\"mosfet\"'"
+  },
+  {
+   "tx": "write:enter"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001",
+    [],
+    [],
+    2
+   ],
+   "call": "unified_kg.replace_mention_bridge",
+   "kwargs": {
+    "reset_epoch": 0
+   },
+   "ret": true
+  },
+  {
+   "sql": "BEGIN"
+  },
+  {
+   "sql": "DELETE FROM mention_edges WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "sql": "DELETE FROM concept_comentions WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET mention_seq=2 WHERE notebook_id='nb-r0001' AND COALESCE(kg_reset_epoch, 0)=0"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET mention_seq=2 WHERE notebook_id='nb-r0001' AND COALESCE(kg_reset_epoch, 0)=0"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET mention_seq=2 WHERE notebook_id='nb-r0001' AND COALESCE(kg_reset_epoch, 0)=0"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET mention_seq=2 WHERE notebook_id='nb-r0001' AND COALESCE(kg_reset_epoch, 0)=0"
+  },
+  {
+   "sql": "UPDATE unified_kg_state SET mention_seq=2 WHERE notebook_id='nb-r0001' AND COALESCE(kg_reset_epoch, 0)=0"
+  },
+  {
+   "exc": null,
+   "tx": "write:exit"
+  },
+  {
+   "sql": "COMMIT"
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self.rebuild_communities",
+   "kwargs": {
+    "level": 0
+   },
+   "ret": 1
+  },
+  {
+   "args": [
+    "nb-r0001"
+   ],
+   "call": "self.get_notebook",
+   "kwargs": {},
+   "ret": {
+    "access": "owner",
+    "access_scope": "",
+    "ask_available": true,
+    "base_kg_available": false,
+    "base_kg_notebook_ids": [],
+    "base_notebooks": [],
+    "can_manage_content": false,
+    "counts": {
+     "cases": 0,
+     "checklist_items": 0,
+     "glossary": 0,
+     "memories": 0,
+     "methods": 0,
+     "risks": 0,
+     "rules": 0,
+     "sources": 3
+    },
+    "created_label": "2026年9月30日",
+    "document_limit": 20,
+    "expected_questions": [],
+    "granted_via": [],
+    "id": "nb-r0001",
+    "indexing_pipeline_available": true,
+    "indexing_pipeline_id": null,
+    "indexing_pipeline_missing": false,
+    "indexing_pipeline_pending": false,
+    "indexing_pipeline_stale": false,
+    "indexing_pipeline_version": "builtin.chunk.v1",
+    "is_shared": false,
+    "kg_build": null,
+    "kg_building": false,
+    "kg_pending_sources": 0,
+    "kg_ready": true,
+    "local_evidence_available": true,
+    "name": "rebuild world",
+    "paper_meta_backfilling": false,
+    "paper_meta_missing": false,
+    "primary_domain": "Semiconductor",
+    "purpose": "",
+    "shared_from": "",
+    "source_types": [],
+    "status": "draft",
+    "sync_origin": "",
+    "target_users": "",
+    "taxonomy": [],
+    "tier": "personal"
+   }
+  },
+  {
+   "sql": "SELECT notebooks.*, u.username AS _owner_username, COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') AS _published_pipeline_version, EXISTS(SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id = notebooks.id AND ng.principal_type IN ('group', 'group_admins')) AS _shared_to_groups FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by LEFT JOIN unified_kg_state ip ON ip.notebook_id=notebooks.id WHERE notebooks.id = 'nb-r0001' AND notebooks.status NOT IN ('copying','deleting','importing')"
+  },
+  {
+   "sql": "SELECT id FROM sources WHERE notebook_id = 'nb-r0001' AND source_type = 'memory'"
+  },
+  {
+   "sql": "SELECT COUNT(*) AS count FROM sources WHERE notebook_id = 'nb-r0001' AND source_type NOT IN ('memory', 'knowhow')"
+  },
+  {
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "sql": "SELECT b.id AS id, b.name AS name, b.tier AS tier, EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id) AS has_kg FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF(NULL, '') AS uid) v WHERE e.notebook_id = 'nb-r0001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = 'nb-r0001')"
+  },
+  {
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM chunks WHERE notebook_id = 'nb-r0001')"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = 'nb-r0001' AND status IN ('approved','reviewed','project_specific','conflict'))"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM sources s WHERE s.notebook_id = 'nb-r0001' AND s.source_type NOT IN ('memory', 'knowhow') AND s.source_type <> 'promotion' AND s.doc_type IN ('', 'academic_paper') AND s.parse_status IN ('parsed', 'extracting', 'extracted') AND NOT EXISTS (SELECT 1 FROM source_paper_meta m WHERE m.source_id = s.id))"
+  },
+  {
+   "sql": "SELECT * FROM kg_build_jobs WHERE notebook_id='nb-r0001' ORDER BY created_at DESC, rowid DESC LIMIT 1"
+  },
+  {
+   "sql": "SELECT nb.created_by AS owner_id, u.role AS owner_role FROM notebooks nb LEFT JOIN users u ON u.id = nb.created_by WHERE nb.id = 'nb-r0001'"
+  },
+  {
+   "sql": "SELECT upload_document_limit FROM user_profiles WHERE user_id = 'user-local'"
+  },
+  {
+   "sql": "SELECT value FROM app_settings WHERE key = 'upload_document_limit_default'"
+  },
+  {
+   "tx": "connect:enter"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001"
+   ],
+   "call": "unified_kg.state_row",
+   "kwargs": {},
+   "ret": {
+    "row": {
+     "canonical_rel_seq": 2,
+     "chunk_elements_indexed": 0,
+     "cluster_code_version": "algo=3;embed_dim=16;runtime_dim=0",
+     "cluster_count": 7,
+     "cluster_generation": 1,
+     "cluster_input_version": "c2fb0ae2680a59bc03127a0afefd95fc2de76cc2",
+     "cluster_mutation_seq": 1,
+     "community_generation": 2,
+     "community_seq": 2,
+     "derived_building_claimed_at": null,
+     "derived_building_generation": 0,
+     "derived_catchup_from": null,
+     "derived_generation_counter": 3,
+     "dirty": 0,
+     "indexing_pipeline_id": "",
+     "indexing_pipeline_version": "builtin.chunk.v1",
+     "kg_mutation_seq": 2,
+     "kg_reset_epoch": 0,
+     "last_rebuild_at": "2026-09-30T00:00:00+00:00",
+     "memory_isolation_version": 1,
+     "mention_seq": 2,
+     "notebook_id": "nb-r0001",
+     "object_count": 17,
+     "relation_count": 5,
+     "source_index_backfilled": 1,
+     "updated_at": "<ts>"
+    }
+   }
+  },
+  {
+   "sql": "SELECT * FROM unified_kg_state WHERE notebook_id='nb-r0001'"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001",
+    0
+   ],
+   "call": "unified_kg.communities_count",
+   "kwargs": {},
+   "ret": {
+    "row": {
+     "c": 1
+    }
+   }
+  },
+  {
+   "sql": "SELECT COUNT(*) AS c FROM communities WHERE notebook_id='nb-r0001' AND level=0 AND generation = COALESCE((SELECT community_generation FROM unified_kg_state WHERE notebook_id = 'nb-r0001'), 0)"
+  },
+  {
+   "args": [
+    "<callable>",
+    "nb-r0001"
+   ],
+   "call": "unified_kg.kg_analysis_artifact_rows",
+   "kwargs": {},
+   "ret": {
+    "cluster_size_histogram": {
+     "created_at": "2026-09-30T00:00:00+00:00",
+     "kg_mutation_seq": 2,
+     "payload": {
+      "buckets": [
+       {
+        "bucket": "1",
+        "clusters": 5,
+        "members": 5
+       },
+       {
+        "bucket": "2",
+        "clusters": 3,
+        "members": 6
+       },
+       {
+        "bucket": "3",
+        "clusters": 2,
+        "members": 6
+       },
+       {
+        "bucket": "4-5",
+        "clusters": 0,
+        "members": 0
+       },
+       {
+        "bucket": "6-10",
+        "clusters": 0,
+        "members": 0
+       },
+       {
+        "bucket": "11-50",
+        "clusters": 0,
+        "members": 0
+       },
+       {
+        "bucket": "51+",
+        "clusters": 0,
+        "members": 0
+       }
+      ],
+      "built_at_cluster_seq": 1,
+      "by_object_type": [
+       {
+        "buckets": [
+         {
+          "bucket": "1",
+          "clusters": 5,
+          "members": 5
+         },
+         {
+          "bucket": "2",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "3",
+          "clusters": 2,
+          "members": 6
+         },
+         {
+          "bucket": "4-5",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "6-10",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "11-50",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "51+",
+          "clusters": 0,
+          "members": 0
+         }
+        ],
+        "clusters": 7,
+        "empty_cluster_member_rows": 0,
+        "empty_clusters": 0,
+        "excluded_member_rows": 0,
+        "member_rows": 11,
+        "object_type": "concept",
+        "object_types": 1
+       },
+       {
+        "buckets": [
+         {
+          "bucket": "1",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "2",
+          "clusters": 1,
+          "members": 2
+         },
+         {
+          "bucket": "3",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "4-5",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "6-10",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "11-50",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "51+",
+          "clusters": 0,
+          "members": 0
+         }
+        ],
+        "clusters": 1,
+        "empty_cluster_member_rows": 0,
+        "empty_clusters": 0,
+        "excluded_member_rows": 0,
+        "member_rows": 2,
+        "object_type": "claim",
+        "object_types": 1
+       },
+       {
+        "buckets": [
+         {
+          "bucket": "1",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "2",
+          "clusters": 1,
+          "members": 2
+         },
+         {
+          "bucket": "3",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "4-5",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "6-10",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "11-50",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "51+",
+          "clusters": 0,
+          "members": 0
+         }
+        ],
+        "clusters": 1,
+        "empty_cluster_member_rows": 0,
+        "empty_clusters": 0,
+        "excluded_member_rows": 0,
+        "member_rows": 2,
+        "object_type": "formula",
+        "object_types": 1
+       },
+       {
+        "buckets": [
+         {
+          "bucket": "1",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "2",
+          "clusters": 1,
+          "members": 2
+         },
+         {
+          "bucket": "3",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "4-5",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "6-10",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "11-50",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "51+",
+          "clusters": 0,
+          "members": 0
+         }
+        ],
+        "clusters": 1,
+        "empty_cluster_member_rows": 0,
+        "empty_clusters": 0,
+        "excluded_member_rows": 0,
+        "member_rows": 2,
+        "object_type": "procedure",
+        "object_types": 1
+       },
+       {
+        "buckets": [
+         {
+          "bucket": "1",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "2",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "3",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "4-5",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "6-10",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "11-50",
+          "clusters": 0,
+          "members": 0
+         },
+         {
+          "bucket": "51+",
+          "clusters": 0,
+          "members": 0
+         }
+        ],
+        "clusters": 0,
+        "empty_cluster_member_rows": 0,
+        "empty_clusters": 0,
+        "excluded_member_rows": 0,
+        "member_rows": 0,
+        "object_type": "other",
+        "object_types": 0
+       }
+      ],
+      "clusters": 10,
+      "empty_cluster_member_rows": 0,
+      "empty_clusters": 0,
+      "excluded_member_rows": 0,
+      "member_rows": 17
+     }
+    },
+    "community_edges": {
+     "created_at": "2026-09-30T00:00:00+00:00",
+     "kg_mutation_seq": 2,
+     "payload": {
+      "built_at_cluster_seq": 1,
+      "communities": 1,
+      "cross_weight": 0,
+      "edge_limit": 200000,
+      "edges": 0,
+      "edges_total": 0,
+      "intra_weight": 2,
+      "level": 0,
+      "truncated": false
+     }
+    },
+    "largest_clusters": {
+     "created_at": "2026-09-30T00:00:00+00:00",
+     "kg_mutation_seq": 2,
+     "payload": {
+      "built_at_cluster_seq": 1,
+      "clusters": [
+       {
+        "canonical_id": "K-bandgap reference",
+        "canonical_name": "cascode",
+        "members": 3
+       },
+       {
+        "canonical_id": "K-metal oxide semiconductor fet",
+        "canonical_name": "MOSFET",
+        "members": 3
+       },
+       {
+        "canonical_id": "K-finfet",
+        "canonical_name": "FinFET",
+        "members": 1
+       },
+       {
+        "canonical_id": "K-gaafet",
+        "canonical_name": "GAAFET",
+        "members": 1
+       },
+       {
+        "canonical_id": "K-nanosheet fet",
+        "canonical_name": "Nanosheet FET",
+        "members": 1
+       },
+       {
+        "canonical_id": "K-nmos switch",
+        "canonical_name": "NMOS switch",
+        "members": 1
+       },
+       {
+        "canonical_id": "K-pmos switch",
+        "canonical_name": "PMOS switch",
+        "members": 1
+       }
+      ],
+      "limit": 20,
+      "object_type": "concept",
+      "truncated": false
+     }
+    },
+    "relation_provenance": {
+     "created_at": "2026-09-30T00:00:00+00:00",
+     "kg_mutation_seq": 2,
+     "payload": {
+      "buckets": {
+       "relink:name-match": 0,
+       "relink:other": 0,
+       "relink:shared-element": 0,
+       "tagged:other": 0,
+       "untagged": 5
+      },
+      "counted": 5,
+      "excluded": {
+       "endpoint_unusable": 0,
+       "rejected": 0
+      },
+      "relink": 0,
+      "total_rows": 5
+     }
+    },
+    "source_profiles": {
+     "created_at": "2026-09-30T00:00:00+00:00",
+     "kg_mutation_seq": 2,
+     "payload": {
+      "built_at_cluster_seq": 1,
+      "head_communities": 1,
+      "head_members": 3,
+      "level": 0,
+      "mainstream_coverage": "float:0.5",
+      "sources": 2,
+      "total_members": 3
+     }
+    }
+   }
+  },
+  {
+   "sql": "SELECT kind, kg_mutation_seq, payload, created_at FROM kg_analysis_artifacts WHERE notebook_id='nb-r0001' ORDER BY kind"
+  },
+  {
+   "exc": null,
+   "tx": "connect:exit"
+  }
+ ]
+}
