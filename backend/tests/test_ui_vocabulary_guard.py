@@ -575,6 +575,11 @@ _CHANNEL_MARKERS = {
         "promotion title prefixes found",
         "promotion-title module missing",
     ),
+    "report_reason": (
+        "in report reason text",
+        "report reason constants found",
+        "report-reason module missing",
+    ),
     "release": ("in release note",),
 }
 
@@ -617,6 +622,21 @@ _MIN_HANDLERS = (
     '    if notebook is None:\n'
     '        raise user_error(400, "请先选择一个笔记本")\n'
     '    raise user_error(403, "请设置 SILICON_NOTEBOOK_AUTH_MODE 后重试")\n'
+)
+
+
+# 第八条通道的最小样本:一个前缀、一个两值字典(包一层 MappingProxyType)、两个子句常量
+# ——共 5 条文案。
+_MIN_REPORT_REASONS = (
+    "from types import MappingProxyType\n"
+    "\n"
+    'REASON_PREFIX = "本轮不读取这份报告："\n'
+    "REASON_CLAUSES = MappingProxyType({\n"
+    '    "scope_sources": "它引用的 {n} 份资料不在当前检索范围内",\n'
+    '    "read_failed": "读取报告时出错，请重试",\n'
+    "})\n"
+    'REASON_CLAUSE_MEMORY_CLOSED_NARROWED = "它用到了你的个人记忆"\n'
+    'REASON_CLAUSE_MEMORY_CLOSED_CHANNEL = "它用到了个人记忆"\n'
 )
 
 
@@ -681,6 +701,7 @@ def _minimal_guard_tree(tmp_path: pathlib.Path, monkeypatch) -> SimpleNamespace:
             # 存量标题的存储拼写:读时映射,从不上屏,守卫不扫。
             'LEGACY_PROMOTION_TITLE_PREFIX = "晋升自："\n',
         ),
+        report_reason=_write(app / "domain" / "report_followup.py", _MIN_REPORT_REASONS),
         notes=tmp_path / "release-notes",
     )
     # README 允许写黑话(写法约定),它在基线里就是「README 被排除」的证据。
@@ -703,6 +724,7 @@ def _minimal_guard_tree(tmp_path: pathlib.Path, monkeypatch) -> SimpleNamespace:
         "SERVICE_LABEL_DICTS": ((tree.migrate, "ROLE_LABELS"),),
         "SERVICE_LABEL_TEMPLATE": tree.template,
         "PROMOTION_TITLE_MODULE": tree.promotion,
+        "REPORT_REASON_MODULE": tree.report_reason,
         "RELEASE_NOTES_DIR": tree.notes,
         # 下限降到这棵树的实际站点数:2 个 user_error、1 条轨迹摘要、4 个展示字段
         # (索引管线 label+description,两个作业存储各 1 个 error_message)、2 个工作负载
@@ -726,7 +748,8 @@ def test_最小树上守卫全绿(tmp_path, monkeypatch, capsys):
     assert (
         "scanned 1 frontend production files + 2 backend user_error() messages + "
         "1 trace summaries + 4 display fields + 2 workload labels + "
-        "4 model service labels + 2 promotion title prefixes"
+        "4 model service labels + 2 promotion title prefixes + "
+        "5 report reason texts"
     ) in captured.out
 
 
@@ -941,6 +964,11 @@ def scan_fields(tmp_path: pathlib.Path, code: str, *, store_module: bool = False
         # 启动兜底的 SQL 字面量(相邻字符串在解析期就并成一个)
         '_write("UPDATE kg_build_jobs SET status=\'failed\', "\n'
         '       "error_message=\'服务重启导致本次抽取中断\', updated_at=? WHERE status=\'running\'")',
+        # 「就此追问」不读报告的原因:回执与就地预检的 reason 原样上屏
+        'LinkedReportReceipt(report_id="r", title="t", status="skipped",\n'
+        '                    reason="本轮不读取这份报告：引用的 chunk 已失效")',
+        'MSG = "它引用的 KG 对象不在范围内"\n'
+        'ReportLinkCheck(report_id="r", title="t", readable=False, reason_code="x", reason=MSG)',
     ],
 )
 def test_展示字段里的黑话会被抓到(tmp_path, code):
@@ -1401,3 +1429,90 @@ def test_收录自标题前缀按名字集合判扫描面_重复赋值顶不了�
     assert guard.main() == 1
     err = _assert_only_channel(capsys, "promotion", "promotion title prefixes found")
     assert "missing MEMORY_PROMOTION_TITLE_PREFIX" in err
+
+
+# --------------------------------------------------------------------------
+# 第八条通道:「就此追问」不读报告的原因文案(domain/report_followup.py 的出处常量)
+# --------------------------------------------------------------------------
+
+
+def test_关联报告原因文案里的黑话会被抓到(tmp_path):
+    module = tmp_path / "report_followup.py"
+    module.write_text(
+        'REASON_PREFIX = "本轮不读取这份报告："\n'
+        "REASON_CLAUSES = MappingProxyType({\n"
+        '    "a": "它引用的 {n} 个 chunk 不在范围内",\n'
+        '    "b": "读取报告时出错，请重试",\n'
+        "})\n"
+        'REASON_CLAUSE_MEMORY_CLOSED_NARROWED = "它用到了你的个人记忆"\n'
+        'REASON_CLAUSE_MEMORY_CLOSED_CHANNEL = "本次提问不能读取 Memory"\n'
+        # 不在登记名单里的常量不上屏,不扫
+        'OTHER = "去重以后的投影"\n',
+        encoding="utf-8",
+    )
+    texts, hits = guard.scan_report_reason_texts(module)
+    assert texts == 5
+    assert [(line, term) for line, term, _ in hits] == [(3, "chunk"), (7, "Memory")]
+
+
+def test_关联报告原因文案解析不了就报而不是静默跳过(tmp_path):
+    module = tmp_path / "report_followup.py"
+    module.write_text(
+        "from elsewhere import CLAUSE\n"
+        'REASON_PREFIX = "本轮不读取这份报告："\n'
+        'REASON_CLAUSES = {"a": CLAUSE, **EXTRA}\n'
+        'REASON_CLAUSE_MEMORY_CLOSED_NARROWED = "它用到了你的个人记忆"\n'
+        'REASON_CLAUSE_MEMORY_CLOSED_CHANNEL = "它用到了个人记忆"\n',
+        encoding="utf-8",
+    )
+    _texts, hits = guard.scan_report_reason_texts(module)
+    assert [term for _line, term, _ in hits] == [
+        guard.UNRESOLVED_LABEL, guard.UNRESOLVED_LABEL,
+    ]
+
+
+def test_真实关联报告原因文案确实曾经违规过(tmp_path):
+    """变异验证:把出处里的一条子句改成带黑话的写法,守卫必须在那一行报出来。"""
+    src = guard.REPORT_REASON_MODULE.read_text(encoding="utf-8")
+    texts, hits = guard.scan_report_reason_texts(guard.REPORT_REASON_MODULE)
+    assert hits == [] and texts >= len(guard.REPORT_REASON_NAMES)
+    clause = "它引用的 {n} 份资料不在当前检索范围内"
+    assert src.count(clause) == 1, "子句又漂了,本变异样本需同步"
+    mutated = tmp_path / "report_followup_mutated.py"
+    mutated.write_text(src.replace(clause, "它引用的 {n} 个 chunk 不在当前检索范围内"), encoding="utf-8")
+    line = src[: src.index(clause)].count("\n") + 1
+    assert [(l, t) for l, t, _x in guard.scan_report_reason_texts(mutated)[1]] == [(line, "chunk")]
+
+
+def test_关联报告原因文案违规让守卫红(tmp_path, monkeypatch, capsys):
+    tree = _minimal_guard_tree(tmp_path, monkeypatch)
+    _rewrite(tree.report_reason, "读取报告时出错，请重试", "读取报告投影时出错")
+    assert guard.main() == 1
+    _assert_only_channel(
+        capsys, "report_reason", "report_followup.py:6: 「投影」in report reason text"
+    )
+
+
+def test_关联报告原因文案扫描面塌了要红(tmp_path, monkeypatch, capsys):
+    tree = _minimal_guard_tree(tmp_path, monkeypatch)
+    _rewrite(tree.report_reason, "REASON_CLAUSES = ", "RENAMED_CLAUSES = ")
+    assert guard.main() == 1
+    err = _assert_only_channel(capsys, "report_reason", "report reason constants found")
+    assert "missing REASON_CLAUSES" in err
+
+
+def test_关联报告原因文案模块缺失要红(tmp_path, monkeypatch, capsys):
+    _minimal_guard_tree(tmp_path, monkeypatch)
+    monkeypatch.setattr(guard, "REPORT_REASON_MODULE", tmp_path / "gone.py")
+    assert guard.main() == 1
+    _assert_only_channel(capsys, "report_reason", "report-reason module missing")
+
+
+def test_关联报告的轨迹步模块登记在轨迹通道且文案可解析():
+    """report 轨迹步的摘要在 TRACE_SUMMARY_MODULES 的扫描面上,且能解析出文案(不是
+    靠跨模块常量拼出来的 0 站点)。"""
+    module = next(
+        p for p in guard.TRACE_SUMMARY_MODULES if p.name == "report_followup.py"
+    )
+    sites, hits = guard.scan_trace_summaries(module)
+    assert sites >= 1 and hits == []
