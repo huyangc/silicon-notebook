@@ -21,10 +21,10 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.repositories.postgres import chunk_store as chunk_store_module
 from app.repositories.postgres import knowledge_store as knowledge_store_module
-from app.repositories.postgres.repository import PostgresRepository
 from app.repositories.postgres.search import PAYLOAD_NAME_EXPRESSION
 from app.domain.knowledge_contracts import USABLE_STATUSES
 from app.services.embedding import FakeEmbedder
+from app.services.postgres_repository import PostgresRepository
 from tests.model_testkit import bind_all_embedding_clients
 
 

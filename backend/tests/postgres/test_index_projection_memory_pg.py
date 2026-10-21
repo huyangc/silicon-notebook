@@ -13,7 +13,7 @@ import os
 import pytest
 
 from app.core.config import Settings
-from app.repositories.postgres.repository import PostgresRepository
+from app.services.postgres_repository import PostgresRepository
 from app.services.embedding import FakeEmbedder
 from tests.memory_artifact_fixture import (
     SECRET_NAMES,

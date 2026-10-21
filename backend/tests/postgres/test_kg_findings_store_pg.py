@@ -20,7 +20,7 @@ pytestmark = pytest.mark.postgres_integration
 
 @pytest.fixture
 def postgres_repository(postgres_settings):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     repository = PostgresRepository(postgres_settings)
     try:
@@ -52,7 +52,7 @@ def concurrent_repository(postgres_settings):
     """Room for two writers plus the checks: three pooled connections, and lock
     and statement timeouts above the case's 3 s barrier (the default test
     settings give a lock wait 1 s)."""
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     repository = PostgresRepository(postgres_settings.model_copy(update={
         "postgres_pool_max_size": 3,

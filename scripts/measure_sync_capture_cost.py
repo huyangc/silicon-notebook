@@ -163,7 +163,7 @@ def _measure_postgres(database_url: str, rows: int, runs: int) -> None:
     sys.path.insert(0, str(ROOT_DIR / "backend"))
     from app.core.config import Settings
     from app.repositories.postgres.database import PostgresDatabase
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     settings = Settings(
         database_url=database_url,

@@ -693,7 +693,7 @@ def pytest_runtest_teardown(item, nextitem):
     对着其中一个 monkeypatch,另一条路径根本看不见——
     `test_scale_build_cli.py::test_the_composition_root_disowns_the_schema_at_the_call_site`
     就是这样在 2026-09-29 于四条互不相关的分支上各红一次:它 patch 的是属性那一份,
-    被测 CLI 的 `from app.repositories.postgres.repository import PostgresRepository`
+    被测 CLI 的 `from app.services.postgres_repository import PostgresRepository`
     读的是 `sys.modules` 那一份,于是真的 `PostgresRepository` 被构造出来。污染源是
     `test_repository_factory.py` 里的裸 `sys.modules.pop`;谁与受害者同 worker、中间
     有没有别的测试恰好重新 import 把属性重绑回来,全看 xdist 分配,所以是间歇失败。

@@ -29,7 +29,6 @@ from tests.test_default_ceiling_probe import (
     build_probe_fixture,
 )
 
-
 pytestmark = [
     pytest.mark.postgres_integration,
     pytest.mark.xdist_group(name="postgres_default_ceiling_probe"),
@@ -38,8 +37,8 @@ pytestmark = [
 
 @pytest.fixture
 def pg_ids(postgres_settings):
-    from app.repositories.postgres.repository import PostgresRepository
     from app.services.embedding import FakeEmbedder
+    from app.services.postgres_repository import PostgresRepository
     from tests.model_testkit import bind_all_embedding_clients
 
     repository = PostgresRepository(postgres_settings)

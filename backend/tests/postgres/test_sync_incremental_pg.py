@@ -55,7 +55,7 @@ def export_settings(postgres_scope, tmp_path) -> Settings:
 
 @pytest.fixture
 def repository(export_settings):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     repo = PostgresRepository(export_settings)
     try:

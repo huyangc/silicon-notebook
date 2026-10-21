@@ -158,7 +158,7 @@ def _reseal(package: Path) -> None:
 def mirrored(postgres_scope, tmp_path):
     """Two live PostgreSQL schemas: a source with capture on and two
     notebooks, and a target that has already applied the full baseline."""
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     base_url = os.environ.get("TEST_POSTGRES_URL")
     if not base_url:

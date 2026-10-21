@@ -34,7 +34,7 @@ _NOW = "2026-01-01T00:00:00+00:00"
 
 @pytest.fixture
 def repo(postgres_settings, tmp_path):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     postgres_settings.storage_dir = str(tmp_path / "postgres-storage")
     postgres_settings.event_log_enabled = False

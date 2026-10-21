@@ -18,7 +18,7 @@ pytestmark = [pytest.mark.postgres_integration]
 def backend(postgres_settings):
     from app.core.request_context import reset_request_user, set_request_user
     from app.models.notebooks import NotebookCreate
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     repo = PostgresRepository(postgres_settings)
     bind_all_embedding_clients(repo, FakeEmbedder(dim=16))

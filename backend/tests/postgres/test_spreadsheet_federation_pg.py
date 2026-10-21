@@ -13,13 +13,12 @@ import pytest
 
 from tests.test_spreadsheet_federation import assert_quote_federation
 
-
 pytestmark = pytest.mark.postgres_integration
 
 
 def test_quote_tables_of_two_libraries_federate_on_postgres(postgres_settings, tmp_path):
-    from app.repositories.postgres.repository import PostgresRepository
     from app.services.embedding import FakeEmbedder
+    from app.services.postgres_repository import PostgresRepository
     from tests.model_testkit import bind_all_embedding_clients
 
     postgres_settings.storage_dir = str(tmp_path / "pg-storage")

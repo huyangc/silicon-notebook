@@ -1359,7 +1359,7 @@ def test_the_factory_hop_is_covered_too(tmp_path):
     silently never consults.  ``app.bootstrap`` reaches the seat only through
     here, so this is the production path, not a variant of it.
     """
-    from app.repositories.factory import create_repository
+    from app.services.repository_factory import create_repository
 
     host = build_extension_runtime((_bundle(_Recorder(SUGGESTION)),)).gap_consult
     repository = create_repository(

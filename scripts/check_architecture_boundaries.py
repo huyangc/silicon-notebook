@@ -553,7 +553,7 @@ def facade_violations(root: Path) -> list[str]:
 FACADE_CLASS_FILES = {
     "RepositoryFacade": "backend/app/services/repository_facade.py",
     "SQLiteRepository": "backend/app/services/sqlite_repository.py",
-    "PostgresRepository": "backend/app/repositories/postgres/repository.py",
+    "PostgresRepository": "backend/app/services/postgres_repository.py",
 }
 # Receiver shapes that hold the facade instance itself: the notion
 # scripts/audit_facade_callers.py (REPO_NAME_RE / RECEIVER_ATTR_NAMES) and

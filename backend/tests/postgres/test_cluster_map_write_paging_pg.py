@@ -7,8 +7,8 @@ from __future__ import annotations
 import pytest
 
 from app.core.config import Settings
-from app.repositories.postgres.repository import PostgresRepository
 from app.services.embedding import FakeEmbedder
+from app.services.postgres_repository import PostgresRepository
 from tests import cluster_map_write_cases as cases
 from tests.model_testkit import bind_all_embedding_clients
 

@@ -185,7 +185,7 @@ def h45_version_key(unified_kg: Any):
     table #11).
 
     R1 (P1-1, post-review): this used to be duplicated per backend —
-    ``sqlite_repository.py`` had it, ``postgres/repository.py``'s ``checkup``
+    ``sqlite_repository.py`` had it, ``postgres_repository.py``'s ``checkup``
     property still wired a bare ``int(graph_seq_row(db, nb)[0])`` seam with
     no epoch at all, so the PRODUCTION PostgreSQL backend's H4/H5 memo kept
     aliasing across a delete+reingest silently — the injected-seam unit

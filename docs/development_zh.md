@@ -27,7 +27,11 @@
 - 保持 `factory/wrapper → facade → runtime → services → stores`。store 独占业务 SQL
   与原始行选择；application/query 组件可以组装领域投影。service 不分支判断 dialect，
   不导入另一 adapter。稳定跨层值放在 `backend/app/domain`，repository ports 不依赖
-  services，静态依赖图无环。领域 router 拥有端点实现，`app/api/routes.py` 只做组合；
+  services，静态依赖图无环。backend factory 与两个后端 wrapper 都在
+  `backend/app/services`（`repository_factory.py`、`sqlite_repository.py`、
+  `postgres_repository.py`）：services 可以依赖 repositories，反过来不行；剩下的
+  repositories→services 边（filesystem scale artifact store 对 `services.kg` 的 import）
+  是由 `repository_service_import_ceiling` 钉住的债务。领域 router 拥有端点实现，`app/api/routes.py` 只做组合；
   兼容 facade 重导出原对象，不新增第二套实现。
 - extension SDK 保持依赖轻量。只有 `app.bootstrap` 连接 adapter 与
   `backend/app/extensions`；workflow 消费领域 host port，plugin 不导入具体 repository、

@@ -32,7 +32,7 @@ RECIPIENT = "u-e53-recipient"
 
 @pytest.fixture
 def postgres_repository(postgres_scope, tmp_path):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     repository = PostgresRepository(
         Settings(

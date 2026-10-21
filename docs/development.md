@@ -32,7 +32,12 @@ contributor constraints, not a second implementation history.
   product SQL and raw rows; application/query components may assemble domain projections.
   Services neither inspect dialects nor import the opposite adapter. Stable cross-layer
   values live in `backend/app/domain`; repository ports cannot import services, and the
-  static dependency graph stays acyclic. Domain routers own endpoint bodies;
+  static dependency graph stays acyclic. The backend factory and both backend wrappers
+  live in `backend/app/services` (`repository_factory.py`, `sqlite_repository.py`,
+  `postgres_repository.py`): services may import repositories, never the reverse, and the
+  remaining repositories→services edges (the filesystem scale artifact store's
+  `services.kg` imports) are debt pinned by `repository_service_import_ceiling`.
+  Domain routers own endpoint bodies;
   `app/api/routes.py` only composes them. Compatibility facades re-export existing objects
   rather than creating a second implementation.
 - Keep extension SDK contracts dependency-light. `app.bootstrap` alone joins adapters

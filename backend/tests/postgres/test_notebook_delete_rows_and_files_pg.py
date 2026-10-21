@@ -38,7 +38,7 @@ def postgres_settings_with_storage(postgres_scope, tmp_path):
 
 @pytest.fixture
 def postgres_repository(postgres_settings_with_storage):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     repository = PostgresRepository(postgres_settings_with_storage)
     try:

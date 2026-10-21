@@ -3597,7 +3597,7 @@ def test_the_composition_root_disowns_the_schema_at_the_call_site(monkeypatch):
     production admin credential with a fresh salt."""
     from app import bootstrap
     from app.core.config import Settings
-    from app.repositories.postgres import repository as repository_module
+    from app.services import postgres_repository as repository_module
 
     captured: dict = {}
 

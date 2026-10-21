@@ -50,7 +50,7 @@ def _settings(url: str, storage: Path) -> Settings:
 
 @pytest.fixture
 def postgres_repository(postgres_scope, tmp_path, monkeypatch):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
@@ -93,7 +93,7 @@ def _add_user(repo, user_id: str, username: str) -> None:
 def test_import_refuses_memory_sources(
     postgres_scope, tmp_path, monkeypatch
 ):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")

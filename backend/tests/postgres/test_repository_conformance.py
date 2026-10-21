@@ -13,15 +13,14 @@ from app.models.sources import SourceImportFile, SourceImportRequest
 from app.repositories.bundle import PersistenceBundle
 from app.repositories.ports import UploadedSourceFile
 
-
 pytestmark = pytest.mark.postgres_integration
 
 
 def test_postgres_repository_boots_empty_schema_and_wires_complete_bundle(
     postgres_settings,
 ):
-    from app.repositories.postgres.repository import PostgresRepository
-    from app.repositories.factory import create_repository
+    from app.services.postgres_repository import PostgresRepository
+    from app.services.repository_factory import create_repository
 
     repository = create_repository(postgres_settings)
     assert isinstance(repository, PostgresRepository)
@@ -135,8 +134,8 @@ def test_complete_postgres_repository_smoke_from_empty_schema(
     tmp_path,
 ):
     """Exercise the production facade, not individual stores, on a fresh PG schema."""
-    from app.repositories.postgres.repository import PostgresRepository
     from app.services.knowhow.api import build_projector
+    from app.services.postgres_repository import PostgresRepository
 
     postgres_settings.storage_dir = str(tmp_path / "postgres-storage")
     postgres_settings.event_log_enabled = False
@@ -348,7 +347,7 @@ def test_postgres_knowhow_node_retrieval_uses_source_scoped_type_query(
     postgres_settings,
 ):
     """The flag-on production retrieval path must never execute SQLite `?` SQL."""
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     postgres_settings.knowhow_kg_node_retrieval_enabled = True
     repository = PostgresRepository(postgres_settings)
@@ -374,7 +373,7 @@ def test_postgres_restart_recovers_every_interrupted_job_and_preserves_terminal_
     postgres_settings,
 ):
     from app.repositories.postgres._store_utils import jsonb
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     repository = PostgresRepository(postgres_settings)
     owner = repository._runtime.identity.create_user("d00123456", "pw123456")
@@ -587,8 +586,8 @@ def test_startup_warm_failure_immediately_closes_real_postgres_pool(
 ):
     from app.api import deps
     from app.core import config, readiness
-    from app.repositories.postgres.repository import PostgresRepository
     from app.services import startup_warmup
+    from app.services.postgres_repository import PostgresRepository
 
     repository = PostgresRepository(postgres_settings)
     cleared = []
@@ -628,8 +627,8 @@ def test_concurrent_startup_constructs_and_closes_one_real_postgres_pool(
 ):
     from app.api import deps
     from app.core import readiness
-    from app.repositories.postgres.repository import PostgresRepository
     from app.services import startup_warmup
+    from app.services.postgres_repository import PostgresRepository
 
     factory_constructed = threading.Event()
     release_factory = threading.Event()
@@ -685,10 +684,10 @@ def test_postgres_last_knowhow_table_delete_sweeps_asset_row_and_file(
     postgres_settings, tmp_path, monkeypatch
 ):
     from app.api import knowhow_routes
-    from app.repositories.postgres.repository import PostgresRepository
     from app.services import background_jobs
     from app.services.knowhow import api as knowhow_api
     from app.services.knowhow.assets import AssetService
+    from app.services.postgres_repository import PostgresRepository
 
     postgres_settings.storage_dir = str(tmp_path / "pg-assets")
     repository = PostgresRepository(postgres_settings)
@@ -752,7 +751,7 @@ def test_delete_source_does_not_wait_on_notebook_capacity_lock(
     would instead observe the ``elapsed < release_delay / 2`` assertion
     below fail once the held lock is released.
     """
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     postgres_settings.storage_dir = str(tmp_path / "pg-delete-lock")
     postgres_settings.event_log_enabled = False

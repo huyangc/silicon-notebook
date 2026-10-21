@@ -21,11 +21,11 @@ import pytest
 
 from app.core.config import Settings
 from app.models.notebooks import NotebookCreate
-from app.repositories.postgres.repository import PostgresRepository
 from app.services import batch_ingest as bi
 from app.services import maintenance_cli
 from app.services import scale_build_cli as cli
 from app.services.embedding import FakeEmbedder
+from app.services.postgres_repository import PostgresRepository
 from tests.model_testkit import RecordingModelProvider
 
 

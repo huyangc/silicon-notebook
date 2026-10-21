@@ -86,7 +86,7 @@ Methodology (read before trusting a "retire-now" row)
        it feeds a fifth, dedicated ``facade_internal`` bucket instead,
        folded into this production total at classification time) and the
        two thin subclass wrappers (``sqlite_repository.py``,
-       ``postgres/repository.py``), which are reported separately in the
+       ``postgres_repository.py``), which are reported separately in the
        "wrapper镜像" column because a call landing on those files is either
        (a) an override that shadows the facade body entirely, or (b) an
        internal ``self.<method>(...)`` call from *within* the wrapper that
@@ -226,7 +226,7 @@ from app.services.repository_facade import RepositoryFacade  # noqa: E402
 
 FACADE_PATH = (REPO_ROOT / FACADE_FILE).resolve()
 SQLITE_WRAPPER_REL = "backend/app/services/sqlite_repository.py"
-POSTGRES_WRAPPER_REL = "backend/app/repositories/postgres/repository.py"
+POSTGRES_WRAPPER_REL = "backend/app/services/postgres_repository.py"
 WRAPPER_RELS = {SQLITE_WRAPPER_REL, POSTGRES_WRAPPER_REL}
 
 PROD_ROOT = REPO_ROOT / "backend" / "app"

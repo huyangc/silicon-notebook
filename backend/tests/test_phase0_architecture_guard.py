@@ -250,7 +250,7 @@ def _facade_root(
         "    def close_local(self): pass\n",
     )
     _write(
-        tmp_path / "backend/app/repositories/postgres/repository.py",
+        tmp_path / "backend/app/services/postgres_repository.py",
         "class PostgresRepository(RepositoryFacade):\n"
         "    def close(self): pass\n",
     )
@@ -1183,14 +1183,14 @@ def test_guard_rejects_main_importing_extension_runtime_directly(tmp_path):
 def test_guard_allows_only_named_application_composition_root(tmp_path):
     app = tmp_path / "app"
     _write(app / "bootstrap.py", "from app import extensions\n")
-    _write(app / "repositories/factory.py", "from app import extensions\n")
+    _write(app / "services/repository_factory.py", "from app import extensions\n")
     _write(app / "repositories/other_factory.py", "from app import extensions\n")
 
     assert boundary_violations(app) == [
-        "app.repositories.factory imports the extension composition "
-        "surface outside an approved root",
         "app.repositories.other_factory imports the extension composition "
-        "surface outside an approved root"
+        "surface outside an approved root",
+        "app.services.repository_factory imports the extension composition "
+        "surface outside an approved root",
     ]
 
 

@@ -158,7 +158,7 @@ class MemoryIsolationRebuild:
     @classmethod
     def for_repository(cls, repo: Any, **kwargs: Any) -> "MemoryIsolationRebuild":
         """The marker store follows the repository's own backend selection
-        (``app.repositories.factory.create_repository``: the scheme of
+        (``app.services.repository_factory.create_repository``: the scheme of
         ``settings.database_url``) -- never the class or module name of an
         object that may be wrapped."""
         runtime = repo._runtime

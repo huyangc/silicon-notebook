@@ -553,11 +553,11 @@ def _sqlite_bundle_factory_class():
 
 
 def _repository_factory_module():
-    module_name = "app.repositories.factory"
+    module_name = "app.services.repository_factory"
     assert importlib.util.find_spec(module_name) is not None, (
         "central repository backend factory is missing"
     )
-    from app.repositories import factory
+    from app.services import repository_factory as factory
 
     return factory
 
@@ -590,8 +590,8 @@ def _forget_module(monkeypatch: pytest.MonkeyPatch, module_name: str) -> None:
     A bare ``sys.modules.pop`` leaves the process with two views of the same
     module: the parent package still binds the OLD module object as an
     attribute, while the next ``import`` builds a NEW one. From then on
-    ``from app.repositories.postgres import repository`` (attribute lookup)
-    and ``from app.repositories.postgres.repository import PostgresRepository``
+    ``from app.services import postgres_repository`` (attribute lookup)
+    and ``from app.services.postgres_repository import PostgresRepository``
     (``sys.modules`` lookup) resolve to different objects, and a monkeypatch
     applied through one path is invisible to the other. That is exactly how
     ``test_scale_build_cli.py::test_the_composition_root_disowns_the_schema_at_the_call_site``
@@ -614,8 +614,8 @@ def test_forgetting_a_module_restores_the_package_attribute_and_sys_modules():
     """Regression pin for the helper above — the leak is only visible AFTER the
     forgetting test's teardown, from a later test, so the helper has to prove
     its own restore rather than rely on the victim to notice."""
-    import app.repositories.postgres.repository as real_module
-    package = sys.modules["app.repositories.postgres"]
+    import app.services.postgres_repository as real_module
+    package = sys.modules["app.services"]
     module_name = real_module.__name__
 
     with pytest.MonkeyPatch.context() as monkeypatch:
@@ -623,19 +623,19 @@ def test_forgetting_a_module_restores_the_package_attribute_and_sys_modules():
         assert module_name not in sys.modules
         reimported = importlib.import_module(module_name)
         assert reimported is not real_module
-        assert package.repository is reimported
+        assert package.postgres_repository is reimported
 
     assert sys.modules[module_name] is real_module
-    assert package.repository is real_module
-    from app.repositories.postgres import repository as via_attribute
-    from app.repositories.postgres.repository import PostgresRepository
+    assert package.postgres_repository is real_module
+    from app.services import postgres_repository as via_attribute
+    from app.services.postgres_repository import PostgresRepository
 
     assert via_attribute is real_module
     assert PostgresRepository is real_module.PostgresRepository
 
 
 def test_postgresql_repository_import_is_lazy(monkeypatch, tmp_path):
-    module_name = "app.repositories.postgres.repository"
+    module_name = "app.services.postgres_repository"
     _forget_module(monkeypatch, module_name)
     factory = _repository_factory_module()
 
@@ -655,7 +655,7 @@ def test_create_repository_omits_migrate_and_seed_kwargs_by_default(monkeypatch,
     """默认调用逐字不变:`migrate`/`seed` 两个关键字**不进**构造调用,一个不
     接受它们的最小替身(比如上面那条测试的单参数 lambda)不受影响
     (codex #700 R1 P1)。"""
-    module_name = "app.repositories.postgres.repository"
+    module_name = "app.services.postgres_repository"
     _forget_module(monkeypatch, module_name)
     factory = _repository_factory_module()
 
@@ -676,7 +676,7 @@ def test_create_repository_forwards_migrate_and_seed_when_overridden(monkeypatch
     """`migrate=False, seed=False` 必须原样转发给 PostgreSQL 适配器
     (codex #700 R1 P1)——`search` 这类只读工具靠这两个关键字关掉
     `bundle._initialize` 的迁移与 admin 密码重写。"""
-    module_name = "app.repositories.postgres.repository"
+    module_name = "app.services.postgres_repository"
     _forget_module(monkeypatch, module_name)
     factory = _repository_factory_module()
 
@@ -795,12 +795,12 @@ def test_real_postgresql_selection_uses_adapter_and_redacts_startup_failure(tmp_
 
 def test_postgresql_selection_does_not_mask_nested_import_failures(monkeypatch, tmp_path):
     factory = _repository_factory_module()
-    _forget_module(monkeypatch, "app.repositories.postgres.repository")
+    _forget_module(monkeypatch, "app.services.postgres_repository")
     _forget_module(monkeypatch, "app.repositories.postgres")
     real_import = builtins.__import__
 
     def import_with_missing_driver(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "app.repositories.postgres.repository":
+        if name == "app.services.postgres_repository":
             raise ModuleNotFoundError(
                 "missing nested driver", name="missing_pg_driver"
             )

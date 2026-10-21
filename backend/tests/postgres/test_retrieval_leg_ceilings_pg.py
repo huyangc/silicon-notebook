@@ -375,8 +375,8 @@ def _pg_seam(postgres_settings, tmp_path, *, own_memory: bool):
     through ``store_kg`` (the reverse index is filled by the real writer)."""
     from app.core.request_context import reset_request_user, set_request_user
     from app.models.schemas import NotebookCreate
-    from app.repositories.postgres.repository import PostgresRepository
     from app.services.embedding import FakeEmbedder
+    from app.services.postgres_repository import PostgresRepository
     from app.services.source_scope import source_scope_context
     from tests import test_retrieval_leg_ceilings as twin
     from tests.model_testkit import bind_all_embedding_clients

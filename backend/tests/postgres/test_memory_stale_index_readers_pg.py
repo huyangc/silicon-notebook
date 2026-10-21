@@ -18,7 +18,7 @@ pytestmark = [
 
 @pytest.fixture
 def world(postgres_settings):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     settings = postgres_settings.model_copy(
         update={"embed_dim": 16, "relation_retrieval_enabled": True})
