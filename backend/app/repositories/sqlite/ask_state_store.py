@@ -92,6 +92,7 @@ from app.repositories.ask_sample_merge import (
 from app.repositories.conversation_linked_report import (
     job_linked_report,
     receipt_linked_report,
+    receipt_linked_report_fields,
 )
 from app.repositories.ports import (
     AskRequestKeyConflict,
@@ -1527,7 +1528,11 @@ class AskStateStore:
 
         ``None`` when the conversation does not exist. Otherwise the
         conversation's own fields (``id``, ``notebook_id``, ``title``,
-        ``updated_at``, ``submitted_via``), ``turn_count`` (its saved answers)
+        ``updated_at``, ``submitted_via``, and ``linked_report`` --
+        ``{"report_id", "title"}`` of the report the conversation's LAST answer
+        names, ``None`` when it names none: the very answer
+        ``list_conversations`` reads it from, so a conversation shows the same
+        report on both), ``turn_count`` (its saved answers)
         and ``turn``: its ``index``-th answer in ``CONVERSATION_ANSWERS_ORDER_ASC``
         order, built exactly as ``get_conversation`` builds that turn -- or
         ``None`` when ``index`` is outside ``0 <= index < turn_count`` or the
@@ -1536,14 +1541,20 @@ class AskStateStore:
         ``get_conversation`` validates every answer's payload and reads the
         running job's trace; a reader that wants one turn (MCP
         ``get_conversation``, one turn per call) pays for that one answer: a
-        count, one answer row by position, and its job's entry point.
+        count, one answer row by position, and its job's entry point. The
+        last answer's receipt is one scalar subquery of the conversation's
+        own row (a JSON path, never the whole payload, and never validated
+        as an answer).
         """
         with self.database.connect() as db:
             conv = db.execute(
                 "SELECT c.id, c.notebook_id, c.title, c.updated_at, "
                 "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) "
                 "AS turn_count, "
-                + CONVERSATION_ENTRY_POINT_SQL + " AS submitted_via "
+                + CONVERSATION_ENTRY_POINT_SQL + " AS submitted_via, "
+                "(SELECT json_extract(a.payload, '$.linked_report') "
+                "   FROM answers a WHERE a.conversation_id = c.id "
+                "  ORDER BY a.rowid DESC LIMIT 1) AS linked_report "
                 "FROM conversations c WHERE c.id = ?",
                 (conversation_id,),
             ).fetchone()
@@ -1572,6 +1583,7 @@ class AskStateStore:
             "title": conv["title"] or "",
             "updated_at": conv["updated_at"] or "",
             "submitted_via": conv["submitted_via"] or "",
+            "linked_report": receipt_linked_report_fields(conv["linked_report"]),
             "turn_count": int(conv["turn_count"]),
             "turn": None if row is None else _conversation_turn(
                 row, (via["submitted_via"] or "") if via is not None else ""

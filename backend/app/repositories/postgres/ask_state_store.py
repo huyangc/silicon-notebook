@@ -55,6 +55,7 @@ from app.repositories.ask_sample_merge import (
 from app.repositories.conversation_linked_report import (
     job_linked_report,
     receipt_linked_report,
+    receipt_linked_report_fields,
 )
 from app.repositories.ports import (
     merge_sampled_rows,
@@ -1397,13 +1398,20 @@ class AskStateStore:
         contract as the SQLite adapter's ``conversation_turn`` (see there):
         ``None`` for a missing conversation, else its fields, ``turn_count``
         and its ``index``-th answer built as ``get_conversation`` builds it
-        (``None`` outside the range or when it went away meanwhile)."""
+        (``None`` outside the range or when it went away meanwhile). Its
+        ``linked_report`` is the receipt of the conversation's LAST answer,
+        read as ``LIST_CONVERSATIONS_SQL`` reads it: ``ORDER BY a.ordinal + 0``
+        keeps the lookup on ``idx_answers_conversation`` (see there), and only
+        the ``linked_report`` key of the last payload is taken."""
         with self.database.connect() as db:
             conv = db.execute(
                 "SELECT c.id, c.notebook_id, c.title, c.updated_at, "
                 "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) "
                 "AS turn_count, "
-                + CONVERSATION_ENTRY_POINT_SQL + " AS submitted_via "
+                + CONVERSATION_ENTRY_POINT_SQL + " AS submitted_via, "
+                "(SELECT a.payload->'linked_report' FROM answers a "
+                "  WHERE a.conversation_id = c.id "
+                "  ORDER BY a.ordinal + 0 DESC LIMIT 1) AS linked_report "
                 "FROM conversations c WHERE c.id = %s",
                 (conversation_id,),
             ).fetchone()
@@ -1432,6 +1440,7 @@ class AskStateStore:
             "title": conv["title"] or "",
             "updated_at": iso_timestamp(conv["updated_at"]),
             "submitted_via": conv["submitted_via"] or "",
+            "linked_report": receipt_linked_report_fields(conv["linked_report"]),
             "turn_count": int(conv["turn_count"]),
             "turn": None if row is None else _conversation_turn(
                 row, (via["submitted_via"] or "") if via is not None else ""
