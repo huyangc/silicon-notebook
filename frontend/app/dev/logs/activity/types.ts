@@ -40,6 +40,8 @@ export type ActivityAsk = {
   submitted_via: "" | SubmittedVia;
   /** "evidence" = 只检索、没有生成回答的提问；缺省按 "answer"（旧后端不带该字段）。 */
   output?: "answer" | "evidence";
+  /** 所在笔记本的库名：存活库取当前名，删除后的留存摘要取删除时的名；全局问答为空串。
+   *  界面经 format.ts 的 activityNotebookName 读取。 */
   notebook_name?: string;
   notebook_deleted_at?: string;
   retained_until?: string;
@@ -85,6 +87,7 @@ export type ActivityReport = {
   status: string;
   generation_started_at: string;
   submitted_via: "" | SubmittedVia;
+  /** 所在笔记本的库名，口径同 ActivityAsk.notebook_name。 */
   notebook_name?: string;
   notebook_deleted_at?: string;
   retained_until?: string;

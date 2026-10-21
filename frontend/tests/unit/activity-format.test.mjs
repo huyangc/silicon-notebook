@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   activityKindLabel,
+  activityNotebookName,
   activityStatusLabel,
   activityTitle,
   activityTone,
@@ -154,6 +155,22 @@ test("activityStatusLabel: unknown values fall back, never leak the raw value", 
   assert.equal(activityStatusLabel(ask({ status: "weird" })), "未知状态");
   assert.equal(activityStatusLabel(source({ parse_status: "weird" })), "未知状态");
   assert.equal(activityStatusLabel(report({ status: "weird" })), "未知状态");
+});
+
+test("activityNotebookName: asks and reports carry their notebook; global asks and sources do not", () => {
+  assert.equal(activityNotebookName(ask({ notebook_name: "芯片选型库" })), "芯片选型库");
+  assert.equal(activityNotebookName(report({ notebook_name: "  共享库  " })), "共享库");
+  // 留存摘要的库名是删除时的名，同样显示。
+  assert.equal(
+    activityNotebookName(ask({ notebook_name: "旧项目", notebook_deleted_at: "2026-08-04T11:00:00" })),
+    "旧项目",
+  );
+  // 全局问答不属于任何笔记本；来源行在左栏的库下面已经看得到。
+  assert.equal(activityNotebookName(ask({ scope: "global", notebook_name: "不该出现" })), "");
+  assert.equal(activityNotebookName(source({ notebook_name: "不该出现" })), "");
+  // 旧后端不带字段 / 空白名：不显示，不编造。
+  assert.equal(activityNotebookName(ask()), "");
+  assert.equal(activityNotebookName(report({ notebook_name: "   " })), "");
 });
 
 test("mergeActivityPages: appends without reordering", () => {

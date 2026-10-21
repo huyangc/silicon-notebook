@@ -219,3 +219,38 @@ test("已删除笔记本的留存摘要在活动行上明确标记", () => {
   ]);
   expect(screen.getByText("原笔记本已删除")).toBeInTheDocument();
 });
+
+
+test("提问与报告行写出所在笔记本；全局问答与来源行不写", () => {
+  const { container } = stream([
+    ask({ id: "ask-shared", notebook_name: "同事的共享库" }),
+    report({ id: "rep-own", notebook_name: "芯片选型库" }),
+    ask({ id: "ask-global", scope: "global", notebook_id: "" }),
+    source({ notebook_name: "芯片选型库" }),
+    ask({ id: "ask-old" }),
+  ]);
+  const rows = container.querySelectorAll(".activity-row");
+  const notebookLine = (row: Element) => row.querySelector(".activity-row-notebook");
+
+  expect(notebookLine(rows[0])).toHaveTextContent("笔记本：同事的共享库");
+  // 名字过长时整行省略，悬停给出全名。
+  expect(notebookLine(rows[0])).toHaveAttribute("title", "同事的共享库");
+  expect(notebookLine(rows[1])).toHaveTextContent("笔记本：芯片选型库");
+  expect(notebookLine(rows[2])).toBeNull();
+  expect(notebookLine(rows[3])).toBeNull();
+  // 旧后端不带库名：不显示空的「笔记本：」。
+  expect(notebookLine(rows[4])).toBeNull();
+});
+
+
+test("已删除笔记本的留存行同时写出删除时的库名", () => {
+  const { container } = stream([
+    ask({
+      notebook_name: "旧项目",
+      notebook_deleted_at: "2026-08-04T11:00:00",
+      retained_until: "2027-01-31T11:00:00",
+    }),
+  ]);
+  expect(container.querySelector(".activity-row-notebook")).toHaveTextContent("笔记本：旧项目");
+  expect(screen.getByText("原笔记本已删除")).toBeInTheDocument();
+});

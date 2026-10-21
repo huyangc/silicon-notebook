@@ -1780,6 +1780,26 @@ class QueryStore:
                     [*report_params, fetch_limit],
                 ).fetchall()
 
+            # 3b. 提问 / 报告所在笔记本的当前库名:只看提问 / 只看报告含共享库里的
+            # 提交,左栏只列自有库,行上不带库名就无从知道它问在哪。对本页已取回的
+            # notebook id 集合批量取一次(同 2b,不是逐行 N+1),不改上面三条按类型
+            # 取数的语句。读连接跨语句不持同一快照:与删库并发时这里可能取不到名,
+            # 该行按空串返回,前端不显示库名;管理员不限库的审计读取随后会取到同一
+            # id 的留存行,在归并时顶替它(本人自助与显式选库不读留存)。
+            notebook_names: dict[str, str] = {}
+            notebook_ids_on_page = sorted(
+                {row["notebook_id"] for row in (*ask_rows, *report_rows)}
+            )
+            if notebook_ids_on_page:
+                ph3 = ",".join("?" for _ in notebook_ids_on_page)
+                notebook_names = {
+                    r["id"]: r["name"] or ""
+                    for r in db.execute(
+                        f"SELECT id, name FROM notebooks WHERE id IN ({ph3})",
+                        notebook_ids_on_page,
+                    ).fetchall()
+                }
+
             # 4. 已删除 notebook 的最小分析快照。它没有 notebook FK，且
             # expires_at 是强读闸：物理 GC 即使稍后执行，过期行也不会再返回。
             # 普通用户的 self-service 视图仍要求实时 notebook 读权，因此删除
@@ -1846,6 +1866,7 @@ class QueryStore:
                     "error": row["error"],
                     "submitted_via": row["submitted_via"],
                     "output": row["output"],
+                    "notebook_name": notebook_names.get(row["notebook_id"], ""),
                 })
             )
         for row in global_rows:
@@ -1916,6 +1937,7 @@ class QueryStore:
                     "status": row["status"],
                     "generation_started_at": generation_started_at,
                     "submitted_via": row["submitted_via"],
+                    "notebook_name": notebook_names.get(row["notebook_id"], ""),
                 })
             )
         for row in retained_rows:

@@ -391,6 +391,7 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
     ("postgres/query_store.py", "QueryStore.list_user_activity"): (
         s(PG_EXP, BOUNDED, "one user's own notebooks"),
         s(PG_EXP, BOUNDED, "source ids of one activity page"),
+        s(PG_EXP, BOUNDED, "notebook ids of one activity page's asks and reports"),
     ),
     ("postgres/query_store.py", "QueryStore.pending_actions_projection_rows"): (
         s(PG_EXP, BOUNDED, "one user's own notebooks"),),
@@ -739,6 +740,7 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
     ("sqlite/query_store.py", "QueryStore.list_user_activity"): (
         s(SQ_EXP, BOUNDED, "one user's own notebooks"),
         s(SQ_EXP, BOUNDED, "source ids of one activity page"),
+        s(SQ_EXP, BOUNDED, "notebook ids of one activity page's asks and reports"),
     ),
     ("sqlite/query_store.py", "QueryStore.pending_actions_projection_rows"): (
         s(SQ_EXP, BOUNDED, "one user's own notebooks"),),

@@ -1662,6 +1662,23 @@ class QueryStore:
                     [*report_params, fetch_limit],
                 ).fetchall()
 
+            # 3b. 提问 / 报告所在笔记本的当前库名(理由同 SQLite 侧):对本页已取回的
+            # notebook id 集合批量取一次,不改上面三条按类型取数的语句。并发删库时
+            # 取不到名的行按空串返回。
+            notebook_names: dict[str, str] = {}
+            notebook_ids_on_page = sorted(
+                {row["notebook_id"] for row in (*ask_rows, *report_rows)}
+            )
+            if notebook_ids_on_page:
+                ph3 = ",".join("%s" for _ in notebook_ids_on_page)
+                notebook_names = {
+                    r["id"]: r["name"] or ""
+                    for r in db.execute(
+                        f"SELECT id, name FROM notebooks WHERE id IN ({ph3})",
+                        notebook_ids_on_page,
+                    ).fetchall()
+                }
+
             retained_rows = []
             if notebook_id is None and include_inaccessible_questions:
                 retained_params: list[Any] = []
@@ -1720,6 +1737,7 @@ class QueryStore:
                     "error": row["error"],
                     "submitted_via": row["submitted_via"],
                     "output": row["output"],
+                    "notebook_name": notebook_names.get(row["notebook_id"], ""),
                 }
             )
         for row in global_rows:
@@ -1788,6 +1806,7 @@ class QueryStore:
                     "status": row["status"],
                     "generation_started_at": generation_started_at,
                     "submitted_via": row["submitted_via"],
+                    "notebook_name": notebook_names.get(row["notebook_id"], ""),
                 }
             )
         for row in retained_rows:

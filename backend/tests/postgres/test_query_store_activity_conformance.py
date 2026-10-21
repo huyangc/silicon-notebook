@@ -26,6 +26,10 @@ from tests.activity_parity_cases import (
     LOCAL_DAY_SINCE,
     LOCAL_DAY_UNTIL,
     MALFORMED_BOUNDS,
+    NOTEBOOK_NAME_AFTER_RENAME_AND_REVOKE,
+    NOTEBOOK_NAME_ASKS,
+    NOTEBOOK_NAME_CASES,
+    NOTEBOOK_NAME_RENAMED,
     REPORT_SCOPE_AFTER_SHARED_DELETE_CASES,
     REPORT_SCOPE_CASES,
     REPORT_SCOPE_REPORTS,
@@ -744,6 +748,60 @@ def test_report_overview_follows_submitter_like_question_overview(
         assert {
             item["id"] for item in result["items"] if item.get("notebook_deleted_at")
         } == retained, label
+
+
+def test_ask_and_report_items_carry_their_notebook_name_postgres(
+    postgres_database, store
+):
+    """与 SQLite 侧同名测试跑**同一张** NOTEBOOK_NAME_CASES 场景表。"""
+    from app.repositories.postgres.ask_state_store import AskStateStore
+    from app.services.repository_runtime import RepositoryCompatibilitySeams
+
+    with postgres_database.write() as connection:
+        _seed_report_scope_rows(connection)
+        for job_id, notebook_id, created_by, created_at in NOTEBOOK_NAME_ASKS:
+            _insert_ask(
+                connection, job_id, notebook_id, created_by,
+                datetime.fromisoformat(created_at),
+            )
+    for label, kwargs, expected in NOTEBOOK_NAME_CASES:
+        result = store.list_user_activity("u1", limit=50, **kwargs)
+        assert {
+            item["id"]: item["notebook_name"] for item in result["items"]
+        } == expected, label
+    asks = AskStateStore(
+        postgres_database,
+        RepositoryCompatibilitySeams(
+            new_id=lambda prefix: f"{prefix}-unused",
+            now=lambda: NOW,
+            copy_chunk_size=lambda: 100,
+            remap_json_ids=lambda value, _mapping: value,
+            in_chunk_size=lambda: 100,
+        ),
+    )
+    with asks.guarded_ask_detail(
+        "ask-shared", actor_id="u1", reader_id="u1"
+    ) as snapshot:
+        assert snapshot["job"]["notebook_name"] == "NB-n2"
+
+    with postgres_database.write() as connection:
+        connection.execute(
+            "UPDATE notebooks SET name=%s WHERE id=%s", (NOTEBOOK_NAME_RENAMED, "n2")
+        )
+        connection.execute(
+            "DELETE FROM notebook_members WHERE notebook_id=%s AND user_id=%s",
+            ("n2", "u1"),
+        )
+    audit = store.list_user_activity(
+        "u1", activity_type="ask", include_inaccessible_questions=True, limit=50
+    )
+    assert {
+        item["id"]: item["notebook_name"] for item in audit["items"]
+    } == NOTEBOOK_NAME_AFTER_RENAME_AND_REVOKE
+    with asks.guarded_ask_detail(
+        "ask-shared", actor_id="u1", reader_id=None
+    ) as snapshot:
+        assert snapshot["job"]["notebook_name"] == NOTEBOOK_NAME_RENAMED
 
 
 def test_guarded_report_detail_runs_the_failed_sections_select_for_admins_only_postgres(

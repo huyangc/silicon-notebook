@@ -39,6 +39,16 @@ export function activityTitle(item: ActivityItem): string {
   return trimmed || NO_TITLE;
 }
 
+// 提问 / 报告所在笔记本的库名:存活库是读列表那一刻的当前名,删除后的留存摘要是
+// 删除时的名。只看提问 / 只看报告含共享库里的提交,而左栏只列自有库——行上不写
+// 库名,就看不出这条问在哪。全局问答不属于任何笔记本(有「全局」标签),来源行
+// 在左栏的库下面已经看得到,两者都回空串。
+export function activityNotebookName(item: ActivityItem): string {
+  if (item.type === "source") return "";
+  if (item.type === "ask" && item.scope === "global") return "";
+  return (item.notebook_name ?? "").trim();
+}
+
 // 来源行的 parse_status 缺失时回退 status——与
 // frontend/app/anomaly-severity.ts::sourceAnomalies 的既有回退规则保持一致,
 // 避免同一行在两处的"失败/未失败"判定互相矛盾。
