@@ -7021,6 +7021,12 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/reports.py",
+        "scope": "<module>.register_report_tools.get_report.load",
+        "target": "get_report"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>._own_report_or_404",
         "target": "get_report"
@@ -7609,6 +7615,12 @@
   },
   "list_reports": {
     "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/reports.py",
+        "scope": "<module>.register_report_tools.list_reports.load",
+        "target": "list_reports"
+      },
       {
         "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
@@ -11136,6 +11148,12 @@
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/_shared.py",
         "scope": "<module>._record_agent_call",
+        "target": "user_can_read_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/list_pages.py",
+        "scope": "<module>.readable_allowlist",
         "target": "user_can_read_notebook"
       },
       {

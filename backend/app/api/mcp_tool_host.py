@@ -40,6 +40,7 @@ from app.api.mcp_tools.memory_context import (
     register_memory_proposal_tools,
 )
 from app.api.mcp_tools.profiles import register_profile_tools
+from app.api.mcp_tools.reports import register_report_tools
 from app.api.mcp_tools.session import register_session_tools
 from app.api.mcp_tools.sources import register_source_tools
 from app.core.json_safety import JsonSafetyError
@@ -60,6 +61,7 @@ _CORE_REGISTRARS = (
     register_memory_context_tools,
     register_citation_tools,
     register_ask_tools,
+    register_report_tools,
     register_memory_proposal_tools,
     register_profile_tools,
     register_source_tools,
@@ -146,6 +148,8 @@ _NOT_FOUND_RESOURCE = {
     "put_knowhow_cell_code": "Knowhow 行或列",
     "ask": "会话或笔记本",
     "get_ask": "问答任务",
+    "list_reports": "笔记本",
+    "get_report": "报告",
 }
 _INTERNAL = "服务内部错误，请稍后重试；如仍失败，请联系管理员"
 _ACCESS_DENIED_CODES = {
