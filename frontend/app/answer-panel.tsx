@@ -50,6 +50,7 @@ import {
   type AnswerImagePreviewRequest,
 } from "./image-preview";
 import { KgTypeMark } from "./kg-type-mark";
+import { linkedReportReceiptName, linkedReportReceiptText } from "./linked-report.ts";
 import {
   modelFailureText,
   sanitizeModelServiceId,
@@ -72,6 +73,7 @@ import { retrievalScopeSummary, skippedLibrariesNotice } from "./source-scope";
 import type {
   AskResponse,
   Citation,
+  LinkedReportReceipt,
   KnowhowBatchCoverage,
   KnowhowResultSet,
   SpreadsheetAnalysisResult,
@@ -990,6 +992,62 @@ export function ReasoningTracePanel({
 type AnswerModelError = NonNullable<AskResponse["model_errors"]>[number];
 
 
+/**
+ * 这一轮挂了关联报告时，回答上方的那一行回执（「就此追问」）。
+ *
+ * - 读入：可展开的 `<details>`，摘要一句说读了什么（执行摘要、哪几节、复原的引用证据），
+ *   展开逐节列出读入与否，再列复原 / 失效 / 超出篇幅的计数。只说读了什么，不推测没读的
+ *   那几节为什么没读（回执里分不出「超出篇幅」与「没有单独正文」）。
+ * - 跳过：一行说明，原因是后端写好的那句（与标签旁的就地预检同一句），原样展示；
+ *   没有可展开的东西，所以不画成折叠块。
+ * 没有回执（没挂报告的回答、历史回答）时一个节点都不多。
+ */
+function LinkedReportReceiptView({ receipt }: { receipt: LinkedReportReceipt }) {
+  const name = linkedReportReceiptName(receipt.title);
+  const text = linkedReportReceiptText(receipt);
+  if (receipt.status !== "read") {
+    return (
+      <p className="answer-linked-report skipped" role="note" title={receipt.title || undefined}>
+        {name} · {text}
+      </p>
+    );
+  }
+  const sections = receipt.sections ?? [];
+  const restored = receipt.evidence_restored ?? 0;
+  const gone = receipt.evidence_gone ?? 0;
+  const overBudget = receipt.evidence_over_budget ?? 0;
+  return (
+    <details className="answer-linked-report">
+      <summary title={receipt.title || undefined}>
+        <ChevronRight size={14} aria-hidden="true" />
+        <span>{name} · {text}</span>
+      </summary>
+      <ul>
+        <li>
+          <span>执行摘要</span>
+          <small>{receipt.summary_truncated ? "已读取（篇幅所限，已截断）" : "已读取"}</small>
+        </li>
+        {sections.map((section) => (
+          <li key={section.index}>
+            <span className={section.read ? "" : "linked-report-section-skipped"}>
+              第 {section.index} 节{section.title ? `《${section.title}》` : ""}
+            </span>
+            <small>{section.read ? "已读取正文" : "正文未读入"}</small>
+          </li>
+        ))}
+        <li>
+          <span>引用证据</span>
+          <small>
+            {`复原 ${restored} 条`}
+            {gone > 0 && ` · ${gone} 条已失效`}
+            {overBudget > 0 && ` · ${overBudget} 条超出篇幅未读入`}
+          </small>
+        </li>
+      </ul>
+    </details>
+  );
+}
+
 function modelTestResultText(result: ModelServiceStatusItem): string {
   if (result.status === "ok") return `正常 ${result.latency_ms}ms`;
   if (result.status === "busy") return `繁忙 ${result.active} / ${result.maximum}`;
@@ -1335,6 +1393,8 @@ export function AnswerView({
           在浏览器侧被算成 5/5 而整行消失。
           ⚠ 库名直接用回执里的快照，不拿当前挂载列表重新映射：回答活得比挂载边久，
           重开历史会话时那个库可能已经被卸载，重新映射恰好会丢掉最该解释它的那一行。 */}
+      {/* 关联报告回执紧挨着检索范围回执：两者都在说「这一轮读了什么」。 */}
+      {answer.linked_report && <LinkedReportReceiptView receipt={answer.linked_report} />}
       {answer.retrieval_scope && (() => {
         const scope = answer.retrieval_scope;
         const includedBases = scope.bases.filter((base) => base.included);

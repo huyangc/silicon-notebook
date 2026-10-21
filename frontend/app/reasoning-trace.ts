@@ -76,6 +76,9 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   // 作答期间没被改动或删除。summary 由后端如实写「已核对 N 条、未通过 M 条」;
   // 核对不通过从不作废回答,这一步只是把核对这件事摆进轨迹。
   citation_check: "核对",
+  // report = 这一轮挂了关联报告(「就此追问」):读了报告的哪些部分、复原了多少条引用
+  // 证据,或者为什么没读。摘要由后端写成整句(report_followup.report_trace_step)。
+  report: "报告",
 };
 
 // next_action 取值来自 backend/app/services/prompts.py 的状态机决策(reflect 步骤
@@ -260,6 +263,21 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
   }
   if (step.step_type === "memory") {
     return typeof detail.count === "number" ? `${detail.count} 条记忆` : "";
+  }
+  // report(关联报告):同一条理由,必须排在通用分支之前。detail 的 evidence_* 数的是
+  // 复原的**报告引用**,不是本轮检索的候选;哪天 detail 多出 count/found 键,排在后面
+  // 就会被念成「N 个候选」。摘要已经写成整句,这里只给折叠态一个短复述:读入了几节、
+  // 复原了几条。没读(skipped)时摘要就是原因,这里不重复。
+  if (step.step_type === "report") {
+    if (detail.status !== "read") return "";
+    const parts: string[] = [];
+    const total = typeof detail.sections_total === "number" ? detail.sections_total : 0;
+    const read = Array.isArray(detail.sections_read) ? detail.sections_read.length : 0;
+    if (total > 0) parts.push(`读入 ${read}/${total} 节`);
+    if (typeof detail.evidence_restored === "number") {
+      parts.push(`复原 ${detail.evidence_restored} 条引用`);
+    }
+    return parts.join(" · ");
   }
   if (step.step_type === "synthesis") {
     // 按节合成(设计文档 §3.1)的每节进度步复用 synthesis 这个 step_type,但它的

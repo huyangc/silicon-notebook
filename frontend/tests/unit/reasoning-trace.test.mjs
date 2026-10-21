@@ -1130,3 +1130,45 @@ test("the final citation check step (PR-D) has its own label and no borrowed det
   const others = Object.entries(TRACE_STEP_LABELS).filter(([key]) => key !== "citation_check");
   assert.ok(others.every(([, text]) => text !== "核对"));
 });
+
+test("the linked-report step (就此追问) has its own label and a short detail, never a borrowed count", () => {
+  const read = {
+    step_type: "report",
+    summary: "已读取关联报告《电池安全综述》：执行摘要与第 2、3 节（共 6 节，按与问题的相关度选取）；复原引用证据 18 条，2 条已失效",
+    detail: {
+      report_id: "r-1",
+      status: "read",
+      sections_total: 6,
+      sections_read: [2, 3],
+      summary_truncated: false,
+      evidence_restored: 18,
+      evidence_gone: 2,
+      evidence_over_budget: 0,
+      // 防御:哪天 detail 多出通用分支认得的键,也不能被念成「N 个候选」。
+      count: 7,
+    },
+  };
+  assert.equal(getTraceStepLabel(read), "报告");
+  assert.equal(getTraceStepDetail(read), "读入 2/6 节 · 复原 18 条引用");
+  const summary = getReasoningTraceSummary([read], false);
+  assert.equal(summary.latestLabel, "报告");
+  assert.equal(summary.latestSummary, read.summary);
+
+  // 没读:摘要就是原因,detail 不重复、也不借通用分支的数。
+  const skipped = {
+    step_type: "report",
+    summary: "未读取关联报告《电池安全综述》：它引用的 2 份资料不在当前检索范围内",
+    detail: { report_id: "r-1", status: "skipped", sections_total: 0, sections_read: [], evidence_restored: 0, reason_code: "scope_sources", found: 4 },
+  };
+  assert.equal(getTraceStepDetail(skipped), "");
+
+  // 报告没有节时只报复原条数;畸形 detail 不把 undefined 送上屏。
+  assert.equal(
+    getTraceStepDetail({ step_type: "report", summary: "", detail: { status: "read", sections_total: 0, evidence_restored: 0 } }),
+    "复原 0 条引用",
+  );
+  assert.equal(getTraceStepDetail({ step_type: "report", summary: "", detail: { status: "read" } }), "");
+
+  const others = Object.entries(TRACE_STEP_LABELS).filter(([key]) => key !== "report");
+  assert.ok(others.every(([, text]) => text !== "报告"));
+});

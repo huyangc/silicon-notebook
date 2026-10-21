@@ -1,5 +1,6 @@
-import { Check, Edit3, Share2, Trash2, X } from "lucide-react";
+import { Check, Edit3, FileText, Share2, Trash2, X } from "lucide-react";
 
+import { linkedReportLabel } from "./linked-report.ts";
 import { formatRelativeTime } from "./relative-time.ts";
 import { Pagination } from "./Pagination";
 import { useClientPagination } from "./use-client-pagination.ts";
@@ -84,13 +85,35 @@ export function AskSessionHistoryList({
                 className="chat-session-card-main"
                 type="button"
                 aria-current={session.id === conversationId ? "true" : undefined}
-                title={sidebar ? `${session.title || "未命名会话"} · ${formatRelativeTime(session.updated_at)} · ${session.turn_count} 轮` : undefined}
+                title={sidebar
+                  ? [
+                    session.title || "未命名会话",
+                    formatRelativeTime(session.updated_at),
+                    `${session.turn_count} 轮`,
+                    ...(session.linked_report ? [linkedReportLabel(session.linked_report.title ?? "")] : []),
+                  ].join(" · ")
+                  : undefined}
                 onClick={() => onOpenSession(session.id)}
               >
-                <span>{session.title || "未命名会话"}</span>
+                {/* 会话最后一轮挂着关联报告时的标记。左栏一行只放得下标题,标记缩成标题前的
+                    小图标,题目进悬停提示;卡片里与「逐步推理」徽标并排。 */}
+                <span>
+                  {sidebar && session.linked_report && (
+                    <FileText size={12} className="chat-session-report-mark" aria-label="关联报告" />
+                  )}
+                  {session.title || "未命名会话"}
+                </span>
                 {!sidebar && <small>
                   {formatRelativeTime(session.updated_at)} · {session.turn_count} 轮
                   {session.used_reasoning && <span className="chat-session-reasoning-badge">{`✦ ${strictLabel}`}</span>}
+                  {session.linked_report && (
+                    <span
+                      className="chat-session-report-badge"
+                      title={linkedReportLabel(session.linked_report.title ?? "")}
+                    >
+                      关联报告
+                    </span>
+                  )}
                 </small>}
               </button>
               <div className="chat-session-card-actions">

@@ -107,6 +107,19 @@ export function linkedReportCheckKey(
   ]);
 }
 
+/**
+ * 标签与在途轮次上的那句「关联报告：<题目>」。题目为空（读取出错的回执、报告已删除的
+ * 在途任务）时只说「关联报告」——不编一个题目，也不猜它为什么不在。
+ */
+export function linkedReportLabel(title: string): string {
+  return title ? `关联报告：${title}` : "关联报告";
+}
+
+/** 回答下方回执里的报告名：「关联报告《题目》」；题目为空时只说「关联报告」。 */
+export function linkedReportReceiptName(title: string): string {
+  return title ? `关联报告《${title}》` : "关联报告";
+}
+
 function count(value: number | undefined): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
 }

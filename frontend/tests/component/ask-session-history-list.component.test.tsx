@@ -107,3 +107,25 @@ test("侧栏形态一行一个标题，当前会话标出 aria-current，分页�
   await user.click(within(rows[2] as HTMLElement).getByTitle("删除"));
   expect(onDelete).toHaveBeenCalledWith(expect.objectContaining({ id: "s3" }));
 });
+
+// 会话最后一轮挂着关联报告时,清单行带一个标记:卡片里是「关联报告」徽标(题目在悬停提示),
+// 左栏一行只放得下标题,标记缩成标题前的小图标、题目并进整行的悬停提示。
+test("挂着关联报告的会话在清单行上带标记，没挂的不带", () => {
+  const sessions: ConversationSummary[] = [
+    { ...makeSessions(1)[0], id: "linked", title: "带报告的会话", linked_report: { report_id: "r-1", title: "电池安全综述" } },
+    { ...makeSessions(1)[0], id: "plain", title: "普通会话" },
+  ];
+  const { rerender } = render(<AskSessionHistoryList sessions={sessions} {...baseProps()} />);
+  const badge = screen.getByText("关联报告");
+  expect(badge).toHaveAttribute("title", "关联报告：电池安全综述");
+  expect(badge.closest("button")).toHaveTextContent("带报告的会话");
+  expect(screen.getByText("普通会话").closest("button")).not.toHaveTextContent("关联报告");
+
+  rerender(<AskSessionHistoryList sessions={sessions} {...baseProps()} variant="sidebar" />);
+  const linkedRow = screen.getByRole("button", { name: /带报告的会话/ });
+  expect(linkedRow.getAttribute("title")).toContain("关联报告：电池安全综述");
+  expect(within(linkedRow).getByLabelText("关联报告")).toBeInTheDocument();
+  const plainRow = screen.getByRole("button", { name: "普通会话" });
+  expect(plainRow.getAttribute("title")).not.toContain("关联报告");
+  expect(within(plainRow).queryByLabelText("关联报告")).toBeNull();
+});

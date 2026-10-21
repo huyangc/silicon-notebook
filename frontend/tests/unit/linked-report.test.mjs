@@ -7,6 +7,8 @@ import {
   linkedReportCheckKey,
   linkedReportFromActiveJob,
   linkedReportFromTurn,
+  linkedReportLabel,
+  linkedReportReceiptName,
   linkedReportReceiptText,
   restoredLinkedReport,
 } from "../../app/linked-report.ts";
@@ -235,4 +237,15 @@ test("nothing left to tick in either dimension falls back to everything and says
   assert.equal(local.source.allSelected, false);
   assert.equal(local.base.allSelected, false);
   assert.equal(local.note, "");
+});
+
+
+test("the tag and receipt name carry the title, and fall back to no title rather than an invented one", () => {
+  assert.equal(linkedReportLabel("电池安全综述"), "关联报告：电池安全综述");
+  assert.equal(linkedReportLabel(""), "关联报告");
+  assert.equal(linkedReportReceiptName("电池安全综述"), "关联报告《电池安全综述》");
+  assert.equal(linkedReportReceiptName(""), "关联报告");
+  // 题目整串保留,不截断(界面只做 CSS 单行省略)。
+  const long = "长".repeat(4000);
+  assert.equal(linkedReportLabel(long), `关联报告：${long}`);
 });
