@@ -1427,6 +1427,8 @@ KG_GLEANING_ENABLED          # extra rounds asking the LLM for MISSED nodes (def
 KG_GLEANING_ROUNDS           # gleaning rounds when enabled (default 1)
 KG_CONCEPT_DESC_ENABLED      # LLM-fuse cross-doc concept-cluster descriptions (default true)
 ANSWER_CONTEXT_BUDGET_CHARS  # answer-context assembly char budget (default 6000; not read by a deep report's sections — see the retrieval behaviour-change note)
+ASK_REPORT_CONTEXT_MAX_CHARS # Ask follow-up on a deep report: character cap of the report block (title + executive summary + every section heading + the selected section bodies) in the answer prompt (default 12000; 2000..60000, out-of-range values refuse to start); over it, whole sections are chosen by relevance to the question and the receipt says so
+ASK_REPORT_EVIDENCE_BUDGET_CHARS # same feature: character cap of the evidence partition the report's references are restored into by id (default 8000; 2000..60000), apart from the turn's retrieval budget; what does not fit is counted as left out for space on the receipt
 RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF ranking vs keyword+semantic fusion (default false)
 RETRIEVAL_RRF_K              # reciprocal-rank-fusion k (default 60)
 KG_QUERY_REFINE_ENABLED      # question-aware evidence refinement before answering (default true)

@@ -192,6 +192,7 @@ erDiagram
     text conversation_id FK
     text status
     jsonb trace_json
+    text report_id "在途轮次挂的深度报告（v99/0080，空串=无）"
   }
   feedback {
     text answer_id FK
@@ -620,6 +621,8 @@ base 的权威性另在答案合成 prompt 中表达：如果 personal 与 base 
 未携带 `intent` 的 `/ask`、`/ask/stream` 直接兼容调用在 `AskService.resolve_reasoning_followup` 里先用确定性澄清闸判问句本身；只有该闸命中（指代不清或纯泛化请求）才读取同一 owner、同一 notebook 的会话历史、跑既有 `query_rewrite` 工作负载把跟进句改写成独立问题，再对改写句重判同一把闸——命中闸就是入口层的唯一改写触发条件，不做无条件改写；改写后仍命中闸返回 422，其文案固定取自原句（改写产物绝不进入错误文案），放行时改写句只顶替 `retrieval_query`/`intent.resolved_question`，`objective`/`result_scope` 等仍按原句判定。解析结果经 `ask_followup.py` 的 `followup_resolution_context` contextvar 从路由层带入（与 `retrieval_scope_receipt_context` 同形、经 `copy_context()` 跨后台任务边界），`_prepare_reasoning_ask` 读取时先校验 `resolution.question` 与当次 payload 问句逐字节相同，不同即视为没有该 resolution、按原句走引擎兼容分支判闸。MCP `ask` 不经这条入口层改写：它在调用内已跑带会话历史的模型理解步并以澄清句柄回传，跟进句由那一步解析。
 
 Excel 专业分析插在 reasoning retrieval 结束与 response-draft seam 之前。它遍历冻结参与集中的当前笔记本及获准挂载库，只读取各自通过 `ActiveSourceScope.allows(owner_notebook_id, source_id)` 的可见来源 ceiling（显式选择，或当次全选快照，再减当前库隐藏合成来源），并按来源所属笔记本读取快照；仅在命中分析意图与已有快照时付 planner 成本。结果作为 `ResponseDraftInput.spreadsheet_results` 进入合成，并同时追加 `AskResponse.result_sets(kind="spreadsheet")` 与可点击来源引用。lane 内任何异常都只记录稳定异常类型并 fail-open，不能放宽 scope、阻塞原回答或修改用户来源。
+
+**关联报告分区**（单库问答带 `report_id` 时；可观察行为与预算见产品/API 文档「就深度报告追问（关联报告）」）。`AskService._engine_scope` 在来源天花板与 retrieval run 安装之后计算一次 `ReportFollowup`（报告行过报告门 → 判词 → 可读时由检索层 `AskCandidatePort.restore_report_references` 按 id 复原被引条目，每条读取再过同一个天花板），装进 `report_followup_context`：chunk 引擎读 `current_report_followup()`，reasoning 经 `PreparedReasoningAsk.report_followup` 显式传递。判词只有一个实现（`services/report_followup.report_link_verdict`），提问执行、`preview_reasoning_intent` 与就地预检 `report_link_check`（经 `_retrieval_ceiling` 非懒安装、不复原）三处共用；扩展引擎在判词之前就定为 `engine_unsupported`，只读报告行；全局（无主体）run 不计算报告。复原条目以原生对象类型与原生号段进入一个独立分区（`services/report_evidence.assemble_report_evidence`，渲染器由调用方注入、每类一次调用、按相关度跨类入选，预算 `ask_report_evidence_budget_chars` 与检索预算分开）：chunk 在记忆块之后、reasoning 在总预算截断与证据精炼之后、外部证据之前追加；不并入检索池参与排名（复原条目没有本轮检索分数）。报告块（`render_report_block`，`ask_report_context_max_chars`）经 `answer_prompt(report_block=…)` 与规则 15 进入回答 prompt。读入报告的 reasoning 轮次保持单次合成（`_draft_reasoning_response` 的按节合成门要求本轮没有读入报告的 `ReportTurn`），报告可读的 chunk 轮次不走文档概览快路径。回执在 `_save_answer` / `ask_evidence` 收口兜底补写（`_stamp_report_receipt`），同一处剥除 `[evidence not loaded]` 并发内容无关事件。读取失败 fail-soft 为「不读报告」（`read_failed`），`AskCancelled`、`RetrievalControlError` 与布线错误 `ReportRestoreScopeError` 照常上抛。
 
 ### 3.3.1 逐步推理预算与结构化完整枚举
 

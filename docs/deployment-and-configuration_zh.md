@@ -1122,6 +1122,8 @@ KG_GLEANING_ENABLED          # 额外几轮让 LLM 找回漏抽节点（默认 t
 KG_GLEANING_ROUNDS           # 开启时的 gleaning 轮数（默认 1）
 KG_CONCEPT_DESC_ENABLED      # LLM 融合跨文档概念簇描述（默认 true）
 ANSWER_CONTEXT_BUDGET_CHARS  # 答案上下文装配字符预算（默认 6000；深度报告的节不再读取，见检索段的行为变化说明）
+ASK_REPORT_CONTEXT_MAX_CHARS # 问答就深度报告追问时，报告块（题目+执行摘要+全部节标题+选入的节正文）进入回答 prompt 的字符上限（默认 12000；2000..60000，越界启动校验拒启）；超出时按与问题的相关度整节选入并在回执里披露
+ASK_REPORT_EVIDENCE_BUDGET_CHARS # 同上，报告引用按 id 复原后进入回答 prompt 的证据分区字符上限（默认 8000；2000..60000），与本轮检索证据的预算分开；放不下的计入回执的「超出篇幅」
 RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF 排序，替代关键词+语义融合（默认 false）
 RETRIEVAL_RRF_K              # RRF 的 k（默认 60）
 KG_QUERY_REFINE_ENABLED      # 答题前做问题感知证据精炼（默认 true）
