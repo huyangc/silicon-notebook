@@ -648,11 +648,13 @@ def scenario_wiring_faults_refuse_before_any_read(world: World) -> None:
             assert _restored_ids(world.repo.retrieval.restore_report_references(
                 world.nb, alice, cited[:1],
             )) == {("chunk", "c-a")}
-    # Alice's ceiling, Alice as actor, but the run's viewer is Bob.
+    # Alice's ceiling while the run's viewer is Bob: neither Alice (not the
+    # viewer) nor Bob (not the ceiling's owner) may read under it.
     with as_request_user(world.bob), default_ceiling_context(
         world.nb, alice, real_readers(world.repo),
     ):
         assert_refused_before_any_read(world, cited, alice)
+        assert_refused_before_any_read(world, cited, bob)
 
 
 def scenario_memory_hits_by_ids(world: World) -> None:
