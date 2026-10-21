@@ -134,6 +134,10 @@ def test_shared_maintenance_opener_holds_lock_and_closes_repository(monkeypatch)
             events.append("close")
 
     monkeypatch.setattr(maintenance_cli, "create_repository", lambda _settings: _Repository())
+    # The schema is re-checked under the lock, before the body.
+    monkeypatch.setattr(
+        maintenance_cli, "require_current_schema", lambda _settings: events.append("recheck")
+    )
     settings = SimpleNamespace(database_url="sqlite:////tmp/maintenance-test.db")
 
     with maintenance_cli.open_maintenance_cli_repository(
@@ -141,7 +145,7 @@ def test_shared_maintenance_opener_holds_lock_and_closes_repository(monkeypatch)
     ):
         events.append("body")
 
-    assert events == ["lock", "body", "unlock", "close"]
+    assert events == ["lock", "recheck", "body", "unlock", "close"]
 
 
 def test_reembed_kg_reads_and_embeds_object_payloads_by_keyset_page(monkeypatch, capsys):

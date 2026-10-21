@@ -26,11 +26,12 @@ Two drivers share ``run_backfill``:
   same result;
 * **by hand** -- ``scripts/backfill_global_ask_attribution.py`` (``main``) for
   a re-run or a dry run. It does NOT own the schema: like every maintenance
-  CLI it is a schema guest (``maintenance_cli.create_schema_guest_repository``:
-  ``migrate=False, seed=False`` -- no migration DDL against a live database, no
-  seed rewrite of the admin credential) and refuses, with the shared wording,
-  a database that is not at this build's schema (so never one short of SQLite
-  v98 / PostgreSQL 0078).
+  CLI it is a schema guest -- the bare one,
+  ``maintenance_cli.create_bare_schema_guest_repository`` (``migrate=False,
+  seed=False``, no extension seats, no admission prime, no auth wiring: the
+  composition it always had, for a tool that runs beside a serving process)
+  -- and refuses, with the shared wording, a database that is not at this
+  build's schema (so never one short of SQLite v98 / PostgreSQL 0078).
 
 Resumable and idempotent: pages are read by job id (keyset) from the partial
 index of still-unattributed done jobs, and each page is written in one
@@ -51,6 +52,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -215,10 +217,11 @@ def open_attribution_repository(settings: Any) -> Iterator[Any]:
     running service never asked for), no seed (whose unconditional admin
     password rewrite would reset the production credential whenever the
     operator's environment lacks it). The shared schema-guest gate raises
-    ``MaintenanceCliSchemaError`` before anything is composed."""
-    from app.services.maintenance_cli import create_schema_guest_repository
+    ``MaintenanceCliSchemaError`` before anything is composed. Bare (no
+    extension seats): the pass only reads and writes attribution rows."""
+    from app.services.maintenance_cli import create_bare_schema_guest_repository
 
-    repository = create_schema_guest_repository(settings)
+    repository = create_bare_schema_guest_repository(settings)
     try:
         yield repository
     finally:
@@ -250,7 +253,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"scanned={result.scanned} written={result.written} skipped={result.skipped} "
               f"unreadable={result.unreadable} last_id={result.last_id}", flush=True)
 
-    from app.services.maintenance_cli import MaintenanceCliSchemaError
+    from app.services.maintenance_cli import MaintenanceCliError
 
     try:
         with open_attribution_repository(Settings()) as repository:
@@ -263,9 +266,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 on_unreadable=_report_writer(args.report),
                 progress=progress,
             )
-    except MaintenanceCliSchemaError as exc:
-        print(f"error: {exc}", flush=True)
-        return EXIT_SCHEMA_NOT_READY
+    except MaintenanceCliError as exc:  # schema refusal: 3; unreachable database: 2
+        print(f"error: {exc}", file=sys.stderr, flush=True)
+        return exc.exit_code
     label = "dry-run" if args.dry_run else "done"
     print(f"backfill-global-ask-attribution {label}: {json.dumps(result.as_dict())}", flush=True)
     return 1 if result.unreadable else 0

@@ -244,11 +244,15 @@ def verify_migration_ledger(database_url: str) -> tuple[int, int]:
     that decides whether composing is safe.
     """
     from app.repositories.schema_currency import (
+        SchemaInspectionError,
         inspect_postgres_schema,
         schema_refusal_message,
     )
 
-    state = inspect_postgres_schema(database_url)
+    try:
+        state = inspect_postgres_schema(database_url)
+    except SchemaInspectionError as exc:  # fixed wording; no connection details
+        raise ScaleBuildCliError(str(exc)) from None
     if not state.is_current:
         raise ScaleBuildCliError(schema_refusal_message(state))
     return state.current, state.required

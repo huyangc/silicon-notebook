@@ -15,6 +15,21 @@ def _find_source_md(notebook_id: str, pattern: str = "*Design_of_Analog_CMOS_IC*
 
 
 def main() -> int:
+    """Entry point: a schema-guest refusal (or an unreachable database) from
+    any of the speed / inference / recall arms becomes its exit status and one
+    stderr line instead of a traceback."""
+    import sys
+
+    from app.services.maintenance_cli import MaintenanceCliError
+
+    try:
+        return _run()
+    except MaintenanceCliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return exc.exit_code
+
+
+def _run() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--notebook", default=DEFAULT_NB)
     ap.add_argument("--db", default=DEFAULT_DB)

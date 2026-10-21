@@ -30,8 +30,30 @@ from app.core.database_url import database_identity
 EXIT_SCHEMA_NOT_CURRENT = 3
 
 MIGRATE_COMMAND = "bash scripts/cli.sh database migrate --confirm-service-stopped"
+#: The same command where the unified entry is not shipped (the offline package).
+MIGRATE_MODULE_COMMAND = (
+    "PYTHONPATH=backend .venv/bin/python -m app.scripts.migrate_database "
+    "--confirm-service-stopped"
+)
+#: The one connection-failure wording. It deliberately names nothing from the
+#: URL: no user, no host, no port, no database -- psycopg's own messages (and
+#: its conninfo parse errors, which quote the offending password token) never
+#: reach the operator's terminal.
+CONNECTION_FAILED_MESSAGE = (
+    "无法连接 PostgreSQL 数据库来检查 schema 版本（连接失败；为免泄露凭据，连接信息与"
+    "原始错误不打印）。请检查 DATABASE_URL 的写法（密码里的特殊字符须 URL 编码）、"
+    "数据库是否在运行、网络是否可达以及用户名和密码，再重跑本命令。"
+)
+#: ``connect_timeout`` used when a caller has no ``Settings`` to read it from.
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 5
+DEFAULT_STATEMENT_TIMEOUT_MS = 30_000
 
 _ROOT_DIR = Path(__file__).resolve().parents[3]
+
+
+class SchemaInspectionError(RuntimeError):
+    """The schema version could not be read. The message is always one of the
+    fixed, credential-free wordings above; the original error is dropped."""
 
 
 class SchemaNotMigratableError(RuntimeError):
@@ -93,8 +115,13 @@ def version_label(backend: str, version: int) -> str:
     return f"SQLite v{version}"
 
 
-def schema_refusal_message(state: SchemaCurrency) -> str:
-    """The one refusal wording: the reason, then the way out."""
+def schema_refusal_message(state: SchemaCurrency, *, migrating: bool = False) -> str:
+    """The one refusal wording: the reason, then the way out.
+
+    ``migrating`` is the ``database migrate`` command's own refusal: it does
+    migrate, so its wording for a never-initialized database says what it does
+    not do (create one) instead of "this command does not migrate".
+    """
     required = version_label(state.backend, state.required)
     if not state.initialized:
         if state.sqlite_file_missing:
@@ -103,9 +130,14 @@ def schema_refusal_message(state: SchemaCurrency) -> str:
             reason = "PostgreSQL 库里没有迁移账本"
         else:
             reason = "SQLite 库的 schema 版本为 0"
+        scope = (
+            "`database migrate` 只升级已由服务初始化过的库，不新建数据库"
+            if migrating
+            else "本命令不创建、不迁移数据库"
+        )
         return (
-            f"数据库还没有初始化（{reason}），本构建需要 {required}；本命令不创建、"
-            "不迁移数据库。请先启动一次服务，由服务建库并写入内置账户，再重跑本命令。"
+            f"数据库还没有初始化（{reason}），本构建需要 {required}；{scope}。"
+            "请先启动一次服务，由服务建库并写入内置账户，再重跑本命令。"
         )
     if not state.ledger_consistent:
         if state.checksum_mismatch_at is not None:
@@ -132,7 +164,8 @@ def schema_refusal_message(state: SchemaCurrency) -> str:
         )
     return (
         f"数据库 schema 版本是 {current}，本构建需要 {required}；本命令不迁移数据库。"
-        f"请先停服并运行 `{MIGRATE_COMMAND}`，或启动一次升级后的服务（启动时自动迁移），"
+        f"请先停服并运行 `{MIGRATE_COMMAND}`（离线包里是 `{MIGRATE_MODULE_COMMAND}`），"
+        "或启动一次升级后的服务（启动时自动迁移），"
         "再重跑本命令；若这个库属于仍在运行旧版本的服务，请改用与该服务相同版本的代码运行本命令。"
     )
 
@@ -143,7 +176,21 @@ def _sqlite_path(settings: Settings) -> Path:
 
 
 def inspect_sqlite_schema(path: Path) -> SchemaCurrency:
-    """Read ``user_version`` read-only; a missing file is reported, never created."""
+    """Read ``user_version`` without creating anything next to the database.
+
+    A missing file is reported, never created. A plain ``mode=ro`` open of a
+    WAL database leaves a fresh ``-wal``/``-shm`` pair behind when none
+    existed (a read-only connection cannot remove them), so the probe picks the
+    open that creates nothing:
+
+    * no ``-wal`` and no ``-shm`` beside the file -- nobody holds the database
+      open and every committed page is in the main file, so ``immutable=1``
+      (no locks, no side files) reads the true ``user_version``;
+    * either side file present -- some connection has the database open (a
+      serving process, typically), the newest ``user_version`` may still sit in
+      the WAL, and the side files already exist, so an ordinary ``mode=ro``
+      open reads through the WAL and adds nothing new.
+    """
     import sqlite3
 
     from app.repositories.sqlite.migrations import SCHEMA_VERSION
@@ -152,11 +199,22 @@ def inspect_sqlite_schema(path: Path) -> SchemaCurrency:
         return SchemaCurrency(
             "sqlite", False, 0, SCHEMA_VERSION, sqlite_file_missing=True
         )
-    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    resolved = path.resolve()
+    side_files = any(
+        resolved.with_name(resolved.name + suffix).exists() for suffix in ("-wal", "-shm")
+    )
+    flags = "mode=ro" if side_files else "mode=ro&immutable=1"
     try:
-        current = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    finally:
-        connection.close()
+        connection = sqlite3.connect(f"{resolved.as_uri()}?{flags}", uri=True)
+        try:
+            current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        raise SchemaInspectionError(
+            f"无法读取 SQLite 库的 schema 版本（{type(exc).__name__}）：请确认 DATABASE_URL "
+            "指向的是本服务的 SQLite 库文件、且当前用户可读，再重跑本命令。"
+        ) from None
     return SchemaCurrency("sqlite", current > 0, current, SCHEMA_VERSION)
 
 
@@ -169,28 +227,62 @@ def packaged_postgres_migrations() -> tuple:
     )
 
 
-def inspect_postgres_schema(database_url: str) -> SchemaCurrency:
+def _read_postgres_ledger(
+    database_url: str, *, connect_timeout_seconds: int, statement_timeout_ms: int
+) -> list:
+    """One bounded, credential-safe bare session. ``_SafeDiagnosticConnection``
+    is the pool's own connection class: it keeps psycopg's connection loggers
+    quiet and replaces any connect failure -- a conninfo parse error quoting a
+    password token, a wrong password naming the user, an unreachable host --
+    with a generic error, which this function then replaces with the fixed
+    wording, dropping the cause (``from None``). ``connect_timeout`` bounds the
+    handshake (an unreachable host otherwise waits on the OS TCP timeout, about
+    two minutes); ``statement_timeout`` bounds the two reads."""
+    from app.repositories.postgres.database import _SafeDiagnosticConnection
+
+    try:
+        with _SafeDiagnosticConnection.connect(
+            database_url,
+            autocommit=True,
+            connect_timeout=max(1, int(connect_timeout_seconds)),
+            application_name="silicon-notebook-schema-check",
+        ) as connection:
+            connection.execute(
+                "SELECT set_config('statement_timeout', %s, false)",
+                (f"{max(1, int(statement_timeout_ms))}ms",),
+            )
+            present = connection.execute(
+                "SELECT to_regclass('silicon_schema_migrations') IS NOT NULL"
+            ).fetchone()[0]
+            if not present:
+                return []
+            return connection.execute(
+                "SELECT version, checksum FROM silicon_schema_migrations "
+                "ORDER BY version"
+            ).fetchall()
+    except Exception:
+        raise SchemaInspectionError(CONNECTION_FAILED_MESSAGE) from None
+
+
+def inspect_postgres_schema(
+    database_url: str,
+    *,
+    connect_timeout_seconds: int = DEFAULT_CONNECT_TIMEOUT_SECONDS,
+    statement_timeout_ms: int = DEFAULT_STATEMENT_TIMEOUT_MS,
+) -> SchemaCurrency:
     """Compare the live ledger with this checkout's migrations on one bare
     connection (no pool): the exact version SET ``1..N`` -- a gapped ledger has
     ``max(version) == N`` yet is one the repository's own migrator refuses --
     and every recorded checksum, which is what catches two checkouts carrying
-    the same number of migrations with different SQL."""
-    import psycopg
-
+    the same number of migrations with different SQL. A connection failure
+    raises ``SchemaInspectionError`` with the fixed credential-free wording."""
     migrations = packaged_postgres_migrations()
     required = len(migrations)
-    with psycopg.connect(database_url, autocommit=True) as connection:
-        present = connection.execute(
-            "SELECT to_regclass('silicon_schema_migrations') IS NOT NULL"
-        ).fetchone()[0]
-        rows = (
-            connection.execute(
-                "SELECT version, checksum FROM silicon_schema_migrations "
-                "ORDER BY version"
-            ).fetchall()
-            if present
-            else []
-        )
+    rows = _read_postgres_ledger(
+        database_url,
+        connect_timeout_seconds=connect_timeout_seconds,
+        statement_timeout_ms=statement_timeout_ms,
+    )
     recorded = tuple(int(row[0]) for row in rows)
     mismatch = next(
         (
@@ -212,8 +304,19 @@ def inspect_postgres_schema(database_url: str) -> SchemaCurrency:
 
 
 def inspect_schema_currency(settings: Settings) -> SchemaCurrency:
-    if database_identity(settings.database_url).scheme == "postgresql":
-        return inspect_postgres_schema(settings.database_url)
+    """Dispatch on the configured backend. PostgreSQL bounds the handshake by
+    the pool's own acquire timeout and the reads by the configured statement
+    timeout, so the check fails no later than composing would."""
+    try:
+        scheme = database_identity(settings.database_url).scheme
+    except Exception:
+        raise SchemaInspectionError(CONNECTION_FAILED_MESSAGE) from None
+    if scheme == "postgresql":
+        return inspect_postgres_schema(
+            settings.database_url,
+            connect_timeout_seconds=settings.postgres_pool_acquire_timeout_seconds,
+            statement_timeout_ms=int(settings.postgres_statement_timeout_seconds * 1000),
+        )
     return inspect_sqlite_schema(_sqlite_path(settings))
 
 
@@ -240,7 +343,7 @@ def migrate_schema(settings: Settings) -> SchemaMigration:
     if before.is_current:
         return SchemaMigration(before, before)
     if not before.is_behind:
-        raise SchemaNotMigratableError(schema_refusal_message(before))
+        raise SchemaNotMigratableError(schema_refusal_message(before, migrating=True))
     if before.backend == "postgresql":
         from app.repositories.postgres.database import PostgresDatabase
         from app.repositories.postgres.maintenance import hold_offline_maintenance_lock

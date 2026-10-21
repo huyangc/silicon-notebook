@@ -55,8 +55,15 @@ admin 密码）；库不是本构建的 schema 时以退出码 3 拒绝（`scale
 
 ```bash
 bash scripts/cli.sh database migrate --confirm-service-stopped
-# 退出码：0 已迁移或已是当前版本；2 缺确认参数 / 维护锁被占用；3 本构建迁不了（从未初始化、比本构建新、账本对不上）
+# 只按某个部署 env 文件选库（忽略 shell 导出的变量）：
+bash scripts/cli.sh database migrate --env-file /path/to/deployment.env --confirm-service-stopped
+# 退出码：0 已迁移或已是当前版本；2 缺确认参数 / --env-file 读不了 / 维护锁被占用 / 连不上库；
+#         3 本构建迁不了（从未初始化、比本构建新、账本对不上）
 ```
+
+连不上 PostgreSQL 时（URL 写法有误、凭据不对、主机不可达），所有 guest 与迁移命令都以退出码 2 退出，
+只打印一条固定提示，不含用户名、密码、主机、端口或库名。`database migrate-postgres`、
+`database shadow start-forward`、`database merge` 是作用于新目标或副本的转换工具，不在这条规则内。
 
 ---
 
@@ -366,7 +373,7 @@ PYTHONPATH=backend python scripts/sweep_legacy_delete_leftovers.py            # 
 PYTHONPATH=backend python scripts/sweep_legacy_delete_leftovers.py --apply    # 清扫
 ```
 
-退出码 0/1/2 与细节见 `docs/operations_zh.md` 的「存量删除残渣清扫」。
+退出码 0/1/2/3（3 = 库不是本构建的 schema，本工具不迁移）与细节见 `docs/operations_zh.md` 的「存量删除残渣清扫」。
 
 ### `backfill_global_ask_attribution.py` —— 全局问答归因回填
 

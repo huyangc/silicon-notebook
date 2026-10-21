@@ -22,6 +22,7 @@ import pytest
 from app.core.config import Settings, get_settings
 from app.repositories.schema_currency import (
     MIGRATE_COMMAND,
+    MIGRATE_MODULE_COMMAND,
     SchemaCurrency,
     inspect_schema_currency,
     schema_refusal_message,
@@ -84,7 +85,14 @@ def _ctx(tmp_path) -> CliContext:
     return CliContext(tmp=tmp_path, confirm=())
 
 
-@pytest.mark.parametrize("case", CASES, ids=lambda case: case.name)
+COMPOSING = tuple(case for case in CASES if case.composes)
+
+
+def _side_files(db: Path) -> set[str]:
+    return {p.name for p in db.parent.iterdir() if p.name.startswith(db.name)}
+
+
+@pytest.mark.parametrize("case", COMPOSING, ids=lambda case: case.name)
 def test_every_cli_composes_as_a_guest_and_leaves_admin_and_schema_untouched(
     guest_db, tmp_path, monkeypatch, case
 ):
@@ -103,6 +111,7 @@ def test_every_cli_refuses_a_database_one_version_behind(
 ):
     _stamp(guest_db, SCHEMA_VERSION - 1)
     admin, schema = _admin(guest_db), _schema(guest_db)
+    files = _side_files(guest_db)
 
     assert run_case(case, _ctx(tmp_path), monkeypatch) == 3
 
@@ -110,8 +119,10 @@ def test_every_cli_refuses_a_database_one_version_behind(
     text = output.out + output.err
     assert f"SQLite v{SCHEMA_VERSION - 1}" in text
     assert MIGRATE_COMMAND in text
+    assert MIGRATE_MODULE_COMMAND in text
     assert _schema(guest_db) == schema
     assert _admin(guest_db) == admin
+    assert _side_files(guest_db) == files, "the refusal must leave no -wal/-shm behind"
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.name)
@@ -251,3 +262,173 @@ def test_database_migrate_is_in_the_unified_catalog():
     assert command.script == "app.scripts.migrate_database"
     assert command.module is True
     assert command.deployment_env is True
+    # --env-file is the authoritative settings source, as for selected-source.
+    assert ("database", "migrate") in cli.SELECTED_ENV_COMMANDS
+
+
+def test_database_migrate_refusing_a_fresh_database_does_not_say_it_never_migrates(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'fresh.db'}")
+
+    assert _migrate(["--confirm-service-stopped"]) == 3
+
+    err = capsys.readouterr().err
+    assert "本命令不创建、不迁移" not in err
+    assert "`database migrate` 只升级已由服务初始化过的库" in err
+
+
+def test_database_migrate_env_file_wins_over_the_shell(guest_db, tmp_path, monkeypatch):
+    """With --env-file the file names the database; the exported DATABASE_URL
+    (another, also-behind database) is ignored and left exactly as it was."""
+    shell_db = tmp_path / "shell-target.db"
+    import shutil
+
+    shutil.copy(guest_db, shell_db)
+    _stamp(shell_db, SCHEMA_VERSION - 1)
+    _stamp(guest_db, SCHEMA_VERSION - 1)
+    env_file = tmp_path / "deployment.env"
+    env_file.write_text(
+        f"DATABASE_URL=sqlite:///{guest_db}\n"
+        f"SILICON_NOTEBOOK_STORAGE_DIR={tmp_path / 'storage'}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{shell_db}")
+    shell_schema = _schema(shell_db)
+
+    assert _migrate(["--env-file", str(env_file), "--confirm-service-stopped"]) == 0
+
+    assert _schema(guest_db)[0] == SCHEMA_VERSION
+    assert _schema(shell_db) == shell_schema
+
+
+def test_database_migrate_rejects_a_missing_env_file(tmp_path, capsys):
+    assert _migrate(["--env-file", str(tmp_path / "nope.env"), "--confirm-service-stopped"]) == 2
+    assert "--env-file" in capsys.readouterr().err
+
+
+def test_the_maintenance_opener_rechecks_the_schema_under_the_lock(guest_db, monkeypatch):
+    """A migration from a newer checkout landing between the composition gate
+    and the maintenance lock is seen under the lock; the body never runs."""
+    from app.services import maintenance_cli
+
+    real = maintenance_cli.create_repository
+
+    def compose_then_race(settings):
+        repository = real(settings)
+        _stamp(guest_db, SCHEMA_VERSION + 1)  # the concurrent `database migrate`
+        return repository
+
+    monkeypatch.setattr(maintenance_cli, "create_repository", compose_then_race)
+    entered = []
+    with pytest.raises(maintenance_cli.MaintenanceCliSchemaError) as caught:
+        with maintenance_cli.open_maintenance_cli_repository(
+            Settings(), confirm_service_stopped=False
+        ):
+            entered.append(True)
+    assert entered == []
+    assert f"SQLite v{SCHEMA_VERSION + 1}" in str(caught.value)
+
+
+def test_the_sqlite_probe_creates_nothing_beside_a_closed_wal_database(tmp_path):
+    from app.repositories.schema_currency import inspect_sqlite_schema
+
+    db = tmp_path / "wal.db"
+    connection = sqlite3.connect(db)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("CREATE TABLE t (a)")
+    connection.execute("PRAGMA user_version = 7")
+    connection.commit()
+    connection.close()  # the last close checkpoints and removes -wal/-shm
+    assert _side_files(db) == {"wal.db"}
+
+    assert inspect_sqlite_schema(db).current == 7
+    assert _side_files(db) == {"wal.db"}
+
+
+def test_the_sqlite_probe_reads_a_version_still_in_the_wal(tmp_path):
+    """While a connection holds the database open, the newest user_version may
+    sit in the WAL; the probe must read through it, not the stale main file."""
+    from app.repositories.schema_currency import inspect_sqlite_schema
+
+    db = tmp_path / "live.db"
+    holder = sqlite3.connect(db)
+    try:
+        holder.execute("PRAGMA journal_mode=WAL")
+        holder.execute("PRAGMA wal_autocheckpoint=0")
+        holder.execute("CREATE TABLE t (a)")
+        holder.execute("PRAGMA user_version = 11")
+        holder.commit()
+        assert inspect_sqlite_schema(db).current == 11
+    finally:
+        holder.close()
+
+
+def test_promotion_targets_refuses_a_database_one_version_behind(guest_db, capsys):
+    module = load_script("backfill_promotion_targets")
+    _stamp(guest_db, SCHEMA_VERSION - 1)
+    schema = _schema(guest_db)
+
+    assert module.main(["--db", str(guest_db), "list"]) == 3
+
+    err = capsys.readouterr().err
+    assert f"SQLite v{SCHEMA_VERSION - 1}" in err and MIGRATE_COMMAND in err
+    assert _schema(guest_db) == schema
+
+
+def test_promotion_targets_runs_on_a_current_database(guest_db):
+    module = load_script("backfill_promotion_targets")
+
+    assert module.main(["--db", str(guest_db), "list"]) == 0
+
+
+# ────────────────────────────── connection failures never leak credentials ──
+
+SECRET_TOKENS = ("s3cr", "ZZet", "opsuser", "db-secret-host", "10.255.255.1", "secretdb")
+UNREACHABLE_URLS = {
+    # an unescaped "%" in the password: psycopg's parse error quotes the token
+    "malformed": "postgresql://opsuser:s3cr%ZZet@db-secret-host.invalid:1/secretdb",
+    # unroutable address: bounded by connect_timeout, not the OS TCP timeout
+    "unreachable": "postgresql://opsuser:s3cret@10.255.255.1:5432/secretdb",
+}
+LEAK_PROBES = (
+    ("database migrate", lambda ctx, mp: _migrate(["--confirm-service-stopped"])),
+    *(
+        (case.name, (lambda case: lambda ctx, mp: run_case(case, ctx, mp))(case))
+        for case in CASES
+        if not case.sqlite_only and case.name in {
+            "batch_ingest embed", "build_chunks", "kg build_kg",
+            "backfill_global_ask_attribution", "maintain delete-leftovers",
+            "prepare_selected_source_graph", "reflect_shadow_rig search",
+        }
+    ),
+)
+
+
+@pytest.mark.parametrize("url_kind", sorted(UNREACHABLE_URLS))
+@pytest.mark.parametrize("probe", LEAK_PROBES, ids=lambda probe: probe[0])
+def test_a_failed_schema_check_prints_no_connection_details(
+    tmp_path, monkeypatch, capfd, url_kind, probe
+):
+    import time
+
+    monkeypatch.setenv("DATABASE_URL", UNREACHABLE_URLS[url_kind])
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("MODEL_SERVICES_CONFIG", "")
+    monkeypatch.setenv("POSTGRES_POOL_ACQUIRE_TIMEOUT_SECONDS", "1")
+    get_settings.cache_clear()
+    started = time.monotonic()
+
+    code = probe[1](CliContext(tmp=tmp_path, confirm=("--confirm-service-stopped",)), monkeypatch)
+
+    elapsed = time.monotonic() - started
+    output = capfd.readouterr()
+    text = output.out + output.err
+    if probe[0] == "prepare_selected_source_graph":
+        assert code == 1 and "open_repository_failed" in text  # content-free code
+    else:
+        assert code == 2, text
+        assert "无法连接 PostgreSQL 数据库来检查 schema 版本" in text
+    for token in SECRET_TOKENS:
+        assert token not in text, f"{token!r} leaked: {text}"
+    assert elapsed < 15, f"the check must fail within its connect timeout ({elapsed:.1f}s)"

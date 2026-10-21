@@ -28,6 +28,7 @@ from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.repository import PostgresRepository
 from app.repositories.schema_currency import (
     MIGRATE_COMMAND,
+    MIGRATE_MODULE_COMMAND,
     inspect_schema_currency,
     packaged_postgres_migrations,
 )
@@ -132,10 +133,11 @@ def _ctx(tmp_path) -> CliContext:
 
 
 PORTABLE = tuple(case for case in CASES if not case.sqlite_only)
+COMPOSING = tuple(case for case in PORTABLE if case.composes)
 SQLITE_ONLY = tuple(case for case in CASES if case.sqlite_only)
 
 
-@pytest.mark.parametrize("case", PORTABLE, ids=lambda case: case.name)
+@pytest.mark.parametrize("case", COMPOSING, ids=lambda case: case.name)
 def test_every_cli_composes_as_a_guest_and_leaves_admin_and_schema_untouched(
     guest_pg, tmp_path, monkeypatch, case
 ):
@@ -160,6 +162,7 @@ def test_every_cli_refuses_a_ledger_one_version_short(
     text = output.out + output.err
     assert f"PostgreSQL {REQUIRED - 1:04d}" in text
     assert MIGRATE_COMMAND in text
+    assert MIGRATE_MODULE_COMMAND in text
     assert _schema(behind_pg) == schema
     assert _admin(behind_pg) == admin
 
@@ -253,3 +256,96 @@ def test_database_migrate_reports_a_held_maintenance_lock_instead_of_waiting(
 
     assert _schema(behind_pg) == schema
     assert "already running" in capsys.readouterr().err
+
+
+def test_database_migrate_env_file_wins_over_the_shell(
+    postgres_scope, behind_pg, tmp_path, monkeypatch
+):
+    """With --env-file the file names the database; the exported DATABASE_URL
+    (a second, also-short ledger) is ignored and left exactly as it was."""
+    from tests.postgres.conftest import _isolated_postgres_scope
+
+    with _isolated_postgres_scope(postgres_scope.base_url) as other:
+        database = PostgresDatabase(Settings(database_url=other.url), ROOT)
+        try:
+            PostgresMigrator(database).migrate(target_version=REQUIRED - 1)
+        finally:
+            database.close()
+        env_file = tmp_path / "deployment.env"
+        env_file.write_text(
+            f"DATABASE_URL={behind_pg}\n"
+            f"SILICON_NOTEBOOK_STORAGE_DIR={tmp_path / 'storage'}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("DATABASE_URL", other.url)
+        other_schema = _schema(other.url)
+
+        assert _migrate(["--env-file", str(env_file), *CONFIRM]) == 0
+
+        assert inspect_schema_currency(Settings(database_url=behind_pg)).is_current
+        assert _schema(other.url) == other_schema
+
+
+def test_the_maintenance_opener_rechecks_the_ledger_under_the_lock(guest_pg, monkeypatch):
+    """A newer checkout's migration landing between the composition gate and
+    the maintenance lock is seen under the lock; the body never runs."""
+    from app.services import maintenance_cli
+
+    real = maintenance_cli.create_repository
+
+    def compose_then_race(settings):
+        repository = real(settings)
+        with psycopg.connect(guest_pg, autocommit=True) as connection:
+            connection.execute(
+                "INSERT INTO silicon_schema_migrations(version, checksum) VALUES (%s, %s)",
+                (REQUIRED + 1, "from-a-newer-checkout"),
+            )
+        return repository
+
+    monkeypatch.setattr(maintenance_cli, "create_repository", compose_then_race)
+    entered = []
+    with pytest.raises(maintenance_cli.MaintenanceCliSchemaError) as caught:
+        with maintenance_cli.open_maintenance_cli_repository(
+            Settings(), confirm_service_stopped=True
+        ):
+            entered.append(True)
+    assert entered == []
+    assert f"PostgreSQL {REQUIRED + 1:04d}" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "probe",
+    ["database migrate", "batch_ingest embed", "build_chunks", "scale ledger preflight"],
+)
+def test_wrong_credentials_never_reach_the_terminal(postgres_scope, tmp_path, monkeypatch, capfd, probe):
+    """A role that does not exist makes the server's error name it; the
+    operator sees the fixed wording only -- no user, password, host or db."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    from app.services import scale_build_cli
+
+    parts = urlsplit(postgres_scope.url)
+    netloc = f"cli_guest_no_such_role:not-the-pw@{parts.hostname}"
+    if parts.port:
+        netloc += f":{parts.port}"
+    url = urlunsplit((parts.scheme, netloc, parts.path, parts.query, ""))
+    _env(monkeypatch, tmp_path, url, SHELL_PASSWORD)
+
+    if probe == "database migrate":
+        code = _migrate(list(CONFIRM))
+    elif probe == "scale ledger preflight":
+        with pytest.raises(scale_build_cli.ScaleBuildCliError) as caught:
+            scale_build_cli.verify_migration_ledger(url)
+        print(str(caught.value))
+        code = 2
+    else:
+        case = next(case for case in CASES if case.name == probe)
+        code = run_case(case, _ctx(tmp_path), monkeypatch)
+
+    output = capfd.readouterr()
+    text = output.out + output.err
+    assert code == 2, text
+    assert "无法连接 PostgreSQL 数据库来检查 schema 版本" in text
+    database = parts.path.lstrip("/")
+    for token in ("cli_guest_no_such_role", "not-the-pw", str(parts.hostname), database):
+        assert token not in text, f"{token!r} leaked: {text}"

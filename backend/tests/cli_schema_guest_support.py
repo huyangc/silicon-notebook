@@ -55,6 +55,9 @@ class CliCase:
     invoke: Callable[[CliContext, object], object]
     #: Tools that named ``SQLiteRepository`` directly keep refusing PostgreSQL.
     sqlite_only: bool = False
+    #: False for a tool that opens a bare database handle rather than a
+    #: repository (it runs the same version gate, but no guest seam).
+    composes: bool = True
 
 
 class Opened(BaseException):
@@ -182,16 +185,16 @@ def _eval_inference(ctx, monkeypatch, spy=None):
     return inference.run_inference("nb-x")
 
 
-def _eval_sa_calibration(ctx, monkeypatch, spy=None):
-    from app.eval import sa_calibration
-
-    return sa_calibration._run_arm(None, [], "academic_paper")
-
-
 def _eval_speed(ctx, monkeypatch, spy=None):
     from app.eval import speed
 
     return speed.measure_speed(str(ctx.tmp / "missing.md"))
+
+
+def _delete_leftovers(ctx, monkeypatch, spy=None):
+    from app.migration import legacy_leftover_sweep
+
+    return legacy_leftover_sweep.main([])
 
 
 def _reflect_search(ctx, monkeypatch, spy=None):
@@ -239,8 +242,8 @@ CASES: tuple[CliCase, ...] = (
     CliCase("kg_product_smoke", _kg_product_smoke, sqlite_only=True),
     CliCase("eval run_all recall", _eval_run_all, sqlite_only=True),
     CliCase("eval inference", _eval_inference, sqlite_only=True),
-    CliCase("eval sa_calibration", _eval_sa_calibration, sqlite_only=True),
     CliCase("eval speed", _eval_speed, sqlite_only=True),
+    CliCase("maintain delete-leftovers", _delete_leftovers, composes=False),
     CliCase("reflect_shadow_rig search", _reflect_search),
     CliCase("reflect_shadow_rig report", _reflect_report),
 )
@@ -254,6 +257,9 @@ def run_case(case: CliCase, ctx: CliContext, monkeypatch, spy=None) -> int:
     try:
         result = case.invoke(ctx, monkeypatch, spy)
     except SystemExit as exc:
+        if isinstance(exc.code, str):  # ``raise SystemExit("message")``
+            print(exc.code, file=sys.stderr)
+            return 1
         return int(exc.code or 0)
     except MaintenanceCliError as exc:
         # A plain helper (the eval functions) lets the refusal escape; its

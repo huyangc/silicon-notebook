@@ -22,9 +22,11 @@ from app.bootstrap import create_application_repository
 from app.repositories.ports import NotebookRepository, OfflineMaintenanceBusyError
 from app.repositories.schema_currency import (
     EXIT_SCHEMA_NOT_CURRENT,
+    SchemaInspectionError,
     SchemaMigration,
     SchemaNotMigratableError,
     inspect_schema_currency,
+    inspect_sqlite_schema,
     migrate_schema,
     schema_refusal_message,
 )
@@ -51,9 +53,49 @@ class MaintenanceCliSchemaError(MaintenanceCliError):
     exit_code = EXIT_SCHEMA_NOT_CURRENT
 
 
+class MaintenanceCliConnectionError(MaintenanceCliError):
+    """The schema version could not be read (the database is unreachable, the
+    URL does not parse, the credentials are wrong...). The message is the fixed
+    credential-free wording; the driver's own error never reaches the terminal."""
+
+
+class DeploymentFileSettings(Settings):
+    """Settings read only from init overrides and one explicit env file: shell
+    variables cannot redirect the command to another database (the
+    ``--env-file`` contract ``prepare_selected_source_graph`` established)."""
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        del settings_cls, env_settings, file_secret_settings
+        return init_settings, dotenv_settings
+
+
 def require_current_schema(settings: Settings) -> None:
     """The one schema-version gate for every schema-guest command."""
-    state = inspect_schema_currency(settings)
+    try:
+        state = inspect_schema_currency(settings)
+    except SchemaInspectionError as exc:
+        raise MaintenanceCliConnectionError(str(exc)) from None
+    if not state.is_current:
+        raise MaintenanceCliSchemaError(schema_refusal_message(state))
+
+
+def require_current_sqlite_file(path) -> None:
+    """The same gate for a tool that takes an explicit SQLite ``--db`` path
+    instead of the deployment settings."""
+    from pathlib import Path
+
+    try:
+        state = inspect_sqlite_schema(Path(path))
+    except SchemaInspectionError as exc:
+        raise MaintenanceCliConnectionError(str(exc)) from None
     if not state.is_current:
         raise MaintenanceCliSchemaError(schema_refusal_message(state))
 
@@ -151,6 +193,11 @@ def open_maintenance_cli_repository(
     with open_cli_repository(settings) as repository:
         try:
             with repository.maintenance.offline_maintenance_lock():
+                # Re-check under the lock: ``database migrate`` takes the same
+                # lock, so a migration (from another checkout) that ran between
+                # the composition gate and this acquisition is seen here, never
+                # worked against.
+                require_current_schema(settings)
                 yield repository
         except OfflineMaintenanceBusyError as exc:
             raise MaintenanceCliBusyError(str(exc)) from None
@@ -172,6 +219,8 @@ def run_schema_migration(
         )
     try:
         return migrate_schema(settings)
+    except SchemaInspectionError as exc:
+        raise MaintenanceCliConnectionError(str(exc)) from None
     except SchemaNotMigratableError as exc:
         raise MaintenanceCliSchemaError(str(exc)) from None
     except OfflineMaintenanceBusyError as exc:
