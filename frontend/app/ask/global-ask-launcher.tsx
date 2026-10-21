@@ -18,8 +18,21 @@ type Presentation = Pick<RootModalCoordinator, "view" | "open" | "requestClose" 
  *  每次点击都换新值:同一个会话点两次也是两次独立的导航意图。 */
 export type GlobalConversationRequest = { conversationId: string; jobId?: string; nonce: number };
 
-export function GlobalAskLauncher({ presentation, uiMode, openRequest }: {
+/** 首次提示「看过了」按用户记在本机;读写失败(私密模式等)按没看过/写不进处理,
+ *  最坏只是提示再出现一次。 */
+export const discoveryHintStorageKey = (userId: string) => `globalAsk.discoveryHintSeen.${userId}`;
+function hintSeen(key: string) {
+  try { return window.localStorage.getItem(key) === "1"; } catch { return false; }
+}
+function rememberHintSeen(key: string) {
+  try { window.localStorage.setItem(key, "1"); } catch { /* ignore */ }
+}
+
+export function GlobalAskLauncher({ presentation, uiMode, openRequest, discoveryHint }: {
   presentation: Presentation; uiMode?: UiMode; openRequest?: GlobalConversationRequest | null;
+  /** 集合页传 `{ userId, active: true }`:用户第一次看到气泡时在旁边说一句它能做什么。
+   *  点「知道了」、打开全局问答、或离开集合页(active 变 false)都算看过,之后不再出现。 */
+  discoveryHint?: { userId: string; active: boolean };
 }) {
   const [expanded, setExpanded] = useState(false);
   const [started, setStarted] = useState(false);
@@ -30,6 +43,24 @@ export function GlobalAskLauncher({ presentation, uiMode, openRequest }: {
   const [forwarded, setForwarded] = useState<GlobalConversationRequest | null>(null);
   const view = presentation.view("global-ask");
   const open = view.open;
+  const hintKey = discoveryHint ? discoveryHintStorageKey(discoveryHint.userId) : null;
+  // 首屏渲染不读 localStorage(服务端没有它);挂载后再决定要不要显示。
+  const [hintPending, setHintPending] = useState(false);
+  useEffect(() => { if (hintKey) setHintPending(!hintSeen(hintKey)); }, [hintKey]);
+  const hintActive = Boolean(discoveryHint?.active);
+  const dismissHint = () => {
+    if (!hintPending || !hintKey) return;
+    rememberHintSeen(hintKey);
+    setHintPending(false);
+  };
+  // 提示出现过之后离开集合页(进笔记本)就算看过;一次都没出现过的不算。
+  const hintShown = useRef(false);
+  const showHint = hintPending && hintActive && !open;
+  if (showHint) hintShown.current = true;
+  useEffect(() => {
+    if (!hintActive && hintShown.current) dismissHint();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hintActive]);
   const mode = !open ? "closed" : expanded ? "full" : "compact";
   function setMode(next: "closed" | "compact" | "full") {
     if (next === "closed") { presentation.requestClose("global-ask", "button"); return; }
@@ -37,6 +68,7 @@ export function GlobalAskLauncher({ presentation, uiMode, openRequest }: {
       launcher.current?.focus();
       if (!presentation.open("global-ask", presentation.captureActorOwner())) return;
     }
+    dismissHint();
     setStarted(true);
     setExpanded(next === "full");
   }
@@ -48,6 +80,7 @@ export function GlobalAskLauncher({ presentation, uiMode, openRequest }: {
       if (!presentation.open("global-ask", presentation.captureActorOwner())) return;
       setExpanded(false);
     }
+    dismissHint();
     setStarted(true);
     setForwarded(openRequest);
     // 只对新的一次点击(nonce)起反应;open/presentation 的变化不是新的导航意图。
@@ -70,7 +103,11 @@ export function GlobalAskLauncher({ presentation, uiMode, openRequest }: {
   }, [mode, view.topmost]);
 
   return <>
-    <button ref={launcher} className="global-ask-bubble" aria-label="打开全局问答" title="全局问答" aria-expanded={open} aria-controls="global-ask-window" hidden={open} onClick={() => { setStarted(true); setMode("compact"); }}><MessageSquare size={25} strokeWidth={1.7} /><span className="global-bubble-label">全局问答</span></button>
+    <button ref={launcher} className="global-ask-bubble" aria-label="打开全局问答" title="全局问答" aria-expanded={open} aria-controls="global-ask-window" hidden={open} onClick={() => { setStarted(true); setMode("compact"); }}><MessageSquare size={20} strokeWidth={1.8} aria-hidden /><span className="global-bubble-label" aria-hidden>全局问答</span></button>
+    {showHint && <aside className="global-ask-hint" role="note" aria-label="全局问答提示">
+      <p><strong>跨笔记本提问</strong>一次问遍你的全部笔记本，回答会注明出处。</p>
+      <button className="global-ask-hint-dismiss" onClick={dismissHint}>知道了</button>
+    </aside>}
     <dialog ref={dialog} id="global-ask-window" className={`global-ask-window ${mode === "full" ? "is-full" : "is-compact"}`} style={{ zIndex: view.zIndex }} inert={open && !view.topmost ? true : undefined} aria-hidden={open && !view.topmost ? true : undefined} aria-label="全局问答"
       // 引用小卡片与会话分享弹窗都在 window 捕获期就把 Esc 吃掉了（preventDefault +
       // stopPropagation），所以下面那个 onKeyDown 在有内层弹层时根本不会触发。剩下的

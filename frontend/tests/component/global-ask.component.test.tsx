@@ -7,7 +7,7 @@ import { GlobalConversationList } from "../../app/ask/conversation-list.tsx";
 import { useGlobalAsk } from "../../app/ask/use-global-ask.ts";
 import GlobalAskPage from "../../app/ask/page.tsx";
 import GlobalAskWorkspace from "../../app/ask/global-ask-workspace.tsx";
-import { GlobalAskLauncher } from "../../app/ask/global-ask-launcher.tsx";
+import { discoveryHintStorageKey, GlobalAskLauncher } from "../../app/ask/global-ask-launcher.tsx";
 import { AnswerView } from "../../app/answer-panel.tsx";
 import { useRootModalCoordinator } from "../../app/use-root-modal-coordinator.ts";
 import { STOPPED_TURN_KEPT_TEXT, STOPPED_TURN_TEXT } from "../../app/stopped-turn.tsx";
@@ -2570,4 +2570,66 @@ test("a progress frame that lost the race to a local stop cannot resurrect the t
   expect(summaries(result.current.turns[0])).toEqual(["已经画出来的一步"]);
   expect(result.current.turns[0].searched_notebook_ids).toEqual(["nb-0"]);
   expect(result.current.running).toBeUndefined();
+});
+
+/** 集合页的宿主替身:`onCollection` 对应 page.tsx 里「在笔记本列表上」。 */
+function HintLauncher({ userId = "user-1", onCollection = true }: { userId?: string; onCollection?: boolean }) {
+  const presentation = useRootModalCoordinator({ actorId: userId, sourceId: null, onClosed() {} });
+  return <GlobalAskLauncher key={userId} presentation={presentation} discoveryHint={{ userId, active: onCollection }} />;
+}
+const hint = () => screen.queryByRole("note", { name: "全局问答提示" });
+
+test("the first-visit hint shows beside the bubble once and stays gone after 知道了", async () => {
+  installDialogMethods();
+  const view = render(<HintLauncher />);
+  await waitFor(() => expect(hint()).not.toBeNull());
+  expect(hint()).toHaveTextContent("一次问遍你的全部笔记本");
+  // 不抢焦点:提示只是旁白,焦点留在原处。
+  expect(hint()!.contains(document.activeElement)).toBe(false);
+  fireEvent.click(within(hint()!).getByRole("button", { name: "知道了" }));
+  expect(hint()).toBeNull();
+  expect(window.localStorage.getItem(discoveryHintStorageKey("user-1"))).toBe("1");
+  view.unmount();
+  render(<HintLauncher />);
+  await act(async () => {});
+  expect(hint()).toBeNull();
+});
+
+test("opening global ask counts as having seen the hint", async () => {
+  installDialogMethods();
+  render(<HintLauncher />);
+  await waitFor(() => expect(hint()).not.toBeNull());
+  fireEvent.click(screen.getByRole("button", { name: "打开全局问答" }));
+  expect(hint()).toBeNull();
+  expect(window.localStorage.getItem(discoveryHintStorageKey("user-1"))).toBe("1");
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入问题" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "收起全局问答" }));
+  expect(screen.getByRole("button", { name: "打开全局问答" })).toBeVisible();
+  expect(hint()).toBeNull();
+});
+
+test("the hint only appears on the notebook list, and leaving after seeing it retires it", async () => {
+  installDialogMethods();
+  const view = render(<HintLauncher onCollection={false} />);
+  await act(async () => {});
+  expect(hint()).toBeNull();
+  // 在笔记本里没见过提示就不算看过:回到列表照样出现。
+  expect(window.localStorage.getItem(discoveryHintStorageKey("user-1"))).toBeNull();
+  view.rerender(<HintLauncher onCollection />);
+  expect(hint()).not.toBeNull();
+  view.rerender(<HintLauncher onCollection={false} />);
+  expect(hint()).toBeNull();
+  expect(window.localStorage.getItem(discoveryHintStorageKey("user-1"))).toBe("1");
+  view.rerender(<HintLauncher onCollection />);
+  expect(hint()).toBeNull();
+});
+
+test("the hint is remembered per user, not per browser", async () => {
+  installDialogMethods();
+  window.localStorage.setItem(discoveryHintStorageKey("user-1"), "1");
+  const view = render(<HintLauncher />);
+  await act(async () => {});
+  expect(hint()).toBeNull();
+  view.rerender(<HintLauncher userId="user-2" />);
+  await waitFor(() => expect(hint()).not.toBeNull());
 });
