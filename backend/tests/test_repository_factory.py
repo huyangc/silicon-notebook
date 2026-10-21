@@ -651,6 +651,19 @@ def test_postgresql_repository_import_is_lazy(monkeypatch, tmp_path):
     assert factory.create_repository(settings) is postgres_sentinel
 
 
+def test_importing_the_factory_does_not_import_the_postgresql_wrapper(monkeypatch):
+    """The test above reuses the already-imported factory, so it cannot see an
+    eager import at the top of the factory module. Re-import the factory from
+    scratch: selecting SQLite must never load the PostgreSQL wrapper."""
+    wrapper = "app.services.postgres_repository"
+    _forget_module(monkeypatch, wrapper)
+    _forget_module(monkeypatch, "app.services.repository_factory")
+
+    importlib.import_module("app.services.repository_factory")
+
+    assert wrapper not in sys.modules
+
+
 def test_create_repository_omits_migrate_and_seed_kwargs_by_default(monkeypatch, tmp_path):
     """默认调用逐字不变:`migrate`/`seed` 两个关键字**不进**构造调用,一个不
     接受它们的最小替身(比如上面那条测试的单参数 lambda)不受影响
