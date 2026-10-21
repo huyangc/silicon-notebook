@@ -648,7 +648,12 @@ QUOTED_BOUND_PREFIX = "(report text) "
 
 
 def _bound_key(line: str) -> str:
-    return " ".join(line.casefold().split()).rstrip(".。:：")
+    """``line`` as it can read once rendered, folded for comparison: its
+    citation markers removed first -- rewriting may delete them (a gone item,
+    an unrenumbered ``[ k1 ]``, any summary marker), so a stored
+    ``End of attached report. [k1]`` can render as the bare end line."""
+    text = LOOSE_MARKER_RE.sub("", line)
+    return " ".join(text.casefold().split()).rstrip(".。:：")
 
 
 def _neutralized_bounds(text: str) -> str:
