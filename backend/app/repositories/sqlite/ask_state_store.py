@@ -1391,7 +1391,14 @@ class AskStateStore:
         turns. Raises KeyError if the conversation does not exist."""
         with self.database.connect() as db:
             conv = db.execute(
-                "SELECT id, notebook_id, title, updated_at FROM conversations WHERE id = ?",
+                "SELECT c.id, c.notebook_id, c.title, c.updated_at, "
+                # The conversation's entry point = its earliest job's. Rides
+                # idx_ask_jobs_conv; a conversation without job rows reads "".
+                "(SELECT j.submitted_via FROM ask_jobs j "
+                "  WHERE j.conversation_id = c.id "
+                "  ORDER BY julianday(j.created_at), j.created_at, j.rowid LIMIT 1) "
+                "AS submitted_via "
+                "FROM conversations c WHERE c.id = ?",
                 (conversation_id,),
             ).fetchone()
             if conv is None:
@@ -1401,6 +1408,16 @@ class AskStateStore:
                 "WHERE conversation_id = ? " + CONVERSATION_ANSWERS_ORDER_ASC,
                 (conversation_id,),
             ).fetchall()
+            # answer_id -> submitted_via, oldest job first: when two job rows
+            # name one answer the first wins (setdefault never overwrites).
+            turn_via: dict[str, str] = {}
+            for job_row in db.execute(
+                "SELECT answer_id, submitted_via FROM ask_jobs "
+                "WHERE conversation_id = ? AND answer_id <> '' "
+                "ORDER BY julianday(created_at), created_at, rowid",
+                (conversation_id,),
+            ).fetchall():
+                turn_via.setdefault(job_row["answer_id"], job_row["submitted_via"] or "")
             job = db.execute(
                 "SELECT id, question, asked_at, mode FROM ask_jobs "
                 "WHERE conversation_id=? AND status='running' "
@@ -1427,6 +1444,7 @@ class AskStateStore:
                     response=AskResponse(**payload),
                     asked_at=str(payload.get("asked_at") or ""),
                     created_at=row["created_at"],
+                    submitted_via=turn_via.get(row["id"], ""),
                 )
             )
         used_reasoning = bool(turns[-1].response.reasoning_trace) if turns else False
@@ -1446,6 +1464,7 @@ class AskStateStore:
             updated_at=conv["updated_at"] or "",
             turn_count=len(turns),
             used_reasoning=used_reasoning,
+            submitted_via=conv["submitted_via"] or "",
             turns=turns,
             active_job=active_job,
         )
@@ -1462,7 +1481,13 @@ class AskStateStore:
                 "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) AS turn_count, "
                 "(SELECT COALESCE(json_array_length(json_extract(a.payload, '$.reasoning_trace')), 0) > 0 "
                 "   FROM answers a WHERE a.conversation_id = c.id "
-                "  ORDER BY a.rowid DESC LIMIT 1) AS used_reasoning "
+                "  ORDER BY a.rowid DESC LIMIT 1) AS used_reasoning, "
+                # The conversation's entry point = its earliest job's (rides
+                # idx_ask_jobs_conv); no job row reads as NULL -> "".
+                "(SELECT j.submitted_via FROM ask_jobs j "
+                "  WHERE j.conversation_id = c.id "
+                "  ORDER BY julianday(j.created_at), j.created_at, j.rowid LIMIT 1) "
+                "AS submitted_via "
                 "FROM conversations c WHERE c.notebook_id = ? AND c.created_by = ? "
                 # julianday compares the absolute instant across legacy/local
                 # UTC offsets; the raw ISO value preserves microsecond order
@@ -1478,6 +1503,7 @@ class AskStateStore:
                 updated_at=row["updated_at"] or "",
                 turn_count=row["turn_count"],
                 used_reasoning=bool(row["used_reasoning"]),
+                submitted_via=row["submitted_via"] or "",
             )
             for row in rows
         ]

@@ -534,6 +534,83 @@ def test_create_report_records_submitted_via(content_harness):
     assert default_row["submitted_via"] == ""
 
 
+def test_conversation_submitted_via_comes_from_its_jobs(content_harness):
+    """The PostgreSQL twin of the SQLite test of the same name: ``conversations``
+    has no entry-point column, so the list/detail read it from ``ask_jobs`` --
+    the conversation's is its EARLIEST job's, a turn's is the job whose
+    ``answer_id`` is that answer, and no job row reads as "" (not recorded).
+    The seams stamp every row with one instant, so the oldest-first order here
+    is the id tie-break the SQL writes (``j.id COLLATE "C"``)."""
+    ask = content_harness.ask
+
+    # 1) first turn submitted from the web, the follow-up through MCP
+    first_request = AskRequest(question="asked in the browser")
+    first_job, conversation_id = ask.begin_durable_job(
+        "nb-content", first_request, "chunk", "user-content", submitted_via="web"
+    )
+    first_answer = ask.save_answer(
+        "nb-content", conversation_id, first_request.question,
+        AskResponse(conclusion="c1", conversation_id=conversation_id), "user-content",
+    )
+    assert ask.finish_job(first_job, "done", answer_id=first_answer) == conversation_id
+    follow_up = AskRequest(
+        question="asked by an agent", conversation_id=conversation_id
+    )
+    second_job, same_conversation = ask.begin_durable_job(
+        "nb-content", follow_up, "chunk", "user-content", submitted_via="mcp"
+    )
+    assert same_conversation == conversation_id
+    second_answer = ask.save_answer(
+        "nb-content", conversation_id, follow_up.question,
+        AskResponse(conclusion="c2", conversation_id=conversation_id), "user-content",
+    )
+    assert ask.finish_job(second_job, "done", answer_id=second_answer) == conversation_id
+
+    listed = {c.id: c for c in ask.list_conversations("nb-content", "user-content")}
+    assert listed[conversation_id].submitted_via == "web"
+    detail = ask.get_conversation(conversation_id)
+    assert detail.submitted_via == "web"
+    assert [(t.answer_id, t.submitted_via) for t in detail.turns] == [
+        (first_answer, "web"), (second_answer, "mcp")]
+
+    # 2) answers with no job row at all: not recorded, at both levels
+    with content_harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO conversations(id,notebook_id,title,created_by,created_at,"
+            "updated_at) VALUES (%s,%s,%s,%s,%s,%s)",
+            ("conv-no-job-rows", "nb-content", "bare", "user-content", NOW, NOW),
+        )
+        connection.execute(
+            "INSERT INTO answers(id,notebook_id,question,payload,created_at,"
+            "conversation_id) VALUES (%s,%s,%s,%s::jsonb,%s,%s)",
+            ("ans-no-job-row", "nb-content", "q",
+             json.dumps({"conclusion": "old answer"}), NOW, "conv-no-job-rows"),
+        )
+    listed = {c.id: c for c in ask.list_conversations("nb-content", "user-content")}
+    assert listed["conv-no-job-rows"].submitted_via == ""
+    bare = ask.get_conversation("conv-no-job-rows")
+    assert bare.submitted_via == ""
+    assert [t.submitted_via for t in bare.turns] == [""]
+
+    # 3) a retrieval-only MCP job carries no conversation id, so it never
+    #    colours a conversation's entry point
+    ask.begin_durable_job(
+        "nb-content",
+        AskRequest(question="evidence only", conversation_id="conv-no-job-rows"),
+        "chunk", "user-content", submitted_via="mcp", output="evidence",
+    )
+    assert ask.get_conversation("conv-no-job-rows").submitted_via == ""
+
+    # 4) two job rows naming one answer: the older job's entry point wins
+    with content_harness.database.write() as connection:
+        connection.execute(
+            "UPDATE ask_jobs SET answer_id=%s WHERE id=%s", (first_answer, second_job)
+        )
+    shared = ask.get_conversation(conversation_id)
+    assert [(t.answer_id, t.submitted_via) for t in shared.turns] == [
+        (first_answer, "web"), (second_answer, "")]
+
+
 def test_recent_user_ask_traces_scopes_to_the_reading_member(content_harness):
     """Agentic Memory P1 (T5): the overlay chain's ONE read, on PostgreSQL.
 

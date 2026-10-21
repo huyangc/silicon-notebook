@@ -4053,6 +4053,16 @@
               "title": "Notebook Id",
               "type": "string"
             },
+            "submitted_via": {
+              "default": "",
+              "enum": [
+                "",
+                "web",
+                "mcp"
+              ],
+              "title": "Submitted Via",
+              "type": "string"
+            },
             "title": {
               "default": "",
               "title": "Title",
@@ -4179,6 +4189,16 @@
               "title": "Notebook Id",
               "type": "string"
             },
+            "submitted_via": {
+              "default": "",
+              "enum": [
+                "",
+                "web",
+                "mcp"
+              ],
+              "title": "Submitted Via",
+              "type": "string"
+            },
             "title": {
               "default": "",
               "title": "Title",
@@ -4229,6 +4249,16 @@
             },
             "response": {
               "$ref": "#/components/schemas/AskResponse"
+            },
+            "submitted_via": {
+              "default": "",
+              "enum": [
+                "",
+                "web",
+                "mcp"
+              ],
+              "title": "Submitted Via",
+              "type": "string"
             }
           },
           "required": [
@@ -29392,6 +29422,7 @@
       "active_job": null,
       "id": "conv-api",
       "notebook_id": "nb-api",
+      "submitted_via": "web",
       "title": "fixture gain",
       "turn_count": 1,
       "turns": [
@@ -29431,7 +29462,8 @@
             "retrieval_effort": "standard",
             "retrieval_query": "fixture gain",
             "top_relevance": 1.0
-          }
+          },
+          "submitted_via": "web"
         }
       ],
       "updated_at": "2024-01-02T03:04:05",

@@ -1166,6 +1166,11 @@ class ConversationSummary(BaseModel):
     updated_at: str = ""
     turn_count: int = 0
     used_reasoning: bool = False
+    # Where the conversation was started from. ``conversations`` has no such
+    # column, so it is read from the conversation's EARLIEST ask_jobs row
+    # (that row's ``submitted_via``); "" (not recorded) when the conversation
+    # has no job row -- an older answer or imported data.
+    submitted_via: StoredSubmittedVia = ""
 
 
 class ConversationTurn(BaseModel):
@@ -1174,6 +1179,10 @@ class ConversationTurn(BaseModel):
     response: AskResponse
     asked_at: str = ""
     created_at: str = ""
+    # This turn's entry point: the ``submitted_via`` of the ask_jobs row whose
+    # ``answer_id`` is this answer; "" (not recorded) when no job row points at
+    # it (an older answer or imported data).
+    submitted_via: StoredSubmittedVia = ""
 
 
 class ActiveAskJob(BaseModel):
