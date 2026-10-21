@@ -97,6 +97,9 @@ const call = (over = {}) => ({
 test("能力档译名：认不出的一律回落到中性说法，绝不把协议串上屏", () => {
   assert.equal(callCapabilityLabel("ask:execute"), "提问");
   assert.equal(callCapabilityLabel("sources:write"), "添加资料");
+  // 读问答记录与深度报告（MCP list/get_conversation、list/get_report）有自己的译名，
+  // 不借 knowledge:read 的「查资料」。
+  assert.equal(callCapabilityLabel("history:read"), "读问答记录和报告");
   // 部署侧插件可以带来这份表里没有的能力档——那不是异常,但也绝不能直出。
   assert.equal(callCapabilityLabel("plugin:whatever"), "用了这个库");
   assert.equal(callCapabilityLabel(""), "用了这个库");

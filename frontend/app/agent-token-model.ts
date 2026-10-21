@@ -6,7 +6,7 @@ export const AGENT_SCOPE_OPTIONS = [
   {
     value: "read",
     label: "读取",
-    description: "读取笔记本里的资料，以及你的私人记忆和 AI 对这个库的理解",
+    description: "读取笔记本里的资料、你的私人记忆、AI 对这个库的理解，以及你的问答记录和深度报告",
     ownerOnly: false,
   },
   {

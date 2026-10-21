@@ -701,6 +701,7 @@ test("编辑器与签发表单同时挂载时,权限说明的 id 不冲突,编�
 
   expect(within(editor).getByRole("checkbox", { name: "管理" })).toHaveAccessibleDescription(/仅对你拥有的笔记本生效/);
   expect(within(editor).getByRole("checkbox", { name: "读取" })).toHaveAccessibleDescription(/读取笔记本里的资料/);
+  expect(within(editor).getByRole("checkbox", { name: "读取" })).toHaveAccessibleDescription(/问答记录和深度报告/);
   const ids = Array.from(document.querySelectorAll("[id]")).map((node) => node.id);
   expect(new Set(ids).size).toBe(ids.length);
 });
