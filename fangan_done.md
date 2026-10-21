@@ -543,6 +543,16 @@ Agent profile、opaque token、scope/allowlist/过期与撤销、公开 onboardi
 - **报告读取的取舍。** 正文与摘录同网页上作者本人所见，标识符更严（他人记忆的条目不给 `ref`、来源与元素 id 置空，永不输出记忆记录与内部字段）；失败小节的原始错误不经 MCP 输出。`history:read` 与 `memory:read` 同属 `read` 档，由测试钉住。
 - 当前合同见[Memory 与 Agent MCP][memory]，接入步骤见 [Agent MCP SOP](docs/agent-mcp-memory-sop_zh.md)，面向用户的说明见[用户手册](docs/user-manual_zh.md)；实施计划：[计划](docs/superpowers/plans/2026-10-21-mcp-history-tools-plan_zh.md)。回归入口：[会话工具](backend/tests/test_mcp_conversations.py)、[报告工具](backend/tests/test_mcp_reports.py)、[档位同档不变量](backend/tests/test_agent_history_capability.py)、[全局会话可见性](backend/tests/test_global_ask_agent_history.py)。
 
+## 63. 问答就深度报告追问（关联报告）（2026-10-21）
+
+**已交付，2026-10-21；方案 §6.5 问答与深度报告的衔接，MCP 部分属 §19.3。** 用户希望问答能接着一份已完成的深度报告往下问：回答读这份报告，并回到报告引用的原文找依据。合同由所属权威文档承载，本节只登记完成状态与回归入口。
+
+- **两处入口与粘性标签（PR #待定）。** 报告详情的「就此追问」（开新会话、挂标签、高级模式下切到报告生成时的检索范围，交集为空或装不下时退回全选并说明）与问答输入框下方的「关联报告」选择器（只列本人在本笔记本里生成完成的报告）；标签在会话内粘性生效，每轮回执记下挂了哪份报告，重开会话按「在途任务的报告，否则最后一轮回执」恢复。发送前预检在标签旁就地说明本轮为什么不读。
+- **冲突判据与读入方式。** 一个判词函数在本轮来源天花板下判报告的全部引用与个人记忆使用，提问执行、意图预检与发送前预检共用；冲突时本轮照常检索作答、报告只贡献题目，回执写明原因。可读时报告正文作不可引用的上下文（规则 15、首尾边界、执行摘要的标记删除、节正文只改写严格格式的标记），被引条目由检索层按 id 从当前原文复原、以原生证据项进入独立预算的分区（跨类按相关度入选，截断残片过短按未载入处理，挤掉的标记显示为未载入并在保存时剥除）。读入报告的 reasoning 轮次单次合成，chunk 轮次不走文档概览快路径；扩展引擎与全局问答不读报告。
+- **存储与分享。** 回执随回答存 `answers.payload`；在途轮次的报告存新列 `ask_jobs.report_id`（SQLite v99 / PostgreSQL 0080）。会话公开分享不带报告正文与关联信息，分享前的个人记忆披露计入读入报告用到的个人记忆。新增两个 Settings（`ASK_REPORT_CONTEXT_MAX_CHARS`、`ASK_REPORT_EVIDENCE_BUDGET_CHARS`）与两个只读端点（发送前预检、「就此追问」范围）。
+- **MCP。** `ask` 新增 `report_id`（单库专用、无粘性；与多库、`"*"`、`gconv-` 组合报 `invalid_argument`；先过笔记本授权再查报告；澄清句柄绑定报告），回执投影在 `scope.linked_report`（仅检索在顶层），不带个人记忆 id；`list_conversations` 行与 `get_conversation` 的 `conversation` 带会话最后一轮的 `linked_report: {report_id, title}`，每轮 `scope.linked_report` 与 `ask` 同形。
+- 当前合同见[就深度报告追问（关联报告）](docs/product-and-api_zh.md#就深度报告追问关联报告)与[Memory 与 Agent MCP][memory]，配置见[部署][deploy]，事件见[运维][ops]，接入步骤见 [Agent MCP SOP](docs/agent-mcp-memory-sop_zh.md)，面向用户的说明见[用户手册](docs/user-manual_zh.md)；实施计划：[计划](docs/superpowers/plans/2026-10-21-ask-report-followup-plan_zh.md)。回归入口：[纯函数](backend/tests/test_report_followup.py)、[契约模型](backend/tests/test_report_followup_models.py)、[引用复原](backend/tests/test_report_reference_restore.py)、[服务编排](backend/tests/test_ask_report_followup_service.py)、[chunk 路径](backend/tests/test_ask_report_followup_chunk.py)、[reasoning 路径](backend/tests/test_ask_report_followup_reasoning.py)、[HTTP 端点](backend/tests/test_ask_report_followup_api.py)、[会话存储](backend/tests/test_conversation_linked_report_store.py)、[MCP ask](backend/tests/test_mcp_ask_linked_report.py)、[MCP 会话页](backend/tests/test_mcp_conversation_pages.py)、[前端选择器](frontend/tests/component/linked-report-picker.component.test.tsx)、[就此追问](frontend/tests/component/report-followup.component.test.tsx)、[回执](frontend/tests/component/answer-linked-report.component.test.tsx)。
+
 [product]: docs/product-and-api_zh.md
 [flow]: docs/product-and-api_zh.md#产品流程
 [retrieval]: docs/product-and-api_zh.md#检索模式问答

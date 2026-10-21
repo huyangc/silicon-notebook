@@ -319,8 +319,9 @@ claude mcp list
 - **会话。** 保存返回的 `conversation_id` 并在下一次传回即可接续：`conv-` 开头接续该笔记本的会话，`gconv-` 开头接续跨笔记本会话（省略 `notebooks` 时沿用会话范围）。会话不属于 token 主人、不在白名单内，或与显式 `notebooks` 冲突，一律 `not_found`——绝不会静默新开一个。可以接续网页端同一用户创建的会话，但历史和结果仍受当前 token 权限约束。
 - **模式。** `mode` 省略即 `reasoning`；`chunk` 跳过理解步骤；部署安装的插件引擎 mode id 只能用于单个笔记本。
 - **输出。** `output` 省略即 `answer`（下文的回答结果）；`evidence` 只检索、不生成回答，见下一小节。其他取值报 `invalid_argument`。
-- **参数约束。** `question` 最多 4,000 字符；`client_request_id` 只能含字母、数字与 `. _ : -`，最多 128 字符。
-- **澄清。** `reasoning` 下问题有歧义时，调用正常返回 `status: "needs_clarification"`、`intent_token`（一小时有效，存放在服务端，绑定笔记本范围与会话，只能配合同一个问题使用，成功提交后也不会被消费）和全部歧义行，并且不创建任何内容。把必答行转给用户，然后用同样的 `question`、`notebooks`、`conversation_id` 与 `output` 再调一次 `ask`，并加上 `intent={"intent_token": "...", "answers": [{"id": "...", "answer": "..."}], "resolved_question": "<可选>"}`。漏传 `output` 会把一次只检索当成回答重跑。
+- **参数约束。** `question` 最多 4,000 字符；`client_request_id` 只能含字母、数字与 `. _ : -`，最多 128 字符；`report_id` 最多 200 字符。
+- **就某份报告追问。** 传 `report_id`（`list_reports` 返回的、token 主人本人在这个笔记本里**已完成**的报告）：回答会读这份报告的正文作背景（不可引用），并回到报告引用过的原文找依据。只用于单个笔记本——与多个 `notebooks`、`["*"]` 或 `gconv-` 会话同传是 `invalid_argument`；报告不存在、不是主人的或不在这个笔记本里是 `not_found`，还没生成完是 `invalid_argument`。**它没有粘性**：接续同一会话时，每次要用报告都要再传一次。本轮读没读、为什么没读，看 `scope.linked_report`（仅检索时在响应顶层的 `linked_report`）：`status` 为 `read` 时有 `sections_read`（读入了哪几节）与 `evidence_restored` / `evidence_gone` / `evidence_over_budget`（复原进本轮的、资料已失效的、因篇幅没载入的引用条数）；为 `skipped` 时 `reason` 写明原因（例如报告引用的资料不在当前范围、token 没有「读取」档而报告用过个人记忆、插件引擎不读报告），回答照常给出。`evidence_over_budget` 大于 0 不等于没有依据，只是这次没载入。
+- **澄清。** `reasoning` 下问题有歧义时，调用正常返回 `status: "needs_clarification"`、`intent_token`（一小时有效，存放在服务端，绑定笔记本范围与会话，只能配合同一个问题使用，成功提交后也不会被消费）和全部歧义行，并且不创建任何内容。把必答行转给用户，然后用同样的 `question`、`notebooks`、`conversation_id`、`output` 与 `report_id`（首次传了的话）再调一次 `ask`，并加上 `intent={"intent_token": "...", "answers": [{"id": "...", "answer": "..."}], "resolved_question": "<可选>"}`。漏传 `output` 会把一次只检索当成回答重跑。
 - **结果。** `ask` 的 `status` 为 `answered`、`failed`、`cancelled`、`needs_clarification`（见上），或只检索的 `retrieved`；`get_ask` 读到仍在运行的任务时为 `running`。回答附带 `job_id`、`conversation_id`、`answer`、`citations`（每条带 `ref`）、`coverage`、`trace`，单个笔记本时还有 `anchors`。长结果用 `get_ask(job_id, answer_offset=, citation_offset=, coverage_offset=, trace_offset=)` 继续：分别沿 `next_answer_offset`、`next_citation_offset`、`next_coverage_offset` 与 `trace.next_offset` 读到各自为 null。检索回执数量始终描述整次任务：`coverage.skipped` 与 `coverage.degraded` 是数量，明细在 `coverage.skipped_notebooks` 与 `coverage.degraded_notebook_ids`（随 `next_coverage_offset` 分页）。部分引用未通过回答的引用核对时，仍返回完整回答，计数放在 `coverage.citation_check`，每条未通过的引用带 `verification`，`read_reference` 会拒绝打开它。
 - **失败与空结果。** 已完成但存储的答案缺失的任务读作 `failed`，绝不是空的 `answered` 页；答案文本为空时回退到结论。首页与每次 `get_ask` 读取同一份 trace。
 - **笔记本状态。** `get_notebook` 本身需要 `read`；默认 `include="status"`（轻量：计数、图谱与检索索引状态），`include="all"` 另加「AI 对这个库的理解」`profile`。
@@ -419,6 +420,8 @@ claude mcp list
    续页里的 `question` 只重复前 200 个字符并以 … 结尾，完整问题以首页为准）；这一轮读完后用
    `turn_offset=next_turn_offset`（另两个游标归 0）读下一轮，直到 `next_turn_offset` 为 null。仍在回答中的问题不算一轮，
    没有已结束轮次时返回 `status: "empty"`。页里没有 `trace`、`coverage`；每条引用的 `ref` 交给 `read_reference` 读原文。
+   就某份深度报告追问过的一轮在 `scope.linked_report` 里带当时的回执（与 `ask` 同形）；列表行与 `conversation` 的 `linked_report: {report_id, title}`
+   是会话最后一轮挂的报告，连同行里的笔记本 id 交给 `get_report` 即可读原报告。
 3. **读报告。** `get_report(report_id, notebook_id)` 要同时传 `list_reports` 那一行里的 `report_id` 与 `notebook_id`
    （报告 id 不带笔记本）。Markdown 正文沿 `next_content_offset` 读，正文里的 `[k3]` 对应 `references` 里 `key` 为 `k3` 的一条，
    参考文献沿 `next_reference_offset` 读；只读其中一个时，把另一个游标设为它的总量（`total_characters` / `total_references`）。
@@ -559,6 +562,9 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 | `ask` 报 `[invalid_argument]`「这个 client_request_id 已用于另一个问题」 | 该 key 已用在不同的问题、模式或会话上（单库与全局一致）。每个问题换新的 `client_request_id`；只有完全相同的重试才复用。 |
 | 明知存在的任务或 key，`ask`/`get_ask` 报 `[not_found]`「没有找到这个问答任务」 | 接回只覆盖同一主人经 MCP 发起的任务：浏览器发起或他人发起的任务在这里读不到。要读网页里问过的问题：先 `list_conversations` 找到会话，再用 `get_conversation` 一轮一轮读。 |
 | `get_conversation` / `get_report` 报 `[not_found]`（「没有找到这个会话…」「没有找到这份报告…」），但网页里明明有 | 这两条消息刻意不区分原因。依次检查：会话或报告是不是 token 主人本人的（别人的读不到）；会话所在笔记本（全局会话则是它任一轮用到的笔记本）是否在 token 白名单内、主人是否仍可读，有一个不满足就整条读不到；`get_report` 是否同时传了 `list_reports` 返回的 `notebook_id`。白名单问题用 **修改权限** 补笔记本。 |
+| `ask` 报 `[invalid_argument]`「report_id 只能用于单个笔记本的提问…」 | 报告属于一个笔记本，跨笔记本提问不读报告。`notebooks` 只传报告所在的那一个（或省略即默认笔记本），不要同时传 `["*"]` 或接 `gconv-` 会话。 |
+| `ask` 报 `[not_found]`「没有找到这份报告…」或 `[invalid_argument]`「这份报告还没有生成完成…」 | `report_id` 只能是 token 主人**本人**在**这个**笔记本里的报告，且 `list_reports` 里 `status` 为 `done`。核对 `list_reports` 那一行的 `notebook_id` 与这次提问的笔记本一致；报告还在生成就等它完成。 |
+| 带 `report_id` 的回答里 `scope.linked_report.status` 是 `skipped` | 不是故障：这一轮照常检索作答，只是没读报告，`reason` 写明原因。常见的是报告用过个人记忆而 token 没有「读取」档、报告引用的参考库或资料不在这次能用的范围内，或用的是插件引擎 mode。 |
 | `ask` 报 `[busy]`「这个问答已有调用在等待结果」 | 该 key 或任务已有两个调用在等。不要并发重试，用 `get_ask(job_id)` 读结果。 |
 | `ask(output="evidence")` 的结果在客户端被截断，或被替换成「太大」之类的提示 | 是客户端自己的工具输出上限，不是服务端：证据按合成预算定大小（最多 524,288 字节），不走 12,000 字节护栏。调高该上限（§4「大响应」；Claude Code 里是 `MAX_MCP_OUTPUT_TOKENS`）。 |
 | `ask(output="evidence")` 报 `[invalid_argument]`，说只支持单个笔记本、只支持 `reasoning`/`chunk`，或不接受 `client_request_id` | 仅检索只用于单个笔记本（`notebooks` 只传一个或不传，不接全局会话 `gconv-`）、只用内置模式（插件引擎 mode 会被拒绝），且不接受 `client_request_id`：它不保存任何可接回的内容，响应里也没有 `job_id`。调用失败时直接再问一次。 |
@@ -566,7 +572,7 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 | `ask` 报 `[unavailable]`，说回答在别处仍显示进行中但没有执行者 | 任务属于其他服务进程，已连续 30 分钟没有任何进展。任务并未取消；稍后用 `get_ask` 查看，或换新 key 重新提问。 |
 | `reasoning` 档的 `ask` 正常返回 `status: "needs_clarification"` 而没有答案 | 不是故障：这是与网页端相同的问题理解步骤发现了会改变检索方向的歧义，此时没有建会话也没有建任务。把 `intent.ambiguities` 里 `required` 为 true 的问题转述给用户，拿到回答后用同一个 `question`、`notebooks`、`conversation_id` 与 `output` 再调一次，并传 `intent={"intent_token": <响应里的 intent_token>, "answers": [{"id", "answer"}], "resolved_question": <可选，确认后的问法>}`。`chunk` 档没有理解步骤。 |
 | `ask` 报 `[invalid_argument]`「请先回答所有必填澄清问题」或「问题理解与当前问题不匹配」 | 回传的答案没通过与 HTTP `/ask` 相同的冻结校验：必填歧义缺答案，或这次的 `question` 与首次调用不一致。补齐答案、保持 `question` 与首次调用完全相同后重试。 |
-| `ask` 报 `[invalid_argument]`「intent_token 无效或已过期」 | 澄清句柄存放在服务端、一小时有效，并且只对同一主人、同一个问题、同一笔记本范围、同一会话有效（单库句柄绑定该笔记本与会话，全局句柄绑定其笔记本范围与会话）。重连不会让它失效，但问题改了、范围换了或过了一小时就会。不带 `intent` 重新提问即可拿到新的合同。成功提交后句柄仍有效，引擎失败可用同一份答案重试。 |
+| `ask` 报 `[invalid_argument]`「intent_token 无效或已过期」 | 澄清句柄存放在服务端、一小时有效，并且只对同一主人、同一个问题、同一笔记本范围、同一会话有效（单库句柄绑定该笔记本与会话，全局句柄绑定其笔记本范围与会话；首次调用带了 `report_id` 的，续调也要带同一个 `report_id`）。重连不会让它失效，但问题改了、范围换了或过了一小时就会。不带 `intent` 重新提问即可拿到新的合同。成功提交后句柄仍有效，引擎失败可用同一份答案重试。 |
 | `POST /mcp/` 返回 `406 Not Acceptable` | 该请求只接受了 `application/json`。传输以 SSE 应答，长任务的 progress 通知才到得了客户端；请发 `accept: application/json, text/event-stream`——这是 Streamable HTTP 规范的要求，所有真实客户端本来就这么发。 |
 | `400 Bad Request: Missing session ID` | 工具调用发生在 `initialize` + `notifications/initialized` 之前，或 `MCP-Session-Id` 头丢了。正式客户端会自动处理；手写 `curl` 不能跳过（第 8 节）。 |
 | Claude Code 把 `${...}` 当成 token 原样发出 | 变量没有在启动 `claude` 的 shell 里导出，或变量名拼错——未定义的变量会被原样透传。导出后新开会话。 |
@@ -597,8 +603,8 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 | `notebook_unreadable` | token 主人已无权读取该笔记本 | 检查主人的成员身份 |
 | `owner_only` | 在 token 主人并不拥有的笔记本上写入 | 改用主人拥有的笔记本 |
 | `forbidden` | 操作被规则拒绝（例如删除用户的来源、重新解析收录来源、给规模太小不需要索引的笔记本建索引）；`ask` / `get_ask` 的 `delivery="link"` 在 token 没打开「允许签发限时回答链接」时也报它（说明指向 **Agent 接入** 页的开关） | 一般不可重试、需要改变请求；回答链接场景到 **修改权限** 打开开关后重试（回答已保存，可先用不带 `delivery` 的 `get_ask` 读取） |
-| `not_found` | 资源不存在，或不在该 token 可见的范围内（说明里写出资源类别）；也包括并非该主人经 MCP 发起的任务或 key、不满足可见规则的会话与报告，以及调用了不存在的工具名 | 检查 id；工具以 `tools/list` 为准 |
-| `invalid_argument` | 参数格式不对或超出范围，或 `client_request_id` 被用于不同的问题。`ValueError` 文本以中文开头、或属于已知校验器形状并被译成中文时才会显示；参数缺失或类型不对（MCP schema 校验）显示为「参数不合法：<字段>」；其他意外错误是 `internal`，从不回显 | 按说明修正对应参数 |
+| `not_found` | 资源不存在，或不在该 token 可见的范围内（说明里写出资源类别）；也包括并非该主人经 MCP 发起的任务或 key、不满足可见规则的会话与报告、`ask` 的 `report_id` 指向的报告不存在、不是主人的或不在该笔记本里，以及调用了不存在的工具名 | 检查 id；工具以 `tools/list` 为准 |
+| `invalid_argument` | 参数格式不对或超出范围，或 `client_request_id` 被用于不同的问题；`ask` 的 `report_id` 与多个笔记本、`["*"]` 或 `gconv-` 会话同用，或指向还没生成完成的报告，也是它。`ValueError` 文本以中文开头、或属于已知校验器形状并被译成中文时才会显示；参数缺失或类型不对（MCP schema 校验）显示为「参数不合法：<字段>」；其他意外错误是 `internal`，从不回显 | 按说明修正对应参数 |
 | `busy` | 已有构建、解析、索引重建或维护动作在运行，同一 `ask` 已有两个调用在等，全局问答并发已满，或该全局对话仍在回答 | 等待并轮询（`get_notebook`、`get_ask`），不要立刻重试 |
 | `mirrored` | 该笔记本是从另一个环境同步来的镜像，同步内容在这里不可写 | 到来源环境里修改 |
 | `unavailable` | 模型、引擎或容量暂不可用：含检索超时、所选索引管线不可用、笔记本还没有可用于回答的内容（多笔记本提问时为所选笔记本全都没有可检索的内容）、笔记本已满、功能开关关闭，或其他进程持有、连续 30 分钟没有进展的 `ask` 任务；`delivery="link"` 时部署没有配置 `PUBLIC_WEB_BASE_URL` 也是它 | 稍后重试，或联系管理员 |
