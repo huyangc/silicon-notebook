@@ -407,7 +407,8 @@ Sections (<N> in total):
     （照 `_hydrate_generated_question_chunks`，挂载库命中带 `notebook_id=lib`）；
   - element：`evidence_elements(ids)`，要求 `row.source_id == ref.source_id` 且 `source_allowed(lib, row.source_id)`；
   - KG 对象：按库 `knowledge.usable_object_rows_on(db, ids, USABLE_STATUSES)` 构造 `RetrievedKnowledge`
-    （照 `retrieval_candidates.py` 邻居扩展处的构造），再过 `source_scope.filter_retrieval_items(lib, "kg", hits)`
+    （照 `retrieval_candidates.py` 邻居扩展处的构造），再过 `source_scope.filter_retrieval_items(lib, "knowledge", hits)`
+    （注意 kind 是 `"knowledge"`：`"kg"` 不命中任何分支、会全部放行）
     （证据逐条按天花板过滤，无界内证据的对象丢弃——其他成员记忆派生的对象因此天然不出现）；
   - relation：按 D2 复原为 element；
   - memory：`MemoryRetriever.memory_hits_by_ids(user_id, notebook_id, memory_ids)`（新方法，只返回该用户、
