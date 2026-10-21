@@ -33,7 +33,7 @@ import time
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import (
-    Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence,
+    Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence,
     TYPE_CHECKING,
 )
 
@@ -57,10 +57,17 @@ from app.domain.report_followup import (
     REASON_NO_SYNTHESIS,
     REASON_READ_FAILED,
     REASON_REPORT_UNAVAILABLE,
+    RESTORED_KIND_CHUNK,
+    RESTORED_KIND_ELEMENT,
+    RESTORED_KIND_KG,
+    RESTORED_KIND_MEMORY,
+    RESTORED_KINDS,
     LinkedReportNotFound,
     LinkedReportNotReady,
     ReportFollowup,
     ReportRestoreScopeError,
+    RestoredReportEvidence,
+    SectionSelection,
 )
 from app.domain.gap_consult import (
     GAP_CONSULT_MAX_GAP_PHRASES,
@@ -94,6 +101,7 @@ from app.models.ask import (
     ExternalEvidenceSection,
     AskRequest,
     AskResponse,
+    LinkedReportReceipt,
     stored_ask_question,
     Citation,
     ConversationBulkDeleteResult,
@@ -134,8 +142,8 @@ from app.services.federated_run import (
 )
 # Leaves: the retrieval-only output's context splitter and anchor-sourced item
 # builder, and the boundary recorder every context assembler writes through.
-from app.services.ask_evidence import _EvidenceAssemblyClient, build_ask_evidence
-from app.services.context_spans import Glue, clip, concat, recording_spans
+from app.services.ask_evidence import _EvidenceAssemblyClient, build_ask_evidence, kind_for_key
+from app.services.context_spans import Glue, clip, concat, joined, recording_spans
 from app.services.evidence_context import CitationLookups, anchor_image_targets
 from app.services.model_work import MalformedModelResponse, ModelNotConfiguredError
 from app.core.model_values import as_text_list
@@ -167,10 +175,13 @@ from app.services.prompts import (
     followup_rewrite_prompt,
 )
 from app.services.report_followup import (
+    ReportAdmissionCounts,
     ReportFollowupReaders,
     current_report_followup,
     followup_outline,
+    followup_receipt,
     load_linked_report,
+    render_report_block,
     report_digest,
     report_followup_context,
     report_link_verdict,
@@ -178,6 +189,7 @@ from app.services.report_followup import (
     report_mode_supported,
     report_owner_ids,
     report_restore_request,
+    select_report_sections,
     skipped_receipt,
     unread_verdict,
 )
@@ -321,6 +333,123 @@ class _OverviewPrep:
     catalog: Any
     prepared: Any
     notice: str
+
+
+def _report_readable(followup: "ReportFollowup | None") -> bool:
+    """Whether this run reads its attached report into the synthesis: the
+    verdict lets it AND the run itself parsed the body and read the cited
+    items back (``AskService._read_report_followup``; a followup that carries
+    only the meta digest is never rendered). Reads nothing but the value."""
+    return (
+        followup is not None and followup.verdict.readable
+        and followup.digest is not None and followup.restored is not None
+    )
+
+
+class _ReportPartition(NamedTuple):
+    """``AskService._append_report_evidence``'s result: the synthesis context
+    with the attached report's evidence partition appended (plan D1, §2.7).
+
+    ``key_map`` maps each report key of the selected text whose item is in the
+    prompt to the key that item has there -- its own partition key, or the key
+    of the same object this turn retrieved itself; ``admitted_keys`` are those
+    turn keys. ``counts`` is what the receipt reports, per report key:
+    ``restored`` (mapped) and ``over_budget`` (read back, but left out by the
+    partition budget or its native key band). ``selected_by_kind`` counts the
+    restored objects per evidence kind the partition tried to render (not the
+    ones it reused): the retrieval-only output's "selected" side."""
+
+    context_block: str
+    id_map: dict
+    key_map: Mapping[str, str]
+    admitted_keys: frozenset
+    counts: ReportAdmissionCounts
+    selected_by_kind: Mapping[str, int]
+
+
+@dataclass
+class _ReportTurn:
+    """The attached report as one turn's synthesis uses it (plan T7/T8).
+
+    Built by ``AskService._report_prompt_parts`` once the turn's query is
+    known (the sections are selected for it); the context assembler records
+    the evidence partition it appended (``admit``) and the answer helper
+    renders the report block from that partition's ``key_map``
+    (``enter_prompt``), which is also what makes the receipt ``read``
+    (``receipt``). Mutable on purpose: the answer helpers run inside
+    ``_answer_with_retry`` and hand back only the answer, so the assembly's
+    outcome travels on this object -- each attempt assembles the same
+    partition and overwrites the same fields."""
+
+    followup: ReportFollowup
+    selection: SectionSelection
+    partition: Optional[_ReportPartition] = None
+    prompted: bool = False
+
+    def admit(self, partition: _ReportPartition) -> None:
+        self.partition = partition
+
+    @property
+    def key_map(self) -> Mapping[str, str]:
+        return self.partition.key_map if self.partition is not None else {}
+
+    @property
+    def admitted_keys(self) -> frozenset:
+        return self.partition.admitted_keys if self.partition is not None else frozenset()
+
+    def enter_prompt(self) -> str:
+        """The report block for the answer prompt being built, its markers
+        rewritten through the partition's ``key_map``; records that the block
+        entered an answer prompt."""
+        self.prompted = True
+        return render_report_block(self.followup.digest, self.selection, self.key_map)
+
+    def receipt(self, *, read: Optional[bool] = None) -> LinkedReportReceipt:
+        """The turn's receipt: ``read`` when the block entered the answer
+        prompt (``read`` overrides it -- the retrieval-only output, which
+        stands in for that prompt, passes True), else ``skipped`` /
+        ``no_synthesis`` (``followup_receipt``)."""
+        counts = (
+            self.partition.counts if self.partition is not None
+            else ReportAdmissionCounts()
+        )
+        return followup_receipt(
+            self.followup, selection=self.selection, admission_counts=counts,
+            read=self.prompted if read is None else read,
+        )
+
+
+class _ReportCards(NamedTuple):
+    """``AskService._report_citations_and_keys``'s result: the citation cards
+    of the restored items the answer bound (deduplicated against the turn's
+    own cards), the bound restored passages (whose element ids join the
+    anchor image candidates) and the bound keys for ``classify_evidence``'s
+    deterministic door. Empty without a report."""
+
+    citations: tuple = ()
+    chunks: tuple = ()
+    exact_keys: frozenset = frozenset()
+
+
+def _with_report_selected(selected: Mapping[str, int], report: "_ReportTurn | None") -> dict:
+    """``selected`` (``_recount_selected``'s per-kind input) plus the objects
+    the report partition tried to render, each under its own kind."""
+    merged = dict(selected)
+    if report is not None and report.partition is not None:
+        for kind, number in report.partition.selected_by_kind.items():
+            merged[kind] = merged.get(kind, 0) + int(number)
+    return merged
+
+
+def _citation_identity(citation: Citation) -> tuple:
+    """What makes two citation cards the same card: the Memory entry, else
+    the (source, element) pair; a snapshot card naming neither is told apart
+    by its label and quote."""
+    if citation.memory_id:
+        return ("memory", citation.memory_id)
+    if citation.source_id or citation.element_id:
+        return ("element", citation.source_id, citation.element_id)
+    return ("snapshot", citation.label, citation.quoted_span)
 
 
 def _merged_section_baseline(rows: Sequence[Mapping[str, Any]]) -> dict:
@@ -1041,6 +1170,17 @@ class AskService:
     # 无 intent 跟进改写的预检超时(秒):见 resolve_reasoning_followup。
     _FOLLOWUP_PRECHECK_TIMEOUT_SECONDS = 20.0
     _DOCUMENT_READ_KEY_BASE = 7000
+    # 关联报告复原证据(计划 2026-10-21 D1)沿用原生号段:``(首号, 末号)``,未加节
+    # 偏移。每类从该段 id_map 已占的最大号之后续编(``_append_report_evidence``),
+    # 越过末号的条目不进 prompt、计入回执的「超出预算」。KG 段止于 1999:2001+ 归
+    # 推导链(``render_follow_chain_context``)。
+    _REPORT_KEY_BANDS = {
+        RESTORED_KIND_CHUNK: (1, _MIX_KG_KEY_BASE - 1),
+        RESTORED_KIND_KG: (_MIX_KG_KEY_BASE + 1, 1999),
+        RESTORED_KIND_MEMORY: (_MEMORY_KEY_BASE + 1, _ELEMENT_KEY_BASE - 1),
+        RESTORED_KIND_ELEMENT: (_ELEMENT_KEY_BASE + 1, _COLLECTION_KEY_BASE - 1),
+    }
+    _REPORT_EVIDENCE_HEADING = "Evidence the attached report cited"
 
     def __init__(
         self,
@@ -3122,6 +3262,298 @@ class AskService:
             ))
         return out
 
+    # ------------------------------------------------------------------
+    # the attached deep report in a synthesis (plan 2026-10-21 T7/T8)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _report_outline_history(history: str) -> str:
+        """The history the follow-up rewrite and the query expansion read
+        when the request attached a report: the turn's (ceiling-scoped)
+        history with the report's outline line after it
+        (``followup_outline``: title and section titles when the turn reads
+        the report, the title alone when it may not, D5). Lets "第三节" or
+        "这份报告" resolve to the report's own words, and makes a first turn
+        with a report rewrite too. The answer prompt keeps the plain history:
+        the report reaches it as its own block. Unchanged without a report."""
+        outline = followup_outline(current_report_followup())
+        if not outline:
+            return history
+        return f"{history}\n\n{outline}" if history else outline
+
+    def _report_prompt_parts(
+        self, followup: "ReportFollowup | None", query: str,
+    ) -> "_ReportTurn | None":
+        """The attached report as this turn's synthesis will use it, or None
+        when the turn does not read it (no report, a verdict that keeps it
+        out, or a followup without the parsed body -- ``_report_readable``).
+
+        Selects the sections for ``query`` within
+        ``ask_report_context_max_chars`` (``select_report_sections``, D12):
+        the chunk engine passes its rewritten retrieval query, the reasoning
+        engine its research question. The block itself is rendered only once
+        the evidence partition has mapped the report's keys
+        (``_ReportTurn.enter_prompt``).
+
+        ``ask_chunk`` (a capped hot function) grew by three statements for
+        the report, 156 -> 159 lines in ``architecture_boundary_baseline``:
+        this call, ``_report_citations_and_keys`` and extending its cards; the
+        rest of the wiring rides on lines it already had."""
+        if not _report_readable(followup):
+            return None
+        return _ReportTurn(followup, select_report_sections(
+            followup.digest, query, self.settings.ask_report_context_max_chars,
+        ))
+
+    @staticmethod
+    def _report_band_start(id_map: Mapping[str, Any], low: int, high: int) -> int:
+        """The first free key number of the band ``[low, high]``: one past the
+        highest key ``id_map`` already holds in it (``_external_key_offset``'s
+        rule), ``low`` when it holds none."""
+        taken = [
+            int(match.group(1)) for key in id_map
+            if (match := re.fullmatch(r"k(\d+)", str(key))) is not None
+            and low <= int(match.group(1)) <= high
+        ]
+        return max(taken, default=low - 1) + 1
+
+    def _render_report_kind(
+        self, kind: str, items: Sequence[Any], *, notebook_id: str,
+        id_offset: int, budget_chars: int,
+    ) -> tuple[str, dict]:
+        """One kind of restored item through its native renderer -- the same
+        lines, id_map entries and ``object_type`` the turn's own retrieval of
+        that object would get (D1), keys from ``id_offset + 1``, within
+        ``budget_chars``. Memory's renderer has its own per-entry and total
+        caps but no budget: the longest prefix of ``items`` that fits."""
+        if kind == RESTORED_KIND_CHUNK:
+            return self._chunk_answer_context(
+                list(items), budget_chars=budget_chars, notebook_id=notebook_id,
+                id_offset=id_offset,
+            )
+        if kind == RESTORED_KIND_ELEMENT:
+            return self.evidence_context.element_context(
+                list(items), notebook_id=notebook_id, id_offset=id_offset,
+                budget_chars=budget_chars,
+            )
+        if kind == RESTORED_KIND_KG:
+            return self._answer_context(
+                notebook_id, list(items), id_offset=id_offset,
+                budget_chars=budget_chars,
+            )
+        for count in range(len(items), 0, -1):
+            block, block_map = self.memory_retriever.context(
+                list(items[:count]), id_offset=id_offset,
+            )
+            if not block_map or len(block) <= budget_chars:
+                return block, block_map
+        return "(none)", {}
+
+    def _append_report_evidence(
+        self,
+        context_block: str,
+        id_map: dict,
+        followup: ReportFollowup,
+        selection: SectionSelection,
+        *,
+        notebook_id: str,
+        key_offset: int = 0,
+    ) -> _ReportPartition:
+        """Append the attached report's evidence partition (plan D1, §2.7):
+        the items the report cited in the text this turn reads, as the
+        notebook holds them now, rendered as ordinary evidence.
+
+        Only the report keys of the selected text (``selection.keys``, in
+        first-appearance order) are wanted; the run already read every cited
+        item back (``followup.restored``, judged under the run's ceiling by
+        the retrieval layer). Each wanted object:
+
+        * already in ``id_map`` as the same kind and object (``kind_for_key``
+          over the entries the turn retrieved itself) -> not rendered again;
+          its report keys map to that key;
+        * otherwise rendered by its kind's native renderer
+          (``_render_report_kind``) in that kind's native band
+          (``_REPORT_KEY_BANDS``, continuing after the band's highest key in
+          ``id_map``, plus ``key_offset``), kinds in order of first
+          appearance; a passage whose content repeats an earlier restored
+          passage of the same source shares that passage's key.
+
+        The partition has its own budget, ``ask_report_evidence_budget_chars``
+        (heading included), apart from the turn's retrieval budget: it sits
+        after everything the caller already budgeted, clipped and refined,
+        and before external evidence, and the turn's retrieval can never
+        crowd it out. A wanted item it cannot fit -- budget spent, or its
+        band full -- is counted ``over_budget`` per report key; a key whose
+        item was not read back (gone, outside the ceiling, a skipped type) is
+        counted by neither. One heading, ``_REPORT_EVIDENCE_HEADING``, through
+        ``_bounded_context_append`` (so the retrieval-only output's spans
+        record it as glue). Nothing wanted or nothing fitting: the context
+        and ``id_map`` come back as they were.
+
+        Shared by the chunk engine (``_chunk_synthesis_context``) and the
+        reasoning engine's assembly."""
+        restored = followup.restored or RestoredReportEvidence()
+        object_of = {
+            key: obj for obj, keys in restored.key_by_object.items() for key in keys
+        }
+        values: dict[str, dict[str, Any]] = {
+            RESTORED_KIND_CHUNK: {item.chunk_id: item for item in restored.chunks},
+            RESTORED_KIND_ELEMENT: {item.element_id: item for item in restored.elements},
+            RESTORED_KIND_KG: {item.object_id: item for item in restored.knowledge},
+            RESTORED_KIND_MEMORY: {item.memory_id: item for item in restored.memory},
+        }
+        wanted: dict[tuple[str, str], list[str]] = {}
+        for key in selection.keys:
+            obj = object_of.get(key)
+            if obj is not None and obj[1] in values.get(obj[0], {}):
+                wanted.setdefault(obj, []).append(key)
+        retrieved: dict[tuple[str, str], str] = {}
+        for key, entry in id_map.items():
+            kind = kind_for_key(key, id_map)
+            if kind in RESTORED_KINDS:
+                retrieved.setdefault((kind, str(entry.get("object_id") or "")), key)
+        key_map: dict[str, str] = {}
+        pending: dict[str, list[tuple[str, str]]] = {}
+        alias: dict[tuple[str, str], tuple[str, str]] = {}
+        contents: dict[tuple[str, str], tuple[str, str]] = {}
+        for obj, keys in wanted.items():
+            if obj in retrieved:
+                key_map.update(dict.fromkeys(keys, retrieved[obj]))
+                continue
+            if obj[0] == RESTORED_KIND_CHUNK:
+                first = contents.setdefault(
+                    source_chunk_content_key(values[obj[0]][obj[1]]), obj,
+                )
+                if first != obj:
+                    alias[obj] = first
+                    continue
+            pending.setdefault(obj[0], []).append(obj)
+        prefix = ("\n\n" if context_block else "") + f"[{self._REPORT_EVIDENCE_HEADING}]\n"
+        room = self.settings.ask_report_evidence_budget_chars - len(prefix)
+        parts: list[str] = []
+        block_map: dict = {}
+        rendered: dict[tuple[str, str], str] = {}
+        used = 0
+        for kind, objects in pending.items():
+            low, high = self._REPORT_KEY_BANDS[kind]
+            start = self._report_band_start(id_map, low + key_offset, high + key_offset)
+            items = [values[kind][object_id] for _kind, object_id in objects]
+            items = items[:max(0, high + key_offset - start + 1)]
+            remaining = room - used - (1 if parts else 0)
+            if not items or remaining <= 0:
+                continue
+            block, kind_map = self._render_report_kind(
+                kind, items, notebook_id=notebook_id, id_offset=start - 1,
+                budget_chars=remaining,
+            )
+            if not kind_map:
+                continue
+            used += (1 if parts else 0) + len(block)
+            parts.append(block)
+            block_map.update(kind_map)
+            for key, entry in kind_map.items():
+                rendered[(kind, str(entry.get("object_id") or ""))] = key
+        merged = id_map
+        if parts:
+            partition = joined(parts, "\n")
+            context_block, merged = self._bounded_context_append(
+                context_block, id_map, partition, block_map,
+                # The partition budget is already spent by the renderers;
+                # this bound only keeps the append from cutting it again.
+                budget_chars=len(context_block) + len(prefix) + len(partition),
+                heading=self._REPORT_EVIDENCE_HEADING,
+            )
+        over_budget = 0
+        for obj, keys in wanted.items():
+            if keys[0] in key_map:
+                continue
+            target = rendered.get(alias.get(obj, obj))
+            if target is not None and target in merged:
+                key_map.update(dict.fromkeys(keys, target))
+            else:
+                over_budget += len(keys)
+        return _ReportPartition(
+            context_block=context_block,
+            id_map=merged,
+            key_map=key_map,
+            admitted_keys=frozenset(key_map.values()),
+            counts=ReportAdmissionCounts(restored=len(key_map), over_budget=over_budget),
+            selected_by_kind={kind: len(objects) for kind, objects in pending.items()},
+        )
+
+    def _report_citations_and_keys(
+        self,
+        report: "_ReportTurn | None",
+        anchors: Sequence[AnswerAnchor],
+        notebook_id: str,
+        *,
+        existing: Iterable[Citation] = (),
+    ) -> _ReportCards:
+        """The answer's cards and grounding keys for the report evidence it
+        bound (plan §2.7).
+
+        Only anchors on a key the partition admitted count. Their restored
+        objects get cards from the native builders -- passages
+        (``chunk_citations``, anchor order), elements (``element_citations``),
+        knowledge objects (``citations_from`` over the bound objects only),
+        Memory (``_memory_citations``) -- minus any card the turn already has
+        (``existing``, by ``_citation_identity``). The bound keys go to
+        ``classify_evidence(exact_evidence_keys=...)``: a restored item has no
+        retrieval score of its own, and the report's citation is
+        deterministic evidence the same way an external item is
+        (``_external_exact_keys``). The bound passages are returned for the
+        anchor image candidates (``anchor_image_targets``). Reads nothing
+        when no restored item is bound."""
+        if report is None or not report.admitted_keys:
+            return _ReportCards()
+        bound = [anchor for anchor in anchors if anchor.key in report.admitted_keys]
+        if not bound:
+            return _ReportCards()
+        restored = report.followup.restored or RestoredReportEvidence()
+
+        def bound_ids(*types: str, other: bool = False) -> set:
+            return {
+                anchor.object_id for anchor in bound
+                if (anchor.object_type not in types) == other
+            }
+
+        chunk_ids = bound_ids("chunk")
+        element_ids = bound_ids("element")
+        memory_ids = bound_ids("memory")
+        kg_ids = bound_ids("chunk", "element", "memory", "external", other=True)
+        chunks = [item for item in restored.chunks if item.chunk_id in chunk_ids]
+        elements = [item for item in restored.elements if item.element_id in element_ids]
+        knowledge = [item for item in restored.knowledge if item.object_id in kg_ids]
+        memory = [item for item in restored.memory if item.memory_id in memory_ids]
+        cards: list[Citation] = []
+        if chunks:
+            cards.extend(card for card, _ids in self.evidence_context.chunk_citations(
+                chunks, notebook_id=notebook_id, anchors=bound,
+            ))
+        if elements:
+            cards.extend(self.evidence_context.element_citations(
+                elements, bound, notebook_id=notebook_id,
+            ))
+        if knowledge:
+            cards.extend(self.evidence_context.citations_from(
+                knowledge,
+                {ev.element_id for hit in knowledge for ev in hit.evidence if ev.element_id},
+                "KG evidence", notebook_id=notebook_id,
+            ))
+        if memory:
+            cards.extend(self._memory_citations(bound, memory))
+        seen = {_citation_identity(card) for card in existing}
+        fresh: list[Citation] = []
+        for card in cards:
+            identity = _citation_identity(card)
+            if identity not in seen:
+                seen.add(identity)
+                fresh.append(card)
+        return _ReportCards(
+            citations=tuple(fresh), chunks=tuple(chunks),
+            exact_keys=frozenset(anchor.key for anchor in bound),
+        )
+
     def _needs_index(self, notebook_id: str) -> bool:
         """大库且磁盘完全无 scale 索引(从未建过)→ True。用于 AskResponse.index_required:
         大库检索强制走索引,无索引时检索降级(FTS/skip/refuse),需提示用户手动建索引。
@@ -3690,7 +4122,7 @@ class AskService:
 
     def _chunk_synthesis_context(
         self, chunks, kg_block, kg_id_map, memory_hits, *,
-        overlay_on: bool, notebook_id: str,
+        overlay_on: bool, notebook_id: str, report: "_ReportTurn | None" = None,
     ) -> tuple:
         """The chunk engine's synthesis context: ``(context_block, id_map,
         budget_chars)`` exactly as ``_answer_chunks`` (``overlay_on=False``)
@@ -3701,6 +4133,13 @@ class AskService:
         would have been written from -- by construction, not by a test.
         Reached as ``AskService._chunk_synthesis_context(self, ...)`` from the
         two answer helpers so their narrow test doubles keep working.
+
+        ``report`` (the turn reads an attached report, ``_report_prompt_parts``):
+        its evidence partition follows the Memory block
+        (``_append_report_evidence``, own budget) and is recorded on it
+        (``_ReportTurn.admit``); ``budget_chars`` then adds what the partition
+        actually took, so the context still never exceeds it. None: as before,
+        byte for byte.
         """
         if overlay_on:
             # chunk 段编号 k1..kN,KG 段从 _MIX_KG_KEY_BASE 起;若 chunk 数逼近 base 会在
@@ -3732,6 +4171,15 @@ class AskService:
             len(context_block) if overlay_on
             else self.settings.chunk_answer_budget_chars
         )
+        if report is not None:
+            before = len(context_block)
+            partition = AskService._append_report_evidence(
+                self, context_block, id_map, report.followup, report.selection,
+                notebook_id=notebook_id,
+            )
+            report.admit(partition)
+            context_block, id_map = partition.context_block, partition.id_map
+            budget_chars += len(context_block) - before
         return context_block, id_map, budget_chars
 
     def _answer_chunks(
@@ -3745,17 +4193,20 @@ class AskService:
         llm_client=None,
         baseline_sink: dict | None = None,
         style_block: str = "",
+        report: "_ReportTurn | None" = None,
     ) -> tuple:
         """长上下文综合:把 MMR 精选的 chunk 原文喂给答案 LLM。返回
         (answer, llm_grounded, anchors)。复用 answer_prompt 的 [k] 标注协议。
         notebook_id:转发给 _chunk_answer_context 解 anchor.tier(见其 docstring);
         chunk 自带 notebook_id(跨库召回)优先,这只是单库 chunk 的回退值。
         ``style_block``:Agentic Memory P3(T8)——调用方按本次提问 user_id 点读
-        并渲染好的风格提示,空串=接入前逐字行为(见 ``_search_profile_style_block``)。"""
+        并渲染好的风格提示,空串=接入前逐字行为(见 ``_search_profile_style_block``)。
+        ``report``:本轮读入的关联报告(``_report_prompt_parts``)——复原证据分区
+        进上下文、报告块进 ``answer_prompt(report_block=...)``;None=接入前逐字行为。"""
         raise_if_cancelled(cancel_event)
         context_block, id_map, budget_chars = AskService._chunk_synthesis_context(
             self, chunks, "", {}, memory_hits,
-            overlay_on=False, notebook_id=notebook_id,
+            overlay_on=False, notebook_id=notebook_id, report=report,
         )
         if baseline_sink is not None:
             baseline_sink.clear()
@@ -3769,7 +4220,8 @@ class AskService:
         raw = llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(
                 question, context_block, history, style_block=style_block,
-                peer_notebooks=subjectless_run_active())}],
+                peer_notebooks=subjectless_run_active(),
+                report_block=report.enter_prompt() if report is not None else "")}],
             ANSWER_SCHEMA_HINT,
             cancel_event=cancel_event,
             **cap_kwargs(llm_client, "answer_max_tokens"),
@@ -3796,16 +4248,18 @@ class AskService:
         llm_client=None,
         baseline_sink: dict | None = None,
         style_block: str = "",
+        report: "_ReportTurn | None" = None,
     ) -> tuple:
         """mix 长上下文综合:chunk 段(k1..kN)+ KG 段(k1001+),统一 id_map。
         chunk 段不再二次预算(选择阶段已 token 预算),故 budget_chars 给极大值。
         返回 (answer, llm_grounded, anchors)。notebook_id:转发给 _chunk_answer_context
         解 anchor.tier(见其 docstring);chunk 自带 notebook_id(跨库召回)优先,
-        这只是单库 chunk 的回退值。``style_block``:见 ``_answer_chunks`` 同名参数。"""
+        这只是单库 chunk 的回退值。``style_block`` / ``report``:见 ``_answer_chunks``
+        同名参数。"""
         raise_if_cancelled(cancel_event)
         context_block, id_map, budget_chars = AskService._chunk_synthesis_context(
             self, chunks, kg_block, kg_id_map, memory_hits,
-            overlay_on=True, notebook_id=notebook_id,
+            overlay_on=True, notebook_id=notebook_id, report=report,
         )
         if baseline_sink is not None:
             baseline_sink.clear()
@@ -3819,7 +4273,8 @@ class AskService:
         raw = llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(
                 question, context_block, history, style_block=style_block,
-                peer_notebooks=subjectless_run_active())}],
+                peer_notebooks=subjectless_run_active(),
+                report_block=report.enter_prompt() if report is not None else "")}],
             ANSWER_SCHEMA_HINT,
             cancel_event=cancel_event,
             **cap_kwargs(llm_client, "answer_max_tokens"),
@@ -4722,7 +5177,13 @@ class AskService:
         source's sampled reading), or a notice that stands in for that
         evidence.  ``None`` = not an overview question.  Shared by the
         answer (``_try_document_overview``) and the retrieval-only output
-        (``_chunk_evidence``)."""
+        (``_chunk_evidence``).
+
+        Also ``None`` for a turn that reads an attached report (plan D9):
+        its subject is the report the request attached, not the notebook's
+        documents, so it takes the retrieval path that reads the report.
+        Decided from the run's report (``current_report_followup``) alone --
+        the question text is not read for it."""
         from app.services.document_overview import overview_intent, resolve_overview_source
         from app.services.document_catalog_overview import prepare_catalog_overview, supplement_missing_summaries
         from app.services.document_source_overview import prepare_source_overview
@@ -4730,6 +5191,8 @@ class AskService:
             ceiling_binds_for_run, document_source_admitted,
         )
 
+        if _report_readable(current_report_followup()):
+            return None
         intent = overview_intent(payload.question)
         if intent is None or self.collection_enumeration is None:
             return None
@@ -4874,6 +5337,13 @@ class AskService:
         return response
 
     def _prepare_chunk_question(self, notebook_id, payload, *, user_id, job_id, cancel_event):
+        """``(question, conversation_id, history, style_block, user_history,
+        plan_history)`` for a chunk turn. ``history`` is the ceiling-scoped
+        history the answer prompt reads; ``plan_history`` is what the
+        follow-up rewrite and the query expansion read -- the same history
+        with the attached report's outline line after it
+        (``_report_outline_history``), equal to ``history`` without a
+        report."""
         from app.services.source_scope import scoped_conversation_history
 
         self.notebooks.get_notebook(notebook_id)
@@ -4886,7 +5356,12 @@ class AskService:
         # Earlier answers can contain sources excluded by this turn's ceiling.
         history = scoped_conversation_history(turn.history)
         raise_if_cancelled(cancel_event)
-        return question, turn.conversation_id, history, self._search_profile_style_block(user_id), scoped_conversation_history(turn.user_history)
+        return (
+            question, turn.conversation_id, history,
+            self._search_profile_style_block(user_id),
+            scoped_conversation_history(turn.user_history),
+            AskService._report_outline_history(history),
+        )
 
     def _chunk_stage_emitter(self, notebook_id: str) -> "Callable[..., None]":
         """The chunk engine's ``ask_stage`` telemetry: one event per stage
@@ -5108,7 +5583,7 @@ class AskService:
         引用绑回 chunk。KG overlay 可选:有图且配了 rerank 走三路 mix,否则 chunk-only。"""
         ask_started = time.perf_counter()
         ask_stage = self._chunk_stage_emitter(notebook_id)
-        question, conversation_id, history, style_block, user_history = self._prepare_chunk_question(
+        question, conversation_id, history, style_block, user_history, plan_history = self._prepare_chunk_question(
             notebook_id, payload, user_id=user_id, job_id=job_id,
             cancel_event=cancel_event,
         )
@@ -5118,7 +5593,8 @@ class AskService:
         )
         if overview is not None:
             return overview
-        retrieval_query = self._rewrite_followup_query(history, question, cancel_event)
+        retrieval_query = self._rewrite_followup_query(plan_history, question, cancel_event)
+        report = self._report_prompt_parts(current_report_followup(), retrieval_query)
         memory_hits = self._memory_hits(user_id, notebook_id, retrieval_query)
 
         _err_sink: list = []
@@ -5133,7 +5609,7 @@ class AskService:
                     workload_id="ask_answer",
                 )
             r = self._chunk_retrieve(
-                notebook_id, retrieval_query, history, style_block,
+                notebook_id, retrieval_query, plan_history, style_block,
                 cancel_event=cancel_event, ask_stage=ask_stage,
             )
             selected, historical_selected = r.selected, r.historical_selected
@@ -5148,20 +5624,20 @@ class AskService:
             _t = time.perf_counter()
             raise_if_cancelled(cancel_event)
             answer_client = self.model_clients.chat("ask_answer")
-            if answer_client.configured and (selected or kg_id_map or memory_hits):
+            if answer_client.configured and (selected or kg_id_map or memory_hits or report):
                 # 空 content 有界重试 + 诚实降级 + 可观测(见 _answer_with_retry docstring)。
                 answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                     lambda: (self._answer_mix(
                                  question, selected, kg_block, kg_id_map, history,
                                  cancel_event=cancel_event, notebook_id=notebook_id,
                                  memory_hits=memory_hits, llm_client=answer_client,
-                                 baseline_sink=chunk_baseline, style_block=style_block)
+                                 baseline_sink=chunk_baseline, style_block=style_block, report=report)
                              if overlay_on else
                              self._answer_chunks(
                                  question, selected, history, cancel_event=cancel_event,
                                  notebook_id=notebook_id, memory_hits=memory_hits,
                                  llm_client=answer_client,
-                                 baseline_sink=chunk_baseline, style_block=style_block)),
+                                 baseline_sink=chunk_baseline, style_block=style_block, report=report)),
                     getattr(answer_client, "model", ""))
                 synth_failed = not _ok
             ask_stage("answer_llm", _t)
@@ -5180,11 +5656,13 @@ class AskService:
             citation_image_targets: List[tuple[Citation, Sequence[str]]] = list(
                 citation_pairs)
             citations.extend(self._memory_citations(anchors, memory_hits))
+            report_cards = self._report_citations_and_keys(report, anchors, notebook_id, existing=citations)
+            citations.extend(report_cards.citations)
             # 锚点与引用一次调用(共享每答案预算,见 attach_citation_images
             # docstring),一次 store 读取。
             self.evidence_context.attach_citation_images(
                 anchor_image_targets(
-                    anchors, {c.chunk_id: c.element_ids for c in selected}
+                    anchors, {c.chunk_id: c.element_ids for c in (*selected, *report_cards.chunks)}
                 ) + citation_image_targets
             )
 
@@ -5192,7 +5670,7 @@ class AskService:
             combined_hits = list(selected) + list(kg_hits) + list(memory_hits)
             evidence_level, top_relevance = classify_evidence(
                 combined_hits, anchors, llm_grounded,
-                self.settings.evidence_tau_low, self.settings.evidence_tau_high)
+                self.settings.evidence_tau_low, self.settings.evidence_tau_high, exact_evidence_keys=report_cards.exact_keys)
             grounded = evidence_level == "grounded"
 
             from app.services.retrieval_baseline import (
@@ -5240,7 +5718,7 @@ class AskService:
                 answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
                 evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
                 citations=citations, llm_mode=llm_mode, conversation_id=conversation_id,
-                retrieval_query=retrieval_query, top_relevance=top_relevance)
+                retrieval_query=retrieval_query, top_relevance=top_relevance, linked_report=report.receipt() if report else None)
         finally:
             _ASK_MODEL_ERRORS.reset(_err_token)
         response.mode = "chunk"
@@ -5272,7 +5750,7 @@ class AskService:
         """
         ask_started = time.perf_counter()
         ask_stage = self._chunk_stage_emitter(notebook_id)
-        question, conversation_id, history, style_block, _user_history = (
+        question, conversation_id, history, style_block, _user_history, plan_history = (
             self._prepare_chunk_question(
                 notebook_id, payload, user_id=user_id, job_id=job_id,
                 cancel_event=cancel_event,
@@ -5286,17 +5764,18 @@ class AskService:
                 overview, conversation_id=conversation_id,
                 retrieval_query=payload.question,
             )
-        retrieval_query = self._rewrite_followup_query(history, question, cancel_event)
+        retrieval_query = self._rewrite_followup_query(plan_history, question, cancel_event)
+        report = self._report_prompt_parts(current_report_followup(), retrieval_query)
         memory_hits = self._memory_hits(user_id, notebook_id, retrieval_query)
         err_sink: list = []
         err_token = _ASK_MODEL_ERRORS.set(err_sink)
         try:
             r = self._chunk_retrieve(
-                notebook_id, retrieval_query, history, style_block,
+                notebook_id, retrieval_query, plan_history, style_block,
                 cancel_event=cancel_event, ask_stage=ask_stage,
             )
             raise_if_cancelled(cancel_event)
-            if not (r.selected or r.kg_id_map or memory_hits):
+            if not (r.selected or r.kg_id_map or memory_hits or report):
                 evidence = AskEvidence(
                     mode="chunk", evidence_kind="none",
                     notice=_CHUNK_NO_EVIDENCE_MESSAGE,
@@ -5306,6 +5785,7 @@ class AskService:
                 context_block, id_map, budget_chars = self._chunk_synthesis_context(
                     r.selected, r.kg_block, r.kg_id_map, memory_hits,
                     overlay_on=r.overlay_on, notebook_id=notebook_id,
+                    report=report,
                 )
                 evidence = build_ask_evidence(
                     context_block, id_map,
@@ -5316,16 +5796,22 @@ class AskService:
                     recalled=r.recalled,
                     budget_chars=budget_chars,
                 )
-                _recount_selected(evidence, {
+                # The report partition's objects count under their own kinds.
+                _recount_selected(evidence, _with_report_selected({
                     "chunk": len({c.chunk_id for c in r.selected}),
                     **({"kg": len(r.kg_id_map)} if r.kg_id_map else {}),
                     **({"memory": len(memory_hits)} if memory_hits else {}),
-                })
+                }, report))
         finally:
             _ASK_MODEL_ERRORS.reset(err_token)
         evidence.conversation_id = conversation_id
         evidence.retrieval_query = retrieval_query
         evidence.model_errors = [ModelError(**e) for e in err_sink]
+        if report is not None:
+            # The retrieval-only output stands in for the answer prompt: the
+            # partition is in it, so the receipt is ``read`` with its counts
+            # (an unread report is stamped ``skipped`` by ``ask_evidence``).
+            evidence.linked_report = report.receipt(read=True)
         ask_stage("total", ask_started)
         return evidence
 
