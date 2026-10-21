@@ -25,7 +25,15 @@ sys.modules.setdefault("check_ui_vocabulary", guard)
 _spec.loader.exec_module(guard)
 
 # Machine codes written to `promotion_candidates.reason`: never rendered.
-_MACHINE_CODES = {"MEMORY_PROMOTION_REJECTED_REASON", "PROMOTION_OBJECT_MISSING_REASON"}
+_MACHINE_CODES = {
+    "MEMORY_PROMOTION_REJECTED_REASON",
+    "PROMOTION_OBJECT_MISSING_REASON",
+    # The merge marker's payload key and the follow-up action kinds.
+    "MERGED_INTO_PAYLOAD_KEY",
+    "FOLLOW_RESTORE",
+    "FOLLOW_REPOINT",
+    "FOLLOW_FORGET",
+}
 
 
 def _copy_constants() -> dict[str, str]:

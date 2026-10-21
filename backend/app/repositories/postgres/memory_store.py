@@ -2061,11 +2061,13 @@ class MemoryStore:
         after locking ``sources`` — rows of ``{id, notebook_id}`` — and before
         the generic teardown). Per notebook, in batched statements:
 
-        * restore what the sources' still-active merge results absorbed
-          from another Memory, then strip the sources' evidence from objects
-          ANOTHER source owns (``GovernanceStore.detach_memory_merges_on``:
-          id-ordered lock statements), so the teardown deletes only what the
-          Memory itself minted and loses no other Memory's knowledge;
+        * (the merge half — lock the rows the teardown writes, settle the
+          objects merged into the sources' objects, strip the sources'
+          evidence from objects ANOTHER source owns — has already run:
+          ``GovernanceStore.detach_memory_merges_on``, wired as the
+          service's ``memory_evidence_detach``, so the teardown deletes only
+          what the Memory itself minted and loses no other Memory's
+          knowledge);
         * read the sources' own objects (``memory_derived_object``);
         * remove the whole clusters of those objects and the merge and
           conflict candidates naming them
@@ -2080,10 +2082,8 @@ class MemoryStore:
         by_notebook: dict[str, list[str]] = {}
         for row in sources:
             by_notebook.setdefault(row["notebook_id"], []).append(row["id"])
-        now = self.now()
         for notebook_id in sorted(by_notebook):
             source_ids = sorted(by_notebook[notebook_id])
-            GovernanceStore.detach_memory_merges_on(db, notebook_id, source_ids, now)
             objects = db.execute(
                 "SELECT ko.id,ko.object_type,ko.payload->>'name' AS name "
                 "FROM knowledge_objects ko "

@@ -806,6 +806,7 @@ def run_startup(lease: object | None) -> object | None:
         _reproject_legacy_knowhow_tables(repo)
         _sweep_orphan_memory_sources(repo)
         _backfill_global_ask_attribution(repo)
+        _heal_memory_merges(repo)
         _rebuild_memory_isolated_notebooks(repo)
         return repo
     except Exception as exc:  # noqa: BLE001 — surface via readiness, never crash
@@ -950,6 +951,30 @@ def _backfill_global_ask_attribution(repo) -> None:
         schedule_attribution_backfill(repo)
     except Exception:  # noqa: BLE001 — best-effort, must never affect readiness
         logger.exception("startup: global ask attribution backfill scheduling failed (non-fatal)")
+
+
+def _heal_memory_merges(repo) -> None:
+    """Post-readiness backstop for merges of a member's own Memory objects
+    (plan 2026-09-29 §13.2-9, ruling 2026-10-21): restore every deprecated
+    Memory object whose merge target is gone while its own Memory still
+    exists. A teardown settles these in its own transaction and re-runs what
+    a held lock skipped right after its commit; this pass only catches what a
+    crash or failure between the two left (``SourceIngestionService.
+    heal_memory_merges``: keyset-paged, waiting, re-checked, idempotent).
+
+    Same placement and failure discipline as ``_sweep_orphan_memory_sources``:
+    strictly AFTER ``mark_ready()``, every exception swallowed; with nothing
+    to heal it is one bounded probe and no job."""
+    try:
+        ingestion = getattr(getattr(repo, "_runtime", None), "source_ingestion", None)
+        if ingestion is None or not ingestion.has_memory_merges_to_heal():
+            return
+        from app.services import background_jobs
+
+        logger.info("startup: memory merges to restore found; scheduling one pass")
+        background_jobs.submit(ingestion.heal_memory_merges, name="memory-merge-heal")
+    except Exception:  # noqa: BLE001 — best-effort, must never affect readiness
+        logger.exception("startup: memory merge heal scheduling failed (non-fatal)")
 
 
 def _rebuild_memory_isolated_notebooks(repo) -> None:

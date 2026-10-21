@@ -1861,19 +1861,16 @@ class MemoryStore:
         bridge_canonical_ids_of: Callable[[list[dict]], list[str]],
     ) -> dict[str, list[str]]:
         """Mirror of the PostgreSQL twin: inside the teardown's transaction,
-        restore what the sources' merge results absorbed and strip the
-        sources' evidence from foreign objects
-        (``GovernanceStore.detach_memory_merges_on``), and remove the whole
+        after the merge half (``GovernanceStore.detach_memory_merges_on``,
+        the service's ``memory_evidence_detach``), remove the whole
         clusters and review candidates naming their own objects; return
         those object ids per notebook for ``drop_memory_lexical_rows_on``."""
         owned: dict[str, list[str]] = {}
         by_notebook: dict[str, list[str]] = {}
         for row in sources:
             by_notebook.setdefault(row["notebook_id"], []).append(row["id"])
-        now = self.now()
         for notebook_id in sorted(by_notebook):
             source_ids = sorted(by_notebook[notebook_id])
-            GovernanceStore.detach_memory_merges_on(db, notebook_id, source_ids, now)
             marks = ",".join("?" for _ in source_ids)
             objects = db.execute(
                 "SELECT ko.id,ko.object_type,json_extract(ko.payload,'$.name') AS name "
