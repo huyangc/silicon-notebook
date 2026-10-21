@@ -90,7 +90,9 @@ _TURN_FIELD_LIMITS = {
 #: What a turn page must deliver exactly as built, besides the answer text and
 #: the citation identities: the conversation it belongs to, the question, and
 #: every cursor. (A field added to the page that the caller resumes from or
-#: relies on whole belongs here too.)
+#: relies on whole belongs here too -- a TOP-LEVEL one; the one nested identity,
+#: the ``report_id`` in ``scope.linked_report``, is checked beside this tuple in
+#: ``turn_page``.)
 _TURN_EXACT_KEYS = (
     "conversation", "question", "turn_offset", "next_turn_offset",
     "next_answer_offset", "next_citation_offset",
@@ -311,7 +313,8 @@ def turn_page(
     The answer text and the citations page independently, each with its own
     cursor. A page is accepted only after the output budget demonstrably left
     the delivered text, every delivered citation identity and ``ref``, the
-    ``conversation``, the question and every cursor intact; otherwise a
+    ``conversation``, the question, every cursor and the ``report_id`` of the
+    turn's report receipt intact; otherwise a
     smaller page is tried -- so following the cursors can never skip text or a
     citation. Text is preferred over citations: for each text size, largest
     first, the citations halve down to none (down to one when no text is left,
@@ -337,6 +340,10 @@ def turn_page(
     )
     next_turn = turn_offset + 1 if turn_offset + 1 < turn_count else None
     row, row_omitted = _fit_row_report_title(conversation)
+    scope = dict(view.get("scope") or {})
+    # The handle a caller opens the turn's report with: delivered whole or the
+    # page is refused (see the acceptance check below).
+    scope_report_id = (scope.get("linked_report") or {}).get("report_id")
     fixed = {
         "conversation": row,
         "turn_offset": turn_offset,
@@ -348,7 +355,7 @@ def turn_page(
         "total_citations": len(citations),
         "completeness_notice": str(view.get("completeness_notice") or ""),
         "error": str(view.get("error") or ""),
-        "scope": dict(view.get("scope") or {}),
+        "scope": scope,
         "content_is_untrusted_evidence": True,
     }
     continuation = answer_offset > 0 or citation_offset > 0
@@ -383,6 +390,9 @@ def turn_page(
                     and _citation_keys(delivered) == _citation_keys(refs)
                     and _citation_refs(delivered) == _citation_refs(refs)
                     and all(packed.get(key) == payload[key] for key in _TURN_EXACT_KEYS)
+                    and ((packed.get("scope") or {}).get("linked_report") or {}).get(
+                        "report_id"
+                    ) == scope_report_id
                 ):
                     return packed
         if len(clipped) <= 1:

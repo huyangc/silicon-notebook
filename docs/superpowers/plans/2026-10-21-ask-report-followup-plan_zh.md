@@ -1127,14 +1127,21 @@ python3 $W/scripts/check_ui_vocabulary.py
 整块拼」处理；rebase 后 `git log --merges origin/master..HEAD` 必须为空）；重新核对迁移号（R1）。
 
 **改文件**（以 B 线落地后的实际文件为准，预计 `backend/app/api/mcp_tools/` 下 B 线新增的会话模块）：
-- `get_conversation` 每轮输出加 `linked_report`（与 §2.11 同一投影函数，抽成共享 helper 供 `notebook_view` 与
-  这里共用，不复制）；在途轮次给 `{report_id, title}`。
-- `list_conversations` 摘要加 `linked_report: {report_id, title}`（来自 `ConversationSummary.linked_report`）。
-- 遵守 `OUTPUT_MAPPING_LIMIT` / 深度 / 文本预算；不带 `memory_used`。
+- `get_conversation` 每轮已自动带 `scope.linked_report`：它与 `ask`/`get_ask` 共用同一个 `notebook_view`
+  （§2.11 的投影，不复制、不带 `memory_used`），本任务只补用例与工具描述。在途轮次按 B 线 D4 不算一轮，
+  `get_conversation` 与 `list_conversations` 都不为它输出任何报告字段（实现如此，以此为准）。
+- 会话行（`conversation_row`，列表行与 `get_conversation.conversation` 共用一个构造函数）加
+  `linked_report: {report_id, title}`：来自最后一条已保存回答的回执（`ConversationSummary.linked_report`），
+  最后一轮没带报告则整个键省略，全局会话没有。单轮读（`conversation_turn`）在两个 store 里同样取最后一条
+  回答的回执，与列表共用同一段「定位最后一条回答并取 linked_report」的 SQL 常量（PG 先按 ordinal 定位再取
+  这一行的 payload，不在 `ORDER BY ... LIMIT` 下解每条回答；SQLite 以 `json_valid` 守住非法 JSON）。
+- 遵守 `OUTPUT_MAPPING_LIMIT` / 深度 / 文本预算；不带 `memory_used`；`title` 截到 `TITLE_CHARS` 并披露；
+  `report_id` 属标识符（预算收缩时不截断，单轮页另核对其原样留存）。
 - 工具描述各补一句；`docs/product-and-api*.md` 的 B 线工具段与 `docs/agent-mcp-memory-sop*.md` 同步。
 
-**测试**：在 B 线的测试文件旁新增用例：读入/跳过两种回执投影、在途轮次、摘要字段、无报告时形状不变、
-token 无 `memory:read` 时投影不含任何记忆信息。
+**测试**：在 B 线的测试文件旁新增用例：读入/跳过两种回执投影、在途任务的报告不出现在任何输出里、摘要字段、
+无报告时形状不变、回执里的记忆编号不出现在任何输出里；PG 语句用结构守卫（不用 EXPLAIN 计划钉）钉住
+「只解最后一行 payload」。
 
 **验证**：B 线测试文件 + `tests/test_mcp_ask_linked_report.py` + `tests/test_mcp_bundle_architecture.py`，`-n 2`。
 

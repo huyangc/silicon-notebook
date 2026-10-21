@@ -430,6 +430,51 @@ def test_a_full_page_keeps_the_receipt_whole() -> None:
     assert "mem-1" not in json.dumps(page, ensure_ascii=False)
 
 
+#: ``rep-`` plus 32 hex, the form a generated id has: longer than the 32
+#: characters the budget's ordinary pass shrinks a string to.
+GENERATED_REPORT_ID = "rep-" + "0123456789abcdef" * 2
+
+
+def _receipt_scope(report_id: str = GENERATED_REPORT_ID) -> dict:
+    receipt = LinkedReportReceipt(
+        report_id=report_id, title=REPORT["title"], status="read",
+        sections=[
+            LinkedReportSection(index=index, title=f"第{index}节 " + "标" * 30, read=True)
+            for index in range(1, 7)
+        ],
+        evidence_restored=7, evidence_gone=2, evidence_over_budget=1,
+    )
+    return {"kind": "notebook", "notebook_ids": [NOTEBOOK],
+            "linked_report": linked_report_view(receipt)}
+
+
+def test_the_report_id_of_a_turns_receipt_is_never_cut() -> None:
+    """A short conversation id, the report on an EARLIER turn (so the row names
+    none), and pages crowded by full-size citations: the budget shrinks the
+    longest strings first, and a 36-character report id is not the longest --
+    until the others are down to its length. It is an identifier: kept whole,
+    and a page that did not keep it is refused, so the caller is never handed a
+    handle that opens nothing."""
+    scope = _receipt_scope()
+    row = _row(conversation_id="conv-1")
+    assert "linked_report" not in row
+    citations = [_full_citation(index) for index in range(40)]
+    view = _view(_body(6_000), citations, scope=scope)
+    answer_offset, citation_offset, pages = 0, 0, 0
+    while answer_offset is not None or citation_offset is not None:
+        page = _page(
+            view, row=row,
+            answer_offset=6_000 if answer_offset is None else answer_offset,
+            citation_offset=40 if citation_offset is None else citation_offset,
+        )
+        pages += 1
+        assert page["scope"]["linked_report"]["report_id"] == GENERATED_REPORT_ID, pages
+        assert _serialized_size(page) <= 12_000 and set(page) == PAGE_KEYS
+        answer_offset = page["next_answer_offset"]
+        citation_offset = page["next_citation_offset"]
+    assert pages >= 4
+
+
 def test_list_page_cuts_a_followed_reports_title_and_counts_it() -> None:
     long = _body(500)
     rows = [
@@ -452,12 +497,10 @@ def test_list_page_cuts_a_followed_reports_title_and_counts_it() -> None:
     assert page["truncation"]["omitted_characters"] == 5 * 301
 
 
-def test_list_page_never_delivers_a_row_with_a_cut_report_id() -> None:
-    # Report ids up to 200 characters are accepted by ``get_report``. Twenty
-    # rows whose report ids and titles are that long: the budget, having cut
-    # the titles, cuts the longest strings left -- the ids among them. A row
-    # naming a cut id must not count as delivered, so no caller is handed an
-    # id that opens nothing; the cursor still reaches every row.
+def test_list_page_keeps_long_report_ids_whole_and_sheds_titles_instead() -> None:
+    # Report ids up to 200 characters are accepted by ``get_report``. Twenty rows
+    # whose ids and titles are that long: an id is an identifier, so the budget
+    # shortens the titles (and only then the rows) and never a report id.
     rows = [
         _row(conversation_id=f"conv-{index:02d}", title="标题" * 5,
              linked_report={
@@ -466,7 +509,7 @@ def test_list_page_never_delivers_a_row_with_a_cut_report_id() -> None:
              })
         for index in range(20)
     ]
-    seen, offset, sizes = [], 0, []
+    seen, offset = [], 0
     while offset is not None:
         page = list_page(rows, limit=20, offset=offset)
         assert page["items"] and page["total"] == 20
@@ -474,11 +517,35 @@ def test_list_page_never_delivers_a_row_with_a_cut_report_id() -> None:
             original = rows[len(seen)]
             assert item["conversation_id"] == original["conversation_id"]
             assert item["linked_report"]["report_id"] == original["linked_report"]["report_id"]
+            title = item["linked_report"]["title"]
+            assert title.endswith("…") and len(title) <= 200
+            assert original["linked_report"]["title"].startswith(title[:-1])
             seen.append(item["conversation_id"])
-        sizes.append(len(page["items"]))
         offset = page["next_offset"]
     assert seen == [row["conversation_id"] for row in rows]
-    assert min(sizes) < 20, "the budget cut a page, so the cut path ran"
+
+
+def test_list_page_never_delivers_a_row_with_a_cut_report_id() -> None:
+    # Only an id longer than the whole response budget -- not one a report has --
+    # is shortened by the budget, as the last resort. A row naming such an id
+    # must not count as delivered (the rows before it still page, and the cursor
+    # stops at it); read alone it is refused rather than handed over cut.
+    rows = [_row(conversation_id=f"conv-{index}",
+                 linked_report={"report_id": f"rep-{index}", "title": "短"})
+            for index in range(3)]
+    rows.append(_row(conversation_id="conv-big",
+                     linked_report={"report_id": "rep-" + "x" * 13_000, "title": "短"}))
+    page = list_page(rows, limit=20, offset=0)
+    assert [item["conversation_id"] for item in page["items"]] == [
+        "conv-0", "conv-1", "conv-2",
+    ]
+    assert [item["linked_report"]["report_id"] for item in page["items"]] == [
+        "rep-0", "rep-1", "rep-2",
+    ]
+    assert page["next_offset"] == 3
+    with pytest.raises(AgentToolError) as refused:
+        list_page(rows, limit=20, offset=3)
+    assert refused.value.code == "internal"
 
 
 def test_list_order_parses_mixed_timestamp_spellings() -> None:
