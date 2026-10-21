@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Mapping, Optional
+from typing import Any, Literal, Mapping, Optional
 
 from app.domain.retrieval import RetrievedChunk, RetrievedElement, RetrievedKnowledge
 from app.models.memory import MemoryHit
@@ -32,9 +32,12 @@ from app.models.memory import MemoryHit
 
 # --- reason codes -----------------------------------------------------------
 # Stored on the turn's receipt (``LinkedReportReceipt.reason_code``) and returned
-# by the pre-send check (``ReportLinkCheck.reason_code``). The three scope codes
-# and ``memory_closed`` are verdicts of ``report_link_verdict``; the rest are
-# decided by the caller around it.
+# by the pre-send check (``ReportLinkCheck.reason_code``). ``report_link_verdict``
+# decides ``engine_unsupported`` first (from ``mode_supported``, before anything
+# is read) and then ``library_unavailable``, ``scope_libraries``,
+# ``scope_sources`` and ``memory_closed`` in that order; ``report_unavailable``
+# (the report gate), ``read_failed`` and ``no_synthesis`` are decided by the
+# caller around it.
 REASON_LIBRARY_UNAVAILABLE = "library_unavailable"
 REASON_SCOPE_LIBRARIES = "scope_libraries"
 REASON_SCOPE_SOURCES = "scope_sources"
@@ -143,14 +146,15 @@ class ReportDigest:
 class ReportLinkVerdict:
     """Whether a turn under the installed retrieval ceiling may read the report.
 
-    ``readable`` is true exactly when ``reason_code`` is empty. ``gone`` counts
-    cited items that no longer exist (never a conflict). ``unavailable_libs``
-    are cited reference libraries the turn cannot use at all, ``unchecked_libs``
-    cited libraries the turn has not ticked, ``out_of_scope_count`` cited
-    sources of ticked libraries that the scope leaves out; ``uses_memory`` is
-    whether the report was written from personal memory."""
+    ``readable`` is derived, not stored: the report is readable exactly when
+    ``reason_code`` is empty, so a verdict can never say "readable" while naming
+    a reason. ``gone`` counts cited items that no longer exist (never a
+    conflict). ``unavailable_libs`` are cited reference libraries the turn
+    cannot use at all, ``unchecked_libs`` cited libraries the turn has not
+    ticked, ``out_of_scope_count`` cited sources of ticked libraries that the
+    scope leaves out; ``uses_memory`` is whether the report was written from
+    personal memory."""
 
-    readable: bool
     reason_code: str = ""
     reason: str = ""
     gone: int = 0
@@ -158,6 +162,10 @@ class ReportLinkVerdict:
     unchecked_libs: frozenset[str] = frozenset()
     out_of_scope_count: int = 0
     uses_memory: bool = False
+
+    @property
+    def readable(self) -> bool:
+        return not self.reason_code
 
 
 @dataclass(frozen=True)
@@ -177,6 +185,21 @@ class SectionSelection:
     keys: tuple[str, ...] = ()
 
 
+#: The kinds of object a report reference is restored as -- a subset of
+#: ``AskEvidenceKind``, named after the evidence kind each one renders as.
+RESTORED_KIND_CHUNK = "chunk"
+RESTORED_KIND_ELEMENT = "element"
+RESTORED_KIND_KG = "kg"
+RESTORED_KIND_MEMORY = "memory"
+RestoredKind = Literal["chunk", "element", "kg", "memory"]
+RESTORED_KINDS = (
+    RESTORED_KIND_CHUNK,
+    RESTORED_KIND_ELEMENT,
+    RESTORED_KIND_KG,
+    RESTORED_KIND_MEMORY,
+)
+
+
 @dataclass(frozen=True)
 class RestoredReportEvidence:
     """The report's cited items, read back from the notebook's current text.
@@ -184,17 +207,31 @@ class RestoredReportEvidence:
     Each tuple holds the retrieval layer's native objects, so the existing
     renderers and citation builders handle them unchanged. ``key_by_object``
     maps ``(kind, object_id)`` to the report reference keys that point at that
-    object (several keys can name one object). ``gone`` counts references whose
-    item no longer exists or lies outside the ceiling the read ran under."""
+    object (several keys can name one object). The key names the RESTORED
+    object, not the reference's own type: a chunk reference is
+    ``("chunk", chunk_id)``, a KG object ``("kg", object_id)``, a memory entry
+    ``("memory", memory_id)``, and a relation reference -- restored as its
+    evidence element -- ``("element", element_id)``. ``kind`` is one of
+    ``RESTORED_KINDS`` (anything else raises ``ValueError``), and the mapping
+    is made read-only on construction. ``gone`` counts references whose item no
+    longer exists or lies outside the ceiling the read ran under."""
 
     chunks: tuple[RetrievedChunk, ...] = ()
     elements: tuple[RetrievedElement, ...] = ()
     knowledge: tuple[RetrievedKnowledge, ...] = ()
     memory: tuple[MemoryHit, ...] = ()
-    key_by_object: Mapping[tuple[str, str], tuple[str, ...]] = field(
+    key_by_object: Mapping[tuple[RestoredKind, str], tuple[str, ...]] = field(
         default_factory=dict
     )
     gone: int = 0
+
+    def __post_init__(self) -> None:
+        frozen: dict[tuple[RestoredKind, str], tuple[str, ...]] = {}
+        for (kind, object_id), keys in self.key_by_object.items():
+            if kind not in RESTORED_KINDS:
+                raise ValueError(f"unknown restored kind {kind!r}")
+            frozen[(kind, object_id)] = tuple(keys)
+        object.__setattr__(self, "key_by_object", MappingProxyType(frozen))
 
 
 @dataclass(frozen=True)
@@ -228,10 +265,16 @@ __all__ = [
     "REASON_REPORT_UNAVAILABLE",
     "REASON_SCOPE_LIBRARIES",
     "REASON_SCOPE_SOURCES",
+    "RESTORED_KINDS",
+    "RESTORED_KIND_CHUNK",
+    "RESTORED_KIND_ELEMENT",
+    "RESTORED_KIND_KG",
+    "RESTORED_KIND_MEMORY",
     "ReportDigest",
     "ReportFollowup",
     "ReportLinkVerdict",
     "ReportSection",
+    "RestoredKind",
     "RestoredReportEvidence",
     "SectionSelection",
 ]

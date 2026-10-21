@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from typing import get_args
 
 import pytest
 from pydantic import ValidationError
@@ -21,6 +22,7 @@ from app.models.ask import (
     AnswerAnchor,
     AskEvidence,
     AskEvidenceItem,
+    AskEvidenceKind,
     AskIntentPreviewRequest,
     AskRequest,
     AskResponse,
@@ -169,16 +171,25 @@ def test_report_id_over_the_rail_is_rejected_not_clipped(model):
     assert caught.value.errors()[0]["loc"] == ("report_id",)
 
 
-def test_report_id_rail_is_the_documented_200():
-    assert ASK_REPORT_ID_MAX_CHARS == 200
+@pytest.mark.parametrize("model", [AskRequest, AskIntentPreviewRequest])
+def test_report_id_length_is_judged_after_the_strip(model):
+    ok = "r" * ASK_REPORT_ID_MAX_CHARS
+    # Padding does not count against the rail ...
+    assert model(question="q", report_id=f"  {ok}\t ").report_id == ok
+    # ... but a stripped id that is still too long is refused, never clipped.
+    with pytest.raises(ValidationError):
+        model(question="q", report_id=f" {ok}x ")
 
 
-def test_ask_request_without_report_id_is_the_historical_request():
-    request = AskRequest(question="q")
-    dumped = request.model_dump()
-    assert dumped.pop("report_id") is None
-    # Every other field is untouched by the new one.
-    assert AskRequest.model_validate({**dumped, "question": "q"}) == request
+def test_ask_requests_without_report_id_stay_valid_for_existing_clients():
+    # The body a pre-feature client sends still validates, and the new field
+    # is optional in the schema the API publishes: making it required (or
+    # giving it a non-null default) would break every such client.
+    for model in (AskRequest, AskIntentPreviewRequest):
+        assert model.model_validate({"question": "q"}).report_id is None
+        schema = model.model_json_schema()
+        assert schema["required"] == ["question"]
+        assert schema["properties"]["report_id"]["default"] is None
 
 
 def test_report_link_check_request_rail():
@@ -186,16 +197,43 @@ def test_report_link_check_request_rail():
     assert request.mode == "chunk"
     assert request.source_scope is None and request.base_scope is None
 
-    for bad in ("", "r" * (ASK_REPORT_ID_MAX_CHARS + 1)):
+    for bad in ("", "   \t ", "r" * (ASK_REPORT_ID_MAX_CHARS + 1)):
         with pytest.raises(ValidationError):
             ReportLinkCheckRequest(report_id=bad)
     with pytest.raises(ValidationError):
         ReportLinkCheckRequest()  # report_id is required
 
 
-def test_report_link_check_carries_an_empty_reason_when_readable():
-    check = ReportLinkCheck(report_id="rep-1", title="题", readable=True)
-    assert (check.reason_code, check.reason) == ("", "")
+def test_report_link_check_request_spells_report_id_like_the_ask_request():
+    # Strip first, then judge the length: the same id means the same report on
+    # the pre-send check and on the question that follows it.
+    ok = "r" * ASK_REPORT_ID_MAX_CHARS
+    assert ReportLinkCheckRequest(report_id="  rep-1 ").report_id == "rep-1"
+    assert ReportLinkCheckRequest(report_id=f" {ok} ").report_id == ok
+    assert AskRequest(question="q", report_id=f" {ok} ").report_id == ok
+    with pytest.raises(ValidationError):
+        ReportLinkCheckRequest(report_id=f" {ok}x ")
+
+
+def test_report_link_check_reason_is_present_exactly_when_unreadable():
+    readable = ReportLinkCheck(report_id="rep-1", title="题", readable=True)
+    assert (readable.reason_code, readable.reason) == ("", "")
+
+    refused = ReportLinkCheck(
+        report_id="rep-1",
+        title="题",
+        readable=False,
+        reason_code=rf.REASON_SCOPE_SOURCES,
+        reason=rf.REASON_PREFIX + "它引用的 3 份资料不在当前检索范围内",
+    )
+    assert refused.readable is False
+
+    with pytest.raises(ValidationError):  # readable, yet names a reason
+        ReportLinkCheck(
+            report_id="rep-1", title="题", readable=True, reason_code="scope_sources"
+        )
+    with pytest.raises(ValidationError):  # unreadable without saying why
+        ReportLinkCheck(report_id="rep-1", title="题", readable=False)
 
 
 # ----------------------------------------------------------------- receipt ---
@@ -267,6 +305,45 @@ def test_skipped_receipt_carries_no_sections_or_memory():
         skipped["evidence_gone"],
         skipped["evidence_over_budget"],
     ) == (0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    "carried",
+    [
+        {"sections": [LinkedReportSection(index=1, title="背景", read=True)]},
+        {"summary_truncated": True},
+        {"evidence_restored": 1},
+        {"evidence_gone": 1},
+        {"evidence_over_budget": 1},
+        {"memory_used": ["mem-1"]},
+    ],
+    ids=[
+        "sections",
+        "summary_truncated",
+        "evidence_restored",
+        "evidence_gone",
+        "evidence_over_budget",
+        "memory_used",
+    ],
+)
+def test_skipped_receipt_cannot_claim_anything_was_read(carried):
+    with pytest.raises(ValidationError) as caught:
+        _receipt(status="skipped", reason_code=rf.REASON_READ_FAILED, **carried)
+    assert next(iter(carried)) in str(caught.value)
+
+    # The same fields are legitimate on a turn that did read the report.
+    assert _receipt(status="read", **carried).status == "read"
+
+
+def test_skipped_receipt_check_applies_when_loading_a_stored_payload():
+    stored = {
+        "report_id": "rep-1",
+        "title": "题",
+        "status": "skipped",
+        "evidence_restored": 3,
+    }
+    with pytest.raises(ValidationError):
+        LinkedReportReceipt.model_validate(stored)
 
 
 def test_receipt_status_is_read_or_skipped_only():
@@ -391,7 +468,8 @@ def test_domain_values_are_frozen_and_default_empty():
     assert digest.references == () and digest.memory_used == ()
     assert digest.sections[1].body == "" and digest.sections[1].keys == ()
 
-    verdict = rf.ReportLinkVerdict(readable=True)
+    verdict = rf.ReportLinkVerdict()
+    assert verdict.readable is True
     assert (verdict.reason_code, verdict.reason, verdict.gone) == ("", "", 0)
     assert verdict.unavailable_libs == frozenset() and verdict.uses_memory is False
 
@@ -399,8 +477,6 @@ def test_domain_values_are_frozen_and_default_empty():
     assert restored.chunks == restored.elements == restored.knowledge == ()
     assert restored.memory == () and restored.gone == 0
     assert dict(restored.key_by_object) == {}
-    # No two instances share one mapping.
-    assert rf.RestoredReportEvidence().key_by_object is not restored.key_by_object
 
     selection = rf.SectionSelection()
     assert selection.read_indices == () and selection.summary_truncated is False
@@ -413,3 +489,51 @@ def test_domain_values_are_frozen_and_default_empty():
     for value in (digest, verdict, restored, selection, followup, digest.sections[0]):
         with pytest.raises(dataclasses.FrozenInstanceError):
             setattr(value, dataclasses.fields(value)[0].name, "x")
+
+
+def test_verdict_readable_is_derived_from_the_reason_code():
+    assert rf.ReportLinkVerdict().readable is True
+    refused = rf.ReportLinkVerdict(
+        reason_code=rf.REASON_SCOPE_SOURCES, reason=rf.REASON_PREFIX + "x"
+    )
+    assert refused.readable is False
+
+    # "readable with a reason" cannot even be written down.
+    with pytest.raises(TypeError):
+        rf.ReportLinkVerdict(readable=True, reason_code="scope_sources")  # type: ignore[call-arg]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        refused.reason_code = ""  # type: ignore[misc]
+
+
+def test_restored_kinds_are_evidence_kinds():
+    assert set(rf.RESTORED_KINDS) == set(get_args(rf.RestoredKind))
+    assert set(rf.RESTORED_KINDS) <= set(get_args(AskEvidenceKind))
+    assert len(rf.RESTORED_KINDS) == len(set(rf.RESTORED_KINDS)) == 4
+
+
+def test_restored_key_by_object_is_a_read_only_copy_with_known_kinds():
+    source = {
+        (rf.RESTORED_KIND_CHUNK, "chunk-1"): ["k1", "k4"],
+        (rf.RESTORED_KIND_ELEMENT, "el-1"): ["k2"],
+    }
+    restored = rf.RestoredReportEvidence(key_by_object=source)
+
+    # Values are normalised to tuples; the caller's dict is not shared.
+    assert restored.key_by_object[("chunk", "chunk-1")] == ("k1", "k4")
+    source[("chunk", "chunk-2")] = ["k9"]
+    assert ("chunk", "chunk-2") not in restored.key_by_object
+    with pytest.raises(TypeError):
+        restored.key_by_object[("kg", "ko-1")] = ("k3",)  # type: ignore[index]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        restored.key_by_object = {}  # type: ignore[misc]
+
+    # An empty default is read-only too, and never shared between instances.
+    empty = rf.RestoredReportEvidence()
+    with pytest.raises(TypeError):
+        empty.key_by_object[("kg", "ko-1")] = ()  # type: ignore[index]
+    assert empty.key_by_object is not rf.RestoredReportEvidence().key_by_object
+
+    # A relation reference restores as its evidence element: there is no
+    # "relation" kind to key by.
+    with pytest.raises(ValueError):
+        rf.RestoredReportEvidence(key_by_object={("relation", "rel-1"): ("k5",)})  # type: ignore[dict-item]
