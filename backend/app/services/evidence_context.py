@@ -169,6 +169,26 @@ class CitationLookups:
                 mine.setdefault(key, value)
 
 
+@dataclass
+class KnowledgeContextOutcome:
+    """Why ``knowledge_context`` left a hit out of the context, for a caller
+    that must account for every object it handed in (the attached report's
+    evidence partition: a cited object folded into another must point at
+    that one's key, and one the run may no longer read must not be reported
+    as cut for space).
+
+    ``folded``: object id -> the key of the admitted object of the same
+    canonical cluster it was folded into (the very fold ``knowledge_context``
+    applied). ``withheld``: object ids left out for what they are, not for
+    room -- an unticked library, an object deleted since recall, one without
+    any occurrence inside the run's ceiling, or one whose cluster's only
+    candidate was such an object. A hit in neither and without a key was cut
+    by the budget."""
+
+    folded: dict[str, str] = field(default_factory=dict)
+    withheld: set[str] = field(default_factory=set)
+
+
 def _remember(memo: dict, asked: Iterable[str], found: Mapping[str, Any]) -> None:
     """Record one batch read: every asked key, ``None`` where it missed."""
     for key in asked:
@@ -1228,6 +1248,7 @@ class EvidenceContextService:
         budget_chars: int | None = None,
         priority_object_ids: Sequence[str] = (),
         priority_budget_chars: int | None = None,
+        outcome: KnowledgeContextOutcome | None = None,
     ) -> tuple[str, dict[str, dict[str, Any]]]:
         """``priority_object_ids`` 先于其余命中装配,并可另有一份更紧的子预算。
 
@@ -1238,6 +1259,11 @@ class EvidenceContextService:
         本次 `evidence_by_id` **内部**的边求的,拆两次就会丢掉所有跨两半的关系,还会
         渲染出两行 `relations:` 并各自记一次预算;cluster 去重同理。缺省(空 priority)
         时这个函数与接入前逐字相同。
+
+        ``outcome``:调用方要为每个交进来的对象记账时传入(关联报告的复原证据分区),
+        记下每个未拿到 key 的命中**为什么**没进来——被同簇已接纳对象折叠(记那个
+        对象的 key)、或因库闸 / 已删除 / 天花板内无证据被扣下;两者都不是的就是被
+        预算截掉。只写这个 sink,上下文与 id_map 与不传时逐字节相同。
 
         """
         budget = (
@@ -1303,6 +1329,12 @@ class EvidenceContextService:
 
         used = 0
         next_id = 0
+        # 簇 -> 本簇被接纳对象的 key,只供 ``outcome`` 记折叠去向。
+        cluster_keys: dict[str, str] = {}
+
+        def _withhold(object_id: str) -> None:
+            if outcome is not None:
+                outcome.withheld.add(object_id)
 
         def _admit(group: Sequence[RetrievedKnowledge], ceiling: int) -> None:
             """把 ``group`` 装进 ``ceiling`` 以内(公用 lines/used/next_id/去重集合)。
@@ -1314,6 +1346,10 @@ class EvidenceContextService:
             for hit in group:
                 cluster_id = _canonical(hit.object_id)
                 if cluster_id in seen_clusters:
+                    if outcome is not None and cluster_id in cluster_keys:
+                        outcome.folded[hit.object_id] = cluster_keys[cluster_id]
+                    else:
+                        _withhold(hit.object_id)
                     continue
                 # origin: hit.notebook_id 回退本次 ask 的 notebook_id,供
                 # node_context 查询用(同库命中也要查得到详情)。raw_origin 是写进
@@ -1340,6 +1376,7 @@ class EvidenceContextService:
                     # 簇记为已见(与改动前逐字相同):无天花板的输出不许因为
                     # 这里而变。
                     seen_clusters.add(cluster_id)
+                    _withhold(hit.object_id)
                     continue
                 # 来源级闸,落在这条**重查**上(PR-A·A3)。上面的 notebook_in_scope
                 # 只答库维度;``hit.evidence`` 虽已被 ``filter_retrieval_items`` 的
@@ -1382,6 +1419,7 @@ class EvidenceContextService:
                 except KeyError:
                     # 召回之后对象被删:簇记为已见,与改动前逐字相同。
                     seen_clusters.add(cluster_id)
+                    _withhold(hit.object_id)
                     continue
                 if scoped_context is None:
                     # FAIL-CLOSED,与 ``filter_retrieval_items`` 的 knowledge 支同
@@ -1393,6 +1431,7 @@ class EvidenceContextService:
                     # notebook_in_scope 整条跳过的理由逐字相同)。无天花板绑住时
                     # 无证据对象照旧渲染。簇在这里**不**记为已见:同簇里下一个
                     # 有天花板内证据的成员仍可顶上(簇只在有成员真被接纳时才记)。
+                    _withhold(hit.object_id)
                     continue
                 seen_clusters.add(cluster_id)
                 context = scoped_context
@@ -1424,6 +1463,7 @@ class EvidenceContextService:
                 line = (prefix + extra)[:remaining_total]
                 lines.append(line)
                 used += separator + len(line)
+                cluster_keys[cluster_id] = key
                 evidence_by_id[key] = {
                     "object_id": hit.object_id,
                     "object_type": hit.object_type,

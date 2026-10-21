@@ -65,6 +65,8 @@ from app.domain.report_followup import (
     REASON_PREFIX,
     REASON_SCOPE_LIBRARIES,
     REASON_SCOPE_SOURCES,
+    REPORT_BLOCK_END,
+    REPORT_EVIDENCE_NOT_LOADED,
     RESTORE_SKIPPED_OBJECT_TYPES,
     CitedReportReference,
     LinkedReportNotFound,
@@ -568,14 +570,22 @@ def report_link_verdict(
 
 
 # --- markers ----------------------------------------------------------------
-def rewrite_report_markers(text: str, key_map: Mapping[str, str]) -> str:
+def rewrite_report_markers(
+    text: str, key_map: Mapping[str, str], *, not_loaded: Collection[str] = (),
+) -> str:
     """Point the report's ``[kN]`` markers at this turn's keys (D3).
 
     ``key_map`` maps a report reference key to the key its restored item has
-    in this turn's prompt. A marker the engine renumbered (``MARKER_RE``:
-    ``[k1]``, ``[k1, k3]``, ``【k2】``, ``(k4)`` ...) keeps only its mapped keys,
-    written ``[kA, kB]``, and is removed whole when none is mapped. A marker
-    only ``LOOSE_MARKER_RE`` matches (``[ k2 ]``) was never renumbered and is
+    in this turn's prompt; ``not_loaded`` are the report keys whose item was
+    read back but left out of the prompt by the report-evidence budget. A
+    marker the engine renumbered (``MARKER_RE``: ``[k1]``, ``[k1, k3]``,
+    ``【k2】``, ``(k4)`` ...) keeps its mapped keys, written ``[kA, kB]``, and
+    is followed by ``REPORT_EVIDENCE_NOT_LOADED`` when any of its other keys
+    is not loaded -- the claim has evidence the turn did not carry, which rule
+    15 tells the model not to call unsupported. Every other key (its item no
+    longer exists, lies outside the ceiling, or was never an item) is removed,
+    and a marker left with nothing is removed whole. A marker only
+    ``LOOSE_MARKER_RE`` matches (``[ k2 ]``) was never renumbered and is
     always removed (see ``_global_marker``). No report key reaches the prompt
     unmapped: it would name an unrelated item of this turn."""
 
@@ -583,31 +593,43 @@ def rewrite_report_markers(text: str, key_map: Mapping[str, str]) -> str:
         if not _global_marker(match.group(0)):
             return ""
         kept: list[str] = []
+        pending = False
         for key in marker_keys(match.group(0)):
             mapped = key_map.get(key)
-            if mapped and mapped not in kept:
-                kept.append(mapped)
-        return "[" + ", ".join(kept) + "]" if kept else ""
+            if mapped:
+                if mapped not in kept:
+                    kept.append(mapped)
+            elif key in not_loaded:
+                pending = True
+        return (
+            ("[" + ", ".join(kept) + "]" if kept else "")
+            + (REPORT_EVIDENCE_NOT_LOADED if pending else "")
+        )
 
     return LOOSE_MARKER_RE.sub(rewrite, text or "")
 
 
 # Wider than any key a restored item can take in the prompt (the widest
-# native segment, element, ends at k4999). Measuring every marker as if each
-# of its keys had this width bounds the block BEFORE ``key_map`` exists:
+# native segment, element, ends at k4999). Measuring every marker at its
+# widest possible rewrite bounds the block BEFORE ``key_map`` exists:
 # selection decides which keys are needed, and only then are they restored.
 _WIDEST_TURN_KEY = "k99999"
 
 
 def _widened(text: str) -> str:
-    """``text`` as long as ``rewrite_report_markers`` can ever make it."""
+    """``text`` as long as ``rewrite_report_markers`` can ever make it. A
+    marker of ``n`` keys is longest with ``n - 1`` of them mapped and the
+    last one not loaded: ``[kA, ...]`` plus ``REPORT_EVIDENCE_NOT_LOADED``,
+    which is longer than any one key."""
 
     def widen(match: re.Match[str]) -> str:
         if not _global_marker(match.group(0)):
             return ""
-        return "[" + ", ".join(
-            _WIDEST_TURN_KEY for _key in marker_keys(match.group(0))
-        ) + "]"
+        mapped = len(marker_keys(match.group(0))) - 1
+        return (
+            ("[" + ", ".join([_WIDEST_TURN_KEY] * mapped) + "]" if mapped else "")
+            + REPORT_EVIDENCE_NOT_LOADED
+        )
 
     return LOOSE_MARKER_RE.sub(widen, text or "")
 
@@ -640,6 +662,7 @@ def _block(
                 lines.append(body(section.body))
             else:
                 lines.append(_SECTION_NOT_LOADED)
+    lines.append(REPORT_BLOCK_END)
     return "\n".join(lines)
 
 
@@ -683,6 +706,11 @@ def select_report_sections(
     the section titles (user-confirmed outline titles); the summary then
     shrinks to the suffix alone and no body is read. ``query`` is the turn's
     retrieval query (chunk) or research question (reasoning).
+
+    The same ranking -- computed whether or not every body fits -- orders
+    ``evidence_keys``: the read sections' keys by section relevance, so the
+    evidence partition admits the cited items of the section the question is
+    about first.
     """
     summary, truncated = _strip_markers(digest.summary), False
     skeleton = len(_block(digest.title, summary, digest, (), _widened))
@@ -699,48 +727,62 @@ def select_report_sections(
         section.index: len(_widened(section.body)) - len(_SECTION_NOT_LOADED)
         for section in digest.sections if section.body
     }
+    # One relevance ranking (score descending, then section order) for both
+    # decisions: which bodies enter when they do not all fit, and in which
+    # order the evidence partition admits the items they cite.
+    basis = keyword_basis(query or "")
+    ranked = sorted(
+        (s for s in digest.sections if s.index in costs),
+        key=lambda s: (-_section_score(basis, s), s.index),
+    )
     if sum(costs.values()) <= remaining:
         chosen = set(costs)
     else:
         chosen = {index for index, cost in costs.items() if cost <= 0}
         remaining -= sum(costs[index] for index in chosen)
-        basis = keyword_basis(query or "")
-        ranked = sorted(
-            (s for s in digest.sections if s.index in costs and s.index not in chosen),
-            key=lambda s: (-_section_score(basis, s), s.index),
-        )
         for section in ranked:
-            if costs[section.index] <= remaining:
+            if section.index not in chosen and costs[section.index] <= remaining:
                 chosen.add(section.index)
                 remaining -= costs[section.index]
     # The summary carries no keys (see ``report_digest``): the keys are the
-    # read sections', in report order.
+    # read sections', in report order -- and, for the evidence partition, in
+    # relevance order.
     keys: dict[str, None] = {}
     for section in digest.sections:
         if section.index in chosen:
             for key in section.keys:
                 keys.setdefault(key, None)
+    evidence_keys: dict[str, None] = {}
+    for section in ranked:
+        if section.index in chosen:
+            for key in section.keys:
+                evidence_keys.setdefault(key, None)
     return SectionSelection(
         read_indices=tuple(sorted(chosen)),
         summary=summary,
         summary_truncated=truncated,
         keys=tuple(keys),
+        evidence_keys=tuple(evidence_keys),
     )
 
 
 def render_report_block(
     digest: ReportDigest, selection: SectionSelection, key_map: Mapping[str, str],
+    *, not_loaded: Collection[str] = (),
 ) -> str:
     """The attached-report block of the answer prompt (§2.6), sections in the
     report's order: a read section with its body, an unread one with a
-    placeholder line, one without body text with a line saying so.
+    placeholder line, one without body text with a line saying so. It opens
+    with ``REPORT_BLOCK_HEADER`` and closes with ``REPORT_BLOCK_END``, the two
+    bounds rule 15 names as the edges of quoted data.
     ``selection.summary`` is used as clipped and marked by
     ``select_report_sections``, with any marker removed (the summary's are
     never the report's keys); section markers are rewritten through
-    ``key_map`` (``rewrite_report_markers``)."""
+    ``key_map``, and ``not_loaded`` report keys show as
+    ``REPORT_EVIDENCE_NOT_LOADED`` (``rewrite_report_markers``)."""
 
     def rewrite(text: str) -> str:
-        return rewrite_report_markers(text, key_map)
+        return rewrite_report_markers(text, key_map, not_loaded=not_loaded)
 
     return _block(
         digest.title, _strip_markers(selection.summary), digest,
@@ -754,12 +796,14 @@ def report_outline_text(
     """The short form of the attached report for understanding, rewriting,
     expansion and planning: the title, plus the section titles when the turn
     may read the report. An unreadable report contributes its title only (D5):
-    section titles were written from evidence this turn may not see."""
+    section titles were written from evidence this turn may not see. A turn
+    that has no title to show (the report is gone, or could not be read)
+    says "Attached report" with no empty title brackets."""
     if isinstance(digest_or_title, ReportDigest):
         title, sections = digest_or_title.title, digest_or_title.section_titles
     else:
         title, sections = str(digest_or_title or ""), ()
-    head = f"Attached report: 《{title}》"
+    head = f"Attached report: 《{title}》" if title else "Attached report"
     if not readable:
         return head + " (it cannot be read in this turn; answer from the notebook evidence)"
     if not sections:
