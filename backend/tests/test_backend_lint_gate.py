@@ -160,7 +160,7 @@ def test_baseline_totals_per_rule_equal_the_pinned_ceiling():
 
 
 def test_never_baselined_rules_are_absent_from_baseline_and_ceiling():
-    assert {"F821", "syntax-error"} <= gate.NEVER_BASELINED
+    assert {"F821", "invalid-syntax"} <= gate.NEVER_BASELINED
     in_baseline = sorted(
         f"{path} {rule}" for path, rules in _baseline().items()
         for rule in rules if rule in gate.NEVER_BASELINED
@@ -241,14 +241,14 @@ def test_baseline_problems_cover_never_baselined_bad_counts_and_unlinted_files()
     ]
 
 
-def test_code_less_parse_failures_count_as_syntax_errors(tmp_path):
+def test_code_less_diagnostics_count_as_invalid_syntax(tmp_path):
     diagnostics = [
         {"filename": str(tmp_path / "x.py"), "code": None},
         {"filename": str(tmp_path / "x.py"), "code": "F401"},
         {"filename": str(tmp_path / "x.py"), "code": "F401"},
     ]
     assert gate.current_counts(diagnostics, tmp_path.resolve()) == {
-        "x.py": {"F401": 2, "syntax-error": 1}
+        "x.py": {"F401": 2, "invalid-syntax": 1}
     }
 
 

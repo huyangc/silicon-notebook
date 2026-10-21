@@ -664,7 +664,7 @@ Violations that predate the gate are recorded in
 - a (file, rule) count is higher than its entry (a new violation);
 - an entry is higher than what still occurs (stale);
 - the baseline names a file the gate does not lint, or a rule that is never
-  baselined (`F821`, `F822`, `F823`, `E902` and syntax errors are always fixed);
+  baselined (`F821`, `F822`, `F823`, `E902` and syntax errors (`invalid-syntax`) are always fixed);
 - ruff lints a different set of files from the one git sees under the roots;
 - the installed ruff is not the pinned version.
 

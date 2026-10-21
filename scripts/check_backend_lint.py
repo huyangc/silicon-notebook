@@ -44,8 +44,9 @@ ROOTS = ("backend/app", "backend/tests", "scripts")
 # ROOTS is generated Python.
 EXCLUDED: tuple[str, ...] = ()
 # Rules whose violations are always real bugs: they are fixed, never recorded.
-# ``syntax-error`` is how this script names ruff's code-less parse failures.
-NEVER_BASELINED = frozenset({"syntax-error", "E902", "F821", "F822", "F823"})
+# ruff reports a parse failure as ``invalid-syntax``; a diagnostic with no code
+# at all is counted under the same name.
+NEVER_BASELINED = frozenset({"invalid-syntax", "E902", "F821", "F822", "F823"})
 
 Counts = dict[str, dict[str, int]]
 
@@ -91,7 +92,7 @@ def linted_files(root: Path = ROOT) -> list[str]:
 
 
 def rule_of(diagnostic: dict) -> str:
-    return diagnostic.get("code") or "syntax-error"
+    return diagnostic.get("code") or "invalid-syntax"
 
 
 def current_counts(diagnostics: list[dict], root: Path = ROOT) -> Counts:
