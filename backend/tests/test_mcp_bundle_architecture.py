@@ -18,6 +18,7 @@ from app.api.mcp_tools.memory_context import (
     register_memory_proposal_tools,
 )
 from app.api.mcp_tools.profiles import register_profile_tools
+from app.api.mcp_tools.reports import register_report_tools
 from app.api.mcp_tools.session import register_session_tools
 from app.api.mcp_tools.sources import register_source_tools
 from app.domain.agent_tools import AGENT_SCOPES, AGENT_TIERS
@@ -28,6 +29,7 @@ _REGISTRARS = (
     register_memory_context_tools,
     register_citation_tools,
     register_ask_tools,
+    register_report_tools,
     register_memory_proposal_tools,
     register_profile_tools,
     register_source_tools,

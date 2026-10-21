@@ -2220,6 +2220,7 @@ SURFACE_MEMBERS = (
         owner='ReportStore',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/mcp_tools/reports.py', scope='<module>.register_report_tools.get_report.load', kind='attribute', target='get_report'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._own_report_or_404', kind='attribute', target='get_report'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.cancel_report_endpoint', kind='attribute', target='get_report'),
             ConsumerSite(path='scripts/reflect_shadow_rig.py', scope='<module>._generate_report', kind='attribute', target='get_report'),
@@ -2512,6 +2513,7 @@ SURFACE_MEMBERS = (
         owner='ReportStore',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/mcp_tools/reports.py', scope='<module>.register_report_tools.list_reports.load', kind='attribute', target='list_reports'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.list_reports', kind='attribute', target='list_reports'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='list_reports'),
         ),
@@ -3863,6 +3865,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._public_conversation_or_404', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/mcp_tools/_shared.py', scope='<module>._record_agent_call', kind='attribute', target='user_can_read_notebook'),
+            ConsumerSite(path='backend/app/api/mcp_tools/list_pages.py', scope='<module>.readable_allowlist', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/mcp_tools/profiles.py', scope='<module>.register_profile_tools.add_observation.run', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/mcp_tools/session.py', scope='<module>.register_session_tools.list_notebooks.load', kind='attribute', target='user_can_read_notebook'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.public_report_route', kind='attribute', target='user_can_read_notebook'),
