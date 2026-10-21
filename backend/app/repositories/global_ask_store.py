@@ -81,6 +81,88 @@ _ATTRIBUTION_INSERT_BATCH = 500
 # Whole-page attempts when PostgreSQL reports a deadlock anyway.
 _DEADLOCK_RETRIES = 3
 
+# ``job_scope_rows``' projection: the six notebook-id lists and the four
+# anchor/citation arrays ``global_ask._snapshot_notebook_ids`` reads, as
+# ``(column alias, answer shape or None for the top level, key)``.
+_SCOPE_LISTS = (
+    ("r0", None, "resolved_notebook_ids"), ("c0", None, "cited_notebook_ids"),
+    ("r1", "answer", "resolved_notebook_ids"), ("c1", "answer", "cited_notebook_ids"),
+    ("r2", "response", "resolved_notebook_ids"), ("c2", "response", "cited_notebook_ids"),
+)
+_SCOPE_ITEMS = (
+    ("a1", "answer", "anchors"), ("z1", "answer", "citations"),
+    ("a2", "response", "anchors"), ("z2", "response", "citations"),
+)
+
+
+def _scope_projection_sqlite(document):
+    """``(alias, expression)`` per projected path over the JSON text ``document``.
+
+    A list is returned only when the stored value is an array (else NULL); an
+    anchor/citation array becomes the array of its elements' ``notebook_id``
+    (NULL for an element that is not an object or has none), ``'[]'`` when the
+    path is not an array.
+    """
+    def path(shape, key):
+        return f"$.{shape}.{key}" if shape else f"$.{key}"
+
+    projection = [
+        (alias, f"CASE json_type({document},'{path(shape, key)}') WHEN 'array' "
+                f"THEN json_extract({document},'{path(shape, key)}') END")
+        for alias, shape, key in _SCOPE_LISTS
+    ]
+    projection.extend(
+        (alias, f"CASE json_type({document},'{path(shape, key)}') WHEN 'array' THEN "
+                "(SELECT json_group_array(CASE e.type WHEN 'object' "
+                "THEN json_extract(e.value,'$.notebook_id') END) "
+                f"FROM json_each({document},'{path(shape, key)}') e) ELSE '[]' END")
+        for alias, shape, key in _SCOPE_ITEMS
+    )
+    return projection
+
+
+def _scope_projection_postgres(document):
+    """The PostgreSQL twin of ``_scope_projection_sqlite`` over the jsonb
+    expression ``document`` (already parsed once by the caller)."""
+    def node(shape, key):
+        return f"{document}->'{shape}'->'{key}'" if shape else f"{document}->'{key}'"
+
+    projection = [
+        (alias, f"CASE WHEN jsonb_typeof({node(shape, key)})='array' THEN {node(shape, key)} END")
+        for alias, shape, key in _SCOPE_LISTS
+    ]
+    projection.extend(
+        (alias, "(SELECT COALESCE(jsonb_agg(CASE WHEN jsonb_typeof(e)='object' "
+                "THEN e->'notebook_id' END),'[]'::jsonb) FROM jsonb_array_elements("
+                f"CASE WHEN jsonb_typeof({node(shape, key)})='array' THEN {node(shape, key)} "
+                "ELSE '[]'::jsonb END) e)")
+        for alias, shape, key in _SCOPE_ITEMS
+    )
+    return projection
+
+
+def _projected_list(value):
+    """One projected column as a Python list, or ``None``: SQLite hands back
+    JSON text, psycopg an already-decoded value."""
+    if isinstance(value, (str, bytes, bytearray)):
+        value = json.loads(value)
+    return value if isinstance(value, list) else None
+
+
+def _narrowed_scope_payload(row):
+    """The narrowed payload ``job_scope_rows`` documents, rebuilt from one row
+    of the projection above. Elements are passed on exactly as stored."""
+    payload = {}
+    shapes = {"answer": {}, "response": {}}
+    for alias, shape, key in _SCOPE_LISTS:
+        (payload if shape is None else shapes[shape])[key] = _projected_list(row[alias])
+    for alias, shape, key in _SCOPE_ITEMS:
+        shapes[shape][key] = [
+            {"notebook_id": value} for value in (_projected_list(row[alias]) or [])
+        ]
+    payload.update(shapes)
+    return payload
+
 
 class GlobalAskStore:
     def __init__(self, database, *, marker="?", access_sql=None, read_authority_lock=None):
@@ -142,14 +224,36 @@ class GlobalAskStore:
             ), (conversation_id, user_id)).fetchone()
         return self._conversation(row)
 
+    def _owner_conversations_sql(self):
+        """One owner's live conversations, most recently updated first -- the
+        statement behind both the paged list and its unpaged twin, so the two
+        cannot disagree on title, liveness or order."""
+        return (
+            f"SELECT c.*, {self._shown_title} AS shown_title "
+            "FROM global_ask_conversations c WHERE c.user_id=? "
+            f"AND {self._conversation_live} "
+            "ORDER BY c.updated_at DESC,c.id DESC"
+        )
+
     def list_conversations(self, user_id, limit, offset):
         with self.database.connect() as db:
             rows = db.execute(self._sql(
-                f"SELECT c.*, {self._shown_title} AS shown_title "
-                "FROM global_ask_conversations c WHERE c.user_id=? "
-                f"AND {self._conversation_live} "
-                "ORDER BY c.updated_at DESC,c.id DESC LIMIT ? OFFSET ?"
+                self._owner_conversations_sql() + " LIMIT ? OFFSET ?"
             ), (user_id, limit, offset)).fetchall()
+        return [self._conversation(row) for row in rows]
+
+    def all_conversations(self, user_id):
+        """``list_conversations`` without the page: every live conversation of
+        ``user_id`` in the same order with the same shown title.
+
+        The Agent history list (``GlobalAskService.agent_conversations``) has
+        to judge each conversation on ALL of its turns before it can page, so
+        it reads the owner's whole list and pages after filtering.
+        """
+        with self.database.connect() as db:
+            rows = db.execute(self._sql(
+                self._owner_conversations_sql()
+            ), (user_id,)).fetchall()
         return [self._conversation(row) for row in rows]
 
     @staticmethod
@@ -615,6 +719,94 @@ class GlobalAskStore:
                 "SELECT id FROM global_ask_jobs WHERE conversation_id=? AND user_id=? AND status='running'"
             ), (conversation_id, user_id)).fetchall()
         return [row["id"] for row in rows]
+
+    # ------------------------------------------------------------------
+    # Agent history reads (``GlobalAskService.agent_conversations`` /
+    # ``agent_conversation_turn``): which libraries every live turn names, and
+    # the n-th finished turn.
+    # ------------------------------------------------------------------
+
+    def job_scope_rows(self, user_id, conversation_id=None):
+        """One row per live job of ``user_id`` (optionally of one conversation):
+        ``{"conversation_id", "job_id", "status", "payload"}``, ordered by
+        conversation, then the canonical ``(created_at, id)``.
+
+        ``payload`` is the NARROWED input of ``global_ask._snapshot_notebook_ids``
+        -- exactly the keys that function reads, nothing else::
+
+            {"resolved_notebook_ids": r0, "cited_notebook_ids": c0,
+             "answer":   {"resolved_notebook_ids": r1, "cited_notebook_ids": c1,
+                          "anchors": a1, "citations": z1},
+             "response": {...the same four keys...}}
+
+        A notebook-id list comes back only when the stored value IS an array
+        (elements untouched), otherwise ``None``, so the function's "empty top
+        level falls back to the nested shapes" behaves as on the whole payload.
+        Each anchor / citation is rebuilt as ``{"notebook_id": x}`` with ``x``
+        exactly as stored (``None`` when absent or the element is not an
+        object); the function filters those itself, and this store adds no rule
+        of its own. ``tests/global_ask_history_store_cases.py`` pins the parity
+        against the whole payload on both backends.
+
+        Why not the whole payload: the visibility judgement runs over EVERY live
+        turn of the owner on each list call, and the payload carries the answer
+        body, its excerpts and the reasoning trace -- none of which decides
+        anything here. Only the ten JSON paths cross the boundary.
+        """
+        where = "user_id=?" + (" AND conversation_id=?" if conversation_id is not None else "")
+        params = (user_id,) if conversation_id is None else (user_id, conversation_id)
+        if self.marker == "%s":
+            # The payload is parsed ONCE per row (``payload_json::jsonb AS p``);
+            # ``OFFSET 0`` keeps the subquery from being flattened back into one
+            # ``::jsonb`` per path read, as ``attribution_sql(document="p")``'s
+            # callers do.
+            sql = (
+                "SELECT j.conversation_id, j.id, j.status, "
+                + ", ".join(
+                    f"{expression} AS {alias}"
+                    for alias, expression in _scope_projection_postgres("j.p")
+                )
+                + " FROM (SELECT conversation_id, id, status, created_at, "
+                "payload_json::jsonb AS p FROM global_ask_jobs "
+                f"WHERE {where} AND {self._live} OFFSET 0) j "
+                "ORDER BY j.conversation_id,j.created_at ASC,j.id ASC"
+            )
+        else:
+            sql = (
+                "SELECT conversation_id, id, status, "
+                + ", ".join(
+                    f"{expression} AS {alias}"
+                    for alias, expression in _scope_projection_sqlite("payload_json")
+                )
+                + f" FROM global_ask_jobs WHERE {where} AND {self._live} "
+                "ORDER BY conversation_id,created_at ASC,id ASC"
+            )
+        with self.database.connect() as db:
+            rows = db.execute(self._sql(sql), params).fetchall()
+        return [
+            {
+                "conversation_id": row["conversation_id"],
+                "job_id": row["id"],
+                "status": row["status"],
+                "payload": _narrowed_scope_payload(row),
+            }
+            for row in rows
+        ]
+
+    def finished_job_at(self, conversation_id, user_id, index):
+        """The ``index``-th (0-based, canonical ``(created_at, id)`` order)
+        live job of this owner's conversation that is no longer ``running``,
+        or ``None`` past the end. A running turn is not a turn yet; once it
+        finishes it sorts after every turn already counted (it is the
+        conversation's newest job), so earlier indexes do not move. ``index``
+        is never negative (the caller guarantees it)."""
+        with self.database.connect() as db:
+            row = db.execute(self._sql(
+                "SELECT * FROM global_ask_jobs WHERE conversation_id=? AND user_id=? "
+                f"AND status<>'running' AND {self._live} {GLOBAL_JOBS_ORDER_ASC} "
+                "LIMIT 1 OFFSET ?"
+            ), (conversation_id, user_id, int(index))).fetchone()
+        return self._job(row)
 
     def rename(self, conversation_id, user_id, title):
         with self.database.write() as db:
