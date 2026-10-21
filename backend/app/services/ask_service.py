@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import collections.abc
+import functools
 import json
 from itertools import islice
 import logging
@@ -1088,6 +1089,97 @@ DOCUMENT_READ_OMITTED_NOTICE = (
     "[Sampled document excerpts exist for this question but were left out "
     "of this context for space; do not state that they are absent.]"
 )
+
+
+#: A ``_ReasoningStageRun`` field its phase has not produced yet. Not ``None``:
+#: several produced values legitimately are ``None`` (no Knowhow batch, a
+#: retriever double's empty field), and the run must hand those on unchanged.
+_UNSET: Any = object()
+
+
+@dataclass(eq=False)
+class _ReasoningStageRun:
+    """Cross-phase state of one ``AskService._run_reasoning_stage`` call, handed
+    from phase helper to phase helper by identity.
+
+    It holds what a later phase reads -- the frozen inputs, the pre-retrieval
+    trace and facts, and the retrieval evidence the draft stage consumes -- and
+    no callable pointing back at it (its methods are bound on call), so it is
+    freed by refcount when the call returns, as the single method's locals
+    were. ``on_trace`` and ``cancel_event`` are read off ``runtime`` once, at
+    entry, as before. The four methods are the closures the orchestrator used
+    to define; ``pre_trace`` is the one list they append to, and ``trace`` is
+    the one list the workbook lane appends to before the draft reads it.
+
+    The fields below ``intent_streamed`` are set by the phase that produces
+    them and start as ``_UNSET``; a phase reads them through ``ready`` so that
+    running the phases out of order fails loudly instead of reading an empty
+    default."""
+
+    prepared: Any
+    runtime: Any
+    intent_contract: Any
+    on_trace: Any
+    cancel_event: Any
+    pre_trace: List[TraceStep]
+    intent_streamed: bool = False
+    # ``_reasoning_structured_phase``
+    structured_batch: Any = _UNSET
+    completeness_unavailable: Any = _UNSET
+    # ``_reasoning_memory_phase``
+    memory_hits: Any = _UNSET
+    memory_ms: Any = _UNSET
+    # ``_reasoning_no_source_answer`` (when it lets the run go on)
+    no_usable_kg: Any = _UNSET
+    # ``_reasoning_retrieval_phase``. ``result`` is the retriever's snapshot, or
+    # the empty ``ReasoningResult()`` when it failed before returning one: its
+    # candidate ledger and external evidence reach the draft either way.
+    result: Any = _UNSET
+    top_hits: Any = _UNSET
+    elements: Any = _UNSET
+    trace: Any = _UNSET
+    chunks: Any = _UNSET
+    chains: Any = _UNSET
+    enumerations: Any = _UNSET
+    document_reads: Any = _UNSET
+    collection_map_text: Any = _UNSET
+    outline: Any = _UNSET
+    outline_evidence: Any = _UNSET
+    historical_chunks: Any = _UNSET
+
+    def ready(self, name: str) -> Any:
+        """A phase-produced field, refusing one its phase has not set yet."""
+        value = getattr(self, name)
+        if value is _UNSET:
+            raise RuntimeError(
+                f"_run_reasoning_stage phase read run.{name} before the phase that sets it")
+        return value
+
+    def stream_intent(self) -> None:
+        if not self.intent_streamed and self.on_trace:
+            for step in self.pre_trace:
+                self.on_trace(step)
+        self.intent_streamed = True
+
+    def checked_pre_trace(self, step: TraceStep) -> None:
+        raise_if_cancelled(self.cancel_event)
+        self.pre_trace.append(step)
+        if self.on_trace:
+            self.on_trace(step)
+
+    def streamed_pre_trace(self) -> "list[TraceStep] | None":
+        """短路返回要带上的轨迹:已经交出去的那几步。
+
+        有 `on_trace` 就说明 intent(及命中时的 memory)已经交付——流式面推给
+        了客户端,同步/MCP 面(PR-3 起)落进了 `ask_trace_steps`;短路返回不带
+        它们,就是让响应否认自己刚写下的轨迹。真正无消费者的直调(报告引擎等)
+        保持原状:空轨迹仍表示「agentic loop 没跑」。"""
+        return self.pre_trace if self.on_trace is not None else None
+
+    def checked_trace(self, step) -> None:
+        raise_if_cancelled(self.cancel_event)
+        if self.on_trace:
+            self.on_trace(step)
 
 
 class AskService:
@@ -3552,9 +3644,10 @@ class AskService:
         that got past every short circuit (a run that short-circuits leaves
         no report step; its receipt says ``no_synthesis``). The step itself
         says "not read" for a run that gets here but whose draft will call no
-        answer model, as its receipt does. ``record`` is the stage's
-        ``checked_pre_trace``. One call at the seat the Memory step already
-        had, so the capped ``_run_reasoning_stage`` does not grow."""
+        answer model, as its receipt does. ``record`` is the run's
+        ``checked_pre_trace``; ``record_memory_step`` records the Memory step
+        (``_record_reasoning_memory_step``). One call at the seat the Memory
+        step already had in the orchestrator."""
         step = self._reasoning_report_step(prepared)
         if step is not None:
             record(step)
@@ -6890,7 +6983,7 @@ class AskService:
         端口直通,``communities`` 逐次新建 —— ``sibling_min_bridge`` 调用时读。
 
         单独成方法只为把这段固定接线移出 ``_run_reasoning_stage`` 的零松弛长度
-        天花板;字段与顺序逐字未改,调用点仍然只有那一处。
+        天花板;字段与顺序逐字未改,调用点仍然只有那一处(``_reasoning_retrieval_phase``)。
 
         ``egress_question`` 是插件 reflect 动作**唯一**会被送出部署的用户措辞
         (由 ``_egress_question(prepared)`` 算出,与 gap consultation 同一把
@@ -7004,18 +7097,17 @@ class AskService:
         that turns retrieval evidence into the response draft.  The commit
         boundary stays core-owned below both seams -- no stage implementation
         reaches the atomic save.
+
+        Each phase is one private helper over a ``_ReasoningStageRun``, in
+        order: the Knowhow enumeration and its structured answer, the Memory
+        recall, the unconfigured-model and no-source short circuits, then --
+        inside the request's model-error sink and embedding memo -- the memory
+        step, retrieval, the workbook lane and the draft stage.
         """
         from app.application.ask_reasoning import (
             PreparedReasoningAsk,
-            ReasoningResponseDraft,
             ReasoningRetrievalRuntime,
-            ResponseDraftInput,
             StageBoundaryError,
-            execute_response_draft_stage,
-        )
-        from app.services.reasoning_retrieval import (
-            ReasoningResult,
-            kg_in_scope_for,
         )
 
         if type(prepared) is not PreparedReasoningAsk:
@@ -7028,69 +7120,92 @@ class AskService:
             notebook_id=prepared.notebook_id,
             user_id=prepared.user_id,
         )
-        notebook_id = prepared.notebook_id
-        question = prepared.question
-        conversation_id = prepared.conversation_id
-        reasoning_history = prepared.history
+        run = self._begin_reasoning_stage(prepared, runtime)
+        self._reasoning_structured_phase(run)
+        committed = self._reasoning_structured_answer(run)
+        if committed is not None:
+            return committed
+        self._reasoning_memory_phase(run)
+        committed = self._reasoning_unconfigured_answer(run)
+        if committed is not None:
+            return committed
+        committed = self._reasoning_no_source_answer(run)
+        if committed is not None:
+            return committed
+
+        _err_sink: list = []
+        _err_token = _ASK_MODEL_ERRORS.set(_err_sink)
+        # P1-A(本轮 scope):只挂 reasoning 模式。ask_chunk 同样受益(已退役的
+        # graph 引擎曾也受益),但等价性回放验证只覆盖了 reasoning——留作 fast-follow。
+        _emb_token = _ASK_EMBED_CACHE.set({})
+        try:
+            # intent already streamed above (before memory retrieval); stream_intent
+            # stays idempotent because the structured branch may emit it earlier.
+            # 记忆那一步排在这里:上面每一条短路返回都不会产出答案,在它们之前记
+            # 就等于给一次没发生的作答留下「用过你的记忆」的痕迹。
+            self._record_report_and_memory_steps(
+                prepared, run.checked_pre_trace,
+                functools.partial(self._record_reasoning_memory_step, run))
+            self._reasoning_retrieval_phase(run)
+            spreadsheet_results = self._spreadsheet_reasoning_results(
+                prepared, runtime, run.ready("trace"))
+            draft = self._reasoning_draft_phase(run, spreadsheet_results, _err_sink)
+        finally:
+            _ASK_MODEL_ERRORS.reset(_err_token)
+            _ASK_EMBED_CACHE.reset(_emb_token)
+        # 持久化边界仍由 core 独占:最后一次取消检查与原子 save 都在
+        # ``_commit_reasoning_draft`` 里,任何 stage 实现都够不到它们。
+        return self._commit_reasoning_draft(draft, runtime, prepared)
+
+    def _begin_reasoning_stage(self, prepared, runtime) -> _ReasoningStageRun:
+        """The run state: the confirmed intent contract (parsed once) and the
+        pre-retrieval trace, which starts with the intent step."""
         from app.models.ask import QueryIntentContract
 
         intent_contract = QueryIntentContract.model_validate_json(
             prepared.intent_json
         )
-        research_question = prepared.research_question
-        intent_queries = prepared.intent_queries
-        limits = prepared.limits
         intent_step = TraceStep(
             step_type="intent",
             summary="已按确认后的问题理解开始检索",
             detail=prepared.intent_projection.as_json_mapping(),
             duration_ms=prepared.intent_trace_duration_ms,
         )
-        user_id = prepared.user_id
-        job_id, asked_at = prepared.job_id, prepared.asked_at
-        retrieval_effort = prepared.retrieval_effort
-        on_trace, cancel_event = runtime.trace_sink, runtime.cancellation
-        pre_trace: list[TraceStep] = [intent_step]
-        intent_streamed = False
+        return _ReasoningStageRun(
+            prepared=prepared,
+            runtime=runtime,
+            intent_contract=intent_contract,
+            on_trace=runtime.trace_sink,
+            cancel_event=runtime.cancellation,
+            pre_trace=[intent_step],
+        )
 
-        def commit_response(response, baseline_manifest=None):
-            return self._commit_reasoning_draft(
-                ReasoningResponseDraft(
-                    notebook_id=notebook_id,
-                    question=question,
-                    response=response,
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                    job_id=job_id,
-                    asked_at=asked_at,
-                    baseline_manifest=baseline_manifest,
-                ),
-                runtime,
-                prepared,
-            )
+    def _commit_reasoning_stage_response(self, run, response, baseline_manifest=None):
+        """Commit a short-circuit response through the one persistence boundary."""
+        from app.application.ask_reasoning import ReasoningResponseDraft
 
-        def stream_intent() -> None:
-            nonlocal intent_streamed
-            if not intent_streamed and on_trace:
-                for step in pre_trace:
-                    on_trace(step)
-            intent_streamed = True
+        prepared = run.prepared
+        return self._commit_reasoning_draft(
+            ReasoningResponseDraft(
+                notebook_id=prepared.notebook_id,
+                question=prepared.question,
+                response=response,
+                conversation_id=prepared.conversation_id,
+                user_id=prepared.user_id,
+                job_id=prepared.job_id,
+                asked_at=prepared.asked_at,
+                baseline_manifest=baseline_manifest,
+            ),
+            run.runtime,
+            prepared,
+        )
 
-        def checked_pre_trace(step: TraceStep) -> None:
-            raise_if_cancelled(cancel_event)
-            pre_trace.append(step)
-            if on_trace:
-                on_trace(step)
-
-        def streamed_pre_trace() -> "list[TraceStep] | None":
-            """短路返回要带上的轨迹:已经交出去的那几步。
-
-            有 `on_trace` 就说明 intent(及命中时的 memory)已经交付——流式面推给
-            了客户端,同步/MCP 面(PR-3 起)落进了 `ask_trace_steps`;短路返回不带
-            它们,就是让响应否认自己刚写下的轨迹。真正无消费者的直调(报告引擎等)
-            保持原状:空轨迹仍表示「agentic loop 没跑」。"""
-            return pre_trace if on_trace is not None else None
-
+    def _reasoning_structured_phase(self, run) -> None:
+        """A completeness question over this library's Knowhow tables: enumerate
+        them when the deterministic executor can prove the answer, otherwise
+        record that completeness is unavailable."""
+        notebook_id, limits = run.prepared.notebook_id, run.prepared.limits
+        intent_contract, cancel_event = run.intent_contract, run.cancel_event
         structured_batch = None
         completeness_unavailable = False
         if (
@@ -7101,7 +7216,6 @@ class AskService:
             from app.services.structured_retrieval import (
                 enumerate_knowhow,
                 is_knowhow_enumeration_query,
-                render_structured_answer,
                 supports_structured_knowhow_query,
             )
             scope_question = intent_contract.resolved_question
@@ -7133,7 +7247,7 @@ class AskService:
                     scope_question, intent_contract.result_scope, knowhow_tables
                 )
             ):
-                stream_intent()
+                run.stream_intent()
                 structured_batch = enumerate_knowhow(
                     self.knowhow_store,
                     notebook_id,
@@ -7141,16 +7255,25 @@ class AskService:
                     limits,
                     catalog_snapshot=knowhow_catalog,
                     cancel_event=cancel_event,
-                    on_step=checked_pre_trace,
+                    on_step=run.checked_pre_trace,
                 )
             else:
                 completeness_unavailable = True
         elif intent_contract.completeness_required:
             completeness_unavailable = True
+        run.structured_batch = structured_batch
+        run.completeness_unavailable = completeness_unavailable
 
+    def _reasoning_structured_answer(self, run):
+        """The deterministic Knowhow answer of a complete/aggregate enumeration,
+        committed; ``None`` when the run goes on."""
+        prepared, limits = run.prepared, run.prepared.limits
+        structured_batch, intent_contract = run.ready("structured_batch"), run.intent_contract
         if structured_batch is not None and intent_contract.result_scope in {
             "complete", "aggregate"
         }:
+            from app.services.structured_retrieval import render_structured_answer
+
             conclusion, answer = render_structured_answer(
                 structured_batch,
                 aggregate=intent_contract.result_scope == "aggregate",
@@ -7173,7 +7296,7 @@ class AskService:
                     "truncated_reason": structured_batch.truncated_reason,
                 },
             )
-            checked_pre_trace(answer_step)
+            run.checked_pre_trace(answer_step)
             response = AskResponse(
                 answer_id="",
                 conclusion=conclusion,
@@ -7181,64 +7304,78 @@ class AskService:
                 grounded=structured_batch.complete,
                 evidence_level="grounded" if structured_batch.complete else "overview",
                 llm_mode="structured",
-                conversation_id=conversation_id,
-                retrieval_query=research_question,
-                reasoning_trace=pre_trace,
+                conversation_id=prepared.conversation_id,
+                retrieval_query=prepared.research_question,
+                reasoning_trace=run.pre_trace,
                 intent=intent_contract,
-                retrieval_effort=retrieval_effort,
+                retrieval_effort=prepared.retrieval_effort,
                 result_sets=structured_batch.result_sets,
                 result_coverage=structured_batch.coverage(),
             )
             response.mode = "reasoning"
-            return commit_response(response)
+            return self._commit_reasoning_stage_response(run, response)
+        return None
 
+    def _reasoning_memory_phase(self, run) -> None:
+        """Stream the intent step, then recall this asker's private memories."""
+        prepared = run.prepared
         # Stream the intent step BEFORE memory retrieval.  Memory hits cost an
         # embedding round trip plus a vector scan, and until this step lands the
         # UI has nothing after the synthetic "start" — the reader is left
         # watching an empty trace through work that is already under way.
-        stream_intent()
+        run.stream_intent()
         memory_started = time.perf_counter()
-        memory_hits = self._memory_hits(user_id, notebook_id, research_question)
+        run.memory_hits = self._memory_hits(
+            prepared.user_id, prepared.notebook_id, prepared.research_question)
         # The duration covers the embedding round trip plus the vector scan
         # above: this step is the trace's only account of that work, so leaving
         # it untimed would drop it from a total advertised as covering the run.
-        memory_ms = round((time.perf_counter() - memory_started) * 1000)
+        run.memory_ms = round((time.perf_counter() - memory_started) * 1000)
 
-        def record_memory_step() -> None:
-            """记录本轮召回到的私有记忆(0 命中不记 —— 那在没有记忆的笔记本里全是噪声)。
+    def _record_reasoning_memory_step(self, run) -> None:
+        """记录本轮召回到的私有记忆(0 命中不记 —— 那在没有记忆的笔记本里全是噪声)。
 
-            措辞只声称**召回**,不声称被答案采纳:合成未必会发生(模型未配置、
-            或注册表为空的离线确定性模式),那时说「参考了 N 条」就是假账。调用点
-            也刻意排在短路返回之后,让根本没产生答案的那几轮干脆不提记忆。
+        措辞只声称**召回**,不声称被答案采纳:合成未必会发生(模型未配置、
+        或注册表为空的离线确定性模式),那时说「参考了 N 条」就是假账。调用点
+        也刻意排在短路返回之后,让根本没产生答案的那几轮干脆不提记忆。
 
-            刻意**不**改成「只在记忆真被模型绑成锚点时才记」(codex 第 7 轮 P2 的
-            建议),两个理由:
-            1. 那会把这一步推到答案合成之后才发出,实时轨迹里它就不再出现在事情
-               真正发生的位置 —— 而这一步携带的正是召回本身的耗时。
-            2. 记忆进了 prompt 却没被引用是常态,按锚点过滤会变成**漏报**:
-               轨迹会说没查过记忆,而实际上查了、也喂给了模型。
-            轨迹记录的是引擎做过什么,不是答案归因了什么;归因由答案里的 [k] 引用
-            承担。反向护栏见 test_reasoning_stream.py 的
-            test_memory_step_reports_recall_not_attribution。"""
-            if memory_hits:
-                checked_pre_trace(TraceStep(
-                    step_type="memory",
-                    summary=f"找到 {len(memory_hits)} 条相关记忆",
-                    detail={"count": len(memory_hits)},
-                    duration_ms=memory_ms,
-                ))
-            else:
-                # 零命中也要记一步:候选查询与 embedding 调用照样发生了,把
-                # memory_ms 丢掉,「轨迹覆盖整轮」这句就不成立(codex 第 10 轮 P2)。
-                # 用 skip 而不是 memory —— 「记忆」这个标签只在真的找到东西时出现,
-                # 与 test_memory_step_reports_recall_not_attribution 的口径一致;
-                # 检索器本来就用 skip 记录跳过的工作,这里沿用同一套词汇。
-                checked_pre_trace(TraceStep(
-                    step_type="skip",
-                    summary="未找到相关记忆",
-                    duration_ms=memory_ms,
-                ))
+        刻意**不**改成「只在记忆真被模型绑成锚点时才记」(codex 第 7 轮 P2 的
+        建议),两个理由:
+        1. 那会把这一步推到答案合成之后才发出,实时轨迹里它就不再出现在事情
+           真正发生的位置 —— 而这一步携带的正是召回本身的耗时。
+        2. 记忆进了 prompt 却没被引用是常态,按锚点过滤会变成**漏报**:
+           轨迹会说没查过记忆,而实际上查了、也喂给了模型。
+        轨迹记录的是引擎做过什么,不是答案归因了什么;归因由答案里的 [k] 引用
+        承担。反向护栏见 test_reasoning_stream.py 的
+        test_memory_step_reports_recall_not_attribution。"""
+        memory_hits, memory_ms = run.ready("memory_hits"), run.ready("memory_ms")
+        if memory_hits:
+            run.checked_pre_trace(TraceStep(
+                step_type="memory",
+                summary=f"找到 {len(memory_hits)} 条相关记忆",
+                detail={"count": len(memory_hits)},
+                duration_ms=memory_ms,
+            ))
+        else:
+            # 零命中也要记一步:候选查询与 embedding 调用照样发生了,把
+            # memory_ms 丢掉,「轨迹覆盖整轮」这句就不成立(codex 第 10 轮 P2)。
+            # 用 skip 而不是 memory —— 「记忆」这个标签只在真的找到东西时出现,
+            # 与 test_memory_step_reports_recall_not_attribution 的口径一致;
+            # 检索器本来就用 skip 记录跳过的工作,这里沿用同一套词汇。
+            run.checked_pre_trace(TraceStep(
+                step_type="skip",
+                summary="未找到相关记忆",
+                duration_ms=memory_ms,
+            ))
 
+    def _reasoning_unconfigured_answer(self, run):
+        """The deterministic answer when the primary model is not configured,
+        committed; ``None`` when the run goes on."""
+        prepared, limits = run.prepared, run.prepared.limits
+        structured_batch, intent_contract = run.ready("structured_batch"), run.intent_contract
+        conversation_id = prepared.conversation_id
+        research_question = prepared.research_question
+        retrieval_effort = prepared.retrieval_effort
         if self._primary_llm_unconfigured():
             if structured_batch is not None:
                 from app.services.structured_retrieval import render_structured_answer
@@ -7261,7 +7398,7 @@ class AskService:
                     llm_mode="structured",
                     conversation_id=conversation_id,
                     retrieval_query=research_question,
-                    reasoning_trace=pre_trace,
+                    reasoning_trace=run.pre_trace,
                     intent=intent_contract,
                     retrieval_effort=retrieval_effort,
                     result_sets=structured_batch.result_sets,
@@ -7271,27 +7408,39 @@ class AskService:
                     )],
                 )
                 response.mode = "reasoning"
-                return commit_response(response)
+                return self._commit_reasoning_stage_response(run, response)
             response = self._unconfigured_model_response(
-                notebook_id, question, conversation_id, "reasoning",
-                user_id=user_id, job_id=job_id, asked_at=asked_at,
+                prepared.notebook_id, prepared.question, conversation_id, "reasoning",
+                user_id=prepared.user_id, job_id=prepared.job_id,
+                asked_at=prepared.asked_at,
                 intent=intent_contract,
                 retrieval_query=research_question,
                 retrieval_effort=retrieval_effort,
-                completeness_unavailable=completeness_unavailable,
-                reasoning_trace=streamed_pre_trace(),
+                completeness_unavailable=run.ready("completeness_unavailable"),
+                reasoning_trace=run.streamed_pre_trace(),
                 persist=False,
             )
-            return commit_response(response)
+            return self._commit_reasoning_stage_response(run, response)
+        return None
 
+    def _reasoning_no_source_answer(self, run):
+        """The deterministic answer when nothing in scope is retrievable,
+        committed; ``None`` when the run goes on (``run.no_usable_kg`` set)."""
+        from app.services.reasoning_retrieval import kg_in_scope_for
+
+        prepared, limits = run.prepared, run.prepared.limits
+        notebook_id = prepared.notebook_id
+        structured_batch = run.ready("structured_batch")
+        completeness_unavailable = run.ready("completeness_unavailable")
         # 无图 ≠ 无法作答。原文段落检索与元素/知识对象清单在「解析了来源但没建
         # 图」的库里照样作答,而自动 KG 抽取默认是关的——那正是常态。所以早退收窄
         # 成「无图 **且** 枚举工具拿不出东西 **且** 当前笔记本一条可检索来源都没有」;
         # 放行后进入正常 reasoning 循环:图是空的,图动作自然收缩,原文检索照常。
         # kg_required 的语义原样保留(无图且无可用参考库 = True),它只是不再顺带
         # 阻断执行——旗标是响应契约的一部分,不能因为这一轮跑通了就变成假的。
-        no_usable_kg = not memory_hits and not kg_in_scope_for(
+        no_usable_kg = not run.ready("memory_hits") and not kg_in_scope_for(
             self.retrieval, notebook_id)
+        run.no_usable_kg = no_usable_kg
         if no_usable_kg and not self._no_kg_scope_admits_run(notebook_id):
             coverage_prefix, coverage_answer = "", ""
             notice = "本次请求未完成，不能视为全部结果。" if completeness_unavailable else ""
@@ -7318,197 +7467,211 @@ class AskService:
                     "grounded"
                     if structured_batch and structured_batch.complete else "inferred"
                 ),
-                conversation_id=conversation_id, retrieval_query=research_question,
+                conversation_id=prepared.conversation_id,
+                retrieval_query=prepared.research_question,
                 llm_mode="deterministic", kg_required=True,
-                intent=intent_contract,
-                retrieval_effort=retrieval_effort,
+                intent=run.intent_contract,
+                retrieval_effort=prepared.retrieval_effort,
                 result_sets=(structured_batch.result_sets if structured_batch else []),
                 result_coverage=(
                     structured_batch.coverage() if structured_batch else None
                 ),
                 reasoning_trace=(
-                    pre_trace
-                    if structured_batch is not None else streamed_pre_trace()
+                    run.pre_trace
+                    if structured_batch is not None else run.streamed_pre_trace()
                 ))
             response.mode = "reasoning"
-            return commit_response(response)
+            return self._commit_reasoning_stage_response(run, response)
+        return None
 
-        _err_sink: list = []
-        _err_token = _ASK_MODEL_ERRORS.set(_err_sink)
-        # P1-A(本轮 scope):只挂 reasoning 模式。ask_chunk 同样受益(已退役的
-        # graph 引擎曾也受益),但等价性回放验证只覆盖了 reasoning——留作 fast-follow。
-        _emb_token = _ASK_EMBED_CACHE.set({})
+    def _reasoning_retrieval_phase(self, run) -> None:
+        """The typed retrieval seam, then the selected-source graph lane; the
+        evidence lands on ``run``. Fail-soft: a failure other than a cancel,
+        a retrieval-control refusal or a stage-boundary error leaves the run
+        with no evidence and only the pre-retrieval trace."""
+        from app.application.ask_reasoning import StageBoundaryError
+        from app.services.reasoning_retrieval import ReasoningResult
+
+        prepared, runtime = run.prepared, run.runtime
+        notebook_id, limits = prepared.notebook_id, prepared.limits
+        cancel_event, user_id = run.cancel_event, prepared.user_id
+        pre_trace = run.pre_trace
         source_graph_status = None
         historical_reasoning_chunks = []
+        result = ReasoningResult()
         try:
-            # intent already streamed above (before memory retrieval); stream_intent
-            # stays idempotent because the structured branch may emit it earlier.
-            # 记忆那一步排在这里:上面每一条短路返回都不会产出答案,在它们之前记
-            # 就等于给一次没发生的作答留下「用过你的记忆」的痕迹。
-            self._record_report_and_memory_steps(prepared, checked_pre_trace, record_memory_step)
-
-            def checked_trace(step):
-                raise_if_cancelled(cancel_event)
-                if on_trace:
-                    on_trace(step)
-
-            result = ReasoningResult()
-            try:
-                # 端口化构造(与冻结的 from_repository 工厂逐字段同源):检索/模型/
-                # 社区端口直通,communities 逐次新建 —— sibling_min_bridge 调用时读。
-                from app.application.ask_reasoning import (
-                    ReasoningRetrievalRuntime,
-                    ReasoningRunInput,
-                    RetrievedReasoningAsk,
-                    execute_reasoning_retrieval_stage,
-                )
-
-                retriever = self._build_reasoning_retriever(
-                    cancel_event=cancel_event, user_id=user_id,
-                    egress_question=_egress_question(prepared), report_outline=_report_outline_of(prepared))
-                retrieval_runtime = ReasoningRetrievalRuntime(
-                    scope=runtime.scope,
-                    retrieval_run=runtime.retrieval_run,
-                    cancellation=runtime.cancellation,
-                    trace_sink=checked_trace,
-                    connection_probe=runtime.connection_probe,
-                )
-                evidence = execute_reasoning_retrieval_stage(
-                    retriever,
-                    ReasoningRunInput(
-                        notebook_id=notebook_id, question=research_question,
-                        history=_with_report_outline(reasoning_history, _report_outline_of(prepared)),
-                        top_n=None, max_steps=None,
-                        intent_queries=tuple(intent_queries), limits=limits, intent_keywords=prepared.intent_keywords,
-                        # 关闭字段投影与 intent trace 同源；检索器只能通过
-                        # ``as_mapping`` 进入既有 project_run_step 收窄点。
-                        intent=prepared.intent_projection,
-                    ),
-                    retrieval_runtime,
-                )
-                retrieved = RetrievedReasoningAsk(
-                    prepared=prepared,
-                    evidence=evidence,
-                )
-                result = retrieved.evidence
-                top_hits, elements, trace, chunks, chains = (
-                    result.top_hits, result.elements, result.trace, result.chunks,
-                    result.chains)
-                # 类型化集合清单(CollectionEnumerationOutcome)原样带出,本任务
-                # 不消费:进证据 prompt 与 AskResponse.result_sets 是 T5 的地盘。
-                enumerations = result.enumerations
-                # 本 run 的按篇原文取样产物(含见证失败的空产物)。同款原样带出。
-                document_reads = result.document_reads
-                # 本 run 的集合地图。run 内已经建过一次(计数走有界缓存),这里
-                # 带出来直接进合成上下文,不重建。
-                collection_map_text = result.collection_map_text
-                # 终态大纲(仅穷尽档非空)+ 被 top_n 截断挤出 top_hits 的绑定对象。
-                # 按节合成按每节的绑定证据分片装配上下文,两者合起来才解析得全
-                # (见 reasoning_retrieval.outline_truncated_kg_evidence)。
-                reasoning_outline = result.outline
-                reasoning_outline_evidence = result.outline_evidence
-                trace = [*pre_trace, *trace]
-                historical_reasoning_chunks = list(chunks)
-                chunks, source_graph_status = self._activate_selected_source_graph(
-                    notebook_id,
-                    historical_reasoning_chunks,
-                    top_hits=top_hits,
-                    max_results=self.settings.ppr_top_chunks,
-                )
-            except (AskCancelled, RetrievalControlError, StageBoundaryError):
-                raise
-            except Exception:
-                top_hits, elements, trace, chunks, chains = (
-                    [], [], list(pre_trace), [], []
-                )
-                enumerations = []
-                document_reads = []
-                collection_map_text = ""
-                reasoning_outline = []
-                reasoning_outline_evidence = []
-
-            spreadsheet_results = self._spreadsheet_reasoning_results(prepared, runtime, trace)
-
-            # 检索之后、合成之前的取消检查。草稿阶段做的第一件事是按笔记本
-            # 读 schema 覆盖层(一次真实 I/O);历史检查排在那次读取**之后**,
-            # 于是被取消的一轮会先白付一次立刻丢弃的读。提到边界之前结局仍是
-            # 同一个 AskCancelled,只是不再付那笔钱(与「拿到槽位后、发起 I/O
-            # 前再检查一次」同一条口径)。已取消且那次 schema 读自身也会抛错时,
-            # 异常类型从该读的异常变成 AskCancelled(取消优先)。
-            raise_if_cancelled(cancel_event)
-            # 权威复核同样上提到编排器:曾经是 ``_draft_reasoning_response``
-            # (出厂默认实现)自己的 prologue 才做的检查,现在挪到这里、紧挨
-            # 进入 seam 之前 —— 这样注入实现也在已验证权威下进入,而不是只有
-            # 出厂路径受保护。``_draft_reasoning_response`` 自己保留两条
-            # ``type(...)`` 检查作纵深防御,但不再重复这次(权威不会在同一次
-            # 调用内两次漂移)的全量校验。
-            self._assert_reasoning_runtime(
-                runtime,
-                "response-draft",
-                notebook_id=notebook_id,
-                user_id=user_id,
+            # 端口化构造(与冻结的 from_repository 工厂逐字段同源):检索/模型/
+            # 社区端口直通,communities 逐次新建 —— sibling_min_bridge 调用时读。
+            from app.application.ask_reasoning import (
+                ReasoningRetrievalRuntime,
+                ReasoningRunInput,
+                RetrievedReasoningAsk,
+                execute_reasoning_retrieval_stage,
             )
-            draft = execute_response_draft_stage(
-                self._response_draft_stage_for(prepared),
-                ResponseDraftInput(
-                    prepared=prepared,
-                    intent_contract=intent_contract,
-                    top_hits=tuple(top_hits),
-                    elements=tuple(elements),
-                    trace=tuple(trace),
-                    chunks=tuple(chunks),
-                    chains=tuple(chains),
-                    enumerations=tuple(enumerations),
-                    document_reads=tuple(document_reads),
-                    collection_map_text=collection_map_text,
-                    outline=tuple(reasoning_outline),
-                    outline_evidence=tuple(reasoning_outline_evidence),
-                    historical_chunks=tuple(historical_reasoning_chunks),
-                    memory_hits=tuple(memory_hits),
-                    structured_batch=structured_batch,
-                    completeness_unavailable=completeness_unavailable,
-                    kg_required=no_usable_kg,
-                    # 检索器自己的候选账本(broad-except 降级时 ``result`` 仍是
-                    # 进入这一轮时的那个对象,取不到就是 None)——原样保留旧的
-                    # getattr 语义,只是把它算在编排侧、不让整个检索结果对象
-                    # 跨过边界。
-                    candidate_manifest=getattr(result, "baseline_manifest", None),
-                    # 同上一句的 getattr 降级语义:插件动作失败/检索降级的
-                    # 一轮拿到的是「零条外部证据」,而不是异常。
-                    external_evidence=tuple(
-                        getattr(result, "external_evidence", ()) or ()),
-                    spreadsheet_results=tuple(spreadsheet_results),
+
+            retriever = self._build_reasoning_retriever(
+                cancel_event=cancel_event, user_id=user_id,
+                egress_question=_egress_question(prepared), report_outline=_report_outline_of(prepared))
+            retrieval_runtime = ReasoningRetrievalRuntime(
+                scope=runtime.scope,
+                retrieval_run=runtime.retrieval_run,
+                cancellation=runtime.cancellation,
+                trace_sink=run.checked_trace,
+                connection_probe=runtime.connection_probe,
+            )
+            evidence = execute_reasoning_retrieval_stage(
+                retriever,
+                ReasoningRunInput(
+                    notebook_id=notebook_id, question=prepared.research_question,
+                    history=_with_report_outline(prepared.history, _report_outline_of(prepared)),
+                    top_n=None, max_steps=None,
+                    intent_queries=tuple(prepared.intent_queries), limits=limits, intent_keywords=prepared.intent_keywords,
+                    # 关闭字段投影与 intent trace 同源；检索器只能通过
+                    # ``as_mapping`` 进入既有 project_run_step 收窄点。
+                    intent=prepared.intent_projection,
                 ),
-                runtime,
+                retrieval_runtime,
             )
-            # ``model_errors`` 由 core 统一填充,不再要求(也不再允许假定)stage
-            # 自己写了它:检索阶段(memory 召回、``ReasoningRetriever.run()`` 内部
-            # 的规划/反思模型调用)记的报警都落在这同一个请求局部 ``_err_sink``
-            # 里,一个从不 import 私有 ``_ASK_MODEL_ERRORS`` 的注入 stage 不会
-            # 因此丢掉它们(codex #571 R2 P2)。放在 stage 返回之后、``finally``
-            # 的 reset 之前——``_err_sink`` 是一个局部变量,值不因 ContextVar
-            # reset 而改变,但填充动作留在权威读取仍然有效的这一刻,不必去
-            # reset 之后再论证为什么局部变量还能用。
-            # 类型防御同 ``_commit_reasoning_draft``:``draft.response`` 若不是
-            # ``AskResponse``,让那个边界自己的类型检查去报
-            # "invalid reasoning response graph",这里不重复、也不因此崩溃。
-            if type(draft.response) is AskResponse:
-                draft.response.model_errors = [
-                    ModelError(**e) for e in _err_sink
-                ]
-                # The draft stage has returned: nothing from this consultation
-                # could have entered its envelope or changed the answer body.
-                self._attach_gap_consult_result(
-                    draft.response, prepared, limits, trace,
-                    top_hits=top_hits, chunks=chunks, elements=elements,
-                    cancel_event=cancel_event, on_trace=on_trace,
-                )
-        finally:
-            _ASK_MODEL_ERRORS.reset(_err_token)
-            _ASK_EMBED_CACHE.reset(_emb_token)
-        # 持久化边界仍由 core 独占:最后一次取消检查与原子 save 都在
-        # ``_commit_reasoning_draft`` 里,任何 stage 实现都够不到它们。
-        return self._commit_reasoning_draft(draft, runtime, prepared)
+            retrieved = RetrievedReasoningAsk(
+                prepared=prepared,
+                evidence=evidence,
+            )
+            result = retrieved.evidence
+            top_hits, elements, trace, chunks, chains = (
+                result.top_hits, result.elements, result.trace, result.chunks,
+                result.chains)
+            # 类型化集合清单(CollectionEnumerationOutcome)原样带出,本任务
+            # 不消费:进证据 prompt 与 AskResponse.result_sets 是 T5 的地盘。
+            enumerations = result.enumerations
+            # 本 run 的按篇原文取样产物(含见证失败的空产物)。同款原样带出。
+            document_reads = result.document_reads
+            # 本 run 的集合地图。run 内已经建过一次(计数走有界缓存),这里
+            # 带出来直接进合成上下文,不重建。
+            collection_map_text = result.collection_map_text
+            # 终态大纲(仅穷尽档非空)+ 被 top_n 截断挤出 top_hits 的绑定对象。
+            # 按节合成按每节的绑定证据分片装配上下文,两者合起来才解析得全
+            # (见 reasoning_retrieval.outline_truncated_kg_evidence)。
+            reasoning_outline = result.outline
+            reasoning_outline_evidence = result.outline_evidence
+            trace = [*pre_trace, *trace]
+            historical_reasoning_chunks = list(chunks)
+            chunks, source_graph_status = self._activate_selected_source_graph(
+                notebook_id,
+                historical_reasoning_chunks,
+                top_hits=top_hits,
+                max_results=self.settings.ppr_top_chunks,
+            )
+        except (AskCancelled, RetrievalControlError, StageBoundaryError):
+            raise
+        except Exception:
+            top_hits, elements, trace, chunks, chains = (
+                [], [], list(pre_trace), [], []
+            )
+            enumerations = []
+            document_reads = []
+            collection_map_text = ""
+            reasoning_outline = []
+            reasoning_outline_evidence = []
+        run.result = result
+        run.top_hits, run.elements, run.trace = top_hits, elements, trace
+        run.chunks, run.chains = chunks, chains
+        run.enumerations, run.document_reads = enumerations, document_reads
+        run.collection_map_text = collection_map_text
+        run.outline, run.outline_evidence = reasoning_outline, reasoning_outline_evidence
+        run.historical_chunks = historical_reasoning_chunks
+
+    def _reasoning_draft_phase(self, run, spreadsheet_results, err_sink):
+        """Enter the draft stage under a re-verified authority, then hand the
+        drafted answer the run's model errors and the post-draft outside
+        material. Runs inside the orchestrator's ContextVar window."""
+        from app.application.ask_reasoning import execute_response_draft_stage
+
+        prepared, runtime = run.prepared, run.runtime
+        # 检索之后、合成之前的取消检查。草稿阶段做的第一件事是按笔记本
+        # 读 schema 覆盖层(一次真实 I/O);历史检查排在那次读取**之后**,
+        # 于是被取消的一轮会先白付一次立刻丢弃的读。提到边界之前结局仍是
+        # 同一个 AskCancelled,只是不再付那笔钱(与「拿到槽位后、发起 I/O
+        # 前再检查一次」同一条口径)。已取消且那次 schema 读自身也会抛错时,
+        # 异常类型从该读的异常变成 AskCancelled(取消优先)。
+        raise_if_cancelled(run.cancel_event)
+        # 权威复核同样上提到编排器:曾经是 ``_draft_reasoning_response``
+        # (出厂默认实现)自己的 prologue 才做的检查,现在挪到这里、紧挨
+        # 进入 seam 之前 —— 这样注入实现也在已验证权威下进入,而不是只有
+        # 出厂路径受保护。``_draft_reasoning_response`` 自己保留两条
+        # ``type(...)`` 检查作纵深防御,但不再重复这次(权威不会在同一次
+        # 调用内两次漂移)的全量校验。
+        self._assert_reasoning_runtime(
+            runtime,
+            "response-draft",
+            notebook_id=prepared.notebook_id,
+            user_id=prepared.user_id,
+        )
+        draft = execute_response_draft_stage(
+            self._response_draft_stage_for(prepared),
+            self._reasoning_draft_input(run, spreadsheet_results),
+            runtime,
+        )
+        # ``model_errors`` 由 core 统一填充,不再要求(也不再允许假定)stage
+        # 自己写了它:检索阶段(memory 召回、``ReasoningRetriever.run()`` 内部
+        # 的规划/反思模型调用)记的报警都落在这同一个请求局部 ``_err_sink``
+        # 里,一个从不 import 私有 ``_ASK_MODEL_ERRORS`` 的注入 stage 不会
+        # 因此丢掉它们(codex #571 R2 P2)。放在 stage 返回之后、``finally``
+        # 的 reset 之前——``_err_sink`` 是一个局部变量,值不因 ContextVar
+        # reset 而改变,但填充动作留在权威读取仍然有效的这一刻,不必去
+        # reset 之后再论证为什么局部变量还能用。
+        # 类型防御同 ``_commit_reasoning_draft``:``draft.response`` 若不是
+        # ``AskResponse``,让那个边界自己的类型检查去报
+        # "invalid reasoning response graph",这里不重复、也不因此崩溃。
+        if type(draft.response) is AskResponse:
+            draft.response.model_errors = [
+                ModelError(**e) for e in err_sink
+            ]
+            # The draft stage has returned: nothing from this consultation
+            # could have entered its envelope or changed the answer body.
+            self._attach_gap_consult_result(
+                draft.response, prepared, prepared.limits, run.ready("trace"),
+                top_hits=run.ready("top_hits"), chunks=run.ready("chunks"),
+                elements=run.ready("elements"),
+                cancel_event=run.cancel_event, on_trace=run.on_trace,
+            )
+        return draft
+
+    def _reasoning_draft_input(self, run, spreadsheet_results):
+        """The ``ResponseDraftInput`` envelope: the evidence after selected-
+        source-graph activation and fail-soft degradation, plus the
+        pre-retrieval facts the drafted answer discloses."""
+        from app.application.ask_reasoning import ResponseDraftInput
+
+        result = run.ready("result")
+        return ResponseDraftInput(
+            prepared=run.prepared,
+            intent_contract=run.intent_contract,
+            top_hits=tuple(run.ready("top_hits")),
+            elements=tuple(run.ready("elements")),
+            trace=tuple(run.ready("trace")),
+            chunks=tuple(run.ready("chunks")),
+            chains=tuple(run.ready("chains")),
+            enumerations=tuple(run.ready("enumerations")),
+            document_reads=tuple(run.ready("document_reads")),
+            collection_map_text=run.ready("collection_map_text"),
+            outline=tuple(run.ready("outline")),
+            outline_evidence=tuple(run.ready("outline_evidence")),
+            historical_chunks=tuple(run.ready("historical_chunks")),
+            memory_hits=tuple(run.ready("memory_hits")),
+            structured_batch=run.ready("structured_batch"),
+            completeness_unavailable=run.ready("completeness_unavailable"),
+            kg_required=run.ready("no_usable_kg"),
+            # 检索器自己的候选账本(broad-except 降级时 ``result`` 仍是
+            # 进入这一轮时的那个对象,取不到就是 None)——原样保留旧的
+            # getattr 语义,只是把它算在编排侧、不让整个检索结果对象
+            # 跨过边界。
+            candidate_manifest=getattr(result, "baseline_manifest", None),
+            # 同上一句的 getattr 降级语义:插件动作失败/检索降级的
+            # 一轮拿到的是「零条外部证据」,而不是异常。
+            external_evidence=tuple(
+                getattr(result, "external_evidence", ()) or ()),
+            spreadsheet_results=tuple(spreadsheet_results),
+        )
 
     def _assemble_document_read_block(
         self,
@@ -7967,7 +8130,7 @@ class AskService:
         only mutations left after the frozen envelope are ``model_errors``
         (filled by the orchestrator right after this stage returns, from the
         same request-local sink, so every stage gets the same treatment
-        without needing to import it -- see ``_run_reasoning_stage``) and
+        without needing to import it -- see ``_reasoning_draft_phase``) and
         ``answer_id`` (which the commit boundary owns).
         """
         from app.application.ask_reasoning import (
@@ -7978,7 +8141,7 @@ class AskService:
         )
 
         # Defense-in-depth only: the full authority sweep for this point now
-        # runs once in the orchestrator (``_run_reasoning_stage``), right
+        # runs once in the orchestrator (``_reasoning_draft_phase``), right
         # before it enters this seam, so every stage implementation -- shipped
         # or injected -- is admitted under the same already-verified runtime.
         # These two ``type(...)`` checks stay here because this method is
@@ -8500,7 +8663,7 @@ class AskService:
 
         response.mode = "reasoning"
         # ``model_errors`` is deliberately *not* set here any more: the
-        # orchestrator (``_run_reasoning_stage``) fills
+        # orchestrator (``_reasoning_draft_phase``) fills
         # ``draft.response.model_errors`` from the same request-local
         # ``_err_sink`` right after this stage returns, so every stage --
         # shipped or injected -- gets the same treatment and an injected
