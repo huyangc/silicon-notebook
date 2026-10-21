@@ -8,7 +8,8 @@ import { ChannelTabs } from "./components/ChannelTabs";
 import { StatsBar } from "./components/StatsBar";
 import { LogList } from "./components/LogList";
 import { LogDetail } from "./components/LogDetail";
-import { fetchMe, type AuthUser } from "../../auth.ts";
+import type { AuthUser } from "../../auth.ts";
+import { fetchPageUser } from "../../page-user.ts";
 import { fetchAdminUsers, type AdminUserUsage } from "../../admin/usage/api.ts";
 import { fetchSystemConfiguration } from "../../system-api.ts";
 import { PageHeader } from "../../components/PageHeader.tsx";
@@ -77,7 +78,7 @@ export default function LogsPage() {
   const [me, setMe] = useState<AuthUser | null>(null);
   // 「当前用户还没回来」与「回来了但取不到」必须是两个可见的态：活动流的用户维度
   // 就靠 me.id 解析，把两者混进一个 null 会让页面先说「没有活动记录」，或者在
-  // fetchMe 失败后**永远**这么说而不给任何提示。
+  // fetchPageUser 失败后**永远**这么说而不给任何提示。
   const [meResolved, setMeResolved] = useState(false);
   const [meError, setMeError] = useState("");
   const [adminUsers, setAdminUsers] = useState<AdminUserUsage[]>([]);
@@ -179,7 +180,7 @@ export default function LogsPage() {
 
   // current user + (admin-only) user list for the drill-down dropdown
   useEffect(() => {
-    fetchMe()
+    fetchPageUser()
       .then((u) => {
         setMe(u);
         setMeResolved(true);
@@ -485,8 +486,10 @@ export default function LogsPage() {
   // 顶部范围条选「我自己」时 owner 是空串，而活动流的端点要的是一个具体用户 id。
   // 未就绪（me 还没回来）时给空串，ActivityView 会按「尚未确定用户」跳过取数——
   // 但它同时要知道这是「还没确定」还是「确定了、就是空」，见下面两个标志。
-  const activityUserId = owner || me?.id || "";
-  // 显式选了 owner 时不依赖 me，因此 fetchMe 的挂起/失败都与活动视图无关。
+  // 活动流要等会话检查落定再取数：被拒的会话（401）正带着本页去登录页，fetchPageUser
+  // 永不落定，抢先发出的读只会先把自己的 401 摆出来。落定之后显式选了 owner 时不依赖
+  // me，检查失败也照常按 owner 取数。
+  const activityUserId = meResolved ? owner || me?.id || "" : "";
   const activityUserPending = !activityUserId && !meResolved;
   const activityUserError = activityUserId ? "" : meError;
   // 页面级范围键：视图 tab + 用户 + 日期。ActivityView 再叠上 notebook_id。
@@ -652,7 +655,8 @@ export default function LogsPage() {
         </label>
       </div>
 
-      {error ? <div className="errorbar">{error}</div> : null}
+      {/* 同理：模型调用一侧的读失败等会话检查落定后才显示。 */}
+      {error && meResolved ? <div className="errorbar">{error}</div> : null}
       {truncated ? (
         <div className="logview-trunc">
           已截断,仅显示最近 {records.length} 条,请选择具体某天或缩小范围

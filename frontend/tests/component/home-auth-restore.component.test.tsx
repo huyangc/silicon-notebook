@@ -2,12 +2,20 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, expect, test, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 
+// jsdom cannot navigate: returning to another page after sign-in leaves through this seam.
+const navigation = vi.hoisted(() => ({ replace: vi.fn() }));
+vi.mock("../../app/auth-return-location", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../app/auth-return-location")>(),
+  replacePageLocation: navigation.replace,
+}));
+
 import Home from "../../app/page";
 import { getToken, setToken } from "../../app/auth";
 import { rememberLoginEntrance, consumeLoginEntrance } from "../../app/login-entrance";
 
 afterEach(() => {
   cleanup();
+  navigation.replace.mockReset();
   vi.unstubAllGlobals();
   window.localStorage.clear();
   window.sessionStorage.clear();
@@ -156,4 +164,74 @@ test("a rejected session with unknown capabilities is cleared and login stays cl
   expect(getToken()).toBe("");
   expect(requests).toEqual(["/api/ready", "/api/auth/capabilities", "/api/me"]);
   expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
+});
+
+const signInFrom = (page: string) => `/?next=${encodeURIComponent(page)}`;
+
+async function signInLocally() {
+  const actor = userEvent.setup();
+  await actor.type(await screen.findByLabelText("用户名"), "alice");
+  await actor.type(screen.getByLabelText("密码"), "pw");
+  await actor.click(screen.getByRole("button", { name: "本地登录" }));
+}
+
+test("local sign-in reached from another page returns there with its path and query", async () => {
+  const requests = authenticationServer({ ssoLogin: false });
+  window.history.replaceState(null, "", signInFrom("/admin/usage?sheet=questions"));
+  render(<Home />);
+  await signInLocally();
+  await waitFor(() => expect(navigation.replace).toHaveBeenCalledWith("/admin/usage?sheet=questions"));
+  expect(getToken()).toBe("new-local-session");
+  expect(screen.getByText("加载中…")).toBeInTheDocument();
+  expect(screen.queryByText("登录成功，正在翻开笔记本…")).not.toBeInTheDocument();
+  expect(requests).not.toContain("/api/notebooks");
+});
+
+test("unified sign-in comes back through the workspace and goes on to the page it started from", async () => {
+  // The provider returns to the saved location, which is the sign-in page with its return parameter.
+  const requests = authenticationServer();
+  setToken("sso-token");
+  rememberLoginEntrance("user-1");
+  window.history.replaceState(null, "", signInFrom("/wishes?kind=bug"));
+  render(<Home />);
+  await waitFor(() => expect(navigation.replace).toHaveBeenCalledWith("/wishes?kind=bug"));
+  expect(getToken()).toBe("sso-token");
+  expect(screen.getByText("加载中…")).toBeInTheDocument();
+  // The entrance animation belongs to the workspace and must not replay on its next visit.
+  expect(consumeLoginEntrance("user-1")).toBe(false);
+  expect(requests).not.toContain("/api/notebooks");
+});
+
+test("a rejected session on the sign-in page keeps the return target for the next sign-in", async () => {
+  authenticationServer({ ssoLogin: false, rejected: true });
+  setToken("stale-session");
+  window.history.replaceState(null, "", signInFrom("/updates"));
+  render(<Home />);
+  expect(await screen.findByLabelText("用户名")).toBeInTheDocument();
+  expect(getToken()).toBe("");
+  expect(navigation.replace).not.toHaveBeenCalled();
+  expect(window.location.search).toBe(`?next=${encodeURIComponent("/updates")}`);
+});
+
+test.each(["https://evil.example/admin", "//evil.example/admin", "/\\evil.example"])(
+  "sign-in refuses the external return target %s and opens the workspace",
+  async (target) => {
+    authenticationServer({ ssoLogin: false });
+    window.history.replaceState(null, "", signInFrom(target));
+    render(<Home />);
+    await signInLocally();
+    expect(await screen.findByText("登录成功，正在翻开笔记本…")).toBeInTheDocument();
+    expect(navigation.replace).not.toHaveBeenCalled();
+    expect(window.location.search).toBe("");
+  },
+);
+
+test("a restored session refuses an external return target and stays in the workspace", async () => {
+  const requests = authenticationServer();
+  setToken("sso-token");
+  window.history.replaceState(null, "", signInFrom("https://evil.example/"));
+  render(<Home />);
+  await waitFor(() => expect(requests).toContain("/api/notebooks"));
+  expect(navigation.replace).not.toHaveBeenCalled();
+  expect(window.location.search).toBe("");
 });

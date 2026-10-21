@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchMe } from "../auth.ts";
+import { fetchPageUser } from "../page-user.ts";
 import { listNotebooks } from "../notebook-api.ts";
 import { askQuestionLimitHint } from "../ask-api.ts";
 import { httpErrorStatus, toUserMessage } from "../errors.ts";
@@ -250,7 +250,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     setTurnOffset(null);
     setConversationId(resumeId || "");
     try {
-      const me = await fetchMe();
+      const me = await fetchPageUser();
       if (mounted.current && owner.current === ticket) setLoadedUiMode(normalizeUiMode(me.ui_mode));
       const [libraries, history] = await Promise.all([listNotebooks(), listGlobalConversations()]);
       if (!mounted.current || owner.current !== ticket) return;

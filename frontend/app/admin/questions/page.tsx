@@ -3,7 +3,7 @@
 import { FileText, Globe, MessageCircleQuestion, Search, ThumbsDown, ThumbsUp, Users } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
-import { fetchMe } from "../../auth.ts";
+import { fetchPageUser } from "../../page-user.ts";
 import { PageHeader } from "../../components/PageHeader.tsx";
 import { Pagination } from "../../Pagination.tsx";
 import { toUserMessage } from "../../errors.ts";
@@ -83,7 +83,7 @@ export default function AdminQuestionsPage() {
   const initialize = useCallback(async () => {
     setState({ kind: "loading" });
     try {
-      const me = await fetchMe();
+      const me = await fetchPageUser();
       if (me.role !== "admin") {
         setAuthorized(false);
         setState({ kind: "forbidden" });

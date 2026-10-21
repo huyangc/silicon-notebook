@@ -3,7 +3,7 @@
 // 「已加载的扩展」——管理员页,`GET /admin/extensions` 的前端对等面,外加一处写
 // 动作:部署插件的运行时开关(`PATCH /admin/extensions/{plugin_id}`)。
 //
-// 壳层逐条镜像 admin/usage/page.tsx:同一个 `fetchMe` 登录门(先判角色、再取数据)、
+// 壳层逐条镜像 admin/usage/page.tsx:同一个 `fetchPageUser` 登录门(先判角色、再取数据)、
 // 同一套四态(加载中 / 无权限 / 加载失败 / 就绪)、同一个 PageHeader、失败一律经
 // `toUserMessage` 出文案。与 usage 的差别只有一处,是刻意的:这里没有 usage 那个
 // `FORBIDDEN_SENTINEL`。403 的识别改用 `httpErrorStatus`——它读的是 errors.ts
@@ -27,7 +27,7 @@ import { Fragment, useCallback, useEffect, useState } from "react";
 // 写法,用在复制结果上)。这里复用同一个时长量级:错误文案比复制成功的两个字长,
 // 6 秒足够读完,又不会长到看起来"卡住了"。
 
-import { fetchMe } from "../../auth.ts";
+import { fetchPageUser } from "../../page-user.ts";
 import { PageHeader } from "../../components/PageHeader.tsx";
 import { httpErrorStatus, toUserMessage } from "../../errors.ts";
 import { label } from "../../vocabulary.ts";
@@ -258,7 +258,7 @@ export default function AdminExtensionsPage() {
   useEffect(() => {
     (async () => {
       try {
-        const me = await fetchMe();
+        const me = await fetchPageUser();
         if (me.role !== "admin") {
           setState({ kind: "forbidden" });
           return;
