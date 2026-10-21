@@ -72,9 +72,11 @@ def test_record_run_requires_retrieval_query_embedding(monkeypatch, capsys):
             assert workload_id == "retrieval_query_embedding"
             return False
 
-    import app.services.sqlite_repository as repository_module
+    import app.services.maintenance_cli as maintenance_cli
     monkeypatch.setattr(
-        repository_module, "SQLiteRepository", lambda settings: _Repo()
+        maintenance_cli,
+        "create_bare_schema_guest_repository",
+        lambda settings, **_kwargs: _Repo(),
     )
 
     with pytest.raises(SystemExit) as exc:
@@ -121,9 +123,13 @@ def test_report_run_enters_report_generation_scope(monkeypatch):
 
     import app.core.request_context as request_context
     import app.services.batch_ingest as batch_ingest
-    import app.services.sqlite_repository as repository_module
+    import app.services.maintenance_cli as maintenance_cli
 
-    monkeypatch.setattr(repository_module, "SQLiteRepository", lambda settings: _Repo())
+    monkeypatch.setattr(
+        maintenance_cli,
+        "create_bare_schema_guest_repository",
+        lambda settings, **_kwargs: _Repo(),
+    )
     monkeypatch.setattr(batch_ingest, "_resolve_owner_profile", lambda repo, owner: _Profile())
     monkeypatch.setattr(request_context, "set_request_user", lambda profile: object())
     monkeypatch.setattr(request_context, "reset_request_user", lambda token: None)
