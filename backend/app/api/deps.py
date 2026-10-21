@@ -12,6 +12,7 @@ from app.services.model_work import model_artifact_scope
 from app.models.identity import UserProfile
 from app.bootstrap import application_extension_runtime, create_application_repository
 from app.domain.report_export import ReportExporterHostPort
+from app.repositories.global_ask_ports import GlobalAskAuthorityStorePort
 from app.repositories.ports import AdminQueryRepository, AnswerMemorySourceRepository, ExtensionToggleStorePort, GroupStorePort, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, NotebookStorePort, RetrievalExperienceStorePort, SourceRepository, AskStreamPort, McpMemoryRepository, MemoryRepository, WishStorePort
 
 
@@ -129,6 +130,27 @@ def global_ask_repository():
     model -- an administrator keeps the audit history after the owner has lost
     a participant's read access, exactly as ``guarded_ask_detail`` does."""
     return repository()._runtime.global_ask_store  # type: ignore[attr-defined]
+
+
+def ask_history_store():
+    """The notebook Ask state store itself, for the MCP history reads
+    (``list_conversations`` / ``get_conversation``): one owner's conversation
+    list per notebook (``list_conversations(notebook_id, user_id)``) and one
+    turn of one conversation (``conversation_turn``), identity passed
+    explicitly. The facade's two readers are the browser's and cost more than
+    these calls need: its ``list_conversations`` first builds the notebook's
+    whole summary (memory counts included) to prove the notebook exists, and
+    its ``get_conversation`` validates every turn's payload and reads the
+    running job's trace. Not on the facade: its surface only shrinks."""
+    return repository()._runtime.ask_state  # type: ignore[attr-defined]
+
+
+def notebook_read_authority() -> GlobalAskAuthorityStorePort:
+    """The batch read check (``readable_notebook_ids``): the predicate of
+    ``user_can_read_notebook`` over many notebooks in one statement, the same
+    seat global Ask judges its libraries with. For the MCP history lists,
+    which span every notebook of a token's allowlist."""
+    return repository()._runtime.sharing_store  # type: ignore[attr-defined]
 
 def _bearer_token(request: Request) -> str:
     header = request.headers.get("Authorization", "")

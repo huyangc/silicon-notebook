@@ -22,10 +22,13 @@ every gate.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import datetime
 from itertools import count
 from types import SimpleNamespace
 
+from app.api.mcp_tools.ask import notebook_view
+from app.api.mcp_tools.conversations import conversation_row, turn_page
 from tests.answer_link_service_cases import _notebook, _set_access, _user, _write
 from tests.citation_check_testkit import seed_source
 from tests.global_ask_history_store_cases import global_job_payload
@@ -258,6 +261,13 @@ async def submitted_via_tells_web_from_mcp(env):
     mixed = _conversation(env, world.nb, world.owner_id, [
         _turn("第一问", via="web"), _turn("第二问", via="mcp"),
     ], updated_at=_stamp(3))
+    # A later job naming the same answer (a retry re-attached in the browser):
+    # the turn keeps the entry point of the OLDEST job that names it.
+    n = mixed.split("-")[-1]
+    with _write(env) as db:
+        _job(db, f"askjob-t3-{n}-again", world.nb, mixed, world.owner_id,
+             question="第二问", status="done", answer_id=f"ans-t3-{n}-1",
+             created_at="2026-10-21T07:05:00+00:00", via="web")
     agent = _conversation(env, world.nb, world.owner_id, [_turn(via="mcp")],
                           updated_at=_stamp(2))
     unrecorded = _conversation(env, world.nb, world.owner_id, [_turn(via=None)],
@@ -306,10 +316,13 @@ async def another_users_conversation_is_invisible_and_indistinguishable(env):
         }))
         assert missing == missing_global
         assert missing[0] == "not_found" and NOT_FOUND in missing[1]
+        # An offset past the end does not tell someone else's conversation
+        # apart either: ownership is judged before the offset.
         for other in (theirs, their_global):
-            assert _error(await client.call("get_conversation", {
-                "conversation_id": other,
-            })) == missing, other
+            for turn_offset in (0, 99):
+                assert _error(await client.call("get_conversation", {
+                    "conversation_id": other, "turn_offset": turn_offset,
+                })) == missing, (other, turn_offset)
     # The member, through a token of their own, reads their conversation.
     member_raw, _ = _agent(env, member_id, [world.nb], scopes=("read",), allow_links=False)
     async with _clients(env, member_raw) as (client,):
@@ -333,9 +346,10 @@ async def notebook_outside_the_allowlist(env):
         missing = _error(await client.call("get_conversation", {
             "conversation_id": "conv-nonexistent",
         }))
-        assert _error(await client.call("get_conversation", {
-            "conversation_id": beyond,
-        })) == missing
+        for turn_offset in (0, 99):
+            assert _error(await client.call("get_conversation", {
+                "conversation_id": beyond, "turn_offset": turn_offset,
+            })) == missing, turn_offset
         code, _text = _error(await client.call("list_conversations", {
             "notebook_id": outside,
         }))
@@ -362,9 +376,10 @@ async def owner_lost_read(env):
             "conversation_id": "conv-nonexistent",
         }))
         for conversation_id in (cid, gcid):
-            assert _error(await client.call("get_conversation", {
-                "conversation_id": conversation_id,
-            })) == missing, conversation_id
+            for turn_offset in (0, 99):
+                assert _error(await client.call("get_conversation", {
+                    "conversation_id": conversation_id, "turn_offset": turn_offset,
+                })) == missing, (conversation_id, turn_offset)
         code, _text = _error(await client.call("list_conversations", {"notebook_id": nb}))
         assert code == "notebook_unreadable"
 
@@ -447,8 +462,9 @@ async def global_conversation_crossing_the_allowlist_never_shows_its_title(env):
             "conversation_id": "gconv-nonexistent",
         }))
         # Turn 0 is inside the allowlist on its own; the conversation is not.
+        # Past its end it reads the same: the turn count is never disclosed.
         for conversation_id in (crossing, evidence):
-            for turn_offset in (0, 1):
+            for turn_offset in (0, 1, 99):
                 refused = _error(await client.call("get_conversation", {
                     "conversation_id": conversation_id, "turn_offset": turn_offset,
                 }))
@@ -634,6 +650,139 @@ async def own_memory_citation_opens_through_mem_ref(env):
         assert opened["kind"] == "mem" and opened["text"] == "记忆正文。"
 
 
+# ------------------------------------------------------------------ read cost
+
+
+class _RecordingConnection:
+    def __init__(self, db, seen):
+        self._db, self._seen = db, seen
+
+    def execute(self, sql, params=()):
+        self._seen.append(str(sql))
+        return self._db.execute(sql, params)
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+
+class _RecordingDatabase:
+    """The store's database, recording every statement its reads send."""
+
+    def __init__(self, database, seen):
+        self._database, self._seen = database, seen
+
+    @contextmanager
+    def connect(self):
+        with self._database.connect() as db:
+            yield _RecordingConnection(db, self._seen)
+
+    def __getattr__(self, name):
+        return getattr(self._database, name)
+
+
+def _page_from_the_full_read(env, cid: str, index: int) -> dict:
+    """What a page was built from before the one-turn read: the whole
+    conversation (``get_conversation``), then the same projection."""
+    detail = env.repo.get_conversation(cid)
+    turn = detail.turns[index]
+    row = conversation_row(
+        conversation_id=detail.id, kind="notebook", title=detail.title,
+        notebook_ids=[detail.notebook_id], turn_count=len(detail.turns),
+        updated_at=detail.updated_at, submitted_via=detail.submitted_via,
+    )
+    view = notebook_view(
+        "", detail.notebook_id, turn.response,
+        {"status": "done", "conversation_id": cid, "mode": turn.response.mode}, True,
+    )
+    page = turn_page(
+        row, view, question=turn.question, asked_at=turn.asked_at or turn.created_at,
+        submitted_via=turn.submitted_via, turn_offset=index,
+        turn_count=len(detail.turns),
+    )
+    return json.loads(json.dumps(page, ensure_ascii=False))
+
+
+def _refuse(*_args, **_kwargs):
+    raise AssertionError("a one-turn read must not load the whole conversation")
+
+
+async def notebook_turn_reads_only_the_asked_answer(env):
+    world = _world(env)
+    with _write(env) as db:
+        seed_source(db, "?", notebook_id=world.nb, source_id="src-cost",
+                    elements={"el-cost-0": "原文。"})
+    trace = [{"step_type": "search_chunks", "summary": "检索", "detail": {"n": 1}}]
+    turns = [
+        _turn(f"第{index}问", {**_answer(f"第{index}答 [1]。", [
+            _element_citation("src-cost", "el-cost-0"),
+        ]), "reasoning_trace": trace}, via="web" if index else "mcp")
+        for index in range(3)
+    ]
+    cid = _conversation(env, world.nb, world.owner_id, turns, running=True)
+    expected = [_page_from_the_full_read(env, cid, index) for index in range(3)]
+
+    # The other turns' answers are made unreadable: the whole-conversation
+    # read now fails, and the one-turn read must not notice.
+    poison = json.dumps({"not_an_answer": True})
+    with _write(env) as db:
+        for index in (0, 2):
+            db.execute("UPDATE answers SET payload = ? WHERE id = ?",
+                       (poison, f"ans-t3-{cid.split('-')[-1]}-{index}"))
+    try:
+        env.repo.get_conversation(cid)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("the poisoned answers must break the full read")
+
+    store = env.repo._runtime.ask_state
+    seen: list[str] = []
+    env.monkeypatch.setattr(store, "database", _RecordingDatabase(store.database, seen))
+    env.monkeypatch.setattr(env.repo, "get_conversation", _refuse)
+    env.monkeypatch.setattr(store, "get_conversation", _refuse)
+    async with _clients(env, world.raw) as (client,):
+        page = _payload(await client.call("get_conversation", {
+            "conversation_id": cid, "turn_offset": 1,
+        }))
+        # Byte for byte what the whole-conversation read gave.
+        assert page == expected[1]
+        reads = [sql for sql in seen if "payload" in sql]
+        assert reads and all("LIMIT 1" in sql for sql in reads), reads
+        assert not any("ask_trace_steps" in sql or "running" in sql for sql in seen), seen
+
+        # Counted, then deleted before it was read: missing, not an empty turn.
+        missing = _error(await client.call("get_conversation", {
+            "conversation_id": "conv-nonexistent",
+        }))
+        counted = store.conversation_turn
+        env.monkeypatch.setattr(store, "conversation_turn", lambda conversation_id, index: {
+            **counted(conversation_id, index), "turn": None,
+        })
+        assert _error(await client.call("get_conversation", {
+            "conversation_id": cid, "turn_offset": 1,
+        })) == missing
+
+
+async def unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary(env):
+    world = _world(env, notebooks=3)
+    ids = [_conversation(env, notebook, world.owner_id, [_turn()],
+                         updated_at=_stamp(index + 1))
+           for index, notebook in enumerate(world.notebooks)]
+    reads: list[str] = []
+
+    def counted(notebook_id, user_id):
+        reads.append(notebook_id)
+        return True
+
+    env.monkeypatch.setattr(env.repo, "user_can_read_notebook", counted)
+    env.monkeypatch.setattr(env.repo, "get_notebook", _refuse)
+    env.monkeypatch.setattr(env.repo, "list_conversations", _refuse)
+    async with _clients(env, world.raw) as (client,):
+        assert await _ids(client) == list(reversed(ids))
+    # One batch read for the whole allowlist, not one read per notebook.
+    assert reads == []
+
+
 # ------------------------------------------------------------------- ledger
 
 
@@ -681,6 +830,8 @@ CASES = {
         turn_paging_is_exact,
         empty_conversation_returns_the_empty_page,
         own_memory_citation_opens_through_mem_ref,
+        notebook_turn_reads_only_the_asked_answer,
+        unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary,
         notebook_read_books_one_history_call,
     )
 }

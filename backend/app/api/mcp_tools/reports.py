@@ -57,6 +57,7 @@ from ._shared import (
     _selected_notebook,
 )
 from .list_pages import (
+    CONTINUATION_QUESTION_CHARS,
     HISTORY_CAPABILITY,
     NEGATIVE_OFFSET,
     history_principal,
@@ -85,9 +86,6 @@ _REPORT_PAGE_CHARS = 6_000
 #: what its ``[kN]`` markers point at and can be paged separately.
 _CONTENT_FLOOR = 1_500
 _QUESTION_CHARS = 2_000
-#: The question on a continuation page (either offset above zero), which only
-#: reminds the caller what the report is about.
-_CONTINUATION_QUESTION_CHARS = 200
 _LIST_QUESTION_CHARS = 300
 
 _LIST_FIELD_LIMITS = {"question": _LIST_QUESTION_CHARS}
@@ -224,7 +222,7 @@ def report_page(
 
     The first page (both offsets zero) carries the question up to
     ``_QUESTION_CHARS`` and keeps it exact; a continuation page carries it
-    cut to ``_CONTINUATION_QUESTION_CHARS`` with ``question_truncated``, and
+    cut to ``list_pages.CONTINUATION_QUESTION_CHARS`` with ``question_truncated``, and
     the question is not part of what must survive the budget there.
     """
     notebook_id = str(report.get("notebook_id") or "")
@@ -241,7 +239,7 @@ def report_page(
         str(report.get("question") or ""), _QUESTION_CHARS
     )
     if continuation:
-        question, cut = _clip_question(question, _CONTINUATION_QUESTION_CHARS)
+        question, cut = _clip_question(question, CONTINUATION_QUESTION_CHARS)
         question_omitted = 0
     error = _report_error(report)
     content_count = _REPORT_PAGE_CHARS
@@ -343,7 +341,7 @@ def register_report_tools(
                 targets = [selected]
             else:
                 principal = history_principal(repo)
-                targets = readable_allowlist(repo, principal)
+                targets = readable_allowlist(principal)
             rows = [
                 _report_row(item)
                 for target in targets
