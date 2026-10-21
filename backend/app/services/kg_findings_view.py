@@ -75,6 +75,17 @@ HANDLED_RELINKED = "relinked"
 
 # The candidate statuses that are a stored decision (`decided_seed_pairs_from`).
 DECIDED_CANDIDATE_STATUSES = ("confirmed", "rejected", "deferred")
+
+# Stored evidence the read side uses and never returns (codex #941 R3). F4's
+# ``member_seeds`` are the v1 seeds of EVERY member of the group's canonicals,
+# hidden (Memory / Knowhow) members included — normalised, readable names past
+# the reader-visible boundary (docs/development.md: who may read a Memory- or
+# Knowhow-derived source). They exist to match stored merge decisions
+# (`f4_member_seeds`); ``seeds_truncated`` only qualifies them. Everything else
+# a row carries is a count, a visible source's id / title, a canonical id (the
+# identifier pending merges and the graph return to the same readers) or a
+# name read from visible sources' own objects.
+INTERNAL_EVIDENCE_KEYS = frozenset({"member_seeds", "seeds_truncated"})
 # A source still in the pipeline: queued → parsing → parsed → extracting → extracted.
 # ``parsed`` waits for extraction but nothing runs on it; the extraction run's own
 # ``running`` covers the KG pass on an already-extracted source.
@@ -276,6 +287,13 @@ def live_source(source_id: str, state: Optional[Mapping[str, object]]) -> Dict[s
     }
 
 
+def public_evidence(evidence: Optional[Mapping[str, object]]) -> Dict[str, object]:
+    """A row's evidence as the API returns it: the stored evidence minus
+    ``INTERNAL_EVIDENCE_KEYS`` (hidden-member-derived; read side only)."""
+    return {key: value for key, value in (evidence or {}).items()
+            if key not in INTERNAL_EVIDENCE_KEYS}
+
+
 def page_row(
     row: Mapping[str, object],
     status: str,
@@ -284,7 +302,8 @@ def page_row(
     states: Mapping[str, Mapping[str, object]],
     built_at: object,
 ) -> Dict[str, Any]:
-    """One row of the page in the API shape (internal codes only)."""
+    """One row of the page in the API shape (internal codes only). The status was
+    decided on the STORED evidence; the response carries `public_evidence`."""
     if status == STATUS_OPEN:
         reason = source_handled_reason(row, states, built_at)
         if reason is not None:
@@ -299,7 +318,7 @@ def page_row(
         "subject": {"kind": row["subject_kind"], "key": row["subject_key"],
                     "label": row["subject_label"]},
         "subject_refs": refs,
-        "evidence": row["evidence"],
+        "evidence": public_evidence(row["evidence"]),   # type: ignore[arg-type]
         "impact": {"objects": int(row["impact_objects"])},   # type: ignore[arg-type]
         "actions": finding_actions(
             str(row["rule_id"]), str(row["subject_key"]), refs,
