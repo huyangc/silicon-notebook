@@ -1785,7 +1785,7 @@ class RepositoryRuntime:
             # and the startup backstop reads with the heal reader.
             memory_evidence_detach=self.governance.detach_memory_merges_on,
             memory_merge_actions_on=self.governance.apply_merge_follow_actions_on,
-            memory_merge_heal_candidates_on=self.governance.heal_merged_away_candidates_on,
+            memory_merge_heal_candidates=self.governance.heal_merged_away_candidates,
             # PR-E8: a promotion source's teardown strips its entries and
             # deletes only the objects left without evidence.
             promotion_detach=self.governance.detach_promotion_sources_on,

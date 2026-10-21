@@ -1363,7 +1363,7 @@ PG 泳道 `scripts/check_postgres.sh`（本机一次性测试库；动迁移的 
    成员退出走 `remove_memory_sources` 的证据摘除；编辑后重抽（`ingest_memory_source`）在源锁下、清旧产物之前做同一次摘除。拥有合并
    结果的那条 Memory 被编辑、转移或删除时，清掉结果之前把直接并进来、其 Memory 仍在的弃用对象恢复为 approved（同日裁决；记录在被并走
    对象自己的 payload 隐藏键 `_merged_into` 上，无迁移；手动改状态或内容时清掉；`detach_memory_merges_on`；PostgreSQL 上拆除先按 id 序
-   锁住要写的全部对象，恢复用 `SKIP LOCKED`、提交后带等待补跑、启动后兜底扫描）。#824 之前的本人记忆合并没有记录，不自动恢复，
+   锁住要写的全部对象，恢复用 `SKIP LOCKED`、提交后补跑（等待上限 3 秒，超时转后台兜底）、启动后兜底扫描（只读、按记忆量有界、恢复前复核避免两份）；目标上的 `_absorbs` 门闸让普通记忆删除只多一条语句）。#824 之前的本人记忆合并没有记录，不自动恢复，
    需本人 PATCH 改回 approved（用户裁决 2026-10-22）。UI 入口（「查重」给本人单列自己的记忆重复组）已裁决另开 PR，
    见 [fangan_todo](../../../fangan_todo.md)「知识图谱」。PostgreSQL
    上合并先按 id 序对源对象的主来源与其证据引用的 Memory 来源取 `FOR KEY SHARE`，再锁两个对象，与拆除 / 重抽同一锁序；加锁前后源对象

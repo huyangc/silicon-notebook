@@ -588,6 +588,132 @@ def test_pg_a_hand_status_change_clears_the_merge_marker(pg_repository):
     assert _pg_status(database, "ko-ma1") == "deprecated"
 
 
+def test_pg_a_merged_away_object_without_evidence_is_restored(pg_repository):
+    """Spec P3-3: ko-ma1's evidence is empty; merged into ko-ma2, it is
+    restored when mem-a2 is deleted."""
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    with database.write() as db:
+        db.execute("UPDATE knowledge_objects SET evidence='[]'::jsonb WHERE id='ko-ma1'")
+    _pg_own_merge(repo, "ko-ma1", "ko-ma2")
+    _pg_change_memory(repo, "mem-a2", "delete")
+    assert _pg_status(database, "ko-ma1") == "approved"
+
+
+def test_pg_the_backstop_repoints_instead_of_restoring_a_second_copy(pg_repository):
+    """ko-ma1 → ko-ma2 → ko-ma3, then ko-ma2's row vanishes without its
+    follow-ups: ko-ma3 still carries all of ko-ma1's evidence, so the
+    backstop re-points ko-ma1 there instead of restoring it."""
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    _pg_add_third_memory(database)
+    _pg_own_merge(repo, "ko-ma1", "ko-ma2")
+    _pg_own_merge(repo, "ko-ma2", "ko-ma3")
+    with database.write() as db:
+        db.execute("DELETE FROM knowledge_objects WHERE id='ko-ma2'")
+    assert repo._runtime.source_ingestion.heal_memory_merges() == 1
+    assert _pg_status(database, "ko-ma1") == "deprecated"
+    with database.connect() as db:
+        payload = db.execute(
+            "SELECT payload FROM knowledge_objects WHERE id='ko-ma1'"
+        ).fetchone()["payload"]
+    assert payload["_merged_into"] == "ko-ma3"
+
+
+def test_pg_a_long_held_lock_bounds_the_follow_up_and_hands_it_to_the_backstop(
+    pg_repository, monkeypatch
+):
+    """Quality P3-1: the after-commit follow-up runs on the delete's own
+    thread, so its wait is bounded (``SET LOCAL lock_timeout``). With
+    mem-a1's source held far longer, deleting mem-a2 returns in bounded
+    time, ko-ma1 still deprecated, and the notebook is handed to a
+    background backstop pass — which restores ko-ma1 once the lock goes."""
+    import threading
+    import time
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from app.services import background_jobs
+    from app.services import source_ingestion as ingestion_module
+
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    _pg_own_merge(repo, "ko-ma1", "ko-ma2")
+    monkeypatch.setattr(ingestion_module, "MERGE_FOLLOWUP_LOCK_TIMEOUT_MS", 300)
+    scheduled: list = []
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda fn, *args, name=None, **kwargs: scheduled.append((fn, kwargs, name)),
+    )
+    outcome: dict = {}
+
+    def remove():
+        outcome["removed"] = repo._runtime.source_ingestion.remove_memory_sources(
+            ["src-ma2"]
+        )
+
+    with psycopg.connect(database.settings.database_url, row_factory=dict_row) as holder:
+        holder.execute("SELECT id FROM sources WHERE id='src-ma1' FOR UPDATE")
+        started = time.monotonic()
+        worker = threading.Thread(target=remove)
+        worker.start()
+        worker.join(timeout=10)
+        elapsed = time.monotonic() - started
+        assert not worker.is_alive(), "the delete waited past its bound"
+        assert outcome == {"removed": 1} and elapsed < 5
+        assert _pg_status(database, "ko-ma2") is None
+        assert _pg_status(database, "ko-ma1") == "deprecated"
+        holder.rollback()
+    ((fn, kwargs, name),) = scheduled
+    assert name == "memory-merge-heal" and kwargs["notebook_id"] == "nb"
+    assert fn(**kwargs) == 1
+    assert _pg_status(database, "ko-ma1") == "approved"
+
+
+def test_pg_the_backstop_walks_the_memory_volume_not_the_tables(seeded):
+    """Quality P2-A: on the bulk notebook with nothing to heal, the backstop
+    reads the Memory sources through their partial index and their objects
+    through the source index — no Seq Scan, no walk of a primary key."""
+    from contextlib import contextmanager
+
+    database, store = seeded
+    _bulk_seed(database)
+    captured: list = []
+    original_connect = database.connect
+
+    @contextmanager
+    def spying_connect():
+        with original_connect() as db:
+            spy = _CapturingConnection(db)
+            captured.append(spy)
+            yield spy
+
+    database.connect = spying_connect
+    try:
+        page, _after = store.heal_merged_away_candidates(10, ("", ""))
+    finally:
+        database.connect = original_connect
+    assert page == []
+    (spy,) = captured
+    statements = spy.statements
+    # The Memory sources once, then their objects in batches of 200 sources
+    # (the two notebooks hold 204 Memory sources: two batches).
+    assert len(statements) == 3
+    with database.connect() as db:
+        plans = [_plan(db, *s) for s in statements]
+    for plan in plans:
+        assert "Seq Scan" not in plan, plan
+        assert "pk_knowledge_objects on knowledge_objects ko" not in plan, plan
+        assert "pk_sources on sources s" not in plan, plan
+    assert "idx_sources_nb_hidden_type" in plans[0], plans[0]
+    for plan in plans[1:]:
+        assert "idx_knowledge_objects_source" in plan, plan
+
+
 def test_pg_the_startup_backstop_restores_what_a_crash_left_behind(pg_repository):
     """Self-healing criterion on PostgreSQL: deprecated, the marker names an
     object that no longer exists, its own Memory still exists."""
@@ -1015,11 +1141,12 @@ def test_pg_new_statements_keep_index_paths(seeded, monkeypatch):
             or "using idx_knowledge_objects_nb_status" in plan
         ), plan
 
-    # A plain Memory removal (no merge anywhere near it) pays, over the strip
-    # it always ran: with a certified reverse index (production's normal
-    # state) exactly two indexed statements — the up-front lock and the
-    # follower read; without one, also the read of the sources' own object
-    # ids (the containment scan itself is read once and handed to the strip).
+    # A plain Memory removal (no merge anywhere near it: none of its objects
+    # has ABSORBS_PAYLOAD_KEY, so no follower read) pays, over the strip it
+    # always ran: with a certified reverse index (production's normal state)
+    # exactly one indexed statement — the up-front lock; without one, also
+    # the read of the sources' own object ids (the containment scan itself is
+    # read once and handed to the strip).
     def statement_delta() -> int:
         with database.write() as db:
             plain = _CapturingConnection(db)
@@ -1034,13 +1161,13 @@ def test_pg_new_statements_keep_index_paths(seeded, monkeypatch):
             db.execute("ROLLBACK")
         return len(plain.statements) - len(strip_only.statements)
 
-    assert statement_delta() == 3
+    assert statement_delta() == 2
     from app.repositories.postgres.knowledge_store import KnowledgeStore as _Knowledge
 
     monkeypatch.setattr(
         _Knowledge, "source_index_backfilled", staticmethod(lambda db, nb: True)
     )
-    assert statement_delta() == 2
+    assert statement_delta() == 1
     monkeypatch.undo()
 
     for plan in plans:

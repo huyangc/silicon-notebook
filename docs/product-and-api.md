@@ -2723,8 +2723,18 @@ once queue instead of deadlocking; the restore then takes the restored objects' 
 rows with `SKIP LOCKED` and never waits inside the teardown. The lock may be held by that Memory's
 deletion or re-extraction, but also by relation completion, an extraction publish, an element swap
 or a transaction that then rolls back, so whatever was skipped is re-run right after the commit in a
-short transaction that waits (same lock order, re-checked, harmless to repeat); what even that
-misses — a crash in between — is restored by a background pass after the next start. On PostgreSQL a merge locks the Memory sources it
+short transaction (same lock order, re-checked, harmless to repeat). That re-run runs on the
+delete's or edit's own request, so its wait is bounded to a few seconds (`lock_timeout`); a lock
+held longer hands the notebook to one background pass that waits longer, and whatever even that
+misses — or a crash in between — is settled by a background pass after the next start. These
+passes read on a read-only connection, Memory sources first and then their objects, so their cost
+follows the amount of Memory, not the size of the notebook. Before restoring, a pass checks whether
+another source's object still carries all of the object's own evidence (a chain link the skipped
+step would have re-pointed to) and re-points it there instead, so an object is never restored as a
+second copy. The merge also marks its target (a hidden `_absorbs` key, kept across hand edits; a
+stale mark only costs one more read): a Memory removal or edit whose objects carry no such mark
+skips the follower read entirely, so with a certified reverse index a plain Memory removal pays one
+statement more than before this feature. On PostgreSQL a merge locks the Memory sources it
 makes the target cite before the object rows (the order of every Memory removal and re-ingest), so
 a concurrent delete, member exit or edit of one of them waits for the merge and then strips what it
 wrote; in the rare case that another merge put a new Memory's evidence on the source object between

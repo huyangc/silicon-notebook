@@ -166,6 +166,15 @@ class SourcePipelineHooks:
     note_corpus_change: Callable[[str], None]
 
 
+#: Bound on the after-commit merge follow-up's wait for a lock (it runs on
+#: the request thread of a Memory delete or edit); a longer-held lock leaves
+#: the rows to a background backstop pass for that notebook.
+MERGE_FOLLOWUP_LOCK_TIMEOUT_MS = 3000
+#: The background backstop pass waits longer, then leaves the rest to the
+#: next start.
+MERGE_HEAL_LOCK_TIMEOUT_MS = 60000
+
+
 class SourceIngestionService:
     """Source ingestion orchestration: import / URL add / upload dispatch,
     the parse → chunk → background-embed → extract status machine, source
@@ -298,11 +307,11 @@ class SourceIngestionService:
         memory_evidence_detach: Optional[Callable[[Any, str, List[str], str], Any]] = None,
         # ``memory_merge_actions_on(db, actions, now, wait=...)`` applies merge
         # follow-ups (the governance store's ``apply_merge_follow_actions_on``)
-        # after a teardown's commit; ``memory_merge_heal_candidates_on(db,
-        # limit, after)`` reads one page of the startup backstop. ``None``
-        # (narrow test doubles) skips both.
+        # after a teardown's commit; ``memory_merge_heal_candidates(limit,
+        # after, notebook_id=...)`` reads one page of the backstop on its own
+        # read-only connection. ``None`` (narrow test doubles) skips both.
         memory_merge_actions_on: Optional[Callable[..., Any]] = None,
-        memory_merge_heal_candidates_on: Optional[Callable[..., Any]] = None,
+        memory_merge_heal_candidates: Optional[Callable[..., Any]] = None,
         # PR-E8: ``promotion_detach(db, rows, now)`` runs for the promotion
         # sources of a teardown after the source lock and before the clear:
         # it removes those sources' entries from the evidence of the objects
@@ -342,7 +351,7 @@ class SourceIngestionService:
         self.memory_after_teardown = memory_after_teardown
         self.memory_evidence_detach = memory_evidence_detach
         self.memory_merge_actions_on = memory_merge_actions_on
-        self.memory_merge_heal_candidates_on = memory_merge_heal_candidates_on
+        self.memory_merge_heal_candidates = memory_merge_heal_candidates
         self.promotion_detach = promotion_detach
         self.begin_extraction_run = begin_extraction_run
         self.finish_extraction_run = finish_extraction_run
@@ -2454,7 +2463,6 @@ class SourceIngestionService:
                 self.kg_mutations.mark_unified_kg_dirty_in_tx(db, notebook_id)
             if self.memory_after_teardown is not None:
                 self.memory_after_teardown(db, detached)
-        self._finish_memory_merge_followups(merge_skipped)
         try:
             self._after_sources_removed(rows)
         except Exception as exc:  # noqa: BLE001 - the removal has committed
@@ -2465,6 +2473,9 @@ class SourceIngestionService:
             self.event_log.logger.warning(
                 "memory source post-commit cleanup failed (%s)", type(exc).__name__
             )
+        # Last: the follow-ups of a skipped merge step wait (boundedly) for a
+        # lock; the removal's own post-commit work never waits behind them.
+        self._finish_memory_merge_followups(merge_skipped)
         return len(rows)
 
     def _detach_memory_merges_tx(
@@ -2493,17 +2504,30 @@ class SourceIngestionService:
             skipped.extend(getattr(result, "skipped", ()) or ())
         return applied, skipped
 
-    def _finish_memory_merge_followups(self, actions: Sequence[Any]) -> int:
+    def _finish_memory_merge_followups(
+        self,
+        actions: Sequence[Any],
+        *,
+        lock_timeout_ms: Optional[int] = None,
+        reschedule: bool = True,
+    ) -> int:
         """Re-run, after the commit, the merge follow-ups a teardown skipped
         because a row lock was held (PostgreSQL ``SKIP LOCKED``): one short
-        write transaction per notebook that holds nothing else and therefore
-        waits, in the same source → object lock order; each action re-checks
-        its row (still deprecated, marker unchanged), so re-running is
-        harmless. A failure is logged by class and left to the startup
-        backstop (``heal_memory_merges``), never raised: the removal or edit
-        has committed. Returns how many actions were applied."""
+        write transaction per notebook that holds nothing else, in the same
+        source → object lock order; each action re-checks its row (still
+        deprecated, marker unchanged), so re-running is harmless.
+
+        The wait is bounded (``lock_timeout_ms``, default
+        ``MERGE_FOLLOWUP_LOCK_TIMEOUT_MS``): this runs on the request thread
+        of a delete or an edit, and the holder may keep its lock for long. A
+        failure — that timeout or anything else — is logged by class, never
+        raised (the removal or edit has committed), and hands the notebook to
+        ONE background backstop pass (``heal_memory_merges`` for that
+        notebook) unless ``reschedule`` is off (the backstop itself). Returns
+        how many actions were applied."""
         if not actions or self.memory_merge_actions_on is None:
             return 0
+        timeout = MERGE_FOLLOWUP_LOCK_TIMEOUT_MS if lock_timeout_ms is None else lock_timeout_ms
         by_notebook: dict[str, List[Any]] = {}
         for action in actions:
             by_notebook.setdefault(action.notebook_id, []).append(action)
@@ -2512,7 +2536,8 @@ class SourceIngestionService:
             try:
                 with self.write() as db:
                     applied, _ = self.memory_merge_actions_on(
-                        db, by_notebook[notebook_id], self.now(), wait=True
+                        db, by_notebook[notebook_id], self.now(), wait=True,
+                        lock_timeout_ms=timeout,
                     )
                     if applied:
                         self.kg_mutations.mark_unified_kg_dirty_in_tx(db, notebook_id)
@@ -2523,37 +2548,71 @@ class SourceIngestionService:
                 self.event_log.logger.warning(
                     "memory merge follow-up failed (%s)", type(exc).__name__
                 )
+                if reschedule:
+                    self._schedule_memory_merge_heal(notebook_id)
         return total
 
-    def has_memory_merges_to_heal(self) -> bool:
-        """One bounded probe for the startup backstop: is any deprecated Memory
-        object's merge target gone while its own Memory still exists?"""
-        if self.memory_merge_heal_candidates_on is None:
-            return False
-        with self.write() as db:
-            return bool(self.memory_merge_heal_candidates_on(db, 1, ""))
+    def _schedule_memory_merge_heal(self, notebook_id: str) -> None:
+        """Hand one notebook to a background backstop pass (after a follow-up
+        could not take its locks in time). Best-effort: a failure to submit
+        leaves the rows to the startup pass."""
+        try:
+            from app.services import background_jobs
 
-    def heal_memory_merges(self, *, page_size: int = 500) -> int:
-        """Startup backstop (after readiness, background): restore every
-        deprecated Memory object whose merge marker names an object that no
-        longer exists while its own Memory still exists — what a skipped
-        in-transaction follow-up whose after-commit re-run also failed left
-        behind. Keyset-paged on the object id; each page is applied through
-        ``_finish_memory_merge_followups`` (waiting, re-checked, idempotent).
-        Returns how many objects were restored."""
-        if self.memory_merge_heal_candidates_on is None:
+            background_jobs.submit(
+                self.heal_memory_merges,
+                notebook_id=notebook_id,
+                lock_timeout_ms=MERGE_HEAL_LOCK_TIMEOUT_MS,
+                name="memory-merge-heal",
+            )
+        except Exception as exc:  # noqa: BLE001 - the startup pass is the backstop
+            self.event_log.logger.warning(
+                "memory merge heal scheduling failed (%s)", type(exc).__name__
+            )
+
+    def has_memory_merges_to_heal(self) -> bool:
+        """The startup backstop's probe: is any deprecated Memory object's
+        merge target gone while its own Memory still exists? The store's read
+        (``heal_merged_away_candidates``) runs on a read-only connection and
+        walks the Memory sources and their objects by index, so it is bounded
+        by the Memory volume and blocks no writer."""
+        if self.memory_merge_heal_candidates is None:
+            return False
+        page, _after = self.memory_merge_heal_candidates(1, ("", ""))
+        return bool(page)
+
+    def heal_memory_merges(
+        self,
+        *,
+        notebook_id: Optional[str] = None,
+        page_size: int = 500,
+        lock_timeout_ms: Optional[int] = None,
+    ) -> int:
+        """The backstop (after readiness at startup, or for one notebook after
+        a follow-up timed out): settle every deprecated Memory object whose
+        merge marker names an object that no longer exists while its own
+        Memory still exists — restore it, or re-point it at the object that
+        still carries its evidence (the store's ``heal_action`` re-check).
+        Reads are keyset-paged on ``(source id, object id)`` on a read-only
+        connection; each page is applied through
+        ``_finish_memory_merge_followups`` (re-checked, idempotent, a bounded
+        wait, never rescheduling itself). Returns how many were applied."""
+        if self.memory_merge_heal_candidates is None:
             return 0
-        restored = 0
-        after = ""
+        timeout = MERGE_HEAL_LOCK_TIMEOUT_MS if lock_timeout_ms is None else lock_timeout_ms
+        applied = 0
+        after: tuple = ("", "")
         while True:
-            with self.write() as db:
-                page = self.memory_merge_heal_candidates_on(db, page_size, after)
+            page, after = self.memory_merge_heal_candidates(
+                page_size, after, notebook_id=notebook_id
+            )
             if not page:
-                return restored
-            after = page[-1].object_id
-            restored += self._finish_memory_merge_followups(page)
+                return applied
+            applied += self._finish_memory_merge_followups(
+                page, lock_timeout_ms=timeout, reschedule=False
+            )
             if len(page) < page_size:
-                return restored
+                return applied
 
     def _teardown_sources_tx(
         self,

@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.domain.memory_kg_isolation import (
+    ABSORBS_PAYLOAD_KEY,
     CROSS_CLASS_MESSAGE,
     MERGED_INTO_PAYLOAD_KEY,
     MemoryKnowledgeMergeRefused,
@@ -276,6 +277,15 @@ def _reverse_index(repo, object_id: str) -> set:
                 (object_id,),
             ).fetchall()
         }
+
+
+@pytest.fixture
+def own_pair_unmerged(world):
+    """Two confirmed Memories of u-a (real pipeline), not merged yet."""
+    repo, nb, _upload = world
+    a1 = _concept(_objects(repo, nb, _confirmed_memory(repo, nb, "mem-a1", "u-a")))
+    a2 = _concept(_objects(repo, nb, _confirmed_memory(repo, nb, "mem-a2", "u-a")))
+    return repo, nb, a1, a2
 
 
 @pytest.fixture
@@ -564,6 +574,143 @@ def test_the_startup_backstop_restores_what_a_crash_left_behind(own_pair):
     assert ingestion.heal_memory_merges() == 0
 
 
+def test_a_merged_away_object_without_evidence_is_restored(own_pair_unmerged):
+    """Spec P3-3: a1's evidence is empty; merged into a2, it still records
+    the target on its own row and is restored when mem-a2 is deleted."""
+    repo, nb, a1, a2 = own_pair_unmerged
+    with repo._write() as db:
+        db.execute("UPDATE knowledge_objects SET evidence='[]' WHERE id=?", (a1,))
+    _governance(repo).merge_knowledge(nb, a1, MergeRequest(into_id=a2), actor_id="u-a")
+    _change_memory(repo, nb, "mem-a2", "delete")
+    assert _status(repo, a1) == "approved"
+
+
+def test_the_backstop_repoints_instead_of_restoring_a_second_copy(world):
+    """Quality P3-3: a1 → a2 → a3, then a2's row vanishes without its
+    follow-ups (a crash): a1's marker names a missing object, but a3 still
+    carries all of a1's evidence. The backstop re-points a1 at a3 instead of
+    restoring it, so a1's knowledge is never live twice; clearing a3 then
+    restores a1."""
+    repo, nb, _upload = world
+    sources = [_confirmed_memory(repo, nb, f"mem-a{n}", "u-a") for n in (1, 2, 3)]
+    a1, a2, a3 = (_concept(_objects(repo, nb, s)) for s in sources)
+    _governance(repo).merge_knowledge(nb, a1, MergeRequest(into_id=a2), actor_id="u-a")
+    _governance(repo).merge_knowledge(nb, a2, MergeRequest(into_id=a3), actor_id="u-a")
+    with repo._write() as db:
+        db.execute("DELETE FROM knowledge_objects WHERE id=?", (a2,))
+    assert repo._runtime.source_ingestion.heal_memory_merges() == 1
+    assert _status(repo, a1) == "deprecated"
+    assert _payload(repo, a1)[MERGED_INTO_PAYLOAD_KEY] == a3
+    _change_memory(repo, nb, "mem-a3", "delete")
+    assert _status(repo, a1) == "approved"
+
+
+def test_the_backstop_reads_without_a_write_transaction(own_pair):
+    """Quality P3-4: the probe and the page reads never open a write
+    transaction (SQLite's BEGIN IMMEDIATE would block every writer)."""
+    repo, _nb, _src_a1, _src_a2, _a1, a2 = own_pair
+    with repo._write() as db:
+        db.execute("DELETE FROM knowledge_objects WHERE id=?", (a2,))
+    ingestion = repo._runtime.source_ingestion
+
+    def no_write():
+        raise AssertionError("the backstop read opened a write transaction")
+
+    original, ingestion.write = ingestion.write, no_write
+    try:
+        assert ingestion.has_memory_merges_to_heal() is True
+        page, _after = ingestion.memory_merge_heal_candidates(10, ("", ""))
+        assert len(page) == 1
+    finally:
+        ingestion.write = original
+
+
+def test_the_merge_opens_the_follower_gate_on_the_target_only(own_pair):
+    """Quality P2-B: an own merge writes ABSORBS_PAYLOAD_KEY on the target
+    (the merged-away row gets the marker); a later hand edit of the target's
+    content keeps the gate, so clearing it still settles its followers."""
+    repo, nb, _src_a1, _src_a2, a1, a2 = own_pair
+    assert _payload(repo, a2)[ABSORBS_PAYLOAD_KEY] is True
+    assert ABSORBS_PAYLOAD_KEY not in _payload(repo, a1)
+    edited = {k: v for k, v in _payload(repo, a2).items() if not k.startswith("_")}
+    edited["name"] = "Engram (edited)"
+    _governance(repo).update_knowledge(
+        nb, a2, KnowledgeUpdate(payload=edited), actor_id="u-a"
+    )
+    assert _payload(repo, a2)[ABSORBS_PAYLOAD_KEY] is True
+    _change_memory(repo, nb, "mem-a2", "delete")
+    assert _status(repo, a1) == "approved"
+
+
+def _sqlite_plan(db, sql: str, params: tuple) -> str:
+    return "\n".join(
+        str(row[3]) for row in db.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()
+    )
+
+
+def test_the_backstop_walks_the_memory_volume_not_the_tables(world):
+    """Quality P2-A: on a large notebook with nothing to heal, every backstop
+    statement is driven by the Memory sources' partial index and the objects'
+    source index — never a scan of sources or knowledge_objects, never a walk
+    of the objects' primary key (``id>?``)."""
+    repo, nb, _upload = world
+    with repo._write() as db:
+        db.execute(
+            "WITH RECURSIVE g(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM g WHERE n<3999) "
+            "INSERT INTO sources(id,notebook_id,title,source_type,created_at,updated_at) "
+            "SELECT 'srcx-'||n, ?, 't', 'upload', ?, ? FROM g",
+            (nb, NOW, NOW),
+        )
+        db.execute(
+            "WITH RECURSIVE g(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM g WHERE n<7999) "
+            "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,payload,"
+            "evidence,source_id,created_at,updated_at) "
+            "SELECT 'kox-'||n, ?, 'concept', CASE WHEN n%2=0 THEN 'deprecated' "
+            "ELSE 'approved' END, '{}', '[]', 'srcx-'||(n%4000), ?, ? FROM g",
+            (nb, NOW, NOW),
+        )
+    _confirmed_memory(repo, nb, "mem-a1", "u-a")
+    store = repo._runtime.governance
+    seen: list = []
+    database = store.database
+    original_connect = database.connect
+
+    class _Spy:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def __enter__(self):
+            self.inner = self.connection.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self.connection.__exit__(*exc)
+
+        def execute(self, sql, params=()):
+            seen.append((str(sql), tuple(params)))
+            return self.inner.execute(sql, params)
+
+    database.connect = lambda: _Spy(original_connect())
+    try:
+        page, _after = store.heal_merged_away_candidates(10, ("", ""))
+    finally:
+        database.connect = original_connect
+    assert page == []
+    assert len(seen) == 2  # the Memory sources, then their objects (one batch)
+    with repo._connect() as db:
+        plans = [_sqlite_plan(db, sql, params) for sql, params in seen]
+    print("PLANS", plans)
+    for plan in plans:
+        assert "SCAN sources" not in plan and "SCAN s\n" not in plan + "\n", plan
+        assert "SCAN knowledge_objects" not in plan and "SCAN ko" not in plan, plan
+        assert "id>?" not in plan.replace(" ", ""), plan
+    assert "idx_sources_nb_hidden_type" in plans[0], plans[0]
+    assert "idx_knowledge_objects_source" in plans[1], plans[1]
+
+
 def test_shared_merges_record_no_merge_marker(world):
     """Quality P3-4: shared objects' merges write no marker — the merged-away
     row's payload and the target's evidence are byte for byte what they were
@@ -585,6 +732,7 @@ def test_shared_merges_record_no_merge_marker(world):
         ).fetchone()["payload"]
     assert payload_after == payload_before
     assert MERGED_INTO_PAYLOAD_KEY not in json.loads(payload_after)
+    assert ABSORBS_PAYLOAD_KEY not in _payload(repo, b)  # no gate on the target
 
 
 def _cite(repo, object_id: str, source_id: str) -> None:
