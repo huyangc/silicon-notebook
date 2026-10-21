@@ -1478,13 +1478,17 @@ class AskStateStore:
             ).fetchall():
                 turn_via.setdefault(job_row["answer_id"], job_row["submitted_via"] or "")
             # The in-flight turn's report title is the report's CURRENT
-            # question (``LinkedReportRef``): a deleted report matches no row,
-            # so the title reads ''. The join is on reports' primary key; a job
-            # with no report has report_id '' and matches nothing.
+            # question (``LinkedReportRef``). Only the asker's own report of
+            # this notebook counts -- the same gate a follow-up passes before
+            # a job exists -- so a deleted report, another notebook's, or
+            # another member's matches no row and the title reads ''. The join
+            # is on reports' primary key; a job with no report has report_id
+            # '' and matches nothing.
             job = db.execute(
                 "SELECT j.id, j.question, j.asked_at, j.mode, j.report_id, "
                 "r.question AS report_title FROM ask_jobs j "
                 "LEFT JOIN reports r ON r.id = j.report_id AND r.notebook_id = j.notebook_id "
+                "AND r.created_by = j.created_by "
                 "WHERE j.conversation_id=? AND j.status='running' "
                 "ORDER BY julianday(j.created_at) DESC, j.created_at DESC, j.rowid DESC LIMIT 1",
                 (conversation_id,),

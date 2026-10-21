@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.models.schemas import AskResponse
+from app.models.schemas import AskResponse, TraceStep
 from app.repositories.postgres._store_utils import jsonb
 from tests import conversation_linked_report_cases as cases
 
@@ -34,14 +34,16 @@ def _save_turn(repo):
     store = repo._runtime.ask_state
     uid = repo.current_user().id
 
-    def save(notebook_id, conversation_id, question, receipt):
+    def save(notebook_id, conversation_id, question, receipt, reasoning=False):
         with store.database.write() as db:
             conversation_id = store.ensure_conversation(
                 db, notebook_id, conversation_id, question, uid)
         store.save_answer(
             notebook_id, conversation_id, question,
             AskResponse(
-                conclusion="c", conversation_id=conversation_id, linked_report=receipt),
+                conclusion="c", conversation_id=conversation_id, linked_report=receipt,
+                reasoning_trace=(
+                    [TraceStep(step_type="answer", summary="s")] if reasoning else [])),
             uid,
         )
         return conversation_id

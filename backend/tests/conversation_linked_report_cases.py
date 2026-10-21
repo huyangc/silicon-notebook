@@ -7,15 +7,18 @@ The two places a conversation names a report are read by two different rules
 (see ``app/repositories/conversation_linked_report.py``):
 
 * the in-flight turn's title is the report's CURRENT question, empty once the
-  report is gone, and only a report of the SAME notebook counts;
+  report is gone, and only the asker's own report of the SAME notebook counts;
 * the summary and the detail take the LAST turn's receipt, whose title is a
-  snapshot -- and the two must always agree.
+  snapshot, and read it by one rule (the cases build conversations whose
+  insertion order and ``created_at`` order coincide, the premise under which the
+  two name the same last answer).
 """
 from __future__ import annotations
 
 import threading
 from typing import Callable, Optional
 
+from app.core.request_context import reset_request_user, set_request_user
 from app.models.ask import (
     AskRequest,
     LinkedReportReceipt,
@@ -23,10 +26,11 @@ from app.models.ask import (
 )
 from app.models.notebooks import NotebookCreate
 
-#: ``save_turn(notebook_id, conversation_id | None, question, receipt | None)``
-#: saves one answered turn (creating the conversation when the id is None) and
-#: returns the conversation id. Supplied per backend by the test module.
-SaveTurn = Callable[[str, Optional[str], str, Optional[LinkedReportReceipt]], str]
+#: ``save_turn(notebook_id, conversation_id | None, question, receipt | None,
+#: reasoning=False)`` saves one answered turn (creating the conversation when the
+#: id is None; ``reasoning`` gives it a reasoning trace) and returns the
+#: conversation id. Supplied per backend by the test module.
+SaveTurn = Callable[..., str]
 
 
 def _receipt(report_id: str, title: str, *, status: str = "read") -> LinkedReportReceipt:
@@ -36,6 +40,19 @@ def _receipt(report_id: str, title: str, *, status: str = "read") -> LinkedRepor
         report_id=report_id, title=title, status="skipped",
         reason_code="scope_sources", reason="本轮不读取这份报告：它引用的 1 份资料不在当前检索范围内",
     )
+
+
+def _report_of_another_member(repo, notebook_id: str, question: str) -> str:
+    """A report of THIS notebook that a different member created."""
+    member = repo._runtime.identity.create_user("b00777002", "pw123456")
+    repo._runtime.sharing.add_member(notebook_id, member.id)
+    marker = set_request_user(member)
+    try:
+        report_id = repo.create_report(notebook_id, question)
+    finally:
+        reset_request_user(marker)
+    assert repo.get_report(notebook_id, report_id)["created_by"] == member.id
+    return report_id
 
 
 def _summary(repo, notebook_id: str, conversation_id: str):
@@ -91,7 +108,9 @@ def assert_job_row_records_the_report(repo, stored_report_id: Callable[[str], st
 def assert_in_flight_turn_names_the_report_by_its_current_title(repo) -> None:
     """``ActiveAskJob.linked_report``: the job row's id plus the report's
     CURRENT question; a deleted report keeps the id and loses the title; a
-    report of another notebook is not this notebook's report."""
+    report of another notebook, or of another member of this one, is not the
+    asker's report -- the same 'not yours means it does not exist' a follow-up
+    is gated by before a job is created."""
     nb = repo.create_notebook(NotebookCreate(name="in-flight")).id
     other = repo.create_notebook(NotebookCreate(name="elsewhere")).id
     report_id = repo.create_report(nb, "Why does the gain drop at 3 GHz?")
@@ -109,9 +128,12 @@ def assert_in_flight_turn_names_the_report_by_its_current_title(repo) -> None:
         report_id=report_id, title="Why does the gain drop at 3 GHz?")
     assert detail.active_job.model_dump(mode="json")["linked_report"] == {
         "report_id": report_id, "title": "Why does the gain drop at 3 GHz?"}
-    # No turn has been answered yet, so there is no receipt to summarise.
+    # No turn has been answered yet, so there is no receipt to summarise -- on
+    # the detail, and on the list row of a conversation without any answer.
     assert detail.linked_report is None
     assert "linked_report" not in detail.model_dump(mode="json")
+    row = _summary(repo, nb, with_report)
+    assert (row.turn_count, row.used_reasoning, row.linked_report) == (0, False, None)
 
     without_report = begin(None)
     plain = repo.get_conversation(without_report).active_job
@@ -121,6 +143,11 @@ def assert_in_flight_turn_names_the_report_by_its_current_title(repo) -> None:
     foreign = begin(repo.create_report(other, "A question of another notebook"))
     foreign_ref = repo.get_conversation(foreign).active_job.linked_report
     assert foreign_ref is not None and foreign_ref.title == ""
+
+    theirs_id = _report_of_another_member(repo, nb, "A question of another member")
+    theirs = begin(theirs_id)
+    theirs_ref = repo.get_conversation(theirs).active_job.linked_report
+    assert theirs_ref == LinkedReportRef(report_id=theirs_id, title="")
 
     # The title follows the report: a deleted one leaves only the id.
     repo.delete_report(nb, report_id)
@@ -143,19 +170,31 @@ def assert_summary_and_detail_follow_the_last_turn(repo, save_turn: SaveTurn) ->
         assert summary == detail, (summary, detail)
         return summary
 
-    conversation = save_turn(nb, None, "q1", _receipt(report_a, "Report A question"))
+    def reasoned(conversation_id: str) -> bool:
+        summary = _summary(repo, nb, conversation_id).used_reasoning
+        assert summary == repo.get_conversation(conversation_id).used_reasoning
+        return summary
+
+    conversation = save_turn(
+        nb, None, "q1", _receipt(report_a, "Report A question"), reasoning=True)
     assert both(conversation) == LinkedReportRef(
         report_id=report_a, title="Report A question")
+    assert reasoned(conversation) is True
 
+    # The reasoning flag and the report both describe the LAST answer: they
+    # change together, and neither keeps an earlier turn's value.
     conversation = save_turn(nb, conversation, "q2", None)
     assert both(conversation) is None
+    assert reasoned(conversation) is False
     assert "linked_report" not in _summary(repo, nb, conversation).model_dump(mode="json")
     assert "linked_report" not in repo.get_conversation(conversation).model_dump(mode="json")
 
     conversation = save_turn(
-        nb, conversation, "q3", _receipt(report_b, "Report B question", status="skipped"))
+        nb, conversation, "q3", _receipt(report_b, "Report B question", status="skipped"),
+        reasoning=True)
     assert both(conversation) == LinkedReportRef(
         report_id=report_b, title="Report B question")
+    assert reasoned(conversation) is True
     # The per-turn receipts stay on the turns; only the last one is summarised.
     turns = repo.get_conversation(conversation).turns
     assert [t.response.linked_report.report_id if t.response.linked_report else None
@@ -178,17 +217,42 @@ def assert_unreadable_receipt_reads_as_no_report(
     save_turn: SaveTurn,
     overwrite_payload: Callable[[str, object], None],
 ) -> None:
-    """A receipt the projection cannot use never breaks the conversation list:
-    an empty report id reads as 'no report' on the summary AND the detail, and
-    a stored value that is not even an object reads as none on the summary."""
+    """A stored receipt that is not a valid ``LinkedReportReceipt`` that names a
+    report -- an unknown status, a skipped receipt that claims to have read
+    something, a missing or non-string report id, or not even an object -- never
+    breaks the conversation: the detail opens, the turn carries no receipt, and
+    the detail and the summary both read it as 'no report'. A receipt that is
+    valid but names no report (an empty id) is no report either."""
     nb = repo.create_notebook(NotebookCreate(name="unreadable")).id
     conversation = save_turn(nb, None, "q1", None)
 
-    overwrite_payload(conversation, {
-        "report_id": "", "title": "no id", "status": "read"})
-    assert _summary(repo, nb, conversation).linked_report is None
-    assert repo.get_conversation(conversation).linked_report is None
+    unreadable = (
+        {"report_id": "rep-1", "title": "odd status", "status": "weird"},
+        {"report_id": "rep-1", "title": "skipped yet read", "status": "skipped",
+         "evidence_restored": 3},
+        {"report_id": "rep-1", "title": "skipped yet read", "status": "skipped",
+         "sections": [{"index": 1, "title": "s", "read": True}]},
+        {"title": "no id at all", "status": "read"},
+        {"report_id": 5, "title": "x", "status": "read"},
+        "oops", [], 7,
+    )
+    for receipt in unreadable:
+        overwrite_payload(conversation, receipt)
+        detail = repo.get_conversation(conversation)
+        assert detail.turns[-1].response.linked_report is None, receipt
+        assert detail.linked_report is None, receipt
+        assert _summary(repo, nb, conversation).linked_report is None, receipt
 
-    for junk in ("oops", [], 7, {"title": "no id"}, {"report_id": 5, "title": "x"}):
-        overwrite_payload(conversation, junk)
-        assert _summary(repo, nb, conversation).linked_report is None, junk
+    overwrite_payload(conversation, {"report_id": "", "title": "no id", "status": "read"})
+    detail = repo.get_conversation(conversation)
+    assert detail.linked_report is None
+    assert _summary(repo, nb, conversation).linked_report is None
+
+    # The tolerance reads the field as absent; a valid receipt in the same
+    # place still reads, so the loop above is not just an always-empty path.
+    overwrite_payload(conversation, {
+        "report_id": "rep-1", "title": "fine", "status": "read"})
+    assert repo.get_conversation(conversation).linked_report == LinkedReportRef(
+        report_id="rep-1", title="fine")
+    assert _summary(repo, nb, conversation).linked_report == LinkedReportRef(
+        report_id="rep-1", title="fine")

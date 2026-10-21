@@ -10,7 +10,6 @@ from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate, AskRequest
 from tests.model_testkit import bind_all_embedding_clients
-from tests import conversation_linked_report_cases as cases
 from tests.ask_testkit import seed_ask_evidence
 
 
@@ -649,21 +648,6 @@ def test_ask_job_origin_reads_the_stored_request_facts(repo):
         submitted_via="mcp", output="evidence",
     )
     assert store.ask_job_origin(evidence)["output"] == "evidence"
-
-
-def test_job_row_records_the_report_the_turn_was_asked_about(repo):
-    """``ask_jobs.report_id`` is written by every begin path and read back by
-    ``ask_job_origin`` and ``ask_job_detail`` ('' = no report); a keyed retry
-    attaches to the first row instead of overwriting it. The body is shared
-    with its PostgreSQL twin
-    (tests/postgres/test_conversation_linked_report_store_pg.py)."""
-    def stored_report_id(job_id: str) -> str:
-        with repo._connect() as db:
-            return db.execute(
-                "SELECT report_id FROM ask_jobs WHERE id=?", (job_id,)
-            ).fetchone()["report_id"]
-
-    cases.assert_job_row_records_the_report(repo, stored_report_id)
 
 
 def test_ask_job_progress_counts_trace_steps_without_reading_them(repo):

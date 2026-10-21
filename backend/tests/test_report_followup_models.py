@@ -351,6 +351,43 @@ def test_receipt_status_is_read_or_skipped_only():
         _receipt(status="pending")
 
 
+@pytest.mark.parametrize(
+    "stored",
+    [
+        {"report_id": "rep-1", "title": "题", "status": "pending"},
+        {"report_id": "rep-1", "title": "题", "status": "skipped", "evidence_gone": 1},
+        {"title": "题", "status": "read"},
+        {"report_id": 5, "title": "题", "status": "read"},
+        "oops",
+        ["rep-1"],
+        7,
+    ],
+)
+def test_a_stored_receipt_that_is_not_valid_reads_as_absent_on_the_carriers(stored):
+    """A payload that was stored with a receipt the strict model rejects must
+    still open as an answer / evidence result -- without a receipt -- instead of
+    failing the whole conversation detail. The receipt model itself stays strict
+    (the two tests above)."""
+    assert AskResponse(conclusion="c", linked_report=stored).linked_report is None
+    assert AskResponse.model_validate(
+        {"conclusion": "c", "linked_report": stored}
+    ).linked_report is None
+    assert AskEvidence(
+        mode="chunk", evidence_kind="none", linked_report=stored
+    ).linked_report is None
+    assert "linked_report" not in AskResponse(
+        conclusion="c", linked_report=stored
+    ).model_dump(mode="json")
+
+
+def test_a_valid_stored_receipt_still_reads_on_the_carriers():
+    stored = _receipt(status="skipped", reason_code="read_failed", reason="x").model_dump()
+    assert AskResponse(conclusion="c", linked_report=stored).linked_report.report_id == "rep-1"
+    assert AskEvidence(
+        mode="chunk", evidence_kind="none", linked_report=stored
+    ).linked_report.status == "skipped"
+
+
 def test_receipt_title_is_kept_whole():
     title = "报告题目" * 1000  # the report question rail is 4000 characters
     assert _receipt(title=title).title == title
