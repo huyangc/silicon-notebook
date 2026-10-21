@@ -8,8 +8,9 @@ conversation share disclosure counts Memory with.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.services.share_disclosure import linked_report_memory_ids
@@ -93,16 +94,58 @@ def test_followup_scope_flips_to_the_complement_when_the_selection_is_longer(mon
     assert (scope.mode, scope.source_ids) == ("exclude", ["e"])
 
 
-def test_followup_scope_with_no_submittable_form_asks_for_a_manual_choice(monkeypatch):
+def test_followup_scope_with_no_submittable_form_has_none(monkeypatch):
     import app.api.report_routes as routes
 
     monkeypatch.setattr(routes, "_SCOPE_IDS_MAX", 2)
     roster = _Roster(["a", "b", "c", "d", "e", "f"])
-    with pytest.raises(HTTPException) as refused:
-        routes._followup_source_scope(roster, "nb", ["a", "b", "c"])
-    assert refused.value.status_code == 409
-    assert refused.value.headers == {"X-User-Message": "1"}
-    assert "无法自动恢复检索范围" in refused.value.detail
+    assert routes._followup_source_scope(roster, "nb", ["a", "b", "c"]) is None
+
+
+class _Notebook:
+    counts = {"sources": 6}
+    local_evidence_available = True
+    base_notebooks = [SimpleNamespace(id="lib-a")]
+
+
+class _Repo(_Roster):
+    """The reads ``_report_followup_scope`` makes, over a notebook of six
+    sources of which the frozen selection still sees five."""
+
+    def __init__(self) -> None:
+        super().__init__(["a", "b", "c", "d", "e", "f"])
+
+    def get_notebook(self, notebook_id: str) -> _Notebook:
+        return _Notebook()
+
+    def visible_source_scope_snapshot(self, notebook_id: str, ids: list[str]):
+        return [i for i in ids if i in self.universe], len(self.universe)
+
+
+def test_a_selection_no_request_can_carry_falls_back_to_everything(monkeypatch):
+    """The browser could not submit a selection that long in either form
+    (include or exclude), so the follow-up scope hands back everything -- both
+    dimensions, the narrowed library one too -- and says so; what dropped out
+    is still counted."""
+    import app.api.report_routes as routes
+
+    monkeypatch.setattr(routes, "_SCOPE_IDS_MAX", 2)
+    row = {"question": "题", "understanding": {
+        "source_scope": {"mode": "include", "narrowed": True,
+                         "source_ids": ["a", "b", "c", "x"]},
+        "base_scope": {"mode": "include", "narrowed": True, "notebook_ids": ["lib-a"]},
+    }}
+    scope = routes._report_followup_scope(_Repo(), "nb", "rep-1", row)
+    assert scope.fell_back_to_all is True
+    assert (scope.source_scope.mode, scope.source_scope.source_ids) == ("exclude", [])
+    assert (scope.base_scope.mode, scope.base_scope.notebook_ids) == ("exclude", [])
+    assert (scope.dropped_sources, scope.dropped_libraries) == (1, 0)
+    # The same selection, once a request can carry it, is restored as it was.
+    monkeypatch.setattr(routes, "_SCOPE_IDS_MAX", 10)
+    scope = routes._report_followup_scope(_Repo(), "nb", "rep-1", row)
+    assert scope.fell_back_to_all is False
+    assert scope.source_scope.source_ids == ["a", "b", "c"]
+    assert scope.base_scope.notebook_ids == ["lib-a"]
 
 
 # --- the receipt reader of the conversation share count ----------------------
