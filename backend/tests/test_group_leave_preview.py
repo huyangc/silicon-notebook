@@ -160,3 +160,18 @@ def test_leaving_keeps_the_memory_and_the_preview_matched_it(http):
     again = client.get("/api/memories", headers=http["leaver"]).json()
     assert again["total_count"] == before["memory_count"] == 2
     assert client.get(_url(http["group"]), headers=http["leaver"]).json() == before
+
+
+def test_the_export_offered_before_leaving_does_not_claim_leaving_deletes(http):
+    """The leave panel's export is the notebook export; its header keeps the
+    shared-notebook exit warning and says leaving a group deletes nothing."""
+    client = http["client"]
+    preview = client.get(_url(http["group"]), headers=http["leaver"]).json()
+    [notebook] = preview["notebooks"]
+    response = client.get(
+        f"/api/notebooks/{notebook['notebook_id']}/memories/export", headers=http["leaver"]
+    )
+    assert response.status_code == 200
+    head = response.text.split("\n## ", 1)[0]
+    assert "退出这本共享笔记本时，这里列出的全部记忆都会被永久删除" in head
+    assert "退出群组不会删除它们" in head

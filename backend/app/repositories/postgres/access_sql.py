@@ -448,7 +448,6 @@ def read_access_clause(
     )
 
 
-
 def read_access_after_group_exit_clause(
     nb_alias: str = "nb",
     member_alias: str = "nm",
@@ -477,6 +476,7 @@ def read_access_after_group_exit_clause(
         )
         + ")"
     )
+
 
 def admin_access_clause(
     nb_alias: str = "nb",

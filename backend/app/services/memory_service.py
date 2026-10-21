@@ -1260,8 +1260,10 @@ class MemoryService:
         group ends, each with its name and how many of the caller's Memory
         items (every status) it holds; notebooks holding none are left out.
         Leaving a group deletes no Memory (``remove_member`` drops the one
-        ``group_members`` row), so rejoining while those notebooks are still
-        shared with the group shows them again. Ordered by name, then id —
+        ``group_members`` row). Rejoining shows them again wherever the
+        rejoined member reads again: a notebook shared with the group's admins
+        only comes back only to someone who rejoins as an admin (an invite
+        link joins as a plain member). Ordered by name, then id —
         the same on both backends whatever the database collation."""
         rows = self.store.group_exit_memory_preview(group_id, user_id)
         return sorted(rows, key=lambda row: (row["name"], row["notebook_id"]))
@@ -1410,7 +1412,8 @@ class MemoryService:
             f"# {_one_line(notebook_title) or '笔记本'} · 我的记忆\n\n"
             f"导出时间：{self.now()}\n\n"
             "只包含你本人在这本笔记本里的记忆。标为「候选」的尚未确认；"
-            "退出这本共享笔记本时，这里列出的全部记忆都会被永久删除。\n"
+            "退出这本共享笔记本时，这里列出的全部记忆都会被永久删除；"
+            "退出群组不会删除它们。\n"
         )
         for index, item in enumerate(items, start=1):
             yield _export_section(index, item)
