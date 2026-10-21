@@ -24,6 +24,7 @@ import type { NotebookSummary } from "./workspace-model";
 // `.graph`) plus the flat command surface listed at the bottom of this file.
 type KgWorkspacePolicy = {
   canGovernKnowledge: boolean;
+  canMergeOwnMemory: boolean;
   canManageNotebookSchemas: boolean;
   canManageGlobalSchemas: boolean;
   canWriteKg: boolean;

@@ -5856,6 +5856,28 @@ button.chat-session-card {
   font-size: 14px;
 }
 
+/* 「查重」里「我的记忆里的重复」:共享组下方单独成段。 */
+.dup-own-section {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #e1e6ee;
+}
+
+/* 一次合并的结果:就地显示在那一组里(或该段列表最上方),按时收起,不走页顶提示。 */
+.dup-merge-result {
+  margin: 6px 0 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.dup-merge-result-done {
+  color: var(--green);
+}
+
+.dup-merge-result-failed {
+  color: var(--danger);
+}
+
 @media (max-width: 1080px) {
   .scenario-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -213,6 +213,13 @@ export function workspaceCapabilities(
     canWriteNotebook: canWrite && !mirrored,
     canGovernKnowledge: canWrite && !mirrored,
     /**
+     * 「查重」里「我的记忆里的重复」那一段的查看与合并。合并两条**本人**记忆对象只要
+     * 笔记本读权(用户裁决 2026-10-22;后端在合并的加锁语句里判定这一对是不是本人对),
+     * 所以只读成员也有它。镜像上收起:后端在镜像上不开读权这条路,按 knowledge:write 的
+     * 围栏处理(只读成员 404,管理者 409),画出来只会点进必然失败的动作。
+     */
+    canMergeOwnMemory: !mirrored,
+    /**
      * 检索索引（scale index）的构建/更新/全量重建入口。**= 未加镜像判定的那个
      * `canWrite`**:后端 `scale_index:write` 在围栏表里是 False,因为索引是目标端自有的
      * 派生产物、不在同步闭包里,而重建又恰恰是目标端唯一的修复手段——跟着

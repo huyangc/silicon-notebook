@@ -75,6 +75,7 @@ type HookOptions = Parameters<typeof useKgWorkspace>[0];
 
 const writablePolicy: HookOptions["policy"] = {
   canGovernKnowledge: true,
+  canMergeOwnMemory: true,
   canManageNotebookSchemas: true,
   canManageGlobalSchemas: true,
   canWriteKg: true,
@@ -377,6 +378,7 @@ test("a closed graph suppresses the stale open request error", async () => {
 test("read-only policy neither restores review work nor admits write commands", async () => {
   const readOnly: HookOptions["policy"] = {
     canGovernKnowledge: false,
+    canMergeOwnMemory: false,
     canManageNotebookSchemas: false,
     canManageGlobalSchemas: false,
     canWriteKg: false,

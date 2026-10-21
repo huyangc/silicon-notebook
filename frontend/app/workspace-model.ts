@@ -924,6 +924,10 @@ export const EMPTY_KNOWLEDGE: Record<string, KnowledgeItem[] | null> = {};
 
 export type KnowledgeRef = { id: string; object_type: string; headline: string; status: string };
 export type DuplicateGroup = { object_type: string; similarity: number; members: KnowledgeRef[] };
+/** 「查重」的两个分区:共享重复组(`/duplicates`)与本人记忆里的重复(`/duplicates/own-memory`)。 */
+export type DuplicatePartition = "shared" | "own";
+/** 一次合并的结果,就地显示在发起合并的那一组旁边(不走页顶提示)。 */
+export type MergeOutcome = { tone: "done" | "failed"; text: string };
 export type NotebookAnalytics = {
   /** 提问数已含归入本库的全局问答;`answers_global` 是其中全局问答那一份。 */
   answers_total: number;

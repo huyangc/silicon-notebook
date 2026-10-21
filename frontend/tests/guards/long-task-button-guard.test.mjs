@@ -156,13 +156,21 @@ test("搬出 page.tsx 的长任务按钮:page.tsx 传进去的是真正的在飞
     );
   }
 
-  const duplicates = jsxElements(page, "DuplicateGroupList");
-  assert.equal(duplicates.length, 1, "page.tsx 应当恰好挂一处 DuplicateGroupList");
-  assert.equal(
-    duplicates[0].bindings.mergingId, "mergingId",
-    "DuplicateGroupList 的 mergingId 没有接到真正的合并中状态——合并按钮连点会重复合并",
-  );
-  assert.match(duplicates[0].bindings.onMerge ?? "", /runMerge\(/, "DuplicateGroupList 的 onMerge 没有接到 runMerge");
+  // 查重结果的两段(共享组、「我的记忆里的重复」)由 DuplicateResults 统一持有合并中状态:
+  // page.tsx 只挂它一处,它的两处 DuplicateGroupList 都接真正的 mergingId 与 runMerge。
+  const results = jsxElements(page, "DuplicateResults");
+  assert.equal(results.length, 1, "page.tsx 应当恰好挂一处 DuplicateResults");
+  assert.equal(results[0].bindings.onMerge, "onMerge", "DuplicateResults 的 onMerge 没有接到面板的 onMerge");
+  const list = await parseModule("duplicate-group-list.tsx");
+  const duplicates = jsxElements(list, "DuplicateGroupList");
+  assert.equal(duplicates.length, 2, "DuplicateResults 应当恰好挂两处 DuplicateGroupList(共享 / 本人)");
+  for (const duplicate of duplicates) {
+    assert.equal(
+      duplicate.bindings.mergingId, "mergingId",
+      "DuplicateGroupList 的 mergingId 没有接到真正的合并中状态——合并按钮连点会重复合并",
+    );
+    assert.match(duplicate.bindings.onMerge ?? "", /runMerge\(/, "DuplicateGroupList 的 onMerge 没有接到 runMerge");
+  }
 });
 
 test("page.tsx 的长任务 file input 也带非平凡的 disabled，且表达式里含在飞标志", async () => {
