@@ -627,8 +627,9 @@ def test_pg_a_long_held_lock_bounds_the_follow_up_and_hands_it_to_the_backstop(
 ):
     """Quality P3-1: the after-commit follow-up runs on the delete's own
     thread, so its wait is bounded by its own ``SET LOCAL lock_timeout`` —
-    not only by the deployment's (``POSTGRES_LOCK_TIMEOUT_SECONDS``, set to
-    30 s here so the bound under test is the follow-up's). With mem-a1's
+    not only by the deployment's (``POSTGRES_LOCK_TIMEOUT_SECONDS`` and the
+    statement timeout, both set to 30 s here so the bound under test is the
+    follow-up's). With mem-a1's
     source held far longer, deleting mem-a2 returns in bounded time, ko-ma1
     still deprecated, and the notebook is handed to a background backstop
     pass — which restores ko-ma1 once the lock goes."""
@@ -642,6 +643,7 @@ def test_pg_a_long_held_lock_bounds_the_follow_up_and_hands_it_to_the_backstop(
     postgres_settings.kg_auto_extract = False
     postgres_settings.embed_dim = 16
     postgres_settings.postgres_lock_timeout_seconds = 30
+    postgres_settings.postgres_statement_timeout_seconds = 30
     repo = PostgresRepository(postgres_settings)
     try:
         _run_the_bounded_follow_up_case(repo, monkeypatch, ingestion_module, background_jobs)
