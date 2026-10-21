@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Callable, Collection, Iterable, Mapping, Optional, Protocol, Union
 
@@ -49,7 +50,7 @@ from app.domain.report_followup import (
     SectionSelection,
 )
 from app.models.ask import LinkedReportReceipt, LinkedReportSection, TraceStep
-from app.services.citation_markers import LOOSE_MARKER_RE, marker_keys
+from app.services.citation_markers import LOOSE_MARKER_RE, MARKER_RE, marker_keys
 from app.services.retrieval import KeywordBasis, _tokens, keyword_basis
 
 
@@ -160,13 +161,51 @@ def _body_end(lines: list[str], fenced: list[bool]) -> int:
     return references[-1] if references else tail
 
 
+# Which markers of the stored body name the report's references. The engine
+# renumbers each section's markers to the report-wide keys of ``references``
+# with the strict ``citation_markers.MARKER_RE`` (``ReportEngine._assemble``),
+# and only the section bodies: the executive summary is stored as the model
+# wrote it (its prompt forbids markers, so any it carries is unnumbered). A
+# marker only the loose pattern matches -- inner spaces, ``[ k2 ]`` -- was
+# never renumbered either. Such markers name nothing in ``references``: they
+# are removed whole, never counted as keys and never rewritten (rewriting one
+# would point this turn's answer at an unrelated item).
+def _global_marker(marker: str) -> bool:
+    return MARKER_RE.fullmatch(marker) is not None
+
+
 def _keys_in(text: str) -> tuple[str, ...]:
-    """Report reference keys of ``text``'s markers, in order of first appearance."""
+    """Report reference keys of a section body's renumbered markers, in order
+    of first appearance."""
     seen: dict[str, None] = {}
     for match in LOOSE_MARKER_RE.finditer(text or ""):
-        for key in marker_keys(match.group(0)):
-            seen.setdefault(key, None)
+        if _global_marker(match.group(0)):
+            for key in marker_keys(match.group(0)):
+                seen.setdefault(key, None)
     return tuple(seen)
+
+
+def _strip_markers(text: str) -> str:
+    """``text`` without any citation marker (the executive summary's)."""
+    return LOOSE_MARKER_RE.sub("", text or "")
+
+
+def _aligned_section(
+    keys: list[str], start: int, wanted: str, at: int, last_at: Mapping[str, int],
+) -> Optional[int]:
+    """The section a heading at line ``at`` opens: the first title from
+    ``start`` on whose folded form is ``wanted``. Skipping titles to reach it
+    is allowed only when none of the skipped titles is still a heading further
+    down -- otherwise the heading is the model's own text that happens to
+    repeat a later title (a section's closing ``## 结论`` before the report's
+    own 结论 section) and the sections in between would be misaligned."""
+    for index in range(start, len(keys)):
+        if keys[index] and keys[index] == wanted:
+            skipped = keys[start:index]
+            if any(key and last_at.get(key, -1) > at for key in skipped):
+                return None
+            return index
+    return None
 
 
 def _split_body(content_md: str, titles: tuple[str, ...]) -> tuple[str, list[str]]:
@@ -174,40 +213,45 @@ def _split_body(content_md: str, titles: tuple[str, ...]) -> tuple[str, list[str
 
     Top-level ``## `` headings outside code fences drive the split. Before the
     first section: ``## 执行摘要`` opens the summary, ``## 资料基础`` a block that
-    is dropped, the ``# `` title line is dropped. A heading that matches a
-    title still ahead (``_heading_key``) opens that section -- titles it skips
-    keep an empty body. A heading that matches none is the model's own: it
-    stays in the current section's body, or -- when no section is open yet --
-    opens the next one, since everything after the source-basis block is
-    section text. The references list and the tail notes are never read.
+    is dropped, the ``# `` title line is dropped. A heading that aligns with a
+    title still ahead (``_heading_key``, ``_aligned_section``) opens that
+    section -- titles it skips keep an empty body. A heading that aligns with
+    none is the model's own: it stays in the summary or the current section,
+    and only after the source-basis block, with no section open yet, does it
+    open the next section (everything there is section text). The references
+    list and the tail notes are never read.
     """
     lines = (content_md or "").splitlines()
     fenced = _fenced(lines)
+    end = _body_end(lines, fenced)
+    headings = {
+        index: lines[index][len(_TOP_HEADING):].strip()
+        for index in range(end)
+        if not fenced[index] and lines[index].startswith(_TOP_HEADING)
+    }
+    folded = {index: _heading_key(heading) for index, heading in headings.items()}
+    last_at = {key: index for index, key in folded.items()}
     keys = [_heading_key(title) for title in titles]
     summary: list[str] = []
     bodies: list[list[str]] = [[] for _ in titles]
     target: Optional[list[str]] = None
     next_section = 0
     opened = seen_summary = False
-    for index, line in enumerate(lines[:_body_end(lines, fenced)]):
-        if not fenced[index] and line.startswith(_TOP_HEADING):
-            heading = line[len(_TOP_HEADING):].strip()
+    for index, line in enumerate(lines[:end]):
+        if index in headings:
+            heading = headings[index]
             if not opened and not seen_summary and heading == _SUMMARY_HEADING:
                 seen_summary, target = True, summary
                 continue
             if not opened and heading == _SOURCE_BASIS_HEADING:
                 target = None
                 continue
-            wanted = _heading_key(heading)
-            found = next(
-                (j for j in range(next_section, len(keys)) if keys[j] and keys[j] == wanted),
-                None,
-            )
-            if found is None and not opened:
-                found = next_section if next_section < len(titles) else None
-                if found is None:
+            found = _aligned_section(keys, next_section, folded[index], index, last_at)
+            if found is None and not opened and target is not summary:
+                if next_section >= len(titles):
                     target = None
                     continue
+                found = next_section
             if found is not None:
                 opened, next_section, target = True, found + 1, bodies[found]
                 continue
@@ -220,11 +264,13 @@ def report_digest(row: Mapping[str, Any]) -> ReportDigest:
     """A stored report reduced to what a follow-up question reads.
 
     Total: any malformed field reads as empty, never raises. ``title`` is
-    ``reports.question`` whole; ``sections`` follow the stored section list
+    ``reports.question`` whole; ``summary`` is the executive summary without
+    citation markers; ``sections`` follow the stored section list
     (``row["sections"]``), each with its body from ``content_md`` (empty when
     its heading cannot be found there; a failed section's body is the stored
-    neutral failure note). ``references`` and ``memory_used`` are copied whole:
-    the verdict judges the entire report, not the part a turn reads.
+    neutral failure note) and the report keys of its renumbered markers.
+    ``references`` and ``memory_used`` are copied whole: the verdict judges the
+    entire report, not the part a turn reads.
     """
     stored_sections = row.get("sections")
     titles = tuple(
@@ -248,14 +294,18 @@ def report_digest(row: Mapping[str, Any]) -> ReportDigest:
     )
     return ReportDigest(
         title=str(row.get("question") or ""),
-        summary=summary,
+        # The summary's markers were never renumbered to the report's keys
+        # (see ``_global_marker``): they are dropped here, so the summary has
+        # no keys -- ``summary_keys`` stays () -- and nothing of it is restored
+        # or rewritten.
+        summary=_strip_markers(summary),
         sections=tuple(
             ReportSection(index=index, title=title, body=body, keys=_keys_in(body))
             for index, (title, body) in enumerate(zip(titles, bodies), start=1)
         ),
         references=references,
         memory_used=memory_used,
-        summary_keys=_keys_in(summary),
+        summary_keys=(),
     )
 
 
@@ -462,14 +512,16 @@ def rewrite_report_markers(text: str, key_map: Mapping[str, str]) -> str:
     """Point the report's ``[kN]`` markers at this turn's keys (D3).
 
     ``key_map`` maps a report reference key to the key its restored item has
-    in this turn's prompt. Each marker (``[k1]``, ``[k1, k3]``, ``【k2】``,
-    ``(k4)`` ...; ``citation_markers.LOOSE_MARKER_RE``, so a marker with inner
-    spaces is rewritten too instead of surviving as a stray key) keeps only its
-    mapped keys, written ``[kA, kB]``; a marker none of whose keys is mapped
-    is removed whole. A report key never reaches the prompt unmapped: it would
-    name an unrelated item of this turn."""
+    in this turn's prompt. A marker the engine renumbered (``MARKER_RE``:
+    ``[k1]``, ``[k1, k3]``, ``【k2】``, ``(k4)`` ...) keeps only its mapped keys,
+    written ``[kA, kB]``, and is removed whole when none is mapped. A marker
+    only ``LOOSE_MARKER_RE`` matches (``[ k2 ]``) was never renumbered and is
+    always removed (see ``_global_marker``). No report key reaches the prompt
+    unmapped: it would name an unrelated item of this turn."""
 
     def rewrite(match: re.Match[str]) -> str:
+        if not _global_marker(match.group(0)):
+            return ""
         kept: list[str] = []
         for key in marker_keys(match.group(0)):
             mapped = key_map.get(key)
@@ -488,12 +540,16 @@ _WIDEST_TURN_KEY = "k99999"
 
 
 def _widened(text: str) -> str:
-    return LOOSE_MARKER_RE.sub(
-        lambda match: "[" + ", ".join(
+    """``text`` as long as ``rewrite_report_markers`` can ever make it."""
+
+    def widen(match: re.Match[str]) -> str:
+        if not _global_marker(match.group(0)):
+            return ""
+        return "[" + ", ".join(
             _WIDEST_TURN_KEY for _key in marker_keys(match.group(0))
-        ) + "]",
-        text or "",
-    )
+        ) + "]"
+
+    return LOOSE_MARKER_RE.sub(widen, text or "")
 
 
 # --- report block and section selection -------------------------------------
@@ -528,33 +584,14 @@ def _block(
 
 
 def _clip_summary(summary: str, room: int) -> str:
-    """The longest prefix of ``summary`` whose widened length fits ``room``,
-    ending at the last sentence end that fits; a hard cut when none does,
-    never inside a marker (half a marker would read as a stray key)."""
+    """The longest prefix of the marker-free ``summary`` within ``room``
+    characters that ends at a sentence end; a hard cut at ``room`` when no
+    sentence ends inside it. One scan of the kept prefix."""
     if room <= 0:
         return ""
-    best = 0
-    for index, char in enumerate(summary):
-        if char not in _SENTENCE_ENDS:
-            continue
-        if len(_widened(summary[:index + 1])) > room:
-            break
-        best = index + 1
-    if best:
-        return summary[:best]
-    cut = min(len(summary), room)
-    while cut > 0:
-        inside = next(
-            (m.start() for m in LOOSE_MARKER_RE.finditer(summary) if m.start() < cut < m.end()),
-            None,
-        )
-        if inside is not None:
-            cut = inside
-        elif len(_widened(summary[:cut])) <= room:
-            break
-        else:
-            cut -= 1
-    return summary[:cut].rstrip()
+    head = summary[:room]
+    end = max(head.rfind(char) for char in _SENTENCE_ENDS)
+    return head[:end + 1] if end >= 0 else head.rstrip()
 
 
 def _section_score(basis: KeywordBasis, section: ReportSection) -> float:
@@ -567,34 +604,36 @@ def select_report_sections(
 ) -> SectionSelection:
     """Which parts of the report enter this turn's prompt (D12, §2.6).
 
-    The skeleton -- header, title, executive summary and every section
-    heading -- always enters. When the skeleton alone exceeds ``budget_chars``
-    the summary is clipped at its last sentence end that fits (a hard cut when
-    none does) and ``SUMMARY_TRUNCATED_SUFFIX`` is appended here, the only
-    place it is added. Section bodies then fill what is left WHOLE (never half
-    a section): all of them when they fit, otherwise by lexical relevance to
-    ``query`` (``retrieval.keyword_basis(query).coverage`` over title and
-    body; ties by section order), skipping a body that does not fit and trying
-    the next. A body shorter than the placeholder it replaces is always taken;
-    a section without a body is always "read" (nothing of it is held back).
+    The skeleton -- header, title, executive summary (without markers, see
+    ``report_digest``) and every section heading -- always enters. When the
+    skeleton alone exceeds ``budget_chars`` the summary is clipped at its last
+    sentence end that fits (a hard cut when none does) and
+    ``SUMMARY_TRUNCATED_SUFFIX`` is appended here, the only place it is
+    added. Section bodies then fill what is left WHOLE (never half a section):
+    all of them when they fit, otherwise by lexical relevance to ``query``
+    (``retrieval.keyword_basis(query).coverage`` over title and body; ties by
+    section order), skipping a body that does not fit and trying the next. A
+    body shorter than the placeholder it replaces is always taken. A section
+    with no body text is never read: it is listed by its heading only.
 
     Lengths are measured with every marker at its widest possible rewrite, so
     the rendered block stays within ``budget_chars`` whatever keys the items
-    take; only section headings -- user-confirmed outline titles, which are
-    never cut -- can push a block past it. ``query`` is the turn's retrieval
-    query (chunk) or research question (reasoning).
+    take. Two parts are never cut and can push a block past it: the report
+    title (``reports.question``, at most ``REPORT_QUESTION_MAX_CHARS``) and
+    the section titles (user-confirmed outline titles); the summary then
+    shrinks to the suffix alone and no body is read. ``query`` is the turn's
+    retrieval query (chunk) or research question (reasoning).
     """
-    always = {section.index for section in digest.sections if not section.body}
-    summary, truncated = digest.summary, False
-    skeleton = len(_block(digest.title, _widened(summary), digest, (), _widened))
+    summary, truncated = _strip_markers(digest.summary), False
+    skeleton = len(_block(digest.title, summary, digest, (), _widened))
     if summary and skeleton > budget_chars:
         # Everything but the summary's own text: the block with a one-char summary.
         overhead = len(_block(digest.title, "x", digest, (), _widened)) - 1
         summary = _clip_summary(
-            digest.summary, budget_chars - overhead - len(SUMMARY_TRUNCATED_SUFFIX)
+            summary, budget_chars - overhead - len(SUMMARY_TRUNCATED_SUFFIX)
         ) + SUMMARY_TRUNCATED_SUFFIX
         truncated = True
-        skeleton = len(_block(digest.title, _widened(summary), digest, (), _widened))
+        skeleton = len(_block(digest.title, summary, digest, (), _widened))
     remaining = budget_chars - skeleton
     costs = {
         section.index: len(_widened(section.body)) - len(_SECTION_NOT_LOADED)
@@ -614,13 +653,15 @@ def select_report_sections(
             if costs[section.index] <= remaining:
                 chosen.add(section.index)
                 remaining -= costs[section.index]
-    keys: dict[str, None] = dict.fromkeys(_keys_in(summary))
+    # The summary carries no keys (see ``report_digest``): the keys are the
+    # read sections', in report order.
+    keys: dict[str, None] = {}
     for section in digest.sections:
         if section.index in chosen:
             for key in section.keys:
                 keys.setdefault(key, None)
     return SectionSelection(
-        read_indices=tuple(sorted(chosen | always)),
+        read_indices=tuple(sorted(chosen)),
         summary=summary,
         summary_truncated=truncated,
         keys=tuple(keys),
@@ -632,15 +673,17 @@ def render_report_block(
 ) -> str:
     """The attached-report block of the answer prompt (§2.6), sections in the
     report's order: a read section with its body, an unread one with a
-    placeholder line. ``selection.summary`` is used as is (already clipped and
-    marked by ``select_report_sections``); every marker is rewritten through
+    placeholder line, one without body text with a line saying so.
+    ``selection.summary`` is used as clipped and marked by
+    ``select_report_sections``, with any marker removed (the summary's are
+    never the report's keys); section markers are rewritten through
     ``key_map`` (``rewrite_report_markers``)."""
 
     def rewrite(text: str) -> str:
         return rewrite_report_markers(text, key_map)
 
     return _block(
-        digest.title, rewrite(selection.summary), digest,
+        digest.title, _strip_markers(selection.summary), digest,
         set(selection.read_indices), rewrite,
     )
 
@@ -667,6 +710,25 @@ def report_outline_text(
 
 
 # --- receipts and trace -----------------------------------------------------
+@dataclass(frozen=True)
+class ReportAdmissionCounts:
+    """What the turn's report-evidence partition admitted (built where the
+    partition is assembled, read by ``followup_receipt``).
+
+    ``restored``: cited items in the prompt, including those reused from the
+    turn's own retrieval. ``over_budget``: cited items read back but left out
+    by the partition budget. Both are non-negative integers."""
+
+    restored: int = 0
+    over_budget: int = 0
+
+    def __post_init__(self) -> None:
+        for name in ("restored", "over_budget"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative int, got {value!r}")
+
+
 def skipped_receipt(followup: ReportFollowup, reason_code: str) -> LinkedReportReceipt:
     """The receipt of a turn that did not read the report -- the only place a
     ``skipped`` receipt is built. It carries no sections and no counts (what
@@ -691,26 +753,27 @@ def followup_receipt(
     followup: ReportFollowup,
     *,
     selection: SectionSelection,
-    admission_counts: Mapping[str, int],
+    admission_counts: ReportAdmissionCounts,
     read: bool,
 ) -> LinkedReportReceipt:
     """The turn's receipt for the attached report.
 
     ``read`` is whether the report block entered the answer prompt. When it did
     not, the receipt is ``skipped_receipt`` with the verdict's reason, or
-    ``no_synthesis`` when the verdict allowed reading. When it did,
-    ``admission_counts`` is what the evidence partition admitted --
-    ``"restored"`` (cited items in the prompt, including those reused from the
-    turn's own retrieval) and ``"over_budget"`` (read back but left out by the
-    partition budget); ``evidence_gone`` adds the references whose item no
-    longer existed for the verdict and for the restore. ``memory_used`` is the
-    author's Memory the report was written from (D14).
+    ``no_synthesis`` when the verdict allowed reading. When it did, a section
+    is ``read`` exactly when its body entered the prompt (a section without
+    body text never does), ``admission_counts`` is what the evidence
+    partition admitted, and ``evidence_gone`` adds the references whose item
+    no longer existed for the verdict and for the restore. ``memory_used`` is
+    the author's Memory the report was written from (D14).
     """
     verdict = followup.verdict
     if not read:
         return skipped_receipt(followup, verdict.reason_code or REASON_NO_SYNTHESIS)
     if not verdict.readable or followup.digest is None:
         raise ValueError("a report the verdict did not let this turn read cannot be read")
+    if not isinstance(admission_counts, ReportAdmissionCounts):
+        raise TypeError("admission_counts must be a ReportAdmissionCounts")
     digest = followup.digest
     read_indices = set(selection.read_indices)
     restored_gone = followup.restored.gone if followup.restored is not None else 0
@@ -721,20 +784,24 @@ def followup_receipt(
         sections=[
             LinkedReportSection(
                 index=section.index, title=section.title,
-                read=section.index in read_indices,
+                read=bool(section.body) and section.index in read_indices,
             )
             for section in digest.sections
         ],
         summary_truncated=selection.summary_truncated,
-        evidence_restored=int(admission_counts.get("restored", 0)),
+        evidence_restored=admission_counts.restored,
         evidence_gone=verdict.gone + restored_gone,
-        evidence_over_budget=int(admission_counts.get("over_budget", 0)),
+        evidence_over_budget=admission_counts.over_budget,
         memory_used=list(digest.memory_used),
     )
 
 
 def _report_name(title: str) -> str:
     return f"《{title}》" if title else ""
+
+
+def _listed(numbers: Iterable[int]) -> str:
+    return "、".join(str(number) for number in numbers)
 
 
 def _evidence_note(receipt: LinkedReportReceipt) -> str:
@@ -748,33 +815,61 @@ def _evidence_note(receipt: LinkedReportReceipt) -> str:
     return note
 
 
-def _read_summary(receipt: LinkedReportReceipt) -> str:
+def _read_summary(receipt: LinkedReportReceipt, blank: Collection[int]) -> str:
+    """What a reading turn read. ``blank`` are the sections without body text:
+    never read, never described as held back by the budget."""
     name = _report_name(receipt.title)
     total = len(receipt.sections)
-    numbers = [section.index for section in receipt.sections if section.read]
-    if not receipt.summary_truncated and len(numbers) == total:
-        return f"已读取关联报告{name}全文"
-    # Concatenated rather than interpolated, so the UI-vocabulary guard reads
-    # the opening words as part of the summary (it drops interpolations).
+    read = [section.index for section in receipt.sections if section.read]
+    empty = sorted(section.index for section in receipt.sections if section.index in blank)
+    dropped = [
+        section.index for section in receipt.sections
+        if not section.read and section.index not in blank
+    ]
+    # Concatenated rather than interpolated wherever there is wording, so the
+    # UI-vocabulary guard reads it (it drops interpolations).
+    blank_note = "第 " + _listed(empty) + " 节没有单独的正文"
+    if not receipt.summary_truncated and not dropped:
+        whole = f"已读取关联报告{name}全文"
+        return whole + "（" + blank_note + "）" if empty else whole
     opening = f"已读取关联报告{name}：" + (
         "执行摘要（已截断）" if receipt.summary_truncated else "执行摘要"
     )
     if not total:
         return opening
-    if len(numbers) == total:
+    if not dropped and not empty:
         return opening + f"与全部 {total} 节"
-    if not numbers:
-        return opening + f"与各节标题（共 {total} 节，正文超出篇幅未读入）"
-    listed = "、".join(str(number) for number in numbers)
-    return opening + f"与第 {listed} 节（共 {total} 节，按与问题的相关度选取）"
+    if read:
+        part = "与第 " + _listed(read) + " 节"
+    elif dropped:
+        part = "与各节标题"
+    else:
+        part = ""
+    note = f"共 {total} 节"
+    if dropped and read:
+        note += "，按与问题的相关度选取"
+    elif dropped:
+        note += "，正文超出篇幅未读入"
+    if empty:
+        note += "，" + blank_note
+    return opening + part + "（" + note + "）"
 
 
-def report_trace_step(receipt: LinkedReportReceipt) -> TraceStep:
+def report_trace_step(
+    receipt: LinkedReportReceipt, *, digest: Optional[ReportDigest],
+) -> TraceStep:
     """The reasoning trace's ``report`` step: what the turn read of the
     attached report and how many cited items it read back, or why it read
-    nothing (the receipt's own reason clause)."""
+    nothing (the receipt's own reason clause). ``digest`` is the turn's
+    ``ReportFollowup.digest`` (None when the report was not read): it tells
+    a section without body text from one the budget left out, which the
+    receipt's ``read`` flags alone cannot."""
     if receipt.status == "read":
-        summary = _read_summary(receipt) + _evidence_note(receipt)
+        blank = {
+            section.index for section in (digest.sections if digest is not None else ())
+            if not section.body
+        }
+        summary = _read_summary(receipt, blank) + _evidence_note(receipt)
     else:
         clause = receipt.reason.removeprefix(REASON_PREFIX)
         summary = f"未读取关联报告{_report_name(receipt.title)}：{clause}"
@@ -795,6 +890,7 @@ def report_trace_step(receipt: LinkedReportReceipt) -> TraceStep:
 
 __all__ = [
     "REPORT_BLOCK_HEADER",
+    "ReportAdmissionCounts",
     "ReportScope",
     "SUMMARY_TRUNCATED_SUFFIX",
     "followup_receipt",
