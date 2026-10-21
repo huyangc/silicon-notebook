@@ -1568,7 +1568,8 @@ def test_pg_a_readers_refused_merge_takes_no_lock(pg_promotion_world):
     with psycopg.connect(url) as holder:
         holder.execute(
             "SELECT id FROM knowledge_objects WHERE id = ANY(%s) FOR UPDATE",
-            ([cases.ORDINARY_OBJECT, cases.ORDINARY_OBJECT_2, cases.MEMORY_OBJECT],),
+            ([cases.ORDINARY_OBJECT, cases.ORDINARY_OBJECT_2, cases.MEMORY_OBJECT,
+              "ko-c-mixed"],),
         )
         holder.execute("SELECT id FROM sources WHERE id='src-memory-a' FOR UPDATE")
         answers: dict = {}
@@ -1578,6 +1579,9 @@ def test_pg_a_readers_refused_merge_takes_no_lock(pg_promotion_world):
                 "shared": (cases.ORDINARY_OBJECT, cases.ORDINARY_OBJECT_2),
                 "cross": ("ko-c-dup-1", cases.ORDINARY_OBJECT),
                 "foreign": ("ko-c-dup-1", cases.MEMORY_OBJECT),
+                # her own object, but carrying shared evidence: the evidence half
+                # of the prefilter refuses it before the row lock
+                "mixed": ("ko-c-mixed", "ko-c-dup-1"),
                 "own": ("ko-c-dup-2", "ko-c-dup-1"),
             }.items():
                 response = cases._merge(world, c, source_id, into_id)
@@ -1593,6 +1597,7 @@ def test_pg_a_readers_refused_merge_takes_no_lock(pg_promotion_world):
         holder.rollback()
     refused = (404, {"detail": "Notebook not found"})
     assert answers["shared"] == answers["cross"] == answers["foreign"] == refused, answers
+    assert answers["mixed"] == refused, answers
     assert answers["patch-shared"] == refused, answers
     assert answers["own"][0] == 200, answers
 
