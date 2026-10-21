@@ -108,6 +108,46 @@ def test_knowhow_named_canonical_never_in_payload(repo, built):
     assert [secret for secret in SECRETS if secret in blob] == []
 
 
+def test_no_hidden_member_text_is_served_in_any_case(repo, built):
+    """codex #941 R3 (P1): F4 stores the v1 seeds of EVERY member — hidden
+    Knowhow / Memory ones included — to match stored decisions. Those seeds are
+    readable names past the reader-visible boundary: the page projects them
+    out, and no hidden spelling or hidden-only seed reaches any served byte,
+    whatever its case (the whole overview and every zone's page)."""
+    from tests.kg_findings_world import hidden_text_served
+
+    assert hidden_text_served(repo, built) == []
+    f4 = next(r for r in _page(repo, built).rows if r["rule_id"] == "F4")
+    assert "member_seeds" not in f4["evidence"]
+    assert "seeds_truncated" not in f4["evidence"]
+    # what the panel needs is still there: the group's ids and visible names
+    assert f4["evidence"]["canonical_ids"] == ["K-llama 3 1", "K-llama 31"]
+    assert [m["name"] for m in f4["evidence"]["members"]] == ["Llama 3.1", "Llama 31"]
+
+
+def test_a_dismissed_or_decided_f4_is_projected_the_same_way(repo, built):
+    """The projection is per row, whatever the zone: an F4 the user decided
+    apart (by a decision keyed by the HIDDEN member's seed — still matched on
+    the stored evidence) and one marked normal carry no member seeds either."""
+    from tests.kg_findings_world import KNOWHOW_HIDDEN_SEED_NAME, hidden_text_served
+
+    _sql(repo,
+         "INSERT INTO concept_merge_candidates(id,notebook_id,canonical_a,canonical_b,"
+         "score,status,seed_a,seed_b,created_at,updated_at) "
+         "VALUES ('mc-h',?,'K-llama 3 1','K-llama 31',0.9,'rejected',?,'llama 31',"
+         "'2026-10-19','2026-10-19')",
+         (built, concept_seed_v1(KNOWHOW_HIDDEN_SEED_NAME)))
+    passed = _page(repo, built, "passed")
+    assert _status(passed)[("F4", "llama31")] == (STATUS_DECIDED_NOT_SAME, None)
+    assert hidden_text_served(repo, built) == []
+    _sql(repo, "DELETE FROM concept_merge_candidates WHERE id='mc-h'")
+    assert _service(repo).dismiss_finding(built, "F4", "llama31", actor_user_id="u")
+    dismissed = _page(repo, built, "dismissed")
+    assert [r["rule_id"] for r in dismissed.rows] == ["F4"]
+    assert "member_seeds" not in dismissed.rows[0]["evidence"]
+    assert hidden_text_served(repo, built) == []
+
+
 def test_pagination_is_stable_within_a_zone(repo, built):
     first = _page(repo, built, limit=2, offset=0)
     second = _page(repo, built, limit=2, offset=2)

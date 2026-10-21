@@ -72,3 +72,28 @@ def test_read_side_statuses_on_postgres(postgres_repository):
     repository._runtime.knowledge_lifecycle.relink_notebook_kg(notebook_id)
     assert service.overview(notebook_id).findings_summary.relink["may_change"] is False
     assert ("F5", "notebook") in _status(repository, notebook_id, "passed")
+
+
+def test_no_hidden_member_text_is_served_on_postgres(postgres_repository):
+    """codex #941 R3 (P1), PostgreSQL form: the hidden Knowhow members' seeds
+    stored in F4's evidence decide (a rejection keyed by the hidden-only seed
+    still moves the group to "passed") but never reach a served byte — not in
+    any zone's page, not anywhere in the overview, in any case."""
+    from tests.kg_findings_world import KNOWHOW_HIDDEN_SEED_NAME, hidden_text_served
+
+    repository = postgres_repository
+    notebook_id = _built(repository)
+    assert hidden_text_served(repository, notebook_id) == []
+    page = repository._runtime.kg_analysis.findings_page(notebook_id)
+    f4 = next(r for r in page.rows if r["rule_id"] == "F4")
+    assert "member_seeds" not in f4["evidence"] and "seeds_truncated" not in f4["evidence"]
+    with repository._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO concept_merge_candidates(id,notebook_id,canonical_a,canonical_b,"
+            "score,status,seed_a,seed_b,created_at,updated_at) "
+            "VALUES ('mc-h',%s,'K-llama 3 1','K-llama 31',0.9,'rejected',%s,'llama 31',"
+            "now(),now())",
+            (notebook_id, concept_seed_v1(KNOWHOW_HIDDEN_SEED_NAME)))
+    assert _status(repository, notebook_id, "passed") == {
+        ("F4", "llama31"): ("decided_not_same", None)}
+    assert hidden_text_served(repository, notebook_id) == []

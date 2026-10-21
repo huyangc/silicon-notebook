@@ -372,15 +372,6 @@
         "K-llama 31"
        ]
       ],
-      "member_seeds": {
-       "K-llama 3 1": [
-        "llama 3 1",
-        "llama three one"
-       ],
-       "K-llama 31": [
-        "llama 31"
-       ]
-      },
       "member_sources": 2,
       "members": [
        {
@@ -394,7 +385,6 @@
         "objects": 1
        }
       ],
-      "seeds_truncated": false,
       "spellings": 2
      },
      "first_seen": {

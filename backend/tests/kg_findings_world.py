@@ -58,6 +58,11 @@ KNOWHOW_HIDDEN_SEED_NAME = "Llama three-one"
 KNOWHOW_ONLY_NAME = "Mistral 7.1"
 _CANONICAL_OVERRIDE = {"Mistral base": KNOWHOW_ONLY_NAME}
 SECRETS = (KNOWHOW_SECRET, KNOWHOW_HIDDEN_SEED_NAME, KNOWHOW_ONLY_NAME)
+# Text only a hidden member could have put in a response (codex #941 R3): every
+# hidden spelling, and the v1 seed no visible name shares ("llama three one" —
+# stored in F4's evidence to match decisions, never served). KNOWHOW_SECRET's
+# seed is the visible "Llama 3.1"'s own, so it is not hidden-only text.
+HIDDEN_ONLY_TEXT = (*SECRETS, concept_seed_v1(KNOWHOW_HIDDEN_SEED_NAME))
 
 
 def canonical_of(name: str) -> str:
@@ -65,6 +70,33 @@ def canonical_of(name: str) -> str:
 
 
 EXPECTED_SNAPSHOT = Path(__file__).with_name("fixtures") / "kg_findings_world_expected.json"
+
+
+def hidden_text_served(repo, notebook_id: str) -> List[str]:
+    """The ``HIDDEN_ONLY_TEXT`` entries found, case-insensitively and as
+    substrings, anywhere in what the findings list serves for the world: every
+    zone's WHOLE page, the overview's ``findings_summary`` and the findings
+    ledger payload the overview's artifact list carries. Also checks the test
+    is not vacuous: the stored F4 evidence does carry the hidden seed (the read
+    side matches decisions on it).
+
+    Not scanned: the batch-1 analysis artifacts (``largest_clusters`` serves the
+    stored ``canonical_name``, which here IS the knowhow spelling) — the
+    pre-findings analysis view, whose naming the findings list does not use."""
+    store = repo._runtime.unified_kg
+    with store.read_snapshot() as db:
+        stored = json.dumps(store.kg_analysis_finding_rows(db, notebook_id),
+                            ensure_ascii=False, default=str).lower()
+    assert concept_seed_v1(KNOWHOW_HIDDEN_SEED_NAME) in stored
+    service = repo._runtime.kg_analysis
+    overview = service.overview(notebook_id)
+    served = [asdict(overview.findings_summary)]
+    served.extend(view.payload for view in overview.artifacts if view.kind == "findings")
+    served.extend(asdict(service.findings_page(notebook_id, zone=zone))
+                  for zone in ("open", "passed", "dismissed"))
+    assert len(served) == 5                  # summary + payload + three pages
+    blob = json.dumps(served, ensure_ascii=False, default=str).lower()
+    return [text for text in HIDDEN_ONLY_TEXT if text.lower() in blob]
 
 
 def world_snapshot(repo, notebook_id: str) -> dict:
