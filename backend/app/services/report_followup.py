@@ -10,9 +10,12 @@ reason codes, their Chinese clauses and the frozen values -- lives one layer
 down in ``app.domain.report_followup``.
 
 * ``load_linked_report`` -- the report gate (own report, this notebook, done);
-* ``report_digest`` -- the stored report reduced to title, executive summary
-  and sections, parsed from ``content_md`` (the only body whose ``[kN]``
-  markers pair with the stored ``references``);
+* ``report_meta_digest`` -- the stored report without its body (title,
+  section titles, references, Memory use): all the verdict, the pre-send check
+  and the understanding step read;
+* ``report_digest`` -- the same with the executive summary and the sections'
+  bodies parsed from ``content_md`` (the only body whose ``[kN]`` markers pair
+  with the stored ``references``), for the run that renders the report block;
 * ``report_link_verdict`` -- may this turn read the report under the ceiling
   it runs with; one implementation for the run, the reasoning intent preview
   and the pre-send check;
@@ -36,7 +39,7 @@ import re
 import unicodedata
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import (
     Any,
@@ -284,52 +287,75 @@ def _split_body(content_md: str, titles: tuple[str, ...]) -> tuple[str, list[str
     return "\n".join(summary).strip(), ["\n".join(body).strip() for body in bodies]
 
 
-def report_digest(row: Mapping[str, Any]) -> ReportDigest:
-    """A stored report reduced to what a follow-up question reads.
+def report_meta_digest(row: Mapping[str, Any]) -> ReportDigest:
+    """The stored report WITHOUT its body: what the verdict, the pre-send
+    check and the understanding step read (plan D4/D5).
 
-    Total: any malformed field reads as empty, never raises. ``title`` is
-    ``reports.question`` whole; ``summary`` is the executive summary without
-    citation markers; ``sections`` follow the stored section list
-    (``row["sections"]``), each with its body from ``content_md`` (empty when
-    its heading cannot be found there; a failed section's body is the stored
-    neutral failure note) and the report keys of its renumbered markers.
-    ``references`` and ``memory_used`` are copied whole: the verdict judges the
-    entire report, not the part a turn reads.
-    """
+    ``title`` is ``reports.question`` whole; ``sections`` are the stored
+    section list (``row["sections"]``) by title, in order, with NO body and no
+    keys; ``summary`` is empty; ``references`` and ``memory_used`` are copied
+    whole (the verdict judges the entire report). ``content_md`` is not
+    parsed: an empty body here means "not read", not "no body text" -- only
+    ``report_digest`` may feed ``select_report_sections`` /
+    ``render_report_block``. Total: any malformed field reads as empty."""
     stored_sections = row.get("sections")
-    titles = tuple(
-        str(section.get("title") or "") if isinstance(section, Mapping) else ""
-        for section in (stored_sections if isinstance(stored_sections, (list, tuple)) else ())
-    )
-    content = row.get("content_md")
-    summary, bodies = _split_body(content if isinstance(content, str) else "", titles)
     stored_references = row.get("references")
-    references = tuple(
-        MappingProxyType(dict(reference))
-        for reference in (
-            stored_references if isinstance(stored_references, (list, tuple)) else ()
-        )
-        if isinstance(reference, Mapping)
-    )
     stored_memory = row.get("memory_used")
-    memory_used = tuple(
-        item for item in (stored_memory if isinstance(stored_memory, (list, tuple)) else ())
-        if isinstance(item, str) and item
-    )
     return ReportDigest(
         title=str(row.get("question") or ""),
+        summary="",
+        sections=tuple(
+            ReportSection(
+                index=index,
+                title=str(section.get("title") or "") if isinstance(section, Mapping) else "",
+            )
+            for index, section in enumerate(
+                stored_sections if isinstance(stored_sections, (list, tuple)) else (),
+                start=1,
+            )
+        ),
+        references=tuple(
+            MappingProxyType(dict(reference))
+            for reference in (
+                stored_references if isinstance(stored_references, (list, tuple)) else ()
+            )
+            if isinstance(reference, Mapping)
+        ),
+        memory_used=tuple(
+            item for item in (stored_memory if isinstance(stored_memory, (list, tuple)) else ())
+            if isinstance(item, str) and item
+        ),
+        summary_keys=(),
+    )
+
+
+def report_digest(row: Mapping[str, Any]) -> ReportDigest:
+    """A stored report reduced to what a follow-up question reads -- the
+    meta digest (``report_meta_digest``) with the body parsed in: only the run
+    that renders the report block needs it.
+
+    Total: any malformed field reads as empty, never raises. ``summary`` is
+    the executive summary without citation markers; each section gets its
+    body from ``content_md`` (empty when its heading cannot be found there; a
+    failed section's body is the stored neutral failure note) and the report
+    keys of its renumbered markers.
+    """
+    meta = report_meta_digest(row)
+    content = row.get("content_md")
+    summary, bodies = _split_body(
+        content if isinstance(content, str) else "", meta.section_titles,
+    )
+    return replace(
+        meta,
         # The summary's markers were never renumbered to the report's keys
         # (see ``_global_marker``): they are dropped here, so the summary has
         # no keys -- ``summary_keys`` stays () -- and nothing of it is restored
         # or rewritten.
         summary=_strip_markers(summary),
         sections=tuple(
-            ReportSection(index=index, title=title, body=body, keys=_keys_in(body))
-            for index, (title, body) in enumerate(zip(titles, bodies), start=1)
+            replace(section, body=body, keys=_keys_in(body))
+            for section, body in zip(meta.sections, bodies)
         ),
-        references=references,
-        memory_used=memory_used,
-        summary_keys=(),
     )
 
 
@@ -347,7 +373,9 @@ class ReportScope(Protocol):
 _MEMORY_TYPE = "memory"
 # Cited web material (an ``ask.reflect_action`` / external-evidence item): it
 # has no row in any notebook, so there is nothing to look up and nothing the
-# turn could read back. It counts as gone, never as a conflict.
+# turn could read back. Like a whole-source reference it is neither restored
+# nor counted as gone (``RESTORE_SKIPPED_OBJECT_TYPES``), and never a conflict;
+# its marker is dropped from the report block like any key the turn lacks.
 _EXTERNAL_TYPE = "external"
 
 
@@ -465,7 +493,10 @@ def report_link_verdict(
 
     ``engine_unsupported`` is decided first and touches none of the other
     inputs. Then, per reference: Memory -> uses Memory; owner gone -> ``gone``
-    (never a conflict); a withheld Memory projection source -> uses Memory; a
+    (never a conflict), except a whole-source or external reference, which
+    names no item to read back and is never gone
+    (``RESTORE_SKIPPED_OBJECT_TYPES``); a withheld Memory projection source
+    -> uses Memory; a
     library the asker cannot use -> unavailable; an unticked library ->
     unchecked; a source the scope leaves out -> out of scope. The first reason
     that holds wins: ``library_unavailable``, ``scope_libraries``,
@@ -480,14 +511,19 @@ def report_link_verdict(
     unchecked: dict[str, None] = {}
     out_of_scope: dict[tuple[str, str], None] = {}
     for reference in digest.references:
-        if _field(reference, "object_type") == _MEMORY_TYPE:
+        object_type = _field(reference, "object_type")
+        if object_type == _MEMORY_TYPE:
             uses_memory = True
             continue
         library = report_reference_owner(
             reference, source_owners=source_owners, object_owners=object_owners
         )
         if library is None:
-            gone += 1
+            # A whole-source or external reference names no item the turn
+            # could read back, so it is never gone (``RESTORE_SKIPPED_OBJECT_
+            # TYPES``); a live whole source is still judged below.
+            if object_type not in RESTORE_SKIPPED_OBJECT_TYPES:
+                gone += 1
             continue
         source_id = _field(reference, "source_id")
         if source_id and source_id in withheld:
@@ -1040,6 +1076,7 @@ __all__ = [
     "report_digest",
     "report_followup_context",
     "report_link_verdict",
+    "report_meta_digest",
     "report_mode_supported",
     "report_outline_text",
     "report_owner_ids",

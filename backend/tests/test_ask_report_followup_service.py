@@ -24,6 +24,7 @@ from app.domain.report_followup import (
     REASON_ENGINE_UNSUPPORTED,
     REASON_NO_SYNTHESIS,
     REASON_READ_FAILED,
+    REASON_REPORT_UNAVAILABLE,
     REASON_SCOPE_SOURCES,
     ReportRestoreScopeError,
     RestoredReportEvidence,
@@ -115,11 +116,30 @@ def _readers(calls: list, *, row=REPORT_ROW, fail=None) -> ReportFollowupReaders
 
 def _service(calls: list, *, visible=("source-1",), fail=None, **overrides):
     """A minimal chunk service whose ceiling admits ``visible`` and whose
-    restore is a logged stub; events land in ``service.events``."""
+    restore is a logged stub; events land in ``service.events``, and every
+    read the ceiling makes and every ``notebooks.get_notebook`` call in
+    ``service.ceiling_reads``."""
     overrides.setdefault("report_followup_readers", _readers(calls, fail=fail))
+    ceiling_reads: list = []
+
+    def counted(name, answer):
+        def read(*args, **kwargs):
+            ceiling_reads.append(name)
+            return answer(*args, **kwargs)
+        return read
+
     service = _minimal_ask_service(
-        ceiling_readers=static_ceiling_readers(visible=lambda _nb: tuple(visible)),
+        ceiling_readers=static_ceiling_readers(
+            participants=counted("participants", lambda nb, _viewer: (nb,)),
+            visible=counted("visible", lambda _nb: tuple(visible)),
+            hidden=counted("hidden", lambda _nb, _owner: ()),
+            memory_sources=counted("memory_sources", lambda _nb: ()),
+        ),
         **overrides,
+    )
+    service.ceiling_reads = ceiling_reads
+    service.notebooks = SimpleNamespace(
+        get_notebook=counted("get_notebook", lambda _nb: SimpleNamespace(base_notebooks=[])),
     )
     service.events = []
     service.event_log = SimpleNamespace(emit=service.events.append)
@@ -203,39 +223,62 @@ def test_no_report_means_no_read_no_receipt_and_an_unchanged_answer():
     assert _events(service, "ask_report_followup") == []
 
 
-def test_extension_engine_reads_nothing_and_still_answers():
-    """An extension engine cannot read a report (D7): its turn answers as
-    usual with ``engine_unsupported`` -- decided before a single read: no
-    report row, no owner, no participant, no restore."""
+def _plugin_service(calls: list, **kwargs):
     from app.extensions.bootstrap import build_extension_runtime
     from tests.test_ask_engine_plugin import _all_live, _bundle, _Provider
 
     runtime = build_extension_runtime((_bundle("alpha", _Provider("alpha.kg")),))
-    calls: list = []
     service = _service(
         calls,
         ask_engine_host=runtime.ask_engines,
         ask_engine_participant_notebooks=lambda _nb: ("nb",),
         ask_engine_visible_sources=lambda _nb: ("source-1",),
         ask_engine_hidden_sources=lambda _nb, _actor: (),
+        **kwargs,
     )
     service.retrieval.federated_retrieve = lambda *_args, **_kwargs: []
     service.retrieval.federated_retrieve_elements = lambda *_args, **_kwargs: []
     service.evidence_context.evidence_elements = _all_live
     service.evidence_context.citation_source_info = lambda _ids: {}
     service.collection_catalog = SimpleNamespace(collection_map_text=lambda _nb: "")
+    return service
+
+
+def test_extension_engine_reads_the_report_row_only_and_still_answers():
+    """An extension engine cannot read a report (D7): its turn answers as
+    usual with ``engine_unsupported``. The one read is the report row, for
+    the receipt's title (the conversation summary and a reopened
+    conversation's tag name the report by it): no owner, no participant, no
+    restore."""
+    calls: list = []
+    service = _plugin_service(calls)
 
     response = _ask(service, mode="alpha.kg")
 
-    assert calls == []
+    assert calls == ["read_report"]
     assert response.answer_id == "answer-1" and response.answer
     receipt = response.linked_report
     assert (receipt.status, receipt.reason_code, receipt.title) == (
-        "skipped", REASON_ENGINE_UNSUPPORTED, "",
+        "skipped", REASON_ENGINE_UNSUPPORTED, "报告题目",
     )
     assert receipt.reason == (
         "本轮不读取这份报告：当前回答方式不读取关联报告，请改用「通用问答」或「逐步推理」"
     )
+
+
+@pytest.mark.parametrize("row", [
+    {**REPORT_ROW, "created_by": "someone-else"},
+    {**REPORT_ROW, "status": "running"},
+    {**REPORT_ROW, "id": "another-report"},
+], ids=["another-member", "unfinished", "missing"])
+def test_extension_engine_names_no_report_the_asker_may_not_follow(row):
+    calls: list = []
+    service = _plugin_service(calls, report_followup_readers=_readers(calls, row=row))
+
+    receipt = _ask(service, mode="alpha.kg").linked_report
+
+    assert calls == ["read_report"]
+    assert (receipt.reason_code, receipt.title) == (REASON_REPORT_UNAVAILABLE, "")
 
 
 def test_report_link_check_judges_like_the_run_but_never_restores():
@@ -247,29 +290,34 @@ def test_report_link_check_judges_like_the_run_but_never_restores():
     )
     assert (check.readable, check.title, check.reason_code) == (True, "报告题目", "")
     assert calls == ["read_report", "source_owners"]
+    assert service.ceiling_reads  # the run's ceiling, built for the verdict
 
     calls.clear()
+    service.ceiling_reads.clear()
     unsupported = service.report_link_check(
         "nb", REPORT_ID, user_id="user", mode_supported=False,
     )
-    assert calls == []
-    assert (unsupported.readable, unsupported.reason_code) == (
-        False, REASON_ENGINE_UNSUPPORTED,
+    # An extension engine never reads a report: no ceiling is built for it and
+    # no notebook is read -- the report row (its title) is the only read.
+    assert calls == ["read_report"]
+    assert service.ceiling_reads == []
+    assert (unsupported.readable, unsupported.reason_code, unsupported.title) == (
+        False, REASON_ENGINE_UNSUPPORTED, "报告题目",
     )
 
 
-@pytest.mark.parametrize(("stage", "error", "title"), [
-    ("read_report", OSError("/srv/private/report.db is gone"), ""),
-    ("source_owners", OSError("/srv/private/source.db is gone"), "报告题目"),
-    ("restore", sqlite3.OperationalError("database is locked: secret"), "报告题目"),
+@pytest.mark.parametrize(("stage", "error"), [
+    ("read_report", OSError("/srv/private/report.db is gone")),
+    ("source_owners", OSError("/srv/private/source.db is gone")),
+    ("restore", sqlite3.OperationalError("database is locked: secret")),
 ])
 def test_a_data_side_failure_does_not_read_the_report_and_the_answer_stands(
-    stage, error, title,
+    stage, error,
 ):
     """D6: any data read failing -- the report row, an owner map, the restore
-    -- leaves the report unread (``read_failed``, the title once it was
-    known), the answer is produced as usual, and the event names the error's
-    class and nothing of its text."""
+    -- leaves the report unread (``read_failed``, no title), the answer is
+    produced as usual, and the event names the error's class and nothing of
+    its text."""
     calls: list = []
     service = _service(calls, fail={stage: error})
 
@@ -278,7 +326,7 @@ def test_a_data_side_failure_does_not_read_the_report_and_the_answer_stands(
     assert response.conclusion and response.answer_id == "answer-1"
     receipt = response.linked_report
     assert (receipt.status, receipt.reason_code, receipt.title) == (
-        "skipped", REASON_READ_FAILED, title,
+        "skipped", REASON_READ_FAILED, "",
     )
     assert _events(service, "ask_report_followup_failed") == [{
         "kind": "ask_report_followup_failed", "notebook_id": "nb",
@@ -461,6 +509,55 @@ def test_the_fallback_gate_stands_down_for_a_request_that_attached_a_report(worl
     assert not attached.needs_clarification and attached.ambiguities == []
     assert plain.needs_clarification
     assert plain.ambiguities[0].id == "ambiguity-input"
+
+
+def test_a_ceiling_that_cannot_be_built_fails_the_understanding_step():
+    """The understanding step's ceiling is lazy, and attaching a report is
+    what first builds it. A ceiling that cannot be built fails the step --
+    as it fails anything that reads the scope -- instead of being recorded
+    as a report that could not be read."""
+    calls: list = []
+    service = _service(calls)
+
+    def broken(_notebook_id):
+        raise OSError("ceiling store unavailable")
+
+    service.ceiling_readers = static_ceiling_readers(visible=broken)
+
+    with pytest.raises(OSError):
+        service.preview_reasoning_intent(
+            "nb", AMBIGUOUS, user_id="user", report_id=REPORT_ID,
+        )
+    assert calls == []
+    assert _events(service, "ask_report_followup_failed") == []
+
+
+def test_only_the_run_that_renders_the_report_parses_its_body(monkeypatch):
+    """The verdict, the pre-send check and the understanding step read the
+    report's meta digest; ``content_md`` is parsed only by a run that will
+    render the report block (readable, restored) -- once."""
+    import app.services.report_followup as followup_module
+
+    parsed: list = []
+    split = followup_module._split_body
+
+    def counted_split(*args):
+        parsed.append(args)
+        return split(*args)
+
+    monkeypatch.setattr(followup_module, "_split_body", counted_split)
+    calls: list = []
+    service = _service(calls)
+
+    service.report_link_check("nb", REPORT_ID, user_id="user", mode_supported=True)
+    service.preview_reasoning_intent(
+        "nb", "第一节的依据是什么？", user_id="user", report_id=REPORT_ID,
+    )
+    _ask(_service([], visible=()))  # a conflict: never rendered
+    assert parsed == []
+
+    _ask(service)
+    assert len(parsed) == 1
 
 
 def test_the_entry_gate_admits_a_report_question_without_reading_anything():
