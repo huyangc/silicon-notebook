@@ -46,6 +46,10 @@ test("collection hook has a positive dependency allowlist and no cross-domain ow
     "./notebook-api.ts",
     "./notebook-bases.ts",
     "./notebook-creation.ts",
+    // 删除窗口的用户文案。零依赖的纯函数叶子模块(notebook-deletion-copy.ts 自己一条
+    // import 都没有),不是任何域的 owner——放行的是删除成功提示那一句「何时永久删除」,
+    // 让列表顶部区块、铃铛与这条提示同一个出处、同一种时刻写法。
+    "./notebook-deletion-copy.ts",
     "./workspace-model.ts",
     // 能力位词汇表。同 errors.ts 一样是零依赖的叶子模块（workspace-transitions.ts 自己
     // 一条 import 都没有），不是任何域的 owner——放行的是 `workspaceCapabilities` 这条

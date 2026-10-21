@@ -8754,6 +8754,122 @@ button.tag:hover {
   color: var(--danger);
 }
 
+/* 「即将永久删除的笔记本」区块(notebook-deletions-block.tsx):笔记本列表顶部、工具栏
+   之下。每行一句说明 + 一排控件,结果写在控件下方;铃铛点进来的那一行描边高亮。 */
+.notebook-deletions {
+  margin: 0 0 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--warning-border);
+  border-radius: 12px;
+  background: var(--warning-bg);
+}
+
+.notebook-deletions h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  color: var(--warning);
+}
+
+.notebook-deletion-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.notebook-deletion-row {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  outline: none;
+}
+
+.notebook-deletion-row.is-focused {
+  border-color: var(--warning-solid);
+  box-shadow: 0 0 0 2px var(--warning-border);
+}
+
+.notebook-deletion-text,
+.notebook-deletion-note,
+.notebook-deletion-warning,
+.notebook-deletion-error {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.notebook-deletion-note {
+  color: var(--muted);
+}
+
+.notebook-deletion-warning {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+.notebook-deletion-error {
+  color: var(--danger);
+}
+
+.notebook-deletion-actions,
+.notebook-deletion-unavailable {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.notebook-deletion-actions .sort-button,
+.notebook-deletion-actions .new-pill,
+.notebook-deletion-unavailable .sort-button {
+  min-height: 30px;
+  padding: 0 12px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.notebook-deletion-transfer {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px dashed var(--warning-border);
+  border-radius: 8px;
+}
+
+.notebook-deletion-target {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.notebook-deletion-target select {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  font: inherit;
+}
+
+/* 退出群组面板里「即将删除」的笔记本:名字后一枚标签,行下一句先导出的提示。 */
+.group-leave-pending-tag {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--warning-bg);
+  color: var(--warning);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .source-modal {
   position: fixed;
   inset: 0;
@@ -12686,6 +12802,15 @@ button.tag:hover {
   overflow: hidden;
   color: var(--ink, #111827);
   font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 删除通知的副行(「可以先导出你的 N 条记忆」/「可以撤销删除」)。 */
+.pending-row-hint {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--warning);
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

@@ -22,6 +22,9 @@
 //
 // 告知读不到就不放行确认(与退出共享「不盲退」一致);告知回 404 说明此刻已经不是这个组的
 // 成员(比如在别的标签页退过了),如实说出来、请群组页刷新清单,不让人「稍后重试」。
+//
+// 所有者已删除、正在一天删除窗口里的笔记本也会列出(`pending_delete`):名字后标「即将删除」,
+// 行下说明退群后就无法再导出——它的「导出」与区块里那个是同一个端点,窗口期内照样可用。
 
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -30,6 +33,7 @@ import { useCopyResult } from "./copy-result.ts";
 import { saveBlobAsFile } from "./download-file.ts";
 import { httpErrorStatus } from "./errors.ts";
 import { getGroupLeavePreview, type GroupLeavePreview } from "./group-api.ts";
+import { LEAVE_PENDING_TAG, leavePendingDeleteText } from "./notebook-deletion-copy.ts";
 import { exportOwnMemories } from "./notebook-exit-api.ts";
 import { usePanelPlacement } from "./notebook-exit-panel.tsx";
 import { useDialogFocus } from "./use-dialog-focus.ts";
@@ -202,7 +206,10 @@ function GroupLeavePanel({
               const reason = exports.reasons.get(notebook.notebook_id) ?? "";
               return (
                 <li key={notebook.notebook_id} className="group-leave-row">
-                  <span className="group-leave-name">{name}</span>
+                  <span className="group-leave-name">
+                    {name}
+                    {notebook.pending_delete && <span className="group-leave-pending-tag">{LEAVE_PENDING_TAG}</span>}
+                  </span>
                   <span className="group-leave-count">{notebook.memory_count} 条</span>
                   <button
                     type="button"
@@ -215,6 +222,9 @@ function GroupLeavePanel({
                   >
                     {busy ? "正在导出…" : result === "copied" ? "已导出" : result === "failed" ? "导出失败" : "导出"}
                   </button>
+                  {notebook.pending_delete && notebook.delete_after && (
+                    <p className="notebook-exit-hint group-leave-row-note">{leavePendingDeleteText(notebook.delete_after)}</p>
+                  )}
                   {reason && <p className="notebook-exit-error group-leave-row-note" role="alert">{reason}</p>}
                 </li>
               );

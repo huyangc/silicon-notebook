@@ -31,6 +31,9 @@ export function doneMessage(
 }
 
 export function itemSig(it: PendingItem): string {
+  // 删除窗口:按库与截止认身份——撤销后再删一次是一条新通知(新截止),关掉过的旧条目
+  // 不会把它压住。
+  if (it.type === "notebook_pending_delete") return `pending_delete:${it.notebook_id ?? ""}:${it.delete_after ?? ""}`;
   if (it.type === "report_outline") return `report:${it.report_id ?? it.notebook_id ?? ""}`;
   if (it.type === "governance") return `gov:${it.notebook_id}:${it.subtype ?? ""}:${it.count ?? 0}`;
   // 共享申请按组分组,签名带 count:待审批数变化 → 新签名 → 关掉过的项重新出现
@@ -48,6 +51,8 @@ export function itemSig(it: PendingItem): string {
  *  名字为空(旧数据/库已删)时返回空串,调用方就不渲染一个空格子。 */
 export function pendingItemOrigin(it: PendingItem): string {
   if (it.type === "ask" && it.scope === "global") return "全局问答";
+  // 删除通知的那句话里已经带着库名,不再单独出一枚标签。
+  if (it.type === "notebook_pending_delete") return "";
   return it.notebook_name || "";
 }
 

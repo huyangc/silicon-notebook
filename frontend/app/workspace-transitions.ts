@@ -145,10 +145,6 @@ export async function openMemoryDeepLink(
 }
 
 
-export const NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING =
-  "所有成员各自绑定到此笔记本的私有记忆也会按生命周期一并删除。";
-
-
 /**
  * 工作区的能力位 —— 「哪些入口画出来」的唯一判据。
  *

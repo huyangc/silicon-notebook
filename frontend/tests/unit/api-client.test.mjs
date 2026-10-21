@@ -85,13 +85,12 @@ test("requestVoid accepts 204 without parsing JSON", async () => {
 });
 
 test("requestVoid accepts 202 with a JSON body without parsing it (batch 3·W1 PR-3 zero-change anchor)", async () => {
-  // DELETE /notebooks/{id} moved from 204 (no body) to 202 with a
-  // {"status":"deleting"} JSON body (design doc §T-2/§5). requestVoid's own
-  // contract is "checked(...) then discard the body" — it only inspects
-  // response.ok (any 2xx), so this status/body change is transparent to
-  // every caller, notebook-api.ts's deleteNotebook included. This test pins
-  // that transparency directly: if requestVoid ever started requiring a
-  // specific status code or attempted to parse the body, this would fail.
+  // requestVoid's own contract is "checked(...) then discard the body" — it
+  // only inspects response.ok (any 2xx). This test pins that directly with a
+  // 202 + JSON body: if requestVoid ever started requiring a specific status
+  // code or attempted to parse the body, this would fail. (notebook-api.ts's
+  // deleteNotebook now reads its 202 body -- the deletion window's
+  // delete_after -- through requestJson instead.)
   globalThis.fetch = async () =>
     new Response(JSON.stringify({ status: "deleting" }), {
       status: 202,

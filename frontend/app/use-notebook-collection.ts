@@ -27,6 +27,7 @@ import {
 } from "./indexing-pipeline-settings.ts";
 import { logDiagnostic } from "./errors.ts";
 import { defaultNotebookPayload } from "./notebook-creation.ts";
+import { deleteScheduledText } from "./notebook-deletion-copy.ts";
 import { workspaceCapabilities } from "./workspace-transitions.ts";
 import type { NotebookSummary, SearchHit } from "./workspace-model.ts";
 
@@ -1176,7 +1177,9 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     deletingRef.current.add(key);
     setDeletion((value) => value ? { ...value, busy: true } : value);
     try {
-      await deleteNotebook(current.target.id);
+      // 删除进入一天的窗口:这本库此刻起对所有人不可用,列表里马上拿掉;它出现在列表顶部
+      // 「即将永久删除的笔记本」区块里,在截止前可以撤销(撤销走 `showCancelledNotebook`)。
+      const { delete_after: deleteAfter } = await deleteNotebook(current.target.id);
       let tombstones = tombstonesRef.current.get(ownerKey(owner.actorId));
       if (!tombstones) {
         tombstones = new Set<string>();
@@ -1206,7 +1209,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         ));
         await effectsRef.current.refreshComposite(() => ownsIdentity(owner)).catch(() => undefined);
       }
-      if (owns(owner)) effectsRef.current.notify("笔记本已删除");
+      if (owns(owner)) effectsRef.current.notify(deleteScheduledText(current.target.name, deleteAfter));
     } catch (error) {
       // Reported on the same authority the success branch and the busy recovery
       // use — actor identity, not the dialog operation and not the generation
@@ -1234,6 +1237,20 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         });
       }
     }
+  }
+
+  /**
+   * 主人在删除窗口里撤销了删除:这本库回来了。删除成功时种下的墓碑在「列表读到它确实
+   * 不在了」之前一直挡着它——撤销可能抢在那一次读之前,墓碑就会把刚恢复的库继续藏住。
+   * 这里先拔掉它,再刷新列表(同一套按身份把关的刷新)。
+   */
+  function showCancelledNotebook(notebook: NotebookSummary) {
+    const owner = captureOwner();
+    if (!owner) return;
+    const tombstones = tombstonesRef.current.get(ownerKey(owner.actorId));
+    tombstones?.delete(notebook.id);
+    if (tombstones && tombstones.size === 0) tombstonesRef.current.delete(ownerKey(owner.actorId));
+    void effectsRef.current.refreshComposite(() => ownsIdentity(owner)).catch(() => undefined);
   }
 
   const visible = Boolean(
@@ -1299,5 +1316,6 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     openDelete,
     closeDelete,
     confirmDelete,
+    showCancelledNotebook,
   };
 }

@@ -146,10 +146,34 @@ import { clearRejectedToken, getToken, subscribeTokenChanges } from "./auth-sess
 import { replacePageLocation, takeSignInReturnLocation } from "./auth-return-location";
 import { copyTextSafely } from "./copy-text";
 import { useCopyResult } from "./copy-result";
-import { httpErrorStatus, toUserMessage } from "./errors.ts";
+import { httpErrorStatus, humanizedError, toUserMessage } from "./errors.ts";
 import { DEFAULT_SUPPORTED_SOURCE_EXTENSIONS, fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ParserEngineCapability, type ReadySnapshot } from "./system-api";
 import { AnalyticsAnswerQuality } from "./analytics-answer-quality";
 import { backfillPaperMetadata, fetchNotebookAnalytics, fetchNotebookContentOverview, fetchNotebookIndexingPipeline, getNotebook, listNotebooks } from "./notebook-api";
+import {
+  cancelNotebookDeletion,
+  exportDeletedNotebookMemories,
+  getNotebookOrDeletionNotice,
+  NotebookDeletedError,
+  type NotebookDeletionNotice,
+} from "./notebook-deletion-api";
+import {
+  CANCEL_DUE_TEXT,
+  CANCEL_GONE_TEXT,
+  DELETE_DIALOG_TITLE,
+  EXPORT_CLOSED_TEXT,
+  EXPORT_FAILED_TEXT,
+  EXPORT_NOTHING_TEXT,
+  NOTICE_DIALOG_TITLE,
+  TRANSFER_LABEL,
+  deleteConfirmText,
+  deleteMountText,
+  deletionNoticeText,
+  exportLabel,
+} from "./notebook-deletion-copy";
+import { NotebookDeletionsBlock, useNotebookDeletions, type DeletionFocusRequest } from "./notebook-deletions-block";
+import { LEAVE_EXPORT_TOO_LARGE_TEXT } from "./group-leave-dialog";
+import { saveBlobAsFile } from "./download-file";
 import { detectSourceTypes, importUrlSources, listSources, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { SourceListPanel } from "./source-list-panel";
 import { compactSourceTitle, SUPPORTED_SOURCE_EXT_GROUP } from "./source-title.ts";
@@ -297,7 +321,7 @@ import {
   MIRROR_NOTEBOOK_DELETE_NOTE,
   MIRROR_NOTEBOOK_MANAGE_NOTE,
   mirrorSourcesNotice,
-  NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING,
+  notebookIsMirror,
   openMemoryDeepLink,
   workspaceCapabilities,
   workspaceRequestIsCurrent,
@@ -1136,6 +1160,32 @@ export default function Home() {
   const modelTestCoordinatorRef = useRef(new ModelTestCoordinator());
   // Subscribe only after /me has established a business user.
   const pending = usePendingActions(Boolean(authChecked && currentUser));
+  // 「即将永久删除的笔记本」区块:铃铛里的删除通知集合一变(推送)、或笔记本列表的条数一变
+  // (删除 / 撤销之后的刷新),就重新拉取一次。
+  const deletionNoticeKey = pending.snapshot.items
+    .filter((item) => item.type === "notebook_pending_delete")
+    .map((item) => `${item.notebook_id ?? ""}@${item.delete_after ?? ""}`)
+    .sort()
+    .join("|");
+  const notebookDeletions = useNotebookDeletions(
+    Boolean(authChecked && currentUser),
+    `${deletionNoticeKey}#${notebookCollection.rows.length}`,
+  );
+  const [deletionFocus, setDeletionFocus] = useState<DeletionFocusRequest | null>(null);
+  const focusDeletion = useCallback((notebookId: string | null) => {
+    setDeletionFocus((current) => (
+      notebookId === null ? null : { id: notebookId, seq: (current?.seq ?? 0) + 1 }
+    ));
+  }, []);
+  // 说明框的打开函数(每次渲染重新指向最新的闭包;见 reportError)。
+  const openDeletionNoticeRef = useRef<(notice: NotebookDeletionNotice) => void>(() => undefined);
+  // 「转移到我的笔记本」的目的地:我自己的、正常可用的笔记本(镜像不收写入)。
+  const deletionTargets = useMemo(
+    () => notebookCollection.rows
+      .filter((row) => (row.access ?? "owner") === "owner" && !notebookIsMirror(row))
+      .map((row) => ({ id: row.id, name: row.name })),
+    [notebookCollection.rows],
+  );
   const latestScaleIndexDoneEventKey = latestScaleIndexDoneKey(
     pending.doneItems,
     currentNotebookId,
@@ -1685,9 +1735,10 @@ export default function Home() {
               if (workspace.sourceId) {
                 await openSourceDetailById(workspace.sourceId);
               }
-            } catch {
+            } catch (error) {
               showCollection();
-              setToast("笔记本链接不可用或已失效");
+              if (error instanceof NotebookDeletedError) openDeletionNoticeRef.current(error.notice);
+              else setToast("笔记本链接不可用或已失效");
             }
           }
         }
@@ -1748,9 +1799,10 @@ export default function Home() {
           .then(async (opened) => {
             if (opened && workspace.sourceId) await openSourceDetailById(workspace.sourceId);
           })
-          .catch(() => {
+          .catch((error) => {
             showCollection();
-            setToast("笔记本链接不可用或已失效");
+            if (error instanceof NotebookDeletedError) openDeletionNoticeRef.current(error.notice);
+            else setToast("笔记本链接不可用或已失效");
           });
         return;
       }
@@ -2711,10 +2763,17 @@ export default function Home() {
     // a stable delete generation; tombstones alone cannot repair ask_available.
     const [notebook, sourcesPage] = await readStableSourceSnapshot(
       () => sourceLibrary.deleteGeneration(notebookId),
-      () => Promise.all([
-        getNotebook(notebookId),
-        listSources(notebookId, 0, SOURCES_PAGE_SIZE),
-      ]),
+      () => {
+        // 两个请求照旧并行。一本正在删除窗口里的笔记本两边都 404,但只有笔记本那一边
+        // 带说明码(换成说明框),所以来源那一边的失败等笔记本那一边先落定:笔记本读到了
+        // 说明码,整次打开就以它为准。
+        const notebookRead = getNotebookOrDeletionNotice(notebookId);
+        const sourcesRead = listSources(notebookId, 0, SOURCES_PAGE_SIZE).catch(async (error) => {
+          await notebookRead;
+          throw error;
+        });
+        return Promise.all([notebookRead, sourcesRead]);
+      },
     );
     return { notebook, sourcesPage };
   }
@@ -2857,6 +2916,14 @@ export default function Home() {
 
   // --- Pending center: precise deep-link per item type --------------------
   async function openPendingItem(item: PendingItem) {
+    // 删除窗口里的笔记本打不开(对所有人不可用):回到笔记本列表,顶部区块定位到这一行,
+    // 在那里撤销 / 导出 / 转移。
+    if (item.type === "notebook_pending_delete") {
+      showCollection();
+      focusDeletion(item.notebook_id ?? null);
+      notebookDeletions.reload();
+      return;
+    }
     // 共享申请是**组维度**的待办,没有 notebook——直接打开独立群组页,组管理员在
     // 「待审批申请」区批准/驳回。放在 openNotebook 之前:它没有 notebook_id 可开。
     if (item.type === "share_request") {
@@ -4688,8 +4755,69 @@ export default function Home() {
   // 根本进不了 throwHumanizedHttpError。现在一律过人话层:已翻译的中文原样保留
   // (保住 401/403/404/409 的语义差别),英文技术串只进 console。
   function reportError(error: unknown) {
+    // 打开一本正在删除窗口里的笔记本:不是「出错了」,是「它已被删除」——换成说明框。
+    // 经 ref 调用:reportError 被许多 effect 引用,它自己不能依赖每次渲染都变的闭包。
+    if (error instanceof NotebookDeletedError) {
+      openDeletionNoticeRef.current(error.notice);
+      return;
+    }
     setStatusText(toUserMessage(error, "服务出了点问题，请稍后重试"));
   }
+
+  /**
+   * 说明框(打开一本正在删除窗口里的笔记本时):这本笔记本已被删除,何时永久删除;主人
+   * 可以撤销,有记忆的人可以导出或去列表顶部的区块里转移。撤销 / 导出是会被服务端拒绝的
+   * 写动作(`run`):按下后按钮置灰,失败原因落在按钮旁;转移要挑目的地,交给区块那一行。
+   */
+  function openDeletionNotice(notice: NotebookDeletionNotice) {
+    const notebookId = notice.notebook_id;
+    const backToList = () => {
+      showCollection();
+      focusDeletion(notebookId);
+      notebookDeletions.reload();
+    };
+    const actions: InfoModalAction[] = [];
+    if (notice.is_owner) {
+      actions.push({
+        label: "撤销删除",
+        primary: true,
+        run: async () => {
+          const outcome = await cancelNotebookDeletion(notebookId);
+          if (outcome.kind !== "cancelled") {
+            throw humanizedError(outcome.kind === "due" ? CANCEL_DUE_TEXT : CANCEL_GONE_TEXT);
+          }
+          notebookCollection.showCancelledNotebook(outcome.notebook);
+          notebookDeletions.reload();
+          void openNotebook(notebookId).catch(reportError);
+        },
+      });
+    }
+    if (notice.memory_count > 0) {
+      actions.push({
+        label: exportLabel(notice.memory_count),
+        run: async () => {
+          const outcome = await exportDeletedNotebookMemories(notebookId);
+          if (outcome.kind !== "exported") {
+            throw humanizedError(
+              outcome.kind === "closed" ? EXPORT_CLOSED_TEXT
+                : outcome.kind === "too_large" ? LEAVE_EXPORT_TOO_LARGE_TEXT
+                  : outcome.kind === "nothing" ? EXPORT_NOTHING_TEXT : EXPORT_FAILED_TEXT,
+            );
+          }
+          saveBlobAsFile(outcome.blob, outcome.filename);
+        },
+      });
+    }
+    if (notice.transferable_count > 0) {
+      actions.push({ label: TRANSFER_LABEL, action: backToList });
+    }
+    actions.push({ label: "返回笔记本列表", action: backToList });
+    openInfoModal(
+      { title: NOTICE_DIALOG_TITLE, message: deletionNoticeText(notice), actions },
+      rootModals.captureActorOwner(),
+    );
+  }
+  openDeletionNoticeRef.current = openDeletionNotice;
 
   /**
    * Root-modal coordinator owns only presentation leases.  Domain payload and
@@ -5285,6 +5413,13 @@ export default function Home() {
               <button className="new-pill" disabled={notebookCollection.creating} onClick={() => { void notebookCollection.createDefaultNotebook(); }}>＋ 新建</button>
             </div>
           </section>
+
+          <NotebookDeletionsBlock
+            deletions={notebookDeletions}
+            targets={deletionTargets}
+            focus={deletionFocus}
+            onCancelled={(notebook) => notebookCollection.showCancelledNotebook(notebook)}
+          />
 
           <section className="collection-title">
             <h1>我的笔记本</h1>
@@ -6974,11 +7109,11 @@ export default function Home() {
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
-                <h2>删除笔记本</h2>
-                <p>确定删除 “{notebookCollection.deletion?.target?.name}” 吗？这个本机 beta 会同时移除它的来源和深度报告；{NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING}</p>
+                <h2>{DELETE_DIALOG_TITLE}</h2>
+                <p>{deleteConfirmText(notebookCollection.deletion?.target?.name ?? "")}</p>
                 {(notebookCollection.deletion?.mountedByCount ?? 0) > 0 && (
                   <p className="delete-mount-warning">
-                    {notebookCollection.deletion?.mountedByCount ?? 0} 个笔记本正在把它作为参考库，删除后这些笔记本会立即失去这条参考库——此操作不可撤销。
+                    {deleteMountText(notebookCollection.deletion?.mountedByCount ?? 0)}
                   </p>
                 )}
               </div>
@@ -6989,7 +7124,7 @@ export default function Home() {
             </div>
             <div className="modal-actions padded">
               <button className="sort-button" onClick={() => rootModals.requestClose("notebook-delete", "button")}>{notebookCollection.deletion?.busy ? "关闭" : "取消"}</button>
-              <button className="new-pill danger-pill" disabled={notebookCollection.deletion?.busy} onClick={() => { void notebookCollection.confirmDelete(); }}>{notebookCollection.deletion?.busy ? "删除中…" : "确认"}</button>
+              <button className="new-pill danger-pill" disabled={notebookCollection.deletion?.busy} onClick={() => { void notebookCollection.confirmDelete(); }}>{notebookCollection.deletion?.busy ? "正在提交…" : "确认删除"}</button>
             </div>
             </>)}
           </FloatingModalCard>

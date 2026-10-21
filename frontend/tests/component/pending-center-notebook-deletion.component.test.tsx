@@ -1,0 +1,73 @@
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, expect, test, vi } from "vitest";
+
+import { bellDeletionHint, bellDeletionLabel } from "../../app/notebook-deletion-copy.ts";
+import { itemSig, pendingView } from "../../app/pending-actions.ts";
+import { PendingBell, type PendingItem } from "../../app/pending-center.tsx";
+
+// 铃铛里的「即将永久删除的笔记本」:主人与在那里有记忆的成员各一条,带绝对时刻;
+// 计入未读;点击交给上层(回到笔记本列表、区块定位到这一行)。
+
+const MEMBER_ITEM: PendingItem = {
+  type: "notebook_pending_delete",
+  notebook_id: "nb-shared",
+  notebook_name: "封装工艺库",
+  delete_after: "2026-10-23T08:00:00+00:00",
+  is_owner: false,
+  memory_count: 4,
+  transferable_count: 2,
+};
+const OWNER_ITEM: PendingItem = {
+  ...MEMBER_ITEM, notebook_id: "nb-own", notebook_name: "我的旧库", is_owner: true, memory_count: 0,
+};
+
+afterEach(() => {
+  window.localStorage.clear();
+});
+
+function renderBell(items: PendingItem[], onOpenItem = vi.fn()) {
+  render(
+    <PendingBell
+      snapshot={{ count: items.length, items }}
+      doneItems={[]}
+      userId="u-deletion"
+      onOpenItem={onOpenItem}
+      onOpenDone={vi.fn()}
+      onDismissDone={vi.fn()}
+    />,
+  );
+  return onOpenItem;
+}
+
+test("删除通知成组排在最前,说清何时永久删除;成员副行说可以导出,主人副行说可以撤销", async () => {
+  const user = userEvent.setup();
+  renderBell([MEMBER_ITEM, OWNER_ITEM]);
+  await user.click(screen.getByLabelText("待确认中心"));
+  const group = screen.getByText("即将永久删除的笔记本").closest(".pending-group") as HTMLElement;
+  expect(group).not.toBeNull();
+  expect(within(group).getByText(bellDeletionLabel("封装工艺库", MEMBER_ITEM.delete_after!))).toBeInTheDocument();
+  expect(within(group).getByText(bellDeletionHint(false, 4))).toBeInTheDocument();
+  expect(within(group).getByText(bellDeletionHint(true, 0))).toBeInTheDocument();
+  expect(bellDeletionLabel("封装工艺库", MEMBER_ITEM.delete_after!)).toContain("2026年10月23日");
+  const groups = document.querySelectorAll(".pending-group");
+  expect(groups[0]).toBe(group);
+});
+
+test("删除通知计入未读;签名随截止变化(再删一次是一条新通知)", async () => {
+  const user = userEvent.setup();
+  renderBell([MEMBER_ITEM]);
+  expect(screen.getByText("1")).toBeInTheDocument();
+  expect(pendingView([MEMBER_ITEM], [], [], []).unread).toBe(1);
+  expect(itemSig(MEMBER_ITEM)).not.toBe(itemSig({ ...MEMBER_ITEM, delete_after: "2026-10-24T08:00:00+00:00" }));
+  await user.click(screen.getByLabelText("待确认中心"));
+  expect(screen.queryByText("1")).toBeNull();
+});
+
+test("点击删除通知把整条交给上层", async () => {
+  const user = userEvent.setup();
+  const onOpenItem = renderBell([MEMBER_ITEM]);
+  await user.click(screen.getByLabelText("待确认中心"));
+  await user.click(screen.getByText(bellDeletionLabel("封装工艺库", MEMBER_ITEM.delete_after!)));
+  expect(onOpenItem).toHaveBeenCalledWith(MEMBER_ITEM);
+});
