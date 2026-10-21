@@ -3,7 +3,8 @@
 import { Bug, CalendarDays, Check, Heart, Lightbulb, Megaphone, Pencil, Send, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { fetchMe, type AuthUser } from "../auth.ts";
+import type { AuthUser } from "../auth.ts";
+import { behindSessionCheck, fetchPageUser } from "../page-user.ts";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { toUserMessage } from "../errors.ts";
 import { createWish, deleteWish, listWishes, setWishStatus, toggleWishVote, updateWish } from "../wish-wall-api.ts";
@@ -151,13 +152,14 @@ export default function WishWallPage() {
     setLoadingMore(false);
     setState({ kind: "loading" });
     try {
+      const session = fetchPageUser();
       const [me, page] = await Promise.all([
-        fetchMe(),
-        listWishes({
+        session,
+        behindSessionCheck(session, listWishes({
           kind: filterRef.current || undefined,
           status: statusFilterRef.current || undefined,
           sort: sortRef.current,
-        }),
+        })),
       ]);
       if (requestGeneration !== listRequestGeneration.current) return;
       setUser(me);

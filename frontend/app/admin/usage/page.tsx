@@ -4,7 +4,7 @@ import {
   Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState,
   type ReactNode, type RefObject,
 } from "react";
-import { fetchMe } from "../../auth.ts";
+import { fetchPageUser } from "../../page-user.ts";
 import { clampPopoverLeft } from "../../effort-picker-logic";
 import { PageHeader } from "../../components/PageHeader.tsx";
 import { toUserMessage } from "../../errors.ts";
@@ -563,7 +563,7 @@ export default function AdminUsagePage() {
   useEffect(() => {
     (async () => {
       try {
-        const me = await fetchMe();
+        const me = await fetchPageUser();
         if (me.role !== "admin") {
           setState({ kind: "forbidden" });
           return;

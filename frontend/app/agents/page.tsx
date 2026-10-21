@@ -1,12 +1,12 @@
 "use client";
 
-// 「Agent 接入」独立页——账户菜单直达。壳层同许愿墙/管理页:`fetchMe` 登录门
+// 「Agent 接入」独立页——账户菜单直达。壳层同许愿墙/管理页:`fetchPageUser` 登录门
 // (加载中 / 加载失败 / 就绪)+ PageHeader;页内全部交互由 AgentAccessManager 负责。
 import { Bot } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { AgentAccessManager } from "../agent-access-manager";
-import { fetchMe } from "../auth.ts";
+import { fetchPageUser } from "../page-user.ts";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { toUserMessage } from "../errors.ts";
 import "./agents.css";
@@ -24,7 +24,7 @@ export default function AgentAccessPage() {
 
   useEffect(() => {
     let cancelled = false;
-    fetchMe()
+    fetchPageUser()
       .then(() => { if (!cancelled) setState({ kind: "ready" }); })
       .catch((error) => {
         if (!cancelled) setState({ kind: "error", notice: toUserMessage(error, "加载失败，请稍后重试") });

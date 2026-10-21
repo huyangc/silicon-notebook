@@ -148,7 +148,7 @@ export function ActivityStream({
   hasMore: boolean;
   onLoadMore: () => void;
   loading: boolean;
-  /** 用户身份本身取不到（fetchMe 失败）——不是「加载中」也不是「确定了、就是空」,
+  /** 用户身份本身取不到（fetchPageUser 失败）——不是「加载中」也不是「确定了、就是空」,
    *  不能断言这个范围里没有活动记录，错误已经在页面顶部显示。 */
   identityErrored?: boolean;
   now?: Date;

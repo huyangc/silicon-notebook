@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-import { fetchMe } from "../auth.ts";
+import { behindSessionCheck, fetchPageUser } from "../page-user.ts";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { toUserMessage } from "../errors.ts";
 import { fetchReleaseNotesHistory, type ReleaseNotesHistoryResponse } from "../release-notes-api.ts";
@@ -32,7 +32,8 @@ export default function UpdatesPage() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([fetchMe(), fetchReleaseNotesHistory()])
+    const session = fetchPageUser();
+    Promise.all([session, behindSessionCheck(session, fetchReleaseNotesHistory())])
       .then(([, history]) => { if (!cancelled) setState({ kind: "ready", history }); })
       .catch((error) => {
         if (!cancelled) setState({ kind: "error", notice: toUserMessage(error, "更新记录加载失败，请重试") });

@@ -143,6 +143,7 @@ import { kgCanvasState } from "./kg-workspace-model.ts";
 import { refreshKgDeleteDependents } from "./kg-delete-dependents.ts";
 import { API_BASE } from "./api-config";
 import { clearRejectedToken, getToken, subscribeTokenChanges } from "./auth-session";
+import { replacePageLocation, takeSignInReturnLocation } from "./auth-return-location";
 import { copyTextSafely } from "./copy-text";
 import { useCopyResult } from "./copy-result";
 import { httpErrorStatus, toUserMessage } from "./errors.ts";
@@ -1633,8 +1634,19 @@ export default function Home() {
         setAuthChecked(true);
         return;
       }
+      let leaving = false;
       try {
         const u = await fetchMe();
+        // Signed in on the way back to another page (unified authentication
+        // returns here, and a tab whose token another tab replaced reloads
+        // here): go there instead of opening the workspace or its entrance.
+        const returnLocation = takeSignInReturnLocation();
+        if (returnLocation) {
+          leaving = true;
+          consumeLoginEntrance();
+          replacePageLocation(returnLocation);
+          return;
+        }
         activateWorkspaceOwners(u.id);
         setCurrentUser(u);
         if (consumeLoginEntrance(u.id)) setLoginOpening(true);
@@ -1683,7 +1695,7 @@ export default function Home() {
           setAuthRestoreError("认证状态暂时无法确认，请稍后重试。");
         }
       } finally {
-        if (!cancelled) setAuthChecked(true);
+        if (!cancelled && !leaving) setAuthChecked(true);
       }
     }
     void restoreAuthentication();
@@ -5029,6 +5041,14 @@ export default function Home() {
   }
   if (!currentUser) {
     return <AuthGate capabilities={authCapabilities!} onAuthenticated={(u) => {
+      // Reached from another page whose session was rejected: return there,
+      // showing the loading card instead of the sign-in form meanwhile.
+      const returnLocation = takeSignInReturnLocation();
+      if (returnLocation) {
+        setAuthChecked(false);
+        replacePageLocation(returnLocation);
+        return;
+      }
       activateWorkspaceOwners(u.id);
       setCurrentUser(u);
       setLoginOpening(true);
