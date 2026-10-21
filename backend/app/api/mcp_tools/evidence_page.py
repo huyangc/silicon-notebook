@@ -22,7 +22,7 @@ from ._shared import (
     _budget_response,
     _serialized_size,
 )
-from .ask_pages import _intent_summary
+from .ask_pages import _intent_summary, linked_report_view
 from .refs import element_ref, memory_ref
 
 # Headroom the pre-trim leaves for what packing adds after it measured: the
@@ -123,7 +123,11 @@ def evidence_page(
             for row in evidence.skipped_libraries
         ],
         "index_required": evidence.index_required,
+        # 14 keys above; the two optional ones below keep the page at 16, far
+        # under ``OUTPUT_MAPPING_LIMIT`` (20), so neither can be dropped.
         **({"intent": intent} if intent is not None else {}),
+        **({"linked_report": linked_report_view(evidence.linked_report)}
+           if evidence.linked_report is not None else {}),
     }
     return _budget_response(
         payload, initial_omitted_characters=_pretrim_evidence_text(
