@@ -170,6 +170,13 @@ def test_ask_job_report_id_matches_the_sqlite_v99_contract(postgres_database):
         )
     assert migrator.migrate() == 80
     assert migrator.migrate() == 80
+    # The ledger skips an applied version, so re-execute the file itself: the
+    # statement is IF NOT EXISTS and must neither fail nor touch the column.
+    with postgres_database.write() as db:
+        db.execute(
+            (MIGRATIONS_PATH / "0080_ask_job_report_id.sql").read_text(encoding="utf-8"),
+            prepare=False,
+        )
     with postgres_database.connect() as conn:
         column = conn.execute(
             "SELECT data_type, is_nullable, column_default, collation_name FROM "

@@ -6060,9 +6060,10 @@ class SqliteMigrator:
         the whole backfill: no turn that exists before this version was linked
         to a report. The column lets a repeated ``client_request_id`` be
         compared against the report it first carried and lets an in-flight
-        turn show its report before its answer exists. No index (a job is read
-        by id or by conversation) and no foreign key (a deleted report must
-        not reach back into the job that asked about it).
+        turn show its report before its answer exists. No index (no query
+        filters jobs by it; the one join starts from the job and hits the
+        report's primary key) and no foreign key (a deleted report must not
+        reach back into the job that asked about it).
         ``add_column_if_missing`` keeps the migration re-runnable.
         """
         with self._connect() as db:

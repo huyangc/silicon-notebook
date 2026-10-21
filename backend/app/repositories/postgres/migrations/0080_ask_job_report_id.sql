@@ -10,9 +10,11 @@
 -- turn show its report on a reload or another device before its answer -- and
 -- with it the receipt that stays in answers.payload -- exists.
 --
--- No index and no foreign key: nothing filters or joins on it (a job is always
--- read by id or by its conversation), and a report deleted later must not
--- reach back into the job that asked about it -- the answer's receipt keeps
--- the title it saw, exactly as ask_jobs rows keep the other ids they were
--- given. No unique-surface change.
+-- No index and no foreign key. No query filters ask_jobs by this column (a job
+-- is read by id or by its conversation); the one read that joins on it starts
+-- from the job and looks the report up by reports' primary key (also
+-- COLLATE "C"), so no index on this column is needed. A report deleted later
+-- must not reach back into the job that asked about it -- the answer's receipt
+-- keeps the title it saw, exactly as ask_jobs rows keep the other ids they
+-- were given. No unique-surface change.
 ALTER TABLE ask_jobs ADD COLUMN IF NOT EXISTS report_id text COLLATE "C" NOT NULL DEFAULT '';
