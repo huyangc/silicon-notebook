@@ -39,6 +39,14 @@ MIGRATION = (
 
 def _roll_back_to_66(database) -> None:
     with database.write() as db:
+        # 80 (notebook deletion grace window) adds four columns and a partial
+        # index: undo them (index first) so the replay can.
+        db.execute("DROP INDEX idx_notebooks_pending_delete_due")
+        for column in (
+            "status_before_delete", "delete_requested_by",
+            "delete_requested_at", "delete_after",
+        ):
+            db.execute(f"ALTER TABLE notebooks DROP COLUMN {column}")
         db.execute("ALTER TABLE unified_kg_state DROP COLUMN memory_isolation_version")
         # 80 (ask_jobs.report_id) adds a column: undo it (newest first) so the
         # replay re-applies it rather than skipping an IF NOT EXISTS no-op.

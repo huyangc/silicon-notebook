@@ -155,7 +155,8 @@ FROM notebooks nb WHERE nb.id=:id
   `tests/sqlite_migration_testkit.py::rollback_v99`；`tests/test_sqlite_migrations.py`（`test_v99_…` 与各 `migrate() == [..., 99]`）、
   `tests/test_repository_snapshot_verifier.py`（`rollback_v99`、`(91, 99)`、`(96, 99)`）、`test_ask_job_output_migration.py`、
   `test_agent_token_tiers_migration.py`、`test_promotion_provenance_migration.py`；`tests/postgres/**` 的 `migrate() == 80` /
-  `current_version() == 80` / `postgres_version == 80` 等字面量；`fixtures/repository_v9/{expected_snapshot,manifest}.json`（重跑
+  `current_version() == 80` / `postgres_version == 80` 等字面量，以及
+  `tests/postgres/test_memory_isolation_migration_pg.py::_roll_back_to_66` 开头撤 0080 的那一段（重放要先撤掉四列与部分索引）；`fixtures/repository_v9/{expected_snapshot,manifest}.json`（重跑
   `scripts/generate_repository_contract_fixtures.py`）。
 - 同批登记：`sync/manifest.py` target_owned 加四列，`import_._insert_overrides` 让新建镜像行取默认值；两份 `access_sql.py` 的
   `NOTEBOOK_LIVE_SQL` 加 `'pending_delete'` + 单点常量 `NOTEBOOK_PENDING_DELETE_STATUS` 与 `notebook_delete_window_open_sql` /

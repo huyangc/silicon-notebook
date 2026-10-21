@@ -620,6 +620,24 @@ def case_the_transfer_closes_with_the_window(world: World) -> None:
     assert {world.memory_notebook(mid) for mid in world.confirmed} == {world.doomed}
 
 
+def case_the_window_read_itself_honours_the_deadline(world: World) -> None:
+    """The per-item window read (``memory_for_user(delete_window_now=...)``)
+    closes at the deadline on its own, even before the promotion: the
+    service's up-front classification is not the only thing standing between
+    a closed window and the caller's Memory."""
+    world.request()
+    store = world.runtime.memory_store
+    item = world.confirmed[0]
+    assert store.memory_for_user(
+        item, world.member.id, delete_window_now=DEADLINE - timedelta(seconds=1)
+    ).id == item
+    assert world.status()["status"] == "pending_delete"
+    with pytest.raises(KeyError):
+        store.memory_for_user(item, world.member.id, delete_window_now=DEADLINE)
+    with pytest.raises(KeyError):
+        store.memory_for_user(item, world.member.id)
+
+
 def case_a_promotion_part_way_fails_the_remaining_items(world: World) -> None:
     """Started inside the window; the promotion commits after the first item
     moved: the first stays moved, the second fails ``delete_window_closed``."""
