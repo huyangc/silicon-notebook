@@ -29,9 +29,12 @@
 只有读权的成员只能合并「两边都是她本人、证据只出自她本人记忆」的一对——判据就是上面
 第三条,由 store 在同一条加锁语句读出的两行上判定(`own_pair_only=True`),不是本人对就
 抛 `NeedsKnowledgeWrite`,任何写入之前。路由把只读成员的每一种拒绝都答成读守卫
-那句 404,不透露另一侧对象存不存在、是什么。镜像库上读权这条路不开(与 knowledge:write
-的围栏同口径)。本人的重复组(`own_memory_duplicate_rows`)按
-`evidence_only_from_own_memory` 逐个对象判同一条,所以列出来的每一对都正是合并会接受的。
+那句 404,不透露另一侧对象存不存在、是什么。`PATCH` 同样分两条路:只读成员只能把这样一个
+本人对象的状态在 approved 与 deprecated 之间改(撤销或重做她的合并,
+`update_object_in_transaction(own_status_only=True)`),其余一律同一个 404。镜像库上读权这两条
+路都不开(与 knowledge:write 的围栏同口径)。本人的重复组(`own_memory_duplicate_seed_rows`)在 SQL
+里逐个对象判同一条(`evidence_only_from_own_memory` 是它的 Python 孪生,差分用例钉住两者一致),
+所以列出来的每一对都正是合并会接受的。
 
 放开同主人合并之后,「删除/编辑一条 Memory 只删到该 Memory 自己的对象」由两处维持:
 删除/转移/退出走 `remove_memory_sources`,先把该来源的证据从别的来源拥有的对象上
@@ -382,7 +385,9 @@ def evidence_only_from_own_memory(
     (``merge_evidence_source_ids``): an entry without a source id fails it, and
     empty evidence passes. Two of the caller's own Memory objects merge exactly
     when both pass (the merge judges the union of both evidence lists, which is
-    the same test), so the owner's duplicate groups (``own_memory_duplicate_rows``)
-    list only pairs the merge accepts."""
+    the same test). The owner's duplicate groups judge it in SQL
+    (``_only_own_memory_evidence_sql`` in both governance stores); this is the
+    Python twin the differential test (``tests/own_memory_dedup_narrowing_cases``)
+    holds them to, so they list only pairs the merge accepts."""
     cited = merge_evidence_source_ids(evidence)
     return cited is not None and cited <= own_memory_source_ids

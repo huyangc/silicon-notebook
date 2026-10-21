@@ -11,6 +11,7 @@ const knowledgeApi = vi.hoisted(() => ({
   findDuplicates: vi.fn(),
   findOwnMemoryDuplicates: vi.fn(),
   mergeKnowledge: vi.fn(),
+  updateKnowledge: vi.fn(),
 }));
 
 vi.mock("../../app/knowledge-api.ts", async (importOriginal) => ({
@@ -19,7 +20,13 @@ vi.mock("../../app/knowledge-api.ts", async (importOriginal) => ({
 }));
 
 import { createTestKgAuthority } from "../../test-support/kg-owner-authority";
-import { MERGE_DONE, MERGE_TARGET_GONE, useKgKnowledge } from "../../app/use-kg-knowledge";
+import {
+  MERGE_DONE,
+  MERGE_TARGET_GONE,
+  RESTORE_DONE,
+  WRITE_NOT_RELOADED,
+  useKgKnowledge,
+} from "../../app/use-kg-knowledge";
 import { humanizedError } from "../../app/errors";
 import type { DuplicateGroup } from "../../app/workspace-model";
 
@@ -113,6 +120,10 @@ function group(prefix: string): DuplicateGroup {
   };
 }
 
+function own(groups: DuplicateGroup[], mergedAway: DuplicateGroup["members"] = []) {
+  return { groups, merged_away: mergedAway };
+}
+
 function renderKnowledge(hookPolicy: { canGovernKnowledge: boolean; canMergeOwnMemory: boolean }) {
   const harness = createTestKgAuthority();
   harness.establish("user-a", "notebook-a");
@@ -128,7 +139,7 @@ function renderKnowledge(hookPolicy: { canGovernKnowledge: boolean; canMergeOwnM
 function resetDuplicateApi() {
   for (const fn of Object.values(knowledgeApi)) fn.mockReset();
   knowledgeApi.findDuplicates.mockResolvedValue([group("shared")]);
-  knowledgeApi.findOwnMemoryDuplicates.mockResolvedValue([group("own")]);
+  knowledgeApi.findOwnMemoryDuplicates.mockResolvedValue(own([group("own")]));
   knowledgeApi.listKnowledge.mockResolvedValue({ items: [], total_count: 0 });
   knowledgeApi.listKnowledgeTypes.mockResolvedValue([{ object_type: "concept", count: 2 }]);
 }
@@ -164,7 +175,7 @@ test("a shared merge keeps its request sequence and answers in place, not in the
     return [{ object_type: "concept", count: 1 }];
   });
   knowledgeApi.findDuplicates.mockImplementation(async () => { calls.push("shared"); return []; });
-  knowledgeApi.findOwnMemoryDuplicates.mockImplementation(async () => { calls.push("own"); return []; });
+  knowledgeApi.findOwnMemoryDuplicates.mockImplementation(async () => { calls.push("own"); return own([]); });
   const { result, fx } = renderKnowledge(policy);
   let outcome: unknown;
   await act(async () => { outcome = await result.current.mergeKnowledge("shared-b", "shared-a", "shared"); });
@@ -179,7 +190,7 @@ test("a shared merge keeps its request sequence and answers in place, not in the
 test("a reader merges her own pair and only her partition is refreshed", async () => {
   resetDuplicateApi();
   knowledgeApi.mergeKnowledge.mockResolvedValue(undefined);
-  knowledgeApi.findOwnMemoryDuplicates.mockResolvedValue([]);
+  knowledgeApi.findOwnMemoryDuplicates.mockResolvedValue(own([]));
   const { result, fx } = renderKnowledge(readerPolicy);
   let outcome: unknown;
   await act(async () => { outcome = await result.current.mergeKnowledge("own-b", "own-a", "own"); });
@@ -228,7 +239,9 @@ test("one failed partition does not swallow the other's groups", async () => {
   await act(async () => { await result.current.findDuplicates(); });
   expect(result.current.view.duplicates).toEqual([group("shared")]);
   expect(result.current.view.ownDuplicates).toBeNull();
-  expect(fx.reportError).toHaveBeenCalledOnce();
+  // said where the section stands, not in the page banner
+  expect(result.current.view.duplicateFailures).toEqual({ own: "服务暂时不可用，请稍后再试" });
+  expect(fx.reportError).not.toHaveBeenCalled();
 });
 
 test("a merge in one section keeps the other section's in-flight 查重 result", async () => {
@@ -242,4 +255,79 @@ test("a merge in one section keeps the other section's in-flight 查重 result",
   await act(async () => { await result.current.mergeKnowledge("own-b", "own-a", "own"); });
   await act(async () => { releaseShared([group("late")]); await find; });
   expect(result.current.view.duplicates).toEqual([group("late")]);
+});
+
+test("a shared failure with an empty own section is reported as a failure, not as no duplicates", async () => {
+  resetDuplicateApi();
+  knowledgeApi.findDuplicates.mockRejectedValue(humanizedError("服务暂时不可用，请稍后再试", 503));
+  knowledgeApi.findOwnMemoryDuplicates.mockResolvedValue(own([]));
+  const { result } = renderKnowledge(policy);
+  await act(async () => { await result.current.findDuplicates(); });
+  expect(result.current.view.duplicates).toBeNull();
+  expect(result.current.view.ownDuplicates).toEqual([]);
+  expect(result.current.view.duplicateFailures).toEqual({ shared: "服务暂时不可用，请稍后再试" });
+  // the next successful read clears it
+  knowledgeApi.findDuplicates.mockResolvedValue([]);
+  await act(async () => { await result.current.findDuplicates(); });
+  expect(result.current.view.duplicateFailures).toEqual({});
+});
+
+test("a merge whose list reload was superseded still reloads its section", async () => {
+  resetDuplicateApi();
+  knowledgeApi.mergeKnowledge.mockResolvedValue(undefined);
+  knowledgeApi.findOwnMemoryDuplicates.mockResolvedValue(own([]));
+  const { result } = renderKnowledge(readerPolicy);
+  let release: (value: unknown) => void = () => {};
+  knowledgeApi.listKnowledge.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+  let merging: Promise<unknown> = Promise.resolve();
+  act(() => { merging = result.current.mergeKnowledge("own-b", "own-a", "own"); });
+  // another list load supersedes the merge's own reload
+  await act(async () => { result.current.refreshKnowledge(); });
+  let outcome: unknown;
+  await act(async () => { release({ items: [], total_count: 0 }); outcome = await merging; });
+  expect(knowledgeApi.findOwnMemoryDuplicates).toHaveBeenCalledOnce();
+  expect(outcome).toEqual({ tone: "done", text: MERGE_DONE });
+});
+
+test("a merge whose section reload fails does not claim the merge in place of a refresh hint", async () => {
+  resetDuplicateApi();
+  knowledgeApi.mergeKnowledge.mockResolvedValue(undefined);
+  knowledgeApi.findOwnMemoryDuplicates.mockRejectedValue(humanizedError("服务暂时不可用，请稍后再试", 503));
+  const { result } = renderKnowledge(readerPolicy);
+  let outcome: unknown;
+  await act(async () => { outcome = await result.current.mergeKnowledge("own-b", "own-a", "own"); });
+  expect(outcome).toEqual({ tone: "stale", text: WRITE_NOT_RELOADED });
+});
+
+test("a reader restores her merged-away object with a status PATCH and her section reloads", async () => {
+  resetDuplicateApi();
+  knowledgeApi.updateKnowledge.mockResolvedValue(undefined);
+  knowledgeApi.findOwnMemoryDuplicates.mockResolvedValue(own([group("own")]));
+  const { result, fx } = renderKnowledge(readerPolicy);
+  let outcome: unknown;
+  await act(async () => { outcome = await result.current.restoreOwnMemoryObject("own-b"); });
+  expect(knowledgeApi.updateKnowledge).toHaveBeenCalledWith("notebook-a", "own-b", { status: "approved" });
+  expect(outcome).toEqual({ tone: "done", text: RESTORE_DONE });
+  expect(knowledgeApi.findDuplicates).not.toHaveBeenCalled();
+  expect(result.current.view.ownDuplicates).toEqual([group("own")]);
+  expect(fx.notify).not.toHaveBeenCalled();
+});
+
+test("restoring an entry that is gone says so and reloads her section", async () => {
+  resetDuplicateApi();
+  knowledgeApi.updateKnowledge.mockRejectedValue(humanizedError("资源不存在", 404));
+  const { result } = renderKnowledge(readerPolicy);
+  let outcome: unknown;
+  await act(async () => { outcome = await result.current.restoreOwnMemoryObject("own-b"); });
+  expect(outcome).toEqual({ tone: "failed", text: MERGE_TARGET_GONE });
+  expect(knowledgeApi.findOwnMemoryDuplicates).toHaveBeenCalledOnce();
+});
+
+test("nobody restores where her own section is closed (a mirror)", async () => {
+  resetDuplicateApi();
+  const { result } = renderKnowledge({ canGovernKnowledge: false, canMergeOwnMemory: false });
+  let outcome: unknown = "unset";
+  await act(async () => { outcome = await result.current.restoreOwnMemoryObject("own-b"); });
+  expect(outcome).toBeNull();
+  expect(knowledgeApi.updateKnowledge).not.toHaveBeenCalled();
 });

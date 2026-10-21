@@ -5885,6 +5885,25 @@ button.chat-session-card {
   color: var(--danger);
 }
 
+/* 写入成功、但这一段没能刷新:不是失败,也不是「已完成」,用正文灰说明该做什么。 */
+.dup-merge-result-stale {
+  color: var(--muted);
+}
+
+/* 「合并时弃用的条目」:本人那一段的末尾,每行一个「恢复」。 */
+.dup-merged-away {
+  margin-top: 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.dup-merged-away-row {
+  padding: 0 12px;
+  border: 1px solid #e1e6ee;
+  border-radius: 10px;
+  background: #fff;
+}
+
 @media (max-width: 1080px) {
   .scenario-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
