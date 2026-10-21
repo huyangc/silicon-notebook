@@ -98,6 +98,12 @@ SQL 字面量 `UPDATE kg_build_jobs SET … error_message='…'` 写入的文案
 路径）同样在扫描面内。`error_message` 在两端存储里是仅限关键字参数，不存在位置传参；`**kwargs`
 展开、多于一跳的别名与跨模块传入的接收者静态解析不了，刻意跳过。
 
+问答「就此追问」一轮不读关联报告时，回执（`LinkedReportReceipt(reason=…)`）与标签旁的发送前
+预检（`ReportLinkCheck(reason=…)`）原样展示同一句原因，这两个调用形状也登记为展示字段。这句话
+由前缀 `REASON_PREFIX` 加一个子句组成，子句只写在 `backend/app/domain/report_followup.py` 的具名
+常量里；调用点经跨模块导入和下标取用，上面的解析器按设计不跟这两种写法，所以守卫直接扫描这几个
+出处常量（字符串与字典的每个值各算一条），并按名字集合核对：改名或删掉其中一个都会让守卫失败。
+
 **模型显示名**也原样上屏：`backend/app/services/model_registry.py` 里 `_WORKLOAD_LABELS` 的值
 作为 `workload_label` 出现在模型失败横幅、管理员用量页和解析问题档案里；仓库出厂的模型服务
 显示名（`scripts/migrate_legacy_model_env.py` 的 `ROLE_LABELS`、`model-services.example.toml`

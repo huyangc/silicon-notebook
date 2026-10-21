@@ -42,6 +42,15 @@ a user's screen, and all of them are scanned:
      wording ruling (the sealed v88 / 0068 migrations still write them); readers map
      them to the current spelling, so they never reach a screen and are not scanned.
 
+  8. backend **report follow-up reasons** — when a question attached a deep report
+     and the turn does not read it, the receipt (`LinkedReportReceipt.reason`), the
+     pre-send check (`ReportLinkCheck.reason`) and the reasoning trace show one
+     sentence verbatim: `REASON_PREFIX` + a clause from the named constants of
+     `backend/app/domain/report_followup.py`. Their call sites reach the text
+     through a cross-module import and a subscript, which channels 2/3/5 do not
+     follow by design, so the constants themselves are scanned. See
+     `REPORT_REASON_MODULE`.
+
   For the backend channels (2, 3, 5) the copy does not have to be a literal at the
   call site: `_IndirectCopy` follows variables, conditionals, concatenation,
   `%`/`.format`, `X.get(k, default)`, module constants and module-helper returns.
@@ -149,6 +158,8 @@ TRACE_SUMMARY_MODULES = (
     ROOT / "backend" / "app" / "services" / "plugin_ask_engine.py",
     ROOT / "backend" / "app" / "services" / "spreadsheet_analysis.py",
     ROOT / "backend" / "app" / "services" / "structured_retrieval.py",
+    # 「就此追问」的 report 轨迹步(读了报告哪几节 / 为什么没读)。
+    ROOT / "backend" / "app" / "services" / "report_followup.py",
 )
 TRACE_STEP = "TraceStep"
 # Non-vacuity floor: keep the existing guard while removing retired modules.
@@ -166,6 +177,10 @@ MIN_TRACE_SUMMARY_SITES = 50
 #     失败文案,经 `KgBuildJobStatus.user_message` 由前端终态提示原样弹出。
 #   * `self.finish(…, error_message=…)`:同一张表在作业存储内部的写入
 #     (`fail_submission`),只在 KG_BUILD_JOB_STORE_MODULES 里认。
+#   * `LinkedReportReceipt(reason=…)` / `ReportLinkCheck(reason=…)`:「就此追问」不读
+#     报告的原因,回执在标签旁、就地预检在发送前原样上屏。正式写法从第八条通道的
+#     出处常量取(跨模块导入 + 下标,这里静态解析不了、不计站点);登记形状挡的是
+#     有人在调用点直接写字面量或本模块常量。
 #   * 接收者是名字时再看一跳别名:`jobs = r.kg_build_jobs; jobs.finish(…)` 同样认。
 #   * SQL 字面量 `UPDATE kg_build_jobs SET … error_message='…'`:启动兜底把残留的
 #     running 作业落成 failed(sqlite/migrations.py、postgres/maintenance.py),这句
@@ -181,6 +196,8 @@ DISPLAY_FIELD_ROOT = ROOT / "backend" / "app"
 DISPLAY_FIELD_CALLS = {
     # 调用名 → 上屏的 kwarg
     "IndexingPipelineOption": ("label", "description"),
+    "LinkedReportReceipt": ("reason",),
+    "ReportLinkCheck": ("reason",),
 }
 DISPLAY_FIELD_METHODS = {
     # 接收者属性链的末段 → (方法名 → 上屏的 kwarg)
@@ -201,6 +218,7 @@ DISPLAY_FIELD_ANCHOR_MODULES = (
     *KG_BUILD_JOB_STORE_MODULES,
     ROOT / "backend" / "app" / "repositories" / "sqlite" / "migrations.py",
     ROOT / "backend" / "app" / "repositories" / "postgres" / "maintenance.py",
+    ROOT / "backend" / "app" / "services" / "report_followup.py",
 )
 # SQL 字面量里写进作业表的展示文案。只认 `error_message='…'` 这种直接写死的值;
 # 占位符(`error_message=?` / `%s`)的值来自调用方,由上面的调用形状覆盖。
@@ -234,6 +252,22 @@ MIN_SERVICE_LABELS = 8
 # 模块顶层常量;`LEGACY_*` 是存量标题的存储拼写(读时映射成新前缀),不在此列。
 PROMOTION_TITLE_MODULE = ROOT / "backend" / "app" / "domain" / "promotion_source.py"
 PROMOTION_TITLE_NAMES = ("PROMOTION_TITLE_PREFIX", "MEMORY_PROMOTION_TITLE_PREFIX")
+
+# —— 第八条通道:「就此追问」不读报告的原因文案 ——————————————————————————
+# 回执 `LinkedReportReceipt.reason`、标签旁就地预检 `ReportLinkCheck.reason` 与推理
+# 轨迹 report 步原样上屏的都是同一句话:前缀 `REASON_PREFIX` + 一个子句。子句只写在
+# 下面这个模块的具名常量里(单一出处),各调用点经跨模块导入与
+# `REASON_CLAUSES[code].format(…)` 取用——第二、三、五条通道的解析器按设计不跟跨模块
+# 导入与下标,在调用点扫不到它们;所以这里直接扫出处。字符串常量与字典(含
+# `MappingProxyType({…})` 包一层)的每个值都是一条;解析不了的报 UNRESOLVED_LABEL。
+# 名字按集合核对(同第七条):改名或删掉其中一个就红,不许静默塌面。
+REPORT_REASON_MODULE = ROOT / "backend" / "app" / "domain" / "report_followup.py"
+REPORT_REASON_NAMES = (
+    "REASON_PREFIX",
+    "REASON_CLAUSES",
+    "REASON_CLAUSE_MEMORY_CLOSED_NARROWED",
+    "REASON_CLAUSE_MEMORY_CLOSED_CHANNEL",
+)
 
 # ASCII acronyms/words: matched only when not glued to another ASCII letter, so
 # identifiers (currentNotebook, MemoryPanel, schemaBusy, PKG) cannot trip them.
@@ -1053,18 +1087,29 @@ def scan_promotion_title_prefixes(path: Path) -> tuple[int, Hits]:
 
 
 def _scan_promotion_title_names(path: Path) -> tuple[set[str], Hits]:
-    """The ``PROMOTION_TITLE_NAMES`` constants found in ``path`` and their hits.
+    """The ``PROMOTION_TITLE_NAMES`` constants found in ``path`` and their hits
+    (see ``_scan_named_texts``)."""
+    found, hits, _ = _scan_named_texts(path, PROMOTION_TITLE_NAMES)
+    return found, hits
 
-    Every name must be a module-level assignment resolvable to string text; one
-    that is missing is simply not in the returned set (the caller compares the SET
-    with ``PROMOTION_TITLE_NAMES``, so a renamed constant cannot hide behind a
-    count that another name happens to fill), one that cannot be resolved is
-    reported as ``UNRESOLVED_LABEL``.
+
+def _scan_named_texts(path: Path, wanted_names: tuple[str, ...]) -> tuple[set[str], Hits, int]:
+    """The named module-level text constants of ``path``: (names found, hits, texts).
+
+    Every name must be a module-level assignment resolvable to string text --
+    a string (through concatenation and module constants), or a dict literal
+    (bare or wrapped in one single-argument call such as ``MappingProxyType``)
+    whose every value is one; each string or dict value is one text. A name that
+    is missing is simply not in the returned set (callers compare the SET with
+    their names, so a renamed constant cannot hide behind a count that another
+    name happens to fill); a text that cannot be resolved, or a ``**`` spread,
+    is reported as ``UNRESOLVED_LABEL``.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     resolver = _IndirectCopy(tree)
     found: set[str] = set()
     hits: Hits = []
+    texts = 0
     for node in tree.body:
         if isinstance(node, ast.Assign):
             names = [t.id for t in node.targets if isinstance(t, ast.Name)]
@@ -1072,16 +1117,36 @@ def _scan_promotion_title_names(path: Path) -> tuple[set[str], Hits]:
             names = [node.target.id]
         else:
             continue
-        wanted = set(names) & set(PROMOTION_TITLE_NAMES)
+        wanted = set(names) & set(wanted_names)
         if node.value is None or not wanted:
             continue
         found |= wanted
+        value = node.value
+        if isinstance(value, ast.Call) and len(value.args) == 1 and not value.keywords \
+                and isinstance(value.args[0], ast.Dict):
+            value = value.args[0]
+        if isinstance(value, ast.Dict):
+            for key, text in zip(value.keys, value.values):
+                texts += 1
+                units = None if key is None else _strict_label_units(text, resolver)
+                hits += _label_hits(text.lineno, units, ast.unparse(text))
+            continue
+        texts += 1
         hits += _label_hits(
-            node.value.lineno,
-            _strict_label_units(node.value, resolver),
-            ast.unparse(node.value),
+            value.lineno,
+            _strict_label_units(value, resolver),
+            ast.unparse(value),
         )
-    return found, hits
+    return found, hits, texts
+
+
+def scan_report_reason_texts(path: Path) -> tuple[int, Hits]:
+    """Blacklisted jargon in the report follow-up reason texts (eighth channel).
+
+    Returns (texts found, hits) over ``REPORT_REASON_NAMES``; see
+    ``_scan_named_texts``."""
+    _, hits, texts = _scan_named_texts(path, REPORT_REASON_NAMES)
+    return texts, hits
 
 
 def scan_service_label_template(path: Path) -> tuple[int, Hits]:
@@ -1346,6 +1411,24 @@ def main(argv: list[str] | None = None) -> int:
             f"title prefix: {snippet!r}"
         )
 
+    # 第八条通道:「就此追问」不读报告的原因文案。按 ROOT 写死,理由同第五条。
+    if not REPORT_REASON_MODULE.exists():
+        print(
+            f"check_ui_vocabulary: report-reason module missing: "
+            f"{_rel(REPORT_REASON_MODULE)} (update REPORT_REASON_MODULE)",
+            file=sys.stderr,
+        )
+        return 1
+    reason_found, reason_hits, reason_texts = _scan_named_texts(
+        REPORT_REASON_MODULE, REPORT_REASON_NAMES
+    )
+    for line, term, snippet in reason_hits:
+        snippet = snippet if len(snippet) <= 80 else snippet[:77] + "…"
+        violations.append(
+            f"  {_rel(REPORT_REASON_MODULE)}:{line}: 「{term}」in report reason text: "
+            f"{snippet!r}"
+        )
+
     note_files = _release_note_files()
     for path in note_files:
         rel = _rel(path)
@@ -1396,6 +1479,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    if reason_found != set(REPORT_REASON_NAMES):
+        missing = sorted(set(REPORT_REASON_NAMES) - reason_found)
+        print(
+            f"check_ui_vocabulary: only {len(reason_found)} report reason constants found "
+            f"in {_rel(REPORT_REASON_MODULE)} (expected {len(REPORT_REASON_NAMES)}; "
+            f"missing {', '.join(missing)}). 原因文案常量是不是改名 / 换了写法?同步 "
+            f"REPORT_REASON_NAMES,别删这条通道来「修」它。",
+            file=sys.stderr,
+        )
+        return 1
+
     if service_sites < MIN_SERVICE_LABELS:
         print(
             f"check_ui_vocabulary: only {service_sites} shipped model-service labels "
@@ -1422,7 +1516,8 @@ def main(argv: list[str] | None = None) -> int:
         f"{display_sites} display fields + "
         f"{label_sites} workload labels + "
         f"{service_sites} model service labels + "
-        f"{promotion_sites} promotion title prefixes "
+        f"{promotion_sites} promotion title prefixes + "
+        f"{reason_texts} report reason texts "
         f"({len(CJK_TERMS) + len(ASCII_TERMS)} blacklisted terms)"
     )
     if extra_roots:
