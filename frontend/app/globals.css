@@ -1948,6 +1948,27 @@ button.chat-session-card {
   font-size: 12px;
 }
 
+/* 会话最后一轮挂着关联报告:卡片里一枚浅色徽标,左栏行里是标题前的小图标。 */
+.chat-session-card-main .chat-session-report-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 7px;
+  border: 1px solid #c9d6f2;
+  border-radius: 999px;
+  background: #f2f6ff;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  vertical-align: middle;
+}
+
+.chat-session-card-main .chat-session-report-mark {
+  margin-right: 5px;
+  color: #1d4ed8;
+  vertical-align: -1px;
+}
+
 .chat-session-card-main .chat-session-reasoning-badge {
   display: inline-block;
   margin-left: 6px;
@@ -5367,6 +5388,279 @@ button.chat-session-card {
   font-size: 13px;
 }
 
+/* ---------------------------------------------------------------------------
+   问答「关联报告」(linked-report-picker.tsx):输入框上方的标签 + 下排的选择器。
+   标签与选择器里的 <span> 都落进上面 `.chat-input-bar span`(一类+一元素)的射程,
+   所以凡是要改字色/字号的 span 选择器一律写成两个类,与 effort-picker 同一条坑。
+   --------------------------------------------------------------------------- */
+.linked-report-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+.linked-report-bar .linked-report-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 0 4px 0 10px;
+  border: 1px solid #c9d6f2;
+  border-radius: 999px;
+  background: #f2f6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.linked-report-bar .linked-report-chip svg {
+  flex: none;
+}
+
+/* 题目整串放在 title 里,这里只做单行省略。 */
+.linked-report-bar .linked-report-chip-text {
+  min-width: 0;
+  overflow: hidden;
+  color: inherit;
+  font-size: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 判词说这一轮不会读这份报告:整块置灰,原因紧挨着说。 */
+.linked-report-bar .linked-report-chip.unreadable {
+  border-color: #d8dee6;
+  background: #f3f4f6;
+  color: #8b95a7;
+}
+
+.linked-report-chip-remove {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.linked-report-chip-remove:hover:not(:disabled) {
+  background: rgba(29, 78, 216, 0.1);
+}
+
+.linked-report-chip-remove:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.linked-report-bar .linked-report-reason {
+  color: var(--warning);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.linked-report-bar .linked-report-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.linked-report-picker {
+  position: relative;
+  display: inline-flex;
+}
+
+.linked-report-picker-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid #d2d6df;
+  border-radius: 999px;
+  background: #fff;
+  color: #22272e;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.linked-report-picker-chip:hover:not(:disabled),
+.linked-report-picker-chip.open {
+  border-color: #9aa6b7;
+  background: #f7f9fc;
+}
+
+.linked-report-picker-chip.open {
+  border-color: #1d4ed8;
+}
+
+.linked-report-picker-chip:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.linked-report-picker .linked-report-picker-chip-label {
+  color: #22272e;
+  font-size: inherit;
+}
+
+.linked-report-picker-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 30;
+  width: min(360px, calc(100vw - 48px));
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #e2e6ee;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16);
+}
+
+.linked-report-picker-head {
+  display: grid;
+  gap: 2px;
+}
+
+.linked-report-picker .linked-report-picker-title {
+  color: #6b7280;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.linked-report-picker-hint {
+  color: #98a2b3;
+  font-size: 11px;
+}
+
+.linked-report-picker-state {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.linked-report-picker-state.failed {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.linked-report-picker .linked-report-picker-state span {
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.linked-report-picker-retry {
+  padding: 2px 10px;
+  border: 1px solid #d2d6df;
+  border-radius: 999px;
+  background: #fff;
+  color: #22272e;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.linked-report-picker-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.linked-report-option {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.linked-report-option:hover {
+  background: #f3f5f9;
+}
+
+.linked-report-option.selected {
+  border-color: #c9d6f2;
+  background: #f2f6ff;
+}
+
+.linked-report-picker .linked-report-option-title {
+  min-width: 0;
+  overflow: hidden;
+  color: #1f2937;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.linked-report-option-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: #6b7280;
+  font-size: 11px;
+}
+
+.linked-report-option.selected .linked-report-option-meta {
+  color: #1d4ed8;
+}
+
+/* 在途轮次问题下方那枚小标签:与右对齐的问题气泡同侧。 */
+.chat-turn-linked-report {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+  margin-top: -6px;
+}
+
+.chat-turn-linked-report-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 78%;
+  min-width: 0;
+  padding: 2px 10px;
+  border: 1px solid #c9d6f2;
+  border-radius: 999px;
+  background: #f2f6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+}
+
+.chat-turn-linked-report-tag svg {
+  flex: none;
+}
+
+.chat-turn-linked-report-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Knowhow tool tabs (Ask / Scenario / Case / Checklist / Rules) */
 .chat-tabs {
   display: flex;
@@ -7312,6 +7606,81 @@ button.tag:hover {
   margin-top: 2px;
   color: #66758f;
   overflow-wrap: anywhere;
+}
+
+/* 这一轮挂了关联报告时的回执(「就此追问」)。读入时与检索范围回执同一种折叠块;
+   没读时只有一行说明(原因由后端写好),没有可展开的东西。 */
+.answer-linked-report {
+  margin: 8px 0 10px;
+  border: 1px solid #d9e3f4;
+  border-radius: 9px;
+  background: #f7f9fe;
+  color: #334155;
+  font-size: 12px;
+}
+
+.answer-linked-report > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  list-style: none;
+  color: #35548c;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.answer-linked-report > summary::-webkit-details-marker {
+  display: none;
+}
+
+.answer-linked-report > summary svg {
+  flex: none;
+  transition: transform 0.12s ease;
+}
+
+.answer-linked-report[open] > summary svg {
+  transform: rotate(90deg);
+}
+
+.answer-linked-report > summary span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.answer-linked-report.skipped {
+  padding: 8px 10px;
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.answer-linked-report ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0 12px 10px 30px;
+}
+
+.answer-linked-report li {
+  min-width: 0;
+}
+
+.answer-linked-report li span {
+  overflow-wrap: anywhere;
+}
+
+.answer-linked-report li small {
+  display: block;
+  margin-top: 2px;
+  color: #66758f;
+  overflow-wrap: anywhere;
+}
+
+.answer-linked-report li .linked-report-section-skipped {
+  color: #8b95a7;
 }
 
 /* 未参与本轮检索的参考库仍逐行列出（它解释了"为什么这条回答里没有它的证据"），

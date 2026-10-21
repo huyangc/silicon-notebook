@@ -288,6 +288,9 @@ const OWNER_LIFECYCLE_SCOPE_ALLOWLIST = {
   // notebookTransitionSteps。
   "<module>.Home.openAskSession": "切换 Ask 会话时保护 source-add lease。",
   "<module>.Home.startNewAskSession": "新建 Ask 会话时保护 source-add lease。",
+  // 报告详情「就此追问」:开一个挂着该报告的新 Ask 会话（askSession.beginReportFollowup），
+  // 与 startNewAskSession 同一条 workspace transition。
+  "<module>.Home.followUpReport": "「就此追问」开新 Ask 会话时保护 source-add lease。",
   // 上传 / URL 导入来源的提交，是 sourceLibrary 自己的「新增来源」写入路径，与打开
   // 笔记本无关。applyImportedUrlSources 是 URL 导入成功半的抽出函数(X9 PR-A T3)——
   // submitUrlSources(粘贴链接框)与 importGapSuggestion(站外来源建议的「导入」按钮,

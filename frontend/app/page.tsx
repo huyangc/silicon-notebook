@@ -244,7 +244,9 @@ import { NotebookCollectionSection } from "./notebook-collection-section.tsx";
 import { AskSessionHistoryList } from "./ask-session-history-list.tsx";
 import { ShareOverviewMembers } from "./share-overview-members.tsx";
 import { DuplicateGroupList } from "./duplicate-group-list.tsx";
-import { downloadReportArchive, downloadReportMarkdown, ReportsPanel } from "./report-view";
+import { downloadReportArchive, downloadReportMarkdown, ReportsPanel, type ReportDetailT } from "./report-view";
+import { followupScopeSelections } from "./linked-report.ts";
+import { LinkedReportChip, LinkedReportPicker, LinkedReportTurnTag } from "./linked-report-picker.tsx";
 import {
   DEFAULT_REPORT_MAX_SECTIONS,
   DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
@@ -2166,6 +2168,10 @@ export default function Home() {
     feedbackSent,
     inFlight: askInFlight,
   } = askSession;
+  // 「关联报告」选择器与标签的移除键何时锁住:与回答方式选择器同一组条件(提交中、问题理解
+  // 中、会话加载中、审阅卡在场)。提交会冻结当时的标签,锁住是为了界面上显示的标签始终就是
+  // 下一次提交会带的那一份,而不是为了保护在途请求。
+  const askLinkedReportLocked = asking || intentChecking || sessionLoading || Boolean(askIntentReview);
   // 收起来源栏后,问答页把空出来的左栏让给平铺的历史会话(「历史」弹窗随之退场)。
   // 窄屏(≤760px)本来就不支持收起来源栏,那里仍用弹窗。
   const wideWorkspace = useMediaQuery("(min-width: 761px)");
@@ -3895,6 +3901,50 @@ export default function Home() {
       rootTransition,
       actorId && notebookId ? { actorId, notebookId, workspaceEpoch } : null,
     );
+  }
+
+  /**
+   * 报告详情「就此追问」:开一个新会话、挂上这份报告、把焦点送进输入框。
+   *
+   * 顺序是承重的:高级模式先取报告生成时冻结的检索范围(`readFollowupScope` 只在报告页签
+   * 仍是它的 owner 时作数),拿到之后才切页签。取范围失败就原样抛给按钮——按钮自己显示
+   * 「打开失败」,页签不动;请求期间归属变了(换库、离开报告页签)返回 null,什么都不做。
+   * 自动模式没有勾选框,有效范围恒为全选(必然覆盖报告冻结时的范围),所以不取也不切。
+   *
+   * 新会话的那半与 startNewAskSession 同一套 workspace transition(epoch、source-add
+   * lease、回答→记忆的派生),只是开会话的命令换成带报告的那一个。
+   */
+  async function followUpReport(report: ReportDetailT) {
+    let scope: ReturnType<typeof followupScopeSelections> | null = null;
+    if (isAdvanced(uiMode)) {
+      const frozen = await reportWorkspace.readFollowupScope(report.id);
+      if (!frozen) return;
+      scope = followupScopeSelections(frozen, mountedBaseIds);
+    }
+    const workspaceEpoch = ++workspaceEpochRef.current;
+    invalidateNotebookOpenGuard();
+    const rootTransition = rootModals.beginWorkspaceTransition();
+    memoryLinksAbortRef.current?.abort();
+    memoryLinksAbortRef.current = null;
+    setMemorySavedAnswers({});
+    const opened = askSession.beginReportFollowup(
+      { id: report.id, title: report.question },
+      workspaceEpoch,
+      scope?.note ?? "",
+    );
+    const actorId = currentUser?.id ?? "";
+    const notebookId = activeNotebookIdRef.current;
+    rootModals.finishWorkspaceTransition(
+      rootTransition,
+      actorId && notebookId ? { actorId, notebookId, workspaceEpoch } : null,
+    );
+    if (!opened) throw new Error("report follow-up did not open a conversation");
+    switchChatMode("ask");
+    if (scope) {
+      sourceLibrary.applySourceScopeSelection(scope.source);
+      setBaseScopeSelection(scope.base);
+    }
+    setAskComposerFocusSignal((value) => value + 1);
   }
 
   // 被停止那一轮的「编辑问题」:问题回到输入框并把焦点送过去,用户接着改就行。
@@ -6000,6 +6050,10 @@ export default function Home() {
                     {askInFlight && (
                       <div className="chat-turn" id={pendingQuestion ? chatTurnDomId(turns.length) : undefined}>
                         {pendingQuestion && <ChatQuestion question={pendingQuestion} askedAt={pendingAskedAt} />}
+                        {/* 这一问提交时挂的报告(冻结在提交那一刻,之后改标签不影响它)。 */}
+                        {askSession.pendingLinkedReport && (
+                          <LinkedReportTurnTag report={askSession.pendingLinkedReport} />
+                        )}
                         <div className="chat-assistant chat-thinking">
                           {/* 按引擎是否流式推轨迹判断,不按分组:同一分组里未来若混入
                               不流轨迹的模式,挂轨迹面板只会让用户从头到尾盯着一句
@@ -6057,6 +6111,7 @@ export default function Home() {
                     // 两个面同一时刻只有一个可见（chatMode 二选一），预览请求的形状与
                     // 资产 URL 也逐字相同，没有理由为报告另开一格不受协调器管辖的弹窗。
                     onPreviewImage={openAnswerImagePreview}
+                    onFollowUp={followUpReport}
                   />
                 )}
 
@@ -6093,12 +6148,34 @@ export default function Home() {
                   disabled={askBlocked || sessionLoading || Boolean(askIntentReview)}
                   submitBlocked={askQuestionOverLimit !== null}
                   focusSignal={askComposerFocusSignal}
+                  // 「关联报告」标签:挂着报告、或只剩一句就地说明(报告已不存在而被移除)时出现。
+                  // 两种界面模式都挂——自动模式也要能移除/更换标签(计划 D16)。
+                  attachment={askSession.linkedReport || askSession.linkedReportNote ? (
+                    <LinkedReportChip
+                      report={askSession.linkedReport}
+                      verdict={askSession.linkedReportCheck}
+                      note={askSession.linkedReportNote}
+                      removeDisabled={askLinkedReportLocked}
+                      onRemove={() => {
+                        askSession.unlinkReport();
+                        setAskComposerFocusSignal((value) => value + 1);
+                      }}
+                    />
+                  ) : null}
                 >
                   {/* 与来源页签工具条同一句话的第二处显示 —— 共用 retrievalScopeText，
                       两处不一致在结构上就不可能发生。 */}
                   <span className="retrieval-scope-count" title="勾选的来源与参考库才会参与本次检索">
                     检索范围 · {retrievalScopeText}
                   </span>
+                  {currentNotebookId && (
+                    <LinkedReportPicker
+                      notebookId={currentNotebookId}
+                      linked={askSession.linkedReport}
+                      disabled={askLinkedReportLocked}
+                      onSelect={askSession.linkReport}
+                    />
+                  )}
                   {/* 超限提示优先于引号回执:它是此刻唯一挡着提交的东西。
                       只在用户真的敲了英文双引号时才出现引号回执:确认哪几段被当成
                       完整短语,或说明为什么这次没识别。判据与后端同一份规则的镜像。 */}

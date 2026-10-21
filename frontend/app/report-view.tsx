@@ -7,7 +7,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowLeft, ArrowUp, Check, CheckSquare, ChevronRight, Copy, Download, Plus, Share2, Sparkles, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, Check, CheckSquare, ChevronRight, Copy, Download, MessageSquare, Plus, Share2, Sparkles, Trash2, X } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -1370,6 +1370,52 @@ export interface ReportsPanelProps {
    * 只是不可点击放大。
    */
   onPreviewImage?: (request: AnswerImagePreviewRequest) => void;
+  /**
+   * 「就此追问」的承接方（page.tsx）：取报告生成时的检索范围、切到问答页签、开新会话并挂上
+   * 这份报告。只对已完成的报告出现；不传时不渲染按钮。返回的 promise 在打开结束后落定，
+   * 失败时 reject——按钮在飞期间禁用，失败结果画在按钮自己身上。
+   */
+  onFollowUp?: (report: ReportDetailT) => Promise<void>;
+}
+
+/**
+ * 详情工具栏的「就此追问」。点下即禁用、文案换成进行态，直到承接方的 promise 落定：
+ * 成功时页面已经切到问答页签（这颗按钮随报告页签一起卸载）；失败时按钮自己显示「打开失败」，
+ * 由 `useCopyResult` 的同一份计时到点复原（不只靠页面横幅）。结果按报告 id 分格：失败态挂着
+ * 时换到另一份报告，新报告的按钮不会顶着上一份的失败出现。
+ */
+function ReportFollowUpButton({
+  report,
+  onFollowUp,
+}: {
+  report: ReportDetailT;
+  onFollowUp: (report: ReportDetailT) => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const outcome = useCopyResult();
+  const failed = outcome.resultFor(`followup:${report.id}`) === "failed";
+  return (
+    <button
+      className={failed ? "report-action copy-result-failed" : "report-action"}
+      type="button"
+      disabled={busy}
+      onClick={() => {
+        setBusy(true);
+        outcome.reset();
+        onFollowUp(report).then(
+          () => setBusy(false),
+          () => {
+            setBusy(false);
+            outcome.report(`followup:${report.id}`, false);
+          },
+        );
+      }}
+    >
+      {failed ? <X size={14} /> : <MessageSquare size={14} />}
+      {" "}
+      {busy ? "正在打开…" : failed ? "打开失败" : "就此追问"}
+    </button>
+  );
 }
 
 // 「分享」按钮的外观。公开成功后的结果格(链接进没进剪贴板)只在 `shared` 时画:取消分享的那
@@ -1411,6 +1457,7 @@ export function ReportsPanel({
   maxSubqueriesPerSection = DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
   uiMode = "advanced",
   onPreviewImage,
+  onFollowUp,
 }: ReportsPanelProps) {
   const {
     reports,
@@ -1508,6 +1555,10 @@ export function ReportsPanel({
             <ArrowLeft size={14} /> 返回列表
           </button>
           <div className="report-detail-actions">
+            {/* 追问是读：与「复制」「下载」一样不看 readOnly（只读成员也能提问）。 */}
+            {onFollowUp && active.status === "done" && (
+              <ReportFollowUpButton report={active} onFollowUp={onFollowUp} />
+            )}
             {!readOnly && isReportActive(active.status) && (
               <button
                 className="report-action"

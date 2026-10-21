@@ -26,8 +26,9 @@ const POPOVER_MARGIN = 8;
 /**
  * 最近的水平裁剪祖先与视口的交集。问答那侧真正裁掉 popover 的是
  * `.workspace-panel { overflow: hidden }`,它比视口窄得多,只夹视口不够。
+ * 问答输入行里的另一个弹出层(「关联报告」选择器,linked-report-picker.tsx)用同一把尺子。
  */
-function clippingBounds(node: HTMLElement): { left: number; right: number } {
+export function clippingBounds(node: HTMLElement): { left: number; right: number } {
   let left = 0;
   // 视口只是兜底上界。隐藏/离屏的渲染环境会把 innerWidth 报成 0(内嵌预览面板实测如此),
   // 那样会把可用区间压成负数、把 popover 钉到荒谬的位置 —— 拿不到可信宽度时干脆不设上界,
