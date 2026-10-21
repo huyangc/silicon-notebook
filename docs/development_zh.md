@@ -490,13 +490,23 @@ hooks 规则都解析为 error，且没有规则停在 warn；`react-hooks/rules
 文件。它在 contracts lane 里跑，耗时不到 1 秒，不在 backend 临界路径上。本机在开发环境里
 （测试锁会装上 ruff）直接跑 `python scripts/check_backend_lint.py`。
 
-只开 lint 规则，不开格式化，也不开风格类规则：
+只开 lint 规则与 import 排序，不开格式化，也不开其它风格类规则：
 
 - pyflakes（`F`）、`E9`（解析器读不了的文件）与 `E722`（裸 `except`）；
 - pylint 的错误类（`PLE`）；
 - flake8-bugbear 里指向疑似 bug 的那部分：可变的参数默认值与 `ContextVar` 默认值、`finally`
   里的 `return`/`break`/`continue`、重复或空的异常元组、`pytest.raises(Exception)`、无意义的
-  比较与表达式、方法上的 `lru_cache`、集合里的重复项等。完整清单见 `ruff.toml`。
+  比较与表达式、方法上的 `lru_cache`、集合里的重复项等。完整清单见 `ruff.toml`；
+- import 排序（`I`，isort 默认风格）。排序器的设置照仓库现有的导入写法定：`src = ["backend",
+  "scripts"]` 让 `app`、`tests` 和 scripts 之间的同级模块（`import diag_common`）算第一方，
+  存量从 1836 条降到 1450 条；不把仓库根算进去，是为了不把第三方库 `packaging` 误认成仓库里
+  的 `packaging/` 目录。`line-length = 120` 只给排序器用（没有开任何行长规则）：99% 的单行
+  import 本来就不超过 88 列，但超出的 133 行在 88 列下都会因换行被报，120 列下只剩 4 行
+  （1009 个文件共 1395 条）。`force-sort-within-sections` 与 `order-by-type = false` 都和现有
+  写法差得更多（分别是 1715 和 1623 条）。存量只记进基线，没有修：开这条规则时没有重排任何
+  import。排序器只排连续的 import 块，不会把 import 挪过 `sys.path.insert` 这类语句；门禁也
+  从不跑 `--fix`。报新违反，意思是新写或改动的 import 在它所在的块里放错了位置，放对即可；
+  已经记在基线里的乱序块，再往里加 import 条数也不变，所以新违反从不逼人挪动已有的 import。
 
 刻意不开：
 
@@ -504,14 +514,17 @@ hooks 规则都解析为 error，且没有规则停在 warn；`react-hooks/rules
 - `B904`、`B905`、`B007`、`B009`/`B010`：异常链、`zip(strict=)`、未用的循环变量、常量
   `getattr`/`setattr`。这几条属于风格，或者改了会改变行为。
 - `B023`：闭包里引用循环变量；命中的大多是在循环体内当场调用的闭包。
-- `UP` 与 `I`：语法现代化与 import 排序。
+- `UP`（2026-10-22 裁决）：537 个文件共 6324 条，几乎全是注解改写（`List` → `list`、
+  `Optional[X]` → `X | None`、去掉注解引号、`datetime.UTC`）。这些是风格搅动而不是 bug，
+  其中 `UP042`（`(str, Enum)` → `StrEnum`）还会改变 `str()` 的结果。
 
 门禁之前就有的违反记在 `scripts/backend_lint_baseline.json`，形状是「文件 → 规则 → 条数」。
 出现下面任何一种情况，门禁都会失败：
 
 - 某个（文件, 规则）的条数高于基线（新违反）；
-- 基线某格高于实际仍存在的条数（过期）；
-- 基线里出现门禁不检查的文件，或出现永不进基线的规则（`F821`、`F822`、`F823`、`E902`
+- 基线某格高于实际仍存在的条数（过期：修掉了一条违反、某个 import 块已经排好序、文件被删或
+  改名）；
+- 基线里出现永不进基线的规则（`F821`、`F822`、`F823`、`E902`
   与语法错误（`invalid-syntax`）一律当场修）；
 - ruff 实际检查的文件集合与 git 在这三处看到的不一致；
 - 装的 ruff 不是钉死的版本。
@@ -523,8 +536,9 @@ hooks 规则都解析为 error，且没有规则停在 warn；`react-hooks/rules
   preview 或 `extend-*` 键。三处目录下不许再有别的 ruff 配置；检查的根目录和空的排除清单也
   都钉死。
 - 点名受检规则的行级豁免按规则钉在 `SUPPRESSION_CEILING`。现有的都早于这道门：为注入而
-  导入的 pytest fixture、再导出、为副作用而做的导入。不带规则码的 `# noqa`，以及文件级的
-  `# ruff: noqa`、`# flake8: noqa`，一律禁止。
+  导入的 pytest fixture、再导出、为副作用而做的导入。不带规则码的 `# noqa`、文件级的
+  `# ruff: noqa` 与 `# flake8: noqa`，以及所有 `# isort:` 指令（`skip`、`skip_file`、`off`、
+  `split`），一律禁止。
 
 这些数字按规则合计。同一条规则下「A 文件修掉一条、B 文件新增一条」各项数字都不变，只能靠
 评审基线的 diff 发现。
@@ -532,9 +546,15 @@ hooks 规则都解析为 error，且没有规则停在 warn；`react-hooks/rules
 降基线的步骤：
 
 1. 修掉违反。
-2. 跑 `python scripts/check_backend_lint.py --prune`。它只调低基线、删掉降到零的格；只要
-   还有新违反，它什么都不写。
-3. 在同一个改动里调低 `BASELINE_CEILING`；若删掉了豁免注释，也调低 `SUPPRESSION_CEILING`。
+2. 跑 `python scripts/check_backend_lint.py --prune`。它只调低基线、删掉降到零的格（包括
+   已删或改名文件的格）；只要还有新违反，它什么都不写。它会打印每条规则的钉住总数要降多少。
+3. 在同一个改动里按打印的数字调低 `BASELINE_CEILING`；若删掉了豁免注释，也调低
+   `SUPPRESSION_CEILING`。
+
+过期报错的文案也是这么指引的。开了 import 排序后，过期比其它规则更容易碰到：改动之后某个
+记在基线里的 import 块恰好排好了序，或者删掉了一个有基线条目的文件，都要 prune。用 `master`
+最近 300 个提交回放（其中 220 个动了受检的 Python 文件）：有 4 个需要 prune（涉及 9 个文件，
+多是被删或重写的测试模块），37 个新写的 import 顺序不对。
 
 没有任何命令会往基线里加格。新违反不许靠改基线或加 `# noqa` 收编，一律修掉；只为再导出而
 保留的名字写进模块的 `__all__`。升级 ruff 自成一次需要评审的改动：改钉版、重锁，并在同一个

@@ -10,15 +10,16 @@ The gate runs ``ruff check --config ruff.toml`` (the version pinned in
 that predate the gate, in the same shape. It fails when
 
 * a (file, rule) count exceeds its baseline entry (a new violation);
-* a baseline entry exceeds what still occurs (stale: run ``--prune``);
-* the baseline names a file ruff does not lint, a rule in ``NEVER_BASELINED``,
-  or a count that is not a positive integer;
+* a baseline entry exceeds what still occurs, or names a file that is no
+  longer linted (stale: run ``--prune``, then lower the pinned totals);
+* the baseline names a rule in ``NEVER_BASELINED`` or a count that is not a
+  positive integer;
 * ruff does not lint exactly the Python files git sees under ``ROOTS``
   (tracked or untracked-but-not-ignored), minus ``EXCLUDED``;
 * the installed ruff is not the pinned one, or ruff itself fails.
 
 ``--prune`` lowers each baseline entry to what still occurs and drops entries
-that reached zero. It never raises an entry or adds one: with any new
+that reached zero, including those of deleted or renamed files. It never raises an entry or adds one: with any new
 violation present it writes nothing and fails. Per-rule totals are pinned
 separately in ``backend/tests/test_backend_lint_gate.py`` (lower them in the
 same change). A new violation is fixed, not baselined.
@@ -106,11 +107,14 @@ def current_counts(diagnostics: list[dict], root: Path = ROOT) -> Counts:
     return counts
 
 
-def baseline_problems(baseline: Counts, linted: set[str]) -> list[str]:
+def baseline_problems(baseline: Counts, linted: set[str], *, prune: bool = False) -> list[str]:
+    """Structural problems. ``prune`` tolerates entries of files no longer
+    linted (deleted or renamed): pruning drops them."""
     problems = []
     for relative, rules in sorted(baseline.items()):
-        if relative not in linted:
-            problems.append(f"{relative}: baseline names a file ruff does not lint")
+        if relative not in linted and not prune:
+            problems.append(f"{relative}: baseline names a file ruff does not lint"
+                            " (deleted or renamed: run --prune)")
         if not isinstance(rules, dict) or not rules:
             problems.append(f"{relative}: baseline entry must be a non-empty rule map")
             continue
@@ -151,6 +155,33 @@ def pruned(baseline: Counts, current: Counts) -> Counts:
     return result
 
 
+def ceiling_deltas(before: Counts, after: Counts) -> dict[str, tuple[int, int]]:
+    """Per rule, how far the pinned (count, files) totals fall from ``before`` to ``after``."""
+    def totals(counts: Counts) -> dict[str, list[int]]:
+        result: dict[str, list[int]] = {}
+        for rules in counts.values():
+            for rule, count in rules.items():
+                entry = result.setdefault(rule, [0, 0])
+                entry[0] += count
+                entry[1] += 1
+        return result
+    old, new = totals(before), totals(after)
+    deltas = {}
+    for rule in sorted(old):
+        count, files = new.get(rule, [0, 0])
+        if (count, files) != tuple(old[rule]):
+            deltas[rule] = (old[rule][0] - count, old[rule][1] - files)
+    return deltas
+
+
+def _ceiling_advice(before: Counts, after: Counts) -> list[str]:
+    return [f"  {rule}: count -{count}, files -{files}"
+            for rule, (count, files) in ceiling_deltas(before, after).items()]
+
+
+CEILING_FILE = "backend/tests/test_backend_lint_gate.py"
+
+
 def dump_baseline(baseline: Counts) -> str:
     return json.dumps(baseline, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
@@ -183,7 +214,7 @@ def run(root: Path = ROOT, *, prune: bool = False) -> int:
                         + "".join(f"  unexpected: {path}\n" for path in extra))
     baseline_path = root / BASELINE
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-    problems = baseline_problems(baseline, set(linted))
+    problems = baseline_problems(baseline, set(linted), prune=prune)
     if problems:
         raise GateError("invalid baseline:\n" + "".join(f"  {p}\n" for p in problems))
     diagnostics = json.loads(_ruff(root, "--output-format", "json", "--exit-zero"))
@@ -199,15 +230,20 @@ def run(root: Path = ROOT, *, prune: bool = False) -> int:
         return 1
     if prune:
         if stale:
-            baseline_path.write_text(dump_baseline(pruned(baseline, current)), encoding="utf-8")
-            print(f"[backend-lint] lowered {len(stale)} baseline entries; lower the per-rule"
-                  " totals in backend/tests/test_backend_lint_gate.py to match")
+            lowered = pruned(baseline, current)
+            baseline_path.write_text(dump_baseline(lowered), encoding="utf-8")
+            print(f"[backend-lint] lowered {len(stale)} baseline entries; in the same change"
+                  f" lower BASELINE_CEILING in {CEILING_FILE} by:")
+            for line in _ceiling_advice(baseline, lowered):
+                print(line)
         else:
             print("[backend-lint] baseline already matches")
         return 0
     if stale:
-        print("[backend-lint] baseline entries larger than what still occurs"
-              " (run scripts/check_backend_lint.py --prune):", file=sys.stderr)
+        print("[backend-lint] baseline entries larger than what still occurs (a fixed"
+              " violation, a sorted import block, a deleted file). Run"
+              " `python scripts/check_backend_lint.py --prune`, then lower"
+              f" BASELINE_CEILING in {CEILING_FILE} by the amounts it prints:", file=sys.stderr)
         for relative, rule, have, want in stale:
             print(f"  {relative} {rule}: {have} < baseline {want}", file=sys.stderr)
         return 1

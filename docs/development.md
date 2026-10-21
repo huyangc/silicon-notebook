@@ -637,7 +637,8 @@ second, so it is off the backend critical path. Run it locally from the
 development environment (the dev lock installs ruff) with
 `python scripts/check_backend_lint.py`.
 
-The rules are lint rules only; there is no formatter and no style rule:
+The rules are lint rules plus import order; there is no formatter and no other
+style rule:
 
 - pyflakes (`F`), `E9` (files the parser cannot read) and `E722` (bare
   `except`);
@@ -646,7 +647,24 @@ The rules are lint rules only; there is no formatter and no style rule:
   `ContextVar` defaults, `return`/`break`/`continue` in `finally`, duplicate or
   empty exception tuples, `pytest.raises(Exception)`, pointless comparisons and
   expressions, `lru_cache` on methods, duplicate set items and the like. The
-  full list is in `ruff.toml`.
+  full list is in `ruff.toml`;
+- import order (`I`, isort's default profile). The sorter's settings follow how
+  the repository already writes imports: `src = ["backend", "scripts"]` makes
+  `app`, `tests` and the sibling script modules (`import diag_common`) first
+  party, which cuts the existing findings from 1836 to 1450; leaving out the
+  repository root keeps the third-party `packaging` library from being taken for
+  the `packaging/` directory. `line-length = 120` is read only by the sorter (no
+  line-length rule is selected): 99% of single-line imports already fit in 88
+  columns, but the 133 that do not would each be reported for wrapping, and 120
+  leaves 4 (1395 findings in 1009 files). `force-sort-within-sections` and
+  `order-by-type = false` both match the existing code worse (1715 and 1623).
+  The existing findings were recorded, not fixed: turning the rule on reordered
+  no import. The sorter only orders contiguous import blocks, so it never moves
+  an import across a statement such as `sys.path.insert`, and the gate never
+  runs `--fix`. A new finding means that new or edited imports are out of order
+  within their block, which is fixed by placing them correctly. Imports already
+  out of order in a recorded block do not change the count, so a new finding
+  never forces existing imports to move.
 
 Left out on purpose:
 
@@ -656,15 +674,18 @@ Left out on purpose:
   behavior change.
 - `B023`: loop variables in closures; most hits are closures called inside the
   loop.
-- `UP` and `I`: modernization and import sorting.
+- `UP` (decided 2026-10-22): 6324 findings in 537 files, almost all
+  annotation rewrites (`List` → `list`, `Optional[X]` → `X | None`, unquoted
+  annotations, `datetime.UTC`). These are style churn rather than bugs, and
+  `UP042` (`(str, Enum)` → `StrEnum`) changes what `str()` returns.
 
 Violations that predate the gate are recorded in
 `scripts/backend_lint_baseline.json`, as file → rule → count. The gate fails when:
 
 - a (file, rule) count is higher than its entry (a new violation);
-- an entry is higher than what still occurs (stale);
-- the baseline names a file the gate does not lint, or a rule that is never
-  baselined (`F821`, `F822`, `F823`, `E902` and syntax errors (`invalid-syntax`) are always fixed);
+- an entry is higher than what still occurs (stale: a fixed violation, an
+  import block that is now sorted, a deleted or renamed file);
+- the baseline names a rule that is never baselined (`F821`, `F822`, `F823`, `E902` and syntax errors (`invalid-syntax`) are always fixed);
 - ruff lints a different set of files from the one git sees under the roots;
 - the installed ruff is not the pinned version.
 
@@ -679,8 +700,9 @@ open:
   list are pinned.
 - Line suppressions that name a gated rule are pinned per rule in
   `SUPPRESSION_CEILING`. The existing ones predate the gate: pytest fixtures
-  imported for injection, re-exports and side-effect imports. A blanket `# noqa`
-  and the file-level `# ruff: noqa` and `# flake8: noqa` are forbidden.
+  imported for injection, re-exports and side-effect imports. A blanket `# noqa`,
+  the file-level `# ruff: noqa` and `# flake8: noqa`, and every `# isort:`
+  action comment (`skip`, `skip_file`, `off`, `split`) are forbidden.
 
 The pins are per-rule totals. Debt moved between files under one rule (one
 violation fixed in file A, one added in file B) keeps every number, and only
@@ -690,10 +712,18 @@ To lower the baseline:
 
 1. Fix violations.
 2. Run `python scripts/check_backend_lint.py --prune`. It only lowers entries
-   and drops the ones that reach zero, and it writes nothing while any new
-   violation exists.
-3. Lower `BASELINE_CEILING`, and `SUPPRESSION_CEILING` if a suppression went, in
-   the same change.
+   and drops the ones that reach zero, including those of deleted or renamed
+   files, and it writes nothing while any new violation exists. It prints how
+   far each rule's pinned totals fall.
+3. Lower `BASELINE_CEILING` by those amounts, and `SUPPRESSION_CEILING` if a
+   suppression went, in the same change.
+
+The stale error says the same. Import order makes it more likely than the
+other rules: an edit that leaves a recorded import block sorted, or deletes a
+file with entries, needs a prune. Replaying the last 300 commits on `master`
+(220 touched gated Python files), 4 would have needed a prune (9 files, mostly
+deleted or rewritten test modules) and 37 would have written new imports out of
+order.
 
 No command adds an entry. Do not absorb a new violation by editing the baseline
 or adding a `# noqa`: fix it. A name kept only as a re-export belongs in the
