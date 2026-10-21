@@ -70,7 +70,11 @@ import {
   type LinkedReportTag,
   type LinkedReportVerdict,
 } from "./linked-report.ts";
-import { mergeSessionListFallback, recordStartedConversation } from "./ask-session-state.ts";
+import {
+  mergeSessionListFallback,
+  recordStartedConversation,
+  upsertSessionFromDetail,
+} from "./ask-session-state.ts";
 import { hasProcessOutput } from "./stopped-turn.tsx";
 import {
   conversationCleanupToast,
@@ -1462,18 +1466,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     ) {
       return false;
     }
-    const summary: ConversationSummary = {
-      id: detail.id,
-      title: detail.title,
-      updated_at: detail.updated_at,
-      turn_count: detail.turn_count,
-      used_reasoning: detail.used_reasoning ?? Boolean(
-        detail.turns[detail.turns.length - 1]?.response.reasoning_trace?.length,
-      ),
-    };
-    setSessions((current) => current.some((session) => session.id === detail.id)
-      ? current.map((session) => session.id === detail.id ? summary : session)
-      : [summary, ...current]);
+    setSessions((current) => upsertSessionFromDetail(current, detail));
     const nextTurns = detail.turns.map((turn) => ({
       question: turn.question,
       response: turn.response,
