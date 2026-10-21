@@ -27,6 +27,13 @@ Who sees what, re-checked on every call:
 A turn is a saved answer (single notebook) or a finished job (global); a
 question still being answered becomes a turn when it finishes, appended at the
 end, so the ``turn_offset`` of earlier turns does not move.
+
+A single-notebook turn that was asked about a deep report carries the report's
+receipt in ``scope.linked_report`` -- the one projection ``ask`` / ``get_ask``
+build (``notebook_view``), not a second one -- and the conversation's row names
+the report its last turn followed (``conversation_row``). Neither carries the
+Memory the report was written from, and a question still being answered
+contributes nothing to either.
 """
 from __future__ import annotations
 
@@ -105,6 +112,7 @@ def _clip(text: str, limit: int) -> tuple[str, int]:
 def conversation_row(
     *, conversation_id: str, kind: str, title: str, notebook_ids: Iterable[str],
     turn_count: int, updated_at: str, submitted_via: str,
+    linked_report: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One conversation as both tools show it: a ``list_conversations`` row and
     ``get_conversation``'s ``conversation``. The one place the shape is built.
@@ -113,9 +121,20 @@ def conversation_row(
     library its live turns used (global), sorted; at most
     ``_LIST_NOTEBOOK_IDS`` are named and ``notebook_count`` is the full number.
     ``submitted_via`` is ``web`` / ``mcp`` / ``""`` (not recorded).
+
+    ``linked_report`` is the report the conversation's LAST saved turn was asked
+    about (``ConversationSummary.linked_report``: the receipt's snapshot), and
+    becomes ``{"report_id", "title"}`` -- nothing more: what a turn read of it,
+    and any Memory the report was written from, never ride on a conversation
+    row. The key is ABSENT when that turn attached none (as on the stored
+    summary, and so a conversation that never followed a report keeps exactly
+    the eight keys above), and a global conversation never has one. ``title`` is
+    the receipt's whole snapshot: the page's field limit cuts it to
+    ``TITLE_CHARS`` and counts the cut in ``truncation`` (``list_page`` /
+    ``turn_page``), unlike the conversation's own title above, which is cut here.
     """
     libraries = sorted({str(item) for item in notebook_ids if item})
-    return {
+    row: dict[str, Any] = {
         "conversation_id": conversation_id,
         "kind": kind,
         "title": _clip(str(title or ""), TITLE_CHARS)[0],
@@ -125,16 +144,25 @@ def conversation_row(
         "updated_at": str(updated_at or ""),
         "submitted_via": str(submitted_via or ""),
     }
+    report_id = str((linked_report or {}).get("report_id") or "")
+    if report_id:
+        row["linked_report"] = {
+            "report_id": report_id,
+            "title": str((linked_report or {}).get("title") or ""),
+        }
+    return row
 
 
 def _notebook_row(conversation: Mapping[str, Any]) -> dict[str, Any]:
     """A single-notebook conversation's fields (a ``ConversationSummary`` dump,
-    or ``conversation_turn``'s result)."""
+    or ``conversation_turn``'s result; both carry ``linked_report`` as
+    ``{"report_id", "title"}`` or leave it out)."""
     return conversation_row(
         conversation_id=conversation["id"], kind="notebook",
         title=conversation["title"], notebook_ids=[conversation["notebook_id"]],
         turn_count=conversation["turn_count"], updated_at=conversation["updated_at"],
         submitted_via=conversation["submitted_via"],
+        linked_report=conversation.get("linked_report"),
     )
 
 
@@ -190,15 +218,22 @@ def list_page(
     rows: Sequence[Mapping[str, Any]], *, limit: int, offset: int,
 ) -> dict[str, Any]:
     """``paged_items`` over conversation rows, plus one more acceptance check:
-    every delivered row names its notebooks whole.
+    every delivered row names its notebooks, and the report it follows, whole.
 
     ``paged_items`` only proves which rows were delivered. Its budget may also
-    cut an inner list -- here a row's ``notebook_ids`` -- once the titles are
-    as short as it makes them; such a row would name fewer notebooks than it
-    used while still being counted as delivered. The page is then retried one
-    row shorter, so the cursor still advances only past whole rows.
+    cut an inner list -- here a row's ``notebook_ids`` -- or, once the titles
+    are as short as it makes them, the longest strings left -- a row's
+    ``linked_report.report_id`` among them; such a row would name fewer
+    notebooks than it used, or a report id that opens nothing, while still
+    being counted as delivered. The page is then retried one row shorter, so
+    the cursor still advances only past whole rows.
     """
-    libraries = {row["conversation_id"]: row["notebook_ids"] for row in rows}
+    named = {
+        row["conversation_id"]: (
+            row["notebook_ids"], (row.get("linked_report") or {}).get("report_id"),
+        )
+        for row in rows
+    }
     cap = limit
     while True:
         page = paged_items(
@@ -207,13 +242,32 @@ def list_page(
         )
         items = page["items"]
         if all(
-            item.get("notebook_ids") == libraries[item["conversation_id"]]
+            (item.get("notebook_ids"), (item.get("linked_report") or {}).get("report_id"))
+            == named[item["conversation_id"]]
             for item in items
         ):
             return page
         if len(items) <= 1:
             raise AgentToolError("internal", _LIST_FAILURE)
         cap = len(items) - 1
+
+
+def _fit_row_report_title(row: Mapping[str, Any]) -> tuple[dict[str, Any], int]:
+    """``row`` with the title of the report it follows cut to ``TITLE_CHARS``,
+    and how many characters that cut removed (the caller counts them in
+    ``truncation``).
+
+    The budget would cut the same title by the same limit, but ``turn_page``
+    accepts a page only when ``conversation`` came through byte for byte -- so
+    the cut is made here, before the row is fixed, and the check compares the
+    row as cut. A row that follows no report is returned as it is."""
+    fitted = dict(row)
+    report = fitted.get("linked_report")
+    if not isinstance(report, Mapping):
+        return fitted, 0
+    title, omitted = _clip(str(report.get("title") or ""), TITLE_CHARS)
+    fitted["linked_report"] = {**report, "title": title}
+    return fitted, omitted
 
 
 def _citation_refs(rows: Sequence[Mapping[str, Any]]) -> list[Any]:
@@ -246,7 +300,13 @@ def turn_page(
     ``get_ask`` for those.
 
     17 top-level keys plus the budget's ``truncation`` -- two below the
-    response's 20-key cap, the room left for per-turn fields added later.
+    response's 20-key cap, the room left for per-turn fields added later. A
+    deep report rides inside two keys that already exist, so the count does
+    not move: the turn's own receipt in ``scope.linked_report`` (what
+    ``notebook_view`` builds for ``ask`` / ``get_ask``, ``memory_used`` never
+    among it) and the report the conversation's last turn followed in
+    ``conversation.linked_report``. Both titles are cut to ``TITLE_CHARS`` and
+    the cuts count in ``truncation``.
 
     The answer text and the citations page independently, each with its own
     cursor. A page is accepted only after the output budget demonstrably left
@@ -276,8 +336,9 @@ def turn_page(
         fewest=0 if answer_left or not citations_left else 1,
     )
     next_turn = turn_offset + 1 if turn_offset + 1 < turn_count else None
+    row, row_omitted = _fit_row_report_title(conversation)
     fixed = {
-        "conversation": dict(conversation),
+        "conversation": row,
         "turn_offset": turn_offset,
         "next_turn_offset": next_turn,
         "asked_at": str(asked_at or ""),
@@ -314,7 +375,7 @@ def turn_page(
                 }
                 packed = _budget_response(
                     payload, field_limits=_TURN_FIELD_LIMITS,
-                    initial_omitted_characters=question_omitted,
+                    initial_omitted_characters=question_omitted + row_omitted,
                 )
                 delivered = packed.get("citations", [])
                 if (
@@ -466,7 +527,12 @@ def register_conversation_tools(
             "(global, gconv-...). Each row: conversation_id, kind "
             "(notebook/global), title, notebook_ids (sorted, at most 20; "
             "notebook_count is the full number), turn_count, updated_at, "
-            "submitted_via (web / mcp; empty = not recorded). notebook_id "
+            "submitted_via (web / mcp; empty = not recorded); a "
+            "single-notebook row whose latest turn was asked about one of your "
+            "deep reports also carries linked_report {report_id, title} (open "
+            "it with get_report; title cut to 200 characters, counted in "
+            "truncation.omitted_characters) -- the key is absent otherwise, "
+            "and cross-notebook rows never have it. notebook_id "
             "omitted = every notebook in the allowlist the owner can still read "
             "(unlike notebook-bound tools, where omitted means the default "
             "notebook); given, it lists only that notebook's conversations and "
@@ -516,7 +582,17 @@ def register_conversation_tools(
             "next_citation_offset). Then call again with "
             "turn_offset=next_turn_offset and both other offsets at 0, until "
             "next_turn_offset is null; `conversation` repeats the list row, "
-            "turn_count included. A page may carry no citations while answer "
+            "turn_count included (and linked_report: the report the latest "
+            "turn followed). A turn that was asked about a deep report carries "
+            "scope.linked_report, the receipt of what THAT turn did with it: "
+            "report_id, title (cut to 200 characters, counted in "
+            "truncation.omitted_characters), status (read / skipped), reason "
+            "(only when skipped), sections_read (titles of the sections whose "
+            "text entered the prompt), summary_truncated (only when true), "
+            "evidence_restored, evidence_gone and evidence_over_budget (counts "
+            "of the report's cited items read back, gone, or read back but "
+            "left out for space); a turn that attached none has no "
+            "linked_report. A page may carry no citations while answer "
             "text is left: keep following next_citation_offset. A page past the "
             "first (answer_offset or citation_offset above 0) repeats the "
             "question cut to 200 characters, ending in …; the first page "

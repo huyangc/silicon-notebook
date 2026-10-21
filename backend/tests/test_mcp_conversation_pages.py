@@ -9,10 +9,13 @@ twin.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.api.mcp_tools import global_ask as global_tools
 from app.api.mcp_tools._shared import AgentToolError, _serialized_size
+from app.api.mcp_tools.ask_pages import linked_report_view
 from app.api.mcp_tools.conversations import (
     _CONVERSATION_NOT_FOUND,
     _global_row,
@@ -24,6 +27,7 @@ from app.api.mcp_tools.conversations import (
     turn_page,
 )
 from app.api.mcp_tools.refs import decode_ref, element_ref
+from app.models.ask import LinkedReportReceipt, LinkedReportSection
 from app.models.global_ask import GlobalConversationSummary, GlobalNotebookScope
 from app.services.global_ask import AgentGlobalConversation, GlobalAskError
 
@@ -326,6 +330,155 @@ def test_conversation_row_is_one_shape_for_both_kinds() -> None:
     # The same row, budgeted on a page, survives whole.
     page = _page(_view(), row=row, turn_count=4)
     assert page["conversation"] == row
+
+
+REPORT = {"report_id": "rep-1a2b3c4d", "title": "光伏组件封装工艺综述"}
+
+
+def test_conversation_row_names_the_followed_report_and_nothing_else() -> None:
+    row = _row(linked_report={
+        **REPORT, "status": "read", "sections_read": ["背景"],
+        "memory_used": ["mem-1"],
+    })
+    assert set(row) == ROW_KEYS | {"linked_report"}
+    assert row["linked_report"] == REPORT
+    # Without a report the row is the eight keys it always was: the key is
+    # left out, never ``None`` or an empty mapping.
+    assert set(_row()) == ROW_KEYS
+    for none in (None, {}, {"report_id": ""}, {"title": "没有编号的标题"}):
+        assert set(_row(linked_report=none)) == ROW_KEYS, none
+    # An empty title is still a report: the id is what the caller opens.
+    assert _row(linked_report={"report_id": "rep-9"})["linked_report"] == {
+        "report_id": "rep-9", "title": "",
+    }
+    # The cut is the page's, so the row itself hands the title over whole.
+    long = _body(500)
+    assert _row(linked_report={**REPORT, "title": long})["linked_report"]["title"] == long
+
+
+def test_a_page_repeats_the_followed_report_and_keeps_its_key_budget() -> None:
+    row = _row(linked_report=REPORT)
+    page = _page(_view(), row=row)
+    assert page["conversation"] == row
+    # The report rides inside ``conversation`` and ``scope``: no new key.
+    assert set(page) == PAGE_KEYS and len(page) == 18
+    assert page["truncation"]["omitted_characters"] == 0
+    empty = empty_turn_page(_row(turn_count=0, linked_report=REPORT))
+    assert empty["conversation"]["linked_report"] == REPORT
+
+
+@pytest.mark.parametrize("chars,cut", [(199, 0), (200, 0), (201, 2), (500, 301)])
+def test_a_followed_reports_title_is_cut_to_the_title_cap_and_counted(chars, cut) -> None:
+    title = _body(chars)
+    row = _row(linked_report={**REPORT, "title": title})
+    page = _page(_view(), row=row)
+    shown = page["conversation"]["linked_report"]["title"]
+    assert shown == (title if not cut else title[:199] + "…")
+    assert len(shown) == min(chars, 200)
+    assert page["truncation"]["omitted_characters"] == cut
+    assert page["conversation"]["linked_report"]["report_id"] == REPORT["report_id"]
+    # The empty page cuts it by the same limit and counts it the same way.
+    empty = empty_turn_page(row)
+    assert empty["conversation"]["linked_report"]["title"] == shown
+    assert empty["truncation"]["omitted_characters"] == cut
+
+
+def test_every_page_of_a_turn_repeats_the_cut_row_and_counts_it() -> None:
+    title = _body(500)
+    row = _row(linked_report={**REPORT, "title": title})
+    citations = [_citation(index) for index in range(30)]
+    view = _view(_body(5_000), citations)
+    answer_offset, citation_offset, pages = 0, 0, 0
+    while answer_offset is not None or citation_offset is not None:
+        page = _page(
+            view, row=row,
+            answer_offset=5_000 if answer_offset is None else answer_offset,
+            citation_offset=30 if citation_offset is None else citation_offset,
+        )
+        pages += 1
+        assert page["conversation"]["linked_report"] == {
+            "report_id": REPORT["report_id"], "title": title[:199] + "…",
+        }
+        assert page["truncation"]["omitted_characters"] >= 301
+        assert _serialized_size(page) <= 12_000 and set(page) == PAGE_KEYS
+        answer_offset = page["next_answer_offset"]
+        citation_offset = page["next_citation_offset"]
+    assert pages >= 3, "a 5,000-character answer is at least three pages"
+
+
+def test_a_full_page_keeps_the_receipt_whole() -> None:
+    """The longest answer page (full text, twenty citations) beside the
+    receipt of a read report: the receipt is not what the budget gives up."""
+    receipt = LinkedReportReceipt(
+        report_id=REPORT["report_id"], title=REPORT["title"], status="read",
+        sections=[
+            LinkedReportSection(index=index, title=f"第{index}节 " + "标" * 30, read=index % 2 == 1)
+            for index in range(1, 7)
+        ],
+        summary_truncated=True, evidence_restored=7, evidence_gone=2,
+        evidence_over_budget=1, memory_used=["mem-1"],
+    )
+    scope = {"kind": "notebook", "notebook_ids": [NOTEBOOK],
+             "linked_report": linked_report_view(receipt)}
+    view = _view(_body(2_000), [_full_citation(index) for index in range(20)], scope=scope)
+    page = _page(view, row=_row(linked_report=REPORT))
+    assert page["scope"] == scope
+    assert page["scope"]["linked_report"]["sections_read"] == [
+        f"第{index}节 " + "标" * 30 for index in (1, 3, 5)
+    ]
+    assert "memory_used" not in page["scope"]["linked_report"]
+    assert "mem-1" not in json.dumps(page, ensure_ascii=False)
+
+
+def test_list_page_cuts_a_followed_reports_title_and_counts_it() -> None:
+    long = _body(500)
+    rows = [
+        _row(conversation_id=f"conv-{index:02d}",
+             linked_report={"report_id": f"rep-{index:02d}", "title": long})
+        for index in range(5)
+    ] + [_row(conversation_id="conv-plain")]
+    page = list_page(rows, limit=20, offset=0)
+    assert [item["conversation_id"] for item in page["items"]] == [
+        row["conversation_id"] for row in rows
+    ]
+    for item, row in zip(page["items"], rows):
+        if "linked_report" in row:
+            assert item["linked_report"] == {
+                "report_id": row["linked_report"]["report_id"],
+                "title": long[:199] + "…",
+            }
+        else:
+            assert set(item) == ROW_KEYS
+    assert page["truncation"]["omitted_characters"] == 5 * 301
+
+
+def test_list_page_never_delivers_a_row_with_a_cut_report_id() -> None:
+    # Report ids up to 200 characters are accepted by ``get_report``. Twenty
+    # rows whose report ids and titles are that long: the budget, having cut
+    # the titles, cuts the longest strings left -- the ids among them. A row
+    # naming a cut id must not count as delivered, so no caller is handed an
+    # id that opens nothing; the cursor still reaches every row.
+    rows = [
+        _row(conversation_id=f"conv-{index:02d}", title="标题" * 5,
+             linked_report={
+                 "report_id": f"rep-{index:02d}-" + "r" * 150,
+                 "title": _body(500),
+             })
+        for index in range(20)
+    ]
+    seen, offset, sizes = [], 0, []
+    while offset is not None:
+        page = list_page(rows, limit=20, offset=offset)
+        assert page["items"] and page["total"] == 20
+        for item in page["items"]:
+            original = rows[len(seen)]
+            assert item["conversation_id"] == original["conversation_id"]
+            assert item["linked_report"]["report_id"] == original["linked_report"]["report_id"]
+            seen.append(item["conversation_id"])
+        sizes.append(len(page["items"]))
+        offset = page["next_offset"]
+    assert seen == [row["conversation_id"] for row in rows]
+    assert min(sizes) < 20, "the budget cut a page, so the cut path ran"
 
 
 def test_list_order_parses_mixed_timestamp_spellings() -> None:

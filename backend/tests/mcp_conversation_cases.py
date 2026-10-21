@@ -29,6 +29,11 @@ from types import SimpleNamespace
 
 from app.api.mcp_tools.ask import notebook_view
 from app.api.mcp_tools.conversations import conversation_row, turn_page
+from app.domain.report_followup import (
+    REASON_CLAUSES,
+    REASON_PREFIX,
+    REASON_REPORT_UNAVAILABLE,
+)
 from tests.answer_link_service_cases import _notebook, _set_access, _user, _write
 from tests.citation_check_testkit import seed_source
 from tests.global_ask_history_store_cases import global_job_payload
@@ -41,6 +46,7 @@ ROW_KEYS = {
     "conversation_id", "kind", "title", "notebook_ids", "notebook_count",
     "turn_count", "updated_at", "submitted_via",
 }
+REPORT_TITLE = "光伏组件封装工艺综述"
 
 
 def _stamp(second: int, minute: int = 0) -> str:
@@ -51,10 +57,43 @@ def _instant(value: str) -> datetime:
     return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
 
-def _answer(text: str = "答案正文。", citations=()) -> dict:
-    """A stored notebook answer payload (a valid ``AskResponse``)."""
-    return {"conclusion": text, "answer": text, "evidence_level": "grounded",
-            "mode": "reasoning", "anchors": [], "citations": list(citations)}
+def _answer(text: str = "答案正文。", citations=(), linked_report: dict | None = None) -> dict:
+    """A stored notebook answer payload (a valid ``AskResponse``);
+    ``linked_report`` is the receipt of the deep report the turn was asked
+    about (``_receipt``), left out for a turn that attached none."""
+    payload = {"conclusion": text, "answer": text, "evidence_level": "grounded",
+               "mode": "reasoning", "anchors": [], "citations": list(citations)}
+    if linked_report is not None:
+        payload["linked_report"] = linked_report
+    return payload
+
+
+def _receipt(report_id: str, title: str = REPORT_TITLE, *, status: str = "read",
+             sections=(), restored: int = 0, gone: int = 0, over_budget: int = 0,
+             summary_truncated: bool = False, reason_code: str = "",
+             reason: str = "", memory_used=()) -> dict:
+    """One stored ``linked_report`` receipt (a valid ``LinkedReportReceipt``
+    dump, optional fields left out as the model leaves them out); ``sections``
+    are ``(title, read)`` pairs."""
+    receipt: dict = {
+        "report_id": report_id, "title": title, "status": status,
+        "evidence_restored": restored, "evidence_gone": gone,
+        "evidence_over_budget": over_budget,
+    }
+    if sections:
+        receipt["sections"] = [
+            {"index": index, "title": name, "read": read}
+            for index, (name, read) in enumerate(sections, 1)
+        ]
+    if summary_truncated:
+        receipt["summary_truncated"] = True
+    if reason_code:
+        receipt["reason_code"] = reason_code
+    if reason:
+        receipt["reason"] = reason
+    if memory_used:
+        receipt["memory_used"] = list(memory_used)
+    return receipt
 
 
 def _turn(question: str = "带宽够吗", answer: dict | None = None, via: str | None = "web"):
@@ -650,6 +689,173 @@ async def own_memory_citation_opens_through_mem_ref(env):
         assert opened["kind"] == "mem" and opened["text"] == "记忆正文。"
 
 
+# ------------------------------------------------------------- linked report
+
+
+def _wire(*payloads) -> str:
+    """Everything a caller was sent, as one string to look for leaks in."""
+    return json.dumps(payloads, ensure_ascii=False)
+
+
+async def a_conversation_that_followed_a_report_names_it_and_each_turn_carries_its_receipt(env):
+    world = _world(env, scopes=("read", "ask"))
+    read = _receipt(
+        "rep-t14-a", sections=[("背景", True), ("工艺路线", True), ("附录", False)],
+        restored=2, gone=1, over_budget=3, summary_truncated=True,
+        memory_used=("mem-t14-secret",),
+    )
+    skipped = _receipt(
+        "rep-t14-b", "另一份报告", status="skipped",
+        reason_code=REASON_REPORT_UNAVAILABLE,
+        reason=REASON_PREFIX + REASON_CLAUSES[REASON_REPORT_UNAVAILABLE],
+    )
+    followed = _conversation(env, world.nb, world.owner_id, [
+        _turn("先问一个不看报告的", _answer("第一答。")),
+        _turn("按报告说", _answer("第二答。", linked_report=read)),
+        _turn("再换一份", _answer("第三答。", linked_report=skipped)),
+    ], title="追问报告", running=True)
+    # A question still being answered is not a turn (B plan D4): the job row
+    # names a third report, and neither tool says anything about it.
+    n = followed.split("-")[-1]
+    with _write(env) as db:
+        db.execute("UPDATE ask_jobs SET report_id = ? WHERE id = ?",
+                   ("rep-t14-running", f"askjob-t3-{n}-running"))
+    never = _conversation(env, world.nb, world.owner_id, [_turn()], title="没看过报告")
+    dropped = _conversation(env, world.nb, world.owner_id, [
+        _turn("按报告说", _answer("答。", linked_report=read)),
+        _turn("不看了", _answer("答二。")),
+    ], title="后来不看了")
+    gcid, _ = _global(env, world.owner_id, [{"resolved": [world.nb]}])
+    async with _clients(env, world.raw) as (client,):
+        listing = _payload(await client.call("list_conversations", {}))
+        rows = {row["conversation_id"]: row for row in listing["items"]}
+        # The row names the report the LAST saved turn followed -- the id and
+        # the title the receipt snapshotted, nothing else.
+        assert rows[followed]["linked_report"] == {
+            "report_id": "rep-t14-b", "title": "另一份报告",
+        }
+        assert set(rows[followed]) == ROW_KEYS | {"linked_report"}
+        # No report on the last turn, a conversation that never followed one,
+        # and a cross-notebook conversation: the row keeps its eight keys.
+        for key in (never, dropped, gcid):
+            assert set(rows[key]) == ROW_KEYS, key
+        filtered = _payload(await client.call("list_conversations", {
+            "notebook_id": world.nb,
+        }))
+        assert {row["conversation_id"]: row for row in filtered["items"]}[
+            followed
+        ] == rows[followed]
+
+        pages = [
+            _payload(await client.call("get_conversation", {
+                "conversation_id": followed, "turn_offset": offset,
+            }))
+            for offset in range(3)
+        ]
+        for page in pages:
+            # ``conversation`` repeats the list row, the followed report too.
+            assert page["conversation"] == rows[followed]
+        scope = {"kind": "notebook", "notebook_ids": [world.nb]}
+        assert pages[0]["scope"] == scope, "this turn attached no report"
+        assert pages[1]["scope"] == {**scope, "linked_report": {
+            "report_id": "rep-t14-a", "title": REPORT_TITLE, "status": "read",
+            "sections_read": ["背景", "工艺路线"], "summary_truncated": True,
+            "evidence_restored": 2, "evidence_gone": 1, "evidence_over_budget": 3,
+        }}
+        assert pages[2]["scope"] == {**scope, "linked_report": {
+            "report_id": "rep-t14-b", "title": "另一份报告", "status": "skipped",
+            "reason": REASON_PREFIX + REASON_CLAUSES[REASON_REPORT_UNAVAILABLE],
+            "sections_read": [], "evidence_restored": 0, "evidence_gone": 0,
+            "evidence_over_budget": 0,
+        }}
+        # The pages are still the 17 keys of a turn page (the report rides in
+        # two keys that were already there).
+        for page in pages:
+            assert len(page) == 18, sorted(page)
+
+        # The receipt's Memory ids never leave: not as ``memory_used``, not as
+        # an id. Nor does the report a running job names.
+        wire = _wire(listing, filtered, pages)
+        for secret in ("memory_used", "mem-t14-secret", "rep-t14-running"):
+            assert secret not in wire, secret
+
+        # A conversation whose last turn attached none shows the report on the
+        # turn that followed it only.
+        first = _payload(await client.call("get_conversation", {
+            "conversation_id": dropped,
+        }))
+        assert first["scope"]["linked_report"]["report_id"] == "rep-t14-a"
+        assert "linked_report" not in first["conversation"]
+        second = _payload(await client.call("get_conversation", {
+            "conversation_id": dropped, "turn_offset": 1,
+        }))
+        assert "linked_report" not in second["scope"]
+        # A conversation that never followed one has no trace of the field.
+        page = _payload(await client.call("get_conversation", {
+            "conversation_id": never,
+        }))
+        assert page["scope"] == scope and "linked_report" not in page["conversation"]
+        assert len(page) == 18
+
+        # Reading is the ``read`` tier's: a token that lost it learns nothing
+        # about the report -- not from an error either.
+        _set_access(env, world.principal, scopes=["ask"])
+        for call, arguments in (
+            ("list_conversations", {}),
+            ("get_conversation", {"conversation_id": followed}),
+            ("get_conversation", {"conversation_id": followed, "turn_offset": 1}),
+        ):
+            code, text = _error(await client.call(call, arguments))
+            assert code == "scope_missing", (call, code)
+            for secret in ("rep-t14-a", "rep-t14-b", REPORT_TITLE, "另一份报告"):
+                assert secret not in text, (call, secret)
+
+
+async def a_receipt_that_is_not_valid_reads_as_no_report_on_the_row_and_the_turn(env):
+    world = _world(env)
+    # A skipped receipt may not claim it read sections: ``AskResponse`` reads
+    # such a payload as having no receipt, and the list must agree with it.
+    invalid = _receipt("rep-t14-bad", status="skipped", sections=[("背景", True)])
+    nameless = {"report_id": 7, "title": REPORT_TITLE, "status": "read"}
+    cids = [
+        _conversation(env, world.nb, world.owner_id, [
+            _turn("问", _answer("答。", linked_report=receipt)),
+        ])
+        for receipt in (invalid, nameless)
+    ]
+    async with _clients(env, world.raw) as (client,):
+        rows = {row["conversation_id"]: row for row in await _all_rows(client)}
+        for cid in cids:
+            assert set(rows[cid]) == ROW_KEYS, cid
+            page = _payload(await client.call("get_conversation", {"conversation_id": cid}))
+            assert page["conversation"] == rows[cid]
+            assert page["scope"] == {"kind": "notebook", "notebook_ids": [world.nb]}
+            assert page["status"] == "answered" and page["answer"] == "答。"
+
+
+async def a_long_report_title_is_cut_and_counted_wherever_it_appears(env):
+    world = _world(env)
+    long = "".join(chr(0x4E00 + (index * 7919) % 4000) for index in range(500))
+    cut = long[:199] + "…"
+    cid = _conversation(env, world.nb, world.owner_id, [
+        _turn("按报告说", _answer("答。", linked_report=_receipt("rep-t14-long", long))),
+    ])
+    async with _clients(env, world.raw) as (client,):
+        listing = _payload(await client.call("list_conversations", {}))
+        [row] = listing["items"]
+        assert row["linked_report"] == {"report_id": "rep-t14-long", "title": cut}
+        assert listing["truncation"]["truncated"] is True
+        assert listing["truncation"]["omitted_characters"] == 301
+
+        page = _payload(await client.call("get_conversation", {"conversation_id": cid}))
+        assert page["conversation"] == row, "the page repeats the row as the list cut it"
+        assert page["scope"]["linked_report"]["title"] == cut
+        assert page["scope"]["linked_report"]["report_id"] == "rep-t14-long"
+        # One cut in ``conversation``, one in ``scope``: each counted.
+        assert page["truncation"]["omitted_characters"] == 602
+        assert page["answer"] == "答。"
+
+
 # ------------------------------------------------------------------ read cost
 
 
@@ -830,6 +1036,9 @@ CASES = {
         turn_paging_is_exact,
         empty_conversation_returns_the_empty_page,
         own_memory_citation_opens_through_mem_ref,
+        a_conversation_that_followed_a_report_names_it_and_each_turn_carries_its_receipt,
+        a_receipt_that_is_not_valid_reads_as_no_report_on_the_row_and_the_turn,
+        a_long_report_title_is_cut_and_counted_wherever_it_appears,
         notebook_turn_reads_only_the_asked_answer,
         unscoped_list_judges_reads_in_one_batch_and_builds_no_notebook_summary,
         notebook_read_books_one_history_call,
