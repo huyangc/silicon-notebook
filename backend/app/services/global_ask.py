@@ -53,6 +53,7 @@ from app.services.share_disclosure import (
     conversation_share_disclosure,
     require_conversation_acknowledged,
 )
+from app.services.vector_cache import LRUProcessCache
 
 
 _LOG = logging.getLogger("silicon_notebook.global_ask")
@@ -573,16 +574,30 @@ class AgentGlobalConversation:
     turn_count: int
 
 
-def _agent_scopes(rows) -> dict[str, tuple[set[str], int]]:
-    """``{conversation_id: (libraries used, finished turns)}`` over the rows of
-    ``GlobalAskStore.job_scope_rows``. The libraries of each turn are exactly
-    ``_snapshot_notebook_ids`` of its (narrowed) payload -- the one definition
-    the public share re-check uses -- so the Agent rule has no second spelling."""
+# How many finished jobs' libraries one process remembers for the Agent history
+# list (``GlobalAskService._agent_job_scopes``). An entry is a job id, its
+# ``updated_at`` and a frozenset of a few notebook ids -- well under 1 KB -- so
+# the cap bounds the cache to a few MB. It holds five times the 2,000-turn
+# history the list was measured on; LRU keeps whichever owner is paging hot.
+_AGENT_SCOPE_CACHE_ENTRIES = 10_000
+
+
+def _agent_scopes(heads, used_by_job) -> dict[str, tuple[set[str], int]]:
+    """``{conversation_id: (libraries used, finished turns)}`` over the live
+    jobs ``heads`` (``GlobalAskStore.job_scope_heads``) and each job's
+    libraries ``used_by_job`` -- exactly ``_snapshot_notebook_ids`` of its
+    narrowed payload, the one definition the public share re-check uses, so
+    the Agent rule has no second spelling. A head with no libraries known went
+    away between the two reads and is no longer a turn."""
     scopes: dict[str, tuple[set[str], int]] = {}
-    for row in rows:
-        used, finished = scopes.get(row["conversation_id"], (set(), 0))
-        used |= _snapshot_notebook_ids([row["payload"]])
-        scopes[row["conversation_id"]] = (used, finished + (row["status"] != "running"))
+    for head in heads:
+        used_now = used_by_job.get(head["job_id"])
+        if used_now is None:
+            continue
+        used, finished = scopes.get(head["conversation_id"], (set(), 0))
+        scopes[head["conversation_id"]] = (
+            used | used_now, finished + (head["status"] != "running"),
+        )
     return scopes
 
 
@@ -655,6 +670,9 @@ class GlobalAskService:
         # Jobs whose ``cancel(discard=True)`` is between "signalled" and
         # "done": that request, not the unwinding worker, publishes the terminal.
         self._discarding = set()
+        # The libraries each FINISHED job uses, for the Agent history list
+        # (``_agent_job_scopes``): thread-safe, bounded, process-local.
+        self._agent_scope_cache = LRUProcessCache(max_entries=_AGENT_SCOPE_CACHE_ENTRIES)
         self._pending = 0
         self._closed = False
         # Monotonic clock, injectable so the trace throttle can be tested with
@@ -2366,15 +2384,54 @@ class GlobalAskService:
             return set(self.can_read_many(sorted(ids), user_id))
         return {notebook_id for notebook_id in ids if self.can_read(notebook_id, user_id)}
 
+    def _agent_job_scopes(self, user_id, conversation_id=None):
+        """``_agent_scopes`` over the owner's live jobs (optionally one
+        conversation's), projecting only the jobs whose libraries are not
+        already known.
+
+        WHICH jobs are live is read fresh on every call (``job_scope_heads``:
+        no payload), so a deleted or expired turn never takes part, whatever
+        is remembered about it. WHAT a finished job uses is remembered in
+        ``_agent_scope_cache``, keyed by ``(job id, updated_at)``: a job's
+        notebook-id paths are written for the last time by its terminal
+        transition (``GlobalAskStore.save``, guarded ``status='running'``,
+        which stamps ``updated_at``); afterwards only the feedback patch
+        rewrites the payload, and it touches ``feedback`` / ``feedback_at``
+        alone, while attribution and retention write their own columns. A
+        running job is never remembered, and an entry is stored only from a
+        row whose status was read together with its payload. Allowlist and
+        read authority are never cached: they are judged on every call.
+        """
+        heads = self.store.job_scope_heads(user_id, conversation_id=conversation_id)
+        used_by_job: dict[str, frozenset] = {}
+        misses = []
+        for head in heads:
+            known = (None if head["status"] == "running" else
+                     self._agent_scope_cache.get((head["job_id"], head["updated_at"])))
+            if known is None:
+                misses.append(head["job_id"])
+            else:
+                used_by_job[head["job_id"]] = known
+        if misses:
+            for row in self.store.job_scope_rows(
+                user_id, conversation_id=conversation_id, job_ids=misses,
+            ):
+                used = frozenset(_snapshot_notebook_ids([row["payload"]]))
+                used_by_job[row["job_id"]] = used
+                if row["status"] != "running":
+                    self._agent_scope_cache[(row["job_id"], row["updated_at"])] = used
+        return _agent_scopes(heads, used_by_job)
+
     def agent_conversations(self, *, user_id, allowed_notebook_ids) -> list[AgentGlobalConversation]:
         """Every global conversation of ``user_id`` an Agent token bounded by
         ``allowed_notebook_ids`` may see (the rule above), in the browser list's
         order (most recently updated first). No request user: identity and the
-        allowlist are explicit. One read of the conversations, one narrowed
-        read of every live turn's libraries, one batched read check."""
+        allowlist are explicit. One read of the conversations, one read of the
+        live jobs (projecting only those whose libraries are not remembered,
+        see ``_agent_job_scopes``), one batched read check."""
         allowed = frozenset(allowed_notebook_ids)
         summaries = self.store.all_conversations(user_id)
-        scopes = _agent_scopes(self.store.job_scope_rows(user_id))
+        scopes = self._agent_job_scopes(user_id)
         # Only libraries on the allowlist can make a conversation visible, so
         # only those need the read check.
         readable = self._agent_readable(
@@ -2408,9 +2465,7 @@ class GlobalAskService:
         """
         allowed = frozenset(allowed_notebook_ids)
         summary = self._conversation(conversation_id, user_id)
-        scope = _agent_scopes(
-            self.store.job_scope_rows(user_id, conversation_id=conversation_id)
-        ).get(conversation_id)
+        scope = self._agent_job_scopes(user_id, conversation_id).get(conversation_id)
         readable = self._agent_readable(scope[0] & allowed, user_id) if scope else set()
         if not _agent_visible(scope, allowed, readable):
             raise GlobalAskError(404, "部分笔记本已无法访问，请重新选择范围。")

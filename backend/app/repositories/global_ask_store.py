@@ -93,6 +93,12 @@ _SCOPE_ITEMS = (
     ("a1", "answer", "anchors"), ("z1", "answer", "citations"),
     ("a2", "response", "anchors"), ("z2", "response", "citations"),
 )
+# How many job ids one ``job_scope_rows(job_ids=...)`` statement names: a
+# batched key probe (the ids are the primary keys of the rows it reads) kept
+# below both backends' batch rule (SQLite <= 900 placeholders, PostgreSQL <=
+# 1024 ids; ``docs/development.md``, "Binding id lists in SQL"), the size the
+# purge pages by.
+_SCOPE_PROBE_BATCH = 500
 
 
 def _scope_projection_sqlite(document):
@@ -102,6 +108,17 @@ def _scope_projection_sqlite(document):
     anchor/citation array becomes the array of its elements' ``notebook_id``
     (NULL for an element that is not an object or has none), ``'[]'`` when the
     path is not an array.
+
+    Known difference, unreachable: on an object with a DUPLICATED key SQLite's
+    ``json_extract`` reads the FIRST value while Python's ``json.loads`` and
+    PostgreSQL's ``jsonb`` keep the LAST, so here (and only here) the narrowed
+    lists could name other libraries than the stored job's model does. On the
+    list that direction is fail-open. It cannot happen: every writer of
+    ``payload_json`` serializes through ``json.dumps`` / ``model_dump_json``
+    (and the feedback patch through ``json_patch`` / ``jsonb ||``), none of
+    which emits a duplicate key. And a turn is never READ on this projection:
+    ``agent_conversation_turn`` re-checks the job it reads through the
+    validated model (``global_job_notebook_ids``), which sees the last value.
     """
     def path(shape, key):
         return f"$.{shape}.{key}" if shape else f"$.{key}"
@@ -726,10 +743,42 @@ class GlobalAskStore:
     # the n-th finished turn.
     # ------------------------------------------------------------------
 
-    def job_scope_rows(self, user_id, conversation_id=None):
+    @staticmethod
+    def _scope_where(user_id, conversation_id):
+        if conversation_id is None:
+            return "user_id=?", (user_id,)
+        return "user_id=? AND conversation_id=?", (user_id, conversation_id)
+
+    def job_scope_heads(self, user_id, conversation_id=None):
+        """Every live job of ``user_id`` (optionally of one conversation) without
+        its payload: ``{"conversation_id", "job_id", "status", "updated_at"}``,
+        ordered by conversation, then the canonical ``(created_at, id)``. The
+        jobs ``job_scope_rows`` would return, for a caller that already knows
+        the libraries of some of them (a finished job's never change) and only
+        projects the rest."""
+        where, params = self._scope_where(user_id, conversation_id)
+        with self.database.connect() as db:
+            rows = db.execute(self._sql(
+                "SELECT conversation_id, id, status, updated_at FROM global_ask_jobs "
+                f"WHERE {where} AND {self._live} "
+                "ORDER BY conversation_id,created_at ASC,id ASC"
+            ), params).fetchall()
+        return [
+            {"conversation_id": row["conversation_id"], "job_id": row["id"],
+             "status": row["status"], "updated_at": row["updated_at"] or ""}
+            for row in rows
+        ]
+
+    def job_scope_rows(self, user_id, conversation_id=None, *, job_ids=None):
         """One row per live job of ``user_id`` (optionally of one conversation):
-        ``{"conversation_id", "job_id", "status", "payload"}``, ordered by
-        conversation, then the canonical ``(created_at, id)``.
+        ``{"conversation_id", "job_id", "status", "updated_at", "payload"}``,
+        ordered by conversation, then the canonical ``(created_at, id)``.
+
+        ``job_ids`` restricts the read to those jobs (still only this owner's
+        live ones), read in batched primary-key probes of
+        ``_SCOPE_PROBE_BATCH``; the rows then come batch by batch, and the
+        caller keys them by ``job_id``. ``status`` and ``updated_at`` are read
+        in the same row as ``payload``, so they describe that very payload.
 
         ``payload`` is the NARROWED input of ``global_ask._snapshot_notebook_ids``
         -- exactly the keys that function reads, nothing else::
@@ -753,45 +802,65 @@ class GlobalAskStore:
         body, its excerpts and the reasoning trace -- none of which decides
         anything here. Only the ten JSON paths cross the boundary.
         """
-        where = "user_id=?" + (" AND conversation_id=?" if conversation_id is not None else "")
-        params = (user_id,) if conversation_id is None else (user_id, conversation_id)
-        if self.marker == "%s":
-            # The payload is parsed ONCE per row (``payload_json::jsonb AS p``);
-            # ``OFFSET 0`` keeps the subquery from being flattened back into one
-            # ``::jsonb`` per path read, as ``attribution_sql(document="p")``'s
-            # callers do.
-            sql = (
-                "SELECT j.conversation_id, j.id, j.status, "
-                + ", ".join(
-                    f"{expression} AS {alias}"
-                    for alias, expression in _scope_projection_postgres("j.p")
-                )
-                + " FROM (SELECT conversation_id, id, status, created_at, "
-                "payload_json::jsonb AS p FROM global_ask_jobs "
-                f"WHERE {where} AND {self._live} OFFSET 0) j "
-                "ORDER BY j.conversation_id,j.created_at ASC,j.id ASC"
-            )
+        where, params = self._scope_where(user_id, conversation_id)
+        if job_ids is None:
+            batches = [((), "")]
         else:
-            sql = (
-                "SELECT conversation_id, id, status, "
-                + ", ".join(
-                    f"{expression} AS {alias}"
-                    for alias, expression in _scope_projection_sqlite("payload_json")
-                )
-                + f" FROM global_ask_jobs WHERE {where} AND {self._live} "
-                "ORDER BY conversation_id,created_at ASC,id ASC"
-            )
+            ids = list(dict.fromkeys(job_ids))
+            batches = [
+                (tuple(page), " AND id IN (" + ",".join("?" for _ in page) + ")")
+                for page in (ids[start:start + _SCOPE_PROBE_BATCH]
+                             for start in range(0, len(ids), _SCOPE_PROBE_BATCH))
+            ]
+        rows = []
         with self.database.connect() as db:
-            rows = db.execute(self._sql(sql), params).fetchall()
+            for page, probe in batches:
+                rows.extend(db.execute(
+                    self._sql(self._scope_statement(where + probe)), params + page,
+                ).fetchall())
         return [
             {
                 "conversation_id": row["conversation_id"],
                 "job_id": row["id"],
                 "status": row["status"],
+                "updated_at": row["updated_at"] or "",
                 "payload": _narrowed_scope_payload(row),
             }
             for row in rows
         ]
+
+    def _scope_statement(self, where):
+        """``job_scope_rows``' statement over the jobs ``where`` (plus the live
+        gate) selects."""
+        if self.marker == "%s":
+            # The payload is parsed ONCE per row (``payload_json::jsonb AS p``).
+            # ``OFFSET 0`` is an optimization fence, nothing else: an offset of
+            # zero drops no row, it only keeps the planner from flattening the
+            # subquery back into one ``::jsonb`` parse per path read (the same
+            # fence ``attribution_sql(document="p")``'s callers use). Measured
+            # on 2,000 turns of ~63 KB each: 163 ms with it, 1,356 ms without.
+            # No plan pin holds it (such pins flip with the visibility map);
+            # this note is what keeps it.
+            return (
+                "SELECT j.conversation_id, j.id, j.status, j.updated_at, "
+                + ", ".join(
+                    f"{expression} AS {alias}"
+                    for alias, expression in _scope_projection_postgres("j.p")
+                )
+                + " FROM (SELECT conversation_id, id, status, created_at, updated_at, "
+                "payload_json::jsonb AS p FROM global_ask_jobs "
+                f"WHERE {where} AND {self._live} OFFSET 0) j "
+                "ORDER BY j.conversation_id,j.created_at ASC,j.id ASC"
+            )
+        return (
+            "SELECT conversation_id, id, status, updated_at, "
+            + ", ".join(
+                f"{expression} AS {alias}"
+                for alias, expression in _scope_projection_sqlite("payload_json")
+            )
+            + f" FROM global_ask_jobs WHERE {where} AND {self._live} "
+            "ORDER BY conversation_id,created_at ASC,id ASC"
+        )
 
     def finished_job_at(self, conversation_id, user_id, index):
         """The ``index``-th (0-based, canonical ``(created_at, id)`` order)

@@ -1,8 +1,9 @@
 """Backend-agnostic store cases for the Agent history reads of global conversations.
 
-``GlobalAskStore`` is one implementation serving both backends, so the three
-reads behind MCP ``list_conversations`` / ``get_conversation`` --
-``all_conversations``, ``job_scope_rows`` and ``finished_job_at`` -- are pinned
+``GlobalAskStore`` is one implementation serving both backends, so the reads
+behind MCP ``list_conversations`` / ``get_conversation`` --
+``all_conversations``, ``job_scope_heads``, ``job_scope_rows`` (whole or by
+job id) and ``finished_job_at`` -- are pinned
 by ONE case list that ``tests/test_global_ask_history_store.py`` (SQLite) and
 ``tests/postgres/test_global_ask_history_store_pg.py`` (PostgreSQL) both run.
 
@@ -175,8 +176,11 @@ def case_scope_projection_matches_the_snapshot_rule(store):
                    f"2026-01-01T00:00:{index:02d}+00:00", payload=payload)
 
     rows = {row["job_id"]: row for row in store.job_scope_rows(user_id)}
+    by_id = {row["job_id"]: row for row in store.job_scope_rows(user_id, job_ids=list(_SHAPES))}
 
     assert set(rows) == set(_SHAPES)
+    # The by-id read is the same projection of the same rows.
+    assert by_id == rows
     for job_id, (payload, expected) in _SHAPES.items():
         narrowed = rows[job_id]["payload"]
         # Narrowed: only the paths the rule reads, never the body or trace.
@@ -219,6 +223,39 @@ def case_scope_rows_skip_expired_turns_and_filter_by_conversation(store):
     assert store.job_scope_rows("user-a", conversation_id="gconv-s3") == []
     assert seen(store.job_scope_rows("user-b")) == [("gconv-s3", "s3-a", "done")]
     assert store.job_scope_rows("user-nobody") == []
+
+    # The heads are the same jobs in the same order, without the payload.
+    for user_id, conversation_id in (("user-a", None), ("user-a", "gconv-s2"),
+                                     ("user-a", "gconv-s3"), ("user-b", None)):
+        rows = store.job_scope_rows(user_id, conversation_id)
+        assert store.job_scope_heads(user_id, conversation_id) == [
+            {key: row[key] for key in ("conversation_id", "job_id", "status", "updated_at")}
+            for row in rows
+        ]
+
+
+def case_scope_rows_by_id_read_only_the_owners_live_listed_jobs(store):
+    from app.repositories.global_ask_store import _SCOPE_PROBE_BATCH
+
+    _conversation(store, "gconv-b1", "user-a")
+    _conversation(store, "gconv-b2", "user-b")
+    for job_id in ("b1-a", "b1-b", "b1-old"):
+        _job(store, "gconv-b1", "user-a", job_id, "2026-01-01T00:00:01+00:00",
+             resolved=["nb-1"], anchors=["nb-2"])
+    _job(store, "gconv-b2", "user-b", "b2-a", "2026-01-01T00:00:01+00:00", resolved=["nb-3"])
+    _stamp(store, "b1-old", _instant(-5))
+    # ``b1-b`` sits in the second probe batch; the other user's job, the
+    # expired one, an unknown id and a duplicate are never returned.
+    wanted = ["b1-a", "b2-a", "b1-old", "b1-a"] + [
+        f"missing-{index}" for index in range(_SCOPE_PROBE_BATCH)
+    ] + ["b1-b"]
+
+    rows = store.job_scope_rows("user-a", job_ids=wanted)
+
+    assert sorted(row["job_id"] for row in rows) == ["b1-a", "b1-b"]
+    assert all(_snapshot_notebook_ids([row["payload"]]) == {"nb-1", "nb-2"} for row in rows)
+    assert store.job_scope_rows("user-a", "gconv-b2", job_ids=["b2-a"]) == []
+    assert store.job_scope_rows("user-a", job_ids=[]) == []
 
 
 # ------------------------------------------------------------------ finished_job_at
@@ -304,6 +341,7 @@ def case_all_conversations_is_the_unpaged_list(store):
 CASES = [
     case_scope_projection_matches_the_snapshot_rule,
     case_scope_rows_skip_expired_turns_and_filter_by_conversation,
+    case_scope_rows_by_id_read_only_the_owners_live_listed_jobs,
     case_finished_job_at_counts_oldest_first_and_skips_running,
     case_finished_job_at_past_the_end_is_none,
     case_all_conversations_is_the_unpaged_list,
