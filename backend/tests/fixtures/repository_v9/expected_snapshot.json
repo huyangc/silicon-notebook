@@ -226,6 +226,7 @@
       "notebook_id": "<nb-id-1>",
       "output": "answer",
       "question": "Why is fixture gain stable?",
+      "report_id": "",
       "status": "done",
       "trace": [
         {
