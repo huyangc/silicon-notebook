@@ -526,19 +526,26 @@ hooks 规则都解析为 error，且没有规则停在 warn；`react-hooks/rules
   改名）；
 - 基线里出现永不进基线的规则（`F821`、`F822`、`F823`、`E902`
   与语法错误（`invalid-syntax`）一律当场修）；
-- ruff 实际检查的文件集合与 git 在这三处看到的不一致；
+- ruff 实际检查的文件集合与 git 在这三处看到的不一致（用 `git ls-files -z`，任何文件名都
+  能处理）、其中有 Python 文件是符号链接，或者三处目录下出现 ruff 配置文件（`ruff.toml`、
+  `.ruff.toml`、`pyproject.toml`）；
+- 点名受检规则的行级豁免与脚本里的 `SUPPRESSIONS` 不一致（按规则比对条数与文件数；现有的
+  都早于这道门：为注入而导入的 pytest fixture、再导出、为副作用而做的导入），或者出现被禁止
+  的指令：不带规则码的 `# noqa`、文件级的 `# ruff: noqa` 与 `# flake8: noqa`，以及所有
+  `# isort:` 指令（`skip`、`skip_file`、`off`、`split`）；
 - 装的 ruff 不是钉死的版本。
 
-`backend/tests/test_backend_lint_gate.py`（backend lane）补门禁自己看不到的几处：
+环境问题（没装 ruff、没有 git、不在 git 检出里）以退出码 2 结束，并说明该装什么、该在哪里跑。
 
-- 每条规则的总条数与涉及文件数零松弛钉在 `BASELINE_CEILING`。
+`backend/tests/test_backend_lint_gate.py`（backend lane，不起子进程）补门禁自己看不到的几处：
+
+- 每条规则的总条数与涉及文件数零松弛钉在 `BASELINE_CEILING`；`SUPPRESSION_CEILING` 必须与
+  脚本里的 `SUPPRESSIONS` 相等。
 - `ruff.toml` 必须与预期配置逐项相等：不许有 `ignore`、`per-file-ignores`、`exclude`、
-  preview 或 `extend-*` 键。三处目录下不许再有别的 ruff 配置；检查的根目录和空的排除清单也
-  都钉死。
-- 点名受检规则的行级豁免按规则钉在 `SUPPRESSION_CEILING`。现有的都早于这道门：为注入而
-  导入的 pytest fixture、再导出、为副作用而做的导入。不带规则码的 `# noqa`、文件级的
-  `# ruff: noqa` 与 `# flake8: noqa`，以及所有 `# isort:` 指令（`skip`、`skip_file`、`off`、
-  `split`），一律禁止。
+  preview 或 `extend-*` 键；检查的根目录和空的排除清单也都钉死。
+- `check_contracts.sh` 必须恰好有一条有效命令行
+  `"$PYTHON_BIN" "$ROOT_DIR/scripts/check_backend_lint.py"`，位于 `set -euo pipefail` 之下、
+  任何 `exit` 之前：把它注释掉、行尾加 `|| true` 或 `; true`、挪到 `exit` 之后，都会报红。
 
 这些数字按规则合计。同一条规则下「A 文件修掉一条、B 文件新增一条」各项数字都不变，只能靠
 评审基线的 diff 发现。
@@ -547,9 +554,14 @@ hooks 规则都解析为 error，且没有规则停在 warn；`react-hooks/rules
 
 1. 修掉违反。
 2. 跑 `python scripts/check_backend_lint.py --prune`。它只调低基线、删掉降到零的格（包括
-   已删或改名文件的格）；只要还有新违反，它什么都不写。它会打印每条规则的钉住总数要降多少。
-3. 在同一个改动里按打印的数字调低 `BASELINE_CEILING`；若删掉了豁免注释，也调低
-   `SUPPRESSION_CEILING`。
+   已删文件的格）；只要还有新违反，它什么都不写。它会打印每条规则的钉住总数要降多少。
+3. 在同一个改动里按打印的数字调低 `BASELINE_CEILING`；若删掉了豁免注释，同时调低
+   `SUPPRESSION_CEILING` 与 `SUPPRESSIONS`。
+
+改名或挪动一个有基线条目的文件时，门禁会报旧路径不再受检、新路径的违反是新增。此时跑
+`python scripts/check_backend_lint.py --rename OLD NEW`：只有旧路径已不存在、新路径还没有
+条目时，它才把旧路径的条目搬到新路径，每格不超过新路径实际还有的条数；只要还有别的新违反，它
+什么都不写。它会打印上限要变多少（单纯改名时不变）。
 
 过期报错的文案也是这么指引的。开了 import 排序后，过期比其它规则更容易碰到：改动之后某个
 记在基线里的 import 块恰好排好了序，或者删掉了一个有基线条目的文件，都要 prune。用 `master`

@@ -592,11 +592,11 @@ def test_assert_override_matches_run_is_the_loud_pre_check(repo, islands):
     """写入方的预先复核:无副作用、无覆盖时是 no-op、错配时响亮失败。"""
     ids, _sources = islands
     # 无覆盖 -> no-op,连 run 都不要求。
-    assert_override_matches_run() is None
+    assert assert_override_matches_run() is None
 
     with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(_override(ids)):
-            assert_override_matches_run() is None
+            assert assert_override_matches_run() is None
     with retrieval_run(run_kind="ask_chunk", actor_id="somebody-else"):
         with participant_override(_override(ids, actor=_ACTOR)):
             with pytest.raises(ParticipantOverrideError):
