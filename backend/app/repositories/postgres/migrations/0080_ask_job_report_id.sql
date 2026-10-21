@@ -1,0 +1,18 @@
+-- Add report_id: the deep report an in-flight Ask turn was asked about
+-- ("follow up on this report" from the Ask box). Mirrors SQLite v99
+-- (_migration_99).
+--
+-- '' means the turn carries no linked report; the default is the whole
+-- backfill, because no turn that exists before this version could be linked to
+-- one. The column lets the idempotent-retry check compare a repeated
+-- client_request_id against the report it first carried (the same request
+-- re-sent with a different report is a reused key), and lets the in-flight
+-- turn show its report on a reload or another device before its answer -- and
+-- with it the receipt that stays in answers.payload -- exists.
+--
+-- No index and no foreign key: nothing filters or joins on it (a job is always
+-- read by id or by its conversation), and a report deleted later must not
+-- reach back into the job that asked about it -- the answer's receipt keeps
+-- the title it saw, exactly as ask_jobs rows keep the other ids they were
+-- given. No unique-surface change.
+ALTER TABLE ask_jobs ADD COLUMN IF NOT EXISTS report_id text COLLATE "C" NOT NULL DEFAULT '';

@@ -80,6 +80,7 @@
         "notebook_id": "<nb-id-1>",
         "output": "answer",
         "question": "Why is fixture gain stable?",
+        "report_id": "",
         "status": "done",
         "submitted_via": "",
         "trace_json": "",
@@ -653,6 +654,7 @@
         "notebook_id": "<nb-id-1>",
         "output": "answer",
         "question": "Why is fixture gain stable?",
+        "report_id": "",
         "status": "done",
         "submitted_via": "",
         "trace_json": "",
@@ -2046,7 +2048,7 @@
       },
       {
         "name": "ask_jobs",
-        "sql_sha256": "2b88e48b47d4483f72b7b81383008be99c8e059d6881e7343f9241698e6c1cfb",
+        "sql_sha256": "ec374121bb7f3ec1989da378bb85c877dfe689f17f8654a59d7a4a296ed48990",
         "type": "table"
       },
       {
@@ -3335,6 +3337,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 98
+    "user_version": 99
   }
 }

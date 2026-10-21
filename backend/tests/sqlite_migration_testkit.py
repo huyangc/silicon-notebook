@@ -44,10 +44,18 @@ V78_AUTH_TABLES = {
 }
 
 
+def rollback_v99(db: sqlite3.Connection) -> None:
+    """Remove ``ask_jobs.report_id``, the column SQLite migration 99 added.
+    Callers lower ``user_version`` themselves."""
+    db.execute("ALTER TABLE ask_jobs DROP COLUMN report_id")
+
+
 def rollback_v98(db: sqlite3.Connection) -> None:
     """Remove what SQLite migration 98 added: the ``global_ask_job_notebooks``
     table with its index, ``idx_global_ask_jobs_unattributed`` and
-    ``global_ask_jobs.attributed``. Callers lower ``user_version`` themselves."""
+    ``global_ask_jobs.attributed``. v99 is undone first (newest-first). Callers
+    lower ``user_version`` themselves."""
+    rollback_v99(db)
     db.execute("DROP INDEX idx_global_ask_jobs_unattributed")
     db.execute("DROP INDEX idx_global_ask_job_notebooks_notebook")
     db.execute("DROP TABLE global_ask_job_notebooks")

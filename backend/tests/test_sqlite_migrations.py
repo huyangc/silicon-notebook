@@ -266,7 +266,7 @@ def test_v92_drops_the_staged_auth_schema_and_keeps_credentials(tmp_path):
         )
         db.execute("PRAGMA user_version = 91")
 
-    assert SqliteMigrator(database, settings).migrate() == [92, 93, 94, 95, 96, 97, 98]
+    assert SqliteMigrator(database, settings).migrate() == [92, 93, 94, 95, 96, 97, 98, 99]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -341,7 +341,7 @@ def test_v93_adds_the_nullable_profile_deleted_at_without_touching_rows(tmp_path
         rollback_v93(db)
         db.execute("PRAGMA user_version = 92")
 
-    assert SqliteMigrator(database, settings).migrate() == [93, 94, 95, 96, 97, 98]
+    assert SqliteMigrator(database, settings).migrate() == [93, 94, 95, 96, 97, 98, 99]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         columns = {row[1]: row for row in db.execute("PRAGMA table_info(agent_profiles)")}
@@ -409,7 +409,7 @@ def test_v94_adds_answer_links_and_the_token_flag(tmp_path):
             ("tk-v94", "agent-v94", "hash-v94", '["read", "ask"]', "nb-v94", None, now),
         )
 
-    assert SqliteMigrator(database, settings).migrate() == [94, 95, 96, 97, 98]
+    assert SqliteMigrator(database, settings).migrate() == [94, 95, 96, 97, 98, 99]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db)[1:] == fresh[1:]
@@ -461,7 +461,7 @@ def test_v95_adds_global_ask_retained_until_without_backfill(tmp_path):
             ("gj-v95", "gc-v95", "u-v95", "{}", "done", "{}", "2026-10-19T00:00:00+00:00"),
         )
 
-    assert SqliteMigrator(database, settings).migrate() == [95, 96, 97, 98]
+    assert SqliteMigrator(database, settings).migrate() == [95, 96, 97, 98, 99]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db) == fresh
@@ -508,7 +508,7 @@ def test_v96_adds_the_rated_global_jobs_partial_index(tmp_path):
                 "payload_json,created_at) VALUES(?,?,?,?,?,?,?)",
                 (job_id, "gconv-v96", "u-v96", "{}", "done", f'{{"feedback":"{rating}"}}', now))
 
-    assert SqliteMigrator(database, settings).migrate() == [96, 97, 98]
+    assert SqliteMigrator(database, settings).migrate() == [96, 97, 98, 99]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert definition(db) == fresh
@@ -549,7 +549,7 @@ def test_v96_stops_with_the_ids_when_a_payload_is_not_json(tmp_path):
         assert db.execute("PRAGMA user_version").fetchone()[0] == 95
     with database.write() as db:
         db.execute("UPDATE global_ask_jobs SET payload_json='{}' WHERE id='g-bad'")
-    assert SqliteMigrator(database, settings).migrate() == [96, 97, 98]
+    assert SqliteMigrator(database, settings).migrate() == [96, 97, 98, 99]
     database.close_local()
 
 
@@ -632,7 +632,7 @@ def test_v97_adds_the_findings_tables_and_the_code_version_column(tmp_path):
         rollback_v97(db)
         db.execute("PRAGMA user_version = 96")
 
-    assert SqliteMigrator(database, settings).migrate() == [97, 98]
+    assert SqliteMigrator(database, settings).migrate() == [97, 98, 99]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         upgraded = shape(db)
@@ -730,7 +730,7 @@ def test_v98_adds_the_attribution_table_without_backfilling(tmp_path):
             ("g-v98", "gconv-v98", "u-v98", "{}", "done",
              '{"resolved_notebook_ids":["nb-x"],"searched_notebook_ids":["nb-x"]}', now))
 
-    assert SqliteMigrator(database, settings).migrate() == [98]
+    assert SqliteMigrator(database, settings).migrate() == [98, 99]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db) == fresh
@@ -740,4 +740,60 @@ def test_v98_adds_the_attribution_table_without_backfilling(tmp_path):
         db.execute("INSERT INTO global_ask_job_notebooks(job_id,notebook_id) VALUES('g-v98','nb-x')")
         db.execute("DELETE FROM global_ask_jobs WHERE id='g-v98'")
         assert db.execute("SELECT COUNT(*) FROM global_ask_job_notebooks").fetchone()[0] == 0
+    database.close_local()
+
+
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
+def test_v99_adds_ask_jobs_report_id(tmp_path):
+    """v99 adds ``ask_jobs.report_id`` (TEXT NOT NULL DEFAULT ''): a fresh
+    database and a v98 upgrade carry the same column, a turn that already
+    exists reads '' (the default is the whole backfill), a row written without
+    the column reads '', one written with a report id keeps it, and a second
+    run is a no-op."""
+    from tests.sqlite_migration_testkit import rollback_v99
+
+    database, settings = _fresh_migrated_database(tmp_path)
+
+    def column(db):
+        return {
+            row[1]: tuple(row[2:]) for row in db.execute("PRAGMA table_info(ask_jobs)")
+        }.get("report_id")
+
+    now = "2026-10-21T00:00:00+00:00"
+    with database.connect() as db:
+        fresh = column(db)
+    # PRAGMA table_info: (cid, name, type, notnull, dflt_value, pk)
+    assert fresh == ("TEXT", 1, "''", 0)
+
+    with database.write() as db:
+        db.execute(
+            "INSERT INTO notebooks (id, name, created_at, updated_at) VALUES (?,?,?,?)",
+            ("nb-v99", "n", now, now))
+        rollback_v99(db)
+        db.execute("PRAGMA user_version = 98")
+        assert column(db) is None
+        db.execute(
+            "INSERT INTO ask_jobs (id, notebook_id, question, status, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            ("job-v98", "nb-v99", "why?", "running", now, now))
+
+    assert SqliteMigrator(database, settings).migrate() == [99]
+    assert SqliteMigrator(database, settings).migrate() == []
+    with database.connect() as db:
+        assert column(db) == fresh
+        assert db.execute(
+            "SELECT report_id FROM ask_jobs WHERE id='job-v98'"
+        ).fetchone()[0] == ""
+    with database.write() as db:
+        db.execute(
+            "INSERT INTO ask_jobs (id, notebook_id, question, status, report_id, "
+            "created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+            ("job-v99", "nb-v99", "why?", "running", "rep-1", now, now))
+        db.execute(
+            "INSERT INTO ask_jobs (id, notebook_id, question, status, created_at, "
+            "updated_at) VALUES (?,?,?,?,?,?)",
+            ("job-plain", "nb-v99", "why?", "running", now, now))
+        stored = dict(db.execute("SELECT id, report_id FROM ask_jobs").fetchall())
+    assert stored == {"job-v98": "", "job-v99": "rep-1", "job-plain": ""}
     database.close_local()
