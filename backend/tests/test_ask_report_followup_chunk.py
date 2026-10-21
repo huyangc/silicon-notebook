@@ -34,6 +34,7 @@ from app.services.ask_service import AskService, _ChunkRetrieval
 from app.services.conversation_public_view import public_conversation_payload
 from app.services.evidence_context import EvidenceContextService
 from app.services.prompts import ATTACHED_REPORT_ANSWER_RULE, answer_prompt
+from app.services.report_evidence import REPORT_EVIDENCE_HEADING
 from app.services.report_followup import REPORT_BLOCK_HEADER, SUMMARY_TRUNCATED_SUFFIX
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import RecordingModelProvider, bind_chat_client
@@ -416,6 +417,94 @@ def test_a_knowledge_object_folded_into_its_cluster_takes_that_objects_key(
     assert (receipt.evidence_restored, receipt.evidence_over_budget) == (5, 0)
 
 
+def _count_renders(monkeypatch) -> list[str]:
+    """Log the kind of every renderer call the report partition makes."""
+    calls: list[str] = []
+    real = AskService._render_report_kind
+
+    def counted(self, kind, items, **kwargs):
+        calls.append(kind)
+        return real(self, kind, items, **kwargs)
+
+    monkeypatch.setattr(AskService, "_render_report_kind", counted)
+    return calls
+
+
+def test_report_knowledge_objects_render_in_one_call_and_keep_their_relations(
+    make_world, monkeypatch,
+):
+    """Two cited knowledge objects with a passage cited between them: the
+    knowledge renderer is called ONCE with both (its contract -- the
+    ``relations:`` line is derived within one call), so their relation still
+    reaches the prompt; and each kind is rendered once, whatever the order
+    of the citations."""
+    world = make_world()
+    world.execute(
+        "INSERT INTO knowledge_relations (id,notebook_id,source_id,source_object_id,"
+        "target_object_id,edge_type,evidence,created_at) "
+        "VALUES ('rel-dep',{ph},'src-a','kg-a','kg-a2','depends_on',{js},{ph})",
+        (world.nb, json.dumps([{
+            "source_id": "src-a", "source_title": "", "element_id": "el-a2",
+            "element_type": "paragraph", "location_label": "p1",
+            "quoted_span": "依赖", "confidence": 1.0,
+        }]), NOW),
+    )
+    report = insert_report(
+        world, "rep-relations",
+        references=[
+            *REFERENCES,
+            _ref("k9", "concept", "kg-a", source_id="src-a"),
+            _ref("k10", "concept", "kg-a2", source_id="src-a"),
+        ],
+        content_md=_content("摘要。", ("甲概念 [k9]，见段落 [k1]，甲二概念 [k10]。", SECTION_TWO)),
+    )
+    stub_retrieval(monkeypatch, C_B)
+    calls = _count_renders(monkeypatch)
+    answer_llm, _rewrite = bind_models(world, "甲概念[k1001]。")
+
+    response = ask(world, report)
+
+    assert sorted(calls) == ["chunk", "kg", "memory"]
+    prompt = answer_llm.prompts[0]
+    assert "甲概念 [k1001]，见段落 [k2]，甲二概念 [k1002]。" in report_block_of(prompt)
+    partition = knowledge_items_of(prompt).split("[Evidence the attached report cited]")[1]
+    assert "\nrelations: k1001 -[depends_on]-> k1002" in partition
+    assert response.linked_report.evidence_over_budget == 0
+
+
+def test_cluster_members_cited_in_different_sections_still_fold(make_world, monkeypatch):
+    """Two members of one canonical cluster, cited in different sections with
+    a passage between them: one knowledge call sees both, so they fold into
+    one entry and take one key."""
+    world = make_world()
+    for member in ("kg-a", "kg-a2"):
+        world.execute(
+            "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,"
+            "canonical_name,object_type,created_at) "
+            "VALUES ({ph},{ph},'cl-a',{ph},'甲概念','concept',{ph})",
+            (f"cc-{member}", world.nb, member, NOW),
+        )
+    report = insert_report(
+        world, "rep-cluster-apart",
+        references=[
+            *REFERENCES,
+            _ref("k9", "concept", "kg-a", source_id="src-a"),
+            _ref("k10", "concept", "kg-a2", source_id="src-a"),
+        ],
+        content_md=_content("摘要。", ("甲概念 [k9]，见段落 [k1]。", "甲二概念 [k10]。")),
+    )
+    stub_retrieval(monkeypatch, C_B)
+    calls = _count_renders(monkeypatch)
+    answer_llm, _rewrite = bind_models(world, "甲概念[k1001]。")
+
+    response = ask(world, report)
+
+    assert calls.count("kg") == 1
+    block = report_block_of(answer_llm.prompts[0])
+    assert "甲概念 [k1001]，见段落 [k2]。" in block and "甲二概念 [k1001]。" in block
+    assert response.linked_report.evidence_over_budget == 0
+
+
 def test_a_knowledge_object_withheld_at_render_is_not_reported_as_cut_for_space(
     make_world, monkeypatch,
 ):
@@ -617,6 +706,60 @@ def test_restored_items_past_the_partition_budget_show_as_not_loaded(
     assert len("[Evidence the attached report cited]" + partition) <= 2000
     receipt = response.linked_report
     assert (receipt.evidence_restored, receipt.evidence_over_budget, receipt.evidence_gone) == (1, 4, 1)
+
+
+def test_an_item_the_budget_would_cut_to_a_fragment_is_not_loaded(make_world, monkeypatch):
+    """The passage the question is about leaves 30 characters of the
+    partition: the next cited passage would be cut to a two-dozen-character
+    fragment that still carries a key (and the model, checking the claim
+    against it, would call it unsupported). It is not loaded instead -- its
+    marker says so, it takes no key -- and so are the items after it."""
+    budget = 2000
+    world = make_world(ask_report_evidence_budget_chars=budget)
+    room = budget - len(f"\n\n[{REPORT_EVIDENCE_HEADING}]\n")
+    world.execute(
+        "UPDATE chunks SET text={ph} WHERE id={ph}",
+        ("甲" * (room - 30 - len("k2: ")), "c-a"),
+    )
+    world.execute(
+        "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,"
+        "element_ids,created_at) VALUES ({ph},{ph},'src-a',{ph},'节',{js},{ph})",
+        ("c-a2", world.nb, "甲第二段原文" * 40, json.dumps(["el-a2"]), NOW),
+    )
+    report = insert_report(
+        world, "rep-fragment",
+        references=[*REFERENCES, _ref("k9", "chunk", "c-a2", source_id="src-a")],
+        content_md=_content("摘要。", ("甲的温度窗口较窄 [k1]，另见 [k9]。", SECTION_TWO)),
+    )
+    stub_retrieval(monkeypatch, C_B)
+    answer_llm, _rewrite = bind_models(world, "甲[k2]。", rewritten="甲的温度窗口较窄")
+
+    response = ask(world, report)
+
+    prompt = answer_llm.prompts[0]
+    block = report_block_of(prompt)
+    assert f"甲的温度窗口较窄 [k2]，另见 {REPORT_EVIDENCE_NOT_LOADED}。" in block
+    partition = knowledge_items_of(prompt).split(f"[{REPORT_EVIDENCE_HEADING}]")[1]
+    assert keys_in(partition) == {"k2"} and "甲第二段原文" not in partition
+    receipt = response.linked_report
+    assert (receipt.evidence_restored, receipt.evidence_over_budget) == (1, 3)
+
+
+def test_the_not_loaded_mark_never_reaches_the_answer(make_world, monkeypatch):
+    """Rule 15 forbids copying the mark; the persistence seam removes it
+    anyway, from the answer and its conclusion, as returned and as stored."""
+    world = make_world()
+    report = insert_report(world, "rep-scrub")
+    stub_retrieval(monkeypatch, C_B)
+    bind_models(world, f"甲的温度窗口较窄[k2]，其依据{REPORT_EVIDENCE_NOT_LOADED}未载入。")
+
+    response = ask(world, report)
+
+    assert response.answer == "甲的温度窗口较窄[k2]，其依据未载入。"
+    assert REPORT_EVIDENCE_NOT_LOADED not in response.conclusion
+    with as_request_user(world.alice):
+        stored = world.repo.get_conversation(response.conversation_id).turns[-1].response
+    assert REPORT_EVIDENCE_NOT_LOADED not in stored.answer + stored.conclusion
 
 
 def test_the_section_the_question_is_about_gets_its_evidence_first(

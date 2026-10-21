@@ -353,9 +353,9 @@ def report_digest(row: Mapping[str, Any]) -> ReportDigest:
         # (see ``_global_marker``): they are dropped here, so the summary has
         # no keys -- ``summary_keys`` stays () -- and nothing of it is restored
         # or rewritten.
-        summary=_strip_markers(summary),
+        summary=_strip_markers(_neutralized_bounds(summary)),
         sections=tuple(
-            replace(section, body=body, keys=_keys_in(body))
+            replace(section, body=_neutralized_bounds(body), keys=_keys_in(body))
             for section, body in zip(meta.sections, bodies)
         ),
     )
@@ -639,6 +639,32 @@ REPORT_BLOCK_HEADER = (
     "Attached report the user is asking about (written earlier by this system; "
     "NOT evidence — see rule 15):"
 )
+#: Put before a line of the stored report that reads like one of the block's
+#: own bounds (``REPORT_BLOCK_HEADER`` / ``REPORT_BLOCK_END``, compared with
+#: case, spacing and a trailing stop folded): report text must never end the
+#: quoted block early, nor open a second one, for the model rule 15 tells to
+#: treat what lies between them as data.
+QUOTED_BOUND_PREFIX = "(report text) "
+
+
+def _bound_key(line: str) -> str:
+    return " ".join(line.casefold().split()).rstrip(".。:：")
+
+
+def _neutralized_bounds(text: str) -> str:
+    """``text`` with every line that reads like a block bound prefixed by
+    ``QUOTED_BOUND_PREFIX`` (``report_digest`` applies it to the summary and
+    each section body, so selection measures what is rendered)."""
+    bounds = {_bound_key(REPORT_BLOCK_HEADER), _bound_key(REPORT_BLOCK_END)}
+    lines = (text or "").split("\n")
+    if not any(_bound_key(line) in bounds for line in lines):
+        return text
+    return "\n".join(
+        QUOTED_BOUND_PREFIX + line.strip() if _bound_key(line) in bounds else line
+        for line in lines
+    )
+
+
 _SECTION_NOT_LOADED = "(body not loaded this turn: over the report-context budget)"
 _SECTION_NO_BODY = "(this section has no separate body text in the stored report)"
 SUMMARY_TRUNCATED_SUFFIX = "（执行摘要已截断）"
