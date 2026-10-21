@@ -1017,8 +1017,9 @@ def test_a_degraded_retrieval_still_consults_and_keeps_its_answer(
 ):
     """Retrieval failing open is a REGISTERED trigger path (plan risk R4).
 
-    ``_run_reasoning_stage`` catches a blown-up retrieval stage and continues
-    with empty evidence, which lands under every tier's floor — so the thin
+    ``_run_reasoning_stage`` (its ``_reasoning_retrieval_phase``) catches a
+    blown-up retrieval stage and continues with empty evidence, which lands
+    under every tier's floor — so the thin
     branch fires on a run whose notebook may be perfectly well stocked.  That
     is deliberate (the run genuinely has nothing to answer from), and it is
     why the step's wording must not blame the corpus.  Pin all three halves:

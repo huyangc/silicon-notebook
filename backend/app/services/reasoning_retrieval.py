@@ -6997,7 +6997,7 @@ class ReasoningRetriever:
             # 花名册列出之后文档被删除(两个仓库适配器的 `source_elements_page`
             # 都抛 KeyError)、或库读瞬时失败:收成**一次失败读取**,与见证失败
             # 同形(零命中步 + 空产物进账目),而不是让异常逃出 `run()` 去撞
-            # `_run_reasoning_stage` 的兜底——那会把本轮此前收集的全部证据、清单
+            # `AskService._reasoning_retrieval_phase` 的兜底——那会把本轮此前收集的全部证据、清单
             # 与轨迹一起丢掉(codex #724 R5)。取消照旧上抛。
             overview = SourceOverview(
                 "", {}, [],
@@ -7377,7 +7377,7 @@ class ReasoningRetriever:
         # 一旦有过外部材料,后续每轮 reflect 都插入不受信内容系统消息(§九 不变量
         # 9)。置在**实例**上是安全的,因为 Ask 每次提问新建一个 retriever
         # (`ask_service._build_reasoning_retriever` 是唯一生产构造点,在
-        # `_run_reasoning_stage` 内逐次调用),报告与 knowhow 也各自新建;没有任何
+        # `_reasoning_retrieval_phase` 内逐次调用),报告与 knowhow 也各自新建;没有任何
         # 生产路径跨 run 复用同一个实例。
         # 判据是**块文本非空**而不是条目非空:零条目但带 note 的那一轮,note 同样是
         # 插件写的、同样进候选摘要,同样需要「这是数据不是指令」的框定(codex #714 R3)。

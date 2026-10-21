@@ -885,7 +885,7 @@ _SEAT_FAILSOFT_SITES = (
     ("app/services/ask_service.py",
      "AskService._no_kg_scope_admits_run", "collection_map"),
     ("app/services/ask_service.py",
-     "AskService._run_reasoning_stage", "execute_reasoning_retrieval_stage"),
+     "AskService._reasoning_retrieval_phase", "execute_reasoning_retrieval_stage"),
     ("app/services/ask_service.py",
      "AskService.ask_plugin_engine", "admit_plugin_engine_result"),
     # D0-3:``synth()`` 把 KG 证据装配算在合成里(``_answer_context`` ->
