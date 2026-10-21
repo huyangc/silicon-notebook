@@ -169,6 +169,19 @@ async def run() -> None:
                     "ask", {"question": "probe", "mode": "chunk"}
                 )
                 assert empty.isError and "[unavailable]" in empty.content[0].text
+                # History reads (``read`` tier): nothing recorded yet lists as
+                # an empty page, and an id that does not exist is the one
+                # ``not_found`` -- never a different answer per missing piece.
+                for listing in ("list_conversations", "list_reports"):
+                    page = payload(await creator.call(listing))
+                    assert page["items"] == [] and page["total"] == 0, listing
+                for reading, arguments in (
+                    ("get_conversation", {"conversation_id": "conv-smoke-missing"}),
+                    ("get_report", {"report_id": "rep-smoke-missing"}),
+                ):
+                    missing = await creator.call(reading, arguments)
+                    assert missing.isError, reading
+                    assert "[not_found]" in missing.content[0].text, reading
                 created = payload(await creator.call(
                     "propose_memory",
                     {
@@ -205,7 +218,7 @@ async def run() -> None:
     print(
         f"memory MCP smoke: OK "
         f"({len(tools)} tools, tier-filtered listing, stateless calls, "
-        f"candidate plane isolation, ref round trip)"
+        f"candidate plane isolation, ref round trip, history reads)"
     )
 
 

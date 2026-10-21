@@ -1699,7 +1699,8 @@ The raw tag list is capped before trimming/deduplication, and blank tags are rej
 The **Agent access** page (`/agents`, a first-level account-menu entry and its only entry point) creates stable Agent profiles and issues tokens. A token has an expiry, a default
 notebook, a notebook allowlist, and the smallest needed set of permission tiers — storage and
 the API know exactly five: `read` (sources/knowledge/Knowhow, the owner's own confirmed and
-candidate Memory, notebook understanding, cited original text, source and build status), `ask`
+candidate Memory, notebook understanding, cited original text, source and build status, and the
+owner's own Q&A history -- single-notebook and global conversations -- and deep reports), `ask`
 (notebook and global Ask; does not need `read`), `contribute` (Memory candidates, Knowhow code
 attachments, observations), `manage` (add/re-parse sources, start graph and retrieval-index
 builds; only on notebooks the owner owns) and `delete` (delete Agent-added sources only; only on
@@ -1770,7 +1771,7 @@ other clients apply a flat per-call ceiling instead. `ask` in `reasoning` mode
 routinely runs for minutes (understanding, plan, federated retrieval, reflect loop, synthesis) and
 a deployment's plugin engine can take longer still, so without a heartbeat the client abandons a call the
 server is still executing successfully and the Agent sees a transport error where the
-answer was about to arrive. Every one of the 17 core tools therefore runs its blocking body
+answer was about to arrive. Every one of the 21 core tools therefore runs its blocking body
 under one progress heartbeat that fires every **5 seconds** and carries only the tool name
 and elapsed wall-clock seconds — never the question, a notebook or source name, or any
 other notebook content, the same rule the observability events follow. It is free where it
@@ -1849,7 +1850,7 @@ read's full authorization on every call. Errors read `[<code>] <Chinese message>
 `not_found`, `invalid_argument`, `busy`, `mirrored`, `unavailable`, `internal`. A `ValueError` becomes an
 `invalid_argument` carrying its text only when that text starts with Chinese (or is a known validator
 shape translated to Chinese); any other unexpected error is `internal` and its text is never echoed. The default core
-tool set is these 17 tools; `mcp_server.PUBLIC_TOOLS` is exactly these 17 tools, not a larger
+tool set is these 21 tools; `mcp_server.PUBLIC_TOOLS` is exactly these 21 tools, not a larger
 combined catalog -- it is the same list as `mcp_server.CORE_TOOLS`:
 
 | Group | Tools | Scope |
@@ -1858,6 +1859,7 @@ combined catalog -- it is the same list as `mcp_server.CORE_TOOLS`:
 | Notebook overview (counts, build status, AI understanding) | `get_notebook` | `read` |
 | Search and point-read | `search`, `read_reference` | `read` |
 | Ask (synchronous; one notebook or 2-8) | `ask`, `get_ask` | `ask` |
+| Q&A history and deep reports (read-only, the token owner's own only) | `list_conversations`, `get_conversation`, `list_reports`, `get_report` | `read` |
 | Contribute | `propose_memory`, `add_observation` | `contribute` |
 | Source read | `list_sources` | `read` |
 | Source management | `add_source`, `reparse_source` | `manage` (owner-only) |
@@ -1867,7 +1869,7 @@ combined catalog -- it is the same list as `mcp_server.CORE_TOOLS`:
 | Knowhow code write | `put_knowhow_cell_code` | `contribute` |
 
 The deployed server-local frozen catalog is authoritative for discovery and onboarding: it is
-exactly the 17 tools above, derived live from the nine core registrars, and
+exactly the 21 tools above, derived live from the eleven core registrars, and
 `mcp_server.PUBLIC_TOOLS` is that same list rather than a second hand-kept copy. Every call
 repeats live token/tier/allowlist/membership checks, and both the `manage` and `delete` tiers are
 forced through the owner-only notebook gate. A tool refused for a missing tier says which tier in
@@ -1988,7 +1990,8 @@ libraries and `coverage.skipped_notebooks` lists them) plus `next_coverage_offse
 answer_offset?, citation_offset?, coverage_offset?, trace_offset?)` re-reads any page by job id
 (`askjob-` or `gask-`); it re-checks the token, the allowlist and read access on every call. It
 reaches only jobs started over MCP and only by their owner: a job the browser started (either
-kind), another member's job, or an unknown id is `not_found`. A finished job whose answer row is
+kind), another member's job, or an unknown id is `not_found` -- to read a question asked in the
+browser, use `get_conversation` (see "Q&A history and deep reports" below). A finished job whose answer row is
 missing reads as `failed`, never as an empty `answered` page; an empty answer falls back to the
 conclusion; the first page of `ask` and every `get_ask` page take the trace from the same job row,
 so their cursors agree.
@@ -2163,7 +2166,119 @@ share's rule, without requiring the token's allowlist to cover them (the same as
 `{PUBLIC_WEB_BASE_URL}/c/alnk-...`; anyone holding it can read the whole answer **without signing in**, which the
 `ask` tool description says outright.
 
-**Refs and `read_reference`.** `search` hits and every `ask`/`get_ask` citation carry an opaque
+**Q&A history and deep reports (`list_conversations`, `get_conversation`, `list_reports`,
+`get_report`).** Four read-only tools, all needing only the `read` tier (internal capability
+`history:read`, folded into `read`: no new tier and no new switch; an already issued `read` token gets
+them at once, and the call ledger shows them as 「读问答记录和报告」). They read the **token
+owner's own** Q&A history and deep reports, whether they were made in the browser or by an Agent;
+another member's conversation or report is never readable, and nobody else's Memory is exposed.
+`get_ask` is unchanged: it re-reads only jobs started over MCP, and a job the browser started is
+still `not_found` -- **to read a question asked in the browser, use `get_conversation`**.
+
+- **`list_conversations(notebook_id?, limit?, offset?)`.** Lists the owner's conversations,
+  single-notebook (`conv-`) and cross-notebook (global, `gconv-`) together, most recent activity
+  first. Row: `conversation_id`, `kind` (`notebook`/`global`), `title` (at most 200 code points),
+  `notebook_ids` (sorted, at most 20; `notebook_count` is the full number -- the notebook a
+  single-notebook conversation lives in, or every notebook a global one's turns used),
+  `turn_count`, `updated_at`, `submitted_via`. `notebook_id` **omitted = every allowlisted
+  notebook the owner can still read** (one the owner can no longer read is skipped silently, like
+  `list_notebooks`), which differs from the notebook-bound tools where omitted means the default
+  notebook; given, it lists only that notebook (outside the allowlist `notebook_not_allowed`,
+  owner lost read access `notebook_unreadable`): its single-notebook conversations plus the
+  visible global ones that used it. `limit` is clamped to 1-20; follow `next_offset` to null --
+  when a page exceeds the 12,000-byte budget `next_offset` advances only past the rows actually
+  delivered, so reaching null never skips one. A negative `offset` is `invalid_argument`
+  (「分页位置不能小于零，请从第一页重新读取」).
+- **`get_conversation(conversation_id, turn_offset?, answer_offset?, citation_offset?)`.** Reads
+  one turn per call, oldest first. A turn is one saved answer (single notebook) or one finished
+  job (global: done, failed, cancelled or interrupted); a question still being answered is not a
+  turn, it is appended at the end when it finishes, so the `turn_offset` of earlier turns does not
+  move (a deletion or expiry shifts the later ones down -- re-read `turn_count` if needed). A page:
+  `conversation` (the list row's own shape, `turn_count` included), `turn_offset` and
+  `next_turn_offset`, `question` (at most 2,000 code points; a longer one ends in `…` and is counted in
+  `truncation`), `asked_at`, `submitted_via`, `status` (`answered`/`failed`/`cancelled`; always
+  `answered` for a single notebook), `mode`, `answer` (this page, at most 2,000 code points) with
+  `next_answer_offset`, `citations` (each with a `ref` for `read_reference`) with
+  `next_citation_offset`, `total_citations`, `completeness_notice`, `error` (Chinese notice only),
+  `scope`, `content_is_untrusted_evidence`. A page carries **no** `trace`, `coverage`, `anchors` or
+  `intent` -- for those, a job started over MCP still has `get_ask`. After the answer and citation
+  cursors of a turn are exhausted, read the next turn with `turn_offset=next_turn_offset` and both
+  other offsets at 0, until `next_turn_offset` is null. A conversation with no finished turn (only
+  a question still being answered) returns a page with `status: "empty"`; a `turn_offset` past the
+  last turn is `invalid_argument` (「turn_offset 超出这条会话的轮数（共 N 轮），请从 0 开始读取」).
+- **`submitted_via` (where it was started):** `web` / `mcp` / empty (not recorded). For a
+  conversation it is the **earliest** job's origin, but empty when an answer is older than that
+  job (an older conversation's first turns have no job row); for a turn it is the origin of the job
+  that produced the answer, empty when no job row is found. "Earliest" is by instant, not by id or
+  insertion order.
+- **Who sees what (the token is re-read on every call; list and read share one rule).** The
+  `read` tier is checked first -- `scope_missing` naming 「读取」 comes before any existence
+  check, so a token without it cannot probe ids. A single-notebook conversation must be the
+  owner's, and its notebook must be allowlisted and readable by the owner right now -- stricter
+  than the browser's conversation detail, which checks only the creator, because a token is a
+  standing delegation and its allowlist and the owner's access are its ceiling; the mounted
+  reference libraries an answer quoted come with that notebook, and need not be on the allowlist
+  themselves (the same as `get_ask` and `read_reference`). A global conversation is judged
+  **whole**: every notebook that any of its unexpired turns used (per turn, the scope, the cited
+  notebooks and the anchors' notebooks -- the same function the public share re-check uses) must
+  be on the allowlist and readable by the owner now, and a deleted notebook counts as unreadable;
+  if one fails, the whole conversation is withheld, and the list does not even show its title or
+  turn count. A conversation that does not exist, is not the owner's, fails those conditions,
+  has an id that does not start with `conv-`/`gconv-`, or is over 200 characters answers one and
+  the same `not_found` (「没有找到这个会话（不存在、不属于此凭证的主人，或它用到的笔记本不在此凭证的白名单里、主人已无权读取）」),
+  whose wording does not reveal which check failed; a dead token is `token_inactive`.
+- **`list_reports(notebook_id?, limit?, offset?)`.** Lists the deep reports the owner created
+  (another member's reports in a shared notebook are not listed), newest first; `notebook_id` and
+  paging as in `list_conversations`. Row: `report_id`, `notebook_id`, `question` (at most 300 code
+  points), `status` (`planning`/`intent_ready`/`outline_ready`/`generating`/`done`/`failed`/
+  `cancelled`), `depth`, `section_count`, `created_at`, `updated_at`; no `error`, `progress` or
+  `created_by`.
+- **`get_report(report_id, notebook_id?, content_offset?, reference_offset?)`.** A report id
+  carries no notebook, so pass the `notebook_id` `list_reports` returned (omitted = the token's
+  default notebook). Only a report the owner created is readable; one that does not exist, was
+  created by someone else, is not in that notebook, whose id does not start with `rep-` or is over
+  200 characters answers one and the same `not_found` (「没有找到这份报告（…；请传 list_reports
+  返回的 notebook_id）」), and outside the allowlist / lost access are `notebook_not_allowed` /
+  `notebook_unreadable`. A page: `report_id`, `notebook_id`, `question`, `status`, `depth`,
+  `created_at`, `updated_at`, the Markdown body `content` (the first page up to 6,000 characters,
+  shorter when the budget requires) with `content_offset`, `next_content_offset` and
+  `total_characters`, the references `references` with `next_reference_offset` and
+  `total_references`, `error`, `content_is_untrusted_evidence`. The body and the references have
+  independent cursors; to read only one of them, set the other cursor to its total to get an empty
+  page. The first page's `question` is at most 2,000 code points; a continuation page (either
+  cursor above 0) cuts `question` to 200 code points (ending in `…`) and adds `question_truncated`,
+  because the caller already has the whole question from the first page and repeating it would eat a
+  large share of every page's budget. A reference row: `key` (the number behind a `[kN]` marker in
+  the body), `label`, `location_label`, `snippet`, `object_type`, `source_id`, `element_id`, `tier`,
+  plus `notebook_id` when it comes from a mounted reference library and `ref` when it points at a
+  source element or the owner's own Memory.
+- **Memory and identifiers inside a report.** The body and the excerpts are what the web page shows
+  the report's author (permissions belong to the retrieval layer, so nothing is filtered again
+  here, and an excerpt an older report stored from someone else's Memory is still given);
+  identifiers are stricter: a reference never carries the memory record the report engine stored
+  (`memory_id`, `memory_owner_id`) or other internals such as `provenance` and `family_key`; a
+  reference recorded as **another member's Memory** gets no `ref`, and its `source_id` and
+  `element_id` are empty strings (the keys stay), because the projection source id of a memory is
+  one-to-one with it -- the same identifier under another name. The owner's own Memory mints a
+  `mem` ref and any other source element an `el` ref; `read_reference` re-runs its whole
+  authorization when one is opened.
+- **Failed reports and failed sections.** The old-format "（本节生成失败:<raw error>）" note in the
+  body is always rewritten to a fixed neutral sentence, and a section's raw error is never given.
+  The top-level `error` exists only when `status` is `failed`: a stored error that **contains
+  Chinese** is given as stored (what the author sees on the web page, so it may carry a service
+  name or another diagnostic fragment); one with no Chinese in it (an exception text) is replaced
+  by 「这份报告没有生成完成，请在网页上重新生成」.
+- **Private Memory and the call ledger.** `history:read` and `memory:read` sit in the same `read`
+  tier, so a token that can call these tools can always read private Memory; reading a stored
+  answer therefore does not add `get_ask`'s private-Memory replay gate. A test pins that same-tier
+  invariant, and splitting the tiers must first add that gate to `get_conversation` and
+  `get_report`. A single-notebook `get_conversation`, the two list calls that pass a
+  `notebook_id`, and `get_report` each book one `history:read` row once every gate has passed; a
+  list without `notebook_id` and a global-conversation read book nothing (there is no single
+  notebook to book -- like `list_notebooks` and a `gask-` `get_ask`).
+
+**Refs and `read_reference`.** `search` hits, every `ask`/`get_ask`/`get_conversation` citation, and
+a `get_report` reference that points at a source element or the owner's own Memory carry an opaque
 `ref` (`base64url(json)` without padding; not signed -- `read_reference` re-runs the original
 read's full authorization on every call). `read_reference(ref, offset?)` reads the text behind it:
 a source element (its own text, its location inside the document, and the document's display
@@ -3703,11 +3818,14 @@ newly added tool is recorded without its author doing anything — at the regist
 that two tools admitted under the same scope read back identically. Calls an AUTHORIZATION decision refused leave no
 trace — a ledger of *attempts by principals who were refused* is a different feature with
 different privacy consequences — and that holds for authorization decisions made AFTER
-the choke point too. Three exist, and each suppresses the automatic record and books it
+the choke point too. Several exist, and each suppresses the automatic record and books it
 itself once its own gate clears: the owner-only check write tools add after
 `require_agent_access`, `read_reference`'s `memory:read_candidates` requirement for a
-candidate Memory, and `delete_source`'s rule that an Agent token may only delete sources an
-Agent added. The invariant is therefore "recorded after every AUTHORIZATION gate", not
+candidate Memory, `delete_source`'s rule that an Agent token may only delete sources an
+Agent added, and the ownership checks of the Q&A-history and report tools (`get_report`'s
+"the report was created by the token's owner", and a single-notebook `get_conversation`'s
+conversation ownership and turn range -- a report id that does not exist leaves no trace,
+exactly like someone else's report). The invariant is therefore "recorded after every AUTHORIZATION gate", not
 "recorded at the choke point".
 
 **Registered line: a lookup outcome is not an authorization decision.** A call naming an
@@ -4254,7 +4372,7 @@ Key local beta APIs:
 - `POST /api/notebooks/{id}/ask/stream` — NDJSON Ask progress stream (same optional timezone-aware `asked_at` request field; first a `started` event with the durable `job_id` and `conversation_id`, then progress/final events). The frontend uses that conversation id to publish/reopen the in-flight session before an answer exists. `mode` is already resolved to a concrete registry id by the time the job is created, so `ask_jobs.mode` holds that id throughout — there is no delayed-selection window — and the synthetic start step is emitted right after `started`. Leaving the workspace before `started` and returning to the same notebook still re-attaches the question from the frontend's local in-flight record on the same stream. The reasoning-mode intent understanding and clarification review that precede submission are likewise not aborted by leaving: understanding continues while away, a clear intent starts the Ask job directly, and a requested clarification re-opens when the notebook is reopened. Both phases are also kept in the browser's per-tab session storage: after a full reload of the same tab, returning to that notebook re-issues the understanding or re-opens the clarification card; closing the tab discards them. The request also accepts an optional `client_request_id` (letters, digits, `.`, `_`, `:`, `-`; at most 128 characters), one key per submission, which the official browser sends on every submit; a repeat POST with the same key by the same user does not create a second job — the stream re-emits `started` with the existing job and conversation ids, replays the persisted progress steps, and ends with the saved answer as `final` (or the job's `cancelled`/`error`). That is how a reload landing between the reasoning preflight's hand-off and `started` is resumed automatically: the tab re-sends the same submission under the same key and attaches, instead of handing the question back as a draft. The attach is decided before the route's own preflight (availability, scope, mode registry) — only notebook authorization stands in front of it — so a retry replays the job even if a fresh ask would now be refused. A key the same user already spent in another notebook ends the stream with an `error` event and creates nothing. The synchronous `POST …/ask` accepts the field but does not persist or honour it: it always creates. A transport disconnect stops delivery to that client only; the detached job keeps running and can persist its answer
 - `GET /api/notebooks/{id}/ask/jobs/{job_id}` — read detached Ask job `status`, `trace`, and `answer_id`; the job must belong to the path notebook and current user; on `done`, the frontend reloads the conversation to obtain the final `AskResponse`
 - `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel` — explicit interrupt endpoint; the job must belong to the path notebook and current user; sets the cancellation event and stops the worker before a cancelled final answer is saved
-- `GET /api/notebooks/{id}/conversations`, `GET|PATCH|DELETE /api/conversations/{id}`
+- `GET /api/notebooks/{id}/conversations`, `GET|PATCH|DELETE /api/conversations/{id}` — the list's summaries and the detail carry `submitted_via` (`web` / `mcp` / empty = not recorded; read from the conversation's earliest job, empty when an answer predates that job), and each turn of the detail carries its own `submitted_via` (the origin of the job that produced that answer); the browser does not read it, and it is what MCP `list_conversations` / `get_conversation` report
 - `POST /api/answers/{answer_id}/feedback`
 - Memory: `GET /api/memories`, `GET /api/notebooks/{id}/memories`, `GET|PATCH /api/memories/{memory_id}`, `POST /api/memories/{memory_id}/confirm|reject|deprecate|promote`, `POST /api/answers/{answer_id}/memory-preview/stream` (browser; `/memory-preview` remains JSON-compatible), `POST /api/notebooks/{id}/memories/from-answer`
   - Endpoints that take an answer id (`POST /api/answers/{answer_id}/memory-preview`, `.../memory-preview/stream`, `POST /api/answers/{answer_id}/feedback`, and `POST /api/notebooks/{notebook_id}/memories/from-answer`) act only on the caller's own answers: the caller must be able to read the notebook AND must have created the answer's conversation. Another member's answer (the notebook owner included), an answer without a conversation, and an unknown id all return the same 404 `Answer not found`. `answer_owner` in the sharing store returns the notebook owner and is not used for authorisation.
