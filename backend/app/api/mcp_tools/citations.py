@@ -275,8 +275,9 @@ def register_citation_tools(
 ) -> None:
     @server.tool(
         description=(
-            "Read the full text behind a `ref` returned by search, ask "
-            "or get_ask: a source element (its own text, location inside "
+            "Read the full text behind a `ref` returned by search, ask, "
+            "get_ask, get_conversation or get_report: a source element (its "
+            "own text, location inside "
             "the document, and the document's display title), one of your "
             "owner's Memory items, or an element cited by a global answer. "
             "Pass the ref exactly as returned; follow next_offset for long "

@@ -11,6 +11,7 @@ from mcp.server.fastmcp import FastMCP
 from app.api import mcp_server
 from app.api.mcp_tools.citations import register_citation_tools
 from app.api.mcp_tools.ask import register_ask_tools
+from app.api.mcp_tools.conversations import register_conversation_tools
 from app.api.mcp_tools.knowhow import register_knowhow_tools
 from app.api.mcp_tools.maintenance import register_maintenance_tools
 from app.api.mcp_tools.memory_context import (
@@ -29,6 +30,7 @@ _REGISTRARS = (
     register_memory_context_tools,
     register_citation_tools,
     register_ask_tools,
+    register_conversation_tools,
     register_report_tools,
     register_memory_proposal_tools,
     register_profile_tools,

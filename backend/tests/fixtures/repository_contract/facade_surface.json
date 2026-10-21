@@ -6501,6 +6501,12 @@
         "target": "get_conversation"
       },
       {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/conversations.py",
+        "scope": "<module>._notebook_turn",
+        "target": "get_conversation"
+      },
+      {
         "kind": "patch",
         "path": "backend/tests/test_admin_user_activity_api.py",
         "scope": "<module>.test_ask_detail_does_not_load_full_conversation_history",
@@ -7418,6 +7424,12 @@
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.list_conversations",
+        "target": "list_conversations"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/conversations.py",
+        "scope": "<module>._notebook_rows",
         "target": "list_conversations"
       },
       {
@@ -9298,6 +9310,12 @@
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/citations.py",
         "scope": "<module>._read_memory",
+        "target": "require_agent_access"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/conversations.py",
+        "scope": "<module>._notebook_turn",
         "target": "require_agent_access"
       },
       {
