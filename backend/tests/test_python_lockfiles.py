@@ -30,7 +30,7 @@ RUNTIME_LOCK = BACKEND / "requirements.txt"
 DEV_IN = BACKEND / "requirements-dev.in"
 DEV_LOCK = BACKEND / "requirements-dev.txt"
 PAIRS = ((RUNTIME_IN, RUNTIME_LOCK), (DEV_IN, DEV_LOCK))
-TEST_ONLY_PACKAGES = ("pytest", "pytest-xdist")
+TEST_ONLY_PACKAGES = ("pytest", "pytest-xdist", "ruff")
 
 _spec = importlib.util.spec_from_file_location(
     "python_lockfiles", ROOT / "scripts" / "python_lockfiles.py"
