@@ -391,6 +391,7 @@ const CALL_CAPABILITY_LABELS: Readonly<Record<string, string>> = {
   "sources:delete": "删除资料",
   "maintenance:execute": "整理这个库",
   "agent_profile:read": "读这个库的理解",
+  "history:read": "读问答记录和报告",
   "agent_observation:write": "写下使用线索",
 };
 
