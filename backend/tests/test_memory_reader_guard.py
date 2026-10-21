@@ -334,6 +334,10 @@ _REGISTRY: dict[str, dict[str, str]] = {
         # leaves out every object of a memory/knowhow source (the canonical name
         # may come from one), the same NOT EXISTS as source_canonical_rows
         "UnifiedKgStore.kg_finding_display_name_rows": KEY_BOUNDED,
+        # the same statements on a connection the caller holds (PostgreSQL;
+        # `kg_finding_display_name_rows` opens the snapshot and calls it, the
+        # read-only rehearsal script calls it on its own connection)
+        "UnifiedKgStore._display_name_rows_in": KEY_BOUNDED,
         # KG analysis findings (PR-2): every member name of the given canonical
         # ids. Hidden (memory/knowhow) members are READ on purpose — stored
         # merge decisions are keyed by v1 seeds of all member names, and a seed
