@@ -1,6 +1,6 @@
 import re
 from datetime import datetime
-from typing import Annotated, Any, Dict, List, Literal, Optional, Union, get_args
+from typing import Annotated, Any, Callable, Dict, List, Literal, Optional, Union, get_args
 
 from pydantic import (
     BaseModel,
@@ -8,6 +8,7 @@ from pydantic import (
     PrivateAttr,
     StrictInt,
     StringConstraints,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -1102,6 +1103,23 @@ class LinkedReportRef(BaseModel):
     title: str = ""
 
 
+def _receipt_or_absent(value: object, handler: Callable[[object], Any]) -> Any:
+    """Read a stored ``linked_report`` receipt, or read it as absent.
+
+    The receipt's own invariants (``LinkedReportReceipt``) stay strict, and the
+    code that writes a receipt builds a ``LinkedReportReceipt`` first, so a
+    stored payload is valid by construction. A payload that is not (an older or
+    hand-edited row, a failed migration) must still open: without this, one
+    malformed receipt would fail ``AskResponse(**payload)`` and with it the
+    whole conversation detail, while the conversation list -- which reads the
+    same field as a plain JSON value -- already treats it as 'no report'. The
+    carriers below apply this at the field, never on the receipt itself."""
+    try:
+        return handler(value)
+    except ValidationError:
+        return None
+
+
 class AskResponse(BaseModel):
     answer_id: str = ""
     asked_at: str = Field(default="", exclude_if=lambda value: not value)
@@ -1217,6 +1235,13 @@ class AskResponse(BaseModel):
     linked_report: Optional[LinkedReportReceipt] = Field(
         default=None, exclude_if=lambda value: value is None
     )
+
+    @field_validator("linked_report", mode="wrap")
+    @classmethod
+    def _unreadable_receipt_reads_as_absent(
+        cls, value: object, handler: Callable[[object], Any]
+    ) -> Any:
+        return _receipt_or_absent(value, handler)
 
     @field_validator("reasoning_trace", mode="before")
     @classmethod
@@ -1334,6 +1359,13 @@ class AskEvidence(BaseModel):
     linked_report: Optional[LinkedReportReceipt] = Field(
         default=None, exclude_if=lambda value: value is None
     )
+
+    @field_validator("linked_report", mode="wrap")
+    @classmethod
+    def _unreadable_receipt_reads_as_absent(
+        cls, value: object, handler: Callable[[object], Any]
+    ) -> Any:
+        return _receipt_or_absent(value, handler)
 
 
 class ConversationRenameRequest(BaseModel):

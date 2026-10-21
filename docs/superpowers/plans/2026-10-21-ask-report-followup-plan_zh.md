@@ -168,8 +168,9 @@ run 保持单次合成」同一先例（`_draft_reasoning_response` 中 `not enu
   `_require_same_request` 比对（同一 `client_request_id` 换了报告 → `AskRequestKeyReused("question")`）、
   `ConversationDetail.active_job.linked_report`（跨设备/刷新后在途轮次显示报告）、MCP `get_ask`
   读到 running 任务时显示。
-- 会话摘要：`ConversationSummary.linked_report` 由最后一条回答的 payload 派生（与 `used_reasoning`
-  同一相关子查询写法），不加列。
+- 会话摘要：`ConversationSummary.linked_report` 从最后一条回答单行取，不加列。PG 先用 LATERAL 按
+  `ordinal` 定位每个会话的最后一条回答，再只对这一行读 payload（`used_reasoning` 与 `linked_report`
+  同取自这一行，不逐行解全部回答的 payload）；SQLite 取 rowid 最大的一行。
 - 粘性标签的恢复：重开会话时取「在途任务的报告，否则最后一轮回执里的报告」。移除标签但还没
   提问就重开，标签会回来——移除只在下一轮提问时落成事实，与模式/档位从最后一轮恢复同一口径。
 - `_conversation_histories`（两端）**不改**：报告经本轮显式块进入，历史里再插报告标记会让每次
@@ -667,11 +668,13 @@ cd $W/backend && TEST_POSTGRES_URL=... python3 -m pytest tests/postgres/test_rep
 **改文件**（`backend/app/repositories/postgres/ask_state_store.py` 与 `sqlite/ask_state_store.py`）：
 - `_insert_job_row`（及 SQLite 对应写入、`begin_or_attach_durable_job` 的插入）写 `payload.report_id or ""`。
 - `ask_job_origin` 返回 `report_id`；`ask_job_detail` 返回 `report_id`。
-- `get_conversation`：在途任务读 `report_id`，并 `LEFT JOIN reports r ON r.id = j.report_id AND r.notebook_id = j.notebook_id`
-  取 `r.question` 作题目（报告已删 → 题目空串），填 `ActiveAskJob.linked_report`。
-- `list_conversations`：在 `used_reasoning` 旁加一个同形相关子查询取最后一条回答的
-  `payload->'linked_report'`（PG）/ `json_extract(a.payload, '$.linked_report')`（SQLite），Python 侧解出
-  `{report_id, title}` 填 `ConversationSummary.linked_report`。若有该语句的计划钉，按钉子规则更新。
+- `get_conversation`：在途任务读 `report_id`，并 `LEFT JOIN reports r ON r.id = j.report_id AND r.notebook_id = j.notebook_id AND r.created_by = j.created_by`
+  取 `r.question` 作题目（报告已删、属于别的笔记本或别的成员 → 题目空串），填 `ActiveAskJob.linked_report`。
+- `list_conversations`：从最后一条回答单行取 `payload->'linked_report'`（PG：LATERAL 先按 `ordinal` 定位最后
+  一条回答，`used_reasoning` 与 `linked_report` 都读自这一行）/ `json_extract(a.payload, '$.linked_report')`
+  （SQLite，`ORDER BY a.rowid DESC LIMIT 1` 的同一行），Python 侧按 `LinkedReportReceipt` 的规则校验后解出
+  `{report_id, title}` 填 `ConversationSummary.linked_report`（校验失败 = 无报告，与详情读时容错一致）。
+  若有该语句的计划钉，按钉子规则更新。
 - 不改 `_conversation_histories`（D10）。
 
 **测试**：

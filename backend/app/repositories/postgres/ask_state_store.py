@@ -167,6 +167,39 @@ def _payload_receipt(row) -> object:
     return payload.get("linked_report") if isinstance(payload, dict) else None
 
 
+#: The one statement behind ``list_conversations`` (module-level so a plan check
+#: looks at exactly what production sends; ``%s`` binds the notebook id, then the
+#: creator). ``used_reasoning`` and ``linked_report`` both describe the
+#: conversation's LAST answer, so the lateral first locates that answer by its
+#: unique ``ordinal`` (a read of ``idx_answers_conversation`` that never touches
+#: the payload) and only then reads ``payload`` -- once per conversation, not once
+#: per answer: ``payload`` is a large jsonb that every answer of the conversation
+#: would otherwise have to detoast before ``ORDER BY ... LIMIT 1`` kept one.
+#: ``ORDER BY a.ordinal + 0`` is deliberate: ordering by the bare column offers the
+#: planner a backward walk of the unique ``ordinal`` index filtered by
+#: ``conversation_id``, which passes every newer answer of every other conversation
+#: before it reaches this conversation's own; the expression is not that index's
+#: order, so the lookup stays on ``idx_answers_conversation`` (a handful of rows).
+#: A conversation without answers has no ``last`` row (both columns NULL, which
+#: reads as no reasoning and no report). ``submitted_via`` is the shared
+#: ``CONVERSATION_ENTRY_POINT_SQL`` over ``c`` and does not touch ``last``.
+LIST_CONVERSATIONS_SQL = (
+    "SELECT c.id, c.notebook_id, c.title, c.updated_at, "
+    "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) AS turn_count, "
+    "(COALESCE(jsonb_array_length(CASE "
+    "WHEN jsonb_typeof(last.payload->'reasoning_trace')='array' "
+    "THEN last.payload->'reasoning_trace' ELSE '[]'::jsonb END), 0) > 0) AS used_reasoning, "
+    + CONVERSATION_ENTRY_POINT_SQL + " AS submitted_via, "
+    "last.payload->'linked_report' AS linked_report "
+    "FROM conversations c "
+    "LEFT JOIN LATERAL (SELECT a.ordinal FROM answers a "
+    "  WHERE a.conversation_id = c.id ORDER BY a.ordinal + 0 DESC LIMIT 1) newest ON true "
+    "LEFT JOIN answers last ON last.ordinal = newest.ordinal "
+    "WHERE c.notebook_id = %s AND c.created_by = %s "
+    "ORDER BY c.updated_at DESC, c.id COLLATE \"C\""
+)
+
+
 class AskStateStore:
     def __init__(self, database: PostgresDatabase, seams) -> None:
         self.database = database
@@ -1315,13 +1348,17 @@ class AskStateStore:
             ).fetchall():
                 turn_via.setdefault(job_row["answer_id"], job_row["submitted_via"] or "")
             # The in-flight turn's report title is the report's CURRENT
-            # question (``LinkedReportRef``): a deleted report matches no row,
-            # so the title reads ''. The join is on reports' primary key; a job
-            # with no report has report_id '' and matches nothing.
+            # question (``LinkedReportRef``). Only the asker's own report of
+            # this notebook counts -- the same gate a follow-up passes before
+            # a job exists -- so a deleted report, another notebook's, or
+            # another member's matches no row and the title reads ''. The join
+            # is on reports' primary key; a job with no report has report_id
+            # '' and matches nothing.
             job = db.execute(
                 "SELECT j.id, j.question, j.asked_at, j.mode, j.report_id, "
                 "r.question AS report_title FROM ask_jobs j "
                 "LEFT JOIN reports r ON r.id = j.report_id AND r.notebook_id = j.notebook_id "
+                "AND r.created_by = j.created_by "
                 "WHERE j.conversation_id=%s AND j.status='running' "
                 "ORDER BY j.created_at DESC, j.id COLLATE \"C\" DESC LIMIT 1",
                 (conversation_id,),
@@ -1408,25 +1445,7 @@ class AskStateStore:
         updated first) with a per-conversation turn count.  The notebook-
         existence KeyError guard stays with the facade adapter."""
         with self.database.connect() as db:
-            rows = db.execute(
-                "SELECT c.id, c.notebook_id, c.title, c.updated_at, "
-                "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) AS turn_count, "
-                "(SELECT COALESCE(jsonb_array_length(CASE "
-                "WHEN jsonb_typeof(a.payload->'reasoning_trace')='array' "
-                "THEN a.payload->'reasoning_trace' ELSE '[]'::jsonb END), 0) > 0 "
-                "   FROM answers a WHERE a.conversation_id = c.id "
-                "  ORDER BY a.ordinal DESC LIMIT 1) AS used_reasoning, "
-                + CONVERSATION_ENTRY_POINT_SQL + " AS submitted_via, "
-                # The report the LAST answer's receipt names (the same last
-                # answer as ``used_reasoning``): a jsonb object, NULL when that
-                # turn attached none.
-                "(SELECT a.payload->'linked_report' "
-                "   FROM answers a WHERE a.conversation_id = c.id "
-                "  ORDER BY a.ordinal DESC LIMIT 1) AS linked_report "
-                "FROM conversations c WHERE c.notebook_id = %s AND c.created_by = %s "
-                "ORDER BY c.updated_at DESC, c.id COLLATE \"C\"",
-                (notebook_id, user_id),
-            ).fetchall()
+            rows = db.execute(LIST_CONVERSATIONS_SQL, (notebook_id, user_id)).fetchall()
         return [
             ConversationSummary(
                 id=row["id"],

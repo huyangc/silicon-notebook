@@ -10,7 +10,7 @@ import json
 import pytest
 
 from app.core.config import Settings
-from app.models.schemas import AskResponse
+from app.models.schemas import AskResponse, TraceStep
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
 from tests import conversation_linked_report_cases as cases
@@ -33,7 +33,7 @@ def _save_turn(repo):
     store = repo._runtime.ask_state
     uid = repo.current_user().id
 
-    def save(notebook_id, conversation_id, question, receipt):
+    def save(notebook_id, conversation_id, question, receipt, reasoning=False):
         with store.database.write() as db:
             store.database.begin_guarded_write(db)
             conversation_id = store.ensure_conversation(
@@ -41,7 +41,9 @@ def _save_turn(repo):
         store.save_answer(
             notebook_id, conversation_id, question,
             AskResponse(
-                conclusion="c", conversation_id=conversation_id, linked_report=receipt),
+                conclusion="c", conversation_id=conversation_id, linked_report=receipt,
+                reasoning_trace=(
+                    [TraceStep(step_type="answer", summary="s")] if reasoning else [])),
             uid,
         )
         return conversation_id
