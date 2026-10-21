@@ -52,6 +52,7 @@ const LONG_TASK_BUTTONS = [
   { match: "decideMerge(", module: "kg-graph-view.tsx", why: "待确认合并落决定:确认分支连带跑全量重建,两颗按钮都需防重复提交;删除知识图谱在跑时候选正被清掉", requires: ["kgGraph.rebuilding", "kgGraph.deleting"] },
   { match: "runFindDuplicates(", why: "查重:全库归一化比对,大库不是瞬时的" },
   { match: "onMerge(", module: "duplicate-group-list.tsx", why: "重复条目合并:连带重拉列表/类型统计并重跑一次查重", requires: "mergingId" },
+  { match: "onRestore(", module: "duplicate-group-list.tsx", why: "恢复合并时弃用的本人条目:连带重拉列表/类型统计并重跑本人那一段", requires: "busyId" },
   { match: "reviewAllMerges", module: "kg-graph-view.tsx", why: "全部自动判重:POST 在飞期间也不能再点(job id 还没回来);删除知识图谱在跑时候选正被清掉", requires: ["kgGraph.reviewAllStarting", "kgGraph.deleting"] },
   { match: "retryIndexingPipelineRebuild(", why: "索引管线重试重建:排全库重建 job,成功后按钮随投影翻 pending 卸载,失败态可再点是合法重试", requires: "editor?.busy" },
   { match: "revertIndexingPipelineToBuiltin(", why: "切回内建索引管线:同上,排全库重建 job", requires: "editor?.busy" },
@@ -157,7 +158,8 @@ test("搬出 page.tsx 的长任务按钮:page.tsx 传进去的是真正的在飞
   }
 
   // 查重结果的两段(共享组、「我的记忆里的重复」)由 DuplicateResults 统一持有合并中状态:
-  // page.tsx 只挂它一处,它的两处 DuplicateGroupList 都接真正的 mergingId 与 runMerge。
+  // page.tsx 只挂它一处,它的两处 DuplicateGroupList 都接真正的 mergingId 与 runWrite,
+  // 「恢复」那一列的 busyId 也接同一个在飞位。
   const results = jsxElements(page, "DuplicateResults");
   assert.equal(results.length, 1, "page.tsx 应当恰好挂一处 DuplicateResults");
   assert.equal(results[0].bindings.onMerge, "onMerge", "DuplicateResults 的 onMerge 没有接到面板的 onMerge");
@@ -169,8 +171,12 @@ test("搬出 page.tsx 的长任务按钮:page.tsx 传进去的是真正的在飞
       duplicate.bindings.mergingId, "mergingId",
       "DuplicateGroupList 的 mergingId 没有接到真正的合并中状态——合并按钮连点会重复合并",
     );
-    assert.match(duplicate.bindings.onMerge ?? "", /runMerge\(/, "DuplicateGroupList 的 onMerge 没有接到 runMerge");
+    assert.match(duplicate.bindings.onMerge ?? "", /runWrite\(/, "DuplicateGroupList 的 onMerge 没有接到 runWrite");
   }
+  const restores = jsxElements(list, "MergedAwayList");
+  assert.equal(restores.length, 1, "DuplicateResults 应当恰好挂一处 MergedAwayList");
+  assert.equal(restores[0].bindings.busyId, "mergingId", "MergedAwayList 的 busyId 没有接到真正的在飞位");
+  assert.match(restores[0].bindings.onRestore ?? "", /runWrite\(/, "MergedAwayList 的 onRestore 没有接到 runWrite");
 });
 
 test("page.tsx 的长任务 file input 也带非平凡的 disabled，且表达式里含在飞标志", async () => {

@@ -926,8 +926,13 @@ export type KnowledgeRef = { id: string; object_type: string; headline: string; 
 export type DuplicateGroup = { object_type: string; similarity: number; members: KnowledgeRef[] };
 /** 「查重」的两个分区:共享重复组(`/duplicates`)与本人记忆里的重复(`/duplicates/own-memory`)。 */
 export type DuplicatePartition = "shared" | "own";
-/** 一次合并的结果,就地显示在发起合并的那一组旁边(不走页顶提示)。 */
-export type MergeOutcome = { tone: "done" | "failed"; text: string };
+/** 本人记忆分区的一次读取:重复组,以及合并时弃用、仍带合并记录、可以恢复的条目。 */
+export type OwnMemoryDuplicates = { groups: DuplicateGroup[]; merged_away: KnowledgeRef[] };
+/**
+ * 一次合并或恢复的结果,就地显示在发起它的那一组(或那一行)旁边,不走页顶提示。
+ * `stale`:写入成功了,但这一段没能重新读取。
+ */
+export type MergeOutcome = { tone: "done" | "failed" | "stale"; text: string };
 export type NotebookAnalytics = {
   /** 提问数已含归入本库的全局问答;`answers_global` 是其中全局问答那一份。 */
   answers_total: number;

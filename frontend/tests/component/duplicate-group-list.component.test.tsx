@@ -5,6 +5,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import {
   DuplicateGroupList,
   DuplicateResults,
+  MERGED_AWAY_TITLE,
   MERGE_RESULT_HOLD_MS,
   OWN_DUPLICATES_HINT,
   OWN_DUPLICATES_TITLE,
@@ -78,7 +79,8 @@ test("合并按钮不出现在每组第一条上，点击第二条调用 onMerge
   const buttons = screen.getAllByRole("button", { name: "合并到第 1 条" });
   expect(buttons).toHaveLength(1);
   await user.click(buttons[0]);
-  expect(onMerge).toHaveBeenCalledWith("g1-b", "g1-a");
+  // the third argument is the group's place on the page (where its result goes back)
+  expect(onMerge).toHaveBeenCalledWith("g1-b", "g1-a", 0);
 });
 
 test("只读模式不渲染合并按钮", () => {
@@ -159,18 +161,27 @@ test("合并在途时按钮改写为合并中并禁用两段的按钮，结果�
   }
 });
 
-test("合并后那一组消失时，结果显示在该分区列表最上方；本人分区留到结果收起", async () => {
+test("合并后那一组消失时，结果放回它原来的位置，不在段顶；本人分区留到结果收起", async () => {
   const user = userEvent.setup();
   const onMerge = vi.fn().mockResolvedValue({ tone: "done", text: "已合并，原条目已弃用" });
+  const groups = [group("a"), group("b"), group("c")];
   const { rerender } = render(
-    <DuplicateResults shared={[]} own={[group("m")]} canMergeShared canMergeOwn onMerge={onMerge} />,
+    <DuplicateResults shared={[]} own={groups} canMergeShared canMergeOwn onMerge={onMerge} />,
   );
-  await user.click(within(ownSection()!).getByRole("button", { name: "合并到第 1 条" }));
-  expect(onMerge).toHaveBeenCalledWith("m-2", "m-1", "own");
+  const second = within(ownSection()!).getByText("b-2").closest(".dup-member") as HTMLElement;
+  await user.click(within(second).getByRole("button", { name: "合并到第 1 条" }));
+  expect(onMerge).toHaveBeenCalledWith("b-2", "b-1", "own");
+  // the pair is gone after the merge: the result takes its place, between a and c
+  rerender(<DuplicateResults shared={[]} own={[group("a"), group("c")]} canMergeShared canMergeOwn onMerge={onMerge} />);
+  const section = ownSection()!;
+  const status = within(section).getByRole("status");
+  expect(status).toHaveTextContent("已合并，原条目已弃用");
+  const order = Array.from(section.querySelectorAll(".item, [role=status]")).map((node) =>
+    node.getAttribute("role") === "status" ? "result" : node.querySelector(".dup-member span")?.textContent?.slice(0, 3));
+  expect(order).toEqual(["a-1", "result", "c-1"]);
+  // the only pair merged: the section stays until the result clears
   rerender(<DuplicateResults shared={[]} own={[]} canMergeShared canMergeOwn onMerge={onMerge} />);
-  const section = ownSection();
-  expect(section).not.toBeNull();
-  expect(within(section!).getByRole("status")).toHaveTextContent("已合并，原条目已弃用");
+  expect(within(ownSection()!).getByRole("status")).toHaveTextContent("已合并，原条目已弃用");
 });
 
 test("失败的结果(409/404 的文案)同样就地显示，用失败样式", async () => {
@@ -181,4 +192,65 @@ test("失败的结果(409/404 的文案)同样就地显示，用失败样式", a
   const result = await screen.findByRole("status");
   expect(result).toHaveTextContent("这条已不在了");
   expect(result).toHaveClass("dup-merge-result-failed");
+});
+
+test("一段没能读取时如实说明，不显示「未发现重复」", () => {
+  render(
+    <DuplicateResults
+      shared={null} own={[]} failures={{ shared: "服务暂时不可用，请稍后再试" }}
+      canMergeShared canMergeOwn onMerge={vi.fn()}
+    />,
+  );
+  expect(screen.getByRole("alert")).toHaveTextContent("共享重复组没能读取：服务暂时不可用，请稍后再试");
+  expect(screen.queryByText("未发现重复。")).not.toBeInTheDocument();
+});
+
+test("本人那一段没能读取时，在那一段里说明", () => {
+  render(
+    <DuplicateResults
+      shared={[]} own={null} failures={{ own: "服务暂时不可用，请稍后再试" }}
+      canMergeShared canMergeOwn onMerge={vi.fn()}
+    />,
+  );
+  expect(within(ownSection()!).getByRole("alert")).toHaveTextContent("我的记忆里的重复没能读取");
+});
+
+test("合并时弃用的本人条目可以就地恢复，结果放在那一行原来的位置", async () => {
+  const user = userEvent.setup();
+  let finish: (value: { tone: "done"; text: string }) => void = () => {};
+  const onRestore = vi.fn(() => new Promise<{ tone: "done"; text: string }>((resolve) => { finish = resolve; }));
+  const merged = [
+    { id: "m-x", object_type: "concept", headline: "条目甲", status: "deprecated" },
+    { id: "m-y", object_type: "concept", headline: "条目乙", status: "deprecated" },
+  ];
+  const { rerender } = render(
+    <DuplicateResults shared={null} own={[]} ownMergedAway={merged}
+      canMergeShared={false} canMergeOwn onMerge={vi.fn()} onRestore={onRestore} />,
+  );
+  const section = ownSection()!;
+  expect(within(section).getByText(MERGED_AWAY_TITLE)).toBeInTheDocument();
+  const row = within(section).getByText("条目甲").closest(".dup-merged-away-row") as HTMLElement;
+  await user.click(within(row).getByRole("button", { name: "恢复" }));
+  expect(onRestore).toHaveBeenCalledWith("m-x");
+  expect(within(section).getByRole("button", { name: "恢复中…" })).toBeDisabled();
+  expect(within(section).getByRole("button", { name: "恢复" })).toBeDisabled();
+  await act(async () => { finish({ tone: "done", text: "已恢复" }); });
+  // restored: the row leaves the list; the result stays where it was, above 条目乙
+  rerender(
+    <DuplicateResults shared={null} own={[group("m")]} ownMergedAway={[merged[1]]}
+      canMergeShared={false} canMergeOwn onMerge={vi.fn()} onRestore={onRestore} />,
+  );
+  const list = ownSection()!.querySelector(".dup-merged-away") as HTMLElement;
+  const order = Array.from(list.querySelectorAll(".dup-merged-away-row, [role=status]")).map((node) =>
+    node.getAttribute("role") === "status" ? node.textContent : node.querySelector("span")?.textContent?.slice(0, 3));
+  expect(order).toEqual(["已恢复", "条目乙"]);
+});
+
+test("不能合并本人条目的地方(镜像)不画「恢复」", () => {
+  const merged = [{ id: "m-x", object_type: "concept", headline: "条目甲", status: "deprecated" }];
+  render(
+    <DuplicateResults shared={[]} own={[]} ownMergedAway={merged}
+      canMergeShared={false} canMergeOwn={false} onMerge={vi.fn()} onRestore={vi.fn()} />,
+  );
+  expect(screen.queryByRole("button", { name: "恢复" })).not.toBeInTheDocument();
 });

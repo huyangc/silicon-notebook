@@ -318,6 +318,7 @@ import {
   type KgObject,
   type KnowledgeItem,
   type KnowledgeKind,
+  type KnowledgeRef,
   type KnowledgeTypeCount,
   type MemoryRecord,
   type MergeOutcome,
@@ -6086,6 +6087,9 @@ export default function Home() {
                     onFindDuplicates={kgWorkspace.findDuplicates}
                     onMerge={kgWorkspace.mergeKnowledge}
                     ownDuplicates={kgKnowledge.ownDuplicates}
+                    ownMergedAway={kgKnowledge.ownMergedAway}
+                    duplicateFailures={kgKnowledge.duplicateFailures}
+                    onRestoreOwn={kgWorkspace.restoreOwnMemoryObject}
                     canMergeOwnMemory={capabilities.canMergeOwnMemory}
                     reload={kgWorkspace.refreshKnowledge}
                     tier={currentNotebook?.tier}
@@ -8160,6 +8164,9 @@ function KnowledgeBrowser({
   onFindDuplicates,
   onMerge,
   ownDuplicates,
+  ownMergedAway,
+  duplicateFailures,
+  onRestoreOwn,
   canMergeOwnMemory,
   reload,
   tier,
@@ -8190,6 +8197,11 @@ function KnowledgeBrowser({
   ) => Promise<MergeOutcome | null> | void;
   /** 本人记忆分区(`null` = 还没点「查重」)。 */
   ownDuplicates: DuplicateGroup[] | null;
+  /** 本人合并时弃用、可以恢复的条目(`null` = 还没点「查重」)。 */
+  ownMergedAway: KnowledgeRef[] | null;
+  /** 哪一段这一次没能读取,值是原因。 */
+  duplicateFailures: Partial<Record<DuplicatePartition, string>>;
+  onRestoreOwn: (id: string) => Promise<MergeOutcome | null> | void;
   /** 合并本人两条记忆对象只要读权;镜像上为 false。 */
   canMergeOwnMemory: boolean;
   reload: () => void;
@@ -8241,10 +8253,14 @@ function KnowledgeBrowser({
           </button>
         )}
       </div>
-      {(duplicates !== null || ownDuplicates !== null) && (
+      {(duplicates !== null || ownDuplicates !== null
+        || Object.keys(duplicateFailures).length > 0) && (
         <DuplicateResults
           shared={duplicates}
           own={ownDuplicates}
+          ownMergedAway={ownMergedAway}
+          failures={duplicateFailures}
+          onRestore={onRestoreOwn}
           canMergeShared={!readOnly}
           canMergeOwn={canMergeOwnMemory}
           onMerge={onMerge}

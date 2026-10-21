@@ -130,6 +130,7 @@ export function useKgWorkspace({
     updateKnowledge: knowledge.updateKnowledge,
     findDuplicates: knowledge.findDuplicates,
     mergeKnowledge: knowledge.mergeKnowledge,
+    restoreOwnMemoryObject: knowledge.restoreOwnMemoryObject,
     loadKnowledgeContext: knowledge.loadKnowledgeContext,
     openSchemas: schema.openSchemas,
     closeSchemas: schema.closeSchemas,

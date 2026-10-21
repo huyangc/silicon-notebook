@@ -2000,8 +2000,13 @@ id）、`POST …/knowledge/{knowledge_id}/promote`、`POST /api/notebooks/{note
 不透露另一侧对象存不存在、是什么。PostgreSQL 上她本人的一对遇到并发修改时同样回 409「要合并的知识对象刚被修改，
 请稍后重试」；不是她本人一对的请求在任何加锁之前就由一次不加锁的读取拒绝，所以她拿别人的或共享的对象 id 既不会
 排在别的写入后面，也不会挡住它们。镜像库上读权这条路不开（与 `knowledge:write` 的围栏同口径），只读成员的合并一律回答上面那个 404。
-只读成员没有 `PATCH` 权限，合并之后不能自己把被并走的那条改回已批准；拥有合并结果的那条记忆被编辑、转移或删除时
-照下文自动恢复。合并之后，删除、转移或编辑其中一条记忆，只从另一条记忆拥有的对象上摘掉这条记忆的证据，不会连带
+`PATCH …/knowledge/{knowledge_id}` 同样只要求读权、同样分两条路（用户裁决 2026-10-22）：有 `knowledge:write` 的
+调用者照旧；只读成员只能对「主来源是她本人的记忆、证据每一条都出自她本人在本库记忆来源」的对象改状态，且只在已批准与
+已弃用之间改（撤销或重做她自己的合并），判定以存储层加锁读回的那一行为准、任何写入之前（PostgreSQL 上同样先由一次
+不加锁的读取拒绝）；改内容、改负责人、改成别的状态、改共享对象或别人的对象、改带共享证据的本人对象、未知 id，都回答
+同一个 404，且一行不写。手动改状态照 #957 的规则清掉被并走对象的 `_merged_into`、保留目标上的 `_absorbs`。镜像库上
+这条路同样不开（只读成员 404、管理者 409）。两条写路由在 FastAPI 校验请求体时就先回 422（例如缺 `into_id`、字段类型
+不对），这一步早于上面所有 404 / 409 的判定，对任何调用者都一样，不暴露对象信息。合并之后，删除、转移或编辑其中一条记忆，只从另一条记忆拥有的对象上摘掉这条记忆的证据，不会连带
 删除它；编辑会把被编辑的记忆重新抽取成它自己的新对象。编辑、转移或删除拥有合并结果的那条记忆，会随它清掉合并
 结果；清掉之前，直接并进来的每个对象若仍是弃用状态、且它自己的记忆仍在，就恢复为已批准，重新可以被检索到（用户
 裁决 2026-10-21）；记忆已不在的对象不恢复。记录放在被并走的那条对象自己身上：合并把目标 id 写进它 payload 里一个
@@ -2048,21 +2053,28 @@ PostgreSQL 上，拆除先用一条按 id 排序的语句锁住它要写的全�
 得到的公共库（同步导入按表复制笔记本行，不经过发布）。边审核队列、铃铛里的「关系审核」计数与共享重复分组
 （`GET …/duplicates`）对所有人都不列出由记忆生成的行，记忆的主人也不例外。
 
-**本人的重复组。** `GET /api/notebooks/{id}/duplicates/own-memory?type=` 只回答调用者本人：她本人的、未弃用的、
-所选类型的记忆派生对象里，证据每一条都出自她本人在本库记忆来源的那些（与上文合并判据逐个对象相同，所以列出的
-每一对都能合并），按与共享查重相同的规则成组——规范化名称种子、缩写别名、相似度提示与排序（大组在前）。要求
-笔记本读权；其他成员、系统管理员、没有 `memory:read` 的令牌都得到 `[]`（不是 404），与本人在本库没有记忆时相同。
+**本人的重复组。** `GET /api/notebooks/{id}/duplicates/own-memory?type=` 只回答调用者本人，返回
+`{groups, merged_away}`。`groups`：她本人的、未弃用的、所选类型的记忆派生对象里，证据每一条都出自她本人在本库记忆
+来源的那些（与上文合并判据逐个对象相同，所以列出的每一对都能合并），按与共享查重相同的规则成组——规范化名称种子、
+缩写别名、相似度提示与排序（大组在前）。`merged_away`：同样口径的本人对象里，已弃用且仍带合并记录（`_merged_into`，
+即合并时弃用、之后没有手动改过）的那些，是她可以用上文的状态 `PATCH` 恢复的条目；手动弃用的不在里面。要求笔记本
+读权；其他成员、系统管理员、没有 `memory:read` 的令牌都得到两个空列表（不是 404），与本人在本库没有记忆时相同。
 它是单独的端点：`/duplicates` 返回裸数组，加一个只给本人的字段会改变它对每个客户端的形状；共享分组、它的读取与
-响应逐字节不变。两者都不缓存。本人分组只按调用者身份读取，不构建整库的查看者范围：一条语句经记忆/Knowhow 来源的
-部分索引读出她本人在本库的记忆来源（没有就到此为止），有的话再经来源索引读她的对象，两条都随她在本库的记忆量增长、
-不随笔记本规模增长。它不进
-合并建议，也不经模型复核。
+响应逐字节不变。两者都不缓存。本人分组只按调用者身份读取，不构建整库的查看者范围，读法与共享查重同形、分两遍：
+第一遍一条语句，经记忆/Knowhow 来源的部分索引取她本人在本库的记忆来源、再经来源索引读她的对象，只取 id、状态与
+名称（procedure 另带 payload，种子要读步骤），「证据全出自本人记忆」的判定在语句里完成；第二遍只为成组的成员与
+`merged_away` 按 id 读 payload。两遍都随她在本库的记忆量增长、不随笔记本规模增长。证据不是数组时，`null`、`{}`
+与空字符串按「没有证据」处理（与合并的读法一致），其余形状一律不列入。它不进合并建议，也不经模型复核。
 
 知识浏览器的「查重」把它显示为共享组下方单独一段「我的记忆里的重复」，说明「这些条目来自你的个人记忆，只有你能
-看到」，默认展开、单独分页，没有本人组时不显示。只读成员也有「查重」，但只有这一段、不请求共享 `/duplicates`；
-镜像库上不显示「查重」。两段的合并结果就地显示在被合并进的那一组里（那一组不在该段当前这一页上时——因合并而只剩
-一条、不再成组，或重排后到了别的页——显示在该段列表最上方），按时收起，不再用页顶提示：成功显示「已合并，原条目已弃用」；409 原样显示服务端文案并重拉该段；
-404 显示「这条已不在了」并重拉该段。合并在途时按钮改为「合并中…」，两段的合并按钮一起禁用。
+看到」，默认展开、单独分页，没有本人组也没有可恢复的条目时不显示。这一段末尾是「合并时弃用的条目」（说明「恢复后，
+这一条会重新出现在你的检索结果里」），每行一个「恢复」，即上文的状态 `PATCH`。只读成员也有「查重」，但只有这一段、
+不请求共享 `/duplicates`；知识列表里她的已弃用对象照旧只读显示状态，恢复入口只在这一段。镜像库上不显示「查重」。
+合并与恢复的结果就地显示：被合并进的那一组（或那一行）还在当前页上时显示在它里面；它因这次写入而离开列表（合并后
+只剩一条不再成组、恢复后不再属于「合并时弃用」）时，显示在它原来的位置；按时收起，不再用页顶提示。成功显示「已合并，
+原条目已弃用」或「已恢复」；写入成功但这一段没能重新读取时显示「已保存，但这一段没能刷新，请重新点「查重」」；409
+原样显示服务端文案并重拉该段；404 显示「这条已不在了」并重拉该段。写入在途时按钮改为「合并中…」/「恢复中…」，
+两段的按钮一起禁用。某一段没能读取时在它的位置说明「…没能读取：原因」，不显示「未发现重复。」。
 
 **体检。** `GET /api/notebooks/{id}/checkup` 同时列出四个只读项：H9（升级后本库知识图谱待后台一次性检查
 整理）、H10（经通用申请路径已收录到公共知识库的记忆派生对象数）、H11（公共知识库仍持有的记忆来源数，见上）与 H12（无主
@@ -3458,7 +3470,7 @@ MCP 任务**签发限时链接（`answer_links` 表，SQLite v94 / PostgreSQL `0
 - `GET /api/notebooks/{id}/understanding/experiences` —— 这本笔记本自己那一份检索策略经验；任意有读权的成员；返回 `enabled`（跟随 `RETRIEVAL_EXPERIENCE_ENABLED`）、`count`、`updated_at`、`can_manage`、`entries`——见[检索策略经验](#检索策略经验)
 - `POST /api/notebooks/{id}/understanding/experiences/distill` —— 需要 `agent_profile:write`（无此能力 404）；手动排一次整理，单飞占用、`RETRIEVAL_EXPERIENCE_ENABLED` 关闭、或冷却期内（上一批完成不足 10 分钟且无新提问）返回 409，三种文案各不相同
 - `DELETE /api/notebooks/{id}/understanding/experiences` —— 权限口径同上；清空这本笔记本那一份，返回 `{removed}`；该分区正在整理或排队时 409 且一行不删；总闸关闭时照常可删
-- `GET /api/notebooks/{id}/knowledge-types`、`GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`、`PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
+- `GET /api/notebooks/{id}/knowledge-types`、`GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`、`PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`（读权；只读成员只能在已批准与已弃用之间改本人记忆对象的状态，见「知识图谱里的记忆」）
 - `GET /api/notebooks/{id}/graph`
 - Knowhow 表：`GET|POST /api/notebooks/{id}/knowhow`、`GET|PATCH|DELETE .../knowhow/{table_id}`、`POST .../knowhow/{table_id}/reproject`——另有导入（`POST .../knowhow/import/preview`、`POST .../knowhow/import`）、列/行/格编辑（`POST .../knowhow/{table_id}/columns`、`PATCH|DELETE .../columns/{column_id}`、`POST .../knowhow/{table_id}/rows`、`DELETE .../rows/{row_id}`、`PATCH .../rows/{row_id}/cells/{column_id}`）、Excel 模板往返（`GET .../knowhow/{table_id}/template`、`POST .../knowhow/{table_id}/append` 配 `mode=preview|commit`）、显式的建议式表达优化（`POST .../rows/{row_id}/cells/{column_id}/optimize`）、带全库推理取证的单行空列补全建议（`POST .../knowhow/{table_id}/rows/{row_id}/complete`，可选 `target_column_ids`，返回 `retrieval_mode` + `retrieval_scope` + `retrieval_status` + `reasoning_trace` + `evidence` + `suggestions`），以及确定性/LLM 辅助的格子格式化（`POST .../rows/{row_id}/cells/{column_id}/reformat`）。官方网页端使用对应的 `optimize/stream`、`complete/stream` 与 `reformat/stream` 变体；JSON 路由保持兼容。
 - `GET /api/notebooks/{id}/search?q=`

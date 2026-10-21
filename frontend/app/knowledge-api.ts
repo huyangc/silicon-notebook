@@ -5,6 +5,7 @@ import type {
   KnowledgeKind,
   KnowledgeTypeCount,
   ObjectSchema,
+  OwnMemoryDuplicates,
   PaginatedKnowledge,
 } from "./workspace-model.ts";
 
@@ -39,7 +40,7 @@ export const findDuplicates = (nb: string, kind: KnowledgeKind) =>
 
 /** 只由调用者本人记忆支撑的重复组;共享 `/duplicates` 对所有人都不列这些对象。 */
 export const findOwnMemoryDuplicates = (nb: string, kind: KnowledgeKind) =>
-  requestJson<DuplicateGroup[]>(
+  requestJson<OwnMemoryDuplicates>(
     `/notebooks/${nb}/duplicates/own-memory?type=${encodeURIComponent(kind)}`,
     options,
   );

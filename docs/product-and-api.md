@@ -2757,9 +2757,18 @@ about whether the other object exists or what it is. On PostgreSQL her own pair 
 not hers is refused by an unlocked read before any lock is taken, so ids that are not hers neither queue
 her behind other writers nor hold them up. On a mirror the read path
 does not open (the same fence as `knowledge:write`): every merge by a read-only member answers that
-404. A read-only member has no `PATCH`, so after a merge she cannot set the merged-away object back to
-approved herself; it is restored automatically as below when the Memory that owns the result is
-edited, moved or deleted. Once merged, deleting, moving or editing one of the
+404. `PATCH …/knowledge/{knowledge_id}` also requires read access and splits the same way (user ruling
+2026-10-22): a caller with `knowledge:write` keeps the old path; a read-only member may only change
+the status, between approved and deprecated, of an object whose primary source is her own Memory and
+whose evidence entries all cite her own Memory sources in this notebook (undoing or redoing her own
+merge), decided on the row the store locked, before anything is written (on PostgreSQL an unlocked
+read refuses first, as for the merge). Editing the content or the owner, any other status, a shared
+or someone else's object, her own object carrying shared evidence, an unknown id — all answer the same
+404 and write nothing. The hand status change follows #957's rule: it drops the merged-away object's
+`_merged_into` and keeps the target's `_absorbs`. On a mirror this path does not open either (reader
+404, writer 409). On both write routes FastAPI's request-body validation answers 422 first (a missing
+`into_id`, a field of the wrong type), before every 404 / 409 above, the same for every caller and
+saying nothing about any object. Once merged, deleting, moving or editing one of the
 two Memories strips only that Memory's entries from the object the other Memory owns — it is never
 deleted with them; an edit re-extracts the edited Memory into fresh objects of its own. Editing,
 moving or deleting the Memory that owns the merge result clears the result with that Memory; just
@@ -2842,30 +2851,41 @@ duplicate groups (`GET …/duplicates`) leave Memory-derived rows out for everyo
 included.
 
 **The owner's duplicate groups.** `GET /api/notebooks/{id}/duplicates/own-memory?type=` answers the
-caller alone: among her own live Memory-derived objects of the requested type, those whose evidence
-entries all cite her own Memory sources in this notebook (the merge rule above, judged one object at a
-time, so every listed pair merges), grouped by the same rules as the shared groups — normalized-name
-seed, acronym alias, similarity hint and order (larger groups first). It requires notebook read
-access; another member, a site admin and a token without `memory:read` all get `[]` (not 404), the
-same answer as a caller who owns no Memory here. It is a route of its own because `/duplicates`
+caller alone with `{groups, merged_away}`. `groups`: among her own live Memory-derived objects of the
+requested type, those whose evidence entries all cite her own Memory sources in this notebook (the
+merge rule above, judged one object at a time, so every listed pair merges), grouped by the same
+rules as the shared groups — normalized-name seed, acronym alias, similarity hint and order (larger
+groups first). `merged_away`: her objects of the same kind that are deprecated and still carry a
+merge record (`_merged_into`: deprecated by a merge and not touched by hand since), the ones she can
+restore with the status `PATCH` above; hand-deprecated objects are not listed. It requires notebook
+read access; another member, a site admin and a token without `memory:read` all get two empty lists
+(not 404), the same answer as a caller who owns no Memory here. It is a route of its own because `/duplicates`
 answers a bare list, so a field only for the owner would change its shape for every client; the
 shared groups, their read and their response bytes are unchanged. Neither is cached. The owner's
-groups are read by the caller's identity alone, with no notebook-wide viewer scope: one statement reads
-her own Memory sources in the notebook through the partial Memory/Knowhow source index (and stops there
-when she has none), and only then a second reads her objects through their source index; both grow with
-her Memory in the notebook, not with the notebook. They take no part in merge
-suggestions or model review.
+groups are read by the caller's identity alone, with no notebook-wide viewer scope, in two passes shaped
+like the shared read: pass 1 is one statement that reaches her own Memory sources through the partial
+Memory/Knowhow source index and her objects through their source index, returns only id, status and
+name (plus the payload for a procedure, whose seed reads the steps), and judges "every evidence entry
+is her own Memory" in the statement; pass 2 reads payloads by id for the group members and
+`merged_away` only. Both grow with her Memory in the notebook, not with the notebook. Evidence that is
+not an array counts as no evidence when it is `null`, `{}` or the empty string (as the merge reads it)
+and is not listed otherwise. They take no part in merge suggestions or model review.
 
 The knowledge browser's 「查重」 shows them as a section of their own below the shared groups,
 「我的记忆里的重复」, with the line 「这些条目来自你的个人记忆，只有你能看到」, expanded and paged on its
-own, and absent when she has no such group. A read-only member gets 「查重」 too, with only that
-section; she never asks for the shared `/duplicates`. Mirrors show no 「查重」. Both sections answer a
-merge where it happened — in the group merged into, or at the top of that section's list when that
-group is not on the section's current page (the merge left it with a single member, or the reorder moved
-it to another page) — and clear the answer on their own timer, instead of a
-page toast: success 「已合并，原条目已弃用」; a 409 shows the server's words and reloads that section;
-a 404 shows 「这条已不在了」 and reloads that section. While a merge runs its button reads 「合并中…」
-and every merge button of both sections is disabled.
+own, and absent when she has neither such a group nor anything to restore. The section ends with
+「合并时弃用的条目」 (「恢复后，这一条会重新出现在你的检索结果里」), one 「恢复」 per row — the
+status `PATCH` above. A read-only member gets 「查重」 too, with only that section; she never asks for
+the shared `/duplicates`. In the knowledge list her deprecated objects still show their status
+read-only; restoring lives in this section. Mirrors show no 「查重」. Merges and restores answer where
+they happened: inside the group merged into (or the row) while it is on the current page, and at its
+former place when the write took it off the list (a merge left a single member, a restore moved it
+out of 「合并时弃用的条目」), clearing on their own timer, instead of a page toast: success
+「已合并，原条目已弃用」 or 「已恢复」; a write that succeeded while the section could not be read
+again 「已保存，但这一段没能刷新，请重新点「查重」」; a 409 shows the server's words and reloads that
+section; a 404 shows 「这条已不在了」 and reloads that section. While a write runs its button reads
+「合并中…」 / 「恢复中…」 and every button of both sections is disabled. A section that could not be
+read says so in its place (「…没能读取：<reason>」) instead of 「未发现重复。」.
 
 **Checkup.** `GET /api/notebooks/{id}/checkup` also lists four read-only items: H9 (the notebook's
 knowledge graph awaits the one-time background check and rebuild after the upgrade), H10 (approved
@@ -4589,7 +4609,7 @@ Key local beta APIs:
 - `GET /api/notebooks/{id}/understanding/experiences` — this notebook's own slice of the retrieval strategy experience library; any reader; returns `enabled` (follows `RETRIEVAL_EXPERIENCE_ENABLED`), `count`, `updated_at`, `can_manage`, `entries` — see [Retrieval strategy experience](#retrieval-strategy-experience)
 - `POST /api/notebooks/{id}/understanding/experiences/distill` — requires `agent_profile:write` (404 without it); manually schedules one consolidation. 409 with three distinct sentences: the single-flight slot is taken, `RETRIEVAL_EXPERIENCE_ENABLED` is off, or the cooldown holds (last batch under 10 minutes ago with no new asks since)
 - `DELETE /api/notebooks/{id}/understanding/experiences` — same capability split; clears this notebook's slice and returns `{removed}`; 409 deleting nothing while a batch for that slice is running or queued; still allowed while the gate is off
-- `GET /api/notebooks/{id}/knowledge-types`, `GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`, `PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
+- `GET /api/notebooks/{id}/knowledge-types`, `GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`, `PATCH /api/notebooks/{id}/knowledge/{knowledge_id}` (read access; a read-only member only moves her own Memory object between approved and deprecated, see "Memory in the knowledge graph")
 - `GET /api/notebooks/{id}/graph`
 - Knowhow tables: `GET|POST /api/notebooks/{id}/knowhow`, `GET|PATCH|DELETE .../knowhow/{table_id}`, `POST .../knowhow/{table_id}/reproject` — plus import (`POST .../knowhow/import/preview`, `POST .../knowhow/import`), column/row/cell editing (`POST .../knowhow/{table_id}/columns`, `PATCH|DELETE .../columns/{column_id}`, `POST .../knowhow/{table_id}/rows`, `DELETE .../rows/{row_id}`, `PATCH .../rows/{row_id}/cells/{column_id}`), the Excel template round-trip (`GET .../knowhow/{table_id}/template`, `POST .../knowhow/{table_id}/append` with `mode=preview|commit`), an explicit suggestion-only wording rewrite (`POST .../rows/{row_id}/cells/{column_id}/optimize`), reasoning-backed row completion suggestions (`POST .../knowhow/{table_id}/rows/{row_id}/complete`, optional `target_column_ids`, response `retrieval_mode` + `retrieval_scope` + `retrieval_status` + `reasoning_trace` + `evidence` + `suggestions`), and deterministic/LLM-assisted cell reformat (`POST .../rows/{row_id}/cells/{column_id}/reformat`). The official browser uses the corresponding `optimize/stream`, `complete/stream`, and `reformat/stream` variants; the JSON routes remain compatible.
 - `GET /api/notebooks/{id}/search?q=`

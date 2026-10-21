@@ -19,9 +19,11 @@ import type {
   DuplicatePartition,
   KnowledgeItem,
   KnowledgeKind,
+  KnowledgeRef,
   KnowledgeTypeCount,
   MergeOutcome,
   NodeContext,
+  OwnMemoryDuplicates,
   NotebookSummary,
 } from "./workspace-model";
 import { EMPTY_KNOWLEDGE } from "./workspace-model";
@@ -39,6 +41,9 @@ type KgKnowledgePolicy = {
 /** 合并结果的就地文案(见 mergeKnowledge)。 */
 export const MERGE_DONE = "已合并，原条目已弃用";
 export const MERGE_TARGET_GONE = "这条已不在了";
+export const RESTORE_DONE = "已恢复";
+/** 写入成功了,但这一段没能重新读取:不说「已合并」,说此刻该做什么。 */
+export const WRITE_NOT_RELOADED = "已保存，但这一段没能刷新，请重新点「查重」";
 
 type KgKnowledgeEffects = {
   notify: (message: string) => void;
@@ -69,6 +74,8 @@ type KnowledgeRequest = {
 // stand in for so the ternary branches unify.
 const NO_KNOWLEDGE_TYPES: KnowledgeTypeCount[] =
   Object.freeze([] as KnowledgeTypeCount[]) as KnowledgeTypeCount[];
+const NO_DUPLICATE_FAILURES: Partial<Record<DuplicatePartition, string>> =
+  Object.freeze({}) as Partial<Record<DuplicatePartition, string>>;
 const EMPTY_KNOWLEDGE_CONTEXTS: Record<string, NodeContext> =
   Object.freeze({} as Record<string, NodeContext>) as Record<string, NodeContext>;
 
@@ -104,6 +111,11 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
   const [knowledgePage, setKnowledgePage] = useState<Record<string, number>>({});
   const [duplicates, setDuplicates] = useState<DuplicateGroup[] | null>(null);
   const [ownDuplicates, setOwnDuplicates] = useState<DuplicateGroup[] | null>(null);
+  const [ownMergedAway, setOwnMergedAway] = useState<KnowledgeRef[] | null>(null);
+  // 哪一段这一次没能读取(原位如实显示),值是给用户看的原因。
+  const [duplicateFailures, setDuplicateFailures] = useState<
+    Partial<Record<DuplicatePartition, string>>
+  >(NO_DUPLICATE_FAILURES);
   const [knowledgeContexts, setKnowledgeContexts] = useState<Record<string, NodeContext>>({});
   const [knowledgeBusy, setKnowledgeBusy] = useState<string | null>(null);
 
@@ -116,6 +128,8 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
     setKnowledgePage({});
     setDuplicates(null);
     setOwnDuplicates(null);
+    setOwnMergedAway(null);
+    setDuplicateFailures(NO_DUPLICATE_FAILURES);
     setKnowledgeContexts({});
     knowledgeContextRequestsRef.current.clear();
     setKnowledgeBusy(null);
@@ -184,6 +198,8 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
       setKnowledgeStatusFilter("all");
       setDuplicates(null);
       setOwnDuplicates(null);
+      setOwnMergedAway(null);
+      setDuplicateFailures(NO_DUPLICATE_FAILURES);
       setKnowledgeContexts({});
       knowledgeContextRequestsRef.current.clear();
       await loadKnowledgeFor(owner, { kind: nextKind, status: "all", page: 0 });
@@ -202,6 +218,8 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
     setKnowledgeStatusFilter("all");
     setDuplicates(null);
     setOwnDuplicates(null);
+    setOwnMergedAway(null);
+    setDuplicateFailures(NO_DUPLICATE_FAILURES);
     setKnowledgeContexts({});
     knowledgeContextRequestsRef.current.clear();
     void loadKnowledgeFor(owner, { kind, status: "all", page: 0 });
@@ -248,6 +266,8 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
     setKnowledgePage({});
     setDuplicates(null);
     setOwnDuplicates(null);
+    setOwnMergedAway(null);
+    setDuplicateFailures(NO_DUPLICATE_FAILURES);
     setKnowledgeContexts({});
     knowledgeContextRequestsRef.current.clear();
   };
@@ -307,14 +327,31 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
       : findOwnMemoryDuplicates(notebookId, kind)
   );
 
-  const setPartition = (partition: DuplicatePartition, rows: DuplicateGroup[]) => {
-    if (partition === "shared") setDuplicates(rows);
-    else setOwnDuplicates(rows);
+  const setPartition = (
+    partition: DuplicatePartition, rows: DuplicateGroup[] | OwnMemoryDuplicates,
+  ) => {
+    if (partition === "shared") {
+      setDuplicates(rows as DuplicateGroup[]);
+    } else {
+      const own = rows as OwnMemoryDuplicates;
+      setOwnDuplicates(own.groups);
+      setOwnMergedAway(own.merged_away);
+    }
+    setDuplicateFailures((current) => {
+      if (!(partition in current)) return current;
+      const next = { ...current };
+      delete next[partition];
+      return next;
+    });
+  };
+
+  const setPartitionFailure = (partition: DuplicatePartition, error: unknown) => {
+    setDuplicateFailures((current) => ({ ...current, [partition]: toUserMessage(error) }));
   };
 
   // 「查重」:有知识治理权时拉共享组,只读成员不请求共享 `/duplicates`;两种人都拉本人
   // 记忆分区。两个请求并发,各自按 kind 与自己那一段的请求代次落定——一段失败不吞掉
-  // 另一段已经回来的结果。
+  // 另一段已经回来的结果;失败的那一段在原位如实说没能读取,不走页顶提示。
   const findDuplicates = async () => {
     const owner = currentOwner();
     if (!owner) return;
@@ -329,31 +366,72 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
         const rows = await loadPartition(owner.notebookId, kind, partition);
         if (current()) setPartition(partition, rows);
       } catch (error) {
-        if (current()) effectsRef.current.reportError(error);
+        if (current()) setPartitionFailure(partition, error);
       }
     }));
   };
 
-  /** 合并之后(或失败之后)重拉发起合并的那个分区;别的分区不受这次合并影响。 */
+  /**
+   * 合并或恢复之后重拉发起它的那个分区;别的分区不受影响。读取失败时返回 false
+   * (该段原位显示没能读取);被更新的请求取代时返回 true(更新的那次会落定)。
+   */
   const refreshPartition = async (
     owner: KgWorkspaceOwner, kind: KnowledgeKind, partition: DuplicatePartition,
     stillOurs: () => boolean,
-  ) => {
+  ): Promise<boolean> => {
     const requestId = ++duplicateRequestRef.current[partition];
     const current = () => stillOurs() && requestId === duplicateRequestRef.current[partition]
       && knowledgeKindRef.current === kind;
     try {
       const rows = await loadPartition(owner.notebookId, kind, partition);
       if (current()) setPartition(partition, rows);
+      return true;
     } catch (error) {
-      if (current()) effectsRef.current.reportError(error);
+      if (current()) setPartitionFailure(partition, error);
+      return false;
     }
+  };
+
+  /**
+   * 一次写入(合并或恢复)之后的共同收尾:重拉知识列表、类型统计,再重拉这一段。
+   * 列表或类型的重拉被别的请求取代(返回 null)时这一段照样重拉;这一段也没能读取时,
+   * 结果不说「已合并」,改为提示重新查重。
+   */
+  const settleWrite = async (
+    owner: KgWorkspaceOwner, kind: KnowledgeKind, status: string,
+    partition: DuplicatePartition, stillOurs: () => boolean, done: string,
+  ): Promise<MergeOutcome | null> => {
+    knowledgeRequestRef.current += 1;
+    duplicateRequestRef.current[partition] += 1;
+    await loadKnowledgeFor(owner, { kind, status, page: 0 });
+    if (stillOurs()) await loadTypesFor(owner);
+    if (!stillOurs()) return null;
+    const reloaded = await refreshPartition(owner, kind, partition, stillOurs);
+    if (!stillOurs()) return null;
+    return reloaded ? { tone: "done", text: done } : { tone: "stale", text: WRITE_NOT_RELOADED };
+  };
+
+  /** 409 / 404 / 其他失败的就地文案;409 与 404 同时重拉该段。 */
+  const failedWrite = async (
+    owner: KgWorkspaceOwner, kind: KnowledgeKind, partition: DuplicatePartition,
+    stillOurs: () => boolean, error: unknown,
+  ): Promise<MergeOutcome | null> => {
+    if (!stillOurs()) return null;
+    const httpStatus = httpErrorStatus(error);
+    if (httpStatus === 409 || httpStatus === 404) {
+      await refreshPartition(owner, kind, partition, stillOurs);
+      return {
+        tone: "failed",
+        text: httpStatus === 404 ? MERGE_TARGET_GONE : toUserMessage(error),
+      };
+    }
+    return { tone: "failed", text: toUserMessage(error) };
   };
 
   /**
    * 合并一条进同组第一条。结果交回调用方就地显示(按钮旁边),不再走页顶提示:
    * 成功 → 「已合并，原条目已弃用」;409 → 服务端原文并重拉该分区;404 → 「这条已不在了」
-   * 并重拉该分区。共享分区的请求序列与以前相同(合并 → 列表 → 类型 → 共享查重)。
+   * 并重拉该分区。成功路径的请求序列与以前相同(合并 → 列表 → 类型 → 该段查重)。
    */
   const mergeKnowledge = async (
     sourceId: string, intoId: string, partition: DuplicatePartition = "shared",
@@ -370,28 +448,36 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
       try {
         await mergeKnowledgeRecords(owner.notebookId, sourceId, intoId);
       } catch (error) {
-        if (!stillOurs()) return null;
-        const httpStatus = httpErrorStatus(error);
-        if (httpStatus === 409 || httpStatus === 404) {
-          await refreshPartition(owner, kind, partition, stillOurs);
-          return {
-            tone: "failed",
-            text: httpStatus === 404 ? MERGE_TARGET_GONE : toUserMessage(error),
-          };
-        }
-        return { tone: "failed", text: toUserMessage(error) };
+        return await failedWrite(owner, kind, partition, stillOurs, error);
       }
       if (!stillOurs()) return null;
-      knowledgeRequestRef.current += 1;
-      duplicateRequestRef.current[partition] += 1;
-      const refreshed = await loadKnowledgeFor(owner, { kind, status, page: 0 });
-      if (refreshed !== null && stillOurs()) {
-        const types = await loadTypesFor(owner);
-        if (types !== null && stillOurs()) {
-          await refreshPartition(owner, kind, partition, stillOurs);
-        }
+      return await settleWrite(owner, kind, status, partition, stillOurs, MERGE_DONE);
+    } finally {
+      if (owns(owner) && ownsOperation("knowledge", operation)) setKnowledgeBusy(null);
+    }
+  };
+
+  /**
+   * 恢复本人被并走的一条(状态改回已批准)。只读成员也能做(只限本人记忆支撑的对象,
+   * 后端在加锁读回的行上判定)。结果同样就地显示:成功「已恢复」;409 / 404 同合并。
+   */
+  const restoreOwnMemoryObject = async (id: string): Promise<MergeOutcome | null> => {
+    const owner = currentOwner();
+    if (!owner || !partitionAllowed("own") || knowledgeBusy) return null;
+    const operation = beginOperation("knowledge");
+    const kind = knowledgeKindRef.current;
+    const status = statusFilterRef.current;
+    const stillOurs = () => owns(owner) && ownsOperation("knowledge", operation)
+      && partitionAllowed("own");
+    setKnowledgeBusy(id);
+    try {
+      try {
+        await updateKnowledgeRecord(owner.notebookId, id, { status: "approved" });
+      } catch (error) {
+        return await failedWrite(owner, kind, "own", stillOurs, error);
       }
-      return stillOurs() ? { tone: "done", text: MERGE_DONE } : null;
+      if (!stillOurs()) return null;
+      return await settleWrite(owner, kind, status, "own", stillOurs, RESTORE_DONE);
     } finally {
       if (owns(owner) && ownsOperation("knowledge", operation)) setKnowledgeBusy(null);
     }
@@ -440,6 +526,8 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
       page: visible ? (knowledgePage[knowledgeKind] ?? 0) : 0,
       duplicates: visible ? duplicates : null,
       ownDuplicates: visible ? ownDuplicates : null,
+      ownMergedAway: visible ? ownMergedAway : null,
+      duplicateFailures: visible ? duplicateFailures : NO_DUPLICATE_FAILURES,
       contexts: visible ? knowledgeContexts : EMPTY_KNOWLEDGE_CONTEXTS,
       busyId: visible ? knowledgeBusy : null,
     },
@@ -454,6 +542,7 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
     updateKnowledge,
     findDuplicates,
     mergeKnowledge,
+    restoreOwnMemoryObject,
     loadKnowledgeContext,
   };
 }
