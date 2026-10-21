@@ -34,6 +34,10 @@ AGENT_CAPABILITY_TIER = MappingProxyType(
         "memory:read": "read",
         "memory:read_candidates": "read",
         "agent_profile:read": "read",
+        # Read the token owner's own Q&A history and deep reports (MCP
+        # list/get_conversation, list/get_report). Must stay on the same tier
+        # as memory:read -- see tests/test_agent_history_capability.py.
+        "history:read": "read",
         "ask:execute": "ask",
         "memory:propose": "contribute",
         "knowhow:code": "contribute",

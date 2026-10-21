@@ -226,6 +226,97 @@ def test_conversation_routes(tmp_path, monkeypatch):
     assert client.get("/api/conversations/bogus").status_code == 404
 
 
+def test_conversation_submitted_via_comes_from_its_jobs(repo):
+    """``conversations`` has no entry-point column, so the list/detail read it
+    from ``ask_jobs``: the conversation's is its EARLIEST job's, a turn's is the
+    job whose ``answer_id`` is that answer. No job row (an older answer, imported
+    data) reads as "" -- not recorded -- never a guess."""
+    from app.models.schemas import AskResponse
+
+    nb = _seed(repo)
+    store = repo._runtime.ask_state
+    user_id = repo.current_user().id
+
+    # 1) first turn submitted from the web, the follow-up through MCP
+    first = AskRequest(question="asked in the browser", mode="chunk")
+    first_job, cid = store.begin_durable_job(
+        nb.id, first, "chunk", user_id, submitted_via="web")
+    first_answer = store.save_answer_for_job(
+        first_job, nb.id, cid, "asked in the browser",
+        AskResponse(conclusion="c1", conversation_id=cid), user_id)
+    follow_up = AskRequest(question="asked by an agent", mode="chunk", conversation_id=cid)
+    second_job, same_cid = store.begin_durable_job(
+        nb.id, follow_up, "chunk", user_id, submitted_via="mcp")
+    assert same_cid == cid
+    second_answer = store.save_answer_for_job(
+        second_job, nb.id, cid, "asked by an agent",
+        AskResponse(conclusion="c2", conversation_id=cid), user_id)
+
+    listed = next(c for c in repo.list_conversations(nb.id) if c.id == cid)
+    assert listed.submitted_via == "web"
+    detail = repo.get_conversation(cid)
+    assert detail.submitted_via == "web"
+    assert [(t.answer_id, t.submitted_via) for t in detail.turns] == [
+        (first_answer, "web"), (second_answer, "mcp")]
+
+    # 2) answers with no job row at all: not recorded, at both levels
+    bare = "conv-no-job-rows"
+    stamp = "2026-07-29T09:05:00+08:00"
+    with repo._connect() as db:
+        db.execute(
+            "INSERT INTO conversations "
+            "(id,notebook_id,title,created_by,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (bare, nb.id, "bare", user_id, stamp, stamp),
+        )
+        db.execute(
+            "INSERT INTO answers "
+            "(id,notebook_id,question,payload,created_at,conversation_id) "
+            "VALUES (?,?,?,?,?,?)",
+            ("ans-no-job-row", nb.id, "q",
+             json.dumps({"conclusion": "old answer"}), stamp, bare),
+        )
+    assert next(c for c in repo.list_conversations(nb.id) if c.id == bare).submitted_via == ""
+    bare_detail = repo.get_conversation(bare)
+    assert bare_detail.submitted_via == ""
+    assert [t.submitted_via for t in bare_detail.turns] == [""]
+
+    # 3) a retrieval-only MCP job is not a conversation job (its row carries no
+    #    conversation id), so it never colours a conversation's entry point
+    store.begin_durable_job(
+        nb.id, AskRequest(question="evidence only", mode="chunk", conversation_id=bare),
+        "chunk", user_id, submitted_via="mcp", output="evidence")
+    assert repo.get_conversation(bare).submitted_via == ""
+
+    # 4) two job rows naming one answer: the older job's entry point wins
+    with repo._connect() as db:
+        db.execute("UPDATE ask_jobs SET answer_id=? WHERE id=?", (first_answer, second_job))
+    shared = repo.get_conversation(cid)
+    assert [(t.answer_id, t.submitted_via) for t in shared.turns] == [
+        (first_answer, "web"), (second_answer, "")]
+
+
+def test_conversation_routes_carry_submitted_via(tmp_path, monkeypatch):
+    """The HTTP list and detail only GAIN the entry-point fields: a browser ask
+    shows up as ``web`` on the conversation and on its turn."""
+    from fastapi.testclient import TestClient
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.main import app
+    client = TestClient(app)
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    from app.api.ask_routes import repository
+    seed_ask_evidence(repository(), nb)
+    cid = client.post(f"/api/notebooks/{nb}/ask", json={"question": "q1"}).json()["conversation_id"]
+
+    listed = client.get(f"/api/notebooks/{nb}/conversations").json()
+    assert [row["submitted_via"] for row in listed] == ["web"]
+    detail = client.get(f"/api/conversations/{cid}").json()
+    assert detail["submitted_via"] == "web"
+    assert [turn["submitted_via"] for turn in detail["turns"]] == ["web"]
+
+
 def test_conversation_mutation_routes(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")

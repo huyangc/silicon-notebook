@@ -281,6 +281,7 @@
       "active_job": null,
       "id": "<conv-id-1>",
       "notebook_id": "<nb-id-1>",
+      "submitted_via": "",
       "title": "Why is gain stable?",
       "turn_count": 1,
       "turns": [
@@ -341,7 +342,8 @@
             "retrieval_effort": "standard",
             "retrieval_query": "Why is fixture gain stable?",
             "top_relevance": 0.91
-          }
+          },
+          "submitted_via": ""
         }
       ],
       "updated_at": "<timestamp>",
