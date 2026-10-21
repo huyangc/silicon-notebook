@@ -265,17 +265,20 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
     return typeof detail.count === "number" ? `${detail.count} 条记忆` : "";
   }
   // report(关联报告):同一条理由,必须排在通用分支之前。detail 的 evidence_* 数的是
-  // 复原的**报告引用**,不是本轮检索的候选;哪天 detail 多出 count/found 键,排在后面
+  // **报告引用**,不是本轮检索的候选;哪天 detail 多出 count/found 键,排在后面
   // 就会被念成「N 个候选」。摘要已经写成整句,这里只给折叠态一个短复述:读入了几节、
-  // 复原了几条。没读(skipped)时摘要就是原因,这里不重复。
+  // 读回了几条。没读(skipped)时摘要就是原因,这里不重复。
+  // 这一步写在检索与合成之前,只知道「从笔记本读回了几条报告引用」
+  // (evidence_read_back);其中几条最终进了 prompt、几条超出篇幅,是回答之后回执
+  // (answer-panel 的关联报告回执)才说的事——所以这里用「读回」,不用回执的「复原」。
   if (step.step_type === "report") {
     if (detail.status !== "read") return "";
     const parts: string[] = [];
     const total = typeof detail.sections_total === "number" ? detail.sections_total : 0;
     const read = Array.isArray(detail.sections_read) ? detail.sections_read.length : 0;
     if (total > 0) parts.push(`读入 ${read}/${total} 节`);
-    if (typeof detail.evidence_restored === "number") {
-      parts.push(`复原 ${detail.evidence_restored} 条引用`);
+    if (typeof detail.evidence_read_back === "number") {
+      parts.push(`读回 ${detail.evidence_read_back} 条引用`);
     }
     return parts.join(" · ");
   }

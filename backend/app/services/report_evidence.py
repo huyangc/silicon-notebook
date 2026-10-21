@@ -11,6 +11,9 @@ engine and the reasoning engine; ``AskService`` supplies the renderers (they
 need its stores) and builds the citation cards.
 
 * ``assemble_report_evidence`` -- the partition (``ReportEvidencePartition``);
+* ``cited_restored_objects`` -- which restored items the read text cites, the
+  one rule the partition starts from and ``report_read_back`` (the reasoning
+  trace's count) counts;
 * ``ReportTurn`` -- the report as one turn's synthesis uses it: the selected
   sections, the partition the assembler recorded, whether the block entered an
   answer prompt, and the receipt;
@@ -104,6 +107,44 @@ def _restored_values(restored: RestoredReportEvidence) -> dict[str, dict[str, An
         RESTORED_KIND_KG: {item.object_id: item for item in restored.knowledge},
         RESTORED_KIND_MEMORY: {item.memory_id: item for item in restored.memory},
     }
+
+
+def cited_restored_objects(
+    restored: Optional[RestoredReportEvidence], selection: SectionSelection,
+) -> dict[tuple[str, str], list[str]]:
+    """``{(kind, object_id): [report keys]}``: the restored objects the text a
+    turn reads cites, in ``selection.evidence_keys`` order (each object first
+    at its most relevant key), each with every report key of that text that
+    names it -- the ONE membership rule of the report's evidence. An object
+    counts when a key of the read text names it
+    (``RestoredReportEvidence.key_by_object``) and the restore brought it back
+    (it is among the restored items). ``assemble_report_evidence`` starts its
+    partition from exactly these objects and ``report_read_back`` counts their
+    keys; neither has a rule of its own."""
+    restored = restored or RestoredReportEvidence()
+    values = _restored_values(restored)
+    object_of = {
+        key: obj for obj, keys in restored.key_by_object.items() for key in keys
+    }
+    wanted: dict[tuple[str, str], list[str]] = {}
+    for key in selection.evidence_keys:
+        obj = object_of.get(key)
+        if obj is not None and obj[1] in values.get(obj[0], {}):
+            wanted.setdefault(obj, []).append(key)
+    return wanted
+
+
+def report_read_back(followup: ReportFollowup, selection: SectionSelection) -> int:
+    """How many report keys of the text a turn reads name an item the run read
+    back from the notebook (``cited_restored_objects``). The reasoning trace
+    reports this before any partition exists; how many then enter the prompt
+    and how many are left out for space is the receipt's split
+    (``ReportAdmissionCounts``) -- a different number under a different name.
+    An item read back and later withheld by its renderer is read back all the
+    same."""
+    return sum(
+        len(keys) for keys in cited_restored_objects(followup.restored, selection).values()
+    )
 
 
 def _band_start(keys: Iterable[str], low: int, high: int) -> int:
@@ -447,16 +488,8 @@ def assemble_report_evidence(
 
     Deterministic for its inputs: an answer helper that is retried assembles
     (and reads) the same partition again rather than caching it."""
-    restored = followup.restored or RestoredReportEvidence()
-    values = _restored_values(restored)
-    object_of = {
-        key: obj for obj, keys in restored.key_by_object.items() for key in keys
-    }
-    wanted: dict[tuple[str, str], list[str]] = {}
-    for key in selection.evidence_keys:
-        obj = object_of.get(key)
-        if obj is not None and obj[1] in values.get(obj[0], {}):
-            wanted.setdefault(obj, []).append(key)
+    values = _restored_values(followup.restored or RestoredReportEvidence())
+    wanted = cited_restored_objects(followup.restored, selection)
     retrieved: dict[tuple[str, str], str] = {}
     for key, entry in id_map.items():
         kind = kind_for_key(key, id_map)
@@ -657,6 +690,8 @@ __all__ = [
     "REPORT_EVIDENCE_MIN_CUT_CHARS",
     "REPORT_RELATIONS_RESERVE_CHARS",
     "citation_identity",
+    "cited_restored_objects",
+    "report_read_back",
     "report_readable",
     "scrub_report_marks",
     "with_report_selected",

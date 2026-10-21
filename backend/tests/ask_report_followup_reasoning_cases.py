@@ -243,9 +243,10 @@ def scenario_a_reasoning_turn_reads_the_report_end_to_end(world: World) -> None:
     assert kinds[:3] == ["intent", "report", "skip"], kinds
     report_step = steps[1]
     assert report_step.summary == (
-        f"已读取关联报告《{TITLE}》全文；复原引用证据 5 条，1 条已失效"
+        f"已读取关联报告《{TITLE}》全文；读回报告引用 5 条，1 条已失效"
     )
     assert report_step.detail["sections_read"] == [1, 2]
+    assert report_step.detail["evidence_read_back"] == 5
     assert isinstance(report_step.duration_ms, int)
     synthesis = steps[-1]
     assert synthesis.step_type == "synthesis"

@@ -17,16 +17,17 @@ from typing import Any
 import pytest
 
 from app.application.ask_reasoning import ReasoningIntentProjection
-from app.core.config import Settings, get_settings
+from app.core.config import Settings
 from app.domain.report_followup import (
     REASON_NO_SYNTHESIS,
     REPORT_EVIDENCE_NOT_LOADED,
     ReportFollowup,
     ReportLinkVerdict,
     RestoredReportEvidence,
+    SectionSelection,
 )
 from app.domain.retrieval_experience import project_run_step
-from app.models.ask import AskRequest, LinkedReportReceipt, TraceStep
+from app.models.ask import AskRequest, TraceStep
 from app.services.ask_service import AskService
 from app.services.embedding import FakeEmbedder
 from app.services.prompts import ATTACHED_REPORT_ANSWER_RULE
@@ -100,7 +101,7 @@ class _Agent:
 def _real_retrieval(world) -> _Agent:
     agent = _Agent()
     bind_chat_client(world.repo, "reasoning_agent", agent)
-    bind_all_embedding_clients(world.repo, FakeEmbedder(dim=get_settings().embed_dim))
+    bind_all_embedding_clients(world.repo, FakeEmbedder(dim=world.repo.settings.embed_dim))
     return agent
 
 
@@ -203,17 +204,18 @@ def test_the_report_step_says_which_sections_a_long_report_reads(make_world):
     step = next(step for step in cases.steps_of(response) if step.step_type == "report")
     assert step.summary == (
         f"已读取关联报告《{cases.TITLE}》：执行摘要与第 2 节（共 2 节，按与问题的相关度选取）"
-        "；复原引用证据 2 条，1 条已失效"
+        "；读回报告引用 2 条，1 条已失效"
     )
 
 
-def test_the_report_step_counts_what_was_read_back_and_the_receipt_what_was_loaded(
-    make_world,
-):
+def test_the_trace_says_read_back_and_only_the_receipt_says_what_was_loaded(make_world):
     """At the smallest evidence budget the partition cannot hold every cited
-    item: the trace step (written before the partition) counts the items read
-    back, the receipt splits them into loaded and not loaded, and the
-    not-loaded markers say so in the block."""
+    item. The trace step is written before the partition exists: it says how
+    many items were read back, under its own name and words, and nothing
+    about loading. The split into loaded and left out for space is the
+    receipt's (and the synthesis step's count of partition entries), and the
+    not-loaded markers say so in the block -- no two places tell the same
+    count with different numbers."""
     world = make_world(ask_report_evidence_budget_chars=2000)
     world.execute("UPDATE chunks SET text={ph} WHERE id={ph}", ("甲段落" * 1000, "c-a"))
     report = cases.insert_report(world, "rep-budget")
@@ -224,12 +226,14 @@ def test_the_report_step_counts_what_was_read_back_and_the_receipt_what_was_load
     block = cases.report_block_of(answer_llm.prompts[0])
     assert REPORT_EVIDENCE_NOT_LOADED in block
     receipt = response.linked_report
-    assert receipt.evidence_over_budget > 0
-    step = next(step for step in cases.steps_of(response) if step.step_type == "report")
-    assert step.detail["evidence_restored"] == (
-        receipt.evidence_restored + receipt.evidence_over_budget
-    ) == 5
-    assert step.detail["evidence_over_budget"] == 0
+    assert (receipt.evidence_restored, receipt.evidence_over_budget) == (1, 4)
+    steps = cases.steps_of(response)
+    step = next(step for step in steps if step.step_type == "report")
+    assert step.detail["evidence_read_back"] == 5
+    assert "evidence_restored" not in step.detail and "evidence_over_budget" not in step.detail
+    assert step.summary.endswith("；读回报告引用 5 条，1 条已失效")
+    assert "复原" not in step.summary
+    assert steps[-1].detail["included_report_evidence"] == 1
 
 
 def test_the_experience_projection_ignores_the_report_step():
@@ -243,9 +247,9 @@ def test_the_experience_projection_ignores_the_report_step():
     synthesis = TraceStep(
         step_type="synthesis", summary="", detail={"anchors": 1, "anchor_evidence_ids": ["c-a"]},
     )
-    report = report_trace_step(LinkedReportReceipt(
-        report_id="rep", title="题", status="read", evidence_restored=3,
-    ), digest=None)
+    report = report_trace_step(
+        _readable_followup("rep"), selection=SectionSelection(read_indices=(1, 2)), read_back=3,
+    )
 
     def projected(*steps):
         return project_run({"run_id": "run-1", "steps": [
@@ -268,20 +272,42 @@ def _outline() -> tuple:
 def test_a_turn_that_reads_the_report_keeps_one_synthesis(make_world, attached):
     """Exhaustive effort with a two-section outline: without a report the
     answer is written section by section; a turn that reads the report is
-    written in one synthesis that carries the report block (D8)."""
+    written in one synthesis that carries the report block (D8), and the
+    synthesis step says why it was not written by section."""
     world = make_world()
     report = cases.insert_report(world, "rep-sections") if attached else None
     answer_llm = cases.bind_answer(world, "答[k1]。")
     with cases.stubbed_retrieval(cases.C_A, cases.C_B, outline=_outline()):
         response = cases.ask(world, report, retrieval_effort="exhaustive")
 
+    synthesis = cases.steps_of(response)[-1]
+    assert synthesis.step_type == "synthesis"
     if attached:
         assert len(answer_llm.prompts) == 1
         assert REPORT_BLOCK_HEADER in answer_llm.prompts[0]
         assert response.linked_report.status == "read"
+        assert synthesis.detail["outline_sections"] == 0
+        assert synthesis.detail["outline_bypassed"] == "linked_report"
     else:
         assert len(answer_llm.prompts) == 2
         assert all(REPORT_BLOCK_HEADER not in prompt for prompt in answer_llm.prompts)
+        assert synthesis.detail["outline_sections"] == 2
+        assert "outline_bypassed" not in synthesis.detail
+
+
+def test_a_one_section_outline_is_not_called_a_report_bypass(make_world):
+    """An outline with one section is written in one synthesis anyway: the
+    step shows no bypass reason, so "fewer than two sections" and "the turn
+    read a report" stay distinguishable."""
+    world = make_world()
+    report = cases.insert_report(world, "rep-one-section")
+    cases.bind_answer(world, "答[k1]。")
+    with cases.stubbed_retrieval(cases.C_A, cases.C_B, outline=_outline()[:1]):
+        response = cases.ask(world, report, retrieval_effort="exhaustive")
+
+    synthesis = cases.steps_of(response)[-1]
+    assert synthesis.detail["outline_sections"] == 0
+    assert "outline_bypassed" not in synthesis.detail
 
 
 # ------------------------------------------------------------- the answer
@@ -357,6 +383,25 @@ def test_a_readable_report_is_answered_even_when_retrieval_finds_nothing(make_wo
     assert {item.key for item in evidence.items if item.key} == {
         "k1", "k4001", "k4002", "k1001", "k3001",
     }
+
+
+def test_a_report_with_nothing_to_load_leaves_an_empty_retrieval_no_evidence(make_world):
+    """The turn retrieved nothing and every item the report cites is gone,
+    external or a whole source: the retrieval-only output is the "no
+    evidence" one with its notice, as without a report -- and the receipt is
+    written all the same."""
+    world = make_world()
+    report = cases.insert_report(world, "rep-empty", references=[
+        cases.REFERENCES[5], cases.REFERENCES[6], cases.REFERENCES[7],
+    ], content=cases.content_md(bodies=("外部资料 [k6]，整份来源 [k7]，已删段落 [k8]。", "无引用。")))
+    cases.bind_answer(world, "unused")
+    with cases.stubbed_retrieval():
+        evidence = cases.ask(world, report, output="evidence")
+
+    assert evidence.evidence_kind == "none"
+    assert evidence.notice and evidence.items == []
+    receipt = evidence.linked_report
+    assert (receipt.status, receipt.evidence_restored, receipt.evidence_gone) == ("read", 0, 1)
 
 
 def _passage_with_image(world, element_ids: list[str]) -> None:
@@ -437,7 +482,9 @@ def test_an_unconfigured_answer_model_reads_no_report(make_world, monkeypatch):
 
 def test_an_answer_client_that_never_runs_reads_no_report(make_world):
     """The registry is empty and no answer client is bound: the turn
-    retrieves but never calls the answer model, and the receipt says so."""
+    retrieves but never calls the answer model. The receipt says so, and so
+    does the trace -- its report step says "not read" with the same reason,
+    never "read the whole report"."""
     world = make_world()
     report = cases.insert_report(world, "rep-offline")
     with cases.stubbed_retrieval(cases.C_B):
@@ -446,20 +493,49 @@ def test_an_answer_client_that_never_runs_reads_no_report(make_world):
     receipt = response.linked_report
     assert (receipt.status, receipt.reason_code) == ("skipped", REASON_NO_SYNTHESIS)
     assert receipt.sections == []
+    step = next(step for step in cases.steps_of(response) if step.step_type == "report")
+    assert step.summary == f"未读取关联报告《{cases.TITLE}》：本轮没有调用回答模型"
+    assert (step.detail["status"], step.detail["reason_code"]) == ("skipped", REASON_NO_SYNTHESIS)
+    assert step.detail["sections_read"] == []
 
 
-def test_a_structured_enumeration_reads_no_report():
-    """A complete Knowhow enumeration answers without the answer model: the
-    turn's receipt is ``no_synthesis`` and its trace has no report step."""
+def test_the_retrieval_only_output_reads_the_report_without_an_answer_model(make_world):
+    """The retrieval-only output needs no answer model and stands in for the
+    prompt the report block would enter: with no answer client its trace
+    step still says the report was read, as its receipt does."""
+    world = make_world()
+    report = cases.insert_report(world, "rep-offline-evidence")
+    steps: list = []
+    payload = AskRequest(question=cases.QUESTION, mode="reasoning", report_id=report)
+    with cases.stubbed_retrieval(cases.C_B), as_request_user(world.alice):
+        evidence = world.repo._runtime.ask_component.ask_evidence(
+            world.nb, payload, user_id=world.alice.id, on_trace=steps.append,
+        )
+
+    assert evidence.linked_report.status == "read"
+    step = next(step for step in steps if step.step_type == "report")
+    assert step.detail["status"] == "read"
+    assert step.summary.startswith(f"已读取关联报告《{cases.TITLE}》")
+
+
+def _readable_followup(report_id: str) -> ReportFollowup:
+    """A followup the verdict lets the turn read, its body parsed, nothing
+    read back (no references)."""
     row = {
         "question": cases.TITLE, "references": [], "memory_used": [],
         "sections": [{"title": title} for title in cases.SECTIONS],
         "content_md": cases.content_md(),
     }
-    followup = ReportFollowup(
-        "rep-structured", cases.TITLE, report_digest(row), ReportLinkVerdict(),
+    return ReportFollowup(
+        report_id, cases.TITLE, report_digest(row), ReportLinkVerdict(),
         RestoredReportEvidence(),
     )
+
+
+def test_a_structured_enumeration_reads_no_report():
+    """A complete Knowhow enumeration answers without the answer model: the
+    turn's receipt is ``no_synthesis`` and its trace has no report step."""
+    followup = _readable_followup("rep-structured")
     service = _minimal_ask_service()
     service.knowhow_store = _EnumerableKnowhow()
 
