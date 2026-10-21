@@ -480,8 +480,16 @@ def _global_scope(notebooks: list[str] | None) -> dict[str, Any] | None:
     return {"mode": "include", "notebook_ids": notebooks} if notebooks else None
 
 
-def _notebook_scope_key(notebook_id: str, conversation_id: str) -> str:
-    return f"notebook:{notebook_id}|{conversation_id}"
+def _notebook_scope_key(
+    notebook_id: str, conversation_id: str, report_id: str = "",
+) -> str:
+    """What a clarification handle is bound to. A question that attached a
+    report was understood WITH that report's outline, so its handle is only
+    good for the same report: ``|report:<id>`` is appended only then, which
+    leaves the key (and so every handle already issued) of a question without
+    a report exactly as it was."""
+    key = f"notebook:{notebook_id}|{conversation_id}"
+    return f"{key}|report:{report_id}" if report_id else key
 
 
 # Concurrent callers allowed to wait on one (owner, key/job) at a time: the
@@ -564,7 +572,8 @@ def _confirm(
         raise AgentToolError(
             "invalid_argument",
             "intent_token 无效或已过期：澄清句柄一小时内有效，且只对签发它的同一个问题、"
-            "同一组笔记本/会话有效；请用相同的 question、notebooks 和 conversation_id "
+            "同一组笔记本/会话（提问时带了 report_id 的，还要是同一份报告）有效；"
+            "请用相同的 question、notebooks、conversation_id 和 report_id "
             "重试，或不带 intent 重新提问以获得新的澄清",
         )
     contract = QueryIntentContract.model_validate(row["contract"])
@@ -615,7 +624,7 @@ def _auto_confirm(contract: QueryIntentContract, understanding_ms: int) -> AskIn
 _CLARIFICATION_NEXT_STEP = (
     "尚未检索，也未创建会话或任务。把 intent.ambiguities 里 required 为 true 的每一项"
     "转述给用户（options 只是候选），然后用同一个 question、同样的 notebooks、"
-    "conversation_id 与 output 再调 ask，传 intent="
+    "conversation_id、output 与 report_id（首次调用传了才有）再调 ask，传 intent="
     '{"intent_token": <本响应的 intent_token>, "answers": [{"id", "answer"}], '
     '"resolved_question": <可选>}。句柄一小时内有效。'
 )
@@ -965,7 +974,7 @@ def _run_notebook(
     """
     allow_memory = _memory_read_allowed(repo, principal, notebook_id)
     conversation_id = conversation.id if conversation is not None else ""
-    scope_key = _notebook_scope_key(notebook_id, conversation_id)
+    scope_key = _notebook_scope_key(notebook_id, conversation_id, report_id)
     with _owner_request_context(principal), memory_access_context(allow_memory):
         request = AskRequest(
             question=question, mode=mode,

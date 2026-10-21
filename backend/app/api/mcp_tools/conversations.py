@@ -41,6 +41,7 @@ from . import global_ask as _global
 from ._shared import (
     RESULT_LIMIT,
     TEXT_LIMIT,
+    TITLE_CHARS,
     AgentToolError,
     _budget_response,
     _record_agent_call,
@@ -70,15 +71,14 @@ _PAGE_FAILURE = "结果暂时无法完整返回，请稍后重试"
 _NOTEBOOK_PREFIX = "conv-"
 _GLOBAL_PREFIX = "gconv-"
 _QUESTION_CHARS = 2_000
-_TITLE_CHARS = 200
 #: How many of a conversation's notebooks a row names (``notebook_count`` is
 #: the full number). The same as the response's list cap, so the budget never
 #: has to cut the list on its own.
 _LIST_NOTEBOOK_IDS = 20
 
-_LIST_FIELD_LIMITS = {"title": _TITLE_CHARS}
+_LIST_FIELD_LIMITS = {"title": TITLE_CHARS}
 _TURN_FIELD_LIMITS = {
-    **_FIELD_LIMITS, "question": _QUESTION_CHARS, "title": _TITLE_CHARS,
+    **_FIELD_LIMITS, "question": _QUESTION_CHARS, "title": TITLE_CHARS,
 }
 #: What a turn page must deliver exactly as built, besides the answer text and
 #: the citation identities: the conversation it belongs to, the question, and
@@ -118,7 +118,7 @@ def conversation_row(
     return {
         "conversation_id": conversation_id,
         "kind": kind,
-        "title": _clip(str(title or ""), _TITLE_CHARS)[0],
+        "title": _clip(str(title or ""), TITLE_CHARS)[0],
         "notebook_ids": libraries[:_LIST_NOTEBOOK_IDS],
         "notebook_count": len(libraries),
         "turn_count": int(turn_count),

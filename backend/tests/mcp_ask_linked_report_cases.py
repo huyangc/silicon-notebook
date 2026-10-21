@@ -36,7 +36,12 @@ from types import SimpleNamespace
 from typing import Any
 
 from app.api.mcp_tools import ask as ask_module
-from app.api.mcp_tools._shared import OUTPUT_MAPPING_LIMIT, TOTAL_TEXT_LIMIT
+from app.api.mcp_tools._shared import (
+    OUTPUT_MAPPING_LIMIT,
+    TEXT_LIMIT,
+    TITLE_CHARS,
+    TOTAL_TEXT_LIMIT,
+)
 from app.domain.report_followup import (
     REASON_CLAUSE_MEMORY_CLOSED_CHANNEL,
     REASON_CLAUSES,
@@ -66,6 +71,7 @@ SINGLE_NOTEBOOK = (
 KEY_REUSED = "这个 client_request_id 已用于另一个问题，请换一个新的 client_request_id"
 RECEIPT_KEYS = {
     "report_id", "title", "status", "sections_read", "evidence_restored", "evidence_gone",
+    "evidence_over_budget",
 }
 # What an answer page carries in chunk mode besides ``truncation``: 18 keys of
 # every page plus ``anchors``. Pinned so a key lost to the mapping cap is seen.
@@ -126,6 +132,10 @@ def build_env(database_url: str, tmp_path, monkeypatch, *, postgres: bool):
         "MINERU_MODE": "off", "MINERU_API_URL": "", "MINERU_API_TOKEN": "",
         "MCP_PUBLIC_URL": "https://memory.example.test/mcp",
         "MCP_REQUIRE_HTTPS": "1",
+        # ``delivery="link"`` (the long-title case): a deployment that can build
+        # a link, with the preview at its largest allowed size.
+        "PUBLIC_WEB_BASE_URL": "http://10.0.0.1:3000/kb",
+        "MCP_ANSWER_PREVIEW_MAX_CHARS": "2000",
     }.items():
         monkeypatch.setenv(name, value)
     # The turn's own Memory retrieval is off, so the only Memory a prompt can
@@ -156,15 +166,65 @@ async def run_case(env, case) -> None:
 # ------------------------------------------------------------------- helpers
 
 
-def _token(env, notebooks: list[str], scopes: tuple[str, ...] = ("read", "ask")) -> str:
+def _token(
+    env, notebooks: list[str], scopes: tuple[str, ...] = ("read", "ask"), *,
+    allow_links: bool = False,
+) -> str:
     """A raw Agent token of Alice's (``read`` opens the private-Memory channel,
     ``ask`` alone leaves it closed)."""
     owner_id = env.world.alice.id
     profile = env.repo.create_agent_profile(owner_id, f"t10-bot-{next(_IDS)}", "")
     issued = env.repo.issue_agent_token(
         owner_id, profile.id, list(scopes), notebooks[0], list(notebooks), None,
+        allow_answer_links=allow_links,
     )
     return issued.token
+
+
+def _recording(env, *names: str) -> list[str]:
+    """Wrap these facade methods so each call is logged by name (and still
+    runs); the log is returned."""
+    calls: list[str] = []
+
+    def wrap(label, original):
+        def wrapper(*args, **kwargs):
+            calls.append(label)
+            return original(*args, **kwargs)
+        return wrapper
+
+    for name in names:
+        env.monkeypatch.setattr(env.repo, name, wrap(name, getattr(env.repo, name)))
+    return calls
+
+
+def _reasoning_engine(env, contract_of=None) -> dict[str, list]:
+    """Replace the reasoning understanding and the engine behind ``ask``: the
+    understanding returns ``contract_of(question)`` (a clear contract by
+    default) and logs the report it was told about; the engine logs
+    ``(report_id, confirmed)`` of each request it is handed and answers. The
+    log is returned."""
+    seen: dict[str, list] = {"preview": [], "requests": []}
+
+    def preview(notebook_id, question, history="", cancel_event=None, **kwargs):
+        seen["preview"].append(kwargs.get("report_id"))
+        if contract_of is not None:
+            return contract_of(question)
+        return QueryIntentContract(objective=question, resolved_question=question)
+
+    def ask_with_job(notebook_id, request, *, submitted_via="", attach_only=False,
+                     stop=None, output="answer"):
+        if attach_only:
+            return None
+        seen["requests"].append((request.report_id, request.intent is not None))
+        return SimpleNamespace(
+            answer_id="", answer="答案。", conclusion="答案。", grounded=True,
+            evidence_level="grounded", mode=request.mode, conversation_id="conv-x",
+            anchors=[], citations=[],
+        ), "askjob-not-stored"
+
+    env.monkeypatch.setattr(env.repo, "preview_reasoning_intent", preview)
+    env.monkeypatch.setattr(env.repo, "ask_with_job", ask_with_job)
+    return seen
 
 
 @asynccontextmanager
@@ -317,7 +377,7 @@ async def readable_report_receipt_rides_in_scope_and_get_ask_rereads_it(env):
             "linked_report": {
                 "report_id": "rep-read", "title": TITLE, "status": "read",
                 "sections_read": list(SECTIONS),
-                "evidence_restored": 4, "evidence_gone": 1,
+                "evidence_restored": 4, "evidence_gone": 1, "evidence_over_budget": 0,
             },
         }
         assert set(page["scope"]["linked_report"]) == RECEIPT_KEYS
@@ -328,10 +388,10 @@ async def readable_report_receipt_rides_in_scope_and_get_ask_rereads_it(env):
         reread = _payload(await client.call("get_ask", {"job_id": page["job_id"]}))
         _assert_answer_page(reread)
         assert reread["scope"] == page["scope"]
-        # Nothing of the stored receipt that is not in the projection leaks.
+        # The projection never carries the stored receipt's Memory ids.
         for text in (json.dumps(page, ensure_ascii=False),
                      json.dumps(reread, ensure_ascii=False)):
-            assert "memory_used" not in text and "evidence_over_budget" not in text
+            assert "memory_used" not in text
 
 
 async def a_report_written_from_memory_is_read_but_its_memory_ids_stay_home(env):
@@ -418,8 +478,6 @@ async def a_report_that_cannot_be_followed_is_refused_before_anything_happens(en
             assert code == "not_found", (report_id, code, message)
             messages.add(message)
         assert messages == {NOT_FOUND}, "one answer for missing, not yours and elsewhere"
-        for report_id in ("rep-bob", "rep-lib"):
-            assert report_id not in NOT_FOUND
         code, message = _error(await client.call("ask", _ask_args("rep-running")))
         assert (code, message) == ("invalid_argument", NOT_READY)
         code, message = _error(await client.call("ask", _ask_args("r" * 201)))
@@ -441,17 +499,7 @@ async def report_id_with_several_notebooks_star_or_a_global_conversation_is_refu
     world = env.world
     insert_report(env, "rep-multi")
     models(env)
-    calls: list[str] = []
-    repo = env.repo
-
-    def recording(label, original):
-        def wrapper(*args, **kwargs):
-            calls.append(label)
-            return original(*args, **kwargs)
-        return wrapper
-
-    for name in ("get_report", "ask_with_job", "preview_reasoning_intent"):
-        env.monkeypatch.setattr(repo, name, recording(name, getattr(repo, name)))
+    calls = _recording(env, "get_report", "ask_with_job", "preview_reasoning_intent")
     env.monkeypatch.setattr(
         ask_module, "global_ask_service",
         lambda: calls.append("global_ask_service") or SimpleNamespace(),
@@ -467,6 +515,30 @@ async def report_id_with_several_notebooks_star_or_a_global_conversation_is_refu
                 "ask", _ask_args("rep-multi", **extra)
             ))
             assert (code, message) == ("invalid_argument", SINGLE_NOTEBOOK), extra
+    assert calls == []
+
+
+async def a_notebook_outside_the_allowlist_is_refused_before_any_report_is_looked_up(env):
+    """The token's own authority over the notebook comes first: asked about a
+    notebook outside its allowlist, a call names no report to anyone -- the
+    owner's finished report there, an unfinished one and an id that exists
+    nowhere are refused with exactly what the same call WITHOUT a report gets,
+    and no report is read. (A report gate that ran first would answer "not
+    found" / "not finished" to a token that may not even see the notebook, and
+    tell it which of the ids exist.)"""
+    world = env.world
+    insert_report(env, "rep-other-done", notebook_id=world.other)
+    insert_report(env, "rep-other-running", notebook_id=world.other, status="running")
+    models(env)
+    calls = _recording(env, "get_report")
+    async with _client(env, _token(env, [world.nb])) as client:
+        plain = _error(await client.call("ask", _ask_args(notebooks=[world.other])))
+        assert plain not in {("not_found", NOT_FOUND), ("invalid_argument", NOT_READY)}
+        for report_id in ("rep-other-done", "rep-other-running", "rep-nope"):
+            refused = _error(await client.call(
+                "ask", _ask_args(report_id, notebooks=[world.other])
+            ))
+            assert refused == plain, report_id
     assert calls == []
 
 
@@ -486,7 +558,7 @@ async def a_report_is_not_read_when_the_memory_channel_is_closed(env):
     assert page["scope"]["linked_report"] == {
         "report_id": "rep-memory", "title": TITLE, "status": "skipped",
         "reason": REASON_PREFIX + REASON_CLAUSE_MEMORY_CLOSED_CHANNEL,
-        "sections_read": [], "evidence_restored": 0, "evidence_gone": 0,
+        "sections_read": [], "evidence_restored": 0, "evidence_gone": 0, "evidence_over_budget": 0,
     }
     assert all(REPORT_BLOCK_HEADER not in prompt for prompt in answer_llm.prompts)
     assert "mem-alice" not in json.dumps(page, ensure_ascii=False)
@@ -506,7 +578,7 @@ async def a_report_citing_an_unusable_library_is_skipped_with_its_reason(env):
     assert skipped["scope"]["linked_report"] == {
         "report_id": "rep-unmounted", "title": TITLE, "status": "skipped",
         "reason": REASON_PREFIX + REASON_CLAUSES[REASON_LIBRARY_UNAVAILABLE].format(n=1),
-        "sections_read": [], "evidence_restored": 0, "evidence_gone": 0,
+        "sections_read": [], "evidence_restored": 0, "evidence_gone": 0, "evidence_over_budget": 0,
     }
     assert skipped["status"] == "answered"
     assert "reason" not in read["scope"]["linked_report"]
@@ -535,7 +607,7 @@ async def an_extension_engine_answers_without_the_report_and_says_so(env):
         assert page["scope"]["linked_report"] == {
             "report_id": "rep-engine", "title": TITLE, "status": "skipped",
             "reason": REASON_PREFIX + REASON_CLAUSES[REASON_ENGINE_UNSUPPORTED],
-            "sections_read": [], "evidence_restored": 0, "evidence_gone": 0,
+            "sections_read": [], "evidence_restored": 0, "evidence_gone": 0, "evidence_over_budget": 0,
         }
         code, message = _error(await client.call(
             "ask", {"question": QUESTION, "mode": "alpha.kg", "report_id": "rep-nope"}
@@ -584,7 +656,8 @@ async def a_retrieval_only_call_carries_the_receipt_and_the_restored_evidence(en
         assert page["status"] == "retrieved"
         assert page["linked_report"] == {
             "report_id": "rep-evidence", "title": TITLE, "status": "read",
-            "sections_read": list(SECTIONS), "evidence_restored": 4, "evidence_gone": 1,
+            "sections_read": list(SECTIONS), "evidence_restored": 4,
+            "evidence_gone": 1, "evidence_over_budget": 0,
         }
         assert "scope" not in page and len(page) <= OUTPUT_MAPPING_LIMIT
         texts = " ".join(str(item.get("text") or "") for item in page["items"])
@@ -613,25 +686,7 @@ async def the_understanding_step_is_told_about_the_report(env):
     call (a refused report costs none), and the understanding step and the
     confirmed request both carry the report."""
     insert_report(env, "rep-reasoning")
-    seen: dict[str, Any] = {"preview": [], "requests": []}
-
-    def preview(notebook_id, question, history="", cancel_event=None, **kwargs):
-        seen["preview"].append(kwargs.get("report_id"))
-        return QueryIntentContract(objective=question, resolved_question=question)
-
-    def ask_with_job(notebook_id, request, *, submitted_via="", attach_only=False,
-                     stop=None, output="answer"):
-        if attach_only:
-            return None
-        seen["requests"].append((request.report_id, request.intent is not None))
-        return SimpleNamespace(
-            answer_id="", answer="答案。", conclusion="答案。", grounded=True,
-            evidence_level="grounded", mode=request.mode, conversation_id="conv-x",
-            anchors=[], citations=[],
-        ), "askjob-not-stored"
-
-    env.monkeypatch.setattr(env.repo, "preview_reasoning_intent", preview)
-    env.monkeypatch.setattr(env.repo, "ask_with_job", ask_with_job)
+    seen = _reasoning_engine(env)
     async with _client(env, _token(env, [env.world.nb])) as client:
         code, message = _error(await client.call("ask", {
             "question": QUESTION, "mode": "reasoning", "report_id": "rep-nope",
@@ -643,6 +698,92 @@ async def the_understanding_step_is_told_about_the_report(env):
         }))
         assert page["status"] == "answered"
     assert seen == {"preview": ["rep-reasoning"], "requests": [("rep-reasoning", True)]}
+
+
+async def a_clarification_handle_is_good_only_for_the_report_it_was_issued_for(env):
+    """A question that attached a report was understood with that report's
+    outline, so its handle answers only the same report: the same question
+    under another report -- or under none -- is the handle refusal (which says
+    to repeat ``report_id``), nothing runs, and the right report still works.
+    A handle issued for a question WITHOUT a report is as it always was."""
+    insert_report(env, "rep-a")
+    insert_report(env, "rep-b")
+    seen = _reasoning_engine(env, lambda question: QueryIntentContract(
+        objective=question, resolved_question=question, needs_clarification=True,
+        ambiguities=[{"id": "ambiguity-1", "question": "哪个对象？",
+                      "required": True, "options": ["A", "B"]}],
+    ))
+    answers = [{"id": "ambiguity-1", "answer": "A"}]
+
+    def args(report_id: str | None, token: str | None = None) -> dict:
+        args: dict[str, Any] = {"question": QUESTION, "mode": "reasoning"}
+        if report_id is not None:
+            args["report_id"] = report_id
+        if token is not None:
+            args["intent"] = {"intent_token": token, "answers": answers}
+        return args
+
+    async with _client(env, _token(env, [env.world.nb])) as client:
+        issued = _payload(await client.call("ask", args("rep-a")))
+        assert issued["status"] == "needs_clarification"
+        assert "report_id" in issued["next_step"]
+        for report_id in ("rep-b", None):
+            code, message = _error(await client.call(
+                "ask", args(report_id, issued["intent_token"])
+            ))
+            assert code == "invalid_argument", report_id
+            assert "intent_token 无效或已过期" in message and "report_id" in message
+        assert seen["requests"] == [], "a refused handle runs nothing"
+        page = _payload(await client.call("ask", args("rep-a", issued["intent_token"])))
+        assert page["status"] == "answered"
+        assert seen["requests"] == [("rep-a", True)]
+        # The other way round: a handle of a question without a report is not
+        # good for a question that names one -- and still is for its own.
+        plain = _payload(await client.call("ask", args(None)))
+        code, message = _error(await client.call(
+            "ask", args("rep-a", plain["intent_token"])
+        ))
+        assert code == "invalid_argument" and "intent_token 无效或已过期" in message
+        page = _payload(await client.call("ask", args(None, plain["intent_token"])))
+        assert page["status"] == "answered"
+        assert seen["requests"] == [("rep-a", True), (None, True)]
+
+
+async def evidence_left_out_for_space_is_counted_not_hidden(env):
+    """The report cites more than the turn's evidence budget for it can hold:
+    the items read back but left out are ``evidence_over_budget`` -- the number
+    the web receipt stored, not a silent zero -- so an Agent can tell "left out
+    for space" from "has no support"."""
+    env.monkeypatch.setattr(
+        env.repo._runtime.ask_component.settings, "ask_report_evidence_budget_chars", 2000
+    )
+    for number in (1, 2, 3):
+        env.world.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,"
+            "element_ids,created_at) VALUES ({ph},{ph},{ph},{ph},'节',{js},{ph})",
+            (f"c-big{number}", env.world.nb, "src-a",
+             f"第{number}大段：" + f"工艺参数{number}的记录。" * 200, json.dumps([]), NOW),
+        )
+    references = [_ref(f"k{n}", "chunk", f"c-big{n}", source_id="src-a") for n in (1, 2, 3)]
+    content = "\n".join([
+        f"# {TITLE}", "", "## 执行摘要", "三段记录。", "", "## 资料基础", "资料。", "",
+        "## 大段记录", "第一段 [k1]，第二段 [k2]，第三段 [k3]。", "", "## 参考文献", "[k1] 甲",
+    ])
+    insert_report(env, "rep-over", sections=("大段记录",), references=references,
+                  content_md=content)
+    models(env)
+    async with _client(env, _token(env, [env.world.nb])) as client:
+        page = _payload(await client.call("ask", _ask_args("rep-over")))
+    receipt = page["scope"]["linked_report"]
+    with _write(env) as conn:
+        stored = conn.execute(
+            "SELECT payload FROM answers WHERE id=?", (page["answer_id"],)
+        ).fetchone()["payload"]
+    stored = json.loads(stored) if isinstance(stored, str) else stored
+    assert receipt["status"] == "read"
+    assert receipt["evidence_over_budget"] >= 1
+    assert receipt["evidence_over_budget"] == stored["linked_report"]["evidence_over_budget"]
+    assert receipt["evidence_restored"] == stored["linked_report"]["evidence_restored"] >= 1
 
 
 async def a_report_too_long_for_one_turn_names_only_what_the_turn_read(env):
@@ -683,29 +824,46 @@ async def a_report_too_long_for_one_turn_names_only_what_the_turn_read(env):
     assert receipt["summary_truncated"] is True
 
 
-async def a_very_long_report_title_still_fits_the_output_budget(env):
+async def a_very_long_report_title_cannot_squeeze_the_answer_or_break_the_link(env):
     """The longest title a report may have (``REPORT_QUESTION_MAX_CHARS``) and
-    the most sections a report has: the answer page stays inside the byte
-    budget and the key cap, the answer text is not the thing that gives, and a
-    cut is disclosed in ``truncation`` (the report id is never cut)."""
+    the most sections a report has, with an answer of several pages: the title
+    is cut to ``TITLE_CHARS`` like a conversation's (the cut disclosed in
+    ``truncation``, the report id never cut), so the answer keeps its full page
+    -- the title is not what the budget takes room from -- and the page stays
+    inside the byte budget and the key cap. The link delivery, which refuses to
+    deliver a clipped preview or link, still delivers."""
     title = "题" * REPORT_QUESTION_MAX_CHARS
     sections = tuple(f"第{index}节的标题" for index in range(1, 13))
     insert_report(env, "rep-long", title=title, sections=sections)
-    models(env)
-    async with _client(env, _token(env, [env.world.nb])) as client:
+    answer = "乙段落如是说[k1]。" + "答" * (3 * TEXT_LIMIT)
+    models(env, answer=answer)
+    async with _client(env, _token(env, [env.world.nb], allow_links=True)) as client:
         page = _payload(await client.call("ask", _ask_args("rep-long")))
-        assert page["status"] == "answered" and page["answer"] == "乙段落如是说[k1]。"
+        assert page["status"] == "answered"
         _assert_answer_page(page)
+        assert page["answer"] == answer[:TEXT_LIMIT], "a title halved the answer's page"
+        assert page["next_answer_offset"] == TEXT_LIMIT
         receipt = page["scope"]["linked_report"]
         assert receipt["report_id"] == "rep-long" and receipt["status"] == "read"
+        assert receipt["title"] == title[:TITLE_CHARS - 1] + "…"
         assert page["truncation"]["truncated"] is True
-        assert len(receipt["title"]) < len(title)
+        assert page["truncation"]["omitted_characters"] >= len(title) - TITLE_CHARS
         assert 0 < len(receipt["sections_read"]) <= OUTPUT_MAPPING_LIMIT
+        second = _payload(await client.call("get_ask", {
+            "job_id": page["job_id"], "answer_offset": TEXT_LIMIT,
+        }))
+        assert second["answer"] == answer[TEXT_LIMIT:2 * TEXT_LIMIT]
         evidence = _payload(await client.call(
             "ask", _ask_args("rep-long", output="evidence")
         ))
-        assert evidence["linked_report"]["report_id"] == "rep-long"
+        assert evidence["linked_report"]["title"] == receipt["title"]
         assert len(evidence) <= OUTPUT_MAPPING_LIMIT
+        linked = _payload(await client.call(
+            "ask", _ask_args("rep-long", delivery="link")
+        ))
+        assert linked["status"] == "answered" and linked["link"]["url"]
+        assert linked["preview"] and "…" not in linked["preview"][:-1]
+        assert linked["scope"]["linked_report"]["title"] == receipt["title"]
 
 
 CASES = {
@@ -716,13 +874,16 @@ CASES = {
         a_running_job_shows_only_its_report_id,
         a_report_that_cannot_be_followed_is_refused_before_anything_happens,
         report_id_with_several_notebooks_star_or_a_global_conversation_is_refused,
+        a_notebook_outside_the_allowlist_is_refused_before_any_report_is_looked_up,
         a_report_is_not_read_when_the_memory_channel_is_closed,
         a_report_citing_an_unusable_library_is_skipped_with_its_reason,
         an_extension_engine_answers_without_the_report_and_says_so,
         a_retried_key_is_tied_to_its_report,
         a_retrieval_only_call_carries_the_receipt_and_the_restored_evidence,
         the_understanding_step_is_told_about_the_report,
+        a_clarification_handle_is_good_only_for_the_report_it_was_issued_for,
+        evidence_left_out_for_space_is_counted_not_hidden,
         a_report_too_long_for_one_turn_names_only_what_the_turn_read,
-        a_very_long_report_title_still_fits_the_output_budget,
+        a_very_long_report_title_cannot_squeeze_the_answer_or_break_the_link,
     )
 }
