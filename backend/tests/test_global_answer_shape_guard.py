@@ -236,6 +236,18 @@ _PY_REGISTRY: dict[str, dict[str, tuple[str, str, tuple[str, ...]]]] = {
                        "the projected text",
             ("new: view.get('answer')",)),
     },
+    "api/mcp_tools/conversations.py": {
+        "turn_page": (
+            PROJECTED, "pages one turn of the normalised view ``global_view``/"
+                       "``notebook_view`` built, whose ``answer`` is already the "
+                       "projected text, and its own budgeted copy of that page",
+            ("new: packed.get('answer')", "new: view.get('answer')")),
+        "_notebook_turn": (
+            NOT_GLOBAL, "a notebook conversation turn (``ConversationTurn.response``); "
+                        "a global turn goes through ``_global_turn`` and "
+                        "``mcp_tools/global_ask.global_view``",
+            ("legacy: turn.response", "legacy: turn.response")),
+    },
     "repositories/postgres/ask_state_store.py": {
         "AskStateStore.answer_memory_source": (
             NOT_GLOBAL, "a notebook ``answers`` row payload",

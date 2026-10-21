@@ -32,6 +32,7 @@ from app.api.mcp_tools._shared import (
 from app.api.mcp_tools._messages import GENERIC_INVALID, chinese_value_error
 from app.api.mcp_tools.citations import register_citation_tools
 from app.api.mcp_tools.ask import register_ask_tools
+from app.api.mcp_tools.conversations import register_conversation_tools
 from app.api.mcp_tools.global_ask import global_ask_tool_error
 from app.api.mcp_tools.knowhow import register_knowhow_tools
 from app.api.mcp_tools.maintenance import register_maintenance_tools
@@ -61,6 +62,7 @@ _CORE_REGISTRARS = (
     register_memory_context_tools,
     register_citation_tools,
     register_ask_tools,
+    register_conversation_tools,
     register_report_tools,
     register_memory_proposal_tools,
     register_profile_tools,
@@ -148,6 +150,8 @@ _NOT_FOUND_RESOURCE = {
     "put_knowhow_cell_code": "Knowhow 行或列",
     "ask": "会话或笔记本",
     "get_ask": "问答任务",
+    "list_conversations": "笔记本",
+    "get_conversation": "会话",
     "list_reports": "笔记本",
     "get_report": "报告",
 }

@@ -2075,6 +2075,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._intent_history', kind='attribute', target='get_conversation'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.get_conversation', kind='attribute', target='get_conversation'),
             ConsumerSite(path='backend/app/api/mcp_tools/ask.py', scope='<module>._conversation', kind='attribute', target='get_conversation'),
+            ConsumerSite(path='backend/app/api/mcp_tools/conversations.py', scope='<module>._notebook_turn', kind='attribute', target='get_conversation'),
             ConsumerSite(path='backend/tests/test_admin_user_activity_api.py', scope='<module>.test_ask_detail_does_not_load_full_conversation_history', kind='patch', target='get_conversation'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='get_conversation'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='get_conversation'),
@@ -2413,6 +2414,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.list_conversations', kind='attribute', target='list_conversations'),
+            ConsumerSite(path='backend/app/api/mcp_tools/conversations.py', scope='<module>._notebook_rows', kind='attribute', target='list_conversations'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='list_conversations'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='list_conversations'),
         ),
@@ -3104,6 +3106,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/mcp_tools/_shared.py', scope='<module>._selected_notebook', kind='attribute', target='require_agent_access'),
             ConsumerSite(path='backend/app/api/mcp_tools/ask.py', scope='<module>._notebook_delivery_gate', kind='attribute', target='require_agent_access'),
             ConsumerSite(path='backend/app/api/mcp_tools/citations.py', scope='<module>._read_memory', kind='attribute', target='require_agent_access'),
+            ConsumerSite(path='backend/app/api/mcp_tools/conversations.py', scope='<module>._notebook_turn', kind='attribute', target='require_agent_access'),
             ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._memory_read_allowed', kind='attribute', target='require_agent_access'),
             ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._memory_rows', kind='attribute', target='require_agent_access'),
             ConsumerSite(path='backend/tests/test_memory_mcp.py', scope='<module>.test_candidate_read_refused_by_the_later_scope_leaves_no_ledger_row', kind='patch', target='require_agent_access'),

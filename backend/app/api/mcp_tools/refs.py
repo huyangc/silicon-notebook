@@ -61,7 +61,10 @@ def global_element_ref(job_id: str, element_id: str) -> str | None:
     return encode_ref("gel", j=job_id, e=element_id)
 
 
-_INVALID_REF = "ref 无法解析：请原样传入 search、ask 或 get_ask 返回的 ref"
+_INVALID_REF = (
+    "ref 无法解析：请原样传入 search、ask、get_ask、get_conversation 或 "
+    "get_report 返回的 ref"
+)
 
 
 def decode_ref(ref: Any) -> tuple[str, dict[str, str]]:
