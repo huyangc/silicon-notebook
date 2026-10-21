@@ -25,7 +25,6 @@ from pathlib import Path
 from app.core.config import Settings
 from app.core.database_url import database_identity
 
-
 #: Exit status every schema-guest command returns when it refuses a database
 #: whose schema is not this build's (the attribution backfill's historical 3).
 EXIT_SCHEMA_NOT_CURRENT = 3

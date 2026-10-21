@@ -22,7 +22,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable, Iterator
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 GUEST_SEAMS = (
