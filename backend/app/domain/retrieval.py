@@ -33,6 +33,26 @@ class RetrievedKnowledge:
 
 
 @dataclass
+class KnowledgeContextOutcome:
+    """Why ``knowledge_context`` left a hit out of the context, for a caller
+    that must account for every object it handed in (the attached report's
+    evidence partition: a cited object folded into another must point at
+    that one's key, and one the run may no longer read must not be reported
+    as cut for space).
+
+    ``folded``: object id -> the key of the admitted object of the same
+    canonical cluster it was folded into (the very fold ``knowledge_context``
+    applied). ``withheld``: object ids left out for what they are, not for
+    room -- an unticked library, an object deleted since recall, one without
+    any occurrence inside the run's ceiling, or one whose cluster's only
+    candidate was such an object. A hit in neither and without a key was cut
+    by the budget."""
+
+    folded: Dict[str, str] = field(default_factory=dict)
+    withheld: set[str] = field(default_factory=set)
+
+
+@dataclass
 class RetrievedElement:
     element_id: str
     source_id: str

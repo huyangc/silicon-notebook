@@ -51,6 +51,7 @@ from app.domain.scale import ScaleIndexView
 from app.domain.retrieval import (
     ChunkRetrievalPlan,
     GapRelationRow,
+    KnowledgeContextOutcome,
     NeighborExpansion,
     RetrievedChunk,
     RetrievedElement,
@@ -3355,6 +3356,9 @@ class EvidenceContextPort(Protocol):
         # opposite sides.
         priority_object_ids: Sequence[str] = (),
         priority_budget_chars: int | None = None,
+        # Filled with why a hit got no key (folded into a cluster member's
+        # key, or withheld for what it is); the context is unchanged by it.
+        outcome: KnowledgeContextOutcome | None = None,
     ) -> tuple[str, dict[str, dict[str, Any]]]: ...
     def parse_anchors(
         self,

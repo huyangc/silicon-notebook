@@ -142,11 +142,8 @@ from app.services.federated_run import (
 # builder, and the boundary recorder every context assembler writes through.
 from app.services.ask_evidence import _EvidenceAssemblyClient, build_ask_evidence
 from app.services.context_spans import Glue, clip, concat, recording_spans
-from app.services.evidence_context import (
-    CitationLookups,
-    KnowledgeContextOutcome,
-    anchor_image_targets,
-)
+from app.domain.retrieval import KnowledgeContextOutcome
+from app.services.evidence_context import CitationLookups, anchor_image_targets
 from app.services.model_work import MalformedModelResponse, ModelNotConfiguredError
 from app.core.model_values import as_text_list
 
@@ -183,6 +180,7 @@ from app.services.report_evidence import (
     assemble_report_evidence,
     citation_identity,
     report_readable,
+    scrub_report_marks,
     with_report_selected,
 )
 from app.services.report_followup import (
@@ -1691,10 +1689,15 @@ class AskService:
         ``ask_evidence``; reads nothing but ``current_report_followup()``.
         The event field is ``receipt_status`` rather than ``status``: the
         event log reads ``status`` as a severity, and a read report is no
-        warning."""
+        warning.
+
+        The same seat strips the report block's not-loaded mark from the
+        answer text (``scrub_report_marks``): prompt vocabulary, never answer
+        text, whichever engine wrote the answer."""
         followup = current_report_followup()
         if followup is None:
             return
+        scrub_report_marks(target)
         if target.linked_report is None:
             target.linked_report = skipped_receipt(
                 followup, followup.verdict.reason_code or REASON_NO_SYNTHESIS,
