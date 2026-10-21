@@ -155,7 +155,8 @@ bash scripts/lock_python_deps.sh --check                  # 重锁到临时副�
 
 ```bash
 python scripts/check_backend_lint.py           # 门禁本身(contracts lane 也跑这一条)
-python scripts/check_backend_lint.py --prune   # 修掉违反后把过期的基线格调低
+python scripts/check_backend_lint.py --prune   # 修掉违反或删了文件后把过期的基线格调低
+python scripts/check_backend_lint.py --rename OLD NEW   # 改名/挪动有基线条目的文件后搬条目
 ```
 
 需要按测试锁装好的环境(ruff 版本钉在 `backend/requirements-dev.in`)。新违反一律修掉,

@@ -686,23 +686,34 @@ Violations that predate the gate are recorded in
 - an entry is higher than what still occurs (stale: a fixed violation, an
   import block that is now sorted, a deleted or renamed file);
 - the baseline names a rule that is never baselined (`F821`, `F822`, `F823`, `E902` and syntax errors (`invalid-syntax`) are always fixed);
-- ruff lints a different set of files from the one git sees under the roots;
+- ruff lints a different set of files from the one git sees under the roots
+  (`git ls-files -z`, so any file name works), a Python file there is a
+  symbolic link, or a ruff configuration file (`ruff.toml`, `.ruff.toml`,
+  `pyproject.toml`) sits under the roots;
+- line suppressions that name a gated rule differ from `SUPPRESSIONS` in the
+  script (per rule, count and files; the existing ones predate the gate:
+  pytest fixtures imported for injection, re-exports and side-effect imports),
+  or a forbidden directive appears: a blanket `# noqa`, the file-level
+  `# ruff: noqa` and `# flake8: noqa`, or any `# isort:` action comment
+  (`skip`, `skip_file`, `off`, `split`);
 - the installed ruff is not the pinned version.
 
-`backend/tests/test_backend_lint_gate.py` (backend lane) covers what that leaves
-open:
+Environment problems (ruff not installed, git missing or not a checkout) exit
+with status 2 and say what to install or where to run it.
+
+`backend/tests/test_backend_lint_gate.py` (backend lane, no subprocess) covers
+what that leaves open:
 
 - Each rule's total count and number of files are pinned in `BASELINE_CEILING`
-  with zero slack.
+  with zero slack, and `SUPPRESSION_CEILING` must equal the script's
+  `SUPPRESSIONS`.
 - `ruff.toml` must equal the expected configuration: no `ignore`,
-  `per-file-ignores`, `exclude`, preview or `extend-*` keys. No other ruff
-  configuration may sit under the roots, and the roots and the empty exclusion
-  list are pinned.
-- Line suppressions that name a gated rule are pinned per rule in
-  `SUPPRESSION_CEILING`. The existing ones predate the gate: pytest fixtures
-  imported for injection, re-exports and side-effect imports. A blanket `# noqa`,
-  the file-level `# ruff: noqa` and `# flake8: noqa`, and every `# isort:`
-  action comment (`skip`, `skip_file`, `off`, `split`) are forbidden.
+  `per-file-ignores`, `exclude`, preview or `extend-*` keys. The roots and the
+  empty exclusion list are pinned.
+- `check_contracts.sh` runs the gate as exactly one effective command line,
+  `"$PYTHON_BIN" "$ROOT_DIR/scripts/check_backend_lint.py"`, under
+  `set -euo pipefail` and before any `exit`: commenting it out, appending
+  `|| true` or `; true`, or moving it after an `exit` is red.
 
 The pins are per-rule totals. Debt moved between files under one rule (one
 violation fixed in file A, one added in file B) keeps every number, and only
@@ -712,11 +723,19 @@ To lower the baseline:
 
 1. Fix violations.
 2. Run `python scripts/check_backend_lint.py --prune`. It only lowers entries
-   and drops the ones that reach zero, including those of deleted or renamed
-   files, and it writes nothing while any new violation exists. It prints how
-   far each rule's pinned totals fall.
-3. Lower `BASELINE_CEILING` by those amounts, and `SUPPRESSION_CEILING` if a
-   suppression went, in the same change.
+   and drops the ones that reach zero, including those of deleted files, and it
+   writes nothing while any new violation exists. It prints how far each rule's
+   pinned totals fall.
+3. Lower `BASELINE_CEILING` by those amounts, and `SUPPRESSION_CEILING` together
+   with `SUPPRESSIONS` if a suppression went, in the same change.
+
+Renaming or moving a file that has entries: the gate reports the old path as
+no longer linted and the new path's findings as new. Run
+`python scripts/check_backend_lint.py --rename OLD NEW`. It moves the old
+path's entries to the new one, each capped at what the new path still has,
+only when the old path is gone and the new one has no entries yet, and writes
+nothing while any other new violation exists. It prints the ceiling change
+(none for a plain rename).
 
 The stale error says the same. Import order makes it more likely than the
 other rules: an edit that leaves a recorded import block sorted, or deletes a

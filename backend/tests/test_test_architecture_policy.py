@@ -17,6 +17,7 @@ REQUIRED_LAYERS = {
         "check_ask_modes_contract.py",
         "check_object_type_labels_contract.py",
         "check_ui_vocabulary.py",
+        "check_backend_lint.py",
         "fangan/testcases/harness/tests",
     ),
     "scripts/check_frontend.sh": (

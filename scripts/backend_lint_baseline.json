@@ -2534,7 +2534,6 @@
     "I001": 1
   },
   "backend/tests/test_participant_override_retrieval.py": {
-    "B015": 2,
     "I001": 1
   },
   "backend/tests/test_peer_ceiling_subgraph.py": {

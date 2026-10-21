@@ -1,8 +1,9 @@
 """Guard for the backend lint gate: what ``scripts/check_backend_lint.py`` cannot see.
 
-The gate (contracts lane) runs ruff and compares per-(file, rule) counts with
-``scripts/backend_lint_baseline.json``: a cell over its entry is a new
-violation, a cell under it is stale. This module covers the holes that leaves:
+The gate (contracts lane) runs ruff over the files git lists, compares
+per-(file, rule) counts with ``scripts/backend_lint_baseline.json`` and counts
+the comment directives that suppress gated rules. This module covers the holes
+that leaves, without starting a process:
 
 1. Per-rule totals and file counts are pinned in ``BASELINE_CEILING`` with zero
    slack, so rewriting the baseline to absorb a new violation turns this red.
@@ -11,28 +12,24 @@ violation, a cell under it is stale. This module covers the holes that leaves:
    diff catches that.
 2. The rule set cannot be loosened: ``ruff.toml`` must equal ``EXPECTED_CONFIG``
    exactly (no ``ignore``, ``per-file-ignores``, ``exclude``, preview or
-   extend keys), the gate's roots and exclusions are pinned, and no other ruff
-   configuration sits under the roots.
-3. Line and file suppressions cannot absorb debt: a blanket line directive,
-   every file-level directive and every ``isort:`` action comment are
-   forbidden, and line directives that name a gated rule are pinned per rule
-   in ``SUPPRESSION_CEILING`` (zero slack, may only fall).
+   extend keys), and the gate's roots and exclusions are pinned.
+3. Suppressions cannot absorb debt: the gate's ``SUPPRESSIONS`` must equal
+   ``SUPPRESSION_CEILING`` here, so raising one without the other is red.
 4. Rules in ``NEVER_BASELINED`` (``F821`` undefined name and friends) are
    never recorded: such a violation is a bug and is fixed on the spot.
+5. The contracts lane really runs the gate: one exact, effective command line,
+   not commented out, not neutralised, not after an ``exit``.
 
-Unit tests at the bottom drive the gate's comparison on fixtures; the one
-real-tree run is the contracts lane's.
+The rest drives the gate's functions on fixtures; the one real-tree run is the
+contracts lane's.
 """
 from __future__ import annotations
 
 import importlib.util
-import io
 import json
 import re
 import sys
-import tokenize
 import tomllib
-from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -52,7 +49,6 @@ _spec.loader.exec_module(gate)
 #: always equal to the baseline (lower both in the same change).
 BASELINE_CEILING = {
     "B004": {"count": 1, "files": 1},
-    "B015": {"count": 2, "files": 1},
     "B017": {"count": 13, "files": 8},
     "B018": {"count": 2, "files": 2},
     "B039": {"count": 1, "files": 1},
@@ -68,7 +64,8 @@ BASELINE_CEILING = {
 
 #: Line suppressions that name a gated rule, per rule. These predate the gate
 #: (they were written for flake8-era tooling): pytest fixtures imported for
-#: injection, re-exports and side-effect imports. Only ever lowered.
+#: injection, re-exports and side-effect imports. Only ever lowered, and
+#: always equal to the gate's ``SUPPRESSIONS``.
 SUPPRESSION_CEILING = {
     "F401": {"count": 66, "files": 56},
     "F811": {"count": 99, "files": 13},
@@ -88,73 +85,51 @@ EXPECTED_CONFIG = {
     },
 }
 
-_BUGBEAR = {code for code in EXPECTED_CONFIG["lint"]["select"] if code.startswith("B")}
+#: The one command line in check_contracts.sh that runs the gate.
+GATE_COMMAND = '"$PYTHON_BIN" "$ROOT_DIR/scripts/check_backend_lint.py"'
+
 # Spelled in pieces so this module carries no directive-shaped comment text.
 _NOQA = "no" + "qa"
-_LINE_DIRECTIVE = re.compile(
-    rf"#\s*{_NOQA}(?![A-Za-z0-9_])(?P<colon>\s*:\s*(?P<codes>[A-Z]+[0-9]+(?:[\s,]+[A-Z]+[0-9]+)*))?",
-    re.IGNORECASE,
-)
-# ruff/flake8 file-level exemptions, and every isort action comment (skip,
-# skip_file, off/on, split): each one hides or re-cuts import order.
-_FILE_DIRECTIVE = re.compile(r"#\s*(?:ruff|flake8|isort)\s*:", re.IGNORECASE)
-
-
-def gated(code: str) -> bool:
-    """True when ``select`` covers ``code`` (ruff's prefix selection)."""
-    return bool(
-        re.fullmatch(r"F[0-9]+", code)
-        or code.startswith(("E9", "PLE"))
-        or code == "E722"
-        or re.fullmatch(r"I[0-9]+", code)
-        or code in _BUGBEAR
-    )
+_SELECT = EXPECTED_CONFIG["lint"]["select"]
 
 
 def _baseline() -> dict:
     return json.loads((ROOT / gate.BASELINE).read_text(encoding="utf-8"))
 
 
-def _python_files() -> list[Path]:
-    files = []
-    for root in gate.ROOTS:
-        files.extend(path for path in (ROOT / root).rglob("*.py")
-                     if "__pycache__" not in path.parts)
-    return sorted(files)
-
-
-def _comments(text: str) -> list[str]:
-    tokens = tokenize.generate_tokens(io.StringIO(text).readline)
-    return [token.string for token in tokens if token.type == tokenize.COMMENT]
-
-
-def _suppressions() -> tuple[Counter, Counter, list[str]]:
-    """(per-rule directive count, per-rule file count, forbidden directives)."""
-    per_rule: Counter = Counter()
-    files_per_rule: Counter = Counter()
-    forbidden = []
-    for path in _python_files():
-        text = path.read_text(encoding="utf-8")
-        lowered = text.lower()
-        if not any(word in lowered for word in (_NOQA, "ruff", "flake8", "isort")):
+def shell_commands(source: str) -> list[str]:
+    """The effective command lines of a shell script: continuation lines joined,
+    comment lines and trailing comments dropped, blank lines skipped."""
+    commands: list[str] = []
+    pending = ""
+    for raw in source.splitlines():
+        line = raw.rstrip()
+        if not pending and line.lstrip().startswith("#"):
             continue
-        relative = path.relative_to(ROOT).as_posix()
-        seen = set()
-        for comment in _comments(text):
-            if _FILE_DIRECTIVE.search(comment):
-                forbidden.append(f"{relative}: suppression directive {comment!r}")
-            for match in _LINE_DIRECTIVE.finditer(comment):
-                codes = re.split(r"[\s,]+", (match.group("codes") or "").strip())
-                codes = [code.upper() for code in codes if code]
-                if not codes:
-                    forbidden.append(f"{relative}: blanket line directive {comment!r}")
-                for code in codes:
-                    if gated(code):
-                        per_rule[code] += 1
-                        seen.add(code)
-        for code in seen:
-            files_per_rule[code] += 1
-    return per_rule, files_per_rule, forbidden
+        line = re.sub(r"\s+#.*$", "", line) if "#" in line else line
+        if line.endswith("\\"):
+            pending += line[:-1].strip() + " "
+            continue
+        command = (pending + line.strip()).strip()
+        pending = ""
+        if command:
+            commands.append(command)
+    return commands
+
+
+def gate_wiring_problems(source: str) -> list[str]:
+    commands = shell_commands(source)
+    problems = []
+    if not commands or commands[0] != "set -euo pipefail":
+        problems.append("the lane must start with `set -euo pipefail`")
+    mentions = [index for index, command in enumerate(commands) if "check_backend_lint.py" in command]
+    exact = [index for index in mentions if commands[index] == GATE_COMMAND]
+    if len(mentions) != 1 or len(exact) != 1:
+        problems.append(f"expected exactly one `{GATE_COMMAND}` command line, found {mentions and [commands[i] for i in mentions]}")
+    exits = [index for index, command in enumerate(commands) if re.match(r"exit\b", command)]
+    if exact and exits and exits[0] < exact[0]:
+        problems.append("the gate runs after an `exit`")
+    return problems
 
 
 def test_baseline_totals_per_rule_equal_the_pinned_ceiling():
@@ -165,6 +140,10 @@ def test_baseline_totals_per_rule_equal_the_pinned_ceiling():
             entry["count"] += count
             entry["files"] += 1
     assert totals == BASELINE_CEILING
+
+
+def test_suppression_totals_equal_the_pinned_ceiling():
+    assert gate.SUPPRESSIONS == SUPPRESSION_CEILING
 
 
 def test_never_baselined_rules_are_absent_from_baseline_and_ceiling():
@@ -193,29 +172,38 @@ def test_baseline_entries_are_well_formed_and_name_existing_files():
 def test_rule_set_scope_and_ruff_pin_cannot_be_loosened():
     with (ROOT / gate.CONFIG).open("rb") as handle:
         assert tomllib.load(handle) == EXPECTED_CONFIG
+    assert gate.selected_rules(ROOT) == _SELECT
     assert gate.ROOTS == ("backend/app", "backend/tests", "scripts")
     assert gate.EXCLUDED == ()
-    stray = sorted(
-        path.relative_to(ROOT).as_posix()
-        for root in gate.ROOTS
-        for name in ("ruff.toml", ".ruff.toml", "pyproject.toml")
-        for path in (ROOT / root).rglob(name)
-    )
-    assert stray == [], "a nested configuration would override ruff.toml for its subtree"
+    assert gate.NESTED_CONFIGS == {"ruff.toml", ".ruff.toml", "pyproject.toml"}
     dev_in = (ROOT / "backend" / "requirements-dev.in").read_text(encoding="utf-8")
     pin = re.search(r"^ruff==(\S+)", dev_in, re.M)
     assert pin is not None, "ruff must be pinned to one exact version"
     assert gate.pinned_ruff_version(ROOT) == pin.group(1)
-    contracts = (ROOT / "scripts" / "check_contracts.sh").read_text(encoding="utf-8")
-    assert '"$ROOT_DIR/scripts/check_backend_lint.py"' in contracts
 
 
-def test_suppression_directives_are_pinned_and_never_blanket():
-    per_rule, files_per_rule, forbidden = _suppressions()
-    assert forbidden == []
-    actual = {rule: {"count": per_rule[rule], "files": files_per_rule[rule]}
-              for rule in sorted(per_rule)}
-    assert actual == SUPPRESSION_CEILING
+def test_contracts_lane_runs_the_gate_once_and_lets_it_fail():
+    source = (ROOT / "scripts" / "check_contracts.sh").read_text(encoding="utf-8")
+    assert gate_wiring_problems(source) == []
+
+
+@pytest.mark.parametrize(
+    "rewrite",
+    [
+        pytest.param(lambda s: s.replace(GATE_COMMAND, "# " + GATE_COMMAND), id="commented-out"),
+        pytest.param(lambda s: s.replace(GATE_COMMAND, GATE_COMMAND + " || true"), id="or-true"),
+        pytest.param(lambda s: s.replace(GATE_COMMAND, GATE_COMMAND + "; true"), id="semicolon-true"),
+        pytest.param(lambda s: s.replace(GATE_COMMAND + "\n", "") + "exit 0\n" + GATE_COMMAND + "\n",
+                     id="after-exit"),
+        pytest.param(lambda s: s.replace(GATE_COMMAND, GATE_COMMAND + "\n" + GATE_COMMAND), id="twice"),
+        pytest.param(lambda s: s.replace("set -euo pipefail", "set -uo pipefail"), id="no-errexit"),
+        pytest.param(lambda s: s.replace(GATE_COMMAND, GATE_COMMAND.replace(" ", " \\\n  ", 1) + " \\\n  || true"),
+                     id="continued-or-true"),
+    ],
+)
+def test_neutralised_wiring_is_rejected(rewrite):
+    source = (ROOT / "scripts" / "check_contracts.sh").read_text(encoding="utf-8")
+    assert gate_wiring_problems(rewrite(source)) != []
 
 
 # ---------------------------------------------------------------- gate logic
@@ -245,7 +233,8 @@ def test_baseline_problems_cover_never_baselined_bad_counts_and_unlinted_files()
         "a.py F821: this rule is never baselined; fix it",
         "b.py F401: count must be a positive integer",
         "c.py: baseline entry must be a non-empty rule map",
-        "gone.py: baseline names a file ruff does not lint (deleted or renamed: run --prune)",
+        "gone.py: baseline names a file ruff does not lint. Deleted: run --prune."
+        " Renamed: run --rename OLD NEW",
     ]
     # --prune tolerates (and then drops) entries of files that are gone.
     assert gate.baseline_problems({"gone.py": {"F401": 1}}, set(), prune=True) == []
@@ -258,15 +247,70 @@ def test_ceiling_deltas_name_what_to_lower_after_a_prune():
     assert gate.ceiling_deltas(before, after) == {"F811": (3, 1), "I001": (2, 1)}
 
 
-def test_code_less_diagnostics_count_as_invalid_syntax(tmp_path):
-    diagnostics = [
-        {"filename": str(tmp_path / "x.py"), "code": None},
-        {"filename": str(tmp_path / "x.py"), "code": "F401"},
-        {"filename": str(tmp_path / "x.py"), "code": "F401"},
-    ]
-    assert gate.current_counts(diagnostics, tmp_path.resolve()) == {
-        "x.py": {"F401": 2, "invalid-syntax": 1}
+def test_rename_moves_entries_capped_at_what_the_new_path_has():
+    baseline = {"old.py": {"F401": 2, "I001": 1}, "x.py": {"F811": 1}}
+    current = {"new.py": {"F401": 1, "I001": 1}, "x.py": {"F811": 1}}
+    assert gate.renamed(baseline, current, {"new.py", "x.py"}, "old.py", "new.py") == {
+        "new.py": {"F401": 1, "I001": 1}, "x.py": {"F811": 1},
     }
+    for old, new, linted, message in [
+        ("nope.py", "new.py", {"new.py"}, "has no baseline entries"),
+        ("old.py", "new.py", {"old.py", "new.py"}, "is still linted"),
+        ("old.py", "gone.py", {"new.py"}, "is not a file the gate lints"),
+        ("old.py", "x.py", {"x.py"}, "already has baseline entries"),
+    ]:
+        with pytest.raises(gate.GateError, match=message):
+            gate.renamed(baseline, current, linted, old, new)
+
+
+def test_code_less_diagnostics_count_as_invalid_syntax(tmp_path):
+    root = tmp_path.resolve()
+    diagnostics = [
+        {"filename": str(root / "x.py"), "code": None},
+        {"filename": str(root / "x.py"), "code": "F401"},
+        {"filename": str(root / "x.py"), "code": "F401"},
+    ]
+    assert gate.current_counts(diagnostics, root) == {"x.py": {"F401": 2, "invalid-syntax": 1}}
+
+
+def test_file_listing_is_nul_separated_and_keeps_non_ascii_names():
+    listed = "backend/app/a.py\0scripts/诊断 工具.py\0backend/tests/b c.py\0".encode()
+    assert gate.parse_ls_files(listed) == ["backend/app/a.py", "scripts/诊断 工具.py", "backend/tests/b c.py"]
+
+
+def test_paths_outside_the_repository_are_a_gate_error_not_a_traceback(tmp_path):
+    root = (tmp_path / "repo").resolve()
+    root.mkdir()
+    assert gate.relative_path(str(root / "scripts" / "诊断.py"), root) == "scripts/诊断.py"
+    assert gate.relative_path("scripts/x.py", root) == "scripts/x.py"
+    with pytest.raises(gate.GateError, match="outside the repository"):
+        gate.relative_path(str(tmp_path / "elsewhere.py"), root)
+
+
+def test_symbolic_links_are_not_followed_when_mapping_paths(tmp_path):
+    root = (tmp_path / "repo").resolve()
+    (root / "scripts").mkdir(parents=True)
+    (tmp_path / "target.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "scripts" / "link.py").symlink_to(tmp_path / "target.py")
+    assert gate.relative_path(str(root / "scripts" / "link.py"), root) == "scripts/link.py"
+
+
+def test_a_missing_ruff_install_is_a_gate_error(monkeypatch):
+    def missing(name):
+        raise gate.metadata.PackageNotFoundError(name)
+    monkeypatch.setattr(gate.metadata, "version", missing)
+    with pytest.raises(gate.GateError, match="requirements-dev.txt"):
+        gate.installed_ruff_version()
+
+
+@pytest.mark.parametrize(
+    ("code", "covered"),
+    [("F401", True), ("FBT001", False), ("E902", True), ("E501", False), ("E722", True),
+     ("PLE0101", True), ("PLW0603", False), ("I001", True), ("ISC001", False),
+     ("B006", True), ("B008", False), ("UP006", False)],
+)
+def test_gated_follows_ruff_selection(code, covered):
+    assert gate.gated(code, _SELECT) is covered
 
 
 @pytest.mark.parametrize(
@@ -288,11 +332,12 @@ def test_code_less_diagnostics_count_as_invalid_syntax(tmp_path):
         (f"# {_NOQA}: B006 F811", ["B006", "F811"], False),
     ],
 )
-def test_directive_parsing(tmp_path, monkeypatch, comment, rules, forbidden):
-    root = tmp_path / "backend" / "app"
-    root.mkdir(parents=True)
-    (root / "m.py").write_text(f"import os  {comment}\n", encoding="utf-8")
-    monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
-    per_rule, _, found = _suppressions()
-    assert sorted(per_rule.elements()) == sorted(rules)
+def test_directive_parsing(comment, rules, forbidden):
+    codes, found = gate.directive_findings(f"import os  {comment}\n", _SELECT)
+    assert sorted(codes) == sorted(rules)
     assert bool(found) is forbidden
+
+
+def test_directive_text_inside_strings_is_not_a_directive():
+    text = f'MESSAGE = "# {_NOQA}"\nOTHER = """# isort: skip_file"""\n'
+    assert gate.directive_findings(text, _SELECT) == ([], [])
