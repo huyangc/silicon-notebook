@@ -174,6 +174,12 @@ SILICON_NOTEBOOK_CORS_ORIGINS=http://<frontend-host>:3000
 并创建 `.local/storage` 与 `.local/logs` 目录，只 seed 本地用户。后端务必**不带 `--reload`**:reload 重启会杀掉
 进行中的抽取后台任务,让上传卡在 `extracting`。
 
+只有后端启动和显式的 `bash scripts/cli.sh database migrate --confirm-service-stopped`（须停服、从不 seed）
+会迁移 schema。其余命令行工具——`batch_ingest.py` 以及其它维护、回填、评测、诊断命令——都是 schema guest：
+从不迁移、从不 seed（因此不会改写 admin 密码）；库不是本构建的 schema（包括后端从未建过的库）时以退出码 3
+拒绝，提示同时给出原因和解决办法。首次离线导入前先启动一次后端；升级后做离线维护前先启动一次
+（或运行 `database migrate`）。细节见[运维文档](./operations_zh.md#schema-归属只有服务和-database-migrate-迁移)。
+
 所有相对路径(数据库、存储、日志、`.env`)都在**代码里锚定到仓库根**,与启动脚本
 `cd` 进哪个目录无关——启动目录从此不重要。后端首行日志会打印解析后的绝对路径
 (`paths: db=... storage=... log_dir=...`),不确定某次启动到底用的哪个 `.local/`
@@ -426,7 +432,8 @@ PgBouncer 的 transaction pooling 会把后续语句挪到别的后端连接，�
 已有全局问答记录的库升级到 SQLite v98 / PostgreSQL 0078 后无需手动操作：服务就绪后会用一次后台回填为升级前
 已完成的全局问答补写归因行（启动日志写出待补数）；补完之前，知识分析看板对这些作业走较慢的 payload 判据，
 数字相同。`PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py`（统一入口
-`maintain global-attribution`）可手动补跑，它从不迁移、不 seed，库还没迁移就拒绝。不涉及任何配置项。细节见
+`maintain global-attribution`）可手动补跑，它与所有维护命令一样从不迁移、不 seed，库不是本构建的 schema
+就拒绝（退出码 3）。不涉及任何配置项。细节见
 [运维文档](./operations_zh.md#全局问答归因回填scriptsbackfill_global_ask_attributionpy)。
 
 改 URL 不会搬运既有行。全新目标可停服务后改 URL、启动并验证空库/bootstrap 状态。
@@ -1451,7 +1458,7 @@ EXTENSION_ADMISSION_REFRESH_SECONDS  # 服务进程重读管理员运行时开�
                                      # （默认 3.0；范围 1..300）
 ```
 
-这是叠在上面 TOML 拓扑之上的第二层、以数据库为真值的开关，不是替代它：`EXTENSIONS_CONFIG` 的 `enabled` 键依旧只表示「装不装载」，依旧只能靠重启生效，一个从未点名或标了 `enabled = false` 的插件不会因为这层开关而注册。一旦某个 `trust="deployment"` 插件已经装载，管理员就可以在 `/admin/extensions`（`PATCH /api/admin/extensions/{plugin_id}`）不重启地把它开或关；当前值存在 `extension_runtime_toggles` 表里，按 plugin id 建键，无行即启用。这一行会在插件从 `EXTENSIONS_CONFIG` 移除、之后又重新加回时保留下来——一个被卸载又重新装载的插件恢复的是管理员上一次给它这个 id 设的开关，不会被重置为启用。发起这次管理员写入的进程立即重新发布自己的内存快照；同一部署里的其它服务进程（例如多副本）各自按 `EXTENSION_ADMISSION_REFRESH_SECONDS` 的节奏收敛。零个已装载 `trust="deployment"` 插件的进程完全不起刷新线程——一个没有部署插件的常规部署仍要付一次启动时的 prime（与其它所有进程一样，组合期本就要做的那一次读表加迁移），只是不会在它之上再起一条周期轮询。离线 CLI 与批处理进程（`batch_ingest.py` 等）只在启动组合那一刻 prime 一次这份快照，运行期间不会再刷新——管理员运行中途翻的开关，一个已经在跑的批处理任务要等下一次调用才能看到。运维操作手册见 [`docs/deployment-extensions-sop_zh.md`](deployment-extensions-sop_zh.md)。
+这是叠在上面 TOML 拓扑之上的第二层、以数据库为真值的开关，不是替代它：`EXTENSIONS_CONFIG` 的 `enabled` 键依旧只表示「装不装载」，依旧只能靠重启生效，一个从未点名或标了 `enabled = false` 的插件不会因为这层开关而注册。一旦某个 `trust="deployment"` 插件已经装载，管理员就可以在 `/admin/extensions`（`PATCH /api/admin/extensions/{plugin_id}`）不重启地把它开或关；当前值存在 `extension_runtime_toggles` 表里，按 plugin id 建键，无行即启用。这一行会在插件从 `EXTENSIONS_CONFIG` 移除、之后又重新加回时保留下来——一个被卸载又重新装载的插件恢复的是管理员上一次给它这个 id 设的开关，不会被重置为启用。发起这次管理员写入的进程立即重新发布自己的内存快照；同一部署里的其它服务进程（例如多副本）各自按 `EXTENSION_ADMISSION_REFRESH_SECONDS` 的节奏收敛。零个已装载 `trust="deployment"` 插件的进程完全不起刷新线程——一个没有部署插件的常规部署仍要付一次启动时的 prime（与其它所有进程一样，组合期本就要做的那一次读表；建表迁移只在服务启动或 `database migrate` 时发生），只是不会在它之上再起一条周期轮询。离线 CLI 与批处理进程（`batch_ingest.py` 等）只在启动组合那一刻 prime 一次这份快照，运行期间不会再刷新——管理员运行中途翻的开关，一个已经在跑的批处理任务要等下一次调用才能看到。运维操作手册见 [`docs/deployment-extensions-sop_zh.md`](deployment-extensions-sop_zh.md)。
 
 
 ## 外部认证部署

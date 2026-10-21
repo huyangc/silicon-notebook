@@ -40,6 +40,41 @@ Selected-source 准备和非 dry-run 的 reflect `report`/`search` 会额外合�
 在线 scale 构建保留自己的每库锁，不改用离线 batch 索引的维护锁。开发 gate、示例、
 基准测试和硬编码目标的历史脚本不纳入运维目录。
 
+### schema 归属：只有服务和 `database migrate` 迁移
+
+只有两个进程会迁移 schema：服务启动（同时 seed 内置账户），以及显式迁移命令：
+
+```bash
+# 先停止 API 与全部后台 writer
+bash scripts/cli.sh database migrate --confirm-service-stopped
+# 或（离线包同样可用，在包根目录执行）：
+# PYTHONPATH=backend python -m app.scripts.migrate_database --confirm-service-stopped
+```
+
+其余所有会打开数据库的命令都是 *schema guest*：`batch`（全部阶段，含 `backfill-images`）、
+`maintain`、`kg`、`scale` 各命令、`maintain selected-source`、带 `--use-llm`/`--apply` 的
+`maintain knowhow`、`maintain global-attribution`、`eval replay`、reflect rig 的 `search`/`report`，
+以及开发用的 eval 辅助脚本。guest 从不迁移、从不 seed，因此不论运维 shell 里的
+`SILICON_NOTEBOOK_ADMIN_PASSWORD` 是什么，都不会改写 admin 密码。打开任何东西之前，它先用一条
+裸连接确认库正好是本构建的 schema（SQLite 看 `user_version`；PostgreSQL 迁移账本须正好是
+`1..N` 且 checksum 一致）。不是就以退出码 3 退出（`build_scale_index.py` 保留它文档里的退出码 2），
+提示同时给出原因和解决办法，并且什么都不创建——不建 SQLite 文件，也不建 PostgreSQL 账本：
+
+| 检查结果 | 提示给出的解决办法 |
+| --- | --- |
+| 落后一个或多个版本（`SQLite v97`，本构建需要 `SQLite v98`） | 停服后运行 `database migrate`，或启动一次升级后的服务（启动时自动迁移）；若这个库属于仍在运行旧版本的服务，改用该版本的代码运行本命令 |
+| 从未初始化（SQLite 文件不存在、`user_version` 为 0、PostgreSQL 没有账本） | 启动一次服务——只有服务会建库并写入内置账户 |
+| 比本构建新，或账本有缺口、checksum 不同 | 改用与在役服务相同版本的代码运行本命令 |
+
+因此升级后要做离线维护的顺序是：停服 → 升级代码 → `database migrate --confirm-service-stopped`
+（或启动再停止一次升级后的服务）→ 跑维护命令 → 启动服务。
+
+`database migrate` 在两种后端上都要求 `--confirm-service-stopped`（只是运维声明，不会替你停服）。
+它执行与服务启动相同的迁移，持有与所有 PostgreSQL 维护命令相同的库级维护锁（锁被占用时直接报告、
+不等待），从不 seed，库已是当前版本时什么都不做；从未初始化的库、比本构建新的库、账本对不上的库
+一律拒绝。退出码：0 已迁移或已是当前版本，2 缺少确认参数或维护锁被占用，3 本构建无法迁移这个库。
+不打印数据库 URL。
+
 ## 插件配套服务
 
 开发、生产、仅后端和离线包的启动入口先准备统一 Python 环境，再启动显式配置的
@@ -166,8 +201,9 @@ PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py            
   `stamp_retained_turns`）正持有的行被跳过、留给下一次（计入 `skipped`，`pending_after` 报出），所以不会与删库
   组成锁环；再用一条带 `attributed = 0` 复核的 UPDATE … RETURNING 置位、插入归因行。万一仍报 `40P01`，整页重试。
   幂等，中断后原样重跑只处理剩下的；`--after-id` 从某个 id 之后续跑，`--limit` 限制本次条数。
-- 命令**不拥有 schema**：以 `migrate=False, seed=False` 组装仓储——不对在役库跑迁移 DDL，也不跑会无条件
-  重写 admin 密码的 seed。库还没迁移到 v98 / 0078 时直接拒绝（退出码 3），不替它迁移。服务运行时可以跑。
+- 命令**不拥有 schema**：与所有维护命令一样是 [schema guest](#schema-归属只有服务和-database-migrate-迁移)
+  ——不对在役库跑迁移 DDL，也不跑会无条件重写 admin 密码的 seed。库不是本构建的 schema（因而不可能还没到
+  v98 / 0078）时直接拒绝（退出码 3，提示原因和解决办法），不替它迁移。服务运行时可以跑。
 - payload 读不回 `GlobalAskJob` 的作业只报告（`--report` 逐行写 `{"job_id", "reason": "payload_unreadable"}`，
   不写正文）、不改动，继续走 payload 判据计数；退出码：0 完成，1 有这类作业，2 参数错误，3 库未迁移。
 - 进度：`SELECT COUNT(*) FROM global_ask_jobs WHERE status='done' AND attributed=0` 即剩余数（命中部分索引
@@ -1698,7 +1734,7 @@ python scripts/mineru_batch_parse.py --only-failed  # 只重跑上次失败的�
 
 可移植 phase 还包括 `question-index`；它与下列 phase 一样按 `DATABASE_URL` 选择 SQLite 或 PostgreSQL。
 
-`ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`reparse`、`backfill-source-index`、`backfill-chunk-elements`、`backfill-images` 会按 `DATABASE_URL` 选择 SQLite 或 PostgreSQL。PostgreSQL 直连维护严格属于离线操作：先停止 API 和全部后台 writer，再给命令追加 `--confirm-service-stopped`。该参数只声明运维人员已经停服，不会自行停止服务。数据库级 advisory lock 会 fail-fast 阻止两个维护 CLI 重叠；来源、完整/限量 KG 目标、metadata、reextract、向量、关系和反向索引驱动均使用有界 keyset 分页——包括 `index` 阶段的整库向量矩阵加载，现在按页有界读取而不是一条无界 `SELECT`。大库离线维护仍可能在这些流程里**其余**的长语句上撞到在线默认的 `POSTGRES_STATEMENT_TIMEOUT_SECONDS`（`30`，按交互式请求定的——这是仓库默认值，生产实际值以部署配置为准）；给维护 CLI 进程本身的环境变量调大该值（例如 `86400`）——矩阵加载已不再是流水线里最大的单条语句，但离线流水线的其余部分（以及慢盘上的分页矩阵读取本身）仍受同一条逐语句超时约束。在线维护仍应走应用/API，`--dry-run` 不打开 repository——**除 `backfill-images` 外**：它的 dry-run 是一次只读的**数据库**演练（要读每个来源的元素与 chunk 才报得出能补多少张），所以在 PostgreSQL 上同样需要 `--confirm-service-stopped`。`vectors-to-blob` 刻意只支持 SQLite，因为 PostgreSQL 向量已经是 `bytea`；PostgreSQL 会在打开 repository 前明确拒绝。
+`ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`reparse`、`backfill-source-index`、`backfill-chunk-elements`、`backfill-images` 会按 `DATABASE_URL` 选择 SQLite 或 PostgreSQL。PostgreSQL 直连维护严格属于离线操作：先停止 API 和全部后台 writer，再给命令追加 `--confirm-service-stopped`。该参数只声明运维人员已经停服，不会自行停止服务。所有 phase 都是 [schema guest](#schema-归属只有服务和-database-migrate-迁移)：从不迁移、从不 seed；库不是本构建的 schema（包括服务从未建过的 SQLite 库）时，在打开任何东西之前以退出码 3 拒绝——请先启动一次服务（或停服时运行 `database migrate`）。数据库级 advisory lock 会 fail-fast 阻止两个维护 CLI 重叠；来源、完整/限量 KG 目标、metadata、reextract、向量、关系和反向索引驱动均使用有界 keyset 分页——包括 `index` 阶段的整库向量矩阵加载，现在按页有界读取而不是一条无界 `SELECT`。大库离线维护仍可能在这些流程里**其余**的长语句上撞到在线默认的 `POSTGRES_STATEMENT_TIMEOUT_SECONDS`（`30`，按交互式请求定的——这是仓库默认值，生产实际值以部署配置为准）；给维护 CLI 进程本身的环境变量调大该值（例如 `86400`）——矩阵加载已不再是流水线里最大的单条语句，但离线流水线的其余部分（以及慢盘上的分页矩阵读取本身）仍受同一条逐语句超时约束。在线维护仍应走应用/API，`--dry-run` 不打开 repository——**除 `backfill-images` 外**：它的 dry-run 是一次只读的**数据库**演练（要读每个来源的元素与 chunk 才报得出能补多少张），所以在 PostgreSQL 上同样需要 `--confirm-service-stopped`。`vectors-to-blob` 刻意只支持 SQLite，因为 PostgreSQL 向量已经是 `bytea`；PostgreSQL 会在打开 repository 前明确拒绝。
 
 把一个目录里的 Markdown(及偶发 PDF)离线复用现有管线灌进库。分两阶段:
 先 `ingest`(无 LLM、快,chunk 问答即可用),再 `kg`(LLM 抽取,单独可恢复)。超大批量
@@ -2318,6 +2354,8 @@ python scripts/replay_retrieval.py --compare before.json after.json --mode topk 
 已有部署先停止 API 和全部后台 writer，再从仓库根目录运行：
 
 ```bash
+# 先把 schema 迁到本构建——准备命令本身从不迁移
+bash scripts/cli.sh database migrate --confirm-service-stopped
 PYTHONPATH=backend python scripts/prepare_selected_source_graph.py \
   --env-file /path/to/deployment.env \
   --confirm-service-stopped
@@ -2325,7 +2363,7 @@ PYTHONPATH=backend python scripts/prepare_selected_source_graph.py \
 
 env 文件必须已经存在，避免生产路径拼错后静默操作本地默认数据库。对该命令而言，这个文件是权威 settings 来源，shell 已导出的变量不能把维护重定向到另一套数据库/存储目录。最终原子修改会保留既有 env 文件的 mode、owner、group 及系统支持的元数据；只有新建 receipt 被强制设为 0600。确认参数只是运维人员声明已经停服，脚本不会代替你停止服务。它固定覆盖当前数据库的全部 notebook，并在数据库阶段持有中央离线维护锁。执行态依次为：
 
-1. 打开 repository、应用待执行 schema migration、枚举全部 notebook。
+1. 先运行 `database migrate --confirm-service-stopped`（见上；它与其它部署类命令一样读取部署根目录的 `.env`——`--env-file` 指向别的文件时，改为用该文件启动一次升级后的服务）。命令随后以 [schema guest](#schema-归属只有服务和-database-migrate-迁移) 方式打开 repository——从不迁移、从不 seed；库不是本构建的 schema 时以 `schema_not_current` 失败、退出码 3，提示原因和解决办法，什么都不改——并枚举全部 notebook。
 2. 按 notebook 持久页游标续跑来源反查索引；当前代次已完成则跳过，KG 代次漂移先失败关闭，下次按新代次重建。
 3. 通过既有的来源/代次账本续跑 source-fact 投影；存在 busy、无代次、failed 或 incomplete 来源就阻断启用。
 4. 按当前 KG 版本和可见来源数复验主 scale manifest 与来源 partition root；当前完整产物直接跳过，否则调用普通有界 builder 重新发布并再次复验。
@@ -2439,7 +2477,7 @@ Knowhow 表格已经对新导入/追加的数据、以及格子级「整理格�
 
 **先 dry-run,再按评审过的 plan 文件写入。** dry-run 绝不写库,而是把完整计划写成一个 JSON plan 文件(并打印其路径),供你逐条评审;随后 `--apply --plan` 按【那个文件】逐条写入——落库的就是你评审过的,不会重新规划。
 
-**默认 dry-run 是只读的,随时可安全执行。** 默认(纯规则)dry-run 以只读方式打开数据库,不会构造可写仓库,因此对着正在运行/繁忙的后端跑也安全。`--use-llm`(需要改写模型)和 `--apply`(写库)则以【可写】方式打开数据库——打开时可能执行尚未完成的 schema 迁移与崩溃恢复,工具会在这么做时打印一行提示,建议在后端空闲时再执行这两种。
+**默认 dry-run 是只读的,随时可安全执行。** 默认(纯规则)dry-run 以只读方式打开数据库,不会构造可写仓库,因此对着正在运行/繁忙的后端跑也安全。`--use-llm`(需要改写模型)和 `--apply`(写库)则以【可写】方式打开数据库——工具会在这么做时打印一行提示,建议在后端空闲时再执行这两种。这个仓库是 [schema guest](#schema-归属只有服务和-database-migrate-迁移):从不迁移、从不 seed;库不是本构建的 schema 时,打开之前就以退出码 3 拒绝(提示原因和解决办法)。
 
 ```bash
 # dry-run(默认):打印每格 before/after/来源 + 汇总,并写出 plan 文件

@@ -191,6 +191,14 @@
   使用独立组合根，强制 `migrate=False, seed=False`，组合前验证 schema，并持
   per-notebook claim 到发布完成。全部工件根及回滚/退役复用 staging/swap 与 claim
   检查，不得原地覆盖活目录。操作步骤见 [运维文档](./operations_zh.md)。
+- 所有非服务进程入口都是 schema guest：经 `app.services.maintenance_cli` 打开库
+  （`open_cli_repository`、`open_maintenance_cli_repository`、`create_schema_guest_repository`，
+  从未带插件宿主的工具用 `create_bare_schema_guest_repository`），不得用带 seed 默认值的
+  `create_application_repository(settings)` / `SQLiteRepository(settings)`。版本闸
+  （`app.repositories.schema_currency`）与唯一一条拒绝文案共用；拒绝经
+  `MaintenanceCliError.exit_code` 以退出码 3 退出。只有服务启动与 `database migrate` 拥有
+  schema。`backend/tests/test_schema_guest_guard.py` 让其余任何不带字面 guest 关键字的构造
+  报红；确实拥有临时库的工具在那里登记理由。
 
 ### 前端实现护栏
 

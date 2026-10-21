@@ -45,11 +45,11 @@ def create_repository(
     stand-in/mocked backend that does not accept them (as in
     ``test_repository_factory.py``) is unaffected.
 
-    Only a **read-only** tool that does not own the schema may pass
-    ``migrate=False, seed=False`` — today that is
-    ``scripts/reflect_shadow_rig.py``'s `search` subcommand, which runs
-    retrieval against the live main database and must never trigger a schema
-    migration or the seed step's unconditional admin-password rewrite.
+    Every process that does not own the schema passes ``migrate=False,
+    seed=False``: all non-serving CLIs, through the schema-guest entries in
+    ``app.services.maintenance_cli`` (which check the schema version first,
+    ``app.repositories.schema_currency``). Only server startup composes with
+    the defaults; ``backend/tests/test_schema_guest_guard.py`` holds that line.
     """
     host_kwargs = {}
     if migrate is not True or seed is not True:

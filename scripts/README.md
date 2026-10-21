@@ -25,7 +25,7 @@ npm run cli -- batch ingest --input-dir ./papers --notebook-name "资料库"
 | `scale` | 原 `build_scale_index.py` 的 inspect/build/export/import |
 | `kg` | 原 `app.scripts` 中的 build/recluster/reembed/backfill-relations |
 | `maintain` | chunks、kg-embeddings、reextract、denoise、knowhow、promotion-targets、delete-leftovers、global-attribution、selected-source |
-| `database` | migrate-postgres、shadow、merge、retrieval-indexes、hotpath-indexes |
+| `database` | migrate（把库迁到本构建的 schema：只迁移不 seed，须停服）、migrate-postgres、shadow、merge、retrieval-indexes、hotpath-indexes |
 | `diag` / `diagnose` | 原统一只读诊断；另有 postgres、retrieval、mineru 专项诊断 |
 | `source` | mineru-batch、embed-images |
 | `audit` | source-facts、kg-edges、kg-quality |
@@ -44,6 +44,19 @@ npm run cli -- batch ingest --input-dir ./papers --notebook-name "资料库"
 [部署配置](../docs/deployment-and-configuration_zh.md#统一-python-启动环境)。
 原脚本路径继续可用，需要部署环境和插件路径时优先使用统一入口。
 不得靠清空 `EXTENSIONS_CONFIG` 或跳过失败插件使批处理继续。
+
+**只有服务启动与 `database migrate` 会迁移 schema。** 其余打开数据库的命令（`batch`、
+`maintain`、`kg`、`scale`、`eval replay` 等）都是 schema guest：从不迁移、从不 seed（不会改写
+admin 密码）；库不是本构建的 schema 时以退出码 3 拒绝（`scale` 保留它原有的 2），提示同时给出
+原因和解决办法，什么都不创建。升级后要做离线维护：停服 → 升级代码 →
+`bash scripts/cli.sh database migrate --confirm-service-stopped`（或启动再停一次服务）→ 维护。
+全新库（服务从未启动过）只能由服务建：先启动一次服务。细节见
+[运维约定](../docs/operations_zh.md#schema-归属只有服务和-database-migrate-迁移)。
+
+```bash
+bash scripts/cli.sh database migrate --confirm-service-stopped
+# 退出码：0 已迁移或已是当前版本；2 缺确认参数 / 维护锁被占用；3 本构建迁不了（从未初始化、比本构建新、账本对不上）
+```
 
 ---
 
@@ -294,7 +307,8 @@ MINERU_BATCH_MANIFEST="" # 空值使用输出目录下的 _manifest.jsonl
 `backfill-source-index` 会通过统一 factory 使用 `DATABASE_URL` 选中的正式后端。
 PostgreSQL 必须先停 API 与全部后台 writer，再给命令追加
 `--confirm-service-stopped`；该参数不会替你停服务。所有生产维护 wrapper 使用同一
-preflight + database-wide advisory lock，锁竞争会以状态码 2 退出。`--dry-run` 不连接
+preflight + database-wide advisory lock，锁竞争会以状态码 2 退出；库不是本构建的 schema
+（含服务从未建过的库）时以状态码 3 拒绝，不迁移也不 seed。`--dry-run` 不连接
 数据库。`vectors-to-blob` 只用于 SQLite 旧文本向量；PostgreSQL 已存 `bytea`，会在连接前拒绝。
 
 `ingest`、`all`、`reparse` 默认跳过笔记本名称和描述的自动刷新，结束时也不补刷，
@@ -359,7 +373,7 @@ PYTHONPATH=backend python scripts/sweep_legacy_delete_leftovers.py --apply    # 
 SQLite v98 / PostgreSQL 0078 起，全局问答完成时把归入的笔记本写进
 `global_ask_job_notebooks`；升级前已完成的作业没有这些行，服务就绪后会在后台自动补写一遍。本工具用于
 手动补跑或 dry run：按作业 id 分页（每页一个事务、从不等待行锁，被锁住的行留到下一次），幂等、可续跑、
-可在服务运行时执行；它不迁移、不 seed（不会改写 admin 密码），库还没迁移就拒绝（退出码 3）；读不回的
+可在服务运行时执行；它不迁移、不 seed（不会改写 admin 密码），库不是本构建的 schema 就拒绝（退出码 3）；读不回的
 作业只报告、不改动，仍按旧判据计数。
 
 ```bash

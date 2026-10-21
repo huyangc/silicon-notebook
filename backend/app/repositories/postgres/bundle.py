@@ -86,9 +86,10 @@ def _initialize(
     composition rooted in an environment without ``ADMIN_PASSWORD`` silently
     resets the production admin credential. The stopped-service gate used to
     stand in for both; an online companion process has no such gate and must
-    turn them off explicitly. Defaults stay ``True``: every existing caller
-    (server startup, maintenance CLIs, tests) owns the schema and keeps its
-    exact current behaviour.
+    turn them off explicitly -- and so does every other non-serving CLI, through
+    ``app.services.maintenance_cli``'s schema-guest entries, which check the
+    schema version first. Defaults stay ``True`` for the owners: server startup
+    and throwaway-database tests.
     """
     if migrate:
         PostgresMigrator(database).migrate()

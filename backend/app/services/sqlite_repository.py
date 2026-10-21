@@ -72,11 +72,11 @@ class SQLiteRepository(RepositoryFacade):
         seed: bool = True,
     ) -> None:
         """``migrate``/``seed`` mirror the PostgreSQL adapter's same-named seam
-        (see ``PostgresRepository.__init__``/``bundle._initialize``): only a
-        process that does not own this schema — today, a read-only tool such
-        as ``scripts/reflect_shadow_rig.py``'s `search` subcommand — passes
-        ``False``. Every other caller keeps the defaults and today's exact
-        behaviour.
+        (see ``PostgresRepository.__init__``/``bundle._initialize``): every
+        process that does not own this schema — every non-serving CLI, through
+        ``app.services.maintenance_cli``'s schema-guest entries — passes
+        ``False``. Server startup and throwaway-database tests keep the
+        defaults.
         """
         super().__init__(
             settings,

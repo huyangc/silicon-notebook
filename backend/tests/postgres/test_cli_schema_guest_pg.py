@@ -191,7 +191,10 @@ def test_sqlite_only_tools_keep_refusing_postgresql_untouched(
 
 
 def _migrate(argv):
-    return load_script("migrate_database").main(argv)
+    from app.scripts import migrate_database
+
+    get_settings.cache_clear()
+    return migrate_database.main(argv)
 
 
 def test_database_migrate_brings_a_short_ledger_current_without_seeding(
