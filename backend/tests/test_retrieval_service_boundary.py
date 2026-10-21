@@ -59,7 +59,17 @@ def test_retrieval_service_publicly_forwards_chunk_hydration():
 def test_retrieval_service_source_has_no_sqlite_repository_import():
     source = inspect.getsource(inspect.getmodule(RetrievalService))
     assert "SQLiteRepository" not in source
-    assert "_repo" not in source
+    # An identifier named ``_repo`` (attribute, name or parameter), not the
+    # substring: ``restore_report_references`` contains "_repo" too.
+    identifiers = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute):
+            identifiers.add(node.attr)
+        elif isinstance(node, ast.Name):
+            identifiers.add(node.id)
+        elif isinstance(node, ast.arg):
+            identifiers.add(node.arg)
+    assert "_repo" not in identifiers
 
 
 def test_graph_retrieval_has_one_cluster_map_definition():
