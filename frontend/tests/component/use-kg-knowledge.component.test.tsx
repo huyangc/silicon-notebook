@@ -281,7 +281,8 @@ test("a merge whose list reload was superseded still reloads its section", async
   knowledgeApi.listKnowledge.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
   let merging: Promise<unknown> = Promise.resolve();
   act(() => { merging = result.current.mergeKnowledge("own-b", "own-a", "own"); });
-  // another list load supersedes the merge's own reload
+  // the merge's own list reload is in flight; another list load supersedes it
+  await waitFor(() => expect(knowledgeApi.listKnowledge).toHaveBeenCalledTimes(1));
   await act(async () => { result.current.refreshKnowledge(); });
   let outcome: unknown;
   await act(async () => { release({ items: [], total_count: 0 }); outcome = await merging; });

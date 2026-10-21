@@ -1085,7 +1085,7 @@ def reader_restores_her_own_merged_object(world: World) -> None:
         ("ko-c-dup-2", {"payload": {"name": "renamed"}}),          # content
         ("ko-c-dup-2", {"status": "approved", "payload": {"name": "x"}}),
         ("ko-c-dup-2", {"owner": "someone"}),                     # owner
-        ("ko-c-dup-2", {"status": "candidate"}),                  # another status
+        ("ko-c-dup-2", {"status": "reviewed"}),                   # another (valid) status
         ("ko-c-dup-2", {}),                                       # nothing
         (ORDINARY_OBJECT, {"status": "deprecated"}),              # a shared object
         (MEMORY_OBJECT, {"status": "deprecated"}),                # A's Memory
