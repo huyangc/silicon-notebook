@@ -28,7 +28,7 @@
 鉴权分两条路(用户裁决 2026-10-22):有 `knowledge:write` 的调用者照上面的规则合并;
 只有读权的成员只能合并「两边都是她本人、证据只出自她本人记忆」的一对——判据就是上面
 第三条,由 store 在同一条加锁语句读出的两行上判定(`own_pair_only=True`),不是本人对就
-抛 `MergeNeedsKnowledgeWrite`,任何写入之前。路由把只读成员的每一种拒绝都答成读守卫
+抛 `NeedsKnowledgeWrite`,任何写入之前。路由把只读成员的每一种拒绝都答成读守卫
 那句 404,不透露另一侧对象存不存在、是什么。镜像库上读权这条路不开(与 knowledge:write
 的围栏同口径)。本人的重复组(`own_memory_duplicate_rows`)按
 `evidence_only_from_own_memory` 逐个对象判同一条,所以列出来的每一对都正是合并会接受的。
@@ -140,16 +140,24 @@ class MemoryKnowledgeMergeRefused(ValueError):
         self.user_message = user_message
 
 
-class MergeNeedsKnowledgeWrite(LookupError):
-    """A caller without ``knowledge:write`` asked to merge a pair that is not two
-    of her own Memory objects supported by her own Memory alone.
+class NeedsKnowledgeWrite(LookupError):
+    """A caller without ``knowledge:write`` asked for a knowledge write the read
+    level does not cover (user rulings 2026-10-22): a merge of a pair that is not
+    two of her own Memory objects supported by her own Memory alone
+    (``merge_objects_in_transaction(own_pair_only=True)``), or a ``PATCH`` that
+    is not a status change between approved and deprecated of such an object of
+    hers (``update_object_in_transaction(own_status_only=True)``).
 
-    Raised by ``merge_objects_in_transaction(own_pair_only=True)`` in the
-    statement that locks and classifies both rows, before anything is written,
-    so the read-level path can never merge anything else. The route answers it
+    Raised on the rows the locking read returned, before anything is written, so
+    the read-level path can never write anything else. The route answers it
     exactly as it answers that caller for every other refusal: the read guard's
-    404, the body a missing notebook gets, so nothing tells her whether the other
+    404, the body a missing notebook gets, so nothing tells her whether the
     object exists or what it is."""
+
+
+#: The two statuses a read-only member may move her own Memory object between
+#: (``PATCH …/knowledge/{id}`` on the read path: undoing or redoing a merge).
+OWN_STATUS_TOGGLE = frozenset({"approved", "deprecated"})
 
 
 class PromotionRefused(ValueError):

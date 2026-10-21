@@ -113,9 +113,9 @@ class _Recording:
         object.__setattr__(self, "_inner", inner)
         object.__setattr__(self, "_log", log)
 
-    def execute(self, statement, params=()):
+    def execute(self, statement, params=(), **kwargs):
         self._log.append((statement, tuple(params or ())))
-        return self._inner.execute(statement, params)
+        return self._inner.execute(statement, params, **kwargs)
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -162,7 +162,11 @@ def _captured(postgres_database, notebook_id: str, viewer: str) -> list[tuple]:
                                          own_memory_only=True)
             # the owner's duplicate groups (her Memory sources, her objects);
             # on ``plain`` she owns no Memory source, so only the first runs
-            GovernanceStore.own_memory_duplicate_rows(db, notebook_id, "concept", viewer)
+            seeds = GovernanceStore.own_memory_duplicate_seed_rows(
+                db, notebook_id, "concept", viewer)
+            if seeds:
+                GovernanceStore.own_memory_duplicate_member_rows(
+                    db, notebook_id, [row["id"] for row in seeds[:200]])
     return [(s, p) for s, p in log if "kg_mutation_seq" not in s
             and "pg_index" not in s and "SAVEPOINT" not in s]
 

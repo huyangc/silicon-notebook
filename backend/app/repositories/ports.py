@@ -4861,15 +4861,24 @@ class GovernanceStorePort(Protocol):
         published cluster row carries is absent. The caller batches."""
         ...
     @staticmethod
-    def own_memory_duplicate_rows(
+    def own_memory_duplicate_seed_rows(
         connection: object, notebook_id: str, object_type: str, viewer_id: str
     ) -> list[dict]:
-        """The owner's duplicate-group input: ``viewer_id``'s own live Memory
+        """Pass 1 of the owner's duplicate groups: ``viewer_id``'s own Memory
         objects of ``object_type`` in this notebook whose evidence cites only
         her own Memory sources there (the pairs ``merge_objects_in_transaction``
-        lets her merge), ``{id, status, name, payload}`` in the order and
-        ``name`` reading of ``duplicate_seed_rows``. Driven by her Memory
-        sources; ``""`` returns nothing."""
+        lets her merge) -- live ones, and deprecated ones still carrying a merge
+        record. Thin: ``{id, status, name}`` (plus ``payload`` for a procedure)
+        in the order and ``name`` reading of ``duplicate_seed_rows``; the
+        evidence test runs in the statement. Driven by her Memory sources;
+        ``""`` returns nothing."""
+        ...
+    @staticmethod
+    def own_memory_duplicate_member_rows(
+        connection: object, notebook_id: str, object_ids: Sequence[str]
+    ) -> dict[str, dict]:
+        """Pass 2: ``{id: payload}`` for ids pass 1 returned, one statement with
+        the ids bound through ``id_binding``."""
         ...
     @staticmethod
     def valid_object_ids(db: object, object_ids: object, *, exclude_memory_derived: bool = False) -> set[str]: ...

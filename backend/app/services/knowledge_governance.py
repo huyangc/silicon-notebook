@@ -50,6 +50,7 @@ from app.models.knowledge import (
     KnowledgeRef,
     KnowledgeUpdate,
     MergeRequest,
+    OwnMemoryDuplicates,
 )
 from app.repositories.ports import (
     GovernanceStorePort,
@@ -2079,16 +2080,23 @@ class KnowledgeGovernanceService:
 
     def update_knowledge(
         self, notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate,
-        *, actor_id: Optional[str] = None,
+        *, actor_id: Optional[str] = None, own_status_only: bool = False,
     ) -> RuleCard:
         """Partial edit of one knowledge object. M1: an object derived from a
         Memory that is not ``actor_id``'s raises the same ``KeyError`` as a
         missing id (read in the store's locking read); ``None`` (internal
-        callers such as conflict resolution) owns no Memory."""
+        callers such as conflict resolution) owns no Memory.
+
+        ``own_status_only``: the caller lacks ``knowledge:write`` (the route's
+        read-level path); the store then applies only a status change between
+        approved and deprecated of her own Memory object supported by her own
+        Memory alone and raises ``NeedsKnowledgeWrite`` for anything else, on
+        the row it locked."""
         now = self._now()
         with self._write() as db:
             row = self.governance_store.update_object_in_transaction(
-                db, notebook_id, knowledge_id, payload, now, actor_id=actor_id
+                db, notebook_id, knowledge_id, payload, now, actor_id=actor_id,
+                own_status_only=own_status_only,
             )
             # A node edit is a clustering input: a payload/name change moves its
             # normalized-name seed (→ cross-doc cluster membership), a re-embed
@@ -2229,35 +2237,63 @@ class KnowledgeGovernanceService:
 
     def find_own_memory_duplicates(
         self, notebook_id: str, object_type: str,
-    ) -> List[DuplicateGroup]:
+    ) -> OwnMemoryDuplicates:
         """The viewer's own duplicate groups: the same blocking and grouping as
         ``find_duplicates`` (seed, acronym alias, similarity, order), run on the
         viewer's own live Memory objects whose evidence cites only her own
-        Memory sources of this notebook
-        (``GovernanceStore.own_memory_duplicate_rows``) — the objects the
-        shared groups leave out for everyone, and exactly the pairs
-        ``merge_knowledge`` lets her merge. Nobody else's Memory can appear:
-        the read starts from her own Memory sources, a site admin has no
-        bypass, and with the Memory channel closed (``viewer_identity`` ''),
-        or in a notebook where she owns no Memory, the answer is ``[]``.
+        Memory sources of this notebook -- the objects the shared groups leave
+        out for everyone, and exactly the pairs ``merge_knowledge`` lets her
+        merge -- plus ``merged_away``: her objects of the type that a merge
+        deprecated and that still carry its record (what she can restore with a
+        status ``PATCH``). Nobody else's Memory can appear: the read starts from
+        her own Memory sources, a site admin has no bypass, and with the Memory
+        channel closed (``viewer_identity`` ''), or in a notebook where she owns
+        no Memory, both lists are empty.
 
-        ``find_duplicates`` and what it returns are untouched, and nothing is
-        cached here (the shared groups are not cached either). The cost is the
-        store's two statements, both bounded by her own Memory in this notebook:
-        her Memory sources (the partial ``idx_sources_nb_hidden_type`` index) and,
-        only when she has any, her objects through their source index. No
+        Two passes, the shape of ``find_duplicates``: pass 1
+        (``own_memory_duplicate_seed_rows``) reads thin rows with the evidence
+        test in SQL; pass 2 (``own_memory_duplicate_member_rows``) hydrates the
+        payload of the members of a group of two or more and of the merged-away
+        objects only. ``find_duplicates`` and what it returns are untouched, and
+        nothing is cached (the shared groups are not cached either). No
         notebook-wide viewer scope is built: the identity is all this read needs."""
         self.get_notebook(notebook_id)
         viewer = viewer_identity(self._current_user_id())
         if not viewer:
-            return []
+            return OwnMemoryDuplicates()
         with self._connect() as db:
-            rows = self.governance_store.own_memory_duplicate_rows(
+            rows = self.governance_store.own_memory_duplicate_seed_rows(
                 db, notebook_id, object_type, viewer
             )
-        by_seed = self._duplicate_blocks(object_type, rows)
-        return self._duplicate_groups(
-            object_type, by_seed, {r["id"]: r["payload"] for r in rows}
+            live = [r for r in rows if r["status"] != "deprecated"]
+            merged_away = [r for r in rows if r["status"] == "deprecated"]
+            by_seed = self._duplicate_blocks(object_type, live)
+            pending = [
+                o["id"] for members in by_seed.values() if len(members) >= 2
+                for o in members
+            ] + [r["id"] for r in merged_away]
+            payloads: Dict[str, dict] = {}
+            if pending:
+                payloads = self.governance_store.own_memory_duplicate_member_rows(
+                    db, notebook_id, pending
+                )
+        refs = [
+            self._knowledge_ref(
+                {
+                    "id": r["id"],
+                    "status": r["status"],
+                    "payload": payloads.get(
+                        r["id"],
+                        {"name": str(r["name"]) if r["name"] is not None else ""},
+                    ),
+                },
+                object_type,
+            )
+            for r in merged_away
+        ]
+        return OwnMemoryDuplicates(
+            groups=self._duplicate_groups(object_type, by_seed, payloads),
+            merged_away=refs,
         )
 
     @staticmethod
@@ -2402,7 +2438,7 @@ class KnowledgeGovernanceService:
         ``own_pair_only``: the caller lacks ``knowledge:write`` (the route's
         read-level path); the store then merges only two of her own Memory
         objects supported by her own Memory alone and raises
-        ``MergeNeedsKnowledgeWrite`` for any other pair, in the same locking
+        ``NeedsKnowledgeWrite`` for any other pair, in the same locking
         statement that classifies it.
 
         M1 refusal: a side derived from someone else's Memory (not

@@ -48,8 +48,10 @@ def notebook_question_suggestions_service():
     return repository()._runtime.question_suggestions  # type: ignore[attr-defined]
 
 def knowledge_governance_service():
-    """The owner's own-Memory duplicate groups read it directly: a new read,
-    deliberately not a facade seat (the facade's public surface is frozen)."""
+    """The knowledge-governance service itself, for routes that need a call the
+    frozen facade does not offer: the owner's own-Memory duplicate groups, and
+    the read-level merge and status ``PATCH`` (which take ``own_pair_only`` /
+    ``own_status_only``). The facade's public surface stays as it is."""
     return repository()._runtime.knowledge_governance  # type: ignore[attr-defined]
 
 def notebook_delete_repository():

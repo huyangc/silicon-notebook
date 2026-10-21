@@ -818,7 +818,16 @@ def _own_groups(world: World, headers: dict, object_type: str = "claim",
         params={"type": object_type}, headers=headers,
     )
     assert response.status_code == 200, response.text
-    return [[m["id"] for m in group["members"]] for group in response.json()]
+    return [[m["id"] for m in group["members"]] for group in response.json()["groups"]]
+
+
+def _merged_away(world: World, headers: dict, object_type: str = "claim") -> list:
+    response = world.client.get(
+        f"/api/notebooks/{world.nb}/duplicates/own-memory",
+        params={"type": object_type}, headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    return [(m["id"], m["status"]) for m in response.json()["merged_away"]]
 
 
 def _shared_text(world: World, headers: dict, object_type: str = "claim") -> str:
@@ -868,7 +877,9 @@ def owner_lists_her_own_memory_duplicates(world: World) -> None:
         f"/api/notebooks/{world.nb}/duplicates/own-memory",
         params={"type": "claim"}, headers=world.a,
     ).json()
-    group = response[0]
+    group = response["groups"][0]
+    # the hand-deprecated object carries no merge record: nothing to restore yet
+    assert response["merged_away"] == []
     assert group["object_type"] == "claim"
     assert {m["headline"] for m in group["members"]} == {OWN_DUP_NAME, "Own  DUP claim"}
     assert all("_merged_into" not in json.dumps(m) for m in group["members"])
@@ -916,6 +927,11 @@ def owner_lists_her_own_memory_duplicates(world: World) -> None:
     assert [set(g) for g in _own_groups(world, world.a)] == [
         {"ko-own-a-pair-1", "ko-own-a-pair-2"}
     ]
+    # the two merged-away objects are listed for restoring, hers alone
+    assert sorted(_merged_away(world, world.a)) == [
+        ("ko-own-dup-2", "deprecated"), ("ko-own-dup-bare", "deprecated"),
+    ]
+    assert _merged_away(world, world.b) == [] and _merged_away(world, world.r) == []
     for name, headers in (("a", world.a), ("b", world.b)):
         assert _shared_text(world, headers) == shared_before[name]
 
@@ -940,16 +956,18 @@ def _reader_with_memory(world: World) -> dict:
               "VALUES ('src-memory-c',?,'src-memory-c','memory','mem-own-c',?,?)"),
             (world.nb, NOW, NOW),
         )
-        for object_id, evidence in (
-            ("ko-c-dup-1", [_ev("src-memory-c")]),
-            ("ko-c-dup-2", [_ev("src-memory-c")]),
-            ("ko-c-mixed", [_ev("src-memory-c"), _ev("src-document")]),
+        for object_id, object_type, evidence in (
+            ("ko-c-dup-1", "claim", [_ev("src-memory-c")]),
+            ("ko-c-dup-2", "claim", [_ev("src-memory-c")]),
+            ("ko-c-mixed", "claim", [_ev("src-memory-c"), _ev("src-document")]),
+            # hers and backed by her Memory alone, but of another type
+            ("ko-c-concept", "concept", [_ev("src-memory-c")]),
         ):
             db.execute(
                 q("INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
                   "payload,evidence,source_id,created_at,updated_at) "
-                  "VALUES (?,?,'claim','approved',?,?,'src-memory-c',?,?)"),
-                (object_id, world.nb, json.dumps({"name": "reader claim"}),
+                  "VALUES (?,?,?,'approved',?,?,'src-memory-c',?,?)"),
+                (object_id, world.nb, object_type, json.dumps({"name": "reader claim"}),
                  json.dumps(evidence, ensure_ascii=False), NOW, NOW),
             )
     return c
@@ -982,6 +1000,7 @@ def reader_merges_only_her_own_memory_pair(world: World) -> None:
         (MEMORY_OBJECT, MEMORY_OBJECT_2),               # A's own pair
         ("ko-c-mixed", "ko-c-dup-1"),                   # her pair, shared evidence
         ("ko-c-dup-1", "ko-c-dup-1"),                   # itself
+        ("ko-c-dup-1", "ko-c-concept"),                 # her own pair, two types
         ("ko-c-dup-1", "ko-does-not-exist"),            # her own into nothing
     ):
         response = _merge(world, c, source_id, into_id)
@@ -1033,6 +1052,94 @@ def merges_on_a_mirror_keep_the_write_fence(world: World) -> None:
     assert [set(g) for g in _own_groups(world, c)] == [{"ko-c-dup-1", "ko-c-dup-2"}]
 
 
+def _patch(world: World, headers: dict, object_id: str, body: dict, nb: str | None = None):
+    return world.client.patch(
+        f"/api/notebooks/{nb or world.nb}/knowledge/{object_id}", headers=headers, json=body,
+    )
+
+
+def _payload_of(world: World, object_id: str) -> dict:
+    (row,) = _rows(world, "SELECT payload FROM knowledge_objects WHERE id=?", (object_id,))
+    payload = row["payload"]
+    return json.loads(payload) if isinstance(payload, str) else payload
+
+
+def reader_restores_her_own_merged_object(world: World) -> None:
+    """User ruling 2026-10-22: with read access alone, a member changes the
+    status (approved <-> deprecated) of her own Memory object supported by her
+    own Memory alone -- the undo of her merge. #957's rule holds: the hand
+    status change drops the merged-away object's merge record, the target keeps
+    its gate. Any other PATCH she sends -- another field, another status, a
+    shared or someone else's object, her own object with shared evidence, an
+    unknown id -- answers the read guard's 404 and writes nothing. Owners and
+    notebook admins keep their answers."""
+    c = _reader_with_memory(world)
+    merged = _merge(world, c, "ko-c-dup-2", "ko-c-dup-1")
+    assert merged.status_code == 200, merged.text
+    assert _merged_away(world, c) == [("ko-c-dup-2", "deprecated")]
+    assert _payload_of(world, "ko-c-dup-2").get("_merged_into") == "ko-c-dup-1"
+
+    refused_body = {"detail": "Notebook not found"}
+    before = _kg_rows(world)
+    for object_id, body in (
+        ("ko-c-dup-2", {"payload": {"name": "renamed"}}),          # content
+        ("ko-c-dup-2", {"status": "approved", "payload": {"name": "x"}}),
+        ("ko-c-dup-2", {"owner": "someone"}),                     # owner
+        ("ko-c-dup-2", {"status": "candidate"}),                  # another status
+        ("ko-c-dup-2", {}),                                       # nothing
+        (ORDINARY_OBJECT, {"status": "deprecated"}),              # a shared object
+        (MEMORY_OBJECT, {"status": "deprecated"}),                # A's Memory
+        ("ko-c-mixed", {"status": "deprecated"}),                 # shared evidence
+        ("ko-does-not-exist", {"status": "approved"}),            # unknown id
+    ):
+        response = _patch(world, c, object_id, body)
+        assert (response.status_code, response.json()) == (404, refused_body), (
+            object_id, body, response.text)
+        assert "X-User-Message" not in response.headers
+    assert _kg_rows(world) == before
+
+    restored = _patch(world, c, "ko-c-dup-2", {"status": "approved"})
+    assert restored.status_code == 200, restored.text
+    assert _object_row(world, "ko-c-dup-2")["status"] == "approved"
+    assert "_merged_into" not in _payload_of(world, "ko-c-dup-2")
+    assert _payload_of(world, "ko-c-dup-1").get("_absorbs") is True
+    assert _merged_away(world, c) == []
+    assert [set(g) for g in _own_groups(world, c)] == [{"ko-c-dup-1", "ko-c-dup-2"}]
+    # and back: the toggle works both ways (a hand deprecation keeps no record)
+    again = _patch(world, c, "ko-c-dup-2", {"status": "deprecated"})
+    assert again.status_code == 200, again.text
+    assert _object_row(world, "ko-c-dup-2")["status"] == "deprecated"
+    assert _merged_away(world, c) == []
+
+    # owner and notebook admin: unchanged answers
+    shared = _patch(world, world.b, ORDINARY_OBJECT, {"status": "deprecated"})
+    assert shared.status_code == 200, shared.text
+    edited = _patch(world, world.a, MEMORY_OBJECT, {"payload": {"name": "edited by A"}})
+    assert edited.status_code == 200, edited.text
+    foreign = _patch(world, world.b, MEMORY_OBJECT, {"status": "approved"})
+    assert (foreign.status_code, foreign.json()) == (
+        404, {"detail": "Knowledge object not found"})
+    outsider, _ = _register(world.client, "d00300006")
+    response = _patch(world, outsider, "ko-c-dup-1", {"status": "deprecated"})
+    assert (response.status_code, response.json()) == (404, refused_body)
+
+
+def status_patches_on_a_mirror_keep_the_write_fence(world: World) -> None:
+    """On a mirror the read-level PATCH does not open either: a reader's own
+    status toggle answers 404 as before, the owner's PATCH 409."""
+    c = _reader_with_memory(world)
+    with world.repo._write() as db:
+        db.execute(world.q("UPDATE notebooks SET sync_origin='env-src' WHERE id=?"),
+                   (world.nb,))
+    before = _kg_rows(world)
+    response = _patch(world, c, "ko-c-dup-1", {"status": "deprecated"})
+    assert (response.status_code, response.json()) == (404, {"detail": "Notebook not found"})
+    response = _patch(world, world.a, MEMORY_OBJECT, {"status": "deprecated"})
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "notebook_mirrored"
+    assert _kg_rows(world) == before
+
+
 def owner_duplicates_follow_the_memory_channel(world: World) -> None:
     """Service level: the same read with the private-Memory channel closed (an
     Agent token without ``read``) returns nothing, her own included."""
@@ -1050,8 +1157,8 @@ def owner_duplicates_follow_the_memory_channel(world: World) -> None:
             closed = service.find_own_memory_duplicates(world.nb, "claim")
     finally:
         reset_request_user(ctx)
-    assert [{m.id for m in g.members} for g in opened] == [
+    assert [{m.id for m in g.members} for g in opened.groups] == [
         {"ko-own-dup-1", "ko-own-dup-2", "ko-own-dup-bare"},
         {"ko-own-a-pair-1", "ko-own-a-pair-2"},
     ]
-    assert closed == []
+    assert closed.groups == [] and closed.merged_away == []

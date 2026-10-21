@@ -148,5 +148,14 @@ class DuplicateGroup(BaseModel):
     members: List[KnowledgeRef]
 
 
+class OwnMemoryDuplicates(BaseModel):
+    """The caller's own duplicate groups (``GET …/duplicates/own-memory``), plus
+    her objects of the type that a merge deprecated and that still carry the
+    merge's record -- what she can restore in place (``merged_away``)."""
+
+    groups: List[DuplicateGroup] = Field(default_factory=list)
+    merged_away: List[KnowledgeRef] = Field(default_factory=list)
+
+
 class MergeRequest(BaseModel):
     into_id: str
