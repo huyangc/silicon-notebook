@@ -2897,10 +2897,10 @@ class GovernanceStore:
 
         ``own_pair_only`` (the caller lacks ``knowledge:write``, user ruling
         2026-10-22): only a pair of the caller's own Memory objects supported
-        by her own Memory alone may merge; any other pair that passes every
-        check below raises ``NeedsKnowledgeWrite`` -- decided on the rows
-        the locking statement returned, before anything is written (the
-        transaction then rolls back, releasing the locks).
+        by her own Memory alone, both approved, may merge; any other pair that
+        passes every check below raises ``NeedsKnowledgeWrite`` -- decided on
+        the rows the locking statement returned, before anything is written
+        (the transaction then rolls back, releasing the locks).
 
         M1 (``app.domain.memory_kg_isolation`` has the rule): a
         Memory-derived object merges only with another one of the same
@@ -2946,6 +2946,7 @@ class GovernanceStore:
             own_rows = connection.execute(
                 "SELECT ko.id FROM knowledge_objects ko "
                 "WHERE ko.notebook_id = %s AND ko.id IN (%s, %s) "
+                "AND ko.status = 'approved' "
                 f"AND {memory_derived_object('ko')} "
                 f"AND {foreign_memory_object_excluded('ko')} "
                 f"AND {_only_own_memory_evidence_sql('ko')}",
@@ -2999,7 +3000,12 @@ class GovernanceStore:
         # own-Memory pair; its merged-away row records the target
         # (MERGED_INTO_PAYLOAD_KEY) so clearing the target can restore it.
         own_pair = bool(src["memory_derived"]) and bool(tgt["memory_derived"])
-        if own_pair_only and not own_pair:
+        # The read-level merge also needs both sides approved: merging and then
+        # restoring would otherwise lift a conflict / reviewed object to approved,
+        # around the read-level PATCH's approved <-> deprecated rule.
+        if own_pair_only and not (
+            own_pair and src["status"] == "approved" and tgt["status"] == "approved"
+        ):
             raise NeedsKnowledgeWrite()
         merged: List[dict] = json_value(tgt["evidence"], [])
         seen = {(e.get("element_id"), e.get("quoted_span")) for e in merged}

@@ -2746,11 +2746,13 @@ member's Memory object is someone else's (404). The merge route requires noteboo
 authorizes along two paths (user ruling 2026-10-22). A caller with `knowledge:write` (the notebook
 owner and admin-level grantees) is checked in the order above, and on a mirror still gets 409
 `notebook_mirrored`. A member with read access only can merge too, but only a pair whose two sides
-both come from her own Memory and whose evidence entries all cite her own Memory sources in this
-notebook. That verdict is reached on the rows of the read that locks both objects, in the merge's
+both come from her own Memory, whose evidence entries all cite her own Memory sources in this
+notebook, and which are both approved (no other status — conflict, reviewed, ...: merging and then
+restoring would lift it to approved, around the read-level `PATCH`'s approved <-> deprecated rule
+below). That verdict is reached on the rows of the read that locks both objects, in the merge's
 own transaction, before anything is written; every other merge she asks for — shared objects,
 another member's Memory, a cross-class pair, a pair carrying shared evidence, a self-merge, two
-types, a missing object — answers exactly the 404 it answered before
+types, a missing object, a side that is not approved — answers exactly the 404 it answered before
 (`{"detail": "Notebook not found"}`, the body a notebook she cannot read gets), so she learns nothing
 about whether the other object exists or what it is. On PostgreSQL her own pair can also answer the
 409 「要合并的知识对象刚被修改，请稍后重试」 under a concurrent change; a request for a pair that is
@@ -2855,7 +2857,9 @@ caller alone with `{groups, merged_away}`. `groups`: among her own live Memory-d
 requested type, those whose evidence entries all cite her own Memory sources in this notebook (the
 merge rule above, judged one object at a time, so every listed pair merges), grouped by the same
 rules as the shared groups — normalized-name seed, acronym alias, similarity hint and order (larger
-groups first). `merged_away`: her objects of the same kind that are deprecated and still carry a
+groups first). For a caller without `knowledge:write`, `groups` hold approved objects only (the
+read-level merge accepts nothing else); a writer's groups are unchanged. `merged_away`: her objects of
+the same kind that are deprecated and still carry a
 merge record (`_merged_into`: deprecated by a merge and not touched by hand since), the ones she can
 restore with the status `PATCH` above; hand-deprecated objects are not listed. It requires notebook
 read access; another member, a site admin and a token without `memory:read` all get two empty lists

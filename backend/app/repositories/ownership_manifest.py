@@ -2658,7 +2658,6 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>._merge_with_write', kind='attribute', target='merge_knowledge'),
-            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.merge_knowledge', kind='attribute', target='merge_knowledge'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='merge_knowledge'),
         ),
         patches=(

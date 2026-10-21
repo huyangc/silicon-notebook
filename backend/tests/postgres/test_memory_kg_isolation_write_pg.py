@@ -1551,6 +1551,11 @@ def test_pg_status_patches_on_a_mirror_keep_the_write_fence(pg_promotion_world):
     cases.status_patches_on_a_mirror_keep_the_write_fence(world)
 
 
+def test_pg_reader_merges_approved_own_objects_only(pg_promotion_world):
+    cases, world = pg_promotion_world
+    cases.reader_merges_approved_own_objects_only(world)
+
+
 @pytest.mark.parametrize("write", ["merge", "patch"])
 def test_pg_a_reader_is_judged_on_the_locked_row(pg_promotion_world, write):
     """The unlocked prefilter only ever refuses; acceptance is decided on the

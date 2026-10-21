@@ -1145,6 +1145,11 @@ def test_status_patches_on_a_mirror_keep_the_write_fence(promotion_world):
     cases.status_patches_on_a_mirror_keep_the_write_fence(world)
 
 
+def test_reader_merges_approved_own_objects_only(promotion_world):
+    cases, world = promotion_world
+    cases.reader_merges_approved_own_objects_only(world)
+
+
 def test_queued_memory_object_proposal_is_refused_and_closed_on_approval(promotion_world):
     cases, world = promotion_world
     cases.queued_memory_proposal_is_refused_on_approval(world)

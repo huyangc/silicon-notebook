@@ -8187,12 +8187,6 @@
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/knowledge_routes.py",
-        "scope": "<module>.merge_knowledge",
-        "target": "merge_knowledge"
-      },
-      {
-        "kind": "attribute",
         "path": "scripts/smoke_backend.py",
         "scope": "<module>.main",
         "target": "merge_knowledge"
