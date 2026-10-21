@@ -401,6 +401,20 @@ test("删除结果画在按钮紧挨着的下一行（role=status），成功/�
 });
 
 
+test("节点详情不渲染以 _ 开头的内部 payload 键，其余字段照常显示", () => {
+  renderView({
+    selectedKgNode: {
+      id: "ko-1",
+      object_type: "concept",
+      payload: { name: "阈值", definition: "触发阈值", _absorbs: true, _x: "internal" },
+    },
+  });
+  expect(screen.getByText("触发阈值")).toBeTruthy();
+  expect(screen.queryByText(/_absorbs/)).toBeNull();
+  expect(screen.queryByText(/_x/)).toBeNull();
+  expect(screen.queryByText("internal")).toBeNull();
+});
+
 test("概念详情经既有 KgEvidenceList 渲染出处，并按 next_cursor 给出加载更多成员", async () => {
   const onLoadMoreConceptMembers = vi.fn();
   renderView({

@@ -687,8 +687,131 @@ def _run_the_bounded_follow_up_case(repo, monkeypatch, ingestion_module, backgro
         assert _pg_status(database, "ko-ma1") == "deprecated"
         holder.rollback()
     ((fn, kwargs, name),) = scheduled
-    assert name == "memory-merge-heal" and kwargs["notebook_id"] == "nb"
-    assert fn(**kwargs) == 1
+    assert name == "memory-merge-heal" and kwargs == {}
+    assert fn() == 1
+    assert _pg_status(database, "ko-ma1") == "approved"
+
+
+@pytest.mark.parametrize("level", ["concept", "object"])
+def test_pg_the_owner_graph_never_shows_internal_payload_keys(pg_repository, level):
+    """Spec P2-1 on PostgreSQL: after ko-ma1 → ko-ma2, the owner's graph
+    nodes carry no ``_`` payload key (the gate ``_absorbs`` stays internal)."""
+    from app.core.request_context import reset_request_user, set_request_user
+    from app.models.identity import UserProfile
+
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    _pg_own_merge(repo, "ko-ma1", "ko-ma2")
+    token = set_request_user(UserProfile(
+        id="u-a", email="u-a@example.test", display_name="u-a", role="user",
+    ))
+    try:
+        graph = repo.unified_graph("nb", level=level)
+    finally:
+        reset_request_user(token)
+    nodes = [n if isinstance(n, dict) else n.model_dump() for n in graph["nodes"]]
+    if level == "object":
+        assert "ko-ma2" in {str(n["id"]) for n in nodes}
+    for node in nodes:
+        assert not any(key.startswith("_") for key in (node.get("payload") or {})), node
+
+
+def test_pg_one_backstop_pass_per_notebook_however_many_follow_ups_time_out(
+    pg_repository, monkeypatch
+):
+    """Quality P3-1: two removals of the same notebook (two pages of a
+    member-exit purge, say) whose follow-ups both time out on the same held
+    lock hand the notebook to ONE background pass, in the light maintenance
+    pool; that pass restores what both left."""
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from app.services import background_jobs
+    from app.services import source_ingestion as ingestion_module
+
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    _pg_add_third_memory(database)
+    with database.write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,payload,"
+            "evidence,source_id,created_at,updated_at) "
+            "VALUES ('ko-ma1c','nb','claim','approved','{}',%s,'src-ma1',%s,%s)",
+            (json.dumps([{"source_id": "src-ma1", "element_id": "el-ko-ma1c",
+                          "quoted_span": "ko-ma1c"}]), NOW, NOW),
+        )
+    _pg_own_merge(repo, "ko-ma1", "ko-ma2")
+    _pg_own_merge(repo, "ko-ma1c", "ko-ma3")
+    monkeypatch.setattr(ingestion_module, "MERGE_FOLLOWUP_LOCK_TIMEOUT_MS", 200)
+    scheduled: list = []
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda fn, *args, name=None, **kwargs: scheduled.append((fn, name)),
+    )
+    assert background_jobs._maintenance_pool("memory-merge-heal") == (
+        "light", "memory-merge-heal"
+    )
+    ingestion = repo._runtime.source_ingestion
+    with psycopg.connect(database.settings.database_url, row_factory=dict_row) as holder:
+        holder.execute("SELECT id FROM sources WHERE id='src-ma1' FOR UPDATE")
+        assert ingestion.remove_memory_sources(["src-ma2"]) == 1
+        assert ingestion.remove_memory_sources(["src-ma3"]) == 1
+        holder.rollback()
+    assert [name for _fn, name in scheduled] == ["memory-merge-heal"]
+    (fn, _name), = scheduled
+    assert fn() == 2
+    assert _pg_status(database, "ko-ma1") == "approved"
+    assert _pg_status(database, "ko-ma1c") == "approved"
+
+
+def test_pg_the_backstop_never_repoints_to_a_hand_deprecated_holder(pg_repository):
+    """Spec P3-1(a) on PostgreSQL: ko-ma1 → ko-ma3, the owner restores ko-ma1
+    and deprecates ko-ma3 by hand, ko-ma1 → ko-ma2, and ko-ma2 vanishes
+    without its follow-ups: the hand-deprecated ko-ma3 is not an eligible
+    target, so ko-ma1 is restored."""
+    from app.models.knowledge import KnowledgeUpdate
+
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    _pg_add_third_memory(database)
+    _pg_own_merge(repo, "ko-ma1", "ko-ma3")
+    for object_id, status in (("ko-ma1", "approved"), ("ko-ma3", "deprecated")):
+        with database.write() as db:
+            GovernanceStore.update_object_in_transaction(
+                db, "nb", object_id, KnowledgeUpdate(status=status), NOW, actor_id="u-a"
+            )
+    _pg_own_merge(repo, "ko-ma1", "ko-ma2")
+    with database.write() as db:
+        db.execute("DELETE FROM knowledge_objects WHERE id='ko-ma2'")
+    assert repo._runtime.source_ingestion.heal_memory_merges() == 1
+    assert _pg_status(database, "ko-ma1") == "approved"
+    assert _pg_status(database, "ko-ma3") == "deprecated"
+
+
+def test_pg_a_repoint_opens_the_follower_gate_on_its_target(pg_repository):
+    """ko-ma1 → ko-ma2 → ko-ma3 with ko-ma3's gate removed: clearing mem-a2
+    re-points ko-ma1 at ko-ma3 and opens its gate (locked with the follower
+    in one id-ordered statement); clearing mem-a3 then restores ko-ma1."""
+    repo = pg_repository
+    database = repo._runtime.database
+    _seed(database)
+    _pg_add_third_memory(database)
+    _pg_own_merge(repo, "ko-ma1", "ko-ma2")
+    _pg_own_merge(repo, "ko-ma2", "ko-ma3")
+    with database.write() as db:
+        db.execute(
+            "UPDATE knowledge_objects SET payload = payload - '_absorbs' WHERE id='ko-ma3'"
+        )
+    _pg_change_memory(repo, "mem-a2", "delete")
+    with database.connect() as db:
+        target = db.execute(
+            "SELECT payload FROM knowledge_objects WHERE id='ko-ma3'"
+        ).fetchone()["payload"]
+    assert target.get("_absorbs") is True
+    _pg_change_memory(repo, "mem-a3", "delete")
     assert _pg_status(database, "ko-ma1") == "approved"
 
 

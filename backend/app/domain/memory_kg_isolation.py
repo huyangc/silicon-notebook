@@ -295,23 +295,38 @@ def evidence_keys(evidence: Iterable[Any]) -> frozenset:
     )
 
 
+def merge_target_eligible(status: str, payload: Any) -> bool:
+    """兜底改指的目标是否合格:仍在用且带门闸(本版本起的合并目标),或弃用且自己带
+    合并标记(链上一层,它被清掉时会继续沿链处理)。"""
+    if not isinstance(payload, Mapping):
+        return False
+    if status == "deprecated":
+        return bool(payload.get(MERGED_INTO_PAYLOAD_KEY))
+    return bool(payload.get(ABSORBS_PAYLOAD_KEY))
+
+
 def heal_action(
     notebook_id: str,
     object_id: str,
     marker: str,
     own_evidence: Iterable[Any],
-    holders: Iterable[tuple[str, str, Any]],
+    holders: Iterable[tuple[str, str, Any, Any]],
 ) -> MergeFollowAction:
     """启动兜底对一个候选(弃用、标记指向的对象已不在、自己的 Memory 仍在)的复核:
-    `holders` 是 `(id, status, evidence)`——同一来源证据的其他对象。仍有对象带着它自己的
-    全部条目(它的知识还在那里),就改指过去(优先仍在用的),否则才恢复。证据为空时
+    `holders` 是 `(id, status, evidence, payload)`——别的来源里引用了它来源的对象。
+    仍有一个**合格**的对象带着它自己的全部条目(它的知识还在那里),就改指过去(优先
+    仍在用的),否则才恢复。合格只有两种(`merge_target_eligible`):仍在用、带
+    `ABSORBS_PAYLOAD_KEY` 的合并目标;或弃用、自己带 `MERGED_INTO_PAYLOAD_KEY` 的链上
+    一层。主人手动弃用、不带标记的对象不合格——指向它,候选就永远不会再被处理。证据为空时
     无从比对,恢复。这样兜底永远不会把同一份知识恢复成两份。"""
     keys = evidence_keys(own_evidence)
     if keys:
         carrying = sorted(
             (status == "deprecated", holder_id)
-            for holder_id, status, evidence in holders
-            if holder_id != object_id and keys <= evidence_keys(evidence)
+            for holder_id, status, evidence, payload in holders
+            if holder_id != object_id
+            and merge_target_eligible(status, payload)
+            and keys <= evidence_keys(evidence)
         )
         if carrying:
             return MergeFollowAction(

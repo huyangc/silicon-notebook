@@ -2706,8 +2706,12 @@ moving or deleting the Memory that owns the merge result clears the result with 
 before, every object merged directly into it is restored to approved, and so is retrievable again,
 when that object is still deprecated and its own Memory still exists (user ruling 2026-10-21). An
 object whose Memory is gone is not restored. The record is on the merged-away object itself: the
-merge writes the target's id into a hidden payload key (`_merged_into`; keys starting with `_` are
-never shown or searched), a later merge of the same object moves it to the newest target, and a
+merge writes the target's id into a hidden payload key (`_merged_into`; every key starting with `_`
+is dropped at each exit that shows, retrieves or searches a payload — graph nodes, the owner's
+overlay, concept detail, the promotion queue through `visible_payload`, and the knowledge list,
+retrieval and search text through their own projections; pinned by
+`test_the_owner_graph_never_shows_internal_payload_keys` on both backends and the graph view's
+component test), a later merge of the same object moves it to the newest target, and a
 hand edit of its status or content (`PATCH`) clears it — so an object the owner deprecated by hand
 is never restored, and an object is never restored twice. Merges between shared objects write
 nothing. A chain restores one level per cleared result: after a1 → a2 → a3, clearing a3 restores
@@ -2726,12 +2730,20 @@ or a transaction that then rolls back, so whatever was skipped is re-run right a
 short transaction (same lock order, re-checked, harmless to repeat). That re-run runs on the
 delete's or edit's own request, so its wait is bounded to a few seconds (`lock_timeout`); a lock
 held longer hands the notebook to one background pass that waits longer, and whatever even that
-misses — or a crash in between — is settled by a background pass after the next start. These
+misses — or a crash in between — is settled by a background pass after the next start. That
+background pass runs in the light maintenance pool, at most one per notebook at a time in a process.
+So the only window that waits for the next start is a re-run and its background pass both failing,
+or the process being killed between the commit and the re-run. These
 passes read on a read-only connection, Memory sources first and then their objects, so their cost
 follows the amount of Memory, not the size of the notebook. Before restoring, a pass checks whether
 another source's object still carries all of the object's own evidence (a chain link the skipped
 step would have re-pointed to) and re-points it there instead, so an object is never restored as a
-second copy. The merge also marks its target (a hidden `_absorbs` key, kept across hand edits; a
+second copy; only an object still in use that carries the merge mark, or a deprecated chain link that
+itself carries the record, qualifies as such a target (a hand-deprecated one does not, and the object
+is restored), and re-pointing also marks the target. A candidate whose evidence is empty cannot be
+compared and is always restored, and a step that would only have dropped the record (its result had
+been deprecated by hand) is restored by the background pass: only when all three layers fail can an
+object whose result the owner deprecated by hand come back. The merge also marks its target (a hidden `_absorbs` key, kept across hand edits; a
 stale mark only costs one more read): a Memory removal or edit whose objects carry no such mark
 skips the follower read entirely, so with a certified reverse index a plain Memory removal pays one
 statement more than before this feature. On PostgreSQL a merge locks the Memory sources it

@@ -100,6 +100,7 @@ import json
 from collections import Counter
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple
 
+from app.domain.knowledge_contracts import visible_payload
 from app.services import source_scope as _source_scope
 from app.services.source_scope import (
     ceiling_binds,
@@ -423,7 +424,7 @@ class KgViewerScope:
             )
         nodes = []
         for oid in kept:
-            payload = _payload(rows[oid]["payload"])
+            payload = visible_payload(_payload(rows[oid]["payload"]))
             nodes.append({
                 "id": oid,
                 "object_type": rows[oid]["object_type"],

@@ -650,7 +650,9 @@ export function KgGraphView({
                 <span className="tag">关系 {selectedKgEdges.length}</span>
               </div>
               {Object.entries(selectedKgNode.payload)
-                .filter(([key, value]) => !["name", "section_path"].includes(key) && Boolean(kgPayloadValue(value)))
+                // `_`-prefixed payload keys are internal bookkeeping (the
+                // backend drops them at every exit; this is the fallback).
+                .filter(([key, value]) => !key.startsWith("_") && !["name", "section_path"].includes(key) && Boolean(kgPayloadValue(value)))
                 .map(([key, value]) => (
                   <p key={key}><strong>{fieldLabel(key)}：</strong>{kgPayloadValue(value)}</p>
                 ))}

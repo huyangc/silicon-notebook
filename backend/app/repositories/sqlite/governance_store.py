@@ -48,6 +48,7 @@ from app.domain.memory_kg_isolation import (
     MemoryKnowledgeMergeRefused,
     MemoryPromotionRefused,
     PromotionObjectMissing,
+    FOLLOW_REPOINT,
     FOLLOW_RESTORE,
     ABSORBS_PAYLOAD_KEY,
     MERGED_INTO_PAYLOAD_KEY,
@@ -1990,6 +1991,7 @@ class GovernanceStore:
                 "ORDER BY ko.id",
                 (found.param, notebook_id),
             ).fetchall()
+            gated: set = set()
             for row in rows:
                 action = wanted[str(row["id"])]
                 payload = json.loads(row["payload"] or "{}")
@@ -2009,7 +2011,29 @@ class GovernanceStore:
                     ),
                 )
                 applied.append(action)
+                if action.kind == FOLLOW_REPOINT and action.repoint_to not in gated:
+                    gated.add(action.repoint_to)
+                    GovernanceStore._open_follower_gate_on(
+                        connection, notebook_id, action.repoint_to
+                    )
         return applied, []
+
+    @staticmethod
+    def _open_follower_gate_on(
+        connection: sqlite3.Connection, notebook_id: str, object_id: str
+    ) -> None:
+        """A re-point's target gets ``ABSORBS_PAYLOAD_KEY`` if it lacks it."""
+        row = connection.execute(
+            "SELECT payload FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
+            (object_id, notebook_id),
+        ).fetchone()
+        payload = json.loads(row["payload"] or "{}") if row is not None else None
+        if isinstance(payload, dict) and not payload.get(ABSORBS_PAYLOAD_KEY):
+            connection.execute(
+                "UPDATE knowledge_objects SET payload = ? WHERE id = ? AND notebook_id = ?",
+                (json.dumps(marked_absorbs(payload), ensure_ascii=False), object_id,
+                 notebook_id),
+            )
 
     @staticmethod
     def lock_memory_teardown_objects_on(
@@ -2150,7 +2174,8 @@ class GovernanceStore:
             )
         if backfilled[notebook_id]:
             rows = connection.execute(
-                "SELECT o.id, o.status, o.evidence FROM knowledge_object_sources kos "
+                "SELECT o.id, o.status, o.evidence, o.payload "
+                "FROM knowledge_object_sources kos "
                 "JOIN knowledge_objects o ON o.id = kos.object_id "
                 "WHERE kos.source_id = ? AND kos.notebook_id = ? AND o.id <> ? "
                 "AND o.source_id IS NOT ?",
@@ -2158,7 +2183,8 @@ class GovernanceStore:
             ).fetchall()
         else:
             rows = connection.execute(
-                "SELECT DISTINCT ko.id, ko.status, ko.evidence FROM knowledge_objects ko "
+                "SELECT DISTINCT ko.id, ko.status, ko.evidence, ko.payload "
+                "FROM knowledge_objects ko "
                 "JOIN json_each(CASE WHEN json_valid(ko.evidence) AND "
                 "json_type(ko.evidence) = 'array' THEN ko.evidence ELSE '[]' END) AS item "
                 "WHERE ko.notebook_id = ? AND ko.id <> ? AND ko.source_id IS NOT ? "
@@ -2167,7 +2193,8 @@ class GovernanceStore:
                 (notebook_id, row["id"], row["source_id"], row["source_id"]),
             ).fetchall()
         return [
-            (str(r["id"]), str(r["status"]), json.loads(r["evidence"] or "[]"))
+            (str(r["id"]), str(r["status"]), json.loads(r["evidence"] or "[]"),
+             json.loads(r["payload"] or "{}"))
             for r in rows
         ]
 
