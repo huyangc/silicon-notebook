@@ -298,7 +298,7 @@
     "backend/app/services/ask_service.py::AskService._chunk_retrieve": 194,
     "backend/app/services/ask_service.py::AskService._draft_reasoning_response": 564,
     "backend/app/services/ask_service.py::AskService._run_reasoning_stage": 513,
-    "backend/app/services/ask_service.py::AskService.ask_chunk": 156,
+    "backend/app/services/ask_service.py::AskService.ask_chunk": 159,
     "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.complete_relations_for_source": 425,
     "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.rebuild_communities": 407,
     "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.rebuild_unified_kg": 65,

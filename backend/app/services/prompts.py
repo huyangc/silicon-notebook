@@ -322,6 +322,24 @@ def _answer_authority_rules(peer_notebooks: bool) -> str:
     )
 
 
+#: Rule 15 of ``answer_prompt``, present only when the turn read an attached
+#: deep report (``report_block``; plan 2026-10-21 §2.8): the report is the
+#: system's own earlier writing, not evidence, and its rewritten ``[k]``
+#: markers point at the knowledge items it was written from.
+ATTACHED_REPORT_ANSWER_RULE = (
+    "15. The attached report below was written earlier by this system from "
+    "the notebook. It is NOT evidence and has no [k] id of its own: never "
+    "cite the report itself. Its [k] markers were rewritten to point at the "
+    "knowledge items it was written from, which appear among the Knowledge "
+    "items; a report sentence whose marker was removed has no surviving "
+    "evidence here. Before you repeat or rely on any statement from the "
+    "report, check it against the cited knowledge item's text. When the "
+    "knowledge items do not support a report statement, say so explicitly "
+    "(for example 「报告中的这一说法在当前资料中找不到依据」) instead of "
+    "repeating it, and never attach a [k] marker to it.\n"
+)
+
+
 def answer_prompt(
     question: str,
     context_block: str,
@@ -334,6 +352,7 @@ def answer_prompt(
     style_block: str = "",
     external_rules: bool = False,
     peer_notebooks: bool = False,
+    report_block: str = "",
 ) -> str:
     """按节合成的四个形参是 **keyword-only**:三个既有位置参数(question/context/
     history)是所有调用方的形状,把模式开关也做成位置参数,只会让「第四个位置传了
@@ -349,6 +368,13 @@ def answer_prompt(
     条目时才为真,追加规则 14;为假时(没有插件动作、动作没带回条目、或整块被
     预算挤掉)输出与接入这个特性之前逐字节相等 —— 一条谈论「库外材料」的规则,
     在一份没有库外材料的证据表面前只会教模型去找一个不存在的标签。
+
+    ``report_block`` (计划 2026-10-21 §2.8) 是第四个例子:这一轮读入的关联深度
+    报告块(``report_followup.render_report_block``,题目、执行摘要、节标题与选入
+    的节正文,其 ``[kN]`` 已改写成本轮 key)。非空时在规则 14 之后追加规则 15
+    (报告不是证据、不得引用报告本身、复述前先核对它引用的知识条目、无支撑时
+    明说),并把报告块放在历史之后、节级指令之前;为空时(没挂报告、报告本轮不可
+    读、或未走到合成)输出与接入这个特性之前逐字节相等。
 
     """
     history_section = (
@@ -374,6 +400,8 @@ def answer_prompt(
         "side is which rather than merging them.\n"
         if external_rules else ""
     )
+    report_rule = ATTACHED_REPORT_ANSWER_RULE if report_block else ""
+    report_section = f"{report_block}\n\n" if report_block else ""
     return (
         "You answer an engineer's question using the notebook knowledge below, "
         "and you may reason beyond it.\n"
@@ -441,8 +469,10 @@ def answer_prompt(
         "may be stated without the marker. Never let a closing section state "
         "as established fact what the body only inferred.\n"
         f"{external_section}"
+        f"{report_rule}"
         "\n"
         f"{history_section}"
+        f"{report_section}"
         f"{section_section}"
         f"{style_section}"
         f"Question: {question}\n\n"
