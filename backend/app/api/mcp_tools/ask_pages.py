@@ -12,16 +12,24 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from ._shared import RESULT_LIMIT, TEXT_LIMIT, AgentToolError, _budget_response
+from ._shared import (
+    RESULT_LIMIT,
+    TEXT_LIMIT,
+    TITLE_CHARS,
+    AgentToolError,
+    _budget_response,
+)
 from .global_ask import _citation_keys, _trace_step_view
 
 # Field caps for the strings an answer page carries (same values the retired
-# single-notebook ask tool used for its anchors and intent summary).
+# single-notebook ask tool used for its anchors and intent summary). ``title``
+# is the attached deep report's (``scope.linked_report.title``): the one cap
+# every surface that shows a title uses.
 _FIELD_LIMITS = {
     "object_type": 100, "label": 300, "source_title": 300, "location_label": 300,
     "resolved_question": 1_000, "entities": 200, "assumptions": 300,
     "constraints": 300, "excluded_topics": 300, "question": 500,
-    "quoted_span": 200, "source_file_name": 300,
+    "quoted_span": 200, "source_file_name": 300, "title": TITLE_CHARS,
 }
 
 
@@ -55,14 +63,18 @@ def linked_report_view(receipt: Any) -> dict[str, Any]:
     ``linked_report`` of a retrieval-only response share this one shape:
     which report was attached, whether it was read (``status``), why not
     (``reason``, only when it was not), the section titles whose text entered
-    the prompt, and how many items the report cited were read back or are gone.
+    the prompt, and how many items the report cited were read back
+    (``evidence_restored``), are gone (``evidence_gone``) or were read back but
+    left out of the prompt for space (``evidence_over_budget`` -- always
+    present, as on the web receipt: an Agent must be able to tell "left out for
+    space" from "has no support").
 
     Deliberately NOT a copy of the receipt: ``memory_used`` -- the ids of the
     owner's personal Memory the report was written from -- never leaves the
     server on this surface (the Agent reads Memory through its own tier, not
-    through a report's footprint), and ``evidence_over_budget`` stays out of
-    the contract too. Titles are the report's own words: they are bounded by
-    the response budget like any string and a cut is counted in ``truncation``.
+    through a report's footprint). ``title`` is the report's own question: the
+    page's field limits cut it to ``TITLE_CHARS`` like a conversation's title,
+    and the cut is counted in ``truncation``.
     """
     view: dict[str, Any] = {
         "report_id": receipt.report_id,
@@ -76,6 +88,7 @@ def linked_report_view(receipt: Any) -> dict[str, Any]:
         view["summary_truncated"] = True
     view["evidence_restored"] = receipt.evidence_restored
     view["evidence_gone"] = receipt.evidence_gone
+    view["evidence_over_budget"] = receipt.evidence_over_budget
     return view
 
 

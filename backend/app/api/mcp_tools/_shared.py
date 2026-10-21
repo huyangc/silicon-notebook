@@ -36,6 +36,13 @@ logger = logging.getLogger(__name__)
 RESULT_LIMIT = 20
 TEXT_LIMIT = 2_000
 TOTAL_TEXT_LIMIT = 12_000
+# A title an Agent is shown -- a conversation's, and the deep report a question
+# attached -- in code points. One name for every surface that cuts one, so a
+# title is the same length wherever it appears. A title is user-written text of
+# up to thousands of characters (a report's is the question its author typed);
+# without a cap of its own it would be the longest string of a page and take
+# the budget from the answer.
+TITLE_CHARS = 200
 # ``ask(output="evidence")`` returns the context the synthesis would
 # have been given, so its size follows the synthesis budget, not the 12,000
 # above. The per-item allowance covers the handle/metadata fields wrapped

@@ -532,8 +532,14 @@ SQLite `_migration_99`：`add_column_if_missing(db, "ask_jobs", "report_id", "TE
 - `ask(..., report_id: str = "")`；`get_ask` 不加参数。
 - `notebook_view(...)["scope"]` 在有回执时加 `linked_report`：
   `{"report_id","title","status","reason"?, "sections_read":[<节标题>…], "summary_truncated"?,
-  "evidence_restored","evidence_gone"}`（不含 `memory_used`）；running 任务只有
-  `{"report_id": …}`（来自任务行）。`evidence_page` 顶层加同形 `linked_report`。
+  "evidence_restored","evidence_gone","evidence_over_budget"}`（不含 `memory_used`；
+  `evidence_over_budget` 恒出现，与网页回执一致——Agent 必须分得清「因预算没载入」和「没有依据」）；
+  没有回答可带回执的任务（running / failed / cancelled）只有 `{"report_id": …}`（来自任务行）。
+  `title` 与会话标题同一上限（`_shared.TITLE_CHARS`，200 码点），切断按响应预算的 `truncation` 披露；
+  link 交付页（`answer_link_page`）同样按此上限。`evidence_page` 顶层加同形 `linked_report`。
+- 澄清句柄绑定报告：`_notebook_scope_key` 在 `report_id` 非空时追加 `|report:<id>`（空时 key 不变，旧句柄
+  不受影响）；续调漏传或换了 `report_id` 是既有的 `intent_token 无效或已过期`，文案与 `next_step`
+  都点明要带同一个 `report_id`。
 
 ### 2.12 前端状态（`use-ask-session.ts` 独占）
 
