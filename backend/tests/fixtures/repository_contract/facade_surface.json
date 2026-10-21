@@ -8202,7 +8202,7 @@
     "owner": "KnowledgeGovernanceService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', source_id: 'str', payload: 'MergeRequest', *, actor_id: 'Optional[str]' = None, own_pair_only: 'bool' = False) -> 'RuleCard'"
+    "signature": "(self, notebook_id: 'str', source_id: 'str', payload: 'MergeRequest', *, actor_id: 'Optional[str]' = None) -> 'RuleCard'"
   },
   "merge_review_job_status": {
     "consumers": [

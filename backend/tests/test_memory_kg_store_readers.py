@@ -147,8 +147,12 @@ def test_viewer_statements_are_index_driven_without_analyze(world, viewer_kind):
             store.relations_for_notebook(
                 recorder, world.nb, viewer_id=viewer, own_memory_only=True)
             # the owner's duplicate groups: her Memory sources, then her objects
-            world.repo._runtime.governance.own_memory_duplicate_rows(
+            governance = world.repo._runtime.governance
+            seeds = governance.own_memory_duplicate_seed_rows(
                 recorder, world.nb, "concept", viewer)
+            assert seeds, "the own-Memory seed read found nothing to pin"
+            governance.own_memory_duplicate_member_rows(
+                recorder, world.nb, [row["id"] for row in seeds])
         statements = list(recorder.statements)
     checked = driven = 0
     with cases.connect(world) as db:
@@ -186,10 +190,10 @@ def test_viewer_statements_are_index_driven_without_analyze(world, viewer_kind):
     # member: the cold two-half count of nb and of nb2 (kg_ready's shared half
     # comes from the count cache), the own-Memory count half (list total),
     # kg_ready's own-Memory probe on the Memory-only nb2, the two overlay reads,
-    # the owner's duplicate-group reads (her Memory sources, her objects) and
-    # the FTS exclusion list; closed channel: the two cold counts and the FTS
-    # exclusion list only
-    assert driven == (9 if viewer else 3)
+    # the owner's duplicate-group pass 1 (pass 2 is a primary-key read of the
+    # ids pass 1 returned) and the FTS exclusion list; closed channel: the two
+    # cold counts and the FTS exclusion list only
+    assert driven == (8 if viewer else 3)
 
 
 def test_no_viewer_issues_the_pre_isolation_statements(world):

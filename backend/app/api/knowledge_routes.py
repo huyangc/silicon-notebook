@@ -28,6 +28,7 @@ from app.models.knowledge import (
     ObjectSchemaCreate,
     ObjectSchemaModel,
     ObjectSchemaUpdate,
+    OwnMemoryDuplicates,
     PaginatedKnowledge,
 )
 from app.domain.memory_kg_isolation import (
@@ -204,9 +205,28 @@ def propose_schemas(notebook_id: str) -> List[ObjectSchemaModel]:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.patch("/notebooks/{notebook_id}/knowledge/{knowledge_id}", dependencies=[Depends(require_notebook_capability("knowledge:write"))])
+@router.patch("/notebooks/{notebook_id}/knowledge/{knowledge_id}", dependencies=[Depends(require_notebook_read)])
 def update_knowledge(notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate,
                      user: UserProfile = Depends(get_current_user)):
+    """Two authorisation paths (user ruling 2026-10-22), the same split as the
+    merge route below.
+
+    With ``knowledge:write``: as before -- the capability, the mirror fence
+    (409), then the store (an object derived from someone else's Memory is "not
+    found", the 404 an unknown id gets).
+
+    With read access only: a status change alone, between approved and
+    deprecated, of the caller's own Memory object supported by her own Memory
+    alone (undoing or redoing a merge), decided on the row the store locked
+    (``own_status_only``). Every refusal -- any other field, a shared or someone
+    else's object, an unknown id, any other status -- answers the 404 this
+    caller got for any ``PATCH`` before. On a mirror the read path does not
+    apply (the knowledge:write fence): 404 as before."""
+    if not notebook_capability_allowed("knowledge:write", notebook_id, user.id):
+        return _update_own_status(notebook_id, knowledge_id, payload, user)
+    mirrored = notebook_mirror_fence("knowledge:write", notebook_id)
+    if mirrored:
+        raise mirrored_notebook_error(mirrored)
     # M1: an object derived from someone else's Memory is "not found" (same
     # 404 body as an unknown id) — decided in the store's locking read.
     try:
@@ -240,18 +260,19 @@ def find_duplicates(notebook_id: str, type: str = Query("rules")) -> List[Duplic
 
 @router.get(
     "/notebooks/{notebook_id}/duplicates/own-memory",
-    response_model=List[DuplicateGroup],
+    response_model=OwnMemoryDuplicates,
     dependencies=[Depends(require_notebook_read)],
 )
 def find_own_memory_duplicates(
     notebook_id: str, type: str = Query("rules"),
-) -> List[DuplicateGroup]:
+) -> OwnMemoryDuplicates:
     """The caller's own duplicate groups: objects derived from her own Memory
     and supported by it alone, which the shared ``/duplicates`` leaves out for
-    everyone. A separate route because ``/duplicates`` answers a bare list, so
-    a per-viewer field would change its shape for every existing client. Anyone
-    else — another member, a site admin — gets ``[]``, the same answer as a
-    viewer who owns no Memory here."""
+    everyone, plus those of them a merge deprecated (``merged_away``, what she
+    can restore). A separate route because ``/duplicates`` answers a bare list,
+    so a per-viewer field would change its shape for every existing client.
+    Anyone else — another member, a site admin — gets two empty lists, the same
+    answer as a viewer who owns no Memory here."""
     object_type = _KNOWLEDGE_TYPE_MAP.get(type, type)
     try:
         return knowledge_governance_service().find_own_memory_duplicates(
@@ -272,8 +293,9 @@ def knowledge_graph(notebook_id: str) -> KnowledgeGraph:
         raise HTTPException(status_code=413, detail=str(exc))
 
 
-#: What a caller without ``knowledge:write`` gets for every merge refusal: the
-#: read guard's own 404 body, the one she got for any merge before 2026-10-22.
+#: What a caller without ``knowledge:write`` gets for every merge or ``PATCH``
+#: refusal: the read guard's own 404 body, the one she got for any such write
+#: before 2026-10-22.
 _MERGE_NOT_PERMITTED = "Notebook not found"
 
 
@@ -304,7 +326,9 @@ def merge_knowledge(notebook_id: str, knowledge_id: str, payload: MergeRequest,
     if notebook_mirror_fence("knowledge:write", notebook_id):
         raise HTTPException(status_code=404, detail=_MERGE_NOT_PERMITTED)
     try:
-        return repository().merge_knowledge(
+        # Straight to the governance service: the facade's frozen signature
+        # stays as it is (only the write path goes through it).
+        return knowledge_governance_service().merge_knowledge(
             notebook_id, knowledge_id, payload, actor_id=user.id, own_pair_only=True
         )
     except MemoryKnowledgeMergeRefused as exc:
@@ -312,8 +336,24 @@ def merge_knowledge(notebook_id: str, knowledge_id: str, payload: MergeRequest,
             raise user_error(409, exc.user_message)
         raise HTTPException(status_code=404, detail=_MERGE_NOT_PERMITTED)
     except (LookupError, ValueError):
-        # KeyError (unknown or someone else's object), MergeNeedsKnowledgeWrite
+        # KeyError (unknown or someone else's object), NeedsKnowledgeWrite
         # (not her own pair), ValueError (self-merge, mismatched types)
+        raise HTTPException(status_code=404, detail=_MERGE_NOT_PERMITTED)
+
+
+def _update_own_status(notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate,
+                       user: UserProfile):
+    """The read-level ``PATCH`` (see ``update_knowledge``): straight to the
+    governance service, so the facade's frozen signature stays as it is."""
+    if notebook_mirror_fence("knowledge:write", notebook_id):
+        raise HTTPException(status_code=404, detail=_MERGE_NOT_PERMITTED)
+    try:
+        return knowledge_governance_service().update_knowledge(
+            notebook_id, knowledge_id, payload, actor_id=user.id, own_status_only=True
+        )
+    except (LookupError, ValueError):
+        # KeyError (unknown or someone else's object), NeedsKnowledgeWrite
+        # (not a status toggle of her own object), ValueError (invalid status)
         raise HTTPException(status_code=404, detail=_MERGE_NOT_PERMITTED)
 
 

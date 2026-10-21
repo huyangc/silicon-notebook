@@ -9572,6 +9572,27 @@
           "title": "ObjectSchemaUpdate",
           "type": "object"
         },
+        "OwnMemoryDuplicates": {
+          "description": "The caller's own duplicate groups (``GET …/duplicates/own-memory``), plus\nher objects of the type that a merge deprecated and that still carry the\nmerge's record -- what she can restore in place (``merged_away``).",
+          "properties": {
+            "groups": {
+              "items": {
+                "$ref": "#/components/schemas/DuplicateGroup"
+              },
+              "title": "Groups",
+              "type": "array"
+            },
+            "merged_away": {
+              "items": {
+                "$ref": "#/components/schemas/KnowledgeRef"
+              },
+              "title": "Merged Away",
+              "type": "array"
+            }
+          },
+          "title": "OwnMemoryDuplicates",
+          "type": "object"
+        },
         "PaginatedKnowledge": {
           "properties": {
             "items": {
@@ -21582,7 +21603,7 @@
       },
       "/api/notebooks/{notebook_id}/duplicates/own-memory": {
         "get": {
-          "description": "The caller's own duplicate groups: objects derived from her own Memory\nand supported by it alone, which the shared ``/duplicates`` leaves out for\neveryone. A separate route because ``/duplicates`` answers a bare list, so\na per-viewer field would change its shape for every existing client. Anyone\nelse — another member, a site admin — gets ``[]``, the same answer as a\nviewer who owns no Memory here.",
+          "description": "The caller's own duplicate groups: objects derived from her own Memory\nand supported by it alone, which the shared ``/duplicates`` leaves out for\neveryone, plus those of them a merge deprecated (``merged_away``, what she\ncan restore). A separate route because ``/duplicates`` answers a bare list,\nso a per-viewer field would change its shape for every existing client.\nAnyone else — another member, a site admin — gets two empty lists, the same\nanswer as a viewer who owns no Memory here.",
           "operationId": "find_own_memory_duplicates_api_notebooks__notebook_id__duplicates_own_memory_get",
           "parameters": [
             {
@@ -21610,11 +21631,7 @@
               "content": {
                 "application/json": {
                   "schema": {
-                    "items": {
-                      "$ref": "#/components/schemas/DuplicateGroup"
-                    },
-                    "title": "Response Find Own Memory Duplicates Api Notebooks  Notebook Id  Duplicates Own Memory Get",
-                    "type": "array"
+                    "$ref": "#/components/schemas/OwnMemoryDuplicates"
                   }
                 }
               },
@@ -24678,6 +24695,7 @@
       },
       "/api/notebooks/{notebook_id}/knowledge/{knowledge_id}": {
         "patch": {
+          "description": "Two authorisation paths (user ruling 2026-10-22), the same split as the\nmerge route below.\n\nWith ``knowledge:write``: as before -- the capability, the mirror fence\n(409), then the store (an object derived from someone else's Memory is \"not\nfound\", the 404 an unknown id gets).\n\nWith read access only: a status change alone, between approved and\ndeprecated, of the caller's own Memory object supported by her own Memory\nalone (undoing or redoing a merge), decided on the row the store locked\n(``own_status_only``). Every refusal -- any other field, a shared or someone\nelse's object, an unknown id, any other status -- answers the 404 this\ncaller got for any ``PATCH`` before. On a mirror the read path does not\napply (the knowledge:write fence): 404 as before.",
           "operationId": "update_knowledge_api_notebooks__notebook_id__knowledge__knowledge_id__patch",
           "parameters": [
             {

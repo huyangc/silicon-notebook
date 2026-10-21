@@ -277,7 +277,9 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "GovernanceStore.pending_merge_names": KEY_BOUNDED,
         # the owner's own duplicate groups: driven by her own Memory sources
         # (own_memory_source), so nobody else's Memory object is ever read
-        "GovernanceStore.own_memory_duplicate_rows": OWN_MEMORY,
+        "GovernanceStore.own_memory_duplicate_seed_rows": OWN_MEMORY,
+        # pass 2 of the same: payloads of ids pass 1 returned (her own objects)
+        "GovernanceStore.own_memory_duplicate_member_rows": KEY_BOUNDED,
         "GovernanceStore.promotion_object_type_row": KEY_BOUNDED,
         "GovernanceStore.locate_approved_base_object": KEY_BOUNDED,
         "GovernanceStore.locate_approved_memory_base_objects": KEY_BOUNDED,

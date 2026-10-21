@@ -46,7 +46,8 @@ from app.domain.knowledge_contracts import (
 from app.domain.memory_kg_isolation import (
     PROMOTION_APPROVE_MESSAGE,
     MemoryKnowledgeMergeRefused,
-    MergeNeedsKnowledgeWrite,
+    NeedsKnowledgeWrite,
+    OWN_STATUS_TOGGLE,
     MemoryPromotionRefused,
     PromotionObjectMissing,
     FOLLOW_REPOINT,
@@ -61,7 +62,6 @@ from app.domain.memory_kg_isolation import (
     heal_action,
     patched_payload,
     merge_evidence_source_ids,
-    evidence_only_from_own_memory,
     memory_merge_refusal,
     plan_merge_follow_actions,
 )
@@ -70,6 +70,31 @@ _REVIEW_STATUSES = frozenset({"pending", "verified", "rejected"})
 
 #: Memory sources per objects statement of the merge-heal backstop read.
 _HEAL_SOURCE_BATCH = 200
+
+
+def _only_own_memory_evidence_sql(alias: str) -> str:
+    """Every evidence entry of ``alias`` cites one of the viewer's own Memory
+    sources of the notebook: the merge's ``only_own_memory_evidence`` (via
+    ``evidence_only_from_own_memory``) in SQL, for the owner's duplicate
+    groups. Two parameters, in order: notebook id, viewer id. An entry that is
+    not an object or has no non-empty ``source_id`` fails it; ``NULL``, ``''``,
+    ``[]``, ``{}`` and ``""`` pass (the Python reading iterates nothing). Other
+    shapes (a non-empty string or object, a number, invalid JSON) fail: the
+    Python reading refused them or could not read them at all."""
+    own = (
+        "SELECT es.id FROM sources es WHERE es.notebook_id = ? "
+        f"AND {hidden_type_index_term('es')} AND {own_memory_source('es')}"
+    )
+    e = f"{alias}.evidence"
+    return (
+        f"({e} IS NULL OR {e} = '' OR (json_valid({e}) AND ("
+        f"(json_type({e}) = 'array' AND NOT EXISTS (SELECT 1 FROM json_each({e}) "
+        "WHERE NOT (json_each.type = 'object' "
+        "AND COALESCE(json_extract(json_each.value, '$.source_id'), '') <> '' "
+        f"AND json_extract(json_each.value, '$.source_id') IN ({own}))))"
+        f" OR (json_type({e}) = 'object' AND NOT EXISTS (SELECT 1 FROM json_each({e})))"
+        f" OR (json_type({e}) = 'text' AND json_extract({e}, '$') = ''))))"
+    )
 
 # Pagination width for the review queue's endpoint-object lookup — a page size,
 # not a cap: every endpoint id is fetched.  500 is the store-wide convention
@@ -2267,13 +2292,20 @@ class GovernanceStore:
         now: str,
         *,
         actor_id: str | None = None,
+        own_status_only: bool = False,
     ) -> sqlite3.Row:
         """The in-transaction body of update_knowledge: validate, apply the
         partial update and return the refetched row. ``payload`` is the
         KnowledgeUpdate model (status/payload/owner partial edit).
 
         M1 (E4-3): an object derived from someone else's Memory raises the
-        same ``KeyError`` as a missing id; see the PostgreSQL twin."""
+        same ``KeyError`` as a missing id; see the PostgreSQL twin.
+
+        ``own_status_only`` (the caller lacks ``knowledge:write``, user ruling
+        2026-10-22): only a status change between approved and deprecated of
+        her own Memory object supported by her own Memory alone
+        (``_own_status_toggle_allowed``) is applied; anything else raises
+        ``NeedsKnowledgeWrite`` on the row just read, before any write."""
         row = connection.execute(
             "SELECT ko.* FROM knowledge_objects ko WHERE ko.id = ? "
             f"AND ko.notebook_id = ? AND {foreign_memory_object_excluded('ko')}",
@@ -2281,6 +2313,10 @@ class GovernanceStore:
         ).fetchone()
         if row is None:
             raise KeyError(object_id)
+        if own_status_only and not GovernanceStore._own_status_toggle_allowed(
+            connection, notebook_id, actor_id, row, payload
+        ):
+            raise NeedsKnowledgeWrite()
         if payload.status is not None and payload.status not in KNOWLEDGE_STATUSES:
             raise ValueError(f"invalid status: {payload.status}")
         new_payload = (
@@ -2314,59 +2350,109 @@ class GovernanceStore:
         ).fetchone()
 
     @staticmethod
-    def own_memory_duplicate_rows(
+    def _own_status_toggle_allowed(
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        actor_id: str | None,
+        row: sqlite3.Row,
+        payload,
+    ) -> bool:
+        """The read-level ``PATCH``: a status change alone, between approved
+        and deprecated, of an object whose primary source and every evidence
+        entry are the caller's own Memory sources of this notebook -- the merge's
+        own-pair rule on one object (``merge_evidence_source_ids``, then one
+        ``own_memory_source`` read over the cited ids and the primary source)."""
+        if payload.payload is not None or payload.owner is not None:
+            return False
+        if payload.status not in OWN_STATUS_TOGGLE or row["status"] not in OWN_STATUS_TOGGLE:
+            return False
+        cited = merge_evidence_source_ids(json.loads(row["evidence"] or "[]"))
+        if cited is None or not actor_id or not row["source_id"]:
+            return False
+        wanted = sorted(cited | {row["source_id"]})
+        # drive_by: the wanted ids are the keys (a primary-key seek each).
+        found = id_bind_ids(wanted, sort=True)
+        own = connection.execute(
+            f"SELECT s.id FROM sources s WHERE {id_drive_by('s.id', found)} "
+            f"AND s.notebook_id = ? AND {own_memory_source('s')}",
+            (found.param, notebook_id, actor_id),
+        ).fetchall()
+        return len(own) == len(wanted)
+
+    @staticmethod
+    def own_memory_duplicate_seed_rows(
         connection: sqlite3.Connection,
         notebook_id: str,
         object_type: str,
         viewer_id: str,
     ) -> List[dict]:
-        """The owner's duplicate-group input (see the PostgreSQL twin): the
-        viewer's own live Memory objects of ``object_type`` whose evidence
-        cites nothing but her own Memory sources of this notebook — the
-        objects ``merge_objects_in_transaction`` lets her merge with one
-        another. ``{"id", "status", "name", "payload"}`` in
-        ``duplicate_seed_rows`` order (``name`` read the way that reader
-        reads it, so blocking sees the same text); the empty viewer owns
-        nothing.
+        """Pass 1 of the owner's duplicate groups (see the PostgreSQL twin):
+        the viewer's own Memory objects of ``object_type`` whose evidence cites
+        nothing but her own Memory sources of this notebook
+        (``_only_own_memory_evidence_sql``, the merge's reading in SQL) --
+        live ones, and deprecated ones still carrying a merge record
+        (``MERGED_INTO_PAYLOAD_KEY``: merged away, not hand-deprecated).
+        Thin like ``duplicate_seed_rows``: ``{"id", "status", "name"}`` (plus
+        ``"payload"`` for a procedure, whose seed reads the steps), ``name``
+        read the way that reader reads it, in its order. No evidence and no
+        payload leave the database; pass 2 (``own_memory_duplicate_member_rows``)
+        hydrates only the ids that end up shown. The empty viewer owns nothing.
 
-        Both statements are driven by the notebook's Memory sources
-        (``idx_sources_nb_hidden_type``, join order pinned by ``CROSS
-        JOIN``), objects then by ``idx_knowledge_objects_source``: the cost
-        follows the viewer's own Memory in this notebook, never the
-        notebook's size."""
+        Driven by the notebook's Memory sources (``idx_sources_nb_hidden_type``,
+        join order pinned by ``CROSS JOIN``), objects then by
+        ``idx_knowledge_objects_source``; the evidence test's own-source list
+        is one uncorrelated subquery on the same partial index. The cost
+        follows the viewer's own Memory in this notebook, never the notebook."""
         if not viewer_id:
             return []
-        own = frozenset(
-            row["id"] for row in connection.execute(
-                "SELECT s.id FROM sources s "
-                f"WHERE s.notebook_id=? AND {hidden_type_index_term('s')} "
-                f"AND {own_memory_source('s')}",
-                (notebook_id, viewer_id),
-            ).fetchall()
-        )
-        if not own:
-            return []
+        procedure = object_type == "procedure"
+        payload_column = "o.payload, " if procedure else ""
+        marker = f"json_extract(o.payload, '$.{MERGED_INTO_PAYLOAD_KEY}')"
         rows = connection.execute(
             "SELECT o.id, o.status, json_extract(o.payload, '$.name') AS name, "
-            "o.payload, o.evidence FROM sources s "
-            "CROSS JOIN knowledge_objects o "
+            f"{payload_column}{marker} AS merged_into "
+            "FROM sources s CROSS JOIN knowledge_objects o "
             f"WHERE s.notebook_id=? AND {hidden_type_index_term('s')} "
             f"AND {own_memory_source('s')} "
-            "AND o.source_id=s.id AND o.notebook_id=s.notebook_id "
-            "AND o.object_type=? AND o.status!='deprecated' "
+            "AND o.source_id=s.id AND o.notebook_id=s.notebook_id AND o.object_type=? "
+            f"AND (o.status!='deprecated' OR COALESCE({marker}, '') <> '') "
+            f"AND {_only_own_memory_evidence_sql('o')} "
             "ORDER BY o.created_at ASC, o.id ASC",
-            (notebook_id, viewer_id, object_type),
+            (notebook_id, viewer_id, object_type, notebook_id, viewer_id),
         ).fetchall()
-        return [
-            {
-                "id": row["id"],
-                "status": row["status"],
-                "name": row["name"],
-                "payload": json.loads(row["payload"] or "{}"),
-            }
-            for row in rows
-            if evidence_only_from_own_memory(json.loads(row["evidence"] or "[]"), own)
-        ]
+        out: List[dict] = []
+        for row in rows:
+            item = {"id": row["id"], "status": row["status"], "name": row["name"]}
+            if procedure:
+                item["payload"] = json.loads(row["payload"] or "{}")
+            out.append(item)
+        return out
+
+    @staticmethod
+    def own_memory_duplicate_member_rows(
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        object_ids: Sequence[str],
+    ) -> Dict[str, dict]:
+        """Pass 2: ``{id: payload}`` for ids pass 1 returned (the members of a
+        group of two or more, and the merged-away objects). One statement, the
+        ids bound as one JSON parameter and driving a primary-key seek each
+        (``drive_by``); ``notebook_id`` is projected and checked here, not put
+        beside the id list (the planner hazard ``duplicate_member_rows``
+        documents)."""
+        ids = list(dict.fromkeys(object_ids))
+        if not ids:
+            return {}
+        found = id_bind_ids(ids)
+        rows = connection.execute(
+            "SELECT o.id, o.payload, o.notebook_id FROM knowledge_objects o "
+            f"WHERE {id_drive_by('o.id', found)}",
+            (found.param,),
+        ).fetchall()
+        return {
+            row["id"]: json.loads(row["payload"] or "{}")
+            for row in rows if row["notebook_id"] == notebook_id
+        }
 
     @staticmethod
     def _own_memory_merge_evidence(
@@ -2414,7 +2500,7 @@ class GovernanceStore:
         ``own_pair_only`` (the caller lacks ``knowledge:write``, user ruling
         2026-10-22): only a pair of the caller's own Memory objects supported
         by her own Memory alone may merge; any other pair that passes every
-        check below raises ``MergeNeedsKnowledgeWrite`` -- decided on the same
+        check below raises ``NeedsKnowledgeWrite`` -- decided on the same
         reads that classify the pair, before anything is written.
 
         M1 (``app.domain.memory_kg_isolation`` has the rule): a
@@ -2456,7 +2542,7 @@ class GovernanceStore:
         # (MERGED_INTO_PAYLOAD_KEY) so clearing the target can restore it.
         own_pair = bool(src["memory_derived"]) and bool(tgt["memory_derived"])
         if own_pair_only and not own_pair:
-            raise MergeNeedsKnowledgeWrite()
+            raise NeedsKnowledgeWrite()
         merged: List[dict] = json.loads(tgt["evidence"] or "[]")
         seen = {(e.get("element_id"), e.get("quoted_span")) for e in merged}
         for item in json.loads(src["evidence"] or "[]"):

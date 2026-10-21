@@ -1541,6 +1541,16 @@ def test_pg_merges_on_a_mirror_keep_the_write_fence(pg_promotion_world):
     cases.merges_on_a_mirror_keep_the_write_fence(world)
 
 
+def test_pg_reader_restores_her_own_merged_object(pg_promotion_world):
+    cases, world = pg_promotion_world
+    cases.reader_restores_her_own_merged_object(world)
+
+
+def test_pg_status_patches_on_a_mirror_keep_the_write_fence(pg_promotion_world):
+    cases, world = pg_promotion_world
+    cases.status_patches_on_a_mirror_keep_the_write_fence(world)
+
+
 def test_pg_a_readers_refused_merge_takes_no_lock(pg_promotion_world):
     """A read-only member's merge of a pair that is not her own is refused by
     an unlocked read before the merge's locking statements: with the shared
@@ -1572,6 +1582,9 @@ def test_pg_a_readers_refused_merge_takes_no_lock(pg_promotion_world):
             }.items():
                 response = cases._merge(world, c, source_id, into_id)
                 answers[key] = (response.status_code, response.json())
+            # the read-level status PATCH refuses before its row lock too
+            response = cases._patch(world, c, cases.ORDINARY_OBJECT, {"status": "deprecated"})
+            answers["patch-shared"] = (response.status_code, response.json())
 
         worker = threading.Thread(target=ask, daemon=True)
         worker.start()
@@ -1580,6 +1593,7 @@ def test_pg_a_readers_refused_merge_takes_no_lock(pg_promotion_world):
         holder.rollback()
     refused = (404, {"detail": "Notebook not found"})
     assert answers["shared"] == answers["cross"] == answers["foreign"] == refused, answers
+    assert answers["patch-shared"] == refused, answers
     assert answers["own"][0] == 200, answers
 
 
