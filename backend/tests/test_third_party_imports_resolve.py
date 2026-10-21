@@ -53,6 +53,14 @@ class ImportUse:
 
 
 def _first_party(root: Path) -> frozenset[str]:
+    """Top-level names that belong to the repository, never to a distribution.
+
+    ``backend/app`` code imports ``app`` (and tests import ``tests``). Scripts
+    run with ``scripts/`` on ``sys.path``, so a sibling module is imported by
+    its bare name (``from diag_common import ...``, ``import python_env``):
+    every ``scripts/*.py`` stem and every ``scripts/`` package directory is
+    first-party there, and only there.
+    """
     names = {"app", "tests", "__future__"}
     if root == SCRIPTS:
         names |= {path.stem for path in SCRIPTS.glob("*.py")}
@@ -61,6 +69,19 @@ def _first_party(root: Path) -> frozenset[str]:
 
 
 def _third_party_imports(root: Path) -> dict[str, ImportUse]:
+    """Every absolute import under ``root`` whose top-level name is neither the
+    standard library (``sys.stdlib_module_names``, all platforms, so a
+    Windows-only ``msvcrt`` fallback is not third-party) nor first-party.
+
+    Policy: position does not matter. A module-level import, a lazy import in a
+    function, one under ``if TYPE_CHECKING:`` and an optional one inside
+    ``try: ... except ImportError:`` are all held to the same rule: they must
+    import in the locked environment and their distribution must be locked.
+    An optional import exists precisely so a missing package degrades quietly,
+    which is the failure this scan is for. There is no allowlist today; should
+    a dependency ever be optional on purpose, add an explicit allowlist here
+    with the reason per entry rather than weakening the scan.
+    """
     skip = frozenset(sys.stdlib_module_names) | _first_party(root)
     uses: dict[str, ImportUse] = {}
 
@@ -105,10 +126,10 @@ def _third_party_imports(root: Path) -> dict[str, ImportUse]:
     return uses
 
 
-def _problems(root: Path, locked: frozenset[str]) -> list[str]:
+def _problems(uses: dict[str, ImportUse], locked: frozenset[str]) -> list[str]:
     providers = metadata.packages_distributions()
     problems = []
-    for module, entry in sorted(_third_party_imports(root).items()):
+    for module, entry in sorted(uses.items()):
         where = sorted(entry.files)[0]
         try:
             imported = importlib.import_module(module)
@@ -136,17 +157,28 @@ def test_backend_third_party_imports_resolve_to_the_runtime_lock() -> None:
     # The scan must see the fail-open lazy imports it exists for.
     assert {"pymupdf4llm", "mammoth", "docx", "pptx", "pypdf", "xlrd", "igraph", "hnswlib"} <= set(uses)
     assert "to_markdown" in uses["pymupdf4llm"].attributes
-    assert _problems(APP, RUNTIME_LOCKED) == []
+    assert _problems(uses, RUNTIME_LOCKED) == []
 
 
 def test_script_third_party_imports_resolve_to_a_lock() -> None:
-    assert _problems(SCRIPTS, ANY_LOCKED) == []
+    uses = _third_party_imports(SCRIPTS)
+    # Sibling script modules are first-party, the packages they use are not.
+    assert not {"python_env", "diag_common", "python_lockfiles"} & set(uses)
+    assert {"dotenv", "psycopg", "openpyxl"} <= set(uses)
+    assert _problems(uses, ANY_LOCKED) == []
 
 
 def test_the_scan_reports_a_module_that_imports_but_lacks_a_name(tmp_path, monkeypatch) -> None:
     package = tmp_path / "pkg"
     (package / "app").mkdir(parents=True)
     (package / "app" / "lazy.py").write_text(
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    import typedpkg\n"
+        "try:\n"
+        "    import optionalpkg\n"
+        "except ImportError:\n"
+        "    optionalpkg = None\n"
         "def load(path):\n"
         "    import json\n"
         "    import shellpkg\n"
@@ -158,10 +190,13 @@ def test_the_scan_reports_a_module_that_imports_but_lacks_a_name(tmp_path, monke
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
     uses = _third_party_imports(package)
-    assert set(uses) == {"shellpkg"}
+    assert set(uses) == {"shellpkg", "typedpkg", "optionalpkg"}
     assert uses["shellpkg"].names == {"present", "absent"}
     assert uses["shellpkg"].attributes == {"convert"}
-    problems = _problems(package, frozenset({"shellpkg"}))
+    problems = _problems(uses, frozenset({"shellpkg"}))
     assert any("has no 'absent'" in problem for problem in problems)
     assert any("has no 'convert'" in problem for problem in problems)
     assert any("none of them locked" in problem for problem in problems)
+    # TYPE_CHECKING-only and try/except ImportError imports get no exemption.
+    assert any(problem.startswith("typedpkg ") and "import failed" in problem for problem in problems)
+    assert any(problem.startswith("optionalpkg ") and "import failed" in problem for problem in problems)

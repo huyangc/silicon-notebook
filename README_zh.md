@@ -26,7 +26,7 @@
 
 ### 环境要求
 
-- macOS 或 Linux（不支持 Windows，请在 WSL 中运行）
+- Apple Silicon 上的 macOS 14+，或 glibc ≥ 2.28 的 Linux x86_64/aarch64（不支持 Intel Mac 与 Windows；Windows 请在 WSL 中运行）
 - Python 3.13+
 - Node.js 26（只支持这一个大版本，钉在 `.nvmrc`，npm 会拒绝其他版本）与 npm
 - git

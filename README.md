@@ -26,7 +26,7 @@ The interface starts in auto mode for upload-and-ask use. Advanced mode exposes 
 
 ### Requirements
 
-- macOS or Linux (Windows is not supported; use WSL)
+- macOS 14+ on Apple Silicon, or Linux x86_64/aarch64 with glibc 2.28+ (Intel Macs and Windows are not supported; on Windows use WSL)
 - Python 3.13+
 - Node.js 26 (exactly this major; pinned in `.nvmrc`, npm refuses others) and npm
 - git
