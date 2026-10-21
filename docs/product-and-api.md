@@ -2753,7 +2753,9 @@ another member's Memory, a cross-class pair, a pair carrying shared evidence, a 
 types, a missing object — answers exactly the 404 it answered before
 (`{"detail": "Notebook not found"}`, the body a notebook she cannot read gets), so she learns nothing
 about whether the other object exists or what it is. On PostgreSQL her own pair can also answer the
-409 「要合并的知识对象刚被修改，请稍后重试」 under a concurrent change. On a mirror the read path
+409 「要合并的知识对象刚被修改，请稍后重试」 under a concurrent change; a request for a pair that is
+not hers is refused by an unlocked read before any lock is taken, so ids that are not hers neither queue
+her behind other writers nor hold them up. On a mirror the read path
 does not open (the same fence as `knowledge:write`): every merge by a read-only member answers that
 404. A read-only member has no `PATCH`, so after a merge she cannot set the merged-away object back to
 approved herself; it is restored automatically as below when the Memory that owns the result is
@@ -2848,17 +2850,19 @@ access; another member, a site admin and a token without `memory:read` all get `
 same answer as a caller who owns no Memory here. It is a route of its own because `/duplicates`
 answers a bare list, so a field only for the owner would change its shape for every client; the
 shared groups, their read and their response bytes are unchanged. Neither is cached. The owner's
-groups cost the viewer-scope decision (one read for a notebook without Memory) plus two statements
-driven by her own Memory sources (her Memory sources, then her objects through their source index),
-growing with her Memory in the notebook, not with the notebook. They take no part in merge
+groups are read by the caller's identity alone, with no notebook-wide viewer scope: one statement reads
+her own Memory sources in the notebook through the partial Memory/Knowhow source index (and stops there
+when she has none), and only then a second reads her objects through their source index; both grow with
+her Memory in the notebook, not with the notebook. They take no part in merge
 suggestions or model review.
 
 The knowledge browser's 「查重」 shows them as a section of their own below the shared groups,
 「我的记忆里的重复」, with the line 「这些条目来自你的个人记忆，只有你能看到」, expanded and paged on its
 own, and absent when she has no such group. A read-only member gets 「查重」 too, with only that
 section; she never asks for the shared `/duplicates`. Mirrors show no 「查重」. Both sections answer a
-merge where it happened — in the group merged into, or at the top of that section's list when the
-merge left the group with a single member — and clear the answer on their own timer, instead of a
+merge where it happened — in the group merged into, or at the top of that section's list when that
+group is not on the section's current page (the merge left it with a single member, or the reorder moved
+it to another page) — and clear the answer on their own timer, instead of a
 page toast: success 「已合并，原条目已弃用」; a 409 shows the server's words and reloads that section;
 a 404 shows 「这条已不在了」 and reloads that section. While a merge runs its button reads 「合并中…」
 and every merge button of both sections is disabled.

@@ -81,7 +81,13 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
 
   const knowledgeRequestRef = useRef(0);
   const typeRequestRef = useRef(0);
-  const duplicateRequestRef = useRef(0);
+  // One request generation per 查重 partition: a merge in one section must not
+  // discard the other section's in-flight result (it never reloads it).
+  const duplicateRequestRef = useRef<Record<DuplicatePartition, number>>({ shared: 0, own: 0 });
+  const bumpDuplicateRequests = () => {
+    duplicateRequestRef.current.shared += 1;
+    duplicateRequestRef.current.own += 1;
+  };
   const knowledgeContextRequestsRef = useRef(new Map<string, object>());
 
   const [knowledgeKind, setKnowledgeKind] = useState<KnowledgeKind>("concept");
@@ -118,7 +124,7 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
   const invalidate = () => {
     knowledgeRequestRef.current += 1;
     typeRequestRef.current += 1;
-    duplicateRequestRef.current += 1;
+    bumpDuplicateRequests();
     clearVisibleState();
   };
 
@@ -177,7 +183,7 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
       setKnowledgeKind(nextKind);
       setKnowledgeStatusFilter("all");
       setDuplicates(null);
-    setOwnDuplicates(null);
+      setOwnDuplicates(null);
       setKnowledgeContexts({});
       knowledgeContextRequestsRef.current.clear();
       await loadKnowledgeFor(owner, { kind: nextKind, status: "all", page: 0 });
@@ -232,7 +238,7 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
   const invalidateKnowledge = () => {
     knowledgeRequestRef.current += 1;
     typeRequestRef.current += 1;
-    duplicateRequestRef.current += 1;
+    bumpDuplicateRequests();
     // 引用同步清空:紧跟着的 enterKnowledge 判「这一类还没加载」读的是这个 ref,等不到
     // 下一次渲染——类型请求很快时,它会看到作废前的旧行而跳过重拉。
     knowledgeRef.current = EMPTY_KNOWLEDGE;
@@ -307,27 +313,25 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
   };
 
   // 「查重」:有知识治理权时拉共享组,只读成员不请求共享 `/duplicates`;两种人都拉本人
-  // 记忆分区。两个请求并发,各自按 kind 与请求代次落定。
+  // 记忆分区。两个请求并发,各自按 kind 与自己那一段的请求代次落定——一段失败不吞掉
+  // 另一段已经回来的结果。
   const findDuplicates = async () => {
     const owner = currentOwner();
     if (!owner) return;
     const partitions = (["shared", "own"] as const).filter(partitionAllowed);
     if (partitions.length === 0) return;
     const kind = knowledgeKindRef.current;
-    const requestId = ++duplicateRequestRef.current;
-    const current = () => owns(owner) && requestId === duplicateRequestRef.current
-      && knowledgeKindRef.current === kind;
-    try {
-      const results = await Promise.all(
-        partitions.map((partition) => loadPartition(owner.notebookId, kind, partition)),
-      );
-      if (!current()) return;
-      partitions.forEach((partition, index) => {
-        if (partitionAllowed(partition)) setPartition(partition, results[index]);
-      });
-    } catch (error) {
-      if (current()) effectsRef.current.reportError(error);
-    }
+    await Promise.all(partitions.map(async (partition) => {
+      const requestId = ++duplicateRequestRef.current[partition];
+      const current = () => owns(owner) && requestId === duplicateRequestRef.current[partition]
+        && knowledgeKindRef.current === kind && partitionAllowed(partition);
+      try {
+        const rows = await loadPartition(owner.notebookId, kind, partition);
+        if (current()) setPartition(partition, rows);
+      } catch (error) {
+        if (current()) effectsRef.current.reportError(error);
+      }
+    }));
   };
 
   /** 合并之后(或失败之后)重拉发起合并的那个分区;别的分区不受这次合并影响。 */
@@ -335,11 +339,14 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
     owner: KgWorkspaceOwner, kind: KnowledgeKind, partition: DuplicatePartition,
     stillOurs: () => boolean,
   ) => {
+    const requestId = ++duplicateRequestRef.current[partition];
+    const current = () => stillOurs() && requestId === duplicateRequestRef.current[partition]
+      && knowledgeKindRef.current === kind;
     try {
       const rows = await loadPartition(owner.notebookId, kind, partition);
-      if (stillOurs() && knowledgeKindRef.current === kind) setPartition(partition, rows);
+      if (current()) setPartition(partition, rows);
     } catch (error) {
-      if (stillOurs()) effectsRef.current.reportError(error);
+      if (current()) effectsRef.current.reportError(error);
     }
   };
 
@@ -366,7 +373,6 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
         if (!stillOurs()) return null;
         const httpStatus = httpErrorStatus(error);
         if (httpStatus === 409 || httpStatus === 404) {
-          duplicateRequestRef.current += 1;
           await refreshPartition(owner, kind, partition, stillOurs);
           return {
             tone: "failed",
@@ -377,7 +383,7 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
       }
       if (!stillOurs()) return null;
       knowledgeRequestRef.current += 1;
-      duplicateRequestRef.current += 1;
+      duplicateRequestRef.current[partition] += 1;
       const refreshed = await loadKnowledgeFor(owner, { kind, status, page: 0 });
       if (refreshed !== null && stillOurs()) {
         const types = await loadTypesFor(owner);

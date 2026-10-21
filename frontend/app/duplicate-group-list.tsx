@@ -32,8 +32,8 @@ function MergeResult({ outcome }: { outcome: MergeOutcome }) {
  * `resetKey` 传当前 kind——切换知识类型 tab 时,前一个 tab 翻到的页码不该带过来。
  *
  * `feedback`:上一次合并的结果。那一组(第一条 = `intoId`)还在当前页上,结果就显示在
- * 那一组里;那一组已经因为合并而消失(只剩一条不再成组),就显示在列表最上面——也就是
- * 刚才那颗按钮所在的这一段,而不是页面顶部。
+ * 那一组里;那一组不在当前页上(因合并只剩一条、不再成组,或重排后到了别的页),就显示在
+ * 列表最上面——也就是刚才那颗按钮所在的这一段,而不是页面顶部。
  */
 export function DuplicateGroupList({
   duplicates,

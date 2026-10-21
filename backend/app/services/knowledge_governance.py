@@ -57,7 +57,7 @@ from app.repositories.ports import (
     MemoryStorePort,
     RepositoryRow,
 )
-from app.services.kg_viewer_scope import filtering
+from app.services.kg_viewer_scope import filtering, viewer_identity
 from app.services.retrieval import cosine, keyword_score
 from app.services.model_work import notebook_model_artifact_scope
 from app.services.review_queue_memo import (
@@ -208,6 +208,10 @@ class KnowledgeGovernanceService:
         viewer_scope: Callable[..., Any] = (
             lambda _notebook_id, _active_notebook_id=None: None
         ),
+        # The request's user id, read at call time: the owner's duplicate groups
+        # judge ``viewer_identity`` of it (empty when the Memory channel is
+        # closed). Default: nobody (every direct construction answers []).
+        current_user_id: Callable[[], str] = lambda: "",
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -250,6 +254,7 @@ class KnowledgeGovernanceService:
         # a module global — see review_queue_memo's module docstring.
         self._review_queue_memo = review_queue_memo
         self._viewer_scope = viewer_scope
+        self._current_user_id = current_user_id
 
     @staticmethod
     def promotion_dict(row, *, payload=None, evidence=None) -> dict:
@@ -2237,17 +2242,18 @@ class KnowledgeGovernanceService:
         or in a notebook where she owns no Memory, the answer is ``[]``.
 
         ``find_duplicates`` and what it returns are untouched, and nothing is
-        cached here (the shared groups are not cached either): the cost is the
-        viewer scope (``memory_source_ids`` alone for a notebook without
-        Memory) plus, when she owns Memory there, two statements bounded by
-        her own Memory in this notebook."""
+        cached here (the shared groups are not cached either). The cost is the
+        store's two statements, both bounded by her own Memory in this notebook:
+        her Memory sources (the partial ``idx_sources_nb_hidden_type`` index) and,
+        only when she has any, her objects through their source index. No
+        notebook-wide viewer scope is built: the identity is all this read needs."""
         self.get_notebook(notebook_id)
-        scope = self._viewer_scope(notebook_id)
-        if scope is None or not scope.own_memory:
+        viewer = viewer_identity(self._current_user_id())
+        if not viewer:
             return []
         with self._connect() as db:
             rows = self.governance_store.own_memory_duplicate_rows(
-                db, notebook_id, object_type, scope.viewer_id
+                db, notebook_id, object_type, viewer
             )
         by_seed = self._duplicate_blocks(object_type, rows)
         return self._duplicate_groups(

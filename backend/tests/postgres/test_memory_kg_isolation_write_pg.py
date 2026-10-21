@@ -1541,6 +1541,48 @@ def test_pg_merges_on_a_mirror_keep_the_write_fence(pg_promotion_world):
     cases.merges_on_a_mirror_keep_the_write_fence(world)
 
 
+def test_pg_a_readers_refused_merge_takes_no_lock(pg_promotion_world):
+    """A read-only member's merge of a pair that is not her own is refused by
+    an unlocked read before the merge's locking statements: with the shared
+    objects (and A's Memory source) held FOR UPDATE by another transaction, her
+    refusals still answer at once, so she can neither queue behind nor hold up
+    other writers with ids that are not hers. Her own pair, untouched by the
+    held locks, still merges."""
+    import threading
+
+    import psycopg
+
+    cases, world = pg_promotion_world
+    c = cases._reader_with_memory(world)
+    url = world.repo._runtime.database.settings.database_url
+    with psycopg.connect(url) as holder:
+        holder.execute(
+            "SELECT id FROM knowledge_objects WHERE id = ANY(%s) FOR UPDATE",
+            ([cases.ORDINARY_OBJECT, cases.ORDINARY_OBJECT_2, cases.MEMORY_OBJECT],),
+        )
+        holder.execute("SELECT id FROM sources WHERE id='src-memory-a' FOR UPDATE")
+        answers: dict = {}
+
+        def ask() -> None:
+            for key, (source_id, into_id) in {
+                "shared": (cases.ORDINARY_OBJECT, cases.ORDINARY_OBJECT_2),
+                "cross": ("ko-c-dup-1", cases.ORDINARY_OBJECT),
+                "foreign": ("ko-c-dup-1", cases.MEMORY_OBJECT),
+                "own": ("ko-c-dup-2", "ko-c-dup-1"),
+            }.items():
+                response = cases._merge(world, c, source_id, into_id)
+                answers[key] = (response.status_code, response.json())
+
+        worker = threading.Thread(target=ask, daemon=True)
+        worker.start()
+        worker.join(timeout=10)
+        assert not worker.is_alive(), "a refused reader merge waited on a held lock"
+        holder.rollback()
+    refused = (404, {"detail": "Notebook not found"})
+    assert answers["shared"] == answers["cross"] == answers["foreign"] == refused, answers
+    assert answers["own"][0] == 200, answers
+
+
 def test_pg_queued_memory_object_proposal_is_refused_and_closed(pg_promotion_world):
     cases, world = pg_promotion_world
     cases.queued_memory_proposal_is_refused_on_approval(world)

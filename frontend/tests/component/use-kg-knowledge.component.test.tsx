@@ -220,3 +220,26 @@ test("404 says the entry is gone and refreshes that partition", async () => {
   expect(knowledgeApi.findDuplicates).toHaveBeenCalledOnce();
   expect(knowledgeApi.findOwnMemoryDuplicates).not.toHaveBeenCalled();
 });
+
+test("one failed partition does not swallow the other's groups", async () => {
+  resetDuplicateApi();
+  knowledgeApi.findOwnMemoryDuplicates.mockRejectedValue(humanizedError("服务暂时不可用，请稍后再试", 503));
+  const { result, fx } = renderKnowledge(policy);
+  await act(async () => { await result.current.findDuplicates(); });
+  expect(result.current.view.duplicates).toEqual([group("shared")]);
+  expect(result.current.view.ownDuplicates).toBeNull();
+  expect(fx.reportError).toHaveBeenCalledOnce();
+});
+
+test("a merge in one section keeps the other section's in-flight 查重 result", async () => {
+  resetDuplicateApi();
+  let releaseShared: (rows: DuplicateGroup[]) => void = () => {};
+  knowledgeApi.findDuplicates.mockImplementation(() => new Promise((resolve) => { releaseShared = resolve; }));
+  knowledgeApi.mergeKnowledge.mockResolvedValue(undefined);
+  const { result } = renderKnowledge(policy);
+  let find: Promise<void> = Promise.resolve();
+  act(() => { find = result.current.findDuplicates(); });
+  await act(async () => { await result.current.mergeKnowledge("own-b", "own-a", "own"); });
+  await act(async () => { releaseShared([group("late")]); await find; });
+  expect(result.current.view.duplicates).toEqual([group("late")]);
+});
