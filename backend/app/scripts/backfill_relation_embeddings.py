@@ -27,7 +27,7 @@ def main() -> int:
             print(f"[backfill] relation embeddings done for {args[0]}")
     except MaintenanceCliError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 2
+        return exc.exit_code
     return 0
 
 

@@ -12,7 +12,10 @@ from dotenv import load_dotenv
 load_dotenv(REPO / ".env")
 
 from app.core.config import Settings  # noqa: E402
-from app.services.sqlite_repository import SQLiteRepository  # noqa: E402
+from app.services.maintenance_cli import (  # noqa: E402
+    MaintenanceCliError,
+    create_bare_schema_guest_repository,
+)
 from app.services.kg.parsing import parse_elements  # noqa: E402
 from app.models.schemas import NotebookCreate  # noqa: E402
 
@@ -55,7 +58,11 @@ def grounding_ok(repo, nb_id):
 
 def main():
     settings = Settings()
-    repo = SQLiteRepository(settings)
+    try:  # schema guest: never migrates or seeds the configured database
+        repo = create_bare_schema_guest_repository(settings, sqlite_only=True)
+    except MaintenanceCliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(exc.exit_code) from None
     kg_client = repo.chat("kg_extract")
     print("kg_extract configured:", kg_client.configured, "| model:",
           getattr(kg_client, "model", "?"), flush=True)

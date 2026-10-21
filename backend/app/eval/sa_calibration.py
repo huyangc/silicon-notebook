@@ -178,8 +178,8 @@ Return JSON ONLY:
 def _run_arm(prompt_fn, windows, doc_type: str) -> Dict[str, Any]:
     from app.core.config import Settings
     from app.services.kg import extract as E
-    from app.services.sqlite_repository import SQLiteRepository
-    repo = SQLiteRepository(Settings())
+    from app.services.maintenance_cli import create_bare_schema_guest_repository
+    repo = create_bare_schema_guest_repository(Settings(), sqlite_only=True)
     client = repo.chat("kg_extract")
     all_nodes: List[Node] = []
     all_edges: List[Edge] = []

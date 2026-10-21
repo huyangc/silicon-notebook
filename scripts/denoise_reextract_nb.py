@@ -119,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
                 print("rebuild clusters:", repo.rebuild_unified_kg(notebook_id), flush=True)
     except MaintenanceCliError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 2
+        return exc.exit_code
     return 0
 
 

@@ -91,10 +91,18 @@ def application_repository_hosts(
     }
 
 
-def create_application_repository(settings: Settings) -> NotebookRepository:
+def create_application_repository(
+    settings: Settings, *, owns_schema: bool = True
+) -> NotebookRepository:
+    """``owns_schema=False`` is the schema-guest composition every non-serving
+    process uses (``app.services.maintenance_cli.create_schema_guest_repository``,
+    which checks the schema version first): the same extension seats, admission
+    prime and auth wiring as the server, but no migration and no seed — the seed
+    step re-hashes the admin password unconditionally."""
     runtime = application_extension_runtime()
+    schema = {} if owns_schema else {"migrate": False, "seed": False}
     repository = create_repository(
-        settings, **application_repository_hosts(runtime)  # type: ignore[arg-type]
+        settings, **application_repository_hosts(runtime), **schema  # type: ignore[arg-type]
     )
     prime_extension_admission(repository)
     try:

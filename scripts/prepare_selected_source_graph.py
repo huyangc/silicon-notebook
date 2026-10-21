@@ -30,7 +30,10 @@ from app.services.batch_ingest import (
     run_backfill_source_facts,
     run_backfill_source_index,
 )
-from app.services.maintenance_cli import open_maintenance_cli_repository
+from app.services.maintenance_cli import (
+    MaintenanceCliSchemaError,
+    open_maintenance_cli_repository,
+)
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -379,7 +382,12 @@ def run_preparation(
             receipt["receipt_updated"] = False
         return receipt
     except Exception as exc:
-        code = exc.code if isinstance(exc, PreparationError) else f"{active_phase}_failed"
+        if isinstance(exc, PreparationError):
+            code = exc.code
+        elif isinstance(exc, MaintenanceCliSchemaError):
+            code = "schema_not_current"
+        else:
+            code = f"{active_phase}_failed"
         receipt.update(
             {
                 "status": "failed",
@@ -446,6 +454,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except PreparationError as exc:
         print(f"prepare-selected-source-graph failed: {exc.code}", file=sys.stderr)
+        if isinstance(exc.__cause__, MaintenanceCliSchemaError):
+            # Versions and the remedy only -- still content-free.
+            print(str(exc.__cause__), file=sys.stderr)
+            return exc.__cause__.exit_code
         return 1
     print(
         "prepare-selected-source-graph complete: "

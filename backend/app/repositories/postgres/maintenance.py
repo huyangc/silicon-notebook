@@ -118,6 +118,44 @@ _NONBLANK_TEXT_SQL = "btrim(e.text, {}) <> ''".format(
 )
 
 
+@contextmanager
+def hold_offline_maintenance_lock(database: Any) -> Iterator[None]:
+    """Hold the database-wide offline-maintenance advisory lock.
+
+    PostgreSQL advisory locks are session scoped, so the same dedicated,
+    non-pooled connection is held from acquisition through release. A failed
+    try never waits behind an unknown operator process: the CLI receives an
+    actionable error and exits before any mutation. A module function rather
+    than only the adapter method so the schema-migration command, which runs
+    before any store can be composed against an older schema, contends on the
+    very same lock as every other maintenance command.
+    """
+    with database.offline_maintenance_session() as db:
+        acquired = bool(
+            db.execute(
+                "SELECT pg_try_advisory_lock(%s) AS acquired",
+                (_OFFLINE_MAINTENANCE_LOCK_KEY,),
+            ).fetchone()["acquired"]
+        )
+        db.commit()
+        if not acquired:
+            raise OfflineMaintenanceBusyError(
+                "another PostgreSQL offline maintenance command is already running; "
+                "wait for it to finish and retry"
+            )
+        try:
+            yield
+        finally:
+            try:
+                db.execute(
+                    "SELECT pg_advisory_unlock(%s)",
+                    (_OFFLINE_MAINTENANCE_LOCK_KEY,),
+                )
+                db.commit()
+            except Exception:  # pragma: no cover - broken sessions self-release
+                logger.warning("offline PostgreSQL maintenance unlock failed")
+
+
 class PostgresMaintenanceAdapter:
     """PostgreSQL batch/repair operations plus backend-owned asset GC."""
 
@@ -126,39 +164,10 @@ class PostgresMaintenanceAdapter:
         self._orphan_first_seen: dict[tuple[str, str], float] = {}
         self._orphan_marks_lock = threading.Lock()
 
-    @contextmanager
-    def offline_maintenance_lock(self) -> Iterator[None]:
-        """Serialize direct PostgreSQL maintenance across backend processes.
-
-        PostgreSQL advisory locks are session scoped, so the same dedicated,
-        non-pooled connection is held from acquisition through release. A failed
-        try never waits behind an unknown operator process: the CLI receives an
-        actionable error and exits before any mutation.
-        """
-        with self._runtime.database.offline_maintenance_session() as db:
-            acquired = bool(
-                db.execute(
-                    "SELECT pg_try_advisory_lock(%s) AS acquired",
-                    (_OFFLINE_MAINTENANCE_LOCK_KEY,),
-                ).fetchone()["acquired"]
-            )
-            db.commit()
-            if not acquired:
-                raise OfflineMaintenanceBusyError(
-                    "another PostgreSQL offline maintenance command is already running; "
-                    "wait for it to finish and retry"
-                )
-            try:
-                yield
-            finally:
-                try:
-                    db.execute(
-                        "SELECT pg_advisory_unlock(%s)",
-                        (_OFFLINE_MAINTENANCE_LOCK_KEY,),
-                    )
-                    db.commit()
-                except Exception:  # pragma: no cover - broken sessions self-release
-                    logger.warning("offline PostgreSQL maintenance unlock failed")
+    def offline_maintenance_lock(self):
+        """Serialize direct PostgreSQL maintenance across backend processes
+        (see :func:`hold_offline_maintenance_lock`)."""
+        return hold_offline_maintenance_lock(self._runtime.database)
 
     def build_chunk_question_index(
         self, notebook_id: str, *, workers: int, force: bool = False,

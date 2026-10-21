@@ -718,6 +718,7 @@ def test_search_repository_disables_migrate_and_seed(monkeypatch):
     主库上真实发生过一次。
     """
     calls: list[dict] = []
+    gated: list[object] = []
 
     def fake_create_repository(settings, **kwargs):
         calls.append(kwargs)
@@ -726,10 +727,16 @@ def test_search_repository_disables_migrate_and_seed(monkeypatch):
     monkeypatch.setattr(
         "app.repositories.factory.create_repository", fake_create_repository,
     )
+    # 共享的 schema guest 入口先过库版本闸;这里只钉它被调用、且先于构造。
+    monkeypatch.setattr(
+        "app.services.maintenance_cli.require_current_schema",
+        lambda settings: gated.append(settings),
+    )
     sentinel = object()
     result = rig._search_repository(sentinel)
     assert result is not sentinel  # 拿到的是 create_repository 的返回值
     assert calls == [{"migrate": False, "seed": False}]
+    assert gated == [sentinel]
 
 
 # --- users.updated_at 的只读断言(codex #700 R1 P1) --------------------------

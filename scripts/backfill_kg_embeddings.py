@@ -83,7 +83,7 @@ def main() -> int:
             return 1
     except MaintenanceCliError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 2
+        return exc.exit_code
 
 
 if __name__ == "__main__":

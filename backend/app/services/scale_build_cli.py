@@ -194,11 +194,9 @@ class _ImportPipelineIdentityUnverifiable(RuntimeError):
 
 def packaged_migrations() -> tuple:
     """The migrations this checkout carries, in version order."""
-    from app.repositories.postgres import migrator as migrator_module
+    from app.repositories.schema_currency import packaged_postgres_migrations
 
-    return migrator_module.load_migrations(
-        Path(migrator_module.__file__).with_name("migrations")
-    )
+    return packaged_postgres_migrations()
 
 
 def packaged_migration_count() -> int:
@@ -233,52 +231,27 @@ def verify_migration_ledger(database_url: str) -> tuple[int, int]:
     stragglers above ``expected`` — before trusting any checksum in it.
 
     Read on a bare connection, before the repository (and its pool) exists, so a
-    refusal costs one connection and leaves no trace in the live database.
-    """
-    import psycopg
+    refusal costs one connection and leaves no trace in the live database. The
+    comparison itself and the refusal wording are the schema-guest ones every
+    maintenance CLI shares (``app.repositories.schema_currency``).
 
-    migrations = packaged_migrations()
-    expected = len(migrations)
-    # Registered, not fixed (codex W-CLI R1 N4): this is the one connection in
-    # the command that is NOT wrapped by the pool's credential-safe error
-    # rendering, so a psycopg connection failure here can surface a message
-    # naming the host/user (never the password — libpq redacts it, and this
-    # process is the operator's own shell). Routing it through
-    # ``PostgresDatabase`` would mean composing the pool before the very check
-    # that decides whether composing is safe.
-    with psycopg.connect(database_url, autocommit=True) as connection:
-        present = connection.execute(
-            "SELECT to_regclass('silicon_schema_migrations') IS NOT NULL"
-        ).fetchone()[0]
-        if not present:
-            raise ScaleBuildCliError(
-                "the target database has no silicon_schema_migrations ledger; "
-                "this CLI never migrates — start the service (or a maintenance "
-                "CLI) against it once before building here"
-            )
-        rows = connection.execute(
-            "SELECT version, checksum FROM silicon_schema_migrations "
-            "ORDER BY version"
-        ).fetchall()
-    recorded_versions = sorted(int(row[0]) for row in rows)
-    applied = recorded_versions[-1] if recorded_versions else 0
-    if recorded_versions != list(range(1, expected + 1)):
-        raise ScaleBuildCliError(
-            f"migration ledger mismatch: the database records versions "
-            f"{recorded_versions}, this checkout expects exactly "
-            f"1..{expected} with no gaps or duplicates. Check out the exact "
-            "revision the service is running (this CLI deliberately does not "
-            "migrate)."
-        )
-    for version, checksum in ((int(row[0]), row[1]) for row in rows):
-        if checksum != migrations[version - 1].checksum:
-            raise ScaleBuildCliError(
-                f"migration checksum mismatch at version {version}: the "
-                "database was migrated by different SQL than this checkout "
-                "carries under the same version number. Check out the exact "
-                "revision the service is running."
-            )
-    return applied, expected
+    That bare connection is registered, not fixed (codex W-CLI R1 N4): it is
+    the one connection in the command that is NOT wrapped by the pool's
+    credential-safe error rendering, so a psycopg connection failure here can
+    surface a message naming the host/user (never the password — libpq redacts
+    it, and this process is the operator's own shell). Routing it through
+    ``PostgresDatabase`` would mean composing the pool before the very check
+    that decides whether composing is safe.
+    """
+    from app.repositories.schema_currency import (
+        inspect_postgres_schema,
+        schema_refusal_message,
+    )
+
+    state = inspect_postgres_schema(database_url)
+    if not state.is_current:
+        raise ScaleBuildCliError(schema_refusal_message(state))
+    return state.current, state.required
 
 
 # ────────────────────────────────────────────────────────── composition ──

@@ -69,10 +69,10 @@ def main() -> int:
         import yaml, pathlib as _pl
         from app.core.config import Settings
         from app.eval.retrieval_metrics import run_recall
-        from app.services.sqlite_repository import SQLiteRepository
+        from app.services.maintenance_cli import create_bare_schema_guest_repository
         gold_path = _pl.Path(__file__).resolve().parent / "recall_gold.yaml"
         gold = yaml.safe_load(open(gold_path, encoding="utf-8")) or []
-        repo = SQLiteRepository(Settings())
+        repo = create_bare_schema_guest_repository(Settings(), sqlite_only=True)
         rows = run_recall(repo, a.notebook, gold)
         (out / "recall_report.json").write_text(
             json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")

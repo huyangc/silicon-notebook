@@ -616,14 +616,26 @@ def test_a_failing_close_does_not_replace_the_prime_diagnostic(monkeypatch):
         bootstrap.create_application_repository(Settings(_env_file=None))
 
 
-def test_maintenance_cli_composes_through_the_priming_root():
+def test_maintenance_cli_composes_through_the_priming_root(monkeypatch):
     """The CLI needs no prime of its own — it must keep using the composition
-    root that has one, rather than reaching for the raw repository factory."""
+    root that has one (as a schema guest), rather than reaching for the raw
+    repository factory."""
 
-    from app.bootstrap import create_application_repository
     from app.services import maintenance_cli
 
-    assert maintenance_cli.create_repository is create_application_repository
+    calls: list[dict] = []
+    sentinel = object()
+
+    def root(settings, **kwargs):
+        calls.append(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(maintenance_cli, "require_current_schema", lambda _settings: None)
+    monkeypatch.setattr(maintenance_cli, "create_application_repository", root)
+
+    assert maintenance_cli.create_repository is maintenance_cli.create_schema_guest_repository
+    assert maintenance_cli.create_repository(object()) is sentinel
+    assert calls == [{"owns_schema": False}]
 
 
 # --- server lifecycle wiring ------------------------------------------------
