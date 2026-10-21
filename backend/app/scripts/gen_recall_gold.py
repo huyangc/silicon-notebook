@@ -4,6 +4,7 @@ PYTHONPATH=backend python -m app.scripts.gen_recall_gold --notebook nb-xxx --n-o
 每个采样的对象/关系让 LLM 写一道自然问题(强制改写、禁逐字引用),gold=源 id;
 leakage_ratio > 0.6 的题剔除(泄漏)。生成后人工抽检并入 recall_gold.yaml。"""
 import argparse, json, yaml, random
+import sys
 from app.core.config import get_settings
 from app.core.model_values import as_text
 from app.services.maintenance_cli import (
@@ -41,7 +42,7 @@ def main() -> int:
     try:  # schema guest: never migrates or seeds
         repo = create_bare_schema_guest_repository(get_settings(), sqlite_only=True)
     except MaintenanceCliError as exc:
-        print(f"error: {exc}")
+        print(f"error: {exc}", file=sys.stderr)
         return exc.exit_code
     client = make_client("GOLDGEN_")
     assert client.configured, "GOLDGEN_OPENAI_COMPAT_* 未配置"

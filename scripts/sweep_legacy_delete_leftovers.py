@@ -13,7 +13,8 @@
   PYTHONPATH=backend python scripts/sweep_legacy_delete_leftovers.py --apply --rows-only
   PYTHONPATH=backend python scripts/sweep_legacy_delete_leftovers.py --apply --disk-only
 
-退出码:0 完成;1 apply 有跳过(锁被占)、删不掉的路径或残余孤儿行;2 参数拒绝。
+退出码:0 完成;1 apply 有跳过(锁被占)、删不掉的路径或残余孤儿行;2 参数拒绝或连不上库;
+3 库不是本构建的 schema(本工具不迁移、不 seed,先启动一次服务或运行 database migrate)。
 运维手册:`docs/operations_zh.md` 的「存量删除残渣清扫」。
 """
 import sys

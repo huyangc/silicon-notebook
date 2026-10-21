@@ -69,7 +69,7 @@ COMMANDS = {
     ("extensions", "services"): Command("extension_services.py", "插件配套服务启停、状态与日志", False),
 }
 ALIASES = {"batch-ingest": "batch"}
-SELECTED_ENV_COMMANDS = frozenset({("maintain", "selected-source")})
+SELECTED_ENV_COMMANDS = frozenset({("maintain", "selected-source"), ("database", "migrate")})
 
 
 def print_help(prefix: tuple[str, ...] = (), *, stream=None) -> None:

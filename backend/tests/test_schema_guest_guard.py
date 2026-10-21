@@ -1,5 +1,6 @@
 """Guard: no process except the server and the explicit migration command may
-compose a repository that migrates or seeds.
+compose a repository that migrates or seeds, and no guest may skip the version
+gate.
 
 Why a static scan rather than a process-role assertion on the seed path: the
 seed path is reached by every default repository construction, and the test
@@ -7,14 +8,35 @@ suite and the scratch-database harnesses construct thousands of those on
 throwaway databases. A runtime assertion would either need every one of them to
 declare a role (noise that hides the real signal) or default to "allowed",
 which guards nothing -- and a new CLI that forgot to declare itself would
-default the same way. The scan instead looks at every repository construction
-in production and tool code (``backend/app``, ``scripts``, ``examples``) and
-accepts it only when it passes the guest keywords literally
-(``migrate=False, seed=False`` or ``owns_schema=False``) or is one of the
-schema owners listed below, each with the reason it owns its database. A new
-CLI that calls ``create_application_repository(settings)`` -- under any alias --
-fails here with its path and line. A listed owner that no longer exists fails
-too, so the list cannot rot into a blanket exemption.
+default the same way.
+
+The scan looks at every repository construction in production and tool code
+(``backend/app``, ``scripts``, ``examples``) and accepts it only in one of
+three listed places, each with its reason:
+
+* ``SERVING_PROCESS`` -- the server itself (every callable imported from
+  ``app.api.deps`` counts as a construction: they all reach its lru-cached
+  repository);
+* ``GUEST_ENTRIES`` -- the few functions that run the version gate first and
+  then compose with the literal guest keywords (``owns_schema=False`` or
+  ``migrate=False, seed=False``). Writing those keywords anywhere else is a
+  violation too: it skips the migration and the seed but also the version gate,
+  so a CLI must call a guest entry instead;
+* ``SCHEMA_OWNERS`` -- the composition roots and the tools that own a scratch
+  database.
+
+A new CLI that calls ``create_application_repository(settings)`` -- under an
+import alias, or through ``deps.repository()`` -- fails here with its path,
+scope and call text (never a line number). A listed place that no longer
+constructs anything fails too, so the lists cannot rot into blanket exemptions.
+
+Known blind spots, accepted: the scan follows names bound by ``import`` /
+``from ... import`` only. It does not see a constructor re-bound by plain
+assignment (``make = create_application_repository; make(s)``), wrapped in
+``functools.partial``, or fetched with ``getattr(module, "...")``. Catching
+those needs data-flow analysis for spellings nothing in the tree uses today;
+each is an obvious detour in review, whereas the import spellings above are the
+ones code is actually written in.
 """
 from __future__ import annotations
 
@@ -31,11 +53,11 @@ CONSTRUCTORS = frozenset({
     "SQLiteRepository",
     "PostgresRepository",
 })
-#: The API's lru-cached server repository (``app.api.deps.repository``).
+#: The API dependency module: everything it exports reaches the server's one
+#: lru-cached repository, so every callable imported from it is a construction.
 SERVER_MODULE = "app.api.deps"
 
-#: Files of the serving process itself (path prefix -> reason). The API layer
-#: reaches the server's one lru-cached repository through ``deps.repository``.
+#: Files of the serving process itself (path prefix -> reason).
 SERVING_PROCESS = {
     "backend/app/api/":
         "the serving process: deps.repository() is its startup composition",
@@ -45,7 +67,17 @@ SERVING_PROCESS = {
         "the serving process's lifespan startup",
 }
 
-#: ``path::enclosing function`` -> why this construction owns its schema.
+#: ``path::function`` -> the version gate that runs before its guest composition.
+GUEST_ENTRIES = {
+    "backend/app/services/maintenance_cli.py::create_schema_guest_repository":
+        "require_current_schema, then create_application_repository(owns_schema=False)",
+    "backend/app/services/maintenance_cli.py::create_bare_schema_guest_repository":
+        "require_current_schema, then create_repository(migrate=False, seed=False)",
+    "backend/app/services/scale_build_cli.py::open_scale_build_repository":
+        "every caller runs verify_migration_ledger (the same schema check) first",
+}
+
+#: ``path::function`` -> why this construction owns its schema.
 SCHEMA_OWNERS = {
     "backend/app/repositories/factory.py::create_repository":
         "the backend selector; forwards the caller's migrate/seed keywords",
@@ -53,6 +85,8 @@ SCHEMA_OWNERS = {
         "the composition root; forwards owns_schema (server: True, guests: False)",
     "backend/app/services/maintenance_cli.py::open_cli_repository":
         "calls the module's guest seam (create_repository = create_schema_guest_repository)",
+    "backend/app/eval/sa_calibration.py::_run_arm":
+        "main() points DATABASE_URL at a fresh temporary calibration database",
     "scripts/smoke_backend.py::check_object_schemas":
         "smoke harness on its own temporary root",
     "scripts/smoke_backend.py::check_kg_store_ask_and_conversations":
@@ -63,6 +97,8 @@ SCHEMA_OWNERS = {
         "smoke harness on its own temporary root",
     "scripts/smoke_backend.py::main":
         "smoke harness on its own temporary root",
+    "scripts/smoke_memory_mcp.py::run":
+        "MCP smoke: run() points DATABASE_URL at a TemporaryDirectory database",
     "scripts/generate_repository_contract_fixtures.py::_new_offline_repo":
         "contract fixtures generated on a throwaway database",
     "scripts/bench_sqlite_writes.py::_make_repo":
@@ -94,16 +130,14 @@ def _is_guest_call(call: ast.Call) -> bool:
 
 
 def _local_constructor_names(tree: ast.AST) -> tuple[set[str], set[str]]:
-    """Names that call a constructor directly, and names bound to the server
-    module (for ``deps.repository()``)."""
+    """Names that call a constructor directly (including everything imported
+    from the server module), and names bound to the server module itself."""
     names = set(CONSTRUCTORS)
     server_modules: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module:
             for alias in node.names:
-                if alias.name in CONSTRUCTORS:
-                    names.add(alias.asname or alias.name)
-                if node.module == SERVER_MODULE and alias.name == "repository":
+                if alias.name in CONSTRUCTORS or node.module == SERVER_MODULE:
                     names.add(alias.asname or alias.name)
                 if node.module == "app.api" and alias.name == "deps":
                     server_modules.add(alias.asname or alias.name)
@@ -133,8 +167,7 @@ def _constructions(path: Path) -> list[tuple[str, ast.Call]]:
                     and (
                         func.attr in CONSTRUCTORS
                         or (
-                            func.attr == "repository"
-                            and isinstance(func.value, ast.Name)
+                            isinstance(func.value, ast.Name)
                             and func.value.id in server_modules
                         )
                     )
@@ -147,6 +180,23 @@ def _constructions(path: Path) -> list[tuple[str, ast.Call]]:
     return found
 
 
+def _verdict(relative: str, scope: str, call: ast.Call) -> tuple[str | None, str | None]:
+    """``(listed place that accepts it, violation text)`` -- exactly one is set."""
+    serving = next((p for p in SERVING_PROCESS if relative.startswith(p)), None)
+    if serving is not None:
+        return serving, None
+    key = f"{relative}::{scope}"
+    if key in GUEST_ENTRIES:
+        if _is_guest_call(call):
+            return key, None
+        return None, f"{key}: a guest entry composing without the guest keywords"
+    if key in SCHEMA_OWNERS:
+        return key, None
+    if _is_guest_call(call):
+        return None, f"{key}: guest keywords outside a guest entry skip the version gate"
+    return None, f"{key}: would migrate and seed (re-hash the admin password)"
+
+
 def _scan() -> tuple[list[str], set[str]]:
     violations: list[str] = []
     used: set[str] = set()
@@ -156,39 +206,32 @@ def _scan() -> tuple[list[str], set[str]]:
             if "/tests/" in f"/{relative}" or "__pycache__" in relative:
                 continue
             for scope, call in _constructions(path):
-                if _is_guest_call(call):
-                    continue
-                serving = next((p for p in SERVING_PROCESS if relative.startswith(p)), None)
-                if serving is not None:
-                    used.add(serving)
-                    continue
-                key = f"{relative}::{scope}"
-                if key in SCHEMA_OWNERS:
-                    used.add(key)
-                    continue
-                violations.append(f"{relative} (in {scope}): {ast.unparse(call)}")
+                accepted, violation = _verdict(relative, scope, call)
+                if accepted is not None:
+                    used.add(accepted)
+                else:
+                    violations.append(f"{violation}: {ast.unparse(call)}")
     return violations, used
 
 
 @pytest.mark.architecture_contract
-def test_only_declared_schema_owners_compose_a_migrating_or_seeding_repository():
+def test_only_listed_places_compose_a_repository():
     violations, _ = _scan()
     assert not violations, (
-        "these constructions would migrate and seed (re-hash the admin password) "
-        "outside the server; open the database through "
-        "app.services.maintenance_cli (open_cli_repository / "
-        "open_maintenance_cli_repository / create_schema_guest_repository / "
-        "create_bare_schema_guest_repository), or, if the process really owns a "
-        "scratch database, add it to SCHEMA_OWNERS with the reason:\n  "
-        + "\n  ".join(violations)
+        "open the database through app.services.maintenance_cli "
+        "(open_cli_repository / open_maintenance_cli_repository / "
+        "create_schema_guest_repository / create_bare_schema_guest_repository), "
+        "or, if the process really owns a scratch database, add it to "
+        "SCHEMA_OWNERS with the reason:\n  " + "\n  ".join(violations)
     )
 
 
 @pytest.mark.architecture_contract
-def test_every_declared_schema_owner_still_exists():
+def test_every_listed_place_still_exists():
     _, used = _scan()
-    stale = sorted((set(SCHEMA_OWNERS) | set(SERVING_PROCESS)) - used)
-    assert not stale, f"remove stale SCHEMA_OWNERS entries: {stale}"
+    listed = set(SCHEMA_OWNERS) | set(SERVING_PROCESS) | set(GUEST_ENTRIES)
+    stale = sorted(listed - used)
+    assert not stale, f"remove stale entries: {stale}"
 
 
 def test_the_cli_seam_is_the_guest_composition():
@@ -197,19 +240,25 @@ def test_the_cli_seam_is_the_guest_composition():
     assert maintenance_cli.create_repository is maintenance_cli.create_schema_guest_repository
 
 
-def test_the_scan_catches_an_aliased_seeding_composition(tmp_path):
-    """The guard's own mutation anchor: a new CLI under an alias is caught."""
-    sample = tmp_path / "new_cli.py"
+def test_the_scan_catches_aliased_server_and_gate_skipping_compositions(tmp_path):
+    """The guard's own mutation anchor: an import alias, any deps callable and
+    literal guest keywords outside a guest entry are all caught."""
+    sample = tmp_path / "scripts" / "new_cli.py"
+    sample.parent.mkdir()
     sample.write_text(
         "from app.bootstrap import create_application_repository as make\n"
         "from app.api import deps\n"
+        "from app.api.deps import identity_repository\n"
         "def main():\n"
         "    make(object())\n"
         "    make(object(), owns_schema=False)\n"
-        "    deps.repository()\n",
+        "    deps.notebook_store()\n"
+        "    identity_repository()\n",
         encoding="utf-8",
     )
-    flagged = [
-        ast.unparse(call) for _, call in _constructions(sample) if not _is_guest_call(call)
+    verdicts = [
+        _verdict("scripts/new_cli.py", scope, call)
+        for scope, call in _constructions(sample)
     ]
-    assert flagged == ["make(object())", "deps.repository()"]
+    assert [accepted for accepted, _ in verdicts] == [None, None, None, None]
+    assert "skip the version gate" in verdicts[1][1]

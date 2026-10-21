@@ -389,7 +389,8 @@ def _print_disk_report(disk_report: DiskSweepReport) -> None:
 
 def main(argv: "list[str] | None" = None) -> int:
     """0=完成(inspect,或 apply 后无跳过/无残留);1=apply 有跳过、删不掉的
-    路径或残余孤儿行;2=参数拒绝。绝不打印数据库 URL。"""
+    路径或残余孤儿行;2=参数拒绝或连不上库;3=库不是本构建的 schema(schema guest,
+    不迁移、不 seed)。绝不打印数据库 URL。"""
     import argparse
 
     from app.core.config import Settings
@@ -445,6 +446,18 @@ def main(argv: "list[str] | None" = None) -> int:
         if args.min_age_seconds is not None
         else max(1, settings.notebook_copy_stale_seconds)
     )
+    # Schema guest like every maintenance command: a database not at this
+    # build's schema is refused (exit 3) with the shared wording before any
+    # connection is pooled.
+    import sys
+
+    from app.services.maintenance_cli import MaintenanceCliError, require_current_schema
+
+    try:
+        require_current_schema(settings)
+    except MaintenanceCliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return exc.exit_code
     database = _open_database(settings, dialect)
     storage = Path(str(settings.storage_dir))
     do_rows = not args.disk_only

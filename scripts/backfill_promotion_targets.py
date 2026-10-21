@@ -234,6 +234,15 @@ def main(argv: list[str] | None = None) -> int:
     db_path = Path(args.db)
     if not db_path.exists():
         raise SystemExit(f"数据库文件不存在: {db_path}")
+    # Schema guest: a --db not at this build's schema is refused (exit 3) with
+    # the shared wording; this tool never migrates the file it is given.
+    from app.services.maintenance_cli import MaintenanceCliError, require_current_sqlite_file
+
+    try:
+        require_current_sqlite_file(db_path)
+    except MaintenanceCliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return exc.exit_code
 
     conn = sqlite3.connect(db_path)  # 离线维护 CLI 直接就地读写操作员指定的 --db 路径
     conn.row_factory = sqlite3.Row

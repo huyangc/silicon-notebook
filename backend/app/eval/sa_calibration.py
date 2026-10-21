@@ -178,8 +178,11 @@ Return JSON ONLY:
 def _run_arm(prompt_fn, windows, doc_type: str) -> Dict[str, Any]:
     from app.core.config import Settings
     from app.services.kg import extract as E
-    from app.services.maintenance_cli import create_bare_schema_guest_repository
-    repo = create_bare_schema_guest_repository(Settings(), sqlite_only=True)
+    from app.services.sqlite_repository import SQLiteRepository
+    # main() points DATABASE_URL at a fresh temporary calibration database
+    # this process owns, so composing it with migrate + seed is correct here
+    # (registered in tests/test_schema_guest_guard.py::SCHEMA_OWNERS).
+    repo = SQLiteRepository(Settings())
     client = repo.chat("kg_extract")
     all_nodes: List[Node] = []
     all_edges: List[Edge] = []
