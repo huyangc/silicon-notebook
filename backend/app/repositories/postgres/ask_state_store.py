@@ -52,6 +52,10 @@ from app.repositories.ask_sample_merge import (
     merge_ask_samples as _merge_ask_samples,
     merge_run_samples as _merge_run_samples,
 )
+from app.repositories.conversation_linked_report import (
+    job_linked_report,
+    receipt_linked_report,
+)
 from app.repositories.ports import (
     merge_sampled_rows,
     AskRequestKeyConflict,
@@ -152,6 +156,15 @@ def _conversation_turn(row, submitted_via: str) -> ConversationTurn:
         created_at=iso_timestamp(row["created_at"]),
         submitted_via=submitted_via,
     )
+
+
+def _payload_receipt(row) -> object:
+    """The raw ``linked_report`` receipt one ``answers`` row's payload stored
+    (``None`` when it holds none). ``get_conversation`` reads it off the LAST
+    answer -- the same answer ``list_conversations`` pulls the receipt from in
+    SQL -- and both hand it to ``receipt_linked_report``."""
+    payload = json_value(row["payload"], {})
+    return payload.get("linked_report") if isinstance(payload, dict) else None
 
 
 class AskStateStore:
@@ -368,11 +381,12 @@ class AskStateStore:
         db.execute(
             "INSERT INTO ask_jobs (id,notebook_id,conversation_id,created_by,mode,question,"
             "asked_at,client_request_id,status,trace_json,answer_id,error,created_at,"
-            "updated_at,submitted_via,output,memory_access) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s, 'running',%s,'','',%s,%s,%s,%s,%s)",
+            "updated_at,submitted_via,output,memory_access,report_id) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s, 'running',%s,'','',%s,%s,%s,%s,%s,%s)",
             (job_id, notebook_id, conversation_id, user_id, mode,
              stored_ask_question(payload.question), payload.asked_at, client_request_id,
-             jsonb([]), now, now, submitted_via, output, 1 if memory_access else 0))
+             jsonb([]), now, now, submitted_via, output, 1 if memory_access else 0,
+             payload.report_id or ""))
 
     def find_job_for_client_request(
         self, user_id: str, client_request_id: str,
@@ -392,12 +406,14 @@ class AskStateStore:
         ``memory_access``, whether the run had the private-Memory channel
         open -- plus where the job stands (``status``, ``output``,
         ``answer_id``), so a reader that only needs those (the anonymous
-        answer link) never loads the trace. ``None`` when the job does not
-        exist."""
+        answer link) never loads the trace. ``report_id`` is the deep report
+        the turn was asked about ('' when it attached none), which the
+        idempotent-retry check compares against a repeated request. ``None``
+        when the job does not exist."""
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT notebook_id, created_by, submitted_via, question, mode, "
-                "conversation_id, memory_access, status, output, answer_id "
+                "conversation_id, memory_access, status, output, answer_id, report_id "
                 "FROM ask_jobs WHERE id=%s",
                 (job_id,),
             ).fetchone()
@@ -414,6 +430,7 @@ class AskStateStore:
             "status": row["status"],
             "output": row["output"],
             "answer_id": row["answer_id"] or "",
+            "report_id": row["report_id"] or "",
         }
 
     def ask_job_progress(self, job_id: str) -> "dict | None":
@@ -945,7 +962,7 @@ class AskStateStore:
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT id,notebook_id,conversation_id,created_by,mode,question,status,"
-                "answer_id,error,asked_at,output FROM ask_jobs WHERE id=%s",
+                "answer_id,error,asked_at,output,report_id FROM ask_jobs WHERE id=%s",
                 (job_id,)).fetchone()
             if row is None:
                 raise KeyError(job_id)
@@ -958,7 +975,8 @@ class AskStateStore:
                 "conversation_id": row["conversation_id"], "created_by": row["created_by"],
                 "mode": row["mode"], "question": row["question"], "status": row["status"],
                 "trace": trace, "answer_id": row["answer_id"], "error": row["error"],
-                "asked_at": row["asked_at"] or "", "output": row["output"]}
+                "asked_at": row["asked_at"] or "", "output": row["output"],
+                "report_id": row["report_id"] or ""}
 
     def ask_answer_detail(self, answer_id: str) -> "dict | None":
         """按 answer_id 直查单条答案(一条主键查询,不加载会话其余轮次)。
@@ -1296,16 +1314,23 @@ class AskStateStore:
                 (conversation_id,),
             ).fetchall():
                 turn_via.setdefault(job_row["answer_id"], job_row["submitted_via"] or "")
+            # The in-flight turn's report title is the report's CURRENT
+            # question (``LinkedReportRef``): a deleted report matches no row,
+            # so the title reads ''. The join is on reports' primary key; a job
+            # with no report has report_id '' and matches nothing.
             job = db.execute(
-                "SELECT id, question, asked_at, mode FROM ask_jobs "
-                "WHERE conversation_id=%s AND status='running' "
-                "ORDER BY created_at DESC, id COLLATE \"C\" DESC LIMIT 1",
+                "SELECT j.id, j.question, j.asked_at, j.mode, j.report_id, "
+                "r.question AS report_title FROM ask_jobs j "
+                "LEFT JOIN reports r ON r.id = j.report_id AND r.notebook_id = j.notebook_id "
+                "WHERE j.conversation_id=%s AND j.status='running' "
+                "ORDER BY j.created_at DESC, j.id COLLATE \"C\" DESC LIMIT 1",
                 (conversation_id,),
             ).fetchone()
             job_trace = self.read_trace(db, job["id"]) if job is not None else []
         turns = [
             _conversation_turn(row, turn_via.get(row["id"], "")) for row in rows
         ]
+        last_receipt = _payload_receipt(rows[-1]) if rows else None
         used_reasoning = bool(turns[-1].response.reasoning_trace) if turns else False
         active_job = None
         if job is not None:
@@ -1315,6 +1340,7 @@ class AskStateStore:
                 asked_at=job["asked_at"] or "",
                 mode=job["mode"] or "",
                 trace=job_trace,
+                linked_report=job_linked_report(job["report_id"], job["report_title"]),
             )
         return ConversationDetail(
             id=conv["id"],
@@ -1324,6 +1350,7 @@ class AskStateStore:
             turn_count=len(turns),
             used_reasoning=used_reasoning,
             submitted_via=conv["submitted_via"] or "",
+            linked_report=receipt_linked_report(last_receipt),
             turns=turns,
             active_job=active_job,
         )
@@ -1389,7 +1416,13 @@ class AskStateStore:
                 "THEN a.payload->'reasoning_trace' ELSE '[]'::jsonb END), 0) > 0 "
                 "   FROM answers a WHERE a.conversation_id = c.id "
                 "  ORDER BY a.ordinal DESC LIMIT 1) AS used_reasoning, "
-                + CONVERSATION_ENTRY_POINT_SQL + " AS submitted_via "
+                + CONVERSATION_ENTRY_POINT_SQL + " AS submitted_via, "
+                # The report the LAST answer's receipt names (the same last
+                # answer as ``used_reasoning``): a jsonb object, NULL when that
+                # turn attached none.
+                "(SELECT a.payload->'linked_report' "
+                "   FROM answers a WHERE a.conversation_id = c.id "
+                "  ORDER BY a.ordinal DESC LIMIT 1) AS linked_report "
                 "FROM conversations c WHERE c.notebook_id = %s AND c.created_by = %s "
                 "ORDER BY c.updated_at DESC, c.id COLLATE \"C\"",
                 (notebook_id, user_id),
@@ -1403,6 +1436,7 @@ class AskStateStore:
                 turn_count=row["turn_count"],
                 used_reasoning=bool(row["used_reasoning"]),
                 submitted_via=row["submitted_via"] or "",
+                linked_report=receipt_linked_report(row["linked_report"]),
             )
             for row in rows
         ]

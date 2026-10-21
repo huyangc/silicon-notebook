@@ -29553,6 +29553,7 @@
       "notebook_id": "nb-api",
       "output": "answer",
       "question": "trace fixture gain",
+      "report_id": "",
       "status": "done",
       "trace": [
         {

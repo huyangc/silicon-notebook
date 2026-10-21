@@ -217,6 +217,8 @@ def test_ask_job_origin_reads_the_stored_request_facts(postgres_repository):
         # Not passed: a run records the channel as open unless told otherwise.
         "memory_access": True,
         "status": "running", "output": "answer", "answer_id": "",
+        # Asked about no report.
+        "report_id": "",
     }
     store.finish_job(job_id, "done", answer_id="ans-origin-1")
     origin = store.ask_job_origin(job_id)
