@@ -633,6 +633,104 @@ def test_exists_form_agrees_with_the_joined_form(world):
         assert (row is not None) is repo.user_can_read_notebook(notebook, user_id)
 
 
+def test_after_group_exit_clause_is_the_read_predicate_without_that_membership(world):
+    """退群预览的谓词 = 真正删掉那一行 `group_members` 之后的 `NOTEBOOK_READ_SQL`。
+
+    对世界里**每一行**组成员关系、每一本库逐格比:谓词在删行之前算出的值,与真删掉
+    这一行(`group_store.remove_member` 删的正是它)之后读权的值相同;算完把行放回去。
+    另加一个同时在两个组里的用户与一本两个组都授权过的库:只退一个组时,经另一个组
+    的读权必须照旧成立——只剔除一行,不是剔除整条群组臂。
+    """
+    repo = world["repo"]
+    both = _mk_user(repo, "user-both-groups")
+    _add_group_member(repo, world["viewers"], both, "member")
+    _add_group_member(repo, world["admins"], both, "admin")
+    shared_twice = _mk_nb(repo, owner=world["owner"])
+    _mk_grant(repo, shared_twice, "group", world["viewers"])
+    _mk_grant(repo, shared_twice, "group_admins", world["admins"])
+    only_admins = _mk_nb(repo, owner=world["owner"])
+    _mk_grant(repo, only_admins, "group_admins", world["admins"])
+    member_too = _mk_nb(repo, owner=world["owner"])
+    _mk_grant(repo, member_too, "group", world["viewers"])
+    repo._runtime.sharing.add_member(member_too, world["group_member"])
+    notebooks = [
+        world[key] for key in ("notebook", "everyone", "everyone_admin", "managed", "sentinel")
+    ] + [shared_twice, only_admins, member_too]
+    clause = access_sql.read_access_after_group_exit_clause(
+        "nb", "xnm", user_ref="gm.user_id", group_ref="gm.group_id",
+        grant_alias="xg", group_alias="xgm", group_admin_alias="xga",
+    )
+    probe = (
+        "SELECT 1 FROM group_members gm JOIN notebooks nb ON nb.id=? "
+        f"WHERE gm.group_id=? AND gm.user_id=? AND {clause}"
+    )
+    sharing = repo._runtime.sharing
+    with repo._connect() as db:
+        memberships = [
+            (row["group_id"], row["user_id"], row["role"], row["added_at"], row["added_by"])
+            for row in db.execute(
+                "SELECT group_id,user_id,role,added_at,added_by FROM group_members"
+            ).fetchall()
+        ]
+    assert len(memberships) >= 5
+    flips = 0
+    for group_id, user_id, role, added_at, added_by in memberships:
+        with repo._connect() as db:
+            predicted = {
+                nb: db.execute(probe, (nb, group_id, user_id)).fetchone() is not None
+                for nb in notebooks
+            }
+        before = {nb: sharing.user_can_read_notebook(nb, user_id) for nb in notebooks}
+        with repo._write() as db:
+            db.execute(
+                "DELETE FROM group_members WHERE group_id=? AND user_id=?",
+                (group_id, user_id),
+            )
+        try:
+            actual = {nb: sharing.user_can_read_notebook(nb, user_id) for nb in notebooks}
+        finally:
+            with repo._write() as db:
+                db.execute(
+                    "INSERT INTO group_members (group_id,user_id,role,added_at,added_by) "
+                    "VALUES (?,?,?,?,?)",
+                    (group_id, user_id, role, added_at, added_by),
+                )
+        assert predicted == actual, (group_id, user_id)
+        flips += sum(1 for nb in notebooks if before[nb] and not actual[nb])
+    # 矩阵里确实有会因退群而读不到的格子(否则这条比较可能恒等于「什么都不变」)。
+    assert flips >= 3
+    # 两个组都在的用户:退任何一个组,两个组都授权过的那本库仍可读。
+    with repo._connect() as db:
+        for group_id in (world["viewers"], world["admins"]):
+            assert db.execute(probe, (shared_twice, group_id, both)).fetchone() is not None
+        # 只授权给组管理员的库:退管理员组就读不到了,退另一个组不影响。
+        assert db.execute(probe, (only_admins, world["admins"], both)).fetchone() is None
+        assert db.execute(probe, (only_admins, world["viewers"], both)).fetchone() is not None
+
+
+def test_after_group_exit_clause_reuses_the_read_predicate_verbatim():
+    """结构守卫:退群谓词由读权的同一组片段拼成,只多两处 `group_id<>` 条件。
+
+    把两处剔除条件删掉之后,它必须逐字等于同别名的 `read_access_clause`——任何「另抄
+    一份主体判定」或漏掉一条臂的实现当场红。双后端各一份。
+    """
+    from app.repositories.postgres import access_sql as pg
+
+    for mod in (access_sql, pg):
+        after = mod.read_access_after_group_exit_clause(
+            user_ref="gm.user_id", group_ref="gm.group_id"
+        )
+        assert after.count(" AND ngm.group_id<>gm.group_id") == 1
+        assert after.count(" AND nga.group_id<>gm.group_id") == 1
+        stripped = after.replace(" AND ngm.group_id<>gm.group_id", "").replace(
+            " AND nga.group_id<>gm.group_id", ""
+        )
+        assert stripped == mod.read_access_clause(user_ref="gm.user_id")
+        # 缺省(不剔除)时片段与加参数之前逐字相同:读权谓词本身一个字没变。
+        assert "<>" not in mod.read_access_clause()
+        assert "<>" not in mod.NOTEBOOK_READ_SQL
+
+
 def test_member_probe_matches_is_member(world):
     """两段式带锁写法复用的成员探测常量,必须与 `is_member` 同义。"""
     repo, notebook = world["repo"], world["notebook"]
@@ -764,6 +862,11 @@ _CALLABLE_PROBES = {
     "read_access_exists_clause": lambda mod: mod.read_access_exists_clause("m"),
     "live_read_access_exists_clause": lambda mod: mod.live_read_access_exists_clause(
         "m"
+    ),
+    "read_access_after_group_exit_clause": (
+        lambda mod: mod.read_access_after_group_exit_clause(
+            user_ref="outer.user_id", group_ref="outer.group_id"
+        )
     ),
     "read_access_params": lambda mod: repr(mod.read_access_params("U")),
     "admin_access_params": lambda mod: repr(mod.admin_access_params("U")),
