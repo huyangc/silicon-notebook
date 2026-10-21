@@ -25,13 +25,13 @@ from app.core.config import Settings, get_settings
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.maintenance import _OFFLINE_MAINTENANCE_LOCK_KEY
 from app.repositories.postgres.migrator import PostgresMigrator
-from app.repositories.postgres.repository import PostgresRepository
 from app.repositories.schema_currency import (
     MIGRATE_COMMAND,
     MIGRATE_MODULE_COMMAND,
     inspect_schema_currency,
     packaged_postgres_migrations,
 )
+from app.services.postgres_repository import PostgresRepository
 from tests.cli_schema_guest_support import (
     CASES,
     ROOT,

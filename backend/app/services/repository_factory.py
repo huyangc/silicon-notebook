@@ -78,11 +78,11 @@ def create_repository(
         return SQLiteRepository(settings, **host_kwargs)
     if scheme == "postgresql":
         try:
-            from app.repositories.postgres.repository import PostgresRepository
+            from app.services.postgres_repository import PostgresRepository
         except ModuleNotFoundError as exc:
             if exc.name in {
                 "app.repositories.postgres",
-                "app.repositories.postgres.repository",
+                "app.services.postgres_repository",
             }:
                 raise RepositoryBackendUnavailableError(
                     "PostgreSQL repository backend is not available"

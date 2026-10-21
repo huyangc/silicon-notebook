@@ -20,7 +20,7 @@ pytestmark = [
 
 @pytest.fixture
 def postgres_env(postgres_settings):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     repo = PostgresRepository(
         postgres_settings.model_copy(update={"embed_dim": 16}),

@@ -48,7 +48,7 @@ EXECUTIONS = 15
 
 @pytest.fixture
 def repo(postgres_settings):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     settings = postgres_settings.model_copy(update={
         "postgres_pool_min_size": 1, "postgres_pool_max_size": 1,

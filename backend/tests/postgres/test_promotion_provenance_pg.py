@@ -26,7 +26,7 @@ def _sql(statement: str) -> str:
 
 @pytest.fixture
 def repo(postgres_settings, monkeypatch):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     for key in ("OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
                 "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL",

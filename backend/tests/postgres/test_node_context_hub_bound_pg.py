@@ -31,7 +31,7 @@ T0 = datetime(2026, 9, 1, tzinfo=timezone.utc)
 
 @pytest.fixture
 def repo(postgres_settings):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     postgres_settings.postgres_statement_timeout_seconds = 30
     repository = PostgresRepository(postgres_settings)

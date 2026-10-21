@@ -92,11 +92,11 @@ GUEST_ENTRIES = {
 
 #: ``path::function`` -> why this construction owns its schema.
 SCHEMA_OWNERS = {
-    "backend/app/repositories/factory.py::create_repository":
+    "backend/app/services/repository_factory.py::create_repository":
         "the backend selector; forwards the caller's migrate/seed keywords",
     "backend/app/bootstrap.py::create_application_repository":
         "the composition root; forwards owns_schema (server: True, guests: False)",
-    "backend/app/repositories/postgres/repository.py::__init__":
+    "backend/app/services/postgres_repository.py::__init__":
         "the PostgreSQL adapter builds its bundle with its caller's migrate/seed",
     "backend/app/services/sqlite_repository.py::__init__":
         "the SQLite adapter builds its bundle; its migrator gets the caller's migrate/seed",

@@ -376,7 +376,7 @@ def test_report_runs_selected_evidence_without_graph_service():
 
 
 def test_repository_factory_accepts_injected_host_without_importing_registry(monkeypatch):
-    from app.repositories import factory
+    from app.services import repository_factory as factory
 
     host = object()
     captured = {}

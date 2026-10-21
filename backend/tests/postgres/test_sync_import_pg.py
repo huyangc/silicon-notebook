@@ -126,7 +126,7 @@ def _seed(repo, name: str, *, placeholder: str, no_time) -> str:
 @pytest.fixture
 def target(postgres_scope, tmp_path):
     """Library B: the PostgreSQL target every case in this file imports into."""
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     settings = _postgres_settings(postgres_scope.url, tmp_path / "target-storage")
     repo = PostgresRepository(settings)
@@ -167,7 +167,7 @@ def postgres_package(tmp_path):
     the import really writes rows it did not itself produce."""
     import os
 
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     base_url = os.environ.get("TEST_POSTGRES_URL")
     if not base_url:
@@ -389,7 +389,7 @@ def sync_key_source(tmp_path):
     returns) -- these tests export it, mutate it, and export it again."""
     import os
 
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     base_url = os.environ.get("TEST_POSTGRES_URL")
     if not base_url:
@@ -759,7 +759,7 @@ def _race_library(
     ``created_by`` is left NULL (the column is nullable, and the FK it
     carries permits NULL) so this does not also need an identity-mapping
     setup that is irrelevant to the race under test."""
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     with _isolated_postgres_scope(base_url) as scope:
         settings = _postgres_settings(scope.url, tmp_path / f"{label}-storage")

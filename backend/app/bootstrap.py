@@ -16,9 +16,9 @@ from app.extensions.ui_projection import (
     UiContributionProjection,
     project_ui_contributions,
 )
-from app.repositories.factory import create_repository
 from app.repositories.ports import NotebookRepository
 from app.services.extension_toggles import refresh_extension_admission
+from app.services.repository_factory import create_repository
 
 
 def application_extension_runtime() -> ExtensionRuntime:

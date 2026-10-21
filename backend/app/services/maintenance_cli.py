@@ -125,7 +125,7 @@ def create_bare_schema_guest_repository(
     if sqlite_only and database_identity(settings.database_url).scheme != "sqlite":
         raise MaintenanceCliUsageError("this tool supports a SQLite DATABASE_URL only")
     require_current_schema(settings)
-    from app.repositories.factory import create_repository as compose
+    from app.services.repository_factory import create_repository as compose
 
     return compose(settings, migrate=False, seed=False)
 

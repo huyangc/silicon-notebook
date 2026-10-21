@@ -460,9 +460,6 @@
   "backend/app/repositories/bundle.py": {
     "I001": 1
   },
-  "backend/app/repositories/factory.py": {
-    "I001": 1
-  },
   "backend/app/repositories/global_ask_store.py": {
     "I001": 1
   },
@@ -573,9 +570,6 @@
     "I001": 1
   },
   "backend/app/repositories/postgres/report_store.py": {
-    "I001": 1
-  },
-  "backend/app/repositories/postgres/repository.py": {
     "I001": 1
   },
   "backend/app/repositories/postgres/retrieval_indexes.py": {
@@ -965,6 +959,9 @@
   "backend/app/services/plugin_ask_engine.py": {
     "I001": 1
   },
+  "backend/app/services/postgres_repository.py": {
+    "I001": 1
+  },
   "backend/app/services/prompts.py": {
     "I001": 1
   },
@@ -1013,6 +1010,9 @@
   "backend/app/services/repository_facade.py": {
     "F401": 36,
     "I001": 3
+  },
+  "backend/app/services/repository_factory.py": {
+    "I001": 1
   },
   "backend/app/services/repository_runtime.py": {
     "I001": 2
@@ -1278,9 +1278,6 @@
   "backend/tests/postgres/test_default_ceiling_entrypoints_pg.py": {
     "I001": 1
   },
-  "backend/tests/postgres/test_default_ceiling_probe_pg.py": {
-    "I001": 1
-  },
   "backend/tests/postgres/test_default_source_ceiling_pg.py": {
     "I001": 1
   },
@@ -1438,8 +1435,7 @@
     "I001": 1
   },
   "backend/tests/postgres/test_repository_conformance.py": {
-    "B017": 2,
-    "I001": 2
+    "B017": 2
   },
   "backend/tests/postgres/test_scale_build_cli.py": {
     "I001": 1
@@ -1448,9 +1444,6 @@
     "I001": 1
   },
   "backend/tests/postgres/test_source_elements_positions_pg.py": {
-    "I001": 1
-  },
-  "backend/tests/postgres/test_spreadsheet_federation_pg.py": {
     "I001": 1
   },
   "backend/tests/postgres/test_sync_capture_pg.py": {

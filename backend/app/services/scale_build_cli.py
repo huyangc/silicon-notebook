@@ -303,7 +303,7 @@ def open_scale_build_repository(settings: Settings) -> Iterator[object]:
         application_repository_hosts,
         prime_extension_admission,
     )
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     runtime = application_extension_runtime()
     repository = PostgresRepository(

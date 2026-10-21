@@ -9,8 +9,8 @@ from __future__ import annotations
 import pytest
 
 from app.core.config import Settings
-from app.repositories.factory import create_repository
 from app.repositories.postgres import knowledge_counts_cache
+from app.services.repository_factory import create_repository
 from tests import unified_kg_rebuild_characterization_cases as cases
 
 pytestmark = [

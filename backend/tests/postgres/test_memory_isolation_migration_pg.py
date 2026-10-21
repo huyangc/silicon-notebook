@@ -225,8 +225,8 @@ def test_fresh_database_defaults_the_marker_to_isolated(postgres_database):
 def test_rebuild_pass_sets_the_marker_through_the_ordinary_slot(
     upgraded, postgres_settings
 ):
-    from app.repositories.postgres.repository import PostgresRepository
     from app.services.memory_isolation_rebuild import MemoryIsolationRebuild
+    from app.services.postgres_repository import PostgresRepository
 
     database, _before, _after = upgraded
     # 0077's and 0079's schema, alone: this build's rebuild end-write stores
@@ -322,8 +322,8 @@ def test_the_pass_leaves_shared_only_totals_even_when_the_input_looks_unchanged_
     """Twin of the SQLite case: the queued notebook is reclustered even when
     its stored input version matches, so ``unified_kg_status`` counts the
     shared graph only afterwards."""
-    from app.repositories.postgres.repository import PostgresRepository
     from app.services.memory_isolation_rebuild import MemoryIsolationRebuild
+    from app.services.postgres_repository import PostgresRepository
 
     database, _before, _after = upgraded
     repository = PostgresRepository(postgres_settings)
@@ -875,8 +875,8 @@ def test_pre_isolation_scale_indexes_are_queued_on_postgres(
     import json
 
     from app.core.config import Settings
-    from app.repositories.postgres.repository import PostgresRepository
     from app.services.memory_isolation_rebuild import MemoryIsolationRebuild
+    from app.services.postgres_repository import PostgresRepository
 
     monkeypatch.setenv("NOTEBOOK_COPY_MAX_ROWS", "1")
     monkeypatch.setenv("VIZ_SYNC_BUILD_MAX_OBJECTS", "3")

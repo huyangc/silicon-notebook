@@ -35,16 +35,16 @@
     {
       "count": 1,
       "kind": "facade_imports",
-      "path": "backend/app/repositories/factory.py",
-      "reason": "formal backend-selection composition root",
+      "path": "backend/app/scripts/gen_recall_gold.py",
+      "reason": "offline CLI composition root",
       "scope": "<module>",
       "target": "app.services.sqlite_repository:SQLiteRepository"
     },
     {
       "count": 1,
       "kind": "facade_imports",
-      "path": "backend/app/scripts/gen_recall_gold.py",
-      "reason": "offline CLI composition root",
+      "path": "backend/app/services/repository_factory.py",
+      "reason": "formal backend-selection composition root",
       "scope": "<module>",
       "target": "app.services.sqlite_repository:SQLiteRepository"
     },

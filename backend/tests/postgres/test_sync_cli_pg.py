@@ -20,7 +20,7 @@ from app.core.config import Settings
 from app.migration.sync import cli
 from app.migration.sync.export import _Source
 from app.repositories.postgres.database import PostgresDatabase
-from app.repositories.postgres.repository import PostgresRepository
+from app.services.postgres_repository import PostgresRepository
 
 
 pytestmark = [

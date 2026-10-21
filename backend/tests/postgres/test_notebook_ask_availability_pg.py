@@ -22,7 +22,7 @@ pytestmark = [
 
 @pytest.fixture
 def repo(postgres_settings):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     repository = PostgresRepository(postgres_settings)
     marker = set_request_user(repository.current_user())

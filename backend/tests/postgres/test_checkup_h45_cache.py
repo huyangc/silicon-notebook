@@ -26,7 +26,7 @@ pytestmark = [
 
 @pytest.fixture
 def postgres_repository(postgres_settings):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     repository = PostgresRepository(postgres_settings)
     try:
@@ -93,7 +93,7 @@ def test_checkup_h45_memo_seq_key_and_event_invalidation(postgres_repository):
 
 def test_checkup_h45_wiring_returns_the_epoch_seq_pair_not_a_bare_int(postgres_repository):
     """R1 (P1-1, post-review): the real ``kg_mutation_seq`` seam wired into
-    ``PostgresRepository.checkup`` (``postgres/repository.py``) once
+    ``PostgresRepository.checkup`` (``postgres_repository.py``) once
     independently called a bare ``int(graph_seq_row(db, nb)[0])`` — a SECOND,
     epoch-unaware copy of the seam ``sqlite_repository.py`` had already moved
     to ``(kg_reset_epoch, kg_mutation_seq)``. The injected-seam tests above
@@ -104,7 +104,7 @@ def test_checkup_h45_wiring_returns_the_epoch_seq_pair_not_a_bare_int(postgres_r
     regression back to a bare int fails here immediately regardless of
     which mutation actually exercises it.
 
-    变异锚点:把 postgres/repository.py 的 kg_mutation_seq 接线改回裸
+    变异锚点:把 postgres_repository.py 的 kg_mutation_seq 接线改回裸
     ``int(graph_seq_row(db,nb)[0])``,本条必须报红(TypeError:'int' 不可解包
     成 2 元组,或返回值不是 tuple)。
     """

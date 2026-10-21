@@ -4,10 +4,10 @@ import json
 
 import pytest
 
-from app.repositories.postgres.repository import PostgresRepository
 from app.services import batch_ingest as bi
 from app.services import maintenance_cli
 from app.services.embedding import FakeEmbedder
+from app.services.postgres_repository import PostgresRepository
 from tests.model_testkit import RecordingModelProvider
 
 

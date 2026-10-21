@@ -633,9 +633,9 @@ def test_pg_a_long_held_lock_bounds_the_follow_up_and_hands_it_to_the_backstop(
     source held far longer, deleting mem-a2 returns in bounded time, ko-ma1
     still deprecated, and the notebook is handed to a background backstop
     pass — which restores ko-ma1 once the lock goes."""
-    from app.repositories.postgres.repository import PostgresRepository
     from app.services import background_jobs
     from app.services import source_ingestion as ingestion_module
+    from app.services.postgres_repository import PostgresRepository
 
     postgres_settings.storage_dir = str(tmp_path / "storage")
     postgres_settings.event_log_enabled = False
@@ -1114,7 +1114,7 @@ def test_pg_conflict_readers_exclude_memory_rows(seeded):
 
 @pytest.fixture
 def pg_repository(postgres_settings, tmp_path):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     postgres_settings.storage_dir = str(tmp_path / "storage")
     postgres_settings.event_log_enabled = False

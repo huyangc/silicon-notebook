@@ -725,7 +725,7 @@ def test_search_repository_disables_migrate_and_seed(monkeypatch):
         return object()
 
     monkeypatch.setattr(
-        "app.repositories.factory.create_repository", fake_create_repository,
+        "app.services.repository_factory.create_repository", fake_create_repository,
     )
     # 共享的 schema guest 入口先过库版本闸;这里只钉它被调用、且先于构造。
     monkeypatch.setattr(

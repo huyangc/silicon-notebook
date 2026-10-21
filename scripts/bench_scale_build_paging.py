@@ -84,7 +84,7 @@ def _url() -> str:
 
 def _repository():
     from app.core.config import Settings
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     settings = Settings(
         database_url=_url(),

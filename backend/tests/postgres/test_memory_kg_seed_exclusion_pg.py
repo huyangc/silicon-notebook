@@ -26,8 +26,8 @@ import pytest
 from app.core.config import Settings
 from app.repositories.postgres import memory_sql as pg_memory_sql
 from app.repositories.postgres.migrator import PostgresMigrator
-from app.repositories.postgres.repository import PostgresRepository
 from app.services.embedding import FakeEmbedder
+from app.services.postgres_repository import PostgresRepository
 from tests import memory_kg_seed_world as world
 from tests.model_testkit import bind_all_embedding_clients
 
