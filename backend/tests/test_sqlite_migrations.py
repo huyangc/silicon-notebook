@@ -743,14 +743,15 @@ def test_v98_adds_the_attribution_table_without_backfilling(tmp_path):
     database.close_local()
 
 
-@pytest.mark.legacy_upgrade_contract
 @pytest.mark.real_sqlite_migration
 def test_v99_adds_ask_jobs_report_id(tmp_path):
     """v99 adds ``ask_jobs.report_id`` (TEXT NOT NULL DEFAULT ''): a fresh
     database and a v98 upgrade carry the same column, a turn that already
     exists reads '' (the default is the whole backfill), a row written without
-    the column reads '', one written with a report id keeps it, and a second
-    run is a no-op."""
+    the column reads '', one written with a report id keeps it, and running
+    the step again on an upgraded database neither fails nor changes the
+    column (the user_version gate would skip a second ``migrate()``, so the
+    step itself is called)."""
     from tests.sqlite_migration_testkit import rollback_v99
 
     database, settings = _fresh_migrated_database(tmp_path)
@@ -780,6 +781,9 @@ def test_v99_adds_ask_jobs_report_id(tmp_path):
 
     assert SqliteMigrator(database, settings).migrate() == [99]
     assert SqliteMigrator(database, settings).migrate() == []
+    # The step re-runs cleanly: add_column_if_missing sees the column and a
+    # bare ADD COLUMN would raise "duplicate column name".
+    SqliteMigrator(database, settings)._migration_99()
     with database.connect() as db:
         assert column(db) == fresh
         assert db.execute(
