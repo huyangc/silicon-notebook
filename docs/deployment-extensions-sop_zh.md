@@ -506,6 +506,10 @@ npm run build
 npm run typecheck
 ```
 
+> **改名（2026-10）：** 类型检查原来叫 `npm run lint`。现在的 `npm run lint` 是只针对基座自身源码的
+> ESLint：既不做类型检查，也不看 `features/ext-*`。仍用 `npm run lint` 校验插件的脚本会在什么都没
+> 检查的情况下通过，请改成 `npm run typecheck`。
+
 **装了插件的树跑不过基座的 `npm run test`。** `extension-ui-host.component.test.tsx` 钉住的是「零插件时合并出来的 registry 逐字等于内建目录、长度为 1」——那正是 registry 拆成两个模块要证明的唯一性质，绝不能为了迁就本地插件被放宽成 `>= 1`。你的验收判据是上面第 3、4 项加第 7 节的对账，不是 `npm run test`。
 
 `--extra-root` 只加宽词汇守卫的扫描面：它按同一份黑名单、同一条 `SANCTIONED_UI` 放行规则扫你这棵树的 `**/*.py` 里的 `user_error(...)` 文案，其它每一项检查与每一行输出都逐字不变。

@@ -36,7 +36,10 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // Reads package/config metadata only.
   "tests/guards/test-runner-config.test.mjs",
   "tests/guards/test-location-guard.test.mjs",
-  // Reads eslint-suppressions.json and package.json: the lint baseline and scripts.
+  // Reads eslint-suppressions.json, package.json and eslint.config.mjs (the lint
+  // baseline, scripts and ignore list), and scans sources only for eslint-disable
+  // comments naming rules-of-hooks: comments are not in the AST, and no position or
+  // order is queried.
   "tests/guards/eslint-baseline-guard.test.mjs",
   // Reads globals.css to compare selector specificity. Not production TS source and
   // not a source-position query — a stylesheet cascade contract has no AST to consume,

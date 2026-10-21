@@ -509,6 +509,11 @@ npm run build
 npm run typecheck
 ```
 
+> **Renamed (2026-10):** the type check used to be `npm run lint`. `npm run lint` now runs
+> ESLint over the base repository's own sources only: it does not type-check and does not
+> look at `features/ext-*`. A script that still runs `npm run lint` to validate a plugin
+> passes without checking it; change it to `npm run typecheck`.
+
 **A tree with plugins configured does not pass the base repository's `npm run test`.** `extension-ui-host.component.test.tsx` pins "the merged registry equals the built-in catalog, length 1, with zero plugins configured" — that property is the entire reason the registry is split into two modules, and it must never be loosened to `>= 1` to accommodate a local plugin. Your acceptance gate is items 3 and 4 above plus the parity check in §7, not `npm run test`.
 
 `--extra-root` only widens the vocabulary guard's scan face: it scans your tree's `**/*.py` for `user_error(...)` messages with the same blacklist and the same `SANCTIONED_UI` allowance, and leaves every other check and every line of output unchanged.

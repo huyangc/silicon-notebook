@@ -459,18 +459,24 @@ CI 和 PyPI 于 2026-10-19 发布它以来的每次全新安装，装到的都�
 所有规则一律是 error：ESLint 的 bulk suppressions 只记录 error，warning 既进不了基线也拦不住
 任何东西；`--max-warnings 0` 加 `reportUnusedDisableDirectives: "error"` 让 warning 这一档彻底
 不存在。前导下划线表示「刻意不用」的绑定。`tests/**` 下关掉两条只保护 Next 打包与对外服务内容的
-规则（`@next/next/no-img-element`、`@next/next/no-assign-module-variable`）。`sync-ui-plugins.mjs`
-生成的插件投影（`features/ext-*`、`registry.local.ts`）不参与 lint。lint 与类型检查是两步：
+规则（`@next/next/no-img-element`、`@next/next/no-assign-module-variable`）。ESLint 不读
+`.gitignore`，所以不参与 lint 的内容由配置里唯一一份全局 `ignores` 列出：构建与工具产物
+（`.next`、`node_modules`、`.local`、`coverage`、`dist`、`build`、`next-env.d.ts`），以及
+`sync-ui-plugins.mjs` 生成的插件投影（`features/ext-*`、`registry.local.ts`）。lint 与类型检查是两步：
 `npm run typecheck` 是 `tsc --noEmit`（引入 ESLint 之前它叫 `npm run lint`）；`next build` 不跑
 lint（`eslint.ignoreDuringBuilds`），因为 Next 构建期那一遍不带基线。
 
-门禁之前就存在的违反记在 `frontend/eslint-suppressions.json`，按「文件 + 规则」计数。某文件
-某规则的违反数超过条目就失败，条目大于实际仍存在的数也失败（exit 2，「suppressions left that
-do not occur anymore」），所以基线始终与源码逐格相等。
-`frontend/tests/guards/eslint-baseline-guard.test.mjs` 补上 ESLint 看不见的部分：每条规则的
-总条数与文件数在 `BASELINE_CEILING` 里零松弛钉死；基线里列出的文件必须都还在（文件删除或改名后，
-ESLint 从不核对它的条目）；`react-hooks/rules-of-hooks` 永不进基线（它的违反要么是真 bug，要么是
-被误命名为 `use*` 的 helper，都当场修）；两条 hooks 规则必须解析为 error。降基线：修掉违反，跑
+门禁之前就存在的违反记在 `frontend/eslint-suppressions.json`，按「文件 + 规则」计数。对每个
+lint 到的文件，某规则的违反数超过该格就失败，该格大于实际仍存在的数也失败（exit 2，「suppressions
+left that do not occur anymore」）；它只核对 lint 到的文件。
+`frontend/tests/guards/eslint-baseline-guard.test.mjs` 补上它管不到的部分：每条规则的总条数与
+文件数在 `BASELINE_CEILING` 里零松弛钉死；基线里列出的文件必须存在且未被忽略（文件删除、改名或
+新加进忽略表后，ESLint 从不核对它的条目）；全局 `ignores` 表与 `reportUnusedDisableDirectives`
+钉死；`app`、`features`、`scripts`、`test-support`、`tests` 下的每个源码文件都必须受检，两条
+hooks 规则都解析为 error，且没有规则停在 warn；`react-hooks/rules-of-hooks` 永不豁免，既不进
+基线，也不许有针对它的 `eslint-disable` 注释（它的违反要么是真 bug，要么是被误命名为 `use*`
+的 helper，都当场修）。钉的是按规则的合计，所以同一规则在文件间对冲（A 文件修掉一条、B 文件新增
+一条）时所有数字都不变，只能靠评审 `eslint-suppressions.json` 的 diff 发现。降基线：修掉违反，跑
 `npm run lint:prune`（`eslint --prune-suppressions .`），同一改动里调低 `BASELINE_CEILING`。
 不要用 `eslint --suppress-all` 或 `--suppress-rule` 收编新违反：修掉它；代码确属刻意如此时，在被
 报告那一行的正上方写 `// eslint-disable-next-line <rule> -- <理由>`。并行路径上 ESLint 自成一组

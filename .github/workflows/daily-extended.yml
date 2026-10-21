@@ -96,7 +96,7 @@ jobs:
           PYTHON_BIN: python
         run: bash scripts/check.sh --lane contracts --lane frontend
 
-      # check_frontend.sh runs its three step groups concurrently only on
+      # check_frontend.sh runs its four step groups concurrently only on
       # hosts with at least eight CPUs; CI runners have fewer, so the step
       # above takes the sequential path. Force the parallel path through the
       # same wrapper so it has CI coverage too. It runs even when the step

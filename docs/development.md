@@ -594,23 +594,31 @@ neither baselined nor gated, and `--max-warnings 0` plus
 `reportUnusedDisableDirectives: "error"` leave no warning tier at all. A leading
 underscore marks a deliberately unused binding. Under `tests/**` the two Next rules
 that protect what Next bundles and serves (`@next/next/no-img-element`,
-`@next/next/no-assign-module-variable`) are off. The plugin projections that
-`sync-ui-plugins.mjs` generates (`features/ext-*`, `registry.local.ts`) are not
-linted. The lint step is separate from the type check: `npm run typecheck` is
+`@next/next/no-assign-module-variable`) are off. ESLint does not read `.gitignore`, so
+the config's one global `ignores` list names what is not linted: build and tool output
+(`.next`, `node_modules`, `.local`, `coverage`, `dist`, `build`, `next-env.d.ts`) and
+the plugin projections that `sync-ui-plugins.mjs` generates (`features/ext-*`,
+`registry.local.ts`). The lint step is separate from the type check: `npm run typecheck` is
 `tsc --noEmit` (before ESLint it was named `npm run lint`), and `next build` does not
 lint (`eslint.ignoreDuringBuilds`), because Next's build-time pass would lint without
 the baseline.
 
 Violations that predate the gate are recorded in `frontend/eslint-suppressions.json`,
-counted per file and rule. A file whose count for a rule rises above its entry fails
-the run, and so does an entry larger than what still occurs (exit 2, "suppressions
-left that do not occur anymore"), so the baseline always equals the tree.
-`frontend/tests/guards/eslint-baseline-guard.test.mjs` adds what ESLint cannot see:
-each rule's total count and file count are pinned in `BASELINE_CEILING` with zero
-slack, every listed file must still exist (ESLint never checks entries for deleted or
-renamed files), `react-hooks/rules-of-hooks` never enters the baseline (a violation is
-a real bug or a helper misnamed `use*`, both fixed on the spot), and both hooks rules
-must resolve to errors. To lower the baseline, fix violations, run
+counted per file and rule. For every file it lints, ESLint fails when a rule's
+violations exceed that file's entry, and when an entry is larger than what still occurs
+(exit 2, "suppressions left that do not occur anymore"). It checks only the files it
+lints. `frontend/tests/guards/eslint-baseline-guard.test.mjs` covers what that leaves
+open: each rule's total count and number of files are pinned in `BASELINE_CEILING`
+with zero slack; every listed file must exist and must not be ignored (ESLint never
+checks entries for deleted, renamed or newly ignored files); the global `ignores` list
+and `reportUnusedDisableDirectives` are pinned; every source file under `app`,
+`features`, `scripts`, `test-support` and `tests` must be linted, with both hooks
+rules resolving to errors and no rule left at warn; and `react-hooks/rules-of-hooks`
+is never exempted, neither in the baseline nor by an `eslint-disable` comment (a
+violation is a real bug or a helper misnamed `use*`, both fixed on the spot). The pins
+are per-rule totals, so debt moved between files under one rule (one violation fixed
+in file A, one added in file B) keeps every number and is caught only by reviewing the
+`eslint-suppressions.json` diff. To lower the baseline, fix violations, run
 `npm run lint:prune` (`eslint --prune-suppressions .`), and lower `BASELINE_CEILING`
 in the same change. Do not absorb a new violation with `eslint --suppress-all` or
 `--suppress-rule`: fix it, or, when the code is deliberately written that way, put an
