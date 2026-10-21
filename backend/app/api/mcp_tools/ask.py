@@ -34,9 +34,11 @@ from app.domain.agent_tools import (
 )
 from app.domain.ask_engine import AskPluginEngineError
 from app.domain.cancellation import AskExecutorGone, AskFollowFailed, AskWaitAbandoned
+from app.domain.report_followup import LinkedReportNotFound, LinkedReportNotReady
 from app.models.ask import (
     ASK_OUTPUTS,
     ASK_QUESTION_MAX_CHARS,
+    ASK_REPORT_ID_MAX_CHARS,
     ASK_UNDERSTANDING_MS_MAX,
     EVIDENCE_OUTPUT_MODE_REFUSAL,
     AskEvidence,
@@ -57,6 +59,7 @@ from app.services.query_intent import (
     conversation_intent_history,
     validate_confirmed_intent,
 )
+from app.services.report_followup import load_linked_report
 from app.services.source_scope import memory_access_context
 
 from . import global_ask as _global
@@ -73,7 +76,7 @@ from ._shared import (
 )
 from ._messages import chinese_value_error
 from .answer_link_page import link_page
-from .ask_pages import answer_page
+from .ask_pages import answer_page, linked_report_view
 from .evidence_page import evidence_page
 from .memory_context import _memory_read_allowed
 from .refs import element_ref, memory_ref
@@ -163,6 +166,7 @@ def _plugin_mode(mode: str) -> bool:
 def _validate_inputs(
     question: str, conversation_id: str, mode: str,
     intent: Mapping[str, Any] | None, notebooks: list[str] | None,
+    report_id: str = "",
 ) -> tuple[_IntentReply | None, list[str] | None]:
     """Every input rail that must fail BEFORE any repository work.
 
@@ -170,7 +174,9 @@ def _validate_inputs(
       checked here so the Agent reads what to do instead of a model dump
       (the shared conversation page serves a question verbatim, so every
       write side bounds it);
-    * ``conversation_id`` length; ``reasoning`` needs a non-blank question;
+    * ``conversation_id`` and ``report_id`` length (the latter is the bound
+      ``AskRequest.report_id`` enforces, spelled for the Agent);
+      ``reasoning`` needs a non-blank question;
     * ``notebooks``: unique non-empty ids, at most 8 (more is refused, never
       truncated); an empty list means "omitted"; ``"*"`` (every authorized
       notebook) stands alone;
@@ -186,6 +192,8 @@ def _validate_inputs(
         )
     if len(conversation_id) > CONVERSATION_ID_MAX_LENGTH:
         raise AgentToolError("invalid_argument", "conversation_id 过长")
+    if len(report_id) > ASK_REPORT_ID_MAX_CHARS:
+        raise AgentToolError("invalid_argument", _REPORT_ID_TOO_LONG)
     if not question.strip():
         raise AgentToolError("invalid_argument", "question 不能为空")
     clean: list[str] | None = None
@@ -233,6 +241,34 @@ _EVIDENCE_NO_KEY = (
     'output="evidence" 不接受 client_request_id：仅检索的结果不保存，'
     "无法接回或重读，失败了直接再问一次即可"
 )
+
+
+# ``report_id``: asking about one of the owner's finished deep reports. The
+# wording is the plan's MCP column (2026-10-21 section 2.5). The not-found
+# sentence is the one for "does not exist", "is not the token owner's" and
+# "is in another notebook" alike -- never an existence probe.
+_REPORT_ID_TOO_LONG = "report_id 过长"
+_REPORT_NOT_FOUND = "没有找到这份报告（不存在、不属于此凭证的主人，或不在这个笔记本里）"
+_REPORT_NOT_READY = "这份报告还没有生成完成，完成后才能就此追问"
+_REPORT_SINGLE_NOTEBOOK = (
+    "report_id 只能用于单个笔记本的提问：报告属于一个笔记本，跨笔记本提问不读取报告"
+)
+
+
+def _require_report(repo: Any, principal: Any, notebook_id: str, report_id: str) -> None:
+    """The report gate of one single-notebook ``ask``: ``load_linked_report``,
+    the one predicate the HTTP routes apply (the token owner's own report of
+    THIS notebook, finished), in the Agent's error model. No ``report_id`` is
+    no check and no read. Runs inside the owner's request context, above any
+    durable state (a conversation, a job)."""
+    if not report_id:
+        return
+    try:
+        load_linked_report(repo.get_report, notebook_id, report_id, principal.owner_id)
+    except LinkedReportNotFound:
+        raise AgentToolError("not_found", _REPORT_NOT_FOUND) from None
+    except LinkedReportNotReady:
+        raise AgentToolError("invalid_argument", _REPORT_NOT_READY) from None
 
 
 def _normalized_key(client_request_id: str) -> str:
@@ -802,6 +838,24 @@ _NOTEBOOK_STATUS = {"done": "answered", "running": "running", "failed": "failed"
                     "cancelled": "cancelled", "interrupted": "failed"}
 
 
+def _notebook_scope(
+    notebook_id: str, response: AskResponse | None, detail: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The view's ``scope``: the one notebook asked and, when the question
+    attached a deep report, ``linked_report`` -- the stored receipt (what was
+    read and how much of what the report cited), else, for a job with no
+    answer to carry one (still running, failed, cancelled), just the
+    ``report_id`` its job row names. Nested here, never a new top-level key:
+    ``answer_page`` already spends all of ``OUTPUT_MAPPING_LIMIT``."""
+    scope: dict[str, Any] = {"kind": "notebook", "notebook_ids": [notebook_id]}
+    receipt = getattr(response, "linked_report", None)
+    if receipt is not None:
+        scope["linked_report"] = linked_report_view(receipt)
+    elif detail.get("report_id"):
+        scope["linked_report"] = {"report_id": str(detail["report_id"])}
+    return scope
+
+
 def notebook_view(
     job_id: str, notebook_id: str, response: AskResponse | None,
     detail: Mapping[str, Any] | None, allow_memory: bool,
@@ -809,8 +863,9 @@ def notebook_view(
     """One notebook Ask job in the shape ``answer_page`` pages.
 
     ``response`` is the answer (from the run itself, or the stored answer
-    payload); ``detail`` the job row (status, trace, conversation). A failed
-    job's stored error is an internal exception text and is never echoed.
+    payload); ``detail`` the job row (status, trace, conversation, the deep
+    report it asked about). A failed job's stored error is an internal
+    exception text and is never echoed.
     """
     anchors, citations = _strip_memory_items(response, allow_memory) if response else ([], [])
     detail = detail or {}
@@ -858,7 +913,7 @@ def notebook_view(
             _global.FAILED_COPY if status == "failed" else "这次回答已被取消"
         ),
         "completeness_notice": getattr(response, "completeness_notice", "") or "",
-        "scope": {"kind": "notebook", "notebook_ids": [notebook_id]},
+        "scope": _notebook_scope(notebook_id, response, detail),
     }
 
 
@@ -887,6 +942,7 @@ def _run_notebook(
     conversation: Any, reply: _IntentReply | None, client_request_id: str,
     stop: threading.Event, output: str = "answer", *,
     delivery: str = "inline", link_ttl_hours: int | None = None,
+    report_id: str = "",
 ) -> dict[str, Any]:
     """The single-notebook path's blocking body (``ask_current`` semantics:
     the memory channel, mounted libraries, plugin engines, the
@@ -894,6 +950,13 @@ def _run_notebook(
 
     ``memory:read`` (the ``read`` tier) opens or closes the private-Memory
     channel for everything run here, entered IN this worker thread.
+
+    ``report_id`` attaches one finished deep report of the token owner's in
+    this notebook (``_require_report``: after a retried key attached -- the
+    first submission already passed it -- and before the understanding step,
+    so a refused report costs no model call and leaves no conversation or
+    job). The request carries it, so a retried key under another report is
+    ``AskRequestKeyReused``, and the understanding step is told about it.
 
     ``output="evidence"`` (retrieval only, built-in modes, never keyed) runs
     the same gates and understanding step, then ``ask_current``'s
@@ -908,6 +971,7 @@ def _run_notebook(
             question=question, mode=mode,
             conversation_id=conversation_id or None,
             client_request_id=client_request_id or None,
+            report_id=report_id or None,
         )
         try:
             # A retried key attaches BEFORE any preflight: the original
@@ -929,11 +993,13 @@ def _run_notebook(
                         "该笔记本还没有可用于回答的内容，请先添加来源，"
                         "或在「设置 → 编辑当前笔记本」里挂载一个参考库。",
                     )
+                _require_report(repo, principal, notebook_id, report_id)
                 if mode == "reasoning" and confirmation is None:
                     contract, understanding_ms = _understood(
                         lambda: repo.preview_reasoning_intent(
                             notebook_id, question.strip(),
                             _notebook_history(conversation),
+                            report_id=report_id or None,
                         )
                     )
                     if contract.needs_clarification:
@@ -1237,7 +1303,8 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
             "blocking ambiguity returns status=\"needs_clarification\" with an "
             "intent_token and every ambiguity (id/question/options/required) and "
             "creates nothing. Relay the questions to the user, then call ask again "
-            "with the same question, notebooks, conversation_id and output and "
+            "with the same question, notebooks, conversation_id, output and "
+            "report_id and "
             "intent={\"intent_token\", \"answers\": [{\"id\", \"answer\"}], "
             "\"resolved_question\"?} (the token lives one hour). Otherwise the "
             "result is status answered|failed|cancelled with job_id, "
@@ -1267,7 +1334,17 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
             "it expires (or the token is revoked); other statuses return the "
             "usual shape. link_ttl_hours (link only) shortens the lifetime, never "
             "beyond the deployment cap; a retry of the same job reuses the same "
-            "link. Needs the token's answer-links switch. Requires the ask "
+            "link. Needs the token's answer-links switch. report_id (single "
+            "notebook only): attach one of your finished deep reports in that "
+            "notebook. The answer reads the report text as non-citable context "
+            "and re-reads the sources it cited as citable evidence when this "
+            "request's scope covers them; otherwise scope.linked_report says why "
+            "the report was not read (a retrieval-only response carries "
+            "linked_report at its top level). Not sticky: pass it on every call "
+            "that should use the report. A report that does not exist, is not "
+            "yours or is in another notebook is not_found; one still being "
+            "written, or report_id together with several notebooks, \"*\" or a "
+            "gconv- conversation, is invalid_argument. Requires the ask "
             "permission; private Memory takes part only with the read permission "
             "too."
         ),
@@ -1277,9 +1354,14 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
         conversation_id: str = "", mode: str = "reasoning",
         intent: dict[str, Any] | None = None, client_request_id: str = "",
         output: str = "answer", delivery: str = "inline",
-        link_ttl_hours: _RawTtl = None,
+        link_ttl_hours: _RawTtl = None, report_id: str = "",
     ) -> dict[str, Any]:
-        reply, clean = _validate_inputs(question, conversation_id, mode, intent, notebooks)
+        # The id's own spelling, as ``AskRequest.report_id`` reads it (blank is
+        # "no report"): judged by what it names, before its length is.
+        report_id = report_id.strip()
+        reply, clean = _validate_inputs(
+            question, conversation_id, mode, intent, notebooks, report_id
+        )
         plugin = _plugin_mode(mode)
         # One spelling of the key from here on: " retry" and "retry" attach to
         # one job, so they must also share one waiter slot.
@@ -1301,6 +1383,10 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
             kind, target, conversation = _route(repo, principal, clean, conversation_id)
             if kind == "global" and output == "evidence":
                 raise AgentToolError("invalid_argument", _EVIDENCE_SINGLE_NOTEBOOK)
+            if kind == "global" and report_id:
+                # A report belongs to one notebook; a cross-notebook (global)
+                # question never reads it. Refused here, before any work.
+                raise AgentToolError("invalid_argument", _REPORT_SINGLE_NOTEBOOK)
             if kind == "global":
                 if plugin:
                     raise AgentToolError(
@@ -1324,12 +1410,14 @@ def register_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) 
             if not client_request_id:
                 return _run_notebook(
                     repo, principal, notebook_id, question, mode, conversation,
-                    reply, client_request_id, stop, output=output, **deliver,
+                    reply, client_request_id, stop, output=output,
+                    report_id=report_id, **deliver,
                 )
             with _waiter_slot(principal.owner_id, "key:" + client_request_id):
                 return _run_notebook(
                     repo, principal, notebook_id, question, mode, conversation,
-                    reply, client_request_id, stop, output=output, **deliver,
+                    reply, client_request_id, stop, output=output,
+                    report_id=report_id, **deliver,
                 )
 
         try:

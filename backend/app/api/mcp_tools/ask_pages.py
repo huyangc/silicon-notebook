@@ -48,6 +48,37 @@ def _intent_summary(contract: Any) -> dict[str, Any] | None:
     }
 
 
+def linked_report_view(receipt: Any) -> dict[str, Any]:
+    """The deep-report receipt of one turn, as the Agent reads it.
+
+    ``scope.linked_report`` of an answer page and the top-level
+    ``linked_report`` of a retrieval-only response share this one shape:
+    which report was attached, whether it was read (``status``), why not
+    (``reason``, only when it was not), the section titles whose text entered
+    the prompt, and how many items the report cited were read back or are gone.
+
+    Deliberately NOT a copy of the receipt: ``memory_used`` -- the ids of the
+    owner's personal Memory the report was written from -- never leaves the
+    server on this surface (the Agent reads Memory through its own tier, not
+    through a report's footprint), and ``evidence_over_budget`` stays out of
+    the contract too. Titles are the report's own words: they are bounded by
+    the response budget like any string and a cut is counted in ``truncation``.
+    """
+    view: dict[str, Any] = {
+        "report_id": receipt.report_id,
+        "title": receipt.title,
+        "status": receipt.status,
+    }
+    if receipt.reason:
+        view["reason"] = receipt.reason
+    view["sections_read"] = [item.title for item in receipt.sections if item.read]
+    if receipt.summary_truncated:
+        view["summary_truncated"] = True
+    view["evidence_restored"] = receipt.evidence_restored
+    view["evidence_gone"] = receipt.evidence_gone
+    return view
+
+
 def answer_page(
     view: Mapping[str, Any], answer_offset: int = 0, citation_offset: int = 0,
     coverage_offset: int = 0, trace_offset: int = 0,
