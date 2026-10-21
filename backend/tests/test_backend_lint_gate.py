@@ -13,10 +13,10 @@ violation, a cell under it is stale. This module covers the holes that leaves:
    exactly (no ``ignore``, ``per-file-ignores``, ``exclude``, preview or
    extend keys), the gate's roots and exclusions are pinned, and no other ruff
    configuration sits under the roots.
-3. Line and file suppressions cannot absorb debt: a blanket line directive and
-   every file-level directive are forbidden, and line directives that name a
-   gated rule are pinned per rule in ``SUPPRESSION_CEILING`` (zero slack, may
-   only fall).
+3. Line and file suppressions cannot absorb debt: a blanket line directive,
+   every file-level directive and every ``isort:`` action comment are
+   forbidden, and line directives that name a gated rule are pinned per rule
+   in ``SUPPRESSION_CEILING`` (zero slack, may only fall).
 4. Rules in ``NEVER_BASELINED`` (``F821`` undefined name and friends) are
    never recorded: such a violation is a bug and is fixed on the spot.
 
@@ -25,15 +25,15 @@ real-tree run is the contracts lane's.
 """
 from __future__ import annotations
 
-from collections import Counter
 import importlib.util
 import io
 import json
-from pathlib import Path
 import re
 import sys
 import tokenize
 import tomllib
+from collections import Counter
+from pathlib import Path
 
 import pytest
 
@@ -61,6 +61,9 @@ BASELINE_CEILING = {
     "F403": {"count": 1, "files": 1},
     "F811": {"count": 402, "files": 38},
     "F841": {"count": 9, "files": 9},
+    # Import order (I001, one per unsorted import block). Recorded, never
+    # auto-fixed: no import was reordered when the rule was turned on.
+    "I001": {"count": 1395, "files": 1009},
 }
 
 #: Line suppressions that name a gated rule, per rule. These predate the gate
@@ -73,9 +76,11 @@ SUPPRESSION_CEILING = {
 
 EXPECTED_CONFIG = {
     "target-version": "py313",
+    "line-length": 120,
+    "src": ["backend", "scripts"],
     "lint": {
         "select": [
-            "F", "E9", "E722", "PLE",
+            "F", "E9", "E722", "PLE", "I",
             "B002", "B003", "B004", "B005", "B006", "B012", "B013", "B014", "B015",
             "B016", "B017", "B018", "B019", "B020", "B021", "B022", "B025", "B026",
             "B029", "B030", "B031", "B032", "B033", "B034", "B035", "B039",
@@ -90,7 +95,9 @@ _LINE_DIRECTIVE = re.compile(
     rf"#\s*{_NOQA}(?![A-Za-z0-9_])(?P<colon>\s*:\s*(?P<codes>[A-Z]+[0-9]+(?:[\s,]+[A-Z]+[0-9]+)*))?",
     re.IGNORECASE,
 )
-_FILE_DIRECTIVE = re.compile(r"#\s*(?:ruff|flake8)\s*:", re.IGNORECASE)
+# ruff/flake8 file-level exemptions, and every isort action comment (skip,
+# skip_file, off/on, split): each one hides or re-cuts import order.
+_FILE_DIRECTIVE = re.compile(r"#\s*(?:ruff|flake8|isort)\s*:", re.IGNORECASE)
 
 
 def gated(code: str) -> bool:
@@ -99,6 +106,7 @@ def gated(code: str) -> bool:
         re.fullmatch(r"F[0-9]+", code)
         or code.startswith(("E9", "PLE"))
         or code == "E722"
+        or re.fullmatch(r"I[0-9]+", code)
         or code in _BUGBEAR
     )
 
@@ -128,13 +136,13 @@ def _suppressions() -> tuple[Counter, Counter, list[str]]:
     for path in _python_files():
         text = path.read_text(encoding="utf-8")
         lowered = text.lower()
-        if _NOQA not in lowered and "ruff" not in lowered and "flake8" not in lowered:
+        if not any(word in lowered for word in (_NOQA, "ruff", "flake8", "isort")):
             continue
         relative = path.relative_to(ROOT).as_posix()
         seen = set()
         for comment in _comments(text):
             if _FILE_DIRECTIVE.search(comment):
-                forbidden.append(f"{relative}: file-level directive {comment!r}")
+                forbidden.append(f"{relative}: suppression directive {comment!r}")
             for match in _LINE_DIRECTIVE.finditer(comment):
                 codes = re.split(r"[\s,]+", (match.group("codes") or "").strip())
                 codes = [code.upper() for code in codes if code]
@@ -237,8 +245,17 @@ def test_baseline_problems_cover_never_baselined_bad_counts_and_unlinted_files()
         "a.py F821: this rule is never baselined; fix it",
         "b.py F401: count must be a positive integer",
         "c.py: baseline entry must be a non-empty rule map",
-        "gone.py: baseline names a file ruff does not lint",
+        "gone.py: baseline names a file ruff does not lint (deleted or renamed: run --prune)",
     ]
+    # --prune tolerates (and then drops) entries of files that are gone.
+    assert gate.baseline_problems({"gone.py": {"F401": 1}}, set(), prune=True) == []
+
+
+def test_ceiling_deltas_name_what_to_lower_after_a_prune():
+    before = {"a.py": {"I001": 2, "F401": 1}, "b.py": {"I001": 1}, "gone.py": {"F811": 3}}
+    after = gate.pruned(before, {"a.py": {"I001": 1, "F401": 1}})
+    assert after == {"a.py": {"F401": 1, "I001": 1}}
+    assert gate.ceiling_deltas(before, after) == {"F811": (3, 1), "I001": (2, 1)}
 
 
 def test_code_less_diagnostics_count_as_invalid_syntax(tmp_path):
@@ -263,6 +280,11 @@ def test_code_less_diagnostics_count_as_invalid_syntax(tmp_path):
         (f"# {_NOQA} - reason", [], True),
         ("# ruff: " + _NOQA, [], True),
         ("# flake8: " + _NOQA, [], True),
+        ("# isort: skip_file", [], True),
+        ("# isort: skip", [], True),
+        ("# isort: off", [], True),
+        ("# isort: split", [], True),
+        (f"# {_NOQA}: I001", ["I001"], False),
         (f"# {_NOQA}: B006 F811", ["B006", "F811"], False),
     ],
 )

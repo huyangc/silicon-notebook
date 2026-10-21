@@ -1,10 +1,19 @@
 # Backend lint gate (docs/development.md "Backend lint gate"). The gate runs
 # `ruff check --config ruff.toml` over backend/app, backend/tests and scripts
 # through scripts/check_backend_lint.py, against the per-file, per-rule
-# baseline in scripts/backend_lint_baseline.json. Lint rules only: there is no
-# formatter and no style rule. Every key here is pinned by
-# backend/tests/test_backend_lint_gate.py; change both together.
+# baseline in scripts/backend_lint_baseline.json. Lint rules and import order
+# only: there is no formatter and no other style rule. Every key here is pinned
+# by backend/tests/test_backend_lint_gate.py; change both together.
 target-version = "py313"
+# Read only by the import sorter (no line-length rule is selected): 99% of the
+# single-line imports already fit in 88 columns, but the 133 that do not would
+# each be reported for wrapping at 88; 120 leaves 4.
+line-length = 120
+# First-party detection for the sorter: `app` and `tests` live under backend/,
+# and scripts import their siblings (`import diag_common`). The repository root
+# is left out on purpose, or the third-party `packaging` library would be
+# taken for the repository's packaging/ directory.
+src = ["backend", "scripts"]
 
 [lint]
 select = [
@@ -12,6 +21,7 @@ select = [
     "E9",    # file the parser cannot read
     "E722",  # bare except
     "PLE",   # pylint errors
+    "I",     # import order (isort's default profile)
     # flake8-bugbear, the subset that flags likely bugs rather than style.
     "B002", "B003", "B004", "B005", "B006", "B012", "B013", "B014", "B015",
     "B016", "B017", "B018", "B019", "B020", "B021", "B022", "B025", "B026",

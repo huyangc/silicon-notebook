@@ -1,295 +1,2130 @@
 {
+  "backend/app/api/admin_routes.py": {
+    "I001": 1
+  },
+  "backend/app/api/agent_mcp_onboarding.py": {
+    "I001": 1
+  },
+  "backend/app/api/agent_profile_routes.py": {
+    "I001": 1
+  },
+  "backend/app/api/ask_routes.py": {
+    "I001": 1
+  },
+  "backend/app/api/catalog_routes.py": {
+    "I001": 1
+  },
+  "backend/app/api/content_overview_routes.py": {
+    "I001": 1
+  },
+  "backend/app/api/deps.py": {
+    "I001": 2
+  },
   "backend/app/api/extension_routes.py": {
-    "B004": 1
+    "B004": 1,
+    "I001": 1
+  },
+  "backend/app/api/global_ask_routes.py": {
+    "I001": 1
+  },
+  "backend/app/api/group_routes.py": {
+    "I001": 1
+  },
+  "backend/app/api/kg_routes.py": {
+    "I001": 1
+  },
+  "backend/app/api/knowhow_routes.py": {
+    "I001": 1
   },
   "backend/app/api/knowledge_routes.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
   },
   "backend/app/api/mcp_server.py": {
-    "F401": 10
+    "F401": 10,
+    "I001": 1
+  },
+  "backend/app/api/mcp_tool_host.py": {
+    "I001": 1
+  },
+  "backend/app/api/mcp_tools/_shared.py": {
+    "I001": 1
+  },
+  "backend/app/api/mcp_tools/ask.py": {
+    "I001": 1
+  },
+  "backend/app/api/mcp_tools/citations.py": {
+    "I001": 1
+  },
+  "backend/app/api/mcp_tools/global_ask.py": {
+    "I001": 2
+  },
+  "backend/app/api/mcp_tools/maintenance.py": {
+    "I001": 1
+  },
+  "backend/app/api/mcp_tools/refs.py": {
+    "I001": 1
+  },
+  "backend/app/api/mcp_tools/sources.py": {
+    "I001": 1
+  },
+  "backend/app/api/memory_routes.py": {
+    "I001": 1
+  },
+  "backend/app/api/notebook_routes.py": {
+    "I001": 1
+  },
+  "backend/app/api/report_routes.py": {
+    "I001": 1
+  },
+  "backend/app/api/routes.py": {
+    "I001": 1
+  },
+  "backend/app/api/source_routes.py": {
+    "I001": 1
   },
   "backend/app/api/system_routes.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/app/api/wish_routes.py": {
+    "I001": 1
+  },
+  "backend/app/application/report_pipeline.py": {
+    "I001": 1
+  },
+  "backend/app/bootstrap.py": {
+    "I001": 1
+  },
+  "backend/app/core/activity_time.py": {
+    "I001": 1
+  },
+  "backend/app/core/ask_context.py": {
+    "I001": 1
+  },
+  "backend/app/core/ask_retrieval_policy.py": {
+    "I001": 1
+  },
+  "backend/app/core/cache/__init__.py": {
+    "I001": 1
   },
   "backend/app/core/diagnostics_runtime.py": {
-    "B039": 1
+    "B039": 1,
+    "I001": 1
+  },
+  "backend/app/core/extension_admission.py": {
+    "I001": 1
+  },
+  "backend/app/core/internal_observability.py": {
+    "I001": 1
   },
   "backend/app/core/llm.py": {
-    "F401": 2
+    "F401": 2,
+    "I001": 1
+  },
+  "backend/app/core/llm_logging.py": {
+    "I001": 1
+  },
+  "backend/app/core/memory_inputs.py": {
+    "I001": 1
+  },
+  "backend/app/core/model_json.py": {
+    "I001": 1
+  },
+  "backend/app/core/model_safety.py": {
+    "I001": 1
+  },
+  "backend/app/core/model_schema.py": {
+    "I001": 1
+  },
+  "backend/app/core/query_syntax.py": {
+    "I001": 1
   },
   "backend/app/core/request_context.py": {
     "F401": 2
   },
+  "backend/app/domain/ask_engine.py": {
+    "I001": 1
+  },
+  "backend/app/domain/auth_provider.py": {
+    "I001": 1
+  },
+  "backend/app/domain/cancellation.py": {
+    "I001": 1
+  },
+  "backend/app/domain/element_enrichment.py": {
+    "I001": 1
+  },
+  "backend/app/domain/extension_http.py": {
+    "I001": 1
+  },
+  "backend/app/domain/extensions.py": {
+    "I001": 1
+  },
+  "backend/app/domain/gap_consult.py": {
+    "I001": 1
+  },
+  "backend/app/domain/indexing_pipeline.py": {
+    "I001": 1
+  },
+  "backend/app/domain/kg/edge_schema.py": {
+    "I001": 1
+  },
+  "backend/app/domain/kg/parsing.py": {
+    "I001": 1
+  },
+  "backend/app/domain/kg/ppr_pairs.py": {
+    "I001": 2
+  },
+  "backend/app/domain/kg_analysis_contracts.py": {
+    "I001": 1
+  },
+  "backend/app/domain/kg_merge_seed.py": {
+    "I001": 1
+  },
+  "backend/app/domain/model_artifacts.py": {
+    "I001": 1
+  },
+  "backend/app/domain/reflect_action.py": {
+    "I001": 1
+  },
+  "backend/app/domain/report_export.py": {
+    "I001": 1
+  },
+  "backend/app/domain/report_failure_note.py": {
+    "I001": 1
+  },
+  "backend/app/domain/retrieval.py": {
+    "I001": 1
+  },
+  "backend/app/domain/retrieval_experience.py": {
+    "I001": 1
+  },
+  "backend/app/domain/search_profile.py": {
+    "I001": 2
+  },
+  "backend/app/domain/source_positions.py": {
+    "I001": 1
+  },
+  "backend/app/eval/db.py": {
+    "I001": 1
+  },
+  "backend/app/eval/inference.py": {
+    "I001": 1
+  },
+  "backend/app/eval/memory_agent_ab.py": {
+    "I001": 1
+  },
+  "backend/app/eval/probes.py": {
+    "I001": 1
+  },
+  "backend/app/eval/report.py": {
+    "I001": 1
+  },
+  "backend/app/eval/retrieval_metrics.py": {
+    "I001": 1
+  },
+  "backend/app/eval/run_all.py": {
+    "I001": 3
+  },
+  "backend/app/eval/sa_calibration.py": {
+    "I001": 3
+  },
+  "backend/app/eval/selected_source_graph.py": {
+    "I001": 1
+  },
+  "backend/app/eval/speed.py": {
+    "I001": 2
+  },
   "backend/app/extension_sdk/__init__.py": {
-    "F401": 2
+    "F401": 2,
+    "I001": 1
+  },
+  "backend/app/extension_sdk/ask.py": {
+    "I001": 1
+  },
+  "backend/app/extension_sdk/auth.py": {
+    "I001": 1
   },
   "backend/app/extension_sdk/contracts.py": {
-    "F401": 3
+    "F401": 3,
+    "I001": 1
+  },
+  "backend/app/extension_sdk/element_enrichment.py": {
+    "I001": 1
+  },
+  "backend/app/extension_sdk/gap_consult.py": {
+    "I001": 1
+  },
+  "backend/app/extension_sdk/http.py": {
+    "I001": 1
+  },
+  "backend/app/extension_sdk/indexing.py": {
+    "I001": 1
+  },
+  "backend/app/extension_sdk/parser.py": {
+    "I001": 1
+  },
+  "backend/app/extension_sdk/reflect_action.py": {
+    "I001": 1
+  },
+  "backend/app/extension_sdk/report.py": {
+    "I001": 1
+  },
+  "backend/app/extension_sdk/report_export.py": {
+    "I001": 1
   },
   "backend/app/extension_sdk/retrieval.py": {
-    "F401": 3
+    "F401": 3,
+    "I001": 1
+  },
+  "backend/app/extension_sdk/ui.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/__init__.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/ask.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/ask_engine.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/auth.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/bootstrap.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/builtin/__init__.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/builtin/ask_completion.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/builtin/generated_question.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/builtin/parser.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/builtin/report_completion.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/builtin/report_export.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/builtin/selected_source_graph.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/capabilities.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/discovery.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/element_enrichment.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/gap_consult.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/host_admission.py": {
+    "I001": 1
   },
   "backend/app/extensions/indexing.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
   },
   "backend/app/extensions/parser_chain.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/app/extensions/reflect_action.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/registry.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/report.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/report_export.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/retrieval.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/service_config.py": {
+    "I001": 1
+  },
+  "backend/app/extensions/ui_projection.py": {
+    "I001": 1
+  },
+  "backend/app/main.py": {
+    "I001": 2
+  },
+  "backend/app/migration/database_activation.py": {
+    "I001": 1
+  },
+  "backend/app/migration/shadow/bulk_copy.py": {
+    "I001": 1
+  },
+  "backend/app/migration/shadow/capture.py": {
+    "I001": 1
+  },
+  "backend/app/migration/shadow/cli.py": {
+    "I001": 1
+  },
+  "backend/app/migration/shadow/control.py": {
+    "I001": 1
+  },
+  "backend/app/migration/shadow/identity.py": {
+    "I001": 1
+  },
+  "backend/app/migration/shadow/manifest.py": {
+    "I001": 1
+  },
+  "backend/app/migration/shadow/postgres_catalog.py": {
+    "I001": 1
+  },
+  "backend/app/migration/shadow/replicator.py": {
+    "I001": 1
+  },
+  "backend/app/migration/shadow/retention.py": {
+    "I001": 1
+  },
+  "backend/app/migration/shadow/transform.py": {
+    "I001": 1
+  },
+  "backend/app/migration/shadow/verifier.py": {
+    "I001": 1
+  },
+  "backend/app/migration/sqlite_to_postgres.py": {
+    "I001": 1
+  },
+  "backend/app/migration/sync/capture.py": {
+    "I001": 1
+  },
+  "backend/app/migration/sync/capture_contract.py": {
+    "I001": 1
+  },
+  "backend/app/migration/sync/cli.py": {
+    "I001": 1
+  },
+  "backend/app/migration/sync/export.py": {
+    "I001": 1
+  },
+  "backend/app/migration/sync/import_.py": {
+    "I001": 1
+  },
+  "backend/app/migration/sync/incremental.py": {
+    "I001": 1
+  },
+  "backend/app/models/admin.py": {
+    "I001": 1
+  },
+  "backend/app/models/ask.py": {
+    "I001": 1
   },
   "backend/app/models/common.py": {
     "F401": 2
   },
+  "backend/app/models/global_ask.py": {
+    "I001": 1
+  },
+  "backend/app/models/groups.py": {
+    "I001": 1
+  },
+  "backend/app/models/knowhow.py": {
+    "I001": 1
+  },
+  "backend/app/models/schemas.py": {
+    "I001": 1
+  },
+  "backend/app/models/sources.py": {
+    "I001": 1
+  },
+  "backend/app/models/wishes.py": {
+    "I001": 1
+  },
   "backend/app/repositories/__init__.py": {
     "F403": 1
   },
+  "backend/app/repositories/analysis_artifacts.py": {
+    "I001": 2
+  },
+  "backend/app/repositories/auth_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/bundle.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/factory.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/global_ask_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/group_rows.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/knowhow_asset_refs.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/like_pattern.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/ownership_manifest.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/pending_action_rows.py": {
+    "I001": 1
+  },
   "backend/app/repositories/ports.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 2
+  },
+  "backend/app/repositories/postgres/_store_utils.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/agent_observation_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/agent_profile_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/ask_state_store.py": {
+    "I001": 2
+  },
+  "backend/app/repositories/postgres/bundle.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/catalog_store.py": {
+    "I001": 1
   },
   "backend/app/repositories/postgres/chunk_store.py": {
-    "F401": 2
+    "F401": 2,
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/cluster_lock.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/embedding_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/extension_toggle_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/governance_store.py": {
+    "I001": 2
+  },
+  "backend/app/repositories/postgres/group_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/hotpath_indexes.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/id_binding.py": {
+    "I001": 1
   },
   "backend/app/repositories/postgres/identity_store.py": {
-    "F401": 6
+    "F401": 6,
+    "I001": 1
   },
   "backend/app/repositories/postgres/index_projection_store.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 2
+  },
+  "backend/app/repositories/postgres/kg_build_job_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/knowhow_history_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/knowhow_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/knowledge_counts_cache.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/knowledge_store.py": {
+    "I001": 2
+  },
+  "backend/app/repositories/postgres/maintenance.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/memory_isolation_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/memory_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/migrator.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/notebook_delete_job_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/notebook_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/query_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/report_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/repository.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/retrieval_indexes.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/rows.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/search.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/sharing_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/source_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/unified_kg_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/postgres/wish_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/read_budget.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/source_fact_backfill.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/agent_profile_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/anchor_normalization.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/ask_state_store.py": {
+    "I001": 2
+  },
+  "backend/app/repositories/sqlite/bundle.py": {
+    "I001": 1
   },
   "backend/app/repositories/sqlite/chunk_store.py": {
-    "F401": 2
+    "F401": 2,
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/database.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/embedding_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/governance_store.py": {
+    "I001": 2
+  },
+  "backend/app/repositories/sqlite/group_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/id_binding.py": {
+    "I001": 1
   },
   "backend/app/repositories/sqlite/identity_store.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
   },
   "backend/app/repositories/sqlite/index_projection_store.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 2
+  },
+  "backend/app/repositories/sqlite/kg_build_job_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/knowhow_fingerprint.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/knowhow_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/knowledge_counts_cache.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/knowledge_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/maintenance.py": {
+    "I001": 2
+  },
+  "backend/app/repositories/sqlite/memory_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/migrations.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/notebook_delete_job_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/notebook_store.py": {
+    "I001": 1
   },
   "backend/app/repositories/sqlite/query_store.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/report_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/sharing_store.py": {
+    "I001": 1
   },
   "backend/app/repositories/sqlite/source_store.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/unified_kg_store.py": {
+    "I001": 1
+  },
+  "backend/app/repositories/sqlite/wish_store.py": {
+    "I001": 1
+  },
+  "backend/app/scripts/backfill_relation_embeddings.py": {
+    "I001": 1
+  },
+  "backend/app/scripts/build_kg.py": {
+    "I001": 1
+  },
+  "backend/app/scripts/gen_recall_gold.py": {
+    "I001": 1
+  },
+  "backend/app/scripts/recluster_kg.py": {
+    "I001": 1
+  },
+  "backend/app/scripts/reembed_kg.py": {
+    "I001": 1
+  },
+  "backend/app/services/agent_profile_job.py": {
+    "I001": 1
+  },
+  "backend/app/services/ask_evidence.py": {
+    "I001": 1
+  },
+  "backend/app/services/ask_execution.py": {
+    "I001": 1
+  },
+  "backend/app/services/ask_service.py": {
+    "I001": 11
+  },
+  "backend/app/services/batch_ingest.py": {
+    "I001": 2
+  },
+  "backend/app/services/catalog_job.py": {
+    "I001": 1
+  },
+  "backend/app/services/chunk_federation.py": {
+    "I001": 3
+  },
+  "backend/app/services/chunk_question_index.py": {
+    "I001": 1
+  },
+  "backend/app/services/chunking.py": {
+    "I001": 1
+  },
+  "backend/app/services/citation_markers.py": {
+    "I001": 1
+  },
+  "backend/app/services/collection_catalog.py": {
+    "I001": 1
+  },
+  "backend/app/services/collection_enumeration.py": {
+    "I001": 1
+  },
+  "backend/app/services/collection_enumeration_answer.py": {
+    "I001": 1
+  },
+  "backend/app/services/command_catalog.py": {
+    "I001": 1
+  },
+  "backend/app/services/communities.py": {
+    "I001": 1
+  },
+  "backend/app/services/concept_merge_review.py": {
+    "I001": 1
+  },
+  "backend/app/services/content_overview.py": {
+    "I001": 1
+  },
+  "backend/app/services/conversation_public_view.py": {
+    "I001": 1
+  },
+  "backend/app/services/document_catalog_overview.py": {
+    "I001": 1
+  },
+  "backend/app/services/document_guide.py": {
+    "I001": 1
+  },
+  "backend/app/services/document_read_answer.py": {
+    "I001": 1
+  },
+  "backend/app/services/document_source_overview.py": {
+    "I001": 1
+  },
+  "backend/app/services/embedding_dashscope.py": {
+    "I001": 1
+  },
+  "backend/app/services/evidence_attestation.py": {
+    "I001": 1
   },
   "backend/app/services/evidence_context.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/app/services/federated_run.py": {
+    "I001": 1
+  },
+  "backend/app/services/generated_question_contribution.py": {
+    "I001": 1
+  },
+  "backend/app/services/global_ask.py": {
+    "I001": 1
+  },
+  "backend/app/services/global_citation_check.py": {
+    "I001": 1
   },
   "backend/app/services/graph_retrieval.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 8
+  },
+  "backend/app/services/indexing_pipeline.py": {
+    "I001": 1
+  },
+  "backend/app/services/kg/canonicalize.py": {
+    "I001": 1
   },
   "backend/app/services/kg/client.py": {
     "F401": 1
   },
+  "backend/app/services/kg/conflict_detect.py": {
+    "I001": 1
+  },
+  "backend/app/services/kg/emit.py": {
+    "I001": 1
+  },
+  "backend/app/services/kg/extract.py": {
+    "I001": 1
+  },
+  "backend/app/services/kg/follow_chain.py": {
+    "I001": 1
+  },
+  "backend/app/services/kg/graph_reason.py": {
+    "I001": 2
+  },
+  "backend/app/services/kg/mention_scan.py": {
+    "I001": 1
+  },
+  "backend/app/services/kg/models.py": {
+    "I001": 1
+  },
+  "backend/app/services/kg/ppr.py": {
+    "I001": 1
+  },
+  "backend/app/services/kg/relation_completion.py": {
+    "I001": 1
+  },
+  "backend/app/services/kg/run_control.py": {
+    "I001": 1
+  },
   "backend/app/services/kg/scale_index.py": {
     "F401": 1
   },
+  "backend/app/services/kg/search.py": {
+    "I001": 1
+  },
+  "backend/app/services/kg/source_partition_index.py": {
+    "I001": 1
+  },
+  "backend/app/services/kg/viz_index.py": {
+    "I001": 1
+  },
+  "backend/app/services/kg/windowing.py": {
+    "I001": 1
+  },
   "backend/app/services/kg_analysis_precompute.py": {
-    "F401": 10
+    "F401": 10,
+    "I001": 1
+  },
+  "backend/app/services/kg_eval/match.py": {
+    "I001": 1
+  },
+  "backend/app/services/kg_eval/score.py": {
+    "I001": 1
+  },
+  "backend/app/services/kg_ingest.py": {
+    "I001": 1
   },
   "backend/app/services/kg_merge.py": {
-    "F401": 9
+    "F401": 9,
+    "I001": 2
+  },
+  "backend/app/services/knowhow/api.py": {
+    "I001": 1
+  },
+  "backend/app/services/knowhow/audit.py": {
+    "I001": 1
+  },
+  "backend/app/services/knowhow/md_normalize.py": {
+    "I001": 1
   },
   "backend/app/services/knowhow/projection.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/app/services/knowhow/transfer.py": {
+    "I001": 1
+  },
+  "backend/app/services/knowledge_contracts.py": {
+    "I001": 1
+  },
+  "backend/app/services/knowledge_governance.py": {
+    "I001": 3
   },
   "backend/app/services/knowledge_lifecycle.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 11
+  },
+  "backend/app/services/knowledge_query.py": {
+    "I001": 1
+  },
+  "backend/app/services/maintenance_cli.py": {
+    "I001": 1
+  },
+  "backend/app/services/memory_retrieval.py": {
+    "I001": 1
+  },
+  "backend/app/services/memory_service.py": {
+    "I001": 1
+  },
+  "backend/app/services/mineru_http_retry.py": {
+    "I001": 1
+  },
+  "backend/app/services/mmr.py": {
+    "I001": 1
+  },
+  "backend/app/services/model_circuit_breaker.py": {
+    "I001": 1
   },
   "backend/app/services/model_provider.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/app/services/model_registry.py": {
+    "I001": 1
+  },
+  "backend/app/services/model_scheduler.py": {
+    "I001": 1
+  },
+  "backend/app/services/model_status.py": {
+    "I001": 1
+  },
+  "backend/app/services/notebook_catalog.py": {
+    "I001": 1
   },
   "backend/app/services/notebook_delete.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/app/services/notebook_metadata.py": {
+    "I001": 1
+  },
+  "backend/app/services/notebook_question_suggestions.py": {
+    "I001": 1
   },
   "backend/app/services/notebook_sharing.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/app/services/outline_synthesis.py": {
+    "I001": 1
   },
   "backend/app/services/parser_chain_execution.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/app/services/parser_registry.py": {
+    "I001": 1
+  },
+  "backend/app/services/parsers.py": {
+    "I001": 1
+  },
+  "backend/app/services/plugin_ask_engine.py": {
+    "I001": 1
+  },
+  "backend/app/services/prompts.py": {
+    "I001": 1
+  },
+  "backend/app/services/query_intent.py": {
+    "I001": 1
+  },
+  "backend/app/services/query_rewrite.py": {
+    "I001": 2
+  },
+  "backend/app/services/reasoning_retrieval.py": {
+    "I001": 2
+  },
+  "backend/app/services/remote_sources.py": {
+    "I001": 1
+  },
+  "backend/app/services/report_engine.py": {
+    "I001": 8
+  },
+  "backend/app/services/report_execution.py": {
+    "I001": 1
+  },
+  "backend/app/services/report_export.py": {
+    "I001": 1
+  },
+  "backend/app/services/report_public_view.py": {
+    "I001": 1
+  },
+  "backend/app/services/report_synthesis.py": {
+    "I001": 1
+  },
+  "backend/app/services/reports/intent_confirmation.py": {
+    "I001": 1
+  },
+  "backend/app/services/reports/observability.py": {
+    "I001": 1
+  },
+  "backend/app/services/reports/policy.py": {
+    "I001": 1
+  },
+  "backend/app/services/reports/section_failure.py": {
+    "I001": 1
+  },
+  "backend/app/services/repository.py": {
+    "I001": 1
   },
   "backend/app/services/repository_facade.py": {
-    "F401": 36
+    "F401": 36,
+    "I001": 3
+  },
+  "backend/app/services/repository_runtime.py": {
+    "I001": 2
+  },
+  "backend/app/services/rerank_client.py": {
+    "I001": 1
   },
   "backend/app/services/retrieval.py": {
-    "F401": 3
+    "F401": 3,
+    "I001": 1
+  },
+  "backend/app/services/retrieval_baseline.py": {
+    "I001": 1
   },
   "backend/app/services/retrieval_candidates.py": {
-    "F401": 4
+    "F401": 4,
+    "I001": 14
+  },
+  "backend/app/services/retrieval_enrichment.py": {
+    "I001": 1
+  },
+  "backend/app/services/retrieval_participants.py": {
+    "I001": 1
+  },
+  "backend/app/services/retrieval_run.py": {
+    "I001": 1
+  },
+  "backend/app/services/retrieval_service.py": {
+    "I001": 2
+  },
+  "backend/app/services/scale_artifact_runtime.py": {
+    "I001": 1
+  },
+  "backend/app/services/scale_build_cli.py": {
+    "I001": 1
+  },
+  "backend/app/services/schema_registry.py": {
+    "I001": 1
   },
   "backend/app/services/search_profile.py": {
-    "F401": 12
+    "F401": 12,
+    "I001": 1
+  },
+  "backend/app/services/share_disclosure.py": {
+    "I001": 1
+  },
+  "backend/app/services/source_chunking.py": {
+    "I001": 1
+  },
+  "backend/app/services/source_element_enrichment.py": {
+    "I001": 1
+  },
+  "backend/app/services/source_element_selection.py": {
+    "I001": 1
+  },
+  "backend/app/services/source_embedding.py": {
+    "I001": 1
+  },
+  "backend/app/services/source_graph_activation.py": {
+    "I001": 1
   },
   "backend/app/services/source_ingestion.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/app/services/source_scope.py": {
+    "I001": 1
+  },
+  "backend/app/services/source_subgraph.py": {
+    "I001": 1
+  },
+  "backend/app/services/spreadsheet_analysis.py": {
+    "I001": 1
   },
   "backend/app/services/sqlite_identity.py": {
-    "F401": 8
+    "F401": 8,
+    "I001": 1
   },
   "backend/app/services/sqlite_repository.py": {
-    "F401": 20
+    "F401": 20,
+    "I001": 1
+  },
+  "backend/app/services/structured_retrieval.py": {
+    "I001": 1
+  },
+  "backend/tests/activity_parity_cases.py": {
+    "I001": 1
+  },
+  "backend/tests/architecture/facade_contract.py": {
+    "I001": 1
+  },
+  "backend/tests/architecture/policy.py": {
+    "I001": 1
+  },
+  "backend/tests/architecture/repository_callers.py": {
+    "I001": 1
+  },
+  "backend/tests/architecture/repository_contract.py": {
+    "I001": 1
+  },
+  "backend/tests/auth_store_contract.py": {
+    "I001": 1
+  },
+  "backend/tests/conftest.py": {
+    "I001": 2
+  },
+  "backend/tests/conversation_share_disclosure_cases.py": {
+    "I001": 1
   },
   "backend/tests/eval/test_ask_latency.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
   },
   "backend/tests/eval/test_db.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/tests/eval/test_inference.py": {
+    "I001": 1
+  },
+  "backend/tests/eval/test_mrl_truncation.py": {
+    "I001": 1
+  },
+  "backend/tests/eval/test_probes.py": {
+    "I001": 1
+  },
+  "backend/tests/eval/test_report.py": {
+    "I001": 1
+  },
+  "backend/tests/eval/test_retrieval_metrics.py": {
+    "I001": 1
+  },
+  "backend/tests/eval/test_selected_source_graph.py": {
+    "I001": 1
+  },
+  "backend/tests/eval/test_speed.py": {
+    "I001": 1
+  },
+  "backend/tests/global_citation_e2e_kit.py": {
+    "I001": 1
+  },
+  "backend/tests/kg/test_build_records_steps.py": {
+    "I001": 1
+  },
+  "backend/tests/kg/test_canonicalize.py": {
+    "I001": 2
+  },
+  "backend/tests/kg/test_eval.py": {
+    "I001": 1
+  },
+  "backend/tests/kg/test_extract.py": {
+    "I001": 2
   },
   "backend/tests/kg/test_extract_prompt_connectivity.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/tests/kg/test_filters.py": {
+    "I001": 1
+  },
+  "backend/tests/kg/test_gleaning.py": {
+    "I001": 1
+  },
+  "backend/tests/kg/test_mention_scan.py": {
+    "I001": 1
+  },
+  "backend/tests/kg/test_meta_claim_drop.py": {
+    "I001": 1
+  },
+  "backend/tests/kg/test_models.py": {
+    "I001": 2
+  },
+  "backend/tests/kg/test_refine.py": {
+    "I001": 1
+  },
+  "backend/tests/kg/test_relink.py": {
+    "I001": 1
+  },
+  "backend/tests/kg/test_sa_calibration_metrics.py": {
+    "I001": 1
   },
   "backend/tests/kg/test_sa_extraction.py": {
-    "F811": 1
+    "F811": 1,
+    "I001": 3
+  },
+  "backend/tests/kg/test_windowing.py": {
+    "I001": 1
+  },
+  "backend/tests/kg_attestation_testkit.py": {
+    "I001": 1
+  },
+  "backend/tests/mcp_answer_link_cases.py": {
+    "I001": 1
+  },
+  "backend/tests/memory_artifact_fixture.py": {
+    "I001": 1
+  },
+  "backend/tests/memory_purge_cases.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/conftest.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/lane.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/targets.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_admin_grant_chain_lock.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_agent_profile_store_conformance.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_ask_state_conversation_user_history_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_ask_state_idempotency_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_auth_store.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_batch_ingest_cli.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_batch_maintenance.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_catalog_store_conformance.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_checkup_h45_cache.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_cluster_generation_explain_pins.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_collection_enumeration_source_ceiling_pg.py": {
+    "I001": 2
+  },
+  "backend/tests/postgres/test_concurrency.py": {
+    "I001": 1
   },
   "backend/tests/postgres/test_content_store_conformance.py": {
-    "B017": 2
+    "B017": 2,
+    "I001": 3
+  },
+  "backend/tests/postgres/test_conversation_share_store.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_copy_memory_exclusion_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_core_store_conformance.py": {
+    "I001": 2
   },
   "backend/tests/postgres/test_database.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/tests/postgres/test_default_ceiling_entrypoints_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_default_ceiling_probe_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_default_source_ceiling_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_exact_lookup_ceiling_store_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_global_ask_empty_scope_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_global_ask_feedback_counts_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_global_ask_replace_store.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_global_ask_retention_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_global_ask_share_store.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_global_ask_store.py": {
+    "I001": 2
+  },
+  "backend/tests/postgres/test_global_citation_check_surfaces.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_global_citation_race_pg.py": {
+    "I001": 3
+  },
+  "backend/tests/postgres/test_graph_rows_paging_oracle.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_hotpath_indexes_batch2_live.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_hotpath_indexes_batch3_live.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_hotpath_indexes_batch4_live.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_hotpath_indexes_live.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_image_backfill_store.py": {
+    "I001": 1
   },
   "backend/tests/postgres/test_index_projection_memory_pg.py": {
-    "F841": 1
+    "F841": 1,
+    "I001": 1
+  },
+  "backend/tests/postgres/test_kg_attestation_races_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_kg_findings_store_pg.py": {
+    "I001": 1
   },
   "backend/tests/postgres/test_kg_service_readers_pg.py": {
-    "F811": 21
+    "F811": 21,
+    "I001": 1
   },
   "backend/tests/postgres/test_kg_viewer_scope_identities_pg.py": {
-    "F811": 19
+    "F811": 19,
+    "I001": 1
+  },
+  "backend/tests/postgres/test_kg_viewer_scope_pg.py": {
+    "I001": 1
   },
   "backend/tests/postgres/test_kg_viewer_scope_twins_pg.py": {
-    "F811": 3
+    "F811": 3,
+    "I001": 1
+  },
+  "backend/tests/postgres/test_knowledge_counts_cache.py": {
+    "I001": 1
   },
   "backend/tests/postgres/test_knowledge_store_conformance.py": {
-    "B017": 1
+    "B017": 1,
+    "I001": 2
+  },
+  "backend/tests/postgres/test_legacy_leftover_sweep_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_mcp_memory_channel_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_memory_chunk_guard_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_memory_chunk_write_refusals_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_memory_kg_store_readers_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_memory_purge_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_memory_sql_contract_pg.py": {
+    "I001": 1
   },
   "backend/tests/postgres/test_migrations.py": {
-    "B017": 1
+    "B017": 1,
+    "I001": 1
   },
   "backend/tests/postgres/test_mount_sql_viewer_pg.py": {
     "F402": 2
   },
+  "backend/tests/postgres/test_mount_viewer_e2e_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_node_context_hub_bound_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_notebook_ask_availability_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_notebook_delete_jobization_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_notebook_delete_rows_and_files_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_notebook_lifecycle_visibility_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_notebook_list_prefetch_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_offline_contract.py": {
+    "I001": 1
+  },
   "backend/tests/postgres/test_pending_merge_names_pg.py": {
     "F811": 3
   },
+  "backend/tests/postgres/test_postgres_schema.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_producer_attestation_races_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_promotion_provenance_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_query_store_activity_conformance.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_query_store_usage_conformance.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_report_default_ceiling_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_report_share_disclosure_pg.py": {
+    "I001": 1
+  },
   "backend/tests/postgres/test_repository_conformance.py": {
-    "B017": 2
+    "B017": 2,
+    "I001": 2
+  },
+  "backend/tests/postgres/test_scale_build_cli.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_search_conformance.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_source_elements_positions_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_spreadsheet_federation_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_sync_capture_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_sync_cli_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_sync_export_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_sync_import_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_sync_incremental_import_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_sync_incremental_pg.py": {
+    "I001": 2
+  },
+  "backend/tests/postgres/test_user_references_pg.py": {
+    "I001": 1
+  },
+  "backend/tests/postgres/test_wish_store_conformance.py": {
+    "I001": 1
+  },
+  "backend/tests/public_page_mount_recheck_cases.py": {
+    "I001": 1
+  },
+  "backend/tests/report_share_disclosure_cases.py": {
+    "I001": 1
+  },
+  "backend/tests/speedups/app_routes.py": {
+    "I001": 1
+  },
+  "backend/tests/sqlite_migration_testkit.py": {
+    "I001": 1
+  },
+  "backend/tests/test_access_sql_contract.py": {
+    "I001": 1
+  },
+  "backend/tests/test_adaptive_windows.py": {
+    "I001": 1
   },
   "backend/tests/test_admin_extensions_routes.py": {
     "F811": 14
   },
+  "backend/tests/test_admin_seed.py": {
+    "I001": 1
+  },
+  "backend/tests/test_admin_user_activity.py": {
+    "I001": 1
+  },
+  "backend/tests/test_admin_user_activity_api.py": {
+    "I001": 1
+  },
+  "backend/tests/test_admin_user_notebooks.py": {
+    "I001": 1
+  },
   "backend/tests/test_agent_observation_store.py": {
     "F401": 1
   },
+  "backend/tests/test_agent_profile_api.py": {
+    "I001": 1
+  },
+  "backend/tests/test_agent_profile_injection.py": {
+    "I001": 1
+  },
+  "backend/tests/test_agent_profile_isolation_guard.py": {
+    "I001": 1
+  },
+  "backend/tests/test_agent_profile_job_base.py": {
+    "I001": 1
+  },
+  "backend/tests/test_agent_profile_job_observations.py": {
+    "I001": 1
+  },
+  "backend/tests/test_agent_profile_job_overlay.py": {
+    "I001": 1
+  },
+  "backend/tests/test_agent_profile_report_injection.py": {
+    "I001": 1
+  },
+  "backend/tests/test_agent_profile_routes.py": {
+    "I001": 1
+  },
+  "backend/tests/test_agent_profile_transaction_guard.py": {
+    "I001": 1
+  },
+  "backend/tests/test_agent_tokens.py": {
+    "I001": 1
+  },
+  "backend/tests/test_answer_context_budget.py": {
+    "I001": 1
+  },
+  "backend/tests/test_answer_quality_contract.py": {
+    "I001": 1
+  },
+  "backend/tests/test_app_route_templates.py": {
+    "I001": 1
+  },
+  "backend/tests/test_apply_conflict_resolution.py": {
+    "I001": 1
+  },
+  "backend/tests/test_architecture_documentation.py": {
+    "I001": 1
+  },
+  "backend/tests/test_architecture_hardening.py": {
+    "I001": 1
+  },
+  "backend/tests/test_arxiv_sample_plugin.py": {
+    "I001": 2
+  },
   "backend/tests/test_arxiv_sample_plugin_e2e.py": {
-    "F811": 9
+    "F811": 9,
+    "I001": 1
+  },
+  "backend/tests/test_ask_embed_cache.py": {
+    "I001": 1
+  },
+  "backend/tests/test_ask_engine_plugin.py": {
+    "I001": 1
+  },
+  "backend/tests/test_ask_evidence_service.py": {
+    "I001": 1
+  },
+  "backend/tests/test_ask_execution_coordinator.py": {
+    "I001": 1
+  },
+  "backend/tests/test_ask_followup_resolution.py": {
+    "I001": 1
+  },
+  "backend/tests/test_ask_jobs.py": {
+    "I001": 3
+  },
+  "backend/tests/test_ask_mode_persist.py": {
+    "I001": 1
   },
   "backend/tests/test_ask_modes.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 2
+  },
+  "backend/tests/test_ask_modes_api.py": {
+    "I001": 4
   },
   "backend/tests/test_ask_post_completion_extensions.py": {
-    "F401": 3
+    "F401": 3,
+    "I001": 1
+  },
+  "backend/tests/test_ask_reconnect.py": {
+    "I001": 2
+  },
+  "backend/tests/test_ask_redesign.py": {
+    "I001": 1
   },
   "backend/tests/test_ask_repository_golden.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/tests/test_ask_service_boundary.py": {
+    "I001": 1
+  },
+  "backend/tests/test_ask_stream_blocking_io_guard.py": {
+    "I001": 1
+  },
+  "backend/tests/test_ask_vector_matrix.py": {
+    "I001": 1
+  },
+  "backend/tests/test_audit_source_facts.py": {
+    "I001": 1
   },
   "backend/tests/test_auth_config.py": {
     "F401": 1
   },
+  "backend/tests/test_auth_provider_host.py": {
+    "I001": 1
+  },
+  "backend/tests/test_auth_utils.py": {
+    "I001": 1
+  },
+  "backend/tests/test_auto_scale_index.py": {
+    "I001": 1
+  },
   "backend/tests/test_autotune_config.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
   },
   "backend/tests/test_autotune_kg_merge.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
   },
   "backend/tests/test_autotune_startup_log.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/tests/test_autotune_wiring.py": {
+    "I001": 1
+  },
+  "backend/tests/test_backend_script_contract.py": {
+    "I001": 1
+  },
+  "backend/tests/test_background_jobs.py": {
+    "I001": 1
   },
   "backend/tests/test_base_scope.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/tests/test_base_scope_federated.py": {
+    "I001": 1
   },
   "backend/tests/test_batch_ingest.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 3
+  },
+  "backend/tests/test_bm25_rrf.py": {
+    "I001": 1
+  },
+  "backend/tests/test_build_release_manifest.py": {
+    "I001": 1
+  },
+  "backend/tests/test_cache_factory.py": {
+    "I001": 1
   },
   "backend/tests/test_cached_embedder.py": {
     "B017": 1,
     "B018": 1
   },
+  "backend/tests/test_candidate_leg_ceilings.py": {
+    "I001": 2
+  },
+  "backend/tests/test_canonical_relations.py": {
+    "I001": 1
+  },
+  "backend/tests/test_catalog_store.py": {
+    "I001": 1
+  },
+  "backend/tests/test_ceiling_binds_verdict.py": {
+    "I001": 1
+  },
+  "backend/tests/test_check_frontend_lane.py": {
+    "I001": 1
+  },
+  "backend/tests/test_check_script_contract.py": {
+    "I001": 1
+  },
+  "backend/tests/test_checkup_service.py": {
+    "I001": 2
+  },
+  "backend/tests/test_chunk_concept_walk.py": {
+    "I001": 1
+  },
+  "backend/tests/test_chunk_embed.py": {
+    "I001": 2
+  },
+  "backend/tests/test_chunk_federation.py": {
+    "I001": 1
+  },
+  "backend/tests/test_chunk_question_index.py": {
+    "I001": 1
+  },
+  "backend/tests/test_chunk_retrieval.py": {
+    "I001": 8
+  },
+  "backend/tests/test_chunk_retrieval_characterization.py": {
+    "I001": 1
+  },
+  "backend/tests/test_ci_portability_contract.py": {
+    "I001": 1
+  },
+  "backend/tests/test_ci_workflow_contract.py": {
+    "I001": 1
+  },
   "backend/tests/test_circuit_diagram_sample_plugin.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
   },
   "backend/tests/test_circuit_diagram_sample_plugin_e2e.py": {
     "F811": 5
   },
+  "backend/tests/test_citation_images.py": {
+    "I001": 1
+  },
+  "backend/tests/test_cli_extension_check.py": {
+    "I001": 1
+  },
+  "backend/tests/test_cluster_generation_census.py": {
+    "I001": 1
+  },
+  "backend/tests/test_cluster_objects.py": {
+    "I001": 1
+  },
+  "backend/tests/test_collection_catalog.py": {
+    "I001": 1
+  },
+  "backend/tests/test_collection_enumeration.py": {
+    "I001": 1
+  },
+  "backend/tests/test_collection_enumeration_source_ceiling.py": {
+    "I001": 2
+  },
+  "backend/tests/test_command_catalog.py": {
+    "I001": 1
+  },
+  "backend/tests/test_command_catalog_job.py": {
+    "I001": 1
+  },
+  "backend/tests/test_communities.py": {
+    "I001": 2
+  },
+  "backend/tests/test_community_peers.py": {
+    "I001": 1
+  },
+  "backend/tests/test_comparison_peer_ceiling.py": {
+    "I001": 1
+  },
+  "backend/tests/test_concept_cluster_collation_guard.py": {
+    "I001": 1
+  },
   "backend/tests/test_concept_desc.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
   },
   "backend/tests/test_concept_detail_owner_library.py": {
     "F811": 3
   },
   "backend/tests/test_conflict_detect.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/tests/test_conflict_detect_bounded.py": {
+    "I001": 1
+  },
+  "backend/tests/test_conflict_e2e.py": {
+    "I001": 1
+  },
+  "backend/tests/test_conflict_endpoints.py": {
+    "I001": 1
+  },
+  "backend/tests/test_conflict_review.py": {
+    "I001": 1
+  },
+  "backend/tests/test_conftest_hook_uniqueness.py": {
+    "I001": 1
   },
   "backend/tests/test_consult_memory_action.py": {
-    "F841": 1
+    "F841": 1,
+    "I001": 2
+  },
+  "backend/tests/test_content_overview_service.py": {
+    "I001": 1
+  },
+  "backend/tests/test_conversation_public_view.py": {
+    "I001": 1
+  },
+  "backend/tests/test_conversation_share_api.py": {
+    "I001": 1
   },
   "backend/tests/test_conversations.py": {
-    "F811": 1
+    "F811": 1,
+    "I001": 5
+  },
+  "backend/tests/test_cross_doc_merge.py": {
+    "I001": 1
+  },
+  "backend/tests/test_cross_tier_reasoning.py": {
+    "I001": 5
+  },
+  "backend/tests/test_database_url.py": {
+    "I001": 1
+  },
+  "backend/tests/test_database_url_diagnostics.py": {
+    "I001": 1
   },
   "backend/tests/test_debug_logs_days.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/tests/test_dedup_read_narrowing.py": {
+    "I001": 1
+  },
+  "backend/tests/test_dedup_scale.py": {
+    "I001": 1
+  },
+  "backend/tests/test_default_ceiling_closed_channel.py": {
+    "I001": 1
+  },
+  "backend/tests/test_default_ceiling_entrypoints.py": {
+    "I001": 1
+  },
+  "backend/tests/test_default_ceiling_probe.py": {
+    "I001": 1
+  },
+  "backend/tests/test_default_ceiling_pushdown.py": {
+    "I001": 2
+  },
+  "backend/tests/test_default_source_ceiling.py": {
+    "I001": 2
+  },
+  "backend/tests/test_diag_pg_hotpaths.py": {
+    "I001": 1
+  },
+  "backend/tests/test_diag_process.py": {
+    "I001": 1
+  },
+  "backend/tests/test_diag_retrieval_latency.py": {
+    "I001": 1
+  },
+  "backend/tests/test_diag_unified.py": {
+    "I001": 1
+  },
+  "backend/tests/test_diagnostics_dir_isolation.py": {
+    "I001": 1
   },
   "backend/tests/test_dim_invariants.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/tests/test_document_guide.py": {
+    "I001": 1
+  },
+  "backend/tests/test_document_source_overview.py": {
+    "I001": 1
+  },
+  "backend/tests/test_document_source_overview_batched.py": {
+    "I001": 1
+  },
+  "backend/tests/test_dual_backend_parity.py": {
+    "I001": 1
+  },
+  "backend/tests/test_dual_keywords.py": {
+    "I001": 1
+  },
+  "backend/tests/test_edge_centrality.py": {
+    "I001": 1
+  },
+  "backend/tests/test_edge_review_queue.py": {
+    "I001": 3
+  },
+  "backend/tests/test_edge_schema.py": {
+    "I001": 1
+  },
+  "backend/tests/test_edge_trust.py": {
+    "I001": 3
+  },
+  "backend/tests/test_element_enricher_docs_contract.py": {
+    "I001": 1
+  },
+  "backend/tests/test_embed_provider_casing.py": {
+    "I001": 1
+  },
+  "backend/tests/test_embedding.py": {
+    "I001": 1
+  },
+  "backend/tests/test_empty_synth_guard.py": {
+    "I001": 1
+  },
+  "backend/tests/test_env_example.py": {
+    "I001": 1
+  },
+  "backend/tests/test_eval_speed_public_path.py": {
+    "I001": 1
+  },
+  "backend/tests/test_event_logging.py": {
+    "I001": 8
+  },
+  "backend/tests/test_evidence_attestation.py": {
+    "I001": 1
+  },
+  "backend/tests/test_evidence_context_service.py": {
+    "I001": 1
+  },
+  "backend/tests/test_exact_lookup.py": {
+    "I001": 1
+  },
+  "backend/tests/test_exact_lookup_ceiling_store.py": {
+    "I001": 1
   },
   "backend/tests/test_experience_offered_actions.py": {
-    "F811": 6
+    "F811": 6,
+    "I001": 1
+  },
+  "backend/tests/test_extension_discovery.py": {
+    "I001": 1
   },
   "backend/tests/test_extension_plugin_routes.py": {
     "F401": 1,
-    "F811": 41
+    "F811": 41,
+    "I001": 2
+  },
+  "backend/tests/test_extension_service_config.py": {
+    "I001": 1
+  },
+  "backend/tests/test_extension_service_launchers.py": {
+    "I001": 1
+  },
+  "backend/tests/test_extension_service_reuse.py": {
+    "I001": 2
+  },
+  "backend/tests/test_extension_services.py": {
+    "I001": 4
+  },
+  "backend/tests/test_extension_toggle_store.py": {
+    "I001": 1
+  },
+  "backend/tests/test_extension_ui_projection.py": {
+    "I001": 1
   },
   "backend/tests/test_federated_global_budget.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/tests/test_federated_participants_seat.py": {
+    "I001": 1
+  },
+  "backend/tests/test_follow_chain_repository.py": {
+    "I001": 1
+  },
+  "backend/tests/test_followup_retrieval_grounding.py": {
+    "I001": 3
+  },
+  "backend/tests/test_gap_consult_ask_wiring.py": {
+    "I001": 2
+  },
+  "backend/tests/test_gap_consult_docs_contract.py": {
+    "I001": 1
+  },
+  "backend/tests/test_gap_consult_host.py": {
+    "I001": 2
+  },
+  "backend/tests/test_gen_recall_gold.py": {
+    "I001": 1
   },
   "backend/tests/test_global_ask.py": {
-    "B017": 1
+    "B017": 1,
+    "I001": 3
   },
   "backend/tests/test_global_ask_admission.py": {
     "F401": 1,
-    "F811": 13
+    "F811": 13,
+    "I001": 1
+  },
+  "backend/tests/test_global_ask_citation_check.py": {
+    "I001": 3
+  },
+  "backend/tests/test_global_ask_empty_scope.py": {
+    "I001": 1
+  },
+  "backend/tests/test_global_ask_engine_parity.py": {
+    "I001": 3
   },
   "backend/tests/test_global_ask_intent_route.py": {
     "F401": 1,
-    "F811": 4
+    "F811": 4,
+    "I001": 2
   },
   "backend/tests/test_global_ask_mcp.py": {
     "F401": 1,
-    "F811": 2
+    "F811": 2,
+    "I001": 6
   },
   "backend/tests/test_global_ask_parallel.py": {
     "F401": 1,
-    "F811": 8
+    "F811": 8,
+    "I001": 2
+  },
+  "backend/tests/test_global_ask_share_api.py": {
+    "I001": 1
   },
   "backend/tests/test_global_ask_stream.py": {
-    "F811": 21
+    "F811": 21,
+    "I001": 2
   },
   "backend/tests/test_global_ask_wait.py": {
     "F811": 12
   },
+  "backend/tests/test_global_citation_check_surfaces.py": {
+    "I001": 1
+  },
+  "backend/tests/test_global_citation_producers_e2e.py": {
+    "I001": 1
+  },
   "backend/tests/test_global_evidence.py": {
     "F401": 1,
-    "F811": 2
+    "F811": 2,
+    "I001": 1
+  },
+  "backend/tests/test_global_run.py": {
+    "I001": 1
+  },
+  "backend/tests/test_global_search.py": {
+    "I001": 1
   },
   "backend/tests/test_governance_read_narrowing.py": {
-    "B017": 1
+    "B017": 1,
+    "I001": 1
   },
   "backend/tests/test_graph_reason.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 5
+  },
+  "backend/tests/test_group_store_transaction_guard.py": {
+    "I001": 1
+  },
+  "backend/tests/test_hotpath_indexes.py": {
+    "I001": 1
+  },
+  "backend/tests/test_hotpath_indexes_batch2.py": {
+    "I001": 1
+  },
+  "backend/tests/test_hotpath_indexes_batch3.py": {
+    "I001": 1
+  },
+  "backend/tests/test_hotpath_indexes_batch4.py": {
+    "I001": 1
+  },
+  "backend/tests/test_hotpath_indexes_batch5.py": {
+    "I001": 1
+  },
+  "backend/tests/test_image_backfill_logic.py": {
+    "I001": 1
+  },
+  "backend/tests/test_image_backfill_phase.py": {
+    "I001": 1
+  },
+  "backend/tests/test_image_backfill_transaction_guard.py": {
+    "I001": 1
+  },
+  "backend/tests/test_in_batching.py": {
+    "I001": 1
+  },
+  "backend/tests/test_in_network_relations.py": {
+    "I001": 1
+  },
+  "backend/tests/test_incremental_fuse_bounded.py": {
+    "I001": 3
+  },
+  "backend/tests/test_incremental_fuse_deferred.py": {
+    "I001": 1
   },
   "backend/tests/test_incremental_fusion.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 3
+  },
+  "backend/tests/test_index_build_consolidation.py": {
+    "I001": 1
   },
   "backend/tests/test_indexed_only_principle.py": {
-    "F841": 1
+    "F841": 1,
+    "I001": 2
+  },
+  "backend/tests/test_indexing_pipeline_chunking.py": {
+    "I001": 1
+  },
+  "backend/tests/test_indexing_pipeline_notebook_api.py": {
+    "I001": 1
+  },
+  "backend/tests/test_intent_keyword_arm.py": {
+    "I001": 1
   },
   "backend/tests/test_interleave_by_lane.py": {
     "F811": 5
+  },
+  "backend/tests/test_isolated_penalty.py": {
+    "I001": 1
+  },
+  "backend/tests/test_kb_list_scale.py": {
+    "I001": 1
+  },
+  "backend/tests/test_keyword_token_cache.py": {
+    "I001": 1
+  },
+  "backend/tests/test_kg_analysis_precompute.py": {
+    "I001": 1
   },
   "backend/tests/test_kg_analysis_service.py": {
     "F401": 1
@@ -297,189 +2132,1139 @@
   "backend/tests/test_kg_backfill_and_cross_checks.py": {
     "F401": 1
   },
+  "backend/tests/test_kg_build_circuit_breaker.py": {
+    "I001": 1
+  },
+  "backend/tests/test_kg_building_flag.py": {
+    "I001": 1
+  },
+  "backend/tests/test_kg_conflict_candidates.py": {
+    "I001": 1
+  },
+  "backend/tests/test_kg_delete_job.py": {
+    "I001": 1
+  },
   "backend/tests/test_kg_graph_drain.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 2
   },
   "backend/tests/test_kg_ingest.py": {
-    "F841": 1
+    "F841": 1,
+    "I001": 4
   },
   "backend/tests/test_kg_merge.py": {
-    "F811": 1
+    "F811": 1,
+    "I001": 7
+  },
+  "backend/tests/test_kg_mutation_phase_matrix.py": {
+    "I001": 1
+  },
+  "backend/tests/test_kg_quality.py": {
+    "I001": 4
+  },
+  "backend/tests/test_kg_ready.py": {
+    "I001": 1
+  },
+  "backend/tests/test_kg_rebuild_relink_api.py": {
+    "I001": 1
+  },
+  "backend/tests/test_kg_relink_job.py": {
+    "I001": 1
+  },
+  "backend/tests/test_kg_repository.py": {
+    "I001": 2
+  },
+  "backend/tests/test_kg_run_control.py": {
+    "I001": 1
+  },
+  "backend/tests/test_kg_scheduler.py": {
+    "I001": 3
   },
   "backend/tests/test_kg_search_api.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 2
   },
   "backend/tests/test_kg_service_readers.py": {
     "F811": 38
+  },
+  "backend/tests/test_kg_source_chunks_cross_library.py": {
+    "I001": 2
+  },
+  "backend/tests/test_kg_source_status.py": {
+    "I001": 1
+  },
+  "backend/tests/test_kg_viewer_scope.py": {
+    "I001": 1
   },
   "backend/tests/test_kg_viewer_scope_assembly.py": {
     "F811": 4
   },
   "backend/tests/test_kg_viewer_scope_identities.py": {
-    "F811": 22
+    "F811": 22,
+    "I001": 1
+  },
+  "backend/tests/test_kg_viewer_scope_routes.py": {
+    "I001": 1
   },
   "backend/tests/test_kg_viewer_scope_rules.py": {
-    "F811": 18
+    "F811": 18,
+    "I001": 1
   },
   "backend/tests/test_kg_viewer_scope_twins.py": {
     "F811": 3
   },
+  "backend/tests/test_kg_viz_index.py": {
+    "I001": 1
+  },
+  "backend/tests/test_knowhow_agent_api.py": {
+    "I001": 1
+  },
+  "backend/tests/test_knowhow_asset_gc.py": {
+    "I001": 1
+  },
+  "backend/tests/test_knowhow_citation.py": {
+    "I001": 1
+  },
+  "backend/tests/test_knowhow_code_isolation.py": {
+    "I001": 1
+  },
   "backend/tests/test_knowhow_editing_api.py": {
     "F401": 1
+  },
+  "backend/tests/test_knowhow_graph_anchor.py": {
+    "I001": 1
+  },
+  "backend/tests/test_knowhow_history_coverage_guard.py": {
+    "I001": 1
+  },
+  "backend/tests/test_knowhow_history_kind_registry_guard.py": {
+    "I001": 1
+  },
+  "backend/tests/test_knowhow_history_service.py": {
+    "I001": 1
   },
   "backend/tests/test_knowhow_kg_node_retrieval.py": {
     "F811": 23
   },
+  "backend/tests/test_knowhow_optimize.py": {
+    "I001": 1
+  },
   "backend/tests/test_knowhow_pr23_integration.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
   },
   "backend/tests/test_knowhow_reformat.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/tests/test_knowhow_retrieval.py": {
+    "I001": 1
   },
   "backend/tests/test_knowhow_template.py": {
     "F401": 1
   },
+  "backend/tests/test_knowhow_textops.py": {
+    "I001": 1
+  },
+  "backend/tests/test_knowhow_transfer_service.py": {
+    "I001": 1
+  },
+  "backend/tests/test_knowledge_context_source_ceiling.py": {
+    "I001": 1
+  },
   "backend/tests/test_knowledge_governance_boundaries.py": {
     "F401": 1
   },
+  "backend/tests/test_knowledge_pagination.py": {
+    "I001": 1
+  },
+  "backend/tests/test_language_policy.py": {
+    "I001": 3
+  },
+  "backend/tests/test_large_lib_index_required.py": {
+    "I001": 1
+  },
+  "backend/tests/test_legacy_graph_guard.py": {
+    "I001": 2
+  },
+  "backend/tests/test_legacy_reflect_prefix.py": {
+    "I001": 1
+  },
+  "backend/tests/test_lexical_corpus_language_gate.py": {
+    "I001": 1
+  },
+  "backend/tests/test_llm_schema_transport.py": {
+    "I001": 1
+  },
+  "backend/tests/test_log_archive.py": {
+    "I001": 1
+  },
   "backend/tests/test_log_reader_windows.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/tests/test_maintenance_cli_wrappers.py": {
+    "I001": 1
+  },
+  "backend/tests/test_max_tokens.py": {
+    "I001": 1
+  },
+  "backend/tests/test_mcp_bundle_architecture.py": {
+    "I001": 2
+  },
+  "backend/tests/test_mcp_memory_channel_e2e.py": {
+    "I001": 1
+  },
+  "backend/tests/test_md_normalize_invariant.py": {
+    "I001": 1
   },
   "backend/tests/test_md_normalize_rule.py": {
-    "F401": 2
+    "F401": 2,
+    "I001": 1
+  },
+  "backend/tests/test_memory_kg_lifecycle.py": {
+    "I001": 1
+  },
+  "backend/tests/test_memory_kg_schema.py": {
+    "I001": 1
+  },
+  "backend/tests/test_memory_kg_store_readers.py": {
+    "I001": 1
+  },
+  "backend/tests/test_memory_mcp.py": {
+    "I001": 4
   },
   "backend/tests/test_memory_orphan_sweep.py": {
     "F401": 1
   },
+  "backend/tests/test_memory_preview.py": {
+    "I001": 1
+  },
+  "backend/tests/test_memory_promotion.py": {
+    "I001": 3
+  },
+  "backend/tests/test_memory_repository_boundaries.py": {
+    "I001": 1
+  },
   "backend/tests/test_memory_retrieval.py": {
     "F401": 1
+  },
+  "backend/tests/test_memory_service.py": {
+    "I001": 1
+  },
+  "backend/tests/test_memory_sql_contract.py": {
+    "I001": 2
+  },
+  "backend/tests/test_memory_transfer_routes.py": {
+    "I001": 1
+  },
+  "backend/tests/test_memory_transfer_service.py": {
+    "I001": 1
+  },
+  "backend/tests/test_mention_bridge.py": {
+    "I001": 1
+  },
+  "backend/tests/test_merge_rebuild_exclude.py": {
+    "I001": 1
+  },
+  "backend/tests/test_merge_review_deferred.py": {
+    "I001": 1
+  },
+  "backend/tests/test_merge_review_job.py": {
+    "I001": 2
+  },
+  "backend/tests/test_merge_seed_pairs.py": {
+    "I001": 1
+  },
+  "backend/tests/test_migrate_legacy_model_env.py": {
+    "I001": 1
+  },
+  "backend/tests/test_mix_answer.py": {
+    "I001": 1
+  },
+  "backend/tests/test_mix_overlay.py": {
+    "I001": 2
+  },
+  "backend/tests/test_mix_reserve_seats.py": {
+    "I001": 3
+  },
+  "backend/tests/test_model_bindings_preflight.py": {
+    "I001": 1
+  },
+  "backend/tests/test_model_circuit_breaker.py": {
+    "I001": 1
+  },
+  "backend/tests/test_model_domain_boundaries.py": {
+    "I001": 1
+  },
+  "backend/tests/test_model_errors.py": {
+    "I001": 1
+  },
+  "backend/tests/test_model_json_repair.py": {
+    "I001": 2
+  },
+  "backend/tests/test_model_json_schema_runtime.py": {
+    "I001": 1
+  },
+  "backend/tests/test_model_provider_runtime.py": {
+    "I001": 1
+  },
+  "backend/tests/test_model_registry.py": {
+    "I001": 1
+  },
+  "backend/tests/test_model_scheduler.py": {
+    "I001": 1
   },
   "backend/tests/test_model_status_service.py": {
     "F401": 1
   },
+  "backend/tests/test_mount_sql_contract.py": {
+    "I001": 1
+  },
+  "backend/tests/test_mount_viewer_e2e.py": {
+    "I001": 1
+  },
+  "backend/tests/test_multi_domain_bases.py": {
+    "I001": 8
+  },
+  "backend/tests/test_node_context.py": {
+    "I001": 1
+  },
+  "backend/tests/test_node_context_steps.py": {
+    "I001": 2
+  },
+  "backend/tests/test_node_embed_incremental.py": {
+    "I001": 1
+  },
+  "backend/tests/test_notebook_ask_availability.py": {
+    "I001": 1
+  },
+  "backend/tests/test_notebook_assets.py": {
+    "I001": 1
+  },
   "backend/tests/test_notebook_copy_service.py": {
-    "F401": 2
+    "F401": 2,
+    "I001": 1
   },
   "backend/tests/test_notebook_copy_stats_memo.py": {
-    "F401": 2
+    "F401": 2,
+    "I001": 1
   },
   "backend/tests/test_notebook_counts_batched.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
   },
   "backend/tests/test_notebook_delete_checkpoint_buildkg.py": {
     "F401": 1
+  },
+  "backend/tests/test_notebook_delete_jobization.py": {
+    "I001": 2
+  },
+  "backend/tests/test_notebook_delete_review_fixes.py": {
+    "I001": 1
+  },
+  "backend/tests/test_notebook_delete_rows_and_files.py": {
+    "I001": 1
+  },
+  "backend/tests/test_notebook_lifecycle_visibility.py": {
+    "I001": 1
+  },
+  "backend/tests/test_notebook_list_prefetch.py": {
+    "I001": 1
+  },
+  "backend/tests/test_notebook_meta.py": {
+    "I001": 2
+  },
+  "backend/tests/test_notebook_metadata_storage.py": {
+    "I001": 1
+  },
+  "backend/tests/test_notebook_owner_scope.py": {
+    "I001": 1
+  },
+  "backend/tests/test_notebook_question_suggestions.py": {
+    "I001": 2
+  },
+  "backend/tests/test_notebook_scale_profile.py": {
+    "I001": 1
+  },
+  "backend/tests/test_notebook_share_copy.py": {
+    "I001": 6
+  },
+  "backend/tests/test_notebook_share_readonly.py": {
+    "I001": 2
+  },
+  "backend/tests/test_notebook_update_authorization_free.py": {
+    "I001": 1
+  },
+  "backend/tests/test_overlay_guard_order.py": {
+    "I001": 1
+  },
+  "backend/tests/test_p4_kg_shrink.py": {
+    "I001": 2
+  },
+  "backend/tests/test_packaging_model_services.py": {
+    "I001": 1
+  },
+  "backend/tests/test_paper_meta_api.py": {
+    "I001": 2
+  },
+  "backend/tests/test_paper_meta_grounding.py": {
+    "I001": 1
+  },
+  "backend/tests/test_paper_meta_service.py": {
+    "I001": 1
+  },
+  "backend/tests/test_parallel_extraction_wiring.py": {
+    "I001": 1
   },
   "backend/tests/test_parser_provider_chain.py": {
     "F401": 2
   },
   "backend/tests/test_parsers_markdown.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/tests/test_parsers_markdown_bundle.py": {
+    "I001": 1
   },
   "backend/tests/test_parsers_office.py": {
     "F401": 3
   },
+  "backend/tests/test_participant_override_guard.py": {
+    "I001": 1
+  },
   "backend/tests/test_participant_override_retrieval.py": {
-    "B015": 2
+    "B015": 2,
+    "I001": 1
+  },
+  "backend/tests/test_peer_ceiling_subgraph.py": {
+    "I001": 1
+  },
+  "backend/tests/test_peer_mode_ask_steps.py": {
+    "I001": 2
+  },
+  "backend/tests/test_peer_mode_citations.py": {
+    "I001": 1
+  },
+  "backend/tests/test_peer_mode_element_arm.py": {
+    "I001": 3
+  },
+  "backend/tests/test_peer_mode_exact_arm.py": {
+    "I001": 1
+  },
+  "backend/tests/test_peer_mode_federation.py": {
+    "I001": 1
+  },
+  "backend/tests/test_peer_mode_keyword_arm.py": {
+    "I001": 1
   },
   "backend/tests/test_peer_mode_reflect_actions.py": {
-    "F811": 14
+    "F811": 14,
+    "I001": 3
+  },
+  "backend/tests/test_pending_actions.py": {
+    "I001": 4
+  },
+  "backend/tests/test_pending_actions_api.py": {
+    "I001": 1
+  },
+  "backend/tests/test_pending_bus.py": {
+    "I001": 1
+  },
+  "backend/tests/test_persistence_bundle_contract.py": {
+    "I001": 1
+  },
+  "backend/tests/test_phase0_architecture_guard.py": {
+    "I001": 1
+  },
+  "backend/tests/test_pipeline_concurrency.py": {
+    "I001": 2
+  },
+  "backend/tests/test_postgres_id_binding_unit.py": {
+    "I001": 1
+  },
+  "backend/tests/test_postgres_recover_interrupted_jobs.py": {
+    "I001": 1
+  },
+  "backend/tests/test_ppr.py": {
+    "I001": 7
+  },
+  "backend/tests/test_ppr_fallback_guard.py": {
+    "I001": 1
   },
   "backend/tests/test_ppr_float32.py": {
     "F401": 1
   },
   "backend/tests/test_ppr_retrieve.py": {
-    "F401": 2
+    "F401": 2,
+    "I001": 5
+  },
+  "backend/tests/test_ppr_source_ceiling.py": {
+    "I001": 3
+  },
+  "backend/tests/test_prepare_selected_source_graph.py": {
+    "I001": 1
+  },
+  "backend/tests/test_prod_launcher.py": {
+    "I001": 1
+  },
+  "backend/tests/test_producer_attestation_races.py": {
+    "I001": 1
+  },
+  "backend/tests/test_prompt_layers.py": {
+    "I001": 1
+  },
+  "backend/tests/test_prompts.py": {
+    "I001": 1
+  },
+  "backend/tests/test_public_conversation_api.py": {
+    "I001": 1
+  },
+  "backend/tests/test_public_conversation_asset_api.py": {
+    "I001": 1
+  },
+  "backend/tests/test_python_launch_environment.py": {
+    "I001": 1
+  },
+  "backend/tests/test_python_lockfiles.py": {
+    "I001": 1
   },
   "backend/tests/test_query_hotpath_cache.py": {
-    "F841": 1
+    "F841": 1,
+    "I001": 1
+  },
+  "backend/tests/test_query_refine.py": {
+    "I001": 1
   },
   "backend/tests/test_query_rewrite.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 2
+  },
+  "backend/tests/test_quota_fuse.py": {
+    "I001": 1
+  },
+  "backend/tests/test_quota_reuse.py": {
+    "I001": 1
+  },
+  "backend/tests/test_reasoning_ask.py": {
+    "I001": 2
+  },
+  "backend/tests/test_reasoning_chunk_citations.py": {
+    "I001": 1
   },
   "backend/tests/test_reasoning_chunk_rerank.py": {
-    "F811": 5
+    "F811": 5,
+    "I001": 1
+  },
+  "backend/tests/test_reasoning_citation_lookup_reuse.py": {
+    "I001": 1
   },
   "backend/tests/test_reasoning_document_read.py": {
-    "F811": 5
+    "F811": 5,
+    "I001": 1
+  },
+  "backend/tests/test_reasoning_document_read_duplicate_titles.py": {
+    "I001": 1
   },
   "backend/tests/test_reasoning_document_read_synthesis.py": {
-    "F811": 2
+    "F811": 2,
+    "I001": 1
+  },
+  "backend/tests/test_reasoning_empty_answer.py": {
+    "I001": 1
   },
   "backend/tests/test_reasoning_enumeration_source_ceiling.py": {
-    "F811": 1
+    "F811": 1,
+    "I001": 2
+  },
+  "backend/tests/test_reasoning_enumeration_tools.py": {
+    "I001": 9
   },
   "backend/tests/test_reasoning_exact_reserve.py": {
     "F811": 14
   },
+  "backend/tests/test_reasoning_external_evidence.py": {
+    "I001": 2
+  },
+  "backend/tests/test_reasoning_loop_characterization.py": {
+    "I001": 1
+  },
+  "backend/tests/test_reasoning_outline.py": {
+    "I001": 3
+  },
+  "backend/tests/test_reasoning_outline_kg_gap.py": {
+    "I001": 1
+  },
+  "backend/tests/test_reasoning_outline_synthesis.py": {
+    "I001": 1
+  },
+  "backend/tests/test_reasoning_plugin_action.py": {
+    "I001": 4
+  },
+  "backend/tests/test_reasoning_ppr.py": {
+    "I001": 4
+  },
+  "backend/tests/test_reasoning_ppr_prefetch.py": {
+    "I001": 1
+  },
   "backend/tests/test_reasoning_retrieval.py": {
-    "F401": 2
+    "F401": 2,
+    "I001": 25
+  },
+  "backend/tests/test_reasoning_stream.py": {
+    "I001": 6
+  },
+  "backend/tests/test_reasoning_trace_analyzer.py": {
+    "I001": 1
+  },
+  "backend/tests/test_reasoning_visited_ledger_hash_seed.py": {
+    "I001": 1
+  },
+  "backend/tests/test_rebuild_checkpoint.py": {
+    "I001": 2
+  },
+  "backend/tests/test_rebuild_communities.py": {
+    "I001": 1
+  },
+  "backend/tests/test_rebuild_desc_cache.py": {
+    "I001": 1
   },
   "backend/tests/test_rebuild_streaming.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/tests/test_rebuild_wires_communities.py": {
+    "I001": 1
+  },
+  "backend/tests/test_recall_relations.py": {
+    "I001": 1
   },
   "backend/tests/test_reference_liveness.py": {
-    "F811": 6
+    "F811": 6,
+    "I001": 2
+  },
+  "backend/tests/test_reflect_action_contract.py": {
+    "I001": 1
+  },
+  "backend/tests/test_reflect_action_docs_contract.py": {
+    "I001": 1
+  },
+  "backend/tests/test_reflect_action_host.py": {
+    "I001": 1
+  },
+  "backend/tests/test_reflect_plugin_projection.py": {
+    "I001": 2
   },
   "backend/tests/test_reflect_t0_scripts.py": {
-    "F811": 16
+    "F811": 16,
+    "I001": 1
+  },
+  "backend/tests/test_relation_ann.py": {
+    "I001": 1
+  },
+  "backend/tests/test_relation_completion.py": {
+    "I001": 1
+  },
+  "backend/tests/test_relation_embed.py": {
+    "I001": 1
+  },
+  "backend/tests/test_relation_retrieval.py": {
+    "I001": 2
   },
   "backend/tests/test_relation_scoring_cold_matrix_guard.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/tests/test_remote_sources.py": {
+    "I001": 1
+  },
+  "backend/tests/test_report_api.py": {
+    "I001": 2
+  },
+  "backend/tests/test_report_default_ceiling.py": {
+    "I001": 2
   },
   "backend/tests/test_report_engine.py": {
-    "F401": 5
+    "F401": 5,
+    "I001": 14
+  },
+  "backend/tests/test_report_engine_ports.py": {
+    "I001": 1
+  },
+  "backend/tests/test_report_execution.py": {
+    "I001": 2
+  },
+  "backend/tests/test_report_exporter_host.py": {
+    "I001": 1
+  },
+  "backend/tests/test_report_outline_integration.py": {
+    "I001": 1
+  },
+  "backend/tests/test_report_ownership.py": {
+    "I001": 1
+  },
+  "backend/tests/test_report_post_completion_extensions.py": {
+    "I001": 1
+  },
+  "backend/tests/test_report_reference_images.py": {
+    "I001": 3
   },
   "backend/tests/test_report_section_passage_order.py": {
     "F811": 7
   },
+  "backend/tests/test_report_share_disclosure.py": {
+    "I001": 1
+  },
+  "backend/tests/test_repository_api_contract.py": {
+    "I001": 1
+  },
+  "backend/tests/test_repository_dependency_contract.py": {
+    "I001": 1
+  },
+  "backend/tests/test_repository_factory.py": {
+    "I001": 1
+  },
+  "backend/tests/test_repository_ownership.py": {
+    "I001": 1
+  },
+  "backend/tests/test_repository_protocol_coverage.py": {
+    "I001": 2
+  },
+  "backend/tests/test_repository_snapshot_verifier.py": {
+    "I001": 1
+  },
+  "backend/tests/test_repository_v9_fixture.py": {
+    "I001": 1
+  },
+  "backend/tests/test_request_user_ctx.py": {
+    "I001": 1
+  },
+  "backend/tests/test_resolve_notebook_conflicts.py": {
+    "I001": 1
+  },
+  "backend/tests/test_retrieval.py": {
+    "I001": 6
+  },
+  "backend/tests/test_retrieval_baseline.py": {
+    "I001": 1
+  },
+  "backend/tests/test_retrieval_contributor_host.py": {
+    "I001": 1
+  },
+  "backend/tests/test_retrieval_contributor_wiring.py": {
+    "I001": 3
+  },
+  "backend/tests/test_retrieval_enrichment.py": {
+    "I001": 1
+  },
+  "backend/tests/test_retrieval_experience_injection.py": {
+    "I001": 3
+  },
+  "backend/tests/test_retrieval_experience_job.py": {
+    "I001": 1
+  },
+  "backend/tests/test_retrieval_experience_store.py": {
+    "I001": 1
+  },
+  "backend/tests/test_retrieval_leg_ceilings.py": {
+    "I001": 1
+  },
+  "backend/tests/test_retrieval_numpy.py": {
+    "I001": 1
+  },
   "backend/tests/test_retrieval_participants.py": {
-    "B018": 1
+    "B018": 1,
+    "I001": 1
   },
   "backend/tests/test_retrieval_service.py": {
     "F401": 1
   },
   "backend/tests/test_retrieval_service_boundary.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "backend/tests/test_route_domain_boundaries.py": {
+    "I001": 1
+  },
+  "backend/tests/test_runtime_dim_bypasses.py": {
+    "I001": 1
+  },
+  "backend/tests/test_runtime_dim_scale_index.py": {
+    "I001": 1
+  },
+  "backend/tests/test_rx_graph_cluster_hubs.py": {
+    "I001": 2
   },
   "backend/tests/test_scale_build_lock_verify_held_timeout.py": {
     "F401": 1
   },
+  "backend/tests/test_scale_builder_failure_boundaries.py": {
+    "I001": 1
+  },
+  "backend/tests/test_scale_combined_splice_equivalence.py": {
+    "I001": 1
+  },
+  "backend/tests/test_scale_delta_policy.py": {
+    "I001": 2
+  },
+  "backend/tests/test_scale_idx_cache_lru.py": {
+    "I001": 2
+  },
+  "backend/tests/test_scale_idx_disk_cache.py": {
+    "I001": 2
+  },
   "backend/tests/test_scale_index.py": {
     "F811": 3,
-    "F841": 1
+    "F841": 1,
+    "I001": 7
+  },
+  "backend/tests/test_scale_index_repo.py": {
+    "I001": 16
+  },
+  "backend/tests/test_scale_index_version_probe.py": {
+    "I001": 1
+  },
+  "backend/tests/test_scale_index_version_singleflight.py": {
+    "I001": 1
+  },
+  "backend/tests/test_scale_version_probe.py": {
+    "I001": 2
+  },
+  "backend/tests/test_scale_xlayer_bridge_delta.py": {
+    "I001": 2
+  },
+  "backend/tests/test_scheduled_model_clients.py": {
+    "I001": 1
+  },
+  "backend/tests/test_search_chunks_federation.py": {
+    "I001": 1
+  },
+  "backend/tests/test_search_concurrency_gate.py": {
+    "I001": 1
+  },
+  "backend/tests/test_search_profile_injection.py": {
+    "I001": 1
+  },
+  "backend/tests/test_search_profile_job.py": {
+    "I001": 1
+  },
+  "backend/tests/test_selected_source_graph_plugin.py": {
+    "I001": 1
+  },
+  "backend/tests/test_service_python_environment.py": {
+    "I001": 1
+  },
+  "backend/tests/test_settings_path_anchor.py": {
+    "I001": 1
+  },
+  "backend/tests/test_shadow_schema_wording_guard.py": {
+    "I001": 3
+  },
+  "backend/tests/test_source_agent_provenance.py": {
+    "I001": 1
+  },
+  "backend/tests/test_source_element_enricher_host.py": {
+    "I001": 1
+  },
+  "backend/tests/test_source_element_enrichment_service.py": {
+    "I001": 1
+  },
+  "backend/tests/test_source_element_pagination.py": {
+    "I001": 1
+  },
+  "backend/tests/test_source_element_selection.py": {
+    "I001": 1
+  },
+  "backend/tests/test_source_embedding_service.py": {
+    "I001": 1
+  },
+  "backend/tests/test_source_graph_activation.py": {
+    "I001": 2
+  },
+  "backend/tests/test_source_image_asset_service.py": {
+    "I001": 1
+  },
+  "backend/tests/test_source_ingestion_failure_boundaries.py": {
+    "I001": 1
   },
   "backend/tests/test_source_ingestion_service.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 2
+  },
+  "backend/tests/test_source_local_facts.py": {
+    "I001": 1
+  },
+  "backend/tests/test_source_partitioned_ppr.py": {
+    "I001": 1
+  },
+  "backend/tests/test_source_repair_api.py": {
+    "I001": 4
+  },
+  "backend/tests/test_source_scope.py": {
+    "I001": 3
+  },
+  "backend/tests/test_source_subgraph.py": {
+    "I001": 1
+  },
+  "backend/tests/test_source_url_persist.py": {
+    "I001": 1
+  },
+  "backend/tests/test_sources_page_batched.py": {
+    "I001": 1
+  },
+  "backend/tests/test_sources_pagination.py": {
+    "I001": 3
+  },
+  "backend/tests/test_spreadsheet_federation.py": {
+    "I001": 2
+  },
+  "backend/tests/test_spreadsheet_multi_table.py": {
+    "I001": 1
+  },
+  "backend/tests/test_sqlite_to_postgres_vector_classification.py": {
+    "I001": 1
+  },
+  "backend/tests/test_step_level_experience_nudge.py": {
+    "I001": 1
+  },
+  "backend/tests/test_strip_think_json.py": {
+    "I001": 1
+  },
+  "backend/tests/test_sync_capture.py": {
+    "I001": 1
+  },
+  "backend/tests/test_sync_export.py": {
+    "I001": 1
   },
   "backend/tests/test_sync_import.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 4
+  },
+  "backend/tests/test_sync_incremental.py": {
+    "I001": 1
+  },
+  "backend/tests/test_sync_incremental_import.py": {
+    "I001": 1
+  },
+  "backend/tests/test_sync_manifest.py": {
+    "I001": 1
+  },
+  "backend/tests/test_system_health.py": {
+    "I001": 1
+  },
+  "backend/tests/test_system_model_services_api.py": {
+    "I001": 1
+  },
+  "backend/tests/test_task_stream.py": {
+    "I001": 1
+  },
+  "backend/tests/test_test_architecture_policy.py": {
+    "I001": 2
+  },
+  "backend/tests/test_third_party_imports_resolve.py": {
+    "I001": 1
   },
   "backend/tests/test_trace_result_ids.py": {
     "F401": 1,
-    "F811": 27
+    "F811": 27,
+    "I001": 3
+  },
+  "backend/tests/test_trackA_cache_backend.py": {
+    "I001": 1
   },
   "backend/tests/test_trackA_rrf_relevance.py": {
-    "F401": 3
+    "F401": 3,
+    "I001": 2
   },
   "backend/tests/test_trackF_governance_promotion.py": {
     "F401": 3
   },
+  "backend/tests/test_two_tier_federated.py": {
+    "I001": 1
+  },
   "backend/tests/test_typed_collection_result_sets.py": {
-    "B017": 4
+    "B017": 4,
+    "I001": 2
+  },
+  "backend/tests/test_unified_cli.py": {
+    "I001": 1
+  },
+  "backend/tests/test_unified_kg_repository.py": {
+    "I001": 1
+  },
+  "backend/tests/test_url_sources.py": {
+    "I001": 1
+  },
+  "backend/tests/test_url_sources_api.py": {
+    "I001": 1
+  },
+  "backend/tests/test_url_sources_schemas.py": {
+    "I001": 1
+  },
+  "backend/tests/test_user_error.py": {
+    "I001": 1
+  },
+  "backend/tests/test_user_session_repo.py": {
+    "I001": 1
+  },
+  "backend/tests/test_vector_index.py": {
+    "I001": 1
+  },
+  "backend/tests/test_viz_bounded.py": {
+    "I001": 1
+  },
+  "backend/tests/test_viz_index.py": {
+    "I001": 1
   },
   "backend/tests/test_viz_index_build.py": {
-    "F841": 1
+    "F841": 1,
+    "I001": 3
+  },
+  "backend/tests/test_viz_index_status.py": {
+    "I001": 1
   },
   "backend/tests/test_viz_index_wire.py": {
-    "F401": 2
+    "F401": 2,
+    "I001": 1
+  },
+  "backend/tests/test_w3_auth_sample_plugin.py": {
+    "I001": 1
+  },
+  "backend/tests/test_world_templates.py": {
+    "I001": 1
+  },
+  "backend/tests/test_xlsx_chunk_granularity.py": {
+    "I001": 1
+  },
+  "backend/tests/world_templates.py": {
+    "I001": 1
+  },
+  "scripts/analyze_reasoning_trace.py": {
+    "I001": 1
+  },
+  "scripts/audit_facade_callers.py": {
+    "I001": 1
+  },
+  "scripts/build_chunks.py": {
+    "I001": 1
+  },
+  "scripts/build_hotpath_indexes.py": {
+    "I001": 1
+  },
+  "scripts/build_postgres_retrieval_indexes.py": {
+    "I001": 1
+  },
+  "scripts/build_release_manifest.py": {
+    "I001": 1
+  },
+  "scripts/check_architecture_boundaries.py": {
+    "I001": 1
+  },
+  "scripts/check_citation_verification_contract.py": {
+    "I001": 1
+  },
+  "scripts/check_deployment_extension_parity.py": {
+    "I001": 1
+  },
+  "scripts/check_enumeration_list_labels_contract.py": {
+    "I001": 1
+  },
+  "scripts/cli.py": {
+    "I001": 1
+  },
+  "scripts/denoise_reextract_nb.py": {
+    "I001": 1
+  },
+  "scripts/diag.py": {
+    "I001": 1
+  },
+  "scripts/diag_base_report.py": {
+    "I001": 1
+  },
+  "scripts/diag_db.py": {
+    "I001": 1
+  },
+  "scripts/diag_incident.py": {
+    "I001": 1
+  },
+  "scripts/diag_pg_hotpaths.py": {
+    "I001": 2
   },
   "scripts/diag_retrieval_latency.py": {
-    "F401": 1
+    "F401": 1,
+    "I001": 1
+  },
+  "scripts/diag_rules.py": {
+    "I001": 1
   },
   "scripts/diag_slow.py": {
     "F841": 1
   },
+  "scripts/example_mcp_memory_client.py": {
+    "I001": 1
+  },
+  "scripts/extension_service_runtime.py": {
+    "I001": 1
+  },
+  "scripts/extension_service_worker.py": {
+    "I001": 1
+  },
+  "scripts/extension_services.py": {
+    "I001": 1
+  },
+  "scripts/generate_repository_contract_fixtures.py": {
+    "I001": 4
+  },
+  "scripts/generate_sync_capture_migration.py": {
+    "I001": 1
+  },
+  "scripts/generate_ui_extension_contract.py": {
+    "I001": 1
+  },
+  "scripts/kg_goldgen.py": {
+    "I001": 1
+  },
+  "scripts/kg_goldgen_all.py": {
+    "I001": 1
+  },
+  "scripts/kg_product_smoke.py": {
+    "I001": 2
+  },
+  "scripts/kg_strip_attrs.py": {
+    "I001": 1
+  },
+  "scripts/migrate_legacy_model_env.py": {
+    "I001": 1
+  },
+  "scripts/migrate_sqlite_to_postgres.py": {
+    "I001": 2
+  },
+  "scripts/prepare_selected_source_graph.py": {
+    "I001": 1
+  },
+  "scripts/python_env.py": {
+    "I001": 1
+  },
+  "scripts/python_lockfiles.py": {
+    "I001": 1
+  },
   "scripts/reflect_shadow_rig.py": {
-    "F841": 1
+    "F841": 1,
+    "I001": 3
+  },
+  "scripts/replay_retrieval.py": {
+    "I001": 3
+  },
+  "scripts/shadow_sqlite_to_postgres.py": {
+    "I001": 1
+  },
+  "scripts/smoke_backend.py": {
+    "I001": 2
+  },
+  "scripts/sync_notebooks.py": {
+    "I001": 1
+  },
+  "scripts/validate_overmerge_fix.py": {
+    "I001": 1
   }
 }
