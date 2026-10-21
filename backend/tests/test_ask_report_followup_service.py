@@ -347,11 +347,17 @@ def test_the_same_key_with_another_report_is_another_request(world):
     """``client_request_id`` names ONE request: the same question about
     another report -- or about none -- is refused as a reused key, never
     attached to the first job's answer."""
+    import threading
+
     store = world.repo._runtime.ask_state
     service = world.repo._runtime.ask_service()
     first = AskRequest(
         question="Q?", mode="chunk", report_id="rep-1", client_request_id="key-1",
     )
+    # Already set: a retry that wrongly attached would leave the wait at once
+    # (``AskWaitAbandoned``) instead of following the running job.
+    stop = threading.Event()
+    stop.set()
     with as_request_user(world.alice):
         job_id, _conversation, attached = store.begin_or_attach_durable_job(
             world.nb, first, "chunk", world.alice.id, submitted_via="mcp",
@@ -362,7 +368,7 @@ def test_the_same_key_with_another_report_is_another_request(world):
                 service.ask_current_with_job(world.nb, AskRequest(
                     question="Q?", mode="chunk", report_id=report_id,
                     client_request_id="key-1",
-                ), submitted_via="mcp")
+                ), submitted_via="mcp", stop=stop)
             assert caught.value.reason == "question"
         # The same request is the same request.
         service._require_same_request(job_id, first, "mcp", None)
