@@ -220,6 +220,7 @@ def insert_report(
     notebook_id: str | None = None, status: str = "done",
     references: list | None = None, memory_used: tuple[str, ...] = (),
     title: str = TITLE, sections: tuple[str, ...] = SECTIONS,
+    content_md: str | None = None,
 ) -> str:
     """A stored deep report: Alice's finished report of ``nb`` by default."""
     world = env.world
@@ -232,7 +233,7 @@ def insert_report(
         (
             report_id, notebook_id or world.nb, title, outline, outline,
             json.dumps(REFERENCES if references is None else references),
-            _content(title, sections), status, created_by or world.alice.id,
+            content_md or _content(title, sections), status, created_by or world.alice.id,
             json.dumps({"_memory_used": list(memory_used)}), NOW, NOW,
         ),
     )
@@ -254,13 +255,15 @@ class _Chat:
         return json.dumps(self.reply, ensure_ascii=False)
 
 
-def models(env, answer: str = "乙段落如是说[k1]。") -> _Chat:
+def models(env, answer: str = "乙段落如是说[k1]。", rewritten: str = "两种工艺的依据") -> _Chat:
     """The chunk path's model seats and its retrieval: the turn itself
     retrieves ``c-b`` (k1); everything after the retrieval is production code.
-    Returns the answer model, whose prompts show what the turn read."""
+    ``rewritten`` is the follow-up rewrite -- the query that picks which
+    sections of a long report are read. Returns the answer model, whose
+    prompts show what the turn read."""
     answer_llm = _Chat({"answer": answer, "grounded": True})
     bind_chat_client(env.repo, "ask_answer", answer_llm)
-    bind_chat_client(env.repo, "query_rewrite", _Chat({"query": "两种工艺的依据"}))
+    bind_chat_client(env.repo, "query_rewrite", _Chat({"query": rewritten}))
     chunk = RetrievedChunk(
         chunk_id="c-b", source_id="src-b", source_title="src-b 标题",
         section_path="节", text="乙段落原文", element_ids=["el-b1"], relevance=0.9,
@@ -642,6 +645,44 @@ async def the_understanding_step_is_told_about_the_report(env):
     assert seen == {"preview": ["rep-reasoning"], "requests": [("rep-reasoning", True)]}
 
 
+async def a_report_too_long_for_one_turn_names_only_what_the_turn_read(env):
+    """A report that does not fit the turn's report budget: ``sections_read``
+    lists the sections whose text entered the prompt (the one the question is
+    about), not the report's whole outline -- and a summary that alone
+    overflows the budget is flagged ``summary_truncated`` (the key exists only
+    then)."""
+    env.monkeypatch.setattr(
+        env.repo._runtime.ask_component.settings, "ask_report_context_max_chars", 2000
+    )
+    titles = ("低温回火", "高温退火", "表面渗氮")
+    themes = {"低温回火": "回火保温时间与内应力的释放", "高温退火": "高温退火的工艺参数与炉温曲线",
+              "表面渗氮": "渗氮层深度与硬度梯度"}
+
+    def content(summary: str) -> str:
+        lines = [f"# {TITLE}", "", "## 执行摘要", summary, "", "## 资料基础", "资料。", ""]
+        for title in titles:
+            lines += [f"## {title}", (themes[title] + "。") * 100, ""]
+        return "\n".join(lines + ["## 参考文献", "[k1] 甲段落"])
+
+    insert_report(env, "rep-big-body", sections=titles, references=[],
+                  content_md=content("三道工艺各有取舍。"))
+    insert_report(env, "rep-big-summary", sections=titles, references=[],
+                  content_md=content("摘要" * 1500))
+    answer_llm = models(env, rewritten="高温退火的工艺参数")
+    async with _client(env, _token(env, [env.world.nb])) as client:
+        body = _payload(await client.call("ask", _ask_args("rep-big-body")))
+        summary = _payload(await client.call("ask", _ask_args("rep-big-summary")))
+    receipt = body["scope"]["linked_report"]
+    assert (receipt["status"], receipt["sections_read"]) == ("read", ["高温退火"])
+    assert "summary_truncated" not in receipt
+    block = answer_llm.prompts[0]
+    assert themes["高温退火"] in block
+    assert themes["低温回火"] not in block and themes["表面渗氮"] not in block
+    receipt = summary["scope"]["linked_report"]
+    assert (receipt["status"], receipt["sections_read"]) == ("read", [])
+    assert receipt["summary_truncated"] is True
+
+
 async def a_very_long_report_title_still_fits_the_output_budget(env):
     """The longest title a report may have (``REPORT_QUESTION_MAX_CHARS``) and
     the most sections a report has: the answer page stays inside the byte
@@ -681,6 +722,7 @@ CASES = {
         a_retried_key_is_tied_to_its_report,
         a_retrieval_only_call_carries_the_receipt_and_the_restored_evidence,
         the_understanding_step_is_told_about_the_report,
+        a_report_too_long_for_one_turn_names_only_what_the_turn_read,
         a_very_long_report_title_still_fits_the_output_budget,
     )
 }
