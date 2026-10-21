@@ -481,7 +481,7 @@ def test_the_budget_sheds_everything_else_before_a_report_id() -> None:
     identifier, so it is neither shrunk by the first nor reached by the second."""
     packed = _budget_response({
         "scope": {"linked_report": {"report_id": GENERATED_REPORT_ID}},
-        "labels": [f"标签{index:03d}" + "标" * 40 for index in range(400)],
+        "rows": [{"label": f"标签{index:03d}" + "标" * 40} for index in range(400)],
     })
     assert packed["scope"]["linked_report"]["report_id"] == GENERATED_REPORT_ID
     assert packed["truncation"]["truncated"] is True, "the pressure was real"
