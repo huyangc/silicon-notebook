@@ -7487,8 +7487,14 @@ class AskService:
     def _reasoning_retrieval_phase(self, run) -> None:
         """The typed retrieval seam, then the selected-source graph lane; the
         evidence lands on ``run``. Fail-soft: a failure other than a cancel,
-        a retrieval-control refusal or a stage-boundary error leaves the run
-        with no evidence and only the pre-retrieval trace."""
+        a retrieval-control refusal or a stage-boundary error empties the
+        evidence lists and leaves only the pre-retrieval trace. What was
+        already produced stays: when the retriever has returned and the graph
+        lane is what failed, ``run.result`` is the retriever's snapshot (its
+        candidate ledger and external evidence still reach the draft) and
+        ``run.historical_chunks`` the passages it found; a failure before the
+        retriever returns leaves the empty ``ReasoningResult()`` and no
+        historical passages."""
         from app.application.ask_reasoning import StageBoundaryError
         from app.services.reasoning_retrieval import ReasoningResult
 
@@ -7496,7 +7502,6 @@ class AskService:
         notebook_id, limits = prepared.notebook_id, prepared.limits
         cancel_event, user_id = run.cancel_event, prepared.user_id
         pre_trace = run.pre_trace
-        source_graph_status = None
         historical_reasoning_chunks = []
         result = ReasoningResult()
         try:
@@ -7555,7 +7560,7 @@ class AskService:
             reasoning_outline_evidence = result.outline_evidence
             trace = [*pre_trace, *trace]
             historical_reasoning_chunks = list(chunks)
-            chunks, source_graph_status = self._activate_selected_source_graph(
+            chunks, _status = self._activate_selected_source_graph(
                 notebook_id,
                 historical_reasoning_chunks,
                 top_hits=top_hits,

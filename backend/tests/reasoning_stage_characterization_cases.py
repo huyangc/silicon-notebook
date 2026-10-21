@@ -898,6 +898,23 @@ def _between(obs: Observation, first: str, last: str) -> list[str]:
     return names[names.index(first) + 1:names.index(last)]
 
 
+#: How often a plain run embeds the research question in total. One more than
+#: the memo allows: the Memory recall runs before the run's embedding memo
+#: exists and so embeds it again. That extra embed is known and tracked as a
+#: separate optimisation; when it is fixed, this becomes 1 -- the one place to
+#: change.
+QUESTION_EMBEDS_PER_RUN = 2
+
+
+def _assert_embedded_once_in_memo(obs: Observation) -> None:
+    """Inside the memo window (everything but the Memory recall) every query
+    text is embedded once; the research question's total is pinned apart."""
+    embedded = collections.Counter(obs.embedded())
+    assert embedded[QUESTION] == QUESTION_EMBEDS_PER_RUN, embedded
+    in_memo = embedded - collections.Counter({QUESTION: QUESTION_EMBEDS_PER_RUN - 1})
+    assert set(in_memo.values()) <= {1}, embedded
+
+
 def _prompt(obs: Observation, workload: str) -> str:
     return "\n".join(json.dumps(call["messages"], ensure_ascii=False)
                      for call in obs.models(workload))
@@ -929,10 +946,8 @@ def _expect_answer_sync(obs: Observation) -> None:
 
     (activate,) = obs.calls("self._activate_selected_source_graph")
     assert activate["kwargs"]["max_results"] == Settings.model_fields["ppr_top_chunks"].default
-    # Inside the run's embedding memo every query is embedded once; the
-    # research question twice -- the Memory recall runs before the memo exists.
-    embedded = collections.Counter(obs.embedded())
-    assert embedded.pop(QUESTION) == 2 and set(embedded.values()) <= {1}, embedded
+    # Inside the run's embedding memo every query is embedded once.
+    _assert_embedded_once_in_memo(obs)
 
 
 def _expect_streamed_memory(obs: Observation) -> None:
@@ -1418,10 +1433,8 @@ def _expect_without_run(obs: Observation) -> None:
     response = _answered(obs, llm_mode="grounded")
     _ran_stages(obs)
     # The orchestrator's embedding memo is the only one here: inside it each
-    # query is embedded once (the research question also by the Memory recall,
-    # which runs before the memo exists).
-    embedded = collections.Counter(obs.embedded())
-    assert embedded.pop(QUESTION) == 2 and set(embedded.values()) <= {1}, embedded
+    # query is embedded once.
+    _assert_embedded_once_in_memo(obs)
     assert "[k1]" in response.answer
 
 
