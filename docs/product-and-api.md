@@ -2553,8 +2553,10 @@ snapshot, never given element vectors, image or source-fact backfills, never rep
 checkup, never read by the command catalog (its routes answer 404 and the source detail shows no entry), and never
 counted in the library profile's corpus statistics. An approval racing the deletion of the same promotion source waits for the deletion and writes the source
 again. Data approved before the upgrade is rewritten by the PostgreSQL `0068` / SQLite v88 migration (see Operations).
-Deleting a notebook cascades all members' private Memory bound to it, so the delete dialog
-warns about that lifecycle consequence without exposing member identities or counts.
+Deleting a notebook eventually deletes all members' private Memory bound to it, so the delete
+dialog warns about that lifecycle consequence without exposing member identities or counts; the
+deletion first holds the notebook for one day so readers can take their Memory out (see
+[Deleting a whole notebook: the one-day window](#deleting-a-whole-notebook-the-one-day-window)).
 
 Hard-deleting a Memory — `DELETE /memories/{id}`, or `POST /memories/bulk-delete` with at most
 200 ids (only the caller's own records count) — first removes everything derived from it: the
@@ -2626,14 +2628,15 @@ Actions that take access away never delete Memory: unsharing the notebook (which
 member list), revoking a grant, or removing someone from a granted group only withdraws access.
 Access is often temporary, so the Memory stays; while access is gone nobody can read it, its
 owner included, and it is visible to its owner again as soon as access returns. Deleting the
-whole notebook is different: it deletes everything in it, members' Memory included (above).
+whole notebook is different: after its one-day window it deletes everything in it, members' Memory
+included (below).
 
 Leaving a group (`DELETE /groups/{id}/membership`) does not delete Memory either: it removes only
 the caller's one membership row in that group. Notebooks the caller read only through that group
 become unreadable, and the caller's Memory in them with them (user ruling 2026-10-21: disclose
 before leaving, allow exporting first, never delete). Before leaving,
 `GET /groups/{id}/membership/leave-preview` returns
-`{"notebook_count": N, "memory_count": M, "notebooks": [{"notebook_id", "name", "memory_count"}]}`:
+`{"notebook_count": N, "memory_count": M, "notebooks": [{"notebook_id", "name", "memory_count", "pending_delete", "delete_after"}]}`:
 the notebooks holding the caller's own Memory that the caller reads now and would no longer read
 after leaving, each with its name and the caller's Memory count (every status, as the notebook
 exit disclosure and the export count them), ordered by name; N and M are that list's length and
@@ -2642,7 +2645,11 @@ sum, computed by the server. The measure is exactly what the leave does: the rea
 (`read_access_after_group_exit_clause`: both `group_members` subqueries gain a `group_id` inequality).
 Notebooks still readable through ownership, a notebook membership, a personal grant, an everyone
 grant or **another** group are not listed; nor are ones the caller cannot read already (being
-deleted, removed long ago). It answers only the caller's own leave: a non-member gets the same 404
+deleted, removed long ago). A notebook inside its one-day deletion window **is** listed (ruling
+B12), with `pending_delete: true` and its `delete_after`: leaving would also end the caller's way to
+export that Memory before the deadline, so the panel tags it 「即将删除」 and says to export first;
+every other row carries `pending_delete: false`, `delete_after: null`. A notebook whose window has
+already closed is not listed. It answers only the caller's own leave: a non-member gets the same 404
 as an unknown group, with no system-admin bypass. It is a plain read; the leave itself takes no
 acknowledgement. The web confirmation panel says 「退出后，你将看不到 N 个笔记本里你的 M 条记忆」,
 lists each notebook with its own 「导出」 (reusing `GET /notebooks/{id}/memories/export`, which
@@ -2660,6 +2667,97 @@ the notebooks the rejoined member can read: those still shared with the group co
 with the group's admins only (`group_admins`) comes back only to someone who rejoins as a group admin
 (an invite link joins as a plain member). The export file's note line states both that leaving the
 shared notebook deletes these items and that leaving a group does not.
+
+### Deleting a whole notebook: the one-day window
+
+Product decision 2026-10-21 (rulings B1–B12 of 2026-10-22; spec
+`docs/superpowers/specs/2026-10-22-notebook-delete-grace-window_zh.md`): deleting a notebook no longer
+deletes it at once. The owner's `DELETE /api/notebooks/{id}` puts it into a **one-day window**
+(`notebooks.status='pending_delete'`, `delete_after = now + NOTEBOOK_DELETE_GRACE_SECONDS`). From that
+instant the notebook is **unavailable to everyone**, its owner included: it is gone from every list,
+search, Ask scope (notebook and global), mount, share link (`/shared`, `/c`, report and global-conversation
+shares answer as for a missing library), MCP / Agent token and administrator count — `pending_delete` is one
+of the values `NOTEBOOK_LIVE_SQL` lists, so every read and write path treats it exactly as a notebook being
+deleted. Nothing inside is touched: members, grants, mounts, share tokens, conversations and in-flight
+work stay as they are, and in-flight maintenance (a KG rebuild already running) finishes normally. When
+`delete_after` passes, the delete sweep's driver C moves the row to `'deleting'` and inserts its delete
+job in the same transaction; the six-phase delete then runs exactly as before, retention projection and
+the global-turn stamp (#931) included. A window that closed while the server was down is promoted by the
+startup sweep. The window has no "delete now" (ruling B8) and its length is a constant, not a setting
+(B2); every client reads the deadline from `delete_after`.
+
+Only five entries stay open during the window, each one deliberately:
+
+1. **Export my own Memory** — `GET /notebooks/{id}/memories/export` works for any reader of the notebook
+   (owner included, ruling B4) while the window is open: the export's snapshot classifies the notebook in
+   its own first statement, and the file's header gains 「这本笔记本已被所有者删除，{时刻}起其中的全部内容（包括这些记忆）将被永久删除。」.
+   The deadline means "start before it": an export whose snapshot began inside the window is complete even
+   if the promotion and the Memory delete commit while it pages. Once the window has closed (deadline
+   passed, promoted or not) the answer is 404 `{"detail": {"code": "delete_window_closed"}}`; after phase 3
+   removed the caller's membership it degrades to a plain 404. A reader who loses read access during the
+   window loses the export too.
+2. **Cancel** — `POST /api/notebooks/{id}/cancel-delete`, the **owner only** (ruling B1; members and
+   administrators get 404; a mirror 409 `notebook_mirrored`): before `delete_after` the row returns to its
+   previous status and everything comes back as it was — **except Memory a member already moved out**
+   (entry 5), which stays in its new notebook. 200 with the notebook summary; a repeated cancel answers the
+   same summary. After the deadline (promoted or not) 409 `{"detail": {"code": "notebook_delete_due",
+   "message"}}`; a missing notebook 404. A content-free audit event `notebook_delete_cancelled` is written
+   (also `notebook_delete_requested` / `notebook_delete_promoted`).
+3. **Notices** — `GET /api/me/notebook-deletions` → `{"items": [{"notebook_id", "name", "delete_after",
+   "is_owner", "memory_count", "transferable_count"}]}`, the windows open now that concern the caller: the
+   owner, and readers holding at least one Memory there (ruling B3); oldest deadline first. `memory_count` is
+   the caller's own Memory there (every status, what the export holds); `transferable_count` the part a
+   transfer moves (confirmed, not proposed for promotion). The pending-actions center shows each as a
+   `notebook_pending_delete` item that **counts as unread**. Each transition (request, cancel, promotion)
+   refreshes the owner's and every Memory holder's bell (fail-open). There is no separate reminder before
+   the deadline (B10).
+4. **Explanation code** — `GET /api/notebooks/{id}` answers a reader of a notebook inside its window 404
+   `{"detail": {"code": "notebook_pending_delete", "notebook_id", "name", "delete_after", "is_owner",
+   "memory_count", "transferable_count"}}`; anyone else gets the plain 404. Every sub-resource keeps its
+   plain 404.
+5. **Move my Memory to my notebook** (ruling B9, 2026-10-22) — `POST /notebooks/{id}/memories/transfer`
+   with `{"target_notebook_id"}`: moves every one of the caller's confirmed Memory items the move rule
+   accepts into a live notebook the caller owns. Always a **move** (no copy), the server picks the items,
+   `extract_kg` as the Memory page's transfer defaults it; candidates and items proposed for promotion stay
+   behind (the interface says 「N 条记忆无法转移，请先导出」). The answer has the shape of
+   `POST /memories/transfer` (`{"results": [...]}`, one entry per item). The instant is taken once when the
+   transfer starts and every item re-checks the window with it: once the promotion has committed, the
+   remaining items fail one by one with `error_code="delete_window_closed"` while the moved ones stay moved.
+   A closed window before the first item: 404 `delete_window_closed`; an unreadable notebook or a target the
+   caller cannot write: 404. **Moved Memory never returns, even if the owner cancels.**
+
+A repeated `DELETE` during the window is 409 `{"detail": {"code": "notebook_pending_delete",
+"delete_after", "message"}}` for the owner (404 for anyone else); a notebook already being deleted,
+copied or imported keeps the existing 409. A group share-request approval on a notebook inside its window
+answers 409 「这本笔记本已安排删除，不能再共享。」. Global Ask turns that used the notebook are unreadable for
+the day and come back on cancel; after the physical delete they follow #931 (ruling B5). Administrator
+counts leave it out during the window and count its retained summary afterwards (B6). The cross-environment
+sync keeps exporting a source notebook inside its window, and the four window columns are target-owned: a
+mirror starts outside any window and a target can never open one on a mirror (the mirror fence refuses
+the delete). Deletions that do not go through the browser route keep deleting at once (B7): the sync
+import's propagated deletion, the synchronous delete used by scripts and tests, offline tooling. MCP offers
+no export or notice (B11).
+
+The browser: the owner's confirmation dialog 「删除笔记本」 says the notebook becomes unavailable to everyone
+at once, is kept one day and then permanently deleted with everything in it, members' own Memory included;
+that Memory holders are notified and can export or move their Memory to their own notebook; that the owner
+can cancel at any time and everything else comes back, but Memory already moved out does not. It still shows
+no member or Memory counts; buttons 「取消」 / 「确认删除」 (「正在提交…」 while in flight); the success toast
+names the deadline. At the top of the notebook list a block 「即将永久删除的笔记本」 lists each notice with its
+sentence and controls whose outcome lands beside them: 「撤销删除」 (owner; 撤销中… / 已撤销 / 「删除时间已到，
+已无法撤销」 / 「这本笔记本已不存在」), 「导出我的记忆（N 条）」 (导出中… / 已导出 / 导出失败 with the reason:
+over the limit, window closed, nothing left) and 「转移到我的笔记本」 (first shows 「转移后这些记忆会离开这本笔记本，
+即使所有者撤销删除也不会回来。」, then a picker of the caller's own notebooks and 「确认转移」; the result names
+the count moved and failed). A row whose deadline passed on the local clock says 「删除时间已到，正在永久
+删除。」 with no control and re-reads; an unreadable list says 「暂时读不到即将删除的笔记本，请稍后重试」
+(fail-closed, with a retry). Clicking the bell item opens the list on that row. Opening such a notebook (a
+stale link, a bookmark) shows the explanation box 「这本笔记本已被删除」 with the same sentence and
+「撤销删除」 (owner), 「导出我的记忆」, 「转移到我的笔记本」 (goes to the block) and 「返回笔记本列表」.
+
+| Bound | Value |
+| --- | --- |
+| Window length | 86,400 s, one day (`NOTEBOOK_DELETE_GRACE_SECONDS`, a constant, not a setting) |
+| Promotion latency after the deadline | up to one sweep interval (`NOTEBOOK_DELETE_SWEEP_SECONDS`, default 300) |
 
 The committed deterministic Memory evaluation reports Recall@5, MRR, nDCG, and three
 zero-tolerance counters: candidate-to-formal-plane leakage, cross-user leakage, and
@@ -4207,6 +4305,14 @@ navigated away or reloaded can find the question they left behind and reopen it.
 It is a projection plus navigation — no new endpoint, no write path, and no
 cancellation entry (stopping an ask stays the in-session 「停止」 button).
 
+A further group, listed first, is 「即将永久删除的笔记本」: one `notebook_pending_delete` item per
+notebook inside its one-day deletion window that concerns the user (owner, or a reader holding Memory
+there), carrying `delete_after`, `is_owner`, `memory_count` and `transferable_count`. Unlike running
+asks it **counts as unread** (it has a deadline after which that Memory cannot be exported any more);
+its identity is the notebook plus the deadline, so a second deletion after a cancel is a new item.
+Clicking it opens the notebook list with that row of the block focused (see
+[Deleting a whole notebook: the one-day window](#deleting-a-whole-notebook-the-one-day-window)).
+
 - **Membership is exact.** An item exists only while `ask_jobs.status = 'running'`,
   the single in-flight state the table has (`queued` does not exist: a job row is
   inserted already running). The terminal states `done` / `failed` / `cancelled`, and
@@ -4585,7 +4691,7 @@ Administrators have a global **Question Analysis** page at `/admin/questions`. I
 
 Key local beta APIs:
 
-- `GET /api/notebooks`, `POST /api/notebooks`, `PATCH /api/notebooks/{id}`, `DELETE /api/notebooks/{id}` — the delete endpoint returns **202** with `{"status":"deleting"}`, not 204: it commits a single-row status change (`notebooks.status='deleting'`) and returns immediately; the notebook is excluded from every list/read/search/mount surface from that instant on (`GET /api/notebooks/{id}` 404s immediately), but its **owner** gets **409** from a repeat `DELETE` on the same notebook (codex #659 R6 P2: the delete endpoint's guard is owner-scoped and deliberately does not apply the same live-only visibility filter every other write endpoint does, precisely so a retried/duplicate delete request reaches this 409 instead of a misleading 404) — a **non-owner** still gets 404 either way (existence is never leaked to a caller without access). The actual database and disk cleanup runs afterward as a background job (materializing source file paths, waiting out any knowledge-graph rebuild already running against that notebook, then one atomic finalize step that archives the deleted content into the user's retained-activity history and removes the row). The browser already treated a successful delete as fire-and-forget (it tombstones the card client-side and refreshes the list), so this is a behavior change only for direct API callers that previously relied on 204 meaning "fully deleted" — poll `GET /api/notebooks/{id}` (404) to confirm invisibility, or (administrators only) `GET /api/admin/users/{user_id}/activity` for confirmation the retained-activity archive has landed. The archived `deleted_at` timestamp is the finalize step's moment, which can trail the delete request by anywhere from under a second to tens of minutes on a large notebook. A full KG **rebuild**'s own delete phase (a different path from notebook deletion) likewise drains the old graph in bounded pages before its single atomic reset; the page/threshold row budget is `KG_GRAPH_DRAIN_PAGE_ROWS` (default 2000, allowed 50–20000 — the ceiling stays under SQLite's default SQLITE_MAX_VARIABLE_NUMBER because drain pages bind selected ids as SQL parameters).
+- `GET /api/notebooks`, `POST /api/notebooks`, `PATCH /api/notebooks/{id}`, `DELETE /api/notebooks/{id}`, `POST /api/notebooks/{id}/cancel-delete`, `GET /api/me/notebook-deletions` — the delete endpoint returns **202** with `{"status":"pending_delete","delete_after":"…"}`: it commits a single-row status change into the one-day deletion window (`notebooks.status='pending_delete'`; see [Deleting a whole notebook: the one-day window](#deleting-a-whole-notebook-the-one-day-window) for the window, the owner's cancel and the notices) and returns immediately; the notebook is excluded from every list/read/search/mount surface from that instant on (`GET /api/notebooks/{id}` 404s immediately, with an explanation code for its readers), and once `delete_after` passes the delete sweep promotes it to `notebooks.status='deleting'` and the background delete below runs. Its **owner** gets **409** from a repeat `DELETE` on the same notebook (`notebook_pending_delete` inside the window) (codex #659 R6 P2: the delete endpoint's guard is owner-scoped and deliberately does not apply the same live-only visibility filter every other write endpoint does, precisely so a retried/duplicate delete request reaches this 409 instead of a misleading 404) — a **non-owner** still gets 404 either way (existence is never leaked to a caller without access). The actual database and disk cleanup runs afterward as a background job (materializing source file paths, waiting out any knowledge-graph rebuild already running against that notebook, then one atomic finalize step that archives the deleted content into the user's retained-activity history and removes the row). The browser already treated a successful delete as fire-and-forget (it tombstones the card client-side and refreshes the list), so this is a behavior change only for direct API callers that previously relied on 204 meaning "fully deleted" — poll `GET /api/notebooks/{id}` (404) to confirm invisibility, or (administrators only) `GET /api/admin/users/{user_id}/activity` for confirmation the retained-activity archive has landed. The archived `deleted_at` timestamp is the finalize step's moment, which can trail the delete request by anywhere from under a second to tens of minutes on a large notebook. A full KG **rebuild**'s own delete phase (a different path from notebook deletion) likewise drains the old graph in bounded pages before its single atomic reset; the page/threshold row budget is `KG_GRAPH_DRAIN_PAGE_ROWS` (default 2000, allowed 50–20000 — the ceiling stays under SQLite's default SQLITE_MAX_VARIABLE_NUMBER because drain pages bind selected ids as SQL parameters).
 - `GET /api/notebooks/{id}/analytics` — the knowledge analytics panel (any reader of the notebook). `feedback_useful` / `feedback_not_useful` and `usefulness_rate` include the **global Ask ratings attributed to this notebook**: a global rating counts once in every library its run searched or cited (when it did neither, in its participants minus the skipped ones — the same rule as the post-Ask learning chain, `global_ask_attribution`); `feedback_useful_global` / `feedback_not_useful_global` are that global subset, which the panel notes after 👍/👎 as 「（其中全局问答 N 条）」. `low_rated_questions` (「低分提问（知识缺口）」) lists notebook questions only — a global question's text never appears there — and ends with 「另有 N 条来自全局问答」. The response carries counts only, never another participant's id or name. `answers_total` (the panel's 「提问」) likewise includes the **global Ask answers attributed to this notebook**: the notebook's own answers plus every finished (`done`) global Ask job attributed to it that is not past its retention stamp, one count in every library a job is attributed to; `answers_global` is that global subset, noted on the panel as 「（其中全局问答 N 条）」 (hidden when 0). The global part is an index count over `global_ask_job_notebooks`; jobs not yet backfilled after the upgrade are counted through the payload predicate (the same rule, so the number is the same before and after the backfill).
 - `GET /api/notebooks/{id}/analytics/content-overview` — viewer-aware content assets: `memory` (`total`, `confirmed`, `candidate`, up to three recent `id`/`title`/`status`/`updated_at`) and `knowhow` (`table_count`, `row_count`, `projection_pending`, `projection_failed`, `stale_code_count`, up to three recent table summaries)
 - `GET /api/notebooks/{id}/checkup` — read-only pipeline health check (dashboard hot path): aggregates source/index damage-and-pending signals — empty source, missing retrieval segments, missing retrieval vectors, sources pending analysis, stale/corrupt retrieval index — each with a count, a bounded sample, and a repair action (read-only items carry the action `none`: they are shown as a notice without a button because the system handles them). `healthy` is true when every repairable item (action other than `none`) counts zero; read-only items are still listed with their counts but do not count toward `healthy`, and they neither ring the bell nor keep the repair polling alive. Consumed by the dashboard's source-status and index blocks plus the bell; a healthy notebook stays neutral and undisturbed. The two missing-retrieval-vector counts are served from an event-driven per-notebook memo: the app's own vector writes (ingest embedding, "backfill vectors", re-parse) invalidate it on completion, so the next poll reflects the new counts; **cross-process** writes (an operator running the offline CLI backfill/import on the server) and a few rare background-failure paths are invisible to these events and fall back to the backstop cache — counts may be **up to 300 seconds stale** in those scenarios.
