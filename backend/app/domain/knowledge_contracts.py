@@ -19,6 +19,20 @@ USABLE_STATUSES = ("approved", "reviewed", "project_specific", "conflict")
 # Every status a curator can stamp on a knowledge object.
 KNOWLEDGE_STATUSES = ("approved", "reviewed", "deprecated", "conflict", "project_specific")
 
+
+def visible_payload(payload: object) -> dict:
+    """A knowledge object's payload as any client may see it: every key that
+    starts with ``_`` is internal bookkeeping (the own-Memory merge marker
+    ``_merged_into`` and gate ``_absorbs``, ``app.domain.memory_kg_isolation``)
+    and is dropped. Every exit that hands a payload WHOLE to an API, MCP or UI
+    client goes through this (graph nodes, the owner's overlay, concept
+    detail members and attached objects, the promotion queue); field-by-field
+    projections (``knowledge_record``, search text, retrieval text) skip the
+    same keys on their own. Anything that is not a mapping reads as empty."""
+    if not isinstance(payload, dict):
+        return {}
+    return {key: value for key, value in payload.items() if not str(key).startswith("_")}
+
 # ---------------------------------------------------------------------------
 # KG 质量分析的只读聚合契约(设计:docs/superpowers/specs/2026-07-25-kg-analysis-view-design.md)
 #

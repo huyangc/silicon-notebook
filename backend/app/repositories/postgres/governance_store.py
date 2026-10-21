@@ -55,6 +55,7 @@ from app.domain.memory_kg_isolation import (
     MemoryKnowledgeMergeRefused,
     MemoryPromotionRefused,
     PromotionObjectMissing,
+    FOLLOW_REPOINT,
     FOLLOW_RESTORE,
     ABSORBS_PAYLOAD_KEY,
     MERGED_INTO_PAYLOAD_KEY,
@@ -2323,9 +2324,16 @@ class GovernanceStore:
                     (found.param, notebook_id),
                 ).fetchall()
             })
+            # A re-point's target gets the follower gate (ABSORBS_PAYLOAD_KEY)
+            # if it lacks it; its row is locked with the followers in ONE
+            # id-ordered statement, so the two row sets never lock out of order.
+            targets = {
+                wanted[object_id].repoint_to for object_id in live
+                if wanted[object_id].kind == FOLLOW_REPOINT and wanted[object_id].repoint_to
+            }
             locked = []
             if live:
-                bound = id_bind_ids(live)
+                bound = id_bind_ids(sorted(set(live) | targets))
                 locked = id_execute_ids(
                     connection,
                     "SELECT id, status, payload FROM knowledge_objects "
@@ -2333,9 +2341,14 @@ class GovernanceStore:
                     f"ORDER BY id COLLATE \"C\" FOR UPDATE{skip}",
                     (bound.param, notebook_id),
                 ).fetchall()
+            by_locked = {str(row["id"]): row for row in locked}
             done = set()
-            for row in locked:
-                action = wanted[str(row["id"])]
+            gated: set = set()
+            for object_id in live:
+                row = by_locked.get(object_id)
+                if row is None:
+                    continue
+                action = wanted[object_id]
                 done.add(action.object_id)
                 payload = json_value(row["payload"], {})
                 if row["status"] != "deprecated" or (
@@ -2354,6 +2367,17 @@ class GovernanceStore:
                     ),
                 )
                 applied.append(action)
+                target = by_locked.get(action.repoint_to) if action.kind == FOLLOW_REPOINT else None
+                if target is not None and action.repoint_to not in gated:
+                    gated.add(action.repoint_to)
+                    target_payload = json_value(target["payload"], {})
+                    if not target_payload.get(ABSORBS_PAYLOAD_KEY):
+                        connection.execute(
+                            "UPDATE knowledge_objects SET payload = %s "
+                            "WHERE id = %s AND notebook_id = %s",
+                            (jsonb(marked_absorbs(target_payload)), action.repoint_to,
+                             notebook_id),
+                        )
             if not wait:
                 skipped.extend(
                     action for object_id, action in sorted(wanted.items())
@@ -2496,7 +2520,8 @@ class GovernanceStore:
             )
         if backfilled[notebook_id]:
             rows = connection.execute(
-                "SELECT o.id, o.status, o.evidence FROM knowledge_object_sources kos "
+                "SELECT o.id, o.status, o.evidence, o.payload "
+                "FROM knowledge_object_sources kos "
                 "JOIN knowledge_objects o ON o.id = kos.object_id "
                 "WHERE kos.source_id = %s AND kos.notebook_id = %s AND o.id <> %s "
                 "AND o.source_id IS DISTINCT FROM %s",
@@ -2504,14 +2529,16 @@ class GovernanceStore:
             ).fetchall()
         else:
             rows = connection.execute(
-                "SELECT id, status, evidence FROM knowledge_objects "
+                "SELECT id, status, evidence, payload FROM knowledge_objects "
                 "WHERE notebook_id = %s AND id <> %s AND source_id IS DISTINCT FROM %s "
                 "AND evidence @> jsonb_build_array("
                 "jsonb_build_object('source_id', %s::text))",
                 (notebook_id, row["id"], row["source_id"], row["source_id"]),
             ).fetchall()
         return [
-            (str(r["id"]), str(r["status"]), json_value(r["evidence"], [])) for r in rows
+            (str(r["id"]), str(r["status"]), json_value(r["evidence"], []),
+             json_value(r["payload"], {}))
+            for r in rows
         ]
 
     @staticmethod

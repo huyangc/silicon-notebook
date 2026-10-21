@@ -61,6 +61,9 @@ _SAFE_JOB_PREFIXES = (
     ("buildkg-", "buildkg"),
     ("index-pipeline-", "index-pipeline"),
     ("deletenb-", "deletenb"),
+    # The own-Memory merge backstop (startup pass, or one notebook after a
+    # follow-up timed out): ``SourceIngestionService.heal_memory_merges``.
+    ("memory-merge-heal", "memory-merge-heal"),
 )
 # "ask-auto": the simplified UI's Ask is submitted before its engine is chosen
 # (selection runs inside the worker), so the diagnostic name must exist for it
@@ -129,6 +132,10 @@ _LIGHT_MAINTENANCE_OPERATIONS = frozenset({
     # 与 agentprofile/retrievalexperience 同一档的有界工作,而且过阈值之后触发的
     # 恰恰就是那两条链自己的 job。
     "ask-completed",
+    # 本人记忆合并的兜底(启动一次,或某本笔记本的补跑超时之后一次):只读一页候选 +
+    # 每本一个有界等待的短写事务,与 knowhow 投影同量级,进**轻活**池——有界并发、
+    # 线程复用;进程内另按笔记本去重(`SourceIngestionService._schedule_memory_merge_heal`)。
+    "memory-merge-heal",
 })
 # 批 3·W1 PR-3(D-2 已定):第三个池,判据同上两池同轴——量级差。删除既不是
 # LLM 扇出型重活(会被小时级重建饿死,而删除是用户已点过确认的操作),也不是

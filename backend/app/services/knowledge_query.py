@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
+from app.domain.knowledge_contracts import visible_payload
 from app.models.ask import RuleCard
 from app.models.knowledge import (
     KnowledgeEdge,
@@ -785,7 +786,7 @@ class KnowledgeQueryService:
             members.append({
                 "id": row["member_object_id"],
                 "object_type": row["object_type"],
-                "payload": json.loads(row["payload"] or "{}"),
+                "payload": visible_payload(json.loads(row["payload"] or "{}")),
                 "evidence": member_evidence,
             })
             member_ids.append(row["member_object_id"])
@@ -863,7 +864,11 @@ class KnowledgeQueryService:
                     if scope.object_hidden(item["id"]):
                         continue
                     item = {**item, "evidence": scope.filter_evidence(item.get("evidence") or [])}
-                attached.append({**item, "edge_type": edge["edge_type"]})
+                attached.append({
+                    **item,
+                    "payload": visible_payload(item.get("payload")),
+                    "edge_type": edge["edge_type"],
+                })
         by_id = {member["id"]: member for member in members}
         evidence = [
             item

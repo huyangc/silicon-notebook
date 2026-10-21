@@ -37,6 +37,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
+from app.domain.knowledge_contracts import visible_payload
 from app.domain.memory_kg_isolation import (
     PROMOTION_PROPOSE_MESSAGE,
     MemoryPromotionRefused,
@@ -103,7 +104,7 @@ def promotion_row_to_dict(
         "reviewed_by": row["reviewed_by"],
         "base_match_id": row["base_match_id"],
         "created_at": row["created_at"],
-        "payload": payload if payload is not None else {},
+        "payload": visible_payload(payload) if payload is not None else {},
         "evidence": evidence if evidence is not None else [],
         "source_kind": "memory" if row["object_type"] == "memory" else "knowledge",
         "memory_id": row["object_id"] if row["object_type"] == "memory" else "",

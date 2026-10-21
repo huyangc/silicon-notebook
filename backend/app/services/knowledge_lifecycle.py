@@ -56,6 +56,7 @@ from app.domain.indexing_pipeline import (
     IndexingPipelineMemorySourceError,
     IndexingPipelineStalePlanError,
 )
+from app.domain.knowledge_contracts import visible_payload
 from app.models.sources import kg_analyzed_without_objects
 from app.repositories.ports import (
     GovernanceStorePort,
@@ -4849,7 +4850,7 @@ class KnowledgeLifecycleService:
         if shared:
             nrows, relations = scope.drop_hidden_graph(
                 list(nrows), list(relations), shared=True)
-        nodes = [{"id": r["id"], "object_type": r["object_type"], "payload": json.loads(r["payload"] or "{}")} for r in nrows]
+        nodes = [{"id": r["id"], "object_type": r["object_type"], "payload": visible_payload(json.loads(r["payload"] or "{}"))} for r in nrows]
         edges = [{"source_object_id": r["source_object_id"], "target_object_id": r["target_object_id"], "edge_type": r["edge_type"]}
                  for r in relations]
         g = derive_unified_graph(nodes, edges, self.cluster_map(notebook_id))

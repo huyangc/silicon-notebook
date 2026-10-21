@@ -352,6 +352,9 @@ class SourceIngestionService:
         self.memory_evidence_detach = memory_evidence_detach
         self.memory_merge_actions_on = memory_merge_actions_on
         self.memory_merge_heal_candidates = memory_merge_heal_candidates
+        # Notebooks with a backstop pass queued or running in this process.
+        self._merge_heal_lock = threading.Lock()
+        self._merge_heal_pending: set[str] = set()
         self.promotion_detach = promotion_detach
         self.begin_extraction_run = begin_extraction_run
         self.finish_extraction_run = finish_extraction_run
@@ -2554,18 +2557,34 @@ class SourceIngestionService:
 
     def _schedule_memory_merge_heal(self, notebook_id: str) -> None:
         """Hand one notebook to a background backstop pass (after a follow-up
-        could not take its locks in time). Best-effort: a failure to submit
+        could not take its locks in time), in the light maintenance pool
+        (``memory-merge-heal``, bounded concurrency). Deduplicated per notebook
+        in this process: while one pass for the notebook is queued or
+        running, another request (the next page of a member-exit purge whose
+        follow-up timed out too) submits nothing — that pass reads every
+        candidate of the notebook anyway. Best-effort: a failure to submit
         leaves the rows to the startup pass."""
+        with self._merge_heal_lock:
+            if notebook_id in self._merge_heal_pending:
+                return
+            self._merge_heal_pending.add(notebook_id)
+
+        def run() -> int:
+            try:
+                return self.heal_memory_merges(
+                    notebook_id=notebook_id, lock_timeout_ms=MERGE_HEAL_LOCK_TIMEOUT_MS
+                )
+            finally:
+                with self._merge_heal_lock:
+                    self._merge_heal_pending.discard(notebook_id)
+
         try:
             from app.services import background_jobs
 
-            background_jobs.submit(
-                self.heal_memory_merges,
-                notebook_id=notebook_id,
-                lock_timeout_ms=MERGE_HEAL_LOCK_TIMEOUT_MS,
-                name="memory-merge-heal",
-            )
+            background_jobs.submit(run, name="memory-merge-heal")
         except Exception as exc:  # noqa: BLE001 - the startup pass is the backstop
+            with self._merge_heal_lock:
+                self._merge_heal_pending.discard(notebook_id)
             self.event_log.logger.warning(
                 "memory merge heal scheduling failed (%s)", type(exc).__name__
             )

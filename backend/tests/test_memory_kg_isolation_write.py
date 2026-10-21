@@ -642,6 +642,92 @@ def test_the_merge_opens_the_follower_gate_on_the_target_only(own_pair):
     assert _status(repo, a1) == "approved"
 
 
+def _as_owner(callable_):
+    from app.core.request_context import reset_request_user, set_request_user
+    from app.models.identity import UserProfile
+
+    token = set_request_user(UserProfile(
+        id="u-a", email="u-a@example.test", display_name="u-a", role="user",
+    ))
+    try:
+        return callable_()
+    finally:
+        reset_request_user(token)
+
+
+def _payload_keys(value) -> set:
+    """Every key of every dict nested in ``value`` (graph nodes, members...)."""
+    keys: set = set()
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            keys.add(str(key))
+            keys |= _payload_keys(inner)
+    elif isinstance(value, (list, tuple)):
+        for inner in value:
+            keys |= _payload_keys(inner)
+    return keys
+
+
+@pytest.mark.parametrize("level", ["concept", "object"])
+def test_the_owner_graph_never_shows_internal_payload_keys(own_pair, level):
+    """Spec P2-1: the merge gate ``_absorbs`` (and any ``_`` key) never
+    reaches the owner's graph nodes nor the concept detail — every exit that
+    hands a payload whole goes through ``visible_payload``."""
+    repo, nb, _src_a1, _src_a2, _a1, a2 = own_pair
+    assert _payload(repo, a2)[ABSORBS_PAYLOAD_KEY] is True
+    graph = _as_owner(lambda: repo.unified_graph(nb, level=level))
+    nodes = [n if isinstance(n, dict) else n.model_dump() for n in graph["nodes"]]
+    assert a2 in {str(n["id"]) for n in nodes}
+    for node in nodes:
+        assert not any(key.startswith("_") for key in (node.get("payload") or {})), node
+    detail = _as_owner(lambda: repo.concept_detail(nb, a2))
+    detail = detail if isinstance(detail, dict) else detail.model_dump()
+    assert not any(key.startswith("_") for key in _payload_keys(detail.get("members"))), detail
+
+
+def test_the_backstop_never_repoints_to_a_hand_deprecated_holder(world):
+    """Spec P3-1(a): a1 → b, the owner restores a1 and deprecates b by hand,
+    then a1 → a2 and a2 vanishes without its follow-ups. b still carries
+    a1's evidence but is hand-deprecated without a marker: not an eligible
+    target (pointing there would leave a1 unsettled for ever), so the
+    backstop restores a1."""
+    repo, nb, _upload = world
+    sources = [_confirmed_memory(repo, nb, f"mem-{n}", "u-a") for n in ("a1", "b", "a2")]
+    a1, b, a2 = (_concept(_objects(repo, nb, s)) for s in sources)
+    governance = _governance(repo)
+    governance.merge_knowledge(nb, a1, MergeRequest(into_id=b), actor_id="u-a")
+    governance.update_knowledge(nb, a1, KnowledgeUpdate(status="approved"), actor_id="u-a")
+    governance.update_knowledge(nb, b, KnowledgeUpdate(status="deprecated"), actor_id="u-a")
+    governance.merge_knowledge(nb, a1, MergeRequest(into_id=a2), actor_id="u-a")
+    with repo._write() as db:
+        db.execute("DELETE FROM knowledge_objects WHERE id=?", (a2,))
+    assert repo._runtime.source_ingestion.heal_memory_merges() == 1
+    assert _status(repo, a1) == "approved"
+    assert _status(repo, b) == "deprecated"
+
+
+def test_a_repoint_opens_the_follower_gate_on_its_target(world):
+    """Quality P3-2: a1 → a2 → a3 with a3's gate missing (a stale write);
+    clearing mem-a2 re-points a1 at a3 and opens a3's gate, so clearing
+    mem-a3 later settles a1 at once instead of waiting for a backstop."""
+    repo, nb, _upload = world
+    sources = [_confirmed_memory(repo, nb, f"mem-a{n}", "u-a") for n in (1, 2, 3)]
+    a1, a2, a3 = (_concept(_objects(repo, nb, s)) for s in sources)
+    _governance(repo).merge_knowledge(nb, a1, MergeRequest(into_id=a2), actor_id="u-a")
+    _governance(repo).merge_knowledge(nb, a2, MergeRequest(into_id=a3), actor_id="u-a")
+    with repo._write() as db:
+        payload = _payload(repo, a3)
+        payload.pop(ABSORBS_PAYLOAD_KEY)
+        db.execute(
+            "UPDATE knowledge_objects SET payload=? WHERE id=?", (json.dumps(payload), a3)
+        )
+    _change_memory(repo, nb, "mem-a2", "delete")
+    assert _payload(repo, a1)[MERGED_INTO_PAYLOAD_KEY] == a3
+    assert _payload(repo, a3)[ABSORBS_PAYLOAD_KEY] is True
+    _change_memory(repo, nb, "mem-a3", "delete")
+    assert _status(repo, a1) == "approved"
+
+
 def _sqlite_plan(db, sql: str, params: tuple) -> str:
     return "\n".join(
         str(row[3]) for row in db.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()
