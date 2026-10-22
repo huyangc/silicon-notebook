@@ -2886,6 +2886,9 @@ class ReportEngine:
                 # retrieval and the selected-source graph lane), and the broad
                 # arm below would turn an identity mismatch into one section
                 # quietly marked 失败. Bare on purpose (see ``_draft_one``).
+                # The other sections are not stopped early: they run to their
+                # own end and the report fails when the results are collected,
+                # exactly as with ``_draft_one`` today.
                 raise
             except AskCancelled:
                 # A cancelled stage is exactly the one worth attributing: the

@@ -759,6 +759,16 @@ class SelectedSourceGraphContributionCall:
         by the workflow once ``host.run`` returns (``raise_control_error``).
         An exception raised by a third-party contribution's own code never
         reaches this method and is still absorbed by the host.
+
+        Accepted trade-offs, all telemetry-only and on a path no production
+        run reaches today (peer mode returns before the lane runs):
+        * after a core refusal is recorded the host still emits a
+          ``failed`` / ``contribution_failed`` operations event for the
+          built-in contribution and goes on running any later third-party
+          contributions; the round fails only once ``host.run`` returns;
+        * if the service already emitted a successful
+          ``selected_source_graph`` event and the refusal arrives later, at
+          the admission read, that event disagrees with the final outcome.
         """
         if self._control_error is None:
             self._control_error = exc
