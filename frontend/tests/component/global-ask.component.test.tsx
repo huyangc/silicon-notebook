@@ -2332,13 +2332,15 @@ function PreviewHost() {
   });
   const view = presentation.view("answer-image-preview");
   const image = currentPreviewImage(preview);
+  // 渲染顺序与 page.tsx 一致（预览在前、浮窗在后）：同一次提交里谁的 layout 相位先跑，
+  // 决定了预览关闭按钮的 autoFocus 发生时窗口是否还是模态的。
   return <>
-    <GlobalAskLauncher presentation={presentation} imagePreviewOpen={view.open}
-      onPreviewImage={(request) => { if (presentation.openAbove("answer-image-preview", "global-ask")) setPreview(request); }} />
     {view.open && image && <ImagePreviewModal referenceLabel={image.referenceLabel} interactive={view.topmost} zIndex={view.zIndex}
       onClose={(reason) => presentation.requestClose("answer-image-preview", reason)}>
       <AuthedImage url={sourceImageAssetUrl("", image.notebookId, image.assetId)} alt={image.alt} />
     </ImagePreviewModal>}
+    <GlobalAskLauncher presentation={presentation} imagePreviewOpen={view.open}
+      onPreviewImage={(request) => { if (presentation.openAbove("answer-image-preview", "global-ask")) setPreview(request); }} />
   </>;
 }
 
@@ -2466,6 +2468,19 @@ test("the full window opens the same preview and gets its modal state and scroll
   pressEscape(document.activeElement!);
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局问答" })).toBeNull());
   expect(document.body.style.overflow).toBe("");
+});
+
+test("a layer that covers the compact window keeps the focus it holds", async () => {
+  installBrowserLikeDialogs();
+  render(<Launcher />);
+  fireEvent.click(screen.getByRole("button", { name: "打开全局问答" }));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入问题" })).toBeEnabled());
+  // 盖住窗口的那一层（这里是提示层）此刻持有焦点。窗口为被盖住重新 show() 时，
+  // dialog focusing steps 会把焦点挪进已 inert 的窗口、掉到 body——必须原样还回去。
+  const cover = screen.getByRole("button", { name: "显示提示" });
+  press(cover);
+  expect(chatWindow()).toHaveAttribute("inert");
+  expect(cover).toHaveFocus();
 });
 
 test("the window's own Escape handler cannot close the window while the preview is on top", async () => {
