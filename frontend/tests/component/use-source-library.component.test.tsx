@@ -18,7 +18,7 @@ vi.mock("../../app/source-api.ts", async (importOriginal) => ({
   ...api,
 }));
 
-import { useSourceLibrary } from "../../app/use-source-library";
+import { useSourceLibrary, type SourceReparseOutcome } from "../../app/use-source-library";
 
 function source(id: string, notebookId: string, parseStatus = "extracted"): SourceSummary {
   return {
@@ -483,12 +483,16 @@ test("following stops on untrackSources, on a notebook switch, and once the foll
   commitPage([source("first", "notebook-a")]);
 
   act(() => value!.trackSourceProgress(["elsewhere"]));
+  expect(value!.reparsingSourceIds.has("elsewhere")).toBe(true);
   act(() => value!.untrackSources());
+  // 跟踪停了,重新解析的占位也一起撤掉。
+  expect(value!.reparsingSourceIds.size).toBe(0);
   await act(async () => vi.advanceTimersByTimeAsync(10_000));
   expect(api.getSource).not.toHaveBeenCalled();
 
   act(() => value!.trackSourceProgress(["elsewhere"]));
   commitPage([source("other", "notebook-b")], "notebook-b");
+  expect(value!.reparsingSourceIds.size).toBe(0);
   await act(async () => vi.advanceTimersByTimeAsync(10_000));
   expect(api.getSource).not.toHaveBeenCalled();
 
@@ -497,11 +501,155 @@ test("following stops on untrackSources, on a notebook switch, and once the foll
   Object.defineProperty(gone, Symbol.for("silicon-notebook.errors.httpStatus"), { value: 404 });
   api.getSource.mockRejectedValue(gone);
   act(() => value!.trackSourceProgress(["deleted-meanwhile"]));
+  expect(value!.reparsingSourceIds.has("deleted-meanwhile")).toBe(true);
   await act(async () => vi.advanceTimersByTimeAsync(1500));
   expect(api.getSource).toHaveBeenCalledTimes(1);
+  expect(value!.reparsingSourceIds.size).toBe(0);
   await act(async () => vi.advanceTimersByTimeAsync(30_000));
   expect(api.getSource).toHaveBeenCalledTimes(1);
   expect(effects.reportError).not.toHaveBeenCalled();
+});
+
+// ------------------------------------------------------------ 重新解析的占位(全页一份)
+// 「重新解析」的每个入口(图谱分析问题清单里引用这篇来源的每一行、来源详情)都读同一份
+// `reparsingSourceIds`:从提交起,到跟踪判定这一次跑完(或跟踪被撤掉)为止。
+
+test("a followed reparse holds the placeholder from submission, through stale terminal reads, until this run ends", async () => {
+  vi.useFakeTimers();
+  const baseline = deferred<SourceSummary>();
+  const request = deferred<SourceReparseOutcome>();
+  api.getSource
+    .mockReturnValueOnce(baseline.promise)
+    .mockResolvedValueOnce(at(source("elsewhere", "notebook-a", "extracted"), "T0"))
+    .mockResolvedValueOnce(at(source("elsewhere", "notebook-a", "extracted"), "T0"))
+    .mockResolvedValueOnce(at(source("elsewhere", "notebook-a", "parsing"), "T1"))
+    .mockResolvedValue(at(source("elsewhere", "notebook-a", "extracted"), "T2"));
+  render(<Harness />);
+  commitPage([source("first", "notebook-a")]);
+
+  let submitted!: Promise<SourceReparseOutcome>;
+  act(() => { submitted = value!.submitFollowedReparse("elsewhere", () => request.promise); });
+  // 读基准、请求还在路上:已经占着。
+  expect(value!.reparsingSourceIds.has("elsewhere")).toBe(true);
+  await act(async () => { baseline.resolve(at(source("elsewhere", "notebook-a", "extracted"), "T0")); });
+  expect(value!.reparsingSourceIds.has("elsewhere")).toBe(true);
+  expect(value!.followedSourceCount).toBe(0);
+  let outcome: SourceReparseOutcome | undefined;
+  await act(async () => {
+    request.resolve("started");
+    outcome = await submitted;
+  });
+  expect(outcome).toBe("started");
+  // 排上之后由跟踪接着占,中间没有空档。
+  expect(value!.followedSourceCount).toBe(1);
+  expect(value!.reparsingSourceIds.has("elsewhere")).toBe(true);
+
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  await act(async () => vi.advanceTimersByTimeAsync(2250));
+  expect(value!.reparsingSourceIds.has("elsewhere")).toBe(true);
+  await act(async () => vi.advanceTimersByTimeAsync(3375));
+  expect(value!.reparsingSourceIds.has("elsewhere")).toBe(true);
+  await act(async () => vi.advanceTimersByTimeAsync(5063));
+  expect(value!.reparsingSourceIds.size).toBe(0);
+  expect(value!.followedSourceCount).toBe(0);
+});
+
+test("a followed reparse reads its baseline before submitting, so a whole run between two reads still ends the follow", async () => {
+  vi.useFakeTimers();
+  api.getSource
+    .mockResolvedValueOnce(at(source("elsewhere", "notebook-a", "extracted"), "T0"))
+    .mockResolvedValue(at(source("elsewhere", "notebook-a", "extracted"), "T2"));
+  render(<Harness />);
+  commitPage([source("first", "notebook-a")]);
+  let readsAtSubmit = -1;
+  await act(async () => {
+    await value!.submitFollowedReparse("elsewhere", async () => {
+      readsAtSubmit = api.getSource.mock.calls.length;
+      return "started";
+    });
+  });
+  expect(readsAtSubmit).toBe(1);
+  expect(value!.reparsingSourceIds.has("elsewhere")).toBe(true);
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(value!.reparsingSourceIds.size).toBe(0);
+});
+
+test.each(["none", "failed"] as const)("a followed reparse that did not start (%s) releases the placeholder and follows nothing", async (result) => {
+  api.getSource.mockResolvedValue(at(source("elsewhere", "notebook-a"), "T0"));
+  render(<Harness />);
+  commitPage([source("first", "notebook-a")]);
+  let outcome: SourceReparseOutcome | undefined;
+  await act(async () => { outcome = await value!.submitFollowedReparse("elsewhere", async () => result); });
+  expect(outcome).toBe(result);
+  expect(value!.reparsingSourceIds.size).toBe(0);
+  expect(value!.followedSourceCount).toBe(0);
+});
+
+test("a followed reparse whose request returns after a notebook switch follows nothing and holds no placeholder", async () => {
+  api.getSource.mockResolvedValue(at(source("elsewhere", "notebook-a"), "T0"));
+  const request = deferred<SourceReparseOutcome>();
+  render(<Harness />);
+  commitPage([source("first", "notebook-a")]);
+  let submitted!: Promise<SourceReparseOutcome>;
+  act(() => { submitted = value!.submitFollowedReparse("elsewhere", () => request.promise); });
+  expect(value!.reparsingSourceIds.has("elsewhere")).toBe(true);
+  commitPage([source("other", "notebook-b")], "notebook-b");
+  expect(value!.reparsingSourceIds.size).toBe(0);
+  await act(async () => {
+    request.resolve("started");
+    await submitted;
+  });
+  expect(value!.followedSourceCount).toBe(0);
+  expect(value!.reparsingSourceIds.size).toBe(0);
+});
+
+test("the placeholder is released when the follow runs out of attempts", async () => {
+  vi.useFakeTimers();
+  // 一直读到上一次的终态(updated_at 没动):跟踪自己判定不了这一次跑完,只能等尝试次数用尽。
+  api.getSource.mockResolvedValue(at(source("elsewhere", "notebook-a", "extracted"), "T0"));
+  render(<Harness />);
+  commitPage([source("first", "notebook-a")]);
+  await act(async () => { await value!.submitFollowedReparse("elsewhere", async () => "started"); });
+  expect(value!.reparsingSourceIds.has("elsewhere")).toBe(true);
+  await act(async () => vi.advanceTimersByTimeAsync(10 * 60 * 1000));
+  expect(value!.reparsingSourceIds.has("elsewhere")).toBe(true);
+  await act(async () => vi.advanceTimersByTimeAsync(60 * 60 * 1000));
+  expect(effects.setStatusText).toHaveBeenCalledWith("处理超时：部分来源长时间未完成，请稍后重试");
+  expect(value!.reparsingSourceIds.size).toBe(0);
+  expect(value!.followedSourceCount).toBe(0);
+});
+
+test("the source detail's reparse is refused while that source holds the placeholder, and its own reparse holds it while in flight", async () => {
+  vi.useFakeTimers();
+  api.getSource.mockResolvedValue(at(source("here", "notebook-a"), "T0"));
+  api.getNotebookSource.mockResolvedValue(source("here", "notebook-a"));
+  api.getNotebookSourceElementsPage.mockResolvedValue({ items: [], total_count: 0, offset: 0, limit: 40 });
+  render(<Harness />);
+  commitPage([source("here", "notebook-a")]);
+  await act(async () => { await value!.openSourceById("here"); });
+  expect(value!.sourceDetail?.id).toBe("here");
+
+  // 图谱分析里提交的重新解析还没跑完:来源详情的「重新解析」不再发一次。
+  await act(async () => { await value!.submitFollowedReparse("here", async () => "started"); });
+  expect(value!.reparsingSourceIds.has("here")).toBe(true);
+  await act(async () => value!.reparseSource());
+  expect(api.parseSource).not.toHaveBeenCalled();
+  expect(value!.reparsingSource).toBe(false);
+
+  // 跟踪撤掉之后才能点;详情自己的重新解析在飞期间同样占着这篇来源(问题清单那边据此置灰)。
+  act(() => value!.untrackSources());
+  expect(value!.reparsingSourceIds.size).toBe(0);
+  const parsed = deferred<SourceSummary>();
+  api.parseSource.mockReturnValueOnce(parsed.promise);
+  let reparsing!: Promise<void>;
+  act(() => { reparsing = value!.reparseSource(); });
+  expect(api.parseSource).toHaveBeenCalledWith("here");
+  expect(value!.reparsingSource).toBe(true);
+  expect(value!.reparsingSourceIds.has("here")).toBe(true);
+  parsed.resolve(source("here", "notebook-a"));
+  await act(async () => reparsing);
+  expect(value!.reparsingSource).toBe(false);
+  expect(value!.reparsingSourceIds.size).toBe(0);
 });
 
 test("a slow or failing checkup refresh does not delay terminal poll scheduling", async () => {

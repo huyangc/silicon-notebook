@@ -110,6 +110,7 @@ const PASSED_PAGE_SIZE = 20;
 /** 「已标为正常」「已撤销」这类区级提示停留多久。 */
 const FINDINGS_NOTICE_HOLD_MS = 8000;
 const NO_DELETING_SOURCES: ReadonlySet<string> = new Set<string>();
+const NO_REPARSING_SOURCES: ReadonlySet<string> = new Set<string>();
 const NO_PENDING_MERGES: readonly PendingMerge[] = Object.freeze([]) as readonly PendingMerge[];
 const NO_FINDING_HANDLERS: KgFindingHandlers = Object.freeze({});
 
@@ -217,6 +218,7 @@ export function KgAnalysisView({
   findingsRevision = "",
   findingHandlers = NO_FINDING_HANDLERS,
   deletingSourceIds = NO_DELETING_SOURCES,
+  reparsingSourceIds = NO_REPARSING_SOURCES,
   relinking = false,
   relinkResult = null,
   pendingMerges = NO_PENDING_MERGES,
@@ -248,6 +250,11 @@ export function KgAnalysisView({
   findingsRevision?: string | number;
   findingHandlers?: KgFindingHandlers;
   deletingSourceIds?: ReadonlySet<string>;
+  /**
+   * 来源库的重新解析占位(page 传 `sourceLibrary.reparsingSourceIds`):从提交到跟踪判定这一次
+   * 跑完,引用这篇来源的每一条问题上的「重新解析…」都置灰并写「已提交重新解析，等待完成」。
+   */
+  reparsingSourceIds?: ReadonlySet<string>;
   relinking?: boolean;
   relinkResult?: KgRelinkResult | null;
   pendingMerges?: readonly PendingMerge[];
@@ -527,6 +534,7 @@ export function KgAnalysisView({
   const actionState: KgFindingsActionState = {
     canWrite: canAnalyze,
     deletingSourceIds,
+    reparsingSourceIds,
     relinking,
     // 补上关联与重新合并 / 整理 / 删除知识图谱共用一个维护槽(`analysisBlocked` 里含 relinking,
     // 那一档由 `relinking` 自己说「补连中…」)。

@@ -1119,8 +1119,9 @@ export default function Home() {
       rootModals.requestClose("kg-analysis", "button");
     }
   }, [notebookCollection.editor?.target?.id, notebookCollection.deletion?.target?.id, sourceDetail?.id, kgSchema.open, kgGraph.analysisOpen]); // eslint-disable-line react-hooks/exhaustive-deps
-  // 图谱分析里「重新解析…」的那篇来源会一直被跟到终态(它多半不在来源库当前页);面板一关就
-  // 不再跟——切库与卸载由来源库自己停。
+  // 图谱分析里「重新解析…」的那篇来源会一直被跟到这一次跑完(它多半不在来源库当前页);面板一关就
+  // 不再跟,它占着的重新解析占位也一起撤掉——切库与卸载由来源库自己停。体检的批量重新解析在
+  // 「知识分析看板」里,那个弹窗与图谱分析同一冲突组、打开就把面板挤掉,所以占位在时它点不到。
   const { untrackSources } = sourceLibrary;
   useEffect(() => {
     if (!kgGraph.analysisOpen) untrackSources();
@@ -4348,16 +4349,14 @@ export default function Home() {
             if (activeNotebookIdRef.current !== nb) return;
             report("running");
             void (async () => {
-              // 提交前读一次这篇来源的 updated_at 作基准:重新解析端点只把作业交给作业池、返回前
-              // 不改来源状态,作业池忙时头一两次轮询还会读到上一次的终态——只有终态且它相对基准
-              // 推进了(或见过这一次开始)才算这一次跑完。读失败就没有基准,只认「见过开始」。
-              const baseline = await sourceLibrary.readFollowBaseline(target.sourceId);
-              const outcome = await reparseOutcome(nb, [target.sourceId]);
-              // 这篇来源多半不在来源库当前页:按 id 跟到这一次跑完,每次状态推进都让问题清单与
-              // 总览失效重取(它们的失效令牌里有来源库的 contentRevision)。
-              if (outcome === "started" && activeNotebookIdRef.current === nb) {
-                sourceLibrary.trackSourceProgress([target.sourceId], { [target.sourceId]: baseline });
-              }
+              // 来源库负责这一次的全程:提交前读 updated_at 作基准,排上后按 id 跟到这一次跑完
+              // (它多半不在来源库当前页;每次状态推进都让问题清单与总览失效重取),从提交起这篇
+              // 来源就占着重新解析的占位——问题清单里引用它的每一行、来源详情里的「重新解析」都
+              // 置灰,直到跟踪判定这一次跑完(见 use-source-library 的 submitFollowedReparse)。
+              const outcome = await sourceLibrary.submitFollowedReparse(
+                target.sourceId,
+                () => reparseOutcome(nb, [target.sourceId]),
+              );
               report(outcome === "started" ? "started" : outcome === "none" ? "skipped" : "failed");
             })();
           },
@@ -5270,6 +5269,11 @@ export default function Home() {
   // 容器 div + map 渲染),避免重复调用。
   const sourceDetailAnomalies = sourceDetail ? sourceAnomalies(sourceDetail) : [];
   const sourceDetailDeleting = Boolean(sourceDetail && deletingSourceIds.has(sourceDetail.id));
+  // 这篇来源的重新解析已从别处(图谱分析的问题清单)提交、这一次还没跑完:详情里的「重新解析」
+  // 用同一份占位置灰并就地写状态(来源库的 reparseSource 自己也拒收)。详情自己在跑时仍说「重新解析中…」。
+  const sourceDetailReparseQueued = Boolean(
+    sourceDetail && !reparsingSource && sourceLibrary.reparsingSourceIds.has(sourceDetail.id),
+  );
   // 打开的来源属于挂载的参考库而非当前库时,只读:代理读取只给「看」,不给「改」。
   const sourceDetailBaseId = sourceDetail
     ? crossLibrarySourceNotebookId(sourceDetail.notebook_id, currentNotebookId)
@@ -7320,12 +7324,12 @@ export default function Home() {
                   {sourceDetailReparsable(sourceDetail.type) && (
                   <button
                     className="icon-button subtle-icon"
-                    disabled={reparsingSource || sourceDetailDeleting}
+                    disabled={reparsingSource || sourceDetailDeleting || sourceDetailReparseQueued}
                     onClick={() => reparseSource().catch(reportError)}
-                    title={sourceDetailDeleting ? "来源删除中，暂时无法重新解析" : reparsingSource ? "重新解析中…" : "重新解析"}
-                    aria-label={sourceDetailDeleting ? "来源删除中，暂时无法重新解析" : reparsingSource ? "重新解析中…" : "重新解析"}
+                    title={sourceDetailDeleting ? "来源删除中，暂时无法重新解析" : reparsingSource ? "重新解析中…" : sourceDetailReparseQueued ? "已提交重新解析，等待完成" : "重新解析"}
+                    aria-label={sourceDetailDeleting ? "来源删除中，暂时无法重新解析" : reparsingSource ? "重新解析中…" : sourceDetailReparseQueued ? "已提交重新解析，等待完成" : "重新解析"}
                   >
-                    {reparsingSource
+                    {reparsingSource || sourceDetailReparseQueued
                       ? <Loader2 size={23} className="busy-spin" aria-hidden="true" />
                       : <ExternalLink size={23} />}
                   </button>
@@ -7344,6 +7348,9 @@ export default function Home() {
                 </div>
                 ) : null}
               </div>
+              {sourceDetailReparseQueued ? (
+                <p className="tool-hint source-detail-reparse-note" role="status">已提交重新解析，等待完成</p>
+              ) : null}
               <section className="source-guide-card">
                 <div className="source-guide-heading">
                   <Sparkles size={26} fill="currentColor" />
@@ -7414,10 +7421,10 @@ export default function Home() {
                         type="button"
                         className="button secondary"
                         aria-label="重新解析降级来源"
-                        disabled={reparsingSource || sourceDetailDeleting}
+                        disabled={reparsingSource || sourceDetailDeleting || sourceDetailReparseQueued}
                         onClick={() => reparseSource().catch(reportError)}
                       >
-                        {reparsingSource ? "重新解析中…" : "重新解析"}
+                        {reparsingSource ? "重新解析中…" : sourceDetailReparseQueued ? "已提交重新解析，等待完成" : "重新解析"}
                       </button>
                       <button
                         type="button"
@@ -8113,6 +8120,7 @@ export default function Home() {
                 onRelink: relinkFromKgView,
               }}
               deletingSourceIds={deletingSourceIds}
+              reparsingSourceIds={sourceLibrary.reparsingSourceIds}
               relinking={kgGraph.relinking}
               relinkResult={kgGraph.relinkResult}
               pendingMerges={kgGraph.pendingMerges}

@@ -30,6 +30,7 @@ import {
   analysisReadiness,
   analysisUpdateState,
   devItemViews,
+  FINDING_REPARSING_NOTE,
   findingActionPlan,
   findingBasedOnChange,
   findingEvidenceView,
@@ -84,6 +85,11 @@ export type KgFindingsActionState = {
   /** 可编辑成员;只读成员与镜像库为 false:一个按钮都没有,也没有「标为正常」。 */
   canWrite: boolean;
   deletingSourceIds: ReadonlySet<string>;
+  /**
+   * 重新解析的占位(来源库跟踪那一份,全页共用):提交之后、跟踪判定这一次跑完之前,引用这篇
+   * 来源的每一条问题上的「重新解析…」都置灰并就地写状态。
+   */
+  reparsingSourceIds: ReadonlySet<string>;
   relinking: boolean;
   /** 维护槽被占(重新合并 / 整理 / 删除知识图谱在跑):补上关联撞同一把锁,禁用。 */
   maintenanceBusy: boolean;
@@ -462,7 +468,11 @@ function FindingRowView({
   const [busy, setBusy] = useState<string | null>(null);
   const [result, showResult] = useTimedResult();
   const evidence = findingEvidenceView(row);
-  const plan = findingActionPlan(row, { canWrite: state.canWrite, pendingMerges: state.pendingMerges });
+  const plan = findingActionPlan(row, {
+    canWrite: state.canWrite,
+    pendingMerges: state.pendingMerges,
+    reparsingSourceIds: state.reparsingSourceIds,
+  });
   const tone = findingSeverityTone(row.severity);
   const handledText = findingHandledText(row);
   const sourceIds = new Set(
@@ -533,9 +543,11 @@ function FindingRowView({
             setBusy(key);
             return;
           }
+          // 这一行自己的在飞态只管「确认之后、请求回来之前」;排上之后按钮由全页共用的重新解析
+          // 占位(state.reparsingSourceIds)继续锁住,直到跟踪判定这一次跑完——不在这里放开。
           setBusy((current) => (current === key ? null : current));
           if (phase === "started") {
-            showResult({ tone: "ok", text: "已开始重新解析；解析完成后点「更新分析」核验" });
+            showResult({ tone: "ok", text: "解析完成后点「更新分析」核验" });
             onChanged();
           } else if (phase === "skipped") {
             showResult({ tone: "neutral", text: "这篇来源已不在或无需重新解析" });
@@ -577,14 +589,20 @@ function FindingRowView({
   }, [row]);
 
   // 在飞期间禁用(长任务按钮红线):删除在跑、重新解析已确认还没排上、来源正在解析时,
-  // 对准这篇来源的写按钮都不能再点;补上关联与重新合并 / 整理 / 删除知识图谱共用一个维护槽。
+  // 对准这篇来源的写按钮都不能再点;重新解析排上之后、这一次跑完之前,引用这篇来源的每一条
+  // 问题上的「重新解析…」都不能再点(全页一份占位);补上关联与重新合并 / 整理 / 删除知识图谱
+  // 共用一个维护槽。
   const disabledFor = (spec: FindingButtonSpec): boolean => {
     switch (spec.kind) {
       case "open_source":
         return busy === `open:${spec.sourceId}`;
       case "delete_source":
+        return busy === `reparse:${spec.sourceId}`
+          || state.deletingSourceIds.has(spec.sourceId)
+          || plan.processingSourceIds.includes(spec.sourceId);
       case "reparse_source":
         return busy === `reparse:${spec.sourceId}`
+          || plan.reparsingSourceIds.includes(spec.sourceId)
           || state.deletingSourceIds.has(spec.sourceId)
           || plan.processingSourceIds.includes(spec.sourceId);
       case "review_merge":
@@ -655,7 +673,11 @@ function FindingRowView({
               </span>
             ) : buttons;
           })}
-          {plan.notes.map((note) => <span key={note} className="kg-finding-action-note">{note}</span>)}
+          {plan.notes.map((note) => (
+            <span key={note} className="kg-finding-action-note" role={note === FINDING_REPARSING_NOTE ? "status" : undefined}>
+              {note}
+            </span>
+          ))}
           {relinkBlocked ? <span className="kg-finding-action-note" role="status">其它图谱任务进行中</span> : null}
           {result ? <span className={`kg-finding-result is-${result.tone}`} role="status">{result.text}</span> : null}
           {canDismiss ? (

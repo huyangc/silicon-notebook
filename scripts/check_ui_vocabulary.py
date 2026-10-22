@@ -323,6 +323,8 @@ ASCII_TERMS = {
     "island component": re.compile(r"(?<![A-Za-z])island components?(?![A-Za-z])", re.IGNORECASE),
     "handled": re.compile(r"(?<![A-Za-z])handled(?![A-Za-z])", re.IGNORECASE),
     "dev-side defect": re.compile(r"(?<![A-Za-z])dev-side defects?(?![A-Za-z])", re.IGNORECASE),
+    # 重新解析已提交、这一次还没跑完时入口上的占位:界面说「已提交重新解析，等待完成」。
+    "reparse placeholder": re.compile(r"(?<![A-Za-z])reparse placeholders?(?![A-Za-z])", re.IGNORECASE),
     # 两个来源的概念集合重合度在界面上叫「概念重合度」,算法名不上屏。
     "Jaccard": re.compile(r"(?<![A-Za-z])jaccard(?![A-Za-z])", re.IGNORECASE),
 }

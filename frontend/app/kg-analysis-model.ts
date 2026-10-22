@@ -1309,12 +1309,19 @@ export type FindingActionPlan = {
   blocked: string[];
   /** 正在解析的来源:对准它们的写按钮置灰,旁边写原因。 */
   processingSourceIds: string[];
+  /** 重新解析已提交、这一次还没跑完的来源:对准它们的「重新解析…」置灰,旁边写「已提交重新解析，等待完成」。 */
+  reparsingSourceIds: string[];
 };
 
 export type FindingActionContext = {
   /** 可编辑成员(只读成员、镜像库都是 false):false 时一个按钮都不出(§3.4)。 */
   canWrite: boolean;
   pendingMerges: readonly PendingMerge[];
+  /**
+   * 来源库的重新解析占位(use-source-library 的 `reparsingSourceIds`):从提交到跟踪判定这一次
+   * 跑完。全页共用一份——引用同一篇来源的每一条问题都按它置灰,不是哪一行点的就只锁哪一行。
+   */
+  reparsingSourceIds: ReadonlySet<string>;
 };
 
 type SourceFacts = {
@@ -1374,6 +1381,8 @@ export function pendingMergeForFinding(
 const DELETE_NOTE = "不可撤销，先打开来源核对";
 const KEEP_NOTE = "两份内容几乎相同，保留对象更多的一份";
 const PROCESSING_NOTE = "这篇来源正在解析，完成后再处理";
+/** 重新解析已提交、这一次还没跑完:写在「重新解析…」旁边的就地状态(面板按读屏状态播报)。 */
+export const FINDING_REPARSING_NOTE = "已提交重新解析，等待完成";
 const NOT_IN_QUEUE_NOTE = "待确认合并里还没有这一组";
 
 /**
@@ -1385,7 +1394,7 @@ const NOT_IN_QUEUE_NOTE = "待确认合并里还没有这一组";
  * 「出不出入口」。
  */
 export function findingActionPlan(row: KgFindingRow, context: FindingActionContext): FindingActionPlan {
-  const plan: FindingActionPlan = { buttons: [], notes: [], blocked: [], processingSourceIds: [] };
+  const plan: FindingActionPlan = { buttons: [], notes: [], blocked: [], processingSourceIds: [], reparsingSourceIds: [] };
   if (!context.canWrite || row.status !== "open") return plan;
   const opened = new Set<string>();
   const addOpen = (sourceId: string, facts: SourceFacts) => {
@@ -1411,6 +1420,13 @@ export function findingActionPlan(row: KgFindingRow, context: FindingActionConte
       if (facts.processing && !plan.processingSourceIds.includes(sourceId)) {
         plan.processingSourceIds.push(sourceId);
       }
+      if (
+        action.kind === "reparse_source"
+        && context.reparsingSourceIds.has(sourceId)
+        && !plan.reparsingSourceIds.includes(sourceId)
+      ) {
+        plan.reparsingSourceIds.push(sourceId);
+      }
       plan.buttons.push({ kind: action.kind, sourceId, title: facts.title, label: facts.title, sourceType: facts.sourceType });
       if (action.kind === "delete_source") {
         if (!plan.notes.includes(DELETE_NOTE)) plan.notes.push(DELETE_NOTE);
@@ -1424,7 +1440,11 @@ export function findingActionPlan(row: KgFindingRow, context: FindingActionConte
       plan.buttons.push({ kind: "relink" });
     }
   }
-  if (plan.processingSourceIds.length > 0) plan.notes.push(PROCESSING_NOTE);
+  if (plan.reparsingSourceIds.length > 0) plan.notes.push(FINDING_REPARSING_NOTE);
+  // 正在解析的正是这次提交的重新解析时,「已提交重新解析，等待完成」已经说清了,不再叠一句。
+  if (plan.processingSourceIds.some((sourceId) => !plan.reparsingSourceIds.includes(sourceId))) {
+    plan.notes.push(PROCESSING_NOTE);
+  }
   distinguishSameTitles(row, plan.buttons);
   return plan;
 }

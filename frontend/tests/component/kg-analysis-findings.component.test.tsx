@@ -10,11 +10,14 @@
 //   · F5 补上关联:open 出按钮、结果就地显示;relink_spent 随 passed 那一页回来,放进诊断数据、
 //     不在「已通过」列出也不计数;F4 待确认合并有 / 无(按全组 canonical_ids);
 //   · 按钮按下的在飞态与结果写在按钮旁(删除、重新解析、标为正常、撤销);
-//   · 打开来源核对时把焦点放在按钮上(来源详情关掉后焦点回到这里)。
+//   · 打开来源核对时把焦点放在按钮上(来源详情关掉后焦点回到这里);
+//   · 重新解析的占位(真的来源库跟踪接上真的面板):从提交到这一次跑完,引用这篇来源的每一条
+//     问题上的「重新解析…」都置灰并就地写「已提交重新解析，等待完成」,轮询读到上一次的终态
+//     不放开,跑完才放开。
 //
 // ⚠ 不跨 await 攥 DOM 节点:状态变化之后一律在 waitFor 里重新查询。
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 vi.mock("../../app/kg-analysis-api", () => ({
   fetchKgAnalysis: vi.fn(),
@@ -22,6 +25,12 @@ vi.mock("../../app/kg-analysis-api", () => ({
   fetchKgFindings: vi.fn(),
   dismissKgFinding: vi.fn(),
   undismissKgFinding: vi.fn(),
+}));
+
+// 来源库只在「重新解析的占位」那组用例里接上;它读来源走 getSource。
+vi.mock("../../app/source-api.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../app/source-api.ts")>()),
+  getSource: vi.fn(),
 }));
 
 import {
@@ -40,7 +49,9 @@ import {
 } from "../../app/kg-analysis-api";
 import type { KgFindingHandlers } from "../../app/kg-analysis-findings";
 import { KgAnalysisView } from "../../app/kg-analysis-view";
-import type { PendingMerge } from "../../app/workspace-model";
+import { getSource } from "../../app/source-api.ts";
+import { useSourceLibrary, type SourceReparseOutcome } from "../../app/use-source-library";
+import type { PendingMerge, SourceSummary } from "../../app/workspace-model";
 
 const CURRENT: KgFreshness = {
   basis: "usable_live", built_at_seq: 128, seq_behind: 0, stale: false, built_at_cluster_seq: 7, cluster_seq_behind: 0,
@@ -302,6 +313,11 @@ beforeEach(() => {
   });
   vi.mocked(dismissKgFinding).mockResolvedValue(undefined);
   vi.mocked(undismissKgFinding).mockResolvedValue(undefined);
+  vi.mocked(getSource).mockReset();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 function renderPanel(props: Partial<Parameters<typeof KgAnalysisView>[0]> = {}) {
@@ -793,9 +809,11 @@ test("疑似解析残缺：重新解析先经确认；确认后在飞禁用，�
   const callsBefore = vi.mocked(fetchKgFindings).mock.calls.length;
   act(() => progress?.("started"));
   await waitFor(() => expect(
-    within(findingByRule("疑似解析残缺")).getByText("已开始重新解析；解析完成后点「更新分析」核验"),
+    within(findingByRule("疑似解析残缺")).getByText("解析完成后点「更新分析」核验"),
   ).toBeInTheDocument());
   expect(vi.mocked(fetchKgFindings).mock.calls.length).toBeGreaterThan(callsBefore);
+  // 这一行自己的在飞态到「排上」为止;排上之后锁不锁、锁到什么时候只看全页共用的重新解析占位
+  // (这里没有传,等于来源库没在跟)——面板不另起一份。占位的全程见下方「重新解析的占位」那组用例。
   expect(within(findingByRule("疑似解析残缺")).getByRole("button", { name: "重新解析…" })).toBeEnabled();
 });
 
@@ -1244,4 +1262,188 @@ test("疑似重复导入的两份同名来源：按钮组名与读屏名带上�
   ]);
   expect(within(f2).getByRole("button", { name: "打开来源核对：Mamba2.pdf（300 个知识对象）" })).toBeInTheDocument();
   expect(within(f2).getByRole("button", { name: "删除来源：Mamba2.pdf（280 个知识对象）" })).toBeInTheDocument();
+});
+
+// ------------------------------------------------------------ 重新解析的占位(来源库跟踪,全页一份)
+//
+// 真的来源库(use-source-library)接上真的面板,按 page.tsx 的接线:面板的占位就是来源库的
+// `reparsingSourceIds`;确认框「重新解析」之后那一段交给 `submitFollowedReparse`(读基准 → 提交
+// → 排上就按 id 跟到这一次跑完)。重新解析端点只把作业交给作业池、返回前不改来源状态,作业池忙时
+// 头几次轮询读到的还是上一次的终态——那段时间按钮必须一直锁着。
+
+const LIBRARY_EFFECTS = {
+  setStatusText: vi.fn(),
+  reportError: vi.fn(),
+  setToast: vi.fn(),
+  invalidateKnowledge: vi.fn(),
+  refreshCollection: vi.fn(async () => undefined),
+  refreshNotebook: vi.fn(async () => undefined),
+  refreshCheckup: vi.fn(async () => undefined),
+};
+const REPARSING_NOTE = "已提交重新解析，等待完成";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
+let library: ReturnType<typeof useSourceLibrary> | null = null;
+let submission: Promise<SourceReparseOutcome> | null = null;
+
+function FollowedPanel({ submit }: { submit: () => Promise<SourceReparseOutcome> }) {
+  const sourceLibrary = useSourceLibrary({ actorId: "user-a", canWriteSources: true, effects: LIBRARY_EFFECTS });
+  library = sourceLibrary;
+  return (
+    <KgAnalysisView
+      notebookId="nb-1"
+      onClose={() => undefined}
+      canAnalyze
+      onAnalyze={() => undefined}
+      findingsRevision={sourceLibrary.contentRevision}
+      reparsingSourceIds={sourceLibrary.reparsingSourceIds}
+      findingHandlers={{
+        onReparseSource: (target, report) => {
+          report("running");
+          submission = sourceLibrary.submitFollowedReparse(target.sourceId, submit).then((outcome) => {
+            report(outcome === "started" ? "started" : outcome === "none" ? "skipped" : "failed");
+            return outcome;
+          });
+        },
+      }}
+    />
+  );
+}
+
+async function renderFollowedPanel(submit: () => Promise<SourceReparseOutcome>) {
+  library = null;
+  submission = null;
+  render(<FollowedPanel submit={submit} />);
+  act(() => {
+    library!.commitNotebookSnapshot({
+      actorId: "user-a", notebookId: "nb-1", workspaceEpoch: 1,
+      page: { items: [], total_count: 0, offset: 0, limit: 50 },
+    });
+  });
+  await waitFor(() => expect(findingItems()).toHaveLength(openRows.length));
+  await settle();
+}
+
+/** 来源详情的读数:这一篇此刻的解析状态与 updated_at。 */
+function detailAt(sourceId: string, parseStatus: string, updatedAt: string): SourceSummary {
+  return {
+    id: sourceId, notebook_id: "nb-1", title: sourceId, display_title: sourceId, type: "file",
+    status: parseStatus, parse_status: parseStatus, summary: "", element_count: 0,
+    file_name: `${sourceId}.pdf`, file_size: 1, created_at: "2026-10-19T00:00:00Z", created_label: "10月19日",
+    updated_at: updatedAt,
+  };
+}
+
+function reparseButtonOf(ruleLabel: string): HTMLElement {
+  return within(findingByRule(ruleLabel)).getByRole("button", { name: /^重新解析/ });
+}
+
+/** 这一条的「重新解析…」被占位锁着:置灰,旁边就地写状态(读屏按状态播报)。 */
+function expectHeld(ruleLabel: string) {
+  const item = findingByRule(ruleLabel);
+  expect(within(item).getByRole("button", { name: "重新解析…" })).toBeDisabled();
+  expect(within(item).getByText(REPARSING_NOTE)).toHaveAttribute("role", "status");
+}
+
+function expectReleased(ruleLabel: string) {
+  const item = findingByRule(ruleLabel);
+  expect(within(item).getByRole("button", { name: "重新解析…" })).toBeEnabled();
+  expect(within(item).queryByText(REPARSING_NOTE)).toBeNull();
+}
+
+/** 同一篇来源(src-d)出现在第二条问题里:疑似内容错配,建议重新解析。 */
+const MISMATCH_ON_D = row({
+  rule_id: "F1",
+  severity: "high",
+  subject: { kind: "source", key: "src-d", label: "Minitron.pdf" },
+  subject_refs: ["src-d"],
+  evidence: { shared_share: 0, giant_share: 0, concepts: 40, samples: ["量子光学"] },
+  impact: { objects: 200 },
+  actions: [{ kind: "reparse_source", capability: "sources:write", source_id: "src-d" }],
+  live_sources: [live("src-d", "Minitron.pdf")],
+});
+
+test("重新解析排上之后、这一次跑完之前（轮询读到的还是上一次的终态）：按钮一直置灰并就地写状态；跑完才放开", async () => {
+  const request = deferred<SourceReparseOutcome>();
+  vi.mocked(getSource)
+    .mockResolvedValueOnce(detailAt("src-d", "extracted", "T0")) // 提交前读的基准
+    .mockResolvedValueOnce(detailAt("src-d", "extracted", "T0")) // 作业池忙:还是上一次的终态
+    .mockResolvedValueOnce(detailAt("src-d", "extracted", "T0"))
+    .mockResolvedValueOnce(detailAt("src-d", "parsing", "T1"))
+    .mockResolvedValue(detailAt("src-d", "extracted", "T2"));
+  await renderFollowedPanel(() => request.promise);
+  vi.useFakeTimers();
+
+  fireEvent.click(reparseButtonOf("疑似解析残缺"));
+  expect(reparseButtonOf("疑似解析残缺")).toBeDisabled();
+  await act(async () => {
+    request.resolve("started");
+    await submission;
+  });
+  expectHeld("疑似解析残缺");
+  expect(within(findingByRule("疑似解析残缺")).getByText("解析完成后点「更新分析」核验")).toBeInTheDocument();
+
+  // 头两次轮询读到的都是上一次留下的「已就绪」:不是这一次跑完,不放开。
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  await act(async () => vi.advanceTimersByTimeAsync(2250));
+  expect(vi.mocked(getSource)).toHaveBeenCalledTimes(3);
+  expectHeld("疑似解析残缺");
+  // 这一次开始了(解析中):仍锁着。
+  await act(async () => vi.advanceTimersByTimeAsync(3375));
+  expect(vi.mocked(getSource)).toHaveBeenCalledTimes(4);
+  expectHeld("疑似解析残缺");
+  // 这一次跑完:放开,状态也撤掉。
+  await act(async () => vi.advanceTimersByTimeAsync(5063));
+  expect(vi.mocked(getSource)).toHaveBeenCalledTimes(5);
+  expectReleased("疑似解析残缺");
+});
+
+test("两条问题引用同一篇来源：从一条提交重新解析，另一条从确认那一刻起也置灰并就地写状态；占位一撤两条一起放开", async () => {
+  openRows = [F3, MISMATCH_ON_D];
+  const request = deferred<SourceReparseOutcome>();
+  vi.mocked(getSource).mockResolvedValue(detailAt("src-d", "extracted", "T0"));
+  await renderFollowedPanel(() => request.promise);
+  vi.useFakeTimers();
+  expectReleased("疑似内容错配");
+
+  fireEvent.click(reparseButtonOf("疑似解析残缺"));
+  // 请求还在路上:点的那一条是「重新解析中…」,另一条已经点不了。
+  expect(within(findingByRule("疑似解析残缺")).getByRole("button", { name: "重新解析中…" })).toBeDisabled();
+  expectHeld("疑似内容错配");
+  await act(async () => {
+    request.resolve("started");
+    await submission;
+  });
+  expectHeld("疑似解析残缺");
+  expectHeld("疑似内容错配");
+  // 轮询读到上一次的终态:两条都还锁着。
+  await act(async () => vi.advanceTimersByTimeAsync(1500 + 2250));
+  expectHeld("疑似解析残缺");
+  expectHeld("疑似内容错配");
+  // 来源库不再跟这一篇(面板关闭时的 untrackSources;跑完、404、超时、切库同样走到这里):一起放开。
+  act(() => library!.untrackSources());
+  expectReleased("疑似解析残缺");
+  expectReleased("疑似内容错配");
+});
+
+test.each([
+  ["failed", "没能开始重新解析，请稍后重试"],
+  ["none", "这篇来源已不在或无需重新解析"],
+] as const)("没排上（%s）：占位当场撤掉，按钮恢复可点，结果写在按钮旁", async (outcome, text) => {
+  openRows = [F3, MISMATCH_ON_D];
+  vi.mocked(getSource).mockResolvedValue(detailAt("src-d", "extracted", "T0"));
+  await renderFollowedPanel(async () => outcome);
+  fireEvent.click(reparseButtonOf("疑似解析残缺"));
+  await act(async () => {
+    await submission;
+  });
+  expectReleased("疑似解析残缺");
+  expectReleased("疑似内容错配");
+  expect(within(findingByRule("疑似解析残缺")).getByText(text)).toBeInTheDocument();
+  expect(library!.followedSourceCount).toBe(0);
 });
