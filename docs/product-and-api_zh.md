@@ -534,15 +534,36 @@ token）。已认证的三个端点在 `/api/global-ask/conversations/{conversat
   （`resolved_notebook_ids`）**并上**它的证据点名的库（`cited_notebook_ids` 以及各锚点、各引用上
   的 `notebook_id`），两者恒取并集：一轮回答可以转述检索到却没有标引用的库，零引用也不等于零复核。
   任一库读不了，整条链接连同它的图片一起 404，与未知 token 不可区分；权限
-  恢复后**同一个** token 自动复活。创建分享时也跑同一条判定：分享者此刻读不了的库被引用的
-  会话不许发布（404 +「部分笔记本已无法访问，请重新选择范围。」），免得发出去一条生来就
-  404 的链接。
+  恢复后**同一个** token 自动复活。创建分享时也跑同一条判定，对象恰好是公开页将提供的那些轮次
+  （截至边界的前缀的页面窗口）：其中有分享者此刻读不了的库被引用时不许发布（404 +「部分笔记本已无法
+  访问，请重新选择范围。」），免得发出去一条生来就 404 的链接；边界之后、或比页面窗口更早的轮次不会
+  否决分享。
 
 个人记忆披露与单库相同（见[问答会话公开分享护栏](#问答会话公开分享护栏)），只是边界换成作业：
 `GET /api/global-ask/conversations/{conversation_id}/share/disclosure?through_id=<job id>` 只对会话主人
 开放，按这次分享将公开的已完成作业计数，跑分享会跑的全部检查（边界拒绝，以及对范围用到的各库的读权
 复核），不写入任何东西；`POST .../share` 接受
 同样的 `acknowledged_memory_count`，以同样的 409 `share_disclosure_required` 拒绝。
+
+分享弹窗的其余数字也来自服务端，所以再长的会话也有确数：
+`GET /api/global-ask/conversations/{conversation_id}/share/counts?through_id=<job id>&watermark_id=&watermark_at=`
+（只对会话主人开放，错误映射与分享三端点相同，只读）。`through_id` 是弹窗问的边界（空串 = 最新的已完成
+作业）；`watermark_id` / `watermark_at` 是弹窗此刻持有的链接水位（两个都为空 = 未分享）；不带
+`watermark_id` 时按服务端此刻存着的水位数——弹窗因此能与读分享态**同时**发出这一问，响应体回带它数时用的
+水位（`watermark_id` / `watermark_at`），与弹窗读到的不一致时弹窗才按自己持有的水位再问一次。响应体是
+`total_turns`（已完成轮数）、`through_id`（边界那一轮：问的那条或最新一条；问的那条解析不到时为空串）、
+`boundary_index`（0 基；没问边界或解析不到时为 -1，后者 `boundary_unresolved`）、`watermark_ahead` /
+`ahead_count` / `watermark_behind` / `watermark_unknown`（链接相对边界的位置）、链接此刻的内容——未分享时
+是按下去会发布的内容——（`new_turns` 水位之后未包含的轮数、`published_turns` 页上的轮数、`earlier_turns`
+页上没有的更早轮数、`image_count`），以及分享 / 更新会发布的内容（`update_image_count`、
+`update_new_image_count` 当前链接还没显示的轮次上的附图、`update_earlier_turns`）。算法沿用弹窗原有的那一套
+（附图数是每轮锚点与引用的附图按 asset_id 去重后逐轮求和——公开页实际显示的是其子集），窗口与公开页实际
+提供的同一个：涉及的每个集合都是已完成作业按规范序 `(created_at, id)` 的一段前缀，各段长度由一次 SQL 聚合
+给出、经 `idx_global_jobs_conversation` 限定在本会话内，每段前缀的页面窗口（最多两段）沿该索引倒序、带
+`LIMIT` 读取。水位按公开读取同一个口径解析（钉在该作业上的 keyset；作业已不在时退回 `created_at <=`
+区间）。解析不到的边界或水位如实报告而不拒绝；被计数的轮次里有分享者已读不了的库时，返回分享自己那句
+404——绝不为一个打开就会 404 的页面给数字。弹窗只有在这个端点本身失败时才说「没能统计」，且不给任何数字。
+`backend/tests/fixtures/share_counts_golden.json` 把浏览器的算法与这个端点钉在同一组期望值上。
 
 图片沿用单库的 token-HMAC 别名通道（别名只能反查**公开页实际披露**的那批图），并受同一个
 部署开关 `MINERU_RETURN_IMAGES` 约束；全局侧另加一条闸：资产所属库必须落在本次**已复核**的
@@ -3529,13 +3550,13 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 会话创建者可将已完成轮次发布到 `/c/{token}`。`/notebooks/{nb}/conversations/{cid}/share` 的 `POST` 发布／更新，`GET` 向创建者返回 token／水位，`DELETE` 撤销；`GET /public/conversations/{token}` 与 `GET /public/conversations/{token}/assets/{alias}` 匿名读取。非创建者与不存在均为 404；空创建者或零答案会话为 409，且不保留新发 token。
 
-发布沿用 token 并推进 `shared_through_at`／`shared_through_id`。body 的 `expected_through_id` 精确绑定用户已审阅的答案，排除其后到达的回答；边界已删除返回 409。空／缺省 body 取最新答案。快照按边界答案的 `(created_at, rowid/ordinal)` keyset 划界，同刻但排序在后的答案仍排除；边界答案无法解析时才退回时间区间。尚无答案行的进行中任务不公开。
+发布沿用 token 并推进 `shared_through_at`／`shared_through_id`。body 的 `expected_through_id` 精确绑定用户已审阅的答案，排除其后到达的回答；边界已删除返回 409。空／缺省 body 取最新答案。快照按边界答案的 `(created_at, rowid/ordinal)` keyset 划界，同刻但排序在后的答案仍排除；边界答案无法解析时才退回时间区间。尚无答案行的进行中任务不公开。公开前缀长于 `MAX_TURNS` 时，公开页显示其中**最近**的 `MAX_TURNS` 轮，被分享的那条回答一定在页上；此时响应体在 `truncated_turns` 之外带 `omitted_earlier_turns`（未包含的更早轮数；为 0 时整项省略，普通长度的页面逐字节不变），页面在第一轮之前说明「会话过长，此处只展示最近 N 轮，更早的 M 轮未包含。」。读取只取这一个窗口（倒序、带 `LIMIT`），只在确有更早轮次时才数它们。公开页、其图片与个人记忆查找、实时复核、分享窗口与个人记忆披露都经同一个窗口（`public_window`）截取。
 
 载荷采用报告式白名单与渲染，另移除 `reasoning_trace`、`intent`、`retrieval_scope`、`retrieval_query` 及含 `memory_id` 在内的全部可寻址 id。就深度报告追问的回执（`linked_report`）不在白名单里：公开页既不带报告正文，也不带某一轮挂过哪份报告。被引用的私有 Memory 摘录会公开，分享前先把条数告知作者并请其确认（见下文）；创建者本人个人记忆的引用带 `is_memory: true`，标题去掉 `Memory · ` 前缀，其余引用不带这个字段。公开页响应带 `Cache-Control: no-store`。结果卡不投影，以 `PublicTurn.omitted_result_sets` 披露省略数。图片使用每 token 的 HMAC `conversation_asset_alias`，不暴露真实资产 id；仅快照引用的图片可读，返回 `Cache-Control: no-store`，撤销即失效，不同 token 的别名不同。终态引用核对有失败的全局轮次以回答时刻快照的口径给出 `PublicTurn.citation_check`（只在 `failed > 0` 时出现，计数收敛为非负整数，`outcome` 恒为 `partial`）与 `PublicReference.verification`（只取三个公开值），页面用过去时陈述；只挂在带标记引用上的附图既不列出、也不能再按别名取到，带标记的卡片不提供打开原文的入口。
 
-历史卡按钮以当前最后答案为界；回答复制按钮后的分享入口发送该答案 id。详情加载失败绝不把显式边界退化为空 body。水位只能前进：点击早于已发布水位的答案时不提供发布动作，显示链接还包含后续 N 轮，并按完整现有范围计算披露数量。缩小范围必须先撤销再分享。数值护栏如下。
+历史卡按钮以当前最后答案为界；回答复制按钮后的分享入口发送该答案 id。详情加载失败绝不把显式边界退化为空 body。水位只能前进：点击早于已发布水位的答案时不提供发布动作，显示链接还包含后续 N 轮，并按完整现有范围计算披露数量。缩小范围必须先撤销再分享。范围长于公开页时，弹窗给出确数：链接此刻（或按下去会发布）的内容写「公开页只显示最近 500 轮，更早的 N 轮未包含。」，更新按钮旁写「更新后公开页只显示最近 500 轮，更早的 N 轮未包含。」；普通长度的会话两句都不出现。笔记本内会话的弹窗从会话的全部轮次就地算（详情读取不分页）；全局会话的弹窗问确数端点（见[全局会话分享](#全局会话分享)），只有端点失败时才说没能统计。数值护栏如下。
 
-**个人记忆披露（服务端）。** `GET /notebooks/{nb}/conversations/{cid}/share/disclosure?through_id=` 返回 `{memory_count, new_memory_count}`。`through_id` 是这次分享将钉住的回答，含义与 `expected_through_id` 相同（空串 = 最新回答）。`memory_count` 是这次分享**恰好**将公开的那些轮次——快照 keyset 截至 `through_id` 的前缀、按 `MAX_TURNS` 截断——里作者本人不同个人记忆的条数，逐一读这些轮次的全部锚点与引用：带 `memory_id` 的引用、本身是个人记忆的锚点，以及来源是作者个人记忆来源的锚点或引用（个人记忆投影命中，一次批量查出）；读入了关联深度报告的轮次，再并入其回执的 `memory_used`（报告据以写成的作者个人记忆：报告正文进过回答 prompt，回答可能转述其中源自个人记忆的内容而不带记忆锚点；没读报告的轮次不计）。`new_memory_count` 是其中链接此刻所公开的页面上还没有的条数——相对当前已公开水位，`through_id` 等于该水位时为 0，首次分享前等于全部——从不大于 `memory_count`。这个读取跑分享会跑的全部检查，且不写入任何东西：创建者门（不存在或不是创建者 404，缺少创建者 409）；边界解析不到或排在已公开水位之前、没有回答时的 409；以及范围里引用的挂载参考库对创建者已不再是有效参与库时的拒绝（404「部分笔记本已无法访问，请重新选择范围。」——这样的链接第一次打开就会 404，所以不发；全局分享对失去读权的库同样如此）。`POST .../share` 按确切范围重新计数：`memory_count > 0` 且 `acknowledged_memory_count != memory_count`（缺省也算不等）时返回 409 `{"detail": {"code": "share_disclosure_required", "memory_count": N, "new_memory_count": M}}`，不发 token、不推进水位；否则按它计数时的边界钉住并公开，期间新完成的回答绝不会未经计数就被公开。缺省 `acknowledged_memory_count` 从不返回 422。不含个人记忆的会话与从前完全相同。只有创建者能到达这些端点，所以会话没有「非作者」的拒绝（报告有，见上文）。
+**个人记忆披露（服务端）。** `GET /notebooks/{nb}/conversations/{cid}/share/disclosure?through_id=` 返回 `{memory_count, new_memory_count}`。`through_id` 是这次分享将钉住的回答，含义与 `expected_through_id` 相同（空串 = 最新回答）。`memory_count` 是这次分享**恰好**将公开的那些轮次——快照 keyset 截至 `through_id` 的前缀、截取公开页的窗口（最近的 `MAX_TURNS` 轮）——里作者本人不同个人记忆的条数，逐一读这些轮次的全部锚点与引用：带 `memory_id` 的引用、本身是个人记忆的锚点，以及来源是作者个人记忆来源的锚点或引用（个人记忆投影命中，一次批量查出）；读入了关联深度报告的轮次，再并入其回执的 `memory_used`（报告据以写成的作者个人记忆：报告正文进过回答 prompt，回答可能转述其中源自个人记忆的内容而不带记忆锚点；没读报告的轮次不计）。`new_memory_count` 是其中链接此刻所公开的页面上还没有的条数——相对当前已公开水位，`through_id` 等于该水位时为 0，首次分享前等于全部——从不大于 `memory_count`。这个读取跑分享会跑的全部检查，且不写入任何东西：创建者门（不存在或不是创建者 404，缺少创建者 409）；边界解析不到或排在已公开水位之前、没有回答时的 409；以及范围里引用的挂载参考库对创建者已不再是有效参与库时的拒绝（404「部分笔记本已无法访问，请重新选择范围。」——这样的链接第一次打开就会 404，所以不发；全局分享对失去读权的库同样如此）。`POST .../share` 按确切范围重新计数：`memory_count > 0` 且 `acknowledged_memory_count != memory_count`（缺省也算不等）时返回 409 `{"detail": {"code": "share_disclosure_required", "memory_count": N, "new_memory_count": M}}`，不发 token、不推进水位；否则按它计数时的边界钉住并公开，期间新完成的回答绝不会未经计数就被公开。缺省 `acknowledged_memory_count` 从不返回 422。不含个人记忆的会话与从前完全相同。只有创建者能到达这些端点，所以会话没有「非作者」的拒绝（报告有，见上文）。
 
 **个人记忆披露（分享弹窗）。** 公开或更新会话分享链接前，分享弹窗先向服务端取「公开页将包含你多少条不同的个人记忆」（`GET …/share/disclosure?through_id=`，浏览器不自己数 Memory），并显示「公开页会包含 N 条你引用到的个人记忆摘录。」（更新后：「更新后公开页共 N 条你引用到的个人记忆摘录（新增 M 条）。」）。N>0 时公开请求在 `expected_through_id` 之外带 `acknowledged_memory_count: N`；N 为 0 或取数失败时不带（请求体仍是 `{"expected_through_id": …}`）。服务端按即将公开的确切范围重算，不相等就返回 409 `share_disclosure_required` 并带回确数（其中 `new_memory_count` 相对当前已公开水位），弹窗把披露行就地换成该数字，按钮改为「确认公开」，作者重新确认后才公开；确认公开成功后披露行显示作者刚确认的数字；403 时在按钮旁就地显示服务端那句中文原因。结果落在公开按钮自己身上（在飞时「生成链接中…」，成功后 1.6 秒内「已公开」），复制链接仍是手动操作。公开页（`/c/{token}`、`/r/{token}`）中个人记忆引用保留标题与摘录，当引用带结构化标记 `is_memory: true` 时位置标签显示「作者的个人记忆」。
 
@@ -3569,7 +3590,7 @@ MCP 任务**签发限时链接（`answer_links` 表，SQLite v94 / PostgreSQL `0
 | --- | ---: |
 | `ASSET_ALIAS_HEX_CHARS`（单个资产别名长度：HMAC-SHA256 截断后的十六进制字符数） | 32 |
 | `MAX_REFERENCED_ASSETS`（图片端点单请求扫描的不同资产上限；必须 ≥ `MAX_TURNS × CITATION_IMAGES_PER_ANSWER`——由 `test_endpoint_scan_cap_covers_every_alias_the_projection_can_emit` 守卫，否则晚轮次图片的别名会永远解析不到） | 6,000 |
-| `MAX_TURNS`（单页公开页渲染的最多轮数；超出部分披露为 `truncated_turns`） | 500 |
+| `MAX_TURNS`（单页公开页渲染的最多轮数——公开前缀里最近的那些；更早的轮次披露为 `omitted_earlier_turns` / `truncated_turns`） | 500 |
 | `MAX_REFERENCES`（每轮引用上限） | 500 |
 | `MAX_REFERENCE_TITLE_CHARS`（每条引用标题/原始文件名字符上限） | 400 |
 | `MAX_SNIPPET_CHARS`（每条引用摘录字符上限） | 1,200 |
