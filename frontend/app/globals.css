@@ -279,9 +279,18 @@ button:not(:disabled):not([aria-disabled="true"]):active {
   display: none !important;
 }
 
+/* 主界面外壳的唯一一列必须写成 minmax(0, 1fr)，不能留空走隐式 `auto` 列。
+   `auto` 列不会窄于子项的 min-content；而 `.notebook-grid` 是
+   `repeat(auto-fill, minmax(250px, 1fr))` + `max-width: 1200px`，算固有尺寸时
+   auto-fill 按 1200 定出 4 条轨道，min-content 就是 4×250 + 3×18 = 1054px。外壳列被它
+   撑到 1054 + 48 = 1102px，于是 1024、768、375 宽下整页都横向溢出到 1102px，顶栏右侧
+   入口和「新建」被推出视口。minmax(0, 1fr) 让列宽等于视口，子项按真实可用宽度排版。
+   这一条是外壳的约束，所以不在外层加 overflow-x: hidden，否则真正放不下的内容会被
+   静默裁掉。守卫：tests/guards/app-shell-column-guard.test.mjs。 */
 .app {
   min-height: 100vh;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: 56px 1fr;
 }
 
@@ -392,8 +401,19 @@ button:not(:disabled):not([aria-disabled="true"]):active {
   margin-right: auto;
 }
 
+/* 工具条放不下一行时让右侧动作组整组换到第二行，而不是把按钮挤到字也折行。
+   外壳列改成 minmax(0, 1fr) 之前，这条工具条在 1200 以下一直被撑成 1054px 宽，
+   所以从没遇到过「放不下」；现在它按真实宽度排版，761~850px 之间（以及搜索框
+   展开时）一行确实放不下。三条配合：
+   - `.library-toolbar` 允许换行；
+   - `.library-actions` 用 `flex: 1 1 0`：换行判定按它的 min-content（搜索框取下限
+     180px）而不是 max-content（搜索框 260px），所以 1024 宽展开搜索不会把整组挤到
+     第二行；在同一行时它占满剩余宽度，`justify-content: flex-end` 让按钮仍贴右，
+     和原先的 space-between 观感一致，搜索框在剩余宽度里伸到 260px 为止；
+   - 带字按钮 `white-space: nowrap`：「全部」「最近 ▾」「＋ 新建」不会被折成两行。 */
 .library-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 18px;
@@ -402,6 +422,7 @@ button:not(:disabled):not([aria-disabled="true"]):active {
 
 .tabs {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 16px;
 }
@@ -416,14 +437,21 @@ button:not(:disabled):not([aria-disabled="true"]):active {
   font-size: 16px;
 }
 
+.library-toolbar .tab,
+.library-actions button {
+  white-space: nowrap;
+}
+
 .tab.active {
   background: #eef0f7;
   border: 1px solid #c9cdd7;
 }
 
 .library-actions {
+  flex: 1 1 0;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 10px;
 }
 
@@ -10341,6 +10369,14 @@ button.tag:hover {
 }
 
 @media (max-width: 760px) {
+  /* 窄屏顶栏本来就设计成可换行（下面 height: auto）。外壳第一行若仍是定死的 56px，
+     换到第二行的状态灯/铃铛/账户会溢出到顶栏淡底之外、压在页面留白上。以前整页被
+     撑到 1102px 宽，顶栏从不换行，所以没露出来。工作区（.app.workspace-mode）不显示
+     顶栏，它自己那条 1fr 的行定义优先级更高，不受影响。 */
+  .app {
+    grid-template-rows: minmax(56px, auto) 1fr;
+  }
+
   .topbar {
     flex-wrap: wrap;
     height: auto;
@@ -10398,8 +10434,15 @@ button.tag:hover {
     display: grid;
   }
 
+  /* 窄屏堆叠布局：动作组单独一行、靠左换行（覆盖宽屏的 flex-end）；三个标签收紧
+     间距，375 宽（内容 327px）也排得下一行。 */
   .library-actions {
     flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .tabs {
+    gap: 8px;
   }
 
   .notebook-list {

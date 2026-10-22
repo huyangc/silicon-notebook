@@ -98,6 +98,12 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // AST,jsdom 又不做布局(量出来的 rect 恒为 0),文本是唯一诚实的输入;组件那侧的结构前提
   // 由 tests/component/notebook-reader-actions.component.test.tsx 真渲染断言。
   "tests/guards/reader-badge-layout-guard.test.mjs",
+  // 同上,只读 globals.css(经 PostCSS 解析,不做文本位置查询):断言主界面外壳 `.app` 的
+  // 列写成 minmax(0, 1fr)、外壳上不靠 overflow 裁剪掩盖溢出,以及笔记本列表工具条与窄屏
+  // 顶栏的换行约束。隐式 `auto` 列曾被 `.notebook-grid` 的 1054px min-content 撑宽,整页在
+  // 1024/768/375 宽下横向溢出到 1102px。jsdom 不做 grid/flex 布局(rect 恒为 0),样式表
+  // 是唯一诚实的输入。
+  "tests/guards/app-shell-column-guard.test.mjs",
   // 同上,只读 globals.css:断言引用附图预览的缩放内容盒以 !important 铺满舞台。这条守卫
   // 存在的理由就是一个真实缺陷——react-zoom-pan-pinch 把自己那份单类 CSS module 在运行时
   // 注入 <head> 末尾,同特指度下它赢,声明好的居中规则整条失效,图片钉死在舞台左上角。
