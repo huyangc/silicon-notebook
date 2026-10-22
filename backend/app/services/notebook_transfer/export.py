@@ -76,6 +76,7 @@ from app.domain.notebook_archive import (
     MAX_ENTRIES,
     MAX_ENTRY_COMPRESSION_RATIO,
     MAX_JSONL_LINE_BYTES,
+    MAX_MANIFEST_BYTES,
     MAX_TOTAL_UNCOMPRESSED_BYTES,
     PART_SUFFIX,
     VECTOR_TABLES,
@@ -401,7 +402,16 @@ def _write_archive(
         global_object_types=normalizer.global_object_types(global_object_schemas),
         excluded_mount_edges=normalizer.mount_edges,
     )
-    writer.write_document(MANIFEST_NAME, json_document(manifest.to_dict()).encode("utf-8"))
+    encoded = json_document(manifest.to_dict()).encode("utf-8")
+    if len(encoded) > MAX_MANIFEST_BYTES:
+        # codex #974 r3: the reader refuses a manifest beyond this size, so an
+        # archive carrying one would be published only to be unreadable. The
+        # unbounded part is global_object_types (custom schema descriptions).
+        raise NotebookExportError(
+            f"导出文件的清单过大（{len(encoded)} 字节，上限 {MAX_MANIFEST_BYTES} 字节），"
+            "通常是引用的自定义对象类型说明过长"
+        )
+    writer.write_document(MANIFEST_NAME, encoded)
     missing = sum(
         1 for relative in normalizer.source_files if relative not in files.notebook_files
     )
