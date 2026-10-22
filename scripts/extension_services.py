@@ -56,13 +56,15 @@ class Cancellation:
             raise KeyboardInterrupt
 
     def launcher_gone(self) -> bool:
-        # Reparenting shows a launcher killed outright (even by SIGKILL, which
-        # no trap sees); the pid check covers one gone before this process read
-        # its parent, or a PYTHON_BIN wrapper that forks rather than execs.
-        if os.getppid() != self.parent:
-            return True
+        # Only a launcher that passed --launcher-pid is watched: a hand-run
+        # `nohup ... start &` must survive its shell logging out. Reparenting
+        # shows a launcher killed outright (even by SIGKILL, which no trap
+        # sees); the pid check covers one gone before this process read its
+        # parent, or a PYTHON_BIN wrapper that forks rather than execs.
         if self.launcher_pid is None:
             return False
+        if os.getppid() != self.parent:
+            return True
         try:
             os.kill(self.launcher_pid, 0)
         except ProcessLookupError:
@@ -386,7 +388,10 @@ def main(arguments: list[str] | None = None) -> int:
         return 2
     finally:
         if args.action == "start" and args.receipt is not None and cancellation.launcher_gone():
-            # Nobody is left to hand the receipt off or to clean it up.
+            # Nobody is left to hand the receipt off or to clean it up. This
+            # also takes back a receipt this run wrote after its launcher had
+            # already removed it and exited (a trap that ran before `$!`): every
+            # path out of start(), ready, failed or cancelled, ends here.
             args.receipt.unlink(missing_ok=True)
 
 

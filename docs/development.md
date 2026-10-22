@@ -533,35 +533,36 @@ it started, and a gate run under `nohup` or as a background lane hands its child
 SIGHUP or SIGINT ignored. Their waits end on handshakes (a pid file published by
 rename, or the launcher's exit) under a 20 s backstop.
 
-### Opt-in stress runs
+### Stress scripts
 
-Some regressions live in a window no deterministic test can aim at. Those
-cases carry their own marker, and the backend conftest deselects them (never
-skips them) unless an environment variable asks for them, so neither G1 nor G2
-runs them. Run one after touching the code it guards, on a loaded machine.
+Some regressions live in a window no deterministic test can aim at. They are
+guarded by stress scripts under `scripts/`, not by pytest cases: a committed
+test is always collected, and no environment switch hides one from a gate.
+Neither G1 nor G2 runs these scripts. Run one by hand, on a loaded machine,
+after touching the code it guards.
 
-- `launcher_signal_stress`
-  (`backend/tests/test_extension_service_launchers.py::test_stress_cancellation_next_to_the_controller_fork`)
-  guards two macOS `/bin/bash` 3.2 races next to the companion-controller fork.
-  `extension_services_start` must poll the controller instead of blocking in
-  `wait`, and `extension_services_cleanup` must repeat its TERM. The case lands
-  a cancellation 0–4 ms after the launcher creates its receipt and fails on any
-  launcher still alive 20 s later. Run it with one busy loop per core:
+- `scripts/stress_launcher_signals.py` guards two macOS `/bin/bash` 3.2 races
+  next to the companion-controller fork. `extension_services_start` must poll
+  the controller instead of blocking in `wait`, and `extension_services_cleanup`
+  must repeat its TERM. Each attempt cancels a real launcher in a fake checkout
+  (`backend/tests/launcher_checkout_testkit.py`, shared with the launcher tests)
+  0–4 ms after the launcher creates its receipt. A launcher still alive 20 s
+  later counts as held:
 
   ```bash
-  SILICON_NOTEBOOK_LAUNCHER_SIGNAL_STRESS=1 PYTHONPATH=backend python -m pytest -n 8 \
-    -m launcher_signal_stress backend/tests/test_extension_service_launchers.py
+  python scripts/stress_launcher_signals.py --load auto
   ```
 
-  It runs 2 launchers x 4 shards, each shard in its own `xdist_group`.
-  `SILICON_NOTEBOOK_LAUNCHER_SIGNAL_STRESS_RUNS` sets the attempts per shard
-  (default 1500) and `SILICON_NOTEBOOK_LAUNCHER_SIGNAL_STRESS_SEED` fixes the
-  random offsets. Measured with one busy loop per core, the fixed launcher was held
-  0 times in 12000 attempts, and a launcher reverted to a blocking `wait` was held
-  2 times in 12000. That race hits about once in 5000 to 6000 attempts, so a
-  default run catches a reintroduced blocking `wait` with roughly 85-90%
-  probability. Raise the attempt count or repeat the run when you need more
-  confidence. A held cancellation fails the case on the first run.
+  `--load auto` runs one busy loop per core alongside. By default it runs
+  2 launchers (`--launchers dev.sh,backend.sh`) × 4 parallel shards
+  (`--shards`) × 1500 attempts (`--runs`); `--seed` fixes the offsets. Exit 0
+  means nothing was held, 1 means a cancellation was held, and 2 means bad
+  usage or a broken shard. Measured with `--load auto`, the fixed launchers were
+  held 0 times in 12000 attempts. Launchers reverted to a blocking
+  `wait` were held 2 times in 12000. That race hits about once in
+  5000 to 6000 attempts, so a default run catches a reintroduced blocking `wait`
+  with roughly 85–90% probability. Raise `--runs` or repeat the run when you
+  need more confidence.
 
 ### Python dependencies
 
