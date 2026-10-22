@@ -621,6 +621,119 @@ def test_a_launcher_gone_before_the_controller_started_cancels_it(directory, tmp
             process.wait()
 
 
+# A controller that stops right after one chosen step succeeded and waits for
+# the test's go-ahead, so the test can kill the launcher in exactly that gap.
+# argv: scripts, state dir, receipt, item JSON ("null" for no services), saw
+# file, go file, exit-code file, hooked name, launcher pid.
+_HANDSHAKE_CONTROLLER = """
+import json, pathlib, sys, time
+sys.path.insert(0, sys.argv[1])
+import extension_services as m
+item = json.loads(sys.argv[4])
+m.configuration = lambda root: ([item] if item else [], 'pending')
+saw, go, exit_file = pathlib.Path(sys.argv[5]), pathlib.Path(sys.argv[6]), pathlib.Path(sys.argv[7])
+target = sys.argv[8]
+original = getattr(m, target)
+held = []
+def wanted(args, value):
+    if target == 'read_json':
+        return pathlib.Path(args[0]).name == 'state.json' and value.get('state') == 'ready'
+    if target == 'healthy':
+        return value is True
+    return True
+def hooked(*args, **kwargs):
+    value = original(*args, **kwargs)
+    if not held and wanted(args, value):
+        held.append(True)
+        saw.write_text('')
+        while not go.exists():
+            time.sleep(0.01)
+    return value
+setattr(m, target, hooked)
+code = m.main(['start', '--state-dir', sys.argv[2], '--receipt', sys.argv[3], '--launcher-pid', sys.argv[9]])
+exit_file.write_text(str(code))
+raise SystemExit(code)
+"""
+# Starts the handshake controller with its own pid as --launcher-pid, publishes
+# the controller pid to argv[2], waits for it.
+_HANDSHAKE_LAUNCHER = (
+    "import os,subprocess,sys\n"
+    "child=subprocess.Popen([sys.executable,'-c',sys.argv[1],*sys.argv[3:],str(os.getpid())])\n"
+    "open(sys.argv[2]+'.tmp','w').write(str(child.pid)); os.replace(sys.argv[2]+'.tmp',sys.argv[2])\n"
+    "child.wait()\n"
+)
+
+
+def _parent_of(pid: int) -> int | None:
+    out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return int(out) if out else None
+
+
+def _kill_the_launcher_at(directory, tmp_path, target: str, item) -> int:
+    """Run the controller up to ``target``'s success, SIGKILL its launcher in
+    that gap, let the controller finish and return its exit code."""
+    receipt = tmp_path / "receipt"
+    receipt.write_text("")
+    saw, go, exit_file = tmp_path / "saw", tmp_path / "go", tmp_path / "exit"
+    controller_pid = tmp_path / "controller.pid"
+    launcher = subprocess.Popen(
+        [sys.executable, "-c", _HANDSHAKE_LAUNCHER, _HANDSHAKE_CONTROLLER, str(controller_pid),
+         str(SCRIPTS), str(directory), str(receipt), json.dumps(item), str(saw), str(go), str(exit_file), target],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    pid = None
+    try:
+        def exited():
+            assert launcher.poll() is None, "launcher exited early"
+        eventually(lambda: saw.exists() and controller_pid.exists(), COLD_START_SECONDS, exited)
+        pid = int(controller_pid.read_text())
+        launcher.kill()
+        launcher.wait()
+        # Handshake: the controller has been reparented, so its watch can see
+        # the launcher gone before it lets the success through.
+        eventually(lambda: _parent_of(pid) not in (None, launcher.pid), COLD_START_SECONDS)
+        go.write_text("")
+        eventually(lambda: exit_file.exists() and not alive(pid), COLD_START_SECONDS)
+        assert not receipt.exists()
+        return int(exit_file.read_text())
+    finally:
+        if launcher.poll() is None:
+            launcher.kill()
+            launcher.wait()
+        if pid is not None and alive(pid):
+            os.kill(pid, signal.SIGKILL)
+
+
+@pytest.mark.process_contract
+def test_a_launcher_killed_as_the_session_turns_ready_rolls_it_back(directory, tmp_path):
+    """#978 codex P2: the session turned ready and the launcher died before the
+    controller's next watch. Accepting the ready would leave a session nobody
+    owns; it is cancelled like any other startup instead."""
+    assert _kill_the_launcher_at(directory, tmp_path, "read_json", service(tmp_path)) == 130
+    assert not runtime.running(directory)
+    assert manager.status(directory)["state"] in ("stopped", "failed")
+
+
+@pytest.mark.process_contract
+def test_a_launcher_killed_as_a_reused_session_rechecks_cancels_without_touching_it(directory, tmp_path):
+    """The reuse recheck has the same gap. Its cancellation stops nothing: the
+    reused session belongs to whoever started it."""
+    owner_receipt = tmp_path / "owner.json"
+    assert manager.start(directory, [service(tmp_path)], "pending", owner_receipt)["reused"] is False
+    assert _kill_the_launcher_at(directory, tmp_path, "healthy", service(tmp_path)) == 130
+    assert runtime.running(directory)
+    assert manager.status(directory)["state"] == "ready"
+    assert manager.stop(directory, owner_receipt)["state"] == "stopped"
+
+
+@pytest.mark.process_contract
+def test_a_launcher_killed_as_startup_finds_nothing_configured_cancels(directory, tmp_path):
+    """No services to start: nothing to roll back, but the exit still says the
+    launch was cancelled and the receipt is gone."""
+    assert _kill_the_launcher_at(directory, tmp_path, "_spawn", None) == 130
+    assert not runtime.running(directory)
+
+
 def test_without_a_launcher_pid_a_changed_parent_is_not_a_cancellation(monkeypatch):
     """`nohup ... start &` by hand must survive its shell logging out: only a
     controller told its launcher's pid watches for the launcher."""
