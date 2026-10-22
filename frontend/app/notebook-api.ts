@@ -80,8 +80,17 @@ export const setNotebookIndexingPipeline = (id: string, pipelineId: string | nul
     body: JSON.stringify({ pipeline_id: pipelineId }),
   });
 
-// 删除整本笔记本只有一份客户端:notebook-deletion-api.ts 的 `requestNotebookDeletion`
-// (校验 202 回答里的 `delete_after`)。
+/** 删除整本笔记本(前端唯一的一份 DELETE 客户端):202 `{status: "pending_delete", delete_after}`
+ *  ——这本笔记本进入一天的删除窗口,此刻起对所有人不可用,`delete_after`(UTC ISO)起永久删除,
+ *  在此之前主人可以撤销。回答里没有可读的 `delete_after` 就当失败:提示里那个时刻必须来自服务端。 */
+export async function deleteNotebook(id: string): Promise<{ deleteAfter: string }> {
+  const body = await requestJson<{ delete_after?: unknown } | null>(
+    `/notebooks/${encodeURIComponent(id)}`,
+    { ...options, method: "DELETE" },
+  );
+  if (typeof body?.delete_after !== "string") throw new Error("malformed delete response");
+  return { deleteAfter: body.delete_after };
+}
 
 export const fetchNotebookAnalytics = (id: string) =>
   requestJson<NotebookAnalytics>(`/notebooks/${id}/analytics`, options);
