@@ -1047,7 +1047,9 @@ test("撤销「标为正常」：调用撤销接口并重取，已通过区说�
   fireEvent.click(within(zone("已通过")).getByRole("button", { name: "撤销" }));
   expect(undismissKgFinding).toHaveBeenCalledWith("nb-1", "F1", "src-t");
   await waitFor(() => expect(within(zone("已通过")).getByText(/已撤销：疑似内容错配 · Titans\.pdf 回到了待处理/)).toBeInTheDocument());
-  expect(vi.mocked(fetchKgFindings).mock.calls.length).toBeGreaterThan(callsBefore);
+  // 撤销接口是在 act 之外回来的:提示与「重取」的 effect 同一次提交排上,但 waitFor 期间 effect
+  // 异步冲刷——提示看得见时重取可能还没发出去(本机全量并发下见过 3 > 3 失败),所以也在 waitFor 里等。
+  await waitFor(() => expect(vi.mocked(fetchKgFindings).mock.calls.length).toBeGreaterThan(callsBefore));
 });
 
 /** 从第 `from` 次起问过的问题页,写成「区@偏移」并排序(请求集合,不是总次数)。 */
