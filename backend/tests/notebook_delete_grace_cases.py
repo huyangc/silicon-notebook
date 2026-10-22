@@ -52,7 +52,12 @@ from tests.memory_purge_cases import Sql, _as_user
 from tests.model_testkit import bind_all_embedding_clients
 
 EMBED_DIM = 16
-T0 = datetime(2026, 10, 22, 8, 0, tzinfo=timezone.utc)
+# Far in the future on purpose: driver A's stale-row cutoff (list_stale) reads
+# the real wall clock, not the injected one, so every job row these cases
+# write must stay newer than real time. A T0 of 2026-10-22 08:00 turned
+# case_one_failing_promotion red the moment real time passed it (the queued
+# job became "stale" and was resubmitted).
+T0 = datetime(2099, 1, 1, 8, 0, tzinfo=timezone.utc)
 GRACE = timedelta(seconds=NOTEBOOK_DELETE_GRACE_SECONDS)
 DEADLINE = T0 + GRACE
 
@@ -626,7 +631,7 @@ def case_the_export_file_names_the_deadline(world: World) -> None:
     document = service.export_markdown(world.doomed, world.member.id)
     text = "".join(document.pieces)
     assert document.title == "将被删除"
-    assert "这本笔记本已被所有者删除，2026-10-23 08:00起其中的全部内容（包括这些记忆）将被永久删除。" in text
+    assert "这本笔记本已被所有者删除，2099-01-02 08:00起其中的全部内容（包括这些记忆）将被永久删除。" in text
     # A live notebook's export carries no such line.
     world.runtime.notebook_delete_jobs.cancel_pending(world.doomed, now=T0)
     live = "".join(service.export_markdown(world.doomed, world.member.id).pieces)
