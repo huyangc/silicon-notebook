@@ -419,7 +419,9 @@ JSON 读取方可读取已打开、当前用户所有的普通文件快照，即
 `backend/tests/launcher_checkout_testkit.py` 里用假的 uvicorn / `next` / `node` 子进程，记录
 收到的 SIGTERM（`TERM_EXITS`）或无视它（`TERM_IGNORED`）。钉住：「TERM → 宽限 → KILL」与两个
 启动器共用的退出码 130 / 143 / 129；宽限等待期间再按一次 Ctrl-C、再收到 TERM 或 HUP 会立刻结束
-等待、配套服务仍被停止（prod.sh 用假 `rm`（`RM_BLOCK`）停在交接之前）；后端的父进程就是启动器
+等待、配套服务仍被停止（prod.sh 用假 `rm`（`RM_BLOCK`）停在交接之前）；同样的信号发给启动器的整个进程组
+（像终端的 Ctrl-C 那样：启动器作为会话首进程，`new_session`，用例用 `os.killpg`），它也会打断启动器
+自己的 `sleep`，这不得在 `set -e` 下中止收尾；后端的父进程就是启动器
 本身（`exec` 守卫；`( 单条简单命令 ) &` 在 bash 里根本不 fork 子 shell，所以可观察的是子 shell 里
 多出第二条命令，而不是去掉 `exec`）；挂起的 trap 没来得及记下 pid 的子进程仍被停止（用 fork 与
 `PID=$!` 之间的 `kill` 确定性复现）；两个启动器都 source 共享脚本且每次 fork 都有括号标记。

@@ -537,7 +537,10 @@ run fake uvicorn / `next` / `node` children in `backend/tests/launcher_checkout_
 that record the SIGTERM they receive (`TERM_EXITS`) or ignore it (`TERM_IGNORED`). They pin:
 TERM, then grace, then KILL, with the exit codes 130 / 143 / 129 for both launchers; a
 second Ctrl-C, TERM or HUP during the grace wait ending it at once while the companion
-services are still stopped (prod.sh is held before its hand-off by a fake `rm`, `RM_BLOCK`);
+services are still stopped (prod.sh is held before its hand-off by a fake `rm`, `RM_BLOCK`); the same
+signals sent to the launcher's whole process group, as a terminal's Ctrl-C does (the launcher runs
+as a session leader, `new_session`, and the test uses `os.killpg`), which also interrupt its own
+`sleep` and must not abort the wind-down under `set -e`;
 that the backend's parent is the launcher itself (the `exec` guard; for `( one simple
 command ) &` bash forks no subshell, so only a second command in that subshell, not a
 dropped `exec`, shows); a child whose pid a pending trap left unassigned still being

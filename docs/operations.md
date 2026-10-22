@@ -186,8 +186,14 @@ for TERM and 129 for HUP.
 A further Ctrl-C, TERM or HUP during that wait (uvicorn prints "CTRL+C to force quit")
 does not kill the launcher: it ends the wait at once, SIGKILLs the servers still running
 and still stops the companion services and removes the receipt, with the exit status of
-the first signal. A child whose pid a signal arrived too early to record (the signal
-lands between the fork and the assignment) is found through `$!` and stopped as well.
+the first signal. This holds for the signal a terminal sends: Ctrl-C reaches the whole
+foreground process group, so it interrupts the launcher's own wait as well, and that
+interruption no longer aborts the wind-down (the launcher runs with `set -e`; the
+wind-down does not). A repeated SIGINT sent to the launcher's pid alone (`kill -INT`) is
+not noticed until the grace window ends, because bash runs no trap for the signal whose
+handler it is still inside; repeated TERM and HUP are noticed at once. A child whose pid
+a signal arrived too early to record (the signal lands between the fork and the
+assignment) is found through `$!` and stopped as well.
 
 Before `dev.sh` starts `next dev` it runs the frontend's UI plugin sync
 (`node scripts/sync-ui-plugins.mjs` from `frontend/`, what `npm run dev` ran as the
