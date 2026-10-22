@@ -189,6 +189,12 @@ export function mayStackAbove(
 // 所以提前结束不会放走那一次 close request。不经键盘的 close request 不在任何一次按键
 // 之内，照旧每次关一层。
 //
+// **按住也只关一层**：按住 Escape 时浏览器连发 `repeat: true` 的 keydown，它们都属于
+// 同一次按键，不另起序号——否则第一次 keydown 关掉预览，下一次自动重复就把刚露出来的
+// 引用卡或窗口也关掉。按键在上面那几个结束条件出现之后若还有 Escape 的自动重复（例如
+// 按住 Escape 时点了一下鼠标），它重新挂回同一个序号，那个序号已被认领，照样拿不到名额。
+// 别的键的自动重复（例如一直按着 Shift）不算「别的键按下」，不结束这次按键。
+//
 // 模块级而不是挂在某个协调器实例上：认领方里有独立页（`/ask`、`/c/{token}`）上没有协调器
 // 的组件；监听在模块加载时就位，早于任何认领方的捕获期监听，序号因此总在同一次派发里
 // 先加一。只碰 window 上的键鼠事件，不做 I/O、不起计时器。
@@ -200,8 +206,11 @@ function endEscapePress() {
 
 if (typeof window !== "undefined") {
   window.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape") { endEscapePress(); return; }
-    escapePress.serial += 1;
+    if (event.key !== "Escape") {
+      if (!event.repeat) endEscapePress();
+      return;
+    }
+    if (!event.repeat) escapePress.serial += 1;
     escapePress.held = true;
   }, true);
   window.addEventListener("keyup", endEscapePress, true);

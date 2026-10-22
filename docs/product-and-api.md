@@ -241,7 +241,7 @@ coordinator opens the preview as a **child layer** stacked over the window (poli
 stays, only leaving the interaction tree (the full window temporarily drops to non-modal), Escape, the backdrop
 and the close button close only the preview and focus returns to the image that opened it, and only the next
 Escape collapses the window as before; if the window leaves, the preview leaves with it. The coordinator
-counts key presses: one Escape press closes at most one layer, even if the browser still sends a close request to
+counts key presses: one Escape press closes at most one layer (holding Escape down still closes only one), even if the browser still sends a close request to
 the window it just revealed; the press a citation card or the share dialog consumes counts the same way. While the preview covers the full window, focus stays in the preview and Tab cannot
 reach the hidden page; over the compact window there is no focus trap, as in notebook Ask.
 While a card is open, Escape closes only the card (an image opened from the card closes first, then the card). The mobile layout retains scope, send and stop.
