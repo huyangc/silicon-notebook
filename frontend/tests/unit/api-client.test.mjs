@@ -88,9 +88,9 @@ test("requestVoid accepts 202 with a JSON body without parsing it (batch 3·W1 P
   // requestVoid's own contract is "checked(...) then discard the body" — it
   // only inspects response.ok (any 2xx). This test pins that directly with a
   // 202 + JSON body: if requestVoid ever started requiring a specific status
-  // code or attempted to parse the body, this would fail. (notebook-api.ts's
-  // deleteNotebook now reads its 202 body -- the deletion window's
-  // delete_after -- through requestJson instead.)
+  // code or attempted to parse the body, this would fail. (Deleting a whole
+  // notebook reads its 202 body -- the deletion window's delete_after --
+  // through notebook-deletion-api.ts's requestNotebookDeletion instead.)
   globalThis.fetch = async () =>
     new Response(JSON.stringify({ status: "deleting" }), {
       status: 202,

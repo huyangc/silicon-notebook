@@ -6,7 +6,6 @@ import type { NotebookSummary } from "../../app/workspace-model";
 
 const notebookApi = vi.hoisted(() => ({
   createNotebook: vi.fn(),
-  deleteNotebook: vi.fn(),
   fetchNotebookIndexingPipeline: vi.fn(),
   getNotebook: vi.fn(),
   listNotebooks: vi.fn(),
@@ -20,6 +19,7 @@ const basesApi = vi.hoisted(() => ({
   setBases: vi.fn(),
 }));
 const searchApi = vi.hoisted(() => ({ searchNotebooksBounded: vi.fn() }));
+const deletionApi = vi.hoisted(() => ({ requestNotebookDeletion: vi.fn() }));
 
 vi.mock("../../app/notebook-api.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../app/notebook-api.ts")>()),
@@ -28,6 +28,10 @@ vi.mock("../../app/notebook-api.ts", async (importOriginal) => ({
 vi.mock("../../app/notebook-bases.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../app/notebook-bases.ts")>()),
   ...basesApi,
+}));
+vi.mock("../../app/notebook-deletion-api.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../app/notebook-deletion-api.ts")>()),
+  ...deletionApi,
 }));
 vi.mock("../../app/collection-search.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../app/collection-search.ts")>()),
@@ -60,7 +64,7 @@ function notebook(
 }
 
 // DELETE /notebooks/{id} → 202: the notebook entered its one-day deletion window.
-const DELETE_ACCEPTED = { status: "pending_delete", delete_after: "2026-10-23T08:00:00+00:00" };
+const DELETE_ACCEPTED = { deleteAfter: "2026-10-23T08:00:00+00:00" };
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -177,7 +181,7 @@ beforeEach(() => {
     rebuild_status: "pending",
     job_id: "job-1",
   }));
-  notebookApi.deleteNotebook.mockResolvedValue(DELETE_ACCEPTED);
+  deletionApi.requestNotebookDeletion.mockResolvedValue(DELETE_ACCEPTED);
   basesApi.listMountable.mockResolvedValue([]);
   basesApi.listBases.mockResolvedValue([]);
   basesApi.mountedByCount.mockResolvedValue({ count: 0 });
@@ -412,7 +416,7 @@ test("a mirrored notebook refuses rename, settings and delete before any request
   await act(async () => value!.openDelete("mirror"));
   expect(value!.deletion).toBeNull();
   expect(basesApi.mountedByCount).not.toHaveBeenCalled();
-  expect(notebookApi.deleteNotebook).not.toHaveBeenCalled();
+  expect(deletionApi.requestNotebookDeletion).not.toHaveBeenCalled();
 });
 
 // 反向一半:同一本库、只差 sync_origin —— 本地库那一侧一个请求都不能少。
@@ -1218,13 +1222,13 @@ test("a published permission downgrade closes an owner-only delete confirmation"
   publish([notebook("a")]);
   expect(value!.deletion).toBeNull();
   await act(async () => value!.confirmDelete());
-  expect(notebookApi.deleteNotebook).not.toHaveBeenCalled();
+  expect(deletionApi.requestNotebookDeletion).not.toHaveBeenCalled();
 });
 
 test("an in-flight delete reports backend rejection after a transient list omission", async () => {
   const deletion = deferred<typeof DELETE_ACCEPTED>();
   const rejection = new Error("delete rejected");
-  notebookApi.deleteNotebook.mockReturnValueOnce(deletion.promise);
+  deletionApi.requestNotebookDeletion.mockReturnValueOnce(deletion.promise);
   render(<Harness />);
   publish([notebook("a")]);
   await act(async () => value!.openDelete("a"));
@@ -1242,7 +1246,7 @@ test("an in-flight delete reports backend rejection after a transient list omiss
 
 test("dismissing the confirmation does not withdraw a DELETE already on the wire", async () => {
   const deletion = deferred<typeof DELETE_ACCEPTED>();
-  notebookApi.deleteNotebook.mockReturnValueOnce(deletion.promise);
+  deletionApi.requestNotebookDeletion.mockReturnValueOnce(deletion.promise);
   render(<Harness />);
   publish([notebook("a")]);
   await act(async () => value!.openDelete("a"));
@@ -1257,7 +1261,7 @@ test("dismissing the confirmation does not withdraw a DELETE already on the wire
   await deleting;
   expect(effects.onNotebookDeleted).toHaveBeenCalledWith("a");
   expect(effects.notify).toHaveBeenCalledWith(
-    deleteScheduledText("a", DELETE_ACCEPTED.delete_after),
+    deleteScheduledText("a", DELETE_ACCEPTED.deleteAfter),
   );
   expect(value!.rows).toEqual([]);
 });
@@ -1265,7 +1269,7 @@ test("dismissing the confirmation does not withdraw a DELETE already on the wire
 test("a delete that fails after its confirmation was dismissed still reports", async () => {
   const deletion = deferred<typeof DELETE_ACCEPTED>();
   const rejection = new Error("delete rejected");
-  notebookApi.deleteNotebook.mockReturnValueOnce(deletion.promise);
+  deletionApi.requestNotebookDeletion.mockReturnValueOnce(deletion.promise);
   render(<Harness />);
   publish([notebook("a")]);
   await act(async () => value!.openDelete("a"));
@@ -1285,7 +1289,7 @@ test("a confirmation reopened over a pending DELETE shows it pending and recover
   // confirmDelete 永远静默拒绝的「确认」——挂死的请求下它永远按不动（codex #629 R1 P2）。
   const first = deferred<typeof DELETE_ACCEPTED>();
   const rejection = new Error("delete rejected");
-  notebookApi.deleteNotebook
+  deletionApi.requestNotebookDeletion
     .mockReturnValueOnce(first.promise)
     .mockResolvedValueOnce(DELETE_ACCEPTED);
   render(<Harness />);
@@ -1306,7 +1310,7 @@ test("a confirmation reopened over a pending DELETE shows it pending and recover
   expect(value!.deletion?.busy).toBe(false);
 
   await act(async () => value!.confirmDelete());
-  expect(notebookApi.deleteNotebook).toHaveBeenCalledTimes(2);
+  expect(deletionApi.requestNotebookDeletion).toHaveBeenCalledTimes(2);
   expect(value!.rows).toEqual([]);
 });
 
@@ -1314,7 +1318,7 @@ test("a confirmation reopened after re-login still recovers from its old DELETE"
   // 与设置弹窗同一条：deletingRef 按 actor id 记账，登出再登录回同一账号时键还在，
   // 释放若绑在发起时的 generation 上，重开的框会永远卡在「删除中」（codex #629 R2 P2）。
   const stuck = deferred<typeof DELETE_ACCEPTED>();
-  notebookApi.deleteNotebook.mockReturnValueOnce(stuck.promise);
+  deletionApi.requestNotebookDeletion.mockReturnValueOnce(stuck.promise);
   const view = render(<Harness />);
   publish([notebook("a")]);
   await act(async () => value!.openDelete("a"));
@@ -1336,7 +1340,7 @@ test("a confirmation reopened after re-login still recovers from its old DELETE"
 
 test("a completed delete does not close a confirmation opened for another notebook", async () => {
   const stuck = deferred<typeof DELETE_ACCEPTED>();
-  notebookApi.deleteNotebook.mockReturnValueOnce(stuck.promise);
+  deletionApi.requestNotebookDeletion.mockReturnValueOnce(stuck.promise);
   render(<Harness />);
   publish([notebook("a"), notebook("b")]);
   await act(async () => value!.openDelete("a"));
@@ -1360,7 +1364,7 @@ test("a delete that fails after re-login reports into the dialog it recovered", 
   // 否则忙碌位悄悄清掉，用户得不到任何解释（codex #629 R4 P2）。
   const stuck = deferred<typeof DELETE_ACCEPTED>();
   const rejection = new Error("delete rejected");
-  notebookApi.deleteNotebook.mockReturnValueOnce(stuck.promise);
+  deletionApi.requestNotebookDeletion.mockReturnValueOnce(stuck.promise);
   const view = render(<Harness />);
   publish([notebook("a")]);
   await act(async () => value!.openDelete("a"));
@@ -1394,7 +1398,7 @@ test("closing the confirmation without a delete in flight says nothing", async (
 
 test("delete is single-flight and a pre-delete list cannot resurrect its tombstone", async () => {
   const deletion = deferred<typeof DELETE_ACCEPTED>();
-  notebookApi.deleteNotebook.mockReturnValueOnce(deletion.promise);
+  deletionApi.requestNotebookDeletion.mockReturnValueOnce(deletion.promise);
   render(<Harness />);
   publish([notebook("a")]);
   const staleRead = value!.beginListRead();
@@ -1405,7 +1409,7 @@ test("delete is single-flight and a pre-delete list cannot resurrect its tombsto
     deleting = value!.confirmDelete();
     void value!.confirmDelete();
   });
-  expect(notebookApi.deleteNotebook).toHaveBeenCalledTimes(1);
+  expect(deletionApi.requestNotebookDeletion).toHaveBeenCalledTimes(1);
   await act(async () => deletion.resolve(DELETE_ACCEPTED));
   await deleting;
   expect(value!.rows).toEqual([]);
@@ -1415,7 +1419,7 @@ test("delete is single-flight and a pre-delete list cannot resurrect its tombsto
 
 test("delete releases its single-flight key after failure and permits one retry", async () => {
   const first = deferred<typeof DELETE_ACCEPTED>();
-  notebookApi.deleteNotebook
+  deletionApi.requestNotebookDeletion
     .mockReturnValueOnce(first.promise)
     .mockResolvedValueOnce(DELETE_ACCEPTED);
   render(<Harness />);
@@ -1427,13 +1431,13 @@ test("delete releases its single-flight key after failure and permits one retry"
     deleting = value!.confirmDelete();
     void value!.confirmDelete();
   });
-  expect(notebookApi.deleteNotebook).toHaveBeenCalledTimes(1);
+  expect(deletionApi.requestNotebookDeletion).toHaveBeenCalledTimes(1);
   await act(async () => first.reject(new Error("delete failed")));
   await deleting;
   expect(effects.reportError).toHaveBeenCalledTimes(1);
 
   await act(async () => value!.confirmDelete());
-  expect(notebookApi.deleteNotebook).toHaveBeenCalledTimes(2);
+  expect(deletionApi.requestNotebookDeletion).toHaveBeenCalledTimes(2);
 });
 
 test("only a post-delete snapshot may garbage-collect a tombstone", async () => {
@@ -1470,7 +1474,7 @@ test("a cancelled deletion lifts the tombstone so the notebook comes back", asyn
 
 test("a delete completed across actor A to B to A removes the restored A card", async () => {
   const deletion = deferred<typeof DELETE_ACCEPTED>();
-  notebookApi.deleteNotebook.mockReturnValueOnce(deletion.promise);
+  deletionApi.requestNotebookDeletion.mockReturnValueOnce(deletion.promise);
   const view = render(<Harness />);
   publish([notebook("a")]);
   await act(async () => value!.openDelete("a"));
