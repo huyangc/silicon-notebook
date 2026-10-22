@@ -12,15 +12,56 @@ fi
 source "$ROOT_DIR/scripts/extension_services.sh"
 LAUNCH_MONITOR_POLL_SECONDS=0.2
 
+# 收尾与 prod.sh 的 cleanup 逐字同形(宽限轮询、KILL 兜底、日志措辞、测试钩子、
+# 退出码)。刻意不抽进 extension_services.sh:那份脚本由配套服务取消握手
+# (#978/#979)独占;两份由
+# test_dev_launcher_cleanup_is_the_same_shape_as_prod_launcher_cleanup 钉成同一个形状。
+#
+# 环境变量:START_CLEANUP_GRACE_SECONDS(默认 10,退出时 SIGTERM 到 SIGKILL 的宽限)
 cleanup() {
-  local status=$?
+  local status=$? pid alive deadline polls=0
   trap - EXIT INT TERM HUP
-  if [[ -n "${BACKEND_PID:-}" ]]; then
-    kill "$BACKEND_PID" 2>/dev/null || true
+
+  if [[ -z "${BACKEND_PID:-}" && -z "${FRONTEND_PID:-}" ]]; then
+    extension_services_cleanup || status=1
+    exit "$status"
   fi
-  if [[ -n "${FRONTEND_PID:-}" ]]; then
-    kill "$FRONTEND_PID" 2>/dev/null || true
-  fi
+
+  # Both services are direct children (the launch subshell execs into the real
+  # process). Signal them together so one slow shutdown cannot consume a full
+  # grace window before the other even receives SIGTERM.
+  for pid in "${BACKEND_PID:-}" "${FRONTEND_PID:-}"; do
+    [[ -n "$pid" ]] || continue
+    kill "$pid" 2>/dev/null || true
+  done
+
+  deadline=$((SECONDS + ${START_CLEANUP_GRACE_SECONDS:-10}))
+  while true; do
+    alive=0
+    for pid in "${BACKEND_PID:-}" "${FRONTEND_PID:-}"; do
+      [[ -n "$pid" ]] || continue
+      if kill -0 "$pid" 2>/dev/null; then alive=1; fi
+    done
+    [[ "$alive" == "0" || "$SECONDS" -ge "$deadline" ]] && break
+    if [[ -n "${_SCRIPT_TEST_CLEANUP_MAX_POLLS:-}" \
+      && "$polls" -ge "${_SCRIPT_TEST_CLEANUP_MAX_POLLS}" ]]; then
+      break
+    fi
+    sleep "${_SCRIPT_TEST_CLEANUP_POLL_INTERVAL_SECONDS:-1}"
+    polls=$((polls + 1))
+  done
+
+  for pid in "${BACKEND_PID:-}" "${FRONTEND_PID:-}"; do
+    [[ -n "$pid" ]] || continue
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "startup child PID $pid did not stop after SIGTERM; sending SIGKILL" >&2
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done
+  for pid in "${BACKEND_PID:-}" "${FRONTEND_PID:-}"; do
+    [[ -n "$pid" ]] || continue
+    wait "$pid" 2>/dev/null || true
+  done
   extension_services_cleanup || status=1
   exit "$status"
 }
@@ -64,8 +105,18 @@ fi
 # shellcheck source=scripts/autotune.sh
 source "$ROOT_DIR/scripts/autotune.sh"
 
+START_CLEANUP_GRACE_SECONDS="${START_CLEANUP_GRACE_SECONDS:-10}"
+if [[ ! "$START_CLEANUP_GRACE_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "错误: START_CLEANUP_GRACE_SECONDS 必须是正整数。" >&2
+  exit 2
+fi
+
 if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
   echo "frontend/node_modules not found; run 'npm install' in frontend/ first" >&2
+  exit 1
+fi
+if [[ ! -x "$ROOT_DIR/frontend/node_modules/.bin/next" ]]; then
+  echo "frontend Next.js launcher not found; run 'npm install' in frontend/ first" >&2
   exit 1
 fi
 extension_services_start
@@ -73,13 +124,19 @@ extension_services_start
 # BACKEND_HOST=0.0.0.0 to expose the API beyond localhost (e.g. server deploys).
 # Paths (db/storage/env_file) are anchored to the repo root in code (Settings), not to
 # the launch directory — the `cd` below is only so Python resolves the `app` package.
+# Both children are launched as `( exec ... ) &` like prod.sh, so $! is the real
+# process: a SIGTERM from cleanup reaches uvicorn / next itself, not an npm or
+# subshell layer that would sit in front of it and leave it running.
+# 与 prod.sh 一样不加 uvicorn 的 --timeout-graceful-shutdown:prod.sh 现行做法没有它,
+# 退出时限完全由上面 cleanup 的 TERM→宽限→KILL 负责。
 cd "$ROOT_DIR/backend"
-PYTHONPATH="$INHERITED_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" "$ROOT_DIR/scripts/python_env.py" \
-  -m uvicorn app.main:app --host "${BACKEND_HOST:-127.0.0.1}" --port 8000 &
+( export PYTHONPATH="$INHERITED_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}"
+  exec "$PYTHON_BIN" "$ROOT_DIR/scripts/python_env.py" -m uvicorn app.main:app \
+  --host "${BACKEND_HOST:-127.0.0.1}" --port 8000 ) &
 BACKEND_PID=$!
 
 cd "$ROOT_DIR/frontend"
-npm run dev &
+( exec "$ROOT_DIR/frontend/node_modules/.bin/next" dev ) &
 FRONTEND_PID=$!
 
 while kill -0 "$BACKEND_PID" 2>/dev/null && kill -0 "$FRONTEND_PID" 2>/dev/null; do

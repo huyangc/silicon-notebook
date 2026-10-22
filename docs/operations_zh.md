@@ -127,6 +127,17 @@ bash scripts/cli.sh extensions services stop
 被忽略的 SIGQUIT。配套服务启动期间启动器本身消失（被杀，包括 SIGKILL）时，控制器把它当作
 取消（直到会话转为就绪的那一刻都算）：回滚自己启动的部分（复用的会话不动），并删除启动器的回执。启动完成时控制器已经退出，已在运行的会话
 不依赖启动它的启动器。
+
+`npm run dev`（`scripts/dev.sh`）把两个服务留在前台，所以 Ctrl-C、TERM、HUP 就是它的
+正常退出方式，收尾与 `scripts/prod.sh` 在交接前被打断时完全同形：uvicorn 和 `next dev`
+都是启动器的直接子进程（各自用 `exec` 启动，前面没有 npm 或 shell 中间层），启动器同时
+给两者发 SIGTERM，信号直达服务本身；随后最多等待 `START_CLEANUP_GRACE_SECONDS`（默认
+10 秒，须为正整数，否则在启动任何东西之前以 2 退出），仍在运行的服务发 SIGKILL（stderr 会
+打印 `startup child PID <n> did not stop after SIGTERM; sending SIGKILL`），回收两者，最后才
+停止本次启动的配套服务。退出码：Ctrl-C 为 130，TERM 为 143，HUP 为 129，与 `prod.sh`
+一致。某个服务自己退出时，启动器以该服务的退出码退出，并用同样的方式停掉另一个。两个
+启动器都不给 uvicorn 传 `--timeout-graceful-shutdown`，上述宽限期是退出时限的唯一约束。
+
 配置或有效启动环境改变则必须显式 stop/start。失败只回收本次新建进程，不影响先前复用
 的会话或外部服务。`stop` 按依赖反序停止，核对已保存的进程归属，先优雅终止，再
 强制清理；不按占用端口或单独一个 PID 识别目标。

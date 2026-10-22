@@ -93,9 +93,27 @@ if action == "start" and os.environ.get("WAIT_SERVICE") in ("1", "misses-first-t
 sys.exit(7 if action == "start" and os.environ.get("FAIL_SERVICE") == "1" else 0)
 ''')
     executable(root / "fake_child.sh", '''#!/bin/bash
+# TERM_EXITS / TERM_IGNORED: space-separated child names that record a SIGTERM in
+# $FAKE_ROOT/<name>.term and then exit (a well-behaved service) or keep running
+# (a service that ignores SIGTERM and only SIGKILL stops). The trap is armed
+# before the pid file is published, so a reader that waits for the pid file can
+# never signal a child that has not armed it yet.
+trapped=
+if [[ " ${TERM_EXITS:-} " == *" $1 "* ]]; then
+  trapped=1; trap ': > "$FAKE_ROOT/$1.term"; exit 0' TERM
+elif [[ " ${TERM_IGNORED:-} " == *" $1 "* ]]; then
+  trapped=1; trap ': > "$FAKE_ROOT/$1.term"' TERM
+fi
 # Publish the pid file by rename so a reader never sees it created but still empty.
 echo "$$" > "$FAKE_ROOT/$1.pid.tmp" && mv "$FAKE_ROOT/$1.pid.tmp" "$FAKE_ROOT/$1.pid"
-[[ "${FAIL_MAIN:-}" == "$1" ]] && exit 8
+if [[ "${FAIL_MAIN:-}" == "$1" ]]; then
+  # FAIL_AFTER: fail only once that other child has published its pid file.
+  while [[ -n "${FAIL_AFTER:-}" && ! -f "$FAKE_ROOT/$FAIL_AFTER.pid" ]]; do /bin/sleep 0.02; done
+  exit 8
+fi
+if [[ -n "$trapped" ]]; then
+  while :; do /bin/sleep 0.05; done
+fi
 exec sleep 60
 ''')
     python_wrapper = '''#!/bin/bash
@@ -188,11 +206,12 @@ def reap_leaked_controllers(root: Path, timeout: float) -> list[int]:
 
 
 def spawn(root: Path, env: dict[str, str], path: str, *args: str,
-          new_session: bool = False) -> subprocess.Popen:
+          new_session: bool = False, stderr=subprocess.DEVNULL) -> subprocess.Popen:
     """``new_session`` puts the launcher and everything it forks in a process
-    group of their own, so a caller can kill even a child not yet exec'd."""
+    group of their own, so a caller can kill even a child not yet exec'd.
+    ``stderr`` is a file object when a test reads the launcher's diagnostics."""
     return subprocess.Popen(["bash", str(root / path), *args], cwd=root, env=env,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=stderr,
                             preexec_fn=default_launcher_signals, start_new_session=new_session)
 
 
