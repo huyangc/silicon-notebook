@@ -592,7 +592,12 @@ class _Normalizer:
         return row
 
     def _row_notebook_object_schemas(self, row: dict) -> dict:
-        self.schema_types.add(str(row["object_type"]))
+        # A local ``proposed`` row is review-only: the registry keeps resolving
+        # the global definition for that type (SchemaRegistryService.
+        # effective_schemas), so it must not stop the global one travelling
+        # (codex #974 r4). Active and disabled local rows do shadow it.
+        if str(row.get("status") or "") != "proposed":
+            self.schema_types.add(str(row["object_type"]))
         return row
 
     def _row_knowhow_tables(self, row: dict) -> dict:

@@ -493,19 +493,33 @@ def check_global_object_types(repo, backend: Backend, tmp: Path) -> None:
             "created_at": now, "updated_at": now,
         })
 
+    # ``sensor`` also has a local PROPOSED row: review-only, the registry keeps
+    # resolving the global definition, so the global one still travels (codex
+    # #974 r4). ``device`` has an active local row, which does shadow it.
+    proposed_sensor = Row("notebook_object_schemas", {
+        "notebook_id": NB, "object_type": "sensor", "plural": "sensors",
+        "fields": [{"name": "name", "type": "text"}], "primary_field": "name",
+        "list_fields": ["name"], "status": "proposed", "created_by": char_cases.OWNER,
+        "created_at": now, "updated_at": now,
+    })
     extra = [
         schema("chip", "custom"), schema("device", "custom"), schema("unused", "induced"),
+        schema("sensor", "custom"), proposed_sensor,
         typed_object("ko-chip", "chip"), typed_object("ko-device", "device"),
+        typed_object("ko-sensor", "sensor"),
     ]
     seed(repo, backend, char_cases.full_world() + extra, storage, char_cases.FULL_FILES)
     out = tmp / "types.snbk"
     export(repo, NB, out)
     inspect_archive(out)
-    assert archive_manifest(out)["global_object_types"] == [{
-        "object_type": "chip", "plural": "chips", "fields": ["name", "vendor"],
-        "primary_field": "name", "description": "d", "label": "label chip",
-        "list_fields": ["name"], "status": "active",
-    }]
+    assert archive_manifest(out)["global_object_types"] == [
+        {
+            "object_type": object_type, "plural": f"{object_type}s",
+            "fields": ["name", "vendor"], "primary_field": "name", "description": "d",
+            "label": f"label {object_type}", "list_fields": ["name"], "status": "active",
+        }
+        for object_type in ("chip", "sensor")
+    ]
 
 
 def check_soft_pointers_are_normalised(repo, backend: Backend, tmp: Path) -> None:
