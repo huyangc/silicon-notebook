@@ -43,9 +43,11 @@ def test_service_launcher_merges_dotenv_and_exported_plugin_paths(tmp_path, dote
         "Path(os.environ['RESULT_FILE']).write_text(json.dumps(["
         "dotenv_plugin.VALUE, exported_plugin.VALUE, os.environ['PLUGIN_TOKEN']]))\n"
     )
-    npm = fake_bin / "npm"
-    npm.write_text('#!/bin/sh\nwhile [ ! -f "$RESULT_FILE" ]; do sleep 0.1; done\n')
-    npm.chmod(0o755)
+    # dev.sh execs frontend/node_modules/.bin/next directly (no npm layer).
+    (frontend / "node_modules/.bin").mkdir()
+    next_bin = frontend / "node_modules/.bin/next"
+    next_bin.write_text('#!/bin/sh\nwhile [ ! -f "$RESULT_FILE" ]; do sleep 0.1; done\n')
+    next_bin.chmod(0o755)
     result_file = tmp_path / "result.json"
     env = dict(os.environ)
     env.pop("SILICON_NOTEBOOK_ENV_FILE", None)

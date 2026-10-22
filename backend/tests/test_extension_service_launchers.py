@@ -194,6 +194,125 @@ def test_development_signal_exit_cleans_owned_receipt(launcher):
         wait_until(lambda: not alive(pid))
 
 
+@contextmanager
+def dev_launcher(root, env, **extra_env):
+    """dev.sh running with both fake children published. Whatever the test does,
+    both children are SIGKILLed by exact pid on the way out, so assertions about
+    the launcher's own cleanup belong inside the ``with`` body."""
+    with (root / "launcher.err").open("w") as stream:
+        process = spawn(root, {**env, **extra_env}, "scripts/dev.sh", stderr=stream)
+    with process:
+        try:
+            wait_until(lambda: (root / "backend.pid").exists() and (root / "frontend.pid").exists())
+            yield process
+        finally:
+            if process.poll() is None:
+                process.kill()
+            kill_published(root / "backend.pid")
+            kill_published(root / "frontend.pid")
+
+
+def published_pid(root, name):
+    return int((root / f"{name}.pid").read_text())
+
+
+def parent_pid(pid):
+    return int(subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
+                              capture_output=True, text=True).stdout.strip())
+
+
+@pytest.mark.parametrize("interruption,status", [
+    (signal.SIGTERM, 143), (signal.SIGHUP, 129), (signal.SIGINT, 130),
+])
+def test_dev_launcher_stops_both_children_with_term_and_never_needs_kill(launcher, interruption, status):
+    root, env = launcher
+    with dev_launcher(root, env, TERM_EXITS="backend frontend") as process:
+        pids = {name: published_pid(root, name) for name in ("backend", "frontend")}
+        # TERM only reaches uvicorn / next themselves if the launcher's child IS
+        # that process: a subshell or npm layer in between would make this ppid
+        # differ and leave the real server running when the layer is signalled.
+        assert {name: parent_pid(pid) for name, pid in pids.items()} == {"backend": process.pid, "frontend": process.pid}
+        process.send_signal(interruption)
+        assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) == status
+        for name, pid in pids.items():
+            assert (root / f"{name}.term").exists(), f"{name} never received SIGTERM"
+            assert not alive(pid)
+        assert "sending SIGKILL" not in (root / "launcher.err").read_text()
+    assert_owned_cleanup(root)
+
+
+def test_dev_launcher_kills_a_child_that_ignores_term_after_the_grace_window(launcher):
+    root, env = launcher
+    with dev_launcher(root, env, TERM_EXITS="backend", TERM_IGNORED="frontend",
+                      START_CLEANUP_GRACE_SECONDS="1",
+                      _SCRIPT_TEST_CLEANUP_POLL_INTERVAL_SECONDS="0.05") as process:
+        backend, frontend = published_pid(root, "backend"), published_pid(root, "frontend")
+        process.terminate()
+        # Without the SIGKILL fallback the launcher would wait forever on `wait`.
+        assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) == 143
+        assert (root / "frontend.term").exists(), "SIGTERM must come before SIGKILL"
+        assert (root / "backend.term").exists()
+        assert not alive(frontend)
+        assert not alive(backend)
+        err = (root / "launcher.err").read_text()
+        assert f"startup child PID {frontend} did not stop after SIGTERM; sending SIGKILL" in err
+        assert f"PID {backend} did not stop" not in err, "only the survivor is killed"
+    assert_owned_cleanup(root)
+
+
+def test_dev_launcher_returns_the_failed_childs_status_and_stops_the_other(launcher):
+    root, env = launcher
+    result = run(root, {**env, "FAIL_MAIN": "backend", "FAIL_AFTER": "frontend",
+                        "TERM_EXITS": "frontend"}, "scripts/dev.sh")
+    assert result.returncode == 8, result.stdout + result.stderr
+    assert (root / "frontend.term").exists()
+    assert not alive(published_pid(root, "frontend"))
+    assert_owned_cleanup(root)
+
+
+@pytest.mark.parametrize("path", ["scripts/dev.sh", "scripts/prod.sh"])
+@pytest.mark.parametrize("interruption,status", [
+    (signal.SIGTERM, 143), (signal.SIGHUP, 129), (signal.SIGINT, 130),
+])
+def test_dev_and_prod_launchers_exit_with_the_same_status_per_signal(launcher, path, interruption, status):
+    root, env = launcher
+    controller_file = root / "controller.pid"
+    with spawn(root, {**env, "WAIT_SERVICE": "1"}, path) as process:
+        try:
+            wait_until(controller_file.exists)
+            process.send_signal(interruption)
+            assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) == status
+        finally:
+            if process.poll() is None:
+                process.kill()
+            kill_published(controller_file)
+    assert_owned_cleanup(root)
+
+
+@pytest.mark.parametrize("grace", ["0", "-1", "ten", "1.5"])
+def test_dev_launcher_rejects_a_bad_grace_before_starting_anything(launcher, grace):
+    root, env = launcher
+    result = run(root, {**env, "START_CLEANUP_GRACE_SECONDS": grace}, "scripts/dev.sh")
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "START_CLEANUP_GRACE_SECONDS 必须是正整数" in result.stderr
+    assert not (root / "service-events.jsonl").exists()
+    assert not (root / "backend.pid").exists()
+    assert not (root / "frontend.pid").exists()
+
+
+def _cleanup_function(script):
+    lines = (ROOT / "scripts" / script).read_text(encoding="utf-8").splitlines()
+    start = lines.index("cleanup() {")
+    end = lines.index("}", start)
+    return "\n".join(lines[start:end + 1])
+
+
+def test_dev_launcher_cleanup_is_the_same_shape_as_prod_launcher_cleanup():
+    """No shared function exists (extension_services.sh is the companion
+    handshake's alone), so the two copies are pinned against drifting apart."""
+    assert _cleanup_function("dev.sh") == _cleanup_function("prod.sh")
+
+
 @pytest.mark.parametrize("path,args", [
     ("scripts/prod.sh", ()), ("scripts/backend.sh", ("start",)), ("start.sh", ()),
 ])

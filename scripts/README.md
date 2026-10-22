@@ -131,6 +131,8 @@ python scripts/migrate_legacy_model_env.py --env .env --apply  # 备份后写入
 scripts/dev.sh                # 同时起 backend(:8000)+ frontend(:3000),Ctrl+C 一起停
 ```
 全栈本地开发用。前台运行、看实时日志、退出即清理两个进程。需先在 `frontend/` 跑过 `npm install`。
+退出(Ctrl+C / TERM / HUP,退出码 130 / 143 / 129)与 `prod.sh` 同形:先同时给 uvicorn 和
+`next dev` 发 SIGTERM,最多等 `START_CLEANUP_GRACE_SECONDS`(默认 10 秒),仍未退出的发 SIGKILL。
 (只需要后端、或要后台常驻 + 明确 stop/status,用 `backend.sh`。)
 
 ### `example_mcp_memory_client.py` —— 外部 Agent MCP/Memory 接入示例

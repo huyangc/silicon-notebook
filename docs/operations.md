@@ -165,6 +165,21 @@ controller treats that as a cancellation, up to and including the moment the
 session turns ready: it rolls back what it started (a reused session is left alone)
 and removes the launcher's receipt. A controller has exited by the time startup completes, so a
 running session never depends on the launcher that started it.
+
+`npm run dev` (`scripts/dev.sh`) keeps both servers in the foreground, so Ctrl-C, TERM and
+HUP are its ordinary way out, and it winds down exactly as `scripts/prod.sh` does when it
+is interrupted before its hand-off. uvicorn and `next dev` are the launcher's direct
+children (each started with `exec`, with no npm or shell layer in front), so the launcher
+sends SIGTERM to both at once and the signal reaches the server itself. It then waits up to
+`START_CLEANUP_GRACE_SECONDS` (default 10 seconds; a positive integer, anything else exits 2
+before anything starts), SIGKILLs a server that is still running (stderr says `startup child
+PID <n> did not stop after SIGTERM; sending SIGKILL`), reaps both and only then stops the
+companion services this launch started. The exit status is 130 for Ctrl-C, 143 for TERM and
+129 for HUP, the same codes `prod.sh` returns. When one server stops on its own, the launcher
+exits with that server's status after stopping the other the same way. Neither launcher
+passes `--timeout-graceful-shutdown` to uvicorn: the grace window is the only bound on
+shutdown.
+
 A failed attempt rolls back only its own new processes, never a previously reused
 session or an external service. `stop` runs in reverse dependency order, verifies
 the saved process ownership, and uses graceful termination before forced cleanup.

@@ -532,6 +532,12 @@ Launcher signal tests start every launcher with default signal dispositions
 it started, and a gate run under `nohup` or as a background lane hands its children
 SIGHUP or SIGINT ignored. Their waits end on handshakes (a pid file published by
 rename, or the launcher's exit) under a 20 s backstop.
+The `dev.sh` shutdown cases run fake uvicorn / `next` children that record the SIGTERM
+they receive (`TERM_EXITS`) or ignore it (`TERM_IGNORED`) in
+`backend/tests/launcher_checkout_testkit.py`. They pin TERM, then grace, then KILL, the
+exit codes 130 / 143 / 129 shared with `prod.sh`, that each child's parent is the launcher
+itself (the `exec` guard), and that the `cleanup` function of `dev.sh` and `prod.sh` stays
+textually identical. Operations behaviour: [operations.md](./operations.md#plugin-companion-services).
 
 ### Stress scripts
 

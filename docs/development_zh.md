@@ -415,6 +415,11 @@ JSON 读取方可读取已打开、当前用户所有的普通文件快照，即
 启动时已被忽略的信号，而在 `nohup` 下或作为后台泳道运行的门禁，会把 SIGHUP 或 SIGINT
 以「已忽略」的状态传给子进程。等待一律以握手结束（按改名发布的 pid 文件，或启动器退出），
 20 s 只作兜底上限。
+`dev.sh` 的退出用例在 `backend/tests/launcher_checkout_testkit.py` 里用假的 uvicorn / `next`
+子进程，记录收到的 SIGTERM（`TERM_EXITS`）或无视它（`TERM_IGNORED`），钉住「TERM → 宽限 →
+KILL」、与 `prod.sh` 共用的退出码 130 / 143 / 129、每个子进程的父进程就是启动器本身（`exec`
+守卫），以及 `dev.sh` 与 `prod.sh` 的 `cleanup` 函数文本逐字相同。运维侧行为见
+[operations_zh.md](./operations_zh.md)。
 
 ### 压测脚本
 
