@@ -1984,7 +1984,7 @@ def test_postgres_pending_refresh_and_a_human_decision_take_rows_in_one_order(
 
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 78
+    assert PostgresMigrator(postgres_database).migrate() == 81
     _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     with postgres_database.write() as connection:
