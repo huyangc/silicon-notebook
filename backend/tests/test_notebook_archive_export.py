@@ -532,10 +532,18 @@ def test_cli_reports_an_io_error_on_a_later_notebook(repo, out_dir, capsys, monk
 
 
 @pytest.mark.parametrize("tree", ["notebooks", "assets", "linked"])
-def test_an_output_inside_an_exported_tree_is_refused(repo, tmp_path, tree):
+def test_an_output_inside_an_exported_tree_is_refused(repo, tmp_path, tree, monkeypatch):
     """codex #974 r1: written inside the notebook's file or asset tree, the
     archive's own part file would be walked and copied into itself until the
-    disk fills. Refused before anything is written, on resolved paths."""
+    disk fills. Refused before anything is written, on resolved paths.
+
+    Creating the writer is made to fail loudly: without the refusal this case
+    would otherwise reproduce the self-copy and never finish."""
+
+    def no_writer(*_args, **_kwargs):
+        raise AssertionError("the writer was created for an output inside an exported tree")
+
+    monkeypatch.setattr(export_module._ArchiveWriter, "create", no_writer)
     notebook_root = _seed_full(repo)
     assets_root = Path(repo.storage_dir) / "assets" / cases.NB
     assets_root.mkdir(parents=True, exist_ok=True)
