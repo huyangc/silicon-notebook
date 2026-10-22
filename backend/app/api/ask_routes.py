@@ -1362,7 +1362,8 @@ def conversation_share_disclosure_route(
             repo, notebook_id, conversation_id, owner, through_id
         )
     return ConversationShareDisclosure(
-        memory_count=count.memory_count, new_memory_count=count.new_memory_count
+        memory_count=count.memory_count, new_memory_count=count.new_memory_count,
+        current_memory_count=count.current_memory_count,
     )
 
 

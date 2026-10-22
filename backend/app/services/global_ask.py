@@ -2609,7 +2609,8 @@ class GlobalAskService:
         _boundary, count, jobs = self._share_count(conversation_id, user_id, through_id)
         self._share_authority_sweep(jobs, user_id)
         return {"memory_count": count.memory_count,
-                "new_memory_count": count.new_memory_count}
+                "new_memory_count": count.new_memory_count,
+                "current_memory_count": count.current_memory_count}
 
     def share_counts(self, conversation_id, *, user_id, through_id="",
                      watermark_id=None, watermark_at=None):

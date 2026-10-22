@@ -66,17 +66,23 @@ test("the frontend never counts memory_id itself: server says 0 -> memoryCount 0
 });
 
 test("readServerMemoryDisclosure accepts the endpoint shape and rejects anything malformed", () => {
-  assert.deepEqual(readServerMemoryDisclosure({ memory_count: 3, new_memory_count: 1 }), {
+  assert.deepEqual(readServerMemoryDisclosure({ memory_count: 3, new_memory_count: 1, current_memory_count: 4 }), {
     memoryCount: 3,
     newMemoryCount: 1,
+    // Counted on the current page's own window: once the window slides it is NOT 3 - 1.
+    currentMemoryCount: 4,
   });
-  // new_memory_count is optional (report endpoint omits it): defaults to 0.
-  assert.deepEqual(readServerMemoryDisclosure({ memory_count: 0 }), { memoryCount: 0, newMemoryCount: 0 });
+  // new_memory_count may be absent: defaults to 0.
+  assert.deepEqual(readServerMemoryDisclosure({ memory_count: 0, current_memory_count: 0 }), {
+    memoryCount: 0, newMemoryCount: 0, currentMemoryCount: 0,
+  });
   // Anything else is a failed fetch (null) -> the fallback copy, never a guessed number.
   for (const bad of [null, undefined, "3", [], {}, { memory_count: -1 }, { memory_count: 1.5 },
     { memory_count: "2" }, { memory_count: 2, new_memory_count: -1 }, { memory_count: 2, new_memory_count: "1" },
     // New is a subset of the total: "1 total, 3 new" contradicts itself -> failed fetch, no guessing.
-    { memory_count: 1, new_memory_count: 3 }]) {
+    { memory_count: 1, new_memory_count: 3, current_memory_count: 0 },
+    // Without the current page's own count there is nothing to derive it from.
+    { memory_count: 3, new_memory_count: 1 }, { memory_count: 3, new_memory_count: 1, current_memory_count: -1 }]) {
     assert.equal(readServerMemoryDisclosure(bad), null, JSON.stringify(bad));
   }
 });

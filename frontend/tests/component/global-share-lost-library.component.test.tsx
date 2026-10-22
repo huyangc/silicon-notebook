@@ -32,7 +32,7 @@ function wire() {
       return { share_token: "gshr-x", shared_through_at: "2026-01-01T00:00:19+00:00", shared_through_id: "j19" };
     }
     if (path.includes("/share/disclosure?")) {
-      if (new URLSearchParams(path.split("?")[1]).get("through_id") === "j19") return { memory_count: 0, new_memory_count: 0 };
+      if (new URLSearchParams(path.split("?")[1]).get("through_id") === "j19") return { memory_count: 0, new_memory_count: 0, current_memory_count: 0 };
       throw humanizedError(LOST, 404);
     }
     if (path.includes("/share/counts?")) throw humanizedError(LOST, 404);

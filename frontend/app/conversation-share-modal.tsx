@@ -177,6 +177,7 @@ export function ConversationShareModal({
     action: "share" | "update";
     memoryCount: number;
     newMemoryCount: number;
+    currentMemoryCount: number | null;
   } | null>(null);
   // 403：服务端给的那句中文原因，就地显示在按钮上方（不是页顶横幅）。
   const [refusal, setRefusal] = useState("");
@@ -366,17 +367,25 @@ export function ConversationShareModal({
   const conflictHere = conflict && conflict.action === (shared ? "update" : "share") ? conflict : null;
   // 个人记忆条数的**唯一来源**：409 带回的确数优先，其次是披露端点；都没有 = 未知。
   const effectiveMemory: ServerMemoryDisclosure | null = conflictHere
-    ? { memoryCount: conflictHere.memoryCount, newMemoryCount: conflictHere.newMemoryCount }
+    ? {
+      memoryCount: conflictHere.memoryCount,
+      newMemoryCount: conflictHere.newMemoryCount,
+      currentMemoryCount: conflictHere.currentMemoryCount,
+    }
     : (memoryEntry ? memoryEntry.counts : null);
-  // 数不出来（轮次取不全，或披露端点失败）：不带数字、但两个面都提的兜底文案。
-  const showCountsError = countsUnavailable || effectiveMemory === null;
-  // 已公开范围的记忆条数：有「更新」时，端点给的是更新后的总数，扣掉新增即当前已公开的。
+  // 披露行描述**链接此刻**的内容。有「更新」时它就是服务端按当前页面**自己的窗口**数的那个数
+  // （`currentMemoryCount`）——绝不用「更新后总数 - 新增」相减：会话长过公开页后两页的窗口不再
+  // 从同一轮开始，相减只剩交集，只在被挤出那一轮里的个人记忆会被数没（codex #985 R1 P1）。
+  // 没有「更新」时，问的范围就是链接此刻的那一页（或未分享时按下去会发布的那一页）。
+  const currentMemory = effectiveMemory
+    ? (canAdvance ? effectiveMemory.currentMemoryCount : effectiveMemory.memoryCount)
+    : null;
+  // 数不出来（轮次取不全、披露端点失败，或此刻那一页的条数没给）：不带数字、但两个面都提的兜底文案。
+  const showCountsError = countsUnavailable || effectiveMemory === null || currentMemory === null;
   const disclosure: ShareDisclosure = useMemo(() => ({
     ...turnDisclosure,
-    memoryCount: effectiveMemory
-      ? (canAdvance ? Math.max(0, effectiveMemory.memoryCount - effectiveMemory.newMemoryCount) : effectiveMemory.memoryCount)
-      : 0,
-  }), [turnDisclosure, effectiveMemory, canAdvance]);
+    memoryCount: currentMemory ?? 0,
+  }), [turnDisclosure, currentMemory]);
   // 前瞻披露:推进水位会公开新增轮次,consent 判据是**这个按钮将要公开什么**,所以它必须
   // 在点击前就披露更新后的记忆/附图条数(codex #522 R1 P1)。边界模式下「更新后」的范围
   // 就是截断批次(只消费于 `canAdvance`,而那要求 !watermarkAhead)。
@@ -429,7 +438,7 @@ export function ConversationShareModal({
       // 没带确认值就被服务端接受，说明这个范围里确实是 0 条。
       setMemoryFetch({
         key: memoryFetchKey,
-        counts: { memoryCount: acknowledged ?? 0, newMemoryCount: 0 },
+        counts: { memoryCount: acknowledged ?? 0, newMemoryCount: 0, currentMemoryCount: acknowledged ?? 0 },
       });
       // 确数同理：水位正好钉在了这次披露的边界上，链接此刻的内容就是 `update` 描述的那一份
       // （`countsAfterPublishing`），不必为新水位再问一次服务端、也不在复制按钮上方闪一下
@@ -449,7 +458,12 @@ export function ConversationShareModal({
       if (err instanceof ShareDisclosureRequired) {
         // 服务端此刻的确数与作者看到的不等（或取数失败时第一次拿到数字）：披露行就地换成
         // 确数，按钮改成「确认公开」，由作者重新决定。不发 token、不推进水位。
-        setConflict({ action, memoryCount: err.memoryCount, newMemoryCount: err.newMemoryCount });
+        setConflict({
+          action,
+          memoryCount: err.memoryCount,
+          newMemoryCount: err.newMemoryCount,
+          currentMemoryCount: err.currentMemoryCount,
+        });
       } else if (httpErrorStatus(err) === 403) {
         // 服务端拒绝公开：那句中文原因（`X-User-Message`）就地显示在按钮上方。
         setRefusal(toUserMessage(err, "暂时无法公开分享"));
@@ -650,7 +664,7 @@ export function ConversationShareModal({
                   </div>
                 )}
 
-                <ShareDisclosureLines disclosure={disclosure} countsError={showCountsError} memoryKnown={effectiveMemory !== null} />
+                <ShareDisclosureLines disclosure={disclosure} countsError={showCountsError} memoryKnown={currentMemory !== null} />
                 {/* 公开成功的结果：原来那颗「生成分享链接」/「更新」按钮随公开一起退场，所以结果
                     就落在它原来的位置、同一款按钮上，停留 1.6 s（`useCopyResult`，key 是这条链接
                     自己的 token）。复制仍是手动的「复制」。class 以字面量写在这里。 */}
@@ -671,7 +685,7 @@ export function ConversationShareModal({
                   <X size={13} /> {busy === "revoke" ? "撤销中…" : "撤销分享"}
                 </button>
               </>) : (<>
-                <ShareDisclosureLines disclosure={disclosure} countsError={showCountsError} memoryKnown={effectiveMemory !== null} />
+                <ShareDisclosureLines disclosure={disclosure} countsError={showCountsError} memoryKnown={currentMemory !== null} />
                 {refusal && <p className="password-change-status error" role="alert">{refusal}</p>}
                 <button
                   type="button"

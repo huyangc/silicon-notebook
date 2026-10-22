@@ -153,16 +153,21 @@ def share_state(world: World, cid: str) -> dict:
     return world.repo.conversation_share_state(world.notebook, cid)
 
 
-def counts(memory_count: int, new_memory_count: int) -> dict:
-    return {"memory_count": memory_count, "new_memory_count": new_memory_count}
+def counts(memory_count: int, new_memory_count: int, current_memory_count: int | None = None) -> dict:
+    """The disclosure body. ``current_memory_count`` -- the entries on the page
+    the link serves now, counted on that page's own window -- defaults to
+    ``memory_count - new_memory_count``: every case here fits the page, and
+    while the range and the published page start at the same turn the two are
+    equal (the range holds the page). The cases past ``MAX_TURNS``
+    (``share_counts_cases``) pass it explicitly, because there they differ."""
+    current = memory_count - new_memory_count if current_memory_count is None else current_memory_count
+    return {"memory_count": memory_count, "new_memory_count": new_memory_count,
+            "current_memory_count": current}
 
 
-def required(memory_count: int, new_memory_count: int) -> dict:
-    return {"detail": {
-        "code": SHARE_DISCLOSURE_REQUIRED,
-        "memory_count": memory_count,
-        "new_memory_count": new_memory_count,
-    }}
+def required(memory_count: int, new_memory_count: int, current_memory_count: int | None = None) -> dict:
+    body = counts(memory_count, new_memory_count, current_memory_count)
+    return {"detail": {"code": SHARE_DISCLOSURE_REQUIRED, **body}}
 
 
 def public_page(world: World, token: str):

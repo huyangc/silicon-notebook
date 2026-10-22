@@ -160,6 +160,7 @@ beforeEach(() => {
   shareApi.disclosure.mockImplementation(async (throughId: string) => ({
     memory_count: throughId === "job-1" ? 0 : 1,
     new_memory_count: 0,
+    current_memory_count: throughId === "job-1" ? 0 : 1,
   }));
   turnsByConversation = { "conv-a": [JOB_1, JOB_2, UNFINISHED] };
   Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: vi.fn() });
@@ -418,7 +419,7 @@ async function openShareOnNewest() {
 test("70 轮的会话：抬头与附图/记忆计数按 70 轮算，数字来自确数端点而不是翻页", async () => {
   turnsByConversation = { "conv-a": longConversation(70) };
   // 个人记忆条数只来自服务端（前端不数）：这里给一个与任何前端计数都对不上的数。
-  shareApi.disclosure.mockResolvedValue({ memory_count: 5, new_memory_count: 0 });
+  shareApi.disclosure.mockResolvedValue({ memory_count: 5, new_memory_count: 0, current_memory_count: 5 });
   await openShareOnNewest();
 
   expect(await screen.findByText(/分享至第 70 轮回答（本会话共 70 轮）/)).toBeInTheDocument();
@@ -436,7 +437,7 @@ test("70 轮的会话：抬头与附图/记忆计数按 70 轮算，数字来自
 
 test("超长会话（600 轮）：给确数，并如实说更早的 100 轮未包含——不再是「拿不全」", async () => {
   turnsByConversation = { "conv-a": longConversation(600, [150, 599]) };
-  shareApi.disclosure.mockResolvedValue({ memory_count: 2, new_memory_count: 0 });
+  shareApi.disclosure.mockResolvedValue({ memory_count: 2, new_memory_count: 0, current_memory_count: 2 });
   await openShareOnNewest();
 
   expect(await screen.findByText(/分享至第 600 轮回答（本会话共 600 轮）/)).toBeInTheDocument();
@@ -454,7 +455,7 @@ test("超长会话（600 轮）：给确数，并如实说更早的 100 轮未�
 test("超长会话已分享到更早一轮：链接此刻的确数与「更新到这一条」之后的确数分开说", async () => {
   turnsByConversation = { "conv-a": longConversation(600, [80, 520, 580]) };
   shareApi.get.mockResolvedValue(SHARED("job-550", "2026-09-19T00:09:09Z"));
-  shareApi.disclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 1 });
+  shareApi.disclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 1, current_memory_count: 0 });
   await openShareOnNewest();
 
   await screen.findByLabelText("分享链接");
@@ -497,6 +498,49 @@ test("打开时那一问的回执按别的水位数（分享态在两次读之�
     "/global-ask/conversations/conv-a/share/counts?through_id=job-2",
     "/global-ask/conversations/conv-a/share/counts?through_id=job-2&watermark_id=job-1&watermark_at=2026-09-19T01%3A00%3A00Z",
   ]);
+});
+
+// --- 窗口滑动后，链接此刻的个人记忆条数按此刻那一页自己数（codex #985 R1 P1） -----------
+//
+// 分享到第 500 轮（第 1–500 轮在页上），只有第 1 轮引用一条个人记忆；之后多了一轮无记忆的
+// 第 501 轮。更新后的页面是第 2–501 轮：不含那条记忆。服务端：更新后 0 条、新增 0 条、此刻 1 条。
+// 旧算法用「更新后 - 新增」推此刻，得 0，把复制按钮旁的那句个人记忆提示整句吞掉——链接其实
+// 一直在公开那条记忆。
+
+test("更新会挤出唯一引用了记忆的那一轮：此刻 1 条照说，更新后不再说记忆", async () => {
+  turnsByConversation = { "conv-a": longConversation(501).map((job) => ({ ...job, answer: job.answer && { ...job.answer, citations: [] } })) };
+  shareApi.get.mockResolvedValue(SHARED("job-500", "2026-09-19T00:08:19Z"));
+  shareApi.disclosure.mockResolvedValue({ memory_count: 0, new_memory_count: 0, current_memory_count: 1 });
+  await openShareOnNewest();
+
+  await screen.findByLabelText("分享链接");
+  expect(screen.getByText(/之后新增 1 轮未包含/)).toBeInTheDocument();
+  expect(screen.getByText("公开页会包含 1 条你引用到的个人记忆摘录。")).toBeInTheDocument();
+  expect(screen.queryByText(/更新后公开页共 \d+ 条你引用到的个人记忆摘录/)).toBeNull();
+  expect(screen.getByRole("button", { name: /更新到这一条/ })).toBeInTheDocument();
+});
+
+test("更新挤出一条记忆、同时带进一条新的：此刻 1 条，更新后 1 条（新增 1 条）", async () => {
+  turnsByConversation = { "conv-a": longConversation(501) };
+  shareApi.get.mockResolvedValue(SHARED("job-500", "2026-09-19T00:08:19Z"));
+  shareApi.disclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 1, current_memory_count: 1 });
+  await openShareOnNewest();
+
+  await screen.findByLabelText("分享链接");
+  expect(screen.getByText("公开页会包含 1 条你引用到的个人记忆摘录。")).toBeInTheDocument();
+  expect(screen.getByText("更新后公开页共 1 条你引用到的个人记忆摘录（新增 1 条）。")).toBeInTheDocument();
+});
+
+test("更新会挤出唯一带附图的那一轮：此刻 1 张照说，更新后不再说附图", async () => {
+  turnsByConversation = { "conv-a": longConversation(501) };
+  shareApi.get.mockResolvedValue(SHARED("job-500", "2026-09-19T00:08:19Z"));
+  shareApi.disclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 1, current_memory_count: 1 });
+  await openShareOnNewest();
+
+  await screen.findByLabelText("分享链接");
+  // 只有第 1 轮带图（longConversation 的 asset-oldest）：此刻的页面上有它，更新后的页面上没有。
+  expect(screen.getByText("公开页会包含 1 张附图。")).toBeInTheDocument();
+  expect(screen.queryByText(/更新后公开页共 \d+ 张附图/)).toBeNull();
 });
 
 test("确数端点失败：一个数字都不给，如实说没能统计，仍可发布", async () => {
@@ -656,7 +700,7 @@ function stubClipboard(rejects = false) {
 }
 
 test("服务端说 0 条：POST 请求体原文就是 {expected_through_id}，没有任何确认字段", async () => {
-  shareApi.disclosure.mockResolvedValue({ memory_count: 0, new_memory_count: 0 });
+  shareApi.disclosure.mockResolvedValue({ memory_count: 0, new_memory_count: 0, current_memory_count: 0 });
   await openShareOn(1);
   expect(screen.queryByText(/条你引用到的个人记忆摘录/)).toBeNull();
 
@@ -666,7 +710,7 @@ test("服务端说 0 条：POST 请求体原文就是 {expected_through_id}，�
 });
 
 test("服务端说 N 条：POST 请求体多一个 acknowledged_memory_count，值就是作者看到的 N", async () => {
-  shareApi.disclosure.mockResolvedValue({ memory_count: 4, new_memory_count: 0 });
+  shareApi.disclosure.mockResolvedValue({ memory_count: 4, new_memory_count: 0, current_memory_count: 4 });
   await openShareOn(1);
   expect(await screen.findByText("公开页会包含 4 条你引用到的个人记忆摘录。")).toBeInTheDocument();
 
@@ -678,7 +722,7 @@ test("服务端说 N 条：POST 请求体多一个 acknowledged_memory_count，�
 test("披露端点取数失败：兜底文案、POST 不带确认值；真实 409（detail 形态）带回确数，按钮改成「确认公开」", async () => {
   shareApi.disclosure.mockRejectedValue(new Error("网络中断"));
   shareApi.post.mockResolvedValueOnce(jsonResponse(409, {
-    detail: { code: "share_disclosure_required", memory_count: 3, new_memory_count: 2 },
+    detail: { code: "share_disclosure_required", memory_count: 3, new_memory_count: 2, current_memory_count: 1 },
   }));
   await openShareOn(1);
   expect(screen.getByText(/公开页可能包含引用到的附图与个人记忆摘录（本次未能统计数量）/)).toBeInTheDocument();
@@ -697,9 +741,9 @@ test("披露端点取数失败：兜底文案、POST 不带确认值；真实 40
 });
 
 test("409 也接受根级形态（code 与数字不在 detail 下）", async () => {
-  shareApi.disclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 0 });
+  shareApi.disclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 0, current_memory_count: 1 });
   shareApi.post.mockResolvedValueOnce(jsonResponse(409, {
-    code: "share_disclosure_required", memory_count: 6, new_memory_count: 6,
+    code: "share_disclosure_required", memory_count: 6, new_memory_count: 6, current_memory_count: 0,
   }));
   await openShareOn(1);
 
@@ -742,9 +786,9 @@ test("公开成功：结果落在公开按钮原来的位置上——「已公�
 });
 
 test("确认公开成功后，披露行是作者刚确认的确数，不退回 409 之前取到的旧数", async () => {
-  shareApi.disclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 0 });
+  shareApi.disclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 0, current_memory_count: 1 });
   shareApi.post.mockResolvedValueOnce(jsonResponse(409, {
-    detail: { code: "share_disclosure_required", memory_count: 3, new_memory_count: 3 },
+    detail: { code: "share_disclosure_required", memory_count: 3, new_memory_count: 3, current_memory_count: 0 },
   }));
   await openShareOn(1);
 

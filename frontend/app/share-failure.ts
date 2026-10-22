@@ -10,12 +10,16 @@ import { throwHumanizedHttpError } from "./errors.ts";
 export class ShareDisclosureRequired extends Error {
   readonly memoryCount: number;
   readonly newMemoryCount: number;
+  /** 会话分享才有：链接**此刻**的页面上有几条（按那一页自己的窗口数，不由另两个数相减）。
+   *  报告分享的 409 不带它，为 null。 */
+  readonly currentMemoryCount: number | null;
 
-  constructor(memoryCount: number, newMemoryCount: number) {
+  constructor(memoryCount: number, newMemoryCount: number, currentMemoryCount: number | null = null) {
     super("share_disclosure_required");
     this.name = "ShareDisclosureRequired";
     this.memoryCount = memoryCount;
     this.newMemoryCount = newMemoryCount;
+    this.currentMemoryCount = currentMemoryCount;
   }
 }
 
@@ -25,7 +29,7 @@ export class ShareDisclosureRequired extends Error {
 export const parseShareDisclosureRequired = (
   status: number,
   body: unknown,
-): { memoryCount: number; newMemoryCount: number } | null => {
+): { memoryCount: number; newMemoryCount: number; currentMemoryCount: number | null } | null => {
   if (status !== 409 || typeof body !== "object" || body === null) return null;
   const root = body as Record<string, unknown>;
   const detail = typeof root.detail === "object" && root.detail !== null
@@ -38,7 +42,10 @@ export const parseShareDisclosureRequired = (
   const newCount = typeof added === "number" && Number.isInteger(added) && added >= 0 ? added : 0;
   // 新增是总数的子集；自相矛盾的回执不当作披露确认（落回通用错误），不猜数字。
   if (newCount > count) return null;
-  return { memoryCount: count, newMemoryCount: newCount };
+  // 链接此刻那一页上的条数（会话分享才带）：形状不对就当作不知道，绝不拿另两个数相减去猜。
+  const current = detail.current_memory_count;
+  const currentCount = typeof current === "number" && Number.isInteger(current) && current >= 0 ? current : null;
+  return { memoryCount: count, newMemoryCount: newCount, currentMemoryCount: currentCount };
 };
 
 /** 公开分享请求的失败出口:409 `share_disclosure_required` 转成带确数的类型化异常;
@@ -53,7 +60,9 @@ export async function throwShareFailure(res: Response, tag: string): Promise<nev
       parsed = undefined;
     }
     const required = parseShareDisclosureRequired(res.status, parsed);
-    if (required) throw new ShareDisclosureRequired(required.memoryCount, required.newMemoryCount);
+    if (required) {
+      throw new ShareDisclosureRequired(required.memoryCount, required.newMemoryCount, required.currentMemoryCount);
+    }
   }
   return throwHumanizedHttpError(res, tag);
 }

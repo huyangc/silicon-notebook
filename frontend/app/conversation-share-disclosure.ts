@@ -52,9 +52,14 @@ export type ShareTurn = {
 
 /** 披露端点（以及会话 409 `share_disclosure_required`）回来的个人记忆条数（服务端口径）。
  *  `memoryCount` = 公开页将包含的、你引用到的不同个人记忆条数；`newMemoryCount` = 其中相对
- *  **当前已公开水位**新增的条数（不是相对作者确认值多出几条）。前端据此推出「当前链接里已有
- *  `memoryCount - newMemoryCount` 条」，所以新增恒 ≤ 总数。 */
-export type ServerMemoryDisclosure = { memoryCount: number; newMemoryCount: number };
+ *  **当前已公开页面**新增的条数；`currentMemoryCount` = 链接**此刻**那一页上的条数（未分享为 0），
+ *  按那一页**自己的**窗口数。
+ *
+ *  ⚠ 当前条数绝不由 `memoryCount - newMemoryCount` 推出：会话长过公开页（500 轮）之后，更新
+ *  前后两页的窗口不再从同一轮开始，相减只剩两页的交集——只出现在被更新挤出页面那一轮里的
+ *  个人记忆，此刻仍在链接里，相减却会把它数没（codex #985 R1 P1）。409 的回执不带它时为
+ *  null：不知道就不说一个数。 */
+export type ServerMemoryDisclosure = { memoryCount: number; newMemoryCount: number; currentMemoryCount: number | null };
 
 const isCount = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value) && value >= 0;
@@ -69,7 +74,8 @@ export function readServerMemoryDisclosure(raw: unknown): ServerMemoryDisclosure
   if (added !== undefined && !isCount(added)) return null;
   // 新增是总数的子集：新增 > 总数是自相矛盾的回执，当作取数失败，绝不把当前条数压成 0 去猜。
   if (added !== undefined && added > body.memory_count) return null;
-  return { memoryCount: body.memory_count, newMemoryCount: added ?? 0 };
+  if (!isCount(body.current_memory_count)) return null;
+  return { memoryCount: body.memory_count, newMemoryCount: added ?? 0, currentMemoryCount: body.current_memory_count };
 }
 
 /** 两句披露文案（产品裁决 M4 的字面）。 */
@@ -383,7 +389,7 @@ export function shareCountsFromTurns(
   // 所以披露按完整 turns 统计（见弹窗里 `disclosureTurns` 的老注释）。
   const disclosureTurns = (boundary.watermarkAhead || boundary.watermarkUnknown) ? turns : scopedTurns;
   const current = summarizeShareDisclosure(disclosureTurns, sharedThroughId, watermark, 0);
-  const update = summarizeShareUpdate(scopedTurns, sharedThroughId, watermark, { memoryCount: 0, newMemoryCount: 0 });
+  const update = summarizeShareUpdate(scopedTurns, sharedThroughId, watermark, { memoryCount: 0, newMemoryCount: 0, currentMemoryCount: 0 });
   return {
     totalTurns: turns.length,
     throughId: scopedTurns.length ? scopedTurns[scopedTurns.length - 1].answer_id : "",
