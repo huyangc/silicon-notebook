@@ -438,6 +438,9 @@ _REGISTRY: dict[str, dict[str, str]] = {
         # PR-E8: rewrites a public library's stored evidence; reads only that
         # library's candidate objects by id and hands nothing to a reader
         "SqliteMigrator._migration_88": MAINTENANCE,
+        # S1: inserts a seed-space state row for a notebook whose concept
+        # clusters exist (an EXISTS probe); returns no row to anyone
+        "SqliteMigrator._migration_102": MAINTENANCE,
     },
     "postgres/maintenance.py": {
         name: MAINTENANCE for name in (
