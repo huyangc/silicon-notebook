@@ -1561,7 +1561,7 @@ class GlobalAskStore:
         return list(reversed(rows)), earlier
 
     def share_counts(self, conversation_id, user_id, *, through_id="",
-                     watermark_id="", watermark_at=""):
+                     watermark_id=None, watermark_at=None):
         """The facts behind the share dialog's numbers, read only: the prefix
         sizes of ``app.domain.share_counts.ShareRanks`` from ONE aggregate over
         this owner's conversation, then the page's window of each prefix the
@@ -1569,7 +1569,8 @@ class GlobalAskStore:
 
         ``through_id`` is the boundary the dialog asks about (empty = the newest
         completed job); ``watermark_id``/``watermark_at`` are the link's
-        watermark as the dialog holds it (empty = not shared). The watermark
+        watermark as the dialog holds it (empty = not shared; ``None`` = the
+        watermark stored now, read with the owner gate in one statement). The watermark
         resolves exactly as the public read resolves it (``_watermark_anchor``:
         a keyset on that job, else the ``created_at <=`` interval), so every
         prefix here is one the page itself could serve. All of them are
@@ -1577,18 +1578,28 @@ class GlobalAskStore:
         finishing in between cannot slip into a window the sizes did not count.
 
         Returns ``{"ranks": ShareRanks, "through_id": str, "windows": {size:
-        [jobs]}}``; ``KeyError`` for a missing or foreign conversation;
+        [jobs]}, "watermark_id": str, "watermark_at": str}`` (the watermark
+        counted against); ``KeyError`` for a missing or foreign conversation
+        (or one whose every turn is past its stamp, as the owner read says);
         ``ConversationShareWatermarkStale`` when the conversation changed
         between the aggregate and a window read (the dialog then says it could
         not count).
         """
         asked = str(through_id or "").strip()
-        mark_id = str(watermark_id or "").strip()
         with self.database.connect() as db:
-            if db.execute(self._sql(
-                "SELECT 1 FROM global_ask_conversations WHERE id=? AND user_id=?"
-            ), (conversation_id, user_id)).fetchone() is None:
+            conv = db.execute(self._sql(
+                "SELECT c.share_token, c.shared_through_id, c.shared_through_at "
+                "FROM global_ask_conversations c WHERE c.id=? AND c.user_id=? "
+                f"AND {self._conversation_live}"
+            ), (conversation_id, user_id)).fetchone()
+            if conv is None:
                 raise KeyError(conversation_id)
+            if watermark_id is None:
+                state = self._share_state(conv)
+                shared = bool(state["share_token"])
+                watermark_id = state["shared_through_id"] if shared else ""
+                watermark_at = state["shared_through_at"] if shared else ""
+            mark_id = str(watermark_id or "").strip()
             mark_at = str(watermark_at or "")
             facts = db.execute(self._sql(
                 _SHARE_RANKS_SQL.format(live=self._live, live_j=self._live_j)
@@ -1613,6 +1624,8 @@ class GlobalAskStore:
             "ranks": ranks,
             "through_id": boundary_id if ranks.boundary is not None else "",
             "windows": windows,
+            "watermark_id": mark_id,
+            "watermark_at": mark_at,
         }
 
     @staticmethod

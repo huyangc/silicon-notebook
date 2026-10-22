@@ -1502,6 +1502,8 @@ class ConversationShareCounts(BaseModel):
     ``update_new_image_count`` (on turns the link does not show yet) and
     ``update_earlier_turns``. Image counts are each turn's anchors' and
     citations' images, deduplicated per turn -- an upper bound on the page.
+    ``watermark_id`` / ``watermark_at``: the watermark these numbers were
+    counted against (the one asked for, or the stored one when none was).
     """
 
     total_turns: int
@@ -1519,6 +1521,8 @@ class ConversationShareCounts(BaseModel):
     update_image_count: int
     update_new_image_count: int
     update_earlier_turns: int
+    watermark_id: str
+    watermark_at: str
 
 
 class ConversationShareResponse(BaseModel):

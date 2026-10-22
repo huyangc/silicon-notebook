@@ -349,16 +349,21 @@ def global_conversation_share_disclosure_route(
 def global_conversation_share_counts_route(
     conversation_id: str,
     through_id: str = Query(default=""),
-    watermark_id: str = Query(default=""),
-    watermark_at: str = Query(default=""),
+    watermark_id: str | None = Query(default=None),
+    watermark_at: str | None = Query(default=None),
     user: UserProfile = Depends(get_current_user),
 ) -> ConversationShareCounts:
     """The share dialog's exact numbers: turns, the boundary ``through_id`` (a
-    JOB id; empty = the newest completed turn) against the link's watermark as
-    the dialog holds it (``watermark_id``/``watermark_at``; empty = not
-    shared), new and older-than-the-page turns, and attached images -- counted
-    in SQL over the windows the public page shows, so a conversation of any
-    length gets exact numbers rather than "not counted".
+    JOB id; empty = the newest completed turn) against the link's watermark,
+    new and older-than-the-page turns, and attached images -- counted in SQL
+    over the windows the public page shows, so a conversation of any length
+    gets exact numbers rather than "not counted".
+
+    The watermark is the one the dialog holds (``watermark_id`` /
+    ``watermark_at``; both empty = not shared) or, when ``watermark_id`` is
+    left out, the link's watermark as stored now -- so the dialog can ask in
+    the same breath as it reads the share state. The body echoes the watermark
+    it counted against (``watermark_id`` / ``watermark_at``).
 
     Owner only, with the share surface's error mapping (``_share_call``): a
     foreign or missing conversation is the same 404, a library the counted

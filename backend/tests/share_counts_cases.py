@@ -182,10 +182,13 @@ def case_every_golden_scenario_matches_the_browser_algorithm(world: World) -> No
         if key not in conversations:
             conversations[key] = seed_golden(world, spec)
         cid = conversations[key]
+        query = golden_query(scenario, cid)
         expected = dict(scenario["expected"])
         if expected["through_id"]:
             expected["through_id"] = f"{cid}-{expected['through_id']}"
-        response = share_counts(world, cid, **golden_query(scenario, cid))
+        # The body echoes the watermark it counted against.
+        expected.update(watermark_id=query["watermark_id"], watermark_at=query["watermark_at"])
+        response = share_counts(world, cid, **query)
         if response.status_code != 200 or response.json() != expected:
             mismatches.append((scenario["name"], response.status_code, response.text))
     assert mismatches == []
@@ -366,9 +369,28 @@ def case_counting_is_owner_only_and_reads_only(world: World) -> None:
     cid, _lost = _long_world(world, 3)
     assert world.client.get(counts_path(cid), headers=world.owner.headers).status_code == 404
     assert share_counts(world, "gconv-missing").status_code == 404
-    assert share_counts(world, cid).status_code == 200
+    unshared = share_counts(world, cid)
+    assert unshared.status_code == 200
+    assert (unshared.json()["watermark_id"], unshared.json()["watermark_at"]) == ("", "")
     store = world.repo._runtime.global_ask_store
     assert store.conversation_share_state(cid, world.alice.id)["share_token"] == ""
+
+
+def case_without_a_watermark_the_stored_one_is_counted_and_echoed(world: World) -> None:
+    """The dialog asks before it has read the share state: left out, the
+    watermark is the stored one, and the body says which it counted against."""
+    turns = MAX_TURNS + 10
+    cid, _lost = _long_world(world, turns)
+    assert share(world, cid, job_of(cid, MAX_TURNS + 2)).status_code == 200
+    state = world.repo._runtime.global_ask_store.conversation_share_state(cid, world.alice.id)
+    implicit = share_counts(world, cid).json()
+    assert (implicit["watermark_id"], implicit["watermark_at"]) == (
+        state["shared_through_id"], state["shared_through_at"])
+    assert implicit == stored_counts(world, cid).json()
+    assert implicit["new_turns"] == 7 and implicit["earlier_turns"] == 3
+    # An explicit empty watermark is "not shared", whatever is stored.
+    explicit = share_counts(world, cid, watermark_id="", watermark_at="").json()
+    assert explicit["watermark_id"] == "" and explicit["new_turns"] == 0
 
 
 # --- authority: the libraries of the turns the page shows ------------------------

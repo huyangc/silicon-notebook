@@ -323,8 +323,8 @@ export function globalConversationShareApi(conversationId: string): Conversation
     // 数字由服务端按公开页的同一个窗口数（再长的会话也有确数），浏览器不再翻页取轮次。
     counts: {
       kind: "server",
-      load: (throughId, watermarkId, watermarkAt) => requestJson<unknown>(
-        conversationShareCountsPath(path, throughId, watermarkId, watermarkAt), options,
+      load: (throughId, watermark) => requestJson<unknown>(
+        conversationShareCountsPath(path, throughId, watermark), options,
       ),
     },
     share: (expectedThroughId, acknowledgedMemoryCount) =>

@@ -442,6 +442,16 @@ export function readServerShareCounts(raw: unknown): ShareCounts | null {
   };
 }
 
+/** 确数回执是按哪条水位数的（`<id>|<at>`，未分享为 `|`）；缺了或形状不对为 null。
+ *  弹窗打开时不等分享态就问（服务端按它存着的水位数），回来后凭它认领：与弹窗读到的
+ *  分享态一致才算数，否则按弹窗持有的水位重问一次。 */
+export function readServerCountsWatermark(raw: unknown): string | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const body = raw as Record<string, unknown>;
+  if (typeof body.watermark_id !== "string" || typeof body.watermark_at !== "string") return null;
+  return `${body.watermark_id}|${body.watermark_at}`;
+}
+
 /** 刚把水位钉到 `counts.throughId`（或刚撤销分享）之后的数字，不必再问一次服务端：
  *  两种情形下链接的内容（未分享时：按下去会发布的内容）都正好是边界之前的那段前缀，
  *  也就是 `update` 描述的那一份——新增 0 轮，范围五态回到「正好在边界上」。
