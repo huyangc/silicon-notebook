@@ -115,18 +115,22 @@ class MemoryRetriever:
         # ahead of everything the Ask streams next) would be paid for nothing.
         # The test is ``is not None``, not truthiness: a decoded empty vector
         # still flips ``has_vector`` and so the fusion denominator.
-        decoded = [(row["record"], decode_vector(row.get("vector"))) for row in rows]
+        # The scan stops at the first vector it finds and keeps nothing: the
+        # rows are decoded one at a time below, as before, so the candidate
+        # pool's vectors are never all held at once.
         query_vector = None
-        if any(vector is not None for _, vector in decoded):
+        if any(decode_vector(row.get("vector")) is not None for row in rows):
             try:
                 query_vector = self.embedder.embed_query(candidate_query)
             except Exception:
                 query_vector = None
         basis = keyword_basis(clean_query)
         hits: list[MemoryHit] = []
-        for item, vector in decoded:
+        for row in rows:
+            item = row["record"]
             text = f"{item.title}\n{item.content_md}\n{' '.join(item.tags)}"
             lexical = basis.coverage(set(_tokens(text)), text)
+            vector = decode_vector(row.get("vector"))
             has_vector = query_vector is not None and vector is not None
             semantic = cosine(query_vector, vector.tolist()) if has_vector else 0.0
             # Eligibility is decided from relevance signals before authority is
