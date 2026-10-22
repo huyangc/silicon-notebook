@@ -42,7 +42,7 @@ copying / importing 不能进入 pending_delete（T1 的 CAS 要求存活）
 |---|---|---|---|
 | T1 | 主人 `DELETE`（`request_pending`） | `SET status_before_delete=status, status='pending_delete', delete_requested_at=:now, delete_requested_by=:actor, delete_after=:now+GRACE WHERE id=? AND {LIVE}`（不动 `updated_at`：撤销后一切原样） | 不存在 404；已在窗口里 409 `{"code":"notebook_pending_delete","delete_after","message"}`；deleting / copying / importing 沿用 409 |
 | T2 | 仅主人 `POST /notebooks/{id}/cancel-delete`（`cancel_pending`） | `SET status=COALESCE(NULLIF(status_before_delete,''),'draft'), status_before_delete='', delete_after=NULL, delete_requested_at=NULL, delete_requested_by=NULL WHERE id=? AND {窗口开放}` | 0 行再读：已存活 → 200 当前摘要（幂等）；窗口里但已到期、或 deleting → 409 `{"code":"notebook_delete_due","message"}`；不存在 404 |
-| T3 | 扫尾驱动 C（`list_due_pending` → `promote_due_pending`） | `SET status='deleting', updated_at=:now WHERE id=? AND {到期}` + 同事务 INSERT 作业行（与 `request()` 共用 `_insert_job_on`） | 0 行跳过 |
+| T3 | 扫尾驱动 C（`list_due_pending` → `promote_due_pending`） | `SET status='deleting', updated_at=<store 时钟> WHERE id=? AND {到期 :tick}` + 同事务 INSERT 作业行（与 `request()` 共用 `_insert_job_on`）。到期判据用扫尾这一拍注入的时刻 `:tick`；`updated_at` 与作业行时间戳用 store 自己的时钟——与 `request()` 写 `'deleting'` 的那一行同源，删除作业的租约与 stale 判据都按 store 时钟算 | 0 行跳过 |
 
 无竞态：T2/T3 对同一行 CAS，PG 行锁 + READ COMMITTED 重求值、SQLite 全局写锁；两边时钟对截止判断不一致时也只有一个落地（两个
 方向都有双连接用例）；`idx_notebooks_pending_delete_due` 之外，`idx_notebook_delete_jobs_one_active` 兜重复建作业；驱动 B 不变。
@@ -62,10 +62,10 @@ T3 后不清新列（随行删除）。
 |---|---|---|---|
 | 列表 / 列表搜索 | 卡片消失；顶部「即将永久删除的笔记本」区块（撤销删除；本人记忆 N>0 时导出与转移） | 卡片消失；N>0 时区块一行 + 导出 / 转移 | 自动 + §5.3 |
 | `GET /notebooks/{id}` | 404 + 说明码 → 说明框（撤销、导出、转移、返回列表） | 有读权：404 + 说明码；无读权：普通 404 | §5.4 |
-| 子资源、写与管理端点、单库问答 / 报告 | 404（在途任务跑完，撤销后可见） | 404 | 自动 |
+| 子资源、写与管理端点、单库问答 / 报告 | 404（已在跑的维护照常跑完；删除那一刻正在提交的提问可能失败） | 404 | 自动 |
 | 再次 DELETE | 409 `notebook_pending_delete` | 404 | T1 |
 | 全局问答 | 勾选范围无它；用到它的轮次 404，撤销恢复，收尾后按 #931 可读 | 同 | 自动（B5） |
-| 挂载 | 挂载方当场失去参考库，撤销恢复 | 同 | 自动 |
+| 挂载 | 挂载方当场失去参考库，撤销恢复；失效原因只说成立的事——被挂库主人本人「你已删除这本笔记本，撤销删除即可恢复」，其他人「该参考库暂时不可用」且名字遮住 | 同 | `list_mount_edges` 读 `b.status` + `MOUNT_BASE_NOT_LIVE_EXPR`（与 `MOUNT_VALID_EXPR` 同一存活项取反），文案在 `app/domain/mount_edges.py` 两后端共用 |
 | 记忆（列表 / 检索 / 候选 / 新建 / 编辑 / 记忆页转移 / 退出共享） | 看不到写不进 | 同；退出共享 404 | 自动 |
 | 导出本人记忆 | 可 | 可 | §5.1 |
 | 转移本人记忆到自己的笔记本 | 可 | 可 | §5.5 |
@@ -113,9 +113,14 @@ FROM notebooks nb WHERE nb.id=:id
 **5.5 转移本人记忆到自己的笔记本**（裁决 B9 + 2026-10-22 落地裁决）：新端点 `POST /notebooks/{id}/memories/transfer`，请求体
 `{"target_notebook_id"}`（`extra="forbid"`，模式不由调用方选）。`MemoryService.transfer_out_of_delete_window`：取一次时刻；窗口状态
 `None` → 404、`closed` → 404 `delete_window_closed`；由服务端按窗口谓词取出本人**全部已确认、且不是 `promotion_state='proposed'`**
-的记忆（`delete_window_transferable_ids`），逐条走既有 `MemoryService.transfer(…, "move", extract_kg=True)` 的校验与结果形状
-（`{"results":[…]}`）。每条的源读取改走 `_transfer_source`：同一个时刻下按窗口谓词读、只认这本库；读不到且窗口已关 → 这一条
-`error_code="delete_window_closed"`。也就是「截止前开始、逐条判断」：推进一旦提交，剩下的逐条失败，已转走的保留。目标照常要求是
+的记忆（`delete_window_transferable_ids`），逐条走既有 `MemoryService.transfer(…, "move", extract_kg=True)` 的校验与结果形状。
+修复轮（2026-10-22 评审）补三条：**分页**——每次请求至多 `DELETE_WINDOW_TRANSFER_PAGE_SIZE=200` 条、按 id 顺序、从请求体的 `after`
+之后取，回答 `{"results":[…], "remaining", "next_after"}`，前端循环到 `remaining=0` 并显示「已转移 X / N 条」，每一页都重新判窗口；
+**单飞**——同一（用户, 源库）一次只跑一次（`delete_window_transfer_claim`：SQLite 进程内认领，服务进程是唯一写者；PostgreSQL 在独立
+会话上 `pg_try_advisory_lock`），第二次立即 409 `transfer_in_progress`，前端「另一次转移正在进行」；**只在窗口期**——存活库 409
+`notebook_not_pending_delete`。每条的源读取改走 `_transfer_source`：同一个时刻下按窗口谓词读、只认这本库；读不到时按
+`delete_window_failure_code` 给准确原因——库已不在或窗口已关 → `delete_window_closed`，窗口还开但失去读权 → `not_readable`；
+复制提交后源行已被删库删掉（条件删除没命中、行也不在）按 `moved` 报。也就是「截止前开始、逐条判断」：推进一旦提交，剩下的逐条失败，已转走的保留。目标照常要求是
 调用者拥有的存活笔记本（不可写 / 非存活 → 404）。**转走的记忆不会因撤销回来**。候选与晋升审批中的条目不动，界面说「N 条记忆无法转移，
 请先导出」，N = `memory_count - transferable_count`。不开「列出记忆 id」的读面。`MemoryService.transfer` 的函数长度天花板不升：新参数
 与源读取各占原来的一行。
@@ -156,7 +161,8 @@ FROM notebooks nb WHERE nb.id=:id
   `tests/test_repository_snapshot_verifier.py`（`rollback_v99`、`(91, 99)`、`(96, 99)`）、`test_ask_job_output_migration.py`、
   `test_agent_token_tiers_migration.py`、`test_promotion_provenance_migration.py`；`tests/postgres/**` 的 `migrate() == 80` /
   `current_version() == 80` / `postgres_version == 80` 等字面量、`tests/postgres/test_migrations.py`
-  `test_packaged_migrations_apply_in_order` 的 ledger 列表末项 `80`，以及
+  `test_packaged_migrations_apply_in_order` 的 ledger 列表末项 `80`、`tests/postgres/test_postgres_schema.py`
+  `test_packaged_index_migration_phases_are_exact` 的 `(80, "notebook_delete_grace")` 与 `index_declarations(80)`，以及
   `tests/postgres/test_memory_isolation_migration_pg.py::_roll_back_to_66` 开头撤 0080 的那一段（重放要先撤掉四列与部分索引）；`fixtures/repository_v9/{expected_snapshot,manifest}.json`（重跑
   `scripts/generate_repository_contract_fixtures.py`）。
 - 同批登记：`sync/manifest.py` target_owned 加四列，`import_._insert_overrides` 让新建镜像行取默认值；两份 `access_sql.py` 的
@@ -232,3 +238,16 @@ release note `feature`；计划 §13.2 第 7 条标已决指向本规格；`fang
 - §5.4 的 404 在依赖层而不是路由体的 KeyError 分支（读守卫在依赖层就拒绝了），所以给 `GET /notebooks/{id}` 换了专用依赖。
 - SQLite 的窗口比较是裸文本（定宽 UTC 串），不是 `julianday()`：两后端谓词逐字相同，`test_access_sql_contract.py` 才能把它们钉成同修。
 - 窗口期列表区块、铃铛与说明框都多了「转移到我的笔记本」（B9），说明框复用现成的 `info` 弹窗槽，转移去区块里挑目标。
+
+## 12. 评审修复轮（2026-10-22）
+- **窗口转移单飞**：同一（用户, 源库）一次只跑一次。之前两个标签页同时点「确认转移」，会让同一条记忆在目标里出现两份，
+  回报也写成与事实不符的 `copied_source_not_removed`。后端用 `delete_window_transfer_claim`：SQLite 进程内认领，服务进程是唯一写者；
+  PostgreSQL 在独立会话上 `pg_try_advisory_lock`，进程退出即释放。第二次请求立即 409 `transfer_in_progress`。前端加 ref 守卫：
+  「取消」不放开守卫，当前这一页结束后停下。
+- **转移分页**：每页至多 200 条，按 id 顺序，回答带 `remaining` 与 `next_after`；每页都重新判窗口。
+- **只在窗口期**：存活库 409 `notebook_not_pending_delete`。
+- **逐条原因准确**：失去读权 → `not_readable`；复制提交后源行被删库删掉 → `moved`，不报「源未删除」。
+- **挂载失效原因**：见 §4 挂载一行。
+- **铃铛**：告知读不到时只丢这一类条目、记日志；T1 / T2 的推送交给后台线程，不拖住回答（T3 在扫尾线程里，照旧同步）。
+- **T3 时钟**：到期判据用扫尾这一拍注入的时刻，`updated_at` 与作业行用 store 时钟（见 §3 T3 一行）。
+- **前端删除客户端只留一份**：`notebook-deletion-api.ts` 的 `requestNotebookDeletion`，它校验 `delete_after`。
