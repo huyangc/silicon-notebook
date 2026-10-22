@@ -2320,7 +2320,14 @@ What to expect:
   chunks together; with only one of `chunk_embedding` / `knowhow_embedding` bound, the
   button is accepted only when the gap is of that kind.
 - **A pipeline switch aborts the pass.** The indexing-pipeline gate is checked before each
-  leg and at every source lock; when it refuses, the run fails and the guard is released.
+  leg, at every source lock, before the Knowhow half of the chunk leg and under every
+  Knowhow table lock; when it refuses, the run fails, nothing more is written and the guard
+  is released.
+- **A backfill never overwrites a newer vector.** Object and relation vectors are inserted
+  only while the row still holds what was embedded and has no vector yet; a Knowhow chunk
+  vector only while the chunk still holds the embedded text (each check and write is one
+  statement). An edit's re-embed or a rebuild that lands while the model is busy keeps its
+  own vector.
 - **Failures stay inside the job.** A leg whose workload is unbound is reported as skipped (a
   chunk leg missing only one of its two workloads runs the other half and names the missing
   one); a failed model batch leaves its rows missing and the leg incomplete; a failed read
