@@ -13,7 +13,7 @@ import pytest
 
 from app.core.config import Settings
 from app.domain.kg_analysis_contracts import ARTIFACT_FINDINGS, LEDGER_CONTRACT_KEY
-from app.domain.kg_merge_seed import concept_seed_v1
+from app.domain.kg_merge_seed import concept_seed_v1, concept_seed_v2
 from app.services.embedding import FakeEmbedder
 from app.services.kg_findings_view import (
     HANDLED_MERGE_CONFIRMED,
@@ -141,6 +141,19 @@ def test_a_dismissed_or_decided_f4_is_projected_the_same_way(repo, built):
     assert _status(passed)[("F4", "llama31")] == (STATUS_DECIDED_NOT_SAME, None)
     assert hidden_text_served(repo, built) == []
     _sql(repo, "DELETE FROM concept_merge_candidates WHERE id='mc-h'")
+    # The same rejection minted in seed space 2 (PR-4: a decision a v2 rebuild
+    # wrote, keyed by the hidden member's v2 seed) decides the group as well,
+    # and its seed is projected out the same way.
+    _sql(repo,
+         "INSERT INTO concept_merge_candidates(id,notebook_id,canonical_a,canonical_b,"
+         "score,status,seed_a,seed_b,seed_version,created_at,updated_at) "
+         "VALUES ('mc-h2',?,'K-llama3 1','K-llama31',0.9,'rejected',?,'llama31',2,"
+         "'2026-10-19','2026-10-19')",
+         (built, concept_seed_v2(KNOWHOW_HIDDEN_SEED_NAME)))
+    passed = _page(repo, built, "passed")
+    assert _status(passed)[("F4", "llama31")] == (STATUS_DECIDED_NOT_SAME, None)
+    assert hidden_text_served(repo, built) == []
+    _sql(repo, "DELETE FROM concept_merge_candidates WHERE id='mc-h2'")
     assert _service(repo).dismiss_finding(built, "F4", "llama31", actor_user_id="u")
     dismissed = _page(repo, built, "dismissed")
     assert [r["rule_id"] for r in dismissed.rows] == ["F4"]
