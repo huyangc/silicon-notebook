@@ -46,7 +46,7 @@ CI 里比行为测试更快、更精确地指出出事的那一行——但角�
    执行的 SQL,断言其中含 ``status='copying'`` 且全程不含 ``'deleting'``,不受
    「常量定义在哪个作用域」影响。源码字面量扫描保留作为更早、更精确的定位辅助,
    不是唯一防线。
-3. **生产者 1 处**——``services/notebook_sharing.py`` 的
+3. **生产者 1 处**——``services/notebook_copy_writer.py`` 的
    ``NotebookUpdate(... status="copying" ...)`` kwarg:这是 Python 关键字参数,
    不是 SQL 字符串,AST 层面只是一个裸的 ``"copying"`` 常量(不含 ``status``
    前缀),两条守卫的正则天然够不到它。写在这里点名,防止后来者以为它是漏扫的

@@ -71,7 +71,7 @@ generic plan,并带一个正对照——把这一支加回去的写法在那几�
 挂载人 = `a.created_by` 的依据:挂载写入口 `PUT /notebooks/{id}/bases` 挂的是
 `notebook:mount`,解析到 **owner 档**(`api/deps.py::_CAPABILITY_LEVELS`);应用层
 没有任何改写 `notebooks.created_by` 的语句(没有笔记本转让),深拷贝产出的是新行、
-挂载边按新主人重判(`notebook_sharing.py`);唯一的另一写者是同步导入对镜像行的
+挂载边按新主人重判(`notebook_copy_writer.py`);唯一的另一写者是同步导入对镜像行的
 upsert,它照搬源环境那一行(同样不可转让)的 owner 映射结果,而镜像上的挂载配置
 本身也随源环境同步、目标端不可写。`notebook_bases.created_by` 不采用:它
 可空、`replace_mounts` 每次整批重插时盖上当时的编辑者、同步导入映射不到时置为导入
