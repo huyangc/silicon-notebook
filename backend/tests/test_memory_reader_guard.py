@@ -445,7 +445,8 @@ _REGISTRY: dict[str, dict[str, str]] = {
     "postgres/maintenance.py": {
         name: MAINTENANCE for name in (
             "PostgresMaintenanceAdapter.backfill_node_embeddings",
-            "PostgresMaintenanceAdapter.backfill_relation_embeddings",
+            # the relation backfill's keyset page (module-level, EXPLAIN-pinned)
+            "_MISSING_RELATION_PAGE_SQL",
             "PostgresMaintenanceAdapter.backfill_source_fact_batch",
             "PostgresMaintenanceAdapter.backfill_source_index_batch",
             "PostgresMaintenanceAdapter.begin_source_index_backfill",
@@ -465,8 +466,9 @@ _REGISTRY: dict[str, dict[str, str]] = {
             "ReadOnlySQLiteInspector.concept_id_names",
             "ReadOnlySQLiteInspector.concept_names",
             "SQLiteMaintenanceAdapter.backfill_node_embeddings",
-            # now pages knowledge_relations itself, like its PostgreSQL twin
-            "SQLiteMaintenanceAdapter.backfill_relation_embeddings",
+            # the relation backfill's keyset page (module-level, so a plan test can
+            # EXPLAIN the statement that runs), twin of the PostgreSQL one
+            "_MISSING_RELATION_PAGE_SQL",
             "SQLiteMaintenanceAdapter.backfill_source_fact_batch",
             "SQLiteMaintenanceAdapter.backfill_source_index_batch",
             "SQLiteMaintenanceAdapter.begin_source_index_backfill",

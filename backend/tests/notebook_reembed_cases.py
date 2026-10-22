@@ -554,3 +554,189 @@ def check_object_leg_keeps_its_count_when_it_fails(repo, backend: Backend, monke
     leg = status.progress["kg_objects"]
     assert (leg.state, leg.detail) == ("failed", "RuntimeError")
     assert leg.embedded == len(vector_ids(repo, backend, nb)["knowledge_embeddings"]) > 0
+
+
+def add_knowhow_table(repo, notebook_id: str, title: str, cells: list) -> str:
+    """A second projected table (one ``fix`` column per row); returns its hidden source."""
+    table_id = repo.create_knowhow_table(
+        notebook_id, title, "", [{"name": "fix", "role": "procedure"}],
+    )
+    column = repo.get_knowhow_table(table_id)["columns"][0]["id"]
+    for text in cells:
+        repo.add_knowhow_row(table_id, {column: text})
+    knowhow_api.build_projector(repo).project_table(table_id)
+    return repo.get_knowhow_table(table_id)["hidden_source_id"]
+
+
+def check_knowhow_fill_discovers_ids_then_reads_page_by_page(
+    repo, backend: Backend, monkeypatch
+) -> None:
+    """The Knowhow fill discovers ids only (one query per table), then reads texts one
+    page at a time, and only that page's ids."""
+    world = build_world(repo, backend)
+    nb = world.notebook_id
+    chunks = sorted(knowhow_chunk_ids(repo, backend, world))
+    delete_chunk_vectors(repo, backend, chunks)
+    monkeypatch.setattr(knowhow_api, "KNOWHOW_FILL_PAGE_ROWS", BATCH)
+    mnt = repo.maintenance
+    discovered: list = []
+    hydrated: list = []
+    real_ids, real_texts = mnt.missing_knowhow_chunk_embedding_ids, mnt.chunk_texts_by_ids
+
+    def _ids(notebook_id, *, source_id):
+        ids = real_ids(notebook_id, source_id=source_id)
+        discovered.append((source_id, ids))
+        return ids
+
+    def _texts(ids):
+        hydrated.append(list(ids))
+        return real_texts(ids)
+
+    monkeypatch.setattr(mnt, "missing_knowhow_chunk_embedding_ids", _ids)
+    monkeypatch.setattr(mnt, "chunk_texts_by_ids", _texts)
+    knowhow_api.fill_missing_knowhow_chunk_vectors(repo, nb)
+
+    assert discovered == [(world.knowhow_source_id, chunks)]
+    assert all(isinstance(chunk_id, str) for chunk_id in discovered[0][1])
+    assert hydrated == [chunks[i:i + BATCH] for i in range(0, len(chunks), BATCH)]
+    assert set(chunks) <= vector_ids(repo, backend, nb)["chunk_embeddings"]
+
+
+def check_conditional_chunk_vector_write(repo, backend: Backend) -> None:
+    """``replace_chunk_vectors_if_text``: a vector lands only on a chunk that still holds
+    the embedded text; a changed or missing chunk gets nothing and raises nothing."""
+    world = build_world(repo, backend)
+    nb = world.notebook_id
+    chunk_id = sorted(knowhow_chunk_ids(repo, backend, world))[0]
+    delete_chunk_vectors(repo, backend, [chunk_id])
+    with repo._runtime.database.connect() as db:
+        text = db.execute(
+            _sql(backend, "SELECT text FROM chunks WHERE id=?"), (chunk_id,)
+        ).fetchone()["text"]
+    store = repo._runtime.embedding_store
+    vector = FakeEmbedder(dim=DIM).embed_query("x")
+    assert store.replace_chunk_vectors_if_text(
+        nb, [(chunk_id, text + " (edited)", vector), ("ck-gone", "t", vector)],
+        created_at=_NOW,
+    ) == 0
+    assert chunk_id not in vector_ids(repo, backend, nb)["chunk_embeddings"]
+    assert store.replace_chunk_vectors_if_text(
+        nb, [(chunk_id, text, vector)], created_at=_NOW,
+    ) == 1
+    assert chunk_id in vector_ids(repo, backend, nb)["chunk_embeddings"]
+
+
+def check_blank_chunks_are_never_a_gap(repo, backend: Backend) -> None:
+    """A blank chunk is not counted by checkup H4 and not returned by any discovery,
+    so the repair cannot leave H4 at 1 forever."""
+    world = build_world(repo, backend)
+    nb = world.notebook_id
+    src = f"src-doc-{nb}"
+    mnt = repo.maintenance
+    assert f"ck-{src}-blank" not in vector_ids(repo, backend, nb)["chunk_embeddings"]
+    assert mnt.count_missing_chunk_vectors(nb) == 0
+    assert mnt.missing_chunk_vector_source_ids(nb) == []
+    assert mnt.missing_chunk_embedding_ids(nb, only_source_id=src) == []
+    assert mnt.missing_chunk_embedding_page(nb) == []
+
+
+def check_orphan_knowhow_sources_are_not_counted(repo, backend: Backend) -> None:
+    """A Knowhow hidden source no table owns (left by a crash between deleting a table
+    and its projection) is unreachable: H4 does not count it and nothing embeds it. A
+    live table's chunk without a vector is counted."""
+    world = build_world(repo, backend)
+    nb = world.notebook_id
+    with repo._runtime.database.write() as db:
+        backend.insert(db, "sources", {
+            "id": f"src-orphan-{nb}", "notebook_id": nb, "title": "orphan",
+            "source_type": "knowhow", "status": "active", "parse_status": "parsed",
+            "created_at": _NOW, "updated_at": _NOW,
+        })
+        backend.insert(db, "chunks", {
+            "id": f"chunk-kh-orphan-{nb}", "notebook_id": nb,
+            "source_id": f"src-orphan-{nb}", "text": "orphaned knowhow text",
+            "section_path": "", "element_ids": [], "created_at": _NOW,
+        })
+    mnt = repo.maintenance
+    assert mnt.count_missing_chunk_vectors(nb) == 0
+    live = sorted(knowhow_chunk_ids(repo, backend, world))[0]
+    delete_chunk_vectors(repo, backend, [live])
+    assert mnt.count_missing_chunk_vectors(nb) == 1
+
+    status = NotebookReembedService(repo).run(nb, legs=["chunks"])
+
+    assert status.state == "succeeded", status
+    assert mnt.count_missing_chunk_vectors(nb) == 0
+    assert f"chunk-kh-orphan-{nb}" not in vector_ids(repo, backend, nb)["chunk_embeddings"]
+    assert "orphaned knowhow text" not in world.embedders["knowhow_embedding"].texts
+
+
+def check_one_failing_knowhow_table_does_not_stop_the_others(
+    repo, backend: Backend, monkeypatch
+) -> None:
+    """A table whose fill raises is recorded on the leg; the other tables still fill."""
+    world = build_world(repo, backend)
+    nb = world.notebook_id
+    second = add_knowhow_table(repo, nb, "second", ["knowhow cell: second table"])
+    delete_vectors(repo, backend, nb, tables=("chunk_embeddings",))
+    mnt = repo.maintenance
+    real = mnt.missing_knowhow_chunk_embedding_ids
+
+    def _first_table_fails(notebook_id, *, source_id):
+        if source_id == world.knowhow_source_id:
+            raise RuntimeError("table read failed")
+        return real(notebook_id, source_id=source_id)
+
+    monkeypatch.setattr(mnt, "missing_knowhow_chunk_embedding_ids", _first_table_fails)
+    status = NotebookReembedService(repo).run(nb, legs=["chunks"])
+
+    leg = status.progress["chunks"]
+    assert (leg.state, leg.detail) == ("failed", "RuntimeError"), status
+    have = vector_ids(repo, backend, nb)["chunk_embeddings"]
+    with repo._runtime.database.connect() as db:
+        second_chunks = {
+            str(r["id"]) for r in db.execute(
+                _sql(backend, "SELECT id FROM chunks WHERE source_id=?"), (second,)
+            ).fetchall()
+        }
+    assert second_chunks and second_chunks <= have
+    assert not (knowhow_chunk_ids(repo, backend, world) & have)
+
+
+def check_offline_embed_messages(repo, backend: Backend, capsys) -> None:
+    """``embed --missing-only`` names an unbound half instead of claiming nothing was
+    missing; "nothing missing" only when both halves ran."""
+    nb = build_world(repo, backend).notebook_id
+    original = repo.configured
+    try:
+        repo.configured = lambda w: w != "chunk_embedding" and original(w)
+        batch_ingest.backfill_chunk_embeddings(repo, nb, missing_only=True)
+        out = capsys.readouterr().out
+        assert "未绑定 chunk_embedding" in out and "无缺失" not in out
+        repo.configured = lambda w: w != "knowhow_embedding" and original(w)
+        batch_ingest.backfill_chunk_embeddings(repo, nb, missing_only=True)
+        out = capsys.readouterr().out
+        assert "未绑定 knowhow_embedding" in out and "无缺失" not in out
+    finally:
+        repo.configured = original
+    batch_ingest.backfill_chunk_embeddings(repo, nb, missing_only=True)
+    out = capsys.readouterr().out
+    assert "无缺失 chunk 向量" in out and "未绑定" not in out
+
+
+def check_an_embedder_that_writes_nothing_is_never_done(
+    repo, backend: Backend, monkeypatch
+) -> None:
+    """The object leg counts what it asked for independently of what the embedder
+    wrote: an embedder that writes nothing leaves the leg incomplete, never done."""
+    world = build_world(repo, backend)
+    nb = world.notebook_id
+    before = vector_ids(repo, backend, nb)["knowledge_embeddings"]
+    delete_vectors(repo, backend, nb, tables=("knowledge_embeddings",))
+    monkeypatch.setattr(
+        repo._runtime.source_embedding, "embed_objects_batch", lambda nb_, items: 0
+    )
+    status = NotebookReembedService(repo).run(nb, legs=["kg_objects"])
+    leg = status.progress["kg_objects"]
+    assert (leg.state, leg.embedded, leg.remaining) == ("incomplete", 0, len(before))
+    assert world.embedders["knowledge_object_embedding"].calls == []

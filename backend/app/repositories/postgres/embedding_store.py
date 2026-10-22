@@ -151,6 +151,36 @@ class EmbeddingStore:
             "chunk_embeddings", notebook_id, rows, created_at=created_at
         )
 
+    def replace_chunk_vectors_if_text(
+        self,
+        notebook_id: str,
+        rows: Sequence[tuple],
+        *,
+        created_at: str,
+    ) -> int:
+        """Upsert ``(chunk_id, text, vector)`` rows, each only if the chunk still exists
+        with exactly ``text``; returns how many were written (twin of the SQLite store:
+        check and write are one statement, so a rewritten or deleted chunk is skipped
+        instead of receiving a stale vector or failing the foreign key)."""
+        encoded = self._encoded_rows([(cid, vector) for cid, _text, vector in rows])
+        if not encoded:
+            return 0
+        created = normalize_timestamp(created_at)
+        written = 0
+        with self.write() as connection:
+            for (chunk_id, text, _vector), (_cid, vector) in zip(rows, encoded):
+                cursor = connection.execute(
+                    "INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) "
+                    "SELECT %s,%s,%s,%s WHERE EXISTS "
+                    "(SELECT 1 FROM chunks WHERE id=%s AND text=%s) "
+                    "ON CONFLICT (chunk_id) DO UPDATE SET "
+                    "notebook_id=EXCLUDED.notebook_id,vector=EXCLUDED.vector,"
+                    "created_at=EXCLUDED.created_at",
+                    (chunk_id, notebook_id, vector, created, chunk_id, text),
+                )
+                written += max(0, cursor.rowcount)
+        return written
+
     def _replace_simple(
         self,
         table: str,

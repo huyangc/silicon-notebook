@@ -39,7 +39,7 @@ from app.repositories.knowhow_asset_refs import (  # 后端中性,postgres maint
     collect_change_payload_tokens,
     keepers_among,
 )
-from app.repositories.ports import VectorBatchEncoder
+from app.repositories.ports import VectorBatchEncoder, VectorFillCount, VectorFillTally
 from app.repositories.source_fact_backfill import project_historical_source_fact
 from app.repositories.sqlite.source_store import NOT_PROMOTION_SOURCE_PREDICATE
 from app.repositories.text_whitespace import PY_WHITESPACE  # 后端中性,postgres maintenance 共用
@@ -65,17 +65,39 @@ VECTOR_TABLES = (
 )
 _VECTOR_TABLE_IDS = dict(VECTOR_TABLES)
 
-# The generic chunk-vector discovery (rows / ids / page / DISTINCT source ids) leaves
-# Knowhow hidden sources out: their chunks belong to ``knowhow_embedding`` and are filled
-# by ``KnowhowProjector.fill_missing_chunk_vectors``. ``count_missing_chunk_vectors``
-# (checkup H4) still counts them -- the repair fills them through that other path.
-_NOT_KNOWHOW_CHUNK = (
+# Chunk-vector gap predicates (alias ``c`` for chunks). One criterion of "a chunk that
+# can get a vector": non-blank text, judged with ``TRIM(text, PY_WHITESPACE)`` -- the
+# same character set as Python's ``str.strip`` the embedders apply, so a blank chunk is
+# never discovered, counted or embedded (as on the element side). The charset is a
+# SQL literal here so the predicate composes without moving any query's parameters.
+_NONBLANK_CHUNK = " AND TRIM(c.text, '{}') != ''".format(PY_WHITESPACE.replace("'", "''"))
+# The generic discovery (rows / ids / page / DISTINCT source ids) leaves Knowhow hidden
+# sources out: their chunks belong to ``knowhow_embedding`` and are filled through
+# ``missing_knowhow_chunk_embedding_ids`` (``knowhow.api.fill_missing_knowhow_chunk_vectors``).
+_DOCUMENT_CHUNK_GAP = _NONBLANK_CHUNK + (
     " AND NOT EXISTS (SELECT 1 FROM sources ks "
     "WHERE ks.id=c.source_id AND ks.source_type='knowhow')"
 )
+# Checkup H4 (``count_missing_chunk_vectors``) counts document and Knowhow chunks, but
+# not a Knowhow hidden source no table owns any more (left behind by a crash between
+# deleting a table and its projection): nothing can reach or fill it.
+_H4_CHUNK_GAP = _NONBLANK_CHUNK + (
+    " AND NOT EXISTS (SELECT 1 FROM sources ks "
+    "WHERE ks.id=c.source_id AND ks.source_type='knowhow' "
+    "AND NOT EXISTS (SELECT 1 FROM knowhow_tables kt "
+    "WHERE kt.notebook_id=c.notebook_id AND kt.hidden_source_id=ks.id))"
+)
 
-# Relation ids discovered per page by ``backfill_relation_embeddings``.
+# Relation ids discovered per page by ``backfill_relation_embeddings``, a keyset over
+# ``idx_knowledge_relations_nb_source_id (notebook_id, source_object_id, id)``: each page
+# is one index range, read in index order (no per-page scan of the notebook, no sort).
 _RELATION_PAGE_SIZE = 500
+_MISSING_RELATION_PAGE_SQL = (
+    "SELECT r.source_object_id, r.id FROM knowledge_relations r "
+    "WHERE r.notebook_id=? AND (r.source_object_id, r.id) > (?, ?) "
+    "AND NOT EXISTS (SELECT 1 FROM relation_embeddings e WHERE e.relation_id=r.id) "
+    "ORDER BY r.source_object_id, r.id LIMIT ?"
+)
 
 # PY_WHITESPACE(= Python str.strip() \u7684\u5168\u96c6)\u73b0\u79fb\u5230\u540e\u7aef\u4e2d\u6027\u7684
 # app.repositories.text_whitespace,\u4f9b sqlite/postgres maintenance \u5171\u7528\u540c\u4e00\u4efd TRIM charset
@@ -715,7 +737,7 @@ class SQLiteMaintenanceAdapter:
                 for r in db.execute(
                     "SELECT c.id, c.source_id, c.text FROM chunks c WHERE c.notebook_id=? "
                     "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
-                    "WHERE e.chunk_id=c.id)" + _NOT_KNOWHOW_CHUNK + clause,
+                    "WHERE e.chunk_id=c.id)" + _DOCUMENT_CHUNK_GAP + clause,
                     tuple(params),
                 ).fetchall()
             ]
@@ -790,8 +812,31 @@ class SQLiteMaintenanceAdapter:
                 for r in db.execute(
                     "SELECT c.id FROM chunks c WHERE c.notebook_id=? "
                     "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
-                    "WHERE e.chunk_id=c.id)" + _NOT_KNOWHOW_CHUNK + clause + " ORDER BY c.id",
+                    "WHERE e.chunk_id=c.id)" + _DOCUMENT_CHUNK_GAP + clause + " ORDER BY c.id",
                     tuple(params),
+                ).fetchall()
+            ]
+
+    def missing_knowhow_chunk_embedding_ids(
+        self, notebook_id: str, *, source_id: str
+    ) -> list[str]:
+        """Ids (ascending) of one Knowhow hidden source's chunks that can get a vector
+        and have none -- the Knowhow counterpart of ``missing_chunk_embedding_ids``,
+        whose generic discovery leaves Knowhow sources out. Id only; the caller hydrates
+        text a page at a time (``chunk_texts_by_ids``).
+
+        "Has a vector" is H4's definition: a ``chunk_embeddings`` row exists. A stored
+        vector that no longer decodes is not rediscovered here (a reprojection's
+        self-heal still re-embeds it)."""
+        with self._runtime.database.connect() as db:
+            return [
+                r["id"]
+                for r in db.execute(
+                    "SELECT c.id FROM chunks c WHERE c.source_id=? AND c.notebook_id=?"
+                    + _NONBLANK_CHUNK
+                    + " AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
+                    "WHERE e.chunk_id=c.id) ORDER BY c.id",
+                    (source_id, notebook_id),
                 ).fetchall()
             ]
 
@@ -903,7 +948,7 @@ class SQLiteMaintenanceAdapter:
                     "SELECT c.id, c.source_id, c.text FROM chunks c "
                     "WHERE c.notebook_id=? AND c.id>? "
                     "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
-                    "WHERE e.chunk_id=c.id)" + _NOT_KNOWHOW_CHUNK + clause
+                    "WHERE e.chunk_id=c.id)" + _DOCUMENT_CHUNK_GAP + clause
                     + " ORDER BY c.id LIMIT ?",
                     tuple(params),
                 ).fetchall()
@@ -954,7 +999,7 @@ class SQLiteMaintenanceAdapter:
                 for r in db.execute(
                     "SELECT DISTINCT c.source_id FROM chunks c WHERE c.notebook_id=? "
                     "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id=c.id)"
-                    + _NOT_KNOWHOW_CHUNK,
+                    + _DOCUMENT_CHUNK_GAP,
                     (notebook_id,),
                 ).fetchall()
             ]
@@ -1069,14 +1114,16 @@ class SQLiteMaintenanceAdapter:
         self,
         notebook_id: str,
         progress=None,
-        tally: Optional[Callable[[int, int], None]] = None,
+        tally: Optional[VectorFillTally] = None,
     ) -> int:
         """Embed missing object vectors in bounded pages without holding DB.
 
-        ``progress`` gets ``(objects scanned, objects total)``; ``tally`` gets running
-        ``(written, attempted)`` after each page, where attempted counts only missing
-        objects with embeddable payload text (what ``embed_objects_batch`` embeds), so
-        an object without text is never reported as left missing."""
+        ``progress`` gets scan progress ``(objects scanned, objects total)``; ``tally``
+        gets a running ``VectorFillCount`` after each page, whose ``attempted`` counts
+        only missing objects with embeddable payload text
+        (``SourceEmbeddingService.embeddable_object_count``, the predicate
+        ``embed_objects_batch`` applies), so an object without text is never reported
+        as left missing -- and an embedder that writes nothing leaves them missing."""
         with self._runtime.database.connect() as db:
             total = int(db.execute(
                 "SELECT COUNT(*) c FROM knowledge_objects "
@@ -1107,22 +1154,13 @@ class SQLiteMaintenanceAdapter:
                 if not row["embedded"]
             ]
             if missing:
-                page = [0]  # embeddable objects of this page, as embed_objects_batch counts
-
-                def _page_total(_done: int, page_total: int, _box=page) -> None:
-                    _box[0] = page_total
-
-                # Asked for only when someone tallies: other callers keep the
-                # two-argument call they always made.
-                extra = {"progress": _page_total} if tally else {}
-                embedded += self._runtime.source_embedding.embed_objects_batch(
-                    notebook_id, missing, **extra
-                )
-                attempted += page[0]
+                embedding = self._runtime.source_embedding
+                attempted += embedding.embeddable_object_count(missing)
+                embedded += embedding.embed_objects_batch(notebook_id, missing)
             if progress:
                 progress(scanned, total)
             if tally:
-                tally(embedded, attempted)
+                tally(VectorFillCount(embedded, attempted))
             if len(rows) < 500:
                 break
         return embedded
@@ -1153,7 +1191,8 @@ class SQLiteMaintenanceAdapter:
         with self._runtime.database.connect() as db:
             return db.execute(
                 "SELECT COUNT(*) c FROM chunks c WHERE c.notebook_id=? AND NOT EXISTS "
-                "(SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id=c.id)" + clause,
+                "(SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id=c.id)"
+                + _H4_CHUNK_GAP + clause,
                 (notebook_id, *exclude),
             ).fetchone()["c"]
 
@@ -1191,36 +1230,33 @@ class SQLiteMaintenanceAdapter:
     def backfill_relation_embeddings(
         self,
         notebook_id: str,
-        progress: Optional[Callable[[int, int], None]] = None,
+        tally: Optional[VectorFillTally] = None,
     ) -> int:
         """给缺向量的关系补 relation_embeddings(幂等,只补缺失),返回落库的向量数。
 
-        与 PostgreSQL 同形:按 id keyset 分页发现缺向量的关系(每页 ``_RELATION_PAGE_SIZE``),
-        发现读放掉之后才按这一页的 id hydrate 名字与证据、调模型——不再一次把全库关系和全部
-        已有向量 id 读进内存。系统未绑定 ``relation_embedding`` 工作负载时 no-op(返回 0)。
-        ``progress`` 每页收一次 ``(已落库, 已尝试)`` 累计值:已尝试 = 缺向量、可查询且文本
-        非空的关系数(与 embed_relations_batch 的过滤同口径),差值是失败批留下的缺口。
-        Canonical body (Task 27) — the facade keeps a frozen-signature delegate."""
+        与 PostgreSQL 同形:按 ``(source_object_id, id)`` keyset 分页发现缺向量的关系(每页
+        ``_RELATION_PAGE_SIZE``,``_MISSING_RELATION_PAGE_SQL``),发现读放掉之后才按这一页的
+        id hydrate 名字与证据、调模型。keyset 走既有索引 ``idx_knowledge_relations_nb_source_id
+        (notebook_id, source_object_id, id)``:每页是一段索引区间、无排序,不会像
+        ``id > ? ORDER BY id`` 那样每页把全库关系扫一遍再排序。系统未绑定 ``relation_embedding``
+        工作负载时 no-op(返回 0)。``tally`` 每页收一次累计 ``VectorFillCount``:attempted =
+        缺向量、可查询且文本非空的关系数(与 embed_relations_batch 的过滤同口径),差值是失败批
+        留下的缺口。Canonical body (Task 27) — the facade keeps a frozen-signature delegate."""
         if not self._runtime.models.configured("relation_embedding"):
             return 0
-        after_id = ""
+        after: tuple[str, str] = ("", "")
         written = 0
         attempted = 0
         while True:
             with self._runtime.database.connect() as db:
-                relation_ids = [
-                    str(row["id"])
-                    for row in db.execute(
-                        "SELECT r.id FROM knowledge_relations r "
-                        "WHERE r.notebook_id=? AND r.id>? "
-                        "AND NOT EXISTS (SELECT 1 FROM relation_embeddings e "
-                        "WHERE e.relation_id=r.id) ORDER BY r.id LIMIT ?",
-                        (notebook_id, after_id, _RELATION_PAGE_SIZE),
-                    ).fetchall()
-                ]
-            if not relation_ids:
+                page = db.execute(
+                    _MISSING_RELATION_PAGE_SQL,
+                    (notebook_id, *after, _RELATION_PAGE_SIZE),
+                ).fetchall()
+            if not page:
                 break
-            after_id = relation_ids[-1]
+            relation_ids = [str(row["id"]) for row in page]
+            after = (str(page[-1]["source_object_id"]), relation_ids[-1])
             items = [
                 {"_rid": str(r["id"]), "text": r["text"]}
                 for r in self._retrieval().relations_with_names(notebook_id, relation_ids)
@@ -1232,8 +1268,8 @@ class SQLiteMaintenanceAdapter:
                     self._runtime.source_embedding.embed_relations_batch(notebook_id, items)
                     or 0
                 )
-            if progress:
-                progress(written, attempted)
+            if tally:
+                tally(VectorFillCount(written, attempted))
             if len(relation_ids) < _RELATION_PAGE_SIZE:
                 break
         return written

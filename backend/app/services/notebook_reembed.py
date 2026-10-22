@@ -57,6 +57,7 @@ from collections import OrderedDict
 from typing import Any, Iterable, Mapping
 
 from app.domain.indexing_pipeline import IndexingPipelineUnavailableError
+from app.repositories.ports import VectorFillCount
 from app.services import background_jobs
 from app.services.knowhow import api as knowhow_api
 
@@ -323,6 +324,24 @@ class NotebookReembedService:
         with _lock:
             return run.snapshot()
 
+    def chunk_gap_fixable(self, notebook_id: str, missing_chunks: int) -> bool:
+        """Whether a chunk-vector gap of ``missing_chunks`` (checkup H4: document and
+        Knowhow chunks together) has one this deployment can fill: a document gap needs
+        ``chunk_embedding``, a Knowhow gap ``knowhow_embedding``. With both bound any gap
+        qualifies; with one bound, an id-level probe of that half decides."""
+        if missing_chunks <= 0:
+            return False
+        configured = self._repo.configured
+        document = configured(_LEG_WORKLOADS[LEG_CHUNKS])
+        knowhow = configured(_KNOWHOW_WORKLOAD)
+        if document and knowhow:
+            return True
+        if document:
+            return bool(self._repo.maintenance.missing_chunk_vector_source_ids(notebook_id))
+        if knowhow:
+            return knowhow_api.knowhow_chunk_gap_exists(self._repo, notebook_id)
+        return False
+
     # --- execution -------------------------------------------------------------
     def submit(self, notebook_id: str, *, legs: Iterable[str]) -> ReembedSubmission:
         """Run ``legs`` for the notebook in the heavy maintenance pool."""
@@ -469,19 +488,13 @@ class NotebookReembedService:
                             run, LEG_ELEMENTS, totals, failures, source_id, page,
                         )
             if knowhow_ok:
-                try:
-                    found, embedded = knowhow_api.fill_missing_knowhow_chunk_vectors(
-                        repo, nb
-                    )
-                    totals[LEG_CHUNKS][0] += found
-                    totals[LEG_CHUNKS][1] += embedded
-                except IndexingPipelineUnavailableError:
-                    raise
-                except Exception as exc:  # noqa: BLE001 — recorded on the leg
-                    _logger.exception(
-                        "notebook-reembed knowhow chunk fill failed: notebook_id=%s", nb
-                    )
-                    failures.setdefault(LEG_CHUNKS, type(exc).__name__)
+                # Per table, isolated: a table that raised is logged and named in the
+                # result while the other tables still run.
+                fill = knowhow_api.fill_missing_knowhow_chunk_vectors(repo, nb)
+                totals[LEG_CHUNKS][0] += fill.found
+                totals[LEG_CHUNKS][1] += fill.written
+                if fill.failure:
+                    failures.setdefault(LEG_CHUNKS, fill.failure)
         except IndexingPipelineUnavailableError as exc:
             for leg in live:
                 self._settle(run, leg, totals, {leg: type(exc).__name__}, {})
@@ -525,9 +538,10 @@ class NotebookReembedService:
         source_id: str,
         page: int,
     ) -> None:
-        """One source's missing rows of one leg, inside the caller's source lock. Only
-        embeddable rows count as missing (a blank chunk never gets a vector). A failed
-        read is logged and fails the leg; the other sources still run."""
+        """One source's missing rows of one leg, inside the caller's source lock. What
+        counts as missing is the discovery query's criterion alone (it already leaves
+        blank text out, as checkup H4/H5 do). A failed read is logged and fails the leg;
+        the other sources still run."""
         mnt = self._repo.maintenance
         nb = run.notebook_id
         try:
@@ -538,10 +552,7 @@ class NotebookReembedService:
             for start in range(0, len(ids), page):
                 batch = ids[start:start + page]
                 if leg == LEG_CHUNKS:
-                    rows = [
-                        r for r in _hydrate_in_id_order(mnt.chunk_texts_by_ids(batch))
-                        if str(r["text"] or "").strip()
-                    ]
+                    rows = _hydrate_in_id_order(mnt.chunk_texts_by_ids(batch))
                     if not rows:
                         continue
                     totals[leg][0] += len(rows)
@@ -582,7 +593,8 @@ class NotebookReembedService:
         _set_leg(run, LEG_KG_OBJECTS, state="running")
         counts = [0, 0]  # [written, attempted] so far, kept if the leg fails
 
-        def _tally(written: int, attempted: int) -> None:
+        def _tally(count: VectorFillCount) -> None:
+            written, attempted = count
             counts[:] = [written, attempted]
             _set_leg(
                 run, LEG_KG_OBJECTS, embedded=written,
@@ -630,7 +642,8 @@ class NotebookReembedService:
         _set_leg(run, LEG_KG_RELATIONS, state="running")
         counts = [0, 0]  # [written, attempted] so far, kept if the leg fails
 
-        def _progress(written: int, attempted: int) -> None:
+        def _tally(count: VectorFillCount) -> None:
+            written, attempted = count
             counts[:] = [written, attempted]
             _set_leg(
                 run, LEG_KG_RELATIONS, embedded=written,
@@ -638,7 +651,7 @@ class NotebookReembedService:
             )
 
         try:
-            repo.maintenance.backfill_relation_embeddings(nb, progress=_progress)
+            repo.maintenance.backfill_relation_embeddings(nb, tally=_tally)
         except Exception as exc:  # noqa: BLE001 — logged and recorded on the leg
             _logger.exception("notebook-reembed kg_relations failed: notebook_id=%s", nb)
             _set_leg(
