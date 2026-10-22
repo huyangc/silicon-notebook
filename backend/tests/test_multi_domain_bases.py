@@ -1912,7 +1912,7 @@ class TestCopyingNotebookExcludedFromMounting:
 
     def test_copying_base_tier_notebook_excluded_from_mountable_candidates(self, repo):
         """tier='base' 分支同理必须被 status 挡住——当前 copy_notebook 只会产出
-        tier='personal' 的拷贝目标(notebook_sharing.py 硬编码 tier="personal"),
+        tier='personal' 的拷贝目标(notebook_copy_writer.py 硬编码 tier="personal"),
         谓词本身不该依赖这个事实性前提才安全,两个 OR 分支都要独立测,不能只测
         更常见的同 owner 那支。"""
         a = repo.create_notebook(NotebookCreate(name="a"))

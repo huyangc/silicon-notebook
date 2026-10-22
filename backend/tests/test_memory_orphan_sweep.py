@@ -294,7 +294,7 @@ class World:
             _derive(repo, "nb-a", source_id)
         # ---- N-5: what an EARLIER deep copy left behind. Since E5-1 a copy carries no
         # Memory, so the legacy transform is written field by field (see
-        # ``notebook_sharing.py``: ``data["memory_id"] = ""`` -- "memory_id is NOT an id
+        # ``notebook_copy_writer.py``: ``data["memory_id"] = ""`` -- "memory_id is NOT an id
         # that gets remapped ... Force it empty"; ``source_type`` stays 'memory', ids are
         # remapped into the new notebook, derived rows are copied along).
         self.copy_id = "nb-legacy-copy"
