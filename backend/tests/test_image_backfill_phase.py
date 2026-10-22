@@ -900,7 +900,7 @@ def test_the_sweep_never_touches_asset_rows_it_did_not_create(
     """反向护栏：清扫**只**碰本次调用亲手铸出来的 id。
 
     若换成任何形式的"无人引用"差集判据，深拷贝留下的资产行会被连同磁盘文件一起
-    删掉——`notebook_sharing` 为 `notebook_assets` 铸新 id，却**不**重映射
+    删掉——`notebook_copy_writer` 为 `notebook_assets` 铸新 id，却**不**重映射
     `source_elements.metadata.asset_id`（它的 json_maps 只含 element/source/object
     三类），所以一本副本里每一条来源图片资产行都"无人引用"。这里预置的正是那种
     形状的行。"""
