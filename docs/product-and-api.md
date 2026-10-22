@@ -2678,8 +2678,9 @@ instant the notebook is **unavailable to everyone**, its owner included: it is g
 search, Ask scope (notebook and global), mount, share link (`/shared`, `/c`, report and global-conversation
 shares answer as for a missing library), MCP / Agent token and administrator count — `pending_delete` is one
 of the values `NOTEBOOK_LIVE_SQL` lists, so every read and write path treats it exactly as a notebook being
-deleted. Nothing inside is touched: members, grants, mounts, share tokens, conversations and in-flight
-work stay as they are, and in-flight maintenance (a KG rebuild already running) finishes normally. When
+deleted. Nothing inside is touched: members, grants, mounts, share tokens and conversations stay as they
+are. Maintenance already running (a KG rebuild, say) finishes normally; a question being submitted at the
+moment of the delete may fail (its write finds the notebook no longer live). When
 `delete_after` passes, the delete sweep's driver C moves the row to `'deleting'` and inserts its delete
 job in the same transaction; the six-phase delete then runs exactly as before, retention projection and
 the global-turn stamp (#931) included. A window that closed while the server was down is promoted by the
@@ -2708,23 +2709,34 @@ Only five entries stay open during the window, each one deliberately:
    owner, and readers holding at least one Memory there (ruling B3); oldest deadline first. `memory_count` is
    the caller's own Memory there (every status, what the export holds); `transferable_count` the part a
    transfer moves (confirmed, not proposed for promotion). The pending-actions center shows each as a
-   `notebook_pending_delete` item that **counts as unread**. Each transition (request, cancel, promotion)
-   refreshes the owner's and every Memory holder's bell (fail-open). There is no separate reminder before
-   the deadline (B10).
+   `notebook_pending_delete` item that **counts as unread**; when the notices cannot be read the bell drops
+   only these items (logged) and keeps the rest, while the list block, reading its own endpoint, says it
+   cannot read them. Each transition (request, cancel, promotion) refreshes the owner's and every Memory
+   holder's bell (fail-open); request and cancel hand that refresh to a background thread so it never holds
+   their answer. There is no separate reminder before the deadline (B10).
 4. **Explanation code** — `GET /api/notebooks/{id}` answers a reader of a notebook inside its window 404
    `{"detail": {"code": "notebook_pending_delete", "notebook_id", "name", "delete_after", "is_owner",
    "memory_count", "transferable_count"}}`; anyone else gets the plain 404. Every sub-resource keeps its
    plain 404.
 5. **Move my Memory to my notebook** (ruling B9, 2026-10-22) — `POST /notebooks/{id}/memories/transfer`
-   with `{"target_notebook_id"}`: moves every one of the caller's confirmed Memory items the move rule
-   accepts into a live notebook the caller owns. Always a **move** (no copy), the server picks the items,
+   with `{"target_notebook_id", "after"?}`: moves the caller's confirmed Memory items the move rule accepts
+   into a live notebook the caller owns. Always a **move** (no copy), the server picks the items,
    `extract_kg` as the Memory page's transfer defaults it; candidates and items proposed for promotion stay
-   behind (the interface says 「N 条记忆无法转移，请先导出」). The answer has the shape of
-   `POST /memories/transfer` (`{"results": [...]}`, one entry per item). The instant is taken once when the
-   transfer starts and every item re-checks the window with it: once the promotion has committed, the
-   remaining items fail one by one with `error_code="delete_window_closed"` while the moved ones stay moved.
-   A closed window before the first item: 404 `delete_window_closed`; an unreadable notebook or a target the
-   caller cannot write: 404. **Moved Memory never returns, even if the owner cancels.**
+   behind (the interface says 「N 条记忆无法转移，请先导出」). **One page per request**: at most 200 items in
+   id order after `after` (omitted on the first page). The answer is `{"results": [...], "remaining", 
+   "next_after"}` — `results` has the shape of `POST /memories/transfer` (one entry per item), `remaining`
+   counts the transferable items after this page, and the client repeats with `after=next_after` until
+   `remaining` is 0 (the interface shows 「已转移 X / N 条」 meanwhile). Every page re-checks the window: its
+   instant is taken once when the page starts and every item re-reads with it; once the promotion has
+   committed, the remaining items fail one by one with `error_code="delete_window_closed"` while the moved
+   ones stay moved, and the next page is 404 `delete_window_closed`. An item the caller can no longer read
+   while the window is open (their access was withdrawn) fails with `error_code="not_readable"`; an item
+   whose source the notebook's own delete removed after its copy committed counts as `moved`. **One transfer
+   at a time** per caller and notebook (two tabs at once would copy an item twice): a second one is 409
+   `{"code": "transfer_in_progress"}` at once (a process-local claim on SQLite, a session advisory lock on
+   PostgreSQL). Only inside a window: a live notebook answers 409 `notebook_not_pending_delete` (the Memory
+   page's transfer covers it); an unreadable notebook or a target the caller cannot write: 404. **Moved
+   Memory never returns, even if the owner cancels.**
 
 A repeated `DELETE` during the window is 409 `{"detail": {"code": "notebook_pending_delete",
 "delete_after", "message"}}` for the owner (404 for anyone else); a notebook already being deleted,
@@ -2748,7 +2760,11 @@ sentence and controls whose outcome lands beside them: 「撤销删除」 (owner
 已无法撤销」 / 「这本笔记本已不存在」), 「导出我的记忆（N 条）」 (导出中… / 已导出 / 导出失败 with the reason:
 over the limit, window closed, nothing left) and 「转移到我的笔记本」 (first shows 「转移后这些记忆会离开这本笔记本，
 即使所有者撤销删除也不会回来。」, then a picker of the caller's own notebooks and 「确认转移」; the result names
-the count moved and failed). A row whose deadline passed on the local clock says 「删除时间已到，正在永久
+the count moved and failed; a large set goes page by page with 「已转移 X / N 条」 beside the button, one
+transfer at a time — a second tab gets 「另一次转移正在进行，请等它结束后再试。」 — and 「取消」 closes the panel and
+stops after the page in flight). A notebook mounting a library that is inside its window shows the edge
+greyed with a reason that only states what holds: the library's own owner reads 「你已删除这本笔记本，撤销删除即可
+恢复」 under its real name, anyone else 「该参考库暂时不可用」 under the masked name. A row whose deadline passed on the local clock says 「删除时间已到，正在永久
 删除。」 with no control and re-reads; an unreadable list says 「暂时读不到即将删除的笔记本，请稍后重试」
 (fail-closed, with a retry). Clicking the bell item opens the list on that row. Opening such a notebook (a
 stale link, a bookmark) shows the explanation box 「这本笔记本已被删除」 with the same sentence and
