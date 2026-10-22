@@ -6416,7 +6416,10 @@ class KnowledgeLifecycleService:
            names that can lead to a key, and only while v1 rows exist.
         3–4. ``kg_merge.translate_v1_decisions``. A new override key (a
            rejection the new seeds would collapse) changes those objects'
-           seeds, so the stream runs once more with it — only then.
+           seeds, so the stream runs once more with it — only then; and the
+           stored v2 decisions naming the seeds those objects left follow
+           them (``DecisionTranslation.move_v2_decisions``, against the
+           seeds the second stream still carries).
 
         The plan is persisted by the pending refresh
         (``_refresh_pending_merges``) and is idempotent: a rebuild that fails
@@ -6425,6 +6428,7 @@ class KnowledgeLifecycleService:
             StoredDecision, override_keys, translate_v1_decisions,
         )
 
+        v2_rows: List[StoredDecision] = []
         with self._connect() as db:
             decided = self.governance_store.decided_seed_pairs_from(
                 db, notebook_id, seed_version=CONCEPT_SEED_VERSION)
@@ -6437,6 +6441,16 @@ class KnowledgeLifecycleService:
                 for r in self.governance_store.merge_decision_rows(
                     db, notebook_id, seed_version=1, include_pending=True)
             ]
+            if v1_rows:
+                # The v2 rows, read in the same snapshot as ``decided``, with
+                # their ids: the ones a new override key moves are re-keyed
+                # by the refresh (pending ones too, see move_v2_decisions).
+                v2_rows = [
+                    StoredDecision(r["id"], r["key_a"], r["key_b"], r["status"])
+                    for r in self.governance_store.merge_decision_rows(
+                        db, notebook_id, seed_version=CONCEPT_SEED_VERSION,
+                        include_pending=True)
+                ]
         override = override_keys(decided)
         seeds_of_key: Dict[str, Set[str]] = {}
         stream = self._stream_seed_reps(
@@ -6457,6 +6471,7 @@ class KnowledgeLifecycleService:
             stream = self._stream_seed_reps(
                 notebook_id, "concept", concept_seed_version=CONCEPT_SEED_VERSION,
                 run_id=run_id, override=plan.override)
+            decided = plan.move_v2_decisions(decided, v2_rows, carried=stream[1])
         return (*stream, {**decided, **plan.decided_pairs()}, plan)
 
     def _squash_merge_candidates(
@@ -6501,8 +6516,10 @@ class KnowledgeLifecycleService:
         its successor's candidates); lock the pending rows and the planned v1
         rows in one statement, in the order a human decision locks a pair's
         rows (PostgreSQL: ``id COLLATE "C"``, so the two wait for each other
-        instead of deadlocking), and DELETE the pending ones; persist the
-        recompute (translating only the rows still as planned); then read the
+        instead of deadlocking; the v2 rows the plan re-keys are locked in the
+        same statement), and DELETE the pending ones; persist the recompute
+        (translating only the rows still as planned) and re-key the v2
+        decisions a new override key moved (``moved_rows``); then read the
         decisions LIVE — the v2 rows, and the v1 rows this rebuild did not
         translate mapped through the stream's seeds (``live_pairs``) — and
         filter the ANN and squash rows (one row per canonical pair,
@@ -6514,7 +6531,7 @@ class KnowledgeLifecycleService:
             StoredDecision, filter_pending_seeds_by_decisions, merge_pending_tiers,
         )
 
-        growth, done = 0, []
+        growth, done, moved = 0, [], []
         with self._write() as db:
             if not self.unified_kg.derived_claim_still_held(
                     db, notebook_id, generation):
@@ -6525,12 +6542,24 @@ class KnowledgeLifecycleService:
                 })
                 raise KgDerivedGenerationPreempted(notebook_id, generation)
             self.governance_store.delete_pending_merges(
-                db, notebook_id, lock_ids=sorted(plan.pairs) if plan is not None else ())
+                db, notebook_id,
+                lock_ids=sorted({*plan.pairs, *plan.moved_rows}) if plan is not None else ())
             if plan is not None and plan.pairs:
                 growth, done = self.governance_store.apply_v1_decision_translation(
                     db, notebook_id, plan.pairs,
                     {rid: (r.key_a, r.key_b, r.status) for rid, r in plan.rows.items()},
                     now)
+            if plan is not None and plan.moved_rows:
+                # The v2 decisions a new override key moved, re-keyed with
+                # the same provenance rules; status not checked (the move is
+                # a function of the keys alone), so a row decided again — or
+                # settled from pending — while the rebuild ran is re-keyed
+                # with its live status. A pending one was just deleted.
+                moved_growth, moved = self.governance_store.apply_v1_decision_translation(
+                    db, notebook_id, plan.moved_rows,
+                    {rid: (*keys, None) for rid, keys in plan.moved_keys.items()},
+                    now, seed_version=CONCEPT_SEED_VERSION)
+                growth += moved_growth
             live_decided = self.governance_store.decided_seed_pairs_from(
                 db, notebook_id, seed_version=CONCEPT_SEED_VERSION)
             if plan is not None:
@@ -6561,6 +6590,7 @@ class KnowledgeLifecycleService:
                 "decision_rows_added": growth,
                 "override_keys": len(plan.override),
                 "unresolved": plan.unresolved,
+                "v2_rows_moved": len(moved),
             })
         return growth
 

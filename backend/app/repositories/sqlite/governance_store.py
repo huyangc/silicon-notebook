@@ -1096,17 +1096,20 @@ class GovernanceStore:
         connection: sqlite3.Connection,
         notebook_id: str,
         pairs: Dict[str, List[Tuple[str, str]]],
-        expected: Dict[str, Tuple[str, str, str]],
+        expected: Dict[str, Tuple[str, str, Optional[str]]],
         now: str,
+        *,
+        seed_version: int = 1,
     ) -> Tuple[int, List[str]]:
         """Persist the recompute of v1 decisions into seed space 2, in the
         caller's pending-refresh transaction (§五 S1 step 5; SQLite's write
         transaction already excludes every other writer, the PostgreSQL twin
         locks the rows FOR UPDATE).
 
-        For each row id in ``pairs`` still at seed version 1 with the keys and
-        status it had when the plan was made (``expected``: ``(key_a, key_b,
-        status)``): the FIRST pair updates the row in place — id, created_at,
+        For each row id in ``pairs`` still at ``seed_version`` with the keys
+        and status it had when the plan was made (``expected``: ``(key_a,
+        key_b, status)``; a ``None`` status is not checked): the FIRST pair
+        updates the row in place — id, created_at,
         score, reviewer, confidence and rationale kept — and every further
         pair is inserted as a new row carrying the same decision. The rows'
         canonical ids become ``"K-" + seed``, the id a full rebuild gives that
@@ -1119,7 +1122,15 @@ class GovernanceStore:
         writes are batched (one ``executemany`` per statement and batch).
         Returns ``(rows the confirmed / rejected count grew by, translated row
         ids)``: the caller folds the first into the stored input version's
-        decision count (deferred rows are not counted there)."""
+        decision count (deferred rows are not counted there).
+
+        ``seed_version=2`` re-keys the stored v2 decisions a new override key
+        moved (``DecisionTranslation.move_v2_decisions``) by the same rules
+        — first pair in place, one inserted row per further pair, the same
+        provenance columns kept — with ``expected`` statuses of ``None``: the
+        move depends on the keys alone, so a row decided again while the
+        rebuild ran is re-keyed with its live status."""
+        version = check_concept_seed_version(seed_version)
         ids = sorted(pairs)
         found: Dict[str, sqlite3.Row] = {}
         for at in range(0, len(ids), _TRANSLATION_BATCH):
@@ -1127,10 +1138,10 @@ class GovernanceStore:
             for r in connection.execute(
                 "SELECT id, canonical_a, canonical_b, seed_a, seed_b, status, score, "
                 "confidence, rationale, reviewed_by, created_at "
-                "FROM concept_merge_candidates WHERE notebook_id=? AND seed_version=1 "
+                "FROM concept_merge_candidates WHERE notebook_id=? AND seed_version=? "
                 "AND status IN ('confirmed','rejected','deferred') "
                 f"AND id IN ({','.join('?' for _ in batch)})",
-                (notebook_id, *batch),
+                (notebook_id, version, *batch),
             ).fetchall():
                 found[r["id"]] = r
         grew = 0
@@ -1142,7 +1153,9 @@ class GovernanceStore:
             if r is None:
                 continue
             row = _decision_row(r)
-            if (row["key_a"], row["key_b"], row["status"]) != tuple(expected[row_id]):
+            key_a, key_b, status = expected[row_id]
+            if (row["key_a"], row["key_b"]) != (key_a, key_b) or (
+                    status is not None and row["status"] != status):
                 continue
             first, rest = pairs[row_id][0], pairs[row_id][1:]
             updates.append((first[0], first[1], "K-" + first[0], "K-" + first[1], now,

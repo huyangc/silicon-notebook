@@ -738,6 +738,23 @@ def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
                     f"WHERE u.notebook_id = main.{t}.notebook_id "
                     f"AND u.{seq_col} = -2)",
                     tuple(sec_nb))
+            # S1(设计 2026-10-19 §五,v102):概念簇是按副库**已发布合并**的概念
+            # 种子空间建的,而状态行刚被清掉——缺行读作代码空间 2,旧空间(1)
+            # 建的簇就会让增量放置在旧种子旁边另起新种子。所以导入后仍留有概念簇的
+            # 笔记本,带着副库那一行的 concept_seed_version 拿回一条干净状态行
+            # (其余列取默认值:不脏、0 代、各 seq 是「从未构建」值,读者一律当
+            # 缺行看——逼部署侧干净重建的本意不变)。与深拷贝的 _COPY_SEED_SPACE
+            # 同一条规则;副库没有状态行的笔记本读作代码空间,这里也不写。
+            if ("concept_seed_version" in sec_state_cols
+                    and _table_exists(conn, "concept_clusters", "main")):
+                conn.execute(
+                    "INSERT INTO main.unified_kg_state "
+                    "(notebook_id, concept_seed_version, updated_at) "
+                    "SELECT u.notebook_id, u.concept_seed_version, u.updated_at "
+                    f"FROM sec.unified_kg_state u WHERE u.notebook_id IN ({ph}) "
+                    "AND EXISTS (SELECT 1 FROM main.concept_clusters c "
+                    "WHERE c.notebook_id = u.notebook_id AND c.object_type = 'concept')",
+                    tuple(sec_nb))
 
         # 孤儿群组授权边清扫。必须在 GLOBAL_UNION 合并**之后**(那一步才决定
         # `groups` 的最终并集)、`foreign_key_check` **之前**(它看不见这类行 ——

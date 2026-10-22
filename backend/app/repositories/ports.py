@@ -5043,13 +5043,17 @@ class GovernanceStorePort(Protocol):
         connection: object,
         notebook_id: str,
         pairs: dict[str, list[tuple[str, str]]],
-        expected: dict[str, tuple[str, str, str]],
+        expected: dict[str, tuple[str, str, str | None]],
         now: str,
+        *,
+        seed_version: int = 1,
     ) -> tuple[int, list[str]]:
         """Persist the recompute of v1 decisions into seed space 2 in the
         caller's transaction: per still-matching v1 row, the first pair in
         place, one inserted row per further pair. Returns (growth of the
-        confirmed / rejected row count, translated row ids)."""
+        confirmed / rejected row count, translated row ids). With
+        ``seed_version=2``, the same for the v2 rows a new override key moved
+        (a ``None`` expected status is not checked)."""
         ...
     @staticmethod
     def merge_candidate_pairs(db: object, notebook_id: str, statuses: object) -> list[Any]: ...

@@ -1112,3 +1112,115 @@ def test_v102_lands_both_halves_and_a_rerun_moves_no_seed_space(tmp_path):
         assert state(db) == (2, 0, "")
         assert db.execute("SELECT board_key FROM communities WHERE id = 'cm-a'").fetchone()[0] == "cm-a"
     database.close_local()
+
+
+def _v101_with_unrecorded_merges(database, now: str) -> None:
+    """A v101 database holding a deep copy made before the upgrade (concept
+    clusters, no state row), a notebook with claim clusters only, a bare
+    notebook and one with a state row and a board."""
+    from tests.sqlite_migration_testkit import rollback_v102
+
+    with database.write() as db:
+        for notebook_id in ("nb-v101", "nb-copy", "nb-claims", "nb-bare"):
+            db.execute(
+                "INSERT INTO notebooks (id, name, created_at, updated_at) "
+                "VALUES (?, 'n', ?, ?)", (notebook_id, now, now))
+        rollback_v102(db)
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, updated_at) VALUES ('nb-v101', ?)",
+            (now,))
+        db.execute(
+            "INSERT INTO communities (id, notebook_id, level, member_ids, size, created_at, "
+            "generation) VALUES ('cm-a', 'nb-v101', 0, '[\"K-x\"]', 1, ?, 0)", (now,))
+        for cluster_id, notebook_id, object_type in (
+                ("cc-1", "nb-copy", "concept"), ("cc-2", "nb-claims", "claim")):
+            db.execute(
+                "INSERT INTO concept_clusters (id, notebook_id, canonical_id, "
+                "member_object_id, canonical_name, object_type, created_at) "
+                "VALUES (?, ?, 'K-q former', 'ko-1', 'Q Former', ?, ?)",
+                (cluster_id, notebook_id, object_type, now))
+        db.execute("PRAGMA user_version = 101")
+
+
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
+def test_v102_gives_a_copy_without_a_state_row_one_in_seed_space_1(tmp_path):
+    """Codex #988 R2: a deep copy made before the upgrade and never written to
+    since holds concept clusters built in seed space 1 but no state row, and a
+    missing row reads as the code's space 2 -- an upload would mint its new
+    seeds beside the copied ones. v102 gives such a notebook a state row in
+    space 1 whose every other column is its default (the clean row every
+    reader takes for a missing one: not dirty, never rebuilt, generation 0).
+    Claim clusters alone, or no clusters, get no row. Mutation anchor: drop the
+    INSERT from ``_migration_102`` and ``nb-copy`` has no row."""
+    database, settings = _fresh_migrated_database(tmp_path)
+    now = "2026-10-23T00:00:00+00:00"
+    _v101_with_unrecorded_merges(database, now)
+
+    assert SqliteMigrator(database, settings).migrate() == [102]
+    with database.write() as db:
+        db.execute("INSERT INTO notebooks (id, name, created_at, updated_at) "
+                   "VALUES ('nb-ref', 'n', ?, ?)", (now, now))
+        db.execute("INSERT INTO unified_kg_state (notebook_id, updated_at) "
+                   "VALUES ('nb-ref', ?)", (now,))
+    with database.connect() as db:
+        state = {r["notebook_id"]: dict(r) for r in db.execute(
+            "SELECT * FROM unified_kg_state")}
+    assert set(state) == {"nb-v101", "nb-copy", "nb-ref"}
+    assert (state["nb-v101"]["concept_seed_version"],
+            state["nb-copy"]["concept_seed_version"],
+            state["nb-ref"]["concept_seed_version"]) == (1, 1, 2)
+
+    def rest(row):
+        return {k: v for k, v in row.items()
+                if k not in ("notebook_id", "updated_at", "concept_seed_version")}
+
+    assert rest(state["nb-copy"]) == rest(state["nb-ref"])
+    assert state["nb-copy"]["dirty"] == 0 and state["nb-copy"]["cluster_input_version"] == ""
+    database.close_local()
+
+
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
+def test_v102_is_one_transaction_so_an_interrupted_run_starts_over(tmp_path, monkeypatch):
+    """Codex #988 R2: Python's sqlite3 opens no transaction before DDL, so an
+    interruption after the ALTER that adds ``concept_seed_version`` (DEFAULT
+    2) and before the UPDATE that sets the existing rows to 1 used to commit
+    the column -- and the retry, seeing it, skipped the backfill for good:
+    every existing library read as space 2. v102 is one BEGIN IMMEDIATE
+    transaction with its stamp: the interrupted run leaves v101 behind and
+    the retry backfills everything (existing rows in space 1, the copy's
+    state row, every board's key). Mutation anchor: drop the BEGIN and the
+    column survives the failure."""
+    from app.repositories.sqlite import database as sqlite_database
+
+    database, settings = _fresh_migrated_database(tmp_path)
+    now = "2026-10-23T00:00:00+00:00"
+    _v101_with_unrecorded_merges(database, now)
+
+    real_execute = sqlite_database._Conn.execute
+
+    def interrupted(self, statement, *args):
+        if statement.startswith("UPDATE unified_kg_state SET concept_seed_version"):
+            raise sqlite3.OperationalError("injected interruption")
+        return real_execute(self, statement, *args)
+
+    monkeypatch.setattr(sqlite_database._Conn, "execute", interrupted)
+    with pytest.raises(sqlite3.OperationalError, match="injected interruption"):
+        SqliteMigrator(database, settings).migrate()
+    monkeypatch.setattr(sqlite_database._Conn, "execute", real_execute)
+
+    with database.connect() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 101
+        columns = {r[1] for r in db.execute("PRAGMA table_info(unified_kg_state)")}
+        assert "concept_seed_version" not in columns
+        assert "board_key" not in {r[1] for r in db.execute("PRAGMA table_info(communities)")}
+
+    assert SqliteMigrator(database, settings).migrate() == [102]
+    with database.connect() as db:
+        assert dict(db.execute(
+            "SELECT notebook_id, concept_seed_version FROM unified_kg_state").fetchall()) == {
+            "nb-v101": 1, "nb-copy": 1}
+        assert db.execute(
+            "SELECT board_key FROM communities WHERE id = 'cm-a'").fetchone()[0] == "cm-a"
+    database.close_local()
