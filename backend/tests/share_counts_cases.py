@@ -424,6 +424,54 @@ def case_a_job_finishing_between_the_aggregate_and_the_windows_is_not_counted(wo
     assert after["total_turns"] == turns + 1 and after["through_id"] == late[0]
 
 
+def case_a_watermark_job_past_its_retention_stamp_is_placed_as_the_page_places_it(world: World) -> None:
+    """Deliberate change from the browser-side count: the watermark job itself
+    expired (its stamp passed) but its row still anchors the public page's
+    keyset. The browser, holding only live turns, could not find it and said
+    "unknown"; the server places it exactly where the page does -- the link
+    holds the live turns before it, and the boundary after it is "behind"."""
+    turns = 10
+    cid, _lost = _long_world(world, turns)
+    assert share(world, cid, job_of(cid, 6)).status_code == 200
+    store = world.repo._runtime.global_ask_store
+    with store.database.write() as db:
+        db.execute(store._sql("UPDATE global_ask_jobs SET retained_until=? WHERE id=?"),
+                   ("2000-01-01T00:00:00+00:00", job_of(cid, 6)))
+    page = _page(world, cid)
+    assert [turn["question"] for turn in page["turns"]] == [f"第 {i} 问" for i in range(6)]
+    whole = stored_counts(world, cid).json()
+    assert (whole["total_turns"], whole["published_turns"], whole["new_turns"]) == (9, 6, 3)
+    bounded = stored_counts(world, cid, through_id=job_of(cid, 9)).json()
+    assert bounded["watermark_unknown"] is False and bounded["watermark_behind"] is True
+    assert bounded["published_turns"] == 6 and bounded["new_turns"] == 3
+
+
+def case_the_counts_resolve_the_boundary_and_watermark_the_share_pins(world: World) -> None:
+    """Same inputs, same resolution: the boundary the counts report is the one
+    a share pins (a tie at one instant included), a boundary the share would
+    refuse as stale is one the counts report as unresolved, and the watermark
+    the counts echo is the one stored."""
+    cid = f"gconv-tie-{next(_IDS)}"
+    insert_conversation(world.repo._runtime.global_ask_store, cid, world.alice.id)
+    rows = [(f"{cid}-{name}", instant(at), "done", job_payload(f"{cid}-{name}", f"问 {name}",
+             resolved=[world.notebook])) for name, at in (("a", 1), ("c", 2), ("b", 2))]
+    bulk_jobs(world, cid, world.alice.id, rows)
+    newest = share_counts(world, cid).json()
+    # (created_at, id) order: a, b, c -- the newest is c, inserted before b.
+    assert newest["through_id"] == f"{cid}-c" and newest["total_turns"] == 3
+    shared = share(world, cid, "")
+    assert shared.status_code == 200 and shared.json()["shared_through_id"] == newest["through_id"]
+    pinned = share_counts(world, cid, through_id=f"{cid}-b").json()
+    assert pinned["boundary_index"] == 1 and pinned["watermark_ahead"] is True
+    assert pinned["ahead_count"] == 1
+    gone = share_counts(world, cid, through_id=f"{cid}-x").json()
+    stale = share(world, cid, f"{cid}-x")
+    assert gone["boundary_unresolved"] is True and stale.status_code == 409
+    implicit = share_counts(world, cid).json()
+    assert (implicit["watermark_id"], implicit["watermark_at"]) == (
+        shared.json()["shared_through_id"], shared.json()["shared_through_at"])
+
+
 # --- authority: the libraries of the turns the page shows ------------------------
 
 

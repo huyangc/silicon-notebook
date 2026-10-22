@@ -1547,7 +1547,7 @@ class GlobalAskStore:
             (boundary["created_at"], boundary["id"]),
         )
 
-    def _prefix_window(self, db, conversation_id, bound_sql, bound_params):
+    def _prefix_window(self, db, conversation_id, bound_sql, bound_params, *, size=None):
         """``(rows, earlier)`` for one prefix of the conversation's live done
         jobs (``bound_sql`` bounds it): its newest ``MAX_TURNS`` rows, oldest
         first (``public_window``), and how many older ones the prefix holds.
@@ -1558,7 +1558,9 @@ class GlobalAskStore:
         payload it ever produced. The extra row only says whether older jobs
         exist; then, and only then, one ``COUNT`` over the same prefix gives
         their number -- an ordinary conversation reads exactly one statement,
-        as before.
+        as before. ``size``: the prefix's length when the caller already
+        counted it (the dialog's aggregate); then the read is ``LIMIT`` the
+        window and no ``COUNT`` runs.
         """
         where = (
             "FROM global_ask_jobs WHERE conversation_id=? AND status='done' "
@@ -1568,7 +1570,9 @@ class GlobalAskStore:
         rows = db.execute(self._sql(
             f"SELECT id, payload_json, created_at {where} "
             + GLOBAL_JOBS_ORDER_DESC + " LIMIT ?"
-        ), (*params, MAX_TURNS + 1)).fetchall()
+        ), (*params, MAX_TURNS + 1 if size is None else window_size(size))).fetchall()
+        if size is not None:
+            return list(reversed(rows)), max(0, size - len(rows))
         earlier = 0
         if len(rows) > MAX_TURNS:
             total = db.execute(self._sql(f"SELECT COUNT(*) AS n {where}"), params).fetchone()
@@ -1626,12 +1630,19 @@ class GlobalAskStore:
             prefixes = share_prefixes(ranks)
             windows = {}
             if prefixes is not None:
-                for size in {prefixes.current, prefixes.scope}:
+                # The longer prefix is read first; when its whole window fits
+                # the page (<= MAX_TURNS) the shorter one's window is its head,
+                # so it is sliced out instead of read and decoded again.
+                for size in sorted({prefixes.current, prefixes.scope}, reverse=True):
+                    longest = max(windows, default=None)
+                    if longest is not None and longest <= MAX_TURNS:
+                        windows[size] = windows[longest][:size]
+                        continue
                     bound_sql, bound_params = bounds[size]
-                    rows, earlier = self._prefix_window(
-                        db, conversation_id, bound_sql, bound_params
+                    rows, _earlier = self._prefix_window(
+                        db, conversation_id, bound_sql, bound_params, size=size
                     )
-                    if len(rows) != window_size(size) or earlier != size - len(rows):
+                    if len(rows) != window_size(size):
                         raise ConversationShareWatermarkStale(asked or mark_id)
                     windows[size] = self._window_jobs(rows)
         newest = facts["n_id"] or ""
