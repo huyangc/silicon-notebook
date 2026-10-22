@@ -261,6 +261,7 @@ def recheck_reused(directory: Path, services: list[dict], fingerprint: str, run_
             time.sleep(POLL_SECONDS)
     with lock(directory / "operations.lock"):
         require_same_ready_session()
+        watch()  # last word before success; see start()
         return {"state": "ready", "reused": True}
 
 
@@ -276,6 +277,7 @@ def start(directory: Path, services: list[dict], fingerprint: str, receipt: Path
         if isinstance(spawned, dict):
             if spawned["state"] == "rechecking":
                 return recheck_reused(directory, services, fingerprint, spawned["run_id"], watch)
+            watch()
             return spawned
         process, run_id = spawned
         deadline = time.monotonic() + sum(s["startup_timeout_seconds"] for s in services) + CONTROL_MARGIN_SECONDS
@@ -283,6 +285,13 @@ def start(directory: Path, services: list[dict], fingerprint: str, receipt: Path
             state = read_json(directory / "state.json")
             if state.get("run_id") == run_id:
                 if state.get("state") == "ready":
+                    # Every success exit asks the launcher watch last: a launcher
+                    # killed while the session turned ready must not leave a
+                    # running session nobody owns behind (main() would only drop
+                    # the receipt). A launcher killed after this check finds the
+                    # session in the state any launcher killed right after a
+                    # successful start does.
+                    watch()
                     return {"state": "ready", "reused": False}
                 if state.get("state") in ("stopping", "failed", "stopped"):
                     raise ServiceError(state.get("reason") or "startup_failed")
