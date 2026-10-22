@@ -12,6 +12,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -150,6 +151,37 @@ def stop_fake_children(root: Path) -> None:
                 os.kill(int(path.read_text()), signal.SIGTERM)
             except ProcessLookupError:
                 pass
+
+
+def checkout_controllers(root: Path) -> list[int]:
+    """Live (non-zombie) companion controllers started from this checkout."""
+    needle = str(root / "scripts" / "extension_services.py")
+    listing = subprocess.run(["ps", "-ax", "-o", "pid=,stat=,command="],
+                             capture_output=True, text=True).stdout
+    found = []
+    for line in listing.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and needle in parts[2] and not parts[1].startswith("Z"):
+            found.append(int(parts[0]))
+    return found
+
+
+def reap_leaked_controllers(root: Path, timeout: float) -> list[int]:
+    """Wait for this checkout's controllers to exit; SIGKILL and return any left.
+
+    A launcher must not leave its controller behind, so whatever is still
+    running once ``timeout`` passes is a leak: it is killed by exact pid (never
+    by pattern) and reported to the caller.
+    """
+    deadline = time.monotonic() + timeout
+    while (left := checkout_controllers(root)) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    for pid in left:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return left
 
 
 def spawn(root: Path, env: dict[str, str], path: str, *args: str) -> subprocess.Popen:
