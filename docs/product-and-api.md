@@ -2712,8 +2712,8 @@ Only five entries stay open during the window, each one deliberately:
    `notebook_pending_delete` item that **counts as unread**; when the notices cannot be read the bell drops
    only these items (logged) and keeps the rest, while the list block, reading its own endpoint, says it
    cannot read them. Each transition (request, cancel, promotion) refreshes the owner's and every Memory
-   holder's bell (fail-open); request and cancel hand that refresh to a background thread so it never holds
-   their answer. There is no separate reminder before the deadline (B10).
+   holder's bell (fail-open); request and cancel hand that refresh to the bounded light background pool
+   (`deletion-notice`) so it never holds their answer. There is no separate reminder before the deadline (B10).
 4. **Explanation code** — `GET /api/notebooks/{id}` answers a reader of a notebook inside its window 404
    `{"detail": {"code": "notebook_pending_delete", "notebook_id", "name", "delete_after", "is_owner",
    "memory_count", "transferable_count"}}`; anyone else gets the plain 404. Every sub-resource keeps its
@@ -2761,11 +2761,16 @@ sentence and controls whose outcome lands beside them: 「撤销删除」 (owner
 已无法撤销」 / 「这本笔记本已不存在」), 「导出我的记忆（N 条）」 (导出中… / 已导出 / 导出失败 with the reason:
 over the limit, window closed, nothing left) and 「转移到我的笔记本」 (first shows 「转移后这些记忆会离开这本笔记本，
 即使所有者撤销删除也不会回来。」, then a picker of the caller's own notebooks and 「确认转移」; the result names
-the count moved and failed; a large set goes page by page with 「已转移 X / N 条」 beside the button, one
-transfer at a time — a second tab gets 「另一次转移正在进行，请等它结束后再试。」 — and 「取消」 closes the panel and
-stops after the page in flight). A notebook mounting a library that is inside its window shows the edge
-greyed with a reason that only states what holds: the library's own owner reads 「你已删除这本笔记本，撤销删除即可
-恢复」 under its real name, anyone else 「该参考库暂时不可用」 under the masked name. A row whose deadline passed on the local clock says 「删除时间已到，正在永久
+how many moved, how many did not (「仍在这本笔记本里，请先导出」) and how many were not reached; a large set goes
+page by page with 「已转移 X / N 条」 beside the button — X counts only items actually moved, failures are
+counted apart — one transfer at a time — a second tab gets 「另一次转移正在进行，请等它结束后再试。」 — and
+「取消」 closes the panel and stops after the page in flight; if the owner cancels the deletion part-way the row
+says 「所有者已撤销删除，这本笔记本已恢复，剩下的记忆留在原处。」). A notebook mounting a library that is not live
+shows the edge greyed with a reason that only states what holds, for the person looking: the library's own
+owner, while it is in its window, reads 「你已删除这本笔记本，撤销删除即可恢复」; anyone else (the mounting
+notebook's group admins included) 「该参考库暂时不可用」; once the six-phase delete has started, everyone reads
+「该参考库已被删除」. Names stay masked as before. A 202 whose `delete_after` cannot be read still reads as
+「已安排删除」 (the exact time is in the block, which re-reads). A row whose deadline passed on the local clock says 「删除时间已到，正在永久
 删除。」 with no control and re-reads; an unreadable list says 「暂时读不到即将删除的笔记本，请稍后重试」
 (fail-closed, with a retry). Clicking the bell item opens the list on that row. Opening such a notebook (a
 stale link, a bookmark) shows the explanation box 「这本笔记本已被删除」 with the same sentence and
