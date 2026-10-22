@@ -872,8 +872,25 @@ READ_SECTION_ACTION = "read_section"
 # 同口径:再长就是堆砌,只会稀释查询向量)。只在执行处截,解析不截——fail_closed
 # 的 2000 字符硬闸因此仍看得到原值。
 SECTION_QUERY_MAX_CHARS = 300
-# trace detail / 账目里回显模型自写的来源标题、章节文本时的截断长度。
+# trace detail / 账目里回显模型自写的来源标题、章节文本时的截断长度;库里的来源
+# 标题与章节标签(`section_path` 不设长度上限)进摘要、账目与轨迹前也按它截。
 _SECTION_ECHO_CHARS = 200
+
+
+def _section_text(value) -> str:
+    """一行有界的显示文本:折叠空白,超过 `_SECTION_ECHO_CHARS` 截断并加省略号。"""
+    text = " ".join(str(value or "").split())
+    if len(text) <= _SECTION_ECHO_CHARS:
+        return text
+    return text[:_SECTION_ECHO_CHARS - 1] + "…"
+
+
+def _display_occurrence(occurrence):
+    """渲染用的出现副本:标签与面包屑各段按 `_section_text` 截成有界的一行。地址簿
+    里登记的仍是原出现(只有显示被截,解析与读取不受影响)。"""
+    return replace(
+        occurrence, label=_section_text(occurrence.label),
+        crumbs=tuple(_section_text(crumb) for crumb in occurrence.crumbs))
 
 # `search_chunks` 动作的关键词串(模型回复的根级 `keywords`)解析时的截断上限。
 # 这串原样进全文检索(`keyword_chunk_candidates` → FTS 的 OR 查询):词项越多,
@@ -7466,7 +7483,7 @@ class ReasoningRetriever:
         for chunk in state.chunks:
             key = (str(chunk.notebook_id or state.notebook_id), chunk.source_id)
             if key not in sources:
-                sources[key] = str(chunk.source_title or UNNAMED_SOURCE_LABEL)
+                sources[key] = _section_text(chunk.source_title or UNNAMED_SOURCE_LABEL)
                 if len(sources) >= max_sources:
                     break
         # 只用本 run 已经嵌入过的文本(问题 + 已执行的查询),且只取检索 run 的嵌入
@@ -7507,9 +7524,11 @@ class ReasoningRetriever:
             relative_floor=float(getattr(
                 self.settings, "reasoning_section_hint_relative_floor", 0.5)),
             best_chunk_sim=best)
+        # 标签按显示口径截(地址簿里存的仍是原出现):条目数已有上限,每行也有界。
         return render_hints([
             (state.surfaced_sections.assign(hint.notebook_id, hint.source_id,
-                                            hint.occurrence), hint)
+                                            hint.occurrence),
+             replace(hint, occurrence=_display_occurrence(hint.occurrence)))
             for hint in hints]), len(rankings), len(hints)
 
     def _section_skip(
@@ -7606,7 +7625,7 @@ class ReasoningRetriever:
         under = " ".join(decision.browse_sections_under.split())[:_SECTION_ECHO_CHARS]
         query = " ".join(decision.browse_sections_query.split())[:SECTION_QUERY_MAX_CHARS]
         browse_key = (row.notebook_id, row.source_id, under.casefold(), query.casefold())
-        title = row.source_title or UNNAMED_SOURCE_LABEL
+        title = _section_text(row.source_title or UNNAMED_SOURCE_LABEL)
         if browse_key in state.section_browse_cache:
             self._replay_section_listing(state, row, title, browse_key, under, query)
             return
@@ -7691,7 +7710,7 @@ class ReasoningRetriever:
             provisional.append((sid, occ))
         render = render_ranked if ranked else render_outline
         rendered = render(
-            provisional,
+            [(sid, _display_occurrence(occ)) for sid, occ in provisional],
             max_chars=int(getattr(self.settings, "reasoning_section_browse_max_chars", 3000)),
             truncated_scan=source_outline.truncated,
             scan_rows=source_outline.scanned_rows)
@@ -7742,7 +7761,7 @@ class ReasoningRetriever:
         if row is None:
             return None, ("section_source_unresolved", unresolved, {
                 "requested_title": decision.read_section_source[:_SECTION_ECHO_CHARS]})
-        title = row.source_title or UNNAMED_SOURCE_LABEL
+        title = _section_text(row.source_title or UNNAMED_SOURCE_LABEL)
         source_outline = self._section_outline_for(
             state, row.notebook_id, row.source_id, title)
         found = resolve_section(
@@ -7753,17 +7772,48 @@ class ReasoningRetriever:
             return state.surfaced_sections.get(state.surfaced_sections.sid_of(
                 row.notebook_id, row.source_id, found.occurrence.index)), title
         if isinstance(found, Ambiguous):
-            listed = "、".join(
-                f"[{state.surfaced_sections.assign(row.notebook_id, row.source_id, occ)}]"
-                f" {occ.display_label}" for occ in found.candidates)
-            return None, ("section_ambiguous",
-                          f"跳过{verb}:「{echo}」在《{title}》里出现 "
-                          f"{len(found.candidates)} 处:{listed},请改用其中一个 [sN]",
-                          {"section": echo, "matches": len(found.candidates)})
+            return None, self._ambiguous_section_skip(
+                state, row, title, echo, found.candidates, verb)
         return None, ("section_not_surfaced",
                       f"跳过{verb}:《{title}》的目录里没有「{echo}」,"
                       "请先用 browse_sections 列出目录再复制 [sN]",
                       {"section": echo})
+
+    def _ambiguous_section_skip(
+        self, state: "_ReasoningRunState", row: "_SectionSource", title: str,
+        echo: str, candidates, verb: str,
+    ) -> tuple:
+        """同名多处的教学 skip:候选按目录的有界渲染器列出(预算
+        `REASONING_SECTION_BROWSE_MAX_CHARS`,与 browse 同一份已校验的 Settings),
+        只给**显示出来**的候选发 `sN`(先按预计号渲染,再按同一顺序发号),其余如实
+        注明省略数。这行文本会留在账目里、每轮重放,所以必须有界。"""
+        fresh = 0
+        provisional = []
+        for occ in candidates:
+            sid = state.surfaced_sections.sid_of(row.notebook_id, row.source_id, occ.index)
+            if not sid:
+                fresh += 1
+                sid = f"s{len(state.surfaced_sections) + fresh}"
+            provisional.append((sid, occ))
+        rendered = render_ranked(
+            [(sid, _display_occurrence(occ)) for sid, occ in provisional],
+            max_chars=int(getattr(self.settings, "reasoning_section_browse_max_chars", 3000)),
+            truncated_scan=False, scan_rows=0)
+        for _sid, occ in provisional[:rendered.listed]:
+            state.surfaced_sections.assign(row.notebook_id, row.source_id, occ)
+        # 渲染器在截断时把它自己的省略说明放在最后一行;这里换成同名场景的措辞,
+        # 列表本身改成一行(账目是一行一条)。
+        lines = rendered.text.split("\n")
+        if rendered.omitted:
+            lines = lines[:-1]
+        listed = "、".join(line for line in lines if line)
+        omitted = (f";另有 {rendered.omitted} 处同名未列出,"
+                   "可用 browse_sections 的 under/query 收窄" if rendered.omitted else "")
+        return ("section_ambiguous",
+                f"跳过{verb}:「{echo}」在《{title}》里出现 {len(candidates)} 处,"
+                f"请改用其中一个 [sN]:{listed}{omitted}",
+                {"section": echo, "matches": len(candidates),
+                 "listed": rendered.listed})
 
     def _action_read_section(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
@@ -7798,8 +7848,8 @@ class ReasoningRetriever:
             reason, summary, detail = title_or_skip
             self._section_skip(state, reason, summary, **detail)
             return
-        title = title_or_skip or UNNAMED_SOURCE_LABEL
-        label = address.label or UNTITLED
+        title = _section_text(title_or_skip or UNNAMED_SOURCE_LABEL)
+        label = _section_text(address.label or UNTITLED)
         read_key = (address.notebook_id, address.source_id, address.occurrence)
         if read_key in state.section_read_keys:
             self._section_skip(
