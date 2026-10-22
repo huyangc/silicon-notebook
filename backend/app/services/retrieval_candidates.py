@@ -3294,6 +3294,11 @@ class CandidateRetrievalService(_RetrievalState):
                 element_id = str(element_id or "")
                 if element_id in wanted and source_id:
                     groups.setdefault((owner, source_id), {})[element_id] = None
+        return self._flagged_navigation_elements(groups)
+
+    def _flagged_navigation_elements(self, groups: dict) -> set:
+        """``{(library, source_id): element ids}`` -> the ids a navigation
+        chunk of that source lists; no group, no connection."""
         flagged: set = set()
         if not groups:
             return flagged
@@ -4971,9 +4976,12 @@ class CandidateRetrievalService(_RetrievalState):
         """``chunk`` references -> their passages; see ``restore_report_
         references`` for the checkpoints. A passage that moved to another
         source (or a reference without one) does not read back. No reference,
-        no connection."""
+        no connection. Nor does a navigation page (table of contents, list of
+        figures) while the read-side switch is on: it is not evidence for this
+        run, whatever an older report cited."""
         if not references:
             return {}
+        drop_navigation = navigation_filter_enabled(self.settings)
         by_library: dict[str, list[CitedReportReference]] = {}
         for library, reference in references:
             by_library.setdefault(library, []).append(reference)
@@ -4993,9 +5001,12 @@ class CandidateRetrievalService(_RetrievalState):
                     if reference.source_id in admitted_set
                 ]
                 for batch in self._in_batches(wanted):
-                    for row in self.chunks.retrieval_contribution_rows(
-                        db, library, batch, actor_id=actor_id,
-                        source_mode="include", source_ids=admitted,
+                    for row in drop_navigation_rows(
+                        self.chunks.retrieval_contribution_rows(
+                            db, library, batch, actor_id=actor_id,
+                            source_mode="include", source_ids=admitted,
+                        ),
+                        enabled=drop_navigation,
                     ):
                         read[(library, str(row["id"]))] = RetrievedChunk(
                             chunk_id=str(row["id"]),
@@ -5080,7 +5091,8 @@ class CandidateRetrievalService(_RetrievalState):
         when it still exists in that source, the source belongs to that
         library and the ceiling admits it. One ``evidence_elements`` read and
         one ``source_metadata`` read (ownership and the display title) for the
-        whole list."""
+        whole list. While the read-side switch is on, an element a navigation
+        chunk lists does not read back (``_flagged_navigation_elements``)."""
         if not wanted:
             return {}
         rows = self.sources.evidence_elements(
@@ -5114,6 +5126,17 @@ class CandidateRetrievalService(_RetrievalState):
                 text=str(row.get("text") or ""),
                 notebook_id=library,
             )
+        if admitted and navigation_filter_enabled(self.settings):
+            groups: dict = {}
+            for reference, element in admitted.items():
+                groups.setdefault(
+                    (element.notebook_id, element.source_id), {}
+                )[element.element_id] = None
+            flagged = self._flagged_navigation_elements(groups)
+            admitted = {
+                reference: element for reference, element in admitted.items()
+                if element.element_id not in flagged
+            }
         return admitted
 
     def _restore_report_knowledge(
