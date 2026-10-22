@@ -230,11 +230,18 @@ that goes to that notebook at the cited source (a plain click also minimizes the
 opens a new tab and leaves it open). There is no citation list under the answer and no side reader; entries
 that need a notebook workspace (source view, Knowledge Graph, Knowhow row, import) are absent.
 Attached images do appear — both the inline citation-image blocks in the body and the **attached images**
-strip inside the citation card — without the page-level zoom preview. Each image is read through the
-asset endpoint of the notebook that owns its citation, and every request re-checks the current user's read
+strip inside the citation card — and clicking one opens the same page-level zoom preview as notebook Ask (the
+same `answer-image-preview` root-modal seat, zoom and stepping; the gallery may span notebooks) in the compact
+window, the full window and the standalone `/ask` page alike. Each image is read through the
+asset endpoint of the notebook that owns its citation — the preview reads each image through that same
+notebook — and every request re-checks the current user's read
 access to that notebook and that the asset's owning library is in that notebook's effective participant set.
-In-notebook Ask still proxies through the active notebook, unchanged.
-While a card is open, Escape closes only the card. The mobile layout retains scope, send and stop.
+In-notebook Ask still proxies through the active notebook, unchanged. In the floating window the modal
+coordinator opens the preview as a **child layer** stacked over the window (policy `stacksOver`): the window
+stays, only leaving the interaction tree (the full window temporarily drops to non-modal), Escape, the backdrop
+and the close button close only the preview and focus returns to the image that opened it, and only the next
+Escape collapses the window as before; if the window leaves, the preview leaves with it.
+While a card is open, Escape closes only the card (an image opened from the card closes first, then the card). The mobile layout retains scope, send and stop.
 The question appears in the transcript at the moment it is sent (the same instant as the notebook Ask's
 pending turn); for `reasoning`, the understanding steps run live under it, using the same client-synthesized
 steps as the notebook Ask, and are prepended to the job's own live trace once the job exists; a cancelled or

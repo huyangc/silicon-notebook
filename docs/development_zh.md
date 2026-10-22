@@ -756,6 +756,10 @@ Homebrew warm gate。
   必须扩展守卫或在评审中登记覆盖缺口。
 - 新增居中或可拖动弹窗必须复用 `FloatingModalCard`，并经 root modal coordinator
   发布，不得另造遮罩、拖动、焦点、色板、边框或圆角行为。
+- 要叠在另一个 root 弹窗之上、又不能把它顶掉的弹窗（例如全局问答窗口上的大图
+  预览），在 `ROOT_MODAL_POLICIES[slot].stacksOver` 里声明这一对，并用
+  `rootModals.openAbove(slot, parent)` 打开。Esc、遮罩与焦点归还随即按协调器的
+  「最上层先吃」规则走；不得在父层里为子层的 Esc 写特判。
 - 来源活动异常只能经 `sourceAnomalies()` 支撑的 `AnomalyBadge` 渲染，不得手搓
   内联警告样式或符号。
 - 五档强度选择必须复用 `frontend/app/effort-picker.tsx::EffortPicker`，不得复制 range
