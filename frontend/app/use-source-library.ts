@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { toUserMessage } from "./errors.ts";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { httpErrorStatus, toUserMessage } from "./errors.ts";
 import {
   deleteSource as deleteSourceRequest,
   getNotebookSource,
@@ -38,6 +38,7 @@ const SOURCE_ELEMENT_PAGE_SIZE = 40;
 const SOURCE_POLL_INITIAL_MS = 1500;
 const SOURCE_POLL_MAX_MS = 15000;
 const SOURCE_POLL_MAX_ATTEMPTS = 120;
+const NO_TRACKED_SOURCES: ReadonlyMap<string, string> = new Map();
 
 // Hidden-state (owner not active) fallback values must be **stable references**.
 // Consumers of the returned view depend on these fields in effects/useMemo;
@@ -118,6 +119,12 @@ export function useSourceLibrary({
   // Content consumers revalidate after mutations, independently of list search
   // and pagination. This is a browser refresh token, not a server content hash.
   const [contentRevision, setContentRevision] = useState(0);
+  // Sources asked to be followed to a terminal parse state even when they are
+  // not on the current page (id -> last seen parse_status; "" before the first
+  // read). The page-scoped poll below only ever sees `sources`, so a reparse
+  // started from elsewhere (the KG analysis findings) would otherwise never
+  // move `contentRevision` and nothing downstream would revalidate.
+  const [trackedSources, setTrackedSources] = useState<ReadonlyMap<string, string>>(NO_TRACKED_SOURCES);
 
   const effectsRef = useRef(effects);
   effectsRef.current = effects;
@@ -144,6 +151,8 @@ export function useSourceLibrary({
   const deleteRefreshGenerationsRef = useRef<Map<string, number>>(new Map());
   const deletedIdsRef = useRef<Map<string, Set<string>>>(new Map());
   const pollCountRef = useRef(0);
+  const trackedSourcesRef = useRef<ReadonlyMap<string, string>>(trackedSources);
+  trackedSourcesRef.current = trackedSources;
   const previousActorIdRef = useRef(actorId);
   const pendingActorIdRef = useRef<string | null>(null);
   const inactiveScopeSelectionRef = useRef(defaultSourceScopeSelection());
@@ -215,6 +224,7 @@ export function useSourceLibrary({
     setHighlightedElementId("");
     setReparsingSource(false);
     setSourcesPageLoading(false);
+    setTrackedSources(NO_TRACKED_SOURCES);
     pollCountRef.current = 0;
   }
 
@@ -286,6 +296,7 @@ export function useSourceLibrary({
     setSourceElementsLoading(false);
     setHighlightedElementId("");
     setSourcesPageLoading(false);
+    setTrackedSources(NO_TRACKED_SOURCES);
     pollCountRef.current = 0;
     setOwnerSerial((value) => value + 1);
     return owner;
@@ -754,7 +765,7 @@ export function useSourceLibrary({
   const visibleSources = ownerIsActive ? sources : NO_SOURCES;
   const hasPending = visibleSources.some(
     (source) => sourceIsPending(source),
-  );
+  ) || (ownerIsActive && trackedSources.size > 0);
 
   useEffect(() => {
     const owner = ownerRef.current;
@@ -778,7 +789,11 @@ export function useSourceLibrary({
       const pending = sourcesRef.current.filter(
         (source) => sourceIsPending(source),
       );
-      if (pending.length === 0) {
+      // Followed sources on the current page are read through `pending` above.
+      const tracked = [...trackedSourcesRef.current].filter(
+        ([id]) => !sourcesRef.current.some((source) => source.id === id),
+      );
+      if (pending.length === 0 && tracked.length === 0) {
         pollCountRef.current = 0;
         return;
       }
@@ -790,13 +805,43 @@ export function useSourceLibrary({
       const elapsedSec = Math.round(
         (pollCountRef.current * SOURCE_POLL_INITIAL_MS) / 1000,
       );
-      effectsRef.current.setStatusText(
-        `正在处理来源（已 ${elapsedSec}s · ${pending.length} 个）`,
-      );
+      if (pending.length > 0) {
+        effectsRef.current.setStatusText(
+          `正在处理来源（已 ${elapsedSec}s · ${pending.length} 个）`,
+        );
+      }
       try {
-        const updated = await Promise.all(pending.map((source) => getSource(source.id)));
+        const [updated, trackedUpdated] = await Promise.all([
+          Promise.all(pending.map((source) => getSource(source.id))),
+          // A followed source deleted meanwhile is done being followed.
+          Promise.all(tracked.map(([id]) => getSource(id).then(
+            (item): SourceSummary | null => item,
+            (error: unknown) => {
+              if (httpErrorStatus(error) === 404) return null;
+              throw error;
+            },
+          ))),
+        ]);
         if (cancelled || !owns(owner)) return;
-        const reachedExtracted = updated.some((item) => {
+        const trackedChanged = tracked.some(([, seen], index) => (
+          trackedUpdated[index]?.parse_status !== seen || trackedUpdated[index] === null
+        ));
+        const trackedReachedExtracted = tracked.some(([, seen], index) => (
+          seen !== "extracted" && trackedUpdated[index]?.parse_status === "extracted"
+        ));
+        if (tracked.length > 0) {
+          setTrackedSources((previous) => {
+            const next = new Map(previous);
+            tracked.forEach(([id], index) => {
+              const item = trackedUpdated[index];
+              if (!next.has(id)) return;
+              if (item && sourceIsPending(item)) next.set(id, item.parse_status);
+              else next.delete(id);
+            });
+            return next.size === 0 ? NO_TRACKED_SOURCES : next;
+          });
+        }
+        const reachedExtracted = trackedReachedExtracted || updated.some((item) => {
           const previous = pending.find((source) => source.id === item.id);
           return previous
             && previous.parse_status !== "extracted"
@@ -808,7 +853,7 @@ export function useSourceLibrary({
             && previous.parse_status !== "failed"
             && item.parse_status === "failed";
         });
-        if (updated.some((item) => pending.find((source) => source.id === item.id)?.parse_status !== item.parse_status)) {
+        if (trackedChanged || updated.some((item) => pending.find((source) => source.id === item.id)?.parse_status !== item.parse_status)) {
           setContentRevision((value) => value + 1);
         }
         let changed = false;
@@ -857,6 +902,19 @@ export function useSourceLibrary({
     };
   }, [hasPending, ownerSerial]);
 
+  // Follow these sources to a terminal parse state even off the current page
+  // (each state change moves `contentRevision`); the shared poll's attempt cap
+  // bounds it, and an owner change or `untrackSources` stops it.
+  const trackSourceProgress = useCallback((sourceIds: readonly string[]) => {
+    if (sourceIds.length === 0 || currentOwner() === null) return;
+    setTrackedSources((previous) => {
+      const next = new Map(previous);
+      for (const id of sourceIds) if (!next.has(id)) next.set(id, "");
+      return next.size === previous.size ? previous : next;
+    });
+  }, []);
+  const untrackSources = useCallback(() => setTrackedSources(NO_TRACKED_SOURCES), []);
+
   // Unmount is not one of the abort/invalidation sites `abortInFlightSourcesPage`
   // is called from elsewhere in this hook (see its own comment) — none of them
   // fire once the component is gone. Without this, a source-page request still
@@ -866,6 +924,8 @@ export function useSourceLibrary({
   }, []);
 
   return {
+    trackSourceProgress,
+    untrackSources,
     sources: visibleSources,
     contentRevision: ownerIsActive ? contentRevision : 0,
     sourceScopeSelection: ownerIsActive
