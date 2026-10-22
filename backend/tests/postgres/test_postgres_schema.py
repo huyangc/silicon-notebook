@@ -407,6 +407,7 @@ def test_packaged_index_migration_phases_are_exact():
         (78, "global_ask_job_notebooks"),
         (79, "kg_cluster_scratch_ordinal"),
         (80, "ask_job_report_id"),
+        (81, "notebook_delete_grace"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -935,6 +936,12 @@ def test_packaged_index_migration_phases_are_exact():
     # Migration 80 (ask_jobs.report_id) adds a defaulted column nothing
     # filters or joins on: no index.
     assert index_declarations(80) == []
+    # Migration 81 (notebook deletion grace window) adds the partial index of
+    # the notebooks inside a window, ordered by deadline (driver C's due scan
+    # and the notices projection).
+    assert index_declarations(81) == [
+        (False, "idx_notebooks_pending_delete_due")
+    ]
     # Spelled without ``IF NOT EXISTS`` on purpose, and that is asserted
     # rather than merely commented: app/migration/shadow/postgres_catalog.py
     # parses CREATE INDEX straight out of these files to build the catalog

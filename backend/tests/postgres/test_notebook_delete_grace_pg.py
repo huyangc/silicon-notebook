@@ -39,7 +39,7 @@ pytestmark = [
 
 @pytest.fixture
 def repo(postgres_settings, tmp_path):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     postgres_settings.storage_dir = str(tmp_path / "postgres-storage")
     postgres_settings.event_log_enabled = False
@@ -137,14 +137,21 @@ def _run(fn: Callable[[], Any]) -> tuple[threading.Thread, list]:
 
 
 def _blocked_on_the_row(repo: Any, *, timeout: float = 10.0) -> None:
-    """Wait until some other backend waits on a lock (the second side of the
-    race is queued behind the parked transaction's row lock)."""
+    """Wait until the second side of the race is queued behind the parked
+    transaction's row lock: another backend of this database, active, waiting
+    on a lock, and running the window's CAS (``UPDATE notebooks SET``) -- not
+    just any lock wait somewhere, so the test really covers "queued, then
+    re-evaluated against the committed row" (same filter as
+    ``test_concurrency.py``)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         with repo._runtime.database.connect() as db:
             waiting = db.execute(
                 "SELECT count(*) AS n FROM pg_stat_activity "
-                "WHERE wait_event_type='Lock' AND datname=current_database()"
+                "WHERE pid<>pg_backend_pid() AND datname=current_database() "
+                "AND wait_event_type='Lock' AND state='active' "
+                "AND query ILIKE %s",
+                ("%UPDATE notebooks SET%",),
             ).fetchone()["n"]
         if waiting:
             return
