@@ -86,11 +86,14 @@ test("source-library hook is narrow and does not depend on other workspace domai
     // 互相引用，下面钉住，这样放行它们不会把别的工作区领域间接带进 hook。
     "./source-management.ts",
     "./document-limit.ts",
+    // 重新解析请求的结果类型(hook 只取类型)。它是不引用任何模块的叶子,下面同样钉住。
+    "./source-reparse-request.ts",
   ]);
   assert.deepEqual(modules.filter((module) => !allowed.has(module)), []);
   for (const [leaf, reachable] of [
     ["source-management.ts", []],
     ["document-limit.ts", ["./source-management.ts"]],
+    ["source-reparse-request.ts", []],
   ]) {
     const leafModules = importsIn(await parseModule(leaf)).map((item) => item.module);
     assert.deepEqual(

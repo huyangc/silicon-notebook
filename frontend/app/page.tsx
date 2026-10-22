@@ -177,6 +177,7 @@ import { LEAVE_EXPORT_TOO_LARGE_TEXT } from "./group-leave-dialog";
 import { saveBlobAsFile } from "./download-file";
 import { detectSourceTypes, importUrlSources, listSources, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { SourceListPanel } from "./source-list-panel";
+import { requestReparse, type ReparseOutcome } from "./source-reparse-request.ts";
 import { compactSourceTitle, SUPPORTED_SOURCE_EXT_GROUP } from "./source-title.ts";
 import { classifyStagedFiles, compactStagedFileName, mergeLiveStagedFileWarnings, scanStandaloneMarkdownImageWarnings, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, sourceUploadSizeLabel, splitFilesByUploadSize, type SkippedStagedFile, type StagedFileWarning } from "./source-upload.ts";
 import { emptyStagedList, mergeStagedFiles, stagedFileKey, type StagedList } from "./staged-files.ts";
@@ -1611,35 +1612,32 @@ export default function Home() {
   //
   // `reparseOutcome` 是同一条路径、但把「没排上」与「请求失败」分开回报——图谱分析的问题
   // 清单要把这两种结果分别写在「重新解析…」按钮旁;体检只要布尔值,走 runReparse。
-  const reparseOutcome = async (nb: string, sourceIds: string[]): Promise<"started" | "none" | "failed"> => {
-    if (sourceIds.length === 0) return "none";
-    try {
-      const r = await reparseSources(nb, sourceIds);
-      // 一篇都没排上是**合法**结果:样本是体检那一刻的快照,期间来源可能已被删除,或
-      // 后端按类型排除(memory/knowhow 合成源)。此时既不能说「已开始重新解析 0 篇」,
-      // 也不能 arm 轮询/置忙碌位——后台根本没活在跑,按钮会白锁到窗口结束(codex 第 2
-      // 轮 P2)。只重拉体检与来源列表把陈旧的 count 拨正。
-      if (r.scheduled.length === 0) {
-        setToast("这些来源已不在或无需重新解析；已刷新状态");
+  //
+  // 请求、提示与刷新的先后都在 source-reparse-request.ts:请求在路上时切了笔记本或账号
+  // (`stillOwned` 不再成立),回来的结果属于被放弃的工作区——不弹提示、不报错、不刷新、
+  // 不开轮询窗口,回 "abandoned"。
+  const reparseOutcome = (nb: string, sourceIds: string[], stillOwned: () => boolean): Promise<ReparseOutcome> => (
+    requestReparse(nb, sourceIds, stillOwned, {
+      reparse: reparseSources,
+      toast: setToast,
+      refresh: () => {
         reloadCheckup(nb);
         loadSourcesPage(nb, sourceLibrary.currentPageRequest()).catch(() => {});
-        return "none";
-      }
-      setToast(`已开始重新解析 ${r.scheduled.length} 篇来源；完成后会自动更新`);
-      bumpCheckupRepairPoll();
-      reloadCheckup(nb);
-      // 让来源列表的状态标签也及时反映(分析中/已就绪)。
-      loadSourcesPage(nb, sourceLibrary.currentPageRequest()).catch(() => {});
-      return "started";
-    } catch (e) { reportError(e); return "failed"; }
-  };
-  const runReparse = async (nb: string, sourceIds: string[]): Promise<boolean> => (
-    (await reparseOutcome(nb, sourceIds)) === "started"
+      },
+      armRepairPoll: bumpCheckupRepairPoll,
+      reportError,
+    })
+  );
+  const runReparse = async (nb: string, sourceIds: string[], stillOwned: () => boolean): Promise<boolean> => (
+    (await reparseOutcome(nb, sourceIds, stillOwned)) === "started"
   );
   // H4/H5 修复:后台补齐该 notebook 缺失的检索向量(只补缺失、幂等)。
-  const runBackfillVectors = async (nb: string): Promise<boolean> => {
+  const runBackfillVectors = async (nb: string, stillOwned: () => boolean): Promise<boolean> => {
     try {
       const r = await backfillVectors(nb);
+      // 与重新解析同一条归属规则:请求在路上时切了笔记本或账号,结果不归当前工作区——不弹
+      // 提示、不刷新、不开轮询窗口。
+      if (!stillOwned()) return false;
       if (!r.accepted) {
         // 后端未配嵌入服务 → 不受理(codex):提示配置、**不** arm 轮询——否则空转 10min、
         // 而缺向量永远补不上、H4/H5 清不掉。同理不置忙碌位:按钮要立刻能再点。
@@ -1650,7 +1648,10 @@ export default function Home() {
       bumpCheckupRepairPoll();
       reloadCheckup(nb);
       return true;
-    } catch (e) { reportError(e); return false; }
+    } catch (e) {
+      if (stillOwned()) reportError(e);
+      return false;
+    }
   };
   const [kgSize, setKgSize] = useState({ width: 720, height: 560 });
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
@@ -4353,11 +4354,13 @@ export default function Home() {
               // (它多半不在来源库当前页;每次状态推进都让问题清单与总览失效重取),从提交起这篇
               // 来源就占着重新解析的占位——问题清单里引用它的每一行、来源详情里的「重新解析」都
               // 置灰,直到跟踪判定这一次跑完(见 use-source-library 的 submitFollowedReparse)。
+              // 等待期间切了笔记本 / 账号或没了写权限:来源库不提交(或丢掉回来的结果),回
+              // "abandoned"——这一行只放开在飞态,什么都不写。
               const outcome = await sourceLibrary.submitFollowedReparse(
                 target.sourceId,
-                () => reparseOutcome(nb, [target.sourceId]),
+                (stillOwned) => reparseOutcome(nb, [target.sourceId], stillOwned),
               );
-              report(outcome === "started" ? "started" : outcome === "none" ? "skipped" : "failed");
+              report(outcome === "none" ? "skipped" : outcome);
             })();
           },
         },
@@ -7632,12 +7635,18 @@ export default function Home() {
                         }
                         // 先乐观置忙碌位(POST 在飞的这段也不能再点),未受理/报错再撤销。
                         setRepairingFix((previous) => ({ ...previous, [g.key]: repairRelease(g.fix, g.count) }));
+                        // 请求在路上时切了笔记本或账号:回来的结果不在新工作区弹提示、不刷新(见
+                        // source-reparse-request.ts)。
+                        const owner = sourceLibrary.captureOwner();
+                        const stillOwned = () => owner !== null && sourceLibrary.captureOwner() === owner;
                         let started = false;
                         try {
-                          if (g.fix === "reparse") started = await runReparse(nb, g.sample);
-                          else if (g.fix === "backfill_vectors") started = await runBackfillVectors(nb);
+                          if (g.fix === "reparse") started = await runReparse(nb, g.sample, stillOwned);
+                          else if (g.fix === "backfill_vectors") started = await runBackfillVectors(nb, stillOwned);
                         } finally {
-                          if (!started) {
+                          // 忙碌位是按笔记本记的(切库时整张表清空):只在仍是发起时那本时撤销这一组,
+                          // 不去动新库里同名分组的忙碌位。
+                          if (!started && activeNotebookIdRef.current === nb) {
                             setRepairingFix((previous) => {
                               const next = { ...previous };
                               delete next[g.key];

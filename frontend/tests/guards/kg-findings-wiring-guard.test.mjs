@@ -81,17 +81,29 @@ test("重新解析:先弹说明确认框,确认后才进在飞态、才发请求
   assert.match(dialog, /report\("running"\);\s*void \(async \(\) => \{/, "确认 → running → 请求");
   // 请求交给来源库:它先读一次 updated_at 作基准、再发重新解析,排上就按 id 跟到这一次跑完,从提交起
   // 这篇来源就占着重新解析的占位(读基准在提交之前、占位从提交起,由 use-source-library 的用例钉住)。
+  // 来源库把「提交时的 owner 与写权限是否仍在」交给请求:请求回来时工作区已换,就不弹提示、不刷新。
   assert.match(
     dialog,
-    /const outcome = await sourceLibrary\.submitFollowedReparse\(\s*target\.sourceId,\s*\(\) => reparseOutcome\(nb, \[target\.sourceId\]\),?\s*\);/,
+    /const outcome = await sourceLibrary\.submitFollowedReparse\(\s*target\.sourceId,\s*\(stillOwned\) => reparseOutcome\(nb, \[target\.sourceId\], stillOwned\),?\s*\);/,
   );
+  // 被放弃(abandoned)原样交给这一行:只放开在飞态,不写结果。
+  assert.match(dialog, /report\(outcome === "none" \? "skipped" : outcome\);/);
   // 确认框说清两件事:会重新调用模型、会替换这篇来源现有的知识条目。
   assert.match(dialog, /会重新调用模型/);
   assert.match(dialog, /替换它现有的知识条目/);
-  // 体检同款批量重新解析:runReparse 与面板共用 reparseOutcome。
+  // 体检同款批量重新解析:runReparse 与面板共用 reparseOutcome,请求、提示与刷新都在
+  // source-reparse-request.ts 的 requestReparse 里(归属核对之后才有副作用,那边的用例钉住)。
   const run = page.getFullText();
-  assert.match(run, /const runReparse = async \(nb: string, sourceIds: string\[\]\): Promise<boolean> => \(\s*\(await reparseOutcome\(nb, sourceIds\)\) === "started"\s*\);/);
-  assert.match(run, /const r = await reparseSources\(nb, sourceIds\);/);
+  assert.match(run, /const runReparse = async \(nb: string, sourceIds: string\[\], stillOwned: \(\) => boolean\): Promise<boolean> => \(\s*\(await reparseOutcome\(nb, sourceIds, stillOwned\)\) === "started"\s*\);/);
+  assert.match(run, /requestReparse\(nb, sourceIds, stillOwned, \{\s*reparse: reparseSources,/);
+  // 体检的批量修复同样带上发起时的 owner;回来时不再是那本,就不动新库的忙碌位。
+  assert.match(run, /const stillOwned = \(\) => owner !== null && sourceLibrary\.captureOwner\(\) === owner;/);
+  assert.match(run, /started = await runReparse\(nb, g\.sample, stillOwned\);/);
+  assert.match(run, /if \(!started && activeNotebookIdRef\.current === nb\) \{/);
+  // 同一个修复按钮里的补齐向量走同一条规则:请求回来先核对归属,再提示、刷新、开轮询窗口。
+  assert.match(run, /started = await runBackfillVectors\(nb, stillOwned\);/);
+  assert.match(run, /const r = await backfillVectors\(nb\);[\s\S]{0,240}?if \(!stillOwned\(\)\) return false;\s*if \(!r\.accepted\)/);
+  assert.match(run, /\} catch \(e\) \{\s*if \(stillOwned\(\)\) reportError\(e\);\s*return false;\s*\}/);
 });
 
 test("重新解析排上之后按 id 跟到这一次跑完;面板一关就不再跟;全页的重新解析入口读同一份占位", () => {

@@ -62,7 +62,11 @@ export type KgRelinkResult = { edgesAdded: number; isolatedAfter: number };
 /** 删除来源与重新解析都先经确认框;确认之后的进展由 page 回报给这一行。 */
 export type KgSourceActionTarget = { sourceId: string; title: string; sourceType: string };
 export type KgDeleteOutcome = "deleted" | "failed";
-export type KgReparsePhase = "running" | "started" | "skipped" | "failed";
+/**
+ * 重新解析的进展。`abandoned`:等待期间切了笔记本 / 账号或没了写权限,来源库没提交(或丢掉了
+ * 回来的结果)——这一行只放开在飞态,不写任何结果。
+ */
+export type KgReparsePhase = "running" | "started" | "skipped" | "failed" | "abandoned";
 
 /**
  * 处置入口。全部可选:没传的那一种就不出按钮(例如组件测试只关心一部分)。
@@ -552,7 +556,7 @@ function FindingRowView({
           } else if (phase === "skipped") {
             showResult({ tone: "neutral", text: "这篇来源已不在或无需重新解析" });
             onChanged();
-          } else {
+          } else if (phase === "failed") {
             showResult({ tone: "failed", text: "没能开始重新解析，请稍后重试" });
           }
         },

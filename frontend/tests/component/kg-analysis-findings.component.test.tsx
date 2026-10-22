@@ -1332,7 +1332,7 @@ function FollowedPanel({ submit }: { submit: () => Promise<SourceReparseOutcome>
         onReparseSource: (target, report) => {
           report("running");
           submission = sourceLibrary.submitFollowedReparse(target.sourceId, submit).then((outcome) => {
-            report(outcome === "started" ? "started" : outcome === "none" ? "skipped" : "failed");
+            report(outcome === "none" ? "skipped" : outcome);
             return outcome;
           });
         },
@@ -1471,5 +1471,31 @@ test.each([
   expectReleased("疑似解析残缺");
   expectReleased("疑似内容错配");
   expect(within(findingByRule("疑似解析残缺")).getByText(text)).toBeInTheDocument();
+  expect(library!.followedSourceCount).toBe(0);
+});
+
+test("提交前读基准的那段时间里来源库换了工作区：不发重新解析请求，这一行只放开在飞态、不写任何结果", async () => {
+  let resolveBaseline: (item: SourceSummary) => void = () => {};
+  vi.mocked(getSource).mockReturnValueOnce(new Promise<SourceSummary>((resolve) => { resolveBaseline = resolve; }));
+  const submit = vi.fn(async (): Promise<SourceReparseOutcome> => "started");
+  await renderFollowedPanel(submit);
+  fireEvent.click(reparseButtonOf("疑似解析残缺"));
+  expect(within(findingByRule("疑似解析残缺")).getByRole("button", { name: "重新解析中…" })).toBeDisabled();
+
+  // 来源库换到另一个工作区(切库;切账号同理),这张面板还在。
+  act(() => {
+    library!.commitNotebookSnapshot({
+      actorId: "user-a", notebookId: "nb-2", workspaceEpoch: 2,
+      page: { items: [], total_count: 0, offset: 0, limit: 50 },
+    });
+  });
+  await act(async () => {
+    resolveBaseline(detailAt("src-d", "extracted", "T0"));
+    await submission;
+  });
+  expect(submit).not.toHaveBeenCalled();
+  expectReleased("疑似解析残缺");
+  const actions = findingByRule("疑似解析残缺").querySelector(".kg-finding-actions");
+  expect(actions?.querySelector(".kg-finding-result")).toBeNull();
   expect(library!.followedSourceCount).toBe(0);
 });
