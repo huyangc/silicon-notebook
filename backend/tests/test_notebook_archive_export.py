@@ -278,7 +278,7 @@ def test_a_directory_swapped_for_a_link_right_before_a_file_open_is_not_followed
 
     def open_after_swap(path, flags, *args, **kwargs):
         name = os.fspath(path)
-        if name == "leaf.txt" and not swapped:
+        if os.path.basename(name) == "leaf.txt" and not swapped:
             inner.rename(tree / "deep.moved")
             inner.symlink_to(host, target_is_directory=True)
             swapped.append(name)
