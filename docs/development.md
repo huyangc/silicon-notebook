@@ -1010,6 +1010,8 @@ Cross-cutting frontend interaction guardrails stay small but explicit:
   inside the parent. One Escape key press closes at most one layer through
   `requestClose(slot, "escape")` (the coordinator counts presses), so a close
   request the browser sends after the keydown cannot close the revealed parent.
+  A layer that eats Escape outside the coordinator (capture-phase listener)
+  calls `claimEscapePress()` for the press it consumes.
 - Source-activity anomalies render only through `AnomalyBadge` backed by
   `sourceAnomalies()`; do not hand-roll inline warning styles or symbols.
 - Five-grade effort selectors reuse
