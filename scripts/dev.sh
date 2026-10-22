@@ -136,6 +136,28 @@ cd "$ROOT_DIR/backend"
 BACKEND_PID=$!
 
 cd "$ROOT_DIR/frontend"
+# `npm run dev` used to run frontend/package.json's `predev` hook first
+# (`npm run sync:ui-plugins` = `node scripts/sync-ui-plugins.mjs`, which projects the
+# out-of-tree UI plugins into the app). Starting next directly would skip it, so the
+# same script runs here, from the same directory, before next starts. It runs as
+# FRONTEND_PID, a direct `exec`ed child polled like the companion controller, so the
+# one cleanup above covers a cancellation inside this window (no npm or node left
+# behind) and a failed sync starts no frontend and stops the backend, as a failed
+# `predev` did. backend/tests/test_extension_service_launchers.py pins these commands
+# to package.json so a new hook there cannot be skipped unnoticed.
+( exec node scripts/sync-ui-plugins.mjs ) &
+FRONTEND_PID=$!
+while kill -0 "$FRONTEND_PID" 2>/dev/null; do
+  sleep "$LAUNCH_MONITOR_POLL_SECONDS"
+done
+sync_status=0
+wait "$FRONTEND_PID" || sync_status=$?
+unset FRONTEND_PID
+if [[ "$sync_status" != "0" ]]; then
+  echo "错误: 前端插件同步失败(退出码 $sync_status),未启动前端。" >&2
+  exit "$sync_status"
+fi
+
 ( exec "$ROOT_DIR/frontend/node_modules/.bin/next" dev ) &
 FRONTEND_PID=$!
 

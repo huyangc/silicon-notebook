@@ -45,6 +45,10 @@ def test_service_launcher_merges_dotenv_and_exported_plugin_paths(tmp_path, dote
     )
     # dev.sh execs frontend/node_modules/.bin/next directly (no npm layer).
     (frontend / "node_modules/.bin").mkdir()
+    # ...after the UI plugin sync (`node scripts/sync-ui-plugins.mjs`), stood in for here.
+    node = fake_bin / "node"
+    node.write_text("#!/bin/sh\nexit 0\n")
+    node.chmod(0o755)
     next_bin = frontend / "node_modules/.bin/next"
     next_bin.write_text('#!/bin/sh\nwhile [ ! -f "$RESULT_FILE" ]; do sleep 0.1; done\n')
     next_bin.chmod(0o755)

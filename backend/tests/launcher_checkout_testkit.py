@@ -104,6 +104,8 @@ if [[ " ${TERM_EXITS:-} " == *" $1 "* ]]; then
 elif [[ " ${TERM_IGNORED:-} " == *" $1 "* ]]; then
   trapped=1; trap ': > "$FAKE_ROOT/$1.term"' TERM
 fi
+# Record whether the UI plugin sync had finished when this child started.
+[[ -f "$FAKE_ROOT/sync.done" ]] && : > "$FAKE_ROOT/$1.after-sync"
 # Publish the pid file by rename so a reader never sees it created but still empty.
 echo "$$" > "$FAKE_ROOT/$1.pid.tmp" && mv "$FAKE_ROOT/$1.pid.tmp" "$FAKE_ROOT/$1.pid"
 if [[ "${FAIL_MAIN:-}" == "$1" ]]; then
@@ -143,6 +145,22 @@ exit 0
         executable(root / path, frontend_wrapper)
     for name in ("ss", "lsof", "fuser"):
         executable(root / "fake-bin" / name, "#!/bin/sh\nexit 0\n")
+    # dev.sh runs `node scripts/sync-ui-plugins.mjs` (the frontend's predev hook)
+    # from frontend/ before starting next. SYNC_MODE: ok (default, writes
+    # sync.done), hang (waits until killed), fail (exit 3 once the backend has
+    # published its pid, so a launcher failing early has already started it).
+    executable(root / "fake-bin/node", '''#!/bin/bash
+[[ "$1" == "scripts/sync-ui-plugins.mjs" ]] || exit 64
+pwd -P > "$FAKE_ROOT/sync.cwd"
+echo "$$" > "$FAKE_ROOT/sync.pid.tmp" && mv "$FAKE_ROOT/sync.pid.tmp" "$FAKE_ROOT/sync.pid"
+case "${SYNC_MODE:-ok}" in
+  hang) exec sleep 60 ;;
+  fail)
+    while [[ ! -f "$FAKE_ROOT/backend.pid" ]]; do /bin/sleep 0.02; done
+    exit 3 ;;
+esac
+: > "$FAKE_ROOT/sync.done"
+''')
     executable(root / "fake-bin/curl", '''#!/bin/bash
 case "$*" in
   */openapi.json*) echo '{"info":{"title":"silicon-notebook API"}}' ;;
