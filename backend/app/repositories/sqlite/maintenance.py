@@ -1213,6 +1213,59 @@ class SQLiteMaintenanceAdapter:
                 (notebook_id,),
             ).fetchone()["c"]
 
+    def count_missing_embeddable_node_vectors(self, notebook_id: str) -> int:
+        """Objects still without a vector that ``embed_objects_batch`` could embed
+        (``embeddable_object_count``: payload text present) -- what the object backfill
+        would still find, read from storage. Unlike ``count_missing_node_vectors`` it
+        leaves out objects no model can embed. Keyset pages over the missing rows only."""
+        embedding = self._runtime.source_embedding
+        after_id = ""
+        missing = 0
+        while True:
+            with self._runtime.database.connect() as db:
+                rows = db.execute(
+                    "SELECT o.id,o.payload FROM knowledge_objects o "
+                    "WHERE o.notebook_id=? AND o.status!='deprecated' AND o.id>? "
+                    "AND NOT EXISTS (SELECT 1 FROM knowledge_embeddings e "
+                    "WHERE e.object_id=o.id) ORDER BY o.id LIMIT 500",
+                    (notebook_id, after_id),
+                ).fetchall()
+            if not rows:
+                break
+            after_id = str(rows[-1]["id"])
+            missing += embedding.embeddable_object_count([
+                {"_oid": str(row["id"]), "payload": json.loads(row["payload"] or "{}")}
+                for row in rows
+            ])
+            if len(rows) < 500:
+                break
+        return missing
+
+    def count_missing_embeddable_relation_vectors(self, notebook_id: str) -> int:
+        """Relations still without a vector that the relation backfill could embed
+        (queryable, non-blank text): the same keyset discovery and hydration filter
+        ``backfill_relation_embeddings`` uses, read from storage, no model call."""
+        after: tuple[str, str] = ("", "")
+        missing = 0
+        while True:
+            with self._runtime.database.connect() as db:
+                page = db.execute(
+                    _MISSING_RELATION_PAGE_SQL,
+                    (notebook_id, *after, _RELATION_PAGE_SIZE),
+                ).fetchall()
+            if not page:
+                break
+            relation_ids = [str(row["id"]) for row in page]
+            after = (str(page[-1]["source_object_id"]), relation_ids[-1])
+            missing += sum(
+                1
+                for r in self._retrieval().relations_with_names(notebook_id, relation_ids)
+                if str(r.get("text") or "").strip()
+            )
+            if len(relation_ids) < _RELATION_PAGE_SIZE:
+                break
+        return missing
+
     def count_chunks(self, notebook_id: str) -> int:
         with self._runtime.database.connect() as db:
             return db.execute(

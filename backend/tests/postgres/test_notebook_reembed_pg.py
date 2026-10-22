@@ -133,6 +133,10 @@ def test_object_backfill_never_overwrites_a_newer_vector_pg(repo):
     cases.check_object_backfill_never_overwrites_a_newer_vector(repo, BACKEND)
 
 
+def test_a_vector_another_writer_filled_is_not_remaining_pg(repo):
+    cases.check_a_vector_another_writer_filled_is_not_remaining(repo, BACKEND)
+
+
 def test_relation_backfill_never_overwrites_or_mismatches_pg(repo):
     cases.check_relation_backfill_never_overwrites_or_mismatches(repo, BACKEND)
 

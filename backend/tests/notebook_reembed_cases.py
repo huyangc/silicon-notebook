@@ -598,7 +598,8 @@ def check_knowhow_fill_discovers_ids_then_reads_page_by_page(
     monkeypatch.setattr(mnt, "chunk_texts_by_ids", _texts)
     knowhow_api.fill_missing_knowhow_chunk_vectors(repo, nb)
 
-    assert discovered == [(world.knowhow_source_id, chunks)]
+    # One discovery to fill, one recount (still under the lock) to report remaining.
+    assert discovered == [(world.knowhow_source_id, chunks), (world.knowhow_source_id, [])]
     assert all(isinstance(chunk_id, str) for chunk_id in discovered[0][1])
     assert hydrated == [chunks[i:i + BATCH] for i in range(0, len(chunks), BATCH)]
     assert set(chunks) <= vector_ids(repo, backend, nb)["chunk_embeddings"]
@@ -811,6 +812,61 @@ def check_object_backfill_never_overwrites_a_newer_vector(repo, backend: Backend
     # for the edit's own re-embed (or the next run) to fill.
     assert vector_ids(repo, backend, nb)["knowledge_embeddings"] == before - {pending}
     assert status.progress["kg_objects"].embedded == len(before) - 3
+    assert status.progress["kg_objects"].remaining == 1  # only the one really missing
+
+
+def check_a_vector_another_writer_filled_is_not_remaining(repo, backend: Backend) -> None:
+    """A row another writer fills while a leg is embedding is skipped by the
+    conditional write and is not "remaining": the leg is done, the run succeeds, and
+    ``embedded`` counts only what this run wrote -- for objects, relations and Knowhow
+    chunks. A genuinely failed batch still leaves the leg incomplete."""
+    world = build_world(repo, backend)
+    nb = world.notebook_id
+    store = repo._runtime.embedding_store
+    vec = FakeEmbedder(dim=DIM).embed_query("another writer")
+    before = vector_ids(repo, backend, nb)
+    delete_vectors(repo, backend, nb, tables=("knowledge_embeddings", "relation_embeddings"))
+    knowhow = sorted(knowhow_chunk_ids(repo, backend, world))
+    delete_chunk_vectors(repo, backend, knowhow)
+    obj, rel, chunk = f"ko-{nb}-firmware", f"rel-{nb}-firmware-controller", knowhow[0]
+
+    def _projection_re_embeds_chunk() -> None:
+        with repo._runtime.database.write() as db:
+            db.execute(
+                _sql(backend, "UPDATE chunks SET text=? WHERE id=?"),
+                ("knowhow cell: rewritten by a projection", chunk),
+            )
+        store.replace_chunk_vectors(nb, [(chunk, vec)], created_at=_NOW)
+
+    _during_first_call(
+        world.embedders["knowledge_object_embedding"],
+        lambda: store.replace_knowledge_vectors(nb, [(obj, vec)], created_at=_NOW),
+    )
+    _during_first_call(
+        world.embedders["relation_embedding"],
+        lambda: store.replace_relation_vectors(nb, [(rel, vec)], created_at=_NOW),
+    )
+    _during_first_call(world.embedders["knowhow_embedding"], _projection_re_embeds_chunk)
+    status = NotebookReembedService(repo).run(nb, legs=["chunks", "kg_objects", "kg_relations"])
+
+    assert status.state == "succeeded", status
+    for leg, total in (
+        ("kg_objects", len(before["knowledge_embeddings"])),
+        ("kg_relations", len(before["relation_embeddings"])),
+        ("chunks", len(knowhow)),
+    ):
+        progress = status.progress[leg]
+        assert (progress.state, progress.remaining) == ("done", 0), (leg, progress)
+        assert progress.embedded == total - 1, (leg, progress)
+
+    # A batch that really fails is still reported.
+    delete_vectors(repo, backend, nb, tables=("knowledge_embeddings",))
+    reset_calls(world)
+    world.embedders["knowledge_object_embedding"].fail_calls = {1}
+    failed = NotebookReembedService(repo).run(nb, legs=["kg_objects"])
+    leg = failed.progress["kg_objects"]
+    assert leg.state == "incomplete" and leg.remaining > 0, failed
+    assert failed.state == "failed"
 
 
 def check_relation_backfill_never_overwrites_or_mismatches(repo, backend: Backend) -> None:

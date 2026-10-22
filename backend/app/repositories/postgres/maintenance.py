@@ -1526,6 +1526,60 @@ class PostgresMaintenanceAdapter:
                 ).fetchone()["c"]
             )
 
+    def count_missing_embeddable_node_vectors(self, notebook_id: str) -> int:
+        """Twin of the SQLite adapter: objects still without a vector that
+        ``embed_objects_batch`` could embed, read from storage page by page."""
+        embedding = self._runtime.source_embedding
+        after_id = ""
+        missing = 0
+        while True:
+            with self._runtime.database.connect() as db:
+                rows = db.execute(
+                    "SELECT o.id,o.payload FROM knowledge_objects o "
+                    "WHERE o.notebook_id=%s AND o.status<>'deprecated' "
+                    "AND o.id COLLATE \"C\">%s "
+                    "AND NOT EXISTS (SELECT 1 FROM knowledge_embeddings e "
+                    "WHERE e.object_id=o.id) "
+                    "ORDER BY o.id COLLATE \"C\" LIMIT %s",
+                    (notebook_id, after_id, _EMBEDDING_PAGE_SIZE),
+                ).fetchall()
+            if not rows:
+                break
+            after_id = str(rows[-1]["id"])
+            missing += embedding.embeddable_object_count([
+                {"_oid": str(row["id"]), "payload": json_value(row["payload"], {})}
+                for row in rows
+            ])
+            if len(rows) < _EMBEDDING_PAGE_SIZE:
+                break
+        return missing
+
+    def count_missing_embeddable_relation_vectors(self, notebook_id: str) -> int:
+        """Twin of the SQLite adapter: relations still without a vector that the
+        relation backfill could embed, by its own discovery and hydration filter."""
+        after: tuple[str, str] = ("", "")
+        missing = 0
+        while True:
+            with self._runtime.database.connect() as db:
+                rows = db.execute(
+                    _MISSING_RELATION_PAGE_SQL,
+                    (notebook_id, *after, _RELATION_PAGE_SIZE),
+                ).fetchall()
+            if not rows:
+                break
+            relation_ids = [str(row["id"]) for row in rows]
+            after = (str(rows[-1]["source_object_id"]), relation_ids[-1])
+            missing += sum(
+                1
+                for relation in self._runtime.retrieval_component.relations_with_names(
+                    notebook_id, relation_ids
+                )
+                if str(relation.get("text") or "").strip()
+            )
+            if len(rows) < _RELATION_PAGE_SIZE:
+                break
+        return missing
+
     def node_embedding_counts(self, notebook_id: str) -> tuple[int, int]:
         with self._runtime.database.connect() as db:
             objects = int(
