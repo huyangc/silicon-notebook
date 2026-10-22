@@ -1476,10 +1476,16 @@ class ConversationShareDisclosure(BaseModel):
     ``new_memory_count``: those not already on the page the link serves now
     (relative to the current watermark; 0 when the range ends at it, all of
     them while the conversation is not shared).  Never above ``memory_count``.
+    ``current_memory_count``: distinct Memory entries of the author on the page
+    the link serves NOW (0 while not shared), counted on that page's own
+    window -- not ``memory_count - new_memory_count``, which once the window
+    slides past ``MAX_TURNS`` is only the part of the current page the range
+    keeps.
     """
 
     memory_count: int
     new_memory_count: int
+    current_memory_count: int
 
 
 class ConversationShareCounts(BaseModel):

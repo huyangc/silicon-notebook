@@ -95,17 +95,26 @@ class MemorySourceReader(Protocol):
 class ShareDisclosureRequired(Exception):
     """The page may carry more of the author's Memory than was acknowledged."""
 
-    def __init__(self, memory_count: int, new_memory_count: int) -> None:
+    def __init__(self, memory_count: int, new_memory_count: int,
+                 current_memory_count: int | None = None) -> None:
         super().__init__(SHARE_DISCLOSURE_REQUIRED)
         self.memory_count = memory_count
         self.new_memory_count = new_memory_count
+        # A conversation also says how many entries the page the link serves
+        # NOW carries -- counted on that page's own window, never derived from
+        # the other two (the window slides once a conversation outgrows the
+        # page). A report has no such page and leaves it out.
+        self.current_memory_count = current_memory_count
 
     def detail(self) -> dict[str, Any]:
-        return {
+        body = {
             "code": SHARE_DISCLOSURE_REQUIRED,
             "memory_count": self.memory_count,
             "new_memory_count": self.new_memory_count,
         }
+        if self.current_memory_count is not None:
+            body["current_memory_count"] = self.current_memory_count
+        return body
 
 
 def require_acknowledged(count: int, acknowledged: int | None) -> None:

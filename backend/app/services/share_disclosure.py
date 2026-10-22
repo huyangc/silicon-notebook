@@ -313,7 +313,11 @@ def share_memory_guard(
 # ``new_memory_count`` is how many of them are not already on the page the link
 # serves now (the snapshot behind the current watermark): 0 when nothing new is
 # published -- in particular when the boundary IS the current watermark -- and
-# all of them when the conversation is not shared yet.  It is never derived from
+# all of them when the conversation is not shared yet.  ``current_memory_count``
+# is how many the page the link serves now carries, counted on that page's own
+# window (0 while not shared): once a conversation outgrows the page the two
+# windows no longer start at the same turn, so the current page's count is not
+# ``memory_count - new_memory_count``.  It is never derived from
 # the acknowledgement: that is the report's "above what was acknowledged"
 # reading (``require_acknowledged``), which a conversation does not use.
 #
@@ -436,6 +440,16 @@ class ConversationShareDisclosure:
         the page the link serves now.  Never above ``memory_count``."""
         return len(self.memory_ids - self.published_memory_ids)
 
+    @property
+    def current_memory_count(self) -> int:
+        """The entries the page the link serves now carries (0 while not
+        shared), counted on that page's own window. NOT ``memory_count -
+        new_memory_count``: that is only the part of the current page the new
+        window keeps, and once a conversation outgrows the page the window
+        slides -- an entry cited only on a turn the update pushes off the page
+        is still on the page the link serves until the update happens."""
+        return len(self.published_memory_ids)
+
 
 def conversation_share_disclosure(
     reader: MemorySourceMapReader,
@@ -476,7 +490,8 @@ def require_conversation_acknowledged(
     (``!=`` refuses, an absent one included).  A count of 0 never asks."""
     if disclosure.memory_count and acknowledged != disclosure.memory_count:
         raise ShareDisclosureRequired(
-            disclosure.memory_count, disclosure.new_memory_count
+            disclosure.memory_count, disclosure.new_memory_count,
+            disclosure.current_memory_count,
         )
 
 

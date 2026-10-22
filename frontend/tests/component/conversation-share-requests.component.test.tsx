@@ -64,11 +64,11 @@ test("全局：同样两种请求体，端点是全局那一组", async () => {
 });
 
 test("披露端点：笔记本与全局都是 GET .../share/disclosure?through_id=<范围>", async () => {
-  respond = () => json(200, { memory_count: 2, new_memory_count: 1 });
+  respond = () => json(200, { memory_count: 2, new_memory_count: 1, current_memory_count: 1 });
   const notebook = await getConversationShareDisclosure("nb-1", "conv-1", "a 2");
   const global = await globalConversationShareApi("conv-g").loadDisclosure("job-2");
-  expect(notebook).toEqual({ memory_count: 2, new_memory_count: 1 });
-  expect(global).toEqual({ memory_count: 2, new_memory_count: 1 });
+  expect(notebook).toEqual({ memory_count: 2, new_memory_count: 1, current_memory_count: 1 });
+  expect(global).toEqual({ memory_count: 2, new_memory_count: 1, current_memory_count: 1 });
   expect(calls.map((call) => [call.method, call.url.replace(/^https?:\/\/[^/]+/, "").replace(/^\/api(?=\/)/, "")])).toEqual([
     ["GET", "/notebooks/nb-1/conversations/conv-1/share/disclosure?through_id=a%202"],
     ["GET", "/global-ask/conversations/conv-g/share/disclosure?through_id=job-2"],
@@ -90,14 +90,14 @@ test("确数端点（全局）：GET .../share/counts，不带水位 = 按服务
 });
 
 test("409 share_disclosure_required（detail 形态）→ ShareDisclosureRequired，带服务端确数", async () => {
-  respond = () => json(409, { detail: { code: "share_disclosure_required", memory_count: 3, new_memory_count: 2 } });
+  respond = () => json(409, { detail: { code: "share_disclosure_required", memory_count: 3, new_memory_count: 2, current_memory_count: 1 } });
   const error = await shareConversation("nb-1", "conv-1", "a2").catch((reason) => reason);
   expect(error).toBeInstanceOf(ShareDisclosureRequired);
   expect([error.memoryCount, error.newMemoryCount]).toEqual([3, 2]);
 });
 
 test("409 share_disclosure_required（根级形态）同样被接受", async () => {
-  respond = () => json(409, { code: "share_disclosure_required", memory_count: 5, new_memory_count: 0 });
+  respond = () => json(409, { code: "share_disclosure_required", memory_count: 5, new_memory_count: 0, current_memory_count: 5 });
   const error = await globalConversationShareApi("conv-g").share("job-2", 4).catch((reason) => reason);
   expect(error).toBeInstanceOf(ShareDisclosureRequired);
   expect([error.memoryCount, error.newMemoryCount]).toEqual([5, 0]);
@@ -119,7 +119,7 @@ test("403：服务端的中文原因（X-User-Message）原样成为错误文案
 });
 
 test("自相矛盾的 409（新增大于总数）不被当成披露确认，落回普通错误", async () => {
-  respond = () => json(409, { detail: { code: "share_disclosure_required", memory_count: 1, new_memory_count: 3 } });
+  respond = () => json(409, { detail: { code: "share_disclosure_required", memory_count: 1, new_memory_count: 3, current_memory_count: 0 } });
   const error = await shareConversation("nb-1", "conv-1", "a2").catch((reason) => reason);
   expect(error).not.toBeInstanceOf(ShareDisclosureRequired);
   expect(httpErrorStatus(error)).toBe(409);

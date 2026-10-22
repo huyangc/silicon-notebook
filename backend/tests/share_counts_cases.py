@@ -472,6 +472,115 @@ def case_the_counts_resolve_the_boundary_and_watermark_the_share_pins(world: Wor
         shared.json()["shared_through_id"], shared.json()["shared_through_at"])
 
 
+# --- personal memory once the window slides ---------------------------------------
+#
+# The page the link serves now and the page an update would serve no longer start
+# at the same turn once a conversation outgrows ``MAX_TURNS``: an entry cited only
+# on a turn the update pushes off the page is still on the CURRENT page. So the
+# disclosure counts the current page on its own window (``current_memory_count``)
+# instead of deriving it as ``memory_count - new_memory_count``.
+
+
+def _memory_world(world: World, turns: int, cited: dict[int, str]) -> tuple[str, str]:
+    """Alice's conversation of ``turns`` completed jobs; turn ``i`` cites the
+    personal memory ``cited[i]`` (made here), every other turn none.
+    Returns ``(conversation id, notebook-scoped conversation id)`` -- the same
+    turns seeded in both shapes."""
+    from tests.conversation_share_disclosure_cases import answer, make_memory, memory_citation
+
+    for key in sorted(set(cited.values())):
+        make_memory(world, world.alice, key)
+    cid = f"gconv-mem-{next(_IDS)}"
+    insert_conversation(world.repo._runtime.global_ask_store, cid, world.alice.id)
+    nid = f"conv-mem-{next(_IDS)}"
+    sql = world.repo._runtime.global_ask_store._sql
+    rows = []
+    with world.repo._runtime.database.write() as db:
+        db.execute(sql(
+            "INSERT INTO conversations (id, notebook_id, title, created_by, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)"
+        ), (nid, world.notebook, "会话", world.alice.id, instant(0), instant(turns)))
+        for index in range(turns):
+            body = answer(citations=[memory_citation(world, cited[index])] if index in cited else [])
+            rows.append((job_of(cid, index), instant(index), "done", {
+                **job_payload(job_of(cid, index), f"第 {index} 问", resolved=[world.notebook]),
+                "answer": body,
+            }))
+            db.execute(sql(
+                "INSERT INTO answers (id, notebook_id, conversation_id, question, payload, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)"
+            ), (f"{nid}-a{index:04d}", world.notebook, nid, f"第 {index} 问",
+                json.dumps(body, ensure_ascii=False), instant(index)))
+    bulk_jobs(world, cid, world.alice.id, rows)
+    return cid, nid
+
+
+def _both_disclosures(world: World, cid: str, nid: str, through: int, turns: int) -> tuple[dict, dict]:
+    glob = world.client.get(f"/api/global-ask/conversations/{cid}/share/disclosure",
+                            params={"through_id": job_of(cid, through)}, headers=world.alice.headers)
+    note = world.client.get(f"/api/notebooks/{world.notebook}/conversations/{nid}/share/disclosure",
+                            params={"through_id": f"{nid}-a{through:04d}"}, headers=world.alice.headers)
+    assert glob.status_code == 200 and note.status_code == 200, (glob.text, note.text)
+    return glob.json(), note.json()
+
+
+def _share_both(world: World, cid: str, nid: str, through: int, acknowledged: int) -> None:
+    body = {"expected_through_id": job_of(cid, through), "acknowledged_memory_count": acknowledged}
+    assert world.client.post(f"/api/global-ask/conversations/{cid}/share", json=body,
+                             headers=world.alice.headers).status_code == 200
+    body = {"expected_through_id": f"{nid}-a{through:04d}", "acknowledged_memory_count": acknowledged}
+    assert world.client.post(f"/api/notebooks/{world.notebook}/conversations/{nid}/share", json=body,
+                             headers=world.alice.headers).status_code == 200
+
+
+def case_a_memory_only_on_a_turn_the_update_drops_is_still_on_the_current_page(world: World) -> None:
+    """Shared at turns 1-500 (only turn 1 cites a memory), then turn 501 with
+    none: the update's page (2-501) carries no memory, the CURRENT page still
+    carries that one -- 1 now, 0 after the update, nothing new."""
+    cid, nid = _memory_world(world, MAX_TURNS + 1, {0: "m-old"})
+    _share_both(world, cid, nid, MAX_TURNS - 1, 1)
+    for body in _both_disclosures(world, cid, nid, MAX_TURNS, MAX_TURNS + 1):
+        assert body == {"memory_count": 0, "new_memory_count": 0, "current_memory_count": 1}, body
+    # The current page really does carry it.
+    page = _page(world, cid)
+    assert page["turns"][0]["question"] == "第 0 问"
+    assert any(ref.get("is_memory") for ref in page["turns"][0]["references"])
+
+
+def case_the_update_adds_a_memory_while_dropping_another(world: World) -> None:
+    """Turn 1 cites m-old, turn 501 cites m-new: the current page (1-500) has
+    m-old, the update's page (2-501) has m-new -- 1 now, 1 after, 1 new; the
+    share's refusal says the same three."""
+    cid, nid = _memory_world(world, MAX_TURNS + 1, {0: "m-old", MAX_TURNS: "m-new"})
+    _share_both(world, cid, nid, MAX_TURNS - 1, 1)
+    for body in _both_disclosures(world, cid, nid, MAX_TURNS, MAX_TURNS + 1):
+        assert body == {"memory_count": 1, "new_memory_count": 1, "current_memory_count": 1}, body
+    refused = world.client.post(f"/api/global-ask/conversations/{cid}/share",
+                                json={"expected_through_id": job_of(cid, MAX_TURNS)},
+                                headers=world.alice.headers)
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["current_memory_count"] == 1
+    assert refused.json()["detail"]["memory_count"] == 1
+
+
+def case_an_image_only_on_a_turn_the_update_drops_is_counted_on_the_current_page(world: World) -> None:
+    """The attached-image twin: an image only on turn 1 is on the current page
+    and not on the update's -- counted on each page's own window, the update
+    shows nothing new."""
+    cid = f"gconv-img-{next(_IDS)}"
+    insert_conversation(world.repo._runtime.global_ask_store, cid, world.alice.id)
+    bulk_jobs(world, cid, world.alice.id, [
+        (job_of(cid, index), instant(index), "done", job_payload(
+            job_of(cid, index), f"第 {index} 问", resolved=[world.notebook],
+            anchors=imaged(["img-first"] if index == 0 else [], notebook_id=world.notebook)))
+        for index in range(MAX_TURNS + 1)
+    ])
+    assert share(world, cid, job_of(cid, MAX_TURNS - 1)).status_code == 200
+    counted = stored_counts(world, cid).json()
+    assert (counted["image_count"], counted["update_image_count"], counted["update_new_image_count"]) == (1, 0, 0)
+    assert counted["new_turns"] == 1 and counted["update_earlier_turns"] == 1
+
+
 # --- authority: the libraries of the turns the page shows ------------------------
 
 

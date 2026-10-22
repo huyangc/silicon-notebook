@@ -4261,8 +4261,12 @@
           "type": "object"
         },
         "ConversationShareDisclosure": {
-          "description": "What a conversation share about to be published carries of the author's\nown personal memory (M4), counted by the server over the exact range the\nshare would publish (``through_id``; empty = the newest completed turn).\n\n``memory_count``: distinct Memory entries of the author in that range.\n``new_memory_count``: those not already on the page the link serves now\n(relative to the current watermark; 0 when the range ends at it, all of\nthem while the conversation is not shared).  Never above ``memory_count``.",
+          "description": "What a conversation share about to be published carries of the author's\nown personal memory (M4), counted by the server over the exact range the\nshare would publish (``through_id``; empty = the newest completed turn).\n\n``memory_count``: distinct Memory entries of the author in that range.\n``new_memory_count``: those not already on the page the link serves now\n(relative to the current watermark; 0 when the range ends at it, all of\nthem while the conversation is not shared).  Never above ``memory_count``.\n``current_memory_count``: distinct Memory entries of the author on the page\nthe link serves NOW (0 while not shared), counted on that page's own\nwindow -- not ``memory_count - new_memory_count``, which once the window\nslides past ``MAX_TURNS`` is only the part of the current page the range\nkeeps.",
           "properties": {
+            "current_memory_count": {
+              "title": "Current Memory Count",
+              "type": "integer"
+            },
             "memory_count": {
               "title": "Memory Count",
               "type": "integer"
@@ -4274,7 +4278,8 @@
           },
           "required": [
             "memory_count",
-            "new_memory_count"
+            "new_memory_count",
+            "current_memory_count"
           ],
           "title": "ConversationShareDisclosure",
           "type": "object"

@@ -82,6 +82,7 @@ beforeEach(() => {
     async (_nb: string, _cid: string, throughId: string) => ({
       memory_count: throughId === "a1" ? 0 : 1,
       new_memory_count: 0,
+      current_memory_count: throughId === "a1" ? 0 : 1,
     }),
   );
   mocks.unshareConversation.mockReset();
@@ -558,7 +559,7 @@ function notShared() {
 
 test("个人记忆条数取自服务端数字，而不是前端数引用（服务端 3 条，前端只看得到 1 条）", async () => {
   notShared();
-  mocks.getConversationShareDisclosure.mockResolvedValue({ memory_count: 3, new_memory_count: 0 });
+  mocks.getConversationShareDisclosure.mockResolvedValue({ memory_count: 3, new_memory_count: 0, current_memory_count: 3 });
   mocks.shareConversation.mockResolvedValue(SHARED_A2);
 
   renderModal();
@@ -575,7 +576,7 @@ test("个人记忆条数取自服务端数字，而不是前端数引用（服�
 
 test("服务端说 0 条：不画记忆那一行，POST 不带确认值（哪怕前端看得到一条引用）", async () => {
   notShared();
-  mocks.getConversationShareDisclosure.mockResolvedValue({ memory_count: 0, new_memory_count: 0 });
+  mocks.getConversationShareDisclosure.mockResolvedValue({ memory_count: 0, new_memory_count: 0, current_memory_count: 0 });
   mocks.shareConversation.mockResolvedValue(SHARED_A2);
 
   renderModal();
@@ -592,7 +593,7 @@ test("服务端说 0 条：不画记忆那一行，POST 不带确认值（哪怕
 test("披露端点取数失败：兜底文案照旧、POST 不带确认值；409 带回确数后披露行换成确数、按钮改成「确认公开」", async () => {
   notShared();
   mocks.getConversationShareDisclosure.mockRejectedValue(new Error("网络中断"));
-  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(2, 2));
+  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(2, 2, 0));
   mocks.shareConversation.mockResolvedValueOnce(SHARED_A2);
 
   renderModal();
@@ -619,8 +620,8 @@ test("披露端点取数失败：兜底文案照旧、POST 不带确认值；409
 
 test("看到的条数与服务端此刻不一致：409 把披露行改成新的确数，作者重新确认后才公开", async () => {
   notShared();
-  mocks.getConversationShareDisclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 0 });
-  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(2, 1));
+  mocks.getConversationShareDisclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 0, current_memory_count: 1 });
+  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(2, 1, 1));
   mocks.shareConversation.mockResolvedValueOnce(SHARED_A2);
 
   renderModal();
@@ -646,8 +647,8 @@ test("「更新」撞上 409：更新后的披露行换成服务端数字（含�
     shared_through_id: "a1",
   });
   mocks.getConversation.mockResolvedValue(DETAIL);
-  mocks.getConversationShareDisclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 1 });
-  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(3, 2));
+  mocks.getConversationShareDisclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 1, current_memory_count: 0 });
+  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(3, 2, 1));
   mocks.shareConversation.mockResolvedValueOnce(SHARED_A2);
 
   renderModal();
@@ -731,8 +732,8 @@ test("公开成功：结果落在公开按钮原来的位置上——「已公�
 
 test("F1 未分享：端点说 1 条、409 带回 2 条、确认公开成功后，披露行是确认过的 2 条", async () => {
   notShared();
-  mocks.getConversationShareDisclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 0 });
-  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(2, 2));
+  mocks.getConversationShareDisclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 0, current_memory_count: 1 });
+  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(2, 2, 0));
   mocks.shareConversation.mockResolvedValueOnce(SHARED_A2);
 
   renderModal();
@@ -751,8 +752,8 @@ test("F1 更新：已公开 1 条、更新会到 2 条，409 带回 3 条，确�
     shared_through_id: "a1",
   });
   mocks.getConversation.mockResolvedValue(DETAIL);
-  mocks.getConversationShareDisclosure.mockResolvedValue({ memory_count: 2, new_memory_count: 1 });
-  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(3, 2));
+  mocks.getConversationShareDisclosure.mockResolvedValue({ memory_count: 2, new_memory_count: 1, current_memory_count: 1 });
+  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(3, 2, 1));
   mocks.shareConversation.mockResolvedValueOnce(SHARED_A2);
 
   renderModal();
@@ -768,7 +769,7 @@ test("F1 更新：已公开 1 条、更新会到 2 条，409 带回 3 条，确�
 test("F1 取数失败的路径：409 带回确数、确认成功后，兜底文案换成确认过的确数", async () => {
   notShared();
   mocks.getConversationShareDisclosure.mockRejectedValue(new Error("网络中断"));
-  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(2, 2));
+  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(2, 2, 0));
   mocks.shareConversation.mockResolvedValueOnce(SHARED_A2);
 
   renderModal();
@@ -801,7 +802,7 @@ test("F2/R4 已公开 2 条、更新后共 3 条（新增 1 条）：当前行�
     shared_through_id: "a1",
   });
   mocks.getConversation.mockResolvedValue(DETAIL);
-  mocks.getConversationShareDisclosure.mockResolvedValue({ memory_count: 3, new_memory_count: 1 });
+  mocks.getConversationShareDisclosure.mockResolvedValue({ memory_count: 3, new_memory_count: 1, current_memory_count: 2 });
 
   renderModal();
 
@@ -819,7 +820,7 @@ test("F2 取数失败时更新撞上 409 {3, 新增 1}：当前 2 条、新增 1
   });
   mocks.getConversation.mockResolvedValue(DETAIL);
   mocks.getConversationShareDisclosure.mockRejectedValue(new Error("网络中断"));
-  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(3, 1));
+  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(3, 1, 2));
 
   renderModal();
 
@@ -835,7 +836,7 @@ test("R10 轮次取不全（兜底文案）时更新撞上 409：确数仍然上
     shared_through_id: "a1",
   });
   mocks.getConversation.mockRejectedValue(new Error("详情加载失败"));
-  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(2, 1));
+  mocks.shareConversation.mockRejectedValueOnce(new ShareDisclosureRequired(2, 1, 1));
 
   renderModal("a2");
 
@@ -847,7 +848,7 @@ test("R10 轮次取不全（兜底文案）时更新撞上 409：确数仍然上
 
 test("R5 披露回执还在路上：只显示「正在加载…」，不画发布按钮；回执到了才出现", async () => {
   notShared();
-  let settle: (value: { memory_count: number; new_memory_count: number }) => void = () => {};
+  let settle: (value: { memory_count: number; new_memory_count: number; current_memory_count: number }) => void = () => {};
   mocks.getConversationShareDisclosure.mockReturnValue(new Promise((resolve) => { settle = resolve; }));
 
   renderModal();
@@ -857,7 +858,7 @@ test("R5 披露回执还在路上：只显示「正在加载…」，不画发�
   // 作者还没看到数字，点不到发布（点了也只会换来一次不必要的 409）。
   expect(screen.queryByRole("button", { name: "生成分享链接" })).toBeNull();
 
-  settle({ memory_count: 2, new_memory_count: 0 });
+  settle({ memory_count: 2, new_memory_count: 0, current_memory_count: 2 });
   expect(await screen.findByRole("button", { name: "生成分享链接" })).toBeInTheDocument();
   expect(screen.getByText("公开页会包含 2 条你引用到的个人记忆摘录。")).toBeInTheDocument();
 });
