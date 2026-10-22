@@ -694,6 +694,39 @@ def case_the_transfer_goes_page_by_page_until_nothing_is_left(world: World) -> N
     )
 
 
+def case_the_next_page_starts_after_the_previous_one(world: World) -> None:
+    """An item that fails stays in the notebook and stays transferable; the
+    cursor keeps the next page from picking it up again, so every item is
+    tried once and the run ends."""
+    extra = _confirmed_memory(world, world.member, "x0")
+    world.request()
+    ordered = sorted([*world.confirmed, extra])
+    store = world.runtime.memory_store
+    real = store.memory_for_user
+
+    def first_one_fails(memory_id, user_id, **kwargs):
+        if memory_id == ordered[0]:
+            raise RuntimeError("this one fails")
+        return real(memory_id, user_id, **kwargs)
+
+    store.memory_for_user = first_one_fails
+    try:
+        with _page_size(2):
+            first = transfer_page(world, world.member, world.member_target)
+            second = transfer_page(
+                world, world.member, world.member_target, first["next_after"]
+            )
+    finally:
+        store.memory_for_user = real
+    assert [(r["source_id"], r["ok"]) for r in first["results"]] == [
+        (ordered[0], False), (ordered[1], True),
+    ]
+    assert first["remaining"] == 1
+    assert [(r["source_id"], r["ok"]) for r in second["results"]] == [(ordered[2], True)]
+    assert second["remaining"] == 0
+    assert world.memory_notebook(ordered[0]) == world.doomed
+
+
 def case_a_page_after_the_deadline_closes_the_transfer(world: World) -> None:
     """The deadline passes between two pages: the next page is refused
     before it reads anything, the moved ones stay moved."""
