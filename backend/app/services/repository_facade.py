@@ -1209,8 +1209,12 @@ class RepositoryFacade:
     def set_notebook_personal(self, notebook_id: str) -> None:
         return self._runtime.catalog.set_notebook_personal(notebook_id)
 
-    def list_notebook_bases(self, notebook_id: str) -> list[dict]:
-        return self._runtime.notebook_store.list_mount_edges_for_notebook(notebook_id)
+    def list_notebook_bases(
+        self, notebook_id: str, viewer_id: str | None = None
+    ) -> list[dict]:
+        return self._runtime.notebook_store.list_mount_edges_for_notebook(
+            notebook_id, viewer_id
+        )
 
     def mountable_notebooks(self, notebook_id: str) -> list[dict]:
         return self._runtime.notebook_store.mountable_for_notebook(notebook_id)
