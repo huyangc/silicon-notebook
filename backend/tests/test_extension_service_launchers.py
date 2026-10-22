@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.child_env_testkit import BYTECODE_ENV
 from tests.launcher_checkout_testkit import (
     alive,
     build_fake_checkout,
@@ -436,7 +437,7 @@ BACKEND_PID=$!
 launcher_fork_done
 exit 3
 ''')
-    with subprocess.Popen(["/bin/bash", str(script)], env={"PATH": "/usr/bin:/bin", "START_CLEANUP_GRACE_SECONDS": "5"},
+    with subprocess.Popen(["/bin/bash", str(script)], env={"PATH": "/usr/bin:/bin", "START_CLEANUP_GRACE_SECONDS": "5", **BYTECODE_ENV},
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                           preexec_fn=default_launcher_signals, start_new_session=True) as process:
         try:
