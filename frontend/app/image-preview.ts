@@ -8,6 +8,10 @@
 
 export type AnswerImagePreviewItem = Readonly<{
   assetId: string;
+  /** 这张图经**哪个**笔记本的资产端点读取——产出方用 `assetNotebookId` 裁定好的结果
+   *  （有 active 恒为 active；全局问答没有 active，是这条引用自己的所属库）。预览只照
+   *  它取图，不再自己猜：全局问答的一本画册可以跨好几个库。 */
+  notebookId: string;
   alt: string;
   referenceLabel: string;
 }>;
@@ -21,6 +25,8 @@ export type AnswerImagePreviewRequest = Readonly<{
 
 type GalleryReference = Readonly<{
   displayLabel: string;
+  /** 这条引用的附图经哪个笔记本读取（已按 `assetNotebookId` 裁定）。 */
+  notebookId: string;
   images: readonly Readonly<{ asset_id: string; caption?: string | null }>[];
 }>;
 
@@ -48,6 +54,7 @@ export function buildImageGallery(
     if (!image) continue;
     items.push({
       assetId: image.asset_id,
+      notebookId: reference.notebookId,
       alt: image.caption || `${reference.displayLabel} 的附图`,
       referenceLabel: reference.displayLabel,
     });
@@ -63,7 +70,9 @@ export function imagePreviewRequest(
   gallery: readonly AnswerImagePreviewItem[],
   current: AnswerImagePreviewItem,
 ): AnswerImagePreviewRequest {
-  const index = gallery.findIndex((item) => item.assetId === current.assetId);
+  const index = gallery.findIndex((item) => (
+    item.assetId === current.assetId && item.notebookId === current.notebookId
+  ));
   return index >= 0 ? { items: gallery, index } : { items: [current], index: 0 };
 }
 

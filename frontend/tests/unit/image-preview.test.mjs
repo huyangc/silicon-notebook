@@ -13,8 +13,8 @@ const image = (assetId, caption = "") => ({ element_id: `el-${assetId}`, asset_i
 // 去重）。这里只钉「把账目翻成预览条目」这一半。顺序那一半由
 // tests/component/answer-citation-images.component.test.tsx 在真渲染上按 DOM 对账。
 const refs = {
-  k1: { displayLabel: "[1]", images: [image("a", "图 1"), image("b")] },
-  k2: { displayLabel: "[2]", images: [image("c", "图 3")] },
+  k1: { displayLabel: "[1]", notebookId: "nb-1", images: [image("a", "图 1"), image("b")] },
+  k2: { displayLabel: "[2]", notebookId: "nb-2", images: [image("c", "图 3")] },
 };
 const resolve = (key) => refs[key];
 
@@ -30,6 +30,8 @@ test("按账目逐条翻成预览条目，标签与 alt 取自该条引用", () 
 
   assert.deepEqual(gallery.map((item) => item.assetId), ["a", "b", "c"]);
   assert.deepEqual(gallery.map((item) => item.referenceLabel), ["[1]", "[1]", "[2]"]);
+  // 每一张带着它那条引用的取图库：全局问答的一本画册可以跨库，预览照它取图。
+  assert.deepEqual(gallery.map((item) => item.notebookId), ["nb-1", "nb-1", "nb-2"]);
   // caption 只作 alt；没有 caption 时回落到「引用 的附图」的既有措辞。
   assert.deepEqual(gallery.map((item) => item.alt), ["图 1", "[1] 的附图", "图 3"]);
 });
@@ -72,7 +74,7 @@ test("点开某一张会定位到它在画册里的位置", () => {
 
 test("画册里找不到这张图时退化成单张，绝不改开另一张", () => {
   const gallery = buildImageGallery([{ citationKey: "k1", imageId: "a" }], resolve);
-  const orphan = { assetId: "zz", alt: "孤图", referenceLabel: "[9]" };
+  const orphan = { assetId: "zz", notebookId: "nb-1", alt: "孤图", referenceLabel: "[9]" };
   const request = imagePreviewRequest(gallery, orphan);
 
   assert.equal(request.index, 0);
@@ -80,11 +82,19 @@ test("画册里找不到这张图时退化成单张，绝不改开另一张", ()
   assert.equal(currentPreviewImage(request).assetId, "zz");
 });
 
+test("定位按（取图库, 资产）认同一张图：别的库里同 id 的资产不算", () => {
+  const gallery = buildImageGallery([{ citationKey: "k1", imageId: "a" }], resolve);
+  const elsewhere = { assetId: "a", notebookId: "nb-9", alt: "同名", referenceLabel: "[9]" };
+  const request = imagePreviewRequest(gallery, elsewhere);
+  assert.deepEqual(request.items, [elsewhere]);
+  assert.equal(imagePreviewRequest(gallery, gallery[0]).index, 0);
+});
+
 test("越界下标不返回图片，由调用方决定不渲染", () => {
   assert.equal(currentPreviewImage(null), null);
   assert.equal(currentPreviewImage({ items: [], index: 0 }), null);
   assert.equal(
-    currentPreviewImage({ items: [{ assetId: "a", alt: "", referenceLabel: "" }], index: 3 }),
+    currentPreviewImage({ items: [{ assetId: "a", notebookId: "nb-1", alt: "", referenceLabel: "" }], index: 3 }),
     null,
   );
 });

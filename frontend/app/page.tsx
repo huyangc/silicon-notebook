@@ -5023,6 +5023,14 @@ export default function Home() {
     }
   }
 
+  // 全局问答窗口里的引用配图：同一格、同一个预览组件，只是作为**子层**叠在窗口之上
+  // （协调器的 `stacksOver`），Esc / 遮罩先归它，窗口离场时它一起撤下。
+  function openGlobalAnswerImagePreview(request: AnswerImagePreviewRequest) {
+    if (rootModals.openAbove("answer-image-preview", "global-ask")) {
+      setAnswerImagePreview(request);
+    }
+  }
+
   function openCatalogReview(request: CatalogReviewRequest) {
     const lease = rootModals.open("catalog-review", rootModals.captureSourceOwner());
     if (lease) {
@@ -7289,7 +7297,9 @@ export default function Home() {
           </FloatingModalCard>
         </section>
       )}
-      {rootModals.view("answer-image-preview").open && answerImagePreview && answerImagePreviewImage && currentNotebookId && (
+      {/* 取图归属随每一张图走（`notebookId` 由产出方按 assetNotebookId 裁定）：笔记本内
+          恒为当前笔记本，全局问答是那条引用自己的所属库，一本画册可以跨库。 */}
+      {rootModals.view("answer-image-preview").open && answerImagePreview && answerImagePreviewImage && answerImagePreviewImage.notebookId && (
         <ImagePreviewModal
           referenceLabel={answerImagePreviewImage.referenceLabel}
           interactive={rootModals.view("answer-image-preview").topmost}
@@ -7301,7 +7311,7 @@ export default function Home() {
           onClose={(reason) => rootModals.requestClose("answer-image-preview", reason)}
         >
           <AuthedImage
-            url={sourceImageAssetUrl(API_BASE, currentNotebookId, answerImagePreviewImage.assetId)}
+            url={sourceImageAssetUrl(API_BASE, answerImagePreviewImage.notebookId, answerImagePreviewImage.assetId)}
             alt={answerImagePreviewImage.alt}
           />
         </ImagePreviewModal>
@@ -8205,6 +8215,7 @@ export default function Home() {
       {/* 首次提示只在笔记本列表上出现:那里是新用户第一眼看到气泡的地方,
           进了笔记本气泡已让位成小圆、不再适合在旁边讲解。 */}
       <GlobalAskLauncher key={currentUser.id} presentation={rootModals} uiMode={uiMode} openRequest={globalAskRequest}
+        onPreviewImage={openGlobalAnswerImagePreview} imagePreviewOpen={rootModals.view("answer-image-preview").open}
         discoveryHint={{ userId: currentUser.id, active: !isWorkspace && outerView === "notebooks" }} />
       <ToastRegion
         message={toast}

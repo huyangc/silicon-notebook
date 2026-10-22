@@ -328,12 +328,12 @@ export function ReportMarkdown({
       buildImageGallery(citationImageOrder.items, (key) => {
         const reference = refsByKey[key];
         return reference
-          ? { displayLabel: reference.displayLabel, images: referenceImages(reference) }
+          ? { displayLabel: reference.displayLabel, notebookId, images: referenceImages(reference) }
           : undefined;
       }),
       image,
     )),
-    [onPreviewImage, citationImageOrder, refsByKey],
+    [onPreviewImage, citationImageOrder, refsByKey, notebookId],
   );
   const previewImage = onPreviewImage ? previewImageCallback : undefined;
   const renderCitationImages = useCallback(

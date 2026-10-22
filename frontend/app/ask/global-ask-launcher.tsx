@@ -6,6 +6,7 @@ import type { RootModalCoordinator } from "../use-root-modal-coordinator";
 import { citationPopoverHoldsEscape } from "../citation-card";
 import { globalAskLayerHoldsEscape } from "./global-ask-escape";
 import type { UiMode } from "../ui-mode";
+import type { AnswerImagePreviewRequest } from "../image-preview";
 import "./global-ask-launcher.css";
 import "./global-ask.css";
 
@@ -28,8 +29,14 @@ function rememberHintSeen(key: string) {
   try { window.localStorage.setItem(key, "1"); } catch { /* ignore */ }
 }
 
-export function GlobalAskLauncher({ presentation, uiMode, openRequest, discoveryHint }: {
+export function GlobalAskLauncher({ presentation, uiMode, openRequest, discoveryHint, onPreviewImage, imagePreviewOpen }: {
   presentation: Presentation; uiMode?: UiMode; openRequest?: GlobalConversationRequest | null;
+  /** 引用配图点开：宿主把同一格页面级预览作为子层叠在本窗口之上（协调器的 `stacksOver`）。
+   *  预览盖住窗口时 `view.topmost` 转假，窗口按既有规则退出交互树、全屏态降成非模态
+   *  ——Esc 因此先归预览，这里不需要为它写任何判断。不传则图片只能原位看。 */
+  onPreviewImage?: (request: AnswerImagePreviewRequest) => void;
+  /** 预览此刻开着：引用卡在它关闭之前不收起，焦点才回得到那张缩略图。 */
+  imagePreviewOpen?: boolean;
   /** 集合页传 `{ userId, active: true }`:用户第一次看到气泡时在旁边说一句它能做什么。
    *  点「知道了」、打开全局问答、或离开集合页(active 变 false)都算看过,之后不再出现。 */
   discoveryHint?: { userId: string; active: boolean };
@@ -117,7 +124,7 @@ export function GlobalAskLauncher({ presentation, uiMode, openRequest, discovery
       onCancel={(event) => { event.preventDefault(); if (citationPopoverHoldsEscape() || globalAskLayerHoldsEscape()) return; presentation.requestClose("global-ask", "escape"); }}
       onKeyDown={(event) => { if (event.key === "Escape" && !event.defaultPrevented) { event.preventDefault(); presentation.requestClose("global-ask", "escape"); } }}>
       {started && <Suspense fallback={<div className="global-window-loading" role="status">正在打开全局问答…<button className="sort-button" onClick={() => setMode("closed")}>收起</button></div>}>
-        <GlobalAskWorkspace embedded uiMode={uiMode} active={open} compact={mode !== "full"} requestedConversation={forwarded} onOpenNotebook={() => setMode("closed")} controls={<>
+        <GlobalAskWorkspace embedded uiMode={uiMode} active={open} compact={mode !== "full"} requestedConversation={forwarded} onOpenNotebook={() => setMode("closed")} onPreviewImage={onPreviewImage} imagePreviewOpen={imagePreviewOpen} controls={<>
           <button autoFocus className="icon-button" aria-label={mode === "full" ? "退出全屏" : "全屏展开"} title={mode === "full" ? "退出全屏" : "全屏展开"} onClick={() => setMode(mode === "full" ? "compact" : "full")}>{mode === "full" ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>
           <button className="icon-button" aria-label="收起全局问答" title="收起，保留当前对话" onClick={() => setMode("closed")}><Minus size={19} /></button>
         </>} />

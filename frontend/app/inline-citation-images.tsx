@@ -86,11 +86,8 @@ export function InlineCitationImages({
       </div>
       <ul className="answer-inline-image-list">
         {rows.map(({ reference, image }) => {
-          const url = sourceImageAssetUrl(
-            API_BASE,
-            assetNotebookId(notebookId, referenceNotebookId(reference)),
-            image.asset_id,
-          );
+          const imageNotebookId = assetNotebookId(notebookId, referenceNotebookId(reference));
+          const url = sourceImageAssetUrl(API_BASE, imageNotebookId, image.asset_id);
           const alt = image.caption || `${reference.displayLabel} 的附图`;
           return (
             <li key={image.asset_id} className="answer-inline-image-item">
@@ -104,6 +101,7 @@ export function InlineCitationImages({
                   aria-label={`放大查看${reference.displayLabel}的附图`}
                   onClick={() => onPreviewImage({
                     assetId: image.asset_id,
+                    notebookId: imageNotebookId,
                     alt,
                     referenceLabel: reference.displayLabel,
                   })}

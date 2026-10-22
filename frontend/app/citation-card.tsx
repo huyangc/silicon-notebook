@@ -444,6 +444,7 @@ export function SelectedReferenceDetail({
                       className="cite-detail-image-button"
                       onClick={() => onPreviewImage({
                         assetId: image.asset_id,
+                        notebookId: imageNotebookId,
                         alt: image.caption || `${reference.displayLabel} 的附图`,
                         referenceLabel: reference.displayLabel,
                       })}
