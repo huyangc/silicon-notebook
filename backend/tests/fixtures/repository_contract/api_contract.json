@@ -4167,7 +4167,7 @@
           "type": "object"
         },
         "ConversationShareCounts": {
-          "description": "The share dialog's exact numbers for one GLOBAL conversation\n(``GET /global-ask/conversations/{id}/share/counts``), counted by the\nserver over the same windows the public page shows\n(``app/domain/share_counts.py``).\n\n``total_turns``: completed turns. ``through_id``: the boundary turn (the\nasked ``through_id``, or the newest; empty when the asked one does not\nresolve). ``boundary_index``: its 0-based position (-1 when none was\nasked, or it does not resolve -- ``boundary_unresolved``). Against the\nwatermark the dialog passed: ``watermark_ahead`` (the link already covers\n``ahead_count`` more turns), ``watermark_behind``, ``watermark_unknown``\n(the watermark turn no longer resolves). What the link holds now (or\nsharing would publish while unshared): ``new_turns`` after the watermark\nnot included, ``published_turns`` on the page, ``earlier_turns`` older\nones the page leaves out, ``image_count`` attached images on those turns.\nWhat sharing / updating publishes: ``update_image_count``,\n``update_new_image_count`` (on turns the link does not show yet) and\n``update_earlier_turns``. Image counts are each turn's anchors' and\ncitations' images, deduplicated per turn -- an upper bound on the page.",
+          "description": "The share dialog's exact numbers for one GLOBAL conversation\n(``GET /global-ask/conversations/{id}/share/counts``), counted by the\nserver over the same windows the public page shows\n(``app/domain/share_counts.py``).\n\n``total_turns``: completed turns. ``through_id``: the boundary turn (the\nasked ``through_id``, or the newest; empty when the asked one does not\nresolve). ``boundary_index``: its 0-based position (-1 when none was\nasked, or it does not resolve -- ``boundary_unresolved``). Against the\nwatermark the dialog passed: ``watermark_ahead`` (the link already covers\n``ahead_count`` more turns), ``watermark_behind``, ``watermark_unknown``\n(the watermark turn no longer resolves). What the link holds now (or\nsharing would publish while unshared): ``new_turns`` after the watermark\nnot included, ``published_turns`` on the page, ``earlier_turns`` older\nones the page leaves out, ``image_count`` attached images on those turns.\nWhat sharing / updating publishes: ``update_image_count``,\n``update_new_image_count`` (on turns the link does not show yet) and\n``update_earlier_turns``. Image counts are each turn's anchors' and\ncitations' images, deduplicated per turn -- an upper bound on the page.\n``watermark_id`` / ``watermark_at``: the watermark these numbers were\ncounted against (the one asked for, or the stored one when none was).",
           "properties": {
             "ahead_count": {
               "title": "Ahead Count",
@@ -4221,9 +4221,17 @@
               "title": "Watermark Ahead",
               "type": "boolean"
             },
+            "watermark_at": {
+              "title": "Watermark At",
+              "type": "string"
+            },
             "watermark_behind": {
               "title": "Watermark Behind",
               "type": "boolean"
+            },
+            "watermark_id": {
+              "title": "Watermark Id",
+              "type": "string"
             },
             "watermark_unknown": {
               "title": "Watermark Unknown",
@@ -4245,7 +4253,9 @@
             "image_count",
             "update_image_count",
             "update_new_image_count",
-            "update_earlier_turns"
+            "update_earlier_turns",
+            "watermark_id",
+            "watermark_at"
           ],
           "title": "ConversationShareCounts",
           "type": "object"
@@ -18778,7 +18788,7 @@
       },
       "/api/global-ask/conversations/{conversation_id}/share/counts": {
         "get": {
-          "description": "The share dialog's exact numbers: turns, the boundary ``through_id`` (a\nJOB id; empty = the newest completed turn) against the link's watermark as\nthe dialog holds it (``watermark_id``/``watermark_at``; empty = not\nshared), new and older-than-the-page turns, and attached images -- counted\nin SQL over the windows the public page shows, so a conversation of any\nlength gets exact numbers rather than \"not counted\".\n\nOwner only, with the share surface's error mapping (``_share_call``): a\nforeign or missing conversation is the same 404, a library the counted\nwindows draw on that the sharer can no longer read is the share's own 404\nsentence. Reads only; a boundary or watermark that does not resolve is\nreported in the body, never refused.",
+          "description": "The share dialog's exact numbers: turns, the boundary ``through_id`` (a\nJOB id; empty = the newest completed turn) against the link's watermark,\nnew and older-than-the-page turns, and attached images -- counted in SQL\nover the windows the public page shows, so a conversation of any length\ngets exact numbers rather than \"not counted\".\n\nThe watermark is the one the dialog holds (``watermark_id`` /\n``watermark_at``; both empty = not shared) or, when ``watermark_id`` is\nleft out, the link's watermark as stored now -- so the dialog can ask in\nthe same breath as it reads the share state. The body echoes the watermark\nit counted against (``watermark_id`` / ``watermark_at``).\n\nOwner only, with the share surface's error mapping (``_share_call``): a\nforeign or missing conversation is the same 404, a library the counted\nwindows draw on that the sharer can no longer read is the share's own 404\nsentence. Reads only; a boundary or watermark that does not resolve is\nreported in the body, never refused.",
           "operationId": "global_conversation_share_counts_route_api_global_ask_conversations__conversation_id__share_counts_get",
           "parameters": [
             {
@@ -18805,9 +18815,15 @@
               "name": "watermark_id",
               "required": false,
               "schema": {
-                "default": "",
-                "title": "Watermark Id",
-                "type": "string"
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Watermark Id"
               }
             },
             {
@@ -18815,9 +18831,15 @@
               "name": "watermark_at",
               "required": false,
               "schema": {
-                "default": "",
-                "title": "Watermark At",
-                "type": "string"
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Watermark At"
               }
             }
           ],
