@@ -174,3 +174,11 @@ test("列表视图在任何宽度下都在自身内部横向滚动,不撑宽整�
     });
   });
 });
+
+test("列表视图里不带空格的超长标题在本列内折行,不压到「来源」列上", () => {
+  // 标题格是行网格的网格项,默认 min-width: auto 会被长名称的 min-content 撑开,
+  // 文字溢出到右边的列上(768 / 375 宽实测)。`min-width: 0` 加 `overflow-wrap: anywhere`
+  // 让它在本列内折行;网格卡片里的标题早就是同一种写法。
+  assert.match(declared(".notebook-list-title", "min-width") ?? "", /^0(?:px)?$/);
+  assert.match(declared(".notebook-list-title strong", "overflow-wrap") ?? "", /^(?:anywhere|break-word)$/);
+});

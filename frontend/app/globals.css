@@ -920,11 +920,16 @@ button.copy-result-failed:hover:not(:disabled) {
   grid-template-columns: 34px minmax(0, 1fr);
   align-items: center;
   gap: 14px;
+  /* 标题格是网格项，默认 min-width: auto 会按不带空格的长名称撑开；写 0 并配合下面
+     strong 的 overflow-wrap，长标题在本列内折行，不压到右边的「来源」列上。
+     守卫：tests/guards/app-shell-column-guard.test.mjs。 */
+  min-width: 0;
 }
 
 .notebook-list-title strong {
   display: block;
   max-width: 560px;
+  overflow-wrap: anywhere;
   font-size: 16px;
   font-weight: 500;
   line-height: 1.28;
