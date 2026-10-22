@@ -9,66 +9,17 @@
 # 需要完整(非浅克隆)历史,失败只警告、不阻断启动。
 #
 # 环境变量:PYTHON_BIN BACKEND_HOST PORT FRONTEND_PORT SKIP_INSTALL SKIP_BUILD
-#              START_CLEANUP_GRACE_SECONDS(默认 10,启动脚本中断时的 SIGTERM 宽限)
+#              START_CLEANUP_GRACE_SECONDS(默认 10,启动脚本中断时的 SIGTERM 宽限;
+#              宽限期间再次中断则立即 SIGKILL,详见 scripts/launcher_cleanup.sh)
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INHERITED_PYTHONPATH="${PYTHONPATH-}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 source "$ROOT_DIR/scripts/extension_services.sh"
+source "$ROOT_DIR/scripts/launcher_cleanup.sh"
 
-cleanup() {
-  local status=$? pid alive deadline polls=0
-  trap - EXIT INT TERM HUP
-
-  if [[ -z "${BACKEND_PID:-}" && -z "${FRONTEND_PID:-}" ]]; then
-    extension_services_cleanup || status=1
-    exit "$status"
-  fi
-
-  # Both services are direct children (the launch subshell execs into the real
-  # process). Signal them together so one slow shutdown cannot consume a full
-  # grace window before the other even receives SIGTERM.
-  for pid in "${BACKEND_PID:-}" "${FRONTEND_PID:-}"; do
-    [[ -n "$pid" ]] || continue
-    kill "$pid" 2>/dev/null || true
-  done
-
-  deadline=$((SECONDS + ${START_CLEANUP_GRACE_SECONDS:-10}))
-  while true; do
-    alive=0
-    for pid in "${BACKEND_PID:-}" "${FRONTEND_PID:-}"; do
-      [[ -n "$pid" ]] || continue
-      if kill -0 "$pid" 2>/dev/null; then alive=1; fi
-    done
-    [[ "$alive" == "0" || "$SECONDS" -ge "$deadline" ]] && break
-    if [[ -n "${_SCRIPT_TEST_CLEANUP_MAX_POLLS:-}" \
-      && "$polls" -ge "${_SCRIPT_TEST_CLEANUP_MAX_POLLS}" ]]; then
-      break
-    fi
-    sleep "${_SCRIPT_TEST_CLEANUP_POLL_INTERVAL_SECONDS:-1}"
-    polls=$((polls + 1))
-  done
-
-  for pid in "${BACKEND_PID:-}" "${FRONTEND_PID:-}"; do
-    [[ -n "$pid" ]] || continue
-    if kill -0 "$pid" 2>/dev/null; then
-      echo "startup child PID $pid did not stop after SIGTERM; sending SIGKILL" >&2
-      kill -9 "$pid" 2>/dev/null || true
-    fi
-  done
-  for pid in "${BACKEND_PID:-}" "${FRONTEND_PID:-}"; do
-    [[ -n "$pid" ]] || continue
-    wait "$pid" 2>/dev/null || true
-  done
-  extension_services_cleanup || status=1
-  exit "$status"
-}
-
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
+launcher_install_traps
 
 # Load the repo-root .env so BOTH processes see the same vars. The backend reads
 # it via pydantic regardless, but the Next.js frontend only reads frontend/.env*
@@ -109,12 +60,7 @@ source "$ROOT_DIR/scripts/autotune.sh"
 BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
 BACKEND_PORT="${PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
-START_CLEANUP_GRACE_SECONDS="${START_CLEANUP_GRACE_SECONDS:-10}"
-
-if [[ ! "$START_CLEANUP_GRACE_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
-  echo "错误: START_CLEANUP_GRACE_SECONDS 必须是正整数。" >&2
-  exit 2
-fi
+launcher_check_grace_seconds
 
 if [[ "$BACKEND_HOST" != "127.0.0.1" && "$BACKEND_HOST" != "localhost" && "$BACKEND_HOST" != "::1" ]]; then
   if [[ -z "${SILICON_NOTEBOOK_ADMIN_PASSWORD:-}" || "${SILICON_NOTEBOOK_ADMIN_PASSWORD}" == "admin" ]]; then
@@ -222,6 +168,7 @@ extension_services_start
 # pools) are per-process and NOT shared across workers — N workers would mean N×
 # memory and N independent (inconsistent) caches, not more throughput.
 cd "$ROOT_DIR/backend"
+launcher_fork_mark BACKEND_PID
 ( export PYTHONPATH="$INHERITED_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}"
   exec nohup "$PYTHON_BIN" "$ROOT_DIR/scripts/python_env.py" -m uvicorn app.main:app \
   --host "$BACKEND_HOST" \
@@ -229,12 +176,15 @@ cd "$ROOT_DIR/backend"
   --workers 1 </dev/null ) \
   >>"$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
+launcher_fork_done
 
 cd "$ROOT_DIR/frontend"
+launcher_fork_mark FRONTEND_PID
 ( exec nohup "$ROOT_DIR/frontend/node_modules/.bin/next" start \
   -p "$FRONTEND_PORT" </dev/null ) \
   >>"$FRONTEND_LOG" 2>&1 &
 FRONTEND_PID=$!
+launcher_fork_done
 
 echo "backend  : http://${BACKEND_HOST}:${BACKEND_PORT}   (PID $BACKEND_PID, log $BACKEND_LOG)"
 echo "frontend : http://0.0.0.0:${FRONTEND_PORT}   (PID $FRONTEND_PID, log $FRONTEND_LOG)"

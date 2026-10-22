@@ -27,7 +27,7 @@ def test_service_launcher_merges_dotenv_and_exported_plugin_paths(tmp_path, dote
     fake_bin = root / "bin"
     for directory in (scripts, backend, frontend / "node_modules", plugin, exported, fake_bin):
         directory.mkdir(parents=True)
-    for name in ("dev.sh", "python_env.py", "extension_services.sh", "extension_services.py", "extension_service_runtime.py", "extension_service_worker.py"):
+    for name in ("dev.sh", "python_env.py", "extension_services.sh", "launcher_cleanup.sh", "extension_services.py", "extension_service_runtime.py", "extension_service_worker.py"):
         shutil.copy2(ROOT / "scripts" / name, scripts / name)
     (scripts / "autotune.sh").write_text("# No host tuning in this test.\n")
     (root / ".env").write_text(

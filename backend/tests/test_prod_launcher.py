@@ -56,7 +56,7 @@ def _prepare_launcher(tmp_path: Path) -> tuple[Path, Path, Path, Path, dict[str,
         encoding="utf-8",
     )
     (scripts / "autotune.sh").write_text("# test stub\n", encoding="utf-8")
-    for name in ("python_env.py", "extension_services.sh", "extension_services.py", "extension_service_runtime.py", "extension_service_worker.py", "build_release_manifest.py"):
+    for name in ("python_env.py", "extension_services.sh", "launcher_cleanup.sh", "extension_services.py", "extension_service_runtime.py", "extension_service_worker.py", "build_release_manifest.py"):
         shutil.copy2(repository_root / "scripts" / name, scripts / name)
     (root / ".env").write_text("# test env\n", encoding="utf-8")
     (backend / "requirements.txt").write_text("# test requirements\n", encoding="utf-8")

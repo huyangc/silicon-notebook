@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import signal
 import subprocess
@@ -229,8 +231,11 @@ def test_dev_launcher_stops_both_children_with_term_and_never_needs_kill(launche
     with dev_launcher(root, env, TERM_EXITS="backend frontend") as process:
         pids = {name: published_pid(root, name) for name in ("backend", "frontend")}
         # TERM only reaches uvicorn / next themselves if the launcher's child IS
-        # that process: a subshell or npm layer in between would make this ppid
-        # differ and leave the real server running when the layer is signalled.
+        # that process. For the backend, whose subshell holds two commands, dropping
+        # `exec` leaves a subshell in between and this ppid differs. For `( one
+        # simple command ) &` (next, the sync) bash does not fork a subshell at all,
+        # so dropping its `exec` is not observable here; adding a second command to
+        # that subshell is (see the sync cancellation case).
         assert {name: parent_pid(pid) for name, pid in pids.items()} == {"backend": process.pid, "frontend": process.pid}
         process.send_signal(interruption)
         assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) == status
@@ -244,8 +249,10 @@ def test_dev_launcher_stops_both_children_with_term_and_never_needs_kill(launche
 def test_dev_launcher_kills_a_child_that_ignores_term_after_the_grace_window(launcher):
     root, env = launcher
     with dev_launcher(root, env, TERM_EXITS="backend", TERM_IGNORED="frontend",
-                      START_CLEANUP_GRACE_SECONDS="1",
+                      START_CLEANUP_GRACE_SECONDS="2",
                       _SCRIPT_TEST_CLEANUP_POLL_INTERVAL_SECONDS="0.05") as process:
+        # The well-behaved backend leaves on its first poll, far inside the window
+        # (the deadline counts whole $SECONDS, so a window of 1 can be 0.0x s long).
         backend, frontend = published_pid(root, "backend"), published_pid(root, "frontend")
         process.terminate()
         # Without the SIGKILL fallback the launcher would wait forever on `wait`.
@@ -310,18 +317,26 @@ def test_dev_launcher_cancelled_during_the_sync_leaves_nothing_running(launcher,
     assert_owned_cleanup(root)
 
 
+def test_dev_launcher_follows_a_backend_that_exits_during_the_sync(launcher):
+    root, env = launcher
+    # The sync would run for a minute; the backend fails once the sync is running.
+    result = run(root, {**env, "SYNC_MODE": "hang", "FAIL_MAIN": "backend", "FAIL_AFTER": "sync"},
+                 "scripts/dev.sh")
+    assert result.returncode == 8, result.stdout + result.stderr
+    assert not alive(published_pid(root, "sync")), "the sync was left running"
+    assert not (root / "frontend.pid").exists()
+    assert_owned_cleanup(root)
+
+
 def test_dev_launcher_runs_every_hook_that_npm_run_dev_would_run():
     """dev.sh starts next itself, so each lifecycle hook `npm run dev` ran must be
     in dev.sh by hand; a hook added to package.json fails here until it is."""
     frontend = json.loads((ROOT / "frontend/package.json").read_text(encoding="utf-8"))["scripts"]
-    top = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["scripts"]
     assert frontend["predev"] == "npm run sync:ui-plugins"
     assert frontend["sync:ui-plugins"] == "node scripts/sync-ui-plugins.mjs"
     assert frontend["dev"] == "next dev"
     for hook in ("postdev", "presync:ui-plugins", "postsync:ui-plugins"):
         assert hook not in frontend
-    for hook in ("predev", "postdev"):
-        assert hook not in top
     dev_sh = (ROOT / "scripts/dev.sh").read_text(encoding="utf-8")
     assert "( exec node scripts/sync-ui-plugins.mjs ) &" in dev_sh
     assert '( exec "$ROOT_DIR/frontend/node_modules/.bin/next" dev ) &' in dev_sh
@@ -356,10 +371,11 @@ def test_dev_and_prod_launchers_exit_with_the_same_status_per_signal(launcher, p
     assert_owned_cleanup(root)
 
 
+@pytest.mark.parametrize("path", ["scripts/dev.sh", "scripts/prod.sh"])
 @pytest.mark.parametrize("grace", ["0", "-1", "ten", "1.5"])
-def test_dev_launcher_rejects_a_bad_grace_before_starting_anything(launcher, grace):
+def test_dev_and_prod_launchers_reject_a_bad_grace_before_starting_anything(launcher, path, grace):
     root, env = launcher
-    result = run(root, {**env, "START_CLEANUP_GRACE_SECONDS": grace}, "scripts/dev.sh")
+    result = run(root, {**env, "START_CLEANUP_GRACE_SECONDS": grace}, path)
     assert result.returncode == 2, result.stdout + result.stderr
     assert "START_CLEANUP_GRACE_SECONDS 必须是正整数" in result.stderr
     assert not (root / "service-events.jsonl").exists()
@@ -367,17 +383,110 @@ def test_dev_launcher_rejects_a_bad_grace_before_starting_anything(launcher, gra
     assert not (root / "frontend.pid").exists()
 
 
-def _cleanup_function(script):
-    lines = (ROOT / "scripts" / script).read_text(encoding="utf-8").splitlines()
-    start = lines.index("cleanup() {")
-    end = lines.index("}", start)
-    return "\n".join(lines[start:end + 1])
+@pytest.mark.parametrize("script", ["dev.sh", "prod.sh"])
+def test_dev_and_prod_launchers_use_the_one_shared_wind_down(script):
+    """The wind-down lives in scripts/launcher_cleanup.sh only (extension_services.sh
+    stays the companion handshake's alone); the launchers must source it, install
+    its traps, and bracket every child fork so a pid left unassigned by a pending
+    trap is still found."""
+    text = (ROOT / "scripts" / script).read_text(encoding="utf-8")
+    body = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    assert body.index('source "$ROOT_DIR/scripts/extension_services.sh"') < body.index(
+        'source "$ROOT_DIR/scripts/launcher_cleanup.sh"')
+    assert "launcher_install_traps" in body
+    assert "launcher_check_grace_seconds" in body
+    for private in ("cleanup() {", "kill -9", "SIGKILL"):
+        assert private not in body, f"{script} carries its own wind-down: {private!r}"
+    # prod.sh alone clears the traps at its hand-off; nothing else installs one.
+    assert [line.strip() for line in body.splitlines() if "trap " in line] in (
+        [], ["trap - EXIT INT TERM HUP"])
+    marked = re.findall(r"^launcher_fork_mark (\w+)$", body, re.MULTILINE)
+    assigned = re.findall(r"^(\w+)=\$!$", body, re.MULTILINE)
+    assert marked == assigned and marked
+    assert body.count("launcher_fork_done") == len(marked)
 
 
-def test_dev_launcher_cleanup_is_the_same_shape_as_prod_launcher_cleanup():
-    """No shared function exists (extension_services.sh is the companion
-    handshake's alone), so the two copies are pinned against drifting apart."""
-    assert _cleanup_function("dev.sh") == _cleanup_function("prod.sh")
+def group_members(pgid):
+    listing = subprocess.run(["ps", "-ax", "-o", "pid=,pgid=,stat="],
+                             capture_output=True, text=True).stdout
+    members = []
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and int(parts[1]) == pgid and not parts[2].startswith("Z"):
+            members.append(int(parts[0]))
+    return members
+
+
+@pytest.mark.parametrize("interruption,status", [(signal.SIGTERM, 143), (signal.SIGHUP, 129)])
+def test_a_child_whose_pid_a_pending_trap_left_unassigned_is_still_stopped(tmp_path, interruption, status):
+    """The window is reproduced deterministically: `kill` runs the trap right after
+    the background fork returned and before `PID=$!`, the state a signal pending at
+    the fork leaves on bash 3.2."""
+    script = tmp_path / "unassigned.sh"
+    script.write_text(f'''set -euo pipefail
+ROOT_DIR={ROOT}
+PYTHON_BIN=true
+source "$ROOT_DIR/scripts/extension_services.sh"
+source "$ROOT_DIR/scripts/launcher_cleanup.sh"
+launcher_install_traps
+launcher_fork_mark BACKEND_PID
+( exec sleep 60 ) &
+kill -{interruption.name[3:]} $$
+BACKEND_PID=$!
+launcher_fork_done
+exit 3
+''')
+    with subprocess.Popen(["/bin/bash", str(script)], env={"PATH": "/usr/bin:/bin", "START_CLEANUP_GRACE_SECONDS": "5"},
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          preexec_fn=default_launcher_signals, start_new_session=True) as process:
+        try:
+            assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) == status
+            wait_until(lambda: not group_members(process.pid), timeout=5)
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.parametrize("path", ["scripts/dev.sh", "scripts/prod.sh"])
+@pytest.mark.parametrize("second", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
+def test_a_second_cancellation_in_the_grace_wait_kills_now_and_still_stops_the_companions(launcher, path, second):
+    """uvicorn prints "CTRL+C to force quit" while it winds down and the user
+    obeys. That second signal used to hit the launcher's default disposition: it
+    died with the signal, the receipt stayed and the companions kept running."""
+    root, env = launcher
+    extra = {"TERM_EXITS": "backend", "TERM_IGNORED": "frontend",
+             "START_CLEANUP_GRACE_SECONDS": "30",
+             "_SCRIPT_TEST_CLEANUP_POLL_INTERVAL_SECONDS": "0.05"}
+    if path.endswith("prod.sh"):
+        # Hold prod.sh just before its hand-off, children running (see the fake rm).
+        extra["RM_BLOCK"] = "1"
+    with (root / "launcher.err").open("w") as stream:
+        process = spawn(root, {**env, **extra}, path, stderr=stream)
+    with process:
+        try:
+            wait_until(lambda: (root / "backend.pid").exists() and (root / "frontend.pid").exists())
+            if path.endswith("prod.sh"):
+                wait_until((root / "rm.blocked").exists)
+            backend, frontend = published_pid(root, "backend"), published_pid(root, "frontend")
+            process.send_signal(signal.SIGTERM)
+            (root / "rm.release").touch()
+            # Both children have had SIGTERM, so the launcher is in its grace wait
+            # (30 s) with the frontend ignoring it.
+            wait_until(lambda: (root / "backend.term").exists() and (root / "frontend.term").exists())
+            process.send_signal(second)
+            assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) == 143
+            assert not alive(frontend)
+            assert not alive(backend)
+            assert f"startup child PID {frontend} did not stop after SIGTERM; sending SIGKILL" in (
+                root / "launcher.err").read_text()
+        finally:
+            if process.poll() is None:
+                process.kill()
+            kill_published(root / "backend.pid")
+            kill_published(root / "frontend.pid")
+    assert_owned_cleanup(root)
 
 
 @pytest.mark.parametrize("path,args", [
