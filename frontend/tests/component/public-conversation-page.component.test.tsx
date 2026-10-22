@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -24,6 +24,7 @@ vi.mock("../../app/math-markdown.ts", async (importOriginal) => {
 });
 
 import PublicConversationPage from "../../app/c/[token]/page";
+import { claimEscapePress } from "../../app/use-root-modal-coordinator";
 import { normalizeMathMarkdown } from "../../app/math-markdown";
 
 const CONVERSATION = {
@@ -179,6 +180,21 @@ test("附图在正文引用段落后渲染、只显示图片，并可页内放�
   await user.click(within(dialog).getByRole("button", { name: "关闭图片预览" }));
   expect(screen.queryByRole("dialog", { name: "引用 [1] 图片预览" })).toBeNull();
   expect(screen.getByRole("button", { name: "放大查看本段附图" })).toHaveFocus();
+});
+
+// Esc 关闭预览认领这一次按键（与站内同一本账）：按住 Esc 也只关这一层。
+test("Esc 关闭预览时认领这一次按键，同一次按住里别的层拿不到名额", async () => {
+  const user = userEvent.setup();
+  render(<PublicConversationPage />);
+  await screen.findByRole("img", { name: "架构示意" });
+  await user.click(screen.getByRole("button", { name: "放大查看本段附图" }));
+  const dialog = screen.getByRole("dialog", { name: "引用 [1] 图片预览" });
+
+  fireEvent.keyDown(within(dialog).getByRole("button", { name: "关闭图片预览" }), { key: "Escape" });
+  expect(screen.queryByRole("dialog", { name: "引用 [1] 图片预览" })).toBeNull();
+  // 这一次按键已被预览认领：同一次按住里别的层再认领拿不到名额。
+  expect(claimEscapePress()).toBe(false);
+  fireEvent.keyUp(window, { key: "Escape" });
 });
 
 // 渲染器组件表若在每次渲染时重建，React 会把整棵 markdown 子树（含附图区）卸载重挂：

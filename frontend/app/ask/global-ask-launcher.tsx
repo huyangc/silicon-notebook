@@ -12,6 +12,9 @@ import "./global-ask.css";
 
 const GlobalAskWorkspace = lazy(() => import("./global-ask-workspace"));
 
+/** 覆盖层里可以接住焦点的控件（焦点跑出最上层、而最上层已换过时落到这里）。 */
+const COVERING_LAYER_FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 type Presentation = Pick<RootModalCoordinator, "view" | "open" | "requestClose" | "captureActorOwner">;
 
 /** 宿主(笔记本页)要求打开某个全局会话——目前只有铃铛里「进行中的提问」的全局
@@ -120,29 +123,42 @@ export function GlobalAskLauncher({ presentation, uiMode, openRequest, discovery
   // 根本看不见的页面元素。被盖住期间焦点只许留在**盖上来的那一层**里；跑出去就拉回
   // 刚才所在的那个元素。只对全屏态：小窗本来就不挡页面，与笔记本内弹层一样不设焦点陷阱。
   //
-  // 「盖上来的那一层」认的是协调器此刻的最上层落地的地方，而不是全文档任意一个
-  // `aria-modal`：被挡住的页面里也可能有写死 aria-modal 的整页视图。协调器只管租约、
-  // 不持有 DOM，所以按事实认：窗口被盖住之后，第一个落在窗口之外的焦点就是最上层
-  // 那一层取得的（打开它的那次 autoFocus / 补聚焦；此刻只有它可交互，下面各层都
-  // inert），它所在的 `aria-modal` 容器就是允许的范围。
+  // 「盖上来的那一层」是**此刻实际的最上层**，每次 focusin 都重新认，而不是窗口被盖住
+  // 那一刻认一次就钉死：被盖住期间最上层还会变（异步弹出的更新说明盖到预览上，或者它关掉、
+  // 预览重新回到最上层），而窗口自己的 `view.topmost` 在这期间一直是 false，拿它当依赖
+  // 感知不到这些变化。按页面上可见的事实认：不在本窗口里、自己和祖先都不 inert（被盖住的
+  // 根层都是 inert）、`aria-modal="true"`、z-index 高于本窗口的那些元素里 z-index 最高
+  // 的一个（同层按文档顺序取后者）。被挡住的页面里写死 aria-modal 的整页视图 z-index 不
+  // 高于窗口，不会被当成覆盖层。协调器只管租约、不持有 DOM，所以不从协调器取元素。
   useLayoutEffect(() => {
     const node = dialog.current;
     if (!node || mode !== "full" || view.topmost) return;
-    let layer: HTMLElement | null = null;
-    let last: HTMLElement | null = null;
-    const admit = (element: HTMLElement) => {
-      if (!layer) layer = element.closest<HTMLElement>('[aria-modal="true"]');
-      if (!layer?.contains(element)) return false;
-      last = element;
-      return true;
+    const floor = Number(getComputedStyle(node).zIndex) || 0;
+    const coveringLayer = () => {
+      let best: HTMLElement | null = null;
+      let bestZ = floor;
+      for (const candidate of document.querySelectorAll<HTMLElement>('[aria-modal="true"]')) {
+        if (node.contains(candidate) || candidate.closest("[inert]")) continue;
+        const z = Number(getComputedStyle(candidate).zIndex) || 0;
+        if (z > bestZ || (best && z === bestZ)) { best = candidate; bestZ = z; }
+      }
+      return best;
     };
+    let last: HTMLElement | null = null;
     const active = document.activeElement;
-    if (active instanceof HTMLElement && active !== document.body && !node.contains(active)) admit(active);
+    if (active instanceof HTMLElement && coveringLayer()?.contains(active)) last = active;
     const onFocusIn = (event: FocusEvent) => {
       const target = event.target;
       if (!(target instanceof HTMLElement) || node.contains(target)) return;
-      if (admit(target)) return;
-      if (last?.isConnected) last.focus({ preventScroll: true });
+      const layer = coveringLayer();
+      if (!layer) return;
+      if (layer.contains(target)) { last = target; return; }
+      // 跑出了最上层：回到它里面刚才那个元素；最上层换过了（刚才那个已不在其中）就落到
+      // 新最上层里第一个可聚焦的控件上。
+      const back = last?.isConnected && layer.contains(last)
+        ? last
+        : layer.querySelector<HTMLElement>(COVERING_LAYER_FOCUSABLE);
+      back?.focus({ preventScroll: true });
     };
     document.addEventListener("focusin", onFocusIn);
     return () => document.removeEventListener("focusin", onFocusIn);

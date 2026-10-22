@@ -35,6 +35,7 @@ import { normalizeInferenceListMarkers } from "../../inference-list-markers";
 import { remarkGfmPlugin } from "../../markdown-gfm";
 import { normalizeMathMarkdown } from "../../math-markdown";
 import { ImagePreviewModal } from "../../image-preview-modal";
+import { claimEscapePress } from "../../use-root-modal-coordinator";
 import {
   CITATION_IMAGE_SLOT_ATTRIBUTE,
   citationImageSlotItems,
@@ -522,7 +523,8 @@ function PublicTurnView({
           imageIndex={previewImage.index}
           imageCount={previewImage.items.length}
           onSelectImage={(next) => setPreviewImage((prev) => (prev ? { ...prev, index: next } : prev))}
-          onClose={() => setPreviewImage(null)}
+          // 与 `/ask` 同一条：Esc 关闭认领这一次按键，按住也只关这一层。
+          onClose={(reason) => { if (reason === "escape" && !claimEscapePress()) return; setPreviewImage(null); }}
         >
           <img
             src={publicConversationImageUrl(token, previewCurrent.image.alias)}
