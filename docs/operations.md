@@ -786,8 +786,16 @@ members.
 Deployments with change capture on (`sync capture`): migration v100 / 0081 backfills two columns, and
 each backfill logs one change per row it sets -- on SQLite every existing state row (its concept seed
 space set to 1; the PostgreSQL column default fires no capture), and on both backends every existing
-topic board (`communities.board_key` set to the board's id). The next export re-sends those rows
-unchanged and the receiving side backfills the same values: export volume only, not content.
+topic board (`communities.board_key` set to the board's id). The next export re-sends those rows and the
+receiving side backfills the same values, so no content changes, but the import is not free: importing a
+`unified_kg_state` row always advances that notebook's `kg_mutation_seq` on the target (the import's rule
+for every state row, so a cached graph can never match a version it was not built from). Every notebook
+whose state row arrives therefore reads as stale there: its KG caches and analysis ledger are rebuilt on
+next use and the topic-board freshness gate is open until the next refresh. On SQLite that is every
+existing notebook, at upgrade time. It is the same invalidation the upgrade's own first full rebuild per
+library causes on the receiving side when its rewritten state row is exported next (that rebuild is due on
+every library anyway), so a capture-on deployment gets one additional, earlier round of it per notebook,
+not a different kind of effect.
 
 ## Promotion provenance in public libraries
 
@@ -882,9 +890,14 @@ boards cold in one pass (the change-capture note there covers the `board_key` ba
 and `community_partition_mode` (0 / '' on every existing notebook) and backfills each existing
 board's `board_key` with its id. The next rebuild of each notebook that actually rebuilds the board
 graph (刷新图谱 after the graph changed, the rebuild after a merge, `recluster_kg`) reads version 0
-and starts **cold**: its boards are partitioned from scratch once, by the new algorithm. A 刷新图谱
-on an unchanged graph only backfills the analysis ledger and partitions nothing, so it leaves the
-version at 0. There is no manual step and no extra pass; the cost is that rebuild's.
+and starts **cold**: its boards are partitioned from scratch once, by the new algorithm. The first
+刷新图谱 after this upgrade is such a rebuild for every notebook, graph changed or not: the same
+upgrade raises the clustering algorithm version (`CLUSTER_ALGO_VERSION` 4), so that refresh re-merges
+instead of skipping, and the board rebuild that closes a re-merge is forced and reads version 0.
+Only a refresh that skips the re-merge, which after that first one is any refresh on an unchanged
+graph, leaves the partition alone: it backfills the analysis ledger and partitions nothing (so it
+also leaves a pending cold-start request below standing). There is no manual step and no extra pass;
+the cost is that rebuild's.
 A cold start still reads the published boards to carry keys: a new board whose members are
 mostly an old board's (mutual best match, Jaccard >= 1/2) keeps that board's key, so the old id
 lives on as its key. Carrying compares members, and the first rebuild after this upgrade also

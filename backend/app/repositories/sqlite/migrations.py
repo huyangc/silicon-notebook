@@ -6210,8 +6210,16 @@ class SqliteMigrator:
         key-only upsert per existing state row for the seed space (SQLite
         only: PostgreSQL's ADD COLUMN default fires no trigger) and one per
         board for ``board_key`` (both backends). The next export re-sends
-        those rows as they are and the receiving side backfills the same
-        values: a difference in export volume, not in content.
+        those rows and the receiving side backfills the same values, so no
+        content changes; but the import advances ``kg_mutation_seq`` of
+        every ``unified_kg_state`` row it receives (``sync/import_.py``,
+        ``_UPSERT_VALUE_OVERRIDES``), so each of those notebooks reads as
+        stale on the target: its KG caches and analysis ledger are rebuilt on
+        next use and the topic-board gate is open until its next refresh.
+        That is the invalidation the upgrade's own first full rebuild per
+        library causes there as well (its rewritten state row is exported
+        next), so a capture-on deployment gets one additional, earlier round
+        of the same effect per notebook.
         """
         with self._connect() as db:
             self.add_column_if_missing(
