@@ -54,7 +54,9 @@ sections in parallel) decode it once. Memory: one source takes about
 defaults). No score memo: a source's section scores are one small matmul over
 cached vectors.
 
-``section_vector_stats()`` reports this run's vector reads for the trace.
+``section_vector_stats()`` reports this run's vector reads;
+``collect_section_vector_stats()`` one caller's own (the hint block's trace
+key). ``embedded_query_texts`` keeps only texts this run already embedded.
 """
 from __future__ import annotations
 
@@ -63,8 +65,10 @@ import json
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Callable, Hashable, Iterable, Sequence
+from typing import Any, Callable, Hashable, Iterable, Iterator, Sequence
 
 import numpy as np
 
@@ -121,7 +125,14 @@ def section_source_admitted(svc: Any, notebook_id: str, source_id: str) -> bool:
       of a subjectless run): the source must also be one of its VISIBLE
       sources. ``allows`` admits any source of a mounted library without a
       per-notebook ceiling, hidden projections included; the chunk channel's
-      peer legs read only the visible list, and so does this.
+      peer legs read only the visible list, and so does this;
+    * the run's own library: a VISIBLE source, or one of the asker's own
+      hidden sources the ceiling carries (``hidden_source_ids``: their Memory,
+      the Knowhow they may read). ``allows`` alone admits every source there
+      while the local ceiling is off (a scope submitted for the library
+      dimension only), another member's Memory projection included.
+
+    Every "no" is the same empty answer a missing source gets.
     """
     if not notebook_id or not source_id:
         return False
@@ -132,9 +143,10 @@ def section_source_admitted(svc: Any, notebook_id: str, source_id: str) -> bool:
         return False
     if not scope.allows(notebook_id, source_id):
         return False
-    if scope.subjectless or notebook_id != scope.notebook_id:
-        return source_id in _visible_sources(svc, notebook_id)
-    return True
+    if source_id in _visible_sources(svc, notebook_id):
+        return True
+    own = not scope.subjectless and notebook_id == scope.notebook_id
+    return own and source_id in scope.hidden_source_ids
 
 
 def _max_scan(settings: Any) -> int:
@@ -334,9 +346,51 @@ class _VectorStats:
 
 _ZERO_STATS = _VectorStats().snapshot()
 
+#: The open ``collect_section_vector_stats`` scopes of this context (outermost
+#: first). A thread started with ``contextvars.copy_context().run`` inherits
+#: them, so a pool's reads count for the scope that started it.
+_STATS_SCOPES: ContextVar[tuple[_VectorStats, ...]] = ContextVar(
+    "section_vector_stats_scopes", default=(),
+)
+
 
 def _run_stats() -> _VectorStats:
     return memoized_retrieval_value(("section_vector_stats",), _VectorStats)
+
+
+def _stats_sinks() -> tuple[_VectorStats, ...]:
+    """Where a read is counted: the run's totals and every open scope. Outside
+    a retrieval run nothing is counted (both views then read zero)."""
+    if current_retrieval_run() is None:
+        return ()
+    return (_run_stats(), *_STATS_SCOPES.get())
+
+
+def _note_load(rows: int, elapsed_ms: float) -> None:
+    for stats in _stats_sinks():
+        stats.note_load(rows, elapsed_ms)
+
+
+def _note_process_hit() -> None:
+    for stats in _stats_sinks():
+        stats.note_process_hit()
+
+
+@contextmanager
+def collect_section_vector_stats() -> Iterator[_VectorStats]:
+    """Count the section-vector reads made inside this block (and in threads
+    it starts through ``contextvars.copy_context().run``) -- unlike the
+    run-wide ``section_vector_stats``, which concurrent report sections share.
+    ``.snapshot()`` gives the same four keys; ``vector_ms`` is wall-clock time
+    summed per read, so reads overlapping in a pool count their overlap more
+    than once. Like the run totals, nothing is counted outside a retrieval
+    run."""
+    stats = _VectorStats()
+    token = _STATS_SCOPES.set((*_STATS_SCOPES.get(), stats))
+    try:
+        yield stats
+    finally:
+        _STATS_SCOPES.reset(token)
 
 
 def section_vector_stats() -> dict[str, int]:
@@ -344,12 +398,15 @@ def section_vector_stats() -> dict[str, int]:
 
     * ``vectors_read`` -- vector rows read from the database (outline-wide
       loads plus a section read's own rows);
-    * ``vector_ms`` -- wall milliseconds spent in those reads and decodes;
+    * ``vector_ms`` -- wall-clock milliseconds spent in those reads and
+      decodes, summed per read (concurrent reads each count their own);
     * ``vector_loads`` -- how many such reads ran;
     * ``process_cache_hits`` -- sources served from the process-wide cache
       without a read.
 
-    All zero outside a retrieval run and in a run that read no vectors."""
+    All zero outside a retrieval run and in a run that read no vectors.
+    Shared by everything in the run (report sections in parallel included):
+    for one caller's own reads use ``collect_section_vector_stats``."""
     if current_retrieval_run() is None:
         return dict(_ZERO_STATS)
     return _run_stats().snapshot()
@@ -446,7 +503,7 @@ def _source_vectors(
         if matrix is None:
             kept, matrix, read = _rows_by_id(svc, notebook_id, ids, dim)
             db_rows = read
-        _run_stats().note_load(db_rows, (time.perf_counter() - started) * 1000.0)
+        _note_load(db_rows, (time.perf_counter() - started) * 1000.0)
         if not kept or matrix.size == 0:
             _emit_vectors_event(
                 svc, notebook_id, source_id,
@@ -470,7 +527,7 @@ def _source_vectors(
             max_bytes=budget, keep=lambda value: value.complete,
         )
         if hit:
-            _run_stats().note_process_hit()
+            _note_process_hit()
         return value
 
     value, _hit = _run_vector_memo().get(
@@ -494,13 +551,14 @@ def _cached_source_vectors(
         return None
     cached = process.peek(_process_key(svc, notebook_id, source_id, outline, dim))
     if cached is not None:
-        _run_stats().note_process_hit()
+        _note_process_hit()
     return cached
 
 
 def _warm_rows(svc: Any, notebook_id: str, ids: Sequence[str], dim: int):
     """``(kept ids, matrix)`` masked out of the warm notebook matrix, or
-    ``([], None)`` when there is none to borrow in this dimension."""
+    ``([], None)`` when there is none to borrow in this dimension, or it holds
+    none of these chunks."""
     version = _warm_matrix_version(svc, notebook_id)
     if version is None:
         return [], None
@@ -508,6 +566,11 @@ def _warm_rows(svc: Any, notebook_id: str, ids: Sequence[str], dim: int):
     if warm is None or warm[1].ndim != 2 or warm[1].shape[1] != dim:
         return [], None
     kept, matrix = svc._mask_vector_matrix(warm[0], warm[1], set(ids))
+    if not kept:
+        # The warm matrix holds none of this source's chunks (a source embedded
+        # after the matrix was built under a version that has not moved yet):
+        # read its own rows instead of concluding it has no vectors.
+        return [], None
     return kept, matrix
 
 
@@ -539,6 +602,20 @@ def _query_vectors(svc: Any, texts: Sequence[str]) -> list[np.ndarray]:
         if array.ndim == 1 and norm > 0:
             vectors.append(array / norm)
     return vectors
+
+
+def embedded_query_texts(settings: Any, texts: Iterable[str]) -> list[str]:
+    """The texts (stripped, deduplicated) whose query embedding this retrieval
+    run has ALREADY computed (``RetrievalRunState.peek_embedding``, the key
+    ``_embed_query`` memoises under) -- so a caller that only wants to reuse
+    vectors, like the section-hint block, adds no embedding call. Outside a
+    run nothing is memoised and every text is returned."""
+    cleaned = _clean_texts(texts)
+    run = current_retrieval_run()
+    if run is None:
+        return cleaned
+    limit = int(settings.embed_truncate_chars)
+    return [text for text in cleaned if run.peek_embedding(text[:limit]) is not None]
 
 
 def _clean_texts(query_texts: Iterable[str]) -> list[str]:
@@ -611,7 +688,7 @@ def _read_similarities(
     if cached is None:
         started = time.perf_counter()
         kept, matrix, read = _rows_by_id(svc, notebook_id, chunk_ids, dim)
-        _run_stats().note_load(read, (time.perf_counter() - started) * 1000.0)
+        _note_load(read, (time.perf_counter() - started) * 1000.0)
         cached = _SourceVectors(
             {chunk_id: position for position, chunk_id in enumerate(kept)}, matrix,
         ) if kept else _NO_VECTORS
@@ -695,6 +772,8 @@ __all__ = [
     "OutlineRow",
     "SECTION_VECTOR_RUN_MEMO_MAX_BYTES",
     "SectionVectorCache",
+    "collect_section_vector_stats",
+    "embedded_query_texts",
     "section_chunk_similarities",
     "section_chunks",
     "section_outline",

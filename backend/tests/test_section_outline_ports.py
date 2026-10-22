@@ -159,9 +159,9 @@ def _wire(repo, monkeypatch):
     return candidates, embedder, events
 
 
-def _scope(visible):
+def _scope(visible, hidden=()):
     return {"mode": "include", "source_ids": list(visible),
-            "hidden_source_ids": [], "narrowed": True, "owner_id": ""}
+            "hidden_source_ids": list(hidden), "narrowed": True, "owner_id": ""}
 
 
 # ------------------------------------------------------------ shared checks
@@ -618,6 +618,116 @@ def check_process_cache_reuses_across_runs(repo, seed, monkeypatch):
     assert len(reads) == 2
 
 
+def check_own_library_hidden_sources(repo, seed, monkeypatch):
+    """The run's own library: a hidden source (another member's Knowhow /
+    Memory projection) is neither outlined nor read while only the library
+    dimension was submitted (``allows`` admits everything there); the asker's
+    own hidden source the ceiling carries stays readable. Out of bounds reads
+    exactly like missing."""
+    nb = _new_notebook(repo, "spec")
+    seed.report(nb, "src-r")
+    seed.source(nb, "src-theirs", title="Their Knowhow", kind="knowhow")
+    seed.chunk(nb, "src-theirs", "t-1", "Private", "their knowhow cell")
+    seed.source(nb, "src-mine", title="My Knowhow", kind="knowhow")
+    seed.chunk(nb, "src-mine", "m-1", "Mine", "my knowhow cell")
+    _wire(repo, monkeypatch)
+    retrieval = repo.retrieval
+    missing = retrieval.section_outline(nb, "src-absent")
+    library_only = {"mode": "include", "notebook_ids": [], "narrowed": True}
+    with retrieval_run(run_kind="ask_reasoning"):
+        with source_scope_context(nb, None, library_only):
+            from app.services.source_scope import current_source_scope
+
+            assert current_source_scope().allows(nb, "src-theirs")
+            assert retrieval.section_outline(nb, "src-theirs") == missing
+            assert retrieval.section_chunks(
+                nb, "src-theirs", ["t-1"], 12, "q") == []
+            assert retrieval.section_outline(nb, "src-r")[0]
+    with retrieval_run(run_kind="ask_reasoning"):
+        with source_scope_context(nb, _scope(["src-r"], hidden=["src-mine"])):
+            assert retrieval.section_outline(nb, "src-mine")[0] == (
+                ("m-1", "Mine", False),)
+            assert [c.chunk_id for c in retrieval.section_chunks(
+                nb, "src-mine", ["m-1"], 12, "q")] == ["m-1"]
+            assert retrieval.section_outline(nb, "src-theirs") == missing
+
+
+def check_warm_matrix_without_the_source_reads_its_rows(repo, seed, monkeypatch):
+    """A warm notebook matrix that holds none of the source's chunks is not
+    "no vectors": the source's own rows are read, no event."""
+    nb = _new_notebook(repo, "spec")
+    seed.report(nb, "src-r")
+    candidates, _embedder, events = _wire(repo, monkeypatch)
+    reads = _count_vector_reads(candidates, monkeypatch)
+    monkeypatch.setattr(candidates, "notebook_copy_stats",
+                        lambda _nb: {"copyable": True})
+    monkeypatch.setattr(candidates, "_warm_vector_matrix_version",
+                        lambda _db, _nb, _table: ("v",))
+    borrowed: list = []
+    monkeypatch.setattr(
+        candidates, "_borrow_vector_matrix",
+        lambda _nb, _table, version: borrowed.append(version) or (
+            ["elsewhere"], np.ones((1, 4), dtype=np.float32)),
+    )
+    sims = repo.retrieval.section_chunk_similarities(
+        nb, "src-r", ["c-571", "c-572"], ["loss question"])
+    assert borrowed == [("v",)]
+    assert sims == pytest.approx({"c-571": 1.0, "c-572": 0.6})
+    assert len(reads) == 1
+    assert events.of("section_vectors_unavailable") == []
+
+
+def check_stats_scopes_count_only_their_own_reads(repo, seed, monkeypatch):
+    """Two callers in one run (report sections in parallel): each
+    ``collect_section_vector_stats`` scope sees its own reads; the run totals
+    see both; a thread started with ``copy_context().run`` counts for the
+    scope that started it."""
+    import contextvars
+    import threading
+
+    from app.services.section_retrieval import (
+        collect_section_vector_stats,
+        section_vector_stats,
+    )
+
+    nb = _new_notebook(repo, "spec")
+    seed.report(nb, "src-r")
+    seed.report(nb, "src-s", rows=tuple(
+        (f"s-{cid}", *rest) for cid, *rest in REPORT))
+    _wire(repo, monkeypatch)
+    seen: dict = {}
+
+    def section(source_id, first_id):
+        with collect_section_vector_stats() as stats:
+            repo.retrieval.section_chunk_similarities(
+                nb, source_id, [first_id], ["loss question"])
+        seen[source_id] = stats.snapshot()
+
+    with retrieval_run(run_kind="ask_reasoning"):
+        threads = [
+            threading.Thread(target=contextvars.copy_context().run,
+                             args=(section, source_id, first_id))
+            for source_id, first_id in (("src-r", "c-571"), ("src-s", "s-c-571"))
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+        with collect_section_vector_stats() as outer:
+            worker = threading.Thread(
+                target=contextvars.copy_context().run,
+                args=(repo.retrieval.section_chunks, nb, "src-r", ["c-573"], 12,
+                      "loss question"))
+            worker.start()
+            worker.join(10)
+        totals = section_vector_stats()
+    for source_id in ("src-r", "src-s"):
+        assert seen[source_id]["vector_loads"] == 1
+        assert seen[source_id]["vectors_read"] == 5
+    assert outer.snapshot()["vector_loads"] == 0  # the run memo held src-r
+    assert totals["vector_loads"] == 2 and totals["vectors_read"] == 10
+
+
 # ------------------------------------------------------------- SQLite only
 @pytest.fixture
 def backend(tmp_path, monkeypatch):
@@ -657,6 +767,9 @@ CHECKS = (
     check_read_limit_is_clamped_and_batched,
     check_expected_dim_on_both_vector_paths,
     check_process_cache_reuses_across_runs,
+    check_own_library_hidden_sources,
+    check_warm_matrix_without_the_source_reads_its_rows,
+    check_stats_scopes_count_only_their_own_reads,
 )
 
 
@@ -1074,3 +1187,17 @@ def test_process_cache_never_crosses_databases(tmp_path, monkeypatch):
                 "nb-same", "src-same", ["c-same"], ["loss question"]))
     assert answers == [pytest.approx({"c-same": 1.0}), pytest.approx({"c-same": 0.0})]
     assert shared.stats()["entries"] == 2
+
+
+def test_embedded_query_texts_keeps_only_what_the_run_embedded(backend, monkeypatch):
+    from app.services.section_retrieval import embedded_query_texts
+
+    repo, _seed = backend
+    candidates, embedder, _events = _wire(repo, monkeypatch)
+    texts = [" loss question ", "crosstalk question", "", "loss question"]
+    assert embedded_query_texts(candidates.settings, texts) == [
+        "loss question", "crosstalk question"]  # no run: nothing to peek
+    with retrieval_run(run_kind="ask_reasoning"):
+        repo.retrieval.embed_query("loss question")
+        assert embedded_query_texts(candidates.settings, texts) == ["loss question"]
+    assert embedder.calls == ["loss question"]

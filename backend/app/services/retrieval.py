@@ -1556,7 +1556,8 @@ class ReasoningPassageOrder(NamedTuple):
 
     ``passages`` is the full reordered partition (nothing dropped).
     ``prefix`` counts the passages at its front that hold a reserved seat --
-    the exact prefix plus the active / per-library prefix -- which is what the
+    the exact prefix, the section-read seats and the active / per-library
+    prefix -- which is what the
     passage floor (``passage_floor``) protects from the structured side.
     """
 
@@ -1576,8 +1577,8 @@ def passage_floor(
     passages whole (``_rendered_chars``: the ``kN: `` prefix plus the text per
     line, one newline between lines, after the same same-source
     de-duplication ``chunk_context`` applies) and ``heading_chars`` is the
-    segment heading with its joiner -- the exact prefix AND the active /
-    per-library prefix (J6).  Measured with the renderer's own measure, so a
+    segment heading with its joiner -- the exact prefix, the section-read
+    seats AND the active / per-library prefix (J6).  Measured with the renderer's own measure, so a
     structured side that leaves the partition at least this much never has
     to change.  The half cap keeps the structured side's own share.  ``0``
     with no reserved passage (no passage, or no exact hit and no library

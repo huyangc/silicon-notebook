@@ -218,7 +218,10 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
         columns=("source_id", "ordinal"),
         predicate="",
         predicate_shape="",
-        serves="search.py:chunk_section_rows (chunks_by_section)",
+        serves=(
+            "search.py:chunk_section_rows (chunks_by_section); "
+            "search.py:source_outline_rows (the section outline's bounded scan)"
+        ),
     ),
     HotpathIndexSpec(
         name="idx_sources_nb_hidden_type",

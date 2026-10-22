@@ -7884,8 +7884,9 @@ class AskService:
 
         So the floor -- ``retrieval.passage_floor``: the REAL rendered cost of
         the reserved-seat prefix of the very order ``_answer_reasoning`` will
-        render (``reasoning_order_for``: exact prefix plus active / per-library
-        prefix), plus the passage segment's heading, capped at half the
+        render (``reasoning_order_for``: exact prefix, then the section-read
+        seats of passages a ``read_section`` read back whole, then the active /
+        per-library prefix), plus the passage segment's heading, capped at half the
         partition -- is computed once and becomes ``room``: what the
         structured side may take in total, ``partition - floor`` less the
         collection map block that sits ahead of it.

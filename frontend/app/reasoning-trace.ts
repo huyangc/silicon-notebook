@@ -36,7 +36,7 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   // 两个词刻意带"章节"以区别于上面三种按整篇/按语义的读取。
   browse_sections: "章节目录",
   read_section: "按章节读取",
-  // outline =大纲便签(update_outline reflect 动作写的那一步);仅 exhaustive 档
+  // outline = 大纲便签(update_outline reflect 动作写的那一步);仅 exhaustive 档
   // 且 REASONING_OUTLINE_ENABLED 开启时出现(设计文档 §3.1)。
   outline: "大纲",
   // profile = Agent 对这个库的已有理解被带进了这一轮的规划/反思(Agentic Memory
@@ -90,7 +90,7 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
 
 // next_action 取值来自 backend/app/services/prompts.py 的状态机决策(reflect 步骤
 // next-step 提议),原样显示会把英文动作名泄漏给用户。
-// 全部 14 个真实取值见 reasoning_retrieval.py 的 next_action if/elif 分发链——从
+// 全部 16 个真实取值见 reasoning_retrieval.py 的 next_action if/elif 分发链——从
 // `decision.next_action == "answer" or decision.sufficient` 起,到
 // `elif decision.next_action == "expand_community":` 止(PR-2 在其中插入了
 // enumerate_elements/enumerate_kg_objects 两个,精确查找通道插入了 exact_lookup
@@ -98,7 +98,8 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
 // consult_memory(`CONSULT_MEMORY_ACTION`,仅 deep 及以上档且经验注入闸开启时
 // 出现)一个,T1 插入了 search_chunks(在原文段落里检索,无图时是唯一进入大预算
 // 分区的一等入口,有图 run 也可选)一个,PR-A 插入了 read_document(按篇读取原文
-// 取样)一个,原为 7 个)。按分支内容定位而非行号:本仓库的行号指针已知会随后续
+// 取样)一个,章节导航检索 PR-2 插入了 browse_sections(查看一篇文档的章节目录)与
+// read_section(按章节读取原文)两个,原为 7 个)。按分支内容定位而非行号:本仓库的行号指针已知会随后续
 // 改动腐烂(见 test_architecture_documentation 一类语义化守卫的教训),这里不
 // 重蹈覆辙。用「下一步意图」措辞而非机制名(ppr/community/chain/enumerate/
 // exact_lookup/update_outline/consult_memory/read_document 这些是内部机制,不该
@@ -110,7 +111,8 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
 // (「枚举来源清单: …」——后端 `_collection_label` 拼的)。update_outline 则相反:
 // 它是货真价实的第 11 个动作 id(不是参数值),所以这张表要加一行。read_document
 // (PR-A)同理是货真价实的第 14 个动作 id;它的 source/coverage 是这个动作自己的
-// 参数值,不因此再加别的行。
+// 参数值,不因此再加别的行。browse_sections / read_section(章节导航检索)是第 15、
+// 16 个动作 id,各加一行;它们的 source/under/query/section 同样只是参数值。
 const NEXT_ACTION: Record<string, string> = {
   answer: "开始作答",
   expand_graph: "顺着相关内容继续找",

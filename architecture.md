@@ -701,8 +701,10 @@ PostgreSQL KG 词法 producer 在同一召回词项和额度下选择 SQL 路径
   （大纲折叠、层级、范围、排名、地址簿、渲染，零 I/O）；`section_retrieval.py` 经 `RetrievalPort` 的
   `section_outline` / `section_chunk_similarities` / `section_chunks` 读大纲行、chunk 向量相似度与整节原文，
   来源天花板与可见来源判定只在这一层，越界与不存在同一个空结果；`reasoning_retrieval.py` 持有 run 内地址簿、
-  两个动作的执行体和线索块。三者共用一把闸 `section_navigation_active`，章节段落带 `section_read` 标志，
-  只在合成时占 `REASONING_SECTION_READ_RESERVE` 个保留席位。数值护栏见产品/API 文档的章节导航一节。
+  两个动作的执行体和线索块。开关闸 `section_navigation_active`（部署开关、调用方策略位、原文检索闸、档位、
+  端口在场、次数上限）只在推理层判定；检索层只做权限与边界（天花板、可见来源、扫描上限、归属核验），
+  不读这把闸；纯函数模块不读任何闸。章节段落带 `section_read` 标志，只在合成时占
+  `REASONING_SECTION_READ_RESERVE` 个保留席位。数值护栏见产品/API 文档的章节导航一节。
 
 工具参数、完整性判定、预算表和界面披露的完整合同统一见
 [产品/API：集合枚举工具](./docs/product-and-api_zh.md#集合枚举工具)；
