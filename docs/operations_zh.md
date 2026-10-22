@@ -128,22 +128,30 @@ bash scripts/cli.sh extensions services stop
 取消（直到会话转为就绪的那一刻都算）：回滚自己启动的部分（复用的会话不动），并删除启动器的回执。启动完成时控制器已经退出，已在运行的会话
 不依赖启动它的启动器。
 
-`npm run dev`（`scripts/dev.sh`）把两个服务留在前台，所以 Ctrl-C、TERM、HUP 就是它的
-正常退出方式，收尾与 `scripts/prod.sh` 在交接前被打断时完全同形：uvicorn 和 `next dev`
-都是启动器的直接子进程（各自用 `exec` 启动，前面没有 npm 或 shell 中间层），启动器同时
-给两者发 SIGTERM，信号直达服务本身。启动 `next dev` 之前，启动器先在 `frontend/` 下运行前端的
-UI 插件同步（`node scripts/sync-ui-plugins.mjs`，即 `npm run dev` 原先作为 `predev` 钩子执行的
-那一步），它同样是启动器自己的 `exec` 子进程：同步失败则不启动前端、停掉后端并以同步的退出码退出；
-同步期间收到 Ctrl-C、TERM、HUP，同步与后端同样被停掉。信号之后最多等待 `START_CLEANUP_GRACE_SECONDS`（默认
-10 秒，须为正整数，否则在启动任何东西之前以 2 退出），仍在运行的服务发 SIGKILL（stderr 会
-打印 `startup child PID <n> did not stop after SIGTERM; sending SIGKILL`），回收两者，最后才
-停止本次启动的配套服务。退出码：Ctrl-C 为 130，TERM 为 143，HUP 为 129，与 `prod.sh`
-一致。某个服务自己退出时，启动器以该服务的退出码退出，并用同样的方式停掉另一个。两个
-启动器都不给 uvicorn 传 `--timeout-graceful-shutdown`，上述宽限期是退出时限的唯一约束。
-
 配置或有效启动环境改变则必须显式 stop/start。失败只回收本次新建进程，不影响先前复用
 的会话或外部服务。`stop` 按依赖反序停止，核对已保存的进程归属，先优雅终止，再
 强制清理；不按占用端口或单独一个 PID 识别目标。
+
+`npm run dev`（`scripts/dev.sh`）把两个服务留在前台，所以 Ctrl-C、TERM、HUP 就是它的
+正常退出方式。收尾与 `scripts/prod.sh`（交接前被打断时）共用 `scripts/launcher_cleanup.sh`。
+uvicorn 和 `next dev` 都是启动器的直接子进程（各自用 `exec` 启动，前面没有 npm 或 shell
+中间层），启动器同时给两者发 SIGTERM，信号直达服务本身；随后最多等待
+`START_CLEANUP_GRACE_SECONDS`（默认 10 秒，须为正整数，否则在启动任何东西之前以 2 退出），
+仍在运行的服务发 SIGKILL（stderr 会打印 `startup child PID <n> did not stop after SIGTERM;
+sending SIGKILL`），回收两者，最后才停止本次启动的配套服务。退出码：Ctrl-C 为 130，
+TERM 为 143，HUP 为 129。
+
+等待期间再按 Ctrl-C（uvicorn 会提示 "CTRL+C to force quit"）或再收到 TERM、HUP，不会杀死
+启动器：它立即结束等待，对仍在运行的服务发 SIGKILL，配套服务照常停止、回执照常删除，
+退出码仍是第一个信号的。信号来得太早、还没来得及记下 pid 的子进程（信号落在 fork 与赋值
+之间）会经 `$!` 找回并同样停止。
+
+`dev.sh` 启动 `next dev` 之前，先在 `frontend/` 下以自己的直接子进程运行前端的 UI 插件同步
+（`node scripts/sync-ui-plugins.mjs`，即 `npm run dev` 原先作为 `predev` 钩子执行的那一步）。
+同步失败则不启动前端、停掉后端并以同步的退出码退出；同步期间被取消，同步与后端同样被停掉；
+同步期间后端先退出，启动器以后端的退出码退出并停掉同步。此后某个服务自己退出时，启动器以
+该服务的退出码退出，并用同样的方式停掉另一个。两个启动器都不给 uvicorn 传
+`--timeout-graceful-shutdown`，上述宽限期是退出时限的唯一约束。
 
 `status`、`logs`、`stop` 使用保存的运行状态，所以当前 TOML 被修复或删除后，旧
 会话仍可管理。`logs` 只显示安全的生命周期事件，不包含子进程原始输出、探测响应、
@@ -2970,7 +2978,6 @@ Excel 专业编译失败、来源解析终态失败，以及全部结构化 chat
 `artifact_available=false` 表示来源副本或模型正文未取得、已解决/删除或已清理，不代表可以
 改走其它路径读取用户原文件或模型输入。存活记录一旦到期就已经越过受支持的读取合同，即使
 独立磁盘盘点尚未观察到清理。
-
 
 ## 统一认证的启用与回退
 
