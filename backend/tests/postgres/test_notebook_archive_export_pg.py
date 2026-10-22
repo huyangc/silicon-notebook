@@ -60,6 +60,22 @@ def test_export_rows_equal_the_copy_snapshot_without_memory_pg(repo, out_dir):
     cases.check_export_equals_snapshot(repo, BACKEND, out_dir)
 
 
+def test_full_world_export_rows_equal_the_copy_snapshot_pg(repo, out_dir):
+    cases.check_full_world_export_equals_snapshot(repo, BACKEND, out_dir)
+
+
+def test_dirty_notebook_export_carries_no_clusters_pg(repo, out_dir):
+    cases.check_dirty_notebook_carries_no_clusters(repo, BACKEND, out_dir)
+
+
+def test_streaming_read_sees_one_snapshot_pg(repo):
+    cases.check_stream_reads_one_snapshot(repo, BACKEND)
+
+
+def test_stream_consumer_must_read_every_page_pg(repo, out_dir):
+    cases.check_consumer_must_read_every_page(repo, BACKEND, out_dir)
+
+
 def test_export_encodes_bytes_and_timestamps_portably_pg(repo, out_dir):
     cases.check_byte_columns_and_timestamps_are_portable(repo, BACKEND, out_dir)
 
@@ -94,26 +110,49 @@ def test_export_refuses_unknown_notebooks_and_leaves_no_part_file_pg(
     cases.check_unknown_notebook_and_cleanup(repo, BACKEND, out_dir, monkeypatch)
 
 
-def test_streaming_read_sees_one_snapshot_pg(repo):
-    """Every statement of the export reads the snapshot pinned by the root read: a chunk
-    committed by another connection while the stream is open (after ``sources``, before
-    ``chunks`` is read) does not appear in it."""
+def test_a_failing_consumer_leaves_no_server_cursor_on_the_connection_pg(repo, monkeypatch):
+    """The page generator is closed while the store still holds its connection: when
+    the consumer raises mid-table, the named ``copy_rows_*`` cursor is gone before the
+    connection goes back to the pool, and the transaction the pool gets back is the
+    store's own (nothing left for the next borrower to trip over)."""
+    import contextlib
+
     cases.seed(repo, BACKEND, cases.char_cases.full_world(), repo.storage_dir)
     store = repo._runtime.sharing_store
-    seen: dict[str, list] = {}
-    late_chunk = {
-        "id": "ck-late", "notebook_id": cases.NB, "source_id": "src-web",
-        "text": "committed mid-export", "element_ids": [], "created_at": cases.memory_cases.NOW,
-    }
+    database = store.database
+    real_connect = database.connect
+    at_release: list[dict] = []
 
-    def on_table(table, pages):
-        rows = [row for page in pages for row in page]
-        seen[table] = rows
-        if table == "sources":
-            with repo._runtime.database.write() as db:
-                _insert(db, "chunks", late_chunk)
+    @contextlib.contextmanager
+    def watched_connect():
+        with real_connect() as connection:
+            try:
+                yield connection
+            finally:
+                cursors = connection.execute(
+                    "SELECT name FROM pg_cursors WHERE name LIKE 'copy_rows_%%'"
+                ).fetchall()
+                at_release.append({"cursors": [row["name"] for row in cursors]})
 
-    store.iter_copy_rows(cases.NB, on_table=on_table)
-    assert "ck-late" not in {row["id"] for row in seen["chunks"]}
-    with repo._runtime.database.connect() as db:
-        assert db.execute("SELECT 1 FROM chunks WHERE id = 'ck-late'").fetchone()
+    class Boom(Exception):
+        pass
+
+    opened: list[str] = []
+
+    def failing(table, pages):
+        for _page in pages:
+            if table == "knowledge_objects":
+                opened.append(table)
+                raise Boom(table)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(store_module, "COPY_STREAM_PAGE_ROWS", 1)
+        patched.setattr(database, "connect", watched_connect)
+        with pytest.raises(Boom):
+            store.iter_copy_rows(cases.NB, on_table=failing)
+    assert opened == ["knowledge_objects"]
+    assert at_release == [{"cursors": []}]
+    with database.connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) AS n FROM pg_cursors"
+        ).fetchone()["n"] == 0

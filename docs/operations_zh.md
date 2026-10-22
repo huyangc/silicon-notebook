@@ -1563,7 +1563,9 @@ bash scripts/cli.sh notebook inspect ./exports/nb-a.snbk [--json]
   大笔记本的这个事务会在整个导出期间保持打开，推迟 vacuum 的回收水位。SQLite 持有一个 WAL 读快照，
   WAL 检查点推不过它。超大笔记本尽量选在业务低峰导出。
 - **文件。** 笔记本的 `storage/notebooks/<id>/` 与 `storage/assets/<id>/` 两棵目录在行事务之后读取
-  （与深拷贝一致）：只收普通文件；符号链接与特殊文件跳过，并在报告里计数。
+  （与深拷贝一致），只收普通文件。每个文件都以不跟随符号链接的方式打开，并在同一个描述符上确认是普通
+  文件：符号链接、FIFO、设备（包括列目录之后才被换成链接的）以及本身就是链接的目录根都会跳过并计数；
+  导出期间被删掉的文件计为缺失，导出继续。大于 1 MiB、压缩后会超出读取端压缩比上限的文件改为不压缩存放。
 - **导出时规范化。** 笔记本行去掉分享链接；`sources.file_path` 改写为相对笔记本文件目录的路径；
   指向导出范围之外的软指针被清空（`knowledge_objects.source_id`/`source_candidate_id`、
   `knowledge_source_facts.global_object_id`、`knowledge_source_fact_backfills.after_object_id`、
@@ -1573,8 +1575,11 @@ bash scripts/cli.sh notebook inspect ./exports/nb-a.snbk [--json]
 - **`--no-vectors`** 让四张向量表为空（`vectors_included=false`）；问题向量（`chunk_questions.vector`，
   非空列）照常携带。manifest 按 embedding 工作负载记录所绑模型的协议与名称、`EMBED_DIM` 和
   `float32-le`，未绑定的记 `null`，供导入端判断向量能否沿用。
-- **原子落盘。** 先写 `<out>.part`，完成后才改名为最终文件，`manifest.json` 是最后一个条目；失败时删掉
-  part 文件。已存在的输出文件绝不覆盖。
+- **原子落盘。** 先写唯一命名的 `<out>.<随机串>.part`，完成后用硬链接发布（`<out>` 已存在则失败；不支持
+  硬链接的文件系统先以 `O_EXCL` 占住 `<out>`），`manifest.json` 是最后一个条目；失败时删掉 part 文件。已存在
+  的输出文件绝不覆盖，两个导出写同一路径也不会互相破坏：后完成的那个失败。
+- **多本导出**按顺序进行、遇到第一个失败即停；已写好的文件保留，`--json` 无论成败都输出
+  `{"exported": [...], "failed": [...]}`。
 - **`inspect`** 只读文件本身：按读取端上限检查 zip 目录（条目数、解压总量、单条压缩比、JSONL 单行长度，
   具名常量在 `app.domain.notebook_archive`）、条目名白名单（拒绝绝对路径、`..`、反斜杠、重名、加密或
   非普通文件条目）、manifest 字段与格式版本（更新的版本被拒绝），以及每张表和每个文件的大小、sha256

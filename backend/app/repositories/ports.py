@@ -4446,6 +4446,12 @@ class CopyRowsOutcome:
 CopyTableConsumer = Callable[[str, Iterator[list[dict]]], None]
 
 
+class CopyRowsNotConsumedError(RuntimeError):
+    """An ``iter_copy_rows`` consumer returned without reading every page of
+    its table: the pages hold a cursor that must not outlive the store's
+    connection (``app.repositories.copy_stream``)."""
+
+
 @runtime_checkable
 class SharingStorePort(Protocol):
     def bind_insert_row(self, insert_row: Callable) -> None: ...

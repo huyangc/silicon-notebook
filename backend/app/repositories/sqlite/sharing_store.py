@@ -13,6 +13,7 @@ from app.repositories.copy_memory_evidence import (
     strip_memory_evidence,
     strip_row_memory_evidence,
 )
+from app.repositories.copy_stream import feed_table, no_pages, single_page
 from app.repositories.group_rows import (
     GROUP_GRANT_COUNT_SQL,
     GROUP_GRANT_EXISTS_SQL,
@@ -1329,8 +1330,10 @@ class SharingStore:
         the returned ``CopyRowsOutcome`` instead. Mirrors the PostgreSQL twin.
 
         ``on_table(table, pages)`` is called once per table in snapshot order
-        and must consume ``pages`` before returning. A table in
-        ``skip_tables`` is not read: its consumer gets an empty iterator."""
+        and must consume ``pages`` before returning: ``copy_stream.feed_table``
+        closes the cursor on every path while the connection is still held, and
+        raises ``CopyRowsNotConsumedError`` when pages are left unread. A table
+        in ``skip_tables`` is not read: its consumer gets an empty iterator."""
         with self.database.connect() as db:
             db.execute("BEGIN")
             root_table, root_sql = _COPY_SNAPSHOT_QUERIES[0]
@@ -1347,12 +1350,12 @@ class SharingStore:
                 row["id"] for row in db.execute(_MEMORY_SOURCE_IDS_SQL, (notebook_id,))
             ) if memory else frozenset()
             keys_box: dict = {}
-            on_table(root_table, iter([roots]))
+            feed_table(on_table, root_table, single_page(roots))
             for table, sql in queries[1:]:
                 if table in skip_tables:
-                    on_table(table, iter(()))
+                    feed_table(on_table, table, no_pages())
                     continue
-                on_table(table, self._copy_pages(
+                feed_table(on_table, table, self._copy_pages(
                     db, sql, notebook_id,
                     memory_source_ids if table in EVIDENCE_TABLES else frozenset(),
                     keys_box if memory and table == "concept_clusters" else None,

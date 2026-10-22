@@ -6,8 +6,11 @@ read (``SharingStorePort.iter_copy_rows``) -- the deep copy's own closure,
 statements and Memory rules (ruling M2: no Memory, nothing derived from one, no
 Memory evidence inside kept rows), paged inside one read transaction and NOT
 bounded by the copy-size limits, so a notebook too large to copy can still be
-exported. Each table goes into its zip entry as it streams; nothing holds more
-than one page of rows.
+exported. Each table goes into its zip entry as it streams, one page of rows in
+memory at a time. What does grow with the notebook: the normaliser's id sets
+(every exported source and knowledge object id, the referenced object types),
+the zip's in-memory directory (one ``ZipInfo`` per entry) and the
+``files.jsonl`` index, which spills to a temporary file past 8 MiB.
 
 What the export changes on the way out (``_Normalizer``), so that a file this
 build wrote passes the importer's strict reference check:
@@ -18,25 +21,37 @@ build wrote passes the importer's strict reference check:
 * soft pointers the deep copy passes through unmapped (``map.get(x, x)``) are
   cleared when they point outside the exported closure; an asset row whose
   source is gone is dropped together with its file; a cluster row whose member
-  object is not exported is dropped;
+  object, or the object its canonical id was minted from, is not exported is
+  dropped;
 * mount edges are not carried at all (an import never mounts); their number is
   recorded in ``manifest.excluded``.
 
 Files are the notebook's ``storage/notebooks/<id>/`` and ``storage/assets/<id>/``
-trees, read after the row transaction (as the deep copy does): regular files
-only, symbolic links and special files skipped and counted. The archive is
-written to ``<out>.part`` and renamed into place only when complete, the
-manifest being its last entry; any failure removes the part file.
+trees, read after the row transaction (as the deep copy does). Each file is
+opened ``O_NOFOLLOW | O_NONBLOCK`` and checked to be a regular file on that same
+descriptor, so a symbolic link, FIFO or device -- including one swapped in after
+the directory listing -- is skipped and counted, and a file that vanished since
+the listing is counted as missing; either way the export continues. A large
+file that would compress beyond the reader's ratio limit is stored uncompressed.
+
+The archive is written to a uniquely named ``<out>.<random>.part`` (created
+``O_EXCL``) and published with a hard link, which fails if ``<out>`` exists, so
+an existing file is never overwritten and two exports to one path cannot
+corrupt each other; the manifest is the last entry; any failure removes the
+part file.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import errno
 import functools
 import os
+import secrets
 import stat
 import tempfile
 import zipfile
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Protocol
@@ -89,6 +104,11 @@ class NotebookExportError(RuntimeError):
     operator and never carries row content."""
 
 
+class NotebookNotFoundError(KeyError):
+    """The notebook does not exist or is being deleted (the store's
+    liveness-filtered root read found no row)."""
+
+
 class CopyRowsReader(Protocol):
     """The one store capability an export needs."""
 
@@ -110,6 +130,8 @@ class ExportReport:
     files: int
     file_bytes: int
     skipped_links: int
+    #: Files listed in the tree that were gone by the time they were opened.
+    missing_files: int
     vectors_included: bool
     #: ``<table>.<column>`` -> how many values the export cleared or rows it
     #: dropped because they pointed outside the exported closure.
@@ -168,16 +190,16 @@ def export_notebook(
 ) -> ExportReport:
     """Write ``notebook_id`` to ``out_path`` (see the module docstring).
 
-    Raises ``KeyError`` when the notebook does not exist or is being deleted,
-    ``NotebookExportError`` when the output already exists or the archive would
-    break a reader limit. The output's directory must exist."""
+    Raises ``NotebookNotFoundError`` when the notebook does not exist or is being
+    deleted, ``NotebookExportError`` when the output already exists (checked
+    before and again at publication) or the archive would break a reader limit.
+    The output's directory must exist."""
     out_path = Path(out_path)
     if out_path.exists():
         raise NotebookExportError(f"输出文件已存在: {out_path}")
     if not out_path.parent.is_dir():
         raise NotebookExportError(f"输出目录不存在: {out_path.parent}")
-    part = out_path.with_name(out_path.name + PART_SUFFIX)
-    writer = _ArchiveWriter(part)
+    writer = _ArchiveWriter.create(out_path)
     try:
         report = _write_archive(
             writer, rows, notebook_id, out_path,
@@ -187,11 +209,42 @@ def export_notebook(
             exported_at=(now or _utc_now)().astimezone(timezone.utc).isoformat(),
         )
         writer.close()
-        os.replace(part, out_path)
+        _publish(writer.part, out_path)
     except BaseException:
         writer.abort()
         raise
     return dataclasses.replace(report, archive_bytes=out_path.stat().st_size)
+
+
+def _publish(part: Path, out_path: Path) -> None:
+    """Give the finished part file its final name without ever replacing an
+    existing file: a hard link fails with ``EEXIST`` when ``out_path`` exists.
+    On a filesystem without hard links, ``out_path`` is first claimed with
+    ``O_EXCL`` (same refusal) and the part file renamed over that claim."""
+    try:
+        os.link(part, out_path)
+    except FileExistsError:
+        raise NotebookExportError(f"输出文件已存在: {out_path}") from None
+    except OSError as exc:
+        if exc.errno not in _NO_HARD_LINKS:
+            raise
+        try:
+            os.close(os.open(out_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+        except FileExistsError:
+            raise NotebookExportError(f"输出文件已存在: {out_path}") from None
+        os.replace(part, out_path)
+        return
+    part.unlink()
+
+
+#: ``os.link`` errors that mean "this filesystem has no hard links".
+_NO_HARD_LINKS = frozenset(
+    code for code in (
+        errno.EPERM, errno.EXDEV, errno.EMLINK,
+        getattr(errno, "ENOTSUP", None), getattr(errno, "EOPNOTSUPP", None),
+        getattr(errno, "ENOSYS", None),
+    ) if code is not None
+)
 
 
 def _utc_now() -> datetime:
@@ -216,14 +269,23 @@ def _write_archive(
     normalizer = _Normalizer(notebook_root)
     tables: dict[str, TableEntry] = {}
 
+    handed: list[str] = []
+
     def on_table(table: str, pages: Iterator[list[dict]]) -> None:
+        handed.append(table)
         tables[table] = writer.write_rows(table, pages, normalizer)
 
-    outcome = rows.iter_copy_rows(
-        notebook_id,
-        on_table=on_table,
-        skip_tables=frozenset() if include_vectors else frozenset(VECTOR_TABLES),
-    )
+    try:
+        outcome = rows.iter_copy_rows(
+            notebook_id,
+            on_table=on_table,
+            skip_tables=frozenset() if include_vectors else frozenset(VECTOR_TABLES),
+        )
+    except KeyError as exc:
+        # Only the root read's own refusal, raised before any table is handed out.
+        if not handed and exc.args == (notebook_id,):
+            raise NotebookNotFoundError(notebook_id) from None
+        raise
     if tuple(tables) != ARCHIVE_TABLES:
         raise NotebookExportError("复制闭包的表集合与导出格式不符，请升级导出格式版本")
     files = _FileIndex(writer)
@@ -265,6 +327,7 @@ def _write_archive(
         files=summary.count,
         file_bytes=summary.bytes,
         skipped_links=files.skipped,
+        missing_files=files.missing,
         vectors_included=include_vectors,
         normalized=dict(sorted(normalizer.counts.items())),
         missing_source_files=missing,
@@ -298,6 +361,23 @@ def _row_encoder(table: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
             if column.data_type == "timestamp with time zone"
         ],
     )
+
+
+def cluster_seed_object_id(canonical_id: str) -> "str | None":
+    """The knowledge object id a cluster's canonical id was minted from, or None.
+
+    ``concept_clusters.canonical_id`` is never a bare object id: every writer
+    builds it as ``<type prefix><seed>`` (``kg_merge``: ``id_prefix + seed``,
+    prefixes ``K-`` / ``KL-`` / ``KF-`` / ``KP-``). Only when an object's name
+    normalises to nothing does the seed fall back to ``~<object id>``
+    (``kg_merge.seed_or_unique``), so the id embeds an object id after the
+    prefix. Python twin of ``memory_sql.cluster_seed_object_id`` (both
+    backends): ``K-~ko-...`` -> from offset 3, ``K?-~ko-...`` -> from offset 4."""
+    if canonical_id.startswith("K-~ko-"):
+        return canonical_id[3:]
+    if canonical_id[:1] == "K" and canonical_id[2:7] == "-~ko-":
+        return canonical_id[4:]
+    return None
 
 
 class _Normalizer:
@@ -406,6 +486,13 @@ class _Normalizer:
         if str(row.get("member_object_id") or "") not in self.object_ids:
             self._note("concept_clusters.member_object_id")
             return None
+        seed = cluster_seed_object_id(str(row.get("canonical_id") or ""))
+        if seed is not None and seed not in self.object_ids:
+            # Minted from an object this export does not carry (gone, or not in
+            # the closure): the same "cannot prove it is not stale" rule as the
+            # copy's ``_visible_cluster``.
+            self._note("concept_clusters.canonical_id")
+            return None
         return row
 
     def _row_notebook_object_schemas(self, row: dict) -> dict:
@@ -453,26 +540,41 @@ class _Normalizer:
 
 
 class _ArchiveWriter:
-    """The zip being written: forced ZIP64, deflate, one entry open at a time,
-    every entry counted against the reader limits as it closes."""
+    """The zip being written: forced ZIP64, deflate (stored for a file that
+    would inflate beyond the ratio limit), one entry open at a time, every entry
+    counted against the reader limits as it closes."""
 
-    def __init__(self, part: Path) -> None:
-        self._part = part
-        self._zip = zipfile.ZipFile(part, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True)
+    def __init__(self, part: Path, handle) -> None:
+        self.part = part
+        self._handle = handle
+        self._zip = zipfile.ZipFile(
+            handle, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True
+        )
         self._entries = 0
         self._uncompressed = 0
 
-    def _info(self, name: str) -> zipfile.ZipInfo:
+    @classmethod
+    def create(cls, out_path: Path) -> "_ArchiveWriter":
+        """A fresh, uniquely named part file beside ``out_path`` (``O_EXCL``)."""
+        while True:
+            part = out_path.with_name(f"{out_path.name}.{secrets.token_hex(6)}{PART_SUFFIX}")
+            try:
+                fd = os.open(part, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o644)
+            except FileExistsError:
+                continue
+            return cls(part, os.fdopen(fd, "w+b"))
+
+    def _info(self, name: str, compress_type: int) -> zipfile.ZipInfo:
         info = zipfile.ZipInfo(name, date_time=_ENTRY_DATE)
-        info.compress_type = zipfile.ZIP_DEFLATED
+        info.compress_type = compress_type
         info.external_attr = _ENTRY_MODE
         return info
 
-    def _open(self, name: str):
+    def _open(self, name: str, compress_type: int = zipfile.ZIP_DEFLATED):
         self._entries += 1
         if self._entries > MAX_ENTRIES:
             raise NotebookExportError("导出文件的条目数超过读取端上限")
-        return self._zip.open(self._info(name), "w", force_zip64=True)
+        return self._zip.open(self._info(name, compress_type), "w", force_zip64=True)
 
     def _closed(self, name: str) -> None:
         info = self._zip.getinfo(name)
@@ -513,11 +615,16 @@ class _ArchiveWriter:
             sha256=digest.hexdigest(),
         )
 
-    def write_file(self, name: str, path: Path) -> DigestCounter:
+    def write_file(self, name: str, fd: int, size: int) -> DigestCounter:
+        """One regular file, read from an already-verified descriptor."""
+        compress_type = (
+            zipfile.ZIP_DEFLATED if _deflate_within_ratio(fd, size) else zipfile.ZIP_STORED
+        )
+        os.lseek(fd, 0, os.SEEK_SET)
         digest = DigestCounter()
-        with path.open("rb") as source, self._open(name) as entry:
+        with self._open(name, compress_type) as entry:
             while True:
-                block = source.read(_COPY_BLOCK)
+                block = os.read(fd, _COPY_BLOCK)
                 if not block:
                     break
                 entry.write(block)
@@ -544,16 +651,42 @@ class _ArchiveWriter:
 
     def close(self) -> None:
         self._zip.close()
+        self._handle.close()
 
     def abort(self) -> None:
+        for close in (self._zip.close, self._handle.close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 -- the part file is removed either way
+                pass
         try:
-            self._zip.close()
-        except Exception:  # noqa: BLE001 -- the part file is removed either way
-            pass
-        try:
-            self._part.unlink()
+            self.part.unlink()
         except FileNotFoundError:
             pass
+
+
+def _deflate_within_ratio(fd: int, size: int) -> bool:
+    """Whether deflating this file keeps its entry within the reader's ratio
+    limit. Exact: the same raw deflate stream ``zipfile`` writes, measured
+    without keeping it, and stopped as soon as the output is large enough --
+    for ordinary content that is within the first block or two."""
+    if size <= COMPRESSION_RATIO_FLOOR_BYTES:
+        return True
+    compressor = zlib.compressobj(zlib.Z_DEFAULT_COMPRESSION, zlib.DEFLATED, -15)
+    produced = 0
+    while True:
+        block = os.read(fd, _COPY_BLOCK)
+        if not block:
+            break
+        produced += len(compressor.compress(block))
+        if produced * MAX_ENTRY_COMPRESSION_RATIO >= size:
+            return True
+    produced += len(compressor.flush())
+    return produced * MAX_ENTRY_COMPRESSION_RATIO >= size
+
+
+#: Read-only, never through a final symbolic link, never blocking on a FIFO.
+_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
 
 
 class _FileIndex:
@@ -566,14 +699,22 @@ class _FileIndex:
         self._index = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024)
         self.count = 0
         self.bytes = 0
+        #: symbolic links, special files and unsafe names left out
         self.skipped = 0
+        #: listed files that were gone when opened
+        self.missing = 0
         #: archive-relative paths (``files/notebooks/<this>``) of the source tree
         self.notebook_files: set[str] = set()
 
     def add_tree(
         self, root: Path, entry_name: Callable[[str], str], *, skip: frozenset[str] = frozenset()
     ) -> None:
-        if not root.is_dir() or root.is_symlink():
+        if root.is_symlink():
+            # The tree root itself is a link: nothing under it is the
+            # notebook's own storage. Counted, never followed.
+            self.skipped += 1
+            return
+        if not root.is_dir():
             return
         for directory, subdirs, names in os.walk(root, followlinks=False):
             base = Path(directory)
@@ -583,24 +724,41 @@ class _FileIndex:
                     self.skipped += 1
             subdirs.sort()
             for name in sorted(names):
-                path = base / name
-                relative = path.relative_to(root).as_posix()
                 if base == root and name in skip:
                     continue
-                mode = os.lstat(path).st_mode
-                if not stat.S_ISREG(mode) or not is_safe_relative_path(relative):
+                relative = (base / name).relative_to(root).as_posix()
+                if not is_safe_relative_path(relative):
                     self.skipped += 1
                     continue
-                self._add(entry_name(relative), path)
-                if entry_name is notebook_file_entry:
+                added = self._add_one(entry_name(relative), base / name)
+                if added and entry_name is notebook_file_entry:
                     self.notebook_files.add(relative)
 
-    def _add(self, name: str, path: Path) -> None:
-        digest = self._writer.write_file(name, path)
+    def _add_one(self, name: str, path: Path) -> bool:
+        """Open, verify on the same descriptor, then copy (module docstring).
+        Returns whether the file was carried."""
+        try:
+            fd = os.open(path, _OPEN_FLAGS)
+        except FileNotFoundError:
+            self.missing += 1
+            return False
+        except OSError:
+            # ELOOP (a symbolic link), ENXIO (a socket) and the like.
+            self.skipped += 1
+            return False
+        try:
+            status = os.fstat(fd)
+            if not stat.S_ISREG(status.st_mode):
+                self.skipped += 1
+                return False
+            digest = self._writer.write_file(name, fd, status.st_size)
+        finally:
+            os.close(fd)
         line = json_line({"path": name, "sha256": digest.hexdigest(), "size": digest.size})
         self._index.write((line + "\n").encode("utf-8"))
         self.count += 1
         self.bytes += digest.size
+        return True
 
     def finish(self) -> FilesSummary:
         self._index.seek(0)

@@ -218,11 +218,6 @@ def is_safe_relative_path(value: str) -> bool:
 # ------------------------------------------------------------------ digests
 
 
-def sha256_hex(data: bytes) -> str:
-    """The lowercase hex sha256 of ``data``."""
-    return hashlib.sha256(data).hexdigest()
-
-
 class DigestCounter:
     """A running sha256 plus byte count over everything ``update`` saw: what a
     streaming writer records for an entry it never holds in memory whole, and
