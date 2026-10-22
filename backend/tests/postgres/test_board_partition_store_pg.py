@@ -28,7 +28,7 @@ pytestmark = pytest.mark.postgres_integration
 
 @pytest.fixture
 def postgres_repository(postgres_settings):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     repository = PostgresRepository(postgres_settings)
     try:
@@ -161,7 +161,7 @@ def pin_database(request, postgres_settings):
         Path(__file__).resolve().parents[3],
     )
     try:
-        assert PostgresMigrator(database).migrate() == 78
+        assert PostgresMigrator(database).migrate() == 81
         _seed(database, *SHAPES[request.param])
         yield database
     finally:
