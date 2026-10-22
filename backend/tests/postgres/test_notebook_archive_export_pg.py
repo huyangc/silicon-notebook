@@ -68,6 +68,10 @@ def test_export_carries_files_assets_and_manifest_pg(repo, out_dir):
     cases.check_full_world_export(repo, BACKEND, out_dir)
 
 
+def test_export_records_the_global_custom_object_types_it_uses_pg(repo, out_dir):
+    cases.check_global_object_types(repo, BACKEND, out_dir)
+
+
 def test_export_normalises_every_soft_pointer_leaving_the_closure_pg(repo, out_dir):
     cases.check_soft_pointers_are_normalised(repo, BACKEND, out_dir)
 

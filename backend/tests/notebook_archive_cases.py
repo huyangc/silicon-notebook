@@ -323,6 +323,43 @@ def dangling_rows() -> list[Row]:
     ]
 
 
+def check_global_object_types(repo, backend: Backend, tmp: Path) -> None:
+    """A deployment-wide custom type the KG uses travels in the manifest; a built-in
+    type, a type the notebook defines itself and an unused custom type do not."""
+    storage = Path(repo.storage_dir)
+    now = memory_cases.NOW
+
+    def schema(object_type: str, source: str) -> Row:
+        return Row("object_schemas", {
+            "object_type": object_type, "plural": f"{object_type}s",
+            "fields": ["name", "vendor"], "primary_field": "name", "description": "d",
+            "label": f"label {object_type}", "list_fields": ["name"], "source": source,
+            "status": "active", "rationale": "", "notebook_id": "", "created_at": now,
+            "updated_at": now,
+        })
+
+    def typed_object(oid: str, object_type: str) -> Row:
+        return Row("knowledge_objects", {
+            "id": oid, "notebook_id": NB, "object_type": object_type, "status": "approved",
+            "source_id": "src-web", "payload": {"name": oid}, "evidence": [],
+            "created_at": now, "updated_at": now,
+        })
+
+    extra = [
+        schema("chip", "custom"), schema("device", "custom"), schema("unused", "induced"),
+        typed_object("ko-chip", "chip"), typed_object("ko-device", "device"),
+    ]
+    seed(repo, backend, char_cases.full_world() + extra, storage, char_cases.FULL_FILES)
+    out = tmp / "types.snbk"
+    export(repo, NB, out)
+    inspect_archive(out)
+    assert archive_manifest(out)["global_object_types"] == [{
+        "object_type": "chip", "plural": "chips", "fields": ["name", "vendor"],
+        "primary_field": "name", "description": "d", "label": "label chip",
+        "list_fields": ["name"], "status": "active",
+    }]
+
+
 def check_soft_pointers_are_normalised(repo, backend: Backend, tmp: Path) -> None:
     """Every pass-through point of the deep copy that can leave the closure is cleared
     (or its row dropped) in the archive, and counted."""
