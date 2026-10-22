@@ -2645,9 +2645,13 @@ class GlobalAskService:
             [job for jobs in windows.values() for job in jobs], user_id
         )
         prefixes = share_prefixes(facts["ranks"])
+        # The two windows overlap (often one is the other's head): each job's
+        # images are counted once.
+        per_job = {job["job_id"]: _turn_image_count(job)
+                   for jobs in windows.values() for job in jobs}
 
         def images(size):
-            return [_turn_image_count(job) for job in windows.get(size, [])]
+            return [per_job[job["job_id"]] for job in windows.get(size, [])]
 
         return {
             **share_counts(
