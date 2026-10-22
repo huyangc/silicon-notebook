@@ -31,7 +31,7 @@ const FRONTEND_DIR = path.resolve(
 
 /** 每条规则在基线里的总条数与涉及文件数。只许调低，且与基线逐项相等。 */
 const BASELINE_CEILING = {
-  "react-hooks/exhaustive-deps": { count: 44, files: 17 },
+  "react-hooks/exhaustive-deps": { count: 43, files: 17 },
   "@typescript-eslint/no-explicit-any": { count: 13, files: 4 },
   "@next/next/no-img-element": { count: 6, files: 3 },
   "@next/next/no-html-link-for-pages": { count: 3, files: 2 },
