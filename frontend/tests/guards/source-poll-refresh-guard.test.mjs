@@ -99,5 +99,8 @@ test("hook live refs 在渲染期赋值，轮询不因 callback identity 重启"
   const text = hook.getText(hook);
   assert.match(text, /sourcesRef\.current = sources/);
   assert.match(text, /effectsRef\.current = effects/);
-  assert.match(text, /\[hasPending, ownerSerial\]/);
+  // 轮询只因三样东西重启:有没有待处理的来源、owner 换了、来了新的跟踪工作(计数器,
+  // 让空闲的轮询器重新起来)——没有任何回调的 identity。
+  assert.match(text, /\[hasPending, ownerSerial, trackSerial\]/);
+  assert.match(text, /const \[trackSerial, setTrackSerial\] = useState\(0\);/);
 });

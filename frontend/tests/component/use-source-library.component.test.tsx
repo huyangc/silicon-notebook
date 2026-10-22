@@ -346,6 +346,60 @@ test("a source followed off the current page is read to a terminal state, moving
   expect(effects.reportError).not.toHaveBeenCalled();
 });
 
+test("a followed source on the current page leaves the follow set once it reaches a terminal state", async () => {
+  vi.useFakeTimers();
+  api.getSource.mockResolvedValue(source("here", "notebook-a", "extracted"));
+  render(<Harness />);
+  commitPage([source("here", "notebook-a", "parsing")]);
+  act(() => value!.trackSourceProgress(["here"]));
+  expect(value!.followedSourceCount).toBe(1);
+
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(value!.sources[0]?.parse_status).toBe("extracted");
+  // 在当前页上走到终态同样移出跟踪集合——否则集合非空、hasPending 恒真,轮询器空转不重启。
+  expect(value!.followedSourceCount).toBe(0);
+});
+
+test("a followed source on the current page with a stale terminal status is still read, and the page row follows", async () => {
+  // 重新解析刚排上时,当前页上那一行可能还是旧的「已就绪」:页内轮询看不见它,得按跟踪读。
+  vi.useFakeTimers();
+  api.getSource
+    .mockResolvedValueOnce(source("here", "notebook-a", "parsing"))
+    .mockResolvedValue(source("here", "notebook-a", "extracted"));
+  render(<Harness />);
+  commitPage([source("here", "notebook-a", "extracted")]);
+  const initial = value!.contentRevision;
+  act(() => value!.trackSourceProgress(["here"]));
+
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(api.getSource).toHaveBeenCalledWith("here");
+  expect(value!.sources[0]?.parse_status).toBe("parsing");
+  expect(value!.contentRevision).toBeGreaterThan(initial);
+
+  await act(async () => vi.advanceTimersByTimeAsync(2250));
+  expect(value!.sources[0]?.parse_status).toBe("extracted");
+  expect(value!.followedSourceCount).toBe(0);
+});
+
+test("new follow work wakes a poller that went idle, even though hasPending never flipped", async () => {
+  vi.useFakeTimers();
+  api.getSource.mockImplementation(async (id: string) => (
+    id === "stuck" ? source("stuck", "notebook-a", "parsing") : source(id, "notebook-a", "extracted")
+  ));
+  render(<Harness />);
+  commitPage([source("stuck", "notebook-a", "parsing")]);
+  // 用完尝试次数:轮询器不再安排定时器,但当前页仍有处理中的来源,hasPending 一直为真。
+  await act(async () => vi.advanceTimersByTimeAsync(60 * 60 * 1000));
+  expect(effects.setStatusText).toHaveBeenCalledWith("处理超时：部分来源长时间未完成，请稍后重试");
+  const revision = value!.contentRevision;
+
+  act(() => value!.trackSourceProgress(["elsewhere"]));
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(api.getSource).toHaveBeenCalledWith("elsewhere");
+  expect(value!.contentRevision).toBeGreaterThan(revision);
+  expect(value!.followedSourceCount).toBe(0);
+});
+
 test("following stops on untrackSources, on a notebook switch, and once the followed source is gone", async () => {
   vi.useFakeTimers();
   api.getSource.mockResolvedValue(source("elsewhere", "notebook-a", "parsing"));
