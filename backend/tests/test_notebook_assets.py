@@ -139,11 +139,7 @@ def test_cross_notebook_asset_id_returns_404(tmp_path, monkeypatch):
     assert cross.status_code == 404
 
 
-# Appended at EOF (rather than interleaved above) so this addition can't shift
-# any other test's line number out from under
-# test_repository_surface_manifest.py's line-pinned consumer-site guard (see
-# that file's FROZEN_ONLY_MOVED_CONSUMERS / the "surface manifest line-shift"
-# lesson from prior knowhow-tables commits).
+# Appended at EOF (rather than interleaved above).
 def test_upload_svg_rejected_as_stored_xss_vector(tmp_path, monkeypatch):
     # SVG is deliberately not in the whitelist (unsanitized SVG served
     # same-origin can carry inline <script>/event handlers — a stored-XSS

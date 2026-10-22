@@ -220,9 +220,7 @@ def test_failure_after_first_chunk_compensates_rows_and_files(repo, monkeypatch)
 
 def test_t4deleg_notebook_row_on_delegate(repo, monkeypatch):
     # Seed via the file's raw-SQL helper and reach join_shared through the
-    # service instance so this test adds no manifest-tracked facade-member
-    # consumer sites (repo._runtime.sharing is not the `repo`/`*_repo` base the
-    # surface scanner records).
+    # service instance.
     notebook_id = _seed_plain_nb(repo, owner="user-local", name="join")
     _seed_user(repo, "user-joiner")
     store = repo._runtime.sharing_store

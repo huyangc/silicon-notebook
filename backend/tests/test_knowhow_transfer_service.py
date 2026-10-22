@@ -329,9 +329,7 @@ def test_move_survives_scheduler_failure_and_still_cleans_source(repo, monkeypat
 # scoping, so leaving the copy's row pointed at the SOURCE notebook's source
 # means deleting/reparsing that source in the source notebook silently deletes
 # the copy's asset row in the target notebook too — violating spec §4.3's
-# "独立副本" (independent copy) promise. Local import (not module-level) to
-# avoid shifting the line-pinned `from app.services.sqlite_repository import
-# SQLiteRepository` at line 5 (KNOWHOW_TRANSFER_SERVICE_ALLOWED_IMPORTS).
+# "独立副本" (independent copy) promise. Local import (not module-level).
 def test_copy_gives_asset_row_independent_source_id(repo):
     from app.services.knowhow.assets import AssetService
 
@@ -457,8 +455,7 @@ def test_move_deletes_source_when_untouched_after_copy_snapshot(repo):
 # `delete_table_projection` — called between the recheck and the delete —
 # performs the concurrent write before returning normally (as if teardown
 # succeeded): the earliest realistic point in move_table's own call sequence
-# after the recheck has already passed. Appended at EOF, same zero-line-shift
-# reason as every other block in this file (see the file-header pin note).
+# after the recheck has already passed. Appended at EOF.
 def test_move_does_not_delete_source_row_added_during_projection_teardown(
     repo, monkeypatch
 ):
@@ -522,8 +519,7 @@ def test_move_does_not_delete_source_row_added_during_projection_teardown(
 # schedules it (the stub replaces build_projector wholesale — no route-level
 # schedule() call fires either) — so absent a fix, it stays "pending"
 # forever: exactly the "no chunks/KG until a manual reproject" defect the
-# fix must close. Appended at EOF, same zero-line-shift reason as every
-# other block in this file (see the file-header pin note).
+# fix must close. Appended at EOF.
 def test_move_reschedules_projection_for_retained_source_when_edited_during_teardown(
     repo, monkeypatch
 ):
@@ -583,9 +579,7 @@ def test_move_reschedules_projection_for_retained_source_when_edited_during_tear
 # docstring's "Known, accepted scope boundary" paragraph. Before the fix,
 # each of these four would have sailed straight past the recheck inside
 # move_table and the source table — now carrying newer metadata than the
-# target's frozen copy — would have been silently deleted. Appended at EOF,
-# same zero-line-shift reason as every other block in this file (see the
-# file-header pin note).
+# target's frozen copy — would have been silently deleted. Appended at EOF.
 def test_move_does_not_delete_source_table_title_edited_after_copy_snapshot(
     repo, monkeypatch
 ):
@@ -742,11 +736,7 @@ def test_move_does_not_delete_source_column_swapped_after_copy_snapshot(
 # route's `except KeyError: raise HTTPException(404, "Table not found")`
 # turns this into a permanent, ordinary-usage brick: the table can never be
 # copied or moved again by anyone, no concurrency required to trigger it.
-# Local `import json` (not module-level) to avoid shifting this file's own
-# line-pinned `from app.services.sqlite_repository import SQLiteRepository`
-# at line 5 (KNOWHOW_TRANSFER_SERVICE_ALLOWED_IMPORTS in
-# test_repository_surface_manifest.py) — same zero-line-shift convention
-# every other block in this file already follows.
+# Local `import json` (not module-level), like the other blocks in this file.
 def test_copy_skips_stale_elements_from_a_deleted_row(repo):
     import json
 
@@ -932,8 +922,7 @@ def test_move_sweep_is_idempotent_when_no_orphan_exists(repo):
 # implementation, then perform the concurrent edit on the source before
 # move_table reaches its cleanup section). Appended near EOF (ahead of the
 # scheduler-drain fixture below, which must stay the file's literal last
-# block per its own comment) for the same zero-line-shift reason as every
-# other block in this file.
+# block per its own comment).
 def test_move_does_not_delete_source_cell_code_updated_by_changed_after_copy_snapshot(
     repo, monkeypatch
 ):

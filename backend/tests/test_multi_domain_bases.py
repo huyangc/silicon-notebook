@@ -443,8 +443,7 @@ class TestPromotionTarget:
 
 # ---------------------------------------------------------------------------
 # Task 8: API 端点(GET/PUT bases, GET mountable)+ Step 4b 晋升目标 HTTP 通路。
-# 全部追加在文件末尾(而非穿插进上面按行号钉住的类)——本文件不在
-# LINE_NUMBER_INSENSITIVE_FILES 白名单里,顶行会打破已登记的 consumer 行号;
+# 全部追加在文件末尾(而非穿插进上面的类);
 # 新增测试内部一律用局部 import(TestClient/create_app/repository),不碰文件
 # 顶部的 import 块。
 # ---------------------------------------------------------------------------
@@ -1309,10 +1308,7 @@ class TestPromotionQueueTargetBaseName:
     TestMountEdgeNamePrivacy 对普通挂载方遮蔽陌生库改名的隐私考量不冲突:那里
     针对的是"失去挂载资格后还能继续窥看库主改名"，这里是"策展人生来就该看见"。
 
-    独立成一个新类、追加在文件末尾(而不是插进 TestPromotionTargetApi 中间)—
-    —本文件顶部注释已经写明:不在 LINE_NUMBER_INSENSITIVE_FILES 白名单里,
-    插入既有类中间会移动其后测试的行号,打破 test_repository_surface_manifest
-    的按行号断言。"""
+    独立成一个新类、追加在文件末尾(而不是插进 TestPromotionTargetApi 中间)。"""
 
     def _client(self, monkeypatch):
         from fastapi.testclient import TestClient
@@ -1412,9 +1408,7 @@ class TestPromotionQueueTargetBaseName:
 
 # ---------------------------------------------------------------------------
 # 最终整支审查 BLOCKER 1(2026-07-19):失效挂载边渲染不出来,且让编辑表单永久
-# 保存失败。追加在文件末尾(而非穿插进已有类)——本文件不在 LINE_NUMBER_INSENSITIVE_
-# FILES 白名单里,插入既有类中间会移动其后测试的行号,打破 test_repository_surface_
-# manifest 的按行号断言(见文件顶部注释与 TestPromotionQueueTargetBaseName 的同款说明)。
+# 保存失败。追加在文件末尾(而非穿插进已有类)。
 # ---------------------------------------------------------------------------
 
 
@@ -1896,8 +1890,7 @@ class TestApprovePromotionRetryDespiteTargetLifecycle:
 # 把它当参考库挂上并从中检索,读到跨事务写入中途的半成品——与本仓库既有的
 # 「copying 状态尚不可用」不变量(notebook_catalog.NotebookSummaryQuery.get /
 # notebook_store.get_row 等处同款排除,见 mount_sql.py 顶部本次同步补写的说明)
-# 矛盾。追加在文件末尾,理由同前面几节:本文件不在 LINE_NUMBER_INSENSITIVE_FILES
-# 白名单里,插入既有类中间会移动其后测试的行号。
+# 矛盾。追加在文件末尾,同前面几节。
 # ---------------------------------------------------------------------------
 
 

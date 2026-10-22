@@ -1943,13 +1943,9 @@ def test_projection_bumps_the_kg_seq_with_its_own_publication_transaction(
 # require — a caller-supplied `connection=` still shares one real SQLite
 # transaction even if some future refactor added more no-op write() calls
 # elsewhere in the same request). Local `from contextlib import
-# contextmanager` (not module-level) so this addition doesn't shift the
-# file's own line-pinned `from app.services.sqlite_repository import
-# SQLiteRepository` at line 24 (TASK5_KNOWHOW_ALLOWED_IMPORTS in
-# test_repository_surface_manifest.py) — same zero-line-shift convention as
-# every other addition in this file, and the same reason
+# contextmanager` (not module-level), as
 # test_snapshot_table_is_internally_consistent_under_concurrent_insert in
-# test_knowhow_transfer_store.py uses a local import too. Appended at EOF.
+# test_knowhow_transfer_store.py does. Appended at EOF.
 def test_ensure_hidden_source_creation_and_attach_are_atomic(
     repo, projector, table_id, notebook_id, monkeypatch
 ):
