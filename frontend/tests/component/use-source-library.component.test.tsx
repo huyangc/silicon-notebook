@@ -61,8 +61,8 @@ const effects = {
   refreshCheckup: vi.fn(async () => undefined),
 };
 
-function Harness({ actorId = "user-a" }: { actorId?: string | null }) {
-  value = useSourceLibrary({ actorId, canWriteSources: true, effects });
+function Harness({ actorId = "user-a", canWrite = true }: { actorId?: string | null; canWrite?: boolean }) {
+  value = useSourceLibrary({ actorId, canWriteSources: canWrite, effects });
   return <div data-testid="ids">{value.sources.map((item) => item.id).join(",")}</div>;
 }
 
@@ -585,21 +585,121 @@ test.each(["none", "failed"] as const)("a followed reparse that did not start (%
   expect(value!.followedSourceCount).toBe(0);
 });
 
-test("a followed reparse whose request returns after a notebook switch follows nothing and holds no placeholder", async () => {
+/** 让 submitFollowedReparse 里已经回来的基准读取把续体跑完(几次微任务)。 */
+async function drain() {
+  await act(async () => {
+    for (let i = 0; i < 6; i += 1) await Promise.resolve();
+  });
+}
+
+test("a followed reparse whose request returns after a notebook switch is abandoned: no follow, no placeholder, and submit's owner check has turned false", async () => {
   api.getSource.mockResolvedValue(at(source("elsewhere", "notebook-a"), "T0"));
   const request = deferred<SourceReparseOutcome>();
   render(<Harness />);
   commitPage([source("first", "notebook-a")]);
+  let stillOwned: (() => boolean) | null = null;
   let submitted!: Promise<SourceReparseOutcome>;
-  act(() => { submitted = value!.submitFollowedReparse("elsewhere", () => request.promise); });
+  act(() => {
+    submitted = value!.submitFollowedReparse("elsewhere", (check) => {
+      stillOwned = check;
+      return request.promise;
+    });
+  });
+  // 基准读完、请求在路上:提交时的 owner 还在。
+  await drain();
+  expect(stillOwned).not.toBeNull();
+  expect(stillOwned!()).toBe(true);
   expect(value!.reparsingSourceIds.has("elsewhere")).toBe(true);
+
+  commitPage([source("other", "notebook-b")], "notebook-b");
+  // 交给 submit 的那把核对随之变假——page 的 reparseOutcome 据此丢掉提示与刷新(source-reparse-request 的用例)。
+  expect(stillOwned!()).toBe(false);
+  expect(value!.reparsingSourceIds.size).toBe(0);
+  let outcome: SourceReparseOutcome | undefined;
+  await act(async () => {
+    // 即便 submit 没察觉、照旧回 started,也不跟、不算数。
+    request.resolve("started");
+    outcome = await submitted;
+  });
+  expect(outcome).toBe("abandoned");
+  expect(value!.followedSourceCount).toBe(0);
+  expect(value!.reparsingSourceIds.size).toBe(0);
+});
+
+test("a notebook switch while the baseline read is pending: nothing is submitted, and the new notebook's placeholder for the same source stays", async () => {
+  const baselineA = deferred<SourceSummary>();
+  const baselineB = deferred<SourceSummary>();
+  api.getSource.mockReturnValueOnce(baselineA.promise).mockReturnValueOnce(baselineB.promise);
+  render(<Harness />);
+  commitPage([source("first", "notebook-a")]);
+  const submitA = vi.fn(async (): Promise<SourceReparseOutcome> => "started");
+  let submittedA!: Promise<SourceReparseOutcome>;
+  act(() => { submittedA = value!.submitFollowedReparse("shared", submitA); });
+  expect(value!.reparsingSourceIds.has("shared")).toBe(true);
+
   commitPage([source("other", "notebook-b")], "notebook-b");
   expect(value!.reparsingSourceIds.size).toBe(0);
+  // 新的 owner 也提交了同一个 id(它的基准读取还挂着),占着自己那一份。
+  const requestB = deferred<SourceReparseOutcome>();
+  const submitB = vi.fn(() => requestB.promise);
+  let submittedB!: Promise<SourceReparseOutcome>;
+  act(() => { submittedB = value!.submitFollowedReparse("shared", submitB); });
+  expect(value!.reparsingSourceIds.has("shared")).toBe(true);
+
+  // 旧 owner 的基准读取回来:不提交,只撤自己那一份,新 owner 的占位不受影响。
+  let outcome: SourceReparseOutcome | undefined;
   await act(async () => {
-    request.resolve("started");
-    await submitted;
+    baselineA.resolve(at(source("shared", "notebook-a"), "T0"));
+    outcome = await submittedA;
   });
+  expect(outcome).toBe("abandoned");
+  expect(submitA).not.toHaveBeenCalled();
+  expect(value!.reparsingSourceIds.has("shared")).toBe(true);
   expect(value!.followedSourceCount).toBe(0);
+
+  // 新 owner 这一次照常提交、排上、跟踪。
+  await act(async () => { baselineB.resolve(at(source("shared", "notebook-b"), "T0")); });
+  await drain();
+  expect(submitB).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    requestB.resolve("started");
+    await submittedB;
+  });
+  expect(value!.followedSourceCount).toBe(1);
+  expect(value!.reparsingSourceIds.has("shared")).toBe(true);
+});
+
+test.each([
+  ["an account switch", { actorId: "user-b" }],
+  ["losing write access", { canWrite: false }],
+] as const)("%s while the baseline read is pending: nothing is submitted", async (_label, props) => {
+  const baseline = deferred<SourceSummary>();
+  api.getSource.mockReturnValueOnce(baseline.promise);
+  const view = render(<Harness />);
+  commitPage([source("first", "notebook-a")]);
+  const submit = vi.fn(async (): Promise<SourceReparseOutcome> => "started");
+  let submitted!: Promise<SourceReparseOutcome>;
+  act(() => { submitted = value!.submitFollowedReparse("elsewhere", submit); });
+  view.rerender(<Harness {...props} />);
+  let outcome: SourceReparseOutcome | undefined;
+  await act(async () => {
+    baseline.resolve(at(source("elsewhere", "notebook-a"), "T0"));
+    outcome = await submitted;
+  });
+  expect(outcome).toBe("abandoned");
+  expect(submit).not.toHaveBeenCalled();
+  expect(value!.followedSourceCount).toBe(0);
+});
+
+test("without an owner or write access a followed reparse is not even started", async () => {
+  const submit = vi.fn(async (): Promise<SourceReparseOutcome> => "started");
+  const view = render(<Harness />);
+  await expect(value!.submitFollowedReparse("elsewhere", submit)).resolves.toBe("abandoned");
+  commitPage([source("first", "notebook-a")]);
+  view.rerender(<Harness canWrite={false} />);
+  await expect(value!.submitFollowedReparse("elsewhere", submit)).resolves.toBe("abandoned");
+  expect(submit).not.toHaveBeenCalled();
+  expect(api.getSource).not.toHaveBeenCalled();
   expect(value!.reparsingSourceIds.size).toBe(0);
 });
 

@@ -26,6 +26,7 @@ import {
   toggleSourceSelection,
   type SourceScopeSelection,
 } from "./source-scope.ts";
+import type { ReparseOutcome } from "./source-reparse-request.ts";
 import type {
   PaginatedSourceElements,
   PaginatedSources,
@@ -46,8 +47,14 @@ const SOURCE_POLL_MAX_ATTEMPTS = 120;
 type FollowedSource = { seen: string; baseline: string | null; started: boolean };
 const NO_TRACKED_SOURCES: ReadonlyMap<string, FollowedSource> = new Map();
 const NO_SOURCE_IDS: ReadonlySet<string> = new Set();
-/** What a submitted reparse came to: queued, nothing to do (gone / excluded), or the request failed. */
-export type SourceReparseOutcome = "started" | "none" | "failed";
+/** Followed reparses still being submitted: source id -> the ticket of the submission holding it. */
+const NO_SUBMISSIONS: ReadonlyMap<string, number> = new Map();
+/**
+ * What a submitted reparse came to: queued, nothing to do (gone / excluded), the
+ * request failed, or abandoned -- the owner (notebook + account) or write access
+ * changed while it waited, so nothing was submitted, shown or refreshed for it.
+ */
+export type SourceReparseOutcome = ReparseOutcome;
 
 /**
  * One read of a followed source -> its next follow state, or null once THIS
@@ -159,8 +166,10 @@ export function useSourceLibrary({
   // that found nothing) even when `hasPending` itself did not flip.
   const [trackSerial, setTrackSerial] = useState(0);
   // Followed reparses (`submitFollowedReparse`) whose baseline read or request has
-  // not returned yet; on "started" the follow set takes each one over.
-  const [submittingSourceIds, setSubmittingSourceIds] = useState<ReadonlySet<string>>(NO_SOURCE_IDS);
+  // not returned yet, each under its own ticket so a submission only ever releases
+  // its own entry; on "started" the follow set takes each one over.
+  const [submittingSources, setSubmittingSources] = useState<ReadonlyMap<string, number>>(NO_SUBMISSIONS);
+  const submissionTicketRef = useRef(0);
 
   const effectsRef = useRef(effects);
   effectsRef.current = effects;
@@ -261,7 +270,7 @@ export function useSourceLibrary({
     setReparsingSourceId(null);
     setSourcesPageLoading(false);
     setTrackedSources(NO_TRACKED_SOURCES);
-    setSubmittingSourceIds(NO_SOURCE_IDS);
+    setSubmittingSources(NO_SUBMISSIONS);
     pollCountRef.current = 0;
   }
 
@@ -334,7 +343,7 @@ export function useSourceLibrary({
     setHighlightedElementId("");
     setSourcesPageLoading(false);
     setTrackedSources(NO_TRACKED_SOURCES);
-    setSubmittingSourceIds(NO_SOURCE_IDS);
+    setSubmittingSources(NO_SUBMISSIONS);
     pollCountRef.current = 0;
     setOwnerSerial((value) => value + 1);
     return owner;
@@ -813,13 +822,13 @@ export function useSourceLibrary({
   // `untrackSources`), and while the source detail's own reparse is in flight.
   const reparsingSourceIds = useMemo<ReadonlySet<string>>(() => {
     if (!ownerIsActive) return NO_SOURCE_IDS;
-    if (trackedSources.size === 0 && submittingSourceIds.size === 0 && reparsingSourceId === null) {
+    if (trackedSources.size === 0 && submittingSources.size === 0 && reparsingSourceId === null) {
       return NO_SOURCE_IDS;
     }
-    const ids = new Set<string>([...trackedSources.keys(), ...submittingSourceIds]);
+    const ids = new Set<string>([...trackedSources.keys(), ...submittingSources.keys()]);
     if (reparsingSourceId !== null) ids.add(reparsingSourceId);
     return ids;
-  }, [ownerIsActive, trackedSources, submittingSourceIds, reparsingSourceId]);
+  }, [ownerIsActive, trackedSources, submittingSources, reparsingSourceId]);
   const reparsingSourceIdsRef = useRef(reparsingSourceIds);
   reparsingSourceIdsRef.current = reparsingSourceIds;
 
@@ -1023,25 +1032,35 @@ export function useSourceLibrary({
   // submission on -- the baseline read and the request included -- so no entry can
   // submit it again meanwhile; on "started" the follow takes it over in the same
   // render, otherwise it is released.
+  //
+  // Ownership: every continuation re-checks the owner captured at the submission
+  // (notebook + account) and write access. If they changed while the baseline read
+  // was pending, nothing is submitted ("abandoned"); `submit` gets the same check to
+  // drop its own after-request effects (toast, refreshes) for an abandoned workspace.
+  // Only this submission's own placeholder entry is released -- an owner change
+  // already cleared it, and a new owner's entry for the same id is left alone.
   async function submitFollowedReparse(
     sourceId: string,
-    submit: () => Promise<SourceReparseOutcome>,
+    submit: (stillOwned: () => boolean) => Promise<SourceReparseOutcome>,
   ): Promise<SourceReparseOutcome> {
     const owner = currentOwner();
-    if (owner) setSubmittingSourceIds((previous) => new Set(previous).add(sourceId));
+    if (!owner || !canWriteRef.current) return "abandoned";
+    const stillOwned = () => owns(owner) && canWriteRef.current;
+    const ticket = ++submissionTicketRef.current;
+    setSubmittingSources((previous) => new Map(previous).set(sourceId, ticket));
     try {
       const baseline = await readFollowBaseline(sourceId);
-      const outcome = await submit();
-      if (outcome === "started" && owner && owns(owner)) {
-        trackSourceProgress([sourceId], { [sourceId]: baseline });
-      }
+      if (!stillOwned()) return "abandoned";
+      const outcome = await submit(stillOwned);
+      if (!stillOwned()) return "abandoned";
+      if (outcome === "started") trackSourceProgress([sourceId], { [sourceId]: baseline });
       return outcome;
     } finally {
-      setSubmittingSourceIds((previous) => {
-        if (!previous.has(sourceId)) return previous;
-        const next = new Set(previous);
+      setSubmittingSources((previous) => {
+        if (previous.get(sourceId) !== ticket) return previous;
+        const next = new Map(previous);
         next.delete(sourceId);
-        return next.size === 0 ? NO_SOURCE_IDS : next;
+        return next.size === 0 ? NO_SUBMISSIONS : next;
       });
     }
   }
