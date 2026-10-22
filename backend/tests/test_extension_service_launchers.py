@@ -260,6 +260,73 @@ def test_dev_launcher_kills_a_child_that_ignores_term_after_the_grace_window(lau
     assert_owned_cleanup(root)
 
 
+def test_dev_launcher_syncs_ui_plugins_in_frontend_before_next_starts(launcher):
+    root, env = launcher
+    with dev_launcher(root, env) as process:
+        assert (root / "sync.done").exists()
+        assert (root / "frontend.after-sync").exists(), "next started before the sync finished"
+        assert (root / "sync.cwd").read_text().strip() == str((root / "frontend").resolve())
+        process.terminate()
+        assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) == 143
+
+
+def test_dev_launcher_starts_no_frontend_and_stops_the_backend_when_the_sync_fails(launcher):
+    root, env = launcher
+    result = run(root, {**env, "SYNC_MODE": "fail", "TERM_EXITS": "backend"}, "scripts/dev.sh")
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "前端插件同步失败(退出码 3)" in result.stderr
+    assert not (root / "frontend.pid").exists()
+    assert (root / "backend.term").exists(), "the backend was not stopped"
+    assert not alive(published_pid(root, "backend"))
+    assert_owned_cleanup(root)
+
+
+@pytest.mark.parametrize("interruption,status", [
+    (signal.SIGTERM, 143), (signal.SIGHUP, 129), (signal.SIGINT, 130),
+])
+def test_dev_launcher_cancelled_during_the_sync_leaves_nothing_running(launcher, interruption, status):
+    root, env = launcher
+    with (root / "launcher.err").open("w") as stream:
+        process = spawn(root, {**env, "SYNC_MODE": "hang", "TERM_EXITS": "backend"},
+                        "scripts/dev.sh", stderr=stream)
+    with process:
+        try:
+            wait_until(lambda: (root / "backend.pid").exists() and (root / "sync.pid").exists())
+            sync = published_pid(root, "sync")
+            backend = published_pid(root, "backend")
+            # The sync is the launcher's own child, so the signal reaches it directly
+            # (no npm or subshell layer to leave a node behind).
+            assert parent_pid(sync) == process.pid
+            process.send_signal(interruption)
+            assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) == status
+            assert not alive(sync)
+            assert not alive(backend)
+            assert not (root / "frontend.pid").exists()
+        finally:
+            if process.poll() is None:
+                process.kill()
+            kill_published(root / "sync.pid")
+            kill_published(root / "backend.pid")
+    assert_owned_cleanup(root)
+
+
+def test_dev_launcher_runs_every_hook_that_npm_run_dev_would_run():
+    """dev.sh starts next itself, so each lifecycle hook `npm run dev` ran must be
+    in dev.sh by hand; a hook added to package.json fails here until it is."""
+    frontend = json.loads((ROOT / "frontend/package.json").read_text(encoding="utf-8"))["scripts"]
+    top = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["scripts"]
+    assert frontend["predev"] == "npm run sync:ui-plugins"
+    assert frontend["sync:ui-plugins"] == "node scripts/sync-ui-plugins.mjs"
+    assert frontend["dev"] == "next dev"
+    for hook in ("postdev", "presync:ui-plugins", "postsync:ui-plugins"):
+        assert hook not in frontend
+    for hook in ("predev", "postdev"):
+        assert hook not in top
+    dev_sh = (ROOT / "scripts/dev.sh").read_text(encoding="utf-8")
+    assert "( exec node scripts/sync-ui-plugins.mjs ) &" in dev_sh
+    assert '( exec "$ROOT_DIR/frontend/node_modules/.bin/next" dev ) &' in dev_sh
+
+
 def test_dev_launcher_returns_the_failed_childs_status_and_stops_the_other(launcher):
     root, env = launcher
     result = run(root, {**env, "FAIL_MAIN": "backend", "FAIL_AFTER": "frontend",
