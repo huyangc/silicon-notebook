@@ -31,7 +31,6 @@ would produce different packages.
 
 from __future__ import annotations
 
-import json
 import re
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
@@ -43,7 +42,7 @@ from typing import TYPE_CHECKING, Any
 from app.core.database_url import database_identity
 from app.migration.shadow.postgres_catalog import EXPECTED_COLUMNS
 from app.migration.sync.manifest import ScopeKind, scope_chain, spec_for
-from app.migration.sync.package import encode_value, utc_timestamp_text
+from app.migration.sync.package import column_encoder
 from app.repositories.postgres.schema_manifest import POSTGRES_ROWID_ORDINAL_TABLES
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -529,33 +528,13 @@ def _row_encoder(table: str, columns: Sequence[str]):
     as ``knowledge_objects.last_reviewed`` write ``null`` here too, and the
     importer decides what its own backend stores for "no time"); everything
     else goes through ``encode_value`` for the two shapes JSON cannot carry
-    natively, bytes and bool.
+    natively, bytes and bool. The encoder itself is
+    ``app.domain.portable_rows.column_encoder``, shared with the notebook
+    archive.
     """
     json_columns = _columns_of_type(table, columns, _JSON_TYPE)
     timestamp_columns = _columns_of_type(table, columns, _TIMESTAMP_TYPE)
-
-    def encode(row: dict[str, Any]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for name, value in row.items():
-            if name in timestamp_columns:
-                result[name] = utc_timestamp_text(value)
-            elif name in json_columns:
-                result[name] = _json_text(value)
-            else:
-                result[name] = encode_value(value)
-        return result
-
-    return encode
-
-
-def _json_text(value: Any) -> Any:
-    """A JSON column's portable form: text, or NULL. psycopg hands back a
-    decoded ``list``/``dict`` for ``jsonb``; SQLite already holds text.
-    ``sort_keys`` because ``jsonb`` has no key order of its own to preserve,
-    so sorting is what makes two exports of one row byte-identical."""
-    if value is None or isinstance(value, str):
-        return value
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return column_encoder(json_columns, timestamp_columns)
 
 
 def _exported_columns(
