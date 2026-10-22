@@ -35,10 +35,13 @@ the listing is counted as missing; either way the export continues. A large
 file that would compress beyond the reader's ratio limit is stored uncompressed.
 
 The archive is written to a uniquely named ``<out>.<random>.part`` (created
-``O_EXCL``) and published with a hard link, which fails if ``<out>`` exists, so
-an existing file is never overwritten and two exports to one path cannot
-corrupt each other; the manifest is the last entry; any failure removes the
-part file.
+``O_EXCL``), fsynced, and published with a hard link, which fails if ``<out>``
+exists, so an existing file is never overwritten and two exports to one path
+cannot corrupt each other; the directory is fsynced after the link. The
+manifest is the last entry; any failure removes the part file. A part file left
+by a killed export is reported (``ExportReport.stale_part_files``), never
+deleted automatically. A file the export cannot read for any reason other than
+"gone" or "not a regular file" (EACCES, EIO...) fails the export.
 """
 
 from __future__ import annotations
@@ -46,10 +49,12 @@ from __future__ import annotations
 import dataclasses
 import errno
 import functools
+import glob
 import os
 import secrets
 import stat
 import tempfile
+import time
 import zipfile
 import zlib
 from datetime import datetime, timezone
@@ -92,6 +97,9 @@ from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS
 
 #: Bytes per read when copying a file into its entry while hashing it.
 _COPY_BLOCK = 1 << 20
+#: Bytes per read of the compression-ratio probe (``_deflate_within_ratio``):
+#: small, because ordinary content proves its ratio after a few reads.
+_PROBE_BLOCK = 64 * 1024
 #: Every entry's timestamp: an archive's bytes depend on its content, not on
 #: when its files were last touched (zip cannot store dates before 1980).
 _ENTRY_DATE = (1980, 1, 1, 0, 0, 0)
@@ -138,6 +146,9 @@ class ExportReport:
     normalized: Mapping[str, int]
     #: Sources whose recorded file is not in the notebook's file tree.
     missing_source_files: int
+    #: Leftover ``<out>.<random>.part`` files of killed earlier exports to the
+    #: same output, older than ``STALE_PART_SECONDS`` (reported, not deleted).
+    stale_part_files: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         result = dataclasses.asdict(self)
@@ -199,6 +210,7 @@ def export_notebook(
         raise NotebookExportError(f"输出文件已存在: {out_path}")
     if not out_path.parent.is_dir():
         raise NotebookExportError(f"输出目录不存在: {out_path.parent}")
+    stale = stale_part_files(out_path)
     writer = _ArchiveWriter.create(out_path)
     try:
         report = _write_archive(
@@ -213,14 +225,20 @@ def export_notebook(
     except BaseException:
         writer.abort()
         raise
-    return dataclasses.replace(report, archive_bytes=out_path.stat().st_size)
+    return dataclasses.replace(
+        report, archive_bytes=out_path.stat().st_size, stale_part_files=stale
+    )
 
 
 def _publish(part: Path, out_path: Path) -> None:
-    """Give the finished part file its final name without ever replacing an
-    existing file: a hard link fails with ``EEXIST`` when ``out_path`` exists.
-    On a filesystem without hard links, ``out_path`` is first claimed with
-    ``O_EXCL`` (same refusal) and the part file renamed over that claim."""
+    """Give the finished (already fsynced) part file its final name without
+    ever replacing an existing file: a hard link fails with ``EEXIST`` when
+    ``out_path`` exists. On a filesystem without hard links, ``out_path`` is
+    first claimed with an empty ``O_EXCL`` placeholder (same refusal) and the
+    part file renamed over that claim; if the rename fails, the placeholder --
+    recognised by the device/inode recorded when it was created, still empty --
+    is removed before the error propagates. The directory is fsynced once the
+    new name exists, so the publication survives a power loss."""
     try:
         os.link(part, out_path)
     except FileExistsError:
@@ -228,13 +246,62 @@ def _publish(part: Path, out_path: Path) -> None:
     except OSError as exc:
         if exc.errno not in _NO_HARD_LINKS:
             raise
-        try:
-            os.close(os.open(out_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
-        except FileExistsError:
-            raise NotebookExportError(f"输出文件已存在: {out_path}") from None
+        _publish_by_rename(part, out_path)
+    else:
+        part.unlink()
+    _fsync_directory(out_path.parent)
+
+
+def _publish_by_rename(part: Path, out_path: Path) -> None:
+    try:
+        fd = os.open(out_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        raise NotebookExportError(f"输出文件已存在: {out_path}") from None
+    try:
+        claim = os.fstat(fd)
+    finally:
+        os.close(fd)
+    try:
         os.replace(part, out_path)
-        return
-    part.unlink()
+    except BaseException:
+        try:
+            current = os.lstat(out_path)
+        except OSError:
+            current = None
+        if (
+            current is not None
+            and (current.st_dev, current.st_ino) == (claim.st_dev, claim.st_ino)
+            and current.st_size == 0
+        ):
+            out_path.unlink()
+        raise
+
+
+def _fsync_directory(directory: Path) -> None:
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+#: A ``<out>.<random>.part`` sibling untouched this long is left over from an
+#: export that was killed (SIGKILL, OOM) before it could remove it.
+STALE_PART_SECONDS = 3600
+
+
+def stale_part_files(out_path: Path, *, now: "float | None" = None) -> tuple[str, ...]:
+    """Names of leftover part files of earlier exports to ``out_path`` (never
+    deleted here: one of them may belong to a running export)."""
+    limit = (time.time() if now is None else now) - STALE_PART_SECONDS
+    found = []
+    for candidate in out_path.parent.glob(f"{glob.escape(out_path.name)}.*{PART_SUFFIX}"):
+        try:
+            if candidate.stat().st_mtime < limit:
+                found.append(candidate.name)
+        except FileNotFoundError:
+            continue
+    return tuple(sorted(found))
 
 
 #: ``os.link`` errors that mean "this filesystem has no hard links".
@@ -650,7 +717,10 @@ class _ArchiveWriter:
         self._closed(name)
 
     def close(self) -> None:
+        """Finish the zip and make its bytes durable before it is published."""
         self._zip.close()
+        self._handle.flush()
+        os.fsync(self._handle.fileno())
         self._handle.close()
 
     def abort(self) -> None:
@@ -669,13 +739,14 @@ def _deflate_within_ratio(fd: int, size: int) -> bool:
     """Whether deflating this file keeps its entry within the reader's ratio
     limit. Exact: the same raw deflate stream ``zipfile`` writes, measured
     without keeping it, and stopped as soon as the output is large enough --
-    for ordinary content that is within the first block or two."""
+    for ordinary content within the first few ``_PROBE_BLOCK`` reads, so a large
+    ordinary file is not compressed twice."""
     if size <= COMPRESSION_RATIO_FLOOR_BYTES:
         return True
     compressor = zlib.compressobj(zlib.Z_DEFAULT_COMPRESSION, zlib.DEFLATED, -15)
     produced = 0
     while True:
-        block = os.read(fd, _COPY_BLOCK)
+        block = os.read(fd, _PROBE_BLOCK)
         if not block:
             break
         produced += len(compressor.compress(block))
@@ -687,6 +758,16 @@ def _deflate_within_ratio(fd: int, size: int) -> bool:
 
 #: Read-only, never through a final symbolic link, never blocking on a FIFO.
 _OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+#: ``open`` errors that mean "this is not a regular file": a final symbolic
+#: link under ``O_NOFOLLOW`` (ELOOP; EMLINK on some BSDs), a socket or a device
+#: without a driver (ENXIO, EOPNOTSUPP/ENOTSUP, ENODEV). Skipped and counted;
+#: every other error fails the export.
+_NOT_A_REGULAR_FILE = frozenset(
+    code for code in (
+        errno.ELOOP, errno.EMLINK, errno.ENXIO, errno.ENODEV,
+        getattr(errno, "EOPNOTSUPP", None), getattr(errno, "ENOTSUP", None),
+    ) if code is not None
+)
 
 
 class _FileIndex:
@@ -716,7 +797,9 @@ class _FileIndex:
             return
         if not root.is_dir():
             return
-        for directory, subdirs, names in os.walk(root, followlinks=False):
+        for directory, subdirs, names in os.walk(
+            root, followlinks=False, onerror=self._walk_error
+        ):
             base = Path(directory)
             for subdir in list(subdirs):
                 if (base / subdir).is_symlink():
@@ -734,6 +817,17 @@ class _FileIndex:
                 if added and entry_name is notebook_file_entry:
                     self.notebook_files.add(relative)
 
+    def _walk_error(self, exc: OSError) -> None:
+        """A directory ``os.walk`` could not list: gone since its parent was
+        listed counts as missing; anything else fails the export, never drops
+        the subtree silently."""
+        if isinstance(exc, FileNotFoundError):
+            self.missing += 1
+            return
+        raise NotebookExportError(
+            f"无法读取笔记本目录（{errno.errorcode.get(exc.errno, exc.errno)}）"
+        ) from exc
+
     def _add_one(self, name: str, path: Path) -> bool:
         """Open, verify on the same descriptor, then copy (module docstring).
         Returns whether the file was carried."""
@@ -742,10 +836,15 @@ class _FileIndex:
         except FileNotFoundError:
             self.missing += 1
             return False
-        except OSError:
-            # ELOOP (a symbolic link), ENXIO (a socket) and the like.
-            self.skipped += 1
-            return False
+        except OSError as exc:
+            if exc.errno in _NOT_A_REGULAR_FILE:
+                self.skipped += 1
+                return False
+            # EACCES, EIO, EMFILE...: a file of the notebook that cannot be
+            # read. Never silently left out of the archive.
+            raise NotebookExportError(
+                f"无法读取笔记本文件 {name}（{errno.errorcode.get(exc.errno, exc.errno)}）"
+            ) from exc
         try:
             status = os.fstat(fd)
             if not stat.S_ISREG(status.st_mode):

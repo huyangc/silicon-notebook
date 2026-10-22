@@ -4,9 +4,12 @@
 stores a row, plus the SQLite-only CLI round trip."""
 from __future__ import annotations
 
+import errno
 import json
 import os
+import stat
 import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -178,35 +181,107 @@ def test_a_file_that_vanishes_after_the_listing_is_counted_not_fatal(repo, out_d
     assert "files/notebooks/extra/notes.txt" in _entries(out)
 
 
-def test_links_fifos_and_a_swapped_in_link_are_skipped_never_followed(repo, out_dir, tmp_path,
-                                                                     monkeypatch):
+def _export_with_deadline(repo, out: Path, *, fifos=(), timeout: float = 60.0):
+    """Run the export in a thread so that a reader blocked in ``open()`` on a FIFO
+    (``O_NONBLOCK`` missing) fails the test instead of hanging the run; the FIFO is
+    then opened for writing once, which releases the stuck reader."""
+    result: dict = {}
+
+    def run() -> None:
+        try:
+            result["report"] = cases.export(repo, cases.NB, out)
+        except BaseException as exc:  # noqa: BLE001 -- re-raised below
+            result["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        for fifo in fifos:
+            try:
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            except OSError:
+                pass
+        worker.join(10)
+        pytest.fail("the export blocked on a FIFO (opened without O_NONBLOCK)")
+    if "error" in result:
+        raise result["error"]
+    return result["report"]
+
+
+def test_links_and_fifos_are_skipped_never_followed_never_blocking(repo, out_dir, tmp_path):
     tree = _seed_full(repo)
     secret = tmp_path / "outside-secret.txt"
     secret.write_bytes(b"HOST-SECRET")
     (tree / "link.txt").symlink_to(secret)
     (tree / "linked-dir").symlink_to(tmp_path, target_is_directory=True)
     os.mkfifo(tree / "pipe")
-    real_walk = os.walk
-
-    def walk_then_swap(root, **kwargs):
-        for directory, subdirs, names in real_walk(root, **kwargs):
-            if Path(directory) == tree / "extra":
-                # Listed as a regular file, replaced by a link before it is opened.
-                (tree / "extra" / "notes.txt").unlink()
-                (tree / "extra" / "notes.txt").symlink_to(secret)
-            yield directory, subdirs, names
-
-    monkeypatch.setattr(export_module.os, "walk", walk_then_swap)
     out = out_dir / "links.snbk"
-    report = cases.export(repo, cases.NB, out)
+    report = _export_with_deadline(repo, out, fifos=[tree / "pipe"])
     inspect_archive(out)
     names = set(_entries(out))
-    assert "files/notebooks/doc.md" in names
-    assert not {"files/notebooks/link.txt", "files/notebooks/pipe",
-                "files/notebooks/extra/notes.txt"} & names
+    assert {"files/notebooks/doc.md", "files/notebooks/extra/notes.txt"} <= names
+    assert not {"files/notebooks/link.txt", "files/notebooks/pipe"} & names
     assert not any(name.startswith("files/notebooks/linked-dir") for name in names)
-    assert report.skipped_links == 4  # link, linked dir, FIFO, swapped-in link
+    assert report.skipped_links == 3  # link, linked dir, FIFO
     assert b"HOST-SECRET" not in out.read_bytes()
+
+
+def test_a_link_swapped_in_right_before_the_open_is_not_followed(repo, out_dir, tmp_path,
+                                                                 monkeypatch):
+    """The file is a regular file whenever anyone looks at it by name, and becomes a
+    link only at the very moment it is opened: only a check on the opened descriptor
+    (``O_NOFOLLOW`` + ``fstat``) can refuse it; a name-based check (``lstat``, then an
+    ``open`` that follows links) would carry the host file."""
+    tree = _seed_full(repo)
+    secret = tmp_path / "outside-secret.txt"
+    secret.write_bytes(b"HOST-SECRET")
+    target = tree / "extra" / "notes.txt"
+    real_open = os.open
+    swapped: list[int] = []
+
+    def open_after_swap(path, flags, *args, **kwargs):
+        if Path(path) == target and not swapped:
+            target.unlink()
+            target.symlink_to(secret)
+            swapped.append(flags)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(export_module.os, "open", open_after_swap)
+    out = out_dir / "swap.snbk"
+    report = cases.export(repo, cases.NB, out)
+    monkeypatch.undo()
+    inspect_archive(out)
+    assert swapped, "the hook must have fired"
+    assert "files/notebooks/extra/notes.txt" not in _entries(out)
+    assert report.skipped_links == 1
+    assert b"HOST-SECRET" not in out.read_bytes()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads files regardless of mode bits")
+def test_an_unreadable_file_fails_the_export(repo, out_dir):
+    tree = _seed_full(repo)
+    locked = tree / "doc.md"
+    locked.chmod(0)
+    try:
+        with pytest.raises(NotebookExportError, match="EACCES"):
+            cases.export(repo, cases.NB, out_dir / "eacces.snbk")
+    finally:
+        locked.chmod(0o644)
+    assert list(out_dir.iterdir()) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root lists directories regardless of mode bits")
+def test_an_unreadable_directory_fails_the_export(repo, out_dir):
+    tree = _seed_full(repo)
+    locked = tree / "extra"
+    locked.chmod(0)
+    try:
+        with pytest.raises(NotebookExportError, match="目录"):
+            cases.export(repo, cases.NB, out_dir / "eacces-dir.snbk")
+    finally:
+        locked.chmod(0o755)
+    assert list(out_dir.iterdir()) == []
 
 
 def test_a_tree_root_that_is_a_symlink_is_counted_and_not_followed(repo, out_dir, tmp_path):
@@ -327,3 +402,130 @@ def test_cli_reports_what_was_exported_before_a_later_failure(repo, out_dir, cap
     assert [item["notebook_id"] for item in payload["exported"]] == [cases.NB]
     assert [item["notebook_id"] for item in payload["failed"]] == ["nb-missing"]
     inspect_archive(out_dir / f"{cases.NB}.snbk")
+
+
+def test_the_ratio_probe_reads_little_of_an_ordinary_file_and_stays_exact(tmp_path,
+                                                                          monkeypatch):
+    ordinary = tmp_path / "random.bin"
+    ordinary.write_bytes(os.urandom(4 * 1024 * 1024))
+    zeros = tmp_path / "zeros.bin"
+    zeros.write_bytes(bytes(4 * 1024 * 1024))
+    real_read = os.read
+    read_bytes: list[int] = []
+
+    def counting_read(fd, n):
+        block = real_read(fd, n)
+        read_bytes.append(len(block))
+        return block
+
+    monkeypatch.setattr(export_module.os, "read", counting_read)
+    for path, expected in ((ordinary, True), (zeros, False)):
+        read_bytes.clear()
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            assert export_module._deflate_within_ratio(fd, path.stat().st_size) is expected
+        finally:
+            os.close(fd)
+        if expected:
+            # Proven after a few 64 KiB reads, not after a 1 MiB copy block.
+            assert max(read_bytes) <= export_module._PROBE_BLOCK
+            assert sum(read_bytes) <= 4 * export_module._PROBE_BLOCK
+        else:
+            assert sum(read_bytes) == path.stat().st_size
+
+
+def _no_hard_links(monkeypatch):
+    def refuse(*args, **kwargs):
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(export_module.os, "link", refuse)
+
+
+def test_publishes_by_rename_where_hard_links_are_refused(repo, out_dir, monkeypatch):
+    _seed_full(repo)
+    _no_hard_links(monkeypatch)
+    out = out_dir / "nolink.snbk"
+    report = cases.export(repo, cases.NB, out)
+    inspect_archive(out)
+    assert sorted(p.name for p in out_dir.iterdir()) == ["nolink.snbk"]
+    assert out.stat().st_size == report.archive_bytes
+
+
+def test_a_failed_rename_leaves_neither_part_nor_placeholder(repo, out_dir, monkeypatch):
+    _seed_full(repo)
+    _no_hard_links(monkeypatch)
+
+    def failing_replace(*args, **kwargs):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(export_module.os, "replace", failing_replace)
+    with pytest.raises(OSError):
+        cases.export(repo, cases.NB, out_dir / "half.snbk")
+    assert list(out_dir.iterdir()) == []
+
+
+def test_the_part_file_and_the_directory_are_fsynced_around_publication(repo, out_dir,
+                                                                        monkeypatch):
+    _seed_full(repo)
+    events: list[str] = []
+    real_fsync, real_link = os.fsync, os.link
+
+    def fsync(fd):
+        events.append("fsync-dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "fsync-file")
+        return real_fsync(fd)
+
+    def link(src, dst, *args, **kwargs):
+        events.append("link")
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(export_module.os, "fsync", fsync)
+    monkeypatch.setattr(export_module.os, "link", link)
+    cases.export(repo, cases.NB, out_dir / "durable.snbk")
+    published = [e for e in events if e in ("fsync-file", "link", "fsync-dir")]
+    assert published[-3:] == ["fsync-file", "link", "fsync-dir"]
+
+
+def test_leftover_part_files_are_reported_never_deleted(repo, out_dir):
+    _seed_full(repo)
+    out = out_dir / "again.snbk"
+    old = out_dir / "again.snbk.0123456789ab.part"
+    fresh = out_dir / "again.snbk.ba9876543210.part"
+    old.write_bytes(b"killed")
+    fresh.write_bytes(b"maybe running")
+    hours_ago = time.time() - 2 * export_module.STALE_PART_SECONDS
+    os.utime(old, (hours_ago, hours_ago))
+    report = cases.export(repo, cases.NB, out)
+    assert report.stale_part_files == (old.name,)
+    assert old.exists() and fresh.exists()
+
+
+def test_cli_reports_an_io_error_on_a_later_notebook(repo, out_dir, capsys, monkeypatch):
+    from app.core.config import get_settings
+
+    _seed_full(repo)
+    real_export = export_module.export_notebook
+    calls: list[str] = []
+
+    def full_disk_on_second(store, notebook_id, *args, **kwargs):
+        calls.append(notebook_id)
+        if len(calls) == 2:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_export(store, notebook_id, *args, **kwargs)
+
+    monkeypatch.setattr(export_module, "export_notebook", full_disk_on_second)
+    cli = load_script("notebook_archive")
+    get_settings.cache_clear()
+    try:
+        status = cli.main([
+            # The second id needs no rows: the injected disk error comes first.
+            "export", "--notebook", cases.NB, "--notebook", "nb-second",
+            "--out-dir", str(out_dir), "--json",
+        ])
+    finally:
+        get_settings.cache_clear()
+    assert status == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["notebook_id"] for item in payload["exported"]] == [cases.NB]
+    (failed,) = payload["failed"]
+    assert failed["notebook_id"] == "nb-second"
+    assert "No space left" in failed["error"]

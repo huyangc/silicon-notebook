@@ -100,15 +100,18 @@ def open_archive(path: Path) -> zipfile.ZipFile:
         size = os.path.getsize(path)
         archive = zipfile.ZipFile(path, "r")
     except Exception as exc:  # noqa: BLE001 -- every parse failure is "not an archive"
-        raise ArchiveError(f"无法作为导出文件打开: {type(exc).__name__}") from None
+        raise ArchiveError(f"无法作为导出文件打开: {type(exc).__name__}") from exc
+    checked = False
     try:
         check_directory(archive, size)
+        checked = True
     except ArchiveError:
-        archive.close()
         raise
     except Exception as exc:  # noqa: BLE001
-        archive.close()
-        raise ArchiveError(f"导出文件目录无法解析: {type(exc).__name__}") from None
+        raise ArchiveError(f"导出文件目录无法解析: {type(exc).__name__}") from exc
+    finally:
+        if not checked:
+            archive.close()
     return archive
 
 
@@ -181,7 +184,7 @@ def inspect_archive(path: Path) -> ArchiveInspection:
         except Exception as exc:  # noqa: BLE001 -- a crafted file never yields a traceback
             # NotImplementedError, RuntimeError, ValueError... from the zip
             # layer or a parser: the file is not one this build can read.
-            raise ArchiveError(f"导出文件无法解析: {type(exc).__name__}") from None
+            raise ArchiveError(f"导出文件无法解析: {type(exc).__name__}") from exc
 
 
 def _inspect_open(path: Path, archive: zipfile.ZipFile) -> ArchiveInspection:

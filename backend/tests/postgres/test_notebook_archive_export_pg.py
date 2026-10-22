@@ -151,8 +151,7 @@ def test_a_failing_consumer_leaves_no_server_cursor_on_the_connection_pg(repo, m
         with pytest.raises(Boom):
             store.iter_copy_rows(cases.NB, on_table=failing)
     assert opened == ["knowledge_objects"]
+    # The guard: the store's own connection, inspected just before it goes back to
+    # the pool. (A count on a freshly borrowed connection would prove nothing: the
+    # pool may hand out another session, and its reset closes portals anyway.)
     assert at_release == [{"cursors": []}]
-    with database.connect() as connection:
-        assert connection.execute(
-            "SELECT count(*) AS n FROM pg_cursors"
-        ).fetchone()["n"] == 0
