@@ -83,6 +83,7 @@ class KeywordProbe:
             chunk_fanout_max_workers=4,
             global_ask_candidate_limit=limit,
             global_ask_keyword_arm_enabled=enabled,
+            retrieval_navigation_filter_enabled=True,
         )
         self.events: list = []
         self.event_log = SimpleNamespace(emit=self.events.append)
@@ -203,7 +204,8 @@ def ranked_scoring(monkeypatch):
     """库内顺序只由预置分数决定;调用参数也记下来供单库守卫断言。"""
     calls: list = []
 
-    def _score(query, chunks, query_vector=None, chunk_sims=None, limit=150):
+    def _score(query, chunks, query_vector=None, chunk_sims=None, limit=150, *,
+               drop_navigation):
         calls.append((query, query_vector, chunk_sims, limit))
         ranked = sorted(chunks, key=lambda row: -row["relevance"])[:limit]
         return [

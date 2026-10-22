@@ -33,6 +33,11 @@ from app.domain.citation_origin import owned_by_another_library
 from app.domain.retrieval import RetrievedChunk
 from app.models.common import Evidence
 from app.services.knowledge_contracts import USABLE_STATUSES
+from app.services.navigation_filter import (
+    drop_navigation_rows,
+    navigation_filter_enabled,
+    row_navigation,
+)
 from app.services.retrieval import RetrievedKnowledge
 from app.services.retrieval_candidates import _RetrievalState
 # Reader #2 on ``retrieval_participants``' frozen whitelist (see that module's
@@ -1442,6 +1447,13 @@ class GraphRetrievalService(_RetrievalState):
             with self._connect() as db:
                 rows = self.chunks.graph_hydrate_rows(db, score_map)
         from app.services.retrieval import RetrievedChunk, RetrievalSupport
+        # Navigation pages are not evidence. Without a ceiling they are
+        # dropped after the cut, so a page PPR ranked spends its slot (the
+        # ranking cannot tell it from a passage before hydration; this path
+        # may return fewer than ``ppr_top_chunks``). The ceiling walk above
+        # refuses them without spending one.
+        rows = drop_navigation_rows(
+            rows, enabled=navigation_filter_enabled(self.settings))
         # combined_chunk_ids (scale_ppr) spans base ⊕ active — a chunk here can
         # belong to a base notebook even though this call is scoped to
         # `notebook_id`. Tag each with its real origin so citation-building can
@@ -1485,8 +1497,8 @@ class GraphRetrievalService(_RetrievalState):
         * A candidate kept in the prefix and ranked again by
           ``rank_further`` takes its slot once.
 
-        Slots are spent in rank order.  A candidate the ceiling refuses spends
-        none; a candidate the store no longer holds spends its slot exactly as
+        Slots are spent in rank order.  A candidate the ceiling refuses, and a
+        navigation page under the read-side switch, spends none; a candidate the store no longer holds spends its slot exactly as
         the historical cut did -- unless the window was filtered in SQL, where
         "not returned" cannot tell a deleted chunk from a refused one.  Kept
         rows are returned in hydration order, as before: an all-selected run
@@ -1495,6 +1507,9 @@ class GraphRetrievalService(_RetrievalState):
         unchanged."""
         dropped = getattr(ranked, "libraries_dropped", ())
         rank_further = getattr(ranked, "rank_further", None)
+        # A navigation page is refused like an out-of-ceiling candidate: it is
+        # already hydrated, so skipping it costs no read and spends no slot.
+        drop_navigation = navigation_filter_enabled(self.settings)
         prefix = top_chunks * _PPR_CEILING_OVERFETCH
         items = list(ranked)
         kept: list = []
@@ -1550,6 +1565,8 @@ class GraphRetrievalService(_RetrievalState):
                 if row is None:
                     if not listed:
                         slots -= 1
+                elif drop_navigation and row_navigation(row):
+                    continue
                 elif ceiling.admits(row, listed):
                     admitted.add(chunk_id)
                     slots -= 1
@@ -2155,7 +2172,8 @@ class GraphRetrievalService(_RetrievalState):
         # 就是它的出口,输出序一字不动。``chunk_owner`` 为空(``object_owners``
         # 为 None)时谓词恒真,逐值回到今天。
         by_id = {
-            cr["id"]: cr for cr in crows
+            cr["id"]: cr for cr in drop_navigation_rows(
+                crows, enabled=navigation_filter_enabled(self.settings))
             if _peer_chunk_allowed(cr, chunk_owner, ceilings)
         }
         out = []

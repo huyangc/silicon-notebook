@@ -113,7 +113,8 @@ class ElementProbe:
             raise planned
         return [SimpleNamespace(notebook_id=notebook_id)], [], None
 
-    def _retrieve_elements_from_chunks(self, query, chunks, *, limit):
+    def _retrieve_elements_from_chunks(self, query, chunks, *, limit, notebook_id):
+        assert notebook_id == chunks[0].notebook_id
         notebook_id = chunks[0].notebook_id
         rows = [
             RetrievedElement(

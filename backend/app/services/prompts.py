@@ -284,7 +284,10 @@ def _answer_section_directive(
         "the other sections are for. The knowledge items below are the "
         "evidence bound to THIS section; the other sections have their own "
         "evidence which is deliberately not shown to you, so never state that "
-        "the notebook lacks material you simply were not given.\n\n"
+        "the notebook lacks material you simply were not given. Rule 12's "
+        "gap statement applies only to what THIS section is responsible for "
+        "covering; never claim other aspects this section did not receive "
+        "were \"not retrieved this time\".\n\n"
     )
 
 
@@ -471,7 +474,14 @@ def answer_prompt(
         "knowledge items cover only the unqualified case or an adjacent "
         "object, say so in one explicit sentence, keep any extrapolation to "
         "the asked case marked （推断）, and never silently generalize the "
-        "question or substitute a related object.\n"
+        "question or substitute a related object. When the knowledge items "
+        "lack something the question asks for, describe the gap only as "
+        "absent from the knowledge items retrieved this time — never "
+        "attribute it to parsing, extraction, indexing, or the library's "
+        "coverage unless a knowledge item (such as an exhaustive coverage "
+        "line, rule 11) explicitly establishes it. This does not stop you "
+        "from answering per rule 3 or extrapolating with the inference "
+        "marker.\n"
         "13. Inference status propagates. A conclusion, summary, 'therefore'/"
         "'so' sentence, or final recommendation that rests on any （推断） or "
         "'Likely,' sentence is itself an inference: prefix it with （推断） "

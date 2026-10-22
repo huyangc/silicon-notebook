@@ -670,6 +670,9 @@ class KnowhowProjector:
             eid = element_id(row_id, column["id"])
             for split_idx, part_text in enumerate(parts_text, start=1):
                 cid = f"chunk-kh-{row_hash}-{col_pos * _COLUMN_PART_STRIDE + split_idx}"
+                # navigation keeps its default (0): a projected knowhow cell
+                # has no heading structure, so the navigation-page detector
+                # (app.services.navigation_chunks) has nothing to judge.
                 to_insert.append(ChunkWrite(
                     id=cid, text=part_text, section_path=section_path, element_ids=(eid,),
                 ))

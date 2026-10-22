@@ -1863,6 +1863,14 @@ REVIEWED: dict[tuple, tuple[str, str]] = {
         (CHANGES, "UPDATE chunks SET question_indexed_at on an existing chunk"),
     (f"{_PG}/chunk_store.py", "ChunkStore.replace_chunk_questions"):
         (CHANGES, "UPDATE chunks SET question_indexed_at on an existing chunk"),
+    (f"{_SQ}/chunk_store.py", "ChunkStore.apply_navigation_flags"):
+        (CHANGES, "UPDATE chunks SET navigation on existing chunks (WHERE id AND source_id)"),
+    (f"{_PG}/chunk_store.py", "ChunkStore.apply_navigation_flags"):
+        (CHANGES, "UPDATE chunks SET navigation on existing chunks (WHERE id AND source_id)"),
+    (f"{_SQ}/chunk_store.py", "ChunkStore.clear_navigation_flags"):
+        (CHANGES, "UPDATE chunks SET navigation=0 on existing flagged chunks"),
+    (f"{_PG}/chunk_store.py", "ChunkStore.clear_navigation_flags"):
+        (CHANGES, "UPDATE chunks SET navigation=0 on existing flagged chunks"),
     # -- moves existing rows only: whole-database mirrors of a database at this
     #    schema version (its migration removes a Memory source's passages) --------
     ("backend/app/migration/sqlite_to_postgres.py", "copy_snapshot_to_postgres", "_copy_table", "table"):
@@ -2406,12 +2414,13 @@ POSITIVE_CONTROLS: dict[str, Callable] = {
     "N1 the INSERT hoisted into a module constant (the function still refuses first)": _both(
         _edit(_PG_CS,
               '            "INSERT INTO chunks"\n'
-              '            "(id,notebook_id,source_id,text,section_path,element_ids,created_at) "\n'
-              '            "VALUES (%s,%s,%s,%s,%s,%s,%s)",\n',
+              '            "(id,notebook_id,source_id,text,section_path,element_ids,created_at,"\n'
+              '            "navigation) "\n'
+              '            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",\n',
               "            CHUNK_INSERT_SQL,\n"),
         _edit(_PG_CS, None,
               "CHUNK_INSERT_SQL = ('INSERT INTO chunks(id,notebook_id,source_id,text,section_path,"
-              "element_ids,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)')"),
+              "element_ids,created_at,navigation) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)')"),
     ),
     "N2 DELETE and SELECT ... FOR UPDATE of chunks": _edit(
         _SQ_MAINT, None,
@@ -2447,12 +2456,14 @@ POSITIVE_CONTROLS: dict[str, Callable] = {
     "P1 the INSERT hoisted into a class constant used through self": _both(
         _edit(_PG_CS,
               '            "INSERT INTO chunks"\n'
-              '            "(id,notebook_id,source_id,text,section_path,element_ids,created_at) "\n'
-              '            "VALUES (%s,%s,%s,%s,%s,%s,%s)",\n            values,',
+              '            "(id,notebook_id,source_id,text,section_path,element_ids,created_at,"\n'
+              '            "navigation) "\n'
+              '            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",\n            values,',
               "            self._INSERT_SQL,\n            values,"),
         _edit(_PG_CS, "    def insert_rows(\n",
               "    _INSERT_SQL = ('INSERT INTO chunks(id,notebook_id,source_id,text,section_path,"
-              "element_ids,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)')\n\n    def insert_rows(\n"),
+              "element_ids,created_at,navigation) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)')\n\n"
+              "    def insert_rows(\n"),
     ),
     "P2 the refusal with keyword arguments": _edit(
         _PG_CS, _PG_INSERT_ROWS_REFUSAL + "        execute_many(",

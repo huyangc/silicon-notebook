@@ -719,7 +719,7 @@ def test_store_unlisted_statement_is_byte_identical(seeded):
         db.set_trace_callback(None)
     historical = (
         "SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, "
-        "c.notebook_id AS chunk_notebook_id, s.title AS source_title "
+        "c.navigation, c.notebook_id AS chunk_notebook_id, s.title AS source_title "
         "FROM chunks c JOIN sources s ON s.id=c.source_id "
         "WHERE c.id IN ('c-a1','c-b1')"
     )

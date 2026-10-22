@@ -164,7 +164,7 @@ def test_nothing_listed_sends_the_historical_statement(pin_database, monkeypatch
     _hydrate(pin_database, ["c-a-0", "c-a-1"], allowed_source_ids={})
     historical = (
         "SELECT c.id,c.source_id,c.text,c.section_path,c.element_ids,"
-        "c.notebook_id AS chunk_notebook_id,s.title AS source_title "
+        "c.navigation,c.notebook_id AS chunk_notebook_id,s.title AS source_title "
         "FROM chunks c JOIN sources s ON s.id=c.source_id "
         "WHERE c.id IN (%s,%s) ORDER BY c.ordinal"
     )

@@ -44,7 +44,33 @@ def source_subgraph_signature_on(
     placeholder: str,
     postgres: bool,
 ) -> tuple:
-    """Return a content-free generation signature for one frozen scope.
+    """The generation signature alone (see :func:`source_subgraph_signatures_on`)."""
+    return source_subgraph_signatures_on(
+        connection, notebook_id, source_ids,
+        placeholder=placeholder, postgres=postgres,
+    )[0]
+
+
+def source_subgraph_signatures_on(
+    connection: Any,
+    notebook_id: str,
+    source_ids: Sequence[str],
+    *,
+    placeholder: str,
+    postgres: bool,
+) -> tuple[tuple, tuple]:
+    """``(generation signature, navigation versions)`` for one frozen scope.
+
+    The navigation versions -- ``((source_id, sources.navigation_version),
+    ...)``, read from the same source rows -- are returned BESIDE the
+    signature, never inside it: the signature is also baked into the on-disk
+    partition manifests (below), whose contents never read the flag, so
+    widening it would invalidate every partition in the fleet. The in-process
+    snapshot cache, whose chunks do carry the flag, keys on both; the counter
+    moves in the transaction of every write that changes a source's flagged
+    chunks (``app.repositories.navigation_version``), so no chunk is scanned.
+
+    The generation signature, a content-free version of the scope:
 
     ``kg_reset_epoch`` (batch-3-W1 PR-2, design doc Sec 3.2 table #14) is
     appended as a FIFTH, trailing element, and — R1 (P1-2, post-review) —
@@ -80,7 +106,7 @@ def source_subgraph_signature_on(
     conditional reconstruction and its ``len(signature)`` gate.
     """
     if not source_ids:
-        return (0, 0, 0, ())
+        return (0, 0, 0, ()), ()
     ph = _in_clause(placeholder, source_ids)
     order_id = 'id COLLATE "C"' if postgres else "id"
     source_index_expr = "COALESCE(source_index_backfilled,0)"
@@ -94,7 +120,7 @@ def source_subgraph_signature_on(
     ).fetchone()
     source_rows = _rows(
         connection,
-        "SELECT s.id,s.updated_at,"
+        "SELECT s.id,s.updated_at,s.navigation_version,"
         "(SELECT er.id FROM extraction_runs er WHERE er.notebook_id=s.notebook_id "
         " AND er.source_id=s.id AND er.run_type='kg' "
         f" ORDER BY er.created_at DESC,{('er.id COLLATE "C"' if postgres else 'er.id')} DESC LIMIT 1) AS latest_id,"
@@ -166,7 +192,11 @@ def source_subgraph_signature_on(
     # Sec 3.4 exists to prevent, replayed on-disk.
     if epoch:
         signature = signature + (epoch,)
-    return signature
+    navigation = tuple(
+        (str(row["id"]), int(row.get("navigation_version") or 0))
+        for row in source_rows
+    )
+    return signature, navigation
 
 
 def _effective_source_states(signature: tuple) -> list[dict[str, Any]]:
@@ -232,7 +262,7 @@ def source_subgraph_rows_on(
     placeholder: str,
     postgres: bool,
 ) -> dict[str, Any]:
-    signature = source_subgraph_signature_on(
+    signature, navigation = source_subgraph_signatures_on(
         connection,
         notebook_id,
         source_ids,
@@ -242,6 +272,7 @@ def source_subgraph_rows_on(
     states = _effective_source_states(signature)
     result: dict[str, Any] = {
         "signature": signature,
+        "navigation_signature": navigation,
         "kg_generation": signature[0],
         "cluster_generation": signature[1],
         "sources": states,
@@ -334,7 +365,8 @@ def source_subgraph_rows_on(
     result["chunks"] = bounded(
         "chunk",
         (
-            "SELECT id AS chunk_id,source_id,text,section_path,created_at,element_ids "
+            "SELECT id AS chunk_id,source_id,text,section_path,created_at,element_ids,"
+            "navigation "
             + chunk_from
             + f"WHERE notebook_id={placeholder} AND source_id IN ({ph}) "
             + f"ORDER BY source_id{id_order},id{id_order} LIMIT {placeholder}"

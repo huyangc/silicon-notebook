@@ -1333,6 +1333,18 @@ class Settings(BaseSettings):
     # chunk-native 检索分块: chunk 目标字数 / 相邻重叠(P1 overlap 默认 0)。
     chunk_target_chars: int = Field(600, validation_alias="CHUNK_TARGET_CHARS")
     chunk_overlap_chars: int = Field(0, validation_alias="CHUNK_OVERLAP_CHARS")
+    # 导航页判定(写侧开关,app/services/navigation_chunks.py):建块时与服务就绪后的
+    # 后台回填是否判定目录/图表清单类导航页并写 chunks.navigation。关闭时建块一律写 0、
+    # 不置 navigation_scanned_at,后台回填不扫描(之后再打开,未判定的来源会被补判)。
+    navigation_detection_enabled: bool = Field(
+        True, validation_alias="NAVIGATION_DETECTION_ENABLED"
+    )
+    # 导航页剔除(读侧开关,app/services/navigation_filter.py):检索各产出点是否剔除
+    # chunks.navigation=1 的块(以及只属于这类块的元素)。关闭 = 剔除全部旁路、检索回到
+    # 有标记之前的结果;误判事故时无需写库即可止血(标记本身由写侧开关与 --clear 管)。
+    retrieval_navigation_filter_enabled: bool = Field(
+        True, validation_alias="RETRIEVAL_NAVIGATION_FILTER_ENABLED"
+    )
     # chunk-native 检索: 大召回候选数 / MMR 精选数 / MMR λ / 答案上下文预算(长上下文综合)。
     chunk_recall: int = Field(200, validation_alias="CHUNK_RECALL")   # mix 候选池/MMR 候选;LightRAG 风格猛召回
     # 联邦 chunk 通道:挂载参考库的原文段落是否进入 chunk 召回。关掉 = 参与集恒

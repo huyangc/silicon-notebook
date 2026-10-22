@@ -49,6 +49,7 @@ from app.domain.retrieval import (
 )
 from app.models.common import Evidence  # compatibility re-export
 from app.repositories.lexical_query import spaced_model_name_parts
+from app.services.navigation_filter import drop_navigation_rows
 from app.services.source_element_selection import (
     rank_source_chunks,
     rank_source_elements,
@@ -1940,15 +1941,22 @@ def score_chunks(
     query_vector: Optional[List[float]] = None,
     chunk_sims: Optional[Dict[str, float]] = None,
     limit: int = 150,
+    *,
+    drop_navigation: bool,
 ) -> List[RetrievedChunk]:
     """Keyword + 可选语义(预算好的 chunk_sims)融合打分 chunk;大召回(默认
-    top-150)。与 score_elements 同构,但作用于合并后的检索 chunk。"""
+    top-150)。与 score_elements 同构,但作用于合并后的检索 chunk。
+
+    ``drop_navigation``(必填,调用方从自己的 settings 取
+    ``retrieval_navigation_filter_enabled``):True 时 ``navigation`` 行(目录、
+    图表清单页)不打分、不占 Top-K。sink 登记在剔除**之前**:它记的是「候选池里
+    出现过谁」,供天花板核验,一个被剔除的外来候选照样占过候选位。"""
     sink = _CANDIDATE_SOURCE_SINK.get()
     if sink is not None:
         sink.extend(str(c.get("source_id") or "") for c in chunks)
     basis = keyword_basis(query)
     scored: List[RetrievedChunk] = []
-    for c in chunks:
+    for c in drop_navigation_rows(chunks, enabled=drop_navigation):
         keyword = basis.coverage(set(_tokens(c["text"])), c["text"])
         semantic = 0.0
         has_vector = bool(

@@ -1,0 +1,38 @@
+-- Navigation-page marker. Mirrors SQLite v101 / _migration_101.
+--
+-- chunks.navigation is 1 for a chunk the build judged to be a navigation page
+-- (table of contents, list of figures / tables: the structural conditions of
+-- app/services/navigation_chunks.py), 0 otherwise;
+-- retrieval leaves those chunks out of ranking. An integer flag (1/0) for
+-- SQLite parity, like global_ask_jobs.attributed and
+-- agent_access_tokens.allow_answer_links.
+--
+-- sources.navigation_scanned_at is a generation token, not a clock reading:
+-- once the source's current chunks are judged it EQUALS its chunked_at (the
+-- build and the pipeline publish write the same instant to both; the
+-- background pass copies chunked_at into it), NULL = never judged. A source
+-- whose stamp is NULL or IS DISTINCT FROM chunked_at still needs judging; the
+-- service does that in the background after readiness
+-- (app/services/navigation_backfill.py), so this migration does no backfill.
+-- ADD COLUMN with a constant default and a nullable ADD COLUMN rewrite no
+-- table on PostgreSQL 11+.
+--
+-- sources.navigation_version counts the changes to the set of flagged chunks
+-- of the source: every write that changes it (the build, the pipeline publish,
+-- the background pass, --clear) adds 1 in the same transaction. The
+-- selected-source snapshot cache keys on it (read with the source row the
+-- generation signature already reads), so a flag change re-keys the cache
+-- without scanning chunks.
+--
+-- No index: a partial index over the flagged chunks would serve only the rare
+-- data-level rollback (backfill_navigation_chunks.py --clear), and building it
+-- here would read the whole chunks heap inside the startup migration's
+-- statement timeout. --clear scans chunks under the maintenance
+-- statement-timeout floor instead.
+--
+-- Incremental sync: the capture triggers record the row id only and the export
+-- reads the current row, so both columns travel with their chunks / sources
+-- rows (docs/incremental-sync-design.md).
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS navigation integer NOT NULL DEFAULT 0;
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS navigation_scanned_at timestamptz;
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS navigation_version integer NOT NULL DEFAULT 0;

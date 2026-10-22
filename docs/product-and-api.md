@@ -122,6 +122,46 @@ The description creates one image element, without a duplicate paragraph element
 
 - **Markdown + image bundle upload**: `.zip` is a first-class built-in parser format. The browser uploads the raw archive unchanged; it is stored as one source and parsed in the background, independent of MinerU. Every `.md`/`.markdown` member is parsed in stable archive-path order and tagged with `metadata.bundle_path`. A local image target is URL-decoded, stripped of query/fragment suffixes, resolved relative to the Markdown member that references it (archive-root paths also work), then admitted by png/jpeg/gif/webp magic bytes and persisted through the ordinary source-image asset port. The archive is never extracted to the host filesystem. Unsafe or duplicate paths, encryption, unsupported compression, no Markdown member, too many retained files, corruption, and an aggregate uncompressed size over the ordinary per-source upload ceiling reject the source as a whole. A missing, remote, corrupt, or unsupported image is a per-image fail-open: its original `src` and caption/description text remain, so the image element is searchable when it has caption/description but renders without an `<img>`. The existing image-storage switch and per-image/per-source asset rails still apply at persistence time. A dropped **folder** remains the compatibility path through the dependency-free browser pipeline (`frontend/app/md-bundle.ts` / `bundle-intake.ts`): it resolves relative paths, magic-sniffs and data-URI-inlines supported images, and keeps its persistent five-category pairing receipt and deliberately conservative whole-paragraph/image-description checks. Exact backend-ZIP and browser-folder guardrails are registered in the [table below](#markdown-bundle-upload-guardrails).
 
+### Navigation-page detection
+
+When a source is chunked, chunks that are navigation pages — a table of contents, a list of figures or
+tables — are marked (`chunks.navigation`) and kept out of retrieval ranking. The judgement uses only the
+source's own headings, never label words or line patterns. Titles and chunk text are normalised alike
+(NFKC, case-folded, only letters, digits and CJK characters kept); a heading takes part only when its title,
+without a leading enumerator such as `5.7.2.1`, `Figure 1-1.` or `A.2` (else the full title), is at least
+**10** weighted characters long, a CJK character weighing **3** (so `Overview` / `概述` do not take part,
+`5.7.2.1损耗` does). In a chunk, the *hits* are the titles of other headings it contains (not its own
+section or that section's ancestors; a title wholly inside a longer one counts once) and the *chain* is the
+longest run of hits in document order. A chunk is a navigation page when all five hold:
+
+| Condition | Threshold | What it separates |
+| --- | --- | --- |
+| References: titles on the chain | ≥ **6** | a few cross-references in body text |
+| Order ratio: chain / distinct hits | ≥ **0.75** | a table of section titles in another order |
+| Letter coverage: share of the non-digit characters inside hits | ≥ **0.65** | prose that names the sections one sentence each |
+| Locality: share of the chain inside the chunk's own section subtree or its parent's (a parent that is the document's common root does not count; `Figure 5-1`, `Chapter 5` and `第5章` belong to chapter 5, `Figure A-1` and `Appendix A` to appendix A; numbering and breadcrumbs both count; 0 when the document has neither) | < **0.5** | a chapter's opening overview, a summary or register table of its own subsections |
+| Density: chain / same-kind headings between the chain's first and last heading (numbered titles down to the chain's deepest level, captions by their leading word, breadcrumb titles by depth) | ≥ **0.6** | a revision history or summary citing one section per chapter |
+
+A summary that lists *whole* subtrees of other chapters (an appendix register summary, say) meets all five
+and is marked. A source with more than **5000** headings is not judged (its chunks stay unmarked).
+`NAVIGATION_DETECTION_ENABLED` (default `true`) switches the judgement off; operations:
+[Navigation-page marker backfill](./operations.md#navigation-page-marker-backfill-scriptsbackfill_navigation_chunkspy).
+
+Table-of-contents and list-of-figures/tables pages are not retrieval evidence. A marked chunk is removed —
+not ranked lower — at every place retrieval turns stored chunks into candidates: chunk scoring (vector,
+lexical, keyword and generated-question arms), PPR, KG source passages, the exact-identifier channel (a
+marked hit opens no section, and a marked chunk in a fetched section is skipped), the selected-source graph
+lane, and chunks an extension proposes. It takes no slot of the final selection (the candidate limit, MMR,
+the PPR ceiling walk's slots, the exact channel's section slots); upstream recall windows it may have
+occupied before being removed are not widened to make up for it — the ANN/FTS recall windows, the first
+`ppr_top_chunks` PPR passages without a source ceiling (and the selected-source graph's online PPR
+`max_results`), the exact probe window and each fetched section's chunk cap — so those legs can return
+fewer passages. The element arm likewise drops every element a marked chunk lists, read from the marked
+chunks themselves (an element a marked chunk shares with a body chunk is dropped too). The marked chunk
+still counts toward the source-ceiling check of the candidate pool. `RETRIEVAL_NAVIGATION_FILTER_ENABLED` (default `true`) is the read-side switch: `false`
+keeps marked chunks and elements everywhere, restoring the results from before the marker, without
+touching the stored flags.
+
 ## Accounts and usage
 
 The login screen centers a single notebook cover, sharing the application's background, panel, text, accent, border and shadow tokens and system font. The cover keeps only the Silicon Notebook name, SN mark, book icon and deployment-selected sign-in controls; surrounding slogans and footer copy are absent. Under unified authentication the resting screen has one sign-in button. Required local-credential controls and actionable failure messages remain available; the successful-entry announcement is screen-reader-only.
@@ -773,7 +813,8 @@ Library-level narrowing is applied at **one** boundary — the participant list,
 
 Two second-order costs are registered and accepted. Graph traversal is filtered *after* traversal and PPR still diffuses over every participant's graph, because the federated graph is memoised process-wide under a scope-blind key: an excluded library's nodes still occupy diffusion budget and can act as transit hops, but none of their content reaches the rendered prompt or becomes citable, and PPR's passage slots go only to in-ceiling passages (next paragraph). The whole-graph size guard likewise stays scope-blind, so unchecking a very large library does not turn that guard back off — deliberately, because the graphs it guards are still built over every mounted library; narrowing the guard alone would admit exactly the build it exists to refuse.
 
-**Retrieval legs under the run's source ceiling.** PPR (concept-walk) slots go only to in-ceiling passages: the ranking still spans every participant's graph (the graph cache is keyed by the participant set, never by the run's source selection), but each library's frozen source ceiling is applied before the `ppr_top_chunks` cut, so a mounted library's Knowhow rows and sources uploaded after the run froze its ceiling never take a slot, and the walk still returns `ppr_top_chunks` passages when enough in-ceiling candidates exist. An all-selected run whose sources did not change hydrates exactly as before. Reaching past refused candidates is bounded: a library the run admits nothing of leaves the PPR ranking itself, and every other refused candidate is passed over within at most 8 hydration windows of 900 candidates beyond the over-ranked prefix; passages ranked deeper are not found by PPR on that run, which returns fewer passages and records `ppr_ceiling_walk_exhausted`.
+**Retrieval legs under the run's source ceiling.** PPR (concept-walk) slots go only to in-ceiling passages: the ranking still spans every participant's graph (the graph cache is keyed by the participant set, never by the run's source selection), but each library's frozen source ceiling is applied before the `ppr_top_chunks` cut, so a mounted library's Knowhow rows and sources uploaded after the run froze its ceiling never take a slot, and the walk still returns `ppr_top_chunks` passages when enough in-ceiling candidates exist (a navigation page is passed over like a
+refused candidate and spends no slot). An all-selected run whose sources did not change hydrates exactly as before. Reaching past refused candidates is bounded: a library the run admits nothing of leaves the PPR ranking itself, and every other refused candidate is passed over within at most 8 hydration windows of 900 candidates beyond the over-ranked prefix; passages ranked deeper are not found by PPR on that run, which returns fewer passages and records `ppr_ceiling_walk_exhausted`.
 
 In a single-notebook run, a derived chain is dropped whole when either of its hops has no evidence left inside the run's source ceiling, so another member's private Memory can no longer supply a citable chain quote. Weak-support relation hints show a relation only when its target is still supported inside the ceiling and its sample relation itself comes from an in-ceiling source; a hint whose sample relation comes from an out-of-ceiling source is dropped even if another supporting source is in range. Of these knowledge-graph hints, only the weak-support hint sends a source list to the database, and only when the run's verdict (taken once per retrieval run) says the ceiling binds and the library no longer matches the freeze, the Memory channel is closed (the asker's own Memory is withheld, so "not another member's Memory" would admit it), or the run carries per-library ceilings; another member's Memory alone is excluded by owner, not by list. When the verdict says the ceiling cannot exclude anything, the hint reads without a list and checks only the source of each sample relation it shows; the first one outside the ceiling switches the rest of the run to the bounded read.
 
@@ -3791,7 +3832,14 @@ preserve every qualifier the question states — scope, operating condition, dir
 RX), periodicity, "only"/"except", a named sub-component — exactly as asked, and answer the
 qualified question rather than its broader or neighbouring form. When the evidence covers only the
 unqualified case or an adjacent object, the answer must say so in one explicit sentence and mark
-any extrapolation to the asked case as 「（推断）」. This rule grants no new `[k]` citation-binding
+any extrapolation to the asked case as 「（推断）」. When the knowledge items lack something the
+question asks for, the answer describes the gap only as absent from the knowledge items retrieved
+this time; it must not attribute the gap to parsing, extraction, indexing, or the library's
+coverage unless a knowledge item (such as an exhaustive coverage line, rule 11) explicitly
+establishes it. This does not stop the answer from answering per rule 3 or extrapolating with the
+inference marker. In sectioned synthesis, such a gap statement covers only what that section is
+responsible for; it must not claim that other sections' aspects were "not retrieved this time".
+This rule grants no new `[k]` citation-binding
 authorization, and the `grounded` determination is unchanged.
 
 The same rule set's rule 13 requires inference status to propagate: a conclusion, summary,

@@ -67,6 +67,9 @@ _SAFE_JOB_PREFIXES = (
     # The bell refresh a deletion-window request / cancel hands off its
     # request thread (``NotebookDeleteJobRunner``).
     ("deletion-notice-", "deletion-notice"),
+    # The navigation-page backfill (one pass after readiness, or none):
+    # ``app.services.navigation_backfill``.
+    ("navigation-backfill", "navigation-backfill"),
 )
 # "ask-auto": the simplified UI's Ask is submitted before its engine is chosen
 # (selection runs inside the worker), so the diagnostic name must exist for it
@@ -143,6 +146,10 @@ _LIGHT_MAINTENANCE_OPERATIONS = frozenset({
     # ask-completed 同理——答案(202 / 200)已经交出去了,没人在等它;进**轻活**池是为了
     # 有界:主人连点删除 / 撤销不会每次各起一条线程。
     "deletion-notice",
+    # 存量来源的导航页判定(启动后一次):逐来源一次有界读 + 纯计算 + 一个只改变化行的
+    # 短写事务,与 memory-merge-heal 同量级,进**轻活**池——放进重活池会被小时级的
+    # 全库重建饿死,而它不跑完检索就一直按未判定的老数据排序。
+    "navigation-backfill",
 })
 # 批 3·W1 PR-3(D-2 已定):第三个池,判据同上两池同轴——量级差。删除既不是
 # LLM 扇出型重活(会被小时级重建饿死,而删除是用户已点过确认的操作),也不是

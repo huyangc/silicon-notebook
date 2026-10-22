@@ -5956,5 +5956,47 @@ MIGRATION_MANIFEST[(99, 100)] = {
     "views": {},
 }
 
+# v101 (parity with PostgreSQL 0082_chunk_navigation.sql): the navigation-page
+# marker. chunks.navigation INTEGER NOT NULL DEFAULT 0 (existing chunks read 0)
+# and sources.navigation_scanned_at nullable TEXT (existing sources stay NULL:
+# the service judges them in the background after readiness), plus
+# sources.navigation_version INTEGER NOT NULL DEFAULT 0 (the snapshot cache's
+# flag-change counter; existing sources read 0). Three ALTER ADD
+# COLUMNs on tables every lineage holds, so the column pins carry the change;
+# no table text, index, trigger or view, and no row is rewritten.
+NAVIGATION_MARKER_COLUMNS = {
+    "chunks": {
+        "navigation": ("navigation", "INTEGER", 1, "0", 0),
+    },
+    "sources": {
+        "navigation_scanned_at": ("navigation_scanned_at", "TEXT", 0, None, 0),
+        "navigation_version": ("navigation_version", "INTEGER", 1, "0", 0),
+    },
+}
+MIGRATION_MANIFEST = {
+    (key[0], 101, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "chunks": {
+                **manifest["columns"].get("chunks", {}),
+                **NAVIGATION_MARKER_COLUMNS["chunks"],
+            },
+            "sources": {
+                **manifest["columns"].get("sources", {}),
+                **NAVIGATION_MARKER_COLUMNS["sources"],
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(100, 101)] = {
+    "tables": {},
+    "columns": NAVIGATION_MARKER_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

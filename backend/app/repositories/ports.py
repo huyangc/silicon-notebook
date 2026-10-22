@@ -296,6 +296,18 @@ class ChunkWrite:
     text: str
     section_path: str
     element_ids: tuple
+    # ``chunks.navigation`` (SQLite v101 / PostgreSQL 0082): True for a chunk
+    # the build judged to be a navigation page
+    # (``app.services.navigation_chunks``). Writers without heading structure
+    # (knowhow projection) keep the default.
+    navigation: bool = False
+
+
+# ``replace_source_chunks(expected_chunked_at=...)`` default: write without
+# comparing the source's ``chunked_at`` (the knowhow projector, and the build's
+# under-lock fallback). Any other value is a compare-and-set token read by
+# ``chunk_generation``.
+CHUNKED_AT_UNCHECKED = object()
 
 
 @dataclass(frozen=True)
@@ -1862,7 +1874,9 @@ class SourceStorePort(Protocol):
         self, source_ids: Sequence[str]
     ) -> dict[str, dict[str, Any]]: ...
     @staticmethod
-    def retrieval_element_rows(db: object, notebook_id: str) -> list[Any]: ...
+    def retrieval_element_rows(
+        db: object, notebook_id: str, *, with_navigation: bool
+    ) -> list[Any]: ...
     def source_titles(self, source_ids: list[str]) -> dict[str, str]: ...
     def report_source_rows(
         self, notebook_id: str, *, representative_limit: int = 20,
@@ -2223,7 +2237,8 @@ class ChunkStorePort(Protocol):
         ...
     @staticmethod
     def chunks_for_element_ids(
-        db: object, notebook_id: str, element_ids: Sequence[str]
+        db: object, notebook_id: str, element_ids: Sequence[str], *,
+        navigation_source_id: str | None = None,
     ) -> list[Any]: ...
     @staticmethod
     def rows_by_ids(db: object, chunk_ids: Sequence[str]) -> list[Any]: ...
@@ -5054,8 +5069,15 @@ class IndexProjectionStorePort(Protocol):
         as_arrays: bool = False,
     ) -> Any: ...
     def source_subgraph_signature(
-        self, notebook_id: str, source_ids: Sequence[str]
-    ) -> tuple: ...
+        self, notebook_id: str, source_ids: Sequence[str], *,
+        with_navigation: bool = False,
+    ) -> tuple:
+        """The scope's generation signature; with ``with_navigation`` the pair
+        ``(signature, ((source_id, navigation_version), ...))`` -- the
+        in-process snapshot cache's key. The navigation half is never folded
+        into the signature, which on-disk partition manifests compare
+        byte for byte (``source_subgraph_projection``)."""
+        ...
     def source_subgraph_rows(
         self,
         notebook_id: str,

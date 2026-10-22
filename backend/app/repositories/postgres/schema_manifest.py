@@ -495,6 +495,7 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # backfill_global_ask_attribution.py writes the existing done jobs' rows) and
 # the partial idx_global_ask_jobs_unattributed over (id) WHERE status = 'done'
 # AND attributed = 0. One new replicated unique surface (the primary key).
+# PostgreSQL 0079 (kg_cluster_scratch ordinal) is PostgreSQL-only.
 # SQLite v99 / PostgreSQL 0080 add ask_jobs.report_id (text COLLATE "C" NOT
 # NULL DEFAULT ''): the deep report an in-flight Ask turn was asked about, ''
 # when it carries none; the default is the whole backfill. No table, index, FK
@@ -506,7 +507,14 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # no FK) and status_before_delete (text NOT NULL DEFAULT '') -- plus the
 # partial idx_notebooks_pending_delete_due over (delete_after) WHERE status =
 # 'pending_delete'. No backfill, no table, FK or unique-surface change.
+# SQLite v101 / PostgreSQL 0082 add chunks.navigation (integer NOT NULL DEFAULT
+# 0: the navigation-page marker the build writes) and
+# sources.navigation_scanned_at (nullable; SQLite ISO text, PostgreSQL
+# timestamptz: a generation token equal to chunked_at once the current chunks
+# are judged) and sources.navigation_version (integer NOT NULL DEFAULT 0: +1
+# whenever the source's set of flagged chunks changes). No backfill in the migration (the service judges existing
+# sources after readiness), no index, no FK or unique-surface change.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=100,
-    postgres_version=81,
+    sqlite_version=101,
+    postgres_version=82,
 )

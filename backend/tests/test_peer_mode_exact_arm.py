@@ -117,6 +117,7 @@ class ExactProbe:
             exact_lookup_fts_k=50,
             exact_lookup_max_sections=3,
             exact_lookup_max_chunks_per_section=12,
+            retrieval_navigation_filter_enabled=True,
         )
         self.events: list = []
         self.event_log = SimpleNamespace(emit=self.events.append)

@@ -22,6 +22,7 @@ from app.services.kg.follow_chain import (
     InferredChain,
     compose_two_hop_paths,
 )
+from app.services.navigation_filter import chunk_navigation, navigation_filter_enabled
 from app.services.retrieval import RetrievedChunk, _tokens, keyword_basis
 from app.services.source_subgraph import (
     SourceSubgraphCapability,
@@ -469,6 +470,7 @@ class SourceGraphPrimitives:
                     "chunk_id": chunk.chunk_id,
                     "source_id": chunk.source_id,
                     "section_path": chunk.section_path,
+                    "navigation": chunk_navigation(chunk),
                 }
                 for chunk in hits[: max(0, int(limit))]
             ]
@@ -506,6 +508,7 @@ class SourceGraphPrimitives:
                 fts_k=self._settings.exact_lookup_fts_k,
                 max_sections=self._settings.exact_lookup_max_sections,
                 max_chunks_per_section=self._settings.exact_lookup_max_chunks_per_section,
+                drop_navigation=navigation_filter_enabled(self._settings),
             ),
         )
         safe = tuple(chunk for chunk in rows if chunk.source_id in allowed)
@@ -520,6 +523,7 @@ class SourceGraphPrimitives:
             "section_path": chunk.section_path,
             "text": chunk.text,
             "element_ids": list(chunk.element_ids),
+            "navigation": chunk_navigation(chunk),
         }
 
     def enumerate(

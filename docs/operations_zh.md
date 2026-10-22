@@ -65,7 +65,7 @@ selected-source 准备的约定相同。
 其余所有会打开数据库的命令都是 *schema guest*：`batch`（全部阶段，含 `backfill-images`）、
 `maintain`、`kg`、`scale` 各命令（含直接开库的 `maintain delete-leftovers` 与
 `maintain promotion-targets`）、`maintain selected-source`、带 `--use-llm`/`--apply` 的
-`maintain knowhow`、`maintain global-attribution`、`eval replay`、reflect rig 的 `search`/`report`，
+`maintain knowhow`、`maintain global-attribution`、`maintain navigation`、`eval replay`、reflect rig 的 `search`/`report`，
 以及开发用的 eval 辅助脚本。guest 从不迁移、从不 seed，因此不论运维 shell 里的
 `SILICON_NOTEBOOK_ADMIN_PASSWORD` 是什么，都不会改写 admin 密码。打开任何东西之前，它先用一条
 裸连接确认库正好是本构建的 schema（SQLite 看 `user_version`；PostgreSQL 迁移账本须正好是
@@ -246,6 +246,61 @@ PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py            
 
 所以服务就绪后会自动回填；回填完成后看板计数只读归因表。完成路径多写的归因行对一次作业落定的写事务影响
 可忽略（PostgreSQL 约 +0.05 ms，SQLite 在测量噪声内）。
+
+### 导航页标记回填(`scripts/backfill_navigation_chunks.py`)
+
+自 SQLite v101 / PostgreSQL 0082 起，建块时只凭文档自身结构判定哪些 chunk 是导航页——目录、图表清单：
+正文主要由同一来源**其他**部分的标题组成、按文档顺序排列、成段地覆盖、且不在它自己所属的那一部分之内
+（`app/services/navigation_chunks.py`；不看标签词、不用目录行正则；五条条件与阈值见
+[导航页判定](./product-and-api_zh.md#导航页判定)）。文档有编号或面包屑、能看出层级时，章节自己的开篇概述、对本节
+下属小节的汇总表属于正文，不标记；两者都没有的文档看不出这一点，这类段落或表格只按其余条件判定。建块在写 chunk 的同一事务里把这些块写成
+`chunks.navigation = 1`，并把 `sources.navigation_scanned_at` 置成与 `chunked_at` 相同的时刻：这个凭证是
+代际令牌，两者相等即「当前这批 chunk 已判定」。检索不把导航块排进结果。标题数超过判定上限的来源不判定
+（其块保持 0），建块或回填记一条内容无关事件 `navigation_detection_skipped`（`notebook_id`、`source_id`、
+`stage`、`reason=too_many_titles`、`title_count`）；判定出错绝不让建块失败——块照常写入、不打标记也不置凭证，
+并记 `navigation_detection_failed`（`notebook_id`、`source_id`、`stage`、`error_class`）。迁移**不回填**：
+升级前分块的来源（或 `NAVIGATION_DETECTION_ENABLED=false` 期间分块的来源）凭证为空或与 `chunked_at` 不同，
+判定前照旧参与排序。
+
+**自动回填**：每次服务启动、就绪之后（与全局问答归因回填同一位置，从不推迟就绪），启动日志写一行
+`navigation backfill: N source(s) to judge`；N 大于 0 时在轻活维护池里启动一轮回填（作业名
+`navigation-backfill`）。每个作业只处理一页待判来源，处理完把下一页作为新作业重新提交，所以不会长期占住
+轻活池的工作线程；最后一个作业记 `navigation backfill: judged=… sources_changed=… chunks_changed=… busy=…
+abandoned=… failed=… pages=… pending_after=…`（只有计数与异常类名）。逐来源不等待地取导入服务的来源分块锁，
+读该来源的标题与 chunk、判定，只写标记有变化的行和凭证，在一个 compare-and-set 事务里提交——来源的
+`chunked_at` 已变就放弃该来源、留到下次。PostgreSQL 上这个事务的锁等待上限低于 `deadlock_timeout`，与来源
+删除（加锁顺序相反）相遇时让路的一定是回填。来源分块锁被占的来源记为 *busy*：持锁的可能是该来源的解析或
+重新分块（它会自己置凭证），也可能是体检的向量补齐、来源目录的写屏障、MCP 来源探针（它们不置凭证）——所以
+一轮结束时对 busy 来源有界地补扫一轮，仍被占的留到下次启动。每页对块有变化的笔记本各标一次 dirty。镜像笔记本
+（`notebooks.sync_origin` 非空）一律不碰（见下）。判定关闭时不运行；离线批处理作用域一开启，就在下一个来源处
+停下。正常情况下升级后无需手动操作。
+
+**预览、手动重跑、回滚**（范围必须显式给出：`--notebook-id <id>` 或 `--all-notebooks`）：
+
+```bash
+PYTHONPATH=backend python scripts/backfill_navigation_chunks.py --all-notebooks --dry-run                  # 只读：逐来源块数/命中数/将改变数
+PYTHONPATH=backend python scripts/backfill_navigation_chunks.py --notebook-id nb-… --dry-run --show-sections # 并列出命中块的章节标签
+PYTHONPATH=backend python scripts/backfill_navigation_chunks.py --all-notebooks --confirm-service-stopped    # 判定待判来源
+PYTHONPATH=backend python scripts/backfill_navigation_chunks.py --all-notebooks --rescan --confirm-service-stopped  # 重判全部已分块来源
+PYTHONPATH=backend python scripts/backfill_navigation_chunks.py --all-notebooks --clear --confirm-service-stopped   # 数据级回滚
+```
+
+- 命令是 [schema guest](#schema-归属只有服务和-database-migrate-迁移)（统一入口为 `maintain navigation`）：不迁移、
+  不 seed，库不在本构建的 schema 版本时以退出码 3 拒绝。写库与服务内回填同一套 compare-and-set，不依赖进程内锁；
+  PostgreSQL 上写库（重跑或 `--clear`）要求 `--confirm-service-stopped`，dry run 不需要。
+- `--clear` 在一个事务里把范围内的标记全部清 0、凭证全部清空（顺序扫描 `chunks`；PostgreSQL 上抬到维护语句超时
+  底线），并标记涉及的笔记本 dirty。判定仍开着时下次启动会重新判定这些来源；
+  要保持清空，先把 `NAVIGATION_DETECTION_ENABLED` 设为 false。误判时要立即止血、不写库，用读侧开关
+  `RETRIEVAL_NAVIGATION_FILTER_ENABLED=false`。判定关闭时写库被拒（退出码 2），dry run 照常可用。
+- 镜像笔记本（增量同步的目标端）上的标记和凭证都来自源端：回填和本工具（含 `--clear`）都不写它们。要判定或清除，
+  在源端操作、由下一次导入带过来；目标端本地唯一的手段是上面的读侧开关。
+- 退出码：0 完成；1 有来源未判定（读写之间被重新分块、写入因锁等待让路、补扫后来源分块锁仍被占，或单个来源失败），
+  重跑即可；2 参数错误或连不上库；3 库不在本构建的 schema 版本。
+- 进度：剩余数为
+  `SELECT COUNT(*) FROM sources s WHERE s.chunked_at IS NOT NULL AND (s.navigation_scanned_at IS NULL OR
+  s.navigation_scanned_at IS DISTINCT FROM s.chunked_at) AND s.notebook_id NOT IN (SELECT id FROM notebooks
+  WHERE sync_origin <> '')`（SQLite 把 `IS DISTINCT FROM` 写作 `IS NOT`）。回填或 `--clear` 会改写 `chunks` 行：
+  开着增量同步时下一次导出会带上它们，目标端导入后重建派生索引（见[增量同步设计](./incremental-sync-design.md)）。
 
 ## 无主 Memory 来源
 

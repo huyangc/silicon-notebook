@@ -22,6 +22,11 @@ from app.domain.extensions import (
     lane_is_dormant,
 )
 from app.services.cancellation import AskCancelled
+from app.services.navigation_filter import (
+    chunk_navigation,
+    navigation_filter_enabled,
+    row_navigation,
+)
 from app.services.retrieval import RetrievedChunk, RetrievalSupport, est_tokens
 from app.services.source_graph_rollout import (
     decide_source_graph_rollout,
@@ -94,7 +99,12 @@ class ActivatedSourceGraphResult:
 
 
 def hydrate_selected_graph_chunk_rows(rows: Sequence[Mapping[str, Any]]):
-    """Convert the bounded retrieval projection at the composition root."""
+    """Convert the bounded retrieval projection at the composition root.
+
+    The navigation flag rides along instead of the row being dropped here:
+    the partitioned-PPR caller checks that every hit it asked for came back
+    (a missing one fails the whole graph lane closed), so it drops a
+    navigation page itself, after that check."""
     return [RetrievedChunk(
         chunk_id=str(row.get("chunk_id") or ""),
         source_id=str(row.get("source_id") or ""),
@@ -102,6 +112,7 @@ def hydrate_selected_graph_chunk_rows(rows: Sequence[Mapping[str, Any]]):
         section_path=str(row.get("section_path") or ""),
         text=str(row.get("text") or ""),
         element_ids=list(row.get("element_ids") or ()),
+        navigation=row_navigation(row),
     ) for row in rows]
 
 
@@ -344,6 +355,17 @@ class SelectedSourceGraphActivationService:
                 source_ids=source_ids, snapshot=snapshot, build_ms=build_ms,
             )
         candidates: dict[str, RetrievedChunk] = {}
+        # Navigation pages (tables of contents, lists of figures) are not
+        # evidence: no producer of this lane proposes one while the read-side
+        # switch is on. The snapshot itself keeps them (topology, memberships).
+        # Judged by THIS snapshot's flagged ids, never by a producer's chunk
+        # object: the online PPR graph is cached on the generation key alone,
+        # so its chunks keep the flag they were built with.
+        drop_navigation = navigation_filter_enabled(self._settings)
+        flagged = (
+            {chunk.chunk_id for chunk in snapshot.chunks if chunk_navigation(chunk)}
+            if drop_navigation else set()
+        )
         degraded = list(snapshot.degraded_reasons)
         online_ppr_available = False
         ppr_unavailable_reason = "ppr_unavailable"
@@ -359,6 +381,8 @@ class SelectedSourceGraphActivationService:
             online_ppr_available = bool(ppr.capability.enabled)
             if online_ppr_available:
                 for hit in ppr.hits:
+                    if hit.chunk.chunk_id in flagged:
+                        continue
                     candidates[hit.chunk.chunk_id] = self._chunk_from_snapshot(
                         hit.chunk,
                         titles.get(hit.chunk.source_id, ""),
@@ -418,6 +442,8 @@ class SelectedSourceGraphActivationService:
         }
         graph_support = RetrievalSupport("kg_source", "object", "", 1.0)
         for chunk in snapshot.chunks:
+            if chunk.chunk_id in flagged:
+                continue
             if chunk.chunk_id in member_chunk_ids and chunk.chunk_id not in candidates:
                 candidates[chunk.chunk_id] = self._chunk_from_snapshot(
                     chunk, titles.get(chunk.source_id, ""), 1.0, graph_support
@@ -501,6 +527,12 @@ class SelectedSourceGraphActivationService:
                         )
                     for hit in partition_hits:
                         chunk = hydrated[hit.chunk_id]
+                        # The partition path hydrates live rows; the snapshot
+                        # may not hold every chunk here, so either flag drops.
+                        if drop_navigation and (
+                            chunk.chunk_id in flagged or chunk_navigation(chunk)
+                        ):
+                            continue
                         chunk.score = hit.score
                         chunk.relevance = hit.score
                         chunk.retrieval_supports = (hit.support,)

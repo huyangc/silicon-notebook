@@ -190,7 +190,8 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
     ("postgres/kg_build_job_store.py", "KgBuildJobStore._validate_stage_payloads"): (
         s(ANY, DRIVEN, "one staged source's element primary keys"),),
     ("postgres/kg_build_job_store.py", "KgBuildJobStore.publish_indexing_pipeline_success"): (
-        s(ANY, BOUNDED, "the source ids of one indexing publish"),),
+        s(ANY, BOUNDED, "the source ids of one indexing publish"),
+        s(ANY, BOUNDED, "the same publish's source ids: their flagged chunks before the delete"),),
     ("postgres/knowhow_store.py", "KnowhowStore.knowhow_table_health_inputs"): tuple(
         s(ANY, DRIVEN, "every knowhow table of the notebook, the keys read")
         for _ in range(3)),

@@ -11,6 +11,7 @@ from app.domain.indexing_pipeline import (
     IndexingPipelineStalePlanError,
 )
 from app.models.sources import INDEXING_CHUNK_FALLBACK_WARNING_PREFIX
+from app.repositories.navigation_version import navigation_bump
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.memory_sql import (
     MEMORY_SOURCE_NOT_CHUNKED,
@@ -558,6 +559,8 @@ class KgBuildJobStore:
                 or len(fallback_warning) > _STAGE_FALLBACK_WARNING_MAX_CHARS
             ):
                 raise ValueError("invalid staged chunk fallback warning")
+            if type(chunk_payload.get("navigation_scanned", False)) is not bool:
+                raise ValueError("invalid staged navigation marker")
             source_chunk_ids: set[str] = set()
             evidence_elements: set[str] = set()
             for row in chunk_payload["rows"]:
@@ -567,6 +570,9 @@ class KgBuildJobStore:
                     or type(row.get("id")) is not str
                     or not isinstance(row.get("text"), str)
                     or not isinstance(row.get("section_path", ""), str)
+                    # Navigation-page marker (v101 / 0082); absent in a stage
+                    # written before it, read as False.
+                    or type(row.get("navigation", False)) is not bool
                     or not isinstance(row.get("element_ids"), list)
                     or any(type(value) is not str for value in row["element_ids"])
                     or len(row["element_ids"]) != len(set(row["element_ids"]))
@@ -848,6 +854,13 @@ class KgBuildJobStore:
             self._refuse_memory_source(db, notebook_id, snapshot)
 
             # All validation precedes the first live mutation.
+            flagged_before = {
+                source_id: db.execute(
+                    "SELECT id FROM chunks WHERE source_id=? AND navigation<>0",
+                    (source_id,),
+                ).fetchall()
+                for source_id in snapshot
+            }
             for source_id in snapshot:
                 db.execute(
                     "DELETE FROM chunks_fts WHERE chunk_id IN "
@@ -866,12 +879,14 @@ class KgBuildJobStore:
                     element_ids = row.get("element_ids") or []
                     db.execute(
                         "INSERT INTO chunks "
-                        "(id,notebook_id,source_id,text,section_path,element_ids,created_at) "
-                        "VALUES (?,?,?,?,?,?,?)",
+                        "(id,notebook_id,source_id,text,section_path,element_ids,created_at,"
+                        "navigation) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
                         (
                             chunk_id, notebook_id, source_id, text,
                             str(row.get("section_path") or ""),
                             json.dumps(element_ids), created_at,
+                            1 if row.get("navigation") else 0,
                         ),
                     )
                     db.execute(
@@ -896,9 +911,17 @@ class KgBuildJobStore:
                             str(vector.get("created_at") or created_at),
                         ),
                     )
+                # navigation_scanned_at certifies the staged judgement; a stage
+                # built with detection off (or before v101) leaves it NULL so the
+                # background pass judges the published chunks.
                 db.execute(
-                    "UPDATE sources SET chunked_at=? WHERE id=? AND notebook_id=?",
-                    (created_at, source_id, notebook_id),
+                    "UPDATE sources SET chunked_at=?, navigation_scanned_at=? "
+                    "WHERE id=? AND notebook_id=?",
+                    (
+                        created_at,
+                        created_at if chunk_payload.get("navigation_scanned") else None,
+                        source_id, notebook_id,
+                    ),
                 )
                 # 每源回退徽标随本事务置/清(codex #602 R4 P2):非空写稳定前缀
                 # 诊断(不覆盖既有 MinerU 诊断),空则只清本前缀自己的旧诊断——
@@ -922,6 +945,26 @@ class KgBuildJobStore:
                         "UPDATE sources SET error_message='' WHERE id=? "
                         "AND notebook_id=? AND error_message LIKE ?",
                         (source_id, notebook_id, f"{prefix}%"),
+                    )
+
+            # sources.navigation_version: +1 for each source whose set of
+            # flagged chunks this publication changed (backend-neutral rule:
+            # ``app.repositories.navigation_version``).
+            published_flagged = {
+                source_id: [
+                    row["id"] for row in payload["chunks"]["rows"]
+                    if isinstance(row, dict) and row.get("navigation")
+                ]
+                for source_id, payload in payloads
+            }
+            for source_id in snapshot:
+                if navigation_bump(
+                    flagged_before.get(source_id, ()),
+                    published_flagged.get(source_id, ()),
+                ):
+                    db.execute(
+                        "UPDATE sources SET navigation_version=navigation_version+1 "
+                        "WHERE id=? AND notebook_id=?", (source_id, notebook_id),
                     )
 
             # Chunk publication invalidates every notebook-derived KG product

@@ -4229,6 +4229,7 @@ class KnowledgeStore:
                 "chunk_id": row["candidate_id"],
                 "source_id": row["source_id"],
                 "section_path": row["section_path"] or "",
+                "navigation": bool(row["navigation"]),
                 "score": float(row["candidate_similarity"] or 0.0),
                 "match": "lexical",
             }

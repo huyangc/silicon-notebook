@@ -806,6 +806,7 @@ def run_startup(lease: object | None) -> object | None:
         _reproject_legacy_knowhow_tables(repo)
         _sweep_orphan_memory_sources(repo)
         _backfill_global_ask_attribution(repo)
+        _backfill_navigation_chunks(repo)
         _heal_memory_merges(repo)
         _rebuild_memory_isolated_notebooks(repo)
         return repo
@@ -951,6 +952,27 @@ def _backfill_global_ask_attribution(repo) -> None:
         schedule_attribution_backfill(repo)
     except Exception:  # noqa: BLE001 — best-effort, must never affect readiness
         logger.exception("startup: global ask attribution backfill scheduling failed (non-fatal)")
+
+
+def _backfill_navigation_chunks(repo) -> None:
+    """Post-readiness step for the navigation-page marker (SQLite v101 /
+    PostgreSQL 0082): hand every chunked source not yet judged (stamp NULL or
+    older than its ``chunked_at``) to ONE light-pool pass
+    (``app.services.navigation_backfill``, which owns the whole contract:
+    per-source compare-and-set under the source chunk lock, dirty marks,
+    content-free logs). Until it has caught up retrieval ranks those sources'
+    chunks as before, so nothing here is a readiness precondition.
+
+    Same placement and failure discipline as ``_backfill_global_ask_attribution``:
+    strictly AFTER ``mark_ready()`` and every exception is swallowed (the
+    scheduler swallows its own too). With detection switched off, or nothing
+    pending, it is at most one COUNT and no job."""
+    try:
+        from app.services.navigation_backfill import schedule_navigation_backfill
+
+        schedule_navigation_backfill(repo)
+    except Exception:  # noqa: BLE001 — best-effort, must never affect readiness
+        logger.exception("startup: navigation backfill scheduling failed (non-fatal)")
 
 
 def _heal_memory_merges(repo) -> None:

@@ -255,7 +255,7 @@ def _row(chunk_id, section_path, text, source_id="s1"):
 def test_service_without_identifier_makes_zero_store_calls():
     stub = _StubDeps(hits=[_hit("c1", "s1", "S", "set_db")])
     out = exact_lookup_chunks(
-        stub.as_deps(), "nb", "这个工具怎么用", ExactLookupLimits())
+        stub.as_deps(), "nb", "这个工具怎么用", ExactLookupLimits(drop_navigation=True))
     assert out == []
     assert stub.connects == 0 and stub.searches == [] and stub.section_calls == []
 
@@ -266,7 +266,7 @@ def test_service_gate_matches_the_shared_identifier_rule():
     must not open a database connection."""
     stub = _StubDeps()
     assert exact_lookup_chunks(
-        stub.as_deps(), "nb", "第 2.1 节讲了什么", ExactLookupLimits()) == []
+        stub.as_deps(), "nb", "第 2.1 节讲了什么", ExactLookupLimits(drop_navigation=True)) == []
     assert stub.connects == 0
 
 
@@ -282,7 +282,7 @@ def test_service_truncates_identifiers_and_sections():
         for name in ("aaa_bbb", "ccc_ddd", "eee_fff", "ggg_hhh")
     }
     stub = _StubDeps(hits=hits, sections=sections)
-    limits = ExactLookupLimits(max_identifiers=2, max_sections=1, fts_k=7)
+    limits = ExactLookupLimits(max_identifiers=2, max_sections=1, fts_k=7, drop_navigation=True)
     out = exact_lookup_chunks(
         stub.as_deps(), "nb",
         "aaa_bbb ccc_ddd eee_fff ggg_hhh 有什么区别", limits)
@@ -308,7 +308,7 @@ def test_hits_fold_onto_the_command_so_subsections_never_take_extra_slots():
     stub = _StubDeps(hits=hits, sections=sections)
     out = exact_lookup_chunks(
         stub.as_deps(), "nb", "set_db 怎么用",
-        ExactLookupLimits(max_sections=2))
+        ExactLookupLimits(max_sections=2, drop_navigation=True))
     # 四条命中分属三个面包屑,但只属于一条命令 → 一次取数,发在命令主节上,
     # 第二个 slot 原封不动留给别的命令(这里没有,于是根本不发第二次)。
     assert [call[1] for call in stub.section_calls] == ["Cmd > set_db"]
@@ -324,7 +324,7 @@ def test_exact_lookup_chunks_are_marked_without_expanding_the_support_vocabulary
     }
     stub = _StubDeps(hits=hits, sections=sections)
     out = exact_lookup_chunks(
-        stub.as_deps(), "nb", "set_db 怎么用", ExactLookupLimits())
+        stub.as_deps(), "nb", "set_db 怎么用", ExactLookupLimits(drop_navigation=True))
 
     assert out
     assert all(chunk.exact_lookup is True for chunk in out)
@@ -348,7 +348,7 @@ def test_equal_hit_groups_are_ordered_by_the_shortest_breadcrumb():
     stub = _StubDeps(hits=hits, sections=sections)
     exact_lookup_chunks(
         stub.as_deps(), "nb", "set_db 和 get_db",
-        ExactLookupLimits(max_sections=2))
+        ExactLookupLimits(max_sections=2, drop_navigation=True))
     assert [call[1] for call in stub.section_calls] == [
         "Cmd > set_db", "Reference > Commands > get_db"]
 
@@ -384,7 +384,7 @@ def test_a_second_command_keeps_its_slot_when_subsections_out_hit_the_main():
     stub = _StubDeps(hits=hits, sections=sections)
     out = exact_lookup_chunks(
         stub.as_deps(), "nb", "set_db 和 report_timing 分别怎么用",
-        ExactLookupLimits(max_sections=3))
+        ExactLookupLimits(max_sections=3, drop_navigation=True))
 
     assert [call[1] for call in stub.section_calls] == [
         "Manual > Commands > set_db", "Manual > Commands > report_timing"]
@@ -410,7 +410,7 @@ def test_nested_subsections_are_absorbed_so_a_second_identifier_keeps_its_slot()
     stub = _StubDeps(hits=hits, sections=sections)
     out = exact_lookup_chunks(
         stub.as_deps(), "nb", "x_yz 和 very_long_command_name_here 有什么区别",
-        ExactLookupLimits(max_sections=3))
+        ExactLookupLimits(max_sections=3, drop_navigation=True))
     assert [call[1] for call in stub.section_calls] == [
         "A > x_yz", "B > very_long_command_name_here"]
     assert {chunk.chunk_id for chunk in out} == {"row-x", "row-y"}
@@ -440,7 +440,7 @@ def test_document_root_section_contributes_only_its_matching_chunks():
     }
     stub = _StubDeps(hits=hits, sections=sections)
     out = exact_lookup_chunks(
-        stub.as_deps(), "nb", "set_db 命令是怎样的", ExactLookupLimits())
+        stub.as_deps(), "nb", "set_db 命令是怎样的", ExactLookupLimits(drop_navigation=True))
     ids = {chunk.chunk_id for chunk in out}
     assert "ck-toc" in ids                       # 命中的目录块本身保留
     assert "ck-intro" not in ids and "ck-lic" not in ids   # 子树不展开
@@ -467,7 +467,7 @@ def test_unnamed_group_hydrates_the_hit_ids_instead_of_requerying_by_path():
         sections={("s1", "Arguments"): crowd + [target]},
     )
     out = exact_lookup_chunks(
-        stub.as_deps(), "nb", "set_db 命令是怎样的", ExactLookupLimits())
+        stub.as_deps(), "nb", "set_db 命令是怎样的", ExactLookupLimits(drop_navigation=True))
 
     assert stub.section_calls == []            # 不按 path 重查
     assert stub.chunk_calls == [["ck-target"]]  # 只取命中的那一块
@@ -486,7 +486,7 @@ def test_unnamed_group_output_follows_probe_order_not_store_order():
         rows=rows,                       # stub 的 chunk_rows 刻意逆序返回
     )
     out = exact_lookup_chunks(
-        stub.as_deps(), "nb", "set_db 命令是怎样的", ExactLookupLimits())
+        stub.as_deps(), "nb", "set_db 命令是怎样的", ExactLookupLimits(drop_navigation=True))
     assert [chunk.chunk_id for chunk in out] == ["ck-0", "ck-1", "ck-2"]
 
 
@@ -498,7 +498,7 @@ def test_unnamed_group_hit_ids_obey_the_per_section_bound():
     )
     out = exact_lookup_chunks(
         stub.as_deps(), "nb", "set_db 命令是怎样的",
-        ExactLookupLimits(max_chunks_per_section=4))
+        ExactLookupLimits(max_chunks_per_section=4, drop_navigation=True))
     assert stub.chunk_calls == [["ck-0", "ck-1", "ck-2", "ck-3"]]
     assert len(out) == 4
 
@@ -519,7 +519,7 @@ def test_channel_scores_the_probed_name_not_the_callers_query():
     )
     long_question = "set_db 命令是怎样的,它有哪些参数、默认值和常见用法"
     out = exact_lookup_chunks(
-        stub.as_deps(), "nb", long_question, ExactLookupLimits())
+        stub.as_deps(), "nb", long_question, ExactLookupLimits(drop_navigation=True))
 
     assert [chunk.relevance for chunk in out] == [1.0]
     # 这条断言让上面的 1.0 有意义:同一块证据按整句问题打分确实低到会掉预算、
@@ -539,15 +539,15 @@ def test_breadcrumb_sibling_scores_nonzero_via_section_path():
         ]},
     )
     out = exact_lookup_chunks(
-        stub.as_deps(), "nb", "set_db 命令是怎样的", ExactLookupLimits())
+        stub.as_deps(), "nb", "set_db 命令是怎样的", ExactLookupLimits(drop_navigation=True))
     assert out and out[0].chunk_id == "c-args"
     assert out[0].relevance > 0.0
 
 
 def test_zero_section_budget_is_a_zero_io_gate():
     stub = _StubDeps(hits=[_hit("h", "s1", "set_db", "set_db")], sections={})
-    for limits in (ExactLookupLimits(max_sections=0),
-                   ExactLookupLimits(max_chunks_per_section=0)):
+    for limits in (ExactLookupLimits(max_sections=0, drop_navigation=True),
+                   ExactLookupLimits(max_chunks_per_section=0, drop_navigation=True)):
         assert exact_lookup_chunks(
             stub.as_deps(), "nb", "set_db 是什么", limits) == []
     assert stub.connects == 0 and stub.searches == []
@@ -560,7 +560,7 @@ def test_service_skips_hits_without_a_section_and_dedupes_chunks():
     ]
     shared = _row("dup", "Cmd > set_db", "body")
     stub = _StubDeps(hits=hits, sections={("s1", "Cmd > set_db"): [shared, shared]})
-    out = exact_lookup_chunks(stub.as_deps(), "nb", "set_db", ExactLookupLimits())
+    out = exact_lookup_chunks(stub.as_deps(), "nb", "set_db", ExactLookupLimits(drop_navigation=True))
     assert [call[1] for call in stub.section_calls] == ["Cmd > set_db"]
     assert [chunk.chunk_id for chunk in out] == ["dup"]
 
@@ -577,7 +577,7 @@ def test_service_scores_keyword_only_without_a_relevance_floor():
         ]},
     )
     out = exact_lookup_chunks(
-        stub.as_deps(), "nb", "set_db 命令是怎样的", ExactLookupLimits())
+        stub.as_deps(), "nb", "set_db 命令是怎样的", ExactLookupLimits(drop_navigation=True))
     by_id = {chunk.chunk_id: chunk for chunk in out}
     assert set(by_id) == {"c-main", "c-args"}
     assert by_id["c-args"].relevance == 0.0
@@ -596,14 +596,14 @@ def test_service_opens_exactly_one_connection():
                   ("s1", "Cmd > get_db"): [_row("b", "Cmd > get_db", "y")]},
     )
     exact_lookup_chunks(
-        stub.as_deps(), "nb", "set_db 和 get_db", ExactLookupLimits())
+        stub.as_deps(), "nb", "set_db 和 get_db", ExactLookupLimits(drop_navigation=True))
     assert stub.connects == 1
 
 
 def test_service_returns_early_when_nothing_matched():
     stub = _StubDeps(hits=[])
     assert exact_lookup_chunks(
-        stub.as_deps(), "nb", "set_db 命令", ExactLookupLimits()) == []
+        stub.as_deps(), "nb", "set_db 命令", ExactLookupLimits(drop_navigation=True)) == []
     assert stub.connects == 1 and stub.section_calls == []
 
 
@@ -824,7 +824,7 @@ def test_nested_identifier_section_keeps_its_own_slot():
     stub = _StubDeps(hits=hits, sections=sections)
     out = exact_lookup_chunks(
         stub.as_deps(), "nb", "set_db 的 config.yaml 怎么配",
-        ExactLookupLimits(max_sections=2, max_chunks_per_section=3))
+        ExactLookupLimits(max_sections=2, max_chunks_per_section=3, drop_navigation=True))
     assert [call[1] for call in stub.section_calls] == [
         "Ref > set_db", "Ref > set_db > config.yaml"]
     assert "row-cfg" in [chunk.chunk_id for chunk in out]
@@ -841,6 +841,6 @@ def test_probe_anchors_via_text_only_so_prose_free_grandchild_sections_are_not_f
     hits: list = []   # 探测(仅文本)一无所获——孙层文本不含 set_db
     stub = _StubDeps(hits=hits, sections={})
     out = exact_lookup_chunks(
-        stub.as_deps(), "nb", "set_db 命令是怎样的", ExactLookupLimits())
+        stub.as_deps(), "nb", "set_db 命令是怎样的", ExactLookupLimits(drop_navigation=True))
     assert out == []
     assert stub.section_calls == []

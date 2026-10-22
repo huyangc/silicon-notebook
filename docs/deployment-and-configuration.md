@@ -538,6 +538,16 @@ unified CLI) re-runs the pass by hand; like every maintenance command it never m
 refuses (exit status 3) a database that is not at this build's schema. No configuration is involved. Details:
 [Operations](./operations.md#global-ask-attribution-backfill-scriptsbackfill_global_ask_attributionpy).
 
+Upgrading to SQLite v101 / PostgreSQL 0082 needs no manual step either: once the service is ready it judges,
+in one light background pass, which already-chunked sources' chunks are navigation pages (tables of contents,
+lists of figures or tables) and flags them (the startup log reports how many sources are pending); new chunks
+are judged as they are built. `NAVIGATION_DETECTION_ENABLED` (default `true`) is the write-side switch;
+`RETRIEVAL_NAVIGATION_FILTER_ENABLED` (default `true`) is the read-side one (`false` stops retrieval from
+dropping flagged chunks, with no write).
+`PYTHONPATH=backend python scripts/backfill_navigation_chunks.py --all-notebooks --dry-run` (`maintain
+navigation` in the unified CLI) previews the judgement; re-runs and `--clear` are described in
+[Operations](./operations.md#navigation-page-marker-backfill-scriptsbackfill_navigation_chunkspy).
+
 Changing the URL never moves existing rows. For a fresh target, stop the service, change
 the URL, start, and verify the empty/bootstrap state. For an existing SQLite source, the
 delivered forward-shadow CLI can build and continuously maintain a PostgreSQL shadow while
@@ -1458,6 +1468,8 @@ REASONING_CONSULT_MEMORY_ENABLED # per-scenario kill switch (defense in depth) f
 REASONING_MAX_CONSULT_MEMORY # max consult_memory calls per run (default 2; ge=0)
 USER_SEARCH_PROFILE_ENABLED  # single gate for the per-user search/answer style preference document (Agentic Memory P3, B-line): background inference, Ask plan/answer injection, and PATCH /me/search-profile's writability all key off it (default true; false reverts everywhere to byte-identical pre-feature behavior on the injection/write side — no inference, no injection, PATCH 409s — but GET /me still returns any existing value already on the row rather than forging search_profile: null)
 USER_SEARCH_PROFILE_TRIGGER  # completed asks for that user before the deterministic, zero-LLM answer_language inference job runs again (default 20; ge=1)
+NAVIGATION_DETECTION_ENABLED # write side of the navigation-page marker (SQLite v101 / PostgreSQL 0082): whether chunk construction and the post-readiness background pass judge table-of-contents / list-of-figures chunks from the document's own heading structure and write chunks.navigation (default true). false: every build writes 0 and leaves sources.navigation_scanned_at NULL, and the background pass and manual re-runs do nothing, so switching it back on judges those sources at the next start; it does not clear flags already written (scripts/backfill_navigation_chunks.py --clear does)
+RETRIEVAL_NAVIGATION_FILTER_ENABLED # read side of the navigation-page marker: whether every retrieval producer (chunk scoring, PPR, KG source passages, the exact-identifier channel, the selected-source graph lane, extension-proposed chunks, and the element arm, which drops every element a flagged chunk lists) drops chunks with chunks.navigation=1 (default true). false: flagged chunks and their elements are retrieved again, as before the marker, immediately and without touching the stored flags -- the stop-gap for a misjudgement; NAVIGATION_DETECTION_ENABLED and scripts/backfill_navigation_chunks.py --clear manage the flags themselves
 CHUNK_RECALL                 # chunk 大召回数 (default 200; mix 候选池 / MMR 候选)
 CHUNK_FEDERATION_ENABLED     # federated chunk recall: whether a mounted reference library's own source passages enter chunk retrieval alongside the active notebook's (default true). False is the single rollback switch: the participant set collapses to the active notebook alone, the federated module short-circuits to the pre-federation single-library lanes, and behaviour returns to active-only passage recall. Global Ask is the one exception — a run with no subject library keeps the federated path and degrades to a one-leg federation over the first resolved library rather than taking that short circuit. A peer library contributes only its currently visible sources — hidden Memory/Knowhow projections are structurally excluded from the cross-library passage channel — and a library the request unchecked contributes nothing at all
 CHUNK_FEDERATION_MAX_PARTICIPANTS # upper bound on libraries one federated chunk arm searches (default 8; 1..8). Beyond it the set is truncated along the deterministic mount order and a content-free `chunk_federation_truncated` event is emitted; the set is never silently widened or silently narrowed. Start at 4 in production and watch that event plus the ask-stage latency distribution before raising it

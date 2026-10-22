@@ -1411,9 +1411,11 @@ def test_ask_chunk_default_chunk_recall_wiring(repo, monkeypatch):
     seen = {}
     orig = rmod.score_chunks
 
-    def _spy(query, chunks, query_vector=None, chunk_sims=None, limit=150):
+    def _spy(query, chunks, query_vector=None, chunk_sims=None, limit=150, *,
+             drop_navigation):
         seen["limit"] = limit
-        return orig(query, chunks, query_vector, chunk_sims, limit)
+        return orig(query, chunks, query_vector, chunk_sims, limit,
+                    drop_navigation=drop_navigation)
 
     monkeypatch.setattr(rmod, "score_chunks", _spy)
 

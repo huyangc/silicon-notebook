@@ -266,7 +266,7 @@ def test_v92_drops_the_staged_auth_schema_and_keeps_credentials(tmp_path):
         )
         db.execute("PRAGMA user_version = 91")
 
-    assert SqliteMigrator(database, settings).migrate() == [92, 93, 94, 95, 96, 97, 98, 99, 100]
+    assert SqliteMigrator(database, settings).migrate() == [92, 93, 94, 95, 96, 97, 98, 99, 100, 101]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -341,7 +341,7 @@ def test_v93_adds_the_nullable_profile_deleted_at_without_touching_rows(tmp_path
         rollback_v93(db)
         db.execute("PRAGMA user_version = 92")
 
-    assert SqliteMigrator(database, settings).migrate() == [93, 94, 95, 96, 97, 98, 99, 100]
+    assert SqliteMigrator(database, settings).migrate() == [93, 94, 95, 96, 97, 98, 99, 100, 101]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         columns = {row[1]: row for row in db.execute("PRAGMA table_info(agent_profiles)")}
@@ -409,7 +409,7 @@ def test_v94_adds_answer_links_and_the_token_flag(tmp_path):
             ("tk-v94", "agent-v94", "hash-v94", '["read", "ask"]', "nb-v94", None, now),
         )
 
-    assert SqliteMigrator(database, settings).migrate() == [94, 95, 96, 97, 98, 99, 100]
+    assert SqliteMigrator(database, settings).migrate() == [94, 95, 96, 97, 98, 99, 100, 101]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db)[1:] == fresh[1:]
@@ -461,7 +461,7 @@ def test_v95_adds_global_ask_retained_until_without_backfill(tmp_path):
             ("gj-v95", "gc-v95", "u-v95", "{}", "done", "{}", "2026-10-19T00:00:00+00:00"),
         )
 
-    assert SqliteMigrator(database, settings).migrate() == [95, 96, 97, 98, 99, 100]
+    assert SqliteMigrator(database, settings).migrate() == [95, 96, 97, 98, 99, 100, 101]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db) == fresh
@@ -508,7 +508,7 @@ def test_v96_adds_the_rated_global_jobs_partial_index(tmp_path):
                 "payload_json,created_at) VALUES(?,?,?,?,?,?,?)",
                 (job_id, "gconv-v96", "u-v96", "{}", "done", f'{{"feedback":"{rating}"}}', now))
 
-    assert SqliteMigrator(database, settings).migrate() == [96, 97, 98, 99, 100]
+    assert SqliteMigrator(database, settings).migrate() == [96, 97, 98, 99, 100, 101]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert definition(db) == fresh
@@ -549,7 +549,7 @@ def test_v96_stops_with_the_ids_when_a_payload_is_not_json(tmp_path):
         assert db.execute("PRAGMA user_version").fetchone()[0] == 95
     with database.write() as db:
         db.execute("UPDATE global_ask_jobs SET payload_json='{}' WHERE id='g-bad'")
-    assert SqliteMigrator(database, settings).migrate() == [96, 97, 98, 99, 100]
+    assert SqliteMigrator(database, settings).migrate() == [96, 97, 98, 99, 100, 101]
     database.close_local()
 
 
@@ -632,7 +632,7 @@ def test_v97_adds_the_findings_tables_and_the_code_version_column(tmp_path):
         rollback_v97(db)
         db.execute("PRAGMA user_version = 96")
 
-    assert SqliteMigrator(database, settings).migrate() == [97, 98, 99, 100]
+    assert SqliteMigrator(database, settings).migrate() == [97, 98, 99, 100, 101]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         upgraded = shape(db)
@@ -730,7 +730,7 @@ def test_v98_adds_the_attribution_table_without_backfilling(tmp_path):
             ("g-v98", "gconv-v98", "u-v98", "{}", "done",
              '{"resolved_notebook_ids":["nb-x"],"searched_notebook_ids":["nb-x"]}', now))
 
-    assert SqliteMigrator(database, settings).migrate() == [98, 99, 100]
+    assert SqliteMigrator(database, settings).migrate() == [98, 99, 100, 101]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db) == fresh
@@ -779,7 +779,7 @@ def test_v99_adds_ask_jobs_report_id(tmp_path):
             "VALUES (?,?,?,?,?,?)",
             ("job-v98", "nb-v99", "why?", "running", now, now))
 
-    assert SqliteMigrator(database, settings).migrate() == [99, 100]
+    assert SqliteMigrator(database, settings).migrate() == [99, 100, 101]
     assert SqliteMigrator(database, settings).migrate() == []
     # The step re-runs cleanly: add_column_if_missing sees the column and a
     # bare ADD COLUMN would raise "duplicate column name".
@@ -851,7 +851,7 @@ def test_v100_adds_the_notebook_delete_window_without_backfilling(tmp_path):
                 (notebook_id, notebook_id, status, now, now),
             )
 
-    assert SqliteMigrator(database, settings).migrate() == [100]
+    assert SqliteMigrator(database, settings).migrate() == [100, 101]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db) == fresh
@@ -863,4 +863,61 @@ def test_v100_adds_the_notebook_delete_window_without_backfilling(tmp_path):
         ("nb-v100-del", "deleting", None, None, None, ""),
         ("nb-v100-ready", "ready", None, None, None, ""),
     ]
+    database.close_local()
+
+
+@pytest.mark.real_sqlite_migration
+def test_v101_adds_the_navigation_marker_columns_without_backfilling(tmp_path):
+    """v101 adds ``chunks.navigation`` (INTEGER NOT NULL DEFAULT 0),
+    ``sources.navigation_scanned_at`` (nullable TEXT) and
+    ``sources.navigation_version`` (INTEGER NOT NULL DEFAULT 0), and no index; a v100 database's
+    existing chunks read 0 and its sources stay unscanned (NULL) for the
+    post-readiness background pass; a fresh database and a v100 upgrade carry
+    the same columns; a second run is a no-op."""
+    from tests.sqlite_migration_testkit import rollback_v101
+
+    database, settings = _fresh_migrated_database(tmp_path)
+
+    def shape(db):
+        chunks = {row[1]: tuple(row[2:]) for row in db.execute("PRAGMA table_info(chunks)")}
+        sources = {row[1]: tuple(row[2:]) for row in db.execute("PRAGMA table_info(sources)")}
+        return (chunks.get("navigation"), sources.get("navigation_scanned_at"),
+                sources.get("navigation_version"))
+
+    with database.connect() as db:
+        fresh = shape(db)
+    assert fresh == (
+        ("INTEGER", 1, "0", 0), ("TEXT", 0, None, 0), ("INTEGER", 1, "0", 0))
+
+    now = "2026-10-21T00:00:00+00:00"
+    with database.write() as db:
+        rollback_v101(db)
+        db.execute("PRAGMA user_version = 100")
+        assert shape(db) == (None, None, None)
+    raw = sqlite3.connect(database.db_path)
+    try:
+        # Rows only, no owners: the migration under test reads no foreign key.
+        raw.execute("PRAGMA foreign_keys = OFF")
+        with raw:
+            raw.execute(
+                "INSERT INTO sources(id,notebook_id,title,source_type,file_path,parse_status,"
+                "created_at,updated_at,chunked_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                ("src-v101", "nb-v101", "t", "md", "f.md", "parsed", now, now, now))
+            raw.execute(
+                "INSERT INTO chunks(id,notebook_id,source_id,text,created_at) VALUES(?,?,?,?,?)",
+                ("ck-v101", "nb-v101", "src-v101", "text", now))
+    finally:
+        raw.close()
+
+    assert SqliteMigrator(database, settings).migrate() == [101]
+    assert SqliteMigrator(database, settings).migrate() == []
+    with database.connect() as db:
+        assert shape(db) == fresh
+        assert db.execute("SELECT navigation FROM chunks WHERE id='ck-v101'").fetchone()[0] == 0
+        assert db.execute(
+            "SELECT navigation_scanned_at FROM sources WHERE id='src-v101'"
+        ).fetchone()[0] is None
+        assert db.execute(
+            "SELECT navigation_version FROM sources WHERE id='src-v101'"
+        ).fetchone()[0] == 0
     database.close_local()

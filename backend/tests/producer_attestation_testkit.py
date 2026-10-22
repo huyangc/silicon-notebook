@@ -211,7 +211,7 @@ def element_search_citations(repository, notebook_id: str, *,
         if between is not None:
             between()
         return candidates._retrieve_elements_from_chunks(
-            _ELEMENT_QUERY, [passage], limit=8,
+            _ELEMENT_QUERY, [passage], limit=8, notebook_id=_notebook_id,
         )
 
     hits = federated_element_candidates(

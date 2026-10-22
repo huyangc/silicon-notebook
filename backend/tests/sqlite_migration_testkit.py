@@ -44,6 +44,15 @@ V78_AUTH_TABLES = {
 }
 
 
+def rollback_v101(db: sqlite3.Connection) -> None:
+    """Remove what SQLite migration 101 added: ``chunks.navigation``,
+    ``sources.navigation_scanned_at`` and ``sources.navigation_version``.
+    Callers lower ``user_version`` themselves."""
+    db.execute("ALTER TABLE chunks DROP COLUMN navigation")
+    db.execute("ALTER TABLE sources DROP COLUMN navigation_scanned_at")
+    db.execute("ALTER TABLE sources DROP COLUMN navigation_version")
+
+
 def rollback_v99(db: sqlite3.Connection) -> None:
     """Remove ``ask_jobs.report_id``, the column SQLite migration 99 added.
     v100 is undone first (newest-first). Callers lower ``user_version``
@@ -54,8 +63,9 @@ def rollback_v99(db: sqlite3.Connection) -> None:
 
 def rollback_v100(db: sqlite3.Connection) -> None:
     """Remove what SQLite migration 100 added: the four notebooks deletion-window
-    columns and ``idx_notebooks_pending_delete_due``. Callers lower
-    ``user_version`` themselves."""
+    columns and ``idx_notebooks_pending_delete_due``. v101 is undone first
+    (newest-first). Callers lower ``user_version`` themselves."""
+    rollback_v101(db)
     db.execute("DROP INDEX idx_notebooks_pending_delete_due")
     for column in (
         "status_before_delete", "delete_requested_by", "delete_requested_at",

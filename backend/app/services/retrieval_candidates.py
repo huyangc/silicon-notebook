@@ -56,6 +56,13 @@ from app.services.chunk_lane import (  # noqa: F401 - re-exported, see above
     _lexical_gate_drift_probe,
 )
 from app.services.knowledge_contracts import USABLE_STATUSES
+from app.services.navigation_filter import (
+    chunk_navigation,
+    drop_navigation_chunks,
+    drop_navigation_rows,
+    navigation_filter_enabled,
+    row_navigation,
+)
 # Reader #1 on ``retrieval_participants``' frozen whitelist (the participant
 # seat ``_RetrievalState._retrieval_participants`` below resolves through it).
 # ``federated_ask_active`` is the PEER-mode predicate the two ACTIVE-ONLY recall
@@ -325,6 +332,7 @@ def _hydrated_chunk_row(r) -> dict:
         "chunk_id": r["id"], "source_id": r["source_id"], "text": r["text"],
         "section_path": r["section_path"], "source_title": r["source_title"],
         "element_ids": json.loads(r["element_ids"] or "[]"),
+        "navigation": row_navigation(r),
     }
 
 
@@ -1466,7 +1474,12 @@ class CandidateRetrievalService(_RetrievalState):
         rd = resolve_runtime_dim(self.settings)
         # Whole-notebook read only: a source ceiling never reaches here (see
         # ``_retrieve_elements``, which routes any list to the chunk path).
-        rows = self.sources.retrieval_element_rows(db, notebook_id)
+        drop_navigation = navigation_filter_enabled(self.settings)
+        rows = drop_navigation_rows(
+            self.sources.retrieval_element_rows(
+                db, notebook_id, with_navigation=drop_navigation),
+            enabled=drop_navigation,
+        )
         elements: List[dict] = []
         for row in rows:
             vector = None
@@ -1523,6 +1536,7 @@ class CandidateRetrievalService(_RetrievalState):
             "chunk_id": r["id"], "source_id": r["source_id"], "text": r["text"],
             "section_path": r["section_path"], "source_title": r["source_title"],
             "element_ids": json.loads(r["element_ids"] or "[]"),
+            "navigation": row_navigation(r),
         } for r in rows]
     def _vector_matrix_version(self, db: object, notebook_id: str, table: str):
         """(table, count, max created_at, kg seq quadruple, runtime dim) version
@@ -3240,7 +3254,7 @@ class CandidateRetrievalService(_RetrievalState):
                 **chunk_kwargs,
             )
             elements = self._retrieve_elements_from_chunks(
-                query, chunks, limit=limit
+                query, chunks, limit=limit, notebook_id=notebook_id,
             )
             self.event_log.emit({
                 "kind": "element_scoring_bounded", "notebook_id": notebook_id,
@@ -3255,15 +3269,54 @@ class CandidateRetrievalService(_RetrievalState):
             elements = self._gather_elements(db, notebook_id, with_vectors=True)
         return score_elements(query, elements, query_vector, limit=limit)
 
+    def _navigation_element_ids(
+        self, notebook_id: str, chunks, element_ids
+    ) -> set:
+        """Which of ``element_ids`` a navigation chunk lists.
+
+        The chunks handed to the element arm already passed ``score_chunks``,
+        so none of them is a navigation page -- but an element can be shared
+        with one (a long table split into parts, one part judged a table of
+        contents). An element lives in one source, so the flagged chunks of
+        the sources holding these elements answer it, read forward from
+        their own ``element_ids`` (``chunks_for_element_ids(...,
+        navigation_source_id=)``): fail-closed, with or without the
+        ``chunk_elements`` reverse index. One connection for the whole lookup,
+        one statement per (library, source) of the at most 64 selected
+        elements; a chunk's own ``notebook_id`` names its library (blank =
+        this call's)."""
+        wanted = set(element_ids)
+        groups: dict = {}
+        for chunk in chunks:
+            owner = str(getattr(chunk, "notebook_id", "") or notebook_id)
+            source_id = str(getattr(chunk, "source_id", "") or "")
+            for element_id in getattr(chunk, "element_ids", None) or []:
+                element_id = str(element_id or "")
+                if element_id in wanted and source_id:
+                    groups.setdefault((owner, source_id), {})[element_id] = None
+        flagged: set = set()
+        if not groups:
+            return flagged
+        with self._connect() as db:
+            for (owner, source_id), ids in groups.items():
+                flagged.update(
+                    str(row["element_id"])
+                    for row in self.chunks.chunks_for_element_ids(
+                        db, owner, list(ids), navigation_source_id=source_id)
+                )
+        return flagged
+
     def _retrieve_elements_from_chunks(
-        self, query: str, chunks, *, limit: int
+        self, query: str, chunks, *, limit: int, notebook_id: str,
     ) -> List[RetrievedElement]:
         """Hydrate and rank a bounded set of exact elements from chunk hits.
 
         Candidate ids are collected round-robin from relevance-ordered chunks so
         one large chunk cannot consume the whole budget.  At most ``limit * 8``
         (capped at 64) primary-key rows are read; there is no notebook-wide text
-        or vector materialisation.
+        or vector materialisation.  Elements of a navigation chunk
+        (``_navigation_element_ids``) are not candidates while the read-side
+        switch is on.
         """
         if limit <= 0 or not chunks:
             return []
@@ -3314,6 +3367,11 @@ class CandidateRetrievalService(_RetrievalState):
         def _hydrate_and_rank(selected, coarse_scores, output_limit):
             if not selected or output_limit <= 0:
                 return []
+            if navigation_filter_enabled(self.settings):
+                flagged = self._navigation_element_ids(notebook_id, chunks, selected)
+                selected = [value for value in selected if value not in flagged]
+                if not selected:
+                    return []
             hydrated = self.sources.evidence_elements(selected)
             source_ids = [
                 str(row.get("source_id") or "") for row in hydrated.values()
@@ -3767,6 +3825,7 @@ class CandidateRetrievalService(_RetrievalState):
             "section_path": chunk.section_path,
             "text": chunk.text,
             "element_ids": list(chunk.element_ids),
+            "navigation": chunk_navigation(chunk),
         } for chunk in authorized_chunks]
         supplemental = score_chunks(
             query,
@@ -3774,6 +3833,7 @@ class CandidateRetrievalService(_RetrievalState):
             query_vector,
             best_by_chunk,
             limit=self.settings.generated_question_recall,
+            drop_navigation=navigation_filter_enabled(self.settings),
         )
         add_chunk_supports(supplemental, {
             chunk.chunk_id: [RetrievalSupport(
@@ -4020,7 +4080,9 @@ class CandidateRetrievalService(_RetrievalState):
                     ids, mat, {chunk["chunk_id"] for chunk in chunks}
                 )
         chunk_sims = query_sims(query_vector, ids, mat) if query_vector else None
-        scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
+        scored = score_chunks(
+            query, chunks, query_vector, chunk_sims, limit=recall,
+            drop_navigation=navigation_filter_enabled(self.settings))
         supports = {}
         for chunk in scored:
             if chunk_sims is not None and chunk.chunk_id in chunk_sims:
@@ -4096,7 +4158,9 @@ class CandidateRetrievalService(_RetrievalState):
             return [], [], None
         chunks, ids, mat = self._hydrate_chunk_candidates([h["chunk_id"] for h in hits])
         chunk_sims = query_sims(query_vector, ids, mat) if query_vector else None
-        scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
+        scored = score_chunks(
+            query, chunks, query_vector, chunk_sims, limit=recall,
+            drop_navigation=navigation_filter_enabled(self.settings))
         lexical_ids = {hit["chunk_id"] for hit in hits}
         add_chunk_supports(scored, {
             chunk.chunk_id: [
@@ -4504,7 +4568,9 @@ class CandidateRetrievalService(_RetrievalState):
             # whole-notebook matrix before scoring.
             if mat is not None:
                 ids, mat = self._mask_vector_matrix(ids, mat, kept_ids)
-        scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
+        scored = score_chunks(
+            query, chunks, query_vector, chunk_sims, limit=recall,
+            drop_navigation=navigation_filter_enabled(self.settings))
         add_chunk_supports(scored, {
             chunk.chunk_id: [
                 *([RetrievalSupport(
@@ -4701,6 +4767,7 @@ class CandidateRetrievalService(_RetrievalState):
             text=str(row["text"]),
             element_ids=list(json.loads(row["element_ids"] or "[]")),
             notebook_id=str(row["chunk_notebook_id"]),
+            navigation=row_navigation(row),
         ) for row in rows]
         if not verify_unbound_read(
             notebook_id, unbound, (chunk.source_id for chunk in chunks),
@@ -4708,7 +4775,12 @@ class CandidateRetrievalService(_RetrievalState):
             # A by-id hydrate has no top-K to protect: dropping the rows from
             # outside the freeze is the bound read's answer.
             chunks = [chunk for chunk in chunks if chunk.source_id in unbound]
-        return chunks
+        # Navigation pages are not evidence: neither a generated-question match
+        # nor an extension proposal (both admission hydrates read here) may
+        # bring one in. Dropped after the ceiling check, which must still see
+        # every row the read returned.
+        return drop_navigation_chunks(
+            chunks, enabled=navigation_filter_enabled(self.settings))
 
     def restore_report_references(
         self,
@@ -5390,7 +5462,9 @@ class CandidateRetrievalService(_RetrievalState):
             chunks = self._hydrate_chunk_texts(hit_ids)
             # keyword-only score (no query_vector/chunk_sims) — mirrors the ANN∪FTS
             # union where lexical hits get keyword score and semantic 0.
-            scored = score_chunks(needle, chunks, None, None, limit=recall)
+            scored = score_chunks(
+                needle, chunks, None, None, limit=recall,
+                drop_navigation=navigation_filter_enabled(self.settings))
             add_chunk_supports(scored, {
                 chunk.chunk_id: [RetrievalSupport(
                     "lexical", "chunk", chunk.chunk_id, chunk.relevance
@@ -5460,6 +5534,7 @@ class CandidateRetrievalService(_RetrievalState):
             max_sections=self.settings.exact_lookup_max_sections,
             max_chunks_per_section=(
                 self.settings.exact_lookup_max_chunks_per_section),
+            drop_navigation=navigation_filter_enabled(self.settings),
         )
 
     def _exact_lookup_deps(self):

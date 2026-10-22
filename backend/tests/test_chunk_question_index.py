@@ -1009,7 +1009,7 @@ def test_bounded_element_retrieval_spends_capacity_on_baseline_first(
     )
 
     elements = candidates._retrieve_elements_from_chunks(
-        "shared", [supplement, baseline], limit=2
+        "shared", [supplement, baseline], limit=2, notebook_id="nb-elements",
     )
 
     assert [item.element_id for item in elements] == [
@@ -1057,6 +1057,6 @@ def test_bounded_element_retrieval_shares_one_hydration_cap(repo, monkeypatch):
     )
 
     assert candidates._retrieve_elements_from_chunks(
-        "shared", [supplement, baseline], limit=8
+        "shared", [supplement, baseline], limit=8, notebook_id="nb-elements",
     ) == []
     assert sum(len(batch) for batch in hydrated_batches) == 64

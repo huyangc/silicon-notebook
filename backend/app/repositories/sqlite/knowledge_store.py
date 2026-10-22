@@ -4027,7 +4027,8 @@ class KnowledgeStore:
         if allowed_source_ids is None:
             rows = db.execute(
                 "SELECT chunks_fts.chunk_id AS chunk_id, c.source_id AS source_id, "
-                "c.section_path AS section_path, bm25(chunks_fts) AS rank "
+                "c.section_path AS section_path, c.navigation AS navigation, "
+                "bm25(chunks_fts) AS rank "
                 "FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.chunk_id "
                 "WHERE chunks_fts.notebook_id=? AND chunks_fts MATCH ? "
                 "ORDER BY rank LIMIT ?",
@@ -4038,7 +4039,8 @@ class KnowledgeStore:
                 return []
             rows = db.execute(
                 "SELECT chunks_fts.chunk_id AS chunk_id, c.source_id AS source_id, "
-                "c.section_path AS section_path, bm25(chunks_fts) AS rank "
+                "c.section_path AS section_path, c.navigation AS navigation, "
+                "bm25(chunks_fts) AS rank "
                 "FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.chunk_id "
                 "WHERE chunks_fts.notebook_id=? AND chunks_fts MATCH ? "
                 f"AND {member_of('c.source_id', ceiling)} "
@@ -4046,6 +4048,7 @@ class KnowledgeStore:
                 (notebook_id, match_query, ceiling.param, k)).fetchall()
         return [{"chunk_id": r["chunk_id"], "source_id": r["source_id"],
                  "section_path": r["section_path"] or "",
+                 "navigation": bool(r["navigation"]),
                  "score": -float(r["rank"]), "match": "lexical"} for r in rows]
 
     @staticmethod
