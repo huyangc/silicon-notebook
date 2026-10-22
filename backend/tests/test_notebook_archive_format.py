@@ -48,8 +48,32 @@ def test_archive_tables_are_exactly_the_copy_closure_on_both_backends():
         )
     assert pg_store._COPY_TABLES == frozenset(ARCHIVE_TABLES)
     assert set(VECTOR_TABLES) < set(ARCHIVE_TABLES)
-    assert notebook_archive.FORMAT_VERSION == 1
     assert notebook_archive.FORMAT_VERSION in notebook_archive.READABLE_FORMAT_VERSIONS
+
+
+def test_the_table_set_of_each_format_version_is_frozen():
+    """A format version names one table set for good: changing ``ARCHIVE_TABLES``
+    without bumping ``FORMAT_VERSION`` turns this red. Bump the version and add the
+    new pair below (keep the old ones: a reader may still accept them)."""
+    assert {notebook_archive.FORMAT_VERSION: ARCHIVE_TABLES} == {1: (
+        "notebooks", "notebook_bases", "sources", "source_paper_meta", "source_authors",
+        "source_elements", "chunks", "knowledge_objects", "knowledge_source_facts",
+        "knowledge_source_fact_elements", "knowledge_source_fact_backfills",
+        "knowledge_relations", "chunk_embeddings", "chunk_questions", "element_embeddings",
+        "knowledge_embeddings", "relation_embeddings", "concept_clusters",
+        "notebook_object_schemas", "knowhow_tables", "knowhow_columns", "knowhow_rows",
+        "knowhow_cells", "knowhow_cell_code", "notebook_assets",
+    )}
+
+
+def test_cluster_seed_object_id_reads_both_prefix_lengths():
+    from app.services.notebook_transfer.export import cluster_seed_object_id
+
+    assert cluster_seed_object_id("K-~ko-abc") == "ko-abc"
+    assert cluster_seed_object_id("KL-~ko-abc") == "ko-abc"
+    assert cluster_seed_object_id("KF-~ko-abc") == "ko-abc"
+    for plain in ("K-shared topic", "KL-name", "ko-abc", "", "K-~x", "KLM-~ko-a"):
+        assert cluster_seed_object_id(plain) is None, plain
 
 
 def test_sync_package_reexports_the_one_portable_encoding():
@@ -241,3 +265,111 @@ def test_cli_inspect_exit_status(archive, tmp_path, capsys):
     tampered = _rewrite(archive, tmp_path / "t.snbk", drop={MANIFEST_NAME})
     assert cli.main(["inspect", str(tampered)]) == 1
     assert "manifest" in capsys.readouterr().err
+
+
+# ------------------------------------------------------- reader limit guards
+
+
+def _patch_central_field(path: Path, name: str, offset: int, width: int, value: int) -> None:
+    """Overwrite one fixed field of ``name``'s central-directory record (and, for the
+    flag word, its local header too, so both agree)."""
+    data = bytearray(path.read_bytes())
+    encoded = name.encode()
+    at = 0
+    while True:
+        at = data.find(b"PK\x01\x02", at)
+        assert at >= 0, name
+        length = int.from_bytes(data[at + 28:at + 30], "little")
+        if bytes(data[at + 46:at + 46 + length]) == encoded:
+            break
+        at += 4
+    data[at + offset:at + offset + width] = value.to_bytes(width, "little")
+    path.write_bytes(bytes(data))
+
+
+@pytest.mark.parametrize(
+    "constant, value, message",
+    [
+        ("MAX_ENTRIES", 3, "条目数"),
+        ("MAX_TOTAL_UNCOMPRESSED_BYTES", 100, "总量"),
+    ],
+)
+def test_inspect_enforces_the_directory_caps(archive, monkeypatch, constant, value, message):
+    from app.services.notebook_transfer import archive_reader
+
+    monkeypatch.setattr(archive_reader, constant, value)
+    with pytest.raises(ArchiveError, match=message):
+        inspect_archive(archive)
+
+
+def test_inspect_enforces_the_compression_ratio(archive, monkeypatch):
+    from app.services.notebook_transfer import archive_reader
+
+    monkeypatch.setattr(archive_reader, "MAX_ENTRY_COMPRESSION_RATIO", 1)
+    monkeypatch.setattr(archive_reader, "COMPRESSION_RATIO_FLOOR_BYTES", 0)
+    with pytest.raises(ArchiveError, match="压缩比"):
+        inspect_archive(archive)
+
+
+def test_inspect_enforces_the_jsonl_line_cap(archive, monkeypatch):
+    from app.services.notebook_transfer import archive_reader
+
+    monkeypatch.setattr(archive_reader, "MAX_JSONL_LINE_BYTES", 40)
+    with pytest.raises(ArchiveError, match="单行上限"):
+        inspect_archive(archive)
+
+
+@pytest.mark.parametrize("method", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+def test_inspect_refuses_other_compression_methods(archive, tmp_path, method):
+    other = tmp_path / "method.snbk"
+    with zipfile.ZipFile(archive) as old, zipfile.ZipFile(other, "w") as new:
+        for info in old.infolist():
+            data = old.read(info)
+            if info.filename == rows_entry("chunks"):
+                info.compress_type = method
+            new.writestr(info, data)
+    with pytest.raises(ArchiveError, match="压缩方式"):
+        inspect_archive(other)
+
+
+def test_inspect_refuses_an_encrypted_entry_as_an_archive_error(archive, tmp_path):
+    encrypted = tmp_path / "encrypted.snbk"
+    encrypted.write_bytes(archive.read_bytes())
+    _patch_central_field(encrypted, rows_entry("chunks"), 8, 2, 0x0801)  # UTF-8 + encrypted
+    with pytest.raises(ArchiveError, match="加密"):
+        inspect_archive(encrypted)
+
+
+def test_inspect_refuses_overlapping_or_oversized_entries(archive, tmp_path):
+    """Compressed sizes that add up to more than the file holds mean entries overlap
+    (or lie), whatever the interpreter's own zip reader would accept."""
+    lying = tmp_path / "overlap.snbk"
+    lying.write_bytes(archive.read_bytes())
+    _patch_central_field(lying, rows_entry("chunks"), 20, 4, archive.stat().st_size)
+    with pytest.raises(ArchiveError, match="重叠"):
+        inspect_archive(lying)
+
+
+def test_inspect_refuses_a_duplicate_path_in_the_file_index(archive, tmp_path):
+    def duplicate_first_line(data: bytes) -> bytes:
+        first = data.splitlines(keepends=True)[0]
+        return first + data
+
+    with zipfile.ZipFile(archive) as zf:
+        grown = len(duplicate_first_line(zf.read(FILES_INDEX_NAME)))
+    tampered = _rewrite(archive, tmp_path / "dup-index.snbk", replace={
+        FILES_INDEX_NAME: duplicate_first_line,
+        MANIFEST_NAME: _manifest_edit(lambda m: m["files"].update(index_bytes=grown)),
+    })
+    with pytest.raises(ArchiveError, match="重复的路径"):
+        inspect_archive(tampered)
+
+
+@pytest.mark.parametrize("error", [NotImplementedError, RuntimeError, ValueError])
+def test_any_reader_exception_is_an_archive_error(archive, monkeypatch, error):
+    def explode(self, *args, **kwargs):
+        raise error("crafted")
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", explode)
+    with pytest.raises(ArchiveError):
+        inspect_archive(archive)

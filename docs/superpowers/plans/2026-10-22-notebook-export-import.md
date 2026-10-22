@@ -143,10 +143,19 @@ chunk_questions 在导入作业内重嵌入；CLI 导入 PG 上必须停服；KG
 3. **重新嵌入作业**：`services/notebook_reembed.py`，下沉 `source_routes._backfill_vectors_job`（端点契约不变），加 KG 对象/关系两条腿，跳过 knowhow 隐藏来源。
 4. **导入核心 + CLI import**（随 CopyProfile 一起：`NotebookCopyRun.source_notebook` 收窄为源名字符串，磁盘状态字段 assets_dest_dir/copied_files/assets_copied 移回服务侧）：`archive_reader.py`（§5 护栏）、`import_.py`、store 新方法（哨兵/心跳/校验/发布/补偿/收割/列集合）；
    四向往返（SQLite↔PG）、重复导入互不相干、向量一致/不一致、全套篡改用例且失败后零残留。
+   **PR2 交接**（导出端已落地的事实与导入端必须补的点）：
+   - manifest 的列名来自文件：拼 SQL 前逐个用 `is_safe_identifier` 校验，并与目标端该表的列集合比对（⊆，多出列即拒绝），绝不把文件里的名字直接拼进语句。
+   - 空表的 `columns` 是 `[]`（列集合取自行的键并集）：不能当作「该表必有的列」，也不能据此推断 NOT NULL。
+   - 解包文件时防大小写/Unicode 归一化撞名：`files/**` 的相对路径按目标文件系统的比较规则（NFC/NFD、大小写不敏感卷）去重，撞名即拒绝。
+   - 时间戳经现有 `app.migration.shadow.transform` 路径写入：有时区的值是 UTC 文本；SQLite 的无时区值原样携带、按约定当 UTC 读（与 sync 一致）；`""` 哨兵按 `_EMPTY_TIME_SENTINELS` 落库。补一条用例：无时区 SQLite 时间戳与 `""` 哨兵导入 PG。
+   - 笔记本行由 `_reset_copied_notebook_row` 复位，覆盖 `sync_origin`、`created_by`、`indexing_pipeline_job_id` 等；文件里的 `share_token` 已是 NULL、`is_shared` 已是 0，`notebook_bases` 恒为空（条数在 `manifest.excluded.mount_edges`）。
+   - `sources.file_path` 是相对 `files/notebooks/` 的路径；资产文件是 `files/assets/<旧 asset id>.<ext>`。
+   - `concept_clusters.canonical_id` 的取值空间：所有写入方都写成 `<类型前缀><种子>`（`kg_merge`：`id_prefix + seed`，前缀 `K-`/`KL-`/`KF-`/`KP-`），**永远不是裸对象 id**，所以复制里的 `object_map.get(canonical_id, canonical_id)` 恒等。唯一嵌对象 id 的形态是名字退化时的 `<前缀>~ko-<对象 id>`（`seed_or_unique`），`memory_sql.cluster_seed_object_id` 据此判 Memory 与陈旧簇。导出端已丢弃「嵌入的对象不在导出范围内」的簇行（计数 `concept_clusters.canonical_id`）；导入端须把嵌入的旧对象 id 按对象映射改写成新 id（`<前缀>~<新 id>`），否则导入库的下一次复制会因种子对象不存在把整簇当陈旧丢掉。
 5. **网页 API 与作业**：路由、能力、作业注册表、Settings、system config、待办中心、Next 反代上限；权限/413/流式/过期用例，OpenAPI 冻结契约更新。
 6. **前端**：API/hook/面板、能力位；vitest + 按钮反馈/长任务/root modal 守卫 + ui-vocabulary；Browser pane 实机走通「导出→下载→导入→打开」。
 7. **文档收尾**：product-and-api、architecture、operations、deployment-and-configuration、development（中英成对）、incremental-sync-design 边界、
    scripts/README、user-manual_zh、ui-vocabulary、release-notes（level=feature）。
+   development.md / `_zh.md` 写明规则：复制闭包增删表 ⇒ 同时更新归档格式（`ARCHIVE_TABLES`）并提升 `FORMAT_VERSION`（`test_notebook_archive_format` 两条守卫钉住）。
 
 ## 11. 风险
 

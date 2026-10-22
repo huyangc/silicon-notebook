@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import stat
 import zipfile
 import zlib
@@ -96,18 +97,26 @@ def open_archive(path: Path) -> zipfile.ZipFile:
     """Open ``path`` as a zip and check its directory (module docstring). The
     caller closes the returned file."""
     try:
+        size = os.path.getsize(path)
         archive = zipfile.ZipFile(path, "r")
-    except (OSError, zipfile.BadZipFile) as exc:
+    except Exception as exc:  # noqa: BLE001 -- every parse failure is "not an archive"
         raise ArchiveError(f"无法作为导出文件打开: {type(exc).__name__}") from None
     try:
-        check_directory(archive)
-    except BaseException:
+        check_directory(archive, size)
+    except ArchiveError:
         archive.close()
         raise
+    except Exception as exc:  # noqa: BLE001
+        archive.close()
+        raise ArchiveError(f"导出文件目录无法解析: {type(exc).__name__}") from None
     return archive
 
 
-def check_directory(archive: zipfile.ZipFile) -> None:
+def check_directory(archive: zipfile.ZipFile, archive_bytes: int) -> None:
+    """The directory checks (module docstring). ``archive_bytes`` is the file's
+    size on disk: the entries' compressed sizes cannot add up to more than the
+    file holds unless entries overlap (the overlapping-entry zip bomb), whatever
+    the interpreter's own zip reader would tolerate."""
     infos = archive.infolist()
     if len(infos) > MAX_ENTRIES:
         raise ArchiveError("导出文件的条目数超过上限")
@@ -135,6 +144,8 @@ def check_directory(archive: zipfile.ZipFile) -> None:
             and info.file_size > MAX_ENTRY_COMPRESSION_RATIO * max(info.compress_size, 1)
         ):
             raise ArchiveError("导出文件含压缩比异常的条目")
+    if sum(info.compress_size for info in infos) > archive_bytes:
+        raise ArchiveError("导出文件的条目相互重叠或声明的大小超出文件本身")
     if MANIFEST_NAME not in seen:
         raise ArchiveError("导出文件缺少 manifest.json（导出未完成或文件已损坏）")
 
@@ -161,10 +172,16 @@ def inspect_archive(path: Path) -> ArchiveInspection:
     with open_archive(path) as archive:
         try:
             return _inspect_open(path, archive)
+        except ArchiveError:
+            raise
         except (zipfile.BadZipFile, zlib.error, EOFError, OSError) as exc:
             # A flipped byte inside a compressed entry surfaces as a CRC or
             # inflate error from the zip layer, never as a checksum mismatch.
             raise ArchiveError(f"导出文件已损坏: {type(exc).__name__}") from None
+        except Exception as exc:  # noqa: BLE001 -- a crafted file never yields a traceback
+            # NotImplementedError, RuntimeError, ValueError... from the zip
+            # layer or a parser: the file is not one this build can read.
+            raise ArchiveError(f"导出文件无法解析: {type(exc).__name__}") from None
 
 
 def _inspect_open(path: Path, archive: zipfile.ZipFile) -> ArchiveInspection:

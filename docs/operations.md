@@ -2002,8 +2002,12 @@ bash scripts/cli.sh notebook inspect ./exports/nb-a.snbk [--json]
   one WAL read snapshot, which keeps the WAL from being checkpointed past it. Prefer a quiet
   period for very large notebooks.
 - **Files.** The notebook's `storage/notebooks/<id>/` and `storage/assets/<id>/` trees are read
-  after the row transaction, like the deep copy reads them: regular files only; symbolic
-  links and special files are skipped and counted in the report.
+  after the row transaction, like the deep copy reads them: regular files only. Each file is
+  opened without following a symbolic link and checked on that same descriptor, so links,
+  FIFOs and devices (including one swapped in after the directory listing) and a tree root
+  that is itself a link are skipped and counted; a file deleted while the export runs is
+  counted as missing and the export continues. A file larger than 1 MiB that would compress
+  beyond the reader's ratio limit is stored uncompressed.
 - **Normalised on the way out.** The notebook row loses its share link; `sources.file_path`
   becomes the path relative to the notebook's file tree; soft pointers that leave the
   exported closure are cleared (`knowledge_objects.source_id`/`source_candidate_id`,
@@ -2016,9 +2020,13 @@ bash scripts/cli.sh notebook inspect ./exports/nb-a.snbk [--json]
   vectors (`chunk_questions.vector`, NOT NULL) still travel. The manifest records, per
   embedding workload, the bound model's protocol and name, `EMBED_DIM` and `float32-le`, or
   `null` for an unbound workload, so an importer can decide whether the vectors are usable.
-- **Atomic output.** The archive is written to `<out>.part` and renamed into place only when
-  complete, `manifest.json` being its last entry; a failure removes the part file. An
-  existing output is never overwritten.
+- **Atomic output.** The archive is written to a uniquely named `<out>.<random>.part` and
+  published with a hard link that fails if `<out>` exists (on a filesystem without hard links,
+  `<out>` is claimed with `O_EXCL` first), `manifest.json` being its last entry; a failure
+  removes the part file. An existing output is never overwritten, and two exports to the same
+  path cannot corrupt each other: the second to finish fails.
+- **Several notebooks** export in order and stop at the first failure; archives already written
+  stay, and `--json` prints `{"exported": [...], "failed": [...]}` either way.
 - **`inspect`** opens nothing but the file. It checks the zip directory against the reader
   limits (entry count, total uncompressed size, per-entry compression ratio, JSONL line
   length -- named constants in `app.domain.notebook_archive`), the entry-name whitelist (no

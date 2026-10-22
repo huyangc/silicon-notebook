@@ -17,7 +17,13 @@ Zip entries (the archive is always written with ZIP64 records)::
     files/assets/<relative path>      the notebook's storage/assets/<id>/ tree
 
 Rows use the portable encoding of ``app.domain.portable_rows`` (SQLite shape,
-``{"$bytes": b64}`` for byte columns, UTC timestamps, ``sort_keys`` JSONL).
+``{"$bytes": b64}`` for byte columns, ``sort_keys`` JSONL). Timestamp columns
+(classified from the PostgreSQL DDL contract): a zone-aware value -- every
+PostgreSQL ``timestamptz``, SQLite text with an offset -- is written as UTC ISO
+text; a naive SQLite value carries no zone and travels exactly as stored, and a
+reader treats it as UTC by convention, as the sync importer does
+(``app.migration.shadow.transform``); SQLite's ``""`` "no time" sentinel
+travels unchanged.
 ``format_version`` is independent of the database schema version: the real
 compatibility gate on import is "every column a file carries exists in the
 target", which the reader checks table by table. A change to the closure's

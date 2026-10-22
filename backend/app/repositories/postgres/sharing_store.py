@@ -48,6 +48,7 @@ from app.repositories.copy_memory_evidence import (
     strip_memory_evidence,
     strip_row_memory_evidence,
 )
+from app.repositories.copy_stream import feed_table, no_pages, single_page
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.knowhow_history_store import record_change
 from app.repositories.postgres import memory_sql
@@ -1220,9 +1221,11 @@ class SharingStore:
         is reported as the returned ``CopyRowsOutcome`` instead.
 
         ``on_table(table, pages)`` is called once per table in snapshot order
-        and must consume ``pages`` before returning (the cursor lives inside the
-        call). A table in ``skip_tables`` is not read: its consumer gets an empty
-        iterator."""
+        and must consume ``pages`` before returning: the cursor lives inside the
+        call, ``copy_stream.feed_table`` closes it on every path while the
+        connection is still held, and raises ``CopyRowsNotConsumedError`` when
+        pages are left unread. A table in ``skip_tables`` is not read: its
+        consumer gets an empty iterator."""
         with self.database.connect() as connection:
             connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             root_table, root_query = _COPY_SNAPSHOT_QUERIES[0]
@@ -1244,12 +1247,12 @@ class SharingStore:
                 for row in connection.execute(_MEMORY_SOURCE_IDS_SQL, (notebook_id,)).fetchall()
             ) if memory else frozenset()
             keys_box: dict = {}
-            on_table(root_table, iter([roots]))
+            feed_table(on_table, root_table, single_page(roots))
             for table, query in queries[1:]:
                 if table in skip_tables:
-                    on_table(table, iter(()))
+                    feed_table(on_table, table, no_pages())
                     continue
-                on_table(table, self._copy_pages(
+                feed_table(on_table, table, self._copy_pages(
                     connection, table, query, notebook_id,
                     memory_source_ids if table in EVIDENCE_TABLES else frozenset(),
                     keys_box if memory and table == "concept_clusters" else None,
