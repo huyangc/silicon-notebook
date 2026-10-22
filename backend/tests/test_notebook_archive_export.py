@@ -302,29 +302,43 @@ def test_a_directory_swapped_for_a_link_right_before_a_file_open_is_not_followed
         assert archive.read("files/notebooks/deep/leaf.txt") == b"NOTEBOOK-OWN"
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads files regardless of mode bits")
-def test_an_unreadable_file_fails_the_export(repo, out_dir):
-    tree = _seed_full(repo)
-    locked = tree / "doc.md"
-    locked.chmod(0)
-    try:
-        with pytest.raises(NotebookExportError, match="EACCES"):
-            cases.export(repo, cases.NB, out_dir / "eacces.snbk")
-    finally:
-        locked.chmod(0o644)
+def _refuse_open(monkeypatch, leaf: str) -> list[str]:
+    """Make the descriptor-relative open of ``leaf`` fail with EACCES, the way
+    mode bits would for a non-root user. Injected rather than ``chmod``-based so
+    the case holds whoever runs it (root ignores mode bits) and needs no skip
+    marker (the test architecture policy forbids them)."""
+    real_open = os.open
+    refused: list[str] = []
+
+    def open_or_refuse(path, flags, *args, **kwargs):
+        if os.fspath(path) == leaf and kwargs.get("dir_fd") is not None:
+            refused.append(leaf)
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), leaf)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(export_module.os, "open", open_or_refuse)
+    return refused
+
+
+def test_an_unreadable_file_fails_the_export(repo, out_dir, monkeypatch):
+    _seed_full(repo)
+    refused = _refuse_open(monkeypatch, "doc.md")
+    with pytest.raises(NotebookExportError, match="EACCES"):
+        cases.export(repo, cases.NB, out_dir / "eacces.snbk")
+    monkeypatch.undo()
+    assert refused == ["doc.md"]
     assert list(out_dir.iterdir()) == []
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root lists directories regardless of mode bits")
-def test_an_unreadable_directory_fails_the_export(repo, out_dir):
-    tree = _seed_full(repo)
-    locked = tree / "extra"
-    locked.chmod(0)
-    try:
-        with pytest.raises(NotebookExportError, match="目录"):
-            cases.export(repo, cases.NB, out_dir / "eacces-dir.snbk")
-    finally:
-        locked.chmod(0o755)
+def test_an_unreadable_directory_fails_the_export(repo, out_dir, monkeypatch):
+    # os.fwalk opens each subdirectory relative to its parent's descriptor; a
+    # refused open reaches the walk's onerror, which must fail the export.
+    _seed_full(repo)
+    refused = _refuse_open(monkeypatch, "extra")
+    with pytest.raises(NotebookExportError, match="目录"):
+        cases.export(repo, cases.NB, out_dir / "eacces-dir.snbk")
+    monkeypatch.undo()
+    assert refused == ["extra"]
     assert list(out_dir.iterdir()) == []
 
 
