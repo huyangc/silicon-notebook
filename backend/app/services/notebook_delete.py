@@ -117,15 +117,15 @@ _log = logging.getLogger("silicon_notebook.notebook_delete")
 
 
 def _notify_on_a_thread(fn: Callable[[], None]) -> None:
-    """Run a fail-open bell refresh off the calling thread. Starting the
-    thread itself is fail-open too: a lost push is caught up by the next
-    snapshot (the bell re-reads on open)."""
+    """Run a fail-open bell refresh off the calling thread, on the bounded
+    light background pool (``background_jobs``: ``deletion-notice``), so a
+    burst of requests / cancels never starts a thread each. Submitting is
+    fail-open too: a lost push is caught up by the next snapshot (the bell
+    re-reads on open)."""
     try:
-        threading.Thread(
-            target=fn, name="notebook-delete-notice", daemon=True
-        ).start()
+        background_jobs.submit(fn, name="deletion-notice-push")
     except Exception:  # noqa: BLE001 - notification is best effort
-        _log.warning("starting the deletion notice push failed", exc_info=True)
+        _log.warning("queueing the deletion notice push failed", exc_info=True)
 
 # §1.5's房规 batch size for the paths-materialization keyset page (phase 1)
 # AND phase 3's row-cleanup batches (form-one page size / form-two ctid
@@ -401,7 +401,7 @@ class NotebookDeleteJobRunner:
         # How T1/T2 hand their bell refresh off the request thread (a push
         # recomputes each subscribed user's snapshot on the calling thread;
         # with many Memory holders that would hold the DELETE / cancel
-        # answer). Default: a daemon thread per transition; tests inject a
+        # answer). Default: the bounded light background pool; tests inject a
         # synchronous runner.
         self._notify_async = notify_async or _notify_on_a_thread
 
