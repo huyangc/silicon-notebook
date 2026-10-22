@@ -47,8 +47,6 @@ const SOURCE_POLL_MAX_ATTEMPTS = 120;
 type FollowedSource = { seen: string; baseline: string | null; started: boolean };
 const NO_TRACKED_SOURCES: ReadonlyMap<string, FollowedSource> = new Map();
 const NO_SOURCE_IDS: ReadonlySet<string> = new Set();
-/** Followed reparses still being submitted: source id -> the ticket of the submission holding it. */
-const NO_SUBMISSIONS: ReadonlyMap<string, number> = new Map();
 /**
  * What a submitted reparse came to: queued, nothing to do (gone / excluded), the
  * request failed, or abandoned -- the owner (notebook + account) or write access
@@ -166,10 +164,18 @@ export function useSourceLibrary({
   // that found nothing) even when `hasPending` itself did not flip.
   const [trackSerial, setTrackSerial] = useState(0);
   // Followed reparses (`submitFollowedReparse`) whose baseline read or request has
-  // not returned yet, each under its own ticket so a submission only ever releases
-  // its own entry; on "started" the follow set takes each one over.
-  const [submittingSources, setSubmittingSources] = useState<ReadonlyMap<string, number>>(NO_SUBMISSIONS);
-  const submissionTicketRef = useRef(0);
+  // not returned yet; on "started" the follow set takes each one over. The ref is
+  // the synchronous copy the submission path reads (duplicate refusal, release).
+  const [submittingSourceIds, setSubmittingSourceIds] = useState<ReadonlySet<string>>(NO_SOURCE_IDS);
+  const submittingRef = useRef<ReadonlySet<string>>(NO_SOURCE_IDS);
+  // The follow epoch: the one token every follow continuation checks after each
+  // await. It moves on every event that voids all pending follow work of this
+  // library -- `untrackSources` (the analysis panel closed), an owner change
+  // (notebook switch, re-commit), an account change, unmount -- and a continuation
+  // from an older epoch registers no follow, holds no placeholder and applies no
+  // follow result (page rows still update; an accepted job is never cancelled).
+  const followEpochRef = useRef(0);
+  const disposedRef = useRef(false);
 
   const effectsRef = useRef(effects);
   effectsRef.current = effects;
@@ -203,6 +209,16 @@ export function useSourceLibrary({
   const inactiveScopeSelectionRef = useRef(defaultSourceScopeSelection());
   const inactiveDeletingIdsRef = useRef(new Set<string>());
 
+  // Voids every pending follow continuation (moves the follow epoch) and drops the
+  // follow set and the submitting placeholder with it. `untrackSources` is this;
+  // owner resets and commits call it too.
+  const voidFollows = useCallback(() => {
+    followEpochRef.current += 1;
+    submittingRef.current = NO_SOURCE_IDS;
+    setSubmittingSourceIds(NO_SOURCE_IDS);
+    setTrackedSources(NO_TRACKED_SOURCES);
+  }, []);
+
   // Every site that bumps `pageRequestRef.current` outside of
   // `loadSourcesPage` itself is abandoning whatever source-list request is
   // currently in flight for the owner being replaced — call this alongside
@@ -226,6 +242,7 @@ export function useSourceLibrary({
       previousActorIdRef.current = actorId;
       actorIdRef.current = actorId;
       generationRef.current += 1;
+      followEpochRef.current += 1;
       ownerRef.current = null;
       abortInFlightSourcesPage();
       pageRequestRef.current += 1;
@@ -269,8 +286,7 @@ export function useSourceLibrary({
     setHighlightedElementId("");
     setReparsingSourceId(null);
     setSourcesPageLoading(false);
-    setTrackedSources(NO_TRACKED_SOURCES);
-    setSubmittingSources(NO_SUBMISSIONS);
+    voidFollows();
     pollCountRef.current = 0;
   }
 
@@ -342,8 +358,10 @@ export function useSourceLibrary({
     setSourceElementsLoading(false);
     setHighlightedElementId("");
     setSourcesPageLoading(false);
-    setTrackedSources(NO_TRACKED_SOURCES);
-    setSubmittingSources(NO_SUBMISSIONS);
+    // The detail's own reparse belonged to the previous owner (its `finally` only
+    // clears while it still owns): its placeholder goes with the owner.
+    setReparsingSourceId(null);
+    voidFollows();
     pollCountRef.current = 0;
     setOwnerSerial((value) => value + 1);
     return owner;
@@ -363,6 +381,11 @@ export function useSourceLibrary({
     const key = currentDeleteKey(notebookId);
     return key ? deleteRefreshGenerationsRef.current.get(key) ?? 0 : 0;
   }
+
+  // The poll effect reloads the page when a row it reads is gone (deleted elsewhere);
+  // read through a ref so the effect keeps its pinned dependency list.
+  const loadSourcesPageRef = useRef(loadSourcesPage);
+  loadSourcesPageRef.current = loadSourcesPage;
 
   async function loadSourcesPage(input: {
     notebookId?: string;
@@ -686,7 +709,7 @@ export function useSourceLibrary({
     if (crossLibrarySourceNotebookId(detail.notebook_id, owner.notebookId)) return;
     // A reparse of this source submitted elsewhere (the KG analysis findings) has not
     // finished yet: submitting it again would run the same expensive parse twice.
-    if (reparsingSourceIdsRef.current.has(detail.id)) return;
+    if (reparsingSourceIdsRef.current.has(detail.id) || submittingRef.current.has(detail.id)) return;
     setReparsingSourceId(detail.id);
     try {
       const updated = await parseSource(detail.id);
@@ -822,13 +845,13 @@ export function useSourceLibrary({
   // `untrackSources`), and while the source detail's own reparse is in flight.
   const reparsingSourceIds = useMemo<ReadonlySet<string>>(() => {
     if (!ownerIsActive) return NO_SOURCE_IDS;
-    if (trackedSources.size === 0 && submittingSources.size === 0 && reparsingSourceId === null) {
+    if (trackedSources.size === 0 && submittingSourceIds.size === 0 && reparsingSourceId === null) {
       return NO_SOURCE_IDS;
     }
-    const ids = new Set<string>([...trackedSources.keys(), ...submittingSources.keys()]);
+    const ids = new Set<string>([...trackedSources.keys(), ...submittingSourceIds]);
     if (reparsingSourceId !== null) ids.add(reparsingSourceId);
     return ids;
-  }, [ownerIsActive, trackedSources, submittingSources, reparsingSourceId]);
+  }, [ownerIsActive, trackedSources, submittingSourceIds, reparsingSourceId]);
   const reparsingSourceIdsRef = useRef(reparsingSourceIds);
   reparsingSourceIdsRef.current = reparsingSourceIds;
 
@@ -851,6 +874,11 @@ export function useSourceLibrary({
     }
     const tick = async () => {
       if (cancelled || !owns(owner)) return;
+      // The follow set and its epoch as this round reads them. A follow result only
+      // counts while the epoch is unchanged after the reads: an untrack (panel
+      // closed), owner change or unmount in between voids it (see followEpochRef).
+      const followEpoch = followEpochRef.current;
+      const followed = trackedSourcesRef.current;
       const pending = sourcesRef.current.filter(
         (source) => sourceIsPending(source),
       );
@@ -858,15 +886,17 @@ export function useSourceLibrary({
       // Followed sources still pending on the current page are read with the page
       // below; every other followed source (off the page, or on it with a stale
       // terminal status) is read here. Both results settle the follow set.
-      const tracked = [...trackedSourcesRef.current].filter(([id]) => !pendingIds.has(id));
+      const tracked = [...followed].filter(([id]) => !pendingIds.has(id));
       if (pending.length === 0 && tracked.length === 0) {
         pollCountRef.current = 0;
         return;
       }
       if (pollCountRef.current > SOURCE_POLL_MAX_ATTEMPTS) {
         effectsRef.current.setStatusText("处理超时：部分来源长时间未完成，请稍后重试");
-        // The follows end with the attempt budget, and their reparse placeholders with them.
-        if (trackedSourcesRef.current.size > 0) setTrackedSources(NO_TRACKED_SOURCES);
+        // The follows end with the attempt budget, and their reparse placeholders with
+        // them. A submission still in flight is not a follow yet: it registers later
+        // with a fresh budget.
+        if (followed.size > 0) setTrackedSources(NO_TRACKED_SOURCES);
         return;
       }
       pollCountRef.current += 1;
@@ -879,35 +909,46 @@ export function useSourceLibrary({
         );
       }
       try {
-        const [updated, trackedUpdated] = await Promise.all([
-          Promise.all(pending.map((source) => getSource(source.id))),
-          // A followed source deleted meanwhile is done being followed.
-          Promise.all(tracked.map(([id]) => getSource(id).then(
-            (item): SourceSummary | null => item,
-            (error: unknown) => {
-              if (httpErrorStatus(error) === 404) return null;
-              throw error;
-            },
-          ))),
+        // A source deleted meanwhile reads as 404: it is gone (null), not an error.
+        const readOrGone = (id: string) => getSource(id).then(
+          (item): SourceSummary | null => item,
+          (error: unknown) => {
+            if (httpErrorStatus(error) === 404) return null;
+            throw error;
+          },
+        );
+        const [pageReads, trackedUpdated] = await Promise.all([
+          Promise.all(pending.map((source) => readOrGone(source.id))),
+          Promise.all(tracked.map(([id]) => readOrGone(id))),
         ]);
         if (cancelled || !owns(owner)) return;
+        const updated = pageReads.filter((item): item is SourceSummary => item !== null);
+        const goneIds = new Set([
+          ...pending.filter((_, index) => pageReads[index] === null).map((source) => source.id),
+          ...tracked.filter((_, index) => trackedUpdated[index] === null).map(([id]) => id),
+        ]);
+        // Follow results only under the epoch they were read in (an untrack, owner
+        // change or unmount meanwhile voids them; the page rows still update).
+        const followCurrent = followEpochRef.current === followEpoch;
         // Every followed source read this round (off the page, or with the page)
-        // steps its follow state; null = this run is over.
+        // steps its follow state; null = this run is over (or the source is gone).
         const steps = new Map<string, FollowedSource | null>();
-        tracked.forEach(([id, entry], index) => steps.set(id, followedSourceStep(entry, trackedUpdated[index])));
-        for (const item of updated) {
-          const entry = trackedSourcesRef.current.get(item.id);
-          // Read with the page means its page row was pending: a run is underway.
-          if (entry) steps.set(item.id, followedSourceStep({ ...entry, started: true }, item));
+        if (followCurrent) {
+          tracked.forEach(([id, entry], index) => steps.set(id, followedSourceStep(entry, trackedUpdated[index])));
+          pending.forEach((source, index) => {
+            const entry = followed.get(source.id);
+            // Read with the page means its page row was pending: a run is underway.
+            if (entry) steps.set(source.id, followedSourceStep({ ...entry, started: true }, pageReads[index]));
+          });
         }
         // Off-page followed sources move contentRevision when this run starts,
         // advances or ends -- not on a stale terminal read before it started.
-        const trackedChanged = tracked.some(([id, entry], index) => {
+        const trackedChanged = followCurrent && tracked.some(([id, entry], index) => {
           const item = trackedUpdated[index];
           return steps.get(id) === null
             || (item !== null && item.parse_status !== entry.seen && (entry.seen !== "" || sourceIsPending(item)));
         });
-        const trackedReachedExtracted = tracked.some(([id], index) => (
+        const trackedReachedExtracted = followCurrent && tracked.some(([id], index) => (
           steps.get(id) === null && trackedUpdated[index]?.parse_status === "extracted"
         ));
         if (steps.size > 0) {
@@ -941,20 +982,50 @@ export function useSourceLibrary({
             && previous.parse_status !== "failed"
             && item.parse_status === "failed";
         });
-        if (trackedChanged || updated.some((item) => pending.find((source) => source.id === item.id)?.parse_status !== item.parse_status)) {
+        // A row of the current page that reads as gone was deleted elsewhere: drop it and
+        // reload the page (fresh totals) instead of polling a 404 until the attempt cap.
+        const goneOnPage = sourcesRef.current.some((source) => goneIds.has(source.id));
+        if (
+          goneOnPage
+          || trackedChanged
+          || updated.some((item) => pending.find((source) => source.id === item.id)?.parse_status !== item.parse_status)
+        ) {
           setContentRevision((value) => value + 1);
         }
         let changed = false;
         setSources((previous) => {
-          const next = previous.map((source) => {
+          const next = previous.flatMap((source) => {
+            if (goneIds.has(source.id)) {
+              changed = true;
+              return [];
+            }
             const item = updated.find((candidate) => candidate.id === source.id)
               ?? trackedUpdated.find((candidate) => candidate?.id === source.id)
               ?? undefined;
             if (item && item.parse_status !== source.parse_status) changed = true;
-            return item ?? source;
+            return [item ?? source];
           });
           return changed ? next : previous;
         });
+        if (goneIds.size > 0) {
+          setSourceScopeSelection((previous) => [...goneIds].reduce(
+            (selection, id) => removeSourceFromSelection(selection, id),
+            previous,
+          ));
+        }
+        if (goneOnPage) {
+          const guard = () => owns(owner);
+          void Promise.allSettled([
+            loadSourcesPageRef.current({
+              notebookId: owner.notebookId,
+              page: sourcesPageRef.current,
+              q: sourceQueryRef.current,
+              guard,
+            }),
+            effectsRef.current.refreshCollection(guard),
+            effectsRef.current.refreshNotebook(owner.notebookId, guard),
+          ]);
+        }
         if (justFailed) {
           const failureHint = justFailed.error_message
             ? toUserMessage(new Error(justFailed.error_message), "")
@@ -1016,7 +1087,9 @@ export function useSourceLibrary({
     pollCountRef.current = 0;
     setTrackSerial((value) => value + 1);
   }, []);
-  const untrackSources = useCallback(() => setTrackedSources(NO_TRACKED_SOURCES), []);
+  // The analysis panel closed: stop following, release every reparse placeholder of
+  // a follow or a pending submission, and void their continuations (see voidFollows).
+  const untrackSources = voidFollows;
   // The baseline a follow compares against: `updated_at` read just before the
   // reparse is submitted (null when that read fails -- the follow then only
   // trusts "seen to start"). `submitFollowedReparse` reads it; source reads stay here.
@@ -1033,35 +1106,47 @@ export function useSourceLibrary({
   // submit it again meanwhile; on "started" the follow takes it over in the same
   // render, otherwise it is released.
   //
-  // Ownership: every continuation re-checks the owner captured at the submission
-  // (notebook + account) and write access. If they changed while the baseline read
-  // was pending, nothing is submitted ("abandoned"); `submit` gets the same check to
-  // drop its own after-request effects (toast, refreshes) for an abandoned workspace.
-  // Only this submission's own placeholder entry is released -- an owner change
-  // already cleared it, and a new owner's entry for the same id is left alone.
+  // After every await the continuation checks two things:
+  // - ownership: the owner captured at the submission (notebook + account), write
+  //   access, and that the library is still mounted. Lost before the request is
+  //   sent -> nothing is submitted; lost after -> the result is "abandoned".
+  //   `submit` gets the same check to drop its own after-request effects (toast,
+  //   refreshes) for an abandoned workspace;
+  // - the follow epoch: an untrack (panel closed) in the same workspace does not
+  //   cancel the confirmed reparse -- the request still goes out and its toast still
+  //   shows -- but nothing is registered: no follow, no placeholder.
+  // A source that already holds the placeholder (submitting, followed, or the
+  // detail's own reparse) is refused, and a submission releases its placeholder
+  // only within its own epoch (an epoch change already released it, and whatever
+  // holds the id now belongs to newer work).
   async function submitFollowedReparse(
     sourceId: string,
     submit: (stillOwned: () => boolean) => Promise<SourceReparseOutcome>,
   ): Promise<SourceReparseOutcome> {
     const owner = currentOwner();
-    if (!owner || !canWriteRef.current) return "abandoned";
-    const stillOwned = () => owns(owner) && canWriteRef.current;
-    const ticket = ++submissionTicketRef.current;
-    setSubmittingSources((previous) => new Map(previous).set(sourceId, ticket));
+    if (!owner || !canWriteRef.current || disposedRef.current) return "abandoned";
+    if (submittingRef.current.has(sourceId) || reparsingSourceIdsRef.current.has(sourceId)) return "abandoned";
+    const followEpoch = followEpochRef.current;
+    const followCurrent = () => followEpochRef.current === followEpoch;
+    const stillOwned = () => !disposedRef.current && owns(owner) && canWriteRef.current;
+    submittingRef.current = new Set(submittingRef.current).add(sourceId);
+    setSubmittingSourceIds(submittingRef.current);
     try {
       const baseline = await readFollowBaseline(sourceId);
       if (!stillOwned()) return "abandoned";
       const outcome = await submit(stillOwned);
       if (!stillOwned()) return "abandoned";
-      if (outcome === "started") trackSourceProgress([sourceId], { [sourceId]: baseline });
+      if (outcome === "started" && followCurrent()) {
+        trackSourceProgress([sourceId], { [sourceId]: baseline });
+      }
       return outcome;
     } finally {
-      setSubmittingSources((previous) => {
-        if (previous.get(sourceId) !== ticket) return previous;
-        const next = new Map(previous);
+      if (followCurrent() && submittingRef.current.has(sourceId)) {
+        const next = new Set(submittingRef.current);
         next.delete(sourceId);
-        return next.size === 0 ? NO_SUBMISSIONS : next;
-      });
+        submittingRef.current = next.size === 0 ? NO_SOURCE_IDS : next;
+        setSubmittingSourceIds(submittingRef.current);
+      }
     }
   }
 
@@ -1069,8 +1154,15 @@ export function useSourceLibrary({
   // is called from elsewhere in this hook (see its own comment) — none of them
   // fire once the component is gone. Without this, a source-page request still
   // in flight when the hook unmounts runs to completion server-side for nothing.
-  useEffect(() => () => {
-    pageAbortRef.current?.abort();
+  // Unmount also voids every pending follow continuation (followEpochRef) and
+  // makes pending submissions abandon (disposedRef).
+  useEffect(() => {
+    disposedRef.current = false;
+    return () => {
+      disposedRef.current = true;
+      followEpochRef.current += 1;
+      pageAbortRef.current?.abort();
+    };
   }, []);
 
   return {
