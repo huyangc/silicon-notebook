@@ -2986,7 +2986,7 @@
     "I001": 1
   },
   "backend/tests/test_source_repair_api.py": {
-    "I001": 4
+    "I001": 2
   },
   "backend/tests/test_source_scope.py": {
     "I001": 3

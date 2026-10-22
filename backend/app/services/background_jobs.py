@@ -60,6 +60,8 @@ _SAFE_JOB_PREFIXES = (
     ("papermeta-", "papermeta"),
     ("buildkg-", "buildkg"),
     ("index-pipeline-", "index-pipeline"),
+    # Missing-vector fill of one notebook: ``app.services.notebook_reembed``.
+    ("notebook-reembed-", "notebook-reembed"),
     ("deletenb-", "deletenb"),
     # The own-Memory merge backstop (startup pass, or one notebook after a
     # follow-up timed out): ``SourceIngestionService.heal_memory_merges``.
@@ -112,6 +114,9 @@ _HEAVY_MAINTENANCE_OPERATIONS = frozenset({
     # 原子发布尾段,量级与 rebuildkg/unifiedkg 同档——都是整库重建,不是
     # 单来源/单表的轻量投影,故同样进重活池,而不是轻活池。
     "index-pipeline",
+    # 一本笔记本的缺失向量补齐(`services/notebook_reembed.py`):跨导入整本重嵌时是
+    # 全库量级的模型扇出(chunk/element/KG 对象/关系四条腿),与 index-pipeline 同档。
+    "notebook-reembed",
 })
 _LIGHT_MAINTENANCE_OPERATIONS = frozenset({
     "papermeta",

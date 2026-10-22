@@ -80,7 +80,8 @@ class SourceEmbeddingService:
     def note_source_vectors_written(self, notebook_id: str) -> None:
         """element/chunk 向量写完的**边界**通知(见 __init__ 的通知面注释)。公开给
         「不在租约/seq 覆盖下、又绕开 embed_source 整源路径」的调用方在自己的边界调用
-        ——今天只有交互式 backfill job(source_routes._backfill_vectors_job)一个。
+        ——今天只有笔记本补向量作业(notebook_reembed 的 chunks/elements 两条腿,
+        backfill-vectors 端点与 notebook-reembed 共用)一个。
         No-op when unwired。"""
         if self.on_source_vectors_written is not None:
             self.on_source_vectors_written(notebook_id)
@@ -615,13 +616,14 @@ class SourceEmbeddingService:
             task_prefix="stage-ck",
         )
 
-    def embed_relations_batch(self, notebook_id: str, rel_items: List[dict]) -> None:
+    def embed_relations_batch(self, notebook_id: str, rel_items: List[dict]) -> int:
         """并发 COMPUTE 关系向量, 一次写事务持久化到 relation_embeddings。
-        rel_items: [{"_rid": str, "text": str}]。best-effort,失败跳过。"""
+        rel_items: [{"_rid": str, "text": str}]。best-effort,失败跳过。
+        返回真正落库的行数(失败批不计)。"""
         workload_id = "relation_embedding"
         embedder = self.embedder(workload_id)
         if not getattr(embedder, "configured", True):
-            return
+            return 0
         pending = [
             (
                 it["_rid"],
@@ -631,7 +633,7 @@ class SourceEmbeddingService:
             if it.get("text", "").strip()
         ]
         if not pending:
-            return
+            return 0
         size = max(1, self.settings.embed_batch_size)
         batches = [pending[i:i + size] for i in range(0, len(pending), size)]
         self._warm_up(embedder)
@@ -652,6 +654,7 @@ class SourceEmbeddingService:
         # replace_relation_vectors is a per-row INSERT OR REPLACE upsert, so
         # flushing per page is safe (no delete-all-for-notebook).
         page_sz = max(1, self.settings.embed_commit_batches)
+        written = 0
         try:
             for pstart in range(0, len(batches), page_sz):
                 rows: list = []
@@ -671,8 +674,10 @@ class SourceEmbeddingService:
                     self.vectors.replace_relation_vectors(
                         notebook_id, rows, created_at=self.now()
                     )
+                    written += len(rows)
         finally:
             self._evict_matrix(notebook_id, "relation_embeddings")
+        return written
 
     def embed_chunk_ids(self, notebook_id: str, rows: List[dict]) -> None:
         """Incremental embed for an EXPLICIT list of chunks — knowhow-tables
@@ -717,13 +722,13 @@ class SourceEmbeddingService:
         items = [{"_oid": r["id"], "payload": {"text": r["text"]}} for r in rows]
         self.embed_chunks_batch(notebook_id, items)
 
-    def embed_chunks_batch(self, notebook_id: str, items: List[dict]) -> None:
+    def embed_chunks_batch(self, notebook_id: str, items: List[dict]) -> int:
         """并发调用 embedder(resilience 由 DashscopeEmbedder 层负责), 落 chunk_embeddings。
-        每批失败时 log + 跳过(best-effort)。"""
+        每批失败时 log + 跳过(best-effort)。返回真正落库的行数(失败批不计)。"""
         workload_id = "chunk_embedding"
         embedder = self.embedder(workload_id)
         if not items or not getattr(embedder, "configured", True):
-            return
+            return 0
         pending = []
         for it in items:
             text = (it["payload"].get("text") or "").strip()
@@ -733,7 +738,7 @@ class SourceEmbeddingService:
                     text[: self.settings.embed_truncate_chars],
                 ))
         if not pending:
-            return
+            return 0
         size = max(1, self.settings.embed_batch_size)
         batches = [pending[i:i+size] for i in range(0, len(pending), size)]
         self._warm_up(embedder)
@@ -752,6 +757,7 @@ class SourceEmbeddingService:
         # replace_chunk_vectors is a per-row INSERT OR REPLACE upsert, so
         # flushing per page is safe (no delete-all-for-notebook).
         page_sz = max(1, self.settings.embed_commit_batches)
+        written = 0
         try:
             for pstart in range(0, len(batches), page_sz):
                 out: list = []
@@ -769,10 +775,12 @@ class SourceEmbeddingService:
                     self.vectors.replace_chunk_vectors(
                         notebook_id, out, created_at=self.now()
                     )
+                    written += len(out)
         finally:
             self._evict_matrix(notebook_id, "chunk_embeddings")
             # 体检 H4/H5 通知刻意不在这里发(分页原语,方法级通知会按页放大——见
             # __init__ 的通知面注释);matrix 逐出没有这个问题:它是幂等 pop、无重算代价。
+        return written
 
     def backfill_knowledge_embeddings(self, db, notebook_id: str,
                                       objects: List[dict], progress=None) -> None:

@@ -178,6 +178,9 @@ PROCESS_CACHE_INVENTORY: dict[str, str] = {
     "app.services.kg.conflict_detect:_TOKEN_GROUPS": CONTENT_KEYED,
     # One row encoder per table name, built from the migration DDL contract.
     "app.services.notebook_transfer.export:_row_encoder": CONTENT_KEYED,
+    # Re-embed run records keyed by a random per-run id, never by notebook id, so
+    # two copies of one world cannot read each other's runs.
+    "app.services.notebook_reembed:_runs": CONTENT_KEYED,
     # Owned by a weak reference to the experience store; each test's
     # repository is a new store object.
     "app.services.reasoning_retrieval:_EXPERIENCE_CACHE": OWNER_SCOPED,
@@ -185,7 +188,8 @@ PROCESS_CACHE_INVENTORY: dict[str, str] = {
     "app.services.knowhow.api:_SCHEDULERS": OWNER_SCOPED,
     # Present only while a request / run / job is in flight.
     "app.api.mcp_tools.ask:_WAITERS": RUNTIME,
-    "app.api.source_routes:_backfill_vectors_inflight": RUNTIME,
+    "app.services.notebook_reembed:_inflight": RUNTIME,
+    "app.services.notebook_reembed:_active_runs": RUNTIME,
     # Named claims held only for the duration of a ``try_claim`` block (the
     # deletion-window transfer's one-at-a-time claim).
     "app.repositories.sqlite.database:_PROCESS_CLAIMS": RUNTIME,
