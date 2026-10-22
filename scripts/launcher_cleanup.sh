@@ -15,8 +15,11 @@
 # During the wait for the children (up to the SIGKILL and the reaping after it),
 # INT / TERM / HUP no longer end the launcher: a further one escalates (stop
 # waiting, SIGKILL the survivors now) and the companion cleanup still runs after
-# the reaping. The exit status stays that of the first cause. The exception is the
-# companion stop itself: it runs in the foreground, so a Ctrl-C that reaches it
+# the reaping. The exit status stays that of the first cause. A second Ctrl-C is
+# seen through the interrupted `sleep` of the wait (the terminal signals the whole
+# process group); a repeated SIGINT sent to the launcher's pid alone is not seen
+# (bash runs no trap for the signal it is still handling), so it ends the wait only
+# when the grace window does. The exception is the companion stop itself: it runs in the foreground, so a Ctrl-C that reaches it
 # interrupts that command, as it always did.
 
 # START_CLEANUP_GRACE_SECONDS must be a positive integer; refuse before anything starts.
@@ -62,6 +65,12 @@ launcher_adopt_forked_child() {
 
 launcher_cleanup() {
   local status=$? pid alive deadline polls=0
+  # Nothing below may end the wind-down on a failed command, whatever the caller's
+  # `set -e`: a Ctrl-C from a terminal reaches the whole foreground process group,
+  # so it also interrupts the `sleep` and `wait` run here, and an aborted wind-down
+  # skips the SIGKILL, the reaping and the companion stop. The function ends in
+  # `exit`, so the option never has to be restored.
+  set +e
   # First thing after capturing the status: a further cancellation must not kill
   # the launcher half way through this, it only asks the grace wait to end now.
   LAUNCHER_ESCALATED=""
@@ -95,6 +104,13 @@ launcher_cleanup() {
       break
     fi
     sleep "${_SCRIPT_TEST_CLEANUP_POLL_INTERVAL_SECONDS:-1}"
+    # A `sleep` that a signal killed (status above 128) is a further cancellation
+    # even when the trap above never ran. A terminal's Ctrl-C reaches the whole
+    # foreground group, so it always kills this `sleep` too; the trap alone cannot
+    # be relied on, because bash does not run a trap for the very signal whose own
+    # trap handler (`exit 130` for INT) it is still inside, i.e. the second Ctrl-C
+    # after a first one.
+    [[ $? -le 128 ]] || LAUNCHER_ESCALATED=1
     polls=$((polls + 1))
   done
 

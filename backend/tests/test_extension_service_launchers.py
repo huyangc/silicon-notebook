@@ -198,12 +198,14 @@ def test_development_signal_exit_cleans_owned_receipt(launcher):
 
 
 @contextmanager
-def dev_launcher(root, env, **extra_env):
+def dev_launcher(root, env, *, group=False, **extra_env):
     """dev.sh running with both fake children published. Whatever the test does,
     both children are SIGKILLed by exact pid on the way out, so assertions about
-    the launcher's own cleanup belong inside the ``with`` body."""
+    the launcher's own cleanup belong inside the ``with`` body. ``group`` starts
+    it as the leader of a session of its own, so a test can signal the whole
+    process group as a terminal does."""
     with (root / "launcher.err").open("w") as stream:
-        process = spawn(root, {**env, **extra_env}, "scripts/dev.sh", stderr=stream)
+        process = spawn(root, {**env, **extra_env}, "scripts/dev.sh", stderr=stream, new_session=group)
     with process:
         try:
             wait_until(lambda: (root / "backend.pid").exists() and (root / "frontend.pid").exists())
@@ -211,8 +213,17 @@ def dev_launcher(root, env, **extra_env):
         finally:
             if process.poll() is None:
                 process.kill()
+            if group:
+                kill_group(process)
             kill_published(root / "backend.pid")
             kill_published(root / "frontend.pid")
+
+
+def kill_group(process):
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def published_pid(root, name):
@@ -463,7 +474,8 @@ exit 3
                 pass
 
 
-def test_a_signal_that_cuts_the_reaping_short_does_not_let_the_companion_stop_run_early(tmp_path):
+@pytest.mark.parametrize("target", ["$$", "-- -$$"], ids=["launcher", "group"])
+def test_a_signal_that_cuts_the_reaping_short_does_not_let_the_companion_stop_run_early(tmp_path, target):
     """A third signal lands while the launcher waits for a SIGKILLed child to be
     reaped: `wait` returns early with the child still there. The reaping must go on
     until the child is gone, and only then are the companions stopped. The harness
@@ -479,7 +491,7 @@ fi
 ''')
     stub.chmod(0o755)
     script = tmp_path / "reaping.sh"
-    script.write_text(f'''set -uo pipefail
+    script.write_text(f'''set -euo pipefail
 ROOT_DIR={ROOT}
 PYTHON_BIN={stub}
 source "$ROOT_DIR/scripts/extension_services.sh"
@@ -489,8 +501,8 @@ START_CLEANUP_GRACE_SECONDS=1
 _SCRIPT_TEST_CLEANUP_POLL_INTERVAL_SECONDS=0.05
 kill() {{
   if [[ "${{1:-}}" == "-9" ]]; then
-    ( /bin/sleep 1; builtin kill -9 "$2" ) &
-    ( /bin/sleep 0.3; builtin kill -TERM $$ ) &
+    ( trap '' INT TERM HUP; /bin/sleep 1; builtin kill -9 "$2" ) &
+    ( trap '' INT TERM HUP; /bin/sleep 0.3; builtin kill -TERM {target} ) &
     return 0
   fi
   builtin kill "$@"
@@ -551,6 +563,101 @@ def test_a_second_cancellation_in_the_grace_wait_kills_now_and_still_stops_the_c
         finally:
             if process.poll() is None:
                 process.kill()
+            kill_published(root / "backend.pid")
+            kill_published(root / "frontend.pid")
+    assert_owned_cleanup(root)
+
+
+# A terminal sends Ctrl-C (and a closing terminal SIGHUP) to the whole foreground
+# process group: the launcher, its foreground `sleep`, and every child still in the
+# group. The cases above signal the launcher's pid alone; these start it as a session
+# leader and signal the group, the way a terminal does.
+SIGNAL_STATUS = [(signal.SIGINT, 130), (signal.SIGTERM, 143), (signal.SIGHUP, 129)]
+
+
+@pytest.mark.parametrize("interruption,status", SIGNAL_STATUS)
+def test_a_group_signal_stops_both_children_and_keeps_the_exit_status(launcher, interruption, status):
+    root, env = launcher
+    with dev_launcher(root, env, group=True, TERM_EXITS="backend frontend") as process:
+        pids = {name: published_pid(root, name) for name in ("backend", "frontend")}
+        os.killpg(process.pid, interruption)
+        assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) == status
+        for name, pid in pids.items():
+            if interruption != signal.SIGHUP:  # a group SIGHUP kills the fake children itself
+                assert (root / f"{name}.term").exists(), f"{name} never received SIGTERM"
+            assert not alive(pid)
+    assert_owned_cleanup(root)
+
+
+@pytest.mark.parametrize("interruption,status", SIGNAL_STATUS)
+def test_a_group_signal_during_the_sync_leaves_nothing_running(launcher, interruption, status):
+    root, env = launcher
+    with (root / "launcher.err").open("w") as stream:
+        process = spawn(root, {**env, "SYNC_MODE": "hang", "TERM_EXITS": "backend"},
+                        "scripts/dev.sh", stderr=stream, new_session=True)
+    with process:
+        try:
+            wait_until(lambda: (root / "backend.pid").exists() and (root / "sync.pid").exists())
+            sync, backend = published_pid(root, "sync"), published_pid(root, "backend")
+            os.killpg(process.pid, interruption)
+            assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) == status
+            assert not alive(sync)
+            assert not alive(backend)
+            assert not (root / "frontend.pid").exists()
+        finally:
+            kill_group(process)
+    assert_owned_cleanup(root)
+
+
+@pytest.mark.parametrize("path", ["scripts/dev.sh", "scripts/prod.sh"])
+@pytest.mark.parametrize("interruption,status", SIGNAL_STATUS)
+def test_a_group_signal_while_companions_start_rolls_everything_back(launcher, path, interruption, status):
+    root, env = launcher
+    controller_file = root / "controller.pid"
+    with spawn(root, {**env, "WAIT_SERVICE": "1"}, path, new_session=True) as process:
+        try:
+            wait_until(controller_file.exists)
+            os.killpg(process.pid, interruption)
+            assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) == status
+            assert not alive(int(controller_file.read_text()))
+        finally:
+            kill_group(process)
+            kill_published(controller_file)
+    assert_owned_cleanup(root)
+    assert not (root / "backend.pid").exists()
+
+
+@pytest.mark.parametrize("path", ["scripts/dev.sh", "scripts/prod.sh"])
+@pytest.mark.parametrize("second", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
+def test_a_second_group_signal_in_the_grace_wait_still_kills_reaps_and_stops_the_companions(launcher, path, second):
+    """The second Ctrl-C of a real terminal also interrupts the launcher's own
+    foreground `sleep`; under `set -e` that failed command must not end the wind-down
+    before the SIGKILL, the reaping and the companion stop."""
+    root, env = launcher
+    extra = {"TERM_EXITS": "backend", "TERM_IGNORED": "frontend",
+             "START_CLEANUP_GRACE_SECONDS": "30",
+             "_SCRIPT_TEST_CLEANUP_POLL_INTERVAL_SECONDS": "0.05"}
+    if path.endswith("prod.sh"):
+        extra["RM_BLOCK"] = "1"
+    with (root / "launcher.err").open("w") as stream:
+        process = spawn(root, {**env, **extra}, path, stderr=stream, new_session=True)
+    with process:
+        try:
+            wait_until(lambda: (root / "backend.pid").exists() and (root / "frontend.pid").exists())
+            if path.endswith("prod.sh"):
+                wait_until((root / "rm.blocked").exists)
+            backend, frontend = published_pid(root, "backend"), published_pid(root, "frontend")
+            os.killpg(process.pid, signal.SIGINT)
+            (root / "rm.release").touch()
+            wait_until(lambda: (root / "backend.term").exists() and (root / "frontend.term").exists())
+            os.killpg(process.pid, second)
+            assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) == 130
+            assert not alive(frontend), "the child that ignores TERM was left running"
+            assert not alive(backend)
+            assert f"startup child PID {frontend} did not stop after SIGTERM; sending SIGKILL" in (
+                root / "launcher.err").read_text()
+        finally:
+            kill_group(process)
             kill_published(root / "backend.pid")
             kill_published(root / "frontend.pid")
     assert_owned_cleanup(root)
