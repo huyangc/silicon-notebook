@@ -215,7 +215,8 @@ npm run stop
 两个脱离 terminal 的进程拉起后，`npm run start` 立即退出，不轮询后端 readiness
 或前端 HTTP；运维方需自行校验 `/api/ready` 和前端。两个子进程完成交接前若被中断，
 脚本会同时发 SIGTERM，最多等待 `START_CLEANUP_GRACE_SECONDS`(默认 10 秒)，
-对残留进程发 SIGKILL 并 `wait` 回收。环境需要
+对残留进程发 SIGKILL 并 `wait` 回收；等待期间再次中断会立即 SIGKILL 残留进程，配套服务
+仍照常停止（见[运维文档](./operations_zh.md)）。环境需要
 `ss` / `lsof` / `fuser` 之一；目标端口已被占用时会在安装依赖前拒绝，
 即使当前用户看不到监听器 PID 也不例外，避免新进程绑定失败后仍由旧服务占着端口。
 后台服务用 `npm run stop` 停止。

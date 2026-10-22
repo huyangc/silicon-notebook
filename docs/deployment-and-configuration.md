@@ -263,6 +263,8 @@ readiness or frontend HTTP access. The services therefore survive closing the te
 operator must verify `/api/ready` and the frontend separately. An interruption before both
 children are handed off sends SIGTERM to both launched children together, waits the bounded
 `START_CLEANUP_GRACE_SECONDS` (default 10 seconds), SIGKILLs any survivor, and reaps both.
+A further interruption during that wait SIGKILLs the survivors at once, and the companion
+services are still stopped (see [operations](./operations.md#plugin-companion-services)).
 One of `ss`, `lsof`, or `fuser` is required. Occupied target ports fail before dependency
 installation even when the current user cannot see the listener PID, so an old listener cannot
 hide a bind failure in the newly launched process. Use `npm run stop` for the detached services.
