@@ -567,8 +567,10 @@ function FindingRowView({
   };
 
   // 成功之后不急着放开按钮:这一行要等问题页重取回来才移走,其间再点只会再发一次请求。
-  // 重取回来的新一页会换掉 `row`(哪怕这一行还在),那时再放开;重取失败时旧行原样留着,
-  // 由 useAfterRefresh 放开,并在按钮旁说清标记已经写上、只是清单没刷新。
+  // 只由 useAfterRefresh 放开——这次写触发的那次重取结束时(成功:新一页已经摆上,这一行移走或
+  // 原样还在;失败:旧行原样留着,并在按钮旁说清标记已经写上、只是清单没刷新)。不按「行对象
+  // 换了」放开:别的原因触发的重取(来源解析状态推进)也会换行对象,而行刚挂载时那次 effect
+  // 可能晚于第一次点击才冲刷——两种都会把在飞的按钮提前放开。
   const armDismissRefresh = useAfterRefresh(refresh, (failed) => {
     setBusy((current) => (current === "dismiss" ? null : current));
     if (failed) showResult({ tone: "neutral", text: "已标为正常，但问题清单没能刷新；点上方「刷新」重新读取" });
@@ -584,10 +586,6 @@ function FindingRowView({
       setBusy((current) => (current === "dismiss" ? null : current));
     }
   };
-  useEffect(() => {
-    setBusy((current) => (current === "dismiss" ? null : current));
-  }, [row]);
-
   // 在飞期间禁用(长任务按钮红线):删除在跑、重新解析已确认还没排上、来源正在解析时,
   // 对准这篇来源的写按钮都不能再点;重新解析排上之后、这一次跑完之前,引用这篇来源的每一条
   // 问题上的「重新解析…」都不能再点(全页一份占位);补上关联与重新合并 / 整理 / 删除知识图谱
@@ -846,8 +844,8 @@ function PassedRowView({
   const [busy, setBusy] = useState(false);
   const [result, showResult] = useTimedResult();
   const dismissed = row.status === "dismissed";
-  // 与「标为正常」同理:成功后保持「撤销中…」,直到重取回来的新一页换掉这一行;重取失败时
-  // 旧行原样留着,由 useAfterRefresh 放开并在按钮旁说清。
+  // 与「标为正常」同理:成功后保持「撤销中…」,只由 useAfterRefresh 在这次写触发的重取结束时
+  // 放开(成功:新一页已摆上;失败:旧行原样留着,并在按钮旁说清)。
   const armUndoRefresh = useAfterRefresh(refresh, (failed) => {
     setBusy(false);
     if (failed) showResult({ tone: "neutral", text: "已撤销，但问题清单没能刷新；点上方「刷新」重新读取" });
@@ -863,9 +861,6 @@ function PassedRowView({
       setBusy(false);
     }
   };
-  useEffect(() => {
-    setBusy(false);
-  }, [row]);
   return (
     <li className="kg-findings-passed-row">
       <span className="kg-findings-passed-mark" aria-hidden="true">{dismissed ? "↺" : "≠"}</span>
