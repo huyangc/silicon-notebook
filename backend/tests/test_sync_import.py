@@ -516,7 +516,7 @@ def test_the_imported_notebook_is_stamped_as_a_mirror(
 def test_a_source_inside_its_deletion_window_exports_and_the_mirror_starts_outside_it(
     source, target, tmp_path
 ):
-    """The deletion window (SQLite v99 / PostgreSQL 0080) is each environment's
+    """The deletion window (SQLite v100 / PostgreSQL 0081) is each environment's
     own: a source notebook inside its window still exports (the exporter does
     not look at the lifecycle), the package carries the source's window
     columns, and the mirror it creates starts outside any window -- the four
