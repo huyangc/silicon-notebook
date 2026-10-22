@@ -135,9 +135,12 @@ class FakeModels:
             decisions = []
             for block in re.findall(r"- id=(\S+) score=\S+\n  A: (.*)\n  B: (.*)", prompt):
                 cid, a, b = block
-                pair = {a.lower(), b.lower()}
-                # "mosfet" folds to the alias seed "mos transistor".
-                same = (any("metal oxide" in p for p in pair)
+                # The prompt names the pair by canonical id, so its spaces are
+                # those of the seed space (concept seed space 2 squashes them:
+                # "K-metaloxidesemiconductorfet"); the script reads both forms.
+                pair = {a.lower().replace(" ", ""), b.lower().replace(" ", "")}
+                # "mosfet" folds to the alias seed "mos transistor" ("mostransistor").
+                same = (any("metaloxide" in p for p in pair)
                         and any("mos" in p and "metal" not in p for p in pair))
                 decisions.append({
                     "candidate_id": cid,
@@ -535,7 +538,9 @@ _COLLABORATORS = ("unified_kg", "governance_store", "knowledge", "scale_artifact
 
 #: Methods of the service itself the rebuild calls (instance-level wrappers).
 _SELF_METHODS = (
-    "get_notebook", "decided_seed_pairs", "_cluster_input_version", "_settle_skip_path",
+    "get_notebook", "_stream_concept_seed_space", "_squash_merge_candidates",
+    "_refresh_pending_merges", "_cluster_input_facts", "_cluster_input_version",
+    "_settle_skip_path",
     "_settle_generation_catchup", "_reap_stale_cluster_generations", "_notebook_deleting",
     "_refresh_generation_lease", "_stream_seed_reps", "_concept_description_stage",
     "_write_cluster_map_streamed", "_invalidate_unified_cache", "_refresh_viz_after_rebuild",
@@ -695,9 +700,16 @@ def _assert_published(obs: Observation, *, merged_by_llm: bool, writes_mid_run: 
     assert after["cluster_generation"] == claim["generation"]
     assert after["kg_mutation_seq"] == (before or {}).get(
         "kg_mutation_seq", after["kg_mutation_seq"] - writes_mid_run) + writes_mid_run
-    (entry_version,) = [e["ret"] for e in obs.calls("self._cluster_input_version")
-                        if not e["kwargs"]]
-    assert after["cluster_input_version"] == entry_version
+    versions = obs.calls("self._cluster_input_version")
+    (entry,) = [e for e in versions if set(e["kwargs"]) == {"facts"}]
+    (stored,) = [e for e in versions if "dec_growth" in e["kwargs"]]
+    # The END-write stores the version of the inputs read at entry (the same
+    # facts), plus only the rows the v1 decision recompute added (S1 step 5);
+    # without such rows it IS the entry version.
+    assert stored["kwargs"]["facts"] == entry["kwargs"]["facts"]
+    assert after["cluster_input_version"] == stored["ret"]
+    if stored["kwargs"]["dec_growth"] == 0:
+        assert stored["ret"] == entry["ret"]
     assert obs.outcome["returned"] == after["cluster_count"]
     _assert_claim_released(obs)
     assert _tail(obs) == DERIVED_TAIL
@@ -710,8 +722,11 @@ def _assert_published(obs: Observation, *, merged_by_llm: bool, writes_mid_run: 
     assert ["bandgap reference", "cascode", "cascode"] in groups.values(), groups
     assert ["NMOS switch"] in groups.values() and ["PMOS switch"] in groups.values(), groups
     assert ["Nanosheet FET"] in groups.values(), groups
-    # The deferred pair stays out of the pending queue, like a rejected one.
-    assert frozenset(("gaafet", "nanosheet fet")) not in _pending(obs)
+    # The deferred pair stays out of the pending queue, like a rejected one --
+    # in either seed space (the world's deferral is a v1 row the first rebuild
+    # recomputes into seed space 2).
+    assert not {frozenset(("gaafet", "nanosheet fet")),
+                frozenset(("gaafet", "nanosheetfet"))} & _pending(obs)
     assert not any("Deprecated thing" in v for v in groups.values()), groups
     for object_type in ("claim", "formula", "procedure"):
         assert len(_groups(obs, object_type)) == 1, (object_type, _groups(obs, object_type))
@@ -740,7 +755,9 @@ def expect_first_rebuild(obs: Observation) -> None:
     _assert_published(obs, merged_by_llm=True)
     assert obs.outcome["returned"] == 7
     assert _state(obs)["dirty"] == 0
-    assert _pending(obs) == {frozenset(("finfet", "mos transistor"))}, _pending(obs)
+    # Seed space 2 keys (the world's v1 decisions are recomputed in this first
+    # rebuild): "mos transistor" is "mostransistor" there.
+    assert _pending(obs) == {frozenset(("finfet", "mostransistor"))}, _pending(obs)
     # Generation 1: nothing to pre-reap; merge review and descriptions both ran.
     assert not obs.calls("self._reap_stale_cluster_generations")
     assert [c["workload"] for c in obs.llm][:1] == ["kg_merge_review"]
@@ -1004,19 +1021,22 @@ def install_live_changes(rig: Rig) -> None:
     nb = rig.notebook_id
 
     def action() -> None:
+        # The world was rebuilt twice, so the library publishes concept seed
+        # space 2: a decision landing now is minted there (its keys and
+        # canonical ids squashed), as is an incremental placement.
         rig.sql("INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,"
-                "seed_a,seed_b,score,status,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                ("mc-live-rejected", nb, "K-finfet", "K-mos transistor", "finfet",
-                 "mos transistor", 0.86,
-                 "rejected", REBUILD_NOW, REBUILD_NOW))
+                "seed_a,seed_b,score,status,seed_version,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                ("mc-live-rejected", nb, "K-finfet", "K-mostransistor", "finfet",
+                 "mostransistor", 0.86,
+                 "rejected", 2, REBUILD_NOW, REBUILD_NOW))
         lifecycle = rig.lifecycle
         lifecycle.store_kg(nb, "s3", [_obj("c-tfet", "concept", "Tunnel FET", "s3",
                                            "tunnel FET leaks less")], [])
         (oid,) = [o["id"] for o in rig.query(
             "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? AND source_id=?",
             (nb, "s3"))]
-        lifecycle.append_clusters(nb, [{"canonical_id": "K-tunnel fet", "member_object_id": oid,
+        lifecycle.append_clusters(nb, [{"canonical_id": "K-tunnelfet", "member_object_id": oid,
                                         "canonical_name": "Tunnel FET"}], object_type="concept")
 
     _after_last_type(rig, action)

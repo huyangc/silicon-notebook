@@ -75,14 +75,16 @@ def test_pending_refresh_revalidates_decisions_that_land_after_clustering(
     governance_store = repo._runtime.knowledge_lifecycle.governance_store
     original_delete = governance_store.delete_pending_merges
 
-    def reject_during_refresh(connection, notebook_id):
+    def reject_during_refresh(connection, notebook_id, **kwargs):
         connection.execute(
             "UPDATE concept_merge_candidates SET status='rejected' "
             "WHERE notebook_id=? AND status='pending' AND "
             "((seed_a=? AND seed_b=?) OR (seed_a=? AND seed_b=?))",
             (notebook_id, seed_a, seed_b, seed_b, seed_a),
         )
-        original_delete(connection, notebook_id)
+        # ``lock_ids`` (the planned v1 decision rows the store locks with the
+        # pending ones, S1) passes through unchanged.
+        original_delete(connection, notebook_id, **kwargs)
 
     monkeypatch.setattr(
         governance_store, "delete_pending_merges", reject_during_refresh
