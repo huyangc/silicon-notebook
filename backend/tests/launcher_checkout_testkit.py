@@ -54,7 +54,7 @@ def build_fake_checkout(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     root = tmp_path / "checkout"
     for directory in ("scripts", "backend", "frontend/node_modules/.bin", "fake-bin", ".venv/bin", "node/bin"):
         (root / directory).mkdir(parents=True, exist_ok=True)
-    for name in ("dev.sh", "prod.sh", "backend.sh", "stop.sh", "extension_services.sh"):
+    for name in ("dev.sh", "prod.sh", "backend.sh", "stop.sh", "extension_services.sh", "launcher_cleanup.sh"):
         shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
     for name in ("start.sh", "stop.sh"):
         shutil.copy2(ROOT / "packaging" / name, root / name)
@@ -160,6 +160,18 @@ case "${SYNC_MODE:-ok}" in
     exit 3 ;;
 esac
 : > "$FAKE_ROOT/sync.done"
+''')
+    # RM_BLOCK=1 holds prod.sh in the window between forking its children and
+    # handing them off: the first `rm` of the extension start receipt (the handoff
+    # does it) publishes rm.blocked, waits for rm.release and then returns WITHOUT
+    # removing anything, as if the launcher had been interrupted just before it.
+    executable(root / "fake-bin/rm", '''#!/bin/bash
+if [[ "${RM_BLOCK:-}" == 1 && "$*" == *silicon-extension-start* && ! -e "$FAKE_ROOT/rm.blocked" ]]; then
+  : > "$FAKE_ROOT/rm.blocked"
+  while [[ ! -e "$FAKE_ROOT/rm.release" ]]; do /bin/sleep 0.02; done
+  exit 0
+fi
+exec /bin/rm "$@"
 ''')
     executable(root / "fake-bin/curl", '''#!/bin/bash
 case "$*" in
