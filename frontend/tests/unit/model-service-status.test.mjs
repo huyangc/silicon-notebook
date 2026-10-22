@@ -195,3 +195,77 @@ test("support id copy keys a pure wrapper instead of mutating refs during render
     },
   }]);
 });
+
+
+async function withStatusBody(body, run) {
+  const originalFetch = globalThis.fetch;
+  const originalWindow = globalThis.window;
+  globalThis.window = { localStorage: { getItem: () => "gaps-token" } };
+  globalThis.fetch = async () => new Response(JSON.stringify(body), { status: 200 });
+  try {
+    return await run();
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.window = originalWindow;
+  }
+}
+
+
+test("binding gaps parse when present and default to empty for an older backend", async () => {
+  const withGaps = await withStatusBody({
+    services: [status("service-a", "ok")],
+    unbound_workloads: [{ id: "agent_profile_consolidate", label: "库理解整理", feature_enabled: true }],
+    stale_binding_ids: ["ask_anwser"],
+    stale_binding_hidden_count: 1,
+  }, fetchModelServiceStatus);
+  assert.deepEqual(withGaps.unbound_workloads, [
+    { id: "agent_profile_consolidate", label: "库理解整理", feature_enabled: true },
+  ]);
+  assert.deepEqual(withGaps.stale_binding_ids, ["ask_anwser"]);
+  assert.equal(withGaps.stale_binding_hidden_count, 1);
+
+  const legacy = await withStatusBody({ services: [status("service-a", "ok")] }, fetchModelServiceStatus);
+  assert.deepEqual(legacy.unbound_workloads, []);
+  assert.deepEqual(legacy.stale_binding_ids, []);
+  assert.equal(legacy.stale_binding_hidden_count, 0);
+});
+
+
+test("malformed binding gaps are rejected like any other untrusted scalar", async () => {
+  for (const extra of [
+    { unbound_workloads: "agent_profile_consolidate" },
+    { unbound_workloads: [{ id: "../private", label: "x", feature_enabled: true }] },
+    { unbound_workloads: [{ id: "kg_glean", label: "x", feature_enabled: "yes" }] },
+    { stale_binding_ids: ["/etc/silicon/secret.toml"] },
+    { stale_binding_hidden_count: -1 },
+  ]) {
+    await assert.rejects(
+      withStatusBody({ services: [status("service-a", "ok")], ...extra }, fetchModelServiceStatus),
+      /模型服务状态格式无效/,
+    );
+  }
+});
+
+
+test("a single-service test result keeps the snapshot's gaps; a test-all result replaces them", () => {
+  const prior = {
+    services: [status("vendor-a", "untested")],
+    unbound_workloads: [{ id: "kg_glean", label: "知识补充分析", feature_enabled: false }],
+    stale_binding_ids: ["ask_anwser"],
+    stale_binding_hidden_count: 1,
+  };
+  const single = mergeModelServiceStatus(prior, status("vendor-a", "ok"));
+  assert.deepEqual(single.unbound_workloads, prior.unbound_workloads);
+  assert.deepEqual(single.stale_binding_ids, ["ask_anwser"]);
+  assert.equal(single.stale_binding_hidden_count, 1);
+
+  const whole = mergeModelServiceStatus(prior, {
+    services: [status("vendor-a", "ok")],
+    unbound_workloads: [],
+    stale_binding_ids: [],
+    stale_binding_hidden_count: 0,
+  });
+  assert.deepEqual(whole.unbound_workloads, []);
+  assert.deepEqual(whole.stale_binding_ids, []);
+  assert.equal(whole.stale_binding_hidden_count, 0);
+});

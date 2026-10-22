@@ -36,12 +36,14 @@ def _status_item(*, status: str = "ok") -> dict[str, object]:
 class _StatusService:
     def __init__(self) -> None:
         self.snapshot_calls = 0
+        self.gap_requests: list[bool] = []
         self.one_calls: list[tuple[str, str]] = []
         self.all_calls: list[str] = []
         self.status = "ok"
 
-    def snapshot(self):
+    def snapshot(self, *, include_binding_gaps: bool = False):
         self.snapshot_calls += 1
+        self.gap_requests.append(include_binding_gaps)
         return {"services": [deepcopy(_status_item(status=self.status))]}
 
     def test_one(self, service_id: str, *, actor_id: str):
@@ -263,7 +265,9 @@ def test_status_requires_authentication(api):
     assert service.snapshot_calls == 0
 
 
-def test_status_is_identical_for_admin_and_user_and_never_probes(api):
+def test_status_rows_are_identical_for_admin_and_user_and_never_probe(api):
+    """Per-service rows do not depend on the caller; only the binding-gap
+    diagnostic is requested for administrators (see the end-to-end case)."""
     client, service = api
     user_headers, _ = _register(client)
     admin_headers, _ = _admin(client)
@@ -272,8 +276,9 @@ def test_status_is_identical_for_admin_and_user_and_never_probes(api):
     admin_response = client.get("/api/model-services/status", headers=admin_headers)
 
     assert user_response.status_code == admin_response.status_code == 200
-    assert user_response.json() == admin_response.json()
+    assert user_response.json()["services"] == admin_response.json()["services"]
     assert service.snapshot_calls == 2
+    assert service.gap_requests == [False, True]
     assert service.one_calls == []
     assert service.all_calls == []
     _assert_sanitized(user_response.json())
@@ -528,3 +533,79 @@ def test_openapi_contains_only_system_model_service_routes(api):
         "/api/me/model-services/{service}/test",
         "/api/me/model-services/test-all",
     }.isdisjoint(paths)
+
+
+def test_binding_gaps_reach_administrators_only(api, tmp_path, monkeypatch):
+    """End to end over HTTP with a real lenient registry: an admin's status
+    carries the unbound workload and the ignored id, an ordinary user's carries
+    the same per-service rows and empty gap fields."""
+    from app.core.config import Settings
+    from app.services.model_provider import RuntimeModelProvider
+    from app.services.model_registry import WORKLOADS, SystemModelServiceRegistry
+    from app.services.model_status import ModelStatusService
+
+    client, _ = api
+    user_headers, _ = _register(client)
+    admin_headers, _ = _admin(client)
+    monkeypatch.setenv("GAPS_API_KEY", "private-secret")
+    bindings = "\n".join(
+        f'{workload_id} = "{"general" if workload.kind == "chat" else workload.kind}"'
+        for workload_id, workload in sorted(WORKLOADS.items())
+        if workload_id != "agent_profile_consolidate"
+    )
+    services = "".join(
+        f"""[services.{service_id}]
+display_name = "{service_id}"
+kind = "{kind}"
+protocol = "{protocol}"
+base_url = "https://private-provider.invalid/v1"
+model = "safe-model"
+api_key_env = "GAPS_API_KEY"
+max_concurrency = 1
+
+"""
+        for service_id, kind, protocol in (
+            ("general", "chat", "openai"),
+            ("embedding", "embedding", "dashscope"),
+            ("rerank", "rerank", "dashscope"),
+        )
+    )
+    config = tmp_path / "gaps.toml"
+    config.write_text(
+        services + "[bindings]\n" + bindings + '\nask_anwser = "general"\n',
+        encoding="utf-8",
+    )
+    settings = Settings(
+        _env_file=None,
+        model_services_config=str(config),
+        model_bindings_strict=False,
+        agent_profile_enabled=True,
+    )
+    registry = SystemModelServiceRegistry.load(settings)
+    provider = RuntimeModelProvider(settings, _EventLog(), registry=registry)
+    _override_status_service(
+        client,
+        ModelStatusService(
+            registry, provider, _MemoryStatusStore(), settings=settings
+        ),
+    )
+    try:
+        admin = client.get("/api/model-services/status", headers=admin_headers)
+        user = client.get("/api/model-services/status", headers=user_headers)
+    finally:
+        provider.close()
+
+    assert admin.status_code == user.status_code == 200
+    admin_body, user_body = admin.json(), user.json()
+    assert admin_body["unbound_workloads"] == [{
+        "id": "agent_profile_consolidate",
+        "label": "库理解整理",
+        "feature_enabled": True,
+    }]
+    assert admin_body["stale_binding_ids"] == ["ask_anwser"]
+    assert admin_body["stale_binding_hidden_count"] == 0
+    assert user_body["unbound_workloads"] == []
+    assert user_body["stale_binding_ids"] == []
+    assert user_body["stale_binding_hidden_count"] == 0
+    assert user_body["services"] == admin_body["services"]
+    _assert_sanitized(admin_body)

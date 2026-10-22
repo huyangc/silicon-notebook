@@ -392,6 +392,7 @@ def _build_persistence_seats(
         getattr(foundation.models, "registry", SystemModelServiceRegistry({}, {})),
         foundation.models,
         bundle.model_status,
+        settings=foundation.settings,
     )
     set_observation_sink = getattr(foundation.models, "set_observation_sink", None)
     if callable(set_observation_sink):

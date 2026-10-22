@@ -25,7 +25,25 @@ export type ModelServiceStatusItem = {
   support_id: string;
 };
 
-export type ModelServicesStatus = { services: ModelServiceStatusItem[] };
+/** 一个没有绑定任何模型服务的使用位置（管理员可见）。 */
+export type ModelUnboundWorkload = {
+  id: string;
+  label: string;
+  /** 它自己的功能开关是开着的：功能「开着却不工作」。 */
+  feature_enabled: boolean;
+};
+
+/**
+ * `unbound_workloads` / `stale_binding_*` 与启动日志的 `model-bindings:` 告警同源，
+ * 只发给管理员；普通用户、离线模式（没有任何模型服务）和默认的严格档下恒为空。
+ * 可选：单服务「测试服务」的回包不带它们，合并时沿用当前快照里的。
+ */
+export type ModelServicesStatus = {
+  services: ModelServiceStatusItem[];
+  unbound_workloads?: ModelUnboundWorkload[];
+  stale_binding_ids?: string[];
+  stale_binding_hidden_count?: number;
+};
 
 export type ModelFailure = {
   service_id: string;
@@ -50,6 +68,8 @@ export type ModelServicesSummary = {
 
 
 const SERVICE_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+// 后端只放行形如工作负载 id 的陈旧键名（与启动日志同一把脱敏），其余只计数。
+const BINDING_ID = /^[a-z0-9_]{1,64}$/;
 const SUPPORT_ID = /^mdl-[A-Za-z0-9_-]{1,80}$/;
 const KINDS = new Set(["chat", "embedding", "rerank"]);
 const STATUSES = new Set(["untested", "ok", "busy", "error", "circuit_open", "half_open"]);
@@ -152,12 +172,37 @@ export function parseModelServiceStatusItem(value: unknown): ModelServiceStatusI
   };
 }
 
+function parseUnboundWorkload(value: unknown): ModelUnboundWorkload {
+  const item = record(value);
+  const flag = item.feature_enabled;
+  if (flag !== undefined && typeof flag !== "boolean") return invalidStatus();
+  return { ...parseWorkload(item), feature_enabled: flag === true };
+}
+
+function parseBindingId(value: unknown): string {
+  const id = stringScalar(value, 64);
+  return BINDING_ID.test(id) ? id : invalidStatus();
+}
+
+/** 旧后端不带这几个字段：缺席按空处理；带了就必须是合法形状。 */
+function optionalList<T>(value: unknown, parse: (item: unknown) => T): T[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) return invalidStatus();
+  return value.map(parse);
+}
+
 function parseModelServicesStatus(value: unknown): ModelServicesStatus {
   const snapshot = record(value);
   if (!Array.isArray(snapshot.services)) return invalidStatus();
   const services = snapshot.services.map(parseModelServiceStatusItem);
   if (new Set(services.map((item) => item.service_id)).size !== services.length) return invalidStatus();
-  return { services };
+  const hidden = snapshot.stale_binding_hidden_count;
+  return {
+    services,
+    unbound_workloads: optionalList(snapshot.unbound_workloads, parseUnboundWorkload),
+    stale_binding_ids: optionalList(snapshot.stale_binding_ids, parseBindingId),
+    stale_binding_hidden_count: hidden === undefined || hidden === null ? 0 : nonnegativeInteger(hidden),
+  };
 }
 
 export async function fetchModelServiceStatus(): Promise<ModelServicesStatus> {
@@ -260,10 +305,18 @@ export function mergeModelServiceStatus(
   current: ModelServicesStatus | null,
   replacement: ModelServiceStatusItem | ModelServicesStatus,
 ): ModelServicesStatus {
-  const updates = "services" in replacement ? replacement.services : [replacement];
+  const whole = "services" in replacement;
+  const updates = whole ? replacement.services : [replacement];
   const byId = new Map(updates.map((item) => [item.service_id, item]));
   const services = (current?.services ?? []).map((item) => byId.get(item.service_id) ?? item);
   const existing = new Set(services.map((item) => item.service_id));
   for (const item of updates) if (!existing.has(item.service_id)) services.push(item);
-  return { services };
+  // 绑定缺口是整份快照的属性：整份回包（测试全部）带来新的，单服务回包沿用当前的。
+  const gaps = whole ? replacement : current;
+  return {
+    services,
+    unbound_workloads: gaps?.unbound_workloads ?? [],
+    stale_binding_ids: gaps?.stale_binding_ids ?? [],
+    stale_binding_hidden_count: gaps?.stale_binding_hidden_count ?? 0,
+  };
 }

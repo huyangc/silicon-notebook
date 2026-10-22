@@ -116,6 +116,51 @@ function ModelServiceCard({
 }
 
 
+/**
+ * 没有绑定模型服务的使用位置、以及配置里被忽略的绑定（只给管理员）。
+ *
+ * 状态卡片按物理服务组织，未绑定的使用位置不会出现在任何一张卡片上，所以单列一块；
+ * 判定与启动日志的 `model-bindings:` 告警同源（后端 `binding_report`）。没有缺口就不渲染，
+ * 不留空壳；离线模式（没有任何模型服务）后端不报缺口，这里也就只剩「暂无模型服务」。
+ */
+export function ModelBindingGaps({ status }: { status: ModelServicesStatus }) {
+  const unbound = status.unbound_workloads ?? [];
+  const stale = status.stale_binding_ids ?? [];
+  const hidden = status.stale_binding_hidden_count ?? 0;
+  if (unbound.length === 0 && stale.length === 0 && hidden === 0) return null;
+  return (
+    <section className="model-service-binding-gaps" aria-label="未绑定的模型服务">
+      {unbound.length > 0 && (
+        <div className="model-service-workloads">
+          <small>未绑定</small>
+          <div>
+            {unbound.map((workload) => (
+              <span key={workload.id} className={workload.feature_enabled ? "is-feature-enabled" : undefined}>
+                {workload.label || "模型任务"}{workload.feature_enabled ? "（功能已开启）" : ""}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+      {(stale.length > 0 || hidden > 0) && (
+        <div className="model-service-workloads">
+          <small>已忽略的绑定</small>
+          <div>
+            {stale.map((bindingId) => <span key={bindingId}>{bindingId}</span>)}
+            {hidden > 0 && <span>另有 {hidden} 项无法显示</span>}
+          </div>
+        </div>
+      )}
+      <p>
+        {unbound.length > 0
+          ? "未绑定的功能当前不可用，需要在模型服务配置里补齐绑定。"
+          : "模型服务配置里有无法识别或已不再使用的绑定，已被忽略，可以删除。"}
+      </p>
+    </section>
+  );
+}
+
+
 export function ModelServiceSummaryButton({
   text, tone, title, onOpen,
 }: {
@@ -258,6 +303,7 @@ export function ModelServicePanel({
           </div>
         </div>
         <div className="source-detail-body model-service-body">
+          {isAdmin && status && <ModelBindingGaps status={status} />}
           {!status ? (
             <p className="tool-hint">正在读取模型状态…</p>
           ) : status.services.length === 0 ? (

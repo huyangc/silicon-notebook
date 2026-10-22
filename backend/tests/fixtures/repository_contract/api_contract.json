@@ -9267,9 +9267,51 @@
               },
               "title": "Services",
               "type": "array"
+            },
+            "stale_binding_hidden_count": {
+              "default": 0,
+              "title": "Stale Binding Hidden Count",
+              "type": "integer"
+            },
+            "stale_binding_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Stale Binding Ids",
+              "type": "array"
+            },
+            "unbound_workloads": {
+              "items": {
+                "$ref": "#/components/schemas/ModelUnboundWorkloadView"
+              },
+              "title": "Unbound Workloads",
+              "type": "array"
             }
           },
           "title": "ModelServicesStatus",
+          "type": "object"
+        },
+        "ModelUnboundWorkloadView": {
+          "properties": {
+            "feature_enabled": {
+              "default": false,
+              "title": "Feature Enabled",
+              "type": "boolean"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "label"
+          ],
+          "title": "ModelUnboundWorkloadView",
           "type": "object"
         },
         "ModelWorkloadView": {
