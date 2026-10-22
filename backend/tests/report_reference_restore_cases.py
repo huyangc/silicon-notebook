@@ -587,14 +587,16 @@ def scenario_source_and_external_references_are_skipped(world: World) -> None:
 
 
 def scenario_reads_only_the_kinds_asked_for(world: World) -> None:
-    """An element-only request reads the participant set and the element
-    tables, and opens no connection for passages, relations or objects."""
+    """An element-only request reads the participant set, the element tables
+    and the element's source's navigation chunks (is it listed by a table of
+    contents?), and opens no connection for passages, relations or objects."""
     with counting_reads(world) as calls:
         restored = restore(world, [ref("k1", "element", "el-a1", source_id="src-a")])
     assert _restored_ids(restored) == {("element", "el-a1")}
     assert calls == [
         "connect", "notebooks.participant_tiers",
         "sources.evidence_elements", "sources.source_metadata",
+        "connect", "chunks.chunks_for_element_ids",
     ]
 
 
@@ -671,8 +673,34 @@ def scenario_memory_hits_by_ids(world: World) -> None:
         assert retriever.memory_hits_by_ids(world.alice.id, world.nb, ids) == []
 
 
+def scenario_navigation_pages_do_not_read_back(world: World) -> None:
+    """A passage judged a navigation page since the report (a table of
+    contents) is not evidence: it and the elements it lists read back
+    nothing and count as gone. With the read-side switch off they return."""
+    world.execute("UPDATE chunks SET navigation=1 WHERE id={ph}", ("c-a",))
+    cited = [
+        ref("k1", "chunk", "c-a", source_id="src-a"),
+        ref("k2", "element", "el-a1", source_id="src-a", element_id="el-a1"),
+    ]
+
+    restored = restore(world, cited)
+    assert _restored_ids(restored) == set()
+    assert restored.gone == 2
+
+    settings = world.repo.settings
+    previous = settings.retrieval_navigation_filter_enabled
+    settings.retrieval_navigation_filter_enabled = False
+    try:
+        restored = restore(world, cited)
+    finally:
+        settings.retrieval_navigation_filter_enabled = previous
+    assert _restored_ids(restored) == {("chunk", "c-a"), ("element", "el-a1")}
+    assert restored.gone == 0
+
+
 SCENARIOS = (
     scenario_each_kind_reads_back_the_current_text,
+    scenario_navigation_pages_do_not_read_back,
     scenario_mounted_library_items_carry_their_library,
     scenario_deleted_and_reparsed_items_are_gone,
     scenario_outside_the_ceiling_reads_nothing,

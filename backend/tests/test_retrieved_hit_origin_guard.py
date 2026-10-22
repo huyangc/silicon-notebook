@@ -178,6 +178,16 @@ NAVIGATION_REGISTRY = {
             ("calls", RC, "CandidateRetrievalService._hydrate_generated_question_chunks",
              "drop_navigation_chunks"),
         )),
+    (RC, "CandidateRetrievalService._restore_report_chunks", "RetrievedChunk"): (
+        "navigation-filtered", (
+            ("calls", RC, "CandidateRetrievalService._restore_report_chunks",
+             "drop_navigation_rows"),
+        )),
+    (RC, "CandidateRetrievalService._admitted_report_elements", "RetrievedElement"): (
+        "navigation-filtered", (
+            ("calls", RC, "CandidateRetrievalService._admitted_report_elements",
+             "_flagged_navigation_elements"),
+        )),
 }
 
 NAVIGATION_CLASSES = {"RetrievedChunk", "RetrievedElement"}

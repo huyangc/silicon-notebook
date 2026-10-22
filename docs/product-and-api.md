@@ -151,7 +151,7 @@ Table-of-contents and list-of-figures/tables pages are not retrieval evidence. A
 not ranked lower — at every place retrieval turns stored chunks into candidates: chunk scoring (vector,
 lexical, keyword and generated-question arms), PPR, KG source passages, the exact-identifier channel (a
 marked hit opens no section, and a marked chunk in a fetched section is skipped), the selected-source graph
-lane, and chunks an extension proposes. It takes no slot of the final selection (the candidate limit, MMR,
+lane, chunks an extension proposes, and a report follow-up's restored citations (a flagged passage and the elements it lists do not read back and count as gone). It takes no slot of the final selection (the candidate limit, MMR,
 the PPR ceiling walk's slots, the exact channel's section slots); upstream recall windows it may have
 occupied before being removed are not widened to make up for it — the ANN/FTS recall windows, the first
 `ppr_top_chunks` PPR passages without a source ceiling (and the selected-source graph's online PPR
