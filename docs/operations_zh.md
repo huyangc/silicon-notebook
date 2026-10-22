@@ -1536,6 +1536,53 @@ SHARE 锁；门开着
 「导出水位」/「模式判定」）。只有从未开过捕获、或者日志还很小的部署，才能不走这一套直接
 升级。
 
+## 笔记本单文件导出
+
+`scripts/cli.sh notebook export` 把一本笔记本导出为一个 `.snbk` 文件（zip 包，格式
+`silicon-notebook.notebook-archive` v1，定义在 `app.domain.notebook_archive`）；
+`scripts/cli.sh notebook inspect` 校验这样的文件。把导出文件导入另一个部署不在本版本内。
+
+与[跨环境笔记本同步](#跨环境笔记本同步)的区别：同步在两个保持关联的环境之间搬目录型包（保留源
+id、按用户名映射、目标端成为只读镜像、记忆随行）。导出文件是一本笔记本一个文件，内容恰好是
+「复制笔记本」复制的那些：材料与原文件、附件、元素、切块、向量、知识图谱和 Knowhow 表。它从不
+携带 Memory 或任何由 Memory 派生的内容（保留行里夹带的 Memory 证据会被剥掉），也不带交互数据
+（对话、回答、报告、反馈）、成员、授权、分享链接和挂载的参考库；规划中的导入会建一本换了新 id、
+归导入者所有的独立新笔记本。
+
+```bash
+bash scripts/cli.sh notebook export --notebook nb-xxx --out ./nb-xxx.snbk
+bash scripts/cli.sh notebook export --notebook nb-a --notebook nb-b --out-dir ./exports --json
+bash scripts/cli.sh notebook export --notebook nb-xxx --out-dir ./exports --no-vectors
+bash scripts/cli.sh notebook inspect ./exports/nb-a.snbk [--json]
+```
+
+- **只读，schema guest。** 导出经共享 guest 入口打开数据库（从不迁移、不 seed；库不是本构建的
+  schema 时以退出码 3 拒绝），可以与服务并存。它不受复制上限（`NOTEBOOK_COPY_MAX_ROWS`、
+  `NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS`）约束：逐表、分页流式读取。
+- **每本一个读事务。** PostgreSQL 在一个 REPEATABLE READ、READ ONLY 事务里用服务端游标读完所有表；
+  大笔记本的这个事务会在整个导出期间保持打开，推迟 vacuum 的回收水位。SQLite 持有一个 WAL 读快照，
+  WAL 检查点推不过它。超大笔记本尽量选在业务低峰导出。
+- **文件。** 笔记本的 `storage/notebooks/<id>/` 与 `storage/assets/<id>/` 两棵目录在行事务之后读取
+  （与深拷贝一致）：只收普通文件；符号链接与特殊文件跳过，并在报告里计数。
+- **导出时规范化。** 笔记本行去掉分享链接；`sources.file_path` 改写为相对笔记本文件目录的路径；
+  指向导出范围之外的软指针被清空（`knowledge_objects.source_id`/`source_candidate_id`、
+  `knowledge_source_facts.global_object_id`、`knowledge_source_fact_backfills.after_object_id`、
+  `knowledge_relations.source_id`、`knowhow_tables.hidden_source_id`）；来源已不存在的附件连同文件
+  一起丢弃；成员对象不在导出范围内的成簇行丢弃。报告逐项列出条数。挂载边不随文件走，manifest
+  只记录条数。
+- **`--no-vectors`** 让四张向量表为空（`vectors_included=false`）；问题向量（`chunk_questions.vector`，
+  非空列）照常携带。manifest 按 embedding 工作负载记录所绑模型的协议与名称、`EMBED_DIM` 和
+  `float32-le`，未绑定的记 `null`，供导入端判断向量能否沿用。
+- **原子落盘。** 先写 `<out>.part`，完成后才改名为最终文件，`manifest.json` 是最后一个条目；失败时删掉
+  part 文件。已存在的输出文件绝不覆盖。
+- **`inspect`** 只读文件本身：按读取端上限检查 zip 目录（条目数、解压总量、单条压缩比、JSONL 单行长度，
+  具名常量在 `app.domain.notebook_archive`）、条目名白名单（拒绝绝对路径、`..`、反斜杠、重名、加密或
+  非普通文件条目）、manifest 字段与格式版本（更新的版本被拒绝），以及每张表和每个文件的大小、sha256
+  和行数。
+
+退出码：0 成功；1 文件校验失败或导出失败；2 参数错误、笔记本不存在或输出已存在；3 库不是本构建的
+schema。
+
 ## PostgreSQL notebook-aware 词法索引
 
 PostgreSQL 词法 SQL 始终带 `notebook_id`，但旧的单表达式 trgm 索引无法在索引访问阶段利用

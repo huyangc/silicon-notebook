@@ -1966,6 +1966,68 @@ the index build on an empty table completes instantly) → run the v85/0065 migr
 (§7 "导出水位"/"模式判定" of the design doc). Only a deployment that has never enabled capture,
 or whose log is still small, can upgrade directly without this dance.
 
+## Single-file notebook export
+
+`scripts/cli.sh notebook export` writes one notebook to one `.snbk` file (a zip archive,
+format `silicon-notebook.notebook-archive` v1, defined in `app.domain.notebook_archive`);
+`scripts/cli.sh notebook inspect` verifies such a file. Importing an archive into another
+deployment is not part of this build yet.
+
+How it differs from [cross-environment sync](#cross-environment-notebook-sync): sync moves a
+directory package between two environments that stay linked (source ids kept, usernames
+mapped, the target becomes a read-only mirror, Memory travels). An archive is one file per
+notebook carrying exactly what "copy notebook" copies: materials and their original files,
+attachments, elements, chunks, vectors, the knowledge graph and Knowhow tables. It never
+carries Memory or anything derived from one (Memory evidence inside kept rows is stripped),
+interaction data (conversations, answers, reports, feedback), members, grants, the share
+link or mounted reference libraries; the planned import creates an independent new notebook
+with new ids, owned by the importer.
+
+```bash
+bash scripts/cli.sh notebook export --notebook nb-xxx --out ./nb-xxx.snbk
+bash scripts/cli.sh notebook export --notebook nb-a --notebook nb-b --out-dir ./exports --json
+bash scripts/cli.sh notebook export --notebook nb-xxx --out-dir ./exports --no-vectors
+bash scripts/cli.sh notebook inspect ./exports/nb-a.snbk [--json]
+```
+
+- **Read-only, schema guest.** The export opens the database through the shared guest seam
+  (it never migrates or seeds, and refuses a database not at this build's schema with exit
+  status 3), so it may run beside the serving process. It is not bounded by the copy limits
+  (`NOTEBOOK_COPY_MAX_ROWS`, `NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS`): rows are streamed table by
+  table, a page at a time.
+- **One read transaction per notebook.** PostgreSQL reads every table inside one REPEATABLE
+  READ, READ ONLY transaction through server-side cursors; for a large notebook that
+  transaction stays open for the whole export and holds back vacuum's horizon. SQLite holds
+  one WAL read snapshot, which keeps the WAL from being checkpointed past it. Prefer a quiet
+  period for very large notebooks.
+- **Files.** The notebook's `storage/notebooks/<id>/` and `storage/assets/<id>/` trees are read
+  after the row transaction, like the deep copy reads them: regular files only; symbolic
+  links and special files are skipped and counted in the report.
+- **Normalised on the way out.** The notebook row loses its share link; `sources.file_path`
+  becomes the path relative to the notebook's file tree; soft pointers that leave the
+  exported closure are cleared (`knowledge_objects.source_id`/`source_candidate_id`,
+  `knowledge_source_facts.global_object_id`, `knowledge_source_fact_backfills.after_object_id`,
+  `knowledge_relations.source_id`, `knowhow_tables.hidden_source_id`); an attachment of a
+  source that no longer exists is dropped with its file; a cluster row whose member object is
+  not exported is dropped. The report lists each count. Mount edges are not carried; the
+  manifest records how many there were.
+- **`--no-vectors`** leaves the four vector tables empty (`vectors_included=false`); question
+  vectors (`chunk_questions.vector`, NOT NULL) still travel. The manifest records, per
+  embedding workload, the bound model's protocol and name, `EMBED_DIM` and `float32-le`, or
+  `null` for an unbound workload, so an importer can decide whether the vectors are usable.
+- **Atomic output.** The archive is written to `<out>.part` and renamed into place only when
+  complete, `manifest.json` being its last entry; a failure removes the part file. An
+  existing output is never overwritten.
+- **`inspect`** opens nothing but the file. It checks the zip directory against the reader
+  limits (entry count, total uncompressed size, per-entry compression ratio, JSONL line
+  length -- named constants in `app.domain.notebook_archive`), the entry-name whitelist (no
+  absolute paths, `..`, backslashes, duplicates, encrypted or non-regular entries), the
+  manifest's fields and format version (a newer version is refused), and every table's and
+  file's size, sha256 and row count.
+
+Exit status: 0 success; 1 the archive is invalid or the export failed; 2 a usage error, an
+unknown notebook or an existing output; 3 the database is not at this build's schema.
+
 ## PostgreSQL notebook-aware lexical indexes
 
 PostgreSQL lexical retrieval always keeps `notebook_id` in the SQL predicate, but the legacy

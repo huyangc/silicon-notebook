@@ -32,6 +32,7 @@ npm run cli -- batch ingest --input-dir ./papers --notebook-name "资料库"
 | `eval` | replay、selected-source、trace-export、trace-analyze、shadow |
 | `migrate` | model-env 配置迁移 |
 | `extensions` | check 导入/配置预检；parity 部署前后端插件对等检查；services 配套服务管理 |
+| `notebook` | export 把笔记本导出为单个 `.snbk` 文件（只读）；inspect 校验导出文件（不打开数据库） |
 
 解释器优先取显式 `PYTHON_BIN`，其次仓库 `.venv/bin/python`，否则 PATH 中的
 `python3`。显式解释器无效时直接报错，不悄悄换环境。也可直接运行
@@ -407,6 +408,23 @@ PYTHONPATH=backend python scripts/backfill_navigation_chunks.py --all-notebooks 
 ```
 
 退出码 0/1/2/3 与细节见 `docs/operations_zh.md` 的「导航页标记回填」。
+
+### `notebook_archive.py` —— 笔记本单文件导出（`.snbk`）与校验
+
+把一本笔记本的内容（材料与原文件、附件、元素、切块、向量、知识图谱、Knowhow 表）导出为一个
+zip 文件，范围与「复制笔记本」相同：不带 Memory、问答/报告等交互数据、成员与授权、分享链接、挂载的参考库。
+导出只读，按 schema guest 打开数据库（可与服务并存，不迁移、不 seed）；不受复制上限约束。
+`inspect` 只读文件，校验条目名、manifest、全部 sha256 与行数。导入在后续版本提供。
+
+```bash
+bash scripts/cli.sh notebook export --notebook nb-xxx --out ./nb-xxx.snbk
+bash scripts/cli.sh notebook export --notebook nb-a --notebook nb-b --out-dir ./exports --json
+bash scripts/cli.sh notebook export --notebook nb-xxx --out-dir ./exports --no-vectors   # 不带四类向量表
+bash scripts/cli.sh notebook inspect ./exports/nb-a.snbk [--json]
+```
+
+退出码：0 成功；1 文件校验失败或导出失败；2 参数错误 / 笔记本不存在 / 输出已存在；3 库不是本构建的 schema。
+与 `sync` 的区别、导出时的规范化与运行代价见 `docs/operations_zh.md` 的「笔记本单文件导出」。
 
 ---
 
