@@ -135,11 +135,25 @@ class SourceEmbeddingService:
             mark_dirty_in_tx=mark_dirty_in_tx,
         )
 
-    def flush_object_vectors(self, notebook_id: str, rows: list) -> None:
-        if rows:
-            self.vectors.replace_knowledge_vectors(
-                notebook_id, rows, created_at=self.now()
+    def flush_object_vectors(
+        self, notebook_id: str, rows: list, *, snapshots: Optional[dict] = None
+    ) -> int:
+        """Persist ``(object_id, vector)`` rows; returns how many were stored. With
+        ``snapshots`` (object id -> stored payload the vector was computed from) each row
+        is inserted only while the object still holds that payload and has no vector
+        (``insert_missing_knowledge_vectors``), for the missing-vector backfill."""
+        if not rows:
+            return 0
+        if snapshots is not None:
+            return self.vectors.insert_missing_knowledge_vectors(
+                notebook_id,
+                [(oid, snapshots[oid], vec) for oid, vec in rows],
+                created_at=self.now(),
             )
+        self.vectors.replace_knowledge_vectors(
+            notebook_id, rows, created_at=self.now()
+        )
+        return len(rows)
 
     def _evict_matrix(self, notebook_id: str, table: str) -> None:
         """Drop retrieval's brute-force ``_vector_matrix`` cache entry for
@@ -443,9 +457,15 @@ class SourceEmbeddingService:
         return sum(1 for it in items if _object_embed_text(it))
 
     def embed_objects_batch(self, notebook_id: str, items: List[dict],
-                            progress=None, commit_every: Optional[int] = None) -> int:
+                            progress=None, commit_every: Optional[int] = None,
+                            *, snapshots: Optional[dict] = None) -> int:
         """并发计算 payload 向量,**每 commit_every 批 flush 一次**(增量提交:中断可续跑、
-        内存不攒全量)。每批计算失败照旧 log+跳过(best-effort)。"""
+        内存不攒全量)。每批计算失败照旧 log+跳过(best-effort)。
+
+        ``snapshots``(object id -> 读出时存储的 payload)给补缺失的回填用:写入改走
+        ``insert_missing_knowledge_vectors``,只在对象 payload 仍是这份快照、且还没有向量时
+        才插入(检查与写入同一条语句),所以编辑在模型计算期间存下的新 payload 与新向量不会被
+        旧向量覆盖。返回真正写入的条数。"""
         workload_id = "knowledge_object_embedding"
         embedder = self.embedder(workload_id)
         if not getattr(embedder, "configured", True):
@@ -503,7 +523,11 @@ class SourceEmbeddingService:
                 ):
                     buf.extend(part)
                 done += sum(len(b) for b in chunk)
-                if buf:
+                if buf and snapshots is not None:
+                    written += self.flush_object_vectors(
+                        notebook_id, buf, snapshots=snapshots
+                    )
+                elif buf:
                     self.flush_object_vectors(notebook_id, buf)
                     written += len(buf)
                 if progress:
@@ -627,10 +651,15 @@ class SourceEmbeddingService:
             task_prefix="stage-ck",
         )
 
-    def embed_relations_batch(self, notebook_id: str, rel_items: List[dict]) -> int:
+    def embed_relations_batch(
+        self, notebook_id: str, rel_items: List[dict], *, snapshots: Optional[dict] = None
+    ) -> int:
         """并发 COMPUTE 关系向量, 一次写事务持久化到 relation_embeddings。
         rel_items: [{"_rid": str, "text": str}]。best-effort,失败跳过。
-        返回真正落库的行数(失败批不计)。"""
+        返回真正落库的行数(失败批不计)。``snapshots``(relation id -> 读出时的
+        ``(source_object_id, target_object_id, edge_type, evidence)``)给补缺失的回填用:
+        写入改走 ``insert_missing_relation_vectors``,只在关系行仍是这份快照、且还没有向量时
+        才插入,不覆盖期间别的写方(重建、补关系)存下的向量。"""
         workload_id = "relation_embedding"
         embedder = self.embedder(workload_id)
         if not getattr(embedder, "configured", True):
@@ -682,10 +711,17 @@ class SourceEmbeddingService:
                     # matrix cache is GUARANTEED by the _evict_matrix finally
                     # below, which is clock-independent (a same-second re-embed
                     # leaves the version key unchanged) and abort-safe.
-                    self.vectors.replace_relation_vectors(
-                        notebook_id, rows, created_at=self.now()
-                    )
-                    written += len(rows)
+                    if snapshots is not None:
+                        written += self.vectors.insert_missing_relation_vectors(
+                            notebook_id,
+                            [(rid, snapshots[rid], vec) for rid, vec in rows],
+                            created_at=self.now(),
+                        )
+                    else:
+                        self.vectors.replace_relation_vectors(
+                            notebook_id, rows, created_at=self.now()
+                        )
+                        written += len(rows)
         finally:
             self._evict_matrix(notebook_id, "relation_embeddings")
         return written

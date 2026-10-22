@@ -73,6 +73,8 @@ class Backend:
     maintenance_module: Any
     relation_page_attr: str
     """The module constant that sizes a relation-backfill discovery page."""
+    json_param: Callable[[Any], Any]
+    """How a JSON column value is bound (text on SQLite, jsonb on PostgreSQL)."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -734,9 +736,184 @@ def check_an_embedder_that_writes_nothing_is_never_done(
     before = vector_ids(repo, backend, nb)["knowledge_embeddings"]
     delete_vectors(repo, backend, nb, tables=("knowledge_embeddings",))
     monkeypatch.setattr(
-        repo._runtime.source_embedding, "embed_objects_batch", lambda nb_, items: 0
+        repo._runtime.source_embedding, "embed_objects_batch",
+        lambda nb_, items, **_kwargs: 0,
     )
     status = NotebookReembedService(repo).run(nb, legs=["kg_objects"])
     leg = status.progress["kg_objects"]
     assert (leg.state, leg.embedded, leg.remaining) == ("incomplete", 0, len(before))
     assert world.embedders["knowledge_object_embedding"].calls == []
+
+
+def _stored_vector(repo, backend: Backend, table: str, column: str, row_id: str):
+    from app.domain.vector_index import decode_vector
+
+    with repo._runtime.database.connect() as db:
+        row = db.execute(
+            _sql(backend, f"SELECT vector FROM {table} WHERE {column}=?"), (row_id,)
+        ).fetchone()
+    return None if row is None else [float(x) for x in decode_vector(row["vector"])]
+
+
+def _same_vector(stored, expected) -> bool:
+    """Stored vectors are float32; compare at that precision."""
+    return stored is not None and len(stored) == len(expected) and all(
+        abs(a - float(b)) < 1e-6 for a, b in zip(stored, expected)
+    )
+
+
+def _during_first_call(embedder: RecordingEmbedder, action: Callable[[], None]) -> None:
+    inner = embedder.embed_texts
+
+    def _wrapped(texts):
+        vectors = inner(texts)
+        if len(embedder.calls) == 1:
+            action()  # after the model answered, before the vectors are written
+        return vectors
+
+    embedder.embed_texts = _wrapped
+
+
+def check_object_backfill_never_overwrites_a_newer_vector(repo, backend: Backend) -> None:
+    """While the object leg is embedding, an edit saves a new payload with its own
+    vector, and another writer stores a vector for a second object: both of those
+    vectors survive (the backfill writes only where the payload is unchanged and no
+    vector exists); every other missing object is still written."""
+    world = build_world(repo, backend)
+    nb = world.notebook_id
+    before = vector_ids(repo, backend, nb)["knowledge_embeddings"]
+    delete_vectors(repo, backend, nb, tables=("knowledge_embeddings",))
+    edited, raced = f"ko-{nb}-controller", f"ko-{nb}-firmware"
+    pending = f"ko-{nb}-bootloader"  # edited, its own re-embed not landed yet
+    newer = FakeEmbedder(dim=DIM).embed_query("edited payload")
+    other = FakeEmbedder(dim=DIM).embed_query("another writer")
+    store = repo._runtime.embedding_store
+
+    def _edit_and_race() -> None:
+        with repo._runtime.database.write() as db:
+            for object_id, name in ((edited, "controller (edited)"), (pending, "bootloader v2")):
+                db.execute(
+                    _sql(backend, "UPDATE knowledge_objects SET payload=? WHERE id=?"),
+                    (backend.json_param({"name": name}), object_id),
+                )
+        store.replace_knowledge_vectors(nb, [(edited, newer), (raced, other)], created_at=_NOW)
+
+    _during_first_call(world.embedders["knowledge_object_embedding"], _edit_and_race)
+    status = NotebookReembedService(repo).run(nb, legs=["kg_objects"])
+
+    assert _same_vector(
+        _stored_vector(repo, backend, "knowledge_embeddings", "object_id", edited), newer
+    )
+    assert _same_vector(
+        _stored_vector(repo, backend, "knowledge_embeddings", "object_id", raced), other
+    )
+    # The object edited mid-call gets no vector from its old payload: it stays missing
+    # for the edit's own re-embed (or the next run) to fill.
+    assert vector_ids(repo, backend, nb)["knowledge_embeddings"] == before - {pending}
+    assert status.progress["kg_objects"].embedded == len(before) - 3
+
+
+def check_relation_backfill_never_overwrites_or_mismatches(repo, backend: Backend) -> None:
+    """While the relation leg is embedding, another writer stores a vector for one
+    relation and a rebuild changes another relation's evidence: the stored vector
+    survives, the changed relation gets no vector from its old text, and the rest
+    are written."""
+    world = build_world(repo, backend)
+    nb = world.notebook_id
+    before = vector_ids(repo, backend, nb)["relation_embeddings"]
+    delete_vectors(repo, backend, nb, tables=("relation_embeddings",))
+    raced = f"rel-{nb}-firmware-controller"
+    changed = f"rel-{nb}-bootloader-firmware"
+    other = FakeEmbedder(dim=DIM).embed_query("another writer")
+    store = repo._runtime.embedding_store
+
+    def _race() -> None:
+        store.replace_relation_vectors(nb, [(raced, other)], created_at=_NOW)
+        with repo._runtime.database.write() as db:
+            db.execute(
+                _sql(backend, "UPDATE knowledge_relations SET evidence=? WHERE id=?"),
+                (backend.json_param([{"quoted_span": "rebuilt"}]), changed),
+            )
+
+    _during_first_call(world.embedders["relation_embedding"], _race)
+    NotebookReembedService(repo).run(nb, legs=["kg_relations"])
+
+    assert _same_vector(
+        _stored_vector(repo, backend, "relation_embeddings", "relation_id", raced), other
+    )
+    have = vector_ids(repo, backend, nb)["relation_embeddings"]
+    assert changed not in have
+    assert have == before - {changed}
+
+
+def _set_pipeline_pending(repo, backend: Backend, notebook_id: str) -> None:
+    with repo._runtime.database.write() as db:
+        db.execute(
+            _sql(backend, "UPDATE notebooks SET indexing_pipeline_job_id=? WHERE id=?"),
+            ("pending:generation", notebook_id),
+        )
+
+
+def check_pipeline_switch_while_waiting_for_a_table_lock(
+    repo, backend: Backend, monkeypatch
+) -> None:
+    """A pipeline switch that lands while the Knowhow fill waits for a table's lock
+    aborts the pass once the lock is held: nothing is written, the run fails, the
+    guard is released."""
+    from contextlib import contextmanager
+
+    world = build_world(repo, backend)
+    nb = world.notebook_id
+    chunks = knowhow_chunk_ids(repo, backend, world)
+    delete_chunk_vectors(repo, backend, chunks)
+    database = repo._runtime.database
+    real_lock = database.table_projection_lock
+
+    @contextmanager
+    def _switch_while_waiting(table_id):
+        _set_pipeline_pending(repo, backend, nb)  # lands while this one waits
+        with real_lock(table_id):
+            yield
+
+    monkeypatch.setattr(database, "table_projection_lock", _switch_while_waiting)
+    with pytest.raises(IndexingPipelineUnavailableError):
+        NotebookReembedService(repo).run(nb, legs=["chunks"])
+
+    assert world.embedders["knowhow_embedding"].calls == []
+    assert not (chunks & vector_ids(repo, backend, nb)["chunk_embeddings"])
+    assert nb not in notebook_reembed._active_runs
+    status = [r for r in notebook_reembed._runs.values() if r.notebook_id == nb][-1]
+    assert (status.state, status.error) == ("failed", "IndexingPipelineUnavailableError")
+
+
+def check_pipeline_switch_between_the_halves(repo, backend: Backend, monkeypatch) -> None:
+    """A switch that lands after the document half aborts the pass before the Knowhow
+    half writes anything; the document vectors written before it stay."""
+    world = build_world(repo, backend)
+    nb = world.notebook_id
+    chunks = knowhow_chunk_ids(repo, backend, world)
+    delete_vectors(repo, backend, nb, tables=("chunk_embeddings",))
+    mnt = repo.maintenance
+    real = mnt.embed_chunks_batch
+
+    def _switch_after(notebook_id, items):
+        written = real(notebook_id, items)
+        _set_pipeline_pending(repo, backend, nb)
+        return written
+
+    monkeypatch.setattr(mnt, "embed_chunks_batch", _switch_after)
+    tables_listed: list = []
+    real_list = repo.list_knowhow_tables
+    monkeypatch.setattr(
+        repo, "list_knowhow_tables",
+        lambda notebook_id: tables_listed.append(notebook_id) or real_list(notebook_id),
+    )
+    with pytest.raises(IndexingPipelineUnavailableError):
+        NotebookReembedService(repo).run(nb, legs=["chunks"])
+    assert tables_listed == []  # refused before the Knowhow half even started
+
+    have = vector_ids(repo, backend, nb)["chunk_embeddings"]
+    assert {f"ck-src-doc-{nb}-{i:03d}" for i in range(DOC_CHUNKS)} <= have
+    assert not (chunks & have)
+    assert world.embedders["knowhow_embedding"].calls == []
+    assert nb not in notebook_reembed._active_runs

@@ -41,6 +41,7 @@ import weakref
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from app.domain.indexing_pipeline import IndexingPipelineUnavailableError
 from app.repositories.knowhow_asset_refs import rendered_asset_ids
 from app.repositories.ports import KNOWHOW_COLUMN_KINDS as _STORE_KINDS
 from app.services import background_jobs
@@ -338,7 +339,10 @@ def fill_missing_knowhow_chunk_vectors(repo: Any, notebook_id: str) -> KnowhowCh
     (``maintenance.missing_knowhow_chunk_embedding_ids``), then the texts of one page at a
     time (``chunk_texts_by_ids``), embedded with ``knowhow_embedding`` in
     ``embed_batch_size`` calls and written only where the chunk still holds that text.
-    One table failing is logged and recorded; the other tables still run. A hidden source
+    One table failing is logged and recorded; the other tables still run. The indexing
+    pipeline's write admission is rechecked under each table's lock, and a refusal
+    (``IndexingPipelineUnavailableError``) propagates: nothing is written after a
+    pipeline switch, for this table or any later one. A hidden source
     no table owns is not reached (checkup H4 does not count it either). The caller checks
     that ``knowhow_embedding`` is bound.
 
@@ -357,6 +361,9 @@ def fill_missing_knowhow_chunk_vectors(repo: Any, notebook_id: str) -> KnowhowCh
             continue  # never projected: no chunks yet
         try:
             with database.table_projection_lock(str(table["id"])):
+                # Admission rechecked once the lock is held (waiting for it can span a
+                # pipeline switch); a refusal aborts the whole fill, not one table.
+                repo.require_indexing_pipeline_write(notebook_id)
                 ids = mnt.missing_knowhow_chunk_embedding_ids(
                     notebook_id, source_id=str(source_id)
                 )
@@ -369,6 +376,8 @@ def fill_missing_knowhow_chunk_vectors(repo: Any, notebook_id: str) -> KnowhowCh
                             rows, key=lambda r: str(r["id"])
                         )],
                     ) or 0)
+        except IndexingPipelineUnavailableError:
+            raise
         except Exception as exc:  # noqa: BLE001 — recorded; the other tables still run
             _log.exception(
                 "knowhow chunk vector fill failed: notebook_id=%s", notebook_id

@@ -488,6 +488,10 @@ class NotebookReembedService:
                             run, LEG_ELEMENTS, totals, failures, source_id, page,
                         )
             if knowhow_ok:
+                # The document half can take long: recheck admission before the Knowhow
+                # half (the fill rechecks again under every table lock; a refusal from
+                # either propagates and aborts the pass).
+                repo.require_indexing_pipeline_write(nb)
                 # Per table, isolated: a table that raised is logged and named in the
                 # result while the other tables still run.
                 fill = knowhow_api.fill_missing_knowhow_chunk_vectors(repo, nb)

@@ -33,6 +33,7 @@ def _insert(db, table: str, values: dict) -> None:
 BACKEND = cases.Backend(
     name="postgres", insert=_insert, placeholder="%s",
     maintenance_module=postgres_maintenance, relation_page_attr="_RELATION_PAGE_SIZE",
+    json_param=Jsonb,
 )
 
 
@@ -126,6 +127,22 @@ def test_offline_embed_messages_pg(repo, capsys):
 
 def test_an_embedder_that_writes_nothing_is_never_done_pg(repo, monkeypatch):
     cases.check_an_embedder_that_writes_nothing_is_never_done(repo, BACKEND, monkeypatch)
+
+
+def test_object_backfill_never_overwrites_a_newer_vector_pg(repo):
+    cases.check_object_backfill_never_overwrites_a_newer_vector(repo, BACKEND)
+
+
+def test_relation_backfill_never_overwrites_or_mismatches_pg(repo):
+    cases.check_relation_backfill_never_overwrites_or_mismatches(repo, BACKEND)
+
+
+def test_pipeline_switch_while_waiting_for_a_table_lock_pg(repo, monkeypatch):
+    cases.check_pipeline_switch_while_waiting_for_a_table_lock(repo, BACKEND, monkeypatch)
+
+
+def test_pipeline_switch_between_the_halves_pg(repo, monkeypatch):
+    cases.check_pipeline_switch_between_the_halves(repo, BACKEND, monkeypatch)
 
 
 def test_relation_discovery_page_is_one_index_range_pg(repo):

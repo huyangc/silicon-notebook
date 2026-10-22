@@ -1597,7 +1597,7 @@ def test_node_backfill_does_not_dirty_when_best_effort_embedding_writes_nothing(
     monkeypatch.setattr(
         repo._runtime.source_embedding,
         "embed_objects_batch",
-        lambda _notebook_id, _items: 0,
+        lambda _notebook_id, _items, **_kwargs: 0,  # the backfill passes snapshots=
     )
     monkeypatch.setattr(
         repo.maintenance,

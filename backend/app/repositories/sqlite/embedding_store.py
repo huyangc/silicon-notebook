@@ -109,6 +109,69 @@ class EmbeddingStore:
                  for cid, vec in rows],
             )
 
+    def insert_missing_knowledge_vectors(
+        self,
+        notebook_id: str,
+        rows: Sequence[tuple],
+        *,
+        created_at: str,
+    ) -> int:
+        """Insert ``(object_id, payload, vector)`` rows, each only while the object
+        still has exactly that stored ``payload`` (the text the vector was computed
+        from) and still has no vector; returns how many were written. Check and write
+        are one statement in one write transaction: a backfill never overwrites a
+        vector some other writer (an edit's re-embed, a build) stored meanwhile, and
+        never attaches a vector computed from a payload that has since changed."""
+        if not rows:
+            return 0
+        written = 0
+        with self.write() as db:
+            for object_id, payload, vector in rows:
+                cursor = db.execute(
+                    "INSERT OR IGNORE INTO knowledge_embeddings "
+                    "(object_id,notebook_id,vector,created_at) "
+                    "SELECT ?,?,?,? WHERE EXISTS "
+                    "(SELECT 1 FROM knowledge_objects WHERE id=? AND payload=?) "
+                    "AND NOT EXISTS (SELECT 1 FROM knowledge_embeddings WHERE object_id=?)",
+                    (object_id, notebook_id, encode_vector(vector), created_at,
+                     object_id, payload, object_id),
+                )
+                written += max(0, cursor.rowcount)
+        return written
+
+    def insert_missing_relation_vectors(
+        self,
+        notebook_id: str,
+        rows: Sequence[tuple],
+        *,
+        created_at: str,
+    ) -> int:
+        """Insert ``(relation_id, (source_object_id, target_object_id, edge_type,
+        evidence), vector)`` rows, each only while the relation row still holds exactly
+        those columns and still has no vector; returns how many were written. One
+        statement per row in one write transaction, so a relation rebuilt or
+        re-embedded meanwhile keeps its own vector, and a deleted relation is skipped
+        instead of failing the foreign key. (The relation text also carries the two
+        endpoint names; no writer re-embeds a relation when an endpoint is renamed, so
+        that part of the text is not a freshness invariant any writer keeps.)"""
+        if not rows:
+            return 0
+        written = 0
+        with self.write() as db:
+            for relation_id, (source, target, edge_type, evidence), vector in rows:
+                cursor = db.execute(
+                    "INSERT OR IGNORE INTO relation_embeddings "
+                    "(relation_id,notebook_id,vector,created_at) "
+                    "SELECT ?,?,?,? WHERE EXISTS (SELECT 1 FROM knowledge_relations "
+                    "WHERE id=? AND source_object_id=? AND target_object_id=? "
+                    "AND edge_type=? AND evidence=?) "
+                    "AND NOT EXISTS (SELECT 1 FROM relation_embeddings WHERE relation_id=?)",
+                    (relation_id, notebook_id, encode_vector(vector), created_at,
+                     relation_id, source, target, edge_type, evidence, relation_id),
+                )
+                written += max(0, cursor.rowcount)
+        return written
+
     def replace_chunk_vectors_if_text(
         self,
         notebook_id: str,

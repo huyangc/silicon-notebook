@@ -2071,7 +2071,7 @@ class RepositoryFacade:
             object_id, notebook_id, payload, mark_dirty_in_tx=mark_dirty_in_tx
         )
 
-    def _flush_object_vectors(self, notebook_id: str, rows: list) -> None:
+    def _flush_object_vectors(self, notebook_id: str, rows: list) -> int:
         """把一批 (oid, vector) 落 knowledge_embeddings(一个写事务,幂等 REPLACE)。"""
         return self._runtime.source_embedding.flush_object_vectors(notebook_id, rows)
 
