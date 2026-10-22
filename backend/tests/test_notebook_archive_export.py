@@ -157,6 +157,13 @@ def _seed_full(repo, files=None):
     return Path(repo.storage_dir) / "notebooks" / cases.NB
 
 
+def _carries(path: Path, needle: bytes) -> bool:
+    """Whether any entry's DECOMPRESSED content holds ``needle``: the raw file
+    bytes are deflated, so a search over them proves nothing."""
+    with zipfile.ZipFile(path) as archive:
+        return any(needle in archive.read(info) for info in archive.infolist())
+
+
 def _entries(path: Path) -> dict[str, zipfile.ZipInfo]:
     with zipfile.ZipFile(path) as archive:
         return {info.filename: info for info in archive.infolist()}
@@ -224,7 +231,7 @@ def test_links_and_fifos_are_skipped_never_followed_never_blocking(repo, out_dir
     assert not {"files/notebooks/link.txt", "files/notebooks/pipe"} & names
     assert not any(name.startswith("files/notebooks/linked-dir") for name in names)
     assert report.skipped_links == 3  # link, linked dir, FIFO
-    assert b"HOST-SECRET" not in out.read_bytes()
+    assert not _carries(out, b"HOST-SECRET")
 
 
 def test_a_link_swapped_in_right_before_the_open_is_not_followed(repo, out_dir, tmp_path,
@@ -256,7 +263,7 @@ def test_a_link_swapped_in_right_before_the_open_is_not_followed(repo, out_dir, 
     assert swapped, "the hook must have fired"
     assert "files/notebooks/extra/notes.txt" not in _entries(out)
     assert report.skipped_links == 1
-    assert b"HOST-SECRET" not in out.read_bytes()
+    assert not _carries(out, b"HOST-SECRET")
 
 
 def test_a_directory_swapped_for_a_link_right_before_a_file_open_is_not_followed(
@@ -290,7 +297,7 @@ def test_a_directory_swapped_for_a_link_right_before_a_file_open_is_not_followed
     monkeypatch.undo()
     inspect_archive(out)
     assert swapped, "the hook must have fired"
-    assert b"HOST-SECRET" not in out.read_bytes()
+    assert not _carries(out, b"HOST-SECRET")
     with zipfile.ZipFile(out) as archive:
         assert archive.read("files/notebooks/deep/leaf.txt") == b"NOTEBOOK-OWN"
 
