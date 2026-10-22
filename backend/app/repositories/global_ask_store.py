@@ -61,12 +61,19 @@ _KEYSET_THROUGH = "(created_at, id) <= (?, ?)"
 #   user);
 # * the WATERMARK the public read anchors its keyset on: any done job of the
 #   conversation, live or not (``_watermark_anchor``; params id, conversation).
+#
+# ``{by_conversation}`` pins SQLite to ``idx_global_jobs_conversation`` where a
+# statement walks one conversation's jobs: without statistics (production
+# never runs ANALYZE) its planner otherwise picks the ``status`` or
+# ``user_id`` index and reads every done job of the deployment, or of the
+# user, to answer for one conversation. PostgreSQL plans these on its own
+# statistics and gets an empty string.
 _BOUNDARY_JOB_SQL = (
     "SELECT id, created_at FROM global_ask_jobs "
     "WHERE id=? AND conversation_id=? AND user_id=? AND status='done' AND {live}"
 )
 _NEWEST_JOB_SQL = (
-    "SELECT id, created_at FROM global_ask_jobs WHERE conversation_id=? "
+    "SELECT id, created_at FROM global_ask_jobs{by_conversation} WHERE conversation_id=? "
     "AND user_id=? AND status='done' AND {live} " + GLOBAL_JOBS_ORDER_DESC + " LIMIT 1"
 )
 _WATERMARK_JOB_SQL = (
@@ -94,7 +101,7 @@ _SHARE_RANKS_SQL = (
     "SUM(CASE WHEN (j.created_at, j.id) <= (w.created_at, w.id) THEN 1 ELSE 0 END) AS w_rank, "
     "SUM(CASE WHEN j.created_at <= ? THEN 1 ELSE 0 END) AS t_rank, "
     "MAX(n.id) AS n_id, MAX(n.created_at) AS n_created "
-    "FROM global_ask_jobs j LEFT JOIN a ON 1=1 LEFT JOIN w ON 1=1 LEFT JOIN n ON 1=1 "
+    "FROM global_ask_jobs j{by_conversation} LEFT JOIN a ON 1=1 LEFT JOIN w ON 1=1 LEFT JOIN n ON 1=1 "
     "WHERE j.conversation_id=? AND j.user_id=? AND j.status='done' AND {live_j}"
 )
 
@@ -253,6 +260,9 @@ class GlobalAskStore:
         # every read of a job's content skips a turn past its stamp.
         self._live = live_turn_sql(dialect=_dialect(marker))
         self._live_j = live_turn_sql(dialect=_dialect(marker), alias="j")
+        self._by_conversation = (
+            " INDEXED BY idx_global_jobs_conversation" if _dialect(marker) == "sqlite" else ""
+        )
         # ...and a conversation whose every turn did (``conversation_live_sql``).
         self._conversation_live = conversation_live_sql(dialect=_dialect(marker), alias="c")
         # An automatic title naming an expired first turn reads as the
@@ -1339,7 +1349,8 @@ class GlobalAskStore:
             if boundary is None:
                 raise ConversationShareWatermarkStale(expected)
             return boundary["created_at"], boundary["id"]
-        latest = db.execute(self._sql(_NEWEST_JOB_SQL.format(live=self._live)), (
+        latest = db.execute(self._sql(_NEWEST_JOB_SQL.format(
+            live=self._live, by_conversation=self._by_conversation)), (
             conversation_id, user_id)).fetchone()
         if latest is None:
             return None, None
@@ -1622,7 +1633,8 @@ class GlobalAskStore:
             mark_id = str(watermark_id or "").strip()
             mark_at = str(watermark_at or "")
             facts = db.execute(self._sql(
-                _SHARE_RANKS_SQL.format(live=self._live, live_j=self._live_j)
+                _SHARE_RANKS_SQL.format(live=self._live, live_j=self._live_j,
+                                        by_conversation=self._by_conversation)
             ), (asked, conversation_id, user_id, mark_id, conversation_id,
                 conversation_id, user_id, mark_at,
                 conversation_id, user_id)).fetchone()
