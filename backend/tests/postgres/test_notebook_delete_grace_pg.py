@@ -251,3 +251,35 @@ def test_an_export_begun_before_the_promotion_is_complete_and_blocks_nothing(rep
     assert {item.id for item in snapshot.items} == {
         *world.confirmed, world.candidate, world.proposed,
     }
+
+
+def test_the_transfer_claim_rides_a_session_that_is_not_reaped(repo, monkeypatch):
+    """The window transfer's claim is a session advisory lock: its session
+    turns ``idle_session_timeout`` off and carries keepalives and
+    ``tcp_user_timeout`` (as the scale-build lock's does), so a hosted
+    instance cannot reap the idle holder and release the claim silently. A
+    second claim on the same key is refused while it is held and granted once
+    it is released."""
+    database = repo._runtime.database
+    real = database._open_claim_connection
+    opened: list = []
+
+    def recording():
+        connection = real()
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(database, "_open_claim_connection", recording)
+    claim = repo._runtime.memory_store.delete_window_transfer_claim
+    with claim("nb-claim", "u-claim") as held:
+        assert held
+        [session] = opened
+        setting = session.execute("SHOW idle_session_timeout").fetchone()
+        assert next(iter(setting.values())) == "0"
+        parameters = session.info.get_parameters()
+        assert parameters.get("keepalives") == "1"
+        assert parameters.get("tcp_user_timeout") == "6000"
+        with claim("nb-claim", "u-claim") as second:
+            assert not second
+    with claim("nb-claim", "u-claim") as again:
+        assert again
