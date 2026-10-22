@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from datetime import timedelta
 from typing import Any, Callable
 
+import psycopg
 import pytest
 
 from app.repositories.ports import NotebookDeleteDueError
@@ -271,15 +272,33 @@ def test_the_transfer_claim_rides_a_session_that_is_not_reaped(repo, monkeypatch
 
     monkeypatch.setattr(database, "_open_claim_connection", recording)
     claim = repo._runtime.memory_store.delete_window_transfer_claim
-    with claim("nb-claim", "u-claim") as held:
-        assert held
-        [session] = opened
-        setting = session.execute("SHOW idle_session_timeout").fetchone()
-        assert next(iter(setting.values())) == "0"
-        parameters = session.info.get_parameters()
-        assert parameters.get("keepalives") == "1"
-        assert parameters.get("tcp_user_timeout") == "6000"
-        with claim("nb-claim", "u-claim") as second:
-            assert not second
-    with claim("nb-claim", "u-claim") as again:
-        assert again
+    # Make the database default a hosted reaper (30 minutes), so "0" below can
+    # only come from the claim session switching it off -- on a stock local
+    # server the default is already 0 and the assertion would prove nothing.
+    with psycopg.connect(database._database_url, autocommit=True) as admin:
+        if admin.info.server_version >= 140000:
+            admin.execute(
+                "ALTER DATABASE %s SET idle_session_timeout = '30min'"
+                % admin.execute("SELECT quote_ident(current_database()) AS n").fetchone()[0]
+            )
+    try:
+        with claim("nb-claim", "u-claim") as held:
+            assert held
+            [session] = opened
+            if session.info.server_version >= 140000:
+                setting = session.execute("SHOW idle_session_timeout").fetchone()
+                assert next(iter(setting.values())) == "0"
+            parameters = session.info.get_parameters()
+            assert parameters.get("keepalives") == "1"
+            assert parameters.get("tcp_user_timeout") == "6000"
+            with claim("nb-claim", "u-claim") as second:
+                assert not second
+        with claim("nb-claim", "u-claim") as again:
+            assert again
+    finally:
+        with psycopg.connect(database._database_url, autocommit=True) as admin:
+            if admin.info.server_version >= 140000:
+                admin.execute(
+                    "ALTER DATABASE %s RESET idle_session_timeout"
+                    % admin.execute("SELECT quote_ident(current_database()) AS n").fetchone()[0]
+                )
