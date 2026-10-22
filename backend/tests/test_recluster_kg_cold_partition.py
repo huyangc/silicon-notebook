@@ -16,7 +16,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.scripts import recluster_kg
-from tests.test_board_partition_wiring import _graph, _state, repo  # noqa: F401  (fixture)
+from tests import test_board_partition_wiring as _wiring
+from tests.test_board_partition_wiring import _graph, _state
+
+# The wiring module's notebook fixture, bound under its own name so pytest
+# registers it here (an assignment, not an import kept alive by a suppression).
+repo = _wiring.repo
 
 
 class _Recorder:
@@ -99,7 +104,7 @@ def test_the_report_says_what_happened(capsys, state, expected):
         assert "re-partitioned" not in out
 
 
-def test_a_rebuild_held_off_by_a_build_in_flight_keeps_the_request(repo, monkeypatch, capsys):  # noqa: F811
+def test_a_rebuild_held_off_by_a_build_in_flight_keeps_the_request(repo, monkeypatch, capsys):
     """The real gate: a build in flight holds the notebook's generation claim, so
     the script's own rebuild returns without partitioning. The version stays 0,
     the script says so, and the next rebuild starts cold."""

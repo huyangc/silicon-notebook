@@ -694,9 +694,12 @@ def _leiden_communities(igraph, layout: _NodeLayout, edges: _ComponentEdges,
                     else warm_labels[n0:n1].astype(np.int64),
                     lo, hi, min_size)
 
-                def quality(membership):
-                    return graph.modularity(membership, weights=component_weight,
-                                            resolution=resolution, directed=False)
+                # ``graph`` is bound as a default, not closed over: the loop ``del``s
+                # both names once the component is done, and a closure over a
+                # deleted name is what pyflakes reads as undefined (F821).
+                def quality(membership, _graph=graph):
+                    return _graph.modularity(membership, weights=component_weight,
+                                             resolution=resolution, directed=False)
 
                 start_quality = quality(start)
                 start_boarded = _boarded(start, min_size)
