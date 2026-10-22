@@ -1773,6 +1773,31 @@ bash scripts/cli.sh notebook inspect ./exports/nb-a.snbk [--json]
 退出码：0 成功；1 文件校验失败或导出失败；2 参数错误、笔记本不存在或输出已存在；3 库不是本构建的
 schema。
 
+## 补齐笔记本缺失的向量（`notebook-reembed`）
+
+`app.services.notebook_reembed` 补齐一本笔记本缺的向量，分四条腿依次执行：chunk、元素、知识对象、
+关系。每条腿只嵌入没有向量的行，所以对一本向量齐全的笔记本跑一次不会调用模型。两个入口用它：
+
+- **`POST /api/notebooks/{id}/backfill-vectors`**（体检 H4/H5 的修复按钮）照旧在 KG 作业池里跑
+  chunk 与元素两条腿：逐来源持该来源的分块锁，结束时刷新一次 H4/H5。
+- **`notebook-reembed` 后台作业**（重活池，受 `BACKGROUND_MAINTENANCE_CONCURRENCY` 约束；诊断里的
+  名字是 `notebook-reembed`）可跑任意几条腿。它暂时没有自己的按钮：计划中的笔记本导入在发布一本
+  归档向量与本部署 embedding 模型不一致的笔记本之后提交它。
+
+需要知道的行为：
+
+- **同一本笔记本同时只有一个作业。** 两个入口共用一把进程内守卫。作业进行中再来的请求并入它，
+  而不是另起一个：当前这一轮正在跑的腿已被覆盖，其余的腿在作业结束前再跑一轮。守卫与作业记录
+  只在 API 进程内，重启即丢（重跑是安全的）。
+- **Knowhow 表用它自己的模型。** 表格的 chunk 属于 `knowhow_embedding`，chunk 腿从不用
+  `chunk_embedding` 嵌入它们（修复按钮以前会这么做），而是重新投影该表，由投影的自愈把缺向量的
+  chunk 嵌回去。重新投影和一次编辑一样会重写该表的图谱对象与边：对象向量保留（id 稳定），该表
+  的关系向量要等关系腿跑过才回来（修复按钮不跑关系腿），统一图被标记为过期。
+- **写入了对象向量的一轮会把统一图标记为过期**，下一次统一图重建不会因计数未变而跳过。
+- **失败留在作业内。** 工作负载未绑定的腿报告为跳过；模型批次失败时这些行仍缺向量，该腿标记为
+  未完成；异常记在 `silicon_notebook.backfill_vectors` 日志下。无论哪种，已写入的都保留，下一次
+  运行接着补其余的。
+
 ## PostgreSQL notebook-aware 词法索引
 
 PostgreSQL 词法 SQL 始终带 `notebook_id`，但旧的单表达式 trgm 索引无法在索引访问阶段利用

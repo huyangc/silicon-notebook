@@ -2279,6 +2279,40 @@ bash scripts/cli.sh notebook inspect ./exports/nb-a.snbk [--json]
 Exit status: 0 success; 1 the archive is invalid or the export failed; 2 a usage error, an
 unknown notebook or an existing output; 3 the database is not at this build's schema.
 
+## Filling a notebook's missing vectors (`notebook-reembed`)
+
+`app.services.notebook_reembed` fills in whatever vectors one notebook is missing, in four
+legs run in order: chunks, elements, knowledge objects, relations. Each leg embeds only what
+has no vector, so a run over a complete notebook makes no model call. Two entries use it:
+
+- **`POST /api/notebooks/{id}/backfill-vectors`** (the checkup's H4/H5 repair button) runs
+  the chunk and element legs as a job on the KG job pool, as before: per source under that
+  source's chunk lock, one H4/H5 refresh at the end.
+- **The `notebook-reembed` background job** (heavy maintenance pool, so bounded by
+  `BACKGROUND_MAINTENANCE_CONCURRENCY`; the diagnostics name is `notebook-reembed`) runs any
+  set of legs. It has no button of its own yet: the planned notebook import submits it after
+  publishing a notebook whose archived vectors did not match this deployment's embedding
+  models.
+
+What to expect:
+
+- **One run per notebook.** The two entries share one in-process guard. A request while a
+  run is in flight joins it instead of starting a second one: legs the current pass is
+  running are covered, the others run in one more pass before the run ends. The guard and the
+  run records live in the API process only; a restart loses them (rerunning is safe).
+- **Knowhow tables keep their own model.** A table's chunks belong to `knowhow_embedding`, so
+  the chunk leg never embeds them with `chunk_embedding` (the repair button used to); it
+  reprojects the table instead, whose self-heal embeds every chunk left without a vector. A
+  reprojection rewrites the table's graph objects and edges as any edit does: object vectors
+  survive (stable ids), the table's relation vectors are dropped until a relation leg runs
+  (the repair button does not run one), and the unified graph is marked out of date.
+- **Object vectors mark the unified graph out of date** when a pass wrote any, so the next
+  unified rebuild does not skip on unchanged counts.
+- **Failures stay inside the job.** A leg whose workload is unbound is reported as skipped; a
+  failed model batch leaves its rows missing and the leg incomplete; an error is logged under
+  `silicon_notebook.backfill_vectors`. In every case what was written stays, and the next run
+  picks up the rest.
+
 ## PostgreSQL notebook-aware lexical indexes
 
 PostgreSQL lexical retrieval always keeps `notebook_id` in the SQL predicate, but the legacy
