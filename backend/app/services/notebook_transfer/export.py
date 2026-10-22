@@ -27,10 +27,13 @@ build wrote passes the importer's strict reference check:
   recorded in ``manifest.excluded``.
 
 Files are the notebook's ``storage/notebooks/<id>/`` and ``storage/assets/<id>/``
-trees, read after the row transaction (as the deep copy does). Each file is
-opened ``O_NOFOLLOW | O_NONBLOCK`` and checked to be a regular file on that same
-descriptor, so a symbolic link, FIFO or device -- including one swapped in after
-the directory listing -- is skipped and counted, and a file that vanished since
+trees, read after the row transaction (as the deep copy does). The trees are
+walked through directory descriptors (``os.fwalk``) and each file is opened
+relative to its directory's descriptor, ``O_NOFOLLOW | O_NONBLOCK``, and checked
+to be a regular file on that same descriptor, so a symbolic link, FIFO or device
+-- including one swapped in after the directory listing, at the file itself or
+at any directory above it -- is never followed: a file-level one is skipped and
+counted, a swapped directory is not entered. A file that vanished since
 the listing is counted as missing; either way the export continues. A large
 file that would compress beyond the reader's ratio limit is stored uncompressed.
 
@@ -813,12 +816,24 @@ class _FileIndex:
             return
         if not root.is_dir():
             return
-        for directory, subdirs, names in os.walk(
-            root, followlinks=False, onerror=self._walk_error
+        # codex #974 r2 (P1): every open is anchored to a directory descriptor.
+        # ``O_NOFOLLOW`` guards only the last path component, so opening
+        # ``<root>/sub/file`` by name follows ``sub`` if it was swapped for a
+        # link after the listing. ``os.fwalk`` without ``follow_symlinks`` opens
+        # each directory relative to its parent's descriptor and descends only
+        # when the opened descriptor is the directory it listed (a swapped-in
+        # link is not entered). A link to a directory is listed among the
+        # subdirectories but never entered; it is pruned here so it is counted.
+        for directory, subdirs, names, dir_fd in os.fwalk(
+            root, follow_symlinks=False, onerror=self._walk_error
         ):
             base = Path(directory)
             for subdir in list(subdirs):
-                if (base / subdir).is_symlink():
+                try:
+                    mode = os.stat(subdir, dir_fd=dir_fd, follow_symlinks=False).st_mode
+                except FileNotFoundError:
+                    continue  # gone: fwalk's own open reports it to _walk_error
+                if stat.S_ISLNK(mode):
                     subdirs.remove(subdir)
                     self.skipped += 1
             subdirs.sort()
@@ -829,14 +844,14 @@ class _FileIndex:
                 if not is_safe_relative_path(relative):
                     self.skipped += 1
                     continue
-                added = self._add_one(entry_name(relative), base / name)
+                added = self._add_one(entry_name(relative), name, dir_fd)
                 if added and entry_name is notebook_file_entry:
                     self.notebook_files.add(relative)
 
     def _walk_error(self, exc: OSError) -> None:
-        """A directory ``os.walk`` could not list: gone since its parent was
-        listed counts as missing; anything else fails the export, never drops
-        the subtree silently."""
+        """A directory ``os.fwalk`` could not list or open: gone since its
+        parent was listed counts as missing; anything else fails the export,
+        never drops the subtree silently."""
         if isinstance(exc, FileNotFoundError):
             self.missing += 1
             return
@@ -844,11 +859,12 @@ class _FileIndex:
             f"无法读取笔记本目录（{errno.errorcode.get(exc.errno, exc.errno)}）"
         ) from exc
 
-    def _add_one(self, name: str, path: Path) -> bool:
-        """Open, verify on the same descriptor, then copy (module docstring).
-        Returns whether the file was carried."""
+    def _add_one(self, name: str, leaf: str, dir_fd: int) -> bool:
+        """Open ``leaf`` relative to its verified directory descriptor, verify
+        on the same file descriptor, then copy (module docstring). Returns
+        whether the file was carried."""
         try:
-            fd = os.open(path, _OPEN_FLAGS)
+            fd = os.open(leaf, _OPEN_FLAGS, dir_fd=dir_fd)
         except FileNotFoundError:
             self.missing += 1
             return False
