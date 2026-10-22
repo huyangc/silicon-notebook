@@ -304,10 +304,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 - [ ] **S2-D：组件层「仅测试调用」成员未清点**（来源：PR #862）：审计脚本只统计 facade，看不到组件层
       （`AskService.ask_chunk_current` / `ask_reasoning_current`、两端 store 与 `AskStateStorePort` 的
       `ask_job_status` 等）只被测试调用的成员；登记为一类待清点项。
-- [ ] **`test_extension_service_launchers.py::test_launcher_forwards_cancellation_while_companions_start`
-      高负载下超时**（来源：K1 第 6 轮验证）：重型本机负载下 4/4 次撞 5 s 子进程超时，干净 master 上
-      26/26 通过，判为锁外压测负载所致而非回归。每天看一眼每日 G2，若在干净 runner 上复现就立项，
-      改成握手/受控时钟判据，别靠放宽超时搪塞。
 
 ### 整改计划刻意不做、只登记
 
