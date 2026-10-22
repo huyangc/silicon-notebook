@@ -36,5 +36,9 @@ def test_memory_with_a_vector_embeds_once_pg(world):
     cases.memory_with_a_vector_embeds_once(world)
 
 
+def test_edited_memory_keeps_its_old_vector_and_still_embeds_pg(world):
+    cases.edited_memory_keeps_its_old_vector_and_still_embeds(world)
+
+
 def test_closed_channel_is_unchanged_pg(world):
     cases.closed_channel_is_unchanged(world)

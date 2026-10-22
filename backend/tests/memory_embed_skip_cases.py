@@ -251,6 +251,27 @@ def memory_with_a_vector_embeds_once(world: World) -> None:
     assert lexical_only != _run(world)["notebook"][0]
 
 
+def edited_memory_keeps_its_old_vector_and_still_embeds(world: World) -> None:
+    """Editing a confirmed, embedded entry sends its status back to ``pending``
+    but leaves the old vector row in place, so the skip must not fire: the
+    stored vector is what decides, not the status."""
+    memory_id = _remember(world, "Signed timing closure",
+                          "Timing closure signed off by review.", embed="ready")
+    service = world.repo._runtime.memory_service
+    scheduler = service.embedding_scheduler
+    service.embedding_scheduler = lambda fn, job: None  # the re-embed never lands
+    try:
+        edited = service.update(memory_id, world.asker.id,
+                                {"content_md": "Timing closure signed off, revised."})
+    finally:
+        service.embedding_scheduler = scheduler
+    assert edited.embedding_status == "pending"
+    for plane, (new, old, embedded) in _run(world).items():
+        assert embedded == [PROBE], plane
+        assert new == old, plane
+        assert new, plane
+
+
 def closed_channel_is_unchanged(world: World) -> None:
     _with_vectors(world)
     reads: list[str] = []

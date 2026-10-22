@@ -40,6 +40,10 @@ def test_memory_with_a_vector_embeds_once(world):
     cases.memory_with_a_vector_embeds_once(world)
 
 
+def test_edited_memory_keeps_its_old_vector_and_still_embeds(world):
+    cases.edited_memory_keeps_its_old_vector_and_still_embeds(world)
+
+
 def test_closed_channel_is_unchanged(world):
     cases.closed_channel_is_unchanged(world)
 

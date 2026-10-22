@@ -108,8 +108,10 @@ class MemoryRetriever:
         # A row takes part in vector scoring exactly when its stored vector
         # decodes to something other than None (``has_vector`` below), so with
         # no such row -- no Memory at all, the common case, or only entries
-        # whose embedding is still pending/failed -- every score is the lexical
-        # one whatever the query vector is, and the embed round trip (serial,
+        # that hold no stored vector (embedding never finished or failed; an
+        # edited, once-embedded entry goes back to pending but keeps its old
+        # vector row, so it still counts) -- every score is the lexical one
+        # whatever the query vector is, and the embed round trip (serial,
         # ahead of everything the Ask streams next) would be paid for nothing.
         # The test is ``is not None``, not truthiness: a decoded empty vector
         # still flips ``has_vector`` and so the fusion denominator.
