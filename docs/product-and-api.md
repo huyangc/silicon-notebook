@@ -2732,7 +2732,8 @@ Only five entries stay open during the window, each one deliberately:
    ones stay moved, and the next page is 404 `delete_window_closed`. An item the caller can no longer read
    while the window is open (their access was withdrawn) fails with `error_code="not_readable"`; an item
    whose source the notebook's own delete removed after its copy committed counts as `moved`. **One transfer
-   at a time** per caller and notebook (two tabs at once would copy an item twice): a second one is 409
+   at a time** per caller and notebook (two running together, say from two browser windows, would copy an
+   item twice): a second one is 409
    `{"code": "transfer_in_progress"}` at once (a process-local claim on SQLite, a session advisory lock on
    PostgreSQL). Only inside a window: a live notebook answers 409 `notebook_not_pending_delete` (the Memory
    page's transfer covers it); an unreadable notebook or a target the caller cannot write: 404. **Moved
