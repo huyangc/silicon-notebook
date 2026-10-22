@@ -151,9 +151,9 @@ class CitationLookups:
     reach the prompt (the partition append can clip the last one), and a key
     read for a passage that is then clipped is a row the old path never read.
 
-    One memo belongs to one Ask run: ``_draft_reasoning_response`` creates it
-    and hands it to every reasoning assembly of the run (each section, each
-    retry, the fallback); the assemblies hand it back through the baseline
+    One memo belongs to one Ask run: the reasoning draft stage creates it
+    (``AskService._draft_synthesis_inputs``) and hands it to every reasoning
+    assembly of the run (each section, each retry, the fallback); the assemblies hand it back through the baseline
     capture.  ``merge`` folds memos together (a no-op duplicate when the
     sections already share one).
     """
