@@ -33,7 +33,8 @@ drop the relations, vectors and cluster rows that point at it.
 
 Mirror of the sibling ``strip_source_evidence_on`` (governance stores, E5-2),
 which detaches one source's entries in place before that source is deleted;
-this one works on the in-memory snapshot and never writes.
+this one works on rows already read for a copy (the snapshot, or one page of
+the streaming read an export uses) and never writes.
 """
 from __future__ import annotations
 
@@ -51,32 +52,48 @@ def _entry_source(item: object) -> "str | None":
     return None
 
 
+def strip_row_memory_evidence(row: MutableMapping, memory: "frozenset[str]") -> bool:
+    """Remove, in place, every evidence entry of ONE row of an evidence table
+    (``EVIDENCE_TABLES``) that cites one of the ``memory`` source ids. Returns
+    whether the row changed. Evidence is JSON text on both backends' copy rows
+    (PostgreSQL rows pass through ``sqlite_compatible_row``); a value that does
+    not parse as a JSON array is left as it is, and a row none of whose entries
+    came from a Memory keeps its original text byte for byte.
+
+    The per-row half of ``strip_memory_evidence``: the streaming copy read
+    (``iter_copy_rows``) applies it page by page, the snapshot read applies it
+    to every row of the materialised snapshot."""
+    if not memory:
+        return False
+    raw = row.get("evidence")
+    if not raw:
+        return False
+    try:
+        entries = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+    except ValueError:
+        return False
+    if not isinstance(entries, list):
+        return False
+    kept = [item for item in entries if _entry_source(item) not in memory]
+    if len(kept) == len(entries):
+        return False
+    row["evidence"] = json.dumps(kept, ensure_ascii=False)
+    return True
+
+
 def strip_memory_evidence(
     snapshot: MutableMapping[str, list],
     memory_source_ids: Iterable[str],
 ) -> int:
     """Remove, in place, every evidence entry citing one of ``memory_source_ids``
-    from the snapshot's evidence arrays. Returns how many rows changed. Evidence
-    is JSON text on both backends' snapshot rows (PostgreSQL rows pass through
-    ``sqlite_compatible_row``); a value that does not parse as a JSON array is
-    left as it is."""
+    from the snapshot's evidence arrays (``strip_row_memory_evidence`` on every
+    row of ``EVIDENCE_TABLES``). Returns how many rows changed."""
     memory = frozenset(memory_source_ids)
     if not memory:
         return 0
     changed = 0
     for table in EVIDENCE_TABLES:
         for row in snapshot.get(table, ()):
-            raw = row.get("evidence")
-            if not raw:
-                continue
-            try:
-                entries = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
-            except ValueError:
-                continue
-            if not isinstance(entries, list):
-                continue
-            kept = [item for item in entries if _entry_source(item) not in memory]
-            if len(kept) != len(entries):
-                row["evidence"] = json.dumps(kept, ensure_ascii=False)
+            if strip_row_memory_evidence(row, memory):
                 changed += 1
     return changed
