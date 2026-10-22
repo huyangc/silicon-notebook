@@ -69,11 +69,41 @@ def test_the_table_set_of_each_format_version_is_frozen():
 def test_cluster_seed_object_id_reads_both_prefix_lengths():
     from app.services.notebook_transfer.export import cluster_seed_object_id
 
-    assert cluster_seed_object_id("K-~ko-abc") == "ko-abc"
-    assert cluster_seed_object_id("KL-~ko-abc") == "ko-abc"
-    assert cluster_seed_object_id("KF-~ko-abc") == "ko-abc"
-    for plain in ("K-shared topic", "KL-name", "ko-abc", "", "K-~x", "KLM-~ko-a"):
+    for minted in MINTED_CANONICALS:
+        assert cluster_seed_object_id(minted) == "ko-abc", minted
+    for plain in PLAIN_CANONICALS:
         assert cluster_seed_object_id(plain) is None, plain
+
+
+MINTED_CANONICALS = ("K-~ko-abc", "KL-~ko-abc", "KF-~ko-abc")
+PLAIN_CANONICALS = (
+    "K-shared topic", "KL-name", "ko-abc", "", "K-~x", "KLM-~ko-a", "K~ko-a", "KL~ko-a",
+    "k-~ko-abc",
+)
+#: Degenerate inputs no writer produces; only the twin agreement matters for them.
+CLUSTER_SEED_SAMPLES = MINTED_CANONICALS + PLAIN_CANONICALS + (
+    "KL-~ko-", "K-~ko-", "KL-~kox-a", "K-~kox", "KL-~ko", "K-~k",
+)
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_cluster_seed_object_id_is_the_twin_of_the_memory_sql_expression(backend):
+    """The Python parse and the SQL ``CASE`` the copy and Memory rules use agree on
+    every sample. Both backends' fragments are evaluated on SQLite (their text is
+    the same ``substr``/equality expression; only the shared rule is compared)."""
+    import importlib
+    import sqlite3
+
+    from app.services.notebook_transfer.export import cluster_seed_object_id
+
+    memory_sql = importlib.import_module(f"app.repositories.{backend}.memory_sql")
+    expression = memory_sql.cluster_seed_object_id("c")
+    with sqlite3.connect(":memory:") as connection:
+        for sample in CLUSTER_SEED_SAMPLES:
+            (sql_value,) = connection.execute(
+                f"SELECT {expression} FROM (SELECT ? AS canonical_id) AS c", (sample,)
+            ).fetchone()
+            assert cluster_seed_object_id(sample) == sql_value, sample
 
 
 def test_sync_package_reexports_the_one_portable_encoding():
@@ -371,5 +401,30 @@ def test_any_reader_exception_is_an_archive_error(archive, monkeypatch, error):
         raise error("crafted")
 
     monkeypatch.setattr(zipfile.ZipFile, "open", explode)
-    with pytest.raises(ArchiveError):
+    with pytest.raises(ArchiveError) as raised:
         inspect_archive(archive)
+    assert isinstance(raised.value.__cause__, error)  # the original is kept for debugging
+
+
+def test_open_archive_closes_the_zip_whatever_interrupts_the_directory_check(archive,
+                                                                            monkeypatch):
+    """Closed by ``open_archive`` itself, before the interruption leaves it: the test
+    holds the zip object, so a close by the garbage collector cannot stand in."""
+    from app.services.notebook_transfer import archive_reader
+
+    class Interrupted(BaseException):
+        pass
+
+    held: list[zipfile.ZipFile] = []
+
+    def interrupt(opened, size):
+        held.append(opened)
+        raise Interrupted()
+
+    monkeypatch.setattr(archive_reader, "check_directory", interrupt)
+    try:
+        archive_reader.open_archive(archive)
+    except Interrupted:
+        assert held and held[0].fp is None, "the zip must be closed before the error leaves"
+    else:
+        pytest.fail("the interruption must propagate")

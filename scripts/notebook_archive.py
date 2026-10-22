@@ -15,8 +15,10 @@ count, and prints a summary.
 Exit status: 0 success; 1 the archive is invalid or the export failed; 2 a
 usage error or an unknown notebook; 3 the database is not at this build's
 schema (the shared schema-guest refusal). Several notebooks export in order and
-stop at the first failure; the archives already written stay, and ``--json``
-prints ``{"exported": [...], "failed": [...]}`` either way.
+stop at the first failure -- an unknown notebook, an export error, an I/O error
+on the output (``ENOSPC``...) or a schema/connection refusal; the archives
+already written stay, and ``--json`` prints ``{"exported": [...], "failed":
+[...]}`` in every one of those cases.
 
 Import (``notebook import``) is not part of this build yet. The format is
 ``app.domain.notebook_archive``; docs/operations.md has the runbook.
@@ -93,12 +95,14 @@ def _export(options) -> int:
     reports = []
     failure: "dict | None" = None
     status = 0
+    current: "str | None" = None
     try:
         with open_cli_repository(settings) as repository:
             store = repository._runtime.sharing_store  # noqa: SLF001 -- CLI composition root
             embeddings = embedding_identities(settings)
             schemas = repository.list_object_schemas()
             for notebook_id, path in targets:
+                current = notebook_id
                 try:
                     report = export_notebook(
                         store, notebook_id, path,
@@ -110,19 +114,21 @@ def _export(options) -> int:
                     failure = {"notebook_id": notebook_id, "error": "笔记本不存在或正在删除"}
                     status = 2
                     break
-                except NotebookExportError as exc:
-                    failure = {"notebook_id": notebook_id, "error": str(exc)}
+                except (NotebookExportError, OSError) as exc:
+                    # OSError: the output side failed (ENOSPC, EIO...).
+                    failure = {"notebook_id": notebook_id, "error": _describe(exc)}
                     status = 1
                     break
                 reports.append(report)
                 if not options.json:
                     _print_export(report)
     except MaintenanceCliError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return exc.exit_code
+        failure = {"notebook_id": current, "error": str(exc)}
+        status = exc.exit_code
     if failure is not None:
         # The archives already written stay; the report says which ones.
-        print(f"error: {failure['notebook_id']}: {failure['error']}", file=sys.stderr)
+        where = f"{failure['notebook_id']}: " if failure["notebook_id"] else ""
+        print(f"error: {where}{failure['error']}", file=sys.stderr)
     if options.json:
         print(json.dumps(
             {"exported": [report.to_dict() for report in reports],
@@ -130,6 +136,12 @@ def _export(options) -> int:
             ensure_ascii=False, indent=2,
         ))
     return status
+
+
+def _describe(exc: BaseException) -> str:
+    if isinstance(exc, OSError):
+        return f"{type(exc).__name__}: {exc.strerror or exc}"
+    return str(exc)
 
 
 def _print_export(report) -> None:
@@ -143,6 +155,9 @@ def _print_export(report) -> None:
         print(f"  skipped {report.skipped_links} symbolic links / special files")
     if report.missing_files:
         print(f"  {report.missing_files} files vanished while the export ran")
+    for name in report.stale_part_files:
+        print(f"  warning: leftover part file from a killed export: {name} "
+              "(delete it once no export to this path is running)", file=sys.stderr)
     if report.missing_source_files:
         print(f"  {report.missing_source_files} sources have no file in the notebook tree")
     for key, count in report.normalized.items():

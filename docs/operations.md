@@ -2006,7 +2006,8 @@ bash scripts/cli.sh notebook inspect ./exports/nb-a.snbk [--json]
   opened without following a symbolic link and checked on that same descriptor, so links,
   FIFOs and devices (including one swapped in after the directory listing) and a tree root
   that is itself a link are skipped and counted; a file deleted while the export runs is
-  counted as missing and the export continues. A file larger than 1 MiB that would compress
+  counted as missing and the export continues. A file or directory that exists but cannot be
+  read (permissions, I/O error) fails the export instead of being left out. A file larger than 1 MiB that would compress
   beyond the reader's ratio limit is stored uncompressed.
 - **Normalised on the way out.** The notebook row loses its share link; `sources.file_path`
   becomes the path relative to the notebook's file tree; soft pointers that leave the
@@ -2020,11 +2021,17 @@ bash scripts/cli.sh notebook inspect ./exports/nb-a.snbk [--json]
   vectors (`chunk_questions.vector`, NOT NULL) still travel. The manifest records, per
   embedding workload, the bound model's protocol and name, `EMBED_DIM` and `float32-le`, or
   `null` for an unbound workload, so an importer can decide whether the vectors are usable.
-- **Atomic output.** The archive is written to a uniquely named `<out>.<random>.part` and
-  published with a hard link that fails if `<out>` exists (on a filesystem without hard links,
-  `<out>` is claimed with `O_EXCL` first), `manifest.json` being its last entry; a failure
-  removes the part file. An existing output is never overwritten, and two exports to the same
-  path cannot corrupt each other: the second to finish fails.
+- **Atomic output.** The archive is written to a uniquely named `<out>.<random>.part`, fsynced,
+  and published with a hard link that fails if `<out>` exists (on a filesystem without hard
+  links, `<out>` is claimed with `O_EXCL` first and removed again if the rename fails); the
+  directory is fsynced after publication, `manifest.json` is the archive's last entry, and a
+  failure removes the part file. An existing output is never overwritten, and two exports to
+  the same path cannot corrupt each other: the second to finish fails.
+- **Leftover part files.** An export killed outright (SIGKILL, OOM) cannot remove its
+  `<out>.<random>.part`. The next export to the same path lists such files older than an hour
+  as a warning (and in the `--json` report as `stale_part_files`) but never deletes them,
+  since one could belong to an export still running; delete them by hand once no export to
+  that path is running.
 - **Several notebooks** export in order and stop at the first failure; archives already written
   stay, and `--json` prints `{"exported": [...], "failed": [...]}` either way.
 - **`inspect`** opens nothing but the file. It checks the zip directory against the reader
