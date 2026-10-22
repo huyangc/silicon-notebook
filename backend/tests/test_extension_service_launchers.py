@@ -1,6 +1,7 @@
 """Real shell launchers with fake services/processes; never bind host ports."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,33 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 pytestmark = [pytest.mark.xdist_group("extension_launcher_lifecycle"), pytest.mark.process_contract]
+# A backstop for a broken run, never the judgement: every wait below ends on a
+# handshake (a pid file published by rename, or the launcher's own exit).
+LIFECYCLE_CAP_SECONDS = 60
+LAUNCHER_TRAPPED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+
+
+def default_launcher_signals() -> None:
+    """``preexec_fn``: the launcher starts with default dispositions.
+
+    A non-interactive shell cannot trap a signal that was ignored when it
+    started (POSIX). A gate run under ``nohup`` or a detached harness ignores
+    SIGHUP, and a backgrounded lane ignores SIGINT; inheriting either would
+    hand the launcher a cancellation it cannot see, and the test would judge
+    the test runner's environment instead of the launcher.
+    """
+    for signum in LAUNCHER_TRAPPED_SIGNALS:
+        signal.signal(signum, signal.SIG_DFL)
+
+
+@contextmanager
+def runner_disposition(signum: int, disposition):
+    """Give the test runner itself ``disposition`` for ``signum`` while it spawns."""
+    previous = signal.signal(signum, disposition)
+    try:
+        yield
+    finally:
+        signal.signal(signum, previous)
 
 
 def executable(path: Path, body: str) -> None:
@@ -23,7 +51,7 @@ def executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
-def wait_until(predicate, timeout: float = 10) -> None:
+def wait_until(predicate, timeout: float = LIFECYCLE_CAP_SECONDS) -> None:
     deadline = time.monotonic() + timeout
     while not predicate():
         if time.monotonic() >= deadline:
@@ -62,8 +90,17 @@ if receipt and receipt.exists() and receipt.read_text():
     record["ownership"] = json.loads(receipt.read_text())
 with open(os.environ["SERVICE_EVENTS"], "a") as stream:
     stream.write(json.dumps(record) + "\\n")
-if action == "start" and os.environ.get("WAIT_SERVICE") == "1":
-    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(130))
+if action == "start" and os.environ.get("WAIT_SERVICE") in ("1", "misses-first-term"):
+    missed = pathlib.Path(os.environ["FAKE_ROOT"], "term-missed")
+    def cancelled(signum, frame):
+        # misses-first-term: the launcher's first TERM is lost, as it is when it
+        # lands before the forked controller has exec'd.
+        if os.environ["WAIT_SERVICE"] == "misses-first-term" and not missed.exists():
+            missed.write_text("")
+            return
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        sys.exit(130)
+    signal.signal(signal.SIGTERM, cancelled)
     staged = pathlib.Path(os.environ["FAKE_ROOT"], "controller.pid.tmp")
     staged.write_text(str(os.getpid()))
     os.replace(staged, staged.with_suffix(""))
@@ -79,7 +116,13 @@ exec sleep 60
 ''')
     python_wrapper = '''#!/bin/bash
 case "${1:-}" in
-  */extension_services.py) exec "$REAL_PYTHON" "$@" ;;
+  */extension_services.py)
+    if [[ "${2:-}" == start && "${WAIT_SERVICE:-}" == forked ]]; then
+      # The controller exists but has not written a receipt or started anything.
+      echo "$$" > "$FAKE_ROOT/controller.pid.tmp" && mv "$FAKE_ROOT/controller.pid.tmp" "$FAKE_ROOT/controller.pid"
+      exec /bin/sleep 60
+    fi
+    exec "$REAL_PYTHON" "$@" ;;
   */python_env.py)
     if [[ "${2:-}" == "-c" ]]; then
       [[ "${FAIL_DATABASE:-0}" == 1 ]] && exit 2
@@ -125,7 +168,22 @@ esac
 
 def run(root, env, path, *args):
     return subprocess.run(["bash", str(root / path), *args], cwd=root, env=env,
-                          capture_output=True, text=True, timeout=15)
+                          capture_output=True, text=True, timeout=LIFECYCLE_CAP_SECONDS,
+                          preexec_fn=default_launcher_signals)
+
+
+def spawn(root, env, path, *args):
+    return subprocess.Popen(["bash", str(root / path), *args], cwd=root, env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            preexec_fn=default_launcher_signals)
+
+
+def kill_published(pid_file: Path) -> None:
+    if pid_file.exists():
+        try:
+            os.kill(int(pid_file.read_text()), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def events(root):
@@ -158,26 +216,79 @@ def test_service_start_failure_prevents_application_start(launcher, path, args):
     ("scripts/backend.sh", ("start",)), ("start.sh", ()),
 ])
 @pytest.mark.parametrize("interruption", [signal.SIGTERM, signal.SIGHUP])
-def test_launcher_forwards_cancellation_while_companions_start(launcher, path, args, interruption):
+@pytest.mark.parametrize("runner", [signal.SIG_DFL, signal.SIG_IGN], ids=["runner-default", "runner-ignores"])
+def test_launcher_forwards_cancellation_while_companions_start(launcher, path, args, interruption, runner):
+    """``runner-ignores`` is the gate run under ``nohup``: the runner ignoring
+    the signal must not make the launcher deaf to it."""
     root, env = launcher
     controller_file = root / "controller.pid"
-    with subprocess.Popen(
-        ["bash", str(root / path), *args], cwd=root, env={**env, "WAIT_SERVICE": "1"},
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    ) as process:
+    with runner_disposition(interruption, runner):
+        process = spawn(root, {**env, "WAIT_SERVICE": "1"}, path, *args)
+    with process:
         try:
+            # Handshake: the controller publishes its pid only after arming its
+            # SIGTERM handler, recording the start and writing the receipt.
             wait_until(controller_file.exists)
             process.send_signal(interruption)
-            assert process.wait(timeout=5) != 0
+            assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) != 0
             assert not alive(int(controller_file.read_text()))
         finally:
             if process.poll() is None:
                 process.kill()
-            if controller_file.exists():
-                try:
-                    os.kill(int(controller_file.read_text()), signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+            kill_published(controller_file)
+    assert_owned_cleanup(root)
+    assert not (root / "backend.pid").exists()
+    assert not (root / "frontend.pid").exists()
+
+
+@pytest.mark.parametrize("path,args", [
+    ("scripts/dev.sh", ()), ("scripts/prod.sh", ()),
+    ("scripts/backend.sh", ("start",)), ("start.sh", ()),
+])
+@pytest.mark.parametrize("interruption", [signal.SIGTERM, signal.SIGHUP])
+def test_launcher_cancellation_before_controller_starts_anything(launcher, path, args, interruption):
+    """Cancelled while the controller exists but has written no receipt: it is
+    stopped, nothing is rolled back (nothing was started) and the receipt goes."""
+    root, env = launcher
+    controller_file = root / "controller.pid"
+    with spawn(root, {**env, "WAIT_SERVICE": "forked"}, path, *args) as process:
+        try:
+            wait_until(controller_file.exists)
+            process.send_signal(interruption)
+            assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) != 0
+            assert not alive(int(controller_file.read_text()))
+        finally:
+            if process.poll() is None:
+                process.kill()
+            kill_published(controller_file)
+    assert not (root / "service-events.jsonl").exists()
+    assert not list(Path(env["TMPDIR"]).glob("silicon-extension-start.*"))
+    assert not (root / "backend.pid").exists()
+    assert not (root / "frontend.pid").exists()
+
+
+@pytest.mark.parametrize("path,args", [
+    ("scripts/dev.sh", ()), ("scripts/prod.sh", ()),
+    ("scripts/backend.sh", ("start",)), ("start.sh", ()),
+])
+@pytest.mark.parametrize("interruption", [signal.SIGTERM, signal.SIGHUP])
+def test_launcher_repeats_cancellation_the_controller_missed(launcher, path, args, interruption):
+    """A TERM that reaches the controller between fork and exec is lost (the
+    fork still runs the launcher's traps); the launcher keeps forwarding until
+    the controller is gone instead of waiting for it to finish starting."""
+    root, env = launcher
+    controller_file = root / "controller.pid"
+    with spawn(root, {**env, "WAIT_SERVICE": "misses-first-term"}, path, *args) as process:
+        try:
+            wait_until(controller_file.exists)
+            process.send_signal(interruption)
+            assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) != 0
+            assert not alive(int(controller_file.read_text()))
+        finally:
+            if process.poll() is None:
+                process.kill()
+            kill_published(controller_file)
+    assert (root / "term-missed").exists()
     assert_owned_cleanup(root)
     assert not (root / "backend.pid").exists()
     assert not (root / "frontend.pid").exists()
@@ -185,12 +296,11 @@ def test_launcher_forwards_cancellation_while_companions_start(launcher, path, a
 
 def test_development_signal_exit_cleans_owned_receipt(launcher):
     root, env = launcher
-    with subprocess.Popen(["bash", str(root / "scripts/dev.sh")], cwd=root,
-                          env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as process:
+    with spawn(root, env, "scripts/dev.sh") as process:
         try:
             wait_until(lambda: (root / "backend.pid").exists() and (root / "frontend.pid").exists())
             process.terminate()
-            assert process.wait(timeout=8) != 0
+            assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) != 0
         finally:
             if process.poll() is None:
                 process.kill()

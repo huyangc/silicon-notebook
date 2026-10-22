@@ -280,8 +280,16 @@ def main(arguments: list[str] | None = None) -> int:
     parser.add_argument("--state-dir", type=Path, default=ROOT / ".local" / "run" / "extensions", help=argparse.SUPPRESS)
     args = parser.parse_args(arguments)
     if args.action != "_supervise":
+        cancelled = False
+
         def interrupted(_signum: int, _frame: object) -> None:
-            raise KeyboardInterrupt
+            # Act on the first cancellation only: the launcher repeats its TERM
+            # until this process exits (its first may be lost before exec), and
+            # a repeat must not abort the rollback the first one started.
+            nonlocal cancelled
+            if not cancelled:
+                cancelled = True
+                raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, interrupted)
         signal.signal(signal.SIGHUP, interrupted)
         signal.signal(signal.SIGINT, interrupted)

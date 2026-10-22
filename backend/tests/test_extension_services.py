@@ -485,6 +485,42 @@ def test_interrupted_launcher_rolls_back_its_unready_session(directory, tmp_path
 
 
 @pytest.mark.process_contract
+def test_repeated_cancellation_does_not_cut_the_rollback_short(directory, tmp_path):
+    """The launcher repeats its TERM until the controller exits. A repeat that
+    lands as the rollback begins is absorbed; the rollback still finishes."""
+    item = service(tmp_path, probe=[sys.executable, "-c", "raise SystemExit(1)"])
+    item["startup_timeout_seconds"] = 30
+    code = (
+        "import json,os,signal,sys; sys.path.insert(0,sys.argv[1]); import extension_services as m\n"
+        "item=json.load(sys.stdin); m.configuration=lambda root: ([item],'pending'); rollback=m.rollback\n"
+        "def repeated(*args, **kwargs):\n"
+        "    os.kill(os.getpid(), signal.SIGTERM)\n"
+        "    return rollback(*args, **kwargs)\n"
+        "m.rollback=repeated\n"
+        "raise SystemExit(m.main(['start','--state-dir',sys.argv[2],'--receipt',sys.argv[3]]))"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", code, str(SCRIPTS), str(directory), str(tmp_path / "receipt")],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    process.stdin.write(json.dumps(item).encode())
+    process.stdin.close()
+    process.stdin = None
+    try:
+        def exited():
+            assert process.poll() is None, f"launcher exited early: {process.communicate()}"
+        eventually(lambda: manager.status(directory)["state"] == "starting", COLD_START_SECONDS, exited)
+        process.send_signal(signal.SIGTERM)
+        process.communicate(timeout=COLD_START_SECONDS)
+        assert process.returncode == 130
+        assert not runtime.running(directory)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+@pytest.mark.process_contract
 def test_cancellation_at_spawn_return_still_rolls_back(directory, tmp_path, monkeypatch):
     spawn = manager._spawn
     def interrupted(*args, **kwargs):
