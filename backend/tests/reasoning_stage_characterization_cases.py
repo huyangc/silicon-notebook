@@ -1,54 +1,37 @@
-"""Characterization rig for the reasoning Ask: the orchestrator ``AskService._run_reasoning_stage``
+"""Behaviour rig for the reasoning Ask: the orchestrator ``AskService._run_reasoning_stage``
 and the shipped response draft stage ``AskService._draft_reasoning_response``.
 
 **两端吃同一份世界、同一套观测、同一组场景**:``tests/test_reasoning_stage_characterization.py``
 (SQLite)与 ``tests/postgres/test_reasoning_stage_characterization_pg.py``(PostgreSQL)各自只写
-一个 ``Backend`` 适配器(有哪些表、怎么录 SQL、缓存怎么清)。不是测试模块(没有 ``test_`` 前缀),
-pytest 不会收集它。
+一个 ``Backend`` 适配器(有哪些表、缓存怎么清)。不是测试模块(没有 ``test_`` 前缀),pytest 不会
+收集它。
 
 每个场景经生产入口(``AskService.ask`` / ``AskService.ask_evidence``,即 ``_engine_scope`` 装好
 检索天花板与 retrieval run 之后)跑一次真实的逐步推理 Ask:真实仓库、真实检索与合成,只有模型是
 脚本化的确定性替身。``observe`` 录下断言要读的东西:对服务自身协作方法与 ``execute_*_stage`` /
-``kg_in_scope_for`` / 结构化枚举 / ``_egress_question`` 的调用(规范化后的参数与返回值)、模型收到
+``kg_in_scope_for`` / 结构化枚举 / ``_egress_question`` / 大纲分节规划的调用,以及草稿阶段经
+``evidence_context`` / ``schemas`` / ``model_clients`` 端口的调用(规范化后的参数与返回值)、模型收到
 的提示词、查询 embedding、流式推送的每一步、本线程日志、表的增删行数、两个请求级 ContextVar 在
 调用之后的值,以及返回值或异常。``Scenario.expect`` 断言用户与下游可见的事实——走了哪条短路、
 ``llm_mode`` / ``kg_required`` / 完整性披露、轨迹的步骤序列与流式推送、记忆那一步、模型错误、站外
 补充、答案与会话是否落库、取消与异常的类型。
 
-这套世界与场景最初是 ``_run_reasoning_stage`` 零行为变化拆分的表征:拆分前在两端采集的逐字节快照
-(另含每次取消检查、ContextVar 的 set/reset、事件日志、本线程的每条 SQL 与整库逐行差分)拆分后不变,
-随后按 AGENTS.md「不做只为重构服务的金标快照」退役,只留本行为层。
-
-现在它第二次服务同一件事,对象是草稿阶段 ``_draft_reasoning_response``:``DRAFT_SCENARIOS`` 补上
-它自己的分支(见那一节的注释),**拆分 oracle 层**重新装回——``observe`` 的完整观测 + 逐字节快照,
-除上面那些之外还录草稿阶段的每个协作方(服务自身方法、``evidence_context`` / ``schemas`` /
-``model_clients`` 端口、它在调用时 import 的模块函数,规范化后的全部参数与返回值)、模型收到的
-每一条提示词(逐字)与回复、两个请求级 ContextVar 的 set/reset、event log、本线程发出的每一条
-SQL、整库逐表的增删差分、日志与返回值/异常属性。它只为 ``_draft_reasoning_response`` 的零行为
-变化拆分服务:拆分前采集、拆分后逐字节不变,拆分完成后随快照目录一起退役。
-
-确定性(跨平台,见 memory「逐字快照要跨平台稳定」):行 id 来自计数器(主线程与工作线程各一个,
-工作线程铸造的 id 打码成 ``<wid>``);数据库与服务自己取的墙钟一律打码成 ``<ts>``,耗时
-(``*_ms`` / ``*duration*``)打码;浮点数(向量分数随 BLAS 末位而变)一律打码成 ``<float>``,只留
-id 次序,夹具里的文本与名字两两不同、没有数学并列;SQLite 只记应用自己的语句;PostgreSQL 跳过
-连接池的借还探测。只记被测 Ask 所在线程;工作线程上的模型调用、推送与事件另记为多重集合。
+这套世界与场景两次充当零行为变化拆分的表征:先是 ``_run_reasoning_stage``,再是草稿阶段
+``_draft_reasoning_response``(为它补了 ``DRAFT_SCENARIOS`` 那一组分支)。两次都是拆分前在两端采集
+的逐字节快照(另含每次取消检查、ContextVar 的 set/reset、事件日志、本线程的每条 SQL 与整库逐行差分)
+拆分后不变,随后按 AGENTS.md「不做只为重构服务的金标快照」退役,只留本行为层。
 """
 from __future__ import annotations
 
 import collections
-import contextlib
 import dataclasses
-import datetime as dt
 import enum
-import hashlib
 import json
 import logging
 import re
-import sys
 import threading
-import uuid
 from pathlib import Path
-from typing import Any, Callable, ContextManager, Optional
+from typing import Any, Callable, Optional
 
 from app.models.ask import (
     AskIntentConfirmation,
@@ -65,71 +48,27 @@ from tests.model_testkit import bind_all_embedding_clients, bind_chat_client
 
 EMBED_DIM = 16
 ASKED_AT = "2026-10-21T08:00:00+08:00"
-STORAGE = "<storage>"
 
 # --------------------------------------------------------------------- canon
 
-_TIMESTAMP = re.compile(
-    r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:[+-]\d{2}:?\d{2}|Z)?"
-)
-#: Ids minted on a worker thread (their order is scheduling, not behaviour).
-_WORKER_UUID_BASE = 0xF000_0000_0000
-_DURATION_KEY = re.compile(r"(?:_ms|_seconds|duration|elapsed)$")
-_SCORE_IN_TEXT = re.compile(r"(?<![\w.])\d+\.\d{4,}(?![\w.])")
-_DURATION_IN_JSON = re.compile(
-    r'("[A-Za-z_]*(?:_ms|_seconds|duration|elapsed)"\s*:\s*)-?\d+(?:\.\d+)?')
-
 
 class Canon:
-    """The stable projection of every recorded value (dataclasses and pydantic
-    models become ``{"dc:<Type>": ...}`` / ``{"pd:<Type>": ...}``)."""
-
-    def __init__(self, storage_dir: Path) -> None:
-        self.storage = str(storage_dir)
-        self.tmp = str(storage_dir.parent)
-
-    def text(self, value: str) -> str:
-        value = value.replace(self.storage, STORAGE).replace(self.tmp, "<tmp>")
-        value = _worker_ids(value)
-        value = _TIMESTAMP.sub("<ts>", value)
-        value = _DURATION_IN_JSON.sub(r'\1"<dur>"', value)
-        value = _LITERAL_IN_LIST.sub(_sorted_in_list, value)
-        value = _BUSY_TIMEOUT.sub("PRAGMA busy_timeout = <left>", value)
-        return _SCORE_IN_TEXT.sub("<float>", value)
+    """A plain JSON-shaped projection of a recorded value (dataclasses and
+    pydantic models become ``{"dc:<Type>": ...}`` / ``{"pd:<Type>": ...}``)."""
 
     def __call__(self, value: Any, _depth: int = 0) -> Any:
         if _depth > 24:
             return f"<deep {type(value).__name__}>"
         depth = _depth + 1
-        if value is None or isinstance(value, bool):
+        if value is None or isinstance(value, (bool, int, float, str)):
             return value
         if isinstance(value, enum.Enum):
             return self(value.value, depth)
-        if isinstance(value, int):
-            return value
-        if isinstance(value, float):
-            return "<float>"
-        if isinstance(value, str):
-            return self.text(value)
-        if isinstance(value, (bytes, bytearray, memoryview)):
-            return "bytes:" + hashlib.sha256(bytes(value)).hexdigest()[:16]
-        if isinstance(value, (dt.datetime, dt.date, dt.time)):
-            return "<ts>"
-        if isinstance(value, Path):
-            return self.text(str(value))
         if isinstance(value, threading.Event):
             return {"event": value.is_set()}
         if isinstance(value, dict):
-            out = {}
-            for key, item in value.items():
-                name = key if isinstance(key, str) else _dumps(self(key, depth))
-                name = self.text(name)
-                if _DURATION_KEY.search(name) and isinstance(item, (int, float)) \
-                        and not isinstance(item, bool):
-                    out[name] = "<dur>"
-                else:
-                    out[name] = self(item, depth)
-            return out
+            return {key if isinstance(key, str) else repr(key): self(item, depth)
+                    for key, item in value.items()}
         if isinstance(value, (list, tuple)):
             return [self(v, depth) for v in value]
         if isinstance(value, (set, frozenset)):
@@ -143,41 +82,13 @@ class Canon:
             }, depth)}
         if hasattr(value, "model_dump"):
             return {"pd:" + type(value).__name__: self(value.model_dump(mode="python"), depth)}
-        if hasattr(value, "keys") and hasattr(value, "__getitem__"):
-            return {"row": self({k: value[k] for k in value.keys()}, depth)}
-        if hasattr(value, "obj") and type(value).__name__ == "Jsonb":
-            return {"jsonb": self(value.obj, depth)}
-        if type(value).__name__ == "module":
-            return f"<module {value.__name__}>"
-        if hasattr(value, "_asdict"):
-            return {"nt:" + type(value).__name__: self(value._asdict(), depth)}
         if callable(value):
             return f"<callable {getattr(value, '__name__', type(value).__name__)}>"
         return f"<{type(value).__name__}>"
 
 
-#: ``IN ('a','b')`` literal lists the store builds from a Python set: their
-#: order follows the hash seed, so they are compared as sets.
-_LITERAL_IN_LIST = re.compile(r"\bIN \(('[^']*'(?:,\s*'[^']*')+)\)")
-
-
-#: The SQLite write lock wait is the time left on a wall-clock budget.
-_BUSY_TIMEOUT = re.compile(r"PRAGMA busy_timeout = \d+")
-
-
-def _sorted_in_list(match: "re.Match[str]") -> str:
-    items = re.findall(r"'[^']*'", match.group(1))
-    return "IN (" + ",".join(sorted(items)) + ")"
-
-
-def _worker_ids(text: str) -> str:
-    # uuid4 counter values minted on a worker thread: ``f000000000xx`` style.
-    return re.sub(r"0{8,}f000000[0-9a-f]{5}|00000000-0000-0000-0000-f000000[0-9a-f]{5}",
-                  "<wid>", text)
-
-
 def _dumps(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, ensure_ascii=False)
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
 
 
 # ------------------------------------------------------------------ recorder
@@ -192,9 +103,6 @@ class Recorder:
         self.thread = threading.get_ident()
         self.timeline: list[dict] = []
         self.worker: list[dict] = []
-        #: Calls whose order among themselves follows the hash seed, each with
-        #: what it recorded inside (see ``_UNORDERED_CALLS``).
-        self.unordered: list[list[dict]] = []
         self._lock = threading.Lock()
 
     def on_thread(self) -> bool:
@@ -221,39 +129,9 @@ class Hooks:
         self.replace: dict[str, Callable] = {}
 
 
-#: Calls made while iterating a Python set (the draft reads each federated
-#: owner's schema overlay in ``{notebook ids}`` order): the timeline keeps a
-#: marker where each happened, and the call with everything recorded inside it
-#: is compared as one item of a multiset.
-_UNORDERED_CALLS = frozenset({"schemas.effective_schemas"})
-
-
 def _recorded(label: str, name: str, attr: Callable, recorder: Recorder,
               hooks: Hooks, *, args_too: bool = True) -> Callable:
     key = f"{label}.{name}"
-    plain = _recorded_call(key, attr, recorder, hooks, args_too=args_too)
-    if key not in _UNORDERED_CALLS:
-        plain.__name__ = name
-        return plain
-
-    def call(*args: Any, **kwargs: Any) -> Any:
-        if not recorder.on_thread():
-            return plain(*args, **kwargs)
-        outer, group = recorder.timeline, []
-        recorder.timeline = group
-        try:
-            return plain(*args, **kwargs)
-        finally:
-            recorder.timeline = outer
-            outer.append({"unordered": key})
-            recorder.unordered.append(group)
-
-    call.__name__ = name
-    return call
-
-
-def _recorded_call(key: str, attr: Callable, recorder: Recorder, hooks: Hooks, *,
-                   args_too: bool) -> Callable:
     canon = recorder.canon
 
     def call(*args: Any, **kwargs: Any) -> Any:
@@ -278,25 +156,8 @@ def _recorded_call(key: str, attr: Callable, recorder: Recorder, hooks: Hooks, *
         entry["ret"] = canon(result)
         return result
 
+    call.__name__ = name
     return call
-
-
-class _VarSpy:
-    """Records ``set``/``reset`` of one request-scoped ContextVar; ``get`` passes."""
-
-    def __init__(self, label: str, var: Any, recorder: Recorder) -> None:
-        self._label, self._var, self._recorder = label, var, recorder
-
-    def set(self, value):
-        self._recorder.note({"ctxvar": self._label, "set": self._recorder.canon(value)})
-        return self._var.set(value)
-
-    def reset(self, token):
-        self._recorder.note({"ctxvar": self._label, "reset": True})
-        return self._var.reset(token)
-
-    def get(self, *args):
-        return self._var.get(*args)
 
 
 # -------------------------------------------------------------------- models
@@ -331,13 +192,7 @@ class ScriptedModels:
     def answer(self, workload, messages, schema_hint, kwargs):
         hint = str(schema_hint or "")
         prompt = "\n".join(str(m.get("content", "")) for m in messages)
-        entry = {
-            "model": workload,
-            "roles": [m.get("role") for m in messages],
-            "messages": self.recorder.canon(messages),
-            "schema_sha": hashlib.sha256(hint.encode()).hexdigest()[:16],
-            "kwargs": self.recorder.canon(kwargs),
-        }
+        entry = {"model": workload, "messages": self.recorder.canon(messages)}
         self.recorder.note(entry)
         failure = self.script.failures.get(workload)
         if workload == "ask_answer" and any(
@@ -346,9 +201,7 @@ class ScriptedModels:
         if failure is not None:
             entry["raised"] = type(failure).__name__
             raise failure
-        reply = self._reply(workload, prompt, hint)
-        entry["reply"] = self.recorder.canon(reply)
-        return reply
+        return self._reply(workload, prompt, hint)
 
     def _reply(self, workload: str, prompt: str, hint: str) -> str:
         script = self.script
@@ -378,7 +231,8 @@ class ScriptedModels:
             if script.cite is None:
                 keys = list(dict.fromkeys(_KEY.findall(prompt)))[:3]
             else:
-                keys = [key for key in dict.fromkeys(_EVIDENCE_KEY.findall(prompt))
+                tail = prompt.split(script.cite_after, 1)[-1] if script.cite_after else prompt
+                keys = [key for key in dict.fromkeys(_EVIDENCE_KEY.findall(tail))
                         if re.fullmatch(script.cite, key)][:3]
             if any(marker in prompt for marker in script.uncited_on):
                 keys = []
@@ -408,6 +262,8 @@ class Script:
     answer_fails_on: tuple = ()
     #: An answer prompt holding one of these is answered without any citation.
     uncited_on: tuple = ()
+    #: With ``cite``: only the evidence keys after this marker are citable.
+    cite_after: str = ""
 
 
 class RecordingEmbedder:
@@ -593,9 +449,31 @@ def report_world(rig: Rig) -> None:
     """The library plus the asker's finished deep report of it, which cites one
     layout passage and one sign-off paragraph (what a question can attach)."""
     library_world(rig)
-    layout, signoff = rig.sources["layout.md"], rig.sources["signoff.md"]
+    _attach_report(rig, "layout.md", "%耦合电容%")
+
+
+PROCESS_MD = """# 工艺手册
+
+## 退火
+
+退火窗口决定晶格修复程度,温度过低修复不足。
+
+退火之后要复测薄层电阻,确认激活率达标。
+"""
+
+
+def long_passage_report_world(rig: Rig) -> None:
+    """The report world, except that the passage the report cites is a
+    two-paragraph section of a third document."""
+    library_world(rig)
+    rig.upload("process.md", PROCESS_MD.encode(), "text/markdown")
+    _attach_report(rig, "process.md", "%退火窗口%")
+
+
+def _attach_report(rig: Rig, passage_source: str, passage_like: str) -> None:
+    layout, signoff = rig.sources[passage_source], rig.sources["signoff.md"]
     (passage,) = rig.query("SELECT id FROM chunks WHERE source_id=? AND text LIKE ?",
-                           (layout, "%耦合电容%"))
+                           (layout, passage_like))
     paragraph = next(row["id"] for row in rig.elements(signoff) if "DRC" in row["text"])
     references = [
         {"key": "k1", "object_type": "chunk", "object_id": passage["id"],
@@ -744,7 +622,6 @@ class Backend:
     name: str
     placeholder: str
     tables: Callable[[Any], list[str]]
-    record_sql: Callable[[Any, Recorder, Any], ContextManager]
     invalidate_caches: Callable[[], None]
 
 
@@ -756,7 +633,6 @@ class Observation:
     outcome: dict
     timeline: list
     worker: list
-    unordered: list
     stream: list
     db_diff: dict
     logs: list
@@ -764,18 +640,11 @@ class Observation:
     error: Any = None
     #: The two request-scoped ContextVars once the Ask returned or raised.
     context_after: dict = dataclasses.field(default_factory=dict)
-
-    def oracle(self) -> dict:
-        return {
-            "outcome": self.outcome, "timeline": self.timeline,
-            "worker": sorted(self.worker, key=_dumps), "stream": self.stream,
-            "unordered": sorted(self.unordered, key=_dumps),
-            "db_diff": self.db_diff, "logs": self.logs,
-        }
+    #: The world's uploaded sources by file name (and the peer notebook).
+    sources: dict = dataclasses.field(default_factory=dict)
 
     def calls(self, key: str) -> list[dict]:
-        return [e for e in self.timeline + [e for g in self.unordered for e in g]
-                if e.get("call") == key]
+        return [e for e in self.timeline if e.get("call") == key]
 
     def call_names(self) -> list[str]:
         return [e["call"] for e in self.timeline if "call" in e]
@@ -795,26 +664,24 @@ class Observation:
         return [e["embed_query"] for e in self.timeline + self.worker if "embed_query" in e]
 
 
-def _dump_db(repo: Any, backend: Backend, canon: Canon) -> dict:
+def _dump_db(repo: Any, backend: Backend) -> dict:
     out: dict[str, collections.Counter] = {}
     with repo._runtime.database.connect() as db:
         for table in backend.tables(repo):
             rows = db.execute(f"SELECT * FROM {table}").fetchall()
-            out[table] = collections.Counter(_dumps(canon(dict(row))) for row in rows)
+            out[table] = collections.Counter(_dumps(dict(row)) for row in rows)
     return out
 
 
 def _db_diff(before: dict, after: dict) -> dict:
-    """Per table, the rows the run added and removed (an update is both)."""
+    """Per table, how many rows the run added and removed (an update is both)."""
     diff = {}
     for table in sorted(set(before) | set(after)):
         old = before.get(table, collections.Counter())
         new = after.get(table, collections.Counter())
-        added = sorted((new - old).elements())
-        removed = sorted((old - new).elements())
+        added, removed = sum((new - old).values()), sum((old - new).values())
         if added or removed:
-            diff[table] = {"added": [json.loads(r) for r in added],
-                           "removed": [json.loads(r) for r in removed]}
+            diff[table] = {"added": added, "removed": removed}
     return diff
 
 
@@ -832,7 +699,6 @@ class _LogCapture(logging.Handler):
         if record.exc_info and record.exc_info[0] is not None:
             entry["exc"] = record.exc_info[0].__name__
         self.records.append(entry)
-        self.recorder.note({"log": entry["level"]})
 
 
 #: Methods of the service the orchestrator (and its stages) call, recorded at
@@ -875,27 +741,12 @@ _MODULE_FUNCTIONS = (
                                            "render_structured_answer",
                                            "supports_structured_knowhow_query")),
     ("app.services.ask_service", ("_egress_question",)),
-)
-
-#: What the draft stage calls besides the service and its ports: the
-#: module-level helpers of ``ask_service`` and the functions it imports at
-#: call time (the split oracle records these as well).
-_DRAFT_MODULE_FUNCTIONS = (
-    ("app.services.ask_service", ("knowledge_record", "classify_evidence",
-                                  "anchor_image_targets", "_merged_section_baseline",
-                                  "_synthesis_step_detail", "_outline_bypass_reason")),
-    ("app.services.collection_enumeration_answer", ("collection_map_block",)),
     ("app.services.outline_synthesis", ("plan_outline_sections",)),
-    ("app.services.reasoning_retrieval", ("outline_wiring_active",)),
-    ("app.services.retrieval_baseline", ("build_retrieval_baseline_manifest",)),
-    ("app.services.kg.follow_chain", ("chain_anchor_relevances",)),
 )
 
 
 def _install_recording(rig: Rig, monkeypatch: Any) -> None:
     import importlib
-
-    from app.services import ask_service as ask_module
 
     recorder, hooks, service = rig.recorder, rig.hooks, rig.service
     for name in _SELF_METHODS:
@@ -906,57 +757,11 @@ def _install_recording(rig: Rig, monkeypatch: Any) -> None:
         for name in names:
             monkeypatch.setattr(port, name,
                                 _recorded(label, name, getattr(port, name), recorder, hooks))
-    for module_name, names in _MODULE_FUNCTIONS + _DRAFT_MODULE_FUNCTIONS:
+    for module_name, names in _MODULE_FUNCTIONS:
         module = importlib.import_module(module_name)
         for name in names:
             monkeypatch.setattr(module, name, _recorded(
                 "fn", name, getattr(module, name), recorder, hooks))
-    monkeypatch.setattr(ask_module, "raise_if_cancelled", _recorded(
-        "fn", "raise_if_cancelled", ask_module.raise_if_cancelled, recorder, hooks))
-    for name in ("_ASK_MODEL_ERRORS", "_ASK_EMBED_CACHE"):
-        monkeypatch.setattr(ask_module, name, _VarSpy(name, getattr(ask_module, name),
-                                                      recorder))
-    log = rig.repo._runtime.event_log
-    original_emit = log.emit
-
-    def emit(event, *args, **kwargs):
-        recorder.note({"event": recorder.canon(event)})
-        return original_emit(event, *args, **kwargs)
-
-    monkeypatch.setattr(log, "emit", emit)
-
-
-@contextlib.contextmanager
-def _deterministic_ids(recorder: Recorder):
-    """``uuid4`` → two counters: the Ask's own thread, and every other thread
-    (those ids are masked: their order is scheduling)."""
-    real = uuid.uuid4
-    counters = {"main": 0, "worker": 0}
-    lock = threading.Lock()
-
-    def fake_uuid4():
-        with lock:
-            if threading.get_ident() == recorder.thread:
-                counters["main"] += 1
-                return uuid.UUID(int=counters["main"])
-            counters["worker"] += 1
-            return uuid.UUID(int=_WORKER_UUID_BASE + counters["worker"])
-
-    patched = []
-    uuid.uuid4 = fake_uuid4
-    for name, module in list(sys.modules.items()):
-        if not name.startswith("app.") or module is None:
-            continue
-        if getattr(module, "uuid4", None) is real:
-            module.uuid4 = fake_uuid4
-            patched.append(module)
-    try:
-        yield
-    finally:
-        uuid.uuid4 = real
-        for module in patched + list(sys.modules.values()):
-            if module is not None and getattr(module, "uuid4", None) is fake_uuid4:
-                module.uuid4 = real
 
 
 #: The only process-level configuration a scenario runs with; everything else
@@ -974,7 +779,7 @@ _SCENARIO_ENV = {
 
 def scrub_environment(monkeypatch: Any, tmp_path: Path, database_url: str) -> None:
     """No local ``.env`` and no deployment variable exported by the developer's
-    shell may reach a recording; every path points under this test's tmp_path."""
+    shell may reach a scenario; every path points under this test's tmp_path."""
     import os
 
     from app.core.config import Settings
@@ -1049,11 +854,11 @@ def make_gap_host():
     return build_extension_runtime((bundle,)).gap_consult
 
 
-def observe(repo: Any, backend: Backend, scenario: Scenario, storage_dir: Path,
-            tmp_path: Path, monkeypatch: Any) -> Observation:
-    """Build the scenario's world, run one reasoning Ask with every collaborator
-    recorded, and return the whole observation (behaviour facts and split oracle)."""
-    canon = Canon(storage_dir)
+def observe(repo: Any, backend: Backend, scenario: Scenario, tmp_path: Path,
+            monkeypatch: Any) -> Observation:
+    """Build the scenario's world, run one reasoning Ask with its collaborators
+    recorded, and return what the behaviour assertions read."""
+    canon = Canon()
     recorder = Recorder(canon)
     hooks = Hooks()
     models = ScriptedModels(recorder, scenario.script)
@@ -1063,69 +868,64 @@ def observe(repo: Any, backend: Backend, scenario: Scenario, storage_dir: Path,
     for workload_id, workload in WORKLOADS.items():
         if workload.kind == "chat":
             bind_chat_client(repo, workload_id, ScriptedChat(workload_id, models))
-    with _deterministic_ids(recorder):
-        _clear_process_caches(backend)
-        scenario.world(rig)
-        _install_recording(rig, monkeypatch)
-        if scenario.install is not None:
-            scenario.install(rig)
-        payload = scenario.request(rig)
-        job_id = ""
-        cancel = threading.Event() if scenario.cancel_event else None
-        rig.cancel = cancel
-        if scenario.job:
-            job_id, _conversation = rig.service.ask_state.begin_durable_job(
-                rig.notebook_id, payload, "reasoning", rig.user_id)
-        _drain_background(repo)
-        _clear_process_caches(backend)
-        db_before = _dump_db(repo, backend, canon)
-        stream: list = []
+    _clear_process_caches(backend)
+    scenario.world(rig)
+    _install_recording(rig, monkeypatch)
+    if scenario.install is not None:
+        scenario.install(rig)
+    payload = scenario.request(rig)
+    job_id = ""
+    cancel = threading.Event() if scenario.cancel_event else None
+    rig.cancel = cancel
+    if scenario.job:
+        job_id, _conversation = rig.service.ask_state.begin_durable_job(
+            rig.notebook_id, payload, "reasoning", rig.user_id)
+    _drain_background(repo)
+    _clear_process_caches(backend)
+    db_before = _dump_db(repo, backend)
+    stream: list = []
 
-        def on_trace(step) -> None:
-            projected = {"step_type": step.step_type, "summary": canon(step.summary),
-                         "detail": canon(step.detail or {})}
-            stream.append(projected)
-            recorder.note({"stream": step.step_type})
-            hook = hooks.after.get("on_trace")
-            if hook is not None:
-                hook(step)
+    def on_trace(step) -> None:
+        stream.append({"step_type": step.step_type, "summary": step.summary,
+                       "detail": canon(step.detail or {})})
+        hook = hooks.after.get("on_trace")
+        if hook is not None:
+            hook(step)
 
-        loggers = [logging.getLogger("silicon_notebook"), logging.getLogger("app")]
-        capture = _LogCapture(recorder)
-        levels = [lg.level for lg in loggers]
-        for lg in loggers:
-            lg.addHandler(capture)
-            lg.setLevel(logging.DEBUG)
-        response = error = None
+    loggers = [logging.getLogger("silicon_notebook"), logging.getLogger("app")]
+    capture = _LogCapture(recorder)
+    levels = [lg.level for lg in loggers]
+    for lg in loggers:
+        lg.addHandler(capture)
+        lg.setLevel(logging.DEBUG)
+    response = error = None
+    try:
+        recorder.active = True
         try:
-            with backend.record_sql(repo, recorder, monkeypatch):
-                recorder.active = True
-                try:
-                    response = _invoke(rig, scenario, payload, job_id, cancel,
-                                       on_trace if scenario.stream else None)
-                    outcome = {"returned": canon(response)}
-                except Exception as exc:  # noqa: BLE001 — the raise IS the observation
-                    error = exc
-                    outcome = {"raised": type(exc).__name__, "message": canon(str(exc)),
-                               "attrs": canon({k: v for k, v in vars(exc).items()
-                                               if not k.startswith("_")})}
-                finally:
-                    recorder.active = False
+            response = _invoke(rig, scenario, payload, job_id, cancel,
+                               on_trace if scenario.stream else None)
+            outcome = {"returned": type(response).__name__}
+        except Exception as exc:  # noqa: BLE001 — the raise IS the observation
+            error = exc
+            outcome = {"raised": type(exc).__name__, "message": str(exc)}
         finally:
-            for lg, level in zip(loggers, levels):
-                lg.removeHandler(capture)
-                lg.setLevel(level)
-        from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
+            recorder.active = False
+    finally:
+        for lg, level in zip(loggers, levels):
+            lg.removeHandler(capture)
+            lg.setLevel(level)
+    from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
 
-        context_after = {"model_errors": _ASK_MODEL_ERRORS.get(),
-                         "embed_cache": _ASK_EMBED_CACHE.get()}
-        _drain_background(repo)
-        db_after = _dump_db(repo, backend, canon)
+    context_after = {"model_errors": _ASK_MODEL_ERRORS.get(),
+                     "embed_cache": _ASK_EMBED_CACHE.get()}
+    _drain_background(repo)
+    db_after = _dump_db(repo, backend)
     return Observation(
         notebook_id=rig.notebook_id, user_id=rig.user_id, job_id=job_id,
         outcome=outcome, timeline=recorder.timeline, worker=recorder.worker,
-        unordered=recorder.unordered, stream=stream, db_diff=_db_diff(db_before, db_after), logs=capture.records,
+        stream=stream, db_diff=_db_diff(db_before, db_after), logs=capture.records,
         response=response, error=error, context_after=context_after,
+        sources=dict(rig.sources),
     )
 
 
@@ -1149,31 +949,6 @@ def _drain_background(repo: Any) -> None:
     quiesce_process_background_work()
 
 
-# --------------------------------------------------------- the oracle layer
-
-
-def oracle_text(observation: Observation) -> str:
-    return json.dumps(observation.oracle(), indent=1, sort_keys=True, ensure_ascii=False) + "\n"
-
-
-def assert_matches_oracle(observation: Observation, path: Path, *, regen: bool) -> None:
-    text = oracle_text(observation)
-    if regen:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-        return
-    assert path.is_file(), f"missing split oracle {path}"
-    expected = path.read_text(encoding="utf-8")
-    if text != expected:
-        import difflib
-
-        delta = "".join(list(difflib.unified_diff(
-            expected.splitlines(True), text.splitlines(True), "oracle", "observed", n=2,
-        ))[:200])
-        raise AssertionError(
-            f"_draft_reasoning_response split oracle drifted ({path.name}):\n{delta}")
-
-
 # ------------------------------------------------------- the behaviour layer
 
 NO_SOURCES = "当前笔记本没有可检索的来源"
@@ -1191,7 +966,7 @@ def _common(obs: Observation) -> None:
 
 
 def _added(obs: Observation, table: str) -> int:
-    return len(obs.db_diff.get(table, {}).get("added", []))
+    return obs.db_diff.get(table, {}).get("added", 0)
 
 
 def _called(obs: Observation, key: str) -> bool:
@@ -1635,6 +1410,13 @@ def _expect_workbook(obs: Observation) -> None:
     assert kinds[-2:] == ["spreadsheet", "synthesis"], kinds
     assert _draft_input(obs)["spreadsheet_results"]
     assert response.answer
+    # The workbook analysis's row locator is one of the answer's citations.
+    workbook = obs.sources["timing.xlsx"]
+    (sheet,) = [r for r in response.result_sets if type(r).__name__ == "SpreadsheetAnalysisResult"]
+    receipt = next(row.citation for row in sheet.rows if row.citation)
+    assert receipt.source_id == workbook and receipt.location_label
+    assert [(c.element_id, c.location_label) for c in response.citations].count(
+        (receipt.element_id, receipt.location_label)) == 1
 
 
 def _expect_workbook_failed(obs: Observation) -> None:
@@ -1877,6 +1659,15 @@ def _expect_snapshot_extras(obs: Observation) -> None:
     activated = [c["dc:RetrievedChunk"]["chunk_id"] for c in draft["chunks"]]
     assert len(historical) > 1 and activated == list(reversed(historical))
     assert response.answer
+    # The manifest the draft builds: the selected passages in the retrieval's
+    # order, the trace as the draft found it, the synthesis's own assembly.
+    assert [ref["dc:BaselineEvidenceRef"]["item_id"]
+            for ref in manifest["selected_chunks"]] == historical
+    assert manifest["baseline_step_usage"] == len(draft["trace"])
+    prompt = manifest["prompt"]["dc:BaselinePromptAssembly"]
+    assert prompt["budget_chars"] > 0 and prompt["citation_handles"]
+    # The admitted outside item is cited.
+    assert EXTERNAL_ITEM[6] in [c.url for c in response.citations]
 
 
 def _activation_fails(rig: Rig) -> None:
@@ -1989,6 +1780,26 @@ def _outline(*titles: str, empty: tuple = ()) -> Callable[[str], dict]:
     return reflect
 
 
+def _outline_kinds(*prefixes: str) -> Callable[[str], dict]:
+    """A final outline whose section ``i`` binds the first candidate whose id
+    starts with ``prefixes[i]`` (a knowledge object, a passage)."""
+    def reflect(prompt: str) -> dict:
+        ids = _candidates(prompt)
+        sections = [{"id": f"s{index + 1}", "title": title,
+                     "evidence": [next(i for i in ids if i.startswith(prefix))]}
+                    for index, (title, prefix) in enumerate(zip(SECTIONS, prefixes))]
+        return {"next_action": "update_outline", "reason": "整理", "sufficient": True,
+                "outline_sections": sections}
+    return reflect
+
+
+def _alarm_before_draft(rig: Rig) -> None:
+    """A retrieval-side model alarm lands in the request's sink before the draft."""
+    rig.hooks.before["self._spreadsheet_reasoning_results"] = (
+        lambda *a, **k: rig.repo._runtime.models.note_model_error(
+            "reflect", RuntimeError("reflect down"), workload_id="reasoning_agent"))
+
+
 def _chain_from(name: str) -> Callable[[str], dict]:
     """``follow_chain`` from the candidate knowledge object called ``name``."""
     def reflect(prompt: str) -> dict:
@@ -2052,11 +1863,11 @@ def _images_everywhere(rig: Rig) -> None:
 
 
 def _move_bound_hit_to_outline_evidence(rig: Rig, draft: Any) -> Any:
-    """The second section's binding was cut from the final selection by top_n
-    and rides on ``outline_evidence`` (what the retriever does then)."""
-    second = set(draft.outline[1].evidence_keys)
-    moved = [hit for hit in draft.top_hits if hit.object_id in second]
-    assert moved, second
+    """Both sections' bindings were cut from the final selection by top_n and
+    ride on ``outline_evidence`` (what the retriever does then)."""
+    bound = {key for section in draft.outline for key in section.evidence_keys}
+    moved = [hit for hit in draft.top_hits if hit.object_id in bound]
+    assert len(moved) == 2, bound
     return dataclasses.replace(
         draft, top_hits=tuple(h for h in draft.top_hits if h not in moved),
         outline_evidence=tuple(draft.outline_evidence) + tuple(moved))
@@ -2095,9 +1906,8 @@ def _first_hit_from_peer(rig: Rig, draft: Any) -> Any:
 def _drop_reported_passage(rig: Rig, draft: Any) -> Any:
     """The turn's own retrieval did not find the passage the report cites, so
     only the report's evidence partition carries it."""
-    (passage,) = rig.query("SELECT id FROM chunks WHERE text LIKE ?", ("%耦合电容%",))
+    (passage,) = rig.query("SELECT id FROM chunks WHERE text LIKE ?", ("%退火窗口%",))
     keep = tuple(chunk for chunk in draft.chunks if chunk.chunk_id != passage["id"])
-    assert len(keep) < len(draft.chunks)
     return dataclasses.replace(draft, chunks=keep)
 
 
@@ -2244,6 +2054,14 @@ def _expect_elements_cited(obs: Observation) -> None:
     assert response.evidence_level == "overview", response.evidence_level
 
 
+def _expect_chain_grounded(obs: Observation) -> None:
+    response = _answered(obs, llm_mode="grounded")
+    assert [(a.key, a.object_type) for a in response.anchors] == [
+        ("k2001", "relation"), ("k2002", "relation")]
+    # Only the relations are cited: their chain relevance is what grounds it.
+    assert response.evidence_level == "grounded"
+
+
 def _expect_chain_cited(obs: Observation) -> None:
     response = _answered(obs, llm_mode="ungrounded")
     assert [(a.key, a.object_type) for a in response.anchors] == [
@@ -2252,6 +2070,14 @@ def _expect_chain_cited(obs: Observation) -> None:
     # their chain's relevance, not a perfect one: under a strict tau, overview.
     assert response.evidence_level == "overview"
     assert _draft_input(obs)["chains"]
+
+
+def _expect_memory_cited(obs: Observation) -> None:
+    response = _answered(obs, llm_mode="grounded")
+    (anchor,) = response.anchors
+    assert anchor.object_type == "memory"
+    (card,) = [c for c in response.citations if c.memory_id]
+    assert card.memory_id == anchor.object_id and card.label == "Memory · 版图评审结论"
 
 
 def _expect_sectioned(obs: Observation) -> None:
@@ -2272,6 +2098,55 @@ def _expect_sectioned(obs: Observation) -> None:
     assert detail["outline_skipped"] == [EMPTY_SECTION]
     assert detail["ungrounded_sections"] == [] and "outline_bypassed" not in detail
     assert response.evidence_level == "grounded"
+    # The sections' own assembly counts are the answer's.
+    assert (detail["included_kg"], detail["included_chunks"]) == (2, 0)
+    # The planner keeps the configured exact-lookup reserve.
+    from app.core.config import Settings
+
+    (plan,) = obs.calls("fn.plan_outline_sections")
+    assert plan["kwargs"]["exact_reserve"] == Settings.model_fields[
+        "reasoning_exact_reserve"].default
+    # Every section reads through the run's one citation-lookup memo.
+    (sections,) = obs.calls("self._answer_reasoning_sections")
+    assert "citation_lookups" in sections["kwargs"]
+
+
+def _expect_sectioned_passage(obs: Observation) -> None:
+    response = _answered(obs, llm_mode="grounded")
+    assert response.answer.startswith(f"## {SECTIONS[0]}")
+    draft = _drafted(obs)
+    (bound,) = draft["outline"][1]["dc:OutlineSection"]["evidence_keys"]
+    (chunk,) = [c["dc:RetrievedChunk"] for c in draft["chunks"]
+                if c["dc:RetrievedChunk"]["chunk_id"] == bound]
+    # The passage the second section bound gets its card: the sections'
+    # assemblies are the baseline the passage cards are drawn from.
+    (cards,) = obs.calls("self._reasoning_chunk_cards")
+    assert cards["ret"], cards
+    assert set(chunk["element_ids"]) & {c.element_id for c in response.citations}
+
+
+def _expect_fallback_keeps_earlier_alarm(obs: Observation) -> None:
+    response = _answered(obs, llm_mode="grounded")
+    assert _synthesis_detail(response)["outline_fallback"] is True
+    # Only the sectioned attempt's alarms are absorbed by the fallback; one
+    # noted before the draft stays.
+    assert [(e.stage, e.workload_id) for e in response.model_errors] == [
+        ("model_call", "reasoning_agent")]
+
+
+def _expect_narrowed_without_ledger(obs: Observation) -> None:
+    response = _answered(obs, llm_mode="grounded")
+    draft = _drafted(obs)
+    assert draft["candidate_manifest"] is None
+    (stage,) = obs.calls("self._run_reasoning_stage")
+    manifest = stage["ret"]["dc:CommittedReasoningAnswer"]["baseline_manifest"][
+        "dc:RetrievalBaselineManifest"]
+    # Without the retriever's ledger the candidates are what the draft was given.
+    ids = [ref["dc:BaselineEvidenceRef"]["item_id"] for ref in manifest["candidate_knowledge"]]
+    assert ids and ids == [h["dc:RetrievedKnowledge"]["object_id"] for h in draft["top_hits"]]
+    chunks = [ref["dc:BaselineEvidenceRef"]["item_id"] for ref in manifest["candidate_chunks"]]
+    assert chunks and chunks == [c["dc:RetrievedChunk"]["chunk_id"] for c in draft["chunks"]]
+    assert response.answer
 
 
 def _expect_sectioned_partly_grounded(obs: Observation) -> None:
@@ -2316,7 +2191,8 @@ def _expect_truncated_binding(obs: Observation) -> None:
     moved = {hit["dc:RetrievedKnowledge"]["object_id"] for hit in draft["outline_evidence"]}
     assert moved and moved <= {a.object_id for a in response.anchors}
     assert not moved & {item.id for item in response.related_knowledge}
-    # The binding the selection lost is in the pool, so its anchor grounds.
+    # The bindings the selection lost are in the pool, so their anchors ground.
+    assert moved == {a.object_id for a in response.anchors}
     assert response.evidence_level == "grounded"
 
 
@@ -2476,11 +2352,16 @@ def _expect_empty_checklist_keeps_notice(obs: Observation) -> None:
 
 def _expect_report_passage_images(obs: Observation) -> None:
     response = _answered(obs, llm_mode="grounded")
-    # k5 is the passage only the report's evidence partition carries (the
-    # turn's own retrieval holds k1-k4): it still brings its images.
+    # The anchor is the passage only the report's evidence partition carries:
+    # it still brings an image for each of its elements.
     (passage,) = response.anchors
-    assert (passage.key, passage.object_type) == ("k5", "chunk")
-    assert passage.images
+    assert passage.object_type == "chunk"
+    (cards,) = obs.calls("self._extend_report_cards")
+    _citations, report_chunks, _keys = cards["ret"]  # a ReportCards named tuple
+    (restored,) = report_chunks
+    elements = set(restored["dc:RetrievedChunk"]["element_ids"])
+    assert len(elements) > 1
+    assert {image.element_id for image in passage.images} == elements
 
 
 def _expect_cancel_first_check(obs: Observation) -> None:
@@ -2538,6 +2419,8 @@ DRAFT_SCENARIOS = [
              script=Script(cite=r"k7\d{3}", reflects=(LIST_SOURCES, READ_LAYOUT))),
     Scenario("elements_cited", library_world, plain(), _expect_elements_cited,
              env=STRICT_TAU, script=Script(cite=r"k4\d{3}", reflects=(SEARCH_ELEMENTS,))),
+    Scenario("chain_grounded", chain_world, plain(), _expect_chain_grounded,
+             script=Script(cite=r"k2\d{3}", reflects=(_chain_from("寄生电容"),))),
     Scenario("chain_cited", chain_world, plain(), _expect_chain_cited, env=STRICT_TAU,
              script=Script(cite=r"k2\d{3}", reflects=(_chain_from("寄生电容"),))),
     Scenario("enumeration_rows_share_a_passage", library_world, plain(),
@@ -2551,14 +2434,28 @@ DRAFT_SCENARIOS = [
     Scenario("report_alone_triggers_synthesis", report_world, _report_request(),
              _expect_report_alone, install=_retrieval_raises(_runtime_error),
              script=Script(cite=ANY_KEY)),
-    Scenario("report_passage_images", report_world, _report_request(),
+    Scenario("report_passage_images", long_passage_report_world, _report_request(),
              _expect_report_passage_images,
              install=lambda rig: (_images_everywhere(rig),
                                   _doctored(_drop_reported_passage)(rig)),
-             script=Script(cite="k5")),
+             script=Script(cite=r"k\d{1,3}",
+                           cite_after="[Evidence the attached report cited]")),
     Scenario("sectioned_answer", library_world, _exhaustive(), _expect_sectioned, stream=True,
              script=Script(cite=ANY_KEY,
                            reflects=(_outline(*SECTIONS, empty=(EMPTY_SECTION,)),))),
+    Scenario("sectioned_binds_a_passage", library_world, _exhaustive(),
+             _expect_sectioned_passage,
+             script=Script(cite=ANY_KEY, reflects=(_outline_kinds("ko-", "ck-"),))),
+    Scenario("sectioned_fallback_keeps_earlier_alarm", library_world, _exhaustive(),
+             _expect_fallback_keeps_earlier_alarm, install=_alarm_before_draft,
+             script=Script(cite=ANY_KEY, answer_fails_on=("is titled: 乙部分",),
+                           reflects=(_outline(*SECTIONS),))),
+    Scenario("memory_cited", memory_world, plain(), _expect_memory_cited,
+             script=Script(cite=r"k3\d{3}")),
+    Scenario("narrowed_without_candidate_ledger", library_world, _narrowed,
+             _expect_narrowed_without_ledger,
+             install=_doctored(lambda rig, draft: dataclasses.replace(
+                 draft, candidate_manifest=None))),
     Scenario("sectioned_partly_grounded", library_world, _exhaustive(), _expect_sectioned_partly_grounded,
              script=Script(cite=ANY_KEY, uncited_on=("is titled: 乙部分",),
                            reflects=(_outline(*SECTIONS),))),
