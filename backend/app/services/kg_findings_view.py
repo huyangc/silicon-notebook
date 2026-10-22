@@ -42,7 +42,7 @@ from app.domain.kg_findings_contracts import (
     finding_actions,
     finding_sort_key,
 )
-from app.domain.kg_merge_seed import OVERRIDE_SEED_PREFIX
+from app.domain.kg_merge_seed import OVERRIDE_SEED_PREFIX, fold_decision
 from app.services.kg_findings import (
     UNDER_MERGE_CONFIRMED,
     UNDER_MERGE_DECIDED_APART,
@@ -153,7 +153,8 @@ def decision_lookup_seeds(member_seeds: Mapping[str, Set[str]]) -> List[str]:
 def decisions_from_candidates(rows: Iterable[Mapping[str, object]]) -> Dict[frozenset, str]:
     """Candidate-state rows → ``{frozenset({seed_a, seed_b}): status}``, the exact
     derivation of ``decided_seed_pairs_from`` (legacy rows with empty seeds fall
-    back to the canonical id minus ``K-``)."""
+    back to the canonical id minus ``K-``; rows that contradict each other on
+    one pair keep the stronger status, ``kg_merge_seed.DECISION_STRENGTH``)."""
     def strip(cid: str) -> str:
         return cid[2:] if cid.startswith("K-") else cid
 
@@ -161,7 +162,7 @@ def decisions_from_candidates(rows: Iterable[Mapping[str, object]]) -> Dict[froz
     for row in rows:
         a = str(row["seed_a"] or "") or strip(str(row["canonical_a"]))
         b = str(row["seed_b"] or "") or strip(str(row["canonical_b"]))
-        out[frozenset((a, b))] = str(row["status"])
+        fold_decision(out, frozenset((a, b)), str(row["status"]))
     return out
 
 

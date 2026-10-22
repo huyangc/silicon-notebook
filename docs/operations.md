@@ -685,8 +685,11 @@ re-merged in full by its next "update analysis" or rebuild, and then:
   rejections that conflict with a confirmation (the confirmation wins), `v2_rows_moved` decisions
   already stored under the new rule that were re-keyed because a key kept on its old seed in this merge
   moved their objects (a decision follows its objects; when it then joins the two sides of a rejection,
-  the confirmation wins and the rejection counts as `unresolved`). Suspended rows stay in the old
-  space and are retried by every later full merge;
+  the confirmation wins and the rejection counts as `unresolved`), `superseded` decision rows removed
+  because the pair they name now carries a stronger decision (one seed pair keeps one decision:
+  confirmed, then rejected, then deferred; every reader applies the same order to rows already
+  stored, whatever their order). Suspended rows stay in the old space and are retried by every later
+  full merge;
 - until then the KG analysis panel says "merge rules updated, update once", and the "needs
   development" S1 item says "fixed, applied by the next update analysis".
 

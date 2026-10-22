@@ -126,6 +126,7 @@ from app.domain.kg_merge_seed import (  # noqa: E402
     concept_seed_v1,
     concept_seed_v2,
     concept_squash_key,
+    fold_decision,
 )
 from app.domain.knowledge_contracts import (  # noqa: E402
     CLUSTER_OBJECT_TYPES,
@@ -584,7 +585,8 @@ def decisions_from_rows(rows: Iterable[tuple]) -> Dict[frozenset, str]:
     ``(canonical_a, canonical_b, seed_a, seed_b, status)``."""
     out: Dict[frozenset, str] = {}
     for canonical_a, canonical_b, seed_a, seed_b, status in rows:
-        out[frozenset((seed_a or _strip_k(canonical_a), seed_b or _strip_k(canonical_b)))] = status
+        fold_decision(out, frozenset((seed_a or _strip_k(canonical_a),
+                                      seed_b or _strip_k(canonical_b))), status)
     return out
 
 
