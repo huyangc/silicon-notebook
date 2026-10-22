@@ -54,8 +54,10 @@ def launcher(tmp_path):
     root, env = build_fake_checkout(tmp_path)
     yield root, env
     stop_fake_children(root)
-    # No launcher may leave its companion controller running (an orphaned fake
-    # controller waits forever, and hundreds once piled up on a gate host).
+    # Backstop against accumulation, not a regression guard: an orphaned fake
+    # controller waits forever, and hundreds once piled up on a gate host. The
+    # cases' own `assert not alive(...)` and scripts/stress_launcher_signals.py
+    # are what catch a launcher that leaves its controller behind.
     leaked = reap_leaked_controllers(root, LIFECYCLE_CAP_SECONDS)
     assert not leaked, f"controllers left running after the test (killed): {leaked}"
 

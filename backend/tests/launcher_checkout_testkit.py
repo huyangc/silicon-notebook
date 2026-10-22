@@ -103,8 +103,9 @@ case "${1:-}" in
   */extension_services.py)
     if [[ "${2:-}" == start && "${WAIT_SERVICE:-}" == forked ]]; then
       # The controller exists but has not written a receipt or started anything.
+      # argv[0] keeps the controller path so checkout_controllers() sees it.
       echo "$$" > "$FAKE_ROOT/controller.pid.tmp" && mv "$FAKE_ROOT/controller.pid.tmp" "$FAKE_ROOT/controller.pid"
-      exec /bin/sleep 60
+      exec -a "$1" /bin/sleep 60
     fi
     exec "$REAL_PYTHON" "$@" ;;
   */python_env.py)
@@ -169,9 +170,11 @@ def checkout_controllers(root: Path) -> list[int]:
 def reap_leaked_controllers(root: Path, timeout: float) -> list[int]:
     """Wait for this checkout's controllers to exit; SIGKILL and return any left.
 
-    A launcher must not leave its controller behind, so whatever is still
-    running once ``timeout`` passes is a leak: it is killed by exact pid (never
-    by pattern) and reported to the caller.
+    A backstop against accumulation, not a regression guard: whatever is still
+    running once ``timeout`` passes is killed by exact pid (never by pattern)
+    and reported, so a fake controller that would wait forever cannot pile up
+    on the host. Launcher regressions are caught by the tests' own
+    ``assert not alive(...)`` and by scripts/stress_launcher_signals.py.
     """
     deadline = time.monotonic() + timeout
     while (left := checkout_controllers(root)) and time.monotonic() < deadline:
@@ -184,10 +187,13 @@ def reap_leaked_controllers(root: Path, timeout: float) -> list[int]:
     return left
 
 
-def spawn(root: Path, env: dict[str, str], path: str, *args: str) -> subprocess.Popen:
+def spawn(root: Path, env: dict[str, str], path: str, *args: str,
+          new_session: bool = False) -> subprocess.Popen:
+    """``new_session`` puts the launcher and everything it forks in a process
+    group of their own, so a caller can kill even a child not yet exec'd."""
     return subprocess.Popen(["bash", str(root / path), *args], cwd=root, env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            preexec_fn=default_launcher_signals)
+                            preexec_fn=default_launcher_signals, start_new_session=new_session)
 
 
 def kill_published(pid_file: Path) -> None:
