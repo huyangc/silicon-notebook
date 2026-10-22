@@ -213,6 +213,19 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       `chunks_keywords` 的 `search_chunks` 动作一次），同一个慢库最坏每次都多等一个
       `POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS`。待大库实测后决定是否加 run 级「本库关键词
       腿已超时」标记（只管关键词腿，不碰语义腿共用的熔断）。
+- [ ] **Memory 召回与检索阶段共用一次问题 embed（第二步，只登记）**。第一步已做：
+      `MemoryRetriever._hits` 在没有任何候选行带可解码向量时不再 embed（无记忆、或记忆的
+      向量还 pending/failed，结果逐字节不变）。剩下的是本人确有带向量记忆时：Memory 召回
+      （跑在 run 级 `memoized_query_embedding` 装上之前、直接调 `embedder.embed_query`）与
+      检索阶段 `retrieval_candidates._embed_query`（经 memo）对同一研究问题各 embed 一次，
+      两次都打 `retrieval_query_embedding` 座位。**不能直接把 Memory 接到 `_embed_query` 的
+      memo 上**，两条约束：① key 归一不同——Memory 用去掉引号标记的整串
+      （`strip_accepted_quote_markers`），memo 用 `query[:EMBED_TRUNCATE_CHARS]` 原串，两边文本
+      未必相同，共用前要先定一个两侧都认的输入；② 截断维度不同——`_embed_query` 按
+      `EMBED_RUNTIME_DIM` 截断并重归一，Memory 向量（`memory_embedding` 座位写入）是原生维，
+      `cosine` 在长度不同时静默返回 0，直接复用会让带向量记忆的语义分全变 0、且不报错。
+      做法候选：memo 存原生维向量、截断在取用侧各自做；或 Memory 侧在 memo 外层自己按原生
+      维缓存。做之前要有「带向量记忆」世界的 embed 计数用例（现为 2）与语义分逐字节对照。
 
 ### 解析
 
