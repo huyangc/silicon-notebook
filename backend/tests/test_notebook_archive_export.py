@@ -657,3 +657,16 @@ def test_cli_reports_a_database_failure_on_a_later_notebook_without_its_message(
     assert failed["notebook_id"] == "nb-second"
     assert failed["error"].startswith("数据库错误: OperationalError")
     assert "secret-db" not in captured.out + captured.err
+
+
+def test_a_manifest_beyond_the_reader_limit_fails_the_export(repo, out_dir, monkeypatch):
+    """codex #974 r3: the reader refuses a manifest larger than
+    MAX_MANIFEST_BYTES, so the export must refuse it too rather than publish
+    an archive its own reader rejects. The limit is lowered to make the full
+    world's manifest exceed it."""
+    _seed_full(repo)
+    monkeypatch.setattr(export_module, "MAX_MANIFEST_BYTES", 256)
+    out = out_dir / "huge-manifest.snbk"
+    with pytest.raises(NotebookExportError, match="清单过大"):
+        cases.export(repo, cases.NB, out)
+    assert list(out_dir.iterdir()) == []
