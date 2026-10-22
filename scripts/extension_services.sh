@@ -4,15 +4,30 @@
 
 EXTENSION_SERVICES_POLL_SECONDS=0.05
 
+# `$!` without nounset: bash 3.2 reports it unbound under `set -u` before the
+# first background job, even as `${!-}`.
+extension_services_last_async() {
+  case $- in
+    *u*) set +u; EXTENSION_SERVICES_LAST_ASYNC="$!"; set -u ;;
+    *) EXTENSION_SERVICES_LAST_ASYNC="$!" ;;
+  esac
+}
+
 extension_services_start() {
   EXTENSION_SERVICES_RECEIPT="$(mktemp "${TMPDIR:-/tmp}/silicon-extension-start.XXXXXX")"
+  extension_services_last_async
+  EXTENSION_SERVICES_PRIOR_ASYNC="$EXTENSION_SERVICES_LAST_ASYNC"
+  EXTENSION_SERVICES_FORKING=1
   PYTHONPATH="${INHERITED_PYTHONPATH-${PYTHONPATH-}}${PYTHONPATH:+:$PYTHONPATH}" \
     "$PYTHON_BIN" "$ROOT_DIR/scripts/extension_services.py" start \
     --receipt "$EXTENSION_SERVICES_RECEIPT" --launcher-pid "$$" &
-  # The controller cancels itself when this shell is gone, which also covers a
-  # pending trap that runs between the fork and the assignment below (cleanup
-  # then has no pid to signal) and a launcher killed by SIGKILL.
+  # A pending trap often runs between the fork and the assignment below (on
+  # bash 3.2, for a large share of the cancellations that land next to the
+  # fork); cleanup then finds the controller through $!.
+  # The controller also cancels itself when this shell is gone, which covers a
+  # launcher killed by SIGKILL.
   EXTENSION_SERVICES_CONTROLLER_PID=$!
+  unset EXTENSION_SERVICES_FORKING
   # MUST poll; never block in `wait "$EXTENSION_SERVICES_CONTROLLER_PID"` here.
   # Under macOS /bin/bash 3.2 a cancellation that lands between the fork and
   # `wait` stays pending until the waited child exits, i.e. until every
@@ -31,6 +46,17 @@ extension_services_start() {
 }
 
 extension_services_cleanup() {
+  if [[ -z "${EXTENSION_SERVICES_CONTROLLER_PID:-}" && -n "${EXTENSION_SERVICES_FORKING:-}" ]]; then
+    # The trap ran between the fork and the assignment: a $! that moved since
+    # just before the fork names the controller. Without this the launcher
+    # exits and leaves it running. Guarded by the leak check of
+    # scripts/stress_launcher_signals.py.
+    extension_services_last_async
+    if [[ -n "$EXTENSION_SERVICES_LAST_ASYNC" && "$EXTENSION_SERVICES_LAST_ASYNC" != "$EXTENSION_SERVICES_PRIOR_ASYNC" ]]; then
+      EXTENSION_SERVICES_CONTROLLER_PID="$EXTENSION_SERVICES_LAST_ASYNC"
+    fi
+  fi
+  unset EXTENSION_SERVICES_FORKING
   if [[ -n "${EXTENSION_SERVICES_CONTROLLER_PID:-}" ]]; then
     # A TERM that lands after the fork but before the controller has exec'd is
     # caught by the fork's copy of this shell's traps and lost at exec, and a

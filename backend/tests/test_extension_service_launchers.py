@@ -19,6 +19,7 @@ from tests.launcher_checkout_testkit import (
     default_launcher_signals,
     executable,
     kill_published,
+    reap_leaked_controllers,
     spawn,
     stop_fake_children,
 )
@@ -53,6 +54,10 @@ def launcher(tmp_path):
     root, env = build_fake_checkout(tmp_path)
     yield root, env
     stop_fake_children(root)
+    # No launcher may leave its companion controller running (an orphaned fake
+    # controller waits forever, and hundreds once piled up on a gate host).
+    leaked = reap_leaked_controllers(root, LIFECYCLE_CAP_SECONDS)
+    assert not leaked, f"controllers left running after the test (killed): {leaked}"
 
 
 def run(root, env, path, *args):

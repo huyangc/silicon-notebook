@@ -12,17 +12,23 @@ at them:
   ``extension_services_cleanup`` must repeat its TERM until the controller
   exits.
 
+It also catches a third, frequent path: a pending trap that runs between the
+fork and ``EXTENSION_SERVICES_CONTROLLER_PID=$!``, after which cleanup must
+find the controller through ``$!`` or the launcher exits and leaves it running.
+
 Each attempt starts a real launcher in a fake checkout
 (``backend/tests/launcher_checkout_testkit.py``) whose controller would wait
 forever. It cancels the launcher 0-4 ms after the launcher creates its
 receipt, which mktemp does right before the fork. A launcher still alive
-``--held-seconds`` after its cancellation counts as held. Shards run in
-parallel processes, one fake checkout each.
+``--held-seconds`` after its cancellation counts as held; a launcher that
+exited but left its controller running counts as leaked (the controller is
+killed by exact pid). Shards run in parallel processes, one fake checkout each.
 
     python scripts/stress_launcher_signals.py --load auto
     python scripts/stress_launcher_signals.py --launchers dev.sh --shards 2 --runs 300
 
-Exit status: 0 nothing held, 1 at least one cancellation held, 2 bad usage.
+Exit status: 0 nothing held or leaked, 1 at least one held or leaked, 2 bad
+usage or a broken shard.
 The blocking-``wait`` race hits about once in 5000-6000 attempts, so the
 default 2 launchers x 4 shards x 1500 attempts catch a reintroduced blocking
 ``wait`` with roughly 85-90% probability; raise ``--runs`` or repeat the run
@@ -56,6 +62,7 @@ def run_shard(launcher: str, shard: int, runs: int, seed: str | None, held_secon
     from tests.launcher_checkout_testkit import (
         build_fake_checkout,
         kill_published,
+        reap_leaked_controllers,
         spawn,
         stop_fake_children,
     )
@@ -63,6 +70,7 @@ def run_shard(launcher: str, shard: int, runs: int, seed: str | None, held_secon
     path, args = LAUNCHERS[launcher]
     rng = random.Random(None if seed is None else f"{seed}-{launcher}-{shard}")
     held = []
+    leaked = []
     with tempfile.TemporaryDirectory(prefix="stress-launcher-") as base:
         tmp = Path(base)
         root, env = build_fake_checkout(tmp)
@@ -86,10 +94,13 @@ def run_shard(launcher: str, shard: int, runs: int, seed: str | None, held_secon
                     held.append([attempt, interruption.name])
                     process.kill()
                     process.wait()
-                kill_published(root / "controller.pid")
+                    kill_published(root / "controller.pid")
+                # The launcher waits for its controller before it exits.
+                if reap_leaked_controllers(root, 1.0) and not (held and held[-1][0] == attempt):
+                    leaked.append([attempt, interruption.name])
         finally:
             stop_fake_children(root)
-    return {"launcher": launcher, "shard": shard, "runs": runs, "held": held}
+    return {"launcher": launcher, "shard": shard, "runs": runs, "held": held, "leaked": leaked}
 
 
 def parse(arguments: list[str] | None) -> argparse.Namespace:
@@ -138,7 +149,7 @@ def main(arguments: list[str] | None = None) -> int:
                                                stdout=subprocess.PIPE, text=True))
             for launcher in args.launcher_names for shard in range(args.shards)
         ]
-        total = held_total = 0
+        total = held_total = leaked_total = 0
         failed = False
         for launcher, shard, worker in workers:
             output, _ = worker.communicate()
@@ -149,16 +160,18 @@ def main(arguments: list[str] | None = None) -> int:
             result = json.loads(output.strip().splitlines()[-1])
             total += result["runs"]
             held_total += len(result["held"])
-            print(f"{launcher} shard {shard}: {len(result['held'])}/{result['runs']} held {result['held']}", flush=True)
+            leaked_total += len(result["leaked"])
+            print(f"{launcher} shard {shard}: {len(result['held'])}/{result['runs']} held {result['held']}, "
+                  f"{len(result['leaked'])} leaked {result['leaked']}", flush=True)
     finally:
         for hog in hogs:
             hog.kill()
         for hog in hogs:
             hog.wait()
-    print(f"total: {held_total}/{total} cancellations held", flush=True)
+    print(f"total: {held_total}/{total} cancellations held, {leaked_total}/{total} controllers leaked", flush=True)
     if failed:
         return 2
-    return 1 if held_total else 0
+    return 1 if held_total or leaked_total else 0
 
 
 if __name__ == "__main__":
