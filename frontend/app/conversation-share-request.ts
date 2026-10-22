@@ -31,14 +31,18 @@ export function conversationShareDisclosurePath(sharePath: string, throughId: st
   return `${sharePath}/disclosure?through_id=${encodeURIComponent(throughId)}`;
 }
 
-/** 确数端点（全局会话）：边界与弹窗此刻持有的链接水位，原样交给服务端。 */
+/** 确数端点（全局会话）：边界与弹窗此刻持有的链接水位，原样交给服务端；水位为 `null`
+ *  时不带水位参数，服务端按它此刻存着的水位数。 */
 export function conversationShareCountsPath(
   sharePath: string,
   throughId: string,
-  watermarkId: string,
-  watermarkAt: string,
+  watermark: { id: string; at: string } | null,
 ): string {
-  const query = new URLSearchParams({ through_id: throughId, watermark_id: watermarkId, watermark_at: watermarkAt });
+  const query = new URLSearchParams({ through_id: throughId });
+  if (watermark) {
+    query.set("watermark_id", watermark.id);
+    query.set("watermark_at", watermark.at);
+  }
   return `${sharePath}/counts?${query.toString()}`;
 }
 

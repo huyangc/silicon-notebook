@@ -28,11 +28,16 @@ import type { ConversationShareResponse } from "./workspace-model.ts";
  *  · `server`：服务端按公开页的同一个窗口在 SQL 里数（全局会话的
  *    `GET /global-ask/conversations/{id}/share/counts`）。全局会话的轮次是**分页**读的，
  *    浏览器翻页只能翻到一个上界、翻不全就只能说「拿不全」；确数端点让再长的会话也有确数。
- *    参数是弹窗此刻持有的范围：边界（空串 = 最新）与链接水位（未分享时两个都是空串）。
+ *    参数是弹窗此刻持有的范围：边界（空串 = 最新）与链接水位（未分享时两个都是空串）；
+ *    水位传 `null` = 按服务端此刻存着的水位数——弹窗打开时与分享态**同时**发出，不必等
+ *    分享态回来再问（回执里带着它数时用的水位，弹窗据此认领或重问）。
  *    回执原样交给 `readServerShareCounts` 校验，形状不对按取数失败处理。 */
 export type ShareCountsSource =
   | { kind: "turns"; load: () => Promise<ShareTurn[]> }
-  | { kind: "server"; load: (throughId: string, watermarkId: string, watermarkAt: string) => Promise<unknown> };
+  | { kind: "server"; load: (throughId: string, watermark: ShareCountsWatermark | null) => Promise<unknown> };
+
+/** 确数端点按哪条水位数（未分享时两个都是空串）。 */
+export type ShareCountsWatermark = { id: string; at: string };
 
 export type ConversationShareApi = {
   /** 这条会话的稳定身份（`<面>:<id>`）。弹窗据它决定何时重新加载分享态与轮次。 */

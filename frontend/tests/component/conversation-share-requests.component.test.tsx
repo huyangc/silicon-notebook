@@ -75,6 +75,20 @@ test("披露端点：笔记本与全局都是 GET .../share/disclosure?through_i
   ]);
 });
 
+test("确数端点（全局）：GET .../share/counts，不带水位 = 按服务端存着的；带水位就原样送", async () => {
+  respond = () => json(200, { total_turns: 1 });
+  const api = globalConversationShareApi("conv-g");
+  if (api.counts.kind !== "server") throw new Error("global counts must come from the server");
+  await api.counts.load("job-2", null);
+  await api.counts.load("", { id: "job 1", at: "2026-01-01T00:00:00+00:00" });
+  await api.counts.load("job-2", { id: "", at: "" });
+  expect(calls.map((call) => [call.method, call.url.replace(/^https?:\/\/[^/]+/, "").replace(/^\/api(?=\/)/, "")])).toEqual([
+    ["GET", "/global-ask/conversations/conv-g/share/counts?through_id=job-2"],
+    ["GET", "/global-ask/conversations/conv-g/share/counts?through_id=&watermark_id=job+1&watermark_at=2026-01-01T00%3A00%3A00%2B00%3A00"],
+    ["GET", "/global-ask/conversations/conv-g/share/counts?through_id=job-2&watermark_id=&watermark_at="],
+  ]);
+});
+
 test("409 share_disclosure_required（detail 形态）→ ShareDisclosureRequired，带服务端确数", async () => {
   respond = () => json(409, { detail: { code: "share_disclosure_required", memory_count: 3, new_memory_count: 2 } });
   const error = await shareConversation("nb-1", "conv-1", "a2").catch((reason) => reason);

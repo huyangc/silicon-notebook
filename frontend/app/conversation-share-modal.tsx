@@ -44,6 +44,7 @@ import {
   SHARE_UPDATE_BOUNDED_COUNTS_ERROR,
   SHARE_UPDATE_COUNTS_ERROR,
   countsAfterPublishing,
+  readServerCountsWatermark,
   readServerMemoryDisclosure,
   readServerShareCounts,
   shareCountsFromTurns,
@@ -151,7 +152,11 @@ export function ConversationShareModal({
   const [countsError, setCountsError] = useState(false);
   // 确数端点（`api.counts.kind === "server"`）的回执，按「查的是哪个范围」记 key：
   // 边界或水位一变，旧回执对新范围不作数。`counts: null` = 取数失败（或形状不对）。
-  const [countsFetch, setCountsFetch] = useState<{ key: string; counts: ShareCounts | null } | null>(null);
+  // `against`：回执说它按哪条水位数的（`<id>|<at>`）——打开时那一问不带水位（与分享态
+  // 同时发出），回来后凭它认领。
+  const [countsFetch, setCountsFetch] = useState<{ key: string; counts: ShareCounts | null; against: string | null } | null>(null);
+  // 打开时那一问还在路上：别为同一个范围再发一次。
+  const [openingCounts, setOpeningCounts] = useState(false);
   // 分享状态（是否已分享 + 水位）**非 404** 加载失败 → 当前是否已分享/水位**未知**。
   // 此时**不可**分享:发空 expected 会让服务端按当前最新兜底发布(可能推进一个已存在
   // 的隐藏分享,或在未显示任何披露的情况下公开)。与 countsError 是两回事——那个是「披露
@@ -187,6 +192,7 @@ export function ConversationShareModal({
     setRefusal("");
     setMemoryFetch(null);
     setCountsFetch(null);
+    setOpeningCounts(false);
     setTurns([]);
     // 每次重跑（切会话/切库导致 api.key 变）都要清掉上一轮的
     // countsError / shareStateError，否则一次失败后即便重跑成功，兜底告警/禁用态
@@ -213,9 +219,27 @@ export function ConversationShareModal({
         setShareStateError(true);
         setError(toUserMessage(err, "分享状态加载失败，请重试"));
       });
-    // 只有就地算数的一侧要先取全部轮次；确数端点那一侧要等分享态落定（它要知道水位），
-    // 由下面那个按范围取数的 effect 去问。
+    // 数字与分享态**同时**去取（打开耗时不比接入确数端点之前多一个来回）：就地算数的
+    // 一侧取全部轮次；确数端点那一侧不带水位问——服务端按它此刻存着的水位数、并在回执里
+    // 说明是哪条，分享态回来后由下面的 `countsEntry` 认领，对不上才按弹窗持有的水位重问。
     const source = apiRef.current.counts;
+    const openingKey = `${apiRef.current.key}|${throughAnswerId}|opening`;
+    if (source.kind === "server") {
+      setOpeningCounts(true);
+      Promise.resolve()
+        .then(() => source.load(throughAnswerId, null))
+        .then((raw) => {
+          if (!cancelled) {
+            setCountsFetch({ key: openingKey, counts: readServerShareCounts(raw), against: readServerCountsWatermark(raw) });
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setCountsFetch({ key: openingKey, counts: null, against: null });
+        })
+        .finally(() => {
+          if (!cancelled) setOpeningCounts(false);
+        });
+    }
     const detailDone = source.kind !== "turns" ? Promise.resolve() : source.load()
       .then((loaded) => {
         if (!cancelled) setTurns(loaded || []);
@@ -231,6 +255,8 @@ export function ConversationShareModal({
     return () => {
       cancelled = true;
     };
+    // 打开时的那一份数字只随会话身份重取（与分享态同一个依赖）；边界换了时调用点会重挂弹窗。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api.key]);
 
   const shared = Boolean(token);
@@ -250,9 +276,16 @@ export function ConversationShareModal({
   );
   const countsKey = `${api.key}|${throughAnswerId}|${countsWatermarkId}|${countsWatermarkAt}`;
   const serverCountsWanted = countsSource === "server" && !loading;
-  const countsFetchKey = countsFetch?.key ?? "";
+  // 打开时那一问（不带水位）按回执里的水位认领：与弹窗读到的分享态一致才算数。它失败了
+  // 就是失败——此刻的数字取不到，不为它再问一次。
+  const countsEntry = countsFetch && (
+    countsFetch.key === countsKey
+    || (countsFetch.key === `${api.key}|${throughAnswerId}|opening`
+      && (countsFetch.counts === null || countsFetch.against === `${countsWatermarkId}|${countsWatermarkAt}`))
+  ) ? countsFetch : null;
+  const countsMissing = serverCountsWanted && !openingCounts && countsEntry === null;
   useEffect(() => {
-    if (!serverCountsWanted || countsFetchKey === countsKey) return;
+    if (!countsMissing) return;
     let cancelled = false;
     // 经 `Promise.resolve().then` 调用：同步抛出的异常（接线错误）与网络失败走同一条
     // 「取数失败」降级，不会把整个弹窗带崩。
@@ -260,19 +293,18 @@ export function ConversationShareModal({
       .then(() => {
         const source = apiRef.current.counts;
         if (source.kind !== "server") throw new Error("share counts source changed");
-        return source.load(throughAnswerId, countsWatermarkId, countsWatermarkAt);
+        return source.load(throughAnswerId, { id: countsWatermarkId, at: countsWatermarkAt });
       })
       .then((raw) => {
-        if (!cancelled) setCountsFetch({ key: countsKey, counts: readServerShareCounts(raw) });
+        if (!cancelled) setCountsFetch({ key: countsKey, counts: readServerShareCounts(raw), against: readServerCountsWatermark(raw) });
       })
       .catch(() => {
-        if (!cancelled) setCountsFetch({ key: countsKey, counts: null });
+        if (!cancelled) setCountsFetch({ key: countsKey, counts: null, against: null });
       });
     return () => {
       cancelled = true;
     };
-  }, [serverCountsWanted, countsKey, countsFetchKey, throughAnswerId, countsWatermarkId, countsWatermarkAt]);
-  const countsEntry = countsFetch && countsFetch.key === countsKey ? countsFetch : null;
+  }, [countsMissing, countsKey, throughAnswerId, countsWatermarkId, countsWatermarkAt]);
   // 确数还在路上：先不画正文、不给发布按钮（与个人记忆回执同一手法）。
   const countsPending = serverCountsWanted && countsEntry === null;
   // ⚠ 确数端点失败只有一条出路：不带数字、但附图与个人记忆两面都提的兜底文案（与笔记本侧
@@ -406,6 +438,7 @@ export function ConversationShareModal({
         setCountsFetch({
           key: `${api.key}|${throughAnswerId}|${resp.shared_through_id}|${resp.shared_through_at || ""}`,
           counts: countsAfterPublishing(countsEntry.counts),
+          against: `${resp.shared_through_id}|${resp.shared_through_at || ""}`,
         });
       }
       // 结果落在公开按钮自己身上：「已公开」停留 1.6 s。key 取被公开的这条链接自己的
@@ -442,7 +475,7 @@ export function ConversationShareModal({
       setConflict(null);
       // 撤销之后「按下去会发布的内容」正是边界之前那段前缀，与刚分享完同一份数字。
       if (countsEntry?.counts) {
-        setCountsFetch({ key: `${api.key}|${throughAnswerId}||`, counts: countsAfterPublishing(countsEntry.counts) });
+        setCountsFetch({ key: `${api.key}|${throughAnswerId}||`, counts: countsAfterPublishing(countsEntry.counts), against: "|" });
       }
       shareResult.reset();
       setNotice("已取消分享，原链接立即失效");

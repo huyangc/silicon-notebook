@@ -114,8 +114,16 @@ const detailFor = (id: string, offset = 0): GlobalConversationDetail => {
 let detailImpl: (id: string, offset: number) => Promise<GlobalConversationDetail>;
 
 /** 确数端点的替身：一条会话的 done 作业按服务端口径（`job.answer` 优先、旧形状 `response`
- *  兜底）交给 `shareCountsFromTurns`，再写成端点的响应体。 */
-function serverCounts(conversationId: string, query: URLSearchParams) {
+ *  兜底）交给 `shareCountsFromTurns`，再写成端点的响应体。不带水位参数时与服务端一样按
+ *  「此刻存着的」分享态数（这里就是分享端点替身回的那一份），并在回执里说明按哪条水位数的。 */
+async function serverCounts(conversationId: string, query: URLSearchParams) {
+  let watermarkId = query.get("watermark_id");
+  let watermarkAt = query.get("watermark_at") ?? "";
+  if (watermarkId === null) {
+    const stored = await Promise.resolve().then(() => shareApi.get()).catch(() => null) as ConversationShareResponse | null;
+    watermarkId = stored?.share_token ? stored.shared_through_id : "";
+    watermarkAt = stored?.share_token ? stored.shared_through_at : "";
+  }
   const turns: ShareTurn[] = (turnsByConversation[conversationId] ?? [])
     .filter((job) => job.status === "done")
     .map((job) => {
@@ -126,9 +134,7 @@ function serverCounts(conversationId: string, query: URLSearchParams) {
         response: { anchors: shaped?.anchors ?? [], citations: shaped?.citations ?? [] },
       };
     });
-  const counted = shareCountsFromTurns(
-    turns, query.get("through_id") ?? "", query.get("watermark_id") ?? "", query.get("watermark_at") ?? "",
-  );
+  const counted = shareCountsFromTurns(turns, query.get("through_id") ?? "", watermarkId, watermarkAt);
   return {
     total_turns: counted.totalTurns, through_id: counted.throughId,
     boundary_index: counted.boundary.index, boundary_unresolved: counted.boundary.unresolved,
@@ -139,6 +145,7 @@ function serverCounts(conversationId: string, query: URLSearchParams) {
     earlier_turns: counted.current.earlierCount, image_count: counted.current.imageCount,
     update_image_count: counted.update.imageCount, update_new_image_count: counted.update.newImageCount,
     update_earlier_turns: counted.update.earlierCount,
+    watermark_id: watermarkId, watermark_at: watermarkAt,
   };
 }
 
@@ -417,10 +424,9 @@ test("70 轮的会话：抬头与附图/记忆计数按 70 轮算，数字来自
   expect(await screen.findByText(/公开页会包含 5 条你引用到的个人记忆摘录/)).toBeInTheDocument();
   // 普通长度：没有「更早未包含」那一句。
   expect(screen.queryByText(/更早的 \d+ 轮未包含/)).toBeNull();
-  // 问的是用户点的那条作业，水位为空（未分享）。
-  expect(countsPaths).toEqual([
-    "/global-ask/conversations/conv-a/share/counts?through_id=job-70&watermark_id=&watermark_at=",
-  ]);
+  // 问的是用户点的那条作业；与分享态同时发出、不带水位（服务端按它存着的数并在回执里说明），
+  // 回执说的水位（未分享）与弹窗读到的一致，所以只问一次。
+  expect(countsPaths).toEqual(["/global-ask/conversations/conv-a/share/counts?through_id=job-70"]);
   // 浏览器不再为披露翻更早的页。
   expect(net.requestJson.mock.calls.some(([path]) => /\/conversations\/conv-a\?.*offset=[1-9]/.test(String(path)))).toBe(false);
 });
@@ -431,7 +437,8 @@ test("超长会话（600 轮）：给确数，并如实说更早的 100 轮未�
   await openShareOnNewest();
 
   expect(await screen.findByText(/分享至第 600 轮回答（本会话共 600 轮）/)).toBeInTheDocument();
-  expect(screen.getByText("公开页只显示最近 500 轮，更早的 100 轮未包含。")).toBeInTheDocument();
+  // 抬头先于正文出现（正文还在等个人记忆的回执），所以这里等它。
+  expect(await screen.findByText("公开页只显示最近 500 轮，更早的 100 轮未包含。")).toBeInTheDocument();
   // 最早那轮的附图不在页上：只数页上那 500 轮里的两张。
   expect(screen.getByText("公开页会包含 2 张附图。")).toBeInTheDocument();
   expect(screen.getByText("公开页会包含 2 条你引用到的个人记忆摘录。")).toBeInTheDocument();
@@ -456,9 +463,7 @@ test("超长会话已分享到更早一轮：链接此刻的确数与「更新�
   // 更新之后：最近 500 轮（101..600）。第 81 轮的那张移出页面，第 581 轮的那张新进来。
   expect(screen.getByText("更新后公开页只显示最近 500 轮，更早的 100 轮未包含。")).toBeInTheDocument();
   expect(screen.getByText("更新后公开页共 2 张附图（新增 1 张）。")).toBeInTheDocument();
-  expect(countsPaths).toEqual([
-    "/global-ask/conversations/conv-a/share/counts?through_id=job-600&watermark_id=job-550&watermark_at=2026-09-19T00%3A09%3A09Z",
-  ]);
+  expect(countsPaths).toEqual(["/global-ask/conversations/conv-a/share/counts?through_id=job-600"]);
 
   // 更新成功后不必再问端点：链接此刻就是刚才「更新后」那一份，复制按钮上方不闪「正在加载…」。
   shareApi.post.mockResolvedValueOnce(SHARED("job-600", "2026-09-19T00:09:59Z"));
@@ -468,6 +473,27 @@ test("超长会话已分享到更早一轮：链接此刻的确数与「更新�
   expect(screen.queryByText(/之后新增/)).toBeNull();
   expect(screen.queryByRole("button", { name: /更新到这一条/ })).toBeNull();
   expect(countsPaths).toHaveLength(1);
+});
+
+test("打开时那一问的回执按别的水位数（分享态在两次读之间变了）：按弹窗读到的水位重问一次", async () => {
+  turnsByConversation = { "conv-a": [JOB_1, JOB_2, UNFINISHED] };
+  shareApi.get.mockResolvedValue(SHARED("job-1", "2026-09-19T01:00:00Z"));
+  // 不带水位的那一问：服务端那一刻还没有分享（回执说按「未分享」数的）。
+  shareApi.counts.mockImplementation(async (conversationId: string, query: URLSearchParams) => (
+    query.has("watermark_id")
+      ? serverCounts(conversationId, query)
+      : serverCounts(conversationId, new URLSearchParams({ through_id: query.get("through_id") ?? "", watermark_id: "", watermark_at: "" }))
+  ));
+  await openShareOn(1);
+
+  await screen.findByLabelText("分享链接");
+  // 链接停在 job-1：这条回答还不在里面——数字是按弹窗读到的水位重问来的，不是那份「未分享」的。
+  expect(screen.getByText(/还不包含这条回答/)).toBeInTheDocument();
+  expect(screen.getByText(/之后新增 1 轮未包含/)).toBeInTheDocument();
+  expect(countsPaths).toEqual([
+    "/global-ask/conversations/conv-a/share/counts?through_id=job-2",
+    "/global-ask/conversations/conv-a/share/counts?through_id=job-2&watermark_id=job-1&watermark_at=2026-09-19T01%3A00%3A00Z",
+  ]);
 });
 
 test("确数端点失败：一个数字都不给，如实说没能统计，仍可发布", async () => {

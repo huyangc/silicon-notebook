@@ -2612,7 +2612,7 @@ class GlobalAskService:
                 "new_memory_count": count.new_memory_count}
 
     def share_counts(self, conversation_id, *, user_id, through_id="",
-                     watermark_id="", watermark_at=""):
+                     watermark_id=None, watermark_at=None):
         """The share dialog's exact numbers (``app/domain/share_counts.py``):
         how many completed turns the conversation has, where the boundary the
         dialog asks about (``through_id``, a job id; empty = the newest) sits
@@ -2629,8 +2629,13 @@ class GlobalAskService:
         refuse is a window the sharer could no longer open: the libraries of
         every window counted pass the same ``_share_authority_sweep`` a share
         runs, so no number is ever given for a page that would 404.
+
+        ``watermark_id=None`` counts against the link's watermark as stored now
+        (empty when not shared); the result echoes the watermark it counted
+        against either way (``watermark_id`` / ``watermark_at``). The store
+        reads the owner gate (``KeyError``, exactly ``_owned_conversation``'s
+        live-owner read) and the stored watermark in its own first statement.
         """
-        self._owned_conversation(conversation_id, user_id)
         facts = self.store.share_counts(
             conversation_id, user_id, through_id=through_id,
             watermark_id=watermark_id, watermark_at=watermark_at,
@@ -2644,11 +2649,15 @@ class GlobalAskService:
         def images(size):
             return [_turn_image_count(job) for job in windows.get(size, [])]
 
-        return share_counts(
-            facts["ranks"], through_id=facts["through_id"],
-            current_images=images(prefixes.current) if prefixes else [],
-            scope_images=images(prefixes.scope) if prefixes else [],
-        )
+        return {
+            **share_counts(
+                facts["ranks"], through_id=facts["through_id"],
+                current_images=images(prefixes.current) if prefixes else [],
+                scope_images=images(prefixes.scope) if prefixes else [],
+            ),
+            "watermark_id": facts["watermark_id"],
+            "watermark_at": facts["watermark_at"],
+        }
 
     def share_conversation(self, conversation_id, *, user_id, expected_through_id="",
                            acknowledged_memory_count=None):
