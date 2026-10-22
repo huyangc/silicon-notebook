@@ -1149,3 +1149,27 @@ def test_the_check_summary_is_an_allowlist_of_counts():
     for malformed in (None, "partial", [1], {"failed": True}, {"failed": "1"}):
         turn = public_turn(_turn("q", {"answer": "答案", "citation_check": malformed}))
         assert "citation_check" not in turn, malformed
+
+
+def test_a_long_prefix_shows_its_newest_turns_and_counts_the_older_ones():
+    """The page shows the NEWEST ``MAX_TURNS`` turns of the published prefix
+    (the shared turn is always on it) and discloses exactly how many older ones
+    it leaves out: those the store already left out (``earlier_turns``) plus any
+    a caller handed over beyond the window. A prefix that fits carries no
+    ``omitted_earlier_turns`` at all, so its body is byte for byte as before."""
+    turns = [{"question": f"q{index}", "payload": {"answer": f"a{index}"}}
+             for index in range(MAX_TURNS + 2)]
+    payload = public_conversation_payload(
+        {"turns": turns, "earlier_turns": 7}, share_token="tok", images_enabled=False,
+    )
+    assert [turn["question"] for turn in payload["turns"]] == [
+        f"q{index}" for index in range(2, MAX_TURNS + 2)
+    ]
+    assert payload["omitted_earlier_turns"] == 9
+    assert payload["truncated_turns"] is True
+
+    fits = public_conversation_payload(
+        {"turns": turns[:3]}, share_token="tok", images_enabled=False,
+    )
+    assert fits["truncated_turns"] is False
+    assert "omitted_earlier_turns" not in PublicConversation(**fits).model_dump()
