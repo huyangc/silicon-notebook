@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import time
+from typing import Callable
 
 from extension_service_runtime import (
     CONTROL_MARGIN_SECONDS, POLL_SECONDS, ServiceError, atomic_json, ensure_state,
@@ -22,6 +23,60 @@ from extension_service_runtime import (
 )
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+class LauncherGone(KeyboardInterrupt):
+    """The launcher that started this controller is gone: cancel as a signal would."""
+
+
+def _unwatched() -> None:
+    return None
+
+
+class Cancellation:
+    """One cancellation per controller, whichever way it arrives.
+
+    A signal or a vanished launcher cancels; only the first counts. The
+    launcher repeats its TERM until this process exits (its first may be lost
+    before exec), and a second Ctrl-C would otherwise cut short the rollback
+    the first one started, so repeats are absorbed. To force a controller out
+    of its rollback, ``kill -9`` it and run ``stop``; SIGQUIT (Ctrl-backslash)
+    also works when it runs in a terminal's foreground, but a launcher's
+    background controller inherits SIGQUIT ignored.
+    """
+
+    def __init__(self, launcher_pid: int | None) -> None:
+        self.cancelled = False
+        self.parent = os.getppid()
+        self.launcher_pid = launcher_pid
+
+    def interrupted(self, _signum: int, _frame: object) -> None:
+        if not self.cancelled:
+            self.cancelled = True
+            raise KeyboardInterrupt
+
+    def launcher_gone(self) -> bool:
+        # Reparenting shows a launcher killed outright (even by SIGKILL, which
+        # no trap sees); the pid check covers one gone before this process read
+        # its parent, or a PYTHON_BIN wrapper that forks rather than execs.
+        if os.getppid() != self.parent:
+            return True
+        if self.launcher_pid is None:
+            return False
+        try:
+            os.kill(self.launcher_pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass
+        return False
+
+    def require_launcher(self) -> None:
+        # Polled only by the startup waits. The controller exits once startup
+        # is ready, so a session it handed off never depends on the launcher.
+        if not self.cancelled and self.launcher_gone():
+            self.cancelled = True
+            raise LauncherGone
 
 
 def configuration(root: Path) -> tuple[list[dict], str]:
@@ -109,7 +164,8 @@ def await_stop(directory: Path, timeout: float, run_id: str | None = None) -> No
         time.sleep(POLL_SECONDS)
 
 
-def _spawn(directory: Path, services: list[dict], fingerprint: str, receipt: Path | None, owner: dict):
+def _spawn(directory: Path, services: list[dict], fingerprint: str, receipt: Path | None, owner: dict,
+           watch: Callable[[], None] = _unwatched):
     state = read_json(directory / "state.json")
     if running(directory):
         if not running(directory, "supervisor.lock") or state.get("state") != "ready" or state.get("fingerprint") != fingerprint:
@@ -146,6 +202,7 @@ def _spawn(directory: Path, services: list[dict], fingerprint: str, receipt: Pat
                 break
         if process.poll() is not None or time.monotonic() >= deadline:
             raise ServiceError("supervisor_start_failed")
+        watch()
         time.sleep(POLL_SECONDS)
     return process, run_id
 
@@ -174,7 +231,8 @@ def rollback(directory: Path, owner: dict) -> None:
     stop_path(directory, run_id).unlink(missing_ok=True)
 
 
-def recheck_reused(directory: Path, services: list[dict], fingerprint: str, run_id: str) -> dict:
+def recheck_reused(directory: Path, services: list[dict], fingerprint: str, run_id: str,
+                   watch: Callable[[], None] = _unwatched) -> dict:
     def require_same_ready_session() -> None:
         state = read_json(directory / "state.json")
         if (state.get("run_id") != run_id or state.get("state") != "ready"
@@ -189,6 +247,7 @@ def recheck_reused(directory: Path, services: list[dict], fingerprint: str, run_
     for service in services:
         deadline = time.monotonic() + service["startup_timeout_seconds"]
         while True:
+            watch()
             require_same_ready_session()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -203,16 +262,18 @@ def recheck_reused(directory: Path, services: list[dict], fingerprint: str, run_
         return {"state": "ready", "reused": True}
 
 
-def start(directory: Path, services: list[dict], fingerprint: str, receipt: Path | None) -> dict:
+def start(directory: Path, services: list[dict], fingerprint: str, receipt: Path | None,
+          watch: Callable[[], None] = _unwatched) -> dict:
     # Hold the control lock only through the daemon ownership handshake; status
     # and a second terminal's stop remain available throughout readiness waits.
     owner: dict = {}
     try:
+        watch()
         with lock(directory / "operations.lock"):
-            spawned = _spawn(directory, services, fingerprint, receipt, owner)
+            spawned = _spawn(directory, services, fingerprint, receipt, owner, watch)
         if isinstance(spawned, dict):
             if spawned["state"] == "rechecking":
-                return recheck_reused(directory, services, fingerprint, spawned["run_id"])
+                return recheck_reused(directory, services, fingerprint, spawned["run_id"], watch)
             return spawned
         process, run_id = spawned
         deadline = time.monotonic() + sum(s["startup_timeout_seconds"] for s in services) + CONTROL_MARGIN_SECONDS
@@ -227,6 +288,7 @@ def start(directory: Path, services: list[dict], fingerprint: str, receipt: Path
                 raise ServiceError("supervisor_start_failed")
             if time.monotonic() >= deadline:
                 raise ServiceError("startup_timeout")
+            watch()
             time.sleep(POLL_SECONDS)
     except BaseException:
         rollback(directory, owner)
@@ -278,21 +340,17 @@ def main(arguments: list[str] | None = None) -> int:
     parser.add_argument("action", choices=("start", "stop", "status", "logs", "validate", "_supervise"), metavar="{start,stop,status,logs,validate}")
     parser.add_argument("--receipt", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--state-dir", type=Path, default=ROOT / ".local" / "run" / "extensions", help=argparse.SUPPRESS)
+    parser.add_argument("--launcher-pid", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args(arguments)
+    cancellation = Cancellation(args.launcher_pid)
     if args.action != "_supervise":
-        cancelled = False
-
-        def interrupted(_signum: int, _frame: object) -> None:
-            # Act on the first cancellation only: the launcher repeats its TERM
-            # until this process exits (its first may be lost before exec), and
-            # a repeat must not abort the rollback the first one started.
-            nonlocal cancelled
-            if not cancelled:
-                cancelled = True
-                raise KeyboardInterrupt
-        signal.signal(signal.SIGTERM, interrupted)
-        signal.signal(signal.SIGHUP, interrupted)
-        signal.signal(signal.SIGINT, interrupted)
+        # Install before any side effect (state directory, receipt, supervisor):
+        # from the first of them on, a cancellation must reach rollback(), and
+        # Python's default disposition would kill this process and leave a
+        # written receipt or a spawned supervisor behind.
+        signal.signal(signal.SIGTERM, cancellation.interrupted)
+        signal.signal(signal.SIGHUP, cancellation.interrupted)
+        signal.signal(signal.SIGINT, cancellation.interrupted)
     try:
         directory = args.state_dir.absolute()
         ensure_state(directory)
@@ -300,7 +358,8 @@ def main(arguments: list[str] | None = None) -> int:
             return supervise(directory, json.load(sys.stdin))
         if args.action in ("start", "validate"):
             services, fingerprint = configuration(ROOT)
-            result = start(directory, services, fingerprint, args.receipt) if args.action == "start" else {"state": "valid", "services": [s["key"] for s in services]}
+            result = (start(directory, services, fingerprint, args.receipt, cancellation.require_launcher)
+                      if args.action == "start" else {"state": "valid", "services": [s["key"] for s in services]})
         elif args.action == "stop":
             result = stop(directory, args.receipt)
         elif args.action == "status":
@@ -325,6 +384,10 @@ def main(arguments: list[str] | None = None) -> int:
     except Exception:
         print("插件服务操作失败，请检查配置、运行目录权限和解释器环境。", file=sys.stderr)
         return 2
+    finally:
+        if args.action == "start" and args.receipt is not None and cancellation.launcher_gone():
+            # Nobody is left to hand the receipt off or to clean it up.
+            args.receipt.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

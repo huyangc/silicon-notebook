@@ -521,6 +521,66 @@ def test_repeated_cancellation_does_not_cut_the_rollback_short(directory, tmp_pa
 
 
 @pytest.mark.process_contract
+def test_controller_rolls_back_when_its_launcher_is_killed(directory, tmp_path):
+    """A SIGKILLed launcher runs no trap and forwards nothing: the controller
+    notices it is gone, rolls back its unready session and removes the receipt."""
+    item = service(tmp_path, probe=[sys.executable, "-c", "raise SystemExit(1)"])
+    # Never ready on its own: only the launcher watch can end this startup in time.
+    item["startup_timeout_seconds"] = 300
+    receipt = tmp_path / "receipt"
+    receipt.write_text("")
+    controller_pid = tmp_path / "controller.pid"
+    controller = (
+        "import json,sys; sys.path.insert(0,sys.argv[1]); import extension_services as m; item=json.load(sys.stdin); "
+        "m.configuration=lambda root: ([item],'pending'); "
+        "raise SystemExit(m.main(['start','--state-dir',sys.argv[2],'--receipt',sys.argv[3],'--launcher-pid',sys.argv[4]]))"
+    )
+    fake_launcher = (
+        "import os,subprocess,sys\n"
+        "child=subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4],str(os.getpid())],"
+        "stdin=subprocess.PIPE)\n"
+        "child.stdin.write(sys.stdin.buffer.read()); child.stdin.close()\n"
+        "open(sys.argv[5]+'.tmp','w').write(str(child.pid)); os.replace(sys.argv[5]+'.tmp',sys.argv[5])\n"
+        "child.wait()\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", fake_launcher, controller, str(SCRIPTS), str(directory), str(receipt), str(controller_pid)],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    process.stdin.write(json.dumps(item).encode())
+    process.stdin.close()
+    process.stdin = None
+    pid = None
+    try:
+        def exited():
+            assert process.poll() is None, "launcher exited early"
+        eventually(lambda: controller_pid.exists() and manager.status(directory)["state"] == "starting",
+                   COLD_START_SECONDS, exited)
+        pid = int(controller_pid.read_text())
+        assert manager.status(directory)["state"] == "starting"
+        process.kill()
+        process.wait()
+        eventually(lambda: not _alive(pid), COLD_START_SECONDS)
+        assert not runtime.running(directory)
+        assert manager.status(directory)["state"] in ("stopped", "failed")
+        assert not receipt.exists()
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if pid is not None and _alive(pid):
+            os.kill(pid, signal.SIGKILL)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@pytest.mark.process_contract
 def test_cancellation_at_spawn_return_still_rolls_back(directory, tmp_path, monkeypatch):
     spawn = manager._spawn
     def interrupted(*args, **kwargs):

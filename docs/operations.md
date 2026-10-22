@@ -155,6 +155,15 @@ Reuse rechecks every required service, including external dependencies, without
 blocking another terminal's stop command. A failed recheck leaves the existing
 session under its original ownership. Launchers forward cancellation while waiting
 for companion startup, so interruption does not wait for the full readiness timeout.
+The start controller acts on the first cancellation only: a second Ctrl-C or TERM
+during its rollback is absorbed, so the rollback finishes. To force it out, `kill -9`
+the controller process and then run the ordinary stop command. SIGQUIT (Ctrl-\)
+also works when `extension_services.py start` runs in a terminal's foreground, but a
+launcher's background controller inherits SIGQUIT ignored. If the launcher itself
+disappears while companions are starting (killed, even with SIGKILL), the
+controller treats that as a cancellation: it rolls back what it started and removes
+the launcher's receipt. A controller has exited by the time startup completes, so a
+running session never depends on the launcher that started it.
 A failed attempt rolls back only its own new processes, never a previously reused
 session or an external service. `stop` runs in reverse dependency order, verifies
 the saved process ownership, and uses graceful termination before forced cleanup.

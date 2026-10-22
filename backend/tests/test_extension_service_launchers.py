@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import random
 import shutil
 import signal
 import subprocess
@@ -19,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 pytestmark = [pytest.mark.xdist_group("extension_launcher_lifecycle"), pytest.mark.process_contract]
 # A backstop for a broken run, never the judgement: every wait below ends on a
 # handshake (a pid file published by rename, or the launcher's own exit).
-LIFECYCLE_CAP_SECONDS = 60
+LIFECYCLE_CAP_SECONDS = 20
 LAUNCHER_TRAPPED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
 
 
@@ -86,6 +87,8 @@ receipt = pathlib.Path(sys.argv[sys.argv.index("--receipt") + 1]) if "--receipt"
 if action == "start" and receipt:
     receipt.write_text(json.dumps({"run_id": "owned-test-run", "owned": True}))
 record = {"action": action, "receipt": str(receipt) if receipt else None}
+if "--launcher-pid" in sys.argv:
+    record["launcher_pid"] = int(sys.argv[sys.argv.index("--launcher-pid") + 1])
 if receipt and receipt.exists() and receipt.read_text():
     record["ownership"] = json.loads(receipt.read_text())
 with open(os.environ["SERVICE_EVENTS"], "a") as stream:
@@ -237,6 +240,8 @@ def test_launcher_forwards_cancellation_while_companions_start(launcher, path, a
                 process.kill()
             kill_published(controller_file)
     assert_owned_cleanup(root)
+    # The controller watches the launcher itself (a SIGKILLed one runs no trap).
+    assert events(root)[0]["launcher_pid"] == process.pid
     assert not (root / "backend.pid").exists()
     assert not (root / "frontend.pid").exists()
 
@@ -292,6 +297,56 @@ def test_launcher_repeats_cancellation_the_controller_missed(launcher, path, arg
     assert_owned_cleanup(root)
     assert not (root / "backend.pid").exists()
     assert not (root / "frontend.pid").exists()
+
+
+STRESS_SHARDS = 4
+
+
+@pytest.mark.launcher_signal_stress
+@pytest.mark.parametrize("path,args", [("scripts/dev.sh", ()), ("scripts/backend.sh", ("start",))])
+@pytest.mark.parametrize("shard", [
+    # One xdist group per shard (the closest group marker wins), so -n spreads them.
+    pytest.param(shard, marks=pytest.mark.xdist_group(f"launcher_signal_stress_{shard}"))
+    for shard in range(STRESS_SHARDS)
+])
+def test_stress_cancellation_next_to_the_controller_fork(launcher, path, args, shard):
+    """Opt-in (docs/development.md, "Opt-in stress runs"); deselected otherwise.
+
+    Two bash 3.2 races live in a sub-millisecond window next to the controller
+    fork, where no deterministic test can aim: a trap pending when `wait`
+    blocks stays pending until the waited child exits (hence the start poll in
+    extension_services.sh), and a TERM delivered between fork and exec is lost
+    (hence the repeated cleanup TERM). Each run lands a cancellation 0-4 ms
+    after the launcher creates its receipt, which mktemp does right before the
+    fork, against a controller that would otherwise wait forever. The blocking
+    `wait` race is rare (about 1 in 5000 attempts on an idle machine), hence
+    the sharding: 2 launchers x 4 shards x 1500 attempts by default.
+    """
+    root, env = launcher
+    runs = int(os.environ.get("SILICON_NOTEBOOK_LAUNCHER_SIGNAL_STRESS_RUNS", "1500"))
+    seed = os.environ.get("SILICON_NOTEBOOK_LAUNCHER_SIGNAL_STRESS_SEED")
+    rng = random.Random(None if seed is None else f"{seed}-{path}-{shard}")
+    receipts = Path(env["TMPDIR"])
+    held = []
+    for attempt in range(runs):
+        for leftover in (root / "controller.pid", root / "service-events.jsonl",
+                         *receipts.glob("silicon-extension-start.*")):
+            leftover.unlink(missing_ok=True)
+        process = spawn(root, {**env, "WAIT_SERVICE": "1"}, path, *args)
+        deadline = time.monotonic() + LIFECYCLE_CAP_SECONDS
+        while not any(receipts.glob("silicon-extension-start.*")):
+            assert process.poll() is None and time.monotonic() < deadline, "launcher never created its receipt"
+        time.sleep(rng.uniform(0, 0.004))
+        interruption = rng.choice((signal.SIGTERM, signal.SIGHUP))
+        process.send_signal(interruption)
+        try:
+            process.wait(timeout=LIFECYCLE_CAP_SECONDS)
+        except subprocess.TimeoutExpired:
+            held.append((attempt, interruption.name))
+            process.kill()
+            process.wait()
+        kill_published(root / "controller.pid")
+    assert held == [], f"{len(held)}/{runs} cancellations held past {LIFECYCLE_CAP_SECONDS} s: {held}"
 
 
 def test_development_signal_exit_cleans_owned_receipt(launcher):
