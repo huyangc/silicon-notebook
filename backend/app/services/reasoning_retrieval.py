@@ -7876,16 +7876,24 @@ class ReasoningRetriever:
         state.zero_hit_by_action["read_section"] = (
             0 if new else state.zero_hit_by_action.get("read_section", 0) + 1)
         # 范围内的 chunk 已剔除导航页(大纲折叠时),所以「本节可读段数 > 上限」
-        # 就是端口截取了。
-        truncated = len(address.chunk_ids) > limit
+        # 就是端口截取了。另一种不完整与上限无关:大纲扫描在这一节里停下
+        # (`SectionAddress.incomplete`),地址里只有扫到的前缀——不论走线索、
+        # 标题还是 sN 进来,都如实报未完。
+        cut = len(address.chunk_ids) > limit
+        scan_cut = address.incomplete
         result_ids, result_ids_truncated = _capped_result_ids([c.chunk_id for c in new])
         detail = {"source": title, "section": label, "found": len(new),
                   "result_ids": result_ids}
         if result_ids_truncated:
             detail["result_ids_truncated"] = True
-        if truncated:
+        if cut or scan_cut:
             detail["truncated"] = True
-        tail = f"(截取本节前 {limit} 段)" if truncated else ""
+        if scan_cut:
+            detail["scan_truncated"] = True
+        scanned = getattr(state.section_outlines.get(
+            (address.notebook_id, address.source_id)), "scanned_rows", 0)
+        tail = (f"(截取本节前 {limit} 段)" if cut else "") + (
+            f"(大纲只覆盖本篇前 {scanned} 段,本节之后可能还有内容)" if scan_cut else "")
         state.section_log.append(f"已读《{title}》 {label}(新增 {len(new)} 段){tail}")
         state.record(TraceStep(
             step_type="read_section",

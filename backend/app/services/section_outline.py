@@ -74,6 +74,12 @@ Structure (generic; no label word lists, no TOC-line patterns -- user ruling
       same-or-higher level heading); a leaf's range is the leaf alone. A
       document of leaves only therefore gets no subtree expansion.
       ``Occurrence.range_chunk_ids`` is the range's chunks in document order.
+    * **Open ranges**: when the scan was cut (``truncated``), every occurrence
+      whose range reaches the scan's end -- the last occurrence and every
+      node still open there, virtual parents included -- is
+      ``range_open``: its section may continue past the scanned rows. The
+      flag travels into ``SectionAddress.incomplete`` and every rendered
+      ``（N 段）`` note reads ``（N 段，可能未完）``.
 
 Public API (T6 wires these)
     ``build_outline(rows, truncated=False) -> Outline``
@@ -177,6 +183,9 @@ UNTITLED = "（无标题）"
 #: at least one (clipped) line; ``render_*`` never exceed ``max_chars`` below
 #: it either, but may then drop notes. T6 gives the browse Settings this floor.
 RENDER_MIN_CHARS = 200
+#: Marker on a range the outline scan cut (``Occurrence.range_open``), inside
+#: the ``（N 段…）`` size note of every listing, hint and candidate line.
+OPEN_RANGE_NOTE = "，可能未完"
 #: Title of the hint block (model-facing).
 HINT_BLOCK_TITLE = "相关章节线索（可用 read_section 按章节读取原文）"
 
@@ -205,7 +214,10 @@ class Occurrence:
     (a virtual node: its number). ``chunk_ids``: its own non-navigation chunks.
     ``range_end``: exclusive end index of its range in ``Outline.occurrences``;
     ``range_chunk_ids``: the range's chunks in document order. ``parent``:
-    index of the enclosing structural node, or None at top level."""
+    index of the enclosing structural node, or None at top level.
+    ``range_open``: the outline scan was cut and this range runs to the scan's
+    end (the last occurrence and every node still open there, virtual parents
+    included) -- the section may continue past what was read."""
 
     index: int
     label: str
@@ -217,6 +229,7 @@ class Occurrence:
     range_end: int
     range_chunk_ids: tuple[str, ...]
     parent: "int | None" = None
+    range_open: bool = False
 
     @property
     def virtual(self) -> bool:
@@ -298,13 +311,16 @@ class SectionHint:
 @dataclass(frozen=True)
 class SectionAddress:
     """A surfaced section: ``chunk_ids`` = the range, in document order;
-    ``notebook_id`` = the rows' owner (``""`` = the run's notebook)."""
+    ``notebook_id`` = the rows' owner (``""`` = the run's notebook);
+    ``incomplete`` = the occurrence's ``range_open`` (the scan stopped inside
+    this range, so ``chunk_ids`` may be only its scanned prefix)."""
 
     notebook_id: str
     source_id: str
     chunk_ids: tuple[str, ...]
     label: str
     occurrence: int = -1
+    incomplete: bool = False
 
 
 @dataclass(frozen=True)
@@ -560,6 +576,7 @@ def build_outline(rows: Iterable[Sequence], truncated: bool = False) -> Outline:
                 range_end=node.range_end,
                 range_chunk_ids=tuple(cid for member in span for cid in member.chunk_ids),
                 parent=node.parent,
+                range_open=bool(truncated) and node.range_end == len(nodes),
             )
         )
     return Outline(occurrences=tuple(occurrences), truncated=bool(truncated), scanned_rows=scanned)
@@ -747,6 +764,7 @@ class AddressBook:
                 chunk_ids=occurrence.range_chunk_ids,
                 label=occurrence.label,
                 occurrence=occurrence.index,
+                incomplete=occurrence.range_open,
             )
         return sid
 
@@ -847,6 +865,12 @@ def _fit(
     return RenderedOutline(text="\n".join(body)[:max_chars], listed=len(kept), omitted=omitted)
 
 
+def _size_note(occ: Occurrence) -> str:
+    """``（N 段）``, or ``（N 段，可能未完）`` for a range the scan cut."""
+    return (f"（{len(occ.range_chunk_ids)} 段{OPEN_RANGE_NOTE}）" if occ.range_open
+            else f"（{len(occ.range_chunk_ids)} 段）")
+
+
 def render_outline(
     entries: Sequence[tuple[str, Occurrence]],
     *,
@@ -861,7 +885,7 @@ def render_outline(
         (
             f"{'  ' * (occ.depth - shallowest)}[{sid}] ",
             occ.title,
-            f"（{len(occ.range_chunk_ids)} 段）",
+            _size_note(occ),
         )
         for sid, occ in entries
     ]
@@ -878,7 +902,7 @@ def render_ranked(
     """Render a ranked listing (``browse_sections`` with ``query``): one
     unindented line per entry in the given order, full label."""
     lines = [
-        (f"[{sid}] ", occ.display_label, f"（{len(occ.range_chunk_ids)} 段）")
+        (f"[{sid}] ", occ.display_label, _size_note(occ))
         for sid, occ in entries
     ]
     return _fit(lines, max_chars=max_chars, truncated_scan=truncated_scan, scan_rows=scan_rows)
@@ -892,6 +916,6 @@ def render_hints(hints: Sequence[tuple[str, SectionHint]]) -> str:
     for sid, hint in hints:
         occ = hint.occurrence
         lines.append(
-            f"[{sid}]《{hint.source_title}》 {occ.display_label}（{len(occ.range_chunk_ids)} 段）"
+            f"[{sid}]《{hint.source_title}》 {occ.display_label}{_size_note(occ)}"
         )
     return "\n".join(lines)

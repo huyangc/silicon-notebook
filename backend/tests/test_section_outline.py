@@ -758,3 +758,55 @@ def test_render_ranked_is_flat_with_full_labels():
         [("s2", scope), ("s1", spec)], max_chars=3000, truncated_scan=False, scan_rows=3
     ).text
     assert text == "[s2] Spec > Scope（2 段）\n[s1] Spec（3 段）"
+
+
+# ------------------------------------------------ open ranges (scan cut, R2)
+
+
+def _cut_outline():
+    """A scan cut inside 5.7.3: the rows past the bound were never read."""
+    return build_outline(_rows(
+        ("5 Electrical", 1), ("5.7.1 Overview", 1), ("5.7.2.1 Mask", 1),
+        ("5.7.3 Standard Package", 2),
+    ), truncated=True)
+
+
+def test_a_cut_scan_marks_every_range_reaching_its_end_open():
+    outline = _cut_outline()
+    open_labels = [occ.label for occ in outline.occurrences if occ.range_open]
+    # 5.7.3 is where the scan stopped; 5 and the virtual 5.7 still enclose it
+    assert open_labels == ["5 Electrical", "5.7", "5.7.3 Standard Package"]
+    for label in ("5.7.1 Overview", "5.7.2", "5.7.2.1 Mask"):
+        assert _by_label(outline, label).range_open is False
+
+
+def test_an_uncut_scan_has_no_open_range():
+    outline = build_outline(_rows(("5 Electrical", 1), ("5.7.3 Standard Package", 2)))
+    assert not any(occ.range_open for occ in outline.occurrences)
+
+
+def test_open_ranges_travel_into_addresses_and_every_rendering():
+    outline = _cut_outline()
+    book = AddressBook()
+    std = _by_label(outline, "5.7.3 Standard Package")
+    mask = _by_label(outline, "5.7.2.1 Mask")
+    sid_std, sid_mask = book.assign("", "src", std), book.assign("", "src", mask)
+    assert book.get(sid_std).incomplete is True
+    assert book.get(sid_mask).incomplete is False
+    tree = render_outline([(sid_std, std), (sid_mask, mask)], max_chars=0,
+                          truncated_scan=True, scan_rows=5)
+    assert "Standard Package（2 段，可能未完）" in tree.text
+    assert "Mask（1 段）" in tree.text
+    ranked = render_ranked([(sid_std, std)], max_chars=0, truncated_scan=False,
+                           scan_rows=0)
+    assert ranked.text == f"[{sid_std}] 5.7.3 Standard Package（2 段，可能未完）"
+    hints = render_hints([(sid_std, SimpleHint(std))])
+    assert hints.splitlines()[1].endswith("5.7.3 Standard Package（2 段，可能未完）")
+
+
+class SimpleHint:
+    """Duck-typed ``SectionHint`` (render_hints reads two fields)."""
+
+    def __init__(self, occurrence, source_title="T"):
+        self.occurrence = occurrence
+        self.source_title = source_title
