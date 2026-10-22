@@ -123,6 +123,27 @@ function useMountedRef() {
   return mounted;
 }
 
+/**
+ * 写成功之后等「这次写触发的那次重取」结束:`arm()` 在写成功那一刻记下当时的结束次数,之后
+ * 这一页再结束一次(成功或失败)就调 `onSettled(重取是否失败)`。重取成功会换掉行对象、行也
+ * 可能移走;失败时旧页原样保留,只能靠这里放开按钮并把结果写在按钮旁。
+ */
+function useAfterRefresh(refresh: Pick<FindingsPageState, "settledSeq" | "refreshFailure">, onSettled: (failed: boolean) => void) {
+  const latestSeq = useRef(refresh.settledSeq);
+  latestSeq.current = refresh.settledSeq;
+  const armedAt = useRef<number | null>(null);
+  const onSettledRef = useRef(onSettled);
+  onSettledRef.current = onSettled;
+  useEffect(() => {
+    if (armedAt.current === null || refresh.settledSeq <= armedAt.current) return;
+    armedAt.current = null;
+    onSettledRef.current(refresh.refreshFailure !== "");
+  }, [refresh.settledSeq, refresh.refreshFailure]);
+  return () => {
+    armedAt.current = latestSeq.current;
+  };
+}
+
 // ------------------------------------------------------------------ 取数
 
 export type FindingsPageState = {
@@ -135,6 +156,11 @@ export type FindingsPageState = {
    * 同一个理由,来源解析状态每推进一步都会重取,一次瞬时失败不该把整列换成一句错误。
    */
   refreshFailure: string;
+  /**
+   * 取数结束(成功或失败)的次数。写完之后等「这次写触发的那次重取」结束再放开按钮:重取
+   * 失败时旧页与旧行对象原样保留,只看行对象换没换会让按钮永远停在「处理中…」。
+   */
+  settledSeq: number;
   /**
    * `page` 是哪一代取回来的(库 + 失效令牌)。令牌变了、新一页还没回来时,屏上仍是上一代的
    * 那一页,这里也仍是上一代——跨页记住的东西按它对齐,不会拿旧页的内容冒充新一代。
@@ -167,6 +193,7 @@ export function useFindingsPage(
   const [loading, setLoading] = useState(enabled);
   const [failure, setFailure] = useState("");
   const [refreshFailure, setRefreshFailure] = useState("");
+  const [settledSeq, setSettledSeq] = useState(0);
   const [generation, setGeneration] = useState("");
   const [shownNotebook, setShownNotebook] = useState(notebookId);
   if (shownNotebook !== notebookId || (!enabled && (page !== null || loading || failure || refreshFailure))) {
@@ -192,9 +219,11 @@ export function useFindingsPage(
         setPage(data);
         setGeneration(`${notebookId}|${token}`);
         setRefreshFailure("");
+        setSettledSeq((value) => value + 1);
       })
       .catch((caught: unknown) => {
         if (cancelled) return;
+        setSettledSeq((value) => value + 1);
         if (pageRef.current) {
           setRefreshFailure(toUserMessage(caught, FINDINGS_REFRESH_FAILED));
           return;
@@ -210,7 +239,7 @@ export function useFindingsPage(
       cancelled = true;
     };
   }, [notebookId, zone, limit, offset, token, enabled]);
-  return { page, loading, failure, refreshFailure, generation };
+  return { page, loading, failure, refreshFailure, settledSeq, generation };
 }
 
 /** 「补上关联已经跑过」那一行在 `passed` 列表里的位置(它只有一条)。 */
@@ -414,6 +443,7 @@ function FindingRowView({
   basedOn,
   state,
   handlers,
+  refresh,
   onDismiss,
   onChanged,
 }: {
@@ -423,6 +453,8 @@ function FindingRowView({
   basedOn: string;
   state: KgFindingsActionState;
   handlers: KgFindingHandlers;
+  /** 这一行所在那一页的取数状态(标为正常之后等它重取结束)。 */
+  refresh: Pick<FindingsPageState, "settledSeq" | "refreshFailure">;
   onDismiss: (row: KgFindingRow) => Promise<void>;
   onChanged: () => void;
 }) {
@@ -523,11 +555,17 @@ function FindingRowView({
   };
 
   // 成功之后不急着放开按钮:这一行要等问题页重取回来才移走,其间再点只会再发一次请求。
-  // 重取回来的新一页会换掉 `row`(哪怕这一行还在),那时再放开。
+  // 重取回来的新一页会换掉 `row`(哪怕这一行还在),那时再放开;重取失败时旧行原样留着,
+  // 由 useAfterRefresh 放开,并在按钮旁说清标记已经写上、只是清单没刷新。
+  const armDismissRefresh = useAfterRefresh(refresh, (failed) => {
+    setBusy((current) => (current === "dismiss" ? null : current));
+    if (failed) showResult({ tone: "neutral", text: "已标为正常，但问题清单没能刷新；点上方「刷新」重新读取" });
+  });
   const dismiss = async () => {
     setBusy("dismiss");
     try {
       await onDismiss(row);
+      if (mounted.current) armDismissRefresh();
     } catch (caught) {
       if (!mounted.current) return;
       showResult({ tone: "failed", text: toUserMessage(caught, "没能标为正常，请稍后重试") });
@@ -701,6 +739,7 @@ export function FindingsPendingZone({
               basedOn={basedOn}
               state={state}
               handlers={handlers}
+              refresh={pageState}
               onDismiss={onDismiss}
               onChanged={onChanged}
             />
@@ -772,21 +811,30 @@ export function FindingsDevZone({ report }: { report: KgAnalysisReport }) {
 function PassedRowView({
   row,
   canWrite,
+  refresh,
   onUndismiss,
 }: {
   row: KgFindingRow;
   canWrite: boolean;
+  /** 这一行所在那一页的取数状态(撤销之后等它重取结束)。 */
+  refresh: Pick<FindingsPageState, "settledSeq" | "refreshFailure">;
   onUndismiss: (row: KgFindingRow) => Promise<void>;
 }) {
   const mounted = useMountedRef();
   const [busy, setBusy] = useState(false);
   const [result, showResult] = useTimedResult();
   const dismissed = row.status === "dismissed";
-  // 与「标为正常」同理:成功后保持「撤销中…」,直到重取回来的新一页换掉这一行。
+  // 与「标为正常」同理:成功后保持「撤销中…」,直到重取回来的新一页换掉这一行;重取失败时
+  // 旧行原样留着,由 useAfterRefresh 放开并在按钮旁说清。
+  const armUndoRefresh = useAfterRefresh(refresh, (failed) => {
+    setBusy(false);
+    if (failed) showResult({ tone: "neutral", text: "已撤销，但问题清单没能刷新；点上方「刷新」重新读取" });
+  });
   const undo = async () => {
     setBusy(true);
     try {
       await onUndismiss(row);
+      if (mounted.current) armUndoRefresh();
     } catch (caught) {
       if (!mounted.current) return;
       showResult({ tone: "failed", text: toUserMessage(caught, "没能撤销，请稍后重试") });
@@ -870,10 +918,10 @@ export function FindingsPassedZone({
       {decided.length > 0 || marked.length > 0 ? (
         <ul className="kg-findings-passed-list">
           {decided.map((row) => (
-            <PassedRowView key={`d:${row.rule_id}:${row.subject.key}`} row={row} canWrite={canWrite} onUndismiss={onUndismiss} />
+            <PassedRowView key={`d:${row.rule_id}:${row.subject.key}`} row={row} canWrite={canWrite} refresh={passed} onUndismiss={onUndismiss} />
           ))}
           {marked.map((row) => (
-            <PassedRowView key={`m:${row.rule_id}:${row.subject.key}`} row={row} canWrite={canWrite} onUndismiss={onUndismiss} />
+            <PassedRowView key={`m:${row.rule_id}:${row.subject.key}`} row={row} canWrite={canWrite} refresh={dismissed} onUndismiss={onUndismiss} />
           ))}
         </ul>
       ) : null}

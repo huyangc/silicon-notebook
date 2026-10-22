@@ -989,6 +989,29 @@ test("标为正常：在飞禁用；成功后从待处理移走、区里说清�
   expect(within(zone(/^待处理/)).getByText(/已标为正常：疑似没合并的同名概念 · RMS Norm。可以在下方「已通过」里撤销。/)).toBeInTheDocument();
 });
 
+test("标为正常写成功、随后的问题页重取失败：按钮不停在「处理中…」，按钮旁说清标记已写上", async () => {
+  renderPanel();
+  await ready();
+  vi.mocked(fetchKgFindings).mockRejectedValue(new Error("flaky"));
+  fireEvent.click(within(findingByRule("疑似没合并的同名概念")).getByRole("button", { name: "标为正常" }));
+  expect(within(findingByRule("疑似没合并的同名概念")).getByRole("button", { name: "处理中…" })).toBeDisabled();
+  expect(dismissKgFinding).toHaveBeenCalledWith("nb-1", "F4", "rmsnorm");
+  await waitFor(() => expect(within(findingByRule("疑似没合并的同名概念")).getByRole("button", { name: "标为正常" })).toBeEnabled());
+  expect(within(findingByRule("疑似没合并的同名概念")).getByText("已标为正常，但问题清单没能刷新；点上方「刷新」重新读取")).toBeInTheDocument();
+  expect(within(zone(/^待处理/)).getByText("问题清单没能刷新，下面是上一次读到的内容")).toBeInTheDocument();
+});
+
+test("撤销写成功、随后的重取失败：按钮不停在「撤销中…」，按钮旁说清已撤销", async () => {
+  renderPanel();
+  await ready();
+  await waitFor(() => expect(within(zone("已通过")).getByRole("button", { name: "撤销" })).toBeInTheDocument());
+  vi.mocked(fetchKgFindings).mockRejectedValue(new Error("flaky"));
+  fireEvent.click(within(zone("已通过")).getByRole("button", { name: "撤销" }));
+  expect(within(zone("已通过")).getByRole("button", { name: "撤销中…" })).toBeDisabled();
+  await waitFor(() => expect(within(zone("已通过")).getByRole("button", { name: "撤销" })).toBeEnabled());
+  expect(within(zone("已通过")).getByText("已撤销，但问题清单没能刷新；点上方「刷新」重新读取")).toBeInTheDocument();
+});
+
 test("标为正常失败：原因写在按钮旁，按钮恢复可点", async () => {
   vi.mocked(dismissKgFinding).mockRejectedValueOnce(new Error("boom"));
   renderPanel();

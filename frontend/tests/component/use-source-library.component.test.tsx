@@ -308,6 +308,72 @@ test("an in-flight delete remains visibly busy across A to B to A", async () => 
   expect(value!.deletingSourceIds.has("deleting")).toBe(false);
 });
 
+function commitPage(items: SourceSummary[], notebookId = "notebook-a") {
+  act(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a", notebookId, workspaceEpoch: 1,
+      page: { items, total_count: items.length, offset: 0, limit: 50 },
+    });
+  });
+}
+
+test("a source followed off the current page is read to a terminal state, moving contentRevision on each change", async () => {
+  // 图谱分析里「重新解析…」的那一篇多半不在来源库当前页:只轮询当前页的话,它解析完也不会
+  // 让问题清单与总览失效。
+  vi.useFakeTimers();
+  api.getSource
+    .mockResolvedValueOnce(source("elsewhere", "notebook-a", "parsing"))
+    .mockResolvedValueOnce(source("elsewhere", "notebook-a", "extracted"));
+  render(<Harness />);
+  commitPage([source("first", "notebook-a")]);
+  const initial = value!.contentRevision;
+  act(() => value!.trackSourceProgress(["elsewhere"]));
+
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(api.getSource).toHaveBeenCalledWith("elsewhere");
+  const parsing = value!.contentRevision;
+  expect(parsing).toBeGreaterThan(initial);
+
+  await act(async () => vi.advanceTimersByTimeAsync(2250));
+  expect(value!.contentRevision).toBeGreaterThan(parsing);
+  expect(effects.refreshCheckup).toHaveBeenCalledWith("notebook-a", expect.any(Function));
+
+  // 到了终态就不再读;当前页原样。
+  const calls = api.getSource.mock.calls.length;
+  await act(async () => vi.advanceTimersByTimeAsync(60_000));
+  expect(api.getSource.mock.calls.length).toBe(calls);
+  expect(value!.sources.map((item) => item.id)).toEqual(["first"]);
+  expect(effects.reportError).not.toHaveBeenCalled();
+});
+
+test("following stops on untrackSources, on a notebook switch, and once the followed source is gone", async () => {
+  vi.useFakeTimers();
+  api.getSource.mockResolvedValue(source("elsewhere", "notebook-a", "parsing"));
+  render(<Harness />);
+  commitPage([source("first", "notebook-a")]);
+
+  act(() => value!.trackSourceProgress(["elsewhere"]));
+  act(() => value!.untrackSources());
+  await act(async () => vi.advanceTimersByTimeAsync(10_000));
+  expect(api.getSource).not.toHaveBeenCalled();
+
+  act(() => value!.trackSourceProgress(["elsewhere"]));
+  commitPage([source("other", "notebook-b")], "notebook-b");
+  await act(async () => vi.advanceTimersByTimeAsync(10_000));
+  expect(api.getSource).not.toHaveBeenCalled();
+
+  // 跟着的那一篇已经被删了(404):不再跟,也不报错。
+  const gone = Object.assign(new Error("not found"), {});
+  Object.defineProperty(gone, Symbol.for("silicon-notebook.errors.httpStatus"), { value: 404 });
+  api.getSource.mockRejectedValue(gone);
+  act(() => value!.trackSourceProgress(["deleted-meanwhile"]));
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(api.getSource).toHaveBeenCalledTimes(1);
+  await act(async () => vi.advanceTimersByTimeAsync(30_000));
+  expect(api.getSource).toHaveBeenCalledTimes(1);
+  expect(effects.reportError).not.toHaveBeenCalled();
+});
+
 test("a slow or failing checkup refresh does not delay terminal poll scheduling", async () => {
   vi.useFakeTimers();
   const checkup = deferred<undefined>();

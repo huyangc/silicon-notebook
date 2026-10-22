@@ -88,6 +88,18 @@ test("重新解析:先弹说明确认框,确认后才进在飞态、才发请求
   assert.match(run, /const r = await reparseSources\(nb, sourceIds\);/);
 });
 
+test("重新解析排上之后按 id 跟到终态(它多半不在来源库当前页);面板一关就不再跟", () => {
+  const dialog = callSitesIn(findFunctionIn(page, "Home", "confirmReparseFromAnalysis"))
+    .find(({ target }) => target === "openInfoModal").arguments[0];
+  // 只在真的排上了、且仍是发起时那个库时才跟——跟的就是这次请求的那一篇。
+  assert.match(
+    dialog,
+    /if \(outcome === "started" && activeNotebookIdRef\.current === nb\) \{\s*sourceLibrary\.trackSourceProgress\(\[target\.sourceId\]\);\s*\}/,
+  );
+  const text = page.getFullText();
+  assert.match(text, /const \{ untrackSources \} = sourceLibrary;\s*useEffect\(\(\) => \{\s*if \(!kgGraph\.analysisOpen\) untrackSources\(\);\s*\}, \[kgGraph\.analysisOpen, untrackSources\]\);/);
+});
+
 test("去待确认合并:关掉面板,并请求知识图谱视图定位那一对", () => {
   const calls = callSitesIn(findFunctionIn(page, "Home", "reviewMergeFromAnalysis")).map(({ target }) => target);
   assert.ok(calls.includes("closeKgAnalysis"));

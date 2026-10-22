@@ -1119,6 +1119,12 @@ export default function Home() {
       rootModals.requestClose("kg-analysis", "button");
     }
   }, [notebookCollection.editor?.target?.id, notebookCollection.deletion?.target?.id, sourceDetail?.id, kgSchema.open, kgGraph.analysisOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+  // 图谱分析里「重新解析…」的那篇来源会一直被跟到终态(它多半不在来源库当前页);面板一关就
+  // 不再跟——切库与卸载由来源库自己停。
+  const { untrackSources } = sourceLibrary;
+  useEffect(() => {
+    if (!kgGraph.analysisOpen) untrackSources();
+  }, [kgGraph.analysisOpen, untrackSources]);
   // 两个治理队列的 owner。只把它们真正需要的东西传进去:协调器的窄命令面(结构类型自动
   // 收窄,见各 hook 的 Pick<RootModalCoordinator, …>)与两条 effect,而不是整个 page state。
   // Ordering constraint: both hooks below must stay after the `rootModals`
@@ -4342,6 +4348,11 @@ export default function Home() {
             if (activeNotebookIdRef.current !== nb) return;
             report("running");
             void reparseOutcome(nb, [target.sourceId]).then((outcome) => {
+              // 这篇来源多半不在来源库当前页:按 id 跟到终态,每次状态推进都让问题清单与总览
+              // 失效重取(它们的失效令牌里有来源库的 contentRevision)。
+              if (outcome === "started" && activeNotebookIdRef.current === nb) {
+                sourceLibrary.trackSourceProgress([target.sourceId]);
+              }
               report(outcome === "started" ? "started" : outcome === "none" ? "skipped" : "failed");
             });
           },
