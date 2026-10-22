@@ -164,15 +164,15 @@ def _entries(path: Path) -> dict[str, zipfile.ZipInfo]:
 
 def test_a_file_that_vanishes_after_the_listing_is_counted_not_fatal(repo, out_dir, monkeypatch):
     tree = _seed_full(repo)
-    real_walk = os.walk
+    real_fwalk = os.fwalk
 
     def walk_then_delete(root, **kwargs):
-        for directory, subdirs, names in real_walk(root, **kwargs):
+        for directory, subdirs, names, dir_fd in real_fwalk(root, **kwargs):
             if Path(directory) == tree:
                 (tree / "doc.md").unlink()
-            yield directory, subdirs, names
+            yield directory, subdirs, names, dir_fd
 
-    monkeypatch.setattr(export_module.os, "walk", walk_then_delete)
+    monkeypatch.setattr(export_module.os, "fwalk", walk_then_delete)
     out = out_dir / "vanished.snbk"
     report = cases.export(repo, cases.NB, out)
     inspect_archive(out)
@@ -241,7 +241,8 @@ def test_a_link_swapped_in_right_before_the_open_is_not_followed(repo, out_dir, 
     swapped: list[int] = []
 
     def open_after_swap(path, flags, *args, **kwargs):
-        if Path(path) == target and not swapped:
+        # Files are opened by leaf name relative to their directory descriptor.
+        if os.fspath(path) == target.name and kwargs.get("dir_fd") is not None and not swapped:
             target.unlink()
             target.symlink_to(secret)
             swapped.append(flags)
@@ -256,6 +257,42 @@ def test_a_link_swapped_in_right_before_the_open_is_not_followed(repo, out_dir, 
     assert "files/notebooks/extra/notes.txt" not in _entries(out)
     assert report.skipped_links == 1
     assert b"HOST-SECRET" not in out.read_bytes()
+
+
+def test_a_directory_swapped_for_a_link_right_before_a_file_open_is_not_followed(
+    repo, out_dir, tmp_path, monkeypatch
+):
+    """codex #974 r2 (P1): ``O_NOFOLLOW`` guards only the last component. A
+    directory above a file, replaced by a link to a host directory between the
+    listing and the file's open, must not lead the open outside the tree: the
+    open is anchored to the descriptor of the directory that was listed."""
+    tree = _seed_full(repo)
+    inner = tree / "deep"
+    inner.mkdir()
+    (inner / "leaf.txt").write_bytes(b"NOTEBOOK-OWN")
+    host = tmp_path / "host-dir"
+    host.mkdir()
+    (host / "leaf.txt").write_bytes(b"HOST-SECRET")
+    real_open = os.open
+    swapped: list[str] = []
+
+    def open_after_swap(path, flags, *args, **kwargs):
+        name = os.fspath(path)
+        if name == "leaf.txt" and not swapped:
+            inner.rename(tree / "deep.moved")
+            inner.symlink_to(host, target_is_directory=True)
+            swapped.append(name)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(export_module.os, "open", open_after_swap)
+    out = out_dir / "dirswap.snbk"
+    cases.export(repo, cases.NB, out)
+    monkeypatch.undo()
+    inspect_archive(out)
+    assert swapped, "the hook must have fired"
+    assert b"HOST-SECRET" not in out.read_bytes()
+    with zipfile.ZipFile(out) as archive:
+        assert archive.read("files/notebooks/deep/leaf.txt") == b"NOTEBOOK-OWN"
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads files regardless of mode bits")
