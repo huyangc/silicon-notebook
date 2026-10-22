@@ -176,6 +176,8 @@ PROCESS_CACHE_INVENTORY: dict[str, str] = {
     "app.services.release_notes:_cache": CONTENT_KEYED,
     # Static token table built at import.
     "app.services.kg.conflict_detect:_TOKEN_GROUPS": CONTENT_KEYED,
+    # One row encoder per table name, built from the migration DDL contract.
+    "app.services.notebook_transfer.export:_row_encoder": CONTENT_KEYED,
     # Owned by a weak reference to the experience store; each test's
     # repository is a new store object.
     "app.services.reasoning_retrieval:_EXPERIENCE_CACHE": OWNER_SCOPED,

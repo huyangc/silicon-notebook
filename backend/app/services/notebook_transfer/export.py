@@ -227,9 +227,12 @@ def _write_archive(
     if tuple(tables) != ARCHIVE_TABLES:
         raise NotebookExportError("复制闭包的表集合与导出格式不符，请升级导出格式版本")
     files = _FileIndex(writer)
-    files.add_tree(notebook_root, notebook_file_entry)
-    files.add_tree(assets_root, asset_file_entry, skip=normalizer.dropped_asset_files())
-    summary = files.finish()
+    try:
+        files.add_tree(notebook_root, notebook_file_entry)
+        files.add_tree(assets_root, asset_file_entry, skip=normalizer.dropped_asset_files())
+        summary = files.finish()
+    finally:
+        files.close()
     notebook = normalizer.notebook
     manifest = ArchiveManifest(
         format_version=FORMAT_VERSION,
@@ -601,11 +604,11 @@ class _FileIndex:
 
     def finish(self) -> FilesSummary:
         self._index.seek(0)
-        try:
-            digest = self._writer.write_stream(FILES_INDEX_NAME, self._index)
-        finally:
-            self._index.close()
+        digest = self._writer.write_stream(FILES_INDEX_NAME, self._index)
         return FilesSummary(
             count=self.count, bytes=self.bytes,
             index_bytes=digest.size, index_sha256=digest.hexdigest(),
         )
+
+    def close(self) -> None:
+        self._index.close()
