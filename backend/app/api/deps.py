@@ -774,15 +774,8 @@ def mcp_memory_repository() -> McpMemoryRepository:
 # --- knowhow-tables PR-2+3 Task 10: "session OR Agent token" dependency -----
 # Appended at EOF rather than interleaved above (e.g. right after
 # get_current_user, which it otherwise reads a lot like) purely for
-# readability — it is not required for correctness.
-# (The original note here claimed every line above this point was
-# individually pinned by a `test_repository_surface_manifest.py` and a
-# `test_repository_callers_static.py`, and that inserting anything above them
-# would shift those pins. That was already wrong: no such tests exist, the
-# architecture guards are semantic — {path, scope, kind, target}, no line
-# numbers — and P0-T2 inserted ~80 lines above this point (the capability
-# guard factory) with every guard still green. See the identical correction
-# in app/api/mcp_server.py above its own Task 10 section.)
+# readability — it is not required for correctness: nothing pins line
+# positions in this module.
 from contextlib import asynccontextmanager  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 
@@ -956,13 +949,7 @@ def require_user_or_agent(scope: str, *, write: bool = False):
 # --------------------------------------------------------------------------
 # 用户可见文案的「出处标记」
 #
-# 追加在文件末尾纯粹是可读性考量，不是正确性要求。
-# （这里原先的注释声称本模块顶部那几个 `_runtime` 取值行被一份
-# `tests/test_repository_callers_static.py` 的 INDEPENDENT_PRIVATE_SITES 按
-# **行号**精确登记，在上方插入代码会整体移位、打破那份账本。那条说法本来就是
-# 错的：不存在这样的测试，架构守卫是语义化的——{path, scope, kind, target}，
-# 不含行号——P0-T2 在这个位置之上插入了约 90 行（能力守卫工厂 + 值域表），
-# 全部守卫照样绿。与 app/api/mcp_server.py 里同一处更正完全一致。）
+# 追加在文件末尾纯粹是可读性考量，不是正确性要求：没有任何东西按行号钉住本模块。
 #
 # 后端的 4xx `detail` 有两类，结构上完全一样：一类是刻意为终端用户写的中文文案
 # （「仅管理员可设为公共知识库」），另一类是 `detail=str(exc)` 直接甩出来的异常文本

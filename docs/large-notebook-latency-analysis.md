@@ -103,7 +103,7 @@
 ### 放哪：`diag_slow.py` 新增 report 函数 `report_notebook_count_hotpaths(conn, notebook_id)`
 
 - **取舍**：放 `diag_slow.py` 而非 `diag.py`——本任务是「慢查询逐条 EXPLAIN+计时」，与 `diag_slow.py` 现有职责同族，共用其 `mode=ro` 只读连接与脱敏惯例；`diag.py` 只留一个薄委托入口即可。
-- **⚠️ 硬约束（记忆 + 任务均点名）**：`diag_slow.py` 的 `conn.execute` 行号被 `test_repository_callers_static.py` 的**允许表钉死**。每新增一个 `conn.execute` 站点，**必须同步更新该允许表**，且保持 `mode=ro`（只读）、**无 DML**、输出脱敏（不打 object 文本/名，只打计数、计划、ms、行数）。
+- **⚠️ 硬约束（记忆 + 任务均点名）**：新增的 `conn.execute` 站点必须保持 `mode=ro`（只读）、**无 DML**、输出脱敏（不打 object 文本/名，只打计数、计划、ms、行数）。
 
 ### 具体打印 spec（对「最大的 notebook」= `SELECT notebook_id FROM (SELECT notebook_id, COUNT(*) c FROM knowledge_objects GROUP BY notebook_id ORDER BY c DESC LIMIT 1)`）
 
@@ -133,7 +133,7 @@
 
 ## 5. 落地次序
 
-1. **先补 diag（零风险，先行）**：`report_notebook_count_hotpaths` 落地并同步 `test_repository_callers_static.py` 允许表。在生产对「最大 notebook」跑一次，**用真实 ms/计划/行数确认**：R1 的 2M 覆盖扫描耗时、`!=` 与 `IN` 计划一致、R3 三条无缓存计数各自耗时、`concept_clusters` DISTINCT 未覆盖。把「机制已确认」升级为「生产数字已确认」，再动代码。
+1. **先补 diag（零风险，先行）**：`report_notebook_count_hotpaths` 落地。在生产对「最大 notebook」跑一次，**用真实 ms/计划/行数确认**：R1 的 2M 覆盖扫描耗时、`!=` 与 `IN` 计划一致、R3 三条无缓存计数各自耗时、`concept_clusters` DISTINCT 未覆盖。把「机制已确认」升级为「生产数字已确认」，再动代码。
 2. **上计数缓存 F1（最高 ROI）+ F2 去重复 fan-out + F3 删 index-status 冗余计数**：优先进程内 seq-gated memo（无迁移）。上前用 diag/审计确认所有改 object status/type 的写路径都 bump `kg_mutation_seq`（缓存正确性前提）。这一步直接消掉打开与看板的 5-6s。
 3. **再做 F4 前端懒加载/并行/客户端缓存**：board 骨架先出、两卡并行 fill、二次打开走客户端 memo，把感知延迟压到接近 0。
 4. （可选，视 diag 数据）**F4-持久版**：若重启后冷跑仍不可接受，再把计数物化进 `unified_kg_state`——此时才需 `_migration_N + bump SCHEMA_VERSION`（记忆「schema 迁移约定」：必须新增 `_migration_N` 并 bump，不能塞进已封版的旧 migration，否则版本闸对已部署库短路漏建列）。

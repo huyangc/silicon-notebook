@@ -215,12 +215,9 @@ def _remap(
     # ``seams`` (already resolved above) rides back out to the caller so
     # ``copy_table`` can hand ``new_id``/``now`` to ``insert_transfer`` (Task
     # 13's genesis flow entry) WITHOUT a second ``repo._runtime`` reach in
-    # ITS OWN scope — the architecture guard's independent_private tracking
-    # (tests/architecture/repository_callers.py) counts private-attribute
-    # accesses PER SCOPE, and ``copy_table`` already has one (its own
+    # ITS OWN scope — ``copy_table`` already has one (its own
     # ``repo._runtime.knowhow_transfer_store`` line below); returning the
-    # already-open seam here keeps that count unchanged instead of adding a
-    # second, distinct occurrence that would need a fixture rebaseline.
+    # already-open seam here avoids a second, distinct occurrence.
     return payload, asset_files, seams
 
 

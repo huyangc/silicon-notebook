@@ -3373,9 +3373,9 @@ class KnowledgeStore:
         fixed case/procedure/tool vocabulary so they can be reprojected under
         the cell-level dynamic-type model. A plain SELECT; the caller owns
         interpretation/scheduling. Kept here (not inline SQL in the service
-        layer) per this codebase's SQL-ownership rule (Task 27,
-        test_repository_callers_static.py): every knowledge_objects query
-        lives in this store, never in a services/* file."""
+        layer) per this codebase's SQL-ownership rule (Task 27): every
+        knowledge_objects query lives in this store, never in a services/*
+        file."""
         placeholders = ",".join("?" for _ in object_types)
         rows = connection.execute(
             f"SELECT DISTINCT json_extract(payload, '$.table_id') AS table_id "

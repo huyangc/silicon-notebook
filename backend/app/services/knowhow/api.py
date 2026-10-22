@@ -735,12 +735,11 @@ def get_scheduler(repo: Any) -> ProjectionScheduler:
 #
 # Deliberately appended here, AFTER build_projector/ProjectionScheduler/
 # get_scheduler rather than interleaved earlier in the file. Historical note:
-# this placement was originally forced by exact-line pinning in
-# test_repository_callers_static.py / test_repository_surface_manifest.py —
-# both were RETIRED in #307; today's architecture guards are semantic
-# ({path, scope, kind, target}, no line numbers), so nothing pins line
-# positions anymore. The layout is kept as-is because moving code to
-# "modernize" a comment is pure churn; new additions may interleave freely.
+# this placement was originally forced by exact-line pinning that was RETIRED
+# in #307; today's architecture guards are semantic ({path, scope, kind,
+# target}, no line numbers), so nothing pins line positions anymore. The
+# layout is kept as-is because moving code to "modernize" a comment is pure
+# churn; new additions may interleave freely.
 
 
 _TEMPLATE_KIND_HINTS: dict[str, str] = {
@@ -998,15 +997,11 @@ def commit_append(
 # accept re-uses the EXISTING PATCH cell endpoint to write it (that endpoint,
 # not this one, is what schedules reprojection).
 #
-# Appended here, after commit_append/before __all__, for the identical zero-
-# line-shift reason documented in the Task 6 section above: build_projector's
-# `_runtime`/`settings` reaches are pinned at their own exact lines in
-# test_repository_callers_static.py/test_repository_surface_manifest.py;
-# inserting anything ABOVE them would shift those pins. This section needs
+# Appended here, after commit_append/before __all__, following the layout of
+# the Task 6 section above (see the historical note there). This section needs
 # its OWN, SECOND `_runtime` reach (repo._runtime.models, to resolve the
-# system-managed workload client + note_model_error) — registered as a new,
-# separate entry in both guards (see task-8-report-pr23.md), not folded into
-# the existing build_projector registration.
+# system-managed workload client + note_model_error), separate from
+# build_projector's.
 
 
 class KnowhowOptimizeUnavailable(RuntimeError):
@@ -2391,10 +2386,8 @@ def reformat_cell(
 #
 # ``hashlib``/``textops`` are imported HERE (not hoisted to the top-of-module
 # import block) as historical layout only: the exact-line pinning that once
-# forbade insertions above (test_repository_callers_static.py /
-# test_repository_surface_manifest.py) was retired in #307 — current guards
-# are semantic and line-number-free. Hoisting is safe; kept in place to avoid
-# no-op churn.
+# forbade insertions above was retired in #307 — current guards are semantic
+# and line-number-free. Hoisting is safe; kept in place to avoid no-op churn.
 import hashlib
 
 from app.services.knowhow import textops

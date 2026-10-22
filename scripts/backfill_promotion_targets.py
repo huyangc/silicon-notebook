@@ -30,8 +30,8 @@ target_base_id 只在 propose 时可设,没有任何接口能给存量候选补�
 本文件不直接对 promotion_candidates 拼 SQL: 读写都经
 `app.repositories.sqlite.governance_store.GovernanceStore` 的
 pending_promotion_targets / set_promotion_target / promotion_target_column_ready ——
-"主业务库 SQL 只在 backend/app/repositories/sqlite 下" 是本仓库的架构硬约束
-(见 backend/tests/test_repository_callers_static.py), 离线 CLI 也不例外。
+"主业务库 SQL 只在 backend/app/repositories/sqlite 下" 是本仓库的架构硬约束,
+离线 CLI 也不例外。
 """
 from __future__ import annotations
 
