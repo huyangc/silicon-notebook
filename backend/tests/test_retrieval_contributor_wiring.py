@@ -4,6 +4,8 @@ import ast
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from app.core.config import Settings
 from app.services.ask_service import AskService
 from app.services.report_engine import ReportEngine
@@ -373,6 +375,45 @@ def test_report_runs_selected_evidence_without_graph_service():
     assert not hasattr(result, "baseline_chunks")
     assert result.chunks == appended
     assert host.calls == [(original, "selected_evidence")]
+
+
+class _RaisingHost:
+    def __init__(self, exc) -> None:
+        self.exc = exc
+        self.calls = 0
+
+    def run(self, baseline, *, invocation, **_kwargs):
+        self.calls += 1
+        raise self.exc
+
+
+def test_ask_and_report_lanes_let_control_flow_through_and_fail_closed_otherwise():
+    """Both selected-evidence lanes fail closed to ``B`` on an ordinary error,
+    but a cancel or a retrieval-control refusal is control flow, not a lane
+    failure: it reaches the caller, as at every other retrieval site."""
+    from app.domain.cancellation import AskCancelled
+    from app.domain.retrieval_control import RetrievalControlError
+
+    baseline = [SimpleNamespace(chunk_id="base")]
+    for exc in (RetrievalControlError("refused"), AskCancelled()):
+        ask_host, report_host = _RaisingHost(exc), _RaisingHost(exc)
+        with pytest.raises(type(exc)):
+            _ask_with_host(ask_host)._activate_selected_source_graph(
+                "notebook", baseline)
+        with pytest.raises(type(exc)):
+            _report_with_host(report_host)._activate_selected_source_graph(
+                "notebook", SimpleNamespace(chunks=baseline))
+        assert (ask_host.calls, report_host.calls) == (1, 1)
+
+    ask_host = _RaisingHost(RuntimeError("lane broke"))
+    chunks, status = _ask_with_host(ask_host)._activate_selected_source_graph(
+        "notebook", baseline)
+    assert chunks == baseline and chunks is not baseline and status is None
+    result = SimpleNamespace(chunks=baseline)
+    _report_with_host(_RaisingHost(RuntimeError("lane broke")))._activate_selected_source_graph(
+        "notebook", result)
+    assert result.chunks is baseline and not hasattr(result, "baseline_chunks")
+    assert ask_host.calls == 1
 
 
 def test_repository_factory_accepts_injected_host_without_importing_registry(monkeypatch):

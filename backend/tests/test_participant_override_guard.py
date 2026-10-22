@@ -886,6 +886,16 @@ _SEAT_FAILSOFT_SITES = (
      "AskService._no_kg_scope_admits_run", "collection_map"),
     ("app/services/ask_service.py",
      "AskService._reasoning_retrieval_phase", "execute_reasoning_retrieval_stage"),
+    # 选定来源图谱通道(Ask 与报告各一份 + 推理侧外层兜底)。try 体经 host.run
+    # -> 内置贡献 -> 图谱服务的取数腿走检索读路径;今天座位只因对等模式下
+    # ``subjectless_run_active()`` 在 try 之前提前返回才不可达——那是一个谓词、
+    # 不是结构,所以照样登记,钉住「控制异常照抛、只把普通错误降级为 B」。
+    ("app/services/ask_service.py",
+     "AskService._activate_selected_source_graph", "run"),
+    ("app/services/ask_service.py",
+     "AskService._reasoning_graph_lane", "_activate_selected_source_graph"),
+    ("app/services/report_engine.py",
+     "ReportEngine._activate_selected_source_graph", "run"),
     ("app/services/ask_service.py",
      "AskService.ask_plugin_engine", "admit_plugin_engine_result"),
     # D0-3:``synth()`` 把 KG 证据装配算在合成里(``_answer_context`` ->

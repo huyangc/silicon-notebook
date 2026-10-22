@@ -1133,7 +1133,9 @@ class _ReasoningStageRun:
     no_usable_kg: Any = _UNSET
     # ``_reasoning_retrieval_phase``. ``result`` is the retriever's snapshot, or
     # the empty ``ReasoningResult()`` when it failed before returning one: its
-    # candidate ledger and external evidence reach the draft either way.
+    # candidate ledger and external evidence reach the draft either way. A
+    # failed graph lane leaves the retrieval's lists as they were and
+    # ``chunks`` equal to ``historical_chunks``.
     result: Any = _UNSET
     top_hits: Any = _UNSET
     elements: Any = _UNSET
@@ -1590,7 +1592,7 @@ class AskService:
                 disabled_capabilities=disabled_capabilities,
             )
             return call.visible_result(host_chunks)
-        except AskCancelled:
+        except (AskCancelled, RetrievalControlError):
             raise
         except Exception:
             return call.fail_closed_result("activation_seam_failed")
@@ -7603,15 +7605,15 @@ class AskService:
 
     def _reasoning_retrieval_phase(self, run) -> None:
         """The typed retrieval seam, then the selected-source graph lane; the
-        evidence lands on ``run``. Fail-soft: a failure other than a cancel,
-        a retrieval-control refusal or a stage-boundary error empties the
-        evidence lists and leaves only the pre-retrieval trace. What was
-        already produced stays: when the retriever has returned and the graph
-        lane is what failed, ``run.result`` is the retriever's snapshot (its
-        candidate ledger and external evidence still reach the draft) and
-        ``run.historical_chunks`` the passages it found; a failure before the
-        retriever returns leaves the empty ``ReasoningResult()`` and no
-        historical passages."""
+        evidence lands on ``run``. Fail-soft: a retrieval failure other than a
+        cancel, a retrieval-control refusal or a stage-boundary error leaves
+        the empty ``ReasoningResult()``, empty evidence lists, no historical
+        passages and only the pre-retrieval trace. Once the retriever has
+        returned, its evidence is the run's: the graph lane only appends
+        (``_reasoning_graph_lane``), so a failure there keeps every list, the
+        retrieval trace and the snapshot (candidate ledger, external evidence)
+        and drafts from ``run.historical_chunks`` -- the ledger's selected
+        passages are then exactly the ones the draft reads."""
         from app.application.ask_reasoning import StageBoundaryError
         from app.services.reasoning_retrieval import ReasoningResult
 
@@ -7677,12 +7679,6 @@ class AskService:
             reasoning_outline_evidence = result.outline_evidence
             trace = [*pre_trace, *trace]
             historical_reasoning_chunks = list(chunks)
-            chunks, _status = self._activate_selected_source_graph(
-                notebook_id,
-                historical_reasoning_chunks,
-                top_hits=top_hits,
-                max_results=self.settings.ppr_top_chunks,
-            )
         except (AskCancelled, RetrievalControlError, StageBoundaryError):
             raise
         except Exception:
@@ -7694,6 +7690,9 @@ class AskService:
             collection_map_text = ""
             reasoning_outline = []
             reasoning_outline_evidence = []
+        else:
+            chunks = self._reasoning_graph_lane(
+                notebook_id, historical_reasoning_chunks, top_hits)
         run.result = result
         run.top_hits, run.elements, run.trace = top_hits, elements, trace
         run.chunks, run.chains = chunks, chains
@@ -7701,6 +7700,45 @@ class AskService:
         run.collection_map_text = collection_map_text
         run.outline, run.outline_evidence = reasoning_outline, reasoning_outline_evidence
         run.historical_chunks = historical_reasoning_chunks
+
+    def _reasoning_graph_lane(self, notebook_id, baseline, top_hits):
+        """The passages the draft reads: the selected-source graph lane over
+        the retrieval's frozen passages ``baseline`` (``B``).
+
+        The lane only ever appends ``G`` after ``B``, so an error escaping it
+        costs exactly that append and nothing retrieval produced: the run
+        keeps ``B`` (a fresh list, the lane's own fail-closed shape) and the
+        content-free ``selected_source_graph`` event records
+        ``activation_seam_failed``. Nothing reaches the trace -- the lane's
+        state never does (product-and-api, selected-source activation) -- and
+        the log names only the exception class. A cancel, a retrieval-control
+        refusal or a stage-boundary error is not a lane failure and still
+        ends the run."""
+        from app.application.ask_reasoning import StageBoundaryError
+
+        try:
+            chunks, _status = self._activate_selected_source_graph(
+                notebook_id,
+                baseline,
+                top_hits=top_hits,
+                max_results=self.settings.ppr_top_chunks,
+            )
+            return chunks
+        except (AskCancelled, RetrievalControlError, StageBoundaryError):
+            raise
+        except Exception as exc:
+            LOGGER.warning(
+                "selected-source graph lane failed (%s)", type(exc).__name__
+            )
+            # ``max_results`` sizes a lane run; the fail-closed path below
+            # never runs one, so it does not matter here.
+            kept, _status = SelectedSourceGraphContributionCall(
+                getattr(self, "selected_source_graph", None),
+                notebook_id,
+                baseline,
+                max_results=0,
+            ).fail_closed_result("activation_seam_failed")
+            return kept
 
     def _reasoning_draft_phase(self, run, spreadsheet_results, err_sink):
         """Enter the draft stage under a re-verified authority, then hand the
