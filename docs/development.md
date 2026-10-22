@@ -1007,7 +1007,9 @@ Cross-cutting frontend interaction guardrails stay small but explicit:
   in `ROOT_MODAL_POLICIES[slot].stacksOver` and opens with
   `rootModals.openAbove(slot, parent)`. Escape, backdrop and focus return then
   follow the coordinator's topmost rule; do not special-case the child's Escape
-  inside the parent.
+  inside the parent. One Escape key press closes at most one layer through
+  `requestClose(slot, "escape")` (the coordinator counts presses), so a close
+  request the browser sends after the keydown cannot close the revealed parent.
 - Source-activity anomalies render only through `AnomalyBadge` backed by
   `sourceAnomalies()`; do not hand-roll inline warning styles or symbols.
 - Five-grade effort selectors reuse

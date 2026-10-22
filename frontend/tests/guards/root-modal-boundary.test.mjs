@@ -437,6 +437,33 @@ test("global ask hands its citation images to the shared preview slot as a stack
   const opener = findFunctionIn(page, "Home", "openGlobalAnswerImagePreview").getText(page);
   assert.match(opener, /rootModals\.openAbove\("answer-image-preview", "global-ask"\)/);
   assert.match(hookText, /"answer-image-preview": \{[^}]*stacksOver: \["global-ask"\] \}/);
+  // 预览按每一张图自己的取图库挂载与取图：全局问答没有当前笔记本，挂载条件或 URL 只要
+  // 退回 `currentNotebookId`，集合页上的预览就永远渲染不出来、或去错的库取图。
+  const previewMounts = [];
+  (function visit(node) {
+    if (ts.isJsxElement(node) && node.openingElement.tagName.getText(page) === "ImagePreviewModal") {
+      let cursor = node.parent;
+      while (cursor && ts.isParenthesizedExpression(cursor)) cursor = cursor.parent;
+      while (
+        cursor?.parent
+        && ts.isBinaryExpression(cursor.parent)
+        && cursor.parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+      ) cursor = cursor.parent;
+      previewMounts.push(cursor && ts.isBinaryExpression(cursor) ? cursor.left.getText(page) : "");
+    }
+    ts.forEachChild(node, visit);
+  })(page);
+  assert.equal(previewMounts.length, 1, "page.tsx 应恰好挂一处 ImagePreviewModal");
+  const mountTerms = previewMounts[0].split("&&").map((term) => term.trim());
+  assert.ok(mountTerms.includes("answerImagePreviewImage.notebookId"), `挂载条件：${previewMounts[0]}`);
+  assert.ok(!mountTerms.includes("currentNotebookId"), `挂载条件不许依赖当前笔记本：${previewMounts[0]}`);
+  const previewImages = jsxElements(page, "AuthedImage")
+    .filter((element) => (element.bindings?.url ?? "").includes("answerImagePreviewImage"));
+  assert.equal(previewImages.length, 1);
+  assert.equal(
+    previewImages[0].bindings.url,
+    "sourceImageAssetUrl(API_BASE, answerImagePreviewImage.notebookId, answerImagePreviewImage.assetId)",
+  );
   // 笔记本内那条入口仍是顶层 workspace primary，不经子层。
   const inNotebook = findFunctionIn(page, "Home", "openAnswerImagePreview").getText(page);
   assert.match(inNotebook, /rootModals\.open\("answer-image-preview", rootModals\.captureWorkspaceOwner\(\)\)/);

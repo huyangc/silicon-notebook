@@ -157,6 +157,20 @@ export const ROOT_MODAL_POLICIES: Readonly<Record<RootModalSlot, ModalPolicy>> =
   extension: { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
 };
 
+/**
+ * 纯判据：`slot` 能否作为子层叠在 `parentSlot` 这一次打开之上。`parentChain` 是父层连同
+ * 它的祖先（父、祖父……）。策略表没声明这一对，或本格已经在父链上（互相叠放：叠上去
+ * 之后父链里那一格被这次发布替换掉，留下一个父层已不在场的孤儿子层），一概拒绝。
+ */
+export function mayStackAbove(
+  policies: Readonly<Partial<Record<RootModalSlot, Readonly<{ stacksOver?: readonly RootModalSlot[] }>>>>,
+  slot: RootModalSlot,
+  parentSlot: RootModalSlot,
+  parentChain: ReadonlySet<RootModalSlot>,
+): boolean {
+  return Boolean(policies[slot]?.stacksOver?.includes(parentSlot)) && !parentChain.has(slot);
+}
+
 // The only primary pairs that may stay open together, as [already open, being
 // opened]. Each one is a drill-down from the slot already open:
 //   · source-detail ⇄ catalog-review — the command-catalog review opens from a
@@ -241,7 +255,35 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
   const orderRef = useRef(0);
   const pendingInvalidationsRef = useRef<Array<[RootModalSlot, RootModalCloseReason]>>([]);
   const pendingFocusReturnRef = useRef<PendingFocusReturn | null>(null);
+  // 「一次 Escape 只收一层」的按键账：每次 Escape 按下记一个序号，按住期间（keyup /
+  // 失焦之前）这一次按键至多让一格以 escape 关闭。同一次按键还可能以别的形式再来一遍
+  // ——浏览器在 keydown 之后派发的 close request（`<dialog>` 的 cancel），而各浏览器对
+  // 「keydown 被 preventDefault 就不再派发」并不一致——那时被盖住的一层已经恢复成
+  // 最上层，没有这本账它会被同一次按键一起关掉。不经键盘的 close request（如移动端
+  // 返回手势）不计入，照旧每次关一层。
+  const escapePressRef = useRef({ serial: 0, held: false, consumed: -1 });
   const [version, setVersion] = useState(0);
+
+  useEffect(() => {
+    const press = escapePressRef.current;
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      press.serial += 1;
+      press.held = true;
+    };
+    const release = (event: Event) => {
+      if (event instanceof KeyboardEvent && event.key !== "Escape") return;
+      press.held = false;
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", release, true);
+    window.addEventListener("blur", release);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", release, true);
+      window.removeEventListener("blur", release);
+    };
+  }, []);
 
   const ownerIsCurrent = (owner: RootModalOwner): boolean => {
     if (
@@ -580,7 +622,9 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
 
   function open<S extends RootModalSlot>(slot: S, owner: RootModalOwner | null): RootModalLease<S> | null {
     const current = activeLease(slot);
-    if (owner && current && sameOwner(current.owner, owner)) return current;
+    // 同一 owner 重开是幂等的——只对顶层打开成立。开着的若是子层，它的 owner 是继承来的
+    // （不受本格 ownerKinds 约束），不能借这条短路让顶层 open 绕过 ownerKinds。
+    if (owner && current && current.parent === null && sameOwner(current.owner, owner)) return current;
     const lease = issue(slot, owner);
     return publish(lease) ? lease : null;
   }
@@ -591,10 +635,11 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
    * 策略表没有声明这一对叠放关系，一概返回 null，什么都不动。
    */
   function openAbove<S extends RootModalSlot>(slot: S, parentSlot: RootModalSlot): RootModalLease<S> | null {
-    if (!ROOT_MODAL_POLICIES[slot].stacksOver?.includes(parentSlot)) return null;
     const parent = activeRef.current.get(parentSlot);
     if (!parent || !ownerIsCurrent(parent.owner) || topmost()?.slot !== parentSlot) return null;
-    const lease = issueLease(slot, parent.owner, Object.freeze({ slot: parentSlot, issue: parent.issue }));
+    const link = Object.freeze({ slot: parentSlot, issue: parent.issue });
+    if (!mayStackAbove(ROOT_MODAL_POLICIES, slot, parentSlot, ancestorsOf(link))) return null;
+    const lease = issueLease(slot, parent.owner, link);
     return publish(lease) ? lease : null;
   }
 
@@ -626,6 +671,11 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
     if (reason === "backdrop" && !policy.backdrop) return false;
     if (reason === "escape" && !policy.escape) return false;
     if ((reason === "backdrop" || reason === "escape") && topmost()?.slot !== slot) return false;
+    const press = escapePressRef.current;
+    if (reason === "escape" && press.held) {
+      if (press.consumed === press.serial) return false;
+      press.consumed = press.serial;
+    }
     const wasTopmost = topmost()?.slot === slot;
     removeWithoutRender(slot, reason, true);
     const revealed = topmost();
