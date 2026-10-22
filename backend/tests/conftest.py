@@ -358,6 +358,24 @@ def _collect_first(items, key: tuple[str, str]) -> None:
             return
 
 
+LAUNCHER_SIGNAL_STRESS_ENV = "SILICON_NOTEBOOK_LAUNCHER_SIGNAL_STRESS"
+
+
+def _deselect_launcher_signal_stress(config, items) -> None:
+    """``launcher_signal_stress`` runs only when the environment asks for it.
+
+    It is a randomised, minutes-long run aimed at a bash race no deterministic
+    test can reach (docs/development.md, "Opt-in stress runs"), so neither G1
+    nor G2 selects it; it is deselected, never skipped.
+    """
+    if os.environ.get(LAUNCHER_SIGNAL_STRESS_ENV) == "1":
+        return
+    stress = [item for item in items if item.get_closest_marker("launcher_signal_stress")]
+    if stress:
+        config.hook.pytest_deselected(items=stress)
+        items[:] = [item for item in items if item not in stress]
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
     """Keep repository-wide source scans on one worker.
@@ -392,6 +410,7 @@ def pytest_collection_modifyitems(config, items):
                 pytest.mark.xdist_group(name="graph_index_contract"),
             )
     _collect_first(items, _DISPATCHED_FIRST)
+    _deselect_launcher_signal_stress(config, items)
 
     # Self-guard for the measured split above: only check allowlist entries
     # whose *file* was actually part of this collection run, so running a
