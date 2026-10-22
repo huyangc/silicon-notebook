@@ -403,7 +403,7 @@ def community_overview_payload(
     ``total``/``returned``/``truncated`` 三件套让「还有多少板块没返回」是显式的;每个
     板块另带 ``top_members_truncated``(成员数 > K),避免把 top-K 误读成板块全貌。
 
-    ``id`` 每一代重铸;``board_key``(v100/0081)是板块的跨代身份——新旧板块成员互为
+    ``id`` 每一代重铸;``board_key``(v102/0083)是板块的跨代身份——新旧板块成员互为
     最佳且 Jaccard ≥ 1/2 时沿用(`app.services.kg_partition`),供快照对比认出「同一个
     板块」。
     """

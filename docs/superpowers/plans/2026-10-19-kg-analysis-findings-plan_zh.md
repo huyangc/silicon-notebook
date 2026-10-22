@@ -12,9 +12,9 @@
 | PR-1 | 存储与契约：迁移、全部登记点、两侧 store 原语、合并代码分量列及两处写入（全量收尾 + 跳过路径），同步捕获集按版本冻结。合入后没有可见行为 | PR-0 | master |
 | PR-2 | 规则与读侧：领域契约、纯规则引擎（含 S1 的纯函数 v1/v2 种子与 squash key，只加函数不切调用点）、计算挂点与发布接线、relink 标记、`/findings` 与豁免端点、overview 新字段、后端文档 | PR-1 | PR-1 合入后 rebase |
 | PR-3 | 前端：四区、弹窗共存、动作接线、S4、界面词、release note | PR-2（契约先行，可并行开发） | PR-2 合入后 rebase |
-| PR-4 | P3+P4 一个 PR：S1 切换种子 + 决定重算 + 描述缓存按签名复用 + 待确认合并显示名 + F4 squash 候选档 + S2 热启动划分与 board_key + 一次 `CLUSTER_ALGO_VERSION` bump + 运维文档；一个迁移 v100/0081（S1 种子空间与 S2 分区列合一）、一条 release note | PR-1（合并代码分量列，否则 S4 会挡住修复）、PR-2（squash key 同源） | PR-2 合入后 rebase |
+| PR-4 | P3+P4 一个 PR：S1 切换种子 + 决定重算 + 描述缓存按签名复用 + 待确认合并显示名 + F4 squash 候选档 + S2 热启动划分与 board_key + 一次 `CLUSTER_ALGO_VERSION` bump + 运维文档；一个迁移 v102/0083（S1 种子空间与 S2 分区列合一）、一条 release note | PR-1（合并代码分量列，否则 S4 会挡住修复）、PR-2（squash key 同源） | PR-2 合入后 rebase |
 
-迁移号：开工时 origin/master 是 SQLite v94 / PG 0074；开工后 master 先合入了 v95/0075 与 v96/0076，所以 PR-1（#937）实际落 **v97/0077**。PR-4 先用占位，rebase 时取合入当时 origin/master 的下一号（PR-1 之后即 v98/0078 起）。合成 PR-4 时（2026-10-22）origin/master 已到 v99/0080，S1、S2 两条线各自的占位迁移（都是 v98/0078）合成**一个** SQLite `_migration_100` 与 PostgreSQL `0081_kg_seed_space_and_board_partition.sql`。PG 同号文件并存不报冲突，所以 MANIFEST 与全仓 `migrate() == N` 断言随改号一起改。
+迁移号：开工时 origin/master 是 SQLite v94 / PG 0074；开工后 master 先合入了 v95/0075 与 v96/0076，所以 PR-1（#937）实际落 **v97/0077**。PR-4 先用占位，rebase 时取合入当时 origin/master 的下一号（PR-1 之后即 v98/0078 起）。合成 PR-4 时（2026-10-22）origin/master 已到 v99/0080，S1、S2 两条线各自的占位迁移（都是 v98/0078）先合成**一个**迁移；随后 master 先后合入「一日删除窗口」（v100/0081）与「导航页标记」（v101/0082），PR-4 顺延为 SQLite `_migration_102` 与 PostgreSQL `0083_kg_seed_space_and_board_partition.sql`。PG 同号文件并存不报冲突，所以 MANIFEST 与全仓 `migrate() == N` 断言随改号一起改。
 
 ## 二、任务
 
@@ -49,7 +49,7 @@
 ### PR-4 种子修复与板块稳定（P3+P4）
 
 - **P4-T2 切换种子并记录发布代的种子空间**：别名表、`_seed_with_alias`、`bridge_canonical_id`、统一重建种子流、催收、增量融合按种子版本参数化；`unified_kg_state.concept_seed_version` 在发布合并结果的同一语句里写；增量融合按已发布代的空间安置。
-- **P4-T3 迁移**：候选表 `seed_version`（存量 1）；state 三列 `concept_seed_version`、`community_partition_version`、`community_partition_mode`；`communities.board_key`（回填为 id）；连带登记；删除知识图谱复位。S1、S2 合成后是一个迁移 v100/0081。
+- **P4-T3 迁移**：候选表 `seed_version`（存量 1）；state 三列 `concept_seed_version`、`community_partition_version`、`community_partition_mode`；`communities.board_key`（回填为 id）；连带登记；删除知识图谱复位。S1、S2 合成后是一个迁移 v102/0083。
 - **P4-T4 已存决定重算**（算法见规格 §五 S1「实施细化」）：放在每个库第一次 v2 全量重建里；覆盖 `~v1:` 例外；悬置发事件；决定计数折进输入版本。
 - **P4-T5 描述缓存按签名复用**。
 - **P4-T6 待确认合并「同名不同写法」标记**：两侧 canonical 名（后端 `name_a` / `name_b` + 前端 + 产品文档）已由单独的 PR（`claude/kg-pending-merge-names`）先行交付；「同名不同写法」标记仍在 PR-4 随 S1 的 squash key 一起加。

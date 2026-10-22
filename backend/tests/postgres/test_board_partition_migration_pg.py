@@ -1,5 +1,5 @@
-"""PostgreSQL migration ``0081_kg_seed_space_and_board_partition.sql`` (SQLite
-twins: ``test_sqlite_migrations.py::test_v100_…``).
+"""PostgreSQL migration ``0083_kg_seed_space_and_board_partition.sql`` (SQLite
+twins: ``test_sqlite_migrations.py::test_v102_…``).
 
 The one migration carries both halves of PR-4. Pinned on real PostgreSQL: the
 board partition's three columns and their defaults; the ``board_key`` backfill
@@ -26,11 +26,11 @@ pytestmark = [
 MIGRATION = (
     Path(__file__).resolve().parents[2]
     / "app" / "repositories" / "postgres" / "migrations"
-    / "0081_kg_seed_space_and_board_partition.sql"
+    / "0083_kg_seed_space_and_board_partition.sql"
 )
 NOW = "2026-10-21T00:00:00+00:00"
-NB = "nb-v80"
-NB_AFTER = "nb-v81"
+NB = "nb-v82"
+NB_AFTER = "nb-v83"
 
 
 def _columns(db) -> dict:
@@ -57,9 +57,9 @@ def _seed_spaces(db) -> dict:
         "WHERE notebook_id IN (%s, %s)", (NB, NB_AFTER))}
 
 
-def test_0081_adds_the_columns_and_backfills_every_generation(postgres_database):
+def test_0083_adds_the_columns_and_backfills_every_generation(postgres_database):
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate(target_version=80) == 80
+    assert migrator.migrate(target_version=82) == 82
     with postgres_database.write() as db:
         for notebook_id in (NB, NB_AFTER):
             db.execute("INSERT INTO notebooks (id, name, created_at, updated_at) "
@@ -75,7 +75,7 @@ def test_0081_adds_the_columns_and_backfills_every_generation(postgres_database)
                 "INSERT INTO communities (id, notebook_id, level, member_ids, size, "
                 "created_at, generation) VALUES (%s, %s, 0, '[\"K-x\"]'::jsonb, 1, %s, %s)",
                 (cid, NB, NOW, generation))
-    assert migrator.migrate() == 81
+    assert migrator.migrate() == 83
     with postgres_database.write() as db:
         db.execute("INSERT INTO unified_kg_state (notebook_id, updated_at) VALUES (%s, %s)",
                    (NB_AFTER, NOW))

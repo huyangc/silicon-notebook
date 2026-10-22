@@ -1281,7 +1281,7 @@ _V87_INSERTED_COLUMNS = frozenset({
 
 # Columns a migration AFTER v87 added with a backfill that differs from the
 # column's declared default, and the value every row existing at that
-# migration holds: v100 adds ``concept_seed_version`` with DEFAULT 2 (rows
+# migration holds: v102 adds ``concept_seed_version`` with DEFAULT 2 (rows
 # created from then on start in the code's seed space) and sets every row that
 # already existed -- the rows v87 inserted among them -- to 1.
 _POST_V87_BACKFILLS = {"concept_seed_version": 1}

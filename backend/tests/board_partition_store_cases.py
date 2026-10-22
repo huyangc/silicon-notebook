@@ -1,5 +1,5 @@
 """Shared world and expectations for the board partition store primitives
-(SQLite v100 / PostgreSQL 0081;
+(SQLite v102 / PostgreSQL 0083;
 design docs/superpowers/specs/2026-10-19-kg-analysis-findings-design_zh.md §五 S2).
 
 ``tests/test_board_partition_store.py`` runs every case on SQLite and

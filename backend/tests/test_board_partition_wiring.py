@@ -298,7 +298,7 @@ def test_a_partition_from_another_algorithm_version_starts_cold_and_carries_keys
 def test_a_legacy_generation_zero_partition_starts_cold_and_carries_its_ids(repo, events):
     """A notebook last built before the generational swap (or imported by
     merge_dbs) has its published boards in generation 0 under pointer 0, and
-    v100/0081 backfilled each board's key with its id. Pointer 0 is still a
+    v102/0083 backfilled each board's key with its id. Pointer 0 is still a
     published partition: the one-time cold start reads it and carries the old
     ids as keys."""
     nb = _graph(repo)
