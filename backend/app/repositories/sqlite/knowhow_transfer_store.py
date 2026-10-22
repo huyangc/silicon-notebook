@@ -292,7 +292,7 @@ class KnowhowTransferStore:
             # 语句与列序照抄 ChunkStore._insert_fts_rows（chunk_store.py:75-78,
             # 由 insert_rows:139 调用），不另发明 SQL；同事务保证「FTS 写失败
             # 连 chunk 行一起回滚」，与 replace_source_chunks 的既有不变量一致。
-            # notebook_sharing.py:487-491 对整本拷贝做的是同一件事，原因相同。
+            # notebook_copy_writer._insert_copy_fts_mirrors 对整本拷贝做的是同一件事，原因相同。
             chunk_rows = payload.get("chunks") or []
             if chunk_rows:
                 db.executemany(

@@ -544,7 +544,7 @@ _SHADOW_SPECS = {spec.name: spec for spec in _SHADOW_MANIFEST.tables}
 # absolute path, which means nothing here, so import re-anchors it on this
 # environment's storage root -- exactly what ``copy_notebook`` does for the
 # same column when it duplicates a notebook within one environment
-# (``services/notebook_sharing.py``: ``destination_dir / Path(value).name``).
+# (``services/notebook_copy_writer.py``: ``destination_dir / Path(value).name``).
 # Without this every mirrored source row points at a path that does not exist
 # on this host. Kept as data, and cross-checked below against the shadow
 # manifest's own ``path_columns`` so a newly declared path column cannot slip
@@ -4550,7 +4550,7 @@ def _prune_batches(
 # writer maintains them by hand: ``ChunkStore.insert_rows`` writes chunk rows,
 # ``KnowledgeLifecycle`` writes object rows, and each bulk path that bypasses
 # those -- ``knowhow_transfer_store`` for a transferred table,
-# ``notebook_sharing`` for a deep copy -- re-does it explicitly, in the same
+# ``notebook_copy_writer`` for a deep copy -- re-does it explicitly, in the same
 # transaction, for exactly this reason. An importer is another such path: land
 # the rows without these and the mirror has vector recall but is permanently
 # invisible to lexical search, with no self-healing probe to notice (the

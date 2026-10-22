@@ -60,7 +60,7 @@ _VISIBLE_SOURCE_NOTEBOOK_SQL = (
 # OTHER leg (the hidden source itself, its elements, its chunks+vectors, and
 # the five knowhow business tables + notebook_assets below) DOES travel with
 # a copy (PR-2 supersedes PR-1's blanket exclusion — see
-# app.services.notebook_sharing.NotebookCopyService.copy_notebook for the id
+# app.services.notebook_copy_writer.NotebookCopyWriter for the id
 # remap: element/chunk ids are RECOMPUTED via
 # app.services.knowhow.projection.element_id/cell_chunk_id, the same stable
 # formula project_table itself uses, so the copy's post-copy reprojection
@@ -293,7 +293,7 @@ _MEMORY_EDGES_SQL = "SELECT COUNT(*) AS n FROM (" + " UNION ".join(
 # Deep-copy row snapshot: table -> the exact SELECT the former mixin issued.
 # "notebooks" carries the single source row that the copy service rewrites
 # into the destination's hidden 'copying' sentinel. Order matters only for
-# readability; the INSERT order (FK-safe) is owned by NotebookCopyService.
+# readability; the INSERT order (FK-safe) is owned by NotebookCopyWriter.
 #
 # Deliberately absent: `catalog_jobs` / `catalog_candidates` (command-catalog
 # extraction, schema v38). Those rows are transient *process* state — one run's
@@ -381,7 +381,7 @@ _MEMORY_EDGES_SQL = "SELECT COUNT(*) AS n FROM (" + " UNION ".join(
 # participant-set resolution), so replaying the source's edge list verbatim
 # would leave the copy carrying permanently-dead edges to libraries its new
 # owner can never read. The snapshot therefore takes the source's edges here
-# and `NotebookCopyService.copy_notebook` re-evaluates each one against the
+# and `NotebookCopyWriter` (the deep copy's row writer) re-evaluates each one against the
 # DESTINATION notebook through `valid_copied_mount_base_ids` below — public
 # `tier='base'` libraries and `everyone`-granted ones survive every copy,
 # a privately-owned library survives only a copy whose owner still owns it,
@@ -780,8 +780,9 @@ class SharingStore:
     """SQLite sharing/membership rows plus the connection-taking deep-copy
     primitives (snapshot / chunked insert / compensate / sweep / validate).
 
-    Row-level only — share-token generation policy, ID remapping, filesystem
-    copy and compensation ORDERING live in app.services.notebook_sharing.
+    Row-level only — share-token generation policy, filesystem copy and
+    compensation ORDERING live in app.services.notebook_sharing, ID remapping
+    in app.services.notebook_copy_writer.
     ``insert_row`` is the facade's ``_insert_row`` compatibility seat injected
     late so per-instance monkeypatches keep observing every copied row.
     """

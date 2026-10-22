@@ -705,7 +705,7 @@ _COPY_VALIDATED_JOIN_TABLES = (
 )
 _COPY_TABLES = frozenset(table for table, _query in _COPY_SNAPSHOT_QUERIES)
 # Operational extraction history is intentionally absent from the source
-# snapshot, but NotebookCopyService synthesizes one copy-local completed KG
+# snapshot, but NotebookCopyWriter synthesizes one copy-local completed KG
 # generation for copied source facts. Keep snapshot eligibility and safe
 # insertion eligibility separate so adding this row cannot start copying run
 # history accidentally.

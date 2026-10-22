@@ -443,7 +443,7 @@ class SourceStore:
             #    本文件的 upsert_paper_meta 先 `SELECT id FROM sources WHERE
             #    id=%s AND notebook_id=%s FOR KEY SHARE` 做归属校验再写两张表,
             #    ON CONFLICT 不更新 notebook_id;clear_paper_meta / 删源只 DELETE;
-            #    notebook_sharing.py 的深拷贝对两张子表都同时改写 source_id 与
+            #    notebook_copy_writer.py 的深拷贝对两张子表都同时改写 source_id 与
             #    notebook_id 到新库;sqlite_to_postgres / shadow 复制与
             #    scripts/merge_dbs.py 都是按列原样搬运。全仓没有任何一处
             #    `UPDATE sources SET notebook_id=…`,即不存在把 source 移到另一个
