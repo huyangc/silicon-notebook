@@ -4104,6 +4104,7 @@ The public conversation projection carries the same notice when present and rend
 | Hint relative threshold (`REASONING_SECTION_HINT_RELATIVE_FLOOR`) | 0.5 (`0`–`1`; a share of the highest chunk cosine the run already holds) |
 | Chunks scanned for one source's outline, and the vectors read for it (`REASONING_SECTION_OUTLINE_MAX_ROWS`) | 4,000 (`0`–`20000`; `0` withdraws navigation altogether) |
 | `browse_sections.query` characters used for ranking (`SECTION_QUERY_MAX_CHARS`) | 300 |
+| Per-item characters echoed into summaries/ledger/trace for section-navigation source titles, section labels and `under` (`_SECTION_ECHO_CHARS`, cut with 「…」; the ambiguous-candidate list is further bounded by `REASONING_SECTION_BROWSE_MAX_CHARS`, issues addresses only for listed candidates and states how many were omitted) | 200 |
 | Process-wide cache for decoded section vectors across runs (`REASONING_SECTION_VECTOR_CACHE_MAX_BYTES`) | 256 MiB (`0`–`16 GiB`; `0` disables it; LRU, about 16 default-sized sources) |
 | Run-wide cache for decoded section vectors (`SECTION_VECTOR_RUN_MEMO_MAX_BYTES`) | 128 MiB (past it vectors are computed again instead of kept; one source takes about rows × runtime dimension × 4 bytes, 16 MB at 4,000 rows and 1,024 dimensions) |
 

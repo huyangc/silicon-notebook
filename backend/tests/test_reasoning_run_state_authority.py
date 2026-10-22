@@ -76,6 +76,7 @@ GUARDED = (
     "_resolve_section_address", "_action_read_section",
     "_section_spent", "_section_read_left", "_section_listing_note",
     "_section_failed", "_replay_section_listing", "_take_section_hint_detail",
+    "_ambiguous_section_skip",
 )
 #: ``run`` parameters that are frozen inputs (state keeps an identical copy);
 #: exempt in ``run`` only

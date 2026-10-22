@@ -679,7 +679,7 @@ def test_an_ambiguous_title_is_readable_by_the_returned_id(repo, monkeypatch):
     llm = _llm(_read("Notes", source="互连规范"), _read("s2"))
     result = _run(_reasoner(repo, monkeypatch, llm), nb)
     ambiguous = _skips(result)["section_ambiguous"]
-    assert "[s1] Notes、[s2] Notes" in ambiguous.summary
+    assert "[s1] Notes（1 段）、[s2] Notes（1 段）" in ambiguous.summary
     assert _steps(result, "read_section")[0].detail["result_ids"] == ["c-s6"]
 
 
@@ -1049,3 +1049,110 @@ def test_a_round_that_computes_no_hints_writes_no_key(repo, monkeypatch, why):
     result = _run(_reasoner(repo, monkeypatch, llm), nb)  # no retrieval run: stats are 0
     assert all("section_hints" not in step.detail
                for step in _steps(result, "reflect"))
+
+
+# ------------------------------------------- bounded ambiguity feedback (R1)
+
+_MANY_NOTES = tuple(
+    row
+    for index in range(500)
+    for row in (
+        (f"m{index}a", f"{index + 1} Part {index + 1}", f"第 {index + 1} 部分正文",
+         False, None),
+        (f"m{index}b", "Notes", f"第 {index + 1} 部分的注释", False, None),
+    )
+)
+
+
+def test_an_ambiguous_title_with_500_namesakes_stays_within_the_browse_budget(
+    repo, monkeypatch,
+):
+    """codex #975 R1:同名 500 处时,歧义回喂经目录的有界渲染器列出(预算
+    `REASONING_SECTION_BROWSE_MAX_CHARS`),只给显示出来的候选发地址,注明省略数;
+    这行留在账目里每轮重放,也同样有界。"""
+    nb = _seed(repo, vectors=False, rows=_MANY_NOTES)
+    budget = repo.settings.reasoning_section_browse_max_chars
+    llm = _llm(_read("Notes", source="互连规范"), _read("s999"))
+    retriever = _reasoner(repo, monkeypatch, llm, seed=("m0a",), rows=_MANY_NOTES)
+    result = _run(retriever, nb)
+    skip = _skips(result)["section_ambiguous"]
+    listed = skip.detail["listed"]
+    assert skip.detail["matches"] == 500 and 0 < listed < 500
+    # header + the bounded listing + the omission note
+    fixed = len("跳过按章节读取原文:「Notes」在《互连规范》里出现 500 处,请改用其中一个 [sN]:")
+    assert len(skip.summary) <= fixed + budget + 60
+    assert f"另有 {500 - listed} 处同名未列出,可用 browse_sections 的 under/query 收窄" in (
+        skip.summary)
+    # only the displayed candidates got an address: s1..s<listed>
+    assert skip.summary.count("[s") == listed + 1   # + the "[sN]" in the header
+    assert f"[s{listed}]" in skip.summary and f"[s{listed + 1}]" not in skip.summary
+    # the ledger line replayed in the next prompt is the same bounded text
+    prompt = llm.reflect_prompts[1]
+    start = prompt.index("（章节导航记录")
+    ledger = prompt[start:prompt.index("。）", start) + 2]
+    assert len(ledger) <= fixed + budget + 100
+    assert _skips(result)["section_not_surfaced"].detail["section"] == "s999"
+
+
+def test_an_unlisted_namesake_has_no_address(repo, monkeypatch):
+    """同一个 run 里:列出的最后一个候选可读,紧随其后的那个号从未发出。"""
+    import re
+
+    nb = _seed(repo, vectors=False, rows=_MANY_NOTES)
+    repo.settings.reasoning_section_browse_max_chars = RENDER_MIN_CHARS
+    retriever = _reasoner(repo, monkeypatch, _llm(), seed=("m0a",), rows=_MANY_NOTES)
+    seen: dict = {}
+
+    def reflect(question, summary, **kwargs):
+        turn = seen.setdefault("turn", 0)
+        seen["turn"] = turn + 1
+        if turn == 0:
+            return ReflectDecision(next_action=READ_SECTION_ACTION,
+                                   read_section_section="Notes",
+                                   read_section_source="互连规范")
+        if turn == 1:
+            seen["last"] = max(int(n) for n in re.findall(r"\[s(\d+)\] Notes", summary))
+            return ReflectDecision(next_action=READ_SECTION_ACTION,
+                                   read_section_section=f"s{seen['last'] + 1}")
+        if turn == 2:
+            return ReflectDecision(next_action=READ_SECTION_ACTION,
+                                   read_section_section=f"s{seen['last']}")
+        return ReflectDecision(next_action="answer", sufficient=True)
+
+    retriever.reflect = reflect
+    result = _run(retriever, nb)
+    listed = _skips(result)["section_ambiguous"].detail["listed"]
+    assert seen["last"] == listed
+    assert _skips(result)["section_not_surfaced"].detail["section"] == f"s{listed + 1}"
+    assert _steps(result, "read_section")[0].detail["result_ids"] == [f"m{listed - 1}b"]
+
+
+def test_long_titles_and_labels_are_clipped_in_every_replayed_text(repo, monkeypatch):
+    """库里的来源标题与章节标签不设长度上限;进摘要、账目、轨迹前一律截成有界的一行。"""
+    long_label = "5.7.3 " + "非常长的章节标题" * 100
+    rows = (
+        ("c-a", "5 Electrical", "第五章 电气规范概述", False, None),
+        ("c-b", long_label, "标准封装插损表", False, None),
+    )
+    nb = _seed(repo, vectors=False, rows=rows)
+    with repo._write() as db:
+        db.execute("UPDATE sources SET title=? WHERE id='src-spec'",
+                   ("互连规范" + "很长的标题" * 100,))
+    llm = _llm(_browse("互连规范" + "很长的标题" * 100), _read("5.7.3", source=(
+        "互连规范" + "很长的标题" * 100)))
+    hit = RetrievedChunk(
+        chunk_id="c-a", source_id="src-spec", source_title="互连规范" + "很长的标题" * 100,
+        section_path="5 Electrical", text="第五章 电气规范概述", relevance=0.5, score=0.5)
+    retriever = _reasoner(repo, monkeypatch, llm, seed=(), extra_hits=(hit,))
+    result = _run(retriever, nb)
+    read = _steps(result, "read_section")[0]
+    assert len(read.detail["section"]) <= 200 and read.detail["section"].endswith("…")
+    assert len(read.detail["source"]) <= 200
+    assert len(_steps(result, "browse_sections")[0].summary) < 600
+    # the navigation texts (the ledger and the listing); the generic evidence
+    # lines above them are the candidate summary's own, not this feature's
+    prompt = llm.reflect_prompts[-1]
+    navigation = prompt[prompt.index("（章节导航记录"):]
+    listing = llm.reflect_prompts[1][llm.reflect_prompts[1].index("（章节目录:"):]
+    for text in (navigation, listing):
+        assert "非常长的章节标题" * 40 not in text and "很长的标题" * 60 not in text

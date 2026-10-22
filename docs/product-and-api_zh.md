@@ -2969,6 +2969,7 @@ V2 实验协议与布局已退役。Ask、Deep Report 和 Knowhow 均使用 Lega
 | 线索相对阈值（`REASONING_SECTION_HINT_RELATIVE_FLOOR`） | 0.5（`0`–`1`；本 run 已有 chunk 最高余弦的比例） |
 | 单个来源大纲扫描的 chunk 数及为它读取的向量数（`REASONING_SECTION_OUTLINE_MAX_ROWS`） | 4,000（`0`–`20000`；`0` 整体撤下导航） |
 | `browse_sections.query` 用于排名的字符数（`SECTION_QUERY_MAX_CHARS`） | 300 |
+| 章节导航回显到摘要/账目/轨迹的来源标题、章节标签、`under` 单项字符上限（`_SECTION_ECHO_CHARS`，超出截断加「…」；歧义候选清单另受 `REASONING_SECTION_BROWSE_MAX_CHARS` 约束，只给列出的候选发地址并注明省略数） | 200 |
 | 跨 run 的进程级章节向量缓存（`REASONING_SECTION_VECTOR_CACHE_MAX_BYTES`） | 256 MiB（`0`–`16 GiB`；`0` 关闭；LRU，约容纳 16 个默认大小的来源） |
 | 整个 run 的章节向量解码缓存（`SECTION_VECTOR_RUN_MEMO_MAX_BYTES`） | 128 MiB（超出后向量重新计算而不再保留；单个来源约 行数 × 运行时维度 × 4 字节，4,000 行、1,024 维时 16 MB） |
 
