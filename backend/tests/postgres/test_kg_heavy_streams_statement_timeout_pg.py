@@ -38,6 +38,9 @@ FLOOR_MS = 600_000
 
 def _seed(connection) -> None:
     stamp = normalize_timestamp(NOW)
+    # 造数据不是被测对象:池里 2 s 的 statement_timeout 在 CI 高负载下会让
+    # 12000 行宽行插入 + 外键检查 QueryCanceled;只放开这次 write 事务。
+    connection.execute("SET LOCAL statement_timeout = 0")
     connection.execute(
         "INSERT INTO notebooks (id,name,created_at,updated_at) VALUES (%s,%s,%s,%s)",
         (NB, NB, stamp, stamp),
