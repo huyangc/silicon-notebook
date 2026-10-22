@@ -402,7 +402,10 @@ Deliberately NOT moved into a transaction, with the reason for each:
     build_chunks (source_chunking)   Writes ``chunks``; not a graph row and
                                 not a review-queue input.
     backfill_node_embeddings / reembed_kg   Write embedding tables; offline
-                                CLI/batch. Not graph rows.
+                                CLI/batch and the notebook-reembed job's
+                                object leg, which (like batch_ingest) calls
+                                mark_unified_kg_dirty after a pass that
+                                wrote vectors. Not graph rows.
 
 Red lines:
 - ``mark_unified_kg_dirty`` / ``mark_unified_kg_dirty_in_tx`` stay the ONLY
