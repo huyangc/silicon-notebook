@@ -90,7 +90,7 @@ function summary(overrides: Partial<KgFindingsSummary> = {}): KgFindingsSummary 
       F5: { status: "ran", objects_checked: 41713, total: 1 },
     },
     dev_items: [{
-      item_id: "S1", groups: 14, objects: 220,
+      item_id: "S1", status: "open", groups: 14, objects: 220,
       samples: [{ names: ["RMS Norm", "RMSNorm"] }, { names: ["Q-Former", "Qformer"] }],
     }],
     structure: {
@@ -367,6 +367,7 @@ test("四个区依次排开：待处理（按严重度 → 影响面）、需要
 
   const dev = zone(/^需要开发处理/);
   expect(within(dev).getByText(/14 组只差空格\/连字符的概念没有合并（例：RMS Norm \/ RMSNorm；Q-Former \/ Qformer）/)).toBeInTheDocument();
+  expect(within(dev).queryByText(/已修复/)).toBeNull();
   expect(within(dev).queryAllByRole("button")).toHaveLength(0);
 
   const sections = Array.from(container.querySelectorAll(".kg-analysis-body > *"));
@@ -441,6 +442,24 @@ test("认不出的规则与字段不报错、不上屏代号：只少几句话",
 });
 
 // ------------------------------------------------------------------ 只读
+
+test("需要开发处理：代码已修复、这个库还没更新分析时写「已修复，更新分析后生效」，仍然不放按钮", async () => {
+  const base = report();
+  vi.mocked(fetchKgAnalysis).mockResolvedValue(report({
+    findings_summary: {
+      ...base.findings_summary,
+      dev_items: base.findings_summary.dev_items.map((item) => ({ ...item, status: "fixed_pending_update" })),
+    },
+  }));
+  renderPanel();
+  await ready();
+  const dev = zone(/^需要开发处理/);
+  expect(within(dev).getByText(
+    "14 组只差空格/连字符的概念没有合并（例：RMS Norm / RMSNorm；Q-Former / Qformer）。已修复，更新分析后生效。",
+  )).toBeInTheDocument();
+  expect(within(dev).queryByText(/这是合并规则的缺陷/)).toBeNull();
+  expect(within(dev).queryAllByRole("button")).toHaveLength(0);
+});
 
 test("只读成员：同样的问题与证据，一个按钮都没有（含标为正常与撤销）", async () => {
   renderPanel({ canAnalyze: false, findingHandlers: {
