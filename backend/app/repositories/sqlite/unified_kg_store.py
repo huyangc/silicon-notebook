@@ -1577,7 +1577,7 @@ class UnifiedKgStore:
     ) -> None:
         """写新代(批 3·W2 §1.3,取代旧 replace_communities 的整表重写):
         不 DELETE,旧代行由发布路径前的预回收清理;理由见 PG 孪生。``board_keys``
-        与 ``kept`` 逐行对齐(v98,占位号)。"""
+        与 ``kept`` 逐行对齐(v100)。"""
         if len(board_keys) != len(kept):
             raise ValueError("write_communities_generation: board_keys 必须与 kept 逐行对齐")
         for (cid, members), board_key in zip(kept, board_keys):
@@ -1679,7 +1679,7 @@ class UnifiedKgStore:
         db: sqlite3.Connection, notebook_id: str, *, version: int, mode: str,
         expected_version: Optional[int] = None,
     ) -> bool:
-        """已发布划分的分区算法版本与方式(v98,占位号);``expected_version`` 的 CAS
+        """已发布划分的分区算法版本与方式(v100);``expected_version`` 的 CAS
         与返回值语义见 PG 孪生。"""
         db.execute(
             "UPDATE unified_kg_state SET community_partition_mode=? WHERE notebook_id=?",

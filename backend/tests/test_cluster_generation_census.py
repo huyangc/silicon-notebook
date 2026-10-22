@@ -125,7 +125,7 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
     "backend/app/repositories/sqlite/sharing_store.py": (2, 0, 0, 3, 0,
         "PG 孪生同注记"),
     "backend/app/repositories/postgres/unified_kg_store.py": (32, 10, 8, 29, 13,
-        "板块划分 S2(v98/0078,占位号):``community_board_key_rows`` 读调用方给定的"
+        "板块划分 S2(v100/0081):``community_board_key_rows`` 读调用方给定的"
         "那一代(重建认领时拿到的已发布代 published_from,作为参数 generation = %s "
         "绑定,两侧都过滤、成员按 m.generation = c.generation 相关对齐),不是本守卫"
         "计数的谓词写法——B 类(读指定代,与 copy_forward_communities 同形),"
@@ -176,7 +176,7 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "检查的 published 分页读 2 处(代次作参数绑定);另 2 处 concept_clusters 与"
         "2 处 community_members 同 PG 孪生的补充说明。"),
     "backend/app/repositories/sqlite/migrations.py": (6, 2, 4, 1, 0,
-        "非站点:DDL(_migration_71 的索引重建);_migration_98(占位号)把存量板块的 "
+        "非站点:DDL(_migration_71 的索引重建);_migration_100 把存量板块的 "
         "board_key 回填成 id(UPDATE communities,C 类跨代:每一代的板块都要有 key,"
         "已发布代之外的行回填了也无害),communities +1;谓词计数来自启动恢复"
         "_reap_stale_derived_generations 的 state 行现读(逐本取 keep)。"

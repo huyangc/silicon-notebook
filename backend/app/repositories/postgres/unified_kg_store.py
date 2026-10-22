@@ -1809,7 +1809,7 @@ class UnifiedKgStore:
         (cid, sorted members) 对写进 generation 代,**不 DELETE**——旧代行由
         发布路径前的预回收清理,指针翻转在既有发布事务里(D-W2-6)。min-size
         策略仍归 orchestration。``board_keys`` 与 ``kept`` 逐行对齐,是每个板块
-        的跨代身份(v98/0078,占位号)。"""
+        的跨代身份(v100/0081)。"""
         if len(board_keys) != len(kept):
             raise ValueError("write_communities_generation: board_keys 必须与 kept 逐行对齐")
         for (cid, members), board_key in zip(kept, board_keys):
@@ -1921,7 +1921,7 @@ class UnifiedKgStore:
         db: Any, notebook_id: str, *, version: int, mode: str,
         expected_version: Optional[int] = None,
     ) -> bool:
-        """已发布划分的分区算法版本与方式(v98/0078,占位号)。发布路径在翻转指针的
+        """已发布划分的分区算法版本与方式(v100/0081)。发布路径在翻转指针的
         同一个写事务里调;``--cold-partition`` 把版本写回 0。无 state 行 → no-op
         (与 `set_community_seq` 同:下一次照样重建)。
 
