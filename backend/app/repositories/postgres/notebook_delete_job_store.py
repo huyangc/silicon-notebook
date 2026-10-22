@@ -239,6 +239,11 @@ class NotebookDeleteJobStore:
     ) -> dict | None:
         """T3. See the SQLite twin for the contract."""
         instant = self._instant(now)
+        # Two clocks on purpose: the due test reads the sweep tick (``now``,
+        # injected, one reading per tick), while ``updated_at`` and the job
+        # row's timestamps read this store's clock -- the clock ``request()``
+        # writes its 'deleting' row with and the delete job's lease and stale
+        # checks compare against.
         with self.database.write() as connection:
             cas = connection.execute(
                 "UPDATE notebooks SET status='deleting',updated_at=%s "

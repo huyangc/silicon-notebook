@@ -491,6 +491,66 @@ def case_global_round_is_re_checked_against_every_searched_library(world: World)
     assert world.client.get(page).status_code == 200
 
 
+def _deletion_window(world: World, *, opened: bool) -> None:
+    """The owner deletes the world's notebook (it enters its one-day
+    window) or cancels that deletion, through the real routes."""
+    if opened:
+        response = world.client.delete(
+            f"/api/notebooks/{world.notebook}", headers=world.owner.headers
+        )
+        assert response.status_code == 202, response.text
+    else:
+        response = world.client.post(
+            f"/api/notebooks/{world.notebook}/cancel-delete", headers=world.owner.headers
+        )
+        assert response.status_code == 200, response.text
+
+
+def case_conversation_page_is_gone_inside_the_deletion_window(world: World) -> None:
+    """``/c``: a notebook in its deletion window answers like a missing one;
+    the owner's cancel brings the same link back."""
+    cid, (first,) = seed_conversation(world, world.alice, [
+        answer([source_anchor(world.doc_source, "k1")]),
+    ])
+    page = f"/api/public/conversations/{publish(world, world.alice, cid, first).json()['share_token']}"
+    assert world.client.get(page).status_code == 200
+    _deletion_window(world, opened=True)
+    gone = world.client.get(page)
+    assert gone.status_code == 404
+    assert gone.json() == world.client.get(
+        "/api/public/conversations/cshr-never-issued").json()
+    _deletion_window(world, opened=False)
+    assert world.client.get(page).status_code == 200
+
+
+def case_report_page_is_gone_inside_the_deletion_window(world: World) -> None:
+    rid = make_report(world, world.alice, [source_ref(world.doc_source, "k1")])
+    page = f"/api/public/reports/{share(world, world.alice, rid).json()['share_token']}"
+    assert world.client.get(page).status_code == 200
+    _deletion_window(world, opened=True)
+    gone = world.client.get(page)
+    assert gone.status_code == 404
+    assert gone.json() == {"detail": "shared report not found"}
+    _deletion_window(world, opened=False)
+    assert world.client.get(page).status_code == 200
+
+
+def case_global_round_citing_a_notebook_in_its_deletion_window_is_gone(world: World) -> None:
+    """A global session share whose round cites the notebook: gone while the
+    notebook is in its window, back after the cancel."""
+    cid, (first,) = seed_global(
+        world, world.alice,
+        [answer([source_anchor(world.doc_source, "k1", notebook_id=world.notebook)])],
+        resolved=[world.notebook],
+    )
+    page = f"/api/public/conversations/{global_publish(world, world.alice, cid, first).json()['share_token']}"
+    assert world.client.get(page).status_code == 200
+    _deletion_window(world, opened=True)
+    assert world.client.get(page).status_code == 404
+    _deletion_window(world, opened=False)
+    assert world.client.get(page).status_code == 200
+
+
 CASES: dict[str, Callable[[World], None]] = {
     name: case for name, case in globals().items()
     if name.startswith("case_") and callable(case)

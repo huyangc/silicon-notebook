@@ -19,7 +19,10 @@ from app.domain.agent_tools import (
 )
 from app.domain.notebook_delete_grace import (
     DELETE_WINDOW_CLOSED_CODE,
+    DELETE_WINDOW_TRANSFER_PAGE_SIZE,
+    MEMORY_NOT_READABLE_CODE,
     WINDOW_CLOSED,
+    WINDOW_LIVE,
     utc_instant,
 )
 from app.models.identity import (
@@ -45,8 +48,10 @@ from app.repositories.identity_errors import (
 from app.repositories.ports import (
     AskStateStorePort,
     DeleteWindowClosedError,
+    DeleteWindowTransferInProgressError,
     MemoryStorePort,
     NotebookAccessRepository,
+    NotInDeleteWindowError,
 )
 from app.services.embedding import Embedder
 from app.core.memory_inputs import (
@@ -1513,41 +1518,71 @@ class MemoryService:
         return self.store.answer_memory_links(notebook_id, user_id, unique_ids)
 
     def transfer_out_of_delete_window(
-        self, user_id: str, notebook_id: str, target_notebook_id: str
-    ) -> list[dict]:
+        self, user_id: str, notebook_id: str, target_notebook_id: str,
+        *, after: str | None = None,
+    ) -> dict:
         """「转移到我的笔记本」(ruling 2026-10-22, the fifth deletion-window
-        exit): move every one of the caller's ``confirmed`` Memory items the
-        move rule accepts out of ``notebook_id`` -- live, or inside its
-        deletion window -- into ``target_notebook_id`` (a live notebook the
-        caller owns). Always ``move``, ``extract_kg`` as the Memory page's
-        transfer defaults it (on); the server picks the items
-        (``delete_window_transferable_ids``), candidates and proposed items
-        stay behind. Each item goes through ``transfer``'s own checks and
-        lands in its result list, same shape.
+        exit): move the caller's ``confirmed`` Memory items the move rule
+        accepts out of ``notebook_id`` -- a notebook inside its deletion window
+        -- into ``target_notebook_id`` (a live notebook the caller owns).
+        Always ``move``, ``extract_kg`` as the Memory page's transfer defaults
+        it (on); the server picks the items (``delete_window_transferable_ids``),
+        candidates and proposed items stay behind. Each item goes through
+        ``transfer``'s own checks and lands in its result list, same shape.
 
-        The instant is taken once, before anything is read: the window must
-        be open when the transfer starts (the deadline means "start before
-        it"). Each item re-checks the window with that instant
+        One page per call: at most ``DELETE_WINDOW_TRANSFER_PAGE_SIZE`` items
+        in id order after ``after`` (the previous page's ``next_after``). The
+        answer is ``{"results", "remaining", "next_after"}``: ``remaining``
+        counts the transferable items after this page, so a client repeats
+        until it is 0. Every page re-checks the window: its instant is taken
+        once, before anything is read, and each item re-reads under it
         (``_transfer_source``); once the promotion has committed, the items
         not yet moved fail one by one with ``delete_window_closed`` and the
-        ones already moved stay moved. A moved item never returns to the
-        notebook, even if the owner cancels the deletion afterwards.
+        ones already moved stay moved -- also if the owner cancels later.
+
+        One transfer at a time per (caller, notebook)
+        (``delete_window_transfer_claim``): two at once would both copy an
+        item before either removed it. The second gets
+        ``DeleteWindowTransferInProgressError`` at once.
 
         Raises ``KeyError`` (unreadable / missing: 404),
-        ``DeleteWindowClosedError`` (404 ``delete_window_closed``) and
-        ``PermissionError`` (the target is not a live notebook the caller
-        owns: 404)."""
-        now = self.now()
-        state = self.store.delete_window_state(notebook_id, user_id, now=now)
-        if state is None:
-            raise KeyError(notebook_id)
-        if state == WINDOW_CLOSED:
-            raise DeleteWindowClosedError(notebook_id)
-        ids = self.store.delete_window_transferable_ids(notebook_id, user_id, now=now)
-        return self.transfer(
-            user_id, ids, target_notebook_id, "move", True,
-            delete_window=(notebook_id, now),
-        )
+        ``NotInDeleteWindowError`` (a live notebook: 409),
+        ``DeleteWindowClosedError`` (404 ``delete_window_closed``),
+        ``DeleteWindowTransferInProgressError`` (409) and ``PermissionError``
+        (the target is not a live notebook the caller owns: 404)."""
+        with self.store.delete_window_transfer_claim(notebook_id, user_id) as held:
+            if not held:
+                raise DeleteWindowTransferInProgressError(notebook_id)
+            now = self.now()
+            state = self.store.delete_window_state(notebook_id, user_id, now=now)
+            if state is None:
+                raise KeyError(notebook_id)
+            if state == WINDOW_LIVE:
+                raise NotInDeleteWindowError(notebook_id)
+            if state == WINDOW_CLOSED:
+                raise DeleteWindowClosedError(notebook_id)
+            ids = self.store.delete_window_transferable_ids(
+                notebook_id, user_id, now=now, after=after,
+                limit=DELETE_WINDOW_TRANSFER_PAGE_SIZE,
+            )
+            results = self.transfer(
+                user_id, ids, target_notebook_id, "move", True,
+                delete_window=(notebook_id, now),
+            )
+            next_after = ids[-1] if ids else after
+            remaining = self.store.delete_window_transferable_count(
+                notebook_id, user_id, now=now, after=next_after,
+            )
+        return {"results": results, "remaining": remaining, "next_after": next_after}
+
+    def _window_source_gone(
+        self, delete_window: "tuple[str, Any] | None", memory_id: str
+    ) -> bool:
+        """A window transfer whose conditional delete matched nothing because
+        the source row is gone: the notebook's own delete (after the
+        promotion) removed it after the copy committed. The item did leave
+        the notebook, so it counts as moved, not as "copied, source kept"."""
+        return delete_window is not None and not self.store.memory_row_exists(memory_id)
 
     def _transfer_source(
         self, memory_id: str, user_id: str, delete_window: "tuple[str, Any] | None"
@@ -1555,10 +1590,12 @@ class MemoryService:
         """The source item of one ``transfer`` step. Outside a deletion-window
         transfer: the caller's own Memory under the ordinary live read. Inside
         one (``delete_window`` = ``(notebook_id, instant)``): under the window
-        read at that instant, and only from that notebook; when the item is
-        no longer readable because the window has closed (promoted, or the
-        membership already removed), the step fails with
-        ``delete_window_closed`` instead of a generic "not found"."""
+        read at that instant, and only from that notebook. When the item can
+        no longer be read the step fails with the reason that holds
+        (``delete_window_failure_code``): ``delete_window_closed`` once the
+        window has closed (promoted, or the notebook already gone),
+        ``not_readable`` when the caller lost access while it is still open;
+        a missing item stays a plain failure."""
         if delete_window is None:
             return self.store.memory_for_user(memory_id, user_id)
         notebook_id, instant = delete_window
@@ -1567,11 +1604,14 @@ class MemoryService:
                 memory_id, user_id, delete_window_now=instant
             )
         except KeyError:
-            state = self.store.delete_window_state(notebook_id, user_id, now=instant)
-            if state in (None, WINDOW_CLOSED):
+            code = self.store.delete_window_failure(notebook_id, user_id, now=instant)
+            if code == DELETE_WINDOW_CLOSED_CODE:
                 raise _TransferRejected(
-                    "删除时间已到，记忆已无法转移",
-                    error_code=DELETE_WINDOW_CLOSED_CODE,
+                    "删除时间已到，记忆已无法转移", error_code=code,
+                )
+            if code == MEMORY_NOT_READABLE_CODE:
+                raise _TransferRejected(
+                    "你已无法读取这本笔记本，记忆无法转移", error_code=code,
                 )
             raise
         if source.notebook_id != notebook_id:
@@ -1827,7 +1867,7 @@ class MemoryService:
                             self.memory_kg.remove_memory_source(source.id)
                         if not self.store.delete_memory_if_unchanged(
                             source.id, user_id, source_revision
-                        ):
+                        ) and not self._window_source_gone(delete_window, source.id):
                             # round 10 P1-B：源确凿是因为原子删除的 WHERE 子句
                             # 未命中才被保留的——在任何后续收尾工作（下面的
                             # 重新排队 KG 抽取）有机会自己出错之前，先诚实记

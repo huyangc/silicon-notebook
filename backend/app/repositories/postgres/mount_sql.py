@@ -62,6 +62,11 @@ MOUNT_GATE_CLOSED_EXPR = (
     + " AND NOT " + _MOUNTER_NOT_SHARED_EXPR + ")"
 )
 
+# 被挂库本身不在存活状态(删除窗口里、正在删除、深拷贝或导入中)——list_mount_edges
+# 用它给失效边一条不断言错误原因的解释。取 MOUNT_VALID_EXPR 里那同一个存活项的否定,
+# 消费点不许手拼。
+MOUNT_BASE_NOT_LIVE_EXPR = "(NOT b." + NOTEBOOK_LIVE_SQL + ")"
+
 MOUNT_VALID = " AND " + MOUNT_VALID_EXPR
 
 # 可挂候选的来源投影(群组知识共享 P1-T4)。

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Callable, Literal, Sequence
 
 from app.core.activity_time import activity_retention_window
+from app.domain.mount_edges import mount_edge_view
 from app.domain.source_display import source_display_title
 from app.models.notebooks import NotebookCreate, NotebookUpdate
 from app.repositories.postgres._store_utils import (
@@ -18,6 +19,7 @@ from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.notebook_delete_job_store import NotebookDeleteJobStore
 from app.repositories.postgres.mount_sql import (
+    MOUNT_BASE_NOT_LIVE_EXPR as _MOUNT_BASE_NOT_LIVE_EXPR,
     MOUNT_GATE_CLOSED_EXPR as _MOUNT_GATE_CLOSED_EXPR,
     MOUNT_JOIN as _MOUNT_JOIN,
     MOUNT_ORDER as _MOUNT_ORDER,
@@ -167,38 +169,19 @@ class NotebookStore:
     @staticmethod
     def list_mount_edges(connection, notebook_id: str) -> list[dict]:
         rows = connection.execute(
-            "SELECT b.id AS id,b.name AS name,b.tier AS tier,"
+            "SELECT b.id AS id,b.name AS name,b.tier AS tier,b.status AS base_status,"
             + _MOUNT_VALID_EXPR
             + " AS ok,"
             + _MOUNT_GATE_CLOSED_EXPR
-            + " AS gate_closed,(b.created_by=a.created_by) AS same_owner "
+            + " AS gate_closed,"
+            + _MOUNT_BASE_NOT_LIVE_EXPR
+            + " AS base_not_live,(b.created_by=a.created_by) AS same_owner "
             + _MOUNT_JOIN
             + _MOUNT_ORDER,
             (notebook_id,),
         ).fetchall()
-        result = []
-        for row in rows:
-            active = bool(row["ok"])
-            gate_closed = bool(row["gate_closed"])
-            # 被未共享门关上的借入边:挂载方 owner 对被挂库仍有合法读权,名字
-            # 照常显示,文案给出恢复出口(与 SQLite 侧逐字一致)。
-            name_visible = active or bool(row["same_owner"]) or gate_closed
-            if active:
-                reason = ""
-            elif gate_closed:
-                reason = "本笔记本已共享，借来的参考库暂停参与检索；取消本笔记本的共享即可恢复"
-            else:
-                reason = "该库已不是公共知识库，且不属于你"
-            result.append(
-                {
-                    "id": row["id"],
-                    "name": row["name"] if name_visible else "已不可用的知识库",
-                    "tier": row["tier"] or "personal",
-                    "active": active,
-                    "inactive_reason": reason,
-                }
-            )
-        return result
+        # 原因与名字可见性在 app/domain/mount_edges.py,两个后端共用。
+        return [mount_edge_view(row) for row in rows]
 
     def list_mount_edges_for_notebook(self, notebook_id: str) -> list[dict]:
         with self.database.connect() as connection:

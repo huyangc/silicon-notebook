@@ -42,6 +42,20 @@ NOTEBOOK_PENDING_DELETE_CODE = "notebook_pending_delete"
 NOTEBOOK_DELETE_DUE_CODE = "notebook_delete_due"
 # An export / transfer out of a notebook whose window has closed.
 DELETE_WINDOW_CLOSED_CODE = "delete_window_closed"
+# One item of a window transfer the caller can no longer read although the
+# window is still open (their access to the notebook was withdrawn).
+MEMORY_NOT_READABLE_CODE = "not_readable"
+# Another window transfer of the same caller out of the same notebook is
+# running (one at a time: two at once would copy the same item twice).
+TRANSFER_IN_PROGRESS_CODE = "transfer_in_progress"
+# The window transfer endpoint on a notebook that is not inside a window.
+NOT_IN_DELETE_WINDOW_CODE = "notebook_not_pending_delete"
+
+# One request of the window transfer moves at most this many items, in a
+# stable order (by id); the answer says how many are left after it and where
+# the next request starts, so a large notebook is moved page by page and every
+# page re-checks the window.
+DELETE_WINDOW_TRANSFER_PAGE_SIZE = 200
 
 
 # The window's status value (``access_sql.NOTEBOOK_PENDING_DELETE_STATUS`` on
@@ -77,6 +91,21 @@ def classify_delete_window(row: Any) -> str | None:
         return WINDOW_OPEN
     if row["status"] in (PENDING_DELETE_STATUS, "deleting"):
         return WINDOW_CLOSED
+    return None
+
+
+def delete_window_failure_code(row: Any) -> str | None:
+    """Why one item of a window transfer could not be read, from the same
+    row ``classify_delete_window`` reads: the notebook is gone or its window
+    has closed (promoted or not) -> ``delete_window_closed``; the window is
+    open but the caller lost read access -> ``not_readable``; ``None`` when
+    neither holds (the item itself is missing)."""
+    if row is None:
+        return DELETE_WINDOW_CLOSED_CODE
+    if row["status"] in (PENDING_DELETE_STATUS, "deleting") and not row["window_open"]:
+        return DELETE_WINDOW_CLOSED_CODE
+    if not row["readable"]:
+        return MEMORY_NOT_READABLE_CODE
     return None
 
 

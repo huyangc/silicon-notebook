@@ -20,19 +20,28 @@ read is pinned to ``world.clock`` for the same reason.
 """
 from __future__ import annotations
 
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 import pytest
 
+from app.domain.mount_edges import (
+    MASKED_MOUNT_NAME,
+    MOUNT_BASE_UNAVAILABLE_REASON,
+    MOUNT_OWN_PENDING_DELETE_REASON,
+)
 from app.domain.notebook_delete_grace import (
     DELETE_WINDOW_CLOSED_CODE,
+    MEMORY_NOT_READABLE_CODE,
     NOTEBOOK_DELETE_GRACE_SECONDS,
 )
 from app.models.schemas import NotebookCreate
 from app.repositories.ports import (
     DeleteWindowClosedError,
+    DeleteWindowTransferInProgressError,
     NotebookAlreadyDeletingError,
     NotebookDeleteDueError,
     NotebookPendingDeleteError,
@@ -252,6 +261,43 @@ def case_cancel_restores_everything(world: World) -> None:
     assert probe() == (world.doomed, {world.owner_target, world.doomed})
     # Idempotent: a second cancel reports the live notebook.
     assert store.cancel_pending(world.doomed, now=T0) == "already_live"
+
+
+def _mount(world: World, notebook_id: str, base_id: str, by: Any) -> Callable[[], list]:
+    world.sql.write(
+        "INSERT INTO notebook_bases (notebook_id,base_notebook_id,created_at,created_by) "
+        "VALUES (?,?,?,?)",
+        (notebook_id, base_id, iso(T0), by.id),
+    )
+    store = world.runtime.notebook_store
+    return lambda: [
+        (edge["name"], edge["active"], edge["inactive_reason"])
+        for edge in store.list_mount_edges_for_notebook(notebook_id)
+    ]
+
+
+def case_my_mount_of_my_deleted_notebook_says_cancel_brings_it_back(world: World) -> None:
+    """The mounting owner deleted the mounted notebook themselves: the edge
+    says so and names the way back, under the real name."""
+    edges = _mount(world, world.owner_target, world.doomed, world.owner)
+    assert edges() == [("将被删除", True, "")]
+    world.request()
+    assert edges() == [("将被删除", False, MOUNT_OWN_PENDING_DELETE_REASON)]
+    world.runtime.notebook_delete_jobs.cancel_pending(world.doomed, now=T0)
+    assert edges() == [("将被删除", True, "")]
+
+
+def case_a_public_library_deleted_by_its_owner_is_only_unavailable(world: World) -> None:
+    """Someone else's public library in its window: the mounter is told it is
+    unavailable -- not that it was demoted or is not theirs -- and its name
+    stays masked; a cancel brings the edge back whole."""
+    world.sql.write("UPDATE notebooks SET tier='base' WHERE id=?", (world.doomed,))
+    edges = _mount(world, world.member_target, world.doomed, world.member)
+    assert edges() == [("将被删除", True, "")]
+    world.request()
+    assert edges() == [(MASKED_MOUNT_NAME, False, MOUNT_BASE_UNAVAILABLE_REASON)]
+    world.runtime.notebook_delete_jobs.cancel_pending(world.doomed, now=T0)
+    assert edges() == [("将被删除", True, "")]
 
 
 def case_cancel_restores_draft_when_nothing_was_recorded(world: World) -> None:
@@ -560,16 +606,24 @@ def case_the_export_file_names_the_deadline(world: World) -> None:
 # ------------------------------------------------ transfer (B9, 2026-10-22)
 
 
-def transfer(world: World, user: Any, target: str) -> list[dict]:
+def transfer_page(
+    world: World, user: Any, target: str, after: str | None = None
+) -> dict:
     return world.runtime.memory_service.transfer_out_of_delete_window(
-        user.id, world.doomed, target
+        user.id, world.doomed, target, after=after
     )
+
+
+def transfer(world: World, user: Any, target: str) -> list[dict]:
+    page = transfer_page(world, user, target)
+    assert page["remaining"] == 0
+    return page["results"]
 
 
 def case_the_window_moves_confirmed_memory_to_my_notebook(world: World) -> None:
     world.request()
     results = transfer(world, world.member, world.member_target)
-    assert [row["source_id"] for row in results] == list(world.confirmed)
+    assert sorted(row["source_id"] for row in results) == sorted(world.confirmed)
     assert all(row["ok"] and row["status"] == "moved" for row in results)
     for row in results:
         assert world.memory_notebook(row["new_id"]) == world.member_target
@@ -581,6 +635,186 @@ def case_the_window_moves_confirmed_memory_to_my_notebook(world: World) -> None:
     assert notice["memory_count"] == 2 and notice["transferable_count"] == 0
     # Nothing left to move: an empty, honest answer.
     assert transfer(world, world.member, world.member_target) == []
+
+
+def _confirmed_memory(world: World, user: Any, tag: str) -> str:
+    """One more confirmed item of ``user`` in ``doomed`` (before the window:
+    a notebook inside it takes no writes)."""
+    service = world.runtime.memory_service
+    world.clock[0] += timedelta(seconds=1)
+    item = service.create_candidate(
+        world.doomed, user.id, None, f"req-{tag}", f"Title {tag}", f"Body {tag}.",
+        [], "reason", {}, [],
+    )
+    service.confirm(item.id, user.id, {"extract_kg": False})
+    world.clock[0] = T0
+    return item.id
+
+
+def _titles_in(world: World, notebook_id: str) -> list[str]:
+    return sorted(row["title"] for row in world.sql.rows(
+        "SELECT title FROM memory_items WHERE notebook_id=?", (notebook_id,)
+    ))
+
+
+@contextmanager
+def _page_size(size: int):
+    from app.services import memory_service as module
+
+    previous = module.DELETE_WINDOW_TRANSFER_PAGE_SIZE
+    module.DELETE_WINDOW_TRANSFER_PAGE_SIZE = size
+    try:
+        yield
+    finally:
+        module.DELETE_WINDOW_TRANSFER_PAGE_SIZE = previous
+
+
+def case_the_transfer_goes_page_by_page_until_nothing_is_left(world: World) -> None:
+    """More items than one page: each page moves at most the page size in id
+    order, says how many are left and where the next starts; repeating until
+    ``remaining`` is 0 moves every item exactly once."""
+    extra = [_confirmed_memory(world, world.member, f"x{i}") for i in range(3)]
+    world.request()
+    expected = sorted([*world.confirmed, *extra])
+    seen, remaining, after = [], [], None
+    with _page_size(2):
+        while True:
+            page = transfer_page(world, world.member, world.member_target, after)
+            assert len(page["results"]) <= 2
+            assert all(row["ok"] and row["status"] == "moved" for row in page["results"])
+            seen += [row["source_id"] for row in page["results"]]
+            remaining.append(page["remaining"])
+            after = page["next_after"]
+            if page["remaining"] == 0:
+                break
+    assert remaining == [3, 1, 0]
+    assert seen == expected
+    assert _titles_in(world, world.member_target) == sorted(
+        ["Title c1", "Title c2", "Title x0", "Title x1", "Title x2"]
+    )
+
+
+def case_a_page_after_the_deadline_closes_the_transfer(world: World) -> None:
+    """The deadline passes between two pages: the next page is refused
+    before it reads anything, the moved ones stay moved."""
+    extra = [_confirmed_memory(world, world.member, f"x{i}") for i in range(3)]
+    world.request()
+    ordered = sorted([*world.confirmed, *extra])
+    with _page_size(2):
+        first = transfer_page(world, world.member, world.member_target)
+        assert [row["source_id"] for row in first["results"]] == ordered[:2]
+        assert first["remaining"] == 3
+        world.runtime.notebook_delete_jobs.promote_due_pending(world.doomed, now=DEADLINE)
+        world.clock[0] = DEADLINE
+        with pytest.raises(DeleteWindowClosedError):
+            transfer_page(world, world.member, world.member_target, first["next_after"])
+    for source in ordered[:2]:
+        assert world.memory_notebook(source) is None
+    for source in ordered[2:]:
+        assert world.memory_notebook(source) == world.doomed
+
+
+def case_two_window_transfers_at_once_run_one(world: World) -> None:
+    """Two tabs press「确认转移」together: one runs, the other is refused at
+    once (``transfer_in_progress``); every item lands in the target exactly
+    once and the one result list says so."""
+    world.request()
+    store = world.runtime.memory_store
+    real = store.memory_for_user
+    entered, release = threading.Event(), threading.Event()
+
+    def paused(memory_id, user_id, **kwargs):
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(10)
+        return real(memory_id, user_id, **kwargs)
+
+    store.memory_for_user = paused
+    outcome: dict = {}
+
+    def first() -> None:
+        outcome["results"] = transfer(world, world.member, world.member_target)
+
+    thread = threading.Thread(target=first)
+    thread.start()
+    try:
+        assert entered.wait(10)
+        with pytest.raises(DeleteWindowTransferInProgressError):
+            transfer(world, world.member, world.member_target)
+    finally:
+        release.set()
+        thread.join(20)
+        store.memory_for_user = real
+    assert sorted(row["source_id"] for row in outcome["results"]) == sorted(world.confirmed)
+    assert all(row["ok"] and row["status"] == "moved" for row in outcome["results"])
+    assert _titles_in(world, world.member_target) == ["Title c1", "Title c2"]
+    # The claim is released: a later transfer runs (nothing is left to move).
+    assert transfer(world, world.member, world.member_target) == []
+
+
+def case_a_source_removed_by_the_delete_after_its_copy_counts_as_moved(world: World) -> None:
+    """The window closes and the notebook's delete runs between an item's
+    copy and its source removal: the source is gone, so the item did leave
+    -- ``moved``, not "copied, source kept"; the next item fails
+    ``delete_window_closed``."""
+    world.request()
+    store = world.runtime.memory_store
+    real = store.delete_memory_if_unchanged
+    runner = world.runtime.notebook_delete
+    calls = {"n": 0}
+
+    def delete_runs_first(memory_id, user_id, revision):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            job = world.runtime.notebook_delete_jobs.promote_due_pending(
+                world.doomed, now=DEADLINE
+            )
+            runner.run(job["id"])
+            assert world.status() is None
+        return real(memory_id, user_id, revision)
+
+    store.delete_memory_if_unchanged = delete_runs_first
+    try:
+        results = world.runtime.memory_service.transfer_out_of_delete_window(
+            world.member.id, world.doomed, world.member_target
+        )["results"]
+    finally:
+        store.delete_memory_if_unchanged = real
+    first, second = results
+    assert (first["ok"], first["status"], first["error_code"]) == (True, "moved", None)
+    assert world.memory_notebook(first["new_id"]) == world.member_target
+    assert (second["ok"], second["error_code"]) == (False, DELETE_WINDOW_CLOSED_CODE)
+
+
+def case_losing_access_part_way_reports_not_readable(world: World) -> None:
+    """The caller's membership goes while the window is still open: the
+    remaining items fail ``not_readable`` (the true reason), not
+    ``delete_window_closed``."""
+    world.request()
+    store = world.runtime.memory_store
+    real = store.memory_for_user
+    calls = {"n": 0}
+
+    def lose_access_before_the_second(memory_id, user_id, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            world.sql.write(
+                "DELETE FROM notebook_members WHERE notebook_id=? AND user_id=?",
+                (world.doomed, world.member.id),
+            )
+        return real(memory_id, user_id, **kwargs)
+
+    store.memory_for_user = lose_access_before_the_second
+    try:
+        results = world.runtime.memory_service.transfer_out_of_delete_window(
+            world.member.id, world.doomed, world.member_target
+        )["results"]
+    finally:
+        store.memory_for_user = real
+    first, second = results
+    assert first["ok"] and first["status"] == "moved"
+    assert (second["ok"], second["error_code"]) == (False, MEMORY_NOT_READABLE_CODE)
+    assert world.memory_notebook(second["source_id"]) == world.doomed
 
 
 def case_moved_memory_stays_moved_after_a_cancel(world: World) -> None:
@@ -659,7 +893,7 @@ def case_a_promotion_part_way_fails_the_remaining_items(world: World) -> None:
     try:
         results = service.transfer_out_of_delete_window(
             world.member.id, world.doomed, world.member_target
-        )
+        )["results"]
     finally:
         store.memory_for_user = real
     first, second = results
