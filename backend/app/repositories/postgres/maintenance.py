@@ -1321,7 +1321,7 @@ class PostgresMaintenanceAdapter:
                 ).fetchall()
             ]
 
-    def embed_chunks_batch(self, notebook_id: str, items: list[dict]) -> None:
+    def embed_chunks_batch(self, notebook_id: str, items: list[dict]) -> int:
         # 嵌入服务是后端中性的共享 runtime 组件——两后端薄委托同一实现(与 sqlite maintenance 一致)。
         return self._runtime.source_embedding.embed_chunks_batch(notebook_id, items)
 
@@ -1500,11 +1500,22 @@ class PostgresMaintenanceAdapter:
                 (notebook_id,),
             )
 
-    def backfill_relation_embeddings(self, notebook_id: str) -> None:
-        """Fill relation vectors in bounded id pages, idempotently."""
+    def backfill_relation_embeddings(
+        self,
+        notebook_id: str,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> int:
+        """Fill relation vectors in bounded id pages, idempotently; returns the number
+        of vectors written (0 when ``relation_embedding`` is unbound).
+
+        ``progress`` receives running ``(written, attempted)`` totals after each page:
+        attempted counts the missing relations that hydrate to a queryable edge, so the
+        difference is what failed model batches left missing."""
         if not self._runtime.models.configured("relation_embedding"):
-            return
+            return 0
         after_id = ""
+        written = 0
+        attempted = 0
         while True:
             with self._runtime.database.connect() as db:
                 rows = db.execute(
@@ -1520,7 +1531,10 @@ class PostgresMaintenanceAdapter:
             relation_ids = [str(row["id"]) for row in rows]
             after_id = relation_ids[-1]
             # Hydration and model work run after releasing the discovery read.
-            relations = self._runtime.retrieval.relations_with_names(
+            # ``retrieval_component`` composes retrieval on first use; the bare
+            # ``retrieval`` attribute is None until something else has (an offline
+            # run or a fresh process raised AttributeError here).
+            relations = self._runtime.retrieval_component.relations_with_names(
                 notebook_id, relation_ids
             )
             items = [
@@ -1528,11 +1542,18 @@ class PostgresMaintenanceAdapter:
                 for relation in relations
             ]
             if items:
-                self._runtime.source_embedding.embed_relations_batch(
-                    notebook_id, items
+                attempted += len(items)
+                written += int(
+                    self._runtime.source_embedding.embed_relations_batch(
+                        notebook_id, items
+                    )
+                    or 0
                 )
+            if progress:
+                progress(written, attempted)
             if len(rows) < _EMBEDDING_PAGE_SIZE:
                 break
+        return written
 
     def mark_unified_kg_dirty(self, notebook_id: str) -> None:
         self._runtime.kg_mutations.mark_unified_kg_dirty(notebook_id)

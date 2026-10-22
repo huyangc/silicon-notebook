@@ -17,7 +17,7 @@ import pytest
 
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
-from app.services import sqlite_repository
+from app.services import notebook_reembed, sqlite_repository
 from app.services.checkup import CheckupService, probe_scale_index_integrity
 from app.services.embedding import FakeEmbedder
 from tests.model_testkit import bind_all_embedding_clients
@@ -840,7 +840,7 @@ def test_backfill_job_notifies_h45_exactly_once(repo, monkeypatch):
     monkeypatch.setattr(
         repo, "configured", lambda wid: wid == "source_element_embedding"
     )
-    monkeypatch.setattr(source_routes, "_BACKFILL_PAGE_ROWS", 10)   # 25 行 → 3 页
+    monkeypatch.setattr(notebook_reembed, "_BACKFILL_PAGE_ROWS", 10)   # 25 行 → 3 页
     calls: list = []
     forward = repo._runtime.on_source_vectors_written
     repo._runtime.on_source_vectors_written = (
@@ -1196,7 +1196,6 @@ def test_backfill_page_rows_is_a_multiple_of_embed_batch_size(repo):
     ``return _BACKFILL_PAGE_ROWS`` 这个变异会静默通过。
 
     变异锚点:``_backfill_page_rows`` 改成 ``return _BACKFILL_PAGE_ROWS`` → 32/64/700 三档红。"""
-    from app.api import source_routes
 
     class _FakeSettings:
         def __init__(self, size):
@@ -1211,12 +1210,12 @@ def test_backfill_page_rows_is_a_multiple_of_embed_batch_size(repo):
             self._runtime = _FakeRuntime(size)
 
     for size in (1, 7, 10, 32, 64, 300, 700):
-        page = source_routes._backfill_page_rows(_FakeRepo(size))
+        page = notebook_reembed._backfill_page_rows(_FakeRepo(size))
         assert page % size == 0, f"page {page} not a multiple of batch size {size}"
         assert page >= size                      # 至少一整批,绝不退化成 0
     # 真 repo 的实际配置同样成立(默认 500/10)。
     real_size = repo._runtime.settings.embed_batch_size
-    assert source_routes._backfill_page_rows(repo) % real_size == 0
+    assert notebook_reembed._backfill_page_rows(repo) % real_size == 0
 
 
 def test_backfill_job_discovers_once_then_hydrates_by_page(repo, monkeypatch):
@@ -1243,7 +1242,7 @@ def test_backfill_job_discovers_once_then_hydrates_by_page(repo, monkeypatch):
 
     # 只配 element 侧,chunk 侧整段短路(不发现、不 hydrate)。
     monkeypatch.setattr(repo, "configured", lambda wid: wid == "source_element_embedding")
-    monkeypatch.setattr(source_routes, "_BACKFILL_PAGE_ROWS", 10)   # → 页 = 10 行(1 整批)
+    monkeypatch.setattr(notebook_reembed, "_BACKFILL_PAGE_ROWS", 10)   # → 页 = 10 行(1 整批)
 
     discoveries: list = []
     hydrations: list = []
@@ -1312,7 +1311,7 @@ def test_backfill_job_discovers_chunks_once_too(repo, monkeypatch):
     assert len(reference) == 20
 
     monkeypatch.setattr(repo, "configured", lambda wid: wid == "chunk_embedding")
-    monkeypatch.setattr(source_routes, "_BACKFILL_PAGE_ROWS", 10)
+    monkeypatch.setattr(notebook_reembed, "_BACKFILL_PAGE_ROWS", 10)
     discoveries: list = []
     real_ids = mnt.missing_chunk_embedding_ids
 
@@ -1353,7 +1352,7 @@ def test_backfill_job_discovers_once_per_source(repo, monkeypatch):
     ]
     mnt = repo.maintenance
     monkeypatch.setattr(repo, "configured", lambda wid: wid == "source_element_embedding")
-    monkeypatch.setattr(source_routes, "_BACKFILL_PAGE_ROWS", 10)
+    monkeypatch.setattr(notebook_reembed, "_BACKFILL_PAGE_ROWS", 10)
     seen: list = []
     real_ids = mnt.missing_element_embedding_ids
 
@@ -1376,17 +1375,16 @@ def test_backfill_hydration_is_re_sorted_into_discovery_order(repo):
     重排,否则「哪几行进同一次 embedder 调用」会随后端/执行计划漂。
 
     变异锚点:把 ``_hydrate_in_id_order`` 改成 ``return rows`` → 本条红。"""
-    from app.api import source_routes
 
     shuffled = [
         {"id": "el-3", "source_id": "s", "text": "c"},
         {"id": "el-1", "source_id": "s", "text": "a"},
         {"id": "el-2", "source_id": "s", "text": "b"},
     ]
-    assert [r["id"] for r in source_routes._hydrate_in_id_order(shuffled)] == [
+    assert [r["id"] for r in notebook_reembed._hydrate_in_id_order(shuffled)] == [
         "el-1", "el-2", "el-3",
     ]
-    assert source_routes._hydrate_in_id_order([]) == []
+    assert notebook_reembed._hydrate_in_id_order([]) == []
 
 
 def test_missing_embedding_ids_match_the_unbounded_rows_predicate(repo):

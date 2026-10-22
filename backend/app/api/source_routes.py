@@ -1,5 +1,3 @@
-import logging
-import threading
 from pathlib import Path
 from typing import Callable, List, Sequence
 
@@ -43,29 +41,20 @@ from app.repositories.ports import (
     SourceRepository,
     UploadedSourceFile,
 )
-from app.services import background_jobs
+from app.services import background_jobs, notebook_reembed
 from app.services.kg import scheduler as kg_scheduler
 from app.services.knowhow.assets import AssetService
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.model_work import model_artifact_scope
+from app.services.notebook_reembed import NotebookReembedService
 from app.services.parser_registry import SUPPORTED_SOURCE_SUFFIXES
 
 
 router = APIRouter()
 
-_logger = logging.getLogger("silicon_notebook.backfill_vectors")
-
 # 批量重解析一次最多受理的源数(去重后)。体检命中样本本就 ≤20;给宽松上限只为挡住
 # 「重复 id/超大列表灌满无界执行器队列」(codex),不是产品限制。
 _REPARSE_MAX = 200
-
-# Z7: backfill-vectors 的 per-notebook 单飞守卫,进程内 set+lock,与
-# NotebookCatalog.kg_building 同型(见 app/services/notebook_catalog.py)。
-# 这个端点没有类似 kg_building 那样的既有 owner 实例可挂,故用模块级状态——
-# 同一进程内的所有请求共享它,和 kg_building/scale build 的 building 集合
-# 一样只是「本进程」范围的准入判断,不跨进程持久。
-_backfill_vectors_inflight: set[str] = set()
-_backfill_vectors_inflight_lock = threading.Lock()
 
 _SOURCE_UPLOAD_OPENAPI = {
     "requestBody": {
@@ -588,150 +577,15 @@ def reparse_sources(
     return RepairScheduledResult(scheduled=scheduled)
 
 
-_BACKFILL_PAGE_ROWS = 500
-"""每源分页读取的目标行数(会向下取整到 embed_batch_size 的整数倍,见 _backfill_page_rows)。"""
-
-
-def _backfill_page_rows(repo) -> int:
-    """把 ``_BACKFILL_PAGE_ROWS`` 向下取整到 ``embed_batch_size`` 的整数倍(至少一整批)。
-
-    ⚠ 取整不是美学:``embed_chunks_batch`` / ``embed_elements_batch`` 都把收到的行按
-    ``embed_batch_size`` 切成一次次 embedder 调用。页大小若不是它的整数倍,每页末尾就会
-    多出一个不足整批的调用,**调用次数**就跟着变。取整之后 embedder 的调用次数与
-    「一次性喂全部行」逐字相同(``ceil(N / embed_batch_size)``)。
-
-    ⚠ 只说到这里为止:**每次调用的文本分组可能不同**。无界 rows 版按 planner 返回序切批,
-    分页/发现版按 id 升序切批,同一批里装的行因此可能不是同一撮。落库的向量集合与
-    embedder 的调用次数不受影响(每行的文本是它自己的,与同批邻居无关),这是刻意接受的
-    差异——把它写成「每次调用的文本逐字相同」是不对的。"""
-    size = max(1, int(repo._runtime.settings.embed_batch_size))
-    return max(size, (_BACKFILL_PAGE_ROWS // size) * size)
-
-
-def _hydrate_in_id_order(rows: list) -> list:
-    """把主键 hydrate 回来的行按 ``id`` 升序重排。
-
-    ``*_texts_by_ids`` 走 ``id IN (...)`` / ``id=ANY(...)``,SQL 对这类查询**不保证行序**
-    (SQLite 按主键 b-tree 序、PG 按它选中的访问路径),而发现查询是 ``ORDER BY id``。
-    不重排的话「哪几行进同一次 embedder 调用」会随后端和执行计划漂;重排之后页边界与
-    批内容确定、可复现,与 keyset 分页版逐字同序。"""
-    return sorted(rows, key=lambda r: str(r["id"]))
-
-
 def _backfill_vectors_job(repo, notebook_id: str) -> None:
-    """后台补齐该 notebook 缺失的 chunk + element 向量(只补缺失、幂等)。EMBED 未配则跳过。
-
-    ⚠ **逐源经 hold_source_chunk_lock 持 P1.5 的分块锁、锁内读→嵌**(codex P1):element/chunk id
-    在 reparse 时复用,并发补齐若在锁外读到旧代行、embedding 后在替换之后才提交,会给新文本挂上
-    **永久陈旧向量**(后续缺向量检查也发现不了——向量「在」,只是内容旧)。守卫在持锁期间同时登记
-    活跃租约,使 process_source 不会在本方仍持锁时把锁 pop 掉(codex 第2轮 P1:否则后续 reparse 另建
-    新锁、互斥失效;backfill-only 源还会锁泄漏)。锁内才读缺失行,故读到的行在补齐提交前不会被
-    reparse 换掉——彻底关掉「快照后才开始 reparse」的残留窗口。best-effort:一源失败不拦其余。
-
-    源发现只用**轻量 DISTINCT source_id 查询**、且只查已配的 workload(codex 第2轮 P1:大库上
-    把每行全文物化进内存仅为收 source_id 会 GB 级/OOM,还会白扫未配的那侧)。
-
-    ⚠ 锁内是 **一次发现 + 按页主键 hydrate**(审计批4 + 其评审修订):
-      - 无界的 ``missing_*_embedding_rows`` 会把该源每一行的**全文**一次性读进内存(2 万
-        元素的手册就是几百 MB,而这条命令的用途恰恰是修大库)——所以正文必须按页取;
-      - 但按页**重跑发现查询**(``missing_*_embedding_page`` 的 keyset)更糟:本仓库从不对
-        生产库跑 ``ANALYZE``,``id > ?`` 在无统计信息时被选成整表主键区间扫、``source_id``
-        降级成残余过滤(EXPLAIN 实测),21k 行的源 = 43 页 × 43 次全扫;
-      - 故发现只跑**一次**、只投影 id(``missing_*_embedding_ids``,判据与 rows 版逐字一致,
-        几十字节 × 21k 的内存可忽略),正文再按页经 ``*_texts_by_ids`` 主键取回。扫描回到
-        一次,正文驻留仍按页有界。
-    写入的向量集合逐位不变:每行**恰好被尝试一次**(id 列表内不重复、按序消费),嵌入失败
-    的行仍是本轮跳过、下轮再补;页大小是 ``embed_batch_size`` 的整数倍(见
-    ``_backfill_page_rows``),故 embedder 调用次数与不分页时相同——**分组**可能不同,理由
-    见该函数 docstring。
-    hydrate 回来的行按发现序重排(``IN`` 不保证行序),保证页边界与批内容可复现。
-    发现查询 ``missing_*_vector_source_ids`` 保持原样:它只投影 DISTINCT source_id、不物化正文,
-    其 btrim/TRIM 全表评估是**判据本身**(与 rows/count/page/ids 四处逐字一致),没有索引可
-    依托,也省不掉这一次扫描——登记为已知代价,不在本次改动范围。
-
-    Z7:外层 try/finally 只负责释放 per-notebook 单飞守卫
-    (``_backfill_vectors_inflight``),无条件覆盖整个函数体——即便最上面这行
-    ``require_indexing_pipeline_write`` 就抛出,守卫也必须放开,否则该 notebook
-    的后续 backfill 请求会被这次失败永久卡住(直到进程重启)。内层结构逐字保留
-    改动前的语义(未配置两类 embedding 时的提前 return 不算「已尝试补齐」,不
-    触发 ``note_source_vectors_written``)。发现查询此前**在 try 之外**——一旦
-    超时会绕开 finally,既不释放单飞守卫也不失效 H4/H5 memo,且异常本身在
-    ``kg_scheduler`` 的 fire-and-forget ``Future`` 里静默消失(评审点名的边缘)。
-    现挪进 try 并加一条 ``except``,发现阶段与循环体本身的任何失败都会被记账
-    (日志可见),不再是「超时=沉默消失」。"""
-    try:
-        repo.require_indexing_pipeline_write(notebook_id)
-        mnt = repo.maintenance
-        ingestion = repo._runtime.source_ingestion
-        chunk_ok = repo.configured("chunk_embedding")
-        elem_ok = repo.configured("source_element_embedding")
-        if not (chunk_ok or elem_ok):
-            return
-        try:
-            # 廉价定位「有缺失向量的源」:只取 DISTINCT source_id(不物化正文),且只查已配 workload。
-            # 真正补齐在锁内按 only_source_id 重新发现(发现到的才是待嵌的行)。
-            sources: set[str] = set()
-            if chunk_ok:
-                sources |= set(mnt.missing_chunk_vector_source_ids(notebook_id))
-            if elem_ok:
-                sources |= set(mnt.missing_element_vector_source_ids(notebook_id))
-            page = _backfill_page_rows(repo)
-            for source_id in sources:
-                with ingestion.hold_source_chunk_lock(source_id):
-                    # Recheck after queueing and again at each source-generation lock;
-                    # a pipeline switch aborts the job rather than being swallowed as
-                    # one source's best-effort embedding failure.
-                    repo.require_indexing_pipeline_write(notebook_id)
-                    try:
-                        if chunk_ok:
-                            ids = mnt.missing_chunk_embedding_ids(
-                                notebook_id, only_source_id=source_id
-                            )
-                            for start in range(0, len(ids), page):
-                                rows = _hydrate_in_id_order(
-                                    mnt.chunk_texts_by_ids(ids[start:start + page])
-                                )
-                                if not rows:
-                                    continue
-                                mnt.embed_chunks_batch(
-                                    notebook_id,
-                                    [{"_oid": r["id"], "payload": {"text": r["text"]}} for r in rows],
-                                )
-                    except Exception:  # noqa: BLE001 — 后台 job 自负错误,一源失败不拦其余
-                        pass
-                    try:
-                        if elem_ok:
-                            ids = mnt.missing_element_embedding_ids(
-                                notebook_id, only_source_id=source_id
-                            )
-                            for start in range(0, len(ids), page):
-                                rows = _hydrate_in_id_order(
-                                    mnt.element_texts_by_ids(ids[start:start + page])
-                                )
-                                if not rows:
-                                    continue
-                                mnt.embed_elements_batch(
-                                    notebook_id,
-                                    [{"element_id": r["id"], "source_id": r["source_id"], "text": r["text"]} for r in rows],
-                                )
-                    except Exception:  # noqa: BLE001
-                        pass
-        except Exception:  # noqa: BLE001 — Z7: 发现阶段/循环体本身的失败现在记账可见,
-            # 不再绕过下面的 note_source_vectors_written 或静默消失在 Future 里。
-            _logger.exception(
-                "backfill-vectors job 失败(已跳过): notebook_id=%s", notebook_id
-            )
-        finally:
-            # 体检 H4/H5 的**边界**事件失效(codex 质量评审 P1):embed 成功不 bump
-            # kg_mutation_seq,而「job 整个落在两次轮询之间」时租约快照也回到原值——没有
-            # 这一下,修复前的计数会被 memo 原样再端到背底 TTL(300s)。刻意只在 job 边界
-            # 发**一次**、不在每页发:job 运行中的每次轮询已被租约键变化逼成现算,且修复中
-            # 的源被租约排除在计数外,页级失效触发的重算可证明返回同一个数,纯付 anti-join
-            # 的钱。finally:中途异常(如管线切换中止)时已提交的页同样改变了计数。
-            repo._runtime.source_embedding.note_source_vectors_written(notebook_id)
-    finally:
-        with _backfill_vectors_inflight_lock:
-            _backfill_vectors_inflight.discard(notebook_id)
+    """The scheduler job behind ``POST /notebooks/{id}/backfill-vectors``: the
+    ``chunks`` and ``elements`` legs of ``NotebookReembedService`` (only what is missing,
+    per source under its chunk lock; Knowhow tables reprojected so their chunks keep
+    ``knowhow_embedding``). Runs the run the route claimed and releases the shared
+    single-flight guard on every exit, including the pipeline gate raising first."""
+    NotebookReembedService(repo).run_claimed(
+        notebook_id, legs=notebook_reembed.SOURCE_VECTOR_LEGS
+    )
 
 
 @router.post(
@@ -758,9 +612,12 @@ def backfill_vectors(notebook_id: str) -> RepairScheduledResult:
     # ("group-gone" 才解除「修复中」)是零打扰的既有分支,不需要新增错误处理或文案。换成
     # 409 需要新增一条 user_error() 中文文案,而前端现有 reportError() 落地在
     # setStatusText(全局状态位、不紧邻按钮),不如幂等受理干净。
-    with _backfill_vectors_inflight_lock:
-        if notebook_id in _backfill_vectors_inflight:
-            return RepairScheduledResult(accepted=True)
+    # 单飞守卫与 notebook-reembed 共用(services/notebook_reembed.py):在飞的若是只跑
+    # KG 腿的重嵌作业,chunks/elements 会并进它的下一轮,同样不重复提交。
+    if NotebookReembedService.join_running(
+        notebook_id, notebook_reembed.SOURCE_VECTOR_LEGS
+    ):
+        return RepairScheduledResult(accepted=True)
     # Z7 受理判定改走 CheckupService 的窄读口 missing_vector_counts()(H4/H5 事件/版本
     # 驱动 memo,PR #625;复用体检看板本身在用的同一份缓存,数值同源、语义一致),不再
     # 内联直打 count_missing_chunk_vectors/count_missing_element_vectors 两条整表反连接
@@ -789,15 +646,14 @@ def backfill_vectors(notebook_id: str) -> RepairScheduledResult:
     # 计数判定与提交之间有窗口,故这里必须**再查一次**单飞集合再登记——上面那次早退只是
     # 省查询的快路径,不是受理判定的唯一闸门;两次检查用的是同一把锁、同一个 set,语义
     # 与改动前一致(仍是「登记后才提交 job」的单次原子动作)。
-    with _backfill_vectors_inflight_lock:
-        if notebook_id in _backfill_vectors_inflight:
-            return RepairScheduledResult(accepted=True)
-        _backfill_vectors_inflight.add(notebook_id)
+    if not NotebookReembedService.claim(
+        notebook_id, notebook_reembed.SOURCE_VECTOR_LEGS
+    ).started:
+        return RepairScheduledResult(accepted=True)
     try:
         kg_scheduler.submit_job(_backfill_vectors_job, repo, notebook_id)
     except Exception:
-        with _backfill_vectors_inflight_lock:
-            _backfill_vectors_inflight.discard(notebook_id)
+        NotebookReembedService.release(notebook_id)
         raise
     return RepairScheduledResult(accepted=True)
 

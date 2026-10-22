@@ -994,7 +994,7 @@ class SQLiteMaintenanceAdapter:
     def embed_elements_batch(self, notebook_id: str, items: list[dict]) -> int:
         return self._runtime.source_embedding.embed_elements_batch(notebook_id, items)
 
-    def embed_chunks_batch(self, notebook_id: str, items: list[dict]) -> None:
+    def embed_chunks_batch(self, notebook_id: str, items: list[dict]) -> int:
         return self._runtime.source_embedding.embed_chunks_batch(notebook_id, items)
 
     def embed_chunks_for_source(self, source_id: str) -> None:
@@ -1152,13 +1152,19 @@ class SQLiteMaintenanceAdapter:
                 "DELETE FROM relation_embeddings WHERE notebook_id=?", (notebook_id,)
             )
 
-    def backfill_relation_embeddings(self, notebook_id: str) -> None:
-        """给缺向量的关系补 relation_embeddings(幂等,只补缺失)。
+    def backfill_relation_embeddings(
+        self,
+        notebook_id: str,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> int:
+        """给缺向量的关系补 relation_embeddings(幂等,只补缺失),返回落库的向量数。
 
-        系统未绑定 ``relation_embedding`` 工作负载时 no-op。
+        系统未绑定 ``relation_embedding`` 工作负载时 no-op(返回 0)。``progress`` 收
+        ``(已落库, 已尝试)`` 的累计值:已尝试 = 缺向量且可查询的关系数,差值是本轮失败批
+        留下的缺口(notebook_reembed 据此报告剩余)。
         Canonical body (Task 27) — the facade keeps a frozen-signature delegate."""
         if not self._runtime.models.configured("relation_embedding"):
-            return
+            return 0
         relations = self._retrieval().relations_with_names(notebook_id)
         with self._runtime.database.connect() as db:
             have = self._runtime.embedding_store.embedded_relation_ids(db, notebook_id)
@@ -1167,8 +1173,15 @@ class SQLiteMaintenanceAdapter:
             for r in relations
             if r["id"] not in have
         ]
+        written = 0
         if missing:
-            self._runtime.source_embedding.embed_relations_batch(notebook_id, missing)
+            written = int(
+                self._runtime.source_embedding.embed_relations_batch(notebook_id, missing)
+                or 0
+            )
+        if progress:
+            progress(written, len(missing))
+        return written
 
     def mark_unified_kg_dirty(self, notebook_id: str) -> None:
         self._runtime.kg_mutations.mark_unified_kg_dirty(notebook_id)
