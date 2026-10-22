@@ -84,3 +84,21 @@ def test_skip_follows_the_decoded_vector_exactly(stored, embeds):
         ("confirmed",), 8))
     assert len(embedder.queries) == embeds
     assert new == old and new
+
+
+@pytest.mark.parametrize("vector_row_at", [0, 1, 2])
+def test_skip_looks_at_every_candidate_not_just_the_first(vector_row_at):
+    """The vector-bearing row may sit anywhere in the candidate list (the store
+    orders by relevance, not by whether an embedding exists), so a test that
+    only peeks at the first row would silently drop the semantic arm."""
+    rows = [{"record": _record(f"m-{i}", "timing closure signed off"), "vector": None}
+            for i in range(3)]
+    rows[vector_row_at]["vector"] = json.dumps([0.5] * cases.EMBED_DIM)
+    embedder = cases.CountingEmbedder()
+    retriever = MemoryRetriever(_Rows(rows), embedder)
+    new = cases.as_bytes(retriever.notebook_memory_hits("u", "nb", cases.QUERY, 8))
+    old = cases.as_bytes(cases.legacy_hits(
+        retriever, FakeEmbedder(dim=cases.EMBED_DIM), "u", "nb", cases.QUERY,
+        ("confirmed",), 8))
+    assert len(embedder.queries) == 1
+    assert new == old and new
