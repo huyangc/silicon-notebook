@@ -13228,6 +13228,11 @@
               "title": "Type",
               "type": "string"
             },
+            "updated_at": {
+              "default": "",
+              "title": "Updated At",
+              "type": "string"
+            },
             "venue": {
               "anyOf": [
                 {
@@ -31143,6 +31148,7 @@
       "summary": "2 parsed text element(s). Gain Source degeneration stabilizes fixture gain.",
       "title": "fixture.md",
       "type": "markdown",
+      "updated_at": "2024-01-02T03:04:05",
       "venue": null
     }
   },

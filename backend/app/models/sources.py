@@ -314,6 +314,14 @@ class SourceDetail(SourceSummary):
     file_path: str = ""
     error_message: str = ""
     paper_meta: Optional[PaperMeta] = None
+    # 这一行最近一次被写的时刻(``sources.updated_at``):状态机的每一步(``set_status``)、
+    # 元素替换、改名都会推进它。只在这条单来源详情路径上出,不进列表投影。
+    #
+    # 存在的理由是「这次重新解析跑完了没有」:重新解析端点只把 process_source 交给作业池、
+    # 返回前不改来源状态,作业池忙时轮询可能还读到上一次的 extracted / failed。前端在提交前
+    # 读一次它作基准,之后只有「终态且它相对基准推进了」才算这一次跑完。改名也会推进它——
+    # 那只会让跟踪提前结束(回到不跟踪时的样子),不会把一次没跑完的解析报成跑完之外的状态。
+    updated_at: str = ""
 
 
 class ScopedSourceDetail(SourceSummary):

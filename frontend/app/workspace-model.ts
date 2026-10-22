@@ -276,6 +276,10 @@ export type SourceSummary = {
   file_name: string;
   file_size: number;
   source_url?: string;
+  /** 这一行最近一次被写的时刻(状态机每一步都推进它)。只有单来源详情 `GET /sources/{id}`
+   *  带它,列表不带:跟踪一次重新解析时,提交前读一次作基准,「终态且它推进了」才算这一次
+   *  跑完(作业池忙时头一两次轮询可能还读到上一次的终态)。 */
+  updated_at?: string;
   /** 抽取用的文档类型（'' = 自动检测，否则是一个 extraction profile id）。上传
    *  时同内容判重会沿用既有来源，但用户新选的类型仍会写进那条来源——所以这个字段
    *  是判断「这次上传到底改没改东西」的依据。 */

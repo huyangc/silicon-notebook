@@ -4347,14 +4347,19 @@ export default function Home() {
           action: () => {
             if (activeNotebookIdRef.current !== nb) return;
             report("running");
-            void reparseOutcome(nb, [target.sourceId]).then((outcome) => {
-              // 这篇来源多半不在来源库当前页:按 id 跟到终态,每次状态推进都让问题清单与总览
-              // 失效重取(它们的失效令牌里有来源库的 contentRevision)。
+            void (async () => {
+              // 提交前读一次这篇来源的 updated_at 作基准:重新解析端点只把作业交给作业池、返回前
+              // 不改来源状态,作业池忙时头一两次轮询还会读到上一次的终态——只有终态且它相对基准
+              // 推进了(或见过这一次开始)才算这一次跑完。读失败就没有基准,只认「见过开始」。
+              const baseline = await sourceLibrary.readFollowBaseline(target.sourceId);
+              const outcome = await reparseOutcome(nb, [target.sourceId]);
+              // 这篇来源多半不在来源库当前页:按 id 跟到这一次跑完,每次状态推进都让问题清单与
+              // 总览失效重取(它们的失效令牌里有来源库的 contentRevision)。
               if (outcome === "started" && activeNotebookIdRef.current === nb) {
-                sourceLibrary.trackSourceProgress([target.sourceId]);
+                sourceLibrary.trackSourceProgress([target.sourceId], { [target.sourceId]: baseline });
               }
               report(outcome === "started" ? "started" : outcome === "none" ? "skipped" : "failed");
-            });
+            })();
           },
         },
       ],
