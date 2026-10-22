@@ -569,9 +569,10 @@ after touching the code it guards.
   - The fixed launchers: 0 held and 0 leaked in 12000 attempts.
   - Launchers without the `$!` fallback: 92 of 400 attempts leaked (unloaded).
   - Launchers reverted to a blocking `wait`: 2 and then 4 held in two runs of
-    12000. That race hits once in a few thousand attempts, so a default run
-    catches it most of the time (roughly 85–98%). Raise `--runs` or repeat the
-    run when you need more confidence.
+    12000. That race hits about once in 3000–6000 attempts, so a default run
+    catches it with roughly 85–98% probability. Raise `--runs` or repeat the
+    run when you need more confidence. The `$!` path leaks so often that a
+    default run always catches it.
 
 ### Python dependencies
 

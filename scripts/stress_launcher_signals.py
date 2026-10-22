@@ -29,10 +29,12 @@ killed by exact pid). Shards run in parallel processes, one fake checkout each.
 
 Exit status: 0 nothing held or leaked, 1 at least one held or leaked, 2 bad
 usage or a broken shard.
-The blocking-``wait`` race hits about once in 5000-6000 attempts, so the
-default 2 launchers x 4 shards x 1500 attempts catch a reintroduced blocking
-``wait`` with roughly 85-90% probability; raise ``--runs`` or repeat the run
-for more confidence.
+Measured with ``--load auto`` (12000 attempts per run): the fixed launchers
+held 0 and leaked 0; launchers reverted to a blocking ``wait`` held 2 and then
+4 in two runs, i.e. that race hits about once in 3000-6000 attempts, so a
+default run catches it with roughly 85-98% probability (raise ``--runs`` or
+repeat the run for more confidence); launchers without the ``$!`` fallback
+leaked 92 of 400 attempts, so a default run always catches that one.
 """
 from __future__ import annotations
 
@@ -79,25 +81,37 @@ def run_shard(launcher: str, shard: int, runs: int, seed: str | None, held_secon
                 for leftover in (root / "controller.pid", root / "service-events.jsonl",
                                  *tmp.glob("silicon-extension-start.*")):
                     leftover.unlink(missing_ok=True)
-                process = spawn(root, {**env, "WAIT_SERVICE": "1"}, path, *args)
-                deadline = time.monotonic() + held_seconds
-                # Spin, do not sleep: the receipt appears just before the fork.
-                while not any(tmp.glob("silicon-extension-start.*")):
-                    if process.poll() is not None or time.monotonic() >= deadline:
-                        raise RuntimeError(f"{launcher} never created its receipt (attempt {attempt})")
-                time.sleep(rng.uniform(0, MAX_OFFSET_SECONDS))
-                interruption = rng.choice((signal.SIGTERM, signal.SIGHUP))
-                process.send_signal(interruption)
+                process = spawn(root, {**env, "WAIT_SERVICE": "1"}, path, *args, new_session=True)
                 try:
-                    process.wait(timeout=held_seconds)
-                except subprocess.TimeoutExpired:
-                    held.append([attempt, interruption.name])
-                    process.kill()
-                    process.wait()
+                    deadline = time.monotonic() + held_seconds
+                    # Spin, do not sleep: the receipt appears just before the fork.
+                    while not any(tmp.glob("silicon-extension-start.*")):
+                        if process.poll() is not None or time.monotonic() >= deadline:
+                            raise RuntimeError(f"{launcher} never created its receipt (attempt {attempt})")
+                    time.sleep(rng.uniform(0, MAX_OFFSET_SECONDS))
+                    interruption = rng.choice((signal.SIGTERM, signal.SIGHUP))
+                    process.send_signal(interruption)
+                    try:
+                        process.wait(timeout=held_seconds)
+                    except subprocess.TimeoutExpired:
+                        held.append([attempt, interruption.name])
+                    else:
+                        # The launcher waits for its controller before it exits.
+                        if reap_leaked_controllers(root, 1.0):
+                            leaked.append([attempt, interruption.name])
+                finally:
+                    # Whatever happened, nothing of this attempt outlives it: the
+                    # launcher, its process group (a child forked but not yet
+                    # exec'd included), and any controller of this checkout.
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait()
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                     kill_published(root / "controller.pid")
-                # The launcher waits for its controller before it exits.
-                if reap_leaked_controllers(root, 1.0) and not (held and held[-1][0] == attempt):
-                    leaked.append([attempt, interruption.name])
+                    reap_leaked_controllers(root, 0)
         finally:
             stop_fake_children(root)
     return {"launcher": launcher, "shard": shard, "runs": runs, "held": held, "leaked": leaked}
