@@ -39,7 +39,8 @@ _log = logging.getLogger("silicon_notebook.sharing")
 
 # PR-2+3 Task 13: a knowhow cell's content_md embeds pasted images as
 # ``![alt](asset://<asset_id>)`` (design doc §①) — a deep copy mints a fresh
-# asset id per copied ``notebook_assets`` row (see copy_notebook), so every
+# asset id per copied ``notebook_assets`` row (see
+# ``NotebookCopyWriter._copy_notebook_assets``), so every
 # cell that references one must have its markdown rewritten to point at the
 # NEW id instead of the source's. Asset ids are ``new_id("asset")`` = a
 # lowercase prefix + a dash + a 32-hex uuid4 (sqlite_repository._new_id) —
@@ -54,7 +55,8 @@ def _rewrite_asset_refs(text: str, asset_map: dict) -> str:
     """Rewrite every ``asset://<old_id>`` in ``text`` to ``asset://<new_id>``
     via ``asset_map`` (old id -> new id); an id with no entry (should not
     happen — every asset referenced by a copied cell was itself copied, see
-    copy_notebook's ordering) is left exactly as-is rather than dropped."""
+    ``NotebookCopyWriter``'s phase order) is left exactly as-is rather than
+    dropped."""
     if "asset://" not in text:
         return text
     return _ASSET_REF_RE.sub(
@@ -113,8 +115,9 @@ def _copy_source_elements(
 ) -> list[dict]:
     """Remap the snapshot's ``source_elements`` rows for a deep copy, in place.
 
-    Pure in-memory rewrite — no statement is issued here; ``copy_notebook``
-    inserts the returned rows exactly as before, inside its compensating try.
+    Pure in-memory rewrite — no statement is issued here;
+    ``NotebookCopyWriter._copy_elements_and_chunks`` inserts the returned rows,
+    inside ``copy_notebook``'s compensating try.
     Fills ``element_map`` (old -> new element id) and ``element_row_new``
     (old knowhow element id -> NEW knowhow row id) for the chunk loop."""
     elements_out = []
@@ -411,14 +414,19 @@ class CopyRowSource(Protocol):
 
     ``batches(table)`` returns the table's rows as an iterable of row lists. The
     writer remaps each batch in place and hands it to ``insert_copy_rows``, one
-    call per batch, so a source that gives ONE batch per table reproduces the
-    frozen one-call-per-table write sequence. A source must
+    call per batch. A source must
 
-    * answer every table of the copy closure, an empty one with exactly one empty
-      batch (the writer still issues that table's ``insert_copy_rows``);
+    * answer every table of the copy closure;
     * allow a table to be asked for again, starting over from its first row: a
       few phases read a table twice (``NotebookCopyWriter`` lists them);
     * hand out row dicts the writer may rewrite in place.
+
+    A table's WRITE pass is always its last read: every second read is a pure
+    pre-scan that runs before the table is written. A source that re-reads from
+    storage (fresh dicts holding source ids) and ``SnapshotRowSource`` (the same,
+    by then remapped, dicts) only agree under that ordering, so a phase that
+    wants to re-read a table after writing it must keep what it needs from the
+    write pass instead.
     """
 
     def batches(self, table: str) -> Iterable[list[dict]]: ...
@@ -429,9 +437,10 @@ class SnapshotRowSource:
 
     Every table is exactly ONE batch: the snapshot's own list, the same object
     each time it is asked for, so the writer's in-place remaps land in the
-    snapshot's dicts exactly as they did before the writer was split out. An
-    empty table is one empty batch. A table the snapshot does not hold raises
-    ``KeyError`` when it is asked for, as ``snapshot[table]`` did."""
+    snapshot's dicts. An empty table is one empty batch, so the writer still
+    issues that table's ``insert_copy_rows``: together these reproduce the
+    frozen one-call-per-table write sequence the copy characterization pins. A
+    table the snapshot does not hold raises ``KeyError`` when it is asked for."""
 
     def __init__(self, snapshot: "dict[str, list[dict]]") -> None:
         self._snapshot = snapshot
@@ -673,7 +682,8 @@ class NotebookCopyWriter:
                 # the SOURCE row's own status was — 'pending' is the schema
                 # default for exactly this "not yet projected" state (see
                 # migrations.py _migration_16), and the post-publish scheduling
-                # (_schedule_copied_projections) is what will settle it.
+                # (NotebookCopyService._schedule_copied_projections in
+                # notebook_sharing) is what will settle it.
                 data["projection_status"] = "pending"
                 rows_out.append(data)
             self._store.insert_copy_rows("knowhow_rows", rows_out, chunk_size=chunk_size)

@@ -141,7 +141,7 @@ chunk_questions 在导入作业内重嵌入；CLI 导入 PG 上必须停服；KG
 2. **可移植编解码 + 流式快照 + 导出 + CLI export/inspect**：`domain/portable_rows.py`（`sync/package.py` 再导出）、`domain/notebook_archive.py`、
    两后端 `iter_copy_rows`、`notebook_transfer/export.py`、`scripts/notebook_archive.py`；守卫登记；导出用例（含记忆排除、流式分页、超复制上限仍可导）。
 3. **重新嵌入作业**：`services/notebook_reembed.py`，下沉 `source_routes._backfill_vectors_job`（端点契约不变），加 KG 对象/关系两条腿，跳过 knowhow 隐藏来源。
-4. **导入核心 + CLI import**：`archive_reader.py`（§5 护栏）、`import_.py`、store 新方法（哨兵/心跳/校验/发布/补偿/收割/列集合）；
+4. **导入核心 + CLI import**（随 CopyProfile 一起：`NotebookCopyRun.source_notebook` 收窄为源名字符串，磁盘状态字段 assets_dest_dir/copied_files/assets_copied 移回服务侧）：`archive_reader.py`（§5 护栏）、`import_.py`、store 新方法（哨兵/心跳/校验/发布/补偿/收割/列集合）；
    四向往返（SQLite↔PG）、重复导入互不相干、向量一致/不一致、全套篡改用例且失败后零残留。
 5. **网页 API 与作业**：路由、能力、作业注册表、Settings、system config、待办中心、Next 反代上限；权限/413/流式/过期用例，OpenAPI 冻结契约更新。
 6. **前端**：API/hook/面板、能力位；vitest + 按钮反馈/长任务/root modal 守卫 + ui-vocabulary；Browser pane 实机走通「导出→下载→导入→打开」。
