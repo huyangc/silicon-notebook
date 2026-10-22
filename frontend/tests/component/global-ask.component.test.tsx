@@ -1,7 +1,7 @@
 import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, onTestFinished, test, vi } from "vitest";
 import { NotebookScopePicker } from "../../app/ask/notebook-scope-picker.tsx";
 import { GlobalConversationList } from "../../app/ask/conversation-list.tsx";
 import { useGlobalAsk } from "../../app/ask/use-global-ask.ts";
@@ -2360,6 +2360,47 @@ function press(element: HTMLElement) {
 
 // 被预览盖住时窗口带 inert + aria-hidden，按角色查不到它：按 id 取同一个 <dialog>。
 const chatWindow = () => document.getElementById("global-ask-window")!;
+
+/**
+ * 比 `installDialogMethods` 更像浏览器的 <dialog>，只给预览这几条用：真机上两处坑
+ * jsdom 默认替身都看不见。
+ * ① `show()` / `showModal()` 跑 dialog focusing steps，焦点挪进窗口——窗口被盖住
+ *   （inert）时于是掉到 body，盖在上面那一层的焦点被抢走；
+ * ② 模态 <dialog> 打开时文档其余部分 inert：此刻对窗口外元素的 `focus()` 落不了地
+ *   （预览关闭按钮的 autoFocus 就发生在这一刻）。
+ */
+function installBrowserLikeDialogs() {
+  installDialogMethods();
+  const nativeFocus = HTMLElement.prototype.focus;
+  const modal = () => document.querySelector<HTMLDialogElement>("dialog[data-test-modal]");
+  Object.defineProperty(HTMLDialogElement.prototype, "show", { configurable: true, value() {
+    this.setAttribute("open", "");
+    this.removeAttribute("data-test-modal");
+    if (this.hasAttribute("inert")) (document.activeElement as HTMLElement | null)?.blur();
+  } });
+  Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value() {
+    this.setAttribute("open", "");
+    this.setAttribute("data-test-modal", "");
+  } });
+  Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value() {
+    this.removeAttribute("open");
+    this.removeAttribute("data-test-modal");
+  } });
+  const gate = vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function focus(this: HTMLElement, options?: FocusOptions) {
+    const open = modal();
+    if (open && !open.contains(this)) return;
+    nativeFocus.call(this, options);
+  });
+  onTestFinished(() => gate.mockRestore());
+}
+
+/** 真机上 Esc 的完整派发：keydown 没被 preventDefault 时，紧接着的 close request 会以
+ *  `cancel` 落在此刻的模态 <dialog> 上。 */
+function pressEscape(target: Element) {
+  const proceed = fireEvent.keyDown(target, { key: "Escape" });
+  const open = document.querySelector("dialog[data-test-modal]");
+  if (proceed && open) fireEvent(open, new Event("cancel", { cancelable: true }));
+}
 const imagePreview = () => screen.queryByRole("dialog", { name: "引用 [1] 图片预览" });
 const openedPreview = () => waitFor(() => {
   const node = imagePreview();
@@ -2368,7 +2409,7 @@ const openedPreview = () => waitFor(() => {
 });
 
 test("the compact window opens a citation image in the shared preview; the first Escape closes only the preview", async () => {
-  installDialogMethods();
+  installBrowserLikeDialogs();
   api.list.mockResolvedValue([conversation()]);
   api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
   render(<PreviewHost />);
@@ -2385,19 +2426,19 @@ test("the compact window opens a citation image in the shared preview; the first
   await within(preview).findByRole("img", { name: "图 1：示意图" });
   expect(api.assetBlob.mock.calls.at(-1)![0]).toContain("/notebooks/nb-1/assets/asset-1");
 
-  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  pressEscape(document.activeElement!);
   await waitFor(() => expect(imagePreview()).toBeNull());
   expect(chatWindow()).not.toHaveAttribute("inert");
   expect(screen.getByRole("textbox", { name: "输入问题" })).toBeTruthy();
   expect(trigger).toHaveFocus();
 
   // 第二次 Esc 才按原逻辑收起窗口。
-  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  pressEscape(document.activeElement!);
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局问答" })).toBeNull());
 });
 
 test("the full window opens the same preview and gets its modal state and scroll lock back after Escape", async () => {
-  installDialogMethods();
+  installBrowserLikeDialogs();
   api.list.mockResolvedValue([conversation()]);
   api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
   render(<PreviewHost />);
@@ -2412,14 +2453,17 @@ test("the full window opens the same preview and gets its modal state and scroll
   // 预览整个盖住）；滚动锁随之让出，与被别的层盖住时同一条。
   expect(chatWindow()).toHaveAttribute("inert");
   expect(document.body.style.overflow).toBe("");
+  // 关闭按钮的 autoFocus 发生在窗口还是模态的那一刻（落不了地）；预览挂载后补聚焦。
+  expect(screen.getByRole("button", { name: "关闭图片预览" })).toHaveFocus();
 
-  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  pressEscape(document.activeElement!);
   await waitFor(() => expect(imagePreview()).toBeNull());
+  expect(chatWindow()).toHaveAttribute("open");
   expect(chatWindow()).toHaveClass("is-full");
   expect(chatWindow()).not.toHaveAttribute("inert");
   expect(document.body.style.overflow).toBe("hidden");
   expect(trigger).toHaveFocus();
-  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  pressEscape(document.activeElement!);
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局问答" })).toBeNull());
   expect(document.body.style.overflow).toBe("");
 });
@@ -2460,7 +2504,7 @@ test("backdrop and the close button close only the preview and return focus to t
 });
 
 test("a citation card thumbnail opens the preview; Escape closes the preview first and leaves the card in place", async () => {
-  installDialogMethods();
+  installBrowserLikeDialogs();
   api.list.mockResolvedValue([conversation()]);
   api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
   const { container } = render(<PreviewHost />);
@@ -2475,13 +2519,14 @@ test("a citation card thumbnail opens the preview; Escape closes the preview fir
 
   press(thumbnail);
   await openedPreview();
+  expect(screen.getByRole("button", { name: "关闭图片预览" })).toHaveFocus();
   // 预览开着时卡片让位（不收起）：它的捕获期 Esc 拦截此刻不装，Esc 归预览。
-  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  pressEscape(document.activeElement!);
   await waitFor(() => expect(imagePreview()).toBeNull());
   expect(container.querySelector(".cite-popover")).not.toBeNull();
   expect(thumbnail).toHaveFocus();
   // 再按：卡片收起；窗口仍在。
-  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  pressEscape(document.activeElement!);
   await waitFor(() => expect(container.querySelector(".cite-popover")).toBeNull());
   expect(screen.getByRole("dialog", { name: "全局问答" })).toBeTruthy();
 });

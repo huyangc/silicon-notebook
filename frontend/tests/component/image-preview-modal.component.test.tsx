@@ -43,6 +43,48 @@ test("图片预览只保留轻量控制层，并支持缩放、关闭按钮、Es
   expect(onClose).toHaveBeenLastCalledWith("backdrop");
 });
 
+// 一次 Esc 只收一层：预览收下的 Esc 要掐掉默认动作（浏览器的 close request），否则
+// 下面那一层模态 <dialog>（全屏的全局问答窗口）会在同一次按键里也收到关闭请求。
+test("预览收下的 Escape 掐掉默认动作，其他按键不掐", () => {
+  const onClose = vi.fn();
+  render(
+    <ImagePreviewModal referenceLabel="[2]" onClose={onClose}>
+      <img src="/preview.png" alt="流程图" />
+    </ImagePreviewModal>,
+  );
+  const dialog = screen.getByRole("dialog", { name: "引用 [2] 图片预览" });
+  expect(fireEvent.keyDown(dialog, { key: "Escape" })).toBe(false);
+  expect(onClose).toHaveBeenLastCalledWith("escape");
+  expect(fireEvent.keyDown(dialog, { key: "Enter" })).toBe(true);
+  expect(onClose).toHaveBeenCalledTimes(1);
+});
+
+test("打开时关闭按钮的 autoFocus 没落地，挂载后补聚焦；落地了就不再动焦点", () => {
+  const nativeFocus = HTMLElement.prototype.focus;
+  // 打开那一刻焦点进不去（下面那层还是模态的）：第一次 focus 调用落空。
+  let blocked = true;
+  const gate = vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function focus(this: HTMLElement, options?: FocusOptions) {
+    if (blocked && this.getAttribute("aria-label") === "关闭图片预览") { blocked = false; return; }
+    nativeFocus.call(this, options);
+  });
+  try {
+    const first = render(
+      <ImagePreviewModal referenceLabel="[2]" onClose={vi.fn()}><img src="/a.png" alt="a" /></ImagePreviewModal>,
+    );
+    expect(blocked).toBe(false);
+    expect(screen.getByRole("button", { name: "关闭图片预览" })).toHaveFocus();
+    first.unmount();
+  } finally {
+    gate.mockRestore();
+  }
+  // autoFocus 正常落地时只有它那一次聚焦。
+  const focus = vi.spyOn(HTMLElement.prototype, "focus");
+  render(<ImagePreviewModal referenceLabel="[2]" onClose={vi.fn()}><img src="/a.png" alt="a" /></ImagePreviewModal>);
+  expect(screen.getByRole("button", { name: "关闭图片预览" })).toHaveFocus();
+  expect(focus).toHaveBeenCalledTimes(1);
+  focus.mockRestore();
+});
+
 test("双击可放大，拖动遮罩超过阈值不会误关", async () => {
   const onClose = vi.fn();
   render(
