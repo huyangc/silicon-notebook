@@ -579,6 +579,7 @@ def test_cli_reports_a_database_failure_on_a_later_notebook_without_its_message(
     import sqlite3
 
     import psycopg
+
     from app.core.config import get_settings
 
     _seed_full(repo)
