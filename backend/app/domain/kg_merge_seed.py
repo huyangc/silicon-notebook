@@ -371,15 +371,34 @@ def seed_fn_for_type(object_type: str, *, concept_seed_version: int,
 
 class ConceptSeedSpaceMoved(RuntimeError):
     """An incremental placement computed in one concept seed space met another
-    one under the cluster write lock: the library's full rebuild published a
-    new space in between (S1). Nothing was written; the writer places again
-    in the space now published."""
+    one under the cluster write lock: a full rebuild published in between
+    either a new space, or new override keys in the same space (a rejection
+    suspended so far, translated now, keeps more v1 seeds as ``~v1:<seed>``)
+    (S1). Either changes the canonical ids the placement must use. Nothing was
+    written; the writer places again in the space now published."""
 
-    def __init__(self, notebook_id: str, placed_in: int, published: int):
-        super().__init__(f"concept seed space moved from {placed_in} to {published}")
+    def __init__(self, notebook_id: str, placed_in: int, published: int,
+                 *, override_moved: bool = False):
+        what = "override keys" if override_moved and placed_in == published else "concept seed space"
+        super().__init__(f"{what} moved under the placement (space {placed_in} -> {published})")
         self.notebook_id = notebook_id
         self.placed_in = placed_in
         self.published = published
+        self.override_moved = override_moved
+
+
+def check_placement_seed_space(
+    notebook_id: str, placed: "tuple[int, frozenset]", published: "tuple[int, frozenset]",
+) -> None:
+    """Raise ``ConceptSeedSpaceMoved`` unless the placement identity — the
+    concept seed space and its override keys — equals the one published now.
+    Both store adapters call this under the cluster write lock."""
+    placed_version, placed_keys = int(placed[0]), frozenset(placed[1])
+    published_version, published_keys = int(published[0]), frozenset(published[1])
+    if placed_version != published_version or placed_keys != published_keys:
+        raise ConceptSeedSpaceMoved(
+            notebook_id, placed_version, published_version,
+            override_moved=placed_keys != published_keys)
 
 
 def published_concept_seed_version(state_row) -> int:

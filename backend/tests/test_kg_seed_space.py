@@ -16,7 +16,9 @@ import pytest
 from app.domain.kg_merge_seed import (
     CONCEPT_SEED_VERSION,
     OVERRIDE_SEED_PREFIX,
+    ConceptSeedSpaceMoved,
     _norm,
+    check_placement_seed_space,
     concept_decision_seeds,
     concept_seed_in_space,
     concept_seed_parts,
@@ -449,6 +451,36 @@ def test_squash_tier_scores_zero_without_vectors_and_reports_the_cap():
     # heaviest group first (ab2: 5 members), anchor = most members (K-d),
     # the other two by members, then by id
     assert rows == [("ab2", "ab 2", "K-d", "K-c", 0.0), ("ab2", "a b2", "K-d", "K-e", 0.0)]
+
+
+def test_squash_tier_leaves_out_decided_pairs_before_the_cap():
+    """A rejected (or deferred) pair never holds a place under the cap, so the
+    next group gets it; a pair whose sides a confirmed chain already joins to
+    a rejected pair's sides counts as decided too (the refresh's own rule)."""
+    seed_to_canonical = {"a 1": "K-a 1", "a1": "K-a1", "b 1": "K-b 1", "b1": "K-b1",
+                         "c 1": "K-c 1", "c1": "K-c1", "x": "K-c1"}
+    members = {"a 1": 5, "a1": 1, "b 1": 3, "b1": 1, "c 1": 1, "c1": 1, "x": 0}
+    rows, total = squash_pending_candidates(seed_to_canonical, members, {}, limit=1)
+    assert ([(r[2], r[3]) for r in rows], total) == ([("K-a 1", "K-a1")], 3)
+    rows, total = squash_pending_candidates(
+        seed_to_canonical, members, {}, limit=1,
+        rejected={frozenset(("a 1", "a1"))})
+    assert ([(r[2], r[3]) for r in rows], total) == ([("K-b 1", "K-b1")], 2)
+    rows, total = squash_pending_candidates(
+        seed_to_canonical, members, {}, limit=1,
+        rejected={frozenset(("a 1", "a1")), frozenset(("b 1", "b1")), frozenset(("c 1", "x"))},
+        confirmed={frozenset(("c1", "x"))})
+    assert (rows, total) == ([], 0)
+
+
+def test_the_placement_identity_is_the_space_and_its_override_keys():
+    check_placement_seed_space("nb", (2, frozenset({"q former"})), (2, {"q former"}))
+    with pytest.raises(ConceptSeedSpaceMoved) as moved:
+        check_placement_seed_space("nb", (1, frozenset()), (2, frozenset()))
+    assert (moved.value.placed_in, moved.value.published, moved.value.override_moved) == (1, 2, False)
+    with pytest.raises(ConceptSeedSpaceMoved) as moved:
+        check_placement_seed_space("nb", (2, frozenset()), (2, frozenset({"q former"})))
+    assert (moved.value.placed_in, moved.value.published, moved.value.override_moved) == (2, 2, True)
 
 
 def test_squash_tier_skips_canonicals_already_merged():

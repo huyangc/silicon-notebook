@@ -1098,6 +1098,8 @@ def squash_pending_candidates(
     reps: Mapping[str, "np.ndarray"],
     *,
     limit: int,
+    confirmed: Iterable[FrozenSet[str]] = (),
+    rejected: Iterable[FrozenSet[str]] = (),
 ) -> Tuple[List[tuple], int]:
     """Pending candidates for canonicals whose v2 seeds share a squash key —
     the names differ only in the spaces punctuation made ("Llama 3.1" /
@@ -1115,8 +1117,16 @@ def squash_pending_candidates(
 
     Rows are ``(seed_a, seed_b, canonical_a, canonical_b, score)`` — the
     shape of ``cluster_seeds``' ``pending_seeds`` — heaviest group first (by
-    the members of its canonicals), then by squash key. Returns the first
-    ``limit`` rows and the total before the cap (the caller reports a cap)."""
+    the members of its canonicals), then by squash key.
+
+    The stored decisions (``confirmed`` / ``rejected``, the latter with the
+    deferred ones — the snapshot the clustering used, by seed) are applied
+    BEFORE the cap, by ``filter_pending_seeds_by_decisions``: a pair a human
+    already rejected or deferred would otherwise keep the top places and be
+    dropped only by the pending refresh, so with more groups than the cap the
+    lighter groups would never reach the queue. The refresh still re-checks
+    the decisions live in its own transaction. Returns the first ``limit``
+    rows and the total before the cap (the caller reports a cap)."""
     spaced = {
         seed.replace(" ", "") for seed in seed_to_canonical
         if " " in seed and not seed.startswith("~")
@@ -1159,6 +1169,14 @@ def squash_pending_candidates(
         for other in cids[1:]:
             sb = rep_seed(by_cid[other])
             rows.append((sa, sb, anchor, other, cosine(sa, sb)))
+    confirmed, rejected = set(map(frozenset, confirmed)), set(map(frozenset, rejected))
+    if rows and (confirmed or rejected):
+        # The decided components are found on the seeds the rows and the
+        # decisions name (those the clustering knows): the same components the
+        # refresh finds on every seed, at the size of the rows plus decisions.
+        named = {s for row in rows for s in row[:2]}
+        named.update(s for pair in confirmed | rejected for s in pair if s in seed_to_canonical)
+        rows = filter_pending_seeds_by_decisions(rows, sorted(named), confirmed, rejected)
     return rows[:max(0, int(limit))], len(rows)
 
 

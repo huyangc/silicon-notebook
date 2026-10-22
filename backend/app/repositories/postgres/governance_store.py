@@ -44,7 +44,7 @@ from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER
 from app.repositories.postgres.promotion_provenance_store import (
     materialize_promotion_evidence,
 )
-from app.domain.kg_merge_seed import ConceptSeedSpaceMoved, check_concept_seed_version
+from app.domain.kg_merge_seed import check_concept_seed_version, check_placement_seed_space
 from app.domain.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
     USABLE_STATUSES,
@@ -802,15 +802,19 @@ class GovernanceStore:
         now: str,
         *,
         concept_seed_version: "int | None" = None,
+        concept_seed_override: frozenset = frozenset(),
     ) -> int:
         """Insert cluster member rows, skipping member ids already present in
         the (notebook, type) slice — the append_clusters idempotency contract.
 
-        ``concept_seed_version`` (incremental placement only): the seed space
-        ``rows`` were placed in. It is compared, under the same lock as the
-        generation pointer, with the space published now; a full rebuild that
-        published another space in between raises ``ConceptSeedSpaceMoved``
-        before any row is written, and the caller places again (S1).
+        ``concept_seed_version`` / ``concept_seed_override`` (incremental
+        placement only): the placement identity ``rows`` were computed in — the
+        seed space and its override keys. It is compared, under the same lock
+        as the generation pointer, with the one published now; a full rebuild
+        that published another space, or the same space with other override
+        keys (a suspended rejection translated later), raises
+        ``ConceptSeedSpaceMoved`` before any row is written, and the caller
+        places again (S1).
         After delete_clusters in the same transaction the existing set is
         empty, so the write_clusters path inserts every row unchanged.
 
@@ -829,15 +833,17 @@ class GovernanceStore:
         两个分支都闭合;锁前读则可能拿旧 P 写在翻转提交之后,永久丢行。
         「直接写对」还要求安置用的概念种子空间仍是已发布的那个(S1):库的第一次
         v2 全量重建可能恰在融合锁外读空间与这里之间翻转,所以空间在同一把锁后
-        复核(``concept_seed_version``),变了就不写、抛 ``ConceptSeedSpaceMoved``
+        复核(``concept_seed_version`` 连同覆盖键 ``concept_seed_override``——同一
+        空间里后来翻译出的驳回会新增 ``~v1:`` 覆盖键,canonical id 随之改变),
+        变了就不写、抛 ``ConceptSeedSpaceMoved``
         由融合方按新空间重新安置——催收只重放退休代里的行,看不到写进新代的
         旧空间行。"""
         lock_cluster_artifact_type(connection, notebook_id, object_type)
         generation = self._published_cluster_generation(connection, notebook_id)
         if concept_seed_version is not None:
-            published = published_concept_seed_version_on(connection, notebook_id)
-            if published != concept_seed_version:
-                raise ConceptSeedSpaceMoved(notebook_id, concept_seed_version, published)
+            check_placement_seed_space(
+                notebook_id, (concept_seed_version, concept_seed_override),
+                published_concept_seed_space_on(connection, notebook_id))
         existing = self._existing_cluster_members(
             connection, notebook_id, object_type, rows, generation
         )

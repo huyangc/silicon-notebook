@@ -46,8 +46,8 @@ from contextlib import closing
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import (
-    Any, Callable, Dict, Iterable, Iterator, List, Mapping, NamedTuple, Optional,
-    Sequence, Set, Tuple,
+    Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Mapping, NamedTuple,
+    Optional, Sequence, Set, Tuple,
 )
 
 from app.core.config import Settings
@@ -2699,15 +2699,18 @@ class KnowledgeLifecycleService:
         return seed_version, override, rows
 
     def append_clusters(self, notebook_id: str, rows: list, object_type: str = "concept",
-                        *, concept_seed_version: Optional[int] = None) -> int:
+                        *, concept_seed_version: Optional[int] = None,
+                        concept_seed_override: FrozenSet[str] = frozenset()) -> int:
         """追加写 concept_clusters(不 DELETE);member_object_id 幂等(已在则跳过)。返回新增数。
-        ``concept_seed_version``:增量安置所用的概念种子空间,锁后与已发布空间
-        复核,变了抛 ``ConceptSeedSpaceMoved``、一行不写(S1)。"""
+        ``concept_seed_version`` / ``concept_seed_override``:增量安置所用的概念种子
+        空间与覆盖键,锁后与已发布的二者一起复核(同一空间里后来翻译出的驳回会新增
+        ``~v1:`` 覆盖键),任一变了抛 ``ConceptSeedSpaceMoved``、一行不写(S1)。"""
         now = self._now()
         with self._write() as db:
             added = self.governance_store.insert_clusters(
                 db, notebook_id, object_type, rows, now,
                 concept_seed_version=concept_seed_version,
+                concept_seed_override=concept_seed_override,
             )
             # P0-A: only bump when a row actually landed (a no-op call — every
             # member already present — must not manufacture a fake change signal).
@@ -2940,18 +2943,22 @@ class KnowledgeLifecycleService:
             frozen_canonical = self._freeze_new_object_canonicals(notebook_id, new_objs)
             try:
                 self.append_clusters(notebook_id, rows, object_type="concept",
-                                     concept_seed_version=seed_version)
+                                     concept_seed_version=seed_version,
+                                     concept_seed_override=override)
             except ConceptSeedSpaceMoved:
-                # The library's first full rebuild in the new space flipped
-                # between the read above and the write lock: nothing was
-                # written, place again in the space now published (a space
-                # changes once per library, so once is enough).
+                # A full rebuild published between the read above and the
+                # write lock either the library's new space (its first v2
+                # rebuild) or new override keys in the same space (a suspended
+                # rejection translated): nothing was written, place again in
+                # what is published now (one rebuild in between, so once is
+                # enough).
                 seed_version, override, rows = self._place_new_concepts_again(
                     notebook_id, new_objs)
                 frozen_canonical = self._freeze_new_object_canonicals(
                     notebook_id, new_objs)
                 self.append_clusters(notebook_id, rows, object_type="concept",
-                                     concept_seed_version=seed_version)
+                                     concept_seed_version=seed_version,
+                                     concept_seed_override=override)
             # Tier2 桥接候选来源三分支(P1-3,perf audit):
             #   1) 有可用 kg ANN(即使版本漂移/stale,advisory 桥接可接受)→ ANN 近邻查询,
             #      任意规模可用,恢复大库(> max_entities)上一直被静默跳过的跨文档桥接。
@@ -6455,18 +6462,24 @@ class KnowledgeLifecycleService:
     def _squash_merge_candidates(
         self, notebook_id: str, seed_to_canonical: Dict[str, str],
         members_count: Dict[str, int], reps: Dict[str, Any],
+        confirmed: Set[FrozenSet[str]], rejected: Set[FrozenSet[str]],
     ) -> List[tuple]:
         """The squash-key candidate tier of the pending refresh (design §4.4,
         P3): one star per group of canonicals whose seeds differ only in the
         spaces punctuation made — ``kg_merge.squash_pending_candidates``. Its
         cap is the Settings field ``kg_merge_squash_candidates_max``; hitting it
         emits ``kg_merge_squash_candidates_capped`` (never silent). Runs while
-        the seed vectors are still in hand (the score is their cosine)."""
+        the seed vectors are still in hand (the score is their cosine).
+        ``confirmed`` / ``rejected`` (deferred included) are the decisions the
+        clustering used: pairs already decided are left out BEFORE the cap, so
+        they never hold places a group still to review needs; the pending
+        refresh re-checks the decisions live."""
         from app.services.kg_merge import squash_pending_candidates
 
         rows, total = squash_pending_candidates(
             seed_to_canonical, members_count, reps,
-            limit=self.settings.kg_merge_squash_candidates_max)
+            limit=self.settings.kg_merge_squash_candidates_max,
+            confirmed=confirmed, rejected=rejected)
         if total > len(rows):
             self.event_log.emit({
                 "kind": "kg_merge_squash_candidates_capped",
@@ -6815,7 +6828,7 @@ class KnowledgeLifecycleService:
                f"{len(sd.get('auto_candidates', []))} auto-cand "
                f"({_time.perf_counter() - _t_cluster:.1f}s)")
         run.squash_rows = self._squash_merge_candidates(
-            notebook_id, sd["seed_to_canonical"], members_count, reps)
+            notebook_id, sd["seed_to_canonical"], members_count, reps, confirmed, rejected)
         # reps (concept mean-vectors, ~18GB at 4.4M seeds) is dead after
         # clustering — its only consumers are the cluster_seeds calls and the
         # squash tier above. Drop it BEFORE the derivation tail (canonical
