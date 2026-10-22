@@ -532,16 +532,22 @@ Launcher signal tests start every launcher with default signal dispositions
 it started, and a gate run under `nohup` or as a background lane hands its children
 SIGHUP or SIGINT ignored. Their waits end on handshakes (a pid file published by
 rename, or the launcher's exit) under a 20 s backstop.
-The `dev.sh` shutdown cases run fake uvicorn / `next` children that record the SIGTERM
-they receive (`TERM_EXITS`) or ignore it (`TERM_IGNORED`) in
-`backend/tests/launcher_checkout_testkit.py`. They pin TERM, then grace, then KILL, the
-exit codes 130 / 143 / 129 shared with `prod.sh`, that each child's parent is the launcher
-itself (the `exec` guard), and that the `cleanup` function of `dev.sh` and `prod.sh` stays
-textually identical. Because `dev.sh` starts `next dev` directly, it also runs the
-`predev` UI plugin sync by hand (a fake `node` in the testkit): the cases pin that the sync
-finishes before next starts, that a failed sync starts no frontend and stops the backend,
-that a cancellation during the sync leaves no process behind, and that
-`frontend/package.json` still has exactly the hooks `dev.sh` reproduces. Operations behaviour: [operations.md](./operations.md#plugin-companion-services).
+The launcher wind-down cases (`dev.sh` and `prod.sh` share `scripts/launcher_cleanup.sh`)
+run fake uvicorn / `next` / `node` children in `backend/tests/launcher_checkout_testkit.py`
+that record the SIGTERM they receive (`TERM_EXITS`) or ignore it (`TERM_IGNORED`). They pin:
+TERM, then grace, then KILL, with the exit codes 130 / 143 / 129 for both launchers; a
+second Ctrl-C, TERM or HUP during the grace wait ending it at once while the companion
+services are still stopped (prod.sh is held before its hand-off by a fake `rm`, `RM_BLOCK`);
+that the backend's parent is the launcher itself (the `exec` guard; for `( one simple
+command ) &` bash forks no subshell, so only a second command in that subshell, not a
+dropped `exec`, shows); a child whose pid a pending trap left unassigned still being
+stopped (reproduced deterministically with `kill` between the fork and `PID=$!`); and that
+both launchers source the shared script and bracket every fork. Because `dev.sh` starts
+`next dev` directly, it also runs the `predev` UI plugin sync by hand: the cases pin that
+the sync finishes before next starts, that a failed sync starts no frontend and stops the
+backend, that a cancellation or a backend exit during the sync leaves no process behind,
+and that `frontend/package.json` still has exactly the hooks `dev.sh` reproduces.
+Operations behaviour: [operations.md](./operations.md#plugin-companion-services).
 
 ### Stress scripts
 

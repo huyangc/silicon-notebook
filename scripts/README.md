@@ -132,8 +132,9 @@ scripts/dev.sh                # 同时起 backend(:8000)+ frontend(:3000),Ctrl+C
 ```
 全栈本地开发用。前台运行、看实时日志、退出即清理两个进程。需先在 `frontend/` 跑过 `npm install`。
 启动前端前先同步 UI 插件(原 `predev` 钩子,失败则不启动前端、停掉后端并以其退出码退出)。
-退出(Ctrl+C / TERM / HUP,退出码 130 / 143 / 129)与 `prod.sh` 同形:先同时给 uvicorn 和
-`next dev` 发 SIGTERM,最多等 `START_CLEANUP_GRACE_SECONDS`(默认 10 秒),仍未退出的发 SIGKILL。
+退出(Ctrl+C / TERM / HUP,退出码 130 / 143 / 129)与 `prod.sh` 共用 `launcher_cleanup.sh`:先同时给 uvicorn 和
+`next dev` 发 SIGTERM,最多等 `START_CLEANUP_GRACE_SECONDS`(默认 10 秒),仍未退出的发 SIGKILL;
+等待期间再按一次 Ctrl+C 则立即 SIGKILL 残留进程,配套服务仍照常停止。
 (只需要后端、或要后台常驻 + 明确 stop/status,用 `backend.sh`。)
 
 ### `example_mcp_memory_client.py` —— 外部 Agent MCP/Memory 接入示例

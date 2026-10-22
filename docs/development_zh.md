@@ -415,12 +415,16 @@ JSON 读取方可读取已打开、当前用户所有的普通文件快照，即
 启动时已被忽略的信号，而在 `nohup` 下或作为后台泳道运行的门禁，会把 SIGHUP 或 SIGINT
 以「已忽略」的状态传给子进程。等待一律以握手结束（按改名发布的 pid 文件，或启动器退出），
 20 s 只作兜底上限。
-`dev.sh` 的退出用例在 `backend/tests/launcher_checkout_testkit.py` 里用假的 uvicorn / `next`
-子进程，记录收到的 SIGTERM（`TERM_EXITS`）或无视它（`TERM_IGNORED`），钉住「TERM → 宽限 →
-KILL」、与 `prod.sh` 共用的退出码 130 / 143 / 129、每个子进程的父进程就是启动器本身（`exec`
-守卫），以及 `dev.sh` 与 `prod.sh` 的 `cleanup` 函数文本逐字相同。`dev.sh` 直接启动
-`next dev`，所以也要手工执行 `predev` 的 UI 插件同步（检出目录工具里有假 `node`）：用例钉住同步
-先于 next 启动完成、同步失败时不启动前端并停掉后端、同步期间被取消不留任何进程，以及
+启动器退出收尾的用例（`dev.sh` 与 `prod.sh` 共用 `scripts/launcher_cleanup.sh`）在
+`backend/tests/launcher_checkout_testkit.py` 里用假的 uvicorn / `next` / `node` 子进程，记录
+收到的 SIGTERM（`TERM_EXITS`）或无视它（`TERM_IGNORED`）。钉住：「TERM → 宽限 → KILL」与两个
+启动器共用的退出码 130 / 143 / 129；宽限等待期间再按一次 Ctrl-C、再收到 TERM 或 HUP 会立刻结束
+等待、配套服务仍被停止（prod.sh 用假 `rm`（`RM_BLOCK`）停在交接之前）；后端的父进程就是启动器
+本身（`exec` 守卫；`( 单条简单命令 ) &` 在 bash 里根本不 fork 子 shell，所以可观察的是子 shell 里
+多出第二条命令，而不是去掉 `exec`）；挂起的 trap 没来得及记下 pid 的子进程仍被停止（用 fork 与
+`PID=$!` 之间的 `kill` 确定性复现）；两个启动器都 source 共享脚本且每次 fork 都有括号标记。
+`dev.sh` 直接启动 `next dev`，所以也要手工执行 `predev` 的 UI 插件同步：用例钉住同步先于 next
+启动完成、同步失败时不启动前端并停掉后端、同步期间被取消或后端退出都不留任何进程，以及
 `frontend/package.json` 的钩子仍恰好是 `dev.sh` 复现的那些。运维侧行为见
 [operations_zh.md](./operations_zh.md)。
 

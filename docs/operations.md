@@ -166,29 +166,38 @@ session turns ready: it rolls back what it started (a reused session is left alo
 and removes the launcher's receipt. A controller has exited by the time startup completes, so a
 running session never depends on the launcher that started it.
 
-`npm run dev` (`scripts/dev.sh`) keeps both servers in the foreground, so Ctrl-C, TERM and
-HUP are its ordinary way out, and it winds down exactly as `scripts/prod.sh` does when it
-is interrupted before its hand-off. uvicorn and `next dev` are the launcher's direct
-children (each started with `exec`, with no npm or shell layer in front), so the launcher
-sends SIGTERM to both at once and the signal reaches the server itself. Before it starts
-`next dev` it runs the frontend's UI plugin sync (`node scripts/sync-ui-plugins.mjs` from
-`frontend/`, what `npm run dev` ran as the `predev` hook) as an `exec`ed child of its own:
-a failed sync starts no frontend, stops the backend and exits with the sync's status, and
-a Ctrl-C, TERM or HUP during the sync stops it, and the backend, the same way. After the
-signal it waits up to
-`START_CLEANUP_GRACE_SECONDS` (default 10 seconds; a positive integer, anything else exits 2
-before anything starts), SIGKILLs a server that is still running (stderr says `startup child
-PID <n> did not stop after SIGTERM; sending SIGKILL`), reaps both and only then stops the
-companion services this launch started. The exit status is 130 for Ctrl-C, 143 for TERM and
-129 for HUP, the same codes `prod.sh` returns. When one server stops on its own, the launcher
-exits with that server's status after stopping the other the same way. Neither launcher
-passes `--timeout-graceful-shutdown` to uvicorn: the grace window is the only bound on
-shutdown.
-
 A failed attempt rolls back only its own new processes, never a previously reused
 session or an external service. `stop` runs in reverse dependency order, verifies
 the saved process ownership, and uses graceful termination before forced cleanup.
 It does not identify targets by occupied ports or a PID alone.
+
+`npm run dev` (`scripts/dev.sh`) keeps both servers in the foreground, so Ctrl-C, TERM and
+HUP are its ordinary way out. It shares its wind-down with `scripts/prod.sh`
+(`scripts/launcher_cleanup.sh`, which prod.sh uses when it is interrupted before its
+hand-off). uvicorn and `next dev` are the launcher's direct children (each started with
+`exec`, with no npm or shell layer in front), so the launcher sends SIGTERM to both at
+once and the signal reaches the server itself. It then waits up to
+`START_CLEANUP_GRACE_SECONDS` (default 10 seconds; a positive integer, anything else exits
+2 before anything starts), SIGKILLs a server that is still running (stderr says `startup
+child PID <n> did not stop after SIGTERM; sending SIGKILL`), reaps both and only then
+stops the companion services this launch started. The exit status is 130 for Ctrl-C, 143
+for TERM and 129 for HUP.
+
+A further Ctrl-C, TERM or HUP during that wait (uvicorn prints "CTRL+C to force quit")
+does not kill the launcher: it ends the wait at once, SIGKILLs the servers still running
+and still stops the companion services and removes the receipt, with the exit status of
+the first signal. A child whose pid a signal arrived too early to record (the signal
+lands between the fork and the assignment) is found through `$!` and stopped as well.
+
+Before `dev.sh` starts `next dev` it runs the frontend's UI plugin sync
+(`node scripts/sync-ui-plugins.mjs` from `frontend/`, what `npm run dev` ran as the
+`predev` hook) as a direct child of its own. A failed sync starts no frontend, stops the
+backend and exits with the sync's status; a cancellation during the sync stops the sync
+and the backend the same way; a backend that exits meanwhile ends the launcher with the
+backend's status and stops the sync. When one server stops on its own later, the launcher
+exits with that server's status after stopping the other the same way. Neither launcher
+passes `--timeout-graceful-shutdown` to uvicorn: the grace window is the only bound on
+shutdown.
 
 `status`, `logs`, and `stop` use stored run state, so repairing/removing the current
 TOML does not make an older run unmanageable. `logs` shows safe lifecycle events,
@@ -3726,7 +3735,6 @@ source copy or model content was unavailable, already resolved/deleted, or clean
 permission to read the user's original source or model input by a different path. If a live
 record has reached expiry it is already outside the supported read contract even before a
 separate filesystem inventory notices cleanup.
-
 
 ## External authentication enablement and rollback
 
