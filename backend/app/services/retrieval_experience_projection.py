@@ -107,6 +107,12 @@ RETRIEVAL_ACTIONS: tuple[str, ...] = (
     # PR-A: appended, never inserted, for the same reason ``search_chunks``
     # was -- this tuple is a persisted, content-addressed vocabulary.
     "read_document",
+    # In-document navigation, appended for the same reason. A
+    # ``browse_sections`` step reports ``listed`` (not one of the trace count
+    # keys), so listing an outline is never counted as an evidence hit or a
+    # zero hit; ``read_section`` reports ``found`` like every evidence action.
+    "browse_sections",
+    "read_section",
 )
 
 RetrievalAction = Literal[
@@ -120,6 +126,8 @@ RetrievalAction = Literal[
     "outline",
     "search_chunks",
     "read_document",
+    "browse_sections",
+    "read_section",
 ]
 
 #: An entry's verdict. Two values, and the second one carries most of the

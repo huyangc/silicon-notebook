@@ -19,6 +19,8 @@ def test_legacy_shares_all_fixed_rules_across_quoted_and_unquoted_questions(
         element_kinds=("formula", "table") if extended else (),
         object_types=("concept",) if extended and kg_actions else (),
         outline=extended, consult_memory=extended,
+        **(dict(section_nav=True, section_browse_cap=3, section_read_cap=3)
+           if extended else {}),
     )
     questions = ['Explain "cache sharing"', '解释“循环深度”', 'Compare two models']
     prompts = [reflect_prompt(question, "source candidates", **options)
@@ -28,6 +30,8 @@ def test_legacy_shares_all_fixed_rules_across_quoted_and_unquoted_questions(
     assert "Before choosing answer, check aspect by aspect" in shared
     assert "Return JSON only matching the schema" in shared
     assert "matches query literally" in shared
+    if extended:
+        assert "- browse_sections:" in shared and "- read_section:" in shared
     assert "Question:" not in shared
     assert "source candidates" not in shared
     for question, prompt in zip(questions, prompts):

@@ -517,6 +517,12 @@ _KNOWN_REFLECT_SCHEMA_GATES = frozenset({
     # 动作词都在,保留集不变。
     "search_elements",
     "ppr_retrieve",
+    # 文档内导航(browse_sections / read_section)。默认关;全门打开时两个动作词与
+    # 两个同名顶层分支必须进保留集。
+    "section_nav",
+    # 它下面的两把逐动作减法闸(上限为 0 或本 run 已用完时关),开着即默认值。
+    "section_browse",
+    "section_read",
 })
 # The full whitelist each sequence-shaped gate is opened with.
 _REFLECT_SCHEMA_SEQUENCE_GATES = {

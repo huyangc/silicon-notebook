@@ -1021,6 +1021,10 @@ def _attest_overlay_passages(candidates, merged: list, kg_chunks: list) -> None:
     )
 
 
+class _ColdVectorMatrix(LookupError):
+    """``_borrow_vector_matrix`` found the entry gone: no load."""
+
+
 def _bound_on_drift(notebook_id: str, produce: Callable[[], Any]) -> Any:
     """Run one producer call whose source list may have been pushed down
     (``source_scope.scoped_allowed_source_ids`` returns ``None`` when the
@@ -1097,6 +1101,12 @@ class CandidateRetrievalService(_RetrievalState):
         self.database = database
         self.memory_retriever = memory_retriever
         self.retrieval_contributors = retrieval_contributors
+        # Process-wide section-vector cache (``section_retrieval``): one per
+        # retrieval service, shared by every run, byte-bounded by
+        # ``REASONING_SECTION_VECTOR_CACHE_MAX_BYTES``.
+        from app.services.section_retrieval import SectionVectorCache
+
+        self.section_vector_cache = SectionVectorCache()
 
     def notebook_memory_hits(
         self, user_id: str, notebook_id: str, query: str, limit: int = 8
@@ -1845,6 +1855,36 @@ class CandidateRetrievalService(_RetrievalState):
         守卫使用(见 _retrieve_relations_scored)。"""
         version = self._vector_matrix_version(db, notebook_id, table)
         return self._vector_cache.peek(f"{notebook_id}:matrix:{table}", version)
+
+    def _warm_vector_matrix_version(
+        self, db: object, notebook_id: str, table: str,
+    ):
+        """The version ``table``'s notebook matrix is cached under when it is
+        ALREADY warm in ``_vector_cache`` (the ``_vector_matrix_warm`` peek),
+        else ``None``.  One version aggregate; never a load.  Callers that
+        borrow more than once (``section_retrieval``, per source) keep this
+        verdict for the run and hand it to ``_borrow_vector_matrix``."""
+        version = self._vector_matrix_version(db, notebook_id, table)
+        if not self._vector_cache.peek(f"{notebook_id}:matrix:{table}", version):
+            return None
+        return version
+
+    def _borrow_vector_matrix(self, notebook_id: str, table: str, version):
+        """``(ids, mat)`` of the cached matrix under ``version``, or ``None``
+        when that entry is gone (evicted, or a newer version replaced it) --
+        never a load: the borrow's loader refuses instead of reading.  For the
+        plain ``(ids, mat)`` tables only (not ``relation_embeddings``, whose
+        entry is the split pair ``_relation_matrices`` owns)."""
+        key = f"{notebook_id}:matrix:{table}"
+
+        def _refuse_load():
+            raise _ColdVectorMatrix(key)
+
+        try:
+            return self._vector_cache.get(key, version, _refuse_load)
+        except _ColdVectorMatrix:
+            return None
+
     def _keyword_token_sets(self, db, notebook_id: str, objects: list,
                             bounded: bool = False, *,
                             read_evidence: Optional[Dict[str, list]] = None) -> dict:
@@ -5547,6 +5587,32 @@ class CandidateRetrievalService(_RetrievalState):
         if federated_ask_active():
             return self._peer_exact_lookup_chunks(notebook_id, query)
         return self._exact_lookup_chunks_one(notebook_id, query)
+
+    # In-document navigation reads (``RetrievalPort.section_*``); the bodies
+    # live in ``section_retrieval``, which owns their ceiling, memos and bounds.
+    def _section_outline(self, notebook_id: str, source_id: str):
+        from app.services.section_retrieval import section_outline
+
+        return section_outline(self, notebook_id, source_id)
+
+    def _section_chunk_similarities(
+        self, notebook_id: str, source_id: str, chunk_ids, query_texts,
+    ) -> Dict[str, float]:
+        from app.services.section_retrieval import section_chunk_similarities
+
+        return section_chunk_similarities(
+            self, notebook_id, source_id, chunk_ids, query_texts,
+        )
+
+    def _section_chunks(
+        self, notebook_id: str, source_id: str, chunk_ids, limit: int,
+        question: str,
+    ):
+        from app.services.section_retrieval import section_chunks
+
+        return section_chunks(
+            self, notebook_id, source_id, chunk_ids, limit, question,
+        )
 
     def _exact_lookup_limits(self):
         from app.services.exact_lookup import ExactLookupLimits

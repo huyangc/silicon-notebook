@@ -380,6 +380,33 @@ class RetrievalService:
             self.candidates._exact_lookup_chunks(notebook_id, query),
         )
 
+    def section_outline(self, notebook_id, source_id):
+        """One source's outline rows ``((chunk_id, section_path, navigation),
+        ...)`` in document order + whether the bounded scan was cut; empty for
+        a source outside the run's ceiling, exactly as for a missing one
+        (``section_retrieval``)."""
+        return self.candidates._section_outline(notebook_id, source_id)
+
+    def section_chunk_similarities(
+        self, notebook_id, source_id, chunk_ids, query_texts,
+    ):
+        """``{chunk_id: max cosine over query_texts}`` for that source's
+        chunks; ``{}`` when vectors are unavailable (``section_retrieval``)."""
+        return self.candidates._section_chunk_similarities(
+            notebook_id, source_id, chunk_ids, query_texts,
+        )
+
+    def section_chunks(self, notebook_id, source_id, chunk_ids, limit, question):
+        """A section read back whole (``section_read`` chunks, document order,
+        navigation pages dropped), behind the result-boundary ceiling filter
+        every chunk producer passes."""
+        return filter_retrieval_items(
+            notebook_id, "chunk",
+            self.candidates._section_chunks(
+                notebook_id, source_id, chunk_ids, limit, question,
+            ),
+        )
+
     def retrieve_chunk_candidates(self, notebook_id, query):
         """单查询原文段落召回 —— 范围是**参与集**,不再是 active 一本。
 

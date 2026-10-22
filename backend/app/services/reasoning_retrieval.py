@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import (
-    Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple,
+    Any, Dict, List, Mapping, NamedTuple, Optional, Protocol, Sequence, Tuple,
     TYPE_CHECKING,
 )
 
@@ -112,6 +112,13 @@ from app.services.retrieval_run import (
     retrieval_fanout_slot,
 )
 from app.services.search_profile import render_style_block
+from app.services.section_retrieval import section_vector_stats
+from app.services.section_outline import (
+    UNDER_NO_NUMBERING, UNTITLED, AddressBook, Ambiguous, Outline, Resolved,
+    SourceRanking, build_outline, filter_outline, parse_section_id,
+    rank_sections, render_hints, render_outline, render_ranked,
+    resolve_section, select_hints,
+)
 # The ASK-side peer predicate. This module may not read the participant
 # override (it is not on that module's frozen reader whitelist);
 # ``subjectless_run_active`` only answers "this run has no subject library",
@@ -246,7 +253,7 @@ def first_round_empty_note(chunk_search: bool, enumeration: bool) -> str:
 def legacy_action_ledger_note(
     visited, collected, neighbor_truncated, neighbor_expand_limit,
     attempted, exact_lookup_log, document_reads=(), read_labels=None, *,
-    element_search: bool = True,
+    element_search: bool = True, section_log=(),
 ) -> str:
     """把已执行动作的五段账目拼到候选摘要之后。
 
@@ -262,6 +269,11 @@ def legacy_action_ledger_note(
     run 级发号簿的 ``issued``):已读账目里那一篇按花名册同一口径显示,否则模型
     读完「第 1 篇」后看到的是一个花名册里已经不存在的裸标题。缺省/无同名时空,
     账目逐字节不变。
+
+    ``section_log`` 是文档内导航的账目行(``browse_sections`` / ``read_section``
+    每次执行或被跳过各一行,执行体自己写好的教学措辞)。目录本身只保留每个来源最近
+    一次的列表(候选摘要里的「章节目录」段),更早的浏览与每一次读取只在这里留一行,
+    模型据此不重复请求。没有这个通道的 run 恒为空,账目逐字节不变。
     """
     note = ""
     # 已展开过的节点回喂 reflect, 提示模型勿重复请求(治"反复 expand 同节点"根源)。
@@ -369,6 +381,9 @@ def legacy_action_ledger_note(
                "不是可选值,那几次已按 brief 份额处理。" if rejected else "")
             + "）"
         )
+    if section_log:
+        note = (f"{note}\n\n（章节导航记录,勿重复请求: "
+                + ";".join(section_log) + "。）")
     return note
 
 
@@ -693,7 +708,8 @@ def _reflect_step_summary(decision: "ReflectDecision") -> str:
 def core_reflect_actions(
     *, kg_actions: bool, chunk_search: bool, enumeration: bool,
     read_document: bool, outline: bool, consult_memory: bool,
-    search_elements: bool, ppr_retrieve: bool,
+    search_elements: bool, ppr_retrieve: bool, section_nav: bool,
+    section_browse: bool = True, section_read: bool = True,
 ) -> Tuple[str, ...]:
     """本轮 reflect 提供的**核心**动作 id(插件动作另由 ``project_reflect_actions``
     给出)。纯函数、零 I/O。
@@ -708,6 +724,10 @@ def core_reflect_actions(
     * ``search_elements`` / ``ppr_retrieve`` = 两把逐动作减法闸(今天对等 run 里
       PPR 那把恒关,元素那把随 ``GLOBAL_ASK_ELEMENT_ARM_ENABLED``,见
       ``element_search_offered`` / ``ppr_retrieve_offered``);
+    * ``section_nav`` = 文档内导航(``section_navigation_active``),一把闸同时
+      给出 ``browse_sections`` 与 ``read_section`` 两个动作(**必填**关键字参数:
+      每个调用方都必须显式说明本 run 给不给);``section_browse`` /
+      ``section_read`` 是它下面两把逐动作减法闸(上限为 0 或本 run 已用完时关);
     * 其余五把各自对应一个可选动作。
 
     ``exact_lookup`` 例外地**不随**部署开关变(沿用 ppr_retrieve 立下的先例):
@@ -721,6 +741,9 @@ def core_reflect_actions(
          "follow_chain") if kg_actions else ()
     ) + (
         ("search_chunks",) if chunk_search else ()
+    ) + (
+        ((BROWSE_SECTIONS_ACTION,) if section_nav and section_browse else ())
+        + ((READ_SECTION_ACTION,) if section_nav and section_read else ())
     ) + (
         (ENUMERATE_ELEMENTS_ACTION,) if enumeration else ()
     ) + (
@@ -837,6 +860,18 @@ DOCUMENT_READ_HEADER_RESERVE_CHARS = 200
 # 又读不出这篇文档讲什么;深度优先按字符份额算得出几个元素,就只查几个,把 I/O
 # 降一个量级而送进合成的正文反而更长。
 DOCUMENT_READ_MIN_CHARS_PER_ELEMENT = 320
+
+# 文档内导航的两个动作 id(§3.8/§3.9)。一把闸(``section_navigation_active``)同时
+# 给出两者:目录(不进证据)与按章节读回原文(进证据)是同一件事的两半——没有目录
+# 就没有可读的地址,读不了就没有必要列目录。
+BROWSE_SECTIONS_ACTION = "browse_sections"
+READ_SECTION_ACTION = "read_section"
+# browse_sections.query 进向量排序之前的截断长度(与 `CHUNKS_KEYWORDS_MAX_CHARS`
+# 同口径:再长就是堆砌,只会稀释查询向量)。只在执行处截,解析不截——fail_closed
+# 的 2000 字符硬闸因此仍看得到原值。
+SECTION_QUERY_MAX_CHARS = 300
+# trace detail / 账目里回显模型自写的来源标题、章节文本时的截断长度。
+_SECTION_ECHO_CHARS = 200
 
 # `search_chunks` 动作的关键词串(模型回复的根级 `keywords`)解析时的截断上限。
 # 这串原样进全文检索(`keyword_chunk_candidates` → FTS 的 OR 查询):词项越多,
@@ -1637,6 +1672,20 @@ def local_only_scope_offered() -> bool:
     那种 run 里这个选项整个不存在:模型看不到它,硬填了也按默认 ``"all"`` 走。
     """
     return not subjectless_run_active()
+
+
+#: 文档内导航不提供的档位(裁决 D2:与 search_chunks 同闸,overview 不提供)。
+_SECTION_NAV_CLOSED_EFFORTS = frozenset({"overview"})
+#: 文档内导航需要的三个检索端口方法(T4,`RetrievalPort`)。
+_SECTION_PORT_METHODS = (
+    "section_outline", "section_chunk_similarities", "section_chunks",
+)
+
+
+def section_ports_offered(retrieval) -> bool:
+    """检索端口是否提供文档内导航的三个方法(按属性探测,不在场的老替身 = 不提供)。"""
+    return all(callable(getattr(retrieval, name, None))
+               for name in _SECTION_PORT_METHODS)
 
 
 def element_search_offered(retrieval) -> bool:
@@ -2755,6 +2804,7 @@ CONSULT_MEMORY_ACTION = "consult_memory"
 CORE_REFLECT_ACTION_IDS: "frozenset[str]" = frozenset(core_reflect_actions(
     kg_actions=True, chunk_search=True, enumeration=True, read_document=True,
     outline=True, consult_memory=True, search_elements=True, ppr_retrieve=True,
+    section_nav=True,
 ))
 
 #: deep 及以上档才提供这个动作。与大纲便签的档位闸同一条道理(低档不该为一次
@@ -2806,8 +2856,11 @@ def consult_memory_active(settings, limits, experience_store) -> bool:
 #: ``search_chunks`` joins them for the same reason: its dispatch already
 #: computes a deterministic "new this turn" number (the ``take_distinct_chunk_
 #: hits`` return), so judging zero-hit needs no extra read.
+#: ``read_section`` joins for the same reason as ``search_chunks``: its
+#: dispatch computes the ``take_distinct_chunk_hits`` "new this turn" number.
 _ZERO_HIT_TRACKED_ACTIONS: Tuple[str, ...] = ("ppr", "exact_lookup", "expand",
-                                              "follow_chain", "search_chunks")
+                                              "follow_chain", "search_chunks",
+                                              "read_section")
 
 #: 同一个动作连续(累计)多少次零新增才够格被提示一次。与
 #: ``_ZERO_HIT_NUDGE_MAX_PER_RUN`` 都是确定性阈值,不是学出来的——P4 开工
@@ -3294,6 +3347,15 @@ def effective_top_n(
                settings.reasoning_top_n_cap)
 
 
+class _SectionSource(NamedTuple):
+    """文档内导航的来源候选一行(鸭子类型兼容 `_resolve_roster_rows` 读的三格)。
+    `notebook_id` 恒为真实属主 id(活动库也是活动库 id)。"""
+
+    source_id: str
+    source_title: str
+    notebook_id: str
+
+
 @dataclass
 class _QueryAttempt:
     """单条子查询的执行账目:原文、带来的新增证据数、尝试次数(含被跳过的重复)。
@@ -3374,7 +3436,8 @@ class ReflectDecision:
     sufficient: bool = False
     # answer|expand_graph|add_subquery|search_elements|search_chunks|
     # ppr_retrieve|expand_community|follow_chain|exact_lookup|
-    # enumerate_elements|enumerate_kg_objects|read_document
+    # enumerate_elements|enumerate_kg_objects|read_document|
+    # browse_sections|read_section
     next_action: str = "answer"
     expand_object_id: str = ""
     expand_edge_type: Optional[str] = None
@@ -3442,6 +3505,14 @@ class ReflectDecision:
     # 实际按 brief 读了,就会以为预算已经花光而过早放弃读别的篇。所以留下非空
     # 非法原值(截 60 字),经 `DocumentReadOutcome.depth_rejected` 进回喂账目。
     read_document_depth_rejected: str = ""
+    # 文档内导航的参数(§3.8/§3.9),只在 `section_navigation_active` 为真时解析。
+    # 全是模型自由文本:来源标题由执行体在本 run 已出现的来源里精确解析,章节
+    # 是 `sN` 地址或已列出的标题/编号——两者都是封闭集合,解析不到就 skip 教学。
+    browse_sections_source: str = ""
+    browse_sections_under: str = ""
+    browse_sections_query: str = ""
+    read_section_source: str = ""
+    read_section_section: str = ""
     # update_outline 携带的**整份章节结构**;同 id 的证据 union/显式删除在 run()
     # 应用。解析期只夹形状与边界,证据 key 的合法性要看 run 局部候选集合——
     # reflect() 在这一层根本不知道候选是什么。
@@ -3911,6 +3982,46 @@ class _ReasoningRunState:
     # 的 `stale` 持平(不清零、不递增)。
     external_delivered_this_turn: bool = False
 
+    # —— 文档内导航(browse_sections / read_section / 章节线索块)。全部带缺省值,
+    # 不经 `_new_run_state`;读写者是 `_action_browse_sections` /
+    # `_action_read_section` / `_section_hint_block` 及其 `_section_*` 帮手。——
+    #
+    # 每个来源的大纲,键 `(属主库 id, source_id)`,**本 run 只建一次**:地址簿的
+    # 出现序号是这份大纲里的位置,重建会让已发出的 `sN` 指向别处。属主库 id 一律是
+    # 真实 id(活动库的 chunk 不带 notebook_id 时取 `state.notebook_id`),与地址簿
+    # 「一个 run 一种口径」的约定一致。
+    section_outlines: Dict[tuple, "Outline"] = field(default_factory=dict)
+    # 来源显示标题(轨迹摘要与账目用),键同上。
+    section_titles: Dict[tuple, str] = field(default_factory=dict)
+    # 本 run 已向模型展示过的章节地址(线索块、目录、歧义回喂)。封闭集合:
+    # read_section 的 `sN` 只认这里发过的号。
+    surfaced_sections: "AddressBook" = field(default_factory=AddressBook)
+    # 每个来源**最近一次** browse 的目录段(替换不累加,插入序 = 最近浏览序)。
+    section_listings: Dict[tuple, str] = field(default_factory=dict)
+    # 导航账目行(浏览、读取与各条教学式 skip),进 `legacy_action_ledger_note`。
+    section_log: List[str] = field(default_factory=list)
+    section_browses: int = 0
+    section_reads: int = 0
+    # 读取的防重键 (库, 来源, 出现序号)。浏览的防重由下面的目录缓存承担。
+    section_read_keys: set = field(default_factory=set)
+    # 线索块的相似度缓存:(库, 来源) → (查询文本元组, {chunk_id: 余弦})。查询文本
+    # 不变就不重算(新增子查询才重算;chunk 向量由检索层按 run 记忆,不重复解码)。
+    section_hint_sims: Dict[tuple, tuple] = field(default_factory=dict)
+    # 本轮 browse 交付了目录(不进证据):循环链尾与 consult/外部材料同款让 `stale`
+    # 持平,读一次即清零。
+    section_listing_delivered_this_turn: bool = False
+    # 最近一次**新**交付目录发生在第几轮(`state.steps`)。下一轮的提示拼装据它把
+    # 「无新证据,请直接作答」与插件的站外 nudge 换成一句「已列出目录」(目录不进
+    # 证据,那一轮的 no_progress 不是空手);不改 no_progress 本身。
+    section_listing_turn: int = -1
+    # 每次成功浏览的目录段,键 (库, 来源, under, query) 规范形。同参数重复浏览时零 I/O 地
+    # 把它放回摘要:(目录段, 列出条数, 范围说明)。
+    section_browse_cache: Dict[tuple, tuple] = field(default_factory=dict)
+    # 本轮真正计算了线索块时的稀疏 trace 键(`section_hints`):参与来源数、列出
+    # 条数与这一轮检索层向量读取的增量。`_section_hint_block` 每轮先清空再写,
+    # 循环拼 reflect 步 detail 时经 `_take_section_hint_detail` 取走。
+    section_hint_detail: Dict[str, Any] = field(default_factory=dict)
+
 
 
 def _rescored_keeping_origin(rescored, collected):
@@ -4070,6 +4181,13 @@ class ReasoningRetriever:
         # must not silently inherit a per-document reading channel whose
         # "query" is a JSON envelope.
         self.allow_document_read = True
+        # In-document navigation policy hook (``browse_sections`` /
+        # ``read_section`` and the section-hint block), same shape and
+        # discipline as allow_document_read: False takes the whole channel away
+        # through ``section_navigation_active``. knowhow completion sets it
+        # False explicitly -- defense in depth on top of allow_search_chunks,
+        # which that gate also reads.
+        self.allow_section_nav = True
         # Authoring flows whose synthesis only accepts server-issued evidence
         # keys (knowhow completion) turn this off: an enumerated list would
         # spend the run's budget on items their prompt cannot cite.
@@ -4237,6 +4355,46 @@ class ReasoningRetriever:
             and element_pool // policy_reads >= 1
             and (DOCUMENT_READ_KEY_BASE + policy_reads * element_pool
                  <= OUTLINE_SECTION_KEY_STRIDE)
+        )
+
+    # --- 文档内导航的总闸(browse_sections / read_section / 章节线索块) ---
+    def section_navigation_active(
+        self, limits: "AskRetrievalLimits | None" = None,
+    ) -> bool:
+        """本 run 是否提供文档内导航(两个动作与章节线索块)。
+
+        与 `search_chunks` 同闸(裁决 D2),overview 档不提供。**七处**共读这一个
+        判据:reflect prompt 的两行动作说明、schema 的两个分支与 next_action 词、
+        `allowed_actions`、字段解析、两个执行体的第一道纵深防御、
+        `_first_round_offered_actions`(经验行过滤)与线索块计算。关闭态逐字节
+        回到接入前。
+
+        条件缺一不可:
+
+        * 部署开关 `REASONING_SECTION_NAV_ENABLED`;
+        * 调用方策略位 `allow_section_nav`(knowhow 补全显式关掉);
+        * `chunk_search_active()`(部署开关 + `allow_search_chunks`);
+        * 档位不是 overview(`limits` 缺省时取默认档,与 `document_read_active` 同口径);
+        * 检索端口提供三个章节方法(按属性探测,`element_search_offered` 的先例:
+          老的检索替身没有它们,动作整体不提供);
+        * 两个次数上限之和 > 0(两动作再各看自己的上限,执行处 cap skip);
+        * 大纲扫描上限 `REASONING_SECTION_OUTLINE_MAX_ROWS` > 0。
+
+        每次调用现算、不缓存,输入在一个 run 内恒定。`getattr` 读 settings:大量
+        老用例用只带几个字段的 settings 替身构造 retriever。
+        """
+        policy = reasoning_action_policy(self.settings)
+        budget = limits if limits is not None else ask_retrieval_limits(
+            DEFAULT_RETRIEVAL_EFFORT)
+        return bool(
+            getattr(self.settings, "reasoning_section_nav_enabled", True)
+            and self.allow_section_nav
+            and self.chunk_search_active()
+            and getattr(budget, "effort", "") not in _SECTION_NAV_CLOSED_EFFORTS
+            and section_ports_offered(self.retrieval)
+            and policy.max_section_browses + policy.max_section_reads > 0
+            and int(getattr(
+                self.settings, "reasoning_section_outline_max_rows", 0) or 0) > 0
         )
 
     def _kg_in_scope(self, notebook_id) -> bool:
@@ -4902,8 +5060,13 @@ class ReasoningRetriever:
                 consult_memory: bool = False, kg_actions: bool = True,
                 *, plugin_actions: "Sequence[ReflectActionSpec]" = (),
                 limits: "AskRetrievalLimits | None" = None,
-                corpus_langs: "Optional[List[str]]" = None):
+                corpus_langs: "Optional[List[str]]" = None,
+                section_spent: "frozenset[str]" = frozenset()):
         """规划后的轻量反思：判断材料是否齐备，或选择下一次检索。
+
+        ``section_spent`` = 本 run 已用完次数的文档内导航动作(``_reflect_round_kwargs``
+        只在非空时传)。用完的那个动作与上限为 0 的同样处理:不进 enum、没有说明、
+        不在白名单里(模型硬吐一个按「本 run 不提供」记 skip)。
 
         ``outline`` = 本 run 提供大纲便签动作(仅 exhaustive 档,见
         ``outline_wiring_active``)。默认 False,所以既有调用方(与关闭态)拿到的
@@ -4973,6 +5136,13 @@ class ReasoningRetriever:
             reasoning_action_policy(self.settings).max_document_reads
             if read_document else 0
         )
+        # 文档内导航:与 read_document 同款在这里现算(判据里的档位来自 `limits`,
+        # 与执行体读的 `state.enum_limits` 是同一份)。prompt 报的两个次数与执行处
+        # cap skip 报的是同一份 `ReasoningActionPolicy`。
+        section_nav = self.section_navigation_active(limits)
+        section_browse, section_read = self._section_actions_offered(
+            section_nav, section_spent)
+        section_policy = reasoning_action_policy(self.settings)
         # 白名单从 collection_catalog import(唯一字面量定义点),prompt/schema/
         # 解析三处共用同一份,不各写一份副本。
         element_kinds = ENUMERABLE_ELEMENT_KINDS if enumeration else ()
@@ -5008,6 +5178,11 @@ class ReasoningRetriever:
                     source_scoped=source_scoped,
                     search_elements=element_search,
                     ppr_retrieve=ppr_action,
+                    section_nav=section_nav,
+                    section_browse_cap=(
+                        section_policy.max_section_browses if section_browse else 0),
+                    section_read_cap=(
+                        section_policy.max_section_reads if section_read else 0),
                 ),
             }]
             if self.untrusted_evidence:
@@ -5026,6 +5201,9 @@ class ReasoningRetriever:
                     enumerate_scope=enumerate_scope,
                     search_elements=element_search,
                     ppr_retrieve=ppr_action,
+                    section_nav=section_nav,
+                    section_browse=section_browse,
+                    section_read=section_read,
                 ),
                 timeout=self.settings.reasoning_timeout_seconds,
                 max_retries=self.settings.reasoning_max_retries,
@@ -5055,6 +5233,8 @@ class ReasoningRetriever:
                 enumeration=enumeration, read_document=read_document,
                 outline=outline, consult_memory=consult_memory,
                 search_elements=element_search, ppr_retrieve=ppr_action,
+                section_nav=section_nav, section_browse=section_browse,
+                section_read=section_read,
             # 白名单条目与 prompt 行、schema 分支同源:三处都由
             # `project_reflect_actions` 这一个纯函数出,所以插件动作不可能出现
             # 「告诉了模型却调不动」或反过来的那种漂移。空元组 ⇒ 这里一个字节
@@ -5231,6 +5411,19 @@ class ReasoningRetriever:
                              else json.dumps(depth_raw, ensure_ascii=False))
                     d.read_document_depth_rejected = " ".join(
                         shown.split())[:60]
+            if section_nav:
+                # 与 read_document 分支同形:闸关时连读都不读。只取字符串
+                # (`as_text`:非字符串读作空串),不在这里截长——fail_closed 的
+                # 2000 字符硬闸要看到原值,执行处再按各自口径截。
+                browse_request = data.get(BROWSE_SECTIONS_ACTION)
+                if section_browse and isinstance(browse_request, dict):
+                    d.browse_sections_source = as_text(browse_request.get("source"))
+                    d.browse_sections_under = as_text(browse_request.get("under"))
+                    d.browse_sections_query = as_text(browse_request.get("query"))
+                read_request = data.get(READ_SECTION_ACTION)
+                if section_read and isinstance(read_request, dict):
+                    d.read_section_source = as_text(read_request.get("source"))
+                    d.read_section_section = as_text(read_request.get("section"))
             if outline:
                 # 与 enumerate 分支同形:只在这一把闸打开时才看这个字段,关闭态
                 # 连读都不读(模型硬吐一份大纲也不会有任何影响)。夹取与丢弃的规则
@@ -5293,6 +5486,12 @@ class ReasoningRetriever:
                     raise ValueError(
                         "reasoning update_outline action is missing outline sections"
                     )
+                if action == BROWSE_SECTIONS_ACTION and not d.browse_sections_source:
+                    raise ValueError(
+                        "reasoning browse_sections action is missing source")
+                if action == READ_SECTION_ACTION and not d.read_section_section:
+                    raise ValueError(
+                        "reasoning read_section action is missing section")
                 # 插件动作的必填参数,与上面五条「缺参数」校验同形、同措辞
                 # (`reasoning <动作名> action is missing <参数名>`)。只有
                 # fail_closed 才在这里拦;非 fail_closed 留给 T3 的执行分支记
@@ -5317,6 +5516,11 @@ class ReasoningRetriever:
                     d.enumerate_source_id,
                     d.enumerate_source_title,
                     d.new_sub_query.query if d.new_sub_query else "",
+                    d.browse_sections_source,
+                    d.browse_sections_under,
+                    d.browse_sections_query,
+                    d.read_section_source,
+                    d.read_section_section,
                 ) + _plugin_text_arguments(
                     plugin_spec, d.plugin_action_arguments)
                 if any(len(value) > 2000 for value in bounded_fields):
@@ -6237,6 +6441,9 @@ class ReasoningRetriever:
             consult_memory=state.consult_memory_flag,
             search_elements=element_search_offered(self.retrieval),
             ppr_retrieve=ppr_retrieve_offered(),
+            section_nav=self.section_navigation_active(state.enum_limits),
+            section_browse=state.action_policy.max_section_browses > 0,
+            section_read=state.action_policy.max_section_reads > 0,
         ))
 
     def _ppr_seed_offered(self) -> bool:
@@ -7082,6 +7289,526 @@ class ReasoningRetriever:
                      f"新增 {len(overview.id_map)} 段"),
             detail=_read_detail))
 
+    # --- 文档内导航(§3.5/§3.7–§3.9):browse_sections / read_section / 线索块 ---
+    def _not_a_name_note(self, state: "_ReasoningRunState", term: str) -> str:
+        """exact_lookup 形状门拒绝时的回喂。本 run 提供 read_section 时追加一句:
+        被拒的往往是章节标题(「5.7.3 Standard Package」),那该走章节导航。"""
+        note = _NOT_A_NAME_NOTE.format(term=term)
+        if self.section_navigation_active(state.enum_limits):
+            note += ";如果这是章节标题,请改用 browse_sections 或 read_section"
+        return note
+
+    def _section_source_rows(self, state: "_ReasoningRunState") -> list:
+        """来源解析的候选:本 run 证据里出现过的来源(首次出现序)∪ 已列出的来源
+        清单行。属主库一律取真实 id(活动库 chunk 不带 notebook_id 时取
+        `state.notebook_id`),与地址簿「一个 run 一种口径」一致。零 I/O。"""
+        rows: Dict[str, _SectionSource] = {}
+        for chunk in state.chunks:
+            rows.setdefault(chunk.source_id, _SectionSource(
+                chunk.source_id, str(chunk.source_title or ""),
+                str(chunk.notebook_id or state.notebook_id)))
+        for listed in state.enumerations:
+            if listed.collection != ENUMERATE_SOURCES_COLLECTION:
+                continue
+            for row in listed.items:
+                rows.setdefault(row.source_id, _SectionSource(
+                    row.source_id, str(row.source_title or ""),
+                    str(getattr(row, "notebook_id", "") or state.notebook_id)))
+        return list(rows.values())
+
+    def _resolve_section_source(
+        self, state: "_ReasoningRunState", requested: str, verb: str,
+    ) -> "Tuple[Optional[_SectionSource], str]":
+        """模型抄来的来源标题 → 唯一一行候选,或 (None, skip 文案)。
+
+        解析复用 `_resolve_roster_rows`(逐步精确匹配,同名序号占位串与清单同一
+        发号簿)。0 篇与多篇的下一步不同,文案分叉,措辞与按篇读取同一口径。候选
+        只来自本 run 已出现的来源(都已过天花板),所以「越界」与「不存在」在这里
+        本来就是同一件事:不在候选里。
+        """
+        issued = state.roster_numbering.sync(state.enum_chains).issued
+        matches = _resolve_roster_rows(
+            self._section_source_rows(state), str(requested or ""), issued)
+        if len(matches) > 1:
+            # 本库与参考库同名:优先本库那一篇(与花名册「本库优先」的读法一致);
+            # 要读参考库那篇,抄花名册给它的「（第 N 篇）」占位串。
+            local = [row for row in matches if row.notebook_id == state.notebook_id]
+            if len(local) == 1:
+                matches = local
+        if len(matches) == 1:
+            return matches[0], ""
+        if matches:
+            return None, (f"跳过{verb}:候选与来源清单里有 {len(matches)} 篇同名文档,"
+                          "按标题无法区分,请改用章节线索里的 [sN] 或换一篇")
+        return None, (f"跳过{verb}:本轮候选与来源清单里没有匹配这个标题的文档,"
+                      "请从候选或清单里逐字复制标题后重试")
+
+    def _section_outline_for(
+        self, state: "_ReasoningRunState", owner: str, source_id: str,
+        title: str = "",
+    ) -> "Outline":
+        """这个来源的大纲,本 run 只读一次(地址簿的出现序号依赖它不变)。
+
+        与 `search_chunks` 同路:I/O 在 `retrieval_fanout_slot()` 里(这是单库叶子
+        读取,对等 run 也一样)。权限在检索层(越界与不存在都返回空大纲)。"""
+        key = (owner, source_id)
+        if title and key not in state.section_titles:
+            state.section_titles[key] = title
+        cached = state.section_outlines.get(key)
+        if cached is None:
+            with retrieval_fanout_slot():
+                rows, truncated = self.retrieval.section_outline(owner, source_id)
+            cached = build_outline(rows, truncated)
+            state.section_outlines[key] = cached
+        return cached
+
+    def _section_similarities(
+        self, owner: str, source_id: str, chunk_ids, query_texts,
+    ) -> Dict[str, float]:
+        """`RetrievalPort.section_chunk_similarities` 的包装(扇出槽同 search_chunks)。"""
+        ids = list(dict.fromkeys(chunk_ids))
+        if not ids:
+            return {}
+        with retrieval_fanout_slot():
+            return dict(self.retrieval.section_chunk_similarities(
+                owner, source_id, ids, list(query_texts)))
+
+    @staticmethod
+    def _take_section_hint_detail(state: "_ReasoningRunState") -> Dict[str, Any]:
+        """本轮 reflect 步 detail 的稀疏 `section_hints` 键(没算线索时为空),取走即清。"""
+        taken = dict(state.section_hint_detail)
+        state.section_hint_detail = {}
+        return {"section_hints": taken} if taken else {}
+
+    def _section_hint_block(self, state: "_ReasoningRunState") -> str:
+        """章节向量线索块(§3.7),惰性计算,**失败开放**(出不来就不出块、不记 skip)。
+
+        * 来源:本 run 证据里首次出现的前 `REASONING_SECTION_HINT_SOURCES` 个来源,
+          只取大纲真实出现 ≥ 2 的;
+        * 查询文本:问题 + 已执行的查询(`attempted`,含跑过的已确认方向),查询向量走检索层
+          的 run 内记忆;相似度按 (来源, 查询文本) 缓存在 state 上,新增子查询才重算,
+          chunk 向量由检索层按 (库, 来源) 记忆、不重复解码;
+        * 排除本 run 已有 chunk 覆盖的节与导航节(`rank_sections`;导航出现不进大纲);
+        * 相对阈值的基准 = 本 run 已有 chunk 在同一把尺子下的最高相似度。没有任何已有
+          chunk 拿得到相似度(向量不可用)时没有基准,整块不出。基准来自**已覆盖**的
+          高分块,而线索只列**未覆盖**的节(天然更低分),所以默认比例取 0.5;噪声靠
+          名次上限 `REASONING_SECTION_HINT_MAX_ENTRIES` 控制。
+        """
+        state.section_hint_detail = {}
+        # read_section 不提供或次数已用完:线索没有可用的下一步,不出块也不重算。
+        if not state.chunks or not self._section_read_left(state):
+            return ""
+        max_entries = int(getattr(self.settings, "reasoning_section_hint_max_entries", 0) or 0)
+        max_sources = int(getattr(self.settings, "reasoning_section_hint_sources", 0) or 0)
+        if max_entries <= 0 or max_sources <= 0:
+            return ""
+        try:
+            before = section_vector_stats()
+            text, sources_used, entries = self._section_hints_text(
+                state, max_entries, max_sources)
+            delta = {key: int(value) - int(before.get(key, 0))
+                     for key, value in section_vector_stats().items()}
+            # 稀疏:只在这一轮真的读了/借了向量,或线索块非空时写(冻结金样里
+            # 闸关、没算或全命中 run 内记忆的轮次一个键都不多)。
+            if text or delta.get("vector_loads") or delta.get("process_cache_hits"):
+                state.section_hint_detail = {
+                    "sources": sources_used, "entries": entries,
+                    "vectors_read": delta.get("vectors_read", 0),
+                    "vector_loads": delta.get("vector_loads", 0),
+                    "process_cache_hits": delta.get("process_cache_hits", 0),
+                    "vector_ms": delta.get("vector_ms", 0),
+                }
+            return text
+        except (AskCancelled, RetrievalControlError):
+            raise
+        except Exception:  # noqa: BLE001 — 线索是提示,不是必需品(失败开放)
+            if self.fail_closed:
+                raise
+            return ""
+
+    def _section_hints_text(
+        self, state: "_ReasoningRunState", max_entries: int, max_sources: int,
+    ) -> "Tuple[str, int, int]":
+        """`_section_hint_block` 的计算体(异常由调用方失败开放):
+        `(线索块文本, 参与排序的来源数, 列出的条数)`。"""
+        sources: Dict[tuple, str] = {}
+        for chunk in state.chunks:
+            key = (str(chunk.notebook_id or state.notebook_id), chunk.source_id)
+            if key not in sources:
+                sources[key] = str(chunk.source_title or UNNAMED_SOURCE_LABEL)
+                if len(sources) >= max_sources:
+                    break
+        # 只用本 run 已经嵌入过的文本(问题 + 已执行的查询):未执行的已确认方向
+        # 会让每轮多付一次嵌入,而它们还没有贡献过任何证据。
+        texts = tuple(dict.fromkeys(
+            text for text in (
+                [state.question]
+                + [entry.query for entry in state.attempted.values()])
+            if str(text or "").strip()))
+        run_ids = {chunk.chunk_id for chunk in state.chunks}
+        rankings: List[SourceRanking] = []
+        best = None
+        for (owner, source_id), title in sources.items():
+            source_outline = self._section_outline_for(state, owner, source_id, title)
+            if source_outline.section_count < 2:
+                continue
+            cached = state.section_hint_sims.get((owner, source_id))
+            if cached is None or cached[0] != texts:
+                cached = (texts, self._section_similarities(
+                    owner, source_id,
+                    [cid for occ in source_outline.occurrences for cid in occ.chunk_ids],
+                    texts))
+                state.section_hint_sims[(owner, source_id)] = cached
+            sims = cached[1]
+            for chunk_id in run_ids:
+                if chunk_id in sims and (best is None or sims[chunk_id] > best):
+                    best = sims[chunk_id]
+            rankings.append(SourceRanking(
+                owner, source_id, title, tuple(rank_sections(
+                    source_outline, sims, exclude_chunk_ids=run_ids,
+                    limit=max_entries))))
+        if best is None:
+            return "", len(rankings), 0
+        hints = select_hints(
+            rankings, max_entries=max_entries,
+            relative_floor=float(getattr(
+                self.settings, "reasoning_section_hint_relative_floor", 0.5)),
+            best_chunk_sim=best)
+        return render_hints([
+            (state.surfaced_sections.assign(hint.notebook_id, hint.source_id,
+                                            hint.occurrence), hint)
+            for hint in hints]), len(rankings), len(hints)
+
+    def _section_skip(
+        self, state: "_ReasoningRunState", reason: str, summary: str,
+        *, feed: bool = True, **detail,
+    ) -> None:
+        """导航动作的 skip:零命中写法(不写 `result_ids`),教学措辞同时进账目。
+        账目行带「未执行:」前缀,与「已浏览/已读」的执行记录分开。"""
+        if feed:
+            state.section_log.append("未执行:" + summary.removeprefix("跳过"))
+        state.record(TraceStep(step_type="skip", summary=summary,
+                               detail={"reason": reason, **detail}))
+
+    def _section_actions_offered(
+        self, section_nav: bool, spent: "frozenset[str]" = frozenset(),
+    ) -> "Tuple[bool, bool]":
+        """(browse_sections, read_section) 各自提供不提供:总闸开、上限 > 0、本 run
+        没用完。prompt / schema / 白名单三处读这一个结论。"""
+        policy = reasoning_action_policy(self.settings)
+        return (
+            bool(section_nav and policy.max_section_browses > 0
+                 and BROWSE_SECTIONS_ACTION not in spent),
+            bool(section_nav and policy.max_section_reads > 0
+                 and READ_SECTION_ACTION not in spent),
+        )
+
+    @staticmethod
+    def _section_spent(state: "_ReasoningRunState") -> "frozenset[str]":
+        """本 run 已用完次数的导航动作(上限为 0 的不算「用完」,那由闸自己关)。"""
+        return frozenset(
+            name for name, used, cap in (
+                (BROWSE_SECTIONS_ACTION, state.section_browses,
+                 state.action_policy.max_section_browses),
+                (READ_SECTION_ACTION, state.section_reads,
+                 state.action_policy.max_section_reads))
+            if cap > 0 and used >= cap)
+
+    def _section_read_left(self, state: "_ReasoningRunState") -> bool:
+        """本轮还能不能 read_section(总闸开、上限 > 0、没用完)。"""
+        return self._section_actions_offered(
+            self.section_navigation_active(state.enum_limits),
+            self._section_spent(state))[1]
+
+    def _section_listing_note(self, state: "_ReasoningRunState") -> str:
+        """上一轮新交付了章节目录时,替代「无新证据」提示的那一句;否则空串。"""
+        if state.section_listing_turn != state.steps - 1:
+            return ""
+        return (
+            "（系统提示:上一步列出了章节目录(目录不是证据,所以没有新增证据)。"
+            + ("可用 read_section 按目录里的 [sN] 读取需要的章节原文,"
+               if self._section_read_left(state) else
+               "可按目录里文档自己的章节用词改写检索,")
+            + "或改用其他检索动作。）")
+
+    def _section_failed(
+        self, state: "_ReasoningRunState", reason: str, verb: str, exc: Exception,
+    ) -> None:
+        """一次导航 I/O 失败收成 skip(与按篇读取的失败同形,codex #724 R5):
+        本 run 已收集的证据与轨迹不因一次读失败作废;只记异常类名。"""
+        self._section_skip(
+            state, reason,
+            f"跳过{verb}:读取时出错({type(exc).__name__}),本次没有结果;"
+            "请改用别的章节或检索动作",
+            error=type(exc).__name__)
+
+    def _action_browse_sections(
+        self, state: "_ReasoningRunState", decision: "ReflectDecision",
+    ) -> None:
+        """reflect 的 `browse_sections`(§3.8):列出一篇来源的章节目录,不进证据。
+
+        `query` 非空时按 §3.7 的向量打分在该来源(及 `under` 范围)内按名次列出;
+        为空时按文档序列出章节树。目录进下一轮 reflect 摘要(每个来源只留最近一次),
+        列出的地址进 `surfaced_sections`;本轮新交付了目录则 stale 持平。同参数重复
+        浏览零 I/O 地把缓存的目录放回摘要(不扣次数、不持平 stale)。读取失败收成
+        `section_browse_failed`(扣一次),整次提问不作废。skip 都不写 `result_ids`。"""
+        verb = "查看章节目录"
+        if not self.section_navigation_active(state.enum_limits):
+            # 纵深防御:闸关时动作不在 allowed_actions 里,正常路径到不了这里。
+            self._section_skip(state, "section_nav_disabled",
+                               f"跳过{verb}(未启用)", feed=False)
+            return
+        cap = state.action_policy.max_section_browses
+        if state.section_browses >= cap:
+            self._section_skip(state, "section_browse_cap",
+                               f"跳过{verb}(已达次数上限 {cap})")
+            return
+        row, unresolved = self._resolve_section_source(
+            state, decision.browse_sections_source, verb)
+        if row is None:
+            self._section_skip(
+                state, "section_source_unresolved", unresolved,
+                requested_title=decision.browse_sections_source[:_SECTION_ECHO_CHARS])
+            return
+        under = " ".join(decision.browse_sections_under.split())[:_SECTION_ECHO_CHARS]
+        query = " ".join(decision.browse_sections_query.split())[:SECTION_QUERY_MAX_CHARS]
+        browse_key = (row.notebook_id, row.source_id, under.casefold(), query.casefold())
+        title = row.source_title or UNNAMED_SOURCE_LABEL
+        if browse_key in state.section_browse_cache:
+            self._replay_section_listing(state, row, title, browse_key, under, query)
+            return
+        counted = False
+        try:
+            source_outline = self._section_outline_for(
+                state, row.notebook_id, row.source_id, title)
+            if not source_outline.occurrences:
+                self._section_skip(state, "section_outline_empty",
+                                   f"跳过{verb}:《{title}》没有可列出的章节")
+                return
+            view = filter_outline(source_outline, under)
+            if not view.under_supported:
+                self._section_skip(
+                    state, "section_under_unsupported",
+                    f"跳过{verb}:《{title}》的章节没有编号,under 不可用,请留空 under 或改用 query"
+                    if view.status == UNDER_NO_NUMBERING else
+                    f"跳过{verb}:under「{under}」不是章节编号,请填写如 5.7 这样的编号或留空",
+                    under=under)
+                return
+            if not view.entries:
+                # 不用空目录覆盖同一来源上一份目录,也不扣次数。
+                self._section_skip(
+                    state, "section_under_empty",
+                    f"跳过{verb}:《{title}》里没有编号在 {under} 之下的章节,"
+                    "请换一个编号或留空 under", under=under)
+                return
+            state.section_browses += 1
+            counted = True
+            self._deliver_section_listing(
+                state, row, title, view.entries, under, query, browse_key)
+        except (AskCancelled, RetrievalControlError):
+            raise
+        except Exception as exc:  # noqa: BLE001 - one failed read must not void the run
+            # 失败也扣一次(不论败在读大纲还是读向量),同参数重试受上限约束。
+            if not counted:
+                state.section_browses += 1
+            self._section_failed(state, "section_browse_failed", verb, exc)
+
+    def _replay_section_listing(
+        self, state: "_ReasoningRunState", row: "_SectionSource", title: str,
+        browse_key: tuple, under: str, query: str,
+    ) -> None:
+        """同参数的第二次浏览:把缓存的目录重新放回摘要(成为该来源最近一份),
+        零 I/O、不扣次数;它不是新信息,所以不持平 stale。"""
+        listing, listed, scope = state.section_browse_cache[browse_key]
+        key = (row.notebook_id, row.source_id)
+        state.section_listings.pop(key, None)
+        state.section_listings[key] = listing
+        state.section_log.append(f"已浏览《{title}》{scope}(本轮已列过,目录已放回)")
+        state.record(TraceStep(
+            step_type="browse_sections",
+            summary=f"查看章节目录:《{title}》{scope},列出 {listed} 条(本轮已列过)",
+            detail={"source": title, "under": under, "query": query,
+                    "listed": listed, "repeat": True}))
+
+    def _deliver_section_listing(
+        self, state: "_ReasoningRunState", row: "_SectionSource", title: str,
+        entries, under: str, query: str, browse_key: tuple,
+    ) -> None:
+        """渲染并交付一次目录:按名次(有 query 且拿得到相似度)或按文档序。
+
+        地址只发给真正列出来的那一段前缀(先按预计号渲染,再按同一顺序发号——
+        渲染保留的是一段前缀,所以两者逐个相同),未列出的条目不进封闭集合。"""
+        key = (row.notebook_id, row.source_id)
+        source_outline = state.section_outlines[key]
+        ranked = []
+        if query:
+            sims = self._section_similarities(
+                row.notebook_id, row.source_id,
+                [cid for occ in entries for cid in occ.range_chunk_ids], [query])
+            ranked = [item.occurrence for item in rank_sections(
+                source_outline, sims, entries=entries)]
+        listed_entries = ranked or list(entries)
+        fresh = 0
+        provisional = []
+        for occ in listed_entries:
+            sid = state.surfaced_sections.sid_of(row.notebook_id, row.source_id, occ.index)
+            if not sid:
+                fresh += 1
+                sid = f"s{len(state.surfaced_sections) + fresh}"
+            provisional.append((sid, occ))
+        render = render_ranked if ranked else render_outline
+        rendered = render(
+            provisional,
+            max_chars=int(getattr(self.settings, "reasoning_section_browse_max_chars", 3000)),
+            truncated_scan=source_outline.truncated,
+            scan_rows=source_outline.scanned_rows)
+        for _sid, occ in provisional[:rendered.listed]:
+            state.surfaced_sections.assign(row.notebook_id, row.source_id, occ)
+        scope = (f" under {under}" if under else "") + (
+            f" 按「{query}」排序" if ranked else
+            f" 「{query}」(向量不可用,按文档顺序)" if query else "")
+        listing = (
+            f"（章节目录:《{title}》{scope},列出 {rendered.listed} 条;目录不是证据"
+            + (",用 read_section 按 [sN] 读取原文" if self._section_read_left(state)
+               else "")
+            + "）\n" + rendered.text)
+        state.section_listings.pop(key, None)
+        state.section_listings[key] = listing
+        state.section_browse_cache[browse_key] = (listing, rendered.listed, scope)
+        state.section_listing_delivered_this_turn = True
+        state.section_listing_turn = state.steps
+        state.section_log.append(f"已浏览《{title}》{scope}(列出 {rendered.listed} 条)")
+        state.record(TraceStep(
+            step_type="browse_sections",
+            summary=f"查看章节目录:《{title}》{scope},列出 {rendered.listed} 条",
+            detail={"source": title, "under": under, "query": query,
+                    "listed": rendered.listed}))
+
+    def _resolve_section_address(
+        self, state: "_ReasoningRunState", decision: "ReflectDecision",
+    ):
+        """`read_section.section` → `(SectionAddress, 来源标题)`,或 `(None, (原因码,
+        skip 文案, detail))`。§3.5:`sN` 只认本 run 发过的号;标题/编号文本在该来源
+        的(本 run 只建一次的)大纲里解析——唯一即采用,多处优先含本 run 已有 chunk
+        的那一处,仍不唯一则回喂各处的 `sN`。地址是封闭集合,不经过 exact_probe_terms。"""
+        verb = "按章节读取原文"
+        text = " ".join(decision.read_section_section.split())
+        echo = text[:_SECTION_ECHO_CHARS]
+        sid = parse_section_id(text)
+        if sid or not text:
+            address = state.surfaced_sections.get(sid) if sid else None
+            if address is None:
+                return None, ("section_not_surfaced",
+                              f"跳过{verb}:「{echo}」不是本轮列出过的章节地址,"
+                              "请从章节线索或 browse_sections 的目录里复制 [sN]",
+                              {"section": echo})
+            return address, state.section_titles.get(
+                (address.notebook_id, address.source_id), "")
+        row, unresolved = self._resolve_section_source(
+            state, decision.read_section_source, verb)
+        if row is None:
+            return None, ("section_source_unresolved", unresolved, {
+                "requested_title": decision.read_section_source[:_SECTION_ECHO_CHARS]})
+        title = row.source_title or UNNAMED_SOURCE_LABEL
+        source_outline = self._section_outline_for(
+            state, row.notebook_id, row.source_id, title)
+        found = resolve_section(
+            source_outline, text, {chunk.chunk_id for chunk in state.chunks})
+        if isinstance(found, Resolved):
+            state.surfaced_sections.assign(
+                row.notebook_id, row.source_id, found.occurrence)
+            return state.surfaced_sections.get(state.surfaced_sections.sid_of(
+                row.notebook_id, row.source_id, found.occurrence.index)), title
+        if isinstance(found, Ambiguous):
+            listed = "、".join(
+                f"[{state.surfaced_sections.assign(row.notebook_id, row.source_id, occ)}]"
+                f" {occ.display_label}" for occ in found.candidates)
+            return None, ("section_ambiguous",
+                          f"跳过{verb}:「{echo}」在《{title}》里出现 "
+                          f"{len(found.candidates)} 处:{listed},请改用其中一个 [sN]",
+                          {"section": echo, "matches": len(found.candidates)})
+        return None, ("section_not_surfaced",
+                      f"跳过{verb}:《{title}》的目录里没有「{echo}」,"
+                      "请先用 browse_sections 列出目录再复制 [sN]",
+                      {"section": echo})
+
+    def _action_read_section(
+        self, state: "_ReasoningRunState", decision: "ReflectDecision",
+    ) -> None:
+        """reflect 的 `read_section`(§3.9):把一个已展示过的章节整节读回证据池。
+
+        取数 `RetrievalPort.section_chunks`(权限、归属核验、导航页剔除、与普通
+        chunk 检索同一把尺子的 relevance、`section_read` 标志都在检索层),再过
+        `_filter_candidates("chunk", …)`,按文档序 `take_distinct_chunk_hits` 并进
+        `state.chunks`,不开新证据号段。整节 chunk id 交给端口,由端口按上限截取
+        (导航页不占名额);本节可读段数超过上限时 trace 注明截取。读取失败(解析
+        大纲或读回整节)收成 `section_read_failed`(扣一次),整次提问不作废。"""
+        verb = "按章节读取原文"
+        if not self.section_navigation_active(state.enum_limits):
+            self._section_skip(state, "section_nav_disabled",
+                               f"跳过{verb}(未启用)", feed=False)
+            return
+        cap = state.action_policy.max_section_reads
+        if state.section_reads >= cap:
+            self._section_skip(state, "section_read_cap",
+                               f"跳过{verb}(已达次数上限 {cap})")
+            return
+        try:
+            address, title_or_skip = self._resolve_section_address(state, decision)
+        except (AskCancelled, RetrievalControlError):
+            raise
+        except Exception as exc:  # noqa: BLE001 - one failed read must not void the run
+            state.section_reads += 1
+            self._section_failed(state, "section_read_failed", verb, exc)
+            return
+        if address is None:
+            reason, summary, detail = title_or_skip
+            self._section_skip(state, reason, summary, **detail)
+            return
+        title = title_or_skip or UNNAMED_SOURCE_LABEL
+        label = address.label or UNTITLED
+        read_key = (address.notebook_id, address.source_id, address.occurrence)
+        if read_key in state.section_read_keys:
+            self._section_skip(
+                state, "section_read_repeat",
+                f"跳过{verb}:《{title}》 {label} 本轮已经读过,请改读别的章节或直接作答")
+            return
+        state.section_reads += 1
+        state.section_read_keys.add(read_key)
+        limit = int(getattr(self.settings, "reasoning_section_read_max_chunks", 12))
+        try:
+            with retrieval_fanout_slot():
+                got = self.retrieval.section_chunks(
+                    address.notebook_id or state.notebook_id, address.source_id,
+                    list(address.chunk_ids), limit, state.question)
+        except (AskCancelled, RetrievalControlError):
+            raise
+        except Exception as exc:  # noqa: BLE001 - one failed read must not void the run
+            # 次数已在上面扣过、这一节进了防重键:同一节的持续性失败不反复重试。
+            self._section_failed(state, "section_read_failed", verb, exc)
+            return
+        new = take_distinct_chunk_hits(
+            self._filter_candidates("chunk", got), state.seen_chunks, state.chunks)
+        state.chunks.extend(new)
+        state.zero_hit_by_action["read_section"] = (
+            0 if new else state.zero_hit_by_action.get("read_section", 0) + 1)
+        # 范围内的 chunk 已剔除导航页(大纲折叠时),所以「本节可读段数 > 上限」
+        # 就是端口截取了。
+        truncated = len(address.chunk_ids) > limit
+        result_ids, result_ids_truncated = _capped_result_ids([c.chunk_id for c in new])
+        detail = {"source": title, "section": label, "found": len(new),
+                  "result_ids": result_ids}
+        if result_ids_truncated:
+            detail["result_ids_truncated"] = True
+        if truncated:
+            detail["truncated"] = True
+        tail = f"(截取本节前 {limit} 段)" if truncated else ""
+        state.section_log.append(f"已读《{title}》 {label}(新增 {len(new)} 段){tail}")
+        state.record(TraceStep(
+            step_type="read_section",
+            summary=f"按章节读取原文:《{title}》 {label},新增 {len(new)} 段{tail}",
+            detail=detail))
+
     def _plugin_action_timeout(self) -> float:
         return float(getattr(
             self.settings,
@@ -7218,7 +7945,9 @@ class ReasoningRetriever:
         plugin_kwargs = self._plugin_action_kwargs(state, no_progress, stale)
         plugin_nudge = plugin_kwargs.pop("plugin_actions_nudge", None)
         reflect_kwargs.update(plugin_kwargs)
-        if plugin_nudge and can_consume_result:
+        # 上一轮交付了章节目录:那一轮「无新证据」是目录不进证据的结果,不是库内
+        # 检索空手——不劝模型转站外,与 `_section_listing_note` 换掉的那句同理。
+        if plugin_nudge and can_consume_result and not self._section_listing_note(state):
             return summary + plugin_nudge
         return summary
 
@@ -8062,8 +8791,8 @@ class ReasoningRetriever:
                 bool(state.outline_overflow) and not state.outline_cap_repair_used
                 and state.outline_updates >= state.max_outline_updates)
             reflect_detail = {"next_action": decision.next_action,
-                              "sufficient": decision.sufficient,
-                              "no_progress": state.no_progress, "stale": state.stale}
+                              "sufficient": decision.sufficient, "no_progress": state.no_progress,
+                              "stale": state.stale, **self._take_section_hint_detail(state)}
             if nudge_note:
                 # 只在**真的发出**引导的那一轮加键(评估用)。无条件写 False 会让
                 # 关闭态/低档位的 reflect detail 多出一个键——冻结基线的口径是
@@ -8138,15 +8867,15 @@ class ReasoningRetriever:
                 len(state.collected) + len(state.elements) + len(state.chunks) + len(state.chains)
                 + state.enum_rows_used + state.document_read_elements_used
             ) == before
-            if state.no_progress and (state.consult_delivered_this_turn
-                                or state.external_delivered_this_turn):
-                # consult 送达了新建议、或插件送达了新的外部材料,两者都不带库内新
-                # 证据:stale 持平——不清零也不递增。各态 skip 照常递增。
-                pass
-            else:
+            # consult 建议、插件外部材料、章节目录:送达了但不带库内新证据,stale 持平。
+            if not (state.no_progress and (
+                    state.consult_delivered_this_turn
+                    or state.external_delivered_this_turn
+                    or state.section_listing_delivered_this_turn)):
                 state.stale = state.stale + 1 if state.no_progress else 0
             state.consult_delivered_this_turn = False
             state.external_delivered_this_turn = False
+            state.section_listing_delivered_this_turn = False
             # 连续 stale_limit 轮无有效进展 → 硬熔断, 强制走到末尾 answer(不再交模型自觉)。
             if state.stale >= self.settings.reasoning_stale_limit:
                 state.record(TraceStep(step_type="skip",
@@ -8183,14 +8912,16 @@ class ReasoningRetriever:
             summary = f"{summary}\n\n" + (
                 first_round_empty_note(
                     self.chunk_search_active(), state.enumeration_active)
-                if first_reflect else NO_NEW_EVIDENCE_NOTE
+                if first_reflect else
+                self._section_listing_note(state) or NO_NEW_EVIDENCE_NOTE
             )
         summary += legacy_action_ledger_note(
             state.visited, state.collected, state.neighbor_truncated,
             state.neighbor_expand_limit, state.attempted, state.exact_lookup_log,
             state.document_reads,
             state.roster_numbering.sync(state.enum_chains).issued,
-            element_search=element_search_offered(self.retrieval))
+            element_search=element_search_offered(self.retrieval),
+            section_log=state.section_log)
         # 未执行的已确认方向回喂 reflect(镜像上面几份账目):模型据此知道哪些
         # 用户确认过的方向还没跑过,可以优先用 add_subquery 把它们补上,而不是
         # 另起炉灶猜一个新角度。每轮按 attempted 现算 —— 模型真把某条补上了,
@@ -8335,6 +9066,13 @@ class ReasoningRetriever:
         if state.consult_block_text:
             summary = f"{summary}\n\n{state.consult_block_text}"
         summary += state.external_block_text  # §3.5;见 _external_block_text
+        # 文档内导航的两段(§3.7/§3.8):各来源最近一次的章节目录,再是章节线索块。
+        # 同样排在集合地图之前(地图与它的额度句是一句话)。闸关时两者都是空串。
+        for listing in state.section_listings.values():
+            summary = f"{summary}\n\n{listing}"
+        section_hints = self._section_hint_block(state)
+        if section_hints:
+            summary = f"{summary}\n\n{section_hints}"
         if state.collection_map_text:
             summary = (
                 f"{summary}\n\n{state.collection_map_text}"
@@ -8358,6 +9096,10 @@ class ReasoningRetriever:
             reflect_kwargs["outline"] = True
         if state.consult_memory_flag:
             reflect_kwargs["consult_memory"] = True
+        section_spent = self._section_spent(state)
+        if section_spent:
+            # 有才传:没用完任何一个时调用形状与接入前相同。
+            reflect_kwargs["section_spent"] = section_spent
         return reflect_kwargs
 
     def _dispatch_reflect_action(
@@ -8416,6 +9158,10 @@ class ReasoningRetriever:
             self._action_read_document(state, decision)
         elif decision.next_action == "search_chunks":
             self._action_search_chunks(state, decision)
+        elif decision.next_action == BROWSE_SECTIONS_ACTION:
+            self._action_browse_sections(state, decision)
+        elif decision.next_action == READ_SECTION_ACTION:
+            self._action_read_section(state, decision)
         elif decision.next_action == "ppr_retrieve":
             self._action_ppr_retrieve(state, decision)
         elif decision.next_action == "exact_lookup":
@@ -8800,9 +9546,9 @@ class ReasoningRetriever:
             # 把精确通道变成全库子串扫描。措辞要教会模型下一轮该给什么,
             # 光说「不合法」它只会换一个同样不合法的词再试一次。
             self._feed_exact_lookup_skip(
-                state, _norm_query(term), [term], _NOT_A_NAME_NOTE.format(term=term))
+                state, _norm_query(term), [term], self._not_a_name_note(state, term))
             state.record(TraceStep(step_type="skip",
-                             summary=f"跳过按名称精确查找:{_NOT_A_NAME_NOTE.format(term=term)}",
+                             summary=f"跳过按名称精确查找:{self._not_a_name_note(state, term)}",
                              detail={"reason": "exact_term_not_identifier",
                                      "term": term}))
         elif not fresh:

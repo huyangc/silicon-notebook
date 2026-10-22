@@ -167,6 +167,9 @@ _ACTION_IDS: dict[str, str] = {
     # PR-A: same coincidence as ``search_chunks`` -- the trace step type and
     # the reflect action id are both ``read_document``.
     "read_document": "read_document",
+    # In-document navigation: the same coincidence, twice.
+    "browse_sections": "browse_sections",
+    "read_section": "read_section",
 }
 assert set(_ACTION_IDS) == set(RETRIEVAL_ACTIONS), (
     "_ACTION_IDS must name exactly the actions in RETRIEVAL_ACTIONS"
@@ -204,6 +207,10 @@ ADOPTION_ACTIONS: dict[str, str] = {
     # PR-A: ``read_document`` has no deterministic seed pass of its own -- every
     # occurrence is the model reaching for it -- so it maps straight through.
     "read_document": "read_document",
+    # In-document navigation: no seed pass either (the section-hint block is
+    # not an action), so both map straight through.
+    "browse_sections": "browse_sections",
+    "read_section": "read_section",
 }
 assert set(ADOPTION_ACTIONS.values()) <= set(RETRIEVAL_ACTIONS), (
     "ADOPTION_ACTIONS must resolve into RETRIEVAL_ACTIONS"

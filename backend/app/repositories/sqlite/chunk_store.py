@@ -932,6 +932,38 @@ class ChunkStore:
         ).fetchall()
 
     @staticmethod
+    def source_outline_rows(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        source_id: str,
+        max_scan: int,
+    ):
+        """One source's ``(id, section_path, navigation, source_chunked_at)``
+        rows in document order, for the section outline -- never the text.
+        ``source_chunked_at`` is the source's chunk generation
+        (``sources.chunked_at``, one uncorrelated primary-key subquery, the same
+        value on every row): the section-vector cache keys on it.
+
+        Bounded before anything else: ``LIMIT max_scan + 1`` is the scan, the
+        extra row only says whether the source has more (``truncated``).
+        ``ORDER BY rowid`` is document order (chunk ids are random surrogates)
+        and ``idx_chunks_source`` (``source_id``, implicitly ``rowid``) serves
+        it without a sort; the unary ``+`` keeps a statistics-less planner off
+        ``idx_chunks_nb``, which would walk the whole notebook. The PostgreSQL
+        twin is ``postgres.search.source_outline_rows``.
+        """
+        if max_scan <= 0 or not notebook_id or not source_id:
+            return [], False
+        rows = db.execute(
+            "SELECT id, section_path, navigation, "
+            "(SELECT chunked_at FROM sources WHERE id=?) AS source_chunked_at "
+            "FROM chunks "
+            "WHERE source_id=? AND +notebook_id=? ORDER BY rowid LIMIT ?",
+            (source_id, source_id, notebook_id, int(max_scan) + 1),
+        ).fetchall()
+        return list(rows[:max_scan]), len(rows) > max_scan
+
+    @staticmethod
     def backfill_fts(db: sqlite3.Connection, notebook_id: str) -> int:
         """从 chunks 重建 chunks_fts(DELETE+re-INSERT),返回写入行数(Task 26:
         SQL 正文自 facade 迁入;调用方持有唯一写事务边界)。"""

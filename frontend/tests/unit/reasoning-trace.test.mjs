@@ -240,6 +240,9 @@ test("NEXT_ACTION 覆盖后端全部真实取值(非机制名)", () => {
     exact_lookup: "按名称精确查找", update_outline: "整理大纲",
     consult_memory: "回想以往的查法",
     read_document: "按篇读取原文取样",
+    // 章节导航检索(PR-2):第 15、16 个动作 id。
+    browse_sections: "查看章节目录",
+    read_section: "按章节读取原文",
   };
   for (const [action, zh] of Object.entries(cases)) {
     const out = getTraceStepDetail({ step_type: "reflect", detail: { next_action: action } });
@@ -1112,6 +1115,61 @@ test("read_document 步的 detail 显示《标题》与新增取样段数,不被
     },
   };
   assert.equal(getTraceStepDetail(zeroWithNote), "《旧版说明书》 读取期间文档重新解析");
+});
+
+// 章节导航检索(PR-2):browse_sections / read_section 两个 reflect 动作的轨迹步。
+test("browse_sections / read_section 有专属标签,不与已有步同名", () => {
+  assert.equal(TRACE_STEP_LABELS.browse_sections, "章节目录");
+  assert.equal(TRACE_STEP_LABELS.read_section, "按章节读取");
+  for (const key of ["browse_sections", "read_section"]) {
+    for (const other of ["fallback", "search_chunks", "read_document"]) {
+      assert.notEqual(TRACE_STEP_LABELS[key], TRACE_STEP_LABELS[other]);
+    }
+    assert.equal(
+      getReasoningTraceSummary([{ step_type: key, summary: "" }], true).latestLabel,
+      TRACE_STEP_LABELS[key],
+    );
+  }
+});
+
+test("browse_sections 步的 detail 显示《标题》、范围/关键词与列出条数", () => {
+  const full = {
+    step_type: "browse_sections",
+    summary: "",
+    detail: { source: "芯片手册", under: "5.7", query: "封装", listed: 12 },
+  };
+  assert.equal(getTraceStepDetail(full), "《芯片手册》 5.7 封装 列出 12 条");
+  // under / query 为空串时不显示,不留多余空格。
+  const bare = {
+    step_type: "browse_sections",
+    summary: "",
+    detail: { source: "芯片手册", under: "", query: "", listed: 0 },
+  };
+  assert.equal(getTraceStepDetail(bare), "《芯片手册》 列出 0 条");
+  const onlyUnder = {
+    step_type: "browse_sections",
+    summary: "",
+    detail: { source: "芯片手册", under: "5.7", query: "", listed: 3 },
+  };
+  assert.equal(getTraceStepDetail(onlyUnder), "《芯片手册》 5.7 列出 3 条");
+});
+
+test("read_section 步的 detail 显示《标题》、章节与新增段数,不被通用 found 分支截胡", () => {
+  const hit = {
+    step_type: "read_section",
+    summary: "",
+    detail: { source: "芯片手册", section: "5.7.3 Standard Package", found: 4, result_ids: ["c-1"] },
+  };
+  assert.equal(getTraceStepDetail(hit), "《芯片手册》 5.7.3 Standard Package 新增 4 段");
+  assert.notEqual(getTraceStepDetail(hit), "新增 4");
+  const truncated = {
+    step_type: "read_section",
+    summary: "",
+    detail: { source: "芯片手册", section: "5.7", found: 8, result_ids: [], truncated: true },
+  };
+  assert.equal(getTraceStepDetail(truncated), "《芯片手册》 5.7 新增 8 段（只读本节前段）");
+  const notTruncated = { ...truncated, detail: { ...truncated.detail, truncated: false } };
+  assert.equal(getTraceStepDetail(notTruncated), "《芯片手册》 5.7 新增 8 段");
 });
 
 test("the final citation check step (PR-D) has its own label and no borrowed detail", () => {

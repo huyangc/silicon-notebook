@@ -186,9 +186,11 @@ test("忙碌位用的就是那份共享实现，不是又抄了一遍", () => {
 
 test("动作词表与推理轨迹的步标签同口径，认不出的退回中性词", () => {
   assert.deepEqual(Object.keys(EXPERIENCE_ACTION_LABELS).sort(), [
-    "enumerate", "exact_lookup", "expand", "expand_community", "follow_chain",
-    "outline", "ppr", "read_document", "retrieve", "search_chunks",
+    "browse_sections", "enumerate", "exact_lookup", "expand", "expand_community", "follow_chain",
+    "outline", "ppr", "read_document", "read_section", "retrieve", "search_chunks",
   ]);
+  assert.equal(experienceActionLabel("browse_sections"), "章节目录");
+  assert.equal(experienceActionLabel("read_section"), "按章节读取");
   assert.equal(experienceActionLabel("exact_lookup"), "精查");
   assert.equal(experienceActionLabel("expand_community"), "对比");
   assert.equal(experienceActionLabel("search_chunks"), "段落");

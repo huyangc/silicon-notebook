@@ -697,6 +697,12 @@ PostgreSQL KG 词法 producer 在同一召回词项和额度下选择 SQL 路径
   使用有界且共享的元素/字符池、来源版本前后复核，以及来源自己的引用身份。
   样本不挤占 ordinary direct-element 席位；“目录列全”与“正文取样/模型分析覆盖”
   分别披露，没有摘要或样本的文档不能凭标题补写正文。
+- 文档内章节导航（`browse_sections` / `read_section` 与向量章节线索块）分三层：`section_outline.py` 是纯函数
+  （大纲折叠、层级、范围、排名、地址簿、渲染，零 I/O）；`section_retrieval.py` 经 `RetrievalPort` 的
+  `section_outline` / `section_chunk_similarities` / `section_chunks` 读大纲行、chunk 向量相似度与整节原文，
+  来源天花板与可见来源判定只在这一层，越界与不存在同一个空结果；`reasoning_retrieval.py` 持有 run 内地址簿、
+  两个动作的执行体和线索块。三者共用一把闸 `section_navigation_active`，章节段落带 `section_read` 标志，
+  只在合成时占 `REASONING_SECTION_READ_RESERVE` 个保留席位。数值护栏见产品/API 文档的章节导航一节。
 
 工具参数、完整性判定、预算表和界面披露的完整合同统一见
 [产品/API：集合枚举工具](./docs/product-and-api_zh.md#集合枚举工具)；

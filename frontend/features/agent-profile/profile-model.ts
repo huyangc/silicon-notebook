@@ -525,6 +525,8 @@ export const EXPERIENCE_ACTION_LABELS: Readonly<Record<string, string>> = {
   outline: "大纲",
   search_chunks: "段落",
   read_document: "整篇取样",
+  browse_sections: "章节目录",
+  read_section: "按章节读取",
 };
 
 /**

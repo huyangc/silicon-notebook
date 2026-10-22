@@ -1113,6 +1113,8 @@ def test_completion_turns_off_every_channel_unsafe_for_a_json_envelope(monkeypat
     # `fail_closed=True`。它还有第三层保险(补全从不传 `sources` 座位),但策略
     # 位必须显式关,不能靠接线没接上这个偶然。
     assert retriever.allow_document_read is False
+    # 文档内导航同理:它的闸也读 allow_search_chunks,但策略位同样显式关。
+    assert retriever.allow_section_nav is False
     assert retriever.allow_community_expansion is False
     assert retriever.allow_ppr is False
     assert retriever.allow_exact_lookup is False

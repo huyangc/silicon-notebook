@@ -143,6 +143,10 @@ CORE_REFLECT_ACTION_IDS = frozenset({
     # PR-A: bounded per-document source sampling (reuses
     # ``document_source_overview.prepare_source_overview``).
     "read_document",
+    # In-document navigation: one source's section outline (listed, not
+    # evidence) and one whole section read back as evidence.
+    "browse_sections",
+    "read_section",
 })
 
 # Every TOP-LEVEL field name of the reflect schema hint, with every gate open.
@@ -170,6 +174,11 @@ REFLECT_SCHEMA_TOP_LEVEL_FIELDS = frozenset({
     # PR-A: the ``read_document`` action's own arguments (``source`` /
     # ``coverage``) nest under this same-named top-level field.
     "read_document",
+    # In-document navigation: ``browse_sections`` (``source`` / ``under`` /
+    # ``query``) and ``read_section`` (``source`` / ``section``) nest their
+    # arguments under same-named top-level fields too.
+    "browse_sections",
+    "read_section",
 })
 
 # Keys that make ``app.core.model_schema.response_format_for_hint`` give up on

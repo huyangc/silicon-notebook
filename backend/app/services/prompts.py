@@ -655,6 +655,9 @@ def reflect_schema_hint(
     enumerate_scope: bool = True,
     search_elements: bool = True,
     ppr_retrieve: bool = True,
+    section_nav: bool = False,
+    section_browse: bool = True,
+    section_read: bool = True,
 ) -> str:
     """The reflect response schema, with the enumeration branch iff offered.
 
@@ -759,6 +762,19 @@ def reflect_schema_hint(
     (``reasoning_retrieval.element_search_offered`` /
     ``ppr_retrieve_offered``). True (the default) is byte-for-byte the schema
     from before the gates existed.
+
+    ``section_nav`` is the in-document navigation gate (single predicate:
+    ``reasoning_retrieval.ReasoningRetriever.section_navigation_active`` --
+    the deployment switch, the caller's policy flag, the ``search_chunks``
+    gate, a non-overview effort, the outline ports and non-zero caps). True
+    adds two words to the ``next_action`` enum (``browse_sections``,
+    ``read_section``) and their two nested branches (``browse_sections``:
+    ``source``/``under``/``query``; ``read_section``: ``source``/``section``).
+    Keyword-only and False by default, so every existing caller and every
+    closed state is byte-for-byte the schema from before the actions existed.
+    ``section_browse`` / ``section_read`` are two SUBTRACTING per-action gates
+    under it (True by default): False drops that one action's word and branch
+    -- a run whose cap for it is 0, or whose allowance for it is spent.
     """
     # The SAME double gate ``reflect_prompt`` applies to the action's own prompt
     # line: ``read_document and enumeration_tools``. The two projections must
@@ -783,6 +799,12 @@ def reflect_schema_hint(
         actions += "|search_chunks"
     if read_document and enumeration_tools:
         actions += "|read_document"
+    offer_browse = section_nav and section_browse
+    offer_read = section_nav and section_read
+    if offer_browse:
+        actions += "|browse_sections"
+    if offer_read:
+        actions += "|read_section"
     # ``keywords`` is ``search_chunks``'s optional literal (full-text) half,
     # shown right after the shared ``query`` and only when it can take effect:
     # it needs the action AND a keyword arm that can actually return something
@@ -863,6 +885,15 @@ def reflect_schema_hint(
         '"depth":"brief|thorough"},'
         if read_document and enumeration_tools else ""
     )
+    # In-document navigation. Every argument is shown EMPTY -- a schema hint
+    # is a template and a spelled-out title, section number or section id
+    # would travel into calls that meant another one (the ``source_title``
+    # rule of the enumerate branch).
+    section_nav_branches = (
+        ('"browse_sections":{"source":"","under":"","query":""},'
+         if offer_browse else "")
+        + ('"read_section":{"source":"","section":""},' if offer_read else "")
+    )
     if consult_memory:
         actions += "|consult_memory"
     outline_branch = ""
@@ -913,6 +944,7 @@ def reflect_schema_hint(
         + chain_branch
         + enumerate_branch
         + read_document_branch
+        + section_nav_branches
         + plugin_projection.schema_branches
         + outline_branch
         + '"query":"",'
@@ -978,6 +1010,9 @@ def reflect_prompt(
     source_scoped: bool = False,
     search_elements: bool = True,
     ppr_retrieve: bool = True,
+    section_nav: bool = False,
+    section_browse_cap: int = 0,
+    section_read_cap: int = 0,
 ) -> str:
     """Next-step decision prompt.
 
@@ -1078,6 +1113,18 @@ def reflect_prompt(
     example list -- for the same reason ``kg_actions`` rewrites those
     sentences. True (the default) is byte-for-byte the prompt from before the
     gates existed.
+
+    ``section_nav`` True = the two in-document navigation actions
+    (``browse_sections``, ``read_section``) are offered this run (the same
+    gate ``reflect_schema_hint`` takes, single predicate
+    ``ReasoningRetriever.section_navigation_active``); their lines follow the
+    ``search_chunks`` line, and ``browse_sections.query`` joins the scope-word
+    field list. ``section_browse_cap`` / ``section_read_cap`` are the per-run
+    allowances each line reports -- the SAME numbers the server's cap skips
+    report back -- and an action whose allowance is 0 (configured so, or
+    spent: the caller passes 0) has no line at all, matching the schema's
+    ``section_browse`` / ``section_read`` gates. False (the default) renders
+    nothing, byte for byte the prompt from before the actions existed.
     """
     if read_document and read_document_cap < 1:
         raise ValueError(
@@ -1155,6 +1202,54 @@ def reflect_prompt(
         + "\n"
         if search_chunks else ""
     )
+    # In-document navigation, right after the passage search it complements.
+    # Four things have to be said or the pair is worse than useless:
+    #   * that the outline is NOT evidence -- it is a map whose ids feed
+    #     read_section -- so the model never cites a listing;
+    #   * WHEN to browse with ``query`` (the document's own wording is
+    #     unknown: the production failure this answers was a model searching
+    #     in chapter-1 vocabulary for a chapter-5 table) and with ``under``
+    #     (a numbered document, one part of it);
+    #   * WHEN to read: a section hint or a listing names a section that
+    #     matches an aspect still missing from the candidates -- reading it
+    #     beats another search in a vocabulary the document does not use;
+    #   * that addresses are a closed set: an id from a hint or a listing, or
+    #     a title/number exactly as listed.
+    offer_browse = section_nav and section_browse_cap > 0
+    offer_read = section_nav and section_read_cap > 0
+    section_nav_actions = (
+        (
+            "- browse_sections: list the SECTIONS (heading outline) of ONE "
+            "document that the candidates or a listed roster already show. Set "
+            "browse_sections.source to that document's title copied exactly as "
+            "shown. Leave browse_sections.under and browse_sections.query empty "
+            "to list its sections in document order; set browse_sections.under "
+            "to a section number (e.g. \"5.7\") to list only that part of a "
+            "numbered document; set browse_sections.query to a few words to rank "
+            "the document's sections by meaning — do that when you do not know "
+            "the document's own wording for what the question asks. A listing is "
+            "NOT evidence and cannot be cited"
+            + (": it shows section ids like [s3] for read_section, and"
+               if offer_read else
+               ": it shows the document's own section titles to search with, and")
+            + " the next listing of the same document replaces it. You may browse "
+            f"at most {section_browse_cap} outline(s) in this run.\n"
+            if offer_browse else ""
+        )
+        + (
+            "- read_section: read ONE whole section of a document back as "
+            "citable passages. Set read_section.section to a section id such as "
+            "s3 copied from the section hints"
+            + (" or from a browse_sections listing" if offer_browse else "")
+            + " (then read_section.source may stay empty), or to a section title "
+            "or number exactly as listed together with read_section.source. When "
+            "a section hint or a listing names a section that matches an aspect "
+            "still missing from the candidates, prefer read_section on it over "
+            f"another search. You may read at most {section_read_cap} section(s) "
+            "this way in this run.\n"
+            if offer_read else ""
+        )
+    )
     # The reflect-local half of the scope-grounding rule: every free-text
     # retrieval field is a place a scope word can leak back in after the
     # paragraph above told the model to drop it. Since every single-string
@@ -1168,6 +1263,8 @@ def reflect_prompt(
     scope_fields = ["new_sub_query.query", "query"]
     if search_chunks and keyword_search:
         scope_fields.append("keywords")
+    if offer_browse:
+        scope_fields.append("browse_sections.query")
     scope_fields_rule = (
         "This applies to every retrieval field you fill: "
         + ", ".join(scope_fields[:-1]) + " and " + scope_fields[-1] + ".\n"
@@ -1502,6 +1599,7 @@ def reflect_prompt(
         "listed as tried in the context; rephrase it substantially or choose "
         "a different action.\n"
         f"{search_chunks_action}"
+        f"{section_nav_actions}"
         f"{search_elements_action}"
         f"{graph_retrieval_actions}"
         "- exact_lookup: the question names a specific command / API / option / "

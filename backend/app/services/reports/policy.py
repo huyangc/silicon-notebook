@@ -15,6 +15,10 @@ DEFAULT_REASONING_MAX_PPR_RETRIEVES = 3
 DEFAULT_REASONING_MAX_EXACT_LOOKUPS = 3
 DEFAULT_REASONING_MAX_CHUNK_SEARCHES = 3
 DEFAULT_REASONING_MAX_DOCUMENT_READS = 4
+# In-document navigation (``browse_sections`` / ``read_section``), mirrored
+# from the Settings defaults like every other rail here.
+DEFAULT_REASONING_MAX_SECTION_BROWSES = 3
+DEFAULT_REASONING_MAX_SECTION_READS = 3
 DEFAULT_REASONING_MAX_FOLLOW_CHAIN_ACTIONS = 3
 DEFAULT_REASONING_COMMUNITY_PEERS_CAP_FACTOR = 2
 DEFAULT_REASONING_MAX_OUTLINE_UPDATES = 6
@@ -73,6 +77,11 @@ class ReasoningActionPolicy:
     max_consult_memory: int
     max_chunk_searches: int
     max_document_reads: int
+    # In-document navigation: per-run counts of ``browse_sections`` and
+    # ``read_section``.  Their sum being ``0`` takes both actions away
+    # (``ReasoningRetriever.section_navigation_active``).
+    max_section_browses: int
+    max_section_reads: int
     # Run-level total for plugin reflect actions, across every action.  The
     # effective per-action cap is ``min(descriptor.max_calls_per_run, this)``
     # — a descriptor may ask for less than the deployment allows, never more.
@@ -151,6 +160,16 @@ def reasoning_action_policy(settings) -> ReasoningActionPolicy:
             "reasoning_max_document_reads",
             DEFAULT_REASONING_MAX_DOCUMENT_READS,
         )),
+        max_section_browses=int(getattr(
+            settings,
+            "reasoning_max_section_browses",
+            DEFAULT_REASONING_MAX_SECTION_BROWSES,
+        )),
+        max_section_reads=int(getattr(
+            settings,
+            "reasoning_max_section_reads",
+            DEFAULT_REASONING_MAX_SECTION_READS,
+        )),
         max_plugin_actions=int(getattr(
             settings,
             "reasoning_max_plugin_actions",
@@ -169,6 +188,8 @@ __all__ = [
     "DEFAULT_REASONING_MAX_PLUGIN_ACTIONS",
     "DEFAULT_REASONING_MAX_PPR_RETRIEVES",
     "DEFAULT_REASONING_MAX_DOCUMENT_READS",
+    "DEFAULT_REASONING_MAX_SECTION_BROWSES",
+    "DEFAULT_REASONING_MAX_SECTION_READS",
     "OUTLINE_EVIDENCE_KEY_CHARS",
     "OUTLINE_ID_CHARS",
     "OUTLINE_MAX_EVIDENCE",

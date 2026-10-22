@@ -150,17 +150,18 @@ def test_the_action_vocabulary_excludes_memory():
     still moves the number this test is watching.
     """
     assert "memory" not in RETRIEVAL_ACTIONS
-    # 10 = 原 8 个 + `search_chunks`(逐步推理的原文段落检索通道,D-2 追加)
-    # + `read_document`(按篇读取有界原文取样,PR-A 追加)。
-    assert len(RETRIEVAL_ACTIONS) == 10
+    # 12 = 原 8 个 + `search_chunks`(逐步推理的原文段落检索通道,D-2 追加)
+    # + `read_document`(按篇读取有界原文取样,PR-A 追加)
+    # + `browse_sections` / `read_section`(文档内导航,末尾追加)。
+    assert len(RETRIEVAL_ACTIONS) == 12
 
 
 def test_the_vocabulary_covers_the_raw_passage_channel():
     """D-2:``search_chunks`` 进 THEN 侧词表,否则无图 run 的**主**检索通道在
     经验库里是盲区(与今天 ``search_elements`` 记成 ``fallback`` 步、被投影整步
     丢弃一样)。追加值对既有条目是无损的:它只是词表末尾多一个词。"""
-    assert RETRIEVAL_ACTIONS[-2] == "search_chunks"
-    assert RETRIEVAL_ACTIONS[:-2] == (
+    assert RETRIEVAL_ACTIONS[-4] == "search_chunks"
+    assert RETRIEVAL_ACTIONS[:-4] == (
         "retrieve", "ppr", "exact_lookup", "expand", "expand_community",
         "follow_chain", "enumerate", "outline")
 
@@ -168,7 +169,23 @@ def test_the_vocabulary_covers_the_raw_passage_channel():
 def test_the_vocabulary_covers_the_per_document_read_channel():
     """PR-A:``read_document`` 进 THEN 侧词表,同 ``search_chunks`` 的追加原则
     ——只在词表末尾多一个词,既有条目一字不动。"""
-    assert RETRIEVAL_ACTIONS[-1] == "read_document"
+    assert RETRIEVAL_ACTIONS[-3] == "read_document"
+
+
+def test_the_vocabulary_covers_in_document_navigation_appended_last():
+    """文档内导航的两个词只追加在末尾(持久化的内容寻址词表,既有条目一字不动)。
+
+    ``browse_sections`` 的 detail 报 ``listed``——不在 ``_TRACE_COUNT_KEYS`` 里,
+    所以列目录既不算证据命中、也不算零命中;``read_section`` 报 ``found``。"""
+    from app.domain.retrieval_experience import project_trace_step
+
+    assert RETRIEVAL_ACTIONS[-2:] == ("browse_sections", "read_section")
+    browse = project_trace_step({"step_type": "browse_sections", "summary": "s",
+                                 "detail": {"listed": 0, "source": "t"}})
+    read = project_trace_step({"step_type": "read_section", "summary": "s",
+                               "detail": {"found": 0, "result_ids": []}})
+    assert browse["count"] is None
+    assert read["count"] == 0
 
 
 def test_the_projection_counts_search_chunks_invocations_and_zero_hits():

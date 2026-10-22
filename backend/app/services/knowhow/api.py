@@ -2128,6 +2128,10 @@ def complete_row(
         # alone keeps the action unreachable, but a policy this profile relies
         # on must not depend on a wiring accident staying an accident.
         reasoning_retriever.allow_document_read = False
+        # In-document navigation (`browse_sections` / `read_section` and the
+        # section-hint block) is off for the same reasons; its gate also reads
+        # `allow_search_chunks`, but the policy is spelled out, not inherited.
+        reasoning_retriever.allow_section_nav = False
         reasoning_retriever.untrusted_evidence = True
         # 显式带上补全专用的收束句。通用主体是缺省值,只翻开关会少掉「只围绕
         # 这次空格补全来规划与反思」那一句 —— 那句话对 Ask 是错的(它不在做
