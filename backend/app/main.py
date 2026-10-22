@@ -42,6 +42,7 @@ from app.core import diagnostics_runtime as diagnostics
 from app.core import readiness
 from app.core.config import Settings, env_file_diagnosis, get_settings
 from app.core.event_logging import EventLogger, new_id
+from app.core.log_paths import loggable_path
 from app.domain.indexing_pipeline import IndexingPipelineUnavailableError
 from app.bootstrap import (
     application_extension_admin_projection,
@@ -385,7 +386,7 @@ def create_app() -> FastAPI:
             # ``log_requests`` before dispatch) so the two lines correlate.
             "id": getattr(request.state, "request_id", ""),
             "method": request.method,
-            "path": request.url.path,
+            "path": loggable_path(request.url.path),
         }
         # Only the dominant `{notebook_id}` path-param spelling is read here —
         # "拿不到不硬凑": guessing at other id spellings (`{id}`, `{nb}`, ...)
@@ -429,7 +430,7 @@ def create_app() -> FastAPI:
                         "id": request_id,
                         "kind": "http",
                         "method": request.method,
-                        "path": request.url.path,
+                        "path": loggable_path(request.url.path),
                         "status": "error",
                         "latency_ms": latency_ms,
                         "client": client,
@@ -447,7 +448,7 @@ def create_app() -> FastAPI:
                     "id": request_id,
                     "kind": "http",
                     "method": request.method,
-                    "path": request.url.path,
+                    "path": loggable_path(request.url.path),
                     "status_code": response.status_code,
                     "status": status,
                     "latency_ms": latency_ms,
@@ -523,7 +524,7 @@ def create_app() -> FastAPI:
                             ),
                             "kind": "query_timeout",
                             "method": scope.get("method", ""),
-                            "path": scope.get("path", ""),
+                            "path": loggable_path(scope.get("path", "")),
                             "streaming": True,
                         }
                     )

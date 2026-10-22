@@ -577,13 +577,13 @@ SQLite 上把条件换成 `scopes_json = '[]'`。结果不为 0 时，这些 tok
 
 后端通过统一的 `EventLogger`（`app/core/event_logging.py`）输出结构化日志：每条事件一行 JSONL 写入 `.local/logs/`，并附控制台简要行。写日志是 best-effort，绝不影响它所观测的请求或管线；未配置模型时 LLM 通道为 no-op。
 
-- `requests.jsonl` — 每个 HTTP 请求（方法、路径、状态码、耗时、`request_id`）。超过 `SLOW_REQUEST_MS`（默认 3000ms）标 `SLOW`；响应头带 `X-Request-Id` 关联前后端。
+- `requests.jsonl` — 每个 HTTP 请求（方法、路径、状态码、耗时、`request_id`）。超过 `SLOW_REQUEST_MS`（默认 3000ms）标 `SLOW`；响应头带 `X-Request-Id` 关联前后端。路径里带内容或凭据的段，在这里和 Uvicorn 访问日志里都记成占位符：图谱分析问题的主键（`…/kg-analysis/findings/{rule}/{subject_key}/dismissal`）、邀请与公开分享口令（`{token}`）、自定义对象类型名（`{object_type}`）；实际请求不变（`backend/app/core/log_paths.py`）。
 - `events.jsonl` — 异步来源管线：各阶段（`parse` / `embed` / `extract`）耗时与每次状态机跃迁。卡住时能看到当前阶段及已运行时长；失败记录真实异常（以及来源的 `error_message`）。KG 抽取丢了窗口时另按来源发一条 `kg_window_failures` 事件（`failed` / `total`，以及 `reasons`：按稳定原因码计数，如 `provider_unavailable`、`malformed_response:invalid_json`，绝不带回复正文）。来源页那句「部分内容未完成分析（N/T 段失败）」刻意不写原因——逐窗口异常为了隔离被吞掉，原因只记在这条事件里。
 - `default_ceiling_library_skipped`（字段 `notebook_id`、`reason` ∈ `timeout|saturated|queue_deadline|unavailable`）：提问开始时，挂载参考库的可见来源清单在 5 秒内（全部挂载库合计 10 秒）读不出，该库不参与本次提问；不会在没有天花板的情况下检索它。同一次跳过也记在本次运行的 scope 上（`current_skipped_mounted_libraries()`，只有库 id 与原因码），供答案的结果提示使用：浏览器与 MCP 的回答都会注明这个库（`skipped_libraries`）。每个问答入口与每个报告阶段开始时都会读取这份天花板——没有挂载库的笔记本一次提问三次读取（个人记忆通道关闭时四次），每个挂载库再加一次——运行中的每次漂移检查是一次单行指纹读取。4.9 万来源、机器负载 7–8 实测：MCP 或 API 提问里每次 SQLite 9–23 ms、PostgreSQL 5–13 ms（chunk 提问检查 3 次，带重排 6 次，reasoning 提问 7–10 次）；深度报告阶段内每次 SQLite 11–16 ms、PostgreSQL 6–10 ms（一份 6 节报告规划时检查 3 次、生成时 31 次）。报告各章节在同一进程里并发，其他章节做计算时检查要等 Python 解释器锁（GIL），会更慢——负载 20–36 时实测 SQLite 最多约 130 ms、PostgreSQL 约 50 ms。全选、未漂移、库里没有其他成员个人记忆的运行不绑定来源清单，词法 lane 的路由检查因此跳过；剩下的检查守的是全图、PPR、关系与精确查找通道。
 - `ask_report_followup`（字段 `notebook_id`、`receipt_status` ∈ `read|skipped`、`reason_code`、`references`、`restored`、`gone`、`over_budget`、`sections_total`、`sections_read`、`summary_truncated`）：挂了深度报告的每一轮问答（含仅检索输出）在保存时按最终回执记一条，只有计数与原因码，不含报告题目、正文或问题。字段叫 `receipt_status` 而不是 `status`，因为事件日志把 `status` 读作严重程度。`ask_report_followup_failed`（`notebook_id`、`error_type`、`status="failed"`）：读报告行、引用归属、参与集或复原时出错，这一轮按「不读报告」继续（回执 `read_failed`），只记异常类名。产品行为见[就深度报告追问](./product-and-api_zh.md#就深度报告追问关联报告)。
 - `llm.jsonl` — 每次大模型调用：chat（prompt/响应/token/耗时，按 `LLM_LOG_MAX_CHARS` 截断）、embedding（仅摘要，不存原始向量）、以及 deterministic fallback 容易让人忽略的错误。
 
-浏览器 DevTools console 会镜像请求为 `[api] 方法 /路径 -> 状态 N毫秒 (request_id)`；轮询期间 UI 显示当前阶段/已用时长，失败时点名是哪个来源。来源的 `error_message` 由后端写成 Python 异常字符串，因此进 console 而不上屏。
+浏览器 DevTools console 会镜像请求为 `[api] 方法 /路径 -> 状态 N毫秒 (request_id)`——查询串只记键、值记成 `*`，上面那些带内容的路径段同样记成占位符（请求的 `logPath`，见 `frontend/app/api-client.ts`）；轮询期间 UI 显示当前阶段/已用时长，失败时点名是哪个来源。来源的 `error_message` 由后端写成 Python 异常字符串，因此进 console 而不上屏。
 
 错误信息按受众分流。用户看到的一律是中文：前端把 HTTP 状态码映射成人话（「没有权限进行这个操作」「没找到，可能已被删除」），裸状态码和后端异常原文都不会出现在界面上。**除非后端明确声明「这句是写给用户的」，否则一概不原样展示**——API 会给这类响应打上 `X-User-Message` 头，只有它们才透传（如「用户名已被占用」，比泛化文案更具体）。其余一律泛化，**包括恰好是中文的后端文本**：像「解析失败：不支持的文件类型」这种串，同样可能是一条原始异常，光看内容分不出来。5xx 无论有没有标记都泛化，避免内部错误外泄。压根没产生 HTTP 响应的失败（断连、后端没起来、藏在流式事件、后台任务记录、失败的报告、来源解析失败里的错误串）走同一条规则，不会把原文直接印出来。
 

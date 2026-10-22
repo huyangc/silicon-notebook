@@ -131,7 +131,8 @@ export async function fetchPublicConversation(
   try {
     const body = await requestJson<PublicConversationT>(
       `/public/conversations/${encodeURIComponent(clean)}`,
-      { tag: "public-conversation", auth: "none", cache: "no-store" },
+      // 分享口令就是凭据,不进日志。
+      { tag: "public-conversation", auth: "none", cache: "no-store", logPath: "/public/conversations/{token}" },
     );
     return {
       kind: "ready",

@@ -8,7 +8,31 @@ export type ApiRequestOptions = RequestInit & {
   auth?: ApiAuth;
   tag: string;
   unauthorized?: "preserve" | "clear-and-reload";
+  /**
+   * What the debug log prints instead of the real path when a path segment carries
+   * content or a credential (a source-derived concept name, a share or invite token,
+   * a schema type name): the route with those segments as placeholders, for example
+   * `/notebooks/nb-1/kg-analysis/findings/F4/{subject_key}/dismissal`. The request
+   * itself always goes to the real path. Query values are never logged either way.
+   */
+  logPath?: string;
 };
+
+/**
+ * The request path as the debug log may print it (AGENTS.md: no content in logs): the
+ * caller's content-free `logPath` when it has one, and never a query value -- search
+ * terms, usernames and the like travel in queries -- only the query keys.
+ */
+export function loggableRequestPath(pathOrUrl: string, logPath?: string): string {
+  const path = logPath ?? pathOrUrl;
+  const queryStart = path.indexOf("?");
+  if (queryStart < 0) return path;
+  const keys = path.slice(queryStart + 1)
+    .split("&")
+    .filter(Boolean)
+    .map((pair) => `${pair.split("=", 1)[0]}=*`);
+  return `${path.slice(0, queryStart)}?${keys.join("&")}`;
+}
 
 function resolveApiUrl(pathOrUrl: string): string {
   try {
@@ -45,6 +69,7 @@ export async function performApiRequest(
     tag,
     unauthorized = "clear-and-reload",
     headers: inputHeaders,
+    logPath,
     ...init
   } = options;
   const headers = new Headers(inputHeaders);
@@ -63,7 +88,7 @@ export async function performApiRequest(
   const elapsed = Math.round(globalThis.performance.now() - started);
   const requestId = response.headers.get("X-Request-Id") || "";
   console.debug(
-    `[api] ${(init.method || "GET").toUpperCase()} ${pathOrUrl} -> ${response.status} ${elapsed}ms${requestId ? ` (${requestId})` : ""}`,
+    `[api] ${(init.method || "GET").toUpperCase()} ${loggableRequestPath(pathOrUrl, logPath)} -> ${response.status} ${elapsed}ms${requestId ? ` (${requestId})` : ""}`,
   );
   if (
     auth === "required"

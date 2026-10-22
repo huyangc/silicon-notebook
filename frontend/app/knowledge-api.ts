@@ -71,11 +71,16 @@ export const createNotebookObjectSchema = (nb: string, payload: unknown) =>
     body: JSON.stringify(payload),
   });
 
+// 自定义对象类型名是用户内容,日志里只写路由形状。
+const OBJECT_SCHEMA_LOG_PATH = "/object-schemas/{object_type}";
+const notebookObjectSchemaLogPath = (nb: string) => `/notebooks/${nb}/object-schemas/{object_type}`;
+
 export const updateObjectSchema = (type: string, patch: unknown) =>
   requestVoid(`/object-schemas/${encodeURIComponent(type)}`, {
     ...options,
     method: "PATCH",
     body: JSON.stringify(patch),
+    logPath: OBJECT_SCHEMA_LOG_PATH,
   });
 
 export const updateNotebookObjectSchema = (nb: string, type: string, patch: unknown) =>
@@ -83,18 +88,21 @@ export const updateNotebookObjectSchema = (nb: string, type: string, patch: unkn
     ...options,
     method: "PATCH",
     body: JSON.stringify(patch),
+    logPath: notebookObjectSchemaLogPath(nb),
   });
 
 export const deleteObjectSchema = (type: string) =>
   requestVoid(`/object-schemas/${encodeURIComponent(type)}`, {
     ...options,
     method: "DELETE",
+    logPath: OBJECT_SCHEMA_LOG_PATH,
   });
 
 export const deleteNotebookObjectSchema = (nb: string, type: string) =>
   requestVoid(`/notebooks/${nb}/object-schemas/${encodeURIComponent(type)}`, {
     ...options,
     method: "DELETE",
+    logPath: notebookObjectSchemaLogPath(nb),
   });
 
 export const proposeObjectSchemas = (nb: string) =>
