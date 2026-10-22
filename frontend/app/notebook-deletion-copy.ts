@@ -98,6 +98,17 @@ export const TRANSFER_NO_TARGET_TEXT = "你还没有自己的其他笔记本可�
 export const TRANSFER_CLOSED_TEXT = "删除时间已到，记忆已无法转移。";
 export const TRANSFER_GONE_TEXT = "这本笔记本或目标笔记本已经读不到了。";
 export const TRANSFER_FAILED_TEXT = "转移没有成功，请重试。";
+export const TRANSFER_BUSY_TEXT = "另一次转移正在进行，请等它结束后再试。";
+
+/** 分页转移进行中的进度(条数取自服务端:已处理 + 剩余)。 */
+export function transferProgressText(done: number, total: number): string {
+  return `已转移 ${done} / ${total} 条`;
+}
+
+/** 转移中途停下(截止已到、读不到、另一次转移、出错):先说已经转走了几条,再说原因。 */
+export function transferStoppedText(moved: number, reason: string): string {
+  return moved > 0 ? `已转移 ${moved} 条；${reason}` : reason;
+}
 
 /** 转移的结果:数字取自服务端逐条结果。 */
 export function transferDoneText(moved: number, failed: number, target: string): string {

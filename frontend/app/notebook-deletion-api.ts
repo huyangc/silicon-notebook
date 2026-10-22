@@ -141,17 +141,22 @@ export async function exportDeletedNotebookMemories(notebookId: string): Promise
 }
 
 export type TransferOutcome =
-  | { kind: "transferred"; results: TransferResult[] }
-  /** 404 delete_window_closed(还没开始就已关闭)。 */
+  /** 一页的结果:`remaining` 是这一页之后还剩多少条可转移,`nextAfter` 是下一页从哪里接着。 */
+  | { kind: "transferred"; results: TransferResult[]; remaining: number; nextAfter: string | null }
+  /** 404 delete_window_closed(这一页还没开始就已关闭)。 */
   | { kind: "closed" }
   /** 404:这本笔记本或目标笔记本已经读不到。 */
   | { kind: "gone" }
+  /** 409 transfer_in_progress:另一次转移(别的标签页)正在进行。 */
+  | { kind: "busy" }
   | { kind: "failed" };
 
-/** 把我在 `notebookId` 里已确认的记忆转移(移动)到 `targetNotebookId`。 */
+/** 把我在 `notebookId` 里已确认的记忆转移(移动)到 `targetNotebookId` 的**一页**
+ *  (服务端每页最多 200 条,按 id 顺序);`after` 是上一页的 `nextAfter`。 */
 export async function transferOutOfDeletedNotebook(
   notebookId: string,
   targetNotebookId: string,
+  after: string | null = null,
 ): Promise<TransferOutcome> {
   let response: Response;
   try {
@@ -160,26 +165,36 @@ export async function transferOutOfDeletedNotebook(
       {
         method: "POST",
         tag: TAG,
-        body: JSON.stringify({ target_notebook_id: targetNotebookId }),
+        body: JSON.stringify(
+          after === null
+            ? { target_notebook_id: targetNotebookId }
+            : { target_notebook_id: targetNotebookId, after },
+        ),
       },
     );
   } catch {
     return { kind: "failed" };
   }
   if (response.ok) {
-    const body = (await response.json().catch(() => null)) as { results?: unknown } | null;
-    if (!Array.isArray(body?.results)) return { kind: "failed" };
-    return { kind: "transferred", results: body.results as TransferResult[] };
+    const body = (await response.json().catch(() => null)) as
+      | { results?: unknown; remaining?: unknown; next_after?: unknown }
+      | null;
+    if (!Array.isArray(body?.results) || !isCount(body?.remaining)) return { kind: "failed" };
+    const nextAfter = typeof body?.next_after === "string" ? body.next_after : null;
+    return {
+      kind: "transferred",
+      results: body.results as TransferResult[],
+      remaining: body.remaining as number,
+      nextAfter,
+    };
   }
-  if (response.status === 404) {
-    return (await detailOf(response))?.code === "delete_window_closed"
-      ? { kind: "closed" }
-      : { kind: "gone" };
-  }
+  const code = (await detailOf(response))?.code;
+  if (response.status === 404) return code === "delete_window_closed" ? { kind: "closed" } : { kind: "gone" };
+  if (response.status === 409 && code === "transfer_in_progress") return { kind: "busy" };
+  if (response.status === 409 && code === "notebook_not_pending_delete") return { kind: "gone" };
   return { kind: "failed" };
 }
 
-/** 打开一本正在删除窗口里的笔记本:服务端 404 带说明码。携带说明,由页面换成说明框。 */
 export class NotebookDeletedError extends Error {
   readonly notice: NotebookDeletionNotice;
 

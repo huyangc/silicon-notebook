@@ -115,9 +115,26 @@ test("导出的结局:成功 / 截止已过 / 超限 / 没有可导出的 / 失�
 test("转移的结局:逐条结果 / 截止已过 / 读不到", async () => {
   globalThis.fetch = async (_url, init) => {
     assert.deepEqual(JSON.parse(init.body), { target_notebook_id: "nb-mine" });
-    return json({ results: [{ source_id: "m", new_id: "n", ok: true, error: null, error_code: null, status: "moved" }] });
+    return json({
+      results: [{ source_id: "m", new_id: "n", ok: true, error: null, error_code: null, status: "moved" }],
+      remaining: 4,
+      next_after: "m",
+    });
   };
-  assert.equal((await transferOutOfDeletedNotebook("nb1", "nb-mine")).kind, "transferred");
+  const page = await transferOutOfDeletedNotebook("nb1", "nb-mine");
+  assert.equal(page.kind, "transferred");
+  assert.equal(page.remaining, 4);
+  assert.equal(page.nextAfter, "m");
+  globalThis.fetch = async (_url, init) => {
+    assert.deepEqual(JSON.parse(init.body), { target_notebook_id: "nb-mine", after: "m" });
+    return json({ results: [], remaining: 0, next_after: "m" });
+  };
+  assert.equal((await transferOutOfDeletedNotebook("nb1", "nb-mine", "m")).remaining, 0);
+  // 回答里没有剩余条数:读不懂就当失败,不会被当成「转完了」。
+  globalThis.fetch = async () => json({ results: [] });
+  assert.deepEqual(await transferOutOfDeletedNotebook("nb1", "nb-mine"), { kind: "failed" });
+  globalThis.fetch = async () => json({ detail: { code: "transfer_in_progress" } }, 409);
+  assert.deepEqual(await transferOutOfDeletedNotebook("nb1", "nb-mine"), { kind: "busy" });
   globalThis.fetch = async () => json({ detail: { code: "delete_window_closed" } }, 404);
   assert.deepEqual(await transferOutOfDeletedNotebook("nb1", "nb-mine"), { kind: "closed" });
   globalThis.fetch = async () => json({ detail: "Notebook not found" }, 404);

@@ -11,8 +11,10 @@
 //   * 截止已过(本地时钟):只说「删除时间已到，正在永久删除」,没有控件,稍后重新拉取。
 //
 // 每个控件的结果都落在它自己旁边(仓库 Interactive feedback 规则):撤销中… / 已撤销 /
-// 删除时间已到 / 不存在;导出中… / 已导出 / 导出失败 + 原因;转移中… / 结果条数。
-// 在途时控件禁用,防止重复提交;导出在途时撤销仍可点(撤销不影响已经开始的导出)。
+// 删除时间已到 / 不存在;导出中… / 已导出 / 导出失败 + 原因;转移中…(带「已转移 X / N 条」
+// 进度) / 结果条数。在途时控件禁用,防止重复提交;导出在途时撤销仍可点(撤销不影响已经开始
+// 的导出)。转移按页提交(服务端每页最多 200 条),一页接一页直到剩余为 0;同一时刻只跑一次
+// (ref 守卫,「取消」只收起面板、不放开守卫,并在当前这一页结束后停下)。
 //
 // 一行一旦有了结果(已撤销、删除时间已到、转移完成……),服务端下一次就可能不再列出它;
 // 区块把这样的行按原样再留 `SETTLED_ROW_HOLD_MS`,控件全部停用,好让结果看得见,
@@ -40,6 +42,7 @@ import {
   EXPORT_CLOSED_TEXT,
   EXPORT_FAILED_TEXT,
   EXPORT_NOTHING_TEXT,
+  TRANSFER_BUSY_TEXT,
   TRANSFER_CLOSED_TEXT,
   TRANSFER_FAILED_TEXT,
   TRANSFER_GONE_TEXT,
@@ -50,6 +53,8 @@ import {
   deletionNoticeText,
   exportLabel,
   transferDoneText,
+  transferProgressText,
+  transferStoppedText,
   untransferableText,
 } from "./notebook-deletion-copy.ts";
 import { LEAVE_EXPORT_TOO_LARGE_TEXT } from "./group-leave-dialog.tsx";
@@ -132,7 +137,7 @@ type CancelState =
 type TransferState =
   | { kind: "closed" }
   | { kind: "choosing"; targetId: string }
-  | { kind: "busy"; targetId: string }
+  | { kind: "busy"; targetId: string; done: number; total: number | null }
   | { kind: "result"; text: string; isFailure: boolean };
 
 /** 一本笔记本的全部控件(区块的一行、说明框的正文都用它)。 */
@@ -166,6 +171,11 @@ export function DeletionNoticeControls({
   const exportingRef = useRef(false);
   const exportResult = useCopyResult();
   const [transfer, setTransfer] = useState<TransferState>({ kind: "closed" });
+  // 在途守卫与导出同款:ref 挡住同一渲染周期里的连点,state 驱动禁用。「取消」把面板
+  // 收回 closed,但守卫只在整次转移结束时放开;stopRef 让循环在当前这一页之后停下。
+  const transferringRef = useRef(false);
+  const stopTransferRef = useRef(false);
+  const [transferring, setTransferring] = useState(false);
   const mounted = useRef(true);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   useEffect(() => {
@@ -182,7 +192,7 @@ export function DeletionNoticeControls({
 
   const due = deletionDue(notice.delete_after, nowMs) || cancel.kind === "due";
   const untransferable = Math.max(0, notice.memory_count - notice.transferable_count);
-  const busy = cancel.kind === "busy" || transfer.kind === "busy" || lingering;
+  const busy = cancel.kind === "busy" || transferring || lingering;
 
   async function runCancel() {
     if (cancel.kind === "busy" || cancel.kind === "done") return;
@@ -237,29 +247,59 @@ export function DeletionNoticeControls({
   }
 
   async function runTransfer(targetId: string) {
-    if (transfer.kind === "busy") return;
+    if (transferringRef.current) return;
     const target = targets.find((t) => t.id === targetId);
     if (!target) return;
-    setTransfer({ kind: "busy", targetId });
-    const outcome = await transferOutOfDeletedNotebook(id, targetId);
-    if (!mounted.current) return;
-    if (outcome.kind === "transferred") {
-      const moved = outcome.results.filter((r) => r.ok).length;
-      const failed = outcome.results.length - moved;
-      setTransfer({ kind: "result", text: transferDoneText(moved, failed, target.name), isFailure: failed > 0 });
+    transferringRef.current = true;
+    stopTransferRef.current = false;
+    setTransferring(true);
+    setTransfer({ kind: "busy", targetId, done: 0, total: null });
+    let moved = 0;
+    let failed = 0;
+    let after: string | null = null;
+    const finish = (state: TransferState) => {
+      if (!mounted.current) return;
+      setTransfer(state);
       onSettled?.();
       onChanged();
-      return;
-    }
-    setTransfer({
-      kind: "result",
-      isFailure: true,
-      text: outcome.kind === "closed" ? TRANSFER_CLOSED_TEXT
-        : outcome.kind === "gone" ? TRANSFER_GONE_TEXT : TRANSFER_FAILED_TEXT,
-    });
-    if (outcome.kind !== "failed") {
-      onSettled?.();
-      onChanged();
+    };
+    try {
+      for (;;) {
+        const outcome = await transferOutOfDeletedNotebook(id, targetId, after);
+        if (!mounted.current) return;
+        if (outcome.kind !== "transferred") {
+          const reason = outcome.kind === "closed" ? TRANSFER_CLOSED_TEXT
+            : outcome.kind === "gone" ? TRANSFER_GONE_TEXT
+              : outcome.kind === "busy" ? TRANSFER_BUSY_TEXT : TRANSFER_FAILED_TEXT;
+          if (outcome.kind === "failed" && moved === 0 && failed === 0) {
+            setTransfer({ kind: "result", isFailure: true, text: reason });
+          } else {
+            finish({ kind: "result", isFailure: true, text: transferStoppedText(moved, reason) });
+          }
+          return;
+        }
+        const ok = outcome.results.filter((r) => r.ok).length;
+        moved += ok;
+        failed += outcome.results.length - ok;
+        const done = moved + failed;
+        if (outcome.remaining === 0 || outcome.results.length === 0 || stopTransferRef.current) {
+          finish({
+            kind: "result",
+            isFailure: failed > 0,
+            text: outcome.remaining > 0
+              ? transferStoppedText(moved, `还有 ${outcome.remaining} 条没有转移。`)
+              : transferDoneText(moved, failed, target.name),
+          });
+          return;
+        }
+        after = outcome.nextAfter;
+        setTransfer((current) => (current.kind === "closed"
+          ? current
+          : { kind: "busy", targetId, done, total: done + outcome.remaining }));
+      }
+    } finally {
+      transferringRef.current = false;
+      if (mounted.current) setTransferring(false);
     }
   }
 
@@ -303,7 +343,7 @@ export function DeletionNoticeControls({
             {exporting ? "导出中…" : exportState === "copied" ? "已导出" : exportState === "failed" ? "导出失败" : exportLabel(notice.memory_count)}
           </button>
         )}
-        {canTransfer && transfer.kind !== "choosing" && transfer.kind !== "busy" && (
+        {canTransfer && transfer.kind !== "choosing" && transfer.kind !== "busy" && !transferring && (
           <button
             type="button"
             className="sort-button"
@@ -341,8 +381,15 @@ export function DeletionNoticeControls({
             </label>
           )}
           <div className="notebook-deletion-actions">
-            {/* 取消永不禁用:在途的转移收不回来,但面板总能关上。 */}
-            <button type="button" className="sort-button" onClick={() => setTransfer({ kind: "closed" })}>
+            {/* 取消永不禁用:在途的这一页收不回来,但面板总能关上;后面的页不再提交。 */}
+            <button
+              type="button"
+              className="sort-button"
+              onClick={() => {
+                stopTransferRef.current = true;
+                setTransfer({ kind: "closed" });
+              }}
+            >
               取消
             </button>
             {targets.length > 0 && (
@@ -356,6 +403,11 @@ export function DeletionNoticeControls({
               </button>
             )}
           </div>
+          {transfer.kind === "busy" && transfer.total !== null && (
+            <p className="notebook-deletion-note" role="status">
+              {transferProgressText(transfer.done, transfer.total)}
+            </p>
+          )}
         </div>
       )}
       {transfer.kind === "result" && (

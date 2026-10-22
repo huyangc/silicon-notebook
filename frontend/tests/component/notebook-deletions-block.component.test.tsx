@@ -11,12 +11,15 @@ import {
   DELETIONS_UNAVAILABLE_TEXT,
   EXPORT_CLOSED_TEXT,
   EXPORT_FAILED_TEXT,
+  TRANSFER_BUSY_TEXT,
   TRANSFER_CLOSED_TEXT,
   TRANSFER_NO_TARGET_TEXT,
   TRANSFER_WARNING_TEXT,
   deletionNoticeText,
   exportLabel,
   transferDoneText,
+  transferProgressText,
+  transferStoppedText,
   untransferableText,
 } from "../../app/notebook-deletion-copy.ts";
 import {
@@ -260,6 +263,8 @@ test("转移:先看到「不会回来」的提示,挑一本自己的笔记本确
       { source_id: "m1", new_id: "x1", ok: true, error: null, error_code: null, status: "moved" },
       { source_id: "m2", new_id: null, ok: false, error: "e", error_code: "delete_window_closed", status: "failed" },
     ],
+    remaining: 0,
+    next_after: "m2",
   })));
   expect(await within(region).findByRole("alert")).toHaveTextContent(transferDoneText(1, 1, "另一本我的"));
 });
@@ -336,6 +341,8 @@ test("有了结果、服务端已不再列出的一行:结果留在原处一会�
           { source_id: "m1", new_id: "x1", ok: true, error: null, error_code: null, status: "moved" },
           { source_id: "m2", new_id: "x2", ok: true, error: null, error_code: null, status: "moved" },
         ],
+        remaining: 0,
+        next_after: "m2",
       });
     },
   ]);
@@ -386,4 +393,107 @@ test("撤销成功后列表立刻刷新、服务端不再列出:「已撤销」�
   const live = within(screen.getByRole("region", { name: DELETIONS_BLOCK_TITLE }));
   expect(live.getByRole("button", { name: "已撤销" })).toBeDisabled();
   expect(live.getByRole("status")).toHaveTextContent(CANCEL_DONE_TEXT);
+});
+
+const moved = (id: string) => ({ source_id: id, new_id: `x-${id}`, ok: true, error: null, error_code: null, status: "moved" });
+
+test("转移按页提交到剩余为 0,途中显示「已转移 X / N 条」,每页接着上一页", async () => {
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  const firstPage = deferred<Response>();
+  const pages = [
+    () => firstPage.promise,
+    () => json({ results: [moved("m3"), moved("m4"), moved("m5")], remaining: 0, next_after: "m5" }),
+  ];
+  const calls = installServer([
+    listOf([{ ...MEMBER, transferable_count: 5 }]),
+    (call) => (call.method === "POST" && call.path.endsWith("/memories/transfer") ? pages.shift()!() : undefined),
+  ]);
+  render(<Host />);
+  const region = await block();
+  await user.click(await within(region).findByRole("button", { name: "转移到我的笔记本" }));
+  await user.click(within(region).getByRole("button", { name: "确认转移" }));
+  await act(async () => firstPage.resolve(json({ results: [moved("m1"), moved("m2")], remaining: 3, next_after: "m2" })));
+  expect(await within(region).findByRole("status")).toHaveTextContent(transferDoneText(5, 0, "我的笔记本"));
+  const bodies = calls.filter((call) => call.path.endsWith("/memories/transfer")).map((call) => JSON.parse(call.body));
+  expect(bodies).toEqual([
+    { target_notebook_id: "nb-mine" },
+    { target_notebook_id: "nb-mine", after: "m2" },
+  ]);
+});
+
+test("转移进度在两页之间可见", async () => {
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  const secondPage = deferred<Response>();
+  const pages = [
+    () => json({ results: [moved("m1"), moved("m2")], remaining: 3, next_after: "m2" }),
+    () => secondPage.promise,
+  ];
+  installServer([
+    listOf([{ ...MEMBER, transferable_count: 5 }]),
+    (call) => (call.method === "POST" && call.path.endsWith("/memories/transfer") ? pages.shift()!() : undefined),
+  ]);
+  render(<Host />);
+  const region = await block();
+  await user.click(await within(region).findByRole("button", { name: "转移到我的笔记本" }));
+  await user.click(within(region).getByRole("button", { name: "确认转移" }));
+  expect(await within(region).findByText(transferProgressText(2, 5))).toBeInTheDocument();
+  expect(within(region).getByRole("button", { name: "转移中…" })).toBeDisabled();
+  await act(async () => secondPage.resolve(json({ results: [moved("m3"), moved("m4"), moved("m5")], remaining: 0, next_after: "m5" })));
+  expect(await within(region).findByRole("status")).toHaveTextContent(transferDoneText(5, 0, "我的笔记本"));
+});
+
+test("同一渲染周期里连点两次确认,只发起一次转移", async () => {
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  const gate = deferred<Response>();
+  const calls = installServer([
+    listOf([MEMBER]),
+    (call) => (call.method === "POST" && call.path.endsWith("/memories/transfer") ? gate.promise : undefined),
+  ]);
+  render(<Host />);
+  const region = await block();
+  await user.click(await within(region).findByRole("button", { name: "转移到我的笔记本" }));
+  const confirm = within(region).getByRole("button", { name: "确认转移" });
+  act(() => {
+    confirm.click();
+    confirm.click();
+  });
+  await act(async () => gate.resolve(json({ results: [moved("m1")], remaining: 0, next_after: "m1" })));
+  expect(calls.filter((call) => call.path.endsWith("/memories/transfer"))).toHaveLength(1);
+});
+
+test("转移途中点「取消」:面板收起,守卫不放开,当前这一页之后不再提交", async () => {
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  const gate = deferred<Response>();
+  const calls = installServer([
+    listOf([{ ...MEMBER, transferable_count: 5 }]),
+    (call) => (call.method === "POST" && call.path.endsWith("/memories/transfer") ? gate.promise : undefined),
+  ]);
+  render(<Host />);
+  const region = await block();
+  await user.click(await within(region).findByRole("button", { name: "转移到我的笔记本" }));
+  await user.click(within(region).getByRole("button", { name: "确认转移" }));
+  await user.click(within(region).getByRole("button", { name: "取消" }));
+  expect(within(region).queryByRole("group", { name: "转移到我的笔记本" })).toBeNull();
+  // 在途时不能再发起一次。
+  expect(within(region).queryByRole("button", { name: "转移到我的笔记本" })).toBeNull();
+  await act(async () => gate.resolve(json({ results: [moved("m1"), moved("m2")], remaining: 3, next_after: "m2" })));
+  expect(await within(region).findByRole("status")).toHaveTextContent(
+    transferStoppedText(2, "还有 3 条没有转移。"),
+  );
+  expect(calls.filter((call) => call.path.endsWith("/memories/transfer"))).toHaveLength(1);
+});
+
+test("另一次转移正在进行(409):原因落在那一行", async () => {
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  installServer([
+    listOf([MEMBER]),
+    (call) => (call.method === "POST" && call.path.endsWith("/memories/transfer")
+      ? json({ detail: { code: "transfer_in_progress", message: "x" } }, 409)
+      : undefined),
+  ]);
+  render(<Host />);
+  const region = await block();
+  await user.click(await within(region).findByRole("button", { name: "转移到我的笔记本" }));
+  await user.click(within(region).getByRole("button", { name: "确认转移" }));
+  expect(await within(region).findByRole("alert")).toHaveTextContent(TRANSFER_BUSY_TEXT);
 });
