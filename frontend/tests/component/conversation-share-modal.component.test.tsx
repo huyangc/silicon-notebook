@@ -861,3 +861,40 @@ test("R5 披露回执还在路上：只显示「正在加载…」，不画发�
   expect(await screen.findByRole("button", { name: "生成分享链接" })).toBeInTheDocument();
   expect(screen.getByText("公开页会包含 2 条你引用到的个人记忆摘录。")).toBeInTheDocument();
 });
+
+
+// --- 公开页只显示最近 500 轮：笔记本内会话同样如实说出更早的轮次未包含 ------------------
+//
+// 笔记本内会话的轮次一次取全（不分页），数字就地算；后端公开页与全局会话同一个窗口
+// （`public_window`：到水位为止最近的 500 轮）。普通长度的会话一句都不多（上面各条用例）。
+
+function longDetail(count: number) {
+  return {
+    ...DETAIL,
+    turn_count: count,
+    turns: Array.from({ length: count }, (_, index) => ({
+      answer_id: `a${index + 1}`,
+      question: `q${index + 1}`,
+      response: {
+        anchors: index === 0 || index === count - 1
+          ? [{ images: [{ asset_id: `img-${index}` }] }]
+          : [],
+        citations: [],
+      },
+      asked_at: `2026-01-01T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}`,
+      created_at: `2026-01-01T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}`,
+    })),
+  };
+}
+
+test("520 轮的笔记本会话：公开页只显示最近 500 轮，弹窗给出更早未包含的确数", async () => {
+  mocks.getConversationShare.mockRejectedValue(humanizedError("not shared", 404));
+  mocks.getConversation.mockResolvedValue(longDetail(520));
+
+  renderModal();
+
+  expect(await screen.findByText("公开页只显示最近 500 轮，更早的 20 轮未包含。")).toBeInTheDocument();
+  // 最早那轮的附图不在页上，只数最新那轮的一张。
+  expect(screen.getByText("公开页会包含 1 张附图。")).toBeInTheDocument();
+  expect(screen.queryByText(/本次未能统计数量/)).toBeNull();
+});

@@ -87,6 +87,9 @@ export type PublicConversationT = {
   shared_at: string;
   turns: PublicTurnT[];
   truncated_turns: boolean;
+  /** 公开范围比公开页长时，页上只显示最近的 `turns.length` 轮，这么多更早的轮次未包含。
+   *  普通长度的会话不带这一项（后端为 0 时整项省略）。 */
+  omitted_earlier_turns?: number;
   /** 仅限时回答链接带：链接失效时刻(ISO)。会话分享没有这一项。 */
   expires_at?: string;
 };

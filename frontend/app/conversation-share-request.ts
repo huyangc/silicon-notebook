@@ -31,6 +31,17 @@ export function conversationShareDisclosurePath(sharePath: string, throughId: st
   return `${sharePath}/disclosure?through_id=${encodeURIComponent(throughId)}`;
 }
 
+/** 确数端点（全局会话）：边界与弹窗此刻持有的链接水位，原样交给服务端。 */
+export function conversationShareCountsPath(
+  sharePath: string,
+  throughId: string,
+  watermarkId: string,
+  watermarkAt: string,
+): string {
+  const query = new URLSearchParams({ through_id: throughId, watermark_id: watermarkId, watermark_at: watermarkAt });
+  return `${sharePath}/counts?${query.toString()}`;
+}
+
 export async function postConversationShare(
   sharePath: string,
   options: ApiRequestOptions,

@@ -26,11 +26,19 @@
  *  ⚠ 这里刻意不 import 任何一个面的会话类型：披露逻辑是两个面共用的**同一份**实现，
  *  一旦它认得某一面的具体类型，第二个面就只能复制一份近似实现出来，而「Memory 披露
  *  绝不省略」那条红线就会立刻分家成两份、各修一半。 */
-/** 公开快照最多投影多少轮——后端 `app/domain/conversation_public_view.MAX_TURNS` 的
- *  镜像。披露只在**拿得到完整序列**时才给数字，所以取轮次的那一侧需要一个与服务端
- *  同源的上界：读到这个数还没到头，就说明这条会话的公开范围本就超出了可披露的规模，
- *  此时给数字等于编（见 `ShareTurnsResult.complete`）。 */
+/** 公开页最多显示多少轮——后端 `app/domain/conversation_public_view.MAX_TURNS` 的
+ *  镜像。公开范围（到水位或边界为止的那段前缀）比它长时，公开页只显示其中**最近**的这么多
+ *  轮（被分享的那条回答一定在页上），更早的轮次不在页上、并如实说出轮数（后端
+ *  `public_window`）。披露的每个数字都按同一个窗口算，见 `publicWindow`。 */
 export const SHARE_SNAPSHOT_MAX_TURNS = 500;
+
+/** 一段公开前缀里公开页实际显示的那几轮的下标：最近的 `SHARE_SNAPSHOT_MAX_TURNS` 个。
+ *  与后端 `public_window` 同一个定义——两边谁换了口径，`share_counts_golden.json` 会红。 */
+function publicWindow(indices: number[]): number[] {
+  return indices.length > SHARE_SNAPSHOT_MAX_TURNS
+    ? indices.slice(indices.length - SHARE_SNAPSHOT_MAX_TURNS)
+    : indices;
+}
 
 export type ShareTurnImage = { asset_id?: string };
 export type ShareTurn = {
@@ -90,7 +98,27 @@ export type ShareDisclosure = {
   newCount: number;
   imageCount: number;
   memoryCount: number;
+  /** 公开范围比公开页长时，页上没有显示的更早轮数（公开页只显示最近
+   *  `SHARE_SNAPSHOT_MAX_TURNS` 轮）。普通长度的会话恒为 0。 */
+  earlierCount: number;
 };
+
+/** 一轮的附图数：anchors ∪ citations 的图按 asset_id 去重（读者每轮看到几张就是几张）。 */
+function turnImageCount(turn: ShareTurn): number {
+  const response: NonNullable<ShareTurn["response"]> = turn.response || {};
+  const assetIds = new Set<string>();
+  for (const anchor of response.anchors || []) {
+    for (const image of anchor.images || []) {
+      if (image.asset_id) assetIds.add(image.asset_id);
+    }
+  }
+  for (const citation of response.citations || []) {
+    for (const image of citation.images || []) {
+      if (image.asset_id) assetIds.add(image.asset_id);
+    }
+  }
+  return assetIds.size;
+}
 
 /** 一轮的 created_at 是否落在水位（含）之前。**仅用于**「水位答案已被删、`shared_through_id`
  *  在 turns 里找不到」的兜底分类(镜像后端 `public_conversation_by_token` 的删除兜底:
@@ -141,6 +169,10 @@ function watermarkClassifier(
  * 附图计数方向刻意**保守**(宁多勿少):前端统计 anchors ∪ citations,而公开页只投影
  * 被选中的那一支(anchors 有 marker 命中时 else citations),是子集——所以披露数
  * ≥ 公开页实际,绝不出现「公开页有内容而披露没数」(codex T5 评审已核这条不变量)。
+ *
+ * 附图只数公开页**实际显示**的那些轮次（`publicWindow`：公开范围里最近的
+ * `SHARE_SNAPSHOT_MAX_TURNS` 轮）；更早的轮数记在 `earlierCount`。普通长度的会话窗口就是
+ * 全部，结果与引入窗口之前逐项相同。
  */
 export function summarizeShareDisclosure(
   turns: ShareTurn[],
@@ -148,32 +180,30 @@ export function summarizeShareDisclosure(
   watermark: string,
   memoryCount: number,
 ): ShareDisclosure {
-  const isShared = watermarkClassifier(turns, sharedThroughId, watermark);
-  let sharedCount = 0;
-  let newCount = 0;
+  const shown = sharedWindow(turns, sharedThroughId, watermark);
   let imageCount = 0;
+  for (const index of shown.window) imageCount += turnImageCount(turns[index]);
+  return {
+    sharedCount: shown.shared.length,
+    newCount: turns.length - shown.shared.length,
+    imageCount,
+    memoryCount,
+    earlierCount: shown.shared.length - shown.window.length,
+  };
+}
+
+/** 水位之内的轮次下标（升序），以及其中公开页实际显示的那几轮（`publicWindow`）。 */
+function sharedWindow(
+  turns: ShareTurn[],
+  sharedThroughId: string,
+  watermark: string,
+): { shared: number[]; window: number[] } {
+  const isShared = watermarkClassifier(turns, sharedThroughId, watermark);
+  const shared: number[] = [];
   for (let index = 0; index < turns.length; index += 1) {
-    const turn = turns[index];
-    if (!isShared(index, turn.created_at)) {
-      newCount += 1;
-      continue;
-    }
-    sharedCount += 1;
-    const response: NonNullable<ShareTurn["response"]> = turn.response || {};
-    const assetIds = new Set<string>();
-    for (const anchor of response.anchors || []) {
-      for (const image of anchor.images || []) {
-        if (image.asset_id) assetIds.add(image.asset_id);
-      }
-    }
-    for (const citation of response.citations || []) {
-      for (const image of citation.images || []) {
-        if (image.asset_id) assetIds.add(image.asset_id);
-      }
-    }
-    imageCount += assetIds.size;
+    if (isShared(index, turns[index].created_at)) shared.push(index);
   }
-  return { sharedCount, newCount, imageCount, memoryCount };
+  return { shared, window: publicWindow(shared) };
 }
 
 export type ShareUpdatePreview = {
@@ -181,7 +211,8 @@ export type ShareUpdatePreview = {
   afterUpdate: ShareDisclosure;
   /** 相对**当前已公开**(在当前水位之内)的增量:更新会新暴露的去重记忆数。 */
   newMemoryCount: number;
-  /** 同上,更新会新暴露的附图数(按轮求和,不去重)。 */
+  /** 同上,更新会新暴露的附图数:更新后公开页上、当前公开页还没显示的那些轮次的附图
+   *  (按轮求和,不去重)。普通长度的会话里就是「更新后 - 当前」。 */
   newImageCount: number;
 };
 
@@ -204,14 +235,19 @@ export function summarizeShareUpdate(
   watermark: string,
   memory: ServerMemoryDisclosure,
 ): ShareUpdatePreview {
-  const current = summarizeShareDisclosure(
-    turns, sharedThroughId, watermark, Math.max(0, memory.memoryCount - memory.newMemoryCount),
-  );
+  // 更新后公开页显示的轮次里、当前公开页还没显示的那些——公开页只显示最近
+  // `SHARE_SNAPSHOT_MAX_TURNS` 轮，所以长会话更新时会有轮次移出窗口，新增附图不能用
+  // 「更新后 - 当前」相减（会把移出的那些也减掉，甚至为负）。
+  const current = new Set(sharedWindow(turns, sharedThroughId, watermark).window);
   const afterUpdate = summarizeShareDisclosure(turns, "", "", memory.memoryCount);
+  let newImageCount = 0;
+  for (const index of sharedWindow(turns, "", "").window) {
+    if (!current.has(index)) newImageCount += turnImageCount(turns[index]);
+  }
   return {
     afterUpdate,
     newMemoryCount: memory.newMemoryCount,
-    newImageCount: afterUpdate.imageCount - current.imageCount,
+    newImageCount,
   };
 }
 
@@ -257,7 +293,7 @@ export type ShareBoundary = {
  *  因为它决定的是一句会被照着复制链接的话，而不是样式（codex #530 R1/R2 三条都出在这里）。 */
 export type ShareScopeState = "unshared" | "at" | "behind" | "ahead" | "unknown";
 
-export function shareScopeState(boundary: ShareBoundary, shared: boolean): ShareScopeState {
+export function shareScopeState(boundary: Omit<ShareBoundary, "turns">, shared: boolean): ShareScopeState {
   if (!shared) return "unshared";
   // 边界本身解析不出时，「这条回答在不在链接里」同样答不了。
   if (boundary.unresolved || boundary.watermarkUnknown) return "unknown";
@@ -314,3 +350,121 @@ export function resolveShareBoundary(
     watermarkUnknown: unknown,
   };
 }
+
+/** 弹窗据以说话的全部数字（个人记忆条数除外，那个只来自披露端点）。
+ *
+ *  两个来源、同一个形状：笔记本内会话从完整轮次就地算（`shareCountsFromTurns`，
+ *  `GET /conversations/{id}` 不分页）；全局会话由服务端按公开页的同一个窗口在 SQL 里数
+ *  （`GET /global-ask/conversations/{id}/share/counts`，`readServerShareCounts`）——再长的
+ *  会话也给确数，浏览器不再翻页。后端 `app/domain/share_counts.py` 与这里逐项同一算法，
+ *  `backend/tests/fixtures/share_counts_golden.json` 把两边钉在同一组期望值上。 */
+export type ShareCounts = {
+  /** 本会话共几轮（已完成的轮次）。 */
+  totalTurns: number;
+  /** 边界那一轮：用户点的那条，或（会话列表入口）最新一条；解析不出时为空串。 */
+  throughId: string;
+  boundary: Omit<ShareBoundary, "turns">;
+  /** 链接此刻的内容（未分享时：按下去会发布的内容）。`memoryCount` 恒为 0，由调用方补。 */
+  current: ShareDisclosure;
+  /** 分享 / 更新会发布的内容。 */
+  update: { imageCount: number; newImageCount: number; earlierCount: number };
+};
+
+/** 从完整轮次算出 `ShareCounts`——弹窗接入确数端点之前就地做的那几步，一步没改。 */
+export function shareCountsFromTurns(
+  turns: ShareTurn[],
+  throughAnswerId: string,
+  sharedThroughId: string,
+  watermark: string,
+): ShareCounts {
+  const resolved = resolveShareBoundary(turns, throughAnswerId, sharedThroughId);
+  const { turns: scopedTurns, ...boundary } = resolved;
+  // 水位已越过边界（或水位在本地看不到）时，链接实际公开的是「整条到水位为止」，
+  // 所以披露按完整 turns 统计（见弹窗里 `disclosureTurns` 的老注释）。
+  const disclosureTurns = (boundary.watermarkAhead || boundary.watermarkUnknown) ? turns : scopedTurns;
+  const current = summarizeShareDisclosure(disclosureTurns, sharedThroughId, watermark, 0);
+  const update = summarizeShareUpdate(scopedTurns, sharedThroughId, watermark, { memoryCount: 0, newMemoryCount: 0 });
+  return {
+    totalTurns: turns.length,
+    throughId: scopedTurns.length ? scopedTurns[scopedTurns.length - 1].answer_id : "",
+    boundary,
+    current,
+    update: {
+      imageCount: update.afterUpdate.imageCount,
+      newImageCount: update.newImageCount,
+      earlierCount: update.afterUpdate.earlierCount,
+    },
+  };
+}
+
+const COUNT_FIELDS = [
+  "total_turns", "boundary_index", "ahead_count", "new_turns", "published_turns", "earlier_turns",
+  "image_count", "update_image_count", "update_new_image_count", "update_earlier_turns",
+] as const;
+const FLAG_FIELDS = ["boundary_unresolved", "watermark_ahead", "watermark_behind", "watermark_unknown"] as const;
+
+/** 读确数端点的回执；形状不对（缺字段、负数、非整数、自相矛盾）一律当作取数失败（null），
+ *  弹窗随即说「没能取到确数」——绝不凭半个回执给一个数字。 */
+export function readServerShareCounts(raw: unknown): ShareCounts | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const body = raw as Record<string, unknown>;
+  if (typeof body.through_id !== "string") return null;
+  for (const field of COUNT_FIELDS) {
+    const value = body[field];
+    if (field === "boundary_index" ? !(Number.isInteger(value) && (value as number) >= -1) : !isCount(value)) return null;
+  }
+  for (const field of FLAG_FIELDS) if (typeof body[field] !== "boolean") return null;
+  const count = (field: (typeof COUNT_FIELDS)[number]) => body[field] as number;
+  if (count("update_new_image_count") > count("update_image_count")) return null;
+  return {
+    totalTurns: count("total_turns"),
+    throughId: body.through_id,
+    boundary: {
+      index: count("boundary_index"),
+      unresolved: body.boundary_unresolved as boolean,
+      watermarkAhead: body.watermark_ahead as boolean,
+      aheadCount: count("ahead_count"),
+      watermarkBehind: body.watermark_behind as boolean,
+      watermarkUnknown: body.watermark_unknown as boolean,
+    },
+    current: {
+      sharedCount: count("published_turns") + count("earlier_turns"),
+      newCount: count("new_turns"),
+      imageCount: count("image_count"),
+      memoryCount: 0,
+      earlierCount: count("earlier_turns"),
+    },
+    update: {
+      imageCount: count("update_image_count"),
+      newImageCount: count("update_new_image_count"),
+      earlierCount: count("update_earlier_turns"),
+    },
+  };
+}
+
+/** 刚把水位钉到 `counts.throughId`（或刚撤销分享）之后的数字，不必再问一次服务端：
+ *  两种情形下链接的内容（未分享时：按下去会发布的内容）都正好是边界之前的那段前缀，
+ *  也就是 `update` 描述的那一份——新增 0 轮，范围五态回到「正好在边界上」。
+ *  由 `conversation-share-disclosure.test.mjs` 对照 `shareCountsFromTurns` 钉住。 */
+export function countsAfterPublishing(counts: ShareCounts): ShareCounts {
+  // 边界之前的那段前缀有几轮：会话列表入口是整条会话，回答下的入口是到边界为止。
+  const scoped = counts.boundary.unresolved ? 0 : counts.boundary.index >= 0 ? counts.boundary.index + 1 : counts.totalTurns;
+  return {
+    ...counts,
+    boundary: { ...counts.boundary, watermarkAhead: false, aheadCount: 0, watermarkBehind: false, watermarkUnknown: false },
+    current: {
+      sharedCount: scoped,
+      newCount: 0,
+      imageCount: counts.update.imageCount,
+      memoryCount: 0,
+      earlierCount: counts.update.earlierCount,
+    },
+    update: { ...counts.update, newImageCount: 0 },
+  };
+}
+
+/** 公开范围比公开页长时的那一句（产品裁决 2026-10-22：如实说出更早的轮次没有包含）。 */
+export const shareEarlierSentence = (count: number): string =>
+  `公开页只显示最近 ${SHARE_SNAPSHOT_MAX_TURNS} 轮，更早的 ${count} 轮未包含。`;
+export const shareUpdateEarlierSentence = (count: number): string =>
+  `更新后公开页只显示最近 ${SHARE_SNAPSHOT_MAX_TURNS} 轮，更早的 ${count} 轮未包含。`;

@@ -5,8 +5,12 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 //
 // 钉的是**接线**，不是弹窗正文：弹窗、五句范围文案、两条披露与全部按钮反馈都由
 // `conversation-share-modal.component.test.tsx` 钉住，这里只证明全局这一侧把它接对了——
-// 端点是全局那一组、边界是**作业**（job_id）、轮次经 `globalShareTurns` 适配（只取
-// done）、错误语义与单库一致、切会话不串味、Esc 只收弹窗这一层。
+// 端点是全局那一组、边界是**作业**（job_id）、数字来自确数端点（`/share/counts`，服务端
+// 按公开页的同一个窗口数，只数 done）、错误语义与单库一致、切会话不串味、Esc 只收弹窗这一层。
+//
+// 确数端点在这里由 `shareCountsFromTurns` 扮演：后端 `app/domain/share_counts.py` 与它逐项
+// 同一算法（两边由 backend/tests/fixtures/share_counts_golden.json 钉在同一组期望值上），
+// 所以普通长度的会话在这里读到的数字，与接入确数端点之前浏览器就地算的逐字相同。
 //
 // 网络闸放在 `api-client` 的 `requestJson`/`requestVoid` 上，而**不是**替掉
 // `globalConversationShareApi` 本身：后者正是本任务要验的那段（路径怎么拼、body 里
@@ -17,7 +21,7 @@ import { GlobalAskLauncher } from "../../app/ask/global-ask-launcher.tsx";
 import { claimEscapePress, useRootModalCoordinator } from "../../app/use-root-modal-coordinator.ts";
 import { humanizedError } from "../../app/errors.ts";
 import { GLOBAL_ASK_PAGE_SIZE, type GlobalConversation, type GlobalConversationDetail, type GlobalJob } from "../../app/global-ask-api.ts";
-import { SHARE_SNAPSHOT_MAX_TURNS } from "../../app/conversation-share-disclosure.ts";
+import { shareCountsFromTurns, type ShareTurn } from "../../app/conversation-share-disclosure.ts";
 import type { AskResponse, ConversationShareResponse, NotebookSummary } from "../../app/workspace-model.ts";
 
 const net = vi.hoisted(() => ({
@@ -72,18 +76,20 @@ const doneJob = (jobId: string, createdAt: string, memoryId = "", assetId = ""):
 });
 
 // 两条 done + 一条**未完成**。未完成那条没有可公开的回答，后端快照也不会包含它——
-// `globalShareTurns` 必须把它滤掉，否则披露会凭空多报一轮。
+// 确数端点只数 done，否则披露会凭空多报一轮。
 const JOB_1 = doneJob("job-1", "2026-09-19T01:00:00Z");
 const JOB_2 = doneJob("job-2", "2026-09-19T01:00:01Z", "m1");
 const UNFINISHED: GlobalJob = { ...doneJob("job-3", "2026-09-19T01:00:02Z"), status: "failed", answer: null };
 
-const shareApi = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), del: vi.fn(), disclosure: vi.fn() }));
+const shareApi = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), del: vi.fn(), disclosure: vi.fn(), counts: vi.fn() }));
 /** 每次 POST 实际送出的请求体原文 —— 「不带确认值时逐字节不变」要看原文，不看解析后的对象。 */
 let shareBodies: string[] = [];
 /** 每次命中分享端点时记下的请求路径 —— 端点走的是全局那一组，不是 /notebooks/… */
 let sharePaths: string[] = [];
 /** 披露端点（`…/share/disclosure?through_id=`）的请求路径，与分享端点分开记。 */
 let disclosurePaths: string[] = [];
+/** 确数端点（`…/share/counts?…`）的请求路径。 */
+let countsPaths: string[] = [];
 let turnsByConversation: Record<string, GlobalJob[]> = {};
 
 const SHARED = (throughId: string, at: string): ConversationShareResponse => ({
@@ -107,10 +113,41 @@ const detailFor = (id: string, offset = 0): GlobalConversationDetail => {
 /** 每个 offset 会不会翻车/翻不到头，由用例按需替换。 */
 let detailImpl: (id: string, offset: number) => Promise<GlobalConversationDetail>;
 
+/** 确数端点的替身：一条会话的 done 作业按服务端口径（`job.answer` 优先、旧形状 `response`
+ *  兜底）交给 `shareCountsFromTurns`，再写成端点的响应体。 */
+function serverCounts(conversationId: string, query: URLSearchParams) {
+  const turns: ShareTurn[] = (turnsByConversation[conversationId] ?? [])
+    .filter((job) => job.status === "done")
+    .map((job) => {
+      const shaped = job.answer ?? job.response;
+      return {
+        answer_id: job.job_id,
+        created_at: job.created_at,
+        response: { anchors: shaped?.anchors ?? [], citations: shaped?.citations ?? [] },
+      };
+    });
+  const counted = shareCountsFromTurns(
+    turns, query.get("through_id") ?? "", query.get("watermark_id") ?? "", query.get("watermark_at") ?? "",
+  );
+  return {
+    total_turns: counted.totalTurns, through_id: counted.throughId,
+    boundary_index: counted.boundary.index, boundary_unresolved: counted.boundary.unresolved,
+    watermark_ahead: counted.boundary.watermarkAhead, ahead_count: counted.boundary.aheadCount,
+    watermark_behind: counted.boundary.watermarkBehind, watermark_unknown: counted.boundary.watermarkUnknown,
+    new_turns: counted.current.newCount,
+    published_turns: counted.current.sharedCount - counted.current.earlierCount,
+    earlier_turns: counted.current.earlierCount, image_count: counted.current.imageCount,
+    update_image_count: counted.update.imageCount, update_new_image_count: counted.update.newImageCount,
+    update_earlier_turns: counted.update.earlierCount,
+  };
+}
+
 beforeEach(() => {
   sharePaths = [];
   disclosurePaths = [];
+  countsPaths = [];
   shareBodies = [];
+  shareApi.counts.mockImplementation(async (conversationId: string, query: URLSearchParams) => serverCounts(conversationId, query));
   // 服务端按「即将公开的确切范围」数个人记忆：job-2 那一轮引用了一条，所以截到 job-1 是 0 条，
   // 截到 job-2 / 当前最新是 1 条。前端不再自己数，数字全从这里来。
   shareApi.disclosure.mockImplementation(async (throughId: string) => ({
@@ -131,6 +168,11 @@ beforeEach(() => {
     if (path.includes("/share/disclosure?")) {
       disclosurePaths.push(path);
       return shareApi.disclosure(new URLSearchParams(path.split("?")[1]).get("through_id") ?? "");
+    }
+    const counts = /^\/global-ask\/conversations\/([^/?]+)\/share\/counts\?(.*)$/.exec(path);
+    if (counts) {
+      countsPaths.push(path);
+      return shareApi.counts(decodeURIComponent(counts[1]), new URLSearchParams(counts[2]));
     }
     if (path.endsWith("/share")) {
       sharePaths.push(path);
@@ -327,21 +369,20 @@ test("切到别的会话后，上一条会话迟到的分享回执不写进新�
 });
 
 
-// --- 长会话：披露的数字必须覆盖**整条**会话，覆盖不了就不给数字 ----------------
+// --- 长会话：数字来自确数端点，覆盖**整条**会话；端点失败才说「没能取到确数」 ------
 //
-// `offset 0` 是最新一页，所以只读第一页丢的是**最早**的轮次。用户点最新那条下面的
-// 分享时边界就在第一页里，`resolveShareBoundary` 正常解析、不走任何降级——于是抬头
-// 写「共 50 轮」而实际 70 轮，附图/记忆只数了最新 50 轮，而公开页会包含全部。这正是
-// 「披露数 ≥ 公开页实际」那条不变量的反面（评审 P1）。
+// 界面本身只读最新一页（`offset 0`）。披露的每个数字都声称覆盖链接的全部内容，所以它们
+// 不来自界面手里那一页，而来自确数端点：服务端按公开页的同一个窗口在 SQL 里数，再长的
+// 会话也给确数。浏览器不再为披露翻页。
 
-/** N 轮的长会话。最早那条（page 1 上）带一张附图与一条独有的个人记忆——只读第一页
- *  时这两个数字都会静默缩水。 */
-function longConversation(count: number): GlobalJob[] {
+/** N 轮的长会话。最早那条（不在第一页上）带一张附图与一条独有的个人记忆——只读第一页
+ *  时这两个数字都会静默缩水。`withImageAt` 另在那几轮（0 基）上各挂一张附图。 */
+function longConversation(count: number, withImageAt: number[] = []): GlobalJob[] {
   return Array.from({ length: count }, (_, index) => doneJob(
     `job-${index + 1}`,
-    `2026-09-19T01:${String(index).padStart(2, "0")}:00Z`,
+    `2026-09-19T${String(Math.floor(index / 3600)).padStart(2, "0")}:${String(Math.floor(index / 60) % 60).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}Z`,
     index === 0 ? "m-oldest" : index === count - 1 ? "m-newest" : "",
-    index === 0 ? "asset-oldest" : "",
+    index === 0 ? "asset-oldest" : withImageAt.includes(index) ? `asset-${index}` : "",
   ));
 }
 
@@ -353,58 +394,100 @@ function expectNoDisclosureNumbers() {
   expect(screen.queryByText(/条你引用到的个人记忆摘录/)).toBeNull();
 }
 
-test("70 轮的会话：翻页取全，抬头与附图/记忆计数按 70 轮算", async () => {
-  turnsByConversation = { "conv-a": longConversation(70) };
-  // 个人记忆条数只来自服务端（前端不数）：这里给一个与任何前端计数都对不上的数。
-  // 必须在打开弹窗之前就位——披露请求在弹窗加载完轮次后立刻发出。
-  shareApi.disclosure.mockResolvedValue({ memory_count: 5, new_memory_count: 0 });
+/** 打开 conv-a，点界面上最新那条回答下的分享。 */
+async function openShareOnNewest() {
   window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
   render(<GlobalAskPage />);
   const buttons = await screen.findAllByRole("button", { name: "分享到这条回答" });
-  // 界面本身仍然只渲染第一页（50 条）——披露取全与「加载更早的问答」是两码事。
+  // 界面本身仍然只渲染第一页——披露的确数与「加载更早的问答」是两码事。
   expect(buttons).toHaveLength(GLOBAL_ASK_PAGE_SIZE);
-  fireEvent.click(buttons[buttons.length - 1]); // 最新那条：边界就在第一页里
+  fireEvent.click(buttons[buttons.length - 1]);
   await screen.findByText("分享会话");
+}
+
+test("70 轮的会话：抬头与附图/记忆计数按 70 轮算，数字来自确数端点而不是翻页", async () => {
+  turnsByConversation = { "conv-a": longConversation(70) };
+  // 个人记忆条数只来自服务端（前端不数）：这里给一个与任何前端计数都对不上的数。
+  shareApi.disclosure.mockResolvedValue({ memory_count: 5, new_memory_count: 0 });
+  await openShareOnNewest();
 
   expect(await screen.findByText(/分享至第 70 轮回答（本会话共 70 轮）/)).toBeInTheDocument();
   // 最早那轮的附图在第二页上：只读第一页时它会少一张。
   expect(await screen.findByText(/公开页会包含 1 张附图/)).toBeInTheDocument();
   expect(await screen.findByText(/公开页会包含 5 条你引用到的个人记忆摘录/)).toBeInTheDocument();
+  // 普通长度：没有「更早未包含」那一句。
+  expect(screen.queryByText(/更早的 \d+ 轮未包含/)).toBeNull();
+  // 问的是用户点的那条作业，水位为空（未分享）。
+  expect(countsPaths).toEqual([
+    "/global-ask/conversations/conv-a/share/counts?through_id=job-70&watermark_id=&watermark_at=",
+  ]);
+  // 浏览器不再为披露翻更早的页。
+  expect(net.requestJson.mock.calls.some(([path]) => /\/conversations\/conv-a\?.*offset=[1-9]/.test(String(path)))).toBe(false);
 });
 
-test("取更早那页失败：一个数字都不给，只给两面都提的兜底文案", async () => {
+test("超长会话（600 轮）：给确数，并如实说更早的 100 轮未包含——不再是「拿不全」", async () => {
+  turnsByConversation = { "conv-a": longConversation(600, [150, 599]) };
+  shareApi.disclosure.mockResolvedValue({ memory_count: 2, new_memory_count: 0 });
+  await openShareOnNewest();
+
+  expect(await screen.findByText(/分享至第 600 轮回答（本会话共 600 轮）/)).toBeInTheDocument();
+  expect(screen.getByText("公开页只显示最近 500 轮，更早的 100 轮未包含。")).toBeInTheDocument();
+  // 最早那轮的附图不在页上：只数页上那 500 轮里的两张。
+  expect(screen.getByText("公开页会包含 2 张附图。")).toBeInTheDocument();
+  expect(screen.getByText("公开页会包含 2 条你引用到的个人记忆摘录。")).toBeInTheDocument();
+  expect(screen.queryByText(/本次未能统计数量/)).toBeNull();
+  // 范围文案仍是「按下去会发布什么」那一句；发布钉在用户点的那条作业上。
+  fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
+  await waitFor(() => expect(shareApi.post).toHaveBeenCalledWith("job-600", 2));
+});
+
+test("超长会话已分享到更早一轮：链接此刻的确数与「更新到这一条」之后的确数分开说", async () => {
+  turnsByConversation = { "conv-a": longConversation(600, [80, 520, 580]) };
+  shareApi.get.mockResolvedValue(SHARED("job-550", "2026-09-19T00:09:09Z"));
+  shareApi.disclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 1 });
+  await openShareOnNewest();
+
+  await screen.findByLabelText("分享链接");
+  expect(screen.getByText(/还不包含这条回答/)).toBeInTheDocument();
+  // 链接此刻：到第 550 轮为止的最近 500 轮（51..550）。
+  expect(screen.getByText(/之后新增 50 轮未包含/)).toBeInTheDocument();
+  expect(screen.getByText("公开页只显示最近 500 轮，更早的 50 轮未包含。")).toBeInTheDocument();
+  expect(screen.getByText("公开页会包含 2 张附图。")).toBeInTheDocument();
+  // 更新之后：最近 500 轮（101..600）。第 81 轮的那张移出页面，第 581 轮的那张新进来。
+  expect(screen.getByText("更新后公开页只显示最近 500 轮，更早的 100 轮未包含。")).toBeInTheDocument();
+  expect(screen.getByText("更新后公开页共 2 张附图（新增 1 张）。")).toBeInTheDocument();
+  expect(countsPaths).toEqual([
+    "/global-ask/conversations/conv-a/share/counts?through_id=job-600&watermark_id=job-550&watermark_at=2026-09-19T00%3A09%3A09Z",
+  ]);
+
+  // 更新成功后不必再问端点：链接此刻就是刚才「更新后」那一份，复制按钮上方不闪「正在加载…」。
+  shareApi.post.mockResolvedValueOnce(SHARED("job-600", "2026-09-19T00:09:59Z"));
+  fireEvent.click(screen.getByRole("button", { name: /更新到这一条/ }));
+  expect(await screen.findByText("已更新到这一条")).toBeInTheDocument();
+  expect(screen.getByText("公开页只显示最近 500 轮，更早的 100 轮未包含。")).toBeInTheDocument();
+  expect(screen.queryByText(/之后新增/)).toBeNull();
+  expect(screen.queryByRole("button", { name: /更新到这一条/ })).toBeNull();
+  expect(countsPaths).toHaveLength(1);
+});
+
+test("确数端点失败：一个数字都不给，如实说没能统计，仍可发布", async () => {
   turnsByConversation = { "conv-a": longConversation(70) };
-  detailImpl = async (id, offset) => {
-    if (offset > 0) throw new Error("更早的问答加载失败");
-    return detailFor(id, offset);
-  };
-  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
-  render(<GlobalAskPage />);
-  const buttons = await screen.findAllByRole("button", { name: "分享到这条回答" });
-  fireEvent.click(buttons[buttons.length - 1]);
-  await screen.findByText("分享会话");
+  shareApi.counts.mockRejectedValue(new Error("确数端点不可用"));
+  await openShareOnNewest();
 
   await waitFor(() => expectNoDisclosureNumbers());
-  // 轮次取不全时一个数都算不出，也就不为它去问披露端点。
+  // 数字取不到时也不为它去问个人记忆的披露端点。
   expect(disclosurePaths).toEqual([]);
   // 披露算不出不等于不能发布：expected 仍是用户点的那条作业，不带确认值。
   fireEvent.click(await screen.findByRole("button", { name: /分享到这一条/ }));
   await waitFor(() => expect(shareApi.post).toHaveBeenCalledWith("job-70", undefined));
 });
 
-test("翻到上界仍有更早的轮次：同样一个数字都不给", async () => {
-  turnsByConversation = { "conv-a": longConversation(60) };
-  // 永远报「还有更早的」——比公开快照上界还长的会话，披露没有可给的确数。
-  detailImpl = async (id, offset) => ({ ...detailFor(id, offset), has_more: true, next_offset: offset + GLOBAL_ASK_PAGE_SIZE });
-  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
-  render(<GlobalAskPage />);
-  const buttons = await screen.findAllByRole("button", { name: "分享到这条回答" });
-  fireEvent.click(buttons[buttons.length - 1]);
-  await screen.findByText("分享会话");
-
+test("确数端点回执形状不对：同样按取数失败处理，绝不凭半个回执给数字", async () => {
+  turnsByConversation = { "conv-a": longConversation(70) };
+  shareApi.counts.mockResolvedValue({ total_turns: 70, through_id: "job-70" });
+  await openShareOnNewest();
   await waitFor(() => expectNoDisclosureNumbers());
-  // 翻页有硬上界，不会无限翻下去。
-  expect(SHARE_SNAPSHOT_MAX_TURNS / GLOBAL_ASK_PAGE_SIZE).toBe(10);
 });
 
 

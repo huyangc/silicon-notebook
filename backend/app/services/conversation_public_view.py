@@ -76,7 +76,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 # Sunk to app.domain.conversation_public_view in B3 (app.repositories'
 # ask_state_store imports it directly there); re-exported here unchanged.
-from app.domain.conversation_public_view import MAX_TURNS
+from app.domain.conversation_public_view import MAX_TURNS, public_window
 from app.services.citation_markers import (
     MARKER_RE as _ANCHOR_MARKER_GROUP_RE,
     marker_keys as _marker_keys,
@@ -188,7 +188,7 @@ def referenced_asset_ids(
     out: list[str] = []
     seen: set[str] = set()
     turns = row.get("turns") if isinstance(row.get("turns"), list) else []
-    for turn in list(turns)[:MAX_TURNS]:
+    for turn in public_window(turns):
         payload = turn.get("payload") if isinstance(turn, dict) else None
         if not isinstance(payload, dict):
             continue
@@ -214,7 +214,7 @@ def memory_lookup_source_ids(row: dict[str, Any]) -> list[str]:
     so the lookup asks about exactly the references that cross."""
     references: list[Any] = []
     turns = row.get("turns") if isinstance(row.get("turns"), list) else []
-    for turn in list(turns)[:MAX_TURNS]:
+    for turn in public_window(turns):
         payload = turn.get("payload") if isinstance(turn, dict) else None
         if not isinstance(payload, dict):
             continue
@@ -248,6 +248,11 @@ def resolve_conversation_asset_alias(
 
 def _text(value: Any, limit: int) -> str:
     return str(value or "").strip()[:limit]
+
+
+def _count(value: Any) -> int:
+    """A non-negative count off a store row (a missing one is 0)."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
 def _text_flag(value: Any, limit: int) -> tuple[str, bool]:
@@ -651,8 +656,15 @@ def public_conversation_payload(
 
     The caller (the anonymous route) has already run the live creator
     re-authorization and popped the GATE fields (``notebook_id``/``created_by``);
-    this allowlist would ignore them regardless, but they must not reach here."""
+    this allowlist would ignore them regardless, but they must not reach here.
+
+    The page shows the newest ``MAX_TURNS`` turns of the published prefix
+    (``public_window``; the shared turn is always among them). The stores read
+    only that window and say how many older turns they left out
+    (``earlier_turns``); ``omitted_earlier_turns`` discloses that number, and
+    ``truncated_turns`` stays its yes/no."""
     turns = row.get("turns") if isinstance(row.get("turns"), list) else []
+    omitted = _count(row.get("earlier_turns")) + max(0, len(turns) - MAX_TURNS)
     return {
         "title": _title_text(row.get("title")),
         "created_at": _text(row.get("created_at"), 64),
@@ -663,9 +675,10 @@ def public_conversation_payload(
                 turn, share_token=share_token, images_enabled=images_enabled,
                 memory_sources=memory_sources,
             )
-            for turn in list(turns)[:MAX_TURNS]
+            for turn in public_window(turns)
         ],
-        "truncated_turns": len(turns) > MAX_TURNS,
+        "truncated_turns": omitted > 0,
+        "omitted_earlier_turns": omitted,
     }
 
 

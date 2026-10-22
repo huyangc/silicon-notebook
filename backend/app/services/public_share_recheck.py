@@ -50,13 +50,13 @@ from __future__ import annotations
 
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from app.domain.conversation_public_view import MAX_TURNS
+from app.domain.conversation_public_view import public_window
 
 
 def conversation_library_ids(turns: Sequence[Any]) -> set[str]:
     """Every library named on an anchor or citation of the projected turns."""
     found: set[str] = set()
-    for turn in list(turns)[:MAX_TURNS]:
+    for turn in public_window(turns):
         payload = turn.get("payload") if isinstance(turn, Mapping) else None
         if not isinstance(payload, Mapping):
             continue

@@ -13,6 +13,7 @@ from app.api.task_stream import (
 )
 from app.models.identity import UserProfile
 from app.models.ask import (
+    ConversationShareCounts,
     ConversationShareDisclosure,
     ConversationShareRequest,
     ConversationShareResponse,
@@ -341,6 +342,34 @@ def global_conversation_share_disclosure_route(
         through_id=through_id,
     )
     return ConversationShareDisclosure(**counts)
+
+
+@router.get("/conversations/{conversation_id}/share/counts",
+            response_model=ConversationShareCounts)
+def global_conversation_share_counts_route(
+    conversation_id: str,
+    through_id: str = Query(default=""),
+    watermark_id: str = Query(default=""),
+    watermark_at: str = Query(default=""),
+    user: UserProfile = Depends(get_current_user),
+) -> ConversationShareCounts:
+    """The share dialog's exact numbers: turns, the boundary ``through_id`` (a
+    JOB id; empty = the newest completed turn) against the link's watermark as
+    the dialog holds it (``watermark_id``/``watermark_at``; empty = not
+    shared), new and older-than-the-page turns, and attached images -- counted
+    in SQL over the windows the public page shows, so a conversation of any
+    length gets exact numbers rather than "not counted".
+
+    Owner only, with the share surface's error mapping (``_share_call``): a
+    foreign or missing conversation is the same 404, a library the counted
+    windows draw on that the sharer can no longer read is the share's own 404
+    sentence. Reads only; a boundary or watermark that does not resolve is
+    reported in the body, never refused."""
+    counts = _share_call(
+        global_ask_service().share_counts, conversation_id, user_id=user.id,
+        through_id=through_id, watermark_id=watermark_id, watermark_at=watermark_at,
+    )
+    return ConversationShareCounts(**counts)
 
 
 @router.get("/conversations/{conversation_id}/share", response_model=ConversationShareResponse)

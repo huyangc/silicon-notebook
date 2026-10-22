@@ -403,17 +403,22 @@ def test_conversation_share_state_reads_back_token_and_watermark(
     assert after["shared_through_id"] == "ans-d"  # newest answer at share time
 
 
-def test_public_snapshot_query_is_bounded_to_cap_plus_one(
+def test_public_snapshot_is_the_newest_window_of_the_prefix(
     postgres_database, monkeypatch
 ):
-    """Mirrors the SQLite copy (codex #522 R6 P2): the token-resolved query fetches
-    at most ``MAX_TURNS + 1`` answers, not the whole conversation. Shrink
-    ``MAX_TURNS`` to 3, seed 6 answers, share to latest, assert the store returns
-    the oldest 4 = cap + 1. Mutation guard: dropping ``LIMIT`` returns all 6."""
+    """Mirrors the SQLite copy (codex #522 R6 P2): the token-resolved read serves
+    the NEWEST ``MAX_TURNS`` answers of the published prefix and counts the older
+    ones. Shrink ``MAX_TURNS`` to 3, seed 6 answers: shared at the latest the
+    store returns the newest three with ``earlier_turns == 3``; shared at
+    ``ans-04`` the page ends at it. The window statement reads backwards under a
+    LIMIT (its plan is pinned in ``test_share_window_explain_pins.py``)."""
+    import app.domain.conversation_public_view as window_mod
     import app.repositories.postgres.ask_state_store as store_mod
     import app.services.conversation_public_view as view_mod
+    from tests.citation_check_testkit import count_statements
 
     monkeypatch.setattr(store_mod, "MAX_TURNS", 3)
+    monkeypatch.setattr(window_mod, "MAX_TURNS", 3)
     monkeypatch.setattr(view_mod, "MAX_TURNS", 3)
 
     assert PostgresMigrator(postgres_database).migrate() == 83
@@ -442,17 +447,28 @@ def test_public_snapshot_query_is_bounded_to_cap_plus_one(
     store = PostgresAskStateStore(postgres_database, _seams())
 
     token = store.share_conversation("nb-big-pg", "conv-big-pg")["share_token"]
-    row = store.public_conversation_by_token(token)
+    with count_statements(postgres_database) as statements:
+        row = store.public_conversation_by_token(token)
 
-    assert [t["answer_id"] for t in row["turns"]] == [
-        "ans-00", "ans-01", "ans-02", "ans-03",
-    ]
+    assert [t["answer_id"] for t in row["turns"]] == ["ans-03", "ans-04", "ans-05"]
+    assert row["earlier_turns"] == 3
+    window_reads = [sql for sql in statements if sql.startswith("SELECT id, question")]
+    assert window_reads and all(
+        "DESC" in sql and "LIMIT" in sql for sql in window_reads
+    ), statements
 
     payload = public_conversation_payload(
         row, share_token=token, images_enabled=False
     )
     assert len(payload["turns"]) == 3
     assert payload["truncated_turns"] is True
+    assert payload["omitted_earlier_turns"] == 3
+
+    store.unshare_conversation("nb-big-pg", "conv-big-pg")
+    token = store.share_conversation("nb-big-pg", "conv-big-pg", "ans-04")["share_token"]
+    row = store.public_conversation_by_token(token)
+    assert [t["answer_id"] for t in row["turns"]] == ["ans-02", "ans-03", "ans-04"]
+    assert row["earlier_turns"] == 2
 
 
 def _wait_for_conversation_row_lock(postgres_database) -> None:

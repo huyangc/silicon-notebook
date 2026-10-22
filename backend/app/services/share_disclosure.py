@@ -88,7 +88,7 @@ from app.domain.share_disclosure import (
     ShareMemoryGuard,
     require_acknowledged,
 )
-from app.domain.conversation_public_view import MAX_TURNS
+from app.domain.conversation_public_view import public_window
 from app.repositories.ports import (
     ConversationHasNoShareableAnswer,
     ConversationShareWatermarkStale,
@@ -281,8 +281,8 @@ def share_memory_guard(
 # global conversation's ``done`` jobs), so its count is taken over exactly that
 # prefix: the turns up to and including the boundary the share would pin
 # (``expected_through_id``; empty = the newest completed turn) in the same
-# canonical order and with the same keyset the public snapshot uses, cut at the
-# ``MAX_TURNS`` the public page projects.
+# canonical order and with the same keyset the public snapshot uses, cut to the
+# window the public page projects (``public_window``: the newest ``MAX_TURNS``).
 #
 # The count is the number of DISTINCT Memory entries of the author the page may
 # carry, read off every anchor and citation of those turns (not only the
@@ -490,9 +490,9 @@ def conversation_share_window(
 
     ``turns`` are every completed turn of the conversation as ``(id, payload)``
     in the canonical order the public snapshot uses; the window is the prefix
-    ending at ``through_id`` (empty = the newest), cut at ``MAX_TURNS`` like
-    the public page.  It refuses exactly as the share write does, with the same
-    exceptions: a boundary that does not resolve, or that sorts before the
+    ending at ``through_id`` (empty = the newest), cut to the page's window
+    (``public_window``: its newest ``MAX_TURNS``) like the public page.
+    It refuses exactly as the share write does, with the same exceptions: a boundary that does not resolve, or that sorts before the
     published watermark ``published_through_id`` (the watermark only
     advances; a watermark turn that no longer resolves is not compared, as
     the store does not compare it), is ``ConversationShareWatermarkStale``; a
@@ -510,5 +510,5 @@ def conversation_share_window(
     published = positions.get(published_through_id) if published_through_id else None
     if published is not None and index < published:
         raise ConversationShareWatermarkStale(through_id or turns[index][0])
-    window = [payload for _turn_id, payload in turns[: index + 1]][:MAX_TURNS]
+    window = public_window([payload for _turn_id, payload in turns[: index + 1]])
     return turns[index][0], window

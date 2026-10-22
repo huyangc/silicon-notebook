@@ -453,3 +453,24 @@ test("带 expires_at 的回答链接头部写明失效时间，会话分享页�
   expect(screen.queryByText(/此链接将于/)).toBeNull();
   expect(screen.getByText("问答会话 · 只读分享")).toBeInTheDocument();
 });
+
+test("公开范围比公开页长：在第一轮之前说明只展示最近的几轮、更早的几轮未包含（确数）", async () => {
+  mocks.fetchPublicConversation.mockResolvedValue({
+    ...CONVERSATION,
+    truncated_turns: true,
+    omitted_earlier_turns: 120,
+  });
+  const { container } = render(<PublicConversationPage />);
+  const note = await screen.findByText("会话过长，此处只展示最近 3 轮，更早的 120 轮未包含。");
+  // 被省掉的是最早的那些轮次，说明排在第一轮之前。
+  const firstQuestion = screen.getByText("LLM 有哪些架构？");
+  expect(note.compareDocumentPosition(firstQuestion) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(container.textContent).not.toContain("只展示前");
+});
+
+test("普通长度的会话没有任何截断说明", async () => {
+  mocks.fetchPublicConversation.mockResolvedValue(CONVERSATION);
+  render(<PublicConversationPage />);
+  await screen.findByText("LLM 有哪些架构？");
+  expect(screen.queryByText(/会话过长/)).toBeNull();
+});

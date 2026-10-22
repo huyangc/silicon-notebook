@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app.core.config import get_settings
 from app.bootstrap import application_extension_runtime
 from app.domain.ask_engine import AskPluginEngineError
-from app.domain.conversation_public_view import MAX_TURNS
+from app.domain.conversation_public_view import public_window
 
 from app.core.capability_tokens import (
     is_answer_link_token,
@@ -1270,7 +1270,7 @@ def _conversation_share_count(
     if snapshot is not None:
         published = [turn.get("payload") for turn in snapshot.get("turns") or []]
     return boundary, conversation_share_disclosure(
-        _memory_store(repo), author_id, window, published[:MAX_TURNS]
+        _memory_store(repo), author_id, window, public_window(published)
     )
 
 

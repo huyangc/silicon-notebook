@@ -2034,41 +2034,46 @@ class AskStateStore:
                     "WHERE id=? AND conversation_id=?",
                     (through_id, conv["id"]),
                 ).fetchone()
-            # ``LIMIT MAX_TURNS + 1`` (cap + 1) applied AFTER the watermark keyset
-            # predicate and canonical ORDER BY: it bounds the fetch to exactly what
-            # the projection renders (the oldest ``MAX_TURNS`` under the ASC order)
-            # plus one extra row, which is precisely what the projection needs to
-            # set ``truncated_turns`` (``len(turns) > MAX_TURNS``). Without it a
-            # >MAX_TURNS conversation makes every anonymous page read — and every
-            # image request, both routed through here — load and deserialize the
-            # whole conversation's payloads (codex #522 R6 P2). Never touches the
-            # keyset/order itself, only caps the row count.
+            # The page's window of the prefix: its NEWEST ``MAX_TURNS`` answers
+            # (``public_window``), read in the canonical order reversed and
+            # capped at ``MAX_TURNS + 1`` AFTER the keyset predicate, then put
+            # back oldest first. The cap bounds every anonymous page read — and
+            # every image request, both routed through here — to one window of
+            # payloads however long the conversation (codex #522 R6 P2); the
+            # one extra row only says older answers exist, and then one COUNT
+            # over the same prefix says how many (``earlier_turns``). Never
+            # touches the keyset/order itself.
             if watermark is not None:
                 # Keyset on the full canonical sort tuple
                 # (julianday(created_at), created_at, rowid) <= the watermark
                 # row's — the exact prefix ending at the watermark answer.
                 wm_at = watermark["created_at"]
-                rows = db.execute(
-                    "SELECT id, question, payload, created_at FROM answers "
-                    "WHERE conversation_id=? AND ("
-                    "julianday(created_at) < julianday(?) "
+                bound = (
+                    "(julianday(created_at) < julianday(?) "
                     "OR (julianday(created_at) = julianday(?) AND ("
-                    "created_at < ? OR (created_at = ? AND rowid <= ?)))"
-                    ") " + CONVERSATION_ANSWERS_ORDER_ASC + " LIMIT ?",
-                    (conv["id"], wm_at, wm_at, wm_at, wm_at, watermark["rid"],
-                     MAX_TURNS + 1),
-                ).fetchall()
+                    "created_at < ? OR (created_at = ? AND rowid <= ?))))"
+                )
+                params = (wm_at, wm_at, wm_at, wm_at, watermark["rid"])
             else:
                 # Watermark answer deleted: fall back to the pure created_at
                 # interval rather than fail closed on the already-shared link.
-                rows = db.execute(
-                    "SELECT id, question, payload, created_at FROM answers "
-                    "WHERE conversation_id=? AND julianday(created_at) <= julianday(?) "
-                    + CONVERSATION_ANSWERS_ORDER_ASC + " LIMIT ?",
-                    (conv["id"], conv["shared_through_at"], MAX_TURNS + 1),
-                ).fetchall()
+                bound = "julianday(created_at) <= julianday(?)"
+                params = (conv["shared_through_at"],)
+            where = "FROM answers WHERE conversation_id=? AND " + bound
+            rows = db.execute(
+                "SELECT id, question, payload, created_at " + where + " "
+                + CONVERSATION_ANSWERS_ORDER_DESC + " LIMIT ?",
+                (conv["id"], *params, MAX_TURNS + 1),
+            ).fetchall()
+            earlier = 0
+            if len(rows) > MAX_TURNS:
+                total = db.execute(
+                    "SELECT COUNT(*) AS n " + where, (conv["id"], *params)
+                ).fetchone()["n"]
+                earlier = max(0, int(total) - MAX_TURNS)
+                rows = rows[:MAX_TURNS]
         turns = []
-        for row in rows:
+        for row in reversed(rows):
             try:
                 payload = json.loads(row["payload"] or "{}")
             except (TypeError, ValueError):
@@ -2090,6 +2095,7 @@ class AskStateStore:
             "shared_through_at": conv["shared_through_at"],
             "shared_through_id": conv["shared_through_id"] or "",
             "turns": turns,
+            "earlier_turns": earlier,
         }
 
     # ------------------------------------------------------------------
