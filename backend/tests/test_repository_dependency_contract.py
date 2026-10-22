@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import json
 from pathlib import Path
 
 from tests.architecture.repository_callers import (
@@ -12,15 +11,6 @@ from tests.architecture.semantic_source import PythonSourceIndex
 
 
 ROOT = Path(__file__).resolve().parents[2]
-FIXTURE = (
-    ROOT
-    / "backend"
-    / "tests"
-    / "fixtures"
-    / "repository_contract"
-    / "caller_boundaries.json"
-)
-ENTRY_FIELDS = {"path", "scope", "kind", "target", "count", "reason"}
 RETIRED_RETRIEVAL_PRIVATES = {
     "_answer_context",
     "_chunk_answer_context",
@@ -190,10 +180,6 @@ LIFECYCLE_STORE_CALLS = {
         "reap_derived_generations_page",
     },
 }
-
-
-def _contract() -> dict[str, list[dict[str, object]]]:
-    return json.loads(FIXTURE.read_text(encoding="utf-8"))
 
 
 def test_api_repository_dependency_uses_the_cached_backend_factory():
