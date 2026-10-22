@@ -125,6 +125,10 @@ export function useSourceLibrary({
   // started from elsewhere (the KG analysis findings) would otherwise never
   // move `contentRevision` and nothing downstream would revalidate.
   const [trackedSources, setTrackedSources] = useState<ReadonlyMap<string, string>>(NO_TRACKED_SOURCES);
+  // Bumped whenever new ids are followed: part of the poll effect's deps, so new
+  // follow work restarts a poller that went idle (attempt cap reached, or a round
+  // that found nothing) even when `hasPending` itself did not flip.
+  const [trackSerial, setTrackSerial] = useState(0);
 
   const effectsRef = useRef(effects);
   effectsRef.current = effects;
@@ -789,10 +793,11 @@ export function useSourceLibrary({
       const pending = sourcesRef.current.filter(
         (source) => sourceIsPending(source),
       );
-      // Followed sources on the current page are read through `pending` above.
-      const tracked = [...trackedSourcesRef.current].filter(
-        ([id]) => !sourcesRef.current.some((source) => source.id === id),
-      );
+      const pendingIds = new Set(pending.map((source) => source.id));
+      // Followed sources still pending on the current page are read with the page
+      // below; every other followed source (off the page, or on it with a stale
+      // terminal status) is read here. Both results settle the follow set.
+      const tracked = [...trackedSourcesRef.current].filter(([id]) => !pendingIds.has(id));
       if (pending.length === 0 && tracked.length === 0) {
         pollCountRef.current = 0;
         return;
@@ -829,16 +834,19 @@ export function useSourceLibrary({
         const trackedReachedExtracted = tracked.some(([, seen], index) => (
           seen !== "extracted" && trackedUpdated[index]?.parse_status === "extracted"
         ));
-        if (tracked.length > 0) {
+        if (trackedSourcesRef.current.size > 0) {
           setTrackedSources((previous) => {
             const next = new Map(previous);
-            tracked.forEach(([id], index) => {
-              const item = trackedUpdated[index];
+            const settle = (id: string, item: SourceSummary | null) => {
               if (!next.has(id)) return;
               if (item && sourceIsPending(item)) next.set(id, item.parse_status);
               else next.delete(id);
-            });
-            return next.size === 0 ? NO_TRACKED_SOURCES : next;
+            };
+            tracked.forEach(([id], index) => settle(id, trackedUpdated[index]));
+            for (const item of updated) settle(item.id, item);
+            return next.size === previous.size && [...next].every(([id, status]) => previous.get(id) === status)
+              ? previous
+              : next.size === 0 ? NO_TRACKED_SOURCES : next;
           });
         }
         const reachedExtracted = trackedReachedExtracted || updated.some((item) => {
@@ -859,7 +867,9 @@ export function useSourceLibrary({
         let changed = false;
         setSources((previous) => {
           const next = previous.map((source) => {
-            const item = updated.find((candidate) => candidate.id === source.id);
+            const item = updated.find((candidate) => candidate.id === source.id)
+              ?? trackedUpdated.find((candidate) => candidate?.id === source.id)
+              ?? undefined;
             if (item && item.parse_status !== source.parse_status) changed = true;
             return item ?? source;
           });
@@ -900,18 +910,23 @@ export function useSourceLibrary({
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [hasPending, ownerSerial]);
+  }, [hasPending, ownerSerial, trackSerial]);
 
   // Follow these sources to a terminal parse state even off the current page
   // (each state change moves `contentRevision`); the shared poll's attempt cap
   // bounds it, and an owner change or `untrackSources` stops it.
   const trackSourceProgress = useCallback((sourceIds: readonly string[]) => {
-    if (sourceIds.length === 0 || currentOwner() === null) return;
+    if (currentOwner() === null) return;
+    const added = sourceIds.filter((id) => !trackedSourcesRef.current.has(id));
+    if (added.length === 0) return;
     setTrackedSources((previous) => {
       const next = new Map(previous);
-      for (const id of sourceIds) if (!next.has(id)) next.set(id, "");
-      return next.size === previous.size ? previous : next;
+      for (const id of added) if (!next.has(id)) next.set(id, "");
+      return next;
     });
+    // New work: a fresh attempt budget, and wake the poller even if it is idle.
+    pollCountRef.current = 0;
+    setTrackSerial((value) => value + 1);
   }, []);
   const untrackSources = useCallback(() => setTrackedSources(NO_TRACKED_SOURCES), []);
 
@@ -926,6 +941,7 @@ export function useSourceLibrary({
   return {
     trackSourceProgress,
     untrackSources,
+    followedSourceCount: ownerIsActive ? trackedSources.size : 0,
     sources: visibleSources,
     contentRevision: ownerIsActive ? contentRevision : 0,
     sourceScopeSelection: ownerIsActive
