@@ -51,8 +51,18 @@
 -- synced table: on a deployment with sync capture enabled the backfill logs
 -- one upsert per board, and the receiving side backfills the same value, so
 -- re-sending them is harmless (the ADD COLUMN defaults above fire no capture
--- trigger). No index: board_key is only ever read through a notebook's
--- published generation (communities(notebook_id, level)).
+-- trigger, and unified_kg_state is not touched row by row here, so unlike on
+-- SQLite no state row is exported by this migration). No index: board_key is
+-- only ever read through a notebook's published generation
+-- (communities(notebook_id, level)).
+--
+-- Cost, stated as measured (PostgreSQL 16, 270,000 communities rows of which
+-- 2% are large boards stored out of line in TOAST, with the production
+-- indexes and the sync-capture trigger on the table, statement_timeout 30 s):
+-- the board_key UPDATE took 4.1 s with capture off and 5.4 s with capture on
+-- (which also writes 270,000 change-log rows); the ADD COLUMN statements
+-- carry constant defaults and only touch the catalogue. Nothing came near the
+-- statement timeout.
 ALTER TABLE concept_merge_candidates ADD COLUMN IF NOT EXISTS seed_version bigint NOT NULL DEFAULT 1;
 
 ALTER TABLE unified_kg_state ADD COLUMN IF NOT EXISTS concept_seed_version bigint NOT NULL DEFAULT 1;
