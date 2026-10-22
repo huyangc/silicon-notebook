@@ -384,7 +384,7 @@ test("a followed source on the current page with a stale terminal status is stil
 test("new follow work wakes a poller that went idle, even though hasPending never flipped", async () => {
   vi.useFakeTimers();
   api.getSource.mockImplementation(async (id: string) => (
-    id === "stuck" ? source("stuck", "notebook-a", "parsing") : source(id, "notebook-a", "extracted")
+    id === "stuck" ? source("stuck", "notebook-a", "parsing") : { ...source(id, "notebook-a", "extracted"), updated_at: "T9" }
   ));
   render(<Harness />);
   commitPage([source("stuck", "notebook-a", "parsing")]);
@@ -393,11 +393,87 @@ test("new follow work wakes a poller that went idle, even though hasPending neve
   expect(effects.setStatusText).toHaveBeenCalledWith("处理超时：部分来源长时间未完成，请稍后重试");
   const revision = value!.contentRevision;
 
-  act(() => value!.trackSourceProgress(["elsewhere"]));
+  // 这一次跑得很快:第一次读到时已经是新的终态(updated_at 相对提交前的基准推进了)。
+  act(() => value!.trackSourceProgress(["elsewhere"], { elsewhere: "T0" }));
   await act(async () => vi.advanceTimersByTimeAsync(1500));
   expect(api.getSource).toHaveBeenCalledWith("elsewhere");
   expect(value!.contentRevision).toBeGreaterThan(revision);
   expect(value!.followedSourceCount).toBe(0);
+});
+
+function at(item: SourceSummary, updatedAt: string): SourceSummary {
+  return { ...item, updated_at: updatedAt };
+}
+
+test("a reparse still queued behind a busy pool: stale terminal reads do not end the follow; this run's start and end do", async () => {
+  // 重新解析端点只把作业交给作业池、返回前不改来源状态:作业池忙时头一两次轮询还会读到上一次
+  // 的 extracted。那不是这一次跑完——跟踪要等到这一次开始(或 updated_at 相对提交前推进)再到终态。
+  vi.useFakeTimers();
+  api.getSource
+    .mockResolvedValueOnce(at(source("elsewhere", "notebook-a", "extracted"), "T0"))
+    .mockResolvedValueOnce(at(source("elsewhere", "notebook-a", "extracted"), "T0"))
+    .mockResolvedValueOnce(at(source("elsewhere", "notebook-a", "parsing"), "T1"))
+    .mockResolvedValue(at(source("elsewhere", "notebook-a", "extracted"), "T2"));
+  render(<Harness />);
+  commitPage([source("first", "notebook-a")]);
+  const initial = value!.contentRevision;
+  act(() => value!.trackSourceProgress(["elsewhere"], { elsewhere: "T0" }));
+
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  await act(async () => vi.advanceTimersByTimeAsync(2250));
+  expect(api.getSource).toHaveBeenCalledTimes(2);
+  // 两次都是上一次留下的旧终态:还在跟,也不让分析失效。
+  expect(value!.followedSourceCount).toBe(1);
+  expect(value!.contentRevision).toBe(initial);
+  expect(effects.refreshCheckup).not.toHaveBeenCalled();
+
+  await act(async () => vi.advanceTimersByTimeAsync(3375));
+  const started = value!.contentRevision;
+  expect(started).toBeGreaterThan(initial);
+  expect(value!.followedSourceCount).toBe(1);
+
+  await act(async () => vi.advanceTimersByTimeAsync(5063));
+  expect(value!.contentRevision).toBeGreaterThan(started);
+  expect(value!.followedSourceCount).toBe(0);
+  expect(effects.refreshCheckup).toHaveBeenCalledWith("notebook-a", expect.any(Function));
+});
+
+test("a whole run that falls between two reads still ends the follow: updated_at moved past the pre-submission baseline", async () => {
+  vi.useFakeTimers();
+  api.getSource
+    .mockResolvedValueOnce(at(source("elsewhere", "notebook-a", "extracted"), "T0"))
+    .mockResolvedValue(at(source("elsewhere", "notebook-a", "extracted"), "T2"));
+  render(<Harness />);
+  commitPage([source("first", "notebook-a")]);
+  const initial = value!.contentRevision;
+  act(() => value!.trackSourceProgress(["elsewhere"], { elsewhere: "T0" }));
+
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(value!.followedSourceCount).toBe(1);
+  await act(async () => vi.advanceTimersByTimeAsync(2250));
+  expect(value!.followedSourceCount).toBe(0);
+  expect(value!.contentRevision).toBeGreaterThan(initial);
+});
+
+test("the follow baseline is the source detail's updated_at, or null when that read fails", async () => {
+  render(<Harness />);
+  commitPage([source("first", "notebook-a")]);
+  api.getSource.mockResolvedValueOnce(at(source("elsewhere", "notebook-a", "extracted"), "T5"));
+  await expect(value!.readFollowBaseline("elsewhere")).resolves.toBe("T5");
+  api.getSource.mockRejectedValueOnce(new Error("offline"));
+  await expect(value!.readFollowBaseline("elsewhere")).resolves.toBeNull();
+  expect(effects.reportError).not.toHaveBeenCalled();
+});
+
+test("without a baseline a stale terminal read never ends the follow; only seeing this run start does", async () => {
+  vi.useFakeTimers();
+  api.getSource.mockResolvedValue(at(source("elsewhere", "notebook-a", "extracted"), "T0"));
+  render(<Harness />);
+  commitPage([source("first", "notebook-a")]);
+  act(() => value!.trackSourceProgress(["elsewhere"]));
+  await act(async () => vi.advanceTimersByTimeAsync(20_000));
+  expect(api.getSource.mock.calls.length).toBeGreaterThan(2);
+  expect(value!.followedSourceCount).toBe(1);
 });
 
 test("following stops on untrackSources, on a notebook switch, and once the followed source is gone", async () => {

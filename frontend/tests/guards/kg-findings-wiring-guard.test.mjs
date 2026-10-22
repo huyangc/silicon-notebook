@@ -78,7 +78,12 @@ test("重新解析:先弹说明确认框,确认后才进在飞态、才发请求
   const modal = calls.find(({ target }) => target === "openInfoModal");
   assert.ok(modal, "没有确认框");
   const dialog = modal.arguments[0];
-  assert.match(dialog, /report\("running"\);\s*void reparseOutcome\(nb, \[target\.sourceId\]\)/, "确认 → running → 请求");
+  assert.match(dialog, /report\("running"\);\s*void \(async \(\) => \{/, "确认 → running → 请求");
+  // 请求之前先读一次 updated_at 作基准,再发重新解析。
+  assert.match(
+    dialog,
+    /const baseline = await sourceLibrary\.readFollowBaseline\(target\.sourceId\);\s*const outcome = await reparseOutcome\(nb, \[target\.sourceId\]\);/,
+  );
   // 确认框说清两件事:会重新调用模型、会替换这篇来源现有的知识条目。
   assert.match(dialog, /会重新调用模型/);
   assert.match(dialog, /替换它现有的知识条目/);
@@ -94,7 +99,7 @@ test("重新解析排上之后按 id 跟到终态(它多半不在来源库当前
   // 只在真的排上了、且仍是发起时那个库时才跟——跟的就是这次请求的那一篇。
   assert.match(
     dialog,
-    /if \(outcome === "started" && activeNotebookIdRef\.current === nb\) \{\s*sourceLibrary\.trackSourceProgress\(\[target\.sourceId\]\);\s*\}/,
+    /if \(outcome === "started" && activeNotebookIdRef\.current === nb\) \{\s*sourceLibrary\.trackSourceProgress\(\[target\.sourceId\], \{ \[target\.sourceId\]: baseline \}\);\s*\}/,
   );
   const text = page.getFullText();
   assert.match(text, /const \{ untrackSources \} = sourceLibrary;\s*useEffect\(\(\) => \{\s*if \(!kgGraph\.analysisOpen\) untrackSources\(\);\s*\}, \[kgGraph\.analysisOpen, untrackSources\]\);/);

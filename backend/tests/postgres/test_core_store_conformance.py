@@ -3238,6 +3238,53 @@ def test_source_visibility_physical_count_and_delete_cascade(core_stores: CoreSt
     ) is None
 
 
+def test_source_detail_updated_at_matches_sqlite_semantics(core_stores: CoreStores):
+    """单来源详情带 ``updated_at``,状态机的每一步都推进它;列表投影不带它。
+
+    SQLite twin: ``tests/test_source_detail_updated_at.py``. 前端在重新解析提交前读它作
+    基准,之后只有「终态且它相对基准推进了」才算这一次跑完——作业池忙时第一次轮询可能还
+    读到上一次的终态。
+    """
+    from app.repositories.postgres._store_utils import normalized_clock
+
+    owner = core_stores.identity.create_user("k00123500", "password-10")
+    notebook_id = core_stores.notebooks.create_row(NotebookCreate(name="Detail clock"), owner.id)
+    store = core_stores.sources
+    store.now = normalized_clock(lambda: datetime(2026, 10, 22, 0, 0, tzinfo=timezone.utc))
+    store.insert_source(
+        source_id="src-detail-clock",
+        notebook_id=notebook_id,
+        title="a.md",
+        source_type="markdown",
+        status="extracted",
+        parse_status="extracted",
+        file_name="a.md",
+        file_path="uploads/a.md",
+        file_size=1,
+        file_hash="",
+        summary="",
+        doc_type="",
+    )
+    baseline = store.get_source("src-detail-clock").updated_at
+    assert baseline
+    assert store.get_source("src-detail-clock").updated_at == baseline
+
+    store.now = normalized_clock(lambda: datetime(2026, 10, 22, 0, 5, tzinfo=timezone.utc))
+    store.set_status("src-detail-clock", "parsing")
+    started = store.get_source("src-detail-clock").updated_at
+    assert started and started != baseline
+
+    store.now = normalized_clock(lambda: datetime(2026, 10, 22, 0, 6, tzinfo=timezone.utc))
+    store.set_status("src-detail-clock", "extracted")
+    finished = store.get_source("src-detail-clock")
+    assert finished.parse_status == "extracted"
+    assert finished.updated_at not in ("", baseline, started)
+
+    listed = [item for item in store.list_sources(notebook_id) if item.id == "src-detail-clock"]
+    assert len(listed) == 1
+    assert "updated_at" not in listed[0].model_dump()
+
+
 def test_source_agent_provenance_matches_sqlite_semantics(core_stores: CoreStores):
     """v26 `sources.agent_profile_id`: "" -> NULL, projection is a bare bool.
 

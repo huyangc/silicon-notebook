@@ -38,7 +38,32 @@ const SOURCE_ELEMENT_PAGE_SIZE = 40;
 const SOURCE_POLL_INITIAL_MS = 1500;
 const SOURCE_POLL_MAX_MS = 15000;
 const SOURCE_POLL_MAX_ATTEMPTS = 120;
-const NO_TRACKED_SOURCES: ReadonlyMap<string, string> = new Map();
+/**
+ * One followed source: the status last read, the `updated_at` read just before
+ * the reparse was submitted (null when that read failed), and whether this run
+ * has been seen to start (a non-terminal status read since the submission).
+ */
+type FollowedSource = { seen: string; baseline: string | null; started: boolean };
+const NO_TRACKED_SOURCES: ReadonlyMap<string, FollowedSource> = new Map();
+
+/**
+ * One read of a followed source -> its next follow state, or null once THIS
+ * run is over. The reparse endpoint only hands `process_source` to the KG job
+ * pool and returns without touching the source's status, so while the pool is
+ * busy the first reads after the submission can still return the previous
+ * run's `extracted` / `failed`; that stale terminal state is not this run
+ * ending. Over: the source is gone (404); or a terminal read after this run was
+ * seen to start; or a terminal read whose `updated_at` moved past the
+ * pre-submission baseline (the whole run fell between two reads). Without a
+ * baseline only "seen to start" counts; the poll's attempt cap bounds the rest.
+ */
+function followedSourceStep(entry: FollowedSource, item: SourceSummary | null): FollowedSource | null {
+  if (!item) return null;
+  if (sourceIsPending(item)) return { ...entry, seen: item.parse_status, started: true };
+  if (entry.started) return null;
+  if (entry.baseline !== null && item.updated_at && item.updated_at !== entry.baseline) return null;
+  return { ...entry, seen: item.parse_status };
+}
 
 // Hidden-state (owner not active) fallback values must be **stable references**.
 // Consumers of the returned view depend on these fields in effects/useMemo;
@@ -124,7 +149,7 @@ export function useSourceLibrary({
   // read). The page-scoped poll below only ever sees `sources`, so a reparse
   // started from elsewhere (the KG analysis findings) would otherwise never
   // move `contentRevision` and nothing downstream would revalidate.
-  const [trackedSources, setTrackedSources] = useState<ReadonlyMap<string, string>>(NO_TRACKED_SOURCES);
+  const [trackedSources, setTrackedSources] = useState<ReadonlyMap<string, FollowedSource>>(NO_TRACKED_SOURCES);
   // Bumped whenever new ids are followed: part of the poll effect's deps, so new
   // follow work restarts a poller that went idle (attempt cap reached, or a round
   // that found nothing) even when `hasPending` itself did not flip.
@@ -155,7 +180,7 @@ export function useSourceLibrary({
   const deleteRefreshGenerationsRef = useRef<Map<string, number>>(new Map());
   const deletedIdsRef = useRef<Map<string, Set<string>>>(new Map());
   const pollCountRef = useRef(0);
-  const trackedSourcesRef = useRef<ReadonlyMap<string, string>>(trackedSources);
+  const trackedSourcesRef = useRef<ReadonlyMap<string, FollowedSource>>(trackedSources);
   trackedSourcesRef.current = trackedSources;
   const previousActorIdRef = useRef(actorId);
   const pendingActorIdRef = useRef<string | null>(null);
@@ -828,25 +853,42 @@ export function useSourceLibrary({
           ))),
         ]);
         if (cancelled || !owns(owner)) return;
-        const trackedChanged = tracked.some(([, seen], index) => (
-          trackedUpdated[index]?.parse_status !== seen || trackedUpdated[index] === null
+        // Every followed source read this round (off the page, or with the page)
+        // steps its follow state; null = this run is over.
+        const steps = new Map<string, FollowedSource | null>();
+        tracked.forEach(([id, entry], index) => steps.set(id, followedSourceStep(entry, trackedUpdated[index])));
+        for (const item of updated) {
+          const entry = trackedSourcesRef.current.get(item.id);
+          // Read with the page means its page row was pending: a run is underway.
+          if (entry) steps.set(item.id, followedSourceStep({ ...entry, started: true }, item));
+        }
+        // Off-page followed sources move contentRevision when this run starts,
+        // advances or ends -- not on a stale terminal read before it started.
+        const trackedChanged = tracked.some(([id, entry], index) => {
+          const item = trackedUpdated[index];
+          return steps.get(id) === null
+            || (item !== null && item.parse_status !== entry.seen && (entry.seen !== "" || sourceIsPending(item)));
+        });
+        const trackedReachedExtracted = tracked.some(([id], index) => (
+          steps.get(id) === null && trackedUpdated[index]?.parse_status === "extracted"
         ));
-        const trackedReachedExtracted = tracked.some(([, seen], index) => (
-          seen !== "extracted" && trackedUpdated[index]?.parse_status === "extracted"
-        ));
-        if (trackedSourcesRef.current.size > 0) {
+        if (steps.size > 0) {
           setTrackedSources((previous) => {
+            let moved = false;
             const next = new Map(previous);
-            const settle = (id: string, item: SourceSummary | null) => {
-              if (!next.has(id)) return;
-              if (item && sourceIsPending(item)) next.set(id, item.parse_status);
-              else next.delete(id);
-            };
-            tracked.forEach(([id], index) => settle(id, trackedUpdated[index]));
-            for (const item of updated) settle(item.id, item);
-            return next.size === previous.size && [...next].every(([id, status]) => previous.get(id) === status)
-              ? previous
-              : next.size === 0 ? NO_TRACKED_SOURCES : next;
+            for (const [id, step] of steps) {
+              const current = next.get(id);
+              if (!current) continue;
+              if (step === null) {
+                next.delete(id);
+                moved = true;
+              } else if (step.seen !== current.seen || step.started !== current.started) {
+                next.set(id, step);
+                moved = true;
+              }
+            }
+            if (!moved) return previous;
+            return next.size === 0 ? NO_TRACKED_SOURCES : next;
           });
         }
         const reachedExtracted = trackedReachedExtracted || updated.some((item) => {
@@ -912,16 +954,23 @@ export function useSourceLibrary({
     };
   }, [hasPending, ownerSerial, trackSerial]);
 
-  // Follow these sources to a terminal parse state even off the current page
-  // (each state change moves `contentRevision`); the shared poll's attempt cap
-  // bounds it, and an owner change or `untrackSources` stops it.
-  const trackSourceProgress = useCallback((sourceIds: readonly string[]) => {
+  // Follow these sources until the reparse just submitted for each is over,
+  // even off the current page (each state change moves `contentRevision`).
+  // `baselines` carries each source's `updated_at` read just before the
+  // submission (see followedSourceStep). The shared poll's attempt cap bounds
+  // it, and an owner change or `untrackSources` stops it.
+  const trackSourceProgress = useCallback((
+    sourceIds: readonly string[],
+    baselines: Readonly<Record<string, string | null | undefined>> = {},
+  ) => {
     if (currentOwner() === null) return;
     const added = sourceIds.filter((id) => !trackedSourcesRef.current.has(id));
     if (added.length === 0) return;
     setTrackedSources((previous) => {
       const next = new Map(previous);
-      for (const id of added) if (!next.has(id)) next.set(id, "");
+      for (const id of added) {
+        if (!next.has(id)) next.set(id, { seen: "", baseline: baselines[id] || null, started: false });
+      }
       return next;
     });
     // New work: a fresh attempt budget, and wake the poller even if it is idle.
@@ -929,6 +978,16 @@ export function useSourceLibrary({
     setTrackSerial((value) => value + 1);
   }, []);
   const untrackSources = useCallback(() => setTrackedSources(NO_TRACKED_SOURCES), []);
+  // The baseline a follow compares against: `updated_at` read just before the
+  // reparse is submitted (null when that read fails -- the follow then only
+  // trusts "seen to start"). The page asks the hook for it; source reads stay here.
+  const readFollowBaseline = useCallback(async (sourceId: string): Promise<string | null> => {
+    try {
+      return (await getSource(sourceId)).updated_at || null;
+    } catch {
+      return null;
+    }
+  }, []);
 
   // Unmount is not one of the abort/invalidation sites `abortInFlightSourcesPage`
   // is called from elsewhere in this hook (see its own comment) — none of them
@@ -941,6 +1000,7 @@ export function useSourceLibrary({
   return {
     trackSourceProgress,
     untrackSources,
+    readFollowBaseline,
     followedSourceCount: ownerIsActive ? trackedSources.size : 0,
     sources: visibleSources,
     contentRevision: ownerIsActive ? contentRevision : 0,

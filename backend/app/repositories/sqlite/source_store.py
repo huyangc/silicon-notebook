@@ -533,6 +533,7 @@ class SourceStore:
                 file_path=row["file_path"],
                 error_message=row["error_message"],
                 paper_meta=self.paper_meta_model(pm),
+                updated_at=row["updated_at"] or "",
             )
 
     def source_exists(self, source_id: str) -> bool:
