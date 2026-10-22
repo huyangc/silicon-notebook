@@ -9307,6 +9307,32 @@ button.tag:hover {
   font-size: 12px;
 }
 
+/* 未绑定的使用位置（管理员可见）：卡片列表上方的一块琥珀提示，没有缺口时不渲染。 */
+.model-service-binding-gaps {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--warning-border);
+  border-radius: 12px;
+  background: var(--warning-bg);
+}
+
+.model-service-binding-gaps p {
+  margin: 0;
+  color: var(--warning);
+  font-size: 12px;
+}
+
+.model-service-binding-gaps .model-service-workloads span {
+  background: #fff;
+  color: var(--warning);
+}
+
+.model-service-binding-gaps .model-service-workloads span.is-feature-enabled {
+  font-weight: 750;
+}
+
 .model-service-support-id {
   display: flex;
   align-items: center;

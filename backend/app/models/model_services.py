@@ -28,5 +28,22 @@ class ModelServiceStatusItem(BaseModel):
     support_id: str = ""
 
 
+class ModelUnboundWorkloadView(BaseModel):
+    id: str
+    label: str
+    # The workload's own feature switch is on, so a feature the operator
+    # turned on is silently doing nothing (startup: 「特性已开但模型未绑定」).
+    feature_enabled: bool = False
+
+
 class ModelServicesStatus(BaseModel):
     services: List[ModelServiceStatusItem] = Field(default_factory=list)
+    # Binding gaps of the live registry, the same computation as the startup
+    # ``model-bindings:`` warnings. Admin-only; always empty for other users,
+    # in the offline mode (no service at all), and under the default strict
+    # binding gate.
+    unbound_workloads: List[ModelUnboundWorkloadView] = Field(default_factory=list)
+    # Unknown/retired ids the registry ignored, sanitised exactly like the log
+    # line: ids not shaped like a workload id only add to the hidden count.
+    stale_binding_ids: List[str] = Field(default_factory=list)
+    stale_binding_hidden_count: int = 0

@@ -628,8 +628,15 @@ READY 之前用一行 WARNING 点名所有没有绑定的 workload（三类都�
 
 `MODEL_SERVICES_CONFIG` 留空是另一回事：那是受支持的离线 / 确定性模式，严格闸对它没有意见
 （否则所有开发环境与 `scripts/check.sh` 都会起不来），只在 READY 之前打一行 WARNING 说明所有
-需要模型的功能将降级为确定性回复。管理页的模型服务状态是按**物理服务**组织的，未绑定的工作
-负载不会产生任何一行，因此「哪些工作负载没绑定」以启动日志 / 启动失败消息为准。
+需要模型的功能将降级为确定性回复。
+
+模型服务状态面板的卡片按**物理服务**组织，未绑定的工作负载不会出现在任何一张卡片上，所以放行档
+下面板另在卡片列表上方单列一块（只给管理员）：「未绑定」逐个列出没有绑定的工作负载（中文名），
+特性开关开着的那两个标「（功能已开启）」；「已忽略的绑定」列出被忽略的未知 / 已退役 id。这块与
+启动告警**同一个计算**（`model_registry.binding_report`，启动告警只是把它渲染成日志行），每次打开
+面板读的是现场注册表，所以热重载补齐绑定后它随之消失、不必等重启。没有缺口时不渲染；离线模式与
+启动告警一样只说「没有可用的模型服务」（面板显示「暂无模型服务」），不把全部工作负载报成未绑定；
+默认的严格档下进程能起来就意味着没有缺口，这块恒不出现。启动失败消息仍是严格档下的唯一出处。
 自动模式（简化界面）固定使用逐步推理（`reasoning`）标准档，与高级界面选择 `reasoning` 时走同一条
 `/ask/intent` 意图预检（复用 `reasoning_agent` workload），不涉及额外的模型服务配置。该 workload
 未绑定或调用失败时，问题理解 fail-open 为空合同、按清晰问题继续以逐步推理执行，不再有通用问答兜底。
@@ -719,7 +726,13 @@ Knowhow 单行空格补全使用两个 interactive chat workload：`reasoning_ag
 普通用户看到的**模型服务**面板是只读的，展示脱敏后的系统服务身份、绑定 workload、
 最近健康状态、active/maximum、排队数、最老等待时间和熔断状态。畸形模型回复在这里只
 以观测出现（`ok` + `malformed_response`），不改变可用性。
-`GET /api/model-services/status` 只读本地状态，绝不自动探测上游。只有 admin 可通过
+`GET /api/model-services/status` 只读本地状态，绝不自动探测上游。除每服务一行的 `services[]`
+外，响应还带三个绑定缺口字段，只对 admin 填写、对其他用户恒为空：`unbound_workloads[]`（每项
+`{id, label, feature_enabled}`，按工作负载目录顺序；`feature_enabled` 为 true 表示它自己的特性开关开着）、
+`stale_binding_ids[]`（被忽略的未知 / 已退役 id，与启动日志同一把脱敏：只放行形如工作负载 id 的键名）
+与 `stale_binding_hidden_count`（其余无法显示的键名个数，对应日志里的 `<无法显示的键名>×N`）。
+`POST /api/admin/model-services/test-all` 的响应同样带这三个字段；单服务测试的响应只是一行服务，不带。
+只有 admin 可通过
 `POST /api/admin/model-services/{service_id}/test` 或
 `POST /api/admin/model-services/test-all` 显式测试一个或全部服务。endpoint、凭证、
 provider 响应正文和原始异常只保留在服务端日志。

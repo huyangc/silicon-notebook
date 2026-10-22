@@ -75,11 +75,13 @@ def health(
 
 @router.get("/model-services/status", response_model=ModelServicesStatus)
 def get_system_model_services_status(
-    _user: UserProfile = Depends(get_current_user),
+    user: UserProfile = Depends(get_current_user),
     service: ModelStatusService = Depends(model_status_service),
 ) -> ModelServicesStatus:
     """Return local sanitized state only; opening the panel never probes upstream."""
-    return service.snapshot()
+    # Unbound workloads / ignored binding ids are an operator diagnostic: only
+    # administrators can act on them, so only they receive them.
+    return service.snapshot(include_binding_gaps=user.role == "admin")
 
 
 @router.get("/me", response_model=UserProfile)

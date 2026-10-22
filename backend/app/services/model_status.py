@@ -12,12 +12,15 @@ from app.core.model_safety import (
 from app.models.model_services import (
     ModelServiceStatusItem,
     ModelServicesStatus,
+    ModelUnboundWorkloadView,
     ModelWorkloadView,
 )
 from app.repositories.ports import ModelStatusStorePort
 from app.services.model_registry import (
     ModelServiceDefinition,
     SystemModelServiceRegistry,
+    binding_report,
+    displayable_ids,
 )
 from app.services.model_work import ProviderObservation, SchedulerSnapshot
 
@@ -38,10 +41,14 @@ class ModelStatusService:
         registry: SystemModelServiceRegistry,
         provider,
         status_store: ModelStatusStorePort,
+        *,
+        settings: object | None = None,
     ) -> None:
         self._initial_registry = registry
         self.provider = provider
         self.status_store = status_store
+        # Only the feature flags are read (``binding_report``); absent → off.
+        self.settings = settings
 
     @property
     def registry(self) -> SystemModelServiceRegistry:
@@ -50,16 +57,56 @@ class ModelStatusService:
         # that live registry rather than retaining the startup snapshot.
         return getattr(self.provider, "registry", self._initial_registry)
 
-    def snapshot(self) -> ModelServicesStatus:
+    def snapshot(self, *, include_binding_gaps: bool = False) -> ModelServicesStatus:
+        """Per-service rows; binding gaps only when ``include_binding_gaps``.
+
+        The gaps are an operator diagnostic (the remedy is editing the
+        deployment's model-services.toml), so the HTTP layer asks for them for
+        administrators only; everyone else gets the fields empty.
+        """
         stored = self.status_store.get_all()
-        return ModelServicesStatus(services=[
-            self._snapshot_item(
-                service,
-                stored.get(service.id),
-                self.provider.scheduler_snapshot(service.id),
+        return ModelServicesStatus(
+            services=[
+                self._snapshot_item(
+                    service,
+                    stored.get(service.id),
+                    self.provider.scheduler_snapshot(service.id),
+                )
+                for service in self.registry.services()
+            ],
+            **(self._binding_gaps() if include_binding_gaps else {}),
+        )
+
+    def _binding_gaps(self) -> dict[str, object]:
+        """Render ``binding_report`` — the startup warnings' own computation.
+
+        Read live on every call, so a hot reload that fixes (or breaks) the
+        bindings shows up here without a restart. The offline mode reports
+        nothing, exactly as the boot log names no workload then. Fail-open
+        like the startup diagnostic: a provider that cannot answer yields no
+        gap rows rather than a failed status panel.
+        """
+        try:
+            report = binding_report(self.settings, self.provider)
+        except Exception as exc:  # diagnostic-only; never fails the panel
+            logger.warning(
+                "model status: binding report unavailable (%s)", type(exc).__name__
             )
-            for service in self.registry.services()
-        ])
+            return {}
+        enabled = {workload.id for workload in report.feature_enabled}
+        shown, hidden = displayable_ids(report.stale_ids)
+        return {
+            "unbound_workloads": [
+                ModelUnboundWorkloadView(
+                    id=workload.id,
+                    label=workload.display_label,
+                    feature_enabled=workload.id in enabled,
+                )
+                for workload in report.unbound
+            ],
+            "stale_binding_ids": list(shown),
+            "stale_binding_hidden_count": hidden,
+        }
 
     def test_one(
         self, service_id: str, *, actor_id: str
@@ -85,7 +132,9 @@ class ModelStatusService:
                 allow_half_open=True,
             )
             self.record_provider_observation(observation)
-        return self.snapshot()
+        # Only administrators reach this (the route checks), so the gaps ride
+        # along: replacing the panel's snapshot must not blank them.
+        return self.snapshot(include_binding_gaps=True)
 
     def record_provider_observation(self, observation: ProviderObservation) -> None:
         try:

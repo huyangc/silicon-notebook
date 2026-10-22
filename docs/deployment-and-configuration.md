@@ -789,10 +789,22 @@ An empty `MODEL_SERVICES_CONFIG` is a different thing entirely: that is the
 supported offline/deterministic runtime and the strict gate has no opinion about
 it (otherwise every development environment and `scripts/check.sh` would fail to
 start). It gets one WARNING line before READY saying that everything needing a
-model will answer deterministically. The admin model-service status page is
-organised by **physical service**, so an unbound workload produces no row there
-at all; the startup log — or the startup failure message — is the authority on
-which workloads are unbound.
+model will answer deterministically.
+
+The cards of the model-service status panel are organised by **physical
+service**, so an unbound workload appears on no card. With the gate off the
+panel therefore adds one block above the card list (administrators only):
+「未绑定」 lists every workload with no binding (Chinese label), marking the two
+feature-gated ones 「（功能已开启）」 when their flag is on, and 「已忽略的绑定」
+lists the unknown/retired ids that were ignored. The block is **the same
+computation** as the startup warnings (`model_registry.binding_report`; the
+warnings only render it as log lines), read from the live registry each time the
+panel loads, so a hot reload that fills in the bindings clears it without a
+restart. It is not rendered when there is no gap; the offline mode says only
+that no model service is available, exactly like its startup line (the panel
+shows 「暂无模型服务」), and never reports every workload as unbound; under the
+default strict gate a process that started has no gap, so the block never
+appears. The startup failure message remains the only report in strict mode.
 
 Auto mode (the simplified interface) always uses step-by-step reasoning
 (`reasoning`) at standard effort, going through the same `/ask/intent` intent
@@ -920,7 +932,16 @@ system service identity, bound workloads, last-known health, active/maximum,
 queued work, oldest wait, and breaker state. A malformed model reply shows up
 there as an observation only (`ok` + `malformed_response`), never as a change
 in availability. Reading
-`GET /api/model-services/status` never probes an upstream service. Only admins
+`GET /api/model-services/status` never probes an upstream service. Besides the
+per-service `services[]`, the response carries three binding-gap fields, filled
+for admins only and always empty for everyone else: `unbound_workloads[]` (each
+`{id, label, feature_enabled}`, in workload-catalogue order; `feature_enabled`
+is true when the workload's own feature flag is on), `stale_binding_ids[]` (the
+ignored unknown/retired ids, sanitised exactly like the startup log: only keys
+shaped like a workload id are echoed), and `stale_binding_hidden_count` (how
+many other keys could not be shown, the log's `<无法显示的键名>×N`). The
+`POST /api/admin/model-services/test-all` response carries the same three
+fields; a single-service test response is one service row and does not. Only admins
 can explicitly probe one service or all services through
 `POST /api/admin/model-services/{service_id}/test` and
 `POST /api/admin/model-services/test-all`. Provider endpoints, credentials,

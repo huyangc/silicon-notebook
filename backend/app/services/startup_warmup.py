@@ -557,21 +557,6 @@ def _pool_budget_warning(settings: object) -> str | None:
         return None
 
 
-#: Chat workloads whose own feature flag can be ON while nothing is bound to
-#: them. Each entry is ``(workload id, settings flag)``. These get their own
-#: WARNING line on top of the summary one, because "the operator switched this
-#: feature on and it silently does nothing" is a different — and louder —
-#: condition than "this workload was never wired up". Both members were added
-#: by Agentic Memory P1/P2, i.e. AFTER most deployments generated their
-#: ``model-services.toml``, which is exactly how a stale file turns a feature
-#: the operator believes is running into a job that only ever settles as
-#: ``failed:模型未配置，无法整理``.
-_FEATURE_GATED_CHAT_WORKLOADS: tuple[tuple[str, str], ...] = (
-    ("agent_profile_consolidate", "agent_profile_enabled"),
-    ("retrieval_experience_distill", "retrieval_experience_enabled"),
-)
-
-
 def _unbound_workload_warnings(settings: object, models: object) -> tuple[str, ...]:
     """Return the startup WARNING lines about this deployment's [bindings].
 
@@ -617,49 +602,41 @@ def _unbound_workload_warnings(settings: object, models: object) -> tuple[str, .
     a startup failure.
     """
     try:
-        from app.services.model_registry import WORKLOADS, loggable_id_list
+        from app.services.model_registry import binding_report, loggable_id_list
 
-        if not models.registry.services():
+        # What is unbound is decided by ``binding_report`` alone — the model
+        # service status payload renders the same value, so the panel and this
+        # log cannot disagree. This function only turns it into log lines.
+        report = binding_report(settings, models)
+        if report.offline:
             # 只说现象:判据是「注册表里一个可用服务都没有」,而不是读到了空的
             # MODEL_SERVICES_CONFIG——后者只是最常见的一种成因。
             return (
                 "model-bindings: 当前没有可用的模型服务——"
                 "所有需要模型的功能将降级为确定性回复。",
             )
-        unbound = tuple(
-            workload
-            for workload in WORKLOADS.values()
-            if not models.configured(workload.id)
-        )
         lines: list[str] = []
-        if unbound:
+        if report.unbound:
             listed = "，".join(
-                f"{workload.display_label}（{workload.id}）" for workload in unbound
+                f"{workload.display_label}（{workload.id}）"
+                for workload in report.unbound
             )
             lines.append(
                 "model-bindings: 以下工作负载在 MODEL_SERVICES_CONFIG 的 "
                 f"[bindings] 里没有绑定，对应功能会静默不可用：{listed}。"
                 "升级后请重新生成 model-services.toml 或补齐新增工作负载的绑定。"
             )
-            unbound_ids = {workload.id: workload for workload in unbound}
-            for workload_id, flag in _FEATURE_GATED_CHAT_WORKLOADS:
-                workload = unbound_ids.get(workload_id)
-                if workload is None or not bool(getattr(settings, flag, False)):
-                    continue
+            for workload in report.feature_enabled:
                 lines.append(
                     "model-bindings: 特性已开但模型未绑定："
                     f"{workload.display_label}（{workload.id}）"
                     "——请在 model-services.toml 的 [bindings] 补绑定或重新生成配置"
                 )
-        # Appended last so the existing lines keep their positions, and read
-        # through a tolerant accessor: a provider double predating this member
-        # must lose THIS line, not every line above it.
-        reader = getattr(models.registry, "unknown_bindings", None)
-        stale = tuple(reader()) if callable(reader) else ()
-        if stale:
+        # Appended last so the existing lines keep their positions.
+        if report.stale_ids:
             lines.append(
                 "model-bindings: MODEL_SERVICES_CONFIG 的 [bindings]/[thinking] 里有"
-                f"未知或已退役的 id，已忽略：{loggable_id_list(stale)}。"
+                f"未知或已退役的 id，已忽略：{loggable_id_list(report.stale_ids)}。"
                 "请删除这些行；MODEL_BINDINGS_STRICT 为 false 才降级为本条告警，"
                 "默认会因此拒绝启动。"
             )

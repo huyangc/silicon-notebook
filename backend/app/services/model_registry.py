@@ -632,16 +632,8 @@ def loggable_id_list(
             return workload_id
         return f"{workload_id}（{'/'.join(sorted(tables[workload_id]))}）"
 
-    listed = [
-        _one(workload_id)
-        for workload_id in ids
-        if _LOGGABLE_ID_RE.fullmatch(workload_id)
-    ]
-    hidden = [
-        workload_id
-        for workload_id in ids
-        if not _LOGGABLE_ID_RE.fullmatch(workload_id)
-    ]
+    shown, hidden = _split_displayable(ids)
+    listed = [_one(workload_id) for workload_id in shown]
     if hidden:
         placeholder = f"<无法显示的键名>×{len(hidden)}"
         if tables is not None:
@@ -651,6 +643,102 @@ def loggable_id_list(
             placeholder = f"{placeholder}（{'/'.join(union)}）"
         listed.append(placeholder)
     return "，".join(listed)
+
+
+def _split_displayable(ids: Iterable[str]) -> tuple[list[str], list[str]]:
+    """Split file-derived ids into (shaped like a workload id, everything else).
+
+    The one predicate behind both the log rendering above and the structured
+    rendering below, so a key the log line refuses to echo can never reach the
+    status payload either. Order is preserved within each half.
+    """
+    ordered = list(ids)
+    return (
+        [value for value in ordered if _LOGGABLE_ID_RE.fullmatch(value)],
+        [value for value in ordered if not _LOGGABLE_ID_RE.fullmatch(value)],
+    )
+
+
+def displayable_ids(ids: Iterable[str]) -> tuple[tuple[str, ...], int]:
+    """``loggable_id_list`` for a structured consumer: (echoable ids, hidden count).
+
+    Same sanitiser, same order; the hidden keys contribute only their count —
+    exactly what the log line's ``<无法显示的键名>×N`` placeholder says.
+    """
+    shown, hidden = _split_displayable(ids)
+    return tuple(shown), len(hidden)
+
+
+#: Chat workloads whose own feature flag can be ON while nothing is bound to
+#: them. Each entry is ``(workload id, settings flag)``. These are singled out
+#: on top of the plain "unbound" list, because "the operator switched this
+#: feature on and it silently does nothing" is a different — and louder —
+#: condition than "this workload was never wired up". Both members were added
+#: by Agentic Memory P1/P2, i.e. AFTER most deployments generated their
+#: ``model-services.toml``, which is exactly how a stale file turns a feature
+#: the operator believes is running into a job that only ever settles as
+#: ``failed:模型未配置，无法整理``.
+FEATURE_GATED_WORKLOADS: tuple[tuple[str, str], ...] = (
+    ("agent_profile_consolidate", "agent_profile_enabled"),
+    ("retrieval_experience_distill", "retrieval_experience_enabled"),
+)
+
+
+@dataclass(frozen=True)
+class BindingReport:
+    """What is wrong with the live ``[bindings]``, as one structured value.
+
+    ``offline``: the registry holds no service at all — the supported
+    offline/deterministic runtime. Nothing else is reported then: listing every
+    workload as unbound would be noise about a state the operator chose.
+    ``unbound``: every workload (all three kinds) with no service, catalogue
+    order. ``feature_enabled``: the subset of ``unbound`` whose own feature flag
+    is on, ``FEATURE_GATED_WORKLOADS`` order. ``stale_ids``: the unknown or
+    retired ids the registry dropped, raw — callers sanitise before rendering.
+    """
+
+    offline: bool = False
+    unbound: tuple[WorkloadSpec, ...] = ()
+    feature_enabled: tuple[WorkloadSpec, ...] = ()
+    stale_ids: tuple[str, ...] = ()
+
+
+def binding_report(settings: object, models: object) -> BindingReport:
+    """The single computation behind every "which workloads are unbound" answer.
+
+    Both the startup ``model-bindings:`` warnings
+    (``startup_warmup._unbound_workload_warnings``) and the model-service status
+    payload (``ModelStatusService.snapshot``) render THIS value, so the panel
+    cannot drift into a second definition of "unbound" than the boot log.
+    ``models`` is the runtime provider (``configured`` plus ``registry``);
+    ``settings`` only supplies the feature flags, read tolerantly (a missing
+    attribute counts as off). Raises on a provider that lacks those members —
+    each caller decides its own fail-open policy.
+
+    Under ``MODEL_BINDINGS_STRICT`` (default) a registry with an unbound
+    workload or a stale id is refused at load, so for any process that started
+    strict — and any hot reload it accepted — this is empty unless ``offline``.
+    """
+    if not models.registry.services():
+        return BindingReport(offline=True)
+    unbound = tuple(
+        workload
+        for workload in WORKLOADS.values()
+        if not models.configured(workload.id)
+    )
+    unbound_ids = {workload.id: workload for workload in unbound}
+    feature_enabled = tuple(
+        unbound_ids[workload_id]
+        for workload_id, flag in FEATURE_GATED_WORKLOADS
+        if workload_id in unbound_ids and bool(getattr(settings, flag, False))
+    )
+    # Tolerant accessor: a provider double predating this member loses only
+    # the stale half, not the whole report.
+    reader = getattr(models.registry, "unknown_bindings", None)
+    stale = tuple(reader()) if callable(reader) else ()
+    return BindingReport(
+        unbound=unbound, feature_enabled=feature_enabled, stale_ids=stale
+    )
 
 
 def _render_binding_gap(

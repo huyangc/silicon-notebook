@@ -251,3 +251,76 @@ test("collection summary only opens the provided status panel", async () => {
   await user.click(screen.getByRole("button", { name: "API 正常 · 1 个模型异常" }));
   expect(onOpen).toHaveBeenCalledTimes(1);
 });
+
+
+const gaps = {
+  unbound_workloads: [
+    { id: "agent_profile_consolidate", label: "库理解整理", feature_enabled: true },
+    { id: "kg_glean", label: "知识补充分析", feature_enabled: false },
+  ],
+  stale_binding_ids: ["ask_anwser"],
+  stale_binding_hidden_count: 2,
+};
+
+
+test("admins see unbound workloads and ignored bindings above the service cards", () => {
+  renderPanel({ isAdmin: true, status: { ...services, ...gaps } });
+  const block = screen.getByRole("region", { name: "未绑定的模型服务" });
+  expect(within(block).getByText("库理解整理（功能已开启）")).toHaveClass("is-feature-enabled");
+  // 特性开关关着的只说未绑定，不冒充「功能已开启」。
+  expect(within(block).getByText("知识补充分析")).not.toHaveClass("is-feature-enabled");
+  expect(within(block).getByText("ask_anwser")).toBeInTheDocument();
+  expect(within(block).getByText("另有 2 项无法显示")).toBeInTheDocument();
+  expect(block).toHaveTextContent("未绑定的功能当前不可用");
+  // 使用位置按中文名显示；内部 id 只在「已忽略的绑定」里出现（那是配置文件里的原样键名）。
+  expect(within(block).queryByText(/agent_profile_consolidate|kg_glean/)).not.toBeInTheDocument();
+  // 每服务卡片照常渲染，块在卡片列表之前。
+  const card = screen.getByRole("group", { name: "通用问答服务" });
+  expect(block.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+
+test("only ignored bindings: the block says they were ignored and lists no unbound row", () => {
+  renderPanel({
+    isAdmin: true,
+    status: {
+      ...services,
+      unbound_workloads: [],
+      stale_binding_ids: ["graph_chain_verify"],
+      stale_binding_hidden_count: 0,
+    },
+  });
+  const block = screen.getByRole("region", { name: "未绑定的模型服务" });
+  expect(within(block).queryByText("未绑定")).not.toBeInTheDocument();
+  expect(within(block).getByText("graph_chain_verify")).toBeInTheDocument();
+  expect(block).toHaveTextContent("已被忽略");
+  expect(within(block).queryByText(/另有/)).not.toBeInTheDocument();
+});
+
+
+test("no gaps renders no block at all, for admins and in the offline mode", () => {
+  const complete = renderPanel({
+    isAdmin: true,
+    status: { ...services, unbound_workloads: [], stale_binding_ids: [], stale_binding_hidden_count: 0 },
+  });
+  expect(screen.queryByRole("region", { name: "未绑定的模型服务" })).not.toBeInTheDocument();
+  expect(document.querySelector(".model-service-binding-gaps")).toBeNull();
+  complete.unmount();
+
+  // 旧后端不带这几个字段：同样不渲染。
+  const legacy = renderPanel({ isAdmin: true });
+  expect(document.querySelector(".model-service-binding-gaps")).toBeNull();
+  legacy.unmount();
+
+  // 离线模式：后端不报缺口，面板只剩「暂无模型服务」。
+  renderPanel({ isAdmin: true, status: { services: [], unbound_workloads: [], stale_binding_ids: [] } });
+  expect(screen.getByText("暂无模型服务")).toBeInTheDocument();
+  expect(document.querySelector(".model-service-binding-gaps")).toBeNull();
+});
+
+
+test("regular users never see the block even if a payload carried gaps", () => {
+  renderPanel({ isAdmin: false, status: { ...services, ...gaps } });
+  expect(screen.queryByRole("region", { name: "未绑定的模型服务" })).not.toBeInTheDocument();
+  expect(screen.queryByText(/功能已开启|已忽略的绑定/)).not.toBeInTheDocument();
+});
