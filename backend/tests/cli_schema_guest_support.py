@@ -209,6 +209,13 @@ def _delete_leftovers(ctx, monkeypatch, spy=None):
     return legacy_leftover_sweep.main([])
 
 
+def _notebook_export(ctx, monkeypatch, spy=None):
+    module = load_script("notebook_archive")
+    return module.main([
+        "export", "--notebook", "nb-x", "--out", str(ctx.tmp / "nb-x.snbk"),
+    ])
+
+
 def _reflect_search(ctx, monkeypatch, spy=None):
     from app.core.config import Settings
 
@@ -258,6 +265,7 @@ CASES: tuple[CliCase, ...] = (
     CliCase("eval inference", _eval_inference, sqlite_only=True),
     CliCase("eval speed", _eval_speed, sqlite_only=True),
     CliCase("maintain delete-leftovers", _delete_leftovers, composes=False),
+    CliCase("notebook export", _notebook_export),
     CliCase("reflect_shadow_rig search", _reflect_search),
     CliCase("reflect_shadow_rig report", _reflect_report),
 )
