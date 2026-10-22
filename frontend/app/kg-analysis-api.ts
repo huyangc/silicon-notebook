@@ -234,6 +234,11 @@ export type KgFindingRuleStatus = {
 /** 「需要开发处理」区的一项(目前只有 S1)。没有任何按钮。 */
 export type KgFindingsDevItem = {
   item_id: string;
+  /**
+   * 读时判定(按 `unified_kg_state.concept_seed_version`):`fixed_pending_update` = 运行中的代码
+   * 已修复、这个库已发布的合并还建在旧规则上,下一次「更新分析」生效;`open` = 仍待开发修复。
+   */
+  status: string;
   groups: number;
   objects: number;
   /** 例子:每一项是一组只差空格 / 连字符的写法。 */

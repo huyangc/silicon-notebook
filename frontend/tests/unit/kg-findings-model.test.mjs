@@ -726,15 +726,30 @@ test("截断不静默:只保存了前若干条时写在待处理区", () => {
 test("需要开发处理:只认 S1、只在测得到影响时出现;例子每项是一组写法", () => {
   assert.deepEqual(devItemViews(summary({
     dev_items: [
-      { item_id: "S1", groups: 14, objects: 220, samples: [{ names: ["RMS Norm", "RMSNorm"] }, { names: ["Q-Former", "Qformer"] }, { names: [] }] },
-      { item_id: "S2", groups: 3, objects: 1, samples: [] },
+      { item_id: "S1", status: "open", groups: 14, objects: 220, samples: [{ names: ["RMS Norm", "RMSNorm"] }, { names: ["Q-Former", "Qformer"] }, { names: [] }] },
+      { item_id: "S2", status: "open", groups: 3, objects: 1, samples: [] },
     ],
   })), [{
     key: "S1",
+    fixed: false,
     text: "14 组只差空格/连字符的概念没有合并（例：RMS Norm / RMSNorm；Q-Former / Qformer），这是合并规则的缺陷，修好后会自动合并，不需要逐条处理。",
   }]);
-  assert.deepEqual(devItemViews(summary({ dev_items: [{ item_id: "S1", groups: 0, objects: 0, samples: [] }] })), []);
+  assert.deepEqual(devItemViews(summary({ dev_items: [{ item_id: "S1", status: "open", groups: 0, objects: 0, samples: [] }] })), []);
   assert.deepEqual(devItemViews(summary({ present: false })), []);
+});
+
+test("需要开发处理:代码已修复、这个库还没更新分析(fixed_pending_update)时写「已修复，更新分析后生效」;认不出的状态按仍待修复写", () => {
+  const item = { item_id: "S1", groups: 14, objects: 220, samples: [{ names: ["RMS Norm", "RMSNorm"] }] };
+  assert.deepEqual(devItemViews(summary({ dev_items: [{ ...item, status: "fixed_pending_update" }] })), [{
+    key: "S1",
+    fixed: true,
+    text: "14 组只差空格/连字符的概念没有合并（例：RMS Norm / RMSNorm）。已修复，更新分析后生效。",
+  }]);
+  for (const status of ["open", "something_new", undefined]) {
+    const [view] = devItemViews(summary({ dev_items: [{ ...item, status }] }));
+    assert.equal(view.fixed, false, String(status));
+    assert.equal(view.text.includes("已修复"), false, String(status));
+  }
 });
 
 test("主体内容 / 孤岛(S3):主题数来自依赖板块的产物,缺席时只少那半句", () => {

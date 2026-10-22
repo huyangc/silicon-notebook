@@ -1532,12 +1532,20 @@ export function structureSignal(
 // ------------------------------------------------------------ 需要开发处理(§五 B 档)
 
 /**
- * 「需要开发处理」区的条目。只写现象、规模和「需要开发修复」,**不放按钮**:看起来能修、
- * 按下去不会有任何变化的按钮一律不许出现(§3.4)。认不出的条目不上屏。
+ * `dev_items[].status` 的「已修复」档:运行中的代码已修好,这个库已发布的合并还建在旧规则上,
+ * 下一次「更新分析」生效(规格 §五 S1「实施细化」末条)。其余取值(`open`、认不出的)按
+ * 「仍待开发修复」写——宁可少说「已修复」,不把没修好的说成修好了。
  */
-export function devItemViews(summary: KgFindingsSummary): Array<{ key: string; text: string }> {
+export const DEV_ITEM_FIXED_PENDING_UPDATE = "fixed_pending_update";
+
+/**
+ * 「需要开发处理」区的条目。只写现象、规模和状态,**不放按钮**:看起来能修、按下去不会有
+ * 任何变化的按钮一律不许出现(§3.4)——「已修复，更新分析后生效」也只是一句话,更新分析
+ * 的按钮在面板头部。认不出的条目不上屏。
+ */
+export function devItemViews(summary: KgFindingsSummary): Array<{ key: string; text: string; fixed: boolean }> {
   if (!summary.present) return [];
-  const views: Array<{ key: string; text: string }> = [];
+  const views: Array<{ key: string; text: string; fixed: boolean }> = [];
   for (const item of summary.dev_items) {
     if (item.item_id !== "S1" || !(item.groups > 0)) continue;
     const examples = item.samples
@@ -1548,9 +1556,13 @@ export function devItemViews(summary: KgFindingsSummary): Array<{ key: string; t
       .filter(Boolean)
       .slice(0, 3);
     const example = examples.length > 0 ? `（例：${examples.join("；")}）` : "";
+    const fixed = item.status === DEV_ITEM_FIXED_PENDING_UPDATE;
     views.push({
       key: "S1",
-      text: `${formatCount(item.groups)} 组只差空格/连字符的概念没有合并${example}，这是合并规则的缺陷，修好后会自动合并，不需要逐条处理。`,
+      fixed,
+      text: fixed
+        ? `${formatCount(item.groups)} 组只差空格/连字符的概念没有合并${example}。已修复，更新分析后生效。`
+        : `${formatCount(item.groups)} 组只差空格/连字符的概念没有合并${example}，这是合并规则的缺陷，修好后会自动合并，不需要逐条处理。`,
     });
   }
   return views;
