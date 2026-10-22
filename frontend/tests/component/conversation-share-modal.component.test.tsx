@@ -899,3 +899,22 @@ test("520 轮的笔记本会话：公开页只显示最近 500 轮，弹窗给�
   expect(screen.getByText("公开页会包含 1 张附图。")).toBeInTheDocument();
   expect(screen.queryByText(/本次未能统计数量/)).toBeNull();
 });
+
+test("笔记本会话分享到第 501 轮后在第 1 轮打开：第六态「不在链接里」，第 2 轮仍「已经在链接里了」", async () => {
+  mocks.getConversationShare.mockResolvedValue({
+    share_token: "tok-1", shared_through_at: "2026-01-01T00:08:20", shared_through_id: "a501",
+  });
+  mocks.getConversation.mockResolvedValue(longDetail(501));
+  mocks.getConversationShareDisclosure.mockResolvedValue({ memory_count: 0, new_memory_count: 0, current_memory_count: 0 });
+
+  const first = renderModal("a1");
+  await screen.findByLabelText("分享链接");
+  expect(screen.getByText("这条回答不在链接里：公开页只显示最近 500 轮，这条回答在没有包含的更早 1 轮里。现在复制发出去的快照不含它。撤销即刻失效。")).toBeInTheDocument();
+  expect(screen.queryByText(/这条回答已经在链接里了/)).toBeNull();
+  first.unmount();
+
+  renderModal("a2");
+  await screen.findByLabelText("分享链接");
+  expect(screen.getByText(/这条回答已经在链接里了——当前链接还多包含它之后的 499 轮。/)).toBeInTheDocument();
+  expect(screen.queryByText(/这条回答不在链接里/)).toBeNull();
+});

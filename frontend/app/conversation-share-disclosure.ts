@@ -287,6 +287,10 @@ export type ShareBoundary = {
   watermarkAhead: boolean;
   /** `watermarkAhead` 时，公开页比这条边界多包含的轮数。 */
   aheadCount: number;
+  /** `watermarkAhead`，**而且**这条回答已滑出公开页：公开页只显示到水位为止最近的
+   *  `SHARE_SNAPSHOT_MAX_TURNS` 轮（`publicWindow`，与后端 `public_window` 同一个定义），这条
+   *  回答排在它们之前，链接里没有它（codex #985 R2 P2）。此时绝不能说「已经在链接里了」。 */
+  answerOmitted: boolean;
   /** 水位停在边界**之前**：这条回答目前**还不在**链接里，要按「更新到这一条」才进去。
    *  界面必须点明这一点——链接与复制按钮就在文案下面，照着「已包含」去复制会发出一份
    *  缺了这条回答的快照（codex #530 R2 P2）。 */
@@ -297,12 +301,14 @@ export type ShareBoundary = {
 
 /** 边界模式下「当前链接相对这条回答处在什么位置」——文案分支的唯一判据。抽成纯函数是
  *  因为它决定的是一句会被照着复制链接的话，而不是样式（codex #530 R1/R2 三条都出在这里）。 */
-export type ShareScopeState = "unshared" | "at" | "behind" | "ahead" | "unknown";
+export type ShareScopeState = "unshared" | "at" | "behind" | "ahead" | "omitted" | "unknown";
 
 export function shareScopeState(boundary: Omit<ShareBoundary, "turns">, shared: boolean): ShareScopeState {
   if (!shared) return "unshared";
   // 边界本身解析不出时，「这条回答在不在链接里」同样答不了。
   if (boundary.unresolved || boundary.watermarkUnknown) return "unknown";
+  // 水位越过了这条回答，但它已不在公开页的窗口里：链接**没有**它，不是「已包含」。
+  if (boundary.answerOmitted) return "omitted";
   if (boundary.watermarkAhead) return "ahead";
   if (boundary.watermarkBehind) return "behind";
   return "at";
@@ -322,6 +328,7 @@ export function resolveShareBoundary(
       unresolved: false,
       watermarkAhead: false,
       aheadCount: 0,
+      answerOmitted: false,
       watermarkBehind: false,
       watermarkUnknown: false,
     };
@@ -337,6 +344,7 @@ export function resolveShareBoundary(
       unresolved: true,
       watermarkAhead: false,
       aheadCount: 0,
+      answerOmitted: false,
       watermarkBehind: false,
       watermarkUnknown: false,
     };
@@ -346,12 +354,15 @@ export function resolveShareBoundary(
   // 不是「不是 ahead 就等于没越界」的二值，codex #530 R2 P1）。
   const unknown = Boolean(markId) && markIndex < 0;
   const ahead = markIndex > index;
+  // 链接此刻那一页：到水位为止的前缀里、公开页实际显示的那几轮（`publicWindow`）。
+  const shown = ahead ? publicWindow(Array.from({ length: markIndex + 1 }, (_, i) => i)) : [];
   return {
     index,
     turns: turns.slice(0, index + 1),
     unresolved: false,
     watermarkAhead: ahead,
     aheadCount: ahead ? markIndex - index : 0,
+    answerOmitted: ahead && !shown.includes(index),
     watermarkBehind: markIndex >= 0 && markIndex < index,
     watermarkUnknown: unknown,
   };
@@ -407,7 +418,7 @@ const COUNT_FIELDS = [
   "total_turns", "boundary_index", "ahead_count", "new_turns", "published_turns", "earlier_turns",
   "image_count", "update_image_count", "update_new_image_count", "update_earlier_turns",
 ] as const;
-const FLAG_FIELDS = ["boundary_unresolved", "watermark_ahead", "watermark_behind", "watermark_unknown"] as const;
+const FLAG_FIELDS = ["boundary_unresolved", "watermark_ahead", "boundary_omitted", "watermark_behind", "watermark_unknown"] as const;
 
 /** 读确数端点的回执；形状不对（缺字段、负数、非整数、自相矛盾）一律当作取数失败（null），
  *  弹窗随即说「没能取到确数」——绝不凭半个回执给一个数字。 */
@@ -430,6 +441,7 @@ export function readServerShareCounts(raw: unknown): ShareCounts | null {
       unresolved: body.boundary_unresolved as boolean,
       watermarkAhead: body.watermark_ahead as boolean,
       aheadCount: count("ahead_count"),
+      answerOmitted: body.boundary_omitted as boolean,
       watermarkBehind: body.watermark_behind as boolean,
       watermarkUnknown: body.watermark_unknown as boolean,
     },
@@ -467,7 +479,7 @@ export function countsAfterPublishing(counts: ShareCounts): ShareCounts {
   const scoped = counts.boundary.unresolved ? 0 : counts.boundary.index >= 0 ? counts.boundary.index + 1 : counts.totalTurns;
   return {
     ...counts,
-    boundary: { ...counts.boundary, watermarkAhead: false, aheadCount: 0, watermarkBehind: false, watermarkUnknown: false },
+    boundary: { ...counts.boundary, watermarkAhead: false, aheadCount: 0, answerOmitted: false, watermarkBehind: false, watermarkUnknown: false },
     current: {
       sharedCount: scoped,
       newCount: 0,

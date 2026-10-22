@@ -472,6 +472,29 @@ def case_the_counts_resolve_the_boundary_and_watermark_the_share_pins(world: Wor
         shared.json()["shared_through_id"], shared.json()["shared_through_at"])
 
 
+def case_an_answer_the_page_no_longer_shows_is_omitted_not_ahead(world: World) -> None:
+    """Shared through turn 501: the page shows turns 2-501. Asked about turn
+    1, the link is past it but does not carry it -- ``boundary_omitted``; turn
+    2 is still on the page -- plain ``watermark_ahead``. Re-shared from turn 1
+    (revoke, then share there), the page carries it again."""
+    turns = MAX_TURNS + 1
+    cid, _lost = _long_world(world, turns)
+    assert share(world, cid, job_of(cid, turns - 1)).status_code == 200
+    first = stored_counts(world, cid, through_id=job_of(cid, 0)).json()
+    assert (first["watermark_ahead"], first["boundary_omitted"], first["ahead_count"]) == (True, True, MAX_TURNS)
+    assert first["earlier_turns"] == 1 and first["published_turns"] == MAX_TURNS
+    second = stored_counts(world, cid, through_id=job_of(cid, 1)).json()
+    assert (second["watermark_ahead"], second["boundary_omitted"]) == (True, False)
+    assert "第 0 问" not in [turn["question"] for turn in _page(world, cid)["turns"]]
+    # The way the dialog offers: revoke, then share from this answer.
+    assert world.client.delete(f"/api/global-ask/conversations/{cid}/share",
+                               headers=world.alice.headers).status_code == 204
+    assert share(world, cid, job_of(cid, 0)).status_code == 200
+    assert [turn["question"] for turn in _page(world, cid)["turns"]] == ["第 0 问"]
+    at = stored_counts(world, cid, through_id=job_of(cid, 0)).json()
+    assert (at["watermark_ahead"], at["boundary_omitted"], at["watermark_behind"]) == (False, False, False)
+
+
 # --- personal memory once the window slides ---------------------------------------
 #
 # The page the link serves now and the page an update would serve no longer start

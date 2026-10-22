@@ -17,6 +17,8 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 // 送的是不是 expected_through_id），mock 掉它就只剩一个壳子。
 
 import GlobalAskPage from "../../app/ask/page.tsx";
+import { ConversationShareModal } from "../../app/conversation-share-modal.tsx";
+import { globalConversationShareApi } from "../../app/global-ask-api.ts";
 import { GlobalAskLauncher } from "../../app/ask/global-ask-launcher.tsx";
 import { claimEscapePress, useRootModalCoordinator } from "../../app/use-root-modal-coordinator.ts";
 import { humanizedError } from "../../app/errors.ts";
@@ -139,6 +141,7 @@ async function serverCounts(conversationId: string, query: URLSearchParams) {
     total_turns: counted.totalTurns, through_id: counted.throughId,
     boundary_index: counted.boundary.index, boundary_unresolved: counted.boundary.unresolved,
     watermark_ahead: counted.boundary.watermarkAhead, ahead_count: counted.boundary.aheadCount,
+    boundary_omitted: counted.boundary.answerOmitted,
     watermark_behind: counted.boundary.watermarkBehind, watermark_unknown: counted.boundary.watermarkUnknown,
     new_turns: counted.current.newCount,
     published_turns: counted.current.sharedCount - counted.current.earlierCount,
@@ -541,6 +544,39 @@ test("更新会挤出唯一带附图的那一轮：此刻 1 张照说，更新�
   // 只有第 1 轮带图（longConversation 的 asset-oldest）：此刻的页面上有它，更新后的页面上没有。
   expect(screen.getByText("公开页会包含 1 张附图。")).toBeInTheDocument();
   expect(screen.queryByText(/更新后公开页共 \d+ 张附图/)).toBeNull();
+});
+
+// --- 第六态 omitted：链接越过了这条回答，但它已滑出公开页（codex #985 R2 P2） -------------
+
+async function openModalOn(throughAnswerId: string) {
+  render(<ConversationShareModal api={globalConversationShareApi("conv-a")} title="会话" throughAnswerId={throughAnswerId} onClose={() => {}} />);
+  await waitFor(() => expect(screen.queryByText("正在加载…")).toBeNull());
+  await screen.findByLabelText("分享链接");
+}
+
+test("分享到第 501 轮后在第 1 轮打开：说「不在链接里」，不说「已经在链接里了」", async () => {
+  turnsByConversation = { "conv-a": longConversation(501) };
+  shareApi.get.mockResolvedValue(SHARED("job-501", "2026-09-19T00:08:20Z"));
+  shareApi.disclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 0, current_memory_count: 1 });
+  await openModalOn("job-1");
+
+  expect(screen.getByText("这条回答不在链接里：公开页只显示最近 500 轮，这条回答在没有包含的更早 1 轮里。现在复制发出去的快照不含它。撤销即刻失效。")).toBeInTheDocument();
+  expect(screen.getByText("公开范围只能往后推、不能收回；要让链接包含这条回答，请先「撤销分享」，再从这条回答重新分享。")).toBeInTheDocument();
+  expect(screen.queryByText(/这条回答已经在链接里了/)).toBeNull();
+  // 链接此刻那一页的确数照说；没有发布动作（水位只能往后推）。
+  expect(screen.getByText("公开页只显示最近 500 轮，更早的 1 轮未包含。")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /更新到这一条|分享到这一条/ })).toBeNull();
+  expect(screen.getByRole("button", { name: /撤销分享/ })).toBeInTheDocument();
+});
+
+test("第 2 轮恰好还在公开页上：仍是「已经在链接里了」", async () => {
+  turnsByConversation = { "conv-a": longConversation(501) };
+  shareApi.get.mockResolvedValue(SHARED("job-501", "2026-09-19T00:08:20Z"));
+  shareApi.disclosure.mockResolvedValue({ memory_count: 1, new_memory_count: 0, current_memory_count: 1 });
+  await openModalOn("job-2");
+
+  expect(screen.getByText(/这条回答已经在链接里了——当前链接还多包含它之后的 499 轮。/)).toBeInTheDocument();
+  expect(screen.queryByText(/这条回答不在链接里/)).toBeNull();
 });
 
 test("确数端点失败：一个数字都不给，如实说没能统计，仍可发布", async () => {

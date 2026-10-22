@@ -63,6 +63,10 @@ class SharePrefixes:
     ahead: bool
     behind: bool
     unknown: bool
+    # ``ahead`` and the asked answer is not on the page the link serves: the
+    # page is the newest ``MAX_TURNS`` of the prefix up to the watermark and
+    # the answer sorts before them (codex #985 R2 P2).
+    omitted: bool = False
 
 
 def share_prefixes(ranks: ShareRanks) -> SharePrefixes | None:
@@ -78,14 +82,18 @@ def share_prefixes(ranks: ShareRanks) -> SharePrefixes | None:
     # answer, so its content is described over the whole conversation.
     disclosure = ranks.total if (ahead or unknown) else scope
     covered = disclosure if ranks.shared is None else ranks.shared
+    current = min(disclosure, covered)
     return SharePrefixes(
         disclosure=disclosure,
-        current=min(disclosure, covered),
+        current=current,
         scope=scope,
         current_scope=min(scope, covered),
         ahead=ahead,
         behind=behind,
         unknown=unknown,
+        # The page shows ranks (current - window, current]; the answer is rank
+        # ``scope`` -- off the page when it is at or below that floor.
+        omitted=ahead and scope <= current - window_size(current),
     )
 
 
@@ -114,6 +122,7 @@ def share_counts(
         return {
             "total_turns": ranks.total, "through_id": "", "boundary_index": -1,
             "boundary_unresolved": True, "watermark_ahead": False, "ahead_count": 0,
+            "boundary_omitted": False,
             "watermark_behind": False, "watermark_unknown": False,
             "new_turns": 0, "published_turns": 0, "earlier_turns": 0, "image_count": 0,
             "update_image_count": 0, "update_new_image_count": 0, "update_earlier_turns": 0,
@@ -136,6 +145,7 @@ def share_counts(
         "boundary_unresolved": False,
         "watermark_ahead": prefixes.ahead,
         "ahead_count": (ranks.mark or 0) - prefixes.scope if prefixes.ahead else 0,
+        "boundary_omitted": prefixes.omitted,
         "watermark_behind": prefixes.behind,
         "watermark_unknown": prefixes.unknown,
         "new_turns": prefixes.disclosure - prefixes.current,
