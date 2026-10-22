@@ -537,7 +537,11 @@ they receive (`TERM_EXITS`) or ignore it (`TERM_IGNORED`) in
 `backend/tests/launcher_checkout_testkit.py`. They pin TERM, then grace, then KILL, the
 exit codes 130 / 143 / 129 shared with `prod.sh`, that each child's parent is the launcher
 itself (the `exec` guard), and that the `cleanup` function of `dev.sh` and `prod.sh` stays
-textually identical. Operations behaviour: [operations.md](./operations.md#plugin-companion-services).
+textually identical. Because `dev.sh` starts `next dev` directly, it also runs the
+`predev` UI plugin sync by hand (a fake `node` in the testkit): the cases pin that the sync
+finishes before next starts, that a failed sync starts no frontend and stops the backend,
+that a cancellation during the sync leaves no process behind, and that
+`frontend/package.json` still has exactly the hooks `dev.sh` reproduces. Operations behaviour: [operations.md](./operations.md#plugin-companion-services).
 
 ### Stress scripts
 
