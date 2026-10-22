@@ -541,28 +541,37 @@ test is always collected, and no environment switch hides one from a gate.
 Neither G1 nor G2 runs these scripts. Run one by hand, on a loaded machine,
 after touching the code it guards.
 
-- `scripts/stress_launcher_signals.py` guards two macOS `/bin/bash` 3.2 races
-  next to the companion-controller fork. `extension_services_start` must poll
-  the controller instead of blocking in `wait`, and `extension_services_cleanup`
-  must repeat its TERM. Each attempt cancels a real launcher in a fake checkout
+- `scripts/stress_launcher_signals.py` guards three macOS `/bin/bash` 3.2 paths
+  next to the companion-controller fork in `scripts/extension_services.sh`:
+  - `extension_services_start` must poll the controller instead of blocking in
+    `wait`;
+  - `extension_services_cleanup` must repeat its TERM;
+  - cleanup must find, through `$!`, a controller forked just before a pending
+    trap ran.
+
+  Each attempt cancels a real launcher in a fake checkout
   (`backend/tests/launcher_checkout_testkit.py`, shared with the launcher tests)
   0–4 ms after the launcher creates its receipt. A launcher still alive 20 s
-  later counts as held:
+  later counts as held. A launcher that exited but left its controller running
+  counts as leaked; that controller is killed by exact pid.
 
   ```bash
   python scripts/stress_launcher_signals.py --load auto
   ```
 
-  `--load auto` runs one busy loop per core alongside. By default it runs
-  2 launchers (`--launchers dev.sh,backend.sh`) × 4 parallel shards
-  (`--shards`) × 1500 attempts (`--runs`); `--seed` fixes the offsets. Exit 0
-  means nothing was held, 1 means a cancellation was held, and 2 means bad
-  usage or a broken shard. Measured with `--load auto`, the fixed launchers were
-  held 0 times in 12000 attempts. Launchers reverted to a blocking
-  `wait` were held 2 times in 12000. That race hits about once in
-  5000 to 6000 attempts, so a default run catches a reintroduced blocking `wait`
-  with roughly 85–90% probability. Raise `--runs` or repeat the run when you
-  need more confidence.
+  `--load auto` runs one busy loop per core alongside. By default the script
+  runs 2 launchers (`--launchers dev.sh,backend.sh`) × 4 parallel shards
+  (`--shards`) × 1500 attempts (`--runs`). `--seed` fixes the offsets. Exit 0
+  means nothing was held or leaked. Exit 1 means a cancellation was held or a
+  controller leaked. Exit 2 means bad usage or a broken shard.
+
+  Measured with `--load auto`:
+  - The fixed launchers: 0 held and 0 leaked in 12000 attempts.
+  - Launchers without the `$!` fallback: 92 of 400 attempts leaked (unloaded).
+  - Launchers reverted to a blocking `wait`: 2 and then 4 held in two runs of
+    12000. That race hits once in a few thousand attempts, so a default run
+    catches it most of the time (roughly 85–98%). Raise `--runs` or repeat the
+    run when you need more confidence.
 
 ### Python dependencies
 

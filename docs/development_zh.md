@@ -422,11 +422,13 @@ JSON 读取方可读取已打开、当前用户所有的普通文件快照，即
 pytest 用例：已提交的用例一律会被收集，没有任何环境开关能把它从门禁里藏起来。G1 和 G2
 都不跑这些脚本；改到它守护的代码后，在满载机器上手动跑一次。
 
-- `scripts/stress_launcher_signals.py` 守护伴随服务控制器 fork 附近的两处 macOS
-  `/bin/bash` 3.2 竞态：`extension_services_start` 必须轮询控制器、不得阻塞在 `wait` 上，
-  `extension_services_cleanup` 必须重复发送 TERM。每次尝试在一个假检出目录里起真实启动器
+- `scripts/stress_launcher_signals.py` 守护 `scripts/extension_services.sh` 里伴随服务控制器
+  fork 附近的三条 macOS `/bin/bash` 3.2 路径：`extension_services_start` 必须轮询控制器、不得
+  阻塞在 `wait` 上；`extension_services_cleanup` 必须重复发送 TERM；挂起的 trap 恰在 fork 之后
+  执行时，收尾必须经 `$!` 找到刚 fork 出的控制器。每次尝试在一个假检出目录里起真实启动器
   （`backend/tests/launcher_checkout_testkit.py`，与启动器用例共用），在启动器创建回执后
-  0–4 ms 内打断它，20 s 后仍未退出即记为挂住：
+  0–4 ms 内打断它：20 s 后仍未退出记为挂住；启动器退出了却留下控制器在跑记为泄漏，那个
+  控制器按精确 pid 杀掉：
 
   ```bash
   python scripts/stress_launcher_signals.py --load auto
@@ -434,10 +436,10 @@ pytest 用例：已提交的用例一律会被收集，没有任何环境开关�
 
   `--load auto` 同时为每个核起一个忙循环。默认 2 个启动器（`--launchers dev.sh,backend.sh`）
   × 4 个并行分片（`--shards`）× 1500 次（`--runs`），`--seed` 固定随机偏移。退出码 0 表示没有
-  挂住，1 表示有取消被挂住，2 表示用法错误或分片自身失败。`--load auto` 实测：修复后的启动器
-  12000 次里挂住 0 次；改回阻塞 `wait` 的启动器 12000 次里挂住 2 次。这一
-  竞态大约每 5000–6000 次命中一次，所以默认一轮约有 85–90% 的把握抓到被改回的阻塞 `wait`；
-  需要更高把握时加大 `--runs` 或多跑几轮。
+  挂住也没有泄漏，1 表示有挂住或泄漏，2 表示用法错误或分片自身失败。`--load auto` 实测：
+  修复后的启动器 12000 次里挂住 0 次、泄漏 0 次；去掉 `$!` 兜底时（空载）400 次里泄漏 92 次；
+  改回阻塞 `wait` 时两轮 12000 次里分别挂住 2 次和 4 次。这一竞态几千次才命中一次，默认一轮
+  大多能抓到（约 85–98%）；需要更高把握时加大 `--runs` 或多跑几轮。
 
 ### Python 依赖
 
