@@ -529,3 +529,78 @@ def test_cli_reports_an_io_error_on_a_later_notebook(repo, out_dir, capsys, monk
     (failed,) = payload["failed"]
     assert failed["notebook_id"] == "nb-second"
     assert "No space left" in failed["error"]
+
+
+@pytest.mark.parametrize("tree", ["notebooks", "assets", "linked"])
+def test_an_output_inside_an_exported_tree_is_refused(repo, tmp_path, tree):
+    """codex #974 r1: written inside the notebook's file or asset tree, the
+    archive's own part file would be walked and copied into itself until the
+    disk fills. Refused before anything is written, on resolved paths."""
+    notebook_root = _seed_full(repo)
+    assets_root = Path(repo.storage_dir) / "assets" / cases.NB
+    assets_root.mkdir(parents=True, exist_ok=True)
+    if tree == "notebooks":
+        target_dir = notebook_root / "exports"
+    elif tree == "assets":
+        target_dir = assets_root
+    else:
+        target_dir = tmp_path / "looks-elsewhere"
+        target_dir.symlink_to(notebook_root, target_is_directory=True)
+    target_dir.mkdir(exist_ok=True)
+    before = sorted(p.name for p in target_dir.iterdir())
+    with pytest.raises(NotebookExportError, match="被导出笔记本的文件目录内"):
+        cases.export(repo, cases.NB, target_dir / "self.snbk")
+    assert sorted(p.name for p in target_dir.iterdir()) == before
+
+
+def test_an_output_beside_the_exported_trees_is_accepted(repo):
+    _seed_full(repo)
+    beside = Path(repo.storage_dir) / "exports"
+    beside.mkdir()
+    cases.export(repo, cases.NB, beside / "ok.snbk")
+    inspect_archive(beside / "ok.snbk")
+
+
+@pytest.mark.parametrize("driver", ["sqlite", "postgres"])
+def test_cli_reports_a_database_failure_on_a_later_notebook_without_its_message(
+    repo, out_dir, capsys, monkeypatch, driver
+):
+    """codex #974 r1: driver errors are not OSError; a dropped connection on a
+    later notebook still yields the structured report, naming the exception
+    type (and SQLSTATE) but never the driver message's connection details."""
+    import sqlite3
+
+    import psycopg
+    from app.core.config import get_settings
+
+    _seed_full(repo)
+    real_export = export_module.export_notebook
+    calls: list[str] = []
+    secret = "connection to server at secret-db.internal port 5433 user=svc failed"
+
+    def drop_on_second(store, notebook_id, *args, **kwargs):
+        calls.append(notebook_id)
+        if len(calls) == 2:
+            if driver == "sqlite":
+                raise sqlite3.OperationalError(secret)
+            raise psycopg.OperationalError(secret)
+        return real_export(store, notebook_id, *args, **kwargs)
+
+    monkeypatch.setattr(export_module, "export_notebook", drop_on_second)
+    cli = load_script("notebook_archive")
+    get_settings.cache_clear()
+    try:
+        status = cli.main([
+            "export", "--notebook", cases.NB, "--notebook", "nb-second",
+            "--out-dir", str(out_dir), "--json",
+        ])
+    finally:
+        get_settings.cache_clear()
+    captured = capsys.readouterr()
+    assert status == 1
+    payload = json.loads(captured.out)
+    assert [item["notebook_id"] for item in payload["exported"]] == [cases.NB]
+    (failed,) = payload["failed"]
+    assert failed["notebook_id"] == "nb-second"
+    assert failed["error"].startswith("数据库错误: OperationalError")
+    assert "secret-db" not in captured.out + captured.err

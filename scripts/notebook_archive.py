@@ -16,7 +16,9 @@ Exit status: 0 success; 1 the archive is invalid or the export failed; 2 a
 usage error or an unknown notebook; 3 the database is not at this build's
 schema (the shared schema-guest refusal). Several notebooks export in order and
 stop at the first failure -- an unknown notebook, an export error, an I/O error
-on the output (``ENOSPC``...) or a schema/connection refusal; the archives
+on the output (``ENOSPC``...), a database failure (a dropped connection, a
+query timeout; reported by exception type and SQLSTATE only, never the driver
+message, which can carry connection details) or a schema/connection refusal; the archives
 already written stay, and ``--json`` prints ``{"exported": [...], "failed":
 [...]}`` in every one of those cases.
 
@@ -92,6 +94,7 @@ def _export(options) -> int:
             print(f"error: 输出目录不存在: {path.parent}", file=sys.stderr)
             return 2
     settings = get_settings()
+    database_errors = _database_errors()
     reports = []
     failure: "dict | None" = None
     status = 0
@@ -114,8 +117,10 @@ def _export(options) -> int:
                     failure = {"notebook_id": notebook_id, "error": "笔记本不存在或正在删除"}
                     status = 2
                     break
-                except (NotebookExportError, OSError) as exc:
-                    # OSError: the output side failed (ENOSPC, EIO...).
+                except (NotebookExportError, OSError, *database_errors) as exc:
+                    # OSError: the output side failed (ENOSPC, EIO...); a
+                    # database error: the connection dropped or a read timed
+                    # out (codex #974 r1).
                     failure = {"notebook_id": notebook_id, "error": _describe(exc)}
                     status = 1
                     break
@@ -125,6 +130,10 @@ def _export(options) -> int:
     except MaintenanceCliError as exc:
         failure = {"notebook_id": current, "error": str(exc)}
         status = exc.exit_code
+    except database_errors as exc:
+        # Opening the repository or reading the schema registry failed.
+        failure = {"notebook_id": current, "error": _describe(exc)}
+        status = 1
     if failure is not None:
         # The archives already written stay; the report says which ones.
         where = f"{failure['notebook_id']}: " if failure["notebook_id"] else ""
@@ -138,9 +147,31 @@ def _export(options) -> int:
     return status
 
 
+def _database_errors() -> "tuple[type[BaseException], ...]":
+    """The driver exceptions a dropped connection or a timed-out read raises:
+    ``sqlite3.Error`` and ``psycopg.Error`` (``psycopg_pool``'s ``PoolTimeout``
+    and ``PoolClosed`` subclass it). Neither is an ``OSError``."""
+    import sqlite3
+
+    errors: "list[type[BaseException]]" = [sqlite3.Error]
+    try:
+        import psycopg
+    except ImportError:  # pragma: no cover - psycopg ships with the backend
+        pass
+    else:
+        errors.append(psycopg.Error)
+    return tuple(errors)
+
+
 def _describe(exc: BaseException) -> str:
     if isinstance(exc, OSError):
         return f"{type(exc).__name__}: {exc.strerror or exc}"
+    if isinstance(exc, _database_errors()):
+        # Type and SQLSTATE only: a driver message can name the host, port,
+        # role or database of the connection.
+        sqlstate = getattr(exc, "sqlstate", None)
+        suffix = f" (SQLSTATE {sqlstate})" if sqlstate else ""
+        return f"数据库错误: {type(exc).__name__}{suffix}"
     return str(exc)
 
 
