@@ -39,7 +39,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from app.domain.kg_merge_seed import concept_seed_v1
+from app.domain.kg_merge_seed import concept_decision_seeds, concept_seed_v1
 from app.models.schemas import NotebookCreate
 
 T0 = "2026-10-19T08:00:00.123456+00:00"
@@ -59,10 +59,12 @@ KNOWHOW_ONLY_NAME = "Mistral 7.1"
 _CANONICAL_OVERRIDE = {"Mistral base": KNOWHOW_ONLY_NAME}
 SECRETS = (KNOWHOW_SECRET, KNOWHOW_HIDDEN_SEED_NAME, KNOWHOW_ONLY_NAME)
 # Text only a hidden member could have put in a response (codex #941 R3): every
-# hidden spelling, and the v1 seed no visible name shares ("llama three one" —
+# hidden spelling, and the decision seeds no visible name shares -- both seed
+# spaces since PR-4 ("llama three one" in space 1, "llamathreeone" in space 2;
 # stored in F4's evidence to match decisions, never served). KNOWHOW_SECRET's
-# seed is the visible "Llama 3.1"'s own, so it is not hidden-only text.
-HIDDEN_ONLY_TEXT = (*SECRETS, concept_seed_v1(KNOWHOW_HIDDEN_SEED_NAME))
+# seeds are the visible "Llama 3.1"'s own, so they are not hidden-only text.
+HIDDEN_ONLY_SEEDS = tuple(sorted(concept_decision_seeds(KNOWHOW_HIDDEN_SEED_NAME)))
+HIDDEN_ONLY_TEXT = (*SECRETS, *HIDDEN_ONLY_SEEDS)
 
 
 def canonical_of(name: str) -> str:
@@ -77,7 +79,7 @@ def hidden_text_served(repo, notebook_id: str) -> List[str]:
     substrings, anywhere in what the findings list serves for the world: every
     zone's WHOLE page, the overview's ``findings_summary`` and the findings
     ledger payload the overview's artifact list carries. Also checks the test
-    is not vacuous: the stored F4 evidence does carry the hidden seed (the read
+    is not vacuous: the stored F4 evidence does carry both hidden seeds (the read
     side matches decisions on it).
 
     Not scanned: the batch-1 analysis artifacts (``largest_clusters`` serves the
@@ -87,7 +89,9 @@ def hidden_text_served(repo, notebook_id: str) -> List[str]:
     with store.read_snapshot() as db:
         stored = json.dumps(store.kg_analysis_finding_rows(db, notebook_id),
                             ensure_ascii=False, default=str).lower()
-    assert concept_seed_v1(KNOWHOW_HIDDEN_SEED_NAME) in stored
+    assert len(HIDDEN_ONLY_SEEDS) == 2           # one seed per space, both distinct
+    for seed in HIDDEN_ONLY_SEEDS:
+        assert seed in stored, seed
     service = repo._runtime.kg_analysis
     overview = service.overview(notebook_id)
     served = [asdict(overview.findings_summary)]

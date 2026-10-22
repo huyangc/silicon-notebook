@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from app.domain.kg_merge_seed import concept_seed_v1
+from app.domain.kg_merge_seed import concept_seed_v1, concept_seed_v2
 from tests.kg_findings_world import EXPECTED_SNAPSHOT, seed_world, world_snapshot
 
 pytestmark = pytest.mark.postgres_integration
@@ -94,6 +94,19 @@ def test_no_hidden_member_text_is_served_on_postgres(postgres_repository):
             "VALUES ('mc-h',%s,'K-llama 3 1','K-llama 31',0.9,'rejected',%s,'llama 31',"
             "now(),now())",
             (notebook_id, concept_seed_v1(KNOWHOW_HIDDEN_SEED_NAME)))
+    assert _status(repository, notebook_id, "passed") == {
+        ("F4", "llama31"): ("decided_not_same", None)}
+    assert hidden_text_served(repository, notebook_id) == []
+    # The same rejection minted in seed space 2, keyed by the hidden member's
+    # v2 seed (PR-4), decides the group too and is projected out the same way.
+    with repository._runtime.database.write() as db:
+        db.execute("DELETE FROM concept_merge_candidates WHERE id = 'mc-h'")
+        db.execute(
+            "INSERT INTO concept_merge_candidates(id,notebook_id,canonical_a,canonical_b,"
+            "score,status,seed_a,seed_b,seed_version,created_at,updated_at) "
+            "VALUES ('mc-h2',%s,'K-llama3 1','K-llama31',0.9,'rejected',%s,'llama31',2,"
+            "now(),now())",
+            (notebook_id, concept_seed_v2(KNOWHOW_HIDDEN_SEED_NAME)))
     assert _status(repository, notebook_id, "passed") == {
         ("F4", "llama31"): ("decided_not_same", None)}
     assert hidden_text_served(repository, notebook_id) == []
