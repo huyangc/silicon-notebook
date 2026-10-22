@@ -691,30 +691,15 @@ def test_sweep_driver_a_resumes_a_stale_active_job(repo):
 # old (well inside a 300s stale window) — the old naive-string compare
 # misreads it as stale (the "过早判 stale" failure mode) purely because of
 # how the two differing offsets happen to print, not because any real time
-# passed. ``datetime.now`` inside the store module is replaced with a fixed,
-# fully-controlled clock (host-timezone-independent: the fake also pins
-# ``astimezone()``'s no-arg branch) so the scenario is deterministic on any
-# machine. Primary assertions tagged `# MUT`.
+# passed. The store's clock (``self.now()``, which the cutoff is taken off --
+# see ``_stale_cutoff_iso``) is pinned to a fixed instant printed under a fixed
+# +03:00 offset, so the scenario is deterministic on any machine and in any
+# host timezone. Primary assertions tagged `# MUT`.
 # ---------------------------------------------------------------------------
 
 
-class _FixedOffsetClock(ndjs.datetime):
-    """Freezes "now" to 2026-03-08T07:00:00+00:00 and pins the no-arg
-    ``astimezone()`` branch to a fixed +03:00 "local" offset — sidesteps the
-    real host timezone database entirely (``_stale_cutoff_iso`` calls
-    ``datetime.now().astimezone()`` with no argument)."""
-
-    @classmethod
-    def now(cls, tz=None):
-        value = cls(2026, 3, 8, 7, 0, 0, tzinfo=timezone.utc)
-        return value if tz is None else value.astimezone(tz)
-
-    def astimezone(self, tz=None):
-        if tz is None:
-            tz = timezone(timedelta(hours=3))
-        return _RealDatetime.astimezone(self, tz)
-
-
+# "Now": 2026-03-08T07:00:00 UTC, printed under a +03:00 "local" offset.
+_NOW_PLUS_THREE = "2026-03-08T10:00:00+03:00"
 # The row's updated_at: the same real instant as "now" minus 60 seconds
 # (2026-03-08T06:59:00 UTC), deliberately printed under a THIRD, unrelated
 # offset (-05:00) to prove the fix is offset-choice-agnostic.
@@ -729,7 +714,7 @@ def test_list_stale_tracks_real_elapsed_time_across_a_utc_offset_change(repo, mo
             "UPDATE notebook_delete_jobs SET updated_at=? WHERE id=?",
             (_UPDATED_AT_60S_AGO_MINUS_FIVE, job["id"]),
         )
-    monkeypatch.setattr(ndjs, "datetime", _FixedOffsetClock)
+    monkeypatch.setattr(repo._runtime.notebook_delete_jobs, "now", lambda: _NOW_PLUS_THREE)
     stale = repo._runtime.notebook_delete_jobs.list_stale(300)
     assert stale == []  # MUT: 60 real seconds old, well inside a 300s window
 
@@ -744,11 +729,33 @@ def test_mark_running_cutoff_tracks_real_elapsed_time_across_a_utc_offset_change
             "UPDATE notebook_delete_jobs SET updated_at=? WHERE id=?",
             (_UPDATED_AT_60S_AGO_MINUS_FIVE, job["id"]),
         )
-    monkeypatch.setattr(ndjs, "datetime", _FixedOffsetClock)
+    monkeypatch.setattr(repo._runtime.notebook_delete_jobs, "now", lambda: _NOW_PLUS_THREE)
     # A second mark_running with a 300s cutoff must NOT be able to steal the
     # lease -- the row is only 60 real seconds stale, not >=300.
     stolen = repo._runtime.notebook_delete_jobs.mark_running(job["id"], stale_cutoff_seconds=300)
     assert stolen is None  # MUT
+
+
+@pytest.mark.parametrize("years", [-30, 30])
+def test_stale_cutoff_reads_the_store_clock_not_the_host_clock(repo, monkeypatch, years):
+    """The stale cutoff (driver A's ``list_stale``, ``mark_running``'s steal
+    branch) is taken off the store's clock -- the clock that writes
+    ``updated_at`` -- so a store running on an injected clock far from the
+    host's judges staleness by that clock alone. #966's grace cases pinned the
+    clock to a literal date and went red the day the host clock reached it."""
+    store = repo._runtime.notebook_delete_jobs
+    base = _RealDatetime.now(timezone.utc).replace(microsecond=0) + timedelta(days=365 * years)
+    clock = [base]
+    monkeypatch.setattr(store, "now", lambda: clock[0].isoformat())
+    _seed_user_and_notebook(repo)
+    job = store.request("nb1", "u1")
+    assert store.mark_running(job["id"], stale_cutoff_seconds=300) is not None
+    clock[0] = base + timedelta(seconds=299)
+    assert store.list_stale(300) == []  # MUT: 299s on the store clock
+    assert store.mark_running(job["id"], stale_cutoff_seconds=300) is None  # MUT
+    clock[0] = base + timedelta(seconds=301)
+    assert [row["id"] for row in store.list_stale(300)] == [job["id"]]  # MUT
+    assert store.mark_running(job["id"], stale_cutoff_seconds=300) is not None  # MUT
 
 
 def test_sweep_driver_a_does_not_touch_fresh_active_jobs(repo):
