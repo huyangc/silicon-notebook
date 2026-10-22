@@ -43,8 +43,12 @@ GLOBAL_JOBS_ORDER_ASC = "ORDER BY created_at ASC,id ASC"
 GLOBAL_JOBS_ORDER_DESC = "ORDER BY created_at DESC,id DESC"
 
 # "Sorts at or before this job" on the canonical pair: the keyset every
-# published prefix is cut by (params: the job's created_at twice, then its id).
-_KEYSET_THROUGH = "created_at < ? OR (created_at = ? AND id <= ?)"
+# published prefix is cut by (params: the job's created_at, then its id). A
+# row-value comparison -- the same lexicographic order as "created_at < t OR
+# (created_at = t AND id <= i)" -- so both backends use it as an INDEX
+# condition on ``(conversation_id, created_at, id)``: a window read backwards
+# from it starts at the bound instead of walking every newer job first.
+_KEYSET_THROUGH = "(created_at, id) <= (?, ?)"
 
 # The share dialog's prefix sizes in ONE aggregate over the owner's live done
 # jobs of one conversation (``GlobalAskStore.share_counts``): the boundary job
@@ -64,11 +68,9 @@ _SHARE_RANKS_SQL = (
     "AND user_id=? AND status='done' AND {live} " + GLOBAL_JOBS_ORDER_DESC + " LIMIT 1) "
     "SELECT COUNT(j.id) AS total, "
     "MAX(a.id) AS a_id, MAX(a.created_at) AS a_created, "
-    "SUM(CASE WHEN j.created_at < a.created_at OR "
-    "(j.created_at = a.created_at AND j.id <= a.id) THEN 1 ELSE 0 END) AS a_rank, "
+    "SUM(CASE WHEN (j.created_at, j.id) <= (a.created_at, a.id) THEN 1 ELSE 0 END) AS a_rank, "
     "MAX(w.id) AS w_id, MAX(w.created_at) AS w_created, "
-    "SUM(CASE WHEN j.created_at < w.created_at OR "
-    "(j.created_at = w.created_at AND j.id <= w.id) THEN 1 ELSE 0 END) AS w_rank, "
+    "SUM(CASE WHEN (j.created_at, j.id) <= (w.created_at, w.id) THEN 1 ELSE 0 END) AS w_rank, "
     "SUM(CASE WHEN j.created_at <= ? THEN 1 ELSE 0 END) AS t_rank, "
     "MAX(n.id) AS n_id, MAX(n.created_at) AS n_created "
     "FROM global_ask_jobs j LEFT JOIN a ON 1=1 LEFT JOIN w ON 1=1 LEFT JOIN n ON 1=1 "
@@ -1528,7 +1530,7 @@ class GlobalAskStore:
         snapshot and the share window."""
         return self._prefix_window(
             db, conversation_id, _KEYSET_THROUGH,
-            (boundary["created_at"], boundary["created_at"], boundary["id"]),
+            (boundary["created_at"], boundary["id"]),
         )
 
     def _prefix_window(self, db, conversation_id, bound_sql, bound_params):
@@ -1634,7 +1636,7 @@ class GlobalAskStore:
         bound that selects exactly that prefix (``{size: (sql, params)}``).
         Every bound is ANDed with the newest job the aggregate counted, so two
         prefixes of one size are the same prefix."""
-        newest = (facts["n_created"], facts["n_created"], facts["n_id"])
+        newest = (facts["n_created"], facts["n_id"])
         total = int(facts["total"] or 0)
 
         def through(anchor_sql, anchor_params):
@@ -1647,13 +1649,13 @@ class GlobalAskStore:
             if facts["a_id"] is not None:
                 boundary = int(facts["a_rank"] or 0)
                 bounds.setdefault(boundary, through(
-                    _KEYSET_THROUGH, (facts["a_created"], facts["a_created"], facts["a_id"]),
+                    _KEYSET_THROUGH, (facts["a_created"], facts["a_id"]),
                 ))
         shared = mark = None
         if mark_id and facts["w_id"] is not None:
             shared = mark = int(facts["w_rank"] or 0)
             bounds.setdefault(shared, through(
-                _KEYSET_THROUGH, (facts["w_created"], facts["w_created"], facts["w_id"]),
+                _KEYSET_THROUGH, (facts["w_created"], facts["w_id"]),
             ))
         elif mark_id:
             # The watermark job is gone: the page falls back to the instant.
