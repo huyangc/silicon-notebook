@@ -1002,6 +1002,12 @@ Cross-cutting frontend interaction guardrails stay small but explicit:
 - New centered or draggable dialogs reuse `FloatingModalCard` and publish
   through the root modal coordinator instead of recreating overlay, dragging,
   focus, palette, border, or radius behavior.
+- A dialog that must open on top of another root dialog without replacing it
+  (for example the image preview over the global Ask window) declares the pair
+  in `ROOT_MODAL_POLICIES[slot].stacksOver` and opens with
+  `rootModals.openAbove(slot, parent)`. Escape, backdrop and focus return then
+  follow the coordinator's topmost rule; do not special-case the child's Escape
+  inside the parent.
 - Source-activity anomalies render only through `AnomalyBadge` backed by
   `sourceAnomalies()`; do not hand-roll inline warning styles or symbols.
 - Five-grade effort selectors reuse
