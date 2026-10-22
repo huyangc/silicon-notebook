@@ -761,7 +761,8 @@ Homebrew warm gate。
   `rootModals.openAbove(slot, parent)` 打开。Esc、遮罩与焦点归还随即按协调器的
   「最上层先吃」规则走；不得在父层里为子层的 Esc 写特判。一次 Esc 按键经
   `requestClose(slot, "escape")` 至多关一层（协调器按按键记账），浏览器在 keydown
-  之后补发的关闭请求关不掉刚露出来的父层。
+  之后补发的关闭请求关不掉刚露出来的父层。不经协调器、在捕获期自己吃掉 Esc 的层，
+  对它吃掉的那一次按键调用 `claimEscapePress()`。
 - 来源活动异常只能经 `sourceAnomalies()` 支撑的 `AnomalyBadge` 渲染，不得手搓
   内联警告样式或符号。
 - 五档强度选择必须复用 `frontend/app/effort-picker.tsx::EffortPicker`，不得复制 range
