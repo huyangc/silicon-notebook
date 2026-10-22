@@ -21,7 +21,7 @@ pytestmark = [
 
 @pytest.fixture
 def world(postgres_settings):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
     from tests.model_testkit import RecordingModelProvider
 
     repository = PostgresRepository(
