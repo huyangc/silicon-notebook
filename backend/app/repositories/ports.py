@@ -4427,6 +4427,25 @@ class NotebookTooLargeToCopyError(ValueError):
     Subclasses ValueError so callers catching ValueError keep working."""
 
 
+@dataclass(frozen=True)
+class CopyRowsOutcome:
+    """What ``SharingStorePort.iter_copy_rows`` decided about the KG of the rows
+    it streamed, in the same transaction: ``starts_dirty`` -- the Memory-aware
+    statement set was used (the notebook holds a Memory source or is dirty), so
+    a notebook built from these rows must start marked for a KG rebuild;
+    ``clusters_dropped`` -- the notebook itself was dirty, so no cluster row was
+    streamed. The snapshot read tags its root row with the same decision
+    (``_copy_starts_dirty``); the streaming read reports it here instead."""
+
+    starts_dirty: bool
+    clusters_dropped: bool
+
+
+#: ``iter_copy_rows``'s per-table consumer: the table name and a lazy iterator
+#: of row pages, to be consumed before the call returns.
+CopyTableConsumer = Callable[[str, Iterator[list[dict]]], None]
+
+
 @runtime_checkable
 class SharingStorePort(Protocol):
     def bind_insert_row(self, insert_row: Callable) -> None: ...
@@ -4444,6 +4463,18 @@ class SharingStorePort(Protocol):
     def remove_member(self, notebook_id: str, user_id: str) -> None: ...
     def kick_all_members(self, notebook_id: str) -> None: ...
     def list_members(self, notebook_id: str) -> list: ...
+    # The copy closure streamed for an export: the snapshot's statement set
+    # (same Memory-aware choice), paged, in one read transaction, without the
+    # copy-size bounds. ``on_table`` is called once per closure table in
+    # snapshot order; tables in ``skip_tables`` get an empty page iterator and
+    # are not read. Raises ``KeyError`` for a missing or deleting notebook.
+    def iter_copy_rows(
+        self,
+        notebook_id: str,
+        *,
+        on_table: CopyTableConsumer,
+        skip_tables: frozenset[str] = frozenset(),
+    ) -> CopyRowsOutcome: ...
 
 
 class LastGroupAdminError(RuntimeError):

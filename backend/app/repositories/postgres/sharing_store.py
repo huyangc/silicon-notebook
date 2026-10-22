@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import threading
+import uuid
 
 import json
 from datetime import timedelta
-from typing import Callable, Sequence
+from typing import Callable, Iterator, Sequence
 
 from psycopg import sql
 from psycopg.errors import ForeignKeyViolation
@@ -16,12 +17,17 @@ from app.repositories.group_rows import (
     GROUP_GRANT_COUNT_SQL,
     GROUP_GRANT_EXISTS_SQL,
 )
-from app.repositories.ports import NotebookTooLargeToCopyError
+from app.repositories.ports import (
+    CopyRowsOutcome,
+    CopyTableConsumer,
+    NotebookTooLargeToCopyError,
+)
 from app.repositories.postgres._store_utils import (
     TimestampInput,
     iso_timestamp,
     normalized_clock,
     normalize_timestamp_row,
+    raise_statement_timeout_floor,
     sqlite_compatible_notebook_row,
     sqlite_compatible_row,
     utc_now,
@@ -37,7 +43,11 @@ from app.repositories.postgres.access_sql import (
     read_access_clause,
     read_access_params,
 )
-from app.repositories.copy_memory_evidence import strip_memory_evidence
+from app.repositories.copy_memory_evidence import (
+    EVIDENCE_TABLES,
+    strip_memory_evidence,
+    strip_row_memory_evidence,
+)
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.knowhow_history_store import record_change
 from app.repositories.postgres import memory_sql
@@ -735,6 +745,12 @@ def _snapshot_compat_row(table: str, row: dict) -> dict:
     return result
 
 
+#: Rows per FETCH of the streaming copy read (``SharingStore.iter_copy_rows``):
+#: the server-side cursor hands the client this many rows at a time, so peak
+#: client memory is one page whatever the notebook's size.
+COPY_STREAM_PAGE_ROWS = 2000
+
+
 class SharingStore:
     """PostgreSQL sharing/member rows and backend-neutral deep-copy primitives."""
 
@@ -1178,6 +1194,90 @@ class SharingStore:
         if connection.execute(_COPY_DIRTY_SQL, (notebook_id, notebook_id)).fetchone():
             return _MEMORY_COPY_SNAPSHOT_QUERIES
         return _COPY_SNAPSHOT_QUERIES
+
+    def iter_copy_rows(
+        self,
+        notebook_id: str,
+        *,
+        on_table: CopyTableConsumer,
+        skip_tables: frozenset[str] = frozenset(),
+    ) -> CopyRowsOutcome:
+        """Stream the copy closure for an export: ``snapshot_copy_rows``' tables,
+        statements and Memory rules, without its two copy-size bounds and
+        without ever holding more than one page of a table.
+
+        One REPEATABLE READ, READ ONLY transaction, pinned by the same
+        liveness-filtered root read the snapshot starts with (a missing or
+        deleting notebook raises ``KeyError``). The statement set comes from
+        ``_copy_queries`` -- the same probe, the same Memory-aware set -- and
+        each statement is read through its own named (server-side) cursor,
+        ``COPY_STREAM_PAGE_ROWS`` rows per FETCH, so ``statement_timeout``
+        bounds one FETCH rather than the whole consumption; it is raised to the
+        maintenance floor for this transaction because a cursor's first FETCH
+        may sort a whole table. Rows come out exactly as the snapshot's
+        (``_snapshot_compat_row``), Memory evidence stripped row by row and
+        Memory-member clusters dropped page by page; the snapshot's root tag
+        is reported as the returned ``CopyRowsOutcome`` instead.
+
+        ``on_table(table, pages)`` is called once per table in snapshot order
+        and must consume ``pages`` before returning (the cursor lives inside the
+        call). A table in ``skip_tables`` is not read: its consumer gets an empty
+        iterator."""
+        with self.database.connect() as connection:
+            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            root_table, root_query = _COPY_SNAPSHOT_QUERIES[0]
+            assert root_table == "notebooks"
+            roots = [
+                _snapshot_compat_row(root_table, row)
+                for row in connection.execute(root_query, (notebook_id,)).fetchall()
+            ]
+            if not roots:
+                raise KeyError(notebook_id)
+            raise_statement_timeout_floor(connection)
+            queries = self._copy_queries(connection, notebook_id)
+            memory = queries is _MEMORY_COPY_SNAPSHOT_QUERIES
+            clusters_dropped = memory and (
+                connection.execute(_SOURCE_DIRTY_SQL, (notebook_id,)).fetchone() is not None
+            )
+            memory_source_ids = frozenset(
+                row["id"]
+                for row in connection.execute(_MEMORY_SOURCE_IDS_SQL, (notebook_id,)).fetchall()
+            ) if memory else frozenset()
+            keys_box: dict = {}
+            on_table(root_table, iter([roots]))
+            for table, query in queries[1:]:
+                if table in skip_tables:
+                    on_table(table, iter(()))
+                    continue
+                on_table(table, self._copy_pages(
+                    connection, table, query, notebook_id,
+                    memory_source_ids if table in EVIDENCE_TABLES else frozenset(),
+                    keys_box if memory and table == "concept_clusters" else None,
+                ))
+        return CopyRowsOutcome(starts_dirty=memory, clusters_dropped=clusters_dropped)
+
+    @staticmethod
+    def _copy_pages(
+        connection, table: str, query: str, notebook_id: str,
+        memory_source_ids: frozenset, keys_box: "dict | None",
+    ) -> Iterator[list[dict]]:
+        """One copy statement through a named cursor, a page at a time. Clusters
+        are diffed against the Memory-member set (``keys_box`` is not None),
+        read once, on the first page that has a cluster row."""
+        with connection.cursor(name=f"copy_rows_{uuid.uuid4().hex}") as cursor:
+            cursor.execute(query, (notebook_id,))
+            while True:
+                fetched = cursor.fetchmany(COPY_STREAM_PAGE_ROWS)
+                if not fetched:
+                    return
+                page = [_snapshot_compat_row(table, row) for row in fetched]
+                for row in page:
+                    strip_row_memory_evidence(row, memory_source_ids)
+                if keys_box is not None:
+                    page = _drop_memory_member_clusters(
+                        page, _member_keys_once(connection, notebook_id, keys_box)
+                    )
+                yield page
 
     def _copy_limit_violation(
         self,
