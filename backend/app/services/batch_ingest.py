@@ -41,6 +41,7 @@ from app.services.image_backfill_phase import (
     ImageBackfillRefused,
     run_backfill_images,
 )
+from app.services.knowhow.api import fill_missing_knowhow_chunk_vectors
 from app.services.knowledge_lifecycle import ModelSkipPolicy
 from app.services.offline_batch import (
     OfflineBatchPolicy,
@@ -605,23 +606,16 @@ def _report_scale_index_not_updated(
     log({"phase": phase, "status": "scale_index_not_updated"})
 
 
-def backfill_chunk_embeddings(
-    repo: BatchIngestRepository,
-    notebook_id: str,
-    missing_only: bool = False,
+def _backfill_missing_chunk_embeddings(
+    repo: BatchIngestRepository, notebook_id: str
 ) -> int:
-    """补该 notebook 的 chunk 向量(低并发)。EMBED 未配则跳过。
-
-    - missing_only=False(默认):遍历每个 source 调 _embed_chunks_for_source 全量重嵌
-      (INSERT OR REPLACE upsert),返回处理的 *source* 数。
-    - missing_only=True:只补缺向量的 chunk(NOT EXISTS),一次 _embed_chunks_batch,
-      返回补的 *chunk* 数(无缺失则跳过返回 0)。
-    """
-    if not repo.configured("chunk_embedding"):
-        return 0
-    mnt = repo.maintenance
-    if missing_only:
-        total = 0
+    """``embed --missing-only``'s chunk half: document chunks by keyset page with
+    ``chunk_embedding``, then Knowhow chunks with ``knowhow_embedding``. Returns the
+    number of chunks it tried to embed (as before: missing rows found, not vectors
+    written)."""
+    total = 0
+    if repo.configured("chunk_embedding"):
+        mnt = repo.maintenance
         after_id = ""
         while rows := mnt.missing_chunk_embedding_page(
             notebook_id, after_id=after_id, limit=_EMBED_PAGE_ROWS
@@ -634,10 +628,35 @@ def backfill_chunk_embeddings(
             total += len(items)
             after_id = str(rows[-1]["id"])
             print(f"[embed] 已补 chunk 向量:{total}", flush=True)
-        if total == 0:
-            print("[embed] 无缺失 chunk 向量,跳过", flush=True)
-            return 0
-        return total
+    if repo.configured("knowhow_embedding"):
+        found, written = fill_missing_knowhow_chunk_vectors(repo, notebook_id)
+        if found:
+            total += found
+            print(f"[embed] 已补 knowhow chunk 向量:{written}/{found}", flush=True)
+    if total == 0:
+        print("[embed] 无缺失 chunk 向量,跳过", flush=True)
+    return total
+
+
+def backfill_chunk_embeddings(
+    repo: BatchIngestRepository,
+    notebook_id: str,
+    missing_only: bool = False,
+) -> int:
+    """补该 notebook 的 chunk 向量(低并发)。EMBED 未配则跳过。
+
+    - missing_only=False(默认):遍历每个 source 调 _embed_chunks_for_source 全量重嵌
+      (INSERT OR REPLACE upsert),返回处理的 *source* 数。
+    - missing_only=True:只补缺向量的 chunk(NOT EXISTS),返回补的 *chunk* 数(无缺失则
+      跳过返回 0)。文档 chunk 走 chunk_embedding(分页发现不含 knowhow 隐藏源);knowhow
+      表的 chunk 走它自己的 knowhow_embedding(``fill_missing_knowhow_chunk_vectors``:
+      按表持投影锁、成批嵌入、不重投影),两半各看各自的 workload 是否已绑定。
+    """
+    if missing_only:
+        return _backfill_missing_chunk_embeddings(repo, notebook_id)
+    if not repo.configured("chunk_embedding"):
+        return 0
+    mnt = repo.maintenance
 
     done = 0
     scanned = 0

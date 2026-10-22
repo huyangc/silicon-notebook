@@ -234,9 +234,12 @@ def test_backfill_refuses_pending_pipeline_before_submit(tmp_path, monkeypatch):
 
     from app.api.source_routes import _backfill_vectors_job
     from app.domain.indexing_pipeline import IndexingPipelineUnavailableError
+    from app.services import notebook_reembed
 
+    notebook_reembed.NotebookReembedService.claim(nb, notebook_reembed.SOURCE_VECTOR_LEGS)
     with pytest.raises(IndexingPipelineUnavailableError):
         _backfill_vectors_job(repo, nb)
+    assert nb not in notebook_reembed._active_runs
 
 
 def test_backfill_vectors_accepts_and_schedules(tmp_path, monkeypatch):
@@ -394,16 +397,15 @@ def test_backfill_vectors_inflight_second_request_is_idempotent(tmp_path, monkey
     monkeypatch.setattr(repo.maintenance, "count_missing_chunk_vectors", _boom)
     monkeypatch.setattr(repo.maintenance, "count_missing_element_vectors", _boom)
 
-    with notebook_reembed._inflight_lock:
-        notebook_reembed._inflight.add(nb)
+    service = notebook_reembed.NotebookReembedService
+    assert service.claim(nb, notebook_reembed.SOURCE_VECTOR_LEGS).started
     try:
         r = client.post(f"/api/notebooks/{nb}/backfill-vectors", headers=headers)
         assert r.status_code == 200, r.text
         assert r.json()["accepted"] is True
         assert len(calls) == 0  # 幂等受理:不重复提交
     finally:
-        with notebook_reembed._inflight_lock:
-            notebook_reembed._inflight.discard(nb)
+        service.release(nb)
 
 
 def test_backfill_vectors_not_inflight_is_admitted_and_registers_guard(
@@ -435,11 +437,11 @@ def test_backfill_vectors_not_inflight_is_admitted_and_registers_guard(
 
     deadline = time.monotonic() + 5
     while (
-        nb in notebook_reembed._inflight
+        nb in notebook_reembed._active_runs
         and time.monotonic() < deadline
     ):
         time.sleep(0.01)
-    assert nb not in notebook_reembed._inflight  # job 结束后守卫已释放
+    assert nb not in notebook_reembed._active_runs  # job 结束后守卫已释放
 
 
 def test_backfill_job_discovery_failure_is_logged_and_finally_still_runs(
@@ -475,15 +477,14 @@ def test_backfill_job_discovery_failure_is_logged_and_finally_still_runs(
         lambda notebook_id: noted.append(notebook_id),
     )
 
-    with notebook_reembed._inflight_lock:
-        notebook_reembed._inflight.add(nb)
+    notebook_reembed.NotebookReembedService.claim(nb, notebook_reembed.SOURCE_VECTOR_LEGS)
 
     with caplog.at_level(logging.ERROR, logger="silicon_notebook.backfill_vectors"):
         source_routes._backfill_vectors_job(repo, nb)  # 必须不向上抛
 
     assert noted == [nb]  # finally 仍然跑了(H4/H5 边界失效通知)
     assert "backfill-vectors job 失败" in caplog.text
-    assert nb not in notebook_reembed._inflight  # 单飞守卫已释放
+    assert nb not in notebook_reembed._active_runs  # 单飞守卫已释放
 
 
 def test_reparse_rejects_hidden_projection_source(tmp_path, monkeypatch):

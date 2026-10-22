@@ -38,6 +38,15 @@ def repo(tmp_path, monkeypatch):
 
 
 # ------------------------------------------------------------------ helpers
+def _claim_backfill(notebook_id):
+    """Take the shared guard the way the route does before its job runs (the job only
+    executes a claimed run)."""
+    claimed = notebook_reembed.NotebookReembedService.claim(
+        notebook_id, notebook_reembed.SOURCE_VECTOR_LEGS
+    )
+    assert claimed.started
+
+
 def _check(result, code):
     return next(c for c in result.checks if c.code == code)
 
@@ -439,6 +448,7 @@ def test_backfill_job_embeds_under_per_source_lock(repo, monkeypatch):
 
     monkeypatch.setattr(mnt, "embed_elements_batch", _spy_elem)
     monkeypatch.setattr(mnt, "embed_chunks_batch", lambda notebook_id, items: None)
+    _claim_backfill(nb.id)
     source_routes._backfill_vectors_job(repo, nb.id)
     assert seen.get("locked") is True   # 锁内嵌
     assert seen.get("sources") == {sid}
@@ -818,6 +828,7 @@ def test_backfill_job_end_invalidates_h45_via_facade_wiring(repo):
     first = repo.checkup.run(nb.id)
     assert _check(first, "H4").count == 1                        # 缓存住修复前计数
     assert _check(first, "H5").count == 1
+    _claim_backfill(nb.id)
     _backfill_vectors_job(repo, nb.id)           # 直接同步跑真 job(不经 scheduler)
     second = repo.checkup.run(nb.id)
     assert _check(second, "H4").count == 0                       # job 边界事件,立即可见
@@ -846,6 +857,7 @@ def test_backfill_job_notifies_h45_exactly_once(repo, monkeypatch):
     repo._runtime.on_source_vectors_written = (
         lambda notebook_id: (calls.append(notebook_id), forward(notebook_id))[-1]
     )
+    _claim_backfill(nb.id)
     source_routes._backfill_vectors_job(repo, nb.id)
     assert calls == [nb.id]
 
@@ -1201,13 +1213,9 @@ def test_backfill_page_rows_is_a_multiple_of_embed_batch_size(repo):
         def __init__(self, size):
             self.embed_batch_size = size
 
-    class _FakeRuntime:
-        def __init__(self, size):
-            self.settings = _FakeSettings(size)
-
     class _FakeRepo:
         def __init__(self, size):
-            self._runtime = _FakeRuntime(size)
+            self.settings = _FakeSettings(size)  # the facade's public settings
 
     for size in (1, 7, 10, 32, 64, 300, 700):
         page = notebook_reembed._backfill_page_rows(_FakeRepo(size))
@@ -1276,6 +1284,7 @@ def test_backfill_job_discovers_once_then_hydrates_by_page(repo, monkeypatch):
     )
     monkeypatch.setattr(mnt, "embed_chunks_batch", lambda notebook_id, items: None)
 
+    _claim_backfill(nb.id)
     source_routes._backfill_vectors_job(repo, nb.id)
 
     # ① 单次扫描:该源只发现了一次,且限定在本源上。
@@ -1334,6 +1343,7 @@ def test_backfill_job_discovers_chunks_once_too(repo, monkeypatch):
         lambda notebook_id, items: embedded.append([it["_oid"] for it in items]),
     )
 
+    _claim_backfill(nb.id)
     source_routes._backfill_vectors_job(repo, nb.id)
 
     assert discoveries == [sid]                          # 一次发现,不是每页一次
@@ -1364,6 +1374,7 @@ def test_backfill_job_discovers_once_per_source(repo, monkeypatch):
     monkeypatch.setattr(mnt, "embed_elements_batch", lambda notebook_id, items: len(items))
     monkeypatch.setattr(mnt, "embed_chunks_batch", lambda notebook_id, items: None)
 
+    _claim_backfill(nb.id)
     source_routes._backfill_vectors_job(repo, nb.id)
 
     assert sorted(seen) == sorted(sids)      # 每个源恰好一次,不多不少

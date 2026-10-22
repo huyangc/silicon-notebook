@@ -65,6 +65,18 @@ VECTOR_TABLES = (
 )
 _VECTOR_TABLE_IDS = dict(VECTOR_TABLES)
 
+# The generic chunk-vector discovery (rows / ids / page / DISTINCT source ids) leaves
+# Knowhow hidden sources out: their chunks belong to ``knowhow_embedding`` and are filled
+# by ``KnowhowProjector.fill_missing_chunk_vectors``. ``count_missing_chunk_vectors``
+# (checkup H4) still counts them -- the repair fills them through that other path.
+_NOT_KNOWHOW_CHUNK = (
+    " AND NOT EXISTS (SELECT 1 FROM sources ks "
+    "WHERE ks.id=c.source_id AND ks.source_type='knowhow')"
+)
+
+# Relation ids discovered per page by ``backfill_relation_embeddings``.
+_RELATION_PAGE_SIZE = 500
+
 # PY_WHITESPACE(= Python str.strip() \u7684\u5168\u96c6)\u73b0\u79fb\u5230\u540e\u7aef\u4e2d\u6027\u7684
 # app.repositories.text_whitespace,\u4f9b sqlite/postgres maintenance \u5171\u7528\u540c\u4e00\u4efd TRIM charset
 # (\u89c1\u8be5\u6a21\u5757 docstring)\u3002\u8fd9\u91cc\u4ece\u9876\u90e8 import \u518d\u5bfc\u51fa,test_batch_ingest \u4ecd\u53ef\u4ece\u672c\u6a21\u5757\u53d6\u3002
@@ -703,7 +715,7 @@ class SQLiteMaintenanceAdapter:
                 for r in db.execute(
                     "SELECT c.id, c.source_id, c.text FROM chunks c WHERE c.notebook_id=? "
                     "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
-                    "WHERE e.chunk_id=c.id)" + clause,
+                    "WHERE e.chunk_id=c.id)" + _NOT_KNOWHOW_CHUNK + clause,
                     tuple(params),
                 ).fetchall()
             ]
@@ -778,7 +790,7 @@ class SQLiteMaintenanceAdapter:
                 for r in db.execute(
                     "SELECT c.id FROM chunks c WHERE c.notebook_id=? "
                     "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
-                    "WHERE e.chunk_id=c.id)" + clause + " ORDER BY c.id",
+                    "WHERE e.chunk_id=c.id)" + _NOT_KNOWHOW_CHUNK + clause + " ORDER BY c.id",
                     tuple(params),
                 ).fetchall()
             ]
@@ -891,7 +903,8 @@ class SQLiteMaintenanceAdapter:
                     "SELECT c.id, c.source_id, c.text FROM chunks c "
                     "WHERE c.notebook_id=? AND c.id>? "
                     "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
-                    "WHERE e.chunk_id=c.id)" + clause + " ORDER BY c.id LIMIT ?",
+                    "WHERE e.chunk_id=c.id)" + _NOT_KNOWHOW_CHUNK + clause
+                    + " ORDER BY c.id LIMIT ?",
                     tuple(params),
                 ).fetchall()
             ]
@@ -940,7 +953,8 @@ class SQLiteMaintenanceAdapter:
                 r["source_id"]
                 for r in db.execute(
                     "SELECT DISTINCT c.source_id FROM chunks c WHERE c.notebook_id=? "
-                    "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id=c.id)",
+                    "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id=c.id)"
+                    + _NOT_KNOWHOW_CHUNK,
                     (notebook_id,),
                 ).fetchall()
             ]
@@ -1051,8 +1065,18 @@ class SQLiteMaintenanceAdapter:
             {"id": r["id"], "payload": json.loads(r["payload"] or "{}")} for r in rows
         ]
 
-    def backfill_node_embeddings(self, notebook_id: str, progress=None) -> int:
-        """Embed missing object vectors in bounded pages without holding DB."""
+    def backfill_node_embeddings(
+        self,
+        notebook_id: str,
+        progress=None,
+        tally: Optional[Callable[[int, int], None]] = None,
+    ) -> int:
+        """Embed missing object vectors in bounded pages without holding DB.
+
+        ``progress`` gets ``(objects scanned, objects total)``; ``tally`` gets running
+        ``(written, attempted)`` after each page, where attempted counts only missing
+        objects with embeddable payload text (what ``embed_objects_batch`` embeds), so
+        an object without text is never reported as left missing."""
         with self._runtime.database.connect() as db:
             total = int(db.execute(
                 "SELECT COUNT(*) c FROM knowledge_objects "
@@ -1062,6 +1086,7 @@ class SQLiteMaintenanceAdapter:
         after_id = ""
         scanned = 0
         embedded = 0
+        attempted = 0
         while True:
             with self._runtime.database.connect() as db:
                 rows = db.execute(
@@ -1082,11 +1107,22 @@ class SQLiteMaintenanceAdapter:
                 if not row["embedded"]
             ]
             if missing:
+                page = [0]  # embeddable objects of this page, as embed_objects_batch counts
+
+                def _page_total(_done: int, page_total: int, _box=page) -> None:
+                    _box[0] = page_total
+
+                # Asked for only when someone tallies: other callers keep the
+                # two-argument call they always made.
+                extra = {"progress": _page_total} if tally else {}
                 embedded += self._runtime.source_embedding.embed_objects_batch(
-                    notebook_id, missing
+                    notebook_id, missing, **extra
                 )
+                attempted += page[0]
             if progress:
                 progress(scanned, total)
+            if tally:
+                tally(embedded, attempted)
             if len(rows) < 500:
                 break
         return embedded
@@ -1159,28 +1195,47 @@ class SQLiteMaintenanceAdapter:
     ) -> int:
         """给缺向量的关系补 relation_embeddings(幂等,只补缺失),返回落库的向量数。
 
-        系统未绑定 ``relation_embedding`` 工作负载时 no-op(返回 0)。``progress`` 收
-        ``(已落库, 已尝试)`` 的累计值:已尝试 = 缺向量且可查询的关系数,差值是本轮失败批
-        留下的缺口(notebook_reembed 据此报告剩余)。
+        与 PostgreSQL 同形:按 id keyset 分页发现缺向量的关系(每页 ``_RELATION_PAGE_SIZE``),
+        发现读放掉之后才按这一页的 id hydrate 名字与证据、调模型——不再一次把全库关系和全部
+        已有向量 id 读进内存。系统未绑定 ``relation_embedding`` 工作负载时 no-op(返回 0)。
+        ``progress`` 每页收一次 ``(已落库, 已尝试)`` 累计值:已尝试 = 缺向量、可查询且文本
+        非空的关系数(与 embed_relations_batch 的过滤同口径),差值是失败批留下的缺口。
         Canonical body (Task 27) — the facade keeps a frozen-signature delegate."""
         if not self._runtime.models.configured("relation_embedding"):
             return 0
-        relations = self._retrieval().relations_with_names(notebook_id)
-        with self._runtime.database.connect() as db:
-            have = self._runtime.embedding_store.embedded_relation_ids(db, notebook_id)
-        missing = [
-            {"_rid": r["id"], "text": r["text"]}
-            for r in relations
-            if r["id"] not in have
-        ]
+        after_id = ""
         written = 0
-        if missing:
-            written = int(
-                self._runtime.source_embedding.embed_relations_batch(notebook_id, missing)
-                or 0
-            )
-        if progress:
-            progress(written, len(missing))
+        attempted = 0
+        while True:
+            with self._runtime.database.connect() as db:
+                relation_ids = [
+                    str(row["id"])
+                    for row in db.execute(
+                        "SELECT r.id FROM knowledge_relations r "
+                        "WHERE r.notebook_id=? AND r.id>? "
+                        "AND NOT EXISTS (SELECT 1 FROM relation_embeddings e "
+                        "WHERE e.relation_id=r.id) ORDER BY r.id LIMIT ?",
+                        (notebook_id, after_id, _RELATION_PAGE_SIZE),
+                    ).fetchall()
+                ]
+            if not relation_ids:
+                break
+            after_id = relation_ids[-1]
+            items = [
+                {"_rid": str(r["id"]), "text": r["text"]}
+                for r in self._retrieval().relations_with_names(notebook_id, relation_ids)
+                if str(r.get("text") or "").strip()
+            ]
+            if items:
+                attempted += len(items)
+                written += int(
+                    self._runtime.source_embedding.embed_relations_batch(notebook_id, items)
+                    or 0
+                )
+            if progress:
+                progress(written, attempted)
+            if len(relation_ids) < _RELATION_PAGE_SIZE:
+                break
         return written
 
     def mark_unified_kg_dirty(self, notebook_id: str) -> None:

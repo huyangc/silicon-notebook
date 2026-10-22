@@ -465,6 +465,8 @@ _REGISTRY: dict[str, dict[str, str]] = {
             "ReadOnlySQLiteInspector.concept_id_names",
             "ReadOnlySQLiteInspector.concept_names",
             "SQLiteMaintenanceAdapter.backfill_node_embeddings",
+            # now pages knowledge_relations itself, like its PostgreSQL twin
+            "SQLiteMaintenanceAdapter.backfill_relation_embeddings",
             "SQLiteMaintenanceAdapter.backfill_source_fact_batch",
             "SQLiteMaintenanceAdapter.backfill_source_index_batch",
             "SQLiteMaintenanceAdapter.begin_source_index_backfill",

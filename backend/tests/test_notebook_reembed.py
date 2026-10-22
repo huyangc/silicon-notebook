@@ -10,16 +10,20 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
+from app.repositories.sqlite import maintenance as sqlite_maintenance
 from app.services import background_jobs, notebook_reembed
 from app.services.notebook_reembed import LEGS, NotebookReembedService, ReembedInFlight
 from app.services.sqlite_repository import SQLiteRepository
 from tests import notebook_reembed_cases as cases
+
+# Runs share the process-wide heavy pool with whatever else a test queued; wait on the
+# run's own completion event with room to spare rather than polling a short clock.
+_WAIT_SECONDS = 120
 
 
 def _insert(db, table: str, values: dict) -> None:
@@ -33,7 +37,10 @@ def _insert(db, table: str, values: dict) -> None:
     )
 
 
-BACKEND = cases.Backend(name="sqlite", insert=_insert, placeholder="?")
+BACKEND = cases.Backend(
+    name="sqlite", insert=_insert, placeholder="?",
+    maintenance_module=sqlite_maintenance, relation_page_attr="_RELATION_PAGE_SIZE",
+)
 
 
 def _env(monkeypatch, tmp_path) -> None:
@@ -60,8 +67,16 @@ def test_every_vector_comes_back_once(repo):
     cases.check_every_vector_comes_back_once(repo, BACKEND)
 
 
-def test_backfill_job_keeps_knowhow_chunks_on_their_workload(repo):
-    cases.check_backfill_job_keeps_knowhow_chunks_on_their_workload(repo, BACKEND)
+def test_backfill_job_fills_knowhow_without_touching_the_graph(repo):
+    cases.check_backfill_job_fills_knowhow_without_touching_the_graph(repo, BACKEND)
+
+
+def test_knowhow_fill_skips_a_chunk_rewritten_mid_call(repo):
+    cases.check_knowhow_fill_skips_a_chunk_rewritten_mid_call(repo, BACKEND)
+
+
+def test_offline_missing_only_embed_keeps_knowhow_on_its_workload(repo):
+    cases.check_offline_missing_only_embed_keeps_knowhow_on_its_workload(repo, BACKEND)
 
 
 def test_object_vectors_mark_the_graph_dirty(repo):
@@ -74,6 +89,22 @@ def test_model_failure_is_visible_and_resumes(repo):
 
 def test_unbound_workload_is_visible(repo):
     cases.check_unbound_workload_is_visible(repo, BACKEND)
+
+
+def test_a_failed_discovery_fails_its_leg(repo, monkeypatch):
+    cases.check_a_failed_discovery_fails_its_leg(repo, BACKEND, monkeypatch)
+
+
+def test_a_pipeline_switch_aborts_the_pass(repo, monkeypatch):
+    cases.check_a_pipeline_switch_aborts_the_pass(repo, BACKEND, monkeypatch)
+
+
+def test_relation_backfill_pages(repo, monkeypatch):
+    cases.check_relation_backfill_pages(repo, BACKEND, monkeypatch)
+
+
+def test_object_leg_keeps_its_count_when_it_fails(repo, monkeypatch):
+    cases.check_object_leg_keeps_its_count_when_it_fails(repo, BACKEND, monkeypatch)
 
 
 # --- single flight, follow-up pass, shared guard ---------------------------------
@@ -90,51 +121,97 @@ class _Gate:
         def _blocking(texts):
             if not self.entered.is_set():
                 self.entered.set()
-                assert self.release.wait(timeout=10)
+                assert self.release.wait(timeout=_WAIT_SECONDS)
             return inner(texts)
 
         embedder.embed_texts = _blocking
 
 
-def _wait_finished(run_id: str, timeout: float = 10.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        status = NotebookReembedService.status(run_id)
-        if status is not None and status.state != "running":
-            return status
-        time.sleep(0.01)
-    raise AssertionError(f"run {run_id} never finished")
+def _finished(run_id: str):
+    status = NotebookReembedService.wait(run_id, timeout=_WAIT_SECONDS)
+    assert status is not None and status.state != "running", status
+    return status
 
 
-def test_a_second_request_joins_the_run_in_flight(repo):
-    """While a run is in flight, a second request for the notebook starts nothing: legs
-    the current pass runs are covered by it, the others run in one follow-up pass of the
-    same run. Nothing embeds twice, and the guard is released only after that pass."""
+def _add_document_chunk(repo, notebook_id: str, chunk_id: str, text: str) -> None:
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,"
+            "created_at) VALUES (?,?,?,?,'','[]',?)",
+            (chunk_id, notebook_id, f"src-doc-{notebook_id}", text, cases._NOW),
+        )
+
+
+def test_a_leg_whose_discovery_already_ran_runs_again(repo):
+    """A request joining after the current pass began discovering a leg is not covered
+    by that pass: the leg runs once more, so a gap that appeared after discovery is
+    filled before the run ends. ``embedded`` adds up over both passes."""
     world = cases.build_world(repo, BACKEND)
     nb = world.notebook_id
-    cases.delete_vectors(repo, BACKEND, nb)
+    cases.delete_vectors(repo, BACKEND, nb, tables=("chunk_embeddings",))
     gate = _Gate(world.embedders["chunk_embedding"])
     service = NotebookReembedService(repo)
 
     first = service.submit(nb, legs=["chunks"])
     assert first.started
-    assert gate.entered.wait(timeout=10)
-    joined = service.submit(nb, legs=["chunks", "kg_objects"])
+    assert gate.entered.wait(timeout=_WAIT_SECONDS)  # discovery done, embedding
+    _add_document_chunk(repo, nb, f"ck-late-{nb}", "a chunk that arrived late")
+    joined = service.submit(nb, legs=["chunks"])
+    assert (joined.run_id, joined.started) == (first.run_id, False)
     with pytest.raises(ReembedInFlight):
         service.run(nb, legs=["elements"])
-    assert (joined.run_id, joined.started) == (first.run_id, False)
-    assert nb in notebook_reembed._inflight
     gate.release.set()
 
-    status = _wait_finished(first.run_id)
+    status = _finished(first.run_id)
     assert status.state == "succeeded", status
     assert status.passes == 2
-    assert status.legs == ("chunks", "kg_objects")
-    assert nb not in notebook_reembed._inflight
-    chunk_calls = world.embedders["chunk_embedding"].calls
-    assert len(chunk_calls) == len({tuple(call) for call in chunk_calls})  # no repeat
-    assert world.embedders["knowledge_object_embedding"].calls
+    assert f"ck-late-{nb}" in cases.vector_ids(repo, BACKEND, nb)["chunk_embeddings"]
+    assert status.progress["chunks"].embedded == (
+        cases.DOC_CHUNKS + 1 + cases.KNOWHOW_CHUNKS
+    )
     assert world.embedders["source_element_embedding"].calls == []
+    assert nb not in notebook_reembed._active_runs
+
+
+def test_a_leg_not_started_yet_covers_a_joining_request(repo):
+    """A request for a leg the current pass has not reached yet is covered by that pass:
+    no second pass, each object embedded once; a leg the run does not have at all is
+    added to a follow-up pass."""
+    world = cases.build_world(repo, BACKEND)
+    nb = world.notebook_id
+    cases.delete_vectors(repo, BACKEND, nb, tables=("chunk_embeddings", "knowledge_embeddings"))
+    gate = _Gate(world.embedders["chunk_embedding"])
+    service = NotebookReembedService(repo)
+
+    first = service.submit(nb, legs=["chunks", "kg_objects"])
+    assert gate.entered.wait(timeout=_WAIT_SECONDS)  # in the chunk leg
+    assert service.join_running(nb, ["kg_objects"])
+    gate.release.set()
+
+    status = _finished(first.run_id)
+    assert status.state == "succeeded", status
+    assert status.passes == 1
+    objects = world.embedders["knowledge_object_embedding"].texts
+    assert len(objects) == len(set(objects))  # each object embedded once
+
+
+def test_run_claimed_has_exactly_one_executor(repo):
+    """The job body executes only a claimed run, and only once at a time."""
+    world = cases.build_world(repo, BACKEND)
+    nb = world.notebook_id
+    service = NotebookReembedService(repo)
+    with pytest.raises(ValueError):
+        service.run_claimed(nb)
+    cases.delete_vectors(repo, BACKEND, nb, tables=("chunk_embeddings",))
+    gate = _Gate(world.embedders["chunk_embedding"])
+    running = service.submit(nb, legs=["chunks"])
+    assert gate.entered.wait(timeout=_WAIT_SECONDS)
+    try:
+        with pytest.raises(RuntimeError):
+            service.run_claimed(nb)
+    finally:
+        gate.release.set()
+    assert _finished(running.run_id).state == "succeeded"
 
 
 def test_unknown_or_empty_legs_are_refused(repo):
@@ -142,7 +219,7 @@ def test_unknown_or_empty_legs_are_refused(repo):
     for legs in ([], ["chunks", "vectors"]):
         with pytest.raises(ValueError):
             service.submit("nb-x", legs=legs)
-    assert "nb-x" not in notebook_reembed._inflight
+    assert "nb-x" not in notebook_reembed._active_runs
 
 
 def test_submission_runs_in_the_heavy_pool_and_failure_stays_inside(repo):
@@ -160,10 +237,10 @@ def test_submission_runs_in_the_heavy_pool_and_failure_stays_inside(repo):
             ("pending:generation", nb),
         )
     submission = NotebookReembedService(repo).submit(nb, legs=LEGS)
-    status = _wait_finished(submission.run_id)
+    status = _finished(submission.run_id)
     assert status.state == "failed"
     assert status.error == "IndexingPipelineUnavailableError"
-    assert nb not in notebook_reembed._inflight
+    assert nb not in notebook_reembed._active_runs
 
 
 def test_finished_runs_are_kept_up_to_the_history_bound(repo, monkeypatch):
@@ -216,13 +293,13 @@ def test_backfill_vectors_endpoint_and_reembed_share_one_guard(tmp_path, monkeyp
     gate = _Gate(world.embedders["knowledge_object_embedding"])
     service = NotebookReembedService(repo)
     running = service.submit(nb, legs=["kg_objects"])
-    assert gate.entered.wait(timeout=10)
+    assert gate.entered.wait(timeout=_WAIT_SECONDS)
     response = client.post(f"/api/notebooks/{nb}/backfill-vectors", headers=headers)
     assert response.status_code == 200, response.text
     assert response.json()["accepted"] is True
     assert scheduled == []
     gate.release.set()
-    status = _wait_finished(running.run_id)
+    status = _finished(running.run_id)
     assert status.legs == ("chunks", "elements", "kg_objects")
     assert status.state == "succeeded", status
 
@@ -238,4 +315,4 @@ def test_backfill_vectors_endpoint_and_reembed_share_one_guard(tmp_path, monkeyp
     status = NotebookReembedService.status(joined.run_id)
     assert status.state == "succeeded", status
     assert status.legs == ("chunks", "elements", "kg_relations")
-    assert nb not in notebook_reembed._inflight
+    assert nb not in notebook_reembed._active_runs

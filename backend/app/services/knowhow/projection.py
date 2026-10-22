@@ -312,6 +312,53 @@ class KnowhowProjector:
             self.knowhow.set_knowhow_hidden_source(table_id, source_id, connection=db)
         return source_id
 
+    # ------------------------------------------------------- vector backfill
+    def fill_missing_chunk_vectors(
+        self, table_id: str, *, source_id: str, notebook_id: str
+    ) -> "tuple[int, int]":
+        """Embed the table's chunks that have no vector, and nothing else.
+
+        The backfill path for Knowhow chunks (``notebook_reembed``'s chunk leg and the
+        offline ``embed --missing-only``): unlike a reprojection it rewrites no element,
+        chunk, object or edge, so relation vectors are kept, ``kg_mutation_seq`` does not
+        move and row projection statuses do not flicker. It holds the table's projection
+        lock like a projection does, finds the hidden source's chunks without a
+        (decodable) vector with the same probe as ``_write_chunks``' self-heal, and embeds
+        them with ``knowhow_embedding`` in ``embed_batch_size`` calls. Returns
+        ``(missing found, vectors written)``; a failed model call leaves its rows
+        missing."""
+        with self.database.table_projection_lock(table_id):
+            with self.database.connect() as db:
+                rows = {
+                    str(r["id"]): str(r["text"])
+                    for r in self.chunks.rows_by_id_prefix(db, source_id, "chunk-kh-")
+                }
+                have = {
+                    r["vid"]
+                    for r in self.embedding.vectors.rows_by_ids(
+                        db, "chunk_embeddings", "chunk_id", list(rows)
+                    )
+                    if decode_vector(r["vector"]) is not None
+                }
+            missing = [
+                {"id": chunk_id, "text": text}
+                for chunk_id, text in sorted(rows.items())
+                if chunk_id not in have and text
+            ]
+
+            def _still_current(chunk_ids: "list[str]") -> set:
+                with self.database.connect() as db:
+                    now = {
+                        str(r["id"]): str(r["text"])
+                        for r in self.chunks.rows_by_id_prefix(db, source_id, "chunk-kh-")
+                    }
+                return {cid for cid in chunk_ids if now.get(cid) == rows.get(cid)}
+
+            written = self.embedding.embed_knowhow_chunks_batch(
+                notebook_id, missing, still_current=_still_current
+            )
+        return len(missing), int(written or 0)
+
     # ------------------------------------------------------------- project
     def project_table(self, table_id: str, *, embed: bool = True) -> str:
         """THE projection entry point (single-flight full-table pass): for

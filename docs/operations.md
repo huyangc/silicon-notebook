@@ -2297,21 +2297,29 @@ has no vector, so a run over a complete notebook makes no model call. Two entrie
 What to expect:
 
 - **One run per notebook.** The two entries share one in-process guard. A request while a
-  run is in flight joins it instead of starting a second one: legs the current pass is
-  running are covered, the others run in one more pass before the run ends. The guard and the
-  run records live in the API process only; a restart loses them (rerunning is safe).
-- **Knowhow tables keep their own model.** A table's chunks belong to `knowhow_embedding`, so
-  the chunk leg never embeds them with `chunk_embedding` (the repair button used to); it
-  reprojects the table instead, whose self-heal embeds every chunk left without a vector. A
-  reprojection rewrites the table's graph objects and edges as any edit does: object vectors
-  survive (stable ids), the table's relation vectors are dropped until a relation leg runs
-  (the repair button does not run one), and the unified graph is marked out of date.
+  run is in flight joins it instead of starting a second one: a leg the current pass has not
+  started yet covers it; any other leg (one already being discovered, or one the run does
+  not have) runs in one more pass before the run ends, possibly on the other entry's pool.
+  The guard and the run records live in the API process only; a restart loses them
+  (rerunning is safe).
+- **Knowhow tables keep their own model, and only vectors are written.** A table's chunks
+  belong to `knowhow_embedding`, so the chunk leg never embeds them with `chunk_embedding`
+  (the repair button used to). It fills the table's chunks that have no vector in
+  `embed_batch_size` calls under the table's projection lock, and rewrites nothing else: the
+  table is not reprojected, so its graph objects, edges and their vectors, the unified graph's
+  state and the rows' projection status are untouched. The offline `embed --missing-only`
+  does the same.
 - **Object vectors mark the unified graph out of date** when a pass wrote any, so the next
   unified rebuild does not skip on unchanged counts.
-- **Failures stay inside the job.** A leg whose workload is unbound is reported as skipped; a
-  failed model batch leaves its rows missing and the leg incomplete; an error is logged under
-  `silicon_notebook.backfill_vectors`. In every case what was written stays, and the next run
-  picks up the rest.
+- **Only embeddable rows count.** A blank chunk, an object without payload text or a
+  relation without text never gets a vector, so it is never reported as missing.
+- **A pipeline switch aborts the pass.** The indexing-pipeline gate is checked before each
+  leg and at every source lock; when it refuses, the run fails and the guard is released.
+- **Failures stay inside the job.** A leg whose workload is unbound is reported as skipped (a
+  chunk leg missing only one of its two workloads runs the other half and names the missing
+  one); a failed model batch leaves its rows missing and the leg incomplete; a failed read
+  fails the leg; errors are logged under `silicon_notebook.backfill_vectors`. In every case
+  what was written stays, and the next run picks up the rest.
 
 ## PostgreSQL notebook-aware lexical indexes
 

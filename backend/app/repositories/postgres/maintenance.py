@@ -51,6 +51,14 @@ logger = logging.getLogger("silicon_notebook.postgres.maintenance")
 # lock. The dedicated session remains open for the lock's whole lifetime.
 _OFFLINE_MAINTENANCE_LOCK_KEY = 0x53494C49434F4E
 _EMBEDDING_PAGE_SIZE = 500
+# Twin of the SQLite adapter's constant: the generic chunk-vector discovery (rows /
+# ids / page / DISTINCT source ids) leaves Knowhow hidden sources to
+# ``KnowhowProjector.fill_missing_chunk_vectors`` (``knowhow_embedding``);
+# ``count_missing_chunk_vectors`` (checkup H4) still counts them.
+_NOT_KNOWHOW_CHUNK = (
+    " AND NOT EXISTS (SELECT 1 FROM sources ks "
+    "WHERE ks.id=c.source_id AND ks.source_type='knowhow')"
+)
 # Rows consumed per fetch while streaming the orphan-asset keeper scan. Twin of
 # the SQLite adapter's constant; see ``_surviving_asset_refs``.
 _ASSET_SCAN_FETCH_ROWS = 200
@@ -1107,7 +1115,8 @@ class PostgresMaintenanceAdapter:
                 dict(r) for r in db.execute(
                     "SELECT c.id, c.source_id, c.text FROM chunks c WHERE c.notebook_id=%s "
                     "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
-                    "WHERE e.chunk_id=c.id)" + clause + " ORDER BY c.id COLLATE \"C\"",
+                    "WHERE e.chunk_id=c.id)" + _NOT_KNOWHOW_CHUNK + clause
+                    + " ORDER BY c.id COLLATE \"C\"",
                     tuple(params),
                 ).fetchall()
             ]
@@ -1131,7 +1140,7 @@ class PostgresMaintenanceAdapter:
                 for row in db.execute(
                     "SELECT c.id FROM chunks c WHERE c.notebook_id=%s "
                     "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
-                    "WHERE e.chunk_id=c.id)" + clause
+                    "WHERE e.chunk_id=c.id)" + _NOT_KNOWHOW_CHUNK + clause
                     + " ORDER BY c.id COLLATE \"C\"",
                     tuple(params),
                 ).fetchall()
@@ -1230,7 +1239,7 @@ class PostgresMaintenanceAdapter:
                     "SELECT c.id,c.source_id,c.text FROM chunks c "
                     "WHERE c.notebook_id=%s AND c.id COLLATE \"C\">%s "
                     "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
-                    "WHERE e.chunk_id=c.id)" + clause + " "
+                    "WHERE e.chunk_id=c.id)" + _NOT_KNOWHOW_CHUNK + clause + " "
                     "ORDER BY c.id COLLATE \"C\" LIMIT %s",
                     tuple(params),
                 ).fetchall()
@@ -1301,7 +1310,8 @@ class PostgresMaintenanceAdapter:
             return [
                 r["source_id"] for r in db.execute(
                     "SELECT DISTINCT c.source_id FROM chunks c WHERE c.notebook_id=%s "
-                    "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id=c.id)",
+                    "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id=c.id)"
+                    + _NOT_KNOWHOW_CHUNK,
                     (notebook_id,),
                 ).fetchall()
             ]
@@ -1392,7 +1402,10 @@ class PostgresMaintenanceAdapter:
         return output
 
     def backfill_node_embeddings(
-        self, notebook_id: str, progress: Optional[Callable[[int, int], None]] = None
+        self,
+        notebook_id: str,
+        progress: Optional[Callable[[int, int], None]] = None,
+        tally: Optional[Callable[[int, int], None]] = None,
     ) -> int:
         """Backfill knowledge vectors in bounded keyset pages.
 
@@ -1400,6 +1413,10 @@ class PostgresMaintenanceAdapter:
         embedding/model waits happen only after that connection has returned to
         the pool.  Advancing by object id also prevents a failed best-effort
         model batch from causing an infinite retry loop.
+
+        ``progress`` gets ``(objects scanned, objects total)``; ``tally`` gets running
+        ``(written, attempted)`` after each page, where attempted counts only missing
+        objects with embeddable payload text (what ``embed_objects_batch`` embeds).
         """
         with self._runtime.database.connect() as db:
             total = int(
@@ -1412,6 +1429,7 @@ class PostgresMaintenanceAdapter:
         after_id = ""
         scanned = 0
         embedded = 0
+        attempted = 0
         while True:
             with self._runtime.database.connect() as db:
                 rows = db.execute(
@@ -1434,11 +1452,22 @@ class PostgresMaintenanceAdapter:
                 if not row["embedded"]
             ]
             if missing:
+                page = [0]  # embeddable objects of this page, as embed_objects_batch counts
+
+                def _page_total(_done: int, page_total: int, _box=page) -> None:
+                    _box[0] = page_total
+
+                # Asked for only when someone tallies: other callers keep the
+                # two-argument call they always made.
+                extra = {"progress": _page_total} if tally else {}
                 embedded += self._runtime.source_embedding.embed_objects_batch(
-                    notebook_id, missing
+                    notebook_id, missing, **extra
                 )
+                attempted += page[0]
             if progress:
                 progress(scanned, total)
+            if tally:
+                tally(embedded, attempted)
             if len(rows) < _EMBEDDING_PAGE_SIZE:
                 break
         if progress and scanned == 0:
@@ -1509,8 +1538,9 @@ class PostgresMaintenanceAdapter:
         of vectors written (0 when ``relation_embedding`` is unbound).
 
         ``progress`` receives running ``(written, attempted)`` totals after each page:
-        attempted counts the missing relations that hydrate to a queryable edge, so the
-        difference is what failed model batches left missing."""
+        attempted counts the missing relations that hydrate to a queryable edge with a
+        non-blank text (what ``embed_relations_batch`` embeds), so the difference is what
+        failed model batches left missing."""
         if not self._runtime.models.configured("relation_embedding"):
             return 0
         after_id = ""
@@ -1540,6 +1570,9 @@ class PostgresMaintenanceAdapter:
             items = [
                 {"_rid": str(relation["id"]), "text": relation["text"]}
                 for relation in relations
+                # Same filter as embed_relations_batch, so "attempted" counts only
+                # relations that can get a vector.
+                if str(relation.get("text") or "").strip()
             ]
             if items:
                 attempted += len(items)
