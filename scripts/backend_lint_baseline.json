@@ -514,7 +514,7 @@
     "I001": 1
   },
   "backend/app/repositories/postgres/governance_store.py": {
-    "I001": 2
+    "I001": 1
   },
   "backend/app/repositories/postgres/group_store.py": {
     "I001": 1
@@ -622,7 +622,7 @@
     "I001": 1
   },
   "backend/app/repositories/sqlite/governance_store.py": {
-    "I001": 2
+    "I001": 1
   },
   "backend/app/repositories/sqlite/group_store.py": {
     "I001": 1
@@ -863,7 +863,7 @@
     "I001": 1
   },
   "backend/app/services/kg_merge.py": {
-    "F401": 9,
+    "F401": 7,
     "I001": 2
   },
   "backend/app/services/knowhow/api.py": {
@@ -886,10 +886,9 @@
     "I001": 1
   },
   "backend/app/services/knowledge_governance.py": {
-    "I001": 3
+    "I001": 2
   },
   "backend/app/services/knowledge_lifecycle.py": {
-    "F401": 1,
     "I001": 10
   },
   "backend/app/services/knowledge_query.py": {
@@ -2083,7 +2082,7 @@
   },
   "backend/tests/test_incremental_fusion.py": {
     "F401": 1,
-    "I001": 3
+    "I001": 2
   },
   "backend/tests/test_index_build_consolidation.py": {
     "I001": 1
@@ -2144,7 +2143,7 @@
   },
   "backend/tests/test_kg_merge.py": {
     "F811": 1,
-    "I001": 7
+    "I001": 6
   },
   "backend/tests/test_kg_mutation_phase_matrix.py": {
     "I001": 1
