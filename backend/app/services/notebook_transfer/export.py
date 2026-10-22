@@ -210,6 +210,7 @@ def export_notebook(
         raise NotebookExportError(f"输出文件已存在: {out_path}")
     if not out_path.parent.is_dir():
         raise NotebookExportError(f"输出目录不存在: {out_path.parent}")
+    _refuse_output_inside_exported_trees(out_path, Path(storage_dir), notebook_id)
     stale = stale_part_files(out_path)
     writer = _ArchiveWriter.create(out_path)
     try:
@@ -228,6 +229,21 @@ def export_notebook(
     return dataclasses.replace(
         report, archive_bytes=out_path.stat().st_size, stale_part_files=stale
     )
+
+
+def _refuse_output_inside_exported_trees(
+    out_path: Path, storage_dir: Path, notebook_id: str
+) -> None:
+    """The archive's own ``.part`` file must never be one of the files it
+    copies: written inside the notebook's file or asset tree, the walk would
+    reach the part file and append its compressed bytes to itself until the
+    disk fills (codex #974 r1). Compared on resolved paths, so a symlinked
+    output directory that lands inside a tree is refused too."""
+    destination = out_path.parent.resolve()
+    for tree in (storage_dir / "notebooks" / notebook_id, storage_dir / "assets" / notebook_id):
+        root = tree.resolve()
+        if destination == root or root in destination.parents:
+            raise NotebookExportError(f"输出路径不能位于被导出笔记本的文件目录内: {out_path}")
 
 
 def _publish(part: Path, out_path: Path) -> None:
