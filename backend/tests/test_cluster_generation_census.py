@@ -175,7 +175,7 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "同 PG 孪生:桥接 id 候选清理的跨代「无簇携带」判定 xa/xb 两处,悬空种子"
         "检查的 published 分页读 2 处(代次作参数绑定);另 2 处 concept_clusters 与"
         "2 处 community_members 同 PG 孪生的补充说明。"),
-    "backend/app/repositories/sqlite/migrations.py": (6, 2, 4, 1, 0,
+    "backend/app/repositories/sqlite/migrations.py": (7, 2, 4, 1, 0,
         "非站点:DDL(_migration_71 的索引重建);_migration_102 把存量板块的 "
         "board_key 回填成 id(UPDATE communities,C 类跨代:每一代的板块都要有 key,"
         "已发布代之外的行回填了也无害),communities +1;谓词计数来自启动恢复"
@@ -189,7 +189,10 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "豁免:含 Memory 成员的 canonical id 在任一代(published 与 building)都要"
         "整簇删掉,只删 published 代会把 building 代里同名的 K-<Memory 种子名> 留下。"
         "再 +1 concept_clusters:同一迁移的 G 集读(F 外、种子对象已不存在的簇"
-        "只入队不删),同为 C 类跨代——任一代里的悬空种子都要让本库重建"),
+        "只入队不删),同为 C 类跨代——任一代里的悬空种子都要让本库重建。"
+        "_migration_102 再 +1 concept_clusters:给有概念簇却没有状态行的笔记本补"
+        "空间 1 状态行的存在性探测(EXISTS),C 类跨代——只问「有没有概念簇」,"
+        "没有状态行时也没有代次指针可比"),
     "backend/app/services/kg_analysis_precompute.py": (0, 0, 1, 0, 0,
         "非站点:注释里的表名"),
     "scripts/diag_open_latency.py": (3, 0, 0, 0, 0,
@@ -200,6 +203,11 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "镜像 graph_rows clusters 腿的分页读、以及取一个游标样本;代次以"
         "绑定参数出现(与生产同形),不走指针子查询,故谓词计数 0"),
     "scripts/diag_slow.py": (1, 1, 0, 0, 0, "C:只读诊断对照组"),
+    "scripts/merge_dbs.py": (1, 0, 0, 0, 0,
+        "C:离线合库(S1,v102):导入后仍有概念簇的笔记本补一条带副库已发布概念"
+        "种子空间的干净状态行,存在性探测(EXISTS)跨代——此前已按副库指针只留"
+        "published 代并归 0,剩下的就是要判的那一代;代次清理用的是动态表名,"
+        "见本文件声明的盲区①"),
     "scripts/verify_repository_snapshot.py": (1, 0, 0, 0, 0,
         "C:离线迁移一致性校验(v24 去重投影),只读"),
     "scripts/kg_findings_rehearsal.py": (4, 0, 0, 3, 0,
