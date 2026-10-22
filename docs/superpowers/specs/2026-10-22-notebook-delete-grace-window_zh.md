@@ -154,16 +154,16 @@ FROM notebooks nb WHERE nb.id=:id
   UTC ISO）；`delete_requested_by text COLLATE "C" NULL`（无 FK，`user_references.py` 登记 `audit_kept`）；`status_before_delete text
   COLLATE "C" NOT NULL DEFAULT ''`；`CREATE INDEX idx_notebooks_pending_delete_due ON notebooks(delete_after) WHERE
   status='pending_delete'`（两边）。不回填；不建新表；不加 PG CHECK（不变量由三条写路径 + 守卫保证）。
-- 改号登记点（一次性替换）：`sqlite/migrations.py` 的 `SCHEMA_VERSION` 注释与 `_migration_99`；PG 文件名；
+- 改号登记点（一次性替换）：`sqlite/migrations.py` 的 `SCHEMA_VERSION` 注释与 `_migration_100`；PG 文件名；
   `postgres/schema_manifest.py`（`sqlite_version` / `postgres_version`）；`migration/shadow/manifest.py::RUNNING_SCHEMA_PAIR`；
-  `scripts/verify_repository_snapshot.py` 的 v99 块（`(key[0], 99, …)` 与 `MIGRATION_MANIFEST[(98, 99)]`）；
-  `tests/sqlite_migration_testkit.py::rollback_v99`；`tests/test_sqlite_migrations.py`（`test_v99_…` 与各 `migrate() == [..., 99]`）、
-  `tests/test_repository_snapshot_verifier.py`（`rollback_v99`、`(91, 99)`、`(96, 99)`）、`test_ask_job_output_migration.py`、
-  `test_agent_token_tiers_migration.py`、`test_promotion_provenance_migration.py`；`tests/postgres/**` 的 `migrate() == 80` /
-  `current_version() == 80` / `postgres_version == 80` 等字面量、`tests/postgres/test_migrations.py`
-  `test_packaged_migrations_apply_in_order` 的 ledger 列表末项 `80`、`tests/postgres/test_postgres_schema.py`
-  `test_packaged_index_migration_phases_are_exact` 的 `(80, "notebook_delete_grace")` 与 `index_declarations(80)`，以及
-  `tests/postgres/test_memory_isolation_migration_pg.py::_roll_back_to_66` 开头撤 0080 的那一段（重放要先撤掉四列与部分索引）；`fixtures/repository_v9/{expected_snapshot,manifest}.json`（重跑
+  `scripts/verify_repository_snapshot.py` 的 v100 块（`(key[0], 100, …)` 与 `MIGRATION_MANIFEST[(99, 100)]`）；
+  `tests/sqlite_migration_testkit.py::rollback_v100`（`rollback_v99` 先调它）；`tests/test_sqlite_migrations.py`（`test_v100_…` 与各 `migrate() == [..., 100]`）、
+  `tests/test_repository_snapshot_verifier.py`（`rollback_v100`、`test_deployed_v99_…`、`(91, 100)`、`(96, 100)`）、`test_ask_job_output_migration.py`、
+  `test_agent_token_tiers_migration.py`、`test_promotion_provenance_migration.py`；`tests/postgres/**` 的 `migrate() == 81` /
+  `current_version() == 81` / `postgres_version == 81` 等字面量、`tests/postgres/test_migrations.py`
+  `test_packaged_migrations_apply_in_order` 的 ledger 列表末项 `81`、`tests/postgres/test_postgres_schema.py`
+  `test_packaged_index_migration_phases_are_exact` 的 `(81, "notebook_delete_grace")` 与 `index_declarations(81)`，以及
+  `tests/postgres/test_memory_isolation_migration_pg.py::_roll_back_to_66` 开头撤 0081 的那一段（重放要先撤掉四列与部分索引）；`fixtures/repository_v9/{expected_snapshot,manifest}.json`（重跑
   `scripts/generate_repository_contract_fixtures.py`）。
 - 同批登记：`sync/manifest.py` target_owned 加四列，`import_._insert_overrides` 让新建镜像行取默认值；两份 `access_sql.py` 的
   `NOTEBOOK_LIVE_SQL` 加 `'pending_delete'` + 单点常量 `NOTEBOOK_PENDING_DELETE_STATUS` 与 `notebook_delete_window_open_sql` /
