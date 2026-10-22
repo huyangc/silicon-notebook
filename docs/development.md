@@ -1008,7 +1008,8 @@ Cross-cutting frontend interaction guardrails stay small but explicit:
   `rootModals.openAbove(slot, parent)`. Escape, backdrop and focus return then
   follow the coordinator's topmost rule; do not special-case the child's Escape
   inside the parent. One Escape key press closes at most one layer through
-  `requestClose(slot, "escape")` (the coordinator counts presses), so a close
+  `requestClose(slot, "escape")` (the coordinator counts presses; holding Escape
+  is one press — auto-repeat keydowns never start a new one), so a close
   request the browser sends after the keydown cannot close the revealed parent.
   A layer that eats Escape outside the coordinator (capture-phase listener)
   calls `claimEscapePress()` for the press it consumes.

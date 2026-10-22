@@ -692,9 +692,47 @@ test("one Escape key press closes at most one layer; the next press closes the n
   expect(value!.view("global-ask").topmost).toBe(true);
   expect(value!.requestClose("global-ask", "escape")).toBe(false);
   expect(value!.view("global-ask").open).toBe(true);
-  // 按键还按着时的重复 keydown 是新的一次按键（与今天的行为一致：每次一层）。
+  // 没有 keyup 却又来一个**非自动重复**的 keydown（keyup 丢失时就是这样）：那是新的
+  // 一次按键。按住产生的自动重复（repeat: true）不算，见下一条。
   fireEvent.keyDown(window, { key: "Escape" });
   act(() => { expect(value!.requestClose("global-ask", "escape")).toBe(true); });
+});
+
+// 按住 Escape：首个 keydown 之后浏览器连发 repeat: true 的 keydown（每个后面还可能跟着
+// close request）。它们都属于同一次按键，按住也只关一层。
+test("holding Escape closes one layer; auto-repeat keydowns stay within the same press", () => {
+  render(<Harness />);
+  const actor = value!.captureActorOwner();
+  act(() => { value!.open("global-ask", actor); });
+  act(() => { value!.openAbove("answer-image-preview", "global-ask"); });
+  fireEvent.keyDown(window, { key: "Escape" });
+  act(() => { expect(value!.requestClose("answer-image-preview", "escape")).toBe(true); });
+  for (let i = 0; i < 4; i += 1) {
+    fireEvent.keyDown(window, { key: "Escape", repeat: true });
+    expect(value!.requestClose("global-ask", "escape")).toBe(false);
+  }
+  // 按着 Escape 时别的键的自动重复（一直按着 Shift）也不结束这次按键。
+  fireEvent.keyDown(window, { key: "Shift", repeat: true });
+  expect(value!.requestClose("global-ask", "escape")).toBe(false);
+  expect(value!.view("global-ask").open).toBe(true);
+  // 松开之后再按一次，下一层才关。
+  fireEvent.keyUp(window, { key: "Escape" });
+  fireEvent.keyDown(window, { key: "Escape" });
+  act(() => { expect(value!.requestClose("global-ask", "escape")).toBe(true); });
+});
+
+test("an Escape auto-repeat after the press was interrupted still cannot close another layer", () => {
+  render(<Harness />);
+  const actor = value!.captureActorOwner();
+  act(() => { value!.open("global-ask", actor); });
+  act(() => { value!.openAbove("answer-image-preview", "global-ask"); });
+  fireEvent.keyDown(window, { key: "Escape" });
+  act(() => { expect(value!.requestClose("answer-image-preview", "escape")).toBe(true); });
+  // 按住 Escape 时点了一下鼠标：这次按键被判结束，但手还按着，自动重复继续来。
+  fireEvent.pointerDown(window);
+  fireEvent.keyDown(window, { key: "Escape", repeat: true });
+  expect(value!.requestClose("global-ask", "escape")).toBe(false);
+  expect(value!.view("global-ask").open).toBe(true);
 });
 
 test("button and backdrop closes never count against the Escape press", () => {

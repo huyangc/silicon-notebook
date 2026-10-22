@@ -2533,6 +2533,43 @@ test("while the preview covers the full window, focus cannot be sent into the hi
   expect(trigger).toHaveFocus();
 });
 
+// 按住 Escape：首个 keydown 加一串 repeat: true 的 keydown，每一个后面都补发一次 close
+// request。按住也只关一层——预览关掉，引用卡与全屏窗口都还在；松开再按才关下一层。
+test("holding Escape closes only the preview; the card and the full window stay until the next press", async () => {
+  installBrowserLikeDialogs();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
+  const { container } = render(<PreviewHost />);
+  await openImageConversation();
+  fireEvent.click(screen.getByRole("button", { name: "全屏展开" }));
+  fireEvent.click(await screen.findByRole("button", { name: "[1]" }));
+  const card = await waitFor(() => {
+    const node = container.querySelector<HTMLElement>(".cite-popover");
+    expect(node).not.toBeNull();
+    return node!;
+  });
+  const thumbnail = await within(card).findByTitle("放大查看这张附图");
+  press(thumbnail);
+  await openedPreview();
+
+  const hold = (repeat: boolean) => {
+    fireEvent.keyDown(document.activeElement!, { key: "Escape", repeat });
+    const open = document.querySelector("dialog[data-test-modal]");
+    if (open) fireEvent(open, new Event("cancel", { cancelable: true }));
+  };
+  hold(false);
+  await waitFor(() => expect(imagePreview()).toBeNull());
+  for (let i = 0; i < 3; i += 1) hold(true);
+  expect(container.querySelector(".cite-popover")).not.toBeNull();
+  expect(chatWindow()).toHaveAttribute("open");
+  expect(thumbnail).toHaveFocus();
+
+  fireEvent.keyUp(document.activeElement!, { key: "Escape" });
+  hold(false);
+  await waitFor(() => expect(container.querySelector(".cite-popover")).toBeNull());
+  expect(chatWindow()).toHaveAttribute("open");
+});
+
 test("a page-level aria-modal view behind the full window is not a way out of the preview", async () => {
   installBrowserLikeDialogs();
   api.list.mockResolvedValue([conversation()]);
