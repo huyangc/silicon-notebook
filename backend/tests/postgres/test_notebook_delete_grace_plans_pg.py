@@ -30,7 +30,7 @@ _INDEX = "idx_notebooks_pending_delete_due"
 
 @pytest.fixture
 def repo(postgres_settings, tmp_path):
-    from app.repositories.postgres.repository import PostgresRepository
+    from app.services.postgres_repository import PostgresRepository
 
     postgres_settings.storage_dir = str(tmp_path / "postgres-storage")
     postgres_settings.event_log_enabled = False
