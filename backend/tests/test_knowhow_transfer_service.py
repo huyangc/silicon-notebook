@@ -275,10 +275,8 @@ def test_transfer_table_rejects_bad_mode(repo):
 # exhaustion. Before the fix this propagated straight out of copy_table as a
 # bare exception — the caller (a route with no handler for it) would see a
 # 500 despite the copy having already landed, inviting a retry that piles up
-# duplicate tables. Appended at EOF (see file header pin note in
-# test_repository_callers_static.py / test_repository_surface_manifest.py —
-# transfer.py:29/89/185/204 are line-pinned; this test only calls existing
-# public functions, it doesn't touch those lines).
+# duplicate tables. Appended at EOF; this test only calls existing public
+# functions.
 def test_copy_survives_scheduler_failure_after_commit(repo, monkeypatch):
     src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
     src_tid = _table_with_row(repo, src_nb)
@@ -385,10 +383,7 @@ def test_copy_gives_asset_row_independent_source_id(repo):
 # update_knowhow_cell/update_knowhow_cells do — see KnowhowStore's own
 # docstring), so a fingerprint that compared mutation_seq alone would sail
 # straight past this race and still lose the row. Appended at EOF — this
-# file only calls existing public functions, it doesn't touch the line-
-# pinned `store = repo._runtime.knowhow_transfer_store` (transfer.py:193) or
-# any other pinned site (see test_repository_callers_static.py /
-# test_repository_surface_manifest.py).
+# file only calls existing public functions.
 def test_move_does_not_delete_source_row_added_after_copy_snapshot(repo, monkeypatch):
     src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
     src_tid = _table_with_row(repo, src_nb)

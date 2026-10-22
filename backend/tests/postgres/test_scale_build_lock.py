@@ -9,6 +9,7 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
+import psycopg
 import pytest
 
 from app.repositories.postgres import database as database_module
@@ -270,29 +271,53 @@ def test_the_lock_session_is_named_and_keeps_its_idle_reaper_disabled(
 ):
     """Both settings are applied AFTER ``_restore_session_defaults``' RESET ALL.
     Moving either above it leaves the session reset to the pool defaults —
-    which is exactly how a silently reaped lock session happens."""
-    handle = postgres_database.try_scale_build_lock("nb-session")
-    assert handle is not None
-    try:
-        pids = _holder_pids(postgres_database, "nb-session")
-        with postgres_database.connect() as conn:
-            names = conn.execute(
-                "SELECT application_name FROM pg_stat_activity WHERE pid = %s",
-                (pids[0],),
-            ).fetchone()
-        # 批 3·W1 PR-3 §4.3: renamed to reflect this session's generalized
-        # semantics (scale build OR notebook delete's phase 4 — both claim
-        # the same per-notebook namespace+key).
-        assert names["application_name"] == "silicon-notebook-notebook-exclusive-lock"
+    which is exactly how a silently reaped lock session happens.
 
-        # Read on the holder's own session: the GUC is session scoped.
-        connection = handle._connection
-        if connection.info.server_version >= 140000:
-            row = connection.execute("SHOW idle_session_timeout").fetchone()
-            connection.commit()
-            assert row["idle_session_timeout"] == "0"
+    The database default is made a hosted reaper (30 minutes) first: on a stock
+    local server it is already 0, so a "0" read back could not tell a session
+    that switched the reaper off from one that never did.
+
+    Mutation anchor: drop the ``_disable_idle_session_timeout`` call from
+    ``try_scale_build_lock`` and this goes red.
+    """
+    database_url = postgres_database._database_url
+    with psycopg.connect(database_url, autocommit=True) as admin:
+        reaper_exists = admin.info.server_version >= 140000
+        if reaper_exists:
+            admin.execute(
+                "ALTER DATABASE %s SET idle_session_timeout = '30min'"
+                % admin.execute("SELECT quote_ident(current_database()) AS n").fetchone()[0]
+            )
+    try:
+        handle = postgres_database.try_scale_build_lock("nb-session")
+        assert handle is not None
+        try:
+            pids = _holder_pids(postgres_database, "nb-session")
+            with postgres_database.connect() as conn:
+                names = conn.execute(
+                    "SELECT application_name FROM pg_stat_activity WHERE pid = %s",
+                    (pids[0],),
+                ).fetchone()
+            # 批 3·W1 PR-3 §4.3: renamed to reflect this session's generalized
+            # semantics (scale build OR notebook delete's phase 4 — both claim
+            # the same per-notebook namespace+key).
+            assert names["application_name"] == "silicon-notebook-notebook-exclusive-lock"
+
+            # Read on the holder's own session: the GUC is session scoped.
+            connection = handle._connection
+            if reaper_exists:
+                row = connection.execute("SHOW idle_session_timeout").fetchone()
+                connection.commit()
+                assert row["idle_session_timeout"] == "0"
+        finally:
+            handle.release()
     finally:
-        handle.release()
+        with psycopg.connect(database_url, autocommit=True) as admin:
+            if reaper_exists:
+                admin.execute(
+                    "ALTER DATABASE %s RESET idle_session_timeout"
+                    % admin.execute("SELECT quote_ident(current_database()) AS n").fetchone()[0]
+                )
 
 
 def test_scale_build_lock_session_has_a_bounded_client_transport_timeout(
