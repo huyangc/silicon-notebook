@@ -129,7 +129,7 @@ export function ModelBindingGaps({ status }: { status: ModelServicesStatus }) {
   const hidden = status.stale_binding_hidden_count ?? 0;
   if (unbound.length === 0 && stale.length === 0 && hidden === 0) return null;
   return (
-    <section className="model-service-binding-gaps" aria-label="未绑定的模型服务">
+    <section className="model-service-binding-gaps" aria-label="未绑定与已忽略的绑定">
       {unbound.length > 0 && (
         <div className="model-service-workloads">
           <small>未绑定</small>
