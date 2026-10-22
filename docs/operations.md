@@ -665,8 +665,7 @@ original text, then other punctuation becomes spaces, so "Q-Former" and "Qformer
 knowledge object from now on. `CLUSTER_ALGO_VERSION` moves to 4 at the same time, and the pending-merge
 review gains a "same name, different spelling" candidate tier.
 
-**Release order.** Release after the version that carries the cluster-map write fix (PR #〔fill in at
-merge〕): this version makes every deployed library's next "update analysis" a full re-merge, and
+**Release order.** Release after the version that carries the cluster-map write fix (PR #948): this version makes every deployed library's next "update analysis" a full re-merge, and
 without that fix the generation-write stage of a first full merge on PostgreSQL can hit
 `POSTGRES_STATEMENT_TIMEOUT_SECONDS`.
 
@@ -674,8 +673,10 @@ without that fix the generation-write stage of a first full merge on PostgreSQL 
 re-merged in full by its next "update analysis" or rebuild, and then:
 
 - the merge is redone under the new rule: almost every multi-word concept's merged knowledge object id
-  changes once and the topic boards are recast once; concept descriptions are reused by signature,
-  only those whose representative name changed are written again;
+  changes once, and the same rebuild partitions the topic boards once from scratch under the new
+  partition algorithm ([Topic-board partition](#topic-board-partition-warm-starts-and-the-one-time-re-partition):
+  both arrive with one migration, v100 / 0081, and land in that one rebuild); concept descriptions are
+  reused by signature, only those whose representative name changed are written again;
 - stored merge decisions are recomputed into new seed pairs from the current objects' names and land in
   that merge's pending-merge refresh transaction, with the event `kg_merge_decisions_recomputed`:
   `translated` rows recomputed, `suspended` rows left as they are because no current object carries a
@@ -747,9 +748,11 @@ spelling-variant tier) stays under 1 s; the claim stage's generation write is st
 refresh writes; hitting it emits `kg_merge_squash_candidates_capped` and keeps the groups with the most
 members.
 
-SQLite deployments with change capture on (`sync capture`): the upgrade backfills the new column of
-every existing state row to 1, which logs one change per row, so the next export re-sends those state
-rows unchanged (volume only); the PostgreSQL migration fires no capture.
+Deployments with change capture on (`sync capture`): migration v100 / 0081 backfills two columns, and
+each backfill logs one change per row it sets -- on SQLite every existing state row (its concept seed
+space set to 1; the PostgreSQL column default fires no capture), and on both backends every existing
+topic board (`communities.board_key` set to the board's id). The next export re-sends those rows
+unchanged and the receiving side backfills the same values: export volume only, not content.
 
 ## Promotion provenance in public libraries
 
@@ -835,7 +838,12 @@ published partition, every board carrying a `board_key` that survives rebuilds (
 and the same published partition always give the same boards under the same keys, whatever order
 the relations arrive in.
 
-**One-time re-partition.** Migration v98 / 0078 adds `unified_kg_state.community_partition_version`
+This re-partition ships in the same upgrade as
+[Merge rule upgrade: concept seed space 2](#merge-rule-upgrade-concept-seed-space-2): migration v100 / 0081
+carries both, and a notebook's first full rebuild after it re-merges the concepts and partitions the
+boards cold in one pass (the change-capture note there covers the `board_key` backfill too).
+
+**One-time re-partition.** Migration v100 / 0081 adds `unified_kg_state.community_partition_version`
 and `community_partition_mode` (0 / '' on every existing notebook) and backfills each existing
 board's `board_key` with its id. The next rebuild of each notebook that actually rebuilds the board
 graph (刷新图谱 after the graph changed, the rebuild after a merge, `recluster_kg`) reads version 0
@@ -844,7 +852,10 @@ on an unchanged graph only backfills the analysis ledger and partitions nothing,
 version at 0. There is no manual step and no extra pass; the cost is that rebuild's.
 A cold start still reads the published boards to carry keys: a new board whose members are
 mostly an old board's (mutual best match, Jaccard >= 1/2) keeps that board's key, so the old id
-lives on as its key. Deleting a notebook's knowledge graph, or publishing a new indexing pipeline,
+lives on as its key. Carrying compares members, and the first rebuild after this upgrade also
+moves the library to concept seed space 2, which renames most multi-word concepts' merged knowledge
+objects: a board made mostly of such concepts gets a new key that once, and keeps it afterwards.
+Deleting a notebook's knowledge graph, or publishing a new indexing pipeline,
 resets both columns, so the rebuild after either starts cold too.
 
 **Afterwards every rebuild warm-starts, `force` included.** The published partition is the start;
@@ -883,7 +894,7 @@ algorithm's partition, so the next rebuild with igraph starts cold rather than w
   its boards while the version was changed under it (a `--cold-partition` request); the request
   stands and the next rebuild starts cold.
 - Which notebooks have published boards and will be partitioned cold by their next real rebuild
-  (same SQL on both backends) -- the one-time re-partition after v98 / 0078, a pending
+  (same SQL on both backends) -- the one-time re-partition after v100 / 0081, a pending
   `--cold-partition` request, or a networkx fallback (`community_partition_mode = 'cold_fallback'`).
   Boards still in generation 0 (built before the batch-3 generational swap) are included; notebooks
   whose knowledge graph was deleted or whose indexing pipeline was republished have no boards and

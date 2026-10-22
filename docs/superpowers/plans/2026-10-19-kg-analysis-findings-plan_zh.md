@@ -12,9 +12,9 @@
 | PR-1 | 存储与契约：迁移、全部登记点、两侧 store 原语、合并代码分量列及两处写入（全量收尾 + 跳过路径），同步捕获集按版本冻结。合入后没有可见行为 | PR-0 | master |
 | PR-2 | 规则与读侧：领域契约、纯规则引擎（含 S1 的纯函数 v1/v2 种子与 squash key，只加函数不切调用点）、计算挂点与发布接线、relink 标记、`/findings` 与豁免端点、overview 新字段、后端文档 | PR-1 | PR-1 合入后 rebase |
 | PR-3 | 前端：四区、弹窗共存、动作接线、S4、界面词、release note | PR-2（契约先行，可并行开发） | PR-2 合入后 rebase |
-| PR-4 | P3+P4 一个 PR：S1 切换种子 + 决定重算 + 描述缓存按签名复用 + 待确认合并显示名 + F4 squash 候选档 + S2 热启动划分与 board_key + 一次 `CLUSTER_ALGO_VERSION` bump + 运维文档 | PR-1（合并代码分量列，否则 S4 会挡住修复）、PR-2（squash key 同源） | PR-2 合入后 rebase |
+| PR-4 | P3+P4 一个 PR：S1 切换种子 + 决定重算 + 描述缓存按签名复用 + 待确认合并显示名 + F4 squash 候选档 + S2 热启动划分与 board_key + 一次 `CLUSTER_ALGO_VERSION` bump + 运维文档；一个迁移 v100/0081（S1 种子空间与 S2 分区列合一）、一条 release note | PR-1（合并代码分量列，否则 S4 会挡住修复）、PR-2（squash key 同源） | PR-2 合入后 rebase |
 
-迁移号：开工时 origin/master 是 SQLite v94 / PG 0074；开工后 master 先合入了 v95/0075 与 v96/0076，所以 PR-1（#937）实际落 **v97/0077**。PR-4 先用占位，rebase 时取合入当时 origin/master 的下一号（PR-1 之后即 v98/0078 起）。PG 同号文件并存不报冲突，所以 MANIFEST 与全仓 `migrate() == N` 断言随改号一起改。
+迁移号：开工时 origin/master 是 SQLite v94 / PG 0074；开工后 master 先合入了 v95/0075 与 v96/0076，所以 PR-1（#937）实际落 **v97/0077**。PR-4 先用占位，rebase 时取合入当时 origin/master 的下一号（PR-1 之后即 v98/0078 起）。合成 PR-4 时（2026-10-22）origin/master 已到 v99/0080，S1、S2 两条线各自的占位迁移（都是 v98/0078）合成**一个** SQLite `_migration_100` 与 PostgreSQL `0081_kg_seed_space_and_board_partition.sql`。PG 同号文件并存不报冲突，所以 MANIFEST 与全仓 `migrate() == N` 断言随改号一起改。
 
 ## 二、任务
 
@@ -49,7 +49,7 @@
 ### PR-4 种子修复与板块稳定（P3+P4）
 
 - **P4-T2 切换种子并记录发布代的种子空间**：别名表、`_seed_with_alias`、`bridge_canonical_id`、统一重建种子流、催收、增量融合按种子版本参数化；`unified_kg_state.concept_seed_version` 在发布合并结果的同一语句里写；增量融合按已发布代的空间安置。
-- **P4-T3 迁移**：候选表 `seed_version`（存量 1）；state 三列 `concept_seed_version`、`community_partition_version`、`community_partition_mode`；`communities.board_key`（回填为 id）；连带登记；删除知识图谱复位。
+- **P4-T3 迁移**：候选表 `seed_version`（存量 1）；state 三列 `concept_seed_version`、`community_partition_version`、`community_partition_mode`；`communities.board_key`（回填为 id）；连带登记；删除知识图谱复位。S1、S2 合成后是一个迁移 v100/0081。
 - **P4-T4 已存决定重算**（算法见规格 §五 S1「实施细化」）：放在每个库第一次 v2 全量重建里；覆盖 `~v1:` 例外；悬置发事件；决定计数折进输入版本。
 - **P4-T5 描述缓存按签名复用**。
 - **P4-T6 待确认合并「同名不同写法」标记**：两侧 canonical 名（后端 `name_a` / `name_b` + 前端 + 产品文档）已由单独的 PR（`claude/kg-pending-merge-names`）先行交付；「同名不同写法」标记仍在 PR-4 随 S1 的 squash key 一起加。
@@ -57,7 +57,7 @@
 - **P4-T8 `CLUSTER_ALGO_VERSION=4`**。
 - **P4-T9 纯分区模块 `services/kg_partition.py`**：按分量逐个跑 igraph Leiden（分量内按 canonical id 排名编号、边排序、resolution = m_c/m、可选 `initial_membership`）。每个分量**逐轮**跑 `n_iterations=1`，每轮开跑前重置 seed=42。每个起点先归一：社区按内部边拆成连通段，不足 min_size 的段拆成单点，再按首次出现序编号。一轮的结果若原样回到起点，或者模块度抬高 ≤ `LEIDEN_MIN_ROUND_GAIN`（1e-4）且没有在模块度不降的前提下多进板块，就作废这一轮、输出它的起点。这样以发布结果热启动在构造上就是不动点，发布的板块也都内部连通。轮数上限 64，触顶如实计数。总边权 m_c² < 2m 的分量直接整块成板块（可证的唯一最优）。board_key 续用（互为最佳且 J ≥ 0.5）与新铸（成员内容哈希、代内撞键确定性再散列）。没装 igraph 时走冷启动 networkx Louvain，记 `cold_fallback`，不拆分。模块导出 `PARTITION_ALGO_VERSION`，由 T10 写进 `community_partition_version`。**不用 `n_iterations=-1`**，有两个原因：它在对称结构上可能永不返回（4 个 K4 成环、以两两成对为起点即复现；评审另测 66 种对称变体里 21 种 4 s 不返回）；它停在续下去的随机序列上，输出在重置 seed 后不是不动点。
 - **P4-T10 接入 `rebuild_communities`**：冷启动判据（无已发布划分 / 分区版本不同 / networkx 回退 / 显式 `--cold-partition`），**force 不等于冷启动**；热启动在事务外流式读 `_published_from` 那一代的成员；发布语句写分区版本与 mode；payload 记 `partition_mode` 与续用数；补账本路径的放弃复核不动。落地补充：指针为 0 也读上一代（批 3·W2 之前建的库与 `merge_dbs` 导入的库，已发布板块在第 0 代）；版本列在认领之后读；上一代不是合法划分（一个 canonical 落在两个板块里、板块没有 board_key）时发事件（带原因码）、按冷启动走，不让重建失败。评审后补充：networkx 回退的产物发布时版本记 0，下一次有 igraph 的重建冷启动；发布写版本时对认领后读到的值做 CAS，构建期间运维 `--cold-partition` 写回的 0 不被在飞的重建覆盖（`community_partition_version_held`），脚本按发布后的状态如实报告有没有真的冷启动。
-- **P4-T11 文档**：operations / product-and-api / ui-vocabulary 双语；release note「主题板块会整体重新划分一次」；原设计 §3.32 推翻指针；K1 注释改公式；`recluster_kg --cold-partition`。
+- **P4-T11 文档**：operations / product-and-api / ui-vocabulary 双语；release note 一条（`kg-merge-rule-update.md`，S1 写下、板块侧共用：同名不同写法合并、「同名不同写法」候选、主题板块会整体重新划分一次）；原设计 §3.32 推翻指针；K1 注释改公式；`recluster_kg --cold-partition`。
 - **P4-T12 实测**：本机真库复现规格数字；分区与种子流的耗时/RSS 对比基线。板块一侧（2026-10-21，本机真库的一次性副本，端到端 `rebuild_communities(force=True)`，每次独立进程）：nb-b37185f4ae（35,889 节点、1,257 板块）一次性冷启动与原 Louvain 划分相比 95.2% 板块原样、11.9% 节点换板块，旧 key 续用 98.9%；随后热启动立即是不动点（连续三次逐字相同，含 board_key）。删孤岛来源 LMCache：新 98.1% 原样、0.87% 换板块，旧算法 95.7% / 11.1%；删巨型重复 Griffin full：新 97.4% / 0.71%，旧 95.9% / 9.7%。第 0 代存量库 nb-012fb94249 冷启动续用 97.6%。耗时与峰值 RSS（中位）：旧 3.06 s / 36.7 MB，新热启动 3.73 s / 43.1 MB、冷启动 3.11 s / 53.2 MB。
 
 ## 三、实施期工程取舍（不另行拍板）
