@@ -97,12 +97,18 @@ export function GlobalAskLauncher({ presentation, uiMode, openRequest, discovery
   useLayoutEffect(() => {
     const node = dialog.current;
     if (!node) return;
-    const focused = node.contains(document.activeElement) ? document.activeElement as HTMLElement : null;
+    const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focused = active && node.contains(active) ? active : null;
+    // 盖在窗口之上的那一层（大图预览、提示框……）此刻持有的焦点。`show()` 会跑 dialog
+    // focusing steps，把焦点挪进本窗口——而窗口此刻是 inert，焦点于是掉到 body，那一层
+    // 的 Esc / 键盘操作全部失灵。被盖住时把它原样还回去。
+    const covering = !view.topmost && active && !focused && active !== document.body ? active : null;
     // Native modal mode supplies focus containment and an inert background in full screen.
     if (node.open) node.close();
     if (mode === "full" && view.topmost) node.showModal();
     else if (mode !== "closed") node.show();
     if (mode !== "closed" && view.topmost) (focused ?? node.querySelector<HTMLButtonElement>("button"))?.focus();
+    else if (covering?.isConnected && document.activeElement !== covering) covering.focus({ preventScroll: true });
     if (mode !== "full" || !view.topmost) return;
     const overflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";

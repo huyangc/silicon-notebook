@@ -38,6 +38,8 @@ export function ImagePreviewModal({
   const [scale, setScale] = useState(IMAGE_PREVIEW_MIN_SCALE);
   const backdropPointerStartRef = useRef<{ x: number; y: number } | null>(null);
   const transformRef = useRef<ReactZoomPanPinchRef | null>(null);
+  const sectionRef = useRef<HTMLElement | null>(null);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
   const previewLabel = referenceLabel ? `引用 ${referenceLabel} 图片预览` : "引用图片预览";
   const canNavigate = imageCount > 1 && Boolean(onSelectImage);
   const atFirst = imageIndex <= 0;
@@ -57,6 +59,18 @@ export function ImagePreviewModal({
     transformRef.current?.resetTransform(0);
     setScale(IMAGE_PREVIEW_MIN_SCALE);
   }, [imageIndex]);
+
+  // 关闭按钮上的 autoFocus 在提交那一刻执行。打开它的那一层若此刻还是**模态**的
+  // （全屏的全局问答窗口：原生 showModal 让文档其余部分全部 inert），那次聚焦落不了地，
+  // 要等那一层在同一次提交的 layout 相位里让位之后才可聚焦。所以挂载后（被动 effect，
+  // 晚于全部 layout effect）再看一眼：焦点还不在本预览里就补聚焦一次。autoFocus 已经
+  // 落地的情形（笔记本内）这里什么都不做。只在挂载时跑：换图不抢焦点（见下）。
+  useEffect(() => {
+    if (!interactive) return;
+    if (sectionRef.current?.contains(document.activeElement)) return;
+    closeRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 夹取只写这一处：两颗按钮在端点上是 disabled、左右方向键到端点后原地不动,
   // 调用方因此永远只会收到合法下标。
@@ -89,6 +103,7 @@ export function ImagePreviewModal({
 
   return (
     <section
+      ref={sectionRef}
       className="utility-modal answer-image-preview"
       role="dialog"
       aria-modal={interactive}
@@ -100,7 +115,12 @@ export function ImagePreviewModal({
         if (event.currentTarget === event.target) onClose("backdrop");
       }}
       onKeyDown={(event) => {
-        if (event.key === "Escape") onClose("escape");
+        if (event.key !== "Escape") return;
+        // 这一次 Esc 归本预览：掐掉它的默认动作（浏览器的 close request）。不掐的话，
+        // 本预览在这次按键里同步关掉、下面那一层（全屏的全局问答窗口）随即恢复成模态
+        // <dialog>，紧接着到来的 close request 就会落在它身上，一次 Esc 收掉两层。
+        event.preventDefault();
+        onClose("escape");
       }}
     >
       <TransformWrapper
@@ -160,7 +180,7 @@ export function ImagePreviewModal({
                   <Plus size={18} />
                 </button>
                 <span className="answer-image-preview-control-divider" aria-hidden="true" />
-                <button type="button" autoFocus onClick={() => onClose("button")} aria-label="关闭图片预览">
+                <button ref={closeRef} type="button" autoFocus onClick={() => onClose("button")} aria-label="关闭图片预览">
                   <X size={19} />
                 </button>
               </div>
