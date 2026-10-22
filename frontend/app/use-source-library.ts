@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { httpErrorStatus, toUserMessage } from "./errors.ts";
 import {
   deleteSource as deleteSourceRequest,
@@ -45,6 +45,9 @@ const SOURCE_POLL_MAX_ATTEMPTS = 120;
  */
 type FollowedSource = { seen: string; baseline: string | null; started: boolean };
 const NO_TRACKED_SOURCES: ReadonlyMap<string, FollowedSource> = new Map();
+const NO_SOURCE_IDS: ReadonlySet<string> = new Set();
+/** What a submitted reparse came to: queued, nothing to do (gone / excluded), or the request failed. */
+export type SourceReparseOutcome = "started" | "none" | "failed";
 
 /**
  * One read of a followed source -> its next follow state, or null once THIS
@@ -134,7 +137,8 @@ export function useSourceLibrary({
   const [sourceQuery, setSourceQueryState] = useState("");
   const [sourceDetail, setSourceDetail] = useState<SourceSummary | null>(null);
   const [deletingSourceIds, setDeletingSourceIds] = useState<Set<string>>(() => new Set());
-  const [reparsingSource, setReparsingSource] = useState(false);
+  // The source detail's own (synchronous) reparse: the source it is for, null when none is in flight.
+  const [reparsingSourceId, setReparsingSourceId] = useState<string | null>(null);
   const [sourceElements, setSourceElements] = useState<SourceElement[]>([]);
   const [sourceElementsTotal, setSourceElementsTotal] = useState(0);
   const [sourceElementStartOffset, setSourceElementStartOffset] = useState(0);
@@ -154,6 +158,9 @@ export function useSourceLibrary({
   // follow work restarts a poller that went idle (attempt cap reached, or a round
   // that found nothing) even when `hasPending` itself did not flip.
   const [trackSerial, setTrackSerial] = useState(0);
+  // Followed reparses (`submitFollowedReparse`) whose baseline read or request has
+  // not returned yet; on "started" the follow set takes each one over.
+  const [submittingSourceIds, setSubmittingSourceIds] = useState<ReadonlySet<string>>(NO_SOURCE_IDS);
 
   const effectsRef = useRef(effects);
   effectsRef.current = effects;
@@ -251,9 +258,10 @@ export function useSourceLibrary({
     setSourceElementStartOffset(0);
     setSourceElementsLoading(false);
     setHighlightedElementId("");
-    setReparsingSource(false);
+    setReparsingSourceId(null);
     setSourcesPageLoading(false);
     setTrackedSources(NO_TRACKED_SOURCES);
+    setSubmittingSourceIds(NO_SOURCE_IDS);
     pollCountRef.current = 0;
   }
 
@@ -326,6 +334,7 @@ export function useSourceLibrary({
     setHighlightedElementId("");
     setSourcesPageLoading(false);
     setTrackedSources(NO_TRACKED_SOURCES);
+    setSubmittingSourceIds(NO_SOURCE_IDS);
     pollCountRef.current = 0;
     setOwnerSerial((value) => value + 1);
     return owner;
@@ -664,9 +673,12 @@ export function useSourceLibrary({
   async function reparseSource() {
     const detail = sourceDetailRef.current;
     const owner = ownerRef.current;
-    if (!detail || !owner || reparsingSource || !canWriteRef.current) return;
+    if (!detail || !owner || reparsingSourceId !== null || !canWriteRef.current) return;
     if (crossLibrarySourceNotebookId(detail.notebook_id, owner.notebookId)) return;
-    setReparsingSource(true);
+    // A reparse of this source submitted elsewhere (the KG analysis findings) has not
+    // finished yet: submitting it again would run the same expensive parse twice.
+    if (reparsingSourceIdsRef.current.has(detail.id)) return;
+    setReparsingSourceId(detail.id);
     try {
       const updated = await parseSource(detail.id);
       if (!owns(owner)) return;
@@ -684,7 +696,7 @@ export function useSourceLibrary({
     } catch (error) {
       if (owns(owner)) effectsRef.current.reportError(error);
     } finally {
-      if (owns(owner)) setReparsingSource(false);
+      if (owns(owner)) setReparsingSourceId(null);
     }
   }
 
@@ -795,6 +807,21 @@ export function useSourceLibrary({
   const hasPending = visibleSources.some(
     (source) => sourceIsPending(source),
   ) || (ownerIsActive && trackedSources.size > 0);
+  // The one reparse placeholder every reparse entry reads: a source holds it from the
+  // moment a followed reparse is submitted until the follow judges THIS run over (or
+  // drops it: the source is gone, the attempt budget ran out, the owner changed,
+  // `untrackSources`), and while the source detail's own reparse is in flight.
+  const reparsingSourceIds = useMemo<ReadonlySet<string>>(() => {
+    if (!ownerIsActive) return NO_SOURCE_IDS;
+    if (trackedSources.size === 0 && submittingSourceIds.size === 0 && reparsingSourceId === null) {
+      return NO_SOURCE_IDS;
+    }
+    const ids = new Set<string>([...trackedSources.keys(), ...submittingSourceIds]);
+    if (reparsingSourceId !== null) ids.add(reparsingSourceId);
+    return ids;
+  }, [ownerIsActive, trackedSources, submittingSourceIds, reparsingSourceId]);
+  const reparsingSourceIdsRef = useRef(reparsingSourceIds);
+  reparsingSourceIdsRef.current = reparsingSourceIds;
 
   useEffect(() => {
     const owner = ownerRef.current;
@@ -829,6 +856,8 @@ export function useSourceLibrary({
       }
       if (pollCountRef.current > SOURCE_POLL_MAX_ATTEMPTS) {
         effectsRef.current.setStatusText("处理超时：部分来源长时间未完成，请稍后重试");
+        // The follows end with the attempt budget, and their reparse placeholders with them.
+        if (trackedSourcesRef.current.size > 0) setTrackedSources(NO_TRACKED_SOURCES);
         return;
       }
       pollCountRef.current += 1;
@@ -958,7 +987,8 @@ export function useSourceLibrary({
   // even off the current page (each state change moves `contentRevision`).
   // `baselines` carries each source's `updated_at` read just before the
   // submission (see followedSourceStep). The shared poll's attempt cap bounds
-  // it, and an owner change or `untrackSources` stops it.
+  // it (and then drops the follow), and an owner change or `untrackSources`
+  // stops it. While followed, a source holds the reparse placeholder.
   const trackSourceProgress = useCallback((
     sourceIds: readonly string[],
     baselines: Readonly<Record<string, string | null | undefined>> = {},
@@ -980,7 +1010,7 @@ export function useSourceLibrary({
   const untrackSources = useCallback(() => setTrackedSources(NO_TRACKED_SOURCES), []);
   // The baseline a follow compares against: `updated_at` read just before the
   // reparse is submitted (null when that read fails -- the follow then only
-  // trusts "seen to start"). The page asks the hook for it; source reads stay here.
+  // trusts "seen to start"). `submitFollowedReparse` reads it; source reads stay here.
   const readFollowBaseline = useCallback(async (sourceId: string): Promise<string | null> => {
     try {
       return (await getSource(sourceId)).updated_at || null;
@@ -988,6 +1018,33 @@ export function useSourceLibrary({
       return null;
     }
   }, []);
+  // A reparse submitted from outside the source detail (the KG analysis findings),
+  // followed to the end of THIS run. The source holds the reparse placeholder from the
+  // submission on -- the baseline read and the request included -- so no entry can
+  // submit it again meanwhile; on "started" the follow takes it over in the same
+  // render, otherwise it is released.
+  async function submitFollowedReparse(
+    sourceId: string,
+    submit: () => Promise<SourceReparseOutcome>,
+  ): Promise<SourceReparseOutcome> {
+    const owner = currentOwner();
+    if (owner) setSubmittingSourceIds((previous) => new Set(previous).add(sourceId));
+    try {
+      const baseline = await readFollowBaseline(sourceId);
+      const outcome = await submit();
+      if (outcome === "started" && owner && owns(owner)) {
+        trackSourceProgress([sourceId], { [sourceId]: baseline });
+      }
+      return outcome;
+    } finally {
+      setSubmittingSourceIds((previous) => {
+        if (!previous.has(sourceId)) return previous;
+        const next = new Set(previous);
+        next.delete(sourceId);
+        return next.size === 0 ? NO_SOURCE_IDS : next;
+      });
+    }
+  }
 
   // Unmount is not one of the abort/invalidation sites `abortInFlightSourcesPage`
   // is called from elsewhere in this hook (see its own comment) — none of them
@@ -1001,7 +1058,9 @@ export function useSourceLibrary({
     trackSourceProgress,
     untrackSources,
     readFollowBaseline,
+    submitFollowedReparse,
     followedSourceCount: ownerIsActive ? trackedSources.size : 0,
+    reparsingSourceIds,
     sources: visibleSources,
     contentRevision: ownerIsActive ? contentRevision : 0,
     sourceScopeSelection: ownerIsActive
@@ -1016,7 +1075,7 @@ export function useSourceLibrary({
     sourceQuery: ownerIsActive ? sourceQuery : "",
     sourceDetail: ownerIsActive ? sourceDetail : null,
     deletingSourceIds: ownerIsActive ? deletingSourceIds : inactiveDeletingIdsRef.current,
-    reparsingSource: ownerIsActive ? reparsingSource : false,
+    reparsingSource: ownerIsActive ? reparsingSourceId !== null : false,
     sourceElements: ownerIsActive ? sourceElements : NO_SOURCE_ELEMENTS,
     sourceElementsTotal: ownerIsActive ? sourceElementsTotal : 0,
     sourceElementStartOffset: ownerIsActive ? sourceElementStartOffset : 0,

@@ -458,7 +458,7 @@ test("证据:缺字段、类型不对、认不出的规则都不抛错,只少几
 
 // ------------------------------------------------------------ 建议动作
 
-const CONTEXT = { canWrite: true, pendingMerges: [] };
+const CONTEXT = { canWrite: true, pendingMerges: [], reparsingSourceIds: new Set() };
 
 test("动作:只有 open 出按钮;只读成员 / 已处理 / 已标为正常 / 已判定 / 已经跑过都没有", () => {
   const f1 = finding({
@@ -536,6 +536,34 @@ test("动作:收录来源不出重新解析;已不在的来源不出按钮;正�
   const processing = findingActionPlan({ ...f3, live_sources: [live("d", "D", { processing: true })] }, CONTEXT);
   assert.deepEqual(processing.processingSourceIds, ["d"]);
   assert.ok(processing.notes.includes("这篇来源正在解析，完成后再处理"));
+  assert.deepEqual(processing.reparsingSourceIds, []);
+});
+
+test("动作:重新解析已提交、这一次还没跑完的来源(全页一份占位)——重新解析标出来并就地写状态,删除不受它影响", () => {
+  const f3 = finding({
+    rule_id: "F3", severity: "medium", subject: { kind: "source", key: "d", label: "D" }, subject_refs: ["d"],
+    actions: [
+      { kind: "reparse_source", capability: "sources:write", source_id: "d" },
+      { kind: "delete_source", capability: "sources:write", source_id: "d" },
+    ],
+    live_sources: [live("d", "D")],
+  });
+  const queued = findingActionPlan(f3, { ...CONTEXT, reparsingSourceIds: new Set(["d"]) });
+  assert.deepEqual(queued.buttons.map((spec) => spec.kind), ["open_source", "reparse_source", "delete_source"]);
+  assert.deepEqual(queued.reparsingSourceIds, ["d"]);
+  assert.deepEqual(queued.processingSourceIds, []);
+  assert.ok(queued.notes.includes("已提交重新解析，等待完成"));
+  // 别的来源的占位不波及这一条。
+  const other = findingActionPlan(f3, { ...CONTEXT, reparsingSourceIds: new Set(["x"]) });
+  assert.deepEqual(other.reparsingSourceIds, []);
+  assert.equal(other.notes.includes("已提交重新解析，等待完成"), false);
+  // 这一次已经在解析:只写「已提交重新解析，等待完成」,不再叠「正在解析」那一句。
+  const running = findingActionPlan(
+    { ...f3, live_sources: [live("d", "D", { processing: true })] },
+    { ...CONTEXT, reparsingSourceIds: new Set(["d"]) },
+  );
+  assert.deepEqual(running.processingSourceIds, ["d"]);
+  assert.deepEqual(running.notes.filter((note) => note.includes("解析")), ["已提交重新解析，等待完成"]);
 });
 
 test("动作:F4 只认两侧都在全组 canonical_ids 里的那一对;没有就写「待确认合并里还没有这一组」", () => {

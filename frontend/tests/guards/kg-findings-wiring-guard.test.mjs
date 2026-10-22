@@ -79,10 +79,11 @@ test("重新解析:先弹说明确认框,确认后才进在飞态、才发请求
   assert.ok(modal, "没有确认框");
   const dialog = modal.arguments[0];
   assert.match(dialog, /report\("running"\);\s*void \(async \(\) => \{/, "确认 → running → 请求");
-  // 请求之前先读一次 updated_at 作基准,再发重新解析。
+  // 请求交给来源库:它先读一次 updated_at 作基准、再发重新解析,排上就按 id 跟到这一次跑完,从提交起
+  // 这篇来源就占着重新解析的占位(读基准在提交之前、占位从提交起,由 use-source-library 的用例钉住)。
   assert.match(
     dialog,
-    /const baseline = await sourceLibrary\.readFollowBaseline\(target\.sourceId\);\s*const outcome = await reparseOutcome\(nb, \[target\.sourceId\]\);/,
+    /const outcome = await sourceLibrary\.submitFollowedReparse\(\s*target\.sourceId,\s*\(\) => reparseOutcome\(nb, \[target\.sourceId\]\),?\s*\);/,
   );
   // 确认框说清两件事:会重新调用模型、会替换这篇来源现有的知识条目。
   assert.match(dialog, /会重新调用模型/);
@@ -93,16 +94,28 @@ test("重新解析:先弹说明确认框,确认后才进在飞态、才发请求
   assert.match(run, /const r = await reparseSources\(nb, sourceIds\);/);
 });
 
-test("重新解析排上之后按 id 跟到终态(它多半不在来源库当前页);面板一关就不再跟", () => {
+test("重新解析排上之后按 id 跟到这一次跑完;面板一关就不再跟;全页的重新解析入口读同一份占位", () => {
   const dialog = callSitesIn(findFunctionIn(page, "Home", "confirmReparseFromAnalysis"))
     .find(({ target }) => target === "openInfoModal").arguments[0];
-  // 只在真的排上了、且仍是发起时那个库时才跟——跟的就是这次请求的那一篇。
-  assert.match(
-    dialog,
-    /if \(outcome === "started" && activeNotebookIdRef\.current === nb\) \{\s*sourceLibrary\.trackSourceProgress\(\[target\.sourceId\], \{ \[target\.sourceId\]: baseline \}\);\s*\}/,
-  );
+  // 跟踪、基准、占位都在来源库里,page 不另记一份(不再自己调 trackSourceProgress / readFollowBaseline)。
+  assert.equal(/trackSourceProgress|readFollowBaseline/.test(dialog), false);
   const text = page.getFullText();
   assert.match(text, /const \{ untrackSources \} = sourceLibrary;\s*useEffect\(\(\) => \{\s*if \(!kgGraph\.analysisOpen\) untrackSources\(\);\s*\}, \[kgGraph\.analysisOpen, untrackSources\]\);/);
+  // 问题清单的占位就是来源库那一份(引用同一篇来源的每一行都按它置灰)。
+  assert.equal(onlyElement(page, "KgAnalysisView").bindings.reparsingSourceIds, "sourceLibrary.reparsingSourceIds");
+  // 来源详情的两个「重新解析」(标题旁的图标、降级提示里的按钮)用同一份占位置灰并就地写状态;
+  // 来源库的 reparseSource 自己也拒收(use-source-library 的用例钉住)。
+  assert.match(
+    text,
+    /const sourceDetailReparseQueued = Boolean\(\s*sourceDetail && !reparsingSource && sourceLibrary\.reparsingSourceIds\.has\(sourceDetail\.id\),\s*\);/,
+  );
+  const reparseButtons = jsxElements(page, "button")
+    .filter((element) => (element.bindings?.onClick ?? "").includes("reparseSource()"));
+  assert.equal(reparseButtons.length, 2, "来源详情应有两个重新解析按钮");
+  for (const button of reparseButtons) {
+    assert.equal(button.bindings.disabled, "reparsingSource || sourceDetailDeleting || sourceDetailReparseQueued");
+  }
+  assert.match(text, /\{sourceDetailReparseQueued \? \(\s*<p className="tool-hint source-detail-reparse-note" role="status">已提交重新解析，等待完成<\/p>/);
 });
 
 test("去待确认合并:关掉面板,并请求知识图谱视图定位那一对", () => {
@@ -120,7 +133,8 @@ test("面板里的写按钮:在飞期间禁用;「标为正常」只给可编辑
   assert.equal(action.bindings.disabled, "disabledFor(spec)");
   const disabledFor = findFunctionIn(findings, "FindingRowView", "disabledFor").getText(findings);
   for (const flag of ["state.deletingSourceIds.has(spec.sourceId)", "plan.processingSourceIds.includes(spec.sourceId)",
-    "state.relinking", "state.maintenanceBusy", "busy === `reparse:${spec.sourceId}`"]) {
+    "state.relinking", "state.maintenanceBusy", "busy === `reparse:${spec.sourceId}`",
+    "plan.reparsingSourceIds.includes(spec.sourceId)"]) {
     assert.ok(disabledFor.includes(flag), `disabledFor 缺 ${flag}`);
   }
   const text = findings.getFullText();
