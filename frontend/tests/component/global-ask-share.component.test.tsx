@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 // 全局问答的会话分享（任务 3：前端弹窗与接点）。
 //
@@ -14,7 +14,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import GlobalAskPage from "../../app/ask/page.tsx";
 import { GlobalAskLauncher } from "../../app/ask/global-ask-launcher.tsx";
-import { useRootModalCoordinator } from "../../app/use-root-modal-coordinator.ts";
+import { claimEscapePress, useRootModalCoordinator } from "../../app/use-root-modal-coordinator.ts";
 import { humanizedError } from "../../app/errors.ts";
 import { GLOBAL_ASK_PAGE_SIZE, type GlobalConversation, type GlobalConversationDetail, type GlobalJob } from "../../app/global-ask-api.ts";
 import { SHARE_SNAPSHOT_MAX_TURNS } from "../../app/conversation-share-disclosure.ts";
@@ -164,6 +164,9 @@ beforeEach(() => {
     throw new Error(`unexpected request: ${options.method} ${path}`);
   });
 });
+
+// 按键账是模块级的：每条用例收尾一次按键，免得上一条留下的「按住」漏进下一条。
+afterEach(() => { fireEvent.keyUp(window, { key: "Escape" }); });
 
 function installDialogMethods() {
   Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: vi.fn() });
@@ -476,6 +479,26 @@ test("弹窗打开时按 Esc：弹窗不关，全局问答浮窗也不关", asyn
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局问答" })).toBeNull());
 });
 
+
+// 分享弹窗在捕获期吃掉 Esc 时**认领**这一次按键：浏览器无视 preventDefault 照样派发的
+// close request 在协调器那里拿不到名额，窗口与弹窗都还在。
+test("弹窗吃掉的那一次 Esc 被它认领：随后的 close request 关不掉窗口", async () => {
+  installDialogMethods();
+  render(<Launcher />);
+  fireEvent.click(screen.getByRole("button", { name: "打开全局问答" }));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入问题" })).toBeEnabled());
+  fireEvent.click(await screen.findByRole("button", { name: "对话 conv-a" }));
+  fireEvent.click((await screen.findAllByRole("button", { name: "分享到这条回答" }))[1]);
+  const heading = await screen.findByText("分享会话");
+
+  fireEvent.keyDown(heading, { key: "Escape" });
+  // 这一次按键已经有主：别的层再认领拿不到名额。
+  expect(claimEscapePress()).toBe(false);
+  fireEvent(screen.getByRole("dialog", { name: "全局问答" }), new Event("cancel", { cancelable: true }));
+  expect(screen.getByText("分享会话")).toBeInTheDocument();
+  expect(screen.getByRole("dialog", { name: "全局问答" })).toBeTruthy();
+  fireEvent.keyUp(heading, { key: "Escape" });
+});
 
 test("收起浮窗会一并收掉分享弹窗，并把宿主页面的 Esc 还回去", async () => {
   installDialogMethods();

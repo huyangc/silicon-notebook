@@ -42,6 +42,7 @@ import { KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import { mapCitationKnowhowRef } from "./knowhow-model.ts";
 import { unwrapStandaloneLatex } from "./math-markdown";
 import { assetNotebookId, sourceImageAssetUrl } from "./source-image";
+import { claimEscapePress } from "./use-root-modal-coordinator";
 import { label, TIER } from "./vocabulary";
 
 
@@ -533,7 +534,12 @@ export function CitationPopover({
       //    一层」是结构性的,不靠每个宿主自己记得判断。
       //  · `preventDefault()` 掐掉原生 <dialog> 的 close request(Esc 的默认动作),
       //    否则全屏形态下卡片关了、窗口也跟着关。浏览器对这一条的支持不完全一致,
-      //    宿主还有 `citationPopoverHoldsEscape()` 那道兜底。
+      //    所以卡片同时**认领**这一次按键(`claimEscapePress`):随后到来的 close
+      //    request 在协调器那里拿不到名额。宿主的 `citationPopoverHoldsEscape()` 兜底
+      //    保留,它管的是不经键盘的 close request(返回手势)——那时卡片还开着,窗口
+      //    不该越过它先关。
+      // 这一次按键已被别的层认领过(它已经关了一层),卡片不再为它收起。
+      if (!claimEscapePress()) return;
       event.preventDefault();
       event.stopPropagation();
       onClose();

@@ -439,24 +439,64 @@ test("global ask hands its citation images to the shared preview slot as a stack
   assert.match(hookText, /"answer-image-preview": \{[^}]*stacksOver: \["global-ask"\] \}/);
   // 预览按每一张图自己的取图库挂载与取图：全局问答没有当前笔记本，挂载条件或 URL 只要
   // 退回 `currentNotebookId`，集合页上的预览就永远渲染不出来、或去错的库取图。
-  const previewMounts = [];
+  // 判据看的是挂载点到根的**全部**祖先条件（`&&` 的左侧、三元的条件、外层 if），不只
+  // 最内层那条 `&&` 链：外面再套一层 `{currentNotebookId && <>…</>}` 一样会让集合页上的
+  // 预览永远渲染不出来。page.tsx 里声明的变量别名按初始化式展开（抽变量是合理重构）。
+  // 正向：某个祖先条件确实读 `answerImagePreviewImage.notebookId`（`.` 或 `?.`）。
+  // 反向：任何祖先条件都不许引用当前笔记本 / 工作区相关的标识——按名字认（含
+  // notebook / workspace 的标识符，属性名除外），`Boolean(currentNotebookId)`、
+  // `currentNotebook?.id`、`isWorkspace` 这类换个写法绕回当前库的都挡住。
+  const homeConsts = new Map();
+  (function collect(node) {
+    // 只展开「条件别名」：初始化式是表达式而不是一次调用（`rootModals = useRootModalCoordinator(…)`
+    // 这类句柄的构造参数与挂载条件无关）。
+    if (
+      ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
+      && !ts.isCallExpression(node.initializer) && !ts.isNewExpression(node.initializer)
+    ) {
+      homeConsts.set(node.name.text, node.initializer);
+    }
+    ts.forEachChild(node, collect);
+  })(page);
+  const previewConditions = [];
   (function visit(node) {
     if (ts.isJsxElement(node) && node.openingElement.tagName.getText(page) === "ImagePreviewModal") {
-      let cursor = node.parent;
-      while (cursor && ts.isParenthesizedExpression(cursor)) cursor = cursor.parent;
-      while (
-        cursor?.parent
-        && ts.isBinaryExpression(cursor.parent)
-        && cursor.parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
-      ) cursor = cursor.parent;
-      previewMounts.push(cursor && ts.isBinaryExpression(cursor) ? cursor.left.getText(page) : "");
+      const conditions = [];
+      let child = node;
+      for (let cursor = node.parent; cursor; child = cursor, cursor = cursor.parent) {
+        if (
+          ts.isBinaryExpression(cursor)
+          && cursor.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+          && cursor.right === child
+        ) conditions.push(cursor.left);
+        if (ts.isConditionalExpression(cursor) && cursor.condition !== child) conditions.push(cursor.condition);
+        if (ts.isIfStatement(cursor) && cursor.expression !== child) conditions.push(cursor.expression);
+      }
+      previewConditions.push(conditions);
     }
     ts.forEachChild(node, visit);
   })(page);
-  assert.equal(previewMounts.length, 1, "page.tsx 应恰好挂一处 ImagePreviewModal");
-  const mountTerms = previewMounts[0].split("&&").map((term) => term.trim());
-  assert.ok(mountTerms.includes("answerImagePreviewImage.notebookId"), `挂载条件：${previewMounts[0]}`);
-  assert.ok(!mountTerms.includes("currentNotebookId"), `挂载条件不许依赖当前笔记本：${previewMounts[0]}`);
+  assert.equal(previewConditions.length, 1, "page.tsx 应恰好挂一处 ImagePreviewModal");
+  const conditionTexts = [];
+  const conditionNames = [];
+  const expand = (expression, depth) => {
+    conditionTexts.push(expression.getText(page));
+    (function names(node) {
+      if (ts.isIdentifier(node) && !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)) {
+        conditionNames.push(node.text);
+        const alias = homeConsts.get(node.text);
+        if (alias && depth < 3) expand(alias, depth + 1);
+      }
+      ts.forEachChild(node, names);
+    })(expression);
+  };
+  for (const condition of previewConditions[0]) expand(condition, 0);
+  assert.ok(
+    conditionTexts.some((text) => /answerImagePreviewImage\??\.notebookId/.test(text)),
+    `挂载条件要读这张图自己的取图库：${conditionTexts.join(" ‖ ")}`,
+  );
+  const currentLibraryNames = conditionNames.filter((name) => /notebook|workspace/i.test(name));
+  assert.deepEqual(currentLibraryNames, [], `挂载条件不许依赖当前笔记本 / 工作区：${conditionTexts.join(" ‖ ")}`);
   const previewImages = jsxElements(page, "AuthedImage")
     .filter((element) => (element.bindings?.url ?? "").includes("answerImagePreviewImage"));
   assert.equal(previewImages.length, 1);
