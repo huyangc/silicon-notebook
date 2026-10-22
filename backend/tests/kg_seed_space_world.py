@@ -162,6 +162,39 @@ def rebuild(repo, nb: str, *, force: bool = False) -> None:
     repo._runtime.knowledge_lifecycle.rebuild_unified_kg(nb, force=force)
 
 
+def record_streams_and_lease_renewals(repo, monkeypatch) -> list:
+    """Every seed-vector stream (by object type) and every claim renewal the
+    rebuild makes from now on, in call order (the calls still run for real)."""
+    lifecycle = repo._runtime.knowledge_lifecycle
+    order: list = []
+    real_stream = lifecycle._stream_seed_reps
+    real_renew = lifecycle._refresh_generation_lease
+
+    def stream(notebook_id, object_type, *args, **kwargs):
+        order.append(("stream", object_type))
+        return real_stream(notebook_id, object_type, *args, **kwargs)
+
+    def renew(*args, **kwargs):
+        order.append(("renew", None))
+        return real_renew(*args, **kwargs)
+
+    monkeypatch.setattr(lifecycle, "_stream_seed_reps", stream)
+    monkeypatch.setattr(lifecycle, "_refresh_generation_lease", renew)
+    return order
+
+
+def assert_the_claim_is_renewed_between_the_two_concept_streams(order: list) -> None:
+    """A rebuild whose v1 decision translation moves the override streams the
+    concept seed vectors twice before its first stage boundary; the claim is
+    renewed in between (the R13 heartbeat), so the second stream starts on a
+    fresh lease. Asserted by position in the call order, not by how many
+    renewals the whole rebuild made (the stage boundaries make plenty)."""
+    concept_streams = [i for i, event in enumerate(order) if event == ("stream", "concept")]
+    assert len(concept_streams) == 2, order
+    first, second = concept_streams
+    assert ("renew", None) in order[first + 1:second], order
+
+
 # ================================================================ scenarios
 
 def assert_the_published_space_switches_with_the_rebuild(repo, monkeypatch) -> None:
@@ -261,7 +294,9 @@ def assert_a_rejection_the_new_seeds_would_collapse_keeps_the_old_seeds(
     decide(repo, nb, "mc-old-rejected", "q former", "qformer", "rejected")
     with legacy_code(monkeypatch):
         rebuild(repo, nb, force=True)
+    order = record_streams_and_lease_renewals(repo, monkeypatch)
     rebuild(repo, nb)
+    assert_the_claim_is_renewed_between_the_two_concept_streams(order)
     assert canonical_of(repo, nb) == {
         "Q-Former": "K-~v1:q former", "Qformer": "K-~v1:qformer"}
     assert decision_rows(repo, nb) == [("~v1:q former", "~v1:qformer", "rejected", 2)]
