@@ -495,7 +495,13 @@ class NotebookReembedService:
                 # Per table, isolated: a table that raised is logged and named in the
                 # result while the other tables still run.
                 fill = knowhow_api.fill_missing_knowhow_chunk_vectors(repo, nb)
-                totals[LEG_CHUNKS][0] += fill.found
+                # The leg's remaining is found - embedded; for the Knowhow half it must be
+                # what storage still lacks (fill.remaining), not found - written: a chunk
+                # whose conditional write was skipped because a projection re-embedded
+                # it meanwhile is not missing. Document chunks need no such correction:
+                # their writes are unconditional and made under the source chunk lock the
+                # ingestion pipeline also takes, so nothing fills them in between.
+                totals[LEG_CHUNKS][0] += fill.written + fill.remaining
                 totals[LEG_CHUNKS][1] += fill.written
                 if fill.failure:
                     failures.setdefault(LEG_CHUNKS, fill.failure)
@@ -607,6 +613,10 @@ class NotebookReembedService:
 
         try:
             repo.maintenance.backfill_node_embeddings(nb, tally=_tally)
+            # "Remaining" is what storage still lacks, not attempted - written: a row
+            # the conditional insert skipped because another writer filled it meanwhile
+            # is not missing (the tally above is live progress only).
+            remaining = int(repo.maintenance.count_missing_embeddable_node_vectors(nb))
         except Exception as exc:  # noqa: BLE001 — logged and recorded on the leg
             _logger.exception("notebook-reembed kg_objects failed: notebook_id=%s", nb)
             # Pages written before the failure changed the clustering inputs.
@@ -616,12 +626,11 @@ class NotebookReembedService:
                 remaining=max(0, counts[1] - counts[0]), detail=type(exc).__name__,
             )
             return
-        written, attempted = counts
+        written = counts[0]
         if written:
             # New object vectors change the clustering inputs: a later rebuild must not
             # skip on unchanged object/decision counts alone (batch_ingest does the same).
             self._mark_kg_dirty(nb)
-        remaining = max(0, attempted - written)
         _set_leg(
             run, LEG_KG_OBJECTS, state="done" if remaining == 0 else "incomplete",
             embedded=written, remaining=remaining,
@@ -656,6 +665,9 @@ class NotebookReembedService:
 
         try:
             repo.maintenance.backfill_relation_embeddings(nb, tally=_tally)
+            # Read from storage, as for objects: a relation another writer filled while
+            # this leg ran is not missing.
+            remaining = int(repo.maintenance.count_missing_embeddable_relation_vectors(nb))
         except Exception as exc:  # noqa: BLE001 — logged and recorded on the leg
             _logger.exception("notebook-reembed kg_relations failed: notebook_id=%s", nb)
             _set_leg(
@@ -663,8 +675,7 @@ class NotebookReembedService:
                 remaining=max(0, counts[1] - counts[0]), detail=type(exc).__name__,
             )
             return
-        written, attempted = counts
-        remaining = max(0, attempted - written)
+        written = counts[0]
         _set_leg(
             run, LEG_KG_RELATIONS, state="done" if remaining == 0 else "incomplete",
             embedded=written, remaining=remaining,

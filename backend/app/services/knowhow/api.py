@@ -313,6 +313,10 @@ class KnowhowChunkFill:
     found: int
     """Chunks that can get a vector and had none."""
     written: int
+    remaining: int
+    """Chunks still without a vector after the fill, read from storage per table (a
+    chunk the conditional write skipped because a projection re-embedded it meanwhile
+    is not missing); for a table that raised, what it found minus what it wrote."""
     failure: str
     """Class name of the first exception a table raised (``""`` when none did)."""
 
@@ -353,9 +357,10 @@ def fill_missing_knowhow_chunk_vectors(repo: Any, notebook_id: str) -> KnowhowCh
     embedding = repo._runtime.source_embedding
     size = max(1, int(repo.settings.embed_batch_size))
     page = max(size, (KNOWHOW_FILL_PAGE_ROWS // size) * size)
-    found = written = 0
+    found = written = remaining = 0
     failure = ""
     for table in repo.list_knowhow_tables(notebook_id):
+        table_found = table_written = 0
         source_id = table.get("hidden_source_id")
         if not source_id:
             continue  # never projected: no chunks yet
@@ -368,14 +373,20 @@ def fill_missing_knowhow_chunk_vectors(repo: Any, notebook_id: str) -> KnowhowCh
                     notebook_id, source_id=str(source_id)
                 )
                 found += len(ids)
+                table_found = len(ids)
                 for start in range(0, len(ids), page):
                     rows = mnt.chunk_texts_by_ids(ids[start:start + page])
-                    written += int(embedding.embed_knowhow_chunks_batch(
+                    table_written += int(embedding.embed_knowhow_chunks_batch(
                         notebook_id,
                         [{"id": r["id"], "text": r["text"]} for r in sorted(
                             rows, key=lambda r: str(r["id"])
                         )],
                     ) or 0)
+                written += table_written
+                # Still under the lock: what this table really still lacks.
+                remaining += len(mnt.missing_knowhow_chunk_embedding_ids(
+                    notebook_id, source_id=str(source_id)
+                )) if ids else 0
         except IndexingPipelineUnavailableError:
             raise
         except Exception as exc:  # noqa: BLE001 — recorded; the other tables still run
@@ -383,7 +394,10 @@ def fill_missing_knowhow_chunk_vectors(repo: Any, notebook_id: str) -> KnowhowCh
                 "knowhow chunk vector fill failed: notebook_id=%s", notebook_id
             )
             failure = failure or type(exc).__name__
-    return KnowhowChunkFill(found=found, written=written, failure=failure)
+            remaining += max(0, table_found - table_written)
+    return KnowhowChunkFill(
+        found=found, written=written, remaining=remaining, failure=failure
+    )
 
 
 def get_table_in_notebook(repo: Any, notebook_id: str, table_id: str) -> dict:

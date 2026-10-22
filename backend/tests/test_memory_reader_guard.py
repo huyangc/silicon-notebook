@@ -449,6 +449,7 @@ _REGISTRY: dict[str, dict[str, str]] = {
     "postgres/maintenance.py": {
         name: MAINTENANCE for name in (
             "PostgresMaintenanceAdapter.backfill_node_embeddings",
+            "PostgresMaintenanceAdapter.count_missing_embeddable_node_vectors",
             # the relation backfill's keyset page (module-level, EXPLAIN-pinned)
             "_MISSING_RELATION_PAGE_SQL",
             "PostgresMaintenanceAdapter.backfill_source_fact_batch",
@@ -470,6 +471,7 @@ _REGISTRY: dict[str, dict[str, str]] = {
             "ReadOnlySQLiteInspector.concept_id_names",
             "ReadOnlySQLiteInspector.concept_names",
             "SQLiteMaintenanceAdapter.backfill_node_embeddings",
+            "SQLiteMaintenanceAdapter.count_missing_embeddable_node_vectors",
             # the relation backfill's keyset page (module-level, so a plan test can
             # EXPLAIN the statement that runs), twin of the PostgreSQL one
             "_MISSING_RELATION_PAGE_SQL",
