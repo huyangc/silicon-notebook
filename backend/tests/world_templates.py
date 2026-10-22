@@ -188,7 +188,6 @@ PROCESS_CACHE_INVENTORY: dict[str, str] = {
     "app.services.knowhow.api:_SCHEDULERS": OWNER_SCOPED,
     # Present only while a request / run / job is in flight.
     "app.api.mcp_tools.ask:_WAITERS": RUNTIME,
-    "app.services.notebook_reembed:_inflight": RUNTIME,
     "app.services.notebook_reembed:_active_runs": RUNTIME,
     # Named claims held only for the duration of a ``try_claim`` block (the
     # deletion-window transfer's one-at-a-time claim).

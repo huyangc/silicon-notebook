@@ -2131,7 +2131,7 @@ class RepositoryRuntime:
         mark_unified_kg_dirty_in_tx: Callable[[Any, str], int],
         bump_cluster_mutation_seq: Callable[..., None],
         embed_objects_batch: Callable[..., None],
-        embed_relations_batch: Callable[..., None],
+        embed_relations_batch: Callable[..., int],
         source_ids_from_evidence: Callable[..., set],
         set_source_status: Callable[..., None],
         run_extraction: Callable[..., None],

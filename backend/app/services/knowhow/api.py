@@ -298,6 +298,26 @@ def build_projector(repo: Any) -> KnowhowProjector:
     )
 
 
+def fill_missing_knowhow_chunk_vectors(repo: Any, notebook_id: str) -> "tuple[int, int]":
+    """Embed every Knowhow chunk of the notebook that has no vector, table by table
+    (``KnowhowProjector.fill_missing_chunk_vectors``: ``knowhow_embedding``, batched, no
+    reprojection). Returns ``(missing found, vectors written)`` summed over the tables.
+    The caller checks that ``knowhow_embedding`` is bound."""
+    projector = None
+    found = written = 0
+    for table in repo.list_knowhow_tables(notebook_id):
+        source_id = table.get("hidden_source_id")
+        if not source_id:
+            continue  # never projected: no chunks yet
+        projector = projector or build_projector(repo)
+        table_found, table_written = projector.fill_missing_chunk_vectors(
+            str(table["id"]), source_id=str(source_id), notebook_id=notebook_id
+        )
+        found += table_found
+        written += table_written
+    return found, written
+
+
 def get_table_in_notebook(repo: Any, notebook_id: str, table_id: str) -> dict:
     """Fetch a table detail, enforce it belongs to ``notebook_id`` (the
     request's read/write guard only proves the caller can access the

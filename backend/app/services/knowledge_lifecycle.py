@@ -673,7 +673,7 @@ class KnowledgeLifecycleService:
         mark_unified_kg_dirty_in_tx: Callable[[object, str], None],
         bump_cluster_mutation_seq: Callable[[object, str], None],
         embed_objects_batch: Callable[..., None],
-        embed_relations_batch: Callable[[str, List[dict]], None],
+        embed_relations_batch: Callable[[str, List[dict]], int],
         source_ids_from_evidence: Callable[[Optional[str | list]], set],
         set_source_status: Callable[..., None],
         run_extraction: Callable[..., None],

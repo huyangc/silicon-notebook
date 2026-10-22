@@ -2081,7 +2081,7 @@ class RepositoryFacade:
             notebook_id, items, progress=progress, commit_every=commit_every
         )
 
-    def _embed_relations_batch(self, notebook_id: str, rel_items: List[dict]) -> None:
+    def _embed_relations_batch(self, notebook_id: str, rel_items: List[dict]) -> int:
         return self._runtime.source_embedding.embed_relations_batch(
             notebook_id, rel_items
         )
@@ -2099,7 +2099,7 @@ class RepositoryFacade:
         self.require_indexing_pipeline_write(source.notebook_id)
         return self._runtime.source_chunking.chunk_and_embed_source(source_id)
 
-    def _embed_chunks_batch(self, notebook_id: str, items: List[dict]) -> None:
+    def _embed_chunks_batch(self, notebook_id: str, items: List[dict]) -> int:
         return self._runtime.source_embedding.embed_chunks_batch(notebook_id, items)
 
     def _backfill_knowledge_embeddings(self, db: object,

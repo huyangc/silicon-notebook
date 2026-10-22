@@ -579,13 +579,12 @@ def reparse_sources(
 
 def _backfill_vectors_job(repo, notebook_id: str) -> None:
     """The scheduler job behind ``POST /notebooks/{id}/backfill-vectors``: the
-    ``chunks`` and ``elements`` legs of ``NotebookReembedService`` (only what is missing,
-    per source under its chunk lock; Knowhow tables reprojected so their chunks keep
-    ``knowhow_embedding``). Runs the run the route claimed and releases the shared
-    single-flight guard on every exit, including the pipeline gate raising first."""
-    NotebookReembedService(repo).run_claimed(
-        notebook_id, legs=notebook_reembed.SOURCE_VECTOR_LEGS
-    )
+    ``chunks`` and ``elements`` legs of ``NotebookReembedService`` (embedding only, only
+    what is missing: document rows per source under its chunk lock, Knowhow chunks on
+    ``knowhow_embedding`` without reprojecting their table). Executes the run the route
+    claimed and releases the shared single-flight guard on every exit, including the
+    pipeline gate raising first."""
+    NotebookReembedService(repo).run_claimed(notebook_id)
 
 
 @router.post(
@@ -612,8 +611,10 @@ def backfill_vectors(notebook_id: str) -> RepairScheduledResult:
     # ("group-gone" 才解除「修复中」)是零打扰的既有分支,不需要新增错误处理或文案。换成
     # 409 需要新增一条 user_error() 中文文案,而前端现有 reportError() 落地在
     # setStatusText(全局状态位、不紧邻按钮),不如幂等受理干净。
-    # 单飞守卫与 notebook-reembed 共用(services/notebook_reembed.py):在飞的若是只跑
-    # KG 腿的重嵌作业,chunks/elements 会并进它的下一轮,同样不重复提交。
+    # 单飞守卫与 notebook-reembed 共用(services/notebook_reembed.py):本轮尚未开始发现
+    # 的 chunks/elements 腿算已覆盖;已开始发现(或在飞作业根本不跑)的腿并进同一作业的
+    # 下一轮,同样不重复提交。并入的腿跑在在飞作业所在的池上(kg_scheduler 或重活池),
+    # 理由见 _join_locked 的 docstring。
     if NotebookReembedService.join_running(
         notebook_id, notebook_reembed.SOURCE_VECTOR_LEGS
     ):

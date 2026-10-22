@@ -305,7 +305,7 @@ class SQLiteRepository(RepositoryFacade):
             nb_id, name, text, tmpdir
         )
 
-    def _backfill_relation_embeddings(self, notebook_id: str) -> None:
+    def _backfill_relation_embeddings(self, notebook_id: str) -> int:
         return self.maintenance.backfill_relation_embeddings(notebook_id)
 
     @staticmethod

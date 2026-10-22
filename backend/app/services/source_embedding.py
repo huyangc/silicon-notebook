@@ -739,6 +739,56 @@ class SourceEmbeddingService:
                 ))
         if not pending:
             return 0
+        return self._write_chunk_vectors(
+            notebook_id, workload_id, embedder, pending, task_prefix="emb-ck"
+        )
+
+    def embed_knowhow_chunks_batch(
+        self,
+        notebook_id: str,
+        rows: List[dict],
+        *,
+        still_current: Optional[Callable[[List[str]], set]] = None,
+    ) -> int:
+        """Batched, best-effort fill of Knowhow chunk vectors with ``knowhow_embedding``
+        — the backfill counterpart of ``embed_chunk_ids`` (which the projector calls one
+        row at a time and which raises). Texts are prepared exactly as
+        ``embed_chunk_ids`` prepares them (``text[:embed_truncate_chars]``, no strip), so
+        a filled vector equals the one a projection would have written. Calls carry
+        ``embed_batch_size`` texts; a failed call is logged and its rows stay missing.
+
+        ``still_current(chunk_ids)`` returns the ids whose stored text is still the text
+        embedded; it runs just before each page is written, so a cell edited while the
+        model was busy is not given its old text's vector (on PostgreSQL the caller's
+        table projection lock already excludes that; on SQLite that lock is a no-op).
+
+        ``rows``: ``[{"id": chunk_id, "text": chunk_text}, ...]``. Returns the number of
+        vectors written."""
+        workload_id = "knowhow_embedding"
+        embedder = self.embedder(workload_id)
+        if not rows or not getattr(embedder, "configured", True):
+            return 0
+        trunc = self.settings.embed_truncate_chars
+        pending = [(r["id"], r["text"][:trunc]) for r in rows if r["text"]]
+        if not pending:
+            return 0
+        return self._write_chunk_vectors(
+            notebook_id, workload_id, embedder, pending,
+            task_prefix="emb-kh", still_current=still_current,
+        )
+
+    def _write_chunk_vectors(
+        self,
+        notebook_id: str,
+        workload_id: str,
+        embedder: Any,
+        pending: List[tuple],
+        *,
+        task_prefix: str,
+        still_current: Optional[Callable[[List[str]], set]] = None,
+    ) -> int:
+        """Embed ``pending`` ``(chunk_id, text)`` in ``embed_batch_size`` calls and upsert
+        the vectors page by page; returns how many were written."""
         size = max(1, self.settings.embed_batch_size)
         batches = [pending[i:i+size] for i in range(0, len(pending), size)]
         self._warm_up(embedder)
@@ -747,8 +797,10 @@ class SourceEmbeddingService:
             try:
                 vecs = embedder.embed_texts([t for _, t in batch])
             except Exception as exc:  # noqa: BLE001 — best-effort; isolate per batch
-                self.event_log.logger.warning("embed chunks batch failed (%d) for %s: %s",
-                                              len(batch), notebook_id, exc)
+                self.event_log.logger.warning(
+                    "embed chunks batch failed (%d, %s) for %s: %s",
+                    len(batch), workload_id, notebook_id, exc,
+                )
                 return []
             return [(cid, v) for (cid, _), v in zip(batch, vecs)]
 
@@ -764,10 +816,13 @@ class SourceEmbeddingService:
                 for part in self._map_embedding_batches(
                     _emb,
                     batches[pstart:pstart + page_sz],
-                    task_prefix="emb-ck",
+                    task_prefix=task_prefix,
                     workload_id=workload_id,
                 ):
                     out.extend(part)
+                if out and still_current is not None:
+                    current = still_current([cid for cid, _ in out])
+                    out = [(cid, vec) for cid, vec in out if cid in current]
                 if out:
                     # Fresh timestamp per page (see embed_relations_batch);
                     # correctness is guaranteed by the _evict_matrix finally, not
