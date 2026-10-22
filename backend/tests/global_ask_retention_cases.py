@@ -24,6 +24,7 @@ import pytest
 from app.models.ask import AskResponse, Citation
 from app.models.global_ask import GlobalAskJob, GlobalNotebookScope
 from app.services.global_ask import GlobalAskError
+from tests.clock_testkit import recent_datetime
 
 NOW = "2026-10-19T00:00:00+00:00"
 OWNER, OTHER, LIBRARIAN = "user-owner", "user-other", "user-lib"
@@ -35,6 +36,7 @@ class World:
         self.store = repo._runtime.global_ask_store
         self.service = repo._runtime.global_ask_service()
         self.clock = 0
+        self.epoch = recent_datetime(days=1)
 
     def sql(self, text):
         return self.store._sql(text)
@@ -48,9 +50,11 @@ class World:
             return db.execute(self.sql(text), params).fetchall()
 
     def stamp(self):
-        """A strictly increasing creation instant (the keyset needs order)."""
+        """A strictly increasing creation instant (the keyset needs order),
+        whole seconds after one day ago: inside the administrator's "last 30
+        days" count, which reads the real clock, on whatever day this runs."""
         self.clock += 1
-        return f"2026-10-01T00:00:{self.clock:02d}+00:00"
+        return (self.epoch + timedelta(seconds=self.clock)).isoformat()
 
     def turn(self, job_id, conversation_id, resolved, *, cited=None, question=None,
              new_conversation=False):
