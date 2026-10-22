@@ -1,7 +1,8 @@
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import {
+  mayStackAbove,
   ROOT_MODAL_POLICIES,
   useRootModalCoordinator,
   type RootModalCloseReason,
@@ -671,4 +672,78 @@ test("closing the stacked preview returns focus to its opener once the window is
   expect(screen.getByTestId("window")).not.toHaveAttribute("inert");
   expect(focus).toHaveBeenCalledTimes(1);
   expect(document.activeElement).toBe(opener);
+});
+
+// 一次 Escape 按键至多让一格以 escape 关闭：同一次按键可能先经 keydown、再经浏览器的
+// close request（<dialog> cancel）到来两遍，第二遍落在刚露出来的那一层上。
+test("one Escape key press closes at most one layer; the next press closes the next", () => {
+  render(<Harness />);
+  const actor = value!.captureActorOwner();
+  act(() => { value!.open("global-ask", actor); });
+  act(() => { value!.openAbove("answer-image-preview", "global-ask"); });
+  fireEvent.keyDown(window, { key: "Escape" });
+  act(() => { expect(value!.requestClose("answer-image-preview", "escape")).toBe(true); });
+  expect(value!.view("global-ask").topmost).toBe(true);
+  expect(value!.requestClose("global-ask", "escape")).toBe(false);
+  expect(value!.view("global-ask").open).toBe(true);
+  // 按键还按着时的重复 keydown 是新的一次按键（与今天的行为一致：每次一层）。
+  fireEvent.keyDown(window, { key: "Escape" });
+  act(() => { expect(value!.requestClose("global-ask", "escape")).toBe(true); });
+});
+
+test("button and backdrop closes never count against the Escape press", () => {
+  render(<Harness />);
+  enterWorkspace();
+  const actor = value!.captureActorOwner();
+  const workspace = value!.captureWorkspaceOwner();
+  act(() => { value!.open("model-service", actor); });
+  act(() => { value!.open("info", workspace); });
+  fireEvent.keyDown(window, { key: "Escape" });
+  act(() => { expect(value!.requestClose("info", "button")).toBe(true); });
+  // 同一次按键里第一次 escape 关闭照常放行。
+  act(() => { expect(value!.requestClose("model-service", "escape")).toBe(true); });
+});
+
+test("after the key is released, or with no key at all, each Escape close request closes one layer", () => {
+  render(<Harness />);
+  const actor = value!.captureActorOwner();
+  act(() => { value!.open("global-ask", actor); });
+  act(() => { value!.openAbove("answer-image-preview", "global-ask"); });
+  fireEvent.keyDown(window, { key: "Escape" });
+  fireEvent.keyUp(window, { key: "Escape" });
+  // 不经键盘的 close request（如移动端返回手势）不记账：两次请求各关一层。
+  act(() => { expect(value!.requestClose("answer-image-preview", "escape")).toBe(true); });
+  act(() => { expect(value!.requestClose("global-ask", "escape")).toBe(true); });
+  // 失焦也算松开（keyup 可能根本不来）。
+  act(() => { value!.open("global-ask", actor); });
+  act(() => { value!.openAbove("answer-image-preview", "global-ask"); });
+  fireEvent.keyDown(window, { key: "Escape" });
+  act(() => { expect(value!.requestClose("answer-image-preview", "escape")).toBe(true); });
+  fireEvent.blur(window);
+  act(() => { expect(value!.requestClose("global-ask", "escape")).toBe(true); });
+});
+
+test("a top-level open of a slot held as a stacked child still obeys ownerKinds", () => {
+  render(<Harness />);
+  const actor = value!.captureActorOwner();
+  act(() => { value!.open("global-ask", actor); });
+  let child: ReturnType<HookValue["openAbove"]> = null;
+  act(() => { child = value!.openAbove("answer-image-preview", "global-ask"); });
+  // 子层的 owner（actor）是继承来的；同 owner 的顶层 open 不能借幂等短路拿到它。
+  expect(value!.open("answer-image-preview", actor)).toBeNull();
+  expect(value!.activeLease("answer-image-preview")?.issue).toBe(child!.issue);
+  expect(closed).not.toHaveBeenCalled();
+});
+
+test("stacking refuses a slot that is already on its parent's chain", () => {
+  const policies = {
+    "global-ask": { stacksOver: ["answer-image-preview"] as RootModalSlot[] },
+    "answer-image-preview": { stacksOver: ["global-ask"] as RootModalSlot[] },
+  };
+  expect(mayStackAbove(policies, "answer-image-preview", "global-ask", new Set<RootModalSlot>(["global-ask"]))).toBe(true);
+  // 互相叠放：global-ask 叠到「叠在 global-ask 之上的预览」上面。
+  expect(mayStackAbove(policies, "global-ask", "answer-image-preview",
+    new Set<RootModalSlot>(["answer-image-preview", "global-ask"]))).toBe(false);
+  // 未声明的一对。
+  expect(mayStackAbove(policies, "info", "global-ask", new Set<RootModalSlot>(["global-ask"]))).toBe(false);
 });

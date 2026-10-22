@@ -82,6 +82,14 @@ test("画册里找不到这张图时退化成单张，绝不改开另一张", ()
   assert.equal(currentPreviewImage(request).assetId, "zz");
 });
 
+test("取图库为空的引用（点不开的图）不进画册", () => {
+  const gallery = buildImageGallery(
+    [{ citationKey: "k1", imageId: "a" }, { citationKey: "k0", imageId: "z" }, { citationKey: "k2", imageId: "c" }],
+    (key) => (key === "k0" ? { displayLabel: "[0]", notebookId: "", images: [image("z")] } : refs[key]),
+  );
+  assert.deepEqual(gallery.map((item) => item.assetId), ["a", "c"]);
+});
+
 test("定位按（取图库, 资产）认同一张图：别的库里同 id 的资产不算", () => {
   const gallery = buildImageGallery([{ citationKey: "k1", imageId: "a" }], resolve);
   const elsewhere = { assetId: "a", notebookId: "nb-9", alt: "同名", referenceLabel: "[9]" };

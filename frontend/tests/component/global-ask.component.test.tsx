@@ -2335,6 +2335,8 @@ function PreviewHost() {
   // 渲染顺序与 page.tsx 一致（预览在前、浮窗在后）：同一次提交里谁的 layout 相位先跑，
   // 决定了预览关闭按钮的 autoFocus 发生时窗口是否还是模态的。
   return <>
+    {/* 宿主页面上的一个普通控件：全屏窗口挡住它时，焦点不许被 Tab 送进去。 */}
+    <button type="button">页面按钮</button>
     {view.open && image && <ImagePreviewModal referenceLabel={image.referenceLabel} interactive={view.topmost} zIndex={view.zIndex}
       onClose={(reason) => presentation.requestClose("answer-image-preview", reason)}>
       <AuthedImage url={sourceImageAssetUrl("", image.notebookId, image.assetId)} alt={image.alt} />
@@ -2468,6 +2470,94 @@ test("the full window opens the same preview and gets its modal state and scroll
   pressEscape(document.activeElement!);
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局问答" })).toBeNull());
   expect(document.body.style.overflow).toBe("");
+});
+
+// 「一次 Escape 只收一层」不能只靠预览掐掉默认动作：各浏览器对「keydown 被
+// preventDefault 就不再派发 close request」并不一致。这里让 close request 无条件
+// 到来，窗口仍得留着——协调器按按键记账，同一次按键至多关一层。
+test("one Escape press closes one layer even when the browser still sends the close request", async () => {
+  installBrowserLikeDialogs();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
+  render(<PreviewHost />);
+  const trigger = await openImageConversation();
+  fireEvent.click(screen.getByRole("button", { name: "全屏展开" }));
+  press(trigger);
+  await openedPreview();
+
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  await waitFor(() => expect(imagePreview()).toBeNull());
+  // 预览关掉后窗口已恢复成模态，同一次按键的 close request 此刻落在它身上。
+  expect(chatWindow()).toHaveAttribute("data-test-modal");
+  fireEvent(chatWindow(), new Event("cancel", { cancelable: true }));
+  expect(chatWindow()).toHaveAttribute("open");
+  expect(trigger).toHaveFocus();
+  fireEvent.keyUp(document.activeElement!, { key: "Escape" });
+
+  // 下一次按键照常收起窗口（键盘派发 + 随后的 close request 各来一次，也只关这一层）。
+  pressEscape(document.activeElement!);
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局问答" })).toBeNull());
+});
+
+test("while the preview covers the full window, focus cannot be sent into the hidden page", async () => {
+  installBrowserLikeDialogs();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
+  render(<PreviewHost />);
+  const trigger = await openImageConversation();
+  fireEvent.click(screen.getByRole("button", { name: "全屏展开" }));
+  press(trigger);
+  await openedPreview();
+  const close = screen.getByRole("button", { name: "关闭图片预览" });
+  expect(close).toHaveFocus();
+  // Tab 走到预览之外：焦点落到被全屏窗口挡住的页面控件上。
+  screen.getByRole("button", { name: "页面按钮" }).focus();
+  expect(close).toHaveFocus();
+  // 预览内部照常移动焦点。
+  const zoomIn = screen.getByRole("button", { name: "放大图片" });
+  zoomIn.focus();
+  expect(zoomIn).toHaveFocus();
+  screen.getByRole("button", { name: "页面按钮" }).focus();
+  expect(zoomIn).toHaveFocus();
+
+  // 预览关掉之后页面回到窗口自己的规则，限制随之撤掉。
+  pressEscape(document.activeElement!);
+  await waitFor(() => expect(imagePreview()).toBeNull());
+  expect(trigger).toHaveFocus();
+});
+
+test("over the compact window the preview sets no focus trap, same as in a notebook", async () => {
+  installBrowserLikeDialogs();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
+  render(<PreviewHost />);
+  press(await openImageConversation());
+  await openedPreview();
+  const page = screen.getByRole("button", { name: "页面按钮" });
+  page.focus();
+  expect(page).toHaveFocus();
+});
+
+test("a citation with no owning notebook stays out of the preview's gallery", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  const answer = answerWithImages({
+    answer: "跨库结论 [k1]。\n\n另一段 [k2]。",
+  });
+  answer.anchors = [answer.anchors![0], {
+    ...answer.anchors![0], key: "k2", element_id: "element-2", notebook_id: undefined,
+    images: [{ element_id: "img-el-2", asset_id: "asset-2", caption: "图 2：无库" }],
+  }];
+  api.detail.mockResolvedValue(detail("conv-a", [{ ...job("done"), cited_notebook_ids: ["nb-1"], answer }]));
+  render(<GlobalAskPage />);
+  // 无库那张在正文里是「图片不可用」、没有放大按钮。
+  await screen.findByRole("complementary", { name: "引用图片 [2]" });
+  expect(screen.queryByRole("button", { name: "放大查看[2]的附图" })).toBeNull();
+  press(await screen.findByRole("button", { name: "放大查看[1]的附图" }));
+  const preview = await openedPreview();
+  // 画册里只有取得到的那一张：没有计数，也没有左右切换。
+  expect(within(preview).queryByText("1 / 2")).toBeNull();
+  expect(within(preview).queryByRole("button", { name: "下一张图片" })).toBeNull();
 });
 
 test("a layer that covers the compact window keeps the focus it holds", async () => {

@@ -115,6 +115,30 @@ export function GlobalAskLauncher({ presentation, uiMode, openRequest, discovery
     return () => { document.body.style.overflow = overflow; };
   }, [mode, view.topmost]);
 
+  // 全屏窗口被盖住时降成了非模态（否则 top layer 会把盖上来的页面级弹层整个压住），
+  // 原生 showModal 给的「其余页面 inert」也随之没了：Tab 会把焦点送进被全屏窗口挡住、
+  // 根本看不见的页面元素。被盖住期间焦点只许留在盖上来的那几层（`aria-modal="true"`
+  // 且不在本窗口里）；跑出去就拉回刚才所在的那个元素。只对全屏态：小窗本来就不挡页面，
+  // 与笔记本内弹层一样不设焦点陷阱。
+  useLayoutEffect(() => {
+    const node = dialog.current;
+    if (!node || mode !== "full" || view.topmost) return;
+    const coveringLayer = (element: Element) => (
+      node.contains(element) ? null : element.closest<HTMLElement>('[aria-modal="true"]')
+    );
+    let last = document.activeElement instanceof HTMLElement && coveringLayer(document.activeElement)
+      ? document.activeElement
+      : null;
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement) || node.contains(target)) return;
+      if (coveringLayer(target)) { last = target; return; }
+      if (last?.isConnected) last.focus({ preventScroll: true });
+    };
+    document.addEventListener("focusin", onFocusIn);
+    return () => document.removeEventListener("focusin", onFocusIn);
+  }, [mode, view.topmost]);
+
   return <>
     <button ref={launcher} className="global-ask-bubble" aria-label="打开全局问答" title="全局问答" aria-expanded={open} aria-controls="global-ask-window" hidden={open} onClick={() => { setStarted(true); setMode("compact"); }}><MessageSquare size={20} strokeWidth={1.8} aria-hidden /><span className="global-bubble-label" aria-hidden>全局问答</span></button>
     {showHint && <aside className="global-ask-hint" role="note" aria-label="全局问答提示">

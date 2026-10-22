@@ -49,7 +49,9 @@ export function buildImageGallery(
   const items: AnswerImagePreviewItem[] = [];
   for (const { citationKey, imageId } of slots) {
     const reference = resolveReference(citationKey);
-    if (!reference) continue;
+    // 取不到图的引用（既无 active、引用也没有所属库）在正文里是「图片不可用」、没有放大
+    // 按钮；它也不进画册，左右切换不会切到一张注定取不到的图。
+    if (!reference || !reference.notebookId) continue;
     const image = reference.images.find((candidate) => candidate.asset_id === imageId);
     if (!image) continue;
     items.push({
