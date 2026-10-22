@@ -1861,6 +1861,76 @@ def _activation_refused(rig: Rig) -> None:
     rig.hooks.replace["self._activate_selected_source_graph"] = activate
 
 
+def _refuse_in_graph_service(rig: Rig) -> None:
+    """A retrieval-control refusal raised by the graph service's own snapshot
+    leg -- beneath the contributor host, which absorbs whatever a contribution
+    raises -- with the real call envelope and the real host."""
+    from types import SimpleNamespace
+
+    from app.domain.retrieval_control import RetrievalControlError
+
+    _wire_contributor_host(rig)
+
+    def refuse(*_args, **_kwargs):
+        rig.recorder.note({"lane_refused": True})
+        raise RetrievalControlError("participant override refused")
+
+    rig.service.selected_source_graph._snapshots = SimpleNamespace(snapshot=refuse)
+
+
+def _narrowed_include(rig: Rig) -> AskRequest:
+    """The library Ask with only the layout document ticked: the frozen
+    include scope the graph service walks (an exclude scope stops before any
+    graph read)."""
+    from app.models.source_scope import SourceScope
+
+    return AskRequest(question=QUESTION, mode="reasoning", asked_at=ASKED_AT,
+                      source_scope=SourceScope(mode="include",
+                                               source_ids=[rig.sources["layout.md"]]))
+
+
+def _expect_graph_service_refused(obs: Observation) -> None:
+    _expect_activation_refused(obs)
+    (activate,) = obs.calls("self._activate_selected_source_graph")
+    assert activate.get("raised", "").startswith("RetrievalControlError"), activate
+
+
+def _graph_service_refused_in_report(rig: Rig, payload, job_id, cancel, on_trace):
+    """The Deep Report twin: the real section pipeline (``_run_sections``:
+    each section's deep dive -- retrieval, then the report's own
+    selected-source graph lane -- behind the section's fail-soft handler)
+    under a narrowed scope."""
+    import dataclasses as _dc
+
+    from app.services.report_engine import ReportEngine
+    from app.services.retrieval_run import retrieval_run
+    from app.services.source_scope import source_scope_context
+
+    del payload, job_id, on_trace
+    from app.extensions import default_extension_runtime
+
+    engine = ReportEngine.from_repository(rig.repo, rig.service.settings, cancel)
+    engine = ReportEngine(
+        _dc.replace(engine.dependencies,
+                    retrieval_contributors=default_extension_runtime().retrieval_contributors),
+        user_id=engine.user_id, cancel_event=engine.cancel_event)
+    section = {"title": REPORT_SECTIONS[0], "scope": "版图寄生",
+               "sub_queries": ["寄生电容如何控制"], "intent_questions": []}
+    with retrieval_run(run_kind="report_generation", actor_id=engine.user_id,
+                       cancel_event=cancel), source_scope_context(
+            rig.notebook_id, {"mode": "include", "narrowed": True,
+                              "source_ids": [rig.sources["layout.md"]]}):
+        return engine._run_sections(rig.notebook_id, "rep-graph-refused", [section],
+                                    QUESTION, 2)
+
+
+def _expect_report_graph_service_refused(obs: Observation) -> None:
+    _raised(obs, "RetrievalControlError", "participant override refused")
+    # Sections retrieve on the pipeline's worker threads.
+    assert [e for e in obs.timeline + obs.worker if "lane_refused" in e] == [
+        {"lane_refused": True}]
+
+
 def _expect_activation_refused(obs: Observation) -> None:
     _raised(obs, "RetrievalControlError", "participant override refused")
     assert [e for e in obs.timeline if "lane_refused" in e] == [{"lane_refused": True}]
@@ -2770,6 +2840,11 @@ SCENARIOS = [
              _expect_cancel_during_activation, install=_cancel_during_activation),
     Scenario("activation_control_error", library_world, _narrowed,
              _expect_activation_refused, install=_activation_refused),
+    Scenario("graph_service_control_error", library_world, _narrowed_include,
+             _expect_graph_service_refused, install=_refuse_in_graph_service),
+    Scenario("report_graph_service_control_error", library_world, _narrowed,
+             _expect_report_graph_service_refused, install=_refuse_in_graph_service,
+             invoke=_graph_service_refused_in_report),
     Scenario("unconfigured_completeness", library_world,
              confirmed(LIST_ALL, topics=(), result_scope="complete", completeness=True),
              _expect_unconfigured_completeness, install=_unconfigured),

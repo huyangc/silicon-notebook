@@ -964,6 +964,8 @@ class ReportEngine:
                 ),
                 disabled_capabilities=disabled_capabilities,
             )
+            # A refusal the host absorbed inside the built-in contribution.
+            call.raise_control_error()
             visible, status = call.visible_result(host_chunks)
         except (AskCancelled, RetrievalControlError):
             raise
@@ -2878,6 +2880,13 @@ class ReportEngine:
                     status[i]["phase"] = "待综合" if synthesis_on else "待撰写"
                 persist(force=True)
                 return result, None
+            except RetrievalControlError:
+                # Registered fail-soft handler, same arm as ``_draft_one``'s:
+                # ``_deep_dive`` reaches the participant seat (its federated
+                # retrieval and the selected-source graph lane), and the broad
+                # arm below would turn an identity mismatch into one section
+                # quietly marked 失败. Bare on purpose (see ``_draft_one``).
+                raise
             except AskCancelled:
                 # A cancelled stage is exactly the one worth attributing: the
                 # user gave up because it ran long.  Record before re-raising.
