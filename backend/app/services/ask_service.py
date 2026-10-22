@@ -1591,6 +1591,8 @@ class AskService:
                 ),
                 disabled_capabilities=disabled_capabilities,
             )
+            # A refusal the host absorbed inside the built-in contribution.
+            call.raise_control_error()
             return call.visible_result(host_chunks)
         except (AskCancelled, RetrievalControlError):
             raise

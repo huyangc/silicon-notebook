@@ -21,6 +21,7 @@ from app.domain.extensions import (
     RetrievalEvidenceProposal,
     lane_is_dormant,
 )
+from app.domain.retrieval_control import RetrievalControlError
 from app.services.cancellation import AskCancelled
 from app.services.navigation_filter import (
     chunk_navigation,
@@ -280,7 +281,7 @@ class SelectedSourceGraphActivationService:
                     scope_drifted = bool(unsafe_scope_drift)
             else:
                 scope_drifted = False
-        except AskCancelled:
+        except (AskCancelled, RetrievalControlError):
             raise
         except Exception:
             return self.fail_closed(
@@ -324,7 +325,7 @@ class SelectedSourceGraphActivationService:
         try:
             with leaf_slot():
                 snapshot = self._snapshots.snapshot(notebook_id, source_ids)
-        except AskCancelled:
+        except (AskCancelled, RetrievalControlError):
             raise
         except Exception:
             status = SourceGraphStatus(
@@ -347,7 +348,7 @@ class SelectedSourceGraphActivationService:
                     titles = dict(source_titles(list(source_ids)))
             else:
                 titles = {}
-        except AskCancelled:
+        except (AskCancelled, RetrievalControlError):
             raise
         except Exception:
             return self.fail_closed(
@@ -394,7 +395,7 @@ class SelectedSourceGraphActivationService:
                     ppr.capability.reason or "ppr_unavailable"
                 )
                 degraded.append(ppr_unavailable_reason)
-        except AskCancelled:
+        except (AskCancelled, RetrievalControlError):
             raise
         except Exception:
             return self.fail_closed(
@@ -427,7 +428,7 @@ class SelectedSourceGraphActivationService:
                         ppr_ms=round((time.perf_counter() - ppr_started) * 1000),
                     )
                 neighbor_ids = {node.object_id for node in expanded.nodes}
-            except AskCancelled:
+            except (AskCancelled, RetrievalControlError):
                 raise
             except Exception:
                 return self.fail_closed(
@@ -537,7 +538,7 @@ class SelectedSourceGraphActivationService:
                         chunk.relevance = hit.score
                         chunk.retrieval_supports = (hit.support,)
                         candidates[chunk.chunk_id] = chunk
-            except AskCancelled:
+            except (AskCancelled, RetrievalControlError):
                 raise
             except Exception:
                 return self.fail_closed(
@@ -646,12 +647,14 @@ class _SelectedEvidenceAdmissionSource:
             [str, str, Sequence[str]], Sequence[RetrievedChunk]
         ],
         leaf_io: Callable[[], Any] | None,
+        control_sink: "SelectedSourceGraphContributionCall | None" = None,
     ) -> None:
         self._graph = graph
         self._notebook_id = notebook_id
         self._actor_id = actor_id
         self._fallback = fallback
         self._leaf_io = leaf_io or nullcontext
+        self._control_sink = control_sink
 
     def read(
         self, identities: tuple[str, ...]
@@ -665,6 +668,12 @@ class _SelectedEvidenceAdmissionSource:
                     hydrated = self._fallback(
                         self._notebook_id, self._actor_id, missing
                     )
+            except RetrievalControlError as exc:
+                # The host absorbs this raise around its admission read; the
+                # call keeps it for the workflow to re-raise.
+                if self._control_sink is not None:
+                    self._control_sink.note_control_error(exc)
+                raise
             except Exception:
                 return ()
             if type(hydrated) not in (list, tuple):
@@ -737,6 +746,27 @@ class SelectedSourceGraphContributionCall:
         self._attempted = False
         self._proposals: tuple[RetrievalEvidenceProposal, ...] = ()
         self._by_id: dict[str, RetrievalEvidenceProposal] = {}
+        self._control_error: RetrievalControlError | None = None
+
+    def note_control_error(self, exc: RetrievalControlError) -> None:
+        """Record a retrieval-control refusal met by core code on this call.
+
+        The contributor host absorbs every exception a contribution raises
+        except core cancellation: one plugin must not fail the whole round.
+        That contract stays.  A refusal raised by the CORE side of this lane
+        -- the graph service under ``propose`` or the admission hydrate -- is
+        control flow, not a plugin failure, so it is kept here and re-raised
+        by the workflow once ``host.run`` returns (``raise_control_error``).
+        An exception raised by a third-party contribution's own code never
+        reaches this method and is still absorbed by the host.
+        """
+        if self._control_error is None:
+            self._control_error = exc
+
+    def raise_control_error(self) -> None:
+        """Re-raise the first recorded refusal, if any (see above)."""
+        if self._control_error is not None:
+            raise self._control_error
 
     def propose(self) -> tuple[RetrievalEvidenceProposal, ...]:
         if self._attempted:
@@ -756,6 +786,11 @@ class SelectedSourceGraphContributionCall:
             ):
                 raise TypeError("invalid selected-source graph result")
         except AskCancelled:
+            raise
+        except RetrievalControlError as exc:
+            # The host absorbs this raise (contribution_failed); the workflow
+            # re-raises the recorded refusal after ``host.run``.
+            self.note_control_error(exc)
             raise
         except Exception:
             activated = self._fail_closed_activation("activation_seam_failed")
@@ -831,7 +866,10 @@ class SelectedSourceGraphContributionCall:
         return [*self._baseline, *host_tail], status
 
     def fail_closed_result(self, reason: str):
-        """Keep workflow callers behind the bridge on seam-level failure."""
+        """Keep workflow callers behind the bridge on seam-level failure.
+
+        A recorded control refusal is never folded into B: it is raised."""
+        self.raise_control_error()
         failed = self._fail_closed_activation(reason)
         if failed is None:
             return list(self._baseline), None
@@ -1020,6 +1058,7 @@ def selected_source_graph_call_context(
             actor_id,
             admission_hydrate,
             admission_leaf_io,
+            control_sink=call,
         ),
         selected_source_graph_source=(
             call if call._service is not None else None

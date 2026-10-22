@@ -416,6 +416,101 @@ def test_ask_and_report_lanes_let_control_flow_through_and_fail_closed_otherwise
     assert ask_host.calls == 1
 
 
+def _third_party_host(contribute):
+    """The real host with one deployment plugin on the selected-evidence
+    point whose ``contribute`` is the given callable."""
+    from app.extension_sdk import (
+        EXTENSION_API_VERSION,
+        RETRIEVAL_CONTRIBUTOR_POINT,
+        ContributionDeclaration,
+        ContributionKind,
+        ExtensionContribution,
+        ExtensionManifest,
+    )
+    from app.extensions import build_extension_runtime
+
+    class _Plugin:
+        invocations = frozenset({"selected_evidence"})
+
+        def contribute(self, context):
+            return contribute(context)
+
+    declaration = ContributionDeclaration(
+        "corp.evidence", RETRIEVAL_CONTRIBUTOR_POINT, ContributionKind.CONTRIBUTOR)
+
+    class _Bundle:
+        manifest = ExtensionManifest(
+            id="corp.evidence", version="1.0.0", api_version=EXTENSION_API_VERSION,
+            display_name="corp.evidence", trust="deployment",
+            contributions=(declaration,),
+        )
+
+        def register(self, registrar):
+            registrar.add_contributor(ExtensionContribution(declaration, _Plugin()))
+
+    return build_extension_runtime((_Bundle(),)).retrieval_contributors
+
+
+def test_a_third_party_plugins_own_control_error_is_still_absorbed_by_the_host():
+    """The host contract is unchanged: whatever a plugin's own code raises,
+    a control-typed exception included, is that plugin's failure and never
+    fails the round. Only the core side of the built-in lane is re-raised."""
+    from app.domain.retrieval_control import RetrievalControlError
+
+    def contribute(_context):
+        raise RetrievalControlError("plugin raised it")
+
+    events = []
+    ask = _ask_with_host(_third_party_host(contribute))
+    ask.event_log = SimpleNamespace(emit=events.append)
+    baseline = [SimpleNamespace(chunk_id="base")]
+
+    chunks, status = ask._activate_selected_source_graph("notebook", baseline)
+
+    assert chunks == baseline and status is None
+    assert [(e["contribution_id"], e["outcome"], e["failure_code"]) for e in events] == [
+        ("corp.evidence", "failed", "contribution_failed")]
+
+
+def test_a_control_error_in_the_core_admission_read_ends_the_lane():
+    """A plugin's proposal sends the host to the core admission read; a
+    refusal there is core control flow: recorded on the call, re-raised by
+    the workflow after ``host.run`` -- in Ask and in Deep Report."""
+    from app.domain.retrieval_control import RetrievalControlError
+    from app.extension_sdk import (
+        ContributorResult,
+        EvidenceCandidate,
+        EvidenceProvenance,
+        ExtensionResultStatus,
+    )
+
+    def contribute(_context):
+        return ContributorResult((EvidenceCandidate(
+            identity="other", notebook_id="notebook", source_id="source",
+            provenance=EvidenceProvenance("chunk", "other"),
+            value=object(), token_cost=1,
+        ),), ExtensionResultStatus.AVAILABLE)
+
+    reads = []
+
+    def refuse(_notebook_id, _actor_id, ids):
+        reads.append(tuple(ids))
+        raise RetrievalControlError("refused at admission")
+
+    baseline = [SimpleNamespace(chunk_id="base")]
+    ask = _ask_with_host(_third_party_host(contribute))
+    ask.retrieval_contributor_hydrate = refuse
+    with pytest.raises(RetrievalControlError, match="refused at admission"):
+        ask._activate_selected_source_graph("notebook", baseline)
+
+    report = _report_with_host(_third_party_host(contribute))
+    report.dependencies.retrieval_contributor_hydrate = refuse
+    with pytest.raises(RetrievalControlError, match="refused at admission"):
+        report._activate_selected_source_graph(
+            "notebook", SimpleNamespace(chunks=baseline))
+    assert reads == [("other",), ("other",)]
+
+
 def test_repository_factory_accepts_injected_host_without_importing_registry(monkeypatch):
     from app.services import repository_factory as factory
 

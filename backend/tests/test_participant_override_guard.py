@@ -886,16 +886,38 @@ _SEAT_FAILSOFT_SITES = (
      "AskService._no_kg_scope_admits_run", "collection_map"),
     ("app/services/ask_service.py",
      "AskService._reasoning_retrieval_phase", "execute_reasoning_retrieval_stage"),
-    # 选定来源图谱通道(Ask 与报告各一份 + 推理侧外层兜底)。try 体经 host.run
-    # -> 内置贡献 -> 图谱服务的取数腿走检索读路径;今天座位只因对等模式下
+    # 选定来源图谱通道,整条链路逐层登记。今天座位只因对等模式下
     # ``subjectless_run_active()`` 在 try 之前提前返回才不可达——那是一个谓词、
     # 不是结构,所以照样登记,钉住「控制异常照抛、只把普通错误降级为 B」。
+    # 链路:工作流(Ask / 报告的 ``_activate_selected_source_graph``,推理侧外层
+    # ``_reasoning_graph_lane``)-> ``host.run`` -> 内置贡献 ->
+    # ``SelectedSourceGraphContributionCall.propose`` -> 图谱服务 ``run`` 的各条
+    # 取数腿(范围漂移探针、快照、来源标题、在线 / 分区 PPR 与回读、邻接扩展);
+    # 宿主对准入读的 ``_SelectedEvidenceAdmissionSource.read`` 是另一条核心 I/O。
+    # 宿主按扩展契约吸收贡献抛出的一切异常(只放行核心取消),所以 ``propose``
+    # 与准入读先把控制异常记在桥接对象上再照抛,工作流在 ``host.run`` 返回后经
+    # ``raise_control_error`` 重新抛出(``fail_closed_result`` 也先抛它)。第三方
+    # 贡献自己代码里抛的异常不经桥接,仍由宿主吸收。
     ("app/services/ask_service.py",
      "AskService._activate_selected_source_graph", "run"),
     ("app/services/ask_service.py",
      "AskService._reasoning_graph_lane", "_activate_selected_source_graph"),
     ("app/services/report_engine.py",
      "ReportEngine._activate_selected_source_graph", "run"),
+    ("app/services/source_graph_activation.py",
+     "SelectedSourceGraphContributionCall.propose", "run"),
+    ("app/services/source_graph_activation.py",
+     "_SelectedEvidenceAdmissionSource.read", "_fallback"),
+    ("app/services/source_graph_activation.py",
+     "SelectedSourceGraphActivationService.run", "unsafe_scope_drift"),
+    ("app/services/source_graph_activation.py",
+     "SelectedSourceGraphActivationService.run", "snapshot"),
+    ("app/services/source_graph_activation.py",
+     "SelectedSourceGraphActivationService.run", "source_titles"),
+    ("app/services/source_graph_activation.py",
+     "SelectedSourceGraphActivationService.run", "retrieve"),
+    ("app/services/source_graph_activation.py",
+     "SelectedSourceGraphActivationService.run", "expand_graph"),
     ("app/services/ask_service.py",
      "AskService.ask_plugin_engine", "admit_plugin_engine_result"),
     # D0-3:``synth()`` 把 KG 证据装配算在合成里(``_answer_context`` ->
@@ -953,6 +975,10 @@ _SEAT_FAILSOFT_SITES = (
     # 一份交付出去的报告里悄悄多一节「失败」。
     ("app/services/report_engine.py",
      "ReportEngine._run_sections._draft_one", "_draft_section"),
+    # 节检索腿:``_retrieve_one`` -> ``_deep_dive``(联邦检索与选定来源图谱
+    # 通道)-> 座位。宽 handler 吞掉就是交付的报告里悄悄多一节「失败」。
+    ("app/services/report_engine.py",
+     "ReportEngine._run_sections._retrieve_one", "_deep_dive"),
     # D0-3:知识表智能补全。这个 try 体两头都触达座位——推理检索器,以及
     # ``_completion_library_evidence`` -> ``knowledge_context``。宽 handler 会
     # 把身份复核失败改写成「逐步推理检索暂时不可用」并记到推理模型头上。
