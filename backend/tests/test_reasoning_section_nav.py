@@ -566,7 +566,7 @@ def test_peer_run_keeps_the_gate_and_routes_by_owner(repo, monkeypatch):
         # 对等 run 里每条 chunk 都带属主:候选来源行按它路由
         state = SimpleNamespace(
             chunks=[_hit("c-s0", notebook_id="nb-b")], notebook_id="nb-a",
-            enumerations=[])
+            elements=[], enumerations=[])
         rows = retriever._section_source_rows(state)
     assert [(r.source_id, r.notebook_id) for r in rows] == [("src-spec", "nb-b")]
 
@@ -1233,3 +1233,78 @@ def test_an_ambiguous_candidate_cut_by_the_scan_says_so(repo, monkeypatch):
     result = _run(_reasoner(repo, monkeypatch, llm), nb)
     summary = _skips(result)["section_ambiguous"].summary
     assert "Notes（1 段，可能未完）" in summary and "Notes（1 段）、" in summary
+
+
+# --------------------------- element-hit sources & the last turn (codex #975 R3)
+
+
+def _element(source_id="src-spec", title="互连规范", notebook_id=""):
+    from app.domain.retrieval import RetrievedElement
+
+    return RetrievedElement(
+        element_id="el-1", source_id=source_id, source_title=title,
+        location_label="表 5-18", element_type="table", text="插损数值表",
+        score=0.6, notebook_id=notebook_id)
+
+
+def test_a_document_found_only_through_an_element_is_navigable(repo, monkeypatch):
+    """search_elements 带回的文档标题也在候选摘要里;按它导航不得 unresolved。"""
+    nb = _seed(repo, vectors=False)
+    llm = _llm({"next_action": "search_elements", "query": "插损", "reason": "查表"},
+               _browse("互连规范"), _read("5.7.3", source="互连规范"))
+    retriever = _reasoner(repo, monkeypatch, llm, seed=())
+    retriever.search_elements = lambda notebook_id, query: [_element()]
+    result = _run(retriever, nb)
+    assert "section_source_unresolved" not in _skips(result)
+    assert _steps(result, "browse_sections")[0].detail["listed"] > 0
+    assert _steps(result, "read_section")[0].detail["result_ids"] == ["c-s3", "c-s4"]
+
+
+def test_element_sources_keep_their_owner_and_follow_passage_sources():
+    retriever = ReasoningRetriever(
+        retrieval=SimpleNamespace(), model_clients=SimpleNamespace(),
+        communities=SimpleNamespace(), settings=SimpleNamespace())
+    state = SimpleNamespace(
+        chunks=[_hit("c-s0", notebook_id="nb-b")], notebook_id="nb-a",
+        elements=[_element("src-x", "参考库表格", "nb-c"), _element()],
+        enumerations=[])
+    rows = retriever._section_source_rows(state)
+    assert [(r.source_id, r.notebook_id) for r in rows] == [
+        ("src-spec", "nb-b"), ("src-x", "nb-c")]
+    # an unstamped element of the run's own notebook reads as that notebook
+    state.chunks, state.elements = [], [_element()]
+    assert [(r.source_id, r.notebook_id)
+            for r in retriever._section_source_rows(state)] == [("src-spec", "nb-a")]
+
+
+def test_the_last_turn_offers_no_browse_but_still_offers_read(repo, monkeypatch):
+    """最后一轮:目录只进下一轮摘要,而下一轮不存在——browse 不进 prompt / schema /
+    白名单;read_section 读回的是证据,照常提供。"""
+    nb = _seed(repo, vectors=False)
+    repo.settings.reasoning_max_steps = 2
+    llm = _llm({"next_action": "search_chunks", "query": "x", "reason": "查"},
+               _browse("互连规范"))
+    result = _run(_reasoner(repo, monkeypatch, llm), nb, effort="deep")
+    first, last = llm.reflect_prompts[0], llm.reflect_prompts[1]
+    assert "- browse_sections:" in first and "- browse_sections:" not in last
+    assert "- read_section:" in last
+    assert "browse_sections" not in json.loads(llm.schema_hints[-1])["next_action"]
+    assert _skips(result)["action_not_offered"].detail["action"] == "browse_sections"
+    assert not _steps(result, "browse_sections")
+
+
+def test_a_last_turn_browse_is_skipped_without_spending_the_allowance(
+    repo, monkeypatch,
+):
+    nb = _seed(repo, vectors=False)
+    repo.settings.reasoning_max_steps = 1
+    retriever = _reasoner(repo, monkeypatch, _llm())
+    queue = [ReflectDecision(next_action=BROWSE_SECTIONS_ACTION,
+                             browse_sections_source="互连规范")]
+    retriever.reflect = lambda *a, **k: queue.pop(0) if queue else ReflectDecision(
+        next_action="answer", sufficient=True)
+    result = retriever.run(nb, QUESTION, "")
+    skip = _skips(result)["section_browse_last_turn"]
+    assert skip.summary == "跳过查看章节目录(已是最后一轮,目录无人消费)"
+    assert "result_ids" not in skip.detail
+    assert not _steps(result, "browse_sections")
