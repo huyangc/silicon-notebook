@@ -2312,7 +2312,13 @@ What to expect:
 - **Object vectors mark the unified graph out of date** when a pass wrote any, so the next
   unified rebuild does not skip on unchanged counts.
 - **Only embeddable rows count.** A blank chunk, an object without payload text or a
-  relation without text never gets a vector, so it is never reported as missing.
+  relation without text never gets a vector, so it is never reported as missing; checkup
+  H4 uses the same blank-chunk rule. H4 also leaves out a Knowhow hidden source that no
+  table owns any more (left behind by a crash while a table was being deleted): nothing
+  can reach it, so nothing fills it.
+- **The repair button accepts only a gap it can fill.** H4 counts document and Knowhow
+  chunks together; with only one of `chunk_embedding` / `knowhow_embedding` bound, the
+  button is accepted only when the gap is of that kind.
 - **A pipeline switch aborts the pass.** The indexing-pipeline gate is checked before each
   leg and at every source lock; when it refuses, the run fails and the guard is released.
 - **Failures stay inside the job.** A leg whose workload is unbound is reported as skipped (a
