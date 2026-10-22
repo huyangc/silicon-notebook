@@ -588,6 +588,109 @@ def test_read_document_source_is_not_listed_among_the_scope_fields():
     assert "new_sub_query.query" in rule
 
 
+# ---------------------------------------------------------------------------
+# 文档内导航(browse_sections / read_section):两态 × 全门组合,三处投影同进同出。
+
+_SECTION_NAV_GATE_COMBINATIONS = _READ_DOCUMENT_GATE_COMBINATIONS + [
+    {"search_chunks": True, "keyword_search": True},
+    {"element_kinds": ("formula",), "object_types": ("claim",),
+     "read_document": True, "search_chunks": True},
+]
+
+
+def _prompt_gates(gates):
+    extra = {"read_document_cap": 2} if gates.get("read_document") else {}
+    return dict(gates, **extra)
+
+
+@pytest.mark.parametrize("gates", _SECTION_NAV_GATE_COMBINATIONS)
+def test_section_nav_closed_is_byte_identical_to_omitting_it(gates):
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+
+    assert reflect_schema_hint(**gates) == reflect_schema_hint(
+        section_nav=False, **gates)
+    assert reflect_prompt("q", "c", **_prompt_gates(gates)) == reflect_prompt(
+        "q", "c", section_nav=False, section_browse_cap=3, section_read_cap=3,
+        **_prompt_gates(gates))
+    for text in (reflect_schema_hint(**gates),
+                 reflect_prompt("q", "c", **_prompt_gates(gates))):
+        assert "browse_sections" not in text
+        assert "read_section" not in text
+
+
+@pytest.mark.parametrize("gates", _SECTION_NAV_GATE_COMBINATIONS)
+def test_section_nav_open_shows_up_in_all_three_projections(gates):
+    """开门 ⇒ 两个枚举词 + 两个参数分支 + 两行动作说明同时出现,参数一律空串示例。"""
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+
+    schema = json.loads(reflect_schema_hint(section_nav=True, **gates))
+    words = schema["next_action"].split("|")
+    assert "browse_sections" in words and "read_section" in words
+    assert schema["browse_sections"] == {"source": "", "under": "", "query": ""}
+    assert schema["read_section"] == {"source": "", "section": ""}
+    prompt = reflect_prompt("q", "c", section_nav=True, section_browse_cap=3,
+                            section_read_cap=2, **_prompt_gates(gates))
+    assert "- browse_sections: list the SECTIONS (heading outline) of ONE document" in prompt
+    assert "- read_section: read ONE whole section" in prompt
+    assert "You may browse at most 3 outline(s) in this run." in prompt
+    assert "You may read at most 2 section(s) this way in this run." in prompt
+    # 两条说明紧跟在 search_chunks 之后(开着时),或在 add_subquery 之后。
+    assert prompt.index("- browse_sections:") > prompt.index("- add_subquery:")
+
+
+def test_section_nav_says_when_to_browse_and_when_to_read():
+    from app.services.prompts import reflect_prompt
+
+    prompt = reflect_prompt("q", "c", search_chunks=True, section_nav=True,
+                            section_browse_cap=3, section_read_cap=3)
+    line = prompt[prompt.index("- browse_sections:"):]
+    line = line[:line.index("\n- read_section:")]
+    assert "do not know the document's own wording" in line
+    assert "browse_sections.under" in line and "numbered document" in line
+    assert "NOT evidence" in line
+    read = prompt[prompt.index("- read_section:"):]
+    read = read[:read.index("\n")]
+    assert "section hint" in read and "prefer read_section" in read
+
+
+@pytest.mark.parametrize("browse_cap, read_cap", [(0, 3), (3, 0)])
+def test_a_zero_or_spent_allowance_drops_only_that_action(browse_cap, read_cap):
+    """上限为 0(或本 run 已用完,调用方传 0):那个动作不进 enum、没有分支、没有
+    说明;另一个照常。只剩 read 时它不再提目录,只剩 browse 时目录不再提 read。"""
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+
+    schema = json.loads(reflect_schema_hint(
+        search_chunks=True, section_nav=True,
+        section_browse=browse_cap > 0, section_read=read_cap > 0))
+    words = set(schema["next_action"].split("|"))
+    assert ("browse_sections" in words) is (browse_cap > 0)
+    assert ("browse_sections" in schema) is (browse_cap > 0)
+    assert ("read_section" in words) is (read_cap > 0)
+    assert ("read_section" in schema) is (read_cap > 0)
+    prompt = reflect_prompt("q", "c", search_chunks=True, section_nav=True,
+                            section_browse_cap=browse_cap,
+                            section_read_cap=read_cap)
+    assert ("- browse_sections:" in prompt) is (browse_cap > 0)
+    assert ("- read_section:" in prompt) is (read_cap > 0)
+    assert ("browse_sections.query" in prompt) is (browse_cap > 0)
+    if browse_cap:
+        assert "for read_section" not in prompt
+    else:
+        assert "browse_sections listing" not in prompt
+
+
+def test_browse_query_joins_the_scope_fields_and_read_section_does_not():
+    from app.services.prompts import reflect_prompt
+
+    prompt = reflect_prompt("q", "c", search_chunks=True, keyword_search=True,
+                            section_nav=True, section_browse_cap=3,
+                            section_read_cap=3)
+    rule = prompt[prompt.index("This applies to every retrieval field you fill"):]
+    rule = rule[:rule.index("\n")]
+    assert rule.endswith("keywords and browse_sections.query.")
+    assert "read_section" not in rule and "browse_sections.source" not in rule
+
+
 def test_expand_query_prompt_opening_is_kg_neutral():
     """规划 prompt 的首句框架是 KG 中性的("retrieval over a document
     corpus"):无图 run 也发同一份,它不得宣称必有一张图。

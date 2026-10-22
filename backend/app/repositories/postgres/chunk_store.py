@@ -34,7 +34,7 @@ from app.repositories.postgres.memory_sql import (
     memory_source_type_predicate,
 )
 from app.repositories.postgres.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
-from app.repositories.postgres.search import chunk_section_rows
+from app.repositories.postgres.search import chunk_section_rows, source_outline_rows
 from app.domain.vector_index import encode_vector
 from app.domain.indexing_pipeline import IndexingPipelineStalePlanError
 
@@ -959,6 +959,19 @@ class ChunkStore:
             connection, notebook_id, source_id, section_path, limit
         )
         return [_compat_element_ids(row) for row in rows]
+
+    @staticmethod
+    def source_outline_rows(
+        connection,
+        notebook_id: str,
+        source_id: str,
+        max_scan: int,
+    ):
+        """One source's ``(id, section_path, navigation)`` rows in document
+        order plus a truncation flag -- semantically equal to the SQLite
+        adapter's ``source_outline_rows``; the SQL lives next to
+        ``chunk_section_rows`` in ``postgres/search.py``."""
+        return source_outline_rows(connection, notebook_id, source_id, max_scan)
 
     @staticmethod
     def backfill_fts(connection, notebook_id: str) -> int:

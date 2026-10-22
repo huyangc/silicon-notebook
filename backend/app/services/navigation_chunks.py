@@ -273,6 +273,50 @@ def _numbering(text: str) -> tuple[str, "tuple[str, str] | None"]:
     return number, (None if number else _caption(text))
 
 
+@dataclass(frozen=True)
+class HeadingNumbering:
+    """How a heading title states its position -- the one numbering parser
+    shared by this detector and the section outline
+    (``app.services.section_outline``).
+
+    ``number``: the dotted section number at the start of the title
+    (``5.7.2.1``, ``A.2``, ``5``; a lone capital letter such as ``A`` is
+    reported as the parser reads it), ``""`` when there is none. When there is
+    none and the title is word-enumerated (``Figure 5-1.``, ``Table 5-18``,
+    ``Chapter 5``, ``第5章``, ``Appendix A``, ``Figure A-1``):
+    ``caption_word`` is the word (``Figure`` / ``第``) and ``caption_chapter``
+    the enumerator's first part (``5`` / ``A``); ``caption_item`` is True when
+    the enumerator continues past it (``5-1``, ``A-1``, ``5.1``), i.e. the title
+    names an item inside that chapter rather than the chapter itself. A Latin
+    word glued to its digits (``DDR4``, ``UART1``) is a name, not a caption."""
+
+    number: str = ""
+    caption_word: str = ""
+    caption_chapter: str = ""
+    caption_item: bool = False
+
+
+# The enumerator continues past the chapter part: ``5-1`` / ``A-1`` / ``5.1``
+# (``Chapter 5. Electrical`` does not -- a space follows the dot).
+_ENUMERATOR_CONTINUES = re.compile(r"[-–—.][0-9A-Za-z]")
+
+
+def heading_numbering(text: str) -> HeadingNumbering:
+    """Public reading of ``_numbering`` (same parse, no behaviour change)."""
+    number, caption = _numbering(text or "")
+    if number:
+        return HeadingNumbering(number=number)
+    if caption is None:
+        return HeadingNumbering()
+    match = _CAPTION_WORD.match(text)
+    rest = text[match.end():] if match is not None else ""
+    return HeadingNumbering(
+        caption_word=caption[0],
+        caption_chapter=caption[1],
+        caption_item=bool(_ENUMERATOR_CONTINUES.match(rest)),
+    )
+
+
 def _headings(elements: Iterable[Mapping]) -> list[_Heading]:
     """Heading elements in document order, labelled the way ``build_chunks``
     labels the chunks that follow them (full breadcrumb, else the text)."""

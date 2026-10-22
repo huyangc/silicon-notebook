@@ -113,11 +113,11 @@ MODES: tuple[str, ...] = (
 #: `backend/app/services/**.py` 的 `step_type=` 全量 grep)。闭集之外的值一律
 #: 折成 `other`,而不是原样带出去——新增一个 step_type 不该悄悄扩大投影面。
 STEP_TYPES: tuple[str, ...] = (
-    "answer", "consult_memory", "enumerate", "exact_lookup", "expand",
-    "expand_community", "experience", "fallback", "follow_chain",
-    "gap_consult", "intent", "memory", "outline", "plan", "plugin", "ppr",
-    "profile", "read_document", "reflect", "rerank", "retrieve",
-    "search_chunks", "skip", "spreadsheet", "synthesis",
+    "answer", "browse_sections", "consult_memory", "enumerate",
+    "exact_lookup", "expand", "expand_community", "experience", "fallback",
+    "follow_chain", "gap_consult", "intent", "memory", "outline", "plan",
+    "plugin", "ppr", "profile", "read_document", "read_section", "reflect",
+    "rerank", "retrieve", "search_chunks", "skip", "spreadsheet", "synthesis",
 )
 STEP_TYPE_OTHER = "other"
 

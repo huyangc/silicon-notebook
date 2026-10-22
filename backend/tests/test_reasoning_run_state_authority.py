@@ -69,6 +69,13 @@ GUARDED = (
     "_action_consult_memory", "_action_exact_lookup", "_action_follow_chain",
     "_feed_exact_lookup_skip", "_collect_kg_gap", "_apply_outline_update",
     "_disclose_unresolved_after_loop", "_finish_run",
+    # in-document navigation: the two actions, the hint block and their helpers
+    "_not_a_name_note", "_section_source_rows", "_resolve_section_source",
+    "_section_outline_for", "_section_hint_block", "_section_hints_text",
+    "_section_skip", "_action_browse_sections", "_deliver_section_listing",
+    "_resolve_section_address", "_action_read_section",
+    "_section_spent", "_section_read_left", "_section_listing_note",
+    "_section_failed", "_replay_section_listing", "_take_section_hint_detail",
 )
 #: ``run`` parameters that are frozen inputs (state keeps an identical copy);
 #: exempt in ``run`` only
@@ -392,6 +399,13 @@ PINNED_READS = {
     ("_dispatch_reflect_action", "self.enumeration_active()"): 1,
     ("_action_consult_memory", "state.limits"): 2,
     ("_finish_run", "state.limits"): 1,
+    # The in-document navigation gate reads the TIER FALLBACK, exactly like
+    # ``document_read_active``: ``reflect()`` gets ``limits=state.enum_limits``
+    # from ``_reflect_round_kwargs``, so prompt and executor judge one tier.
+    ("_not_a_name_note", "state.enum_limits"): 1,
+    ("_section_read_left", "state.enum_limits"): 1,
+    ("_action_browse_sections", "state.enum_limits"): 1,
+    ("_action_read_section", "state.enum_limits"): 1,
 }
 
 

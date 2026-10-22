@@ -222,6 +222,7 @@ def _all_gates_open(kg_actions):
         object_types=ENUMERABLE_KG_OBJECT_TYPES,
         outline=True, consult_memory=True, search_chunks=True,
         kg_actions=kg_actions, read_document=True, keyword_search=True,
+        section_nav=True,
     )
 
 
@@ -229,6 +230,7 @@ def _digest(kg_actions, **extra):
     gates = _all_gates_open(kg_actions)
     prompt = reflect_prompt(
         "布局布线怎么做", "候选", **gates, read_document_cap=2,
+        section_browse_cap=3, section_read_cap=3,
         corpus_langs=["zh", "en"], source_scoped=True, **extra)
     schema = reflect_schema_hint(**gates, **extra)
     return hashlib.sha256(
@@ -239,9 +241,11 @@ def _digest(kg_actions, **extra):
 #: 全开,含这两把闸改写过的每一句:search_chunks 的对比句、enumerate 的偏好句、
 #: consult_memory 的示例清单、两条动作说明)。改动 reflect prompt 本身时按新渲染
 #: 重算;只为这两把闸改了单库渲染的一个字节,这里就会红。
+#: 2026-10-22 重算:全开的闸里加入文档内导航(``section_nav``,两条动作说明、两个
+#: schema 分支、scope 字段清单里的 ``browse_sections.query``)。
 _SINGLE_LIBRARY_DIGESTS = {
-    True: "2a2bcefbcffbec9691597e7be33dc392644a6acc0165bd3b781799dbe8d416db",
-    False: "3c92676db409c1ae04ec2b451c4eb2be18f26482fea973e1e6ac99a4e48a5800",
+    True: "17f332ea9f991ffc6c3fea5e34869f82736a1ecbd9983be1984ccaa29c02da4a",
+    False: "f65b72d3dd815cc1c69e0eb4e85f70fd9dd69b06d70bd97b01e56720f869cb35",
 }
 
 
@@ -482,7 +486,7 @@ def test_core_action_ids_are_every_gate_open():
     every = core_reflect_actions(
         kg_actions=True, chunk_search=True, enumeration=True, read_document=True,
         outline=True, consult_memory=True, search_elements=True,
-        ppr_retrieve=True)
+        ppr_retrieve=True, section_nav=True)
     assert len(every) == len(set(every))
     assert frozenset(every) == CORE_REFLECT_ACTION_IDS
     for word in RETRIEVAL_ACTIONS:

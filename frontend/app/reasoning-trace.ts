@@ -29,7 +29,14 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   // 「按语义/关键词检索原文段落」的一等检索动作,read_document 是「整篇文档的有界
   // 取样」)。
   read_document: "取样",
-  // outline = 大纲便签(update_outline reflect 动作写的那一步);仅 exhaustive 档
+  // browse_sections / read_section = 章节导航两个 reflect 动作(章节导航检索 PR-2):
+  // 先看一篇文档的章节目录,再按章节标签读取那一节的原文。⚠ 不用"取样"(read_document
+  // 占了:整篇有界取样)也不用"段落"/"原文"(search_chunks/fallback 占了);
+  // 「章节目录」说的是只列标题、不读正文,「按章节读取」说的是读指定一节的原文,
+  // 两个词刻意带"章节"以区别于上面三种按整篇/按语义的读取。
+  browse_sections: "章节目录",
+  read_section: "按章节读取",
+  // outline =大纲便签(update_outline reflect 动作写的那一步);仅 exhaustive 档
   // 且 REASONING_OUTLINE_ENABLED 开启时出现(设计文档 §3.1)。
   outline: "大纲",
   // profile = Agent 对这个库的已有理解被带进了这一轮的规划/反思(Agentic Memory
@@ -119,6 +126,8 @@ const NEXT_ACTION: Record<string, string> = {
   update_outline: "整理大纲",
   consult_memory: "回想以往的查法",
   read_document: "按篇读取原文取样",
+  browse_sections: "查看章节目录",
+  read_section: "按章节读取原文",
 };
 
 export type ReasoningTraceSummary = {
@@ -388,6 +397,29 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
   // 核对步的条数已经写在 summary 里;这里显式返回空,免得下面的通用兜底把 detail
   // 里的计数字段念成「N 个候选」「新增 N」这类说的是另一件事的话。
   if (step.step_type === "citation_check") return "";
+  // browse_sections(章节导航检索):只列一篇文档的章节标题,不读正文。detail 带
+  // source/under/query/listed;listed 不是 found/count,但同样排在通用分支之前,
+  // 以免日后后端加字段时被通用兜底截胡。under/query 为空时不显示,不编造。
+  if (step.step_type === "browse_sections") {
+    const parts: string[] = [];
+    if (typeof detail.source === "string" && detail.source) parts.push(`《${detail.source}》`);
+    if (typeof detail.under === "string" && detail.under) parts.push(detail.under);
+    if (typeof detail.query === "string" && detail.query) parts.push(detail.query);
+    if (typeof detail.listed === "number") parts.push(`列出 ${detail.listed} 条`);
+    return parts.join(" ");
+  }
+  // read_section(章节导航检索):按章节标签读取那一节的原文。detail 带 found(新增
+  // 段数)、source、section,必须排在通用 found 分支之前——否则只剩「新增 N」,
+  // 读的是哪一篇哪一节被吞掉。truncated 为真表示该节只读了前段,要说清楚。
+  if (step.step_type === "read_section") {
+    const parts: string[] = [];
+    if (typeof detail.source === "string" && detail.source) parts.push(`《${detail.source}》`);
+    if (typeof detail.section === "string" && detail.section) parts.push(detail.section);
+    if (typeof detail.found === "number") {
+      parts.push(`新增 ${detail.found} 段${detail.truncated ? "（只读本节前段）" : ""}`);
+    }
+    return parts.join(" ");
+  }
   if (step.step_type === "read_document") {
     const title = typeof detail.source === "string" && detail.source ? `《${detail.source}》` : "";
     const found = typeof detail.found === "number" ? detail.found : undefined;

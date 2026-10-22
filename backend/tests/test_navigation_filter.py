@@ -135,6 +135,9 @@ _SQL_READERS_COVERED = {
     "ChunkStore.rows_by_ids", "ChunkStore.chunks_by_section",
     "KnowledgeStore.chunk_exact_search", "chunk_exact_candidate_rows",
     "chunk_section_rows", "source_subgraph_rows_on",
+    # the section outline's bounded scan (both adapters + PostgreSQL's SQL in
+    # ``postgres/search.py``); behaviour pinned by test_section_outline_ports
+    "ChunkStore.source_outline_rows", "source_outline_rows",
 }
 
 
@@ -166,7 +169,7 @@ def test_every_chunk_row_reader_is_enumerated_and_selects_navigation():
 _RETRIEVAL_SERVICE_PATTERNS = (
     "retrieval*.py", "graph_retrieval.py", "reasoning_retrieval.py", "exact_lookup.py",
     "chunk_federation.py", "source_graph_*.py", "source_subgraph*.py",
-    "navigation_filter.py",
+    "navigation_filter.py", "section_retrieval.py",
 )
 
 

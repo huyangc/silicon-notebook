@@ -25,6 +25,7 @@ reasoning_retrieval.py 的候选池汇总 "answer" 步,以及 ``step_limit`` 截
   (coverage)pass  ⑤ expand  ⑥ add_subquery 的 retrieve 步  ⑦ ppr 动作步
   ⑧ exact_lookup 动作步  ⑨ 无图首轮的原文播种  ⑩ search_chunks 动作步
   ⑪ read_document 动作步(PR-A;见证失败也是零命中的 I/O 步,不是 skip)
+  ⑫ read_section 动作步(文档内导航;browse_sections 列目录不产证据,不写这把键)
 外加 ask_service.py 的 synthesis 步(``anchor_evidence_ids``)。
 """
 from __future__ import annotations
@@ -842,3 +843,32 @@ def test_public_trace_steps_passes_result_ids_through_unfiltered():
     assert [s["step_type"] for s in visible] == ["retrieve", "synthesis"]
     assert visible[0]["detail"]["result_ids"] == ["ko-1"]
     assert visible[1]["detail"]["anchor_evidence_ids"] == ["e1"]
+
+
+def test_read_section_step_carries_result_ids_and_browse_and_skips_do_not(
+    tmp_path, monkeypatch,
+):
+    """⑫ `read_section`:读到即写 `result_ids`(零命中写空列表);`browse_sections`
+    只列目录、不产证据,和各条 skip 一样不写这把键。"""
+    from tests.test_reasoning_section_nav import (
+        _browse,
+        _llm,
+        _read,
+        _reasoner,
+        _run,
+        _seed,
+        make_section_repo,
+    )
+
+    repo = make_section_repo(tmp_path, monkeypatch)
+    nb = _seed(repo)
+    llm = _llm(_browse("互连规范"), _read("6", source="互连规范"),
+               _read("5.7.2.1", source="互连规范"), _read("s99"))
+    result = _run(_reasoner(repo, monkeypatch, llm, seed=("c-s2",)), nb)
+    reads = [t for t in result.trace if t.step_type == "read_section"]
+    assert [t.detail["result_ids"] for t in reads] == [["c-s5", "c-s6"], []]
+    browse = next(t for t in result.trace if t.step_type == "browse_sections")
+    assert "result_ids" not in browse.detail
+    skip = next(t for t in result.trace if t.step_type == "skip"
+                and t.detail.get("reason") == "section_not_surfaced")
+    assert "result_ids" not in skip.detail

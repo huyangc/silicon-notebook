@@ -3786,6 +3786,10 @@ def test_reflect_kill_switch_puts_the_whole_action_back_to_baseline(rrepo):
             rrepo, rrepo.settings).reflect("布局布线怎么做", "候选")
         return decision, capture.seen[-1]
 
+    # 文档内导航与 search_chunks 同闸(关掉原文检索它也一起消失);这里只对账
+    # search_chunks 自己的那几处插入,所以把导航的部署开关单独关掉。导航自己的
+    # 逐字节对账在 test_prompts / test_reasoning_section_nav。
+    rrepo.settings.reasoning_section_nav_enabled = False
     rrepo.settings.reasoning_chunk_search_enabled = False
     off_decision, (off_prompt, off_schema) = _reflect_once()
     # 关闭态:模型看到的两份文本里连这个词都不存在。
@@ -6979,6 +6983,10 @@ def test_peer_run_with_the_keyword_arm_switched_off_hides_chunks_keywords(
     if not enabled:
         # 子闸关 == search_chunks 开但没有这个参数的形态,逐字节。
         gates = dict(element_kinds=(), object_types=(), search_chunks=True)
+        prompt_extra = {}
+        if rr.section_navigation_active():
+            gates.update(section_nav=True)
+            prompt_extra = dict(section_browse_cap=3, section_read_cap=3)
         if rr.enumeration_active():
             from app.services.collection_catalog import (
                 ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES,
@@ -6986,7 +6994,8 @@ def test_peer_run_with_the_keyword_arm_switched_off_hides_chunks_keywords(
             gates.update(element_kinds=ENUMERABLE_ELEMENT_KINDS,
                          object_types=ENUMERABLE_KG_OBJECT_TYPES)
         assert schema == reflect_schema_hint(**gates)
-        assert prompt == reflect_prompt("布局布线怎么做", "候选", **gates)
+        assert prompt == reflect_prompt("布局布线怎么做", "候选", **gates,
+                                        **prompt_extra)
     # 单库 run 不读这把开关:关着也照样提供。
     assert rr.keyword_search_active() is True
 

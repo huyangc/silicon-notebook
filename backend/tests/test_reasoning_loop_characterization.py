@@ -268,6 +268,35 @@ def _seed_empty(repo) -> tuple:
     return notebook.id, {}
 
 
+#: A flat numbered specification (in-document navigation): a virtual ``5.7.2``,
+#: two ``Notes`` leaves (an ambiguous title) and a second source with no chunks
+#: (an empty outline). No vectors: the section-hint block stays fail-open off.
+_SECTION_ROWS = (
+    ("c-s0", "5 Electrical", "第五章 电气规范概述"),
+    ("c-s1", "5.7 Channel", "通道规范概述"),
+    ("c-s2", "5.7.2.1 Loss and Crosstalk Mask", "插损与串扰掩模限值"),
+    ("c-s3", "5.7.3 Standard Package", "标准封装插损表 5-18 数值"),
+    ("c-s4", "Notes", "注释一"),
+    ("c-s5", "6 Protocol", "协议层说明"),
+    ("c-s6", "Notes", "注释二"),
+)
+
+
+def _seed_sections(repo) -> tuple:
+    notebook = repo._runtime.catalog.create_notebook(NotebookCreate(name="规范"))
+    nb = notebook.id
+    with repo._write() as db:
+        _source(db, nb, "src-spec", "互连规范")
+        _source(db, nb, "src-blank", "空白文档")
+        for chunk_id, path, text in _SECTION_ROWS:
+            db.execute(
+                "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,"
+                "element_ids,created_at) VALUES (?,?,?,?,?,?,?)",
+                (chunk_id, nb, "src-spec", f"[{path}] {text}", path, "[]", NOW))
+    repo.collection_catalog.invalidate()
+    return nb, {}
+
+
 def _situation(effort: str) -> dict:
     return current_situation(INTENT_DETAIL, mode="reasoning", retrieval_effort=effort)
 
@@ -497,6 +526,7 @@ def _build_retriever(scenario, repo, cancel_event):
         retriever.allow_consult_memory = False
         retriever.allow_search_chunks = False
         retriever.allow_document_read = False
+        retriever.allow_section_nav = False
         retriever.untrusted_evidence = True
         return retriever
     retriever = ReasoningRetriever.from_repository(repo, repo.settings, cancel_event)
@@ -579,7 +609,8 @@ def observe(scenario: Scenario, tmp_path, monkeypatch) -> dict:
         repo = _make_repo(tmp_path, monkeypatch)
         for key, value in scenario.settings.items():
             setattr(repo.settings, key, value)
-        seed = _seed_empty if scenario.notebook == "empty" else _seed_graph
+        seed = {"empty": _seed_empty, "sections": _seed_sections}.get(
+            scenario.notebook, _seed_graph)
         nb, ids = seed(repo)
         if scenario.experiences:
             _seed_experiences(repo, scenario.effort, scenario.experiences)
@@ -1331,6 +1362,129 @@ def _expect_consult_disabled(obs):
     assert obs.reasons() == ["consult_memory_disabled"]
 
 
+# --- in-document navigation: browse_sections / read_section ----------------
+
+def browse(source, under="", query=""):
+    return act("browse_sections", browse_sections={
+        "source": source, "under": under, "query": query})
+
+
+def read_section(section, source=""):
+    return act("read_section", read_section={"source": source, "section": section})
+
+
+@scenario(
+    name="section_navigation_branches",
+    notebook="sections", effort=None,  # the raw step budget, not standard's 8
+    settings={"reasoning_max_section_browses": 2, "reasoning_max_section_reads": 2,
+              "reasoning_stale_limit": 50, "reasoning_max_steps": 20},
+    reflects=[
+        act("enumerate_elements", enumerate={"collection": "sources"}),
+        browse("互连规范"),
+        browse("互连规范"),
+        browse("互连规范", under="附录甲"),
+        browse("互连规范", under="9"),
+        browse("不存在的文档"),
+        browse("空白文档"),
+        read_section("s99"),
+        read_section("Notes", source="互连规范"),
+        read_section("5.7.3", source="互连规范"),
+        read_section("5.7.3 Standard Package", source="互连规范"),
+        read_section("s2"),
+        # spent actions leave the enum, so a model can no longer pick them;
+        # the caps are the executors' own defence in depth
+        RawDecision("read_section"),
+        browse("互连规范", under="5.7"),
+        RawDecision("browse_sections"),
+        ANSWER,
+    ],
+)
+def _expect_section_navigation(obs):
+    reasons = [r for r in obs.reasons() if r.startswith("section_")]
+    assert reasons == [
+        "section_under_unsupported", "section_under_empty",
+        "section_source_unresolved", "section_outline_empty",
+        "section_not_surfaced", "section_ambiguous", "section_read_repeat",
+        "section_read_cap", "section_browse_cap"]
+    browses = obs.steps("browse_sections")
+    # the second, identical browse puts the cached listing back (zero I/O)
+    assert [(s["detail"]["under"], s["detail"].get("repeat", False))
+            for s in browses] == [("", False), ("", True), ("5.7", False)]
+    assert all(s["detail"]["listed"] > 0 and "result_ids" not in s["detail"]
+               for s in browses)
+    reads = obs.steps("read_section")
+    assert [s["detail"]["section"] for s in reads] == [
+        "5.7.3 Standard Package", "5.7 Channel"]
+    # a leaf (the Notes after it) does not end 5.7.3: it is part of its range
+    assert reads[0]["detail"]["result_ids"] == ["c-s3", "c-s4"]
+    # 5.7's range is 5.7, its virtual 5.7.2 / 5.7.2.1 and 5.7.3 (already read)
+    assert reads[1]["detail"]["result_ids"] == ["c-s1", "c-s2"]
+    # the outline is read once per source and run, whatever the turn count
+    assert len(obs.port_calls("retrieval.section_outline")) == 2
+    summaries = obs.summaries()
+    # the listing reaches the next turn, and the next listing of the same
+    # document replaces it (one listing block, the latest)
+    assert "（章节目录:《互连规范》,列出" in summaries[2]
+    assert summaries[-1].count("（章节目录:") == 1
+    assert "（章节目录:《互连规范》 under 5.7," in summaries[-1]
+    assert "已浏览《互连规范》" in summaries[-1] and "已读《互连规范》" in summaries[-1]
+    assert "未执行:查看章节目录" in summaries[-1]
+    # after a new listing the turn is told to read it, not to give up; a
+    # replayed listing is no new information and gets the ordinary note
+    assert "上一步列出了章节目录" in summaries[2]
+    assert "上一步检索未带来新证据" not in summaries[2]
+    assert "上一步检索未带来新证据" in summaries[3]
+    # a new listing holds stale; the replay after it does not
+    details = obs.reflect_details()
+    assert details[2]["no_progress"] is True and details[2]["stale"] == 0
+    assert details[3]["stale"] == 1
+    # with reads spent, the hint text and the listing stop pointing at read_section
+    assert "按 [sN] 读取原文" not in summaries[-1]
+
+
+def _raise_section_io(*args, **kwargs):
+    raise RuntimeError("大纲读取失败")
+
+
+@scenario(
+    name="section_navigation_failures",
+    notebook="sections",
+    retrieval_overrides=lambda ctx: {"section_outline": _raise_section_io},
+    reflects=[
+        act("enumerate_elements", enumerate={"collection": "sources"}),
+        browse("互连规范"),
+        read_section("6", source="互连规范"),
+        ANSWER,
+    ],
+)
+def _expect_section_navigation_failures(obs):
+    # one failed read never voids the run: both turn into skips, the roster
+    # listed before them is kept, and the run still answers
+    assert obs.data["outcome"].get("returned") is True
+    failed = [s for s in obs.steps("skip")
+              if s["detail"].get("reason", "").endswith("_failed")]
+    assert [(s["detail"]["reason"], s["detail"]["error"]) for s in failed] == [
+        ("section_browse_failed", "RuntimeError"),
+        ("section_read_failed", "RuntimeError")]
+    assert all("result_ids" not in s["detail"] for s in failed)
+    assert obs.steps("enumerate") and obs.steps()[-1]["step_type"] == "answer"
+    assert "未执行:查看章节目录:读取时出错(RuntimeError)" in obs.summaries()[-1]
+
+
+@scenario(
+    name="section_navigation_closed",
+    notebook="sections",
+    settings={"reasoning_section_nav_enabled": False},
+    reflects=[RawDecision("browse_sections"), RawDecision("read_section"), ANSWER],
+)
+def _expect_section_navigation_closed(obs):
+    assert [r for r in obs.reasons() if r.startswith("section_")] == [
+        "section_nav_disabled", "section_nav_disabled"]
+    assert not obs.steps("browse_sections") and not obs.steps("read_section")
+    # zero I/O: no outline, similarity or section read reaches the port
+    assert not obs.port_calls("retrieval.section_")
+
+
 # --- every block of the candidate summary, in one run ----------------------
 
 @scenario(
@@ -1351,6 +1505,7 @@ def _expect_consult_disabled(obs):
     reflects=[
         act("enumerate_elements", enumerate={"collection": "sources"}),
         act("consult_memory"),
+        browse("版图手册"),
         outline({"id": "s1", "title": "版图要点", "evidence": []}),
         act("exact_lookup", query="foo_bar"),
         act("exact_lookup", query="baz_qux"),
@@ -1362,14 +1517,14 @@ def _expect_every_block(obs):
     # the turn after the second dry exact lookup carries every block that can
     # share a turn (the outline nudge only shows while there is no outline)
     blocks = [_summary_blocks(text) for text in obs.summaries()]
-    assert [name for name, _ in blocks[5]] == [
+    assert [name for name, _ in blocks[6]] == [
         "evidence", "progress_note", "ledger", "uncovered", "zero_hit_nudge",
         "enumeration", "outline", "profile", "experience", "consult",
-        "collection_map", "plugin_nudge"]
+        "section_listing", "collection_map", "plugin_nudge"]
     assert [name for name, _ in blocks[1]][:8] == [
         "evidence", "ledger", "uncovered", "enumeration", "outline_nudge",
         "profile", "experience", "collection_map"]
-    assert "external" in [name for name, _ in blocks[6]]
+    assert {"external", "section_listing"} <= {name for name, _ in blocks[7]}
     assert obs.steps("plugin_action")
 
 
@@ -1453,10 +1608,11 @@ SCENARIO_IDS = [item.name for item in SCENARIOS]
 #: share one slot and never appear together.
 SUMMARY_BLOCKS = (
     ("evidence", ("- [",)),
-    ("progress_note", ("（系统提示:首轮检索未命中任何证据", "（系统提示:上一步检索未带来新证据")),
+    ("progress_note", ("（系统提示:首轮检索未命中任何证据", "（系统提示:上一步检索未带来新证据",
+                       "（系统提示:上一步列出了章节目录")),
     ("ledger", ("（已展开过的节点", "（以下节点的关系数超过", "（已执行过的子查询及各自新增证据数",
                 "（已按名称精确查找过及各自结果", "已按篇读取过原文的文档",
-                "本次没有取到原文的文档")),
+                "本次没有取到原文的文档", "（章节导航记录")),
     ("uncovered", ("（以下已确认的检索方向因步骤预算不足尚未执行",)),
     ("zero_hit_nudge", ("」这类动作在当前场景已连续",)),
     ("enumeration", ("（本轮已枚举的清单",)),
@@ -1466,6 +1622,7 @@ SUMMARY_BLOCKS = (
     ("experience", ("[Search tactics learned from earlier runs]",)),
     ("consult", ("[Recalled search tactics]",)),
     ("external", ("[External evidence]",)),
+    ("section_listing", ("（章节目录:",)),
     ("collection_map", ("[Collections in scope]",)),
     ("plugin_nudge", ("（系统提示:库内检索已无新证据",)),
 )
@@ -1528,6 +1685,10 @@ LOOP_SKIP_REASONS = frozenset({
     "outline_overflow_repair_declined", "outline_repair_structure",
     "outline_budget", "outline_empty", "kg_gap_unavailable",
     "outline_evidence_overflow_unresolved", "intent_coverage_incomplete",
+    "section_nav_disabled", "section_browse_cap", "section_source_unresolved",
+    "section_outline_empty", "section_under_unsupported", "section_under_empty",
+    "section_read_cap", "section_not_surfaced", "section_ambiguous",
+    "section_read_repeat", "section_browse_failed", "section_read_failed",
 })
 
 
@@ -1608,7 +1769,7 @@ def test_scenarios_reach_every_loop_branch_whatever_the_shell_exports(
     assert LOOP_SKIP_REASONS <= reasons, sorted(LOOP_SKIP_REASONS - reasons)
     assert {"expand", "follow_chain", "outline", "consult_memory",
             "plugin_action", "enumerate", "read_document", "exact_lookup",
-            "expand_community"} <= kinds
+            "expand_community", "browse_sections", "read_section"} <= kinds
     assert {"AskCancelled", "RuntimeError"} <= raised
     assert {case.entry for case in SCENARIOS} == {"run", "report", "ask", "knowhow"}
     pairs = {(a, b) for (a, _), (b, _) in zip(SUMMARY_BLOCKS, SUMMARY_BLOCKS[1:])}

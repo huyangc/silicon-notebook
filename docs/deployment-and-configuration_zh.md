@@ -1200,6 +1200,13 @@ REASONING_MAX_PPR_RETRIEVES / REASONING_MAX_EXACT_LOOKUPS / REASONING_MAX_FOLLOW
 REASONING_MAX_CHUNK_SEARCHES # 逐步推理 search_chunks 动作每 run 的调用次数上限（默认 3，与 REASONING_MAX_PPR_RETRIEVES/REASONING_MAX_EXACT_LOOKUPS 一致；ge=0；首轮的确定性原文播种不计入这个上限）
 REASONING_DOCUMENT_READ_ENABLED # 逐步推理的按篇原文取样 reflect 动作 read_document 总闸（默认 true；false 时动作不进 schema/prompt/白名单，零额外查询，逐字回到接入前）；与集合枚举总闸 REASONING_ENUM_TOOLS_ENABLED 同门——枚举工具关闭或请求按来源收窄了检索范围时，这个动作即便自己开着也不会出现，因为它只读本 run 已经列出过的来源清单
 REASONING_MAX_DOCUMENT_READS # 逐步推理 read_document 动作每 run 的调用次数上限（默认 4；ge=0；为 0 时是第二把部署级 kill switch）；元素取样池复用上方 DOCUMENT_OVERVIEW_MAX_ELEMENTS，字符取样池取档位 chunk_context_chars 的四分之一，两者都按「剩余预算 // 还能读几次」切份额，不是独立请求级字段
+REASONING_SECTION_NAV_ENABLED # 逐步推理文档内导航总闸：reflect 动作 browse_sections / read_section 与章节线索块（默认 true；false 时它们一并从 schema/prompt/白名单消失，逐字节回到接入前）。与段落检索同闸——REASONING_CHUNK_SEARCH_ENABLED 关闭或处于 overview 档时本特性也不出现。**保留名：** browse_sections、read_section 现在是核心 reflect 动作 id，部署插件如果声明了叫这两个名字的 reflect 动作，升级后启动即被拒（ExtensionRegistryError），需先改名
+REASONING_MAX_SECTION_BROWSES / REASONING_MAX_SECTION_READS # browse_sections 与 read_section 每 run 的调用次数上限；两者都为 0 时整体撤下该特性；默认值与取值范围见 product-and-api
+REASONING_SECTION_READ_MAX_CHUNKS / REASONING_SECTION_READ_RESERVE # 单次 read_section 读回的 chunk 数，以及读回段落在精确标识符前缀之后保留的合成席位数（0 = 不保留）；默认值与取值范围见 product-and-api
+REASONING_SECTION_BROWSE_MAX_CHARS # 单次 browse_sections 目录渲染的字符预算；默认值与取值范围见 product-and-api
+REASONING_SECTION_HINT_MAX_ENTRIES / REASONING_SECTION_HINT_SOURCES / REASONING_SECTION_HINT_RELATIVE_FLOOR # 向量章节线索块的规模（条目数、覆盖的来源数，以及相对本 run 已有最高 chunk 相似度的分数阈值；任一计数为 0 时不出块）；默认值与取值范围见 product-and-api
+REASONING_SECTION_OUTLINE_MAX_ROWS # 单个来源为大纲扫描、为向量读取的 chunk 数硬界（0 整体撤下导航）；同时约束单来源的向量内存（约 行数 × 运行时维度 × 4 字节）；默认值与取值范围见 product-and-api
+REASONING_SECTION_VECTOR_CACHE_MAX_BYTES # 跨 run 共享的进程级章节向量缓存的字节预算（LRU；0 关闭，此时每个 run 自己读取来源向量）。条目的键含数据库、库、来源、来源的 chunked_at、大纲指纹与查询维度，所以重新分块会让它失效；没有 chunked_at、或仍有 chunk 缺向量的来源不进缓存。已知限制：换成同维度的嵌入模型、或不重新分块就原地重嵌入，要等条目被淘汰或进程重启后才被看到；默认值与取值范围见 product-and-api
 REASONING_MAX_TOKENS # 逐步推理规划（查询扩展）与每轮反思的单次输出上限（默认 16384；ge=1）。这是 Legacy 共用的部署预算；各 workload 的输出、重试与超时边界仍独立生效。
 ```
 

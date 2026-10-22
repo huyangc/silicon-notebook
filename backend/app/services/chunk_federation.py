@@ -2748,7 +2748,8 @@ def reasoning_order_for(
     section), the passage floor computed before it
     (``AskService._assemble_structured_evidence``) and deep-report drafting
     (``ReportEngine._section_passage_order``) -- so they cannot read different
-    numbers: ``REASONING_EXACT_RESERVE`` for the exact prefix, and
+    numbers: ``REASONING_EXACT_RESERVE`` for the exact prefix,
+    ``REASONING_SECTION_READ_RESERVE`` for the section-read seats behind it, and
     ``active_reserve_seats`` / ``peer_library_reserve_seats`` (exactly one of
     them non-zero) for the library prefix.  Lives beside those two because
     they own the seat numbers; ``retrieval`` stays free of an import back
@@ -2764,6 +2765,8 @@ def reasoning_order_for(
         library_reserve=peer_library_reserve_seats(settings),
         active_notebook_id=active_notebook_id,
         held=held,
+        section_read_reserve=int(
+            getattr(settings, "reasoning_section_read_reserve", 0) or 0),
     )
 
 

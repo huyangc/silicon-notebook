@@ -164,7 +164,7 @@ Package 的插损、驱动架构等参数，答案称第 5 章「未解析」。
 - 渲染：每行 `[sN] 标题（N 段）`，`sN` 是本 run 内地址号，按深度缩进，总字符受
   `REASONING_SECTION_BROWSE_MAX_CHARS` 约束，截断时注明「另有 K 条未列出，可用 under/query 收窄」；扫描
   截断时注明「大纲只覆盖本篇前 N 段」。
-- `ports_protocol_method_count` 979 → 983（1 个 `ChunkStorePort` + 3 个 `RetrievalPort`，同 diff 改）。T2 合入后仍为 979：快照缓存的导航版本经既有 `source_subgraph_signature(..., with_navigation=True)` 读出，元素通道的导航反查是 `chunks_for_element_ids(..., navigation_source_id=)` 关键字，均未新增端口方法。
+- `ports_protocol_method_count`：PR-2 开工时 master 为 996，本 PR 加 1 个 `ChunkStorePort` + 3 个 `RetrievalPort` → 1000（同 diff 改 baseline，以开工时实际值为准）。
 
 ### 3.5 地址与封闭集合
 
@@ -179,17 +179,32 @@ Package 的插损、驱动架构等参数，答案称第 5 章「未解析」。
 ### 3.6 分层与权限（检索层负责）
 
 - `RetrievalPort.section_outline(notebook_id, source_id)`、
-  `RetrievalPort.section_scores(notebook_id, source_id, query_texts)`（§3.7）、
+  `RetrievalPort.section_chunk_similarities(notebook_id, source_id, chunk_ids, query_texts)`（§3.7；返回
+  每个 chunk 对各查询向量余弦的最大值，按节取最大由纯函数 `section_outline` 完成）、
   `RetrievalPort.section_chunks(notebook_id, source_id, chunk_ids, limit, question)`（§3.9），由
   `RetrievalService` 实现、委托 `CandidateRetrievalService`。
 - 权限直接用 `source_scope`（`scope.allows(notebook_id, source_id)` + subjectless run 的
-  `source_ceiling_for(notebook_id) is None` 拒绝），**不 import** `RR` 里的 `document_source_admitted`
-  （向上依赖）。越界与不存在返回同一个空结果。
+  `source_ceiling_for(notebook_id) is None` 拒绝；非本库——参考库与 subjectless run 的每个库——还要求
+  来源在该库可见来源集合内，与 chunk 通道对等腿同一份 `_peer_visible_sources`，他人 Memory / Knowhow
+  投影不可大纲、不可读取），**不 import** `RR` 里的 `document_source_admitted`（向上依赖）。越界与不存在
+  返回同一个空结果；天花板在每次读 memo 之前判，memo 不替权限作答。
 - `section_chunks` 先校验 `chunk_ids` 全部属于该 `(notebook_id, source_id)`，再读行，输出过
   `drop_navigation_chunks` 与 `filter_retrieval_items(notebook_id, "chunk", …)`；推理侧调用经过
   `retrieval_fanout_slot()` 与 `_filter_candidates("chunk", …)`，与 `search_chunks` 同路（`RR:4727-4750`）。
-- run 内记忆分三份，键各自独立：大纲按 `(notebook_id, source_id)`；该来源的 chunk 向量按
-  `(notebook_id, source_id)`（新增子查询不重复解码）；章节分数按 `(notebook_id, source_id, query_texts)`。
+- run 内记忆，键各自独立：大纲按 `(notebook_id, source_id)`；笔记本矩阵是否已暖按 `notebook_id`（每库每
+  run 至多一次版本聚合，非 copyable 大库一次也不付）；该来源的 chunk 向量按 `(notebook_id, source_id,
+  查询维)`（新增子查询不重复解码；单源约 `max_rows × 运行时维 × 4B`，整个 run 的向量缓存另有字节上限
+  `SECTION_VECTOR_RUN_MEMO_MAX_BYTES`，按 LRU 淘汰）。**不做**第三份「章节分数」memo：分数是已缓存
+  向量上的一次小矩阵乘，毫秒级现算。
+- 进程级向量缓存（跨 run 复用，线索块默认开、每次推理都要读）：键 `(数据库指纹, notebook_id, source_id,
+  chunked_at, 大纲 id 指纹, 查询维)`，`chunked_at` 随大纲同一条查询取出（主键子查询）；数据库指纹是整条
+  `DATABASE_URL` 的摘要（含 search_path，两个库/schema 同 id 不串）；只缓存每个大纲块都有向量的来源；
+  字节上限 `REASONING_SECTION_VECTOR_CACHE_MAX_BYTES`（默认 256MiB，0 = 关闭），LRU 淘汰。两级缓存都
+  single-flight（报告多节并发同一来源只解码一次）。已知局限：同维换嵌入模型原地重嵌不改分块时，要等淘汰
+  才看到新向量（仓库没有嵌入漂移信号）。
+- `read_section` 打分只读这 ≤limit 段的向量（缓存里已有整源时直接用）；`section_retrieval
+  .section_vector_stats()` 给出本 run 的 `vectors_read` / `vector_ms` / `vector_loads` /
+  `process_cache_hits`，供 trace 放稀疏键。
 
 ### 3.7 向量章节线索
 
@@ -235,8 +250,10 @@ Package 的插损、驱动架构等参数，答案称第 5 章「未解析」。
 ### 3.9 `read_section` 动作
 
 - 参数：`read_section: {source: "", section: ""}`（§3.5 解析规则）。
-- 取数：`section_chunks(addr.notebook_id or state.notebook_id, addr.source_id, addr.chunk_ids[:limit],
-  question)`，`limit = REASONING_SECTION_READ_MAX_CHUNKS`，按文档序、`take_distinct_chunk_hits` 去重进
+- 取数：`section_chunks(addr.notebook_id or state.notebook_id, addr.source_id, addr.chunk_ids,
+  limit, question)`——把**整节** id 交给端口，由端口按文档序截取（导航页先剔除、不占名额，再取前 `limit`
+  段；端口另把 `limit` 钳到 `REASONING_SECTION_READ_MAX_CHUNKS`、按批读行），
+  `limit = REASONING_SECTION_READ_MAX_CHUNKS`，按文档序、`take_distinct_chunk_hits` 去重进
   `state.chunks`，**不开新证据号段**；超出上限时 trace 注明「截取本节前 N 段」。
 - **relevance**：每块对问题的融合分，与普通 chunk 检索同一把尺子——`_fuse(关键词覆盖, 该块向量与问题
   向量的余弦)`，不设 floor；无论地址来自线索、browse 还是标题文本，都按这一条算。
@@ -246,7 +263,8 @@ Package 的插损、驱动架构等参数，答案称第 5 章「未解析」。
   `prefer_stronger_chunk_candidate` 同步合并（与 `exact_lookup` 同法，`retrieval.py:1737-1739`）。
   `reasoning_passage_order` 为 `section_read` 块保留席位 `REASONING_SECTION_READ_RESERVE`（排在 exact
   预留之后），保证读回的整节在 `chunk_context_chars` 分区里存活；大纲合成不对它逐节注入。新增
-  `RetrievedChunk(...)` 构造点登记 `ORIGIN_REGISTRY`。
+  `RetrievedChunk(...)` 构造点登记 `NAVIGATION_REGISTRY`（它传入属主库 `notebook_id`，按守卫规则不进
+  `ORIGIN_REGISTRY`）。
 - 预算：每 run 上限 `REASONING_MAX_SECTION_READS`；同地址重复 → skip `section_read_repeat`；零命中计入
   `zero_hit_by_action["read_section"]`。
 - skip 原因码：`section_nav_disabled`、`section_read_cap`、`section_source_unresolved`、
@@ -279,6 +297,7 @@ Package 的插损、驱动架构等参数，答案称第 5 章「未解析」。
 | `reasoning_section_hint_sources` / `REASONING_SECTION_HINT_SOURCES` | 4 | 线索块覆盖的来源数上限 |
 | `reasoning_section_hint_relative_floor` / `REASONING_SECTION_HINT_RELATIVE_FLOOR` | 0.8 | 线索相对阈值（占本 run 最高 chunk 语义相似度的比例） |
 | `reasoning_section_outline_max_rows` / `REASONING_SECTION_OUTLINE_MAX_ROWS` | 4000 | 单源大纲扫描块数硬界 |
+| `reasoning_section_vector_cache_max_bytes` / `REASONING_SECTION_VECTOR_CACHE_MAX_BYTES` | 268435456 | 章节向量进程级缓存字节上限（0 = 关闭） |
 
 `ReasoningActionPolicy`（`reports/policy.py`）加 `max_section_browses` / `max_section_reads`。
 精确数值写进 `docs/product-and-api*.md`，env 登记进 `docs/deployment-and-configuration*.md`，并注明：已有
@@ -311,6 +330,16 @@ Package 的插损、驱动架构等参数，答案称第 5 章「未解析」。
   `ADOPTION_ACTIONS` 同步。
 
 ## 4. 任务
+
+### PR-2 开工前置（2026-10-22，PR-1 已合 #971）
+
+- PR-1 已落地：`chunks.navigation` / `sources.navigation_version`（SQLite v101 / PG 0082）、`app/services/navigation_filter.py`
+  （`drop_navigation_rows` / `drop_navigation_chunks` / `navigation_filter_enabled`）、构造点守卫
+  `test_retrieved_hit_origin_guard`（每个新 `RetrievedChunk` / `RetrievedElement` 构造点必须登记导航处理）。
+- 因此：大纲读取带 `navigation`，全为导航页的出现不进大纲与线索；`section_chunks` 输出过 `drop_navigation_rows`；
+  `read_section` 新构造点（`section_retrieval.section_chunks`）传入属主库 `notebook_id`，只登记
+  `NAVIGATION_REGISTRY`（navigation-filtered）；守卫规定点名库归属的构造点不进 `ORIGIN_REGISTRY`。
+- 本 PR 无迁移。
 
 全局约定：
 
@@ -389,7 +418,7 @@ baseline 979 → 983。
   方法（独立方法，登记 `test_reasoning_run_state_authority` 的 `GUARDED`）。
 - 线索块接入 `_reflect_round_context_blocks`；`legacy_action_ledger_note`「已浏览 / 已读章节，勿重复」
   账目；`section_listing_delivered_this_turn` 的 stale 保持。
-- `section_read` 标志、`prefer_stronger_chunk_candidate`、`reasoning_passage_order` 保留席位、`ORIGIN_REGISTRY`。
+- `section_read` 标志、`prefer_stronger_chunk_candidate`、`reasoning_passage_order` 保留席位、`NAVIGATION_REGISTRY`。
 - `_ZERO_HIT_TRACKED_ACTIONS` 追加 `read_section`；`STEP_TYPES`；经验词表四处；`_NOT_A_NAME_NOTE` 追加句；
   Settings 与 `ReasoningActionPolicy`。
 - 测试：新 `backend/tests/test_reasoning_section_nav.py`（闸门矩阵；两动作每个 skip 原因码；越界不可区分；
@@ -398,6 +427,13 @@ baseline 979 → 983。
   接线清单里的既有测试（`test_reasoning_loop_characterization.py`、`test_trace_result_ids.py`、
   `test_experience_offered_actions.py`、`test_retrieval_experience_job.py`、`test_reasoning_trace_stats.py`、
   `test_prompts.py`、`test_reflect_action_contract.py`）。
+- 落地取舍（2026-10-22）：①`read_section` 按标题/编号读取时，该来源的大纲若本 run 尚未建过就当场建一次
+  （仍是 run 内唯一一份，地址簿依赖它不变）；候选来源只来自本 run 已出现的来源，封闭集合不变。②导航账目
+  列出每一次浏览与读取（含被替换的那份目录对应的浏览）以及各条教学式 skip，目录段本身每来源只留最近一次。
+  ③`browse_sections(query=…)` 拿不到向量相似度时退回按文档序列出，并在目录抬头注明「向量不可用」。④线索块
+  的相对阈值基准取本 run 已有 chunk 在同一组查询向量下的最高余弦（同一把尺子）；没有任何已有 chunk 拿得到
+  余弦时不出块。⑤`section_read` 保留席位不按库拆分；按库分席位的保底规则用 `is_active_hit` 归一，本库块戳
+  本库 id 与不戳 id 是同一个库（`test_reasoning_section_nav` 钉住）。
 
 ### T7 — 前端（sonnet，impl-task）
 

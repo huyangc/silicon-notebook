@@ -2250,6 +2250,11 @@ class ChunkStorePort(Protocol):
     def knowhow_bridge_version_row(db: object, notebook_id: str) -> Any: ...
     @staticmethod
     def chunks_by_section(db: object, notebook_id: str, source_id: str, section_path: str, limit: int) -> list[Any]: ...
+    # The section outline's bounded read: ``(id, section_path, navigation,
+    # source_chunked_at)`` in document order, at most ``max_scan`` rows, plus
+    # whether the source has more (``truncated``). Never reads the text.
+    @staticmethod
+    def source_outline_rows(db: object, notebook_id: str, source_id: str, max_scan: int) -> tuple[list[Any], bool]: ...
 
 
 @runtime_checkable
@@ -3439,6 +3444,19 @@ class RetrievalPort(Protocol):
     def federated_retrieve_elements(self, active_notebook_id: str, query: str, *, allowed_source_keys: Iterable[tuple[str, str]], limit: int = 8) -> list[RetrievedElement]: ...
     def ppr_retrieve(self, notebook_id: str, question: str) -> list[RetrievedChunk]: ...
     def exact_lookup_chunks(self, notebook_id: str, query: str) -> list[RetrievedChunk]: ...
+    # In-document navigation (reasoning's ``browse_sections`` / ``read_section``).
+    # ``notebook_id`` is the library that OWNS ``source_id`` (a mounted or peer
+    # library's own id); a source outside the run's ceiling answers exactly like
+    # one that does not exist: empty.  ``section_outline``: the source's
+    # ``(chunk_id, section_path, navigation)`` rows in document order (bounded by
+    # ``REASONING_SECTION_OUTLINE_MAX_ROWS``) and whether the scan was cut.
+    # ``section_chunk_similarities``: per chunk id of that source, the max cosine
+    # over the query texts' vectors ({} when vectors are unavailable).
+    # ``section_chunks``: those chunks read back in document order, navigation
+    # pages dropped, at most ``limit``, each scored against ``question``.
+    def section_outline(self, notebook_id: str, source_id: str) -> tuple[tuple[tuple[str, str, bool], ...], bool]: ...
+    def section_chunk_similarities(self, notebook_id: str, source_id: str, chunk_ids: Sequence[str], query_texts: Sequence[str]) -> dict[str, float]: ...
+    def section_chunks(self, notebook_id: str, source_id: str, chunk_ids: Sequence[str], limit: int, question: str) -> list[RetrievedChunk]: ...
     # The raw-passage retrieval pair (reasoning's ``search_chunks`` channel).
     # Spelled here as well as on ``AskCandidatePort`` because reasoning reaches
     # them through its own ``RetrievalPort`` handle, not through the ask

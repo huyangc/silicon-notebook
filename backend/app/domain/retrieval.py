@@ -160,6 +160,12 @@ class RetrievedChunk:
     # consumer that reads it (`is_graph_only_chunk` included). Reasoning's
     # synthesis-assembly reserve identifies its candidates by this flag.
     exact_lookup: bool = field(default=False, compare=False)
+    # Provenance marker: this chunk was read back as part of a whole document
+    # section (reasoning's ``read_section``, ``RetrievalPort.section_chunks``).
+    # Deliberately separate from ``exact_lookup``, which means "the user named
+    # it" and drives the exact reserve and outline synthesis's per-section
+    # injection; a section read only keeps its own synthesis reserve.
+    section_read: bool = field(default=False, compare=False)
     # ``chunks.navigation`` of the row this chunk was hydrated from (a table of
     # contents / list of figures page, ``app.services.navigation_chunks``).
     # Set only by the by-id hydrations whose caller drops it later

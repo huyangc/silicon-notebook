@@ -1522,6 +1522,35 @@ def is_exact_lookup_chunk(chunk: "RetrievedChunk") -> bool:
     return bool(getattr(chunk, "exact_lookup", False))
 
 
+def is_section_read_chunk(chunk: "RetrievedChunk") -> bool:
+    """Whether a passage was read back as part of a whole section
+    (reasoning's ``read_section``, ``RetrievalPort.section_chunks``)."""
+    return bool(getattr(chunk, "section_read", False))
+
+
+def promote_section_read_prefix(
+    ordered: Sequence["RetrievedChunk"], prefix: int, reserve: int,
+) -> ReasoningPassageOrder:
+    """Stably move up to ``reserve`` section-read passages to directly behind
+    the first ``prefix`` passages (the exact prefix).
+
+    A section-read passage already inside the prefix holds its seat there and
+    does not spend one of these. Current order is kept among the moved
+    passages (relevance order after ``interleave_by_lane``), and nothing is
+    dropped. ``reserve <= 0`` or no section-read passage moves nothing.
+    """
+    head, tail = list(ordered[:prefix]), list(ordered[prefix:])
+    seats = max(0, int(reserve))
+    picked: List["RetrievedChunk"] = []
+    rest: List["RetrievedChunk"] = []
+    for chunk in tail:
+        if len(picked) < seats and is_section_read_chunk(chunk):
+            picked.append(chunk)
+        else:
+            rest.append(chunk)
+    return ReasoningPassageOrder(head + picked + rest, len(head) + len(picked))
+
+
 class ReasoningPassageOrder(NamedTuple):
     """``reasoning_passage_order``'s result: the order, and its seat prefix.
 
@@ -1615,6 +1644,7 @@ def reasoning_passage_order(
     library_reserve: int,
     active_notebook_id: str,
     held: Sequence["RetrievedChunk"] = (),
+    section_read_reserve: int = 0,
 ) -> ReasoningPassageOrder:
     """The order a reasoning passage partition is rendered in, against a
     character budget, plus how many passages at its front hold a reserved
@@ -1639,6 +1669,12 @@ def reasoning_passage_order(
        exact passages move to the very front (seats split per library in a
        peer run), so exact passages keep the highest priority; running the
        interleave after it would scatter the promoted block again;
+       ``promote_section_read_prefix`` then moves at most
+       ``section_read_reserve`` passages a ``read_section`` action read back
+       whole (``section_read``) directly behind that block, so a section the
+       model chose to read survives the partition's character budget (they
+       stay at their relevance otherwise; outline synthesis never injects
+       them per section -- that is the ``exact_lookup`` marker's job);
     4. ``promote_library_prefix`` over ``library_floor_rules`` -- directly
        behind the exact prefix, at most ``active_reserve`` eligible active
        passages (``active_reserve_eligible``, first copy per text, current
@@ -1666,10 +1702,12 @@ def reasoning_passage_order(
     # passages: ``library_seats`` hands out min(reserve, candidates) seats.
     exact = min(max(0, int(exact_reserve)),
                 sum(1 for chunk in ordered if is_exact_lookup_chunk(chunk)))
+    ordered, prefix = promote_section_read_prefix(
+        ordered, exact, section_read_reserve)
     rules = library_floor_rules(
         [*held, *ordered], active_notebook_id,
         active_seats=active_reserve, library_seats_total=library_reserve)
-    return promote_library_prefix(ordered, exact, rules, held)
+    return promote_library_prefix(ordered, prefix, rules, held)
 
 
 def relevance_on_ppr_scale(chunk: "RetrievedChunk") -> bool:
@@ -1738,6 +1776,8 @@ def prefer_stronger_chunk_candidate(
     # on the same content key must keep its `exact_lookup` marker even when
     # the semantic representative is the one kept in place.
     chosen.exact_lookup = existing.exact_lookup or candidate.exact_lookup
+    # Same union for the section-read marker (``RetrievalPort.section_chunks``).
+    chosen.section_read = existing.section_read or candidate.section_read
     return chosen
 
 

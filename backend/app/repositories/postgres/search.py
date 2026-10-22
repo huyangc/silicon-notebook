@@ -881,6 +881,32 @@ def chunk_section_rows(
     ).fetchall()
 
 
+def source_outline_rows(
+    connection, notebook_id: str, source_id: str, max_scan: int
+):
+    """One source's ``(id, section_path, navigation, source_chunked_at)`` rows
+    in document order for the section outline -- never the text -- and whether
+    it has more.  ``source_chunked_at`` is the source's chunk generation (one
+    uncorrelated primary-key subquery, an InitPlan): the section-vector cache
+    keys on it.
+
+    Bounded before anything else: ``LIMIT max_scan + 1`` is the scan and the
+    extra row is only the truncation signal.  ``ordinal`` is document order
+    (the SQLite twin's ``rowid``) and ``idx_chunks_source_ordinal``
+    (``source_id, ordinal``) serves the ordered, limited walk without a sort.
+    """
+    if max_scan <= 0 or not notebook_id or not source_id:
+        return [], False
+    rows = connection.execute(
+        "SELECT id,section_path,navigation,"
+        "(SELECT chunked_at FROM sources WHERE id=%s) AS source_chunked_at "
+        "FROM chunks "
+        "WHERE source_id=%s AND notebook_id=%s ORDER BY ordinal LIMIT %s",
+        (source_id, source_id, notebook_id, int(max_scan) + 1),
+    ).fetchall()
+    return list(rows[:max_scan]), len(rows) > max_scan
+
+
 def chunk_candidate_documents(connection, ids):
     values = list(ids)
     if not values:

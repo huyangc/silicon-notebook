@@ -153,13 +153,28 @@ def test_consult_rows_drop_actions_the_run_does_not_offer(repo):
     full = frozenset(core_reflect_actions(
         kg_actions=True, chunk_search=True, enumeration=True,
         read_document=False, outline=False, consult_memory=True,
-        search_elements=True, ppr_retrieve=True))
+        search_elements=True, ppr_retrieve=True, section_nav=True))
     peer = frozenset(core_reflect_actions(
         kg_actions=True, chunk_search=True, enumeration=True,
         read_document=False, outline=False, consult_memory=True,
-        search_elements=False, ppr_retrieve=False))
+        search_elements=False, ppr_retrieve=False, section_nav=True))
     assert _actions(None) == _actions(full) == {"ppr", "retrieve"}
     assert _actions(peer) == {"retrieve"}
+
+
+def test_section_navigation_experience_rows_follow_the_section_gate():
+    """文档内导航的两个词:闸开才推荐,闸关不渲染(与其余动作同一把过滤)。"""
+    for word in ("browse_sections", "read_section"):
+        offered = frozenset(core_reflect_actions(
+            kg_actions=False, chunk_search=True, enumeration=False,
+            read_document=False, outline=False, consult_memory=False,
+            search_elements=True, ppr_retrieve=False, section_nav=True))
+        closed = frozenset(core_reflect_actions(
+            kg_actions=False, chunk_search=True, enumeration=False,
+            read_document=False, outline=False, consult_memory=False,
+            search_elements=True, ppr_retrieve=False, section_nav=False))
+        assert experience_action_offered(word, offered)
+        assert not experience_action_offered(word, closed)
 
 
 def test_the_enumerate_wildcard_is_offered_by_either_listing_action():

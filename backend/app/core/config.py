@@ -1082,6 +1082,70 @@ class Settings(BaseSettings):
     reasoning_max_document_reads: int = Field(
         4, ge=0, validation_alias="REASONING_MAX_DOCUMENT_READS"
     )
+    # 文档内导航(browse_sections / read_section)读单篇来源大纲时的扫描硬界:按文档序
+    # 至多读这么多个 chunk 的 (id, section_path, navigation),超出即截断并如实说明。
+    # 同一界也约束章节向量线索为该来源读取的 chunk 向量数。0 = 不读大纲(导航整体不提供)。
+    # 内存:每个来源的 run 内向量缓存 ≈ max_rows × 运行时维 × 4B(默认 4000×1024×4B
+    # ≈ 16MB,上界 20000 ≈ 80MB);整个 run 的缓存总量另有字节上限
+    # (``section_retrieval.SECTION_VECTOR_RUN_MEMO_MAX_BYTES``),超出只现算不缓存。
+    reasoning_section_outline_max_rows: int = Field(
+        4000, ge=0, le=20000, validation_alias="REASONING_SECTION_OUTLINE_MAX_ROWS"
+    )
+    # 章节向量的进程级缓存字节上限(跨 run 复用,LRU 淘汰)。键含来源的分块代次
+    # (sources.chunked_at)、大纲 id 指纹与查询维,改过分块即失效;只缓存每个大纲块都
+    # 有向量的来源。0 = 关闭(每个 run 现读)。默认 256MiB ≈ 16 个默认大小的来源。
+    reasoning_section_vector_cache_max_bytes: int = Field(
+        256 * 1024 * 1024, ge=0, le=16 * 1024 * 1024 * 1024,
+        validation_alias="REASONING_SECTION_VECTOR_CACHE_MAX_BYTES",
+    )
+    # 文档内导航的总闸与各项上限(reflect 动作 browse_sections / read_section 与
+    # 章节向量线索块)。总闸关、两个次数上限都为 0、或上面的大纲扫描界为 0 时,两个
+    # 动作与线索块整体不提供(prompt / schema / allowed_actions 三处同时消失,单点
+    # 判据 ``ReasoningRetriever.section_navigation_active``)。与 ``search_chunks``
+    # 同闸,overview 档不提供。
+    reasoning_section_nav_enabled: bool = Field(
+        True, validation_alias="REASONING_SECTION_NAV_ENABLED"
+    )
+    # 每 run 可以查看几次章节目录(browse_sections)。
+    reasoning_max_section_browses: int = Field(
+        3, ge=0, le=50, validation_alias="REASONING_MAX_SECTION_BROWSES"
+    )
+    # 每 run 可以按章节读取几次原文(read_section)。
+    reasoning_max_section_reads: int = Field(
+        3, ge=0, le=50, validation_alias="REASONING_MAX_SECTION_READS"
+    )
+    # 单次 read_section 最多读回本节的前多少段(chunk);超出时 trace 注明截取。
+    reasoning_section_read_max_chunks: int = Field(
+        12, ge=1, le=200, validation_alias="REASONING_SECTION_READ_MAX_CHUNKS"
+    )
+    # 合成时给按章节读回的段落(``RetrievedChunk.section_read``)保留的席位数,排在
+    # 精确查找席位之后(``retrieval.reasoning_passage_order``),保证读回的整节在
+    # ``chunk_context_chars`` 分区里存活。0 = 不保留。
+    reasoning_section_read_reserve: int = Field(
+        6, ge=0, le=100, validation_alias="REASONING_SECTION_READ_RESERVE"
+    )
+    # 单次 browse_sections 渲染给模型的目录字符上限。下界 200 等于
+    # ``section_outline.RENDER_MIN_CHARS``(低于它截断说明本身可能被截掉;
+    # 相等关系由 ``test_reasoning_section_nav`` 钉住——core 不 import services)。
+    reasoning_section_browse_max_chars: int = Field(
+        3000, ge=200, le=20000, validation_alias="REASONING_SECTION_BROWSE_MAX_CHARS"
+    )
+    # 章节线索块最多列几条(跨来源按名次合并后截取)。0 = 不出线索块。
+    reasoning_section_hint_max_entries: int = Field(
+        8, ge=0, le=50, validation_alias="REASONING_SECTION_HINT_MAX_ENTRIES"
+    )
+    # 章节线索块覆盖本 run 证据里首次出现的前几个来源。0 = 不出线索块。
+    reasoning_section_hint_sources: int = Field(
+        4, ge=0, le=20, validation_alias="REASONING_SECTION_HINT_SOURCES"
+    )
+    # 线索的相对阈值:只保留分数 ≥ 本 run 已取得 chunk 最高语义相似度 × 该比例的
+    # 章节(相对而不是绝对,换嵌入模型不失效)。默认 0.5 而不是更严:基准来自本 run
+    # **已覆盖**的高分块,而线索本来就只列**未覆盖**的节——未覆盖的目标节天然比已
+    # 覆盖的低分(端到端实测 0.8 会把首轮已有高分块时的目标节挡在外面);噪声由
+    # 名次上限 `REASONING_SECTION_HINT_MAX_ENTRIES` 控制,不靠这条阈值。
+    reasoning_section_hint_relative_floor: float = Field(
+        0.5, ge=0.0, le=1.0, validation_alias="REASONING_SECTION_HINT_RELATIVE_FLOOR"
+    )
     # Agentic Memory P4 (T5): reflect 动作 consult_memory 的总开关与 per-run 次数
     # 上限。仅在 deep 及以上档且 ``RETRIEVAL_EXPERIENCE_INJECT_ENABLED`` 也开着时
     # 才提供这个动作(见 ``reasoning_retrieval.consult_memory_active`` 的单点判定

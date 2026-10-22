@@ -183,6 +183,16 @@ NAVIGATION_REGISTRY = {
             ("calls", RC, "CandidateRetrievalService._restore_report_chunks",
              "drop_navigation_rows"),
         )),
+    # A section read back whole names its owning library (the ``notebook_id``
+    # the caller resolved the address under), and drops navigation pages both
+    # by the outline's marker and by the hydrated rows' own column.
+    ("services/section_retrieval.py", "section_chunks", "RetrievedChunk"): (
+        "navigation-filtered", (
+            ("calls", "services/section_retrieval.py", "section_chunks",
+             "drop_navigation_rows"),
+            ("calls", "services/section_retrieval.py", "section_chunks",
+             "navigation_filter_enabled"),
+        )),
     (RC, "CandidateRetrievalService._admitted_report_elements", "RetrievedElement"): (
         "navigation-filtered", (
             ("calls", RC, "CandidateRetrievalService._admitted_report_elements",

@@ -170,17 +170,19 @@ def _split_like_mineru(title: str) -> str:
     return title.replace("Voltage Transfer", "Voltage T | ransfer")
 
 
-def _toc_entries() -> list[tuple[str, str, int]]:
+def _toc_entries(sections=SECTIONS) -> list[tuple[str, str, int]]:
     entries = []
-    for index, (number, title, _body) in enumerate(SECTIONS):
+    for index, (number, title, _body) in enumerate(sections):
         entries.append((number, _split_like_mineru(title), 9 + index * 11))
     return entries
 
 
-def spec_elements(revision: str) -> list[tuple[str, str]]:
-    """``(element_type, text)`` in document order."""
+def spec_elements(revision: str, sections=SECTIONS) -> list[tuple[str, str]]:
+    """``(element_type, text)`` in document order. ``sections`` defaults to
+    :data:`SECTIONS`; the section-navigation end-to-end suite passes an
+    extended copy (same shape, more subsections)."""
     out: list[tuple[str, str]] = [("heading", "Contents")]
-    for number, title, page in _toc_entries():
+    for number, title, page in _toc_entries(sections):
         out.append(("paragraph", f"| {number} | {title} {'.' * 12} | {page} |"))
     out.append(("heading", "Tables"))
     for index, (_after, caption) in enumerate(TABLES):
@@ -188,8 +190,9 @@ def spec_elements(revision: str) -> list[tuple[str, str]]:
     out.append(("heading", "Figures"))
     for index, (_after, caption) in enumerate(FIGURES):
         out.append(("paragraph", f"{_split_like_mineru(caption)} {'.' * 12} {12 + index * 21}"))
-    for number, title, body in SECTIONS:
-        out.append(("heading", f"{number} {title}"))
+    for number, title, body in sections:
+        # an unnumbered heading (``number == ""``) is the bare title
+        out.append(("heading", f"{number} {title}".strip()))
         for paragraph in body:
             out.append(("paragraph", paragraph.replace("UCIe is", f"UCIe {revision} is")))
         for after, caption in FIGURES:
@@ -205,11 +208,12 @@ def spec_elements(revision: str) -> list[tuple[str, str]]:
     return out
 
 
-def seed_spec(repo, notebook_id: str, revision: str) -> str:
+def seed_spec(repo, notebook_id: str, revision: str, sections=SECTIONS,
+              source_id: str = "") -> str:
     """Write heading + paragraph source elements, then build and embed the
     chunks through the real path (``_chunk_and_embed_source``), which also
     computes the navigation flags."""
-    source_id = f"src-{uuid.uuid4().hex[:8]}"
+    source_id = source_id or f"src-{uuid.uuid4().hex[:8]}"
     now = _now()
     with repo._write() as db:
         db.execute(
@@ -219,7 +223,8 @@ def seed_spec(repo, notebook_id: str, revision: str) -> str:
             (source_id, notebook_id, f"UCIe Specification {revision}", "document",
              f"ucie-{revision}.pdf", f"/tmp/ucie-{revision}.pdf", 0, f"h-{source_id}",
              "", "", "extracted", now, now))
-        for index, (element_type, text) in enumerate(spec_elements(revision), 1):
+        for index, (element_type, text) in enumerate(
+                spec_elements(revision, sections), 1):
             db.execute(
                 "INSERT INTO source_elements (id,source_id,element_type,location_label,"
                 "text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
@@ -230,8 +235,9 @@ def seed_spec(repo, notebook_id: str, revision: str) -> str:
 
 
 # ----------------------------------------------------------------- fixture
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
+def make_spec_repo(tmp_path, monkeypatch):
+    """A scrubbed SQLite repository with the keyword embedder bound (a plain
+    function so the section-navigation end-to-end suite builds the same one)."""
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'nav-regression.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
@@ -244,6 +250,11 @@ def repo(tmp_path, monkeypatch):
     repository = SQLiteRepository(Settings(_env_file=None))
     bind_all_embedding_clients(repository, KeywordEmbedder())
     return repository
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    return make_spec_repo(tmp_path, monkeypatch)
 
 
 class Library:
