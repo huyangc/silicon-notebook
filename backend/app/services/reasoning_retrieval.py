@@ -5083,9 +5083,10 @@ class ReasoningRetriever:
                 section_spent: "frozenset[str]" = frozenset()):
         """规划后的轻量反思：判断材料是否齐备，或选择下一次检索。
 
-        ``section_spent`` = 本 run 已用完次数的文档内导航动作(``_reflect_round_kwargs``
-        只在非空时传)。用完的那个动作与上限为 0 的同样处理:不进 enum、没有说明、
-        不在白名单里(模型硬吐一个按「本 run 不提供」记 skip)。
+        ``section_spent`` = 本轮不提供的文档内导航动作(``_reflect_round_kwargs``
+        只在非空时传):本 run 已用完次数的,以及最后一轮的 ``browse_sections``(目录
+        只进下一轮 reflect,而下一轮不存在)。与上限为 0 的同样处理:不进 enum、没有
+        说明、不在白名单里(模型硬吐一个按「本 run 不提供」记 skip)。
 
         ``outline`` = 本 run 提供大纲便签动作(仅 exhaustive 档,见
         ``outline_wiring_active``)。默认 False,所以既有调用方(与关闭态)拿到的
@@ -7317,15 +7318,25 @@ class ReasoningRetriever:
             note += ";如果这是章节标题,请改用 browse_sections 或 read_section"
         return note
 
-    def _section_source_rows(self, state: "_ReasoningRunState") -> list:
-        """来源解析的候选:本 run 证据里出现过的来源(首次出现序)∪ 已列出的来源
-        清单行。属主库一律取真实 id(活动库 chunk 不带 notebook_id 时取
-        `state.notebook_id`),与地址簿「一个 run 一种口径」一致。零 I/O。"""
+    @staticmethod
+    def _section_evidence_sources(state: "_ReasoningRunState") -> "List[_SectionSource]":
+        """本 run 两条原文通道里出现过的来源,首次出现序:先原文段(`state.chunks`),
+        再原文元素(`state.elements`,search_elements 与首轮元素兜底)——候选摘要把
+        两者的来源标题都给模型看了,所以两者都能被导航动作按标题解析。属主库一律取
+        真实 id(活动库命中不带 notebook_id 时取 `state.notebook_id`),与地址簿
+        「一个 run 一种口径」一致。零 I/O。"""
         rows: Dict[str, _SectionSource] = {}
-        for chunk in state.chunks:
-            rows.setdefault(chunk.source_id, _SectionSource(
-                chunk.source_id, str(chunk.source_title or ""),
-                str(chunk.notebook_id or state.notebook_id)))
+        for hit in [*state.chunks, *state.elements]:
+            rows.setdefault(hit.source_id, _SectionSource(
+                hit.source_id, str(hit.source_title or ""),
+                str(getattr(hit, "notebook_id", "") or state.notebook_id)))
+        return list(rows.values())
+
+    def _section_source_rows(self, state: "_ReasoningRunState") -> list:
+        """来源解析的候选:本 run 证据里出现过的来源(原文段与原文元素,首次出现序)
+        ∪ 已列出的来源清单行。零 I/O。"""
+        rows: Dict[str, _SectionSource] = {
+            row.source_id: row for row in self._section_evidence_sources(state)}
         for listed in state.enumerations:
             if listed.collection != ENUMERATE_SOURCES_COLLECTION:
                 continue
@@ -7479,13 +7490,11 @@ class ReasoningRetriever:
     ) -> "Tuple[str, int, int]":
         """`_section_hint_block` 的计算体(异常由调用方失败开放):
         `(线索块文本, 参与排序的来源数, 列出的条数)`。"""
-        sources: Dict[tuple, str] = {}
-        for chunk in state.chunks:
-            key = (str(chunk.notebook_id or state.notebook_id), chunk.source_id)
-            if key not in sources:
-                sources[key] = _section_text(chunk.source_title or UNNAMED_SOURCE_LABEL)
-                if len(sources) >= max_sources:
-                    break
+        # 与来源解析同一份候选、同一个首次出现序(原文段,再原文元素)。
+        sources: Dict[tuple, str] = {
+            (row.notebook_id, row.source_id): _section_text(
+                row.source_title or UNNAMED_SOURCE_LABEL)
+            for row in self._section_evidence_sources(state)[:max_sources]}
         # 只用本 run 已经嵌入过的文本(问题 + 已执行的查询),且只取检索 run 的嵌入
         # 记忆里已有向量的那些(`embedded_query_texts`):线索块不新增嵌入调用;未执行
         # 的已确认方向还没有贡献过任何证据。
@@ -7609,6 +7618,12 @@ class ReasoningRetriever:
             # 纵深防御:闸关时动作不在 allowed_actions 里,正常路径到不了这里。
             self._section_skip(state, "section_nav_disabled",
                                f"跳过{verb}(未启用)", feed=False)
+            return
+        if state.steps >= state.max_steps:
+            # 纵深防御:最后一轮 browse 不在 allowed_actions 里。目录无人消费,
+            # 不扣次数、不进账目(账目同样只给下一轮看)。
+            self._section_skip(state, "section_browse_last_turn",
+                               f"跳过{verb}(已是最后一轮,目录无人消费)", feed=False)
             return
         cap = state.action_policy.max_section_browses
         if state.section_browses >= cap:
@@ -9188,6 +9203,11 @@ class ReasoningRetriever:
         if state.consult_memory_flag:
             reflect_kwargs["consult_memory"] = True
         section_spent = self._section_spent(state)
+        if state.steps >= state.max_steps:
+            # 最后一轮:目录只进下一轮 reflect 摘要、不是证据,而下一轮不存在
+            # (与插件「需要再一轮」的 nudge 判据、consult_memory 的末轮 skip 同理)。
+            # read_section 照常提供:它读回的是证据,收尾合成用得上。
+            section_spent = section_spent | {BROWSE_SECTIONS_ACTION}
         if section_spent:
             # 有才传:没用完任何一个时调用形状与接入前相同。
             reflect_kwargs["section_spent"] = section_spent
