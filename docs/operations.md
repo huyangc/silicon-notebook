@@ -84,7 +84,7 @@ Every other command that opens the database is a *schema guest*: `batch` (every 
 including `backfill-images`), the `maintain`, `kg` and `scale` commands (including `maintain
 delete-leftovers` and `maintain promotion-targets`, which open the database directly), `maintain
 selected-source`, `maintain knowhow` with `--use-llm`/`--apply`, `maintain global-attribution`,
-`eval replay`, the reflect rig's `search`/`report`, and the developer eval helpers. A guest
+`maintain navigation`, `eval replay`, the reflect rig's `search`/`report`, and the developer eval helpers. A guest
 never migrates and never seeds, so it never rewrites the admin password, whatever
 `SILICON_NOTEBOOK_ADMIN_PASSWORD` the operator's shell carries. Before it opens anything it
 checks, on one bare connection, that the database is at exactly this build's schema (SQLite
@@ -321,6 +321,81 @@ global jobs site-wide, ~8 KB payloads; the panel read's extra time over not coun
 That is why the service backfills on its own after readiness; once it has, the panel's count reads the
 attribution table only. The rows the completion path writes add a negligible amount to the job's final
 write transaction (PostgreSQL about +0.05 ms; within noise on SQLite).
+
+### Navigation-page marker backfill (`scripts/backfill_navigation_chunks.py`)
+
+From SQLite v101 / PostgreSQL 0082 on, chunk construction judges which chunks are navigation pages — a
+table of contents, a list of figures or tables — from the document's own structure only: a chunk whose
+text is mostly the titles of *other* parts of the same source, in document order, covering a whole stretch
+of them, outside the part they belong to (`app/services/navigation_chunks.py`; no label words, no TOC-line
+patterns; the five conditions and their thresholds are in
+[Navigation-page detection](./product-and-api.md#navigation-page-detection)). Where the document's
+numbering or breadcrumbs show its hierarchy, a chapter's own overview paragraph or a summary table of its
+own subsections is chapter content and is not flagged; a document with neither gives no such signal, and
+such a paragraph or table is judged by the other conditions alone. The
+build writes `chunks.navigation = 1` for them and, in the same transaction as the chunks, sets
+`sources.navigation_scanned_at` to the same instant as `chunked_at`: the stamp is a generation token, and a
+source is judged exactly when the two are equal. Retrieval leaves navigation chunks out of ranking. A source
+with more headings than the detection cap is not judged (its chunks stay 0) and the build or pass records
+the content-free event `navigation_detection_skipped` (`notebook_id`, `source_id`, `stage`,
+`reason=too_many_titles`, `title_count`); a detector error never fails a build — its chunks are written
+unflagged and unjudged and `navigation_detection_failed` (`notebook_id`, `source_id`, `stage`,
+`error_class`) is recorded. The migration does **not** backfill: sources chunked before the upgrade (or
+while `NAVIGATION_DETECTION_ENABLED=false`) carry a NULL stamp, or one that differs from their `chunked_at`,
+and rank as before until judged.
+
+**Automatic backfill**: on every start, once the service is ready (beside the global Ask attribution
+backfill; it never delays readiness), the startup log writes `navigation backfill: N source(s) to judge`;
+when N is above 0 it starts a pass in the light maintenance pool (job name `navigation-backfill`). Each job
+judges one page of pending sources and submits the next page as a new job, so the pass never holds a
+light-pool worker for long; the last job writes `navigation backfill: judged=… sources_changed=…
+chunks_changed=… busy=… abandoned=… failed=… pages=… pending_after=…` (counts and an exception class only).
+Per source it takes the ingestion service's per-source chunk lock without waiting, reads the source's
+headings and chunks, judges, and writes only the rows whose flag changed plus the stamp in one
+compare-and-set transaction that commits only while the source's `chunked_at` is unchanged; otherwise the
+source is abandoned and stays pending. On PostgreSQL that transaction runs under a lock timeout below
+`deadlock_timeout`, so when it meets a source deletion (which locks in the opposite order) the backfill is
+always the side that gives way. A source whose lock is held is *busy*: the lock is held by a parse or
+re-chunk of that source (which stamps it itself), but also by the checkup's vector backfill, the source
+catalog's write barrier and the MCP source probes, which do not — busy sources get one bounded retry
+round at the end of the pass, and whatever is still busy then waits for the next start. Each notebook whose
+chunks changed is marked dirty once per page. Mirrored notebooks (`notebooks.sync_origin` set) are never
+touched (below). The pass does nothing while detection is switched off, and stops at the next source once
+an offline batch scope is active. Normally nothing has to be done by hand after an upgrade.
+
+**Preview, manual re-run, rollback** (the scope is explicit: `--notebook-id <id>` or `--all-notebooks`):
+
+```bash
+PYTHONPATH=backend python scripts/backfill_navigation_chunks.py --all-notebooks --dry-run                  # read-only: per-source chunks / flagged / changed
+PYTHONPATH=backend python scripts/backfill_navigation_chunks.py --notebook-id nb-… --dry-run --show-sections # also lists the flagged chunks' section labels
+PYTHONPATH=backend python scripts/backfill_navigation_chunks.py --all-notebooks --confirm-service-stopped    # judge what is pending
+PYTHONPATH=backend python scripts/backfill_navigation_chunks.py --all-notebooks --rescan --confirm-service-stopped  # re-judge every chunked source
+PYTHONPATH=backend python scripts/backfill_navigation_chunks.py --all-notebooks --clear --confirm-service-stopped   # data-level rollback
+```
+
+- The command is a [schema guest](#schema-ownership-only-the-service-and-database-migrate-migrate) (`maintain
+  navigation` in the unified CLI): no migration, no seed; a database not at this build's schema is refused with
+  exit status 3. Writes use the same compare-and-set as the service pass and need no in-process lock; on
+  PostgreSQL a write (re-run or `--clear`) requires `--confirm-service-stopped`, a dry run does not.
+- `--clear` sets every flag in scope back to 0 and every stamp back to NULL in one transaction (it scans
+  `chunks`; on PostgreSQL under the maintenance statement-timeout floor) and marks the affected notebooks
+  dirty. With detection still on, the next start
+  judges those sources again: to keep them cleared, set `NAVIGATION_DETECTION_ENABLED=false` first. To stop a
+  misjudgement at once without writing anything, switch the read side off with
+  `RETRIEVAL_NAVIGATION_FILTER_ENABLED=false`. A write while detection is off is refused (exit status 2); a
+  dry run is allowed.
+- Mirrored notebooks (incremental-sync targets) carry the source environment's flags and stamps: neither the
+  pass nor the CLI (including `--clear`) writes them. Judge or clear them on the source environment and let the
+  next import bring the result; on the target itself the only lever is the read-side switch above.
+- Exit status: 0 done; 1 some sources were not judged (generation changed under the pass, the write gave way
+  to a lock, the source chunk lock still held after the retry round, or a source failed) — re-run; 2 usage
+  error or the database cannot be reached; 3 the database is not at this build's schema.
+- Progress: what is left is
+  `SELECT COUNT(*) FROM sources s WHERE s.chunked_at IS NOT NULL AND (s.navigation_scanned_at IS NULL OR
+  s.navigation_scanned_at IS DISTINCT FROM s.chunked_at) AND s.notebook_id NOT IN (SELECT id FROM notebooks
+  WHERE sync_origin <> '')` (SQLite: `IS NOT` for `IS DISTINCT FROM`). A backfill or `--clear` rewrites
+  `chunks` rows: with incremental sync enabled, the next export carries them and the target rebuilds its
+  derived indexes on import ([incremental sync](./incremental-sync-design.md)).
 
 ## Ownerless Memory sources
 

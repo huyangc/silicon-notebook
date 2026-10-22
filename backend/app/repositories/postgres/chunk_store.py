@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 from typing import Iterable, Mapping, Sequence
 
-from app.repositories.chunk_elements import reverse_rows_for_writes
-from app.repositories.ports import ChunkWrite
+import psycopg
+
+from app.repositories.chunk_elements import decode_element_ids, reverse_rows_for_writes
+from app.repositories.navigation_version import navigation_bump
+from app.repositories.ports import CHUNKED_AT_UNCHECKED, ChunkWrite
 from app.repositories.postgres._store_utils import (
     GRAPH_FETCH_BATCH,
     TimestampInput,
@@ -15,6 +18,7 @@ from app.repositories.postgres._store_utils import (
     keyset_pages,
     normalize_timestamp,
     placeholders,
+    raise_statement_timeout_floor,
 )
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.source_ceiling import ceiling_param, normalise_ceiling
@@ -40,6 +44,26 @@ from app.domain.indexing_pipeline import IndexingPipelineStalePlanError
 # one another, and a fixed batch keeps the statement shape stable no matter how
 # many evidence elements one query hit.
 CHUNK_ELEMENT_LOOKUP_BATCH = 500
+
+# The navigation backfill and its CLI never write a mirrored notebook
+# (``notebooks.sync_origin`` non-empty, docs/incremental-sync-design.md §5): its
+# chunks and stamps are the source environment's and arrive with every import.
+_NOT_MIRRORED_NOTEBOOK = (
+    "notebook_id NOT IN (SELECT id FROM notebooks WHERE sync_origin <> '')"
+)
+
+
+#: ``lock_timeout`` of one navigation backfill write (``apply_navigation_flags``).
+#: Must stay below PostgreSQL's ``deadlock_timeout`` (1 s by default) so the
+#: backfill always gives up before deadlock detection could pick a source
+#: deletion as the victim; 200 ms is far above an uncontended row update.
+NAVIGATION_BACKFILL_LOCK_TIMEOUT_MS = 200
+
+
+class _ChunkGenerationChanged(Exception):
+    """Rolls a compare-and-set chunk write back: the source's ``chunked_at`` is
+    no longer the token the caller read."""
+
 
 #: The refusal probe of the two write methods: a primary-key point lookup.
 MEMORY_PROBE_SQL = "SELECT 1 FROM sources WHERE id=%s AND " + memory_source_type_predicate()
@@ -272,8 +296,22 @@ class ChunkStore:
         *,
         created_at: TimestampInput,
         mark_chunked_at: TimestampInput | None = None,
-    ) -> None:
+        navigation_scanned_at: TimestampInput | None = None,
+        expected_chunked_at: object = CHUNKED_AT_UNCHECKED,
+    ) -> bool:
+        """See the SQLite twin. The compare-and-set is the WHERE of the closing
+        ``UPDATE sources``: under READ COMMITTED that statement waits for a
+        concurrent writer of the row and re-evaluates the predicate on the
+        committed version, and it comes after the chunk rows, the same
+        chunks-then-sources lock order every other chunk writer (publish,
+        build) takes."""
+        if expected_chunked_at is not CHUNKED_AT_UNCHECKED and mark_chunked_at is None:
+            raise ValueError("expected_chunked_at requires mark_chunked_at")
         created_at = normalize_timestamp(created_at)
+        scanned_at = (
+            None if navigation_scanned_at is None
+            else normalize_timestamp(navigation_scanned_at)
+        )
         rows = [
             (
                 chunk.id,
@@ -283,34 +321,68 @@ class ChunkStore:
                 chunk.section_path,
                 jsonb(list(chunk.element_ids)),
                 created_at,
+                int(bool(chunk.navigation)),
             )
             for chunk in chunks
         ]
-        with self.database.write() as connection:
-            # Probe on the write transaction's own connection, before the DELETE,
-            # so a refused write leaves whatever the source already owns untouched.
-            self._refuse_memory_source(connection, source_id)
-            connection.execute("DELETE FROM chunks WHERE source_id=%s", (source_id,))
-            execute_many(
-                connection,
-                "INSERT INTO chunks"
-                "(id,notebook_id,source_id,text,section_path,element_ids,created_at) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                rows,
-            )
-            self._insert_fts_rows(
-                connection, [(row[0], row[1], row[3]) for row in rows]
-            )
-            # element -> chunk reverse rows, same transaction as the chunk rows
-            # they describe. The old rows are already gone: chunk_elements has
-            # ``REFERENCES chunks(id) ON DELETE CASCADE``, so the DELETE above
-            # took them with it.
-            self._insert_chunk_element_rows(connection, notebook_id, chunks)
-            if mark_chunked_at is not None:
-                connection.execute(
-                    "UPDATE sources SET chunked_at=%s WHERE id=%s",
-                    (normalize_timestamp(mark_chunked_at), source_id),
+        try:
+            with self.database.write() as connection:
+                # Probe on the write transaction's own connection, before the DELETE,
+                # so a refused write leaves whatever the source already owns untouched.
+                self._refuse_memory_source(connection, source_id)
+                # The set of flagged chunks before and after: a change bumps
+                # sources.navigation_version in this transaction (the snapshot
+                # cache's flag-change counter).
+                bump = navigation_bump(
+                    connection.execute(
+                        "SELECT id FROM chunks WHERE source_id=%s AND navigation<>0",
+                        (source_id,)).fetchall(),
+                    (c.id for c in chunks if c.navigation),
                 )
+                connection.execute("DELETE FROM chunks WHERE source_id=%s", (source_id,))
+                execute_many(
+                    connection,
+                    "INSERT INTO chunks"
+                    "(id,notebook_id,source_id,text,section_path,element_ids,created_at,"
+                    "navigation) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                    rows,
+                )
+                self._insert_fts_rows(
+                    connection, [(row[0], row[1], row[3]) for row in rows]
+                )
+                # element -> chunk reverse rows, same transaction as the chunk rows
+                # they describe. The old rows are already gone: chunk_elements has
+                # ``REFERENCES chunks(id) ON DELETE CASCADE``, so the DELETE above
+                # took them with it.
+                self._insert_chunk_element_rows(connection, notebook_id, chunks)
+                if mark_chunked_at is None and bump:
+                    connection.execute(
+                        "UPDATE sources SET navigation_version=navigation_version+1 "
+                        "WHERE id=%s", (source_id,),
+                    )
+                elif mark_chunked_at is not None and expected_chunked_at is CHUNKED_AT_UNCHECKED:
+                    connection.execute(
+                        "UPDATE sources SET chunked_at=%s, navigation_scanned_at=%s, "
+                        "navigation_version=navigation_version+%s WHERE id=%s",
+                        (normalize_timestamp(mark_chunked_at), scanned_at, bump, source_id),
+                    )
+                elif mark_chunked_at is not None:
+                    changed = connection.execute(
+                        "UPDATE sources SET chunked_at=%s, navigation_scanned_at=%s, "
+                        "navigation_version=navigation_version+%s "
+                        "WHERE id=%s AND chunked_at IS NOT DISTINCT FROM "
+                        "CAST(%s AS timestamptz)",
+                        (normalize_timestamp(mark_chunked_at), scanned_at, bump, source_id,
+                         expected_chunked_at),
+                    ).rowcount
+                    if changed != 1:
+                        # Roll the whole write back (DELETE/INSERT included): the
+                        # caller re-reads under its lock.
+                        raise _ChunkGenerationChanged(source_id)
+        except _ChunkGenerationChanged:
+            return False
+        return True
 
     @staticmethod
     def _refuse_memory_source(connection, source_id: str) -> None:
@@ -370,9 +442,18 @@ class ChunkStore:
 
     @staticmethod
     def chunks_for_element_ids(
-        connection, notebook_id: str, element_ids: Sequence[str]
+        connection, notebook_id: str, element_ids: Sequence[str], *,
+        navigation_source_id: str | None = None,
     ):
         """``(element_id, chunk_id)`` rows for these elements, in chunk order.
+
+        ``navigation_source_id`` switches to the navigation read the element
+        arm makes instead: the navigation-flagged chunks of that ONE source
+        whose own ``element_ids`` hold any of these elements, as
+        ``{element_id, chunk_id, navigation}`` rows. It reads the flagged
+        chunks forward (the source of truth the reverse index is derived
+        from), so it holds in a notebook whose ``chunk_elements`` is not
+        backfilled; one statement per source, no list bound.
 
         The fast half of the element -> chunk reverse lookup: an indexed seek
         on the ``(notebook_id, element_id, chunk_id)`` primary key instead of a
@@ -381,6 +462,19 @@ class ChunkStore:
         ``ORDER BY c.ordinal`` is the PostgreSQL counterpart of SQLite's
         ``rowid`` insertion order (see POSTGRES_ROWID_ORDINAL_TABLES)."""
         ids = list(dict.fromkeys(e for e in element_ids if e))
+        if navigation_source_id is not None:
+            wanted = set(ids)
+            flagged = connection.execute(
+                "SELECT id, element_ids FROM chunks WHERE source_id=%s "
+                "AND notebook_id=%s AND navigation<>0 ORDER BY ordinal",
+                (navigation_source_id, notebook_id),
+            ).fetchall() if wanted else []
+            return [
+                {"element_id": element_id, "chunk_id": row["id"], "navigation": True}
+                for row in flagged
+                for element_id in decode_element_ids(row["element_ids"])
+                if element_id in wanted
+            ]
         rows: list = []
         for offset in range(0, len(ids), CHUNK_ELEMENT_LOOKUP_BATCH):
             batch = ids[offset : offset + CHUNK_ELEMENT_LOOKUP_BATCH]
@@ -426,6 +520,7 @@ class ChunkStore:
                 row.section_path,
                 jsonb(list(row.element_ids)),
                 created_at,
+                int(bool(row.navigation)),
             )
             for row in rows
         ]
@@ -437,13 +532,20 @@ class ChunkStore:
         execute_many(
             connection,
             "INSERT INTO chunks"
-            "(id,notebook_id,source_id,text,section_path,element_ids,created_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            "(id,notebook_id,source_id,text,section_path,element_ids,created_at,"
+            "navigation) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
             values,
         )
         self._insert_fts_rows(
             connection, [(row[0], row[1], row[3]) for row in values]
         )
+        if any(row.navigation for row in rows):
+            # A flagged chunk joins the source's flagged set (the knowhow
+            # projector, the only caller, writes none; kept exact anyway).
+            connection.execute(
+                "UPDATE sources SET navigation_version=navigation_version+1 "
+                "WHERE id=%s", (source_id,))
         # The projector's precise ``delete_by_ids`` already dropped the prior
         # rows for these chunks via the chunks cascade; add the new ones in the
         # same transaction so the reverse index never lags its chunk rows.
@@ -456,6 +558,172 @@ class ChunkStore:
                 (source_id,),
             ).fetchall()
         return [{"id": row["id"], "text": row["text"]} for row in rows]
+
+    # ------------------------------------------- navigation-page marker
+    # (SQLite v101 / PostgreSQL 0082). See the SQLite twin for the contract
+    # (``navigation_scanned_at`` is a generation token equal to ``chunked_at``
+    # once judged); the statements are the same shape, document order is
+    # ``ordinal``.
+
+    def chunk_generation(self, source_id: str) -> object:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT chunked_at FROM sources WHERE id=%s", (source_id,)
+            ).fetchone()
+        return None if row is None else row["chunked_at"]
+
+    def source_heading_elements(self, source_id: str) -> list[dict]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT id,element_type,text,metadata FROM source_elements "
+                "WHERE source_id=%s AND element_type='heading' "
+                "ORDER BY id COLLATE \"C\"",
+                (source_id,),
+            ).fetchall()
+        output = []
+        for row in rows:
+            metadata = json_value(row["metadata"], {})
+            section_path = (
+                str(metadata.get("section_path") or "")
+                if isinstance(metadata, dict) else ""
+            )
+            output.append({"id": row["id"], "element_type": row["element_type"],
+                           "text": row["text"], "section_path": section_path})
+        return output
+
+    def navigation_scan_page(
+        self,
+        *,
+        after_source_id: str,
+        limit: int,
+        notebook_id: str | None = None,
+        pending_only: bool = True,
+    ) -> list[tuple[str, str]]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT id, notebook_id FROM sources "
+                "WHERE id > %s AND chunked_at IS NOT NULL AND "
+                + _NOT_MIRRORED_NOTEBOOK + " "
+                "AND (CAST(%s AS text) IS NULL OR notebook_id = %s) "
+                "AND (NOT %s OR navigation_scanned_at IS NULL "
+                "OR navigation_scanned_at IS DISTINCT FROM chunked_at) "
+                "ORDER BY id LIMIT %s",
+                (after_source_id, notebook_id, notebook_id, bool(pending_only),
+                 int(limit)),
+            ).fetchall()
+        return [(row["id"], row["notebook_id"]) for row in rows]
+
+    def navigation_pending_count(self, *, notebook_id: str | None = None) -> int:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS n FROM sources WHERE chunked_at IS NOT NULL AND "
+                + _NOT_MIRRORED_NOTEBOOK + " "
+                "AND (CAST(%s AS text) IS NULL OR notebook_id = %s) "
+                "AND (navigation_scanned_at IS NULL "
+                "OR navigation_scanned_at IS DISTINCT FROM chunked_at)",
+                (notebook_id, notebook_id),
+            ).fetchone()
+        return int(row["n"])
+
+    def navigation_scan_rows(self, source_id: str) -> tuple[object, list[dict]]:
+        with self.database.connect() as connection:
+            token_row = connection.execute(
+                "SELECT chunked_at FROM sources WHERE id=%s", (source_id,)
+            ).fetchone()
+            rows = connection.execute(
+                "SELECT id, section_path, text, navigation FROM chunks "
+                "WHERE source_id=%s ORDER BY ordinal",
+                (source_id,),
+            ).fetchall()
+        token = None if token_row is None else token_row["chunked_at"]
+        return token, [
+            {"id": row["id"], "section_path": row["section_path"] or "",
+             "text": row["text"] or "", "navigation": bool(row["navigation"])}
+            for row in rows
+        ]
+
+    def apply_navigation_flags(
+        self,
+        source_id: str,
+        *,
+        expected_chunked_at: object,
+        changes: Sequence[tuple[str, bool]],
+    ) -> bool:
+        """Lock order: the chunk rows first, then the compare-and-set
+        ``UPDATE sources``. That is the OPPOSITE of a source deletion
+        (``DELETE FROM sources`` locks the source row, then cascades to its
+        chunks), so the two can wait on each other. The transaction therefore
+        runs under ``SET LOCAL lock_timeout`` =
+        ``NAVIGATION_BACKFILL_LOCK_TIMEOUT_MS``, below PostgreSQL's
+        ``deadlock_timeout`` (1 s by default): whenever it would wait that long
+        it gives up before deadlock detection runs, so the backfill -- never
+        the deletion -- is the side that yields. A lock timeout rolls the
+        whole judgement back and returns False (the pass counts the source
+        as abandoned; it stays pending)."""
+        try:
+            with self.database.write() as connection:
+                connection.execute(
+                    f"SET LOCAL lock_timeout = '{int(NAVIGATION_BACKFILL_LOCK_TIMEOUT_MS)}ms'"
+                )
+                execute_many(
+                    connection,
+                    "UPDATE chunks SET navigation=%s WHERE id=%s AND source_id=%s",
+                    [(int(bool(flag)), chunk_id, source_id) for chunk_id, flag in changes],
+                )
+                # ``changes`` holds only rows whose flag moved, so a non-empty
+                # write is a flagged-set change (sources.navigation_version).
+                changed = connection.execute(
+                    "UPDATE sources SET navigation_scanned_at=chunked_at, "
+                    "navigation_version=navigation_version+%s "
+                    "WHERE id=%s AND chunked_at IS NOT DISTINCT FROM "
+                    "CAST(%s AS timestamptz)",
+                    (1 if changes else 0, source_id, expected_chunked_at),
+                ).rowcount
+                if expected_chunked_at is None or changed != 1:
+                    raise _ChunkGenerationChanged(source_id)
+        except (_ChunkGenerationChanged, psycopg.errors.LockNotAvailable):
+            return False
+        return True
+
+    def clear_navigation_flags(
+        self, *, notebook_id: str | None = None
+    ) -> tuple[int, int, list[str]]:
+        """See the SQLite twin. A whole-site ``--clear`` is an offline
+        maintenance write that scans chunks (no index serves the flag), so it
+        runs under the maintenance statement-timeout floor
+        (``raise_statement_timeout_floor``, the ``maintenance.py`` precedent)."""
+        with self.database.write() as connection:
+            raise_statement_timeout_floor(connection)
+            notebooks = [
+                row["notebook_id"] for row in connection.execute(
+                    "SELECT DISTINCT notebook_id FROM chunks WHERE navigation <> 0 AND "
+                    + _NOT_MIRRORED_NOTEBOOK + " "
+                    "AND (CAST(%s AS text) IS NULL OR notebook_id = %s) "
+                    "ORDER BY notebook_id",
+                    (notebook_id, notebook_id),
+                ).fetchall()
+            ]
+            # One statement, chunks first and then the sources whose flagged
+            # set it emptied (the order every chunk writer takes); no list is
+            # bound.
+            cleared = int(connection.execute(
+                "WITH cleared AS (UPDATE chunks SET navigation=0 WHERE navigation <> 0 AND "
+                + _NOT_MIRRORED_NOTEBOOK + " "
+                "AND (CAST(%s AS text) IS NULL OR notebook_id = %s) "
+                "RETURNING source_id), "
+                "bumped AS (UPDATE sources SET navigation_version=navigation_version+1 "
+                "WHERE id IN (SELECT source_id FROM cleared) RETURNING id) "
+                "SELECT (SELECT COUNT(*) FROM cleared) AS cleared",
+                (notebook_id, notebook_id),
+            ).fetchone()["cleared"])
+            reset = connection.execute(
+                "UPDATE sources SET navigation_scanned_at=NULL "
+                "WHERE navigation_scanned_at IS NOT NULL AND "
+                + _NOT_MIRRORED_NOTEBOOK + " "
+                "AND (CAST(%s AS text) IS NULL OR notebook_id = %s)",
+                (notebook_id, notebook_id),
+            ).rowcount
+        return int(cleared), int(reset), notebooks
 
     @staticmethod
     def language_probe_rows(connection, notebook_id: str):
@@ -470,7 +738,8 @@ class ChunkStore:
     def retrieval_rows(connection, notebook_id: str):
         rows = connection.execute(
             "SELECT c.id,c.source_id,c.text,c.section_path,c.element_ids,"
-            "s.title AS source_title FROM chunks c JOIN sources s ON s.id=c.source_id "
+            "c.navigation,s.title AS source_title "
+            "FROM chunks c JOIN sources s ON s.id=c.source_id "
             "WHERE c.notebook_id=%s ORDER BY c.ordinal",
             (notebook_id,),
         ).fetchall()
@@ -489,7 +758,8 @@ class ChunkStore:
             return []
         rows = connection.execute(
             "SELECT c.id,c.source_id,c.text,c.section_path,c.element_ids,"
-            "s.title AS source_title FROM chunks c JOIN sources s ON s.id=c.source_id "
+            "c.navigation,s.title AS source_title "
+            "FROM chunks c JOIN sources s ON s.id=c.source_id "
             f"WHERE c.id IN ({placeholders(ids)}) ORDER BY c.ordinal",
             ids,
         ).fetchall()
@@ -521,7 +791,7 @@ class ChunkStore:
             return []
         sql = (
             "SELECT c.id,c.source_id,c.text,c.section_path,c.element_ids,"
-            "c.notebook_id AS chunk_notebook_id,s.title AS source_title "
+            "c.navigation,c.notebook_id AS chunk_notebook_id,s.title AS source_title "
             "FROM chunks c JOIN sources s ON s.id=c.source_id "
             f"WHERE c.id IN ({placeholders(ids)})"
         )
@@ -573,7 +843,7 @@ class ChunkStore:
         rows = execute_bound(
             connection,
             "SELECT c.id,c.source_id,c.text,c.section_path,c.element_ids,"
-            "c.notebook_id AS chunk_notebook_id,s.title AS source_title "
+            "c.navigation,c.notebook_id AS chunk_notebook_id,s.title AS source_title "
             "FROM chunks c JOIN sources s "
             "ON s.id=c.source_id AND s.notebook_id=c.notebook_id "
             f"WHERE c.notebook_id=%s AND c.id IN ({placeholders(ids)})"
@@ -659,7 +929,7 @@ class ChunkStore:
         if not ids:
             return []
         rows = connection.execute(
-            "SELECT id,source_id,text,section_path,element_ids FROM chunks "
+            "SELECT id,source_id,text,section_path,element_ids,navigation FROM chunks "
             f"WHERE id IN ({placeholders(ids)}) ORDER BY ordinal",
             ids,
         ).fetchall()

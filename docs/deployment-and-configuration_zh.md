@@ -436,6 +436,13 @@ PgBouncer 的 transaction pooling 会把后续语句挪到别的后端连接，�
 就拒绝（退出码 3）。不涉及任何配置项。细节见
 [运维文档](./operations_zh.md#全局问答归因回填scriptsbackfill_global_ask_attributionpy)。
 
+升级到 SQLite v101 / PostgreSQL 0082 同样无需手动操作：服务就绪后会用一次轻量后台回填判定已分块来源里哪些 chunk
+是导航页（目录、图表清单）并打上标记（启动日志写出待判来源数）；新建的 chunk 在建块时即判定。写侧开关是
+`NAVIGATION_DETECTION_ENABLED`（默认 `true`），读侧开关是 `RETRIEVAL_NAVIGATION_FILTER_ENABLED`（默认 `true`；
+`false` 时检索不再剔除被标记的 chunk，无需写库）。`PYTHONPATH=backend python scripts/backfill_navigation_chunks.py
+--all-notebooks --dry-run`（统一入口 `maintain navigation`）可预览判定结果；重跑与 `--clear` 见
+[运维文档](./operations_zh.md#导航页标记回填scriptsbackfill_navigation_chunkspy)。
+
 改 URL 不会搬运既有行。全新目标可停服务后改 URL、启动并验证空库/bootstrap 状态。
 对于存量 SQLite，已交付的 forward-shadow CLI 可在 SQLite 继续 active 时建立并持续维护
 PostgreSQL 影子库。它要求 PostgreSQL 16、专用且可恢复的目标库、已验证的源/目标备份、
@@ -1153,6 +1160,8 @@ RETRIEVAL_EXPERIENCE_TRIGGER # 全局分区链路蒸馏一批前需累计的已�
 RETRIEVAL_EXPERIENCE_NOTEBOOK_TRIGGER # 笔记本分区链路蒸馏一批前，单个笔记本需累计的已完成 reasoning 提问数（2026-09-22 新增；默认 10；ge=1）
 USER_SEARCH_PROFILE_ENABLED  # 每用户检索/回答风格偏好文档总闸（Agentic Memory P3 B 线）：后台归纳、Ask 规划/答案注入、`PATCH /me/search-profile` 可写性都由它决定（默认 true；关闭后注入/写入两侧处处逐字回到接入前——不归纳、不注入、`PATCH` 409——但 `GET /me` 仍照常返回该行上已存在的取值，不会伪造成 `search_profile: null`）
 USER_SEARCH_PROFILE_TRIGGER  # 确定性、零 LLM 的 `answer_language` 归纳任务再次运行前，该用户需累计的已完成提问数（默认 20；ge=1）
+NAVIGATION_DETECTION_ENABLED # 导航页标记的写侧开关（SQLite v101 / PostgreSQL 0082）：建块与服务就绪后的后台回填是否凭文档自身的标题结构判定目录、图表清单类 chunk 并写 chunks.navigation（默认 true）。false：建块一律写 0、不置 sources.navigation_scanned_at，后台回填与手动重跑都不做事，之后再打开，下次启动会补判这些来源；它不清除已写入的标记（清除用 scripts/backfill_navigation_chunks.py --clear）
+RETRIEVAL_NAVIGATION_FILTER_ENABLED # 导航页标记的读侧开关：检索的各产出点（chunk 打分、PPR、知识图谱来源段落、精确标识符通道、选定来源图谱通道、扩展提出的 chunk，以及剔除被标记 chunk 所列全部元素的元素通道）是否剔除 chunks.navigation=1 的 chunk（默认 true）。false：被标记的 chunk 及其元素立即重新参与检索，回到有标记之前的结果，已存的标记不动——用于误判时止血；标记本身由 NAVIGATION_DETECTION_ENABLED 与 scripts/backfill_navigation_chunks.py --clear 管理
 CHUNK_RECALL                 # chunk 大召回数（默认 200；mix 候选池 / 无 rerank 时 MMR 候选）
 CHUNK_FEDERATION_ENABLED     # 联邦 chunk 召回：挂载参考库自己的原文段落是否与当前笔记本的段落一起进入 chunk 检索（默认 true）。false 是唯一的回退开关：参与集收成当前笔记本一本，联邦模块短路回联邦化之前的单库召回，行为回到「只召回当前库原文」。全局问答是唯一例外——没有主体库的 run 仍走联邦路径，退化为只检索第一个解析库的单腿联邦，而不是走那条短路。参考库只贡献它当前可见的来源——隐藏的 Memory/Knowhow 投影结构性不参与跨库原文通道——请求取消勾选的库则一条都不贡献
 CHUNK_FEDERATION_MAX_PARTICIPANTS # 一条联邦 chunk 臂最多搜索几个库（默认 8；1..8）。超出时按确定的挂载顺序截断并发一条内容无关的 `chunk_federation_truncated` 事件；既不静默扩张也不静默收窄。生产建议先设 4，观察这个事件与 ask 阶段延迟分布后再放到 8

@@ -1944,6 +1944,53 @@ def test_run_discloses_and_feeds_back_uncovered_intent_directions(rrepo, monkeyp
     assert "add_subquery" in block
 
 
+def test_first_round_plan_step_states_deferred_confirmed_directions(rrepo, monkeypatch):
+    """首轮 plan 步摘要:已确认方向超出首轮上限时说清「首轮执行 N 个、另有 M 个随后视
+    预算补检」(补检只用一半步数预算,不承诺全部执行),detail 带 pending_count
+    (M 与补检同一套 `_norm_query` 归一去重);没有待补方向时句子保持原样、
+    detail 不写 pending_count(与改动前逐位一致,冻结金样依赖它)。"""
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent", _RecordingSeqLLM(
+        plan={"sub_queries": [{"query": "planner 不应执行"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}],
+    ))
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    monkeypatch.setattr(
+        retriever, "search",
+        lambda notebook_id, query, types=None, prefer="balanced": [
+            _mk_rk(f"{query}-0", query)])
+
+    def plan_step(intent_queries, **kwargs):
+        result = retriever.run(nb.id, "完整问题", intent_queries=intent_queries,
+                               **kwargs)
+        return next(s for s in result.trace if s.step_type == "plan")
+
+    # overview 首轮 2 条,6 条方向 → 待补 4 条。
+    deferred = plan_step(
+        ["完整问题", "方向一", "方向二", "方向三", "方向四", "方向五"],
+        limits=ask_retrieval_limits("overview"))
+    assert deferred.summary == (
+        "首轮执行 2 个检索方向,另有 4 个已确认方向随后视预算补检")
+    assert deferred.detail["pending_count"] == 4
+    assert deferred.detail["source"] == "confirmed_intent"
+
+    # 无待补方向:原句逐字不变。
+    whole = plan_step(["完整问题", "方向一"], limits=ask_retrieval_limits("overview"))
+    assert whole.summary == "采用已确认意图的 2 个检索方向"
+    assert "pending_count" not in whole.detail
+
+    # M 按归一后去重:大小写/空白不同的待补方向、与首轮方向归一后相同的,不多计。
+    deduped = plan_step(
+        ["完整问题", "方向一", "TX Power", "tx  power", "方向一 ", "Tx power"],
+        limits=ask_retrieval_limits("overview"))
+    assert deduped.summary == (
+        "首轮执行 2 个检索方向,另有 1 个已确认方向随后视预算补检")
+    assert deduped.detail["pending_count"] == 1
+
+
 def test_run_discloses_pending_directions_beyond_disclose_cap(rrepo, monkeypatch):
     """_INTENT_PENDING_DISCLOSE=8:未执行方向数超过 8 个时,披露步与 reflect 回喂
     都必须走"列出前 8 个 + 等 N 个"的截断措辞,而不是把全部方向不加节制地铺满

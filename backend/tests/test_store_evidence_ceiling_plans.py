@@ -233,7 +233,8 @@ def test_without_a_ceiling_the_statements_are_the_historical_ones(store, conn, s
         ),
         (
             "SELECT chunks_fts.chunk_id AS chunk_id, c.source_id AS source_id, "
-            "c.section_path AS section_path, bm25(chunks_fts) AS rank "
+            "c.section_path AS section_path, c.navigation AS navigation, "
+            "bm25(chunks_fts) AS rank "
             "FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.chunk_id "
             "WHERE chunks_fts.notebook_id=? AND chunks_fts MATCH ? "
             "ORDER BY rank LIMIT ?",

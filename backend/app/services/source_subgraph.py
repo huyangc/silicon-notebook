@@ -101,6 +101,11 @@ class SourceSubgraphChunk:
     section_path: str
     created_at: str
     element_ids: tuple[str, ...]
+    # ``chunks.navigation``: a table of contents / list of figures page. The
+    # snapshot keeps it (graph topology and memberships are unaffected); the
+    # producers that turn snapshot chunks into evidence drop it
+    # (``app.services.navigation_filter``).
+    navigation: bool = False
 
 
 @dataclass(frozen=True)
@@ -233,12 +238,19 @@ class SourceSubgraphService:
                 notebook_id, allowed, scope_hash, "source_limit_exceeded"
             )
 
-        signature = self._projections.source_subgraph_signature(notebook_id, allowed)
+        # The navigation flags move without the generation signature moving
+        # (the backfill writes no column it reads), so the per-source
+        # ``navigation_version`` counters, read with the same source rows,
+        # key the cache beside it.
+        signature, navigation = self._projections.source_subgraph_signature(
+            notebook_id, allowed, with_navigation=True
+        )
         key = (
             notebook_id,
             scope_hash,
             GRAPH_CONTRACT_VERSION,
             signature,
+            navigation,
             self._limits,
         )
         with self._lock:
@@ -256,6 +268,7 @@ class SourceSubgraphService:
             scope_hash,
             GRAPH_CONTRACT_VERSION,
             tuple(raw.get("signature") or ()),
+            tuple(raw.get("navigation_signature") or ()),
             self._limits,
         )
         with self._lock:
@@ -352,6 +365,7 @@ class SourceSubgraphService:
                         str(v) for v in _json_list(row.get("element_ids")) if str(v)
                     )
                 ),
+                navigation=bool(row.get("navigation")),
             )
             for row in raw.get("chunks") or ()
             if str(row["source_id"]) in allowed

@@ -3024,6 +3024,30 @@ def intent_direction_label(query: str, max_chars: int = _INTENT_DIRECTION_LABEL_
     return head
 
 
+def _deferred_direction_count(
+    first_round: List[str], pending: List[str],
+) -> int:
+    """首轮装不下、留给补检的已确认方向数。与补检同一套归一(`_norm_query`):
+    待补方向之间、或与首轮方向仅大小写/空白不同的,补检时会被当作已覆盖而跳过,
+    所以不计入。"""
+    covered = {_norm_query(q) for q in first_round}
+    return len({_norm_query(q) for q in pending} - covered)
+
+
+def _first_round_plan_summary(
+    count: int, confirmed: bool, deferred: int,
+) -> str:
+    """首轮 plan 步的摘要。已确认意图超出首轮上限时,溢出的方向在首轮之后、
+    reflect 之前的补检里按预算补种(补检只用一半步数预算),所以只说「视预算
+    补检」,不承诺全部执行;无待补方向时句子与引入本参数之前逐字一致。"""
+    if not confirmed:
+        return f"规划了 {count} 个子查询"
+    if deferred > 0:
+        return (f"首轮执行 {count} 个检索方向,"
+                f"另有 {deferred} 个已确认方向随后视预算补检")
+    return f"采用已确认意图的 {count} 个检索方向"
+
+
 def _build_direction_registry(
     queries: List[str],
 ) -> Tuple[Dict[str, str], Dict[str, str]]:
@@ -6116,16 +6140,19 @@ class ReasoningRetriever:
             subqueries = outcome.subqueries
             plan_keywords = outcome.keywords
         raise_if_cancelled(self.cancel_event)
+        deferred = _deferred_direction_count(
+            reviewed_queries, pending_intent_queries)
+        plan_detail = {"sub_queries": [{"query": s.query, "types": s.types,
+                                        "prefer": s.prefer, "reason": s.reason}
+                                       for s in subqueries],
+                       "source": "confirmed_intent" if reviewed_queries else "planner"}
+        if deferred:
+            plan_detail["pending_count"] = deferred
         record(TraceStep(
             step_type="plan",
-            summary=(
-                f"采用已确认意图的 {len(subqueries)} 个检索方向"
-                if reviewed_queries else f"规划了 {len(subqueries)} 个子查询"
-            ),
-            detail={"sub_queries": [{"query": s.query, "types": s.types,
-                                     "prefer": s.prefer, "reason": s.reason}
-                                    for s in subqueries],
-                    "source": "confirmed_intent" if reviewed_queries else "planner"}))
+            summary=_first_round_plan_summary(
+                len(subqueries), bool(reviewed_queries), deferred),
+            detail=plan_detail))
         state.reviewed_all = reviewed_all
         state.label_of = label_of
         state.direction_of = direction_of

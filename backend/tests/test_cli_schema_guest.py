@@ -482,6 +482,7 @@ LEAK_PROBES = (
         if not case.sqlite_only and case.name in {
             "batch_ingest embed", "build_chunks", "kg build_kg",
             "backfill_global_ask_attribution", "maintain delete-leftovers",
+            "backfill_navigation_chunks --dry-run", "backfill_navigation_chunks",
             "prepare_selected_source_graph", "reflect_shadow_rig search",
         }
     ),

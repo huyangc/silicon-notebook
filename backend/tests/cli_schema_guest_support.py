@@ -146,6 +146,18 @@ def _global_attribution(ctx, monkeypatch, spy=None):
     return global_ask_attribution_backfill.main([])
 
 
+def _navigation_dry_run(ctx, monkeypatch, spy=None):
+    from app.services import navigation_backfill_cli
+
+    return navigation_backfill_cli.main(["--all-notebooks", "--dry-run"])
+
+
+def _navigation_rerun(ctx, monkeypatch, spy=None):
+    from app.services import navigation_backfill_cli
+
+    return navigation_backfill_cli.main(["--all-notebooks", *ctx.confirm])
+
+
 def _knowhow_md(ctx, monkeypatch, spy=None):
     module = load_script("backfill_knowhow_md")
     _patch_seams(module, monkeypatch, spy)
@@ -236,6 +248,8 @@ CASES: tuple[CliCase, ...] = (
         _backend_wrapper("app.scripts.backfill_relation_embeddings"),
     ),
     CliCase("backfill_global_ask_attribution", _global_attribution),
+    CliCase("backfill_navigation_chunks --dry-run", _navigation_dry_run),
+    CliCase("backfill_navigation_chunks", _navigation_rerun),
     CliCase("backfill_knowhow_md --use-llm", _knowhow_md, sqlite_only=True),
     CliCase("replay_retrieval", _replay, sqlite_only=True),
     CliCase("gen_recall_gold", _gen_recall_gold, sqlite_only=True),

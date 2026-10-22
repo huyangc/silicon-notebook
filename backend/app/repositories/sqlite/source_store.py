@@ -1290,20 +1290,47 @@ class SourceStore:
             }
 
     @staticmethod
-    def retrieval_element_rows(db: sqlite3.Connection, notebook_id: str):
+    def retrieval_element_rows(
+        db: sqlite3.Connection, notebook_id: str, *, with_navigation: bool
+    ):
         """Every element of an unscoped, copyable notebook (the direct element
         fallback).  There is deliberately no source-list form: a source list
-        routes ``_retrieve_elements`` to the bounded chunk path instead."""
+        routes ``_retrieve_elements`` to the bounded chunk path instead.
+        ``with_navigation`` (the read-side switch) adds ``navigation``: true for
+        an element some navigation chunk of the notebook lists in its own
+        ``element_ids`` (a table of contents page, or a part of one), read
+        forward from the flagged chunks -- the source of truth, so it holds in
+        a notebook whose ``chunk_elements`` reverse index is not backfilled.
+        The flagged set is one scan of the notebook's chunks, done once per
+        call (this path only serves copyable notebooks); the caller drops
+        those elements. Without it the statement is the historical one."""
+        if not with_navigation:
+            return db.execute(
+                """
+                SELECT e.id, e.source_id, e.element_type, e.location_label, e.text,
+                       s.title AS source_title, em.vector AS vector
+                FROM source_elements e
+                JOIN sources s ON s.id = e.source_id
+                LEFT JOIN element_embeddings em ON em.element_id = e.id
+                WHERE s.notebook_id = ?
+                """,
+                (notebook_id,),
+            ).fetchall()
         return db.execute(
             """
+            WITH nav(element_id) AS (
+              SELECT DISTINCT j.value FROM chunks c, json_each(c.element_ids) j
+              WHERE c.notebook_id = ? AND c.navigation <> 0
+            )
             SELECT e.id, e.source_id, e.element_type, e.location_label, e.text,
-                   s.title AS source_title, em.vector AS vector
+                   s.title AS source_title, em.vector AS vector,
+                   e.id IN (SELECT element_id FROM nav) AS navigation
             FROM source_elements e
             JOIN sources s ON s.id = e.source_id
             LEFT JOIN element_embeddings em ON em.element_id = e.id
             WHERE s.notebook_id = ?
             """,
-            (notebook_id,),
+            (notebook_id, notebook_id),
         ).fetchall()
 
     def report_source_rows(

@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 81
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 82
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -69,10 +69,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 81
-    assert migrator.migrate() == 81
-    assert migrator.current_version() == 81
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 81
+    assert migrator.migrate() == 82
+    assert migrator.migrate() == 82
+    assert migrator.current_version() == 82
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 82
 
 
 @pytest.mark.postgres_integration
@@ -84,7 +84,7 @@ def test_kg_findings_storage_matches_the_sqlite_v97_contract(postgres_database):
 
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 81
+    assert PostgresMigrator(postgres_database).migrate() == 82
     with postgres_database.connect() as conn:
         def columns(table):
             return [
@@ -168,8 +168,8 @@ def test_ask_job_report_id_matches_the_sqlite_v99_contract(postgres_database):
             "INSERT INTO ask_jobs (id, notebook_id, question, status, created_at, "
             "updated_at) VALUES ('job-v79', 'nb-v80', 'why?', 'running', now(), now())"
         )
-    assert migrator.migrate() == 81
-    assert migrator.migrate() == 81
+    assert migrator.migrate() == 82
+    assert migrator.migrate() == 82
     # The ledger skips an applied version, so re-execute the file itself: the
     # statement is IF NOT EXISTS and must neither fail nor touch the column.
     with postgres_database.write() as db:
@@ -219,7 +219,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 81
+    assert migrator.migrate() == 82
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -302,7 +302,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 81
+        assert PostgresMigrator(databases[1]).migrate() == 82
     finally:
         for database in databases:
             database.close()
@@ -408,6 +408,7 @@ def test_packaged_index_migration_phases_are_exact():
         (79, "kg_cluster_scratch_ordinal"),
         (80, "ask_job_report_id"),
         (81, "notebook_delete_grace"),
+        (82, "chunk_navigation"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -942,6 +943,8 @@ def test_packaged_index_migration_phases_are_exact():
     assert index_declarations(81) == [
         (False, "idx_notebooks_pending_delete_due")
     ]
+    # Migration 82 (navigation-page marker) adds three columns and no index.
+    assert index_declarations(82) == []
     # Spelled without ``IF NOT EXISTS`` on purpose, and that is asserted
     # rather than merely commented: app/migration/shadow/postgres_catalog.py
     # parses CREATE INDEX straight out of these files to build the catalog

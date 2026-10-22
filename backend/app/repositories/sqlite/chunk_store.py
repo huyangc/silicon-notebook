@@ -4,9 +4,10 @@ import json
 import sqlite3
 from typing import Iterable, Mapping, Sequence
 
-from app.repositories.chunk_elements import reverse_rows_for_writes
+from app.repositories.chunk_elements import decode_element_ids, reverse_rows_for_writes
+from app.repositories.navigation_version import navigation_bump
 from app.repositories.like_pattern import escape_like_pattern
-from app.repositories.ports import ChunkWrite
+from app.repositories.ports import CHUNKED_AT_UNCHECKED, ChunkWrite
 from app.repositories.sqlite.source_ceiling import ceiling_param, normalise_ceiling
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.id_binding import (
@@ -53,6 +54,19 @@ CHUNK_ELEMENT_LOOKUP_BATCH = 500
 #     ``memory_derived_in_notebook``) a Memory source's rows are not copied.
 #     The guard checks on every run, on both backends, whether it does and lists
 #     the path as guarded or unguarded accordingly (``copy_path_reason``).
+
+
+# The navigation backfill and its CLI never write a mirrored notebook
+# (``notebooks.sync_origin`` non-empty, docs/incremental-sync-design.md §5): its
+# chunks and stamps are the source environment's and arrive with every import.
+_NOT_MIRRORED_NOTEBOOK = (
+    "notebook_id NOT IN (SELECT id FROM notebooks WHERE sync_origin <> '')"
+)
+
+
+class _ChunkGenerationChanged(Exception):
+    """Rolls a compare-and-set chunk write back: the source's ``chunked_at`` is
+    no longer the token the caller read."""
 
 
 #: 两个写方法的 Memory 探针:对来源做一次主键点查(计划钉在
@@ -246,7 +260,9 @@ class ChunkStore:
         *,
         created_at: str,
         mark_chunked_at: str | None = None,
-    ) -> None:
+        navigation_scanned_at: str | None = None,
+        expected_chunked_at: object = CHUNKED_AT_UNCHECKED,
+    ) -> bool:
         """幂等:先删该 source 旧 chunk(级联删 chunk_embeddings)。chunk 行与其
         chunks_fts 行在同一个写事务里换血——FTS 插入失败连 chunk 行一起回滚。
 
@@ -254,37 +270,76 @@ class ChunkStore:
         (完成标记与它所认证的 chunk 数据原子提交——否则 0-chunk 成功的源崩在
         「chunks 已提交、marker 未提交」之间会留下 chunks=0+chunked_at=NULL,正好被
         H3 误判为损坏)。``build_chunks_for_source`` 传时间戳;knowhow 投影器**不传**
-        (它按格子复用本方法、传空 chunks,那些隐藏源不该被打完成标记)。"""
+        (它按格子复用本方法、传空 chunks,那些隐藏源不该被打完成标记)。
+        同一条 UPDATE 置 ``navigation_scanned_at``(这批 chunk 的导航判定凭证;
+        None = 未判定,后台回填会补判)。
+
+        ``expected_chunked_at``(compare-and-set,需同时传 ``mark_chunked_at``):
+        来源的 ``chunked_at`` 已不是它(读与写之间被别人换代)时整笔回滚、返回
+        False,什么也不写;判据内联进最后那条 UPDATE 的 WHERE,与 PostgreSQL 侧
+        同形。返回 True = 已写入。"""
+        if expected_chunked_at is not CHUNKED_AT_UNCHECKED and mark_chunked_at is None:
+            raise ValueError("expected_chunked_at requires mark_chunked_at")
         rows = [(c.id, notebook_id, source_id, c.text,
-                 c.section_path, json.dumps(list(c.element_ids)), created_at)
+                 c.section_path, json.dumps(list(c.element_ids)), created_at,
+                 int(bool(c.navigation)))
                 for c in chunks]
-        with self.database.write() as db:
-            # 探测与写入同一个写事务:write() 的连接是 sqlite3 旧式事务控制,
-            # SELECT 不开事务、要到 DELETE 才开——先 BEGIN IMMEDIATE,否则另一进程
-            # 可在「探测通过」与「首条写入」之间改掉来源。在任何 DELETE 之前拒绝,
-            # 被拒的写入不动该来源已有的行。write() 每次递出全新连接,此处无已开事务。
-            self.database.begin_immediate(db)
-            self._refuse_memory_source(db, source_id)
-            # chunks_fts 是词法派生索引(无 source_id 列,不随 chunks 的 FK 级联),须同事务
-            # 手动同步:先删本 source 旧 chunk 的 FTS 行(chunks DELETE 前 join 取 id),再重插。
-            db.execute(
-                "DELETE FROM chunks_fts WHERE chunk_id IN "
-                "(SELECT id FROM chunks WHERE source_id=?)", (source_id,))
-            db.execute("DELETE FROM chunks WHERE source_id=?", (source_id,))  # 级联删 embeddings
-            db.executemany(
-                "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
-                "VALUES (?,?,?,?,?,?,?)", rows)
-            self._insert_fts_rows(db, [(r[0], r[1], r[3]) for r in rows])
-            # element -> chunk reverse rows, same transaction as the chunk rows
-            # they describe. The old rows are already gone: chunk_elements has
-            # ``REFERENCES chunks(id) ON DELETE CASCADE`` and every connection
-            # runs with ``PRAGMA foreign_keys = ON`` (SqliteDatabase), so the
-            # DELETE above took them with it — exactly like chunk_embeddings.
-            self._insert_chunk_element_rows(db, notebook_id, chunks)
-            if mark_chunked_at is not None:
+        try:
+            with self.database.write() as db:
+                # 探测与写入同一个写事务:write() 的连接是 sqlite3 旧式事务控制,
+                # SELECT 不开事务、要到 DELETE 才开——先 BEGIN IMMEDIATE,否则另一进程
+                # 可在「探测通过」与「首条写入」之间改掉来源。在任何 DELETE 之前拒绝,
+                # 被拒的写入不动该来源已有的行。write() 每次递出全新连接,此处无已开事务。
+                self.database.begin_immediate(db)
+                self._refuse_memory_source(db, source_id)
+                # The set of flagged chunks before and after: a change bumps
+                # sources.navigation_version in this transaction (the snapshot
+                # cache's flag-change counter).
+                bump = navigation_bump(
+                    db.execute(
+                        "SELECT id FROM chunks WHERE source_id=? AND navigation<>0",
+                        (source_id,)).fetchall(),
+                    (c.id for c in chunks if c.navigation),
+                )
+                # chunks_fts 是词法派生索引(无 source_id 列,不随 chunks 的 FK 级联),须同事务
+                # 手动同步:先删本 source 旧 chunk 的 FTS 行(chunks DELETE 前 join 取 id),再重插。
                 db.execute(
-                    "UPDATE sources SET chunked_at = ? WHERE id = ?",
-                    (mark_chunked_at, source_id))
+                    "DELETE FROM chunks_fts WHERE chunk_id IN "
+                    "(SELECT id FROM chunks WHERE source_id=?)", (source_id,))
+                db.execute("DELETE FROM chunks WHERE source_id=?", (source_id,))  # 级联删 embeddings
+                db.executemany(
+                    "INSERT INTO chunks "
+                    "(id,notebook_id,source_id,text,section_path,element_ids,created_at,navigation) "
+                    "VALUES (?,?,?,?,?,?,?,?)", rows)
+                self._insert_fts_rows(db, [(r[0], r[1], r[3]) for r in rows])
+                # element -> chunk reverse rows, same transaction as the chunk rows
+                # they describe. The old rows are already gone: chunk_elements has
+                # ``REFERENCES chunks(id) ON DELETE CASCADE`` and every connection
+                # runs with ``PRAGMA foreign_keys = ON`` (SqliteDatabase), so the
+                # DELETE above took them with it — exactly like chunk_embeddings.
+                self._insert_chunk_element_rows(db, notebook_id, chunks)
+                if mark_chunked_at is None and bump:
+                    db.execute(
+                        "UPDATE sources SET navigation_version = navigation_version + 1 "
+                        "WHERE id = ?", (source_id,))
+                elif mark_chunked_at is not None and expected_chunked_at is CHUNKED_AT_UNCHECKED:
+                    db.execute(
+                        "UPDATE sources SET chunked_at = ?, navigation_scanned_at = ?, "
+                        "navigation_version = navigation_version + ? WHERE id = ?",
+                        (mark_chunked_at, navigation_scanned_at, bump, source_id))
+                elif mark_chunked_at is not None:
+                    changed = db.execute(
+                        "UPDATE sources SET chunked_at = ?, navigation_scanned_at = ?, "
+                        "navigation_version = navigation_version + ? "
+                        "WHERE id = ? AND chunked_at IS ?",
+                        (mark_chunked_at, navigation_scanned_at, bump, source_id,
+                         expected_chunked_at)).rowcount
+                    if changed != 1:
+                        # 回滚整笔(连同上面的 DELETE/INSERT):调用方在锁内重读重算。
+                        raise _ChunkGenerationChanged(source_id)
+        except _ChunkGenerationChanged:
+            return False
+        return True
 
     @staticmethod
     def _refuse_memory_source(connection: sqlite3.Connection, source_id: str) -> None:
@@ -341,9 +396,18 @@ class ChunkStore:
 
     @staticmethod
     def chunks_for_element_ids(
-        db: sqlite3.Connection, notebook_id: str, element_ids: Sequence[str]
+        db: sqlite3.Connection, notebook_id: str, element_ids: Sequence[str], *,
+        navigation_source_id: str | None = None,
     ):
         """``(element_id, chunk_id)`` rows for these elements, in chunk order.
+
+        ``navigation_source_id`` switches to the navigation read the element
+        arm makes instead: the navigation-flagged chunks of that ONE source
+        whose own ``element_ids`` hold any of these elements, as
+        ``{element_id, chunk_id, navigation}`` rows. It reads the flagged
+        chunks forward (the source of truth the reverse index is derived
+        from), so it holds in a notebook whose ``chunk_elements`` is not
+        backfilled; one statement per source, no list bound.
 
         The fast half of the element -> chunk reverse lookup: an indexed seek
         on the ``(notebook_id, element_id, chunk_id)`` primary key instead of a
@@ -357,6 +421,20 @@ class ChunkStore:
         Batching is by element id, so every row for one element stays inside a
         single ordered statement."""
         ids = list(dict.fromkeys(e for e in element_ids if e))
+        if navigation_source_id is not None:
+            wanted = set(ids)
+            # ``+notebook_id``: the source index drives without statistics.
+            flagged = db.execute(
+                "SELECT id, element_ids FROM chunks WHERE source_id=? "
+                "AND +notebook_id=? AND navigation<>0 ORDER BY rowid",
+                (navigation_source_id, notebook_id),
+            ).fetchall() if wanted else []
+            return [
+                {"element_id": element_id, "chunk_id": row["id"], "navigation": True}
+                for row in flagged
+                for element_id in decode_element_ids(row["element_ids"])
+                if element_id in wanted
+            ]
         rows: list = []
         for offset in range(0, len(ids), CHUNK_ELEMENT_LOOKUP_BATCH):
             batch = ids[offset : offset + CHUNK_ELEMENT_LOOKUP_BATCH]
@@ -427,7 +505,8 @@ class ChunkStore:
         the projector does its own precise ``delete_by_ids`` beforehand."""
         values = [
             (c.id, notebook_id, source_id, c.text,
-             c.section_path, json.dumps(list(c.element_ids)), created_at)
+             c.section_path, json.dumps(list(c.element_ids)), created_at,
+             int(bool(c.navigation)))
             for c in rows
         ]
         if not values:
@@ -436,9 +515,16 @@ class ChunkStore:
         # 元素行),与下面的 INSERT 同一事务。
         self._refuse_memory_source(connection, source_id)
         connection.executemany(
-            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
-            "VALUES (?,?,?,?,?,?,?)", values)
+            "INSERT INTO chunks "
+            "(id,notebook_id,source_id,text,section_path,element_ids,created_at,navigation) "
+            "VALUES (?,?,?,?,?,?,?,?)", values)
         self._insert_fts_rows(connection, [(v[0], v[1], v[3]) for v in values])
+        if any(row.navigation for row in rows):
+            # A flagged chunk joins the source's flagged set (the knowhow
+            # projector, the only caller, writes none; kept exact anyway).
+            connection.execute(
+                "UPDATE sources SET navigation_version=navigation_version+1 "
+                "WHERE id=?", (source_id,))
         # The projector's precise ``delete_by_ids`` already dropped the prior
         # rows for these chunks via the chunks cascade; add the new ones in the
         # same transaction so the reverse index never lags its chunk rows.
@@ -449,6 +535,181 @@ class ChunkStore:
             rows = db.execute(
                 "SELECT id, text FROM chunks WHERE source_id=?", (source_id,)).fetchall()
         return [{"id": r["id"], "text": r["text"]} for r in rows]
+
+    # ------------------------------------------- navigation-page marker
+    # (SQLite v101 / PostgreSQL 0082). The build writes ``chunks.navigation``
+    # with the chunks (``replace_source_chunks``); these serve the
+    # post-readiness background pass and its CLI
+    # (``app.services.navigation_backfill``). ``navigation_scanned_at`` is a
+    # generation token, not a clock reading: a judged source carries a stamp
+    # EQUAL to its ``chunked_at`` (the build and the publish write the same
+    # instant to both, the pass copies ``chunked_at`` into it), so "still to
+    # judge" is ``stamp IS NULL OR stamp IS NOT chunked_at`` -- no wall clock,
+    # time zone or text ordering is involved.
+
+    def chunk_generation(self, source_id: str) -> object:
+        """The source's ``chunked_at``: the compare-and-set token of its
+        current chunk generation (None when unchunked or unknown)."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT chunked_at FROM sources WHERE id=?", (source_id,)).fetchone()
+        return None if row is None else row["chunked_at"]
+
+    def source_heading_elements(self, source_id: str) -> list[dict]:
+        """The source's heading elements only, document order, as
+        ``{id, element_type, text, section_path}`` -- what the navigation
+        detector reads; the pass never loads the body elements' text."""
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT id, element_type, text, metadata FROM source_elements "
+                "WHERE source_id=? AND element_type='heading' ORDER BY id",
+                (source_id,),
+            ).fetchall()
+        output = []
+        for r in rows:
+            section_path = ""
+            if r["metadata"]:
+                try:
+                    parsed = json.loads(r["metadata"])
+                except (ValueError, TypeError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    section_path = str(parsed.get("section_path") or "")
+            output.append({"id": r["id"], "element_type": r["element_type"],
+                           "text": r["text"], "section_path": section_path})
+        return output
+
+    def navigation_scan_page(
+        self,
+        *,
+        after_source_id: str,
+        limit: int,
+        notebook_id: str | None = None,
+        pending_only: bool = True,
+    ) -> list[tuple[str, str]]:
+        """``(source_id, notebook_id)`` of chunked sources after the cursor, id
+        order: only those still to judge unless ``pending_only`` is False."""
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT id, notebook_id FROM sources "
+                "WHERE id > ? AND chunked_at IS NOT NULL AND "
+                + _NOT_MIRRORED_NOTEBOOK + " "
+                "AND (? IS NULL OR notebook_id = ?) "
+                "AND (? = 0 OR navigation_scanned_at IS NULL "
+                "OR navigation_scanned_at IS NOT chunked_at) "
+                "ORDER BY id LIMIT ?",
+                (after_source_id, notebook_id, notebook_id,
+                 1 if pending_only else 0, int(limit)),
+            ).fetchall()
+        return [(r["id"], r["notebook_id"]) for r in rows]
+
+    def navigation_pending_count(self, *, notebook_id: str | None = None) -> int:
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT COUNT(*) FROM sources WHERE chunked_at IS NOT NULL AND "
+                + _NOT_MIRRORED_NOTEBOOK + " "
+                "AND (? IS NULL OR notebook_id = ?) "
+                "AND (navigation_scanned_at IS NULL "
+                "OR navigation_scanned_at IS NOT chunked_at)",
+                (notebook_id, notebook_id),
+            ).fetchone()
+        return int(row[0])
+
+    def navigation_scan_rows(self, source_id: str) -> tuple[object, list[dict]]:
+        """``(chunked_at token, chunks in document order)`` for one source;
+        each chunk as ``{id, section_path, text, navigation}``. The token is
+        read first, so a generation change after it fails the later
+        compare-and-set instead of judging a mix."""
+        with self.database.connect() as db:
+            token_row = db.execute(
+                "SELECT chunked_at FROM sources WHERE id=?", (source_id,)).fetchone()
+            rows = db.execute(
+                "SELECT id, section_path, text, navigation FROM chunks "
+                "WHERE source_id=? ORDER BY rowid",
+                (source_id,),
+            ).fetchall()
+        token = None if token_row is None else token_row["chunked_at"]
+        return token, [
+            {"id": r["id"], "section_path": r["section_path"] or "",
+             "text": r["text"] or "", "navigation": bool(r["navigation"])}
+            for r in rows
+        ]
+
+    def apply_navigation_flags(
+        self,
+        source_id: str,
+        *,
+        expected_chunked_at: object,
+        changes: Sequence[tuple[str, bool]],
+    ) -> bool:
+        """Compare-and-set write of one source's judgement: the changed chunk
+        rows (``WHERE id=? AND source_id=?``) and the stamp
+        (``navigation_scanned_at = chunked_at``), in one transaction that
+        commits only while the source's ``chunked_at`` is still
+        ``expected_chunked_at``. False = the generation changed; nothing was
+        written. (SQLite has one writer, so no lock order is involved.)"""
+        try:
+            with self.database.write() as db:
+                self.database.begin_immediate(db)
+                db.executemany(
+                    "UPDATE chunks SET navigation=? WHERE id=? AND source_id=?",
+                    [(int(bool(flag)), chunk_id, source_id) for chunk_id, flag in changes],
+                )
+                # ``changes`` holds only rows whose flag moved, so a non-empty
+                # write is a flagged-set change (sources.navigation_version).
+                changed = db.execute(
+                    "UPDATE sources SET navigation_scanned_at=chunked_at, "
+                    "navigation_version=navigation_version+? "
+                    "WHERE id=? AND chunked_at IS ?",
+                    (1 if changes else 0, source_id, expected_chunked_at),
+                ).rowcount
+                if expected_chunked_at is None or changed != 1:
+                    raise _ChunkGenerationChanged(source_id)
+        except _ChunkGenerationChanged:
+            return False
+        return True
+
+    def clear_navigation_flags(
+        self, *, notebook_id: str | None = None
+    ) -> tuple[int, int, list[str]]:
+        """Data-level rollback: every flagged chunk back to 0 and every judged
+        source back to unjudged (stamp NULL), in one transaction. Returns
+        ``(chunks cleared, sources reset, notebooks whose chunks changed)``.
+        It scans chunks: no index serves the flag (the rare rollback does not
+        justify one)."""
+        with self.database.write() as db:
+            self.database.begin_immediate(db)
+            notebooks = [
+                r[0] for r in db.execute(
+                    "SELECT DISTINCT notebook_id FROM chunks WHERE navigation <> 0 AND "
+                    + _NOT_MIRRORED_NOTEBOOK + " "
+                    "AND (? IS NULL OR notebook_id = ?) ORDER BY notebook_id",
+                    (notebook_id, notebook_id),
+                ).fetchall()
+            ]
+            # Each source whose flagged set is about to empty (one writer, so
+            # the order against the chunk UPDATE below cannot deadlock).
+            db.execute(
+                "UPDATE sources SET navigation_version=navigation_version+1 "
+                "WHERE id IN (SELECT DISTINCT source_id FROM chunks "
+                "WHERE navigation <> 0 AND " + _NOT_MIRRORED_NOTEBOOK + " "
+                "AND (? IS NULL OR notebook_id = ?))",
+                (notebook_id, notebook_id),
+            )
+            cleared = db.execute(
+                "UPDATE chunks SET navigation=0 WHERE navigation <> 0 AND "
+                + _NOT_MIRRORED_NOTEBOOK + " "
+                "AND (? IS NULL OR notebook_id = ?)",
+                (notebook_id, notebook_id),
+            ).rowcount
+            reset = db.execute(
+                "UPDATE sources SET navigation_scanned_at=NULL "
+                "WHERE navigation_scanned_at IS NOT NULL AND "
+                + _NOT_MIRRORED_NOTEBOOK + " "
+                "AND (? IS NULL OR notebook_id = ?)",
+                (notebook_id, notebook_id),
+            ).rowcount
+        return int(cleared), int(reset), notebooks
 
     @staticmethod
     def language_probe_rows(db: sqlite3.Connection, notebook_id: str):
@@ -468,7 +729,7 @@ class ChunkStore:
         return db.execute(
             """
             SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids,
-                   s.title AS source_title
+                   c.navigation, s.title AS source_title
             FROM chunks c JOIN sources s ON s.id = c.source_id
             WHERE c.notebook_id = ?
             """,
@@ -490,7 +751,8 @@ class ChunkStore:
         ph = ",".join("?" for _ in ids)
         return db.execute(
             f"SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, "
-            f"s.title AS source_title FROM chunks c JOIN sources s ON s.id=c.source_id "
+            f"c.navigation, s.title AS source_title "
+            f"FROM chunks c JOIN sources s ON s.id=c.source_id "
             f"WHERE c.id IN ({ph})", ids,
         ).fetchall()
 
@@ -515,7 +777,7 @@ class ChunkStore:
         ph = ",".join("?" for _ in ids)
         sql = (
             f"SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, "
-            f"c.notebook_id AS chunk_notebook_id, s.title AS source_title "
+            f"c.navigation, c.notebook_id AS chunk_notebook_id, s.title AS source_title "
             f"FROM chunks c JOIN sources s ON s.id=c.source_id "
             f"WHERE c.id IN ({ph})"
         )
@@ -559,7 +821,7 @@ class ChunkStore:
         params.append(actor_id)
         return db.execute(
             "SELECT c.id,c.source_id,c.text,c.section_path,c.element_ids,"
-            "c.notebook_id AS chunk_notebook_id,s.title AS source_title "
+            "c.navigation,c.notebook_id AS chunk_notebook_id,s.title AS source_title "
             "FROM chunks c JOIN sources s "
             "ON s.id=c.source_id AND s.notebook_id=c.notebook_id "
             f"WHERE +c.notebook_id=? AND c.id IN ({id_placeholders})"
@@ -619,7 +881,7 @@ class ChunkStore:
             return []
         ph = ",".join("?" for _ in ids)
         return db.execute(
-            f"SELECT id, source_id, text, section_path, element_ids "
+            f"SELECT id, source_id, text, section_path, element_ids, navigation "
             f"FROM chunks WHERE id IN ({ph})", ids,
         ).fetchall()
 
@@ -660,7 +922,7 @@ class ChunkStore:
             return []
         return db.execute(
             "SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, "
-            "s.title AS source_title "
+            "c.navigation, s.title AS source_title "
             "FROM chunks c JOIN sources s ON s.id=c.source_id "
             "WHERE c.notebook_id=? AND c.source_id=? "
             "AND (c.section_path=? OR c.section_path LIKE ? ESCAPE '\\') "

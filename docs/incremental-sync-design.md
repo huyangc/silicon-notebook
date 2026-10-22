@@ -260,6 +260,13 @@ users 不同步但导入时可能**创建**：见 §4。
   驱动的整体替换指令。
 - 人工审核字段（knowledge_objects 的 status/owner/last_reviewed）随行同步；目标端不允许
   改（§5）。
+- 导航页标记（SQLite v101 / PostgreSQL 0082 的 `chunks.navigation`、
+  `sources.navigation_scanned_at` 与 `sources.navigation_version`）是普通列，随所在的 chunks / sources 行同步：捕获触发器只记行 id 和变更
+  标记（`0064_sync_change_capture.sql` 的 chunks/sources 触发器），导出时读当前行，所以新列不需要任何同步侧
+  登记。源端的后台回填或 `scripts/backfill_navigation_chunks.py`（重跑或 `--clear`）只改有变化的 chunk 行与
+  来源凭证，这些 UPDATE 照常进入变更日志；目标端下一次增量导入按行覆盖它们，并像其他改写已索引行的包一样，
+  由 CLI 层的 `rebuild_after_import` 全量重建涉及笔记本的派生索引（下一条）。目标端是镜像，不自己判定：
+  镜像上的标记就是源端的标记。
 - `kg_index`/`kg_viz`/`kg_index_partitions` 不拷贝，目标端按现有 scale build 流程重建。
   PR-2 的导入器本身仍然不触发重建（`import_.py` 不 import 服务层）；PR-4 T2 把它接在了
   **CLI 层**：`sync import` 在导入置 `done` 之后调

@@ -22,7 +22,8 @@ def _ck(cid, text):
 def test_score_chunks_keyword_only_filters_floor():
     chunks = [_ck("c1", "deepseek mixture of experts routing"),
               _ck("c2", "unrelated cooking recipe tomato")]
-    out = score_chunks("deepseek experts routing", chunks, query_vector=None, chunk_sims=None, limit=10)
+    out = score_chunks("deepseek experts routing", chunks, query_vector=None, chunk_sims=None, limit=10,
+                       drop_navigation=True)
     ids = [c.chunk_id for c in out]
     assert "c1" in ids and "c2" not in ids      # c2 低于 RELEVANCE_FLOOR 被丢
     assert all(isinstance(c, RetrievedChunk) for c in out)
@@ -31,7 +32,8 @@ def test_score_chunks_keyword_only_filters_floor():
 
 def test_score_chunks_caps_to_limit_sorted():
     chunks = [_ck(f"c{i}", f"shared term token{i}") for i in range(20)]
-    out = score_chunks("shared term", chunks, query_vector=None, chunk_sims=None, limit=5)
+    out = score_chunks("shared term", chunks, query_vector=None, chunk_sims=None, limit=5,
+                       drop_navigation=True)
     assert len(out) == 5
     assert all(out[i].score >= out[i+1].score for i in range(len(out)-1))
 
@@ -43,7 +45,7 @@ def test_score_chunks_deduplicates_same_source_text_before_limit():
         _ck("abstract", "Cosmos 3 introduces an omnimodal architecture."),
     ]
 
-    out = score_chunks("Cosmos 3 omnimodal", chunks, limit=2)
+    out = score_chunks("Cosmos 3 omnimodal", chunks, limit=2, drop_navigation=True)
 
     assert len(out) == 2
     assert sum(chunk.chunk_id.startswith("header-") for chunk in out) == 1
@@ -54,7 +56,8 @@ def test_score_chunks_uses_semantic_sims():
     chunks = [_ck("c1", "no keyword overlap here")]
     # 仅语义信号(关键词 0): chunk_sims 给高余弦 → 仍能过 floor。
     out = score_chunks("totally different words", chunks,
-                       query_vector=[0.1]*4, chunk_sims={"c1": 0.9}, limit=10)
+                       query_vector=[0.1]*4, chunk_sims={"c1": 0.9}, limit=10,
+                       drop_navigation=True)
     assert [c.chunk_id for c in out] == ["c1"]
     assert out[0].relevance >= 0.5
 
@@ -62,7 +65,8 @@ def test_score_chunks_uses_semantic_sims():
 def test_score_chunks_lexical_only_candidate_is_keyword_renormalized():
     chunks = [_ck("lexical", "ZXCV9000 timing controller")]
     keyword_only = score_chunks(
-        "ZXCV9000 controller", chunks, query_vector=None, chunk_sims=None, limit=10
+        "ZXCV9000 controller", chunks, query_vector=None, chunk_sims=None, limit=10,
+        drop_navigation=True,
     )
     mixed_window = score_chunks(
         "ZXCV9000 controller",
@@ -70,6 +74,7 @@ def test_score_chunks_lexical_only_candidate_is_keyword_renormalized():
         query_vector=[0.1] * 4,
         chunk_sims={"semantic-other": 0.9},
         limit=10,
+        drop_navigation=True,
     )
     assert keyword_only and mixed_window
     assert mixed_window[0].score == pytest.approx(keyword_only[0].score)
@@ -373,7 +378,8 @@ def test_single_path_keyword_arm_reads_no_vectors_and_scores_as_before(
     before_rows, _ids, _mat = candidates.hydrate_chunk_candidates(hit_ids)
     # 探针本身有效:改前那条 hydrate 确实会读 chunk_embeddings。
     assert vector_tables and set(vector_tables) == {"chunk_embeddings"}
-    before = score_chunks(needle, before_rows, None, None, limit=recall)
+    before = score_chunks(needle, before_rows, None, None, limit=recall,
+                          drop_navigation=True)
     assert candidates._hydrate_chunk_texts(hit_ids) == before_rows
 
     def _fields(chunk):
@@ -2131,3 +2137,85 @@ def test_chunk_fts_backfill_and_search(repo):
         hits = chunk_fts_search(db, nb.id, "XZQW9000", k=10)
     assert "c1" in {h["chunk_id"] for h in hits}   # 罕见词法词命中
     assert "c2" not in {h["chunk_id"] for h in hits}
+
+
+# --- navigation pages (chunks.navigation) are not evidence -------------------
+# A table of contents names every section, so it out-scores the section it
+# points at on both arms; it is dropped (not sunk) before it can take a slot.
+
+def _navigation_rows():
+    toc = {**_ck("toc", "insertion loss mask standard package insertion loss mask"),
+           "source_id": "s-toc", "navigation": True}
+    body = _ck("body", "the insertion loss mask of the standard package")
+    return [toc, body]
+
+
+def test_score_chunks_drops_a_navigation_row_with_the_highest_similarity():
+    from app.services.retrieval import observed_chunk_candidates
+
+    with observed_chunk_candidates() as sink:
+        out = score_chunks(
+            "insertion loss mask standard package", _navigation_rows(),
+            query_vector=[0.1] * 4, chunk_sims={"toc": 0.99, "body": 0.4},
+            limit=10, drop_navigation=True,
+        )
+    assert [chunk.chunk_id for chunk in out] == ["body"]
+    # The sink records the candidate pool BEFORE the drop: an outsider that
+    # took a candidate slot must still flip the ceiling verdict.
+    assert "s-toc" in sink
+
+
+def test_score_chunks_with_the_switch_off_keeps_navigation_rows():
+    out = score_chunks(
+        "insertion loss mask standard package", _navigation_rows(),
+        query_vector=[0.1] * 4, chunk_sims={"toc": 0.99, "body": 0.4},
+        limit=10, drop_navigation=False,
+    )
+    assert [chunk.chunk_id for chunk in out] == ["toc", "body"]
+
+
+def _flag_chunks_of_element(repo, source_id, element_suffix):
+    with repo._write() as db:
+        ids = [
+            row["id"] for row in db.execute(
+                "SELECT id FROM chunks WHERE source_id=? AND element_ids LIKE ?",
+                (source_id, f"%{element_suffix}%"),
+            ).fetchall()
+        ]
+        db.executemany("UPDATE chunks SET navigation=1 WHERE id=?", [(i,) for i in ids])
+    assert ids
+    return set(ids)
+
+
+@pytest.mark.parametrize("ann", [False, True], ids=["bruteforce", "ann"])
+def test_retrieve_chunks_never_returns_a_navigation_chunk(repo, monkeypatch, ann):
+    """The highest-scoring chunk on both arms is the flagged one; it never comes
+    back, and the read-side switch off restores it (no write needed)."""
+    query = "insertion loss mask standard package"
+    nb, sid = _seed_chunks(repo, [
+        f"{query} " * 30,
+        "the channel reach of the standard package is twenty five millimetres " * 12,
+    ])
+    flagged = _flag_chunks_of_element(repo, sid, "-0001")
+    if ann:
+        repo.build_scale_index(nb.id)
+        monkeypatch.setattr(repo.settings, "chunk_ann_enabled", True)
+    scored, _ids, _mat = repo._retrieve_chunks(nb.id, query)
+    assert scored and not flagged & {chunk.chunk_id for chunk in scored}
+
+    monkeypatch.setattr(repo.settings, "retrieval_navigation_filter_enabled", False)
+    restored, _ids, _mat = repo._retrieve_chunks(nb.id, query)
+    assert flagged & {chunk.chunk_id for chunk in restored}
+
+
+def test_keyword_arm_never_returns_a_navigation_chunk(repo, monkeypatch):
+    nb, sid = _seed_chunks(repo, [
+        "ZXQV7000 retry buffer ZXQV7000 retry buffer " * 15,
+        "the ZXQV7000 retry buffer holds sixty four flits " * 12,
+    ])
+    flagged = _flag_chunks_of_element(repo, sid, "-0001")
+    hits = repo.retrieval.candidates._keyword_chunk_candidates(nb.id, "ZXQV7000")
+    assert hits and not flagged & {chunk.chunk_id for chunk in hits}
+    monkeypatch.setattr(repo.settings, "retrieval_navigation_filter_enabled", False)
+    hits = repo.retrieval.candidates._keyword_chunk_candidates(nb.id, "ZXQV7000")
+    assert flagged & {chunk.chunk_id for chunk in hits}

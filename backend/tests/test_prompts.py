@@ -64,6 +64,38 @@ def test_answer_prompt_rule_12_preserves_question_qualifiers():
         "asked case marked （推断）" in p
     )
 
+    # 缺口归因:知识项里没有问题要的内容时,只许把缺口描述为「本次检索到的资料里
+    # 没有」,不得推给解析/抽取/索引/资料库覆盖范围(除非某条知识项明说,例如规则 11
+    # 的完整枚举覆盖行);不妨碍按规则 3 作答或按推断标记外推。它与限定词保真同属
+    # 规则 12,落在规则 13 之前。
+    gap_rule = (
+        "When the knowledge items lack something the question asks for, "
+        "describe the gap only as absent from the knowledge items retrieved "
+        "this time — never attribute it to parsing, extraction, indexing, or "
+        "the library's coverage unless a knowledge item (such as an exhaustive "
+        "coverage line, rule 11) explicitly establishes it. This does not stop "
+        "you from answering per rule 3 or extrapolating with the inference "
+        "marker."
+    )
+    assert gap_rule in p
+    assert (
+        p.index("12. Preserve every qualifier") < p.index(gap_rule)
+        < p.index("13. Inference status propagates")
+    )
+
+    # 分节合成:规则 12 的缺口说明只针对本节负责覆盖的内容,不得替别节宣称「本次
+    # 未检索到」。
+    sectioned = answer_prompt(
+        "q?", "k1: [concept] X", sectioned=True,
+        section_title="T", section_index=2, section_total=5)
+    assert gap_rule in sectioned
+    assert (
+        "Rule 12's gap statement applies only to what THIS section is "
+        "responsible for covering; never claim other aspects this section "
+        "did not receive were \"not retrieved this time\"." in sectioned
+    )
+    assert "Rule 12's gap statement" not in p
+
     rule_11_idx = p.index("collection on its own.")
     rule_12_idx = p.index("12. Preserve every qualifier")
     question_idx = p.index("Question: q?")

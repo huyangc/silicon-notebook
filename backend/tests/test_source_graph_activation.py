@@ -72,6 +72,7 @@ def _service(*, snapshot, ppr, primitives=None, partitioned_ppr=None):
         selected_source_graph_rollout_percent=0,
         selected_source_graph_expected_corpus_signature="",
         selected_source_graph_enrichment_tokens=1000,
+        retrieval_navigation_filter_enabled=True,
     )
     events = _Events()
     service = SelectedSourceGraphActivationService(

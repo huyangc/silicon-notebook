@@ -41,6 +41,7 @@ COMMANDS = {
     ("maintain", "promotion-targets"): Command("backfill_promotion_targets.py", "回填晋升目标"),
     ("maintain", "delete-leftovers"): Command("sweep_legacy_delete_leftovers.py", "清理历史删除残留"),
     ("maintain", "global-attribution"): Command("backfill_global_ask_attribution.py", "回填全局问答归因"),
+    ("maintain", "navigation"): Command("backfill_navigation_chunks.py", "判定存量来源的导航页（目录、图表清单）"),
     ("maintain", "selected-source"): Command("prepare_selected_source_graph.py", "准备所选来源图索引", False),
     ("database", "migrate"): Command("app.scripts.migrate_database", "把数据库迁移到本构建的 schema 版本（只迁移不 seed，须停服）", True, None, True),
     ("database", "migrate-postgres"):Command("migrate_sqlite_to_postgres.py", "迁移 SQLite 到 PostgreSQL"),

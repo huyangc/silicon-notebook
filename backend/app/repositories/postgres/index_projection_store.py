@@ -37,7 +37,7 @@ from app.repositories.postgres.search import PAYLOAD_NAME_EXPRESSION
 from app.repositories.source_subgraph_projection import (
     source_graph_partition_rows_on,
     source_subgraph_rows_on,
-    source_subgraph_signature_on,
+    source_subgraph_signatures_on,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -759,19 +759,21 @@ class IndexProjectionStore:
         ).fetchall()
 
     def source_subgraph_signature(
-        self, notebook_id: str, source_ids: Sequence[str]
+        self, notebook_id: str, source_ids: Sequence[str], *,
+        with_navigation: bool = False,
     ) -> tuple:
         allowed = tuple(sorted(set(source_ids)))
         if not allowed:
-            return (0, 0, 0, ())
+            return ((0, 0, 0, ()), ()) if with_navigation else (0, 0, 0, ())
         with self.connect() as connection:
-            return source_subgraph_signature_on(
+            signatures = source_subgraph_signatures_on(
                 connection,
                 notebook_id,
                 allowed,
                 placeholder="%s",
                 postgres=True,
             )
+        return signatures if with_navigation else signatures[0]
 
     def source_subgraph_rows(
         self,
@@ -783,6 +785,7 @@ class IndexProjectionStore:
         if not allowed:
             return {
                 "signature": (0, 0, 0, ()),
+                "navigation_signature": (),
                 "kg_generation": 0,
                 "cluster_generation": 0,
                 "sources": [],

@@ -333,7 +333,15 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # a user id) and status_before_delete (TEXT NOT NULL DEFAULT '') -- plus the
 # partial idx_notebooks_pending_delete_due over delete_after WHERE
 # status='pending_delete'. No backfill. See ``_migration_100``.
-SCHEMA_VERSION = 100
+# v101 (paired with PostgreSQL 0082_chunk_navigation.sql) adds
+# chunks.navigation (INTEGER NOT NULL DEFAULT 0: 1 = a navigation page the
+# build judged, kept out of retrieval ranking) and
+# sources.navigation_scanned_at (nullable TEXT: equal to chunked_at once the
+# current chunk generation is judged) and sources.navigation_version (INTEGER
+# NOT NULL DEFAULT 0: +1 whenever the source's set of flagged chunks changes;
+# the selected-source snapshot cache keys on it). No index, no backfill in the migration:
+# the service judges existing sources after readiness. See ``_migration_101``.
+SCHEMA_VERSION = 101
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
 # when v87 was written (a migration must not change meaning when the live
@@ -6106,6 +6114,37 @@ class SqliteMigrator:
                 "CREATE INDEX IF NOT EXISTS idx_notebooks_pending_delete_due\n"
                 "                    ON notebooks(delete_after) "
                 "WHERE status='pending_delete'"
+            )
+
+    def _migration_101(self) -> None:
+        """Navigation-page marker, parity with PostgreSQL
+        ``0082_chunk_navigation.sql``.
+
+        ``chunks.navigation`` is 1 for a chunk the build judged to be a
+        navigation page (table of contents, list of figures / tables:
+        ``app.services.navigation_chunks``), 0 otherwise; retrieval
+        leaves those chunks out of ranking. ``sources.navigation_scanned_at``
+        is the instant the source's current chunk generation was judged (NULL
+        = never judged): a generation token, equal to ``chunked_at`` once the
+        current chunks are judged, so a source whose stamp is NULL or differs
+        from its ``chunked_at`` still needs judging (no clock comparison).
+        ``sources.navigation_version`` counts changes to the source's set of
+        flagged chunks (+1 in the transaction of every write that changes it),
+        the cheap version token the selected-source snapshot cache keys on. No
+        index: the rare ``--clear`` scans chunks under the maintenance
+        statement-timeout floor, and retrieval never filters by this column
+        through an index. No backfill here: the service
+        judges existing sources in the background after readiness
+        (``app.services.navigation_backfill``), so the upgrade stays O(1) on
+        large databases.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "chunks", "navigation", "INTEGER NOT NULL DEFAULT 0"
+            )
+            self.add_column_if_missing(db, "sources", "navigation_scanned_at", "TEXT")
+            self.add_column_if_missing(
+                db, "sources", "navigation_version", "INTEGER NOT NULL DEFAULT 0"
             )
 
     def migrate(self) -> list[int]:

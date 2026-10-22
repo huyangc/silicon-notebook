@@ -2430,6 +2430,7 @@ def test_generated_question_hydration_pushes_down_a_peer_ceiling():
 
     class _Candidates:
         chunks = _Chunks()
+        settings = SimpleNamespace(retrieval_navigation_filter_enabled=True)
 
         def _connect(self):
             import contextlib

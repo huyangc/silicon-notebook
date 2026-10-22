@@ -4,6 +4,7 @@ from typing import Callable, Sequence
 
 from psycopg import errors
 
+from app.repositories.navigation_version import navigation_bump
 from app.repositories.postgres._store_utils import (
     TimestampInput,
     execute_many,
@@ -538,6 +539,8 @@ class KgBuildJobStore:
                 or len(fallback_warning) > _STAGE_FALLBACK_WARNING_MAX_CHARS
             ):
                 raise ValueError("invalid staged chunk fallback warning")
+            if type(chunks.get("navigation_scanned", False)) is not bool:
+                raise ValueError("invalid staged navigation marker")
             chunks["_created_at"] = normalize_timestamp(
                 str(chunks.get("created_at"))
             )
@@ -550,6 +553,9 @@ class KgBuildJobStore:
                     or type(row.get("id")) is not str
                     or not isinstance(row.get("text"), str)
                     or not isinstance(row.get("section_path", ""), str)
+                    # Navigation-page marker (v101 / 0082); absent in a stage
+                    # written before it, read as False.
+                    or type(row.get("navigation", False)) is not bool
                     or not isinstance(row.get("element_ids"), list)
                     or any(type(value) is not str for value in row["element_ids"])
                     or len(row["element_ids"]) != len(set(row["element_ids"]))
@@ -812,7 +818,13 @@ class KgBuildJobStore:
             self._validate_stage_payloads(connection, payloads)
             self._refuse_memory_source(connection, notebook_id, snapshot)
 
+            flagged_before: dict = {}
             if snapshot:
+                for row in connection.execute(
+                    "SELECT source_id, id FROM chunks "
+                    "WHERE source_id=ANY(%s) AND navigation<>0", (snapshot,)
+                ).fetchall():
+                    flagged_before.setdefault(row["source_id"], []).append(row)
                 connection.execute(
                     "DELETE FROM chunks WHERE source_id=ANY(%s)", (snapshot,)
                 )
@@ -832,6 +844,7 @@ class KgBuildJobStore:
                             chunk_id, notebook_id, source_id, str(row["text"]),
                             str(row.get("section_path") or ""),
                             jsonb(element_ids), created,
+                            1 if row.get("navigation") else 0,
                         )
                     )
                     chunk_element_rows.extend(
@@ -839,9 +852,16 @@ class KgBuildJobStore:
                         for element_id in element_ids
                     )
                 chunk_vectors.extend(chunk_payload.get("vectors") or [])
+                # navigation_scanned_at certifies the staged judgement (same as
+                # SQLite): NULL for a stage built with detection off / before 0082.
                 connection.execute(
-                    "UPDATE sources SET chunked_at=%s WHERE id=%s AND notebook_id=%s",
-                    (created, source_id, notebook_id),
+                    "UPDATE sources SET chunked_at=%s, navigation_scanned_at=%s "
+                    "WHERE id=%s AND notebook_id=%s",
+                    (
+                        created,
+                        created if chunk_payload.get("navigation_scanned") else None,
+                        source_id, notebook_id,
+                    ),
                 )
                 # 每源回退徽标随本事务置/清(codex #602 R4 P2;与 SQLite 同义)。
                 warning_code = str(
@@ -867,8 +887,9 @@ class KgBuildJobStore:
             execute_many(
                 connection,
                 "INSERT INTO chunks "
-                "(id,notebook_id,source_id,text,section_path,element_ids,created_at) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                "(id,notebook_id,source_id,text,section_path,element_ids,created_at,"
+                "navigation) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
                 chunk_rows,
             )
             execute_many(
@@ -891,6 +912,26 @@ class KgBuildJobStore:
                 "(chunk_id,notebook_id,vector,created_at) VALUES (%s,%s,%s,%s)",
                 encoded_chunk_vectors,
             )
+
+            # sources.navigation_version: +1 for each source whose set of
+            # flagged chunks this publication changed (backend-neutral rule:
+            # ``app.repositories.navigation_version``).
+            published_flagged = {
+                source_id: [
+                    row["id"] for row in payload["chunks"]["rows"]
+                    if isinstance(row, dict) and row.get("navigation")
+                ]
+                for source_id, payload in payloads
+            }
+            for source_id in snapshot:
+                if navigation_bump(
+                    flagged_before.get(source_id, ()),
+                    published_flagged.get(source_id, ()),
+                ):
+                    connection.execute(
+                        "UPDATE sources SET navigation_version=navigation_version+1 "
+                        "WHERE id=%s AND notebook_id=%s", (source_id, notebook_id),
+                    )
 
             # Chunk publication invalidates every notebook-derived KG product
             # even when the selected pipeline preserves base KG rows.  Derived

@@ -26,10 +26,11 @@ database touch arrives as an injected callable.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, ContextManager, Sequence
 
 from app.repositories.lexical_query import exact_probe_terms
+from app.services.navigation_filter import drop_navigation_rows, row_navigation
 from app.services.retrieval import (
     RetrievalSupport,
     RetrievedChunk,
@@ -39,12 +40,20 @@ from app.services.retrieval import (
 
 @dataclass(frozen=True)
 class ExactLookupLimits:
-    """Every bound this path obeys, in one place (all from Settings)."""
+    """Every bound this path obeys, in one place (all from Settings).
+
+    ``drop_navigation`` (required) is the read-side navigation switch
+    (``retrieval_navigation_filter_enabled``): True leaves navigation pages
+    (tables of contents, lists of figures) out of the probe's hits -- so they
+    spend no section slot -- and out of every fetched section."""
 
     max_identifiers: int = 3
     fts_k: int = 50
     max_sections: int = 3
     max_chunks_per_section: int = 12
+    # Required (keyword-only), like ``score_chunks``' ``drop_navigation``: a
+    # construction that forgets the switch fails instead of ignoring it.
+    drop_navigation: bool = field(kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -52,10 +61,10 @@ class ExactLookupDeps:
     """The four store seams, injected — this module owns no SQL and no facade.
 
     ``exact_search(db, notebook_id, needle, k)`` →
-        ``[{chunk_id, source_id, section_path, score, ...}]``
+        ``[{chunk_id, source_id, section_path, score, navigation, ...}]``
     ``section_rows(db, notebook_id, source_id, section_path, limit)`` →
         chunk rows (``id, source_id, text, section_path, element_ids,
-        source_title``) in document order.
+        source_title, navigation``) in document order.
     ``chunk_rows(db, chunk_ids)`` →
         the SAME row shape, addressed by primary key. Needed because "take the
         whole section" is only meaningful when the library HAS sections; see
@@ -253,6 +262,10 @@ def exact_lookup_sections(
     with deps.connect() as db:
         for term in terms:
             for hit in deps.exact_search(db, notebook_id, term, limits.fts_k):
+                if limits.drop_navigation and row_navigation(hit):
+                    # A table of contents names every section; as a hit it would
+                    # take a section slot from the section it points at.
+                    continue
                 source_id = str(hit["source_id"] or "")
                 section_path = str(hit["section_path"] or "")
                 if not source_id or not section_path:
@@ -286,7 +299,11 @@ def exact_lookup_sections(
                 row_groups.append(_ordered_by_id(
                     deps.chunk_rows(db, hit_ids), hit_ids))
 
-    return _build_sections(row_groups, terms)
+    return _build_sections(
+        [drop_navigation_rows(rows, enabled=limits.drop_navigation)
+         for rows in row_groups],
+        terms,
+    )
 
 
 def _ordered_by_id(rows: Sequence[Any], chunk_ids: Sequence[str]) -> list[Any]:

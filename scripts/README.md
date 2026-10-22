@@ -24,7 +24,7 @@ npm run cli -- batch ingest --input-dir ./papers --notebook-name "资料库"
 | `batch`（兼容名 `batch-ingest`） | 原 `batch_ingest.py` 的所有阶段和参数 |
 | `scale` | 原 `build_scale_index.py` 的 inspect/build/export/import |
 | `kg` | 原 `app.scripts` 中的 build/recluster/reembed/backfill-relations |
-| `maintain` | chunks、kg-embeddings、reextract、denoise、knowhow、promotion-targets、delete-leftovers、global-attribution、selected-source |
+| `maintain` | chunks、kg-embeddings、reextract、denoise、knowhow、promotion-targets、delete-leftovers、global-attribution、navigation、selected-source |
 | `database` | migrate（把库迁到本构建的 schema：只迁移不 seed，须停服）、migrate-postgres、shadow、merge、retrieval-indexes、hotpath-indexes |
 | `diag` / `diagnose` | 原统一只读诊断；另有 postgres、retrieval、mineru 专项诊断 |
 | `source` | mineru-batch、embed-images |
@@ -389,6 +389,24 @@ PYTHONPATH=backend python scripts/backfill_global_ask_attribution.py            
 ```
 
 退出码 0/1/2/3 与细节见 `docs/operations_zh.md` 的「全局问答归因回填」。
+
+### `backfill_navigation_chunks.py` —— 导航页标记回填
+
+SQLite v101 / PostgreSQL 0082 起，建块时只凭文档自身的标题结构判定目录、图表清单这类导航页并写
+`chunks.navigation`（检索不把它们排进结果）；升级前已分块的来源服务就绪后会在后台自动补判一遍。本工具用于
+dry run（逐来源块数/命中数/将改变数，`--show-sections` 列出命中块的章节标签）、手动重跑（默认只判待判来源，
+`--rescan` 重判全部）与 `--clear`（数据级回滚：标记清 0、判定凭证清空）。范围必须显式给出（`--notebook-id`
+或 `--all-notebooks`）；写库是 compare-and-set，PostgreSQL 上写库要求 `--confirm-service-stopped`；不迁移、不 seed，
+库不是本构建的 schema 就拒绝（退出码 3）。统一入口：`maintain navigation`。
+
+```bash
+PYTHONPATH=backend python scripts/backfill_navigation_chunks.py --all-notebooks --dry-run
+PYTHONPATH=backend python scripts/backfill_navigation_chunks.py --notebook-id <id> --dry-run --show-sections
+PYTHONPATH=backend python scripts/backfill_navigation_chunks.py --all-notebooks --confirm-service-stopped
+PYTHONPATH=backend python scripts/backfill_navigation_chunks.py --all-notebooks --clear --confirm-service-stopped
+```
+
+退出码 0/1/2/3 与细节见 `docs/operations_zh.md` 的「导航页标记回填」。
 
 ---
 

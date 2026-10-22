@@ -31,6 +31,7 @@ from tests.sqlite_migration_testkit import (
     rollback_v98,
     rollback_v99,
     rollback_v100,
+    rollback_v101,
 )
 
 
@@ -94,7 +95,7 @@ def test_v92_drop_outside_the_allowlist_still_fails(tmp_path, _upgraded_v9):
     with sqlite3.connect(database) as rollback:
         rollback_v92(rollback)
         rollback.execute("PRAGMA user_version = 91")
-    manifest = module.MIGRATION_MANIFEST[(91, 100)]
+    manifest = module.MIGRATION_MANIFEST[(91, 101)]
     assert manifest["dropped_tables"] == frozenset(
         {"auth_policy", "auth_policy_audit", "external_identities"}
     )
@@ -104,12 +105,12 @@ def test_v92_drop_outside_the_allowlist_still_fails(tmp_path, _upgraded_v9):
     }
     original = dict(manifest)
     try:
-        module.MIGRATION_MANIFEST[(91, 100)] = {
+        module.MIGRATION_MANIFEST[(91, 101)] = {
             **manifest, "dropped_tables": frozenset({"auth_policy"}),
         }
         result = module.verify_snapshot(database, storage)
     finally:
-        module.MIGRATION_MANIFEST[(91, 100)] = original
+        module.MIGRATION_MANIFEST[(91, 101)] = original
     assert not result.ok
     assert "external_identities" in result.changed_tables
 
@@ -287,6 +288,27 @@ def test_deployed_v98_database_verifies_the_ask_job_report_column(tmp_path, _upg
 
 @pytest.mark.legacy_upgrade_contract
 @pytest.mark.real_sqlite_migration
+def test_deployed_v100_database_verifies_the_navigation_marker_columns(tmp_path, _upgraded_v9):
+    """A deployed v100 database is missing exactly _migration_101's three
+    columns, chunks.navigation, sources.navigation_scanned_at and
+    sources.navigation_version; the upgrade adds them with their defaults and
+    rewrites no existing row."""
+    module = _load_verifier()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
+    with sqlite3.connect(database) as rollback:
+        rollback_v101(rollback)
+        rollback.execute("PRAGMA user_version = 100")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 100
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+
+
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
 def test_deployed_v97_database_verifies_the_global_attribution_table(tmp_path, _upgraded_v9):
     """A deployed v97 database is missing exactly _migration_98's schema: the
     global_ask_job_notebooks table and its index, global_ask_jobs.attributed
@@ -400,7 +422,7 @@ def test_v97_hop_holds_the_findings_triggers_to_the_generator(tmp_path, _upgrade
     with sqlite3.connect(database) as rollback:
         rollback_v97(rollback)
         rollback.execute("PRAGMA user_version = 96")
-    manifest = module.MIGRATION_MANIFEST[(96, 100)]
+    manifest = module.MIGRATION_MANIFEST[(96, 101)]
     assert set(manifest["triggers"]) == {
         "sync_capture_kg_analysis_findings_insert",
         "sync_capture_kg_analysis_findings_update",
@@ -408,7 +430,7 @@ def test_v97_hop_holds_the_findings_triggers_to_the_generator(tmp_path, _upgrade
     }
     original = dict(manifest)
     try:
-        module.MIGRATION_MANIFEST[(96, 100)] = {
+        module.MIGRATION_MANIFEST[(96, 101)] = {
             **manifest,
             "triggers": {
                 **manifest["triggers"],
@@ -417,7 +439,7 @@ def test_v97_hop_holds_the_findings_triggers_to_the_generator(tmp_path, _upgrade
         }
         result = module.verify_snapshot(database, storage)
     finally:
-        module.MIGRATION_MANIFEST[(96, 100)] = original
+        module.MIGRATION_MANIFEST[(96, 101)] = original
     assert not result.ok
 
 

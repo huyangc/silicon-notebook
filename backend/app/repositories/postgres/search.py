@@ -839,7 +839,7 @@ def chunk_exact_candidate_rows(
         scope_params.append(ceiling.param)
     return execute_bound(
         connection,
-        "SELECT id AS candidate_id,source_id,section_path,"
+        "SELECT id AS candidate_id,source_id,section_path,navigation,"
         f"public.similarity({text_expression},%s) AS candidate_similarity "
         f"FROM chunks WHERE notebook_id=%s AND {text_expression} ILIKE %s"
         f"{scope_sql} "
@@ -866,7 +866,8 @@ def chunk_section_rows(
         return []
     return connection.execute(
         "SELECT c.id,c.source_id,c.text,c.section_path,c.element_ids,"
-        "s.title AS source_title FROM chunks c JOIN sources s ON s.id=c.source_id "
+        "c.navigation,s.title AS source_title "
+        "FROM chunks c JOIN sources s ON s.id=c.source_id "
         "WHERE c.notebook_id=%s AND c.source_id=%s "
         "AND (c.section_path=%s OR c.section_path LIKE %s) "
         "ORDER BY c.ordinal LIMIT %s",

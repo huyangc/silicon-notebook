@@ -720,6 +720,7 @@
           "<el-id-1>"
         ],
         "id": "<chunk-id-1>",
+        "navigation": 0,
         "notebook_id": "<nb-id-1>",
         "question_indexed_at": null,
         "section_path": "§1 Gain",
@@ -732,6 +733,7 @@
           "<el-id-2>"
         ],
         "id": "<chunk-id-2>",
+        "navigation": 0,
         "notebook_id": "<nb-id-1>",
         "question_indexed_at": null,
         "section_path": "§2 Formula",
@@ -1040,6 +1042,8 @@
         "file_size": 113,
         "id": "<src-id-1>",
         "memory_id": null,
+        "navigation_scanned_at": null,
+        "navigation_version": 0,
         "notebook_id": "<nb-id-1>",
         "parse_status": "parsed",
         "source_type": "markdown",
@@ -2118,7 +2122,7 @@
       },
       {
         "name": "chunks",
-        "sql_sha256": "1ec86c13d63be576037a05f6455da95a2395f1e4e3bee02996c687490e411c01",
+        "sql_sha256": "3bd3af3185e990f919a6ecbc3add4ad109bfb68afd23d1910c810d03d52c63d0",
         "type": "table"
       },
       {
@@ -2563,7 +2567,7 @@
       },
       {
         "name": "sources",
-        "sql_sha256": "377dee25d3b7df5f8cd0fb45f7ee82da01899d5b190bee7c0c6fdd5a52da3e3c",
+        "sql_sha256": "dde88392e008e1698a4235a4c129b318cc92c04f406525af984d6256ac42f7ef",
         "type": "table"
       },
       {
@@ -3347,6 +3351,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 100
+    "user_version": 101
   }
 }

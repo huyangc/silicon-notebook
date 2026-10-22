@@ -5,8 +5,15 @@ from typing import Callable, Iterable
 
 from app.core.config import Settings
 from app.models.sources import MEMORY_SOURCE_TYPE
-from app.repositories.ports import ChunkStorePort, ChunkWrite, SourceStorePort
+from app.repositories.ports import (
+    CHUNKED_AT_UNCHECKED,
+    ChunkStorePort,
+    ChunkWrite,
+    SourceStorePort,
+)
 from app.services.chunking import build_chunks
+from app.services.navigation_backfill import emit_navigation_skipped
+from app.services.navigation_chunks import detect_navigation_chunks
 from app.services.source_embedding import SourceEmbeddingService
 from app.domain.indexing_pipeline import (
     BUILTIN_INDEXING_PIPELINE_VERSION,
@@ -288,34 +295,148 @@ class SourceChunkingService:
             # 返回 "" = 没有回退警告(调用方只看它是否为真)。
             self._emit_memory_refused(notebook_id, source_id)
             return ""
-        with self._notebook_lock(notebook_id):
-            pipeline_id, _pipeline_version = (
-                frozen_identity
-                if frozen_identity is not None
-                else self._pipeline_identity(notebook_id)
+        lock = self._notebook_lock(notebook_id)
+        with lock:
+            token, elements, chunk_dicts, warning = self._read_generation(
+                source_id, notebook_id, frozen_identity
             )
-            elements = self.chunks.source_elements_for_chunking(source_id)
-            chunk_dicts, warning = self._chunk_dicts(elements, pipeline_id)
-            rows = [ChunkWrite(id=self.new_id("ck"), text=c["text"],
-                               section_path=c["section_path"],
-                               element_ids=tuple(c["element_ids"])) for c in chunk_dicts]
-            now = self.now()
-            # 分块成功(build_chunks 正常返回,**含产 0 chunk 的纯标题 md**)才走到这里:
-            # 把完成标记 chunked_at 与它认证的 chunk 数据在**同一事务**里提交。
-            self.chunks.replace_source_chunks(
-                source_id, notebook_id, rows, created_at=now, mark_chunked_at=now
+        # 导航页判定在笔记本锁**外**(计划 §3.2):纯计算、与来源大小线性,不拉长同库
+        # 其他分块的等待。写入时按读到的 chunked_at 做 compare-and-set。
+        flags, scanned = self._navigation_flags(
+            notebook_id, source_id, elements, chunk_dicts
+        )
+        with lock:
+            if self._write_generation(
+                source_id, notebook_id, chunk_dicts, warning, flags, scanned,
+                expected_chunked_at=token,
+            ):
+                return warning
+            # 读与写之间这一来源被别人换了代(重解析清了 chunked_at、或另一次分块已
+            # 提交):在锁内整段重来——读、判定、写同一次持锁,不再比对,与改动前同语义。
+            _token, elements, chunk_dicts, warning = self._read_generation(
+                source_id, notebook_id, frozen_identity
             )
-            # 畸形提案回退内建不能只发内部观测事件——用户必须在来源徽标上看得见
-            # (spec:「可见 parse_quality_warning 同级提示」)。marker 在 replace
-            # 之后单独一笔写(它描述已提交的结局);warning 为空清掉本前缀自己的
-            # 旧诊断,MinerU 降级诊断由写入侧的条件谓词保护、绝不覆盖。
-            self.sources.mark_indexing_chunk_fallback(source_id, warning)
-            # Every chunk-derived cache keys off this mutation sequence.
-            self.mark_unified_dirty(notebook_id)
-            # 返回回退码给 process_source:终态状态写会覆写 error_message,上面的
-            # marker 在上传流水线里只是过渡态,徽标要活到终态得靠 terminal_msg 携带
-            # (codex #602 R13 P2)。直连/修复调用路没有后续状态写,marker 即终态。
+            # The first judgement already reported this source's events; the
+            # redo does not report them again.
+            flags, scanned = self._navigation_flags(
+                notebook_id, source_id, elements, chunk_dicts, emit_events=False
+            )
+            self._write_generation(
+                source_id, notebook_id, chunk_dicts, warning, flags, scanned,
+                expected_chunked_at=CHUNKED_AT_UNCHECKED,
+            )
             return warning
+
+    def _read_generation(
+        self,
+        source_id: str,
+        notebook_id: str,
+        frozen_identity: "tuple[str, str] | None",
+    ) -> tuple[object, list[dict], list[dict], str]:
+        """Under the notebook lock: the chunk-generation token, the elements
+        and the chunk dicts. The token is read FIRST: an element replacement
+        (re-parse) after it clears ``chunked_at`` to NULL and so fails the
+        compare-and-set, as does another committed chunk generation. The one
+        case the token cannot see is a replacement while the token is ALREADY
+        NULL (NULL -> NULL, an ABA on the cleared marker): that race predates
+        this change -- the build held the lock across read and write, but the
+        re-parse never takes the notebook lock either -- and it heals the same
+        way, because the re-parse that replaced the elements runs its own
+        build afterwards. Splitting the lock does not widen it."""
+        pipeline_id, _pipeline_version = (
+            frozen_identity
+            if frozen_identity is not None
+            else self._pipeline_identity(notebook_id)
+        )
+        token = self.chunks.chunk_generation(source_id)
+        elements = self.chunks.source_elements_for_chunking(source_id)
+        chunk_dicts, warning = self._chunk_dicts(elements, pipeline_id)
+        return token, elements, chunk_dicts, warning
+
+    def _navigation_flags(
+        self,
+        notebook_id: str,
+        source_id: str,
+        elements: list[dict],
+        chunk_dicts: list[dict],
+        *,
+        emit_events: bool = True,
+    ) -> tuple[list[bool], bool]:
+        """``(per-chunk navigation flags, judged)``. Detection off: all False
+        and not judged, so ``navigation_scanned_at`` stays NULL and a later
+        switch-on judges the source in the background. Fail-open: a detector
+        error never fails the build -- the chunks are written unflagged and
+        unjudged (the background pass retries) and a content-free event names
+        the exception class."""
+        if not self.settings.navigation_detection_enabled:
+            return [False] * len(chunk_dicts), False
+        try:
+            result = detect_navigation_chunks(
+                elements, [(c["section_path"], c["text"]) for c in chunk_dicts]
+            )
+        except Exception as exc:  # noqa: BLE001 - judgement is advisory, the build is not
+            if emit_events:
+                self._emit_navigation_failed(notebook_id, source_id, exc)
+            return [False] * len(chunk_dicts), False
+        if result.skipped and emit_events:
+            emit_navigation_skipped(
+                self.event_log, notebook_id, source_id, result, stage="chunking"
+            )
+        return list(result.flags), True
+
+    def _emit_navigation_failed(
+        self, notebook_id: str, source_id: str, exc: BaseException
+    ) -> None:
+        if self.event_log is None:
+            return
+        try:
+            self.event_log.emit({
+                "kind": "navigation_detection_failed",
+                "notebook_id": notebook_id,
+                "source_id": source_id,
+                "stage": "chunking",
+                "error_class": type(exc).__name__,
+            })
+        except Exception:  # noqa: BLE001 - observability is fail-open
+            pass
+
+    def _write_generation(
+        self,
+        source_id: str,
+        notebook_id: str,
+        chunk_dicts: list[dict],
+        warning: str,
+        flags: list[bool],
+        scanned: bool,
+        *,
+        expected_chunked_at: object,
+    ) -> bool:
+        rows = [ChunkWrite(id=self.new_id("ck"), text=c["text"],
+                           section_path=c["section_path"],
+                           element_ids=tuple(c["element_ids"]),
+                           navigation=flag)
+                for c, flag in zip(chunk_dicts, flags)]
+        now = self.now()
+        # 分块成功(build_chunks 正常返回,**含产 0 chunk 的纯标题 md**)才走到这里:
+        # 把完成标记 chunked_at、导航判定凭证与它们认证的 chunk 数据在**同一事务**里提交。
+        if not self.chunks.replace_source_chunks(
+            source_id, notebook_id, rows, created_at=now, mark_chunked_at=now,
+            navigation_scanned_at=now if scanned else None,
+            expected_chunked_at=expected_chunked_at,
+        ):
+            return False
+        # 畸形提案回退内建不能只发内部观测事件——用户必须在来源徽标上看得见
+        # (spec:「可见 parse_quality_warning 同级提示」)。marker 在 replace
+        # 之后单独一笔写(它描述已提交的结局);warning 为空清掉本前缀自己的
+        # 旧诊断,MinerU 降级诊断由写入侧的条件谓词保护、绝不覆盖。
+        self.sources.mark_indexing_chunk_fallback(source_id, warning)
+        # Every chunk-derived cache keys off this mutation sequence.
+        self.mark_unified_dirty(notebook_id)
+        # 返回回退码给 process_source(build_chunks_for_source 返回 warning):终态
+        # 状态写会覆写 error_message,上面的 marker 在上传流水线里只是过渡态,徽标要活到
+        # 终态得靠 terminal_msg 携带(codex #602 R13 P2)。直连/修复调用路没有后续状态写,
+        # marker 即终态。
+        return True
 
     def rebuild_notebook_chunks(
         self,
@@ -341,6 +462,7 @@ class SourceChunkingService:
             )
             rows_by_source: dict[str, list[ChunkWrite]] = {}
             warnings_by_source: dict[str, str] = {}
+            scanned_by_source: dict[str, bool] = {}
             total_proposals = 0
             total_chars = 0
             warning_count = 0
@@ -359,14 +481,20 @@ class SourceChunkingService:
                     > self.settings.indexing_pipeline_rebuild_max_text_chars
                 ):
                     raise ValueError("indexing pipeline rebuild exceeds deployment bounds")
+                # 重建本就持笔记本锁跨整库 embedding I/O(见 _notebook_lock),判定
+                # 在锁内与之同量级可忽略;标记随暂存 payload 进入原子发布。
+                flags, scanned_by_source[source_id] = self._navigation_flags(
+                    notebook_id, source_id, elements, chunk_dicts
+                )
                 rows_by_source[source_id] = [
                     ChunkWrite(
                         id=self.new_id("ck"),
                         text=item["text"],
                         section_path=item["section_path"],
                         element_ids=tuple(item["element_ids"]),
+                        navigation=flag,
                     )
-                    for item in chunk_dicts
+                    for item, flag in zip(chunk_dicts, flags)
                 ]
             # Embedding/model I/O happens before and outside the final publish
             # transaction. Each source payload is durable but not readable.
@@ -398,9 +526,13 @@ class SourceChunkingService:
                                 "text": row.text,
                                 "section_path": row.section_path,
                                 "element_ids": list(row.element_ids),
+                                "navigation": bool(row.navigation),
                             }
                             for row in rows
                         ],
+                        # 发布器据此在同一事务里置 navigation_scanned_at(False =
+                        # 判定关闭,留 NULL 给后台回填)。
+                        "navigation_scanned": scanned_by_source[source_id],
                         "vectors": vectors,
                         # 每源回退警告随 payload 持久化(codex #602 R4 P2):发布器在
                         # 同一原子事务里随 chunk 置/清来源徽标——重建是异步的,计数

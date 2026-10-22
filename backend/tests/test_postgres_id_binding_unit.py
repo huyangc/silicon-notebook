@@ -261,7 +261,7 @@ def test_batched_element_counts_keep_the_plan_cache():
     connection = _Recorder()
     store = SourceStore(_database(connection), now=lambda: "2026-09-01T00:00:00+00:00")
 
-    SourceStore.retrieval_element_rows(connection, "nb")
+    SourceStore.retrieval_element_rows(connection, "nb", with_navigation=True)
     store.element_type_count_rows(connection, ["s-1", "s-2"], ["paragraph", "table"])
 
     recorded = connection.calls
@@ -288,9 +288,12 @@ def test_whole_notebook_reads_have_no_source_list_form():
 
     connection = _Recorder()
     KnowledgeStore.relation_endpoint_rows(connection, "nb")
-    SourceStore.retrieval_element_rows(connection, "nb")
-    assert [options for _s, _p, options in connection.calls] == [{}, {}]
-    assert [params for _s, params, _o in connection.calls] == [("nb",), ("nb",)]
+    SourceStore.retrieval_element_rows(connection, "nb", with_navigation=False)
+    SourceStore.retrieval_element_rows(connection, "nb", with_navigation=True)
+    assert [options for _s, _p, options in connection.calls] == [{}, {}, {}]
+    # The navigation form binds the notebook twice (its flagged-chunk CTE).
+    assert [params for _s, params, _o in connection.calls] == [
+        ("nb",), ("nb",), ("nb", "nb")]
     for method in (
         KnowledgeStore.relation_endpoint_rows,
         SqliteKnowledgeStore.relation_endpoint_rows,
@@ -303,5 +306,10 @@ def test_whole_notebook_reads_have_no_source_list_form():
         (RetrievalKnowledgeStorePort, "relation_endpoint_rows"),
         (SourceStorePort, "retrieval_element_rows"),
     ):
-        parameters = list(inspect.signature(getattr(port, name)).parameters)
+        # Keyword-only switches (``with_navigation``) are not a source list.
+        parameters = [
+            parameter.name
+            for parameter in inspect.signature(getattr(port, name)).parameters.values()
+            if parameter.kind is not inspect.Parameter.KEYWORD_ONLY
+        ]
         assert parameters[-2:] == ["db", "notebook_id"], (port, parameters)

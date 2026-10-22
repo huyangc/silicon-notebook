@@ -160,6 +160,12 @@ class RetrievedChunk:
     # consumer that reads it (`is_graph_only_chunk` included). Reasoning's
     # synthesis-assembly reserve identifies its candidates by this flag.
     exact_lookup: bool = field(default=False, compare=False)
+    # ``chunks.navigation`` of the row this chunk was hydrated from (a table of
+    # contents / list of figures page, ``app.services.navigation_chunks``).
+    # Set only by the by-id hydrations whose caller drops it later
+    # (``app.services.navigation_filter.drop_navigation_chunks``); scored
+    # producers drop flagged rows before a chunk is ever built.
+    navigation: bool = field(default=False, compare=False)
 
     @property
     def object_id(self) -> str:
