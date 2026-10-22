@@ -323,6 +323,35 @@ def test_sweep_driver_a_on_postgres(postgres_repository):
     assert remaining == 0
 
 
+@pytest.mark.parametrize("years", [-30, 30])
+def test_stale_cutoff_reads_the_store_clock_on_postgres(
+    postgres_repository, monkeypatch, years
+):
+    """PostgreSQL twin of the SQLite lane's store-clock cutoff test: driver
+    A's ``list_stale`` and ``mark_running``'s steal branch judge staleness by
+    the store's clock (the one writing ``updated_at``), not the host's."""
+    from datetime import datetime, timedelta, timezone
+
+    repo = postgres_repository
+    owner = f"u-pg-clock-{years}"
+    nb = f"nb-pg-clock-{years}"
+    with repo._write() as db:
+        _insert_user(db, owner)
+        _insert_notebook(db, nb, owner)
+    store = repo._runtime.notebook_delete_jobs
+    base = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(days=365 * years)
+    clock = [base]
+    monkeypatch.setattr(store, "now", lambda: clock[0])
+    job = store.request(nb, owner)
+    assert store.mark_running(job["id"], stale_cutoff_seconds=300) is not None
+    clock[0] = base + timedelta(seconds=299)
+    assert job["id"] not in [row["id"] for row in store.list_stale(300)]  # MUT
+    assert store.mark_running(job["id"], stale_cutoff_seconds=300) is None  # MUT
+    clock[0] = base + timedelta(seconds=301)
+    assert job["id"] in [row["id"] for row in store.list_stale(300)]  # MUT
+    assert store.mark_running(job["id"], stale_cutoff_seconds=300) is not None  # MUT
+
+
 def test_sweep_driver_b_on_postgres(postgres_repository):
     repo = postgres_repository
     owner = "u-pg-sweep-b"
