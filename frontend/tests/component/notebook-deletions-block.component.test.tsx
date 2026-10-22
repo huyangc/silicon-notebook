@@ -12,6 +12,7 @@ import {
   EXPORT_CLOSED_TEXT,
   EXPORT_FAILED_TEXT,
   TRANSFER_BUSY_TEXT,
+  TRANSFER_RESTORED_TEXT,
   TRANSFER_CLOSED_TEXT,
   TRANSFER_NO_TARGET_TEXT,
   TRANSFER_WARNING_TEXT,
@@ -19,7 +20,7 @@ import {
   exportLabel,
   transferDoneText,
   transferProgressText,
-  transferStoppedText,
+  transferSummaryText,
   untransferableText,
 } from "../../app/notebook-deletion-copy.ts";
 import {
@@ -436,7 +437,7 @@ test("转移进度在两页之间可见", async () => {
   const region = await block();
   await user.click(await within(region).findByRole("button", { name: "转移到我的笔记本" }));
   await user.click(within(region).getByRole("button", { name: "确认转移" }));
-  expect(await within(region).findByText(transferProgressText(2, 5))).toBeInTheDocument();
+  expect(await within(region).findByText(transferProgressText(2, 0, 5))).toBeInTheDocument();
   expect(within(region).getByRole("button", { name: "转移中…" })).toBeDisabled();
   await act(async () => secondPage.resolve(json({ results: [moved("m3"), moved("m4"), moved("m5")], remaining: 0, next_after: "m5" })));
   expect(await within(region).findByRole("status")).toHaveTextContent(transferDoneText(5, 0, "我的笔记本"));
@@ -478,7 +479,7 @@ test("转移途中点「取消」:面板收起,守卫不放开,当前这一页�
   expect(within(region).queryByRole("button", { name: "转移到我的笔记本" })).toBeNull();
   await act(async () => gate.resolve(json({ results: [moved("m1"), moved("m2")], remaining: 3, next_after: "m2" })));
   expect(await within(region).findByRole("status")).toHaveTextContent(
-    transferStoppedText(2, "还有 3 条没有转移。"),
+    transferSummaryText(2, 0, 3, "我的笔记本"),
   );
   expect(calls.filter((call) => call.path.endsWith("/memories/transfer"))).toHaveLength(1);
 });
@@ -496,4 +497,70 @@ test("另一次转移正在进行(409):原因落在那一行", async () => {
   await user.click(await within(region).findByRole("button", { name: "转移到我的笔记本" }));
   await user.click(within(region).getByRole("button", { name: "确认转移" }));
   expect(await within(region).findByRole("alert")).toHaveTextContent(TRANSFER_BUSY_TEXT);
+});
+
+const failedItem = (id: string) => ({ source_id: id, new_id: null, ok: false, error: "e", error_code: "x", status: "failed" });
+
+test("进度只数转走的,失败另计;结束时如实列出转走 / 没转成 / 未处理", async () => {
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  const secondPage = deferred<Response>();
+  const pages = [
+    () => json({ results: [moved("m1"), failedItem("m2")], remaining: 3, next_after: "m2" }),
+    () => secondPage.promise,
+  ];
+  installServer([
+    listOf([{ ...MEMBER, transferable_count: 5 }]),
+    (call) => (call.method === "POST" && call.path.endsWith("/memories/transfer") ? pages.shift()!() : undefined),
+  ]);
+  render(<Host />);
+  const region = await block();
+  await user.click(await within(region).findByRole("button", { name: "转移到我的笔记本" }));
+  await user.click(within(region).getByRole("button", { name: "确认转移" }));
+  expect(await within(region).findByText(transferProgressText(1, 1, 5))).toBeInTheDocument();
+  expect(transferProgressText(1, 1, 5)).toBe("已转移 1 / 5 条，1 条没有转移成功");
+  await act(async () => secondPage.resolve(json({ results: [moved("m3"), moved("m4"), moved("m5")], remaining: 0, next_after: "m5" })));
+  const result = await within(region).findByRole("alert");
+  expect(result).toHaveTextContent(transferSummaryText(4, 1, 0, "我的笔记本"));
+  expect(result).toHaveTextContent("1 条没有转移成功（仍在这本笔记本里，请先导出）");
+});
+
+test("转移途中主人撤销了删除(409 notebook_not_pending_delete):说库已恢复、剩下的留在原处", async () => {
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  const pages = [
+    () => json({ results: [moved("m1"), moved("m2")], remaining: 3, next_after: "m2" }),
+    () => json({ detail: { code: "notebook_not_pending_delete", message: "x" } }, 409),
+  ];
+  installServer([
+    listOf([{ ...MEMBER, transferable_count: 5 }]),
+    (call) => (call.method === "POST" && call.path.endsWith("/memories/transfer") ? pages.shift()!() : undefined),
+  ]);
+  render(<Host />);
+  const region = await block();
+  await user.click(await within(region).findByRole("button", { name: "转移到我的笔记本" }));
+  await user.click(within(region).getByRole("button", { name: "确认转移" }));
+  const result = await within(region).findByText(
+    transferSummaryText(2, 0, 3, "我的笔记本", TRANSFER_RESTORED_TEXT),
+  );
+  expect(result).toHaveAttribute("role", "status");
+  expect(result).toHaveTextContent("所有者已撤销删除，这本笔记本已恢复，剩下的记忆留在原处。");
+  expect(result).toHaveTextContent("3 条未处理");
+});
+
+test("分页中途截止已到:原因在前,再列出已转走与未处理的条数", async () => {
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  const pages = [
+    () => json({ results: [moved("m1"), moved("m2")], remaining: 3, next_after: "m2" }),
+    () => json({ detail: { code: "delete_window_closed" } }, 404),
+  ];
+  installServer([
+    listOf([{ ...MEMBER, transferable_count: 5 }]),
+    (call) => (call.method === "POST" && call.path.endsWith("/memories/transfer") ? pages.shift()!() : undefined),
+  ]);
+  render(<Host />);
+  const region = await block();
+  await user.click(await within(region).findByRole("button", { name: "转移到我的笔记本" }));
+  await user.click(within(region).getByRole("button", { name: "确认转移" }));
+  expect(await within(region).findByRole("alert")).toHaveTextContent(
+    transferSummaryText(2, 0, 3, "我的笔记本", TRANSFER_CLOSED_TEXT),
+  );
 });

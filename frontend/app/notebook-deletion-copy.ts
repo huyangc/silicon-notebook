@@ -41,8 +41,10 @@ export function deleteMountText(count: number): string {
 }
 
 /** 确认成功后的提示(弹窗已关,这本笔记本出现在列表顶部的区块里)。 */
-export function deleteScheduledText(name: string, deleteAfter: string): string {
-  return `已安排删除${named(name)}。它现在对所有人都不可用，${formatDeleteAt(deleteAfter)}起永久删除；`
+export function deleteScheduledText(name: string, deleteAfter: string | null): string {
+  // 回答里没有可读的截止时刻:照样是「已安排删除」,时刻去列表顶部的区块里看(它重新拉取)。
+  const when = deleteAfter ? `${formatDeleteAt(deleteAfter)}起永久删除` : "一天后永久删除（确切时刻见笔记本列表顶部）";
+  return `已安排删除${named(name)}。它现在对所有人都不可用，${when}；`
     + "在此之前可以在笔记本列表顶部撤销。";
 }
 
@@ -99,21 +101,29 @@ export const TRANSFER_CLOSED_TEXT = "删除时间已到，记忆已无法转移�
 export const TRANSFER_GONE_TEXT = "这本笔记本或目标笔记本已经读不到了。";
 export const TRANSFER_FAILED_TEXT = "转移没有成功，请重试。";
 export const TRANSFER_BUSY_TEXT = "另一次转移正在进行，请等它结束后再试。";
+/** 转移途中主人撤销了删除(409 notebook_not_pending_delete):库回来了,没转的留在原处。 */
+export const TRANSFER_RESTORED_TEXT = "所有者已撤销删除，这本笔记本已恢复，剩下的记忆留在原处。";
 
-/** 分页转移进行中的进度(条数取自服务端:已处理 + 剩余)。 */
-export function transferProgressText(done: number, total: number): string {
-  return `已转移 ${done} / ${total} 条`;
+/** 分页转移进行中的进度:`moved` 只数真正转走的,失败的另计;`total` = 已处理 + 剩余。 */
+export function transferProgressText(moved: number, failed: number, total: number): string {
+  const head = `已转移 ${moved} / ${total} 条`;
+  return failed > 0 ? `${head}，${failed} 条没有转移成功` : head;
 }
 
-/** 转移中途停下(截止已到、读不到、另一次转移、出错):先说已经转走了几条,再说原因。 */
-export function transferStoppedText(moved: number, reason: string): string {
-  return moved > 0 ? `已转移 ${moved} 条；${reason}` : reason;
+/** 转移结束或中途停下时的如实交代:转走几条、几条没转成(还在这本笔记本里)、几条没处理;
+ *  停下有原因时原因在前。数字全取自服务端逐条结果与剩余条数。 */
+export function transferSummaryText(
+  moved: number, failed: number, unprocessed: number, target: string, reason = "",
+): string {
+  const parts = [moved > 0 ? `已把 ${moved} 条记忆转移到${named(target)}` : "没有转移任何记忆"];
+  if (failed > 0) parts.push(`${failed} 条没有转移成功（仍在这本笔记本里，请先导出）`);
+  if (unprocessed > 0) parts.push(`${unprocessed} 条未处理`);
+  return `${reason}${parts.join("，")}。`;
 }
 
-/** 转移的结果:数字取自服务端逐条结果。 */
+/** 全部处理完的结果(没有未处理的)。 */
 export function transferDoneText(moved: number, failed: number, target: string): string {
-  const head = moved > 0 ? `已把 ${moved} 条记忆转移到${named(target)}。` : "没有转移任何记忆。";
-  return failed > 0 ? `${head}${failed} 条没有转移成功，请导出保存。` : head;
+  return transferSummaryText(moved, failed, 0, target);
 }
 
 // ------------------------------------------------------------------- 铃铛

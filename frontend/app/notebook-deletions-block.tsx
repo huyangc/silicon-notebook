@@ -46,15 +46,15 @@ import {
   TRANSFER_CLOSED_TEXT,
   TRANSFER_FAILED_TEXT,
   TRANSFER_GONE_TEXT,
+  TRANSFER_RESTORED_TEXT,
   TRANSFER_LABEL,
   TRANSFER_NO_TARGET_TEXT,
   TRANSFER_WARNING_TEXT,
   deletionDue,
   deletionNoticeText,
   exportLabel,
-  transferDoneText,
   transferProgressText,
-  transferStoppedText,
+  transferSummaryText,
   untransferableText,
 } from "./notebook-deletion-copy.ts";
 import { LEAVE_EXPORT_TOO_LARGE_TEXT } from "./group-leave-dialog.tsx";
@@ -137,7 +137,7 @@ type CancelState =
 type TransferState =
   | { kind: "closed" }
   | { kind: "choosing"; targetId: string }
-  | { kind: "busy"; targetId: string; done: number; total: number | null }
+  | { kind: "busy"; targetId: string; moved: number; failed: number; total: number | null }
   | { kind: "result"; text: string; isFailure: boolean };
 
 /** 一本笔记本的全部控件(区块的一行、说明框的正文都用它)。 */
@@ -253,9 +253,11 @@ export function DeletionNoticeControls({
     transferringRef.current = true;
     stopTransferRef.current = false;
     setTransferring(true);
-    setTransfer({ kind: "busy", targetId, done: 0, total: null });
+    setTransfer({ kind: "busy", targetId, moved: 0, failed: 0, total: null });
     let moved = 0;
     let failed = 0;
+    // 还没处理的条数:第一页之前只能取通知里的可转移条数,之后取服务端每页的 remaining。
+    let unprocessed = notice.transferable_count;
     let after: string | null = null;
     const finish = (state: TransferState) => {
       if (!mounted.current) return;
@@ -270,32 +272,36 @@ export function DeletionNoticeControls({
         if (outcome.kind !== "transferred") {
           const reason = outcome.kind === "closed" ? TRANSFER_CLOSED_TEXT
             : outcome.kind === "gone" ? TRANSFER_GONE_TEXT
-              : outcome.kind === "busy" ? TRANSFER_BUSY_TEXT : TRANSFER_FAILED_TEXT;
+              : outcome.kind === "busy" ? TRANSFER_BUSY_TEXT
+                : outcome.kind === "restored" ? TRANSFER_RESTORED_TEXT : TRANSFER_FAILED_TEXT;
           if (outcome.kind === "failed" && moved === 0 && failed === 0) {
             setTransfer({ kind: "result", isFailure: true, text: reason });
           } else {
-            finish({ kind: "result", isFailure: true, text: transferStoppedText(moved, reason) });
+            finish({
+              kind: "result",
+              isFailure: outcome.kind !== "restored",
+              text: transferSummaryText(moved, failed, unprocessed, target.name, reason),
+            });
           }
           return;
         }
         const ok = outcome.results.filter((r) => r.ok).length;
         moved += ok;
         failed += outcome.results.length - ok;
-        const done = moved + failed;
+        unprocessed = outcome.remaining;
         if (outcome.remaining === 0 || outcome.results.length === 0 || stopTransferRef.current) {
           finish({
             kind: "result",
             isFailure: failed > 0,
-            text: outcome.remaining > 0
-              ? transferStoppedText(moved, `还有 ${outcome.remaining} 条没有转移。`)
-              : transferDoneText(moved, failed, target.name),
+            text: transferSummaryText(moved, failed, outcome.remaining, target.name),
           });
           return;
         }
         after = outcome.nextAfter;
+        const total = moved + failed + outcome.remaining;
         setTransfer((current) => (current.kind === "closed"
           ? current
-          : { kind: "busy", targetId, done, total: done + outcome.remaining }));
+          : { kind: "busy", targetId, moved, failed, total }));
       }
     } finally {
       transferringRef.current = false;
@@ -405,7 +411,7 @@ export function DeletionNoticeControls({
           </div>
           {transfer.kind === "busy" && transfer.total !== null && (
             <p className="notebook-deletion-note" role="status">
-              {transferProgressText(transfer.done, transfer.total)}
+              {transferProgressText(transfer.moved, transfer.failed, transfer.total)}
             </p>
           )}
         </div>
