@@ -64,6 +64,7 @@ def test_the_detail_read_and_a_deletion_take_their_locks_in_one_order(repo, post
 
     import psycopg
 
+    from tests.clock_testkit import recent_instant
     from tests.global_ask_retention_cases import OWNER, build
 
     world = build(repo)
@@ -96,9 +97,11 @@ def test_the_detail_read_and_a_deletion_take_their_locks_in_one_order(repo, post
         assert parked, "the detail read never waited on the notebook the deletion holds"
         # Finalize's stamp: under the old order the reader already held this
         # row FOR SHARE, and the server would abort one side with a deadlock.
+        # Still in the future when the read resumes (it re-checks the stamp
+        # against CURRENT_TIMESTAMP), on whatever day this runs.
         finalize.execute(
             "UPDATE global_ask_jobs SET retained_until=%s WHERE id='job-1'",
-            ("2027-04-17T00:00:00+00:00",),
+            (recent_instant(days=-180),),
         )
         finalize.commit()
     reader.join(30)
