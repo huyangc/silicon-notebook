@@ -1182,6 +1182,122 @@ class _ReasoningStageRun:
             self.on_trace(step)
 
 
+@dataclass(eq=False)
+class _ReasoningDraftRun:
+    """Cross-phase state of one ``AskService._draft_reasoning_response`` call,
+    handed from phase helper to phase helper by identity.
+
+    The fields above ``related_knowledge`` are the draft input rebound by the
+    prologue (``_begin_reasoning_draft``) under the names the body has always
+    read -- list snapshots of the input's evidence tuples, the attached report
+    the turn reads, the trace sink, the cancellation and the request's
+    model-error sink. ``trace`` is the one list the section progress steps and
+    the synthesis step append to; ``citations`` is the one list the card phase
+    extends (until a checklist answer with no bound marker replaces it); the
+    counts / baseline dicts and the admitted-external set are the sinks the
+    synthesis fills in place. The run holds no callable pointing back at it
+    (``record_section_step`` is bound on call), so it is freed by refcount when
+    the call returns, as the single method's locals were.
+
+    The fields from ``related_knowledge`` on are set by the phase that
+    produces them and start as ``_UNSET``; a phase reads them through
+    ``ready`` so that running the phases out of order fails loudly instead of
+    reading an empty default (several produced values are legitimately
+    ``None`` or empty: no sectioned synthesis, no baseline manifest)."""
+
+    stage: Any
+    prepared: Any
+    notebook_id: Any
+    conversation_id: Any
+    reasoning_history: Any
+    style_block: Any
+    research_question: Any
+    limits: Any
+    retrieval_effort: Any
+    intent_contract: Any
+    memory_hits: list
+    structured_batch: Any
+    completeness_unavailable: Any
+    no_usable_kg: Any
+    top_hits: list
+    elements: list
+    trace: list
+    chunks: list
+    chains: list
+    enumerations: list
+    spreadsheet_results: list
+    collection_map_text: Any
+    reasoning_outline: list
+    reasoning_outline_evidence: list
+    historical_reasoning_chunks: list
+    report: Any
+    on_trace: Any
+    cancel_event: Any
+    err_sink: list
+    # ``_draft_related_knowledge``
+    related_knowledge: Any = _UNSET
+    citations: Any = _UNSET
+    # ``_draft_synthesis_inputs`` (the answer's starting values,
+    # which the synthesis phase replaces)
+    answer: Any = _UNSET
+    llm_grounded: Any = _UNSET
+    anchors: Any = _UNSET
+    synth_failed: Any = _UNSET
+    synthesis_ran: Any = _UNSET
+    synthesis_started: Any = _UNSET
+    reasoning_counts: Any = _UNSET
+    reasoning_baseline: Any = _UNSET
+    run_lookups: Any = _UNSET
+    admitted_external: Any = _UNSET
+    answer_client: Any = _UNSET
+    collection_map_prompt_block: Any = _UNSET
+    structured_block: Any = _UNSET
+    structured_map: Any = _UNSET
+    typed_collection_result_sets: Any = _UNSET
+    enumeration_block_dropped: Any = _UNSET
+    collection_item_citations: Any = _UNSET
+    document_read_block_dropped: Any = _UNSET
+    # ``_draft_sectioned_attempt``
+    outline_slices: Any = _UNSET
+    outline_skipped: Any = _UNSET
+    outline_attempted: Any = _UNSET
+    outline_planned: Any = _UNSET
+    sectioned: Any = _UNSET
+    outline_err_mark: Any = _UNSET
+    # ``_draft_synthesis``
+    outline_fallback: Any = _UNSET
+    # ``_draft_baseline_manifest``
+    final_baseline_manifest: Any = _UNSET
+    # ``_draft_citation_cards``
+    chain_evidence: Any = _UNSET
+    element_evidence: Any = _UNSET
+    report_cards: Any = _UNSET
+    collection_citation_ids: Any = _UNSET
+    # ``_draft_evidence_level``
+    evidence_level: Any = _UNSET
+    top_relevance: Any = _UNSET
+    grounded: Any = _UNSET
+    # ``_draft_conclusion``
+    conclusion: Any = _UNSET
+    llm_mode: Any = _UNSET
+    warning: Any = _UNSET
+
+    def ready(self, name: str) -> Any:
+        """A phase-produced field, refusing one its phase has not set yet."""
+        value = getattr(self, name)
+        if value is _UNSET:
+            raise RuntimeError(
+                f"_draft_reasoning_response phase read run.{name} before the phase that sets it")
+        return value
+
+    def record_section_step(self, step: TraceStep) -> None:
+        """分节进度步:实时推给客户端,同时留在本轮轨迹里。"""
+        raise_if_cancelled(self.cancel_event)
+        self.trace.append(step)
+        if self.on_trace:
+            self.on_trace(step)
+
+
 class AskService:
     # mix 合成的 KG 段编号基点 / prompt 结构预留 token(与 facade 冻结常量同值)。
     _MIX_KG_KEY_BASE = 1000
@@ -3509,8 +3625,8 @@ class AskService:
         cards of the restored items the answer bound are appended to
         ``citations`` in place (deduplicated against what it already holds),
         and the ``ReportCards`` are returned for the grounding keys, the anchor
-        image candidates and the card-image exclusion. One call, so the capped
-        ``_draft_reasoning_response`` spends one line on it."""
+        image candidates and the card-image exclusion. One call, so the card
+        phase of the draft (``_draft_citation_cards``) spends one line on it."""
         cards = self._report_citations_and_keys(
             report, anchors, notebook_id, existing=citations,
         )
@@ -3534,8 +3650,8 @@ class AskService:
         crossing the stage seams; each draft records its own partition on its
         own turn.
 
-        ``_draft_reasoning_response`` (a capped hot function) grew by two
-        statements for the report, 564 -> 566 lines in
+        ``_draft_reasoning_response`` (then a capped hot function, since split
+        into phase helpers) grew by two statements for the report, 564 -> 566 lines in
         ``architecture_boundary_baseline``: this call and
         ``_extend_report_cards``. The rest of the wiring rides on lines it
         already had: the synthesis call takes the turn; the sectioned gate
@@ -4873,7 +4989,8 @@ class AskService:
             ),
             # Not part of the manifest (``build_retrieval_baseline_manifest``
             # reads the keys above by name): the reads the passage-card leg of
-            # ``_draft_reasoning_response`` reuses (``_reasoning_chunk_cards``).
+            # the reasoning draft (``_draft_citation_cards``) reuses
+            # (``_reasoning_chunk_cards``).
             "citation_lookups": lookup_sink,
         }
         return _ReasoningContext(
@@ -4991,7 +5108,7 @@ class AskService:
             # 证据,本来就没有中段可丢。
             refine=not sectioned,
             # 本 run 共享的读取备忘:别的节 / 重试 / 回退的装配不重读已读过的键,
-            # 调用方(``_draft_reasoning_response``)随后给同一批原文段发引用卡时
+            # 调用方(草稿阶段的 ``_draft_citation_cards``)随后给同一批原文段发引用卡时
             # 也复用它(``_reasoning_chunk_cards``)。没传就是本次装配自己一份。
             citation_lookups=(
                 citation_lookups if citation_lookups is not None
@@ -8124,13 +8241,21 @@ class AskService:
     def _draft_reasoning_response(self, stage, runtime):
         """The shipped ``ResponseDraftStage`` body: evidence -> response draft.
 
-        Everything below the rebinding prologue is the historical inline
-        segment of ``_run_reasoning_stage``, moved verbatim: answer synthesis,
-        sectioned synthesis, ``classify_evidence``, ``[k]`` anchor binding,
-        the synthesis trace step and ``AskResponse`` assembly keep their exact
-        order and their exact object graph.  ``self`` is deliberately not
-        renamed -- the seam is the injected ``DefaultResponseDraftStage``
-        object, not a rename across 650 lines of body.
+        Only the order of the phases lives here, after the two type gates; each
+        phase is one private helper over a ``_ReasoningDraftRun``: the rebinding
+        prologue (``_begin_reasoning_draft``), the related knowledge and the KG
+        evidence cards, the synthesis inputs (the answer client, the collection
+        map block and the structured side), the sectioned synthesis attempt,
+        its adoption or the single synthesis, the retrieval baseline manifest,
+        the citation cards, the evidence grading, the enumeration clearing and
+        the evidence images, the synthesis trace step, the conclusion and its
+        disclosures, and the ``AskResponse``.  The bodies are the historical
+        inline segment of ``_run_reasoning_stage`` moved verbatim: answer
+        synthesis, sectioned synthesis, ``classify_evidence``, ``[k]`` anchor
+        binding, the synthesis trace step and ``AskResponse`` assembly keep
+        their exact order and their exact object graph.  ``self`` is
+        deliberately not renamed -- the seam is the injected
+        ``DefaultResponseDraftStage`` object, not a rename across the body.
 
         The response graph is *finished* here, including ``mode`` -- so the
         only mutations left after the frozen envelope are ``model_errors``
@@ -8158,6 +8283,47 @@ class AskService:
             raise StageBoundaryError("invalid reasoning response draft input")
         if type(runtime) is not ReasoningRetrievalRuntime:
             raise StageBoundaryError("invalid reasoning response draft runtime")
+        run = self._begin_reasoning_draft(stage, runtime)
+        self._draft_related_knowledge(run)
+        self._draft_synthesis_inputs(run)
+        self._draft_sectioned_attempt(run)
+        self._draft_synthesis(run)
+        self._draft_baseline_manifest(run)
+        self._draft_citation_cards(run)
+        self._draft_evidence_level(run)
+        self._draft_attachments(run)
+        self._draft_synthesis_step(run)
+        self._draft_conclusion(run)
+        response = self._draft_ask_response(run)
+        prepared = run.prepared
+        notebook_id = run.notebook_id
+        conversation_id = run.conversation_id
+        final_baseline_manifest = run.ready("final_baseline_manifest")
+        # ``model_errors`` is deliberately *not* set here any more: the
+        # orchestrator (``_reasoning_draft_phase``) fills
+        # ``draft.response.model_errors`` from the same request-local
+        # ``_err_sink`` right after this stage returns, so every stage --
+        # shipped or injected -- gets the same treatment and an injected
+        # implementation is never required to import the private
+        # ``_ASK_MODEL_ERRORS`` ContextVar just to keep retrieval-side
+        # warnings visible (codex #571 R2 P2).  Setting it here too would
+        # only assign it twice with the same value.
+        return ReasoningResponseDraft(
+            notebook_id=notebook_id,
+            question=prepared.question,
+            response=response,
+            conversation_id=conversation_id,
+            user_id=prepared.user_id,
+            job_id=prepared.job_id,
+            asked_at=prepared.asked_at,
+            baseline_manifest=final_baseline_manifest,
+        )
+
+    def _begin_reasoning_draft(self, stage, runtime) -> _ReasoningDraftRun:
+        """The run state: the draft input rebound to the names the body reads
+        (list snapshots of its evidence tuples), the attached report this turn
+        reads, the trace sink, the cancellation and the request's model-error
+        sink."""
         prepared = stage.prepared
         notebook_id = prepared.notebook_id
         conversation_id = prepared.conversation_id
@@ -8192,7 +8358,31 @@ class AskService:
         _err_sink = _ASK_MODEL_ERRORS.get()
         if _err_sink is None:
             _err_sink = []
+        return _ReasoningDraftRun(
+            stage=stage, prepared=prepared, notebook_id=notebook_id,
+            conversation_id=conversation_id, reasoning_history=reasoning_history,
+            style_block=style_block, research_question=research_question,
+            limits=limits, retrieval_effort=retrieval_effort,
+            intent_contract=intent_contract, memory_hits=memory_hits,
+            structured_batch=structured_batch,
+            completeness_unavailable=completeness_unavailable,
+            no_usable_kg=no_usable_kg, top_hits=top_hits, elements=elements,
+            trace=trace, chunks=chunks, chains=chains, enumerations=enumerations,
+            spreadsheet_results=spreadsheet_results,
+            collection_map_text=collection_map_text,
+            reasoning_outline=reasoning_outline,
+            reasoning_outline_evidence=reasoning_outline_evidence,
+            historical_reasoning_chunks=historical_reasoning_chunks,
+            report=report, on_trace=on_trace, cancel_event=cancel_event,
+            err_sink=_err_sink,
+        )
 
+    def _draft_related_knowledge(self, run: _ReasoningDraftRun) -> None:
+        """The related knowledge the response lists (each hit rendered against
+        its owning notebook's schema overlay, deduplicated, capped) and the KG
+        evidence cards the citations start from."""
+        notebook_id, top_hits = run.notebook_id, run.top_hits
+        cancel_event = run.cancel_event
         # Federated hits carry their owning notebook. Render each payload
         # against THAT notebook's schema overlay: the active notebook may
         # customize the same object_type, but its field order/primary label
@@ -8227,7 +8417,15 @@ class AskService:
                              for ev in item.evidence if ev.element_id}
         citations = self.evidence_context.citations_from(
             top_hits, cited_element_ids, "KG evidence", notebook_id=notebook_id)
+        run.related_knowledge, run.citations = related_knowledge, citations
 
+    def _draft_synthesis_inputs(self, run: _ReasoningDraftRun) -> None:
+        """What every synthesis below reads: the answer's starting values, the
+        synthesis clock, the counts / baseline sinks, the run's citation
+        lookups and admitted external keys (behind a cancellation check), the
+        answer client, the collection map block and the structured side."""
+        stage, collection_map_text = run.stage, run.collection_map_text
+        cancel_event = run.cancel_event
         answer, llm_grounded, anchors = "", False, []
         synth_failed = False
         synthesis_ran = False
@@ -8257,27 +8455,35 @@ class AskService:
          enumeration_block_dropped, collection_item_citations,
          document_read_block_dropped) = self._assemble_structured_evidence(
             stage, answer_client, collection_map_prompt_block)
-        def _synth_reasoning():
-            # counts_sink 在模型调用前就被 _answer_reasoning 填充:合成模型
-            # 抛错/吐畸形 JSON 时,synthesis 步仍能报出真实装配计数而非全零。
-            ans, llm_grounded_, anchors_, _counts = self._answer_reasoning(
-                notebook_id, research_question, top_hits, elements,
-                reasoning_history,
-                cancel_event=cancel_event, chunks=chunks, chains=chains,
-                memory_hits=memory_hits, answer_client=answer_client,
-                kg_context_chars=limits.kg_context_chars,
-                chunk_context_chars=limits.chunk_context_chars,
-                element_items=limits.answer_element_items,
-                structured_block=structured_block,
-                structured_map=structured_map,
-                collection_map_block=collection_map_prompt_block,
-                counts_sink=reasoning_counts,
-                baseline_sink=reasoning_baseline,
-                external_evidence=stage.external_evidence,
-                external_sink=admitted_external,
-                style_block=style_block, citation_lookups=run_lookups, report=report)
-            return ans, llm_grounded_, anchors_
+        run.answer, run.llm_grounded, run.anchors = answer, llm_grounded, anchors
+        run.synth_failed, run.synthesis_ran = synth_failed, synthesis_ran
+        run.synthesis_started = synthesis_started
+        run.reasoning_counts, run.reasoning_baseline = reasoning_counts, reasoning_baseline
+        run.run_lookups, run.admitted_external = run_lookups, admitted_external
+        run.answer_client = answer_client
+        run.collection_map_prompt_block = collection_map_prompt_block
+        run.structured_block, run.structured_map = structured_block, structured_map
+        run.typed_collection_result_sets = typed_collection_result_sets
+        run.enumeration_block_dropped = enumeration_block_dropped
+        run.collection_item_citations = collection_item_citations
+        run.document_read_block_dropped = document_read_block_dropped
 
+    def _draft_sectioned_attempt(self, run: _ReasoningDraftRun) -> None:
+        """The outline plan and, when it has two or more sections with evidence
+        and no checklist, Knowhow batch or attached report holds the run to one
+        synthesis, the section-by-section synthesis attempt."""
+        stage, limits, report = run.stage, run.limits, run.report
+        notebook_id, research_question = run.notebook_id, run.research_question
+        reasoning_history, style_block = run.reasoning_history, run.style_block
+        top_hits, elements, chunks = run.top_hits, run.elements, run.chunks
+        enumerations, structured_batch = run.enumerations, run.structured_batch
+        reasoning_outline = run.reasoning_outline
+        reasoning_outline_evidence = run.reasoning_outline_evidence
+        cancel_event, _err_sink = run.cancel_event, run.err_sink
+        answer_client = run.ready("answer_client")
+        admitted_external = run.ready("admitted_external")
+        run_lookups = run.ready("run_lookups")
+        record_section_step = run.record_section_step
         # ---------------------------------------------- 按节合成(设计文档 §3.1)
         # 终态大纲有 ≥2 个能装配出证据的节时,逐节合成再拼接:每节只看见自己
         # 绑上的那几条证据(DualGraph 的产出侧借鉴,避免 lost-in-the-middle)。
@@ -8294,13 +8500,6 @@ class AskService:
         # 横幅是假报警。事件日志(events.jsonl)不受影响 —— note_model_error 的
         # 两个副作用里,只有响应里的这一份是给用户看的。
         outline_err_mark = len(_err_sink)
-
-        def record_section_step(step: TraceStep) -> None:
-            """分节进度步:实时推给客户端,同时留在本轮轨迹里。"""
-            raise_if_cancelled(cancel_event)
-            trace.append(step)
-            if on_trace:
-                on_trace(step)
 
         if answer_client.configured and reasoning_outline:
             from app.services.outline_synthesis import plan_outline_sections
@@ -8339,6 +8538,58 @@ class AskService:
                         external_sink=admitted_external,
                         citation_lookups=run_lookups,
                     )
+        run.outline_slices, run.outline_skipped = outline_slices, outline_skipped
+        run.outline_attempted, run.outline_planned = outline_attempted, outline_planned
+        run.sectioned, run.outline_err_mark = sectioned, outline_err_mark
+
+    def _draft_synthesis(self, run: _ReasoningDraftRun) -> None:
+        """The sectioned synthesis's answer when it was written, else the single
+        synthesis (when there is anything to answer from) -- and, when that one
+        absorbs a sectioned attempt's failure, the attempt's alarms dropped."""
+        stage, limits, report = run.stage, run.limits, run.report
+        notebook_id, research_question = run.notebook_id, run.research_question
+        reasoning_history, style_block = run.reasoning_history, run.style_block
+        top_hits, elements, chunks = run.top_hits, run.elements, run.chunks
+        chains, memory_hits = run.chains, run.memory_hits
+        enumerations, structured_batch = run.enumerations, run.structured_batch
+        cancel_event, _err_sink = run.cancel_event, run.err_sink
+        answer = run.ready("answer")
+        llm_grounded = run.ready("llm_grounded")
+        anchors = run.ready("anchors")
+        synth_failed = run.ready("synth_failed")
+        synthesis_ran = run.ready("synthesis_ran")
+        reasoning_counts = run.ready("reasoning_counts")
+        reasoning_baseline = run.ready("reasoning_baseline")
+        run_lookups = run.ready("run_lookups")
+        admitted_external = run.ready("admitted_external")
+        answer_client = run.ready("answer_client")
+        collection_map_prompt_block = run.ready("collection_map_prompt_block")
+        structured_block = run.ready("structured_block")
+        structured_map = run.ready("structured_map")
+        outline_attempted = run.ready("outline_attempted")
+        sectioned = run.ready("sectioned")
+        outline_err_mark = run.ready("outline_err_mark")
+        def _synth_reasoning():
+            # counts_sink 在模型调用前就被 _answer_reasoning 填充:合成模型
+            # 抛错/吐畸形 JSON 时,synthesis 步仍能报出真实装配计数而非全零。
+            ans, llm_grounded_, anchors_, _counts = self._answer_reasoning(
+                notebook_id, research_question, top_hits, elements,
+                reasoning_history,
+                cancel_event=cancel_event, chunks=chunks, chains=chains,
+                memory_hits=memory_hits, answer_client=answer_client,
+                kg_context_chars=limits.kg_context_chars,
+                chunk_context_chars=limits.chunk_context_chars,
+                element_items=limits.answer_element_items,
+                structured_block=structured_block,
+                structured_map=structured_map,
+                collection_map_block=collection_map_prompt_block,
+                counts_sink=reasoning_counts,
+                baseline_sink=reasoning_baseline,
+                external_evidence=stage.external_evidence,
+                external_sink=admitted_external,
+                style_block=style_block, citation_lookups=run_lookups, report=report)
+            return ans, llm_grounded_, anchors_
+
         # 按节合成失败(某一节两次都吐不出内容)→ 整体回退单次合成,已经产出
         # 的分节文本全部丢弃。多付一次合成调用是 fail-open 的价钱。
         outline_fallback = outline_attempted and sectioned is None
@@ -8382,7 +8633,18 @@ class AskService:
                 # 由这一行负责」,哪天单次合成路径多记一条本该保留的错误就会被
                 # 这一行悄悄吞掉。
                 del _err_sink[outline_err_mark:fallback_err_mark]
+        run.outline_fallback = outline_fallback
+        run.answer, run.llm_grounded, run.anchors = answer, llm_grounded, anchors
+        run.synth_failed, run.synthesis_ran = synth_failed, synthesis_ran
 
+    def _draft_baseline_manifest(self, run: _ReasoningDraftRun) -> None:
+        """The retrieval baseline manifest of what the synthesis was given."""
+        stage, notebook_id = run.stage, run.notebook_id
+        research_question = run.research_question
+        top_hits, elements, chunks = run.top_hits, run.elements, run.chunks
+        historical_reasoning_chunks = run.historical_reasoning_chunks
+        trace = run.trace
+        reasoning_baseline = run.ready("reasoning_baseline")
         from app.services.retrieval_baseline import (
             build_retrieval_baseline_manifest,
         )
@@ -8419,7 +8681,19 @@ class AskService:
             ),
             baseline_step_usage=len(trace),
         )
+        run.final_baseline_manifest = final_baseline_manifest
 
+    def _draft_citation_cards(self, run: _ReasoningDraftRun) -> None:
+        """The citation cards the bound anchors add (Memory, elements, passages,
+        the attached report's items, typed collection rows), and the relevance
+        entries of the relations and elements the evidence pool needs."""
+        notebook_id, report = run.notebook_id, run.report
+        elements, chunks = run.elements, run.chunks
+        chains, memory_hits = run.chains, run.memory_hits
+        citations = run.ready("citations")
+        anchors = run.ready("anchors")
+        reasoning_baseline = run.ready("reasoning_baseline")
+        collection_item_citations = run.ready("collection_item_citations")
         # chunks 直接进证据池:RetrievedChunk.object_id 属性=chunk_id,与 chunk 锚的
         # object_id 对齐,classify_evidence 即可正确计 anchored_rel(守 tau)。
         # Relation anchors need classifier entries, but chain trust is NOT
@@ -8462,6 +8736,23 @@ class AskService:
         element_evidence = [SimpleNamespace(
             object_id=item.element_id, relevance=float(item.score or 0.0),
         ) for item in elements]
+        run.chain_evidence, run.element_evidence = chain_evidence, element_evidence
+        run.report_cards = report_cards
+        run.collection_citation_ids = collection_citation_ids
+
+    def _draft_evidence_level(self, run: _ReasoningDraftRun) -> None:
+        """The answer's evidence level: ``classify_evidence`` over the pool (the
+        outline bindings the selection lost included when the sectioned
+        synthesis was written), capped by the per-section grounding."""
+        top_hits, chunks, memory_hits = run.top_hits, run.chunks, run.memory_hits
+        anchors = run.ready("anchors")
+        llm_grounded = run.ready("llm_grounded")
+        sectioned = run.ready("sectioned")
+        outline_slices = run.ready("outline_slices")
+        structured_map = run.ready("structured_map")
+        chain_evidence = run.ready("chain_evidence")
+        element_evidence = run.ready("element_evidence")
+        report_cards = run.ready("report_cards")
         # 按节合成真正写进 prompt 的知识对象里,有一部分被 top_n 截断挤出了
         # top_hits(见 outline_truncated_kg_evidence)。它们进不了这个池子的话,
         # 引用了它们的句子在 classify_evidence 眼里就是"引了个不存在的东西",
@@ -8502,7 +8793,20 @@ class AskService:
                 if evidence_level == "grounded":
                     evidence_level = "overview"
         grounded = evidence_level == "grounded"
+        run.evidence_level, run.top_relevance = evidence_level, top_relevance
+        run.grounded = grounded
 
+    def _draft_attachments(self, run: _ReasoningDraftRun) -> None:
+        """The checklist answer's citation clearing, the workbook and external
+        receipts, then the images of the final anchors and citations."""
+        stage, chunks = run.stage, run.chunks
+        enumerations, spreadsheet_results = run.enumerations, run.spreadsheet_results
+        citations = run.ready("citations")
+        anchors = run.ready("anchors")
+        synthesis_ran = run.ready("synthesis_ran")
+        admitted_external = run.ready("admitted_external")
+        report_cards = run.ready("report_cards")
+        collection_citation_ids = run.ready("collection_citation_ids")
         # An enumeration answer with no bound [k] marker has no verifiable
         # attribution.  Do not let unrelated ranked-retrieval citations
         # masquerade as sources for a checklist the model may have copied.
@@ -8537,7 +8841,26 @@ class AskService:
                 if id(citation) not in collection_citation_ids
             ]
         )
+        run.citations = citations
 
+    def _draft_synthesis_step(self, run: _ReasoningDraftRun) -> None:
+        """The synthesis trace step, when a synthesis ran."""
+        trace, on_trace = run.trace, run.on_trace
+        enumerations, report = run.enumerations, run.report
+        answer = run.ready("answer")
+        anchors = run.ready("anchors")
+        citations = run.ready("citations")
+        synthesis_ran = run.ready("synthesis_ran")
+        synthesis_started = run.ready("synthesis_started")
+        evidence_level = run.ready("evidence_level")
+        reasoning_counts = run.ready("reasoning_counts")
+        enumeration_block_dropped = run.ready("enumeration_block_dropped")
+        document_read_block_dropped = run.ready("document_read_block_dropped")
+        outline_planned = run.ready("outline_planned")
+        sectioned = run.ready("sectioned")
+        outline_fallback = run.ready("outline_fallback")
+        outline_skipped = run.ready("outline_skipped")
+        outline_slices = run.ready("outline_slices")
         if synthesis_ran:
             # The retriever's own last step reports which evidence it ADOPTED;
             # writing the answer (and assembling its citations) happens out
@@ -8570,6 +8893,17 @@ class AskService:
             if on_trace:
                 on_trace(synthesis_step)
 
+    def _draft_conclusion(self, run: _ReasoningDraftRun) -> None:
+        """The conclusion and ``llm_mode``, then the disclosure that leads them:
+        the completeness warning (unless a complete checklist answers it) or the
+        Knowhow coverage line."""
+        top_hits, intent_contract = run.top_hits, run.intent_contract
+        completeness_unavailable = run.completeness_unavailable
+        structured_batch = run.structured_batch
+        answer = run.ready("answer")
+        grounded = run.ready("grounded")
+        synth_failed = run.ready("synth_failed")
+        typed_collection_result_sets = run.ready("typed_collection_result_sets")
         if answer:
             conclusion = _MARKER_GROUP_RE.sub("", answer).strip()
             llm_mode = "grounded" if grounded else "ungrounded"
@@ -8646,7 +8980,27 @@ class AskService:
             coverage_line = f"{enumeration_line} {analysis_line}"
             conclusion = f"{coverage_line}\n\n{conclusion}"
             answer = f"> {coverage_line}\n\n{answer}" if answer else coverage_line
+        run.answer, run.conclusion = answer, conclusion
+        run.llm_mode, run.warning = llm_mode, warning
 
+    def _draft_ask_response(self, run: _ReasoningDraftRun) -> AskResponse:
+        """The finished ``AskResponse`` (``mode`` included)."""
+        conversation_id, research_question = run.conversation_id, run.research_question
+        trace, intent_contract = run.trace, run.intent_contract
+        retrieval_effort, report = run.retrieval_effort, run.report
+        structured_batch, spreadsheet_results = run.structured_batch, run.spreadsheet_results
+        no_usable_kg = run.no_usable_kg
+        conclusion = run.ready("conclusion")
+        answer = run.ready("answer")
+        warning = run.ready("warning")
+        grounded = run.ready("grounded")
+        evidence_level = run.ready("evidence_level")
+        anchors = run.ready("anchors")
+        related_knowledge = run.ready("related_knowledge")
+        citations = run.ready("citations")
+        llm_mode = run.ready("llm_mode")
+        top_relevance = run.ready("top_relevance")
+        typed_collection_result_sets = run.ready("typed_collection_result_sets")
         response = AskResponse(
             answer_id="", conclusion=conclusion, answer=answer,
             completeness_notice=warning, grounded=grounded,
@@ -8668,25 +9022,7 @@ class AskService:
         )
 
         response.mode = "reasoning"
-        # ``model_errors`` is deliberately *not* set here any more: the
-        # orchestrator (``_reasoning_draft_phase``) fills
-        # ``draft.response.model_errors`` from the same request-local
-        # ``_err_sink`` right after this stage returns, so every stage --
-        # shipped or injected -- gets the same treatment and an injected
-        # implementation is never required to import the private
-        # ``_ASK_MODEL_ERRORS`` ContextVar just to keep retrieval-side
-        # warnings visible (codex #571 R2 P2).  Setting it here too would
-        # only assign it twice with the same value.
-        return ReasoningResponseDraft(
-            notebook_id=notebook_id,
-            question=prepared.question,
-            response=response,
-            conversation_id=conversation_id,
-            user_id=prepared.user_id,
-            job_id=prepared.job_id,
-            asked_at=prepared.asked_at,
-            baseline_manifest=final_baseline_manifest,
-        )
+        return response
 
     def _draft_reasoning_evidence(self, stage, runtime):
         """``EvidenceDraftStage``'s body: the retrieval evidence -> the context

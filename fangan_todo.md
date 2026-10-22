@@ -393,13 +393,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 
 **结构**（零行为变化的拆分；有需要时立项，每项先补表征测试）
 
-- [ ] **第二梯队大函数拆分**（用户裁决 2026-10-19：四个函数各一个 PR、零行为变化）：`AskService._draft_reasoning_response` 566 行
-      （`backend/app/services/ask_service.py:8118`）仍待做，在 `scripts/architecture_boundary_baseline.json::function_length_ceiling`
-      里按现值零松弛钉住。它牵涉合成与绑定、流式输出与提示词字节，拆前可复用编排器拆分留下的表征世界
-      （`backend/tests/reasoning_stage_characterization_cases.py`：40 个场景经生产入口、用真实草拟阶段跑两端）。
-      进度：`NotebookCopyService.copy_notebook`（621 → 83 行）、`KnowledgeLifecycleService.rebuild_unified_kg`
-      （458 → 65 行）与 `AskService._run_reasoning_stage`（513 → 67 行）已拆完，都是按阶段抽成私有 helper、
-      拆分前采集的两端逐字节快照不变后退役，见 [fangan_done.md](fangan_done.md) 第 61 节。
 - [ ] **≥ 150 行的函数共 182 个**（`backend/app` 全量，含嵌套函数），`ask_service.py` 7468 行、
       `knowledge_lifecycle.py` 7442 行两个大文件。函数天花板守卫只盯基线里登记的 24 个函数，新出现的长
       函数不会被自动纳入。没有统一拆分计划，按触碰到的模块逐个处理。
