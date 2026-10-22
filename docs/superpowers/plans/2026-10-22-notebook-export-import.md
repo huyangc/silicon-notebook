@@ -136,7 +136,7 @@ chunk_questions 在导入作业内重嵌入；CLI 导入 PG 上必须停服；KG
 
 ## 10. PR 拆分（同一轮全部交付）
 
-1. **重构 copy_notebook（零行为变化）**：抽 `notebook_copy_writer.py`（RowSource / CopyProfile / 相位）；Snapshot 来源每表一个批次保持冻结写序；
+1. **重构 copy_notebook（零行为变化）**：抽 `notebook_copy_writer.py`（CopyRowSource / NotebookCopyWriter / 相位；`CopyProfile` 推迟到 PR4 有第二个消费者时再引入，避免零消费者扩展点；磁盘文件操作经 `materialize_assets` 回调留在服务里）；Snapshot 来源每表一个批次保持冻结写序；
    复制表征测试（SQLite+PG）、记忆排除、图片资产、knowhow 复制全部不改即绿；下调 `architecture_boundary_baseline.json`。
 2. **可移植编解码 + 流式快照 + 导出 + CLI export/inspect**：`domain/portable_rows.py`（`sync/package.py` 再导出）、`domain/notebook_archive.py`、
    两后端 `iter_copy_rows`、`notebook_transfer/export.py`、`scripts/notebook_archive.py`；守卫登记；导出用例（含记忆排除、流式分页、超复制上限仍可导）。
