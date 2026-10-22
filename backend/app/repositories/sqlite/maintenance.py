@@ -93,7 +93,8 @@ _H4_CHUNK_GAP = _NONBLANK_CHUNK + (
 # is one index range, read in index order (no per-page scan of the notebook, no sort).
 _RELATION_PAGE_SIZE = 500
 _MISSING_RELATION_PAGE_SQL = (
-    "SELECT r.source_object_id, r.id FROM knowledge_relations r "
+    "SELECT r.source_object_id, r.id, r.target_object_id, r.edge_type, r.evidence "
+    "FROM knowledge_relations r "
     "WHERE r.notebook_id=? AND (r.source_object_id, r.id) > (?, ?) "
     "AND NOT EXISTS (SELECT 1 FROM relation_embeddings e WHERE e.relation_id=r.id) "
     "ORDER BY r.source_object_id, r.id LIMIT ?"
@@ -1156,7 +1157,14 @@ class SQLiteMaintenanceAdapter:
             if missing:
                 embedding = self._runtime.source_embedding
                 attempted += embedding.embeddable_object_count(missing)
-                embedded += embedding.embed_objects_batch(notebook_id, missing)
+                # Each vector lands only while its object still holds the payload read
+                # here and still has no vector (an edit's re-embed may race this).
+                embedded += embedding.embed_objects_batch(
+                    notebook_id, missing,
+                    snapshots={
+                        str(row["id"]): row["payload"] for row in rows if not row["embedded"]
+                    },
+                )
             if progress:
                 progress(scanned, total)
             if tally:
@@ -1264,8 +1272,19 @@ class SQLiteMaintenanceAdapter:
             ]
             if items:
                 attempted += len(items)
+                # Conditional write: only while the relation row still holds what
+                # discovery read and has no vector (a rebuild may race this).
+                snapshots = {
+                    str(row["id"]): (
+                        row["source_object_id"], row["target_object_id"],
+                        row["edge_type"], row["evidence"],
+                    )
+                    for row in page
+                }
                 written += int(
-                    self._runtime.source_embedding.embed_relations_batch(notebook_id, items)
+                    self._runtime.source_embedding.embed_relations_batch(
+                        notebook_id, items, snapshots=snapshots
+                    )
                     or 0
                 )
             if tally:

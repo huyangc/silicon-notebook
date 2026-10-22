@@ -388,6 +388,10 @@ _REGISTRY: dict[str, dict[str, str]] = {
     "*/embedding_store.py": {
         "EmbeddingStore.knowledge_delta_rows": CEILING_BOUNDED,
         "EmbeddingStore.relation_delta_rows": CEILING_BOUNDED,
+        # the vector backfills' conditional inserts: an EXISTS probe on the one object
+        # / relation id the caller is writing a vector for
+        "EmbeddingStore.insert_missing_knowledge_vectors": KEY_BOUNDED,
+        "EmbeddingStore.insert_missing_relation_vectors": KEY_BOUNDED,
     },
     "*/source_store.py": {
         "SourceStore.source_from_row": STATE_PROBE,

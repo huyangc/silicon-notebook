@@ -45,11 +45,11 @@ def test_node_embed_commits_incrementally_and_resumes(repo, monkeypatch):
     # 会传播出 _embed_objects_batch。EMBED_COMMIT_BATCHES=1,batch=2 → 每 2 个一 flush。
     real_flush = repo.__dict__["_runtime"].source_embedding.flush_object_vectors
     calls = {"n": 0}
-    def flaky_flush(nb_id, rows):
+    def flaky_flush(nb_id, rows, **kwargs):  # the backfill passes snapshots=
         calls["n"] += 1
         if calls["n"] == 3:
             raise RuntimeError("模拟中断")
-        return real_flush(nb_id, rows)
+        return real_flush(nb_id, rows, **kwargs)
     monkeypatch.setattr(repo.__dict__["_runtime"].source_embedding, "flush_object_vectors", flaky_flush)
 
     with pytest.raises(RuntimeError):

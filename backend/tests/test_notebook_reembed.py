@@ -40,6 +40,7 @@ def _insert(db, table: str, values: dict) -> None:
 BACKEND = cases.Backend(
     name="sqlite", insert=_insert, placeholder="?",
     maintenance_module=sqlite_maintenance, relation_page_attr="_RELATION_PAGE_SIZE",
+    json_param=json.dumps,
 )
 
 
@@ -133,6 +134,22 @@ def test_offline_embed_messages(repo, capsys):
 
 def test_an_embedder_that_writes_nothing_is_never_done(repo, monkeypatch):
     cases.check_an_embedder_that_writes_nothing_is_never_done(repo, BACKEND, monkeypatch)
+
+
+def test_object_backfill_never_overwrites_a_newer_vector(repo):
+    cases.check_object_backfill_never_overwrites_a_newer_vector(repo, BACKEND)
+
+
+def test_relation_backfill_never_overwrites_or_mismatches(repo):
+    cases.check_relation_backfill_never_overwrites_or_mismatches(repo, BACKEND)
+
+
+def test_pipeline_switch_while_waiting_for_a_table_lock(repo, monkeypatch):
+    cases.check_pipeline_switch_while_waiting_for_a_table_lock(repo, BACKEND, monkeypatch)
+
+
+def test_pipeline_switch_between_the_halves(repo, monkeypatch):
+    cases.check_pipeline_switch_between_the_halves(repo, BACKEND, monkeypatch)
 
 
 def test_relation_discovery_page_is_one_index_range(repo):

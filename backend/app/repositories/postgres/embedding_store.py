@@ -8,6 +8,7 @@ from psycopg import sql
 from app.repositories.postgres._store_utils import (
     execute_many,
     iso_timestamp,
+    jsonb,
     normalize_timestamp,
 )
 from app.domain.vector_index import decode_vector, encode_vector
@@ -150,6 +151,69 @@ class EmbeddingStore:
         self._replace_simple(
             "chunk_embeddings", notebook_id, rows, created_at=created_at
         )
+
+    def insert_missing_knowledge_vectors(
+        self,
+        notebook_id: str,
+        rows: Sequence[tuple],
+        *,
+        created_at: str,
+    ) -> int:
+        """Twin of the SQLite store: insert ``(object_id, payload, vector)`` only while
+        the object still has exactly that ``payload`` (jsonb equality) and no vector;
+        ``ON CONFLICT DO NOTHING`` keeps a concurrently stored vector."""
+        encoded = self._encoded_rows([(oid, vector) for oid, _payload, vector in rows])
+        if not encoded:
+            return 0
+        created = normalize_timestamp(created_at)
+        written = 0
+        with self.write() as connection:
+            for (object_id, payload, _vector), (_oid, vector) in zip(rows, encoded):
+                cursor = connection.execute(
+                    "INSERT INTO knowledge_embeddings "
+                    "(object_id,notebook_id,vector,created_at) "
+                    "SELECT %s,%s,%s,%s WHERE EXISTS "
+                    "(SELECT 1 FROM knowledge_objects WHERE id=%s AND payload=%s) "
+                    "AND NOT EXISTS (SELECT 1 FROM knowledge_embeddings WHERE object_id=%s) "
+                    "ON CONFLICT (object_id) DO NOTHING",
+                    (object_id, notebook_id, vector, created, object_id,
+                     jsonb(payload), object_id),
+                )
+                written += max(0, cursor.rowcount)
+        return written
+
+    def insert_missing_relation_vectors(
+        self,
+        notebook_id: str,
+        rows: Sequence[tuple],
+        *,
+        created_at: str,
+    ) -> int:
+        """Twin of the SQLite store: insert a relation vector only while the relation
+        still holds the snapshotted ``(source_object_id, target_object_id, edge_type,
+        evidence)`` and has no vector (see the SQLite docstring for why the endpoint
+        names are not part of the check)."""
+        encoded = self._encoded_rows([(rid, vector) for rid, _snap, vector in rows])
+        if not encoded:
+            return 0
+        created = normalize_timestamp(created_at)
+        written = 0
+        with self.write() as connection:
+            for (relation_id, snapshot, _vector), (_rid, vector) in zip(rows, encoded):
+                source, target, edge_type, evidence = snapshot
+                cursor = connection.execute(
+                    "INSERT INTO relation_embeddings "
+                    "(relation_id,notebook_id,vector,created_at) "
+                    "SELECT %s,%s,%s,%s WHERE EXISTS (SELECT 1 FROM knowledge_relations "
+                    "WHERE id=%s AND source_object_id=%s AND target_object_id=%s "
+                    "AND edge_type=%s AND evidence=%s) "
+                    "AND NOT EXISTS (SELECT 1 FROM relation_embeddings WHERE relation_id=%s) "
+                    "ON CONFLICT (relation_id) DO NOTHING",
+                    (relation_id, notebook_id, vector, created, relation_id,
+                     source, target, edge_type, jsonb(evidence), relation_id),
+                )
+                written += max(0, cursor.rowcount)
+        return written
 
     def replace_chunk_vectors_if_text(
         self,
