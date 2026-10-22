@@ -184,6 +184,9 @@ PROCESS_CACHE_INVENTORY: dict[str, str] = {
     # Present only while a request / run / job is in flight.
     "app.api.mcp_tools.ask:_WAITERS": RUNTIME,
     "app.api.source_routes:_backfill_vectors_inflight": RUNTIME,
+    # Named claims held only for the duration of a ``try_claim`` block (the
+    # deletion-window transfer's one-at-a-time claim).
+    "app.repositories.sqlite.database:_PROCESS_CLAIMS": RUNTIME,
     "app.services.plugin_ask_engine:_CANCELLATION_STATES": RUNTIME,
     "app.services.plugin_ask_engine:_RETRIEVAL_STATES": RUNTIME,
     "app.services.plugin_ask_engine:_MODEL_STATES": RUNTIME,

@@ -934,7 +934,7 @@ def case_a_promotion_part_way_fails_the_remaining_items(world: World) -> None:
     assert world.memory_notebook(first["new_id"]) == world.member_target
     assert second["ok"] is False and second["status"] == "failed"
     assert second["error_code"] == DELETE_WINDOW_CLOSED_CODE
-    assert world.memory_notebook(world.confirmed[1]) == world.doomed
+    assert world.memory_notebook(second["source_id"]) == world.doomed
 
 
 # ----------------------------------------- in-flight maintenance (§3, §8.12)

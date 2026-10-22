@@ -400,7 +400,7 @@ class _BudgetedReadConnection:
         return self.connection.execute(*args, **kwargs)
 
 
-# Process-local named claims (``SqliteDatabase.try_process_claim``), keyed by
+# Process-local named claims (``SqliteDatabase.try_claim``), keyed by
 # database file and name, shared by every ``SqliteDatabase`` of this process.
 _PROCESS_CLAIMS: set[tuple[str, str]] = set()
 _PROCESS_CLAIMS_LOCK = threading.Lock()
@@ -771,7 +771,7 @@ class SqliteDatabase:
         conn.execute("BEGIN IMMEDIATE")
 
     @contextmanager
-    def try_process_claim(self, name: str) -> Iterator[bool]:
+    def try_claim(self, name: str) -> Iterator[bool]:
         """Try to take a named claim for the duration of the block; yields
         whether this call holds it and never waits. Process-local: SQLite has
         one serving process writing the file, and the claims this backs

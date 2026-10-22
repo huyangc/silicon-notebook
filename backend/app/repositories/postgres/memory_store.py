@@ -1055,7 +1055,7 @@ class MemoryStore:
     def delete_window_transfer_claim(self, notebook_id: str, user_id: str):
         """See the SQLite twin. PostgreSQL's claim is a session advisory lock
         on a dedicated connection, so it holds across processes."""
-        return self.database.try_session_claim(
+        return self.database.try_claim(
             f"memory-transfer\x1f{user_id}\x1f{notebook_id}"
         )
 

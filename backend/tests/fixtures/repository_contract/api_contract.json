@@ -4337,6 +4337,17 @@
           "additionalProperties": false,
           "description": "``POST /notebooks/{id}/memories/transfer``: move the caller's own\nconfirmed Memory out of a notebook inside its deletion window. The mode\nis always ``move`` and the server picks the items (ruling 2026-10-22);\nonly the destination is the caller's choice.",
           "properties": {
+            "after": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After"
+            },
             "target_notebook_id": {
               "title": "Target Notebook Id",
               "type": "string"
@@ -26052,7 +26063,7 @@
       },
       "/api/notebooks/{notebook_id}/memories/transfer": {
         "post": {
-          "description": "「转移到我的笔记本」during a notebook's deletion window: move every\none of the caller's confirmed Memory items here (those the move rule\naccepts) into ``target_notebook_id``, a live notebook the caller owns.\nAlways a move; the server picks the items; the answer has the shape of\n``POST /memories/transfer`` (``{\"results\": [...]}``, one entry per item).\nMoved items do not come back if the owner cancels the deletion. Window\nclosed: 404 ``delete_window_closed`` (before the first item), or per item\n``error_code=\"delete_window_closed\"`` (closed part-way). Unreadable\nnotebook, or a target the caller cannot write: 404.",
+          "description": "「转移到我的笔记本」during a notebook's deletion window: move the\ncaller's confirmed Memory items here (those the move rule accepts) into\n``target_notebook_id``, a live notebook the caller owns. Always a move;\nthe server picks the items. One page per request (at most\n``DELETE_WINDOW_TRANSFER_PAGE_SIZE`` items, id order, starting after\n``after``): ``{\"results\": [...], \"remaining\": n, \"next_after\": id}`` --\n``results`` has the shape of ``POST /memories/transfer``; the client\nrepeats with ``after=next_after`` until ``remaining`` is 0. Moved items do\nnot come back if the owner cancels the deletion.\n\nWindow closed: 404 ``delete_window_closed`` (before the page), or per\nitem ``error_code=\"delete_window_closed\"`` (closed part-way). Another\ntransfer of the same caller out of this notebook running: 409\n``transfer_in_progress``. Not inside a window: 409\n``notebook_not_pending_delete``. Unreadable notebook, or a target the\ncaller cannot write: 404.",
           "operationId": "transfer_memories_out_of_delete_window_api_notebooks__notebook_id__memories_transfer_post",
           "parameters": [
             {

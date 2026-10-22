@@ -935,7 +935,7 @@ class MemoryStore:
         manager answering whether this call holds the claim. SQLite's claim
         is process-local -- the serving process is this backend's only
         writer, and every transfer runs in it."""
-        return self.database.try_process_claim(
+        return self.database.try_claim(
             f"memory-transfer\x1f{user_id}\x1f{notebook_id}"
         )
 

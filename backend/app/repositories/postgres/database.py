@@ -478,7 +478,7 @@ class PostgresDatabase:
             )
 
     @contextmanager
-    def try_session_claim(self, name: str) -> Iterator[bool]:
+    def try_claim(self, name: str) -> Iterator[bool]:
         """Try to take a named claim for the duration of the block, across
         processes; yields whether this call holds it and never waits.
 
