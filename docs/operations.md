@@ -2327,7 +2327,8 @@ What to expect:
   only while the row still holds what was embedded and has no vector yet; a Knowhow chunk
   vector only while the chunk still holds the embedded text (each check and write is one
   statement). An edit's re-embed or a rebuild that lands while the model is busy keeps its
-  own vector.
+  own vector, and such a row is not counted as left missing: a KG or Knowhow leg reads what
+  is still missing from storage after its pass.
 - **Failures stay inside the job.** A leg whose workload is unbound is reported as skipped (a
   chunk leg missing only one of its two workloads runs the other half and names the missing
   one); a failed model batch leaves its rows missing and the leg incomplete; a failed read
