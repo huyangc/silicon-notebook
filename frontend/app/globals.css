@@ -863,9 +863,13 @@ button.copy-result-failed:hover:not(:disabled) {
   margin: 0;
 }
 
+/* 列表视图的列下限之和（≤1100 时 777px，>1100 时更大）在 768~840 宽会超出内容区。
+   表格在自己内部横向滚动，不撑宽外壳：这条对所有宽度生效，不只窄屏。
+   守卫：tests/guards/app-shell-column-guard.test.mjs。 */
 .notebook-list {
   display: grid;
   width: 100%;
+  overflow-x: auto;
   border-top: 1px solid #c8c8c8;
 }
 
@@ -10370,8 +10374,9 @@ button.tag:hover {
 
 @media (max-width: 760px) {
   /* 窄屏顶栏本来就设计成可换行（下面 height: auto）。外壳第一行若仍是定死的 56px，
-     换到第二行的状态灯/铃铛/账户会溢出到顶栏淡底之外、压在页面留白上。以前整页被
-     撑到 1102px 宽，顶栏从不换行，所以没露出来。工作区（.app.workspace-mode）不显示
+     换到第二行的状态灯/铃铛/账户会溢出到顶栏淡底之外、压在页面留白上。群组页、私有
+     记忆页本来就没被撑宽，375 宽下这个问题一直在；只有笔记本列表页因为整页被撑到
+     1102px、顶栏在那一页不换行，才没露出来。工作区（.app.workspace-mode）不显示
      顶栏，它自己那条 1fr 的行定义优先级更高，不受影响。 */
   .app {
     grid-template-rows: minmax(56px, auto) 1fr;
@@ -10443,10 +10448,6 @@ button.tag:hover {
 
   .tabs {
     gap: 8px;
-  }
-
-  .notebook-list {
-    overflow-x: auto;
   }
 
   .notebook-list-header,
