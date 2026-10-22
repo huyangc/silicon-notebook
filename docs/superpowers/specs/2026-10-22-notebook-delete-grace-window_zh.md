@@ -65,7 +65,7 @@ T3 后不清新列（随行删除）。
 | 子资源、写与管理端点、单库问答 / 报告 | 404（已在跑的维护照常跑完；删除那一刻正在提交的提问可能失败） | 404 | 自动 |
 | 再次 DELETE | 409 `notebook_pending_delete` | 404 | T1 |
 | 全局问答 | 勾选范围无它；用到它的轮次 404，撤销恢复，收尾后按 #931 可读 | 同 | 自动（B5） |
-| 挂载 | 挂载方当场失去参考库，撤销恢复；失效原因只说成立的事——被挂库主人本人「你已删除这本笔记本，撤销删除即可恢复」，其他人「该参考库暂时不可用」且名字遮住 | 同 | `list_mount_edges` 读 `b.status` + `MOUNT_BASE_NOT_LIVE_EXPR`（与 `MOUNT_VALID_EXPR` 同一存活项取反），文案在 `app/domain/mount_edges.py` 两后端共用 |
+| 挂载 | 挂载方当场失去参考库，撤销恢复；失效原因按查看者只说成立的事——窗口期内被挂库主人本人（`b.created_by == 查看者`）「你已删除这本笔记本，撤销删除即可恢复」，其他人（含挂载方的组管理员）「该参考库暂时不可用」；`deleting` 时所有人「该参考库已被删除」；名字遮蔽规则不变 | 同 | `list_mount_edges` 读 `b.status` + `MOUNT_BASE_NOT_LIVE_EXPR`（与 `MOUNT_VALID_EXPR` 同一存活项取反），文案在 `app/domain/mount_edges.py` 两后端共用 |
 | 记忆（列表 / 检索 / 候选 / 新建 / 编辑 / 记忆页转移 / 退出共享） | 看不到写不进 | 同；退出共享 404 | 自动 |
 | 导出本人记忆 | 可 | 可 | §5.1 |
 | 转移本人记忆到自己的笔记本 | 可 | 可 | §5.5 |
@@ -251,3 +251,11 @@ release note `feature`；计划 §13.2 第 7 条标已决指向本规格；`fang
 - **铃铛**：告知读不到时只丢这一类条目、记日志；T1 / T2 的推送交给后台线程，不拖住回答（T3 在扫尾线程里，照旧同步）。
 - **T3 时钟**：到期判据用扫尾这一拍注入的时刻，`updated_at` 与作业行用 store 时钟（见 §3 T3 一行）。
 - **前端删除客户端只留一份**：`notebook-api.ts` 的 `deleteNotebook`，它校验 `delete_after`。实现搬进了 notebook-api.ts，因为列表 hook 的依赖白名单只放行 notebook 域客户端；原来 `notebook-deletion-api.ts` 里的 `requestNotebookDeletion` 已删除。
+
+## 13. 复审修复（2026-10-22）
+- PG 认领会话照 scale-build 锁的写法：关 `idle_session_timeout`（在 RESET ALL 之后），带 keepalive 与 `tcp_user_timeout`；PG 用例断言会话设置生效、同键第二次认领被拒、释放后可再取。
+- 转移途中主人撤销：409 `notebook_not_pending_delete` 单独映射为「所有者已撤销删除，这本笔记本已恢复，剩下的记忆留在原处」。
+- 挂载原因按查看者判（`list_notebook_bases(…, viewer_id)`，路由传当前用户）；`deleting` 如实说「该参考库已被删除」。
+- 分页进度只数转走的，失败另计；结束或中途停下时列出转走 / 没转成（仍在这本笔记本里，请先导出）/ 未处理。
+- T1 / T2 推送进有界的轻活后台池（`deletion-notice`）。
+- `deleteNotebook` 在 202 却读不出 `delete_after` 时按「已安排删除」处理，提示不写时刻，列表与区块重新拉取拿真实时刻。
