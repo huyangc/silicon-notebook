@@ -1,6 +1,6 @@
 """单张 knowhow 表跨 notebook 的复制/移动编排。
 
-复用整本拷贝（notebook_sharing.copy_notebook）验证过的 K-1 稳定-id 派生物方案：
+复用整本拷贝（notebook_sharing.copy_notebook，写入在 notebook_copy_writer）验证过的 K-1 稳定-id 派生物方案：
 source_elements 用 element_id(new_row,new_col) 重算、chunks 用 cell_chunk_id 重算、
 chunk_embeddings 随 chunk id 原样搬 → 拷完调度 project_table，text/section_path 未变
 → 零重嵌入。业务表 id 全新映射；cells 的 asset:// 引用改写；资产磁盘文件随迁。
@@ -18,7 +18,7 @@ from typing import Any
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS
 from app.services.knowhow.api import build_projector, get_scheduler
 from app.services.knowhow.ids import cell_chunk_id, element_id
-from app.services.notebook_sharing import _ASSET_REF_RE, _rewrite_asset_refs
+from app.services.notebook_copy_writer import _ASSET_REF_RE, _rewrite_asset_refs
 
 _log = logging.getLogger("silicon_notebook.knowhow.transfer")
 
