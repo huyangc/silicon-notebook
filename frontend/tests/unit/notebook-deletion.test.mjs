@@ -9,9 +9,9 @@ import {
   getNotebookOrDeletionNotice,
   listNotebookDeletions,
   parseDeletionNotice,
-  requestNotebookDeletion,
   transferOutOfDeletedNotebook,
 } from "../../app/notebook-deletion-api.ts";
+import { deleteNotebook } from "../../app/notebook-api.ts";
 import {
   deleteConfirmText,
   deleteMountText,
@@ -82,7 +82,10 @@ test("确认删除返回服务端定下的截止时刻", async () => {
     assert.equal(init.method, "DELETE");
     return json({ status: "pending_delete", delete_after: NOTICE.delete_after }, 202);
   };
-  assert.deepEqual(await requestNotebookDeletion("nb1"), { deleteAfter: NOTICE.delete_after });
+  assert.deepEqual(await deleteNotebook("nb1"), { deleteAfter: NOTICE.delete_after });
+  // 没有可读的截止时刻:当失败,不编一个时刻出来。
+  globalThis.fetch = async () => json({ status: "pending_delete" }, 202);
+  await assert.rejects(deleteNotebook("nb1"));
 });
 
 test("撤销的三种结局:成功 / 截止已过 / 已不存在", async () => {

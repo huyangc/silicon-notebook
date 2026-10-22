@@ -250,4 +250,4 @@ release note `feature`；计划 §13.2 第 7 条标已决指向本规格；`fang
 - **挂载失效原因**：见 §4 挂载一行。
 - **铃铛**：告知读不到时只丢这一类条目、记日志；T1 / T2 的推送交给后台线程，不拖住回答（T3 在扫尾线程里，照旧同步）。
 - **T3 时钟**：到期判据用扫尾这一拍注入的时刻，`updated_at` 与作业行用 store 时钟（见 §3 T3 一行）。
-- **前端删除客户端只留一份**：`notebook-deletion-api.ts` 的 `requestNotebookDeletion`，它校验 `delete_after`。
+- **前端删除客户端只留一份**：`notebook-api.ts` 的 `deleteNotebook`，它校验 `delete_after`。实现搬进了 notebook-api.ts，因为列表 hook 的依赖白名单只放行 notebook 域客户端；原来 `notebook-deletion-api.ts` 里的 `requestNotebookDeletion` 已删除。

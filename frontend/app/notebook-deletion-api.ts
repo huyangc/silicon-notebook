@@ -71,19 +71,8 @@ async function detailOf(response: Response): Promise<Record<string, unknown> | n
   }
 }
 
-/** 主人确认删除:返回服务端定下的永久删除时刻。 */
-export async function requestNotebookDeletion(notebookId: string): Promise<{ deleteAfter: string }> {
-  const response = await performApiRequest(`/notebooks/${encodeURIComponent(notebookId)}`, {
-    method: "DELETE",
-    tag: TAG,
-  });
-  if (response.ok) {
-    const body = (await response.json().catch(() => null)) as { delete_after?: unknown } | null;
-    if (typeof body?.delete_after !== "string") throw new Error("malformed delete response");
-    return { deleteAfter: body.delete_after };
-  }
-  return throwHumanizedHttpError(response, TAG);
-}
+// 主人确认删除走 notebook-api.ts 的 `deleteNotebook`(唯一的一份 DELETE 客户端,校验
+// `delete_after`);这里只放窗口期专有的读写。
 
 export type CancelOutcome =
   | { kind: "cancelled"; notebook: NotebookSummary }

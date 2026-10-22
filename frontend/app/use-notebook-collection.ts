@@ -13,6 +13,7 @@ import {
 } from "./notebook-bases.ts";
 import {
   createNotebook,
+  deleteNotebook,
   fetchNotebookIndexingPipeline,
   getNotebook,
   listNotebooks,
@@ -26,7 +27,6 @@ import {
 } from "./indexing-pipeline-settings.ts";
 import { logDiagnostic } from "./errors.ts";
 import { defaultNotebookPayload } from "./notebook-creation.ts";
-import { requestNotebookDeletion } from "./notebook-deletion-api.ts";
 import { deleteScheduledText } from "./notebook-deletion-copy.ts";
 import { workspaceCapabilities } from "./workspace-transitions.ts";
 import type { NotebookSummary, SearchHit } from "./workspace-model.ts";
@@ -1179,7 +1179,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     try {
       // 删除进入一天的窗口:这本库此刻起对所有人不可用,列表里马上拿掉;它出现在列表顶部
       // 「即将永久删除的笔记本」区块里,在截止前可以撤销(撤销走 `showCancelledNotebook`)。
-      const { deleteAfter } = await requestNotebookDeletion(current.target.id);
+      const { deleteAfter } = await deleteNotebook(current.target.id);
       let tombstones = tombstonesRef.current.get(ownerKey(owner.actorId));
       if (!tombstones) {
         tombstones = new Set<string>();
