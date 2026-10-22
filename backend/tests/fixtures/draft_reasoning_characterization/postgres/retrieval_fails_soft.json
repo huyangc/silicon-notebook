@@ -1,0 +1,3270 @@
+{
+ "db_diff": {
+  "answers": {
+   "added": [
+    {
+     "conversation_id": "conv-00000000000000000000000000000015",
+     "created_at": "<ts>",
+     "id": "ans-00000000000000000000000000000016",
+     "notebook_id": "nb-00000000000000000000000000000001",
+     "ordinal": 1,
+     "payload": {
+      "anchors": [],
+      "answer": "",
+      "answer_id": "ans-00000000000000000000000000000016",
+      "answered_at": "<ts>",
+      "asked_at": "<ts>",
+      "citations": [],
+      "conclusion": "当前检索没有找到足以支撑回答的来源证据。资料可能已经导入，但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。",
+      "conversation_id": "conv-00000000000000000000000000000015",
+      "evidence_level": "inferred",
+      "grounded": false,
+      "index_required": false,
+      "intent": {
+       "ambiguities": [],
+       "assumptions": [],
+       "clarification_answers": [],
+       "comparison_axes": [],
+       "completeness_required": false,
+       "confidence": "<float>",
+       "confirmed": true,
+       "constraints": [],
+       "entities": [],
+       "excluded_topics": [],
+       "expected_output": "",
+       "high_level_keywords": [],
+       "intent_type": "other",
+       "keyword_basis": "",
+       "low_level_keywords": [],
+       "mandatory_topics": [],
+       "needs_clarification": false,
+       "objective": "版图设计要点有哪些",
+       "resolved_question": "版图设计要点有哪些",
+       "result_scope": "ranked"
+      },
+      "kg_required": false,
+      "llm_mode": "deterministic",
+      "mode": "reasoning",
+      "model_errors": [],
+      "reasoning_trace": [
+       {
+        "detail": {
+         "assumptions": [],
+         "completeness_required": false,
+         "constraints": [],
+         "entities": [],
+         "excluded_topics": [],
+         "expected_output": "",
+         "mandatory_topics": [],
+         "resolved_question": "版图设计要点有哪些",
+         "result_scope": "ranked",
+         "retrieval_effort": "standard"
+        },
+        "duration_ms": null,
+        "step_type": "intent",
+        "summary": "已按确认后的问题理解开始检索"
+       },
+       {
+        "detail": {},
+        "duration_ms": "<dur>",
+        "step_type": "skip",
+        "summary": "未找到相关记忆"
+       }
+      ],
+      "related_knowledge": [],
+      "retrieval_effort": "standard",
+      "retrieval_query": "版图设计要点有哪些",
+      "top_relevance": "<float>"
+     },
+     "question": "版图设计要点有哪些"
+    }
+   ],
+   "removed": []
+  },
+  "conversations": {
+   "added": [
+    {
+     "created_at": "<ts>",
+     "created_by": "user-local",
+     "id": "conv-00000000000000000000000000000015",
+     "notebook_id": "nb-00000000000000000000000000000001",
+     "share_token": null,
+     "shared_through_at": null,
+     "shared_through_id": null,
+     "title": "版图设计要点有哪些",
+     "updated_at": "<ts>"
+    }
+   ],
+   "removed": []
+  }
+ },
+ "logs": [],
+ "outcome": {
+  "returned": {
+   "pd:AskResponse": {
+    "anchors": [],
+    "answer": "",
+    "answer_id": "ans-00000000000000000000000000000016",
+    "answered_at": "<ts>",
+    "asked_at": "<ts>",
+    "citations": [],
+    "conclusion": "当前检索没有找到足以支撑回答的来源证据。资料可能已经导入，但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。",
+    "conversation_id": "conv-00000000000000000000000000000015",
+    "evidence_level": "inferred",
+    "grounded": false,
+    "index_required": false,
+    "intent": {
+     "ambiguities": [],
+     "assumptions": [],
+     "clarification_answers": [],
+     "comparison_axes": [],
+     "completeness_required": false,
+     "confidence": "<float>",
+     "confirmed": true,
+     "constraints": [],
+     "entities": [],
+     "excluded_topics": [],
+     "expected_output": "",
+     "high_level_keywords": [],
+     "intent_type": "other",
+     "keyword_basis": "",
+     "low_level_keywords": [],
+     "mandatory_topics": [],
+     "needs_clarification": false,
+     "objective": "版图设计要点有哪些",
+     "resolved_question": "版图设计要点有哪些",
+     "result_scope": "ranked"
+    },
+    "kg_required": false,
+    "llm_mode": "deterministic",
+    "mode": "reasoning",
+    "model_errors": [],
+    "reasoning_trace": [
+     {
+      "detail": {
+       "assumptions": [],
+       "completeness_required": false,
+       "constraints": [],
+       "entities": [],
+       "excluded_topics": [],
+       "expected_output": "",
+       "mandatory_topics": [],
+       "resolved_question": "版图设计要点有哪些",
+       "result_scope": "ranked",
+       "retrieval_effort": "standard"
+      },
+      "duration_ms": null,
+      "step_type": "intent",
+      "summary": "已按确认后的问题理解开始检索"
+     },
+     {
+      "detail": {},
+      "duration_ms": "<dur>",
+      "step_type": "skip",
+      "summary": "未找到相关记忆"
+     }
+    ],
+    "related_knowledge": [],
+    "retrieval_effort": "standard",
+    "retrieval_query": "版图设计要点有哪些",
+    "top_relevance": "<float>"
+   }
+  }
+ },
+ "stream": [
+  {
+   "detail": {
+    "assumptions": [],
+    "completeness_required": false,
+    "constraints": [],
+    "entities": [],
+    "excluded_topics": [],
+    "expected_output": "",
+    "mandatory_topics": [],
+    "resolved_question": "版图设计要点有哪些",
+    "result_scope": "ranked",
+    "retrieval_effort": "standard"
+   },
+   "step_type": "intent",
+   "summary": "已按确认后的问题理解开始检索"
+  },
+  {
+   "detail": {},
+   "step_type": "skip",
+   "summary": "未找到相关记忆"
+  }
+ ],
+ "timeline": [
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT tier FROM notebooks WHERE id=%s"
+  },
+  {
+   "params": [
+    "user-local",
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT b.id AS id,b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF(CAST(%s AS text), '') AS uid) v WHERE e.notebook_id = %s AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing','pending_delete') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name COLLATE \"C\", b.id COLLATE \"C\""
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT id FROM sources WHERE notebook_id=%s AND source_type NOT IN ('knowhow','memory') ORDER BY id"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001",
+    "user-local"
+   ],
+   "sql": "SELECT s.id FROM sources s WHERE s.notebook_id=%s AND s.source_type IN ('knowhow','memory') AND (s.source_type <> 'memory' OR EXISTS (SELECT 1 FROM memory_items rm WHERE rm.id = s.memory_id AND rm.created_by = %s)) ORDER BY s.id"
+  },
+  {
+   "args": [
+    "nb-00000000000000000000000000000001",
+    {
+     "pd:AskRequest": {
+      "asked_at": "<ts>",
+      "base_scope": null,
+      "client_request_id": null,
+      "conversation_id": null,
+      "intent": null,
+      "mode": "reasoning",
+      "question": "版图设计要点有哪些",
+      "report_id": null,
+      "retrieval_effort": "standard",
+      "scenario": {},
+      "source_scope": null
+     }
+    }
+   ],
+   "call": "self._prepare_reasoning_ask",
+   "kwargs": {
+    "job_id": "",
+    "runtime": {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<PostgresDatabase>",
+      "retrieval_run": "<RetrievalRunState>",
+      "scope": {
+       "dc:ActiveSourceScope": {
+        "_skipped_libraries": [],
+        "_universe_read_order": [
+         [
+          "src-00000000000000000000000000000002",
+          "src-00000000000000000000000000000006"
+         ],
+         []
+        ],
+        "_verdict_probes": {
+         "dc:CeilingVerdictProbes": {
+          "foreign_hidden": "<callable call>",
+          "universe_digests": "<callable call>"
+         }
+        },
+        "base_mode": "exclude",
+        "base_narrowed": null,
+        "base_notebook_ids": [],
+        "base_provided": false,
+        "ceilings_total": true,
+        "hidden_source_ids": [],
+        "mode": "include",
+        "narrowed": false,
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "notebook_source_ceilings": [],
+        "owner_id": "user-local",
+        "source_ids": [
+         "src-00000000000000000000000000000002",
+         "src-00000000000000000000000000000006"
+        ],
+        "source_provided": false,
+        "subjectless": false,
+        "withheld_hidden_source_ids": []
+       }
+      },
+      "trace_sink": "<callable on_trace>"
+     }
+    },
+    "user_id": "user-local"
+   },
+   "ret": {
+    "dc:PreparedReasoningAsk": {
+     "asked_at": "<ts>",
+     "conversation_id": "conv-00000000000000000000000000000015",
+     "history": "",
+     "intent_json": "{\"objective\":\"版图设计要点有哪些\",\"resolved_question\":\"版图设计要点有哪些\",\"intent_type\":\"other\",\"result_scope\":\"ranked\",\"completeness_required\":false,\"entities\":[],\"mandatory_topics\":[],\"high_level_keywords\":[],\"low_level_keywords\":[],\"keyword_basis\":\"\",\"comparison_axes\":[],\"constraints\":[],\"excluded_topics\":[],\"expected_output\":\"\",\"assumptions\":[],\"ambiguities\":[],\"confidence\":0.0,\"needs_clarification\":false,\"confirmed\":true,\"clarification_answers\":[]}",
+     "intent_keywords": "",
+     "intent_projection": {
+      "dc:ReasoningIntentProjection": {
+       "assumptions": [],
+       "completeness_required": false,
+       "constraints": [],
+       "entities": [],
+       "excluded_topics": [],
+       "expected_output": "",
+       "mandatory_topics": [],
+       "resolved_question": "版图设计要点有哪些",
+       "result_scope": "ranked",
+       "retrieval_effort": "standard"
+      }
+     },
+     "intent_queries": [],
+     "intent_trace_duration_ms": null,
+     "job_id": "",
+     "limits": {
+      "dc:AskRetrievalLimits": {
+       "answer_element_items": 6,
+       "cell_excerpt_chars": 1000,
+       "chunk_context_chars": 30000,
+       "effort": "standard",
+       "enum_page_size": 50,
+       "enum_pages_per_run": 4,
+       "enum_rows_per_run": 200,
+       "inline_answer_rows": 100,
+       "kg_context_chars": 6000,
+       "max_initial_subqueries": 5,
+       "max_reasoning_steps": 8,
+       "overflow_semantics": "explicit_partial",
+       "ranked_final_cap": 36,
+       "ranked_final_floor": 20,
+       "ranked_per_aspect": 3,
+       "ranked_per_query_take": 8,
+       "structured_max_columns": 8,
+       "structured_max_pages": 50,
+       "structured_max_rows": 1250,
+       "structured_max_tables": 8,
+       "structured_page_size": 25,
+       "structured_payload_chars": 256000
+      }
+     },
+     "notebook_id": "nb-00000000000000000000000000000001",
+     "output": "answer",
+     "question": "版图设计要点有哪些",
+     "report_followup": null,
+     "research_question": "版图设计要点有哪些",
+     "retrieval_effort": "standard",
+     "style_block": "",
+     "user_id": "user-local"
+    }
+   }
+  },
+  {
+   "args": [
+    {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<PostgresDatabase>",
+      "retrieval_run": "<RetrievalRunState>",
+      "scope": {
+       "dc:ActiveSourceScope": {
+        "_skipped_libraries": [],
+        "_universe_read_order": [
+         [
+          "src-00000000000000000000000000000002",
+          "src-00000000000000000000000000000006"
+         ],
+         []
+        ],
+        "_verdict_probes": {
+         "dc:CeilingVerdictProbes": {
+          "foreign_hidden": "<callable call>",
+          "universe_digests": "<callable call>"
+         }
+        },
+        "base_mode": "exclude",
+        "base_narrowed": null,
+        "base_notebook_ids": [],
+        "base_provided": false,
+        "ceilings_total": true,
+        "hidden_source_ids": [],
+        "mode": "include",
+        "narrowed": false,
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "notebook_source_ceilings": [],
+        "owner_id": "user-local",
+        "source_ids": [
+         "src-00000000000000000000000000000002",
+         "src-00000000000000000000000000000006"
+        ],
+        "source_provided": false,
+        "subjectless": false,
+        "withheld_hidden_source_ids": []
+       }
+      },
+      "trace_sink": "<callable on_trace>"
+     }
+    },
+    "prepare"
+   ],
+   "call": "self._assert_reasoning_runtime",
+   "kwargs": {
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "user_id": "user-local"
+   },
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT notebooks.*, u.username AS _owner_username, COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') AS _published_pipeline_version, EXISTS(SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id = notebooks.id AND ng.principal_type IN ('group','group_admins')) AS _shared_to_groups FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by LEFT JOIN unified_kg_state ip ON ip.notebook_id=notebooks.id WHERE notebooks.id = %s AND notebooks.status NOT IN ('copying','deleting','importing','pending_delete')"
+  },
+  {
+   "params": [
+    "user-local"
+   ],
+   "sql": "SELECT created_by, notebook_id, COUNT(*) AS c FROM memory_items WHERE created_by=%s GROUP BY created_by, notebook_id"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT id FROM sources WHERE notebook_id=%s AND source_type = 'memory'"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT COUNT(*) AS count FROM sources WHERE notebook_id = %s AND source_type NOT IN ('knowhow','memory')"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001",
+    "nb-00000000000000000000000000000001",
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "WITH total AS (SELECT object_type, status, COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=%s GROUP BY object_type, status), memory AS (SELECT mo.object_type, mo.status, COUNT(*) AS c FROM knowledge_objects mo WHERE mo.source_id = ANY(ARRAY(SELECT s.id FROM sources s WHERE s.notebook_id=%s AND s.source_type = 'memory')) AND mo.notebook_id=%s GROUP BY mo.object_type, mo.status) SELECT t.object_type, t.status, t.c - COALESCE(m.c, 0) AS c, COALESCE(m.c, 0) AS m FROM total t LEFT JOIN memory m ON m.object_type = t.object_type AND m.status = t.status"
+  },
+  {
+   "params": [
+    "user-local",
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT b.id AS id, b.name AS name, b.tier AS tier, EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id) AS has_kg FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF(CAST(%s AS text), '') AS uid) v WHERE e.notebook_id = %s AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing','pending_delete') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name COLLATE \"C\", b.id COLLATE \"C\""
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id=%s) AS exists"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM sources s JOIN LATERAL (SELECT 1 AS found FROM source_elements e WHERE e.source_id=s.id LIMIT 1) parsed ON TRUE LEFT JOIN LATERAL (SELECT er.status,er.error_message FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.ordinal DESC LIMIT 1) latest_kg ON TRUE LEFT JOIN LATERAL (SELECT 1 AS found FROM knowledge_objects k WHERE k.source_id=s.id AND k.source_id!='' LIMIT 1) source_kg ON TRUE WHERE s.notebook_id=%s AND s.source_type NOT IN ('knowhow','memory') AND s.source_type <> 'promotion' AND (source_kg.found IS NULL OR COALESCE(latest_kg.status,'completed')!='completed' OR COALESCE(latest_kg.error_message,'') ~ 'windows_failed=[1-9][0-9]*/[0-9]+' OR strpos(COALESCE(latest_kg.error_message,''),'retry_incomplete=1')>0) AND NOT (COALESCE(latest_kg.status,'')='completed' AND starts_with(COALESCE(latest_kg.error_message,''),'kg objects=0 ') AND COALESCE(latest_kg.error_message,'') !~ 'windows_failed=[1-9][0-9]*/[0-9]+')"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM chunks WHERE notebook_id=%s) AS exists"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM sources s WHERE s.notebook_id=%s AND s.source_type NOT IN ('knowhow','memory') AND s.source_type <> 'promotion' AND s.doc_type IN ('','academic_paper') AND s.parse_status IN ('extracted','extracting','parsed') AND NOT EXISTS(SELECT 1 FROM source_paper_meta m WHERE m.source_id=s.id)) AS exists"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT * FROM kg_build_jobs WHERE notebook_id=%s ORDER BY created_at DESC,ordinal DESC LIMIT 1"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT nb.created_by AS owner_id,u.role AS owner_role FROM notebooks nb LEFT JOIN users u ON u.id=nb.created_by WHERE nb.id=%s"
+  },
+  {
+   "params": [
+    "user-local"
+   ],
+   "sql": "SELECT upload_document_limit FROM user_profiles WHERE user_id=%s"
+  },
+  {
+   "params": [
+    "upload_document_limit_default"
+   ],
+   "sql": "SELECT value FROM app_settings WHERE key=%s"
+  },
+  {
+   "args": [
+    {
+     "event": false
+    }
+   ],
+   "call": "fn.raise_if_cancelled",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "conv-00000000000000000000000000000015",
+    "nb-00000000000000000000000000000001",
+    "版图设计要点有哪些",
+    "user-local",
+    "<ts>",
+    "<ts>",
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "INSERT INTO conversations (id, notebook_id, title, created_by, created_at, updated_at) SELECT %s, %s, %s, %s, %s, %s WHERE EXISTS (SELECT 1 FROM notebooks WHERE id = %s AND status NOT IN ('copying','deleting','importing','pending_delete'))"
+  },
+  {
+   "params": [
+    "conv-00000000000000000000000000000015"
+   ],
+   "sql": "SELECT question, payload FROM answers WHERE conversation_id = %s ORDER BY created_at ASC, ordinal ASC"
+  },
+  {
+   "args": [
+    {
+     "event": false
+    }
+   ],
+   "call": "fn.raise_if_cancelled",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "user-local"
+   ],
+   "sql": "SELECT search_profile_json FROM user_profiles WHERE user_id=%s"
+  },
+  {
+   "args": [
+    {
+     "dc:PreparedReasoningAsk": {
+      "asked_at": "<ts>",
+      "conversation_id": "conv-00000000000000000000000000000015",
+      "history": "",
+      "intent_json": "{\"objective\":\"版图设计要点有哪些\",\"resolved_question\":\"版图设计要点有哪些\",\"intent_type\":\"other\",\"result_scope\":\"ranked\",\"completeness_required\":false,\"entities\":[],\"mandatory_topics\":[],\"high_level_keywords\":[],\"low_level_keywords\":[],\"keyword_basis\":\"\",\"comparison_axes\":[],\"constraints\":[],\"excluded_topics\":[],\"expected_output\":\"\",\"assumptions\":[],\"ambiguities\":[],\"confidence\":0.0,\"needs_clarification\":false,\"confirmed\":true,\"clarification_answers\":[]}",
+      "intent_keywords": "",
+      "intent_projection": {
+       "dc:ReasoningIntentProjection": {
+        "assumptions": [],
+        "completeness_required": false,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "mandatory_topics": [],
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked",
+        "retrieval_effort": "standard"
+       }
+      },
+      "intent_queries": [],
+      "intent_trace_duration_ms": null,
+      "job_id": "",
+      "limits": {
+       "dc:AskRetrievalLimits": {
+        "answer_element_items": 6,
+        "cell_excerpt_chars": 1000,
+        "chunk_context_chars": 30000,
+        "effort": "standard",
+        "enum_page_size": 50,
+        "enum_pages_per_run": 4,
+        "enum_rows_per_run": 200,
+        "inline_answer_rows": 100,
+        "kg_context_chars": 6000,
+        "max_initial_subqueries": 5,
+        "max_reasoning_steps": 8,
+        "overflow_semantics": "explicit_partial",
+        "ranked_final_cap": 36,
+        "ranked_final_floor": 20,
+        "ranked_per_aspect": 3,
+        "ranked_per_query_take": 8,
+        "structured_max_columns": 8,
+        "structured_max_pages": 50,
+        "structured_max_rows": 1250,
+        "structured_max_tables": 8,
+        "structured_page_size": 25,
+        "structured_payload_chars": 256000
+       }
+      },
+      "notebook_id": "nb-00000000000000000000000000000001",
+      "output": "answer",
+      "question": "版图设计要点有哪些",
+      "report_followup": null,
+      "research_question": "版图设计要点有哪些",
+      "retrieval_effort": "standard",
+      "style_block": "",
+      "user_id": "user-local"
+     }
+    },
+    {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<PostgresDatabase>",
+      "retrieval_run": "<RetrievalRunState>",
+      "scope": {
+       "dc:ActiveSourceScope": {
+        "_skipped_libraries": [],
+        "_universe_read_order": [
+         [
+          "src-00000000000000000000000000000002",
+          "src-00000000000000000000000000000006"
+         ],
+         []
+        ],
+        "_verdict_probes": {
+         "dc:CeilingVerdictProbes": {
+          "foreign_hidden": "<callable call>",
+          "universe_digests": "<callable call>"
+         }
+        },
+        "base_mode": "exclude",
+        "base_narrowed": null,
+        "base_notebook_ids": [],
+        "base_provided": false,
+        "ceilings_total": true,
+        "hidden_source_ids": [],
+        "mode": "include",
+        "narrowed": false,
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "notebook_source_ceilings": [],
+        "owner_id": "user-local",
+        "source_ids": [
+         "src-00000000000000000000000000000002",
+         "src-00000000000000000000000000000006"
+        ],
+        "source_provided": false,
+        "subjectless": false,
+        "withheld_hidden_source_ids": []
+       }
+      },
+      "trace_sink": "<callable on_trace>"
+     }
+    }
+   ],
+   "call": "self._run_reasoning_stage",
+   "kwargs": {},
+   "ret": {
+    "dc:CommittedReasoningAnswer": {
+     "baseline_manifest": null,
+     "evidence": null,
+     "response": {
+      "pd:AskResponse": {
+       "anchors": [],
+       "answer": "",
+       "answer_id": "ans-00000000000000000000000000000016",
+       "answered_at": "<ts>",
+       "asked_at": "<ts>",
+       "citations": [],
+       "conclusion": "当前检索没有找到足以支撑回答的来源证据。资料可能已经导入，但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。",
+       "conversation_id": "conv-00000000000000000000000000000015",
+       "evidence_level": "inferred",
+       "grounded": false,
+       "index_required": false,
+       "intent": {
+        "ambiguities": [],
+        "assumptions": [],
+        "clarification_answers": [],
+        "comparison_axes": [],
+        "completeness_required": false,
+        "confidence": "<float>",
+        "confirmed": true,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "high_level_keywords": [],
+        "intent_type": "other",
+        "keyword_basis": "",
+        "low_level_keywords": [],
+        "mandatory_topics": [],
+        "needs_clarification": false,
+        "objective": "版图设计要点有哪些",
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked"
+       },
+       "kg_required": false,
+       "llm_mode": "deterministic",
+       "mode": "reasoning",
+       "model_errors": [],
+       "reasoning_trace": [
+        {
+         "detail": {
+          "assumptions": [],
+          "completeness_required": false,
+          "constraints": [],
+          "entities": [],
+          "excluded_topics": [],
+          "expected_output": "",
+          "mandatory_topics": [],
+          "resolved_question": "版图设计要点有哪些",
+          "result_scope": "ranked",
+          "retrieval_effort": "standard"
+         },
+         "duration_ms": null,
+         "step_type": "intent",
+         "summary": "已按确认后的问题理解开始检索"
+        },
+        {
+         "detail": {},
+         "duration_ms": "<dur>",
+         "step_type": "skip",
+         "summary": "未找到相关记忆"
+        }
+       ],
+       "related_knowledge": [],
+       "retrieval_effort": "standard",
+       "retrieval_query": "版图设计要点有哪些",
+       "top_relevance": "<float>"
+      }
+     }
+    }
+   }
+  },
+  {
+   "args": [
+    {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<PostgresDatabase>",
+      "retrieval_run": "<RetrievalRunState>",
+      "scope": {
+       "dc:ActiveSourceScope": {
+        "_skipped_libraries": [],
+        "_universe_read_order": [
+         [
+          "src-00000000000000000000000000000002",
+          "src-00000000000000000000000000000006"
+         ],
+         []
+        ],
+        "_verdict_probes": {
+         "dc:CeilingVerdictProbes": {
+          "foreign_hidden": "<callable call>",
+          "universe_digests": "<callable call>"
+         }
+        },
+        "base_mode": "exclude",
+        "base_narrowed": null,
+        "base_notebook_ids": [],
+        "base_provided": false,
+        "ceilings_total": true,
+        "hidden_source_ids": [],
+        "mode": "include",
+        "narrowed": false,
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "notebook_source_ceilings": [],
+        "owner_id": "user-local",
+        "source_ids": [
+         "src-00000000000000000000000000000002",
+         "src-00000000000000000000000000000006"
+        ],
+        "source_provided": false,
+        "subjectless": false,
+        "withheld_hidden_source_ids": []
+       }
+      },
+      "trace_sink": "<callable on_trace>"
+     }
+    },
+    "reasoning-stage-entry"
+   ],
+   "call": "self._assert_reasoning_runtime",
+   "kwargs": {
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "user_id": "user-local"
+   },
+   "ret": null
+  },
+  {
+   "stream": "intent"
+  },
+  {
+   "args": [
+    "user-local",
+    "nb-00000000000000000000000000000001",
+    "版图设计要点有哪些"
+   ],
+   "call": "self._memory_hits",
+   "kwargs": {},
+   "ret": []
+  },
+  {
+   "params": [
+    "user-local",
+    "nb-00000000000000000000000000000001",
+    [
+     "confirmed"
+    ],
+    "user-local",
+    "user-local",
+    "user-local",
+    "user-local",
+    "user-local",
+    "版图设计要点有哪些",
+    "%版图设计要点有哪些%",
+    "版图设计要点有哪些",
+    "%版图设计要点有哪些%",
+    "版图设计要点有哪些",
+    "%版图设计要点有哪些%",
+    "版图设计要点有哪些",
+    "版图设计要点有哪些",
+    "版图设计要点有哪些",
+    64
+   ],
+   "sql": "SELECT id FROM memory_items WHERE created_by=%s AND notebook_id=%s AND status=ANY(%s) AND EXISTS (SELECT 1 FROM notebooks access_nb WHERE access_nb.id=memory_items.notebook_id AND (access_nb.created_by=%s OR EXISTS (SELECT 1 FROM notebook_members access_nm WHERE access_nm.notebook_id=access_nb.id AND access_nm.user_id=%s) OR EXISTS (SELECT 1 FROM notebook_grants access_ng WHERE access_ng.notebook_id=access_nb.id AND ((access_ng.principal_type='user' AND access_ng.principal_id=%s) OR (access_ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members access_ngm WHERE access_ngm.group_id=access_ng.principal_id AND access_ngm.user_id=%s)) OR (access_ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members access_nga WHERE access_nga.group_id=access_ng.principal_id AND access_nga.user_id=%s AND access_nga.role='admin')) OR access_ng.principal_type='everyone'))) AND access_nb.status NOT IN ('copying','deleting','importing','pending_delete')) AND ((title OPERATOR(public.%%) %s OR title ILIKE %s OR content_md OPERATOR(public.%%) %s OR content_md ILIKE %s OR (tags_json::text) COLLATE \"C\" OPERATOR(public.%%) %s OR (tags_json::text) COLLATE \"C\" ILIKE %s)) ORDER BY GREATEST(public.similarity(title,%s),public.similarity(content_md,%s),public.similarity((tags_json::text) COLLATE \"C\",%s)) DESC,id COLLATE \"C\" LIMIT %s"
+  },
+  {
+   "params": [
+    "user-local",
+    "nb-00000000000000000000000000000001",
+    "confirmed",
+    "user-local",
+    "user-local",
+    "user-local",
+    "user-local",
+    "user-local",
+    [],
+    64
+   ],
+   "sql": "SELECT m.id,m.notebook_id,m.created_by,m.agent_profile_id,m.source_answer_id,m.origin,m.status,m.promotion_state,m.title,m.content_md,m.tags_json,m.confirmed_by,m.confirmed_at,m.embedding_status,m.embedding_error,m.created_at,m.updated_at,p.payload_json,me.vector AS retrieval_vector FROM memory_items m LEFT JOIN memory_provenance p ON p.memory_id=m.id LEFT JOIN memory_embeddings me ON me.memory_id=m.id WHERE m.created_by=%s AND m.notebook_id=%s AND m.status IN (%s) AND EXISTS (SELECT 1 FROM notebooks access_nb WHERE access_nb.id=m.notebook_id AND (access_nb.created_by=%s OR EXISTS (SELECT 1 FROM notebook_members access_nm WHERE access_nm.notebook_id=access_nb.id AND access_nm.user_id=%s) OR EXISTS (SELECT 1 FROM notebook_grants access_ng WHERE access_ng.notebook_id=access_nb.id AND ((access_ng.principal_type='user' AND access_ng.principal_id=%s) OR (access_ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members access_ngm WHERE access_ngm.group_id=access_ng.principal_id AND access_ngm.user_id=%s)) OR (access_ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members access_nga WHERE access_nga.group_id=access_ng.principal_id AND access_nga.user_id=%s AND access_nga.role='admin')) OR access_ng.principal_type='everyone'))) AND access_nb.status NOT IN ('copying','deleting','importing','pending_delete')) AND m.id=ANY(%s) ORDER BY m.updated_at DESC,m.id COLLATE \"C\" LIMIT %s"
+  },
+  {
+   "params": [
+    "user-local",
+    "nb-00000000000000000000000000000001",
+    "confirmed",
+    "user-local",
+    "user-local",
+    "user-local",
+    "user-local",
+    "user-local",
+    256
+   ],
+   "sql": "SELECT m.id,m.notebook_id,m.created_by,m.agent_profile_id,m.source_answer_id,m.origin,m.status,m.promotion_state,m.title,m.content_md,m.tags_json,m.confirmed_by,m.confirmed_at,m.embedding_status,m.embedding_error,m.created_at,m.updated_at,p.payload_json,me.vector AS retrieval_vector FROM memory_items m LEFT JOIN memory_provenance p ON p.memory_id=m.id JOIN memory_embeddings me ON me.memory_id=m.id WHERE m.created_by=%s AND m.notebook_id=%s AND m.status IN (%s) AND EXISTS (SELECT 1 FROM notebooks access_nb WHERE access_nb.id=m.notebook_id AND (access_nb.created_by=%s OR EXISTS (SELECT 1 FROM notebook_members access_nm WHERE access_nm.notebook_id=access_nb.id AND access_nm.user_id=%s) OR EXISTS (SELECT 1 FROM notebook_grants access_ng WHERE access_ng.notebook_id=access_nb.id AND ((access_ng.principal_type='user' AND access_ng.principal_id=%s) OR (access_ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members access_ngm WHERE access_ngm.group_id=access_ng.principal_id AND access_ngm.user_id=%s)) OR (access_ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members access_nga WHERE access_nga.group_id=access_ng.principal_id AND access_nga.user_id=%s AND access_nga.role='admin')) OR access_ng.principal_type='everyone'))) AND access_nb.status NOT IN ('copying','deleting','importing','pending_delete')) ORDER BY m.updated_at DESC,m.id COLLATE \"C\" LIMIT %s"
+  },
+  {
+   "embed_query": "版图设计要点有哪些"
+  },
+  {
+   "args": [],
+   "call": "self._primary_llm_unconfigured",
+   "kwargs": {},
+   "ret": false
+  },
+  {
+   "args": [
+    "<RetrievalService>",
+    "nb-00000000000000000000000000000001"
+   ],
+   "call": "fn.kg_in_scope_for",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id=%s)"
+  },
+  {
+   "ctxvar": "_ASK_MODEL_ERRORS",
+   "set": []
+  },
+  {
+   "ctxvar": "_ASK_EMBED_CACHE",
+   "set": {}
+  },
+  {
+   "args": [
+    {
+     "event": false
+    }
+   ],
+   "call": "fn.raise_if_cancelled",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "stream": "skip"
+  },
+  {
+   "args": [
+    {
+     "dc:PreparedReasoningAsk": {
+      "asked_at": "<ts>",
+      "conversation_id": "conv-00000000000000000000000000000015",
+      "history": "",
+      "intent_json": "{\"objective\":\"版图设计要点有哪些\",\"resolved_question\":\"版图设计要点有哪些\",\"intent_type\":\"other\",\"result_scope\":\"ranked\",\"completeness_required\":false,\"entities\":[],\"mandatory_topics\":[],\"high_level_keywords\":[],\"low_level_keywords\":[],\"keyword_basis\":\"\",\"comparison_axes\":[],\"constraints\":[],\"excluded_topics\":[],\"expected_output\":\"\",\"assumptions\":[],\"ambiguities\":[],\"confidence\":0.0,\"needs_clarification\":false,\"confirmed\":true,\"clarification_answers\":[]}",
+      "intent_keywords": "",
+      "intent_projection": {
+       "dc:ReasoningIntentProjection": {
+        "assumptions": [],
+        "completeness_required": false,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "mandatory_topics": [],
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked",
+        "retrieval_effort": "standard"
+       }
+      },
+      "intent_queries": [],
+      "intent_trace_duration_ms": null,
+      "job_id": "",
+      "limits": {
+       "dc:AskRetrievalLimits": {
+        "answer_element_items": 6,
+        "cell_excerpt_chars": 1000,
+        "chunk_context_chars": 30000,
+        "effort": "standard",
+        "enum_page_size": 50,
+        "enum_pages_per_run": 4,
+        "enum_rows_per_run": 200,
+        "inline_answer_rows": 100,
+        "kg_context_chars": 6000,
+        "max_initial_subqueries": 5,
+        "max_reasoning_steps": 8,
+        "overflow_semantics": "explicit_partial",
+        "ranked_final_cap": 36,
+        "ranked_final_floor": 20,
+        "ranked_per_aspect": 3,
+        "ranked_per_query_take": 8,
+        "structured_max_columns": 8,
+        "structured_max_pages": 50,
+        "structured_max_rows": 1250,
+        "structured_max_tables": 8,
+        "structured_page_size": 25,
+        "structured_payload_chars": 256000
+       }
+      },
+      "notebook_id": "nb-00000000000000000000000000000001",
+      "output": "answer",
+      "question": "版图设计要点有哪些",
+      "report_followup": null,
+      "research_question": "版图设计要点有哪些",
+      "retrieval_effort": "standard",
+      "style_block": "",
+      "user_id": "user-local"
+     }
+    }
+   ],
+   "call": "fn._egress_question",
+   "kwargs": {},
+   "ret": "版图设计要点有哪些"
+  },
+  {
+   "args": [],
+   "call": "self._build_reasoning_retriever",
+   "kwargs": {
+    "cancel_event": {
+     "event": false
+    },
+    "egress_question": "版图设计要点有哪些",
+    "report_outline": "",
+    "user_id": "user-local"
+   },
+   "ret": "<ReasoningRetriever>"
+  },
+  {
+   "args": [
+    "<ReasoningRetriever>",
+    {
+     "dc:ReasoningRunInput": {
+      "history": "",
+      "intent": {
+       "dc:ReasoningIntentProjection": {
+        "assumptions": [],
+        "completeness_required": false,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "mandatory_topics": [],
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked",
+        "retrieval_effort": "standard"
+       }
+      },
+      "intent_keywords": "",
+      "intent_queries": [],
+      "limits": {
+       "dc:AskRetrievalLimits": {
+        "answer_element_items": 6,
+        "cell_excerpt_chars": 1000,
+        "chunk_context_chars": 30000,
+        "effort": "standard",
+        "enum_page_size": 50,
+        "enum_pages_per_run": 4,
+        "enum_rows_per_run": 200,
+        "inline_answer_rows": 100,
+        "kg_context_chars": 6000,
+        "max_initial_subqueries": 5,
+        "max_reasoning_steps": 8,
+        "overflow_semantics": "explicit_partial",
+        "ranked_final_cap": 36,
+        "ranked_final_floor": 20,
+        "ranked_per_aspect": 3,
+        "ranked_per_query_take": 8,
+        "structured_max_columns": 8,
+        "structured_max_pages": 50,
+        "structured_max_rows": 1250,
+        "structured_max_tables": 8,
+        "structured_page_size": 25,
+        "structured_payload_chars": 256000
+       }
+      },
+      "max_steps": null,
+      "notebook_id": "nb-00000000000000000000000000000001",
+      "question": "版图设计要点有哪些",
+      "top_n": null
+     }
+    },
+    {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<PostgresDatabase>",
+      "retrieval_run": "<RetrievalRunState>",
+      "scope": {
+       "dc:ActiveSourceScope": {
+        "_skipped_libraries": [],
+        "_universe_read_order": [
+         [
+          "src-00000000000000000000000000000002",
+          "src-00000000000000000000000000000006"
+         ],
+         []
+        ],
+        "_verdict_probes": {
+         "dc:CeilingVerdictProbes": {
+          "foreign_hidden": "<callable call>",
+          "universe_digests": "<callable call>"
+         }
+        },
+        "base_mode": "exclude",
+        "base_narrowed": null,
+        "base_notebook_ids": [],
+        "base_provided": false,
+        "ceilings_total": true,
+        "hidden_source_ids": [],
+        "mode": "include",
+        "narrowed": false,
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "notebook_source_ceilings": [],
+        "owner_id": "user-local",
+        "source_ids": [
+         "src-00000000000000000000000000000002",
+         "src-00000000000000000000000000000006"
+        ],
+        "source_provided": false,
+        "subjectless": false,
+        "withheld_hidden_source_ids": []
+       }
+      },
+      "trace_sink": "<callable checked_trace>"
+     }
+    }
+   ],
+   "call": "fn.execute_reasoning_retrieval_stage",
+   "kwargs": {},
+   "raised": "RuntimeError: retrieval blew up"
+  },
+  {
+   "args": [
+    {
+     "dc:PreparedReasoningAsk": {
+      "asked_at": "<ts>",
+      "conversation_id": "conv-00000000000000000000000000000015",
+      "history": "",
+      "intent_json": "{\"objective\":\"版图设计要点有哪些\",\"resolved_question\":\"版图设计要点有哪些\",\"intent_type\":\"other\",\"result_scope\":\"ranked\",\"completeness_required\":false,\"entities\":[],\"mandatory_topics\":[],\"high_level_keywords\":[],\"low_level_keywords\":[],\"keyword_basis\":\"\",\"comparison_axes\":[],\"constraints\":[],\"excluded_topics\":[],\"expected_output\":\"\",\"assumptions\":[],\"ambiguities\":[],\"confidence\":0.0,\"needs_clarification\":false,\"confirmed\":true,\"clarification_answers\":[]}",
+      "intent_keywords": "",
+      "intent_projection": {
+       "dc:ReasoningIntentProjection": {
+        "assumptions": [],
+        "completeness_required": false,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "mandatory_topics": [],
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked",
+        "retrieval_effort": "standard"
+       }
+      },
+      "intent_queries": [],
+      "intent_trace_duration_ms": null,
+      "job_id": "",
+      "limits": {
+       "dc:AskRetrievalLimits": {
+        "answer_element_items": 6,
+        "cell_excerpt_chars": 1000,
+        "chunk_context_chars": 30000,
+        "effort": "standard",
+        "enum_page_size": 50,
+        "enum_pages_per_run": 4,
+        "enum_rows_per_run": 200,
+        "inline_answer_rows": 100,
+        "kg_context_chars": 6000,
+        "max_initial_subqueries": 5,
+        "max_reasoning_steps": 8,
+        "overflow_semantics": "explicit_partial",
+        "ranked_final_cap": 36,
+        "ranked_final_floor": 20,
+        "ranked_per_aspect": 3,
+        "ranked_per_query_take": 8,
+        "structured_max_columns": 8,
+        "structured_max_pages": 50,
+        "structured_max_rows": 1250,
+        "structured_max_tables": 8,
+        "structured_page_size": 25,
+        "structured_payload_chars": 256000
+       }
+      },
+      "notebook_id": "nb-00000000000000000000000000000001",
+      "output": "answer",
+      "question": "版图设计要点有哪些",
+      "report_followup": null,
+      "research_question": "版图设计要点有哪些",
+      "retrieval_effort": "standard",
+      "style_block": "",
+      "user_id": "user-local"
+     }
+    },
+    {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<PostgresDatabase>",
+      "retrieval_run": "<RetrievalRunState>",
+      "scope": {
+       "dc:ActiveSourceScope": {
+        "_skipped_libraries": [],
+        "_universe_read_order": [
+         [
+          "src-00000000000000000000000000000002",
+          "src-00000000000000000000000000000006"
+         ],
+         []
+        ],
+        "_verdict_probes": {
+         "dc:CeilingVerdictProbes": {
+          "foreign_hidden": "<callable call>",
+          "universe_digests": "<callable call>"
+         }
+        },
+        "base_mode": "exclude",
+        "base_narrowed": null,
+        "base_notebook_ids": [],
+        "base_provided": false,
+        "ceilings_total": true,
+        "hidden_source_ids": [],
+        "mode": "include",
+        "narrowed": false,
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "notebook_source_ceilings": [],
+        "owner_id": "user-local",
+        "source_ids": [
+         "src-00000000000000000000000000000002",
+         "src-00000000000000000000000000000006"
+        ],
+        "source_provided": false,
+        "subjectless": false,
+        "withheld_hidden_source_ids": []
+       }
+      },
+      "trace_sink": "<callable on_trace>"
+     }
+    },
+    [
+     {
+      "pd:TraceStep": {
+       "detail": {
+        "assumptions": [],
+        "completeness_required": false,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "mandatory_topics": [],
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked",
+        "retrieval_effort": "standard"
+       },
+       "duration_ms": null,
+       "step_type": "intent",
+       "summary": "已按确认后的问题理解开始检索"
+      }
+     },
+     {
+      "pd:TraceStep": {
+       "detail": {},
+       "duration_ms": "<dur>",
+       "step_type": "skip",
+       "summary": "未找到相关记忆"
+      }
+     }
+    ]
+   ],
+   "call": "self._spreadsheet_reasoning_results",
+   "kwargs": {},
+   "ret": []
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001",
+    "user-local"
+   ],
+   "sql": "SELECT s.id FROM sources s WHERE s.notebook_id=%s AND s.source_type IN ('knowhow','memory') AND (s.source_type <> 'memory' OR EXISTS (SELECT 1 FROM memory_items rm WHERE rm.id = s.memory_id AND rm.created_by = %s)) ORDER BY s.id"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT tier FROM notebooks WHERE id=%s"
+  },
+  {
+   "params": [
+    "user-local",
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT b.id AS id,b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF(CAST(%s AS text), '') AS uid) v WHERE e.notebook_id = %s AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing','pending_delete') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name COLLATE \"C\", b.id COLLATE \"C\""
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT id FROM sources WHERE notebook_id=%s AND source_type NOT IN ('knowhow','memory') ORDER BY id"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT id,tier FROM notebooks WHERE id IN (%s)"
+  },
+  {
+   "args": [
+    "reasoning_agent"
+   ],
+   "call": "models.chat",
+   "kwargs": {},
+   "ret": "<ScriptedChat>"
+  },
+  {
+   "args": [
+    {
+     "event": false
+    }
+   ],
+   "call": "fn.raise_if_cancelled",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "args": [
+    {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<PostgresDatabase>",
+      "retrieval_run": "<RetrievalRunState>",
+      "scope": {
+       "dc:ActiveSourceScope": {
+        "_skipped_libraries": [],
+        "_universe_read_order": [
+         [
+          "src-00000000000000000000000000000002",
+          "src-00000000000000000000000000000006"
+         ],
+         []
+        ],
+        "_verdict_probes": {
+         "dc:CeilingVerdictProbes": {
+          "foreign_hidden": "<callable call>",
+          "universe_digests": "<callable call>"
+         }
+        },
+        "base_mode": "exclude",
+        "base_narrowed": null,
+        "base_notebook_ids": [],
+        "base_provided": false,
+        "ceilings_total": true,
+        "hidden_source_ids": [],
+        "mode": "include",
+        "narrowed": false,
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "notebook_source_ceilings": [],
+        "owner_id": "user-local",
+        "source_ids": [
+         "src-00000000000000000000000000000002",
+         "src-00000000000000000000000000000006"
+        ],
+        "source_provided": false,
+        "subjectless": false,
+        "withheld_hidden_source_ids": []
+       }
+      },
+      "trace_sink": "<callable on_trace>"
+     }
+    },
+    "response-draft"
+   ],
+   "call": "self._assert_reasoning_runtime",
+   "kwargs": {
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "user_id": "user-local"
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    {
+     "dc:PreparedReasoningAsk": {
+      "asked_at": "<ts>",
+      "conversation_id": "conv-00000000000000000000000000000015",
+      "history": "",
+      "intent_json": "{\"objective\":\"版图设计要点有哪些\",\"resolved_question\":\"版图设计要点有哪些\",\"intent_type\":\"other\",\"result_scope\":\"ranked\",\"completeness_required\":false,\"entities\":[],\"mandatory_topics\":[],\"high_level_keywords\":[],\"low_level_keywords\":[],\"keyword_basis\":\"\",\"comparison_axes\":[],\"constraints\":[],\"excluded_topics\":[],\"expected_output\":\"\",\"assumptions\":[],\"ambiguities\":[],\"confidence\":0.0,\"needs_clarification\":false,\"confirmed\":true,\"clarification_answers\":[]}",
+      "intent_keywords": "",
+      "intent_projection": {
+       "dc:ReasoningIntentProjection": {
+        "assumptions": [],
+        "completeness_required": false,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "mandatory_topics": [],
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked",
+        "retrieval_effort": "standard"
+       }
+      },
+      "intent_queries": [],
+      "intent_trace_duration_ms": null,
+      "job_id": "",
+      "limits": {
+       "dc:AskRetrievalLimits": {
+        "answer_element_items": 6,
+        "cell_excerpt_chars": 1000,
+        "chunk_context_chars": 30000,
+        "effort": "standard",
+        "enum_page_size": 50,
+        "enum_pages_per_run": 4,
+        "enum_rows_per_run": 200,
+        "inline_answer_rows": 100,
+        "kg_context_chars": 6000,
+        "max_initial_subqueries": 5,
+        "max_reasoning_steps": 8,
+        "overflow_semantics": "explicit_partial",
+        "ranked_final_cap": 36,
+        "ranked_final_floor": 20,
+        "ranked_per_aspect": 3,
+        "ranked_per_query_take": 8,
+        "structured_max_columns": 8,
+        "structured_max_pages": 50,
+        "structured_max_rows": 1250,
+        "structured_max_tables": 8,
+        "structured_page_size": 25,
+        "structured_payload_chars": 256000
+       }
+      },
+      "notebook_id": "nb-00000000000000000000000000000001",
+      "output": "answer",
+      "question": "版图设计要点有哪些",
+      "report_followup": null,
+      "research_question": "版图设计要点有哪些",
+      "retrieval_effort": "standard",
+      "style_block": "",
+      "user_id": "user-local"
+     }
+    }
+   ],
+   "call": "self._response_draft_stage_for",
+   "kwargs": {},
+   "ret": "<DefaultResponseDraftStage>"
+  },
+  {
+   "args": [
+    "<DefaultResponseDraftStage>",
+    {
+     "dc:ResponseDraftInput": {
+      "candidate_manifest": null,
+      "chains": [],
+      "chunks": [],
+      "collection_map_text": "",
+      "completeness_unavailable": false,
+      "document_reads": [],
+      "elements": [],
+      "enumerations": [],
+      "external_evidence": [],
+      "historical_chunks": [],
+      "intent_contract": {
+       "pd:QueryIntentContract": {
+        "ambiguities": [],
+        "assumptions": [],
+        "clarification_answers": [],
+        "comparison_axes": [],
+        "completeness_required": false,
+        "confidence": "<float>",
+        "confirmed": true,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "high_level_keywords": [],
+        "intent_type": "other",
+        "keyword_basis": "",
+        "low_level_keywords": [],
+        "mandatory_topics": [],
+        "needs_clarification": false,
+        "objective": "版图设计要点有哪些",
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked"
+       }
+      },
+      "kg_required": false,
+      "memory_hits": [],
+      "outline": [],
+      "outline_evidence": [],
+      "prepared": {
+       "dc:PreparedReasoningAsk": {
+        "asked_at": "<ts>",
+        "conversation_id": "conv-00000000000000000000000000000015",
+        "history": "",
+        "intent_json": "{\"objective\":\"版图设计要点有哪些\",\"resolved_question\":\"版图设计要点有哪些\",\"intent_type\":\"other\",\"result_scope\":\"ranked\",\"completeness_required\":false,\"entities\":[],\"mandatory_topics\":[],\"high_level_keywords\":[],\"low_level_keywords\":[],\"keyword_basis\":\"\",\"comparison_axes\":[],\"constraints\":[],\"excluded_topics\":[],\"expected_output\":\"\",\"assumptions\":[],\"ambiguities\":[],\"confidence\":0.0,\"needs_clarification\":false,\"confirmed\":true,\"clarification_answers\":[]}",
+        "intent_keywords": "",
+        "intent_projection": {
+         "dc:ReasoningIntentProjection": {
+          "assumptions": [],
+          "completeness_required": false,
+          "constraints": [],
+          "entities": [],
+          "excluded_topics": [],
+          "expected_output": "",
+          "mandatory_topics": [],
+          "resolved_question": "版图设计要点有哪些",
+          "result_scope": "ranked",
+          "retrieval_effort": "standard"
+         }
+        },
+        "intent_queries": [],
+        "intent_trace_duration_ms": null,
+        "job_id": "",
+        "limits": {
+         "dc:AskRetrievalLimits": {
+          "answer_element_items": 6,
+          "cell_excerpt_chars": 1000,
+          "chunk_context_chars": 30000,
+          "effort": "standard",
+          "enum_page_size": 50,
+          "enum_pages_per_run": 4,
+          "enum_rows_per_run": 200,
+          "inline_answer_rows": 100,
+          "kg_context_chars": 6000,
+          "max_initial_subqueries": 5,
+          "max_reasoning_steps": 8,
+          "overflow_semantics": "explicit_partial",
+          "ranked_final_cap": 36,
+          "ranked_final_floor": 20,
+          "ranked_per_aspect": 3,
+          "ranked_per_query_take": 8,
+          "structured_max_columns": 8,
+          "structured_max_pages": 50,
+          "structured_max_rows": 1250,
+          "structured_max_tables": 8,
+          "structured_page_size": 25,
+          "structured_payload_chars": 256000
+         }
+        },
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "output": "answer",
+        "question": "版图设计要点有哪些",
+        "report_followup": null,
+        "research_question": "版图设计要点有哪些",
+        "retrieval_effort": "standard",
+        "style_block": "",
+        "user_id": "user-local"
+       }
+      },
+      "spreadsheet_results": [],
+      "structured_batch": null,
+      "top_hits": [],
+      "trace": [
+       {
+        "pd:TraceStep": {
+         "detail": {
+          "assumptions": [],
+          "completeness_required": false,
+          "constraints": [],
+          "entities": [],
+          "excluded_topics": [],
+          "expected_output": "",
+          "mandatory_topics": [],
+          "resolved_question": "版图设计要点有哪些",
+          "result_scope": "ranked",
+          "retrieval_effort": "standard"
+         },
+         "duration_ms": null,
+         "step_type": "intent",
+         "summary": "已按确认后的问题理解开始检索"
+        }
+       },
+       {
+        "pd:TraceStep": {
+         "detail": {},
+         "duration_ms": "<dur>",
+         "step_type": "skip",
+         "summary": "未找到相关记忆"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<PostgresDatabase>",
+      "retrieval_run": "<RetrievalRunState>",
+      "scope": {
+       "dc:ActiveSourceScope": {
+        "_skipped_libraries": [],
+        "_universe_read_order": [
+         [
+          "src-00000000000000000000000000000002",
+          "src-00000000000000000000000000000006"
+         ],
+         []
+        ],
+        "_verdict_probes": {
+         "dc:CeilingVerdictProbes": {
+          "foreign_hidden": "<callable call>",
+          "universe_digests": "<callable call>"
+         }
+        },
+        "base_mode": "exclude",
+        "base_narrowed": null,
+        "base_notebook_ids": [],
+        "base_provided": false,
+        "ceilings_total": true,
+        "hidden_source_ids": [],
+        "mode": "include",
+        "narrowed": false,
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "notebook_source_ceilings": [],
+        "owner_id": "user-local",
+        "source_ids": [
+         "src-00000000000000000000000000000002",
+         "src-00000000000000000000000000000006"
+        ],
+        "source_provided": false,
+        "subjectless": false,
+        "withheld_hidden_source_ids": []
+       }
+      },
+      "trace_sink": "<callable on_trace>"
+     }
+    }
+   ],
+   "call": "fn.execute_response_draft_stage",
+   "kwargs": {},
+   "ret": {
+    "dc:ReasoningResponseDraft": {
+     "asked_at": "<ts>",
+     "baseline_manifest": null,
+     "conversation_id": "conv-00000000000000000000000000000015",
+     "evidence": null,
+     "job_id": "",
+     "notebook_id": "nb-00000000000000000000000000000001",
+     "question": "版图设计要点有哪些",
+     "response": {
+      "pd:AskResponse": {
+       "anchors": [],
+       "answer": "",
+       "answer_id": "",
+       "citations": [],
+       "conclusion": "当前检索没有找到足以支撑回答的来源证据。资料可能已经导入，但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。",
+       "conversation_id": "conv-00000000000000000000000000000015",
+       "evidence_level": "inferred",
+       "grounded": false,
+       "index_required": false,
+       "intent": {
+        "ambiguities": [],
+        "assumptions": [],
+        "clarification_answers": [],
+        "comparison_axes": [],
+        "completeness_required": false,
+        "confidence": "<float>",
+        "confirmed": true,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "high_level_keywords": [],
+        "intent_type": "other",
+        "keyword_basis": "",
+        "low_level_keywords": [],
+        "mandatory_topics": [],
+        "needs_clarification": false,
+        "objective": "版图设计要点有哪些",
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked"
+       },
+       "kg_required": false,
+       "llm_mode": "deterministic",
+       "mode": "reasoning",
+       "model_errors": [],
+       "reasoning_trace": [
+        {
+         "detail": {
+          "assumptions": [],
+          "completeness_required": false,
+          "constraints": [],
+          "entities": [],
+          "excluded_topics": [],
+          "expected_output": "",
+          "mandatory_topics": [],
+          "resolved_question": "版图设计要点有哪些",
+          "result_scope": "ranked",
+          "retrieval_effort": "standard"
+         },
+         "duration_ms": null,
+         "step_type": "intent",
+         "summary": "已按确认后的问题理解开始检索"
+        },
+        {
+         "detail": {},
+         "duration_ms": "<dur>",
+         "step_type": "skip",
+         "summary": "未找到相关记忆"
+        }
+       ],
+       "related_knowledge": [],
+       "retrieval_effort": "standard",
+       "retrieval_query": "版图设计要点有哪些",
+       "top_relevance": "<float>"
+      }
+     },
+     "user_id": "user-local"
+    }
+   }
+  },
+  {
+   "args": [
+    {
+     "dc:ResponseDraftInput": {
+      "candidate_manifest": null,
+      "chains": [],
+      "chunks": [],
+      "collection_map_text": "",
+      "completeness_unavailable": false,
+      "document_reads": [],
+      "elements": [],
+      "enumerations": [],
+      "external_evidence": [],
+      "historical_chunks": [],
+      "intent_contract": {
+       "pd:QueryIntentContract": {
+        "ambiguities": [],
+        "assumptions": [],
+        "clarification_answers": [],
+        "comparison_axes": [],
+        "completeness_required": false,
+        "confidence": "<float>",
+        "confirmed": true,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "high_level_keywords": [],
+        "intent_type": "other",
+        "keyword_basis": "",
+        "low_level_keywords": [],
+        "mandatory_topics": [],
+        "needs_clarification": false,
+        "objective": "版图设计要点有哪些",
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked"
+       }
+      },
+      "kg_required": false,
+      "memory_hits": [],
+      "outline": [],
+      "outline_evidence": [],
+      "prepared": {
+       "dc:PreparedReasoningAsk": {
+        "asked_at": "<ts>",
+        "conversation_id": "conv-00000000000000000000000000000015",
+        "history": "",
+        "intent_json": "{\"objective\":\"版图设计要点有哪些\",\"resolved_question\":\"版图设计要点有哪些\",\"intent_type\":\"other\",\"result_scope\":\"ranked\",\"completeness_required\":false,\"entities\":[],\"mandatory_topics\":[],\"high_level_keywords\":[],\"low_level_keywords\":[],\"keyword_basis\":\"\",\"comparison_axes\":[],\"constraints\":[],\"excluded_topics\":[],\"expected_output\":\"\",\"assumptions\":[],\"ambiguities\":[],\"confidence\":0.0,\"needs_clarification\":false,\"confirmed\":true,\"clarification_answers\":[]}",
+        "intent_keywords": "",
+        "intent_projection": {
+         "dc:ReasoningIntentProjection": {
+          "assumptions": [],
+          "completeness_required": false,
+          "constraints": [],
+          "entities": [],
+          "excluded_topics": [],
+          "expected_output": "",
+          "mandatory_topics": [],
+          "resolved_question": "版图设计要点有哪些",
+          "result_scope": "ranked",
+          "retrieval_effort": "standard"
+         }
+        },
+        "intent_queries": [],
+        "intent_trace_duration_ms": null,
+        "job_id": "",
+        "limits": {
+         "dc:AskRetrievalLimits": {
+          "answer_element_items": 6,
+          "cell_excerpt_chars": 1000,
+          "chunk_context_chars": 30000,
+          "effort": "standard",
+          "enum_page_size": 50,
+          "enum_pages_per_run": 4,
+          "enum_rows_per_run": 200,
+          "inline_answer_rows": 100,
+          "kg_context_chars": 6000,
+          "max_initial_subqueries": 5,
+          "max_reasoning_steps": 8,
+          "overflow_semantics": "explicit_partial",
+          "ranked_final_cap": 36,
+          "ranked_final_floor": 20,
+          "ranked_per_aspect": 3,
+          "ranked_per_query_take": 8,
+          "structured_max_columns": 8,
+          "structured_max_pages": 50,
+          "structured_max_rows": 1250,
+          "structured_max_tables": 8,
+          "structured_page_size": 25,
+          "structured_payload_chars": 256000
+         }
+        },
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "output": "answer",
+        "question": "版图设计要点有哪些",
+        "report_followup": null,
+        "research_question": "版图设计要点有哪些",
+        "retrieval_effort": "standard",
+        "style_block": "",
+        "user_id": "user-local"
+       }
+      },
+      "spreadsheet_results": [],
+      "structured_batch": null,
+      "top_hits": [],
+      "trace": [
+       {
+        "pd:TraceStep": {
+         "detail": {
+          "assumptions": [],
+          "completeness_required": false,
+          "constraints": [],
+          "entities": [],
+          "excluded_topics": [],
+          "expected_output": "",
+          "mandatory_topics": [],
+          "resolved_question": "版图设计要点有哪些",
+          "result_scope": "ranked",
+          "retrieval_effort": "standard"
+         },
+         "duration_ms": null,
+         "step_type": "intent",
+         "summary": "已按确认后的问题理解开始检索"
+        }
+       },
+       {
+        "pd:TraceStep": {
+         "detail": {},
+         "duration_ms": "<dur>",
+         "step_type": "skip",
+         "summary": "未找到相关记忆"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<PostgresDatabase>",
+      "retrieval_run": "<RetrievalRunState>",
+      "scope": {
+       "dc:ActiveSourceScope": {
+        "_skipped_libraries": [],
+        "_universe_read_order": [
+         [
+          "src-00000000000000000000000000000002",
+          "src-00000000000000000000000000000006"
+         ],
+         []
+        ],
+        "_verdict_probes": {
+         "dc:CeilingVerdictProbes": {
+          "foreign_hidden": "<callable call>",
+          "universe_digests": "<callable call>"
+         }
+        },
+        "base_mode": "exclude",
+        "base_narrowed": null,
+        "base_notebook_ids": [],
+        "base_provided": false,
+        "ceilings_total": true,
+        "hidden_source_ids": [],
+        "mode": "include",
+        "narrowed": false,
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "notebook_source_ceilings": [],
+        "owner_id": "user-local",
+        "source_ids": [
+         "src-00000000000000000000000000000002",
+         "src-00000000000000000000000000000006"
+        ],
+        "source_provided": false,
+        "subjectless": false,
+        "withheld_hidden_source_ids": []
+       }
+      },
+      "trace_sink": "<callable on_trace>"
+     }
+    }
+   ],
+   "call": "self._draft_reasoning_response",
+   "kwargs": {},
+   "ret": {
+    "dc:ReasoningResponseDraft": {
+     "asked_at": "<ts>",
+     "baseline_manifest": null,
+     "conversation_id": "conv-00000000000000000000000000000015",
+     "evidence": null,
+     "job_id": "",
+     "notebook_id": "nb-00000000000000000000000000000001",
+     "question": "版图设计要点有哪些",
+     "response": {
+      "pd:AskResponse": {
+       "anchors": [],
+       "answer": "",
+       "answer_id": "",
+       "citations": [],
+       "conclusion": "当前检索没有找到足以支撑回答的来源证据。资料可能已经导入，但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。",
+       "conversation_id": "conv-00000000000000000000000000000015",
+       "evidence_level": "inferred",
+       "grounded": false,
+       "index_required": false,
+       "intent": {
+        "ambiguities": [],
+        "assumptions": [],
+        "clarification_answers": [],
+        "comparison_axes": [],
+        "completeness_required": false,
+        "confidence": "<float>",
+        "confirmed": true,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "high_level_keywords": [],
+        "intent_type": "other",
+        "keyword_basis": "",
+        "low_level_keywords": [],
+        "mandatory_topics": [],
+        "needs_clarification": false,
+        "objective": "版图设计要点有哪些",
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked"
+       },
+       "kg_required": false,
+       "llm_mode": "deterministic",
+       "mode": "reasoning",
+       "model_errors": [],
+       "reasoning_trace": [
+        {
+         "detail": {
+          "assumptions": [],
+          "completeness_required": false,
+          "constraints": [],
+          "entities": [],
+          "excluded_topics": [],
+          "expected_output": "",
+          "mandatory_topics": [],
+          "resolved_question": "版图设计要点有哪些",
+          "result_scope": "ranked",
+          "retrieval_effort": "standard"
+         },
+         "duration_ms": null,
+         "step_type": "intent",
+         "summary": "已按确认后的问题理解开始检索"
+        },
+        {
+         "detail": {},
+         "duration_ms": "<dur>",
+         "step_type": "skip",
+         "summary": "未找到相关记忆"
+        }
+       ],
+       "related_knowledge": [],
+       "retrieval_effort": "standard",
+       "retrieval_query": "版图设计要点有哪些",
+       "top_relevance": "<float>"
+      }
+     },
+     "user_id": "user-local"
+    }
+   }
+  },
+  {
+   "args": [
+    {
+     "dc:PreparedReasoningAsk": {
+      "asked_at": "<ts>",
+      "conversation_id": "conv-00000000000000000000000000000015",
+      "history": "",
+      "intent_json": "{\"objective\":\"版图设计要点有哪些\",\"resolved_question\":\"版图设计要点有哪些\",\"intent_type\":\"other\",\"result_scope\":\"ranked\",\"completeness_required\":false,\"entities\":[],\"mandatory_topics\":[],\"high_level_keywords\":[],\"low_level_keywords\":[],\"keyword_basis\":\"\",\"comparison_axes\":[],\"constraints\":[],\"excluded_topics\":[],\"expected_output\":\"\",\"assumptions\":[],\"ambiguities\":[],\"confidence\":0.0,\"needs_clarification\":false,\"confirmed\":true,\"clarification_answers\":[]}",
+      "intent_keywords": "",
+      "intent_projection": {
+       "dc:ReasoningIntentProjection": {
+        "assumptions": [],
+        "completeness_required": false,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "mandatory_topics": [],
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked",
+        "retrieval_effort": "standard"
+       }
+      },
+      "intent_queries": [],
+      "intent_trace_duration_ms": null,
+      "job_id": "",
+      "limits": {
+       "dc:AskRetrievalLimits": {
+        "answer_element_items": 6,
+        "cell_excerpt_chars": 1000,
+        "chunk_context_chars": 30000,
+        "effort": "standard",
+        "enum_page_size": 50,
+        "enum_pages_per_run": 4,
+        "enum_rows_per_run": 200,
+        "inline_answer_rows": 100,
+        "kg_context_chars": 6000,
+        "max_initial_subqueries": 5,
+        "max_reasoning_steps": 8,
+        "overflow_semantics": "explicit_partial",
+        "ranked_final_cap": 36,
+        "ranked_final_floor": 20,
+        "ranked_per_aspect": 3,
+        "ranked_per_query_take": 8,
+        "structured_max_columns": 8,
+        "structured_max_pages": 50,
+        "structured_max_rows": 1250,
+        "structured_max_tables": 8,
+        "structured_page_size": 25,
+        "structured_payload_chars": 256000
+       }
+      },
+      "notebook_id": "nb-00000000000000000000000000000001",
+      "output": "answer",
+      "question": "版图设计要点有哪些",
+      "report_followup": null,
+      "research_question": "版图设计要点有哪些",
+      "retrieval_effort": "standard",
+      "style_block": "",
+      "user_id": "user-local"
+     }
+    }
+   ],
+   "call": "self._reasoning_report_turn",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "args": [
+    {
+     "event": false
+    }
+   ],
+   "call": "fn.raise_if_cancelled",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "args": [
+    [],
+    [],
+    "KG evidence"
+   ],
+   "call": "evidence.citations_from",
+   "kwargs": {
+    "notebook_id": "nb-00000000000000000000000000000001"
+   },
+   "ret": []
+  },
+  {
+   "args": [
+    {
+     "event": false
+    }
+   ],
+   "call": "fn.raise_if_cancelled",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "args": [
+    "ask_answer"
+   ],
+   "call": "models.chat",
+   "kwargs": {},
+   "ret": "<ScriptedChat>"
+  },
+  {
+   "args": [
+    ""
+   ],
+   "call": "fn.collection_map_block",
+   "kwargs": {},
+   "ret": ""
+  },
+  {
+   "args": [
+    {
+     "dc:ResponseDraftInput": {
+      "candidate_manifest": null,
+      "chains": [],
+      "chunks": [],
+      "collection_map_text": "",
+      "completeness_unavailable": false,
+      "document_reads": [],
+      "elements": [],
+      "enumerations": [],
+      "external_evidence": [],
+      "historical_chunks": [],
+      "intent_contract": {
+       "pd:QueryIntentContract": {
+        "ambiguities": [],
+        "assumptions": [],
+        "clarification_answers": [],
+        "comparison_axes": [],
+        "completeness_required": false,
+        "confidence": "<float>",
+        "confirmed": true,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "high_level_keywords": [],
+        "intent_type": "other",
+        "keyword_basis": "",
+        "low_level_keywords": [],
+        "mandatory_topics": [],
+        "needs_clarification": false,
+        "objective": "版图设计要点有哪些",
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked"
+       }
+      },
+      "kg_required": false,
+      "memory_hits": [],
+      "outline": [],
+      "outline_evidence": [],
+      "prepared": {
+       "dc:PreparedReasoningAsk": {
+        "asked_at": "<ts>",
+        "conversation_id": "conv-00000000000000000000000000000015",
+        "history": "",
+        "intent_json": "{\"objective\":\"版图设计要点有哪些\",\"resolved_question\":\"版图设计要点有哪些\",\"intent_type\":\"other\",\"result_scope\":\"ranked\",\"completeness_required\":false,\"entities\":[],\"mandatory_topics\":[],\"high_level_keywords\":[],\"low_level_keywords\":[],\"keyword_basis\":\"\",\"comparison_axes\":[],\"constraints\":[],\"excluded_topics\":[],\"expected_output\":\"\",\"assumptions\":[],\"ambiguities\":[],\"confidence\":0.0,\"needs_clarification\":false,\"confirmed\":true,\"clarification_answers\":[]}",
+        "intent_keywords": "",
+        "intent_projection": {
+         "dc:ReasoningIntentProjection": {
+          "assumptions": [],
+          "completeness_required": false,
+          "constraints": [],
+          "entities": [],
+          "excluded_topics": [],
+          "expected_output": "",
+          "mandatory_topics": [],
+          "resolved_question": "版图设计要点有哪些",
+          "result_scope": "ranked",
+          "retrieval_effort": "standard"
+         }
+        },
+        "intent_queries": [],
+        "intent_trace_duration_ms": null,
+        "job_id": "",
+        "limits": {
+         "dc:AskRetrievalLimits": {
+          "answer_element_items": 6,
+          "cell_excerpt_chars": 1000,
+          "chunk_context_chars": 30000,
+          "effort": "standard",
+          "enum_page_size": 50,
+          "enum_pages_per_run": 4,
+          "enum_rows_per_run": 200,
+          "inline_answer_rows": 100,
+          "kg_context_chars": 6000,
+          "max_initial_subqueries": 5,
+          "max_reasoning_steps": 8,
+          "overflow_semantics": "explicit_partial",
+          "ranked_final_cap": 36,
+          "ranked_final_floor": 20,
+          "ranked_per_aspect": 3,
+          "ranked_per_query_take": 8,
+          "structured_max_columns": 8,
+          "structured_max_pages": 50,
+          "structured_max_rows": 1250,
+          "structured_max_tables": 8,
+          "structured_page_size": 25,
+          "structured_payload_chars": 256000
+         }
+        },
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "output": "answer",
+        "question": "版图设计要点有哪些",
+        "report_followup": null,
+        "research_question": "版图设计要点有哪些",
+        "retrieval_effort": "standard",
+        "style_block": "",
+        "user_id": "user-local"
+       }
+      },
+      "spreadsheet_results": [],
+      "structured_batch": null,
+      "top_hits": [],
+      "trace": [
+       {
+        "pd:TraceStep": {
+         "detail": {
+          "assumptions": [],
+          "completeness_required": false,
+          "constraints": [],
+          "entities": [],
+          "excluded_topics": [],
+          "expected_output": "",
+          "mandatory_topics": [],
+          "resolved_question": "版图设计要点有哪些",
+          "result_scope": "ranked",
+          "retrieval_effort": "standard"
+         },
+         "duration_ms": null,
+         "step_type": "intent",
+         "summary": "已按确认后的问题理解开始检索"
+        }
+       },
+       {
+        "pd:TraceStep": {
+         "detail": {},
+         "duration_ms": "<dur>",
+         "step_type": "skip",
+         "summary": "未找到相关记忆"
+        }
+       }
+      ]
+     }
+    },
+    "<ScriptedChat>",
+    ""
+   ],
+   "call": "self._assemble_structured_evidence",
+   "kwargs": {},
+   "ret": [
+    "",
+    {},
+    [],
+    false,
+    {},
+    false
+   ]
+  },
+  {
+   "args": [],
+   "call": "fn.build_retrieval_baseline_manifest",
+   "kwargs": {
+    "baseline_step_usage": 2,
+    "candidate_chunks": [],
+    "candidate_elements": [],
+    "candidate_knowledge": [],
+    "capture_error_count": 0,
+    "final_budget_chars": 0,
+    "final_context_block": "",
+    "final_id_map": {},
+    "final_ordered_handles": [],
+    "mode": "reasoning",
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "prior_manifest": null,
+    "query": "版图设计要点有哪些",
+    "selected_chunks": [],
+    "selected_elements": [],
+    "selected_knowledge": [],
+    "settings": "<Settings>"
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    []
+   ],
+   "call": "fn.chain_anchor_relevances",
+   "kwargs": {},
+   "ret": {}
+  },
+  {
+   "args": [
+    [],
+    []
+   ],
+   "call": "self._memory_citations",
+   "kwargs": {},
+   "ret": []
+  },
+  {
+   "args": [
+    [],
+    []
+   ],
+   "call": "evidence.element_citations",
+   "kwargs": {
+    "notebook_id": "nb-00000000000000000000000000000001"
+   },
+   "ret": []
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT id,tier FROM notebooks WHERE id IN (%s)"
+  },
+  {
+   "args": [
+    [],
+    {},
+    "nb-00000000000000000000000000000001"
+   ],
+   "call": "self._reasoning_chunk_cards",
+   "kwargs": {},
+   "ret": []
+  },
+  {
+   "args": [
+    [],
+    null,
+    [],
+    "nb-00000000000000000000000000000001"
+   ],
+   "call": "self._extend_report_cards",
+   "kwargs": {},
+   "ret": [
+    [],
+    [],
+    []
+   ]
+  },
+  {
+   "args": [
+    []
+   ],
+   "call": "self._external_exact_keys",
+   "kwargs": {},
+   "ret": []
+  },
+  {
+   "args": [
+    [],
+    [],
+    false,
+    "<float>",
+    "<float>"
+   ],
+   "call": "fn.classify_evidence",
+   "kwargs": {
+    "exact_evidence_keys": []
+   },
+   "ret": [
+    "inferred",
+    "<float>"
+   ]
+  },
+  {
+   "args": [
+    [],
+    []
+   ],
+   "call": "self._append_spreadsheet_citations",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "args": [
+    [],
+    [],
+    []
+   ],
+   "call": "self._append_external_citations",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "args": [
+    []
+   ],
+   "call": "evidence.external_citations",
+   "kwargs": {},
+   "ret": []
+  },
+  {
+   "args": [
+    [],
+    {}
+   ],
+   "call": "fn.anchor_image_targets",
+   "kwargs": {},
+   "ret": []
+  },
+  {
+   "args": [
+    []
+   ],
+   "call": "evidence.attach_citation_images",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "args": [
+    null,
+    [],
+    []
+   ],
+   "call": "self._reasoning_result_sets",
+   "kwargs": {},
+   "ret": []
+  },
+  {
+   "args": [
+    {
+     "pd:AskResponse": {
+      "anchors": [],
+      "answer": "",
+      "answer_id": "",
+      "citations": [],
+      "conclusion": "当前检索没有找到足以支撑回答的来源证据。资料可能已经导入，但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。",
+      "conversation_id": "conv-00000000000000000000000000000015",
+      "evidence_level": "inferred",
+      "grounded": false,
+      "index_required": false,
+      "intent": {
+       "ambiguities": [],
+       "assumptions": [],
+       "clarification_answers": [],
+       "comparison_axes": [],
+       "completeness_required": false,
+       "confidence": "<float>",
+       "confirmed": true,
+       "constraints": [],
+       "entities": [],
+       "excluded_topics": [],
+       "expected_output": "",
+       "high_level_keywords": [],
+       "intent_type": "other",
+       "keyword_basis": "",
+       "low_level_keywords": [],
+       "mandatory_topics": [],
+       "needs_clarification": false,
+       "objective": "版图设计要点有哪些",
+       "resolved_question": "版图设计要点有哪些",
+       "result_scope": "ranked"
+      },
+      "kg_required": false,
+      "llm_mode": "deterministic",
+      "mode": "reasoning",
+      "model_errors": [],
+      "reasoning_trace": [
+       {
+        "detail": {
+         "assumptions": [],
+         "completeness_required": false,
+         "constraints": [],
+         "entities": [],
+         "excluded_topics": [],
+         "expected_output": "",
+         "mandatory_topics": [],
+         "resolved_question": "版图设计要点有哪些",
+         "result_scope": "ranked",
+         "retrieval_effort": "standard"
+        },
+        "duration_ms": null,
+        "step_type": "intent",
+        "summary": "已按确认后的问题理解开始检索"
+       },
+       {
+        "detail": {},
+        "duration_ms": "<dur>",
+        "step_type": "skip",
+        "summary": "未找到相关记忆"
+       }
+      ],
+      "related_knowledge": [],
+      "retrieval_effort": "standard",
+      "retrieval_query": "版图设计要点有哪些",
+      "top_relevance": "<float>"
+     }
+    },
+    {
+     "dc:PreparedReasoningAsk": {
+      "asked_at": "<ts>",
+      "conversation_id": "conv-00000000000000000000000000000015",
+      "history": "",
+      "intent_json": "{\"objective\":\"版图设计要点有哪些\",\"resolved_question\":\"版图设计要点有哪些\",\"intent_type\":\"other\",\"result_scope\":\"ranked\",\"completeness_required\":false,\"entities\":[],\"mandatory_topics\":[],\"high_level_keywords\":[],\"low_level_keywords\":[],\"keyword_basis\":\"\",\"comparison_axes\":[],\"constraints\":[],\"excluded_topics\":[],\"expected_output\":\"\",\"assumptions\":[],\"ambiguities\":[],\"confidence\":0.0,\"needs_clarification\":false,\"confirmed\":true,\"clarification_answers\":[]}",
+      "intent_keywords": "",
+      "intent_projection": {
+       "dc:ReasoningIntentProjection": {
+        "assumptions": [],
+        "completeness_required": false,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "mandatory_topics": [],
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked",
+        "retrieval_effort": "standard"
+       }
+      },
+      "intent_queries": [],
+      "intent_trace_duration_ms": null,
+      "job_id": "",
+      "limits": {
+       "dc:AskRetrievalLimits": {
+        "answer_element_items": 6,
+        "cell_excerpt_chars": 1000,
+        "chunk_context_chars": 30000,
+        "effort": "standard",
+        "enum_page_size": 50,
+        "enum_pages_per_run": 4,
+        "enum_rows_per_run": 200,
+        "inline_answer_rows": 100,
+        "kg_context_chars": 6000,
+        "max_initial_subqueries": 5,
+        "max_reasoning_steps": 8,
+        "overflow_semantics": "explicit_partial",
+        "ranked_final_cap": 36,
+        "ranked_final_floor": 20,
+        "ranked_per_aspect": 3,
+        "ranked_per_query_take": 8,
+        "structured_max_columns": 8,
+        "structured_max_pages": 50,
+        "structured_max_rows": 1250,
+        "structured_max_tables": 8,
+        "structured_page_size": 25,
+        "structured_payload_chars": 256000
+       }
+      },
+      "notebook_id": "nb-00000000000000000000000000000001",
+      "output": "answer",
+      "question": "版图设计要点有哪些",
+      "report_followup": null,
+      "research_question": "版图设计要点有哪些",
+      "retrieval_effort": "standard",
+      "style_block": "",
+      "user_id": "user-local"
+     }
+    },
+    {
+     "dc:AskRetrievalLimits": {
+      "answer_element_items": 6,
+      "cell_excerpt_chars": 1000,
+      "chunk_context_chars": 30000,
+      "effort": "standard",
+      "enum_page_size": 50,
+      "enum_pages_per_run": 4,
+      "enum_rows_per_run": 200,
+      "inline_answer_rows": 100,
+      "kg_context_chars": 6000,
+      "max_initial_subqueries": 5,
+      "max_reasoning_steps": 8,
+      "overflow_semantics": "explicit_partial",
+      "ranked_final_cap": 36,
+      "ranked_final_floor": 20,
+      "ranked_per_aspect": 3,
+      "ranked_per_query_take": 8,
+      "structured_max_columns": 8,
+      "structured_max_pages": 50,
+      "structured_max_rows": 1250,
+      "structured_max_tables": 8,
+      "structured_page_size": 25,
+      "structured_payload_chars": 256000
+     }
+    },
+    [
+     {
+      "pd:TraceStep": {
+       "detail": {
+        "assumptions": [],
+        "completeness_required": false,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "mandatory_topics": [],
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked",
+        "retrieval_effort": "standard"
+       },
+       "duration_ms": null,
+       "step_type": "intent",
+       "summary": "已按确认后的问题理解开始检索"
+      }
+     },
+     {
+      "pd:TraceStep": {
+       "detail": {},
+       "duration_ms": "<dur>",
+       "step_type": "skip",
+       "summary": "未找到相关记忆"
+      }
+     }
+    ]
+   ],
+   "call": "self._attach_gap_consult_result",
+   "kwargs": {
+    "cancel_event": {
+     "event": false
+    },
+    "chunks": [],
+    "elements": [],
+    "on_trace": "<callable on_trace>",
+    "top_hits": []
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    {
+     "dc:PreparedReasoningAsk": {
+      "asked_at": "<ts>",
+      "conversation_id": "conv-00000000000000000000000000000015",
+      "history": "",
+      "intent_json": "{\"objective\":\"版图设计要点有哪些\",\"resolved_question\":\"版图设计要点有哪些\",\"intent_type\":\"other\",\"result_scope\":\"ranked\",\"completeness_required\":false,\"entities\":[],\"mandatory_topics\":[],\"high_level_keywords\":[],\"low_level_keywords\":[],\"keyword_basis\":\"\",\"comparison_axes\":[],\"constraints\":[],\"excluded_topics\":[],\"expected_output\":\"\",\"assumptions\":[],\"ambiguities\":[],\"confidence\":0.0,\"needs_clarification\":false,\"confirmed\":true,\"clarification_answers\":[]}",
+      "intent_keywords": "",
+      "intent_projection": {
+       "dc:ReasoningIntentProjection": {
+        "assumptions": [],
+        "completeness_required": false,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "mandatory_topics": [],
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked",
+        "retrieval_effort": "standard"
+       }
+      },
+      "intent_queries": [],
+      "intent_trace_duration_ms": null,
+      "job_id": "",
+      "limits": {
+       "dc:AskRetrievalLimits": {
+        "answer_element_items": 6,
+        "cell_excerpt_chars": 1000,
+        "chunk_context_chars": 30000,
+        "effort": "standard",
+        "enum_page_size": 50,
+        "enum_pages_per_run": 4,
+        "enum_rows_per_run": 200,
+        "inline_answer_rows": 100,
+        "kg_context_chars": 6000,
+        "max_initial_subqueries": 5,
+        "max_reasoning_steps": 8,
+        "overflow_semantics": "explicit_partial",
+        "ranked_final_cap": 36,
+        "ranked_final_floor": 20,
+        "ranked_per_aspect": 3,
+        "ranked_per_query_take": 8,
+        "structured_max_columns": 8,
+        "structured_max_pages": 50,
+        "structured_max_rows": 1250,
+        "structured_max_tables": 8,
+        "structured_page_size": 25,
+        "structured_payload_chars": 256000
+       }
+      },
+      "notebook_id": "nb-00000000000000000000000000000001",
+      "output": "answer",
+      "question": "版图设计要点有哪些",
+      "report_followup": null,
+      "research_question": "版图设计要点有哪些",
+      "retrieval_effort": "standard",
+      "style_block": "",
+      "user_id": "user-local"
+     }
+    },
+    {
+     "dc:AskRetrievalLimits": {
+      "answer_element_items": 6,
+      "cell_excerpt_chars": 1000,
+      "chunk_context_chars": 30000,
+      "effort": "standard",
+      "enum_page_size": 50,
+      "enum_pages_per_run": 4,
+      "enum_rows_per_run": 200,
+      "inline_answer_rows": 100,
+      "kg_context_chars": 6000,
+      "max_initial_subqueries": 5,
+      "max_reasoning_steps": 8,
+      "overflow_semantics": "explicit_partial",
+      "ranked_final_cap": 36,
+      "ranked_final_floor": 20,
+      "ranked_per_aspect": 3,
+      "ranked_per_query_take": 8,
+      "structured_max_columns": 8,
+      "structured_max_pages": 50,
+      "structured_max_rows": 1250,
+      "structured_max_tables": 8,
+      "structured_page_size": 25,
+      "structured_payload_chars": 256000
+     }
+    },
+    [
+     {
+      "pd:TraceStep": {
+       "detail": {
+        "assumptions": [],
+        "completeness_required": false,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "mandatory_topics": [],
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked",
+        "retrieval_effort": "standard"
+       },
+       "duration_ms": null,
+       "step_type": "intent",
+       "summary": "已按确认后的问题理解开始检索"
+      }
+     },
+     {
+      "pd:TraceStep": {
+       "detail": {},
+       "duration_ms": "<dur>",
+       "step_type": "skip",
+       "summary": "未找到相关记忆"
+      }
+     }
+    ]
+   ],
+   "call": "self._consult_gap_sources",
+   "kwargs": {
+    "cancellation": {
+     "event": false
+    },
+    "chunks": [],
+    "deadline": "<float>",
+    "elements": [],
+    "on_step": "<callable on_trace>",
+    "sink": [],
+    "top_hits": []
+   },
+   "ret": [
+    [],
+    null
+   ]
+  },
+  {
+   "args": [
+    [],
+    [],
+    []
+   ],
+   "call": "self._draft_external_evidence_section",
+   "kwargs": {
+    "cancel_event": {
+     "event": false
+    },
+    "deadline": "<float>"
+   },
+   "ret": null
+  },
+  {
+   "ctxvar": "_ASK_MODEL_ERRORS",
+   "reset": true
+  },
+  {
+   "ctxvar": "_ASK_EMBED_CACHE",
+   "reset": true
+  },
+  {
+   "args": [
+    {
+     "dc:ReasoningResponseDraft": {
+      "asked_at": "<ts>",
+      "baseline_manifest": null,
+      "conversation_id": "conv-00000000000000000000000000000015",
+      "evidence": null,
+      "job_id": "",
+      "notebook_id": "nb-00000000000000000000000000000001",
+      "question": "版图设计要点有哪些",
+      "response": {
+       "pd:AskResponse": {
+        "anchors": [],
+        "answer": "",
+        "answer_id": "",
+        "citations": [],
+        "conclusion": "当前检索没有找到足以支撑回答的来源证据。资料可能已经导入，但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。",
+        "conversation_id": "conv-00000000000000000000000000000015",
+        "evidence_level": "inferred",
+        "grounded": false,
+        "index_required": false,
+        "intent": {
+         "ambiguities": [],
+         "assumptions": [],
+         "clarification_answers": [],
+         "comparison_axes": [],
+         "completeness_required": false,
+         "confidence": "<float>",
+         "confirmed": true,
+         "constraints": [],
+         "entities": [],
+         "excluded_topics": [],
+         "expected_output": "",
+         "high_level_keywords": [],
+         "intent_type": "other",
+         "keyword_basis": "",
+         "low_level_keywords": [],
+         "mandatory_topics": [],
+         "needs_clarification": false,
+         "objective": "版图设计要点有哪些",
+         "resolved_question": "版图设计要点有哪些",
+         "result_scope": "ranked"
+        },
+        "kg_required": false,
+        "llm_mode": "deterministic",
+        "mode": "reasoning",
+        "model_errors": [],
+        "reasoning_trace": [
+         {
+          "detail": {
+           "assumptions": [],
+           "completeness_required": false,
+           "constraints": [],
+           "entities": [],
+           "excluded_topics": [],
+           "expected_output": "",
+           "mandatory_topics": [],
+           "resolved_question": "版图设计要点有哪些",
+           "result_scope": "ranked",
+           "retrieval_effort": "standard"
+          },
+          "duration_ms": null,
+          "step_type": "intent",
+          "summary": "已按确认后的问题理解开始检索"
+         },
+         {
+          "detail": {},
+          "duration_ms": "<dur>",
+          "step_type": "skip",
+          "summary": "未找到相关记忆"
+         }
+        ],
+        "related_knowledge": [],
+        "retrieval_effort": "standard",
+        "retrieval_query": "版图设计要点有哪些",
+        "top_relevance": "<float>"
+       }
+      },
+      "user_id": "user-local"
+     }
+    },
+    {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<PostgresDatabase>",
+      "retrieval_run": "<RetrievalRunState>",
+      "scope": {
+       "dc:ActiveSourceScope": {
+        "_skipped_libraries": [],
+        "_universe_read_order": [
+         [
+          "src-00000000000000000000000000000002",
+          "src-00000000000000000000000000000006"
+         ],
+         []
+        ],
+        "_verdict_probes": {
+         "dc:CeilingVerdictProbes": {
+          "foreign_hidden": "<callable call>",
+          "universe_digests": "<callable call>"
+         }
+        },
+        "base_mode": "exclude",
+        "base_narrowed": null,
+        "base_notebook_ids": [],
+        "base_provided": false,
+        "ceilings_total": true,
+        "hidden_source_ids": [],
+        "mode": "include",
+        "narrowed": false,
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "notebook_source_ceilings": [],
+        "owner_id": "user-local",
+        "source_ids": [
+         "src-00000000000000000000000000000002",
+         "src-00000000000000000000000000000006"
+        ],
+        "source_provided": false,
+        "subjectless": false,
+        "withheld_hidden_source_ids": []
+       }
+      },
+      "trace_sink": "<callable on_trace>"
+     }
+    },
+    {
+     "dc:PreparedReasoningAsk": {
+      "asked_at": "<ts>",
+      "conversation_id": "conv-00000000000000000000000000000015",
+      "history": "",
+      "intent_json": "{\"objective\":\"版图设计要点有哪些\",\"resolved_question\":\"版图设计要点有哪些\",\"intent_type\":\"other\",\"result_scope\":\"ranked\",\"completeness_required\":false,\"entities\":[],\"mandatory_topics\":[],\"high_level_keywords\":[],\"low_level_keywords\":[],\"keyword_basis\":\"\",\"comparison_axes\":[],\"constraints\":[],\"excluded_topics\":[],\"expected_output\":\"\",\"assumptions\":[],\"ambiguities\":[],\"confidence\":0.0,\"needs_clarification\":false,\"confirmed\":true,\"clarification_answers\":[]}",
+      "intent_keywords": "",
+      "intent_projection": {
+       "dc:ReasoningIntentProjection": {
+        "assumptions": [],
+        "completeness_required": false,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "mandatory_topics": [],
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked",
+        "retrieval_effort": "standard"
+       }
+      },
+      "intent_queries": [],
+      "intent_trace_duration_ms": null,
+      "job_id": "",
+      "limits": {
+       "dc:AskRetrievalLimits": {
+        "answer_element_items": 6,
+        "cell_excerpt_chars": 1000,
+        "chunk_context_chars": 30000,
+        "effort": "standard",
+        "enum_page_size": 50,
+        "enum_pages_per_run": 4,
+        "enum_rows_per_run": 200,
+        "inline_answer_rows": 100,
+        "kg_context_chars": 6000,
+        "max_initial_subqueries": 5,
+        "max_reasoning_steps": 8,
+        "overflow_semantics": "explicit_partial",
+        "ranked_final_cap": 36,
+        "ranked_final_floor": 20,
+        "ranked_per_aspect": 3,
+        "ranked_per_query_take": 8,
+        "structured_max_columns": 8,
+        "structured_max_pages": 50,
+        "structured_max_rows": 1250,
+        "structured_max_tables": 8,
+        "structured_page_size": 25,
+        "structured_payload_chars": 256000
+       }
+      },
+      "notebook_id": "nb-00000000000000000000000000000001",
+      "output": "answer",
+      "question": "版图设计要点有哪些",
+      "report_followup": null,
+      "research_question": "版图设计要点有哪些",
+      "retrieval_effort": "standard",
+      "style_block": "",
+      "user_id": "user-local"
+     }
+    }
+   ],
+   "call": "self._commit_reasoning_draft",
+   "kwargs": {},
+   "ret": {
+    "dc:CommittedReasoningAnswer": {
+     "baseline_manifest": null,
+     "evidence": null,
+     "response": {
+      "pd:AskResponse": {
+       "anchors": [],
+       "answer": "",
+       "answer_id": "ans-00000000000000000000000000000016",
+       "answered_at": "<ts>",
+       "asked_at": "<ts>",
+       "citations": [],
+       "conclusion": "当前检索没有找到足以支撑回答的来源证据。资料可能已经导入，但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。",
+       "conversation_id": "conv-00000000000000000000000000000015",
+       "evidence_level": "inferred",
+       "grounded": false,
+       "index_required": false,
+       "intent": {
+        "ambiguities": [],
+        "assumptions": [],
+        "clarification_answers": [],
+        "comparison_axes": [],
+        "completeness_required": false,
+        "confidence": "<float>",
+        "confirmed": true,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "high_level_keywords": [],
+        "intent_type": "other",
+        "keyword_basis": "",
+        "low_level_keywords": [],
+        "mandatory_topics": [],
+        "needs_clarification": false,
+        "objective": "版图设计要点有哪些",
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked"
+       },
+       "kg_required": false,
+       "llm_mode": "deterministic",
+       "mode": "reasoning",
+       "model_errors": [],
+       "reasoning_trace": [
+        {
+         "detail": {
+          "assumptions": [],
+          "completeness_required": false,
+          "constraints": [],
+          "entities": [],
+          "excluded_topics": [],
+          "expected_output": "",
+          "mandatory_topics": [],
+          "resolved_question": "版图设计要点有哪些",
+          "result_scope": "ranked",
+          "retrieval_effort": "standard"
+         },
+         "duration_ms": null,
+         "step_type": "intent",
+         "summary": "已按确认后的问题理解开始检索"
+        },
+        {
+         "detail": {},
+         "duration_ms": "<dur>",
+         "step_type": "skip",
+         "summary": "未找到相关记忆"
+        }
+       ],
+       "related_knowledge": [],
+       "retrieval_effort": "standard",
+       "retrieval_query": "版图设计要点有哪些",
+       "top_relevance": "<float>"
+      }
+     }
+    }
+   }
+  },
+  {
+   "args": [
+    {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<PostgresDatabase>",
+      "retrieval_run": "<RetrievalRunState>",
+      "scope": {
+       "dc:ActiveSourceScope": {
+        "_skipped_libraries": [],
+        "_universe_read_order": [
+         [
+          "src-00000000000000000000000000000002",
+          "src-00000000000000000000000000000006"
+         ],
+         []
+        ],
+        "_verdict_probes": {
+         "dc:CeilingVerdictProbes": {
+          "foreign_hidden": "<callable call>",
+          "universe_digests": "<callable call>"
+         }
+        },
+        "base_mode": "exclude",
+        "base_narrowed": null,
+        "base_notebook_ids": [],
+        "base_provided": false,
+        "ceilings_total": true,
+        "hidden_source_ids": [],
+        "mode": "include",
+        "narrowed": false,
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "notebook_source_ceilings": [],
+        "owner_id": "user-local",
+        "source_ids": [
+         "src-00000000000000000000000000000002",
+         "src-00000000000000000000000000000006"
+        ],
+        "source_provided": false,
+        "subjectless": false,
+        "withheld_hidden_source_ids": []
+       }
+      },
+      "trace_sink": "<callable on_trace>"
+     }
+    },
+    "before-persist"
+   ],
+   "call": "self._assert_reasoning_runtime",
+   "kwargs": {
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "user_id": "user-local"
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    {
+     "event": false
+    }
+   ],
+   "call": "fn.raise_if_cancelled",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "args": [
+    "nb-00000000000000000000000000000001",
+    "版图设计要点有哪些",
+    {
+     "pd:AskResponse": {
+      "anchors": [],
+      "answer": "",
+      "answer_id": "",
+      "citations": [],
+      "conclusion": "当前检索没有找到足以支撑回答的来源证据。资料可能已经导入，但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。",
+      "conversation_id": "conv-00000000000000000000000000000015",
+      "evidence_level": "inferred",
+      "grounded": false,
+      "index_required": false,
+      "intent": {
+       "ambiguities": [],
+       "assumptions": [],
+       "clarification_answers": [],
+       "comparison_axes": [],
+       "completeness_required": false,
+       "confidence": "<float>",
+       "confirmed": true,
+       "constraints": [],
+       "entities": [],
+       "excluded_topics": [],
+       "expected_output": "",
+       "high_level_keywords": [],
+       "intent_type": "other",
+       "keyword_basis": "",
+       "low_level_keywords": [],
+       "mandatory_topics": [],
+       "needs_clarification": false,
+       "objective": "版图设计要点有哪些",
+       "resolved_question": "版图设计要点有哪些",
+       "result_scope": "ranked"
+      },
+      "kg_required": false,
+      "llm_mode": "deterministic",
+      "mode": "reasoning",
+      "model_errors": [],
+      "reasoning_trace": [
+       {
+        "detail": {
+         "assumptions": [],
+         "completeness_required": false,
+         "constraints": [],
+         "entities": [],
+         "excluded_topics": [],
+         "expected_output": "",
+         "mandatory_topics": [],
+         "resolved_question": "版图设计要点有哪些",
+         "result_scope": "ranked",
+         "retrieval_effort": "standard"
+        },
+        "duration_ms": null,
+        "step_type": "intent",
+        "summary": "已按确认后的问题理解开始检索"
+       },
+       {
+        "detail": {},
+        "duration_ms": "<dur>",
+        "step_type": "skip",
+        "summary": "未找到相关记忆"
+       }
+      ],
+      "related_knowledge": [],
+      "retrieval_effort": "standard",
+      "retrieval_query": "版图设计要点有哪些",
+      "top_relevance": "<float>"
+     }
+    },
+    "conv-00000000000000000000000000000015"
+   ],
+   "call": "self._save_answer",
+   "kwargs": {
+    "asked_at": "<ts>",
+    "job_id": "",
+    "user_id": "user-local"
+   },
+   "ret": "ans-00000000000000000000000000000016"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT id FROM notebooks WHERE id=%s FOR KEY SHARE"
+  },
+  {
+   "params": [
+    "conv-00000000000000000000000000000015",
+    "nb-00000000000000000000000000000001",
+    "user-local"
+   ],
+   "sql": "SELECT id FROM conversations WHERE id=%s AND notebook_id=%s AND created_by=%s FOR UPDATE"
+  },
+  {
+   "params": [
+    "ans-00000000000000000000000000000016",
+    "nb-00000000000000000000000000000001",
+    "版图设计要点有哪些",
+    {
+     "jsonb": {
+      "anchors": [],
+      "answer": "",
+      "answer_id": "ans-00000000000000000000000000000016",
+      "answered_at": "<ts>",
+      "asked_at": "<ts>",
+      "citations": [],
+      "conclusion": "当前检索没有找到足以支撑回答的来源证据。资料可能已经导入，但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。",
+      "conversation_id": "conv-00000000000000000000000000000015",
+      "evidence_level": "inferred",
+      "grounded": false,
+      "index_required": false,
+      "intent": {
+       "ambiguities": [],
+       "assumptions": [],
+       "clarification_answers": [],
+       "comparison_axes": [],
+       "completeness_required": false,
+       "confidence": "<float>",
+       "confirmed": true,
+       "constraints": [],
+       "entities": [],
+       "excluded_topics": [],
+       "expected_output": "",
+       "high_level_keywords": [],
+       "intent_type": "other",
+       "keyword_basis": "",
+       "low_level_keywords": [],
+       "mandatory_topics": [],
+       "needs_clarification": false,
+       "objective": "版图设计要点有哪些",
+       "resolved_question": "版图设计要点有哪些",
+       "result_scope": "ranked"
+      },
+      "kg_required": false,
+      "llm_mode": "deterministic",
+      "mode": "reasoning",
+      "model_errors": [],
+      "reasoning_trace": [
+       {
+        "detail": {
+         "assumptions": [],
+         "completeness_required": false,
+         "constraints": [],
+         "entities": [],
+         "excluded_topics": [],
+         "expected_output": "",
+         "mandatory_topics": [],
+         "resolved_question": "版图设计要点有哪些",
+         "result_scope": "ranked",
+         "retrieval_effort": "standard"
+        },
+        "duration_ms": null,
+        "step_type": "intent",
+        "summary": "已按确认后的问题理解开始检索"
+       },
+       {
+        "detail": {},
+        "duration_ms": "<dur>",
+        "step_type": "skip",
+        "summary": "未找到相关记忆"
+       }
+      ],
+      "related_knowledge": [],
+      "retrieval_effort": "standard",
+      "retrieval_query": "版图设计要点有哪些",
+      "top_relevance": "<float>"
+     }
+    },
+    "<ts>",
+    "conv-00000000000000000000000000000015"
+   ],
+   "sql": "INSERT INTO answers (id, notebook_id, question, payload, created_at, conversation_id) VALUES (%s, %s, %s, %s, %s, %s)"
+  },
+  {
+   "event": {
+    "chunk_fts_circuit_skips": 0,
+    "chunk_fts_timeouts": 0,
+    "embedding_errors": 0,
+    "embedding_hits": 0,
+    "embedding_requests": 0,
+    "fanout_acquires": 0,
+    "fanout_wait_ms": "<dur>",
+    "fanout_waits": 0,
+    "kind": "retrieval_run_stats",
+    "run_id": "rr-000000000000",
+    "run_kind": "ask_reasoning"
+   }
+  }
+ ],
+ "unordered": [],
+ "worker": []
+}
