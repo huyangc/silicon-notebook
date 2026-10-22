@@ -4,7 +4,9 @@
 A sync package is a directory; this module owns the names inside it and the
 value encoding its ``*.jsonl`` files use, so the exporter
 (``app.migration.sync.export``) and the importer read and write exactly one
-format rather than two that drift apart.
+format rather than two that drift apart. The encoding itself is defined in
+``app.domain.portable_rows`` (the single-file notebook archive writes the same
+row shape) and re-exported below; what follows describes it.
 
 The row encoding is the **SQLite shape**: a row is a JSON object keyed by
 column name whose values are text/integer/null as SQLite would hold them
@@ -34,12 +36,62 @@ timestamp is never rewritten. Three rules inside such a column:
 
 from __future__ import annotations
 
-import base64
-import json
-import re
 from collections.abc import Mapping
-from datetime import datetime, timezone
 from typing import Any
+
+# The row encoding, the deterministic JSON writers and the path-safety rules
+# moved to ``app.domain.portable_rows`` so the single-file notebook archive
+# writes exactly the same row shape. Re-exported here under their historical
+# names: one definition, two formats.
+from app.domain.portable_rows import (
+    _SAFE_IDENTIFIER_RE,
+    BYTES_KEY,
+    column_encoder,
+    decode_row,
+    decode_value,
+    encode_row,
+    encode_value,
+    is_safe_identifier,
+    is_safe_path_segment,
+    is_safe_relative_path,
+    json_document,
+    json_line,
+    utc_timestamp_text,
+)
+
+__all__ = [
+    "ASSET_FILES_DIR",
+    "BYTES_KEY",
+    "CHECKSUMS_NAME",
+    "DELETES_NAME",
+    "FILES_DIR",
+    "KG_EPOCHS_NAME",
+    "MANIFEST_NAME",
+    "MODE_FULL",
+    "MODE_INCREMENTAL",
+    "NOTEBOOK_FILES_DIR",
+    "PACKAGE_FORMAT_VERSION",
+    "READABLE_FORMAT_VERSIONS",
+    "ROWS_DIR",
+    "USERS_NAME",
+    "_SAFE_IDENTIFIER_RE",
+    "column_encoder",
+    "decode_row",
+    "decode_value",
+    "delete_entry",
+    "encode_row",
+    "encode_value",
+    "is_safe_identifier",
+    "is_safe_path_segment",
+    "is_safe_relative_path",
+    "json_document",
+    "json_line",
+    "notebook_assets_dir",
+    "notebook_files_dir",
+    "package_dir_name",
+    "rows_path",
+    "utc_timestamp_text",
+]
 
 # Bumped only when the layout or encoding below changes incompatibly; import
 # preflight rejects a package whose format_version it does not know.
@@ -88,9 +140,6 @@ FILES_DIR = "files"
 NOTEBOOK_FILES_DIR = "notebooks"
 ASSET_FILES_DIR = "assets"
 
-# Sole key of the object a byte string is encoded as.
-BYTES_KEY = "$bytes"
-
 
 def package_dir_name(
     source_env: str, from_seq: int, to_seq: int, package_id: str
@@ -117,127 +166,6 @@ def notebook_files_dir(notebook_id: str) -> str:
 def notebook_assets_dir(notebook_id: str) -> str:
     """This notebook's package-relative attachment-body directory."""
     return f"{FILES_DIR}/{ASSET_FILES_DIR}/{notebook_id}"
-
-
-def utc_timestamp_text(value: Any) -> Any:
-    """One TIMESTAMP COLUMN's portable value (see the module docstring).
-
-    Callers must only apply this to a column the schema says is a timestamp;
-    it makes no attempt to decide that for itself.
-    """
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        if value.tzinfo is None or value.utcoffset() is None:
-            return value.isoformat()
-        return value.astimezone(timezone.utc).isoformat()
-    if not isinstance(value, str):
-        return value
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return value
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        return value
-    return parsed.astimezone(timezone.utc).isoformat()
-
-
-def json_line(payload: Any) -> str:
-    """One ``*.jsonl`` line. ``ensure_ascii=False`` keeps CJK content readable
-    (and the package smaller); ``sort_keys=True`` makes the bytes -- and
-    therefore ``checksums.json`` -- depend on the row's content alone, not on
-    the column order a particular driver handed back."""
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
-
-
-def json_document(payload: Any) -> str:
-    """``manifest.json``/``checksums.json`` text, same determinism rules."""
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
-
-
-def encode_value(value: Any) -> Any:
-    """Encode one already-SQLite-shaped column value for JSON.
-
-    ``bool`` is checked before the byte types and folded to 0/1 because that
-    is the SQLite shape (§8) -- and because a PostgreSQL ``boolean`` column
-    hands psycopg a real ``bool``, which would otherwise travel as JSON
-    ``true``/``false`` and reach a SQLite target as a different literal than
-    every other environment writes.
-
-    This handles only what JSON cannot carry natively. Timestamp and JSON
-    columns are the exporter's business, because both need to know WHICH
-    column a value came from -- see ``utc_timestamp_text``.
-    """
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        return {BYTES_KEY: base64.b64encode(bytes(value)).decode("ascii")}
-    return value
-
-
-def decode_value(value: Any) -> Any:
-    """Inverse of ``encode_value``. Only the exact single-key ``$bytes``
-    object decodes back to bytes; every other value passes through, so a JSON
-    column carried as text is untouched."""
-    if isinstance(value, dict) and tuple(value) == (BYTES_KEY,):
-        return base64.b64decode(value[BYTES_KEY])
-    return value
-
-
-# A single filesystem path SEGMENT drawn from package content that will be
-# spliced into a real path (a notebook id becoming a directory name, mainly).
-# Deliberately narrow -- this is not "what a notebook id happens to look
-# like today", it is "what is safe to join onto a trusted base path without
-# a traversal or a shell-metacharacter surprise". ``import_.py`` is the only
-# caller today; kept here (not there) because the SAME rule has to hold for
-# whatever the exporter writes into ``manifest.notebooks``/``checksums.json``
-# and whatever the importer reads back out of them -- one rule, not two that
-# can drift.
-_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-
-
-def is_safe_identifier(value: str) -> bool:
-    """True when ``value`` is safe to use as ONE filesystem path segment.
-
-    Non-empty, drawn only from ``[A-Za-z0-9._-]``, must not start with ``.``
-    (which rules out ``.``, ``..``, and any dotfile in one stroke), and must
-    not contain ``..`` anywhere (redundant with the leading-dot rule for the
-    exact traversal token, kept as a second, independent check rather than
-    relying on the regex alone to carry the whole rule)."""
-    if not value or value.startswith(".") or ".." in value:
-        return False
-    return bool(_SAFE_IDENTIFIER_RE.match(value))
-
-
-def is_safe_path_segment(value: str) -> bool:
-    """True when ``value`` can be ONE segment of a package-relative path.
-
-    Looser than ``is_safe_identifier`` on purpose: the last segment of a
-    ``files/**`` path is an uploaded file's name, which ``stored_upload_name``
-    keeps as the user typed it -- ``研究.pdf``, ``meeting notes.pdf`` -- so a
-    character whitelist here would reject packages the exporter itself
-    produced (codex #772 r10). What a segment must NOT be is what lets it
-    leave its directory: empty, ``.``/``..``, or carrying a separator or NUL.
-    Containment is proven separately by resolving the path against its root."""
-    if not value or value in (".", ".."):
-        return False
-    return "/" not in value and "\\" not in value and "\x00" not in value
-
-
-def is_safe_relative_path(value: str) -> bool:
-    """True when ``value`` is a package-relative, ``/``-separated path (the
-    shape ``checksums.json``'s keys and ``rows_path()``/``notebook_files_dir()``/
-    ``notebook_assets_dir()`` take) whose every segment is
-    ``is_safe_path_segment``. Refuses an empty string, a leading ``/`` or
-    ``\\`` (absolute on POSIX or Windows), and a Windows drive prefix
-    (``C:...``) -- and, through the per-segment check, any ``..`` hop.
-    Notebook and package ids are held to the stricter ``is_safe_identifier``
-    by the importer's preflight; this function only guards traversal."""
-    if not value or value.startswith("/") or value.startswith("\\"):
-        return False
-    if len(value) >= 2 and value[1] == ":":
-        return False
-    return all(is_safe_path_segment(segment) for segment in value.split("/"))
 
 
 def delete_entry(
@@ -278,11 +206,3 @@ def delete_entry(
         "notebook_id": notebook_id or None,
         "parent_key": parent_key or None,
     }
-
-
-def encode_row(row: dict[str, Any]) -> dict[str, Any]:
-    return {name: encode_value(value) for name, value in row.items()}
-
-
-def decode_row(row: dict[str, Any]) -> dict[str, Any]:
-    return {name: decode_value(value) for name, value in row.items()}

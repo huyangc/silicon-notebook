@@ -829,6 +829,11 @@ _ALLOWED_BY_FILE = {
     # case using the same folding the auth store compares with (a pure
     # stdlib-only helper), instead of a second copy that could drift.
     "identity.py": {"app.domain.auth_utils"},
+    # The portable row encoding, deterministic JSON writers and path-safety
+    # rules live in a pure stdlib domain module shared with the single-file
+    # notebook archive; package.py re-exports them so the rest of this package
+    # keeps importing them from here.
+    "package.py": {"app.domain.portable_rows"},
 }
 
 
