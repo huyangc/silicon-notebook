@@ -37,7 +37,6 @@ from app.repositories.postgres._store_utils import (
     TimestampInput,
     execute_many,
     normalized_clock,
-    utc_now,
 )
 from app.domain.notebook_delete_grace import (
     delete_after_for,
@@ -367,7 +366,7 @@ class NotebookDeleteJobStore:
         success (``None`` on failure) -- every write this run() invocation
         issues from here on must carry it."""
         token = _new_lease_token()
-        cutoff = utc_now() - timedelta(seconds=max(1, stale_cutoff_seconds))
+        cutoff = self.now() - timedelta(seconds=max(1, stale_cutoff_seconds))
         with self.database.write() as connection:
             cursor = connection.execute(
                 "UPDATE notebook_delete_jobs SET status='running',"
@@ -622,10 +621,13 @@ class NotebookDeleteJobStore:
         not moved in at least ``older_than_seconds`` -- a worker died
         mid-phase, or a phase-2 quiesce timeout left the row 'waiting'. Same
         cutoff-computed-in-the-store idiom as
-        ``sharing_store.sweep_stale_copies`` (``utc_now() - timedelta(...)``,
-        a real ``datetime`` bound against the ``timestamptz`` column) rather
-        than accepting a precomputed value from a backend-neutral caller."""
-        cutoff = utc_now() - timedelta(seconds=max(1, older_than_seconds))
+        ``sharing_store.sweep_stale_copies`` (a real ``datetime`` bound
+        against the ``timestamptz`` column) rather than accepting a
+        precomputed value from a backend-neutral caller. The cutoff reads
+        this store's clock (``self.now()``), the one that writes
+        ``updated_at`` -- not the host clock, which an injected clock would
+        disagree with (``mark_running`` too)."""
+        cutoff = self.now() - timedelta(seconds=max(1, older_than_seconds))
         with self.database.connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM notebook_delete_jobs "

@@ -55,8 +55,16 @@ def _new_lease_token() -> str:
     return secrets.token_hex(16)
 
 
-def _stale_cutoff_iso(seconds: float) -> str:
-    """codex #659 R13 P2: this store's clock seam (``self.now()``, injected
+def _stale_cutoff_iso(seconds: float, now: str) -> str:
+    """The cutoff is taken off ``now`` -- this store's own clock
+    (``self.now()``), the clock that writes the ``updated_at`` it is compared
+    against -- never off the host clock: with an injected clock the two used
+    to disagree, so a row written on the injected clock looked stale (or
+    fresh) by however far that clock sat from the host's (#966's grace cases
+    went red the day their literal date arrived). In production both are the
+    host clock, so nothing changes there.
+
+    codex #659 R13 P2: this store's clock seam (``self.now()``, injected
     as ``repository_facade.py``'s module-level ``_now``) writes
     ``datetime.now().astimezone().isoformat(...)`` — an OFFSET-AWARE string
     carrying whatever the host's UTC offset was AT WRITE TIME. The cutoff
@@ -80,9 +88,10 @@ def _stale_cutoff_iso(seconds: float) -> str:
     ``datetime()`` treats an offset-less operand as already being in its
     own UTC-equivalent terms, the same graceful fallback SQLite applies to
     any of this schema's other naive timestamp columns."""
-    return (
-        datetime.now().astimezone() - timedelta(seconds=max(1, seconds))
-    ).isoformat()
+    instant = datetime.fromisoformat(now)
+    if instant.tzinfo is None:
+        instant = instant.astimezone()
+    return (instant - timedelta(seconds=max(1, seconds))).isoformat()
 
 
 class NotebookDeleteJobStore:
@@ -371,7 +380,7 @@ class NotebookDeleteJobStore:
         track real elapsed time across a host UTC-offset change (codex #659
         R13 P2)."""
         token = _new_lease_token()
-        cutoff = _stale_cutoff_iso(stale_cutoff_seconds)
+        cutoff = _stale_cutoff_iso(stale_cutoff_seconds, self.now())
         with self.database.write(operation="notebook_delete.mark_running") as db:
             cursor = db.execute(
                 "UPDATE notebook_delete_jobs SET status='running',"
@@ -577,7 +586,7 @@ class NotebookDeleteJobStore:
         stayed constant between a row's write and this call — see that
         helper's docstring for the DST/timezone-change failure mode this
         closes."""
-        cutoff = _stale_cutoff_iso(older_than_seconds)
+        cutoff = _stale_cutoff_iso(older_than_seconds, self.now())
         with self.database.connect() as db:
             rows = db.execute(
                 "SELECT * FROM notebook_delete_jobs "
