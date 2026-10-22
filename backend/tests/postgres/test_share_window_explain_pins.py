@@ -8,9 +8,12 @@ the stores actually issue (recorded with their parameters):
 
 * the global window read (``_prefix_window``: the public read, the share
   window and the dialog's windows) walks ``idx_global_jobs_conversation``
-  BACKWARDS under a ``Limit`` -- no ``Sort``, no sequential scan: it reads
-  one window of rows however long the conversation is, in the custom and the
-  GENERIC plan;
+  BACKWARDS under a ``Limit``, starting AT the keyset bound (the row-value
+  comparison is an index condition, not a filter) -- no ``Sort``, no
+  sequential scan: it reads one window of rows however long the conversation
+  is and however far back the link stands, in the custom and the GENERIC
+  plan, and executing it touches no more than the window plus the rows its
+  filter drops (pinned with ``EXPLAIN ANALYZE``);
 * the count of older turns and the dialog's one aggregate are bounded to the
   conversation by ``idx_global_jobs_conversation`` (an index condition on
   ``conversation_id``): proportional to the conversation's size, never to the
@@ -166,6 +169,7 @@ def _is_older_count(sql: str) -> bool:
 def _assert_backward_window(plan: str) -> None:
     assert "Limit" in plan, plan
     assert "Index Scan Backward using idx_global_jobs_conversation on global_ask_jobs" in plan, plan
+    assert re.search(r"Index Cond: \(\(conversation_id = [^)]+\) AND \(ROW\(created_at, id\) <= ROW\(", plan), plan
     assert "Sort" not in plan and "Seq Scan" not in plan, plan
 
 
@@ -202,6 +206,21 @@ def test_the_public_window_reads_backwards_under_a_limit(postgres_database, byst
         _assert_backward_window(plan)
     for plan in _plans(postgres_database, bystander_snapshot, statements, _is_older_count):
         _assert_bounded_to_the_conversation(plan)
+    # Executed: the link stands at turn 2460 of 3000, yet the backward walk
+    # starts there -- it reads the window (+1) and the failed jobs among it,
+    # never the 539 newer jobs (the old ascending read did the same work from
+    # the other end; a filter-only keyset would read them all first).
+    [(sql, params)] = [(sql, params) for sql, params in statements if _is_window(sql)]
+    with postgres_database.connect() as connection:
+        analyzed = "\n".join(
+            str(row["QUERY PLAN"]) for row in connection.execute(
+                f"EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) {sql}", params,
+            ).fetchall()
+        )
+    scan = re.search(r"Index Scan Backward.*?rows=(\d+) loops=1\)", analyzed)
+    dropped = re.search(r"Rows Removed by Filter: (\d+)", analyzed)
+    assert scan and int(scan.group(1)) == MAX_TURNS + 1, analyzed
+    assert (int(dropped.group(1)) if dropped else 0) < MAX_TURNS // 10, analyzed
 
 
 def test_the_share_dialog_counts_in_one_aggregate_bounded_to_the_conversation(
