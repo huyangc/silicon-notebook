@@ -424,3 +424,33 @@ test("release-notes slot: policy is the actor-owned announcement shape and its c
   assert.match(modalText, /markReleaseNotesSeen\(build\.ordinal\)/);
   assert.doesNotMatch(modalText, /disabled=/);
 });
+
+// 全局问答窗口里的引用配图走的是笔记本页**同一格** answer-image-preview，作为子层叠在
+// 窗口之上（`openAbove` + 策略表的 `stacksOver`）。组件测试用的是与 page.tsx 同构的宿主
+// 替身，所以 page.tsx 这一侧的接线由这里钉住：断了任何一环，浮窗里的放大按钮就会消失
+// （没有承接方）或者点开时把窗口顶掉（不经子层）。
+test("global ask hands its citation images to the shared preview slot as a stacked child", async () => {
+  const launchers = jsxElements(page, "GlobalAskLauncher");
+  assert.equal(launchers.length, 1);
+  assert.equal(launchers[0].bindings?.onPreviewImage, "openGlobalAnswerImagePreview");
+  assert.equal(launchers[0].bindings?.imagePreviewOpen, 'rootModals.view("answer-image-preview").open');
+  const opener = findFunctionIn(page, "Home", "openGlobalAnswerImagePreview").getText(page);
+  assert.match(opener, /rootModals\.openAbove\("answer-image-preview", "global-ask"\)/);
+  assert.match(hookText, /"answer-image-preview": \{[^}]*stacksOver: \["global-ask"\] \}/);
+  // 笔记本内那条入口仍是顶层 workspace primary，不经子层。
+  const inNotebook = findFunctionIn(page, "Home", "openAnswerImagePreview").getText(page);
+  assert.match(inNotebook, /rootModals\.open\("answer-image-preview", rootModals\.captureWorkspaceOwner\(\)\)/);
+
+  // Esc 分层是协调器的通用规则（最上层先吃），全局窗口一侧不许为预览写特判。
+  const launcher = await parseModule("ask/global-ask-launcher.tsx");
+  const workspace = await parseModule("ask/global-ask-workspace.tsx");
+  for (const source of [launcher, workspace]) {
+    assert.doesNotMatch(source.getText(source), /answer-image-preview|openAbove/);
+  }
+  const dialogs = jsxElements(launcher, "dialog");
+  assert.equal(dialogs.length, 1);
+  for (const handler of ["onCancel", "onKeyDown"]) {
+    assert.ok(dialogs[0].bindings?.[handler], `${handler} 不见了`);
+    assert.doesNotMatch(dialogs[0].bindings[handler], /preview/i, handler);
+  }
+});

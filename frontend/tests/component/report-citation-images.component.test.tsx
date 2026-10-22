@@ -293,8 +293,8 @@ test("点击正文图片交出整本画册，顺序与正文里的图片区块�
   ]);
 
   const expectedItems = [
-    { assetId: "asset-2", alt: "图 2", referenceLabel: "[2]" },
-    { assetId: "asset-1", alt: "图 1：时钟树收敛示意", referenceLabel: "[1]" },
+    { assetId: "asset-2", notebookId: "nb-1", alt: "图 2", referenceLabel: "[2]" },
+    { assetId: "asset-1", notebookId: "nb-1", alt: "图 1：时钟树收敛示意", referenceLabel: "[1]" },
   ];
   await user.click(openButtons[1]);
   expect(onPreviewImage).toHaveBeenCalledWith({ items: expectedItems, index: 1 });
@@ -388,7 +388,7 @@ test("报告详情面板把正文图片与预览承接方接到正文渲染", as
   await screen.findByRole("img", { name: "图 1：时钟树收敛示意" });
   await user.click(screen.getByRole("button", { name: "放大查看[1]的附图" }));
   expect(onPreviewImage).toHaveBeenCalledWith({
-    items: [{ assetId: "asset-1", alt: "图 1：时钟树收敛示意", referenceLabel: "[1]" }],
+    items: [{ assetId: "asset-1", notebookId: "nb-1", alt: "图 1：时钟树收敛示意", referenceLabel: "[1]" }],
     index: 0,
   });
 });

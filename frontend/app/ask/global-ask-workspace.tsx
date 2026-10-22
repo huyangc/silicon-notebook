@@ -18,6 +18,7 @@ import { CitationPopover } from "../citation-card";
 import { ConversationShareModal } from "../conversation-share-modal";
 import { globalConversationShareApi, type GlobalJob } from "../global-ask-api";
 import { holdGlobalAskEscape } from "./global-ask-escape";
+import { imagePreviewRequest, type AnswerImagePreviewRequest } from "../image-preview";
 import type { UiMode } from "../ui-mode";
 import type { ReasoningTraceStep } from "../ask-stream";
 import { GlobalConversationList } from "./conversation-list";
@@ -59,7 +60,12 @@ const suggestions = [
   { title: "寻找相关证据", question: "这个问题有哪些原文证据支持，还有哪些信息需要补充？", icon: FileText },
 ];
 
-export default function GlobalAskWorkspace({ compact = false, embedded = false, active = true, controls, onOpenNotebook, uiMode, requestedConversation }: { compact?: boolean; embedded?: boolean; active?: boolean; controls?: ReactNode; onOpenNotebook?: () => void; uiMode?: UiMode; requestedConversation?: { conversationId: string; jobId?: string; nonce: number } | null }) {
+export default function GlobalAskWorkspace({ compact = false, embedded = false, active = true, controls, onOpenNotebook, uiMode, requestedConversation, onPreviewImage, imagePreviewOpen = false }: { compact?: boolean; embedded?: boolean; active?: boolean; controls?: ReactNode; onOpenNotebook?: () => void; uiMode?: UiMode; requestedConversation?: { conversationId: string; jobId?: string; nonce: number } | null;
+  /** 引用配图点开大图。预览由宿主渲染（浮窗：page.tsx 那一格 root modal，作为子层叠在
+   *  窗口之上；独立页 `/ask`：页面自己）；不传则图片只能原位看、不出现放大按钮。 */
+  onPreviewImage?: (request: AnswerImagePreviewRequest) => void;
+  /** 宿主的预览此刻开着：引用卡让位（不收起），关掉预览时焦点回得到那张缩略图。 */
+  imagePreviewOpen?: boolean }) {
   const ask = useGlobalAsk({ syncUrl: !embedded, active, uiMode });
   // 宿主要求打开的会话(铃铛里的全局条目)。等首次载入结束再开:载入与打开会话各自
   // 推进 owner,载入中途打开会把会话列表那次读取作废。提交 / 停止在途时也先不动——
@@ -241,8 +247,9 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                       取图端点每次请求仍复核当前用户对它的读权，不新增权限面。
                       （有 active 的笔记本内问答仍恒走 active——挂载的参考库用户
                       未必是成员，那种情形只能经 active 的参与集代理。）
-                      放大预览不接：那需要一个页面级弹层，而这里可能住在全屏
-                      `<dialog>` 的 top layer 里，见文件末尾引用卡片那段注释。 */}
+                      放大预览交给宿主（`onPreviewImage`）：每张图带着自己的取图库，
+                      浮窗里它是叠在窗口之上的子层，窗口因此退出交互树、全屏态降成
+                      非模态，页面级弹层不会被 top layer 盖住。 */}
                   <AnswerView
                     answer={job.answer}
                     feedbackSent={job.feedback ?? ""}
@@ -252,6 +259,8 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                     notebookHref={(notebookId, sourceId) => `/${notebookHash(notebookId, sourceId)}`}
                     onOpenNotebook={onOpenNotebook}
                     onShare={() => openShare(job.job_id)}
+                    onPreviewImage={onPreviewImage}
+                    imagePreviewOpen={imagePreviewOpen}
                     // 浮窗收起（active 转假）与分享弹窗开合都要收掉卡片：两层同时
                     // 接管 Esc 时一次按键会收两层，而收起后留着的监听会吞掉宿主
                     // 页面的下一次 Esc。
@@ -377,6 +386,9 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
       onOpenNotebook={onOpenNotebook}
       anchorRect={cite.rect}
       onClose={() => setCite(null)}
+      // 旧形状的轮次正文里没有内联附图，画册就是点开的这一张。
+      onPreviewImage={onPreviewImage ? (image) => onPreviewImage(imagePreviewRequest([], image)) : undefined}
+      dismissSuspended={imagePreviewOpen}
     />}
     {/* 会话分享弹窗。与笔记本内问答**同一个组件**——端点、轮次形状的差别全部由注入的
         `globalConversationShareApi` 吸收，弹窗正文、五句范围文案与两条披露一个字没动。

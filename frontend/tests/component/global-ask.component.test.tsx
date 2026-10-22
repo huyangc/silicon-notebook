@@ -9,7 +9,11 @@ import GlobalAskPage from "../../app/ask/page.tsx";
 import GlobalAskWorkspace from "../../app/ask/global-ask-workspace.tsx";
 import { discoveryHintStorageKey, GlobalAskLauncher } from "../../app/ask/global-ask-launcher.tsx";
 import { AnswerView } from "../../app/answer-panel.tsx";
-import { useRootModalCoordinator } from "../../app/use-root-modal-coordinator.ts";
+import { useRootModalCoordinator, type RootModalSlot } from "../../app/use-root-modal-coordinator.ts";
+import { ImagePreviewModal } from "../../app/image-preview-modal.tsx";
+import { AuthedImage } from "../../app/authed-image.tsx";
+import { currentPreviewImage, type AnswerImagePreviewRequest } from "../../app/image-preview.ts";
+import { sourceImageAssetUrl } from "../../app/source-image.ts";
 import { STOPPED_TURN_KEPT_TEXT, STOPPED_TURN_TEXT } from "../../app/stopped-turn.tsx";
 import { humanizedError } from "../../app/errors.ts";
 
@@ -2279,8 +2283,8 @@ test("global answers show citation images, read through each citation's own note
   await within(region).findByRole("img", { name: "图 1：示意图" });
   await waitFor(() => expect(api.assetBlob).toHaveBeenCalled());
   expect(api.assetBlob.mock.calls[0][0]).toContain("/notebooks/nb-1/assets/asset-1");
-  // 没有承接方时不留一颗点了没反应的控件：全局问答不接页面级放大预览。
-  expect(within(region).queryByRole("button", { name: /放大查看/ })).toBeNull();
+  // 独立页 `/ask` 自己承接放大预览，所以放大按钮在（点开的行为见下面「独立页」那条）。
+  expect(within(region).getByRole("button", { name: "放大查看[1]的附图" })).toBeTruthy();
 
   // ② 引用卡里的「本段附图」：同一条归属规则，同一个库。
   fireEvent.click(await screen.findByRole("button", { name: "[1]" }));
@@ -2311,6 +2315,238 @@ test("a citation with no owning notebook renders no image block at all", async (
   expect(within(card).queryByText("本段附图")).toBeNull();
   expect(screen.queryByRole("img", { name: "图 1：示意图" })).toBeNull();
   expect(api.assetBlob).not.toHaveBeenCalled();
+});
+
+// --- 引用配图的大图预览 -------------------------------------------------------
+//
+// 浮窗里点开配图：笔记本页那一格 answer-image-preview 作为**子层**叠在窗口之上
+// （协调器 `openAbove`）。下面的宿主替身与 page.tsx 同构：同一个协调器、同一个
+// `ImagePreviewModal`、按 view 渲染、onClose 交给 requestClose。page.tsx 那一侧的
+// 接线由 tests/guards/root-modal-boundary.test.mjs 钉住。
+
+function PreviewHost() {
+  const [preview, setPreview] = useState<AnswerImagePreviewRequest | null>(null);
+  const presentation = useRootModalCoordinator({
+    actorId: "user-1", sourceId: null,
+    onClosed(slot: RootModalSlot) { if (slot === "answer-image-preview") setPreview(null); },
+  });
+  const view = presentation.view("answer-image-preview");
+  const image = currentPreviewImage(preview);
+  return <>
+    <GlobalAskLauncher presentation={presentation} imagePreviewOpen={view.open}
+      onPreviewImage={(request) => { if (presentation.openAbove("answer-image-preview", "global-ask")) setPreview(request); }} />
+    {view.open && image && <ImagePreviewModal referenceLabel={image.referenceLabel} interactive={view.topmost} zIndex={view.zIndex}
+      onClose={(reason) => presentation.requestClose("answer-image-preview", reason)}>
+      <AuthedImage url={sourceImageAssetUrl("", image.notebookId, image.assetId)} alt={image.alt} />
+    </ImagePreviewModal>}
+  </>;
+}
+
+const imageJob: GlobalJob = { ...job("done"), cited_notebook_ids: ["nb-1"], answer: answerWithImages() };
+
+/** 打开浮窗、载入带图的那一轮。 */
+async function openImageConversation() {
+  fireEvent.click(screen.getByRole("button", { name: "打开全局问答" }));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入问题" })).toBeEnabled());
+  fireEvent.click(await screen.findByRole("button", { name: "对话 conv-a" }));
+  return screen.findByRole("button", { name: "放大查看[1]的附图" });
+}
+
+/** 像真实点击那样先落焦点再点：协调器在打开那一刻记下的归还目标就是它。 */
+function press(element: HTMLElement) {
+  element.focus();
+  fireEvent.click(element);
+}
+
+// 被预览盖住时窗口带 inert + aria-hidden，按角色查不到它：按 id 取同一个 <dialog>。
+const chatWindow = () => document.getElementById("global-ask-window")!;
+const imagePreview = () => screen.queryByRole("dialog", { name: "引用 [1] 图片预览" });
+const openedPreview = () => waitFor(() => {
+  const node = imagePreview();
+  expect(node).not.toBeNull();
+  return node!;
+});
+
+test("the compact window opens a citation image in the shared preview; the first Escape closes only the preview", async () => {
+  installDialogMethods();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
+  render(<PreviewHost />);
+  const trigger = await openImageConversation();
+  expect(chatWindow()).toHaveClass("is-compact");
+
+  press(trigger);
+  const preview = await openedPreview();
+  // 点开有可见变化：预览盖在窗口之上，窗口退出交互树。
+  expect(Number(preview.style.zIndex)).toBeGreaterThan(Number(chatWindow().style.zIndex));
+  expect(chatWindow()).toHaveAttribute("inert");
+  expect(within(preview).getByRole("button", { name: "关闭图片预览" })).toHaveFocus();
+  // 取图经这条引用自己的所属库（与原位缩略图同一条归属）。
+  await within(preview).findByRole("img", { name: "图 1：示意图" });
+  expect(api.assetBlob.mock.calls.at(-1)![0]).toContain("/notebooks/nb-1/assets/asset-1");
+
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  await waitFor(() => expect(imagePreview()).toBeNull());
+  expect(chatWindow()).not.toHaveAttribute("inert");
+  expect(screen.getByRole("textbox", { name: "输入问题" })).toBeTruthy();
+  expect(trigger).toHaveFocus();
+
+  // 第二次 Esc 才按原逻辑收起窗口。
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局问答" })).toBeNull());
+});
+
+test("the full window opens the same preview and gets its modal state and scroll lock back after Escape", async () => {
+  installDialogMethods();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
+  render(<PreviewHost />);
+  const trigger = await openImageConversation();
+  fireEvent.click(screen.getByRole("button", { name: "全屏展开" }));
+  expect(chatWindow()).toHaveClass("is-full");
+  expect(document.body.style.overflow).toBe("hidden");
+
+  press(trigger);
+  await openedPreview();
+  // 被子层盖住的全屏窗口按既有规则降成非模态、退出交互树（否则 top layer 会把页面级
+  // 预览整个盖住）；滚动锁随之让出，与被别的层盖住时同一条。
+  expect(chatWindow()).toHaveAttribute("inert");
+  expect(document.body.style.overflow).toBe("");
+
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  await waitFor(() => expect(imagePreview()).toBeNull());
+  expect(chatWindow()).toHaveClass("is-full");
+  expect(chatWindow()).not.toHaveAttribute("inert");
+  expect(document.body.style.overflow).toBe("hidden");
+  expect(trigger).toHaveFocus();
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局问答" })).toBeNull());
+  expect(document.body.style.overflow).toBe("");
+});
+
+test("the window's own Escape handler cannot close the window while the preview is on top", async () => {
+  installDialogMethods();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
+  render(<PreviewHost />);
+  press(await openImageConversation());
+  await openedPreview();
+  // 即使这次按键先落到窗口自己的监听上（焦点没跟着进预览时），协调器也只认最上层：
+  // 窗口原样留着，预览也没被顺手收掉。
+  fireEvent.keyDown(chatWindow(), { key: "Escape" });
+  expect(chatWindow()).toHaveAttribute("open");
+  expect(imagePreview()).not.toBeNull();
+});
+
+test("backdrop and the close button close only the preview and return focus to the image", async () => {
+  installDialogMethods();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
+  render(<PreviewHost />);
+  const trigger = await openImageConversation();
+
+  press(trigger);
+  fireEvent.click(await openedPreview());
+  await waitFor(() => expect(imagePreview()).toBeNull());
+  expect(chatWindow()).not.toHaveAttribute("inert");
+  expect(trigger).toHaveFocus();
+
+  press(trigger);
+  await openedPreview();
+  fireEvent.click(screen.getByRole("button", { name: "关闭图片预览" }));
+  await waitFor(() => expect(imagePreview()).toBeNull());
+  expect(screen.getByRole("dialog", { name: "全局问答" })).toBeTruthy();
+  expect(trigger).toHaveFocus();
+});
+
+test("a citation card thumbnail opens the preview; Escape closes the preview first and leaves the card in place", async () => {
+  installDialogMethods();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
+  const { container } = render(<PreviewHost />);
+  await openImageConversation();
+  fireEvent.click(await screen.findByRole("button", { name: "[1]" }));
+  const card = await waitFor(() => {
+    const node = container.querySelector<HTMLElement>(".cite-popover");
+    expect(node).not.toBeNull();
+    return node!;
+  });
+  const thumbnail = await within(card).findByTitle("放大查看这张附图");
+
+  press(thumbnail);
+  await openedPreview();
+  // 预览开着时卡片让位（不收起）：它的捕获期 Esc 拦截此刻不装，Esc 归预览。
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  await waitFor(() => expect(imagePreview()).toBeNull());
+  expect(container.querySelector(".cite-popover")).not.toBeNull();
+  expect(thumbnail).toHaveFocus();
+  // 再按：卡片收起；窗口仍在。
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  await waitFor(() => expect(container.querySelector(".cite-popover")).toBeNull());
+  expect(screen.getByRole("dialog", { name: "全局问答" })).toBeTruthy();
+});
+
+test("the legacy turn's citation card thumbnail opens the same preview", async () => {
+  installDialogMethods();
+  api.list.mockResolvedValue([conversation()]);
+  const legacy: GlobalJob = { ...citedAnswer, response: { ...citedAnswer.response!, anchors: [{
+    ...citedAnswer.response!.anchors![0], notebook_id: "nb-1",
+    images: [{ element_id: "img-el-1", asset_id: "asset-1", caption: "图 1：示意图" }],
+  }] } };
+  api.detail.mockResolvedValue(detail("conv-a", [legacy]));
+  const { container } = render(<PreviewHost />);
+  fireEvent.click(screen.getByRole("button", { name: "打开全局问答" }));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入问题" })).toBeEnabled());
+  fireEvent.click(await screen.findByRole("button", { name: "对话 conv-a" }));
+  fireEvent.click(await screen.findByRole("button", { name: "[1]" }));
+  const card = await waitFor(() => {
+    const node = container.querySelector<HTMLElement>(".cite-popover");
+    expect(node).not.toBeNull();
+    return node!;
+  });
+  const thumbnail = await within(card).findByTitle("放大查看这张附图");
+  press(thumbnail);
+  const preview = await openedPreview();
+  await within(preview).findByRole("img", { name: "图 1：示意图" });
+  expect(api.assetBlob.mock.calls.at(-1)![0]).toContain("/notebooks/nb-1/assets/asset-1");
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  await waitFor(() => expect(imagePreview()).toBeNull());
+  expect(container.querySelector(".cite-popover")).not.toBeNull();
+  expect(thumbnail).toHaveFocus();
+  expect(screen.getByRole("dialog", { name: "全局问答" })).toBeTruthy();
+});
+
+test("collapsing the window takes a stacked preview down with it", async () => {
+  installDialogMethods();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
+  render(<PreviewHost />);
+  press(await openImageConversation());
+  await openedPreview();
+  // 预览盖着窗口时用户点不到「收起」；这里直接点它，验的是窗口不论因何离场，叠在
+  // 上面的预览都同一刻撤下，不会孤零零地浮在页面上。
+  fireEvent.click(within(chatWindow()).getByRole("button", { name: "收起全局问答", hidden: true }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局问答" })).toBeNull());
+  expect(imagePreview()).toBeNull();
+});
+
+test("the standalone /ask page opens the same preview, and Escape, backdrop and focus behave the same", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
+  render(<GlobalAskPage />);
+  const trigger = await screen.findByRole("button", { name: "放大查看[1]的附图" });
+  press(trigger);
+  const preview = await openedPreview();
+  await within(preview).findByRole("img", { name: "图 1：示意图" });
+  expect(api.assetBlob.mock.calls.at(-1)![0]).toContain("/notebooks/nb-1/assets/asset-1");
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  await waitFor(() => expect(imagePreview()).toBeNull());
+  expect(trigger).toHaveFocus();
+  press(trigger);
+  fireEvent.click(await openedPreview());
+  await waitFor(() => expect(imagePreview()).toBeNull());
+  expect(trigger).toHaveFocus();
 });
 
 // --- 运行中作业的推送流 -------------------------------------------------------

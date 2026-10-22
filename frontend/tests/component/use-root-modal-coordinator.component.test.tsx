@@ -521,3 +521,154 @@ test("release-notes is an actor-owned announcement that never evicts a primary m
   expect(closed).toHaveBeenCalledWith("release-notes", "button");
   expect(value!.view("password-change").topmost).toBe(true);
 });
+
+// --- 子层（stacksOver / openAbove）------------------------------------------------
+//
+// 全局问答窗口里的引用配图要叠在窗口**之上**：同一格 answer-image-preview，但不按
+// primary 冲突组把窗口顶掉，Escape / 遮罩先归它（requestClose 既有的「只有最上层接
+// Escape」那条规则），窗口离场时它一起撤下。笔记本内那条入口不经子层，口径不变。
+
+test("a stacked image preview sits above the global window and takes the first Escape", () => {
+  render(<Harness />);
+  const actor = value!.captureActorOwner();
+  act(() => { value!.open("global-ask", actor); });
+  let lease: ReturnType<HookValue["openAbove"]> = null;
+  act(() => { lease = value!.openAbove("answer-image-preview", "global-ask"); });
+  expect(lease).not.toBeNull();
+  // 子层继承父层那一次打开的 owner（actor），不经本格 ownerKinds。
+  expect(lease!.owner).toBe(actor);
+  expect(lease!.parent).toEqual({ slot: "global-ask", issue: value!.activeLease("global-ask")!.issue });
+  expect(closed).not.toHaveBeenCalled();
+  expect(value!.view("global-ask").open).toBe(true);
+  expect(value!.view("global-ask").topmost).toBe(false);
+  expect(value!.view("answer-image-preview").topmost).toBe(true);
+  expect(value!.view("answer-image-preview").zIndex).toBeGreaterThan(value!.view("global-ask").zIndex);
+
+  // 第一次 Escape：窗口不是最上层，它的请求被拒；预览收下。
+  expect(value!.requestClose("global-ask", "escape")).toBe(false);
+  act(() => { expect(value!.requestClose("answer-image-preview", "escape")).toBe(true); });
+  expect(closed).toHaveBeenCalledWith("answer-image-preview", "escape");
+  expect(value!.view("global-ask").open).toBe(true);
+  expect(value!.view("global-ask").topmost).toBe(true);
+  // 第二次 Escape 才轮到窗口。
+  act(() => { expect(value!.requestClose("global-ask", "escape")).toBe(true); });
+  expect(closed).toHaveBeenLastCalledWith("global-ask", "escape");
+});
+
+test("backdrop and the close button close only the stacked preview", () => {
+  render(<Harness />);
+  act(() => { value!.open("global-ask", value!.captureActorOwner()); });
+  act(() => { value!.openAbove("answer-image-preview", "global-ask"); });
+  act(() => { expect(value!.requestClose("answer-image-preview", "backdrop")).toBe(true); });
+  expect(value!.view("global-ask").topmost).toBe(true);
+  act(() => { value!.openAbove("answer-image-preview", "global-ask"); });
+  act(() => { expect(value!.requestClose("answer-image-preview", "button")).toBe(true); });
+  expect(value!.view("global-ask").open).toBe(true);
+  expect(closed.mock.calls.filter(([slot]) => slot === "global-ask")).toEqual([]);
+});
+
+test("openAbove refuses undeclared pairs, an absent parent and a covered parent", () => {
+  render(<Harness />);
+  enterWorkspace();
+  const actor = value!.captureActorOwner();
+  // 父层不在场。
+  expect(value!.openAbove("answer-image-preview", "global-ask")).toBeNull();
+  // 策略表没有声明的叠放关系。
+  act(() => { value!.open("model-service", actor); });
+  expect(value!.openAbove("answer-image-preview", "model-service")).toBeNull();
+  act(() => { value!.open("global-ask", actor); });
+  expect(value!.openAbove("info", "global-ask")).toBeNull();
+  // 父层被更高的层盖住：用户本来点不到它，不许从它下面再叠一层。
+  act(() => { value!.open("info", actor); });
+  expect(value!.openAbove("answer-image-preview", "global-ask")).toBeNull();
+  expect(value!.view("answer-image-preview").open).toBe(false);
+  // 顶层打开的口径不变：actor owner 仍被 ownerKinds 拒绝。
+  expect(value!.open("answer-image-preview", actor)).toBeNull();
+});
+
+test("the stacked preview leaves with its parent, whatever removes the parent", () => {
+  const screen = render(<Harness />);
+  const actor = () => value!.captureActorOwner();
+  // ① 父层被按钮关掉。
+  act(() => { value!.open("global-ask", actor()); });
+  act(() => { value!.openAbove("answer-image-preview", "global-ask"); });
+  act(() => { value!.requestClose("global-ask", "button"); });
+  expect(value!.view("answer-image-preview").open).toBe(false);
+  expect(closed).toHaveBeenCalledWith("answer-image-preview", "owner-invalidated");
+  // ② 父层被另一个 primary 顶掉。
+  closed.mockClear();
+  act(() => { value!.open("global-ask", actor()); });
+  act(() => { value!.openAbove("answer-image-preview", "global-ask"); });
+  act(() => { value!.open("model-service", actor()); });
+  expect(value!.view("global-ask").open).toBe(false);
+  expect(value!.view("answer-image-preview").open).toBe(false);
+  expect(closed).toHaveBeenCalledWith("global-ask", "conflict");
+  expect(closed.mock.calls.some(([slot]) => slot === "answer-image-preview")).toBe(true);
+  act(() => { value!.requestClose("model-service", "button"); });
+  // ③ 换了用户：两层一起失效，旧子层租约不能复活。
+  act(() => { value!.open("global-ask", actor()); });
+  let stale: ReturnType<HookValue["openAbove"]> = null;
+  act(() => { stale = value!.openAbove("answer-image-preview", "global-ask"); });
+  screen.rerender(<Harness actorId="user-b" />);
+  expect(value!.view("answer-image-preview").open).toBe(false);
+  expect(value!.leaseIsCurrent(stale)).toBe(false);
+  expect(value!.publish(stale)).toBe(false);
+});
+
+test("a stacked lease is bound to that one opening of its parent", () => {
+  render(<Harness />);
+  act(() => { value!.open("global-ask", value!.captureActorOwner()); });
+  expect(value!.issue("answer-image-preview", value!.captureActorOwner())).toBeNull();
+  let stacked: ReturnType<HookValue["openAbove"]> = null;
+  act(() => { stacked = value!.openAbove("answer-image-preview", "global-ask"); });
+  act(() => { value!.requestClose("answer-image-preview", "button"); });
+  act(() => { value!.requestClose("global-ask", "button"); });
+  act(() => { value!.open("global-ask", value!.captureActorOwner()); });
+  // 窗口重开是另一次打开：上一次的子层租约不能发布到新窗口之上。
+  expect(value!.publish(stacked)).toBe(false);
+  expect(value!.view("answer-image-preview").open).toBe(false);
+});
+
+test("bringing the parent to front keeps its stacked child on top", () => {
+  render(<Harness />);
+  const actor = value!.captureActorOwner();
+  act(() => { value!.open("global-ask", actor); });
+  act(() => { value!.openAbove("answer-image-preview", "global-ask"); });
+  act(() => { value!.open("release-notes", actor); });
+  expect(value!.view("release-notes").topmost).toBe(true);
+  act(() => { value!.bringToFront("global-ask"); });
+  expect(value!.view("answer-image-preview").topmost).toBe(true);
+  expect(value!.view("answer-image-preview").zIndex).toBeGreaterThan(value!.view("global-ask").zIndex);
+  expect(value!.view("global-ask").zIndex).toBeGreaterThan(value!.view("release-notes").zIndex);
+});
+
+test("an in-notebook image preview is still an ordinary primary that replaces the global window", () => {
+  render(<Harness />);
+  enterWorkspace();
+  act(() => { value!.open("global-ask", value!.captureActorOwner()); });
+  act(() => { value!.open("answer-image-preview", value!.captureWorkspaceOwner()); });
+  expect(value!.view("global-ask").open).toBe(false);
+  expect(closed).toHaveBeenCalledWith("global-ask", "conflict");
+  expect(value!.activeLease("answer-image-preview")!.parent).toBeNull();
+});
+
+test("closing the stacked preview returns focus to its opener once the window is interactive again", () => {
+  function StackHarness() {
+    value = useRootModalCoordinator({ actorId: "user-a", sourceId: null, onClosed: closed });
+    const chat = value.view("global-ask");
+    return chat.open ? <section data-testid="window" inert={chat.topmost ? undefined : true}>
+      <button data-testid="opener">图</button>
+    </section> : null;
+  }
+  const screen = render(<StackHarness />);
+  act(() => { value!.open("global-ask", value!.captureActorOwner()); });
+  const opener = screen.getByTestId("opener");
+  opener.focus();
+  act(() => { value!.openAbove("answer-image-preview", "global-ask"); });
+  expect(screen.getByTestId("window")).toHaveAttribute("inert");
+  const focus = vi.spyOn(opener, "focus");
+  act(() => { value!.requestClose("answer-image-preview", "escape"); });
+  expect(screen.getByTestId("window")).not.toHaveAttribute("inert");
+  expect(focus).toHaveBeenCalledTimes(1);
+  expect(document.activeElement).toBe(opener);
+});

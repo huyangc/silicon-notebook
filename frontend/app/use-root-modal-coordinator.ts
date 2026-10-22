@@ -69,6 +69,13 @@ export type SourceModalOwner = Readonly<{
 
 export type RootModalOwner = ActorModalOwner | WorkspaceModalOwner | SourceModalOwner;
 
+/** 子层租约叠在哪一次打开的父层之上：格子 + 那一次的 issue。父层换了一次打开
+ *  （同格子新 issue）就不再是它的父层。 */
+export type RootModalParent = Readonly<{
+  slot: RootModalSlot;
+  issue: number;
+}>;
+
 export type RootModalLease<S extends RootModalSlot = RootModalSlot> = Readonly<{
   slot: S;
   issue: number;
@@ -76,6 +83,7 @@ export type RootModalLease<S extends RootModalSlot = RootModalSlot> = Readonly<{
   workspaceIssue: number | null;
   owner: RootModalOwner;
   returnFocus: HTMLElement | null;
+  parent: RootModalParent | null;
 }>;
 
 export type RootModalView = Readonly<{
@@ -91,6 +99,18 @@ type ModalPolicy = Readonly<{
   backdrop: boolean;
   escape: boolean;
   workspaceSensitive?: boolean;
+  /**
+   * 本格还可以作为**子层**叠在哪些格子之上（`openAbove`）。子层：
+   * · 继承父层那一次打开的 owner（不受本格 `ownerKinds` 约束——它的寿命被父层框住）；
+   * · 与父层（及父层的祖先）不按冲突组互斥，其余规则照旧：同组的别的 primary 一样
+   *   被它顶掉，它也一样被后来的 primary 顶掉；
+   * · 恒在父层之上（同层按开启顺序，父层被 `bringToFront` 时子层跟着上移），因此
+   *   Escape / 遮罩先归它——「最上层先吃」是 `requestClose` 既有的那条规则，不是
+   *   父层里的特判；
+   * · 父层不论因何离场（关闭、被顶掉、owner 失效），子层同一刻一起撤下。
+   * 不列在这里的父层一概拒绝：叠放关系与其余策略一样只在这张表里声明。
+   */
+  stacksOver?: readonly RootModalSlot[];
 }>;
 
 // This table is the presentation policy's only source of truth.  It deliberately
@@ -125,7 +145,10 @@ export const ROOT_MODAL_POLICIES: Readonly<Record<RootModalSlot, ModalPolicy>> =
   "promotion-queue": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
   "promotion-target": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
   "edge-review": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
-  "answer-image-preview": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: true },
+  // 全局问答窗口里的引用配图点开后叠在窗口之上（子层，见 `stacksOver`）：第一次 Esc
+  // 只收图、焦点回到点开它的那张图，窗口原样留着；窗口离场时预览随之撤下。笔记本内
+  // 那条入口不经子层，仍是普通的 workspace primary，口径一字未变。
+  "answer-image-preview": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: true, stacksOver: ["global-ask"] },
   // 与最接近的核心弹窗（`understanding`——内建插件打开的就是它）同一档：workspace 拥有、
   // primary 冲突组、layer 60、可点遮罩关闭、不接 Escape。`escape: false` 不是遗漏：
   // 除 `model-service` 外每个 primary 都是 false，给插件弹窗单独开 Escape 会让它比任何
@@ -238,6 +261,12 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
       && sourceGenerationRef.current === owner.sourceGeneration;
   };
 
+  const childrenOf = (parent: ActiveLease): ActiveLease[] => (
+    [...activeRef.current.values()].filter((active) => (
+      active.parent?.slot === parent.slot && active.parent.issue === parent.issue
+    ))
+  );
+
   const removeWithoutRender = (
     slot: RootModalSlot,
     reason: RootModalCloseReason,
@@ -245,6 +274,8 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
   ): ActiveLease | null => {
     const active = activeRef.current.get(slot) ?? null;
     if (!active) return null;
+    // 子层先撤：父层没了，叠在它上面的那一层同一刻离场（它的 owner 就是父层这一次打开）。
+    for (const child of childrenOf(active)) removeWithoutRender(child.slot, "owner-invalidated", notify);
     activeRef.current.delete(slot);
     if (notify) onClosedRef.current(slot, reason);
     else pendingInvalidationsRef.current.push([slot, reason]);
@@ -456,8 +487,18 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
     slot: S,
     owner: RootModalOwner | null,
   ): RootModalLease<S> | null {
+    return issueLease(slot, owner, null);
+  }
+
+  function issueLease<S extends RootModalSlot>(
+    slot: S,
+    owner: RootModalOwner | null,
+    parent: RootModalParent | null,
+  ): RootModalLease<S> | null {
     const policy = ROOT_MODAL_POLICIES[slot];
-    if (!owner || !policy.ownerKinds.includes(owner.kind) || !ownerIsCurrent(owner)) return null;
+    if (!owner || !ownerIsCurrent(owner)) return null;
+    // 子层的 owner 是父层那一次打开的 owner，归属由 `stacksOver` 授权，不再看 ownerKinds。
+    if (!parent && !policy.ownerKinds.includes(owner.kind)) return null;
     const nextIssue = (issueRef.current.get(slot) ?? 0) + 1;
     issueRef.current.set(slot, nextIssue);
     const conflictIssue = policy.conflictGroup === "primary"
@@ -469,8 +510,26 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
     const returnFocus = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
-    return Object.freeze({ slot, issue: nextIssue, conflictIssue, workspaceIssue, owner, returnFocus });
+    return Object.freeze({ slot, issue: nextIssue, conflictIssue, workspaceIssue, owner, returnFocus, parent });
   }
+
+  /** 父层这一次打开仍在场、且仍属当前 owner。 */
+  const parentIsCurrent = (parent: RootModalParent | null): boolean => {
+    if (!parent) return true;
+    const active = activeRef.current.get(parent.slot);
+    return Boolean(active && active.issue === parent.issue && ownerIsCurrent(active.owner));
+  };
+
+  /** 一次打开的父层链（父、祖父……），发布子层时它们都不算冲突。 */
+  const ancestorsOf = (parent: RootModalParent | null): Set<RootModalSlot> => {
+    const slots = new Set<RootModalSlot>();
+    let cursor = parent;
+    while (cursor && !slots.has(cursor.slot)) {
+      slots.add(cursor.slot);
+      cursor = activeRef.current.get(cursor.slot)?.parent ?? null;
+    }
+    return slots;
+  };
 
   // Async openers need an authority check before the presentation lease is
   // published. `owns` deliberately requires an already-open slot; this checks
@@ -489,14 +548,17 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
         lease.workspaceIssue === null
         || workspaceGenerationRef.current === lease.workspaceIssue
       )
-      && ownerIsCurrent(lease.owner),
+      && ownerIsCurrent(lease.owner)
+      && parentIsCurrent(lease.parent),
     );
   }
 
   function publish<S extends RootModalSlot>(lease: RootModalLease<S> | null): lease is RootModalLease<S> {
     if (!leaseIsCurrent(lease)) return false;
     const policy = ROOT_MODAL_POLICIES[lease.slot];
+    const ancestors = ancestorsOf(lease.parent);
     for (const [slot] of [...activeRef.current.entries()]) {
+      if (ancestors.has(slot)) continue;
       if (
         slot === lease.slot
         || (
@@ -523,6 +585,19 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
     return publish(lease) ? lease : null;
   }
 
+  /**
+   * 把 `slot` 作为子层叠在**此刻最上层**的 `parentSlot` 之上打开（见策略表的
+   * `stacksOver`）。父层不在场、不是最上层（被别的层盖住时用户本来点不到它）、或
+   * 策略表没有声明这一对叠放关系，一概返回 null，什么都不动。
+   */
+  function openAbove<S extends RootModalSlot>(slot: S, parentSlot: RootModalSlot): RootModalLease<S> | null {
+    if (!ROOT_MODAL_POLICIES[slot].stacksOver?.includes(parentSlot)) return null;
+    const parent = activeRef.current.get(parentSlot);
+    if (!parent || !ownerIsCurrent(parent.owner) || topmost()?.slot !== parentSlot) return null;
+    const lease = issueLease(slot, parent.owner, Object.freeze({ slot: parentSlot, issue: parent.issue }));
+    return publish(lease) ? lease : null;
+  }
+
   function owns(lease: RootModalLease | null): boolean {
     if (!leaseIsCurrent(lease)) return false;
     const active = activeRef.current.get(lease.slot);
@@ -539,6 +614,7 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
         workspaceIssue: active.workspaceIssue,
         owner: active.owner,
         returnFocus: active.returnFocus,
+        parent: active.parent,
       })
       : null;
   }
@@ -567,7 +643,12 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
   function bringToFront(slot: RootModalSlot) {
     const active = activeRef.current.get(slot);
     if (!active || !ownerIsCurrent(active.owner)) return;
-    activeRef.current.set(slot, Object.freeze({ ...active, order: ++orderRef.current }));
+    // 子层恒在父层之上：父层上移时，叠在它上面的各层按原有先后跟着上移。
+    const raise = (lease: ActiveLease) => {
+      activeRef.current.set(lease.slot, Object.freeze({ ...lease, order: ++orderRef.current }));
+      for (const child of childrenOf(lease).sort((left, right) => left.order - right.order)) raise(child);
+    };
+    raise(active);
     setVersion((value) => value + 1);
   }
 
@@ -599,6 +680,7 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
     issue,
     publish,
     open,
+    openAbove,
     leaseIsCurrent,
     owns,
     activeLease,

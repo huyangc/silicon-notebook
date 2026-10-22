@@ -194,7 +194,7 @@ test("点击正文图片请求页面内放大，并保留 caption 作为预览 a
   await screen.findByRole("img", { name: "图 1：示意图" });
   await user.click(screen.getByRole("button", { name: "放大查看[1]的附图" }));
   expect(onPreviewImage).toHaveBeenCalledWith({
-    items: [{ assetId: "asset-1", alt: "图 1：示意图", referenceLabel: "[1]" }],
+    items: [{ assetId: "asset-1", notebookId: "nb-1", alt: "图 1：示意图", referenceLabel: "[1]" }],
     index: 0,
   });
 });
@@ -242,8 +242,8 @@ test("正文多图时交出整本画册，顺序与正文里的图片区块一�
   ]);
 
   const expectedItems = [
-    { assetId: "asset-1", alt: "图 1", referenceLabel: "[1]" },
-    { assetId: "asset-2", alt: "图 2", referenceLabel: "[2]" },
+    { assetId: "asset-1", notebookId: "nb-1", alt: "图 1", referenceLabel: "[1]" },
+    { assetId: "asset-2", notebookId: "nb-1", alt: "图 2", referenceLabel: "[2]" },
   ];
   await user.click(openButtons[1]);
   expect(onPreviewImage).toHaveBeenCalledWith({ items: expectedItems, index: 1 });
@@ -290,8 +290,8 @@ test("回退引用路径下,画册跟随正文顺序而不是 citations 数组�
 
   // 画册 = 正文顺序（[2] 在前），且不含从未在正文出现过的 [3] 的图片。
   const expectedItems = [
-    { assetId: "asset-2", alt: "图 2", referenceLabel: "[2]" },
-    { assetId: "asset-1", alt: "图 1", referenceLabel: "[1]" },
+    { assetId: "asset-2", notebookId: "nb-1", alt: "图 2", referenceLabel: "[2]" },
+    { assetId: "asset-1", notebookId: "nb-1", alt: "图 1", referenceLabel: "[1]" },
   ];
   await user.click(openButtons[0]);
   expect(onPreviewImage).toHaveBeenCalledWith({ items: expectedItems, index: 0 });
@@ -311,8 +311,8 @@ test("引用浮层里的缩略图打开的也是整本画册", async () => {
   await user.click(await within(popover).findByTitle("放大查看这张附图"));
   expect(onPreviewImage).toHaveBeenCalledWith({
     items: [
-      { assetId: "asset-1", alt: "图 1", referenceLabel: "[1]" },
-      { assetId: "asset-2", alt: "图 2", referenceLabel: "[2]" },
+      { assetId: "asset-1", notebookId: "nb-1", alt: "图 1", referenceLabel: "[1]" },
+      { assetId: "asset-2", notebookId: "nb-1", alt: "图 2", referenceLabel: "[2]" },
     ],
     index: 1,
   });
@@ -328,7 +328,7 @@ test("引用浮层里的缩略图也只打开页面内预览，不跳来源详�
   const popover = screen.getByRole("dialog");
   await user.click(await within(popover).findByTitle("放大查看这张附图"));
   expect(onPreviewImage).toHaveBeenCalledWith({
-    items: [{ assetId: "asset-1", alt: "图 1：示意图", referenceLabel: "[1]" }],
+    items: [{ assetId: "asset-1", notebookId: "nb-1", alt: "图 1：示意图", referenceLabel: "[1]" }],
     index: 0,
   });
   expect(onOpenSource).not.toHaveBeenCalled();
@@ -466,6 +466,26 @@ test("跨库附图仍经当前 active notebook 的代理资产端点读取", asy
   await waitFor(() => expect(fetchInternalAssetBlob).toHaveBeenCalledTimes(2));
   for (const [called] of vi.mocked(fetchInternalAssetBlob).mock.calls) {
     expect(called).toContain("/notebooks/nb-1/assets/asset-1");
+  }
+});
+
+// 放大预览是第三个取图点：交出去的每一张都带着裁定好的取图库，有 active 时恒为
+// active——条目自己的 notebook_id（base-1）不许混进来，页面级预览照它取图。
+test("跨库附图点开放大时交出的取图库仍是当前 active notebook", async () => {
+  const user = userEvent.setup();
+  const onPreviewImage = vi.fn();
+  const answer = anchorAnswerWithImages();
+  answer.anchors[0].notebook_id = "base-1";
+  answer.anchors[0].tier = "base";
+  renderAnswer(answer, { onPreviewImage });
+
+  await screen.findByRole("img", { name: "图 1：示意图" });
+  await user.click(screen.getByRole("button", { name: "放大查看[1]的附图" }));
+  await user.click(screen.getByRole("button", { name: "[1]" }));
+  await user.click(await within(screen.getByRole("dialog")).findByTitle("放大查看这张附图"));
+  expect(onPreviewImage).toHaveBeenCalledTimes(2);
+  for (const [request] of onPreviewImage.mock.calls) {
+    expect(request.items.map((item: { notebookId: string }) => item.notebookId)).toEqual(["nb-1"]);
   }
 });
 

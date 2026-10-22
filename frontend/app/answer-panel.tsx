@@ -41,6 +41,7 @@ import { useImportRowController } from "./import-row-state";
 import {
   InlineCitationImages,
   referenceImages,
+  referenceNotebookId,
   resolveCitationImageRows,
 } from "./inline-citation-images";
 import {
@@ -1297,7 +1298,12 @@ export function AnswerView({
       buildImageGallery(citationImageOrder.items, (key) => {
         const reference = referencesByCitationKey[key];
         return reference
-          ? { displayLabel: reference.displayLabel, images: referenceImages(reference) }
+          ? {
+            displayLabel: reference.displayLabel,
+            // 与正文附图取图同一条归属规则（InlineCitationImages 逐行算的那一个）。
+            notebookId: assetNotebookId(notebookId, referenceNotebookId(reference)),
+            images: referenceImages(reference),
+          }
           : undefined;
       }),
       image,
