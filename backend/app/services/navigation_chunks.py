@@ -510,8 +510,12 @@ class _Structure:
     every multi-segment label shares (the document's common root), each
     heading's kind/depth, and the participating headings in document order."""
 
-    def __init__(self, headings: Sequence[_Heading]) -> None:
+    def __init__(self, headings: Sequence[_Heading], index: "_TitleIndex") -> None:
         self.headings = headings
+        # Every heading that carries a chain node's title: locality asks
+        # whether ANY of them is local (see ``locality``).
+        self.orders = index.orders
+        self.key_of = index.key_of
         multi = [h.crumbs for h in headings if len(h.crumbs) >= 2]
         depth = 0
         while (
@@ -534,7 +538,16 @@ class _Structure:
         count). Numbering compares segment prefixes (``Figure 5-1`` reads as
         chapter 5) and takes a parent only from a number of two segments or
         more; breadcrumbs compare crumb prefixes. 0 for a chunk whose section
-        has neither."""
+        has neither.
+
+        A chain node counts as local when ANY heading carrying its title is
+        local, not only the one the chain was pinned to. Titles repeat across
+        chapters (chapters 1 and 5 with the same seven subsection names): the
+        text cannot say which chapter's copy a chunk means, and the chain's
+        pin follows document order, not the chunk's position -- so chapter
+        5's own overview would read as a list of chapter 1's sections. A
+        table of contents is unaffected: its own section (``Contents``, the
+        document root) has no subtree to be local to."""
         if not chain:
             return 0.0
         crumbs = _crumbs(section_path)
@@ -562,16 +575,18 @@ class _Structure:
                 crumb_prefixes.append(crumbs[:-1])
         if not number_prefixes and not crumb_prefixes:
             return 0.0
-        local = 0
-        for order in chain:
-            heading = self.headings[order]
+        def inside(heading: _Heading) -> bool:
             parts = heading.position
             if parts and any(parts[: len(p)] == p for p in number_prefixes):
-                local += 1
-            elif any(
+                return True
+            return any(
                 len(heading.crumbs) > len(p) and list(heading.crumbs[: len(p)]) == p
                 for p in crumb_prefixes
-            ):
+            )
+
+        local = 0
+        for order in chain:
+            if any(inside(self.headings[same]) for same in self.orders[self.key_of[order]]):
                 local += 1
         return local / len(chain)
 
@@ -628,7 +643,7 @@ def detect_navigation_chunks(
         )
     index = _TitleIndex(headings)
     ancestry = _Ancestry(headings)
-    structure = _Structure(headings)
+    structure = _Structure(headings, index)
     flags: list[bool] = []
     metrics: list[ChunkNavigationMetrics] = []
     for section_path, text in chunks:
