@@ -19,8 +19,8 @@ extension_services_start() {
   # companion has started. A trap pending across a foreground command runs as
   # soon as that command returns, so this poll honours a cancellation within
   # one interval wherever it lands. No deterministic test can aim at that
-  # window; the opt-in stress case guards it:
-  # backend/tests/test_extension_service_launchers.py::test_stress_cancellation_next_to_the_controller_fork
+  # window; the stress script guards it (not in CI, run it by hand):
+  # python scripts/stress_launcher_signals.py --load auto
   while kill -0 "$EXTENSION_SERVICES_CONTROLLER_PID" 2>/dev/null; do
     sleep "$EXTENSION_SERVICES_POLL_SECONDS"
   done
@@ -38,7 +38,7 @@ extension_services_cleanup() {
     # repeat it until the controller is gone; the controller acts on the first
     # cancellation it receives and absorbs the rest. Deterministic case:
     # test_launcher_repeats_cancellation_the_controller_missed; the real
-    # window is covered by the same opt-in stress case as the poll above.
+    # window is covered by the same stress script as the poll above.
     while kill -TERM "$EXTENSION_SERVICES_CONTROLLER_PID" 2>/dev/null; do
       sleep "$EXTENSION_SERVICES_POLL_SECONDS"
     done

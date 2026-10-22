@@ -12,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from tests.launcher_checkout_testkit import alive
+
 SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import extension_services as manager
@@ -520,34 +522,44 @@ def test_repeated_cancellation_does_not_cut_the_rollback_short(directory, tmp_pa
             process.wait()
 
 
-@pytest.mark.process_contract
-def test_controller_rolls_back_when_its_launcher_is_killed(directory, tmp_path):
-    """A SIGKILLed launcher runs no trap and forwards nothing: the controller
-    notices it is gone, rolls back its unready session and removes the receipt."""
+_CONTROLLER = (
+    "import json,sys; sys.path.insert(0,sys.argv[1]); import extension_services as m; item=json.load(sys.stdin); "
+    "m.configuration=lambda root: ([item],'pending'); "
+    "extra=['--launcher-pid',sys.argv[4]] if sys.argv[4] != '-' else []; "
+    "raise SystemExit(m.main(['start','--state-dir',sys.argv[2],'--receipt',sys.argv[3],*extra]))"
+)
+# A stand-in launcher: starts the controller, publishes its pid, waits for it.
+# argv[6] is the --launcher-pid to pass ("self", an explicit pid, or "-" for none).
+_FAKE_LAUNCHER = (
+    "import os,subprocess,sys\n"
+    "launcher=str(os.getpid()) if sys.argv[6]=='self' else sys.argv[6]\n"
+    "child=subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4],launcher],"
+    "stdin=subprocess.PIPE)\n"
+    "child.stdin.write(sys.stdin.buffer.read()); child.stdin.close()\n"
+    "open(sys.argv[5]+'.tmp','w').write(str(child.pid)); os.replace(sys.argv[5]+'.tmp',sys.argv[5])\n"
+    "child.wait()\n"
+)
+
+
+def _never_ready(tmp_path):
     item = service(tmp_path, probe=[sys.executable, "-c", "raise SystemExit(1)"])
     # Never ready on its own: only the launcher watch can end this startup in time.
     item["startup_timeout_seconds"] = 300
+    return item
+
+
+def _kill_the_launcher_of_a_starting_controller(directory, tmp_path, launcher_pid: str):
+    """Start a controller under a stand-in launcher, SIGKILL the launcher once
+    the session is starting, and wait for the controller to exit."""
     receipt = tmp_path / "receipt"
     receipt.write_text("")
     controller_pid = tmp_path / "controller.pid"
-    controller = (
-        "import json,sys; sys.path.insert(0,sys.argv[1]); import extension_services as m; item=json.load(sys.stdin); "
-        "m.configuration=lambda root: ([item],'pending'); "
-        "raise SystemExit(m.main(['start','--state-dir',sys.argv[2],'--receipt',sys.argv[3],'--launcher-pid',sys.argv[4]]))"
-    )
-    fake_launcher = (
-        "import os,subprocess,sys\n"
-        "child=subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4],str(os.getpid())],"
-        "stdin=subprocess.PIPE)\n"
-        "child.stdin.write(sys.stdin.buffer.read()); child.stdin.close()\n"
-        "open(sys.argv[5]+'.tmp','w').write(str(child.pid)); os.replace(sys.argv[5]+'.tmp',sys.argv[5])\n"
-        "child.wait()\n"
-    )
     process = subprocess.Popen(
-        [sys.executable, "-c", fake_launcher, controller, str(SCRIPTS), str(directory), str(receipt), str(controller_pid)],
+        [sys.executable, "-c", _FAKE_LAUNCHER, _CONTROLLER, str(SCRIPTS), str(directory), str(receipt),
+         str(controller_pid), launcher_pid],
         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    process.stdin.write(json.dumps(item).encode())
+    process.stdin.write(json.dumps(_never_ready(tmp_path)).encode())
     process.stdin.close()
     process.stdin = None
     pid = None
@@ -560,7 +572,7 @@ def test_controller_rolls_back_when_its_launcher_is_killed(directory, tmp_path):
         assert manager.status(directory)["state"] == "starting"
         process.kill()
         process.wait()
-        eventually(lambda: not _alive(pid), COLD_START_SECONDS)
+        eventually(lambda: not alive(pid), COLD_START_SECONDS)
         assert not runtime.running(directory)
         assert manager.status(directory)["state"] in ("stopped", "failed")
         assert not receipt.exists()
@@ -568,16 +580,57 @@ def test_controller_rolls_back_when_its_launcher_is_killed(directory, tmp_path):
         if process.poll() is None:
             process.kill()
             process.wait()
-        if pid is not None and _alive(pid):
+        if pid is not None and alive(pid):
             os.kill(pid, signal.SIGKILL)
 
 
-def _alive(pid: int) -> bool:
+@pytest.mark.process_contract
+def test_controller_rolls_back_when_its_launcher_is_killed(directory, tmp_path):
+    """A SIGKILLed launcher runs no trap and forwards nothing: the controller
+    notices it is gone, rolls back its unready session and removes the receipt."""
+    _kill_the_launcher_of_a_starting_controller(directory, tmp_path, "self")
+
+
+@pytest.mark.process_contract
+def test_a_changed_parent_alone_reveals_the_lost_launcher(directory, tmp_path):
+    """The pid handed over belongs to a live process (this test), so only the
+    reparenting shows that the launcher is gone."""
+    _kill_the_launcher_of_a_starting_controller(directory, tmp_path, str(os.getpid()))
+
+
+@pytest.mark.process_contract
+def test_a_launcher_gone_before_the_controller_started_cancels_it(directory, tmp_path):
+    """The launcher exited before this controller read its parent (a trap that
+    ran before `$!` removed the receipt and left): the parent never changes, only
+    the pid shows it. Nothing is started and no receipt is written back."""
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    receipt = tmp_path / "receipt"
+    process = subprocess.Popen(
+        [sys.executable, "-c", _CONTROLLER, str(SCRIPTS), str(directory), str(receipt), str(gone.pid)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
+        process.communicate(json.dumps(_never_ready(tmp_path)).encode(), timeout=COLD_START_SECONDS)
+        assert process.returncode == 130
+        assert not runtime.running(directory)
+        assert not receipt.exists()
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+def test_without_a_launcher_pid_a_changed_parent_is_not_a_cancellation(monkeypatch):
+    """`nohup ... start &` by hand must survive its shell logging out: only a
+    controller told its launcher's pid watches for the launcher."""
+    unwatched = manager.Cancellation(None)
+    watched = manager.Cancellation(os.getpid())
+    monkeypatch.setattr(manager.os, "getppid", lambda: unwatched.parent + 1)
+    assert not unwatched.launcher_gone()
+    unwatched.require_launcher()
+    assert not unwatched.cancelled
+    assert watched.launcher_gone()
 
 
 @pytest.mark.process_contract

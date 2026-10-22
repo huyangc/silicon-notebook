@@ -1937,9 +1937,6 @@
   "backend/tests/test_extension_service_config.py": {
     "I001": 1
   },
-  "backend/tests/test_extension_service_launchers.py": {
-    "I001": 1
-  },
   "backend/tests/test_extension_service_reuse.py": {
     "I001": 2
   },

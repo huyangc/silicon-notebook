@@ -1,40 +1,33 @@
 """Real shell launchers with fake services/processes; never bind host ports."""
 from __future__ import annotations
 
-from contextlib import contextmanager
 import json
-import os
-from pathlib import Path
-import random
 import shutil
 import signal
 import subprocess
 import sys
 import tarfile
 import time
+from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
+from tests.launcher_checkout_testkit import (
+    alive,
+    build_fake_checkout,
+    default_launcher_signals,
+    executable,
+    kill_published,
+    spawn,
+    stop_fake_children,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 pytestmark = [pytest.mark.xdist_group("extension_launcher_lifecycle"), pytest.mark.process_contract]
 # A backstop for a broken run, never the judgement: every wait below ends on a
 # handshake (a pid file published by rename, or the launcher's own exit).
 LIFECYCLE_CAP_SECONDS = 20
-LAUNCHER_TRAPPED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
-
-
-def default_launcher_signals() -> None:
-    """``preexec_fn``: the launcher starts with default dispositions.
-
-    A non-interactive shell cannot trap a signal that was ignored when it
-    started (POSIX). A gate run under ``nohup`` or a detached harness ignores
-    SIGHUP, and a backgrounded lane ignores SIGINT; inheriting either would
-    hand the launcher a cancellation it cannot see, and the test would judge
-    the test runner's environment instead of the launcher.
-    """
-    for signum in LAUNCHER_TRAPPED_SIGNALS:
-        signal.signal(signum, signal.SIG_DFL)
 
 
 @contextmanager
@@ -47,11 +40,6 @@ def runner_disposition(signum: int, disposition):
         signal.signal(signum, previous)
 
 
-def executable(path: Path, body: str) -> None:
-    path.write_text(body, encoding="utf-8")
-    path.chmod(0o755)
-
-
 def wait_until(predicate, timeout: float = LIFECYCLE_CAP_SECONDS) -> None:
     deadline = time.monotonic() + timeout
     while not predicate():
@@ -60,133 +48,17 @@ def wait_until(predicate, timeout: float = LIFECYCLE_CAP_SECONDS) -> None:
         time.sleep(0.02)
 
 
-def alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
-
-
 @pytest.fixture
 def launcher(tmp_path):
-    root = tmp_path / "checkout"
-    for directory in ("scripts", "backend", "frontend/node_modules/.bin", "fake-bin", ".venv/bin", "node/bin"):
-        (root / directory).mkdir(parents=True, exist_ok=True)
-    for name in ("dev.sh", "prod.sh", "backend.sh", "stop.sh", "extension_services.sh"):
-        shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
-    for name in ("start.sh", "stop.sh"):
-        shutil.copy2(ROOT / "packaging" / name, root / name)
-    (root / "scripts/autotune.sh").write_text("# no host configuration\n")
-    (root / ".env").write_text("# isolated deployment\n")
-    (root / "frontend/server.js").write_text("// fake node does not evaluate this\n")
-    (root / "scripts/extension_services.py").write_text('''
-import json, os, pathlib, signal, sys, time
-action = sys.argv[1]
-receipt = pathlib.Path(sys.argv[sys.argv.index("--receipt") + 1]) if "--receipt" in sys.argv else None
-if action == "start" and receipt:
-    receipt.write_text(json.dumps({"run_id": "owned-test-run", "owned": True}))
-record = {"action": action, "receipt": str(receipt) if receipt else None}
-if "--launcher-pid" in sys.argv:
-    record["launcher_pid"] = int(sys.argv[sys.argv.index("--launcher-pid") + 1])
-if receipt and receipt.exists() and receipt.read_text():
-    record["ownership"] = json.loads(receipt.read_text())
-with open(os.environ["SERVICE_EVENTS"], "a") as stream:
-    stream.write(json.dumps(record) + "\\n")
-if action == "start" and os.environ.get("WAIT_SERVICE") in ("1", "misses-first-term"):
-    missed = pathlib.Path(os.environ["FAKE_ROOT"], "term-missed")
-    def cancelled(signum, frame):
-        # misses-first-term: the launcher's first TERM is lost, as it is when it
-        # lands before the forked controller has exec'd.
-        if os.environ["WAIT_SERVICE"] == "misses-first-term" and not missed.exists():
-            missed.write_text("")
-            return
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        sys.exit(130)
-    signal.signal(signal.SIGTERM, cancelled)
-    staged = pathlib.Path(os.environ["FAKE_ROOT"], "controller.pid.tmp")
-    staged.write_text(str(os.getpid()))
-    os.replace(staged, staged.with_suffix(""))
-    while True:
-        time.sleep(1)
-sys.exit(7 if action == "start" and os.environ.get("FAIL_SERVICE") == "1" else 0)
-''')
-    executable(root / "fake_child.sh", '''#!/bin/bash
-# Publish the pid file by rename so a reader never sees it created but still empty.
-echo "$$" > "$FAKE_ROOT/$1.pid.tmp" && mv "$FAKE_ROOT/$1.pid.tmp" "$FAKE_ROOT/$1.pid"
-[[ "${FAIL_MAIN:-}" == "$1" ]] && exit 8
-exec sleep 60
-''')
-    python_wrapper = '''#!/bin/bash
-case "${1:-}" in
-  */extension_services.py)
-    if [[ "${2:-}" == start && "${WAIT_SERVICE:-}" == forked ]]; then
-      # The controller exists but has not written a receipt or started anything.
-      echo "$$" > "$FAKE_ROOT/controller.pid.tmp" && mv "$FAKE_ROOT/controller.pid.tmp" "$FAKE_ROOT/controller.pid"
-      exec /bin/sleep 60
-    fi
-    exec "$REAL_PYTHON" "$@" ;;
-  */python_env.py)
-    if [[ "${2:-}" == "-c" ]]; then
-      [[ "${FAIL_DATABASE:-0}" == 1 ]] && exit 2
-      echo "sqlite test deployment"; exit 0
-    fi
-    exec /bin/bash "$FAKE_ROOT/fake_child.sh" backend ;;
-  -c) exec "$REAL_PYTHON" "$@" ;;
-esac
-exit 0
-'''
-    executable(root / "fake-bin/python", python_wrapper)
-    executable(root / ".venv/bin/python", python_wrapper)
-    frontend_wrapper = '#!/bin/bash\nexec /bin/bash "$FAKE_ROOT/fake_child.sh" frontend\n'
-    for path in ("fake-bin/npm", "frontend/node_modules/.bin/next", "node/bin/node"):
-        executable(root / path, frontend_wrapper)
-    for name in ("ss", "lsof", "fuser"):
-        executable(root / "fake-bin" / name, "#!/bin/sh\nexit 0\n")
-    executable(root / "fake-bin/curl", '''#!/bin/bash
-case "$*" in
-  */openapi.json*) echo '{"info":{"title":"silicon-notebook API"}}' ;;
-  */api/ready*)
-    if [[ -f "$FAKE_ROOT/backend.pid" ]]; then echo '{"ready":true}'
-    else echo '{"ready":false}'; fi ;;
-esac
-''')
-    env = {
-        "PATH": f"{root / 'fake-bin'}:/usr/bin:/bin:/usr/sbin:/sbin",
-        "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
-        "REAL_PYTHON": sys.executable, "PYTHON_BIN": str(root / "fake-bin/python"),
-        "FAKE_ROOT": str(root), "SERVICE_EVENTS": str(root / "service-events.jsonl"),
-        "SKIP_INSTALL": "1", "SKIP_BUILD": "1", "START_TIMEOUT_SECONDS": "3",
-        "PYTHONDONTWRITEBYTECODE": "1",
-    }
+    root, env = build_fake_checkout(tmp_path)
     yield root, env
-    for name in ("backend", "frontend"):
-        path = root / f"{name}.pid"
-        if path.exists():
-            try:
-                os.kill(int(path.read_text()), signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+    stop_fake_children(root)
 
 
 def run(root, env, path, *args):
     return subprocess.run(["bash", str(root / path), *args], cwd=root, env=env,
                           capture_output=True, text=True, timeout=LIFECYCLE_CAP_SECONDS,
                           preexec_fn=default_launcher_signals)
-
-
-def spawn(root, env, path, *args):
-    return subprocess.Popen(["bash", str(root / path), *args], cwd=root, env=env,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            preexec_fn=default_launcher_signals)
-
-
-def kill_published(pid_file: Path) -> None:
-    if pid_file.exists():
-        try:
-            os.kill(int(pid_file.read_text()), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
 
 
 def events(root):
@@ -297,56 +169,6 @@ def test_launcher_repeats_cancellation_the_controller_missed(launcher, path, arg
     assert_owned_cleanup(root)
     assert not (root / "backend.pid").exists()
     assert not (root / "frontend.pid").exists()
-
-
-STRESS_SHARDS = 4
-
-
-@pytest.mark.launcher_signal_stress
-@pytest.mark.parametrize("path,args", [("scripts/dev.sh", ()), ("scripts/backend.sh", ("start",))])
-@pytest.mark.parametrize("shard", [
-    # One xdist group per shard (the closest group marker wins), so -n spreads them.
-    pytest.param(shard, marks=pytest.mark.xdist_group(f"launcher_signal_stress_{shard}"))
-    for shard in range(STRESS_SHARDS)
-])
-def test_stress_cancellation_next_to_the_controller_fork(launcher, path, args, shard):
-    """Opt-in (docs/development.md, "Opt-in stress runs"); deselected otherwise.
-
-    Two bash 3.2 races live in a sub-millisecond window next to the controller
-    fork, where no deterministic test can aim: a trap pending when `wait`
-    blocks stays pending until the waited child exits (hence the start poll in
-    extension_services.sh), and a TERM delivered between fork and exec is lost
-    (hence the repeated cleanup TERM). Each run lands a cancellation 0-4 ms
-    after the launcher creates its receipt, which mktemp does right before the
-    fork, against a controller that would otherwise wait forever. The blocking
-    `wait` race is rare (about 1 in 5000 attempts on an idle machine), hence
-    the sharding: 2 launchers x 4 shards x 1500 attempts by default.
-    """
-    root, env = launcher
-    runs = int(os.environ.get("SILICON_NOTEBOOK_LAUNCHER_SIGNAL_STRESS_RUNS", "1500"))
-    seed = os.environ.get("SILICON_NOTEBOOK_LAUNCHER_SIGNAL_STRESS_SEED")
-    rng = random.Random(None if seed is None else f"{seed}-{path}-{shard}")
-    receipts = Path(env["TMPDIR"])
-    held = []
-    for attempt in range(runs):
-        for leftover in (root / "controller.pid", root / "service-events.jsonl",
-                         *receipts.glob("silicon-extension-start.*")):
-            leftover.unlink(missing_ok=True)
-        process = spawn(root, {**env, "WAIT_SERVICE": "1"}, path, *args)
-        deadline = time.monotonic() + LIFECYCLE_CAP_SECONDS
-        while not any(receipts.glob("silicon-extension-start.*")):
-            assert process.poll() is None and time.monotonic() < deadline, "launcher never created its receipt"
-        time.sleep(rng.uniform(0, 0.004))
-        interruption = rng.choice((signal.SIGTERM, signal.SIGHUP))
-        process.send_signal(interruption)
-        try:
-            process.wait(timeout=LIFECYCLE_CAP_SECONDS)
-        except subprocess.TimeoutExpired:
-            held.append((attempt, interruption.name))
-            process.kill()
-            process.wait()
-        kill_published(root / "controller.pid")
-    assert held == [], f"{len(held)}/{runs} cancellations held past {LIFECYCLE_CAP_SECONDS} s: {held}"
 
 
 def test_development_signal_exit_cleans_owned_receipt(launcher):

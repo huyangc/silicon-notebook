@@ -416,30 +416,28 @@ JSON 读取方可读取已打开、当前用户所有的普通文件快照，即
 以「已忽略」的状态传给子进程。等待一律以握手结束（按改名发布的 pid 文件，或启动器退出），
 20 s 只作兜底上限。
 
-### 按需开启的压力用例
+### 压测脚本
 
-有些回归落在任何确定性用例都打不中的窗口里。这类用例带专属标记，后端 conftest 在没有
-对应环境变量时把它们反选掉（不是 skip），G1 和 G2 都不跑。改到它守护的代码后，在满载
-机器上手动跑一次。
+有些回归落在任何确定性用例都打不中的窗口里，由 `scripts/` 下的压测脚本守护，而不是
+pytest 用例：已提交的用例一律会被收集，没有任何环境开关能把它从门禁里藏起来。G1 和 G2
+都不跑这些脚本；改到它守护的代码后，在满载机器上手动跑一次。
 
-- `launcher_signal_stress`
-  （`backend/tests/test_extension_service_launchers.py::test_stress_cancellation_next_to_the_controller_fork`）
-  守护伴随服务控制器 fork 附近的两处 macOS `/bin/bash` 3.2 竞态：
-  `extension_services_start` 必须轮询控制器、不得阻塞在 `wait` 上，
-  `extension_services_cleanup` 必须重复发送 TERM。用例在启动器创建回执后 0–4 ms 内
-  打断它，20 s 后仍未退出的启动器即判失败。每个核起一个忙循环后运行：
+- `scripts/stress_launcher_signals.py` 守护伴随服务控制器 fork 附近的两处 macOS
+  `/bin/bash` 3.2 竞态：`extension_services_start` 必须轮询控制器、不得阻塞在 `wait` 上，
+  `extension_services_cleanup` 必须重复发送 TERM。每次尝试在一个假检出目录里起真实启动器
+  （`backend/tests/launcher_checkout_testkit.py`，与启动器用例共用），在启动器创建回执后
+  0–4 ms 内打断它，20 s 后仍未退出即记为挂住：
 
   ```bash
-  SILICON_NOTEBOOK_LAUNCHER_SIGNAL_STRESS=1 PYTHONPATH=backend python -m pytest -n 8 \
-    -m launcher_signal_stress backend/tests/test_extension_service_launchers.py
+  python scripts/stress_launcher_signals.py --load auto
   ```
 
-  共 2 个启动器 × 4 个分片，每个分片各占一个 `xdist_group`。
-  `SILICON_NOTEBOOK_LAUNCHER_SIGNAL_STRESS_RUNS` 设每个分片的尝试次数（默认 1500），
-  `SILICON_NOTEBOOK_LAUNCHER_SIGNAL_STRESS_SEED` 固定随机偏移。每核一个忙循环的满载实测：
-  修复后的启动器 12000 次里挂住 0 次；改回阻塞 `wait` 的启动器 12000 次里挂住 2 次。这一竞态
-  大约每 5000–6000 次命中一次，所以默认一轮约有 85–90% 的把握抓到被改回的阻塞 `wait`；
-  需要更高把握时加大次数或多跑几轮。只要有一次取消被挂住，用例就当场判红。
+  `--load auto` 同时为每个核起一个忙循环。默认 2 个启动器（`--launchers dev.sh,backend.sh`）
+  × 4 个并行分片（`--shards`）× 1500 次（`--runs`），`--seed` 固定随机偏移。退出码 0 表示没有
+  挂住，1 表示有取消被挂住，2 表示用法错误或分片自身失败。`--load auto` 实测：修复后的启动器
+  12000 次里挂住 0 次；改回阻塞 `wait` 的启动器 12000 次里挂住 2 次。这一
+  竞态大约每 5000–6000 次命中一次，所以默认一轮约有 85–90% 的把握抓到被改回的阻塞 `wait`；
+  需要更高把握时加大 `--runs` 或多跑几轮。
 
 ### Python 依赖
 
