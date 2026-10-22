@@ -724,7 +724,8 @@ re-merged in full by its next "update analysis" or rebuild, and then:
 
 Until a library has been re-merged, new uploads keep joining the old merged knowledge objects under the
 old rule (`unified_kg_state.concept_seed_version` stays 1); a placement during which that merge
-publishes is placed again under the new rule. So one library never mixes the two id forms. A library
+publishes is placed again under the new rule — and likewise when a later full merge in the same
+rule keeps one more old seed apart (a rejection translated late), since that changes the ids too. So one library never mixes the two id forms. A library
 created after the upgrade uses the new rule from the start. A deep copy keeps the rule of its source's
 published merge; a copy of a source that was waiting for a rebuild carries no merge and places under
 the new rule.

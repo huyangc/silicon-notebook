@@ -450,6 +450,112 @@ def assert_the_squash_tier_proposes_spelling_variants(repo, monkeypatch) -> None
     assert (capped["total"], capped["kept"]) == (1, 0)
 
 
+def _spelling_pairs(repo, nb: str) -> List[frozenset]:
+    governance = repo._runtime.knowledge_governance
+    return [frozenset((p["canonical_a"], p["canonical_b"]))
+            for p in governance.pending_merges(nb) if p["kind"] == "spelling_variant"]
+
+
+def assert_the_squash_cap_leaves_out_pairs_already_decided(repo, monkeypatch) -> None:
+    """A squash pair a human already rejected never holds a place under the
+    Settings cap: it is left out BEFORE the cap, so the next group reaches the
+    queue (codex #988 P2 — filtered only by the pending refresh, the rejected
+    pair kept the top place and the queue stayed empty forever). Cap 1 with two
+    groups, then cap 2 with three groups (the batch beyond the cap). The names
+    are ones the similarity (ANN) tier never pairs under the test embedder, so
+    every spelling-variant row here is the squash tier's."""
+    governance = repo._runtime.knowledge_governance
+    settings = repo._runtime.knowledge_lifecycle.settings
+    llama = frozenset(("K-llama3 1", "K-llama31"))
+    gpt = frozenset(("K-gpt4 0", "K-gpt40"))
+    phi = frozenset(("K-phi3 5", "K-phi35"))
+
+    monkeypatch.setattr(settings, "kg_merge_squash_candidates_max", 1)
+    nb = notebook(repo, "s1", "s2", "s3", "s4")
+    concepts(repo, nb, "s1", "Llama 3.1", "Llama 3.1")     # the heaviest group ranks first
+    concepts(repo, nb, "s2", "Llama 31")
+    concepts(repo, nb, "s3", "Phi 3.5")
+    concepts(repo, nb, "s4", "Phi 35")
+    rebuild(repo, nb)
+    assert _spelling_pairs(repo, nb) == [llama]
+    [first] = [p for p in governance.pending_merges(nb) if p["kind"] == "spelling_variant"]
+    governance.reject_merge(nb, first["id"])
+    events = capture_events(repo, monkeypatch)
+    rebuild(repo, nb, force=True)
+    assert _spelling_pairs(repo, nb) == [phi]
+    assert [e for e in events if e["kind"] == "kg_merge_squash_candidates_capped"] == []
+
+    monkeypatch.setattr(settings, "kg_merge_squash_candidates_max", 2)
+    nb2 = notebook(repo, "t1", "t2", "t3", "t4", "t5", "t6")
+    concepts(repo, nb2, "t1", "Llama 3.1", "Llama 3.1", "Llama 3.1")
+    concepts(repo, nb2, "t2", "Llama 31")
+    concepts(repo, nb2, "t3", "GPT 4.0", "GPT 4.0")
+    concepts(repo, nb2, "t4", "GPT 40")
+    concepts(repo, nb2, "t5", "Phi 3.5")
+    concepts(repo, nb2, "t6", "Phi 35")
+    events.clear()
+    rebuild(repo, nb2)
+    assert sorted(_spelling_pairs(repo, nb2), key=sorted) == sorted([llama, gpt], key=sorted)
+    [capped] = [e for e in events if e["kind"] == "kg_merge_squash_candidates_capped"]
+    assert (capped["total"], capped["kept"]) == (3, 2)
+    for row in governance.pending_merges(nb2):
+        if row["kind"] == "spelling_variant":
+            governance.reject_merge(nb2, row["id"])
+    events.clear()
+    rebuild(repo, nb2, force=True)
+    assert _spelling_pairs(repo, nb2) == [phi]
+    assert [e for e in events if e["kind"] == "kg_merge_squash_candidates_capped"] == []
+
+
+def assert_new_override_keys_between_placement_and_write_place_again(
+    repo, monkeypatch,
+) -> None:
+    """In a library already in space 2, a later full rebuild can translate a
+    rejection suspended so far and keep one more v1 seed as ``~v1:<seed>`` —
+    new override keys, the space still 2. An incremental placement computed
+    before that is refused under the cluster write lock and redone with the
+    keys published now: the new object lands in the overridden canonical, not
+    in the one the rejection keeps it apart from (codex #988 P2)."""
+    nb = notebook(repo, "s2")
+    concepts(repo, nb, "s2", "Qformer")
+    rebuild(repo, nb)
+    assert published_space(repo, nb) == 2 and canonical_of(repo, nb) == {"Qformer": "K-qformer"}
+    lifecycle = repo._runtime.knowledge_lifecycle
+    real = lifecycle._freeze_new_object_canonicals
+    published: list = []
+
+    def freeze(notebook_id, new_objs):
+        if not published:            # after the placement, before the write
+            published.append(notebook_id)
+            # What that rebuild persists: a space-2 rejection keyed by the
+            # kept v1 seed ("Q-Former" and "Qformer" are not the same thing).
+            write(repo, "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,"
+                        "canonical_b,seed_a,seed_b,score,status,reviewed_by,created_at,"
+                        "updated_at,seed_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                  ("mc-kept-apart", notebook_id, "K-~v1:q former", "K-qformer",
+                   "~v1:q former", "qformer", 0.9, "rejected", "", NOW, NOW, 2))
+        return real(notebook_id, new_objs)
+
+    monkeypatch.setattr(lifecycle, "_freeze_new_object_canonicals", freeze)
+    real_again = lifecycle._place_new_concepts_again
+    placed_again: list = []
+
+    def place_again(notebook_id, new_objs):
+        placed_again.append(notebook_id)
+        return real_again(notebook_id, new_objs)
+
+    monkeypatch.setattr(lifecycle, "_place_new_concepts_again", place_again)
+    fuse(repo, nb, "s1", "Q-Former")
+    assert published == [nb] and published_space(repo, nb) == 2
+    assert placed_again == [nb]
+    assert canonical_of(repo, nb) == {"Qformer": "K-qformer", "Q-Former": "K-~v1:q former"}
+    # With the keys already published and nothing moving, the placement carries
+    # them to the write: no second placement, the overridden canonical again.
+    fuse(repo, nb, "s3", "Q Former")
+    assert placed_again == [nb]
+    assert canonical_of(repo, nb)["Q Former"] == "K-~v1:q former"
+
+
 def assert_duplicate_blocking_follows_the_published_space(repo, monkeypatch) -> None:
     """查重 blocks by the seed of the notebook's PUBLISHED space: "Q-Former" and
     "Qformer" (same definition) are one candidate group only once the library
@@ -615,5 +721,8 @@ SCENARIOS = {
     "catchup_published_space": assert_catchup_places_window_members_in_the_published_space,
     "canonical_keyed_row_translated": assert_a_decision_keyed_by_canonical_ids_is_translated,
     "squash_tier": assert_the_squash_tier_proposes_spelling_variants,
+    "squash_cap_skips_decided": assert_the_squash_cap_leaves_out_pairs_already_decided,
+    "override_moved_mid_placement": (
+        assert_new_override_keys_between_placement_and_write_place_again),
     "duplicates_follow_space": assert_duplicate_blocking_follows_the_published_space,
 }

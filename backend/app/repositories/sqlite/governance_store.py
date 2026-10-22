@@ -38,7 +38,7 @@ from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER
 from app.repositories.sqlite.promotion_provenance_store import (
     materialize_promotion_evidence,
 )
-from app.domain.kg_merge_seed import ConceptSeedSpaceMoved, check_concept_seed_version
+from app.domain.kg_merge_seed import check_concept_seed_version, check_placement_seed_space
 from app.domain.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
     USABLE_STATUSES,
@@ -732,15 +732,19 @@ class GovernanceStore:
         now: str,
         *,
         concept_seed_version: "int | None" = None,
+        concept_seed_override: frozenset = frozenset(),
     ) -> int:
         """Insert cluster member rows, skipping member ids already present in
         the (notebook, type) slice — the append_clusters idempotency contract.
 
-        ``concept_seed_version`` (incremental placement only): the seed space
-        ``rows`` were placed in. It is compared, under the same lock as the
-        generation pointer, with the space published now; a full rebuild that
-        published another space in between raises ``ConceptSeedSpaceMoved``
-        before any row is written, and the caller places again (S1).
+        ``concept_seed_version`` / ``concept_seed_override`` (incremental
+        placement only): the placement identity ``rows`` were computed in — the
+        seed space and its override keys. It is compared, under the same lock
+        as the generation pointer, with the one published now; a full rebuild
+        that published another space, or the same space with other override
+        keys (a suspended rejection translated later), raises
+        ``ConceptSeedSpaceMoved`` before any row is written, and the caller
+        places again (S1).
         After delete_clusters in the same transaction the existing set is
         empty, so the write_clusters path inserts every row unchanged.
 
@@ -770,9 +774,9 @@ class GovernanceStore:
         now = datetime.now().astimezone().isoformat(timespec="microseconds")
         generation = self._published_cluster_generation(connection, notebook_id)
         if concept_seed_version is not None:
-            published = published_concept_seed_version_on(connection, notebook_id)
-            if published != concept_seed_version:
-                raise ConceptSeedSpaceMoved(notebook_id, concept_seed_version, published)
+            check_placement_seed_space(
+                notebook_id, (concept_seed_version, concept_seed_override),
+                published_concept_seed_space_on(connection, notebook_id))
         existing = self._existing_cluster_members(
             connection, notebook_id, object_type, rows, generation
         )
