@@ -9,11 +9,15 @@
 // `overflow-wrap: anywhere`,不是元凶(Browser pane 实测:注入 minmax(0, 1fr) 后三个宽度
 // 都是 scrollWidth == clientWidth)。
 //
-// 外壳列一旦按视口宽度排版,工具条和窄屏顶栏就第一次真正「放不下」,于是另外两处一直被
-// 1102px 掩盖的版式问题露了出来,本守卫一并钉住:
-//   - 761~850px(以及搜索框展开时)工具条一行放不下,按钮被挤到字折行(「全/部」「最/近」);
-//   - ≤760px 顶栏本来就设计成可换行,但外壳第一行定死 56px,换到第二行的入口溢出顶栏、
-//     压在页面上(群组页上直接压住「返回主页」和「新建群组」)。
+// 外壳列按视口宽度排版后,另外两处版式要一并钉住:
+//   - 笔记本列表页的工具条:以前被撑到 1102px 宽,从没遇到「放不下」;现在 761~850px
+//     (以及搜索框展开时)一行放不下,按钮会被挤到字折行(「全/部」「最/近」);
+//   - ≤760px 的顶栏本来就设计成可换行,但外壳第一行定死 56px,换到第二行的入口溢出顶栏、
+//     压在页面上。这条与笔记本列表无关:群组页、私有记忆页在修复前的 375 宽下就已经
+//     溢出(群组页上压住「返回主页」和「新建群组」),只有笔记本列表页因整页被撑宽、
+//     顶栏不换行才没露出来;
+//   - 列表视图的列下限之和(≤1100 时 777px)在 768~840 宽超出内容区,表格必须在自己内部
+//     横向滚动,不能再把整页撑出横向滚动条。
 //
 // 判据全部是语义的(PostCSS 规则/声明),不含行号;jsdom 不做 grid/flex 布局,量出来的
 // rect 恒为 0,所以这些约束只能在样式表里钉。覆盖边界:本文件只证明形态,像素结果由
@@ -64,19 +68,50 @@ test(".app 的唯一一列写成 minmax(0, 1fr),不让子项的 min-content 撑�
   );
 });
 
+/** 选择器的主语(最后一个复合选择器)是否带 `.app` 类:`.app`、`.app.workspace-mode`、
+ *  `body > .app` 都算;`.app .topbar` 的主语是 `.topbar`,不算。 */
+function subjectIsApp(selector) {
+  const subject = normalize(selector).split(/\s*[>+~]\s*|\s+/).pop();
+  return /\.app(?![\w-])/.test(subject);
+}
+
+/** 简写 `grid-template` / `grid` 的列部分(斜杠之后);没有斜杠就是没写列,等于把列重置回 none。 */
+function shorthandColumns(value) {
+  const slash = normalize(value).indexOf("/");
+  return slash === -1 ? "" : normalize(value).slice(slash + 1).trim();
+}
+
 test("任何作用域里都不许把 .app 的列改回不以 0 为下限的写法", () => {
   // 例如在某个 @media 里写 `grid-template-columns: 1fr` —— `1fr` 的下限是 auto,
-  // 等于把同一个 bug 换个断点放回来。
+  // 等于把同一个 bug 换个断点放回来。简写同样会重置列:`grid-template: 56px 1fr`
+  // 没有斜杠,列被重置成 none(隐式 auto),守卫必须一并拦住,不能只看长写。
+  let checked = 0;
   stylesheet.walkRules((rule) => {
-    if (!rule.selectors.map(normalize).some((one) => one === ".app" || one.startsWith(".app."))) return;
+    if (!rule.selectors.some(subjectIsApp)) return;
+    const where = `${rule.selector}${scopeOf(rule) ? ` @media ${scopeOf(rule)}` : ""}`;
     rule.walkDecls("grid-template-columns", (decl) => {
+      checked += 1;
+      assert.match(normalize(decl.value), /^minmax\(0(?:px)?, /, `${where} 的列没有 0 下限`);
+    });
+    rule.walkDecls(/^(?:grid-template|grid)$/, (decl) => {
+      checked += 1;
       assert.match(
-        normalize(decl.value),
+        shorthandColumns(decl.value),
         /^minmax\(0(?:px)?, /,
-        `${rule.selector}${scopeOf(rule) ? ` @media ${scopeOf(rule)}` : ""} 的列没有 0 下限`,
+        `${where} 的简写 ${decl.prop}: ${decl.value} 把列重置成了没有 0 下限的写法`,
       );
     });
   });
+  assert.ok(checked >= 1, "一条 .app 的列声明都没扫到,选择器匹配失效");
+});
+
+test("subjectIsApp 认复合选择器,不误伤 .app 的后代", () => {
+  assert.equal(subjectIsApp(".app"), true);
+  assert.equal(subjectIsApp(".app.workspace-mode"), true);
+  assert.equal(subjectIsApp("body > .app"), true);
+  assert.equal(subjectIsApp("div.app"), true);
+  assert.equal(subjectIsApp(".app .topbar"), false);
+  assert.equal(subjectIsApp(".app-shell"), false);
 });
 
 test("不靠在外壳上裁掉溢出来掩盖问题", () => {
@@ -99,7 +134,7 @@ test("工具条放不下一行时整组换行,而不是把按钮挤到字折行"
   assert.equal(declared(".library-toolbar", "flex-wrap"), "wrap");
   // flex-basis 为 0:换行判定按动作组的 min-content(搜索框取下限),1024 宽展开搜索
   // 时仍留在同一行;同一行时占满剩余宽度、按钮贴右,与原先 space-between 观感一致。
-  assert.equal(declared(".library-actions", "flex"), "1 1 0");
+  assert.match(declared(".library-actions", "flex") ?? "", /^1 1 0(?:px|%)?$/, "flex-basis 必须是 0 的等价写法");
   assert.equal(declared(".library-actions", "justify-content"), "flex-end");
   assert.equal(declared(".library-toolbar .tab", "white-space"), "nowrap");
   assert.equal(declared(".library-actions button", "white-space"), "nowrap");
@@ -121,4 +156,21 @@ test("窄屏顶栏换行时外壳第一行跟着长高,入口不溢出顶栏", (
   assert.match(rows, /^minmax\(56px, auto\) /, "第一行必须能随顶栏换行长高");
   // 工作区不显示顶栏,它的单行定义必须仍然压过上面那条(两类选择器 > 一类)。
   assert.equal(declared(".app.workspace-mode", "grid-template-rows"), "1fr");
+});
+
+test("列表视图在任何宽度下都在自身内部横向滚动,不撑宽整页", () => {
+  // 列表行的列下限之和(≤1100 时 777px)在 768~840 宽超出内容区。`overflow-x: auto`
+  // 必须写在基础规则上(对所有宽度生效),不能只写在 ≤760 的 @media 里,否则 768~840 宽
+  // 整页又被撑出横向滚动条(评审探针量到 scrollWidth=801 / clientWidth=753)。
+  assert.equal(declared(".notebook-list", "overflow-x"), "auto");
+  stylesheet.walkRules((rule) => {
+    if (!rule.selectors.map(normalize).includes(".notebook-list")) return;
+    rule.walkDecls(/^overflow(?:-x)?$/, (decl) => {
+      assert.doesNotMatch(
+        normalize(decl.value),
+        /\bvisible\b/,
+        `${rule.selector}${scopeOf(rule) ? ` @media ${scopeOf(rule)}` : ""} 把列表的滚动关掉了`,
+      );
+    });
+  });
 });
