@@ -139,8 +139,9 @@ for (const scenario of golden.scenarios.filter((item) => item.turns <= SHARE_SNA
       current: { sharedCount: counted.current.sharedCount, newCount: counted.current.newCount, imageCount: counted.current.imageCount },
       update: { imageCount: counted.update.imageCount, newImageCount: counted.update.newImageCount },
     }, legacy);
-    // 普通长度的会话没有「更早未包含」。
+    // 普通长度的会话没有「更早未包含」，也就不可能有「这条回答已滑出公开页」。
     assert.equal(counted.current.earlierCount, 0);
+    assert.equal(counted.boundary.answerOmitted, false);
     assert.equal(counted.update.earlierCount, 0);
   });
 }
@@ -179,4 +180,14 @@ test("readServerShareCounts 拒收形状不对、负数、自相矛盾的回执"
 test("更早未包含的两句按现有界面词汇写，并给出确数", () => {
   assert.equal(shareEarlierSentence(120), "公开页只显示最近 500 轮，更早的 120 轮未包含。");
   assert.equal(shareUpdateEarlierSentence(3), "更新后公开页只显示最近 500 轮，更早的 3 轮未包含。");
+});
+
+test("滑出公开页只按窗口判：恰好越过窗口下沿的那一条是 omitted，再往后一条仍在页上", () => {
+  for (const [name, omitted] of [["one_past_the_page_first_answer_slid_off", true], ["one_past_the_page_second_answer_still_on", false]]) {
+    const scenario = golden.scenarios.find((item) => item.name === name);
+    const { turns, through, watermarkId, watermarkAt } = expand(scenario);
+    const counted = shareCountsFromTurns(turns, through, watermarkId, watermarkAt);
+    assert.equal(counted.boundary.watermarkAhead, true, name);
+    assert.equal(counted.boundary.answerOmitted, omitted, name);
+  }
 });

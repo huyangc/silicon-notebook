@@ -4167,7 +4167,7 @@
           "type": "object"
         },
         "ConversationShareCounts": {
-          "description": "The share dialog's exact numbers for one GLOBAL conversation\n(``GET /global-ask/conversations/{id}/share/counts``), counted by the\nserver over the same windows the public page shows\n(``app/domain/share_counts.py``).\n\n``total_turns``: completed turns. ``through_id``: the boundary turn (the\nasked ``through_id``, or the newest; empty when the asked one does not\nresolve). ``boundary_index``: its 0-based position (-1 when none was\nasked, or it does not resolve -- ``boundary_unresolved``). Against the\nwatermark the dialog passed: ``watermark_ahead`` (the link already covers\n``ahead_count`` more turns), ``watermark_behind``, ``watermark_unknown``\n(the watermark turn no longer resolves). What the link holds now (or\nsharing would publish while unshared): ``new_turns`` after the watermark\nnot included, ``published_turns`` on the page, ``earlier_turns`` older\nones the page leaves out, ``image_count`` attached images on those turns.\nWhat sharing / updating publishes: ``update_image_count``,\n``update_new_image_count`` (on turns the link does not show yet) and\n``update_earlier_turns``. Image counts are each turn's anchors' and\ncitations' images, deduplicated per turn -- an upper bound on the page.\n``watermark_id`` / ``watermark_at``: the watermark these numbers were\ncounted against (the one asked for, or the stored one when none was).",
+          "description": "The share dialog's exact numbers for one GLOBAL conversation\n(``GET /global-ask/conversations/{id}/share/counts``), counted by the\nserver over the same windows the public page shows\n(``app/domain/share_counts.py``).\n\n``total_turns``: completed turns. ``through_id``: the boundary turn (the\nasked ``through_id``, or the newest; empty when the asked one does not\nresolve). ``boundary_index``: its 0-based position (-1 when none was\nasked, or it does not resolve -- ``boundary_unresolved``). Against the\nwatermark the dialog passed: ``watermark_ahead`` (the link already covers\n``ahead_count`` more turns), ``boundary_omitted`` (ahead, and the asked\nanswer has slid off the page: the page shows only the newest\n``MAX_TURNS`` turns up to the watermark), ``watermark_behind``, ``watermark_unknown``\n(the watermark turn no longer resolves). What the link holds now (or\nsharing would publish while unshared): ``new_turns`` after the watermark\nnot included, ``published_turns`` on the page, ``earlier_turns`` older\nones the page leaves out, ``image_count`` attached images on those turns.\nWhat sharing / updating publishes: ``update_image_count``,\n``update_new_image_count`` (on turns the link does not show yet) and\n``update_earlier_turns``. Image counts are each turn's anchors' and\ncitations' images, deduplicated per turn -- an upper bound on the page.\n``watermark_id`` / ``watermark_at``: the watermark these numbers were\ncounted against (the one asked for, or the stored one when none was).",
           "properties": {
             "ahead_count": {
               "title": "Ahead Count",
@@ -4176,6 +4176,10 @@
             "boundary_index": {
               "title": "Boundary Index",
               "type": "integer"
+            },
+            "boundary_omitted": {
+              "title": "Boundary Omitted",
+              "type": "boolean"
             },
             "boundary_unresolved": {
               "title": "Boundary Unresolved",
@@ -4245,6 +4249,7 @@
             "boundary_unresolved",
             "watermark_ahead",
             "ahead_count",
+            "boundary_omitted",
             "watermark_behind",
             "watermark_unknown",
             "new_turns",

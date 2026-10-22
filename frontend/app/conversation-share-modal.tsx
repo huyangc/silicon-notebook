@@ -41,6 +41,7 @@ import { useCopyResult } from "./copy-result.ts";
 import { ShareDisclosureRequired } from "./share-failure.ts";
 import {
   SHARE_DISCLOSURE_COUNTS_ERROR,
+  SHARE_SNAPSHOT_MAX_TURNS,
   SHARE_UPDATE_BOUNDED_COUNTS_ERROR,
   SHARE_UPDATE_COUNTS_ERROR,
   countsAfterPublishing,
@@ -93,7 +94,7 @@ const UNBOUNDED_SCOPE_COPY =
 /** 边界模式（分享到某条回答为止）按 `ShareScopeState` 分五句。每一句描述的都是**当前**
  *  链接里有什么——只有 `unshared` 那句才是对「按下去会发布什么」的承诺，因为那时还没有
  *  链接可复制。三条评审意见（#530 R1 P1、R2 P1、R2 P2）全部出在把这五种情形写成一句。 */
-const BOUNDED_SCOPE_COPY: Record<ReturnType<typeof shareScopeState>, string> = {
+const BOUNDED_SCOPE_COPY: Record<Exclude<ReturnType<typeof shareScopeState>, "omitted">, string> = {
   unshared:
     "发布成一条免登录的只读快照，只包含这条回答以及它之前的问答。之后的问答不会出现在链接里。撤销即刻失效。",
   at: "链接的内容就到这条回答为止，它之后的问答不在里面。撤销即刻失效。",
@@ -104,6 +105,12 @@ const BOUNDED_SCOPE_COPY: Record<ReturnType<typeof shareScopeState>, string> = {
   unknown:
     "无法确认当前链接的范围——它可能已在别处被推进到这里看不到的轮次。现在复制发出去的内容可能多于这条回答，请刷新后重新查看。",
 };
+
+/** 第六态 `omitted`：链接覆盖的范围越过了这条回答，但公开页只显示到水位为止最近的 500 轮，
+ *  这条回答落在没有包含的更早轮次里——链接**此刻没有**它（codex #985 R2 P2）。`earlier` 是
+ *  公开页没有包含的更早轮数（确数）。 */
+const omittedScopeCopy = (earlier: number): string =>
+  `这条回答不在链接里：公开页只显示最近 ${SHARE_SNAPSHOT_MAX_TURNS} 轮，这条回答在没有包含的更早 ${earlier} 轮里。现在复制发出去的快照不含它。撤销即刻失效。`;
 
 export function ConversationShareModal({
   api,
@@ -608,7 +615,9 @@ export function ConversationShareModal({
                   而不是「按下按钮会发布什么」——用户读完这句就复制发出去了，纠正写在下面
                   没用（codex #530 R1 P1 / R2 P2）。五个状态各一句，不共用。 */}
               <p className="tool-hint" style={{ margin: 0 }}>
-                {bounded ? BOUNDED_SCOPE_COPY[scope] : UNBOUNDED_SCOPE_COPY}
+                {!bounded ? UNBOUNDED_SCOPE_COPY
+                  : scope === "omitted" ? omittedScopeCopy(turnDisclosure.earlierCount)
+                    : BOUNDED_SCOPE_COPY[scope]}
               </p>
 
               {shared ? (<>
@@ -634,7 +643,12 @@ export function ConversationShareModal({
                     服务端做不到(只会换回一句"这条会话已有变化"的 409,而实际什么都没变),
                     所以这一支**不给发布按钮**,改为说清现状与唯一可行的出路:先撤销、再从
                     这条回答重新分享(撤销会清空水位,重发即可钉在更早的边界上)。 */}
-                {boundary.watermarkAhead && (
+                {scope === "omitted" && (
+                  <p className="tool-hint" style={{ margin: 0 }}>
+                    公开范围只能往后推、不能收回；要让链接包含这条回答，请先「撤销分享」，再从这条回答重新分享。
+                  </p>
+                )}
+                {scope === "ahead" && (
                   <p className="tool-hint" style={{ margin: 0 }}>
                     这条回答已经在链接里了——当前链接还多包含它之后的 {boundary.aheadCount} 轮。
                     公开范围只能往后推、不能收回；要缩小到这一条，请先「撤销分享」，再从这条回答重新分享。

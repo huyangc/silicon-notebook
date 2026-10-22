@@ -1499,7 +1499,9 @@ class ConversationShareCounts(BaseModel):
     resolve). ``boundary_index``: its 0-based position (-1 when none was
     asked, or it does not resolve -- ``boundary_unresolved``). Against the
     watermark the dialog passed: ``watermark_ahead`` (the link already covers
-    ``ahead_count`` more turns), ``watermark_behind``, ``watermark_unknown``
+    ``ahead_count`` more turns), ``boundary_omitted`` (ahead, and the asked
+    answer has slid off the page: the page shows only the newest
+    ``MAX_TURNS`` turns up to the watermark), ``watermark_behind``, ``watermark_unknown``
     (the watermark turn no longer resolves). What the link holds now (or
     sharing would publish while unshared): ``new_turns`` after the watermark
     not included, ``published_turns`` on the page, ``earlier_turns`` older
@@ -1518,6 +1520,7 @@ class ConversationShareCounts(BaseModel):
     boundary_unresolved: bool
     watermark_ahead: bool
     ahead_count: int
+    boundary_omitted: bool
     watermark_behind: bool
     watermark_unknown: bool
     new_turns: int
