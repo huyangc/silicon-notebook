@@ -30,6 +30,7 @@ import pytest
 
 from app.domain.mount_edges import (
     MASKED_MOUNT_NAME,
+    MOUNT_BASE_DELETED_REASON,
     MOUNT_BASE_UNAVAILABLE_REASON,
     MOUNT_OWN_PENDING_DELETE_REASON,
 )
@@ -263,28 +264,45 @@ def case_cancel_restores_everything(world: World) -> None:
     assert store.cancel_pending(world.doomed, now=T0) == "already_live"
 
 
-def _mount(world: World, notebook_id: str, base_id: str, by: Any) -> Callable[[], list]:
+def _mount(world: World, notebook_id: str, base_id: str, by: Any) -> Callable[..., list]:
     world.sql.write(
         "INSERT INTO notebook_bases (notebook_id,base_notebook_id,created_at,created_by) "
         "VALUES (?,?,?,?)",
         (notebook_id, base_id, iso(T0), by.id),
     )
     store = world.runtime.notebook_store
-    return lambda: [
+    return lambda viewer: [
         (edge["name"], edge["active"], edge["inactive_reason"])
-        for edge in store.list_mount_edges_for_notebook(notebook_id)
+        for edge in store.list_mount_edges_for_notebook(notebook_id, viewer.id)
     ]
 
 
+def _group_admin_of(world: World, notebook_id: str, admin: Any) -> None:
+    """``admin`` becomes a group admin holding an admin grant on ``notebook_id``."""
+    groups = world.runtime.groups
+    group = groups.create_group(
+        name="管理组", kind="project", description="", created_by=world.owner.id
+    )["id"]
+    groups.upsert_member(group, admin.id, role="admin", added_by=world.owner.id)
+    groups.create_grant(
+        notebook_id, principal_type="group", principal_id=group, role="admin",
+        created_by=world.owner.id, admin_user_id=world.owner.id,
+    )
+
+
 def case_my_mount_of_my_deleted_notebook_says_cancel_brings_it_back(world: World) -> None:
-    """The mounting owner deleted the mounted notebook themselves: the edge
-    says so and names the way back, under the real name."""
+    """The mounted notebook's own owner looks at a mount of it in its window:
+    the edge says so and names the way back, under the real name. A group
+    admin of the mounting notebook looking at the same edge reads the neutral
+    copy -- they did not delete it and cannot cancel it."""
+    _group_admin_of(world, world.owner_target, world.bystander)
     edges = _mount(world, world.owner_target, world.doomed, world.owner)
-    assert edges() == [("将被删除", True, "")]
+    assert edges(world.owner) == [("将被删除", True, "")]
     world.request()
-    assert edges() == [("将被删除", False, MOUNT_OWN_PENDING_DELETE_REASON)]
+    assert edges(world.owner) == [("将被删除", False, MOUNT_OWN_PENDING_DELETE_REASON)]
+    assert edges(world.bystander) == [("将被删除", False, MOUNT_BASE_UNAVAILABLE_REASON)]
     world.runtime.notebook_delete_jobs.cancel_pending(world.doomed, now=T0)
-    assert edges() == [("将被删除", True, "")]
+    assert edges(world.owner) == [("将被删除", True, "")]
 
 
 def case_a_public_library_deleted_by_its_owner_is_only_unavailable(world: World) -> None:
@@ -293,11 +311,23 @@ def case_a_public_library_deleted_by_its_owner_is_only_unavailable(world: World)
     stays masked; a cancel brings the edge back whole."""
     world.sql.write("UPDATE notebooks SET tier='base' WHERE id=?", (world.doomed,))
     edges = _mount(world, world.member_target, world.doomed, world.member)
-    assert edges() == [("将被删除", True, "")]
+    assert edges(world.member) == [("将被删除", True, "")]
     world.request()
-    assert edges() == [(MASKED_MOUNT_NAME, False, MOUNT_BASE_UNAVAILABLE_REASON)]
+    assert edges(world.member) == [(MASKED_MOUNT_NAME, False, MOUNT_BASE_UNAVAILABLE_REASON)]
     world.runtime.notebook_delete_jobs.cancel_pending(world.doomed, now=T0)
-    assert edges() == [("将被删除", True, "")]
+    assert edges(world.member) == [("将被删除", True, "")]
+
+
+def case_a_mounted_library_being_deleted_says_it_was_deleted(world: World) -> None:
+    """Past the window (``'deleting'``) the edge states the fact -- deleted --
+    for everyone, its owner included; not "temporarily unavailable"."""
+    world.sql.write("UPDATE notebooks SET tier='base' WHERE id=?", (world.doomed,))
+    mine = _mount(world, world.owner_target, world.doomed, world.owner)
+    theirs = _mount(world, world.member_target, world.doomed, world.member)
+    world.request()
+    world.runtime.notebook_delete_jobs.promote_due_pending(world.doomed, now=DEADLINE)
+    assert mine(world.owner) == [("将被删除", False, MOUNT_BASE_DELETED_REASON)]
+    assert theirs(world.member) == [(MASKED_MOUNT_NAME, False, MOUNT_BASE_DELETED_REASON)]
 
 
 def case_cancel_restores_draft_when_nothing_was_recorded(world: World) -> None:

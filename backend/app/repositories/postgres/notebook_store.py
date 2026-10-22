@@ -167,9 +167,12 @@ class NotebookStore:
         return [notebook_id for notebook_id, _tier in pairs], dict(pairs)
 
     @staticmethod
-    def list_mount_edges(connection, notebook_id: str) -> list[dict]:
+    def list_mount_edges(
+        connection, notebook_id: str, viewer_id: str | None = None
+    ) -> list[dict]:
         rows = connection.execute(
             "SELECT b.id AS id,b.name AS name,b.tier AS tier,b.status AS base_status,"
+            "b.created_by AS base_owner,"
             + _MOUNT_VALID_EXPR
             + " AS ok,"
             + _MOUNT_GATE_CLOSED_EXPR
@@ -181,11 +184,13 @@ class NotebookStore:
             (notebook_id,),
         ).fetchall()
         # 原因与名字可见性在 app/domain/mount_edges.py,两个后端共用。
-        return [mount_edge_view(row) for row in rows]
+        return [mount_edge_view(row, viewer_id) for row in rows]
 
-    def list_mount_edges_for_notebook(self, notebook_id: str) -> list[dict]:
+    def list_mount_edges_for_notebook(
+        self, notebook_id: str, viewer_id: str | None = None
+    ) -> list[dict]:
         with self.database.connect() as connection:
-            return self.list_mount_edges(connection, notebook_id)
+            return self.list_mount_edges(connection, notebook_id, viewer_id)
 
     @staticmethod
     def mounted_by_count(connection, notebook_id: str) -> int:

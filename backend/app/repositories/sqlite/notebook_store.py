@@ -149,7 +149,9 @@ class NotebookStore:
         return [nb_id for nb_id, _ in pairs], dict(pairs)
 
     @staticmethod
-    def list_mount_edges(db: sqlite3.Connection, notebook_id: str) -> list[dict]:
+    def list_mount_edges(
+        db: sqlite3.Connection, notebook_id: str, viewer_id: str | None = None
+    ) -> list[dict]:
         """全部挂载边(含失效的)。失效边保留展示 + 置灰,不能假装它还在工作。
 
         失效边如果不属于本笔记本(notebook_id)的 owner,名字一律遮蔽:挂载时
@@ -160,7 +162,7 @@ class NotebookStore:
         因为库主本就看得到自己的库,没有泄露可言。"""
         rows = db.execute(
             "SELECT b.id AS id, b.name AS name, b.tier AS tier, "
-            "b.status AS base_status, "
+            "b.status AS base_status, b.created_by AS base_owner, "
             + MOUNT_VALID_EXPR + " AS ok, "
             + MOUNT_GATE_CLOSED_EXPR + " AS gate_closed, "
             + MOUNT_BASE_NOT_LIVE_EXPR + " AS base_not_live, "
@@ -169,12 +171,15 @@ class NotebookStore:
             (notebook_id,),
         ).fetchall()
         # 原因与名字可见性在 app/domain/mount_edges.py,两个后端共用。
-        return [mount_edge_view(row) for row in rows]
+        return [mount_edge_view(row, viewer_id) for row in rows]
 
-    def list_mount_edges_for_notebook(self, notebook_id: str) -> list[dict]:
-        """self-connecting 版 list_mount_edges —— facade 一跳委托用(不外传 db)。"""
+    def list_mount_edges_for_notebook(
+        self, notebook_id: str, viewer_id: str | None = None
+    ) -> list[dict]:
+        """self-connecting 版 list_mount_edges —— facade 一跳委托用(不外传 db)。
+        `viewer_id` 是谁在看:失效原因按查看者给(见 app/domain/mount_edges.py)。"""
         with self.database.connect() as db:
-            return self.list_mount_edges(db, notebook_id)
+            return self.list_mount_edges(db, notebook_id, viewer_id)
 
     @staticmethod
     def mounted_by_count(db: sqlite3.Connection, notebook_id: str) -> int:

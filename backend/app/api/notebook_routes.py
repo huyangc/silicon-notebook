@@ -295,7 +295,9 @@ def set_notebook_tier(notebook_id: str, payload: SetTierRequest, user: UserProfi
 
 @router.get("/notebooks/{notebook_id}/bases", response_model=List[MountedBase],
             dependencies=[Depends(require_notebook_capability("notebook:configure"))])
-def list_notebook_bases_route(notebook_id: str) -> List[MountedBase]:
+def list_notebook_bases_route(
+    notebook_id: str, user: UserProfile = Depends(get_current_user),
+) -> List[MountedBase]:
     """本 notebook 挂载的参考库。含 active=False 的失效边(被挂库易主 / 公共库被
     降级),前端置灰展示——边保留是为了对方恢复后自动生效。
 
@@ -303,7 +305,10 @@ def list_notebook_bases_route(notebook_id: str) -> List[MountedBase]:
     跟着 PUT 一起归到 notebook:mount:它答的是「这本库此刻挂了什么」,镜像上照样要
     显示得出来。挂载配置的**写**与只对写有意义的候选/影响面查询才归 notebook:mount
     (见 deps.py 两张表上方的注释)。"""
-    return [MountedBase(**edge) for edge in repository().list_notebook_bases(notebook_id)]
+    return [
+        MountedBase(**edge)
+        for edge in repository().list_notebook_bases(notebook_id, viewer_id=user.id)
+    ]
 
 
 @router.put("/notebooks/{notebook_id}/bases", response_model=List[MountedBase],
@@ -339,7 +344,10 @@ def set_notebook_bases_route(
     if any(nb_id not in allowed for nb_id in wanted):
         raise user_error(400, "选择里包含不能作为参考库的知识库")
     repo.replace_notebook_bases(notebook_id, wanted, user.id)
-    return [MountedBase(**edge) for edge in repo.list_notebook_bases(notebook_id)]
+    return [
+        MountedBase(**edge)
+        for edge in repo.list_notebook_bases(notebook_id, viewer_id=user.id)
+    ]
 
 
 @router.get("/notebooks/{notebook_id}/mountable", response_model=List[MountableNotebook],
