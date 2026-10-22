@@ -104,17 +104,27 @@ class MemoryRetriever:
             vector_limit=self.VECTOR_CANDIDATES,
             phrase_queries=quoted_phrases(clean_query),
         )
-        try:
-            query_vector = self.embedder.embed_query(candidate_query)
-        except Exception:
-            query_vector = None
+        # The query is embedded only when some candidate can use the vector.
+        # A row takes part in vector scoring exactly when its stored vector
+        # decodes to something other than None (``has_vector`` below), so with
+        # no such row -- no Memory at all, the common case, or only entries
+        # whose embedding is still pending/failed -- every score is the lexical
+        # one whatever the query vector is, and the embed round trip (serial,
+        # ahead of everything the Ask streams next) would be paid for nothing.
+        # The test is ``is not None``, not truthiness: a decoded empty vector
+        # still flips ``has_vector`` and so the fusion denominator.
+        decoded = [(row["record"], decode_vector(row.get("vector"))) for row in rows]
+        query_vector = None
+        if any(vector is not None for _, vector in decoded):
+            try:
+                query_vector = self.embedder.embed_query(candidate_query)
+            except Exception:
+                query_vector = None
         basis = keyword_basis(clean_query)
         hits: list[MemoryHit] = []
-        for row in rows:
-            item = row["record"]
+        for item, vector in decoded:
             text = f"{item.title}\n{item.content_md}\n{' '.join(item.tags)}"
             lexical = basis.coverage(set(_tokens(text)), text)
-            vector = decode_vector(row.get("vector"))
             has_vector = query_vector is not None and vector is not None
             semantic = cosine(query_vector, vector.tolist()) if has_vector else 0.0
             # Eligibility is decided from relevance signals before authority is

@@ -898,17 +898,19 @@ def _between(obs: Observation, first: str, last: str) -> list[str]:
     return names[names.index(first) + 1:names.index(last)]
 
 
-#: How often a plain run embeds the research question in total. One more than
-#: the memo allows: the Memory recall runs before the run's embedding memo
-#: exists and so embeds it again. That extra embed is known and tracked as a
-#: separate optimisation; when it is fixed, this becomes 1 -- the one place to
-#: change.
-QUESTION_EMBEDS_PER_RUN = 2
+#: How often a plain run embeds the research question in total. The scenarios
+#: that pin it (``answer_sync``, ``direct_entry_without_run``) run in
+#: ``library_world``, where the asker has no Memory: the Memory recall, which
+#: runs before the run's embedding memo exists and embeds outside it, finds no
+#: candidate with a vector and so does not embed at all -- only the retrieval
+#: stage embeds the question, once, inside the memo. A world with a vector-
+#: bearing Memory of the asker would add that recall's own embed (2).
+QUESTION_EMBEDS_PER_RUN = 1
 
 
 def _assert_embedded_once_in_memo(obs: Observation) -> None:
-    """Inside the memo window (everything but the Memory recall) every query
-    text is embedded once; the research question's total is pinned apart."""
+    """Every query text is embedded once inside the memo window; the research
+    question's total is pinned apart (``QUESTION_EMBEDS_PER_RUN``)."""
     embedded = collections.Counter(obs.embedded())
     assert embedded[QUESTION] == QUESTION_EMBEDS_PER_RUN, embedded
     in_memo = embedded - collections.Counter({QUESTION: QUESTION_EMBEDS_PER_RUN - 1})
