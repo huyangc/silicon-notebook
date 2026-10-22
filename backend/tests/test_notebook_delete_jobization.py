@@ -33,7 +33,6 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.repositories.ports import NotebookAlreadyDeletingError
-from app.repositories.sqlite import notebook_delete_job_store as ndjs
 from app.services import background_jobs
 from app.services.sqlite_repository import SQLiteRepository
 
