@@ -208,8 +208,8 @@ Package 的插损、驱动架构等参数，答案称第 5 章「未解析」。
 
 ### 3.7 向量章节线索
 
-- **打分**：一个大纲出现的分数 = 该节范围内 chunk 向量与本 run 查询向量（问题原文 + 已确认方向检索词 +
-  已执行子查询）余弦相似度的最大值。
+- **打分**：一个大纲出现的分数 = 该节范围内 chunk 向量与本 run 查询向量（问题原文 + 已执行的查询，
+  含跑过的已确认方向；未执行的方向不参与，免得为没贡献过证据的文本多付嵌入）余弦相似度的最大值。
   - 查询向量走 `memoized_query_embedding`（本 run 里大多已算过，命中缓存）。
   - chunk 向量：笔记本矩阵已在缓存里时（`_vector_matrix_warm` 只窥视、不触发加载）直接按 id 取行；
     否则 `vector_rows_for_ids` 读该来源大纲涉及的 chunk（≤ `REASONING_SECTION_OUTLINE_MAX_ROWS`），
@@ -242,10 +242,14 @@ Package 的插损、驱动架构等参数，答案称第 5 章「未解析」。
   只在账目里留一行「已浏览：《标题》 under 5.7」。列出的地址进入 `state.surfaced_sections`。
 - 停滞判定：本轮有大纲交付时置 `section_listing_delivered_this_turn`，**保持** stale 级别（不重置也不
   推进），沿用 `RR:8104-8109` 无证据交付的先例。
-- 预算：每 run 上限 `REASONING_MAX_SECTION_BROWSES`；同一 `(source, under, query)` 重复 → skip
-  `section_browse_repeat`。
+- 预算：每 run 上限 `REASONING_MAX_SECTION_BROWSES`（用完后动作不进 enum、不出说明）；同一
+  `(source, under, query)` 重复 → **不 skip**：零 I/O 地把缓存目录放回摘要，记一条 `browse_sections`
+  步（detail `repeat: true`），不扣次数、不持平 stale。
+- `under` 下没有条目 → skip `section_under_empty`（不扣次数，不覆盖同源上一份目录）。
+- 读大纲或按 query 读向量失败 → skip `section_browse_failed`（扣一次，detail 带异常类名；`AskCancelled`
+  与 `RetrievalControlError` 照抛），整次提问不作废。
 - skip 原因码：`section_nav_disabled`、`section_browse_cap`、`section_source_unresolved`、
-  `section_browse_repeat`、`section_outline_empty`、`section_under_unsupported`。
+  `section_outline_empty`、`section_under_unsupported`、`section_under_empty`、`section_browse_failed`。
 
 ### 3.9 `read_section` 动作
 
@@ -267,8 +271,10 @@ Package 的插损、驱动架构等参数，答案称第 5 章「未解析」。
   `ORIGIN_REGISTRY`）。
 - 预算：每 run 上限 `REASONING_MAX_SECTION_READS`；同地址重复 → skip `section_read_repeat`；零命中计入
   `zero_hit_by_action["read_section"]`。
+- 读大纲（按标题解析）或读回整节失败 → skip `section_read_failed`（扣一次，同上）。次数用完后动作
+  不进 enum、不出说明，线索块也不再计算。
 - skip 原因码：`section_nav_disabled`、`section_read_cap`、`section_source_unresolved`、
-  `section_not_surfaced`、`section_ambiguous`、`section_read_repeat`。
+  `section_not_surfaced`、`section_ambiguous`、`section_read_repeat`、`section_read_failed`。
 - `exact_lookup` 形状门拒绝的回喂（`_NOT_A_NAME_NOTE`）在 `read_section` 提供时追加一句「如果这是章节
   标题，请改用 browse_sections 或 read_section」。
 
@@ -295,7 +301,7 @@ Package 的插损、驱动架构等参数，答案称第 5 章「未解析」。
 | `reasoning_section_browse_max_chars` / `REASONING_SECTION_BROWSE_MAX_CHARS` | 3000 | 单次 browse 渲染字符上限 |
 | `reasoning_section_hint_max_entries` / `REASONING_SECTION_HINT_MAX_ENTRIES` | 8 | 线索块条目上限 |
 | `reasoning_section_hint_sources` / `REASONING_SECTION_HINT_SOURCES` | 4 | 线索块覆盖的来源数上限 |
-| `reasoning_section_hint_relative_floor` / `REASONING_SECTION_HINT_RELATIVE_FLOOR` | 0.8 | 线索相对阈值（占本 run 最高 chunk 语义相似度的比例） |
+| `reasoning_section_hint_relative_floor` / `REASONING_SECTION_HINT_RELATIVE_FLOOR` | 0.5 | 线索相对阈值（占本 run 最高 chunk 语义相似度的比例；基准来自已覆盖的高分块，而线索只列未覆盖节，0.8 会挡住目标节） |
 | `reasoning_section_outline_max_rows` / `REASONING_SECTION_OUTLINE_MAX_ROWS` | 4000 | 单源大纲扫描块数硬界 |
 | `reasoning_section_vector_cache_max_bytes` / `REASONING_SECTION_VECTOR_CACHE_MAX_BYTES` | 268435456 | 章节向量进程级缓存字节上限（0 = 关闭） |
 
@@ -395,7 +401,7 @@ Package 的插损、驱动架构等参数，答案称第 5 章「未解析」。
 记忆、chunk_ids 归属校验、向量窥视与按 id 读取、维度处理）。测试：SQLite 单测（平铺 / 面包屑 / 同名标题
 多处 / 空 path / 扫描截断）、`tests/postgres/test_search_conformance.py` 两侧对等、越界不可区分、挂载库
 notebook_id 路由（仿 `test_exact_lookup.py:133-150`）、`test_repository_protocol_coverage.py` 生产调用点。
-baseline 979 → 983。
+baseline 996 → 1000。
 
 ### T5 — 大纲投影与线索选择纯函数（opus）
 

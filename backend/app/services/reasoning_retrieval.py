@@ -112,7 +112,9 @@ from app.services.retrieval_run import (
     retrieval_fanout_slot,
 )
 from app.services.search_profile import render_style_block
-from app.services.section_retrieval import section_vector_stats
+from app.services.section_retrieval import (
+    collect_section_vector_stats, embedded_query_texts,
+)
 from app.services.section_outline import (
     UNDER_NO_NUMBERING, UNTITLED, AddressBook, Ambiguous, Outline, Resolved,
     SourceRanking, build_outline, filter_outline, parse_section_id,
@@ -7373,6 +7375,35 @@ class ReasoningRetriever:
             return dict(self.retrieval.section_chunk_similarities(
                 owner, source_id, ids, list(query_texts)))
 
+    def _section_similarities_parallel(
+        self, requests: "List[Tuple[str, str, List[str]]]", texts,
+    ) -> "Dict[Tuple[str, str], Dict[str, float]]":
+        """线索块的多来源相似度:`(库, 来源, chunk ids)` 各一次端口调用,并发跑
+        (冷读整源向量是 I/O 加解码,串行时 4 个来源的冷读全压在首次 reflect 之前)。
+
+        有界线程池(至多 4 路);每个任务用 `contextvars.copy_context().run` 继承
+        检索 run(扇出槽、run 内记忆)、来源天花板与统计作用域;扇出槽仍在
+        `_section_similarities` 里逐次取。取消:提交前与收结果时各查一次,任务内的
+        端口等待也会查;第一个异常原样抛给调用方(失败开放在 `_section_hint_block`)。"""
+        if not requests:
+            return {}
+        raise_if_cancelled(self.cancel_event)
+        if len(requests) == 1:
+            owner, source_id, ids = requests[0]
+            return {(owner, source_id): self._section_similarities(
+                owner, source_id, ids, texts)}
+        with ThreadPoolExecutor(max_workers=min(len(requests), 4)) as pool:
+            futures = {
+                (owner, source_id): pool.submit(
+                    contextvars.copy_context().run,
+                    self._section_similarities, owner, source_id, ids, texts)
+                for owner, source_id, ids in requests}
+            results = {}
+            for key, future in futures.items():
+                results[key] = future.result()
+                raise_if_cancelled(self.cancel_event)
+        return results
+
     @staticmethod
     def _take_section_hint_detail(state: "_ReasoningRunState") -> Dict[str, Any]:
         """本轮 reflect 步 detail 的稀疏 `section_hints` 键(没算线索时为空),取走即清。"""
@@ -7403,11 +7434,11 @@ class ReasoningRetriever:
         if max_entries <= 0 or max_sources <= 0:
             return ""
         try:
-            before = section_vector_stats()
-            text, sources_used, entries = self._section_hints_text(
-                state, max_entries, max_sources)
-            delta = {key: int(value) - int(before.get(key, 0))
-                     for key, value in section_vector_stats().items()}
+            # 只计本次线索计算(含它开的线程)的读取:run 级累计被报告并行章节共享。
+            with collect_section_vector_stats() as hint_reads:
+                text, sources_used, entries = self._section_hints_text(
+                    state, max_entries, max_sources)
+            delta = hint_reads.snapshot()
             # 稀疏:只在这一轮真的读了/借了向量,或线索块非空时写(冻结金样里
             # 闸关、没算或全命中 run 内记忆的轮次一个键都不多)。
             if text or delta.get("vector_loads") or delta.get("process_cache_hits"):
@@ -7438,28 +7469,30 @@ class ReasoningRetriever:
                 sources[key] = str(chunk.source_title or UNNAMED_SOURCE_LABEL)
                 if len(sources) >= max_sources:
                     break
-        # 只用本 run 已经嵌入过的文本(问题 + 已执行的查询):未执行的已确认方向
-        # 会让每轮多付一次嵌入,而它们还没有贡献过任何证据。
-        texts = tuple(dict.fromkeys(
-            text for text in (
+        # 只用本 run 已经嵌入过的文本(问题 + 已执行的查询),且只取检索 run 的嵌入
+        # 记忆里已有向量的那些(`embedded_query_texts`):线索块不新增嵌入调用;未执行
+        # 的已确认方向还没有贡献过任何证据。
+        texts = tuple(embedded_query_texts(self.settings, (
+            str(text or "") for text in (
                 [state.question]
-                + [entry.query for entry in state.attempted.values()])
-            if str(text or "").strip()))
+                + [entry.query for entry in state.attempted.values()]))))
         run_ids = {chunk.chunk_id for chunk in state.chunks}
-        rankings: List[SourceRanking] = []
-        best = None
+        outlines: List[Tuple[str, str, str, "Outline"]] = []
         for (owner, source_id), title in sources.items():
             source_outline = self._section_outline_for(state, owner, source_id, title)
-            if source_outline.section_count < 2:
-                continue
-            cached = state.section_hint_sims.get((owner, source_id))
-            if cached is None or cached[0] != texts:
-                cached = (texts, self._section_similarities(
-                    owner, source_id,
-                    [cid for occ in source_outline.occurrences for cid in occ.chunk_ids],
-                    texts))
-                state.section_hint_sims[(owner, source_id)] = cached
-            sims = cached[1]
+            if source_outline.section_count >= 2:
+                outlines.append((owner, source_id, title, source_outline))
+        recompute = [
+            (owner, source_id, [cid for occ in source_outline.occurrences
+                                for cid in occ.chunk_ids])
+            for owner, source_id, _title, source_outline in outlines
+            if (state.section_hint_sims.get((owner, source_id)) or (None,))[0] != texts]
+        for key, sims in self._section_similarities_parallel(recompute, texts).items():
+            state.section_hint_sims[key] = (texts, sims)
+        rankings: List[SourceRanking] = []
+        best = None
+        for owner, source_id, title, source_outline in outlines:
+            sims = state.section_hint_sims[(owner, source_id)][1]
             for chunk_id in run_ids:
                 if chunk_id in sims and (best is None or sims[chunk_id] > best):
                     best = sims[chunk_id]

@@ -372,6 +372,69 @@ def test_hint_block_fails_open_when_the_port_raises(repo, monkeypatch):
     assert result.trace[-1].step_type != "skip"
 
 
+def _embedded_by_the_first_round(repo, *texts):
+    """What production's first round leaves in the run's query-embedding memo
+    (it embeds the question); this suite stubs ``search_chunks``, so it puts
+    it there itself. The hint block only reuses embedded texts."""
+    for text in texts or (QUESTION,):
+        repo.retrieval.embed_query(text)
+
+
+@pytest.mark.parametrize("first_round_embedded_question", [True, False])
+def test_the_hint_block_adds_no_embedding_call(
+    repo, monkeypatch, first_round_embedded_question,
+):
+    """线索块只用本 run 已经嵌入过的查询文本(`embedded_query_texts`):开着线索与
+    关掉线索,一个 run 的嵌入调用逐条相同;首轮没嵌入问题原文时,线索也不替它嵌入
+    (只用已嵌入的子查询,这里没有一条有向量,于是首轮不出块)。"""
+    nb = _seed(repo)
+
+    def embeds(hints_on):
+        embedder = _TableEmbedder()
+        repo.settings.reasoning_section_hint_max_entries = 8 if hints_on else 0
+        llm = _llm()
+        retriever = _reasoner(repo, monkeypatch, llm, embedder=embedder)
+        with retrieval_run(run_kind="ask_reasoning"):
+            if first_round_embedded_question:
+                _embedded_by_the_first_round(repo)
+            _run(retriever, nb)
+        return embedder.calls, llm.reflect_prompts[0]
+
+    with_hints, prompt = embeds(True)
+    without_hints, _ = embeds(False)
+    assert with_hints == without_hints
+    if first_round_embedded_question:
+        assert with_hints.count(QUESTION) == 1
+    assert (HINT_BLOCK_TITLE in prompt) is first_round_embedded_question
+
+
+def test_hint_sources_load_their_vectors_concurrently(repo, monkeypatch):
+    """多个来源的相似度并发算(有界线程池),每个任务继承检索 run 与统计作用域:
+    两个任务必须同时在端口里才能过栅栏——串行执行会让栅栏超时。"""
+    import threading
+
+    from app.services.retrieval_run import current_retrieval_run
+    from app.services.section_retrieval import _STATS_SCOPES, collect_section_vector_stats
+
+    retriever = _reasoner(repo, monkeypatch, _llm())
+    gate = threading.Barrier(2, timeout=5)
+    seen: list = []
+
+    def similarities(owner, source_id, chunk_ids, texts):
+        gate.wait()
+        seen.append((source_id, current_retrieval_run(), len(_STATS_SCOPES.get())))
+        return {chunk_ids[0]: 0.5}
+
+    monkeypatch.setattr(retriever, "_section_similarities", similarities)
+    with retrieval_run(run_kind="ask_reasoning") as run:
+        with collect_section_vector_stats():
+            result = retriever._section_similarities_parallel(
+                [("nb", "src-a", ["a-1"]), ("nb", "src-b", ["b-1"])], ("q",))
+    assert result == {("nb", "src-a"): {"a-1": 0.5}, ("nb", "src-b"): {"b-1": 0.5}}
+    assert sorted(seen, key=lambda item: item[0]) == [
+        ("src-a", run, 1), ("src-b", run, 1)]
+
+
 def test_a_new_sub_query_re_ranks_without_re_decoding_vectors(repo, monkeypatch):
     """新增子查询让线索重算(查询文本变了),但同一来源的 chunk 向量在 run 内只读
     一次;大纲也只读一次。查询向量走 run 内记忆。"""
@@ -397,6 +460,7 @@ def test_a_new_sub_query_re_ranks_without_re_decoding_vectors(repo, monkeypatch)
                                   "prefer": "balanced", "reason": "补"}})
     retriever = _reasoner(repo, monkeypatch, llm, embedder=embedder)
     with retrieval_run(run_kind="ask_reasoning"):
+        _embedded_by_the_first_round(repo)
         _run(retriever, nb)
     assert reads == {"vectors": 1, "outline": 1}
     assert embedder.calls.count(QUESTION) == 1
@@ -956,6 +1020,7 @@ def test_a_round_that_computes_hints_reports_them_in_the_reflect_step(
     llm = _llm(_browse("互连规范"))
     retriever = _reasoner(repo, monkeypatch, llm)
     with retrieval_run(run_kind="ask_reasoning"):
+        _embedded_by_the_first_round(repo)
         result = _run(retriever, nb)
     first, second = (step.detail for step in _steps(result, "reflect")[:2])
     hints = first["section_hints"]
