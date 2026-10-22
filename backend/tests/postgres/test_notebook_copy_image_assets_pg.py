@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from psycopg import Cursor
 from psycopg.types.json import Jsonb
 
-from app.services import notebook_sharing
+from app.services import notebook_copy_writer
 from tests import copy_image_asset_cases as cases
 
 pytestmark = [
@@ -143,8 +143,8 @@ def test_remap_helpers_add_no_statement_to_the_copy(world, monkeypatch):
     cases.copy(world)  # 预热
     executed = _count_statements(monkeypatch)
     with monkeypatch.context() as legacy:
-        legacy.setattr(notebook_sharing, "_remap_element_asset_id", lambda raw, _m: raw)
-        legacy.setattr(notebook_sharing, "_remap_copied_asset_row", _legacy_asset_row)
+        legacy.setattr(notebook_copy_writer, "_remap_element_asset_id", lambda raw, _m: raw)
+        legacy.setattr(notebook_copy_writer, "_remap_copied_asset_row", _legacy_asset_row)
         legacy_copy = cases.copy(world)
     legacy_statements = list(executed)
     executed.clear()

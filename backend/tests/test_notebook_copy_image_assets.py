@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.repositories.sqlite import database as sqlite_database
-from app.services import notebook_sharing
+from app.services import notebook_copy_writer
 from tests import copy_image_asset_cases as cases
 
 
@@ -147,8 +147,8 @@ def test_remap_helpers_add_no_statement_to_the_copy(world, monkeypatch):
     cases.copy(world)  # 预热:首拷触发的一次性懒初始化不进比较
     executed = _count_statements(monkeypatch)
     with monkeypatch.context() as legacy:
-        legacy.setattr(notebook_sharing, "_remap_element_asset_id", lambda raw, _m: raw)
-        legacy.setattr(notebook_sharing, "_remap_copied_asset_row", _legacy_asset_row)
+        legacy.setattr(notebook_copy_writer, "_remap_element_asset_id", lambda raw, _m: raw)
+        legacy.setattr(notebook_copy_writer, "_remap_copied_asset_row", _legacy_asset_row)
         legacy_copy = cases.copy(world)
     legacy_statements = list(executed)
     executed.clear()
@@ -168,20 +168,20 @@ def test_metadata_without_the_asset_id_key_is_never_parsed(monkeypatch):
     """子串快速路径:不含 ``"asset_id"`` 子串的 metadata 原样返回,一次都不解析——每个元素
     都 ``json.loads`` 一遍会让 20 万行的拷贝多出约 0.2 s。含子串的那条是见证:它确实会被解析。"""
     parsed: list[str] = []
-    real_loads = notebook_sharing.json.loads
+    real_loads = notebook_copy_writer.json.loads
 
     def counting_loads(text, *args, **kwargs):
         parsed.append(text)
         return real_loads(text, *args, **kwargs)
 
-    monkeypatch.setattr(notebook_sharing.json, "loads", counting_loads)
+    monkeypatch.setattr(notebook_copy_writer.json, "loads", counting_loads)
     asset_map = {"asset-old": "asset-new"}
     skipped = ['{"page": 1}', "{}", '{"assetid": "asset-old"}', '{"caption": "asset-old"}', ""]
     for raw in skipped:
-        assert notebook_sharing._remap_element_asset_id(raw, asset_map) is raw
+        assert notebook_copy_writer._remap_element_asset_id(raw, asset_map) is raw
     assert parsed == []
     witness = '{"asset_id": "asset-old"}'
-    assert notebook_sharing._remap_element_asset_id(witness, asset_map) == '{"asset_id": "asset-new"}'
+    assert notebook_copy_writer._remap_element_asset_id(witness, asset_map) == '{"asset_id": "asset-new"}'
     assert parsed == [witness]
 
 
