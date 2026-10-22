@@ -1,0 +1,1939 @@
+{
+ "db_diff": {
+  "answers": {
+   "added": [
+    {
+     "conversation_id": "conv-00000000000000000000000000000022",
+     "created_at": "<ts>",
+     "id": "ans-00000000000000000000000000000023",
+     "notebook_id": "nb-00000000000000000000000000000001",
+     "payload": "{\"answer_id\": \"ans-00000000000000000000000000000023\", \"asked_at\": \"<ts>\", \"answered_at\": \"<ts>\", \"conclusion\": \"已完整读取 3/3 行 Knowhow 记录。\", \"answer\": \"已完整读取 3/3 行 Knowhow 记录。\\n\\n### 时序优化方法\\n- 1. 方法：屏蔽走线\\n- 2. 方法：插入缓冲\\n- 3. 方法：降低负载\", \"grounded\": true, \"evidence_level\": \"grounded\", \"anchors\": [], \"related_knowledge\": [], \"citations\": [], \"llm_mode\": \"structured\", \"mode\": \"reasoning\", \"conversation_id\": \"conv-00000000000000000000000000000022\", \"retrieval_query\": \"列出所有方法\\n\\n用户确认的补充信息与问题契约：\\n研究对象：版图\\n约束条件：先进工艺\\n期望输出：要点清单\", \"top_relevance\": 0.0, \"reasoning_trace\": [{\"step_type\": \"intent\", \"summary\": \"已按确认后的问题理解开始检索\", \"detail\": {\"resolved_question\": \"列出所有方法\", \"result_scope\": \"complete\", \"completeness_required\": true, \"retrieval_effort\": \"standard\", \"entities\": [\"版图\"], \"constraints\": [\"先进工艺\"], \"excluded_topics\": [], \"assumptions\": [], \"expected_output\": \"要点清单\", \"mandatory_topics\": []}, \"duration_ms\": \"<dur>\"}, {\"step_type\": \"enumerate\", \"summary\": \"读取 3/3 行 Knowhow\", \"detail\": {\"table_id\": \"khtbl-00000000000000000000000000000014\", \"page\": 1, \"scanned_rows\": 3, \"known_total_rows\": 3}, \"duration_ms\": null}, {\"step_type\": \"answer\", \"summary\": \"完整枚举 3 行\", \"detail\": {\"complete\": true, \"scanned_rows\": 3, \"returned_rows\": 3, \"known_total_rows\": 3, \"truncated_reason\": \"\"}, \"duration_ms\": null}], \"intent\": {\"objective\": \"列出所有方法\", \"resolved_question\": \"列出所有方法\", \"intent_type\": \"explain\", \"result_scope\": \"complete\", \"completeness_required\": true, \"entities\": [\"版图\"], \"mandatory_topics\": [], \"high_level_keywords\": [], \"low_level_keywords\": [], \"keyword_basis\": \"\", \"comparison_axes\": [], \"constraints\": [\"先进工艺\"], \"excluded_topics\": [], \"expected_output\": \"要点清单\", \"assumptions\": [], \"ambiguities\": [], \"confidence\": 0.0, \"needs_clarification\": false, \"confirmed\": true, \"clarification_answers\": []}, \"retrieval_effort\": \"standard\", \"result_sets\": [{\"kind\": \"knowhow\", \"table_id\": \"khtbl-00000000000000000000000000000014\", \"title\": \"时序优化方法\", \"columns\": [{\"id\": \"khcol-00000000000000000000000000000015\", \"name\": \"方法\", \"role\": \"anchor\"}], \"rows\": [{\"row_id\": \"khrow-00000000000000000000000000000017\", \"position\": 0, \"cells\": {\"khcol-00000000000000000000000000000015\": \"屏蔽走线\"}}, {\"row_id\": \"khrow-0000000000000000000000000000001a\", \"position\": 1, \"cells\": {\"khcol-00000000000000000000000000000015\": \"插入缓冲\"}}, {\"row_id\": \"khrow-0000000000000000000000000000001d\", \"position\": 2, \"cells\": {\"khcol-00000000000000000000000000000015\": \"降低负载\"}}], \"coverage\": {\"total_rows\": 3, \"scanned_rows\": 3, \"returned_rows\": 3, \"complete\": true, \"truncated_reason\": \"\", \"overflow_semantics\": \"\"}}], \"result_coverage\": {\"known_tables\": 1, \"selected_tables\": 1, \"known_total_rows\": 3, \"scanned_rows\": 3, \"returned_rows\": 3, \"complete\": true, \"truncated_reason\": \"\", \"overflow_semantics\": \"\", \"synthesis_rows\": 0, \"synthesis_complete\": null}, \"kg_required\": false, \"index_required\": false, \"model_errors\": []}",
+     "question": "列出所有方法"
+    }
+   ],
+   "removed": []
+  },
+  "conversations": {
+   "added": [
+    {
+     "created_at": "<ts>",
+     "created_by": "user-local",
+     "id": "conv-00000000000000000000000000000022",
+     "notebook_id": "nb-00000000000000000000000000000001",
+     "share_token": null,
+     "shared_through_at": null,
+     "shared_through_id": null,
+     "title": "列出所有方法",
+     "updated_at": "<ts>"
+    }
+   ],
+   "removed": []
+  }
+ },
+ "logs": [],
+ "outcome": {
+  "returned": {
+   "pd:AskResponse": {
+    "anchors": [],
+    "answer": "已完整读取 3/3 行 Knowhow 记录。\n\n### 时序优化方法\n- 1. 方法：屏蔽走线\n- 2. 方法：插入缓冲\n- 3. 方法：降低负载",
+    "answer_id": "ans-00000000000000000000000000000023",
+    "answered_at": "<ts>",
+    "asked_at": "<ts>",
+    "citations": [],
+    "conclusion": "已完整读取 3/3 行 Knowhow 记录。",
+    "conversation_id": "conv-00000000000000000000000000000022",
+    "evidence_level": "grounded",
+    "grounded": true,
+    "index_required": false,
+    "intent": {
+     "ambiguities": [],
+     "assumptions": [],
+     "clarification_answers": [],
+     "comparison_axes": [],
+     "completeness_required": true,
+     "confidence": "<float>",
+     "confirmed": true,
+     "constraints": [
+      "先进工艺"
+     ],
+     "entities": [
+      "版图"
+     ],
+     "excluded_topics": [],
+     "expected_output": "要点清单",
+     "high_level_keywords": [],
+     "intent_type": "explain",
+     "keyword_basis": "",
+     "low_level_keywords": [],
+     "mandatory_topics": [],
+     "needs_clarification": false,
+     "objective": "列出所有方法",
+     "resolved_question": "列出所有方法",
+     "result_scope": "complete"
+    },
+    "kg_required": false,
+    "llm_mode": "structured",
+    "mode": "reasoning",
+    "model_errors": [],
+    "reasoning_trace": [
+     {
+      "detail": {
+       "assumptions": [],
+       "completeness_required": true,
+       "constraints": [
+        "先进工艺"
+       ],
+       "entities": [
+        "版图"
+       ],
+       "excluded_topics": [],
+       "expected_output": "要点清单",
+       "mandatory_topics": [],
+       "resolved_question": "列出所有方法",
+       "result_scope": "complete",
+       "retrieval_effort": "standard"
+      },
+      "duration_ms": "<dur>",
+      "step_type": "intent",
+      "summary": "已按确认后的问题理解开始检索"
+     },
+     {
+      "detail": {
+       "known_total_rows": 3,
+       "page": 1,
+       "scanned_rows": 3,
+       "table_id": "khtbl-00000000000000000000000000000014"
+      },
+      "duration_ms": null,
+      "step_type": "enumerate",
+      "summary": "读取 3/3 行 Knowhow"
+     },
+     {
+      "detail": {
+       "complete": true,
+       "known_total_rows": 3,
+       "returned_rows": 3,
+       "scanned_rows": 3,
+       "truncated_reason": ""
+      },
+      "duration_ms": null,
+      "step_type": "answer",
+      "summary": "完整枚举 3 行"
+     }
+    ],
+    "related_knowledge": [],
+    "result_coverage": {
+     "complete": true,
+     "known_tables": 1,
+     "known_total_rows": 3,
+     "overflow_semantics": "",
+     "returned_rows": 3,
+     "scanned_rows": 3,
+     "selected_tables": 1,
+     "synthesis_complete": null,
+     "synthesis_rows": 0,
+     "truncated_reason": ""
+    },
+    "result_sets": [
+     {
+      "columns": [
+       {
+        "id": "khcol-00000000000000000000000000000015",
+        "name": "方法",
+        "role": "anchor"
+       }
+      ],
+      "coverage": {
+       "complete": true,
+       "overflow_semantics": "",
+       "returned_rows": 3,
+       "scanned_rows": 3,
+       "total_rows": 3,
+       "truncated_reason": ""
+      },
+      "kind": "knowhow",
+      "rows": [
+       {
+        "cells": {
+         "khcol-00000000000000000000000000000015": "屏蔽走线"
+        },
+        "position": 0,
+        "row_id": "khrow-00000000000000000000000000000017"
+       },
+       {
+        "cells": {
+         "khcol-00000000000000000000000000000015": "插入缓冲"
+        },
+        "position": 1,
+        "row_id": "khrow-0000000000000000000000000000001a"
+       },
+       {
+        "cells": {
+         "khcol-00000000000000000000000000000015": "降低负载"
+        },
+        "position": 2,
+        "row_id": "khrow-0000000000000000000000000000001d"
+       }
+      ],
+      "table_id": "khtbl-00000000000000000000000000000014",
+      "title": "时序优化方法"
+     }
+    ],
+    "retrieval_effort": "standard",
+    "retrieval_query": "列出所有方法\n\n用户确认的补充信息与问题契约：\n研究对象：版图\n约束条件：先进工艺\n期望输出：要点清单",
+    "top_relevance": "<float>"
+   }
+  }
+ },
+ "stream": [],
+ "timeline": [
+  {
+   "sql": "PRAGMA busy_timeout"
+  },
+  {
+   "sql": "PRAGMA busy_timeout = <left>"
+  },
+  {
+   "sql": "PRAGMA busy_timeout = <left>"
+  },
+  {
+   "sql": "SELECT tier FROM notebooks WHERE id='nb-00000000000000000000000000000001'"
+  },
+  {
+   "sql": "PRAGMA busy_timeout = <left>"
+  },
+  {
+   "sql": "SELECT b.id AS id, b.tier AS tier FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('user-local', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing','pending_delete') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id"
+  },
+  {
+   "sql": "PRAGMA busy_timeout = <left>"
+  },
+  {
+   "sql": "PRAGMA busy_timeout"
+  },
+  {
+   "sql": "PRAGMA busy_timeout = <left>"
+  },
+  {
+   "sql": "PRAGMA busy_timeout = <left>"
+  },
+  {
+   "sql": "SELECT id FROM sources WHERE notebook_id='nb-00000000000000000000000000000001' AND source_type NOT IN ('knowhow','memory') ORDER BY id"
+  },
+  {
+   "sql": "PRAGMA busy_timeout = <left>"
+  },
+  {
+   "sql": "PRAGMA busy_timeout"
+  },
+  {
+   "sql": "PRAGMA busy_timeout = <left>"
+  },
+  {
+   "sql": "PRAGMA busy_timeout = <left>"
+  },
+  {
+   "sql": "SELECT s.id FROM sources s WHERE s.notebook_id='nb-00000000000000000000000000000001' AND s.source_type IN ('knowhow','memory') AND (s.source_type <> 'memory' OR EXISTS (SELECT 1 FROM memory_items rm WHERE rm.id = s.memory_id AND rm.created_by = 'user-local')) ORDER BY s.id"
+  },
+  {
+   "sql": "PRAGMA busy_timeout = <left>"
+  },
+  {
+   "args": [
+    "nb-00000000000000000000000000000001",
+    {
+     "pd:AskRequest": {
+      "asked_at": "<ts>",
+      "base_scope": null,
+      "client_request_id": null,
+      "conversation_id": null,
+      "intent": {
+       "answers": [],
+       "contract": {
+        "ambiguities": [],
+        "assumptions": [],
+        "clarification_answers": [],
+        "comparison_axes": [],
+        "completeness_required": true,
+        "confidence": "<float>",
+        "confirmed": true,
+        "constraints": [
+         "先进工艺"
+        ],
+        "entities": [
+         "版图"
+        ],
+        "excluded_topics": [],
+        "expected_output": "要点清单",
+        "high_level_keywords": [],
+        "intent_type": "explain",
+        "keyword_basis": "",
+        "low_level_keywords": [],
+        "mandatory_topics": [],
+        "needs_clarification": false,
+        "objective": "列出所有方法",
+        "resolved_question": "列出所有方法",
+        "result_scope": "complete"
+       },
+       "resolved_question": "列出所有方法",
+       "understanding_ms": "<dur>"
+      },
+      "mode": "reasoning",
+      "question": "列出所有方法",
+      "report_id": null,
+      "retrieval_effort": "standard",
+      "scenario": {},
+      "source_scope": null
+     }
+    }
+   ],
+   "call": "self._prepare_reasoning_ask",
+   "kwargs": {
+    "job_id": "",
+    "runtime": {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<SqliteDatabase>",
+      "retrieval_run": "<RetrievalRunState>",
+      "scope": {
+       "dc:ActiveSourceScope": {
+        "_skipped_libraries": [],
+        "_universe_read_order": [
+         [
+          "src-00000000000000000000000000000002",
+          "src-00000000000000000000000000000006"
+         ],
+         []
+        ],
+        "_verdict_probes": {
+         "dc:CeilingVerdictProbes": {
+          "foreign_hidden": "<callable call>",
+          "universe_digests": "<callable call>"
+         }
+        },
+        "base_mode": "exclude",
+        "base_narrowed": null,
+        "base_notebook_ids": [],
+        "base_provided": false,
+        "ceilings_total": true,
+        "hidden_source_ids": [],
+        "mode": "include",
+        "narrowed": false,
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "notebook_source_ceilings": [],
+        "owner_id": "user-local",
+        "source_ids": [
+         "src-00000000000000000000000000000002",
+         "src-00000000000000000000000000000006"
+        ],
+        "source_provided": false,
+        "subjectless": false,
+        "withheld_hidden_source_ids": []
+       }
+      },
+      "trace_sink": null
+     }
+    },
+    "user_id": "user-local"
+   },
+   "ret": {
+    "dc:PreparedReasoningAsk": {
+     "asked_at": "<ts>",
+     "conversation_id": "conv-00000000000000000000000000000022",
+     "history": "",
+     "intent_json": "{\"objective\":\"列出所有方法\",\"resolved_question\":\"列出所有方法\",\"intent_type\":\"explain\",\"result_scope\":\"complete\",\"completeness_required\":true,\"entities\":[\"版图\"],\"mandatory_topics\":[],\"high_level_keywords\":[],\"low_level_keywords\":[],\"keyword_basis\":\"\",\"comparison_axes\":[],\"constraints\":[\"先进工艺\"],\"excluded_topics\":[],\"expected_output\":\"要点清单\",\"assumptions\":[],\"ambiguities\":[],\"confidence\":0.0,\"needs_clarification\":false,\"confirmed\":true,\"clarification_answers\":[]}",
+     "intent_keywords": "",
+     "intent_projection": {
+      "dc:ReasoningIntentProjection": {
+       "assumptions": [],
+       "completeness_required": true,
+       "constraints": [
+        "先进工艺"
+       ],
+       "entities": [
+        "版图"
+       ],
+       "excluded_topics": [],
+       "expected_output": "要点清单",
+       "mandatory_topics": [],
+       "resolved_question": "列出所有方法",
+       "result_scope": "complete",
+       "retrieval_effort": "standard"
+      }
+     },
+     "intent_queries": [
+      "列出所有方法\n\n用户确认的补充信息与问题契约：\n研究对象：版图\n约束条件：先进工艺\n期望输出：要点清单"
+     ],
+     "intent_trace_duration_ms": "<dur>",
+     "job_id": "",
+     "limits": {
+      "dc:AskRetrievalLimits": {
+       "answer_element_items": 6,
+       "cell_excerpt_chars": 1000,
+       "chunk_context_chars": 30000,
+       "effort": "standard",
+       "enum_page_size": 50,
+       "enum_pages_per_run": 4,
+       "enum_rows_per_run": 200,
+       "inline_answer_rows": 100,
+       "kg_context_chars": 6000,
+       "max_initial_subqueries": 5,
+       "max_reasoning_steps": 8,
+       "overflow_semantics": "explicit_partial",
+       "ranked_final_cap": 36,
+       "ranked_final_floor": 20,
+       "ranked_per_aspect": 3,
+       "ranked_per_query_take": 8,
+       "structured_max_columns": 8,
+       "structured_max_pages": 50,
+       "structured_max_rows": 1250,
+       "structured_max_tables": 8,
+       "structured_page_size": 25,
+       "structured_payload_chars": 256000
+      }
+     },
+     "notebook_id": "nb-00000000000000000000000000000001",
+     "output": "answer",
+     "question": "列出所有方法",
+     "report_followup": null,
+     "research_question": "列出所有方法\n\n用户确认的补充信息与问题契约：\n研究对象：版图\n约束条件：先进工艺\n期望输出：要点清单",
+     "retrieval_effort": "standard",
+     "style_block": "",
+     "user_id": "user-local"
+    }
+   }
+  },
+  {
+   "args": [
+    {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<SqliteDatabase>",
+      "retrieval_run": "<RetrievalRunState>",
+      "scope": {
+       "dc:ActiveSourceScope": {
+        "_skipped_libraries": [],
+        "_universe_read_order": [
+         [
+          "src-00000000000000000000000000000002",
+          "src-00000000000000000000000000000006"
+         ],
+         []
+        ],
+        "_verdict_probes": {
+         "dc:CeilingVerdictProbes": {
+          "foreign_hidden": "<callable call>",
+          "universe_digests": "<callable call>"
+         }
+        },
+        "base_mode": "exclude",
+        "base_narrowed": null,
+        "base_notebook_ids": [],
+        "base_provided": false,
+        "ceilings_total": true,
+        "hidden_source_ids": [],
+        "mode": "include",
+        "narrowed": false,
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "notebook_source_ceilings": [],
+        "owner_id": "user-local",
+        "source_ids": [
+         "src-00000000000000000000000000000002",
+         "src-00000000000000000000000000000006"
+        ],
+        "source_provided": false,
+        "subjectless": false,
+        "withheld_hidden_source_ids": []
+       }
+      },
+      "trace_sink": null
+     }
+    },
+    "prepare"
+   ],
+   "call": "self._assert_reasoning_runtime",
+   "kwargs": {
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "user_id": "user-local"
+   },
+   "ret": null
+  },
+  {
+   "sql": "SELECT notebooks.*, u.username AS _owner_username, COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') AS _published_pipeline_version, EXISTS(SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id = notebooks.id AND ng.principal_type IN ('group','group_admins')) AS _shared_to_groups FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by LEFT JOIN unified_kg_state ip ON ip.notebook_id=notebooks.id WHERE notebooks.id = 'nb-00000000000000000000000000000001' AND notebooks.status NOT IN ('copying','deleting','importing','pending_delete')"
+  },
+  {
+   "sql": "SELECT created_by, notebook_id, COUNT(*) AS c FROM memory_items WHERE created_by='user-local' GROUP BY created_by, notebook_id"
+  },
+  {
+   "sql": "SELECT id FROM sources WHERE notebook_id = 'nb-00000000000000000000000000000001' AND source_type = 'memory'"
+  },
+  {
+   "sql": "SELECT COUNT(*) AS count FROM sources WHERE notebook_id = 'nb-00000000000000000000000000000001' AND source_type NOT IN ('knowhow','memory')"
+  },
+  {
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'"
+  },
+  {
+   "sql": "WITH total AS (SELECT object_type, status, COUNT(*) AS c FROM knowledge_objects WHERE notebook_id='nb-00000000000000000000000000000001' GROUP BY object_type, status), memory AS (SELECT mo.object_type, mo.status, COUNT(*) AS c FROM knowledge_objects mo WHERE mo.source_id IN (SELECT s.id FROM sources s WHERE s.notebook_id='nb-00000000000000000000000000000001' AND s.source_type IN ('knowhow','memory') AND s.source_type = 'memory') AND +mo.notebook_id='nb-00000000000000000000000000000001' GROUP BY mo.object_type, mo.status) SELECT t.object_type, t.status, t.c - COALESCE(m.c, 0) AS c, COALESCE(m.c, 0) AS m FROM total t LEFT JOIN memory m ON m.object_type = t.object_type AND m.status = t.status"
+  },
+  {
+   "sql": "SELECT b.id AS id, b.name AS name, b.tier AS tier, EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id) AS has_kg FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF('user-local', '') AS uid) v WHERE e.notebook_id = 'nb-00000000000000000000000000000001' AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing','pending_delete') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = 'nb-00000000000000000000000000000001')"
+  },
+  {
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'"
+  },
+  {
+   "sql": "SELECT COUNT(*) FROM sources s WHERE s.notebook_id = 'nb-00000000000000000000000000000001' AND s.source_type NOT IN ('knowhow','memory') AND s.source_type <> 'promotion' AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id) AND NOT EXISTS (SELECT 1 FROM knowledge_objects k WHERE k.source_id = s.id AND k.source_id != '' AND COALESCE(( SELECT er.status FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC, er.rowid DESC LIMIT 1), 'completed')='completed' AND NOT (COALESCE((SELECT er.error_message FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'') GLOB '*windows_failed=[1-9]*/*' OR instr(COALESCE((SELECT er.error_message FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),''),'retry_incomplete=1')>0)) AND NOT (COALESCE((SELECT er.status FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'')='completed' AND COALESCE((SELECT er.error_message FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'') GLOB 'kg objects=0 *' AND COALESCE((SELECT er.error_message FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'') NOT GLOB '*windows_failed=[1-9]*/*')"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM chunks WHERE notebook_id = 'nb-00000000000000000000000000000001')"
+  },
+  {
+   "sql": "SELECT EXISTS(SELECT 1 FROM sources s WHERE s.notebook_id = 'nb-00000000000000000000000000000001' AND s.source_type NOT IN ('knowhow','memory') AND s.source_type <> 'promotion' AND s.doc_type IN ('','academic_paper') AND s.parse_status IN ('extracted','extracting','parsed') AND NOT EXISTS (SELECT 1 FROM source_paper_meta m WHERE m.source_id = s.id))"
+  },
+  {
+   "sql": "SELECT * FROM kg_build_jobs WHERE notebook_id='nb-00000000000000000000000000000001' ORDER BY created_at DESC, rowid DESC LIMIT 1"
+  },
+  {
+   "sql": "SELECT nb.created_by AS owner_id, u.role AS owner_role FROM notebooks nb LEFT JOIN users u ON u.id = nb.created_by WHERE nb.id = 'nb-00000000000000000000000000000001'"
+  },
+  {
+   "sql": "SELECT upload_document_limit FROM user_profiles WHERE user_id = 'user-local'"
+  },
+  {
+   "sql": "SELECT value FROM app_settings WHERE key = 'upload_document_limit_default'"
+  },
+  {
+   "args": [
+    {
+     "event": false
+    }
+   ],
+   "call": "fn.raise_if_cancelled",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "sql": "BEGIN IMMEDIATE"
+  },
+  {
+   "sql": "INSERT INTO conversations (id, notebook_id, title, created_by, created_at, updated_at) SELECT 'conv-00000000000000000000000000000022', 'nb-00000000000000000000000000000001', '列出所有方法', 'user-local', '<ts>', '<ts>' WHERE EXISTS (SELECT 1 FROM notebooks WHERE id = 'nb-00000000000000000000000000000001' AND status NOT IN ('copying','deleting','importing','pending_delete'))"
+  },
+  {
+   "sql": "SELECT question, payload FROM answers WHERE conversation_id = 'conv-00000000000000000000000000000022' ORDER BY julianday(created_at) ASC, created_at ASC, rowid ASC"
+  },
+  {
+   "sql": "COMMIT"
+  },
+  {
+   "args": [
+    {
+     "event": false
+    }
+   ],
+   "call": "fn.raise_if_cancelled",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "sql": "SELECT search_profile_json FROM user_profiles WHERE user_id = 'user-local'"
+  },
+  {
+   "args": [
+    {
+     "dc:PreparedReasoningAsk": {
+      "asked_at": "<ts>",
+      "conversation_id": "conv-00000000000000000000000000000022",
+      "history": "",
+      "intent_json": "{\"objective\":\"列出所有方法\",\"resolved_question\":\"列出所有方法\",\"intent_type\":\"explain\",\"result_scope\":\"complete\",\"completeness_required\":true,\"entities\":[\"版图\"],\"mandatory_topics\":[],\"high_level_keywords\":[],\"low_level_keywords\":[],\"keyword_basis\":\"\",\"comparison_axes\":[],\"constraints\":[\"先进工艺\"],\"excluded_topics\":[],\"expected_output\":\"要点清单\",\"assumptions\":[],\"ambiguities\":[],\"confidence\":0.0,\"needs_clarification\":false,\"confirmed\":true,\"clarification_answers\":[]}",
+      "intent_keywords": "",
+      "intent_projection": {
+       "dc:ReasoningIntentProjection": {
+        "assumptions": [],
+        "completeness_required": true,
+        "constraints": [
+         "先进工艺"
+        ],
+        "entities": [
+         "版图"
+        ],
+        "excluded_topics": [],
+        "expected_output": "要点清单",
+        "mandatory_topics": [],
+        "resolved_question": "列出所有方法",
+        "result_scope": "complete",
+        "retrieval_effort": "standard"
+       }
+      },
+      "intent_queries": [
+       "列出所有方法\n\n用户确认的补充信息与问题契约：\n研究对象：版图\n约束条件：先进工艺\n期望输出：要点清单"
+      ],
+      "intent_trace_duration_ms": "<dur>",
+      "job_id": "",
+      "limits": {
+       "dc:AskRetrievalLimits": {
+        "answer_element_items": 6,
+        "cell_excerpt_chars": 1000,
+        "chunk_context_chars": 30000,
+        "effort": "standard",
+        "enum_page_size": 50,
+        "enum_pages_per_run": 4,
+        "enum_rows_per_run": 200,
+        "inline_answer_rows": 100,
+        "kg_context_chars": 6000,
+        "max_initial_subqueries": 5,
+        "max_reasoning_steps": 8,
+        "overflow_semantics": "explicit_partial",
+        "ranked_final_cap": 36,
+        "ranked_final_floor": 20,
+        "ranked_per_aspect": 3,
+        "ranked_per_query_take": 8,
+        "structured_max_columns": 8,
+        "structured_max_pages": 50,
+        "structured_max_rows": 1250,
+        "structured_max_tables": 8,
+        "structured_page_size": 25,
+        "structured_payload_chars": 256000
+       }
+      },
+      "notebook_id": "nb-00000000000000000000000000000001",
+      "output": "answer",
+      "question": "列出所有方法",
+      "report_followup": null,
+      "research_question": "列出所有方法\n\n用户确认的补充信息与问题契约：\n研究对象：版图\n约束条件：先进工艺\n期望输出：要点清单",
+      "retrieval_effort": "standard",
+      "style_block": "",
+      "user_id": "user-local"
+     }
+    },
+    {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<SqliteDatabase>",
+      "retrieval_run": "<RetrievalRunState>",
+      "scope": {
+       "dc:ActiveSourceScope": {
+        "_skipped_libraries": [],
+        "_universe_read_order": [
+         [
+          "src-00000000000000000000000000000002",
+          "src-00000000000000000000000000000006"
+         ],
+         []
+        ],
+        "_verdict_probes": {
+         "dc:CeilingVerdictProbes": {
+          "foreign_hidden": "<callable call>",
+          "universe_digests": "<callable call>"
+         }
+        },
+        "base_mode": "exclude",
+        "base_narrowed": null,
+        "base_notebook_ids": [],
+        "base_provided": false,
+        "ceilings_total": true,
+        "hidden_source_ids": [],
+        "mode": "include",
+        "narrowed": false,
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "notebook_source_ceilings": [],
+        "owner_id": "user-local",
+        "source_ids": [
+         "src-00000000000000000000000000000002",
+         "src-00000000000000000000000000000006"
+        ],
+        "source_provided": false,
+        "subjectless": false,
+        "withheld_hidden_source_ids": []
+       }
+      },
+      "trace_sink": null
+     }
+    }
+   ],
+   "call": "self._run_reasoning_stage",
+   "kwargs": {},
+   "ret": {
+    "dc:CommittedReasoningAnswer": {
+     "baseline_manifest": null,
+     "evidence": null,
+     "response": {
+      "pd:AskResponse": {
+       "anchors": [],
+       "answer": "已完整读取 3/3 行 Knowhow 记录。\n\n### 时序优化方法\n- 1. 方法：屏蔽走线\n- 2. 方法：插入缓冲\n- 3. 方法：降低负载",
+       "answer_id": "ans-00000000000000000000000000000023",
+       "answered_at": "<ts>",
+       "asked_at": "<ts>",
+       "citations": [],
+       "conclusion": "已完整读取 3/3 行 Knowhow 记录。",
+       "conversation_id": "conv-00000000000000000000000000000022",
+       "evidence_level": "grounded",
+       "grounded": true,
+       "index_required": false,
+       "intent": {
+        "ambiguities": [],
+        "assumptions": [],
+        "clarification_answers": [],
+        "comparison_axes": [],
+        "completeness_required": true,
+        "confidence": "<float>",
+        "confirmed": true,
+        "constraints": [
+         "先进工艺"
+        ],
+        "entities": [
+         "版图"
+        ],
+        "excluded_topics": [],
+        "expected_output": "要点清单",
+        "high_level_keywords": [],
+        "intent_type": "explain",
+        "keyword_basis": "",
+        "low_level_keywords": [],
+        "mandatory_topics": [],
+        "needs_clarification": false,
+        "objective": "列出所有方法",
+        "resolved_question": "列出所有方法",
+        "result_scope": "complete"
+       },
+       "kg_required": false,
+       "llm_mode": "structured",
+       "mode": "reasoning",
+       "model_errors": [],
+       "reasoning_trace": [
+        {
+         "detail": {
+          "assumptions": [],
+          "completeness_required": true,
+          "constraints": [
+           "先进工艺"
+          ],
+          "entities": [
+           "版图"
+          ],
+          "excluded_topics": [],
+          "expected_output": "要点清单",
+          "mandatory_topics": [],
+          "resolved_question": "列出所有方法",
+          "result_scope": "complete",
+          "retrieval_effort": "standard"
+         },
+         "duration_ms": "<dur>",
+         "step_type": "intent",
+         "summary": "已按确认后的问题理解开始检索"
+        },
+        {
+         "detail": {
+          "known_total_rows": 3,
+          "page": 1,
+          "scanned_rows": 3,
+          "table_id": "khtbl-00000000000000000000000000000014"
+         },
+         "duration_ms": null,
+         "step_type": "enumerate",
+         "summary": "读取 3/3 行 Knowhow"
+        },
+        {
+         "detail": {
+          "complete": true,
+          "known_total_rows": 3,
+          "returned_rows": 3,
+          "scanned_rows": 3,
+          "truncated_reason": ""
+         },
+         "duration_ms": null,
+         "step_type": "answer",
+         "summary": "完整枚举 3 行"
+        }
+       ],
+       "related_knowledge": [],
+       "result_coverage": {
+        "complete": true,
+        "known_tables": 1,
+        "known_total_rows": 3,
+        "overflow_semantics": "",
+        "returned_rows": 3,
+        "scanned_rows": 3,
+        "selected_tables": 1,
+        "synthesis_complete": null,
+        "synthesis_rows": 0,
+        "truncated_reason": ""
+       },
+       "result_sets": [
+        {
+         "columns": [
+          {
+           "id": "khcol-00000000000000000000000000000015",
+           "name": "方法",
+           "role": "anchor"
+          }
+         ],
+         "coverage": {
+          "complete": true,
+          "overflow_semantics": "",
+          "returned_rows": 3,
+          "scanned_rows": 3,
+          "total_rows": 3,
+          "truncated_reason": ""
+         },
+         "kind": "knowhow",
+         "rows": [
+          {
+           "cells": {
+            "khcol-00000000000000000000000000000015": "屏蔽走线"
+           },
+           "position": 0,
+           "row_id": "khrow-00000000000000000000000000000017"
+          },
+          {
+           "cells": {
+            "khcol-00000000000000000000000000000015": "插入缓冲"
+           },
+           "position": 1,
+           "row_id": "khrow-0000000000000000000000000000001a"
+          },
+          {
+           "cells": {
+            "khcol-00000000000000000000000000000015": "降低负载"
+           },
+           "position": 2,
+           "row_id": "khrow-0000000000000000000000000000001d"
+          }
+         ],
+         "table_id": "khtbl-00000000000000000000000000000014",
+         "title": "时序优化方法"
+        }
+       ],
+       "retrieval_effort": "standard",
+       "retrieval_query": "列出所有方法\n\n用户确认的补充信息与问题契约：\n研究对象：版图\n约束条件：先进工艺\n期望输出：要点清单",
+       "top_relevance": "<float>"
+      }
+     }
+    }
+   }
+  },
+  {
+   "args": [
+    {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<SqliteDatabase>",
+      "retrieval_run": "<RetrievalRunState>",
+      "scope": {
+       "dc:ActiveSourceScope": {
+        "_skipped_libraries": [],
+        "_universe_read_order": [
+         [
+          "src-00000000000000000000000000000002",
+          "src-00000000000000000000000000000006"
+         ],
+         []
+        ],
+        "_verdict_probes": {
+         "dc:CeilingVerdictProbes": {
+          "foreign_hidden": "<callable call>",
+          "universe_digests": "<callable call>"
+         }
+        },
+        "base_mode": "exclude",
+        "base_narrowed": null,
+        "base_notebook_ids": [],
+        "base_provided": false,
+        "ceilings_total": true,
+        "hidden_source_ids": [],
+        "mode": "include",
+        "narrowed": false,
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "notebook_source_ceilings": [],
+        "owner_id": "user-local",
+        "source_ids": [
+         "src-00000000000000000000000000000002",
+         "src-00000000000000000000000000000006"
+        ],
+        "source_provided": false,
+        "subjectless": false,
+        "withheld_hidden_source_ids": []
+       }
+      },
+      "trace_sink": null
+     }
+    },
+    "reasoning-stage-entry"
+   ],
+   "call": "self._assert_reasoning_runtime",
+   "kwargs": {
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "user_id": "user-local"
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "call": "self._knowhow_completeness_in_scope",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "sql": "SELECT (SELECT group_concat(id, char(30)) FROM (SELECT id FROM sources WHERE notebook_id='nb-00000000000000000000000000000001' AND source_type NOT IN ('knowhow','memory') ORDER BY id)) AS visible_ids, (SELECT group_concat(id, char(30)) FROM (SELECT s.id FROM sources s WHERE s.notebook_id='nb-00000000000000000000000000000001' AND s.source_type IN ('knowhow','memory') AND (s.source_type <> 'memory' OR EXISTS (SELECT 1 FROM memory_items rm WHERE rm.id = s.memory_id AND rm.created_by = 'user-local')) ORDER BY s.id)) AS hidden_ids"
+  },
+  {
+   "sql": "SELECT id,notebook_id,title,description,created_at,updated_at,mutation_seq,hidden_source_id,created_by FROM knowhow_tables WHERE notebook_id='nb-00000000000000000000000000000001' ORDER BY created_at,id"
+  },
+  {
+   "sql": "SELECT table_id,COUNT(*) AS row_count,COALESCE(SUM(CASE WHEN projection_status IN ('pending','syncing') THEN 1 ELSE 0 END),0) AS projection_pending,COALESCE(SUM(CASE WHEN projection_status='failed' THEN 1 ELSE 0 END),0) AS projection_failed,MAX(updated_at) AS row_activity_at FROM knowhow_rows WHERE table_id IN (SELECT value FROM json_each('[\"khtbl-00000000000000000000000000000014\"]')) GROUP BY table_id"
+  },
+  {
+   "sql": "SELECT r.table_id,MAX(c.updated_at) AS cell_activity_at FROM knowhow_cells c JOIN knowhow_rows r ON r.id=c.row_id WHERE r.table_id IN (SELECT value FROM json_each('[\"khtbl-00000000000000000000000000000014\"]')) GROUP BY r.table_id"
+  },
+  {
+   "sql": "SELECT r.table_id,cc.cell_content_hash AS saved_hash,COALESCE(c.content_md,'') AS current_content_md,cc.updated_at FROM knowhow_cell_code cc JOIN knowhow_rows r ON r.id=cc.row_id LEFT JOIN knowhow_cells c ON c.row_id=cc.row_id AND c.column_id=cc.column_id WHERE r.table_id IN (SELECT value FROM json_each('[\"khtbl-00000000000000000000000000000014\"]'))"
+  },
+  {
+   "args": [
+    [
+     {
+      "cell_activity_at": "<ts>",
+      "code_inputs": [],
+      "created_at": "<ts>",
+      "created_by": "user-local",
+      "description": "",
+      "hidden_source_id": null,
+      "id": "khtbl-00000000000000000000000000000014",
+      "mutation_seq": 1,
+      "notebook_id": "nb-00000000000000000000000000000001",
+      "projection_failed": 0,
+      "projection_pending": 3,
+      "row_activity_at": "<ts>",
+      "row_count": 3,
+      "title": "时序优化方法",
+      "updated_at": "<ts>"
+     }
+    ],
+    "列出所有方法"
+   ],
+   "call": "fn.is_knowhow_enumeration_query",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "args": [
+    "列出所有方法",
+    "complete",
+    [
+     {
+      "cell_activity_at": "<ts>",
+      "code_inputs": [],
+      "created_at": "<ts>",
+      "created_by": "user-local",
+      "description": "",
+      "hidden_source_id": null,
+      "id": "khtbl-00000000000000000000000000000014",
+      "mutation_seq": 1,
+      "notebook_id": "nb-00000000000000000000000000000001",
+      "projection_failed": 0,
+      "projection_pending": 3,
+      "row_activity_at": "<ts>",
+      "row_count": 3,
+      "title": "时序优化方法",
+      "updated_at": "<ts>"
+     }
+    ]
+   ],
+   "call": "fn.supports_structured_knowhow_query",
+   "kwargs": {},
+   "ret": true
+  },
+  {
+   "args": [
+    "<_LegacyKnowhowStore>",
+    "nb-00000000000000000000000000000001",
+    "列出所有方法",
+    {
+     "dc:AskRetrievalLimits": {
+      "answer_element_items": 6,
+      "cell_excerpt_chars": 1000,
+      "chunk_context_chars": 30000,
+      "effort": "standard",
+      "enum_page_size": 50,
+      "enum_pages_per_run": 4,
+      "enum_rows_per_run": 200,
+      "inline_answer_rows": 100,
+      "kg_context_chars": 6000,
+      "max_initial_subqueries": 5,
+      "max_reasoning_steps": 8,
+      "overflow_semantics": "explicit_partial",
+      "ranked_final_cap": 36,
+      "ranked_final_floor": 20,
+      "ranked_per_aspect": 3,
+      "ranked_per_query_take": 8,
+      "structured_max_columns": 8,
+      "structured_max_pages": 50,
+      "structured_max_rows": 1250,
+      "structured_max_tables": 8,
+      "structured_page_size": 25,
+      "structured_payload_chars": 256000
+     }
+    }
+   ],
+   "call": "fn.enumerate_knowhow",
+   "kwargs": {
+    "cancel_event": {
+     "event": false
+    },
+    "catalog_snapshot": {
+     "fingerprint": [],
+     "known_tables": 1,
+     "known_total_rows": 3,
+     "tables": [
+      {
+       "cell_activity_at": "<ts>",
+       "code_inputs": [],
+       "created_at": "<ts>",
+       "created_by": "user-local",
+       "description": "",
+       "hidden_source_id": null,
+       "id": "khtbl-00000000000000000000000000000014",
+       "mutation_seq": 1,
+       "notebook_id": "nb-00000000000000000000000000000001",
+       "projection_failed": 0,
+       "projection_pending": 3,
+       "row_activity_at": "<ts>",
+       "row_count": 3,
+       "title": "时序优化方法",
+       "updated_at": "<ts>"
+      }
+     ]
+    },
+    "on_step": "<callable checked_pre_trace>"
+   },
+   "ret": {
+    "dc:StructuredEnumeration": {
+     "complete": true,
+     "known_tables": 1,
+     "known_total_rows": 3,
+     "result_sets": [
+      {
+       "pd:StructuredKnowhowResult": {
+        "columns": [
+         {
+          "id": "khcol-00000000000000000000000000000015",
+          "name": "方法",
+          "role": "anchor"
+         }
+        ],
+        "coverage": {
+         "complete": true,
+         "overflow_semantics": "",
+         "returned_rows": 3,
+         "scanned_rows": 3,
+         "total_rows": 3,
+         "truncated_reason": ""
+        },
+        "kind": "knowhow",
+        "rows": [
+         {
+          "cells": {
+           "khcol-00000000000000000000000000000015": "屏蔽走线"
+          },
+          "position": 0,
+          "row_id": "khrow-00000000000000000000000000000017"
+         },
+         {
+          "cells": {
+           "khcol-00000000000000000000000000000015": "插入缓冲"
+          },
+          "position": 1,
+          "row_id": "khrow-0000000000000000000000000000001a"
+         },
+         {
+          "cells": {
+           "khcol-00000000000000000000000000000015": "降低负载"
+          },
+          "position": 2,
+          "row_id": "khrow-0000000000000000000000000000001d"
+         }
+        ],
+        "table_id": "khtbl-00000000000000000000000000000014",
+        "title": "时序优化方法"
+       }
+      }
+     ],
+     "returned_rows": 3,
+     "scanned_rows": 3,
+     "selected_tables": 1,
+     "synthesis_complete": null,
+     "synthesis_rows": 0,
+     "truncated_reason": ""
+    }
+   }
+  },
+  {
+   "sql": "SELECT t.id,t.notebook_id,t.title,t.description,t.mutation_seq,(SELECT COUNT(*) FROM knowhow_rows rr WHERE rr.table_id=t.id) AS row_count,(SELECT COALESCE(MAX(ch.seq),0) FROM knowhow_changes ch WHERE ch.table_id=t.id) AS enumeration_seq FROM knowhow_tables t WHERE t.notebook_id = 'nb-00000000000000000000000000000001' AND t.id IN ('khtbl-00000000000000000000000000000014') ORDER BY t.id COLLATE BINARY"
+  },
+  {
+   "sql": "SELECT id,table_id,name,role,position FROM knowhow_columns WHERE table_id IN ('khtbl-00000000000000000000000000000014') ORDER BY table_id COLLATE BINARY,position,id COLLATE BINARY"
+  },
+  {
+   "sql": "SELECT COUNT(*) AS scope_total_rows,COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM knowhow_cells c JOIN knowhow_columns kc ON kc.id=c.column_id AND kc.table_id=r.table_id WHERE c.row_id=r.id AND c.content_md<>'' AND 1=0) THEN 1 ELSE 0 END),0) AS scope_nonempty_rows FROM knowhow_rows r JOIN knowhow_tables t ON t.id=r.table_id WHERE t.notebook_id = 'nb-00000000000000000000000000000001' AND t.id IN ('khtbl-00000000000000000000000000000014')"
+  },
+  {
+   "sql": "SELECT r.id,r.table_id,r.position FROM knowhow_rows r JOIN knowhow_tables t ON t.id=r.table_id WHERE t.notebook_id = 'nb-00000000000000000000000000000001' AND t.id IN ('khtbl-00000000000000000000000000000014') ORDER BY t.id COLLATE BINARY,r.position,r.id COLLATE BINARY LIMIT 2"
+  },
+  {
+   "sql": "SELECT c.row_id,c.column_id,c.content_md FROM knowhow_cells c JOIN knowhow_rows r ON r.id=c.row_id JOIN knowhow_columns kc ON kc.id=c.column_id AND kc.table_id=r.table_id WHERE c.row_id IN ('khrow-00000000000000000000000000000017') AND c.content_md<>'' AND 1=0 ORDER BY r.table_id COLLATE BINARY,r.position,r.id COLLATE BINARY,kc.position,kc.id COLLATE BINARY"
+  },
+  {
+   "sql": "SELECT t.id,t.notebook_id,t.title,t.description,t.mutation_seq,(SELECT COUNT(*) FROM knowhow_rows rr WHERE rr.table_id=t.id) AS row_count,(SELECT COALESCE(MAX(ch.seq),0) FROM knowhow_changes ch WHERE ch.table_id=t.id) AS enumeration_seq FROM knowhow_tables t WHERE t.notebook_id = 'nb-00000000000000000000000000000001' AND t.id IN ('khtbl-00000000000000000000000000000014') ORDER BY t.id COLLATE BINARY"
+  },
+  {
+   "sql": "SELECT id,table_id,name,role,position FROM knowhow_columns WHERE table_id IN ('khtbl-00000000000000000000000000000014') ORDER BY table_id COLLATE BINARY,position,id COLLATE BINARY"
+  },
+  {
+   "sql": "SELECT COUNT(*) AS scope_total_rows,COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM knowhow_cells c JOIN knowhow_columns kc ON kc.id=c.column_id AND kc.table_id=r.table_id WHERE c.row_id=r.id AND c.content_md<>'' AND c.column_id IN ('khcol-00000000000000000000000000000015')) THEN 1 ELSE 0 END),0) AS scope_nonempty_rows FROM knowhow_rows r JOIN knowhow_tables t ON t.id=r.table_id WHERE t.notebook_id = 'nb-00000000000000000000000000000001' AND t.id IN ('khtbl-00000000000000000000000000000014')"
+  },
+  {
+   "sql": "SELECT r.id,r.table_id,r.position FROM knowhow_rows r JOIN knowhow_tables t ON t.id=r.table_id WHERE t.notebook_id = 'nb-00000000000000000000000000000001' AND t.id IN ('khtbl-00000000000000000000000000000014') ORDER BY t.id COLLATE BINARY,r.position,r.id COLLATE BINARY LIMIT 26"
+  },
+  {
+   "sql": "SELECT c.row_id,c.column_id,c.content_md FROM knowhow_cells c JOIN knowhow_rows r ON r.id=c.row_id JOIN knowhow_columns kc ON kc.id=c.column_id AND kc.table_id=r.table_id WHERE c.row_id IN ('khrow-00000000000000000000000000000017','khrow-0000000000000000000000000000001a','khrow-0000000000000000000000000000001d') AND c.content_md<>'' AND c.column_id IN ('khcol-00000000000000000000000000000015') ORDER BY r.table_id COLLATE BINARY,r.position,r.id COLLATE BINARY,kc.position,kc.id COLLATE BINARY"
+  },
+  {
+   "args": [
+    {
+     "event": false
+    }
+   ],
+   "call": "fn.raise_if_cancelled",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "sql": "SELECT t.id,t.notebook_id,t.title,t.description,t.mutation_seq,(SELECT COUNT(*) FROM knowhow_rows rr WHERE rr.table_id=t.id) AS row_count,(SELECT COALESCE(MAX(ch.seq),0) FROM knowhow_changes ch WHERE ch.table_id=t.id) AS enumeration_seq FROM knowhow_tables t WHERE t.notebook_id = 'nb-00000000000000000000000000000001' AND t.id IN ('khtbl-00000000000000000000000000000014') ORDER BY t.id COLLATE BINARY"
+  },
+  {
+   "sql": "SELECT id,table_id,name,role,position FROM knowhow_columns WHERE table_id IN ('khtbl-00000000000000000000000000000014') ORDER BY table_id COLLATE BINARY,position,id COLLATE BINARY"
+  },
+  {
+   "sql": "SELECT COUNT(*) AS scope_total_rows,COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM knowhow_cells c JOIN knowhow_columns kc ON kc.id=c.column_id AND kc.table_id=r.table_id WHERE c.row_id=r.id AND c.content_md<>'' AND 1=0) THEN 1 ELSE 0 END),0) AS scope_nonempty_rows FROM knowhow_rows r JOIN knowhow_tables t ON t.id=r.table_id WHERE t.notebook_id = 'nb-00000000000000000000000000000001' AND t.id IN ('khtbl-00000000000000000000000000000014')"
+  },
+  {
+   "sql": "SELECT r.id,r.table_id,r.position FROM knowhow_rows r JOIN knowhow_tables t ON t.id=r.table_id WHERE t.notebook_id = 'nb-00000000000000000000000000000001' AND t.id IN ('khtbl-00000000000000000000000000000014') ORDER BY t.id COLLATE BINARY,r.position,r.id COLLATE BINARY LIMIT 2"
+  },
+  {
+   "sql": "SELECT c.row_id,c.column_id,c.content_md FROM knowhow_cells c JOIN knowhow_rows r ON r.id=c.row_id JOIN knowhow_columns kc ON kc.id=c.column_id AND kc.table_id=r.table_id WHERE c.row_id IN ('khrow-00000000000000000000000000000017') AND c.content_md<>'' AND 1=0 ORDER BY r.table_id COLLATE BINARY,r.position,r.id COLLATE BINARY,kc.position,kc.id COLLATE BINARY"
+  },
+  {
+   "sql": "SELECT id,notebook_id,title,description,created_at,updated_at,mutation_seq,hidden_source_id,created_by FROM knowhow_tables WHERE notebook_id='nb-00000000000000000000000000000001' ORDER BY created_at,id"
+  },
+  {
+   "sql": "SELECT table_id,COUNT(*) AS row_count,COALESCE(SUM(CASE WHEN projection_status IN ('pending','syncing') THEN 1 ELSE 0 END),0) AS projection_pending,COALESCE(SUM(CASE WHEN projection_status='failed' THEN 1 ELSE 0 END),0) AS projection_failed,MAX(updated_at) AS row_activity_at FROM knowhow_rows WHERE table_id IN (SELECT value FROM json_each('[\"khtbl-00000000000000000000000000000014\"]')) GROUP BY table_id"
+  },
+  {
+   "sql": "SELECT r.table_id,MAX(c.updated_at) AS cell_activity_at FROM knowhow_cells c JOIN knowhow_rows r ON r.id=c.row_id WHERE r.table_id IN (SELECT value FROM json_each('[\"khtbl-00000000000000000000000000000014\"]')) GROUP BY r.table_id"
+  },
+  {
+   "sql": "SELECT r.table_id,cc.cell_content_hash AS saved_hash,COALESCE(c.content_md,'') AS current_content_md,cc.updated_at FROM knowhow_cell_code cc JOIN knowhow_rows r ON r.id=cc.row_id LEFT JOIN knowhow_cells c ON c.row_id=cc.row_id AND c.column_id=cc.column_id WHERE r.table_id IN (SELECT value FROM json_each('[\"khtbl-00000000000000000000000000000014\"]'))"
+  },
+  {
+   "args": [
+    {
+     "dc:StructuredEnumeration": {
+      "complete": true,
+      "known_tables": 1,
+      "known_total_rows": 3,
+      "result_sets": [
+       {
+        "pd:StructuredKnowhowResult": {
+         "columns": [
+          {
+           "id": "khcol-00000000000000000000000000000015",
+           "name": "方法",
+           "role": "anchor"
+          }
+         ],
+         "coverage": {
+          "complete": true,
+          "overflow_semantics": "",
+          "returned_rows": 3,
+          "scanned_rows": 3,
+          "total_rows": 3,
+          "truncated_reason": ""
+         },
+         "kind": "knowhow",
+         "rows": [
+          {
+           "cells": {
+            "khcol-00000000000000000000000000000015": "屏蔽走线"
+           },
+           "position": 0,
+           "row_id": "khrow-00000000000000000000000000000017"
+          },
+          {
+           "cells": {
+            "khcol-00000000000000000000000000000015": "插入缓冲"
+           },
+           "position": 1,
+           "row_id": "khrow-0000000000000000000000000000001a"
+          },
+          {
+           "cells": {
+            "khcol-00000000000000000000000000000015": "降低负载"
+           },
+           "position": 2,
+           "row_id": "khrow-0000000000000000000000000000001d"
+          }
+         ],
+         "table_id": "khtbl-00000000000000000000000000000014",
+         "title": "时序优化方法"
+        }
+       }
+      ],
+      "returned_rows": 3,
+      "scanned_rows": 3,
+      "selected_tables": 1,
+      "synthesis_complete": null,
+      "synthesis_rows": 0,
+      "truncated_reason": ""
+     }
+    }
+   ],
+   "call": "fn.render_structured_answer",
+   "kwargs": {
+    "aggregate": false,
+    "cell_excerpt_chars": 1000,
+    "inline_rows": 100
+   },
+   "ret": [
+    "已完整读取 3/3 行 Knowhow 记录。",
+    "已完整读取 3/3 行 Knowhow 记录。\n\n### 时序优化方法\n- 1. 方法：屏蔽走线\n- 2. 方法：插入缓冲\n- 3. 方法：降低负载"
+   ]
+  },
+  {
+   "args": [
+    {
+     "event": false
+    }
+   ],
+   "call": "fn.raise_if_cancelled",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "args": [
+    {
+     "dc:ReasoningResponseDraft": {
+      "asked_at": "<ts>",
+      "baseline_manifest": null,
+      "conversation_id": "conv-00000000000000000000000000000022",
+      "evidence": null,
+      "job_id": "",
+      "notebook_id": "nb-00000000000000000000000000000001",
+      "question": "列出所有方法",
+      "response": {
+       "pd:AskResponse": {
+        "anchors": [],
+        "answer": "已完整读取 3/3 行 Knowhow 记录。\n\n### 时序优化方法\n- 1. 方法：屏蔽走线\n- 2. 方法：插入缓冲\n- 3. 方法：降低负载",
+        "answer_id": "",
+        "citations": [],
+        "conclusion": "已完整读取 3/3 行 Knowhow 记录。",
+        "conversation_id": "conv-00000000000000000000000000000022",
+        "evidence_level": "grounded",
+        "grounded": true,
+        "index_required": false,
+        "intent": {
+         "ambiguities": [],
+         "assumptions": [],
+         "clarification_answers": [],
+         "comparison_axes": [],
+         "completeness_required": true,
+         "confidence": "<float>",
+         "confirmed": true,
+         "constraints": [
+          "先进工艺"
+         ],
+         "entities": [
+          "版图"
+         ],
+         "excluded_topics": [],
+         "expected_output": "要点清单",
+         "high_level_keywords": [],
+         "intent_type": "explain",
+         "keyword_basis": "",
+         "low_level_keywords": [],
+         "mandatory_topics": [],
+         "needs_clarification": false,
+         "objective": "列出所有方法",
+         "resolved_question": "列出所有方法",
+         "result_scope": "complete"
+        },
+        "kg_required": false,
+        "llm_mode": "structured",
+        "mode": "reasoning",
+        "model_errors": [],
+        "reasoning_trace": [
+         {
+          "detail": {
+           "assumptions": [],
+           "completeness_required": true,
+           "constraints": [
+            "先进工艺"
+           ],
+           "entities": [
+            "版图"
+           ],
+           "excluded_topics": [],
+           "expected_output": "要点清单",
+           "mandatory_topics": [],
+           "resolved_question": "列出所有方法",
+           "result_scope": "complete",
+           "retrieval_effort": "standard"
+          },
+          "duration_ms": "<dur>",
+          "step_type": "intent",
+          "summary": "已按确认后的问题理解开始检索"
+         },
+         {
+          "detail": {
+           "known_total_rows": 3,
+           "page": 1,
+           "scanned_rows": 3,
+           "table_id": "khtbl-00000000000000000000000000000014"
+          },
+          "duration_ms": null,
+          "step_type": "enumerate",
+          "summary": "读取 3/3 行 Knowhow"
+         },
+         {
+          "detail": {
+           "complete": true,
+           "known_total_rows": 3,
+           "returned_rows": 3,
+           "scanned_rows": 3,
+           "truncated_reason": ""
+          },
+          "duration_ms": null,
+          "step_type": "answer",
+          "summary": "完整枚举 3 行"
+         }
+        ],
+        "related_knowledge": [],
+        "result_coverage": {
+         "complete": true,
+         "known_tables": 1,
+         "known_total_rows": 3,
+         "overflow_semantics": "",
+         "returned_rows": 3,
+         "scanned_rows": 3,
+         "selected_tables": 1,
+         "synthesis_complete": null,
+         "synthesis_rows": 0,
+         "truncated_reason": ""
+        },
+        "result_sets": [
+         {
+          "columns": [
+           {
+            "id": "khcol-00000000000000000000000000000015",
+            "name": "方法",
+            "role": "anchor"
+           }
+          ],
+          "coverage": {
+           "complete": true,
+           "overflow_semantics": "",
+           "returned_rows": 3,
+           "scanned_rows": 3,
+           "total_rows": 3,
+           "truncated_reason": ""
+          },
+          "kind": "knowhow",
+          "rows": [
+           {
+            "cells": {
+             "khcol-00000000000000000000000000000015": "屏蔽走线"
+            },
+            "position": 0,
+            "row_id": "khrow-00000000000000000000000000000017"
+           },
+           {
+            "cells": {
+             "khcol-00000000000000000000000000000015": "插入缓冲"
+            },
+            "position": 1,
+            "row_id": "khrow-0000000000000000000000000000001a"
+           },
+           {
+            "cells": {
+             "khcol-00000000000000000000000000000015": "降低负载"
+            },
+            "position": 2,
+            "row_id": "khrow-0000000000000000000000000000001d"
+           }
+          ],
+          "table_id": "khtbl-00000000000000000000000000000014",
+          "title": "时序优化方法"
+         }
+        ],
+        "retrieval_effort": "standard",
+        "retrieval_query": "列出所有方法\n\n用户确认的补充信息与问题契约：\n研究对象：版图\n约束条件：先进工艺\n期望输出：要点清单",
+        "top_relevance": "<float>"
+       }
+      },
+      "user_id": "user-local"
+     }
+    },
+    {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<SqliteDatabase>",
+      "retrieval_run": "<RetrievalRunState>",
+      "scope": {
+       "dc:ActiveSourceScope": {
+        "_skipped_libraries": [],
+        "_universe_read_order": [
+         [
+          "src-00000000000000000000000000000002",
+          "src-00000000000000000000000000000006"
+         ],
+         []
+        ],
+        "_verdict_probes": {
+         "dc:CeilingVerdictProbes": {
+          "foreign_hidden": "<callable call>",
+          "universe_digests": "<callable call>"
+         }
+        },
+        "base_mode": "exclude",
+        "base_narrowed": null,
+        "base_notebook_ids": [],
+        "base_provided": false,
+        "ceilings_total": true,
+        "hidden_source_ids": [],
+        "mode": "include",
+        "narrowed": false,
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "notebook_source_ceilings": [],
+        "owner_id": "user-local",
+        "source_ids": [
+         "src-00000000000000000000000000000002",
+         "src-00000000000000000000000000000006"
+        ],
+        "source_provided": false,
+        "subjectless": false,
+        "withheld_hidden_source_ids": []
+       }
+      },
+      "trace_sink": null
+     }
+    },
+    {
+     "dc:PreparedReasoningAsk": {
+      "asked_at": "<ts>",
+      "conversation_id": "conv-00000000000000000000000000000022",
+      "history": "",
+      "intent_json": "{\"objective\":\"列出所有方法\",\"resolved_question\":\"列出所有方法\",\"intent_type\":\"explain\",\"result_scope\":\"complete\",\"completeness_required\":true,\"entities\":[\"版图\"],\"mandatory_topics\":[],\"high_level_keywords\":[],\"low_level_keywords\":[],\"keyword_basis\":\"\",\"comparison_axes\":[],\"constraints\":[\"先进工艺\"],\"excluded_topics\":[],\"expected_output\":\"要点清单\",\"assumptions\":[],\"ambiguities\":[],\"confidence\":0.0,\"needs_clarification\":false,\"confirmed\":true,\"clarification_answers\":[]}",
+      "intent_keywords": "",
+      "intent_projection": {
+       "dc:ReasoningIntentProjection": {
+        "assumptions": [],
+        "completeness_required": true,
+        "constraints": [
+         "先进工艺"
+        ],
+        "entities": [
+         "版图"
+        ],
+        "excluded_topics": [],
+        "expected_output": "要点清单",
+        "mandatory_topics": [],
+        "resolved_question": "列出所有方法",
+        "result_scope": "complete",
+        "retrieval_effort": "standard"
+       }
+      },
+      "intent_queries": [
+       "列出所有方法\n\n用户确认的补充信息与问题契约：\n研究对象：版图\n约束条件：先进工艺\n期望输出：要点清单"
+      ],
+      "intent_trace_duration_ms": "<dur>",
+      "job_id": "",
+      "limits": {
+       "dc:AskRetrievalLimits": {
+        "answer_element_items": 6,
+        "cell_excerpt_chars": 1000,
+        "chunk_context_chars": 30000,
+        "effort": "standard",
+        "enum_page_size": 50,
+        "enum_pages_per_run": 4,
+        "enum_rows_per_run": 200,
+        "inline_answer_rows": 100,
+        "kg_context_chars": 6000,
+        "max_initial_subqueries": 5,
+        "max_reasoning_steps": 8,
+        "overflow_semantics": "explicit_partial",
+        "ranked_final_cap": 36,
+        "ranked_final_floor": 20,
+        "ranked_per_aspect": 3,
+        "ranked_per_query_take": 8,
+        "structured_max_columns": 8,
+        "structured_max_pages": 50,
+        "structured_max_rows": 1250,
+        "structured_max_tables": 8,
+        "structured_page_size": 25,
+        "structured_payload_chars": 256000
+       }
+      },
+      "notebook_id": "nb-00000000000000000000000000000001",
+      "output": "answer",
+      "question": "列出所有方法",
+      "report_followup": null,
+      "research_question": "列出所有方法\n\n用户确认的补充信息与问题契约：\n研究对象：版图\n约束条件：先进工艺\n期望输出：要点清单",
+      "retrieval_effort": "standard",
+      "style_block": "",
+      "user_id": "user-local"
+     }
+    }
+   ],
+   "call": "self._commit_reasoning_draft",
+   "kwargs": {},
+   "ret": {
+    "dc:CommittedReasoningAnswer": {
+     "baseline_manifest": null,
+     "evidence": null,
+     "response": {
+      "pd:AskResponse": {
+       "anchors": [],
+       "answer": "已完整读取 3/3 行 Knowhow 记录。\n\n### 时序优化方法\n- 1. 方法：屏蔽走线\n- 2. 方法：插入缓冲\n- 3. 方法：降低负载",
+       "answer_id": "ans-00000000000000000000000000000023",
+       "answered_at": "<ts>",
+       "asked_at": "<ts>",
+       "citations": [],
+       "conclusion": "已完整读取 3/3 行 Knowhow 记录。",
+       "conversation_id": "conv-00000000000000000000000000000022",
+       "evidence_level": "grounded",
+       "grounded": true,
+       "index_required": false,
+       "intent": {
+        "ambiguities": [],
+        "assumptions": [],
+        "clarification_answers": [],
+        "comparison_axes": [],
+        "completeness_required": true,
+        "confidence": "<float>",
+        "confirmed": true,
+        "constraints": [
+         "先进工艺"
+        ],
+        "entities": [
+         "版图"
+        ],
+        "excluded_topics": [],
+        "expected_output": "要点清单",
+        "high_level_keywords": [],
+        "intent_type": "explain",
+        "keyword_basis": "",
+        "low_level_keywords": [],
+        "mandatory_topics": [],
+        "needs_clarification": false,
+        "objective": "列出所有方法",
+        "resolved_question": "列出所有方法",
+        "result_scope": "complete"
+       },
+       "kg_required": false,
+       "llm_mode": "structured",
+       "mode": "reasoning",
+       "model_errors": [],
+       "reasoning_trace": [
+        {
+         "detail": {
+          "assumptions": [],
+          "completeness_required": true,
+          "constraints": [
+           "先进工艺"
+          ],
+          "entities": [
+           "版图"
+          ],
+          "excluded_topics": [],
+          "expected_output": "要点清单",
+          "mandatory_topics": [],
+          "resolved_question": "列出所有方法",
+          "result_scope": "complete",
+          "retrieval_effort": "standard"
+         },
+         "duration_ms": "<dur>",
+         "step_type": "intent",
+         "summary": "已按确认后的问题理解开始检索"
+        },
+        {
+         "detail": {
+          "known_total_rows": 3,
+          "page": 1,
+          "scanned_rows": 3,
+          "table_id": "khtbl-00000000000000000000000000000014"
+         },
+         "duration_ms": null,
+         "step_type": "enumerate",
+         "summary": "读取 3/3 行 Knowhow"
+        },
+        {
+         "detail": {
+          "complete": true,
+          "known_total_rows": 3,
+          "returned_rows": 3,
+          "scanned_rows": 3,
+          "truncated_reason": ""
+         },
+         "duration_ms": null,
+         "step_type": "answer",
+         "summary": "完整枚举 3 行"
+        }
+       ],
+       "related_knowledge": [],
+       "result_coverage": {
+        "complete": true,
+        "known_tables": 1,
+        "known_total_rows": 3,
+        "overflow_semantics": "",
+        "returned_rows": 3,
+        "scanned_rows": 3,
+        "selected_tables": 1,
+        "synthesis_complete": null,
+        "synthesis_rows": 0,
+        "truncated_reason": ""
+       },
+       "result_sets": [
+        {
+         "columns": [
+          {
+           "id": "khcol-00000000000000000000000000000015",
+           "name": "方法",
+           "role": "anchor"
+          }
+         ],
+         "coverage": {
+          "complete": true,
+          "overflow_semantics": "",
+          "returned_rows": 3,
+          "scanned_rows": 3,
+          "total_rows": 3,
+          "truncated_reason": ""
+         },
+         "kind": "knowhow",
+         "rows": [
+          {
+           "cells": {
+            "khcol-00000000000000000000000000000015": "屏蔽走线"
+           },
+           "position": 0,
+           "row_id": "khrow-00000000000000000000000000000017"
+          },
+          {
+           "cells": {
+            "khcol-00000000000000000000000000000015": "插入缓冲"
+           },
+           "position": 1,
+           "row_id": "khrow-0000000000000000000000000000001a"
+          },
+          {
+           "cells": {
+            "khcol-00000000000000000000000000000015": "降低负载"
+           },
+           "position": 2,
+           "row_id": "khrow-0000000000000000000000000000001d"
+          }
+         ],
+         "table_id": "khtbl-00000000000000000000000000000014",
+         "title": "时序优化方法"
+        }
+       ],
+       "retrieval_effort": "standard",
+       "retrieval_query": "列出所有方法\n\n用户确认的补充信息与问题契约：\n研究对象：版图\n约束条件：先进工艺\n期望输出：要点清单",
+       "top_relevance": "<float>"
+      }
+     }
+    }
+   }
+  },
+  {
+   "args": [
+    {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<SqliteDatabase>",
+      "retrieval_run": "<RetrievalRunState>",
+      "scope": {
+       "dc:ActiveSourceScope": {
+        "_skipped_libraries": [],
+        "_universe_read_order": [
+         [
+          "src-00000000000000000000000000000002",
+          "src-00000000000000000000000000000006"
+         ],
+         []
+        ],
+        "_verdict_probes": {
+         "dc:CeilingVerdictProbes": {
+          "foreign_hidden": "<callable call>",
+          "universe_digests": "<callable call>"
+         }
+        },
+        "base_mode": "exclude",
+        "base_narrowed": null,
+        "base_notebook_ids": [],
+        "base_provided": false,
+        "ceilings_total": true,
+        "hidden_source_ids": [],
+        "mode": "include",
+        "narrowed": false,
+        "notebook_id": "nb-00000000000000000000000000000001",
+        "notebook_source_ceilings": [],
+        "owner_id": "user-local",
+        "source_ids": [
+         "src-00000000000000000000000000000002",
+         "src-00000000000000000000000000000006"
+        ],
+        "source_provided": false,
+        "subjectless": false,
+        "withheld_hidden_source_ids": []
+       }
+      },
+      "trace_sink": null
+     }
+    },
+    "before-persist"
+   ],
+   "call": "self._assert_reasoning_runtime",
+   "kwargs": {
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "user_id": "user-local"
+   },
+   "ret": null
+  },
+  {
+   "args": [
+    {
+     "event": false
+    }
+   ],
+   "call": "fn.raise_if_cancelled",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "args": [
+    "nb-00000000000000000000000000000001",
+    "列出所有方法",
+    {
+     "pd:AskResponse": {
+      "anchors": [],
+      "answer": "已完整读取 3/3 行 Knowhow 记录。\n\n### 时序优化方法\n- 1. 方法：屏蔽走线\n- 2. 方法：插入缓冲\n- 3. 方法：降低负载",
+      "answer_id": "",
+      "citations": [],
+      "conclusion": "已完整读取 3/3 行 Knowhow 记录。",
+      "conversation_id": "conv-00000000000000000000000000000022",
+      "evidence_level": "grounded",
+      "grounded": true,
+      "index_required": false,
+      "intent": {
+       "ambiguities": [],
+       "assumptions": [],
+       "clarification_answers": [],
+       "comparison_axes": [],
+       "completeness_required": true,
+       "confidence": "<float>",
+       "confirmed": true,
+       "constraints": [
+        "先进工艺"
+       ],
+       "entities": [
+        "版图"
+       ],
+       "excluded_topics": [],
+       "expected_output": "要点清单",
+       "high_level_keywords": [],
+       "intent_type": "explain",
+       "keyword_basis": "",
+       "low_level_keywords": [],
+       "mandatory_topics": [],
+       "needs_clarification": false,
+       "objective": "列出所有方法",
+       "resolved_question": "列出所有方法",
+       "result_scope": "complete"
+      },
+      "kg_required": false,
+      "llm_mode": "structured",
+      "mode": "reasoning",
+      "model_errors": [],
+      "reasoning_trace": [
+       {
+        "detail": {
+         "assumptions": [],
+         "completeness_required": true,
+         "constraints": [
+          "先进工艺"
+         ],
+         "entities": [
+          "版图"
+         ],
+         "excluded_topics": [],
+         "expected_output": "要点清单",
+         "mandatory_topics": [],
+         "resolved_question": "列出所有方法",
+         "result_scope": "complete",
+         "retrieval_effort": "standard"
+        },
+        "duration_ms": "<dur>",
+        "step_type": "intent",
+        "summary": "已按确认后的问题理解开始检索"
+       },
+       {
+        "detail": {
+         "known_total_rows": 3,
+         "page": 1,
+         "scanned_rows": 3,
+         "table_id": "khtbl-00000000000000000000000000000014"
+        },
+        "duration_ms": null,
+        "step_type": "enumerate",
+        "summary": "读取 3/3 行 Knowhow"
+       },
+       {
+        "detail": {
+         "complete": true,
+         "known_total_rows": 3,
+         "returned_rows": 3,
+         "scanned_rows": 3,
+         "truncated_reason": ""
+        },
+        "duration_ms": null,
+        "step_type": "answer",
+        "summary": "完整枚举 3 行"
+       }
+      ],
+      "related_knowledge": [],
+      "result_coverage": {
+       "complete": true,
+       "known_tables": 1,
+       "known_total_rows": 3,
+       "overflow_semantics": "",
+       "returned_rows": 3,
+       "scanned_rows": 3,
+       "selected_tables": 1,
+       "synthesis_complete": null,
+       "synthesis_rows": 0,
+       "truncated_reason": ""
+      },
+      "result_sets": [
+       {
+        "columns": [
+         {
+          "id": "khcol-00000000000000000000000000000015",
+          "name": "方法",
+          "role": "anchor"
+         }
+        ],
+        "coverage": {
+         "complete": true,
+         "overflow_semantics": "",
+         "returned_rows": 3,
+         "scanned_rows": 3,
+         "total_rows": 3,
+         "truncated_reason": ""
+        },
+        "kind": "knowhow",
+        "rows": [
+         {
+          "cells": {
+           "khcol-00000000000000000000000000000015": "屏蔽走线"
+          },
+          "position": 0,
+          "row_id": "khrow-00000000000000000000000000000017"
+         },
+         {
+          "cells": {
+           "khcol-00000000000000000000000000000015": "插入缓冲"
+          },
+          "position": 1,
+          "row_id": "khrow-0000000000000000000000000000001a"
+         },
+         {
+          "cells": {
+           "khcol-00000000000000000000000000000015": "降低负载"
+          },
+          "position": 2,
+          "row_id": "khrow-0000000000000000000000000000001d"
+         }
+        ],
+        "table_id": "khtbl-00000000000000000000000000000014",
+        "title": "时序优化方法"
+       }
+      ],
+      "retrieval_effort": "standard",
+      "retrieval_query": "列出所有方法\n\n用户确认的补充信息与问题契约：\n研究对象：版图\n约束条件：先进工艺\n期望输出：要点清单",
+      "top_relevance": "<float>"
+     }
+    },
+    "conv-00000000000000000000000000000022"
+   ],
+   "call": "self._save_answer",
+   "kwargs": {
+    "asked_at": "<ts>",
+    "job_id": "",
+    "user_id": "user-local"
+   },
+   "ret": "ans-00000000000000000000000000000023"
+  },
+  {
+   "sql": "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'"
+  },
+  {
+   "sql": "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch FROM unified_kg_state WHERE notebook_id='nb-00000000000000000000000000000001'"
+  },
+  {
+   "sql": "BEGIN IMMEDIATE"
+  },
+  {
+   "sql": "SELECT id FROM conversations WHERE id='conv-00000000000000000000000000000022' AND notebook_id='nb-00000000000000000000000000000001' AND created_by='user-local'"
+  },
+  {
+   "sql": "INSERT INTO answers (id, notebook_id, question, payload, created_at, conversation_id) VALUES ('ans-00000000000000000000000000000023', 'nb-00000000000000000000000000000001', '列出所有方法', '{\"answer_id\": \"ans-00000000000000000000000000000023\", \"asked_at\": \"<ts>\", \"answered_at\": \"<ts>\", \"conclusion\": \"已完整读取 3/3 行 Knowhow 记录。\", \"answer\": \"已完整读取 3/3 行 Knowhow 记录。\\n\\n### 时序优化方法\\n- 1. 方法：屏蔽走线\\n- 2. 方法：插入缓冲\\n- 3. 方法：降低负载\", \"grounded\": true, \"evidence_level\": \"grounded\", \"anchors\": [], \"related_knowledge\": [], \"citations\": [], \"llm_mode\": \"structured\", \"mode\": \"reasoning\", \"conversation_id\": \"conv-00000000000000000000000000000022\", \"retrieval_query\": \"列出所有方法\\n\\n用户确认的补充信息与问题契约：\\n研究对象：版图\\n约束条件：先进工艺\\n期望输出：要点清单\", \"top_relevance\": 0.0, \"reasoning_trace\": [{\"step_type\": \"intent\", \"summary\": \"已按确认后的问题理解开始检索\", \"detail\": {\"resolved_question\": \"列出所有方法\", \"result_scope\": \"complete\", \"completeness_required\": true, \"retrieval_effort\": \"standard\", \"entities\": [\"版图\"], \"constraints\": [\"先进工艺\"], \"excluded_topics\": [], \"assumptions\": [], \"expected_output\": \"要点清单\", \"mandatory_topics\": []}, \"duration_ms\": \"<dur>\"}, {\"step_type\": \"enumerate\", \"summary\": \"读取 3/3 行 Knowhow\", \"detail\": {\"table_id\": \"khtbl-00000000000000000000000000000014\", \"page\": 1, \"scanned_rows\": 3, \"known_total_rows\": 3}, \"duration_ms\": null}, {\"step_type\": \"answer\", \"summary\": \"完整枚举 3 行\", \"detail\": {\"complete\": true, \"scanned_rows\": 3, \"returned_rows\": 3, \"known_total_rows\": 3, \"truncated_reason\": \"\"}, \"duration_ms\": null}], \"intent\": {\"objective\": \"列出所有方法\", \"resolved_question\": \"列出所有方法\", \"intent_type\": \"explain\", \"result_scope\": \"complete\", \"completeness_required\": true, \"entities\": [\"版图\"], \"mandatory_topics\": [], \"high_level_keywords\": [], \"low_level_keywords\": [], \"keyword_basis\": \"\", \"comparison_axes\": [], \"constraints\": [\"先进工艺\"], \"excluded_topics\": [], \"expected_output\": \"要点清单\", \"assumptions\": [], \"ambiguities\": [], \"confidence\": 0.0, \"needs_clarification\": false, \"confirmed\": true, \"clarification_answers\": []}, \"retrieval_effort\": \"standard\", \"result_sets\": [{\"kind\": \"knowhow\", \"table_id\": \"khtbl-00000000000000000000000000000014\", \"title\": \"时序优化方法\", \"columns\": [{\"id\": \"khcol-00000000000000000000000000000015\", \"name\": \"方法\", \"role\": \"anchor\"}], \"rows\": [{\"row_id\": \"khrow-00000000000000000000000000000017\", \"position\": 0, \"cells\": {\"khcol-00000000000000000000000000000015\": \"屏蔽走线\"}}, {\"row_id\": \"khrow-0000000000000000000000000000001a\", \"position\": 1, \"cells\": {\"khcol-00000000000000000000000000000015\": \"插入缓冲\"}}, {\"row_id\": \"khrow-0000000000000000000000000000001d\", \"position\": 2, \"cells\": {\"khcol-00000000000000000000000000000015\": \"降低负载\"}}], \"coverage\": {\"total_rows\": 3, \"scanned_rows\": 3, \"returned_rows\": 3, \"complete\": true, \"truncated_reason\": \"\", \"overflow_semantics\": \"\"}}], \"result_coverage\": {\"known_tables\": 1, \"selected_tables\": 1, \"known_total_rows\": 3, \"scanned_rows\": 3, \"returned_rows\": 3, \"complete\": true, \"truncated_reason\": \"\", \"overflow_semantics\": \"\", \"synthesis_rows\": 0, \"synthesis_complete\": null}, \"kg_required\": false, \"index_required\": false, \"model_errors\": []}', '<ts>', 'conv-00000000000000000000000000000022')"
+  },
+  {
+   "sql": "COMMIT"
+  },
+  {
+   "event": {
+    "chunk_fts_circuit_skips": 0,
+    "chunk_fts_timeouts": 0,
+    "embedding_errors": 0,
+    "embedding_hits": 0,
+    "embedding_requests": 0,
+    "fanout_acquires": 0,
+    "fanout_wait_ms": "<dur>",
+    "fanout_waits": 0,
+    "kind": "retrieval_run_stats",
+    "run_id": "rr-000000000000",
+    "run_kind": "ask_reasoning"
+   }
+  }
+ ],
+ "unordered": [],
+ "worker": []
+}

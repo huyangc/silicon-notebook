@@ -1,0 +1,374 @@
+{
+ "db_diff": {
+  "conversations": {
+   "added": [
+    {
+     "created_at": "<ts>",
+     "created_by": "user-local",
+     "id": "conv-00000000000000000000000000000014",
+     "notebook_id": "nb-00000000000000000000000000000001",
+     "share_token": null,
+     "shared_through_at": null,
+     "shared_through_id": null,
+     "title": "版图设计要点有哪些",
+     "updated_at": "<ts>"
+    }
+   ],
+   "removed": []
+  }
+ },
+ "logs": [],
+ "outcome": {
+  "returned": {
+   "prepared": "StageBoundaryError: invalid prepared Ask reasoning input",
+   "runtime": "StageBoundaryError: invalid Ask reasoning runtime"
+  }
+ },
+ "stream": [],
+ "timeline": [
+  {
+   "args": [
+    "not prepared",
+    {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<PostgresDatabase>",
+      "retrieval_run": null,
+      "scope": null,
+      "trace_sink": null
+     }
+    }
+   ],
+   "call": "self._run_reasoning_stage",
+   "kwargs": {},
+   "raised": "StageBoundaryError: invalid prepared Ask reasoning input"
+  },
+  {
+   "args": [
+    "nb-00000000000000000000000000000001",
+    {
+     "pd:AskRequest": {
+      "asked_at": "<ts>",
+      "base_scope": null,
+      "client_request_id": null,
+      "conversation_id": null,
+      "intent": null,
+      "mode": "reasoning",
+      "question": "版图设计要点有哪些",
+      "report_id": null,
+      "retrieval_effort": "standard",
+      "scenario": {},
+      "source_scope": null
+     }
+    }
+   ],
+   "call": "self._prepare_reasoning_ask",
+   "kwargs": {
+    "job_id": "",
+    "runtime": {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<PostgresDatabase>",
+      "retrieval_run": null,
+      "scope": null,
+      "trace_sink": null
+     }
+    },
+    "user_id": "user-local"
+   },
+   "ret": {
+    "dc:PreparedReasoningAsk": {
+     "asked_at": "<ts>",
+     "conversation_id": "conv-00000000000000000000000000000014",
+     "history": "",
+     "intent_json": "{\"objective\":\"版图设计要点有哪些\",\"resolved_question\":\"版图设计要点有哪些\",\"intent_type\":\"other\",\"result_scope\":\"ranked\",\"completeness_required\":false,\"entities\":[],\"mandatory_topics\":[],\"high_level_keywords\":[],\"low_level_keywords\":[],\"keyword_basis\":\"\",\"comparison_axes\":[],\"constraints\":[],\"excluded_topics\":[],\"expected_output\":\"\",\"assumptions\":[],\"ambiguities\":[],\"confidence\":0.0,\"needs_clarification\":false,\"confirmed\":true,\"clarification_answers\":[]}",
+     "intent_keywords": "",
+     "intent_projection": {
+      "dc:ReasoningIntentProjection": {
+       "assumptions": [],
+       "completeness_required": false,
+       "constraints": [],
+       "entities": [],
+       "excluded_topics": [],
+       "expected_output": "",
+       "mandatory_topics": [],
+       "resolved_question": "版图设计要点有哪些",
+       "result_scope": "ranked",
+       "retrieval_effort": "standard"
+      }
+     },
+     "intent_queries": [],
+     "intent_trace_duration_ms": null,
+     "job_id": "",
+     "limits": {
+      "dc:AskRetrievalLimits": {
+       "answer_element_items": 6,
+       "cell_excerpt_chars": 1000,
+       "chunk_context_chars": 30000,
+       "effort": "standard",
+       "enum_page_size": 50,
+       "enum_pages_per_run": 4,
+       "enum_rows_per_run": 200,
+       "inline_answer_rows": 100,
+       "kg_context_chars": 6000,
+       "max_initial_subqueries": 5,
+       "max_reasoning_steps": 8,
+       "overflow_semantics": "explicit_partial",
+       "ranked_final_cap": 36,
+       "ranked_final_floor": 20,
+       "ranked_per_aspect": 3,
+       "ranked_per_query_take": 8,
+       "structured_max_columns": 8,
+       "structured_max_pages": 50,
+       "structured_max_rows": 1250,
+       "structured_max_tables": 8,
+       "structured_page_size": 25,
+       "structured_payload_chars": 256000
+      }
+     },
+     "notebook_id": "nb-00000000000000000000000000000001",
+     "output": "answer",
+     "question": "版图设计要点有哪些",
+     "report_followup": null,
+     "research_question": "版图设计要点有哪些",
+     "retrieval_effort": "standard",
+     "style_block": "",
+     "user_id": "user-local"
+    }
+   }
+  },
+  {
+   "args": [
+    {
+     "dc:ReasoningRetrievalRuntime": {
+      "cancellation": {
+       "event": false
+      },
+      "connection_probe": "<PostgresDatabase>",
+      "retrieval_run": null,
+      "scope": null,
+      "trace_sink": null
+     }
+    },
+    "prepare"
+   ],
+   "call": "self._assert_reasoning_runtime",
+   "kwargs": {
+    "notebook_id": "nb-00000000000000000000000000000001",
+    "user_id": "user-local"
+   },
+   "ret": null
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT notebooks.*, u.username AS _owner_username, COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') AS _published_pipeline_version, EXISTS(SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id = notebooks.id AND ng.principal_type IN ('group','group_admins')) AS _shared_to_groups FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by LEFT JOIN unified_kg_state ip ON ip.notebook_id=notebooks.id WHERE notebooks.id = %s AND notebooks.status NOT IN ('copying','deleting','importing','pending_delete')"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT id FROM sources WHERE notebook_id=%s AND source_type = 'memory'"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT COUNT(*) AS count FROM sources WHERE notebook_id = %s AND source_type NOT IN ('knowhow','memory')"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001",
+    "nb-00000000000000000000000000000001",
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "WITH total AS (SELECT object_type, status, COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=%s GROUP BY object_type, status), memory AS (SELECT mo.object_type, mo.status, COUNT(*) AS c FROM knowledge_objects mo WHERE mo.source_id = ANY(ARRAY(SELECT s.id FROM sources s WHERE s.notebook_id=%s AND s.source_type = 'memory')) AND mo.notebook_id=%s GROUP BY mo.object_type, mo.status) SELECT t.object_type, t.status, t.c - COALESCE(m.c, 0) AS c, COALESCE(m.c, 0) AS m FROM total t LEFT JOIN memory m ON m.object_type = t.object_type AND m.status = t.status"
+  },
+  {
+   "params": [
+    null,
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT b.id AS id, b.name AS name, b.tier AS tier, EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id) AS has_kg FROM notebook_bases e JOIN notebooks b ON b.id = e.base_notebook_id JOIN notebooks a ON a.id = e.notebook_id CROSS JOIN (SELECT NULLIF(CAST(%s AS text), '') AS uid) v WHERE e.notebook_id = %s AND b.id != e.notebook_id AND ((b.status NOT IN ('copying','deleting','importing','pending_delete') AND (b.tier = 'base' OR b.created_by = a.created_by OR EXISTS (SELECT 1 FROM notebook_grants nge WHERE nge.notebook_id=b.id AND nge.principal_type='everyone') OR ((EXISTS (SELECT 1 FROM notebook_members nm WHERE nm.notebook_id=b.id AND nm.user_id=a.created_by) OR EXISTS (SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=b.id AND ((ng.principal_type='user' AND ng.principal_id=a.created_by) OR (ng.principal_type='group' AND EXISTS (SELECT 1 FROM group_members ngm WHERE ngm.group_id=ng.principal_id AND ngm.user_id=a.created_by)) OR (ng.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members nga WHERE nga.group_id=ng.principal_id AND nga.user_id=a.created_by AND nga.role='admin'))))) AND (NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id) AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))))) AND (b.tier = 'base' OR (b.created_by=v.uid OR EXISTS (SELECT 1 FROM notebook_members vm WHERE vm.notebook_id=b.id AND vm.user_id=v.uid) OR EXISTS (SELECT 1 FROM notebook_grants vg WHERE vg.notebook_id=b.id AND ((vg.principal_type='user' AND vg.principal_id=v.uid) OR (vg.principal_type='group' AND EXISTS (SELECT 1 FROM group_members vgm WHERE vgm.group_id=vg.principal_id AND vgm.user_id=v.uid)) OR (vg.principal_type='group_admins' AND EXISTS (SELECT 1 FROM group_members vga WHERE vga.group_id=vg.principal_id AND vga.user_id=v.uid AND vga.role='admin')) OR vg.principal_type='everyone'))))) ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name COLLATE \"C\", b.id COLLATE \"C\""
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id=%s) AS exists"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT COUNT(*) AS c FROM sources s JOIN LATERAL (SELECT 1 AS found FROM source_elements e WHERE e.source_id=s.id LIMIT 1) parsed ON TRUE LEFT JOIN LATERAL (SELECT er.status,er.error_message FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' ORDER BY er.created_at DESC,er.ordinal DESC LIMIT 1) latest_kg ON TRUE LEFT JOIN LATERAL (SELECT 1 AS found FROM knowledge_objects k WHERE k.source_id=s.id AND k.source_id!='' LIMIT 1) source_kg ON TRUE WHERE s.notebook_id=%s AND s.source_type NOT IN ('knowhow','memory') AND s.source_type <> 'promotion' AND (source_kg.found IS NULL OR COALESCE(latest_kg.status,'completed')!='completed' OR COALESCE(latest_kg.error_message,'') ~ 'windows_failed=[1-9][0-9]*/[0-9]+' OR strpos(COALESCE(latest_kg.error_message,''),'retry_incomplete=1')>0) AND NOT (COALESCE(latest_kg.status,'')='completed' AND starts_with(COALESCE(latest_kg.error_message,''),'kg objects=0 ') AND COALESCE(latest_kg.error_message,'') !~ 'windows_failed=[1-9][0-9]*/[0-9]+')"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM chunks WHERE notebook_id=%s) AS exists"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT EXISTS(SELECT 1 FROM sources s WHERE s.notebook_id=%s AND s.source_type NOT IN ('knowhow','memory') AND s.source_type <> 'promotion' AND s.doc_type IN ('','academic_paper') AND s.parse_status IN ('extracted','extracting','parsed') AND NOT EXISTS(SELECT 1 FROM source_paper_meta m WHERE m.source_id=s.id)) AS exists"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT * FROM kg_build_jobs WHERE notebook_id=%s ORDER BY created_at DESC,ordinal DESC LIMIT 1"
+  },
+  {
+   "params": [
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "SELECT nb.created_by AS owner_id,u.role AS owner_role FROM notebooks nb LEFT JOIN users u ON u.id=nb.created_by WHERE nb.id=%s"
+  },
+  {
+   "params": [
+    "user-local"
+   ],
+   "sql": "SELECT upload_document_limit FROM user_profiles WHERE user_id=%s"
+  },
+  {
+   "params": [
+    "upload_document_limit_default"
+   ],
+   "sql": "SELECT value FROM app_settings WHERE key=%s"
+  },
+  {
+   "args": [
+    {
+     "event": false
+    }
+   ],
+   "call": "fn.raise_if_cancelled",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "conv-00000000000000000000000000000014",
+    "nb-00000000000000000000000000000001",
+    "版图设计要点有哪些",
+    "user-local",
+    "<ts>",
+    "<ts>",
+    "nb-00000000000000000000000000000001"
+   ],
+   "sql": "INSERT INTO conversations (id, notebook_id, title, created_by, created_at, updated_at) SELECT %s, %s, %s, %s, %s, %s WHERE EXISTS (SELECT 1 FROM notebooks WHERE id = %s AND status NOT IN ('copying','deleting','importing','pending_delete'))"
+  },
+  {
+   "params": [
+    "conv-00000000000000000000000000000014"
+   ],
+   "sql": "SELECT question, payload FROM answers WHERE conversation_id = %s ORDER BY created_at ASC, ordinal ASC"
+  },
+  {
+   "args": [
+    {
+     "event": false
+    }
+   ],
+   "call": "fn.raise_if_cancelled",
+   "kwargs": {},
+   "ret": null
+  },
+  {
+   "params": [
+    "user-local"
+   ],
+   "sql": "SELECT search_profile_json FROM user_profiles WHERE user_id=%s"
+  },
+  {
+   "args": [
+    {
+     "dc:PreparedReasoningAsk": {
+      "asked_at": "<ts>",
+      "conversation_id": "conv-00000000000000000000000000000014",
+      "history": "",
+      "intent_json": "{\"objective\":\"版图设计要点有哪些\",\"resolved_question\":\"版图设计要点有哪些\",\"intent_type\":\"other\",\"result_scope\":\"ranked\",\"completeness_required\":false,\"entities\":[],\"mandatory_topics\":[],\"high_level_keywords\":[],\"low_level_keywords\":[],\"keyword_basis\":\"\",\"comparison_axes\":[],\"constraints\":[],\"excluded_topics\":[],\"expected_output\":\"\",\"assumptions\":[],\"ambiguities\":[],\"confidence\":0.0,\"needs_clarification\":false,\"confirmed\":true,\"clarification_answers\":[]}",
+      "intent_keywords": "",
+      "intent_projection": {
+       "dc:ReasoningIntentProjection": {
+        "assumptions": [],
+        "completeness_required": false,
+        "constraints": [],
+        "entities": [],
+        "excluded_topics": [],
+        "expected_output": "",
+        "mandatory_topics": [],
+        "resolved_question": "版图设计要点有哪些",
+        "result_scope": "ranked",
+        "retrieval_effort": "standard"
+       }
+      },
+      "intent_queries": [],
+      "intent_trace_duration_ms": null,
+      "job_id": "",
+      "limits": {
+       "dc:AskRetrievalLimits": {
+        "answer_element_items": 6,
+        "cell_excerpt_chars": 1000,
+        "chunk_context_chars": 30000,
+        "effort": "standard",
+        "enum_page_size": 50,
+        "enum_pages_per_run": 4,
+        "enum_rows_per_run": 200,
+        "inline_answer_rows": 100,
+        "kg_context_chars": 6000,
+        "max_initial_subqueries": 5,
+        "max_reasoning_steps": 8,
+        "overflow_semantics": "explicit_partial",
+        "ranked_final_cap": 36,
+        "ranked_final_floor": 20,
+        "ranked_per_aspect": 3,
+        "ranked_per_query_take": 8,
+        "structured_max_columns": 8,
+        "structured_max_pages": 50,
+        "structured_max_rows": 1250,
+        "structured_max_tables": 8,
+        "structured_page_size": 25,
+        "structured_payload_chars": 256000
+       }
+      },
+      "notebook_id": "nb-00000000000000000000000000000001",
+      "output": "answer",
+      "question": "版图设计要点有哪些",
+      "report_followup": null,
+      "research_question": "版图设计要点有哪些",
+      "retrieval_effort": "standard",
+      "style_block": "",
+      "user_id": "user-local"
+     }
+    },
+    "not a runtime"
+   ],
+   "call": "self._run_reasoning_stage",
+   "kwargs": {},
+   "raised": "StageBoundaryError: invalid Ask reasoning runtime"
+  }
+ ],
+ "unordered": [],
+ "worker": []
+}
