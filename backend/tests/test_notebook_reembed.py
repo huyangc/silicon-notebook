@@ -107,6 +107,52 @@ def test_object_leg_keeps_its_count_when_it_fails(repo, monkeypatch):
     cases.check_object_leg_keeps_its_count_when_it_fails(repo, BACKEND, monkeypatch)
 
 
+def test_knowhow_fill_discovers_ids_then_reads_page_by_page(repo, monkeypatch):
+    cases.check_knowhow_fill_discovers_ids_then_reads_page_by_page(repo, BACKEND, monkeypatch)
+
+
+def test_conditional_chunk_vector_write(repo):
+    cases.check_conditional_chunk_vector_write(repo, BACKEND)
+
+
+def test_blank_chunks_are_never_a_gap(repo):
+    cases.check_blank_chunks_are_never_a_gap(repo, BACKEND)
+
+
+def test_orphan_knowhow_sources_are_not_counted(repo):
+    cases.check_orphan_knowhow_sources_are_not_counted(repo, BACKEND)
+
+
+def test_one_failing_knowhow_table_does_not_stop_the_others(repo, monkeypatch):
+    cases.check_one_failing_knowhow_table_does_not_stop_the_others(repo, BACKEND, monkeypatch)
+
+
+def test_offline_embed_messages(repo, capsys):
+    cases.check_offline_embed_messages(repo, BACKEND, capsys)
+
+
+def test_an_embedder_that_writes_nothing_is_never_done(repo, monkeypatch):
+    cases.check_an_embedder_that_writes_nothing_is_never_done(repo, BACKEND, monkeypatch)
+
+
+def test_relation_discovery_page_is_one_index_range(repo):
+    """Each relation-backfill page is one range of
+    ``idx_knowledge_relations_nb_source_id``, read in index order: no scan of the
+    notebook's relations and no temporary sort per page (what ``id > ? ORDER BY id``
+    cost without a ``(notebook_id, id)`` index)."""
+    with repo._runtime.database.connect() as db:
+        plan = " | ".join(
+            str(row["detail"]) for row in db.execute(
+                "EXPLAIN QUERY PLAN " + sqlite_maintenance._MISSING_RELATION_PAGE_SQL,
+                ("nb", "a", "b", 5),
+            ).fetchall()
+        )
+    assert "idx_knowledge_relations_nb_source_id" in plan, plan
+    assert "(source_object_id,id)>" in plan.replace(" ", ""), plan
+    assert "TEMP B-TREE" not in plan, plan
+    assert "SCAN r" not in plan, plan
+
+
 # --- single flight, follow-up pass, shared guard ---------------------------------
 
 
@@ -125,6 +171,14 @@ class _Gate:
             return inner(texts)
 
         embedder.embed_texts = _blocking
+
+    def __enter__(self) -> "_Gate":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        # Always let the blocked worker go, so a failing assertion inside the block
+        # cannot leave a heavy-pool worker parked until its timeout.
+        self.release.set()
 
 
 def _finished(run_id: str):
@@ -149,18 +203,17 @@ def test_a_leg_whose_discovery_already_ran_runs_again(repo):
     world = cases.build_world(repo, BACKEND)
     nb = world.notebook_id
     cases.delete_vectors(repo, BACKEND, nb, tables=("chunk_embeddings",))
-    gate = _Gate(world.embedders["chunk_embedding"])
     service = NotebookReembedService(repo)
 
-    first = service.submit(nb, legs=["chunks"])
-    assert first.started
-    assert gate.entered.wait(timeout=_WAIT_SECONDS)  # discovery done, embedding
-    _add_document_chunk(repo, nb, f"ck-late-{nb}", "a chunk that arrived late")
-    joined = service.submit(nb, legs=["chunks"])
-    assert (joined.run_id, joined.started) == (first.run_id, False)
-    with pytest.raises(ReembedInFlight):
-        service.run(nb, legs=["elements"])
-    gate.release.set()
+    with _Gate(world.embedders["chunk_embedding"]) as gate:
+        first = service.submit(nb, legs=["chunks"])
+        assert first.started
+        assert gate.entered.wait(timeout=_WAIT_SECONDS)  # discovery done, embedding
+        _add_document_chunk(repo, nb, f"ck-late-{nb}", "a chunk that arrived late")
+        joined = service.submit(nb, legs=["chunks"])
+        assert (joined.run_id, joined.started) == (first.run_id, False)
+        with pytest.raises(ReembedInFlight):
+            service.run(nb, legs=["elements"])
 
     status = _finished(first.run_id)
     assert status.state == "succeeded", status
@@ -175,24 +228,26 @@ def test_a_leg_whose_discovery_already_ran_runs_again(repo):
 
 def test_a_leg_not_started_yet_covers_a_joining_request(repo):
     """A request for a leg the current pass has not reached yet is covered by that pass:
-    no second pass, each object embedded once; a leg the run does not have at all is
-    added to a follow-up pass."""
+    no second pass, and the object leg runs exactly once. (A leg the run does not have
+    at all goes to a follow-up pass: pinned by the shared-guard endpoint test below.)"""
     world = cases.build_world(repo, BACKEND)
     nb = world.notebook_id
+    objects = cases.vector_ids(repo, BACKEND, nb)["knowledge_embeddings"]
     cases.delete_vectors(repo, BACKEND, nb, tables=("chunk_embeddings", "knowledge_embeddings"))
-    gate = _Gate(world.embedders["chunk_embedding"])
     service = NotebookReembedService(repo)
 
-    first = service.submit(nb, legs=["chunks", "kg_objects"])
-    assert gate.entered.wait(timeout=_WAIT_SECONDS)  # in the chunk leg
-    assert service.join_running(nb, ["kg_objects"])
-    gate.release.set()
+    with _Gate(world.embedders["chunk_embedding"]) as gate:
+        first = service.submit(nb, legs=["chunks", "kg_objects"])
+        assert gate.entered.wait(timeout=_WAIT_SECONDS)  # in the chunk leg
+        assert service.join_running(nb, ["kg_objects"])
 
     status = _finished(first.run_id)
     assert status.state == "succeeded", status
     assert status.passes == 1
-    objects = world.embedders["knowledge_object_embedding"].texts
-    assert len(objects) == len(set(objects))  # each object embedded once
+    # One object pass: every missing object embedded once, in ceil(n / batch) calls.
+    recorder = world.embedders["knowledge_object_embedding"]
+    assert len(recorder.texts) == len(objects)
+    assert len(recorder.calls) == -(-len(objects) // cases.BATCH)
 
 
 def test_run_claimed_has_exactly_one_executor(repo):
@@ -203,14 +258,11 @@ def test_run_claimed_has_exactly_one_executor(repo):
     with pytest.raises(ValueError):
         service.run_claimed(nb)
     cases.delete_vectors(repo, BACKEND, nb, tables=("chunk_embeddings",))
-    gate = _Gate(world.embedders["chunk_embedding"])
-    running = service.submit(nb, legs=["chunks"])
-    assert gate.entered.wait(timeout=_WAIT_SECONDS)
-    try:
+    with _Gate(world.embedders["chunk_embedding"]) as gate:
+        running = service.submit(nb, legs=["chunks"])
+        assert gate.entered.wait(timeout=_WAIT_SECONDS)
         with pytest.raises(RuntimeError):
             service.run_claimed(nb)
-    finally:
-        gate.release.set()
     assert _finished(running.run_id).state == "succeeded"
 
 
@@ -289,18 +341,19 @@ def test_backfill_vectors_endpoint_and_reembed_share_one_guard(tmp_path, monkeyp
     )
     cases.delete_vectors(repo, BACKEND, nb)
 
-    # 1) reembed in flight -> the endpoint joins it.
-    gate = _Gate(world.embedders["knowledge_object_embedding"])
+    # 1) reembed in flight -> the endpoint joins it; legs the run did not have run in
+    #    a follow-up pass of the same run.
     service = NotebookReembedService(repo)
-    running = service.submit(nb, legs=["kg_objects"])
-    assert gate.entered.wait(timeout=_WAIT_SECONDS)
-    response = client.post(f"/api/notebooks/{nb}/backfill-vectors", headers=headers)
-    assert response.status_code == 200, response.text
-    assert response.json()["accepted"] is True
-    assert scheduled == []
-    gate.release.set()
+    with _Gate(world.embedders["knowledge_object_embedding"]) as gate:
+        running = service.submit(nb, legs=["kg_objects"])
+        assert gate.entered.wait(timeout=_WAIT_SECONDS)
+        response = client.post(f"/api/notebooks/{nb}/backfill-vectors", headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["accepted"] is True
+        assert scheduled == []
     status = _finished(running.run_id)
     assert status.legs == ("chunks", "elements", "kg_objects")
+    assert status.passes == 2
     assert status.state == "succeeded", status
 
     # 2) the endpoint's run in flight -> a reembed submission joins it.
@@ -316,3 +369,50 @@ def test_backfill_vectors_endpoint_and_reembed_share_one_guard(tmp_path, monkeyp
     assert status.state == "succeeded", status
     assert status.legs == ("chunks", "elements", "kg_relations")
     assert nb not in notebook_reembed._active_runs
+
+
+@pytest.mark.parametrize(
+    "gap,unbound,accepted",
+    [
+        ("knowhow", "chunk_embedding", True),
+        ("knowhow", "knowhow_embedding", False),
+        ("document", "knowhow_embedding", True),
+        ("document", "chunk_embedding", False),
+    ],
+)
+def test_backfill_vectors_accepts_a_chunk_gap_only_when_its_workload_is_bound(
+    tmp_path, monkeypatch, gap, unbound, accepted
+):
+    """H4 counts document and Knowhow chunks together; the endpoint accepts a chunk gap
+    only when the workload that fills that kind of chunk is bound (a document gap needs
+    chunk_embedding, a Knowhow gap knowhow_embedding), and refuses otherwise in the
+    existing ``accepted=false`` shape."""
+    client = _client(tmp_path, monkeypatch)
+    r = client.post("/api/auth/register", json={"username": "r00400402", "password": "pw"})
+    headers = {"Authorization": f"Bearer {r.json()['token']}"}
+    created = client.post("/api/notebooks", headers=headers, json={"name": "gap-kind"})
+    from app.api.deps import repository
+
+    repo = repository()
+    world = cases.build_world(repo, BACKEND, notebook_id=created.json()["id"])
+    nb = world.notebook_id
+    if gap == "knowhow":
+        missing = sorted(cases.knowhow_chunk_ids(repo, BACKEND, world))[:1]
+    else:
+        missing = [f"ck-src-doc-{nb}-000"]
+    cases.delete_chunk_vectors(repo, BACKEND, missing)
+    repo._runtime.source_embedding.note_source_vectors_written(nb)  # fresh H4/H5
+    original = repo.configured
+    monkeypatch.setattr(repo, "configured", lambda w: w != unbound and original(w))
+    scheduled = []
+    monkeypatch.setattr(
+        "app.services.kg.scheduler.submit_job",
+        lambda fn, /, *args, **kwargs: scheduled.append((fn, args)),
+    )
+    try:
+        response = client.post(f"/api/notebooks/{nb}/backfill-vectors", headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["accepted"] is accepted
+        assert len(scheduled) == (1 if accepted else 0)
+    finally:
+        NotebookReembedService.release(nb)

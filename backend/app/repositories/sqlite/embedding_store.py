@@ -109,6 +109,33 @@ class EmbeddingStore:
                  for cid, vec in rows],
             )
 
+    def replace_chunk_vectors_if_text(
+        self,
+        notebook_id: str,
+        rows: Sequence[tuple],
+        *,
+        created_at: str,
+    ) -> int:
+        """Upsert ``(chunk_id, text, vector)`` rows, each only if the chunk still exists
+        with exactly ``text``; returns how many were written. The check and the write are
+        one statement in one write transaction, so a chunk rewritten (or deleted with its
+        table) after its text was embedded gets no vector and raises no FK error."""
+        if not rows:
+            return 0
+        written = 0
+        with self.write() as db:
+            for chunk_id, text, vector in rows:
+                cursor = db.execute(
+                    "INSERT OR REPLACE INTO chunk_embeddings "
+                    "(chunk_id,notebook_id,vector,created_at) "
+                    "SELECT ?,?,?,? WHERE EXISTS "
+                    "(SELECT 1 FROM chunks WHERE id=? AND text=?)",
+                    (chunk_id, notebook_id, encode_vector(vector), created_at,
+                     chunk_id, text),
+                )
+                written += max(0, cursor.rowcount)
+        return written
+
     @staticmethod
     def version_row(db, notebook_id: str, table: str):
         return db.execute(

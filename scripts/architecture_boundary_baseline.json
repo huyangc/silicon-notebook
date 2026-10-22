@@ -288,7 +288,7 @@
     "allowed": []
   },
   "facade_protocol_binding_gaps": {},
-  "ports_protocol_method_count": 1007,
+  "ports_protocol_method_count": 1008,
   "function_length_ceiling": {
     "backend/app/extensions/ask.py::AskCompletedObserverHost.observe_application": 154,
     "backend/app/extensions/parser_chain.py::ParserProviderChainHost._run": 307,

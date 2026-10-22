@@ -639,7 +639,9 @@ def backfill_vectors(notebook_id: str) -> RepairScheduledResult:
     # 按**损坏所属的 workload** 精判受理(codex P2):某类缺向量确实存在**且**其嵌入 workload 已配,
     # job 才补得动该类。粗判 `configured(chunk) or configured(element)` 会在「损坏是 element、却只配
     # 了 chunk」时假受理→前端「修复中」空转轮询、而 H5 永远清不掉。短路:未配某类就不跑那类判断。
-    chunk_fixable = repo.configured("chunk_embedding") and h4_count > 0
+    # H4 counts document and Knowhow chunks, which have different workloads; the service
+    # decides whether the gap that exists is one a bound workload can fill.
+    chunk_fixable = NotebookReembedService(repo).chunk_gap_fixable(notebook_id, h4_count)
     elem_fixable = repo.configured("source_element_embedding") and h5_count > 0
     if not (chunk_fixable or elem_fixable):
         # 无「已配 + 有缺」的类 → job 必 no-op。accepted=false,前端据此提示而非「修复中」。

@@ -18,6 +18,11 @@ from app.services.retrieval import _payload_text
 _ELEMENT_READ_PAGE = 2000
 
 
+def _object_embed_text(item: dict) -> str:
+    """The text an object item is embedded with; empty means it cannot get a vector."""
+    return _payload_text(item["payload"]).strip()
+
+
 class SourceEmbeddingService:
     """Vector COMPUTE orchestration for elements / KG objects / KG relations /
     chunks: ThreadPoolExecutor batching.  The producer pool is derived from
@@ -431,6 +436,12 @@ class SourceEmbeddingService:
         )
         return written
 
+    @staticmethod
+    def embeddable_object_count(items: List[dict]) -> int:
+        """How many of ``items`` (``{"_oid", "payload"}``) ``embed_objects_batch`` would
+        send to the model: one criterion for "an object that can get a vector"."""
+        return sum(1 for it in items if _object_embed_text(it))
+
     def embed_objects_batch(self, notebook_id: str, items: List[dict],
                             progress=None, commit_every: Optional[int] = None) -> int:
         """并发计算 payload 向量,**每 commit_every 批 flush 一次**(增量提交:中断可续跑、
@@ -441,7 +452,7 @@ class SourceEmbeddingService:
             return 0
         pending = []
         for it in items:
-            text = _payload_text(it["payload"]).strip()
+            text = _object_embed_text(it)
             if text:
                 pending.append((
                     it["_oid"],
@@ -747,8 +758,6 @@ class SourceEmbeddingService:
         self,
         notebook_id: str,
         rows: List[dict],
-        *,
-        still_current: Optional[Callable[[List[str]], set]] = None,
     ) -> int:
         """Batched, best-effort fill of Knowhow chunk vectors with ``knowhow_embedding``
         — the backfill counterpart of ``embed_chunk_ids`` (which the projector calls one
@@ -757,10 +766,9 @@ class SourceEmbeddingService:
         a filled vector equals the one a projection would have written. Calls carry
         ``embed_batch_size`` texts; a failed call is logged and its rows stay missing.
 
-        ``still_current(chunk_ids)`` returns the ids whose stored text is still the text
-        embedded; it runs just before each page is written, so a cell edited while the
-        model was busy is not given its old text's vector (on PostgreSQL the caller's
-        table projection lock already excludes that; on SQLite that lock is a no-op).
+        Each vector is written only if its chunk still holds the text that was embedded
+        (``replace_chunk_vectors_if_text``: check and upsert in one statement), so a cell
+        edited, or a table deleted, while the model was busy gets no stale vector.
 
         ``rows``: ``[{"id": chunk_id, "text": chunk_text}, ...]``. Returns the number of
         vectors written."""
@@ -769,12 +777,13 @@ class SourceEmbeddingService:
         if not rows or not getattr(embedder, "configured", True):
             return 0
         trunc = self.settings.embed_truncate_chars
-        pending = [(r["id"], r["text"][:trunc]) for r in rows if r["text"]]
+        expected = {r["id"]: r["text"] for r in rows if r["text"]}
+        pending = [(cid, text[:trunc]) for cid, text in expected.items()]
         if not pending:
             return 0
         return self._write_chunk_vectors(
             notebook_id, workload_id, embedder, pending,
-            task_prefix="emb-kh", still_current=still_current,
+            task_prefix="emb-kh", expected_texts=expected,
         )
 
     def _write_chunk_vectors(
@@ -785,10 +794,12 @@ class SourceEmbeddingService:
         pending: List[tuple],
         *,
         task_prefix: str,
-        still_current: Optional[Callable[[List[str]], set]] = None,
+        expected_texts: Optional[dict] = None,
     ) -> int:
         """Embed ``pending`` ``(chunk_id, text)`` in ``embed_batch_size`` calls and upsert
-        the vectors page by page; returns how many were written."""
+        the vectors page by page; returns how many were written. With
+        ``expected_texts`` (chunk id -> full stored text) each upsert is conditional on
+        the chunk still holding that text."""
         size = max(1, self.settings.embed_batch_size)
         batches = [pending[i:i+size] for i in range(0, len(pending), size)]
         self._warm_up(embedder)
@@ -820,10 +831,13 @@ class SourceEmbeddingService:
                     workload_id=workload_id,
                 ):
                     out.extend(part)
-                if out and still_current is not None:
-                    current = still_current([cid for cid, _ in out])
-                    out = [(cid, vec) for cid, vec in out if cid in current]
-                if out:
+                if out and expected_texts is not None:
+                    written += self.vectors.replace_chunk_vectors_if_text(
+                        notebook_id,
+                        [(cid, expected_texts[cid], vec) for cid, vec in out],
+                        created_at=self.now(),
+                    )
+                elif out:
                     # Fresh timestamp per page (see embed_relations_batch);
                     # correctness is guaranteed by the _evict_matrix finally, not
                     # by created_at advancing.

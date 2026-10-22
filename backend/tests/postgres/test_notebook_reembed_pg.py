@@ -32,7 +32,7 @@ def _insert(db, table: str, values: dict) -> None:
 
 BACKEND = cases.Backend(
     name="postgres", insert=_insert, placeholder="%s",
-    maintenance_module=postgres_maintenance, relation_page_attr="_EMBEDDING_PAGE_SIZE",
+    maintenance_module=postgres_maintenance, relation_page_attr="_RELATION_PAGE_SIZE",
 )
 
 
@@ -98,6 +98,52 @@ def test_relation_backfill_pages_pg(repo, monkeypatch):
 
 def test_object_leg_keeps_its_count_when_it_fails_pg(repo, monkeypatch):
     cases.check_object_leg_keeps_its_count_when_it_fails(repo, BACKEND, monkeypatch)
+
+
+def test_knowhow_fill_discovers_ids_then_reads_page_by_page_pg(repo, monkeypatch):
+    cases.check_knowhow_fill_discovers_ids_then_reads_page_by_page(repo, BACKEND, monkeypatch)
+
+
+def test_conditional_chunk_vector_write_pg(repo):
+    cases.check_conditional_chunk_vector_write(repo, BACKEND)
+
+
+def test_blank_chunks_are_never_a_gap_pg(repo):
+    cases.check_blank_chunks_are_never_a_gap(repo, BACKEND)
+
+
+def test_orphan_knowhow_sources_are_not_counted_pg(repo):
+    cases.check_orphan_knowhow_sources_are_not_counted(repo, BACKEND)
+
+
+def test_one_failing_knowhow_table_does_not_stop_the_others_pg(repo, monkeypatch):
+    cases.check_one_failing_knowhow_table_does_not_stop_the_others(repo, BACKEND, monkeypatch)
+
+
+def test_offline_embed_messages_pg(repo, capsys):
+    cases.check_offline_embed_messages(repo, BACKEND, capsys)
+
+
+def test_an_embedder_that_writes_nothing_is_never_done_pg(repo, monkeypatch):
+    cases.check_an_embedder_that_writes_nothing_is_never_done(repo, BACKEND, monkeypatch)
+
+
+def test_relation_discovery_page_is_one_index_range_pg(repo):
+    """Each relation-backfill page is one range of
+    ``idx_knowledge_relations_nb_source_id`` in index order: no Sort node (the old
+    ``id > %s ORDER BY id`` had no ``(notebook_id, id)`` index to follow). Judged with
+    seqscan/bitmapscan off like the sibling EXPLAIN pins: the test bed is tiny."""
+    with repo._runtime.database.write() as db:
+        db.execute("SET LOCAL enable_seqscan=off")
+        db.execute("SET LOCAL enable_bitmapscan=off")
+        plan = "\n".join(
+            str(next(iter(dict(row).values()))) for row in db.execute(
+                "EXPLAIN (COSTS OFF) " + postgres_maintenance._MISSING_RELATION_PAGE_SQL,
+                ("nb", "a", "b", 5),
+            ).fetchall()
+        )
+    assert "idx_knowledge_relations_nb_source_id" in plan, plan
+    assert "Sort" not in plan, plan
 
 
 def test_relation_backfill_in_a_fresh_process_pg(env):

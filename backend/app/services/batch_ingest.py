@@ -612,9 +612,14 @@ def _backfill_missing_chunk_embeddings(
     """``embed --missing-only``'s chunk half: document chunks by keyset page with
     ``chunk_embedding``, then Knowhow chunks with ``knowhow_embedding``. Returns the
     number of chunks it tried to embed (as before: missing rows found, not vectors
-    written)."""
+    written). An unbound half says so; "nothing missing" is printed only when both
+    halves ran and found nothing."""
     total = 0
-    if repo.configured("chunk_embedding"):
+    ran_both = True
+    if not repo.configured("chunk_embedding"):
+        ran_both = False
+        print("[embed] 未绑定 chunk_embedding,跳过文档 chunk", flush=True)
+    else:
         mnt = repo.maintenance
         after_id = ""
         while rows := mnt.missing_chunk_embedding_page(
@@ -628,12 +633,17 @@ def _backfill_missing_chunk_embeddings(
             total += len(items)
             after_id = str(rows[-1]["id"])
             print(f"[embed] 已补 chunk 向量:{total}", flush=True)
-    if repo.configured("knowhow_embedding"):
-        found, written = fill_missing_knowhow_chunk_vectors(repo, notebook_id)
-        if found:
-            total += found
-            print(f"[embed] 已补 knowhow chunk 向量:{written}/{found}", flush=True)
-    if total == 0:
+    if not repo.configured("knowhow_embedding"):
+        ran_both = False
+        print("[embed] 未绑定 knowhow_embedding,跳过 knowhow chunk", flush=True)
+    else:
+        fill = fill_missing_knowhow_chunk_vectors(repo, notebook_id)
+        if fill.found:
+            total += fill.found
+            print(f"[embed] 已补 knowhow chunk 向量:{fill.written}/{fill.found}", flush=True)
+        if fill.failure:
+            print(f"[embed] knowhow chunk 补齐有表失败:{fill.failure}(留待重跑)", flush=True)
+    if total == 0 and ran_both:
         print("[embed] 无缺失 chunk 向量,跳过", flush=True)
     return total
 

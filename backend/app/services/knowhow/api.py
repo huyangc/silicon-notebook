@@ -33,10 +33,12 @@ PR-2+3 Task 3 adds three things to this module:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
 import weakref
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from app.repositories.knowhow_asset_refs import rendered_asset_ids
@@ -44,6 +46,8 @@ from app.repositories.ports import KNOWHOW_COLUMN_KINDS as _STORE_KINDS
 from app.services import background_jobs
 from app.services.knowhow.grid_parser import ParsedGrid, guess_kinds, parse_grid, forward_fill_column
 from app.services.knowhow.projection import KnowhowProjector
+
+_log = logging.getLogger("silicon_notebook.backfill_vectors")
 
 # Legal column KINDS a client may name directly on the wire (PR-2+3 Task 3):
 # every store-level kind EXCEPT 'anchor' — the row-title designation is never
@@ -298,24 +302,79 @@ def build_projector(repo: Any) -> KnowhowProjector:
     )
 
 
-def fill_missing_knowhow_chunk_vectors(repo: Any, notebook_id: str) -> "tuple[int, int]":
-    """Embed every Knowhow chunk of the notebook that has no vector, table by table
-    (``KnowhowProjector.fill_missing_chunk_vectors``: ``knowhow_embedding``, batched, no
-    reprojection). Returns ``(missing found, vectors written)`` summed over the tables.
-    The caller checks that ``knowhow_embedding`` is bound."""
-    projector = None
+KNOWHOW_FILL_PAGE_ROWS = 500
+"""Chunk texts hydrated per page by ``fill_missing_knowhow_chunk_vectors`` (rounded down
+to a multiple of ``embed_batch_size``)."""
+
+
+@dataclass(frozen=True)
+class KnowhowChunkFill:
+    found: int
+    """Chunks that can get a vector and had none."""
+    written: int
+    failure: str
+    """Class name of the first exception a table raised (``""`` when none did)."""
+
+
+def knowhow_chunk_gap_exists(repo: Any, notebook_id: str) -> bool:
+    """Whether any table of the notebook has a chunk without a vector (the same id-only
+    discovery the fill runs, stopping at the first table that has one)."""
+    mnt = repo.maintenance
+    return any(
+        mnt.missing_knowhow_chunk_embedding_ids(
+            notebook_id, source_id=str(table["hidden_source_id"])
+        )
+        for table in repo.list_knowhow_tables(notebook_id)
+        if table.get("hidden_source_id")
+    )
+
+
+def fill_missing_knowhow_chunk_vectors(repo: Any, notebook_id: str) -> KnowhowChunkFill:
+    """Embed every Knowhow chunk of the notebook that has no vector, table by table, and
+    write nothing else (no reprojection: elements, chunks, objects, edges, their vectors,
+    ``kg_mutation_seq`` and row statuses stay as they are).
+
+    Per table, under its projection lock: an id-only discovery scoped to the hidden source
+    (``maintenance.missing_knowhow_chunk_embedding_ids``), then the texts of one page at a
+    time (``chunk_texts_by_ids``), embedded with ``knowhow_embedding`` in
+    ``embed_batch_size`` calls and written only where the chunk still holds that text.
+    One table failing is logged and recorded; the other tables still run. A hidden source
+    no table owns is not reached (checkup H4 does not count it either). The caller checks
+    that ``knowhow_embedding`` is bound.
+
+    ``repo._runtime`` is used for the two seams with no facade member: the table
+    projection lock and the embedding service."""
+    mnt = repo.maintenance
+    database = repo._runtime.database
+    embedding = repo._runtime.source_embedding
+    size = max(1, int(repo.settings.embed_batch_size))
+    page = max(size, (KNOWHOW_FILL_PAGE_ROWS // size) * size)
     found = written = 0
+    failure = ""
     for table in repo.list_knowhow_tables(notebook_id):
         source_id = table.get("hidden_source_id")
         if not source_id:
             continue  # never projected: no chunks yet
-        projector = projector or build_projector(repo)
-        table_found, table_written = projector.fill_missing_chunk_vectors(
-            str(table["id"]), source_id=str(source_id), notebook_id=notebook_id
-        )
-        found += table_found
-        written += table_written
-    return found, written
+        try:
+            with database.table_projection_lock(str(table["id"])):
+                ids = mnt.missing_knowhow_chunk_embedding_ids(
+                    notebook_id, source_id=str(source_id)
+                )
+                found += len(ids)
+                for start in range(0, len(ids), page):
+                    rows = mnt.chunk_texts_by_ids(ids[start:start + page])
+                    written += int(embedding.embed_knowhow_chunks_batch(
+                        notebook_id,
+                        [{"id": r["id"], "text": r["text"]} for r in sorted(
+                            rows, key=lambda r: str(r["id"])
+                        )],
+                    ) or 0)
+        except Exception as exc:  # noqa: BLE001 — recorded; the other tables still run
+            _log.exception(
+                "knowhow chunk vector fill failed: notebook_id=%s", notebook_id
+            )
+            failure = failure or type(exc).__name__
+    return KnowhowChunkFill(found=found, written=written, failure=failure)
 
 
 def get_table_in_notebook(repo: Any, notebook_id: str, table_id: str) -> dict:
