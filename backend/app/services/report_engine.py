@@ -965,7 +965,7 @@ class ReportEngine:
                 disabled_capabilities=disabled_capabilities,
             )
             visible, status = call.visible_result(host_chunks)
-        except AskCancelled:
+        except (AskCancelled, RetrievalControlError):
             raise
         except Exception:
             # Report retrieval has already frozen B.  Graph/version/scope I/O

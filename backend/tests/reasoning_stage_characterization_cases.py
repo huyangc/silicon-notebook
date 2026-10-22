@@ -1670,9 +1670,25 @@ def _expect_snapshot_extras(obs: Observation) -> None:
     assert EXTERNAL_ITEM[6] in [c.url for c in response.citations]
 
 
+def _record_graph_fail_closed(rig: Rig) -> None:
+    """Note every fail-closed status the selected-source graph service records
+    (it is what emits the content-free ``selected_source_graph`` event)."""
+    graph = rig.service.selected_source_graph
+    assert graph is not None, "the shipped wiring configures the graph lane"
+    real = graph.fail_closed
+
+    def fail_closed(notebook_id, baseline, reason, **kwargs):
+        rig.recorder.note({"graph_fail_closed": reason,
+                           "baseline": [chunk.chunk_id for chunk in baseline]})
+        return real(notebook_id, baseline, reason, **kwargs)
+
+    graph.fail_closed = fail_closed
+
+
 def _activation_fails(rig: Rig) -> None:
     """Retrieval returns, then the selected-source graph lane blows up."""
     _snapshot_extras(rig)
+    _record_graph_fail_closed(rig)
 
     def boom(real, *args, **kwargs):
         raise RuntimeError("selected-source graph lane broke")
@@ -1680,25 +1696,176 @@ def _activation_fails(rig: Rig) -> None:
     rig.hooks.replace["self._activate_selected_source_graph"] = boom
 
 
+def _retrieval_snapshot(obs: Observation) -> dict:
+    (call,) = obs.calls("fn.execute_reasoning_retrieval_stage")
+    return call["ret"]["dc:ReasoningEvidenceSnapshot"]
+
+
+def _chunk_ids(chunks: list) -> list[str]:
+    return [chunk["dc:RetrievedChunk"]["chunk_id"] for chunk in chunks]
+
+
+def _committed_manifest(obs: Observation) -> dict:
+    (stage,) = obs.calls("self._run_reasoning_stage")
+    committed = stage["ret"]["dc:CommittedReasoningAnswer"]
+    return committed["baseline_manifest"]["dc:RetrievalBaselineManifest"]
+
+
+def _ledger_ids(manifest: dict, key: str) -> list[str]:
+    return [ref["dc:BaselineEvidenceRef"]["item_id"] for ref in manifest[key]]
+
+
+def _assert_kept_retrieval_evidence(obs: Observation, *, synthesized: bool = True) -> dict:
+    """The graph lane failed after retrieval returned: everything retrieval
+    produced is the draft's input, only the lane's own append is missing, and
+    the lane leaves no trace step (its state never enters the trace)."""
+    snapshot, draft = _retrieval_snapshot(obs), _draft_input(obs)
+    for key in ("top_hits", "elements", "chains", "enumerations", "document_reads",
+                "outline", "outline_evidence"):
+        assert draft[key] == snapshot[key], key
+    assert draft["collection_map_text"] == snapshot["collection_map_text"]
+    assert draft["external_evidence"] == snapshot["external_evidence"]
+    assert _chunk_ids(draft["historical_chunks"]) == _chunk_ids(snapshot["chunks"])
+    # The lane fails closed to the retrieval's passages, as a fresh copy.
+    assert draft["chunks"] == draft["historical_chunks"]
+    # The trace is the pre-retrieval steps plus the retrieval's, nothing added.
+    assert draft["trace"][2:] == snapshot["trace"], [
+        s["pd:TraceStep"]["step_type"] for s in draft["trace"]]
+    # The response reports that trace, plus the synthesis step when one ran.
+    drafted = [s["pd:TraceStep"]["step_type"] for s in draft["trace"]]
+    assert obs.trace_kinds() == drafted + (["synthesis"] if synthesized else []), drafted
+    # One fail-closed status (the reason code the event carries) over exactly
+    # the passages the draft reads; the log names only the exception class.
+    closed = [e for e in obs.timeline if "graph_fail_closed" in e]
+    assert closed == [{"graph_fail_closed": "activation_seam_failed",
+                       "baseline": _chunk_ids(draft["chunks"])}], closed
+    assert {"logger": "silicon_notebook.ask_service", "level": "WARNING",
+            "message": "selected-source graph lane failed (RuntimeError)"} in obs.logs
+    return draft
+
+
 def _expect_activation_fails(obs: Observation) -> None:
-    # Only the outside material is left to answer from: an ungrounded answer.
-    response = _answered(obs, llm_mode="ungrounded")
+    # The lane only appends to what retrieval found, so its failure costs only
+    # that append: the run answers from the retrieval's evidence.
+    response = _answered(obs, llm_mode="grounded")
     _ran_stages(obs)
-    # Fail-soft after the retriever returned: the evidence lists are emptied
-    # and the trace is back to the pre-retrieval steps, but the retriever's
-    # own result (ledger, external evidence) and the passages it found before
-    # the lane ran still reach the draft.
-    draft = _draft_input(obs)
-    assert [s["pd:TraceStep"]["step_type"] for s in draft["trace"]] == ["intent", "skip"]
-    assert "plan" not in obs.trace_kinds()
-    for key in ("top_hits", "elements", "chunks", "chains", "enumerations",
-                "document_reads", "outline", "outline_evidence"):
-        assert draft[key] == [], key
+    draft = _assert_kept_retrieval_evidence(obs)
+    passages = _chunk_ids(draft["chunks"])
+    assert len(passages) > 1 and draft["top_hits"]
+    assert "plan" in obs.trace_kinds()
     assert draft["candidate_manifest"] is not None
     assert [item["dc:ExternalEvidence"]["key"] for item in draft["external_evidence"]] == [
         EXTERNAL_ITEM[0]]
-    assert len(draft["historical_chunks"]) > 1
-    assert response.grounded is False
+    # The ledger's selected items are what the draft was given.
+    manifest = _committed_manifest(obs)
+    assert _ledger_ids(manifest, "selected_chunks") == passages
+    assert _ledger_ids(manifest, "selected_knowledge") == [
+        hit["dc:RetrievedKnowledge"]["object_id"] for hit in draft["top_hits"]]
+    # The answer is grounded in the retrieval's passages and cites them (and
+    # the admitted outside item).
+    assert response.grounded is True and "[k" in response.answer and response.anchors
+    cited = {c.element_id for c in response.citations if c.element_id}
+    passage_elements = {element_id for chunk in draft["chunks"]
+                        for element_id in chunk["dc:RetrievedChunk"]["element_ids"]}
+    assert cited & passage_elements, (cited, passage_elements)
+    assert EXTERNAL_ITEM[6] in [c.url for c in response.citations]
+
+
+def _expect_activation_fails_streamed(obs: Observation) -> None:
+    _expect_activation_fails(obs)
+    # Every step streamed while retrieval ran is still in the response.
+    _streamed_as_traced(obs)
+
+
+def _activation_fails_on_empty_retrieval(rig: Rig) -> None:
+    """Retrieval returns, having found nothing; then the graph lane blows up."""
+    _record_graph_fail_closed(rig)
+
+    def empty(real, *args, **kwargs):
+        result = real(*args, **kwargs)
+        return dataclasses.replace(result, **{
+            key: type(getattr(result, key))() for key in (
+                "top_hits", "elements", "chunks", "chains", "enumerations",
+                "document_reads", "collection_map_text", "outline",
+                "outline_evidence", "external_evidence")})
+
+    def boom(real, *args, **kwargs):
+        raise RuntimeError("selected-source graph lane broke")
+
+    rig.hooks.replace["fn.execute_reasoning_retrieval_stage"] = empty
+    rig.hooks.replace["self._activate_selected_source_graph"] = boom
+
+
+def _expect_activation_fails_on_empty_retrieval(obs: Observation) -> None:
+    # Nothing was found and nothing is invented: the deterministic
+    # no-evidence answer, with the retrieval's steps still reported.
+    response = _answered(obs, llm_mode="deterministic")
+    _streamed_as_traced(obs)
+    draft = _assert_kept_retrieval_evidence(obs, synthesized=False)
+    for key in ("top_hits", "chunks", "historical_chunks", "external_evidence"):
+        assert draft[key] == [], key
+    assert "plan" in obs.trace_kinds()
+    assert response.answer == "" and response.grounded is False
+    manifest = _committed_manifest(obs)
+    assert manifest["selected_chunks"] == [] and manifest["selected_knowledge"] == []
+
+
+def _wire_contributor_host(rig: Rig) -> None:
+    """The process-shared contributor host the application bootstrap injects
+    (a bare repository has none, so its graph lane returns before any work):
+    with it the real lane runs as in production."""
+    from app.extensions import default_extension_runtime
+
+    rig.service.retrieval_contributors = default_extension_runtime().retrieval_contributors
+
+
+def _cancel_during_activation(rig: Rig) -> None:
+    """The user cancels while the selected-source graph lane runs (the real
+    lane, which checks the cancellation inside the contributor host)."""
+    _wire_contributor_host(rig)
+    rig.hooks.before["self._activate_selected_source_graph"] = (
+        lambda *args, **kwargs: rig.cancel.set())
+
+
+def _expect_cancel_during_activation(obs: Observation) -> None:
+    _raised(obs, "AskCancelled")
+    (activate,) = obs.calls("self._activate_selected_source_graph")
+    assert activate.get("raised", "").startswith("AskCancelled"), activate
+    # The run ends there: no table lane, no draft, no answer.
+    assert not _called(obs, "self._spreadsheet_reasoning_results")
+    assert not _called(obs, "fn.execute_response_draft_stage")
+    assert obs.models("ask_answer") == []
+
+
+def _activation_refused(rig: Rig) -> None:
+    """A retrieval-control refusal raised inside the real lane's own handler
+    (where it builds the contributor envelope)."""
+    from app.domain.retrieval_control import RetrievalControlError
+    from app.services import ask_service as module
+
+    _wire_contributor_host(rig)
+
+    def activate(real, *args, **kwargs):
+        original = module.selected_source_graph_call_context
+
+        def refuse(*_args, **_kwargs):
+            rig.recorder.note({"lane_refused": True})
+            raise RetrievalControlError("participant override refused")
+
+        module.selected_source_graph_call_context = refuse
+        try:
+            return real(*args, **kwargs)
+        finally:
+            module.selected_source_graph_call_context = original
+
+    rig.hooks.replace["self._activate_selected_source_graph"] = activate
+
+
+def _expect_activation_refused(obs: Observation) -> None:
+    _raised(obs, "RetrievalControlError", "participant override refused")
+    assert [e for e in obs.timeline if "lane_refused" in e] == [{"lane_refused": True}]
+    assert not _called(obs, "self._spreadsheet_reasoning_results")
+    assert not _called(obs, "fn.execute_response_draft_stage")
 
 
 def _expect_unconfigured_completeness(obs: Observation) -> None:
@@ -2594,6 +2761,15 @@ SCENARIOS = [
              invoke=_without_run),
     Scenario("activation_fails_soft", library_world, _narrowed, _expect_activation_fails,
              install=_activation_fails),
+    Scenario("activation_fails_soft_streamed", library_world, _narrowed,
+             _expect_activation_fails_streamed, stream=True, install=_activation_fails),
+    Scenario("activation_fails_on_empty_retrieval", library_world, _narrowed,
+             _expect_activation_fails_on_empty_retrieval, stream=True,
+             install=_activation_fails_on_empty_retrieval),
+    Scenario("cancelled_during_activation", library_world, _narrowed,
+             _expect_cancel_during_activation, install=_cancel_during_activation),
+    Scenario("activation_control_error", library_world, _narrowed,
+             _expect_activation_refused, install=_activation_refused),
     Scenario("unconfigured_completeness", library_world,
              confirmed(LIST_ALL, topics=(), result_scope="complete", completeness=True),
              _expect_unconfigured_completeness, install=_unconfigured),
