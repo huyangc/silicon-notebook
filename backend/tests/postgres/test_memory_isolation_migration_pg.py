@@ -39,6 +39,14 @@ MIGRATION = (
 
 def _roll_back_to_66(database) -> None:
     with database.write() as db:
+        # 83 (the concept seed space and the board partition) adds five columns
+        # and backfills two: undo them (newest first) so the replay re-applies
+        # the file rather than skipping IF NOT EXISTS no-ops.
+        db.execute("ALTER TABLE communities DROP COLUMN board_key")
+        db.execute("ALTER TABLE unified_kg_state DROP COLUMN community_partition_mode")
+        db.execute("ALTER TABLE unified_kg_state DROP COLUMN community_partition_version")
+        db.execute("ALTER TABLE unified_kg_state DROP COLUMN concept_seed_version")
+        db.execute("ALTER TABLE concept_merge_candidates DROP COLUMN seed_version")
         # 82 (navigation-page marker) adds three columns: undo them (newest
         # first) so the replay can.
         db.execute("ALTER TABLE chunks DROP COLUMN navigation")
@@ -245,20 +253,25 @@ def test_rebuild_pass_sets_the_marker_through_the_ordinary_slot(
     from app.services.postgres_repository import PostgresRepository
 
     database, _before, _after = upgraded
-    # 0077's and 0079's schema, alone: this build's rebuild end-write stores
-    # unified_kg_state.cluster_code_version, its analysis publish rewrites the
-    # findings detail, and its cluster-map write pages over
-    # kg_cluster_scratch.ordinal, so the code under test needs them; none of
-    # their DDL touches what 0067 left (0079 empties only the transient scratch
-    # table, which a rebuild repopulates per run). 0082 (chunks.navigation,
-    # sources.navigation_scanned_at, sources.navigation_version) only adds
-    # three defaulted columns that this
-    # build's chunk writers name. (The SQLite twin rolls back
-    # v87 alone, so its world keeps every later schema object the same way.)
+    # 0077's, 0079's and 0083's schema, alone: this build's rebuild end-write
+    # stores unified_kg_state.cluster_code_version, its analysis publish
+    # rewrites the findings detail, its cluster-map write pages over
+    # kg_cluster_scratch.ordinal, its flip writes the published concept seed
+    # space, its decision reads and purge name concept_merge_candidates.
+    # seed_version, and its board publish reads and writes the partition
+    # columns and board keys, so the code under test needs them; none of their
+    # DDL touches what 0067 left (0079 empties only the transient scratch table,
+    # which a rebuild repopulates per run; 0083 adds columns and fills
+    # defaults, its board_key backfill names only rows still at ''). 0082
+    # (chunks.navigation, sources.navigation_scanned_at,
+    # sources.navigation_version) only adds three defaulted columns that this
+    # build's chunk writers name. (The SQLite twin rolls back v87 alone, so its
+    # world keeps every later schema object the same way.)
     with database.write() as db:
         for later in ("0077_kg_analysis_findings.sql",
                       "0079_kg_cluster_scratch_ordinal.sql",
-                      "0082_chunk_navigation.sql"):
+                      "0082_chunk_navigation.sql",
+                      "0083_kg_seed_space_and_board_partition.sql"):
             db.execute(
                 (MIGRATION.parent / later).read_text(encoding="utf-8"),
                 prepare=False,

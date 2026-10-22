@@ -240,7 +240,7 @@ def concept_squash_key(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 # ⚠ ``unified_kg_state.concept_seed_version``'s column DEFAULT is this value
-# (SQLite v98 / PostgreSQL 0078): a state row created from now on starts in
+# (SQLite v100 / PostgreSQL 0081): a state row created from now on starts in
 # the space the code builds in. A future space 3 needs a migration that moves
 # the default as well.
 CONCEPT_SEED_VERSION = 2

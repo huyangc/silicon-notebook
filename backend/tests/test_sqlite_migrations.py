@@ -1053,3 +1053,62 @@ def test_v102_adds_the_board_partition_columns_and_backfills_board_keys(tmp_path
         keys = {row[0]: row[1] for row in db.execute("SELECT id, board_key FROM communities")}
         assert keys == {"cm-a": "cm-a", "cm-b": "cm-b", "cm-c": "bk-kept"}
     database.close_local()
+
+
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
+def test_v100_lands_both_halves_and_a_rerun_moves_no_seed_space(tmp_path):
+    """``_migration_100`` is the concept seed space (S1) and the board partition
+    (S2) in one step: a v99 database gains all five columns at once -- its
+    existing state row reads seed space 1 and partition 0 / '', its board
+    carries its own id as ``board_key``, its decision reads seed space 1.
+    Re-running the step after the board half went missing (an interrupted
+    run, the shape the S2 re-run test guards) finishes that half and moves no
+    row's seed space: a state row already in space 2 stays there."""
+    from tests.sqlite_migration_testkit import rollback_v100
+
+    database, settings = _fresh_migrated_database(tmp_path)
+    now = "2026-10-22T00:00:00+00:00"
+
+    def state(db):
+        return tuple(db.execute(
+            "SELECT concept_seed_version, community_partition_version, "
+            "community_partition_mode FROM unified_kg_state WHERE notebook_id = 'nb-v99'"
+        ).fetchone())
+
+    with database.write() as db:
+        db.execute(
+            "INSERT INTO notebooks (id, name, created_at, updated_at) VALUES "
+            "('nb-v99', 'n', ?, ?)", (now, now))
+        rollback_v100(db)
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, updated_at) VALUES ('nb-v99', ?)",
+            (now,))
+        db.execute(
+            "INSERT INTO concept_merge_candidates (id, notebook_id, canonical_a, "
+            "canonical_b, score, status, created_at, updated_at) VALUES "
+            "('mc-old', 'nb-v99', 'K-a b', 'K-c', 0.9, 'rejected', ?, ?)", (now, now))
+        db.execute(
+            "INSERT INTO communities (id, notebook_id, level, member_ids, size, created_at, "
+            "generation) VALUES ('cm-a', 'nb-v99', 0, '[\"K-x\"]', 1, ?, 1)", (now,))
+        db.execute("PRAGMA user_version = 99")
+
+    assert SqliteMigrator(database, settings).migrate() == [100]
+    with database.connect() as db:
+        assert state(db) == (1, 0, "")
+        assert db.execute("SELECT board_key FROM communities WHERE id = 'cm-a'").fetchone()[0] == "cm-a"
+        assert db.execute(
+            "SELECT seed_version FROM concept_merge_candidates WHERE id = 'mc-old'"
+        ).fetchone()[0] == 1
+
+    with database.write() as db:
+        db.execute("ALTER TABLE communities DROP COLUMN board_key")
+        db.execute("ALTER TABLE unified_kg_state DROP COLUMN community_partition_mode")
+        db.execute("ALTER TABLE unified_kg_state DROP COLUMN community_partition_version")
+        db.execute("UPDATE unified_kg_state SET concept_seed_version = 2 WHERE notebook_id = 'nb-v99'")
+        db.execute("PRAGMA user_version = 99")
+    assert SqliteMigrator(database, settings).migrate() == [100]
+    with database.connect() as db:
+        assert state(db) == (2, 0, "")
+        assert db.execute("SELECT board_key FROM communities WHERE id = 'cm-a'").fetchone()[0] == "cm-a"
+    database.close_local()
