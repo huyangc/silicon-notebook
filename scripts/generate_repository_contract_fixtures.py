@@ -3025,21 +3025,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "never touches the frozen repository_v9 database or storage"
         ),
     )
-    parser.add_argument(
-        "--rebaseline-callers",
-        action="store_true",
-        help=(
-            "regenerate only the semantic repository caller-boundary contract; "
-            "never touches runtime or frozen repository_v9 artifacts"
-        ),
-    )
     args = parser.parse_args(argv)
     selected_rebaseline_modes = sum(
         bool(value)
         for value in (
             args.rebaseline,
             args.rebaseline_surface,
-            args.rebaseline_callers,
         )
     )
     if selected_rebaseline_modes > 1:
@@ -3048,15 +3039,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     contract_dir = args.fixtures_root / "repository_contract"
     v9_dir = args.fixtures_root / "repository_v9"
     contract_dir.mkdir(parents=True, exist_ok=True)
-
-    if args.rebaseline_callers:
-        from tests.architecture.repository_callers import collect_caller_contract
-
-        _write_json(
-            contract_dir / "caller_boundaries.json",
-            collect_caller_contract(),
-        )
-        return 0
 
     if args.rebaseline_surface:
         surface = collect_facade_surface(

@@ -8,7 +8,7 @@
   "改对了" 与 "下次还会错" 同时成立:这是一条跑步机,不是一次疏漏。
 
   更隐蔽的是 ``validate_postgres_v11_catalog`` 这个**函数名**:它一路活到 v14,
-  连那次全量手改都漏掉了它(以及它在 caller_boundaries.json 里的守卫条目)。
+  连那次全量手改都漏掉了它(以及它当时在 caller_boundaries.json 里的守卫条目,该合同文件现已整套删除)。
 
 所以真正的不变式不是 "版本号写对了",而是 **"版本号根本不出现在措辞里"**——
 必须从 ``POSTGRES_SCHEMA_MANIFEST`` 派生。
