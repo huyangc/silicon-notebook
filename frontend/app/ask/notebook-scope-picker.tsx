@@ -2,6 +2,7 @@ import { BookOpen, Check, ChevronDown, Search, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { GLOBAL_ASK_MAX_NOTEBOOKS, type GlobalScope } from "../global-ask-api.ts";
 import type { NotebookSummary } from "../workspace-model.ts";
+import { claimEscapePress } from "../use-root-modal-coordinator.ts";
 
 export function scopeLabel(scope: GlobalScope, count: number): string {
   if (scope.mode === "all") return `全部笔记本 · ${count} 个`;
@@ -32,11 +33,13 @@ export function NotebookScopePicker({ notebooks, scope, onChange, disabled }: {
     onChange(ids.length || overCap ? { mode: "include", notebook_ids: ids } : { mode: "all" });
   }
 
+  // 面板的 Esc 认领这一次按键（`claimEscapePress`）：浏览器无视 preventDefault 照样派发的
+  // close request 落到全屏窗口上时拿不到名额，一次 Esc 只收起面板。
   return <div className="global-scope">
     <button className="global-scope-trigger" type="button" aria-expanded={open} aria-controls="global-scope-options" disabled={disabled} onClick={() => setOpen(!open)}>
       <BookOpen size={15} />{scopeLabel(scope, notebooks.length)}<ChevronDown size={14} />
     </button>
-    {open && <section id="global-scope-options" className="global-scope-panel" aria-label="选择检索范围" onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setOpen(false); } }}>
+    {open && <section id="global-scope-options" className="global-scope-panel" aria-label="选择检索范围" onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); if (claimEscapePress()) setOpen(false); } }}>
       <div className="global-scope-heading"><strong>选择检索范围</strong><button type="button" className="icon-button" aria-label="收起检索范围" onClick={() => setOpen(false)}><X size={16} /></button></div>
       <label className="global-scope-search"><Search size={16} /><input autoFocus type="search" aria-label="搜索笔记本" placeholder="搜索名称或用途" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
       {overCap ? <p className="global-scope-cap" role="note">一次最多检索 {GLOBAL_ASK_MAX_NOTEBOOKS} 个笔记本，已预选来源最多的 {GLOBAL_ASK_MAX_NOTEBOOKS} 个，可以改选。{full && " 已选满，取消一个后才能再选。"}</p> : <button type="button" className="global-scope-all" disabled={disabled} onClick={() => onChange({ mode: "all" })}>

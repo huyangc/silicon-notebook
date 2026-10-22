@@ -2328,13 +2328,14 @@ test("a citation with no owning notebook renders no image block at all", async (
 // `ImagePreviewModal`、按 view 渲染、onClose 交给 requestClose。page.tsx 那一侧的
 // 接线由 tests/guards/root-modal-boundary.test.mjs 钉住。
 
-function PreviewHost({ pageModal = false }: { pageModal?: boolean } = {}) {
+function PreviewHost({ pageModal = false, notes = false }: { pageModal?: boolean; notes?: boolean } = {}) {
   const [preview, setPreview] = useState<AnswerImagePreviewRequest | null>(null);
   const presentation = useRootModalCoordinator({
     actorId: "user-1", sourceId: null,
     onClosed(slot: RootModalSlot) { if (slot === "answer-image-preview") setPreview(null); },
   });
   const view = presentation.view("answer-image-preview");
+  const notesView = presentation.view("release-notes");
   const image = currentPreviewImage(preview);
   // 渲染顺序与 page.tsx 一致（预览在前、浮窗在后）：同一次提交里谁的 layout 相位先跑，
   // 决定了预览关闭按钮的 autoFocus 发生时窗口是否还是模态的。
@@ -2343,6 +2344,12 @@ function PreviewHost({ pageModal = false }: { pageModal?: boolean } = {}) {
     <button type="button">页面按钮</button>
     {/* 被挡住的页面里写死 aria-modal 的整页视图（如 Knowhow 面板），不是 root modal。 */}
     {pageModal && <section role="dialog" aria-modal="true" aria-label="整页视图"><button type="button">整页视图按钮</button></section>}
+    {/* 异步弹出的根层对话框（更新说明）的替身：与 page.tsx 一样按 view 渲染 aria-modal / inert / zIndex。 */}
+    {notes && <button type="button" onClick={() => presentation.open("release-notes", presentation.captureActorOwner())}>弹出更新说明</button>}
+    {notes && notesView.open && <section role="dialog" aria-label="更新说明" aria-modal={notesView.topmost}
+      inert={notesView.topmost ? undefined : true} style={{ zIndex: notesView.zIndex }}>
+      <button type="button" onClick={() => presentation.requestClose("release-notes", "button")}>知道了</button>
+    </section>}
     {view.open && image && <ImagePreviewModal referenceLabel={image.referenceLabel} interactive={view.topmost} zIndex={view.zIndex}
       onClose={(reason) => presentation.requestClose("answer-image-preview", reason)}>
       <AuthedImage url={sourceImageAssetUrl("", image.notebookId, image.assetId)} alt={image.alt} />
@@ -2610,6 +2617,84 @@ test("the Escape a citation card eats is claimed, so the close request after it 
   pressEscape(marker);
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局问答" })).toBeNull());
   expect(claimEscapePress()).toBe(false);
+});
+
+// 预览盖在全屏窗口上时，更新说明之类的根层对话框异步弹出、盖到预览之上：窗口自己的
+// `view.topmost` 一直是 false，焦点限制必须跟着**实际最上层**走——进不了被挡住的页面，也
+// 回不到已被盖住的预览；更新说明关掉后，焦点回到预览，限制照旧生效。
+test("when another root dialog covers the preview, the focus confinement follows the new topmost layer", async () => {
+  installBrowserLikeDialogs();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
+  render(<PreviewHost notes />);
+  const trigger = await openImageConversation();
+  fireEvent.click(screen.getByRole("button", { name: "全屏展开" }));
+  press(trigger);
+  await openedPreview();
+  const close = screen.getByRole("button", { name: "关闭图片预览" });
+  expect(close).toHaveFocus();
+
+  fireEvent.click(screen.getByRole("button", { name: "弹出更新说明" }));
+  const ok = await screen.findByRole("button", { name: "知道了" });
+  ok.focus();
+  expect(ok).toHaveFocus();
+  // 被挡住的页面、已被盖住的预览，都不是出口。
+  screen.getByRole("button", { name: "页面按钮" }).focus();
+  expect(ok).toHaveFocus();
+  screen.getByRole("button", { name: "放大图片", hidden: true }).focus();
+  expect(ok).toHaveFocus();
+
+  // 更新说明关掉：协调器把焦点还给预览，限制换回预览这一层。
+  fireEvent.click(ok);
+  await waitFor(() => expect(screen.queryByRole("button", { name: "知道了" })).toBeNull());
+  expect(close).toHaveFocus();
+  screen.getByRole("button", { name: "页面按钮" }).focus();
+  expect(close).toHaveFocus();
+});
+
+test("on the standalone /ask page, holding Escape closes the preview opened from a card and leaves the card", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
+  const { container } = render(<GlobalAskPage />);
+  fireEvent.click(await screen.findByRole("button", { name: "[1]" }));
+  const card = await waitFor(() => {
+    const node = container.querySelector<HTMLElement>(".cite-popover");
+    expect(node).not.toBeNull();
+    return node!;
+  });
+  const thumbnail = await within(card).findByTitle("放大查看这张附图");
+  press(thumbnail);
+  await openedPreview();
+
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  await waitFor(() => expect(imagePreview()).toBeNull());
+  // 预览关掉后卡片的 Esc 监听重新挂上；按住产生的自动重复不能把它也收掉。
+  for (let i = 0; i < 3; i += 1) fireEvent.keyDown(document.activeElement!, { key: "Escape", repeat: true });
+  expect(container.querySelector(".cite-popover")).not.toBeNull();
+  expect(thumbnail).toHaveFocus();
+
+  fireEvent.keyUp(document.activeElement!, { key: "Escape" });
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  await waitFor(() => expect(container.querySelector(".cite-popover")).toBeNull());
+});
+
+test("the scope picker's Escape is claimed, so the close request after it cannot close the full window", async () => {
+  installBrowserLikeDialogs();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
+  render(<PreviewHost />);
+  await openImageConversation();
+  fireEvent.click(screen.getByRole("button", { name: "全屏展开" }));
+  fireEvent.click(screen.getByRole("button", { name: "全部笔记本 · 2 个" }));
+  const search = await screen.findByRole("searchbox", { name: "搜索笔记本" });
+
+  fireEvent.keyDown(search, { key: "Escape" });
+  expect(screen.queryByRole("searchbox", { name: "搜索笔记本" })).toBeNull();
+  // 浏览器无视 preventDefault 照样把 close request 派给全屏窗口。
+  fireEvent(chatWindow(), new Event("cancel", { cancelable: true }));
+  expect(chatWindow()).toHaveAttribute("open");
+  fireEvent.keyUp(search, { key: "Escape" });
 });
 
 test("over the compact window the preview sets no focus trap, same as in a notebook", async () => {
