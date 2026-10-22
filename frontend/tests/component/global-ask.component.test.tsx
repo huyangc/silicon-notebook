@@ -9,7 +9,7 @@ import GlobalAskPage from "../../app/ask/page.tsx";
 import GlobalAskWorkspace from "../../app/ask/global-ask-workspace.tsx";
 import { discoveryHintStorageKey, GlobalAskLauncher } from "../../app/ask/global-ask-launcher.tsx";
 import { AnswerView } from "../../app/answer-panel.tsx";
-import { useRootModalCoordinator, type RootModalSlot } from "../../app/use-root-modal-coordinator.ts";
+import { claimEscapePress, useRootModalCoordinator, type RootModalSlot } from "../../app/use-root-modal-coordinator.ts";
 import { ImagePreviewModal } from "../../app/image-preview-modal.tsx";
 import { AuthedImage } from "../../app/authed-image.tsx";
 import { currentPreviewImage, type AnswerImagePreviewRequest } from "../../app/image-preview.ts";
@@ -115,7 +115,11 @@ beforeEach(() => {
   // 的环境（隐私窗口、被清的站点数据）也必须能跑——那正是 hook 里 try/catch 的契约。
   try { window.localStorage.clear(); } catch { /* 存储不可用即无记忆，照常。 */ }
 });
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  // 按键账是模块级的：每条用例收尾一次按键，免得上一条留下的「按住」漏进下一条。
+  fireEvent.keyUp(window, { key: "Escape" });
+});
 
 function installDialogMethods() {
   Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: vi.fn() });
@@ -2324,7 +2328,7 @@ test("a citation with no owning notebook renders no image block at all", async (
 // `ImagePreviewModal`、按 view 渲染、onClose 交给 requestClose。page.tsx 那一侧的
 // 接线由 tests/guards/root-modal-boundary.test.mjs 钉住。
 
-function PreviewHost() {
+function PreviewHost({ pageModal = false }: { pageModal?: boolean } = {}) {
   const [preview, setPreview] = useState<AnswerImagePreviewRequest | null>(null);
   const presentation = useRootModalCoordinator({
     actorId: "user-1", sourceId: null,
@@ -2337,6 +2341,8 @@ function PreviewHost() {
   return <>
     {/* 宿主页面上的一个普通控件：全屏窗口挡住它时，焦点不许被 Tab 送进去。 */}
     <button type="button">页面按钮</button>
+    {/* 被挡住的页面里写死 aria-modal 的整页视图（如 Knowhow 面板），不是 root modal。 */}
+    {pageModal && <section role="dialog" aria-modal="true" aria-label="整页视图"><button type="button">整页视图按钮</button></section>}
     {view.open && image && <ImagePreviewModal referenceLabel={image.referenceLabel} interactive={view.topmost} zIndex={view.zIndex}
       onClose={(reason) => presentation.requestClose("answer-image-preview", reason)}>
       <AuthedImage url={sourceImageAssetUrl("", image.notebookId, image.assetId)} alt={image.alt} />
@@ -2494,7 +2500,8 @@ test("one Escape press closes one layer even when the browser still sends the cl
   expect(trigger).toHaveFocus();
   fireEvent.keyUp(document.activeElement!, { key: "Escape" });
 
-  // 下一次按键照常收起窗口（键盘派发 + 随后的 close request 各来一次，也只关这一层）。
+  // 下一次按键：窗口自己的 keydown 处理接下它、掐掉默认动作，收起窗口（这一步不会再有
+  // close request——`pressEscape` 只在默认动作没被掐掉时才补发）。
   pressEscape(document.activeElement!);
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局问答" })).toBeNull());
 });
@@ -2524,6 +2531,48 @@ test("while the preview covers the full window, focus cannot be sent into the hi
   pressEscape(document.activeElement!);
   await waitFor(() => expect(imagePreview()).toBeNull());
   expect(trigger).toHaveFocus();
+});
+
+test("a page-level aria-modal view behind the full window is not a way out of the preview", async () => {
+  installBrowserLikeDialogs();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
+  render(<PreviewHost pageModal />);
+  const trigger = await openImageConversation();
+  fireEvent.click(screen.getByRole("button", { name: "全屏展开" }));
+  press(trigger);
+  await openedPreview();
+  const close = screen.getByRole("button", { name: "关闭图片预览" });
+  expect(close).toHaveFocus();
+  // 允许的范围是协调器最上层落地的那一层，不是全文档任意一个 aria-modal。
+  screen.getByRole("button", { name: "整页视图按钮" }).focus();
+  expect(close).toHaveFocus();
+});
+
+// 引用卡在捕获期吃掉 Esc 时认领这一次按键：浏览器无视 preventDefault 照样派发的 close
+// request 落到全屏窗口上，也拿不到名额。
+test("the Escape a citation card eats is claimed, so the close request after it cannot close the full window", async () => {
+  installBrowserLikeDialogs();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [imageJob]));
+  const { container } = render(<PreviewHost />);
+  await openImageConversation();
+  fireEvent.click(screen.getByRole("button", { name: "全屏展开" }));
+  const marker = await screen.findByRole("button", { name: "[1]" });
+  fireEvent.click(marker);
+  await waitFor(() => expect(container.querySelector(".cite-popover")).not.toBeNull());
+
+  fireEvent.keyDown(marker, { key: "Escape" });
+  await waitFor(() => expect(container.querySelector(".cite-popover")).toBeNull());
+  expect(chatWindow()).toHaveAttribute("data-test-modal");
+  fireEvent(chatWindow(), new Event("cancel", { cancelable: true }));
+  expect(chatWindow()).toHaveAttribute("open");
+  expect(screen.getByRole("textbox", { name: "输入问题" })).toBeTruthy();
+  fireEvent.keyUp(marker, { key: "Escape" });
+  // 这一次按键结束之后，窗口照常被下一次 Esc 收起。
+  pressEscape(marker);
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局问答" })).toBeNull());
+  expect(claimEscapePress()).toBe(false);
 });
 
 test("over the compact window the preview sets no focus trap, same as in a notebook", async () => {

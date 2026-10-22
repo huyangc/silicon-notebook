@@ -2,9 +2,11 @@ import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import {
+  claimEscapePress,
   mayStackAbove,
   ROOT_MODAL_POLICIES,
   useRootModalCoordinator,
+  type ModalPolicy,
   type RootModalCloseReason,
   type RootModalSlot,
 } from "../../app/use-root-modal-coordinator";
@@ -17,11 +19,13 @@ let value: HookValue | null = null;
 function Harness({
   actorId = "user-a",
   sourceId = null,
+  policies,
 }: {
   actorId?: string | null;
   sourceId?: string | null;
+  policies?: Readonly<Record<RootModalSlot, ModalPolicy>>;
 }) {
-  value = useRootModalCoordinator({ actorId, sourceId, onClosed: closed });
+  value = useRootModalCoordinator({ actorId, sourceId, onClosed: closed, policies });
   const analytics = value.view("analytics");
   const info = value.view("info");
   return <div>
@@ -58,6 +62,8 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  // 按键账是模块级的：用例之间收尾一次按键，免得上一条留下的「按住」漏进下一条。
+  fireEvent.keyUp(window, { key: "Escape" });
   cleanup();
 });
 
@@ -746,4 +752,57 @@ test("stacking refuses a slot that is already on its parent's chain", () => {
     new Set<RootModalSlot>(["answer-image-preview", "global-ask"]))).toBe(false);
   // 未声明的一对。
   expect(mayStackAbove(policies, "info", "global-ask", new Set<RootModalSlot>(["global-ask"]))).toBe(false);
+});
+
+// 策略表组合不出互相叠放，用注入的一张表验证协调器自己的拒绝判据（不只是纯函数）。
+test("openAbove refuses mutual stacking from a policy table that would allow it", () => {
+  const policies = {
+    ...ROOT_MODAL_POLICIES,
+    "global-ask": { ...ROOT_MODAL_POLICIES["global-ask"], stacksOver: ["answer-image-preview"] as RootModalSlot[] },
+  };
+  render(<Harness policies={policies} />);
+  act(() => { value!.open("global-ask", value!.captureActorOwner()); });
+  let child: ReturnType<HookValue["openAbove"]> = null;
+  act(() => { child = value!.openAbove("answer-image-preview", "global-ask"); });
+  expect(child).not.toBeNull();
+  // global-ask 已在预览的父链上：再把它叠到预览之上会替换掉父层、留下孤儿子层。
+  act(() => { expect(value!.openAbove("global-ask", "answer-image-preview")).toBeNull(); });
+  expect(value!.view("answer-image-preview").open).toBe(true);
+  expect(value!.activeLease("answer-image-preview")?.issue).toBe(child!.issue);
+  expect(value!.view("global-ask").open).toBe(true);
+  expect(closed).not.toHaveBeenCalled();
+});
+
+// macOS 按住 Cmd 时 Escape 的 keyup 会被吞掉。账不能因此一直停在「按住」：之后不经键盘
+// 的 close request（返回手势）仍得一次关一层。
+test("a swallowed Escape keyup does not block later close requests", () => {
+  render(<Harness />);
+  const actor = value!.captureActorOwner();
+  for (const end of [
+    () => fireEvent.keyUp(window, { key: "Meta" }),
+    () => fireEvent.keyDown(window, { key: "Shift" }),
+    () => fireEvent.pointerDown(window),
+    () => fireEvent(document, new Event("visibilitychange")),
+  ]) {
+    act(() => { value!.open("global-ask", actor); });
+    act(() => { value!.openAbove("answer-image-preview", "global-ask"); });
+    fireEvent.keyDown(window, { key: "Escape", metaKey: true });
+    act(() => { expect(value!.requestClose("answer-image-preview", "escape")).toBe(true); });
+    // keyup 没来；同一次按键里窗口仍拿不到名额。
+    expect(value!.requestClose("global-ask", "escape")).toBe(false);
+    end();
+    act(() => { expect(value!.requestClose("global-ask", "escape")).toBe(true); });
+  }
+});
+
+test("layers that eat the Escape themselves claim the same press", () => {
+  render(<Harness />);
+  act(() => { value!.open("global-ask", value!.captureActorOwner()); });
+  fireEvent.keyDown(window, { key: "Escape" });
+  // 一个不经协调器的层（引用卡、分享弹窗）在捕获期吃掉并认领了这次按键。
+  expect(claimEscapePress()).toBe(true);
+  expect(value!.requestClose("global-ask", "escape")).toBe(false);
+  expect(value!.view("global-ask").open).toBe(true);
+  fireEvent.keyUp(window, { key: "Escape" });
+  act(() => { expect(value!.requestClose("global-ask", "escape")).toBe(true); });
 });

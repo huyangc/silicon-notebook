@@ -117,22 +117,31 @@ export function GlobalAskLauncher({ presentation, uiMode, openRequest, discovery
 
   // 全屏窗口被盖住时降成了非模态（否则 top layer 会把盖上来的页面级弹层整个压住），
   // 原生 showModal 给的「其余页面 inert」也随之没了：Tab 会把焦点送进被全屏窗口挡住、
-  // 根本看不见的页面元素。被盖住期间焦点只许留在盖上来的那几层（`aria-modal="true"`
-  // 且不在本窗口里）；跑出去就拉回刚才所在的那个元素。只对全屏态：小窗本来就不挡页面，
-  // 与笔记本内弹层一样不设焦点陷阱。
+  // 根本看不见的页面元素。被盖住期间焦点只许留在**盖上来的那一层**里；跑出去就拉回
+  // 刚才所在的那个元素。只对全屏态：小窗本来就不挡页面，与笔记本内弹层一样不设焦点陷阱。
+  //
+  // 「盖上来的那一层」认的是协调器此刻的最上层落地的地方，而不是全文档任意一个
+  // `aria-modal`：被挡住的页面里也可能有写死 aria-modal 的整页视图。协调器只管租约、
+  // 不持有 DOM，所以按事实认：窗口被盖住之后，第一个落在窗口之外的焦点就是最上层
+  // 那一层取得的（打开它的那次 autoFocus / 补聚焦；此刻只有它可交互，下面各层都
+  // inert），它所在的 `aria-modal` 容器就是允许的范围。
   useLayoutEffect(() => {
     const node = dialog.current;
     if (!node || mode !== "full" || view.topmost) return;
-    const coveringLayer = (element: Element) => (
-      node.contains(element) ? null : element.closest<HTMLElement>('[aria-modal="true"]')
-    );
-    let last = document.activeElement instanceof HTMLElement && coveringLayer(document.activeElement)
-      ? document.activeElement
-      : null;
+    let layer: HTMLElement | null = null;
+    let last: HTMLElement | null = null;
+    const admit = (element: HTMLElement) => {
+      if (!layer) layer = element.closest<HTMLElement>('[aria-modal="true"]');
+      if (!layer?.contains(element)) return false;
+      last = element;
+      return true;
+    };
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body && !node.contains(active)) admit(active);
     const onFocusIn = (event: FocusEvent) => {
       const target = event.target;
       if (!(target instanceof HTMLElement) || node.contains(target)) return;
-      if (coveringLayer(target)) { last = target; return; }
+      if (admit(target)) return;
       if (last?.isConnected) last.focus({ preventScroll: true });
     };
     document.addEventListener("focusin", onFocusIn);

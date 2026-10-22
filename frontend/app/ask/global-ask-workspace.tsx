@@ -18,6 +18,7 @@ import { CitationPopover } from "../citation-card";
 import { ConversationShareModal } from "../conversation-share-modal";
 import { globalConversationShareApi, type GlobalJob } from "../global-ask-api";
 import { holdGlobalAskEscape } from "./global-ask-escape";
+import { claimEscapePress } from "../use-root-modal-coordinator";
 import { imagePreviewRequest, type AnswerImagePreviewRequest } from "../image-preview";
 import type { UiMode } from "../ui-mode";
 import type { ReasoningTraceStep } from "../ask-stream";
@@ -150,6 +151,9 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
     if (!share) return;
     const onKey = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape" || event.isComposing) return;
+      // 认领这一次按键：分享弹窗吃掉它（什么都不关），随后到来的 close request 在协调器
+      // 那里也拿不到名额。下面的 hold 兜底保留，它管不经键盘的 close request。
+      if (!claimEscapePress()) return;
       event.preventDefault();
       event.stopPropagation();
     };
