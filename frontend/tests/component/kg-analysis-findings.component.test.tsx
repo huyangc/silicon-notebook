@@ -1007,6 +1007,30 @@ test("标为正常：在飞禁用；成功后从待处理移走、区里说清�
   expect(within(zone(/^待处理/)).getByText(/已标为正常：疑似没合并的同名概念 · RMS Norm。可以在下方「已通过」里撤销。/)).toBeInTheDocument();
 });
 
+test("标为正常在飞时别的原因触发的重取（来源解析推进）换掉了行对象：按钮仍锁着，等这次写自己的重取结束才放开", async () => {
+  let release: () => void = () => {};
+  vi.mocked(dismissKgFinding).mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
+  const view = renderPanel({ findingsRevision: "r1" });
+  await ready();
+  fireEvent.click(within(findingByRule("疑似没合并的同名概念")).getByRole("button", { name: "标为正常" }));
+  expect(within(findingByRule("疑似没合并的同名概念")).getByRole("button", { name: "处理中…" })).toBeDisabled();
+
+  // 来源库的跟踪推进了 contentRevision:问题页重取,回来的是新的行对象(同一条问题)。
+  const callsBefore = vi.mocked(fetchKgFindings).mock.calls.length;
+  openRows = openRows.map((item) => ({ ...item }));
+  view.rerender(
+    <KgAnalysisView notebookId="nb-1" onClose={() => undefined} canAnalyze onAnalyze={() => undefined} findingsRevision="r2" />,
+  );
+  await waitFor(() => expect(vi.mocked(fetchKgFindings).mock.calls.length).toBeGreaterThan(callsBefore));
+  await settle();
+  expect(within(findingByRule("疑似没合并的同名概念")).getByRole("button", { name: "处理中…" })).toBeDisabled();
+
+  // 这次写回来、它自己触发的那次重取结束:这一条移走。
+  openRows = openRows.filter((item) => item.rule_id !== "F4");
+  await act(async () => { release(); });
+  await waitFor(() => expect(findingItems()).toHaveLength(4));
+});
+
 test("标为正常写成功、随后的问题页重取失败：按钮不停在「处理中…」，按钮旁说清标记已写上", async () => {
   renderPanel();
   await ready();
