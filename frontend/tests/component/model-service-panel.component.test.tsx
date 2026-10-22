@@ -265,7 +265,7 @@ const gaps = {
 
 test("admins see unbound workloads and ignored bindings above the service cards", () => {
   renderPanel({ isAdmin: true, status: { ...services, ...gaps } });
-  const block = screen.getByRole("region", { name: "未绑定的模型服务" });
+  const block = screen.getByRole("region", { name: "未绑定与已忽略的绑定" });
   expect(within(block).getByText("库理解整理（功能已开启）")).toHaveClass("is-feature-enabled");
   // 特性开关关着的只说未绑定，不冒充「功能已开启」。
   expect(within(block).getByText("知识补充分析")).not.toHaveClass("is-feature-enabled");
@@ -290,7 +290,7 @@ test("only ignored bindings: the block says they were ignored and lists no unbou
       stale_binding_hidden_count: 0,
     },
   });
-  const block = screen.getByRole("region", { name: "未绑定的模型服务" });
+  const block = screen.getByRole("region", { name: "未绑定与已忽略的绑定" });
   expect(within(block).queryByText("未绑定")).not.toBeInTheDocument();
   expect(within(block).getByText("graph_chain_verify")).toBeInTheDocument();
   expect(block).toHaveTextContent("已被忽略");
@@ -303,7 +303,7 @@ test("no gaps renders no block at all, for admins and in the offline mode", () =
     isAdmin: true,
     status: { ...services, unbound_workloads: [], stale_binding_ids: [], stale_binding_hidden_count: 0 },
   });
-  expect(screen.queryByRole("region", { name: "未绑定的模型服务" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "未绑定与已忽略的绑定" })).not.toBeInTheDocument();
   expect(document.querySelector(".model-service-binding-gaps")).toBeNull();
   complete.unmount();
 
@@ -321,6 +321,6 @@ test("no gaps renders no block at all, for admins and in the offline mode", () =
 
 test("regular users never see the block even if a payload carried gaps", () => {
   renderPanel({ isAdmin: false, status: { ...services, ...gaps } });
-  expect(screen.queryByRole("region", { name: "未绑定的模型服务" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "未绑定与已忽略的绑定" })).not.toBeInTheDocument();
   expect(screen.queryByText(/功能已开启|已忽略的绑定/)).not.toBeInTheDocument();
 });

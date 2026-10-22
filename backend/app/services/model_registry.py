@@ -703,28 +703,49 @@ class BindingReport:
     stale_ids: tuple[str, ...] = ()
 
 
-def binding_report(settings: object, models: object) -> BindingReport:
+def binding_report(
+    settings: object, models: object, registry: object | None = None
+) -> BindingReport:
     """The single computation behind every "which workloads are unbound" answer.
 
     Both the startup ``model-bindings:`` warnings
     (``startup_warmup._unbound_workload_warnings``) and the model-service status
     payload (``ModelStatusService.snapshot``) render THIS value, so the panel
     cannot drift into a second definition of "unbound" than the boot log.
-    ``models`` is the runtime provider (``configured`` plus ``registry``);
+    ``models`` is the runtime provider (``registry`` plus ``configured``);
     ``settings`` only supplies the feature flags, read tolerantly (a missing
     attribute counts as off). Raises on a provider that lacks those members —
     each caller decides its own fail-open policy.
+
+    The whole report comes from ONE registry generation. A hot reload publishes
+    a new registry by rebinding ``models.registry``; reading that attribute per
+    workload could see a populated registry at the offline check and an empty
+    one a few lookups later, and report every workload as unbound — the very
+    thing the offline rule exists to prevent. So the registry is read once
+    (or handed in by a caller that already holds a snapshot, so its per-service
+    rows and these gaps agree) and every answer below is taken from it:
+    ``service_for`` is what ``RuntimeModelProvider.configured`` itself checks.
+    Only a registry double without ``service_for`` falls back to
+    ``models.configured``.
 
     Under ``MODEL_BINDINGS_STRICT`` (default) a registry with an unbound
     workload or a stale id is refused at load, so for any process that started
     strict — and any hot reload it accepted — this is empty unless ``offline``.
     """
-    if not models.registry.services():
+    if registry is None:
+        registry = models.registry
+    if not registry.services():
         return BindingReport(offline=True)
+    service_for = getattr(registry, "service_for", None)
+    if callable(service_for):
+        def bound(workload_id: str) -> bool:
+            return service_for(workload_id) is not None
+    else:
+        bound = models.configured
     unbound = tuple(
         workload
         for workload in WORKLOADS.values()
-        if not models.configured(workload.id)
+        if not bound(workload.id)
     )
     unbound_ids = {workload.id: workload for workload in unbound}
     feature_enabled = tuple(
@@ -734,7 +755,7 @@ def binding_report(settings: object, models: object) -> BindingReport:
     )
     # Tolerant accessor: a provider double predating this member loses only
     # the stale half, not the whole report.
-    reader = getattr(models.registry, "unknown_bindings", None)
+    reader = getattr(registry, "unknown_bindings", None)
     stale = tuple(reader()) if callable(reader) else ()
     return BindingReport(
         unbound=unbound, feature_enabled=feature_enabled, stale_ids=stale

@@ -23,6 +23,7 @@ from app.services.model_registry import (
     WORKLOADS,
     ModelBindingGapError,
     SystemModelServiceRegistry,
+    binding_report,
 )
 from app.services.model_status import ModelStatusService
 from app.services.model_work import SchedulerSnapshot
@@ -323,10 +324,26 @@ def test_hot_reload_is_reflected_without_a_restart(tmp_path):
         provider.close()
 
 
-def test_a_provider_that_cannot_answer_fails_open_without_breaking_the_panel():
+def test_a_registry_that_cannot_answer_fails_open_without_breaking_the_panel(tmp_path):
     """fail-open 同启动诊断:算不出清单只丢清单,每服务行照常返回。"""
-    registry = SystemModelServiceRegistry({}, {})
+
+    class _Broken(SystemModelServiceRegistry):
+        def unknown_bindings(self):
+            raise RuntimeError("diagnostic reader exploded")
+
+    loaded = SystemModelServiceRegistry.load(
+        _settings(_write_config(tmp_path / "m.toml", omit={"kg_glean"}))
+    )
+    registry = _Broken(
+        {service.id: service for service in loaded.services()},
+        {
+            workload_id: service.id
+            for service in loaded.services()
+            for workload_id in (workload.id for workload in loaded.workloads_for(service.id))
+        },
+    )
     provider = SimpleNamespace(
+        registry=registry,
         scheduler_snapshot=lambda _service_id: SchedulerSnapshot(
             active=0, maximum=1, queued=0, oldest_wait_ms=0,
             breaker_state="closed", busy=False,
@@ -334,6 +351,70 @@ def test_a_provider_that_cannot_answer_fails_open_without_breaking_the_panel():
     )
     service = ModelStatusService(registry, provider, _MemoryStore(), settings=_settings())
 
-    assert _gaps(service.snapshot(include_binding_gaps=True)) == {
-        "unbound": [], "stale": [], "hidden": 0,
-    }
+    payload = service.snapshot(include_binding_gaps=True)
+    assert [item.service_id for item in payload.services] == ["chat", "embed", "rerank"]
+    assert _gaps(payload) == {"unbound": [], "stale": [], "hidden": 0}
+
+
+class _SwappingProvider:
+    """A provider whose ``.registry`` is rebound by a "hot reload" mid-read.
+
+    The first ``reads`` reads of ``.registry`` return ``first``; every later
+    read returns ``second`` — exactly what a reload thread publishing
+    ``self.registry = candidate`` between two attribute reads looks like.
+    ``configured`` reads through the same attribute, as the real provider does.
+    """
+
+    def __init__(self, first, second, *, reads: int = 1) -> None:
+        self._first, self._second, self._left = first, second, reads
+        self.reads = 0
+
+    @property
+    def registry(self):
+        self.reads += 1
+        if self._left > 0:
+            self._left -= 1
+            return self._first
+        return self._second
+
+    def configured(self, workload_id):
+        return self.registry.service_for(workload_id) is not None
+
+    def scheduler_snapshot(self, _service_id):
+        return SchedulerSnapshot(
+            active=0, maximum=2, queued=0, oldest_wait_ms=0,
+            breaker_state="closed", busy=False,
+        )
+
+
+def test_the_report_comes_from_one_registry_generation(tmp_path):
+    """热重载在离线判定之后换上一份空注册表:报告仍整份来自读到的那一代,
+    不会把全部工作负载报成未绑定(规格明令禁止的「全都未绑定」)。启动告警走同一个
+    函数,一并钉住。"""
+    settings = _settings(_write_config(tmp_path / "m.toml", omit={"kg_glean"}))
+    populated = SystemModelServiceRegistry.load(settings)
+    emptied = SystemModelServiceRegistry({}, {})
+
+    provider = _SwappingProvider(populated, emptied)
+    report = binding_report(settings, provider)
+    assert [workload.id for workload in report.unbound] == ["kg_glean"]
+    assert provider.reads == 1
+
+    provider = _SwappingProvider(populated, emptied)
+    summary_ids, _ = _warning_ids(_unbound_workload_warnings(settings, provider))
+    assert summary_ids == ["kg_glean"]
+
+
+def test_snapshot_rows_and_gaps_share_one_registry_generation(tmp_path):
+    """同一次快照里每服务行(含「使用位置」)与缺口来自同一份注册表。"""
+    settings = _settings(_write_config(tmp_path / "m.toml", omit={"kg_glean"}))
+    populated = SystemModelServiceRegistry.load(settings)
+    provider = _SwappingProvider(populated, SystemModelServiceRegistry({}, {}))
+    service = ModelStatusService(populated, provider, _MemoryStore(), settings=settings)
+
+    payload = service.snapshot(include_binding_gaps=True)
+
+    assert provider.reads == 1
+    assert [item.service_id for item in payload.services] == ["chat", "embed", "rerank"]
+    assert all(item.workloads for item in payload.services)
+    assert _gaps(payload)["unbound"] == [("kg_glean", False)]

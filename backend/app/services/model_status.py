@@ -63,7 +63,13 @@ class ModelStatusService:
         The gaps are an operator diagnostic (the remedy is editing the
         deployment's model-services.toml), so the HTTP layer asks for them for
         administrators only; everyone else gets the fields empty.
+
+        The registry is read ONCE: a hot reload rebinds the provider's
+        registry, and rows and gaps taken from two generations could disagree
+        (a service row next to a gap list that calls the whole deployment
+        offline, or the reverse).
         """
+        registry = self.registry
         stored = self.status_store.get_all()
         return ModelServicesStatus(
             services=[
@@ -71,13 +77,14 @@ class ModelStatusService:
                     service,
                     stored.get(service.id),
                     self.provider.scheduler_snapshot(service.id),
+                    registry=registry,
                 )
-                for service in self.registry.services()
+                for service in registry.services()
             ],
-            **(self._binding_gaps() if include_binding_gaps else {}),
+            **(self._binding_gaps(registry) if include_binding_gaps else {}),
         )
 
-    def _binding_gaps(self) -> dict[str, object]:
+    def _binding_gaps(self, registry: SystemModelServiceRegistry) -> dict[str, object]:
         """Render ``binding_report`` — the startup warnings' own computation.
 
         Read live on every call, so a hot reload that fixes (or breaks) the
@@ -87,7 +94,7 @@ class ModelStatusService:
         gap rows rather than a failed status panel.
         """
         try:
-            report = binding_report(self.settings, self.provider)
+            report = binding_report(self.settings, self.provider, registry)
         except Exception as exc:  # diagnostic-only; never fails the panel
             logger.warning(
                 "model status: binding report unavailable (%s)", type(exc).__name__
@@ -159,7 +166,10 @@ class ModelStatusService:
         service: ModelServiceDefinition,
         stored: dict[str, object] | None,
         live: SchedulerSnapshot,
+        *,
+        registry: SystemModelServiceRegistry | None = None,
     ) -> ModelServiceStatusItem:
+        registry = registry if registry is not None else self.registry
         persisted = self._current_persisted(service, stored)
         persisted_status = str(persisted.get("status", "untested"))
         if live.breaker_state == "half_open":
@@ -177,7 +187,7 @@ class ModelStatusService:
             model=safe_model_label(service.model),
             workloads=[
                 ModelWorkloadView(id=workload.id, label=workload.display_label)
-                for workload in self.registry.workloads_for(service.id)
+                for workload in registry.workloads_for(service.id)
             ],
             status=status,
             active=max(0, int(live.active)),
