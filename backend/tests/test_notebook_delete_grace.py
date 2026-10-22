@@ -10,6 +10,7 @@ SQLite's own race between two sweepers.
 from __future__ import annotations
 
 import threading
+import time
 from datetime import timedelta
 
 import pytest
@@ -18,8 +19,11 @@ from fastapi.testclient import TestClient
 from app.core.config import Settings
 from app.domain.notebook_delete_grace import (
     DELETE_WINDOW_CLOSED_CODE,
+    DELETE_WINDOW_TRANSFER_PAGE_SIZE,
+    NOT_IN_DELETE_WINDOW_CODE,
     NOTEBOOK_DELETE_DUE_CODE,
     NOTEBOOK_PENDING_DELETE_CODE,
+    TRANSFER_IN_PROGRESS_CODE,
 )
 from app.services import notebook_delete as notebook_delete_module
 from app.services.sqlite_repository import SQLiteRepository
@@ -52,6 +56,24 @@ def test_notebook_delete_grace(repo, monkeypatch, case):
     CASES[case](build_world(repo, postgres=False, monkeypatch=monkeypatch))
 
 
+def test_more_than_one_real_page_moves_everything(repo, monkeypatch):
+    """The real page size: 203 transferable items take two pages (200 + 3)
+    and every one lands in the target exactly once."""
+    from tests.notebook_delete_grace_cases import _confirmed_memory, _titles_in, transfer_page
+
+    world = build_world(repo, postgres=False, monkeypatch=monkeypatch)
+    extra = [_confirmed_memory(world, world.member, f"p{i:03d}") for i in range(201)]
+    world.request()
+    first = transfer_page(world, world.member, world.member_target)
+    assert (len(first["results"]), first["remaining"]) == (DELETE_WINDOW_TRANSFER_PAGE_SIZE, 3)
+    second = transfer_page(world, world.member, world.member_target, first["next_after"])
+    assert (len(second["results"]), second["remaining"]) == (3, 0)
+    moved = [row for page in (first, second) for row in page["results"]]
+    assert all(row["ok"] and row["status"] == "moved" for row in moved)
+    assert sorted(row["source_id"] for row in moved) == sorted([*world.confirmed, *extra])
+    assert len(_titles_in(world, world.member_target)) == 203
+
+
 # --------------------------------------------------------------- pushes
 
 
@@ -64,6 +86,7 @@ def test_every_transition_pushes_the_owner_and_the_memory_holders(repo, monkeypa
     monkeypatch.setattr(notebook_delete_module, "publish_snapshot", pushed.append)
     runner = repo._runtime.notebook_delete
     runner._submit = lambda job_id, notebook_id: True
+    runner._notify_async = lambda fn: fn()
     audience = sorted([world.owner.id, world.member.id])
 
     runner.request_pending(world.doomed, world.owner.id)
@@ -86,6 +109,62 @@ def test_every_transition_pushes_the_owner_and_the_memory_holders(repo, monkeypa
     monkeypatch.setattr(repo._runtime.notebook_delete_jobs, "delete_notice_audience", broken)
     runner.request_pending(world.owner_target, world.owner.id)  # does not raise
     assert pushed == []
+
+
+def test_request_and_cancel_do_not_wait_for_the_bell(repo, monkeypatch):
+    """T1 and T2 answer before their bell refresh runs: the push recomputes
+    each subscribed user's snapshot, which must not hold the request."""
+    world = build_world(repo, postgres=False, monkeypatch=monkeypatch)
+    release, pushed = threading.Event(), []
+
+    def slow_push(user_id):
+        assert release.wait(10)
+        pushed.append(user_id)
+
+    monkeypatch.setattr(notebook_delete_module, "publish_snapshot", slow_push)
+    runner = repo._runtime.notebook_delete
+    started = time.monotonic()
+    assert runner.request_pending(world.doomed, world.owner.id)["status"] == "pending_delete"
+    assert runner.cancel_pending(world.doomed, world.owner.id) == "cancelled"
+    assert time.monotonic() - started < 5
+    assert pushed == []
+    release.set()
+    deadline = time.monotonic() + 10
+    while len(pushed) < 4 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert sorted(pushed) == sorted([world.owner.id, world.member.id] * 2)
+
+
+def test_a_failing_notice_read_drops_only_those_bell_items(repo, monkeypatch, caplog):
+    """The bell keeps its other items when the deletion notices cannot be
+    read, and the failure is logged."""
+    world = build_world(repo, postgres=False, monkeypatch=monkeypatch)
+    world.request()
+    pending = repo._runtime.pending_actions_service
+    real_rows = pending.projections.pending_actions_projection_rows
+    other = {"type": "share_request", "request_id": "sr-1", "group_id": "g-1"}
+
+    def rows_with_another_item(user_id):
+        rows = real_rows(user_id)
+        return {**rows, "items": [*rows["items"], other]}
+
+    monkeypatch.setattr(
+        pending.projections, "pending_actions_projection_rows", rows_with_another_item
+    )
+    before = pending.list_for_user(world.owner.id)
+    assert [item["type"] for item in before["items"]][:1] == ["notebook_pending_delete"]
+    projection_items = [i for i in before["items"] if i["type"] != "notebook_pending_delete"]
+
+    def broken(user_id, **kwargs):
+        raise RuntimeError("notice read failed")
+
+    monkeypatch.setattr(pending.projections, "pending_delete_notices", broken)
+    with caplog.at_level("WARNING", logger="silicon_notebook.pending_actions"):
+        after = pending.list_for_user(world.owner.id)
+    assert after["items"] == projection_items and other in after["items"]
+    assert "deletion-window notices failed" in caplog.text
+    with pytest.raises(RuntimeError):
+        pending.deletion_notices(world.owner.id)  # the block's own endpoint fails closed
 
 
 def test_two_sweepers_promote_a_window_once(repo, monkeypatch):
@@ -277,9 +356,25 @@ def test_transfer_route_moves_and_reports_per_item(http):
     ).status_code == 422  # the mode is not the caller's choice
     response = client.post(url, json={"target_notebook_id": http["mine"]}, headers=http["member"])
     assert response.status_code == 200, response.text
-    [result] = response.json()["results"]
+    page = response.json()
+    [result] = page["results"]
     assert result["source_id"] == http["memory_ids"][0]
     assert result["status"] == "moved" and result["ok"] is True
+    assert (page["remaining"], page["next_after"]) == (0, http["memory_ids"][0])
+    # Only inside a window: a live notebook keeps the Memory page's transfer.
+    live = client.post(
+        f"/api/notebooks/{http['mine']}/memories/transfer",
+        json={"target_notebook_id": http["mine"]}, headers=http["member"],
+    )
+    assert live.status_code == 409
+    assert live.json()["detail"]["code"] == NOT_IN_DELETE_WINDOW_CODE
+    # One transfer at a time per caller and notebook.
+    claim = http["repo"]._runtime.memory_store.delete_window_transfer_claim
+    with claim(doomed, http["member_id"]) as held:
+        assert held
+        busy = client.post(url, json={"target_notebook_id": http["mine"]}, headers=http["member"])
+    assert busy.status_code == 409
+    assert busy.json()["detail"]["code"] == TRANSFER_IN_PROGRESS_CODE
     assert client.post(
         url, json={"target_notebook_id": doomed}, headers=http["member"]
     ).status_code == 404  # not a notebook the member can write

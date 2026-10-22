@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+_log = logging.getLogger("silicon_notebook.pending_actions")
 
 
 class PendingActionsService:
@@ -53,6 +56,20 @@ class PendingActionsService:
         )
         return rows[0] if rows else None
 
+    def _bell_deletion_notices(self, user_id: str) -> list[dict[str, Any]]:
+        """The bell's deletion-window entries. A failing read drops only this
+        kind (logged for diagnosis), never the whole bell: the notebook list's
+        block reads the same notices from its own endpoint and says there
+        when they cannot be read (fail-closed), so nothing is silently lost."""
+        try:
+            return self.deletion_notices(user_id)
+        except Exception:  # noqa: BLE001 - one kind must not hide the others
+            _log.warning(
+                "pending actions: reading the deletion-window notices failed",
+                exc_info=True,
+            )
+            return []
+
     def list_for_user(self, user_id: str) -> dict:
         projection = self.projections.pending_actions_projection_rows(user_id)
         # 删除窗口里的库排在最前:它们有截止时刻,而且计入未读(见 count)。
@@ -66,7 +83,7 @@ class PendingActionsService:
                 "memory_count": notice["memory_count"],
                 "transferable_count": notice["transferable_count"],
             }
-            for notice in self.deletion_notices(user_id)
+            for notice in self._bell_deletion_notices(user_id)
         ] + projection["items"]
         for notebook_id in projection["notebook_ids"]:
             try:

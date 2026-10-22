@@ -115,6 +115,18 @@ from app.services.pending_bus import publish_snapshot
 
 _log = logging.getLogger("silicon_notebook.notebook_delete")
 
+
+def _notify_on_a_thread(fn: Callable[[], None]) -> None:
+    """Run a fail-open bell refresh off the calling thread. Starting the
+    thread itself is fail-open too: a lost push is caught up by the next
+    snapshot (the bell re-reads on open)."""
+    try:
+        threading.Thread(
+            target=fn, name="notebook-delete-notice", daemon=True
+        ).start()
+    except Exception:  # noqa: BLE001 - notification is best effort
+        _log.warning("starting the deletion notice push failed", exc_info=True)
+
 # §1.5's房规 batch size for the paths-materialization keyset page (phase 1)
 # AND phase 3's row-cleanup batches (form-one page size / form-two ctid
 # batch size) — the design gives ONE starting value (500) for both forms and
@@ -345,6 +357,7 @@ class NotebookDeleteJobRunner:
         scale_artifact_store: Any = None,
         scale_build_claim_in_process: Callable[[str], bool] | None = None,
         scale_build_release_in_process: Callable[[str], None] | None = None,
+        notify_async: Callable[[Callable[[], None]], None] | None = None,
     ) -> None:
         self.notebook_store = notebook_store
         self.delete_jobs = delete_jobs
@@ -385,6 +398,12 @@ class NotebookDeleteJobRunner:
         # ``mark_running`` lease CAS decides ownership there as everywhere.
         self._inflight: set[str] = set()
         self._inflight_lock = threading.Lock()
+        # How T1/T2 hand their bell refresh off the request thread (a push
+        # recomputes each subscribed user's snapshot on the calling thread;
+        # with many Memory holders that would hold the DELETE / cancel
+        # answer). Default: a daemon thread per transition; tests inject a
+        # synchronous runner.
+        self._notify_async = notify_async or _notify_on_a_thread
 
     # ------------------------------------------------------------------
     # §T-2: tombstone request — the API-facing entry point
@@ -413,7 +432,7 @@ class NotebookDeleteJobRunner:
         after the commit."""
         window = self.delete_jobs.request_pending(notebook_id, actor)
         self._log_window_event("notebook_delete_requested", notebook_id, actor)
-        self._publish_notice_change(notebook_id)
+        self._notify_async(lambda: self._publish_notice_change(notebook_id))
         return {"status": "pending_delete", "delete_after": window["delete_after"]}
 
     def cancel_pending(self, notebook_id: str, actor: str) -> str:
@@ -423,7 +442,7 @@ class NotebookDeleteJobRunner:
         outcome = self.delete_jobs.cancel_pending(notebook_id)
         if outcome == "cancelled":
             self._log_window_event("notebook_delete_cancelled", notebook_id, actor)
-            self._publish_notice_change(notebook_id)
+            self._notify_async(lambda: self._publish_notice_change(notebook_id))
         return outcome
 
     def _promote_due_windows(self, now: Any) -> int:

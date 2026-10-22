@@ -400,6 +400,12 @@ class _BudgetedReadConnection:
         return self.connection.execute(*args, **kwargs)
 
 
+# Process-local named claims (``SqliteDatabase.try_process_claim``), keyed by
+# database file and name, shared by every ``SqliteDatabase`` of this process.
+_PROCESS_CLAIMS: set[tuple[str, str]] = set()
+_PROCESS_CLAIMS_LOCK = threading.Lock()
+
+
 class SqliteDatabase:
     """进程内 SQLite 连接来源。**每线程复用一条连接**(threading.local),而非每次
     新建——把 fd 用量从 O(操作数) 降到 O(线程数),并省掉每操作反复建连接/PRAGMA/
@@ -763,6 +769,25 @@ class SqliteDatabase:
     def begin_guarded_write(conn: sqlite3.Connection) -> None:
         """Backend-neutral guarded-write seam used by domain services."""
         conn.execute("BEGIN IMMEDIATE")
+
+    @contextmanager
+    def try_process_claim(self, name: str) -> Iterator[bool]:
+        """Try to take a named claim for the duration of the block; yields
+        whether this call holds it and never waits. Process-local: SQLite has
+        one serving process writing the file, and the claims this backs
+        (one window transfer per caller and notebook) are only ever taken by
+        it. The PostgreSQL twin is a session advisory lock."""
+        key = (str(self.db_path), name)
+        with _PROCESS_CLAIMS_LOCK:
+            held = key not in _PROCESS_CLAIMS
+            if held:
+                _PROCESS_CLAIMS.add(key)
+        try:
+            yield held
+        finally:
+            if held:
+                with _PROCESS_CLAIMS_LOCK:
+                    _PROCESS_CLAIMS.discard(key)
 
     @contextmanager
     def table_projection_lock(self, table_id: str) -> Iterator[None]:

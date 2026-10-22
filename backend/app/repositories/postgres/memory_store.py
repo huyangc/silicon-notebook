@@ -23,6 +23,7 @@ from app.domain.notebook_delete_grace import (
     WINDOW_CLOSED,
     WINDOW_OPEN,
     classify_delete_window,
+    delete_window_failure_code,
     instant_text,
     utc_instant,
 )
@@ -994,23 +995,77 @@ class MemoryStore:
             )
         return classify_delete_window(row)
 
-    def delete_window_transferable_ids(
+    def delete_window_failure(
         self, notebook_id: str, user_id: str, *, now: Any
-    ) -> list[str]:
+    ) -> str | None:
         """See the SQLite twin."""
         with self.database.connect() as db:
-            rows = db.execute(
-                "SELECT m.id FROM memory_items m WHERE m.notebook_id=%s "
-                "AND m.created_by=%s AND m.status='confirmed' "
-                "AND m.promotion_state<>'proposed' AND "
-                + export_access_exists_clause("m")
-                + ' ORDER BY m.created_at,m.id COLLATE "C"',
-                (
-                    notebook_id, user_id, *read_access_params(user_id),
-                    utc_instant(now),
-                ),
-            ).fetchall()
+            row = self._delete_window_row_on(
+                db, notebook_id, user_id, utc_instant(now)
+            )
+        return delete_window_failure_code(row)
+
+    @staticmethod
+    def _transferable_where(after: str | None) -> str:
+        return (
+            "m.notebook_id=%s AND m.created_by=%s AND m.status='confirmed' "
+            "AND m.promotion_state<>'proposed' AND "
+            + export_access_exists_clause("m")
+            + (' AND m.id COLLATE "C" > %s' if after is not None else "")
+        )
+
+    def delete_window_transferable_ids(
+        self, notebook_id: str, user_id: str, *, now: Any,
+        after: str | None = None, limit: int | None = None,
+    ) -> list[str]:
+        """See the SQLite twin (byte order, ``COLLATE "C"``, on both)."""
+        params: list[Any] = [
+            notebook_id, user_id, *read_access_params(user_id), utc_instant(now),
+        ]
+        if after is not None:
+            params.append(after)
+        sql = (
+            "SELECT m.id FROM memory_items m WHERE "
+            + self._transferable_where(after) + ' ORDER BY m.id COLLATE "C"'
+        )
+        if limit is not None:
+            sql += " LIMIT %s"
+            params.append(int(limit))
+        with self.database.connect() as db:
+            rows = db.execute(sql, params).fetchall()
         return [row["id"] for row in rows]
+
+    def delete_window_transferable_count(
+        self, notebook_id: str, user_id: str, *, now: Any, after: str | None = None
+    ) -> int:
+        """See the SQLite twin."""
+        params: list[Any] = [
+            notebook_id, user_id, *read_access_params(user_id), utc_instant(now),
+        ]
+        if after is not None:
+            params.append(after)
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT COUNT(*) AS c FROM memory_items m WHERE "
+                + self._transferable_where(after),
+                params,
+            ).fetchone()
+        return int(row["c"])
+
+    def delete_window_transfer_claim(self, notebook_id: str, user_id: str):
+        """See the SQLite twin. PostgreSQL's claim is a session advisory lock
+        on a dedicated connection, so it holds across processes."""
+        return self.database.try_session_claim(
+            f"memory-transfer\x1f{user_id}\x1f{notebook_id}"
+        )
+
+    def memory_row_exists(self, memory_id: str) -> bool:
+        """See the SQLite twin."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT 1 AS one FROM memory_items WHERE id=%s", (memory_id,)
+            ).fetchone()
+        return row is not None
 
     def memory_by_answer(self, user_id: str, answer_id: str) -> MemoryRecord | None:
         with self.database.connect() as db:

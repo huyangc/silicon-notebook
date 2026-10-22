@@ -21,6 +21,7 @@ from app.domain.notebook_delete_grace import (
     WINDOW_CLOSED,
     WINDOW_OPEN,
     classify_delete_window,
+    delete_window_failure_code,
     instant_text,
     stored_instant_text,
 )
@@ -862,27 +863,91 @@ class MemoryStore:
             )
         return classify_delete_window(row)
 
-    def delete_window_transferable_ids(
+    def delete_window_failure(
         self, notebook_id: str, user_id: str, *, now: Any
+    ) -> str | None:
+        """``delete_window_failure_code`` of one notebook for one caller at
+        ``now``: why one item of a window transfer could not be read."""
+        with self.database.connect() as db:
+            row = self._delete_window_row_on(
+                db, notebook_id, user_id, stored_instant_text(now)
+            )
+        return delete_window_failure_code(row)
+
+    @staticmethod
+    def _transferable_where(after: str | None) -> str:
+        return (
+            "m.notebook_id=? AND m.created_by=? AND m.status='confirmed' "
+            "AND m.promotion_state<>'proposed' AND "
+            + export_access_exists_clause("m")
+            + (" AND m.id > ?" if after is not None else "")
+        )
+
+    def delete_window_transferable_ids(
+        self, notebook_id: str, user_id: str, *, now: Any,
+        after: str | None = None, limit: int | None = None,
     ) -> list[str]:
         """The caller's own Memory a deletion-window transfer moves: every
         ``confirmed`` item the move rule accepts (not
-        ``promotion_state='proposed'``), oldest first, under the same window
-        predicate as the export. Candidates and proposed items stay behind
-        (the notice counts them so the interface can say how many)."""
+        ``promotion_state='proposed'``), under the same window predicate as
+        the export, in id order -- the transfer's page cursor: ``after`` is
+        the last id the previous page handled, ``limit`` the page size.
+        Candidates and proposed items stay behind (the notice counts them so
+        the interface can say how many)."""
+        params: list[Any] = [
+            notebook_id, user_id, *read_access_params(user_id),
+            stored_instant_text(now),
+        ]
+        if after is not None:
+            params.append(after)
+        sql = (
+            "SELECT m.id FROM memory_items m WHERE "
+            + self._transferable_where(after) + " ORDER BY m.id"
+        )
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
         with self.database.connect() as db:
-            rows = db.execute(
-                "SELECT m.id FROM memory_items m WHERE m.notebook_id=? "
-                "AND m.created_by=? AND m.status='confirmed' "
-                "AND m.promotion_state<>'proposed' AND "
-                + export_access_exists_clause("m")
-                + " ORDER BY m.created_at,m.id",
-                (
-                    notebook_id, user_id, *read_access_params(user_id),
-                    stored_instant_text(now),
-                ),
-            ).fetchall()
+            rows = db.execute(sql, params).fetchall()
         return [row["id"] for row in rows]
+
+    def delete_window_transferable_count(
+        self, notebook_id: str, user_id: str, *, now: Any, after: str | None = None
+    ) -> int:
+        """How many of ``delete_window_transferable_ids`` lie after ``after``
+        (what the next pages will still move)."""
+        params: list[Any] = [
+            notebook_id, user_id, *read_access_params(user_id),
+            stored_instant_text(now),
+        ]
+        if after is not None:
+            params.append(after)
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT COUNT(*) AS c FROM memory_items m WHERE "
+                + self._transferable_where(after),
+                params,
+            ).fetchone()
+        return int(row["c"])
+
+    def delete_window_transfer_claim(self, notebook_id: str, user_id: str):
+        """One window transfer at a time per (caller, notebook): a context
+        manager answering whether this call holds the claim. SQLite's claim
+        is process-local -- the serving process is this backend's only
+        writer, and every transfer runs in it."""
+        return self.database.try_process_claim(
+            f"memory-transfer\x1f{user_id}\x1f{notebook_id}"
+        )
+
+    def memory_row_exists(self, memory_id: str) -> bool:
+        """Whether a Memory row with this id exists at all (any notebook, any
+        status) -- no access check; the transfer asks it about its own source
+        after a conditional delete matched nothing."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM memory_items WHERE id=?", (memory_id,)
+            ).fetchone()
+        return row is not None
 
     def memory_by_answer(self, user_id: str, answer_id: str) -> MemoryRecord | None:
         with self.database.connect() as db:

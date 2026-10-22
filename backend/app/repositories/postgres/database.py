@@ -58,6 +58,7 @@ _ISOLATION_LEVELS = {
 _CONNECTION_LOG_STATE = threading.local()
 _KNOWHOW_PROJECTION_LOCK_NAMESPACE = 0x534E4B48  # "SNKH"
 _SCALE_BUILD_LOCK_NAMESPACE = 0x53434C42  # "SCLB"
+_SESSION_CLAIM_NAMESPACE = 0x534E434C  # "SNCL"
 # 批 3·W1 PR-3 §4.3: this session/``application_name`` is no longer
 # scale-build-only — notebook delete's phase 4 (§T-3b) claims the SAME
 # per-notebook namespace+key before sweeping the notebook's disk artifacts,
@@ -459,7 +460,9 @@ class PostgresDatabase:
                     f"PostgreSQL pool is closed for {self._diagnostic_url}"
                 )
 
-    def _open_projection_lock_connection(self):
+    def _open_projection_lock_connection(
+        self, application_name: str = "silicon-notebook-projection-lock"
+    ):
         """Open a dedicated lock session at one lifecycle linearization point."""
         with self._lifecycle_lock:
             if self._closed:
@@ -470,9 +473,50 @@ class PostgresDatabase:
                 self._database_url,
                 autocommit=False,
                 row_factory=dict_row,
-                application_name="silicon-notebook-projection-lock",
+                application_name=application_name,
                 connect_timeout=self._projection_connect_timeout_seconds,
             )
+
+    @contextmanager
+    def try_session_claim(self, name: str) -> Iterator[bool]:
+        """Try to take a named claim for the duration of the block, across
+        processes; yields whether this call holds it and never waits.
+
+        A session advisory lock (``pg_try_advisory_lock``) on a dedicated,
+        non-pooled session: the holder keeps using pooled connections for its
+        work, and closing the session releases the lock even if the explicit
+        unlock fails or the process dies. The key is the CRC32 of ``name``
+        (``advisory_lock_key``); a collision only makes an unrelated claim
+        answer "held"."""
+        self._ensure_projection_lock_open()
+        connection = None
+        try:
+            connection = self._open_projection_lock_connection(
+                "silicon-notebook-session-claim"
+            )
+            self._restore_session_defaults(connection)
+            row = connection.execute(
+                "SELECT pg_try_advisory_lock(%s, %s) AS locked",
+                (_SESSION_CLAIM_NAMESPACE, advisory_lock_key(name)),
+            ).fetchone()
+            connection.commit()
+        except PostgresDatabaseClosedError:
+            raise
+        except Exception:
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+            raise self._safe_error("session claim acquisition") from None
+        try:
+            yield bool(row["locked"])
+        finally:
+            # Closing the session is the release (and the no-leak net).
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     @contextmanager
     def offline_maintenance_session(

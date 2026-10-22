@@ -71,8 +71,8 @@ def _insert_notebook(db, nid: str, owner: str) -> None:
     )
 
 
-@pytest.fixture
-def lifecycle(postgres_repository):
+@pytest.fixture(params=["deleting", "pending_delete"])
+def lifecycle(postgres_repository, request):
     """SQLite 侧同名 fixture 的精简版:只播种本文件实际要用到的几条腿
     (owned/granted/activity/mount),不重建全部 16 个方法的辅助数据。"""
     repo = postgres_repository
@@ -139,7 +139,14 @@ def lifecycle(postgres_repository):
             )
 
         db.execute("UPDATE notebooks SET status='copying' WHERE id=%s", (copying_id,))
-        db.execute("UPDATE notebooks SET status='deleting' WHERE id=%s", (deleting_id,))
+        # Twice, like the SQLite matrix: the six-phase delete in progress and
+        # the one-day window with its deadline far away (open, and still
+        # missing from every read path).
+        db.execute(
+            "UPDATE notebooks SET status=%s,status_before_delete='ready',delete_after=%s "
+            "WHERE id=%s",
+            (request.param, "2999-01-01T00:00:00+00:00", deleting_id),
+        )
 
     return {
         "owner_id": owner_id,

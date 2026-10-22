@@ -45,7 +45,12 @@ from app.repositories.identity_errors import (
     AgentTokenInactiveError,
     AgentTokenSecretUnavailableError,
 )
-from app.domain.notebook_delete_grace import DELETE_WINDOW_CLOSED_CODE, WINDOW_CLOSED
+from app.domain.notebook_delete_grace import (
+    DELETE_WINDOW_CLOSED_CODE,
+    NOT_IN_DELETE_WINDOW_CODE,
+    TRANSFER_IN_PROGRESS_CODE,
+    WINDOW_CLOSED,
+)
 from app.models.memory import (
     AnswerMemoryLinksRequest,
     AnswerMemoryLinksResponse,
@@ -65,7 +70,9 @@ from app.models.admin import PromoteRequest, PromotionCandidate
 from app.repositories.ports import (
     AnswerMemorySourceRepository,
     DeleteWindowClosedError,
+    DeleteWindowTransferInProgressError,
     MemoryRepository,
+    NotInDeleteWindowError,
 )
 from app.services.prompts import MEMORY_PREVIEW_SCHEMA_HINT, memory_preview_prompt
 from app.services.knowledge_governance import PromotionTargetError
@@ -714,23 +721,40 @@ async def transfer_memories_out_of_delete_window(
     notebook_id: str = Depends(require_memory_export_access),
     user: UserProfile = Depends(get_current_user),
 ) -> dict:
-    """「转移到我的笔记本」during a notebook's deletion window: move every
-    one of the caller's confirmed Memory items here (those the move rule
-    accepts) into ``target_notebook_id``, a live notebook the caller owns.
-    Always a move; the server picks the items; the answer has the shape of
-    ``POST /memories/transfer`` (``{"results": [...]}``, one entry per item).
-    Moved items do not come back if the owner cancels the deletion. Window
-    closed: 404 ``delete_window_closed`` (before the first item), or per item
-    ``error_code="delete_window_closed"`` (closed part-way). Unreadable
-    notebook, or a target the caller cannot write: 404."""
+    """「转移到我的笔记本」during a notebook's deletion window: move the
+    caller's confirmed Memory items here (those the move rule accepts) into
+    ``target_notebook_id``, a live notebook the caller owns. Always a move;
+    the server picks the items. One page per request (at most
+    ``DELETE_WINDOW_TRANSFER_PAGE_SIZE`` items, id order, starting after
+    ``after``): ``{"results": [...], "remaining": n, "next_after": id}`` --
+    ``results`` has the shape of ``POST /memories/transfer``; the client
+    repeats with ``after=next_after`` until ``remaining`` is 0. Moved items do
+    not come back if the owner cancels the deletion.
+
+    Window closed: 404 ``delete_window_closed`` (before the page), or per
+    item ``error_code="delete_window_closed"`` (closed part-way). Another
+    transfer of the same caller out of this notebook running: 409
+    ``transfer_in_progress``. Not inside a window: 409
+    ``notebook_not_pending_delete``. Unreadable notebook, or a target the
+    caller cannot write: 404."""
     service = memory_membership_service()
     try:
-        results = await run_in_threadpool(
+        return await run_in_threadpool(
             service.transfer_out_of_delete_window,
             user.id, notebook_id, payload.target_notebook_id,
+            after=payload.after,
         )
     except DeleteWindowClosedError:
         raise _delete_window_closed()
+    except DeleteWindowTransferInProgressError:
+        raise HTTPException(status_code=409, detail={
+            "code": TRANSFER_IN_PROGRESS_CODE,
+            "message": "另一次转移正在进行，请等它结束后再试。",
+        })
+    except NotInDeleteWindowError:
+        raise HTTPException(status_code=409, detail={
+            "code": NOT_IN_DELETE_WINDOW_CODE,
+            "message": "这本笔记本没有在删除窗口里。",
+        })
     except (KeyError, PermissionError):
         raise _not_found("Notebook not found")
-    return {"results": results}

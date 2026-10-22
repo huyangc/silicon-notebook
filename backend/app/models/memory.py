@@ -233,6 +233,8 @@ class DeleteWindowTransferRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     target_notebook_id: str
+    # The previous page's ``next_after``; omitted on the first page.
+    after: str | None = None
 
 
 @dataclass(frozen=True)

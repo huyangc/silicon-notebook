@@ -4268,13 +4268,25 @@ class MemoryStorePort(Protocol):
         live_only: bool = True,
         delete_window_now: Any = None,
     ) -> MemoryRecord: ...
-    # 删除窗口期的两个本人记忆出口（导出、转移）读这两个：窗口判定与可转移 id。
+    # 删除窗口期的两个本人记忆出口（导出、转移）读这些：窗口判定、单条读不到时
+    # 的准确原因、按 id 分页的可转移 id 与其后剩余条数、一次只放一个的转移认领。
     def delete_window_state(
         self, notebook_id: str, user_id: str, *, now: Any
     ) -> str | None: ...
-    def delete_window_transferable_ids(
+    def delete_window_failure(
         self, notebook_id: str, user_id: str, *, now: Any
+    ) -> str | None: ...
+    def delete_window_transferable_ids(
+        self, notebook_id: str, user_id: str, *, now: Any,
+        after: str | None = None, limit: int | None = None,
     ) -> list[str]: ...
+    def delete_window_transferable_count(
+        self, notebook_id: str, user_id: str, *, now: Any, after: str | None = None
+    ) -> int: ...
+    def delete_window_transfer_claim(
+        self, notebook_id: str, user_id: str
+    ) -> ContextManager[bool]: ...
+    def memory_row_exists(self, memory_id: str) -> bool: ...
     def append_revision(
         self, memory_id: str, snapshot: dict, changed_by: str, reason: str
     ) -> None: ...
@@ -4522,6 +4534,25 @@ class DeleteWindowClosedError(KeyError):
     ``'deleting'``、成员行还没被删）。路由映射 404
     ``{"code": "delete_window_closed"}``；删库阶段 3 删掉成员行之后自然退化为
     普通 404。``KeyError`` 的子类：没单独识别它的调用方仍按「不存在」处理。"""
+
+
+class DeleteWindowTransferInProgressError(RuntimeError):
+    """同一个人从同一本库发起的窗口转移已经在进行（另一个标签页、或上一页还没
+    跑完）。两次同时跑会把同一条记忆复制两份，所以一次只放一个；路由映射 409
+    ``{"code": "transfer_in_progress"}``。"""
+
+    def __init__(self, notebook_id: str) -> None:
+        super().__init__(notebook_id)
+        self.notebook_id = notebook_id
+
+
+class NotInDeleteWindowError(RuntimeError):
+    """窗口转移端点用在了不在删除窗口里的笔记本上（存活的库照常用记忆页的转移）。
+    路由映射 409 ``{"code": "notebook_not_pending_delete"}``。"""
+
+    def __init__(self, notebook_id: str) -> None:
+        super().__init__(notebook_id)
+        self.notebook_id = notebook_id
 
 
 class StaleLeaseFinalizeError(RuntimeError):

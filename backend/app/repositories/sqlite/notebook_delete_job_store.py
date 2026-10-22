@@ -261,6 +261,11 @@ class NotebookDeleteJobStore:
         nothing (cancelled, promoted by another sweeper, or not due yet). The
         window columns stay on the row; they leave with it."""
         instant = self._instant(now)
+        # Two clocks on purpose: the due test reads the sweep tick (``now``,
+        # injected, one reading per tick), while ``updated_at`` and the job
+        # row's timestamps read this store's clock -- the clock ``request()``
+        # writes its 'deleting' row with and the delete job's lease and stale
+        # checks compare against.
         with self.database.write(operation="notebook_delete.promote_due") as db:
             cas = db.execute(
                 "UPDATE notebooks SET status='deleting',updated_at=? "
