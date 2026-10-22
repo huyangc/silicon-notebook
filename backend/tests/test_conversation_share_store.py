@@ -353,25 +353,28 @@ def test_zero_answer_conversation_is_refused_atomically_and_leaves_no_token(
     }
 
 
-def test_public_snapshot_query_is_bounded_to_cap_plus_one(tmp_path, monkeypatch):
-    """The token-resolved query fetches at most ``MAX_TURNS + 1`` answers, not the
-    whole conversation (codex #522 R6 P2). A holder of a public link — and every
-    image request, both routed through ``public_conversation_by_token`` — must not
-    force loading and deserializing every payload of an arbitrarily long
-    conversation on each read.
+def test_public_snapshot_is_the_newest_window_of_the_prefix(tmp_path, monkeypatch):
+    """The token-resolved read serves the NEWEST ``MAX_TURNS`` answers of the
+    published prefix (the shared answer is always on the page) and counts the
+    older ones it leaves out, never the whole conversation's payloads (codex
+    #522 R6 P2): a holder of a public link — and every image request, both
+    routed through ``public_conversation_by_token`` — must not force loading
+    and deserializing every payload of an arbitrarily long conversation.
 
-    We shrink ``MAX_TURNS`` to 3 (in both the store and the projection module),
-    seed 6 answers, share to the latest, and assert the STORE returns exactly
-    4 = cap + 1 rows (the oldest four under the ASC order); the projection then
-    renders 3 and still discloses ``truncated_turns=True`` off that one extra row.
-
-    Mutation guard: dropping ``LIMIT`` makes the store return all 6 rows, and the
-    ``== 4-row prefix`` assertion reds.
+    ``MAX_TURNS`` shrinks to 3 (store, page window and projection), 6 answers
+    are seeded. Shared at the latest the store returns the newest three and
+    ``earlier_turns == 3``; the projection renders those three and discloses
+    ``omitted_earlier_turns == 3``. Shared at ``ans-04`` the page ends at it.
+    The window statement reads backwards under a LIMIT (dropping it would load
+    every payload again).
     """
+    import app.domain.conversation_public_view as window_mod
     import app.repositories.sqlite.ask_state_store as store_mod
     import app.services.conversation_public_view as view_mod
+    from tests.citation_check_testkit import count_statements
 
     monkeypatch.setattr(store_mod, "MAX_TURNS", 3)
+    monkeypatch.setattr(window_mod, "MAX_TURNS", 3)
     monkeypatch.setattr(view_mod, "MAX_TURNS", 3)
 
     repo = _repo(tmp_path, monkeypatch)
@@ -398,21 +401,28 @@ def test_public_snapshot_query_is_bounded_to_cap_plus_one(tmp_path, monkeypatch)
     store = AskStateStore(db, repo._runtime.seams)
 
     token = store.share_conversation("nb-big", "conv-big")["share_token"]
-    row = store.public_conversation_by_token(token)
+    with count_statements(db) as statements:
+        row = store.public_conversation_by_token(token)
 
-    # Store capped the fetch to cap + 1 = 4 (the oldest four under ASC order),
-    # not all 6 answers.
-    assert [t["answer_id"] for t in row["turns"]] == [
-        "ans-00", "ans-01", "ans-02", "ans-03",
-    ]
+    assert [t["answer_id"] for t in row["turns"]] == ["ans-03", "ans-04", "ans-05"]
+    assert row["earlier_turns"] == 3
+    window_reads = [sql for sql in statements if sql.startswith("SELECT id, question")]
+    assert window_reads and all(
+        "DESC" in sql and "LIMIT" in sql for sql in window_reads
+    ), statements
 
-    # The projection renders MAX_TURNS (3) and still detects truncation off the
-    # single extra row the cap+1 fetch carried.
     payload = public_conversation_payload(
         row, share_token=token, images_enabled=False
     )
     assert len(payload["turns"]) == 3
     assert payload["truncated_turns"] is True
+    assert payload["omitted_earlier_turns"] == 3
+
+    store.unshare_conversation("nb-big", "conv-big")
+    token = store.share_conversation("nb-big", "conv-big", "ans-04")["share_token"]
+    row = store.public_conversation_by_token(token)
+    assert [t["answer_id"] for t in row["turns"]] == ["ans-02", "ans-03", "ans-04"]
+    assert row["earlier_turns"] == 2
 
 
 def test_conversation_share_state_reads_back_token_and_watermark(

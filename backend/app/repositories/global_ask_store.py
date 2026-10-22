@@ -21,6 +21,7 @@ from app.domain.global_ask_retention import (
     participant_bind_count,
     participant_sql,
 )
+from app.domain.share_counts import ShareRanks, share_prefixes, window_size
 from app.models.ask import CONVERSATION_TITLE_MAX_CHARS
 from app.models.global_ask import (
     GLOBAL_JOB_READ_TIME_FIELDS,
@@ -40,6 +41,39 @@ from app.repositories.ports import (
 # cannot drift from the order the public page renders in.
 GLOBAL_JOBS_ORDER_ASC = "ORDER BY created_at ASC,id ASC"
 GLOBAL_JOBS_ORDER_DESC = "ORDER BY created_at DESC,id DESC"
+
+# "Sorts at or before this job" on the canonical pair: the keyset every
+# published prefix is cut by (params: the job's created_at twice, then its id).
+_KEYSET_THROUGH = "created_at < ? OR (created_at = ? AND id <= ?)"
+
+# The share dialog's prefix sizes in ONE aggregate over the owner's live done
+# jobs of one conversation (``GlobalAskStore.share_counts``): the boundary job
+# the dialog asks about (``a``: a live done job of this owner), the watermark
+# job (``w``: any done job of the conversation -- the public read's anchor),
+# the newest live done job (``n``: the bound every window is read under), and
+# per job whether it sorts at/before ``a``, at/before ``w``, or at/before the
+# watermark instant (the page's fallback when ``w`` is gone). Placeholders, in
+# order: a(id, conversation, user), w(id, conversation), n(conversation,
+# user), the watermark instant, then the scan's (conversation, user).
+_SHARE_RANKS_SQL = (
+    "WITH a AS (SELECT id, created_at FROM global_ask_jobs WHERE id=? "
+    "AND conversation_id=? AND user_id=? AND status='done' AND {live}), "
+    "w AS (SELECT id, created_at FROM global_ask_jobs WHERE id=? "
+    "AND conversation_id=? AND status='done'), "
+    "n AS (SELECT id, created_at FROM global_ask_jobs WHERE conversation_id=? "
+    "AND user_id=? AND status='done' AND {live} " + GLOBAL_JOBS_ORDER_DESC + " LIMIT 1) "
+    "SELECT COUNT(j.id) AS total, "
+    "MAX(a.id) AS a_id, MAX(a.created_at) AS a_created, "
+    "SUM(CASE WHEN j.created_at < a.created_at OR "
+    "(j.created_at = a.created_at AND j.id <= a.id) THEN 1 ELSE 0 END) AS a_rank, "
+    "MAX(w.id) AS w_id, MAX(w.created_at) AS w_created, "
+    "SUM(CASE WHEN j.created_at < w.created_at OR "
+    "(j.created_at = w.created_at AND j.id <= w.id) THEN 1 ELSE 0 END) AS w_rank, "
+    "SUM(CASE WHEN j.created_at <= ? THEN 1 ELSE 0 END) AS t_rank, "
+    "MAX(n.id) AS n_id, MAX(n.created_at) AS n_created "
+    "FROM global_ask_jobs j LEFT JOIN a ON 1=1 LEFT JOIN w ON 1=1 LEFT JOIN n ON 1=1 "
+    "WHERE j.conversation_id=? AND j.user_id=? AND j.status='done' AND {live_j}"
+)
 
 
 def _transition_now() -> str:
@@ -195,6 +229,7 @@ class GlobalAskStore:
         # The retention read gate (``app/domain/global_ask_retention.py``):
         # every read of a job's content skips a turn past its stamp.
         self._live = live_turn_sql(dialect=_dialect(marker))
+        self._live_j = live_turn_sql(dialect=_dialect(marker), alias="j")
         # ...and a conversation whose every turn did (``conversation_live_sql``).
         self._conversation_live = conversation_live_sql(dialect=_dialect(marker), alias="c")
         # An automatic title naming an expired first turn reads as the
@@ -1347,6 +1382,11 @@ class GlobalAskStore:
         fall back to the plain interval -- slightly less precise on a
         same-instant tie, but an already-shared link must not fail closed.
 
+        Of that prefix only its newest ``MAX_TURNS`` jobs come back (the page's
+        ``public_window``, oldest first), so the shared turn is always on the
+        page; ``earlier_turns`` is how many older ones the prefix holds beyond
+        them, counted only when there are any.
+
         ``user_id`` comes back as the sharer's identity for the caller's live
         authorization re-check; it is NOT part of any public disclosure surface
         and must be dropped before anything crosses to an anonymous reader. Job
@@ -1365,7 +1405,7 @@ class GlobalAskStore:
             ), (clean,)).fetchone()
             if conv is None or not conv["shared_through_at"]:
                 return None
-            rows = self._public_jobs(db, conv)
+            rows, earlier = self._public_jobs(db, conv)
         return {
             "id": conv["id"],
             "user_id": conv["user_id"],
@@ -1373,14 +1413,8 @@ class GlobalAskStore:
             "created_at": conv["created_at"],
             "shared_through_at": conv["shared_through_at"],
             "shared_through_id": conv["shared_through_id"] or "",
-            "jobs": [
-                {
-                    "job_id": row["id"],
-                    "payload": self._payload(row["payload_json"]),
-                    "created_at": row["created_at"],
-                }
-                for row in rows
-            ],
+            "jobs": self._window_jobs(rows),
+            "earlier_turns": earlier,
         }
 
     def public_job(self, job_id, user_id):
@@ -1425,6 +1459,9 @@ class GlobalAskStore:
         resolve or that sorts before the published watermark
         (``_refuse_regression``), ``ConversationHasNoShareableAnswer`` without
         a done job.
+
+        Like the public read it carries the page's window (``jobs``, the
+        newest ``MAX_TURNS`` of the prefix) and ``earlier_turns``.
         """
         expected = str(expected_through_id or "").strip()
         with self.database.connect() as db:
@@ -1442,56 +1479,177 @@ class GlobalAskStore:
             self._refuse_regression(
                 db, conversation_id, through_id, conv["shared_through_id"], expected
             )
-            rows = self._jobs_through(
+            rows, earlier = self._jobs_through(
                 db, conversation_id, {"id": through_id, "created_at": through_at}
             )
         return {
             "through_id": through_id,
-            "jobs": [
-                {
-                    "job_id": row["id"],
-                    "payload": self._payload(row["payload_json"]),
-                    "created_at": row["created_at"],
-                }
-                for row in rows
-            ],
+            "jobs": self._window_jobs(rows),
+            "earlier_turns": earlier,
         }
 
-    def _public_jobs(self, db, conv):
-        """The watermark-bounded prefix of this conversation's done jobs.
+    def _window_jobs(self, rows):
+        return [
+            {
+                "job_id": row["id"],
+                "payload": self._payload(row["payload_json"]),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
 
-        ``LIMIT MAX_TURNS + 1`` (cap + 1) is applied AFTER the keyset predicate
-        and the canonical ORDER BY: it bounds the fetch to exactly what the
-        projection renders plus the one extra row it needs to disclose
-        truncation. Without it a pathological conversation makes every anonymous
-        page read deserialize every payload it ever produced.
-        """
-        watermark = None
-        if conv["shared_through_id"]:
-            watermark = db.execute(self._sql(
-                "SELECT id, created_at FROM global_ask_jobs "
-                "WHERE id=? AND conversation_id=? AND status='done'"
-            ), (conv["shared_through_id"], conv["id"])).fetchone()
+    def _watermark_anchor(self, db, conversation_id, watermark_id):
+        """The watermark job's ``(id, created_at)`` -- any done job of the
+        conversation, live or not, exactly as the public read anchors its
+        keyset -- or ``None``."""
+        if not watermark_id:
+            return None
+        return db.execute(self._sql(
+            "SELECT id, created_at FROM global_ask_jobs "
+            "WHERE id=? AND conversation_id=? AND status='done'"
+        ), (watermark_id, conversation_id)).fetchone()
+
+    def _public_jobs(self, db, conv):
+        """The page's window of the watermark-bounded prefix of this
+        conversation's done jobs, and how many older ones it leaves out
+        (``_prefix_window``). A watermark job that no longer resolves falls
+        back to the ``created_at <=`` interval."""
+        watermark = self._watermark_anchor(db, conv["id"], conv["shared_through_id"])
         if watermark is not None:
             return self._jobs_through(db, conv["id"], watermark)
-        return db.execute(self._sql(
-            "SELECT id, payload_json, created_at FROM global_ask_jobs "
-            f"WHERE conversation_id=? AND status='done' AND created_at <= ? AND {self._live} "
-            + GLOBAL_JOBS_ORDER_ASC + " LIMIT ?"
-        ), (conv["id"], conv["shared_through_at"], MAX_TURNS + 1)).fetchall()
+        return self._prefix_window(
+            db, conv["id"], "created_at <= ?", (conv["shared_through_at"],)
+        )
 
     def _jobs_through(self, db, conversation_id, boundary):
-        """The done jobs up to and including ``boundary`` (a job row's ``id``
-        and ``created_at``) in the canonical ``(created_at, id)`` order, as a
-        keyset, capped at ``MAX_TURNS + 1`` -- the one statement behind both the
-        published snapshot and the share window."""
-        return db.execute(self._sql(
-            "SELECT id, payload_json, created_at FROM global_ask_jobs "
-            f"WHERE conversation_id=? AND status='done' AND {self._live} AND ("
-            "created_at < ? OR (created_at = ? AND id <= ?)) "
-            + GLOBAL_JOBS_ORDER_ASC + " LIMIT ?"
-        ), (conversation_id, boundary["created_at"], boundary["created_at"],
-            boundary["id"], MAX_TURNS + 1)).fetchall()
+        """The page's window of the done jobs up to and including ``boundary``
+        (a job row's ``id`` and ``created_at``) in the canonical ``(created_at,
+        id)`` order, as a keyset -- the one statement behind both the published
+        snapshot and the share window."""
+        return self._prefix_window(
+            db, conversation_id, _KEYSET_THROUGH,
+            (boundary["created_at"], boundary["created_at"], boundary["id"]),
+        )
+
+    def _prefix_window(self, db, conversation_id, bound_sql, bound_params):
+        """``(rows, earlier)`` for one prefix of the conversation's live done
+        jobs (``bound_sql`` bounds it): its newest ``MAX_TURNS`` rows, oldest
+        first (``public_window``), and how many older ones the prefix holds.
+
+        The rows come off the ``(conversation_id, created_at, id)`` index read
+        BACKWARDS from the bound, ``LIMIT MAX_TURNS + 1``: a pathological
+        conversation costs one window per anonymous page read, never every
+        payload it ever produced. The extra row only says whether older jobs
+        exist; then, and only then, one ``COUNT`` over the same prefix gives
+        their number -- an ordinary conversation reads exactly one statement,
+        as before.
+        """
+        where = (
+            "FROM global_ask_jobs WHERE conversation_id=? AND status='done' "
+            f"AND {self._live} AND ({bound_sql})"
+        )
+        params = (conversation_id, *bound_params)
+        rows = db.execute(self._sql(
+            f"SELECT id, payload_json, created_at {where} "
+            + GLOBAL_JOBS_ORDER_DESC + " LIMIT ?"
+        ), (*params, MAX_TURNS + 1)).fetchall()
+        earlier = 0
+        if len(rows) > MAX_TURNS:
+            total = db.execute(self._sql(f"SELECT COUNT(*) AS n {where}"), params).fetchone()
+            earlier = max(0, int(total["n"]) - MAX_TURNS)
+            rows = rows[:MAX_TURNS]
+        return list(reversed(rows)), earlier
+
+    def share_counts(self, conversation_id, user_id, *, through_id="",
+                     watermark_id="", watermark_at=""):
+        """The facts behind the share dialog's numbers, read only: the prefix
+        sizes of ``app.domain.share_counts.ShareRanks`` from ONE aggregate over
+        this owner's conversation, then the page's window of each prefix the
+        dialog describes (at most two).
+
+        ``through_id`` is the boundary the dialog asks about (empty = the newest
+        completed job); ``watermark_id``/``watermark_at`` are the link's
+        watermark as the dialog holds it (empty = not shared). The watermark
+        resolves exactly as the public read resolves it (``_watermark_anchor``:
+        a keyset on that job, else the ``created_at <=`` interval), so every
+        prefix here is one the page itself could serve. All of them are
+        bounded by the newest completed job the aggregate saw, so a job
+        finishing in between cannot slip into a window the sizes did not count.
+
+        Returns ``{"ranks": ShareRanks, "through_id": str, "windows": {size:
+        [jobs]}}``; ``KeyError`` for a missing or foreign conversation;
+        ``ConversationShareWatermarkStale`` when the conversation changed
+        between the aggregate and a window read (the dialog then says it could
+        not count).
+        """
+        asked = str(through_id or "").strip()
+        mark_id = str(watermark_id or "").strip()
+        with self.database.connect() as db:
+            if db.execute(self._sql(
+                "SELECT 1 FROM global_ask_conversations WHERE id=? AND user_id=?"
+            ), (conversation_id, user_id)).fetchone() is None:
+                raise KeyError(conversation_id)
+            mark_at = str(watermark_at or "")
+            facts = db.execute(self._sql(
+                _SHARE_RANKS_SQL.format(live=self._live, live_j=self._live_j)
+            ), (asked, conversation_id, user_id, mark_id, conversation_id,
+                conversation_id, user_id, mark_at,
+                conversation_id, user_id)).fetchone()
+            ranks, bounds = self._share_ranks(facts, asked, mark_id, mark_at)
+            prefixes = share_prefixes(ranks)
+            windows = {}
+            if prefixes is not None:
+                for size in {prefixes.current, prefixes.scope}:
+                    bound_sql, bound_params = bounds[size]
+                    rows, earlier = self._prefix_window(
+                        db, conversation_id, bound_sql, bound_params
+                    )
+                    if len(rows) != window_size(size) or earlier != size - len(rows):
+                        raise ConversationShareWatermarkStale(asked or mark_id)
+                    windows[size] = self._window_jobs(rows)
+        newest = facts["n_id"] or ""
+        boundary_id = asked if asked else newest
+        return {
+            "ranks": ranks,
+            "through_id": boundary_id if ranks.boundary is not None else "",
+            "windows": windows,
+        }
+
+    @staticmethod
+    def _share_ranks(facts, asked, mark_id, mark_at):
+        """``ShareRanks`` off the aggregate row, and for every prefix size the
+        bound that selects exactly that prefix (``{size: (sql, params)}``).
+        Every bound is ANDed with the newest job the aggregate counted, so two
+        prefixes of one size are the same prefix."""
+        newest = (facts["n_created"], facts["n_created"], facts["n_id"])
+        total = int(facts["total"] or 0)
+
+        def through(anchor_sql, anchor_params):
+            return (f"({_KEYSET_THROUGH}) AND ({anchor_sql})", (*newest, *anchor_params))
+
+        bounds = {total: (_KEYSET_THROUGH, newest)}
+        boundary = total
+        if asked:
+            boundary = None
+            if facts["a_id"] is not None:
+                boundary = int(facts["a_rank"] or 0)
+                bounds.setdefault(boundary, through(
+                    _KEYSET_THROUGH, (facts["a_created"], facts["a_created"], facts["a_id"]),
+                ))
+        shared = mark = None
+        if mark_id and facts["w_id"] is not None:
+            shared = mark = int(facts["w_rank"] or 0)
+            bounds.setdefault(shared, through(
+                _KEYSET_THROUGH, (facts["w_created"], facts["w_created"], facts["w_id"]),
+            ))
+        elif mark_id:
+            # The watermark job is gone: the page falls back to the instant.
+            shared = int(facts["t_rank"] or 0)
+            bounds.setdefault(shared, through("created_at <= ?", (mark_at,)))
+        return ShareRanks(
+            total=total, boundary=boundary, bounded=bool(asked),
+            shared=shared, mark=mark,
+        ), bounds
 
     @staticmethod
     def _payload(raw):

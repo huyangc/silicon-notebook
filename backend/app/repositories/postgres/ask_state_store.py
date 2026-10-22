@@ -1899,34 +1899,38 @@ class AskStateStore:
                     "WHERE id=%s AND conversation_id=%s",
                     (through_id, conv["id"]),
                 ).fetchone()
-            # ``LIMIT MAX_TURNS + 1`` (cap + 1) after the watermark keyset and
-            # canonical ORDER BY — mirrors the SQLite adapter. It bounds the fetch
-            # to exactly the projected prefix plus the one extra row the projection
-            # needs to set ``truncated_turns``; without it a >MAX_TURNS conversation
-            # forces every anonymous page read (and every image request) to load and
-            # deserialize the whole conversation (codex #522 R6 P2). Never touches
-            # the keyset/order, only caps the row count.
+            # The page's window of the prefix — mirrors the SQLite adapter: its
+            # NEWEST ``MAX_TURNS`` answers (``public_window``), read in the
+            # canonical order reversed and capped at ``MAX_TURNS + 1`` after the
+            # keyset, then put back oldest first. The cap bounds every anonymous
+            # page read (and every image request) to one window of payloads
+            # (codex #522 R6 P2); the extra row only says older answers exist,
+            # and then one COUNT over the same prefix says how many
+            # (``earlier_turns``). Never touches the keyset/order.
             if watermark is not None:
                 # Keyset on (created_at, ordinal) <= the watermark row's — the
                 # exact prefix ending at the watermark answer.
-                rows = db.execute(
-                    "SELECT id, question, payload, created_at FROM answers "
-                    "WHERE conversation_id=%s AND ("
-                    "created_at < %s OR (created_at = %s AND ordinal <= %s)"
-                    ") " + CONVERSATION_ANSWERS_ORDER_ASC + " LIMIT %s",
-                    (conv["id"], watermark["created_at"],
-                     watermark["created_at"], watermark["ordinal"],
-                     MAX_TURNS + 1),
-                ).fetchall()
+                bound = "(created_at < %s OR (created_at = %s AND ordinal <= %s))"
+                params = (watermark["created_at"], watermark["created_at"],
+                          watermark["ordinal"])
             else:
                 # Watermark answer deleted: fall back to the pure created_at
                 # interval rather than fail closed on the already-shared link.
-                rows = db.execute(
-                    "SELECT id, question, payload, created_at FROM answers "
-                    "WHERE conversation_id=%s AND created_at <= %s "
-                    + CONVERSATION_ANSWERS_ORDER_ASC + " LIMIT %s",
-                    (conv["id"], conv["shared_through_at"], MAX_TURNS + 1),
-                ).fetchall()
+                bound = "created_at <= %s"
+                params = (conv["shared_through_at"],)
+            where = "FROM answers WHERE conversation_id=%s AND " + bound
+            rows = db.execute(
+                "SELECT id, question, payload, created_at " + where + " "
+                + CONVERSATION_ANSWERS_ORDER_DESC + " LIMIT %s",
+                (conv["id"], *params, MAX_TURNS + 1),
+            ).fetchall()
+            earlier = 0
+            if len(rows) > MAX_TURNS:
+                total = db.execute(
+                    "SELECT COUNT(*) AS n " + where, (conv["id"], *params)
+                ).fetchone()["n"]
+                earlier = max(0, int(total) - MAX_TURNS)
+                rows = rows[:MAX_TURNS]
         turns = [
             {
                 "answer_id": row["id"],
@@ -1934,7 +1938,7 @@ class AskStateStore:
                 "payload": json_value(row["payload"], {}),
                 "created_at": iso_timestamp(row["created_at"]),
             }
-            for row in rows
+            for row in reversed(rows)
         ]
         return {
             "id": conv["id"],
@@ -1945,6 +1949,7 @@ class AskStateStore:
             "shared_through_at": iso_timestamp(conv["shared_through_at"]),
             "shared_through_id": conv["shared_through_id"] or "",
             "turns": turns,
+            "earlier_turns": earlier,
         }
 
     # ------------------------------------------------------------------

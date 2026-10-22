@@ -4166,6 +4166,90 @@
           "title": "ConversationRenameRequest",
           "type": "object"
         },
+        "ConversationShareCounts": {
+          "description": "The share dialog's exact numbers for one GLOBAL conversation\n(``GET /global-ask/conversations/{id}/share/counts``), counted by the\nserver over the same windows the public page shows\n(``app/domain/share_counts.py``).\n\n``total_turns``: completed turns. ``through_id``: the boundary turn (the\nasked ``through_id``, or the newest; empty when the asked one does not\nresolve). ``boundary_index``: its 0-based position (-1 when none was\nasked, or it does not resolve -- ``boundary_unresolved``). Against the\nwatermark the dialog passed: ``watermark_ahead`` (the link already covers\n``ahead_count`` more turns), ``watermark_behind``, ``watermark_unknown``\n(the watermark turn no longer resolves). What the link holds now (or\nsharing would publish while unshared): ``new_turns`` after the watermark\nnot included, ``published_turns`` on the page, ``earlier_turns`` older\nones the page leaves out, ``image_count`` attached images on those turns.\nWhat sharing / updating publishes: ``update_image_count``,\n``update_new_image_count`` (on turns the link does not show yet) and\n``update_earlier_turns``. Image counts are each turn's anchors' and\ncitations' images, deduplicated per turn -- an upper bound on the page.",
+          "properties": {
+            "ahead_count": {
+              "title": "Ahead Count",
+              "type": "integer"
+            },
+            "boundary_index": {
+              "title": "Boundary Index",
+              "type": "integer"
+            },
+            "boundary_unresolved": {
+              "title": "Boundary Unresolved",
+              "type": "boolean"
+            },
+            "earlier_turns": {
+              "title": "Earlier Turns",
+              "type": "integer"
+            },
+            "image_count": {
+              "title": "Image Count",
+              "type": "integer"
+            },
+            "new_turns": {
+              "title": "New Turns",
+              "type": "integer"
+            },
+            "published_turns": {
+              "title": "Published Turns",
+              "type": "integer"
+            },
+            "through_id": {
+              "title": "Through Id",
+              "type": "string"
+            },
+            "total_turns": {
+              "title": "Total Turns",
+              "type": "integer"
+            },
+            "update_earlier_turns": {
+              "title": "Update Earlier Turns",
+              "type": "integer"
+            },
+            "update_image_count": {
+              "title": "Update Image Count",
+              "type": "integer"
+            },
+            "update_new_image_count": {
+              "title": "Update New Image Count",
+              "type": "integer"
+            },
+            "watermark_ahead": {
+              "title": "Watermark Ahead",
+              "type": "boolean"
+            },
+            "watermark_behind": {
+              "title": "Watermark Behind",
+              "type": "boolean"
+            },
+            "watermark_unknown": {
+              "title": "Watermark Unknown",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "total_turns",
+            "through_id",
+            "boundary_index",
+            "boundary_unresolved",
+            "watermark_ahead",
+            "ahead_count",
+            "watermark_behind",
+            "watermark_unknown",
+            "new_turns",
+            "published_turns",
+            "earlier_turns",
+            "image_count",
+            "update_image_count",
+            "update_new_image_count",
+            "update_earlier_turns"
+          ],
+          "title": "ConversationShareCounts",
+          "type": "object"
+        },
         "ConversationShareDisclosure": {
           "description": "What a conversation share about to be published carries of the author's\nown personal memory (M4), counted by the server over the exact range the\nshare would publish (``through_id``; empty = the newest completed turn).\n\n``memory_count``: distinct Memory entries of the author in that range.\n``new_memory_count``: those not already on the page the link serves now\n(relative to the current watermark; 0 when the range ends at it, all of\nthem while the conversation is not shared).  Never above ``memory_count``.",
           "properties": {
@@ -10841,6 +10925,11 @@
                 }
               ],
               "title": "Expires At"
+            },
+            "omitted_earlier_turns": {
+              "default": 0,
+              "title": "Omitted Earlier Turns",
+              "type": "integer"
             },
             "shared_at": {
               "default": "",
@@ -18682,6 +18771,79 @@
             }
           },
           "summary": "Share Global Conversation Route",
+          "tags": [
+            "global-ask"
+          ]
+        }
+      },
+      "/api/global-ask/conversations/{conversation_id}/share/counts": {
+        "get": {
+          "description": "The share dialog's exact numbers: turns, the boundary ``through_id`` (a\nJOB id; empty = the newest completed turn) against the link's watermark as\nthe dialog holds it (``watermark_id``/``watermark_at``; empty = not\nshared), new and older-than-the-page turns, and attached images -- counted\nin SQL over the windows the public page shows, so a conversation of any\nlength gets exact numbers rather than \"not counted\".\n\nOwner only, with the share surface's error mapping (``_share_call``): a\nforeign or missing conversation is the same 404, a library the counted\nwindows draw on that the sharer can no longer read is the share's own 404\nsentence. Reads only; a boundary or watermark that does not resolve is\nreported in the body, never refused.",
+          "operationId": "global_conversation_share_counts_route_api_global_ask_conversations__conversation_id__share_counts_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "conversation_id",
+              "required": true,
+              "schema": {
+                "title": "Conversation Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "through_id",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Through Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "watermark_id",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Watermark Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "watermark_at",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Watermark At",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ConversationShareCounts"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Global Conversation Share Counts Route",
           "tags": [
             "global-ask"
           ]

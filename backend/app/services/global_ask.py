@@ -21,8 +21,9 @@ from app.core.ask_retrieval_policy import DEFAULT_RETRIEVAL_EFFORT
 from app.domain.cancellation import (
     ATTACH_STALL_SECONDS, AskExecutorGone, AskFollowFailed, AskWaitAbandoned,
 )
-from app.domain.conversation_public_view import MAX_TURNS
+from app.domain.conversation_public_view import public_window
 from app.domain.global_ask_attribution import job_attribution
+from app.domain.share_counts import share_counts, share_prefixes
 from app.models.ask import AskRequest, QueryIntentContract, TraceStep
 from app.models.global_ask import (
     GlobalAskIntentPreviewRequest, GlobalAskJob, GlobalAskRequest,
@@ -559,6 +560,25 @@ def _public_turn_row(job: Any) -> dict[str, Any]:
         "question": payload.get("question") or "",
         "payload": answer if isinstance(answer, dict) else {},
     }
+
+
+def _turn_image_count(job: Any) -> int:
+    """The images one snapshot job attaches, as the share dialog counts them:
+    every anchor's and every citation's images, deduplicated by ``asset_id``
+    within the turn -- the browser's ``summarizeShareDisclosure`` rule, a
+    conservative upper bound on what the page shows (it projects one of the
+    two lists). Read off the same answer ``_public_turn_row`` hands the page."""
+    answer = _public_turn_row(job)["payload"]
+    assets: set[str] = set()
+    for key in ("anchors", "citations"):
+        items = answer.get(key)
+        for item in items if isinstance(items, list) else ():
+            images = item.get("images") if isinstance(item, dict) else None
+            for image in images if isinstance(images, list) else ():
+                asset_id = image.get("asset_id") if isinstance(image, dict) else None
+                if asset_id:
+                    assets.add(str(asset_id))
+    return len(assets)
 
 
 @dataclass(frozen=True)
@@ -2522,7 +2542,7 @@ class GlobalAskService:
         if self.store.conversation(conversation_id, user_id) is None:
             raise KeyError(conversation_id)
 
-    def _share_authority_sweep(self, conversation_id, user_id, expected_through_id=""):
+    def _share_authority_sweep(self, window_jobs, user_id):
         """Refuse to MINT a link the sharer could not open themselves.
 
         A global answer can cite a library the sharer has since lost access to
@@ -2530,51 +2550,34 @@ class GlobalAskService:
         re-checks that on every open and 404s, so such a link would be dead on
         arrival; creating it anyway would hand the user a URL that silently
         never works. This runs the SAME ``_check`` every other global entry
-        point runs, so "can this user still read these libraries" has exactly
-        one definition.
+        point runs, over the SAME library set (``_snapshot_notebook_ids`` of the
+        stored payloads), so "can this user still read these libraries" has
+        exactly one definition.
 
-        Only the turns that WILL BE PUBLISHED may veto the share. With a
-        boundary (``expected_through_id``, a job id) that is the prefix up to and
-        including that job in the canonical ``(created_at, id)`` order; turns
-        after it stay private, so a later turn over a library the sharer has
-        lost must not block sharing an earlier one whose anonymous read would
-        succeed. A boundary that does not resolve here is left for the store to
-        refuse (``ConversationShareWatermarkStale``): this sweep then checks
-        nothing rather than guessing a prefix.
-
-        Best effort by construction, and that is the honest division of labour:
-        it reads the conversation's most recent ``MAX_TURNS`` completed turns
-        rather than the not-yet-computed snapshot (the store resolves the
-        watermark inside its own write transaction). The AUTHORITATIVE gate is
-        ``public_conversation``'s per-open re-check, which reads exactly the
-        published snapshot; this one only stops the obvious dead link.
+        ``window_jobs`` are exactly the jobs the share would publish: the store's
+        ``share_window`` -- the page's window (``public_window``, the newest
+        ``MAX_TURNS``) of the prefix ending at the boundary, the very rows the
+        anonymous read will re-check on every open. A turn after the boundary
+        stays private and a turn older than the window is not on the page, so
+        neither may veto a share whose page would open; a turn inside it always
+        does.
         """
-        done = [
-            job for job in self.store.jobs(conversation_id, user_id, MAX_TURNS, 0)
-            if job is not None and job.status == "done"
-        ]
-        if expected_through_id:
-            boundary = next(
-                (job for job in done if job.job_id == expected_through_id), None)
-            if boundary is None:
-                return
-            edge = (boundary.created_at, boundary.job_id)
-            done = [job for job in done if (job.created_at, job.job_id) <= edge]
         self._check(
-            _snapshot_notebook_ids([job.model_dump(mode="json") for job in done]),
+            _snapshot_notebook_ids([job.get("payload") for job in window_jobs]),
             user_id,
         )
 
     def _share_count(self, conversation_id, user_id, through_id=""):
-        """``(boundary job id, the author's Memory count)`` over EXACTLY the
-        done jobs a share pinned at ``through_id`` would publish (M4).
+        """``(boundary job id, the author's Memory count, the window's jobs)``
+        over EXACTLY the done jobs a share pinned at ``through_id`` would
+        publish (M4).
 
         The window is the store's read-only twin of the share
-        (``share_window``: same boundary, same keyset as the public snapshot),
-        cut at the ``MAX_TURNS`` the page projects; ``new_memory_count`` is
-        measured against the snapshot the link serves now, read the way the
-        anonymous page reads it. One batched Memory-source lookup for both.
-        Raises what the share raises for the same range.
+        (``share_window``: same boundary, same keyset and the same page window
+        as the public snapshot); ``new_memory_count`` is measured against the
+        snapshot the link serves now, read the way the anonymous page reads
+        it. One batched Memory-source lookup for both. Raises what the share
+        raises for the same range.
         """
         window = self.store.share_window(
             conversation_id, user_id, expected_through_id=through_id
@@ -2587,12 +2590,13 @@ class GlobalAskService:
         if snapshot is not None:
             published = [_public_turn_row(job)["payload"]
                          for job in snapshot.get("jobs") or []]
+        jobs = public_window(window["jobs"])
         count = conversation_share_disclosure(
             self.memory_sources or _NO_MEMORY_SOURCES, user_id,
-            [_public_turn_row(job)["payload"] for job in window["jobs"]][:MAX_TURNS],
-            published[:MAX_TURNS],
+            [_public_turn_row(job)["payload"] for job in jobs],
+            public_window(published),
         )
-        return window["through_id"], count
+        return window["through_id"], count, jobs
 
     def share_disclosure(self, conversation_id, *, user_id, through_id=""):
         """The author's Memory a share pinned at ``through_id`` (a job id;
@@ -2602,10 +2606,49 @@ class GlobalAskService:
         authority sweep over the libraries the range draws on -- and nothing is
         written."""
         self._owned_conversation(conversation_id, user_id)
-        boundary, count = self._share_count(conversation_id, user_id, through_id)
-        self._share_authority_sweep(conversation_id, user_id, boundary)
+        _boundary, count, jobs = self._share_count(conversation_id, user_id, through_id)
+        self._share_authority_sweep(jobs, user_id)
         return {"memory_count": count.memory_count,
                 "new_memory_count": count.new_memory_count}
+
+    def share_counts(self, conversation_id, *, user_id, through_id="",
+                     watermark_id="", watermark_at=""):
+        """The share dialog's exact numbers (``app/domain/share_counts.py``):
+        how many completed turns the conversation has, where the boundary the
+        dialog asks about (``through_id``, a job id; empty = the newest) sits
+        against the link's watermark as the dialog holds it
+        (``watermark_id``/``watermark_at``; empty = not shared), how many turns
+        are new since the watermark, how many older ones the page leaves out,
+        and the attached images of the page's window -- now, and after the
+        share or update the dialog offers.
+
+        Owner only like the rest of the share surface (``KeyError``) and read
+        only. It never refuses a boundary or a watermark: a boundary that does
+        not resolve, or one the watermark has passed, is something the dialog
+        must SAY (``boundary_unresolved`` / ``watermark_ahead``). What it does
+        refuse is a window the sharer could no longer open: the libraries of
+        every window counted pass the same ``_share_authority_sweep`` a share
+        runs, so no number is ever given for a page that would 404.
+        """
+        self._owned_conversation(conversation_id, user_id)
+        facts = self.store.share_counts(
+            conversation_id, user_id, through_id=through_id,
+            watermark_id=watermark_id, watermark_at=watermark_at,
+        )
+        windows = facts["windows"]
+        self._share_authority_sweep(
+            [job for jobs in windows.values() for job in jobs], user_id
+        )
+        prefixes = share_prefixes(facts["ranks"])
+
+        def images(size):
+            return [_turn_image_count(job) for job in windows.get(size, [])]
+
+        return share_counts(
+            facts["ranks"], through_id=facts["through_id"],
+            current_images=images(prefixes.current) if prefixes else [],
+            scope_images=images(prefixes.scope) if prefixes else [],
+        )
 
     def share_conversation(self, conversation_id, *, user_id, expected_through_id="",
                            acknowledged_memory_count=None):
@@ -2623,12 +2666,12 @@ class GlobalAskService:
         and the share is pinned to the boundary the count was taken over.
         """
         self._owned_conversation(conversation_id, user_id)
-        boundary, count = self._share_count(
+        boundary, count, jobs = self._share_count(
             conversation_id, user_id, expected_through_id
         )
         # A link that could not be opened is refused before the author is
         # asked to confirm anything about it.
-        self._share_authority_sweep(conversation_id, user_id, boundary)
+        self._share_authority_sweep(jobs, user_id)
         require_conversation_acknowledged(count, acknowledged_memory_count)
         return self.store.share_conversation(
             conversation_id, user_id, expected_through_id=boundary
@@ -2693,7 +2736,10 @@ class GlobalAskService:
             # and a link that can never be re-checked must not be served.
             return None
         jobs = [job for job in (row.get("jobs") or []) if isinstance(job, dict)]
-        snapshot = self._public_snapshot(jobs, creator)
+        # The page's window (the store already reads exactly it): the turns
+        # re-checked are the turns served, and how many older ones the
+        # published prefix leaves out travels with them.
+        snapshot = self._public_snapshot(public_window(jobs), creator)
         if snapshot is None:
             return None
         turns, scope = snapshot
@@ -2702,6 +2748,8 @@ class GlobalAskService:
             "created_at": row.get("created_at") or "",
             "shared_through_at": row.get("shared_through_at") or "",
             "turns": turns,
+            "earlier_turns": int(row.get("earlier_turns") or 0)
+            + max(0, len(jobs) - len(turns)),
             "notebook_ids": scope,
             # Gate field like ``notebook_ids``: the sharer, whose own Memory the
             # page route marks (M4); popped before projection, never shown.

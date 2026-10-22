@@ -43,14 +43,17 @@ import {
   SHARE_DISCLOSURE_COUNTS_ERROR,
   SHARE_UPDATE_BOUNDED_COUNTS_ERROR,
   SHARE_UPDATE_COUNTS_ERROR,
+  countsAfterPublishing,
   readServerMemoryDisclosure,
-  resolveShareBoundary,
+  readServerShareCounts,
+  shareCountsFromTurns,
+  shareEarlierSentence,
   shareMemorySentence,
   shareScopeState,
+  shareUpdateEarlierSentence,
   shareUpdateMemorySentence,
-  summarizeShareDisclosure,
-  summarizeShareUpdate,
   type ServerMemoryDisclosure,
+  type ShareCounts,
   type ShareDisclosure,
   type ShareTurn,
   type ShareUpdatePreview,
@@ -143,8 +146,12 @@ export function ConversationShareModal({
   const [watermarkId, setWatermarkId] = useState("");
   const [turns, setTurns] = useState<ShareTurn[]>([]);
   // 会话详情没加载出来 → 无法算数。Memory 披露此时退化成不带数字的告警，绝不省略。
-  // **仍可分享**（水位/是否已分享是另一路独立加载的）。
+  // **仍可分享**（水位/是否已分享是另一路独立加载的）。只用于从轮次就地算数的一侧
+  // （`api.counts.kind === "turns"`）；确数端点那一侧的成败记在 `countsFetch` 里。
   const [countsError, setCountsError] = useState(false);
+  // 确数端点（`api.counts.kind === "server"`）的回执，按「查的是哪个范围」记 key：
+  // 边界或水位一变，旧回执对新范围不作数。`counts: null` = 取数失败（或形状不对）。
+  const [countsFetch, setCountsFetch] = useState<{ key: string; counts: ShareCounts | null } | null>(null);
   // 分享状态（是否已分享 + 水位）**非 404** 加载失败 → 当前是否已分享/水位**未知**。
   // 此时**不可**分享:发空 expected 会让服务端按当前最新兜底发布(可能推进一个已存在
   // 的隐藏分享,或在未显示任何披露的情况下公开)。与 countsError 是两回事——那个是「披露
@@ -179,6 +186,8 @@ export function ConversationShareModal({
     setConflict(null);
     setRefusal("");
     setMemoryFetch(null);
+    setCountsFetch(null);
+    setTurns([]);
     // 每次重跑（切会话/切库导致 api.key 变）都要清掉上一轮的
     // countsError / shareStateError，否则一次失败后即便重跑成功，兜底告警/禁用态
     // 会残留在一个已经算得出精确数字、已加载出分享状态的会话上（codex T5 评审 P2-4）。
@@ -204,14 +213,12 @@ export function ConversationShareModal({
         setShareStateError(true);
         setError(toUserMessage(err, "分享状态加载失败，请重试"));
       });
-    const detailDone = apiRef.current.loadTurns()
+    // 只有就地算数的一侧要先取全部轮次；确数端点那一侧要等分享态落定（它要知道水位），
+    // 由下面那个按范围取数的 effect 去问。
+    const source = apiRef.current.counts;
+    const detailDone = source.kind !== "turns" ? Promise.resolve() : source.load()
       .then((loaded) => {
-        if (cancelled) return;
-        setTurns(loaded.turns || []);
-        // ⚠ 「取到了，但取得不全」与「没取到」在披露上是**同一件事**：半份序列算出来的
-        // 是一个偏小的**确数**（共几轮、几张附图、几条记忆），而公开页包含的是全部——
-        // 那比没有数字更坏，因为它看上去言之凿凿。取不全一律走同一条降级。
-        if (!loaded.complete) setCountsError(true);
+        if (!cancelled) setTurns(loaded || []);
       })
       .catch(() => {
         // 详情失败：披露算不出但仍可分享，退化成不带数字的兜底告警（countsError）。
@@ -229,14 +236,51 @@ export function ConversationShareModal({
   const shared = Boolean(token);
   const link = shared ? buildPublicConversationLink(token, typeof window !== "undefined" ? window.location.origin : "") : "";
   const bounded = Boolean(throughAnswerId);
-  // 本次要发布的那批轮次。`throughAnswerId` 为空时逐字等于 `turns`（既有语义）;非空时
-  // 截到那条答案（含）为止——披露、`expected_through_id` 与所有按钮文案都从同一批派生,
-  // 「披露的快照 == 发布的快照」这条不变量因此对两种模式同时成立。
-  const boundary = useMemo(
-    () => resolveShareBoundary(turns, throughAnswerId, shared ? watermarkId : ""),
-    [turns, throughAnswerId, watermarkId, shared],
+  // 弹窗的全部数字（个人记忆条数除外）。两个来源同一个形状（`ShareCounts`）：笔记本内会话
+  // 从完整轮次就地算；全局会话问确数端点——服务端按公开页的同一个窗口在 SQL 里数，再长的
+  // 会话也给确数。`throughAnswerId` 为空时逐字是会话列表那个入口的既有语义（整条会话）；
+  // 非空时截到那条答案（含）为止——披露、`expected_through_id` 与所有按钮文案都从同一份
+  // 数字派生，「披露的快照 == 发布的快照」这条不变量因此对两种模式同时成立。
+  const countsSource = api.counts.kind;
+  const countsWatermarkId = shared ? watermarkId : "";
+  const countsWatermarkAt = shared ? watermark : "";
+  const localCounts = useMemo(
+    () => shareCountsFromTurns(countsSource === "turns" ? turns : [], throughAnswerId, countsWatermarkId, watermark),
+    [countsSource, turns, throughAnswerId, countsWatermarkId, watermark],
   );
-  const scopedTurns = boundary.turns;
+  const countsKey = `${api.key}|${throughAnswerId}|${countsWatermarkId}|${countsWatermarkAt}`;
+  const serverCountsWanted = countsSource === "server" && !loading;
+  const countsFetchKey = countsFetch?.key ?? "";
+  useEffect(() => {
+    if (!serverCountsWanted || countsFetchKey === countsKey) return;
+    let cancelled = false;
+    // 经 `Promise.resolve().then` 调用：同步抛出的异常（接线错误）与网络失败走同一条
+    // 「取数失败」降级，不会把整个弹窗带崩。
+    Promise.resolve()
+      .then(() => {
+        const source = apiRef.current.counts;
+        if (source.kind !== "server") throw new Error("share counts source changed");
+        return source.load(throughAnswerId, countsWatermarkId, countsWatermarkAt);
+      })
+      .then((raw) => {
+        if (!cancelled) setCountsFetch({ key: countsKey, counts: readServerShareCounts(raw) });
+      })
+      .catch(() => {
+        if (!cancelled) setCountsFetch({ key: countsKey, counts: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [serverCountsWanted, countsKey, countsFetchKey, throughAnswerId, countsWatermarkId, countsWatermarkAt]);
+  const countsEntry = countsFetch && countsFetch.key === countsKey ? countsFetch : null;
+  // 确数还在路上：先不画正文、不给发布按钮（与个人记忆回执同一手法）。
+  const countsPending = serverCountsWanted && countsEntry === null;
+  // ⚠ 确数端点失败只有一条出路：不带数字、但附图与个人记忆两面都提的兜底文案（与笔记本侧
+  // 详情加载失败同一条降级），绝不给一个偏小的数字。数字本身退回「什么都没取到」那一份
+  // （空轮次算出来的），于是范围五态、抬头与按钮的取舍与详情加载失败时逐字相同。
+  const counts: ShareCounts = countsSource === "server" && countsEntry?.counts ? countsEntry.counts : localCounts;
+  const countsFailed = countsSource === "server" ? countsEntry !== null && countsEntry.counts === null : countsError;
+  const boundary = counts.boundary;
   // 当前链接相对这条回答处在什么位置——所有范围文案的唯一判据（五值，不是「越没越过」
   // 的二值；codex #530 R1/R2 三条都出在把它当二值上）。
   const scope = shareScopeState(boundary, shared);
@@ -244,17 +288,11 @@ export function ConversationShareModal({
   // 失败同一条退化路径:不带数字、但**附图与个人记忆两个面都提**的兜底文案。仍可发布——
   // expected 是用户点的那条 id,不依赖 turns。水位指向本地看不到的答案（unknown）同理:
   // 链接的真实范围我们答不上来,给数字就是编（codex #530 R2 P1）。
-  const countsUnavailable = countsError || boundary.unresolved || boundary.watermarkUnknown;
-  // ⚠ 水位已越过边界时,当前链接实际公开的是「整条到水位为止」而不是用户点的那一段,所以
-  // 披露必须按**完整** turns 统计。按截断批次算会**少报**公开页真实包含的附图/记忆条数——
-  // 披露描述的是「链接里有什么」,不是「用户点了哪一条」。unknown 同走这一支(它至少是
-  // 我们已知的上界),数字本身已由 countsUnavailable 压掉。
-  const disclosureTurns = (boundary.watermarkAhead || boundary.watermarkUnknown) ? turns : scopedTurns;
+  const countsUnavailable = countsFailed || boundary.unresolved || boundary.watermarkUnknown;
   // 轮数与附图数（个人记忆条数不在这里数——见下面 `effectiveMemory`，只来自服务端）。
-  const turnDisclosure = useMemo(
-    () => summarizeShareDisclosure(disclosureTurns, shared ? watermarkId : "", watermark, 0),
-    [disclosureTurns, watermarkId, watermark, shared],
-  );
+  // ⚠ 水位已越过边界时，`current` 按**完整**会话统计（链接实际公开的是「整条到水位为止」，
+  // 披露描述的是「链接里有什么」，不是「用户点了哪一条」）——见 `shareCountsFromTurns`。
+  const turnDisclosure = counts.current;
   // 「更新」块的渲染条件。既有模式沿用 newCount>0（含 countsError 时 turns 为空 → 不显示,
   // 逐字保留接入前行为）;边界模式另接住 countsUnavailable——算不出新增轮数,但确实还没
   // 发布到这里,藏起来等于把一次合法的推进变没了。水位已越过边界时后端只会 409,所以那一
@@ -266,12 +304,12 @@ export function ConversationShareModal({
   // 即将公开的确切范围：水位将被钉到的那条回答（空串 = 当前最新）。披露端点与 POST 的
   // `expected_through_id` 必须说同一个范围，所以这里与 `doShare` 里的 expected 同一个式子；
   // 水位已越过边界时没有发布动作，披露的是链接**当前**的范围——水位那条。
-  const lastScopedId = scopedTurns.length ? scopedTurns[scopedTurns.length - 1].answer_id : "";
+  const lastScopedId = counts.throughId;
   const expectedThroughId = throughAnswerId || lastScopedId;
   const disclosureThroughId = boundary.watermarkAhead ? watermarkId : expectedThroughId;
   const memoryFetchKey = `${api.key}|${disclosureThroughId}`;
   // 取不到整批轮次时（countsUnavailable）已经退到兜底文案，不再为它去问服务端。
-  const memoryFetchWanted = !loading && !countsUnavailable;
+  const memoryFetchWanted = !loading && !countsPending && !countsUnavailable;
   useEffect(() => {
     if (!memoryFetchWanted) return;
     let cancelled = false;
@@ -309,16 +347,18 @@ export function ConversationShareModal({
   }), [turnDisclosure, effectiveMemory, canAdvance]);
   // 前瞻披露:推进水位会公开新增轮次,consent 判据是**这个按钮将要公开什么**,所以它必须
   // 在点击前就披露更新后的记忆/附图条数(codex #522 R1 P1)。边界模式下「更新后」的范围
-  // 就是截断批次(只消费于 `canAdvance`,而那要求 !watermarkAhead,故这里用 scopedTurns)。
-  const updatePreview = useMemo(
-    () => summarizeShareUpdate(
-      scopedTurns,
-      shared ? watermarkId : "",
-      watermark,
-      effectiveMemory ?? { memoryCount: 0, newMemoryCount: 0 },
-    ),
-    [scopedTurns, watermarkId, watermark, shared, effectiveMemory],
-  );
+  // 就是截断批次(只消费于 `canAdvance`,而那要求 !watermarkAhead)。
+  const updatePreview: ShareUpdatePreview = useMemo(() => ({
+    afterUpdate: {
+      sharedCount: 0,
+      newCount: 0,
+      imageCount: counts.update.imageCount,
+      memoryCount: effectiveMemory ? effectiveMemory.memoryCount : 0,
+      earlierCount: counts.update.earlierCount,
+    },
+    newMemoryCount: effectiveMemory ? effectiveMemory.newMemoryCount : 0,
+    newImageCount: counts.update.newImageCount,
+  }), [counts, effectiveMemory]);
 
   async function doShare(action: "share" | "update") {
     // 防御性复查:分享状态未知时绝不发布(CTA 已 disabled,这里兜底 codex #522 R6 P1)。
@@ -359,6 +399,15 @@ export function ConversationShareModal({
         key: memoryFetchKey,
         counts: { memoryCount: acknowledged ?? 0, newMemoryCount: 0 },
       });
+      // 确数同理：水位正好钉在了这次披露的边界上，链接此刻的内容就是 `update` 描述的那一份
+      // （`countsAfterPublishing`），不必为新水位再问一次服务端、也不在复制按钮上方闪一下
+      // 「正在加载…」。服务端没钉在这里（不该发生）就照常按新水位重取。
+      if (countsEntry?.counts && expectedThroughId && resp.shared_through_id === expectedThroughId) {
+        setCountsFetch({
+          key: `${api.key}|${throughAnswerId}|${resp.shared_through_id}|${resp.shared_through_at || ""}`,
+          counts: countsAfterPublishing(countsEntry.counts),
+        });
+      }
       // 结果落在公开按钮自己身上：「已公开」停留 1.6 s。key 取被公开的这条链接自己的
       // token（copy-result.ts 的规矩：结果不能跟着槽位走，链接一换就自动失配回 idle）。
       shareResult.report(`share:${resp.share_token || ""}`, true);
@@ -391,6 +440,10 @@ export function ConversationShareModal({
       setWatermark("");
       setWatermarkId("");
       setConflict(null);
+      // 撤销之后「按下去会发布的内容」正是边界之前那段前缀，与刚分享完同一份数字。
+      if (countsEntry?.counts) {
+        setCountsFetch({ key: `${api.key}|${throughAnswerId}||`, counts: countsAfterPublishing(countsEntry.counts) });
+      }
       shareResult.reset();
       setNotice("已取消分享，原链接立即失效");
     } catch (err) {
@@ -491,14 +544,14 @@ export function ConversationShareModal({
               <p style={{ wordBreak: "break-word" }}>{title || "未命名会话"}</p>
               {bounded && !boundary.unresolved && (
                 <p className="tool-hint" style={{ margin: "4px 0 0" }}>
-                  分享至第 {boundary.index + 1} 轮回答（本会话共 {turns.length} 轮）。
+                  分享至第 {boundary.index + 1} 轮回答（本会话共 {counts.totalTurns} 轮）。
                 </p>
               )}
             </div>
             <button className="icon-button" onClick={onClose} title="关闭">×</button>
           </div>
           <div className="source-detail-body conversation-share-body">
-            {loading || memoryPending ? (
+            {loading || countsPending || memoryPending ? (
               <p className="tool-hint" style={{ margin: 0 }}>正在加载…</p>
             ) : (<>
               {error && <p className="password-change-status error">{error}</p>}
@@ -619,6 +672,10 @@ function ShareDisclosureLines({
 }) {
   return (
     <div className="conversation-share-disclosure">
+      {/* 公开范围比公开页长：如实说出页上没有的更早轮次（普通长度的会话恒为 0，不出现）。 */}
+      {!countsError && disclosure.earlierCount > 0 && (
+        <p className="tool-hint" style={{ margin: 0 }}>{shareEarlierSentence(disclosure.earlierCount)}</p>
+      )}
       {countsError ? (
         <p className="tool-hint" style={{ margin: 0 }}>
           {SHARE_DISCLOSURE_COUNTS_ERROR}
@@ -671,6 +728,9 @@ function ShareUpdateDisclosureLines({
   }
   return (
     <div className="conversation-share-disclosure">
+      {afterUpdate.earlierCount > 0 && (
+        <p className="tool-hint" style={{ margin: 0 }}>{shareUpdateEarlierSentence(afterUpdate.earlierCount)}</p>
+      )}
       {afterUpdate.imageCount > 0 && (
         <p className="tool-hint" style={{ margin: 0 }}>
           更新后公开页共 {afterUpdate.imageCount} 张附图{newImageCount > 0 ? `（新增 ${newImageCount} 张）` : ""}。

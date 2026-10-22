@@ -282,13 +282,18 @@ export default function PublicConversationPage() {
         </p>
       </header>
 
+      {/* 公开页只显示到分享为止最近的那些轮次（被分享的那条一定在页上），更早的轮次排在
+          最前面、不在页上——所以这句话放在第一轮之前，并给出确数。 */}
+      {conversation.truncated_turns && (
+        <p className="public-report-note">
+          会话过长，此处只展示最近 {conversation.turns.length} 轮
+          {(conversation.omitted_earlier_turns ?? 0) > 0 && `，更早的 ${conversation.omitted_earlier_turns} 轮未包含`}。
+        </p>
+      )}
+
       {conversation.turns.map((turn, index) => (
         <PublicTurnView key={index} turn={turn} index={index} token={token} />
       ))}
-
-      {conversation.truncated_turns && (
-        <p className="public-report-note">会话过长，此处只展示前 {conversation.turns.length} 轮。</p>
-      )}
 
       <footer className="public-report-foot">
         <p className="public-report-note">本页是只读分享副本，引用可核对但不可打开原始资料。</p>

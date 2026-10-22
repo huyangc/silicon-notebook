@@ -1482,6 +1482,45 @@ class ConversationShareDisclosure(BaseModel):
     new_memory_count: int
 
 
+class ConversationShareCounts(BaseModel):
+    """The share dialog's exact numbers for one GLOBAL conversation
+    (``GET /global-ask/conversations/{id}/share/counts``), counted by the
+    server over the same windows the public page shows
+    (``app/domain/share_counts.py``).
+
+    ``total_turns``: completed turns. ``through_id``: the boundary turn (the
+    asked ``through_id``, or the newest; empty when the asked one does not
+    resolve). ``boundary_index``: its 0-based position (-1 when none was
+    asked, or it does not resolve -- ``boundary_unresolved``). Against the
+    watermark the dialog passed: ``watermark_ahead`` (the link already covers
+    ``ahead_count`` more turns), ``watermark_behind``, ``watermark_unknown``
+    (the watermark turn no longer resolves). What the link holds now (or
+    sharing would publish while unshared): ``new_turns`` after the watermark
+    not included, ``published_turns`` on the page, ``earlier_turns`` older
+    ones the page leaves out, ``image_count`` attached images on those turns.
+    What sharing / updating publishes: ``update_image_count``,
+    ``update_new_image_count`` (on turns the link does not show yet) and
+    ``update_earlier_turns``. Image counts are each turn's anchors' and
+    citations' images, deduplicated per turn -- an upper bound on the page.
+    """
+
+    total_turns: int
+    through_id: str
+    boundary_index: int
+    boundary_unresolved: bool
+    watermark_ahead: bool
+    ahead_count: int
+    watermark_behind: bool
+    watermark_unknown: bool
+    new_turns: int
+    published_turns: int
+    earlier_turns: int
+    image_count: int
+    update_image_count: int
+    update_new_image_count: int
+    update_earlier_turns: int
+
+
 class ConversationShareResponse(BaseModel):
     """The public link + read watermark for one shared conversation (T2).
 
@@ -1612,6 +1651,11 @@ class PublicConversation(BaseModel):
     shared_at: str = ""
     turns: List[PublicTurn] = Field(default_factory=list)
     truncated_turns: bool = False
+    # A published prefix longer than ``MAX_TURNS``: the page shows its newest
+    # ``MAX_TURNS`` turns (the shared one always among them) and this many
+    # older ones are not included. Left out of the body while 0, so a page of
+    # ordinary length serializes byte for byte as before.
+    omitted_earlier_turns: int = Field(default=0, exclude_if=lambda value: value == 0)
     # MCP answer links (``alnk-``) only: when this link stops opening. Left out
     # of the body entirely when unset, so a session/global share serializes
     # byte for byte as before.

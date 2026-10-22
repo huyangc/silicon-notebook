@@ -294,8 +294,9 @@ def case_a_deleted_watermark_job_falls_back_to_the_interval_not_to_nothing(store
     assert _public_ids(store, token) == ["job-a", "job-b"]
 
 
-def case_the_public_read_is_capped_at_one_past_the_render_limit(store):
-    """匿名读取有上界:渲染上限 + 1(多出的那一条只用来披露「被截断了」)。"""
+def case_the_public_read_is_the_newest_window_of_the_prefix(store):
+    """匿名读取有上界:只取前缀里**最近**的渲染上限那么多轮(被分享的那一轮一定在页上),
+    更早的轮数单独给出确数(``earlier_turns``),而不是只给一个「被截断了」。"""
     from app.domain.conversation_public_view import MAX_TURNS
 
     conversation_id, user_id = insert_conversation(store, "conv-long", "user-long")
@@ -303,11 +304,27 @@ def case_the_public_read_is_capped_at_one_past_the_render_limit(store):
         # 真实写入形状:UTC ``isoformat()``,整秒时刻不带小数位。
         stamp = f"2026-01-01T{index // 3600:02d}:{index // 60 % 60:02d}:{index % 60:02d}+00:00"
         insert_job(store, conversation_id, user_id, f"job-{index:04d}", stamp)
-    token = store.share_conversation(conversation_id, user_id)["share_token"]
+    # A prefix that fits counts nothing extra and reads as before.
+    short = store.share_window(conversation_id, user_id, expected_through_id="job-0009")
+    assert [entry["job_id"] for entry in short["jobs"]] == [
+        f"job-{index:04d}" for index in range(10)
+    ]
+    assert short["earlier_turns"] == 0
+    token = store.share_conversation(
+        conversation_id, user_id, expected_through_id=f"job-{MAX_TURNS + 2:04d}"
+    )["share_token"]
 
-    ids = _public_ids(store, token)
-    assert len(ids) == MAX_TURNS + 1
-    assert ids[0] == "job-0000"
+    public = store.public_conversation_by_token(token)
+    ids = [entry["job_id"] for entry in public["jobs"]]
+    assert ids == [f"job-{index:04d}" for index in range(3, MAX_TURNS + 3)]
+    assert public["earlier_turns"] == 3
+    window = store.share_window(
+        conversation_id, user_id, expected_through_id=f"job-{MAX_TURNS + 4:04d}"
+    )
+    assert [entry["job_id"] for entry in window["jobs"]] == [
+        f"job-{index:04d}" for index in range(5, MAX_TURNS + 5)
+    ]
+    assert window["earlier_turns"] == 5
 
 
 def case_production_shaped_timestamps_keep_lexical_and_temporal_order_aligned(store):
@@ -412,7 +429,7 @@ CASES = [
     case_an_unknown_or_blank_token_resolves_to_nothing,
     case_a_token_cannot_be_issued_twice,
     case_a_deleted_watermark_job_falls_back_to_the_interval_not_to_nothing,
-    case_the_public_read_is_capped_at_one_past_the_render_limit,
+    case_the_public_read_is_the_newest_window_of_the_prefix,
     case_production_shaped_timestamps_keep_lexical_and_temporal_order_aligned,
     case_a_late_inserted_job_with_an_early_stamp_stays_outside_the_snapshot,
     case_a_job_stamped_after_the_newest_one_keeps_its_own_stamp,
