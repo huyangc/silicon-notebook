@@ -1000,3 +1000,51 @@ def test_caption_enumeration_needs_a_separated_enumerator(title, kind, chapter):
     [heading] = nav._headings([{"element_type": "heading", "text": title}])
     assert heading.kind[0] == kind
     assert heading.chapter == chapter
+
+
+_REPEATED_SUBSECTIONS = ["Electrical Layer Overview", "Transmitter Equalization Settings",
+                         "Receiver Sensitivity Limits", "Clocking Architecture Details",
+                         "Lane Reversal Support", "Channel Characteristics",
+                         "Sideband Signaling Interface"]
+
+
+def _two_chapters_sharing_subsections() -> _Doc:
+    """Chapters 1 and 5 carry the same seven subsection titles; each opens
+    with the same overview paragraph; a TOC lists the whole document."""
+    sections: list[str] = []
+    for chapter in (1, 2, 3, 4, 5):
+        sections.append(f"{chapter} Chapter {_WORDS[chapter - 1]} Specification")
+        names = (_REPEATED_SUBSECTIONS if chapter in (1, 5)
+                 else [f"Section {_WORDS[chapter - 1]} {_WORDS[s]} Rules" for s in range(7)])
+        sections += [f"{chapter}.{i} {name}" for i, name in enumerate(names, start=1)]
+    doc = _Doc().h("Contents")
+    for i, title in enumerate(sections):
+        doc.p(_toc_line(title, 10 + i * 3))
+    overview = "This chapter covers " + ", ".join(_REPEATED_SUBSECTIONS) + "."
+    for title in sections:
+        doc.h(title)
+        doc.p(overview if title.split()[0] in ("1", "5") else _BODY)
+    return doc
+
+
+def test_each_chapters_overview_is_local_when_chapters_share_subsection_titles():
+    """codex #971 P2: the text cannot tell chapter 1's ``Lane Reversal
+    Support`` from chapter 5's, and the chain is pinned by document order,
+    so chapter 5's own overview used to read as a list of chapter 1's
+    sections (locality 0, flagged) while the identical text under chapter 1
+    was local. A node is local when any heading with its title is."""
+    chunks, result = _two_chapters_sharing_subsections().detect()
+    for heading in ("1 Chapter One Specification", "5 Chapter Five Specification"):
+        overview = _candidates(chunks, result, heading)
+        assert overview and overview[0].locality == 1.0, heading
+    assert "1 Chapter One Specification" not in _flagged_sections(chunks, result)
+    assert "5 Chapter Five Specification" not in _flagged_sections(chunks, result)
+
+
+def test_toc_of_chapters_sharing_subsection_titles_is_still_flagged():
+    chunks, result = _two_chapters_sharing_subsections().detect()
+    toc = [(m, flag) for c, m, flag in zip(chunks, result.metrics, result.flags)
+           if c["section_path"] == "Contents" and m.ordered_refs >= nav.NAV_MIN_REFERENCES]
+    assert len(toc) >= 2 and all(m.locality == 0.0 for m, _flag in toc)
+    assert all(flag for _m, flag in toc)
+    assert set(_flagged_sections(chunks, result)) == {"Contents"}
