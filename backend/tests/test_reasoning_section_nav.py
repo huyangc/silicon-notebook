@@ -1156,3 +1156,80 @@ def test_long_titles_and_labels_are_clipped_in_every_replayed_text(repo, monkeyp
     listing = llm.reflect_prompts[1][llm.reflect_prompts[1].index("（章节目录:"):]
     for text in (navigation, listing):
         assert "非常长的章节标题" * 40 not in text and "很长的标题" * 60 not in text
+
+
+# ----------------------------------------- scan-cut sections (codex #975 R2)
+
+
+def _cut_scan(repo):
+    """The outline scan stops after c-s3: 5.7.3 continues (its Notes leaf
+    c-s4 was never read), 5.7.2.1 lies wholly inside the scan."""
+    repo.settings.reasoning_section_outline_max_rows = 5
+
+
+def test_a_section_cut_by_the_scan_reads_as_incomplete_from_a_hint(repo, monkeypatch):
+    nb = _seed(repo)
+    _cut_scan(repo)
+    llm = _llm(_read("s2"), _read("s1"))
+    result = _run(_reasoner(repo, monkeypatch, llm), nb)
+    prompt = llm.reflect_prompts[0]
+    block = prompt[prompt.index(HINT_BLOCK_TITLE):].split("\n\n")[0].splitlines()
+    assert block[1:] == [
+        "[s1]《互连规范》 5.7.2.1 Loss and Crosstalk Mask（1 段）",
+        "[s2]《互连规范》 5.7.3 Standard Package（1 段，可能未完）",
+    ]
+    cut, whole = _steps(result, "read_section")
+    assert cut.detail["truncated"] is True and cut.detail["scan_truncated"] is True
+    assert cut.summary.endswith("(大纲只覆盖本篇前 5 段,本节之后可能还有内容)")
+    assert "truncated" not in whole.detail and "scan_truncated" not in whole.detail
+    assert "可能还有内容" in llm.reflect_prompts[-1]   # the ledger says so too
+
+
+def test_a_section_cut_by_the_scan_reads_as_incomplete_by_title(repo, monkeypatch):
+    nb = _seed(repo, vectors=False)
+    _cut_scan(repo)
+    llm = _llm(_read("5.7.3", source="互连规范"))
+    result = _run(_reasoner(repo, monkeypatch, llm), nb)
+    step = _steps(result, "read_section")[0]
+    assert step.detail["scan_truncated"] is True and step.detail["result_ids"] == ["c-s3"]
+
+
+def test_a_section_cut_by_the_scan_reads_as_incomplete_from_a_listing(
+    repo, monkeypatch,
+):
+    import re
+
+    nb = _seed(repo, vectors=False)
+    _cut_scan(repo)
+    retriever = _reasoner(repo, monkeypatch, _llm())
+    seen: dict = {}
+
+    def reflect(question, summary, **kwargs):
+        turn = seen.setdefault("turn", 0)
+        seen["turn"] = turn + 1
+        if turn == 0:
+            return ReflectDecision(next_action=BROWSE_SECTIONS_ACTION,
+                                   browse_sections_source="互连规范")
+        if turn == 1:
+            seen["listing"] = summary[summary.index("（章节目录:"):]
+            sid = re.search(r"\[(s\d+)\] 5\.7\.3 Standard Package", seen["listing"])
+            return ReflectDecision(next_action=READ_SECTION_ACTION,
+                                   read_section_section=sid.group(1))
+        return ReflectDecision(next_action="answer", sufficient=True)
+
+    retriever.reflect = reflect
+    result = _run(retriever, nb)
+    assert "5.7.3 Standard Package（1 段，可能未完）" in seen["listing"]
+    assert "大纲只覆盖本篇前 5 段" in seen["listing"]
+    assert _steps(result, "read_section")[0].detail["scan_truncated"] is True
+
+
+def test_an_ambiguous_candidate_cut_by_the_scan_says_so(repo, monkeypatch):
+    # the last Notes continues (c-s7) past a scan that stops after c-s6
+    rows = SPEC + (("c-s7", "Notes", "注释三", False, _unit((7, 1.0))),)
+    nb = _seed(repo, vectors=False, rows=rows)
+    repo.settings.reasoning_section_outline_max_rows = len(rows) - 1
+    llm = _llm(_read("Notes", source="互连规范"))
+    result = _run(_reasoner(repo, monkeypatch, llm), nb)
+    summary = _skips(result)["section_ambiguous"].summary
+    assert "Notes（1 段，可能未完）" in summary and "Notes（1 段）、" in summary
