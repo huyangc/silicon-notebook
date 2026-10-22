@@ -44,7 +44,10 @@ from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER
 from app.repositories.postgres.promotion_provenance_store import (
     materialize_promotion_evidence,
 )
-from app.domain.kg_merge_seed import check_concept_seed_version, check_placement_seed_space
+from app.domain.kg_merge_seed import (
+    CONCEPT_SEED_VERSION, check_concept_seed_version, check_placement_seed_space,
+    fold_decision, stronger_decision,
+)
 from app.domain.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
     USABLE_STATUSES,
@@ -1129,7 +1132,10 @@ class GovernanceStore:
     def decided_pairs(self, notebook_id: str) -> Dict[tuple, str]:
         with self.database.connect() as db:
             rows = db.execute("SELECT canonical_a, canonical_b, status FROM concept_merge_candidates WHERE notebook_id=%s AND status IN ('confirmed','rejected')", (notebook_id,)).fetchall()
-        return {(r["canonical_a"], r["canonical_b"]): r["status"] for r in rows}
+        out: Dict[tuple, str] = {}
+        for r in rows:
+            fold_decision(out, (r["canonical_a"], r["canonical_b"]), r["status"])
+        return out
 
     @staticmethod
     def decided_seed_pairs_from(
@@ -1155,7 +1161,9 @@ class GovernanceStore:
         ).fetchall()
         out: Dict[frozenset, str] = {}
         for r in rows:
-            out[frozenset(_decision_keys(r))] = r["status"]
+            # Rows that contradict each other on one pair: the stronger status
+            # (kg_merge_seed.DECISION_STRENGTH), whatever the row order.
+            fold_decision(out, frozenset(_decision_keys(r)), r["status"])
         return out
 
     def decided_seed_pairs(
@@ -1256,6 +1264,53 @@ class GovernanceStore:
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,2,%s,%s)",
                 inserts[at:at + _TRANSLATION_BATCH])
         return grew, done
+
+    @staticmethod
+    def drop_superseded_decisions(
+        connection: Any, notebook_id: str, pairs: Sequence[Tuple[str, str]],
+    ) -> Tuple[int, int]:
+        """One effective decision per seed pair of ``pairs`` among the
+        notebook's decided rows in the code's seed space, in the caller's
+        pending-refresh transaction: where rows name one pair with different
+        statuses, the rows weaker than the pair's strongest status
+        (``kg_merge_seed.DECISION_STRENGTH``: confirmed, rejected, deferred)
+        are deleted -- a weaker row can never take effect against the
+        stronger one and would only contradict it for every reader. Rows of
+        the winning status all stay (the same decision twice is no
+        contradiction). The decided rows of the space are read once (bounded
+        by the notebook's decisions; the refresh reads them all again right
+        after), each delete re-checks the status it read. Returns ``(rows
+        deleted, confirmed / rejected rows among them)``: the caller folds the
+        second into the stored input version's decision count."""
+        wanted = {frozenset(pair) for pair in pairs}
+        if not wanted:
+            return 0, 0
+        groups: Dict[frozenset, List[Any]] = {}
+        for r in connection.execute(
+            "SELECT id, canonical_a, canonical_b, seed_a, seed_b, status "
+            "FROM concept_merge_candidates WHERE notebook_id=%s AND seed_version=%s "
+            "AND status IN ('confirmed','rejected','deferred')",
+            (notebook_id, CONCEPT_SEED_VERSION),
+        ).fetchall():
+            key = frozenset(_decision_keys(r))
+            if key in wanted:
+                groups.setdefault(key, []).append(r)
+        deleted = counted = 0
+        for group in groups.values():
+            strongest = None
+            for r in group:
+                strongest = stronger_decision(strongest, r["status"])
+            for r in group:
+                if r["status"] == strongest:
+                    continue
+                gone = connection.execute(
+                    "DELETE FROM concept_merge_candidates "
+                    "WHERE id=%s AND notebook_id=%s AND status=%s",
+                    (r["id"], notebook_id, r["status"])).rowcount or 0
+                deleted += gone
+                if r["status"] in ("confirmed", "rejected"):
+                    counted += gone
+        return deleted, counted
 
     # ------------------------------------------------------ merge review job
     @staticmethod

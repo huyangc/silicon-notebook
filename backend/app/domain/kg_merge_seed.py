@@ -252,6 +252,46 @@ CONCEPT_SEED_VERSIONS = (1, 2)
 OVERRIDE_SEED_PREFIX = "~v1:"
 
 
+#: The order in which a stored merge decision wins when several name ONE seed
+#: pair (rows that contradict each other, or decisions from several sources
+#: folded into one map): confirmed, then rejected, then deferred. Confirmed
+#: first is the rule the clustering already applies (a confirmed pair forces
+#: the union, ``kg_merge.cluster_seeds``); rejected and deferred both keep a pair
+#: apart in every reader, so their order only makes the result total. Any other
+#: status ranks after them. Every reader that builds a pair → status map folds
+#: through ``fold_decision``, so what it returns never depends on row order.
+DECISION_STRENGTH = ("confirmed", "rejected", "deferred")
+
+
+def _decision_rank(status: str) -> "tuple[int, str]":
+    if status in DECISION_STRENGTH:
+        return DECISION_STRENGTH.index(status), status
+    return len(DECISION_STRENGTH), status
+
+
+def stronger_decision(held: "str | None", status: str) -> str:
+    """The status a seed pair keeps when ``held`` (``None``: nothing yet) and
+    ``status`` both name it (``DECISION_STRENGTH``)."""
+    if held is None:
+        return status
+    return min(held, status, key=_decision_rank)
+
+
+def fold_decision(out: dict, key: object, status: str) -> None:
+    """Record ``status`` for ``key`` in ``out`` unless a stronger one is there."""
+    out[key] = stronger_decision(out.get(key), status)
+
+
+def fold_decisions(*maps: "dict") -> dict:
+    """Several ``{pair: status}`` maps as one, each pair at its strongest
+    status — the same result in any order of the maps or of their entries."""
+    out: dict = {}
+    for decisions in maps:
+        for key, status in decisions.items():
+            fold_decision(out, key, status)
+    return out
+
+
 def check_concept_seed_version(version: object) -> int:
     """The version as an int, or ``ValueError`` — never a silent default."""
     if isinstance(version, bool) or not isinstance(version, int) \

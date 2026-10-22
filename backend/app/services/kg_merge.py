@@ -35,6 +35,7 @@ from app.domain.kg_merge_seed import (
     concept_seed_of,
     concept_seed_parts,
     concept_seed_v2,
+    fold_decision,
     seed_claim,
     seed_concept,
     seed_formula,
@@ -932,7 +933,13 @@ class DecisionTranslation:
     it move their objects off the v2 seeds the stored v2 decisions name —
     ``move_v2_decisions`` re-keys those decisions: ``moved_rows`` (v2 row
     id → its pairs after the move) and ``moved_keys`` (its keys when the
-    plan was made; the store re-keys a row only while they still hold)."""
+    plan was made; the store re-keys a row only while they still hold).
+    ``collision_ids``: the stored v2 rows (any status, pending included)
+    already naming a pair this plan writes — the pending refresh locks them
+    with the rows it rewrites, because after writing it keeps one effective
+    decision per pair (``drop_superseded_decisions``). Wherever several
+    decisions name one pair they fold by ``kg_merge_seed.DECISION_STRENGTH``
+    (confirmed first), here and in every reader."""
 
     pairs: Dict[str, List[Tuple[str, str]]] = field(default_factory=dict)
     rows: Dict[str, StoredDecision] = field(default_factory=dict)
@@ -943,6 +950,7 @@ class DecisionTranslation:
     base_override: FrozenSet[str] = frozenset()
     moved_rows: Dict[str, List[Tuple[str, str]]] = field(default_factory=dict)
     moved_keys: Dict[str, Tuple[str, str]] = field(default_factory=dict)
+    collision_ids: List[str] = field(default_factory=list)
 
     @property
     def recomputed_any(self) -> bool:
@@ -967,7 +975,7 @@ class DecisionTranslation:
             side_b = _translated_seeds(r.key_b, self.seeds_of_key, self.override)
             if side_a and side_b:
                 for a, b in _row_pairs(side_a, side_b):
-                    out[frozenset((a, b))] = r.status
+                    fold_decision(out, frozenset((a, b)), r.status)
         return out
 
     def decided_pairs(self) -> Dict[FrozenSet[str], str]:
@@ -977,7 +985,7 @@ class DecisionTranslation:
         for row_id in sorted(self.pairs):
             status = self.rows[row_id].status
             for a, b in self.pairs[row_id]:
-                out[frozenset((a, b))] = status
+                fold_decision(out, frozenset((a, b)), status)
         return out
 
     def move_v2_decisions(
@@ -1012,12 +1020,28 @@ class DecisionTranslation:
         for pair, status in decided.items():
             a, b = sorted(pair) if len(pair) == 2 else (next(iter(pair)),) * 2
             if a not in moved and b not in moved:
-                out[pair] = status
+                fold_decision(out, pair, status)
                 continue
             for x, y in _row_pairs(_moved_side(a, moved, carried),
                                    _moved_side(b, moved, carried)):
-                out[frozenset((x, y))] = status
+                fold_decision(out, frozenset((x, y)), status)
         return out
+
+    def written_pairs(self) -> Set[FrozenSet[str]]:
+        """Every pair the pending refresh writes for this plan: the v1 rows'
+        translations and the moved v2 rows' new keys."""
+        return {frozenset(pair) for pairs in (*self.pairs.values(), *self.moved_rows.values())
+                for pair in pairs}
+
+    def note_collisions(self, rows: Iterable[StoredDecision]) -> None:
+        """Record ``collision_ids``: the stored v2 rows (``rows``, the plan-time
+        snapshot) that name a pair this plan writes and that it does not
+        rewrite itself."""
+        written = self.written_pairs()
+        self.collision_ids = sorted(
+            r.row_id for r in rows
+            if r.row_id not in self.moved_rows
+            and frozenset((r.key_a, r.key_b)) in written)
 
 
 class _Everything:

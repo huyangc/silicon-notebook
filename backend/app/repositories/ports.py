@@ -5056,6 +5056,15 @@ class GovernanceStorePort(Protocol):
         (a ``None`` expected status is not checked)."""
         ...
     @staticmethod
+    def drop_superseded_decisions(
+        connection: object, notebook_id: str, pairs: Sequence[tuple[str, str]],
+    ) -> tuple[int, int]:
+        """One effective decision per seed pair of ``pairs`` (seed space 2) in
+        the caller's transaction: rows weaker than the pair's strongest status
+        (``kg_merge_seed.DECISION_STRENGTH``) are deleted. Returns (rows
+        deleted, confirmed / rejected rows among them)."""
+        ...
+    @staticmethod
     def merge_candidate_pairs(db: object, notebook_id: str, statuses: object) -> list[Any]: ...
     @staticmethod
     def merge_candidate_pairs_for_canonicals(

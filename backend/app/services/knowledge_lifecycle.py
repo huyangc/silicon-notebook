@@ -84,6 +84,7 @@ from app.domain.kg_merge_seed import (
     CONCEPT_SEED_VERSION,
     ConceptSeedSpaceMoved,
     concept_decision_seeds,
+    fold_decisions,
 )
 from app.services.kg_findings import (
     FindingsDraft,
@@ -6472,7 +6473,11 @@ class KnowledgeLifecycleService:
                 notebook_id, "concept", concept_seed_version=CONCEPT_SEED_VERSION,
                 run_id=run_id, override=plan.override)
             decided = plan.move_v2_decisions(decided, v2_rows, carried=stream[1])
-        return (*stream, {**decided, **plan.decided_pairs()}, plan)
+        plan.note_collisions(v2_rows)
+        # One status per pair, confirmed first (DECISION_STRENGTH): the
+        # translated v1 rows, the stored v2 rows and the moved ones can all
+        # name one pair — what the translator reports must be what clusters.
+        return (*stream, fold_decisions(decided, plan.decided_pairs()), plan)
 
     def _squash_merge_candidates(
         self, notebook_id: str, seed_to_canonical: Dict[str, str],
@@ -6516,22 +6521,25 @@ class KnowledgeLifecycleService:
         its successor's candidates); lock the pending rows and the planned v1
         rows in one statement, in the order a human decision locks a pair's
         rows (PostgreSQL: ``id COLLATE "C"``, so the two wait for each other
-        instead of deadlocking; the v2 rows the plan re-keys are locked in the
-        same statement), and DELETE the pending ones; persist the recompute
-        (translating only the rows still as planned) and re-key the v2
-        decisions a new override key moved (``moved_rows``); then read the
+        instead of deadlocking; the v2 rows the plan re-keys, and those naming
+        a pair it writes, are locked in the same statement), and DELETE the
+        pending ones; persist the recompute
+        (translating only the rows still as planned), re-key the v2
+        decisions a new override key moved (``moved_rows``) and keep one
+        decision per pair written (``_persist_decision_plan``); then read the
         decisions LIVE — the v2 rows, and the v1 rows this rebuild did not
-        translate mapped through the stream's seeds (``live_pairs``) — and
+        translate mapped through the stream's seeds (``live_pairs``), folded
+        confirmed first — and
         filter the ANN and squash rows (one row per canonical pair,
         ``kg_merge.merge_pending_tiers``) against them, since decisions may
         land after the clustering snapshot. Returns the growth of the
-        confirmed / rejected row count, which the caller folds into the
-        stored input version."""
+        confirmed / rejected row count (rows added less rows superseded),
+        which the caller folds into the stored input version."""
         from app.services.kg_merge import (
             StoredDecision, filter_pending_seeds_by_decisions, merge_pending_tiers,
         )
 
-        growth, done, moved = 0, [], []
+        added, done, moved, superseded = 0, [], [], (0, 0)
         with self._write() as db:
             if not self.unified_kg.derived_claim_still_held(
                     db, notebook_id, generation):
@@ -6543,30 +6551,18 @@ class KnowledgeLifecycleService:
                 raise KgDerivedGenerationPreempted(notebook_id, generation)
             self.governance_store.delete_pending_merges(
                 db, notebook_id,
-                lock_ids=sorted({*plan.pairs, *plan.moved_rows}) if plan is not None else ())
-            if plan is not None and plan.pairs:
-                growth, done = self.governance_store.apply_v1_decision_translation(
-                    db, notebook_id, plan.pairs,
-                    {rid: (r.key_a, r.key_b, r.status) for rid, r in plan.rows.items()},
-                    now)
-            if plan is not None and plan.moved_rows:
-                # The v2 decisions a new override key moved, re-keyed with
-                # the same provenance rules; status not checked (the move is
-                # a function of the keys alone), so a row decided again — or
-                # settled from pending — while the rebuild ran is re-keyed
-                # with its live status. A pending one was just deleted.
-                moved_growth, moved = self.governance_store.apply_v1_decision_translation(
-                    db, notebook_id, plan.moved_rows,
-                    {rid: (*keys, None) for rid, keys in plan.moved_keys.items()},
-                    now, seed_version=CONCEPT_SEED_VERSION)
-                growth += moved_growth
+                lock_ids=sorted({*plan.pairs, *plan.moved_rows, *plan.collision_ids})
+                if plan is not None else ())
+            if plan is not None:
+                added, done, moved, superseded = self._persist_decision_plan(
+                    db, notebook_id, plan, now)
             live_decided = self.governance_store.decided_seed_pairs_from(
                 db, notebook_id, seed_version=CONCEPT_SEED_VERSION)
             if plan is not None:
-                live_decided = {**plan.live_pairs(
+                live_decided = fold_decisions(plan.live_pairs(
                     StoredDecision(r["id"], r["key_a"], r["key_b"], r["status"])
                     for r in self.governance_store.merge_decision_rows(
-                        db, notebook_id, seed_version=1)), **live_decided}
+                        db, notebook_id, seed_version=1)), live_decided)
             pending_seeds = filter_pending_seeds_by_decisions(
                 merge_pending_tiers(ann_rows, squash_rows), seeds,
                 {pair for pair, st in live_decided.items() if st == "confirmed"},
@@ -6587,12 +6583,45 @@ class KnowledgeLifecycleService:
                 "notebook_id": notebook_id,
                 "translated": len(done),
                 "suspended": len(plan.suspended) + len(plan.pairs) - len(done),
-                "decision_rows_added": growth,
+                "decision_rows_added": added,
                 "override_keys": len(plan.override),
                 "unresolved": plan.unresolved,
                 "v2_rows_moved": len(moved),
+                "superseded": superseded[0],
             })
-        return growth
+        return added - superseded[1]
+
+    def _persist_decision_plan(self, db, notebook_id: str, plan, now: str):
+        """The decision recompute's writes, in the pending refresh's
+        transaction: the v1 rows translated (only those still as planned), the
+        v2 rows a new override key moved (keys checked, status not: the move is
+        a function of the keys alone, so a row decided again — or settled from
+        pending — while the rebuild ran is re-keyed with its live status; a
+        pending one was just deleted), both with the same provenance rules;
+        then one effective decision per pair written
+        (``drop_superseded_decisions``: a pair two rows now name with
+        different statuses keeps the stronger one, confirmed first — the
+        weaker row could never take effect and would only contradict the
+        stronger one for every reader). Returns ``(rows added, translated ids,
+        moved ids, (rows superseded, confirmed / rejected rows among them))``."""
+        added, done, moved = 0, [], []
+        if plan.pairs:
+            added, done = self.governance_store.apply_v1_decision_translation(
+                db, notebook_id, plan.pairs,
+                {rid: (r.key_a, r.key_b, r.status) for rid, r in plan.rows.items()}, now)
+        if plan.moved_rows:
+            moved_added, moved = self.governance_store.apply_v1_decision_translation(
+                db, notebook_id, plan.moved_rows,
+                {rid: (*keys, None) for rid, keys in plan.moved_keys.items()},
+                now, seed_version=CONCEPT_SEED_VERSION)
+            added += moved_added
+        written = [pair for rid in done for pair in plan.pairs[rid]]
+        written += [pair for rid in moved for pair in plan.moved_rows[rid]]
+        superseded = (0, 0)
+        if written:
+            superseded = self.governance_store.drop_superseded_decisions(
+                db, notebook_id, written)
+        return added, done, moved, superseded
 
     @notebook_model_artifact_scope
     def rebuild_unified_kg(self, notebook_id: str,

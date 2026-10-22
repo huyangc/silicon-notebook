@@ -882,7 +882,109 @@ def assert_a_moved_v2_row_is_rekeyed_with_its_live_status(repo, monkeypatch) -> 
         assert str(r["created_at"]).startswith("2026-01-02"), r
 
 
+def assert_a_rejection_landing_on_a_confirmed_pair_yields_to_it(repo, monkeypatch) -> None:
+    """Codex #988 R3: a rejection from before the upgrade ("Q-Former" is not
+    "Perceiver") stays suspended while no "Q-Former" exists; under the new
+    rule the user confirms "Qformer" = "Perceiver". "Q-Former" returns
+    (seed ``qformer``): the translation keeps both keys on their old seeds,
+    and the confirmation follows its objects — onto the very pair the
+    translated rejection names, ``~v1:q former`` / ``~v1:perceiver``. One pair,
+    two statuses: confirmed wins (as the translator reports, ``unresolved``),
+    in the clustering and in the store — the rejection's row is superseded, so
+    the pair keeps one decision (before the fix the rejection overrode the
+    confirmation in the clustering map and both rows stayed). The decision
+    count folded into the input version matches the rows: the next update is
+    the skip path; a forced rebuild keeps the result."""
+    nb = notebook(repo, "s1", "s2")
+    concepts(repo, nb, "s1", "Qformer")
+    concepts(repo, nb, "s2", "Perceiver")
+    decide(repo, nb, "mc-old-rejected", "q former", "perceiver", "rejected")
+    rebuild(repo, nb)
+    decide_v2(repo, nb, "mc-new-confirmed", "qformer", "perceiver", "confirmed")
+    rebuild(repo, nb, force=True)
+    group = canonical_of(repo, nb)
+    assert group["Qformer"] == group["Perceiver"], group
+    fuse(repo, nb, "s3", "Q-Former")
+
+    events = capture_events(repo, monkeypatch)
+    rebuild(repo, nb)
+    group = canonical_of(repo, nb)
+    assert group["Q-Former"] == group["Qformer"] == group["Perceiver"], group
+    assert decision_rows(repo, nb) == [
+        ("qformer", "~v1:perceiver", "confirmed", 2),
+        ("~v1:q former", "~v1:perceiver", "confirmed", 2),
+    ]
+    assert rows(repo, "SELECT id FROM concept_merge_candidates WHERE id='mc-old-rejected'") == []
+    [event] = [e for e in events if e["kind"] == "kg_merge_decisions_recomputed"]
+    assert {k: event[k] for k in ("translated", "decision_rows_added", "override_keys",
+                                  "unresolved", "v2_rows_moved", "superseded")} == {
+        "translated": 1, "decision_rows_added": 1, "override_keys": 2,
+        "unresolved": 1, "v2_rows_moved": 1, "superseded": 1}
+
+    lifecycle = repo._runtime.knowledge_lifecycle
+    streamed: list = []
+    real = lifecycle._stream_seed_reps
+    monkeypatch.setattr(lifecycle, "_stream_seed_reps",
+                        lambda *a, **k: streamed.append(a) or real(*a, **k))
+    rebuild(repo, nb)
+    assert streamed == [], "the next update re-merged"
+    monkeypatch.setattr(lifecycle, "_stream_seed_reps", real)
+    rebuild(repo, nb, force=True)
+    assert canonical_of(repo, nb) == group
+
+
+#: Pairs stored twice with different statuses -> the status every reader keeps.
+_CONTRADICTIONS = {
+    ("alphanet", "betanet"): ("confirmed", "rejected"),
+    ("gammanet", "deltanet"): ("rejected", "deferred"),
+    ("epsilonnet", "zetanet"): ("confirmed", "deferred"),
+}
+
+
+def assert_contradictory_rows_of_one_pair_read_the_same_in_any_order(
+    repo, monkeypatch,
+) -> None:
+    """Codex #988 R3, the readers' line of defence (rows a store already
+    holds): two rows naming one seed pair with different statuses read as
+    the stronger one — confirmed, then rejected, then deferred — in every
+    reader (the clustering's and the pending refresh's decided map, the
+    findings rules' v1 ∪ v2 map, the F4 read side, the governance API),
+    whichever row was written first; and the clustering merges a pair whose
+    rows say both confirmed and rejected."""
+    from app.services import kg_findings_view as findings_view
+
+    store = repo._runtime.governance
+    expected = {frozenset(pair): statuses[0] for pair, statuses in _CONTRADICTIONS.items()}
+    seeds = sorted({seed for pair in _CONTRADICTIONS for seed in pair})
+    for reverse in (False, True):
+        a, b = f"s1-{reverse}", f"s2-{reverse}"
+        nb = notebook(repo, a, b)
+        concepts(repo, nb, a, "Alpha Net")
+        concepts(repo, nb, b, "Beta Net")
+        rebuild(repo, nb)
+        group = canonical_of(repo, nb)
+        assert group["Alpha Net"] != group["Beta Net"], group
+        for number, (pair, statuses) in enumerate(_CONTRADICTIONS.items()):
+            for index, status in enumerate(reversed(statuses) if reverse else statuses):
+                decide_v2(repo, nb, f"mc-{reverse}-{number}-{index}", pair[0], pair[1], status)
+        with repo._connect() as db:
+            in_space = store.decided_seed_pairs_from(db, nb, seed_version=2)
+            every_space = store.decided_seed_pairs_from(db, nb, seed_version=None)
+            read_side = findings_view.decisions_from_candidates(
+                store.merge_candidate_states_for_seeds(
+                    db, nb, findings_view.DECIDED_CANDIDATE_STATUSES, seeds))
+        assert in_space == every_space == read_side == expected, (reverse, in_space)
+        assert repo._runtime.knowledge_governance.decided_seed_pairs(nb) == expected
+        rebuild(repo, nb, force=True)
+        group = canonical_of(repo, nb)
+        assert group["Alpha Net"] == group["Beta Net"], (reverse, group)
+
+
 SCENARIOS = {
+    "rejection_yields_to_confirmed_pair": (
+        assert_a_rejection_landing_on_a_confirmed_pair_yields_to_it),
+    "contradictory_rows_read_in_any_order": (
+        assert_contradictory_rows_of_one_pair_read_the_same_in_any_order),
     "copy_without_state_row_upgraded": (
         assert_the_upgrade_gives_a_copy_without_a_state_row_its_space),
     "v2_decisions_follow_moved_objects": (

@@ -398,6 +398,34 @@ def test_a_stored_confirmation_follows_the_objects_a_new_key_moves():
     assert plan.unresolved == 1
 
 
+def test_one_pair_keeps_its_strongest_decision_in_any_order():
+    """Codex #988 R3: several decisions naming one seed pair fold to one —
+    confirmed, then rejected, then deferred (any other status after them) —
+    whatever order they arrive in."""
+    from app.domain.kg_merge_seed import fold_decisions, stronger_decision
+
+    for first, second, kept in (("confirmed", "rejected", "confirmed"),
+                                ("rejected", "deferred", "rejected"),
+                                ("confirmed", "deferred", "confirmed"),
+                                ("deferred", "pending", "deferred")):
+        assert stronger_decision(first, second) == stronger_decision(second, first) == kept
+    pair = frozenset(("x", "y"))
+    assert (fold_decisions({pair: "rejected"}, {pair: "confirmed"})
+            == fold_decisions({pair: "confirmed"}, {pair: "rejected"})
+            == {pair: "confirmed"})
+
+
+def test_translated_rows_on_one_pair_fold_confirmed_first():
+    """Two v1 rows that contradict each other translate to the same pair: the
+    clustering's map keeps the confirmation, not the row translated last."""
+    plan = translate_v1_decisions(
+        _rows(("a b", "c", "confirmed"), ("a b", "c", "rejected")),
+        {"a b": {"ab"}, "c": {"c"}})
+    assert plan.decided_pairs() == {frozenset(("ab", "c")): "confirmed"}
+    assert plan.live_pairs(_rows(("a b", "c", "confirmed"), ("a b", "c", "rejected"))) == {
+        frozenset(("ab", "c")): "confirmed"}
+
+
 def test_moved_v2_decisions_are_rekeyed_onto_every_seed_their_objects_carry():
     plan = translate_v1_decisions(
         _rows(("q former", "qformer", "rejected")),

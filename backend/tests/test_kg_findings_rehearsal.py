@@ -902,7 +902,7 @@ def test_decisions_are_read_and_keyed_like_the_product_reader():
         {"canonical_a": "K-x", "canonical_b": "K-y", "seed_a": "x", "seed_b": "y",
          "status": "confirmed"},
         {"canonical_a": "K-x", "canonical_b": "K-y", "seed_a": "y", "seed_b": "x",
-         "status": "rejected"},                       # same pair, other orientation: last row wins
+         "status": "rejected"},     # same pair, other orientation: the confirmation holds
     ]
     seen: List[Tuple[str, Any]] = []
 
@@ -920,7 +920,13 @@ def test_decisions_are_read_and_keyed_like_the_product_reader():
               for r in rows]
     assert rehearsal.decisions_from_rows(tuples) == product
     assert product[frozenset(("old one", "old two"))] == "deferred"
-    assert product[frozenset(("x", "y"))] == "rejected"
+    # Codex #988 R3: contradicting rows of one pair read as the stronger status
+    # (confirmed, rejected, deferred), whatever the row order -- both readers.
+    assert product[frozenset(("x", "y"))] == "confirmed"
+    rows.reverse()
+    assert GovernanceStore.decided_seed_pairs_from(
+        _Connection(), NOTEBOOK, seed_version=None) == product
+    assert rehearsal.decisions_from_rows(reversed(tuples)) == product
 
 
 def test_member_seeds_are_the_decision_seeds_of_every_member_name():

@@ -82,6 +82,9 @@ LIFECYCLE_STORE_CALLS = {
         # S1 (design 2026-10-19 §五): the first v2 full rebuild persists the
         # recompute of the stored v1 decisions inside its pending refresh.
         "apply_v1_decision_translation",
+        # ... and keeps one effective decision per seed pair it wrote
+        # (confirmed first, kg_merge_seed.DECISION_STRENGTH).
+        "drop_superseded_decisions",
         # Rebuild must re-read live decisions inside the pending-publication
         # transaction so a decision committed after clustering cannot resurface.
         "decided_seed_pairs_from",
