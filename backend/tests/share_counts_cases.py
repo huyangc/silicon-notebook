@@ -393,6 +393,37 @@ def case_without_a_watermark_the_stored_one_is_counted_and_echoed(world: World) 
     assert explicit["watermark_id"] == "" and explicit["new_turns"] == 0
 
 
+def case_a_job_finishing_between_the_aggregate_and_the_windows_is_not_counted(world: World) -> None:
+    """Every window is bounded by the newest job the aggregate saw: a job that
+    finishes between the two reads neither enters a window nor turns the
+    answer into a refusal."""
+    from app.repositories.global_ask_store import GlobalAskStore
+
+    turns = 12
+    cid, _lost = _long_world(world, turns)
+    before = share_counts(world, cid).json()
+    original = GlobalAskStore._share_ranks
+    late: list[str] = []
+
+    def job_finishes_in_between(facts, asked, mark_id, mark_at):
+        result = original(facts, asked, mark_id, mark_at)
+        if not late:
+            late.append(f"{cid}-late")
+            bulk_jobs(world, cid, world.alice.id, [(late[0], instant(turns + 5), "done", job_payload(
+                late[0], "晚到的一问", resolved=[world.notebook],
+                anchors=imaged(["img-late"], notebook_id=world.notebook),
+            ))])
+        return result
+
+    world.monkeypatch.setattr(GlobalAskStore, "_share_ranks", staticmethod(job_finishes_in_between))
+    during = share_counts(world, cid)
+    assert during.status_code == 200, during.text
+    assert during.json() == before
+    world.monkeypatch.setattr(GlobalAskStore, "_share_ranks", staticmethod(original))
+    after = share_counts(world, cid).json()
+    assert after["total_turns"] == turns + 1 and after["through_id"] == late[0]
+
+
 # --- authority: the libraries of the turns the page shows ------------------------
 
 

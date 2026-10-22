@@ -333,6 +333,9 @@ test("撤销分享：DELETE 走同一条全局端点，界面回到未分享", a
   expect(await screen.findByText("已取消分享，原链接立即失效")).toBeInTheDocument();
   expect(await screen.findByRole("button", { name: /分享到这一条/ })).toBeInTheDocument();
   expect(new Set(sharePaths)).toEqual(new Set(["/global-ask/conversations/conv-a/share"]));
+  // 撤销之后「按下去会发布的内容」就地推出（与重新按空水位数的一模一样），不再问确数端点。
+  expect(countsPaths).toHaveLength(1);
+  expect(screen.queryByText("正在加载…")).toBeNull();
 });
 
 
