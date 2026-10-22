@@ -32,8 +32,20 @@
 -- published clusters of its source, built in space 2 once that source was
 -- rebuilt. A notebook without a state row reads as space 2 for the same reason.
 --
--- No backfill beyond the ADD COLUMN default, no index: the recompute reads one
--- notebook's decided rows through idx_candidates_nb_status (notebook_id, status).
+-- Except the notebooks that hold concept clusters but no state row -- a deep
+-- copy made before the upgrade and never written to since: their merge was
+-- built in space 1, so reading them as 2 would mint an incremental
+-- placement's new seeds next to the old ones. Each gets a state row first,
+-- before the column exists, so the ADD COLUMN default gives it 1; every other
+-- column takes its default (clean, generation 0, every sequence at its "never
+-- built" value, cluster_input_version ''), which every reader takes for a
+-- missing row, as for the rows 0067 inserted for copies. The insert reads
+-- information_schema so that it runs only while the column is still missing
+-- (a re-run of this file inserts nothing). Only concept clusters count.
+--
+-- No backfill beyond that and the ADD COLUMN default, no index: the recompute
+-- reads one notebook's decided rows through idx_candidates_nb_status
+-- (notebook_id, status).
 --
 -- Board partition (S2).
 --
@@ -51,8 +63,9 @@
 -- synced table: on a deployment with sync capture enabled the backfill logs
 -- one upsert per board, and the receiving side backfills the same value, so
 -- re-sending them is harmless (the ADD COLUMN defaults above fire no capture
--- trigger, and unified_kg_state is not touched row by row here, so unlike on
--- SQLite no state row is exported by this migration). No index: board_key is
+-- trigger, so unlike on SQLite the existing state rows are not exported by
+-- this migration; the state rows inserted for notebooks with concept clusters
+-- log one upsert each, on both backends). No index: board_key is
 -- only ever read through a notebook's published generation
 -- (communities(notebook_id, level)).
 --
@@ -64,6 +77,18 @@
 -- carry constant defaults and only touch the catalogue. Nothing came near the
 -- statement timeout.
 ALTER TABLE concept_merge_candidates ADD COLUMN IF NOT EXISTS seed_version bigint NOT NULL DEFAULT 1;
+
+INSERT INTO unified_kg_state (notebook_id, updated_at)
+SELECT n.id, now()
+FROM notebooks n
+WHERE NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'unified_kg_state'
+          AND column_name = 'concept_seed_version')
+  AND NOT EXISTS (SELECT 1 FROM unified_kg_state u WHERE u.notebook_id = n.id)
+  AND EXISTS (SELECT 1 FROM concept_clusters c
+              WHERE c.notebook_id = n.id AND c.object_type = 'concept');
 
 ALTER TABLE unified_kg_state ADD COLUMN IF NOT EXISTS concept_seed_version bigint NOT NULL DEFAULT 1;
 ALTER TABLE unified_kg_state ALTER COLUMN concept_seed_version SET DEFAULT 2;

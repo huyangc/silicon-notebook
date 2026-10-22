@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import sys
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Dict, List
 
 from app.models.schemas import NotebookCreate
@@ -134,6 +135,67 @@ def decide(repo, nb: str, row_id: str, a: str, b: str, status: str, *,
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
           (row_id, nb, "K-" + a, "K-" + b, a if seeds else "", b if seeds else "",
            0.9, status, "", NOW, NOW))
+
+
+def decide_v2(repo, nb: str, row_id: str, a: str, b: str, status: str) -> None:
+    """A decision a user made after the upgrade: keys ``a`` / ``b`` in seed
+    space 2, with a reviewer and a rationale (the provenance a re-key keeps)."""
+    write(repo, "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,"
+                "canonical_b,seed_a,seed_b,score,status,confidence,rationale,reviewed_by,"
+                "seed_version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          (row_id, nb, "K-" + a, "K-" + b, a, b, 0.9, status, 0.75, "one module",
+           "user-curator", 2, "2026-01-02T03:04:05", NOW))
+
+
+MIGRATION_0083 = (
+    Path(__file__).resolve().parents[1] / "app" / "repositories" / "postgres"
+    / "migrations" / "0083_kg_seed_space_and_board_partition.sql"
+)
+#: unified_kg_state's v102 / 0083 columns, last to first.
+_V102_STATE_COLUMNS = (
+    "community_partition_mode", "community_partition_version", "concept_seed_version",
+)
+
+
+def upgrade_the_seed_space_again(repo) -> None:
+    """Run the upgrade's seed-space step (SQLite v102 / PostgreSQL 0083) on
+    this database as the upgrade does: the step's ``unified_kg_state``
+    columns are dropped and the real migration runs again (SQLite: the
+    migrator from v101; PostgreSQL: the frozen 0083 file). The columns come
+    back in their original order, so a cached ``SELECT *`` keeps its shape."""
+    with repo._write() as db:
+        for column in _V102_STATE_COLUMNS:
+            db.execute(f"ALTER TABLE unified_kg_state DROP COLUMN {column}")
+        if is_postgres(repo):
+            db.execute(MIGRATION_0083.read_text(encoding="utf-8"), prepare=False)
+        else:
+            db.execute("PRAGMA user_version = 101")
+    if not is_postgres(repo):
+        assert repo._migrator.migrate() == [102]
+
+
+def what_a_library_reads_of_its_state(repo, nb: str) -> dict:
+    """Everything that judges whether a library is built and how fresh it is,
+    as the product reads it: the graph status, the board partition, the
+    analysis state, artifacts, board freshness and merge-code stamp, the
+    rebuild skip gate and the graph version keys."""
+    from dataclasses import asdict
+
+    lifecycle = repo._runtime.knowledge_lifecycle
+    overview = repo._runtime.kg_analysis.overview(nb)
+    with repo._connect() as db:
+        graph_seq = repo._runtime.unified_kg.graph_seq_row(db, nb)
+    return {
+        "status": repo.unified_kg_status(nb),
+        "partition": repo.community_partition_state(nb),
+        "analysis_state": asdict(overview.state),
+        "artifacts": [asdict(view) for view in overview.artifacts],
+        "boards": asdict(overview.boards.freshness),
+        "merge_code": asdict(overview.merge_code),
+        "skip": lifecycle._unified_rebuild_skip(
+            nb, lifecycle._cluster_input_version(nb), None),
+        "graph_seq": tuple(graph_seq),
+    }
 
 
 def decision_rows(repo, nb: str) -> List[tuple]:
@@ -706,7 +768,126 @@ def assert_a_v1_pending_row_settled_mid_rebuild_stays_out_of_the_queue(
     assert decision_rows(repo, nb) == [("llama3 1", "llama31", "rejected", 2)]
 
 
+def assert_the_upgrade_gives_a_copy_without_a_state_row_its_space(repo, monkeypatch) -> None:
+    """Codex #988 R2: a deep copy made before the upgrade and never written to
+    since carries its source's v1 clusters but no state row, and a missing row
+    reads as the code's space 2 — an upload of "Q-Former" would mint
+    ``K-qformer`` beside the copied ``K-q former``. The upgrade's seed-space
+    step gives such a notebook a clean state row in space 1, so the upload
+    lands in the existing canonical; everything that judges whether the copy
+    is built and how fresh it is reads exactly as before. A notebook without
+    concept clusters still gets no row."""
+    nb = notebook(repo, "s1")
+    concepts(repo, nb, "s1", "Q Former")
+    with legacy_code(monkeypatch):
+        rebuild(repo, nb)
+    copied = copy_of(repo, nb)
+    bare = notebook(repo)
+    for notebook_id in (copied, bare):       # what the code before the upgrade left
+        write(repo, "DELETE FROM unified_kg_state WHERE notebook_id=?", (notebook_id,))
+    assert canonical_of(repo, copied) == {"Q Former": "K-q former"}
+    assert space_read_by_placement(repo, copied) == 2
+    before = what_a_library_reads_of_its_state(repo, copied)
+
+    upgrade_the_seed_space_again(repo)
+    assert published_space(repo, copied) == 1
+    assert rows(repo, "SELECT 1 FROM unified_kg_state WHERE notebook_id=?", (bare,)) == []
+    assert what_a_library_reads_of_its_state(repo, copied) == before
+    fuse(repo, copied, "c-s2", "Q-Former")
+    assert canonical_of(repo, copied)["Q-Former"] == "K-q former"
+
+
+def assert_stored_new_rule_decisions_follow_the_objects_a_late_override_moves(
+    repo, monkeypatch,
+) -> None:
+    """Codex #988 R2: a rejection from before the upgrade ("Q-Former" is not
+    "Qformer") stays suspended while no "Q-Former" exists; under the new rule
+    the user confirms "Qformer" = "Perceiver" (seeds ``qformer`` /
+    ``perceiver``). "Q-Former" returns; its new-rule seed is ``qformer``,
+    so the confirmation covers it too. The next full merge translates the
+    rejection, which needs both keys on their old seeds — moving every
+    object off ``qformer``. The
+    confirmation follows its objects: re-keyed onto both ``~v1:`` seeds in
+    the pending refresh, provenance kept, so it still holds (before the fix
+    it named a seed no object carried and the three objects split). It now
+    joins the rejection's two sides, so it wins, as everywhere, and the
+    rejection counts as unresolved. A second full merge keeps the result."""
+    nb = notebook(repo, "s1", "s2")
+    concepts(repo, nb, "s1", "Qformer")
+    concepts(repo, nb, "s2", "Perceiver")
+    decide(repo, nb, "mc-old-rejected", "q former", "qformer", "rejected")
+    rebuild(repo, nb)
+    assert decision_rows(repo, nb) == [("q former", "qformer", "rejected", 1)]
+    decide_v2(repo, nb, "mc-new-confirmed", "qformer", "perceiver", "confirmed")
+    rebuild(repo, nb, force=True)
+    group = canonical_of(repo, nb)
+    assert group["Qformer"] == group["Perceiver"], group
+    fuse(repo, nb, "s3", "Q-Former")
+
+    events = capture_events(repo, monkeypatch)
+    rebuild(repo, nb)
+    group = canonical_of(repo, nb)
+    assert group["Qformer"] == group["Perceiver"], group        # the confirmation holds
+    assert group["Q-Former"] == group["Qformer"], group         # for all it applied to
+    assert decision_rows(repo, nb) == [
+        ("~v1:q former", "perceiver", "confirmed", 2),
+        ("~v1:q former", "~v1:qformer", "rejected", 2),
+        ("~v1:qformer", "perceiver", "confirmed", 2),
+    ]
+    kept = rows(repo, "SELECT seed_a, seed_b FROM concept_merge_candidates "
+                      "WHERE id='mc-new-confirmed'")
+    assert kept == [{"seed_a": "~v1:q former", "seed_b": "perceiver"}]
+    for r in rows(repo, "SELECT reviewed_by, confidence, rationale, created_at "
+                        "FROM concept_merge_candidates WHERE notebook_id=? "
+                        "AND status='confirmed'", (nb,)):
+        assert (r["reviewed_by"], float(r["confidence"]), r["rationale"]) == (
+            "user-curator", 0.75, "one module"), r
+        assert str(r["created_at"]).startswith("2026-01-02"), r
+    [event] = [e for e in events if e["kind"] == "kg_merge_decisions_recomputed"]
+    assert {k: event[k] for k in ("translated", "suspended", "decision_rows_added",
+                                  "override_keys", "unresolved", "v2_rows_moved")} == {
+        "translated": 1, "suspended": 0, "decision_rows_added": 1,
+        "override_keys": 2, "unresolved": 1, "v2_rows_moved": 1}
+    rebuild(repo, nb, force=True)
+    assert canonical_of(repo, nb) == group
+
+
+def assert_a_moved_v2_row_is_rekeyed_with_its_live_status(repo, monkeypatch) -> None:
+    """The store re-keys a v2 decision a new override key moved while its keys
+    are what the plan saw, whatever its status now (the move depends on the
+    keys alone: a row the user decided again, or settled from pending, while
+    the rebuild ran keeps its live status); a row whose keys changed is left
+    alone. Same provenance rules as the v1 translation."""
+    nb = notebook(repo)
+    decide_v2(repo, nb, "mc-v2", "qformer", "perceiver", "confirmed")
+    write(repo, "UPDATE concept_merge_candidates SET status='rejected' WHERE id='mc-v2'")
+    store = repo._runtime.governance
+    pairs = {"mc-v2": [("~v1:q former", "perceiver"), ("~v1:qformer", "perceiver")]}
+    with repo._write() as db:
+        grew, done = store.apply_v1_decision_translation(
+            db, nb, pairs, {"mc-v2": ("qformer", "other", None)}, NOW, seed_version=2)
+    assert (grew, done) == (0, [])
+    with repo._write() as db:
+        grew, done = store.apply_v1_decision_translation(
+            db, nb, pairs, {"mc-v2": ("qformer", "perceiver", None)}, NOW, seed_version=2)
+    assert (grew, done) == (1, ["mc-v2"])
+    assert decision_rows(repo, nb) == [
+        ("~v1:q former", "perceiver", "rejected", 2),
+        ("~v1:qformer", "perceiver", "rejected", 2),
+    ]
+    for r in rows(repo, "SELECT reviewed_by, confidence, rationale, created_at "
+                        "FROM concept_merge_candidates WHERE notebook_id=?", (nb,)):
+        assert (r["reviewed_by"], float(r["confidence"]), r["rationale"]) == (
+            "user-curator", 0.75, "one module"), r
+        assert str(r["created_at"]).startswith("2026-01-02"), r
+
+
 SCENARIOS = {
+    "copy_without_state_row_upgraded": (
+        assert_the_upgrade_gives_a_copy_without_a_state_row_its_space),
+    "v2_decisions_follow_moved_objects": (
+        assert_stored_new_rule_decisions_follow_the_objects_a_late_override_moves),
+    "moved_v2_row_rekeyed_live": assert_a_moved_v2_row_is_rekeyed_with_its_live_status,
     "published_space_switches": assert_the_published_space_switches_with_the_rebuild,
     "v1_pending_settled_mid_rebuild": (
         assert_a_v1_pending_row_settled_mid_rebuild_stays_out_of_the_queue),

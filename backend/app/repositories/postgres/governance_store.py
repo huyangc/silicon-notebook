@@ -1089,7 +1089,7 @@ class GovernanceStore:
     ) -> None:
         """The pending refresh's delete, one statement: lock every pending row
         of the notebook AND ``lock_ids`` (the v1 decision rows the refresh
-        then translates) in ``id COLLATE "C"`` order — the order
+        then translates, and the v2 ones it re-keys) in ``id COLLATE "C"`` order — the order
         ``set_merge_decision`` locks a displayed pair's rows (legacy duplicates
         included) — then delete the pending ones. Locking the pending rows by
         the DELETE and the decision rows later would take them in the opposite
@@ -1189,14 +1189,21 @@ class GovernanceStore:
         connection: Any,
         notebook_id: str,
         pairs: Dict[str, List[Tuple[str, str]]],
-        expected: Dict[str, Tuple[str, str, str]],
+        expected: Dict[str, Tuple[str, str, Optional[str]]],
         now: str,
+        *,
+        seed_version: int = 1,
     ) -> Tuple[int, List[str]]:
         """Persist the recompute of v1 decisions into seed space 2 in the
         caller's pending-refresh transaction (see the SQLite twin). The rows
         are read ``FOR UPDATE`` in id order, so a concurrent decision on one
         of them waits for this transaction and the plan's check (same keys,
-        same status) sees what is committed."""
+        same status; a ``None`` status is not checked) sees what is
+        committed. ``seed_version=2`` re-keys the stored v2 decisions a new
+        override key moved by the same rules (see the SQLite twin); the
+        refresh has already locked them with the pending rows
+        (``delete_pending_merges``' ``lock_ids``)."""
+        version = check_concept_seed_version(seed_version)
         ids = sorted(pairs)
         found: Dict[str, Any] = {}
         for at in range(0, len(ids), _TRANSLATION_BATCH):
@@ -1204,10 +1211,10 @@ class GovernanceStore:
             for r in connection.execute(
                 "SELECT id, canonical_a, canonical_b, seed_a, seed_b, status, score, "
                 "confidence, rationale, reviewed_by, created_at "
-                "FROM concept_merge_candidates WHERE notebook_id=%s AND seed_version=1 "
+                "FROM concept_merge_candidates WHERE notebook_id=%s AND seed_version=%s "
                 "AND status IN ('confirmed','rejected','deferred') "
                 "AND id = ANY(%s) ORDER BY id FOR UPDATE",
-                (notebook_id, batch),
+                (notebook_id, version, batch),
             ).fetchall():
                 found[r["id"]] = r
         grew = 0
@@ -1220,7 +1227,9 @@ class GovernanceStore:
             if r is None:
                 continue
             row = _decision_row(r)
-            if (row["key_a"], row["key_b"], row["status"]) != tuple(expected[row_id]):
+            key_a, key_b, status = expected[row_id]
+            if (row["key_a"], row["key_b"]) != (key_a, key_b) or (
+                    status is not None and row["status"] != status):
                 continue
             first, rest = pairs[row_id][0], pairs[row_id][1:]
             updates.append((first[0], first[1], "K-" + first[0], "K-" + first[1], now_ts,

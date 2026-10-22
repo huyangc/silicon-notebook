@@ -682,7 +682,10 @@ re-merged in full by its next "update analysis" or rebuild, and then:
   `translated` rows recomputed, `suspended` rows left as they are because no current object carries a
   side, `decision_rows_added` decision rows added, `override_keys` keys kept on their old seed
   (`~v1:<old seed>`) because a rejection would otherwise collapse onto one new seed, `unresolved`
-  rejections that conflict with a confirmation (the confirmation wins). Suspended rows stay in the old
+  rejections that conflict with a confirmation (the confirmation wins), `v2_rows_moved` decisions
+  already stored under the new rule that were re-keyed because a key kept on its old seed in this merge
+  moved their objects (a decision follows its objects; when it then joins the two sides of a rejection,
+  the confirmation wins and the rejection counts as `unresolved`). Suspended rows stay in the old
   space and are retried by every later full merge;
 - until then the KG analysis panel says "merge rules updated, update once", and the "needs
   development" S1 item says "fixed, applied by the next update analysis".
@@ -693,7 +696,8 @@ publishes is placed again under the new rule — and likewise when a later full 
 rule keeps one more old seed apart (a rejection translated late), since that changes the ids too. So one library never mixes the two id forms. A library
 created after the upgrade uses the new rule from the start. A deep copy keeps the rule of its source's
 published merge; a copy of a source that was waiting for a rebuild carries no merge and places under
-the new rule.
+the new rule. A library imported with `scripts/merge_dbs.py` keeps the rule of its source's published
+merge as well.
 
 **Mixed cross-library period.** Graph retrieval and federated reasoning treat the same canonical id in
 the active library and a reference library as one hub. While one of them has switched and the other
@@ -708,24 +712,25 @@ PYTHONPATH=backend python -m app.scripts.recluster_kg <notebook_id> --confirm-se
 
 and let active libraries switch on their next "update analysis".
 
-**Two kinds of library to update once by hand.** A library that has a merge but no state row places
-under the new rule: a deep copy made before the upgrade and never written to since, and a library
-merged in with `scripts/merge_dbs.py`. If its merge was built under the old rule, new multi-word
-concepts land apart from its existing merged knowledge objects until it is re-merged in full. The third
-query below lists them; one "update analysis" each is enough.
+**Libraries without a state row.** A deep copy made before the upgrade and never written to since holds
+a merge built under the old rule but no `unified_kg_state` row, which would read as the new rule. The
+migration gives each such library (one holding concept clusters) a state row on the old rule (1), every
+other column at its default — not dirty, never rebuilt, so it reads exactly as before for "already
+built" and freshness — and it converges like every other library on its next "update analysis".
+`scripts/merge_dbs.py` likewise gives each imported library that keeps concept clusters a state row
+carrying the rule of its source's published merge.
 
 **Progress queries** (both backends):
 
 ```sql
--- libraries still on the old rule that hold a merge
-SELECT notebook_id FROM unified_kg_state WHERE concept_seed_version = 1 AND cluster_count > 0;
+-- libraries still on the old rule that hold a merge (a migrated copy's state row has cluster_count 0)
+SELECT u.notebook_id FROM unified_kg_state u
+WHERE u.concept_seed_version = 1
+  AND EXISTS (SELECT 1 FROM concept_clusters c
+              WHERE c.notebook_id = u.notebook_id AND c.object_type = 'concept');
 -- a library's decisions not recomputed yet (suspended)
 SELECT count(*) FROM concept_merge_candidates
 WHERE notebook_id = '<id>' AND seed_version = 1 AND status IN ('confirmed','rejected','deferred');
--- libraries with a merge but no state row
-SELECT DISTINCT c.notebook_id FROM concept_clusters c
-WHERE c.object_type = 'concept'
-  AND NOT EXISTS (SELECT 1 FROM unified_kg_state u WHERE u.notebook_id = c.notebook_id);
 ```
 
 **Measured** (nb-b37185f4ae on a local PostgreSQL copy: 9,400 concept objects, 1,880 stored merge
@@ -749,10 +754,11 @@ spelling-variant tier) stays under 1 s; the claim stage's generation write is st
 refresh writes; hitting it emits `kg_merge_squash_candidates_capped` and keeps the groups with the most
 members.
 
-Deployments with change capture on (`sync capture`): migration v102 / 0083 backfills two columns, and
-each backfill logs one change per row it sets -- on SQLite every existing state row (its concept seed
-space set to 1; the PostgreSQL column default fires no capture), and on both backends every existing
-topic board (`communities.board_key` set to the board's id). The next export re-sends those rows and the
+Deployments with change capture on (`sync capture`): migration v102 / 0083 backfills two columns and
+the missing state rows, and each backfill logs one change per row it writes -- on SQLite every existing
+state row (its concept seed space set to 1; the PostgreSQL column default fires no capture), on both
+backends every state row it inserts for a library holding a merge without one, and on both backends
+every existing topic board (`communities.board_key` set to the board's id). The next export re-sends those rows and the
 receiving side backfills the same values, so no content changes, but the import is not free: importing a
 `unified_kg_state` row always advances that notebook's `kg_mutation_seq` on the target (the import's rule
 for every state row, so a cached graph can never match a version it was not built from). Every notebook
@@ -912,8 +918,9 @@ algorithm's partition, so the next rebuild with igraph starts cold rather than w
   `--cold-partition` request, or a networkx fallback (`community_partition_mode = 'cold_fallback'`).
   Boards still in generation 0 (built before the batch-3 generational swap) are included; notebooks
   whose knowledge graph was deleted or whose indexing pipeline was republished have no boards and
-  are not. A notebook imported by `merge_dbs` has no state row and is not listed either: its next
-  rebuild starts cold because there is no version to match.
+  are not. A notebook imported by `merge_dbs` is listed when it keeps concept clusters (the import
+  gives it a clean state row, partition version 0); without them it has no state row and is not listed
+  either: its next rebuild starts cold because there is no version to match.
 
 ```sql
 SELECT u.notebook_id, u.community_partition_mode FROM unified_kg_state u
@@ -3428,7 +3435,7 @@ Preconditions: each side must have exactly one `tier='base'` public knowledge ba
 
 Edges on the non-surviving base notebook are dropped with everything else that notebook owns, exactly like its mounts, sources and knowledge objects — the same caveat as the paragraph above. After merging, review each library's sharing list: any edge that survived but points at a group whose membership came from the other side should be re-confirmed.
 
-**Graph state and graph-analysis artifacts of imported notebooks are reset:** for every notebook carried over from the secondary side, its graph build state and the precomputed artifacts behind the "Graph analysis" report are not preserved (the former is cleared after import, the latter is never imported). Both are derived data, and the version stamps they carry are only meaningful inside the database they were computed in — keeping them would make the analysis report compare the source database's stamp against the merged database's current state and raise a "this figure is newer than the current content" alarm that should never occur. Reset, those reports honestly read "never computed", and the rebuild below recomputes them along with the topic boards.
+**Graph state and graph-analysis artifacts of imported notebooks are reset:** for every notebook carried over from the secondary side, its graph build state and the precomputed artifacts behind the "Graph analysis" report are not preserved (the former is cleared after import, the latter is never imported). Both are derived data, and the version stamps they carry are only meaningful inside the database they were computed in — keeping them would make the analysis report compare the source database's stamp against the merged database's current state and raise a "this figure is newer than the current content" alarm that should never occur. Reset, those reports honestly read "never computed", and the rebuild below recomputes them along with the topic boards. One thing travels with the merge itself: a notebook that keeps concept clusters gets a state row carrying only the concept merge rule its source's published merge was built under (`concept_seed_version`, every other column at its default, so it still reads as never built), so new uploads land in its existing merged knowledge objects until that rebuild.
 
 After merging, deploy the `merged/` output (db + storage) to whichever host keeps running, and on first start trigger an index rebuild in the app ("Rebuild index" / "Refresh graph") to regenerate the `kg_index`/`kg_viz`/ANN artifacts, which are intentionally not copied.
 

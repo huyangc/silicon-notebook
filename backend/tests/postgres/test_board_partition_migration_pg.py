@@ -110,3 +110,57 @@ def test_0083_adds_the_columns_and_backfills_every_generation(postgres_database)
     with postgres_database.connect() as db:
         assert _keys(db) == {"cm-a": "cm-a", "cm-b": "cm-b", "cm-c": "bk-kept"}
         assert _seed_spaces(db) == {NB: 2, NB_AFTER: 2}
+
+
+def test_0083_gives_a_copy_without_a_state_row_one_in_seed_space_1(postgres_database):
+    """Codex #988 R2 (SQLite twin: ``test_v102_gives_a_copy_without_a_state_row_
+    one_in_seed_space_1``): a deep copy made before the upgrade holds concept
+    clusters built in seed space 1 but no state row, which reads as space 2.
+    0083 gives it a state row in space 1, every other column its default;
+    claim clusters alone, or none, get no row. The insert runs only while the
+    column is missing: a re-run of the frozen SQL inserts nothing (a notebook
+    in the same shape since then reads as the code's space). The migrator
+    applies the file and its ledger row in one transaction. Mutation anchor:
+    drop the INSERT and ``nb-copy`` has no row."""
+    migrator = PostgresMigrator(postgres_database)
+    assert migrator.migrate(target_version=82) == 82
+
+    def clustered(db, notebook_id, cluster_id, object_type):
+        db.execute("INSERT INTO notebooks (id, name, created_at, updated_at) "
+                   "VALUES (%s, 'n', %s, %s)", (notebook_id, NOW, NOW))
+        if cluster_id:
+            db.execute(
+                "INSERT INTO concept_clusters (id, notebook_id, canonical_id, "
+                "member_object_id, canonical_name, object_type, created_at) "
+                "VALUES (%s, %s, 'K-q former', 'ko-1', 'Q Former', %s, %s)",
+                (cluster_id, notebook_id, object_type, NOW))
+
+    with postgres_database.write() as db:
+        clustered(db, "nb-copy", "cc-1", "concept")
+        clustered(db, "nb-claims", "cc-2", "claim")
+        clustered(db, "nb-bare", "", "")
+    assert migrator.migrate() == 83
+    with postgres_database.write() as db:
+        clustered(db, "nb-ref", "", "")
+        db.execute("INSERT INTO unified_kg_state (notebook_id, updated_at) "
+                   "VALUES ('nb-ref', %s)", (NOW,))
+        clustered(db, "nb-late", "cc-3", "concept")
+    with postgres_database.connect() as db:
+        state = {r["notebook_id"]: dict(r) for r in db.execute(
+            "SELECT * FROM unified_kg_state")}
+    assert set(state) == {"nb-copy", "nb-ref"}
+    assert (state["nb-copy"]["concept_seed_version"],
+            state["nb-ref"]["concept_seed_version"]) == (1, 2)
+
+    def rest(row):
+        return {k: v for k, v in row.items()
+                if k not in ("notebook_id", "updated_at", "concept_seed_version")}
+
+    assert rest(state["nb-copy"]) == rest(state["nb-ref"])
+    assert state["nb-copy"]["last_rebuild_at"] is None
+
+    with postgres_database.write() as db:
+        db.execute(MIGRATION.read_text(encoding="utf-8"), prepare=False)
+    with postgres_database.connect() as db:
+        assert {r["notebook_id"] for r in db.execute(
+            "SELECT notebook_id FROM unified_kg_state")} == {"nb-copy", "nb-ref"}

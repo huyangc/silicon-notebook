@@ -345,12 +345,14 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # PR-4 of the KG analysis findings design: the concept seed space
 # (concept_merge_candidates.seed_version, INTEGER NOT NULL DEFAULT 1, and
 # unified_kg_state.concept_seed_version, NOT NULL, every existing row 1 and
-# DEFAULT 2 for rows created afterwards) and the board partition
+# DEFAULT 2 for rows created afterwards; a notebook with concept clusters but
+# no state row gets a clean one in space 1) and the board partition
 # (unified_kg_state.community_partition_version INTEGER NOT NULL DEFAULT 0 and
 # community_partition_mode TEXT NOT NULL DEFAULT '', communities.board_key TEXT
-# NOT NULL DEFAULT '' backfilled to the row's own id). Stored decisions are not
-# rewritten here (each library's first full rebuild in seed space 2 recomputes
-# its v1 decisions). See ``_migration_102``.
+# NOT NULL DEFAULT '' backfilled to the row's own id), all in one BEGIN
+# IMMEDIATE transaction with its stamp. Stored decisions are not rewritten
+# here (each library's first full rebuild in seed space 2 recomputes its v1
+# decisions). See ``_migration_102``.
 SCHEMA_VERSION = 102
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
@@ -6188,6 +6190,20 @@ class SqliteMigrator:
         that exist are set to 1 in the same transaction (only when the column
         is new, so a rerun never touches a row written since).
 
+        A notebook with concept clusters but no state row -- a deep copy made
+        before the upgrade and never written to since -- carries a merge
+        built in space 1, yet a missing row reads as the code's space 2, so
+        an incremental placement would mint the new seeds next to its old
+        ones. It gets a state row in space 1, every other column its default
+        (``dirty`` 0, generation 0, every sequence at its "never built"
+        value, ``cluster_input_version`` ''), which every reader takes for a
+        missing row: the copy reads neither as built nor as fresher than it
+        was (the precedent of v87's rows for copies, and the clean row a deep
+        copy of a space-1 library gets now, ``sharing_store._COPY_SEED_SPACE``).
+        The insert runs only when the column is new, right after the UPDATE
+        of the rows that exist. Only ``concept`` clusters count: the seed
+        space is a concept rule.
+
         Board partition (S2). ``unified_kg_state.community_partition_version``
         is the ``kg_partition.PARTITION_ALGO_VERSION`` the published board
         partition was built with, and ``community_partition_mode`` how
@@ -6199,17 +6215,26 @@ class SqliteMigrator:
         (``communities.id`` is re-minted every generation). Existing rows are
         backfilled to their own id, so the first partition built by the new
         algorithm can carry a matching board's key forward. The UPDATE only
-        touches rows still at the default, so a re-run after an interruption
-        between the ALTER and the UPDATE finishes the job.
+        touches rows still at the default.
+
+        One transaction. Python's sqlite3 opens no transaction before DDL, so
+        without an explicit one an interruption after an ALTER would commit
+        the new column at its default (``concept_seed_version`` 2 on every
+        existing row, ``board_key`` '') and the retry would see the column
+        and skip the backfill for good. The whole step -- every ALTER, both
+        UPDATEs, the state-row insert and the ``user_version`` stamp -- is
+        one ``BEGIN IMMEDIATE`` transaction (the shape of v87 / v92), so an
+        interruption leaves v101 and the retry starts over.
 
         Change capture. No capture trigger names a non-key column (the change
         log records row keys only; ``unified_kg_state`` and ``communities``
         are SYNCED, ``concept_merge_candidates`` is LOCAL), so no trigger
         changes. With
-        change capture switched on, the two backfill UPDATEs log upserts: one
-        key-only upsert per existing state row for the seed space (SQLite
-        only: PostgreSQL's ADD COLUMN default fires no trigger) and one per
-        board for ``board_key`` (both backends). The next export re-sends
+        change capture switched on, the backfills log upserts: one key-only
+        upsert per existing state row for the seed space (SQLite only:
+        PostgreSQL's ADD COLUMN default fires no trigger), one per state row
+        inserted for a notebook with concept clusters (both backends), and
+        one per board for ``board_key`` (both backends). The next export re-sends
         those rows and the receiving side backfills the same values, so no
         content changes; but the import advances ``kg_mutation_seq`` of
         every ``unified_kg_state`` row it receives (``sync/import_.py``,
@@ -6221,7 +6246,8 @@ class SqliteMigrator:
         next), so a capture-on deployment gets one additional, earlier round
         of the same effect per notebook.
         """
-        with self._connect() as db:
+        with self.database.write(operation="sqlite.migration.102") as db:
+            self.database.begin_immediate(db)
             self.add_column_if_missing(
                 db, "concept_merge_candidates", "seed_version",
                 "INTEGER NOT NULL DEFAULT 1",
@@ -6232,6 +6258,15 @@ class SqliteMigrator:
                 db.execute("ALTER TABLE unified_kg_state ADD COLUMN "
                            "concept_seed_version INTEGER NOT NULL DEFAULT 2")
                 db.execute("UPDATE unified_kg_state SET concept_seed_version = 1")
+                db.execute(
+                    "INSERT INTO unified_kg_state "
+                    "(notebook_id, concept_seed_version, updated_at) "
+                    "SELECT n.id, 1, ? FROM notebooks n "
+                    "WHERE NOT EXISTS (SELECT 1 FROM unified_kg_state u "
+                    "WHERE u.notebook_id = n.id) "
+                    "AND EXISTS (SELECT 1 FROM concept_clusters c "
+                    "WHERE c.notebook_id = n.id AND c.object_type = 'concept')",
+                    (_now(),))
             self.add_column_if_missing(
                 db, "unified_kg_state", "community_partition_version",
                 "INTEGER NOT NULL DEFAULT 0")
@@ -6241,6 +6276,7 @@ class SqliteMigrator:
             self.add_column_if_missing(
                 db, "communities", "board_key", "TEXT NOT NULL DEFAULT ''")
             db.execute("UPDATE communities SET board_key = id WHERE board_key = ''")
+            db.execute("PRAGMA user_version = 102")
 
     def migrate(self) -> list[int]:
         with self._connect() as db:
@@ -6264,11 +6300,11 @@ class SqliteMigrator:
         applied: list[int] = []
         for version in range(current + 1, SCHEMA_VERSION + 1):
             getattr(self, f"_migration_{version}")()
-            # v25, v78, v87, v88, v89 and v92 stamp themselves inside the same
-            # BEGIN IMMEDIATE transaction as their irreversible data/schema
-            # changes. Preserve the existing migration/stamp behavior
-            # byte-for-byte for all other versions.
-            if version not in {25, 78, 87, 88, 89, 92}:
+            # v25, v78, v87, v88, v89, v92 and v102 stamp themselves inside
+            # the same BEGIN IMMEDIATE transaction as their irreversible
+            # data/schema changes. Preserve the existing migration/stamp
+            # behavior byte-for-byte for all other versions.
+            if version not in {25, 78, 87, 88, 89, 92, 102}:
                 with self._connect() as db:
                     db.execute(f"PRAGMA user_version = {version}")
             applied.append(version)

@@ -382,6 +382,64 @@ def test_when_both_keys_are_overridden_the_component_keys_follow():
     assert plan.unresolved == 1
 
 
+def test_a_stored_confirmation_follows_the_objects_a_new_key_moves():
+    """Codex #988 R2: the suspended rejection (q former, qformer) becomes
+    translatable and both keys keep their old seeds — every object leaves
+    ``qformer``, which a stored v2 confirmation names. The check moves the
+    confirmation with them, so it still joins the rejection's two sides:
+    confirmed wins and the rejection is reported, not silently honoured by
+    dropping the confirmation."""
+    plan = translate_v1_decisions(
+        _rows(("q former", "qformer", "rejected")),
+        {"q former": {"qformer"}, "qformer": {"qformer"}},
+        v2_confirmed=[frozenset(("qformer", "perceiver"))])
+    assert plan.override == {"q former", "qformer"}
+    assert plan.base_override == frozenset()
+    assert plan.unresolved == 1
+
+
+def test_moved_v2_decisions_are_rekeyed_onto_every_seed_their_objects_carry():
+    plan = translate_v1_decisions(
+        _rows(("q former", "qformer", "rejected")),
+        {"q former": {"qformer"}, "qformer": {"qformer"}})
+    decided = {frozenset(("qformer", "perceiver")): "confirmed",
+               frozenset(("blip", "perceiver")): "rejected"}
+    v2_rows = [StoredDecision("mc-a", "qformer", "perceiver", "confirmed"),
+               StoredDecision("mc-b", "blip", "perceiver", "rejected"),
+               StoredDecision("mc-c", "perceiver", "qformer", "pending")]
+    moved = plan.move_v2_decisions(decided, v2_rows, carried={"perceiver", "blip"})
+    assert moved == {
+        frozenset(("~v1:q former", "perceiver")): "confirmed",
+        frozenset(("~v1:qformer", "perceiver")): "confirmed",
+        frozenset(("blip", "perceiver")): "rejected",
+    }
+    assert plan.moved_rows == {
+        "mc-a": [("~v1:q former", "perceiver"), ("~v1:qformer", "perceiver")],
+        "mc-c": [("perceiver", "~v1:q former"), ("perceiver", "~v1:qformer")],
+    }
+    assert plan.moved_keys == {"mc-a": ("qformer", "perceiver"),
+                               "mc-c": ("perceiver", "qformer")}
+    # An object the move left on the old seed keeps the old pair as well.
+    again = translate_v1_decisions(
+        _rows(("q former", "qformer", "rejected")),
+        {"q former": {"qformer"}, "qformer": {"qformer"}})
+    assert again.move_v2_decisions(
+        decided, v2_rows[:1], carried={"qformer", "perceiver"},
+    )[frozenset(("qformer", "perceiver"))] == "confirmed"
+    assert again.moved_rows["mc-a"] == [
+        ("qformer", "perceiver"), ("~v1:q former", "perceiver"), ("~v1:qformer", "perceiver")]
+
+
+def test_nothing_moves_when_the_override_did_not_grow():
+    plan = translate_v1_decisions(
+        _rows(("x", "y", "rejected")), {"x": {"x2"}, "y": {"y2"}}, override={"q former"})
+    decided = {frozenset(("~v1:q former", "perceiver")): "confirmed"}
+    assert plan.move_v2_decisions(
+        decided, [StoredDecision("mc-a", "~v1:q former", "perceiver", "confirmed")],
+        carried=set()) == decided
+    assert plan.moved_rows == {} and plan.moved_keys == {}
+
+
 def test_a_rejection_already_contradicted_in_space_1_is_left_alone():
     plan = translate_v1_decisions(
         _rows(("a", "b", "confirmed"), ("a", "b", "rejected")),

@@ -262,7 +262,9 @@ def test_rebuild_pass_sets_the_marker_through_the_ordinary_slot(
     # columns and board keys, so the code under test needs them; none of their
     # DDL touches what 0067 left (0079 empties only the transient scratch table,
     # which a rebuild repopulates per run; 0083 adds columns and fills
-    # defaults, its board_key backfill names only rows still at ''). 0082
+    # defaults, its board_key backfill names only rows still at '', and its
+    # state-row insert names only a notebook with concept clusters and no state
+    # row, which 0067 has already given every such notebook). 0082
     # (chunks.navigation, sources.navigation_scanned_at,
     # sources.navigation_version) only adds three defaulted columns that this
     # build's chunk writers name. (The SQLite twin rolls back v87 alone, so its

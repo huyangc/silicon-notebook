@@ -404,9 +404,14 @@ def check_placement_seed_space(
 def published_concept_seed_version(state_row) -> int:
     """The concept seed space of a library's published merge, read off its
     ``unified_kg_state`` row. ``None`` — no row: a notebook that never wrote a
-    graph, a deep copy (which carries its source's published clusters) — reads
-    as ``CONCEPT_SEED_VERSION``, the column's default for every row created
-    after the upgrade; only the rows that existed before it hold 1."""
+    graph, a deep copy or a ``merge_dbs`` import of a library whose merge is
+    in this space — reads as ``CONCEPT_SEED_VERSION``, the column's default
+    for every row created after the upgrade. A notebook holding clusters
+    built in space 1 always has a row saying so: the rows that existed at the
+    upgrade, the clean row SQLite v102 / PostgreSQL 0083 inserted for each
+    notebook with concept clusters and no row (a copy made before it), and
+    the row a copy (``_COPY_SEED_SPACE``) or a ``merge_dbs`` import of such a
+    library gets."""
     if state_row is None:
         return CONCEPT_SEED_VERSION
     return check_concept_seed_version(int(state_row["concept_seed_version"]))

@@ -13,8 +13,8 @@ import logging
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import (
-    Callable, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set,
-    Tuple,
+    Callable, Container, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence,
+    Set, Tuple,
 )
 
 import numpy as np
@@ -927,7 +927,12 @@ class DecisionTranslation:
     — only a confirmed decision can do that, and confirmed stays authoritative
     as everywhere in ``cluster_seeds``. ``seeds_of_key``: the stream's map
     (v1 key → the seeds of the current objects carrying it), kept for
-    ``live_pairs``."""
+    ``live_pairs``. ``base_override``: the override the stream started
+    with (read off the stored v2 decisions); the keys ``override`` adds to
+    it move their objects off the v2 seeds the stored v2 decisions name —
+    ``move_v2_decisions`` re-keys those decisions: ``moved_rows`` (v2 row
+    id → its pairs after the move) and ``moved_keys`` (its keys when the
+    plan was made; the store re-keys a row only while they still hold)."""
 
     pairs: Dict[str, List[Tuple[str, str]]] = field(default_factory=dict)
     rows: Dict[str, StoredDecision] = field(default_factory=dict)
@@ -935,6 +940,9 @@ class DecisionTranslation:
     override: FrozenSet[str] = frozenset()
     unresolved: int = 0
     seeds_of_key: Dict[str, Set[str]] = field(default_factory=dict)
+    base_override: FrozenSet[str] = frozenset()
+    moved_rows: Dict[str, List[Tuple[str, str]]] = field(default_factory=dict)
+    moved_keys: Dict[str, Tuple[str, str]] = field(default_factory=dict)
 
     @property
     def recomputed_any(self) -> bool:
@@ -971,6 +979,76 @@ class DecisionTranslation:
             for a, b in self.pairs[row_id]:
                 out[frozenset((a, b))] = status
         return out
+
+    def move_v2_decisions(
+        self, decided: Mapping[FrozenSet[str], str], rows: Iterable[StoredDecision],
+        carried: Container[str],
+    ) -> Dict[FrozenSet[str], str]:
+        """Re-key the stored v2 decisions onto the seeds their objects carry
+        once the keys this rebuild added to the override moved them
+        (``~v1:<key>``). A v2 decision names a seed, and a seed decision
+        applies to the objects carrying that seed now: when a new override
+        key moves some of them to ``~v1:<key>``, the decision follows them —
+        one pair per seed the moved and the remaining objects carry (the
+        old seed stays only while ``carried``, the final stream's seeds,
+        still holds it). Without this the decision would name a seed no
+        object carries and silently stop applying (a confirmation lost, a
+        rejection lifted).
+
+        ``decided``: the stored v2 decisions the clustering reads, returned
+        re-keyed. ``rows``: the same rows with their ids (pending ones
+        included, so a row a human settles while the rebuild runs is
+        re-keyed too) — recorded in ``moved_rows`` / ``moved_keys`` for the
+        pending refresh to persist."""
+        moved = _moved_by_seed(self.seeds_of_key, self.base_override, self.override)
+        if not moved:
+            return dict(decided)
+        for r in rows:
+            if r.key_a in moved or r.key_b in moved:
+                self.moved_rows[r.row_id] = _row_pairs(
+                    _moved_side(r.key_a, moved, carried), _moved_side(r.key_b, moved, carried))
+                self.moved_keys[r.row_id] = (r.key_a, r.key_b)
+        out: Dict[FrozenSet[str], str] = {}
+        for pair, status in decided.items():
+            a, b = sorted(pair) if len(pair) == 2 else (next(iter(pair)),) * 2
+            if a not in moved and b not in moved:
+                out[pair] = status
+                continue
+            for x, y in _row_pairs(_moved_side(a, moved, carried),
+                                   _moved_side(b, moved, carried)):
+                out[frozenset((x, y))] = status
+        return out
+
+
+class _Everything:
+    """``carried`` for the recompute's own check: every seed counts as still
+    carried (see ``translate_v1_decisions``)."""
+
+    def __contains__(self, _seed: object) -> bool:
+        return True
+
+
+_EVERYTHING = _Everything()
+
+
+def _moved_by_seed(
+    seeds_of_key: Mapping[str, Set[str]], base: FrozenSet[str], over: FrozenSet[str],
+) -> Dict[str, Set[str]]:
+    """v2 seed → the ``~v1:<key>`` seeds its objects move to, for the keys
+    ``over`` adds to ``base`` (``seeds_of_key`` was recorded under ``base``,
+    so a new key's seeds are the plain v2 seeds its objects carried)."""
+    out: Dict[str, Set[str]] = {}
+    for key in sorted(over - base):
+        for seed in seeds_of_key.get(key) or ():
+            out.setdefault(seed, set()).add(OVERRIDE_SEED_PREFIX + key)
+    return out
+
+
+def _moved_side(seed: str, moved: Mapping[str, Set[str]], carried: Container[str]) -> Set[str]:
+    new = moved.get(seed)
+    if not new:
+        return {seed}
+    return set(new) | ({seed} if seed in carried else set())
 
 
 def override_keys(decided: Iterable[FrozenSet[str]]) -> FrozenSet[str]:
@@ -1032,7 +1110,17 @@ def translate_v1_decisions(
     ``~v1:<key>``); when both already did, every key whose seeds sit in the
     collapsed component joins. Repeat until no violation; the override only
     grows, and with every key overridden the v2 components restricted to the
-    keys are the v1 ones, so it terminates."""
+    keys are the v1 ones, so it terminates.
+
+    ``v2_confirmed`` follows the keys the loop adds to ``override``: a key
+    that joins moves its objects off the v2 seeds the stored confirmations
+    name, and a confirmation follows them (``DecisionTranslation.
+    move_v2_decisions``) — so one that still joins a rejection's two sides
+    after the move is reported as ``unresolved`` (confirmed wins) instead of
+    vanishing. The check keeps every old seed in the moved pairs (it cannot
+    know yet which ones the final stream still carries); an old seed is on
+    a rejection's side only while an object the move left alone carries
+    it, so the components the check compares are the same."""
     rows = [r for r in rows if r.status in DECIDED_MERGE_STATUSES]
     v2_confirmed = [tuple(p) for p in v2_confirmed if len(p) == 2]
     v1_uf = _UF({k for r in rows for k in (r.key_a, r.key_b)})
@@ -1040,20 +1128,26 @@ def translate_v1_decisions(
         if r.status == "confirmed":
             v1_uf.union(r.key_a, r.key_b)
     keys = sorted({k for r in rows for k in (r.key_a, r.key_b) if seeds_of_key.get(k)})
-    over = frozenset(override)
+    base = over = frozenset(override)
     unresolved = 0
     while True:
         sides = {k: _translated_seeds(k, seeds_of_key, over) for k in keys}
         live = [r for r in rows if sides.get(r.key_a) and sides.get(r.key_b)]
         pairs = {r.row_id: _row_pairs(sides[r.key_a], sides[r.key_b]) for r in live}
+        moved = _moved_by_seed(seeds_of_key, base, over)
+        confirmed_v2 = [
+            pair for a, b in v2_confirmed
+            for pair in _row_pairs(_moved_side(a, moved, _EVERYTHING),
+                                   _moved_side(b, moved, _EVERYTHING))
+        ] if moved else v2_confirmed
         nodes = {s for ps in pairs.values() for p in ps for s in p}
-        nodes.update(s for p in v2_confirmed for s in p)
+        nodes.update(s for p in confirmed_v2 for s in p)
         uf = _UF(nodes)
         for r in live:
             if r.status == "confirmed":
                 for a, b in pairs[r.row_id]:
                     uf.union(a, b)
-        for a, b in v2_confirmed:
+        for a, b in confirmed_v2:
             uf.union(a, b)
         add: Set[str] = set()
         unresolved = 0
@@ -1081,6 +1175,7 @@ def translate_v1_decisions(
         pairs=pairs, rows={r.row_id: r for r in rows if r.row_id in pairs},
         suspended=suspended, override=over, unresolved=unresolved,
         seeds_of_key={k: set(v) for k, v in seeds_of_key.items()},
+        base_override=base,
     )
 
 

@@ -639,3 +639,71 @@ def test_merge_keeps_dismissals_and_drops_relink_marks_and_findings(tmp_path):
         ("nb-sec", "dismissed"),
     }
     assert findings == {"nb-main"}
+
+
+def test_merge_carries_the_concept_seed_space_of_the_imported_clusters(tmp_path, monkeypatch):
+    """Codex #988 R2 (S1, v102): the merge clears an imported notebook's state
+    row but keeps its published concept clusters, built in the concept seed
+    space of the source's PUBLISHED merge — and a missing row reads as the
+    code's space 2. A library merged in before its first re-merge under the
+    new rule (space 1) would mint "Q-Former" as ``K-qformer`` beside its
+    ``K-q former``. Each imported notebook that keeps concept clusters gets a
+    clean state row carrying the source's space (every other column its
+    default: still reads as never built); one without clusters gets none.
+    Built and merged by the real code; placement checked in the merged
+    database. Mutation anchor: drop the INSERT from ``merge_core``."""
+    from app.core.config import Settings
+    from app.services.embedding import FakeEmbedder
+    from app.services.sqlite_repository import SQLiteRepository
+    from tests import kg_seed_space_world as world
+    from tests.model_testkit import bind_all_embedding_clients
+
+    def repository(name):
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / name}")
+        monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / f"{name}-storage"))
+        monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+        monkeypatch.setenv("EMBED_DIM", "16")
+        repo = SQLiteRepository(Settings())
+        bind_all_embedding_clients(repo, FakeEmbedder(dim=16))
+        return repo
+
+    secondary = repository("b.db")
+    old = world.notebook(secondary, "s1")
+    world.concepts(secondary, old, "s1", "Q Former")
+    with world.legacy_code(monkeypatch):
+        world.rebuild(secondary, old)
+    new = world.notebook(secondary, "t1")
+    world.concepts(secondary, new, "t1", "Q Former")
+    world.rebuild(secondary, new)
+    bare = world.notebook(secondary)
+    assert (world.published_space(secondary, old), world.published_space(secondary, new)) == (1, 2)
+    secondary.close()
+
+    primary, sec_db, out = tmp_path / "a.db", tmp_path / "b.db", tmp_path / "out.db"
+    merge_dbs.migrate_to_current(primary)
+    merge_dbs.migrate_to_current(sec_db)          # checkpoints the WAL, as main() does
+    merge_dbs.merge_core(out, primary, sec_db, shared_base="nb-none")
+
+    conn = sqlite3.connect(str(out))
+    conn.row_factory = sqlite3.Row
+    try:
+        state = {r["notebook_id"]: dict(r) for r in conn.execute(
+            "SELECT * FROM unified_kg_state WHERE notebook_id IN (?, ?, ?)", (old, new, bare))}
+    finally:
+        conn.close()
+    assert set(state) == {old, new}
+    assert (state[old]["concept_seed_version"], state[new]["concept_seed_version"]) == (1, 2)
+    for row in state.values():
+        assert (row["dirty"], row["kg_mutation_seq"], row["cluster_mutation_seq"],
+                row["cluster_generation"], row["community_generation"],
+                row["cluster_input_version"], row["cluster_code_version"],
+                row["last_rebuild_at"], row["cluster_count"]) == (0, 0, 0, 0, 0, "", "", "", 0), row
+
+    merged = repository("out.db")
+    try:
+        world.fuse(merged, old, "s2", "Q-Former")
+        world.fuse(merged, new, "t2", "Q-Former")
+        assert world.canonical_of(merged, old)["Q-Former"] == "K-q former"
+        assert world.canonical_of(merged, new)["Q-Former"] == "K-qformer"
+    finally:
+        merged.close()
