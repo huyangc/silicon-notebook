@@ -1032,16 +1032,37 @@ test("撤销「标为正常」：调用撤销接口并重取，已通过区说�
   expect(vi.mocked(fetchKgFindings).mock.calls.length).toBeGreaterThan(callsBefore);
 });
 
-test("失效令牌变化（来源被删、补上关联跑完……）时三页按当前偏移重取", async () => {
+/** 从第 `from` 次起问过的问题页,写成「区@偏移」并排序(请求集合,不是总次数)。 */
+function findingsRequestsSince(from: number): string[] {
+  return vi.mocked(fetchKgFindings).mock.calls.slice(from)
+    .map(([, options]) => `${options?.zone ?? "open"}@${options?.offset ?? 0}`)
+    .sort();
+}
+
+/** 让已经排上的 effect 与请求都跑完(waitFor 期间 React 的 effect 是异步冲刷的)。 */
+async function settle() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  });
+}
+
+test("失效令牌变化（来源被删、补上关联跑完……）时三页按当前偏移各重取一次", async () => {
+  // 已通过区的两页要等总览回来、看过计数才取(findingsZonesToFetch),比待处理晚一拍;而
+  // waitFor 等待期间 React 的 effect 是异步冲刷的——「待处理列出来了」那一刻它们未必已经
+  // 发出。所以起点要等三页都取过一次再记,断言的是请求集合而不是总次数(CI 上曾在起点只
+  // 记到 1 次请求,于是数成 6 ≠ 4)。
   const view = renderPanel({ findingsRevision: "1|0|0" });
   await ready();
+  await waitFor(() => expect(findingsRequestsSince(0)).toEqual(["dismissed@0", "open@0", "passed@0"]));
+  await settle();
   const callsBefore = vi.mocked(fetchKgFindings).mock.calls.length;
   view.rerender(
     <KgAnalysisView notebookId="nb-1" onClose={() => undefined} canAnalyze onAnalyze={() => undefined} findingsRevision="2|0|0" />,
   );
-  await waitFor(() => expect(vi.mocked(fetchKgFindings).mock.calls.length).toBe(callsBefore + 3));
-  expect(vi.mocked(fetchKgFindings).mock.calls.slice(callsBefore).map(([, options]) => options?.zone).sort())
-    .toEqual(["dismissed", "open", "passed"]);
+  await waitFor(() => expect(findingsRequestsSince(callsBefore)).toEqual(["dismissed@0", "open@0", "passed@0"]));
+  // 每页恰好一次:没有重复失效、没有依赖抖动带来的第二轮。
+  await settle();
+  expect(findingsRequestsSince(callsBefore)).toEqual(["dismissed@0", "open@0", "passed@0"]);
 });
 
 test("换库时问题清单当场清空：新库的报告先回来、问题清单还在路上时，也不摆上一个库的问题", async () => {
@@ -1102,6 +1123,8 @@ test("一定为空的区不发请求：没有标为正常的问题、账本里�
   openRows = [F1, F2, F3, F5];
   renderPanel();
   await waitFor(() => expect(findingItems()).toHaveLength(4));
+  // 「没发请求」要等总览驱动的 effect 跑完再断言,否则可能只是还没轮到。
+  await settle();
   const zones = vi.mocked(fetchKgFindings).mock.calls.map(([, options]) => options?.zone);
   expect(zones).not.toContain("passed");
   expect(zones).not.toContain("dismissed");
