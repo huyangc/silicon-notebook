@@ -173,8 +173,7 @@ def test_move_source_changed_returns_distinct_code_and_never_suggests_deleting_s
 # 同 notebook 那条又在触达任何守卫之前就 400 返回了——于是路由里
 # 「copy 用读守卫 / move 用写守卫」这个三元表达式完全没有被覆盖：把它反过来
 # 写，三条用例依旧全绿，而只读成员就此获得了删除别人表的能力（move = 复制
-# + 删源）。下面四条专门钉这条接线。追加在文件尾：在 line 72 之上插入会顶掉
-# test_repository_surface_manifest.py 里按行号钉死的 patch 站点。
+# + 删源）。下面四条专门钉这条接线。追加在文件尾。
 # --------------------------------------------------------------------------
 
 def _uid(client, headers):

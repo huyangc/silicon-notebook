@@ -1131,9 +1131,8 @@ def test_share_returns_transaction_token_if_concurrent_unshare_wins(repo, monkey
     assert repo._runtime.sharing.find_notebook_by_share_token(out["share_token"]) is None
 
 
-# NOTE: appended at EOF on purpose — inserting mid-file shifts the by-line
-# patch/consumer sites the repository_surface_manifest guard pins for the
-# _COPY_CHUNK / _insert_row seams below this file's earlier tests.
+# NOTE: appended at EOF on purpose; the earlier tests above patch the
+# _COPY_CHUNK / _insert_row seams.
 def _seed_knowhow_into_notebook(repo, nb, owner="user-local"):
     """Seed a knowhow table (one real column+row+cell) into an existing
     notebook, plus its projected element/chunk(+embedding) and PR-1-vocabulary
@@ -1148,10 +1147,7 @@ def _seed_knowhow_into_notebook(repo, nb, owner="user-local"):
     on purpose — Task 13 still EXCLUDES them from the copy (rebuilt by
     project_table instead, see test_knowhow_copy.py for that contract), so
     their exact shape is irrelevant here, only their PRESENCE/count is."""
-    # Deferred import (keeps this EOF-appended block's own line count from
-    # perturbing any earlier test's pinned _COPY_CHUNK/_insert_row usage
-    # line — see test_repository_surface_manifest.py's EXPECTED_PATCH_DELTAS;
-    # a top-of-file import shifts EVERY later line by one).
+    # Deferred import (keeps this EOF-appended block self-contained).
     from app.services.knowhow.projection import cell_chunk_id
 
     now = _now()
@@ -1261,7 +1257,7 @@ def test_copy_notebook_includes_knowhow_content_with_remap(repo):
         assert db.execute("SELECT COUNT(*) FROM knowledge_objects WHERE source_id=?", (hidden,)).fetchone()[0] == 3
 
 
-# NOTE: appended at EOF for the same line-pin reason as the block above.
+# NOTE: appended at EOF, like the block above.
 def test_copy_notebook_carries_paper_metadata(repo):
     """Final-review Fix 1 (merge blocker): notebook deep-copy must carry
     source_paper_meta + source_authors alongside the source they describe —

@@ -51,16 +51,8 @@ def _set_flag(settings, value):
 def _new_repo():
     """Build an isolated real repository for the integration/e2e tests below.
 
-    Kept behind this factory (and every caller binds it to a NON-`repo`-named
-    local — `store`) on purpose: test_repository_surface_manifest.py's consumer
-    scan only records a file as a private-member consumer when a facade member is
-    reached through a `repo`/`*_repo`-named handle OR a local assigned STRAIGHT
-    from `SQLiteRepository(...)`. Returning from a helper breaks the direct-call
-    detection and `store.*` dodges the name pattern, so this file needs no
-    private-consumer manifest churn — only the SQLiteRepository import (line 37)
-    is registered (TASK3_KNOWHOW_KGNODE_ALLOWED_IMPORTS). Env (DATABASE_URL /
-    STORAGE_DIR) is set by the caller before this runs, so Settings() picks up
-    the per-test tmp paths."""
+    Env (DATABASE_URL / STORAGE_DIR) is set by the caller before this runs, so
+    Settings() picks up the per-test tmp paths."""
     return SQLiteRepository(Settings())
 
 

@@ -783,10 +783,8 @@ from dataclasses import dataclass  # noqa: E402
 async def _resolve_session_user(request: Request) -> UserProfile:
     """Session-Bearer -> UserProfile: the SAME resolve-or-auth_optional-
     fallback-or-401 behavior as get_current_user's own body, DUPLICATED
-    rather than extracted/shared — get_current_user's body has individual
-    lines pinned by both architecture guards (see this section's own header
-    comment), so refactoring it to share this helper would shift those pins
-    for zero behavioral gain. Used only by user_or_agent_scope's session
+    rather than extracted/shared, so get_current_user's body stays untouched.
+    Used only by user_or_agent_scope's session
     branch below; get_current_user itself is untouched."""
     settings = get_settings()
     repo = identity_repository()
@@ -1012,8 +1010,8 @@ def shutdown_repository_if_initialized() -> None:
         repository().close()  # type: ignore[attr-defined]
 
 
-# System model-service wiring is deliberately appended after the line-pinned
-# repository compatibility sites above. Routes receive the one process-owned
+# System model-service wiring is deliberately appended after the repository
+# compatibility sites above. Routes receive the one process-owned
 # status service; they never reconstruct registries, providers, or schedulers.
 from app.services.model_status import ModelStatusService  # noqa: E402
 

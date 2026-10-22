@@ -1110,8 +1110,7 @@ def test_move_cleans_up_source_recreated_between_removal_and_delete(
 # transfer() schedules a SECOND job for the copy. Local `from app.models.
 # schemas import MemoryUpdate` mirrors the same local-import convention this
 # file's own test_move_does_not_delete_source_edited_after_copy_commits
-# already uses. Appended at EOF, same zero-line-shift convention as every
-# other addition in this file.
+# already uses. Appended at EOF.
 def test_move_schedules_embed_for_copy_when_source_vector_was_stale_at_transfer_time(
     repo, alice
 ):

@@ -539,10 +539,7 @@ def test_copy_failure_compensation_removes_assets_dir(repo, monkeypatch):
         ).fetchone()[0] == 1
 
 
-# NOTE: appended at EOF on purpose — the failure-compensation test above has
-# its _new_id/_insert_row monkeypatch sites line-pinned in
-# test_repository_surface_manifest.py's EXPECTED_PATCH_DELTAS; inserting a
-# test before it would shift those pins.
+# NOTE: appended at EOF, after the failure-compensation test above.
 def test_schedule_failure_after_publish_never_compensates(
     repo, projector, embedder, monkeypatch
 ):
