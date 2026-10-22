@@ -401,10 +401,23 @@ def test_dev_and_prod_launchers_use_the_one_shared_wind_down(script):
     # prod.sh alone clears the traps at its hand-off; nothing else installs one.
     assert [line.strip() for line in body.splitlines() if "trap " in line] in (
         [], ["trap - EXIT INT TERM HUP"])
-    marked = re.findall(r"^launcher_fork_mark (\w+)$", body, re.MULTILINE)
-    assigned = re.findall(r"^(\w+)=\$!$", body, re.MULTILINE)
-    assert marked == assigned and marked
-    assert body.count("launcher_fork_done") == len(marked)
+    lines = [line for line in body.splitlines() if line.strip()]
+    marks = [i for i, line in enumerate(lines) if line.startswith("launcher_fork_mark ")]
+    assert marks
+    assert len(marks) == sum(1 for line in lines if re.fullmatch(r"\w+=\$!", line))
+    assert len(marks) == sum(1 for line in lines if line == "launcher_fork_done")
+    for start in marks:
+        variable = lines[start].split()[1]
+        # mark / one `( ... ) &` fork / VAR=$! / done, nothing in between: a mark
+        # moved earlier would name a pid that is not the child's (it could adopt the
+        # companion controller), a done moved earlier or later leaves the fork
+        # unprotected or protected for too long.
+        assert lines[start + 1].startswith("("), f"{script}: {lines[start + 1]!r} after the mark"
+        end = next(i for i in range(start + 1, len(lines)) if lines[i] == f"{variable}=$!")
+        block = lines[start + 1:end]
+        assert [line for line in block if line.endswith(" &")] == [block[-1]]
+        assert not [line for line in block if line.startswith("launcher_fork_")]
+        assert lines[end + 1] == "launcher_fork_done"
 
 
 def group_members(pgid):
@@ -443,6 +456,59 @@ exit 3
         try:
             assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) == status
             wait_until(lambda: not group_members(process.pid), timeout=5)
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_a_signal_that_cuts_the_reaping_short_does_not_let_the_companion_stop_run_early(tmp_path):
+    """A third signal lands while the launcher waits for a SIGKILLed child to be
+    reaped: `wait` returns early with the child still there. The reaping must go on
+    until the child is gone, and only then are the companions stopped. The harness
+    delays the SIGKILL's effect (a `kill` function: the child dies a second after
+    `kill -9`) and sends the signal in between; the stand-in for the companion stop
+    records whether the child was still alive when it ran."""
+    stop_state = tmp_path / "stop.state"
+    stub = tmp_path / "python-stub"
+    stub.write_text(f'''#!/bin/bash
+if [[ "$2" == stop ]]; then
+  if kill -0 "$(cat {tmp_path}/child.pid)" 2>/dev/null; then echo alive; else echo dead; fi > {stop_state}
+fi
+''')
+    stub.chmod(0o755)
+    script = tmp_path / "reaping.sh"
+    script.write_text(f'''set -uo pipefail
+ROOT_DIR={ROOT}
+PYTHON_BIN={stub}
+source "$ROOT_DIR/scripts/extension_services.sh"
+source "$ROOT_DIR/scripts/launcher_cleanup.sh"
+launcher_install_traps
+START_CLEANUP_GRACE_SECONDS=1
+_SCRIPT_TEST_CLEANUP_POLL_INTERVAL_SECONDS=0.05
+kill() {{
+  if [[ "${{1:-}}" == "-9" ]]; then
+    ( /bin/sleep 1; builtin kill -9 "$2" ) &
+    ( /bin/sleep 0.3; builtin kill -TERM $$ ) &
+    return 0
+  fi
+  builtin kill "$@"
+}}
+EXTENSION_SERVICES_RECEIPT={tmp_path}/receipt
+echo started > "$EXTENSION_SERVICES_RECEIPT"
+( trap '' TERM; exec /bin/sleep 60 ) &
+BACKEND_PID=$!
+echo "$BACKEND_PID" > {tmp_path}/child.pid
+kill -TERM $$
+exit 3
+''')
+    with subprocess.Popen(["/bin/bash", str(script)], env={"PATH": "/usr/bin:/bin", **BYTECODE_ENV},
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          preexec_fn=default_launcher_signals, start_new_session=True) as process:
+        try:
+            assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) == 143
+            assert stop_state.read_text().strip() == "dead"
         finally:
             try:
                 os.killpg(process.pid, signal.SIGKILL)

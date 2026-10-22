@@ -12,10 +12,12 @@
 # Exit sequence, on every exit path and on Ctrl-C / TERM / HUP (130 / 143 / 129):
 # SIGTERM to the children together, a grace window, SIGKILL for whatever is still
 # running, reap, and only then the companion services this launch started.
-# While that runs, INT / TERM / HUP no longer end the launcher: a further one
-# escalates (stop waiting, SIGKILL the survivors now) and the companion cleanup
-# still runs, so a second Ctrl-C cannot strand the receipt or the companions.
-# The exit status stays that of the first cause.
+# During the wait for the children (up to the SIGKILL and the reaping after it),
+# INT / TERM / HUP no longer end the launcher: a further one escalates (stop
+# waiting, SIGKILL the survivors now) and the companion cleanup still runs after
+# the reaping. The exit status stays that of the first cause. The exception is the
+# companion stop itself: it runs in the foreground, so a Ctrl-C that reaches it
+# interrupts that command, as it always did.
 
 # START_CLEANUP_GRACE_SECONDS must be a positive integer; refuse before anything starts.
 launcher_check_grace_seconds() {
@@ -60,11 +62,11 @@ launcher_adopt_forked_child() {
 
 launcher_cleanup() {
   local status=$? pid alive deadline polls=0
-  trap - EXIT
-  # A further cancellation must not kill the launcher half way through this:
-  # it only asks the grace wait below to end now.
+  # First thing after capturing the status: a further cancellation must not kill
+  # the launcher half way through this, it only asks the grace wait to end now.
   LAUNCHER_ESCALATED=""
   trap 'LAUNCHER_ESCALATED=1' INT TERM HUP
+  trap - EXIT
   launcher_adopt_forked_child
 
   if [[ -z "${BACKEND_PID:-}" && -z "${FRONTEND_PID:-}" ]]; then
@@ -105,7 +107,12 @@ launcher_cleanup() {
   done
   for pid in "${BACKEND_PID:-}" "${FRONTEND_PID:-}"; do
     [[ -n "$pid" ]] || continue
-    wait "$pid" 2>/dev/null || true
+    # A signal that arrives meanwhile (only noted by the trap above) cuts `wait`
+    # short with a status above 128 while the child is still there: wait again, so
+    # the children are gone before the companions are stopped.
+    while ! wait "$pid" 2>/dev/null; do
+      kill -0 "$pid" 2>/dev/null || break
+    done
   done
   extension_services_cleanup || status=1
   exit "$status"

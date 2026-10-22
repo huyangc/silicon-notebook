@@ -71,7 +71,7 @@ extension_services_start
 # process: a SIGTERM from cleanup reaches uvicorn / next itself, not an npm or
 # subshell layer that would sit in front of it and leave it running.
 # 与 prod.sh 一样不加 uvicorn 的 --timeout-graceful-shutdown:prod.sh 现行做法没有它,
-# 退出时限完全由上面 cleanup 的 TERM→宽限→KILL 负责。
+# 退出时限完全由 scripts/launcher_cleanup.sh 的 TERM→宽限→KILL 负责。
 cd "$ROOT_DIR/backend"
 launcher_fork_mark BACKEND_PID
 ( export PYTHONPATH="$INHERITED_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}"
