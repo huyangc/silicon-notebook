@@ -170,7 +170,12 @@ running session never depends on the launcher that started it.
 HUP are its ordinary way out, and it winds down exactly as `scripts/prod.sh` does when it
 is interrupted before its hand-off. uvicorn and `next dev` are the launcher's direct
 children (each started with `exec`, with no npm or shell layer in front), so the launcher
-sends SIGTERM to both at once and the signal reaches the server itself. It then waits up to
+sends SIGTERM to both at once and the signal reaches the server itself. Before it starts
+`next dev` it runs the frontend's UI plugin sync (`node scripts/sync-ui-plugins.mjs` from
+`frontend/`, what `npm run dev` ran as the `predev` hook) as an `exec`ed child of its own:
+a failed sync starts no frontend, stops the backend and exits with the sync's status, and
+a Ctrl-C, TERM or HUP during the sync stops it, and the backend, the same way. After the
+signal it waits up to
 `START_CLEANUP_GRACE_SECONDS` (default 10 seconds; a positive integer, anything else exits 2
 before anything starts), SIGKILLs a server that is still running (stderr says `startup child
 PID <n> did not stop after SIGTERM; sending SIGKILL`), reaps both and only then stops the

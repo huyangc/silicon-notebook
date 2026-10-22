@@ -418,7 +418,10 @@ JSON 读取方可读取已打开、当前用户所有的普通文件快照，即
 `dev.sh` 的退出用例在 `backend/tests/launcher_checkout_testkit.py` 里用假的 uvicorn / `next`
 子进程，记录收到的 SIGTERM（`TERM_EXITS`）或无视它（`TERM_IGNORED`），钉住「TERM → 宽限 →
 KILL」、与 `prod.sh` 共用的退出码 130 / 143 / 129、每个子进程的父进程就是启动器本身（`exec`
-守卫），以及 `dev.sh` 与 `prod.sh` 的 `cleanup` 函数文本逐字相同。运维侧行为见
+守卫），以及 `dev.sh` 与 `prod.sh` 的 `cleanup` 函数文本逐字相同。`dev.sh` 直接启动
+`next dev`，所以也要手工执行 `predev` 的 UI 插件同步（检出目录工具里有假 `node`）：用例钉住同步
+先于 next 启动完成、同步失败时不启动前端并停掉后端、同步期间被取消不留任何进程，以及
+`frontend/package.json` 的钩子仍恰好是 `dev.sh` 复现的那些。运维侧行为见
 [operations_zh.md](./operations_zh.md)。
 
 ### 压测脚本
