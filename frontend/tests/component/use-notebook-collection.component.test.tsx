@@ -1262,6 +1262,19 @@ test("dismissing the confirmation does not withdraw a DELETE already on the wire
   expect(value!.rows).toEqual([]);
 });
 
+test("a 202 without a readable deadline still reads as scheduled and re-reads the list", async () => {
+  notebookApi.deleteNotebook.mockResolvedValueOnce({ deleteAfter: null });
+  render(<Harness />);
+  publish([notebook("a")]);
+  await act(async () => value!.openDelete("a"));
+  vi.mocked(effects.refreshComposite).mockClear();
+  await act(async () => value!.confirmDelete());
+  expect(effects.reportError).not.toHaveBeenCalled();
+  expect(effects.notify).toHaveBeenCalledWith(deleteScheduledText("a", null));
+  expect(effects.refreshComposite).toHaveBeenCalled();
+  expect(value!.rows).toEqual([]);
+});
+
 test("a delete that fails after its confirmation was dismissed still reports", async () => {
   const deletion = deferred<typeof DELETE_ACCEPTED>();
   const rejection = new Error("delete rejected");

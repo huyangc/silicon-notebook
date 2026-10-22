@@ -138,6 +138,8 @@ export type TransferOutcome =
   | { kind: "gone" }
   /** 409 transfer_in_progress:另一次转移(别的标签页)正在进行。 */
   | { kind: "busy" }
+  /** 409 notebook_not_pending_delete:主人撤销了删除,这本笔记本已恢复。 */
+  | { kind: "restored" }
   | { kind: "failed" };
 
 /** 把我在 `notebookId` 里已确认的记忆转移(移动)到 `targetNotebookId` 的**一页**
@@ -180,7 +182,7 @@ export async function transferOutOfDeletedNotebook(
   const code = (await detailOf(response))?.code;
   if (response.status === 404) return code === "delete_window_closed" ? { kind: "closed" } : { kind: "gone" };
   if (response.status === 409 && code === "transfer_in_progress") return { kind: "busy" };
-  if (response.status === 409 && code === "notebook_not_pending_delete") return { kind: "gone" };
+  if (response.status === 409 && code === "notebook_not_pending_delete") return { kind: "restored" };
   return { kind: "failed" };
 }
 

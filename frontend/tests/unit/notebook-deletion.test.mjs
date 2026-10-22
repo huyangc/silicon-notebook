@@ -83,9 +83,15 @@ test("确认删除返回服务端定下的截止时刻", async () => {
     return json({ status: "pending_delete", delete_after: NOTICE.delete_after }, 202);
   };
   assert.deepEqual(await deleteNotebook("nb1"), { deleteAfter: NOTICE.delete_after });
-  // 没有可读的截止时刻:当失败,不编一个时刻出来。
+  // 202 但读不出截止时刻:仍是「已安排删除」,时刻留空(不编),提示不写时刻。
   globalThis.fetch = async () => json({ status: "pending_delete" }, 202);
-  await assert.rejects(deleteNotebook("nb1"));
+  assert.deepEqual(await deleteNotebook("nb1"), { deleteAfter: null });
+  globalThis.fetch = async () => json({ status: "pending_delete", delete_after: "not a time" }, 202);
+  assert.deepEqual(await deleteNotebook("nb1"), { deleteAfter: null });
+  const text = deleteScheduledText("旧库", null);
+  assert.ok(text.startsWith("已安排删除“旧库”。"), text);
+  assert.ok(text.includes("确切时刻见笔记本列表顶部"), text);
+  assert.ok(!/\d{4}年/.test(text), text);
 });
 
 test("撤销的三种结局:成功 / 截止已过 / 已不存在", async () => {
@@ -138,6 +144,8 @@ test("转移的结局:逐条结果 / 截止已过 / 读不到", async () => {
   assert.deepEqual(await transferOutOfDeletedNotebook("nb1", "nb-mine"), { kind: "failed" });
   globalThis.fetch = async () => json({ detail: { code: "transfer_in_progress" } }, 409);
   assert.deepEqual(await transferOutOfDeletedNotebook("nb1", "nb-mine"), { kind: "busy" });
+  globalThis.fetch = async () => json({ detail: { code: "notebook_not_pending_delete" } }, 409);
+  assert.deepEqual(await transferOutOfDeletedNotebook("nb1", "nb-mine"), { kind: "restored" });
   globalThis.fetch = async () => json({ detail: { code: "delete_window_closed" } }, 404);
   assert.deepEqual(await transferOutOfDeletedNotebook("nb1", "nb-mine"), { kind: "closed" });
   globalThis.fetch = async () => json({ detail: "Notebook not found" }, 404);
