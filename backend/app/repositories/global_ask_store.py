@@ -50,22 +50,43 @@ GLOBAL_JOBS_ORDER_DESC = "ORDER BY created_at DESC,id DESC"
 # from it starts at the bound instead of walking every newer job first.
 _KEYSET_THROUGH = "(created_at, id) <= (?, ?)"
 
+# The three job lookups every share read resolves, written once and spliced
+# into each statement that needs them, so the share, the public read and the
+# dialog's counts cannot resolve a job differently (``{live}`` is the dialect's
+# retention gate, ``live_turn_sql``):
+#
+# * the BOUNDARY a share pins to: a live done job of this owner's conversation
+#   (``_share_boundary``; params id, conversation, user);
+# * the NEWEST such job, the boundary when none is asked (params conversation,
+#   user);
+# * the WATERMARK the public read anchors its keyset on: any done job of the
+#   conversation, live or not (``_watermark_anchor``; params id, conversation).
+_BOUNDARY_JOB_SQL = (
+    "SELECT id, created_at FROM global_ask_jobs "
+    "WHERE id=? AND conversation_id=? AND user_id=? AND status='done' AND {live}"
+)
+_NEWEST_JOB_SQL = (
+    "SELECT id, created_at FROM global_ask_jobs WHERE conversation_id=? "
+    "AND user_id=? AND status='done' AND {live} " + GLOBAL_JOBS_ORDER_DESC + " LIMIT 1"
+)
+_WATERMARK_JOB_SQL = (
+    "SELECT id, created_at FROM global_ask_jobs "
+    "WHERE id=? AND conversation_id=? AND status='done'"
+)
+
 # The share dialog's prefix sizes in ONE aggregate over the owner's live done
 # jobs of one conversation (``GlobalAskStore.share_counts``): the boundary job
-# the dialog asks about (``a``: a live done job of this owner), the watermark
-# job (``w``: any done job of the conversation -- the public read's anchor),
-# the newest live done job (``n``: the bound every window is read under), and
-# per job whether it sorts at/before ``a``, at/before ``w``, or at/before the
-# watermark instant (the page's fallback when ``w`` is gone). Placeholders, in
-# order: a(id, conversation, user), w(id, conversation), n(conversation,
-# user), the watermark instant, then the scan's (conversation, user).
+# the dialog asks about (``a``), the watermark job (``w``), the newest job
+# (``n``: the bound every window is read under) -- the three lookups above,
+# verbatim -- and per job whether it sorts at/before ``a``, at/before ``w``,
+# or at/before the watermark instant (the page's fallback when ``w`` is gone).
+# Placeholders, in order: a(id, conversation, user), w(id, conversation),
+# n(conversation, user), the watermark instant, then the scan's (conversation,
+# user).
 _SHARE_RANKS_SQL = (
-    "WITH a AS (SELECT id, created_at FROM global_ask_jobs WHERE id=? "
-    "AND conversation_id=? AND user_id=? AND status='done' AND {live}), "
-    "w AS (SELECT id, created_at FROM global_ask_jobs WHERE id=? "
-    "AND conversation_id=? AND status='done'), "
-    "n AS (SELECT id, created_at FROM global_ask_jobs WHERE conversation_id=? "
-    "AND user_id=? AND status='done' AND {live} " + GLOBAL_JOBS_ORDER_DESC + " LIMIT 1) "
+    "WITH a AS (" + _BOUNDARY_JOB_SQL + "), "
+    "w AS (" + _WATERMARK_JOB_SQL + "), "
+    "n AS (" + _NEWEST_JOB_SQL + ") "
     "SELECT COUNT(j.id) AS total, "
     "MAX(a.id) AS a_id, MAX(a.created_at) AS a_created, "
     "SUM(CASE WHEN (j.created_at, j.id) <= (a.created_at, a.id) THEN 1 ELSE 0 END) AS a_rank, "
@@ -1313,17 +1334,13 @@ class GlobalAskStore:
         passed explicitly.
         """
         if expected:
-            boundary = db.execute(self._sql(
-                "SELECT id, created_at FROM global_ask_jobs "
-                f"WHERE id=? AND conversation_id=? AND user_id=? AND status='done' AND {self._live}"
-            ), (expected, conversation_id, user_id)).fetchone()
+            boundary = db.execute(self._sql(_BOUNDARY_JOB_SQL.format(live=self._live)), (
+                expected, conversation_id, user_id)).fetchone()
             if boundary is None:
                 raise ConversationShareWatermarkStale(expected)
             return boundary["created_at"], boundary["id"]
-        latest = db.execute(self._sql(
-            "SELECT id, created_at FROM global_ask_jobs WHERE conversation_id=? "
-            f"AND user_id=? AND status='done' AND {self._live} " + GLOBAL_JOBS_ORDER_DESC + " LIMIT 1"
-        ), (conversation_id, user_id)).fetchone()
+        latest = db.execute(self._sql(_NEWEST_JOB_SQL.format(live=self._live)), (
+            conversation_id, user_id)).fetchone()
         if latest is None:
             return None, None
         return latest["created_at"], latest["id"]
@@ -1506,10 +1523,7 @@ class GlobalAskStore:
         keyset -- or ``None``."""
         if not watermark_id:
             return None
-        return db.execute(self._sql(
-            "SELECT id, created_at FROM global_ask_jobs "
-            "WHERE id=? AND conversation_id=? AND status='done'"
-        ), (watermark_id, conversation_id)).fetchone()
+        return db.execute(self._sql(_WATERMARK_JOB_SQL), (watermark_id, conversation_id)).fetchone()
 
     def _public_jobs(self, db, conv):
         """The page's window of the watermark-bounded prefix of this
