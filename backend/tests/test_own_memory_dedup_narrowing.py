@@ -21,3 +21,7 @@ def world(tmp_path, monkeypatch):
 
 def test_two_passes_answer_what_the_full_read_answered(world):
     cases.two_passes_answer_what_the_full_read_answered(world)
+
+
+def test_blocks_follow_the_published_seed_space(world):
+    cases.blocks_follow_the_published_seed_space(world)

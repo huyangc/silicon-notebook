@@ -710,7 +710,7 @@ re-merged in full by its next "update analysis" or rebuild, and then:
 - the merge is redone under the new rule: almost every multi-word concept's merged knowledge object id
   changes once, and the same rebuild partitions the topic boards once from scratch under the new
   partition algorithm ([Topic-board partition](#topic-board-partition-warm-starts-and-the-one-time-re-partition):
-  both arrive with one migration, v100 / 0081, and land in that one rebuild); concept descriptions are
+  both arrive with one migration, v102 / 0083, and land in that one rebuild); concept descriptions are
   reused by signature, only those whose representative name changed are written again;
 - stored merge decisions are recomputed into new seed pairs from the current objects' names and land in
   that merge's pending-merge refresh transaction, with the event `kg_merge_decisions_recomputed`:
@@ -783,7 +783,7 @@ spelling-variant tier) stays under 1 s; the claim stage's generation write is st
 refresh writes; hitting it emits `kg_merge_squash_candidates_capped` and keeps the groups with the most
 members.
 
-Deployments with change capture on (`sync capture`): migration v100 / 0081 backfills two columns, and
+Deployments with change capture on (`sync capture`): migration v102 / 0083 backfills two columns, and
 each backfill logs one change per row it sets -- on SQLite every existing state row (its concept seed
 space set to 1; the PostgreSQL column default fires no capture), and on both backends every existing
 topic board (`communities.board_key` set to the board's id). The next export re-sends those rows and the
@@ -882,11 +882,11 @@ and the same published partition always give the same boards under the same keys
 the relations arrive in.
 
 This re-partition ships in the same upgrade as
-[Merge rule upgrade: concept seed space 2](#merge-rule-upgrade-concept-seed-space-2): migration v100 / 0081
+[Merge rule upgrade: concept seed space 2](#merge-rule-upgrade-concept-seed-space-2): migration v102 / 0083
 carries both, and a notebook's first full rebuild after it re-merges the concepts and partitions the
 boards cold in one pass (the change-capture note there covers the `board_key` backfill too).
 
-**One-time re-partition.** Migration v100 / 0081 adds `unified_kg_state.community_partition_version`
+**One-time re-partition.** Migration v102 / 0083 adds `unified_kg_state.community_partition_version`
 and `community_partition_mode` (0 / '' on every existing notebook) and backfills each existing
 board's `board_key` with its id. The next rebuild of each notebook that actually rebuilds the board
 graph (刷新图谱 after the graph changed, the rebuild after a merge, `recluster_kg`) reads version 0
@@ -942,7 +942,7 @@ algorithm's partition, so the next rebuild with igraph starts cold rather than w
   its boards while the version was changed under it (a `--cold-partition` request); the request
   stands and the next rebuild starts cold.
 - Which notebooks have published boards and will be partitioned cold by their next real rebuild
-  (same SQL on both backends) -- the one-time re-partition after v100 / 0081, a pending
+  (same SQL on both backends) -- the one-time re-partition after v102 / 0083, a pending
   `--cold-partition` request, or a networkx fallback (`community_partition_mode = 'cold_fallback'`).
   Boards still in generation 0 (built before the batch-3 generational swap) are included; notebooks
   whose knowledge graph was deleted or whose indexing pipeline was republished have no boards and

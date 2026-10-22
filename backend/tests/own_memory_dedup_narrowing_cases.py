@@ -138,6 +138,7 @@ def _oracle(world: World, user, object_type: str):
                     "FROM knowledge_objects WHERE notebook_id=? AND object_type=?"),
             (world.nb, object_type),
         ).fetchall()]
+        space = service.governance_store.published_concept_seed_space(db, world.nb)
     rows = [r for r in rows if r["source_id"] in own]
     rows.sort(key=lambda r: (str(r["created_at"]), r["id"]))
     kept = []
@@ -148,7 +149,7 @@ def _oracle(world: World, user, object_type: str):
         kept.append({"id": r["id"], "status": r["status"], "payload": payload,
                      "name": payload.get("name")})
     live = [r for r in kept if r["status"] != "deprecated"]
-    by_seed = service._duplicate_blocks(object_type, live)
+    by_seed = service._duplicate_blocks(object_type, live, *space)
     groups = service._duplicate_groups(object_type, by_seed, {r["id"]: r["payload"] for r in live})
     merged = [
         service._knowledge_ref(r, object_type) for r in kept
@@ -176,3 +177,46 @@ def two_passes_answer_what_the_full_read_answered(world: World) -> None:
             compared += len(expected_groups) + len(expected_merged)
     # the corpus is not vacuous: groups and merged-away objects for both users
     assert compared >= 20, compared
+
+
+def blocks_follow_the_published_seed_space(world: World) -> None:
+    """The owner's groups block in the notebook's PUBLISHED concept seed space,
+    as the shared groups do: "Q-Former" and "Qformer" (her own Memory) share a
+    seed, hence a group, only once the library publishes space 2."""
+    ids = ("ko-q1", "ko-q2")
+    with world.repo._write() as db:
+        for object_id, name in zip(ids, ("Q-Former", "Qformer")):
+            db.execute(
+                world.q("INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
+                        "payload,evidence,source_id,created_at,updated_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)"),
+                (object_id, world.nb, "concept", "approved",
+                 json.dumps({"name": name}),
+                 json.dumps([{"source_id": "src-own-1", "element_id": "el-0",
+                              "quoted_span": "q"}]),
+                 "src-own-1", NOW, NOW),
+            )
+
+    def groups_of_the_pair(published_space: int) -> list:
+        with world.repo._write() as db:
+            db.execute(world.q("DELETE FROM unified_kg_state WHERE notebook_id=?"),
+                       (world.nb,))
+            db.execute(
+                world.q("INSERT INTO unified_kg_state (notebook_id, concept_seed_version, "
+                        "updated_at) VALUES (?,?,?)"),
+                (world.nb, published_space, NOW),
+            )
+        token = set_request_user(world.viewer)
+        try:
+            answer = world.repo._runtime.knowledge_governance.find_own_memory_duplicates(
+                world.nb, "concept")
+        finally:
+            reset_request_user(token)
+        return [
+            sorted(member.id for member in group.members)
+            for group in answer.groups
+            if set(ids) <= {member.id for member in group.members}
+        ]
+
+    assert groups_of_the_pair(1) == []
+    assert groups_of_the_pair(2) == [list(ids)]

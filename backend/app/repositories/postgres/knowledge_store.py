@@ -1263,7 +1263,7 @@ class KnowledgeStore:
         # cluster_code_version(v97/0077)随 cluster_input_version 一起清空:
         # 两列合起来描述「上一次合并」,合并结果删掉了,两者都不再成立;
         # INSERT 分支取列默认值 ''。
-        # community_partition_version / _mode(v100/0081)同理复位成
+        # community_partition_version / _mode(v102/0083)同理复位成
         # 0 / '':它们描述「已发布的那套板块划分」,图删掉之后下一次重建没有
         # 上一代可热启动,该从冷启动开始。communities.board_key 随行留到重建,
         # 读者经已发布代谓词看不到它们。

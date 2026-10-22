@@ -112,7 +112,7 @@ def _pinned_plans(
 def test_cluster_member_rows_keeps_index_only_scan_with_the_predicate(
     postgres_database, bystander_snapshot,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 82
+    assert PostgresMigrator(postgres_database).migrate() == 83
     _seed(postgres_database, "nb-ios", 5000)
     plans = _pinned_plans(
         postgres_database, bystander_snapshot, "idx_clusters_nb_canonical_member_gen",
@@ -136,7 +136,7 @@ def test_cluster_member_rows_keeps_index_only_scan_with_the_predicate(
 def test_version_facts_cluster_component_scans_the_created_gen_index(
     postgres_database, bystander_snapshot,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 82
+    assert PostgresMigrator(postgres_database).migrate() == 83
     _seed(postgres_database, "nb-vf", 5000)
     plans = _pinned_plans(
         postgres_database, bystander_snapshot, "idx_clusters_nb_created_gen",
@@ -234,7 +234,7 @@ def test_node_context_ceiling_queries_never_seq_scan(postgres_database, authorit
     from app.domain.knowledge_contracts import NODE_CONTEXT_CLUSTER_MEMBER_PROBE
     from app.repositories.postgres.knowledge_store import _node_context_cluster_sql
 
-    assert PostgresMigrator(postgres_database).migrate() == 82
+    assert PostgresMigrator(postgres_database).migrate() == 83
     _seed_node_context_explain(postgres_database)
     notebook_id = _NC_EXPLAIN_NOTEBOOK
     cluster_sql = _node_context_cluster_sql(authoritative=authoritative)
@@ -269,7 +269,7 @@ def test_node_context_legacy_sibling_queries_never_seq_scan(postgres_database):
         _LEGACY_SIBLINGS_UNSECTIONED_SQL,
     )
 
-    assert PostgresMigrator(postgres_database).migrate() == 82
+    assert PostgresMigrator(postgres_database).migrate() == 83
     _seed_node_context_explain(postgres_database)
     notebook_id = _NC_EXPLAIN_NOTEBOOK
     first_page = (notebook_id, normalize_timestamp("0001-01-01T00:00:00+00:00"), "")
@@ -300,7 +300,7 @@ def test_node_context_defines_query_walks_the_target_index_in_id_order(postgres_
     定义者按主键回表,不顺扫。"""
     from app.repositories.postgres.knowledge_store import _NODE_CONTEXT_DEFINES_SQL
 
-    assert PostgresMigrator(postgres_database).migrate() == 82
+    assert PostgresMigrator(postgres_database).migrate() == 83
     _seed_node_context_explain(postgres_database)
     params = (_NC_EXPLAIN_NOTEBOOK, "ko-42", 8)
     with postgres_database.connect() as connection:
@@ -320,7 +320,7 @@ def test_concept_clusters_count_skip_gate_leg_stays_index_only(
 ):
     # 0051: idx_clusters_nb_created_gen serves the rebuild skip-gate's second
     # leg (unified_kg_store.concept_clusters_count).
-    assert PostgresMigrator(postgres_database).migrate() == 82
+    assert PostgresMigrator(postgres_database).migrate() == 83
     _seed(postgres_database, "nb-cnt", 5000)
     plans = _pinned_plans(
         postgres_database, bystander_snapshot, "idx_clusters_nb_created_gen",
@@ -341,7 +341,7 @@ def test_sole_index_helper_refuses_a_table_foreign_keys_reference(postgres_datab
     other tables' foreign keys hanging off it: it refuses before dropping
     anything (``notebooks.pk_notebooks`` is referenced by concept_clusters
     and many more)."""
-    assert PostgresMigrator(postgres_database).migrate() == 82
+    assert PostgresMigrator(postgres_database).migrate() == 83
     with postgres_database.connect() as connection:
         before = connection.execute(
             "SELECT count(*) AS n FROM pg_constraint WHERE contype = 'f'").fetchone()["n"]
@@ -419,7 +419,7 @@ def test_viewer_scope_owned_and_citing_read_seeks_the_source_indexes(postgres_da
     issues."""
     from app.repositories.postgres.knowledge_store import KnowledgeStore
 
-    assert PostgresMigrator(postgres_database).migrate() == 82
+    assert PostgresMigrator(postgres_database).migrate() == 83
     _seed_node_context_explain(postgres_database)
     notebook_id = _NC_EXPLAIN_NOTEBOOK
     with postgres_database.write() as db:

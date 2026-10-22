@@ -1,4 +1,4 @@
-"""Board partition store primitives on PostgreSQL (0081): the twin of ``tests/test_board_partition_store.py``. Same world,
+"""Board partition store primitives on PostgreSQL (0083): the twin of ``tests/test_board_partition_store.py``. Same world,
 same checks, same literal expectations (``tests/board_partition_store_cases.py``).
 
 Plus the plan pin of the previous-partition read on two corpus shapes (a
@@ -161,7 +161,7 @@ def pin_database(request, postgres_settings):
         Path(__file__).resolve().parents[3],
     )
     try:
-        assert PostgresMigrator(database).migrate() == 81
+        assert PostgresMigrator(database).migrate() == 83
         _seed(database, *SHAPES[request.param])
         yield database
     finally:

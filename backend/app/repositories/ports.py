@@ -2912,7 +2912,7 @@ class UnifiedKgStorePort(Protocol):
     # 发布事务**外**先行(write_communities_generation,无 DELETE),发布事务
     # 内 copy-forward 未重建的 level(板块 id 重铸+成员行重映射)再翻
     # community_generation 指针(flip_community_generation,双 CAS)。
-    # ``board_keys``(v100/0081)与 ``kept`` 逐行对齐:第 i 个板块的跨代身份
+    # ``board_keys``(v102/0083)与 ``kept`` 逐行对齐:第 i 个板块的跨代身份
     # (`kg_partition.Board.key`),写进 `communities.board_key`。
     @staticmethod
     def write_communities_generation(db: object, notebook_id: str, level: int, kept: object, names: object, deg: object, now: str, generation: int, *, board_keys: Sequence[str]) -> None: ...

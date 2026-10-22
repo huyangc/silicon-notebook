@@ -7656,7 +7656,7 @@ class KnowledgeLifecycleService:
           · 其余 → 以已发布那一代(``published_from``)的板块热启动。
         只要有已发布的划分,冷启动也照样读它当 ``previous``(``warm=False``):只用来
         续用 board_key。⚠ 指针为 0 也要读:批 3·W2 之前建的库、`merge_dbs` 导入的库,
-        已发布的板块就在第 0 代(存量行的 board_key 由 v100/0081 回填成 id)。非默认层没有
+        已发布的板块就在第 0 代(存量行的 board_key 由 v102/0083 回填成 id)。非默认层没有
         自己的版本列(两列与 `community_seq` 一样归默认层),一律冷启动、不读上一代。
 
         上一代读不成一份合法的划分(同一代里一个 canonical 落在两个板块里,或板块没有

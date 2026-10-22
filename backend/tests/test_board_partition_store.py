@@ -1,4 +1,4 @@
-"""Board partition store primitives on SQLite (v100; design docs/superpowers/specs/2026-10-19-kg-analysis-findings-design_zh.md
+"""Board partition store primitives on SQLite (v102; design docs/superpowers/specs/2026-10-19-kg-analysis-findings-design_zh.md
 §五 S2).
 
 The world and every expected value live in ``tests/board_partition_store_cases.py``;

@@ -26,3 +26,7 @@ def world(postgres_settings):
 
 def test_two_passes_answer_what_the_full_read_answered_pg(world):
     cases.two_passes_answer_what_the_full_read_answered(world)
+
+
+def test_blocks_follow_the_published_seed_space_pg(world):
+    cases.blocks_follow_the_published_seed_space(world)

@@ -68,7 +68,7 @@ def pin_database(postgres_settings):
         Path(__file__).resolve().parents[3],
     )
     try:
-        assert PostgresMigrator(database).migrate() == 82
+        assert PostgresMigrator(database).migrate() == 83
         _seed(database)
         yield database
     finally:
