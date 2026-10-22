@@ -46,7 +46,7 @@
   },
   "app/conversation-share-modal.tsx": {
     "react-hooks/exhaustive-deps": {
-      "count": 2
+      "count": 1
     }
   },
   "app/dev/logs/page.tsx": {
