@@ -253,6 +253,8 @@ export const joinGroupInvite = (token: string): Promise<GroupDetail> =>
   requestJson(`/group-invites/${encodeURIComponent(token)}/join`, {
     method: "POST",
     tag: TAG,
+    // 邀请口令就是凭据,不进日志。
+    logPath: "/group-invites/{token}/join",
   });
 
 /** 按用户名**精确**查人。查不到是 404,由错误层翻成后端写好的文案。 */

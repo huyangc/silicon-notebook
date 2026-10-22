@@ -391,11 +391,18 @@ export const fetchKgFindings = (
 // 主键两段都要转义:F2 的主键用「|」拼两个来源 id,F4 的主键是概念名归一后的串(可能含「/」「+」)。
 const dismissalPath = (nb: string, ruleId: string, subjectKey: string) =>
   `/notebooks/${nb}/kg-analysis/findings/${encodeURIComponent(ruleId)}/${encodeURIComponent(subjectKey)}/dismissal`;
+// 日志里只写路由形状:主键是来源派生的内容(概念名 / 来源 id),不进浏览器日志(URL 编码不算脱敏)。
+const dismissalLogPath = (nb: string, ruleId: string) =>
+  `/notebooks/${nb}/kg-analysis/findings/${encodeURIComponent(ruleId)}/{subject_key}/dismissal`;
 
 /** 标为正常(需要图谱写权限;镜像库 409;主键不在当前问题清单里 404)。 */
 export const dismissKgFinding = (nb: string, ruleId: string, subjectKey: string) =>
-  requestVoid(dismissalPath(nb, ruleId, subjectKey), { ...options, method: "PUT" });
+  requestVoid(dismissalPath(nb, ruleId, subjectKey), {
+    ...options, method: "PUT", logPath: dismissalLogPath(nb, ruleId),
+  });
 
 /** 撤销「标为正常」。幂等。 */
 export const undismissKgFinding = (nb: string, ruleId: string, subjectKey: string) =>
-  requestVoid(dismissalPath(nb, ruleId, subjectKey), { ...options, method: "DELETE" });
+  requestVoid(dismissalPath(nb, ruleId, subjectKey), {
+    ...options, method: "DELETE", logPath: dismissalLogPath(nb, ruleId),
+  });

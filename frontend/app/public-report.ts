@@ -65,7 +65,8 @@ export async function fetchPublicReport(token: string): Promise<PublicReportT | 
   try {
     const body = await requestJson<PublicReportT>(
       `/public/reports/${encodeURIComponent(clean)}`,
-      { tag: "public-report", auth: "none", cache: "no-store" },
+      // 分享口令就是凭据,不进日志。
+      { tag: "public-report", auth: "none", cache: "no-store", logPath: "/public/reports/{token}" },
     );
     return {
       ...body,
