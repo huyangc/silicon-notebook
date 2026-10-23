@@ -443,6 +443,8 @@ def report_run_keeps_the_hand_over_bounded(world: World) -> None:
             assert _memory(world, section) == oracle_memory(world, section)
             sizes.append(_table())
             _vector(world, f"section {index} sub query")
+            # The stage embedded another text: the unread Memory vector went.
+            assert _table()[1] == 0, _table()
             sizes.append(_table())
         # The Ask-shaped hand-over still works at the end of a long run.
         world.embedder.queries.clear()
