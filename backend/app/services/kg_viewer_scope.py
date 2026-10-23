@@ -546,11 +546,27 @@ class KgViewerScope:
         ``_first_visible_members``' answers: a label and the id a cluster is
         answered by come from one read."""
         if canonical_id not in self._first_rows:
-            window = min(_FIRST_MEMBER_WINDOW, self.hidden_member_bound(canonical_id) + 1)
+            window = self._first_window([canonical_id])
             with self._reader.connect() as db:
                 self._first_rows[canonical_id] = self._scan_members(
                     db, canonical_id, after="", window=window)
         return self._first_rows[canonical_id]
+
+    def _first_window(self, canonical_ids: Sequence[str]) -> int:
+        """The first window of a first-visible-member read of
+        ``canonical_ids``.  A member scope: ``_FIRST_MEMBER_WINDOW``, lowered
+        to one past the largest ``hidden_member_bound`` among them (the
+        per-cluster fold, which deciding ``cluster_needs_check`` paid
+        already).  A scope that ``answers_by_member`` asks about every
+        cluster without that fold and does not pay it here either:
+        ``_FIRST_MEMBER_WINDOW`` when the library holds a hidden source,
+        else one row (no member can be hidden)."""
+        if self.answers_by_member:
+            return _FIRST_MEMBER_WINDOW if self.foreign else 1
+        return min(
+            _FIRST_MEMBER_WINDOW,
+            max(self.hidden_member_bound(cid) for cid in canonical_ids) + 1,
+        )
 
     def _scan_members(
         self, db: Any, canonical_id: str, *, after: str, window: int,
@@ -579,8 +595,7 @@ class KgViewerScope:
     ) -> Dict[str, Optional[Dict[str, Any]]]:
         """``visible_member`` for many clusters: ONE batched read of the first
         ``window`` members of every listed cluster, where ``window`` is
-        ``_FIRST_MEMBER_WINDOW`` (lower when no listed cluster's
-        ``hidden_member_bound + 1`` reaches it) -- at most
+        ``_first_window``'s (``_FIRST_MEMBER_WINDOW`` at most) -- at most
         ``len(canonical_ids) × _FIRST_MEMBER_WINDOW`` rows, however large
         one cluster's suspect count is (codex #806 r3: a shared
         ``max(bound) + 1`` let one suspect hub size every cluster's window).
@@ -596,10 +611,7 @@ class KgViewerScope:
         again."""
         missing = [cid for cid in canonical_ids if cid not in self._first_rows]
         if missing:
-            window = min(
-                _FIRST_MEMBER_WINDOW,
-                max(self.hidden_member_bound(cid) for cid in missing) + 1,
-            )
+            window = self._first_window(missing)
             with self._reader.connect() as db:
                 rows, _unused = self._reader.knowledge.concept_cluster_detail_rows(
                     db, self.notebook_id, "", limit=window, canonical_ids=missing,

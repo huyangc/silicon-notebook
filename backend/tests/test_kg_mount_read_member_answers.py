@@ -410,6 +410,37 @@ def test_a_library_without_a_hidden_source_reads_one_member_row_per_cluster(
     assert batched == [] and relinks == [], (batched, relinks)
 
 
+def test_a_non_members_neighbour_read_pays_no_hidden_member_fold(env, monkeypatch):
+    """Cost, library WITH its Knowhow source: the non-member's scope answers
+    every cluster by member without asking which clusters may hold a hidden
+    member, so no statement folds the hidden-owned objects to clusters (the
+    only folds are the focus's and the edge-support fold of the response's
+    own ids), and the batched first-member read takes the full window."""
+    from app.services.kg_viewer_scope import _FIRST_MEMBER_WINDOW
+
+    ids = build_library(env)
+    knowledge = env.repo._runtime.knowledge
+    unified_kg = env.repo._runtime.unified_kg
+    batched, folds = [], []
+    detail_rows = knowledge.concept_cluster_detail_rows
+    fold = unified_kg.cluster_fold_rows
+
+    def spy_detail(*args, **kwargs):
+        if kwargs.get("canonical_ids") is not None:
+            batched.append((sorted(kwargs["canonical_ids"]), kwargs.get("limit")))
+        return detail_rows(*args, **kwargs)
+
+    monkeypatch.setattr(knowledge, "concept_cluster_detail_rows", spy_detail)
+    monkeypatch.setattr(unified_kg, "cluster_fold_rows",
+                        lambda *a, **k: folds.append(list(a[2])) or fold(*a, **k))
+    r = neighbours(env, env.member, ids.widget, ids.lib)
+    assert r.status_code == 200 and {n["id"] for n in r.json()["nodes"]} == {
+        ids.qzx, ids.widget}
+    assert batched == [(sorted([SEEDED_ID, ids.widget_c]), _FIRST_MEMBER_WINDOW)], batched
+    assert not any(ids.kh in f for f in folds), folds
+    assert all(set(f) <= {ids.widget, SEEDED_ID, ids.widget_c} for f in folds), folds
+
+
 @pytest.mark.parametrize("drop_source", [False, True])
 def test_detail_pages_answer_by_the_same_member(env, drop_source):
     """Paging a cluster: every page answers by the first visible member, and
