@@ -73,10 +73,6 @@ class KnowledgeQueryService:
         self.current_user_id = current_user_id
         self.queries = queries
         self.viewer_scope = viewer_scope
-        # E4-7: ``notebook_id -> bool``, the M1 transition marker (``<> 1``),
-        # bound by ``RepositoryRuntime.wire_knowledge_lifecycle`` to the
-        # lifecycle's reader once that exists; False = isolated (today).
-        self.memory_isolation_pending: Callable[[str], bool] = lambda _nb: False
 
     # 测试观察点:直写 chunks 的用例重建 chunks_fts 的构造点
     def backfill_chunk_fts(self, notebook_id: str) -> int:
@@ -194,24 +190,21 @@ class KnowledgeQueryService:
         scope's live owned-hidden set alone, no row read: a hit that is not
         a live object never reaches the answer (``hydrate_search_hits`` drops
         deprecated and unknown ids).
-        Folded hits: a cluster hit takes the label of its first visible
-        member, and a cluster with none is dropped -- every cluster of the
-        page judged in ONE batched member read (``cluster_labels``), never
-        one read per hit.  The FTS leg is filtered in the store once it takes
-        ``viewer_id`` (E4-4); this pass covers the ANN leg (a pre-isolation
-        index included) and keeps the answer right before that.
-
-        While the notebook awaits its isolated rebuild (the E4-5 marker
-        ``<> 1``) a checked cluster's canonical id may still be minted from a
-        hidden member's name (``K-<seed>``), so such a hit is answered by its
-        first visible member's OBJECT id instead -- same name, the canonical
-        id not in the response, and still openable; once isolated, the
-        canonical id again (one marker read, only when a checked cluster is
-        on the page)."""
+        Folded hits: a cluster hit that may hold a hidden member is answered
+        by its first visible member -- that member's name and OBJECT id, since
+        a canonical id may be minted from a hidden member's name
+        (``K-<seed>``), whatever the notebook's isolation marker -- and a
+        cluster with none is dropped; every cluster of the page judged in ONE
+        batched member read (``cluster_first_visible``), never one read per
+        hit.  The answered id opens like the cluster (concept detail resolves
+        a member id).  For this notebook's own readers such a cluster exists
+        only before the isolated rebuild.  The FTS leg is filtered in the
+        store once it takes ``viewer_id`` (E4-4); this pass covers the ANN leg
+        (a pre-isolation index included) and keeps the answer right before
+        that."""
         ids = [hit["object_id"] for hit in hits]
         hidden = frozenset() if folded else scope.owned_hidden.intersection(ids)
         firsts = scope.cluster_first_visible(ids) if folded else {}
-        pending = bool(firsts) and self.memory_isolation_pending(scope.notebook_id)
         kept = []
         for hit in hits:
             if hit["object_id"] in hidden:
@@ -220,10 +213,8 @@ class KnowledgeQueryService:
                 row = firsts[hit["object_id"]]
                 if row is None:
                     continue
-                hit = {**hit, "name": str(
+                hit = {**hit, "object_id": str(row["member_object_id"]), "name": str(
                     json.loads(row["payload"] or "{}").get("name", "") or "")}
-                if pending:
-                    hit["object_id"] = str(row["member_object_id"])
             kept.append(hit)
         return kept
 
@@ -542,18 +533,21 @@ class KnowledgeQueryService:
     ) -> dict:
         source_id = self._participant_source(notebook_id, source_notebook_id)
         raw_scope = self.viewer_scope(source_id, notebook_id)
+        if raw_scope is not None and raw_scope.answers_by_member:
+            return self._member_answered_detail(
+                source_id, canonical_id, raw_scope, limit=limit, after=after)
         scope = filtering(raw_scope)
         detail = self._concept_detail(
             source_id, canonical_id, limit=limit, after=after, scope=scope
         )
         if not detail["members"] and raw_scope is not None:
-            # Not a canonical id (M1, codex #824 r4).  While a notebook awaits
-            # its isolated rebuild, the graph and search answer a mixed
-            # cluster by its first visible member's OBJECT id, and the
-            # viewer's own Memory concepts belong to no cluster at all: both
-            # must still open.  A member id resolves to its cluster (one
-            # bounded member lookup) unless the viewer may not see that
-            # member; an own Memory concept is its own single member.
+            # Not a canonical id (M1, codex #824 r4).  The graph and search
+            # answer a cluster that may hold a hidden member by its first
+            # visible member's OBJECT id, and the viewer's own Memory
+            # concepts belong to no cluster at all: both must still open.  A
+            # member id resolves to its cluster (one bounded member lookup)
+            # unless the viewer may not see that member; an own Memory
+            # concept is its own single member.
             resolved = self._resolve_concept_member(source_id, canonical_id, scope)
             if resolved is not None:
                 canonical_id = resolved
@@ -565,15 +559,59 @@ class KnowledgeQueryService:
                     source_id, canonical_id, limit=limit, scope=scope,
                     single_member=True,
                 )
-        if (scope is not None and scope.cluster_needs_check(canonical_id)
-                and self.memory_isolation_pending(source_id)):
-            # Awaiting the isolated rebuild: answered by the first visible
-            # member, never by a canonical id that may be minted from a
-            # hidden member's name (``KgViewerScope.pending_answer_ids``).
-            answer = scope.pending_answer_ids([canonical_id]).get(canonical_id)
+        if scope is not None and scope.cluster_needs_check(canonical_id):
+            # A cluster that may hold a hidden member is answered by its
+            # first visible member, never by a canonical id that may be
+            # minted from a hidden member's name -- whatever the isolation
+            # marker (``KgViewerScope.member_answer_ids``); its name is that
+            # member's already (``_viewer_cluster_page``).
+            answer = self._first_visible_answer(scope, detail, canonical_id, after)
             if answer is not None:
-                detail = {**detail, "canonical_id": answer}
+                detail = {**detail, "canonical_id": answer[0]}
         return detail
+
+    def _member_answered_detail(
+        self, notebook_id: str, requested_id: str, scope: Any, *,
+        limit: Optional[int], after: str,
+    ) -> dict:
+        """Concept detail for a reader who is not a member of the mounted
+        library ``notebook_id`` (``scope.answers_by_member``): the response
+        never carries a cluster id or a stored cluster name -- either may come
+        from a hidden member, or from one a Knowhow re-projection pruned.
+
+        Only a visible member's object id opens a concept (the ids this
+        reader is shown are such ids); a cluster id, a hidden member's id, an
+        id of no clustered object and an unknown id are the same 404.  The
+        cluster is read under ``filtering(scope)`` -- unfiltered when the
+        library holds no hidden source -- and answered by its first visible
+        member: ``canonical_id`` is that member's object id, the same on
+        every page, and ``canonical_name`` its name."""
+        cluster = self._resolve_concept_member(notebook_id, requested_id, scope)
+        if cluster is None:
+            raise KeyError(requested_id)
+        detail = self._concept_detail(
+            notebook_id, cluster, limit=limit, after=after, scope=filtering(scope))
+        answer = self._first_visible_answer(scope, detail, cluster, after)
+        if answer is None:
+            raise KeyError(requested_id)
+        return {**detail, "canonical_id": answer[0], "canonical_name": answer[1]}
+
+    @staticmethod
+    def _first_visible_answer(
+        scope: Any, detail: dict, canonical_id: str, after: str,
+    ) -> Optional[tuple]:
+        """``(object id, name)`` of the cluster's first visible member, or
+        ``None`` when it has none.  A first page's first member IS that member
+        (member-id order, hidden members dropped); a later page reads it --
+        one bounded batched read (``KgViewerScope.cluster_first_visible``)."""
+        if not after and detail["members"]:
+            first = detail["members"][0]
+            return str(first["id"]), str(first["payload"].get("name", "") or "")
+        row = scope.cluster_first_visible([canonical_id]).get(canonical_id)
+        if row is None:
+            return None
+        return (str(row["member_object_id"]),
+                str(json.loads(row["payload"] or "{}").get("name", "") or ""))
 
     def _resolve_concept_member(
         self, notebook_id: str, object_id: str, scope: Any,

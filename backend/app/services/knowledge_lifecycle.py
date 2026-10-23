@@ -126,7 +126,7 @@ from app.services.kg_partition import (
     partition_boards,
 )
 from app.services.model_work import notebook_model_artifact_scope
-from app.services.kg_viewer_scope import answer_graph_by, store_viewer_kwargs
+from app.services.kg_viewer_scope import answer_graph_by, judging, store_viewer_kwargs
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.kg.run_control import (
     KgBuildAborted,
@@ -4990,8 +4990,7 @@ class KnowledgeLifecycleService:
             "total_nodes": total_nodes,
             "total_edges": total_edges,
             "truncated": len(sliced["nodes"]) < total_nodes,
-        }, limit, concept_only=level == "concept", name_only=False, shared=True,
-            pending=not artifacts)
+        }, limit, concept_only=level == "concept", name_only=False, shared=True)
 
     def _memory_isolation_pending(self, notebook_id: str) -> bool:
         """Whether the notebook is not isolated yet (E4-5 marker ``<> 1``, one
@@ -5004,14 +5003,13 @@ class KnowledgeLifecycleService:
     def _with_viewer_overlay(
         self, scope, graph: dict, limit: Optional[int], *,
         concept_only: bool = False, name_only: bool = True, shared: bool = False,
-        pending: bool = False,
     ) -> dict:
         """The viewer's graph = the shared graph + the viewer's own Memory
         (M1, E4-7).  ``graph`` is shared already when ``shared``; otherwise it
         is a persisted artifact's answer.  An artifact built after the
         isolation (E4-6) holds nobody's Memory; one built before it may, so
         the answer is first put under the viewer rule
-        (``filter_neighbourhood``: hidden raw nodes and clusters with no
+        (``answer_neighbourhood``: hidden raw nodes and clusters with no
         visible member dropped, partly hidden clusters relabelled -- only
         when the scope filters) and the viewer's own raw Memory nodes are
         dropped, with their edges, the totals following the drops.  The
@@ -5022,23 +5020,27 @@ class KnowledgeLifecycleService:
         shared page holds at most ``limit`` nodes and the own overlay at most
         ``limit`` more, so a response holds at most ``2 × limit`` nodes (and
         exactly the shared page's when the viewer owns no Memory here).  No
-        scope: ``graph`` unchanged.  ``pending`` (the notebook awaits its
-        isolated rebuild): a cluster that may hold a hidden member is
-        answered by its first visible member's object id, never by a
-        canonical id that may be minted from a hidden member's name
-        (``KgViewerScope.pending_answer_ids``)."""
+        scope: ``graph`` unchanged.  When the scope filters, a cluster that
+        may hold a hidden member is answered by its first visible member's
+        object id, never by a canonical id that may be minted from a hidden
+        member's name (``KgViewerScope.member_answer_ids``), whatever the
+        isolation marker; a notebook's own readers meet such a cluster only
+        before its isolated rebuild."""
         if scope is None:
             return graph
         nodes, edges = graph["nodes"], graph["edges"]
-        if pending and scope.filters:
+        if shared and scope.filters:
             nodes, edges = answer_graph_by(
-                scope.pending_answer_ids(n["id"] for n in nodes), nodes, edges)
+                scope.member_answer_ids(n["id"] for n in nodes), nodes, edges)
         total_nodes, total_edges = graph["total_nodes"], graph["total_edges"]
         if not shared:
-            viewed_nodes, viewed_edges = (
-                scope.filter_neighbourhood(nodes, edges, ())
-                if scope.filters else (nodes, edges)
-            )
+            viewed_nodes, viewed_edges = nodes, edges
+            if scope.filters:
+                # Relabelled and answered from the same member read.
+                viewed_nodes, viewed_edges, answers = scope.answer_neighbourhood(
+                    nodes, edges, ())
+                viewed_nodes, viewed_edges = answer_graph_by(
+                    answers, viewed_nodes, viewed_edges)
             exclude = frozenset(scope.own_memory_object_ids())
             kept = [n for n in viewed_nodes if str(n["id"]) not in exclude]
             kept_ids = {str(n["id"]) for n in kept}
@@ -5293,7 +5295,7 @@ class KnowledgeLifecycleService:
             # Decided by one primary-key read of the focus row's owner column
             # (none when the viewer owns no Memory here).
             result = self._own_memory_neighbors(source_id, object_id, cap, scope)
-        elif scope is None or not scope.filters:
+        elif judging(scope) is None:
             result = self._kg_neighbors_unchecked(
                 source_id, object_id, cap, artifacts=artifacts)
         else:
@@ -5350,10 +5352,14 @@ class KnowledgeLifecycleService:
         *, artifacts: bool = True,
     ) -> dict:
         """PR-A·A5 (rulings Q4 / M1): neighbour hydration under the viewer
-        rule (``KgViewerScope.filter_neighbourhood``): hidden objects,
+        rule (``KgViewerScope.answer_neighbourhood``): hidden objects,
         clusters whose every live member is hidden, and edges touching either
-        are omitted, partly hidden clusters are relabelled, and a hidden focus
-        answers an empty neighbourhood — the shape an unknown id gets.
+        are omitted; a cluster answered by its first visible member (one that
+        may hold a hidden member -- whatever the isolation marker -- and, for
+        a non-member reading a mounted library, every cluster) carries that
+        member's object id and name, the focus included; and a hidden focus
+        answers exactly what an unknown id does (``_absent_focus_neighbors``),
+        as does, for that non-member, a focus given as a cluster id.
 
         ``cap`` counts VISIBLE neighbours: both hydration paths apply their
         cap before this filter, so the raw read over-fetches (by the
@@ -5370,12 +5376,14 @@ class KnowledgeLifecycleService:
                 store_kwargs=store_viewer_kwargs(scope))
             focus_id = result.get("focus_id") or object_id
             raw_neighbours = sum(1 for n in result.get("nodes", []) if n["id"] != focus_id)
-            filtered = scope.filter_neighbourhood(
+            judged = scope.answer_neighbourhood(
                 result.get("nodes", []), result.get("edges", []), (object_id, focus_id),
+                inputs=(object_id,),
             )
-            if filtered is None:
-                return {**result, "nodes": [], "edges": []}
-            nodes, edges = filtered
+            if judged is None:
+                return self._absent_focus_neighbors(
+                    notebook_id, object_id, artifacts=artifacts)
+            nodes, edges, answers = judged
             visible_neighbours = [n for n in nodes if n["id"] != focus_id]
             if len(visible_neighbours) >= cap or raw_neighbours < budget:
                 break
@@ -5386,14 +5394,46 @@ class KnowledgeLifecycleService:
             e for e in edges
             if e["source_object_id"] in keep and e["target_object_id"] in keep
         ]
-        if not artifacts:
-            # Awaiting the isolated rebuild: a cluster that may hold a hidden
-            # member is answered by its first visible member (see
-            # ``KgViewerScope.pending_answer_ids``), the focus included.
-            renames = scope.pending_answer_ids([*keep])
-            nodes, edges = answer_graph_by(renames, nodes, edges)
-            result = {**result, "focus_id": renames.get(str(focus_id), focus_id)}
-        return {**result, "nodes": nodes, "edges": edges}
+        nodes, edges = answer_graph_by(answers, nodes, edges)
+        return {**result, "nodes": nodes, "edges": edges,
+                "focus_id": answers.get(str(focus_id), focus_id)}
+
+    def _absent_focus_neighbors(
+        self, notebook_id: str, object_id: str, *, artifacts: bool,
+    ) -> dict:
+        """What ``_kg_neighbors_unchecked`` answers for an id the notebook
+        does not hold (no member row to fold, no position in the preview, no
+        relation): an empty neighbourhood focused on the id itself -- or, on a
+        notebook too large for the live path, ``locating_unavailable`` (with
+        ``preview_lacks_focus`` when a preview exists).  A hidden focus, and a
+        cluster id given by a reader who may not be shown one, answer this, so
+        neither tells an existing id from an unknown one.  Reads: the preview
+        probe and the object count the unknown id's answer reads."""
+        idx = self.scale_artifacts.viz_index(notebook_id) if artifacts else None
+        preview = idx is not None and getattr(idx, "viz_ids", None) is not None
+        with self._connect() as db:
+            object_count = self.knowledge.count_active_objects(db, notebook_id)
+        if int(object_count) > self.settings.viz_sync_build_max_objects:
+            return self._locating_unavailable(object_id, object_id, preview=preview)
+        return {"nodes": [], "edges": [], "focus_id": object_id,
+                "focus_object_id": object_id}
+
+    @staticmethod
+    def _locating_unavailable(focus_id: str, object_id: str, *, preview: bool) -> dict:
+        """A large notebook's answer for a focus no preview holds: the live
+        path must not run for it (no compact artifact to answer from)."""
+        unavailable = {
+            "nodes": [],
+            "edges": [],
+            "focus_id": focus_id,
+            "focus_object_id": object_id,
+            "locating_unavailable": True,
+        }
+        if preview:
+            # A preview exists but does not hold this focus (E4-7): the
+            # client says so instead of "no preview yet".
+            unavailable["preview_lacks_focus"] = True
+        return unavailable
 
     def _kg_neighbors_unchecked(
         self, notebook_id: str, object_id: str, cap: int,
@@ -5493,18 +5533,8 @@ class KnowledgeLifecycleService:
         with self._connect() as db:
             object_count = self.knowledge.count_active_objects(db, notebook_id)
         if int(object_count) > self.settings.viz_sync_build_max_objects:
-            unavailable = {
-                "nodes": [],
-                "edges": [],
-                "focus_id": focus_id,
-                "focus_object_id": object_id,
-                "locating_unavailable": True,
-            }
-            if positions is not None:
-                # A preview exists but does not hold this focus (E4-7): the
-                # client says so instead of "no preview yet".
-                unavailable["preview_lacks_focus"] = True
-            return unavailable
+            return self._locating_unavailable(
+                focus_id, object_id, preview=positions is not None)
         result = self._kg_neighbors_db(
             notebook_id, focus_id, cap, store_kwargs=store_kwargs)
         result["focus_id"] = focus_id

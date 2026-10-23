@@ -785,12 +785,15 @@ class TestApiUnauthorizedWrite:
         )
         assert proxied.status_code == 200
         assert proxied.json()["source_notebook_id"] == base["id"]
-        assert proxied.json()["focus_id"] == "K-base-focus"
+        # Not a member of the base: its clusters are answered by their first
+        # visible member, never by a cluster id (2026-10-23 ruling, R2).
+        assert proxied.json()["focus_id"] == source_id
         assert proxied.json()["focus_object_id"] == source_id
         assert {node["id"] for node in proxied.json()["nodes"]} == {
-            "K-base-focus",
+            source_id,
             target_id,
         }
+        assert "K-base-focus" not in proxied.text
 
         inferred = client.get(
             f"/api/notebooks/{active['id']}/objects/{source_id}/neighbors",

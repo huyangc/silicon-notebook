@@ -41,7 +41,8 @@ bytes — when the notebook holds no Memory that matters to the viewer (one
 read, ``memory_source_ids``, for a notebook without Memory).  With Memory
 present that decision is two index-bounded reads sized by the notebook's
 Memory/Knowhow count (``memory_source_ids`` + ``hidden_source_ids``; a
-mounted library read by a non-member adds one access check).  A filtered
+mounted library read by a non-member adds one access check, and always
+takes both reads and a scope).  A filtered
 read then builds, lazily and at most once per request: the readable set (one
 visible-universe read) for the detail reads' evidence items, and the set of
 objects OWNED by an unreadable hidden source (ONE statement whatever the
@@ -55,18 +56,36 @@ own Memory object to the live tables; the graph overlay adds one
 such statement for the viewer's own Memory sources, and one metadata read
 and one relation read per 900 of the objects it returns.  Neighbours then
 read the first members of every cluster of the
-response that needs a check in one batched statement
+response that needs a check (every cluster, for a scope that answers by
+member) in one batched statement
 (``concept_cluster_detail_rows(canonical_ids=...)``), at most
-``_FIRST_MEMBER_WINDOW`` per cluster; only a cluster none of whose first
-members is visible is paged further, on its own.  Everything else is
-decided on the rows the response already carries.
+``_FIRST_MEMBER_WINDOW`` per cluster (one when the notebook holds no hidden
+source); only a cluster none of whose first members is visible is paged
+further, on its own.  The ids and labels the response answers with come
+from that same read.  Everything else is decided on the rows the response
+already carries.
 
 Identities.  Each id a read returns is judged on what it is (codex #806 r1):
 a raw object by the object rule (its owner column); a folded cluster id by
-its members — hidden when no live member is visible, labelled by its first
-visible member when any member may be hidden (``cluster_needs_check``).
+its members — hidden when no live member is visible, and answered by its
+first visible member (that member's object id and name) when any member may
+be hidden (``cluster_needs_check``), whatever the notebook's isolation
+marker: a canonical id (``K-<seed>``) and a stored ``canonical_name`` can
+both come from a hidden member.  For a reader of the notebook itself such a
+cluster exists only before the isolated rebuild (Knowhow is theirs to read,
+and Memory is in no shared cluster after it), so their responses are
+unchanged once isolated.
 Legacy procedure steps are judged in the store, on the sibling's own
 ``source_id`` and on each evidence element's ACTUAL source.
+
+Mounted libraries (``answers_by_member``).  A reader who is not a member of
+a mounted library is never given a cluster id or a stored cluster name of
+it: the scope is built for them whether or not the library holds a hidden
+source (a member row pruned by a Knowhow re-projection leaves the old id and
+name on the surviving rows until the next merge), and EVERY cluster of such
+a response is answered by its first visible member; a cluster id given as
+input answers like an unknown id.  The members of the library read it
+unchanged.
 
 M1 alignment (permission remediation E4-7, plan §2 D2/D4).  The object rule
 is the Python twin of ``memory_sql.foreign_memory_object_excluded``: an
@@ -169,6 +188,13 @@ def filtering(scope: Optional["KgViewerScope"]) -> Optional["KgViewerScope"]:
     return scope if scope is not None and scope.filters else None
 
 
+def judging(scope: Optional["KgViewerScope"]) -> Optional["KgViewerScope"]:
+    """``scope`` when the ids and names of a detail read must be judged under
+    it -- it hides something, or it answers every cluster by its first visible
+    member (a non-member reading a mounted library) -- else ``None``."""
+    return scope if scope is not None and (scope.filters or scope.answers_by_member) else None
+
+
 def store_viewer_kwargs(scope: Optional["KgViewerScope"]) -> Dict[str, str]:
     """``{"viewer_id": ...}`` for a KG store reader -- only when the scope
     filters (plan §2 D2: the service passes ``viewer_id`` only when the
@@ -191,8 +217,9 @@ class KgViewerScope:
 
     Built only when the notebook holds Memory that matters to the viewer:
     some hidden source is unreadable (``filters``), or the viewer owns Memory
-    there (``own_memory``, the graph overlay).  A ``None`` scope means
-    nothing is filtered and nothing is overlaid.
+    there (``own_memory``, the graph overlay) -- and always for a non-member
+    reading a mounted library (``answers_by_member``).  A ``None`` scope means
+    nothing is filtered, nothing is overlaid and every cluster keeps its id.
     """
 
     def __init__(
@@ -204,6 +231,7 @@ class KgViewerScope:
         foreign: FrozenSet[str],
         viewer_id: str = "",
         own_memory: FrozenSet[str] = frozenset(),
+        answers_by_member: bool = False,
     ) -> None:
         self._reader = reader
         self.notebook_id = notebook_id
@@ -219,10 +247,18 @@ class KgViewerScope:
         # The viewer's own Memory sources of this notebook (empty when the
         # channel is closed): the graph overlay's input.
         self.own_memory = own_memory
+        # A non-member reading a mounted library: every cluster of a detail
+        # read is answered by its first visible member, never by its
+        # canonical id or stored name (``cluster_answered_by_member``).
+        # Independent of ``filters``: such a scope may hide nothing.
+        self.answers_by_member = answers_by_member
         self._allowed: Optional[FrozenSet[str]] = None
         self._owned: Optional[FrozenSet[str]] = None
         self._owned_per_cluster: Optional[Dict[str, int]] = None
         self._own_objects: Optional[Tuple[str, ...]] = None
+        # ``{canonical id: first visible member row or None}``, read once per
+        # cluster for the scope's request (``_first_visible_members``).
+        self._first_rows: Dict[str, Optional[Dict[str, Any]]] = {}
 
     @property
     def filters(self) -> bool:
@@ -295,7 +331,10 @@ class KgViewerScope:
         statement whatever the number of such sources
         (``relink_object_rows_for_source(source_ids=...)``), once per scope.
         The per-cluster fold is a separate, on-demand read
-        (``_owned_clusters``): the graph and raw-hit reads need only this set."""
+        (``_owned_clusters``): the graph and raw-hit reads need only this set.
+        A scope that hides nothing owns nothing hidden, and reads nothing."""
+        if self._owned is None and not self.foreign:
+            self._owned = frozenset()
         if self._owned is None:
             with self._reader.connect() as db:
                 self._owned = frozenset(
@@ -332,6 +371,17 @@ class KgViewerScope:
         unreadable hidden source.  Any other cluster is left as it is: no
         member of it is hidden, so neither is it or its label."""
         return bool(self._owned_clusters().get(canonical_id))
+
+    def cluster_answered_by_member(self, canonical_id: str) -> bool:
+        """Whether a cluster is answered by its first visible member -- that
+        member's object id and name instead of the canonical id and the stored
+        ``canonical_name``, either of which may come from a hidden member:
+        every cluster for a scope that ``answers_by_member`` (decided without
+        the per-cluster fold), else a cluster that may hold a hidden member
+        (``cluster_needs_check``).  The ids this judges must be cluster ids
+        (or unknown): a raw object id has no member and would read as a
+        cluster with no visible member."""
+        return self.answers_by_member or self.cluster_needs_check(canonical_id)
 
     def hidden_member_bound(self, canonical_id: str) -> int:
         """The cluster's owned-hidden member count.  It only ever LOWERS a
@@ -492,10 +542,15 @@ class KgViewerScope:
 
         A first read of at most ``_FIRST_MEMBER_WINDOW`` member rows (no
         COUNT), widened by doubling only while a full window holds nothing
-        visible (``_scan_members``)."""
-        window = min(_FIRST_MEMBER_WINDOW, self.hidden_member_bound(canonical_id) + 1)
-        with self._reader.connect() as db:
-            return self._scan_members(db, canonical_id, after="", window=window)
+        visible (``_scan_members``).  Kept for the scope's request, with
+        ``_first_visible_members``' answers: a label and the id a cluster is
+        answered by come from one read."""
+        if canonical_id not in self._first_rows:
+            window = min(_FIRST_MEMBER_WINDOW, self.hidden_member_bound(canonical_id) + 1)
+            with self._reader.connect() as db:
+                self._first_rows[canonical_id] = self._scan_members(
+                    db, canonical_id, after="", window=window)
+        return self._first_rows[canonical_id]
 
     def _scan_members(
         self, db: Any, canonical_id: str, *, after: str, window: int,
@@ -536,80 +591,82 @@ class KgViewerScope:
         last row (``_scan_members``, pages doubling from ``2 × window``), so
         it reads rows up to the page holding its first visible member, or its
         whole member list when it has none and is answered ``None`` (hidden).
-        An id with no live member row maps to ``None``."""
-        if not canonical_ids:
-            return {}
-        window = min(
-            _FIRST_MEMBER_WINDOW,
-            max(self.hidden_member_bound(cid) for cid in canonical_ids) + 1,
-        )
-        found: Dict[str, Optional[Dict[str, Any]]] = {}
-        with self._reader.connect() as db:
-            rows, _unused = self._reader.knowledge.concept_cluster_detail_rows(
-                db, self.notebook_id, "", limit=window, canonical_ids=canonical_ids,
+        An id with no live member row maps to ``None``.  A cluster this scope
+        has answered already (here or in ``visible_member``) is not read
+        again."""
+        missing = [cid for cid in canonical_ids if cid not in self._first_rows]
+        if missing:
+            window = min(
+                _FIRST_MEMBER_WINDOW,
+                max(self.hidden_member_bound(cid) for cid in missing) + 1,
             )
-            by_cluster: Dict[str, list] = {cid: [] for cid in canonical_ids}
-            for row in rows:
-                by_cluster.setdefault(str(row["canonical_id"]), []).append(row)
-            for cid in canonical_ids:
-                members = by_cluster.get(cid, [])
-                visible = next((r for r in members if not self.member_hidden(r)), None)
-                if visible is None and len(members) >= window:
-                    visible = self._scan_members(
-                        db, cid, after=str(members[-1]["member_object_id"]),
-                        window=2 * window)
-                found[cid] = visible
-        return found
+            with self._reader.connect() as db:
+                rows, _unused = self._reader.knowledge.concept_cluster_detail_rows(
+                    db, self.notebook_id, "", limit=window, canonical_ids=missing,
+                )
+                by_cluster: Dict[str, list] = {cid: [] for cid in missing}
+                for row in rows:
+                    by_cluster.setdefault(str(row["canonical_id"]), []).append(row)
+                for cid in missing:
+                    members = by_cluster.get(cid, [])
+                    visible = next((r for r in members if not self.member_hidden(r)), None)
+                    if visible is None and len(members) >= window:
+                        visible = self._scan_members(
+                            db, cid, after=str(members[-1]["member_object_id"]),
+                            window=2 * window)
+                    self._first_rows[cid] = visible
+        return {cid: self._first_rows[cid] for cid in canonical_ids}
 
     def cluster_display_name(self, canonical_id: str, name: str) -> Optional[str]:
-        """A cluster that may hold a hidden member (``cluster_needs_check``)
-        is labelled with its first visible member's name (the stored
-        ``canonical_name`` and the label the viz artifact bakes from one
-        member's payload may be a hidden member's); other clusters keep
-        ``name``.  ``None`` when such a cluster has no visible live member:
-        it does not exist for this viewer, and the stored name -- which can
-        only have come from a hidden member -- is never the answer (codex
-        #806 r4)."""
-        if not self.cluster_needs_check(canonical_id):
+        """A cluster answered by its first visible member
+        (``cluster_answered_by_member``) is labelled with that member's name
+        (the stored ``canonical_name`` and the label the viz artifact bakes
+        from one member's payload may be a hidden member's); other clusters
+        keep ``name``.  ``None`` when such a cluster has no visible live
+        member: it does not exist for this viewer, and the stored name is
+        never the answer (codex #806 r4)."""
+        if not self.cluster_answered_by_member(canonical_id):
             return name
         row = self.visible_member(canonical_id)
         if row is None:
             return None
-        # Same text-JSON row shape concept_detail decodes.
-        return str(json.loads(row["payload"] or "{}").get("name", "") or "")
+        return _member_name(row)
 
     def cluster_labels(self, canonical_ids: Sequence[str]) -> Dict[str, Optional[str]]:
         """``cluster_display_name`` for many clusters at once: for every id
-        that may hold a hidden member (``cluster_needs_check``), its first
-        visible member's name, or ``None`` when it has no visible live member
-        (the cluster does not exist for this viewer).  Ids that need no check
-        are absent from the answer (they keep their own name).  ONE batched
-        member read for all of them (``_first_visible_members``), whatever
-        their number -- KG search's folded hits and neighbour hydration."""
+        answered by its first visible member (``cluster_answered_by_member``),
+        that member's name, or ``None`` when it has no visible live member
+        (the cluster does not exist for this viewer).  Other ids are absent
+        from the answer (they keep their own name).  ONE batched member read
+        for all of them (``_first_visible_members``), whatever their number --
+        pending-merge names and neighbour hydration."""
         return {
-            cid: None if row is None
-            else str(json.loads(row["payload"] or "{}").get("name", "") or "")
+            cid: None if row is None else _member_name(row)
             for cid, row in self.cluster_first_visible(canonical_ids).items()
         }
 
     def cluster_first_visible(
         self, canonical_ids: Sequence[str],
     ) -> Dict[str, Optional[Dict[str, Any]]]:
-        """The member rows behind ``cluster_labels``: for every id that needs
-        the check, its first visible member row (``member_object_id``,
-        ``payload``) or ``None``; the same one batched read."""
+        """The member rows behind ``cluster_labels`` and ``member_answer_ids``:
+        for every id answered by its first visible member
+        (``cluster_answered_by_member``), that member's row
+        (``member_object_id``, ``payload``) or ``None``; the same one batched
+        read."""
         checked = list(dict.fromkeys(
-            str(cid) for cid in canonical_ids if self.cluster_needs_check(str(cid))))
+            str(cid) for cid in canonical_ids
+            if self.cluster_answered_by_member(str(cid))))
         return self._first_visible_members(checked)
 
-    def pending_answer_ids(self, ids: Iterable[Any]) -> Dict[str, str]:
-        """While the notebook awaits its isolated rebuild (the E4-5 marker
-        ``<> 1``) a cluster that may hold a hidden member can still carry a
-        canonical id minted from that member's name (``K-<seed>``).  The
-        viewer is then answered by the cluster's first VISIBLE member's object
-        id instead: ``{cluster id: member object id}`` for every such id among
-        ``ids`` that has a visible member (one with none is dropped by the
-        viewer rule anyway).  The same batched member read as
+    def member_answer_ids(self, ids: Iterable[Any]) -> Dict[str, str]:
+        """A cluster that may hold a hidden member can carry a canonical id
+        minted from that member's name (``K-<seed>``), whether or not the
+        notebook still awaits its isolated rebuild (the E4-5 marker): the
+        viewer is answered by the cluster's first VISIBLE member's object id
+        instead -- ``{cluster id: member object id}`` for every id among
+        ``ids`` answered by its first visible member
+        (``cluster_answered_by_member``) that has one (one with none is
+        dropped by the viewer rule anyway).  The same batched member read as
         ``cluster_first_visible`` -- KG search's folded hits, the graph view,
         the neighbour view and concept detail all answer by it."""
         return {
@@ -685,27 +742,49 @@ class KgViewerScope:
         """Neighbour hydration under the rule: ``None`` when the focus itself
         is hidden, else ``(nodes, edges)`` without hidden objects, clusters
         with no visible live member, and edges touching either; clusters
-        that may hold a hidden member are relabelled.
+        answered by their first visible member are relabelled (their ids are
+        ``answer_neighbourhood``'s third value)."""
+        judged = self.answer_neighbourhood(nodes, edges, focus_ids)
+        return None if judged is None else judged[:2]
+
+    def answer_neighbourhood(
+        self, nodes: List[dict], edges: List[dict], focus_ids: Iterable[str],
+        *, inputs: Iterable[str] = (),
+    ) -> Optional[tuple]:
+        """``(nodes, edges, answers)``: ``filter_neighbourhood``'s pair, and
+        ``{cluster id: first visible member's object id}`` for every cluster
+        among them (and the focus ids) that is answered by its first visible
+        member (``cluster_answered_by_member``) -- the label and the id come
+        from the same one batched member read; the caller applies the ids
+        (``answer_graph_by``) after cutting the response.  ``None`` when a
+        focus is hidden, and -- for a scope that ``answers_by_member`` -- when
+        an id in ``inputs`` (the ids the reader asked with) is no raw object:
+        a cluster id given as input answers like an unknown one.
 
         Every id is judged on its own identity (codex #806 r1): a raw object
-        by the object rule, a folded cluster id by ``cluster_needs_check`` and
-        its members — a cluster none of whose members is owned by an
-        unreadable source but every member of which cites only one is hidden
-        like any other."""
+        by the object rule, a folded cluster id by its members — a cluster
+        none of whose members is owned by an unreadable source but every
+        member of which cites only one is hidden like any other."""
+        focus_ids = [str(f) for f in focus_ids if f]
+        inputs = [str(i) for i in inputs if i]
         unique = list(dict.fromkeys(
-            [str(n["id"]) for n in nodes] + [str(f) for f in focus_ids if f]))
+            [str(n["id"]) for n in nodes] + focus_ids + inputs))
         hidden_raw, known_raw = self._raw_objects(unique)
+        if self.answers_by_member and any(i not in known_raw for i in inputs):
+            return None
         labels: Dict[str, str] = {}
+        answers: Dict[str, str] = {}
         hidden_clusters: set = set()
-        for node_id, label in self.cluster_labels(
+        for node_id, row in self.cluster_first_visible(
             [i for i in unique if i not in known_raw]
         ).items():
-            if label is None:
+            if row is None:
                 hidden_clusters.add(node_id)
             else:
-                labels[node_id] = label
+                labels[node_id] = _member_name(row)
+                answers[node_id] = str(row["member_object_id"])
         gone = hidden_raw | hidden_clusters
-        if any(str(f) in gone for f in focus_ids if f):
+        if any(f in gone for f in [*focus_ids, *inputs]):
             return None
         kept_nodes = []
         for node in nodes:
@@ -716,12 +795,12 @@ class KgViewerScope:
                 node = {**node, "payload": {**(node.get("payload") or {}),
                                             "name": labels[node_id]}}
             kept_nodes.append(node)
-        kept = {str(n["id"]) for n in kept_nodes} | {str(f) for f in focus_ids if f}
+        kept = {str(n["id"]) for n in kept_nodes} | set(focus_ids)
         kept_edges = [
             e for e in edges
             if str(e["source_object_id"]) in kept and str(e["target_object_id"]) in kept
         ]
-        return kept_nodes, kept_edges
+        return kept_nodes, kept_edges, answers
 
     def drop_hidden_graph(
         self, nodes: List[dict], edges: List[dict], *, shared: bool,
@@ -750,7 +829,8 @@ def answer_graph_by(
     renames: Dict[str, str], nodes: List[dict], edges: List[dict],
 ) -> Tuple[List[dict], List[dict]]:
     """``nodes`` / ``edges`` with every id in ``renames`` replaced by its
-    answer id (``KgViewerScope.pending_answer_ids``); unchanged when empty."""
+    answer id (``KgViewerScope.member_answer_ids`` or the third value of
+    ``KgViewerScope.answer_neighbourhood``); unchanged when empty."""
     if not renames:
         return nodes, edges
 
@@ -767,6 +847,12 @@ def answer_graph_by(
             for e in edges
         ],
     )
+
+
+def _member_name(row: Any) -> str:
+    """A cluster member row's name (the text-JSON payload of
+    ``concept_cluster_detail_rows``, the shape concept detail decodes)."""
+    return str(json.loads(row["payload"] or "{}").get("name", "") or "")
 
 
 def _payload(value: Any) -> dict:
@@ -885,7 +971,12 @@ class KgViewerScopeReader:
         The identity judged is ``viewer_identity``: with the Memory channel
         closed it is '' and every Memory of the notebook is foreign, the
         viewer's own included (plan correction 1).  A notebook without Memory
-        answers ``None`` after one read, as before."""
+        answers ``None`` after one read, as before -- except to a non-member
+        reading a mounted library, who always gets a scope that
+        ``answers_by_member`` (filtering only when the library holds a hidden
+        source): a cluster's id and stored name can come from a hidden member,
+        or from one a Knowhow re-projection pruned, whose old id and name stay
+        on the surviving member rows until the next merge."""
         user = self.current_user_id()
         viewer = viewer_identity(user)
         member = (
@@ -908,9 +999,9 @@ class KgViewerScopeReader:
             foreign = frozenset(
                 memory | {str(s) for s in self.sources.hidden_source_ids(notebook_id, "") if s}
             )
-        if not foreign and not own_memory:
+        if member and not foreign and not own_memory:
             return None
         return KgViewerScope(
             self, notebook_id, own_hidden=own, foreign=foreign,
-            viewer_id=viewer, own_memory=own_memory,
+            viewer_id=viewer, own_memory=own_memory, answers_by_member=not member,
         )
