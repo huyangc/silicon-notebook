@@ -382,6 +382,35 @@ def test_a_refused_neighbour_read_reports_a_refused_preview_build_once(
     assert refusals(env.nb, env.owner, env.membernote_c) == once_nb
 
 
+@pytest.mark.parametrize("path", ["preview", "live"])
+def test_a_refused_focus_is_decided_before_the_neighbour_read(env, monkeypatch, path):
+    """A focus the scope refuses outright is answered before any neighbour,
+    preview or cluster read is made for it -- the non-member's cluster-id
+    input, hidden Knowhow object and unknown id, and the shared notebook's
+    owner asking about the member's Memory concept -- with the same bytes
+    as before (the unknown id's answer, ids swapped); a visible focus still
+    reads its neighbourhood."""
+    ids = build_library(env)
+    serve_from(env.repo, monkeypatch, path, ids.lib)
+    lifecycle = env.repo._runtime.knowledge_lifecycle
+    unknown_lib = neighbours(env, env.owner, NEVER_ID, ids.lib).text
+    unknown_nb = env.client.get(
+        f"/api/notebooks/{env.nb}/objects/{NEVER_ID}/neighbors", headers=env.owner).text
+    reads: list = []
+    unchecked = lifecycle._kg_neighbors_unchecked
+    monkeypatch.setattr(lifecycle, "_kg_neighbors_unchecked",
+                        lambda *a, **k: reads.append(a[1]) or unchecked(*a, **k))
+    for object_id in (SEEDED_ID, ids.widget_c, ids.kh, NEVER_ID):
+        r = neighbours(env, env.member, object_id, ids.lib)
+        assert r.text.replace(object_id, "<id>") == unknown_lib.replace(NEVER_ID, "<id>")
+    own = env.client.get(
+        f"/api/notebooks/{env.nb}/objects/{env.member_shared}/neighbors", headers=env.owner)
+    assert own.text.replace(env.member_shared, "<id>") == unknown_nb.replace(NEVER_ID, "<id>")
+    assert reads == [], reads
+    assert neighbours(env, env.member, ids.widget, ids.lib).json()["focus_id"] == ids.widget
+    assert reads == [ids.widget], reads
+
+
 def drop_knowhow_member(repo, lib, *, drop_source: bool):
     """What a Knowhow re-projection that drops the object (or a table delete,
     ``drop_source``) does: the dropped object's cluster member rows go, the
@@ -432,9 +461,10 @@ def test_a_library_without_a_hidden_source_reads_one_member_row_per_cluster(
     """Cost: with no hidden source left the scope hides nothing -- no store
     reader takes ``viewer_id``, no owned-hidden read, no fold of hidden
     objects to clusters -- and the neighbour view adds the identity read of
-    its ids (which are objects, which are clusters) and ONE batched
-    first-member read, one row per cluster; concept detail adds no member
-    read at all on its first page."""
+    its ids (which are objects, which are clusters: the focus before the
+    neighbour read, the others after it) and ONE batched first-member read,
+    one row per cluster; concept detail adds no member read at all on its
+    first page."""
     ids = build_library(env)
     drop_knowhow_member(env.repo, ids.lib, drop_source=True)
     knowledge = env.repo._runtime.knowledge
@@ -469,7 +499,10 @@ def test_a_library_without_a_hidden_source_reads_one_member_row_per_cluster(
     assert batched == [(sorted([SEEDED_ID, ids.widget_c]), 1)], batched
     assert relinks == [], relinks
     assert all("viewer_id" not in kwargs for kwargs in relation_kwargs), relation_kwargs
-    assert len(identities) == 1, identities
+    # The focus is judged before the neighbour read, the rest after it; no id
+    # is read twice.
+    assert [sorted(i) for i in identities] == [
+        [ids.widget], sorted([SEEDED_ID, ids.widget_c])], identities
     # The focus's fold and the edge-support fold of the response's own ids:
     # nothing hidden is folded to clusters.
     assert [ids.widget] in folds, folds
