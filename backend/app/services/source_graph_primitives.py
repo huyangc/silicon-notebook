@@ -47,14 +47,14 @@ class SourceGraphPrimitives:
     @staticmethod
     def _owned_snapshot(
         snapshot: SourceSubgraphSnapshot,
-    ) -> tuple[set[str], dict[str, SourceSubgraphNode]]:
+    ) -> dict[str, SourceSubgraphNode]:
         allowed = set(snapshot.allowed_source_ids)
         nodes = {
             node.object_id: node
             for node in snapshot.nodes
             if node.source_ids and set(node.source_ids) <= allowed
         }
-        return allowed, nodes
+        return nodes
 
     @staticmethod
     def _safe_relations(
@@ -84,7 +84,7 @@ class SourceGraphPrimitives:
         capability = snapshot.capability("neighbors")
         if not capability.enabled:
             return SourceGraphNeighborResult(capability)
-        _allowed, nodes = self._owned_snapshot(snapshot)
+        nodes = self._owned_snapshot(snapshot)
         requested_seeds = [
             node_id for node_id in dict.fromkeys(seed_object_ids) if node_id in nodes
         ]

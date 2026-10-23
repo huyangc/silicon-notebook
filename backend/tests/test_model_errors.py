@@ -104,7 +104,7 @@ def test_scheduled_ask_failure_has_safe_support_metadata_and_no_fake_answer(
     repo.settings.chunk_kg_overlay_enabled = False
     notebook = _seed_chunks(repo)
 
-    response = ask_engine_as_current_user(repo._runtime.ask_component, 
+    response = ask_engine_as_current_user(repo._runtime.ask_component,
         notebook.id, AskRequest(question="cascode", mode="chunk")
     )
 
@@ -299,7 +299,7 @@ def test_embedding_failure_is_embedding_service(repo, monkeypatch):
     )
     bind_chat_client(repo, "ask_answer", _AnswerLLM())
     nb = _seed_chunks(repo)
-    response = ask_engine_as_current_user(repo._runtime.ask_component, 
+    response = ask_engine_as_current_user(repo._runtime.ask_component,
         nb.id, AskRequest(question="cascode", mode="chunk")
     )
     error = next(item for item in response.model_errors if item.stage == "embed")

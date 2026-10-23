@@ -175,7 +175,7 @@ def test_complete_postgres_repository_smoke_from_empty_schema(
         ) == 1
         assert warm_progress == [(1, 1)]
 
-        answer = ask_engine_as_current_user(repository._runtime.ask_component, 
+        answer = ask_engine_as_current_user(repository._runtime.ask_component,
             notebook.id,
             AskRequest(question="What evidence is available?", mode="chunk"),
         )

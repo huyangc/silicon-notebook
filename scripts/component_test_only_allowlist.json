@@ -159,7 +159,7 @@
     {
       "member": "backend/app/repositories/ports.py::UnifiedKgStorePort.community_overview",
       "category": "pending-decision",
-      "reason": "主题板块列表的「自开快照」入口:ports.py 注明两个入口是刻意的,生产只用 community_overview_on。删掉自开入口是对这条接口约定的取舍,需拍板"
+      "reason": "主会话 2026-10-23 裁定保留:主题板块列表的「自开快照」入口与 community_overview_on 两个入口是刻意设计(ports.py 注明),供手上没有读连接的调用方用"
     },
     {
       "member": "backend/app/repositories/postgres/answer_link_store.py::AnswerLinkStore.sweep_answer_links",
@@ -254,7 +254,7 @@
     {
       "member": "backend/app/repositories/postgres/unified_kg_store.py::UnifiedKgStore.community_overview",
       "category": "pending-decision",
-      "reason": "主题板块列表的「自开快照」入口:ports.py 注明两个入口是刻意的,生产只用 community_overview_on。删掉自开入口是对这条接口约定的取舍,需拍板"
+      "reason": "主会话 2026-10-23 裁定保留:主题板块列表的「自开快照」入口与 community_overview_on 两个入口是刻意设计(ports.py 注明),供手上没有读连接的调用方用"
     },
     {
       "member": "backend/app/repositories/postgres/unified_kg_store.py::UnifiedKgStore.replace_cluster_rows_streamed",
@@ -364,7 +364,7 @@
     {
       "member": "backend/app/repositories/sqlite/unified_kg_store.py::UnifiedKgStore.community_overview",
       "category": "pending-decision",
-      "reason": "主题板块列表的「自开快照」入口:ports.py 注明两个入口是刻意的,生产只用 community_overview_on。删掉自开入口是对这条接口约定的取舍,需拍板"
+      "reason": "主会话 2026-10-23 裁定保留:主题板块列表的「自开快照」入口与 community_overview_on 两个入口是刻意设计(ports.py 注明),供手上没有读连接的调用方用"
     },
     {
       "member": "backend/app/repositories/sqlite/unified_kg_store.py::UnifiedKgStore.replace_cluster_rows_streamed",
@@ -439,7 +439,7 @@
     {
       "member": "backend/app/services/retrieval_baseline.py::RetrievalBaselineManifest.event_payload",
       "category": "pending-decision",
-      "reason": "selected-source 基线的脱敏运维事件载荷;test_baseline_scaffold_has_no_operational_emit_path 刻意钉住「还没有发出路径」,是待接的脚手架还是删除,需拍板(其读的 manifest_hash / comparison_ready / 两个计数随它)"
+      "reason": "主会话 2026-10-23 裁定保留:selected-source 基线的脱敏运维事件载荷是刻意钉住的运维脚手架(test_baseline_scaffold_has_no_operational_emit_path 钉住「还没有发出路径」),其读的 manifest_hash / comparison_ready / 两个计数随它"
     },
     {
       "member": "backend/app/services/review_queue_memo.py::ReviewQueueMemo.cached_seq",
