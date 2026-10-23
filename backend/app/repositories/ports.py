@@ -3580,7 +3580,13 @@ class OfflineMaintenanceBusyError(RuntimeError):
     """A second direct maintenance process could not claim the operator lock."""
 
 
-class FacadePropertyContract(ModelClientProvider, Protocol):
+# The facade carries chat/configured/parallelism, never rerank: rerank callers
+# hold the runtime's model provider (``ModelClientProvider``), and
+# ``ReasoningRetriever._chunk_rerank_client`` probes ``model_clients`` for
+# ``rerank`` so the knowhow ``from_repository`` path, whose ``model_clients``
+# is the facade, stays on MMR. Inheriting ``ModelClientProvider`` here would
+# promise a method the facade must not grow (S2-A).
+class FacadePropertyContract(ReasoningModelProvider, Protocol):
     settings: Settings
     storage_dir: Path
     retrieval: RetrievalPort

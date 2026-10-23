@@ -292,11 +292,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       只有中性句的报告不读 `sections`。已知残余：存下的原文本身以「中性句 + 「）」+ 空行」开头时，
       不读 `sections` 就无法与新格式区分。只有异常文本恰好以本产品自己的中文失败文案开头才会出现，
       代码注释与用例已写明，登记为已知形态，不另行处理。
-- [ ] **S2-A：协议绑定缺口只剩 `NotebookRepository.rerank`**（来源：PR #857 / #862 / #872 / #906）：
-      `scripts/architecture_boundary_baseline.json::facade_protocol_binding_gaps` 起始 44 条
-      （AskStateStorePort 20、McpMemoryRepository 4、NotebookRepository 20），其余已清零；剩下的
-      `rerank` 经 `FacadePropertyContract` → `ModelClientProvider` 继承进 `NotebookRepository`，facade
-      本体不实现它；#906 刻意未动。清零需要另立一项处理这条继承链。
 - [ ] **S2-D：组件层「仅测试调用」成员未清点**（来源：PR #862）：审计脚本只统计 facade，看不到组件层
       （`AskService.ask_chunk_current` / `ask_reasoning_current`、两端 store 与 `AskStateStorePort` 的
       `ask_job_status` 等）只被测试调用的成员；登记为一类待清点项。
