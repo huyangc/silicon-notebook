@@ -193,8 +193,9 @@ contributor constraints, not a second implementation history.
     are notebook-wide, and no shared cluster holds Memory once a notebook is isolated). A mounted
     library read by a non-member answers every cluster by its first visible member, and treats a
     cluster id given as input as unknown (`KgViewerScope` built for the non-member); a name taken
-    out of a library under a source ceiling comes from a member whose own source is in that
-    ceiling (comparison peers in `communities.py`). A new surface that hands a cluster id or name
+    out of a library under a source ceiling, or matched against one, comes from a member the
+    ceiling admits — its own source is in the ceiling or it has none (a promoted object) —
+    (comparison peers and the focal entity in `communities.py`). A new surface that hands a cluster id or name
     to anyone else follows the same split.
   - For a notebook without a Memory source, scale and viz artifacts are byte-identical to those
     built before the Memory isolation except in three manifests: the main and viz manifests gain
