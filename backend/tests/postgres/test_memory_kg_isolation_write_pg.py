@@ -27,6 +27,7 @@ from app.domain.memory_kg_isolation import (
     MemoryKnowledgeMergeRefused,
 )
 from app.domain.vector_index import encode_vector
+from app.repositories.postgres._store_utils import execute_many
 from app.repositories.postgres.governance_store import GovernanceStore
 from app.repositories.postgres.migrator import PostgresMigrator
 from app.services.repository_runtime import RepositoryCompatibilitySeams
@@ -54,58 +55,70 @@ def _seed(database) -> None:
     `src-ma2`), of u-b (`src-mb`) and one orphan (`src-mo`, memory_id NULL); one
     concept per source, one relation per source."""
     with database.write() as db:
-        for user in ("u-a", "u-b"):
-            db.execute(
-                "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
-                "username,password_hash,password_salt,password_iterations) "
-                "VALUES (%s,%s,%s,'user','active',%s,%s,%s,'','',0)",
-                (user, f"{user}@example.test", user, NOW, NOW, user),
-            )
+        execute_many(
+            db,
+            "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
+            "username,password_hash,password_salt,password_iterations) "
+            "VALUES (%s,%s,%s,'user','active',%s,%s,%s,'','',0)",
+            [(user, f"{user}@example.test", user, NOW, NOW, user)
+             for user in ("u-a", "u-b")],
+        )
         db.execute(
             "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
             "created_at,updated_at,tier) VALUES ('nb','N','','','ready','u-a',%s,%s,'personal')",
             (NOW, NOW),
         )
-        for memory_id, owner in (("mem-a1", "u-a"), ("mem-a2", "u-a"), ("mem-b", "u-b")):
-            db.execute(
-                "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
-                "content_md,created_at,updated_at) "
-                "VALUES (%s,'nb',%s,'ask_answer','confirmed','t','x',%s,%s)",
-                (memory_id, owner, NOW, NOW),
-            )
-        for source_id, source_type, memory_id in (
+        execute_many(
+            db,
+            "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
+            "content_md,created_at,updated_at) "
+            "VALUES (%s,'nb',%s,'ask_answer','confirmed','t','x',%s,%s)",
+            [(memory_id, owner, NOW, NOW)
+             for memory_id, owner in (("mem-a1", "u-a"), ("mem-a2", "u-a"), ("mem-b", "u-b"))],
+        )
+        sources = (
             ("src-s", "file", None),
             ("src-s2", "file", None),
             ("src-ma1", "memory", "mem-a1"),
             ("src-ma2", "memory", "mem-a2"),
             ("src-mb", "memory", "mem-b"),
             ("src-mo", "memory", None),
-        ):
-            db.execute(
-                "INSERT INTO sources(id,notebook_id,title,source_type,memory_id,created_at,"
-                "updated_at) VALUES (%s,'nb',%s,%s,%s,%s,%s)",
-                (source_id, source_id, source_type, memory_id, NOW, NOW),
-            )
-            object_id = "ko-" + source_id[4:]
-            db.execute(
-                "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,payload,"
-                "evidence,source_id,created_at,updated_at) "
-                "VALUES (%s,'nb','claim','approved',%s,%s,%s,%s,%s)",
-                (object_id, json.dumps({"name": object_id}),
-                 json.dumps([{"source_id": source_id, "element_id": f"el-{source_id}",
-                              "quoted_span": object_id}]),
-                 source_id, NOW, NOW),
-            )
-            db.execute(
-                "INSERT INTO knowledge_embeddings(object_id,notebook_id,vector,created_at) "
-                "VALUES (%s,'nb',%s,%s)",
-                (object_id, encode_vector([1.0] + [0.0] * 15), NOW),
-            )
-            db.execute(
-                "INSERT INTO knowledge_relations(id,notebook_id,source_id,source_object_id,"
-                "target_object_id,edge_type,created_at) VALUES (%s,'nb',%s,%s,%s,'r',%s)",
-                ("kr-" + source_id[4:], source_id, object_id, object_id, NOW),
-            )
+        )
+        # Batch each table in foreign-key order; every call still owns one
+        # independent schema, real migration and write transaction.
+        execute_many(
+            db,
+            "INSERT INTO sources(id,notebook_id,title,source_type,memory_id,created_at,"
+            "updated_at) VALUES (%s,'nb',%s,%s,%s,%s,%s)",
+            [(source_id, source_id, source_type, memory_id, NOW, NOW)
+             for source_id, source_type, memory_id in sources],
+        )
+        objects = [("ko-" + source_id[4:], source_id) for source_id, _, _ in sources]
+        execute_many(
+            db,
+            "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,payload,"
+            "evidence,source_id,created_at,updated_at) "
+            "VALUES (%s,'nb','claim','approved',%s,%s,%s,%s,%s)",
+            [(object_id, json.dumps({"name": object_id}),
+              json.dumps([{"source_id": source_id, "element_id": f"el-{source_id}",
+                           "quoted_span": object_id}]),
+              source_id, NOW, NOW)
+             for object_id, source_id in objects],
+        )
+        execute_many(
+            db,
+            "INSERT INTO knowledge_embeddings(object_id,notebook_id,vector,created_at) "
+            "VALUES (%s,'nb',%s,%s)",
+            [(object_id, encode_vector([1.0] + [0.0] * 15), NOW)
+             for object_id, _ in objects],
+        )
+        execute_many(
+            db,
+            "INSERT INTO knowledge_relations(id,notebook_id,source_id,source_object_id,"
+            "target_object_id,edge_type,created_at) VALUES (%s,'nb',%s,%s,%s,'r',%s)",
+            [("kr-" + source_id[4:], source_id, object_id, object_id, NOW)
+             for object_id, source_id in objects],
+        )
 
 
 @pytest.fixture
@@ -1866,17 +1879,22 @@ def _cost_seed(
                 (notebook_id, notebook_id, "deprecated" if deprecated_ordinary else "approved",
                  notebook_id, NOW, NOW, n),
             )
+            memory_vectors = []
             for g in range(1, n + 1):
                 # Distinct vectors (HNSW recall degrades on exact duplicates),
                 # all behind the shared concept but well above the bridge
                 # threshold, so they crowd the ANN window.
                 vec = [1.0] + [0.0] * 15
                 vec[1 + g % 14] = 0.2 + (g % 50) * 0.002
-                db.execute(
-                    "INSERT INTO knowledge_embeddings(object_id,notebook_id,vector,created_at) "
-                    "VALUES (%s,%s,%s,%s)",
-                    (f"{notebook_id}-kom{g}", notebook_id, encode_vector(vec), NOW),
+                memory_vectors.append(
+                    (f"{notebook_id}-kom{g}", notebook_id, encode_vector(vec), NOW)
                 )
+            execute_many(
+                db,
+                "INSERT INTO knowledge_embeddings(object_id,notebook_id,vector,created_at) "
+                "VALUES (%s,%s,%s,%s)",
+                memory_vectors,
+            )
         for source_id in ("src-A", "src-B", "src-far"):
             db.execute(
                 "INSERT INTO sources(id,notebook_id,title,source_type,created_at,updated_at) "

@@ -13,6 +13,7 @@ from app.core.config import Settings
 from app.repositories.postgres import knowledge_counts_cache
 from app.services.repository_factory import create_repository
 from tests import reasoning_stage_characterization_cases as cases
+from tests.postgres.reasoning_snapshot import read_table_rows
 
 pytestmark = [
     pytest.mark.postgres_integration,
@@ -35,6 +36,7 @@ BACKEND = cases.Backend(
     placeholder="%s",
     tables=_tables,
     invalidate_caches=knowledge_counts_cache.invalidate,
+    read_table_rows=read_table_rows,
 )
 
 
