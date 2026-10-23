@@ -1,18 +1,19 @@
 """GitHub Actions keeps offline and PostgreSQL gates isolated and least-privilege."""
 from __future__ import annotations
 
+import ast
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
 from tests.child_env_testkit import BYTECODE_ENV
-
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
@@ -191,6 +192,91 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
     assert [command for command in run_commands if "scripts/check" in command] == [
         "bash scripts/check_postgres.sh"
     ]
+
+
+def _ci_logging_configurator():
+    job = _load_workflow()["jobs"]["postgres-integration"]
+    command = _named_step(job, "Provision least-privilege PostgreSQL test targets")["run"]
+    source = command.removeprefix("python - <<'PY'\n").removesuffix("PY\n")
+    module = ast.parse(source)
+    functions = [node for node in module.body if isinstance(node, ast.FunctionDef)]
+    assert [function.name for function in functions] == ["configure_ci_logging"]
+    connection_blocks = [
+        node for node in module.body if isinstance(node, ast.With)
+        and any(isinstance(item.optional_vars, ast.Name)
+                and item.optional_vars.id == "connection" for item in node.items)
+    ]
+    assert len(connection_blocks) == 1
+    # The executed provisioning path applies and verifies the policy before it
+    # checks durability or creates test roles/databases, not merely defining it.
+    invocation = connection_blocks[0].body[0]
+    assert isinstance(invocation, ast.Expr) and isinstance(invocation.value, ast.Call)
+    assert isinstance(invocation.value.func, ast.Name)
+    assert invocation.value.func.id == "configure_ci_logging"
+    namespace = {"time": SimpleNamespace(sleep=lambda _: None)}
+    exec(compile(ast.Module(body=functions, type_ignores=[]), str(WORKFLOW_PATH), "exec"), namespace)
+    return namespace["configure_ci_logging"]
+
+
+class _CiLoggingServer:
+    """Reload affects later sessions; the administrative session stays stale."""
+
+    def __init__(self, *, reload_ok=True, effective_after=2):
+        self.reload_ok = reload_ok
+        self.effective_after = effective_after
+        self.pending = None
+        self.reloads = 0
+        self.probes = 0
+        self.closed_probes = 0
+
+    def execute(self, statement):
+        match = re.fullmatch(r"ALTER SYSTEM SET (\w+) = '(\w+)'", statement)
+        if match:
+            # Only repeated SQL bodies may be suppressed: errors, diagnostics,
+            # message severity and the application's privileges stay intact.
+            assert match[1] == "log_min_error_statement"
+            self.pending = match[2]
+            return None
+        assert statement == "SELECT pg_reload_conf()"
+        self.reloads += 1
+        return SimpleNamespace(fetchone=lambda: (self.reload_ok,))
+
+    def connect(self):
+        self.probes += 1
+        effective = (
+            self.pending if self.reloads and self.probes >= self.effective_after else "error"
+        )
+        server = self
+
+        class Probe:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                server.closed_probes += 1
+
+            def execute(self, statement):
+                assert statement == "SHOW log_min_error_statement"
+                return SimpleNamespace(fetchone=lambda: (effective,))
+
+        return Probe()
+
+
+def test_postgres_ci_logging_reloads_and_verifies_fresh_sessions() -> None:
+    server = _CiLoggingServer()
+    _ci_logging_configurator()(server, server.connect)
+    assert server.pending == "panic"
+    assert server.reloads == 1
+    assert server.probes == server.closed_probes == 2
+
+
+@pytest.mark.parametrize("reload_ok", [False, True])
+def test_postgres_ci_logging_fails_closed_if_reload_is_not_effective(reload_ok) -> None:
+    server = _CiLoggingServer(reload_ok=reload_ok, effective_after=1000)
+    with pytest.raises(RuntimeError, match="logging policy"):
+        _ci_logging_configurator()(server, server.connect)
+    assert server.reloads == 1
+    assert server.probes == server.closed_probes == (50 if reload_ok else 0)
 
 
 @pytest.mark.parametrize(

@@ -174,23 +174,42 @@ jobs:
           python - <<'PY'
           import json
           import os
+          import time
           from urllib.parse import quote
 
           import psycopg
           from psycopg import sql
 
+          def configure_ci_logging(connection, connect):
+              # RAISE LOG includes its entire migration DO statement by default.
+              # Keep messages and their diagnostics, but omit repeated SQL bodies
+              # on this disposable CI server (including SQL from real errors).
+              connection.execute("ALTER SYSTEM SET log_min_error_statement = 'panic'")
+              if not connection.execute("SELECT pg_reload_conf()").fetchone()[0]:
+                  raise RuntimeError("could not reload PostgreSQL CI logging policy")
+              for _ in range(50):
+                  # Reload is asynchronous. A new session must observe the policy
+                  # before any test role, database or migration is provisioned.
+                  with connect() as probe:
+                      if probe.execute("SHOW log_min_error_statement").fetchone()[0] == "panic":
+                          return
+                  time.sleep(0.1)
+              raise RuntimeError("PostgreSQL CI logging policy did not become effective")
+
           role = "silicon_notebook_app"
           decoy_owner_role = "silicon_notebook_ci_owner_decoy"
           password = os.environ["POSTGRES_APP_PASSWORD"]
           targets = []
-          with psycopg.connect(
+          admin_connection = dict(
               host=os.environ["PGHOST"],
               port=os.environ["PGPORT"],
               user=os.environ["PGUSER"],
               password=os.environ["PGPASSWORD"],
               dbname="postgres",
               autocommit=True,
-          ) as connection:
+          )
+          with psycopg.connect(**admin_connection) as connection:
+              configure_ci_logging(connection, lambda: psycopg.connect(**admin_connection))
               # Disposable in-memory storage avoids hosted-disk DDL overhead;
               # keep PostgreSQL's real commit/WAL machinery enabled.
               for setting in ("fsync", "synchronous_commit", "full_page_writes"):

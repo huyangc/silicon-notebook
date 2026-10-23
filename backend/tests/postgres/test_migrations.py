@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import threading
+from contextlib import contextmanager
 
 import pytest
 
@@ -10,7 +11,6 @@ from app.migration.sync.capture import (
     expected_postgres_triggers,
 )
 from tests.postgres.conftest import _safe_ascii_text
-
 
 pytestmark = pytest.mark.postgres_integration
 
@@ -70,6 +70,156 @@ def test_migrate_can_stop_at_a_valid_target_then_resume(postgres_database):
     assert migrator.current_version() == 3
     with pytest.raises(RuntimeError, match="newer than requested target"):
         migrator.migrate(target_version=2)
+
+
+def test_applied_prefix_needs_no_replay_transactions(postgres_database, monkeypatch):
+    migrations = [
+        _migration(
+            1,
+            "CREATE TABLE migration_transaction_probe "
+            "(step integer PRIMARY KEY, transaction_id bigint NOT NULL); "
+            "INSERT INTO migration_transaction_probe VALUES (1, txid_current())",
+        ),
+        *(
+            _migration(
+                version,
+                "INSERT INTO migration_transaction_probe "
+                f"VALUES ({version}, txid_current())",
+            )
+            for version in range(2, 5)
+        ),
+    ]
+    migrator = _migrator(postgres_database, migrations)
+    original_write = postgres_database.write
+    query_counts: list[int] = []
+
+    class CountedConnection:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, *args, **kwargs):
+            query_counts[-1] += 1
+            return self.connection.execute(*args, **kwargs)
+
+    @contextmanager
+    def counted_write():
+        with original_write() as connection:
+            query_counts.append(0)
+            yield CountedConnection(connection)
+
+    monkeypatch.setattr(postgres_database, "write", counted_write)
+    assert migrator.migrate(target_version=2) == 2
+    assert len(query_counts) == 2
+    assert all(count <= 5 for count in query_counts)
+
+    query_counts.clear()
+    assert migrator.migrate() == 4
+    assert len(query_counts) == 2
+    assert all(count <= 5 for count in query_counts)
+
+    query_counts.clear()
+    assert migrator.migrate() == 4
+    assert len(query_counts) == 1
+    assert query_counts[0] <= 3
+
+    with postgres_database.connect() as connection:
+        steps = connection.execute(
+            "SELECT step, transaction_id FROM migration_transaction_probe ORDER BY step"
+        ).fetchall()
+    assert [row["step"] for row in steps] == [1, 2, 3, 4]
+    # Every real step still commits independently, including after a partial run.
+    assert len({row["transaction_id"] for row in steps}) == 4
+
+
+@pytest.mark.parametrize(
+    ("corruption", "message"),
+    [
+        ("UPDATE silicon_schema_migrations SET checksum='corrupt' WHERE version=1", "checksum"),
+        ("DELETE FROM silicon_schema_migrations WHERE version=2", "gap"),
+        (
+            "INSERT INTO silicon_schema_migrations(version, checksum) VALUES (4, 'future')",
+            "future",
+        ),
+    ],
+    ids=["early-checksum", "early-gap", "future-version"],
+)
+def test_current_migration_revalidates_the_whole_ledger(
+    postgres_database, corruption, message
+):
+    migrator = _migrator(
+        postgres_database,
+        [_migration(version, f"SELECT {version}") for version in range(1, 4)],
+    )
+    assert migrator.migrate() == 3
+    assert migrator.migrate() == 3
+    with postgres_database.write() as connection:
+        connection.execute(corruption)
+    with pytest.raises(RuntimeError, match=message):
+        migrator.migrate()
+
+
+def test_failed_later_migration_preserves_committed_prefix_and_can_resume(postgres_database):
+    import psycopg
+
+    first = _migration(1, "CREATE TABLE resume_probe (id integer PRIMARY KEY)")
+    broken = _migration(
+        2,
+        "INSERT INTO resume_probe VALUES (2); INSERT INTO missing_table VALUES (1)",
+    )
+    migrator = _migrator(postgres_database, [first, broken])
+    with pytest.raises(psycopg.errors.UndefinedTable):
+        migrator.migrate()
+    assert migrator.current_version() == 1
+    with postgres_database.connect() as connection:
+        assert connection.execute("SELECT * FROM resume_probe").fetchall() == []
+
+    resumed = _migrator(
+        postgres_database,
+        [first, _migration(2, "INSERT INTO resume_probe VALUES (2)")],
+    )
+    assert resumed.migrate() == 2
+    assert resumed.current_version() == 2
+    with postgres_database.connect() as connection:
+        assert connection.execute("SELECT id FROM resume_probe").fetchall() == [{"id": 2}]
+
+
+def test_ledger_tail_rewind_between_commits_is_refused(postgres_database, monkeypatch):
+    first = _migration(1, "CREATE TABLE rewind_probe (id integer PRIMARY KEY)")
+    second = _migration(2, "INSERT INTO rewind_probe VALUES (2)")
+    migrator = _migrator(postgres_database, [first, second])
+    original_write = postgres_database.write
+    applied_sql: list[str] = []
+    rewound = False
+
+    class ObservedConnection:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, statement, *args, **kwargs):
+            if statement in (first.sql, second.sql):
+                applied_sql.append(statement)
+            return self.connection.execute(statement, *args, **kwargs)
+
+    @contextmanager
+    def write_with_intervening_rewind():
+        nonlocal rewound
+        with original_write() as connection:
+            yield ObservedConnection(connection)
+        # Run only after the real first transaction commits and releases its
+        # advisory lock, before the migrator can acquire its next transaction.
+        if not rewound:
+            rewound = True
+            with original_write() as connection:
+                connection.execute("DELETE FROM silicon_schema_migrations WHERE version=1")
+
+    monkeypatch.setattr(postgres_database, "write", write_with_intervening_rewind)
+    with pytest.raises(RuntimeError, match="version gap"):
+        migrator.migrate()
+    assert rewound
+    assert applied_sql == [first.sql]
+    with postgres_database.connect() as connection:
+        assert connection.execute("SELECT * FROM rewind_probe").fetchall() == []
+        assert connection.execute("SELECT * FROM silicon_schema_migrations").fetchall() == []
 
 
 @pytest.mark.parametrize("target_version", [0, -1, 4, True, 1.5])
@@ -216,6 +366,8 @@ def test_gapped_ledger_versions_fail_closed(postgres_database):
 
 
 def test_failed_migration_rolls_back_ddl_and_ledger(postgres_database):
+    import psycopg
+
     migrator = _migrator(
         postgres_database,
         [
@@ -227,7 +379,7 @@ def test_failed_migration_rolls_back_ddl_and_ledger(postgres_database):
         ],
     )
 
-    with pytest.raises(Exception):
+    with pytest.raises(psycopg.errors.UndefinedTable):
         migrator.migrate()
 
     with postgres_database.connect() as conn:

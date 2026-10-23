@@ -333,6 +333,10 @@ store 决定，两个后端一致。清单只有属于以下三类之一时才�
   连续编号 SQL，并同步 [POSTGRES_SCHEMA_MANIFEST](../backend/app/repositories/postgres/schema_manifest.py)。
   [migrator](../backend/app/repositories/postgres/migrator.py) 在迁移锁下验证 checksum
   与 ledger，不能改写已应用 SQL。当前版本号与逐版本 DDL 以这些可执行源文件为准。
+  每次锁内事务先校验完整 ledger，再选择下一个未应用版本。已是目标版本时只需一次
+  校验事务，部分升级从下一个版本继续。待应用迁移仍逐条提交，每步重新取得 advisory
+  lock 并读取 ledger，保留并发启动与失败恢复检查。仅缓存已加载的不可变迁移对象的
+  checksum，不缓存数据库状态；新的 migrator 仍重新加载迁移 SQL 文件。
 - 同时保留新库与升级行为、null/default 语义、归属、keyset 排序/collation、
   FK/cascade/unique surface 和复制/清理分类。表特有的设计理由写在引入它的迁移旁；
   同批更新受影响的 schema/seed/snapshot fixture 与 migration manifest，不能
@@ -730,7 +734,12 @@ WAL、`fsync`、`synchronous_commit`、`full_page_writes` 保持默认值，建�
 job 记录存储用量、容器内存峰值与 CPU 计数，以及 PostgreSQL 16 `pg_stat_bgwriter`
 中的 checkpoint 次数、写入/同步耗时和 buffer 写入计数，区分 checkpoint 压力与测试 CPU
 开销。此泳道验证运行中的数据库行为，不验证容器丢失或宿主
-断电后的介质持久性；生产与本地 PostgreSQL 存储不变。CI 先创建四组显式的主库、
+断电后的介质持久性；生产与本地 PostgreSQL 存储不变。
+仅 CI 为可丢弃服务设置 `log_min_error_statement=panic`，reload 后通过新连接确认生效，
+再创建测试目标。这会省略服务端 SQL 语句正文，包括每次迁移 `RAISE LOG` 汇总原先附带的
+整段 SQL。服务端消息等级与错误详细程度保持默认：主错误、DETAIL/HINT/CONTEXT、
+无内容迁移汇总仍保留，失败测试的 psycopg 客户端诊断也完整保留。服务端失败 SQL 的
+正文同样省略；生产和本地日志默认值不变。CI 先创建四组显式的主库、
 非 C UTF8 库与非 UTF 库，再交给权限不变的最小权限应用账号。`TEST_POSTGRES_TARGETS_JSON`
 是四个对象组成的数组，每个对象包含 `primary`、`non_c`、`non_utf` URL 字段；同一显式
 服务端地址上的十二个数据库必须互不相同。launcher 在启动四个 pytest worker 前校验并

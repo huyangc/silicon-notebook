@@ -441,6 +441,13 @@ statement-local planner settings (measured in both directions).
   [POSTGRES_SCHEMA_MANIFEST](../backend/app/repositories/postgres/schema_manifest.py).
   The [migrator](../backend/app/repositories/postgres/migrator.py) validates checksums
   and the ledger under its migration lock; never rewrite an applied SQL file.
+  Every locked transaction validates the complete ledger before selecting the
+  next unapplied version. An already-current database needs one validation
+  transaction; a partial upgrade starts at its next version. Pending migrations
+  still commit individually and re-read the ledger under the advisory lock at
+  each step, preserving concurrent-startup and failure/resume checks. Only the
+  checksum of each immutable loaded migration object is memoized; database state
+  is never cached and new migrators reload the packaged SQL files.
   Current version numbers and per-version DDL are owned by these executable sources.
 - Preserve fresh-install and upgrade behavior, null/default semantics, ownership,
   keyset ordering/collation, FK/cascade/unique surfaces, and copy/cleanup classification.
@@ -971,6 +978,14 @@ PostgreSQL 16 checkpoint counts, write/sync time, and buffer-write counters from
 This lane tests live
 database behavior, not persistence across container loss or host power failure;
 production and local PostgreSQL storage are unchanged.
+CI alone sets `log_min_error_statement=panic` on its disposable server and checks
+the reloaded value from a new connection before provisioning targets. This omits
+server-side SQL statement bodies, including those otherwise appended to every
+migration `RAISE LOG` summary. Server message levels and error verbosity retain
+their defaults: primary errors, DETAIL/HINT/CONTEXT and content-free migration
+summaries remain, as do complete psycopg client diagnostics in failing tests.
+Server-side failing SQL bodies are also omitted; production and local logging
+defaults are unchanged.
 CI provisions four explicit groups of primary, non-C UTF8, and non-UTF targets
 before handing off to the unchanged least-privilege application role. The
 `TEST_POSTGRES_TARGETS_JSON` array contains four objects with `primary`, `non_c`,
