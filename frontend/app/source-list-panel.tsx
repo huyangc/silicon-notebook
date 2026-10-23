@@ -40,6 +40,7 @@ export function SourceListPanel({
   onOpenSource,
   onDeleteSource,
   onPage,
+  onAddSource,
 }: {
   sources: SourceSummary[];
   uiMode: UiMode;
@@ -59,6 +60,8 @@ export function SourceListPanel({
   onOpenSource: (source: SourceSummary) => void;
   onDeleteSource: (source: SourceSummary) => void;
   onPage: (page: number) => void;
+  /** 空列表那句「添加来源」的动作（与来源栏顶部那颗按钮同一个入口）。 */
+  onAddSource: () => void;
 }) {
   return (
     <>
@@ -103,7 +106,15 @@ export function SourceListPanel({
           <article className="source-empty">
             <div>▧</div>
             <strong>已保存的来源将显示在此处</strong>
-            <p>点击上方的“添加来源”导入 PDF、Markdown、DOCX 或 PPTX。</p>
+            {/* 说到的动作就是可点的字;只读成员加不了来源,不叫他去点一颗不存在的按钮。 */}
+            {readOnlyWorkspace ? (
+              <p>这本笔记本还没有来源。</p>
+            ) : (
+              <p>
+                <button type="button" className="link-button inline-action" onClick={onAddSource}>添加来源</button>
+                ，导入 PDF、Markdown、DOCX 或 PPTX。
+              </p>
+            )}
           </article>
         ) : (
           sources.map((source) => {

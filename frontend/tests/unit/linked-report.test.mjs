@@ -8,6 +8,7 @@ import {
   linkedReportFromActiveJob,
   linkedReportFromTurn,
   linkedReportLabel,
+  linkedReportTagText,
   linkedReportReceiptName,
   linkedReportReceiptText,
   restoredLinkedReport,
@@ -243,6 +244,9 @@ test("nothing left to tick in either dimension falls back to everything and says
 test("the tag and receipt name carry the title, and fall back to no title rather than an invented one", () => {
   assert.equal(linkedReportLabel("电池安全综述"), "关联报告：电池安全综述");
   assert.equal(linkedReportLabel(""), "关联报告");
+  // 来源栏分组的标题已是「关联报告」,标签只放题目;没有题目时如实说没有。
+  assert.equal(linkedReportTagText("电池安全综述"), "电池安全综述");
+  assert.equal(linkedReportTagText(""), "（无题目）");
   assert.equal(linkedReportReceiptName("电池安全综述"), "关联报告《电池安全综述》");
   assert.equal(linkedReportReceiptName(""), "关联报告");
   // 题目整串保留,不截断(界面只做 CSS 单行省略)。

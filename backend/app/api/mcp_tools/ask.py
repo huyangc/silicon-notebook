@@ -1000,7 +1000,7 @@ def _run_notebook(
                     raise AgentToolError(
                         "unavailable",
                         "该笔记本还没有可用于回答的内容，请先添加来源，"
-                        "或在「设置 → 编辑当前笔记本」里挂载一个参考库。",
+                        "或在「笔记本设置」的「参考库」里挂载一个参考库。",
                     )
                 _require_report(repo, principal, notebook_id, report_id)
                 if mode == "reasoning" and confirmation is None:

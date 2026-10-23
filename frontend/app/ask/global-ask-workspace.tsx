@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowUp, BookOpen, Check, ChevronRight, Copy, FileText, Layers3, LoaderCircle, MessageSquare, PanelLeft, Plus, Share2 } from "lucide-react";
 import { PageHeader } from "../components/PageHeader";
@@ -361,7 +362,13 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
             </div>
             {excludesPreviousContext && <p className="global-scope-context-notice" role="status">范围已收窄：先前涉及其他笔记本的提问不会用于本次追问，请重新说明要讨论的对象。</p>}
           </form>
-          <p className={`global-composer-hint${hint ? " invalid" : ""}`}>{hint || (ask.notebooks.length ? "答案来自所选范围的原文 · Enter 发送，Shift + Enter 换行" : "还没有可访问的笔记本，请先返回主页添加资料。")}</p>
+          <p className={`global-composer-hint${hint ? " invalid" : ""}`}>{hint || (ask.notebooks.length
+            ? "答案来自所选范围的原文 · Enter 发送，Shift + Enter 换行"
+            // 说到的动作就是可点的字。嵌在主页的浮窗里时主页就在底下:收起浮窗即可
+            // (onOpenNotebook 即收起),不整页重载;独立的 /ask 页才导航回主页。
+            : <>还没有可访问的笔记本，请先{embedded
+              ? <button type="button" className="link-button inline-action" onClick={() => onOpenNotebook?.()}>返回主页</button>
+              : <Link className="link-button inline-action" href="/">返回主页</Link>}添加资料。</>)}</p>
         </div>
       </main>
     </div>

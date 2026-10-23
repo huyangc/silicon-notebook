@@ -76,30 +76,40 @@ test("page composes one availability owner and exactly the two canonical outlets
   );
 
   assert.ok(sourceDetailWindow, "source extension slot must remain inside SourceDetailWindow");
-  // The side outlet is an entry row inside the source panel's **non-scrolling**
-  // area, not a third workspace column (that column left an empty 190px strip and
-  // squeezed the chat panel). Its direct JSX parent must therefore stay the
-  // sources body. `.source-list` is the only scrolling container (it owns
-  // `flex:1 1 auto/overflow:auto`), so nesting the outlet *inside* it would make the
-  // entry scroll away with the source rows; pinning the direct parent to the sources
-  // body is the load-bearing half of that invariant (the layout guard only pins the
-  // `.sources-panel` subtree and rejects the old `.workspace-grid` direct child).
-  let workspaceOutletParent = outletNodes.get("workspace.side_panel")?.parent;
-  while (workspaceOutletParent && !ts.isJsxElement(workspaceOutletParent)) {
-    workspaceOutletParent = workspaceOutletParent.parent;
+  // The side outlet sits inside the source panel's **non-scrolling** area, not a
+  // third workspace column (that column left an empty 190px strip and squeezed the
+  // chat panel). Its entries are small buttons in the sources tool row (a wrapping
+  // row shared with 补全论文信息, so no plugin entry takes a whole row), and that
+  // row is a direct child of the sources body. `.source-list` is the only scrolling
+  // container (it owns `flex:1 1 auto/overflow:auto`), so nesting the outlet
+  // *inside* it would make the entry scroll away with the source rows; pinning
+  // outlet → tool row → sources body is the load-bearing half of that invariant
+  // (the layout guard only pins the `.sources-panel` subtree and rejects the old
+  // `.workspace-grid` direct child).
+  function enclosingJsxElement(node) {
+    let current = node?.parent;
+    while (current && !ts.isJsxElement(current)) current = current.parent;
+    return current;
   }
+  function classNameText(element) {
+    const attribute = element?.openingElement.attributes.properties.find((property) => (
+      ts.isJsxAttribute(property) && property.name.getText(page) === "className"
+    ));
+    return attribute?.initializer?.getText(page);
+  }
+  const toolRow = enclosingJsxElement(outletNodes.get("workspace.side_panel"));
   assert.ok(
-    workspaceOutletParent
-    && workspaceOutletParent.openingElement.tagName.getText(page) === "div",
-    "workspace side outlet must remain a direct JSX child of the sources body",
+    toolRow
+    && toolRow.openingElement.tagName.getText(page) === "div"
+    && classNameText(toolRow) === '"sources-tool-row"',
+    "workspace side outlet must be a direct JSX child of the sources tool row",
   );
-  const workspaceClass = workspaceOutletParent.openingElement.attributes.properties.find((attribute) => (
-    ts.isJsxAttribute(attribute) && attribute.name.getText(page) === "className"
-  ));
+  const sourcesBody = enclosingJsxElement(toolRow);
   assert.ok(
-    workspaceClass
-    && workspaceClass.initializer?.getText(page) === '"workspace-panel-body sources-body"',
-    "workspace side outlet direct parent must be the fixed sources body, above the scrolling source list",
+    sourcesBody
+    && sourcesBody.openingElement.tagName.getText(page) === "div"
+    && classNameText(sourcesBody) === '"workspace-panel-body sources-body"',
+    "the sources tool row must be a direct child of the fixed sources body, above the scrolling source list",
   );
   let sourceOutletAncestor = outletNodes.get("source.detail_section")?.parent;
   while (sourceOutletAncestor && sourceOutletAncestor !== sourceDetailWindow) {

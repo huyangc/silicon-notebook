@@ -236,30 +236,30 @@ function Shell({
           onFollowUp={followUp}
         />
       ) : (
-        <AskComposer
-          value={question}
-          placeholder="提问"
-          onChange={setQuestion}
-          onSubmit={() => undefined}
-          onAbort={() => undefined}
-          running={false}
-          focusSignal={focusSignal}
-          attachment={(
+        <>
+          <LinkedReportPicker
+            notebookId="notebook-a"
+            linked={session.linkedReport}
+            disabled={false}
+            onSelect={session.linkReport}
+          >
             <LinkedReportChip
               report={session.linkedReport}
               verdict={session.linkedReportCheck}
               note={session.linkedReportNote}
               onRemove={session.unlinkReport}
             />
-          )}
-        >
-          <LinkedReportPicker
-            notebookId="notebook-a"
-            linked={session.linkedReport}
-            disabled={false}
-            onSelect={session.linkReport}
+          </LinkedReportPicker>
+          <AskComposer
+            value={question}
+            placeholder="提问"
+            onChange={setQuestion}
+            onSubmit={() => undefined}
+            onAbort={() => undefined}
+            running={false}
+            focusSignal={focusSignal}
           />
-        </AskComposer>
+        </>
       )}
     </>
   );
@@ -294,7 +294,7 @@ test("高级模式：按钮 → 取范围 → 切到问答页签，新会话挂�
   await user.click(screen.getByRole("button", { name: "就此追问" }));
   expect(readFollowupScope).toHaveBeenCalledWith("rep-1");
   expect(screen.getByTestId("tab")).toHaveTextContent("ask");
-  expect(screen.getByText("关联报告：电池热失控的防护方案有哪些")).toBeInTheDocument();
+  expect(screen.getByText("电池热失控的防护方案有哪些")).toBeInTheDocument();
   expect(screen.getByRole("textbox", { name: "提问" })).toHaveFocus();
   expect(JSON.parse(screen.getByTestId("source-scope").textContent!)).toEqual({
     mode: "include",
@@ -314,12 +314,12 @@ test("自动模式：不取也不切检索范围，照样开新会话、挂报�
   await user.click(screen.getByRole("button", { name: "就此追问" }));
   expect(readFollowupScope).not.toHaveBeenCalled();
   expect(screen.getByTestId("tab")).toHaveTextContent("ask");
-  expect(screen.getByText("关联报告：电池热失控的防护方案有哪些")).toBeInTheDocument();
+  expect(screen.getByText("电池热失控的防护方案有哪些")).toBeInTheDocument();
   expect(screen.getByRole("textbox", { name: "提问" })).toHaveFocus();
   expect(JSON.parse(screen.getByTestId("source-scope").textContent!)).toEqual({ mode: "exclude", source_ids: [] });
   // 自动模式也能从标签上摘掉。
   await user.click(screen.getByRole("button", { name: "移除关联报告" }));
-  expect(screen.queryByText(/关联报告：/)).toBeNull();
+  expect(screen.queryByText("电池热失控的防护方案有哪些")).toBeNull();
 });
 
 test("取范围失败：留在报告页签，按钮自己显示「打开失败」，不挂标签", async () => {

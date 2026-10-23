@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowLeft, BarChart3, Cpu, Database, ExternalLink, GitMerge, LayoutDashboard, LayoutGrid, Link2, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, Users, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, BarChart3, Cpu, Database, ExternalLink, GitMerge, LayoutDashboard, LayoutGrid, Link2, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, ScrollText, Settings, Share2, Sparkles, Table2, Trash2, Upload, Users, X } from "lucide-react";
 import "katex/dist/katex.min.css";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
 import { AuthedImage } from "./authed-image";
@@ -24,6 +24,7 @@ import {
   defaultSourceScopeSelection,
   localScopeIsEmpty,
   retrievalScopeSummary,
+  selectBases,
   selectedBaseIds,
   selectedSourceCount,
   sourceScopePayload,
@@ -249,6 +250,8 @@ import { PasswordChangeModal } from "./password-change-modal";
 import { ReleaseNotesModal } from "./release-notes-modal";
 import { SearchProfileModal } from "./search-profile-modal";
 import { AskComposer } from "./ask-composer";
+import { KgReadinessHint, KgUnavailableHint } from "./kg-readiness-hint";
+import { WelcomeGuidance } from "./welcome-guidance";
 import { quotedPhraseHint } from "./query-syntax";
 import { AskIntentReview } from "./ask-intent-review";
 import {
@@ -257,6 +260,7 @@ import {
   isAskBlocked,
   kgAvailableForScope,
   kgBlockedByBaseScope,
+  unselectedKgBases,
 } from "./ask-availability";
 import { AskSessionHeaderActions } from "./ask-session-header";
 import { ChatTurnNav, chatTurnDomId } from "./chat-turn-nav";
@@ -409,6 +413,9 @@ type WelcomeCopy = {
   title: string;
   description: string;
   prompts: Array<[string, string]>;
+  /** 有值时 description 为空、由页面渲染带行内动作的指引(「添加来源」「挂载参考库」可点),
+   *  而不是一句叫人去别处找入口的纯文字;动作按当前用户的权限取舍,所以不在这个纯函数里拼。 */
+  guidance?: "blocked" | "empty";
 };
 
 // --- 打开笔记本的单一 transition：共享类型 ---------------------------------
@@ -519,20 +526,14 @@ function welcomeCopyFor(notebook: NotebookSummary | null, sources: SourceSummary
   // 对话被硬约束禁用时(后端判定无任何可检索证据):引导添加来源或挂参考库,且不给
   // 可点的提问建议(点了也会被 runAsk 挡下)。判据是后端 ask_available,与来源搜索是否
   // 过滤、当前页 sources 是否为空无关。
+  // 这里的指引不让笔记本描述顶掉:不说怎么开始,用户就无从下手。
   if (isAskBlocked(notebook)) {
-    return {
-      title: "先添加来源，再开始对话",
-      description: notebookPurpose
-        || "上传 PDF、Markdown、DOCX 或 PPTX，或在「设置 → 编辑当前笔记本」里挂载一个参考库，就能基于内容对话了。",
-      prompts: [],
-    };
+    return { title: "先添加来源，再开始对话", description: "", prompts: [], guidance: "blocked" };
   }
   if (sources.length === 0) {
-    return {
-      title: "导入来源后开始提问",
-      description: notebookPurpose || "添加 PDF、Markdown、DOCX 或 PPTX 后，这里会根据来源内容生成可追溯的问题建议。",
-      prompts: promptChipsFor(notebook, sources),
-    };
+    return notebookPurpose
+      ? { title: "导入来源后开始提问", description: notebookPurpose, prompts: promptChipsFor(notebook, sources) }
+      : { title: "导入来源后开始提问", description: "", prompts: promptChipsFor(notebook, sources), guidance: "empty" };
   }
   const topic = sourceTopicLabel(notebook, sources);
   return {
@@ -2252,6 +2253,8 @@ export default function Home() {
   const sessionSidebar = chatMode === "ask" && sourcesCollapsed && wideWorkspace;
   const sessionSidebarMorph = useSessionSidebarMorph(sessionSidebar);
   // 来源栏的两个开关都先记下动画起点再切换,会话栏才能从「历史」按钮长出来、再缩回去。
+  const sourcesCollapsedRef = useRef(sourcesCollapsed);
+  sourcesCollapsedRef.current = sourcesCollapsed;
   function setSourcesCollapsedWithMorph(collapsed: boolean) {
     sessionSidebarMorph.capture();
     sourceLibrary.setSourcesCollapsed(collapsed);
@@ -3127,10 +3130,16 @@ export default function Home() {
     void notebookCollection.saveEditor(patch);
   }
 
-  async function presentNotebookEditor(notebookId: string) {
+  // 来源栏「挂载已整理的参考库」:打开笔记本设置后滚到「参考库」一节(由那一节的 ref 消费)。
+  const notebookEditorBasesFocusRef = useRef(false);
+
+  async function presentNotebookEditor(notebookId: string, options: { focusBases?: boolean } = {}) {
     const lease = rootModals.issue("notebook-editor", rootModals.captureActorOwner());
     if (!lease) return;
-    if (await notebookCollection.openEditor(notebookId)) rootModals.publish(lease);
+    if (await notebookCollection.openEditor(notebookId)) {
+      notebookEditorBasesFocusRef.current = Boolean(options.focusBases);
+      rootModals.publish(lease);
+    }
   }
 
   async function openReadOnlyNotebookSettings() {
@@ -3155,7 +3164,11 @@ export default function Home() {
     }
     openInfoModal({
       title: "设置",
-      message: `当前笔记本为只读。当前索引管线：${summary.label}。${summary.detail} 参考库挂载与链接分享由库主管理。`,
+      // 镜像收走了「本来能改」的人(含库主)的那组控件:对他们说随源环境同步,而不是
+      // 「由库主管理」;纯只读成员照旧(判据见 mirrorHidesNotebookManage 的说明)。
+      message: `当前笔记本为只读。当前索引管线：${summary.label}。${summary.detail} ${capabilities.mirrorHidesNotebookManage
+        ? `${MIRROR_NOTEBOOK_MANAGE_NOTE}；链接分享由库主管理。`
+        : "参考库挂载与链接分享由库主管理。"}`,
       actions: [],
     }, owner);
   }
@@ -4040,6 +4053,9 @@ export default function Home() {
       sourceLibrary.applySourceScopeSelection(scope.source);
       setBaseScopeSelection(scope.base);
     }
+    // 挂上的标签住在来源栏:来源栏收着时展开它,「就此追问」的结果(标签与范围说明)才看得见。
+    // 读 ref 不读闭包:高级模式在 await 取范围之后才走到这里,其间用户可能刚收起来源栏。
+    if (sourcesCollapsedRef.current) setSourcesCollapsedWithMorph(false);
     setAskComposerFocusSignal((value) => value + 1);
   }
 
@@ -5780,120 +5796,133 @@ export default function Home() {
                     <Plus size={20} strokeWidth={2.7} /> 添加来源
                   </button>
                 )}
-                {/* 显示门:仅当存在信息不完整的论文(或补全任务进行中)才显示;
-                    后端单库快照 paper_meta_missing 为 false 且可见页无 missing 来源
-                    时隐藏。判据是纯函数 showPaperMetaBackfill(有单测)。 */}
-                {!readOnlyWorkspace && showPaperMetaBackfill(currentNotebook, sources, backfillingMeta) && (
-                  <button
-                    type="button"
-                    className="button secondary"
-                    disabled={backfillingMeta}
-                    title="为已上传的论文补齐作者、机构等信息"
-                    onClick={async () => {
-                      if (!currentNotebookId || backfillingMeta) return;
-                      // POST 是 fire-and-forget:后端立刻返回 queued,真正的补抽在
-                      // background_jobs 线程里跑。仿 startKgBuild 的不对称模式——
-                      // 成功且 queued>0 时保持 backfillingMeta=true,交给下方轮询
-                      // effect(或聚合看板 poll)检测完成;queued===0 立刻复位
-                      // (无事可做);出错也复位。原本的 finally { false } 让 flag
-                      // 在 HTTP 往返几百毫秒内就被清 0,轮询 gate 从来没机会跑。
-                      // 请求发出前就捕获 notebook/epoch:响应回来时用户可能已切到
-                      // 别的库并发起了它自己的补全,迟到的 queued===0 / 失败若不加
-                      // 守卫会把**那个库**的 backfillingMeta 清掉、停掉它的完成轮询
-                      // (codex R3 P2);快照/来源页刷新(R1/R2)也复用同一份捕获。
-                      const nb = currentNotebookId;
-                      const workspaceEpoch = workspaceEpochRef.current;
-                      const stillCurrent = () => workspaceRequestIsCurrent(
-                        false,
-                        workspaceEpoch,
-                        workspaceEpochRef.current,
-                        nb,
-                        activeNotebookIdRef.current,
-                      );
-                      setBackfillingMeta(true);
-                      try {
-                        const res = await backfillPaperMetadata(nb);
-                        if (!stillCurrent()) return;
-                        if (res.queued === 0) {
+                {/* 笔记本级的次要工具排:补全论文信息与 workspace.side_panel 扩展入口都是一颗
+                    小按钮,同排、按宽度折行,不各占一整行(主动作只有上面的「添加来源」)。
+                    两样都不在时这一排是空的,`.sources-tool-row:empty` 让它不占间距。 */}
+                <div className="sources-tool-row">
+                  {/* 显示门:仅当存在信息不完整的论文(或补全任务进行中)才显示;
+                      后端单库快照 paper_meta_missing 为 false 且可见页无 missing 来源
+                      时隐藏。判据是纯函数 showPaperMetaBackfill(有单测)。 */}
+                  {!readOnlyWorkspace && showPaperMetaBackfill(currentNotebook, sources, backfillingMeta) && (
+                    <button
+                      type="button"
+                      className="button secondary sources-tool-chip"
+                      disabled={backfillingMeta}
+                      title="为已上传的论文补齐作者、机构等信息"
+                      onClick={async () => {
+                        if (!currentNotebookId || backfillingMeta) return;
+                        // POST 是 fire-and-forget:后端立刻返回 queued,真正的补抽在
+                        // background_jobs 线程里跑。仿 startKgBuild 的不对称模式——
+                        // 成功且 queued>0 时保持 backfillingMeta=true,交给下方轮询
+                        // effect(或聚合看板 poll)检测完成;queued===0 立刻复位
+                        // (无事可做);出错也复位。原本的 finally { false } 让 flag
+                        // 在 HTTP 往返几百毫秒内就被清 0,轮询 gate 从来没机会跑。
+                        // 请求发出前就捕获 notebook/epoch:响应回来时用户可能已切到
+                        // 别的库并发起了它自己的补全,迟到的 queued===0 / 失败若不加
+                        // 守卫会把**那个库**的 backfillingMeta 清掉、停掉它的完成轮询
+                        // (codex R3 P2);快照/来源页刷新(R1/R2)也复用同一份捕获。
+                        const nb = currentNotebookId;
+                        const workspaceEpoch = workspaceEpochRef.current;
+                        const stillCurrent = () => workspaceRequestIsCurrent(
+                          false,
+                          workspaceEpoch,
+                          workspaceEpochRef.current,
+                          nb,
+                          activeNotebookIdRef.current,
+                        );
+                        setBackfillingMeta(true);
+                        try {
+                          const res = await backfillPaperMetadata(nb);
+                          if (!stillCurrent()) return;
+                          if (res.queued === 0) {
+                            setBackfillingMeta(false);
+                            setToast("论文信息已是最新，无需补全");
+                            // 显示门数据已漂移(按钮显示着但确无活可干):单库快照与可见
+                            // 来源页**都**要刷——showPaperMetaBackfill 取两者并集,别的
+                            // 标签页补完时本页 sources 里陈旧的 paper_meta_status=
+                            // "missing" 行会压过 paper_meta_missing=false,只刷快照按钮
+                            // 收不起来(codex R1 P2)。翻页/搜索/切库守卫与上方补全完成
+                            // 轮询同一套(refs + workspaceEpoch,codex R2 P2)。
+                            getNotebook(nb).then((refreshed) => {
+                              if (!stillCurrent()) return;
+                              setCurrentNotebook((cur) => (cur && cur.id === refreshed.id ? refreshed : cur));
+                            }).catch(() => {});
+                            loadSourcesPage(nb, {
+                              ...sourceLibrary.currentPageRequest(),
+                              guard: stillCurrent,
+                            }).catch(() => {});
+                          } else {
+                            setToast(`已提交 ${res.queued} 篇论文的信息补全`);
+                            // 保持 backfillingMeta=true;完成检测交给轮询 effect。
+                          }
+                        } catch (err) {
+                          if (!stillCurrent()) return;
                           setBackfillingMeta(false);
-                          setToast("论文信息已是最新，无需补全");
-                          // 显示门数据已漂移(按钮显示着但确无活可干):单库快照与可见
-                          // 来源页**都**要刷——showPaperMetaBackfill 取两者并集,别的
-                          // 标签页补完时本页 sources 里陈旧的 paper_meta_status=
-                          // "missing" 行会压过 paper_meta_missing=false,只刷快照按钮
-                          // 收不起来(codex R1 P2)。翻页/搜索/切库守卫与上方补全完成
-                          // 轮询同一套(refs + workspaceEpoch,codex R2 P2)。
-                          getNotebook(nb).then((refreshed) => {
-                            if (!stillCurrent()) return;
-                            setCurrentNotebook((cur) => (cur && cur.id === refreshed.id ? refreshed : cur));
-                          }).catch(() => {});
-                          loadSourcesPage(nb, {
-                            ...sourceLibrary.currentPageRequest(),
-                            guard: stillCurrent,
-                          }).catch(() => {});
-                        } else {
-                          setToast(`已提交 ${res.queued} 篇论文的信息补全`);
-                          // 保持 backfillingMeta=true;完成检测交给轮询 effect。
+                          reportError(err);
                         }
-                      } catch (err) {
-                        if (!stillCurrent()) return;
-                        setBackfillingMeta(false);
-                        reportError(err);
-                      }
-                    }}
-                  >
-                    {backfillingMeta ? "补全中…" : "补全论文信息"}
-                  </button>
-                )}
+                      }}
+                    >
+                      <ScrollText size={14} aria-hidden="true" />
+                      <span>{backfillingMeta ? "补全中…" : "补全论文信息"}</span>
+                    </button>
+                  )}
+                  {/* workspace.side_panel 扩展点的落点。三条理由:
+                      ① **不是工作区的第三列,也不占来源栏的一整行**——每个入口是工具排里
+                         一颗小按钮(与「补全论文信息」同排、按宽度折行),插件多了也只多
+                         一颗,不会一个入口吃掉一整行;
+                      ② **落在 .sources-body 的固定区、且排在 `.source-list` 之前**:
+                         唯一会滚的容器是 `.source-list` 自己(flex:1 1 auto / overflow:auto),
+                         只有放进它内部才会跟着来源行滚走;排在它之前是为了紧跟「添加来源」、
+                         短视口下也不会先被裁掉(列表才是让位的那个)。
+                      ③ **排在检索范围之上**:从 .source-scope-toolbar 往下(检索范围 →
+                         参考库 → 关联报告 → 本库来源)是一整组「这一问读什么」,插进中间
+                         会把它切断。
+                      只读成员同样看得见——后端四个端点都走 require_notebook_read,
+                      「本人那一份」恰是只读成员唯一能写的东西(可见性判据仍在 host
+                      的 permission/availability 门里,不在这里)。来源栏收起时入口随
+                      整栏一起隐藏(视觉隐藏、仍可 Tab 聚焦——与整个来源栏既有机制一致):
+                      这是收起来源栏本来的语义,已登记接受。 */}
+                  {currentUser && currentNotebook && workspaceExtensions.ownerKey && (
+                    <WorkspaceExtensionOutlet
+                      slot="workspace.side_panel"
+                      registry={WORKSPACE_UI_CONTRIBUTIONS}
+                      projection={workspaceExtensionProjection}
+                      ownerKey={workspaceExtensions.ownerKey}
+                      actions={workspaceExtensionActions}
+                      dialog={rootModals.view("extension")}
+                      dialogHolder={extensionDialogHolder}
+                      context={{
+                        slot: "workspace.side_panel",
+                        actor: {
+                          id: currentUser.id,
+                          username: currentUser.username,
+                          displayName: currentUser.display_name,
+                        },
+                        notebook: { id: currentNotebook.id, name: currentNotebook.name },
+                        source: null,
+                        uiMode,
+                        permissions: workspaceExtensionPermissions,
+                      }}
+                    />
+                  )}
+                </div>
+                {/* 知识图谱就绪度:一句话,话里提到的动作就是可点的字(整理/合并/挂载参考库),
+                    不再是「一颗整行大按钮 + 一段说要去别处做什么的说明」。 */}
                 {!readOnlyWorkspace && currentNotebookId && sources.length > 0 && (
-                  currentNotebook?.kg_ready
-                    ? (
-                      <>
-                        {(currentNotebook?.kg_pending_sources ?? 0) > 0
-                          ? (
-                            <>
-                              <button
-                                type="button"
-                                className="add-source-button"
-                                disabled={kgGraph.buildingKg || kgGraph.deleting}
-                                title="有新增来源尚未分析，点击分析新增内容并合并进知识图谱"
-                                onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
-                              >
-                                <Network size={20} strokeWidth={2.7} /> {kgGraph.buildingKg ? "分析中…" : `分析新增 ${currentNotebook.kg_pending_sources ?? "?"} 篇并合并`}
-                              </button>
-                              <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
-                                知识图谱已就绪 · 有 {currentNotebook.kg_pending_sources ?? "?"} 篇来源待分析
-                              </p>
-                            </>
-                          )
-                          : (
-                            <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
-                              {`✓ 知识图谱已就绪 · 「${strictLabel}」将同时使用图谱`}
-                            </p>
-                          )
-                        }
-                      </>
-                    )
-                    : (
-                      <>
-                        <button
-                          type="button"
-                          className="add-source-button"
-                          disabled={kgGraph.buildingKg || kgGraph.deleting}
-                          title={currentNotebook?.base_kg_available
-                            ? `本笔记本尚未整理知识图谱，${strictLabel}会借用已挂载的参考库；点击为本笔记本单独整理`
-                            : `本笔记本尚未整理知识图谱，也没挂参考库；整理知识图谱可增强${strictLabel}效果；也可挂一个已整理的参考库`}
-                          onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
-                        >
-                          <Network size={20} strokeWidth={2.7} /> {kgGraph.buildingKg ? "整理中…" : "整理知识图谱"}
-                        </button>
-                        <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
-                          {currentNotebook?.base_kg_available
-                            ? `本笔记本尚未整理知识图谱，${strictLabel}将借用已挂载的参考库`
-                            : `本笔记本尚未整理知识图谱，也没挂参考库；整理知识图谱可增强${strictLabel}效果；也可挂一个已整理的参考库`}
-                        </p>
-                      </>
-                    )
+                  <KgReadinessHint
+                    kgReady={Boolean(currentNotebook?.kg_ready)}
+                    pendingSources={currentNotebook?.kg_pending_sources ?? 0}
+                    baseKgAvailable={Boolean(currentNotebook?.base_kg_available)}
+                    hasMountedBase={hasMountedBase}
+                    strictLabel={strictLabel}
+                    busy={kgGraph.buildingKg || kgGraph.deleting}
+                    building={kgGraph.buildingKg}
+                    canMountBases={capabilities.canMountBases}
+                    onBuild={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
+                    onMountBases={() => {
+                      if (currentNotebook) void presentNotebookEditor(currentNotebook.id, { focusBases: true });
+                    }}
+                  />
                 )}
                 {currentNotebook?.kg_build && (
                   <div
@@ -5951,44 +5980,6 @@ export default function Home() {
                     </p>
                   );
                 })()}
-                {/* workspace.side_panel 扩展点的落点。三条理由:
-                    ① **不再是工作区的第三列**——一整列只放一个入口,其余整列空白,
-                       还把问答面板挤窄;这里它与「添加来源」「整理知识图谱」同属
-                       笔记本级动作,视觉上本来就是一排。
-                    ② **落在 .sources-body 的固定区、且排在 `.source-list` 之前**:
-                       唯一会滚的容器是 `.source-list` 自己(flex:1 1 auto / overflow:auto),
-                       只有放进它内部才会跟着来源行滚走;排在它之前是为了与「添加来源」
-                       同排、短视口下也不会先被裁掉(列表才是让位的那个)。
-                    ③ **排在检索范围之上**:从 .source-scope-toolbar 往下(检索范围 →
-                       参考库 → 本库来源)是一整组「范围」,插进中间会把它切断。
-                    只读成员同样看得见——后端四个端点都走 require_notebook_read,
-                    「本人那一份」恰是只读成员唯一能写的东西(可见性判据仍在 host
-                    的 permission/availability 门里,不在这里)。来源栏收起时入口随
-                    整栏一起隐藏(视觉隐藏、仍可 Tab 聚焦——与整个来源栏既有机制一致):
-                    这是收起来源栏本来的语义,已登记接受。 */}
-                {currentUser && currentNotebook && workspaceExtensions.ownerKey && (
-                  <WorkspaceExtensionOutlet
-                    slot="workspace.side_panel"
-                    registry={WORKSPACE_UI_CONTRIBUTIONS}
-                    projection={workspaceExtensionProjection}
-                    ownerKey={workspaceExtensions.ownerKey}
-                    actions={workspaceExtensionActions}
-                    dialog={rootModals.view("extension")}
-                    dialogHolder={extensionDialogHolder}
-                    context={{
-                      slot: "workspace.side_panel",
-                      actor: {
-                        id: currentUser.id,
-                        username: currentUser.username,
-                        displayName: currentUser.display_name,
-                      },
-                      notebook: { id: currentNotebook.id, name: currentNotebook.name },
-                      source: null,
-                      uiMode,
-                      permissions: workspaceExtensionPermissions,
-                    }}
-                  />
-                )}
                 <div className="source-scope-toolbar" role="group" aria-label="问答与深度报告检索范围">
                   {/* title 带上完整计数：窄面板下这行会被省略号截断，不重复一遍就没处看。 */}
                   <span
@@ -6058,6 +6049,35 @@ export default function Home() {
                     </div>
                   </section>
                 )}
+                {/* 「关联报告」分组:这一问除了勾选的来源还读哪份报告。它回答的是「读什么」,
+                    所以住在来源栏、与参考库/本库来源并列;输入框下排只放「怎么答」(回答方式、
+                    检索档位),两类不混在一行。只在问答页签挂——深度报告不读关联报告。
+                    两种界面模式都挂——自动模式也要能挂/换/摘(计划 D16)。标签出现的判据只在
+                    LinkedReportChip 里(报告与说明都为空时它渲染 null),这里不另写一份条件。
+                    排在「本库来源」之前:SourceListPanel 的滚动列表必须是最后一个、让位的那个。 */}
+                {chatMode === "ask" && currentNotebookId && (
+                  <LinkedReportPicker
+                    notebookId={currentNotebookId}
+                    linked={askSession.linkedReport}
+                    disabled={askLinkedReportLocked}
+                    // 选中即挂上,焦点送进输入框(清单随之卸载,焦点不能落在 body)。
+                    onSelect={(report) => {
+                      askSession.linkReport(report);
+                      setAskComposerFocusSignal((value) => value + 1);
+                    }}
+                  >
+                    <LinkedReportChip
+                      report={askSession.linkedReport}
+                      verdict={askSession.linkedReportCheck}
+                      note={askSession.linkedReportNote}
+                      removeDisabled={askLinkedReportLocked}
+                      onRemove={() => {
+                        askSession.unlinkReport();
+                        setAskComposerFocusSignal((value) => value + 1);
+                      }}
+                    />
+                  </LinkedReportPicker>
+                )}
                 {/* 「本库来源」标题 + 搜索表单 + 滚动列表 + 分页整体住在
                     SourceListPanel（PR-5 分片 2）。它返回 Fragment：两个 div 仍是
                     .sources-body 的直接子节点，滚动算术与扩展点「固定区在列表之前」
@@ -6081,6 +6101,7 @@ export default function Home() {
                   onOpenSource={(source) => { openSourceDetail(source).catch(reportError); }}
                   onDeleteSource={(source) => confirmDeleteSource(source)}
                   onPage={(p) => { if (currentNotebookId) loadSourcesPage(currentNotebookId, { page: p, q: sourceQuery }).catch(reportError); }}
+                  onAddSource={() => { setLinkSectionOpen(false); openSourceModal(); }}
                 />
               </div>
             </aside>
@@ -6203,8 +6224,19 @@ export default function Home() {
                 {chatMode === "ask" && (turns.length === 0 && !askInFlight && !askStoppedTurn ? (
                   <div className="welcome">
                     <div className="wave">👋</div>
-                    <h2>{welcomeCopy.title}</h2>
-                    <p>{welcomeCopy.description}</p>
+                    <h2>{welcomeCopy.guidance === "blocked" && readOnlyWorkspace ? "还没有可检索的内容" : welcomeCopy.title}</h2>
+                    {welcomeCopy.guidance ? (
+                      <WelcomeGuidance
+                        blocked={welcomeCopy.guidance === "blocked"}
+                        canAddSources={!readOnlyWorkspace}
+                        canMountBases={capabilities.canMountBases}
+                        mirrored={capabilities.mirrored}
+                        onAddSources={() => { setLinkSectionOpen(false); openSourceModal(); }}
+                        onMountBases={() => {
+                          if (currentNotebook) void presentNotebookEditor(currentNotebook.id, { focusBases: true });
+                        }}
+                      />
+                    ) : <p>{welcomeCopy.description}</p>}
                     {welcomeCopy.prompts.length > 0 && (
                       <NotebookQuestionSuggestions
                         actorId={currentUser?.id ?? null}
@@ -6397,39 +6429,12 @@ export default function Home() {
                   disabled={askBlocked || sessionLoading || Boolean(askIntentReview)}
                   submitBlocked={askQuestionOverLimit !== null}
                   focusSignal={askComposerFocusSignal}
-                  // 「关联报告」标签:挂着报告、或只剩一句就地说明(报告已不存在而被移除)时出现——
-                  // 判据只在 LinkedReportChip 里(两样都没有时它渲染 null),这里不另写一份条件。
-                  // 两种界面模式都挂——自动模式也要能移除/更换标签(计划 D16)。
-                  attachment={(
-                    <LinkedReportChip
-                      report={askSession.linkedReport}
-                      verdict={askSession.linkedReportCheck}
-                      note={askSession.linkedReportNote}
-                      removeDisabled={askLinkedReportLocked}
-                      onRemove={() => {
-                        askSession.unlinkReport();
-                        setAskComposerFocusSignal((value) => value + 1);
-                      }}
-                    />
-                  )}
                 >
                   {/* 与来源页签工具条同一句话的第二处显示 —— 共用 retrievalScopeText，
                       两处不一致在结构上就不可能发生。 */}
                   <span className="retrieval-scope-count" title="勾选的来源与参考库才会参与本次检索">
                     检索范围 · {retrievalScopeText}
                   </span>
-                  {currentNotebookId && (
-                    <LinkedReportPicker
-                      notebookId={currentNotebookId}
-                      linked={askSession.linkedReport}
-                      disabled={askLinkedReportLocked}
-                      // 选中即挂上,焦点送进输入框(弹出层随之卸载,焦点不能落在 body)。
-                      onSelect={(report) => {
-                        askSession.linkReport(report);
-                        setAskComposerFocusSignal((value) => value + 1);
-                      }}
-                    />
-                  )}
                   {/* 超限提示优先于引号回执:它是此刻唯一挡着提交的东西。
                       只在用户真的敲了英文双引号时才出现引号回执:确认哪几段被当成
                       完整短语,或说明为什么这次没识别。判据与后端同一份规则的镜像。 */}
@@ -6453,36 +6458,36 @@ export default function Home() {
                       onChange: (id) => askSession.selectRetrievalEffort(id as AskRetrievalEffortId),
                     }}
                     hints={<>
-                    {groupOf(askMode, askModes) === "strict" && !kgAvailable && (
-                      kgBlockedByScope ? (
-                        // 出路是把勾选点回来,不是花钱整理一次整库图谱 —— 这一支
-                        // 刻意不给「整理知识图谱」按钮。T5:无图不再拒答,只用原文
-                        // 检索,所以措辞从「取不到图谱」(听起来像拒答)改成「将只用
-                        // 原文检索」(如实披露,不是阻断)。
-                        <span className="mode-hint">
-                          {`已整理知识图谱的参考库这次都没勾选，${strictLabel}将只用原文检索；在来源面板重新勾选可增强`}
-                        </span>
-                      ) : (
-                        <span className="mode-hint">
-                          {`该笔记本尚无知识图谱，${strictLabel}将只用原文检索；整理知识图谱可增强问答效果`}
-                          <button
-                            type="button"
-                            className="mode-engine"
-                            style={{ marginLeft: 6 }}
-                            disabled={kgGraph.buildingKg || kgGraph.deleting || asking || sessionLoading}
-                            onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
-                          >
-                            {kgGraph.buildingKg ? "整理中…" : "整理知识图谱"}
-                          </button>
-                        </span>
-                      )
-                    )}
-                    {groupOf(askMode, askModes) === "extension"
-                      && requiresKg(askMode, askModes)
-                      && !kgAvailable && (
-                        <span className="chat-hint">
-                          当前扩展引擎需要知识图谱，请先整理本笔记本或重新勾选带图谱的参考库
-                        </span>
+                    {/* 取不到图谱时的那句话:说到的出路就是可点的字(勾回带图谱的参考库 /
+                        整理知识图谱 / 挂载参考库),当前用户做不了的出路不说。两种成因出路
+                        差着一次整库整理,分支判据见 kgBlockedByBaseScope。T5:无图不再拒答,
+                        内置深入分析只是「将只用原文检索」。 */}
+                    {!kgAvailable && (
+                      groupOf(askMode, askModes) === "strict"
+                      || (groupOf(askMode, askModes) === "extension" && requiresKg(askMode, askModes))
+                    ) && (
+                      <KgUnavailableHint
+                        variant={groupOf(askMode, askModes) === "strict" ? "strict" : "extension"}
+                        blockedByScope={kgBlockedByScope}
+                        strictLabel={strictLabel}
+                        // 空库整理不出图谱:来源栏那句同样只在有来源时出现。
+                        canBuild={!readOnlyWorkspace && notebookSourceTotal > 0}
+                        canMountBases={capabilities.canMountBases}
+                        busy={kgGraph.buildingKg || kgGraph.deleting || asking || sessionLoading}
+                        building={kgGraph.buildingKg}
+                        onSelectKgBases={() => {
+                          setBaseScopeSelection((previous) => selectBases(
+                            previous,
+                            unselectedKgBases(currentNotebook, selectedBaseNotebookIds).map((base) => base.id),
+                          ));
+                          // 勾上之后这句提示随之消失:焦点送回输入框,不掉到 body。
+                          setAskComposerFocusSignal((value) => value + 1);
+                        }}
+                        onBuild={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
+                        onMountBases={() => {
+                          if (currentNotebook) void presentNotebookEditor(currentNotebook.id, { focusBases: true });
+                        }}
+                      />
                     )}
                     {shouldShowBorrowedBaseHint({
                       strict: groupOf(askMode, askModes) === "strict",
@@ -7127,7 +7132,15 @@ export default function Home() {
                 </p>
               </section>
               {notebookCollection.editor?.canMountBases && (
-                <section className="settings-section">
+                <section
+                  className="settings-section"
+                  // 从来源栏「挂载已整理的参考库」打开时,直接停在这一节。
+                  ref={(element) => {
+                    if (!element || !notebookEditorBasesFocusRef.current) return;
+                    notebookEditorBasesFocusRef.current = false;
+                    element.scrollIntoView({ block: "start" });
+                  }}
+                >
                   <div className="settings-section-head">
                   <h3>参考库</h3>
                   <p>检索时会一并搜索这些知识库。不选则只搜本笔记本。</p>
@@ -7533,9 +7546,39 @@ export default function Home() {
                         仍回 error_message,兜底路径与轮询路径靠它。原文在来源轮询那条
                         路径上已经过 toUserMessage 落进 console(见 justFailed);渲染期
                         不调 toUserMessage:它会随重渲染反复刷日志。 */}
-                    <p>{(sourceDetail.parse_failed ?? Boolean(sourceDetail.error_message))
-                      ? "这个来源没能解析成功，可以删除后重新上传。"
-                      : "当前来源还没有解析出元素。"}</p>
+                    {/* 说到的出路就是可点的字(重新解析 / 删除),与标题行那两颗图标按钮同一个
+                        入口、同一套禁用;参考库来源与只读成员没有这两个入口,只说现状。 */}
+                    <p>{!(sourceDetail.parse_failed ?? Boolean(sourceDetail.error_message))
+                      ? "当前来源还没有解析出元素。"
+                      : sourceDetailBaseId || readOnlyWorkspace || !sourceDetailManageable(sourceDetail.type)
+                        ? "这个来源没能解析成功。"
+                        : (
+                          <>
+                            这个来源没能解析成功，可以
+                            {sourceDetailReparsable(sourceDetail.type) && (
+                              <>
+                                <button
+                                  type="button"
+                                  className="link-button inline-action"
+                                  disabled={reparsingSource || sourceDetailDeleting || sourceDetailReparseQueued}
+                                  onClick={() => reparseSource().catch(reportError)}
+                                >
+                                  {reparsingSource ? "重新解析中…" : sourceDetailReparseQueued ? "已提交重新解析，等待完成" : "重新解析"}
+                                </button>
+                                ，或
+                              </>
+                            )}
+                            <button
+                              type="button"
+                              className="link-button inline-action"
+                              disabled={reparsingSource || sourceDetailDeleting}
+                              onClick={() => confirmDeleteSource(sourceDetail)}
+                            >
+                              {sourceDetailDeleting ? "删除中…" : "删除"}
+                            </button>
+                            后重新上传。
+                          </>
+                        )}</p>
                   </article>
                 )}
                 {sourceElementStartOffset + sourceElements.length < sourceElementsTotal && (
@@ -8101,6 +8144,8 @@ export default function Home() {
           relinkFromKgView={relinkFromKgView}
           confirmRefreshUnifiedKg={confirmRefreshUnifiedKg}
           startKgRebuild={startKgRebuild}
+          startKgBuild={startKgBuild}
+          canBuildKg={!readOnlyWorkspace && notebookSourceTotal > 0}
           confirmDeleteKg={confirmDeleteKg}
           handleKgSearchChange={handleKgSearchChange}
           changeKgRange={changeKgRange}
@@ -8483,6 +8528,7 @@ function KnowledgeBrowser({
   readOnly?: boolean;
 }) {
   const [dupBusy, setDupBusy] = useState(false);
+  const statusSelectRef = useRef<HTMLSelectElement | null>(null);
   const runFindDuplicates = async () => {
     if (dupBusy) return;
     setDupBusy(true);
@@ -8512,7 +8558,7 @@ function KnowledgeBrowser({
         ))}
       </div>
       <div className="tool-input-row">
-        <select value={statusFilter} onChange={(event) => onStatusFilter(event.target.value)}>
+        <select ref={statusSelectRef} value={statusFilter} onChange={(event) => onStatusFilter(event.target.value)}>
           {statuses.map((value) => <option key={value} value={value}>{value === "all" ? "全部状态" : label(KNOWLEDGE_STATUS, value, "其他")}</option>)}
         </select>
         <button className="sort-button" onClick={reload}>刷新</button>
@@ -8539,7 +8585,24 @@ function KnowledgeBrowser({
       {items === null ? (
         <p className="tool-hint">加载中…</p>
       ) : items.length === 0 ? (
-        <p className="tool-hint">暂无条目。在审核队列批准对应类型的候选后会出现在这里。</p>
+        // 按状态筛过时,空列表多半只是筛掉了:出路就是那句里可点的「看全部状态」。
+        statusFilter !== "all" ? (
+          <p className="tool-hint">
+            当前状态下没有条目，
+            {/* 按下后这句随列表重载卸载:焦点落到状态筛选框(刚被它改成「全部状态」),不掉到 body。 */}
+            <button
+              type="button"
+              className="link-button inline-action"
+              onClick={() => {
+                onStatusFilter("all");
+                statusSelectRef.current?.focus();
+              }}
+            >看全部状态</button>
+            。
+          </p>
+        ) : (
+          <p className="tool-hint">暂无条目。在审核队列批准对应类型的候选后会出现在这里。</p>
+        )
       ) : (
         <div className="stack">
           {items.map((item) => (

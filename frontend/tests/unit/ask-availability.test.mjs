@@ -7,6 +7,7 @@ import {
   isAskBlocked,
   kgAvailableForScope,
   kgBlockedByBaseScope,
+  unselectedKgBases,
 } from "../../app/ask-availability.ts";
 
 const nb = (over = {}) => ({
@@ -155,4 +156,24 @@ test("分得清「没勾」与「没建图」——两者出路差着一次整�
   // 一个参考库都没挂 / 没有笔记本:同样是「该建图」那一支。
   assert.equal(kgBlockedByBaseScope(nb({ kg_ready: false }), []), false);
   assert.equal(kgBlockedByBaseScope(null, []), false);
+});
+
+
+test("「勾选带图谱的参考库」只勾回带图、且这次没勾的那几个", () => {
+  const ids = (bases) => bases.map((base) => base.id);
+  assert.deepEqual(ids(unselectedKgBases(twoBases(), ["B"])), ["A"]);
+  assert.deepEqual(ids(unselectedKgBases(twoBases(), [])), ["A"]);
+  assert.deepEqual(ids(unselectedKgBases(twoBases(), ["A", "B"])), []);
+  // 一个都没建图:没有可勾回的。
+  assert.deepEqual(
+    ids(unselectedKgBases(twoBases({ base_kg_available: false, base_kg_notebook_ids: [] }), [])),
+    [],
+  );
+  // skew:不知道哪几个带图,退回所有没勾的挂载库(都本来挂在这本库上)。
+  assert.deepEqual(ids(unselectedKgBases(twoBases({ base_kg_notebook_ids: undefined }), ["B"])), ["A"]);
+  assert.deepEqual(
+    ids(unselectedKgBases(twoBases({ base_kg_notebook_ids: undefined, base_kg_available: false }), [])),
+    [],
+  );
+  assert.deepEqual(unselectedKgBases(null, []), []);
 });

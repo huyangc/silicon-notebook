@@ -109,6 +109,10 @@ carrier they name; neither entry point is a second product or architecture sourc
   unchanged in code and protocols.
 - User-visible errors are Chinese and actionable. Diagnostic details that are not explicitly
   marked displayable remain internal.
+- A hint, empty state or notice that names an action the user can take here makes those words the
+  control itself (an inline `.link-button.inline-action` inside the sentence), instead of a sentence
+  that sends the user to find the control elsewhere. Leave out any action the current user cannot
+  take (read-only member, non-owner, mirror) rather than naming a control they do not have.
 - Before handing off a change, decide whether users need to know about it or do something because
   of it. If they do, the same change adds a `release-notes/<slug>.md` with a `level`
   (`change`/`feature` are listed in the post-upgrade notice, `fix` is only counted there, `internal`

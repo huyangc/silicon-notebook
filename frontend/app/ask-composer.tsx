@@ -27,10 +27,6 @@ type AskComposerProps = {
   // 调用方要把焦点送回输入框时递增它（「编辑问题」）。输入框的 ref 留在本组件里不外露：
   // 调用方只说「现在聚焦」，不需要知道里面是哪个元素、叫什么类名。0 / 未传 = 不聚焦。
   focusSignal?: number;
-  // 输入框**上方**的附着物（问答里是「关联报告」标签与它旁边的就地说明）。它描述的是
-  // 下一次提交会带上什么，所以贴着输入框、而不是落在下排的控件行里；不传或为 null 时
-  // 一个节点都不多。
-  attachment?: ReactNode;
   children?: ReactNode;
 };
 
@@ -46,7 +42,6 @@ export function AskComposer({
   disabled = false,
   submitBlocked = false,
   focusSignal = 0,
-  attachment = null,
   children,
 }: AskComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -98,7 +93,6 @@ export function AskComposer({
 
   return (
     <div className="chat-input-bar">
-      {attachment}
       {/* 上排:输入框独占宽度 + 发送按钮。下排(.chat-input-controls):来源数 / 模式标签 /
           提示语,可换行。旧版把四者塞进同一行 grid,输入被挤窄、长 placeholder 折行被裁。 */}
       <div className="chat-input-main">

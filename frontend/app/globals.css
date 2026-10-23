@@ -1286,41 +1286,56 @@ button.copy-result-failed:hover:not(:disabled) {
   transition: grid-template-columns 200ms ease;
 }
 
-/* workspace.side_panel 的落点在**来源栏内部**(见 page.tsx 挂载点注释),不再给
-   工作区加第三列:那一列宽 190px、只放一个入口,其余整列空白,还把问答面板挤窄。
-   容器本身只负责纵向堆叠(将来多个 contribution 时不互相贴住),布局归来源栏的
-   flex 列所有。 */
-.workspace-extension-outlet-workspace-side_panel {
-  display: grid;
-  gap: 8px;
+/* 来源栏的次要工具排(page.tsx `.sources-tool-row`):补全论文信息与 workspace.side_panel
+   扩展入口同排、按宽度折行,每个都是一颗小按钮而不是一整行——插件再多也只多一颗。
+   两样都不在时这一排为空,不占 `.sources-body` 的间距。 */
+.sources-tool-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
   min-width: 0;
 }
 
-/* 一行式入口:视觉全部由 `.button.secondary` 提供(系统边框/圆角/字重/背景),这里
-   **只补排版**。刻意不写任何颜色字面量——需要颜色时取 :root 的 token。也刻意不写
-   :hover:系统 secondary 按钮本来就没有单独的悬停态,而且 `.workspace-extension-entry:hover`
-   与 `.button.secondary` 特异度相同(0,2,0)、源序在前,写了也会被盖掉(评审实测)。
-   `min-width: 0` 是因为它是 outlet(grid)的 item:不解开 `min-width:auto`,长文案会
-   把按钮撑出 outlet 而不是让 span 省略。
-   类名是**通用**的(不带 agent-profile 字样):仓库外插件的 side-panel 入口共用这一条,
-   它们不许自己写 CSS。 */
-.workspace-extension-entry {
-  display: flex;
+.sources-tool-row:empty {
+  display: none;
+}
+
+/* outlet 本身不再排版:它的入口直接成为工具排的 flex item,与「补全论文信息」同一行折行。 */
+.workspace-extension-outlet-workspace-side_panel {
+  display: contents;
+}
+
+/* 小按钮的外形。视觉底子仍由 `.button.secondary` 提供(系统边框/字色/背景),这里只把
+   尺寸收小、做成胶囊;刻意不写任何颜色字面量——需要颜色时取 :root 的 token。
+   用 `.button.<类>`(0,2,0)压过 `.button`(0,1,0)的 min-height/padding,源序在前也成立。
+   `.workspace-extension-entry` 是**通用**类(不带 agent-profile 字样):仓库外插件的
+   side-panel 入口共用这一条,它们不许自己写 CSS。 */
+.button.sources-tool-chip,
+.button.workspace-extension-entry {
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  width: 100%;
+  gap: 6px;
+  max-width: 100%;
   min-width: 0;
-  font-size: 13px;
+  min-height: 30px;
+  padding: 0 11px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
   text-align: left;
 }
 
-.workspace-extension-entry > svg {
+.button.sources-tool-chip > svg,
+.button.workspace-extension-entry > svg {
   flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
   color: var(--muted);
 }
 
 /* 来源栏最窄到 270px,长文案必须能省略而不是把按钮撑破。 */
-.workspace-extension-entry > span {
+.button.sources-tool-chip > span,
+.button.workspace-extension-entry > span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -5426,9 +5441,11 @@ button.chat-session-card {
 }
 
 /* ---------------------------------------------------------------------------
-   问答「关联报告」(linked-report-picker.tsx):输入框上方的标签 + 下排的选择器。
-   标签与选择器里的 <span> 都落进上面 `.chat-input-bar span`(一类+一元素)的射程,
-   所以凡是要改字色/字号的 span 选择器一律写成两个类,与 effort-picker 同一条坑。
+   问答「关联报告」(linked-report-picker.tsx):来源栏里的一个分组,与「参考库」「本库来源」
+   并列——标题行(标题 + 选择/更换)、当前标签,以及就地展开的报告清单。分组外壳复用
+   `.scope-group` / `.scope-group-title`,所以与上下两组同一套间距与标题字。
+   清单占文档流、不做浮层:来源栏窄且 `.workspace-panel { overflow: hidden }`,浮层朝哪边
+   都可能被裁;下面的来源列表本来就是让位的那个。
    --------------------------------------------------------------------------- */
 .linked-report-bar {
   display: flex;
@@ -5510,73 +5527,51 @@ button.chat-session-card {
   line-height: 1.5;
 }
 
-.linked-report-picker {
-  position: relative;
-  display: inline-flex;
-}
-
-.linked-report-picker-chip {
-  display: inline-flex;
+.linked-report-picker-head {
+  display: flex;
   align-items: center;
-  gap: 5px;
-  height: 28px;
-  padding: 0 10px;
-  border: 1px solid #d2d6df;
-  border-radius: 999px;
-  background: #fff;
-  color: #22272e;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 22px;
+}
+
+/* 与 .source-scope-toolbar button(全选/清空)同一套蓝色文字按钮;按下有底色、松手还原。 */
+.linked-report-picker-toggle {
+  flex: none;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--blue);
+  padding: 3px 6px;
   font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
   white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease;
 }
 
-.linked-report-picker-chip:hover:not(:disabled),
-.linked-report-picker-chip.open {
-  border-color: #9aa6b7;
-  background: #f7f9fc;
+.linked-report-picker-toggle:hover:not(:disabled),
+.linked-report-picker-toggle.open {
+  background: #eef3ff;
 }
 
-.linked-report-picker-chip.open {
-  border-color: #1d4ed8;
+.linked-report-picker-toggle:active:not(:disabled) {
+  background: #dce6ff;
 }
 
-.linked-report-picker-chip:disabled {
-  opacity: 0.55;
+.linked-report-picker-toggle:disabled {
+  color: #98a2b3;
   cursor: not-allowed;
 }
 
-.linked-report-picker .linked-report-picker-chip-label {
-  color: #22272e;
-  font-size: inherit;
-}
-
-.linked-report-picker-popover {
-  position: absolute;
-  right: 0;
-  bottom: calc(100% + 8px);
-  z-index: 30;
-  width: min(360px, calc(100vw - 48px));
-  max-height: min(420px, 60vh);
-  overflow-y: auto;
+.linked-report-picker-panel {
   display: grid;
   gap: 8px;
-  padding: 12px;
+  max-height: min(320px, 45vh);
+  overflow-y: auto;
+  padding: 8px;
   border: 1px solid #e2e6ee;
-  border-radius: 12px;
+  border-radius: 10px;
   background: #fff;
-  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16);
-}
-
-.linked-report-picker-head {
-  display: grid;
-  gap: 2px;
-}
-
-.linked-report-picker .linked-report-picker-title {
-  color: #6b7280;
-  font-size: 12px;
-  font-weight: 700;
 }
 
 .linked-report-picker-hint {
@@ -5835,6 +5830,24 @@ button.chat-session-card {
   color: #aab;
   cursor: default;
   text-decoration: none;
+}
+
+/* 说明文字里的动作:字号/行高随所在那句话,只在颜色与下划线上显出「可点」。
+   用法:说明里提到的动作就是这颗按钮的字(「整理知识图谱」「挂载已整理的参考库」),
+   不让人读完一句话再去别处找入口。 */
+.link-button.inline-action {
+  display: inline;
+  font-size: inherit;
+  line-height: inherit;
+  font-weight: 600;
+  vertical-align: baseline;
+}
+
+/* 来源栏的知识图谱就绪度那一句(kg-readiness-hint.tsx)。 */
+.tool-hint.kg-readiness-hint {
+  margin: 0 2px;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .knowledge-kind-tabs {
@@ -13128,13 +13141,8 @@ button.tag:hover {
 }
 /* Pagination */
 .pagination { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 2px; }
-/* 「关联报告」弹出层(linked-report-picker.tsx)住在问答输入框里,那里的 `.chat-input-bar span`
-   (一类+一元素)会压过下面两个单类选择器,把分页文字改成 13px/#667085。两条规则各并入一个
-   带弹出层前缀的选择器(两个类),让那里的分页沿用同一份样式,而不是另抄一份数值。 */
-.pagination-info,
-.linked-report-picker-popover .pagination-info { font-size: 12px; color: var(--muted, #667085); margin-right: auto; }
-.pagination-page,
-.linked-report-picker-popover .pagination-page { font-size: 13px; color: #20242a; }
+.pagination-info { font-size: 12px; color: var(--muted, #667085); margin-right: auto; }
+.pagination-page { font-size: 13px; color: #20242a; }
 .pagination-jump { width: 68px; box-sizing: border-box; border: 1px solid #d9dfeb; border-radius: 8px; padding: 5px 8px; font-size: 13px; }
 /* 窄侧栏:区间独占一行,箭头按钮收成小圆钮。 */
 .pagination.compact { gap: 6px; }

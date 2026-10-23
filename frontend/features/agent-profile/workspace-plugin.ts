@@ -8,12 +8,11 @@ import type { WorkspaceExtensionProps } from "../extension-sdk/contracts.ts";
 /**
  * Thin presentation entry; AgentProfilePanel retains all domain I/O/state.
  *
- * 形态是**一行入口**而不是一张卡片:宿主把它渲染进来源栏的固定区(落点理由写在
- * 壳层的挂载点注释里),旁边是「添加来源」「整理知识图谱」这一排同级动作。复用 `.button
- * .secondary` 的既有按钮语言,自己那条类只补一行式排版,不写任何颜色字面量——
- * 视觉必须走系统色板/边框/圆角（见 `docs/development.md` 的前端架构约束）。
- * 整行就是动作本身(图标 + 文案),不再另配一颗「打开」按钮:一行里两个可点目标
- * 在 270px 宽的来源栏里只会互相挤。
+ * 形态是**一颗小按钮**而不是一整行或一张卡片:宿主把它渲染进来源栏的次要工具排
+ * (与「补全论文信息」同排、按宽度折行;落点理由写在壳层的挂载点注释里)。复用 `.button
+ * .secondary` 的既有按钮语言,通用类 `.workspace-extension-entry` 只把尺寸收成胶囊,
+ * 不写任何颜色字面量——视觉必须走系统色板/边框/圆角（见 `docs/development.md` 的
+ * 前端架构约束）。按钮就是动作本身(图标 + 文案),不再另配一颗「打开」按钮。
  */
 export function AgentProfileWorkspacePanel({ actions }: WorkspaceExtensionProps) {
   return createElement(

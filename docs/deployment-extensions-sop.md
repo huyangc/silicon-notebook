@@ -521,7 +521,7 @@ npm run typecheck
 ### 5.4 End-to-end by hand
 
 1. Start backend and frontend, sign in.
-2. The entry row appears in the sources panel's fixed area, above the scrolling source list. If it does not, work down the four visibility gates in §7.
+2. The entry button appears in the sources panel's tool row (a row of small buttons under 「添加来源」 that wraps by width; each plugin adds one button, never a full-width row), above the scrolling source list. If it does not, work down the four visibility gates in §7.
 3. Open it, run your action, import one document; the source list refreshes.
 4. Open `/admin/extensions` as a system administrator — your plugin is listed with its version, trust `部署装入`, its server contributions and its UI contributions.
 5. Check the event log: your records carry only `kind`, `plugin_id`, and the whitelisted counters.
