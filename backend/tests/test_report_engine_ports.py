@@ -116,9 +116,6 @@ class _Evidence:
     def parse_anchors(self, answer, evidence_by_id):
         return []
 
-    def citation_titles(self, source_ids):
-        return {}
-
     def citation_source_info(self, source_ids):
         return {}
 
