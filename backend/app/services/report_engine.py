@@ -109,6 +109,7 @@ from app.services.reports.section_failure import (
 )
 from app.services.retrieval_run import (
     current_retrieval_run,
+    offering_query_vectors,
     retrieval_fanout_slot,
     retrieval_run,
 )
@@ -1530,16 +1531,20 @@ class ReportEngine:
             except Exception:
                 pass
         try:
-            memories = (
-                deps.memory_retriever.notebook_memory_hits(
-                    self.user_id,
-                    notebook_id,
-                    question,
-                    self.settings.report_scout_memory_limit,
+            # Each library's scout recalls Memory for the SAME question, so
+            # one embed of it can serve them all (``offering_query_vectors``).
+            with offering_query_vectors():
+                memories = (
+                    deps.memory_retriever.notebook_memory_hits(
+                        self.user_id,
+                        notebook_id,
+                        question,
+                        self.settings.report_scout_memory_limit,
+                    )
+                    if deps.memory_retriever is not None
+                    and not source_scope_restricted()
+                    else []
                 )
-                if deps.memory_retriever is not None and not source_scope_restricted()
-                else []
-            )
             memory_lines = [
                 (item.memory_id, f"- {item.title}: {item.text[:240]}")
                 for item in memories
