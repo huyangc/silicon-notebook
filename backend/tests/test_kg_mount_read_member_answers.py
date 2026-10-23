@@ -23,6 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.services.kg_viewer_scope import answer_graph_by
 from tests.pre_isolation_graph import build_pre_isolation
 from tests.test_kg_viewer_scope import _ev, _memory, _object_id, _source
 
@@ -443,6 +444,73 @@ def test_a_hidden_focus_echoes_what_an_unknown_id_would_whatever_the_hint(
             NEVER_ID, "<id>"), (hint, object_id, r.text)
     # A visible object of the library is still found there without a hint.
     assert read(ids.widget).json()["source_notebook_id"] == ids.lib
+
+
+def test_an_answer_id_that_is_already_a_raw_node_merges_with_it():
+    """A stale preview can hold a raw object ``m`` that the live re-merge
+    has since put into cluster ``K`` whose first visible member is ``m``:
+    answering ``K`` by ``m`` gives one node, an edge that only the rewrite
+    duplicated once, and no self-loop between ``K`` and ``m``; edges the
+    rewrite does not touch stay as they are, in order."""
+    nodes = [
+        {"id": "K-c", "object_type": "concept", "payload": {"name": "Cee"}},
+        {"id": "ko-m", "object_type": "concept", "payload": {"name": "Cee"}},
+        {"id": "ko-x", "object_type": "claim", "payload": {"name": "Ex"}},
+    ]
+    edges = [
+        {"source_object_id": "ko-m", "target_object_id": "ko-x", "edge_type": "about"},
+        {"source_object_id": "K-c", "target_object_id": "ko-x", "edge_type": "about"},
+        {"source_object_id": "K-c", "target_object_id": "ko-m", "edge_type": "related_to"},
+        {"source_object_id": "ko-x", "target_object_id": "K-c", "edge_type": "defines"},
+        {"source_object_id": "K-c", "target_object_id": "ko-x", "edge_type": "cites"},
+    ]
+    answered_nodes, answered_edges = answer_graph_by({"K-c": "ko-m"}, nodes, edges)
+    assert [n["id"] for n in answered_nodes] == ["ko-m", "ko-x"]
+    assert [(e["source_object_id"], e["target_object_id"], e["edge_type"])
+            for e in answered_edges] == [
+        ("ko-m", "ko-x", "about"), ("ko-x", "ko-m", "defines"), ("ko-m", "ko-x", "cites")]
+    # Nothing to merge: the rewrite alone, nothing dropped.
+    plain_nodes, plain_edges = answer_graph_by({"K-c": "ko-n"}, nodes, edges)
+    assert [n["id"] for n in plain_nodes] == ["ko-n", "ko-m", "ko-x"]
+    assert len(plain_edges) == len(edges)
+
+
+@pytest.mark.parametrize("cluster_first", [True, False])
+def test_a_stale_neighbourhood_holding_the_answering_member_raw_merges(
+    env, monkeypatch, cluster_first,
+):
+    """The same case through the neighbour route: the read answers with the
+    QZX cluster AND its visible member ``QZX`` as a raw node (as a preview
+    built before the merge would); the non-member gets one ``QZX`` node, one
+    edge from ``Widget`` and no self-loop."""
+    ids = build_library(env)
+    lifecycle = env.repo._runtime.knowledge_lifecycle
+    cluster = {"id": SEEDED_ID, "object_type": "concept", "payload": {"name": HIDDEN_NAME}}
+    raw = {"id": ids.qzx, "object_type": "concept", "payload": {"name": "QZX"}}
+    stale = {
+        "nodes": [{"id": ids.widget_c, "object_type": "concept",
+                   "payload": {"name": "Widget"}},
+                  *([cluster, raw] if cluster_first else [raw, cluster])],
+        "edges": [
+            {"source_object_id": ids.widget_c, "target_object_id": SEEDED_ID,
+             "edge_type": "related_to"},
+            {"source_object_id": ids.widget_c, "target_object_id": ids.qzx,
+             "edge_type": "related_to"},
+            {"source_object_id": ids.qzx, "target_object_id": SEEDED_ID,
+             "edge_type": "related_to"},
+        ],
+        "focus_id": ids.widget_c, "focus_object_id": ids.widget,
+    }
+    monkeypatch.setattr(lifecycle, "_kg_neighbors_unchecked",
+                        lambda *_a, **_k: json.loads(json.dumps(stale)))
+    r = neighbours(env, env.member, ids.widget, ids.lib)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert sorted(n["id"] for n in body["nodes"]) == sorted([ids.widget, ids.qzx]), body
+    assert [(e["source_object_id"], e["target_object_id"]) for e in body["edges"]] == [
+        (ids.widget, ids.qzx)], body
+    assert body["focus_id"] == ids.widget
+    assert_names_no_hidden_member(r.text, "stale neighbourhood")
 
 
 def drop_knowhow_member(repo, lib, *, drop_source: bool):
