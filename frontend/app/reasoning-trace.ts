@@ -1,6 +1,8 @@
 import type { ReasoningTraceStep } from "./ask-stream";
 import { label } from "./vocabulary.ts";
 
+// ⚠ 徽章列固定 48px,只放得下两个字:每个标签都必须是两个字以内(单测钉住);
+// 完整说法放在 NEXT_ACTION 与步骤摘要里。
 export const TRACE_STEP_LABELS: Record<string, string> = {
   start: "启动",
   intent: "理解",
@@ -8,7 +10,7 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   plan: "规划",
   retrieve: "检索",
   enumerate: "枚举",
-  spreadsheet: "表格分析",
+  spreadsheet: "表格",
   reflect: "反思",
   expand: "扩展",
   ppr: "漫游",
@@ -60,7 +62,7 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   // 「合成」上——生产上出现过 195 秒的「合成」步,其中绝大部分其实花在这里。
   // ⚠ 不能叫「整理」或「排序」:前者与「重新整理」(图谱重建)撞车,后者听起来
   // 像用户可以调的一个列表顺序。
-  rerank: "收尾重排",
+  rerank: "重排",
   answer: "合成",
   // answer = 检索器决定作答并报告采用了哪些证据;synthesis = 答案真的写出来了。
   // 分两步是因为中间那次生成调用往往是整轮里最长的一段,合并会让它彻底隐形。
@@ -71,7 +73,7 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   // consult_memory 都是不同的东西——那三步问的是"这个库/这类问题以前怎么样",
   // 这一步问的是"这个库以外还有什么"。零插件部署一步都不产生(见宿主 no-op)。
   gap_consult: "外扩",
-  external_evidence: "外部补充",
+  external_evidence: "外部",
   plugin: "扩展",
   // plugin_action = 模型在 reflect 循环里自己选调的一个**插件提供的检索函数**
   // (ask.reflect_action,设计文档 §五)。⚠ 与上面两步都不同,三者不能同名:
@@ -79,7 +81,7 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   //   gap_consult「外扩」= 确定性触发、草稿之后调一次、产出**不进**答案;
   //   plugin_action    = 模型自己决定调、循环之内调、产出**进**答案且可 [k] 引用。
   // step_type 是核心拥有的**一个**值,不随插件数量增长(插件名只进 detail)。
-  plugin_action: "扩展检索",
+  plugin_action: "扩检",
   // citation_check = 全局问答作答之后的终态引用核对(PR-D):逐条确认引用的原文在
   // 作答期间没被改动或删除。summary 由后端如实写「已核对 N 条、未通过 M 条」;
   // 核对不通过从不作废回答,这一步只是把核对这件事摆进轨迹。
