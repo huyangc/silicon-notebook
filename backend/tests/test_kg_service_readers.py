@@ -29,6 +29,7 @@ from tests.kg_no_memory_baseline import (
 from tests.test_kg_viewer_scope import (  # noqa: F401  (``repo`` is a fixture)
     _ev,
     _now,
+    _object_id,
     _source,
     as_user,
     build_scenario,
@@ -267,7 +268,12 @@ def test_folded_search_hits_are_labelled_in_one_member_read(repo, monkeypatch):
     monkeypatch.setattr(reader, "connect", lambda: connects.append(1) or connect())
     hits = as_user(s.b, repo.kg_search, s.nb, "Foldterm")
     assert sorted(h["name"] for h in hits) == sorted(f"Foldterm {w}" for w in words)
-    assert all(h["object_id"].startswith("K") for h in hits), hits
+    # Every cluster holds A's Memory: each hit is answered by its first
+    # visible member's object id (whatever the isolation marker), from the
+    # same one member read.
+    with repo._write() as db:
+        visible = sorted(_object_id(db, s.nb, f"Foldterm {w}", "src-s") for w in words)
+    assert sorted(h["object_id"] for h in hits) == visible, hits
     assert len(calls) == 1 and calls[0].get("canonical_ids"), calls
     # The scope's own reads: Memory split, owned set, owned fold, members.
     assert len(connects) <= 4, connects
@@ -286,10 +292,12 @@ def _seed_named_cluster(repo, s, seed_id, ph="?"):
 def test_a_pending_notebook_never_answers_a_search_hit_by_a_seeded_cluster_id(
     scenario, repo, monkeypatch, pending,
 ):
-    """E4-4 §7.1: before the isolated rebuild a mixed cluster's canonical id
-    can carry a hidden member's text.  While the marker says pending, B's
-    folded hit is answered by its first visible member's object id -- same
-    name, no seeded id, openable; once isolated, the canonical id again."""
+    """E4-4 §7.1: a mixed cluster's canonical id can carry a hidden member's
+    text.  B's folded hit is answered by its first visible member's object id
+    -- same name, no seeded id, openable -- whether or not the marker says
+    pending (2026-10-23, R1: the answer used to go back to the canonical id
+    once isolated; a reader of the notebook meets such a cluster only before
+    the isolated rebuild, so this changes nothing for an isolated graph)."""
     s = scenario
     seed = "K-a private seedname"
     _seed_named_cluster(repo, s, seed)
@@ -298,13 +306,16 @@ def test_a_pending_notebook_never_answers_a_search_hit_by_a_seeded_cluster_id(
     hits = as_user(s.b, repo.kg_search, s.nb, "Engram")
     engram = [h for h in hits if h["name"] == "Engram"]
     assert len(engram) == 1, hits
-    if pending:
-        assert engram[0]["object_id"] == s.ids.engram_s, hits
-        assert "private seedname" not in repr(hits)
-        ctx = as_user(s.b, repo.node_context, s.nb, engram[0]["object_id"])
-        assert ctx["id"] == s.ids.engram_s
-    else:
-        assert engram[0]["object_id"] == seed, hits
+    assert engram[0]["object_id"] == s.ids.engram_s, hits
+    assert "private seedname" not in repr(hits)
+    ctx = as_user(s.b, repo.node_context, s.nb, engram[0]["object_id"])
+    assert ctx["id"] == s.ids.engram_s
+    detail = as_user(s.b, repo.concept_detail, s.nb, engram[0]["object_id"])
+    assert detail["canonical_id"] == s.ids.engram_s
+    assert "private seedname" not in repr(detail)
+    # A reads every member: the cluster id is A's to see.
+    a_hits = as_user(s.a, repo.kg_search, s.nb, "Engram")
+    assert seed in {h["object_id"] for h in a_hits if h["name"] == "Engram"}, a_hits
 
 
 def test_a_cluster_hit_with_no_visible_member_is_dropped(scenario, repo, monkeypatch):
@@ -369,6 +380,30 @@ def test_graph_view_is_the_shared_graph_plus_the_viewers_own_memory(scenario, re
     assert any(e["source_object_id"] == s.ids.secret
                and e["target_object_id"] == s.ids.engram_ma for e in owner["edges"])
     assert owner["total_nodes"] >= member["total_nodes"] + 3
+
+
+@pytest.mark.parametrize("level", ["object", "concept"])
+def test_the_graph_answers_a_cluster_holding_a_hidden_member_by_a_visible_member(
+    scenario, request, level,
+):
+    """R1 (2026-10-23): the Engram cluster holds A's Memory, so B's live
+    shared graph answers it by its first visible member's object id, the
+    edges included, while the notebook is isolated as much as while it awaits
+    its rebuild (pinned there by
+    ``test_a_notebook_pending_its_isolated_rebuild_serves_no_artifact``).  A
+    reads every member: the cluster id.  (The persisted preview stores such a
+    pre-isolation cluster as its raw members, E4-6.)"""
+    repository = request.getfixturevalue("repo")
+    s = scenario
+    member = as_user(s.b, repository.unified_graph, s.nb, level=level)
+    assert s.ids.engram_s in _node_ids(member), member
+    assert s.ids.engram_canonical not in repr(member), member
+    if level == "object":
+        assert any(
+            e["source_object_id"] == s.ids.definer_s
+            and e["target_object_id"] == s.ids.engram_s for e in member["edges"]), member
+    owner = as_user(s.a, repository.unified_graph, s.nb, level=level)
+    assert s.ids.engram_canonical in _node_ids(owner), owner
 
 
 @pytest.mark.parametrize("level", ["object", "concept"])
@@ -609,16 +644,18 @@ def test_a_focus_missing_from_the_artifact_falls_back_to_the_live_path(
     if large:
         monkeypatch.setattr(repo._runtime.knowledge_lifecycle.settings,
                             "viz_sync_build_max_objects", 1)
-    for user in (s.a, s.b):
+    # B: the Engram cluster holds A's Memory, so it is answered by its first
+    # visible member's object id (R1, whatever the isolation marker).
+    for user, focus in ((s.a, s.ids.engram_canonical), (s.b, s.ids.engram_s)):
         view = as_user(user, repo.kg_neighbors, s.nb, s.ids.engram_s)
-        assert view["focus_id"] == s.ids.engram_canonical
+        assert view["focus_id"] == focus
         if large:
             assert view.get("locating_unavailable") is True, view
             # P3-D: a preview exists, it just lacks this node.
             assert view.get("preview_lacks_focus") is True, view
             assert view["nodes"] == []
         else:
-            assert s.ids.engram_canonical in _node_ids(view), view
+            assert focus in _node_ids(view), view
             assert "visible definer" in repr(view), view
     if not large:
         member = as_user(s.b, repo.kg_neighbors, s.nb, s.ids.engram_s)

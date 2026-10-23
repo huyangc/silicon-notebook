@@ -1,9 +1,11 @@
 """PostgreSQL twin of tests/test_kg_service_readers.py (E4-7): the shared
 graph plus the viewer's own Memory from the live tables and its
 viewer-independent cache, the neighbourhood of an own Memory object, the
-list's element-source rule, the folded search's one member read, the
-viewer keyword of the summary counts / analytics / search box, and the
-assembly tripwires (tests/test_kg_viewer_scope_assembly.py)."""
+list's element-source rule, the folded search's one member read, a cluster
+holding a hidden member answered by a visible member whatever the isolation
+marker (R1, 2026-10-23), the viewer keyword of the summary counts /
+analytics / search box, and the assembly tripwires
+(tests/test_kg_viewer_scope_assembly.py)."""
 from __future__ import annotations
 
 import pytest
@@ -57,6 +59,26 @@ def test_pg_graph_view_is_the_shared_graph_plus_the_viewers_own_memory(repo, pat
                and e["target_object_id"] == s.ids.engram_ma for e in owner["edges"])
     names = {n["id"]: n["payload"]["name"] for n in owner["nodes"]}
     assert names[s.ids.secret] == "SecretProject"
+
+
+@pytest.mark.parametrize("level", ["object", "concept"])
+def test_pg_the_graph_answers_a_cluster_holding_a_hidden_member_by_a_visible_member(
+    request, level,
+):
+    """R1 (2026-10-23): whatever the isolation marker, B's live shared graph
+    answers the Engram cluster (it holds A's Memory) by its first visible
+    member's object id; A reads the cluster id."""
+    repository = request.getfixturevalue("repo")
+    s = build_scenario(repository, b_memory=False)
+    member = as_user(s.b, repository.unified_graph, s.nb, level=level)
+    assert s.ids.engram_s in _node_ids(member), member
+    assert s.ids.engram_canonical not in repr(member), member
+    if level == "object":
+        assert any(
+            e["source_object_id"] == s.ids.definer_s
+            and e["target_object_id"] == s.ids.engram_s for e in member["edges"]), member
+    owner = as_user(s.a, repository.unified_graph, s.nb, level=level)
+    assert s.ids.engram_canonical in _node_ids(owner), owner
 
 
 def test_pg_closed_channel_hides_the_owners_own_memory(repo, monkeypatch):
@@ -260,6 +282,11 @@ def test_pg_a_focus_missing_from_the_artifact_falls_back_to_the_live_path(
         monkeypatch.setattr(repo._runtime.knowledge_lifecycle.settings,
                             "viz_sync_build_max_objects", 1)
     view = as_user(s.b, repo.kg_neighbors, s.nb, s.ids.engram_s)
+    # The Engram cluster holds A's Memory: B's focus is its first visible
+    # member's object id whatever the isolation marker (R1, 2026-10-23).
+    assert view["focus_id"] == s.ids.engram_s, view
+    assert as_user(s.a, repo.kg_neighbors, s.nb, s.ids.engram_s)["focus_id"] == (
+        s.ids.engram_canonical)
     if large:
         assert view.get("locating_unavailable") is True, view
     else:
@@ -287,13 +314,17 @@ def test_pg_a_pending_notebook_never_answers_a_search_hit_by_a_seeded_cluster_id
     hits = as_user(s.b, repo.kg_search, s.nb, "Engram")
     engram = [h for h in hits if h["name"] == "Engram"]
     assert len(engram) == 1, hits
-    if pending:
-        assert engram[0]["object_id"] == s.ids.engram_s, hits
-        assert "private seedname" not in repr(hits)
-        assert as_user(s.b, repo.node_context, s.nb,
-                       engram[0]["object_id"])["id"] == s.ids.engram_s
-    else:
-        assert engram[0]["object_id"] == seed, hits
+    # Answered by the first visible member whatever the marker (R1,
+    # 2026-10-23: it used to go back to the canonical id once isolated).
+    assert engram[0]["object_id"] == s.ids.engram_s, hits
+    assert "private seedname" not in repr(hits)
+    assert as_user(s.b, repo.node_context, s.nb,
+                   engram[0]["object_id"])["id"] == s.ids.engram_s
+    detail = as_user(s.b, repo.concept_detail, s.nb, engram[0]["object_id"])
+    assert detail["canonical_id"] == s.ids.engram_s
+    assert "private seedname" not in repr(detail)
+    a_hits = as_user(s.a, repo.kg_search, s.nb, "Engram")
+    assert seed in {h["object_id"] for h in a_hits if h["name"] == "Engram"}, a_hits
 
 
 def test_pg_list_judges_an_item_without_an_element_by_the_source_it_names(repo):
