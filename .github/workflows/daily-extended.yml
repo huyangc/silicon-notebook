@@ -57,7 +57,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: daily-backend-test-timings
-          path: backend/.local/backend-junit.xml
+          path: |
+            backend/.local/backend-junit.xml
+            backend/.local/backend-metrics.json
           if-no-files-found: warn
           retention-days: 7
 
@@ -157,6 +159,8 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: daily-backend-extended-test-timings
-          path: backend/.local/backend-extended-junit.xml
+          path: |
+            backend/.local/backend-extended-junit.xml
+            backend/.local/backend-extended-metrics.json
           if-no-files-found: warn
           retention-days: 7

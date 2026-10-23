@@ -932,7 +932,10 @@ checks in the lane that owns them.
 Only the CI service stores PGDATA on a bounded 4 GiB tmpfs to avoid hosted-disk
 overhead from disposable schemas. WAL, `fsync`, `synchronous_commit`, and
 `full_page_writes` retain their defaults; provisioning checks the three settings.
-The job records storage usage and container peak memory. This lane tests live
+The job records storage usage, container peak memory and CPU counters, plus
+PostgreSQL 16 checkpoint counts, write/sync time, and buffer-write counters from
+`pg_stat_bgwriter`, so checkpoint pressure can be distinguished from test CPU.
+This lane tests live
 database behavior, not persistence across container loss or host power failure;
 production and local PostgreSQL storage are unchanged.
 CI provisions four explicit groups of primary, non-C UTF8, and non-UTF targets
@@ -953,12 +956,37 @@ the rare term's natural plan, then adds 20k foreign-notebook hits and re-analyze
 before checking scoped bitmap access and zero local results. Both original plan
 assertion sets remain reachable; neither corpus scale nor planner checks are reduced.
 
+The KG findings, store-evidence, id-binding, and certified KG-enumeration plan
+checks likewise run labelled read-only matrices over one real-migrated corpus
+per matrix. Every original result/SQL/plan assertion and corpus cardinality stays
+intact. Store-evidence, id-binding, and certified-enumeration scenarios open fresh
+connection pools so prepared-statement controls cannot warm a later scenario's
+cache; recording patches are restored between scenarios. The uncertified
+reverse-index world retains its own schema. This does not introduce a shared
+mutable module fixture or a PostgreSQL migration template.
+The id-binding repeated-execution cache test also retains its own schema: it
+toggles the reverse-index certificate and must not change the certified world
+used by the row-order checks.
+
 Local verification can still use an installed PostgreSQL 16 service and an explicit
 `TEST_POSTGRES_URL` for the serial lane; do not also set the parallel JSON variable.
 Auxiliary targets remain mandatory in authoritative CI. `scripts/check.sh` must never
 start or contact PostgreSQL. The PG launcher always reports slow setup/call/teardown
 durations and writes `backend/.local/postgres-junit.xml`, uploaded by CI even on failure.
 It does not forward arbitrary `PYTEST_ADDOPTS` into its isolated child environment.
+The backend, extended-backend, and PostgreSQL wrappers also load the optional
+`tests.ci_metrics` plugin and write the matching `*-metrics.json` beside their
+JUnit report; CI uploads both in the existing seven-day artifact. Metrics include
+wall time, summed setup/call/teardown durations and report counts, available CPU
+count, worker CPU seconds, and the largest individual test-process peak RSS in
+bytes (not the sum of concurrent process peaks or PostgreSQL service memory).
+The xdist controller counts each report once and collects resource counters from
+workers; crashed/missing workers mark process metrics incomplete. Phase sums are
+worker time, not wall time, and process CPU excludes the database service and child
+processes. Only numeric measurements and completeness flags enter the JSON and
+terminal summary; test identifiers, environments, connection URLs, source content,
+and exception text are excluded. Measurement or output failure never changes the
+gate exit status. These observations add no CI performance pass/fail threshold.
 The PG dependency cache uses a dedicated portable-wheel directory and an exact
 OS/architecture/Python/lock-file/policy key, with no generic fallback cache;
 `HNSWLIB_NO_NATIVE=1` remains mandatory. The whole PG job is measured against a

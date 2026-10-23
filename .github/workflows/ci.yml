@@ -59,7 +59,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: backend-test-timings
-          path: backend/.local/backend-junit.xml
+          path: |
+            backend/.local/backend-junit.xml
+            backend/.local/backend-metrics.json
           if-no-files-found: warn
           retention-days: 7
 
@@ -254,13 +256,25 @@ jobs:
               printf "PostgreSQL container peak memory (bytes): "
               cat /sys/fs/cgroup/memory.peak
             fi
+            if [ -r /sys/fs/cgroup/cpu.stat ]; then
+              printf "PostgreSQL container CPU counters:\n"
+              cat /sys/fs/cgroup/cpu.stat
+            fi
           '
+          docker exec "$POSTGRES_CONTAINER" psql --no-password -U postgres -d postgres -P pager=off -c '
+            SELECT checkpoints_timed, checkpoints_req, checkpoint_write_time,
+                   checkpoint_sync_time, buffers_checkpoint, buffers_backend,
+                   buffers_backend_fsync
+            FROM pg_stat_bgwriter;
+          ' 2>/dev/null || printf 'PostgreSQL checkpoint counters unavailable\n'
 
       - name: Upload PostgreSQL test timings
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: postgres-test-timings
-          path: backend/.local/postgres-junit.xml
+          path: |
+            backend/.local/postgres-junit.xml
+            backend/.local/postgres-metrics.json
           if-no-files-found: warn
           retention-days: 7

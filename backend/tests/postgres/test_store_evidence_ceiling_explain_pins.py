@@ -169,7 +169,7 @@ def _plan(database, sql: str, params) -> str:
 
 
 # --------------------------------------------------------------- conformance
-def test_in_network_relation_rows_contract(database):
+def _assert_in_network_relation_rows_contract(database, _monkeypatch):
     store = KnowledgeStore(database, _seams())
     cases.check_in_network_relations(_on_connection(
         database,
@@ -177,7 +177,7 @@ def test_in_network_relation_rows_contract(database):
     ))
 
 
-def test_chunk_exact_search_contract(database):
+def _assert_chunk_exact_search_contract(database, _monkeypatch):
     store = KnowledgeStore(database, _seams())
     cases.check_chunk_exact(_on_connection(
         database,
@@ -186,14 +186,14 @@ def test_chunk_exact_search_contract(database):
     ))
 
 
-def test_node_context_owner_library_contract(database):
+def _assert_node_context_owner_library_contract(database, _monkeypatch):
     store = KnowledgeStore(database, _seams())
     cases.check_node_context_owner(
         lambda object_id: store.node_context(cases.NB, object_id, check_access=False)
     )
 
 
-def test_element_texts_owner_contract(database):
+def _assert_element_texts_owner_contract(database, _monkeypatch):
     store = KnowledgeStore(database, _seams())
     cases.check_element_texts_owner(_on_connection(
         database,
@@ -201,7 +201,7 @@ def test_element_texts_owner_contract(database):
     ))
 
 
-def test_follow_relation_evidence_contract(database):
+def _assert_follow_relation_evidence_contract(database, _monkeypatch):
     store = KnowledgeStore(database, _seams())
     cases.check_follow_relation_evidence(_on_connection(
         database,
@@ -210,7 +210,7 @@ def test_follow_relation_evidence_contract(database):
 
 
 # ------------------------------------------------------------ byte identity
-def test_without_a_ceiling_the_statements_are_the_historical_ones(database, monkeypatch):
+def _assert_without_a_ceiling_the_statements_are_the_historical_ones(database, monkeypatch):
     store = KnowledgeStore(database, _seams())
     ids = ["ko-a", "ko-b", "ko-c"]
     recorder = _Recorder(monkeypatch)
@@ -238,7 +238,7 @@ def test_without_a_ceiling_the_statements_are_the_historical_ones(database, monk
 
 
 # ------------------------------------------------------------ plan cache
-def test_ceiling_statements_stay_out_of_the_plan_cache(database, monkeypatch):
+def _assert_ceiling_statements_stay_out_of_the_plan_cache(database, monkeypatch):
     store = KnowledgeStore(database, _seams())
     recorder = _Recorder(monkeypatch)
     calls = {
@@ -266,7 +266,7 @@ def test_ceiling_statements_stay_out_of_the_plan_cache(database, monkeypatch):
 FORTY = ["ko-a", "ko-b", "ko-c"] + [f"kob-{n:05d}" for n in range(0, 37 * 300, 300)]
 
 
-def test_sourced_relation_read_binds_no_list_and_the_endpoints_drive(database, monkeypatch):
+def _assert_sourced_relation_read_binds_no_list_and_the_endpoints_drive(database, monkeypatch):
     store = KnowledgeStore(database, _seams())
     recorder = _Recorder(monkeypatch)
     with database.connect() as db:
@@ -285,7 +285,7 @@ def test_sourced_relation_read_binds_no_list_and_the_endpoints_drive(database, m
     ), plan
 
 
-def test_follow_relation_evidence_goes_by_relation_primary_keys(database, monkeypatch):
+def _assert_follow_relation_evidence_goes_by_relation_primary_keys(database, monkeypatch):
     store = KnowledgeStore(database, _seams())
     recorder = _Recorder(monkeypatch)
     relation_ids = ["kr-1", "kr-7"] + [f"krb-{n}-0" for n in range(0, BULK, 400)]
@@ -298,7 +298,7 @@ def test_follow_relation_evidence_goes_by_relation_primary_keys(database, monkey
     assert "Seq Scan on" not in plan, plan
 
 
-def test_exact_probe_ceiling_is_a_constant_filter_on_the_trigram_match(database, monkeypatch):
+def _assert_exact_probe_ceiling_is_a_constant_filter_on_the_trigram_match(database, monkeypatch):
     store = KnowledgeStore(database, _seams())
     recorder = _Recorder(monkeypatch)
     with database.connect() as db:
@@ -313,7 +313,7 @@ def test_exact_probe_ceiling_is_a_constant_filter_on_the_trigram_match(database,
     assert "idx_chunks_source" not in plan, plan
 
 
-def test_owner_library_evidence_read_goes_by_primary_keys(database, monkeypatch):
+def _assert_owner_library_evidence_read_goes_by_primary_keys(database, monkeypatch):
     store = KnowledgeStore(database, _seams())
     recorder = _Recorder(monkeypatch)
     element_ids = ["el-own", "el-priv"] + [f"elb-{n}" for n in range(0, BULK, 400)]
@@ -337,14 +337,14 @@ def test_owner_library_evidence_read_goes_by_primary_keys(database, monkeypatch)
 
 
 # --------------------------------------------- relation_delta_rows (E2-2)
-def test_relation_delta_rows_contract(database):
+def _assert_relation_delta_rows_contract(database, _monkeypatch):
     cases.check_relation_delta_rows(_on_connection(
         database,
         lambda db, ids, **kwargs: EmbeddingStore.relation_delta_rows(db, cases.NB, ids, **kwargs),
     ))
 
 
-def test_relation_delta_rows_default_statement_is_unchanged(database, monkeypatch):
+def _assert_relation_delta_rows_default_statement_is_unchanged(database, monkeypatch):
     recorder = _Recorder(monkeypatch)
     with database.connect() as db:
         EmbeddingStore.relation_delta_rows(db, cases.NB, ["s-01", "s-02"])
@@ -357,7 +357,7 @@ def test_relation_delta_rows_default_statement_is_unchanged(database, monkeypatc
     assert list(params) == [cases.NB, cases.NB, ["s-01", "s-02"]] and options == {}
 
 
-def test_relation_delta_rows_with_sources_probe_by_source_then_primary_key(database, monkeypatch):
+def _assert_relation_delta_rows_with_sources_probe_by_source_then_primary_key(database, monkeypatch):
     recorder = _Recorder(monkeypatch)
     sources = [f"sb-{n:05d}" for n in range(0, BULK, 300)]
     with database.connect() as db:
@@ -369,3 +369,55 @@ def test_relation_delta_rows_with_sources_probe_by_source_then_primary_key(datab
     assert "idx_knowledge_relations_source" in plan, plan
     assert "pk_relation_embeddings" in plan, plan
     assert "Seq Scan on knowledge_relations" not in plan, plan
+
+
+def test_store_evidence_contract_and_plan_matrix(database, monkeypatch):
+    """Share immutable rows while preserving each check's connection state.
+
+    Every scenario gets a fresh one-connection pool, so preparing a statement
+    in one cannot warm another's cache. The fifteen-execution cache pin still
+    uses one physical connection throughout. Recording patches are restored
+    before closing each pool. The schema, migration, seed and VACUUM remain
+    owned by this single test's function-scoped database fixture.
+    """
+    checks = (
+        ("in-network relations", _assert_in_network_relation_rows_contract),
+        ("exact search", _assert_chunk_exact_search_contract),
+        ("node-context owner", _assert_node_context_owner_library_contract),
+        ("element-text owner", _assert_element_texts_owner_contract),
+        ("follow-relation evidence", _assert_follow_relation_evidence_contract),
+        (
+            "historical SQL without a ceiling",
+            _assert_without_a_ceiling_the_statements_are_the_historical_ones,
+        ),
+        ("unprepared ceiling SQL", _assert_ceiling_statements_stay_out_of_the_plan_cache),
+        (
+            "sourced relation endpoint plan",
+            _assert_sourced_relation_read_binds_no_list_and_the_endpoints_drive,
+        ),
+        (
+            "follow-relation primary-key plan",
+            _assert_follow_relation_evidence_goes_by_relation_primary_keys,
+        ),
+        (
+            "exact probe trigram plan",
+            _assert_exact_probe_ceiling_is_a_constant_filter_on_the_trigram_match,
+        ),
+        ("owner-library primary-key plan", _assert_owner_library_evidence_read_goes_by_primary_keys),
+        ("relation deltas", _assert_relation_delta_rows_contract),
+        ("historical relation-delta SQL", _assert_relation_delta_rows_default_statement_is_unchanged),
+        (
+            "sourced relation-delta plan",
+            _assert_relation_delta_rows_with_sources_probe_by_source_then_primary_key,
+        ),
+    )
+    for label, check in checks:
+        scenario_database = PostgresDatabase(database.settings, database.root_dir)
+        try:
+            with monkeypatch.context() as scenario_patch:
+                check(scenario_database, scenario_patch)
+        except Exception as error:
+            error.add_note(f"Store evidence scenario: {label}")
+            raise
+        finally:
+            scenario_database.close()

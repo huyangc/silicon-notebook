@@ -396,7 +396,7 @@ def _assert_constant_ceiling(plan: str, generic: str, predicate: str) -> None:
     assert "string_to_array($" in generic, generic
 
 
-def test_chunk_rare_term_plan_keeps_the_ceiling_a_constant_filter(pin_database):
+def _assert_chunk_rare_term_plan_keeps_the_ceiling_a_constant_filter(pin_database, _monkeypatch):
     knowledge = KnowledgeStore(pin_database, _seams())
 
     def call():
@@ -417,8 +417,8 @@ def test_chunk_rare_term_plan_keeps_the_ceiling_a_constant_filter(pin_database):
     assert 'Index Cond: ("chunks".source_id' not in plan, plan
 
 
-def test_kg_authoritative_gate_plan_matches_evidence_against_a_constant(
-    pin_database,
+def _assert_kg_authoritative_gate_plan_matches_evidence_against_a_constant(
+    pin_database, _monkeypatch,
 ):
     knowledge = KnowledgeStore(pin_database, _seams())
 
@@ -437,8 +437,8 @@ def test_kg_authoritative_gate_plan_matches_evidence_against_a_constant(
     _assert_constant_ceiling(plan, generic, "(ev.value ->> 'source_id'::text)")
 
 
-def test_contribution_hydration_plan_drives_by_candidate_primary_keys(
-    pin_database,
+def _assert_contribution_hydration_plan_drives_by_candidate_primary_keys(
+    pin_database, _monkeypatch,
 ):
     chunks = ChunkStore(pin_database)
 
@@ -460,7 +460,7 @@ def test_contribution_hydration_plan_drives_by_candidate_primary_keys(
     assert "Index Cond: (c.source_id" not in plan, plan
 
 
-def test_converted_statements_keep_their_documented_row_order(pin_database):
+def _assert_converted_statements_keep_their_documented_row_order(pin_database, _monkeypatch):
     """The binding changed how the ceiling travels, never which rows come back
     or in what order: each ordered statement is checked against its own
     ORDER BY, on data where a lost key would show."""
@@ -514,7 +514,7 @@ def test_converted_statements_keep_their_documented_row_order(pin_database):
     assert len(comentions) == 20 and claims == sorted(claims, reverse=True)
 
 
-def test_text_form_and_fallback_select_exactly_the_array_rows(pin_database):
+def _assert_text_form_and_fallback_select_exactly_the_array_rows(pin_database, _monkeypatch):
     """``string_to_array`` over the joined ids equals the bound array for every
     list the text form is chosen for; the lists it cannot express (an empty
     id, the separator inside an id) keep the array binding.  Both predicate
@@ -560,7 +560,7 @@ def test_text_form_and_fallback_select_exactly_the_array_rows(pin_database):
     assert rows == []
 
 
-def test_unscoped_calls_leave_the_plan_cache_to_do_its_work(pin_database):
+def _assert_unscoped_calls_leave_the_plan_cache_to_do_its_work(pin_database, _monkeypatch):
     """No ceiling, no list: those statements keep psycopg's default execute
     and are prepared as before — the binding module never taxes them."""
     knowledge = KnowledgeStore(pin_database, _seams())
@@ -593,7 +593,7 @@ def _chunk_sources(database) -> dict[str, str]:
         }
 
 
-def test_p4_question_rows_are_exactly_the_ceiling_rows_of_the_window(pin_database):
+def _assert_p4_question_rows_are_exactly_the_ceiling_rows_of_the_window(pin_database, _monkeypatch):
     chunks = ChunkStore(pin_database)
     unscoped = chunks.question_index_rows(
         NB, actor_id=USER, allowed_source_ids=None, limit=10001,
@@ -611,7 +611,7 @@ def test_p4_question_rows_are_exactly_the_ceiling_rows_of_the_window(pin_databas
     assert not {row["id"] for row in outside} & {row["id"] for row in scoped}
 
 
-def test_p6_ids_for_sources_equals_the_fixture_reference(pin_database):
+def _assert_p6_ids_for_sources_equals_the_fixture_reference(pin_database, _monkeypatch):
     chunk_sources = _chunk_sources(pin_database)
     expected = sorted(
         chunk_id for chunk_id, source in chunk_sources.items()
@@ -625,8 +625,8 @@ def test_p6_ids_for_sources_equals_the_fixture_reference(pin_database):
     assert got == expected
 
 
-def test_p7_presence_keeps_first_occurrence_order_of_the_listed_sources(
-    pin_database,
+def _assert_p7_presence_keeps_first_occurrence_order_of_the_listed_sources(
+    pin_database, _monkeypatch,
 ):
     present = set(_chunk_sources(pin_database).values())
     requested = (
@@ -645,8 +645,8 @@ def test_p7_presence_keeps_first_occurrence_order_of_the_listed_sources(
     ]
 
 
-def test_p5_exclude_mode_returns_exactly_the_candidates_outside_the_ceiling(
-    pin_database,
+def _assert_p5_exclude_mode_returns_exactly_the_candidates_outside_the_ceiling(
+    pin_database, _monkeypatch,
 ):
     chunk_sources = _chunk_sources(pin_database)
     candidates = [
@@ -678,3 +678,34 @@ def test_p5_exclude_mode_returns_exactly_the_candidates_outside_the_ceiling(
     assert outside and inside
     assert [row["id"] for row in excluded] == outside
     assert [row["id"] for row in included] == inside
+
+
+def test_id_binding_contracts_on_one_production_shaped_corpus(pin_database, monkeypatch):
+    """Seed once; each read-only check gets a pristine prepared-statement cache.
+
+    A generic-plan control in one check must not seed another check's cache.
+    The separate repeated-execution cache test changes the reverse-index
+    certificate, so it retains its original independent schema and seed.
+    """
+    checks = (
+        _assert_chunk_rare_term_plan_keeps_the_ceiling_a_constant_filter,
+        _assert_kg_authoritative_gate_plan_matches_evidence_against_a_constant,
+        _assert_contribution_hydration_plan_drives_by_candidate_primary_keys,
+        _assert_converted_statements_keep_their_documented_row_order,
+        _assert_text_form_and_fallback_select_exactly_the_array_rows,
+        _assert_unscoped_calls_leave_the_plan_cache_to_do_its_work,
+        _assert_p4_question_rows_are_exactly_the_ceiling_rows_of_the_window,
+        _assert_p6_ids_for_sources_equals_the_fixture_reference,
+        _assert_p7_presence_keeps_first_occurrence_order_of_the_listed_sources,
+        _assert_p5_exclude_mode_returns_exactly_the_candidates_outside_the_ceiling,
+    )
+    for check in checks:
+        database = PostgresDatabase(pin_database.settings, pin_database.root_dir)
+        try:
+            with monkeypatch.context() as scoped:
+                check(database, scoped)
+        except Exception as error:
+            error.add_note(f"ID-binding scenario: {check.__name__.removeprefix('_assert_')}")
+            raise
+        finally:
+            database.close()

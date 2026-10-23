@@ -198,6 +198,8 @@ python scripts/check_backend_lint.py --rename OLD NEW   # 改名/挪动有基线
 运行方式为 `PYTHON_BIN=/path/to/python bash scripts/check_postgres.sh`；launcher
 预检全部目标并隔离凭据，每条用例仍使用独立 schema。慢测试计时直接输出，JUnit 写入
 `backend/.local/postgres-junit.xml`。完整隔离与 CI 约定见[开发说明](../docs/development_zh.md#验证)。
+同时生成 `backend/.local/postgres-metrics.json`，汇总墙钟、各 worker 阶段累计耗时、
+CPU 与单进程峰值内存；指标故障不影响测试结果，CI 将其与 JUnit 一起保留七天。
 
 ### `migrate_sqlite_to_postgres.py` —— SQLite 存量迁移到 PostgreSQL
 

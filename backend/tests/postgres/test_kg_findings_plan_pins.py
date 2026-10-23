@@ -198,7 +198,7 @@ def _no_scan(plan: str, *tables: str) -> None:
         assert f"Seq Scan on {table} " not in plan + " ", plan
 
 
-def test_source_state_read_seeks_each_listed_source(pin_database):
+def _assert_source_state_read_seeks_each_listed_source(pin_database):
     store = UnifiedKgStore(pin_database)
 
     def call():
@@ -213,7 +213,7 @@ def test_source_state_read_seeks_each_listed_source(pin_database):
     assert "idx_extraction_runs_source_created" in plan, plan
 
 
-def test_display_name_read_is_driven_by_the_listed_canonicals(pin_database):
+def _assert_display_name_read_is_driven_by_the_listed_canonicals(pin_database):
     store = UnifiedKgStore(pin_database)
 
     def call():
@@ -226,7 +226,7 @@ def test_display_name_read_is_driven_by_the_listed_canonicals(pin_database):
     assert "idx_clusters_member" in plan, plan
 
 
-def test_member_name_read_is_driven_by_the_listed_canonicals(pin_database):
+def _assert_member_name_read_is_driven_by_the_listed_canonicals(pin_database):
     """PR-2: every member of the listed canonicals (both legs, as the display
     names) plus the hidden-source probe by the sources' primary key."""
     store = UnifiedKgStore(pin_database)
@@ -246,7 +246,7 @@ def test_member_name_read_is_driven_by_the_listed_canonicals(pin_database):
     assert "idx_clusters_member" in plan, plan
 
 
-def test_candidate_state_read_is_driven_by_the_notebook_status_slice(pin_database):
+def _assert_candidate_state_read_is_driven_by_the_notebook_status_slice(pin_database):
     store = GovernanceStore(pin_database, _seams())
 
     def call():
@@ -263,7 +263,7 @@ def test_candidate_state_read_is_driven_by_the_notebook_status_slice(pin_databas
     assert "Sort" not in plan, plan
 
 
-def test_finding_key_read_probes_the_primary_key(pin_database):
+def _assert_finding_key_read_probes_the_primary_key(pin_database):
     """PR-2 review: the dismissal write's existence check and the overview's
     dismissed count probe ``pk_kg_analysis_findings`` per key — never the
     notebook's whole detail, never a scan of every notebook's findings."""
@@ -281,7 +281,7 @@ def test_finding_key_read_probes_the_primary_key(pin_database):
     assert "subject_key = ANY" in plan, plan
 
 
-def test_old_detail_read_walks_the_primary_key(pin_database):
+def _assert_old_detail_read_walks_the_primary_key(pin_database):
     """The notebook's slice of ``pk_kg_analysis_findings`` and nothing else.
     PostgreSQL may sort that slice (a bitmap scan of 125 rows here) -- a sort
     bounded by the write-side cap, ``KG_FINDINGS_ROWS_MAX + 1`` rows at most;
@@ -298,3 +298,28 @@ def test_old_detail_read_walks_the_primary_key(pin_database):
     _no_scan(plan, "kg_analysis_findings")
     assert "pk_kg_analysis_findings" in plan, plan
     assert "Index Cond: (notebook_id = " in plan, plan
+
+
+def test_kg_findings_read_plans_match_the_production_shaped_corpus(pin_database):
+    """All six read-only plan checks use one unchanged, fully migrated corpus.
+
+    Keep each result and plan assertion, the full corpus, and VACUUM intact;
+    only migration and seed preparation are shared within this test's schema.
+    """
+    checks = (
+        ("source state", _assert_source_state_read_seeks_each_listed_source),
+        ("display names", _assert_display_name_read_is_driven_by_the_listed_canonicals),
+        ("member names", _assert_member_name_read_is_driven_by_the_listed_canonicals),
+        (
+            "candidate state",
+            _assert_candidate_state_read_is_driven_by_the_notebook_status_slice,
+        ),
+        ("finding keys", _assert_finding_key_read_probes_the_primary_key),
+        ("old detail", _assert_old_detail_read_walks_the_primary_key),
+    )
+    for label, check in checks:
+        try:
+            check(pin_database)
+        except Exception as error:
+            error.add_note(f"KG findings plan scenario: {label}")
+            raise

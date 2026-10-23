@@ -30,6 +30,7 @@ import psycopg
 import pytest
 
 from app.repositories.postgres import source_ceiling
+from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.id_binding import ID_SEPARATOR
 from app.repositories.postgres.knowledge_store import KnowledgeStore
 from app.repositories.postgres.migrator import PostgresMigrator
@@ -167,9 +168,7 @@ def _assert_common(plan: str) -> None:
     assert "'::text[]" in plan and "string_to_array" not in plan, plan
 
 
-def test_page_with_reverse_index_keeps_keyset_scan_and_object_probe(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 83
-    _seed(postgres_database, backfilled=True)
+def _assert_page_with_reverse_index_keeps_keyset_scan_and_object_probe(postgres_database):
     store = KnowledgeStore(postgres_database, _seams())
     after = ("2026-09-01T01:00:00+00:00", f"{NOTEBOOK}-ko-3600")
     for name, ceiling in CEILINGS.items():
@@ -183,9 +182,7 @@ def test_page_with_reverse_index_keeps_keyset_scan_and_object_probe(postgres_dat
                 assert "idx_kos_source_object" not in plan, (name, plan)
 
 
-def test_count_with_reverse_index_never_seeks_per_ceiling_id(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 83
-    _seed(postgres_database, backfilled=True)
+def _assert_count_with_reverse_index_never_seeks_per_ceiling_id(postgres_database):
     store = KnowledgeStore(postgres_database, _seams())
     for name, ceiling in CEILINGS.items():
         for plan in _plans_first_and_fifteenth(postgres_database, _count(store, ceiling)):
@@ -210,12 +207,10 @@ def test_uncertified_index_reads_evidence_json_not_the_reverse_index(postgres_da
             assert "knowledge_object_sources" not in plan, (name, plan)
 
 
-def test_control_without_statement_settings_the_49k_page_goes_parallel(postgres_database):
+def _assert_control_without_statement_settings_the_49k_page_goes_parallel(postgres_database):
     """Control for the "no Gather" pins: the same custom plan WITHOUT
     ``execute_with_ceiling``'s settings is parallel here, so their absence
     above is the settings' doing, not the fixture's size."""
-    assert PostgresMigrator(postgres_database).migrate() == 83
-    _seed(postgres_database, backfilled=True)
     store = KnowledgeStore(postgres_database, _seams())
     with postgres_database.connect() as connection:
         sql, params = _statement(connection, _page(store, CEILING_49K))
@@ -223,7 +218,7 @@ def test_control_without_statement_settings_the_49k_page_goes_parallel(postgres_
     assert "Gather" in plan, plan
 
 
-def test_ceiling_statements_never_become_server_side_prepared(postgres_database):
+def _assert_ceiling_statements_never_become_server_side_prepared(postgres_database):
     """psycopg prepares a statement on its fifth execution per connection;
     PostgreSQL may then plan it GENERICALLY, where the ceiling is an opaque
     ``$n`` (assumed ~10 elements, ``= ANY`` unhashed) — the uncertified count
@@ -231,8 +226,6 @@ def test_ceiling_statements_never_become_server_side_prepared(postgres_database)
     ``source_ceiling`` module docstring).  Pin that the store's ceiling
     statements are sent unprepared however often they run, and that the check
     itself can see a prepared statement (control)."""
-    assert PostgresMigrator(postgres_database).migrate() == 83
-    _seed(postgres_database, backfilled=True)
     store = KnowledgeStore(postgres_database, _seams())
     prepared_sql = (
         "SELECT count(*) AS c FROM pg_prepared_statements "
@@ -262,3 +255,27 @@ def test_ceiling_statements_never_become_server_side_prepared(postgres_database)
             connection.execute(sql, params).fetchall()
         assert connection.execute(
             prepared_sql, ("%knowledge_object_sources%",)).fetchone()["c"] >= 1
+
+
+def test_certified_ceiling_plan_matrix(postgres_database):
+    """One certified corpus, with independent connection caches for each check.
+
+    The uncertified reverse-index world remains a separate test/schema.
+    """
+    assert PostgresMigrator(postgres_database).migrate() == 83
+    _seed(postgres_database, backfilled=True)
+    checks = (
+        _assert_page_with_reverse_index_keeps_keyset_scan_and_object_probe,
+        _assert_count_with_reverse_index_never_seeks_per_ceiling_id,
+        _assert_control_without_statement_settings_the_49k_page_goes_parallel,
+        _assert_ceiling_statements_never_become_server_side_prepared,
+    )
+    for check in checks:
+        database = PostgresDatabase(postgres_database.settings, postgres_database.root_dir)
+        try:
+            check(database)
+        except Exception as error:
+            error.add_note(f"Certified-ceiling scenario: {check.__name__.removeprefix('_assert_')}")
+            raise
+        finally:
+            database.close()
