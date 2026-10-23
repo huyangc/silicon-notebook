@@ -153,7 +153,7 @@ def notebook_delete_window_open_sql(nb_alias: str = "") -> str:
     (微秒恒写、偏移恒为 +00:00,字节序即时间序)——窗口列的三条写路径与全部绑定
     参数都走它。这样两个后端的谓词逐字相同(`test_access_sql_contract` 钉住),部分
     索引 `idx_notebooks_pending_delete_due`(`WHERE status='pending_delete'`)也能直接
-    服务这个范围。别把别的形态的时刻串绑进来;`_stale_cutoff_iso` 那种带本机偏移的
+    服务这个范围。别把别的形态的时刻串绑进来;`stale_cutoff_iso` 那种带本机偏移的
     串必须先经 `stored_instant_text`。`nb_alias` 为空时用裸列名。"""
     prefix = f"{nb_alias}." if nb_alias else ""
     return (

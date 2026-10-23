@@ -28,6 +28,13 @@ from app.repositories.sqlite.memory_sql import memory_source_type_predicate
 from app.domain.memory_kg_isolation import NotebookHoldsMemory
 
 # 「这本笔记本里有 Memory 来源」:发布为公共库的拒绝条件(M1,E4-3)。一个参数:笔记本 id。
+# A notebook import that never published, handed to the delete job by
+# ``request_delete_from_import`` (it records ``status_before_delete='importing'``):
+# its delete keeps no activity record (``_retain_user_activity_before_delete``).
+_ABANDONED_IMPORT_SQL = (
+    "SELECT 1 FROM notebooks WHERE id=? AND status='deleting' "
+    "AND status_before_delete='importing'"
+)
 _HOLDS_MEMORY_SQL = (
     "SELECT 1 FROM sources hm WHERE hm.notebook_id = ? "
     f"AND {memory_source_type_predicate('hm.source_type')} LIMIT 1"
@@ -592,7 +599,14 @@ class NotebookStore:
         do. The table intentionally carries no notebook FK. It is not a backup:
         answer bodies, traces, citations, source content and report sections
         never cross this boundary.
+
+        Not for a notebook import that never published (its delete was requested
+        by ``request_delete_from_import``, which records
+        ``status_before_delete='importing'``): nobody ever saw or used it, so it
+        has no activity to keep, and the import's compensation leaves nothing.
         """
+        if db.execute(_ABANDONED_IMPORT_SQL, (notebook_id,)).fetchone() is not None:
+            return
         deleted_at, expires_at = activity_retention_window(
             self.now(), retention_days=self.activity_retention_days
         )

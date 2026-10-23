@@ -1,13 +1,22 @@
 """Read and verify a ``.snbk`` notebook archive before anything trusts it.
 
-The preflight every reader runs first (``notebook inspect`` today, the importer
-next): the zip's directory is checked against the protocol limits and the entry
-name whitelist of ``app.domain.notebook_archive``, ``manifest.json`` is
-validated field by field, and every entry the manifest and ``files.jsonl``
-declare is re-read and re-hashed -- sizes, sha256, row counts and the column
-names each row carries. Nothing is extracted to disk here and nothing is
-written anywhere; an archive that fails any check raises ``ArchiveError`` with
-an operator-facing message.
+The preflight every reader runs first (``notebook inspect`` and the importer):
+the zip's directory is checked against the protocol limits and the entry name
+whitelist of ``app.domain.notebook_archive``, ``manifest.json`` is validated
+field by field, and every entry the manifest and ``files.jsonl`` declare is
+re-read and re-hashed -- sizes, sha256, row counts and the column names each
+row carries. Nothing is extracted to disk here and nothing is written
+anywhere; an archive that fails any check raises ``ArchiveError`` with an
+operator-facing message.
+
+The importer then reads the verified archive a second time, through
+``ArchiveRowSource`` (the rows, page by page, each pass re-hashed against the
+manifest) and ``copy_file_entry`` (one file into an already-open descriptor,
+re-hashed against ``files.jsonl``), so a file changed on disk after the
+preflight fails the import instead of slipping past it. Two import-only checks
+live here too: ``check_columns`` (the column names are plain identifiers the
+target has) and ``check_file_paths`` (no two ``files/**`` paths collide on a
+case-insensitive or Unicode-normalising file system).
 
 What is checked on the zip directory, before a single entry is decompressed:
 entry count and total uncompressed size within the limits; every name is
@@ -21,18 +30,22 @@ large entry inflates beyond the per-entry compression ratio.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import os
 import stat
+import unicodedata
 import zipfile
 import zlib
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Callable, Iterable, Iterator, Mapping
 
 from app.domain.notebook_archive import (
     ARCHIVE_TABLES,
+    ASSET_FILES_DIR,
     COMPRESSION_RATIO_FLOOR_BYTES,
+    FILES_DIR,
     FILES_INDEX_NAME,
     MANIFEST_NAME,
     MAX_ENTRIES,
@@ -40,14 +53,17 @@ from app.domain.notebook_archive import (
     MAX_JSONL_LINE_BYTES,
     MAX_MANIFEST_BYTES,
     MAX_TOTAL_UNCOMPRESSED_BYTES,
+    NOTEBOOK_FILES_DIR,
     ArchiveManifest,
     ManifestError,
     entry_kind,
     rows_entry,
 )
-from app.domain.portable_rows import DigestCounter
+from app.domain.portable_rows import DigestCounter, decode_row, is_safe_identifier
 
 _READ_BLOCK = 1 << 20
+#: The default line-byte budget of one ``ArchiveRowSource`` page (32 MiB).
+PAGE_BYTES = 32 * 1024 * 1024
 _ALLOWED_COMPRESSION = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
 #: ``ZipInfo.create_system`` value of an archive written on a Unix host, the
 #: only one whose external attributes carry a file mode.
@@ -65,6 +81,10 @@ class ArchiveInspection:
     manifest: ArchiveManifest
     entries: int
     uncompressed_bytes: int
+    #: ``files.jsonl``: carried file entry name -> (size, sha256).
+    files: Mapping[str, tuple[int, str]] = dataclasses.field(
+        default_factory=dict, repr=False
+    )
 
     def summary(self) -> dict[str, Any]:
         manifest = self.manifest
@@ -78,6 +98,7 @@ class ArchiveInspection:
             "kg": {
                 "starts_dirty": manifest.kg_starts_dirty,
                 "clusters_dropped": manifest.kg_clusters_dropped,
+                "concept_seed_version": manifest.kg_concept_seed_version,
             },
             "vectors_included": manifest.vectors_included,
             "embeddings": {
@@ -173,18 +194,35 @@ def inspect_archive(path: Path) -> ArchiveInspection:
     """Every check of this module, on the whole archive (module docstring)."""
     path = Path(path)
     with open_archive(path) as archive:
-        try:
-            return _inspect_open(path, archive)
-        except ArchiveError:
-            raise
-        except (zipfile.BadZipFile, zlib.error, EOFError, OSError) as exc:
+        return inspect_open_archive(path, archive)
+
+
+def inspect_open_archive(path: Path, archive: zipfile.ZipFile) -> ArchiveInspection:
+    """``inspect_archive`` on a zip the caller keeps open (the importer reads
+    the same open file again for the rows and files it writes)."""
+    with archive_errors():
+        return _inspect_open(path, archive)
+
+
+class archive_errors:
+    """Context manager: what the zip layer or a parser raises while reading a
+    crafted or damaged archive becomes ``ArchiveError`` (never a traceback)."""
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, kind, exc, traceback) -> bool:
+        if exc is None or isinstance(exc, ArchiveError):
+            return False
+        if isinstance(exc, (zipfile.BadZipFile, zlib.error, EOFError, OSError)):
             # A flipped byte inside a compressed entry surfaces as a CRC or
             # inflate error from the zip layer, never as a checksum mismatch.
             raise ArchiveError(f"导出文件已损坏: {type(exc).__name__}") from None
-        except Exception as exc:  # noqa: BLE001 -- a crafted file never yields a traceback
+        if isinstance(exc, Exception):
             # NotImplementedError, RuntimeError, ValueError... from the zip
             # layer or a parser: the file is not one this build can read.
             raise ArchiveError(f"导出文件无法解析: {type(exc).__name__}") from exc
+        return False
 
 
 def _inspect_open(path: Path, archive: zipfile.ZipFile) -> ArchiveInspection:
@@ -194,7 +232,8 @@ def _inspect_open(path: Path, archive: zipfile.ZipFile) -> ArchiveInspection:
         name = rows_entry(table)
         declared.add(name)
         _verify_rows(archive, name, manifest.tables[table])
-    declared.update(_verify_files(archive, manifest))
+    files = _verify_files(archive, manifest)
+    declared.update(files)
     extra = [info.filename for info in archive.infolist() if info.filename not in declared]
     if extra:
         raise ArchiveError(f"导出文件含 {len(extra)} 个未在清单中声明的条目")
@@ -204,6 +243,7 @@ def _inspect_open(path: Path, archive: zipfile.ZipFile) -> ArchiveInspection:
         manifest=manifest,
         entries=len(infos),
         uncompressed_bytes=sum(info.file_size for info in infos),
+        files=files,
     )
 
 
@@ -258,7 +298,9 @@ def _verify_rows(archive: zipfile.ZipFile, name: str, declared) -> None:
         raise ArchiveError(f"{name} 的行数与清单声明不符")
 
 
-def _verify_files(archive: zipfile.ZipFile, manifest: ArchiveManifest) -> set[str]:
+def _verify_files(
+    archive: zipfile.ZipFile, manifest: ArchiveManifest
+) -> dict[str, tuple[int, str]]:
     info = _entry(archive, FILES_INDEX_NAME)
     if info.file_size != manifest.files.index_bytes:
         raise ArchiveError("files.jsonl 的大小与清单声明不符")
@@ -299,4 +341,155 @@ def _verify_files(archive: zipfile.ZipFile, manifest: ArchiveManifest) -> set[st
                 file_digest.update(block)
         if file_digest.size != size or file_digest.hexdigest() != sha256:
             raise ArchiveError(f"{path} 的校验和与文件清单不符")
-    return set(files)
+    return files
+
+
+# ------------------------------------------------------------------ import
+
+
+def check_columns(
+    manifest: ArchiveManifest, target_columns: Mapping[str, frozenset[str]]
+) -> None:
+    """Every column name the archive declares is a plain identifier (it becomes
+    part of an INSERT statement) and exists in the target's table. An empty
+    table declares ``[]``, which says nothing about the table's columns. A
+    column the target lacks means the archive came from a newer build."""
+    for table in ARCHIVE_TABLES:
+        declared = manifest.tables[table].columns
+        if not all(is_safe_identifier(column) for column in declared):
+            raise ArchiveError(f"{rows_entry(table)} 的列名不合法")
+        missing = sorted(set(declared) - set(target_columns.get(table, ())))
+        if missing:
+            raise ArchiveError(
+                f"导出文件的 {table} 表含本部署没有的列（{len(missing)} 个）："
+                "导出端版本较新，请先升级本部署再导入"
+            )
+
+
+def check_file_paths(paths: "Iterable[str]") -> None:
+    """No two carried files may land on the same path of a case-insensitive or
+    Unicode-normalising file system (macOS, Windows volumes): each path is
+    compared NFC-normalised and lower-cased, and a file may not also be the
+    directory of another file.
+
+    ``str.lower()`` (simple, one-to-one case mapping), not ``str.casefold()``:
+    APFS and NTFS compare names under a simple case mapping, so ``ß`` and
+    ``ss`` are two different files there, while full case folding would refuse
+    an archive that extracts fine."""
+    seen: set[str] = set()
+    parents: set[str] = set()
+    for path in paths:
+        key = unicodedata.normalize("NFC", path).lower()
+        if key in seen or key in parents:
+            raise ArchiveError("导出文件含大小写或 Unicode 归一化后重名的文件")
+        seen.add(key)
+        parts = key.split("/")
+        for depth in range(1, len(parts)):
+            parent = "/".join(parts[:depth])
+            if parent in seen:
+                raise ArchiveError("导出文件含大小写或 Unicode 归一化后重名的文件")
+            parents.add(parent)
+
+
+class ArchiveRowSource:
+    """``CopyRowSource`` (``notebook_copy_writer``) over a verified archive.
+
+    ``batches(table)`` opens the table's ``rows/<table>.jsonl`` entry again on
+    every call (a zip entry can be re-read from its start) and yields its rows
+    a page at a time, decoded (``{"$bytes": ...}`` back to bytes) and passed
+    through ``adapt(table, row)`` (the target backend's value shapes). A page
+    closes at ``page_rows`` rows or once its lines reach ``page_bytes``, so a
+    page of very long rows (each up to ``MAX_JSONL_LINE_BYTES``) never holds
+    more than about ``page_bytes`` plus one row; ``on_page()`` runs before
+    each page is handed out (the importer beats its heartbeat there, also
+    during the writer's read-only pre-passes) -- outside ``archive_errors``,
+    so what it raises (a reaped import, a database error) reaches the caller
+    as itself, never as a damaged file.
+    Only one page is held at a time; the writer's ``CopyRowSource`` contract --
+    a table's write pass is its last read -- holds because every read starts
+    over from the file. Each pass re-hashes the entry and counts its rows, and
+    a pass that does not end exactly at the manifest's sha256 and row count
+    raises ``ArchiveError`` (the file changed since the preflight)."""
+
+    def __init__(
+        self,
+        archive: zipfile.ZipFile,
+        manifest: ArchiveManifest,
+        *,
+        adapt: "Callable[[str, dict], dict]",
+        page_rows: int,
+        page_bytes: int = PAGE_BYTES,
+        on_page: "Callable[[], None]" = lambda: None,
+    ) -> None:
+        self._archive = archive
+        self._manifest = manifest
+        self._adapt = adapt
+        self._page_rows = max(1, int(page_rows))
+        self._page_bytes = max(1, int(page_bytes))
+        self._on_page = on_page
+
+    def batches(self, table: str) -> Iterator[list[dict]]:
+        with contextlib.closing(self._pages(table)) as pages:
+            for page in pages:
+                self._on_page()
+                yield page
+
+    def _pages(self, table: str) -> Iterator[list[dict]]:
+        """The pages of ``batches``, read (and re-verified) under ``archive_errors``."""
+        declared = self._manifest.tables[table]
+        name = rows_entry(table)
+        columns = frozenset(declared.columns)
+        with archive_errors():
+            info = _entry(self._archive, name)
+            digest = DigestCounter()
+            count = page_size = 0
+            page: list[dict] = []
+            with self._archive.open(info) as handle:
+                for line in _lines(handle, name, digest):
+                    row = _json_object(line, name)
+                    if not set(row) <= columns:
+                        raise ArchiveError(f"{name} 有行携带清单未声明的列")
+                    page.append(self._adapt(table, decode_row(row)))
+                    count += 1
+                    page_size += len(line)
+                    if len(page) >= self._page_rows or page_size >= self._page_bytes:
+                        yield page
+                        page, page_size = [], 0
+            if digest.size != declared.bytes or digest.hexdigest() != declared.sha256:
+                raise ArchiveError(f"{name} 自预检后已被改动（校验和不符）")
+            if count != declared.rows:
+                raise ArchiveError(f"{name} 自预检后已被改动（行数不符）")
+        if page or count == 0:
+            yield page
+
+
+def copy_file_entry(
+    archive: zipfile.ZipFile, name: str, size: int, sha256: str, fd: int
+) -> None:
+    """Copy one ``files/**`` entry into ``fd`` (opened by the caller, written
+    from its start), re-hashing it: a size or sha256 other than ``files.jsonl``
+    declared raises ``ArchiveError``."""
+    with archive_errors():
+        info = _entry(archive, name)
+        digest = DigestCounter()
+        with archive.open(info) as handle:
+            while True:
+                block = handle.read(_READ_BLOCK)
+                if not block:
+                    break
+                digest.update(block)
+                _write_all(fd, block)
+        if digest.size != size or digest.hexdigest() != sha256:
+            raise ArchiveError(f"{name} 自预检后已被改动（校验和不符）")
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        view = view[written:]
+
+
+#: ``files/notebooks/`` and ``files/assets/``: where an import extracts from.
+NOTEBOOK_FILES_PREFIX = f"{FILES_DIR}/{NOTEBOOK_FILES_DIR}/"
+ASSET_FILES_PREFIX = f"{FILES_DIR}/{ASSET_FILES_DIR}/"

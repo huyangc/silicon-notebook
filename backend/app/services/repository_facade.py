@@ -247,6 +247,17 @@ def _schedule_knowhow_projection(repo: "RepositoryFacade", table_id: str) -> Non
     get_scheduler(repo).schedule(table_id)
 
 
+def _project_knowhow_table(repo: "RepositoryFacade", table_id: str, embed: bool) -> None:
+    """The ``project_table`` seam ``wire_sharing`` hands to the notebook
+    importer: one synchronous projection pass (not the debounced scheduler --
+    the import must know the pass is over before its re-embedding legs run).
+    Module-level and deferred-import for the same reasons as
+    ``_schedule_knowhow_projection``."""
+    from app.services.knowhow.api import build_projector
+
+    build_projector(repo).project_table(table_id, embed=embed)
+
+
 def _make_persist_image(
     repo: "RepositoryFacade", notebook_id: str, source_id: str, created_by: str
 ):
@@ -390,6 +401,7 @@ class RepositoryFacade:
             schedule_projection=lambda table_id: _schedule_knowhow_projection(
                 self, table_id
             ),
+            project_table=lambda table_id, embed: _project_knowhow_table(self, table_id, embed),
         )
         # Task 10: vector flushes stay on the facade's `_write` seat (resolved
         # per call) so transaction-counting/failure-injection monkeypatches

@@ -1880,6 +1880,10 @@ REVIEWED: dict[tuple, tuple[str, str]] = {
         (CHANGES, "UPDATE chunks SET question_indexed_at on an existing chunk"),
     (f"{_PG}/chunk_store.py", "ChunkStore.replace_chunk_questions"):
         (CHANGES, "UPDATE chunks SET question_indexed_at on an existing chunk"),
+    (f"{_SQ}/chunk_store.py", "ChunkStore.clear_question_index_marks"):
+        (CHANGES, "UPDATE chunks SET question_indexed_at=NULL on an imported notebook's chunks"),
+    (f"{_PG}/chunk_store.py", "ChunkStore.clear_question_index_marks"):
+        (CHANGES, "UPDATE chunks SET question_indexed_at=NULL on an imported notebook's chunks"),
     (f"{_SQ}/chunk_store.py", "ChunkStore.apply_navigation_flags"):
         (CHANGES, "UPDATE chunks SET navigation on existing chunks (WHERE id AND source_id)"),
     (f"{_PG}/chunk_store.py", "ChunkStore.apply_navigation_flags"):

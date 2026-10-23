@@ -1357,6 +1357,12 @@ class NotebookDeleteJobStorePort(Protocol):
     覆盖新主人的进度。"""
 
     def request(self, notebook_id: str, created_by: str) -> dict: ...
+    # 中止的笔记本导入转交删除作业：``importing``(且 ``sync_origin=''``)CAS 成
+    # ``deleting`` 并同事务建作业行;``stale_seconds`` 给出时只收心跳已过期的哨兵。
+    # 行已不是这样的哨兵则返回 ``None``。
+    def request_delete_from_import(
+        self, notebook_id: str, *, stale_seconds: "float | None" = None
+    ) -> "dict | None": ...
     # 删除整本笔记本的一天窗口（``app.domain.notebook_delete_grace``）：T1/T2/T3
     # 三个同事务 CAS，时刻一律显式传入（``None`` = 读一次 store 注入的时钟）。
     def request_pending(
@@ -2176,6 +2182,9 @@ class ChunkStorePort(Protocol):
         *,
         created_at: str,
     ) -> None: ...
+    # A notebook import clears the question-index mark of the chunks whose
+    # stored questions it could not keep (``notebook_transfer.import_``).
+    def clear_question_index_marks(self, notebook_id: str, chunk_ids: Sequence[str]) -> int: ...
     def question_index_rows(
         self,
         notebook_id: str,
@@ -4416,11 +4425,16 @@ class CopyRowsOutcome:
     statement set was used (the notebook holds a Memory source or is dirty), so
     a notebook built from these rows must start marked for a KG rebuild;
     ``clusters_dropped`` -- the notebook itself was dirty, so no cluster row was
-    streamed. The snapshot read tags its root row with the same decision
-    (``_copy_starts_dirty``); the streaming read reports it here instead."""
+    streamed; ``concept_seed_version`` -- the concept seed space of the
+    notebook's published merge, the space the streamed cluster rows were built
+    in (``None`` when no cluster row was streamed because they were dropped).
+    The snapshot read tags its root row with the same decisions
+    (``_copy_starts_dirty`` / ``_copy_concept_seed_version``); the streaming
+    read reports them here instead."""
 
     starts_dirty: bool
     clusters_dropped: bool
+    concept_seed_version: "int | None"
 
 
 #: ``iter_copy_rows``'s per-table consumer: the table name and a lazy iterator
@@ -4462,6 +4476,25 @@ class SharingStorePort(Protocol):
         on_table: CopyTableConsumer,
         skip_tables: frozenset[str] = frozenset(),
     ) -> CopyRowsOutcome: ...
+    # A notebook import (``app.services.notebook_transfer.import_``) writes behind
+    # the hidden sentinel ``status='importing'`` with ``sync_origin=''`` (the sync
+    # importer's mirrors carry the same status with a non-empty origin, and no
+    # method below ever touches them). ``updated_at`` is the heartbeat;
+    # ``touch_import``/``publish_import``/``compensate_import`` answer ``False``
+    # once the row is no longer this import's sentinel. ``validate_import`` raises
+    # ``RuntimeError`` when a table's rows differ from what the import wrote or a
+    # reference leaves the notebook; ``stale_import_ids`` lists sentinels whose
+    # heartbeat stopped (the delete job store's ``request_delete_from_import``
+    # reaps them). ``import_table_columns``: each table's column names here.
+    def insert_import_sentinel(
+        self, row: dict, *, starts_dirty: bool, concept_seed_version: "int | None" = None
+    ) -> None: ...
+    def touch_import(self, notebook_id: str) -> bool: ...
+    def import_table_columns(self, tables: Sequence[str]) -> dict[str, frozenset[str]]: ...
+    def validate_import(self, notebook_id: str, written: Mapping[str, int]) -> None: ...
+    def publish_import(self, notebook_id: str, status: str) -> bool: ...
+    def compensate_import(self, notebook_id: str) -> bool: ...
+    def stale_import_ids(self, *, older_than_seconds: float) -> list[str]: ...
 
 
 class LastGroupAdminError(RuntimeError):

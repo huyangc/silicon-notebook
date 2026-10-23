@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Single-file notebook archive CLI: ``export`` and ``inspect``.
+"""Single-file notebook archive CLI: ``export``, ``inspect`` and ``import``.
 
 ``scripts/cli.sh notebook export --notebook <id>... (--out <file>|--out-dir <dir>)
 [--no-vectors] [--json]`` writes each notebook to one ``.snbk`` archive. It is
@@ -22,8 +22,27 @@ message, which can carry connection details) or a schema/connection refusal; the
 already written stay, and ``--json`` prints ``{"exported": [...], "failed":
 [...]}`` in every one of those cases.
 
-Import (``notebook import``) is not part of this build yet. The format is
-``app.domain.notebook_archive``; docs/operations.md has the runbook.
+``scripts/cli.sh notebook import <file>... --owner <username> [--name N]
+[--dry-run] [--confirm-service-stopped] [--rebuild-scale auto|skip]
+[--reembed auto|skip] [--json]`` imports each archive as a new, independent
+notebook owned by ``--owner`` (``app.services.notebook_transfer.import_``). It
+writes through the maintenance repository (``open_maintenance_cli_repository``:
+schema guest, the database-wide operator lock, and on PostgreSQL the stopped
+service confirmed with ``--confirm-service-stopped``), then runs what the import
+leaves to its caller, synchronously: the re-embedding legs the report names
+(``notebook_reembed``) and, on PostgreSQL, a full scale-index build
+(``app.migration.sync.scale_rebuild``; SQLite reports it as skipped).
+``--dry-run`` opens the database read-only (no confirmation needed), runs the
+whole preflight and the row mapping and writes nothing. Files import in order
+and stop at the first failure; the notebooks already imported stay. Exit
+status: 0 every file imported (re-embedding or the scale build may still
+report a problem; the import itself is done); 1 a file was refused or the
+import failed (nothing of that file remains); 2 a usage error, an unknown
+owner or a missing confirmation; 3 the schema refusal. ``--json`` prints
+``{"imported": [...], "failed": [...]}`` in every case.
+
+The format is ``app.domain.notebook_archive``; docs/operations.md has the
+runbook.
 """
 from __future__ import annotations
 
@@ -57,6 +76,28 @@ def _parser() -> argparse.ArgumentParser:
     inspect = commands.add_parser("inspect", help="校验 .snbk 文件并打印摘要（不打开数据库）")
     inspect.add_argument("file", type=Path)
     inspect.add_argument("--json", action="store_true", help="输出 JSON 摘要")
+    imported = commands.add_parser(
+        "import", help="把 .snbk 文件导入为新的独立笔记本（写库；PostgreSQL 需先停服）",
+    )
+    imported.add_argument("file", type=Path, nargs="+", help="要导入的 .snbk 文件；可给多个")
+    imported.add_argument("--owner", required=True, metavar="USERNAME", help="新笔记本的所有者（用户名）")
+    imported.add_argument("--name", help="新笔记本的名称（默认沿用导出时的名称；只导入一个文件时可用）")
+    imported.add_argument(
+        "--dry-run", action="store_true", help="只做预检与映射预演，不写入任何东西",
+    )
+    imported.add_argument(
+        "--confirm-service-stopped", action="store_true",
+        help="确认服务已停止（PostgreSQL 上写库必需）",
+    )
+    imported.add_argument(
+        "--rebuild-scale", choices=("auto", "skip"), default="auto",
+        help="导入后重建 scale 索引（PostgreSQL；SQLite 记为跳过）",
+    )
+    imported.add_argument(
+        "--reembed", choices=("auto", "skip"), default="auto",
+        help="导入后同步补齐需要重新嵌入的向量",
+    )
+    imported.add_argument("--json", action="store_true", help="输出 JSON 报告")
     return parser
 
 
@@ -222,10 +263,208 @@ def _inspect(options) -> int:
     return 0
 
 
+def _import(options) -> int:
+    from app.core.config import get_settings
+    from app.services.maintenance_cli import (
+        MaintenanceCliError,
+        open_cli_repository,
+        open_maintenance_cli_repository,
+    )
+    from app.services.notebook_transfer.import_ import NotebookImportError
+
+    files = list(dict.fromkeys(options.file))
+    imported: list[dict] = []
+    failure: "dict | None" = None
+    if options.name is not None and len(files) != 1:
+        failure, status = {"file": None, "error": "--name 只能配一个导入文件"}, 2
+        return _finish_import(options, imported, failure, status)
+    settings = get_settings()
+    database_errors = _database_errors()
+    status, current = 0, None
+    opened = (
+        open_cli_repository(settings) if options.dry_run
+        else open_maintenance_cli_repository(
+            settings, confirm_service_stopped=options.confirm_service_stopped
+        )
+    )
+    try:
+        with opened as repository:
+            owner = repository.maintenance.resolve_owner_profile(options.owner)
+            if owner is None:
+                failure = {"file": None, "error": f"找不到用户（或用户名不唯一）: {options.owner}"}
+                return _finish_import(options, imported, failure, 2)
+            for path in files:
+                current = str(path)
+                try:
+                    entry = _import_one(repository, path, owner.id, options)
+                except NotebookImportError as exc:
+                    failure, status = {"file": current, "error": str(exc)}, 1
+                    break
+                except (OSError, *database_errors) as exc:
+                    failure, status = {"file": current, "error": _describe(exc)}, 1
+                    break
+                except Exception as exc:  # noqa: BLE001 -- the service compensated; report it
+                    # Anything else (a validation failure, a bug): the import of
+                    # this file left nothing behind, and the report must still be
+                    # printed. The class name only: a message could carry anything.
+                    failure, status = {"file": current, "error": f"导入失败: {type(exc).__name__}"}, 1
+                    break
+                imported.append(entry)
+    except MaintenanceCliError as exc:
+        failure, status = {"file": current, "error": str(exc)}, exc.exit_code
+    except database_errors as exc:
+        failure, status = {"file": current, "error": _describe(exc)}, 1
+    if not options.dry_run and options.rebuild_scale == "auto":
+        _rebuild_scale(settings, imported)
+    return _finish_import(options, imported, failure, status)
+
+
+def _import_one(repository, path: Path, owner_id: str, options) -> dict:
+    """One archive: the import, then (not on a dry run) its re-embedding legs,
+    synchronously, in this order (the import has already projected its Knowhow
+    tables; the legs must follow that)."""
+    service = repository._runtime.notebook_import  # noqa: SLF001 -- CLI composition root
+    report = service.import_notebook(
+        path, owner_id=owner_id, name=options.name, dry_run=options.dry_run,
+        progress=lambda event: _print_progress(path, event),
+    )
+    entry = {"file": str(path), "import": report.to_dict()}
+    if options.dry_run:
+        entry["reembed"] = {"state": "dry_run", "legs": list(report.reembed_legs)}
+    elif not report.reembed_legs:
+        entry["reembed"] = {"state": "not_needed", "legs": []}
+    elif options.reembed == "skip":
+        entry["reembed"] = {"state": "skipped", "legs": list(report.reembed_legs)}
+    else:
+        entry["reembed"] = _reembed(repository, report)
+    if not options.json:
+        _print_import(entry)
+    return entry
+
+
+def _reembed(repository, report) -> dict:
+    import dataclasses
+
+    from app.services.notebook_reembed import NotebookReembedService
+
+    try:
+        status = NotebookReembedService(repository).run(
+            report.notebook_id, legs=report.reembed_legs
+        )
+    except Exception as exc:  # noqa: BLE001 -- the import itself is done
+        # The class name only (as the per-file loop; a database error as
+        # ``_describe`` puts it): a model service's message -- an OSError's
+        # too, a URLError is one -- can carry its URL.
+        error = (
+            _describe(exc) if isinstance(exc, _database_errors())
+            else f"重新嵌入失败: {type(exc).__name__}"
+        )
+        return {"state": "failed", "legs": list(report.reembed_legs), "error": error}
+    return {
+        "state": status.state,
+        "legs": list(status.legs),
+        "progress": {leg: dataclasses.asdict(p) for leg, p in status.progress.items()},
+        "error": status.error,
+    }
+
+
+#: Re-embedding outcomes after which a scale index may be built: an index built
+#: on a notebook still missing vectors would be incomplete.
+_SCALE_READY = ("succeeded", "not_needed")
+
+
+def _rebuild_scale(settings, imported: list[dict]) -> None:
+    """A full scale-index build of every imported notebook whose vectors are
+    complete, after the maintenance repository is closed (``scale_rebuild``
+    opens its own). A notebook whose re-embedding was skipped or did not
+    succeed is reported as skipped: build its index once its vectors are in."""
+    from app.migration.sync.scale_rebuild import aborted_result, rebuild_after_import
+
+    ids = []
+    for entry in imported:
+        if entry["reembed"]["state"] in _SCALE_READY:
+            ids.append(entry["import"]["notebook_id"])
+            continue
+        entry["scale"] = {
+            "outcome": "skipped:reembed_not_done",
+            "note": (
+                "scale 索引: 向量尚未补齐（重新嵌入被跳过或未成功），本次未重建；补齐向量后"
+                "再运行 scripts/build_scale_index.py build --notebook "
+                f"{entry['import']['notebook_id']} --full"
+            ),
+            "warnings": [],
+        }
+    if not ids:
+        return
+    try:
+        result = rebuild_after_import(settings, ids)
+    except BaseException as exc:  # noqa: BLE001 -- the receipt is still printed
+        result = aborted_result(ids, exc)
+    for entry in imported:
+        if "scale" in entry:
+            continue
+        entry["scale"] = {
+            "outcome": result.outcomes.get(entry["import"]["notebook_id"], ""),
+            "note": result.note,
+            "warnings": list(result.warnings),
+        }
+
+
+def _finish_import(options, imported: list[dict], failure: "dict | None", status: int) -> int:
+    if failure is not None:
+        where = f"{failure['file']}: " if failure["file"] else ""
+        print(f"error: {where}{failure['error']}", file=sys.stderr)
+    if options.json:
+        print(json.dumps(
+            {"imported": imported, "failed": [] if failure is None else [failure]},
+            ensure_ascii=False, indent=2,
+        ))
+    elif options.rebuild_scale == "auto" and not options.dry_run:
+        for entry in imported:
+            scale = entry.get("scale") or {}
+            if scale.get("note"):
+                print(f"  {scale['note']}")
+            for warning in scale.get("warnings", ()):
+                print(f"  warning: {warning}", file=sys.stderr)
+    return status
+
+
+def _print_progress(path: Path, event) -> None:
+    if event.stage != "rows":
+        print(f"[import] {path.name}: {event.stage}", file=sys.stderr, flush=True)
+
+
+def _print_import(entry: dict) -> None:
+    report = entry["import"]
+    label = "would import" if report["dry_run"] else f"-> {report['notebook_id']}"
+    rows = sum(report["rows"].values())
+    print(f"[import] {entry['file']} {label} 「{report['name']}」 "
+          f"({rows} rows, {report['files']} files, owner {report['owner_id']})")
+    kept = [w for w, v in report["vectors"].items() if v["kept"]]
+    print(f"  vectors kept: {', '.join(kept) or 'none'}; "
+          f"reembed: {entry['reembed']['state']} {entry['reembed']['legs']}")
+    questions = report["chunk_questions"]
+    print(f"  questions: kept {questions['kept']}, re-embedded {questions['reembedded']}, "
+          f"dropped {questions['dropped']} {questions['reason']}".rstrip())
+    for key in ("cleared", "dropped"):
+        for column, count in report[key].items():
+            print(f"  {key} {column}: {count}")
+    if report["mount_edges_dropped"]:
+        print(f"  mount edges not carried: {report['mount_edges_dropped']}")
+    if report["sources_reset"]:
+        print(f"  unfinished sources set to failed: {report['sources_reset']}")
+    if report["global_object_types"]["added"]:
+        print(f"  object types added: {', '.join(report['global_object_types']['added'])}")
+    for table in report["projection_failures"]:
+        print(f"  warning: knowhow table {table} projection failed", file=sys.stderr)
+
+
 def main(argv: "list[str] | None" = None) -> int:
     options = _parser().parse_args(sys.argv[1:] if argv is None else argv)
     if options.command == "export":
         return _export(options)
+    if options.command == "import":
+        return _import(options)
     return _inspect(options)
 
 

@@ -55,7 +55,7 @@ def _new_lease_token() -> str:
     return secrets.token_hex(16)
 
 
-def _stale_cutoff_iso(seconds: float, now: str) -> str:
+def stale_cutoff_iso(seconds: float, now: str) -> str:
     """The cutoff is taken off ``now`` -- this store's own clock
     (``self.now()``), the clock that writes the ``updated_at`` it is compared
     against -- never off the host clock: with an injected clock the two used
@@ -144,6 +144,32 @@ class NotebookDeleteJobStore:
                 if existing is None:
                     raise KeyError(notebook_id)
                 raise NotebookAlreadyDeletingError(notebook_id)
+            job_id = self._insert_job_on(db, notebook_id, now)
+        return self.get(job_id)
+
+    def request_delete_from_import(
+        self, notebook_id: str, *, stale_seconds: "float | None" = None
+    ) -> "dict | None":
+        """Hand an abandoned notebook import to the delete job (PostgreSQL twin
+        docstring): CAS ``status='importing' AND sync_origin=''`` to
+        ``'deleting'`` plus the job row in one transaction; ``None`` when the row
+        is not such a sentinel. ``status_before_delete='importing'`` marks the
+        notebook as an import that never published, so the delete keeps no
+        activity record of it (``NotebookStore._retain_user_activity_before_delete``). The staleness bound is compared through
+        ``datetime()`` against ``stale_cutoff_iso`` (this store's clock)."""
+        now = self.now()
+        stale = "" if stale_seconds is None else " AND datetime(updated_at)<datetime(?)"
+        params: tuple = (now, notebook_id)
+        if stale_seconds is not None:
+            params += (stale_cutoff_iso(stale_seconds, now),)
+        with self.database.write(operation="notebook_delete.request_from_import") as db:
+            cas = db.execute(
+                "UPDATE notebooks SET status='deleting',status_before_delete='importing',"
+                "updated_at=? WHERE id=? AND status='importing' AND sync_origin=''" + stale,
+                params,
+            )
+            if cas.rowcount != 1:
+                return None
             job_id = self._insert_job_on(db, notebook_id, now)
         return self.get(job_id)
 
@@ -375,12 +401,12 @@ class NotebookDeleteJobStore:
     def mark_running(self, job_id: str, *, stale_cutoff_seconds: float) -> str | None:
         """P2-a owner/lease CAS. PostgreSQL twin's docstring has the full
         rationale; SQLite's cutoff mirrors ``list_stale``'s own
-        ``_stale_cutoff_iso(...)`` + ``datetime(...)``-normalized compare —
+        ``stale_cutoff_iso(...)`` + ``datetime(...)``-normalized compare —
         see that helper's docstring for why a plain string ``<`` would not
         track real elapsed time across a host UTC-offset change (codex #659
         R13 P2)."""
         token = _new_lease_token()
-        cutoff = _stale_cutoff_iso(stale_cutoff_seconds, self.now())
+        cutoff = stale_cutoff_iso(stale_cutoff_seconds, self.now())
         with self.database.write(operation="notebook_delete.mark_running") as db:
             cursor = db.execute(
                 "UPDATE notebook_delete_jobs SET status='running',"
@@ -579,14 +605,14 @@ class NotebookDeleteJobStore:
         """Sweep driver A (§T-4). PostgreSQL twin's docstring has the full
         rationale (``timestamptz`` there is a true instant already, no
         string comparison involved). SQLite's cutoff uses
-        ``_stale_cutoff_iso(...)`` + a ``datetime(...)``-normalized compare
+        ``stale_cutoff_iso(...)`` + a ``datetime(...)``-normalized compare
         — codex #659 R13 P2: this used to be a bare ``datetime.now()``
         cutoff compared against ``updated_at`` via a plain string ``<``,
         which only tracked real elapsed time while the host's UTC offset
         stayed constant between a row's write and this call — see that
         helper's docstring for the DST/timezone-change failure mode this
         closes."""
-        cutoff = _stale_cutoff_iso(older_than_seconds, self.now())
+        cutoff = stale_cutoff_iso(older_than_seconds, self.now())
         with self.database.connect() as db:
             rows = db.execute(
                 "SELECT * FROM notebook_delete_jobs "
@@ -602,7 +628,7 @@ class NotebookDeleteJobStore:
         codex #659 R13 P2: the "most recent failed attempt" sub-selects
         used to ``ORDER BY j2.finished_at DESC`` as a plain string sort —
         the same offset-vs-naive string-comparison class of bug as
-        ``list_stale``'s old cutoff (see ``_stale_cutoff_iso``'s
+        ``list_stale``'s old cutoff (see ``stale_cutoff_iso``'s
         docstring), just applied to ordering two STORED rows against each
         other instead of a row against a freshly-computed cutoff: if the
         host's UTC offset changed between two 'failed' attempts for the

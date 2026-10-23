@@ -1966,6 +1966,12 @@ class Settings(BaseSettings):
     # (改只读共享),使深拷贝的峰值内存与病态扇出解耦(codex PR#353 r5 P2)。
     notebook_copy_max_snapshot_rows: int = Field(200_000, validation_alias="NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS")
     notebook_copy_stale_seconds: int = Field(3600, validation_alias="NOTEBOOK_COPY_STALE_SECONDS")
+    # 笔记本导入(.snbk)的 importing 哨兵心跳超时:导入进程每写一批刷新一次
+    # updated_at(远短于本值),服务启动时把心跳停了这么久的哨兵交给删除作业收割
+    # (sweep_stale_imports)。只收 sync_origin='' 的导入哨兵,跨环境同步的镜像
+    # 永不在此列。下限 60s:比一批写入还短会把活着的导入当成崩溃。
+    notebook_import_stale_seconds: int = Field(
+        3600, ge=60, le=7 * 86400, validation_alias="NOTEBOOK_IMPORT_STALE_SECONDS")
     # NoDecode 让 pydantic-settings 不把环境变量当 JSON 解析（否则逗号串会崩），
     # 改由下面的 split_cors_origins(mode="before") 处理逗号分隔；validation_alias
     # 才能真正读到 SILICON_NOTEBOOK_CORS_ORIGINS（v2 下 Field(validation_alias=...) 会被忽略）。

@@ -396,6 +396,7 @@ def _write_archive(
         },
         kg_starts_dirty=outcome.starts_dirty,
         kg_clusters_dropped=outcome.clusters_dropped,
+        kg_concept_seed_version=outcome.concept_seed_version,
         vectors_included=include_vectors,
         embeddings={workload: embeddings.get(workload) for workload in EMBEDDING_WORKLOADS},
         tables=tables,

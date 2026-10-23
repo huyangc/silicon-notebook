@@ -118,11 +118,13 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "成对读出各代含 Memory 成员的簇,调用方按同一对键在自己那一代上做差,不需代次谓词"),
     "backend/app/repositories/sqlite/memory_sql.py": (2, 0, 0, 0, 0,
         "PG 孪生同注记"),
-    "backend/app/repositories/postgres/sharing_store.py": (2, 0, 0, 3, 0,
+    "backend/app/repositories/postgres/sharing_store.py": (3, 0, 0, 3, 0,
         "C→§1.6:拷贝快照只取 published 代 + 校验两侧同谓词口径;E5-1(M2)给快照加一份"
         "Memory 感知的孪生文本(源库含 Memory 或已标脏时才用),代次谓词逐字相同;validate "
-        "副本侧沿用原口径,源侧按快照的决定计数"),
-    "backend/app/repositories/sqlite/sharing_store.py": (2, 0, 0, 3, 0,
+        "副本侧沿用原口径,源侧按快照的决定计数;C:validate_import 的行数核对与悬空检查"
+        "数导入新笔记本的全部簇行(导入只写 generation=0 一代,对照的是本次写入的行数),"
+        "不需代次谓词"),
+    "backend/app/repositories/sqlite/sharing_store.py": (3, 0, 0, 3, 0,
         "PG 孪生同注记"),
     "backend/app/repositories/postgres/unified_kg_store.py": (30, 10, 8, 27, 13,
         "板块划分 S2(v102/0083):``community_board_key_rows`` 读调用方给定的"

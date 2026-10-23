@@ -218,7 +218,7 @@ def _parse_timestamp(value: Any) -> datetime | None:
     been written arbitrarily long ago under a DIFFERENT host UTC offset
     (a DST transition, a timezone reconfiguration). ``list_stale`` and
     ``mark_running`` (``notebook_delete_job_store.py``, SQLite) no longer
-    take that shortcut — see ``_stale_cutoff_iso``'s docstring there for
+    take that shortcut — see ``stale_cutoff_iso``'s docstring there for
     the fix (an offset-aware cutoff plus a SQL-side ``datetime(...)``
     normalization on both operands)."""
     if value is None:
@@ -501,6 +501,13 @@ class NotebookDeleteJobRunner:
             )
         except Exception:  # noqa: BLE001 - logging must not break the flow
             _log.warning("notebook %s: %s event failed", notebook_id, event)
+
+    def submit_job(self, job_id: str, notebook_id: str) -> bool:
+        """Hand an existing job row to the delete pool (deduplicated like every
+        submission here); for a caller that created the row itself -- the
+        notebook import's sweep of abandoned import sentinels
+        (``NotebookImportService.sweep_stale_imports``)."""
+        return self._submit(job_id, notebook_id)
 
     def _submit(self, job_id: str, notebook_id: str) -> bool:
         """Hand the job to the delete pool once; ``False`` = already in this

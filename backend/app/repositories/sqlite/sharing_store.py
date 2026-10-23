@@ -4,7 +4,7 @@ import threading
 
 import sqlite3
 from datetime import datetime, timedelta
-from typing import Callable, Iterator, Sequence
+from typing import Callable, Iterator, Mapping, Sequence
 
 from app.core.config import Settings
 from app.domain.kg_merge_seed import (
@@ -42,6 +42,7 @@ from app.repositories.sqlite import memory_sql
 from app.repositories.sqlite.knowhow_history_store import record_change
 from app.repositories.sqlite.memory_sql import memory_source_readable
 from app.repositories.sqlite.mount_sql import MOUNT_VALID_EXPR
+from app.repositories.sqlite.notebook_delete_job_store import stale_cutoff_iso
 from app.repositories.sqlite.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
 
@@ -808,6 +809,98 @@ _COPY_VALIDATED_JOIN_TABLES: tuple[tuple[str, str], ...] = (
 #: the PostgreSQL twin's constant of the same name sizes its server-side FETCH.
 COPY_STREAM_PAGE_ROWS = 2000
 
+_IMPORTING = "importing"
+#: ``validate_import``: one parameter (the imported notebook's id) per statement.
+_IMPORT_COUNT_SQL: dict[str, str] = {
+    **{
+        table: f"SELECT COUNT(*) FROM {table} WHERE notebook_id = ?"
+        for table in (
+            "sources", "source_paper_meta", "source_authors", "chunks",
+            "knowledge_objects", "knowledge_source_facts",
+            "knowledge_source_fact_elements", "knowledge_source_fact_backfills",
+            "knowledge_relations", "chunk_embeddings", "chunk_questions",
+            "element_embeddings", "knowledge_embeddings", "relation_embeddings",
+            "concept_clusters", "notebook_object_schemas", "knowhow_tables",
+            "notebook_assets", "extraction_runs",
+        )
+    },
+    "notebooks": "SELECT COUNT(*) FROM notebooks WHERE id = ?",
+    "source_elements": (
+        "SELECT COUNT(*) FROM source_elements e JOIN sources s ON s.id = e.source_id "
+        "WHERE s.notebook_id = ?"
+    ),
+    **{table: query for table, query in _COPY_VALIDATED_JOIN_TABLES},
+}
+#: ``validate_import``: references that must stay inside the imported notebook.
+#: Each statement counts offenders; every ``?`` is the notebook id.
+#: ``validate_copy``: relations of the copy whose endpoint is not one of its
+#: objects -- one anti-join per endpoint (``NOT EXISTS``, never ``NOT IN`` over a
+#: subquery: PostgreSQL's twin falls back to a linear scan per row once that set
+#: outgrows ``work_mem``), summed; zero means none.
+_DANGLING_RELATION_ENDPOINTS_SQL = (
+    "SELECT (SELECT COUNT(*) FROM knowledge_relations r WHERE r.notebook_id = ? "
+    "AND NOT EXISTS (SELECT 1 FROM knowledge_objects o WHERE o.id = r.source_object_id "
+    "AND o.notebook_id = r.notebook_id)) + "
+    "(SELECT COUNT(*) FROM knowledge_relations r WHERE r.notebook_id = ? "
+    "AND NOT EXISTS (SELECT 1 FROM knowledge_objects o WHERE o.id = r.target_object_id "
+    "AND o.notebook_id = r.notebook_id))"
+)
+#: ``validate_import``: one anti-join each (``NOT EXISTS`` correlated on the same
+#: notebook, never ``NOT IN``: see ``_DANGLING_RELATION_ENDPOINTS_SQL``).
+_IMPORT_DANGLING_SQL: tuple[tuple[str, str], ...] = (
+    ("knowledge_relations.source_object_id",
+     "SELECT COUNT(*) FROM knowledge_relations r WHERE r.notebook_id=? "
+     "AND NOT EXISTS (SELECT 1 FROM knowledge_objects o WHERE o.id=r.source_object_id "
+     "AND o.notebook_id=r.notebook_id)"),
+    ("knowledge_relations.target_object_id",
+     "SELECT COUNT(*) FROM knowledge_relations r WHERE r.notebook_id=? "
+     "AND NOT EXISTS (SELECT 1 FROM knowledge_objects o WHERE o.id=r.target_object_id "
+     "AND o.notebook_id=r.notebook_id)"),
+    ("knowledge_relations.source_id",
+     "SELECT COUNT(*) FROM knowledge_relations r WHERE r.notebook_id=? "
+     "AND r.source_id IS NOT NULL AND r.source_id <> '' "
+     "AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id=r.source_id "
+     "AND s.notebook_id=r.notebook_id)"),
+    ("knowledge_objects.source_id",
+     "SELECT COUNT(*) FROM knowledge_objects k WHERE k.notebook_id=? "
+     "AND k.source_id <> '' "
+     "AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id=k.source_id "
+     "AND s.notebook_id=k.notebook_id)"),
+    ("knowledge_objects.source_candidate_id",
+     "SELECT COUNT(*) FROM knowledge_objects k WHERE k.notebook_id=? "
+     "AND k.source_candidate_id IS NOT NULL AND k.source_candidate_id <> '' "
+     "AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id=k.source_candidate_id "
+     "AND s.notebook_id=k.notebook_id)"),
+    ("knowledge_embeddings.object_id",
+     "SELECT COUNT(*) FROM knowledge_embeddings e WHERE e.notebook_id=? "
+     "AND NOT EXISTS (SELECT 1 FROM knowledge_objects o WHERE o.id=e.object_id "
+     "AND o.notebook_id=e.notebook_id)"),
+    ("knowledge_source_facts.global_object_id",
+     "SELECT COUNT(*) FROM knowledge_source_facts f WHERE f.notebook_id=? "
+     "AND f.global_object_id <> '' "
+     "AND NOT EXISTS (SELECT 1 FROM knowledge_objects o WHERE o.id=f.global_object_id "
+     "AND o.notebook_id=f.notebook_id)"),
+    ("knowledge_source_fact_backfills.after_object_id",
+     "SELECT COUNT(*) FROM knowledge_source_fact_backfills b WHERE b.notebook_id=? "
+     "AND b.after_object_id <> '' "
+     "AND NOT EXISTS (SELECT 1 FROM knowledge_objects o WHERE o.id=b.after_object_id "
+     "AND o.notebook_id=b.notebook_id)"),
+    ("concept_clusters.member_object_id",
+     "SELECT COUNT(*) FROM concept_clusters c WHERE c.notebook_id=? "
+     "AND NOT EXISTS (SELECT 1 FROM knowledge_objects o WHERE o.id=c.member_object_id "
+     "AND o.notebook_id=c.notebook_id)"),
+    ("knowhow_tables.hidden_source_id",
+     "SELECT COUNT(*) FROM knowhow_tables t WHERE t.notebook_id=? "
+     "AND t.hidden_source_id IS NOT NULL AND t.hidden_source_id <> '' "
+     "AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id=t.hidden_source_id "
+     "AND s.notebook_id=t.notebook_id)"),
+    ("notebook_assets.source_id",
+     "SELECT COUNT(*) FROM notebook_assets a WHERE a.notebook_id=? "
+     "AND a.source_id IS NOT NULL "
+     "AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id=a.source_id "
+     "AND s.notebook_id=a.notebook_id)"),
+)
+
 
 class SharingStore:
     """SQLite sharing/membership rows plus the connection-taking deep-copy
@@ -1368,6 +1461,10 @@ class SharingStore:
             memory_source_ids = frozenset(
                 row["id"] for row in db.execute(_MEMORY_SOURCE_IDS_SQL, (notebook_id,))
             ) if memory else frozenset()
+            # The space the clusters streamed below were built in, read in the
+            # same snapshot (the copy's _COPY_SEED_SPACE rule): none when dropped.
+            seed_space = None if clusters_dropped else published_concept_seed_version(
+                db.execute(_SOURCE_SEED_SPACE_SQL, (notebook_id,)).fetchone())
             keys_box: dict = {}
             feed_table(on_table, root_table, single_page(roots))
             for table, sql in queries[1:]:
@@ -1379,7 +1476,10 @@ class SharingStore:
                     memory_source_ids if table in EVIDENCE_TABLES else frozenset(),
                     keys_box if memory and table == "concept_clusters" else None,
                 ))
-        return CopyRowsOutcome(starts_dirty=memory, clusters_dropped=clusters_dropped)
+        return CopyRowsOutcome(
+            starts_dirty=memory, clusters_dropped=clusters_dropped,
+            concept_seed_version=seed_space,
+        )
 
     @staticmethod
     def _copy_pages(
@@ -1724,14 +1824,7 @@ class SharingStore:
                     raise RuntimeError(
                         f"copy_notebook: {table} 行数不一致 {copied_count}!={source_count}"
                     )
-            dangling = db.execute(
-                "SELECT COUNT(*) FROM knowledge_relations r WHERE r.notebook_id = ? AND ("
-                "r.source_object_id NOT IN "
-                "(SELECT id FROM knowledge_objects WHERE notebook_id = ?) OR "
-                "r.target_object_id NOT IN "
-                "(SELECT id FROM knowledge_objects WHERE notebook_id = ?))",
-                (new_id, new_id, new_id),
-            ).fetchone()[0]
+            dangling = db.execute(_DANGLING_RELATION_ENDPOINTS_SQL, (new_id, new_id)).fetchone()[0]
             if dangling:
                 raise RuntimeError("copy_notebook: 关系存在悬空引用")
 
@@ -1819,6 +1912,133 @@ class SharingStore:
             if on_reaped is not None:
                 on_reaped(nb_id)
         return reaped
+
+    # ------------------------------------------------------ import primitives
+    # A notebook import (``app.services.notebook_transfer.import_``) writes its
+    # rows behind the hidden ``importing`` sentinel with ``sync_origin=''``. The
+    # cross-environment sync importer (``app.migration.sync.import_``) uses the
+    # same status for its mirrors, always with a non-empty ``sync_origin``; every
+    # write below therefore names BOTH columns, so nothing here can touch a
+    # half-synced mirror (which is resumable, never garbage). The PostgreSQL
+    # twin mirrors each method.
+
+    def insert_import_sentinel(
+        self, row: dict, *, starts_dirty: bool, concept_seed_version: "int | None" = None
+    ) -> None:
+        """Commit the import's ``notebooks`` row (``status='importing'``,
+        ``sync_origin=''``; ``updated_at`` is its heartbeat). ``starts_dirty``:
+        the archive says the source's KG was dirty or left Memory rows out, so
+        the notebook starts marked for a rebuild; ``concept_seed_version``: the
+        seed space the archive's clusters were built in, when it is not the
+        default. Both are written by ``insert_copy_rows``' own birth-row branches
+        (the deep copy's dirty mark -- kg_mutation's FULL CENSUS -- and its seed
+        space, ``_COPY_SEED_SPACE``, refused there by
+        ``check_concept_seed_version`` when unknown), in the same transaction."""
+        if row.get("status") != _IMPORTING or row.get("sync_origin"):
+            raise ValueError("an import sentinel has the importing status and an empty sync_origin")
+        tagged = dict(row)
+        if starts_dirty:
+            tagged[_COPY_DIRTY_MARK] = _HOLDS_MEMORY
+        if concept_seed_version is not None:
+            tagged[_COPY_SEED_SPACE] = concept_seed_version
+        self.insert_copy_rows("notebooks", [tagged], chunk_size=1)
+
+    def touch_import(self, notebook_id: str) -> bool:
+        """Heartbeat: move the sentinel's ``updated_at`` to now. ``False`` when the
+        row is no longer this import's sentinel (reaped, or published)."""
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE notebooks SET updated_at = ? "
+                "WHERE id = ? AND status = 'importing' AND sync_origin = ''",
+                (self.now(), notebook_id),
+            )
+        return cursor.rowcount == 1
+
+    def import_table_columns(self, tables: Sequence[str]) -> dict[str, frozenset[str]]:
+        """The column names of each of ``tables`` here (an absent table maps to
+        an empty set). Table names are bound as parameters of the table-valued
+        ``pragma_table_info``, never spliced into the statement."""
+        with self.database.connect() as db:
+            return {
+                table: frozenset(
+                    str(row["name"])
+                    for row in db.execute(
+                        "SELECT name FROM pragma_table_info(?)", (table,)
+                    ).fetchall()
+                )
+                for table in tables
+            }
+
+    def validate_import(self, notebook_id: str, written: Mapping[str, int]) -> None:
+        """Post-import self-check: every table holds exactly the rows the import
+        wrote to it, and no reference points outside the notebook. Raises
+        ``RuntimeError`` (the import is then compensated)."""
+        unknown = set(written) - set(_IMPORT_COUNT_SQL)
+        if unknown:
+            raise RuntimeError(f"validate_import: 无法核对的表 {sorted(unknown)}")
+        with self.database.connect() as db:
+            for table, expected in written.items():
+                found = db.execute(_IMPORT_COUNT_SQL[table], (notebook_id,)).fetchone()[0]
+                if found != expected:
+                    raise RuntimeError(
+                        f"validate_import: {table} 行数不一致 {found}!={expected}"
+                    )
+            for label, query in _IMPORT_DANGLING_SQL:
+                if db.execute(query, (notebook_id,) * query.count("?")).fetchone()[0]:
+                    raise RuntimeError(f"validate_import: {label} 存在悬空引用")
+
+    def publish_import(self, notebook_id: str, status: str) -> bool:
+        """Flip this import's sentinel to ``status``; ``False`` when it is no
+        longer the sentinel (reaped meanwhile)."""
+        self._take_clusters_dropped(notebook_id)
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE notebooks SET status = ?, updated_at = ? "
+                "WHERE id = ? AND status = 'importing' AND sync_origin = ''",
+                (status, self.now(), notebook_id),
+            )
+        return cursor.rowcount == 1
+
+    def compensate_import(self, notebook_id: str) -> bool:
+        """Failure compensation of a small import: its FTS mirrors, its
+        ``knowledge_embeddings`` (no FK) and the sentinel row, whose children
+        cascade. Only while the row is still this import's sentinel; ``False``
+        otherwise (nothing deleted)."""
+        self._take_clusters_dropped(notebook_id)
+        with self.database.write() as db:
+            mine = db.execute(
+                "SELECT 1 FROM notebooks "
+                "WHERE id = ? AND status = 'importing' AND sync_origin = ''",
+                (notebook_id,),
+            ).fetchone()
+            if mine is None:
+                return False
+            db.execute("DELETE FROM kg_objects_fts WHERE notebook_id = ?", (notebook_id,))
+            db.execute("DELETE FROM chunks_fts WHERE notebook_id = ?", (notebook_id,))
+            db.execute(
+                "DELETE FROM knowledge_embeddings WHERE notebook_id = ?", (notebook_id,)
+            )
+            db.execute(
+                "DELETE FROM notebooks "
+                "WHERE id = ? AND status = 'importing' AND sync_origin = ''",
+                (notebook_id,),
+            )
+        return True
+
+    def stale_import_ids(self, *, older_than_seconds: float) -> list[str]:
+        """Import sentinels whose heartbeat stopped ``older_than_seconds`` ago
+        (the importing process died). Compared through ``datetime()`` against a
+        cutoff in this store's own clock, like the delete jobs' staleness
+        (``notebook_delete_job_store.stale_cutoff_iso``)."""
+        cutoff = stale_cutoff_iso(older_than_seconds, self.now())
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT id FROM notebooks "
+                "WHERE status = 'importing' AND sync_origin = '' "
+                "AND datetime(updated_at) < datetime(?) ORDER BY id",
+                (cutoff,),
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
 
     @staticmethod
     def insert_row_values(db: sqlite3.Connection, table: str, data: dict) -> None:

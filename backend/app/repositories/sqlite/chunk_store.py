@@ -127,6 +127,24 @@ class ChunkStore:
                 (created_at, chunk_id),
             )
 
+    def clear_question_index_marks(self, notebook_id: str, chunk_ids: Sequence[str]) -> int:
+        """Mark these chunks as having no generated questions (``question_indexed_at``
+        back to NULL), so the question index regenerates them; returns how many.
+        A notebook import calls it for the chunks whose stored questions it
+        could not keep (``notebook_transfer.import_``)."""
+        ids = list(dict.fromkeys(chunk_ids))
+        cleared = 0
+        with self.database.write() as connection:
+            for start in range(0, len(ids), 400):
+                batch = ids[start:start + 400]
+                cursor = connection.execute(
+                    "UPDATE chunks SET question_indexed_at=NULL WHERE notebook_id=? "
+                    f"AND id IN ({','.join('?' for _ in batch)})",
+                    (notebook_id, *batch),
+                )
+                cleared += cursor.rowcount
+        return cleared
+
     def question_index_rows(
         self,
         notebook_id: str,

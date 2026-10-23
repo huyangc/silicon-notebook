@@ -101,6 +101,8 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(ANY, BOUNDED, "capped at CATALOG_MAX_CANDIDATE_PAGE"),),
     ("postgres/chunk_store.py", "ChunkStore.chunks_for_element_ids"): (
         s(ANY, BATCHED, "element ids, CHUNK_ELEMENT_LOOKUP_BATCH (500) per statement"),),
+    ("postgres/chunk_store.py", "ChunkStore.clear_question_index_marks"): (
+        s(PG_EXP, BATCHED, "an imported notebook's chunk primary keys, 400 per statement"),),
     ("postgres/chunk_store.py", "ChunkStore.delete_by_ids"): (
         s(ANY, DRIVEN, "a re-projected knowhow table's chunk primary keys"),),
     ("postgres/chunk_store.py", "ChunkStore.hydrate_rows"): (
@@ -409,6 +411,8 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(ANY, BOUNDED, "the ranked candidate window (<= per-term limit)"),),
     ("postgres/search.py", "_memory_match_predicates"): (
         s(ANY, NOT_IDS, "the scope's memory statuses"),),
+    ("postgres/sharing_store.py", "SharingStore.import_table_columns"): (
+        s(ANY, NOT_IDS, "table names: the archive format's fixed closure (ARCHIVE_TABLES)"),),
     ("postgres/sharing_store.py", "SharingStore.readable_notebook_ids"): (
         s(ANY, BOUNDED, "a global run's notebooks (<= global_ask_max_notebooks, 8)"),),
     ("postgres/sharing_store.py", "SharingStore.valid_copied_mount_base_ids"): (
@@ -483,6 +487,8 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(SQ_EXP, BOUNDED, "capped at CATALOG_MAX_CANDIDATE_PAGE"),),
     ("sqlite/catalog_store.py", "CatalogStore.mark_candidates_dismissed"): (
         s(SQ_EXP, BOUNDED, "capped at CATALOG_MAX_CANDIDATE_PAGE"),),
+    ("sqlite/chunk_store.py", "ChunkStore.clear_question_index_marks"): (
+        s(SQ_EXP, BATCHED, "an imported notebook's chunk primary keys, 400 per statement"),),
     ("sqlite/chunk_store.py", "ChunkStore.ids_for_sources"): (
         s(JSON, DRIVEN, "presence probe: the ordinal of each listed id is the output order"),),
     ("sqlite/chunk_store.py", "ChunkStore.chunks_for_element_ids"): (

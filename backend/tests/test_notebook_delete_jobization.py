@@ -691,7 +691,7 @@ def test_sweep_driver_a_resumes_a_stale_active_job(repo):
 # misreads it as stale (the "过早判 stale" failure mode) purely because of
 # how the two differing offsets happen to print, not because any real time
 # passed. The store's clock (``self.now()``, which the cutoff is taken off --
-# see ``_stale_cutoff_iso``) is pinned to a fixed instant printed under a fixed
+# see ``stale_cutoff_iso``) is pinned to a fixed instant printed under a fixed
 # +03:00 offset, so the scenario is deterministic on any machine and in any
 # host timezone. Primary assertions tagged `# MUT`.
 # ---------------------------------------------------------------------------

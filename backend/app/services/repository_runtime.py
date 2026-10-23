@@ -1153,6 +1153,8 @@ class RepositoryRuntime:
         # wire_knowledge_lifecycle finishes deletion after building its
         # kg_maintenance and kg_conflict_jobs collaborators.
         self.notebook_delete = None
+        # wire_sharing builds the .snbk importer (NotebookImportService).
+        self.notebook_import = None
         retrieval = _build_retrieval_domain(foundation)
         self.retrieval_snapshots = retrieval.retrieval_snapshots
         self.memory_service = retrieval.memory_service
@@ -2409,6 +2411,7 @@ class RepositoryRuntime:
         copy_stats: Callable[[str], dict],
         storage_dir: Callable[[], Path],
         schedule_projection: Callable[[str], None],
+        project_table: Callable[[str, bool], None],
     ) -> NotebookSharingService:
         """Compose the sharing domain (Task 9) once the facade-bound seams
         exist: ``insert_row`` = the facade's ``_insert_row`` compatibility
@@ -2417,8 +2420,12 @@ class RepositoryRuntime:
         (PR-2+3 Task 13) is the facade's
         ``knowhow_api.get_scheduler(repo).schedule`` — late-bound the same way
         as the other three seams, so it always resolves against the fully
-        constructed facade even though wire_sharing runs mid-``__init__``."""
+        constructed facade even though wire_sharing runs mid-``__init__``.
+        ``project_table(table_id, embed)`` is one synchronous Knowhow projection
+        (``KnowhowProjector.project_table``), the notebook import's post-publish
+        step, late-bound like ``schedule_projection``."""
         self.sharing_store.bind_insert_row(insert_row)
+        self._wire_notebook_import(storage_dir=storage_dir, project_table=project_table)
         self.notebook_copies = NotebookCopyService(
             store=self.sharing_store,
             catalog=self.catalog,
@@ -2441,6 +2448,42 @@ class RepositoryRuntime:
             ask_state=self.ask_state,
         )
         return self.sharing
+
+    def _wire_notebook_import(
+        self,
+        *,
+        storage_dir: Callable[[], Path],
+        project_table: Callable[[str, bool], None],
+    ) -> None:
+        """The ``.snbk`` importer over this runtime's seats; every collaborator
+        that changes after construction (the model registry, the schema
+        registry, the delete runner wired later by the knowledge lifecycle) is
+        read at call time."""
+        from app.services.notebook_transfer.export import embedding_identities
+        from app.services.notebook_transfer.import_ import NotebookImportService
+
+        def question_embedder():
+            if not self.models.configured("chunk_embedding"):
+                return None
+            return self.models.embedding("chunk_embedding")
+
+        self.notebook_import = NotebookImportService(
+            store=self.sharing_store,
+            chunks=self.chunk_store,
+            delete_jobs=self.notebook_delete_jobs,
+            seams=self.seams,
+            settings=self.settings,
+            storage_dir=storage_dir,
+            target_embeddings=lambda: embedding_identities(
+                self.settings, self.models.registry.service_for
+            ),
+            question_embedder=question_embedder,
+            object_types=lambda: [
+                schema.object_type for schema in self.schema_registry.list_object_schemas()
+            ],
+            project_table=project_table,
+            delete_runner=lambda: self.notebook_delete,
+        )
 
     def _after_report_completed(self, committed) -> None:
         """Run report hooks after durable done and every execution scope exits."""

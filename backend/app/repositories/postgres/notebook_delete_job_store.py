@@ -138,6 +138,34 @@ class NotebookDeleteJobStore:
             job_id = self._insert_job_on(connection, notebook_id, now)
         return self.get(job_id)
 
+    def request_delete_from_import(
+        self, notebook_id: str, *, stale_seconds: "float | None" = None
+    ) -> "dict | None":
+        """Hand an abandoned notebook import to the delete job: CAS its sentinel
+        (``status='importing'`` with ``sync_origin=''``, a notebook import's and
+        never a sync mirror's) to ``'deleting'`` and insert the job row, one
+        transaction. ``stale_seconds``: only when the sentinel's heartbeat
+        (``updated_at``) is at least that old (the startup sweep). Returns the
+        job, or ``None`` when the row is not such a sentinel (any more).
+        ``status_before_delete='importing'`` marks it as an import that never
+        published: the delete then keeps no activity record of it
+        (``NotebookStore._retain_user_activity_before_delete``)."""
+        now = self.now()
+        stale = "" if stale_seconds is None else " AND updated_at<%s"
+        params: tuple = (now, notebook_id)
+        if stale_seconds is not None:
+            params += (now - timedelta(seconds=max(1, stale_seconds)),)
+        with self.database.write() as connection:
+            cas = connection.execute(
+                "UPDATE notebooks SET status='deleting',status_before_delete='importing',"
+                "updated_at=%s WHERE id=%s AND status='importing' AND sync_origin=''" + stale,
+                params,
+            )
+            if cas.rowcount != 1:
+                return None
+            job_id = self._insert_job_on(connection, notebook_id, now)
+        return self.get(job_id)
+
     def _insert_job_on(self, connection, notebook_id: str, now) -> str:
         """The fresh ``'queued'``/``'mark'`` job row of a notebook this same
         transaction has just moved to ``'deleting'`` (``request`` and the
