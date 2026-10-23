@@ -417,6 +417,9 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "_MEMORY_SNAPSHOT_TEXT": COPY,
         "SharingStore._copy_limit_violation": COPY,
         "SharingStore.validate_copy": COPY,
+        "_IMPORT_COUNT_SQL": COPY,
+        "_IMPORT_DANGLING_SQL": COPY,
+        "_DANGLING_RELATION_ENDPOINTS_SQL": COPY,
     },
     "*/memory_store.py": {
         "MemoryStore._validate_evidence_ref_on": KEY_BOUNDED,

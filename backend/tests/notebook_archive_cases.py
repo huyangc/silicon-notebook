@@ -329,7 +329,9 @@ def check_export_equals_snapshot(repo, backend: Backend, tmp: Path) -> None:
         for item in json.loads(row["evidence"]):
             assert not str(item.get("source_id", "")).startswith("src-mem"), row["id"]
     manifest = archive_manifest(out)
-    assert manifest["kg"] == {"starts_dirty": True, "clusters_dropped": False}
+    assert manifest["kg"] == {
+        "starts_dirty": True, "clusters_dropped": False, "concept_seed_version": 2,
+    }
     assert manifest["excluded"] == {"memory": "not_carried", "mount_edges": 0}
 
 

@@ -49,11 +49,19 @@ CI 里比行为测试更快、更精确地指出出事的那一行——但角�
    「常量定义在哪个作用域」影响。源码字面量扫描保留作为更早、更精确的定位辅助,
    不是唯一防线。
 3. **生产者 1 处**——``services/notebook_copy_writer.py`` 里
-   ``_reset_copied_notebook_row`` 的 ``notebook_row.update(... status="copying" ...)``
-   kwarg:这是 Python 关键字参数,
-   不是 SQL 字符串,AST 层面只是一个裸的 ``"copying"`` 常量(不含 ``status``
-   前缀),两条守卫的正则天然够不到它。写在这里点名,防止后来者以为它是漏扫的
-   第 41 处。
+   ``_reset_copied_notebook_row`` 的 ``notebook_row.update(... status=status ...)``,
+   取值是 ``CopyProfile.sentinel_status``(模块常量 ``COPYING`` / ``IMPORTING``):这是
+   Python 关键字参数,不是 SQL 字符串,两条守卫的正则天然够不到它。写在这里点名,
+   防止后来者以为它是漏扫的第 41 处。
+4. **写侧 importing 哨兵(笔记本导入,``notebook_transfer.import_``)**——导入在
+   ``status='importing'`` 且 ``sync_origin=''`` 的隐藏行后面写入;跨环境同步导入器
+   (``app.migration.sync.import_``)的镜像也用 ``importing``,但 ``sync_origin`` 恒非空,
+   它是**可续跑**的半成品,不是垃圾。所以导入的每一处写侧哨兵 SQL(心跳、发布、
+   补偿、收割候选、转删除作业)都必须同时写明 ``sync_origin=''``:
+   ``status='importing'`` 等值形只许出现在 ``_IMPORT_WRITE_SIDE_WHITELIST`` 的函数里,
+   且 ``test_import_write_side_sentinel_never_touches_a_sync_mirror`` **真调用**这些
+   方法(两后端),断言实际执行的每条含 ``status='importing'`` 的语句都带
+   ``sync_origin=''``。
 
 **规则式豁免(定稿,零豁免清单)**:``ast.walk`` 收集 ``ast.Constant(str)``,跳过
 Module/ClassDef/FunctionDef 的首语句(docstring)。注释根本不进 AST,天然免扫。
@@ -107,6 +115,21 @@ _WRITE_SIDE_WHITELIST: frozenset[tuple[str, str]] = frozenset({
     ("backend/app/repositories/sqlite/sharing_store.py", "compensate_copy"),
     ("backend/app/repositories/sqlite/sharing_store.py", "sweep_stale_copies"),
 })
+
+
+# 写侧 importing 哨兵(模块 docstring 第④条):等值形只许出现在这些函数里。
+_IMPORT_WRITE_SIDE_SENTINEL = re.compile(r"status\s*=\s*'importing'")
+_IMPORT_WRITE_SIDE_WHITELIST: frozenset[tuple[str, str]] = frozenset(
+    (f"backend/app/repositories/{backend}/{module}.py", function)
+    for backend in ("sqlite", "postgres")
+    for module, function in (
+        ("sharing_store", "touch_import"),
+        ("sharing_store", "publish_import"),
+        ("sharing_store", "compensate_import"),
+        ("sharing_store", "stale_import_ids"),
+        ("notebook_delete_job_store", "request_delete_from_import"),
+    )
+)
 
 
 def _scan_targets() -> list[pathlib.Path]:
@@ -368,6 +391,90 @@ def test_write_side_sentinel_actually_executed_never_folds_deleting():
         if "DELETE FROM notebooks" in sql
     ]
     assert len(notebook_deletes) == 6, (notebook_deletes, executed)
+
+
+@pytest.mark.xdist_group(name="notebook_live_status_literals")
+def test_importing_write_side_sentinel_confined_to_the_import_methods():
+    """`status='importing'` 等值形只许出现在导入的写侧哨兵方法里(第④条)。"""
+    violations: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for rel, node, func in _all_scanned_constants():
+        if not _IMPORT_WRITE_SIDE_SENTINEL.search(node.value):
+            continue
+        key = (rel, func or "")
+        seen.add(key)
+        if key not in _IMPORT_WRITE_SIDE_WHITELIST:
+            violations.append(f"{rel}:{node.lineno} (in {key[1]!r}): {node.value!r}")
+    assert not violations, (
+        "写侧 importing 哨兵只许出现在导入的哨兵方法内:\n" + "\n".join(violations)
+    )
+    # The whitelist names only places that still hold the sentinel (no rot).
+    assert seen == _IMPORT_WRITE_SIDE_WHITELIST, sorted(_IMPORT_WRITE_SIDE_WHITELIST - seen)
+
+
+class _ImportRecordingConnection(_RecordingConnection):
+    rowcount = 1
+
+    def fetchall(self) -> list[dict]:
+        return [{"id": "nb-fake-import"}]
+
+
+class _ImportRecordingDatabase(_RecordingDatabase):
+    def __init__(self) -> None:
+        self.connection = _ImportRecordingConnection()
+
+    def write(self, operation: str = "") -> "_ImportRecordingDatabase":
+        del operation
+        return self
+
+
+def test_import_write_side_sentinel_never_touches_a_sync_mirror():
+    """真调用两后端导入的写侧哨兵方法(第④条):每条实际执行、含 `status='importing'`
+    的语句都同时限定 `sync_origin=''`——同步镜像的 importing 行永远不会被导入的心跳、
+    发布、补偿、收割或转删除作业碰到。"""
+    from app.repositories.postgres.notebook_delete_job_store import (
+        NotebookDeleteJobStore as PgDeleteJobs,
+    )
+    from app.repositories.postgres.sharing_store import SharingStore as PgSharingStore
+    from app.repositories.sqlite.notebook_delete_job_store import (
+        NotebookDeleteJobStore as SqliteDeleteJobs,
+    )
+    from app.repositories.sqlite.sharing_store import SharingStore as SqliteSharingStore
+
+    executed: list[str] = []
+    for sharing_cls, jobs_cls, now in (
+        (PgSharingStore, PgDeleteJobs, "2020-01-01T00:00:00+00:00"),
+        (SqliteSharingStore, SqliteDeleteJobs, "2020-01-01T00:00:00+00:00"),
+    ):
+        db = _ImportRecordingDatabase()
+        store = sharing_cls(
+            database=db, settings=_FakeSettings(), now=lambda: now,
+            insert_row=lambda *a, **k: None,
+        )
+        store.touch_import("nb-fake")
+        store.publish_import("nb-fake", "draft")
+        store.compensate_import("nb-fake")
+        store.stale_import_ids(older_than_seconds=60)
+        jobs = jobs_cls(db, new_id=lambda prefix: f"{prefix}-fake", now=lambda: now)
+        jobs.get = lambda job_id: {"id": job_id}  # the recording connection holds no row
+        jobs.request_delete_from_import("nb-fake")
+        jobs.request_delete_from_import("nb-fake", stale_seconds=60)
+        executed.extend(sql for sql, _params in db.connection.executed)
+    sentinel = [sql for sql in executed if _IMPORT_WRITE_SIDE_SENTINEL.search(sql)]
+    # touch + publish + compensate (check + delete) + stale + 2 delete-job CAS, per backend.
+    assert len(sentinel) == 2 * 7, sentinel
+    # Both conditions in the statement's WHERE clause: a ``sync_origin=''`` moved
+    # into SET (or anywhere else) would write the origin instead of guarding by it.
+    unguarded = []
+    for sql in sentinel:
+        where = re.split(r"\bWHERE\b", sql, flags=re.IGNORECASE)
+        clause = where[-1] if len(where) > 1 else ""
+        if not (
+            _IMPORT_WRITE_SIDE_SENTINEL.search(clause)
+            and re.search(r"sync_origin\s*=\s*''", clause)
+        ):
+            unguarded.append(sql)
+    assert not unguarded, unguarded
 
 
 def _load_module(path: pathlib.Path, name: str):

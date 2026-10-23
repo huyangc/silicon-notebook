@@ -238,6 +238,13 @@ class ArchiveManifest:
     global_object_types: tuple[Mapping[str, Any], ...]
     #: Mount edges the export did not carry (an import never mounts).
     excluded_mount_edges: int
+    #: ``kg.concept_seed_version``: the concept seed space the carried cluster
+    #: rows were built in (the source's published merge), written whenever the
+    #: clusters were not dropped. Optional within format version 1: an archive
+    #: written before the key existed lacks it, and an importer then cannot
+    #: place new concepts next to the carried clusters and starts the notebook
+    #: marked for a rebuild.
+    kg_concept_seed_version: "int | None" = None
     format: str = FORMAT
 
     def to_dict(self) -> dict[str, Any]:
@@ -250,6 +257,11 @@ class ArchiveManifest:
             "kg": {
                 "starts_dirty": self.kg_starts_dirty,
                 "clusters_dropped": self.kg_clusters_dropped,
+                **(
+                    {}
+                    if self.kg_concept_seed_version is None
+                    else {"concept_seed_version": self.kg_concept_seed_version}
+                ),
             },
             "embeddings": {
                 "vectors_included": self.vectors_included,
@@ -338,6 +350,10 @@ class ArchiveManifest:
             ),
             global_object_types=tuple(dict(item) for item in global_types),
             excluded_mount_edges=_count(excluded.get("mount_edges"), "excluded.mount_edges"),
+            kg_concept_seed_version=(
+                None if kg.get("concept_seed_version") is None
+                else _count(kg.get("concept_seed_version"), "kg.concept_seed_version")
+            ),
         )
 
 

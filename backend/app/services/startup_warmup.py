@@ -395,6 +395,28 @@ def _sweep_notebook_delete_jobs_on_start(repo: object) -> None:
         )
 
 
+def _sweep_stale_notebook_imports(repo: object) -> None:
+    """Hand every notebook-import sentinel whose heartbeat stopped
+    ``NOTEBOOK_IMPORT_STALE_SECONDS`` ago to the delete job
+    (``NotebookImportService.sweep_stale_imports``): the process that wrote it
+    died before it could compensate. Startup only, for the same reason as the
+    delete-job sweep below: an offline CLI cannot claim no live import owns a
+    row. A narrow test double without the seat is not an error."""
+    service = getattr(getattr(repo, "_runtime", None), "notebook_import", None)
+    sweep = getattr(service, "sweep_stale_imports", None)
+    if not callable(sweep):
+        return
+    try:
+        reaped = int(sweep() or 0)
+    except Exception:  # noqa: BLE001 - recovery must never block startup
+        logger.exception("startup: stale notebook import sweep failed")
+        return
+    if reaped:
+        logger.warning(
+            "startup: handed %d abandoned notebook import(s) to the delete job", reaped
+        )
+
+
 def _start_notebook_delete_sweeper(lease: object, repo: object) -> None:
     """Begin the periodic notebook-delete-job sweep in this process (batch
     3·W1 PR-3 §T-4's two drivers, run every ``NOTEBOOK_DELETE_SWEEP_
@@ -690,6 +712,9 @@ def run_startup(lease: object | None) -> object | None:
         # an offline CLI has no right to make the "nothing else owns these
         # rows" claim while a live backend may.
         _sweep_agent_profile_chains(repo)
+        # Before the delete-job sweep: abandoned notebook imports become delete
+        # jobs here, and that sweep is what keeps every job moving afterwards.
+        _sweep_stale_notebook_imports(repo)
         _sweep_notebook_delete_jobs_on_start(repo)
         if not _bind_repository_and_begin_warmup(lease, repo):
             # Defensive only: a valid lease cannot be detached during startup.

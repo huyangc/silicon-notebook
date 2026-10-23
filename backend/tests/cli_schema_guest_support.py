@@ -216,6 +216,15 @@ def _notebook_export(ctx, monkeypatch, spy=None):
     ])
 
 
+def _notebook_import(ctx, monkeypatch, spy=None):
+    """The import writes: it opens the maintenance repository (operator lock,
+    stopped-service confirmation on PostgreSQL) before it reads the archive."""
+    module = load_script("notebook_archive")
+    return module.main([
+        "import", str(ctx.tmp / "nb-x.snbk"), "--owner", "admin", *ctx.confirm,
+    ])
+
+
 def _reflect_search(ctx, monkeypatch, spy=None):
     from app.core.config import Settings
 
@@ -266,6 +275,7 @@ CASES: tuple[CliCase, ...] = (
     CliCase("eval speed", _eval_speed, sqlite_only=True),
     CliCase("maintain delete-leftovers", _delete_leftovers, composes=False),
     CliCase("notebook export", _notebook_export),
+    CliCase("notebook import", _notebook_import),
     CliCase("reflect_shadow_rig search", _reflect_search),
     CliCase("reflect_shadow_rig report", _reflect_report),
 )
