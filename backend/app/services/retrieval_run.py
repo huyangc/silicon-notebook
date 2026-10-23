@@ -61,6 +61,11 @@ class RetrievalRunState:
         self._embedding_pending: dict[Hashable, _PendingEmbedding] = {}
         self._value_cache: dict[Hashable, Any] = {}
         self._value_pending: dict[Hashable, _PendingEmbedding] = {}
+        # Native query vectors handed between the run's consumers of one
+        # embedder (``share_query_vector``): (id(embedder), text) -> (embedder,
+        # vector). The embedder is kept beside the vector so a lookup can
+        # check identity, never only an id that a freed object could reuse.
+        self._query_vectors: dict[tuple[int, str], tuple[Any, Any]] = {}
         self._chunk_fts_open: set[str] = set()
         self._peer_unprepared: dict[str, str] = {}
         self.embedding_requests = 0
@@ -127,6 +132,23 @@ class RetrievalRunState:
             if current is not None:
                 current.ready.set()
         return value
+
+    def shared_query_vector(self, embedder: Any, text: str) -> Any:
+        """The native vector ``embedder`` produced for exactly ``text`` earlier
+        in this run, or ``None``. See the module-level ``shared_query_vector``."""
+        with self._lock:
+            entry = self._query_vectors.get((id(embedder), text))
+        if entry is None or entry[0] is not embedder:
+            return None
+        return entry[1]
+
+    def share_query_vector(self, embedder: Any, text: str, vector: Any) -> None:
+        """Offer ``embedder``'s native vector for ``text`` to the run's other
+        consumers. ``None`` is never kept: a failed embed is no answer."""
+        if vector is None:
+            return
+        with self._lock:
+            self._query_vectors[(id(embedder), text)] = (embedder, vector)
 
     def memoized_value(self, key: Hashable, compute: Callable[[], T]) -> T:
         """Single-flight one successful run-local infrastructure value.
@@ -340,6 +362,53 @@ def memoized_query_embedding(key: Hashable, compute: Callable[[], T]) -> T:
     return state.memoized_embedding(key, compute) if state is not None else compute()
 
 
+def shared_query_vector(embedder: Any, text: str) -> Any:
+    """A native query vector another consumer of this run already paid for.
+
+    Memory recall (``MemoryRetriever._hits``) and the retrieval stage
+    (``CandidateRetrievalService._embed_query``) both embed the research
+    question with the query seat's embedder. This is the hand-over between
+    them, and it is deliberately narrower than the run's embedding memo:
+
+    * the vector is the embedder's NATIVE output, untouched. Memory scores it
+      against native-dimension stored vectors; the retrieval stage truncates
+      its own copy to ``EMBED_RUNTIME_DIM`` after reading it;
+    * it is keyed by the EXACT text each side sends to ``embed_query`` and by
+      the embedder object itself, so two sides share only when they would
+      have sent the same text to the same model; any other pair embeds on
+      its own, as before;
+    * an unconfigured embedder (offline mode) never shares: Memory then
+      embeds with the offline stand-in as before, and the retrieval stage
+      does not embed at all;
+    * it never waits, retries, counts or checks cancellation: a miss is the
+      caller's ordinary embed with its own fail-soft handling, a failed or
+      ``None`` embed is never offered, and outside a run nothing is shared.
+    """
+    state = current_retrieval_run()
+    if state is None or not _shares(embedder):
+        return None
+    return state.shared_query_vector(embedder, text)
+
+
+def share_query_vector(embedder: Any, text: str, vector: Any) -> None:
+    """Offer a native query vector to the run's other consumers (see
+    ``shared_query_vector`` for the conditions under which one is read)."""
+    state = current_retrieval_run()
+    if state is None or not _shares(embedder):
+        return
+    state.share_query_vector(embedder, text, vector)
+
+
+def _shares(embedder: Any) -> bool:
+    """Whether ``embedder`` takes part in the hand-over: only a configured
+    one. A ``configured`` probe that raises counts as not configured, so the
+    hand-over never turns Memory's fail-soft recall into an error."""
+    try:
+        return bool(getattr(embedder, "configured", False))
+    except Exception:
+        return False
+
+
 def memoized_retrieval_value(key: Hashable, compute: Callable[[], T]) -> T:
     state = current_retrieval_run()
     return state.memoized_value(key, compute) if state is not None else compute()
@@ -363,4 +432,6 @@ __all__ = [
     "memoized_retrieval_value",
     "retrieval_fanout_slot",
     "retrieval_run",
+    "share_query_vector",
+    "shared_query_vector",
 ]
