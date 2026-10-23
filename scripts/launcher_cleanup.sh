@@ -17,9 +17,10 @@
 # waiting, SIGKILL the survivors now) and the companion cleanup still runs after
 # the reaping. The exit status stays that of the first cause. A second Ctrl-C is
 # seen through the interrupted `sleep` of the wait (the terminal signals the whole
-# process group); a repeated SIGINT sent to the launcher's pid alone is not seen
-# (bash runs no trap for the signal it is still handling), so it ends the wait only
-# when the grace window does. The exception is the companion stop itself: it runs in the foreground, so a Ctrl-C that reaches it
+# process group), so it counts only if a poll `sleep` is running when it lands: a
+# Ctrl-C in the instant between two polls is missed (press it again), and so is a
+# repeated SIGINT sent to the launcher's pid alone (bash runs no trap for the
+# signal it is still handling); either way the wait just ends with the grace window. The exception is the companion stop itself: it runs in the foreground, so a Ctrl-C that reaches it
 # interrupts that command, as it always did.
 
 # START_CLEANUP_GRACE_SECONDS must be a positive integer; refuse before anything starts.

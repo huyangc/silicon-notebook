@@ -173,6 +173,15 @@ if [[ "${RM_BLOCK:-}" == 1 && "$*" == *silicon-extension-start* && ! -e "$FAKE_R
 fi
 exec /bin/rm "$@"
 ''')
+    # SLEEP_MARKER_ARG=<n>: a `sleep <n>` publishes its pid in `sleeping` (by rename)
+    # just before it execs the real sleep, so a test can wait until that pid shows
+    # `/bin/sleep <n>` and then signal a launcher that is provably inside the sleep.
+    executable(root / "fake-bin/sleep", '''#!/bin/bash
+if [[ -n "${SLEEP_MARKER_ARG:-}" && "${1:-}" == "$SLEEP_MARKER_ARG" ]]; then
+  echo "$$" > "$FAKE_ROOT/sleeping.tmp" && mv "$FAKE_ROOT/sleeping.tmp" "$FAKE_ROOT/sleeping"
+fi
+exec /bin/sleep "$@"
+''')
     executable(root / "fake-bin/curl", '''#!/bin/bash
 case "$*" in
   */openapi.json*) echo '{"info":{"title":"silicon-notebook API"}}' ;;
