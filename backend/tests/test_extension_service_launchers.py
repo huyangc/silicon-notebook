@@ -230,6 +230,10 @@ def published_pid(root, name):
     return int((root / f"{name}.pid").read_text())
 
 
+def command_line(pid):
+    return subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
+
+
 def parent_pid(pid):
     return int(subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
                               capture_output=True, text=True).stdout.strip())
@@ -632,11 +636,21 @@ def test_a_group_signal_while_companions_start_rolls_everything_back(launcher, p
 def test_a_second_group_signal_in_the_grace_wait_still_kills_reaps_and_stops_the_companions(launcher, path, second):
     """The second Ctrl-C of a real terminal also interrupts the launcher's own
     foreground `sleep`; under `set -e` that failed command must not end the wind-down
-    before the SIGKILL, the reaping and the companion stop."""
+    before the SIGKILL, the reaping and the companion stop.
+
+    The launcher sees a second Ctrl-C through that interrupted `sleep` (bash runs no
+    trap for a SIGINT that follows a SIGINT), so the signal only counts when a
+    poll `sleep` is alive. A short poll leaves that to chance under load (the
+    launcher can sit runnable between two sleeps for longer than a short sleep
+    lasts), which made the INT case flaky. The poll is therefore long and the fake
+    `sleep` publishes its pid when the poll starts; the signal is sent once that pid
+    has become the real 10 s sleep. (Signalling on the marker alone still failed
+    about 1 run in 100: a bash wrapper signalled while its own `mv` runs can carry
+    on and exec the sleep after the signal has passed.)"""
     root, env = launcher
     extra = {"TERM_EXITS": "backend", "TERM_IGNORED": "frontend",
              "START_CLEANUP_GRACE_SECONDS": "30",
-             "_SCRIPT_TEST_CLEANUP_POLL_INTERVAL_SECONDS": "0.05"}
+             "_SCRIPT_TEST_CLEANUP_POLL_INTERVAL_SECONDS": "10.01", "SLEEP_MARKER_ARG": "10.01"}
     if path.endswith("prod.sh"):
         extra["RM_BLOCK"] = "1"
     with (root / "launcher.err").open("w") as stream:
@@ -650,6 +664,12 @@ def test_a_second_group_signal_in_the_grace_wait_still_kills_reaps_and_stops_the
             os.killpg(process.pid, signal.SIGINT)
             (root / "rm.release").touch()
             wait_until(lambda: (root / "backend.term").exists() and (root / "frontend.term").exists())
+            wait_until((root / "sleeping").exists)
+            sleeper = int((root / "sleeping").read_text())
+            # The fake sleep publishes its pid before it execs the real one, and a
+            # bash script that is signalled while its own child runs may carry on
+            # instead of dying: wait until that pid really is the 10 s sleep.
+            wait_until(lambda: "/bin/sleep 10.01" in command_line(sleeper))
             os.killpg(process.pid, second)
             assert process.wait(timeout=LIFECYCLE_CAP_SECONDS) == 130
             assert not alive(frontend), "the child that ignores TERM was left running"

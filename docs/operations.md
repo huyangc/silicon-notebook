@@ -189,9 +189,11 @@ and still stops the companion services and removes the receipt, with the exit st
 the first signal. This holds for the signal a terminal sends: Ctrl-C reaches the whole
 foreground process group, so it interrupts the launcher's own wait as well, and that
 interruption no longer aborts the wind-down (the launcher runs with `set -e`; the
-wind-down does not). A repeated SIGINT sent to the launcher's pid alone (`kill -INT`) is
-not noticed until the grace window ends, because bash runs no trap for the signal whose
-handler it is still inside; repeated TERM and HUP are noticed at once. A child whose pid
+wind-down does not). A second Ctrl-C is noticed through that interrupted wait, so one that
+lands in the instant between two polls is missed (press it again), and so is a repeated
+SIGINT sent to the launcher's pid alone (`kill -INT`), because bash runs no trap for the
+signal whose handler it is still inside; either is only noticed when the grace window ends.
+Repeated TERM and HUP sent to the pid are noticed at once. A child whose pid
 a signal arrived too early to record (the signal lands between the fork and the
 assignment) is found through `$!` and stopped as well.
 
