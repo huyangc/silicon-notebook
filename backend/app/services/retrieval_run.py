@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextvars
 import threading
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Hashable, Iterator, Optional, TypeVar
@@ -22,6 +23,13 @@ from app.services.cancellation import CancelEvent, raise_if_cancelled
 
 T = TypeVar("T")
 _CANCEL_POLL_SECONDS = 0.05
+#: How many native query vectors one run keeps for the hand-over
+#: (``share_query_vector``), least recently used out first. The hand-overs it
+#: serves are adjacent -- an Ask's Memory recall and the retrieval stage right
+#: after it; a report scout's stage embed and its Memory recall, repeated per
+#: library -- so two suffice; a report's per-section recalls, each with its own
+#: text and none ever read back, can then never pile up.
+QUERY_VECTOR_SHARE_LIMIT = 2
 _RUN_KINDS = frozenset({
     "ask_chunk",
     "ask_reasoning",
@@ -63,9 +71,11 @@ class RetrievalRunState:
         self._value_pending: dict[Hashable, _PendingEmbedding] = {}
         # Native query vectors handed between the run's consumers of one
         # embedder (``share_query_vector``): (id(embedder), text) -> (embedder,
-        # vector). The embedder is kept beside the vector so a lookup can
-        # check identity, never only an id that a freed object could reuse.
-        self._query_vectors: dict[tuple[int, str], tuple[Any, Any]] = {}
+        # vector), at most QUERY_VECTOR_SHARE_LIMIT of them, LRU. The embedder
+        # is kept beside the vector so a lookup can check identity, never only
+        # an id that a freed object could reuse.
+        self._query_vectors: "OrderedDict[tuple[int, str], tuple[Any, Any]]" = (
+            OrderedDict())
         self._chunk_fts_open: set[str] = set()
         self._peer_unprepared: dict[str, str] = {}
         self.embedding_requests = 0
@@ -136,10 +146,12 @@ class RetrievalRunState:
     def shared_query_vector(self, embedder: Any, text: str) -> Any:
         """The native vector ``embedder`` produced for exactly ``text`` earlier
         in this run, or ``None``. See the module-level ``shared_query_vector``."""
+        key = (id(embedder), text)
         with self._lock:
-            entry = self._query_vectors.get((id(embedder), text))
-        if entry is None or entry[0] is not embedder:
-            return None
+            entry = self._query_vectors.get(key)
+            if entry is None or entry[0] is not embedder:
+                return None
+            self._query_vectors.move_to_end(key)
         return entry[1]
 
     def share_query_vector(self, embedder: Any, text: str, vector: Any) -> None:
@@ -147,8 +159,12 @@ class RetrievalRunState:
         consumers. ``None`` is never kept: a failed embed is no answer."""
         if vector is None:
             return
+        key = (id(embedder), text)
         with self._lock:
-            self._query_vectors[(id(embedder), text)] = (embedder, vector)
+            self._query_vectors[key] = (embedder, vector)
+            self._query_vectors.move_to_end(key)
+            while len(self._query_vectors) > QUERY_VECTOR_SHARE_LIMIT:
+                self._query_vectors.popitem(last=False)
 
     def memoized_value(self, key: Hashable, compute: Callable[[], T]) -> T:
         """Single-flight one successful run-local infrastructure value.
@@ -266,7 +282,12 @@ class RetrievalRunState:
             semaphore.release()
 
     def event(self) -> dict[str, Any]:
-        """Content-free aggregate suitable for the shared event logger."""
+        """Content-free aggregate suitable for the shared event logger.
+
+        ``embedding_requests`` counts misses of the run's embedding memo, not
+        model requests actually sent: a miss the query-vector hand-over
+        (``shared_query_vector``) answers is counted without a request, and
+        Memory recall's own embeds never pass the memo at all."""
         with self._lock:
             event = {
                 "kind": "retrieval_run_stats",
@@ -382,7 +403,17 @@ def shared_query_vector(embedder: Any, text: str) -> Any:
       does not embed at all;
     * it never waits, retries, counts or checks cancellation: a miss is the
       caller's ordinary embed with its own fail-soft handling, a failed or
-      ``None`` embed is never offered, and outside a run nothing is shared.
+      ``None`` embed is never offered, and outside a run nothing is shared;
+    * at most ``QUERY_VECTOR_SHARE_LIMIT`` vectors are kept per run (LRU), so
+      a run that offers many texts nobody reads back holds no more than that.
+
+    Two limits it shares with the run's embedding memo, deliberately: a vector
+    is reused as it came back, so a malformed answer (a wrong width, all
+    zeros) that Memory received is what the stage then uses too, exactly as
+    the memo already hands one stage embed to every later caller; and
+    identity is the embedder OBJECT, so a scheduled adapter rebound to another
+    model by a hot reload mid-run still counts as the same embedder -- the
+    memo pins the run's first vector across such a reload in the same way.
     """
     state = current_retrieval_run()
     if state is None or not _shares(embedder):

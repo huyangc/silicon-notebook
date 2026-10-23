@@ -1447,7 +1447,10 @@ class CandidateRetrievalService(_RetrievalState):
             # Memory recall usually embedded this very text already: read its
             # NATIVE vector (``shared_query_vector`` -- same text, same
             # embedder only) and truncate a copy below, exactly as a fresh
-            # embed would be.
+            # embed would be. Like this memo, the hand-over reuses what came
+            # back as is (a malformed vector Memory got is reused too) and
+            # keys on the embedder object (a hot reload behind the same
+            # adapter does not split it) -- see ``shared_query_vector``.
             embedder = self.embedder
             native = shared_query_vector(embedder, key)
             vec = native if native is not None else embedder.embed_query(key)

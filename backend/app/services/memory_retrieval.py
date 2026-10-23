@@ -164,7 +164,11 @@ class MemoryRetriever:
         stored vectors are native-dimension, against which a truncated query
         would score 0 without a word. A failure stays silent here, as before;
         nothing is offered, so the retrieval stage embeds (and reports) on
-        its own."""
+        its own. A vector that came back malformed is offered as it is, and a
+        hot reload behind the same adapter object does not stop the reuse --
+        both exactly as the run's embedding memo already behaves; the run
+        keeps only the last few offered vectors (``QUERY_VECTOR_SHARE_LIMIT``),
+        so a report's per-section recalls do not accumulate."""
         vector = shared_query_vector(self.embedder, text)
         if vector is not None:
             return vector

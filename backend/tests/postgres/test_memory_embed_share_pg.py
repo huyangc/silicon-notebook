@@ -75,3 +75,11 @@ def test_outside_a_run_nothing_is_shared_pg(world):
 
 def test_no_vector_memory_is_unchanged_pg(world):
     cases.no_vector_memory_is_unchanged(world)
+
+
+def test_report_run_keeps_the_hand_over_bounded_pg(world):
+    cases.report_run_keeps_the_hand_over_bounded(world)
+
+
+def test_scout_shares_across_libraries_pg(world):
+    cases.scout_shares_across_libraries(world)
