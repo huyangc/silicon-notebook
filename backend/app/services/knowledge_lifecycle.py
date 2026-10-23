@@ -5382,9 +5382,10 @@ class KnowledgeLifecycleService:
         objects is not returned either."""
         budget = cap + min(len(scope.owned_hidden), cap)
         while True:
+            probe: dict = {}
             result = self._kg_neighbors_unchecked(
                 notebook_id, object_id, budget, artifacts=artifacts,
-                store_kwargs=store_viewer_kwargs(scope))
+                store_kwargs=store_viewer_kwargs(scope), probe=probe)
             focus_id = result.get("focus_id") or object_id
             raw_neighbours = sum(1 for n in result.get("nodes", []) if n["id"] != focus_id)
             judged = scope.answer_neighbourhood(
@@ -5393,7 +5394,7 @@ class KnowledgeLifecycleService:
             )
             if judged is None:
                 return self._absent_focus_neighbors(
-                    notebook_id, object_id, artifacts=artifacts)
+                    notebook_id, object_id, artifacts=artifacts, probe=probe)
             nodes, edges, answers = judged
             visible_neighbours = [n for n in nodes if n["id"] != focus_id]
             if len(visible_neighbours) >= cap or raw_neighbours < budget:
@@ -5411,6 +5412,7 @@ class KnowledgeLifecycleService:
 
     def _absent_focus_neighbors(
         self, notebook_id: str, object_id: str, *, artifacts: bool,
+        probe: Optional[dict] = None,
     ) -> dict:
         """What ``_kg_neighbors_unchecked`` answers for an id the notebook
         does not hold (no member row to fold, no position in the preview, no
@@ -5418,13 +5420,25 @@ class KnowledgeLifecycleService:
         notebook too large for the live path, ``locating_unavailable`` (with
         ``preview_lacks_focus`` when a preview exists).  A hidden focus, and a
         cluster id given by a reader who may not be shown one, answer this, so
-        neither tells an existing id from an unknown one.  Reads: the preview
-        probe and the object count the unknown id's answer reads."""
-        idx = self.scale_artifacts.viz_index(notebook_id) if artifacts else None
-        preview = idx is not None and getattr(idx, "viz_ids", None) is not None
-        with self._connect() as db:
-            object_count = self.knowledge.count_active_objects(db, notebook_id)
-        if int(object_count) > self.settings.viz_sync_build_max_objects:
+        neither tells an existing id from an unknown one.
+
+        Reads: what the unknown id's answer reads -- the preview probe and
+        the object count -- minus what this request's neighbour read already
+        learnt (``probe``, filled by ``_kg_neighbors_unchecked``): the preview
+        is probed at most once per request, so a refused build is reported
+        once (``viz_lazy_build_refused``, the stale-refresh refusal included),
+        as for an unknown id, and the count is not read twice."""
+        if probe is None or "preview" not in probe:
+            idx = self.scale_artifacts.viz_index(notebook_id) if artifacts else None
+            preview = idx is not None and getattr(idx, "viz_ids", None) is not None
+        else:
+            preview = bool(probe["preview"])
+        large = None if probe is None else probe.get("large")
+        if large is None:
+            with self._connect() as db:
+                object_count = self.knowledge.count_active_objects(db, notebook_id)
+            large = int(object_count) > self.settings.viz_sync_build_max_objects
+        if large:
             return self._locating_unavailable(object_id, object_id, preview=preview)
         return {"nodes": [], "edges": [], "focus_id": object_id,
                 "focus_object_id": object_id}
@@ -5449,10 +5463,15 @@ class KnowledgeLifecycleService:
     def _kg_neighbors_unchecked(
         self, notebook_id: str, object_id: str, cap: int,
         *, artifacts: bool = True, store_kwargs: Optional[dict] = None,
+        probe: Optional[dict] = None,
     ) -> dict:
         """Participant-authorized neighbor read; caller already checked scope.
         ``artifacts`` False (the M1 transition marker, E4-7): the persisted viz
-        is not consulted, as if absent."""
+        is not consulted, as if absent.  ``probe`` (a dict) records what this
+        read learnt about the notebook -- ``preview``, and ``large`` once the
+        object count was read -- so a caller that then answers the request
+        as an unknown id (``_absent_focus_neighbors``) does not probe the
+        preview a second time."""
         focus_id = object_id
         with self._connect() as db:
             fold_rows = self.unified_kg.cluster_fold_rows(
@@ -5472,6 +5491,8 @@ class KnowledgeLifecycleService:
             if idx is not None and getattr(idx, "viz_ids", None) is not None
             else None
         )
+        if probe is not None:
+            probe["preview"] = positions is not None
         if positions is not None and focus_id in positions:
             from app.services.kg.scale_index import viz_neighbors
             nb = viz_neighbors(self._viz_dict(idx), focus_id, cap)
@@ -5543,7 +5564,10 @@ class KnowledgeLifecycleService:
         # exactly that instead of promising a retry.
         with self._connect() as db:
             object_count = self.knowledge.count_active_objects(db, notebook_id)
-        if int(object_count) > self.settings.viz_sync_build_max_objects:
+        large = int(object_count) > self.settings.viz_sync_build_max_objects
+        if probe is not None:
+            probe["large"] = large
+        if large:
             return self._locating_unavailable(
                 focus_id, object_id, preview=positions is not None)
         result = self._kg_neighbors_db(

@@ -93,11 +93,14 @@ def env(monkeypatch, tmp_path):
     with repo._write() as db:
         member_shared = _object_id(db, nb, "Shared", "src-mm")
         visible_shared = _object_id(db, nb, "Shared", "src-s")
+        membernote = _object_id(db, nb, "Membernote", "src-mm")
     cmap = repo.cluster_map(nb)
     assert cmap[member_shared] == cmap[visible_shared], cmap
     return SimpleNamespace(client=client, repo=repo, nb=nb, owner=owner,
                            owner_id=owner_id, member=member, member_id=member_id,
-                           member_shared=member_shared)
+                           member_shared=member_shared,
+                           # a cluster whose only member is the member's Memory
+                           membernote_c=cmap[membernote])
 
 
 def build_library(env):
@@ -310,6 +313,73 @@ def test_a_hidden_focus_answers_like_an_unknown_id(env, monkeypatch, large, path
     assert "Membernote" in env.client.get(
         f"/api/notebooks/{env.nb}/objects/{env.member_shared}/neighbors",
         headers=env.member).text
+
+
+@pytest.mark.parametrize("preview", ["absent", "stale"])
+def test_a_refused_neighbour_read_reports_a_refused_preview_build_once(
+    env, monkeypatch, preview,
+):
+    """On a library too large for an in-process preview build, every
+    neighbour read reports the refused build (``viz_lazy_build_refused``)
+    exactly once, as an unknown id's read does: the non-member's unknown id,
+    cluster-id input and hidden focus, and -- answered as an unknown id only
+    after the neighbour read -- a notebook reader's cluster id whose every
+    member is hidden from them.  ``preview``: none at all (trigger
+    ``absent``), or a stale one (``stale_refresh``)."""
+    ids = build_library(env)
+    repo = env.repo
+    scale = repo._runtime.scale_artifacts
+    if preview == "absent":
+        # Whatever an earlier read or rebuild tail published goes.
+        for notebook_id in (ids.lib, env.nb):
+            scale.retire_viz(notebook_id)
+            scale.viz_cache.pop(notebook_id, None)
+            assert scale.artifacts.load_viz(notebook_id) is None
+    if preview == "stale":
+        monkeypatch.setattr(scale, "_spawn_viz_build", lambda _nb: None)
+        for notebook_id, source_id in ((ids.lib, "src-late-l"), (env.nb, "src-late-s")):
+            assert scale.build_viz(notebook_id) is not None
+            with repo._write() as db:
+                _source(db, notebook_id, source_id, elements=[(f"el-{source_id}", "late")])
+            repo.store_kg(notebook_id, source_id, [
+                {"local_id": "z", "object_type": "concept",
+                 "payload": {"name": "Latecomer", "section_path": "1"},
+                 "evidence": [_ev(source_id, f"el-{source_id}")]}], [])
+    for settings in {id(s): s for s in (repo._runtime.knowledge_lifecycle.settings,
+                                        scale.settings)}.values():
+        monkeypatch.setattr(settings, "viz_sync_build_max_objects", 1)
+    trigger = {"absent": "absent", "stale": "stale_refresh"}[preview]
+    events: list = []
+    emit = scale._emit_viz_lazy_build_refused
+    monkeypatch.setattr(
+        scale, "_emit_viz_lazy_build_refused",
+        lambda nb, objects, why: events.append((nb, why)) or emit(nb, objects, why))
+    # The neighbour read's object count (``locating_unavailable``'s gate).
+    knowledge = repo._runtime.knowledge_lifecycle.knowledge
+    counts: list = []
+    count = knowledge.count_active_objects
+    monkeypatch.setattr(knowledge, "count_active_objects",
+                        lambda db, nb, **k: counts.append(nb) or count(db, nb, **k))
+
+    def refusals(url_notebook, headers, object_id, lib=None):
+        events.clear()
+        counts.clear()
+        params = {"source_notebook_id": lib} if lib else {}
+        r = env.client.get(
+            f"/api/notebooks/{url_notebook}/objects/{object_id}/neighbors",
+            headers=headers, params=params)
+        assert r.status_code == 200 and r.json().get("locating_unavailable") is True, r.text
+        return list(events), list(counts)
+
+    # The references: an unknown id read by the library's member, and by
+    # the shared notebook's owner -- one refusal, and the count read once.
+    once_lib = refusals(env.nb, env.owner, NEVER_ID, ids.lib)
+    once_nb = refusals(env.nb, env.owner, "K-neverexisted-here")
+    assert once_lib[0] == [(ids.lib, trigger)] and once_lib[1].count(ids.lib) == 1
+    assert once_nb[0] == [(env.nb, trigger)] and once_nb[1].count(env.nb) == 1
+    for object_id in (NEVER_ID, SEEDED_ID, ids.kh):
+        assert refusals(env.nb, env.member, object_id, ids.lib) == once_lib, object_id
+    assert refusals(env.nb, env.owner, env.membernote_c) == once_nb
 
 
 def drop_knowhow_member(repo, lib, *, drop_source: bool):
