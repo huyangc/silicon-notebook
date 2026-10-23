@@ -420,3 +420,51 @@ def no_vector_memory_is_unchanged(world: World) -> None:
     assert world.embedder.queries == [PLAIN]
     assert notebook == []
     assert json.dumps(vector) == vector_ref and recall == recall_ref
+
+
+def _table_size() -> int:
+    from app.services.retrieval_run import current_retrieval_run
+
+    return len(current_retrieval_run()._query_vectors)
+
+
+def report_run_keeps_the_hand_over_bounded(world: World) -> None:
+    """A report recalls Memory once per section, each with its own text that
+    nothing reads back; the run must not keep every one of those vectors."""
+    from app.services.retrieval_run import QUERY_VECTOR_SHARE_LIMIT
+
+    remember(world)
+    sizes = []
+    with one_run(world):
+        for index in range(12):
+            section = f"{PLAIN} section {index} corner review"
+            assert _memory(world, section) == oracle_memory(world, section)
+            _vector(world, f"section {index} sub query")
+            sizes.append(_table_size())
+        # The Ask-shaped hand-over still works at the end of a long run.
+        world.embedder.queries.clear()
+        notebook = _memory(world, PLAIN)
+        vector = _vector(world, PLAIN)
+        sizes.append(_table_size())
+    assert max(sizes) == QUERY_VECTOR_SHARE_LIMIT, sizes
+    assert world.embedder.queries == [PLAIN]
+    assert notebook == oracle_memory(world, PLAIN) and notebook
+    assert vector == reference_vector(world, PLAIN)
+
+
+def scout_shares_across_libraries(world: World) -> None:
+    """A report scout probes each library with the same question: the stage
+    embed (memoised after the first library) and one Memory recall per
+    library. Every later recall reuses the first native vector it can."""
+    remember(world)
+    world.embedder.queries.clear()
+    hits = []
+    with one_run(world):
+        for _library in range(3):
+            world.retrieval.retrieve_chunk_candidates(world.notebook_id, PLAIN)
+            hits.append(_memory(world, PLAIN))
+    # Untruncated, the stage's own vector serves every recall; truncated, the
+    # first recall embeds once and the others reuse that.
+    expected = [PLAIN] if not world.runtime_dim else [PLAIN, PLAIN]
+    assert world.embedder.queries == expected
+    assert all(item == oracle_memory(world, PLAIN) for item in hits) and hits[0]
