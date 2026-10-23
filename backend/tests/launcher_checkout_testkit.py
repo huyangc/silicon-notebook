@@ -95,14 +95,16 @@ sys.exit(7 if action == "start" and os.environ.get("FAIL_SERVICE") == "1" else 0
     executable(root / "fake_child.sh", '''#!/bin/bash
 # TERM_EXITS / TERM_IGNORED: space-separated child names that record a SIGTERM in
 # $FAKE_ROOT/<name>.term and then exit (a well-behaved service) or keep running
-# (a service that ignores SIGTERM and only SIGKILL stops). The trap is armed
+# (a service that ignores SIGTERM and only SIGKILL stops; it ignores SIGHUP too,
+# like a service started under nohup, so that a terminal's group SIGHUP does not
+# kill it and the launcher is the one that must SIGKILL it). The trap is armed
 # before the pid file is published, so a reader that waits for the pid file can
 # never signal a child that has not armed it yet.
 trapped=
 if [[ " ${TERM_EXITS:-} " == *" $1 "* ]]; then
   trapped=1; trap ': > "$FAKE_ROOT/$1.term"; exit 0' TERM
 elif [[ " ${TERM_IGNORED:-} " == *" $1 "* ]]; then
-  trapped=1; trap ': > "$FAKE_ROOT/$1.term"' TERM
+  trapped=1; trap ': > "$FAKE_ROOT/$1.term"' TERM; trap '' HUP
 fi
 # Record whether the UI plugin sync had finished when this child started.
 [[ -f "$FAKE_ROOT/sync.done" ]] && : > "$FAKE_ROOT/$1.after-sync"
