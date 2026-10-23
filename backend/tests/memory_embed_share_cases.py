@@ -422,10 +422,12 @@ def no_vector_memory_is_unchanged(world: World) -> None:
     assert json.dumps(vector) == vector_ref and recall == recall_ref
 
 
-def _table_size() -> int:
+def _table() -> tuple[int, int]:
+    """(entries in the run's hand-over table, of them offered by Memory)."""
     from app.services.retrieval_run import current_retrieval_run
 
-    return len(current_retrieval_run()._query_vectors)
+    entries = list(current_retrieval_run()._query_vectors.values())
+    return len(entries), sum(1 for entry in entries if entry[2] == "memory")
 
 
 def report_run_keeps_the_hand_over_bounded(world: World) -> None:
@@ -439,14 +441,18 @@ def report_run_keeps_the_hand_over_bounded(world: World) -> None:
         for index in range(12):
             section = f"{PLAIN} section {index} corner review"
             assert _memory(world, section) == oracle_memory(world, section)
+            sizes.append(_table())
             _vector(world, f"section {index} sub query")
-            sizes.append(_table_size())
+            sizes.append(_table())
         # The Ask-shaped hand-over still works at the end of a long run.
         world.embedder.queries.clear()
         notebook = _memory(world, PLAIN)
         vector = _vector(world, PLAIN)
-        sizes.append(_table_size())
-    assert max(sizes) == QUERY_VECTOR_SHARE_LIMIT, sizes
+        sizes.append(_table())
+    # Never more than the limit, and never more than ONE unread Memory vector:
+    # each recall dropped the previous recall's before embedding its own.
+    assert max(total for total, _ in sizes) <= QUERY_VECTOR_SHARE_LIMIT, sizes
+    assert max(memory for _, memory in sizes) == 1, sizes
     assert world.embedder.queries == [PLAIN]
     assert notebook == oracle_memory(world, PLAIN) and notebook
     assert vector == reference_vector(world, PLAIN)

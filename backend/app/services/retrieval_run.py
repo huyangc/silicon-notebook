@@ -28,7 +28,10 @@ _CANCEL_POLL_SECONDS = 0.05
 #: serves are adjacent -- an Ask's Memory recall and the retrieval stage right
 #: after it; a report scout's stage embed and its Memory recall, repeated per
 #: library -- so two suffice; a report's per-section recalls, each with its own
-#: text and none ever read back, can then never pile up.
+#: text and none ever read back, can then never pile up. On top of the limit,
+#: a Memory recall that has to embed first drops the vectors earlier Memory
+#: recalls offered (``drop_query_vectors``), so the run never holds an
+#: unread Memory vector while the next one is computed.
 QUERY_VECTOR_SHARE_LIMIT = 2
 _RUN_KINDS = frozenset({
     "ask_chunk",
@@ -71,11 +74,12 @@ class RetrievalRunState:
         self._value_pending: dict[Hashable, _PendingEmbedding] = {}
         # Native query vectors handed between the run's consumers of one
         # embedder (``share_query_vector``): (id(embedder), text) -> (embedder,
-        # vector), at most QUERY_VECTOR_SHARE_LIMIT of them, LRU. The embedder
+        # vector, owner), at most QUERY_VECTOR_SHARE_LIMIT of them, LRU. The
+        # owner names the side that offered it ("memory" / "stage"). The embedder
         # is kept beside the vector so a lookup can check identity, never only
         # an id that a freed object could reuse.
-        self._query_vectors: "OrderedDict[tuple[int, str], tuple[Any, Any]]" = (
-            OrderedDict())
+        self._query_vectors: (
+            "OrderedDict[tuple[int, str], tuple[Any, Any, str]]") = OrderedDict()
         self._chunk_fts_open: set[str] = set()
         self._peer_unprepared: dict[str, str] = {}
         self.embedding_requests = 0
@@ -154,17 +158,25 @@ class RetrievalRunState:
             self._query_vectors.move_to_end(key)
         return entry[1]
 
-    def share_query_vector(self, embedder: Any, text: str, vector: Any) -> None:
+    def share_query_vector(self, embedder: Any, text: str, vector: Any,
+                           owner: str) -> None:
         """Offer ``embedder``'s native vector for ``text`` to the run's other
         consumers. ``None`` is never kept: a failed embed is no answer."""
         if vector is None:
             return
         key = (id(embedder), text)
         with self._lock:
-            self._query_vectors[key] = (embedder, vector)
+            self._query_vectors[key] = (embedder, vector, owner)
             self._query_vectors.move_to_end(key)
             while len(self._query_vectors) > QUERY_VECTOR_SHARE_LIMIT:
                 self._query_vectors.popitem(last=False)
+
+    def drop_query_vectors(self, owner: str) -> None:
+        """Forget every vector ``owner`` offered (see ``drop_query_vectors``)."""
+        with self._lock:
+            for key in [key for key, entry in self._query_vectors.items()
+                        if entry[2] == owner]:
+                del self._query_vectors[key]
 
     def memoized_value(self, key: Hashable, compute: Callable[[], T]) -> T:
         """Single-flight one successful run-local infrastructure value.
@@ -421,13 +433,30 @@ def shared_query_vector(embedder: Any, text: str) -> Any:
     return state.shared_query_vector(embedder, text)
 
 
-def share_query_vector(embedder: Any, text: str, vector: Any) -> None:
+def share_query_vector(embedder: Any, text: str, vector: Any, *,
+                       owner: str) -> None:
     """Offer a native query vector to the run's other consumers (see
-    ``shared_query_vector`` for the conditions under which one is read)."""
+    ``shared_query_vector`` for the conditions under which one is read).
+    ``owner`` -- ``"memory"`` or ``"stage"`` -- is who offered it."""
     state = current_retrieval_run()
     if state is None or not _shares(embedder):
         return
-    state.share_query_vector(embedder, text, vector)
+    state.share_query_vector(embedder, text, vector, owner)
+
+
+def drop_query_vectors(owner: str) -> None:
+    """Forget the vectors ``owner`` offered earlier in this run.
+
+    Memory recall calls it before it embeds a text nobody offered: its own
+    earlier offers were for other texts, and a report recalls Memory once per
+    section with a new text each time that nothing reads back. Dropping them
+    first keeps a run from holding one more native vector than before the
+    hand-over existed while the next one is computed. A stage offer is the
+    very list the embedding memo already holds, so it costs nothing to keep.
+    """
+    state = current_retrieval_run()
+    if state is not None:
+        state.drop_query_vectors(owner)
 
 
 def _shares(embedder: Any) -> bool:
@@ -463,6 +492,7 @@ __all__ = [
     "memoized_retrieval_value",
     "retrieval_fanout_slot",
     "retrieval_run",
+    "drop_query_vectors",
     "share_query_vector",
     "shared_query_vector",
 ]

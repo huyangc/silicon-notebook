@@ -1464,7 +1464,7 @@ class CandidateRetrievalService(_RetrievalState):
                 # it to a later Memory recall costs no second copy. A truncated
                 # one is never offered (Memory would score it 0 against its
                 # native vectors), nor is the native kept beside it.
-                share_query_vector(embedder, key, vec)
+                share_query_vector(embedder, key, vec, owner="stage")
             return vec
 
         try:

@@ -88,6 +88,7 @@ def test_hand_over_keeps_the_most_recently_used_vectors():
     stage's other texts."""
     from app.services.retrieval_run import (
         QUERY_VECTOR_SHARE_LIMIT,
+        drop_query_vectors,
         retrieval_run,
         share_query_vector,
         shared_query_vector,
@@ -96,15 +97,19 @@ def test_hand_over_keeps_the_most_recently_used_vectors():
     embedder = cases.CountingEmbedder()
     assert QUERY_VECTOR_SHARE_LIMIT == 2
     with retrieval_run(run_kind="ask_reasoning"):
-        share_query_vector(embedder, "question", [1.0])
-        share_query_vector(embedder, "other", [2.0])
+        share_query_vector(embedder, "question", [1.0], owner="memory")
+        share_query_vector(embedder, "other", [2.0], owner="stage")
         assert shared_query_vector(embedder, "question") == [1.0]
-        share_query_vector(embedder, "third", [3.0])
+        share_query_vector(embedder, "third", [3.0], owner="stage")
         assert shared_query_vector(embedder, "question") == [1.0]
         assert shared_query_vector(embedder, "other") is None
         assert shared_query_vector(embedder, "third") == [3.0]
-        share_query_vector(embedder, "none", None)
+        share_query_vector(embedder, "none", None, owner="stage")
         assert shared_query_vector(embedder, "question") == [1.0]
+        # A Memory recall about to embed drops only Memory's own offers.
+        drop_query_vectors("memory")
+        assert shared_query_vector(embedder, "question") is None
+        assert shared_query_vector(embedder, "third") == [3.0]
     # Outside a run nothing is kept.
-    share_query_vector(embedder, "question", [1.0])
+    share_query_vector(embedder, "question", [1.0], owner="memory")
     assert shared_query_vector(embedder, "question") is None

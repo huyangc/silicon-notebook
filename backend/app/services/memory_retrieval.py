@@ -18,7 +18,11 @@ from app.services.retrieval import (
     keyword_basis,
 )
 from app.services.context_spans import entry_lines
-from app.services.retrieval_run import share_query_vector, shared_query_vector
+from app.services.retrieval_run import (
+    drop_query_vectors,
+    share_query_vector,
+    shared_query_vector,
+)
 from app.services.source_scope import memory_channel_allowed
 from app.services.vector_index import decode_vector
 
@@ -166,17 +170,20 @@ class MemoryRetriever:
         nothing is offered, so the retrieval stage embeds (and reports) on
         its own. A vector that came back malformed is offered as it is, and a
         hot reload behind the same adapter object does not stop the reuse --
-        both exactly as the run's embedding memo already behaves; the run
-        keeps only the last few offered vectors (``QUERY_VECTOR_SHARE_LIMIT``),
-        so a report's per-section recalls do not accumulate."""
+        both exactly as the run's embedding memo already behaves. Before it
+        embeds, this recall drops the vectors earlier recalls offered
+        (``drop_query_vectors``), and the run keeps at most
+        ``QUERY_VECTOR_SHARE_LIMIT`` in all, so a report's per-section
+        recalls never accumulate."""
         vector = shared_query_vector(self.embedder, text)
         if vector is not None:
             return vector
+        drop_query_vectors("memory")
         try:
             vector = self.embedder.embed_query(text)
         except Exception:
             return None
-        share_query_vector(self.embedder, text, vector)
+        share_query_vector(self.embedder, text, vector, owner="memory")
         return vector
 
     def notebook_memory_hits(
