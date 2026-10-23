@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import pytest
@@ -165,8 +166,17 @@ def _primitives(repo):
 def test_expand_graph_stays_inside_the_selected_source(repo):
     notebook_id, source_a, source_b = _add_chain_and_manual(repo)
     snapshot = repo._runtime.source_subgraphs.snapshot(notebook_id, [source_a])
+    # Defense in depth: even a snapshot carrying an edge that only the other
+    # source asserted, between two selected-source nodes, never expands it.
+    template = next(r for r in snapshot.relations if r.relation_id == "rel-a")
+    foreign = dataclasses.replace(
+        template, relation_id="rel-foreign", source_id=source_b,
+        target_object_id="ko-a3",
+    )
+    snapshot = dataclasses.replace(snapshot, relations=(*snapshot.relations, foreign))
     expansion = _primitives(repo).expand_graph(snapshot, ["ko-a1"], max_depth=3)
     assert {node.object_id for node in expansion.nodes} >= {"ko-a1", "ko-a2"}
+    assert "rel-foreign" not in {relation.relation_id for relation in expansion.relations}
     assert {relation.source_id for relation in expansion.relations} == {source_a}
     assert all(source_b not in node.source_ids for node in expansion.nodes)
     assert all(set(node.source_ids) <= {source_a} for node in expansion.nodes)
