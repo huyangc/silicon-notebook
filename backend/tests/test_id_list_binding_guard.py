@@ -118,8 +118,6 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(ANY, BATCHED, "delta or Memory source ids; one batched read (<= 900)"),),
     ("postgres/embedding_store.py", "EmbeddingStore.knowledge_delta_rows"): (
         s(ANY, BATCHED, "delta source ids, callers batch with _in_batches (<= 900)"),),
-    ("postgres/embedding_store.py", "EmbeddingStore.element_delta_rows"): (
-        s(ANY, BATCHED, "delta source ids, same batching contract as its siblings"),),
     ("postgres/embedding_store.py", "EmbeddingStore.chunk_delta_rows"): (
         s(ANY, BATCHED, "delta source ids, callers batch with _in_batches (<= 900)"),),
     ("postgres/embedding_store.py", "EmbeddingStore.rows_by_ids"): (
@@ -503,8 +501,6 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(SQ_EXP, BATCHED, "delta or Memory source ids; one batched read (<= 900)"),),
     ("sqlite/embedding_store.py", "EmbeddingStore.knowledge_delta_rows"): (
         s(SQ_EXP, BATCHED, "delta source ids, callers batch with _in_batches (<= 900)"),),
-    ("sqlite/embedding_store.py", "EmbeddingStore.element_delta_rows"): (
-        s(SQ_EXP, BATCHED, "delta source ids, same batching contract as its siblings"),),
     ("sqlite/embedding_store.py", "EmbeddingStore.chunk_delta_rows"): (
         s(SQ_EXP, BATCHED, "delta source ids, callers batch with _in_batches (<= 900)"),),
     ("sqlite/governance_store.py", "GovernanceStore.sweep_orphan_clusters_page"): (
@@ -660,8 +656,6 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(SQ_EXP, BOUNDED, "sources in flight in this process (ingest leases)"),),
     ("sqlite/maintenance.py", "SQLiteMaintenanceAdapter.count_missing_chunk_vectors"): (
         s(SQ_EXP, BOUNDED, "sources in flight in this process (ingest leases)"),),
-    ("sqlite/maintenance.py", "SQLiteMaintenanceAdapter.chunk_notebook_map"): (
-        s(SQ_EXP, BATCHED, "chunk ids, 400 per statement"),),
     ("sqlite/maintenance.py", "SQLiteMaintenanceAdapter.image_backfill_discard_assets"): (
         s(SQ_EXP, BOUNDED, "assets written by one source's image backfill"),),
     ("sqlite/maintenance.py", "SQLiteMaintenanceAdapter.backfill_source_fact_batch"): (

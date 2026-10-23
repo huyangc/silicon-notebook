@@ -1600,19 +1600,19 @@ def test_orphan_producing_paths_are_exhaustively_registered():
 
     backend = Path(__file__).resolve().parents[1]
 
-    # ① 两个后端各恰好五条 DELETE FROM knowledge_objects,且每条所在的函数都必须
-    #    同时删 concept_clusters —— 除了 knowhow 那两条:它们的清理由服务层在同一
-    #    写事务里经 prune_cluster_rows_for_source 完成(见 ② ③)。第五条是
+    # ① 两个后端各恰好四条 DELETE FROM knowledge_objects,且每条所在的函数都必须
+    #    同时删 concept_clusters —— 除了 knowhow 那一条:它的清理由服务层在同一
+    #    写事务里经 prune_cluster_rows_for_source 完成(见 ② ③)。第四条是
     #    batch-3-W1 T-5a 的 drain_notebook_graph_rows_page(delete_notebook_kg
     #    预排水的 knowledge_objects 页):它按 _delete_object_id_batch 同形在同一
     #    事务里删本页对象的簇成员行,由下面的 AST 扫描(函数体须含
     #    concept_clusters)自动覆盖——排水不是新的孤儿生产者。
-    KNOWHOW_DELETES = {"delete_objects_by_source", "delete_objects_by_source_and_row"}
+    KNOWHOW_DELETES = {"delete_objects_by_source"}
     WHOLE_TABLE_WIPES = {"delete_notebook_graph_rows"}
     for adapter in ("sqlite", "postgres"):
         path = backend / "app" / "repositories" / adapter / "knowledge_store.py"
         source = path.read_text(encoding="utf-8")
-        assert source.count("DELETE FROM knowledge_objects") == 5, adapter
+        assert source.count("DELETE FROM knowledge_objects") == 4, adapter
         tree = ast.parse(source, filename=str(path))
         unguarded = []
         for node in ast.walk(tree):
@@ -1643,8 +1643,8 @@ def test_orphan_producing_paths_are_exhaustively_registered():
                      / "knowledge_store.py").read_text(encoding="utf-8")
     assert 'for table in (\n            "concept_clusters"' in sqlite_source
 
-    # ② `delete_objects_by_source*` 在生产代码里只有 knowhow 投影这一个**调用**点。
-    call_re = re.compile(r"\.delete_objects_by_source(_and_row)?\(")
+    # ② `delete_objects_by_source` 在生产代码里只有 knowhow 投影这一个**调用**点。
+    call_re = re.compile(r"\.delete_objects_by_source\(")
     services = backend / "app" / "services"
     callers = {
         path.relative_to(backend).as_posix()

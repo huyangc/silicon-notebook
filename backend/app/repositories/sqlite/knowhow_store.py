@@ -1652,13 +1652,6 @@ class KnowhowStore:
                 )
         return {"row_ids": row_ids, "skipped_anchor_values": skipped}
 
-    def set_knowhow_row_projection(self, row_id: str, status: str) -> None:
-        with self.database.write() as db:
-            db.execute(
-                "UPDATE knowhow_rows SET projection_status = ? WHERE id = ?",
-                (status, row_id),
-            )
-
     def set_knowhow_row_projection_if_table_seq(
         self, row_id: str, status: str, expected_mutation_seq: int
     ) -> bool:

@@ -85,7 +85,6 @@ def _assert_floor_raise(sql: str, params: tuple) -> None:
             ["DELETE FROM knowledge_embeddings", "DELETE FROM relation_embeddings"],
         ),
         ("clear_source_index", ["DELETE FROM knowledge_object_sources"]),
-        ("clear_chunk_element_index", ["DELETE FROM chunk_elements"]),
     ],
 )
 def test_whole_notebook_delete_sites_raise_the_timeout_floor_in_the_same_tx(

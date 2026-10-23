@@ -684,16 +684,6 @@ class UnifiedKgStore:
         return names, relations
 
     @staticmethod
-    def cluster_version_row(db: Any, notebook_id: str):
-        row = db.execute(
-            f"SELECT COUNT(*) AS c,MAX(created_at) AS ts "
-            f"FROM concept_clusters WHERE notebook_id = %s "
-            f"AND generation = {_PUBLISHED_CLUSTER_GEN}",
-            (notebook_id, notebook_id),
-        ).fetchone()
-        return {**dict(row), "ts": iso_timestamp(row["ts"])}
-
-    @staticmethod
     def cluster_member_rows(db: Any, notebook_id: str):
         return db.execute(
             f"SELECT canonical_id, member_object_id FROM concept_clusters "
@@ -701,36 +691,6 @@ class UnifiedKgStore:
             f"ORDER BY canonical_id COLLATE \"C\", member_object_id COLLATE \"C\"",
             (notebook_id, notebook_id),
         ).fetchall()
-
-    @staticmethod
-    def ppr_version_rows(db: Any, notebook_id: str):
-        rel = db.execute(
-            "SELECT COUNT(*) AS c,MAX(created_at) AS ts "
-            "FROM knowledge_relations WHERE notebook_id=%s "
-            "AND review_status!='rejected'", (notebook_id,),
-        ).fetchone()
-        obj = db.execute(
-            "SELECT COUNT(*) AS c,MAX(updated_at) AS ts "
-            "FROM knowledge_objects WHERE notebook_id=%s", (notebook_id,),
-        ).fetchone()
-        chunk = db.execute(
-            "SELECT COUNT(*) AS c,MAX(created_at) AS ts "
-            "FROM chunks WHERE notebook_id=%s", (notebook_id,),
-        ).fetchone()
-        cluster = db.execute(
-            f"SELECT COUNT(*) AS c,MAX(created_at) AS ts "
-            f"FROM concept_clusters WHERE notebook_id=%s "
-            f"AND generation = {_PUBLISHED_CLUSTER_GEN}",
-            (notebook_id, notebook_id),
-        ).fetchone()
-        mention = db.execute(
-            "SELECT COALESCE(mention_seq,-1) AS ms FROM unified_kg_state "
-            "WHERE notebook_id=%s", (notebook_id,),
-        ).fetchone()
-        versions = []
-        for row in (rel, obj, chunk, cluster):
-            versions.append({**dict(row), "ts": iso_timestamp(row["ts"])})
-        return (*versions, mention)
 
     @staticmethod
     def graph_seq_row(db: Any, notebook_id: str) -> "tuple[int, int, int, int]":

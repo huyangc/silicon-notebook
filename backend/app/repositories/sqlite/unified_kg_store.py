@@ -564,15 +564,6 @@ class UnifiedKgStore:
         return names, relations
 
     @staticmethod
-    def cluster_version_row(db: sqlite3.Connection, notebook_id: str):
-        return db.execute(
-            "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
-            "FROM concept_clusters WHERE notebook_id = ? "
-            f"AND generation = {_PUBLISHED_CLUSTER_GEN}",
-            (notebook_id, notebook_id),
-        ).fetchone()
-
-    @staticmethod
     def cluster_member_rows(db: sqlite3.Connection, notebook_id: str):
         return db.execute(
             "SELECT canonical_id, member_object_id FROM concept_clusters "
@@ -581,33 +572,6 @@ class UnifiedKgStore:
             "ORDER BY canonical_id, member_object_id",
             (notebook_id, notebook_id),
         ).fetchall()
-
-    @staticmethod
-    def ppr_version_rows(db: sqlite3.Connection, notebook_id: str):
-        rel = db.execute(
-            "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-            "FROM knowledge_relations WHERE notebook_id=? "
-            "AND review_status!='rejected'", (notebook_id,),
-        ).fetchone()
-        obj = db.execute(
-            "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at),'') AS ts "
-            "FROM knowledge_objects WHERE notebook_id=?", (notebook_id,),
-        ).fetchone()
-        chunk = db.execute(
-            "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-            "FROM chunks WHERE notebook_id=?", (notebook_id,),
-        ).fetchone()
-        cluster = db.execute(
-            "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-            "FROM concept_clusters WHERE notebook_id=? "
-            f"AND generation = {_PUBLISHED_CLUSTER_GEN}",
-            (notebook_id, notebook_id),
-        ).fetchone()
-        mention = db.execute(
-            "SELECT COALESCE(mention_seq,-1) AS ms FROM unified_kg_state "
-            "WHERE notebook_id=?", (notebook_id,),
-        ).fetchone()
-        return rel, obj, chunk, cluster, mention
 
     @staticmethod
     def graph_seq_row(db: sqlite3.Connection, notebook_id: str) -> "tuple[int, int, int, int]":
