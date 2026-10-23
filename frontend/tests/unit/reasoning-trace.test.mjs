@@ -737,7 +737,7 @@ test("gap_consult 有自己的短标签,且与 memory 不同名,detail 说清带
 });
 
 test("外部补充步骤使用独立标签", () => {
-  assert.equal(getTraceStepLabel({ step_type: "external_evidence", summary: "", detail: {} }), "外部补充");
+  assert.equal(getTraceStepLabel({ step_type: "external_evidence", summary: "", detail: {} }), "外部");
 });
 
 // 分支顺序守卫(同 profile/experience/consult_memory 的理由):gap_consult 必须
@@ -840,8 +840,8 @@ test("labels the closing rerank step apart from every other step (T-BF6)", () =>
     summary: "重排候选",
     detail: { queries: 3, reused: 2, researched: 1, researched_ms: 190000, top_n: 20 },
   };
-  assert.equal(getTraceStepLabel(step), "收尾重排");
-  assert.equal(getReasoningTraceSummary([step], true).latestLabel, "收尾重排");
+  assert.equal(getTraceStepLabel(step), "重排");
+  assert.equal(getReasoningTraceSummary([step], true).latestLabel, "重排");
   assert.notEqual(TRACE_STEP_LABELS.rerank, TRACE_STEP_LABELS.answer);
   assert.notEqual(TRACE_STEP_LABELS.rerank, TRACE_STEP_LABELS.synthesis);
   assert.notEqual(TRACE_STEP_LABELS.rerank, TRACE_STEP_LABELS.retrieve);
@@ -868,8 +868,8 @@ test("plugin_action 步有自己的标签，且与 plugin / gap_consult 分得�
       result_keys: ["ext:acme.ieee:1", "ext:acme.ieee:2"],
     },
   };
-  assert.equal(getTraceStepLabel(step), "扩展检索");
-  assert.equal(getReasoningTraceSummary([step], true).latestLabel, "扩展检索");
+  assert.equal(getTraceStepLabel(step), "扩检");
+  assert.equal(getReasoningTraceSummary([step], true).latestLabel, "扩检");
   assert.notEqual(TRACE_STEP_LABELS.plugin_action, TRACE_STEP_LABELS.plugin);
   assert.notEqual(TRACE_STEP_LABELS.plugin_action, TRACE_STEP_LABELS.gap_consult);
   assert.notEqual(TRACE_STEP_LABELS.plugin_action, TRACE_STEP_LABELS.retrieve);
@@ -1238,4 +1238,10 @@ test("the linked-report step (就此追问) has its own label and a short detail
 
   const others = Object.entries(TRACE_STEP_LABELS).filter(([key]) => key !== "report");
   assert.ok(others.every(([, text]) => text !== "报告"));
+});
+
+test("每个轨迹徽章标签都不超过两个字(徽章列固定 48px)", () => {
+  for (const [key, value] of Object.entries(TRACE_STEP_LABELS)) {
+    assert.ok([...value].length <= 2, `${key}: 「${value}」 overflows the badge`);
+  }
 });
