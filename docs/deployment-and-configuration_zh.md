@@ -1083,6 +1083,16 @@ NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS  # 深拷贝将物化的「所有表」总行数
                                  # 不至于把拷贝 OOM;超过即改为只读分享（默认 200000）
 ```
 
+笔记本导入（`scripts/cli.sh notebook import`，见 docs/operations_zh.md「笔记本单文件导入」）写在一条
+隐藏哨兵行后面，`updated_at` 是它的心跳；失败的导入若超过上面两个行数上限，改由分批删除作业删除，而不是
+一个事务删完：
+
+```text
+NOTEBOOK_IMPORT_STALE_SECONDS    # 心跳早于该秒数的导入哨兵在服务启动时被收割(交给删除作业):
+                                 # 导入进程已死。只收笔记本导入(sync_origin 为空),从不碰同步
+                                 # 镜像（默认 3600；60..604800）
+```
+
 **欢迎页候选问题：**
 
 笔记本自动标题／描述也使用 `notebook_metadata` 调用类型。

@@ -2233,8 +2233,8 @@ or whose log is still small, can upgrade directly without this dance.
 
 `scripts/cli.sh notebook export` writes one notebook to one `.snbk` file (a zip archive,
 format `silicon-notebook.notebook-archive` v1, defined in `app.domain.notebook_archive`);
-`scripts/cli.sh notebook inspect` verifies such a file. Importing an archive into another
-deployment is not part of this build yet.
+`scripts/cli.sh notebook inspect` verifies such a file;
+[`scripts/cli.sh notebook import`](#single-file-notebook-import) imports it into another deployment.
 
 How it differs from [cross-environment sync](#cross-environment-notebook-sync): sync moves a
 directory package between two environments that stay linked (source ids kept, usernames
@@ -2243,8 +2243,8 @@ notebook carrying exactly what "copy notebook" copies: materials and their origi
 attachments, elements, chunks, vectors, the knowledge graph and Knowhow tables. It never
 carries Memory or anything derived from one (Memory evidence inside kept rows is stripped),
 interaction data (conversations, answers, reports, feedback), members, grants, the share
-link or mounted reference libraries; the planned import creates an independent new notebook
-with new ids, owned by the importer.
+link or mounted reference libraries; an import creates an independent new notebook with new
+ids, owned by the importer.
 
 ```bash
 bash scripts/cli.sh notebook export --notebook nb-xxx --out ./nb-xxx.snbk
@@ -2306,6 +2306,99 @@ bash scripts/cli.sh notebook inspect ./exports/nb-a.snbk [--json]
 Exit status: 0 success; 1 the archive is invalid or the export failed; 2 a usage error, an
 unknown notebook or an existing output; 3 the database is not at this build's schema.
 
+## Single-file notebook import
+
+`scripts/cli.sh notebook import` turns a `.snbk` archive into a **new, independent notebook**
+of this deployment: fresh ids, owned by `--owner`, editable like any notebook of theirs, with no
+link back to the exported one. The same file can be imported any number of times; every import
+is another notebook. How it differs from [cross-environment sync](#cross-environment-notebook-sync):
+sync keeps source ids, maps usernames and makes the target a read-only mirror
+(`notebooks.sync_origin`) that the next package refreshes; an import never sets `sync_origin`,
+never reuses an id and is never refreshed. Memory, members, grants, the share link and mount
+edges are not in the file and the file can name none of them (the mount edges the export left
+out are only counted).
+
+```bash
+bash scripts/cli.sh notebook import ./nb-a.snbk --owner alice --dry-run           # preflight + rehearsal, writes nothing
+bash scripts/cli.sh notebook import ./nb-a.snbk --owner alice --confirm-service-stopped --json
+bash scripts/cli.sh notebook import ./a.snbk ./b.snbk --owner alice --confirm-service-stopped
+bash scripts/cli.sh notebook import ./nb-a.snbk --owner alice --name "Imported copy" \
+  --reembed skip --rebuild-scale skip --confirm-service-stopped
+```
+
+- **Writes through the maintenance repository.** Schema guest (no migration, no seed; exit 3
+  when the database is not at this build's schema) under the database-wide operator lock. On
+  PostgreSQL it requires `--confirm-service-stopped`, the same rule as the batch import tool:
+  stop the API and every background writer first. `--dry-run` only reads (no lock, no
+  confirmation).
+- **Preflight before any write.** The zip directory and entry names (no absolute path, `..`,
+  backslash, duplicate, link, encrypted entry or compression bomb), the manifest and its format
+  version (a newer version is refused), every table's and file's size, sha256 and row count,
+  exactly one notebook row, every column name a plain identifier this database has (a column
+  this database lacks is refused: the exporting deployment runs a newer build, upgrade this one
+  first), and the carried file paths (two that collide on a case-insensitive or
+  Unicode-normalising file system are refused).
+- **Strict references.** A reference column naming a row the file does not carry refuses the
+  whole file ("文件内容不完整") -- the export clears every pointer leaving its closure, so this
+  only happens to an incomplete or edited file. An id inside stored JSON (payload, evidence,
+  element ids, an element's attachment id) that names nothing is cleared and counted; an
+  attachment of a source the file lacks is dropped with its file and counted. The columns that
+  name a person who owns or edited something become the importer: the notebook's owner, the
+  creators of object schemas, Knowhow tables and attachments, and the last editor of Knowhow code
+  (`updated_by`); `sources.uploaded_by` and `sources.agent_profile_id` are cleared (an empty
+  uploader reads as the notebook owner, as for a copy). A source still being parsed or extracted
+  when it was exported arrives failed, to be parsed again. A JSON column holding anything but
+  text (the export writes text or NULL), JSON nested deeper than 64 levels, or text that is not
+  JSON at all refuses the file.
+- **Vectors.** Per embedding workload the manifest's `(model, dim)` is compared with this
+  deployment's binding and `EMBED_DIM`: equal, the vectors land byte for byte (each checked to
+  be `4 x dim` bytes); otherwise they are dropped (an archive exported with `--no-vectors`
+  counts as "all different"). Document and Knowhow chunk vectors are judged separately
+  (`chunk_embedding` / `knowhow_embedding`). Question vectors (`chunk_questions`, NOT NULL)
+  that cannot be kept are embedded again with `chunk_embedding` before publishing; when that
+  model is unbound or fails, those questions are dropped and their chunks are marked for the
+  question index again.
+- **Object types: the source's effective definition wins where this deployment has none.** A
+  deployment-wide custom type the graph uses and this deployment lacks is created as the
+  notebook's own type, replacing a local `proposed` row of that type (reported as
+  `proposals_superseded`: the proposal was review-only, the source kept using the
+  deployment-wide definition). A type this deployment already defines keeps this deployment's
+  definition; an active or disabled local row shadows the deployment-wide one and is kept; a
+  deployment-wide type that was itself only `proposed` was never in effect and is not created
+  (`skipped_proposed`). A manifest listing one type twice refuses the file.
+- **Concept clusters keep their seed space.** The archive records the seed space its clusters
+  were built in (`kg.concept_seed_version`) and the import records it on the new notebook, as a
+  copy does, so new material clusters with the carried concepts. An archive from before this key
+  existed holds clusters of an unknown space: the notebook starts marked for a rebuild and the
+  report says `seed_space_unknown`.
+- **After publishing, synchronously:** every Knowhow table is projected again, then the
+  re-embedding legs the report names run (`notebook-reembed`; a notebook with a Knowhow table
+  always gets the relation leg, since the projection rewrites its edges); `--reembed skip`
+  leaves them to be run later (the report lists them). Then, with `--rebuild-scale auto` and
+  only when re-embedding succeeded or was not needed, a full scale-index build on PostgreSQL
+  (`scale_build_cli.run_build`, after the ledger check, as `sync import` does); an index over
+  missing vectors would be incomplete, so a skipped or failed re-embedding reports the build as
+  `skipped:reembed_not_done`. SQLite reports it as skipped.
+- **Failure leaves nothing.** Until it publishes, the import writes behind a hidden
+  `status='importing'` row with an empty `sync_origin`, whose `updated_at` is a heartbeat. That
+  row is committed before the first file is written, and the heartbeat moves (at most every
+  30 s) on every page read, every file written, between question-embedding batches and around
+  validation, so only a single step longer than `NOTEBOOK_IMPORT_STALE_SECONDS` could let the
+  sweep below reap a live import -- which then stops with an error and leaves nothing. Any
+  failure removes the rows and both directories it created: in one transaction when the
+  notebook is within the copy limits (`NOTEBOOK_COPY_MAX_ROWS` / `NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS`),
+  through the batched delete job otherwise. A process killed mid-import leaves its hidden row;
+  at the next server start every such row whose heartbeat is older than
+  `NOTEBOOK_IMPORT_STALE_SECONDS` (default 3600) is handed to the delete job. A sync mirror being
+  imported (`status='importing'` with a `sync_origin`) is never touched.
+
+Exit status: 0 every file imported (a re-embedding or scale problem is reported, the import is
+done); 1 a file was refused or its import failed for any reason (nothing of it remains; the
+error names only the exception class when it is not a refusal); 2 a usage error, an
+unknown owner or a missing `--confirm-service-stopped`; 3 the database is not at this build's
+schema. Several files import in order and stop at the first failure; `--json` prints
+`{"imported": [...], "failed": [...]}` in every case, without connection details.
+
 ## Filling a notebook's missing vectors (`notebook-reembed`)
 
 `app.services.notebook_reembed` fills in whatever vectors one notebook is missing, in four
@@ -2317,9 +2410,9 @@ has no vector, so a run over a complete notebook makes no model call. Two entrie
   source's chunk lock, one H4/H5 refresh at the end.
 - **The `notebook-reembed` background job** (heavy maintenance pool, so bounded by
   `BACKGROUND_MAINTENANCE_CONCURRENCY`; the diagnostics name is `notebook-reembed`) runs any
-  set of legs. It has no button of its own yet: the planned notebook import submits it after
+  set of legs. It has no button of its own: the notebook import runs its legs after
   publishing a notebook whose archived vectors did not match this deployment's embedding
-  models.
+  models (the CLI synchronously, `.run`; a web import submits it, `.submit`).
 
 What to expect:
 
