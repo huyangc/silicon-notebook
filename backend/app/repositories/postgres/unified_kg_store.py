@@ -2009,17 +2009,22 @@ class UnifiedKgStore:
     def community_member_peers(
         self, notebook_id: str, community_id: str, exclude_canonical_id: str, limit: int,
         *, allowed_source_ids: Sequence[str] | None = None,
+        with_canonical_id: bool = False,
     ) -> List[dict]:
         """``allowed_source_ids`` 缺省 → SQL 与来源闸落地之前逐字相同。
 
         传进来时是本 run 给**该库**冻结的来源天花板:只留还有天花板内来源
         支撑的成员。空清单是显式 deny,不是「不限」(见 ``source_scope
         .source_ceiling_for`` 的 None / frozenset() 之分)。
+
+        ``with_canonical_id``:SQLite 孪生同注记(每行多带 ``canonical_id``,
+        缺省 → 语句逐字不变)。
         """
+        columns = "canonical_id, " if with_canonical_id else ""
         with self.database.connect() as db:
             if allowed_source_ids is None:
                 return db.execute(
-                    f"SELECT canonical_name, centrality FROM community_members "
+                    f"SELECT {columns}canonical_name, centrality FROM community_members "
                     f"WHERE notebook_id=%s AND community_id=%s AND canonical_id!=%s "
                     f"AND generation = {_PUBLISHED_COMMUNITY_GEN} "
                     f"ORDER BY centrality DESC, canonical_id COLLATE \"C\" ASC LIMIT %s",
@@ -2036,7 +2041,7 @@ class UnifiedKgStore:
             )
             return execute_ids(
                 db,
-                f"SELECT canonical_name, centrality FROM community_members "
+                f"SELECT {columns}canonical_name, centrality FROM community_members "
                 f"WHERE notebook_id=%s AND community_id=%s AND canonical_id!=%s "
                 f"AND generation = {_PUBLISHED_COMMUNITY_GEN} AND {gate} "
                 f"ORDER BY centrality DESC, canonical_id COLLATE \"C\" ASC LIMIT %s",
@@ -2047,12 +2052,16 @@ class UnifiedKgStore:
     def comention_peers(
         self, notebook_id: str, canonical_id: str, min_bridge: int, limit: int,
         *, allowed_source_ids: Sequence[str] | None = None,
-    ) -> List[Tuple[str, int]]:
+        with_canonical_id: bool = False,
+    ) -> List[tuple]:
         """concept_comentions 两侧按 bridge_claims 降序取对端 canonical_name。
 
         ``allowed_source_ids`` 同 ``community_member_peers``:缺省 → 结果与来源闸
         落地之前逐值相同;传进来时闸挂两处——**取名字**的那条查询(出口)与
         共提行的 ``LIMIT`` **之前**(否则无支撑的高位对端占满名额)。
+
+        ``with_canonical_id``:SQLite 孪生同注记(返回
+        ``(canonical_id, canonical_name, bridge_claims)``,SQL 一字不变)。
 
         名字是**一条**按 canonical_id 集合的批量读(SQLite 孪生同注记):逐行版本
         本来就是 N+1,加闸之后每一行还要各背一遍整库天花板的清单谓词。
@@ -2115,10 +2124,58 @@ class UnifiedKgStore:
                     (notebook_id, wanted, notebook_id, *gate_params),
                     ceiling).fetchall()
             }
+            if with_canonical_id:
+                return [
+                    (other, names[other], claims)
+                    for other, claims in ordered if names.get(other)
+                ]
             return [
                 (names[other], claims)
                 for other, claims in ordered if names.get(other)
             ]
+
+    def comparison_peer_members(
+        self, notebook_id: str, canonical_ids: Sequence[str], *, limit: int,
+        after: str = "",
+    ) -> List[dict]:
+        """对比兄弟名 R3 的成员读(SQLite 孪生同注记):每个列出的簇在
+        member-id 序里的前 ``limit`` 个活成员,**一条**语句;行带
+        ``canonical_id``、``member_object_id``、成员自己的 ``source_id`` 与
+        ``member_name``(``payload->>'name'``)。
+
+        形状同 ``KnowledgeStore.concept_cluster_detail_rows(canonical_ids=...)``:
+        每个簇 id 一次 LATERAL 有界 seek(``(notebook_id, canonical_id,
+        member_object_id)`` 索引),枢纽簇也只读 ``limit`` 行;排序与 keyset 比较
+        都带 ``COLLATE "C"``,与 SQLite 的字节序一致。簇 id 清单经 ``id_binding``
+        绑成一个参数、不走预备语句(``execute_ids``)。``after`` 只在单簇往后
+        翻页时传;空清单不发语句。
+        """
+        values = sorted({str(value) for value in canonical_ids if value})
+        if not values or limit <= 0:
+            return []
+        peers = bind_ids(values)
+        seek, seek_params = (
+            ('AND cc.member_object_id COLLATE "C" > %s '
+             'AND ko.id COLLATE "C" > %s ', (after, after))
+            if after else ("", ())
+        )
+        with self.database.connect() as db:
+            return execute_ids(
+                db,
+                "SELECT c.cid AS canonical_id, m.member_object_id, m.source_id, "
+                "m.member_name "
+                f"FROM unnest({peers.sql}) AS c(cid) CROSS JOIN LATERAL ("
+                "SELECT cc.member_object_id, ko.source_id, "
+                "ko.payload->>'name' AS member_name "
+                "FROM concept_clusters cc "
+                "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
+                "WHERE cc.notebook_id=%s AND cc.canonical_id=c.cid "
+                "AND ko.status!='deprecated' "
+                f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN} {seek}"
+                'ORDER BY cc.member_object_id COLLATE "C" LIMIT %s) m '
+                'ORDER BY c.cid COLLATE "C", m.member_object_id COLLATE "C"',
+                (peers.param, notebook_id, notebook_id, *seek_params, int(limit)),
+            ).fetchall()
 
     def source_index_backfilled(self, notebook_id: str) -> bool:
         """SQLite 孪生同注记:给服务层的可观测入口,只在天花板真的在绑时被调。"""
