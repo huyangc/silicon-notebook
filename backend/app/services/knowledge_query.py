@@ -16,7 +16,7 @@ from app.models.knowledge import (
 from app.services.retrieval import RetrievedKnowledge
 from app.services.extraction_profiles import OBJECT_SCHEMAS, OBJECT_TYPE_LABELS, ObjectSchema
 from app.services.knowledge_contracts import CONCEPT_DETAIL_PAGE_MAX, KnowledgeGraphTooLargeError
-from app.services.kg_viewer_scope import filtering, store_viewer_kwargs
+from app.services.kg_viewer_scope import filtering, member_name, store_viewer_kwargs
 from app.services.model_work import ModelProviderError
 
 
@@ -213,8 +213,8 @@ class KnowledgeQueryService:
                 row = firsts[hit["object_id"]]
                 if row is None:
                     continue
-                hit = {**hit, "object_id": str(row["member_object_id"]), "name": str(
-                    json.loads(row["payload"] or "{}").get("name", "") or "")}
+                hit = {**hit, "object_id": str(row["member_object_id"]),
+                       "name": member_name(row)}
             kept.append(hit)
         return kept
 
@@ -561,10 +561,10 @@ class KnowledgeQueryService:
                 )
         if scope is not None and scope.cluster_needs_check(canonical_id):
             # A cluster that may hold a hidden member is answered by its
-            # first visible member, never by a canonical id that may be
-            # minted from a hidden member's name -- whatever the isolation
-            # marker (``KgViewerScope.member_answer_ids``); its name is that
-            # member's already (``_viewer_cluster_page``).
+            # first visible member's object id (``_first_visible_answer``),
+            # never by a canonical id that may be minted from a hidden
+            # member's name -- whatever the isolation marker; its name is
+            # that member's already (``_viewer_cluster_page``).
             answer = self._first_visible_answer(scope, detail, canonical_id, after)
             if answer is not None:
                 detail = {**detail, "canonical_id": answer[0]}
@@ -610,8 +610,7 @@ class KnowledgeQueryService:
         row = scope.cluster_first_visible([canonical_id]).get(canonical_id)
         if row is None:
             return None
-        return (str(row["member_object_id"]),
-                str(json.loads(row["payload"] or "{}").get("name", "") or ""))
+        return str(row["member_object_id"]), member_name(row)
 
     def _resolve_concept_member(
         self, notebook_id: str, object_id: str, scope: Any,

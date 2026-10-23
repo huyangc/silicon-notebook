@@ -147,11 +147,12 @@ def test_cluster_labels_never_come_from_a_hidden_member(scenario, repo, certifie
               "payload": {"name": "Engram"}}]
     edges = [{"source_object_id": canonical, "target_object_id": s.ids.engram_canonical,
               "edge_type": "x"}]
-    kept, kept_edges = as_user(
-        s.b, scope.filter_neighbourhood, nodes, edges, (s.ids.engram_canonical,))
+    kept, kept_edges, answers = as_user(
+        s.b, scope.answer_neighbourhood, nodes, edges, (s.ids.engram_canonical,))
     assert [(n["id"], n["payload"]["name"]) for n in kept] == [
         (canonical, "Gadget"), (s.ids.engram_canonical, "Engram")]
     assert len(kept_edges) == 1
+    assert answers[canonical] == visible
     owner = as_user(s.a, repo.concept_detail, s.nb, canonical)
     assert owner["canonical_name"] == "A-PRIVATE Gadget"
 
@@ -322,7 +323,7 @@ def test_a_raw_object_is_judged_on_its_own_source_whatever_its_status(scenario, 
     hidden = as_user(s.b, repo.kg_neighbors, s.nb, s.ids.secret)
     assert hidden["nodes"] == [] and hidden["edges"] == []
     scope = as_user(s.b, reader_of(repo).for_notebook, s.nb)
-    kept, edges = scope.filter_neighbourhood(
+    kept, edges, _answers = scope.answer_neighbourhood(
         [{"id": s.ids.secret, "object_type": "concept",
           "payload": {"name": "SecretProject"}},
          {"id": s.ids.engram_canonical, "object_type": "concept",
@@ -485,8 +486,8 @@ def test_a_suspect_hub_no_longer_sizes_every_clusters_member_window(scenario, re
     hydrated = count_hydrated_member_rows(reader.knowledge, monkeypatch)
     clusters = [HUB, *ORDINARY, DEEP]
     nodes, edges = neighbour_nodes(s.ids.engram_canonical, clusters)
-    kept, _edges = as_user(s.b, scope.filter_neighbourhood, nodes, edges,
-                           (s.ids.engram_canonical,))
+    kept, _edges, _answers = as_user(s.b, scope.answer_neighbourhood, nodes, edges,
+                                     (s.ids.engram_canonical,))
     assert [n["id"] for n in kept] == clusters
     # One batched read of ``window`` rows per listed cluster (plus the focus
     # Engram cluster's two members: it is checked too), then the one widened
@@ -505,8 +506,8 @@ def test_a_cluster_is_labelled_by_a_visible_member_beyond_the_first_window(
     certify(repo, s.nb, certified)
     scope = as_user(s.b, reader_of(repo).for_notebook, s.nb)
     nodes, edges = neighbour_nodes(s.ids.engram_canonical, [HUB, DEEP])
-    kept, kept_edges = as_user(s.b, scope.filter_neighbourhood, nodes, edges,
-                               (s.ids.engram_canonical,))
+    kept, kept_edges, _answers = as_user(s.b, scope.answer_neighbourhood, nodes, edges,
+                                         (s.ids.engram_canonical,))
     labels = {n["id"]: n["payload"]["name"] for n in kept}
     assert labels[DEEP] == f"{DEEP} v12" and f"{DEEP} v12" in names.values()
     assert labels[HUB] == f"{HUB} v0"
@@ -520,12 +521,12 @@ def test_a_cluster_with_no_visible_member_anywhere_is_hidden(scenario, repo, cer
     certify(repo, s.nb, certified)
     scope = as_user(s.b, reader_of(repo).for_notebook, s.nb)
     nodes, edges = neighbour_nodes(s.ids.engram_canonical, [DARK, ORDINARY[0]])
-    kept, kept_edges = as_user(s.b, scope.filter_neighbourhood, nodes, edges,
-                               (s.ids.engram_canonical,))
+    kept, kept_edges, answers = as_user(s.b, scope.answer_neighbourhood, nodes, edges,
+                                        (s.ids.engram_canonical,))
     assert [n["id"] for n in kept] == [ORDINARY[0]]
     assert [e["target_object_id"] for e in kept_edges] == [ORDINARY[0]]
-    assert "A-PRIVATE" not in repr(kept)
-    assert as_user(s.b, scope.filter_neighbourhood, *neighbour_nodes(DARK, []), (DARK,)) is None
+    assert "A-PRIVATE" not in repr(kept) and DARK not in answers
+    assert as_user(s.b, scope.answer_neighbourhood, *neighbour_nodes(DARK, []), (DARK,)) is None
 
 
 # ------------------------------------- concept detail pages (codex #806 r4)

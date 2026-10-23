@@ -440,13 +440,15 @@ def test_neighbourhood_filter_relabels_partly_hidden_clusters(scenario, repo):
         {"source_object_id": s.ids.definer_ma,
          "target_object_id": s.ids.engram_canonical, "edge_type": "z"},
     ]
-    kept_nodes, kept_edges = as_user(
-        s.b, scope.filter_neighbourhood, nodes, edges, (s.ids.engram_canonical,))
+    kept_nodes, kept_edges, answers = as_user(
+        s.b, scope.answer_neighbourhood, nodes, edges, (s.ids.engram_canonical,))
     assert [(n["id"], n["payload"]["name"]) for n in kept_nodes] == [
         (s.ids.engram_canonical, "Engram"), (s.ids.definer_s, "visible definer"),
     ]
     assert [e["edge_type"] for e in kept_edges] == ["y"]
-    assert as_user(s.b, scope.filter_neighbourhood, nodes, edges, (s.ids.secret,)) is None
+    # The relabelled cluster is answered by the member its label came from.
+    assert answers == {s.ids.engram_canonical: s.ids.engram_s}
+    assert as_user(s.b, scope.answer_neighbourhood, nodes, edges, (s.ids.secret,)) is None
 
 
 # --------------------------------------------------------------- neighbours

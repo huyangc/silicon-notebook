@@ -5025,7 +5025,18 @@ class KnowledgeLifecycleService:
         object id, never by a canonical id that may be minted from a hidden
         member's name (``KgViewerScope.member_answer_ids``), whatever the
         isolation marker; a notebook's own readers meet such a cluster only
-        before its isolated rebuild."""
+        before its isolated rebuild.
+
+        Registered cost of that rule on the live shared graph (``shared``,
+        small notebooks only -- a large one never takes this path): deciding
+        which clusters may hold a hidden member is the scope's fold, i.e. one
+        ``owned_hidden`` read (the live objects owned by unreadable sources;
+        shared with ``drop_hidden_graph`` when the shared graph was not
+        cached) plus one ``cluster_fold_rows`` statement per 900 of those
+        objects, paid on every such read since the rule stopped waiting on
+        the isolation marker; a batched first-member read follows only when
+        some returned cluster may hold a hidden member.  The artifact path
+        already paid the same fold through ``answer_neighbourhood``."""
         if scope is None:
             return graph
         nodes, edges = graph["nodes"], graph["edges"]

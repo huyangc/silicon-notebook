@@ -107,11 +107,12 @@ def test_pg_cluster_labels_never_come_from_a_hidden_member(repo, certified):
     assert "A-PRIVATE" not in repr(detail)
     scope = as_user(s.b, _reader(repo).for_notebook, s.nb)
     assert scope.cluster_display_name(canonical, "A-PRIVATE Gadget") == "Gadget"
-    kept, _edges = as_user(
-        s.b, scope.filter_neighbourhood,
+    kept, _edges, answers = as_user(
+        s.b, scope.answer_neighbourhood,
         [{"id": canonical, "object_type": "concept",
           "payload": {"name": "A-PRIVATE baked Gadget"}}], [], (s.ids.engram_canonical,))
     assert [n["payload"]["name"] for n in kept] == ["Gadget"]
+    assert answers[canonical] == visible
     assert as_user(s.a, repo.concept_detail, s.nb, canonical)["canonical_name"] == (
         "A-PRIVATE Gadget")
 
@@ -303,8 +304,8 @@ def test_pg_a_suspect_hub_no_longer_sizes_every_clusters_member_window(repo, mon
     hydrated = count_hydrated_member_rows(reader.knowledge, monkeypatch)
     clusters = [HUB, *ORDINARY, DEEP]
     nodes, edges = neighbour_nodes(s.ids.engram_canonical, clusters)
-    kept, _edges = as_user(s.b, scope.filter_neighbourhood, nodes, edges,
-                           (s.ids.engram_canonical,))
+    kept, _edges, _answers = as_user(s.b, scope.answer_neighbourhood, nodes, edges,
+                                     (s.ids.engram_canonical,))
     assert [n["id"] for n in kept] == clusters
     assert hydrated == [len(clusters) * window + 2, len(MEMBER_SPECS[DEEP]) - window]
     assert sum(hydrated) <= (len(clusters) + 1) * window + len(MEMBER_SPECS[DEEP])
@@ -319,8 +320,8 @@ def test_pg_a_cluster_is_labelled_by_a_visible_member_beyond_the_first_window(
     _certify(repo, s.nb, certified)
     scope = as_user(s.b, _reader(repo).for_notebook, s.nb)
     nodes, edges = neighbour_nodes(s.ids.engram_canonical, [HUB, DEEP])
-    kept, kept_edges = as_user(s.b, scope.filter_neighbourhood, nodes, edges,
-                               (s.ids.engram_canonical,))
+    kept, kept_edges, _answers = as_user(s.b, scope.answer_neighbourhood, nodes, edges,
+                                         (s.ids.engram_canonical,))
     labels = {n["id"]: n["payload"]["name"] for n in kept}
     assert labels == {HUB: f"{HUB} v0", DEEP: f"{DEEP} v12"}
     assert len(kept_edges) == 2 and "A-PRIVATE" not in repr(kept)
@@ -333,12 +334,12 @@ def test_pg_a_cluster_with_no_visible_member_anywhere_is_hidden(repo, certified)
     _certify(repo, s.nb, certified)
     scope = as_user(s.b, _reader(repo).for_notebook, s.nb)
     nodes, edges = neighbour_nodes(s.ids.engram_canonical, [DARK, ORDINARY[0]])
-    kept, kept_edges = as_user(s.b, scope.filter_neighbourhood, nodes, edges,
-                               (s.ids.engram_canonical,))
+    kept, kept_edges, answers = as_user(s.b, scope.answer_neighbourhood, nodes, edges,
+                                        (s.ids.engram_canonical,))
     assert [n["id"] for n in kept] == [ORDINARY[0]]
     assert [e["target_object_id"] for e in kept_edges] == [ORDINARY[0]]
-    assert "A-PRIVATE" not in repr(kept)
-    assert as_user(s.b, scope.filter_neighbourhood, *neighbour_nodes(DARK, []), (DARK,)) is None
+    assert "A-PRIVATE" not in repr(kept) and DARK not in answers
+    assert as_user(s.b, scope.answer_neighbourhood, *neighbour_nodes(DARK, []), (DARK,)) is None
 
 
 # ------------------------------------- concept detail pages (codex #806 r4)

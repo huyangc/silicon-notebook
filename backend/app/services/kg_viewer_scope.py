@@ -630,7 +630,7 @@ class KgViewerScope:
         row = self.visible_member(canonical_id)
         if row is None:
             return None
-        return _member_name(row)
+        return member_name(row)
 
     def cluster_labels(self, canonical_ids: Sequence[str]) -> Dict[str, Optional[str]]:
         """``cluster_display_name`` for many clusters at once: for every id
@@ -638,37 +638,40 @@ class KgViewerScope:
         that member's name, or ``None`` when it has no visible live member
         (the cluster does not exist for this viewer).  Other ids are absent
         from the answer (they keep their own name).  ONE batched member read
-        for all of them (``_first_visible_members``), whatever their number --
-        pending-merge names and neighbour hydration."""
+        for all of them (``cluster_first_visible``), whatever their number.
+        Read by the pending-merge side names
+        (``KnowledgeGovernanceService``); neighbour hydration takes names and
+        ids from ``answer_neighbourhood`` instead."""
         return {
-            cid: None if row is None else _member_name(row)
+            cid: None if row is None else member_name(row)
             for cid, row in self.cluster_first_visible(canonical_ids).items()
         }
 
     def cluster_first_visible(
         self, canonical_ids: Sequence[str],
     ) -> Dict[str, Optional[Dict[str, Any]]]:
-        """The member rows behind ``cluster_labels`` and ``member_answer_ids``:
-        for every id answered by its first visible member
+        """For every id answered by its first visible member
         (``cluster_answered_by_member``), that member's row
-        (``member_object_id``, ``payload``) or ``None``; the same one batched
-        read."""
+        (``member_object_id``, ``payload``) or ``None``: one batched read
+        (``_first_visible_members``), each cluster read once per scope.  The
+        rows every member-answered id and label comes from: KG search's folded
+        hits, ``answer_neighbourhood``, ``cluster_labels``,
+        ``member_answer_ids`` and a later concept-detail page."""
         checked = list(dict.fromkeys(
             str(cid) for cid in canonical_ids
             if self.cluster_answered_by_member(str(cid))))
         return self._first_visible_members(checked)
 
     def member_answer_ids(self, ids: Iterable[Any]) -> Dict[str, str]:
-        """A cluster that may hold a hidden member can carry a canonical id
-        minted from that member's name (``K-<seed>``), whether or not the
-        notebook still awaits its isolated rebuild (the E4-5 marker): the
-        viewer is answered by the cluster's first VISIBLE member's object id
-        instead -- ``{cluster id: member object id}`` for every id among
-        ``ids`` answered by its first visible member
+        """``{cluster id: first visible member's object id}`` for every id
+        among ``ids`` answered by its first visible member
         (``cluster_answered_by_member``) that has one (one with none is
-        dropped by the viewer rule anyway).  The same batched member read as
-        ``cluster_first_visible`` -- KG search's folded hits, the graph view,
-        the neighbour view and concept detail all answer by it."""
+        dropped by the viewer rule anyway): a cluster that may hold a hidden
+        member can carry a canonical id minted from that member's name
+        (``K-<seed>``), whatever the isolation marker.  The same batched read
+        as ``cluster_first_visible``.  Read by the graph view's live shared
+        graph only (``KnowledgeLifecycleService._with_viewer_overlay``); the
+        other reads answer from ``cluster_first_visible`` rows directly."""
         return {
             cid: str(row["member_object_id"])
             for cid, row in self.cluster_first_visible(
@@ -736,27 +739,19 @@ class KgViewerScope:
                     "element_id": getattr(item, "element_id", "") or ""}
         return None
 
-    def filter_neighbourhood(
-        self, nodes: List[dict], edges: List[dict], focus_ids: Iterable[str],
-    ) -> Optional[tuple]:
-        """Neighbour hydration under the rule: ``None`` when the focus itself
-        is hidden, else ``(nodes, edges)`` without hidden objects, clusters
-        with no visible live member, and edges touching either; clusters
-        answered by their first visible member are relabelled (their ids are
-        ``answer_neighbourhood``'s third value)."""
-        judged = self.answer_neighbourhood(nodes, edges, focus_ids)
-        return None if judged is None else judged[:2]
-
     def answer_neighbourhood(
         self, nodes: List[dict], edges: List[dict], focus_ids: Iterable[str],
         *, inputs: Iterable[str] = (),
     ) -> Optional[tuple]:
-        """``(nodes, edges, answers)``: ``filter_neighbourhood``'s pair, and
-        ``{cluster id: first visible member's object id}`` for every cluster
-        among them (and the focus ids) that is answered by its first visible
-        member (``cluster_answered_by_member``) -- the label and the id come
-        from the same one batched member read; the caller applies the ids
-        (``answer_graph_by``) after cutting the response.  ``None`` when a
+        """A neighbourhood (or a graph page) under the rule:
+        ``(nodes, edges, answers)`` -- the nodes and edges without hidden
+        objects, clusters with no visible live member, and edges touching
+        either, every cluster answered by its first visible member
+        (``cluster_answered_by_member``) relabelled with that member's name,
+        and ``answers``, ``{cluster id: that member's object id}`` for those
+        clusters among the nodes and the focus ids -- the label and the id
+        come from the same one batched member read; the caller applies the
+        ids (``answer_graph_by``) after cutting the response.  ``None`` when a
         focus is hidden, and -- for a scope that ``answers_by_member`` -- when
         an id in ``inputs`` (the ids the reader asked with) is no raw object:
         a cluster id given as input answers like an unknown one.
@@ -781,7 +776,7 @@ class KgViewerScope:
             if row is None:
                 hidden_clusters.add(node_id)
             else:
-                labels[node_id] = _member_name(row)
+                labels[node_id] = member_name(row)
                 answers[node_id] = str(row["member_object_id"])
         gone = hidden_raw | hidden_clusters
         if any(f in gone for f in [*focus_ids, *inputs]):
@@ -849,9 +844,11 @@ def answer_graph_by(
     )
 
 
-def _member_name(row: Any) -> str:
+def member_name(row: Any) -> str:
     """A cluster member row's name (the text-JSON payload of
-    ``concept_cluster_detail_rows``, the shape concept detail decodes)."""
+    ``concept_cluster_detail_rows``, the shape concept detail decodes) -- the
+    one decoding of a member-answered cluster's name, for this module and
+    ``KnowledgeQueryService``."""
     return str(json.loads(row["payload"] or "{}").get("name", "") or "")
 
 
