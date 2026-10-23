@@ -32,10 +32,11 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   // browse_sections / read_section = 章节导航两个 reflect 动作(章节导航检索 PR-2):
   // 先看一篇文档的章节目录,再按章节标签读取那一节的原文。⚠ 不用"取样"(read_document
   // 占了:整篇有界取样)也不用"段落"/"原文"(search_chunks/fallback 占了);
-  // 「章节目录」说的是只列标题、不读正文,「按章节读取」说的是读指定一节的原文,
-  // 两个词刻意带"章节"以区别于上面三种按整篇/按语义的读取。
-  browse_sections: "章节目录",
-  read_section: "按章节读取",
+  // 「目录」说的是只列标题、不读正文,「章节」说的是读指定一节的原文,以区别于上面三种
+  // 按整篇/按语义的读取。⚠ 徽章列固定宽度,只放得下两个字(其余标签多为两字):
+  // 曾用「章节目录」「按章节读取」,在轨迹里溢出徽章框;完整说法留给 NEXT_ACTION。
+  browse_sections: "目录",
+  read_section: "章节",
   // outline = 大纲便签(update_outline reflect 动作写的那一步);仅 exhaustive 档
   // 且 REASONING_OUTLINE_ENABLED 开启时出现(设计文档 §3.1)。
   outline: "大纲",
