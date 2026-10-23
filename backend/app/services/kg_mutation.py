@@ -52,7 +52,7 @@ mutation_phases.json, replayed by test_kg_mutation_phase_matrix) is unchanged:
                            knowledge_objects for that source) + dirty bump ride
                            ONE transaction (mark_unified_kg_dirty_in_tx, codex
                            #638 R4 P2), opened by the FACADE (`_write`) rather
-                           than the store's self-contained `begin_extraction` —
+                           than a store-side self-contained wrapper (since deleted) —
                            stores don't import this coordinator. A clear with
                            no matching bump left review_queue_memo's seq gate
                            unable to see the delete (the fallback-to-store

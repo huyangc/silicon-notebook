@@ -1076,7 +1076,7 @@ def commit_append(
     # entry instead of one ``row_add`` per row (the old per-row
     # ``add_knowhow_row`` loop this replaced produced exactly that noise, and
     # left the revert engine's ``import_append`` branch of ``_apply_before``
-    # permanently unreachable — see ``KnowhowStore.add_knowhow_rows``).
+    # permanently unreachable — see ``KnowhowStore.append_knowhow_rows``).
     for aligned_row in aligned_rows:
         cells = {}
         for i, value in enumerate(aligned_row):

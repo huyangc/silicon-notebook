@@ -501,17 +501,6 @@ class CanonicalEdgeTable:
         """唯一边(= canonical 对)的条数。"""
         return int(self.src.size)
 
-    def igraph_edges(self) -> "np.ndarray":
-        """igraph `Graph(n=…, edges=…)` 直接吃的 ``(M, 2)`` 整数数组。
-
-        ⚠ 这是一份**拷贝**(`column_stack`),不是视图 —— 但它是**临时值**:按
-        ``_ig.Graph(n=…, edges=table.igraph_edges())`` 这样写,igraph 把它拷进自己的
-        C 结构之后这份就当场回收。第 7 轮评审抓到的 `list(ew.keys())` 别名(那份拷贝
-        与 dict 共享同一批 key 元组、一个活着另一个一个字节都放不掉)在数组模型下**不
-        存在**:column_stack 出来的是独立缓冲区,和 `src`/`dst` 没有任何共享。
-        """
-        return np.column_stack([self.src, self.dst])
-
     def release(self) -> None:
         """把三个数组换成空数组 —— 调用方栈帧上的那个引用因此不再钉住 GB 级缓冲。
 

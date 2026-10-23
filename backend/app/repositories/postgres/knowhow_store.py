@@ -1193,21 +1193,9 @@ class KnowhowStore:
             ).fetchall()
         return {row["value"] for row in rows}
 
-    def table_exists(self, table_id: str) -> bool:
-        """Cheap existence probe (a single ``SELECT 1``, not the full
-        columns/rows/cells hydration ``get_knowhow_table`` does) — for a
-        caller that only needs to know whether the row is still there, e.g.
-        ``KnowhowProjector.project_table``'s pre-terminal-write re-check
-        guarding against a concurrent ``delete_knowhow_table`` (a move or a
-        plain delete) landing mid-pass."""
-        with self.database.connect() as db:
-            return db.execute(
-                "SELECT 1 FROM knowhow_tables WHERE id = %s", (table_id,)
-            ).fetchone() is not None
-
     @staticmethod
     def table_exists_tx(connection: object, table_id: str) -> bool:
-        """Same probe as ``table_exists``, but against a caller-supplied
+        """Cheap existence probe (a single ``SELECT 1``) against a caller-supplied
         connection instead of opening its own ``database.connect()`` —
         mirrors ``KnowledgeStore``'s tx-scoped statics (e.g.
         ``delete_relations_by_source``). For a caller that must check-then-
@@ -1585,14 +1573,6 @@ class KnowhowStore:
                     origin=origin,
                 )
         return {"row_ids": row_ids, "skipped_anchor_values": skipped}
-
-    def add_knowhow_rows(
-        self, table_id: str, rows: list[dict[str, str]],
-        actor: str = "", origin: str = "user",
-    ) -> list[str]:
-        return self.append_knowhow_rows(
-            table_id, rows, actor=actor, origin=origin
-        )
 
     def set_knowhow_row_projection(self, row_id: str, status: str) -> None:
         with self.database.write() as db:

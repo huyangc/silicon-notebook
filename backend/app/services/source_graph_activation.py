@@ -76,20 +76,6 @@ class SourceGraphStatus:
     post_scope_drop_count: int = 0
     degraded_reasons: tuple[str, ...] = ()
 
-    def public_dict(self) -> dict[str, Any]:
-        return {
-            "state": self.state,
-            "reason": self.reason,
-            "selected_source_count": self.selected_source_count,
-            "node_count": self.node_count,
-            "relation_count": self.relation_count,
-            "chunk_count": self.chunk_count,
-            "enrichment_count": self.enrichment_count,
-            "cache_hit": self.cache_hit,
-            "baseline_preserved": self.baseline_preserved,
-            "degraded_reasons": list(self.degraded_reasons),
-        }
-
 
 @dataclass(frozen=True)
 class ActivatedSourceGraphResult:

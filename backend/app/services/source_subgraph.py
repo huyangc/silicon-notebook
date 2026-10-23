@@ -220,12 +220,6 @@ class SourceSubgraphService:
     def _normalize_sources(source_ids: Sequence[str]) -> tuple[str, ...]:
         return tuple(sorted({str(value) for value in source_ids if str(value)}))
 
-    def invalidate_notebook(self, notebook_id: str) -> None:
-        with self._lock:
-            stale = [key for key in self._cache if key[0] == notebook_id]
-            for key in stale:
-                self._cache.pop(key, None)
-
     def snapshot(
         self, notebook_id: str, source_ids: Sequence[str]
     ) -> SourceSubgraphSnapshot:
