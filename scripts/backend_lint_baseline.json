@@ -557,9 +557,6 @@
   "backend/app/repositories/postgres/memory_store.py": {
     "I001": 1
   },
-  "backend/app/repositories/postgres/migrator.py": {
-    "I001": 1
-  },
   "backend/app/repositories/postgres/notebook_delete_job_store.py": {
     "I001": 1
   },
@@ -1378,10 +1375,6 @@
   "backend/tests/postgres/test_memory_sql_contract_pg.py": {
     "I001": 1
   },
-  "backend/tests/postgres/test_migrations.py": {
-    "B017": 1,
-    "I001": 1
-  },
   "backend/tests/postgres/test_mount_sql_viewer_pg.py": {
     "F402": 2
   },
@@ -1711,9 +1704,6 @@
     "I001": 1
   },
   "backend/tests/test_ci_portability_contract.py": {
-    "I001": 1
-  },
-  "backend/tests/test_ci_workflow_contract.py": {
     "I001": 1
   },
   "backend/tests/test_circuit_diagram_sample_plugin.py": {

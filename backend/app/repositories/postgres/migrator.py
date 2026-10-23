@@ -5,12 +5,12 @@ import hashlib
 import math
 import re
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import Sequence
 
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
-
 
 MIGRATION_ADVISORY_LOCK_NAME = "silicon-notebook:postgres-migrations"
 MAX_MIGRATION_STATEMENT_TIMEOUT_SECONDS = 86_400
@@ -35,7 +35,7 @@ class PostgresMigration:
     name: str
     sql: str
 
-    @property
+    @cached_property
     def checksum(self) -> str:
         return hashlib.sha256(self.sql.encode("utf-8")).hexdigest()
 
@@ -166,26 +166,24 @@ class PostgresMigrator:
             statement_timeout_ms = max(
                 1, math.ceil(float(statement_timeout_seconds) * 1000)
             )
-        if not self.migrations:
-            with self.database.write() as conn:
-                self._lock(conn)
-                conn.execute(_LEDGER_SQL)
-                return self._validate_ledger(self._ledger_rows(conn))
-
-        current = 0
-        for migration in self.migrations[:target_version]:
+        minimum_committed_version = 0
+        while True:
             with self.database.write() as conn:
                 self._lock(conn)
                 conn.execute(_LEDGER_SQL)
                 current = self._validate_ledger(self._ledger_rows(conn))
+                if current < minimum_committed_version:
+                    raise RuntimeError("PostgreSQL migration ledger has a version gap")
                 if current > target_version:
                     raise RuntimeError(
                         "PostgreSQL migration ledger is newer than requested target"
                     )
-                if current >= migration.version:
-                    continue
-                if current != migration.version - 1:
-                    raise RuntimeError("PostgreSQL migration ledger has a version gap")
+                if current == target_version:
+                    return current
+                # Re-read and validate the whole ledger after every lock acquisition:
+                # another migrator may have advanced it since our last commit.
+                # The applied prefix needs no separate no-op transactions.
+                migration = self.migrations[current]
                 if statement_timeout_ms is not None:
                     conn.execute(
                         "SELECT set_config('statement_timeout', %s, true)",
@@ -198,4 +196,6 @@ class PostgresMigrator:
                     (migration.version, migration.checksum),
                 )
                 current = migration.version
-        return current
+                minimum_committed_version = current
+                if current == target_version:
+                    return current
