@@ -179,7 +179,9 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
 
     timings = _named_step(job, "Upload PostgreSQL test timings")
     assert timings["if"] == "always()"
-    assert timings["with"]["path"] == "backend/.local/postgres-junit.xml"
+    assert set(timings["with"]["path"].splitlines()) == {
+        "backend/.local/postgres-junit.xml", "backend/.local/postgres-metrics.json",
+    }
 
     run_commands = [
         step["run"]
@@ -339,7 +341,10 @@ def test_pr_ci_runs_every_g1_lane_in_two_jobs() -> None:
         )
         assert upload["if"] == "always()"
         assert upload["with"]["name"] == artifact
-        assert upload["with"]["path"] == f"backend/.local/{junit}"
+        expected_paths = {f"backend/.local/{junit}"}
+        if job_name == "standard-backend":
+            expected_paths.add("backend/.local/backend-metrics.json")
+        assert set(upload["with"]["path"].splitlines()) == expected_paths
         assert upload["with"]["retention-days"] == "7"
 
 
@@ -555,7 +560,10 @@ def test_daily_extended_complement_job_runs_only_the_complement_wrapper() -> Non
         job, "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
     )
     assert upload["if"] == "always()"
-    assert upload["with"]["path"] == "backend/.local/backend-extended-junit.xml"
+    assert set(upload["with"]["path"].splitlines()) == {
+        "backend/.local/backend-extended-junit.xml",
+        "backend/.local/backend-extended-metrics.json",
+    }
     assert upload["with"]["retention-days"] == "7"
 
 

@@ -29,8 +29,9 @@ export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
 unset PYTHONDONTWRITEBYTECODE
 
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
-  -m pytest -p no:cacheprovider -n "$BACKEND_EXTENDED_PYTEST_WORKERS" \
+  -m pytest -p no:cacheprovider -p tests.ci_metrics -n "$BACKEND_EXTENDED_PYTEST_WORKERS" \
   -m "slow or architecture_contract_heavy or graph_index_contract or process_contract or legacy_upgrade_contract" \
   --ignore="$ROOT_DIR/backend/tests/postgres" \
   --durations=30 --junitxml="$ROOT_DIR/backend/.local/backend-extended-junit.xml" \
+  --ci-metrics="$ROOT_DIR/backend/.local/backend-extended-metrics.json" \
   "$ROOT_DIR/backend/tests"

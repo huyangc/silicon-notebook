@@ -706,7 +706,9 @@ PostgreSQL 覆盖与离线门禁明确分离。`level-3-postgres-integration` jo
 后者将环境自足的适配器/迁移契约与 launcher/目标安全检查纳入它所归属的泳道。
 仅 CI service 将 PGDATA 放在上限 4 GiB 的 tmpfs，减少短命 schema 的宿主磁盘开销。
 WAL、`fsync`、`synchronous_commit`、`full_page_writes` 保持默认值，建库时检查后三项；
-job 记录存储用量与容器内存峰值。此泳道验证运行中的数据库行为，不验证容器丢失或宿主
+job 记录存储用量、容器内存峰值与 CPU 计数，以及 PostgreSQL 16 `pg_stat_bgwriter`
+中的 checkpoint 次数、写入/同步耗时和 buffer 写入计数，区分 checkpoint 压力与测试 CPU
+开销。此泳道验证运行中的数据库行为，不验证容器丢失或宿主
 断电后的介质持久性；生产与本地 PostgreSQL 存储不变。CI 先创建四组显式的主库、
 非 C UTF8 库与非 UTF 库，再交给权限不变的最小权限应用账号。`TEST_POSTGRES_TARGETS_JSON`
 是四个对象组成的数组，每个对象包含 `primary`、`non_c`、`non_utf` URL 字段；同一显式
@@ -720,11 +722,29 @@ batch2 的 payload 计划矩阵只创建一次 10 万行笔记本：先检查稀
 其他笔记本的 2 万行命中数据并重新 ANALYZE，检查位图访问被限定在当前笔记本且本地
 结果为空。两组原有计划断言仍可达，语料规模和计划检查均不缩减。
 
+KG findings、store-evidence、id-binding 和已认证 KG 枚举的计划检查也以带场景标签的
+只读矩阵运行，每份矩阵只准备一次执行过真实迁移的语料，保留全部原有结果、SQL、
+计划断言和数据规模。store-evidence、id-binding 与已认证枚举的各场景使用新连接池，
+避免预编译语句对照预热后续场景的缓存；录制补丁在场景之间还原。未认证反向索引世界
+仍使用独立 schema。这不引入共享可变的模块级 fixture 或 PostgreSQL 迁移模板。
+id-binding 的重复执行缓存测试也保留独立 schema：它会切换反向索引认证标记，不能改变
+行序检查所用的已认证世界。
+
 本地仍可使用已安装的 PostgreSQL 16 和显式 `TEST_POSTGRES_URL` 运行串行泳道，此时
 不得同时设置并行 JSON 变量；权威 CI 仍要求辅助目标齐全。`scripts/check.sh` 不得启动
 或连接 PostgreSQL。PG launcher 固定报告慢 setup/call/teardown，并输出
 `backend/.local/postgres-junit.xml`，CI 即使失败也上传；不会把任意 `PYTEST_ADDOPTS`
-转发给隔离的子进程。PG 依赖缓存使用专属 portable wheel 目录及精确的
+转发给隔离的子进程。backend、extended-backend 与 PostgreSQL wrapper 另加载可选
+`tests.ci_metrics` 插件，在 JUnit 旁写入对应的 `*-metrics.json`；CI 在原有保留七天的
+artifact 中一起上传。指标包括墙钟、setup/call/teardown 的累计耗时与报告数、可用 CPU
+数量、worker CPU 秒数，以及单个测试进程的最大峰值 RSS 字节数（不是并发进程峰值之和，
+也不包含 PostgreSQL 服务内存）。xdist controller 对每份报告只计一次，并收集 worker
+资源计数；worker 崩溃或缺失时标记进程指标不完整。阶段累计耗时是 worker 时间而非墙钟，
+进程 CPU 不包含数据库服务和子进程。JSON 与终端汇总只包含数值指标和完整性标记，
+不包含测试标识、环境、连接 URL、源码内容或异常文本。测量或写入失败不改变门禁退出码，
+也不新增 CI 性能通过阈值。
+
+PG 依赖缓存使用专属 portable wheel 目录及精确的
 OS/架构/Python/锁文件/构建策略 key，不回退到通用缓存，仍必须设置
 `HNSWLIB_NO_NATIVE=1`。整条 PG job 以三分钟为优化目标，测试全绿本身不代表达到目标，
 实测需计入冷缓存时的依赖安装。

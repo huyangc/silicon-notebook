@@ -41,8 +41,9 @@ unset PYTHONDONTWRITEBYTECODE
 # 2026-10-14 ruling that set the local warm-gate target to 80 s: those
 # contracts are reported by the daily gate, not on every PR.
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
-  -m pytest -p no:cacheprovider -n "$BACKEND_PYTEST_WORKERS" \
+  -m pytest -p no:cacheprovider -p tests.ci_metrics -n "$BACKEND_PYTEST_WORKERS" \
   -m "not slow and not architecture_contract_heavy and not graph_index_contract and not process_contract and not legacy_upgrade_contract" \
   --ignore="$ROOT_DIR/backend/tests/postgres" \
   --durations=30 --junitxml="$ROOT_DIR/backend/.local/backend-junit.xml" \
+  --ci-metrics="$ROOT_DIR/backend/.local/backend-metrics.json" \
   "$ROOT_DIR/backend/tests"
