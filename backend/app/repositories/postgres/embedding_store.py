@@ -518,13 +518,3 @@ class EmbeddingStore:
                 (notebook_id,),
             ).fetchall()
         }
-
-    @staticmethod
-    def embedded_relation_ids(db, notebook_id: str) -> set:
-        return {
-            row["relation_id"]
-            for row in db.execute(
-                "SELECT relation_id FROM relation_embeddings WHERE notebook_id=%s",
-                (notebook_id,),
-            ).fetchall()
-        }
