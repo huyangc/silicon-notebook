@@ -15,9 +15,22 @@ fallback 事件(闸在 SQL 里、事件在服务层)。
 来源闸只回答「这个兄弟簇留不留」,不回答「它叫什么」:存储的 canonical_name 可能是
 天花板外成员(隐藏的 Knowhow 投影 / Memory)的写法,也可能是那个成员已被剪掉后留下
 的陈旧名字。所以天花板在绑时,名字再过一道 R3(_ceiling_peer_names):名字只取自
-自己的 source_id 在该库天花板内的成员,一个都没有的簇丢弃。共提与社区两路在同一处
-出口、按同一规则改名,改名发生在名字被用于任何事情(社区重排、去重、top_k、返回、
-事件)之前;无天花板时一条语句都不多发。"""
+「天花板内成员」,一个可命名的都没有的簇丢弃。共提与社区两路在同一处出口、按同一
+规则改名,改名发生在名字被用于任何事情(社区重排、去重、top_k、返回、事件)之前;
+无天花板时一条语句都不多发。
+
+「天花板内成员」与对象规则对齐(``KgViewerScope.row_hidden``:对象只由**自己的**来源
+决定是否隐藏):成员自己的 ``source_id`` 为空(晋升进公共库的对象一律写成
+``source_id=''``,证据改写到库内可见的 promotion 来源)或在该库冻结天花板内即算;
+只有 ``source_id`` 非空且不在天花板内的成员不能命名(``_member_in_ceiling``)。
+
+焦点也一样(R4,_ceiling_focal):存储名解析出来的焦点簇,天花板在绑时还必须有一个
+天花板内成员的名字 ``lower(name)`` 等于焦点键,否则按未解析处理——与今天解析不到时
+同一条路径、同一个事件。猜中隐藏写法因此不再能解析出焦点(存在性预言机)。
+
+top_k 在哪里截:共提路无天花板时 SQL 的 LIMIT 就是 top_k(与今天逐字相同);天花板在
+绑时 SQL 取 ``top_k × _COMENTION_OVERFETCH``,R3 改名 / 丢弃之后再截到 top_k,被丢弃的
+簇不白占名额。社区路 SQL 取 ``candidates`` 行,R3 → 重排 → 去重之后截 top_k。"""
 from __future__ import annotations
 from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
@@ -27,12 +40,18 @@ from app.services.retrieval_participants import federated_ask_active
 from app.services.retrieval_run import current_viewer_id
 
 # R3 成员读的首窗口:一次调用里所有兄弟簇各读 member-id 序的前这么多个活成员,
-# 一条批量语句;只有整窗都在天花板外的簇才单独往后翻页(窗口翻倍)。与
-# ``kg_viewer_scope._FIRST_MEMBER_WINDOW`` 同值同理(那边是「第一个可见成员」)。
-# 它不是结果的截断:翻页一直走到找到天花板内成员或读完整簇为止。它只决定「哪些
-# 天花板内成员算作已读到」——存储名由已读到的天花板内成员携带时保留存储名,两种
-# 答案都只来自天花板内成员。
+# 一条批量语句;只有首窗里没有可命名的天花板内成员的簇才单独往后翻页(窗口翻倍,
+# 封顶 ``_PEER_MEMBER_PAGE_MAX``)。与 ``kg_viewer_scope._FIRST_MEMBER_WINDOW`` 同值
+# 同理(那边是「第一个可见成员」)。它不是结果的截断:翻页一直走到找到可命名的天花板内
+# 成员或读完整簇为止。它只决定「哪些天花板内成员算作已读到」——存储名由已读到的天花板
+# 内成员携带时保留存储名,两种答案都只来自天花板内成员。
 _PEER_MEMBER_WINDOW = 8
+# 单簇翻页的页大小上限:翻倍到这里就不再长,一页读的行数有界(终止性不变:每个满页
+# 都把游标严格前移,短页即读完)。
+_PEER_MEMBER_PAGE_MAX = 512
+# 共提路在天花板下向 SQL 多要的倍数:R3 会丢掉没有天花板内成员的簇,多要一倍名额,
+# 改名之后再截回 top_k,丢掉的簇不白占名额。无天花板时 SQL 照旧只取 top_k。
+_COMENTION_OVERFETCH = 2
 
 
 class CommunityQueryService:
@@ -109,9 +128,7 @@ class CommunityQueryService:
         key = _norm(focal_name)
         if not base_notebook_id or not key:
             return []
-        focal = _resolve_focal(
-            self.unified_kg, base_notebook_id, focal_name
-        )
+        focal = self._ceiling_focal(base_notebook_id, focal_name)
         if not focal:
             self.event_log.emit({
                 "kind": "community_unavailable",
@@ -170,14 +187,14 @@ class CommunityQueryService:
     def sibling_peers(self, notebook_id: str, focal_name: str, *,
                       top_k: int = 8) -> List[Tuple[str, int]]:
         try:
-            focal = _resolve_focal(
-                self.unified_kg, notebook_id, focal_name
-            )
+            focal = self._ceiling_focal(notebook_id, focal_name)
             if not focal:
                 return []
             ceiling = self._ceiling_kwargs(notebook_id)
             peers = self.unified_kg.comention_peers(
-                notebook_id, focal, self.sibling_min_bridge, top_k,
+                notebook_id, focal, self.sibling_min_bridge,
+                # 天花板在绑时多要一倍,R3 丢掉的簇不白占名额;无天花板 → 照旧 top_k。
+                top_k * _COMENTION_OVERFETCH if ceiling else top_k,
                 **_peer_read_kwargs(ceiling),
             )
             if not ceiling:
@@ -189,9 +206,30 @@ class CommunityQueryService:
             return [
                 (named[cid], claims)
                 for cid, _name, claims in peers if named.get(cid)
-            ]
+            ][:top_k]
         except Exception:
             return []
+
+    def _ceiling_focal(self, notebook_id: str, focal_name: str) -> Optional[str]:
+        """R4:焦点解析。存储名解析(``_resolve_focal``)之外,该库天花板在绑时,
+        解析出的焦点簇还必须有一个**天花板内成员**(同 R3,``_member_in_ceiling``)
+        的名字 ``lower(name)`` 等于焦点归一键;没有 → ``None``,调用方走与今天
+        解析不到时同一条路径(社区路发 ``community_unavailable/focal_unresolved``,
+        共提路返回 [])。存储名可能是天花板外成员的写法,不加这一道,猜中隐藏写法就
+        能解析出焦点并拿到兄弟。
+
+        成本:天花板在绑且存储名解析成功时多一条语句(``focal_name_members``,只取
+        该簇里名字等于焦点键的成员及其自己的 ``source_id``);天花板判定在这里对
+        冻结的天花板集合做,一整库的来源清单不进 SQL。无天花板 → 零额外语句。"""
+        focal = _resolve_focal(self.unified_kg, notebook_id, focal_name)
+        if not focal or not _ceiling_binds(notebook_id):
+            return focal
+        allowed = _library_ceiling(notebook_id)
+        members = self.unified_kg.focal_name_members(
+            notebook_id, focal, _norm(focal_name))
+        if any(_member_in_ceiling(row, allowed) for row in members):
+            return focal
+        return None
 
     def _ceiling_kwargs(self, notebook_id: str) -> dict:
         """``_source_ceiling_kwargs`` 加一条可观测性:闸落在**未回填库**上时发事件。
@@ -243,24 +281,26 @@ class CommunityQueryService:
         """R3:天花板在绑时,经来源闸留下的兄弟簇各自该叫什么。
 
         ``peers`` 是 ``(canonical_id, 存储的 canonical_name)``;返回
-        ``canonical_id -> 名字``,没有天花板内成员的簇**不在**返回里(丢弃)。
+        ``canonical_id -> 名字``,没有可命名的天花板内成员的簇**不在**返回里(丢弃)。
 
-        规则:按 member-id 序读该簇的活成员(已发布代、对象未 deprecated),
-        「天花板内成员」= 自己的 ``knowledge_objects.source_id`` 在该库冻结
-        天花板里的成员(不看 evidence:来源闸已经按 evidence 判过「留不留」,
-        名字要的是「这个写法属于谁」)。读到的天花板内成员(读到第一个天花板内
-        成员所在的那一页为止)里有人的名字与存储名逐字相同 → 存储名;否则 →
-        第一个天花板内成员的名字;一个都没有 → 丢弃。存储名因此只在它确实是
-        某个天花板内成员的写法时才出去——既挡住天花板外成员的写法,也挡住
-        携带它的成员已被剪掉后留下的陈旧名字。
+        规则:按 member-id 序读该簇的活成员(已发布代、对象未 deprecated)。
+        「天花板内成员」按对象规则判,只看成员**自己的**
+        ``knowledge_objects.source_id``(``_member_in_ceiling``):为空(晋升对象
+        ``source_id=''``)或在该库冻结天花板里即算,非空且在天花板外的不算;不看
+        evidence——来源闸已经按 evidence 判过「留不留」,名字要的是「这个写法属于
+        谁」。名字为空的天花板内成员不能命名。读到的可命名天花板内成员(读到第一个
+        这样的成员所在的那一页为止)里有人的名字与存储名逐字相同 → 存储名;否则 →
+        第一个这样的成员的名字;一个都没有 → 丢弃。存储名因此只在它确实是某个天花板
+        内成员的写法时才出去——既挡住天花板外成员的写法,也挡住携带它的成员已被剪掉
+        后留下的陈旧名字。
 
         成本:**一条**批量语句读本次调用全部兄弟簇的首窗口
         (``_PEER_MEMBER_WINDOW`` 个成员,``comparison_peer_members``),不随兄弟数
-        增长;只有首窗口整窗都在天花板外的簇才单独往后翻页
+        增长;只有首窗口满窗却没有可命名天花板内成员的簇才单独往后翻页
         (``_scan_peer_members``,同 ``KgViewerScope._first_visible_members`` /
-        ``_scan_members``)。天花板集合取自本 run 冻结的那一份
-        (``library_source_ceiling``,按 run 记忆,不复制、不排序)。无天花板时
-        调用方根本不进这里。
+        ``_scan_members``,页大小封顶 ``_PEER_MEMBER_PAGE_MAX``)。天花板集合取自
+        本 run 冻结的那一份(``library_source_ceiling``,按 run 记忆,不复制、不
+        排序)。无天花板时调用方根本不进这里。
         """
         stored: Dict[str, str] = {}
         for canonical_id, name in peers:
@@ -292,8 +332,9 @@ class CommunityQueryService:
         allowed: FrozenSet[str], *, after: str, window: int,
     ) -> Optional[str]:
         """R3 的单簇翻页:keyset 游标 ``after`` 之后,每页 ``window`` 个成员、
-        整页都在天花板外就翻倍再读。终止:每个满页都把游标严格前移,短页即
-        读完;读完仍没有天花板内成员 → ``None``(丢弃,fail closed)。"""
+        整页都没有可命名的天花板内成员就翻倍再读,页大小封顶
+        ``_PEER_MEMBER_PAGE_MAX``。终止:每个满页都把游标严格前移,短页即读完;
+        读完仍没有 → ``None``(丢弃,fail closed)。"""
         while True:
             rows = self.unified_kg.comparison_peer_members(
                 notebook_id, [canonical_id], limit=window, after=after,
@@ -302,7 +343,7 @@ class CommunityQueryService:
             if name is not None or len(rows) < window:
                 return name
             after = str(rows[-1]["member_object_id"])
-            window *= 2
+            window = min(window * 2, _PEER_MEMBER_PAGE_MAX)
 
     def comparison_peer_names(self, base_notebook_ids, focal_name: str,
                               question: str, *, top_k: int, candidates: int,
@@ -420,16 +461,35 @@ def _peer_read_kwargs(ceiling: dict) -> dict:
     return {**ceiling, "with_canonical_id": True} if ceiling else {}
 
 
+def _ceiling_binds(notebook_id: str) -> bool:
+    """这一库这次 run 有没有冻结的来源天花板——与 ``_source_ceiling_kwargs`` 返回
+    非空 kwargs 是同一个判据(``source_ceiling_for(...) is not None``),只是不去
+    物化清单。R4 在焦点解析时(早于 ``_ceiling_kwargs``)用它。"""
+    from app.services.source_scope import current_source_scope
+
+    scope = current_source_scope()
+    return scope is not None and scope.source_ceiling_for(notebook_id) is not None
+
+
 def _library_ceiling(notebook_id: str) -> FrozenSet[str]:
-    """R3 判成员用的天花板集合:与 ``_source_ceiling_kwargs`` 交给 SQL 闸的是
+    """R3 / R4 判成员用的天花板集合:与 ``_source_ceiling_kwargs`` 交给 SQL 闸的是
     同一份(``library_source_ceiling``,本 run 内按库记忆,per-library 天花板原样
-    返回、不复制)。只在 ``_ceiling_kwargs`` 非空时被调;万一 scope 已不在,按
-    空集判(一个名字都不出,fail closed)。"""
+    返回、不复制)。只在天花板在绑时被调;万一 scope 已不在,按空集判(只剩
+    ``source_id`` 为空的成员能命名,见 ``_member_in_ceiling``)。"""
     from app.services.source_scope import current_source_scope, library_source_ceiling
 
     scope = current_source_scope()
     ceiling = None if scope is None else library_source_ceiling(scope, notebook_id)
     return frozenset() if ceiling is None else ceiling
+
+
+def _member_in_ceiling(row, allowed: FrozenSet[str]) -> bool:
+    """「天花板内成员」(R3 / R4 共用):与对象规则 ``KgViewerScope.row_hidden``
+    对齐——对象只由**自己的**来源决定是否隐藏。自己的 ``source_id`` 为空(晋升进
+    公共库的对象一律写成 ``source_id=''``,证据改写到库内可见的 promotion 来源)
+    或在冻结天花板 ``allowed`` 里 → 算;非空且在天花板外 → 不算。"""
+    source_id = row["source_id"]
+    return not source_id or str(source_id) in allowed
 
 
 def _member_name(row) -> str:
@@ -438,16 +498,19 @@ def _member_name(row) -> str:
 
 
 def _in_ceiling_name(rows, stored_name: str, allowed: FrozenSet[str]) -> Optional[str]:
-    """R3 在一页成员上的判定:这页的天花板内成员(自己的 ``source_id`` 在
-    ``allowed`` 里)里有人叫存储名 → 存储名;否则第一个天花板内成员的名字;
-    这页一个天花板内成员都没有 → ``None``(由调用方决定翻页还是丢弃)。"""
-    inside = [
-        _member_name(row) for row in rows
-        if row["source_id"] is not None and str(row["source_id"]) in allowed
+    """R3 在一页成员上的判定。只有名字非空的天花板内成员(``_member_in_ceiling``)
+    能命名:它们里有人叫存储名 → 存储名;否则第一个这样的成员的名字;这页一个都
+    没有 → ``None``(由调用方决定翻页还是丢弃)。名字为空的天花板内成员排在前面
+    也不会让整簇被丢掉。"""
+    named = [
+        name for name in (
+            _member_name(row) for row in rows if _member_in_ceiling(row, allowed)
+        )
+        if name.strip()
     ]
-    if not inside:
+    if not named:
         return None
-    return stored_name if stored_name in inside else inside[0]
+    return stored_name if stored_name in named else named[0]
 
 
 def _norm(s: str) -> str:
@@ -457,7 +520,8 @@ def _norm(s: str) -> str:
 def _resolve_focal(store, notebook_id: str, focal_name: str) -> Optional[str]:
     """focal 名 → canonical_id(共提/社区两路共用的焦点解析:lower(canonical_name)==_norm(focal),
     多簇取成员最多者)。入参空 / 解析不到 → None。**不 emit 事件**——sibling_peers 走静默、
-    community_peers 拿到 None 后自行补 community_unavailable 事件。"""
+    community_peers 拿到 None 后自行补 community_unavailable 事件。天花板在绑时两路都经
+    ``CommunityQueryService._ceiling_focal`` 再过一道 R4(焦点写法须属于天花板内成员)。"""
     key = _norm(focal_name)
     if not notebook_id or not key:
         return None

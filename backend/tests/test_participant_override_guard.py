@@ -994,10 +994,16 @@ _SEAT_FAILSOFT_SITES = (
 #
 # * ``retrieval_candidates._chunk_kg_overlay``(D0-1 的 ``_ceiling_scoped_subgraph``)
 #   —— 该函数里**没有任何宽 except**,裁剪整段裸奔。
-# * ``communities.sibling_peers`` 的 ``except Exception`` —— try 体是
-#   ``_resolve_focal`` + ``comention_peers(**_ceiling_kwargs(...))``;``_ceiling_kwargs``
-#   只读 ``source_scope.current_source_scope()`` 与 ``retrieval_run`` 的 memo,座位读发生在
-#   **更外层**的 ``mounted_base_ids``(它不在任何 try 里,而它的 reasoning 调用点
+# * ``communities.sibling_peers`` 的 ``except Exception`` —— try 体(R3/R4 之后)是:
+#   ``_ceiling_focal``(``_resolve_focal`` → store ``resolve_focal``;天花板在绑时再
+#   ``_ceiling_binds`` + ``_library_ceiling`` + store ``focal_name_members``)、
+#   ``_ceiling_kwargs``(``_source_ceiling_kwargs`` + ``_note_source_index_fallback``)、
+#   store ``comention_peers(**_peer_read_kwargs(...))``,以及天花板在绑时的
+#   ``_ceiling_peer_names``(``_library_ceiling`` + store ``comparison_peer_members``,
+#   必要时 ``_scan_peer_members`` 翻页)。这些只读 ``source_scope.current_source_scope()``
+#   (及其按 run 记忆的天花板)、``retrieval_run`` 的 memo 和统一图谱 store 的只读连接,
+#   没有一个经过 ``_retrieval_participants`` / ``resolve_retrieval_participant*``;座位读
+#   发生在**更外层**的 ``mounted_base_ids``(它不在任何 try 里,而它的 reasoning 调用点
 #   ``_action_expand_community`` 已在上面登记)。
 # * ``communities._note_source_index_fallback._probe`` —— 纯可观测性探针
 #   (``source_index_backfilled`` + emit),不触达座位。
