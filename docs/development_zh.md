@@ -141,6 +141,12 @@
     在两个后端钉住；服务层只通过 `store_viewer_kwargs` 向 KG store 读取传 `viewer_id`，也就是
     仅当笔记本里有查看者不能读的记忆时才传。`test_kg_viewer_scope_assembly.py` 的装配绊线核对
     开关（`STORE_READERS_TAKE_VIEWER_ID`）与 store 接受的关键字一致，并核对隔离标记读取已接好。
+  - 合并知识对象的 id（`K-` / `KL-` / `KF-` / `KP-` 加全体成员里最小的种子）与存储的 `canonical_name`
+    可能拼出任何一个成员，所以只交给能读全部成员来源的读者：笔记本自己的读者（Knowhow 投影整库可读，
+    笔记本完成隔离后共享簇里没有记忆）。不是挂载库成员的读者经挂载读取时，每个簇都用第一个可见成员作答，
+    作为输入的簇 id 按不存在处理（为非成员建的 `KgViewerScope`）；在来源天花板下从某库取出的名字，取自
+    「自己的来源在该天花板内」的成员（`communities.py` 的对比兄弟）。新的返回面要把簇 id 或名字交给
+    其他读者时，按同样的划分处理。
   - 没有记忆来源的笔记本，其 scale 与 viz 工件与隔离前逐字节相同，差别只在三份 manifest：主索引
     和 viz 的 manifest 多出 `memory_isolation`、`memory_sources_digest`、`shared_content_digest`
     三个字段；所有 version 列表（主索引、viz、来源分区伴随工件的 `parent_version`）都多一对

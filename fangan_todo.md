@@ -1,6 +1,7 @@
 # silicon-notebook 待办（fangan_todo.md）
 
-更新日期：2026-10-23（图谱分析「问题清单」特性已全部合入并记入 `fangan_done.md` §64，本文件相应补登：
+更新日期：2026-10-23（第二节「隐藏成员名字经 canonical id 暴露」已处理并移入 `fangan_done.md` §65：摸排确认
+直接读者面不越界，只修了经挂载读与来源天花板下的取名；同日早些时候，图谱分析「问题清单」特性已全部合入并记入 `fangan_done.md` §64，本文件相应补登：
 第二节「知识图谱」新增三条（换描述模型或提示词后没有重写概念描述的路径、隐藏成员名字经 canonical id 暴露、
 问题清单阈值待生产演练复核），第四节「其它残余」新增两条（Uvicorn 访问日志里其它路由的查询串、`.snbk`
 归档不带种子空间与板块分区列），`communities.title` / `summary` / `findings` 一条补记 v102 / 0083 增列时
@@ -141,16 +142,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       已发布的库按新模型 / 新提示词把描述整批重写，只能等名字或引文变化逐个触发。要补一条显式路径（签名里带模型
       身份与提示词版本，或一个只重写描述的维护命令）；动手前先定「换模型是否应当整批重写」——整批重写是一大笔
       描述模型调用，按签名复用正是为了避免种子归一后几乎每个多词概念都被重调一遍。
-- [ ] **隐藏成员名字经 canonical id 暴露，需全产品统一处理**（来源：PR #941 评审，PR #940 同形；非本特性引入）：
-      合并后知识对象的 canonical id = `K-` + 该合并组全体成员的最小种子；最小种子恰好来自隐藏的 Memory / Knowhow
-      成员时，id 本身就带着这个成员的规范化名字。已有的返回面：`GET /notebooks/{id}/unified-kg/pending-merges`
-      （`backend/app/api/kg_routes.py`）、统一图谱 `GET /notebooks/{id}/unified-kg`、问题清单 F4 证据里的
-      `canonical_ids`（`backend/app/services/kg_findings.py`）；图谱分析早先的 `largest_clusters`
-      （`backend/app/repositories/kg_analysis_payloads.py::largest_clusters_payload`）更直接，返回的是存储的 canonical
-      名。#941 评审里同类的 `evidence.member_seeds` 暴露（P1）已由 `public_evidence()`
-      （`backend/app/services/kg_findings_view.py`）去掉；上面几处是既有暴露，本特性没有扩大、也没有修。
-      修法要全产品一起定，不能只改某一个返回面：id 同时是跨库桥接的枢纽键（`docs/operations_zh.md`「跨库混合期」）
-      和无种子候选行的回退键（`concept_merge_candidates` 的 `canonical_a` / `canonical_b`）。
 - [ ] **问题清单阈值是本机标定的初值，生产只读演练数据回来后复核**（来源：PR #941，规格 §14③ 的用户裁决「先按本机
       初值实现」）：F1 / F2 / F3 / F4 的各阈值与 F2 排除「通用概念」的界（出现在超过 30 个来源里）只在一个 84 个来源的
       本机库（`nb-b37185f4ae`）上标定过，F3 在本机没有正样本；规格 §14③ 写明 4.9 万个来源上 30 可能太小。精确值在
