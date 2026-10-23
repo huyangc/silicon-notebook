@@ -440,17 +440,6 @@ class SQLiteMaintenanceAdapter:
                 (doc_type, notebook_id),
             )
 
-    def kg_covered_source_ids(self, notebook_id: str) -> set:
-        with self._runtime.database.connect() as db:
-            return {
-                r["source_id"]
-                for r in db.execute(
-                    "SELECT DISTINCT source_id FROM knowledge_objects "
-                    "WHERE notebook_id=? AND source_id!=''",
-                    (notebook_id,),
-                ).fetchall()
-            }
-
     def partial_kg_source_ids(self, notebook_id: str) -> set:
         """Sources whose latest KG run reports at least one failed window.
 
@@ -1049,21 +1038,6 @@ class SQLiteMaintenanceAdapter:
             notebook_id, items, progress=progress, commit_every=commit_every
         )
 
-    def knowledge_object_payloads(
-        self, notebook_id: str, *, include_deprecated: bool = False
-    ) -> list[dict]:
-        """[{"id", "payload": dict}, ...] for (re-)embedding tooling."""
-        where = "WHERE notebook_id=?" + (
-            "" if include_deprecated else " AND status!='deprecated'"
-        )
-        with self._runtime.database.connect() as db:
-            rows = db.execute(
-                f"SELECT id, payload FROM knowledge_objects {where}", (notebook_id,)
-            ).fetchall()
-        return [
-            {"id": r["id"], "payload": json.loads(r["payload"] or "{}")} for r in rows
-        ]
-
     def knowledge_object_payload_page(
         self,
         notebook_id: str,
@@ -1402,30 +1376,6 @@ class SQLiteMaintenanceAdapter:
                     "GROUP BY notebook_id"
                 ).fetchall()
             }
-
-    def sample_approved_object_payload(self, notebook_id: str) -> Optional[str]:
-        with self._runtime.database.connect() as db:
-            row = db.execute(
-                "SELECT payload FROM knowledge_objects WHERE notebook_id=? "
-                "AND status='approved' LIMIT 1",
-                (notebook_id,),
-            ).fetchone()
-        return row["payload"] if row else None
-
-    def chunk_notebook_map(self, chunk_ids: Sequence[str]) -> dict:
-        out: dict = {}
-        ids = list(chunk_ids)
-        if not ids:
-            return out
-        with self._runtime.database.connect() as db:
-            for i in range(0, len(ids), 400):  # 分批防超 SQLite 变量上限
-                part = ids[i : i + 400]
-                ph = ",".join("?" for _ in part)
-                for r in db.execute(
-                    f"SELECT id, notebook_id FROM chunks WHERE id IN ({ph})", part
-                ):
-                    out[r["id"]] = r["notebook_id"]
-        return out
 
     # -- vectors-to-blob / source-index backfills --------------------------------
 
@@ -1959,26 +1909,6 @@ class SQLiteMaintenanceAdapter:
                 "updated_at=? WHERE notebook_id=? AND status!='complete'",
                 (code, self._runtime.seams.now(), notebook_id),
             )
-
-    def clear_chunk_element_index(self, notebook_id: str) -> int:
-        """Reset chunk_elements for one notebook; returns the chunks total the
-        backfill loop must cover."""
-        with self._runtime.database.write() as db:
-            db.execute(
-                "DELETE FROM chunk_elements WHERE notebook_id=?", (notebook_id,)
-            )
-            # Incomplete from here until the final marker write. Reset the
-            # fast-path flag in the same transaction so an interrupted CLI can
-            # never publish a partial index.
-            db.execute(
-                "UPDATE unified_kg_state SET chunk_elements_indexed=0, "
-                "updated_at=? WHERE notebook_id=?",
-                (self._runtime.seams.now(), notebook_id),
-            )
-            return db.execute(
-                "SELECT COUNT(*) c FROM chunks WHERE notebook_id=?",
-                (notebook_id,),
-            ).fetchone()["c"]
 
     def chunk_elements_indexed(self, notebook_id: str) -> bool:
         with self._runtime.database.connect() as db:

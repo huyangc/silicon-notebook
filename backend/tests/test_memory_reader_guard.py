@@ -213,7 +213,6 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "KnowledgeStore.any_mounted_has_kg_on": STATE_PROBE,
         "KnowledgeStore.notebook_schema_has_objects": STATE_PROBE,
         "KnowledgeStore.relation_exists": STATE_PROBE,
-        "KnowledgeStore.graph_version_rows": STATE_PROBE,
         "KnowledgeStore.object_version_row": STATE_PROBE,
         # maintenance
         "KnowledgeStore._stale_object_ids_for_source_batch": MAINTENANCE,
@@ -358,8 +357,6 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "UnifiedKgStore.object_support_source_rows": CEILING_BOUNDED,
         # probes
         "UnifiedKgStore.cluster_input_facts": STATE_PROBE,
-        "UnifiedKgStore.cluster_version_row": STATE_PROBE,
-        "UnifiedKgStore.ppr_version_rows": STATE_PROBE,
         "UnifiedKgStore.concept_clusters_count": STATE_PROBE,
         "UnifiedKgStore.distinct_cluster_count": STATE_PROBE,
         # the rebuild's end-state totals (finish_rebuild_state runs them): the
@@ -458,7 +455,6 @@ _REGISTRY: dict[str, dict[str, str]] = {
             "PostgresMaintenanceAdapter.clear_source_index",
             "PostgresMaintenanceAdapter.count_missing_node_vectors",
             "PostgresMaintenanceAdapter.count_sources_missing_kg",
-            "PostgresMaintenanceAdapter.kg_covered_source_ids",
             "PostgresMaintenanceAdapter.kg_target_source_rows_page",
             "PostgresMaintenanceAdapter.knowledge_object_payload_page",
             "PostgresMaintenanceAdapter.node_embedding_counts",
@@ -482,15 +478,12 @@ _REGISTRY: dict[str, dict[str, str]] = {
             "SQLiteMaintenanceAdapter.count_missing_node_vectors",
             "SQLiteMaintenanceAdapter.count_sources_missing_kg",
             "SQLiteMaintenanceAdapter.gold_knowledge_object_rows",
-            "SQLiteMaintenanceAdapter.kg_covered_source_ids",
             "SQLiteMaintenanceAdapter.kg_object_counts_by_notebook",
             "SQLiteMaintenanceAdapter.kg_target_source_rows_page",
             "SQLiteMaintenanceAdapter.knowledge_object_payload_page",
-            "SQLiteMaintenanceAdapter.knowledge_object_payloads",
             "SQLiteMaintenanceAdapter.node_embedding_counts",
             "SQLiteMaintenanceAdapter.partial_kg_source_ids",
             "SQLiteMaintenanceAdapter.resume_source_index_backfill_batch",
-            "SQLiteMaintenanceAdapter.sample_approved_object_payload",
             "SQLiteMaintenanceAdapter.sample_knowledge_objects",
         )
     },

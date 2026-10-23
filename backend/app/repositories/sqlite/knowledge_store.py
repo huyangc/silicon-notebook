@@ -1926,20 +1926,6 @@ class KnowledgeStore:
         return rows
 
     @staticmethod
-    def graph_version_rows(db: sqlite3.Connection, notebook_id: str):
-        rel = db.execute(
-            "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts, "
-            "COALESCE(SUM(CASE WHEN review_status = 'rejected' THEN 1 ELSE 0 END), 0) AS n_rej, "
-            "COALESCE(SUM(CASE WHEN review_status = 'verified' THEN 1 ELSE 0 END), 0) AS n_ver "
-            "FROM knowledge_relations WHERE notebook_id = ?", (notebook_id,),
-        ).fetchone()
-        obj = db.execute(
-            "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts "
-            "FROM knowledge_objects WHERE notebook_id = ?", (notebook_id,),
-        ).fetchone()
-        return rel, obj
-
-    @staticmethod
     def graph_object_rows(db: sqlite3.Connection, notebook_id: str, statuses):
         ph = ",".join("?" for _ in statuses)
         return db.execute(
@@ -3178,37 +3164,6 @@ class KnowledgeStore:
             rows,
         )
 
-    # ------------------------------------------------- knowhow projection
-    # (Task 5, knowhow-tables PR-1): the deterministic projector writes
-    # case/procedure/tool objects and their edges directly (bypassing
-    # store_kg's fresh-id-per-call allocation — knowhow ids are STABLE
-    # hashes of row_id/column_id/table_id so reprojection is idempotent, not
-    # append-only), reusing insert_object_chunk/insert_relation_chunk above
-    # for the actual INSERTs. These primitives cover the row/table-scoped
-    # DELETEs that pattern needs and are absent from the plain store_kg path.
-    @staticmethod
-    def delete_objects_by_source_and_row(
-        connection: sqlite3.Connection, source_id: str, row_id: str
-    ) -> None:
-        """Delete this row's PRIOR case+procedure objects (any column) under
-        the knowhow hidden source, keyed by ``payload.row_id`` — NOT tool
-        objects (table-scoped, deduped across rows, so they carry no
-        ``row_id`` key and are correctly left untouched here; project_table's
-        full rebuild is what sweeps orphaned tools). json_extract on payload
-        is unindexed but source_id narrows the scan first (idx_knowledge_
-        objects_source), acceptable at this feature's bounded scale."""
-        connection.execute(
-            "DELETE FROM knowledge_object_sources WHERE object_id IN ("
-            "SELECT id FROM knowledge_objects WHERE source_id = ? "
-            "AND json_extract(payload, '$.row_id') = ?)",
-            (source_id, row_id),
-        )
-        connection.execute(
-            "DELETE FROM knowledge_objects WHERE source_id = ? "
-            "AND json_extract(payload, '$.row_id') = ?",
-            (source_id, row_id),
-        )
-
     @staticmethod
     def delete_objects_by_source(
         connection: sqlite3.Connection, source_id: str
@@ -3592,7 +3547,7 @@ class KnowledgeStore:
         member id can match.
 
         ⚠ This is safe HERE and deliberately NOT done in the knowhow projector's
-        ``delete_objects_by_source`` / ``delete_objects_by_source_and_row``.
+        ``delete_objects_by_source``.
         Every caller of this path (source delete, reparse,
         ``store_kg(replace_source=True)``) either drops the objects for good or
         re-mints FRESH ids, so the membership rows really are dead. The knowhow

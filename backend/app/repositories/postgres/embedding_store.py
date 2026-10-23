@@ -482,18 +482,6 @@ class EmbeddingStore:
         return _compat_vector_rows(rows)
 
     @staticmethod
-    def element_delta_rows(db, notebook_id: str, source_ids):
-        values = list(source_ids)
-        if not values:
-            return []
-        rows = db.execute(
-            "SELECT element_id AS vid,vector FROM element_embeddings "
-            "WHERE notebook_id=%s AND source_id=ANY(%s)",
-            (notebook_id, values),
-        ).fetchall()
-        return _compat_vector_rows(rows)
-
-    @staticmethod
     def chunk_delta_rows(db, notebook_id: str, source_ids):
         values = list(source_ids)
         if not values:

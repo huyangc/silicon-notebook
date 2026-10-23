@@ -46,7 +46,6 @@ BACKEND_STORES = {
 #: 允许不记流水的方法 —— 它们不改用户可见内容。
 EXEMPT_METHODS = frozenset({
     "bump_knowhow_mutation_seq",          # 纯投影调度计数器
-    "set_knowhow_row_projection",          # 投影状态机
     "set_knowhow_row_projection_if_table_seq",
     "set_knowhow_hidden_source",           # 隐藏合成源接线
     "insert_notebook_asset",               # 资产表，不属于 knowhow 表内容

@@ -359,19 +359,6 @@ def test_empty_notebook_completes_immediately(repo):
     assert repo.maintenance.chunk_elements_indexed(notebook.id) is True
 
 
-def test_clear_resets_rows_and_marker(repo):
-    notebook = repo.create_notebook(NotebookCreate(name="b6"))
-    source_id = _seed_source(repo, notebook.id)
-    _seed_chunks(repo, notebook.id, source_id, [("c1", ["e1"])])
-    maintenance = repo.maintenance
-    maintenance.begin_chunk_element_backfill(notebook.id)
-    _drain(maintenance, notebook.id)
-
-    assert maintenance.clear_chunk_element_index(notebook.id) == 1
-    assert _reverse_rows(repo) == []
-    assert maintenance.chunk_elements_indexed(notebook.id) is False
-
-
 def test_mark_failed_records_only_a_stable_code(repo):
     notebook = repo.create_notebook(NotebookCreate(name="b7"))
     source_id = _seed_source(repo, notebook.id)

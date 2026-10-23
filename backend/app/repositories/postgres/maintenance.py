@@ -80,9 +80,9 @@ _RECOVERY_DELETE_BATCH_ROWS = 5000
 _RECOVERY_REAP_PAGES_BUDGET = 40
 
 # T-W4-4 维护站点普查:本文件里「按 notebook_id 整表 DELETE、不分页、只被
-# 离线 CLI 触发」的站点共五处——``purge_kg_embeddings``(reembed_kg,要求
+# 离线 CLI 触发」的站点共四处——``purge_kg_embeddings``(reembed_kg,要求
 # ``--confirm-service-stopped``)、source-index 与 chunk-element 两族 backfill
-# 的起手清场(含 ``clear_source_index``/``clear_chunk_element_index``)。大库
+# 的起手清场(含 ``clear_source_index``)。大库
 # 上这些 DELETE 可能超过默认 30s statement_timeout;离线维护不共享请求路径
 # 的时间预算,统一经 ``raise_statement_timeout_floor`` 做事务内放宽
 # (定义在 ``_store_utils``,取「底」不取「值」的理由见它的注释)。
@@ -408,17 +408,6 @@ class PostgresMaintenanceAdapter:
                 "AND source_type NOT IN ('memory','knowhow') AND source_type <> 'promotion'",
                 (doc_type, notebook_id),
             )
-
-    def kg_covered_source_ids(self, notebook_id: str) -> set[str]:
-        with self._runtime.database.connect() as db:
-            return {
-                str(row["source_id"])
-                for row in db.execute(
-                    "SELECT DISTINCT source_id FROM knowledge_objects "
-                    "WHERE notebook_id=%s AND source_id<>''",
-                    (notebook_id,),
-                ).fetchall()
-            }
 
     def partial_kg_source_ids(self, notebook_id: str) -> set[str]:
         """Sources whose latest KG attempt is partial and old graph survives."""
@@ -1394,27 +1383,6 @@ class PostgresMaintenanceAdapter:
             for row in rows
         ]
 
-    def knowledge_object_payloads(
-        self, notebook_id: str, *, include_deprecated: bool = False
-    ) -> list[dict]:
-        """Compatibility projection; large-library callers should use pages."""
-        output: list[dict] = []
-        after_id = ""
-        while True:
-            page = self.knowledge_object_payload_page(
-                notebook_id,
-                after_id=after_id,
-                limit=_EMBEDDING_PAGE_SIZE,
-                include_deprecated=include_deprecated,
-            )
-            if not page:
-                break
-            output.extend(page)
-            after_id = str(page[-1]["id"])
-            if len(page) < _EMBEDDING_PAGE_SIZE:
-                break
-        return output
-
     def backfill_node_embeddings(
         self,
         notebook_id: str,
@@ -2194,26 +2162,6 @@ class PostgresMaintenanceAdapter:
                 "updated_at=%s WHERE notebook_id=%s AND status!='complete'",
                 (code, normalize_timestamp(self._runtime.seams.now()), notebook_id),
             )
-
-    def clear_chunk_element_index(self, notebook_id: str) -> int:
-        """Reset chunk_elements for one notebook; returns the chunks total the
-        backfill loop must cover."""
-        with self._runtime.database.write() as db:
-            # T-W4-4: whole-notebook DELETE — floor-raise inside the same tx.
-            raise_statement_timeout_floor(db)
-            db.execute(
-                "DELETE FROM chunk_elements WHERE notebook_id=%s", (notebook_id,)
-            )
-            db.execute(
-                "UPDATE unified_kg_state SET chunk_elements_indexed=0,"
-                "updated_at=%s WHERE notebook_id=%s",
-                (normalize_timestamp(self._runtime.seams.now()), notebook_id),
-            )
-            row = db.execute(
-                "SELECT COUNT(*) AS c FROM chunks WHERE notebook_id=%s",
-                (notebook_id,),
-            ).fetchone()
-        return int(row["c"])
 
     def chunk_elements_indexed(self, notebook_id: str) -> bool:
         with self._runtime.database.connect() as db:

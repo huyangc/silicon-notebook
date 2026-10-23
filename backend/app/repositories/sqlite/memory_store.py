@@ -1000,12 +1000,6 @@ class MemoryStore:
             ).fetchone()
         return row is not None
 
-    def append_revision(
-        self, memory_id: str, snapshot: dict, changed_by: str, reason: str
-    ) -> None:
-        with self.database.write() as db:
-            self._append_revision_on(db, memory_id, snapshot, changed_by, reason)
-
     def _append_revision_on(
         self,
         db: sqlite3.Connection,

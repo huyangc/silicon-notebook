@@ -271,18 +271,6 @@ class EmbeddingStore:
         ).fetchall()
 
     @staticmethod
-    def element_delta_rows(db, notebook_id: str, source_ids):
-        values = list(source_ids)
-        if not values:
-            return []
-        ph = ",".join("?" for _ in values)
-        return db.execute(
-            f"SELECT element_id AS vid, vector FROM element_embeddings "
-            f"WHERE notebook_id=? AND source_id IN ({ph})",
-            (notebook_id, *values),
-        ).fetchall()
-
-    @staticmethod
     def chunk_delta_rows(db, notebook_id: str, source_ids):
         values = list(source_ids)
         if not values:

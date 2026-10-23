@@ -26,7 +26,6 @@ def test_memory_ports_expose_store_and_lifecycle_contracts():
         "create_candidate_with_initial_revision",
         "create_answer_with_initial_revision",
         "memory_for_user",
-        "append_revision",
         "transition",
         "transition_with_revision",
         "update_fields",
