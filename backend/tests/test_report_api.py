@@ -134,7 +134,10 @@ def test_report_done_compare_and_set_cannot_overwrite_a_cancelled_generation(
     repo = repository()
     repo.update_report(nb["id"], rid, status="outline_ready")
     assert repo.claim_report_generation(nb["id"], rid)
-    assert repo._runtime.report_store.cancel_report(nb["id"], rid)
+    repo._runtime.report_store.update_report(
+        nb["id"], rid, status="cancelled", progress="已取消"
+    )
+    assert repo._runtime.report_store.get_report(nb["id"], rid)["status"] == "cancelled"
     assert repo._runtime.report_store.complete_report_generation(
         nb["id"],
         rid,

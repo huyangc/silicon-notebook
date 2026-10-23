@@ -6,7 +6,7 @@ title, then its file name.
 
 Three call sites name sources for the user, and they name the *same* sources in
 the same session — the answer's ``[k]`` citation cards
-(``evidence_context.EvidenceContextService.citation_titles``), the element
+(``evidence_context.EvidenceContextService.citation_source_info``), the element
 candidates the reasoning retriever scores and renders as evidence
 (``retrieval_candidates``), and the typed-collection list
 (``collection_enumeration``).  Each arrived separately and each wrote the rule

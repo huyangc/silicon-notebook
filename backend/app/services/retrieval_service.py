@@ -761,9 +761,6 @@ class RetrievalService:
             active_notebook_id, actor_id, cited
         )
 
-    def edge_support_map(self, notebook_id):
-        return self.graph._edge_support_map(notebook_id)
-
     def cluster_map(self, notebook_id):
         return self.graph.cluster_map(notebook_id)
 

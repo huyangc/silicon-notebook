@@ -45,6 +45,11 @@ OWNER = "user-e53-owner"
 RECIPIENT = "user-e53-recipient"
 
 
+def _orphan_ids(store, limit, after_id=""):
+    """The id column of ``orphan_memory_source_refs`` (one statement)."""
+    return [source_id for source_id, _ in store.orphan_memory_source_refs(limit, after_id)]
+
+
 def _repo(tmp_path, monkeypatch, name="e53"):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / (name + '.db')}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / (name + "-storage")))
@@ -389,7 +394,7 @@ def test_the_fixture_really_holds_every_orphan_shape(world):
     """Guards the guard: each shape is an orphan by the store's own predicate, the
     controls are not, and every orphan has derived rows in every table."""
     store = world.repo._runtime.memory_store
-    assert store.orphan_memory_source_ids(1000) == world.orphan_ids
+    assert _orphan_ids(store, 1000) == world.orphan_ids
     for sid in ["src-hard", "src-dep", "src-dangling", "src-null"]:
         assert all(world.captured[sid][t] for t, _k, _f in _DERIVED), sid
 
@@ -399,7 +404,7 @@ def test_a_pass_removes_every_orphan_and_everything_derived_from_it(world, event
 
     assert tally == {"deleted": len(world.orphan_ids), "gone": 0, "failed": 0}
     _assert_swept(world)
-    assert world.repo._runtime.memory_store.orphan_memory_source_ids(1000) == []
+    assert _orphan_ids(world.repo._runtime.memory_store, 1000) == []
     kinds = [e["kind"] for e in _sweep_events(events)]
     assert kinds == ["memory_orphan_sweep_started", "memory_orphan_sweep_completed"]
     assert _sweep_events(events)[-1] == {
@@ -749,18 +754,18 @@ def test_checkup_h12_follows_a_failed_pass_until_the_next_start(world):
 
 def test_the_store_read_pages_by_key_and_bounds_its_result(world):
     store = world.repo._runtime.memory_store
-    everything = store.orphan_memory_source_ids(1000)
+    everything = _orphan_ids(store, 1000)
     assert everything == sorted(everything) == world.orphan_ids
     walked, after = [], ""
     while True:
-        page = store.orphan_memory_source_ids(2, after)
+        page = _orphan_ids(store, 2, after)
         assert len(page) <= 2
         if not page:
             break
         walked += page
         after = page[-1]
     assert walked == everything
-    assert store.orphan_memory_source_ids(0) == everything[:1]  # limit is floored at 1
+    assert _orphan_ids(store, 0) == everything[:1]  # limit is floored at 1
 
 
 def test_a_cleared_link_is_an_orphan_even_if_a_memory_row_has_an_empty_id(repo):
@@ -772,7 +777,7 @@ def test_a_cleared_link_is_an_orphan_even_if_a_memory_row_has_an_empty_id(repo):
     _notebook(repo, "nb-a")
     _memory_item(repo, "", "nb-a")  # a confirmed Memory row whose id is the empty string
     _source(repo, "nb-a", "src-cleared", "memory", "")
-    assert repo._runtime.memory_store.orphan_memory_source_ids(10) == ["src-cleared"]
+    assert _orphan_ids(repo._runtime.memory_store, 10) == ["src-cleared"]
 
 
 def test_a_deep_copy_today_carries_no_memory_source(repo):
@@ -792,7 +797,7 @@ def test_a_deep_copy_today_carries_no_memory_source(repo):
             (copy.id,),
         ).fetchone()[0]
     assert carried == 0
-    assert repo._runtime.memory_store.orphan_memory_source_ids(10) == []
+    assert _orphan_ids(repo._runtime.memory_store, 10) == []
 
 
 def test_an_exception_is_a_failure_and_only_an_absent_row_is_gone(world, events):

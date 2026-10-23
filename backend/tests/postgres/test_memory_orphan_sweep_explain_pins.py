@@ -1,7 +1,7 @@
 """EXPLAIN pins (real PG, the REAL planner) of the statements behind the E5-3 orphan sweep.
 
 * ``MemoryStore.has_orphan_memory_sources`` (startup probe, ``EXISTS``),
-* ``MemoryStore.orphan_memory_source_ids`` (the sweep's global keyset read) and
+* ``MemoryStore.orphan_memory_source_refs`` (the sweep's global keyset read) and
 * ``MemoryStore.orphan_memory_source_count_on`` (checkup H12, one notebook).
 
 No ``enable_*`` switches anywhere: the point of these pins is the plan an untuned
@@ -38,6 +38,11 @@ pytestmark = [
 
 _NOW = "2026-01-01T00:00:00+00:00"
 _TABLES = ("sources", "memory_items")
+
+
+def _orphan_ids(store, limit, after_id=""):
+    """The id column of ``orphan_memory_source_refs`` (one statement)."""
+    return [source_id for source_id, _ in store.orphan_memory_source_refs(limit, after_id)]
 
 
 def _seed(postgres_database) -> None:
@@ -135,7 +140,7 @@ def test_orphan_statements_keep_their_plan_shapes(postgres_database):
         _RecordingDatabase(postgres_database, seen), new_id=lambda prefix: prefix, now=lambda: _NOW
     )
     assert store.has_orphan_memory_sources() is True
-    found = store.orphan_memory_source_ids(200)
+    found = _orphan_ids(store, 200)
     assert len(found) == 12 and found == sorted(found)
     with store.database.connect() as connection:
         assert postgres_memory_store.MemoryStore.orphan_memory_source_count_on(

@@ -1941,9 +1941,6 @@ def test_run_reparse_and_run_all_do_not_reconfigure_scheduler(repo, monkeypatch)
     )
     monkeypatch.setattr(repo.maintenance, "source_ids", lambda notebook_id: [])
     monkeypatch.setattr(
-        repo.maintenance, "sources_with_elements", lambda notebook_id: set()
-    )
-    monkeypatch.setattr(
         repo, "rebuild_unified_kg",
         lambda notebook_id, progress=None, force=False, fresh=False: 0,
     )

@@ -320,20 +320,26 @@ def test_pg_recover_stamps_updated_at(store, monkeypatch):
     assert reread.updated_at == "2026-09-21T02:00:00+00:00"
 
 
+def _admin_record(store, job_id, owner_id):
+    """What the administrator activity detail reads (``reader_id=None``)."""
+    with store.guarded_admin_job_record(job_id, owner_id, reader_id=None) as record:
+        return record
+
+
 def test_pg_admin_job_record_returns_record_and_none_for_foreign_or_missing_job(store):
     value = job()
     store.create(value, "user-a", "request-a", "payload", "mcp", new_conversation=True)
     value.status = "failed"
     assert store.save(value, "user-a", error_detail="RuntimeError: boom")
 
-    record = store.admin_job_record(value.job_id, "user-a")
+    record = _admin_record(store, value.job_id, "user-a")
     assert record is not None
     assert record["error_detail"] == "RuntimeError: boom"
     assert record["submitted_via"] == "mcp"
     assert record["job"].job_id == value.job_id
 
-    assert store.admin_job_record(value.job_id, "user-b") is None
-    assert store.admin_job_record("no-such-job", "user-a") is None
+    assert _admin_record(store, value.job_id, "user-b") is None
+    assert _admin_record(store, "no-such-job", "user-a") is None
 
 
 def test_postgres_global_batch_authority_and_source_ceiling(store, monkeypatch):

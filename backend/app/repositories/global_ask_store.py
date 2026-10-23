@@ -969,7 +969,12 @@ class GlobalAskStore:
 
     @contextmanager
     def guarded_admin_job_record(self, job_id, owner_id, *, reader_id):
-        """``admin_job_record`` under the activity-detail locking invariant.
+        """One job as the activity detail reads it, under the activity-detail
+        locking invariant: the owner's job plus the two per-row facts the
+        owner-facing ``GlobalAskJob`` never carries -- the raw failure text
+        and the submission surface. ``owner_id`` is the OWNER (the viewed
+        user), not the reader; ``None`` when the row does not belong to that
+        owner, so a foreign job is indistinguishable from a missing one.
 
         The notebook twin (``guarded_ask_detail``) leases the notebook root
         ``FOR KEY SHARE`` and the reader's authority chain ``FOR SHARE`` and
@@ -1065,29 +1070,6 @@ class GlobalAskStore:
                 "submitted_via": row["submitted_via"] or "",
                 "notebook_names": names,
             }
-
-    def admin_job_record(self, job_id, user_id):
-        """One job as the administrator activity detail reads it: the owner's
-        job plus the two per-row facts the owner-facing ``GlobalAskJob`` never
-        carries -- the raw failure text and the submission surface.
-
-        ``user_id`` is the OWNER (the viewed user), not the reader: the caller
-        decides who may read (admin, or the owner under a live read re-check)
-        exactly as ``guarded_ask_detail`` does for a notebook job. Returns
-        ``None`` when the row does not belong to that owner, so a foreign job
-        is indistinguishable from a missing one.
-        """
-        with self.database.connect() as db:
-            row = db.execute(self._sql(
-                f"SELECT * FROM global_ask_jobs WHERE id=? AND user_id=? AND {self._live}"
-            ), (job_id, user_id)).fetchone()
-        if row is None:
-            return None
-        return {
-            "job": self._job(row),
-            "error_detail": row["error_detail"] or "",
-            "submitted_via": row["submitted_via"] or "",
-        }
 
     # ------------------------------------------------------------------
     # retention after a participant library is deleted

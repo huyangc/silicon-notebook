@@ -725,12 +725,12 @@ def test_annotate_edge_support_folds_only_edge_endpoints(repo, monkeypatch):
 def _legacy_annotate_edge_support(kq, notebook_id, edges):
     """``annotate_edge_support`` 改造**前**的正文,原样抄成 oracle。
 
-    唯一差别在支撑数的取法:这里仍走 ``retrieval.edge_support_map()`` 的整表
+    唯一差别在支撑数的取法:这里仍走 ``retrieval.graph._edge_support_map()`` 的整表
     dict(生产 8.35M 行),新实现改成按本次边集的两个朝向做 ``relation_support_rows``
     定点查询。折叠、键构造、正/反向偏好、未命中原样返回,三处逐字保持相同,
     所以两者在同一数据上必须逐字段相等。
     """
-    support = kq.retrieval().edge_support_map(notebook_id)
+    support = kq.retrieval().graph._edge_support_map(notebook_id)
     if not support:
         return edges
     ids = sorted({
@@ -876,7 +876,7 @@ def test_annotate_edge_support_never_scans_the_full_support_table(repo, monkeypa
     """R2-1 的方向钉:标注绝不允许再触碰整表 ``edge_support_rows``
     (canonical_relations 的 per-notebook 全表扫,生产 8.35M 行 ≈3.6GB)。
 
-    **变异锚点**:把实现改回 ``retrieval.edge_support_map(notebook_id)``
+    **变异锚点**:把实现改回整表的 ``retrieval.graph._edge_support_map(notebook_id)``
     → 这条立刻报红。上面的等价 oracle 按定义对这条变异是绿的(它就是 oracle
     自己),所以「少扫」这一半必须由本条守卫钉住。"""
     nb, edges = _annotate_oracle_fixture(repo)

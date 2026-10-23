@@ -710,8 +710,8 @@ class QueryStore:
     def sources_without_elements(db: sqlite3.Connection, notebook_id: str) -> set:
         """H2(空源)的 SQL 候选集:本 notebook 下**解析已终态、却没有任何 source_elements**
         的用户源 source_id 集合——「流水线声称处理过、却没落下任何解析产物」的损坏信号
-        (承 pipeline-damage-recovery 设计「二·体检层」H2,是 knowledge_store.sources_with_elements
-        的对称取反)。
+        (承 pipeline-damage-recovery 设计「二·体检层」H2,原是已删除的
+        knowledge_store.sources_with_elements 的对称取反)。
 
         判据三条:
         - `source_type NOT IN ('memory','knowhow')`:与 H3 / list_sources 同口径,只看用户可见源;
@@ -2638,14 +2638,3 @@ class QueryStore:
                 one("SELECT COUNT(*) FROM knowledge_relations WHERE notebook_id = ?"),
             )
 
-    def is_mounted_by_anyone(self, notebook_id: str) -> bool:
-        """被任何笔记本当作参考库挂着(Task 6)—— NotebookScaleProfile.index_eligible
-        的挂载分支消费。刻意不区分挂载边是否仍然「有效」(不走 mount_sql.py 的
-        MOUNT_VALID_EXPR):那是解析参与集用的谓词,边失效通常是临时的,不该让
-        索引跟着过期。IndexProjectionStore.is_mounted_by_anyone 是
-        ScaleArtifactRuntime.eligible 侧的镜像实现,两处必须保持同一判定。"""
-        with self.database.connect() as db:
-            return bool(db.execute(
-                "SELECT EXISTS(SELECT 1 FROM notebook_bases WHERE base_notebook_id=?)",
-                (notebook_id,),
-            ).fetchone()[0])

@@ -4395,7 +4395,8 @@ def test_report_completion_cas_cannot_overwrite_a_cancelled_generation(
     report_id = reports.create_report(notebook_id, "为什么?", 2)
     reports.update_report(notebook_id, report_id, status="outline_ready")
     assert reports.claim_report_generation(notebook_id, report_id)
-    assert reports.cancel_report(notebook_id, report_id)
+    # The cancel endpoint's durable write (report_routes.cancel_report_endpoint).
+    reports.update_report(notebook_id, report_id, status="cancelled", progress="已取消")
     assert reports.complete_report_generation(
         notebook_id,
         report_id,
@@ -4435,7 +4436,7 @@ def test_report_cancel_cannot_overwrite_a_completed_generation(
         gaps=[],
         references=[],
     )
-    assert reports.cancel_report(notebook_id, report_id) is False
+    reports.update_report(notebook_id, report_id, status="cancelled", progress="已取消")
     row = reports.get_report(notebook_id, report_id)
     assert row["status"] == "done"
     assert row["content_md"] == "durable"

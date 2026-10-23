@@ -216,7 +216,6 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "KnowledgeStore.object_version_row": STATE_PROBE,
         # maintenance
         "KnowledgeStore._stale_object_ids_for_source_batch": MAINTENANCE,
-        "KnowledgeStore.backfill_fts": MAINTENANCE,
         "KnowledgeStore.clear_sources_graph_state": MAINTENANCE,
         "KnowledgeStore.completion_page": MAINTENANCE,
         "KnowledgeStore.delete_notebook_graph_rows": MAINTENANCE,
@@ -228,7 +227,6 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "KnowledgeStore.relink_orphan_source_ids": MAINTENANCE,
         "KnowledgeStore.relink_object_rows_for_source": MAINTENANCE,
         "KnowledgeStore.relink_relation_rows_for_objects": MAINTENANCE,
-        "KnowledgeStore.source_build_rows": MAINTENANCE,
         "KnowledgeStore.source_build_state_page": MAINTENANCE,
     },
     "*/query_store.py": {

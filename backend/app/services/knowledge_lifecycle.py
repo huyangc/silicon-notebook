@@ -2503,13 +2503,6 @@ class KnowledgeLifecycleService:
     # These methods remain as one-hop compatibility seams for the facade, routes,
     # post-build relink tail, and established tests/operational probes.
 
-    def _settle_kg_maintenance(
-        self, notebook_id: str, job_id: str, status: str, stats: dict | None = None
-    ) -> None:
-        return self.kg_maintenance.settle(
-            notebook_id, job_id, status, stats
-        )
-
     def start_notebook_relink(
         self, notebook_id: str, *, exempt_build_marker: bool = False
     ) -> dict:
@@ -2518,13 +2511,6 @@ class KnowledgeLifecycleService:
 
     def notebook_relink_status(self, notebook_id: str) -> dict:
         return self.kg_maintenance.notebook_relink_status(notebook_id)
-
-    def _settle_notebook_relink(
-        self, notebook_id: str, job_id: str, status: str, stats: dict | None = None
-    ) -> None:
-        return self.kg_maintenance.settle(
-            notebook_id, job_id, status, stats
-        )
 
     def run_notebook_relink_job(self, notebook_id: str, job_id: str) -> dict:
         return self.kg_maintenance.run_notebook_relink_job(
@@ -2662,6 +2648,7 @@ class KnowledgeLifecycleService:
 
     # --- Concept-cluster writes ---------------------------------------------
 
+    # 测试观察点:直接写簇行的构造点,用例借它摆出指定的簇状态
     def write_clusters(self, notebook_id: str, rows: List[dict],
                        object_type: str = "concept") -> None:
         now = self._now()
@@ -3576,15 +3563,6 @@ class KnowledgeLifecycleService:
             after_id = str(rows[-1]["id"])
             if len(rows) < _SOURCE_BUILD_PAGE_SIZE:
                 return
-
-    def _kg_target_pages(
-        self, notebook_id: str, mode: str
-    ) -> Iterator[Tuple[List[str], List[str], List[str]]]:
-        """Compatibility projection used by existing diagnostics/tests."""
-        for targets, skipped, missing in self._kg_target_batches(
-            notebook_id, mode
-        ):
-            yield [source_id for source_id, _preserve in targets], skipped, missing
 
     def _kg_target_count(
         self,
@@ -8540,7 +8518,3 @@ class KnowledgeLifecycleService:
                     })
         return draft.result()
 
-    def list_communities(self, notebook_id: str, level: int = 0) -> List[List[str]]:
-        """Member-id lists of each published community at ``level``."""
-        with self._connect() as db:
-            return self.unified_kg.community_member_ids(db, notebook_id, level)

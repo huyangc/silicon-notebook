@@ -30,6 +30,11 @@ OWNER = "u-e53-owner"
 RECIPIENT = "u-e53-recipient"
 
 
+def _orphan_ids(store, limit, after_id=""):
+    """The id column of ``orphan_memory_source_refs`` (one statement)."""
+    return [source_id for source_id, _ in store.orphan_memory_source_refs(limit, after_id)]
+
+
 @pytest.fixture
 def postgres_repository(postgres_scope, tmp_path):
     from app.services.postgres_repository import PostgresRepository
@@ -271,7 +276,7 @@ def test_the_store_read_finds_exactly_the_orphan_shapes(postgres_repository):
     world = World(postgres_repository)
     store = postgres_repository._runtime.memory_store
     assert store.has_orphan_memory_sources() is True
-    assert store.orphan_memory_source_ids(1000) == world.orphan_ids
+    assert _orphan_ids(store, 1000) == world.orphan_ids
     assert "src-keep" not in world.orphan_ids
     for sid in ("src-hard", "src-dep", "src-dangling", "src-null"):
         assert all(world.captured[sid][t] for t, _k, _f in _DERIVED), sid
@@ -280,18 +285,18 @@ def test_the_store_read_finds_exactly_the_orphan_shapes(postgres_repository):
 def test_the_store_read_pages_by_key_and_bounds_its_result(postgres_repository):
     world = World(postgres_repository)
     store = postgres_repository._runtime.memory_store
-    everything = store.orphan_memory_source_ids(1000)
+    everything = _orphan_ids(store, 1000)
     assert everything == sorted(everything) == world.orphan_ids
     walked, after = [], ""
     while True:
-        page = store.orphan_memory_source_ids(2, after)
+        page = _orphan_ids(store, 2, after)
         assert len(page) <= 2
         if not page:
             break
         walked += page
         after = page[-1]
     assert walked == everything
-    assert store.orphan_memory_source_ids(0) == everything[:1]
+    assert _orphan_ids(store, 0) == everything[:1]
 
 
 def test_a_pass_removes_every_orphan_and_everything_derived_from_it(postgres_repository):
@@ -304,7 +309,7 @@ def test_a_pass_removes_every_orphan_and_everything_derived_from_it(postgres_rep
     again = MemoryOrphanSweep.for_repository(postgres_repository)
     assert again.has_orphans() is False and again.schedule() is None
     assert again.run_pass() == {"deleted": 0, "gone": 0, "failed": 0}
-    assert postgres_repository._runtime.memory_store.orphan_memory_source_ids(1000) == []
+    assert _orphan_ids(postgres_repository._runtime.memory_store, 1000) == []
 
 
 def test_a_page_of_one_gives_the_same_end_state_as_the_default_page(
@@ -439,7 +444,7 @@ def test_a_deep_copy_today_carries_no_memory_source(postgres_repository):
             (copy.id,),
         ).fetchone())
     assert carried == 0
-    assert repo._runtime.memory_store.orphan_memory_source_ids(10) == []
+    assert _orphan_ids(repo._runtime.memory_store, 10) == []
 
 
 def test_an_exception_is_a_failure_and_a_non_memory_id_is_refused(postgres_repository):
@@ -489,5 +494,5 @@ def test_a_cleared_link_is_an_orphan_even_if_a_memory_row_has_an_empty_id(postgr
     _source(repo, "nb-a", "src-cleared", "memory", "")
     _source(repo, "nb-a", "src-null", "memory", None)
     store = repo._runtime.memory_store
-    assert store.orphan_memory_source_ids(10) == ["src-cleared", "src-null"]
+    assert _orphan_ids(store, 10) == ["src-cleared", "src-null"]
     assert store.has_orphan_memory_sources() is True

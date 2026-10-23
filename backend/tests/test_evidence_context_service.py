@@ -73,6 +73,16 @@ def _service(*, source_metadata=None, elements=None):
     )
 
 
+def _citation_titles(service, source_ids):
+    """The user-facing title each citation card shows (``citation_source_info``
+    is what the cards read; a source with no name is left out)."""
+    return {
+        source_id: info["title"]
+        for source_id, info in service.citation_source_info(source_ids).items()
+        if info["title"]
+    }
+
+
 def test_citation_titles_prefer_grounded_paper_title_and_keep_other_sources():
     service = _service(source_metadata={
         "paper": {
@@ -89,7 +99,7 @@ def test_citation_titles_prefer_grounded_paper_title_and_keep_other_sources():
         },
     })
 
-    assert service.citation_titles(["paper", "ordinary", "untitled-paper"]) == {
+    assert _citation_titles(service, ["paper", "ordinary", "untitled-paper"]) == {
         "paper": "A Useful Article Title",
         "ordinary": "design-notes.md",
         "untitled-paper": "scan.pdf",
@@ -116,8 +126,8 @@ def test_a_promotion_citation_card_names_the_original_under_either_spelling():
         },
     })
 
-    assert service.citation_titles(
-        ["src-promo-new", "src-promo-old", "src-promo-mem", "plain"]
+    assert _citation_titles(
+        service, ["src-promo-new", "src-promo-old", "src-promo-mem", "plain"]
     ) == {
         "src-promo-new": "原件甲",
         "src-promo-old": "原件乙",

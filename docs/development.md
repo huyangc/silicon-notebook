@@ -76,6 +76,17 @@ contributor constraints, not a second implementation history.
   [caller ledger](./superpowers/plans/2026-08-23-facade-retirement-ledger.md), reproduced
   by `scripts/audit_facade_callers.py`; update the ownership/surface fixtures with
   `scripts/generate_repository_contract_fixtures.py --rebaseline-surface`.
+- The facade audit sees only the facade. `scripts/audit_component_callers.py --check`
+  (contracts lane) does the same census for the component layer: every method and
+  property of a class under `backend/app` outside `api/` and the facade layer
+  (services, both adapters' stores, the ports, extension hosts) that no production
+  code references, by any spelling of its name, including through another such
+  member. It fails on such a member unless
+  `scripts/component_test_only_allowlist.json` registers it as a test observation
+  point (the `def` carries a 「测试观察点」 comment), an extension port, a run-time
+  reference the scan cannot see, or a pending decision. It also fails on an entry
+  that is no longer a candidate. Do not add a member only tests call: rewrite the
+  test through the production path, or register it with a reason.
 - Keep both adapters' `access_sql.py`, `mount_sql.py` and `memory_sql.py` predicates
   aligned. `memory_sql.py` is the shared definition point of who may read a
   Memory-derived source and of which KG rows count as Memory-derived; new readers import

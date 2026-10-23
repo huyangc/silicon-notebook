@@ -572,21 +572,6 @@ class EvidenceContextService:
         """
         return self.sources.evidence_elements(element_ids)
 
-    def citation_titles(self, source_ids: Iterable[str]) -> dict[str, str]:
-        """Resolve user-facing citation titles in one bounded source lookup.
-
-        The naming rule itself is ``source_display.source_display_title`` — the
-        same one the enumeration list and the retrieval element cards apply, so
-        one source cannot be called two things in one answer.  A source with no
-        name at all is left out of the map rather than mapped to ``""``: callers
-        fall back to their own label, which is not the same as showing a blank.
-        """
-        return {
-            source_id: value["title"]
-            for source_id, value in self.citation_source_info(source_ids).items()
-            if value["title"]
-        }
-
     def _source_rows_and_info(
         self, source_ids: Iterable[str],
     ) -> tuple[Mapping[str, Mapping[str, Any]], dict[str, dict[str, str]]]:

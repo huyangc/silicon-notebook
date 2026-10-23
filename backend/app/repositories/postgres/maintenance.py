@@ -351,6 +351,7 @@ class PostgresMaintenanceAdapter:
             ).fetchall()
         return [str(row["id"]) for row in rows]
 
+    # 测试观察点:旧批处理的抽取目标判据,用例拿来断言流水线目标集合(并断言生产不再调用旧查询)
     def kg_target_source_rows_page(
         self,
         notebook_id: str,
@@ -409,6 +410,7 @@ class PostgresMaintenanceAdapter:
                 (doc_type, notebook_id),
             )
 
+    # 测试观察点:旧批处理的抽取目标判据,用例拿来断言流水线目标集合(并断言生产不再调用旧查询)
     def partial_kg_source_ids(self, notebook_id: str) -> set[str]:
         """Sources whose latest KG attempt is partial and old graph survives."""
         with self._runtime.database.connect() as db:
@@ -431,15 +433,7 @@ class PostgresMaintenanceAdapter:
             ).fetchall()
         return {str(row["source_id"]) for row in rows}
 
-    def sources_with_elements(self, notebook_id: str) -> set[str]:
-        with self._runtime.database.connect() as db:
-            rows = db.execute(
-                "SELECT DISTINCT e.source_id FROM source_elements e "
-                "JOIN sources s ON s.id=e.source_id WHERE s.notebook_id=%s",
-                (notebook_id,),
-            ).fetchall()
-        return {str(row["source_id"]) for row in rows}
-
+    # 测试观察点:旧批处理的抽取目标判据,用例拿来断言流水线目标集合(并断言生产不再调用旧查询)
     def count_sources_missing_kg(self, notebook_id: str) -> int:
         with self._runtime.database.connect() as db:
             row = db.execute(
@@ -535,17 +529,6 @@ class PostgresMaintenanceAdapter:
 
     def delete_notebook_kg(self, notebook_id: str) -> dict:
         return self._runtime.knowledge_lifecycle.delete_notebook_kg(notebook_id)
-
-    def backfill_kg_fts(self, notebook_id: str) -> int:
-        self._runtime.catalog.get_notebook(notebook_id)
-        with self._runtime.database.write() as db:
-            return int(self._runtime.knowledge.backfill_fts(db, notebook_id))
-
-    def backfill_chunk_fts(self, notebook_id: str) -> int:
-        with self._runtime.database.write() as db:
-            count = int(self._runtime.chunk_store.backfill_fts(db, notebook_id))
-        self._runtime.kg_mutations.notebook_languages.pop(notebook_id, None)
-        return count
 
     def build_scale_index(
         self,
@@ -1084,6 +1067,7 @@ class PostgresMaintenanceAdapter:
                 (notebook_id, *exclude),
             ).fetchone()["c"])
 
+    # 测试观察点:无界版缺向量判据,keyset 分页版按它做等价差分
     def missing_chunk_embedding_rows(
         self, notebook_id: str, only_source_id: "str | None" = None
     ) -> list[dict]:
@@ -1248,6 +1232,7 @@ class PostgresMaintenanceAdapter:
                 ).fetchall()
             ]
 
+    # 测试观察点:无界版缺向量判据,keyset 分页版按它做等价差分
     def missing_element_embedding_rows(
         self, notebook_id: str, only_source_id: "str | None" = None
     ) -> list[dict]:
@@ -2374,6 +2359,7 @@ class PostgresMaintenanceAdapter:
             for row in rows
         ]
 
+    # 测试观察点:整表清空 / 单页重建反向索引,用例用来构造「回填进行到一半」的状态测续跑
     def clear_source_index(self, notebook_id: str) -> int:
         with self._runtime.database.write() as db:
             # T-W4-4: whole-notebook DELETE — floor-raise inside the same tx.
@@ -2400,6 +2386,7 @@ class PostgresMaintenanceAdapter:
         with self._runtime.database.connect() as db:
             return self._runtime.knowledge.source_index_backfilled(db, notebook_id)
 
+    # 测试观察点:整表清空 / 单页重建反向索引,用例用来构造「回填进行到一半」的状态测续跑
     def backfill_source_index_batch(
         self, notebook_id: str, last_id: str, batch_size: int
     ) -> tuple[int, int, str]:

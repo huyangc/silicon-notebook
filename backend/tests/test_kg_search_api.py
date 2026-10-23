@@ -106,23 +106,6 @@ def test_kg_search_unknown_notebook_raises(repo):
         repo.kg_search("no-such-nb", "query", k=5)
 
 
-def test_backfill_kg_fts(repo):
-    nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo.store_kg(nb.id, None, [
-        {"local_id": "a", "object_type": "concept",
-         "payload": {"name": "op-amp", "section_path": ""}, "evidence": []},
-    ], [])
-    # Simulate stale FTS: delete FTS rows manually, then backfill
-    with repo._connect() as db:
-        db.execute("DELETE FROM kg_objects_fts WHERE notebook_id=?", (nb.id,))
-    hits_before = repo.kg_search(nb.id, "op-amp", k=5)
-    assert hits_before == []   # FTS wiped, no semantic index either
-
-    repo._runtime.knowledge_query.backfill_kg_fts(nb.id)
-    hits_after = repo.kg_search(nb.id, "op-amp", k=5)
-    assert any(h["name"] == "op-amp" for h in hits_after)
-
-
 # ---------------------------------------------------------------------------
 # API-level tests
 # ---------------------------------------------------------------------------

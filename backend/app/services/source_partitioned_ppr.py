@@ -194,6 +194,7 @@ class SourcePartitionedPprService:
             return None
         return MANIFEST_ABSENT
 
+    # 测试观察点:进程内缓存条数观察点,测淘汰与失效
     @property
     def cache_size(self) -> int:
         with self._lock:

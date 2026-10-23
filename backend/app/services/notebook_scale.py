@@ -209,6 +209,7 @@ class CopyStatsMemo:
                 self._global_epoch += 1   # fail closed,理由见类 docstring
             self._store.pop(notebook_id, None)
 
+    # 测试观察点:memo 驻留版本标签观察点,测 seq 闸与失效
     def cached_version(self, notebook_id: str) -> Any:
         """当前驻留的版本键(没有则 ``None``)。只给测试与运维观察用。"""
         with self._lock:
@@ -249,9 +250,3 @@ class NotebookScaleProfile:
     def requires_index(self, notebook_id: str, *, has_disk_index: bool) -> bool:
         if self.is_copyable(notebook_id): return False
         return not has_disk_index
-    def index_eligible(self, notebook_id: str, *, tier: str, has_disk_index: bool, total_chunks: int) -> bool:
-        # 被任何笔记本挂载即构成建索引资格(Task 6)——镜像 ScaleArtifactRuntime.eligible
-        # 的同一分支,两处必须保持一致(否则建索引与用索引的判定会分叉)。
-        if tier == "base" or has_disk_index or self.facts_repo.is_mounted_by_anyone(notebook_id): return True
-        if total_chunks > self.settings.index_suggest_chunk_threshold: return True
-        return not self.is_copyable(notebook_id)

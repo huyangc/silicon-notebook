@@ -81,9 +81,7 @@ class GlobalAskStorePort(Protocol):
     def save(self, job: GlobalAskJob, user_id: str, *, error_detail: str = "") -> bool: ...
     def save_progress(self, job: GlobalAskJob, user_id: str) -> bool: ...
     # Administrator activity detail: the OWNER's job plus ``error_detail`` and
-    # ``submitted_via``; ``None`` for a foreign or missing job.
-    def admin_job_record(self, job_id: str, user_id: str) -> dict | None: ...
-    # The same record under the activity-detail locking invariant: a context
+    # ``submitted_via``, under the activity-detail locking invariant: a context
     # manager whose transaction holds the job row and every participant
     # notebook's read-authority chain until the caller has assembled its
     # response. Yields ``None`` for a foreign/missing job, or -- when

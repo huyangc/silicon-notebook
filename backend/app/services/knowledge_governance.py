@@ -273,6 +273,7 @@ class KnowledgeGovernanceService:
     # Track E: edge trust review queue + curation feedback loop
     # ------------------------------------------------------------------
 
+    # 测试观察点:审阅队列的逐位等价 oracle,分页版 review_queue_page 与 memo 按它对照
     def review_queue(self, notebook_id: str, limit: int = 200) -> List[dict]:
         """Edges ranked by review priority, served from the seq-gated ranking
         memo whenever ``0 <= limit <= REVIEW_QUEUE_MEMO_ITEMS`` (R3 T-A2).
@@ -611,6 +612,7 @@ class KnowledgeGovernanceService:
     # Concept-cluster merge candidates + decisions
     # ------------------------------------------------------------------
 
+    # 测试观察点:直接写合并候选的构造点
     def write_merge_candidate(self, notebook_id: str, a: str, b: str, score: float) -> None:
         """A pending candidate between canonical ids ``a`` and ``b``, minted in
         the notebook's published concept seed space (read in the same

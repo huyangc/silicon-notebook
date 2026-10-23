@@ -312,9 +312,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       只有中性句的报告不读 `sections`。已知残余：存下的原文本身以「中性句 + 「）」+ 空行」开头时，
       不读 `sections` 就无法与新格式区分。只有异常文本恰好以本产品自己的中文失败文案开头才会出现，
       代码注释与用例已写明，登记为已知形态，不另行处理。
-- [ ] **S2-D：组件层「仅测试调用」成员未清点**（来源：PR #862）：审计脚本只统计 facade，看不到组件层
-      （`AskService.ask_chunk_current` / `ask_reasoning_current`、两端 store 与 `AskStateStorePort` 的
-      `ask_job_status` 等）只被测试调用的成员；登记为一类待清点项。
 - [ ] **Uvicorn 访问日志里其它路由的查询串仍原样记录，是否改为只记键待拍板**（来源：PR #969 codex 第 8 轮）：
       `backend/app/core/auth_logging.py::AuthenticationAccessFilter` 只处理两类请求：`/api/auth/` 下的丢弃整个查询串
       （OAuth 回调带凭据），以及 `backend/app/core/log_paths.py` 登记的几类内容路径段（问题清单豁免的 subject、

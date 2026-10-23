@@ -90,7 +90,7 @@ def test_claim_is_released_on_base_exception(repo):
     assert status["status"] == "failed"
     repo.start_unified_kg_rebuild(nb)          # slot reusable
     # ...and so is relink: they share the slot, so a stuck claim would take both.
-    repo._runtime.knowledge_lifecycle._settle_kg_maintenance(
+    repo._runtime.knowledge_lifecycle.kg_maintenance.settle(
         nb, repo.unified_kg_rebuild_status(nb)["job_id"], "failed"
     )
     repo.start_notebook_relink(nb)
@@ -159,7 +159,7 @@ def test_a_stale_worker_does_not_clobber_a_newer_claim(repo):
     repo.fail_unified_kg_rebuild_submission(nb, first["job_id"])
     second = repo.start_unified_kg_rebuild(nb)
 
-    repo._runtime.knowledge_lifecycle._settle_kg_maintenance(
+    repo._runtime.knowledge_lifecycle.kg_maintenance.settle(
         nb, first["job_id"], "succeeded", {"clusters": 99}
     )
     status = repo.unified_kg_rebuild_status(nb)
@@ -207,7 +207,6 @@ def test_background_job_runs_the_pass_under_the_version_gate(repo):
 
 _JOB_PLUMBING = (
     "_claim_kg_maintenance",
-    "_settle_kg_maintenance",
     "kg_maintenance_jobs",
     "kg_maintenance_lock",
     "kg_maintenance",

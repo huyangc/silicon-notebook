@@ -504,8 +504,8 @@ def test_delete_table_clears_chunk_fts_vector_and_ko_so_query_no_longer_hits(cli
 # projection — it must neither wipe the projected case/procedure/tool objects
 # and their edges, nor re-extract the hidden source with the LLM (the feature's
 # zero-LLM invariant). Two seams enforce this: delete_notebook_graph_rows (the
-# wipe) preserves knowhow-sourced rows, and source_build_rows (the extraction
-# target picker) excludes the hidden source.
+# wipe) preserves knowhow-sourced rows, and source_build_state_page (the
+# extraction target picker) excludes the hidden source.
 # ---------------------------------------------------------------------------
 
 

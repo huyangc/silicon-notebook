@@ -19,6 +19,13 @@ def repo(tmp_path, monkeypatch):
     return r
 
 
+def _published_communities(repo, notebook_id, level=0):
+    """Member-id lists of each published community at ``level``."""
+    runtime = repo._runtime
+    with runtime.database.connect() as db:
+        return runtime.unified_kg.community_member_ids(db, notebook_id, level)
+
+
 def _claim(lid, name):
     return {"local_id": lid, "object_type": "claim",
             "payload": {"name": name, "section_path": "1"}, "evidence": []}
@@ -40,7 +47,7 @@ def test_rebuild_communities_detects_two_groups(repo):
         [_rel("A", "B"), _rel("B", "C"), _rel("A", "C"), _rel("D", "E")])
     n = repo._runtime.knowledge_lifecycle.rebuild_communities(nb.id)
     assert n == 2
-    comms = repo._runtime.knowledge_lifecycle.list_communities(nb.id)            # List[List[str]] member-id lists
+    comms = _published_communities(repo, nb.id)            # List[List[str]] member-id lists
     sizes = sorted(len(c) for c in comms)
     assert sizes == [2, 3]
 
@@ -48,7 +55,7 @@ def test_rebuild_communities_detects_two_groups(repo):
 def test_rebuild_communities_empty_graph(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     assert repo._runtime.knowledge_lifecycle.rebuild_communities(nb.id) == 0
-    assert repo._runtime.knowledge_lifecycle.list_communities(nb.id) == []
+    assert _published_communities(repo, nb.id) == []
 
 
 def test_rebuild_communities_is_idempotent(repo):
@@ -57,7 +64,7 @@ def test_rebuild_communities_is_idempotent(repo):
     repo.store_kg(nb.id, None, [_claim("A", "a"), _claim("B", "b")], [_rel("A", "B")])
     repo._runtime.knowledge_lifecycle.rebuild_communities(nb.id)
     repo._runtime.knowledge_lifecycle.rebuild_communities(nb.id)                 # rerun must not duplicate
-    assert len(repo._runtime.knowledge_lifecycle.list_communities(nb.id)) == 1   # one community {A,B}, not two
+    assert len(_published_communities(repo, nb.id)) == 1   # one community {A,B}, not two
 
 
 def test_community_query_service_uses_explicit_sibling_threshold():

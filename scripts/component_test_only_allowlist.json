@@ -1,0 +1,510 @@
+{
+  "_comment": "Component members production never reaches, kept on purpose. scripts/audit_component_callers.py --check (contracts lane) fails on any candidate missing here and on any entry that is no longer a candidate. Categories: test-observation (the def carries a 「测试观察点」comment), extension-port, runtime-reference, pending-decision.",
+  "members": [
+    {
+      "member": "backend/app/domain/ask_engine.py::AskEngineHostPort.has_engines",
+      "category": "extension-port",
+      "reason": "ask.engine 扩展宿主契约方法(app.domain 协议 + 宿主实现);扩展点即使仓库内零调用也不删"
+    },
+    {
+      "member": "backend/app/domain/ask_engine.py::RetrievalAccessPort.kg_overview",
+      "category": "extension-port",
+      "reason": "ask.engine 插件拿到的预作用域检索端口(RetrievalAccessPort)及其核心实现;调用方是仓库外插件引擎,仓库内只有测试"
+    },
+    {
+      "member": "backend/app/domain/ask_engine.py::RetrievalAccessPort.search_kg",
+      "category": "extension-port",
+      "reason": "ask.engine 插件拿到的预作用域检索端口(RetrievalAccessPort)及其核心实现;调用方是仓库外插件引擎,仓库内只有测试"
+    },
+    {
+      "member": "backend/app/domain/extension_http.py::PluginUrlSourceImportPort.import_urls_async",
+      "category": "extension-port",
+      "reason": "插件路由的 URL 导入端口的 async 入口;调用方是仓库外插件的 async handler"
+    },
+    {
+      "member": "backend/app/domain/report_export.py::ReportExporterHostPort.has_provider",
+      "category": "extension-port",
+      "reason": "report.exporter 扩展宿主契约属性(app.domain 协议 + 宿主实现);扩展点不删"
+    },
+    {
+      "member": "backend/app/extension_sdk/retrieval.py::ScheduledModelAccess.complete_json",
+      "category": "extension-port",
+      "reason": "extension SDK 暴露给插件的结构化模型调用;调用方是仓库外插件"
+    },
+    {
+      "member": "backend/app/extensions/ask_engine.py::AskEngineHost.has_engines",
+      "category": "extension-port",
+      "reason": "ask.engine 扩展宿主契约方法(app.domain 协议 + 宿主实现);扩展点即使仓库内零调用也不删"
+    },
+    {
+      "member": "backend/app/extensions/report_export.py::ReportExporterHost.has_provider",
+      "category": "extension-port",
+      "reason": "report.exporter 扩展宿主契约属性(app.domain 协议 + 宿主实现);扩展点不删"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::AnswerLinkStorePort.sweep_answer_links",
+      "category": "test-observation",
+      "reason": "显式清扫入口,生产在签发时顺带清扫(同一 _sweep)"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::BatchMaintenancePort.backfill_source_index_batch",
+      "category": "test-observation",
+      "reason": "整表清空 / 单页重建反向索引,用例用来构造「回填进行到一半」的状态测续跑"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::BatchMaintenancePort.clear_source_index",
+      "category": "test-observation",
+      "reason": "整表清空 / 单页重建反向索引,用例用来构造「回填进行到一半」的状态测续跑"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::BatchMaintenancePort.count_sources_missing_kg",
+      "category": "test-observation",
+      "reason": "旧批处理的抽取目标判据,用例拿来断言流水线目标集合(并断言生产不再调用旧查询)"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::BatchMaintenancePort.kg_target_source_rows_page",
+      "category": "test-observation",
+      "reason": "旧批处理的抽取目标判据,用例拿来断言流水线目标集合(并断言生产不再调用旧查询)"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::EvidenceKnowledgeContextPort.relation_support_count",
+      "category": "test-observation",
+      "reason": "逐条支撑数的语义真源,批量 relation_support_counts 按它做差分"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::GovernanceStorePort.merge_candidate_pairs",
+      "category": "test-observation",
+      "reason": "整库候选对读取,有界版按它对照;用例也借它断言生产不再整库扫描"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::IdentityRepository.authenticate_user",
+      "category": "test-observation",
+      "reason": "生产登录刻意合成一个写事务(login_with_password);拆开的验密 / 建会话只给用例摆会话与核对口令"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::IdentityRepository.create_session",
+      "category": "test-observation",
+      "reason": "生产登录刻意合成一个写事务(login_with_password);拆开的验密 / 建会话只给用例摆会话与核对口令"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::KnowhowHistoryStorePort.list_changes",
+      "category": "test-observation",
+      "reason": "流水 / 里程碑观察点(生产走 knowhow_history_page 快照)"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::KnowhowHistoryStorePort.list_milestones",
+      "category": "test-observation",
+      "reason": "流水 / 里程碑观察点(生产走 knowhow_history_page 快照)"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::KnowhowStorePort.source_asset_ids",
+      "category": "test-observation",
+      "reason": "来源资产行观察点(生产走 delete_source_asset_rows)"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::MemoryStorePort.insert_memory",
+      "category": "test-observation",
+      "reason": "直写 Memory 行的构造点"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::MemoryStorePort.revisions_for_user",
+      "category": "test-observation",
+      "reason": "修订历史观察点(生产不读修订列表)"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::MemoryStorePort.update_fields",
+      "category": "test-observation",
+      "reason": "直写 Memory 行的构造点"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::RetrievalExperienceStorePort.read_experience",
+      "category": "test-observation",
+      "reason": "按 id 读一条检索经验的观察点"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::SQLiteMaintenancePort.backfill_source_index_batch",
+      "category": "test-observation",
+      "reason": "整表清空 / 单页重建反向索引,用例用来构造「回填进行到一半」的状态测续跑"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::SQLiteMaintenancePort.clear_source_index",
+      "category": "test-observation",
+      "reason": "整表清空 / 单页重建反向索引,用例用来构造「回填进行到一半」的状态测续跑"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::SQLiteMaintenancePort.count_sources_missing_kg",
+      "category": "test-observation",
+      "reason": "旧批处理的抽取目标判据,用例拿来断言流水线目标集合(并断言生产不再调用旧查询)"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::SQLiteMaintenancePort.missing_chunk_embedding_rows",
+      "category": "test-observation",
+      "reason": "无界版缺向量判据,keyset 分页版按它做等价差分"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::SQLiteMaintenancePort.missing_element_embedding_rows",
+      "category": "test-observation",
+      "reason": "无界版缺向量判据,keyset 分页版按它做等价差分"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::SQLiteMaintenancePort.partial_kg_source_ids",
+      "category": "test-observation",
+      "reason": "旧批处理的抽取目标判据,用例拿来断言流水线目标集合(并断言生产不再调用旧查询)"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::SourceStorePort.visible_source_identity_rows_bounded",
+      "category": "pending-decision",
+      "reason": "可见来源身份清单的有界读,只剩测试与计划钉;配套部分索引 idx_sources_visible_identity 只为它服务。删方法会留下孤立索引,是否连索引一起迁移下线需拍板"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::UnifiedKgStorePort.community_member_ids",
+      "category": "test-observation",
+      "reason": "已发布社区成员观察点"
+    },
+    {
+      "member": "backend/app/repositories/ports.py::UnifiedKgStorePort.community_overview",
+      "category": "pending-decision",
+      "reason": "主题板块列表的「自开快照」入口:ports.py 注明两个入口是刻意的,生产只用 community_overview_on。删掉自开入口是对这条接口约定的取舍,需拍板"
+    },
+    {
+      "member": "backend/app/repositories/postgres/answer_link_store.py::AnswerLinkStore.sweep_answer_links",
+      "category": "test-observation",
+      "reason": "显式清扫入口,生产在签发时顺带清扫(同一 _sweep)"
+    },
+    {
+      "member": "backend/app/repositories/postgres/governance_store.py::GovernanceStore.merge_candidate_pairs",
+      "category": "test-observation",
+      "reason": "整库候选对读取,有界版按它对照;用例也借它断言生产不再整库扫描"
+    },
+    {
+      "member": "backend/app/repositories/postgres/identity_store.py::IdentityStore.authenticate_user",
+      "category": "test-observation",
+      "reason": "生产登录刻意合成一个写事务(login_with_password);拆开的验密 / 建会话只给用例摆会话与核对口令"
+    },
+    {
+      "member": "backend/app/repositories/postgres/identity_store.py::IdentityStore.create_session",
+      "category": "test-observation",
+      "reason": "生产登录刻意合成一个写事务(login_with_password);拆开的验密 / 建会话只给用例摆会话与核对口令"
+    },
+    {
+      "member": "backend/app/repositories/postgres/knowhow_store.py::KnowhowStore.source_asset_ids",
+      "category": "test-observation",
+      "reason": "来源资产行观察点(生产走 delete_source_asset_rows)"
+    },
+    {
+      "member": "backend/app/repositories/postgres/knowledge_store.py::KnowledgeStore.add_relations",
+      "category": "test-observation",
+      "reason": "裸插关系的构造点(kg_relation_testkit 等夹具)"
+    },
+    {
+      "member": "backend/app/repositories/postgres/maintenance.py::PostgresMaintenanceAdapter.backfill_source_index_batch",
+      "category": "test-observation",
+      "reason": "整表清空 / 单页重建反向索引,用例用来构造「回填进行到一半」的状态测续跑"
+    },
+    {
+      "member": "backend/app/repositories/postgres/maintenance.py::PostgresMaintenanceAdapter.clear_source_index",
+      "category": "test-observation",
+      "reason": "整表清空 / 单页重建反向索引,用例用来构造「回填进行到一半」的状态测续跑"
+    },
+    {
+      "member": "backend/app/repositories/postgres/maintenance.py::PostgresMaintenanceAdapter.count_sources_missing_kg",
+      "category": "test-observation",
+      "reason": "旧批处理的抽取目标判据,用例拿来断言流水线目标集合(并断言生产不再调用旧查询)"
+    },
+    {
+      "member": "backend/app/repositories/postgres/maintenance.py::PostgresMaintenanceAdapter.kg_target_source_rows_page",
+      "category": "test-observation",
+      "reason": "旧批处理的抽取目标判据,用例拿来断言流水线目标集合(并断言生产不再调用旧查询)"
+    },
+    {
+      "member": "backend/app/repositories/postgres/maintenance.py::PostgresMaintenanceAdapter.missing_chunk_embedding_rows",
+      "category": "test-observation",
+      "reason": "无界版缺向量判据,keyset 分页版按它做等价差分"
+    },
+    {
+      "member": "backend/app/repositories/postgres/maintenance.py::PostgresMaintenanceAdapter.missing_element_embedding_rows",
+      "category": "test-observation",
+      "reason": "无界版缺向量判据,keyset 分页版按它做等价差分"
+    },
+    {
+      "member": "backend/app/repositories/postgres/maintenance.py::PostgresMaintenanceAdapter.partial_kg_source_ids",
+      "category": "test-observation",
+      "reason": "旧批处理的抽取目标判据,用例拿来断言流水线目标集合(并断言生产不再调用旧查询)"
+    },
+    {
+      "member": "backend/app/repositories/postgres/memory_store.py::MemoryStore.insert_memory",
+      "category": "test-observation",
+      "reason": "直写 Memory 行的构造点"
+    },
+    {
+      "member": "backend/app/repositories/postgres/memory_store.py::MemoryStore.revisions_for_user",
+      "category": "test-observation",
+      "reason": "修订历史观察点(生产不读修订列表)"
+    },
+    {
+      "member": "backend/app/repositories/postgres/memory_store.py::MemoryStore.update_fields",
+      "category": "test-observation",
+      "reason": "直写 Memory 行的构造点"
+    },
+    {
+      "member": "backend/app/repositories/postgres/memory_store.py::MemoryStore.validate_promotion_approval_access_on",
+      "category": "pending-decision",
+      "reason": "晋升审批写事务内的读权复核:生产审批现走 lock_promotion_memory_on(_lock_memory_aggregate_on, permission_error/require_live),本方法只剩计划钉用例。删除前需确认两条判据(含群组授权)等价——属授权语义核查,不自行判定"
+    },
+    {
+      "member": "backend/app/repositories/postgres/retrieval_experience_store.py::RetrievalExperienceStore.read_experience",
+      "category": "test-observation",
+      "reason": "按 id 读一条检索经验的观察点"
+    },
+    {
+      "member": "backend/app/repositories/postgres/source_store.py::SourceStore.visible_source_identity_rows_bounded",
+      "category": "pending-decision",
+      "reason": "可见来源身份清单的有界读,只剩测试与计划钉;配套部分索引 idx_sources_visible_identity 只为它服务。删方法会留下孤立索引,是否连索引一起迁移下线需拍板"
+    },
+    {
+      "member": "backend/app/repositories/postgres/unified_kg_store.py::UnifiedKgStore.community_member_ids",
+      "category": "test-observation",
+      "reason": "已发布社区成员观察点"
+    },
+    {
+      "member": "backend/app/repositories/postgres/unified_kg_store.py::UnifiedKgStore.community_overview",
+      "category": "pending-decision",
+      "reason": "主题板块列表的「自开快照」入口:ports.py 注明两个入口是刻意的,生产只用 community_overview_on。删掉自开入口是对这条接口约定的取舍,需拍板"
+    },
+    {
+      "member": "backend/app/repositories/postgres/unified_kg_store.py::UnifiedKgStore.replace_cluster_rows_streamed",
+      "category": "test-observation",
+      "reason": "直接写簇行的构造点,用例借它摆出指定的簇状态"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/answer_link_store.py::AnswerLinkStore.sweep_answer_links",
+      "category": "test-observation",
+      "reason": "显式清扫入口,生产在签发时顺带清扫(同一 _sweep)"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/governance_store.py::GovernanceStore.merge_candidate_pairs",
+      "category": "test-observation",
+      "reason": "整库候选对读取,有界版按它对照;用例也借它断言生产不再整库扫描"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/identity_store.py::IdentityStore.authenticate_user",
+      "category": "test-observation",
+      "reason": "生产登录刻意合成一个写事务(login_with_password);拆开的验密 / 建会话只给用例摆会话与核对口令"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/identity_store.py::IdentityStore.create_session",
+      "category": "test-observation",
+      "reason": "生产登录刻意合成一个写事务(login_with_password);拆开的验密 / 建会话只给用例摆会话与核对口令"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/knowhow_history_store.py::KnowhowHistoryStore.list_changes",
+      "category": "test-observation",
+      "reason": "流水 / 里程碑观察点(生产走 knowhow_history_page 快照)"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/knowhow_history_store.py::KnowhowHistoryStore.list_milestones",
+      "category": "test-observation",
+      "reason": "流水 / 里程碑观察点(生产走 knowhow_history_page 快照)"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/knowhow_store.py::KnowhowStore.source_asset_ids",
+      "category": "test-observation",
+      "reason": "来源资产行观察点(生产走 delete_source_asset_rows)"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/knowledge_store.py::KnowledgeStore.add_relations",
+      "category": "test-observation",
+      "reason": "裸插关系的构造点(kg_relation_testkit 等夹具)"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/maintenance.py::SQLiteMaintenanceAdapter.backfill_source_index_batch",
+      "category": "test-observation",
+      "reason": "整表清空 / 单页重建反向索引,用例用来构造「回填进行到一半」的状态测续跑"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/maintenance.py::SQLiteMaintenanceAdapter.clear_source_index",
+      "category": "test-observation",
+      "reason": "整表清空 / 单页重建反向索引,用例用来构造「回填进行到一半」的状态测续跑"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/maintenance.py::SQLiteMaintenanceAdapter.count_sources_missing_kg",
+      "category": "test-observation",
+      "reason": "旧批处理的抽取目标判据,用例拿来断言流水线目标集合(并断言生产不再调用旧查询)"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/maintenance.py::SQLiteMaintenanceAdapter.kg_target_source_rows_page",
+      "category": "test-observation",
+      "reason": "旧批处理的抽取目标判据,用例拿来断言流水线目标集合(并断言生产不再调用旧查询)"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/maintenance.py::SQLiteMaintenanceAdapter.missing_chunk_embedding_rows",
+      "category": "test-observation",
+      "reason": "无界版缺向量判据,keyset 分页版按它做等价差分"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/maintenance.py::SQLiteMaintenanceAdapter.missing_element_embedding_rows",
+      "category": "test-observation",
+      "reason": "无界版缺向量判据,keyset 分页版按它做等价差分"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/maintenance.py::SQLiteMaintenanceAdapter.partial_kg_source_ids",
+      "category": "test-observation",
+      "reason": "旧批处理的抽取目标判据,用例拿来断言流水线目标集合(并断言生产不再调用旧查询)"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/memory_store.py::MemoryStore.insert_memory",
+      "category": "test-observation",
+      "reason": "直写 Memory 行的构造点"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/memory_store.py::MemoryStore.revisions_for_user",
+      "category": "test-observation",
+      "reason": "修订历史观察点(生产不读修订列表)"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/memory_store.py::MemoryStore.update_fields",
+      "category": "test-observation",
+      "reason": "直写 Memory 行的构造点"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/memory_store.py::MemoryStore.validate_promotion_approval_access_on",
+      "category": "pending-decision",
+      "reason": "晋升审批写事务内的读权复核:生产审批现走 lock_promotion_memory_on(_lock_memory_aggregate_on, permission_error/require_live),本方法只剩计划钉用例。删除前需确认两条判据(含群组授权)等价——属授权语义核查,不自行判定"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/retrieval_experience_store.py::RetrievalExperienceStore.read_experience",
+      "category": "test-observation",
+      "reason": "按 id 读一条检索经验的观察点"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/source_store.py::SourceStore.visible_source_identity_rows_bounded",
+      "category": "pending-decision",
+      "reason": "可见来源身份清单的有界读,只剩测试与计划钉;配套部分索引 idx_sources_visible_identity 只为它服务。删方法会留下孤立索引,是否连索引一起迁移下线需拍板"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/unified_kg_store.py::UnifiedKgStore.community_member_ids",
+      "category": "test-observation",
+      "reason": "已发布社区成员观察点"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/unified_kg_store.py::UnifiedKgStore.community_overview",
+      "category": "pending-decision",
+      "reason": "主题板块列表的「自开快照」入口:ports.py 注明两个入口是刻意的,生产只用 community_overview_on。删掉自开入口是对这条接口约定的取舍,需拍板"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/unified_kg_store.py::UnifiedKgStore.replace_cluster_rows_streamed",
+      "category": "test-observation",
+      "reason": "直接写簇行的构造点,用例借它摆出指定的簇状态"
+    },
+    {
+      "member": "backend/app/services/ask_service.py::AskService.ask_chunk_current",
+      "category": "pending-decision",
+      "reason": "单引擎、带检索天花板的直调入口;生产只走 ask() 按模式分发。是否算对外语义(留作引擎直调面)还是改测试走 ask() 后删除,需拍板"
+    },
+    {
+      "member": "backend/app/services/ask_service.py::AskService.ask_reasoning_current",
+      "category": "pending-decision",
+      "reason": "单引擎、带检索天花板的直调入口;生产只走 ask() 按模式分发。是否算对外语义(留作引擎直调面)还是改测试走 ask() 后删除,需拍板"
+    },
+    {
+      "member": "backend/app/services/graph_retrieval.py::GraphRetrievalService.relation_support_count",
+      "category": "test-observation",
+      "reason": "逐条支撑数的语义真源,批量 relation_support_counts 按它做差分"
+    },
+    {
+      "member": "backend/app/services/kg/scale_index.py::VizEdgeSet.edge_type_at",
+      "category": "test-observation",
+      "reason": "标量参考实现,批量 edge_types_at_many 按它做等价对照"
+    },
+    {
+      "member": "backend/app/services/knowledge_governance.py::KnowledgeGovernanceService.review_queue",
+      "category": "test-observation",
+      "reason": "审阅队列的逐位等价 oracle,分页版 review_queue_page 与 memo 按它对照"
+    },
+    {
+      "member": "backend/app/services/knowledge_governance.py::KnowledgeGovernanceService.write_merge_candidate",
+      "category": "test-observation",
+      "reason": "直接写合并候选的构造点"
+    },
+    {
+      "member": "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.write_clusters",
+      "category": "test-observation",
+      "reason": "直接写簇行的构造点,用例借它摆出指定的簇状态"
+    },
+    {
+      "member": "backend/app/services/knowledge_query.py::KnowledgeQueryService.backfill_chunk_fts",
+      "category": "test-observation",
+      "reason": "直写 chunks 的用例重建 chunks_fts 的构造点"
+    },
+    {
+      "member": "backend/app/services/notebook_scale.py::CopyStatsMemo.cached_version",
+      "category": "test-observation",
+      "reason": "memo 驻留版本标签观察点,测 seq 闸与失效"
+    },
+    {
+      "member": "backend/app/services/notebook_sharing.py::NotebookSharingService.add_member",
+      "category": "test-observation",
+      "reason": "直接写成员行的构造点(生产入会走分享令牌 join_shared),大量用例借它摆成员关系"
+    },
+    {
+      "member": "backend/app/services/notebook_sharing.py::NotebookSharingService.kick_all_members",
+      "category": "pending-decision",
+      "reason": "「整本踢出全部成员」没有任何生产入口,只有 Memory 退出与只读分享用例在用;是保留为产品能力(待接入口)还是连同用例删除,需拍板"
+    },
+    {
+      "member": "backend/app/services/pending_bus.py::PendingBus._buffered_count",
+      "category": "test-observation",
+      "reason": "缓冲区条数观察点,测 TTL 与出队"
+    },
+    {
+      "member": "backend/app/services/plugin_ask_engine.py::PluginRetrievalAccess.kg_overview",
+      "category": "extension-port",
+      "reason": "ask.engine 插件拿到的预作用域检索端口(RetrievalAccessPort)及其核心实现;调用方是仓库外插件引擎,仓库内只有测试"
+    },
+    {
+      "member": "backend/app/services/plugin_ask_engine.py::PluginRetrievalAccess.search_kg",
+      "category": "extension-port",
+      "reason": "ask.engine 插件拿到的预作用域检索端口(RetrievalAccessPort)及其核心实现;调用方是仓库外插件引擎,仓库内只有测试"
+    },
+    {
+      "member": "backend/app/services/report_memory_use.py::RetrievalSourceLog.watches",
+      "category": "test-observation",
+      "reason": "断言端口已被记录包装的观察点"
+    },
+    {
+      "member": "backend/app/services/retrieval_baseline.py::RetrievalBaselineManifest.event_payload",
+      "category": "pending-decision",
+      "reason": "selected-source 基线的脱敏运维事件载荷;test_baseline_scaffold_has_no_operational_emit_path 刻意钉住「还没有发出路径」,是待接的脚手架还是删除,需拍板(其读的 manifest_hash / comparison_ready / 两个计数随它)"
+    },
+    {
+      "member": "backend/app/services/review_queue_memo.py::ReviewQueueMemo.cached_seq",
+      "category": "test-observation",
+      "reason": "memo 驻留版本标签观察点,测 seq 闸与失效"
+    },
+    {
+      "member": "backend/app/services/review_queue_memo.py::ReviewQueueMemo.cached_version",
+      "category": "test-observation",
+      "reason": "memo 驻留版本标签观察点,测 seq 闸与失效"
+    },
+    {
+      "member": "backend/app/services/section_outline.py::AddressBook.addresses",
+      "category": "test-observation",
+      "reason": "本 run 地址簿的只读视图观察点"
+    },
+    {
+      "member": "backend/app/services/source_graph_primitives.py::SourceGraphPrimitives.retrieve_relations",
+      "category": "pending-decision",
+      "reason": "selected-source 图原语族(neighbors / follow_chain / retrieve_relations)里唯一未接生产的一个;删除连带结果类型与 max_relation_results 配置,是否保留这个原语需拍板"
+    },
+    {
+      "member": "backend/app/services/source_partitioned_ppr.py::SourcePartitionedPprService.cache_size",
+      "category": "test-observation",
+      "reason": "进程内缓存条数观察点,测淘汰与失效"
+    },
+    {
+      "member": "backend/app/services/source_subgraph_ppr.py::SourceSubgraphPprService.cache_size",
+      "category": "test-observation",
+      "reason": "进程内缓存条数观察点,测淘汰与失效"
+    }
+  ]
+}

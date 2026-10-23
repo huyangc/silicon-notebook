@@ -21,6 +21,16 @@ from app.services.report_engine import (
 from app.services.report_synthesis import fair_editor_context
 
 
+def _probe_coverage(engine, notebook_id, queries, *, max_queries=4):
+    """One coverage aggregate, loaded through the batch probe scheduler the
+    report's probe plan uses."""
+    return engine._summarize_probe_results(
+        engine._load_probe_query_results(
+            notebook_id, [queries], max_queries=max_queries,
+        )[0]
+    )
+
+
 class _Sources:
     def __init__(self, rows):
         self.rows = rows
@@ -526,7 +536,7 @@ def test_sufficiency_probe_excludes_low_relevance_sources_from_family_counts():
         for source_id in ("s-relevant", "s-noise-a", "s-noise-b")
     ])
     deps = _deps(retrieval=_Retrieval(), source_query=sources)
-    result = _engine(deps)._probe_queries("nb", ["q"])
+    result = _probe_coverage(_engine(deps), "nb", ["q"])
 
     assert result["relevant_items"] == 1
     assert result["source_hits"] == 3
@@ -577,7 +587,7 @@ def test_probe_deduplicates_same_evidence_across_queries_and_keeps_share_units_a
     sources = _Sources([{
         "id": "s1", "file_hash": "h1", "is_paper": None, "paper_title": None,
     }])
-    result = _engine(_deps(retrieval=_Retrieval(), source_query=sources))._probe_queries(
+    result = _probe_coverage(_engine(_deps(retrieval=_Retrieval(), source_query=sources)),
         "nb", ["q1", "q2"]
     )
     assert result["relevant_items"] == 1
@@ -602,7 +612,7 @@ def test_probe_does_not_count_unidentified_sources_as_independent_families():
         "id": "s-unknown", "file_hash": "", "is_paper": None,
         "paper_title": None,
     }])
-    result = _engine(_deps(retrieval=_Retrieval(), source_query=sources))._probe_queries(
+    result = _probe_coverage(_engine(_deps(retrieval=_Retrieval(), source_query=sources)),
         "nb", ["q"]
     )
     assert result["source_identity_uncertain"] == 1
@@ -653,9 +663,9 @@ def test_probe_uses_unknown_identity_as_a_conservative_top1_upper_bound():
             for index in range(6)
         ],
     ])
-    result = _engine(_deps(
+    result = _probe_coverage(_engine(_deps(
         retrieval=_Retrieval(), source_query=sources
-    ))._probe_queries("nb", ["q"])
+    )), "nb", ["q"])
 
     assert result["relevant_supports"] == 14
     assert result["relevant_family_count"] == 2

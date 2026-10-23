@@ -774,6 +774,7 @@ class AddressBook:
     def get(self, sid: str) -> "SectionAddress | None":
         return self._addresses.get(parse_section_id(sid) or sid)
 
+    # 测试观察点:本 run 地址簿的只读视图观察点
     @property
     def addresses(self) -> Mapping[str, SectionAddress]:
         return MappingProxyType(self._addresses)

@@ -91,8 +91,8 @@ R5 因此不再逐个堵,而是把 ``kg_mutation.py`` 顶部的操作矩阵**全
 **已知豁口**——不是「漏了一条 bump」,而是那条路径的 seq **根本不前进**,所以
 seq 闸对它们天然无效:
 
-1. ``RepositoryFacade.add_relations``(``repository_facade.py``)是 fixture/测试
-   专用的裸插入,直接走 ``KnowledgeStorePort.add_relations_current``,**不** bump。
+1. ``kg_relation_testkit.add_relations``(``backend/tests/``)是 fixture/测试
+   专用的裸插入,直接走 ``KnowledgeStore.add_relations``,**不** bump。
    照 ``knowledge_query.insert_test_object`` 的先例,该方法内显式调用本 memo 的
    ``invalidate``(与它已有的 ``invalidate_knowledge_counts`` 并排)——这是**唯一**
    还需要显式失效的豁口:它是测试专用的裸写路径,不值得为它接一条生产 bump。
@@ -478,6 +478,7 @@ class ReviewQueueMemo:
                 self._global_epoch += 1   # fail closed,理由见模块 docstring
             self._store.pop(notebook_id, None)
 
+    # 测试观察点:memo 驻留版本标签观察点,测 seq 闸与失效
     def cached_seq(self, notebook_id: str) -> "Optional[int]":
         """当前驻留条目 version 标签的 ``kg_mutation_seq`` 半(没有则 ``None``)。
         只给测试与运维观察用。batch-3-W1 PR-2 之前这就是整个标签;现在标签是
@@ -489,6 +490,7 @@ class ReviewQueueMemo:
             hit = self._store.get(notebook_id)
             return hit[0][1] if hit is not None else None
 
+    # 测试观察点:memo 驻留版本标签观察点,测 seq 闸与失效
     def cached_version(self, notebook_id: str) -> "Optional[_Version]":
         """当前驻留条目的完整 ``(kg_reset_epoch, kg_mutation_seq)`` 标签(没有则
         ``None``)。只给测试与运维观察用 —— 别名消失(delete+reingest 不串代)的

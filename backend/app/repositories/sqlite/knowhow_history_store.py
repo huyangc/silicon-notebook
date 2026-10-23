@@ -231,6 +231,7 @@ class KnowhowHistoryStore:
             ).fetchone()
         return int(row["head"])
 
+    # 测试观察点:流水 / 里程碑观察点(生产走 knowhow_history_page 快照)
     def list_changes(
         self, table_id: str, limit: int = 50, before_seq: "int | None" = None
     ) -> list[dict]:
@@ -396,6 +397,7 @@ class KnowhowHistoryStore:
                 (table_id, milestone_id),
             )
 
+    # 测试观察点:流水 / 里程碑观察点(生产走 knowhow_history_page 快照)
     def list_milestones(self, table_id: str) -> list[dict]:
         """本表全部里程碑，最新（``seq`` 最大）在前。``stale`` = 它指向的
         ``seq`` 已经被 ``prune`` 删掉——``knowhow_milestones.seq`` 刻意不设

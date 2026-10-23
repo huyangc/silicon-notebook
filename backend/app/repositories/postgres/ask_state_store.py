@@ -652,18 +652,6 @@ class AskStateStore:
                 (conversation_id,),
             )
 
-    def ask_job_status(self, job_id: str) -> dict:
-        with self.database.connect() as db:
-            row = db.execute(
-                "SELECT id,notebook_id,conversation_id,created_by,mode,status,answer_id,error "
-                "FROM ask_jobs WHERE id=%s", (job_id,)).fetchone()
-        if row is None:
-            raise KeyError(job_id)
-        return {"job_id": row["id"], "notebook_id": row["notebook_id"],
-                "conversation_id": row["conversation_id"], "created_by": row["created_by"],
-                "mode": row["mode"], "status": row["status"], "answer_id": row["answer_id"],
-                "error": row["error"]}
-
     # ------------------------------------------------------------------
     # M1 trace: append-only sub-table
     # ------------------------------------------------------------------

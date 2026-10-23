@@ -130,6 +130,12 @@ class _PartiallyInvalidFilterPlanner:
         })
 
 
+def _listed_issues(store, *, limit=200, **filters):
+    """The first page of ``page_issues`` (the read the issue routes use)."""
+    items, _total = store.page_issues(offset=0, limit=limit, **filters)
+    return items
+
+
 def _settings(tmp_path: Path) -> Settings:
     return Settings(
         _env_file=None,
@@ -887,7 +893,7 @@ def test_challenging_workbook_is_archived_instead_of_silently_misanalysed(tmp_pa
         _source(path), notebook_name="Notebook", owner_id="user-1",
         row_element_ids={},
     ) is False
-    [issue] = artifacts.list_issues(status="open", now=_SERVICE_NOW)
+    [issue] = _listed_issues(artifacts, status="open", now=_SERVICE_NOW)
     assert issue["code"] == "SPREADSHEET_MULTIPLE_REGIONS"
     assert issue["artifact_available"] is True
     assert artifacts.load_spreadsheet_manifest("nb-1", "src-1") is None
@@ -920,7 +926,7 @@ def test_oversized_cell_is_rejected_without_truncation(tmp_path):
         _source(path), notebook_name="Notebook", owner_id="user-1",
         row_element_ids={},
     ) is False
-    [issue] = artifacts.list_issues(status="open", now=_SERVICE_NOW)
+    [issue] = _listed_issues(artifacts, status="open", now=_SERVICE_NOW)
     assert issue["code"] == "SPREADSHEET_CELL_TOO_LONG"
 
 
@@ -945,7 +951,7 @@ def test_missing_header_is_rejected_instead_of_synthesized(tmp_path):
         _source(path), notebook_name="Notebook", owner_id="user-1",
         row_element_ids={},
     ) is False
-    [issue] = artifacts.list_issues(status="open", now=_SERVICE_NOW)
+    [issue] = _listed_issues(artifacts, status="open", now=_SERVICE_NOW)
     assert issue["code"] == "SPREADSHEET_HEADER_MISSING"
 
 
@@ -1050,7 +1056,7 @@ def test_issue_archive_resolves_redacts_and_expires(tmp_path):
         occurred_at=occurred,
         source_path=str(source_path),
     )
-    [open_issue] = store.list_issues(
+    [open_issue] = _listed_issues(store,
         status="open", now=datetime(2026, 8, 30, tzinfo=timezone.utc)
     )
     assert open_issue["artifact_available"] is True
@@ -1059,7 +1065,7 @@ def test_issue_archive_resolves_redacts_and_expires(tmp_path):
         "nb-1", "src-1", "source_parse",
         resolved_at="2026-08-30T12:00:00+00:00",
     )
-    [resolved] = store.list_issues(
+    [resolved] = _listed_issues(store,
         status="resolved", now=datetime(2026, 8, 30, 13, tzinfo=timezone.utc)
     )
     assert resolved["artifact_available"] is False
@@ -1067,7 +1073,7 @@ def test_issue_archive_resolves_redacts_and_expires(tmp_path):
     store.redact_source(
         "nb-1", "src-1", occurred_at="2026-08-30T14:00:00+00:00"
     )
-    [redacted] = store.list_issues(
+    [redacted] = _listed_issues(store,
         now=datetime(2026, 8, 30, 15, tzinfo=timezone.utc)
     )
     assert redacted["source_deleted"] is True
@@ -1086,7 +1092,7 @@ def test_issue_archive_resolves_redacts_and_expires(tmp_path):
     assert "nb-1" not in relative_path
     assert "src-1" not in relative_path
 
-    assert store.list_issues(
+    assert _listed_issues(store,
         now=datetime(2026, 9, 1, 1, tzinfo=timezone.utc)
     ) == []
     assert not (store.root / "issues" / "redacted").exists()
@@ -1117,7 +1123,7 @@ def test_issue_pages_reach_every_match_and_report_the_filtered_total(tmp_path):
     assert [item["source_id"] for item in first] == ["src-3", "src-2", "src-1"]
     assert [item["source_id"] for item in second] == ["src-0"]
     assert store.page_issues(owner_id="user-1", offset=9, limit=3, now=now) == ([], 4)
-    assert store.list_issues(owner_id="user-1", limit=3, now=now) == first
+    assert _listed_issues(store, owner_id="user-1", limit=3, now=now) == first
 
 
 def test_model_output_issue_keeps_content_out_of_list_and_serves_one_artifact(
@@ -1142,13 +1148,13 @@ def test_model_output_issue_keeps_content_out_of_list_and_serves_one_artifact(
         occurred_at="2026-08-29T00:00:00+00:00",
     ))
 
-    [listed] = store.list_issues(
+    [listed] = _listed_issues(store,
         category="model_output", now=datetime(2026, 8, 30, tzinfo=timezone.utc)
     )
     assert listed["id"] == issue["id"]
     assert "question" not in listed
     assert "response" not in listed
-    assert store.list_issues(
+    assert _listed_issues(store,
         category="model_output",
         model_area="report",
         now=datetime(2026, 8, 30, tzinfo=timezone.utc),
@@ -1178,7 +1184,7 @@ def test_model_output_issue_keeps_content_out_of_list_and_serves_one_artifact(
     assert store.load_model_output_artifact(
         issue["id"], now=datetime(2026, 8, 30, 2, tzinfo=timezone.utc)
     ) is None
-    [redacted] = store.list_issues(
+    [redacted] = _listed_issues(store,
         category="model_output",
         now=datetime(2026, 8, 30, 2, tzinfo=timezone.utc),
     )
@@ -1550,7 +1556,7 @@ def test_source_deletion_conservatively_removes_notebook_model_content(tmp_path)
     assert store.load_model_output_artifact(
         issue["id"], now=datetime(2026, 8, 30, 2, tzinfo=timezone.utc)
     ) is None
-    [redacted] = store.list_issues(
+    [redacted] = _listed_issues(store,
         category="model_output",
         now=datetime(2026, 8, 30, 2, tzinfo=timezone.utc),
     )
@@ -1579,7 +1585,7 @@ def test_expired_issue_removes_identifier_directories(tmp_path):
         archive_file=False,
     )
 
-    assert store.list_issues(
+    assert _listed_issues(store,
         now=datetime(2026, 8, 31, tzinfo=timezone.utc)
     ) == []
     assert not (store.root / "issues" / "nb-private").exists()

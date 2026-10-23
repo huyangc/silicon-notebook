@@ -2348,6 +2348,7 @@ class GraphRetrievalService(_RetrievalState):
                 )
         return out
 
+    # 测试观察点:逐条支撑数的语义真源,批量 relation_support_counts 按它做差分
     def relation_support_count(self, notebook_id, source_id, edge_type, target_id):
         # 保留:唯一生产调用方(evidence_context.knowledge_context)已改用下面
         # 的批量 relation_support_counts(B1 热点整改批 1)——逐条调用每次都要

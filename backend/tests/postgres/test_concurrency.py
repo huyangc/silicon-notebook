@@ -1052,8 +1052,8 @@ def test_new_job_and_final_answer_use_compatible_notebook_leases(
 
     assert continued_conversation == conversation_id
     assert answer_id
-    assert asks.ask_job_status(old_job)["status"] == "done"
-    assert asks.ask_job_status(new_job)["status"] == "running"
+    assert asks.ask_job_detail(old_job)["status"] == "done"
+    assert asks.ask_job_detail(new_job)["status"] == "running"
 
 
 @pytest.mark.postgres_integration
@@ -1572,7 +1572,7 @@ def test_ask_cancel_and_atomic_save_contend_on_the_real_job_row(
         loser_result = loser_future.result(timeout=10)
 
     results = {winner: winner_result, loser: loser_result}
-    status = store.ask_job_status(job_id)
+    status = store.ask_job_detail(job_id)
     with postgres_database.connect() as connection:
         answers = connection.execute(
             "SELECT id FROM answers WHERE conversation_id=%s", (conversation_id,)
@@ -1692,7 +1692,7 @@ def test_conversation_cleanup_cannot_split_continuation_job_creation(
         cleanup_future.result(timeout=10)
 
     assert continued_id == conversation_id
-    assert store.ask_job_status(second_job)["status"] == "running"
+    assert store.ask_job_detail(second_job)["status"] == "running"
     assert store.get_conversation(conversation_id).id == conversation_id
 
 

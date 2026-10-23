@@ -105,6 +105,7 @@ class SourceSubgraphPprService:
         self._cache: OrderedDict[tuple[Any, ...], _SparseGraph] = OrderedDict()
         self._lock = threading.RLock()
 
+    # 测试观察点:进程内缓存条数观察点,测淘汰与失效
     @property
     def cache_size(self) -> int:
         with self._lock:
