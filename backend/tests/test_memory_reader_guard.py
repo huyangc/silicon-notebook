@@ -350,9 +350,16 @@ _REGISTRY: dict[str, dict[str, str]] = {
         # comparison-peer names (R3, plan 2026-10-23 T2): the first live
         # members of the peer cluster ids the caller already holds (those
         # that passed the ceiling gate), each with its own source_id; the
-        # caller names a peer only from members whose source_id is in the
-        # run's frozen ceiling, so a member outside it never names anything
+        # caller names a peer only from members whose own source_id is empty
+        # (a promoted object) or in the run's frozen ceiling -- the object
+        # rule -- so a member owned by a source outside it never names
+        # anything
         "UnifiedKgStore.comparison_peer_members": KEY_BOUNDED,
+        # comparison focal (R4): the members of the one focal cluster the
+        # caller resolved whose name equals the focal key, with their own
+        # source_id; the caller keeps the focal only when one of them passes
+        # the same object rule against the frozen ceiling
+        "UnifiedKgStore.focal_name_members": KEY_BOUNDED,
         "_canonical_support_exists": CEILING_BOUNDED,
         "_object_support_exists": CEILING_BOUNDED,
         # PR-E2 E2-1: the weak-support hint's target probe (``SELECT 1``, judged

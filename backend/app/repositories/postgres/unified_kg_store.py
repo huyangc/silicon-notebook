@@ -1997,6 +1997,26 @@ class UnifiedKgStore:
                 (notebook_id, focal_key, notebook_id)).fetchone()
         return row["canonical_id"] if row else None
 
+    def focal_name_members(
+        self, notebook_id: str, canonical_id: str, focal_key: str,
+    ) -> List[dict]:
+        """对比焦点 R4 的成员读(SQLite 孪生同注记):这个簇里
+        ``lower(payload->>'name') == focal_key`` 的活成员,每行带成员自己的
+        ``source_id``;天花板判定在调用方(冻结的天花板集合),一整库的来源清单
+        不进这条语句。只绑三个标量,保持普通 ``execute``(计划缓存照用)。"""
+        with self.database.connect() as db:
+            return db.execute(
+                "SELECT cc.member_object_id, ko.source_id "
+                "FROM concept_clusters cc "
+                "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
+                "WHERE cc.notebook_id=%s AND cc.canonical_id=%s "
+                "AND ko.status!='deprecated' "
+                f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN} "
+                "AND lower(ko.payload->>'name')=%s "
+                'ORDER BY cc.member_object_id COLLATE "C"',
+                (notebook_id, canonical_id, notebook_id, focal_key),
+            ).fetchall()
+
     def top_community_for(self, notebook_id: str, canonical_id: str) -> Optional[str]:
         with self.database.connect() as db:
             row = db.execute(
