@@ -218,9 +218,6 @@ class _MinimalEvidence:
     def source_metadata(self, source_ids):
         return {}
 
-    def citation_titles(self, source_ids):
-        return {}
-
     def citation_source_info(self, source_ids):
         return {}
 
